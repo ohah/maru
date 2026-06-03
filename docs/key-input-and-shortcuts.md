@@ -16,6 +16,7 @@ Focused app key event
 -> AppAction 또는 TerminalInput
 
 TerminalInput
+-> SurfaceRuntime
 -> PtySession.writeInput
 ```
 

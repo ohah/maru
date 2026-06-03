@@ -21,7 +21,8 @@ GUI가 붙기 전에는 headless 경로가 첫 성공 기준이다. macOS 창과
 - macOS local shell을 실행할 수 있는 `PtySession` facade.
 - PTY에서 읽은 raw bytes를 `TerminalCore.write`로 넣는 단방향 output path.
 - 사용자가 입력한 key bytes를 PTY로 보내기 위한 최소 input path.
-- surface 1개를 표현하는 `Surface` 모델.
+- surface 1개를 표현하는 `Surface` 모델(`TerminalCore` + 복구 가능한 metadata).
+- `Surface`와 `PtySession`의 live 연결을 관리하는 `SurfaceRuntime`(저장 대상 아님).
 - `TerminalCore` snapshot과 실패 artifact.
 - raw input, resize, output을 나중에 replay할 수 있는 trace event 이름과 위치.
 - headless E2E: 실제 프로세스 또는 통제된 PTY workload가 최종 screen snapshot으로 검증되는 경로.

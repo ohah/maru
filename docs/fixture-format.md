@@ -107,14 +107,13 @@ ANSI fixture
 -> artifact 저장
 ```
 
-미래 외부 oracle 흐름:
+외부 reference 오라클(opt-in, 구현됨 — libvterm/Ghostty/Alacritty):
 
 ```text
 ANSI fixture
--> reference terminal/parser 실행
--> reference snapshot capture
--> sanitized golden 갱신
--> Maru 결과와 비교
+-> reference(libvterm / libghostty-vt / alacritty_terminal) 실행
+-> reference screen 덤프
+-> 커밋된 golden과 비교 (golden == reference 교차검증)
 ```
 
-외부 oracle runner는 선택 기능으로 추가한다. 새 runtime 의존성을 기본 테스트 경로에 넣어야 하는 경우에는 먼저 사용자와 논의한다.
+비교 전략과 명령은 [오라클 비교 테스트 전략](oracle-testing.md)을 따른다. golden을 손으로 적지 않고 reference로 생성/갱신하는 자동화는 escape fixture가 늘면 추가한다. 새 reference를 기본 `check` 경로의 필수 의존성으로 승격하려면 먼저 사용자와 논의한다.

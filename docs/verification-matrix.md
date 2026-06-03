@@ -7,7 +7,7 @@
 | 영역 | 현재 검증 방법 | 산출물 | 의미 |
 | --- | --- | --- | --- |
 | 기본 Zig 빌드 | `mise run build` | 없음 | 프로젝트가 Zig 0.16.0으로 컴파일되는지 확인한다. |
-| 단위 테스트 | `mise run test` | 없음 | facade, config, terminal core 같은 작은 단위가 의도대로 동작하는지 확인한다. 각 배럴(terminal/config/app/pty/renderer/plugin)에 refAllDecls 집계 블록을 두어 구현 파일의 inline 테스트가 모두 빌드에 포함된다. |
+| 단위 테스트 | `mise run test` | 없음 | facade, config, terminal core 같은 작은 단위가 의도대로 동작하는지 확인한다. 각 facade 배럴(src/*.zig)에 refAllDecls 집계 블록을 두어 구현 파일의 inline 테스트가 모두 빌드에 포함된다. |
 | headless E2E | `mise run e2e` | `tests/artifacts/e2e/headless/*.screen.txt`, `*.snapshot.txt`, `*.stdout.txt` | 실제 프로세스 stdout이 terminal core 상태로 변환되는지 확인한다. |
 | recorded oracle 비교 | `mise run oracle` | `tests/artifacts/oracle/*/*.actual.txt`, `*.expected.txt`, `*.snapshot.txt`, `input.decoded.txt` | Maru의 화면 결과가 기록된 reference snapshot과 같은지 확인한다. 현재 golden은 사람이 손으로 기록한 기대값이며 실제 reference terminal 캡처가 아니다. |
 | 빠른 스트레스 | `mise run stress` | `tests/artifacts/stress/quick/*.screen.txt`, `*.snapshot.txt`, `*.summary.txt` | 대량 출력과 반복 resize가 terminal core 상태를 깨지 않는지 확인한다. |

@@ -95,8 +95,10 @@ ANSI fixture
 ## 명령
 
 ```sh
-mise run oracle      # 기본: Maru vs 기록된 golden (check에 포함)
-mise run oracle-ext  # opt-in: golden vs libvterm (check에는 미포함, libvterm 필요)
+mise run oracle           # 기본: Maru vs 기록된 golden (check에 포함)
+mise run oracle-ext       # opt-in: golden vs libvterm
+mise run oracle-ghostty   # opt-in: golden vs Ghostty libghostty-vt
+mise run oracle-alacritty # opt-in: golden vs Alacritty alacritty_terminal
 ```
 
-`mise run oracle`는 `mise run check`에도 포함된다. `mise run oracle-ext`는 opt-in이라 `check`에 넣지 않는다.
+`mise run oracle`만 `mise run check`에 포함된다. 외부 reference 오라클 세 개는 opt-in이라 `check`에 넣지 않는다(각 reference 설치/빌드 필요).

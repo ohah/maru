@@ -6,7 +6,7 @@ const std = @import("std");
 // 위해서다). "리뷰에서 조심한다"는 규칙만으로는 이를 보장할 수 없으므로, 한 레이어가
 // 금지된 레이어를 import하는 순간 빌드를 실패시킨다.
 //
-// 금지에는 두 종류가 있다(implementation-plan.md:71-76).
+// 금지에는 두 종류가 있다(implementation-plan.md "1단계 boundary checker 최소 요구사항"의 초기 금지 규칙).
 //   - 레이어 전체 금지: 공개 barrel("layer.zig")과 구현 디렉터리("layer/...") 모두 금지.
 //     예) terminal -> pty/platform/renderer, renderer -> pty, plugin -> pty.
 //   - private 구현만 금지: 구현 디렉터리("layer/...")만 금지하고 공개 barrel은 허용.

@@ -9,6 +9,7 @@
 - facade는 다른 레이어의 private 구현 타입을 public API로 노출하지 않는다.
 - 새로운 기능은 먼저 어떤 facade의 책임인지 정한 뒤 구현한다.
 - 계약을 바꿔야 하면 같은 PR에서 문서, 테스트, PR 전략 영향 평가를 함께 갱신한다.
+- import boundary는 테스트로 확인한다. 단순히 "조심한다"는 규칙만으로 경계를 지켰다고 보지 않는다.
 
 ## `TerminalCore`
 
@@ -76,6 +77,8 @@
 
 - PTY output event가 pane의 `TerminalCore`로 전달된다.
 - pane size 변경이 core resize와 PTY resize request로 분리되어 전달된다.
+- `RestorablePaneMetadata`에는 cwd/env/command/size 같은 선언적 상태만 들어가고 live PTY handle은 들어가지 않는다.
+- env 저장은 allowlist 또는 redaction 경계를 가져야 한다.
 
 ## `Workspace`
 
@@ -104,6 +107,7 @@
 - test, debug log, replay, future inspector가 같은 terminal 상태를 보게 한다.
 - visible screen, cursor, size, pane/workspace metadata를 구조화한다.
 - 실패 artifact로 저장할 수 있는 안정된 텍스트 표현을 제공한다.
+- schema version을 포함한다. v0 consumer가 future field 추가 때문에 깨지지 않게 한다.
 
 몰라야 하는 것:
 
@@ -114,6 +118,7 @@
 
 - 같은 terminal state는 같은 snapshot text를 만든다.
 - trailing spaces, cursor, size가 손실되지 않는다.
+- snapshot text에 schema version이 포함된다.
 
 ## `Trace/Event`
 
@@ -152,6 +157,7 @@ Plugin ABI나 권한 모델을 확정해야 하는 순간이 오면, 구현 전�
 
 - platform layer는 OS 전역 shortcut 등록 성공/실패를 app layer에 보고한다.
 - app layer는 key event를 `AppAction` 또는 `TerminalInput`으로 분류한다.
+- `KeyBindingResolver`는 초반 contract 단계에서 최소 타입을 갖는다.
 - `PtySession`은 이미 terminal input으로 분류된 bytes만 받는다.
 - app/global shortcut으로 소비된 key event는 PTY로 전달하지 않는다.
 

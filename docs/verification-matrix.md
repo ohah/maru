@@ -39,13 +39,15 @@ fixture, golden, trace 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fix
 | 영역 | 불가 이유 | 현재 한계 | 손해 | 예정 검증 경로 |
 | --- | --- | --- | --- | --- |
 | 실제 외부 오라클 실행 | 구현 전, 환경 의존 | `xterm`, `libvterm`, `Alacritty`, Ghostty를 테스트 중 직접 실행하지 않는다. | recorded golden이 틀리면 Maru도 틀린 정답을 따라갈 수 있다. | 선택형 oracle runner를 추가하고, sanitized snapshot 갱신 흐름을 만든다. 새 필수 의존성은 사용자와 먼저 논의한다. |
-| PTY/forkpty | 구현 전 | 아직 `PTY` facade만 있고 실제 macOS PTY 연결은 없다. | shell, job control, resize, signal, interactive input 문제를 검증하지 못한다. | `tests/integration/pty/`에서 macOS PTY smoke test를 추가한다. |
+| PTY/forkpty controlled command | 구현 전 | 아직 `PTY` facade만 있고 실제 macOS PTY 연결은 없다. | shell process stdout, resize, lifecycle 문제를 검증하지 못한다. | `tests/integration/pty/`에서 deterministic command PTY test를 추가하고, 안정화 뒤 기본 `check` 편입을 검토한다. |
+| interactive shell smoke | 구현 전, 환경 의존 | 사용자의 login shell, prompt, dotfiles, locale에 따라 출력이 달라진다. | 실제 shell prompt, job control, shell startup escape 문제를 조기에 놓칠 수 있다. | `mise run pty` 같은 opt-in smoke로 분리하고 artifact를 남긴다. |
 | VT parser | 구현 전 | 현재 core는 UTF-8 텍스트와 일부 control만 처리한다. | ANSI 색상, cursor movement, alternate screen, mouse mode 같은 터미널 핵심 호환성을 검증하지 못한다. | 작은 ANSI fixture를 TDD로 추가하고 oracle snapshot을 함께 늘린다. |
 | GPU renderer | 구현 전, 환경 의존, 시스템 한계에 가까움 | Metal/WebGPU 렌더러가 아직 없다. 실제 화면 검증은 macOS window server, GPU driver, font stack 영향을 받는다. | 폰트, glyph atlas, frame pacing, dirty redraw 문제를 검증하지 못한다. | headless snapshot과 GUI screenshot artifact를 연결하는 app E2E를 추가한다. |
 | workspace/session restore | 구현 전 | 아직 session model만 초기 구조다. | cwd/env/command/layout restore가 실제 사용자 UX로 보장되지 않는다. | serialized workspace fixture와 restore E2E를 추가한다. |
 | Wasm plugin | 구현 전 | 현재 plugin registry는 no-op 구조다. | plugin boundary, 권한, event ABI, 실패 격리를 검증하지 못한다. | plugin hook API가 정해진 뒤 fixture plugin과 sandbox failure test를 추가한다. |
 | global shortcut | 구현 전, 환경 의존 | macOS 전역 핫키 등록과 충돌 검증이 아직 없다. | quick terminal/focus UX가 terminal input과 충돌하지 않는지 증명하지 못한다. | config conflict unit test, resolver test, macOS app smoke test를 추가한다. |
 | trace/replay | 구현 전 | snapshot은 있지만 event trace/replay는 아직 없다. | 실패를 시간순으로 재현하기 어렵다. | terminal input/output event를 domain event로 기록하고 replay test를 추가한다. |
+| boundary checker | 구현 전 | facade import 경계를 사람이 리뷰로만 확인한다. | `TerminalCore`가 PTY/platform/renderer를 몰래 import해도 자동으로 막지 못한다. | `tools/check-boundaries` 또는 `zig build check-boundaries`를 추가하고 `mise run check`에 연결한다. |
 | SSH workload | 구현 전, 환경 의존 | SSH 전용 integration은 아직 실행하지 않는다. 외부 네트워크나 특정 원격 서버에 묶이지 않는 방식이 필요하다. | 원격 shell, latency, locale, terminal mode 차이를 검증하지 못한다. | 로컬 테스트 서버나 opt-in 환경변수 기반 SSH smoke test를 추가한다. |
 | 긴 soak/제품 성능 예산 | 부분 구현, 환경 의존 | `mise run perf`는 core 기준만 측정한다. 앱 시작, 입력 지연, frame budget, RSS는 아직 없다. | GUI/PTY/renderer 성능 회귀는 아직 숫자로 실패시키지 못한다. | macOS host, PTY, renderer가 붙으면 startup, latency, memory, throughput 기준을 확장한다. |
 

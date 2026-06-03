@@ -17,10 +17,18 @@ run = "zig build test-e2e"
 description = "Compare Maru against recorded terminal oracles"
 run = "zig build test-oracle"
 
+[tasks.stress]
+description = "Run quick deterministic stress tests"
+run = "zig build test-stress"
+
+[tasks.stress-soak]
+description = "Run longer opt-in stress tests"
+run = "zig build test-stress-soak"
+
 [tasks.fmt]
 description = "Format Zig sources"
 run = "zig fmt build.zig src tests"
 
 [tasks.check]
 description = "Format, test, and build"
-depends = ["fmt", "test", "e2e", "oracle", "build"]
+depends = ["fmt", "test", "e2e", "oracle", "stress", "build"]

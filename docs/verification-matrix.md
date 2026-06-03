@@ -10,7 +10,8 @@
 | 단위 테스트 | `mise run test` | 없음 | facade, config, terminal core 같은 작은 단위가 의도대로 동작하는지 확인한다. |
 | headless E2E | `mise run e2e` | `tests/artifacts/e2e/headless/*.screen.txt`, `*.snapshot.txt`, `*.stdout.txt` | 실제 프로세스 stdout이 terminal core 상태로 변환되는지 확인한다. |
 | recorded oracle 비교 | `mise run oracle` | `tests/artifacts/oracle/*/*.actual.txt`, `*.expected.txt`, `*.snapshot.txt`, `*.decoded.txt` | Maru의 화면 결과가 기록된 reference snapshot과 같은지 확인한다. |
-| 전체 확인 | `mise run check` | 위 산출물 전체 | format, unit, E2E, oracle, build를 한 번에 확인한다. |
+| 빠른 스트레스 | `mise run stress` | `tests/artifacts/stress/quick/*.screen.txt`, `*.snapshot.txt`, `*.summary.txt` | 대량 출력과 반복 resize가 terminal core 상태를 깨지 않는지 확인한다. |
+| 전체 확인 | `mise run check` | 위 산출물 전체 | format, unit, E2E, oracle, stress, build를 한 번에 확인한다. |
 
 ## 구조화 스냅샷
 
@@ -42,6 +43,7 @@
 | Wasm plugin | 구현 전 | 현재 plugin registry는 no-op 구조다. | plugin boundary, 권한, event ABI, 실패 격리를 검증하지 못한다. | plugin hook API가 정해진 뒤 fixture plugin과 sandbox failure test를 추가한다. |
 | trace/replay | 구현 전 | snapshot은 있지만 event trace/replay는 아직 없다. | 실패를 시간순으로 재현하기 어렵다. | terminal input/output event를 domain event로 기록하고 replay test를 추가한다. |
 | SSH workload | 구현 전, 환경 의존 | SSH 전용 integration은 아직 실행하지 않는다. 외부 네트워크나 특정 원격 서버에 묶이지 않는 방식이 필요하다. | 원격 shell, latency, locale, terminal mode 차이를 검증하지 못한다. | 로컬 테스트 서버나 opt-in 환경변수 기반 SSH smoke test를 추가한다. |
+| 긴 soak/성능 예산 | 구현 전, 환경 의존 | `mise run stress-soak` 경로는 있지만 절대 시간, 메모리, 처리량 기준은 아직 없다. | 느린 회귀를 자동으로 실패시키지는 못하고, 상태 불변식만 확인한다. | `docs/performance-budget.md`를 만든 뒤 startup, latency, memory, throughput 기준을 분리해서 추가한다. |
 
 ## PR마다 확인할 질문
 

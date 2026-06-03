@@ -82,4 +82,44 @@ pub fn build(b: *std.Build) void {
 
     const oracle_step = b.step("test-oracle", "Compare Maru snapshots against recorded terminal oracles");
     oracle_step.dependOn(&run_oracle_tests.step);
+
+    const stress_options = b.addOptions();
+    stress_options.addOption(bool, "soak", false);
+    const stress_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/stress/core.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "test_support", .module = test_support_mod },
+                .{ .name = "stress_options", .module = stress_options.createModule() },
+            },
+        }),
+    });
+    const run_stress_tests = b.addRunArtifact(stress_tests);
+    run_stress_tests.setCwd(b.path("."));
+
+    const stress_step = b.step("test-stress", "Run quick deterministic stress tests");
+    stress_step.dependOn(&run_stress_tests.step);
+
+    const stress_soak_options = b.addOptions();
+    stress_soak_options.addOption(bool, "soak", true);
+    const stress_soak_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/stress/core.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "test_support", .module = test_support_mod },
+                .{ .name = "stress_options", .module = stress_soak_options.createModule() },
+            },
+        }),
+    });
+    const run_stress_soak_tests = b.addRunArtifact(stress_soak_tests);
+    run_stress_soak_tests.setCwd(b.path("."));
+
+    const stress_soak_step = b.step("test-stress-soak", "Run longer opt-in stress tests");
+    stress_soak_step.dependOn(&run_stress_soak_tests.step);
 }

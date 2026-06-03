@@ -16,4 +16,7 @@ tests/artifacts/oracle/*/*.actual.txt
 tests/artifacts/oracle/*/*.expected.txt
 tests/artifacts/oracle/*/*.decoded.txt
 tests/artifacts/oracle/*/*.snapshot.txt
+tests/artifacts/stress/*/*.screen.txt
+tests/artifacts/stress/*/*.snapshot.txt
+tests/artifacts/stress/*/*.summary.txt
 ```

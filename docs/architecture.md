@@ -17,7 +17,7 @@ Ghostty 등 레퍼런스는 다음 용도로만 사용한다.
 
 ## 1차 모듈 경계
 
-첫 구현 목표는 [v0 세로 슬라이스](v0-vertical-slice.md)를 따른다. 각 facade가 맡는 책임과 금지된 의존성은 [Facade 계약](facade-contracts.md)을 단일 출처로 둔다. 키 입력, app shortcut, global shortcut의 충돌 규칙은 [키 입력과 단축키 경계](key-input-and-shortcuts.md)를 따른다.
+첫 구현 목표는 [초기 세로 슬라이스](initial-vertical-slice.md)를 따른다. 각 facade가 맡는 책임과 금지된 의존성은 [Facade 계약](facade-contracts.md)을 단일 출처로 둔다. 키 입력, app shortcut, global shortcut의 충돌 규칙은 [키 입력과 단축키 경계](key-input-and-shortcuts.md)를 따른다.
 
 ```text
 src/maru.zig
@@ -29,6 +29,43 @@ src/maru.zig
 ```
 
 현재 스캐폴드는 실제 터미널 구현이 아니라, 앞으로 지켜야 할 경계를 컴파일 가능한 형태로 세운 것이다.
+
+## 아키텍처 다이어그램
+
+이 그림은 현재 목표 구조를 보여준다. 핵심은 `TerminalCore`가 PTY, renderer, platform을 직접 알지 않고, 각 영역이 facade와 domain data를 통해서만 연결되는 것이다.
+
+```mermaid
+flowchart TD
+    User[사용자 입력] --> AppHost[macOS App Host<br/>window / focus / IME / menu]
+    GlobalShortcut[OS global shortcut] --> Platform[Platform Layer<br/>macOS now, Windows/Linux later]
+    Platform --> AppHost
+
+    AppHost --> Resolver[KeyBindingResolver<br/>AppAction 또는 TerminalInput 분류]
+    Resolver -->|AppAction| AppModel[App / Window / Tab / Pane Model]
+    Resolver -->|TerminalInput bytes| PtySession[PtySession Facade]
+
+    PtySession -->|raw output bytes| Pane[Pane<br/>PTY와 TerminalCore 연결]
+    Pane --> TerminalCore[TerminalCore Facade<br/>parser / screen state / cursor / scrollback]
+    TerminalCore --> Snapshot[RenderSnapshot / DebugSnapshot]
+
+    Snapshot --> Renderer[Renderer Facade<br/>Metal now, WebGPU later]
+    Renderer --> Screen[화면]
+
+    Snapshot --> Artifacts[tests/artifacts<br/>screen / snapshot / trace]
+    Artifacts --> Replay[Future Replay Runner]
+    Artifacts --> Inspector[Future Inspector]
+
+    AppModel --> Workspace[Workspace / Session Restore<br/>future]
+    AppModel --> ActionRegistry[Action Registry / Config]
+    ActionRegistry --> PluginBoundary[Plugin Boundary<br/>future Wasm, hot path 밖]
+
+    PluginBoundary -.domain events/actions only.-> AppModel
+
+    TerminalCore -.금지.-> PtySession
+    Renderer -.금지.-> PtySession
+    PluginBoundary -.금지.-> TerminalCore
+    PluginBoundary -.금지.-> PtySession
+```
 
 ## 핵심 경계
 
@@ -59,7 +96,7 @@ Renderer
 
 구체적인 구현 순서는 [실제 구현 계획](implementation-plan.md)을 단일 출처로 둔다.
 
-이전에는 parser를 먼저 만든다고 표현했지만, 실제 순서는 더 좁게 잡는다. 먼저 facade 계약과 snapshot/artifact 경계를 고정하고, v0 shell 경로에 필요한 parser 동작만 fixture 기반으로 작게 추가한다. 그다음 macOS PTY, pane 연결, headless E2E, renderer/app host 순서로 진행한다.
+이전에는 parser를 먼저 만든다고 표현했지만, 실제 순서는 더 좁게 잡는다. 먼저 facade 계약과 snapshot/artifact 경계를 고정하고, 초기 shell 경로에 필요한 parser 동작만 fixture 기반으로 작게 추가한다. 그다음 macOS PTY, pane 연결, headless E2E, renderer/app host 순서로 진행한다.
 
 ## 테스트 원칙
 

@@ -12,7 +12,7 @@
 - [스트레스 테스트 전략](docs/stress-testing.md)
 - [성능 예산](docs/performance-budget.md)
 - [실제 구현 계획](docs/implementation-plan.md)
-- [v0 세로 슬라이스](docs/v0-vertical-slice.md)
+- [초기 세로 슬라이스](docs/initial-vertical-slice.md)
 - [Facade 계약](docs/facade-contracts.md)
 - [Fixture와 Oracle 포맷](docs/fixture-format.md)
 - [키 입력과 단축키 경계](docs/key-input-and-shortcuts.md)
@@ -21,7 +21,7 @@
 
 - [초기 아키텍처](docs/architecture.md)
 - [실제 구현 계획](docs/implementation-plan.md)
-- [v0 세로 슬라이스](docs/v0-vertical-slice.md)
+- [초기 세로 슬라이스](docs/initial-vertical-slice.md)
 - [Facade 계약](docs/facade-contracts.md)
 - [테스트 원칙](docs/architecture.md#테스트-원칙)
 - [관측 가능성 원칙](docs/architecture.md#관측-가능성-원칙)

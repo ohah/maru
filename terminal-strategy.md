@@ -443,6 +443,7 @@ snapshot/golden test 영역:
 - ANSI bytes -> final grid text/style
 - asciinema cast -> screen state snapshots
 - render snapshot -> glyph/background/cursor instances
+- recorded oracle snapshot -> Maru screen snapshot 비교
 
 순수 TDD가 어려운 영역:
 

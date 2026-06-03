@@ -13,10 +13,14 @@ run = "zig build test"
 description = "Run headless E2E tests"
 run = "zig build test-e2e"
 
+[tasks.oracle]
+description = "Compare Maru against recorded terminal oracles"
+run = "zig build test-oracle"
+
 [tasks.fmt]
 description = "Format Zig sources"
 run = "zig fmt build.zig src tests"
 
 [tasks.check]
 description = "Format, test, and build"
-depends = ["fmt", "test", "e2e", "build"]
+depends = ["fmt", "test", "e2e", "oracle", "build"]

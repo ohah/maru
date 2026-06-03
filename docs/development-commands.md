@@ -13,6 +13,7 @@ Maru 작업에서 사용하는 기본 명령이다.
 - 빌드: `mise run build`
 - 테스트: `mise run test`
 - E2E 테스트: `mise run e2e`
+- 오라클 비교 테스트: `mise run oracle`
 - 포맷: `mise run fmt`
 - 전체 확인: `mise run check`
 - Zig 테스트 직접 실행: `zig build test`

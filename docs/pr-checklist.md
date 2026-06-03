@@ -4,6 +4,20 @@
 
 GitHub PR 본문은 `.github/pull_request_template.md`를 사용한다. 이 문서는 템플릿에 들어가는 질문의 기준과 해석을 설명하는 단일 출처다.
 
+## PR 메타데이터 (필수)
+
+모든 PR은 다음을 반드시 갖춘다.
+
+- 라벨: 하나 이상 단다.
+- assignee: `ohah`로 지정한다.
+
+```sh
+# 새 PR
+gh pr create --assignee ohah --label <label> ...
+# 이미 만든 PR
+gh pr edit <번호> --add-assignee ohah --add-label <label>
+```
+
 ## 전략 영향 평가
 
 PR 설명에는 다음 질문에 대한 답이 있어야 한다.

@@ -115,9 +115,9 @@ Esc      vim, readline, shell mode 전환에 자주 쓰인다.
 - `Ctrl+B`, `Ctrl+C`, `Ctrl+D`, `Ctrl+R`, `Ctrl+Z`, `Esc` 같은 terminal 관용 조합을 app/global shortcut으로 등록하면 경고다.
 - 사용자가 경고를 명시적으로 허용하지 않으면 기본 설정 파일 생성이나 GUI 설정 화면에서 저장하지 않는다.
 
-## v0 범위
+## 초기 범위
 
-v0에서는 글로벌 핫키를 구현하지 않는다. 지금은 다음 경계만 유지한다.
+초기 구현에서는 글로벌 핫키를 구현하지 않는다. 지금은 다음 경계만 유지한다.
 
 - `Action`/keybinding config가 terminal input과 분리될 수 있어야 한다.
 - `PtySession`은 이미 해석된 terminal input bytes만 받는다.

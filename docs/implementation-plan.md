@@ -4,7 +4,7 @@
 
 ## 핵심 판단
 
-초기 구현은 [v0 세로 슬라이스](v0-vertical-slice.md)를 기준으로 한다.
+초기 구현은 [초기 세로 슬라이스](initial-vertical-slice.md)를 기준으로 한다.
 
 ```text
 macOS 로컬 shell 1개 pane
@@ -14,7 +14,7 @@ macOS 로컬 shell 1개 pane
 -> headless test 통과
 ```
 
-중요한 점은 parser 전체를 먼저 만들지 않는 것이다. 완전한 VT parser를 먼저 파면 실제 PTY와 E2E 없이 parser 코드만 커질 가능성이 높다. v0에서는 실제 shell bytes가 Maru의 책임 경계를 지나가는 경로를 먼저 만들고, parser는 fixture가 요구하는 만큼만 작게 확장한다.
+중요한 점은 parser 전체를 먼저 만들지 않는 것이다. 완전한 VT parser를 먼저 파면 실제 PTY와 E2E 없이 parser 코드만 커질 가능성이 높다. 초기 구현에서는 실제 shell bytes가 Maru의 책임 경계를 지나가는 경로를 먼저 만들고, parser는 fixture가 요구하는 만큼만 작게 확장한다.
 
 ## TDD 기준
 
@@ -48,7 +48,7 @@ TDD 방식:
 - `mise run check` 통과.
 - 새 facade가 [Facade 계약](facade-contracts.md)과 어긋나지 않는다.
 - PR 설명에 각 facade가 왜 존재하는지 초보자용 설명이 들어간다.
-- `tools/check-boundaries` 또는 동등한 boundary checker 계획이 생긴다. 단순 import smoke test만으로 경계가 지켜진다고 주장하지 않는다.
+- `zig build check-boundaries`가 `mise run check`에 연결되어 있다. 단순 import smoke test만으로 경계가 지켜진다고 주장하지 않는다.
 
 아직 하지 않는다:
 
@@ -60,11 +60,9 @@ TDD 방식:
 
 ### 1단계 boundary checker 최소 요구사항
 
-`import boundary test`는 말만으로는 부족하다. 구현 전에는 다음 중 하나를 반드시 선택한다.
+`import boundary test`는 말만으로는 부족하다. 초기에는 `zig build check-boundaries`의 Zig 기반 검사를 사용한다.
 
-- `tools/check-boundaries`: Zig source import graph를 읽고 금지 import를 실패 처리한다.
-- build step 기반 검사: `zig build check-boundaries`를 만들고 `mise run check`에 연결한다.
-- 더 단순한 임시안: `rg` 기반 금지 import 검사. 단, 이 경우 임시 검사임을 PR 한계에 적고 root-cause로 import graph checker 계획을 남긴다.
+이 검사는 금지 import를 자동으로 막는 것이 목적이다. src 트리가 커져 파일 목록을 직접 관리하기 어려워지면 디렉터리 워킹 기반 import graph 검사로 고도화한다.
 
 초기 금지 규칙:
 
@@ -81,7 +79,7 @@ src/plugin/**    -> src/terminal/** private 구현, src/pty/** handle import 금
 
 - 실패했을 때 볼 수 있는 공통 산출물을 먼저 만든다.
 - 테스트, 로그, replay, future inspector가 같은 도메인 데이터를 소비하게 한다.
-- snapshot schema는 `v0`로 versioning한다. "영원히 고정된 최종 포맷"이 아니라 "v0에서 호환성을 지킬 포맷"으로 다룬다.
+- snapshot schema는 `maru.snapshot.v1`로 versioning한다. 이 버전은 제품 버전이 아니라 테스트 산출물과 replay consumer가 읽는 데이터 포맷 버전이다.
 
 TDD 방식:
 
@@ -103,11 +101,11 @@ TDD 방식:
 - full trace/replay 구현.
 - GUI inspector.
 
-## 3단계: v0에 필요한 parser/core 동작만 작게 확장
+## 3단계: 초기 shell 경로에 필요한 parser/core 동작만 작게 확장
 
 목표:
 
-- 완전한 VT parser가 아니라, v0 shell smoke에 필요한 최소 terminal core 동작만 TDD로 추가한다.
+- 완전한 VT parser가 아니라, 초기 shell smoke에 필요한 최소 terminal core 동작만 TDD로 추가한다.
 - CR/LF, printable text, resize, cursor 위치 같은 기본기를 먼저 안정화한다.
 
 TDD 방식:
@@ -195,7 +193,7 @@ TDD 방식:
 - split layout.
 - workspace restore.
 
-## 6단계: Headless E2E를 v0 성공 기준으로 고정
+## 6단계: Headless E2E를 초기 성공 기준으로 고정
 
 목표:
 
@@ -211,8 +209,8 @@ TDD 방식:
 
 완료 기준:
 
-- `mise run check`가 deterministic v0 headless E2E를 포함한다.
-- `mise run pty` 또는 동등한 opt-in 명령이 macOS PTY smoke를 실행한다.
+- `mise run check`가 deterministic headless E2E를 포함한다.
+- PTY 구현 PR에서 `mise run pty` 또는 동등한 opt-in 명령을 추가하고, 그 명령이 macOS PTY smoke를 실행한다.
 - 실패했을 때 원인을 parser, PTY, pane 연결 중 어디서 봐야 하는지 artifact로 판단할 수 있다.
 
 아직 하지 않는다:

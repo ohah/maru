@@ -141,7 +141,7 @@
 
 ## Plugin 경계
 
-v0에서는 Wasm plugin을 구현하지 않는다. 다만 나중에 plugin이 들어와도 core를 직접 만지지 못하게 다음 방향만 유지한다.
+초기 구현에서는 Wasm plugin을 구현하지 않는다. 다만 나중에 plugin이 들어와도 core를 직접 만지지 못하게 다음 방향만 유지한다.
 
 - plugin은 domain event와 action facade를 통해서만 상호작용한다.
 - plugin은 `TerminalCore` private storage, PTY handle, renderer resource를 직접 받지 않는다.

@@ -1,6 +1,6 @@
 # Facade 계약
 
-이 문서는 Maru의 핵심 facade가 무엇을 책임지고 무엇을 몰라야 하는지 정한다. 초보자 관점에서 중요한 이유는 간단하다. 터미널은 PTY, parser, renderer, session restore, plugin이 쉽게 서로 얽힌다. facade 계약은 얽힘을 막고, 나중에 내부 구현을 바꿔도 바깥 API를 크게 흔들지 않게 하는 울타리다.
+이 문서는 Maru의 핵심 facade가 무엇을 책임지고 무엇을 몰라야 하는지 정한다. 초보자 관점에서 중요한 이유는 간단하다. 터미널은 PTY, parser, renderer, workspace restore, plugin이 쉽게 서로 얽힌다. facade 계약은 얽힘을 막고, 나중에 내부 구현을 바꿔도 바깥 API를 크게 흔들지 않게 하는 울타리다.
 
 ## 공통 규칙
 
@@ -62,7 +62,8 @@
 책임:
 
 - 하나의 사용 가능한 terminal surface를 표현한다.
-- `PtySession`과 `TerminalCore`를 연결한다.
+- `TerminalCore`와 복구 가능한 surface metadata를 소유한다.
+- live `PtySession` handle은 직접 저장하지 않는다.
 - surface의 title, cwd, env, command, size 같은 복구 가능한 metadata를 보관한다.
 - snapshot을 만들 때 terminal state와 surface metadata를 함께 제공한다.
 
@@ -72,6 +73,7 @@
 - GPU draw call.
 - workspace 파일 저장 방식.
 - plugin 실행 방식.
+- PTY file descriptor나 live process handle.
 
 초기 테스트:
 
@@ -80,13 +82,34 @@
 - `RestorableSurfaceMetadata`에는 cwd/env/command/size 같은 선언적 상태만 들어가고 live PTY handle은 들어가지 않는다.
 - env 저장은 allowlist 또는 redaction 경계를 가져야 한다.
 
+## `SurfaceRuntime`
+
+책임:
+
+- app layer에서 `Surface`와 `PtySession`의 live 연결을 관리한다.
+- PTY output event를 해당 surface의 `TerminalCore`로 전달한다.
+- terminal input bytes와 resize request를 해당 `PtySession`으로 전달한다.
+- process exit 같은 runtime event를 surface metadata 갱신이나 artifact로 연결한다.
+
+몰라야 하는 것:
+
+- renderer resource handle.
+- workspace 저장 파일의 세부 포맷.
+- plugin 내부 메모리.
+
+초기 테스트:
+
+- 하나의 PTY output event가 올바른 surface로 routing된다.
+- surface resize가 `TerminalCore.resize`와 `PtySession.resize` 요청으로 분리된다.
+- runtime 연결이 끊겨도 `RestorableSurfaceMetadata`에는 live handle이 남지 않는다.
+
 ## `Workspace`
 
 책임:
 
 - 프로젝트별 workspace 식별자와 root path를 관리한다.
 - 탭/분할 layout restore에 필요한 선언적 상태를 저장한다.
-- 최근 작업 세션 목록을 관리한다.
+- 최근 작업 상태 목록을 관리한다.
 - repo별 기본 레이아웃과 scratch terminal 정책을 나중에 수용한다.
 
 몰라야 하는 것:
@@ -145,7 +168,7 @@
 
 - plugin은 domain event와 action facade를 통해서만 상호작용한다.
 - plugin은 `TerminalCore` private storage, PTY handle, renderer resource를 직접 받지 않는다.
-- plugin 실패는 surface/session 전체를 죽이지 않고 격리되어야 한다.
+- plugin 실패는 surface/window 전체를 죽이지 않고 격리되어야 한다.
 
 Plugin ABI나 권한 모델을 확정해야 하는 순간이 오면, 구현 전에 사용자와 별도 논의한다.
 

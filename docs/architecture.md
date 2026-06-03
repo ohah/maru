@@ -34,6 +34,8 @@ src/maru.zig
 
 이 그림은 현재 목표 구조를 보여준다. 핵심은 `TerminalCore`가 PTY, renderer, platform을 직접 알지 않고, 각 영역이 facade와 domain data를 통해서만 연결되는 것이다.
 
+`Surface`는 복구 가능한 terminal state와 metadata를 표현한다. live `PtySession` handle은 저장하지 않는다. 실제 실행 중에는 app layer의 `SurfaceRuntime`이 `Surface`와 `PtySession`을 묶고, PTY output/input/resize를 전달한다. 이 분리는 workspace restore가 live process handle을 저장하지 않게 하고, 테스트가 PTY 없이도 surface/core를 검증할 수 있게 한다.
+
 ```mermaid
 flowchart TD
     User[사용자 입력] --> AppHost[macOS App Host<br/>window / focus / IME / menu]
@@ -42,9 +44,11 @@ flowchart TD
 
     AppHost --> Resolver[KeyBindingResolver<br/>AppAction 또는 TerminalInput 분류]
     Resolver -->|AppAction| AppModel[App / Window / Tab / Surface Model]
-    Resolver -->|TerminalInput bytes| PtySession[PtySession Facade]
+    Resolver -->|TerminalInput bytes| SurfaceRuntime[SurfaceRuntime<br/>live 연결, 저장 안 함]
 
-    PtySession -->|raw output bytes| Surface[Surface<br/>PTY와 TerminalCore 연결]
+    SurfaceRuntime -->|write input / resize| PtySession[PtySession Facade]
+    PtySession -->|raw output bytes / process event| SurfaceRuntime
+    SurfaceRuntime -->|apply output event| Surface[Surface<br/>TerminalCore + metadata]
     Surface --> TerminalCore[TerminalCore Facade<br/>parser / screen state / cursor / scrollback]
     TerminalCore --> Snapshot[RenderSnapshot / DebugSnapshot]
 
@@ -55,17 +59,19 @@ flowchart TD
     Artifacts --> Replay[Future Replay Runner]
     Artifacts --> Inspector[Future Inspector]
 
-    AppModel --> Workspace[Workspace / Session Restore<br/>future]
+    AppModel --> Workspace[Workspace / Surface Restore<br/>future]
     AppModel --> ActionRegistry[Action Registry / Config]
     ActionRegistry --> PluginBoundary[Plugin Boundary<br/>future Wasm, hot path 밖]
 
     PluginBoundary -.domain events/actions only.-> AppModel
 
-    TerminalCore -.금지.-> PtySession
-    Renderer -.금지.-> PtySession
-    PluginBoundary -.금지.-> TerminalCore
-    PluginBoundary -.금지.-> PtySession
+    TerminalCore -.금지: process/PTY handle 직접 접근.-> PtySession
+    Renderer -.금지: process/PTY handle 직접 접근.-> PtySession
+    PluginBoundary -.금지: private core storage 직접 접근.-> TerminalCore
+    PluginBoundary -.금지: PTY handle 직접 접근.-> PtySession
 ```
+
+금지 화살표는 모든 상호작용을 금지한다는 뜻이 아니다. public facade, domain event, action을 통한 간접 상호작용은 허용한다. 금지되는 것은 private storage, live PTY handle, renderer resource 같은 내부 구현 세부사항을 직접 잡는 의존성이다.
 
 ## 핵심 경계
 
@@ -76,10 +82,14 @@ AppWindow
   - UI action 적용
 
 Surface
-  - PtySession 연결
   - TerminalCore
   - RenderSnapshot
   - title/cwd/process state
+
+SurfaceRuntime
+  - Surface와 PtySession의 live 연결
+  - PTY output/input/resize routing
+  - 저장/restore 대상 아님
 
 TerminalCore
   - bytes 입력

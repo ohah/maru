@@ -14,3 +14,10 @@ pub const Rgb = types.Rgb;
 pub const Size = types.Size;
 pub const Style = types.Style;
 pub const TerminalCore = core.TerminalCore;
+
+test {
+    // Aggregate this layer's child-file tests into the build. refAllDecls is
+    // shallow and does not recurse through the maru barrel, so without this
+    // block the unit tests in terminal/* never compile into `zig build test`.
+    @import("std").testing.refAllDecls(@This());
+}

@@ -39,6 +39,7 @@ ANSI fixture
 -> Maru TerminalCore 실행
 -> screen snapshot 생성
 -> recorded oracle snapshot과 비교
+-> tests/artifacts/oracle 아래에 actual/expected/input snapshot 저장
 ```
 
 이 구조를 먼저 만드는 이유는 CI와 로컬 개발환경이 `xterm`, `libvterm`, `alacritty`, `ghostty` 설치 여부에 묶이지 않게 하기 위해서다.

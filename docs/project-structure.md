@@ -57,7 +57,8 @@ tests/
     traces/             sanitized replay trace
   golden/
     screen/             screen snapshot expected output
-  artifacts/            실패 시 생성되는 로컬 산출물
+  support/              테스트 공통 helper
+  artifacts/            테스트 실행 시 생성되는 로컬 산출물
 ```
 
 ## build.zig 연결 원칙

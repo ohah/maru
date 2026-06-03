@@ -8,6 +8,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/maru.zig"),
         .target = target,
     });
+    const test_support_mod = b.addModule("test_support", .{
+        .root_source_file = b.path("tests/support/artifacts.zig"),
+        .target = target,
+    });
 
     const exe = b.addExecutable(.{
         .name = "maru-dev",
@@ -52,10 +56,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "maru", .module = maru_mod },
+                .{ .name = "test_support", .module = test_support_mod },
             },
         }),
     });
     const run_e2e_tests = b.addRunArtifact(e2e_tests);
+    run_e2e_tests.setCwd(b.path("."));
 
     const e2e_step = b.step("test-e2e", "Run headless E2E tests");
     e2e_step.dependOn(&run_e2e_tests.step);
@@ -67,6 +73,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "maru", .module = maru_mod },
+                .{ .name = "test_support", .module = test_support_mod },
             },
         }),
     });

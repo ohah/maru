@@ -1,5 +1,6 @@
 const std = @import("std");
 const maru = @import("maru");
+const artifacts = @import("test_support");
 
 const RecordedOracle = struct {
     name: []const u8,
@@ -73,6 +74,22 @@ fn compareCase(case: Case) !void {
     const actual = try core.dumpUtf8(allocator);
     defer allocator.free(actual);
 
+    const actual_path = try std.fmt.allocPrint(
+        allocator,
+        "tests/artifacts/oracle/{s}/maru.actual.txt",
+        .{case.name},
+    );
+    defer allocator.free(actual_path);
+    try artifacts.writeTextWithFinalNewline(allocator, actual_path, actual);
+
+    const input_path = try std.fmt.allocPrint(
+        allocator,
+        "tests/artifacts/oracle/{s}/input.decoded.txt",
+        .{case.name},
+    );
+    defer allocator.free(input_path);
+    try artifacts.writeText(input_path, input);
+
     for (case.oracles) |oracle| {
         const expected_file = try std.Io.Dir.cwd().readFileAlloc(
             std.testing.io,
@@ -81,6 +98,14 @@ fn compareCase(case: Case) !void {
             .limited(64 * 1024),
         );
         defer allocator.free(expected_file);
+
+        const expected_path = try std.fmt.allocPrint(
+            allocator,
+            "tests/artifacts/oracle/{s}/{s}.expected.txt",
+            .{ case.name, oracle.name },
+        );
+        defer allocator.free(expected_path);
+        try artifacts.writeTextWithFinalNewline(allocator, expected_path, goldenText(expected_file));
 
         errdefer std.debug.print(
             "oracle mismatch: case={s} oracle={s} source={s}\n",

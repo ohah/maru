@@ -1,5 +1,6 @@
 const std = @import("std");
 const maru = @import("maru");
+const artifacts = @import("test_support");
 
 // Headless E2E exists before GUI E2E because terminal bugs are easiest to
 // debug from the bottom up. If this test fails, the beginner-friendly mental
@@ -32,6 +33,17 @@ test "headless E2E feeds real command stdout into TerminalCore" {
 
     const screen = try core.dumpUtf8(allocator);
     defer allocator.free(screen);
+
+    try artifacts.writeTextWithFinalNewline(
+        allocator,
+        "tests/artifacts/e2e/headless/hello-maru.screen.txt",
+        screen,
+    );
+
+    try artifacts.writeText(
+        "tests/artifacts/e2e/headless/hello-maru.stdout.txt",
+        result.stdout,
+    );
 
     try std.testing.expect(std.mem.indexOf(u8, screen, "hello maru") != null);
 }

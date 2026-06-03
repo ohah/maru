@@ -17,6 +17,18 @@ run = "zig build test-e2e"
 description = "Compare Maru against recorded terminal oracles"
 run = "zig build test-oracle"
 
+[tasks.oracle-ext]
+description = "Validate goldens against a real libvterm reference (opt-in; requires libvterm)"
+run = "zig build test-oracle-ext"
+
+[tasks.oracle-ghostty]
+description = "Validate goldens against Ghostty libghostty-vt (opt-in; requires prebuilt libghostty-vt.a)"
+run = "zig build test-oracle-ghostty"
+
+[tasks.oracle-alacritty]
+description = "Validate goldens against Alacritty alacritty_terminal (opt-in; requires prebuilt Rust dumper)"
+run = "zig build test-oracle-alacritty"
+
 [tasks.stress]
 description = "Run quick deterministic stress tests"
 run = "zig build test-stress"
@@ -33,6 +45,14 @@ run = "zig build perf"
 description = "Format Zig sources"
 run = "zig fmt build.zig src tests tools"
 
+[tasks.fmt-check]
+description = "Check Zig formatting without modifying files"
+run = "zig fmt --check build.zig src tests tools"
+
+[tasks.check-boundaries]
+description = "Check facade import boundaries"
+run = "zig build check-boundaries"
+
 [tasks.check]
-description = "Format, test, and build"
-depends = ["fmt", "test", "e2e", "oracle", "stress", "build"]
+description = "Check format, tests, boundaries, and build"
+depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "build"]

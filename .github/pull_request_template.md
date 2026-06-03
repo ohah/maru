@@ -16,6 +16,13 @@
 - [ ] 문서 변경이 없다면 왜 필요 없는지 설명했습니다.
 - 수정한 문서:
 
+## Clean-room 근거
+
+- [ ] 레퍼런스 코드 표현을 복사하지 않았습니다.
+- [ ] VT/parser 변경이면 공개 명세 섹션을 인용했습니다.
+- [ ] renderer/storage/platform interop 변경이면 public spec, platform 문서, 또는 독립 설계 근거를 적었습니다.
+- 근거:
+
 ## 전략 영향 평가
 
 - [ ] 기존 Maru 전략을 유지합니다.
@@ -27,6 +34,7 @@
 - [ ] plugin/extension boundary를 나중에 막지 않습니다.
 - [ ] 가벼운 native shell/workspace UX 목표를 해치지 않습니다.
 - [ ] VT/parser 동작을 바꿨다면 유도한 공개 명세 섹션을 인용했습니다(해당 없으면 N/A).
+- [ ] renderer/storage/platform interop를 바꿨다면 public spec, platform 문서, 또는 독립 설계 근거를 적었습니다(해당 없으면 N/A).
 
 ## 테스트
 

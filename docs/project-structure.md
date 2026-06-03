@@ -18,13 +18,13 @@ Maru는 초기에 파일 이동을 최소화한다. 기존 `src/*.zig` 파일은
 src/
   maru.zig              public import facade
   main.zig              개발용 CLI entrypoint
-  app.zig               탭/창/session facade
+  app.zig               탭/창/surface facade
   config.zig            action/config facade
   pty.zig               process/PTY facade
   renderer.zig          render facade
   terminal.zig          terminal-core facade
 
-  app/                  window/session처럼 앱 상태 책임별 구현
+  app/                  window/surface처럼 앱 상태 책임별 구현
   config/               action parsing, theme/font config
   pty/                  PTY backend, spawn request, process handle
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding
@@ -33,7 +33,7 @@ src/
     macos/
     windows/
     linux/
-  workspace/            project workspace, layout restore, recent sessions
+  workspace/            project workspace, layout restore, recent workspaces
   observability/        DebugEvent, TraceEvent, DebugSnapshot, ReplayRunner
   plugin/               future action/plugin/Wasm boundary
 ```

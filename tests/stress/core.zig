@@ -50,8 +50,8 @@ test "stress: repeated output keeps final screen bounded and inspectable" {
 }
 
 test "stress: repeated resize and writes keep storage invariants valid" {
-    // Resize stress matters because terminal panes resize often: app window
-    // changes, split panes, font-size changes, and future workspace restore
+    // Resize stress matters because terminal surfaces resize often: app window
+    // changes, split surfaces, font-size changes, and future workspace restore
     // all exercise the same storage boundary.
     const allocator = std.testing.allocator;
     const p = profile();

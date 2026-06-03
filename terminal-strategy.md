@@ -65,7 +65,7 @@ Swift/AppKit이 맡을 것:
 
 Zig가 맡을 것:
 
-- 터미널/session 모델
+- 터미널 surface 모델
 - 탭 모델
 - action registry
 - config parser와 hot reload
@@ -163,7 +163,7 @@ Windows와 Linux를 지금 구현하지는 않는다. 다만 `TerminalCore`, `Pt
 권장 분리:
 
 ```text
-Zig: terminal core, session/tab model, render data, Metal renderer
+Zig: terminal core, surface/tab model, render data, Metal renderer
 Swift/AppKit: macOS shell only
 ```
 
@@ -232,8 +232,8 @@ v1에 포함:
 
 v1에서 제외:
 
-- split panes
-- workspace/session restore
+- split surfaces
+- workspace/surface restore
 - AI
 - cloud/account
 - command block UI
@@ -522,8 +522,8 @@ SSH 관련해서는 두 가지를 구분해야 한다.
 
 1. SSH로 원격 Mac에 접속해서 개발하는 경우:
    - core test와 build command는 가능하다.
-   - GUI/Metal/AppKit 테스트는 실제 macOS GUI session이 필요하다.
-   - bare SSH session만으로는 앱 화면, IME, focus, Metal 렌더링을 충분히 테스트할 수 없다.
+   - GUI/Metal/AppKit 테스트는 실제 macOS GUI 로그인 환경이 필요하다.
+   - SSH-only 환경만으로는 앱 화면, IME, focus, Metal 렌더링을 충분히 테스트할 수 없다.
 
 2. Maru 터미널 안에서 SSH 동작을 테스트하는 경우:
    - 반드시 integration test에 포함해야 한다.

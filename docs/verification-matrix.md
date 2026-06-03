@@ -49,7 +49,7 @@ fixture, golden, trace 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fix
 | PTY 경계 분할 UTF-8 | 구현 전 | `write`가 버퍼 전체를 한 번에 검증해, read 경계에 걸친 multi-byte는 청크째 버려질 수 있다. | 실제 forkpty가 붙으면 CJK/이모지가 read 경계에서 깨진다. | tail 버퍼 기반 증분 디코더로 교체하고, codepoint를 두 write로 쪼개는 fixture를 추가한다. |
 | modifier/application-cursor 키 인코딩 | 구현 전 | `encodeKey`가 modifiers를 읽지 않고 normal-mode 화살표만 낸다. | Ctrl+C→0x03, Alt meta, DECCKM(SS3), CSI-u가 없어 실제 대화형 프로그램 입력이 어긋난다. | C0 control/meta/DECCKM 분기와 modifier 단위 테스트를 추가하고 키 버퍼를 확장한다. |
 | GPU renderer | 구현 전, 환경 의존, 시스템 한계에 가까움 | Metal/WebGPU 렌더러가 아직 없다. 실제 화면 검증은 macOS window server, GPU driver, font stack 영향을 받는다. | 폰트, glyph atlas, frame pacing, dirty redraw 문제를 검증하지 못한다. | headless snapshot과 GUI screenshot artifact를 연결하는 app E2E를 추가한다. |
-| workspace/session restore | 구현 전 | 아직 session model만 초기 구조다. | cwd/env/command/layout restore가 실제 사용자 UX로 보장되지 않는다. | serialized workspace fixture와 restore E2E를 추가한다. |
+| workspace/surface restore | 구현 전 | 아직 surface model만 초기 구조다. | cwd/env/command/layout restore가 실제 사용자 UX로 보장되지 않는다. | serialized workspace fixture와 restore E2E를 추가한다. |
 | Wasm plugin | 구현 전 | 현재 plugin registry는 no-op 구조다. | plugin boundary, 권한, event ABI, 실패 격리를 검증하지 못한다. | plugin hook API가 정해진 뒤 fixture plugin과 sandbox failure test를 추가한다. |
 | global shortcut | 구현 전, 환경 의존 | macOS 전역 핫키 등록과 충돌 검증이 아직 없다. | quick terminal/focus UX가 terminal input과 충돌하지 않는지 증명하지 못한다. | config conflict unit test, resolver test, macOS app smoke test를 추가한다. |
 | trace/replay | 구현 전 | snapshot은 있지만 event trace/replay는 아직 없다. | 실패를 시간순으로 재현하기 어렵다. | terminal input/output event를 domain event로 기록하고 replay test를 추가한다. |

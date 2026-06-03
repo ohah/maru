@@ -32,6 +32,22 @@ VT 파서/state machine을 구현할 때는 아래 명세를 1차 출처로 삼�
 
 오라클은 "정답"이 아니라 명세를 근사하는 second opinion이다. 진짜 기준은 위 명세이고, 오라클은 의견이 갈리는 지점을 드러내는 용도다. 비교 전략은 [오라클 비교 테스트 전략](oracle-testing.md)을 따른다.
 
+## 레퍼런스를 쓰는 방법
+
+허용한다:
+
+- 공개 명세와 platform 문서에서 동작을 유도한다.
+- reference terminal을 실행해 최종 화면, escape 처리 결과, 성능/UX 기준을 비교한다.
+- "core와 renderer를 분리한다", "snapshot을 테스트 산출물로 둔다"처럼 추상적인 책임 경계와 품질 기준을 참고한다.
+
+허용하지 않는다:
+
+- reference source의 자료구조 레이아웃, 함수 분해, iterator/control-flow 구조를 옮긴다.
+- copyleft 레퍼런스(GNOME vte, kitty 등)의 소스를 구현 유도 목적으로 읽는다.
+- renderer/storage/platform interop 구현을 reference source에서 line-by-line으로 포팅한다.
+
+renderer, storage, platform interop는 VT 명세처럼 하나의 공개 표준만으로 설명되지 않을 수 있다. 이 경우 PR은 "public platform 문서에서 유도", "Maru 독립 설계", "동작 비교만 reference 사용" 중 어느 근거인지 설명해야 한다.
+
 | 오라클 | 라이선스 | 받는 법 | 상태 |
 | --- | --- | --- | --- |
 | libvterm | MIT | `brew install libvterm` (또는 배포판 패키지) | ✅ opt-in (`mise run oracle-ext`) |

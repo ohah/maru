@@ -31,7 +31,7 @@ macOS 로컬 shell 1개 surface
 
 목표:
 
-- `TerminalCore`, `PtySession`, `Surface`, `Snapshot`, `Trace/Event`의 최소 public 타입과 책임 경계를 만든다.
+- `TerminalCore`, `PtySession`, `Surface`, `SurfaceRuntime`, `Snapshot`, `Trace/Event`의 최소 public 타입과 책임 경계를 만든다.
 - 각 facade가 몰라야 하는 레이어를 import하지 않게 한다.
 - `KeyBindingResolver`의 최소 타입을 만든다. full global shortcut은 나중에 구현하더라도, app action과 terminal input이 섞이지 않는 경계는 초반에 고정한다.
 
@@ -163,18 +163,20 @@ TDD 방식:
 - job control 전체 호환성.
 - global shortcut.
 
-## 5단계: `Surface`로 PTY와 TerminalCore 연결
+## 5단계: `SurfaceRuntime`으로 PTY와 Surface 연결
 
 목표:
 
 - 하나의 사용 가능한 terminal surface를 만든다.
-- `PTY output event -> Surface -> TerminalCore -> Snapshot` 경로를 완성한다.
+- `PTY output event -> SurfaceRuntime -> Surface -> TerminalCore -> Snapshot` 경로를 완성한다.
+- `Surface`는 `TerminalCore`와 복구 가능한 metadata를 보관하고, live `PtySession` handle은 직접 저장하지 않는다.
+- `SurfaceRuntime`은 app layer에서 `Surface`와 `PtySession`의 live 연결만 관리한다.
 - surface metadata인 title, cwd, env, command, size를 복구 가능한 형태로 보관한다.
 - workspace restore는 구현하지 않더라도 `RestorableSurfaceMetadata` 초안은 만든다.
 
 TDD 방식:
 
-- unit test: PTY output event가 surface의 `TerminalCore`로 전달된다.
+- unit test: PTY output event가 `SurfaceRuntime`을 거쳐 surface의 `TerminalCore`로 전달된다.
 - unit test: surface resize가 core resize와 PTY resize request로 분리되어 전달된다.
 - snapshot test: surface metadata와 terminal state가 같은 artifact에 함께 보인다.
 - metadata test: cwd/env/command/size가 serializable draft model로 round-trip된다.
@@ -185,6 +187,7 @@ TDD 방식:
 - surface는 renderer 좌표나 GPU resource를 모른다.
 - workspace 저장 포맷을 아직 확정하지 않아도, 저장 가능한 metadata 경계는 존재한다.
 - live PTY handle은 metadata에 들어가지 않는다.
+- live PTY handle은 `Surface`가 아니라 `SurfaceRuntime` 책임이다.
 - env 저장 정책은 최소 초안이라도 문서화한다.
 
 아직 하지 않는다:
@@ -202,7 +205,7 @@ TDD 방식:
 
 TDD 방식:
 
-- E2E fixture: controlled command -> PTY -> Surface -> TerminalCore -> screen snapshot.
+- E2E fixture: controlled command -> PTY -> SurfaceRuntime -> Surface -> TerminalCore -> screen snapshot.
 - failure artifact: raw output, decoded screen, structured snapshot.
 - replay 준비: event 이름과 저장 위치를 먼저 맞춘다.
 - opt-in smoke: interactive shell -> snapshot까지 crash 없이 도달하는지 확인한다.
@@ -283,7 +286,7 @@ TDD 방식:
 - 프로젝트별 workspace 저장.
 - 탭/분할 layout restore.
 - 각 surface의 cwd/env/command restore.
-- 최근 작업 세션 빠른 복구.
+- 최근 작업 상태 빠른 복구.
 - repo별 기본 레이아웃과 scratch terminal 정책.
 
 TDD 방식:
@@ -314,7 +317,7 @@ TDD 방식:
 완료 기준:
 
 - plugin ABI와 권한 모델은 구현 전에 사용자와 별도 논의한다.
-- plugin 실패가 surface/session 전체를 죽이지 않는다.
+- plugin 실패가 surface/window 전체를 죽이지 않는다.
 
 ## 현재 문서에서 정리해야 할 점
 

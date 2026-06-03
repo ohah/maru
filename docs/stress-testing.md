@@ -29,5 +29,5 @@
 - parser: ANSI/OSC/DCS fixture corpus 반복 입력
 - PTY: 대량 stdout, resize storm, tab close 중 process cleanup
 - renderer: 큰 grid, dirty region storm, cursor blink와 redraw 압박
-- workspace: 여러 tab/session restore 반복
+- workspace: 여러 tab/surface restore 반복
 - plugin: event queue flood, timeout, 권한 거부, 실패 격리

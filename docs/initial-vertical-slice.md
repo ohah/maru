@@ -55,7 +55,7 @@ GUI가 붙기 전에는 headless 경로가 첫 성공 기준이다. macOS 창과
 1. `docs/facade-contracts.md`의 계약을 먼저 지킨다.
 2. trace/snapshot 산출물을 먼저 정의한다.
 3. macOS `PtySession`을 최소 기능으로 붙인다.
-4. `Surface`가 `PtySession`과 `TerminalCore`를 연결한다.
+4. `SurfaceRuntime`이 `PtySession`과 `Surface`를 연결한다.
 5. headless E2E로 shell output이 snapshot까지 도달하는지 검증한다.
 6. 같은 snapshot 계약을 renderer와 macOS app host가 소비하게 만든다.
 

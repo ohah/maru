@@ -9,10 +9,14 @@ run = "zig build"
 description = "Run Zig tests"
 run = "zig build test"
 
+[tasks.e2e]
+description = "Run headless E2E tests"
+run = "zig build test-e2e"
+
 [tasks.fmt]
 description = "Format Zig sources"
-run = "zig fmt build.zig src"
+run = "zig fmt build.zig src tests"
 
 [tasks.check]
 description = "Format, test, and build"
-depends = ["fmt", "test", "build"]
+depends = ["fmt", "test", "e2e", "build"]

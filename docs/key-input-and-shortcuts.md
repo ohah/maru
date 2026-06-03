@@ -51,10 +51,35 @@ terminal_key_overrides:
 
 ## 충돌 규칙
 
+- global shortcut은 정확히 등록한 key chord만 소비한다. 예를 들어 `Ctrl+Cmd+,`를 등록해도 `Ctrl+B`, `Ctrl+C`, `Esc`에는 영향을 주지 않는다.
 - global shortcut과 terminal input이 같은 조합이면 global shortcut이 이긴다. 전역으로 등록한 키는 사용자가 앱 밖에서도 Maru 명령으로 쓰겠다고 선택한 것이기 때문이다.
 - app keybinding과 terminal input override가 같은 조합이면 config validation에서 오류로 보고한다.
 - OS나 다른 앱이 이미 선점한 global shortcut은 등록 실패로 보고하고, 조용히 무시하지 않는다.
 - 사용자가 명시적으로 `send_text` 또는 `send_escape_sequence`를 설정한 조합은 app action과 동시에 사용할 수 없다.
+
+## 위험한 터미널 조합
+
+Maru는 기본 global shortcut이나 app keybinding에 전통적인 terminal 조합을 사용하지 않는다.
+
+대표적으로 피해야 하는 조합:
+
+```text
+Ctrl+B   tmux prefix로 자주 사용된다.
+Ctrl+C   foreground process interrupt다.
+Ctrl+D   EOF/logout으로 쓰인다.
+Ctrl+R   shell history search로 쓰인다.
+Ctrl+Z   suspend로 쓰인다.
+Esc      vim, readline, shell mode 전환에 자주 쓰인다.
+```
+
+사용자가 이런 조합을 global shortcut이나 app keybinding으로 직접 설정할 수는 있다. 다만 이 경우 shell, tmux, vim으로 내려가야 할 입력을 Maru가 소비하게 되므로 config validation은 경고를 보여야 한다.
+
+오류와 경고의 기준:
+
+- 같은 key chord가 app action과 terminal override에 동시에 있으면 오류다.
+- OS 전역 등록에 실패한 global shortcut은 오류다.
+- `Ctrl+B`, `Ctrl+C`, `Ctrl+D`, `Ctrl+R`, `Ctrl+Z`, `Esc` 같은 terminal 관용 조합을 app/global shortcut으로 등록하면 경고다.
+- 사용자가 경고를 명시적으로 허용하지 않으면 기본 설정 파일 생성이나 GUI 설정 화면에서 저장하지 않는다.
 
 ## v0 범위
 
@@ -67,7 +92,9 @@ v0에서는 글로벌 핫키를 구현하지 않는다. 지금은 다음 경계�
 ## 검증 계획
 
 - config parser test: 같은 key 조합이 app action과 terminal override에 동시에 있으면 실패한다.
+- config validation test: terminal 관용 조합을 app/global shortcut으로 등록하면 경고한다.
 - resolver unit test: app action으로 소비된 key는 terminal input으로 내려가지 않는다.
+- resolver unit test: 등록하지 않은 `Ctrl+B` 같은 조합은 global shortcut 때문에 소비되지 않는다.
 - PTY E2E: terminal input으로 분류된 key만 shell에 전달된다.
 - macOS app E2E: global shortcut registration 실패/성공을 artifact로 남긴다.
 

@@ -1,0 +1,18 @@
+[tools]
+zig = "0.16.0"
+
+[tasks.build]
+description = "Build Maru"
+run = "zig build"
+
+[tasks.test]
+description = "Run Zig tests"
+run = "zig build test"
+
+[tasks.fmt]
+description = "Format Zig sources"
+run = "zig fmt build.zig src"
+
+[tasks.check]
+description = "Format, test, and build"
+depends = ["fmt", "test", "build"]

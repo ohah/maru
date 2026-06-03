@@ -74,6 +74,17 @@ fn compareCase(case: Case) !void {
     const actual = try core.dumpUtf8(allocator);
     defer allocator.free(actual);
 
+    const snapshot = try maru.observability.snapshot.renderTerminalSnapshot(allocator, core.snapshot());
+    defer allocator.free(snapshot);
+
+    const snapshot_path = try std.fmt.allocPrint(
+        allocator,
+        "tests/artifacts/oracle/{s}/maru.snapshot.txt",
+        .{case.name},
+    );
+    defer allocator.free(snapshot_path);
+    try artifacts.writeText(snapshot_path, snapshot);
+
     const actual_path = try std.fmt.allocPrint(
         allocator,
         "tests/artifacts/oracle/{s}/maru.actual.txt",

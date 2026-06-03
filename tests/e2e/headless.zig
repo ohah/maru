@@ -40,6 +40,14 @@ test "headless E2E feeds real command stdout into TerminalCore" {
         screen,
     );
 
+    const snapshot = try maru.observability.snapshot.renderTerminalSnapshot(allocator, core.snapshot());
+    defer allocator.free(snapshot);
+
+    try artifacts.writeText(
+        "tests/artifacts/e2e/headless/hello-maru.snapshot.txt",
+        snapshot,
+    );
+
     try artifacts.writeText(
         "tests/artifacts/e2e/headless/hello-maru.stdout.txt",
         result.stdout,

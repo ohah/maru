@@ -86,6 +86,8 @@
 
 ## `SurfaceRuntime`
 
+구체적인 초기 API는 [SurfaceRuntime API 계약](surface-runtime-api.md)을 따른다.
+
 책임:
 
 - app layer에서 `Surface`와 `PtySession`의 live 연결을 관리한다.
@@ -127,6 +129,8 @@
 
 ## `Snapshot`
 
+schema version 유지/증가 기준은 [Snapshot Versioning](snapshot-versioning.md)을 따른다.
+
 책임:
 
 - test, debug log, replay, future inspector가 같은 terminal 상태를 보게 한다.
@@ -146,6 +150,8 @@
 - snapshot text에 schema version이 포함된다.
 
 ## `Trace/Event`
+
+trace schema와 replay 동작은 [Trace와 Replay](trace-replay.md)를 따른다.
 
 책임:
 

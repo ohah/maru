@@ -17,7 +17,7 @@ Maru는 IDE 터미널이나 Warp식 워크플로우 제품이 아니라, 가볍�
 - 설정과 키바인딩 커스텀이 쉬운 구조
 - 나중에 WASM 플러그인으로 확장 가능한 구조
 - macOS 우선 개발
-- 장기적으로 Windows, Linux, WebGPU 타깃을 고려할 수 있는 코어 구조
+- 장기적으로 Windows, Linux, browser/WebGPU 타깃을 고려할 수 있는 코어 구조
 
 처음부터 하지 않을 것:
 
@@ -47,7 +47,7 @@ Maru    = 더 작고 단순한 네이티브 셸 + 쉬운 커스텀
 코어:      Zig
 렌더러:    Metal
 터미널 코어: Maru 자체 clean-room VT core
-장기 웹:   WebGPU only
+장기 웹:   Wasm + WebGPU backend, native 초기 renderer와 별도
 ```
 
 SwiftUI 레이아웃을 핵심으로 삼는 것이 아니다. Swift/AppKit은 macOS 앱으로서 필요한 얇은 호스트 레이어만 맡는다.
@@ -135,7 +135,7 @@ WindowBackend
 
 RendererBackend
   - macOS: Metal
-  - Web: WebGPU
+  - Web: WebGPU later
   - Windows: WebGPU native 또는 D3D12
   - Linux: Vulkan/WebGPU/OpenGL later
 
@@ -156,7 +156,7 @@ Windows와 Linux를 지금 구현하지는 않는다. 다만 `TerminalCore`, `Pt
 - 이미 Zig로 고성능 번들러를 만든 경험이 있다.
 - Ghostty가 Zig라서 구조를 직접 읽고 참고하기 쉽다.
 - terminal buffer, glyph atlas, allocator, C/ObjC/Metal interop에 Zig가 잘 맞는다.
-- 코어를 WASM/WebGPU 방향으로 가져갈 여지도 있다.
+- `RenderSnapshot -> DrawList` 경계를 유지하면 장기 Wasm/WebGPU backend를 추가할 여지도 있다.
 
 다만 모든 것을 순수 Zig로 밀어붙이는 것은 피한다. macOS 앱 호스트까지 Zig로 직접 만들면 터미널 개발이 아니라 AppKit 바인딩 개발이 된다.
 
@@ -395,7 +395,7 @@ Maru 차별화:
 - tiling WM 친화적인 탭 동작
 - action/config-first 커스텀
 - 장기 WASM plugin 경로
-- 장기 웹은 WebGPU only
+- 장기 web target은 Wasm + WebGPU backend로 별도 검토
 - 적은 기능, 강한 기본값
 
 목표는 Ghostty 엔진을 직접 이기는 것이 아니다.

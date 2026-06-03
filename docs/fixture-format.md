@@ -76,6 +76,8 @@ tests/artifacts/**/maru.snapshot.txt
 
 Snapshot artifact는 기본적으로 로컬 산출물이다. 회귀 테스트 fixture로 승격할 때는 민감정보가 없는지 확인한 뒤 별도 PR에서 추가한다.
 
+snapshot schema version을 언제 유지하고 언제 올릴지는 [Snapshot Versioning](snapshot-versioning.md)을 따른다.
+
 ## Trace fixture 초안
 
 위치:
@@ -94,6 +96,8 @@ process-exit code
 ```
 
 이 어휘를 바꾸거나 새 event를 추가할 때는, 직렬화 구현 전이라도 먼저 `docs/facade-contracts.md`의 `Trace/Event` 계약을 갱신한 뒤 진행한다.
+
+trace가 어떤 기능이고 replay가 어떻게 동작하는지는 [Trace와 Replay](trace-replay.md)를 따른다.
 
 ## Oracle 기록 흐름
 

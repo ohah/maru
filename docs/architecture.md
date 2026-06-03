@@ -17,7 +17,7 @@ Ghostty 등 레퍼런스는 다음 용도로만 사용한다.
 
 ## 1차 모듈 경계
 
-첫 구현 목표는 [초기 세로 슬라이스](initial-vertical-slice.md)를 따른다. 각 facade가 맡는 책임과 금지된 의존성은 [Facade 계약](facade-contracts.md)을 단일 출처로 둔다. 키 입력, app shortcut, global shortcut의 충돌 규칙은 [키 입력과 단축키 경계](key-input-and-shortcuts.md)를 따른다.
+첫 구현 목표는 [초기 세로 슬라이스](initial-vertical-slice.md)를 따른다. 각 facade가 맡는 책임과 금지된 의존성은 [Facade 계약](facade-contracts.md)을 단일 출처로 둔다. 실행 중 `Surface`와 `PtySession` 연결은 [SurfaceRuntime API 계약](surface-runtime-api.md)을 따른다. 키 입력, app shortcut, global shortcut의 충돌 규칙은 [키 입력과 단축키 경계](key-input-and-shortcuts.md)를 따른다.
 
 ```text
 src/maru.zig
@@ -52,7 +52,7 @@ flowchart TD
     Surface --> TerminalCore[TerminalCore Facade<br/>parser / screen state / cursor / scrollback]
     TerminalCore --> Snapshot[RenderSnapshot / DebugSnapshot]
 
-    Snapshot --> Renderer[Renderer Facade<br/>Metal now, WebGPU later]
+    Snapshot --> Renderer[Renderer Facade<br/>Metal-first, DrawList 계약<br/>WebGPU later]
     Renderer --> Screen[화면]
 
     Snapshot --> Artifacts[tests/artifacts<br/>screen / snapshot / trace]
@@ -168,10 +168,12 @@ PTY/input/parser/terminal/renderer/workspace
 
 1. `DebugSnapshot`: cursor, grid, mode, dirty region, surface/workspace 상태를 설명한다.
 2. `TraceRecorder`: raw bytes, key input, resize, parser event를 재생 가능한 이벤트로 저장한다.
-3. `ReplayRunner`: 저장된 trace를 headless test에서 다시 실행한다.
+3. `ReplayRunner`: 저장된 trace를 headless test에서 다시 실행한다. 세부 schema와 replay 의미는 [Trace와 Replay](trace-replay.md)를 따른다.
 4. `FailureArtifact`: 테스트 실패 시 trace, snapshot, config를 로컬 산출물로 남긴다.
 
 릴리스 빌드에서는 이 관측 기능이 꺼졌을 때 hot path에 의미 있는 비용을 남기지 않아야 한다. trace와 artifact는 기본적으로 로컬 전용이며, 회귀 테스트로 추가할 때만 민감정보를 제거한 fixture를 git에 넣는다.
+
+렌더러 backend 선택은 [렌더러 전략](renderer-strategy.md)을 따른다. 현재 추천은 macOS Metal-first 구현과 backend-neutral `DrawList` 계약이다.
 
 ## 메모리 전략
 

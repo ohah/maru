@@ -1,0 +1,38 @@
+name: PR metadata
+
+# 필수 PR 메타데이터(라벨 1개 이상 + assignee=ohah)를 강제한다.
+# 규칙의 단일 출처는 docs/pr-checklist.md다. 무거운 check/oracle 잡이 라벨 변경마다
+# 다시 돌지 않도록 별도 워크플로우로 분리하고, 메타데이터가 바뀔 때만 트리거한다.
+on:
+  pull_request:
+    types: [opened, reopened, labeled, unlabeled, assigned, unassigned]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  require-label-and-assignee:
+    name: require label and assignee=ohah
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR has a label and is assigned to ohah
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          labels=$(gh pr view "$PR" --repo "$REPO" --json labels -q '.labels[].name')
+          assignees=$(gh pr view "$PR" --repo "$REPO" --json assignees -q '.assignees[].login')
+          fail=0
+          if [ -z "$labels" ]; then
+            echo "::error::PR must have at least one label (see docs/pr-checklist.md)"
+            fail=1
+          fi
+          if ! printf '%s\n' "$assignees" | grep -qx 'ohah'; then
+            echo "::error::PR must be assigned to ohah (gh pr edit $PR --add-assignee ohah)"
+            fail=1
+          fi
+          if [ "$fail" -eq 0 ]; then
+            echo "ok: labels=[$(echo "$labels" | tr '\n' ' ')] assignees=[$(echo "$assignees" | tr '\n' ' ')]"
+          fi
+          exit "$fail"

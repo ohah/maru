@@ -45,6 +45,7 @@ src/
 ```text
 tests/
   unit/                 facade 밖에 둘 단위 테스트
+  oracle/               recorded reference terminal snapshot 비교
   integration/
     pty/                forkpty, process, resize propagation
     ssh/                ssh localhost/통제된 원격 환경 smoke

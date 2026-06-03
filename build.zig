@@ -59,4 +59,20 @@ pub fn build(b: *std.Build) void {
 
     const e2e_step = b.step("test-e2e", "Run headless E2E tests");
     e2e_step.dependOn(&run_e2e_tests.step);
+
+    const oracle_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/oracle/recorded.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+            },
+        }),
+    });
+    const run_oracle_tests = b.addRunArtifact(oracle_tests);
+    run_oracle_tests.setCwd(b.path("."));
+
+    const oracle_step = b.step("test-oracle", "Compare Maru snapshots against recorded terminal oracles");
+    oracle_step.dependOn(&run_oracle_tests.step);
 }

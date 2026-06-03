@@ -103,7 +103,13 @@ pub const TerminalCore = struct {
     fn writeTab(self: *TerminalCore) void {
         const next_tab = @min(self.size.cols, ((self.cursor.col / 8) + 1) * 8);
         while (self.cursor.col < next_tab) {
+            const before = self.cursor.col;
             self.putCell(' ');
+            // The current MVP core does not implement automatic line wrapping
+            // yet. When the cursor is already at the last column, putCell must
+            // keep it there; this guard prevents tab expansion from looping
+            // forever until full wrap semantics are designed and tested.
+            if (self.cursor.col == before) break;
         }
     }
 
@@ -187,4 +193,18 @@ test "terminal core writes process-like text into cells" {
     try std.testing.expect(std.mem.indexOf(u8, text, "hello") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "maru") != null);
     try std.testing.expectEqual(@as(u16, 1), core.snapshot().cursor.row);
+}
+
+test "terminal core tab expansion stops at the row edge" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+
+    // This test protects the root cause of a common terminal-core failure:
+    // cursor movement that cannot advance must not leave a control sequence in
+    // an infinite loop. Full wrap behavior will be specified separately.
+    try core.write("a\t");
+
+    const snapshot = core.snapshot();
+    try std.testing.expectEqual(@as(u16, 0), snapshot.cursor.row);
+    try std.testing.expectEqual(@as(u16, 7), snapshot.cursor.col);
 }

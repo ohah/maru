@@ -22,6 +22,22 @@
 - `kitty`: 고급 프로토콜과 그래픽 기능
 - `WezTerm`: mux, font, 복잡한 터미널 기능
 
+### 레퍼런스 라이선스와 허용 상호작용
+
+레퍼런스마다 라이선스가 다르므로 허용되는 상호작용도 다르다. 어떤 레퍼런스의 소스도 Maru에 복사하지 않으며, 구현은 공개 명세(ECMA-48, vt100.net DEC ANSI state machine, xterm ctlseqs)에서 유도한다.
+
+| 레퍼런스 | 라이선스 | 허용 상호작용 |
+| --- | --- | --- |
+| xterm | MIT 계열 | 공개 명세/동작 기준점. 소스 복사 금지. |
+| libvterm | MIT | 동작 비교 오라클. 소스 복사 금지. |
+| Alacritty | Apache-2.0 | 구조 참고/동작 비교. 소스 복사 금지. |
+| GNOME vte | LGPL-2.1+ (copyleft) | 최종 화면 동작 비교(오라클)로만. 구현 유도를 위한 소스 열람 금지. |
+| Ghostty | MIT | 구조 레퍼런스/동작 비교. 소스 복사 금지. |
+| kitty | GPL-3.0 (copyleft) | 프로토콜 명세 참고만. 구현 유도를 위한 소스 열람 금지. |
+| WezTerm | MIT | 기능 참고/동작 비교. 소스 복사 금지. |
+
+copyleft(LGPL/GPL) 레퍼런스는 read-only 동작 오라클로만 쓰고, 구현을 유도하려고 소스를 읽지 않는다. 규칙 전문은 [필수 프로젝트 규칙](project-rules.md)을 따른다.
+
 비교 오라클이 아닌 것:
 
 - `tmux`, `vim`, `less`, `htop`, `ssh`는 터미널 안에서 실행되는 workload다.
@@ -44,25 +60,43 @@ ANSI fixture
 
 이 구조를 먼저 만드는 이유는 CI와 로컬 개발환경이 `xterm`, `libvterm`, `alacritty`, `ghostty` 설치 여부에 묶이지 않게 하기 위해서다.
 
+현재 한계를 분명히 한다. 지금 커밋된 fixture에는 아직 escape sequence(`\e`)가 하나도 없고, core에도 VT parser가 없다. 따라서 이 단계의 oracle은 ANSI/VT 적합성이 아니라 평문과 일부 control(CR/LF/tab/backspace) 배치, 그리고 한 줄 스크롤만 검증한다. golden 파일은 사람이 손으로 기록한 기대값이며 실제 reference terminal에서 캡처한 것이 아니다. `tests/fixtures/ansi`, golden 경로 `tests/golden/screen/xterm/`, 케이스 라벨의 `xterm` 표기는 "이런 출처를 기준으로 삼겠다"는 의도 표시일 뿐, 현재 자동 검증된 호환성을 뜻하지 않는다. 다만 아래의 외부 오라클(`mise run oracle-ext`, opt-in)이 이 golden을 실제 libvterm 출력과 대조해 검증한다.
+
 fixture와 golden 파일의 저장 형식은 [Fixture와 Oracle 포맷](fixture-format.md)을 따른다.
 
-## 나중에 추가할 것
+## 외부 오라클 (opt-in, 구현됨)
 
-실제 오라클 실행기는 선택 기능으로 붙인다.
+실제 reference VT 엔진과 비교하는 외부 오라클은 opt-in으로만 실행하며, 기본 경로(`mise run check`)에는 넣지 않아 외부 의존성 없이도 개발할 수 있다. 현재 세 reference를 지원한다.
+
+| reference | 테스트 | 명령 | 받는 법 |
+| --- | --- | --- | --- |
+| libvterm | `tests/oracle/external.zig` | `mise run oracle-ext` | `brew install libvterm` |
+| Ghostty libghostty-vt | `tests/oracle/external_ghostty.zig` | `mise run oracle-ghostty` | clone 후 `references/ghostty`에서 `mise exec zig@0.15.2 -- zig build -Demit-lib-vt=true` |
+| Alacritty alacritty_terminal | `tests/oracle/external_alacritty.zig` | `mise run oracle-alacritty` | `tests/oracle/alacritty-dumper`에서 `cargo build --release` |
+
+각 reference에 동일한 fixture를 먹여 최종 화면을 덤프하고 커밋된 golden과 비교한다.
 
 ```text
-reference terminal/parser 실행
--> snapshot capture
--> sanitized recorded oracle 갱신
--> Maru 결과와 비교
+ANSI fixture
+-> reference(libvterm / libghostty-vt / alacritty_terminal) 실행
+-> 최종 screen 덤프
+-> 커밋된 golden과 비교
 ```
 
-외부 오라클 실행기를 추가할 때는 사용자와 먼저 논의한다. 새 바이너리나 라이브러리를 필수 테스트 의존성으로 만드는 것은 의존성 전략에 영향을 주기 때문이다.
+이 구조로 맞물린다.
+
+- `recorded.zig`(기본 oracle): Maru == golden
+- `external*.zig`(opt-in oracle): golden == libvterm, golden == Ghostty, golden == Alacritty
+
+따라서 Maru == 세 reference가 transitively 성립한다. 세 reference가 서로 다른 구현이므로, golden이 한쪽 구현의 특이동작을 따라가지 않았는지도 교차 확인된다. 앞으로 escape sequence fixture가 늘어날 때 golden을 손으로 적지 않고 reference로 검증/생성할 수 있다.
+
+연동 방식은 reference마다 다르다. libvterm과 Ghostty libghostty-vt는 C 라이브러리라 in-process로 링크하되, bitfield/opaque 핸들 때문에 Zig translate-c로 직접 다루기 까다로워 셀 접근용 얇은 C shim을 둔다(`tests/oracle/vterm_shim.c`, `tests/oracle/ghostty_shim.c`). Alacritty `alacritty_terminal`은 Rust 크레이트라 작은 dumper 바이너리(`tests/oracle/alacritty-dumper`)로 빌드해 subprocess로 호출한다. 새 reference를 **필수**(기본 `check`) 의존성으로 승격할 때는 의존성 전략에 영향을 주므로 사용자와 먼저 논의한다.
 
 ## 명령
 
 ```sh
-mise run oracle
+mise run oracle      # 기본: Maru vs 기록된 golden (check에 포함)
+mise run oracle-ext  # opt-in: golden vs libvterm (check에는 미포함, libvterm 필요)
 ```
 
-`mise run check`에도 포함된다.
+`mise run oracle`는 `mise run check`에도 포함된다. `mise run oracle-ext`는 opt-in이라 `check`에 넣지 않는다.

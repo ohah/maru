@@ -26,6 +26,7 @@
 - [테스트 원칙](docs/architecture.md#테스트-원칙)
 - [관측 가능성 원칙](docs/architecture.md#관측-가능성-원칙)
 - [오라클 비교 테스트 전략](docs/oracle-testing.md)
+- [레퍼런스와 공개 명세](docs/references.md)
 - [Fixture와 Oracle 포맷](docs/fixture-format.md)
 - [키 입력과 단축키 경계](docs/key-input-and-shortcuts.md)
 - [메모리 전략](docs/architecture.md#메모리-전략)

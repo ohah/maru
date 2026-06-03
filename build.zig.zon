@@ -10,6 +10,7 @@
         "src",
         "tests",
         "docs",
+        "LICENSE",
         "terminal-strategy.md",
         "AGENTS.md",
         ".mise.toml",

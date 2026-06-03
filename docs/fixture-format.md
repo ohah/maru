@@ -84,7 +84,7 @@ Snapshot artifact는 기본적으로 로컬 산출물이다. 회귀 테스트 fi
 tests/fixtures/traces/*.trace.txt
 ```
 
-초기 포맷은 아직 구현 전이다. 다만 다음 event 종류를 기준으로 설계한다.
+직렬화 포맷의 구현은 나중이지만, 최소 event 어휘는 지금 고정한다. step 4(PtySession) 이후 코드가 기능마다 ad-hoc trace 포맷을 만들지 않도록, 다음 네 가지 event 이름과 인자를 확정한다.
 
 ```text
 output escaped-bytes
@@ -93,7 +93,7 @@ resize cols rows
 process-exit code
 ```
 
-Trace 포맷을 실제로 구현하기 전에는 `docs/facade-contracts.md`의 `Trace/Event` 계약을 먼저 갱신한다.
+이 어휘를 바꾸거나 새 event를 추가할 때는, 직렬화 구현 전이라도 먼저 `docs/facade-contracts.md`의 `Trace/Event` 계약을 갱신한 뒤 진행한다.
 
 ## Oracle 기록 흐름
 

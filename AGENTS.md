@@ -11,6 +11,7 @@
 - [검증 매트릭스](docs/verification-matrix.md)
 - [스트레스 테스트 전략](docs/stress-testing.md)
 - [성능 예산](docs/performance-budget.md)
+- [실제 구현 계획](docs/implementation-plan.md)
 - [v0 세로 슬라이스](docs/v0-vertical-slice.md)
 - [Facade 계약](docs/facade-contracts.md)
 - [Fixture와 Oracle 포맷](docs/fixture-format.md)
@@ -19,6 +20,7 @@
 ## 설계 문서
 
 - [초기 아키텍처](docs/architecture.md)
+- [실제 구현 계획](docs/implementation-plan.md)
 - [v0 세로 슬라이스](docs/v0-vertical-slice.md)
 - [Facade 계약](docs/facade-contracts.md)
 - [테스트 원칙](docs/architecture.md#테스트-원칙)

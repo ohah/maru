@@ -10,6 +10,14 @@ Maru에서 작업하는 모든 에이전트와 개발자는 이 규칙을 따른
 - Maru 터미널 코어의 "clean-room"은 공개 명세 기반 독립 재구현을 뜻한다. 구현은 ECMA-48, vt100.net DEC ANSI state machine, xterm ctlseqs 같은 공개 명세에서 유도하며, 레퍼런스의 코드 표현(자료구조 레이아웃, 함수/이터레이터 구조)을 그대로 옮기지 않는다. 레퍼런스별 허용 상호작용은 [오라클 비교 테스트 전략](oracle-testing.md#레퍼런스-라이선스와-허용-상호작용)을 따른다.
 - 터미널 코어 API는 Maru 내부 facade 뒤에 둔다.
 - `main`에 직접 푸시하지 않는다. 항상 브랜치와 PR을 사용한다.
+- 커밋 메시지는 conventional-commit prefix(`feat`/`fix`/`docs`/`test`/`refactor`/`build`/`ci`/`chore`)를 쓴다.
+- 브랜치 이름은 `type/kebab-설명` 형식을 쓴다(예: `refactor/surface-rename`).
+
+## 의존성
+
+- 런타임 의존성(`build.zig.zon`의 `dependencies`)은 기본 0으로 둔다. 새 런타임 의존성을 추가하려면 먼저 사용자와 논의한다.
+- dev/test/CI 의존성(외부 오라클의 libvterm, Ghostty libghostty-vt, Alacritty alacritty_terminal 등)은 opt-in으로만 쓰고 기본 `mise run check` 경로에 넣지 않는다.
+- 외부 reference를 추가하거나 필수 의존성으로 승격하는 규칙은 [레퍼런스와 공개 명세](references.md)·[오라클 비교 테스트 전략](oracle-testing.md)을 단일 출처로 둔다.
 
 ## 문서와 설명
 

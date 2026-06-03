@@ -26,16 +26,22 @@
 
 ## 아직 완전 자동 검증이 아닌 영역
 
-| 영역 | 현재 한계 | 손해 | 예정 검증 경로 |
-| --- | --- | --- | --- |
-| 실제 외부 오라클 실행 | `xterm`, `libvterm`, `Alacritty`, Ghostty를 테스트 중 직접 실행하지 않는다. | recorded golden이 틀리면 Maru도 틀린 정답을 따라갈 수 있다. | 선택형 oracle runner를 추가하고, sanitized snapshot 갱신 흐름을 만든다. 새 필수 의존성은 사용자와 먼저 논의한다. |
-| PTY/forkpty | 아직 `PTY` facade만 있고 실제 macOS PTY 연결은 없다. | shell, job control, resize, signal, interactive input 문제를 검증하지 못한다. | `tests/integration/pty/`에서 macOS PTY smoke test를 추가한다. |
-| VT parser | 현재 core는 UTF-8 텍스트와 일부 control만 처리한다. | ANSI 색상, cursor movement, alternate screen, mouse mode 같은 터미널 핵심 호환성을 검증하지 못한다. | 작은 ANSI fixture를 TDD로 추가하고 oracle snapshot을 함께 늘린다. |
-| GPU renderer | Metal/WebGPU 렌더러가 아직 없다. | 폰트, glyph atlas, frame pacing, dirty redraw 문제를 검증하지 못한다. | headless snapshot과 GUI screenshot artifact를 연결하는 app E2E를 추가한다. |
-| workspace/session restore | 아직 session model만 초기 구조다. | cwd/env/command/layout restore가 실제 사용자 UX로 보장되지 않는다. | serialized workspace fixture와 restore E2E를 추가한다. |
-| Wasm plugin | 현재 plugin registry는 no-op 구조다. | plugin boundary, 권한, event ABI, 실패 격리를 검증하지 못한다. | plugin hook API가 정해진 뒤 fixture plugin과 sandbox failure test를 추가한다. |
-| trace/replay | snapshot은 있지만 event trace/replay는 아직 없다. | 실패를 시간순으로 재현하기 어렵다. | terminal input/output event를 domain event로 기록하고 replay test를 추가한다. |
-| SSH workload | SSH 전용 integration은 아직 실행하지 않는다. | 원격 shell, latency, locale, terminal mode 차이를 검증하지 못한다. | 로컬 테스트 서버나 opt-in 환경변수 기반 SSH smoke test를 추가한다. |
+불가 이유는 다음 의미로 쓴다.
+
+- `구현 전`: 기능이나 테스트 러너가 아직 없어서 못 검증한다. 만들면 자동화할 수 있다.
+- `환경 의존`: 외부 바이너리, SSH 서버, macOS window server, GPU driver, font stack처럼 실행 환경에 따라 결과가 달라질 수 있다.
+- `시스템 한계에 가까움`: 순수 headless 테스트만으로는 실제 화면이나 하드웨어 동작을 완전히 증명하기 어렵다. 대신 내부 snapshot, screenshot, 수동 산출물을 함께 남긴다.
+
+| 영역 | 불가 이유 | 현재 한계 | 손해 | 예정 검증 경로 |
+| --- | --- | --- | --- | --- |
+| 실제 외부 오라클 실행 | 구현 전, 환경 의존 | `xterm`, `libvterm`, `Alacritty`, Ghostty를 테스트 중 직접 실행하지 않는다. | recorded golden이 틀리면 Maru도 틀린 정답을 따라갈 수 있다. | 선택형 oracle runner를 추가하고, sanitized snapshot 갱신 흐름을 만든다. 새 필수 의존성은 사용자와 먼저 논의한다. |
+| PTY/forkpty | 구현 전 | 아직 `PTY` facade만 있고 실제 macOS PTY 연결은 없다. | shell, job control, resize, signal, interactive input 문제를 검증하지 못한다. | `tests/integration/pty/`에서 macOS PTY smoke test를 추가한다. |
+| VT parser | 구현 전 | 현재 core는 UTF-8 텍스트와 일부 control만 처리한다. | ANSI 색상, cursor movement, alternate screen, mouse mode 같은 터미널 핵심 호환성을 검증하지 못한다. | 작은 ANSI fixture를 TDD로 추가하고 oracle snapshot을 함께 늘린다. |
+| GPU renderer | 구현 전, 환경 의존, 시스템 한계에 가까움 | Metal/WebGPU 렌더러가 아직 없다. 실제 화면 검증은 macOS window server, GPU driver, font stack 영향을 받는다. | 폰트, glyph atlas, frame pacing, dirty redraw 문제를 검증하지 못한다. | headless snapshot과 GUI screenshot artifact를 연결하는 app E2E를 추가한다. |
+| workspace/session restore | 구현 전 | 아직 session model만 초기 구조다. | cwd/env/command/layout restore가 실제 사용자 UX로 보장되지 않는다. | serialized workspace fixture와 restore E2E를 추가한다. |
+| Wasm plugin | 구현 전 | 현재 plugin registry는 no-op 구조다. | plugin boundary, 권한, event ABI, 실패 격리를 검증하지 못한다. | plugin hook API가 정해진 뒤 fixture plugin과 sandbox failure test를 추가한다. |
+| trace/replay | 구현 전 | snapshot은 있지만 event trace/replay는 아직 없다. | 실패를 시간순으로 재현하기 어렵다. | terminal input/output event를 domain event로 기록하고 replay test를 추가한다. |
+| SSH workload | 구현 전, 환경 의존 | SSH 전용 integration은 아직 실행하지 않는다. 외부 네트워크나 특정 원격 서버에 묶이지 않는 방식이 필요하다. | 원격 shell, latency, locale, terminal mode 차이를 검증하지 못한다. | 로컬 테스트 서버나 opt-in 환경변수 기반 SSH smoke test를 추가한다. |
 
 ## PR마다 확인할 질문
 

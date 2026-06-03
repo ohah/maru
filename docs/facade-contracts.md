@@ -77,10 +77,12 @@
 
 초기 테스트:
 
-- PTY output event가 surface의 `TerminalCore`로 전달된다.
-- surface size 변경이 core resize와 PTY resize request로 분리되어 전달된다.
+- Surface가 output bytes를 자신의 `TerminalCore.write`로 넘긴다(`PtySession` 없이).
+- Surface size 변경이 `TerminalCore.resize`로 반영된다.
 - `RestorableSurfaceMetadata`에는 cwd/env/command/size 같은 선언적 상태만 들어가고 live PTY handle은 들어가지 않는다.
 - env 저장은 allowlist 또는 redaction 경계를 가져야 한다.
+
+(PTY output routing과 PTY resize 분리는 `SurfaceRuntime` 책임이며 아래에서 테스트한다.)
 
 ## `SurfaceRuntime`
 
@@ -109,7 +111,7 @@
 
 - 프로젝트별 workspace 식별자와 root path를 관리한다.
 - 탭/분할 layout restore에 필요한 선언적 상태를 저장한다.
-- 최근 작업 상태 목록을 관리한다.
+- 최근 workspace 목록을 관리한다.
 - repo별 기본 레이아웃과 scratch terminal 정책을 나중에 수용한다.
 
 몰라야 하는 것:

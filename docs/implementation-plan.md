@@ -177,7 +177,7 @@ TDD 방식:
 TDD 방식:
 
 - unit test: PTY output event가 `SurfaceRuntime`을 거쳐 surface의 `TerminalCore`로 전달된다.
-- unit test: surface resize가 core resize와 PTY resize request로 분리되어 전달된다.
+- unit test: surface resize가 `SurfaceRuntime`을 통해 core resize와 PTY resize request로 분리되어 전달된다.
 - snapshot test: surface metadata와 terminal state가 같은 artifact에 함께 보인다.
 - metadata test: cwd/env/command/size가 serializable draft model로 round-trip된다.
 - 민감정보 test 초안: env를 그대로 저장하지 않고 allowlist/redaction 경계를 둔다.
@@ -286,7 +286,7 @@ TDD 방식:
 - 프로젝트별 workspace 저장.
 - 탭/분할 layout restore.
 - 각 surface의 cwd/env/command restore.
-- 최근 작업 상태 빠른 복구.
+- 최근 workspace 빠른 복구.
 - repo별 기본 레이아웃과 scratch terminal 정책.
 
 TDD 방식:

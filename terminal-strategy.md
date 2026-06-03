@@ -267,13 +267,12 @@ const AppWindow = struct {
 
 ```zig
 const Surface = struct {
-    pty: PtySession,
     core: TerminalCore,
-    render_state: RenderSnapshot,
     title: []const u8,
     cwd: ?[]const u8,
     process_state: ProcessState,
 };
+// live PtySession 연결은 Surface가 아니라 SurfaceRuntime이 들고 있다.
 ```
 
 ## 8. 커스텀 전략

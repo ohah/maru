@@ -25,9 +25,13 @@ run = "zig build test-stress"
 description = "Run longer opt-in stress tests"
 run = "zig build test-stress-soak"
 
+[tasks.perf]
+description = "Run local performance budget harness"
+run = "zig build perf"
+
 [tasks.fmt]
 description = "Format Zig sources"
-run = "zig fmt build.zig src tests"
+run = "zig fmt build.zig src tests tools"
 
 [tasks.check]
 description = "Format, test, and build"

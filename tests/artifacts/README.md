@@ -19,4 +19,5 @@ tests/artifacts/oracle/*/*.snapshot.txt
 tests/artifacts/stress/*/*.screen.txt
 tests/artifacts/stress/*/*.snapshot.txt
 tests/artifacts/stress/*/*.summary.txt
+tests/artifacts/perf/*.txt
 ```

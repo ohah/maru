@@ -24,6 +24,9 @@ src/
   renderer.zig          render facade
   terminal.zig          terminal-core facade
 
+  app/                  window/session처럼 앱 상태 책임별 구현
+  config/               action parsing, theme/font config
+  pty/                  PTY backend, spawn request, process handle
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding
   renderer/             Metal/WebGPU renderer internals, glyph atlas, frame stats
   platform/             OS별 process/window/input bridge
@@ -34,6 +37,8 @@ src/
   observability/        DebugEvent, TraceEvent, DebugSnapshot, ReplayRunner
   plugin/               future action/plugin/Wasm boundary
 ```
+
+루트의 `*.zig` 파일은 외부 import 경로를 안정화하는 facade다. 실제 구현은 위 하위 폴더에 목적별로 둔다.
 
 ## 테스트 구조
 

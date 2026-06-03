@@ -34,6 +34,7 @@ macOS 로컬 shell 1개 surface
 - `TerminalCore`, `PtySession`, `Surface`, `SurfaceRuntime`, `Snapshot`, `Trace/Event`의 최소 public 타입과 책임 경계를 만든다.
 - 각 facade가 몰라야 하는 레이어를 import하지 않게 한다.
 - `KeyBindingResolver`의 최소 타입을 만든다. full global shortcut은 나중에 구현하더라도, app action과 terminal input이 섞이지 않는 경계는 초반에 고정한다.
+- `SurfaceRuntime`의 구체 API는 [SurfaceRuntime API 계약](surface-runtime-api.md)을 따른다.
 
 TDD 방식:
 
@@ -80,6 +81,7 @@ src/plugin/**    -> src/terminal/** private 구현, src/pty/** handle import 금
 - 실패했을 때 볼 수 있는 공통 산출물을 먼저 만든다.
 - 테스트, 로그, replay, future inspector가 같은 도메인 데이터를 소비하게 한다.
 - snapshot schema는 `maru.snapshot.v1`로 versioning한다. 이 버전은 제품 버전이 아니라 테스트 산출물과 replay consumer가 읽는 데이터 포맷 버전이다.
+- version 유지/증가 기준은 [Snapshot Versioning](snapshot-versioning.md)을 따른다.
 
 TDD 방식:
 
@@ -136,6 +138,7 @@ TDD 방식:
 목표:
 
 - macOS `forkpty` 기반으로 먼저 통제된 command를 실행한다.
+- reader thread, queue, backpressure 같은 운영 모델은 [PTY 운영 모델](pty-operating-model.md)을 따른다.
 - 통제된 command가 안정화된 뒤 interactive shell smoke를 opt-in으로 추가한다.
 - PTY output bytes를 domain event로 내보낸다.
 - terminal input bytes와 resize request를 PTY에 전달한다.
@@ -208,6 +211,7 @@ TDD 방식:
 - E2E fixture: controlled command -> PTY -> SurfaceRuntime -> Surface -> TerminalCore -> screen snapshot.
 - failure artifact: raw output, decoded screen, structured snapshot.
 - replay 준비: event 이름과 저장 위치를 먼저 맞춘다.
+- trace/replay schema와 의미는 [Trace와 Replay](trace-replay.md)를 따른다.
 - opt-in smoke: interactive shell -> snapshot까지 crash 없이 도달하는지 확인한다.
 
 완료 기준:
@@ -227,6 +231,7 @@ TDD 방식:
 
 - renderer는 snapshot 계약만 소비한다.
 - macOS app host는 입력, window, focus, surface lifecycle을 관리한다.
+- 실제 backend 선택과 검증 순서는 [렌더러 전략](renderer-strategy.md)을 따른다.
 
 TDD 방식:
 
@@ -288,6 +293,7 @@ TDD 방식:
 - 각 surface의 cwd/env/command restore.
 - 최근 workspace 빠른 복구.
 - repo별 기본 레이아웃과 scratch terminal 정책.
+- 저장 대상, env redaction, command restore 정책은 [Workspace Restore 전략](workspace-restore.md)을 따른다.
 
 TDD 방식:
 

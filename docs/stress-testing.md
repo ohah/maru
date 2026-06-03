@@ -19,7 +19,7 @@
 
 - 절대 시간 기준으로 실패시키지 않는다.
 - 실제 PTY backpressure를 검증하지 않는다.
-- Metal/WebGPU frame pacing을 검증하지 않는다.
+- Metal frame pacing을 검증하지 않는다. future WebGPU backend도 생기면 별도 검증한다.
 - 메모리 상한을 강제하지 않는다.
 
 이 항목들은 PTY, renderer, performance budget이 생긴 뒤 별도 스트레스/벤치마크로 추가한다.

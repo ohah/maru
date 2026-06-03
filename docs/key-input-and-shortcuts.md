@@ -51,6 +51,74 @@ terminal_key_overrides:
 
 이렇게 나누는 이유는 충돌을 사람이 이해할 수 있게 만들기 위해서다. 같은 `Cmd-Space`라도 OS 전역 핫키인지, 앱이 focus 되었을 때만 쓰는 단축키인지, shell로 보낼 문자열인지가 다르다.
 
+## Key chord parser 계약
+
+최종 config parser는 코드로 구현해야 한다. 하지만 구현 전에 계약을 먼저 정해야 한다. 그렇지 않으면 `Cmd+B`, `Command+b`, `ctrl-cmd-,` 같은 표기가 제각각 들어오고, 나중에 충돌 판정이 흔들린다.
+
+초기 key chord 문자열은 다음 형태만 허용한다.
+
+```text
+Modifier+Modifier+Key
+```
+
+허용 modifier:
+
+```text
+Cmd
+Ctrl
+Alt
+Shift
+```
+
+허용 key:
+
+```text
+A-Z
+0-9
+,
+.
+/
+;
+'
+[
+]
+-
+=
+`
+Esc
+Tab
+Enter
+Space
+Backspace
+Delete
+Up
+Down
+Left
+Right
+F1..F24
+```
+
+정규화 규칙:
+
+- modifier 순서는 항상 `Ctrl`, `Alt`, `Shift`, `Cmd` 순서로 저장한다.
+- key 이름은 대소문자를 구분하지 않고 canonical name으로 바꾼다.
+- `Command` 같은 alias는 초기에는 허용하지 않는다. alias가 필요하면 별도 PR에서 추가한다.
+- 같은 modifier를 두 번 쓰면 오류다.
+- key가 없으면 오류다.
+- 알 수 없는 key 이름은 오류다.
+
+예시:
+
+```text
+Cmd+B          -> Cmd+B
+ctrl+cmd+,     -> Ctrl+Cmd+,
+Shift+Alt+F13  -> Alt+Shift+F13
+Cmd+Cmd+B      -> 오류
+Command+B      -> 초기에는 오류
+```
+
+이 parser 계약은 실제 TOML parser보다 먼저 구현할 수 있다. `KeyChord.parse("Ctrl+Cmd+,")` 같은 작은 단위 테스트로 시작하고, 나중에 config 파일 parser가 이 함수를 호출하게 만든다.
+
 ## 충돌 규칙
 
 - global shortcut은 정확히 등록한 key chord만 소비한다. 예를 들어 `Ctrl+Cmd+,`를 등록해도 `Ctrl+B`, `Ctrl+C`, `Esc`에는 영향을 주지 않는다.

@@ -62,6 +62,8 @@ tests/
   artifacts/            테스트 실행 시 생성되는 로컬 산출물
 ```
 
+fixture와 golden 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fixture-format.md)을 따른다.
+
 ## build.zig 연결 원칙
 
 새 테스트 파일을 추가할 때는 같은 PR에서 `build.zig`와 `.mise.toml` 태스크에 연결한다.
@@ -79,4 +81,11 @@ tests/
 ```text
 tools/
   perf/                 로컬 성능 예산 측정 harness
+```
+
+## GitHub 구조
+
+```text
+.github/
+  pull_request_template.md  PR마다 전략 영향 평가와 한계 보고를 빠뜨리지 않게 하는 템플릿
 ```

@@ -11,13 +11,21 @@
 - [검증 매트릭스](docs/verification-matrix.md)
 - [스트레스 테스트 전략](docs/stress-testing.md)
 - [성능 예산](docs/performance-budget.md)
+- [v0 세로 슬라이스](docs/v0-vertical-slice.md)
+- [Facade 계약](docs/facade-contracts.md)
+- [Fixture와 Oracle 포맷](docs/fixture-format.md)
+- [키 입력과 단축키 경계](docs/key-input-and-shortcuts.md)
 
 ## 설계 문서
 
 - [초기 아키텍처](docs/architecture.md)
+- [v0 세로 슬라이스](docs/v0-vertical-slice.md)
+- [Facade 계약](docs/facade-contracts.md)
 - [테스트 원칙](docs/architecture.md#테스트-원칙)
 - [관측 가능성 원칙](docs/architecture.md#관측-가능성-원칙)
 - [오라클 비교 테스트 전략](docs/oracle-testing.md)
+- [Fixture와 Oracle 포맷](docs/fixture-format.md)
+- [키 입력과 단축키 경계](docs/key-input-and-shortcuts.md)
 - [메모리 전략](docs/architecture.md#메모리-전략)
 - [터미널 전략](terminal-strategy.md)
 - [디버깅/로그/리플레이 전략](terminal-strategy.md#12-디버깅로그리플레이-전략)

@@ -17,6 +17,8 @@ Ghostty는 다음 용도로만 사용한다.
 
 ## 1차 모듈 경계
 
+첫 구현 목표는 [v0 세로 슬라이스](v0-vertical-slice.md)를 따른다. 각 facade가 맡는 책임과 금지된 의존성은 [Facade 계약](facade-contracts.md)을 단일 출처로 둔다. 키 입력, app shortcut, global shortcut의 충돌 규칙은 [키 입력과 단축키 경계](key-input-and-shortcuts.md)를 따른다.
+
 ```text
 src/maru.zig
   -> app.zig
@@ -56,7 +58,7 @@ Renderer
 ## 개발 순서
 
 1. `TerminalCore` facade를 유지한 채 자체 VT parser를 만든다.
-2. ANSI fixture와 golden test를 먼저 쌓는다.
+2. [Fixture와 Oracle 포맷](fixture-format.md)에 맞춰 ANSI fixture와 golden test를 먼저 쌓는다.
 3. `forkpty`를 붙여 로컬 shell bytes를 core로 넣는다.
 4. `RenderSnapshot`을 Metal renderer로 그린다.
 5. 탭 모델과 action/keybinding/config를 얹는다.

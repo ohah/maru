@@ -26,6 +26,8 @@
 
 이 포맷은 현재 테스트 산출물이면서, 나중에 replay trace와 inspector가 같은 도메인 데이터를 보도록 하기 위한 첫 관측 가능성 경계다.
 
+fixture, golden, trace 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fixture-format.md)을 따른다.
+
 ## 아직 완전 자동 검증이 아닌 영역
 
 불가 이유는 다음 의미로 쓴다.
@@ -42,6 +44,7 @@
 | GPU renderer | 구현 전, 환경 의존, 시스템 한계에 가까움 | Metal/WebGPU 렌더러가 아직 없다. 실제 화면 검증은 macOS window server, GPU driver, font stack 영향을 받는다. | 폰트, glyph atlas, frame pacing, dirty redraw 문제를 검증하지 못한다. | headless snapshot과 GUI screenshot artifact를 연결하는 app E2E를 추가한다. |
 | workspace/session restore | 구현 전 | 아직 session model만 초기 구조다. | cwd/env/command/layout restore가 실제 사용자 UX로 보장되지 않는다. | serialized workspace fixture와 restore E2E를 추가한다. |
 | Wasm plugin | 구현 전 | 현재 plugin registry는 no-op 구조다. | plugin boundary, 권한, event ABI, 실패 격리를 검증하지 못한다. | plugin hook API가 정해진 뒤 fixture plugin과 sandbox failure test를 추가한다. |
+| global shortcut | 구현 전, 환경 의존 | macOS 전역 핫키 등록과 충돌 검증이 아직 없다. | quick terminal/focus UX가 terminal input과 충돌하지 않는지 증명하지 못한다. | config conflict unit test, resolver test, macOS app smoke test를 추가한다. |
 | trace/replay | 구현 전 | snapshot은 있지만 event trace/replay는 아직 없다. | 실패를 시간순으로 재현하기 어렵다. | terminal input/output event를 domain event로 기록하고 replay test를 추가한다. |
 | SSH workload | 구현 전, 환경 의존 | SSH 전용 integration은 아직 실행하지 않는다. 외부 네트워크나 특정 원격 서버에 묶이지 않는 방식이 필요하다. | 원격 shell, latency, locale, terminal mode 차이를 검증하지 못한다. | 로컬 테스트 서버나 opt-in 환경변수 기반 SSH smoke test를 추가한다. |
 | 긴 soak/제품 성능 예산 | 부분 구현, 환경 의존 | `mise run perf`는 core 기준만 측정한다. 앱 시작, 입력 지연, frame budget, RSS는 아직 없다. | GUI/PTY/renderer 성능 회귀는 아직 숫자로 실패시키지 못한다. | macOS host, PTY, renderer가 붙으면 startup, latency, memory, throughput 기준을 확장한다. |

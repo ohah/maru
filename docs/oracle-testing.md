@@ -44,6 +44,8 @@ ANSI fixture
 
 이 구조를 먼저 만드는 이유는 CI와 로컬 개발환경이 `xterm`, `libvterm`, `alacritty`, `ghostty` 설치 여부에 묶이지 않게 하기 위해서다.
 
+fixture와 golden 파일의 저장 형식은 [Fixture와 Oracle 포맷](fixture-format.md)을 따른다.
+
 ## 나중에 추가할 것
 
 실제 오라클 실행기는 선택 기능으로 붙인다.

@@ -41,6 +41,7 @@ TDD 방식:
 - boundary test: `TerminalCore`가 PTY/platform/renderer 타입을 public API로 노출하지 않는다.
 - config/action test: app action과 terminal input이 같은 타입으로 섞이지 않는다.
 - resolver contract test: app action으로 소비된 key event는 terminal input으로 변환되지 않는다.
+- resolver contract test: `send_control("b")` 같은 terminal input macro는 terminal bytes로 변환되지만 app action과 같은 key chord를 공유할 수 없다.
 
 완료 기준:
 
@@ -252,6 +253,7 @@ TDD 방식:
 TDD 방식:
 
 - config validation test: 위험한 terminal 조합을 app/global shortcut으로 등록하면 경고한다.
+- resolver test: focused app keybinding의 `send_control("b")`는 `0x02` terminal input으로 내려간다.
 - resolver test: exact-match global shortcut만 소비한다.
 - resolver test: 등록하지 않은 `Ctrl+B`는 PTY input으로 내려간다.
 - app smoke test: global shortcut 등록 성공/실패를 artifact로 남긴다.
@@ -260,6 +262,7 @@ TDD 방식:
 
 - 세부 규칙은 [키 입력과 단축키 경계](key-input-and-shortcuts.md)를 따른다.
 - app/global shortcut으로 소비된 key event는 PTY로 전달하지 않는다.
+- terminal input macro는 focused pane이 명확할 때만 PTY로 bytes를 보낸다.
 - OS가 선점한 global shortcut 등록 실패를 조용히 무시하지 않는다.
 
 아직 하지 않는다:

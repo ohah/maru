@@ -33,18 +33,21 @@ macOS 로컬 shell 1개 pane
 
 - `TerminalCore`, `PtySession`, `Pane`, `Snapshot`, `Trace/Event`의 최소 public 타입과 책임 경계를 만든다.
 - 각 facade가 몰라야 하는 레이어를 import하지 않게 한다.
+- `KeyBindingResolver`의 최소 타입을 만든다. full global shortcut은 나중에 구현하더라도, app action과 terminal input이 섞이지 않는 경계는 초반에 고정한다.
 
 TDD 방식:
 
 - compile smoke test: public facade가 import되고 최소 생성/해제가 가능해야 한다.
 - boundary test: `TerminalCore`가 PTY/platform/renderer 타입을 public API로 노출하지 않는다.
 - config/action test: app action과 terminal input이 같은 타입으로 섞이지 않는다.
+- resolver contract test: app action으로 소비된 key event는 terminal input으로 변환되지 않는다.
 
 완료 기준:
 
 - `mise run check` 통과.
 - 새 facade가 [Facade 계약](facade-contracts.md)과 어긋나지 않는다.
 - PR 설명에 각 facade가 왜 존재하는지 초보자용 설명이 들어간다.
+- `tools/check-boundaries` 또는 동등한 boundary checker 계획이 생긴다. 단순 import smoke test만으로 경계가 지켜진다고 주장하지 않는다.
 
 아직 하지 않는다:
 
@@ -52,6 +55,24 @@ TDD 방식:
 - renderer.
 - workspace restore.
 - plugin ABI.
+- 실제 OS global shortcut 등록.
+
+### 1단계 boundary checker 최소 요구사항
+
+`import boundary test`는 말만으로는 부족하다. 구현 전에는 다음 중 하나를 반드시 선택한다.
+
+- `tools/check-boundaries`: Zig source import graph를 읽고 금지 import를 실패 처리한다.
+- build step 기반 검사: `zig build check-boundaries`를 만들고 `mise run check`에 연결한다.
+- 더 단순한 임시안: `rg` 기반 금지 import 검사. 단, 이 경우 임시 검사임을 PR 한계에 적고 root-cause로 import graph checker 계획을 남긴다.
+
+초기 금지 규칙:
+
+```text
+src/terminal/**  -> src/pty/**, src/platform/**, src/renderer/** import 금지
+src/pty/**       -> src/terminal/** private 구현 import 금지
+src/renderer/**  -> src/pty/** import 금지
+src/plugin/**    -> src/terminal/** private 구현, src/pty/** handle import 금지
+```
 
 ## 2단계: Snapshot과 artifact를 먼저 확정
 
@@ -59,18 +80,22 @@ TDD 방식:
 
 - 실패했을 때 볼 수 있는 공통 산출물을 먼저 만든다.
 - 테스트, 로그, replay, future inspector가 같은 도메인 데이터를 소비하게 한다.
+- snapshot schema는 `v0`로 versioning한다. "영원히 고정된 최종 포맷"이 아니라 "v0에서 호환성을 지킬 포맷"으로 다룬다.
 
 TDD 방식:
 
 - same state -> same snapshot text.
 - trailing spaces, cursor, size가 손실되지 않는 snapshot test.
 - 실패 artifact가 `tests/artifacts/` 아래에 남는 E2E/support test.
+- snapshot version test: snapshot text에 schema version이 들어간다.
 
 완료 기준:
 
 - screen text와 structured snapshot이 모두 생성된다.
 - artifact 포맷은 [Fixture와 Oracle 포맷](fixture-format.md)을 따른다.
 - snapshot이 renderer나 PTY 구현 세부사항을 몰라야 한다.
+- snapshot에 `schema=maru.snapshot.v0` 같은 버전 표시가 있다.
+- `future fields`를 어디에 추가할지 문서화되어 있다. cursor mode, style, alternate screen, scrollback이 붙어도 v0 consumer가 깨지지 않게 한다.
 
 아직 하지 않는다:
 
@@ -108,7 +133,8 @@ TDD 방식:
 
 목표:
 
-- macOS `forkpty` 기반으로 local shell 또는 통제된 command를 실행한다.
+- macOS `forkpty` 기반으로 먼저 통제된 command를 실행한다.
+- 통제된 command가 안정화된 뒤 interactive shell smoke를 opt-in으로 추가한다.
 - PTY output bytes를 domain event로 내보낸다.
 - terminal input bytes와 resize request를 PTY에 전달한다.
 
@@ -118,12 +144,15 @@ TDD 방식:
 - integration test: 통제된 command stdout을 읽는다.
 - integration test: resize request가 PTY layer까지 전달된다.
 - process lifecycle test: exit status가 event로 관측된다.
+- opt-in smoke test: 사용자의 shell을 실행해 prompt/output이 crash 없이 snapshot까지 도달하는지 확인한다.
 
 완료 기준:
 
 - `PtySession`은 escape sequence 의미를 모른다.
 - `TerminalCore`는 PTY file descriptor를 모른다.
 - 실패 시 stdout bytes와 snapshot artifact가 남는다.
+- deterministic controlled command PTY test와 환경 의존 interactive shell smoke가 분리되어 있다.
+- interactive shell smoke는 처음부터 기본 `mise run check`에 넣지 않는다.
 
 아직 하지 않는다:
 
@@ -139,17 +168,22 @@ TDD 방식:
 - 하나의 사용 가능한 terminal surface를 만든다.
 - `PTY output event -> Pane -> TerminalCore -> Snapshot` 경로를 완성한다.
 - pane metadata인 title, cwd, env, command, size를 복구 가능한 형태로 보관한다.
+- workspace restore는 구현하지 않더라도 `RestorablePaneMetadata` 초안은 만든다.
 
 TDD 방식:
 
 - unit test: PTY output event가 pane의 `TerminalCore`로 전달된다.
 - unit test: pane resize가 core resize와 PTY resize request로 분리되어 전달된다.
 - snapshot test: pane metadata와 terminal state가 같은 artifact에 함께 보인다.
+- metadata test: cwd/env/command/size가 serializable draft model로 round-trip된다.
+- 민감정보 test 초안: env를 그대로 저장하지 않고 allowlist/redaction 경계를 둔다.
 
 완료 기준:
 
 - pane은 renderer 좌표나 GPU resource를 모른다.
 - workspace 저장 포맷을 아직 확정하지 않아도, 저장 가능한 metadata 경계는 존재한다.
+- live PTY handle은 metadata에 들어가지 않는다.
+- env 저장 정책은 최소 초안이라도 문서화한다.
 
 아직 하지 않는다:
 
@@ -162,16 +196,19 @@ TDD 방식:
 목표:
 
 - GUI 없이 실제 process/PTY output이 snapshot까지 도달하는지 자동으로 증명한다.
+- 기본 check에는 deterministic path만 넣는다. 환경 의존 PTY shell smoke는 opt-in으로 둔다.
 
 TDD 방식:
 
 - E2E fixture: controlled command -> PTY -> Pane -> TerminalCore -> screen snapshot.
 - failure artifact: raw output, decoded screen, structured snapshot.
 - replay 준비: event 이름과 저장 위치를 먼저 맞춘다.
+- opt-in smoke: interactive shell -> snapshot까지 crash 없이 도달하는지 확인한다.
 
 완료 기준:
 
-- `mise run check`가 v0 headless E2E를 포함한다.
+- `mise run check`가 deterministic v0 headless E2E를 포함한다.
+- `mise run pty` 또는 동등한 opt-in 명령이 macOS PTY smoke를 실행한다.
 - 실패했을 때 원인을 parser, PTY, pane 연결 중 어디서 봐야 하는지 artifact로 판단할 수 있다.
 
 아직 하지 않는다:
@@ -210,6 +247,7 @@ TDD 방식:
 
 - 최소 탭 기능과 scratch/quick terminal UX를 app action으로 얹는다.
 - global shortcut은 platform/app layer에서 처리하고, PTY input과 섞지 않는다.
+- `KeyBindingResolver` 자체는 1단계에서 최소 계약을 만든다. 이 단계에서는 실제 탭/quick/global shortcut 동작을 연결한다.
 
 TDD 방식:
 

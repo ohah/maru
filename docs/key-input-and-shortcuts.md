@@ -88,8 +88,8 @@ terminal_key_overrides:
 - macro가 만든 bytes는 `TerminalInput`으로 분류된 뒤 `PtySession.writeInput`으로 간다.
 - macro가 app action으로 소비된 key event와 같은 key chord를 쓰면 config validation 오류다.
 - `Ctrl+B -> send_control("b")`처럼 동일 입력을 동일 bytes로 다시 매핑하는 설정은 보통 필요 없다. 기본 terminal input encoding이 이미 처리하기 때문이다.
-- global shortcut이 직접 `send_control("b")`를 실행하는 것은 기본 허용하지 않는다. 앱 밖에서 눌렀을 때 어느 pane에 보낼지 불명확하기 때문이다.
-- global shortcut에서 terminal bytes를 보내야 한다면 `focus_or_create_window -> select_target_pane -> send_control("b")`처럼 대상 pane을 명시하는 action chain이어야 한다.
+- global shortcut이 직접 `send_control("b")`를 실행하는 것은 기본 허용하지 않는다. 앱 밖에서 눌렀을 때 어느 surface에 보낼지 불명확하기 때문이다.
+- global shortcut에서 terminal bytes를 보내야 한다면 `focus_or_create_window -> select_target_pane -> send_control("b")`처럼 대상 surface을 명시하는 action chain이어야 한다.
 
 ## 위험한 터미널 조합
 

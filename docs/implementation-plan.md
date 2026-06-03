@@ -7,7 +7,7 @@
 초기 구현은 [초기 세로 슬라이스](initial-vertical-slice.md)를 기준으로 한다.
 
 ```text
-macOS 로컬 shell 1개 pane
+macOS 로컬 shell 1개 surface
 -> PTY output bytes
 -> TerminalCore
 -> snapshot/trace artifact
@@ -31,7 +31,7 @@ macOS 로컬 shell 1개 pane
 
 목표:
 
-- `TerminalCore`, `PtySession`, `Pane`, `Snapshot`, `Trace/Event`의 최소 public 타입과 책임 경계를 만든다.
+- `TerminalCore`, `PtySession`, `Surface`, `Snapshot`, `Trace/Event`의 최소 public 타입과 책임 경계를 만든다.
 - 각 facade가 몰라야 하는 레이어를 import하지 않게 한다.
 - `KeyBindingResolver`의 최소 타입을 만든다. full global shortcut은 나중에 구현하더라도, app action과 terminal input이 섞이지 않는 경계는 초반에 고정한다.
 
@@ -163,26 +163,26 @@ TDD 방식:
 - job control 전체 호환성.
 - global shortcut.
 
-## 5단계: `Pane`으로 PTY와 TerminalCore 연결
+## 5단계: `Surface`으로 PTY와 TerminalCore 연결
 
 목표:
 
 - 하나의 사용 가능한 terminal surface를 만든다.
-- `PTY output event -> Pane -> TerminalCore -> Snapshot` 경로를 완성한다.
-- pane metadata인 title, cwd, env, command, size를 복구 가능한 형태로 보관한다.
-- workspace restore는 구현하지 않더라도 `RestorablePaneMetadata` 초안은 만든다.
+- `PTY output event -> Surface -> TerminalCore -> Snapshot` 경로를 완성한다.
+- surface metadata인 title, cwd, env, command, size를 복구 가능한 형태로 보관한다.
+- workspace restore는 구현하지 않더라도 `RestorableSurfaceMetadata` 초안은 만든다.
 
 TDD 방식:
 
-- unit test: PTY output event가 pane의 `TerminalCore`로 전달된다.
-- unit test: pane resize가 core resize와 PTY resize request로 분리되어 전달된다.
-- snapshot test: pane metadata와 terminal state가 같은 artifact에 함께 보인다.
+- unit test: PTY output event가 surface의 `TerminalCore`로 전달된다.
+- unit test: surface resize가 core resize와 PTY resize request로 분리되어 전달된다.
+- snapshot test: surface metadata와 terminal state가 같은 artifact에 함께 보인다.
 - metadata test: cwd/env/command/size가 serializable draft model로 round-trip된다.
 - 민감정보 test 초안: env를 그대로 저장하지 않고 allowlist/redaction 경계를 둔다.
 
 완료 기준:
 
-- pane은 renderer 좌표나 GPU resource를 모른다.
+- surface은 renderer 좌표나 GPU resource를 모른다.
 - workspace 저장 포맷을 아직 확정하지 않아도, 저장 가능한 metadata 경계는 존재한다.
 - live PTY handle은 metadata에 들어가지 않는다.
 - env 저장 정책은 최소 초안이라도 문서화한다.
@@ -202,7 +202,7 @@ TDD 방식:
 
 TDD 방식:
 
-- E2E fixture: controlled command -> PTY -> Pane -> TerminalCore -> screen snapshot.
+- E2E fixture: controlled command -> PTY -> Surface -> TerminalCore -> screen snapshot.
 - failure artifact: raw output, decoded screen, structured snapshot.
 - replay 준비: event 이름과 저장 위치를 먼저 맞춘다.
 - opt-in smoke: interactive shell -> snapshot까지 crash 없이 도달하는지 확인한다.
@@ -211,7 +211,7 @@ TDD 방식:
 
 - `mise run check`가 deterministic headless E2E를 포함한다.
 - PTY 구현 PR에서 `mise run pty` 또는 동등한 opt-in 명령을 추가하고, 그 명령이 macOS PTY smoke를 실행한다.
-- 실패했을 때 원인을 parser, PTY, pane 연결 중 어디서 봐야 하는지 artifact로 판단할 수 있다.
+- 실패했을 때 원인을 parser, PTY, surface 연결 중 어디서 봐야 하는지 artifact로 판단할 수 있다.
 
 아직 하지 않는다:
 
@@ -263,7 +263,7 @@ TDD 방식:
 
 - 세부 규칙은 [키 입력과 단축키 경계](key-input-and-shortcuts.md)를 따른다.
 - app/global shortcut으로 소비된 key event는 PTY로 전달하지 않는다.
-- terminal input macro는 focused pane이 명확할 때만 PTY로 bytes를 보낸다.
+- terminal input macro는 focused surface이 명확할 때만 PTY로 bytes를 보낸다.
 - OS가 선점한 global shortcut 등록 실패를 조용히 무시하지 않는다.
 
 아직 하지 않는다:
@@ -282,21 +282,21 @@ TDD 방식:
 
 - 프로젝트별 workspace 저장.
 - 탭/분할 layout restore.
-- 각 pane의 cwd/env/command restore.
+- 각 surface의 cwd/env/command restore.
 - 최근 작업 세션 빠른 복구.
 - repo별 기본 레이아웃과 scratch terminal 정책.
 
 TDD 방식:
 
 - serialized workspace fixture round-trip.
-- restore E2E: 저장된 layout -> pane 생성 -> command/cwd/env 확인.
+- restore E2E: 저장된 layout -> surface 생성 -> command/cwd/env 확인.
 - 민감정보 test: env/token/path가 fixture에 그대로 들어가지 않는지 확인.
 
 완료 기준:
 
 - live PTY handle은 저장하지 않는다.
 - 저장 포맷은 선언적 상태만 담는다.
-- 복구 실패 시 어떤 pane이 왜 실패했는지 artifact가 남는다.
+- 복구 실패 시 어떤 surface이 왜 실패했는지 artifact가 남는다.
 
 ## 10단계: Plugin/Wasm
 
@@ -314,7 +314,7 @@ TDD 방식:
 완료 기준:
 
 - plugin ABI와 권한 모델은 구현 전에 사용자와 별도 논의한다.
-- plugin 실패가 pane/session 전체를 죽이지 않는다.
+- plugin 실패가 surface/session 전체를 죽이지 않는다.
 
 ## 현재 문서에서 정리해야 할 점
 

@@ -57,14 +57,14 @@
 - process exit가 domain event로 관측된다.
 - app/global shortcut으로 소비된 key가 PTY input으로 내려오지 않는다.
 
-## `Pane`
+## `Surface`
 
 책임:
 
 - 하나의 사용 가능한 terminal surface를 표현한다.
 - `PtySession`과 `TerminalCore`를 연결한다.
-- pane의 title, cwd, env, command, size 같은 복구 가능한 metadata를 보관한다.
-- snapshot을 만들 때 terminal state와 pane metadata를 함께 제공한다.
+- surface의 title, cwd, env, command, size 같은 복구 가능한 metadata를 보관한다.
+- snapshot을 만들 때 terminal state와 surface metadata를 함께 제공한다.
 
 몰라야 하는 것:
 
@@ -75,9 +75,9 @@
 
 초기 테스트:
 
-- PTY output event가 pane의 `TerminalCore`로 전달된다.
-- pane size 변경이 core resize와 PTY resize request로 분리되어 전달된다.
-- `RestorablePaneMetadata`에는 cwd/env/command/size 같은 선언적 상태만 들어가고 live PTY handle은 들어가지 않는다.
+- PTY output event가 surface의 `TerminalCore`로 전달된다.
+- surface size 변경이 core resize와 PTY resize request로 분리되어 전달된다.
+- `RestorableSurfaceMetadata`에는 cwd/env/command/size 같은 선언적 상태만 들어가고 live PTY handle은 들어가지 않는다.
 - env 저장은 allowlist 또는 redaction 경계를 가져야 한다.
 
 ## `Workspace`
@@ -105,7 +105,7 @@
 책임:
 
 - test, debug log, replay, future inspector가 같은 terminal 상태를 보게 한다.
-- visible screen, cursor, size, pane/workspace metadata를 구조화한다.
+- visible screen, cursor, size, surface/workspace metadata를 구조화한다.
 - 실패 artifact로 저장할 수 있는 안정된 텍스트 표현을 제공한다.
 - schema version을 포함한다. 현재 코드가 내보내는 버전은 `maru.snapshot.v1`이다. style, cursor mode, alternate screen, scrollback 같은 future field가 붙어도 기존 버전 consumer가 깨지지 않도록 추가 시 버전을 올린다.
 
@@ -145,7 +145,7 @@
 
 - plugin은 domain event와 action facade를 통해서만 상호작용한다.
 - plugin은 `TerminalCore` private storage, PTY handle, renderer resource를 직접 받지 않는다.
-- plugin 실패는 pane/session 전체를 죽이지 않고 격리되어야 한다.
+- plugin 실패는 surface/session 전체를 죽이지 않고 격리되어야 한다.
 
 Plugin ABI나 권한 모델을 확정해야 하는 순간이 오면, 구현 전에 사용자와 별도 논의한다.
 

@@ -1,12 +1,12 @@
 const std = @import("std");
-const session = @import("session.zig");
+const surface = @import("surface.zig");
 const terminal = @import("../terminal.zig");
 
 pub const AppWindow = struct {
-    tabs: []session.TerminalSession,
+    tabs: []surface.Surface,
     active_tab: usize = 0,
 
-    pub fn active(self: *AppWindow) ?*session.TerminalSession {
+    pub fn active(self: *AppWindow) ?*surface.Surface {
         if (self.tabs.len == 0) return null;
         if (self.active_tab >= self.tabs.len) return null;
         return &self.tabs[self.active_tab];
@@ -20,9 +20,9 @@ pub const AppWindow = struct {
 };
 
 test "window selects active tab" {
-    var tabs = [_]session.TerminalSession{
-        try session.TerminalSession.init(std.testing.allocator, 1, terminal.Size.default),
-        try session.TerminalSession.init(std.testing.allocator, 2, .{ .cols = 120, .rows = 40 }),
+    var tabs = [_]surface.Surface{
+        try surface.Surface.init(std.testing.allocator, 1, terminal.Size.default),
+        try surface.Surface.init(std.testing.allocator, 2, .{ .cols = 120, .rows = 40 }),
     };
     defer tabs[0].deinit();
     defer tabs[1].deinit();

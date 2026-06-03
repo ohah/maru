@@ -18,6 +18,8 @@ gh pr create --assignee ohah --label <label> ...
 gh pr edit <번호> --add-assignee ohah --add-label <label>
 ```
 
+이 규칙은 `.github/workflows/pr-metadata.yml`가 확인한다. 체크 실패가 실제로 머지를 막으려면 GitHub branch protection에서 `PR metadata / require label and assignee=ohah`를 required check로 지정한다(저장소 설정이라 코드에는 없다).
+
 ## 전략 영향 평가
 
 PR 설명에는 다음 질문에 대한 답이 있어야 한다.

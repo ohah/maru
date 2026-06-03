@@ -1,11 +1,14 @@
 name: PR metadata
 
 # 필수 PR 메타데이터(라벨 1개 이상 + assignee=ohah)를 강제한다.
-# 규칙의 단일 출처는 docs/pr-checklist.md다. 무거운 check/oracle 잡이 라벨 변경마다
-# 다시 돌지 않도록 별도 워크플로우로 분리하고, 메타데이터가 바뀔 때만 트리거한다.
+# 규칙의 단일 출처는 docs/pr-checklist.md다. 기본 `pull_request` 트리거(ci.yml)는
+# labeled/assigned 이벤트로 돌지 않으므로, 라벨/assignee가 바뀔 때 메타데이터를
+# 재평가하려면 그 이벤트들을 명시한 별도 워크플로우가 필요하다. synchronize도 넣어
+# 새 커밋(새 head SHA)마다 결과가 남게 한다.
+# 주의: 이 체크가 실제로 머지를 막으려면 branch protection의 required check로 지정해야 한다.
 on:
   pull_request:
-    types: [opened, reopened, labeled, unlabeled, assigned, unassigned]
+    types: [opened, reopened, synchronize, labeled, unlabeled, assigned, unassigned]
 
 permissions:
   pull-requests: read
@@ -21,6 +24,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
           labels=$(gh pr view "$PR" --repo "$REPO" --json labels -q '.labels[].name')
           assignees=$(gh pr view "$PR" --repo "$REPO" --json assignees -q '.assignees[].login')
           fail=0

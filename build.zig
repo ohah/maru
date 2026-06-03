@@ -44,4 +44,19 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    const e2e_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/e2e/headless.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+            },
+        }),
+    });
+    const run_e2e_tests = b.addRunArtifact(e2e_tests);
+
+    const e2e_step = b.step("test-e2e", "Run headless E2E tests");
+    e2e_step.dependOn(&run_e2e_tests.step);
 }

@@ -8,6 +8,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "tests",
         "docs",
         "terminal-strategy.md",
         "AGENTS.md",

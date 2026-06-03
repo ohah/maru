@@ -8,7 +8,9 @@ pub fn main(init: std.process.Init) !void {
     var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
 
-    const size: maru.terminal.Size = .{ .cols = 80, .rows = 24 };
+    // The CLI is only a development smoke target for now. Keeping it tiny makes
+    // it obvious whether the Zig module graph compiles before the macOS app exists.
+    const size = maru.terminal.Size.default;
     try stdout.print("maru-dev: clean-room terminal core scaffold ({d}x{d})\n", .{
         size.cols,
         size.rows,

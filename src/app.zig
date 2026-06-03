@@ -14,11 +14,15 @@ pub const TerminalSession = struct {
     process_state: ProcessState = .starting,
     core: terminal.TerminalCore,
 
-    pub fn init(id: u64, size: terminal.Size) TerminalSession {
+    pub fn init(allocator: std.mem.Allocator, id: u64, size: terminal.Size) !TerminalSession {
         return .{
             .id = id,
-            .core = terminal.TerminalCore.init(size),
+            .core = try terminal.TerminalCore.init(allocator, size),
         };
+    }
+
+    pub fn deinit(self: *TerminalSession) void {
+        self.core.deinit();
     }
 };
 
@@ -41,9 +45,12 @@ pub const AppWindow = struct {
 
 test "window selects active tab" {
     var tabs = [_]TerminalSession{
-        TerminalSession.init(1, terminal.Size.default),
-        TerminalSession.init(2, .{ .cols = 120, .rows = 40 }),
+        try TerminalSession.init(std.testing.allocator, 1, terminal.Size.default),
+        try TerminalSession.init(std.testing.allocator, 2, .{ .cols = 120, .rows = 40 }),
     };
+    defer tabs[0].deinit();
+    defer tabs[1].deinit();
+
     var window: AppWindow = .{ .tabs = &tabs };
 
     try std.testing.expectEqual(@as(u64, 1), window.active().?.id);

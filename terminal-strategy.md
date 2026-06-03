@@ -574,7 +574,7 @@ SSH에서 확인할 것:
 
 처음부터 완전 호환 parser를 한 번에 만들려고 하면 이 일정은 깨진다. Maru는 작은 clean-room core에서 시작해 oracle fixture를 늘리며 호환성을 확장한다.
 
-## 14. 1차 구현 순서
+## 15. 1차 구현 순서
 
 1. 저장소 기본 구조 만들기
    - `src/core`
@@ -642,7 +642,7 @@ SSH에서 확인할 것:
     - theme/font
     - SSH/vim/tmux sanity
 
-## 15. 최종 결정
+## 16. 최종 결정
 
 Maru는 "더 큰 Ghostty"가 아니라 "더 작은 네이티브 셸"로 간다.
 

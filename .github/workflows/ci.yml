@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 같은 ref에서 새 푸시가 오면 진행 중인 실행을 취소한다.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 기본 게이트: 의존성 없이 fmt-check, unit, e2e, recorded oracle, stress,
+  # facade import 경계, build 를 한 번에 검증한다(.mise.toml 의 check 태스크).
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: mise run check
+
+  # 외부 reference 오라클(opt-in). 손으로 기록한 golden을 실제 VT 구현과 대조한다.
+  # CI에서는 설치가 가벼운 libvterm(apt)과 Alacritty(runner 기본 Rust)만 돌린다.
+  # Ghostty libghostty-vt 오라클은 Zig 0.15.2 + 무거운 Ghostty 빌드가 필요해
+  # 기본 CI에서 제외한다(로컬에서 `mise run oracle-ghostty`).
+  oracles:
+    name: external oracles (libvterm, Alacritty)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+
+      - name: Install libvterm
+        run: sudo apt-get update && sudo apt-get install -y libvterm-dev
+
+      - name: libvterm oracle
+        run: mise run oracle-ext
+
+      - name: Build Alacritty dumper
+        run: cargo build --release --manifest-path tests/oracle/alacritty-dumper/Cargo.toml
+
+      - name: Alacritty oracle
+        run: mise run oracle-alacritty

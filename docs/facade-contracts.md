@@ -158,6 +158,7 @@ Plugin ABI나 권한 모델을 확정해야 하는 순간이 오면, 구현 전�
 - platform layer는 OS 전역 shortcut 등록 성공/실패를 app layer에 보고한다.
 - app layer는 key event를 `AppAction` 또는 `TerminalInput`으로 분류한다.
 - `KeyBindingResolver`는 초반 contract 단계에서 최소 타입을 갖는다.
+- terminal input macro는 `send_control`, `send_text`, `send_escape_sequence` 같은 명시적 terminal input action으로 표현한다.
 - `PtySession`은 이미 terminal input으로 분류된 bytes만 받는다.
 - app/global shortcut으로 소비된 key event는 PTY로 전달하지 않는다.
 

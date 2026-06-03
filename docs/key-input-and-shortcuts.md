@@ -43,6 +43,7 @@ app_keybindings:
   - focus_next_pane
 
 terminal_key_overrides:
+  - send_control
   - send_text
   - send_escape_sequence
 ```
@@ -56,6 +57,39 @@ terminal_key_overrides:
 - app keybinding과 terminal input override가 같은 조합이면 config validation에서 오류로 보고한다.
 - OS나 다른 앱이 이미 선점한 global shortcut은 등록 실패로 보고하고, 조용히 무시하지 않는다.
 - 사용자가 명시적으로 `send_text` 또는 `send_escape_sequence`를 설정한 조합은 app action과 동시에 사용할 수 없다.
+
+## 터미널 입력 매크로
+
+Maru는 앱이 focus된 상태에서 특정 key chord를 terminal input bytes로 바꾸는 매핑을 지원할 수 있다.
+
+예시:
+
+```text
+Cmd+B -> send_control("b") -> PTY bytes 0x02
+```
+
+이 기능은 `Ctrl+B`를 Maru가 빼앗는 것과 다르다. 사용자는 `Cmd+B`를 누르지만, shell/tmux/vim에는 `Ctrl+B`가 들어간다. `Ctrl+B` 자체를 app/global shortcut으로 등록하는 것과, 다른 key chord가 `Ctrl+B` bytes를 보내도록 매핑하는 것은 완전히 다른 동작이다.
+
+권장 설정 형태:
+
+```text
+app_keybindings:
+  Cmd+B:
+    send_control: b
+
+terminal_key_overrides:
+  F13:
+    send_escape_sequence: "\\e[25~"
+```
+
+규칙:
+
+- terminal input macro는 기본적으로 focused app key event에서만 동작한다.
+- macro가 만든 bytes는 `TerminalInput`으로 분류된 뒤 `PtySession.writeInput`으로 간다.
+- macro가 app action으로 소비된 key event와 같은 key chord를 쓰면 config validation 오류다.
+- `Ctrl+B -> send_control("b")`처럼 동일 입력을 동일 bytes로 다시 매핑하는 설정은 보통 필요 없다. 기본 terminal input encoding이 이미 처리하기 때문이다.
+- global shortcut이 직접 `send_control("b")`를 실행하는 것은 기본 허용하지 않는다. 앱 밖에서 눌렀을 때 어느 pane에 보낼지 불명확하기 때문이다.
+- global shortcut에서 terminal bytes를 보내야 한다면 `focus_or_create_window -> select_target_pane -> send_control("b")`처럼 대상 pane을 명시하는 action chain이어야 한다.
 
 ## 위험한 터미널 조합
 
@@ -93,6 +127,8 @@ v0에서는 글로벌 핫키를 구현하지 않는다. 지금은 다음 경계�
 
 - config parser test: 같은 key 조합이 app action과 terminal override에 동시에 있으면 실패한다.
 - config validation test: terminal 관용 조합을 app/global shortcut으로 등록하면 경고한다.
+- resolver unit test: `Cmd+B -> send_control("b")`는 `0x02` terminal input으로 변환된다.
+- resolver unit test: app action과 terminal input macro가 같은 key chord를 쓰면 오류다.
 - resolver unit test: app action으로 소비된 key는 terminal input으로 내려가지 않는다.
 - resolver unit test: 등록하지 않은 `Ctrl+B` 같은 조합은 global shortcut 때문에 소비되지 않는다.
 - PTY E2E: terminal input으로 분류된 key만 shell에 전달된다.

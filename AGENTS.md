@@ -10,6 +10,7 @@
 - [파일/폴더 구조](docs/project-structure.md)
 - [검증 매트릭스](docs/verification-matrix.md)
 - [스트레스 테스트 전략](docs/stress-testing.md)
+- [성능 예산](docs/performance-budget.md)
 
 ## 설계 문서
 

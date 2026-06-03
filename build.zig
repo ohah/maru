@@ -122,4 +122,21 @@ pub fn build(b: *std.Build) void {
 
     const stress_soak_step = b.step("test-stress-soak", "Run longer opt-in stress tests");
     stress_soak_step.dependOn(&run_stress_soak_tests.step);
+
+    const perf_exe = b.addExecutable(.{
+        .name = "maru-perf",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/perf/core.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+            },
+        }),
+    });
+    const run_perf = b.addRunArtifact(perf_exe);
+    run_perf.setCwd(b.path("."));
+
+    const perf_step = b.step("perf", "Run local performance budget harness");
+    perf_step.dependOn(&run_perf.step);
 }

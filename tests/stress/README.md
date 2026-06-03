@@ -15,4 +15,4 @@
 - `mise run stress`: 빠른 스트레스 테스트다. 기본 `mise run check`에 포함된다.
 - `mise run stress-soak`: 더 긴 opt-in 테스트다. 로컬에서 큰 변경 전후에 실행한다. 기본 `check`에는 넣지 않는다.
 
-절대 시간 기준은 아직 두지 않는다. 성능 예산 문서가 생기기 전까지는 실행 시간으로 실패시키지 않고, 상태 불변식과 snapshot artifact를 검증한다.
+절대 시간 기준은 stress에는 두지 않는다. 실행 시간 기준은 `mise run perf`의 성능 예산 harness에서 별도로 다루고, stress는 상태 불변식과 snapshot artifact를 검증한다.

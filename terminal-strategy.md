@@ -46,7 +46,7 @@ Maru    = 더 작고 단순한 네이티브 셸 + 쉬운 커스텀
 호스트 앱: Swift/AppKit
 코어:      Zig
 렌더러:    Metal
-터미널 코어: libghostty-vt 또는 Ghostty에서 배운 구조를 facade 뒤에 숨김
+터미널 코어: Maru 자체 clean-room VT core
 장기 웹:   WebGPU only
 ```
 
@@ -76,18 +76,18 @@ Zig가 맡을 것:
 
 ## 3. 핵심 아키텍처
 
-Ghostty나 `libghostty-vt`에 직접 의존하지 말고, 반드시 로컬 facade 뒤에 숨긴다.
+Ghostty나 `libghostty-vt`를 런타임 의존성으로 사용하지 않는다. Ghostty는 구조 레퍼런스, 테스트 전략 참고, 동작 비교 오라클로만 둔다.
 
 ```text
 Swift/AppKit Host
   -> Zig App/Core
     -> TerminalCoreFacade
-      -> libghostty-vt 또는 Ghostty-derived core
+      -> Maru clean-room VT core
     -> RenderSnapshot
     -> MetalRenderer
 ```
 
-앱 전체가 Ghostty 타입에 직접 묶이면 나중에 자체 엔진으로 갈아타기 어렵다. 그래서 처음부터 다음 형태의 경계를 둔다.
+앱 전체가 특정 parser 구현 타입에 직접 묶이면 나중에 내부 엔진을 고치기 어렵다. 그래서 처음부터 다음 형태의 경계를 둔다.
 
 ```zig
 pub const TerminalCore = struct {
@@ -98,12 +98,12 @@ pub const TerminalCore = struct {
 };
 ```
 
-이렇게 하면 구현을 단계적으로 바꿀 수 있다.
+이렇게 하면 내부 구현을 단계적으로 키울 수 있다.
 
 ```text
-v1: libghostty-vt 사용
-v2: Ghostty VT 코어를 vendoring/fork
-v3: 자체 엔진
+v1: UTF-8 text/control MVP
+v2: clean-room VT parser/state machine
+v3: oracle 기반 호환성 확장
 ```
 
 핵심은 "Ghostty급 코어 위에 UX를 얹는다"가 아니라, "Ghostty에서 배운 경계를 유지하면서 Maru 코어를 독립시킨다"이다.
@@ -547,7 +547,7 @@ SSH에서 확인할 것:
 - macOS 우선
 - Zig core
 - Swift/AppKit thin host
-- Ghostty 또는 `libghostty-vt`를 facade 뒤에서 사용
+- Ghostty/libghostty-vt 런타임 의존 없이 clean-room core 구현
 - 직접 Metal renderer
 - v1에는 plugin 없음
 
@@ -570,7 +570,7 @@ SSH에서 확인할 것:
   배포 가능한 안정성, polish, edge case, broader compatibility
 ```
 
-처음부터 parser를 완전히 새로 만들면 이 일정은 깨진다.
+처음부터 완전 호환 parser를 한 번에 만들려고 하면 이 일정은 깨진다. Maru는 작은 clean-room core에서 시작해 oracle fixture를 늘리며 호환성을 확장한다.
 
 ## 14. 1차 구현 순서
 
@@ -594,7 +594,7 @@ SSH에서 확인할 것:
    - key input을 PTY로 전달
 
 4. TerminalCore facade 만들기
-   - Ghostty-derived core 또는 `libghostty-vt` 연결
+   - Maru clean-room core 연결
    - `write`
    - `resize`
    - `snapshot`
@@ -648,7 +648,7 @@ Maru는 "더 큰 Ghostty"가 아니라 "더 작은 네이티브 셸"로 간다.
 
 ```text
 Ghostty는 기술 레퍼런스로 사용한다.
-Ghostty/libghostty-vt 의존성은 facade 뒤에 숨긴다.
+Ghostty/libghostty-vt는 런타임 의존성으로 사용하지 않는다.
 macOS를 먼저 출시한다.
 제품 표면은 작게 유지한다.
 커스텀은 config/action/keybinding부터 시작한다.

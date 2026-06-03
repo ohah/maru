@@ -489,7 +489,31 @@ src/renderer:    23 tests
 - renderer/GUI는 상대적으로 테스트가 적고 smoke/manual coverage가 필요하다.
 - Maru도 core는 테스트 우선으로 가고, GUI/Metal은 smoke와 수동 매트릭스를 병행한다.
 
-## 12. SSH 테스트
+## 12. 디버깅/로그/리플레이 전략
+
+Maru는 모든 개발 과정에서 디버깅, 테스트, 로그, 리플레이가 같은 상태 모델을 공유하도록 설계한다.
+
+핵심 규칙:
+
+- 새 기능은 구현 전에 어떤 로그, snapshot, trace, E2E 경로로 검증할지 정한다.
+- `println` 로그, 테스트 fixture, inspector 전용 상태를 따로 만들지 않는다.
+- `DebugEvent`, `TraceEvent`, `DebugSnapshot` 같은 공통 도메인 데이터를 먼저 만들고, 로그/테스트/리플레이/나중의 GUI inspector는 이 데이터를 소비한다.
+- 실제 shell, ssh, vim, tmux에서 발생한 버그는 가능한 한 raw byte trace와 screen snapshot으로 저장해 headless replay test로 바꾼다.
+- trace에는 cwd, env, token, host, command output 같은 민감정보가 들어갈 수 있으므로 기본은 local-only이고, git에 넣는 fixture는 반드시 sanitized 데이터여야 한다.
+
+목표 흐름:
+
+```text
+버그 발생
+-> trace/snapshot 저장
+-> replay test 추가
+-> root cause 수정
+-> fixture가 영구 regression test가 됨
+```
+
+이 전략의 목적은 디버깅 편의성이 아니라 유지보수성이다. 터미널 버그는 시각적으로는 "화면이 깨짐"으로 보이지만 실제 원인은 parser state, cursor mode, resize propagation, dirty region, renderer snapshot 중 하나일 수 있다. 공통 관측 모델이 없으면 원인을 찾을 때마다 수동 재현에 의존하게 된다.
+
+## 13. SSH 테스트
 
 SSH 관련해서는 두 가지를 구분해야 한다.
 
@@ -515,7 +539,7 @@ SSH에서 확인할 것:
 - UTF-8과 한글
 - `TERM` / terminfo 동작
 
-## 13. 예상 일정
+## 14. 예상 일정
 
 전제:
 

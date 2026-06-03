@@ -1,0 +1,67 @@
+# 파일/폴더 구조
+
+Maru는 초기에 파일 이동을 최소화한다. 기존 `src/*.zig` 파일은 public facade 역할을 유지하고, 기능이 커질 때 하위 폴더에 책임별 구현을 추가한다.
+
+## 원칙
+
+- 기존 facade 파일은 오래 유지한다.
+- 새 기능은 가장 가까운 책임 폴더에 추가한다.
+- 한 파일이 여러 책임을 갖기 시작하면 새 폴더로 분리한다.
+- 파일은 가능한 한 하나의 목적을 갖는다. 서로 다른 이유로 변경되는 코드가 같은 파일에 쌓이면, public API를 유지한 채 구현 파일을 목적별로 나눈다.
+- `main.zig`, `maru.zig`, `terminal.zig`, `renderer.zig` 같은 facade 파일은 얇게 유지한다. facade는 import/export와 안정된 진입점 역할을 하고, 실제 구현 책임을 계속 떠안지 않는다.
+- 테스트, trace, snapshot, replay 자료는 기능 코드와 같은 책임 이름을 사용한다.
+- 빈 폴더도 의도를 문서화해서 나중에 위치를 다시 정하는 리팩토링을 줄인다.
+
+## 소스 구조
+
+```text
+src/
+  maru.zig              public import facade
+  main.zig              개발용 CLI entrypoint
+  app.zig               탭/창/session facade
+  config.zig            action/config facade
+  pty.zig               process/PTY facade
+  renderer.zig          render facade
+  terminal.zig          terminal-core facade
+
+  terminal/             parser, screen, cursor, scrollback, key/mouse encoding
+  renderer/             Metal/WebGPU renderer internals, glyph atlas, frame stats
+  platform/             OS별 process/window/input bridge
+    macos/
+    windows/
+    linux/
+  workspace/            project workspace, layout restore, recent sessions
+  observability/        DebugEvent, TraceEvent, DebugSnapshot, ReplayRunner
+  plugin/               future action/plugin/Wasm boundary
+```
+
+## 테스트 구조
+
+```text
+tests/
+  unit/                 facade 밖에 둘 단위 테스트
+  integration/
+    pty/                forkpty, process, resize propagation
+    ssh/                ssh localhost/통제된 원격 환경 smoke
+  e2e/
+    headless.zig        real process -> TerminalCore -> screen snapshot
+    app/                macOS app, renderer, input, screenshot smoke
+  fixtures/
+    ansi/               ANSI/VT 입력 fixture
+    traces/             sanitized replay trace
+  golden/
+    screen/             screen snapshot expected output
+  artifacts/            실패 시 생성되는 로컬 산출물
+```
+
+## build.zig 연결 원칙
+
+새 테스트 파일을 추가할 때는 같은 PR에서 `build.zig`와 `.mise.toml` 태스크에 연결한다.
+
+테스트가 아직 자동화될 수 없다면 문서와 PR 설명에 다음을 남긴다.
+
+```text
+왜 자동화가 불가능한가?
+어떤 수동 검증을 했는가?
+나중에 자동화하려면 어떤 경계가 필요한가?
+```

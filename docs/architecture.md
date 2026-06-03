@@ -91,6 +91,42 @@ App E2E:
 
 어떤 영역이 자동 E2E로 검증 불가능하면, 그 이유와 수동 검증 방법을 사용자에게 보고해야 한다.
 
+## 관측 가능성 원칙
+
+Maru는 처음부터 디버깅, 테스트, 로그, 리플레이가 같은 데이터를 공유하는 구조로 만든다.
+
+이 원칙의 의도는 실제 터미널에서만 보이는 버그를 재현 가능한 테스트로 바꾸는 것이다. `println` 로그, 테스트 fixture, 나중의 GUI inspector가 서로 다른 상태 모델을 보면 버그를 고칠 때마다 같은 정보를 여러 번 해석해야 하고, 어느 도구가 진짜 상태를 말하는지 알기 어려워진다.
+
+공통 흐름:
+
+```text
+PTY/input/parser/terminal/renderer/workspace
+  -> DebugEvent / TraceEvent / DebugSnapshot
+  -> structured log
+  -> headless replay
+  -> golden snapshot
+  -> failure artifact
+  -> future GUI inspector
+```
+
+새 기능을 만들 때는 구현 전에 다음 질문에 답해야 한다.
+
+```text
+이 기능의 중요한 상태는 어떤 snapshot으로 볼 수 있는가?
+실패 상황을 replay trace로 저장할 수 있는가?
+테스트 실패 시 어떤 artifact가 남아 root cause를 찾게 해주는가?
+로그에 민감한 cwd/env/token/server 정보가 섞일 수 있는가?
+```
+
+초기 구현 우선순위:
+
+1. `DebugSnapshot`: cursor, grid, mode, dirty region, pane/workspace 상태를 설명한다.
+2. `TraceRecorder`: raw bytes, key input, resize, parser event를 재생 가능한 이벤트로 저장한다.
+3. `ReplayRunner`: 저장된 trace를 headless test에서 다시 실행한다.
+4. `FailureArtifact`: 테스트 실패 시 trace, snapshot, config를 로컬 산출물로 남긴다.
+
+릴리스 빌드에서는 이 관측 기능이 꺼졌을 때 hot path에 의미 있는 비용을 남기지 않아야 한다. trace와 artifact는 기본적으로 로컬 전용이며, 회귀 테스트로 추가할 때만 민감정보를 제거한 fixture를 git에 넣는다.
+
 ## 메모리 전략
 
 Ghostty는 앱 전체를 하나의 mmap allocator로만 운영하지 않는다. 일반 영역은 Zig allocator interface를 주입하고, terminal page backing memory처럼 성능과 zero-fill 특성이 중요한 영역은 `mmap`/`VirtualAlloc`을 직접 쓴다.

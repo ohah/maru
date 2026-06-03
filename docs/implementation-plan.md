@@ -163,7 +163,7 @@ TDD 방식:
 - job control 전체 호환성.
 - global shortcut.
 
-## 5단계: `Surface`으로 PTY와 TerminalCore 연결
+## 5단계: `Surface`로 PTY와 TerminalCore 연결
 
 목표:
 
@@ -182,7 +182,7 @@ TDD 방식:
 
 완료 기준:
 
-- surface은 renderer 좌표나 GPU resource를 모른다.
+- surface는 renderer 좌표나 GPU resource를 모른다.
 - workspace 저장 포맷을 아직 확정하지 않아도, 저장 가능한 metadata 경계는 존재한다.
 - live PTY handle은 metadata에 들어가지 않는다.
 - env 저장 정책은 최소 초안이라도 문서화한다.
@@ -263,7 +263,7 @@ TDD 방식:
 
 - 세부 규칙은 [키 입력과 단축키 경계](key-input-and-shortcuts.md)를 따른다.
 - app/global shortcut으로 소비된 key event는 PTY로 전달하지 않는다.
-- terminal input macro는 focused surface이 명확할 때만 PTY로 bytes를 보낸다.
+- terminal input macro는 focused surface가 명확할 때만 PTY로 bytes를 보낸다.
 - OS가 선점한 global shortcut 등록 실패를 조용히 무시하지 않는다.
 
 아직 하지 않는다:
@@ -296,7 +296,7 @@ TDD 방식:
 
 - live PTY handle은 저장하지 않는다.
 - 저장 포맷은 선언적 상태만 담는다.
-- 복구 실패 시 어떤 surface이 왜 실패했는지 artifact가 남는다.
+- 복구 실패 시 어떤 surface가 왜 실패했는지 artifact가 남는다.
 
 ## 10단계: Plugin/Wasm
 

@@ -1,94 +1,93 @@
-# Terminal Strategy Notes
+# Maru 터미널 개발 계획
 
-Date: 2026-06-03
-Source context: discussion while inspecting `/Users/yoon/Documents/workspace/ghostty`
+작성일: 2026-06-03
+배경: Ghostty를 참고하면서, 더 작고 커스텀하기 쉬운 macOS 우선 네이티브 터미널을 만든다.
 
-This document captures the working strategy from the Ghostty terminal design discussion.
-It is not a verbatim transcript. It is the condensed decision log and technical plan.
+이 문서는 대화 내용을 그대로 옮긴 것이 아니라, 실제 개발을 시작하기 위한 결정 로그와 작업 계획이다.
 
-## Product Position
+## 1. 제품 방향
 
-Build a lightweight native shell, not an IDE terminal and not a Warp-style workflow product.
+Maru는 IDE 터미널이나 Warp식 워크플로우 제품이 아니라, 가볍고 빠른 네이티브 셸 포지션을 목표로 한다.
 
-The product should be:
+목표:
 
-- Native and fast.
-- Small by default.
-- Focused on core terminal behavior.
-- Tab-oriented, with cmux-level tab ergonomics.
-- Easy to customize through config and actions.
-- Extensible later through WASM plugins.
-- macOS-first, while keeping the core portable for future WebGPU, Windows, and Linux work.
+- 기본기가 좋은 터미널
+- 작고 빠른 네이티브 앱
+- cmux 정도의 단순한 탭 경험
+- 설정과 키바인딩 커스텀이 쉬운 구조
+- 나중에 WASM 플러그인으로 확장 가능한 구조
+- macOS 우선 개발
+- 장기적으로 Windows, Linux, WebGPU 타깃을 고려할 수 있는 코어 구조
 
-The product should not start as:
+처음부터 하지 않을 것:
 
-- A tmux replacement.
-- A workspace/session IDE.
-- A command-block terminal.
-- An AI terminal.
-- A cloud/account product.
-- A plugin platform first.
-- A cross-platform app from day one.
+- tmux 대체
+- IDE형 워크스페이스 제품
+- Warp식 command block UI
+- AI 터미널
+- 클라우드/계정 기반 제품
+- 플러그인 플랫폼 우선 제품
+- 첫 버전부터 완전한 크로스 플랫폼 앱
 
-Short version:
-
-```text
-Ghostty = feature-rich, high-quality native terminal
-Maru    = smaller native shell, simple tabs, easy customization
-```
-
-## Initial Target
-
-Start with macOS only.
+짧게 정리하면:
 
 ```text
-macOS host: Swift/AppKit, thin layer
-Core:       Zig
-Renderer:   Metal
-Parser:     libghostty-vt at first, behind our facade
-Future web: WebGPU only
+Ghostty = 고품질, 고기능 네이티브 터미널
+Maru    = 더 작고 단순한 네이티브 셸 + 쉬운 커스텀
 ```
 
-SwiftUI layout is not the goal. Swift/AppKit is only the macOS host and OS integration layer.
+## 2. 1차 타깃
 
-Swift/AppKit should handle:
+처음에는 macOS만 고려한다.
 
-- NSWindow / NSView.
-- Key input.
-- IME / marked text.
-- Menu integration.
-- Clipboard.
-- Focus.
-- Drag/drop where needed.
-- Accessibility later.
+권장 스택:
 
-Zig should own:
+```text
+호스트 앱: Swift/AppKit
+코어:      Zig
+렌더러:    Metal
+터미널 코어: libghostty-vt 또는 Ghostty에서 배운 구조를 facade 뒤에 숨김
+장기 웹:   WebGPU only
+```
 
-- Terminal/session model.
-- Tab model.
-- Action registry.
-- Config parser and hot reload.
-- Terminal core facade.
-- Render snapshots.
-- Metal renderer.
-- Future backend boundaries.
+SwiftUI 레이아웃을 핵심으로 삼는 것이 아니다. Swift/AppKit은 macOS 앱으로서 필요한 얇은 호스트 레이어만 맡는다.
 
-## Architecture
+Swift/AppKit이 맡을 것:
 
-Keep Ghostty-specific APIs behind a local facade.
+- `NSWindow` / `NSView`
+- 키 입력
+- IME / marked text
+- 메뉴
+- 클립보드
+- 포커스
+- 필요한 경우 drag/drop
+- 추후 접근성
+
+Zig가 맡을 것:
+
+- 터미널/session 모델
+- 탭 모델
+- action registry
+- config parser와 hot reload
+- 터미널 코어 facade
+- render snapshot 생성
+- Metal renderer
+- 향후 backend 경계
+
+## 3. 핵심 아키텍처
+
+Ghostty나 `libghostty-vt`에 직접 의존하지 말고, 반드시 로컬 facade 뒤에 숨긴다.
 
 ```text
 Swift/AppKit Host
   -> Zig App/Core
     -> TerminalCoreFacade
-      -> libghostty-vt initially
+      -> libghostty-vt 또는 Ghostty-derived core
     -> RenderSnapshot
     -> MetalRenderer
 ```
 
-Do not let the app depend directly on Ghostty types.
-
-Suggested facade shape:
+앱 전체가 Ghostty 타입에 직접 묶이면 나중에 자체 엔진으로 갈아타기 어렵다. 그래서 처음부터 다음 형태의 경계를 둔다.
 
 ```zig
 pub const TerminalCore = struct {
@@ -99,27 +98,29 @@ pub const TerminalCore = struct {
 };
 ```
 
-This keeps future options open:
+이렇게 하면 구현을 단계적으로 바꿀 수 있다.
 
 ```text
-implementation v1: libghostty-vt
-implementation v2: vendored/forked ghostty-vt
-implementation v3: custom engine
+v1: libghostty-vt 사용
+v2: Ghostty VT 코어를 vendoring/fork
+v3: 자체 엔진
 ```
 
-## Backend Boundaries
+핵심은 "Ghostty급 코어 위에 UX를 얹는다"가 아니라, "Ghostty에서 배운 경계를 유지하면서 Maru 코어를 독립시킨다"이다.
 
-Design the boundaries now, but implement only the macOS path first.
+## 4. 백엔드 경계
+
+macOS만 먼저 구현하되, 경계는 처음부터 나눈다.
 
 ```text
 TerminalCore
-  - VT/parser integration
+  - VT/parser 연동
   - terminal state
   - scrollback
   - render snapshot
-  - no AppKit
-  - no Metal
-  - no forkpty directly exposed to app code
+  - AppKit 없음
+  - Metal 직접 노출 없음
+  - forkpty를 앱 코드에 직접 노출하지 않음
 
 PtyBackend
   - macOS: forkpty
@@ -135,8 +136,8 @@ WindowBackend
 RendererBackend
   - macOS: Metal
   - Web: WebGPU
-  - Windows: WebGPU native or D3D12
-  - Linux: Vulkan/WebGPU/OpenGL, later decision
+  - Windows: WebGPU native 또는 D3D12
+  - Linux: Vulkan/WebGPU/OpenGL later
 
 FontBackend
   - macOS: CoreText/HarfBuzz
@@ -144,136 +145,114 @@ FontBackend
   - Web: browser font/canvas metrics later
 ```
 
-## Why Zig
+Windows와 Linux를 지금 구현하지는 않는다. 다만 `TerminalCore`, `PtyBackend`, `WindowBackend`, `RendererBackend`, `FontBackend` 경계를 섞지 않는다.
 
-Use Zig for the core/hot path because:
+## 5. 왜 Zig인가
 
-- The author already has strong Zig experience from a high-performance bundler.
-- Ghostty is Zig, so its architecture is directly readable and reusable as a reference.
-- Zig is good for explicit allocator control, terminal buffers, glyph atlas state, and C/ObjC/Metal interop.
-- Zig keeps the core portable to WASM/WebGPU later.
+현재 프로젝트에는 Zig가 가장 자연스럽다.
 
-Do not make everything Zig-only. Pure Zig for all macOS host behavior would turn the project into an AppKit binding project.
+이유:
 
-Recommended split:
+- 이미 Zig로 고성능 번들러를 만든 경험이 있다.
+- Ghostty가 Zig라서 구조를 직접 읽고 참고하기 쉽다.
+- terminal buffer, glyph atlas, allocator, C/ObjC/Metal interop에 Zig가 잘 맞는다.
+- 코어를 WASM/WebGPU 방향으로 가져갈 여지도 있다.
+
+다만 모든 것을 순수 Zig로 밀어붙이는 것은 피한다. macOS 앱 호스트까지 Zig로 직접 만들면 터미널 개발이 아니라 AppKit 바인딩 개발이 된다.
+
+권장 분리:
 
 ```text
 Zig: terminal core, session/tab model, render data, Metal renderer
 Swift/AppKit: macOS shell only
 ```
 
-## Ghostty Reference Scope
+## 6. Ghostty에서 참고할 범위
 
-Use Ghostty as a design reference, not as a product template to clone.
+Ghostty는 제품을 복제할 대상이 아니라 기술 레퍼런스다.
 
-Strongly reference:
+강하게 참고할 것:
 
-- VT/render-state boundary.
-- Parser/stream/terminal-state pipeline.
-- Dirty tracking.
-- Row/cell render iterators.
-- Glyph atlas model.
-- Metal pipeline structure.
-- CoreText/HarfBuzz/font shaping setup.
-- macOS input/IME host boundary.
-- Test strategy.
+- VT/render-state 경계
+- parser -> stream -> terminal-state 파이프라인
+- dirty tracking
+- row/cell render iterator
+- glyph atlas 구조
+- Metal pipeline 구조
+- CoreText/HarfBuzz/font shaping 구성
+- macOS input/IME host 경계
+- 테스트 전략
 
-Avoid copying wholesale:
+초기 버전에서 따라 하지 않을 것:
 
-- Large config surface.
-- Native macOS tabs behavior.
-- Split/workspace complexity.
-- GTK/Linux host for v1.
-- WebGL path.
-- Inspector.
-- Advanced feature parity as an initial goal.
+- 거대한 config surface
+- macOS native tabs 중심 설계
+- split/workspace 복잡도
+- GTK/Linux host
+- WebGL path
+- inspector
+- Ghostty 전체 기능 parity
 
-Important Ghostty local files inspected:
+Ghostty 기술 관찰:
 
-```text
-build.zig
-src/renderer.zig
-src/renderer/Metal.zig
-src/renderer/generic.zig
-src/renderer/shaders/shaders.metal
-src/renderer/metal/shaders.zig
-src/font/Atlas.zig
-src/font/face/coretext.zig
-src/terminal/Parser.zig
-src/terminal/stream.zig
-src/terminal/stream_terminal.zig
-src/simd/vt.zig
-include/ghostty/vt/render.h
-include/ghostty/vt/terminal.h
-macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift
-macos/Sources/Ghostty/Ghostty.Input.swift
-```
+- native renderer는 wgpu, mach-gpu, Electron, Skia를 쓰지 않는다.
+- 자체 renderer abstraction을 갖고 있다.
+- macOS/iOS backend는 Metal이다.
+- Linux/BSD backend는 OpenGL이다.
+- WebGL 파일은 존재하지만, 현재 Maru v1과는 무관하다.
+- 텍스트 렌더링은 glyph atlas와 custom shader 기반이다.
+- macOS font path는 CoreText와 HarfBuzz를 사용한다.
+- parser는 `libvterm`, `vaxis`, `alacritty_terminal`이 아니라 Zig로 만든 자체 VT parser다.
+- parser는 vt100.net의 DEC ANSI parser state machine 모델을 따른다.
 
-## Ghostty Technical Findings
-
-Ghostty GPU/rendering:
-
-- It does not use wgpu/mach-gpu/Electron/Skia for its native renderer.
-- It has its own renderer abstraction.
-- macOS/iOS backend: Metal.
-- Linux/BSD backend: OpenGL.
-- Web target has a WebGL placeholder, but current `src/renderer/WebGL.zig` is effectively a stub.
-- Text rendering uses glyph atlas data and custom shaders.
-- macOS font path uses CoreText plus HarfBuzz.
-
-Ghostty parser/core:
-
-- It does not use `libvterm`, `vaxis`, or `alacritty_terminal`.
-- It has a custom Zig VT parser in `src/terminal/Parser.zig`.
-- The parser follows the DEC ANSI parser state machine model from vt100.net.
-- The pipeline includes SIMD/UTF-8 fast paths, parser state machine, stream actions, terminal state updates, and render state.
-
-Ghostty Web/WASM:
-
-- The Web/WASM target exists mainly for `libghostty-vt` as an embeddable WebAssembly core.
-- It is not evidence of a complete browser Ghostty app.
-- WebGL is not relevant to our macOS v1.
-- For Maru, long-term web should be WebGPU-only.
-
-## MVP Scope
-
-Build the smallest useful native terminal:
-
-- Single terminal.
-- Local shell.
-- Tabs.
-- Keybindings.
-- Theme/font config.
-- Config hot reload.
-- Copy/paste/selection.
-- Search.
-- SSH/vim/tmux/neovim sanity.
-
-Leave out of v1:
-
-- Split panes.
-- Workspace/session restore.
-- AI.
-- Cloud/account.
-- Command block UI.
-- Plugin runtime.
-- GUI settings app.
-- Heavy inspector.
-
-Tab scope:
+Maru에서 중요한 결론:
 
 ```text
-Cmd+T        new tab
-Cmd+W        close tab
-Cmd+1..9     select tab
-Cmd+Shift+[  previous tab
-Cmd+Shift+]  next tab
-Reorder tabs
-Tab title from shell title/cwd/process
-Close confirmation when needed
+Ghostty 코드를 그대로 크게 포크하기보다,
+Ghostty의 경계와 파이프라인을 읽고 Maru에 맞는 작은 구조로 다시 설계한다.
 ```
 
-Initial model can be simple:
+## 7. MVP 범위
+
+첫 목표는 "매일 쓸 수 있는 작고 빠른 단일 창 터미널"이다.
+
+v1에 포함:
+
+- 단일 터미널 창
+- 로컬 셸 실행
+- 탭
+- 키바인딩
+- theme/font config
+- config hot reload
+- copy/paste/selection
+- search
+- `ssh`, `vim`, `tmux`, `neovim`, `less`, `htop` 기본 sanity
+
+v1에서 제외:
+
+- split panes
+- workspace/session restore
+- AI
+- cloud/account
+- command block UI
+- plugin runtime
+- GUI settings app
+- heavy inspector
+
+탭 기능 범위:
+
+```text
+Cmd+T        새 탭
+Cmd+W        탭 닫기
+Cmd+1..9     탭 선택
+Cmd+Shift+[  이전 탭
+Cmd+Shift+]  다음 탭
+탭 순서 변경
+shell title/cwd/process 기반 탭 제목
+필요 시 닫기 확인
+```
+
+초기 모델:
 
 ```zig
 const AppWindow = struct {
@@ -282,7 +261,7 @@ const AppWindow = struct {
 };
 ```
 
-Each tab:
+각 탭:
 
 ```zig
 const TerminalSession = struct {
@@ -295,17 +274,17 @@ const TerminalSession = struct {
 };
 ```
 
-## Customization Strategy
+## 8. 커스텀 전략
 
-Do not start with plugins.
+처음부터 플러그인을 넣지 않는다.
 
-Start with:
+v1 커스텀은 다음 세 가지로 충분하다.
 
 ```text
 config + action registry + keybinding map + hot reload
 ```
 
-Everything routes through actions:
+모든 동작은 action을 통해 실행한다.
 
 ```text
 Keybinding -> Action
@@ -313,7 +292,7 @@ Menu       -> Action
 Command palette -> Action
 ```
 
-Example config shape:
+예시 config:
 
 ```toml
 font.family = "JetBrains Mono"
@@ -333,52 +312,54 @@ cursor = "#ffffff"
 selection = "#334455"
 ```
 
-## WASM Plugin Strategy
+이 구조를 먼저 만들면 나중에 플러그인, command palette, 메뉴, 키바인딩이 같은 action 시스템을 공유할 수 있다.
 
-WASM plugins are a good long-term differentiator, but not v1.
+## 9. WASM 플러그인 전략
 
-Benefits:
+WASM 플러그인은 좋은 장기 차별점이지만 v1 기능은 아니다.
 
-- Multi-language plugin compatibility.
-- Sandboxable extension model.
-- Local-only extensibility.
-- No native dylib ABI instability.
+장점:
 
-Risks:
+- 여러 언어로 플러그인 작성 가능
+- sandbox 가능한 확장 모델
+- local-only 확장성
+- native dylib ABI 문제 회피
 
-- WASM runtime size and complexity.
-- API versioning burden.
-- Permissions model.
-- Debugging/logging/diagnostics.
-- Plugins blocking hot paths if designed poorly.
+리스크:
 
-Allowed plugin areas later:
+- WASM runtime 크기와 복잡도
+- API versioning 부담
+- permission model 필요
+- debugging/logging/diagnostics 필요
+- hot path에 들어오면 성능 문제 발생
 
-- Tab title formatter.
-- Statusline.
-- Command palette provider.
-- Theme generator.
-- Notification rule.
-- Output matcher.
-- Hyperlink provider.
-- Shell integration event handler.
+나중에 허용할 플러그인 영역:
 
-Forbidden plugin areas:
+- 탭 제목 formatter
+- statusline
+- command palette provider
+- theme generator
+- notification rule
+- output matcher
+- hyperlink provider
+- shell integration event handler
 
-- Per-byte VT hook.
-- Per-cell render hook.
-- Metal draw loop.
-- Keyboard critical path.
-- PTY blocking path.
-- Glyph shaping hot path.
+금지할 플러그인 영역:
 
-Plugin execution should be async/off-hot-path:
+- per-byte VT hook
+- per-cell render hook
+- Metal draw loop
+- keyboard critical path
+- PTY blocking path
+- glyph shaping hot path
+
+플러그인 실행은 반드시 hot path 밖에서 처리한다.
 
 ```text
 terminal event -> queue -> plugin worker -> result/action -> main app applies safely
 ```
 
-Phasing:
+단계:
 
 ```text
 v1: config/action/keybindings
@@ -386,92 +367,92 @@ v2: command palette + statusline customization
 v3: WASM plugin runtime
 ```
 
-## Ghostty Comparison
+## 10. Ghostty와의 차별점
 
-Ghostty strengths:
+Ghostty의 강점:
 
-- Very fast and responsive.
-- Strong terminal compatibility.
-- Native platform integration.
-- Mature macOS/Linux terminal behavior.
-- Custom Zig VT parser and renderer.
-- Good font rendering and glyph handling.
+- 매우 빠르고 반응성이 좋다.
+- 터미널 호환성이 강하다.
+- 플랫폼 네이티브 통합이 좋다.
+- macOS/Linux 터미널 동작이 성숙하다.
+- Zig 기반 커스텀 VT parser와 renderer를 갖고 있다.
+- font rendering과 glyph handling이 좋다.
 
-Commonly relevant Ghostty drawbacks/opportunities:
+Ghostty의 약점 또는 Maru가 노릴 수 있는 지점:
 
-- Windows support is not the main shipped target yet.
-- Linux GTK/OpenGL can carry platform overhead and environment issues.
-- `TERM=xterm-ghostty` can cause remote terminfo friction.
-- macOS native tabs can be awkward with tiling window managers.
-- Feature surface is broader than a tiny native shell.
-- App extension/plugin model is not the central product philosophy.
+- Windows는 아직 핵심 shipped target이 아니다.
+- Linux GTK/OpenGL 경로는 환경 이슈와 플랫폼 오버헤드를 가질 수 있다.
+- `TERM=xterm-ghostty`는 remote terminfo 마찰을 만들 수 있다.
+- macOS native tabs는 tiling window manager와 어색할 수 있다.
+- 기능 표면적이 작은 셸 앱보다 넓다.
+- 플러그인/확장 모델이 제품 철학의 중심은 아니다.
 
-Maru differentiation:
+Maru 차별화:
 
-- Smaller surface.
-- Simple custom-drawn tabs.
-- Tiling-WM-friendly tab behavior.
-- Action/config-first customization.
-- WASM plugin path later.
-- WebGPU-only future web strategy.
-- Strong defaults, fewer features.
+- 더 작은 기능 표면
+- 단순한 custom-drawn tabs
+- tiling WM 친화적인 탭 동작
+- action/config-first 커스텀
+- 장기 WASM plugin 경로
+- 장기 웹은 WebGPU only
+- 적은 기능, 강한 기본값
 
-The goal is not to beat Ghostty's engine directly.
+목표는 Ghostty 엔진을 직접 이기는 것이 아니다.
 
 ```text
-Wrong goal: Ghostty보다 빠른 VT parser / Metal renderer
-Right goal: Ghostty보다 작아서 체감이 빠른 native shell
+잘못된 목표: Ghostty보다 빠른 VT parser / Metal renderer 만들기
+올바른 목표: Ghostty보다 작아서 체감이 빠른 native shell 만들기
 ```
 
-Win by doing less:
+이기는 방식은 더 적게 하는 것이다.
 
-- Less UI.
-- Less config surface.
-- Less background work.
-- Less platform scope in v1.
-- Less feature ambition.
+- UI를 줄인다.
+- config surface를 줄인다.
+- background work를 줄인다.
+- v1 플랫폼 범위를 줄인다.
+- 기능 욕심을 줄인다.
 
-## Testing Strategy
+## 11. 테스트 전략
 
-Terminal projects can be heavily tested, but not entirely through pure TDD.
+터미널은 TDD가 가능한 영역과 불가능한 영역이 명확히 나뉜다.
 
-Pure TDD areas:
+순수 TDD가 가능한 영역:
 
-- VT parser facade behavior.
-- Terminal state.
-- Screen/scrollback.
-- Resize/reflow.
-- Selection.
-- Key encoding.
-- Mouse encoding.
-- Tab model.
-- Action system.
-- Config parser.
-- Render snapshot generation.
+- VT parser facade behavior
+- terminal state
+- screen/scrollback
+- resize/reflow
+- selection
+- key encoding
+- mouse encoding
+- tab model
+- action system
+- config parser
+- render snapshot generation
 
-Integration test areas:
+통합 테스트 영역:
 
-- `forkpty`.
-- Shell command execution.
-- Resize -> `TIOCSWINSZ`.
-- `ssh localhost`.
-- `vim`, `tmux`, `less`, `htop` smoke tests.
+- `forkpty`
+- shell command execution
+- resize -> `TIOCSWINSZ`
+- `ssh localhost`
+- `vim`, `tmux`, `less`, `htop` smoke test
 
-Snapshot/golden test areas:
+snapshot/golden test 영역:
 
-- ANSI bytes -> final grid text/style.
-- Asciinema cast -> screen state snapshots.
-- Render snapshot -> glyph/background/cursor instances.
+- ANSI bytes -> final grid text/style
+- asciinema cast -> screen state snapshots
+- render snapshot -> glyph/background/cursor instances
 
-Hard to test with pure TDD:
+순수 TDD가 어려운 영역:
 
-- Metal pixel output.
-- Font rasterization exact pixels.
-- IME/marked text.
-- AppKit focus/menu/clipboard/accessibility.
-- GPU driver issues.
+- Metal pixel output
+- font rasterization exact pixels
+- IME/marked text
+- AppKit focus/menu/clipboard/accessibility
+- GPU driver issue
 
-Recommended approach:
+권장 접근:
 
 ```text
 Core: TDD
@@ -480,7 +461,7 @@ Renderer data: snapshot/golden tests
 Metal/AppKit/IME: smoke + screenshot + manual matrix
 ```
 
-Ghostty local test scale observed:
+Ghostty 테스트 규모 관찰:
 
 ```text
 Zig test declarations: 3,106
@@ -490,7 +471,7 @@ test/ directory files: about 4,019
 fuzz corpus files: about 4,002
 ```
 
-Distribution observed:
+대략적인 분포:
 
 ```text
 src/terminal: 2,114 tests
@@ -502,74 +483,155 @@ src/termio:      30 tests
 src/renderer:    23 tests
 ```
 
-This suggests Ghostty strongly tests terminal core behavior and fuzzes parser/stream/OSC paths, while renderer/GUI is tested more lightly and needs smoke/manual coverage.
+해석:
 
-## SSH Testing
+- Ghostty는 terminal core와 parser/stream/OSC/fuzz 쪽을 강하게 테스트한다.
+- renderer/GUI는 상대적으로 테스트가 적고 smoke/manual coverage가 필요하다.
+- Maru도 core는 테스트 우선으로 가고, GUI/Metal은 smoke와 수동 매트릭스를 병행한다.
 
-Two cases:
+## 12. SSH 테스트
 
-1. Developing over SSH on a remote Mac:
-   - Core tests and build commands are fine.
-   - GUI/Metal/AppKit tests need an actual macOS GUI session, not just a bare SSH session.
+SSH 관련해서는 두 가지를 구분해야 한다.
 
-2. Testing Maru's terminal behavior with SSH:
-   - Must be part of integration testing.
-   - Use `ssh localhost` or a controlled VM/container before relying on external servers.
+1. SSH로 원격 Mac에 접속해서 개발하는 경우:
+   - core test와 build command는 가능하다.
+   - GUI/Metal/AppKit 테스트는 실제 macOS GUI session이 필요하다.
+   - bare SSH session만으로는 앱 화면, IME, focus, Metal 렌더링을 충분히 테스트할 수 없다.
 
-SSH should test:
+2. Maru 터미널 안에서 SSH 동작을 테스트하는 경우:
+   - 반드시 integration test에 포함해야 한다.
+   - 처음에는 `ssh localhost`나 통제된 VM/container를 사용한다.
 
-- Remote prompt.
-- `vim`.
-- `tmux`.
-- `htop`.
-- Resize propagation.
-- Bracketed paste.
-- Mouse reporting.
-- Alternate screen.
-- UTF-8 and Korean text.
-- TERM/terminfo behavior.
+SSH에서 확인할 것:
 
-## Estimated Timeline
+- remote prompt
+- `vim`
+- `tmux`
+- `htop`
+- resize propagation
+- bracketed paste
+- mouse reporting
+- alternate screen
+- UTF-8과 한글
+- `TERM` / terminfo 동작
 
-Assumptions:
+## 13. 예상 일정
 
-- macOS first.
-- Zig core.
-- Swift/AppKit thin host.
-- `libghostty-vt` or Ghostty-derived design behind a facade.
-- Direct Metal renderer.
-- No plugins in v1.
+전제:
 
-Estimate:
+- macOS 우선
+- Zig core
+- Swift/AppKit thin host
+- Ghostty 또는 `libghostty-vt`를 facade 뒤에서 사용
+- 직접 Metal renderer
+- v1에는 plugin 없음
+
+예상:
 
 ```text
-2 weeks:
-  Empty macOS window, Zig bridge, PTY connection, bytes into terminal core.
+2주:
+  빈 macOS 창, Zig bridge, PTY 연결, bytes -> terminal core
 
-4-6 weeks:
-  Basic Metal rendering, ASCII/color/cursor, zsh/vim/htop basics.
+4-6주:
+  기본 Metal 렌더링, ASCII/color/cursor, zsh/vim/htop 기본 동작
 
-8-10 weeks:
-  Input, resize, selection, copy/paste, search, scrollback stabilization.
+8-10주:
+  input, resize, selection, copy/paste, search, scrollback 안정화
 
-3-4 months:
-  Tabs, config, actions, theme/font hot reload, daily-driver alpha.
+3-4개월:
+  tabs, config, actions, theme/font hot reload, daily-driver alpha
 
-6+ months:
-  Distribution-level stability, polish, edge cases, broader compatibility.
+6개월+:
+  배포 가능한 안정성, polish, edge case, broader compatibility
 ```
 
-If a custom parser is built from scratch, this schedule no longer applies.
+처음부터 parser를 완전히 새로 만들면 이 일정은 깨진다.
 
-## Key Decision
+## 14. 1차 구현 순서
 
-Build a smaller terminal, not a bigger Ghostty.
+1. 저장소 기본 구조 만들기
+   - `src/core`
+   - `src/terminal`
+   - `src/pty`
+   - `src/renderer`
+   - `src/config`
+   - `macos`
+
+2. macOS 빈 창 만들기
+   - Swift/AppKit host
+   - Zig library bridge
+   - 최소 event loop
+
+3. PTY 연결
+   - `forkpty`
+   - 기본 shell 실행
+   - shell output을 Zig core로 전달
+   - key input을 PTY로 전달
+
+4. TerminalCore facade 만들기
+   - Ghostty-derived core 또는 `libghostty-vt` 연결
+   - `write`
+   - `resize`
+   - `snapshot`
+   - `encodeKey`
+
+5. RenderSnapshot 정의
+   - cell grid
+   - style
+   - cursor
+   - selection
+   - dirty region
+
+6. Metal renderer MVP
+   - background quad
+   - glyph atlas
+   - ASCII glyph
+   - cursor
+   - color
+
+7. 입력 안정화
+   - key encoding
+   - modifier
+   - IME
+   - paste
+   - mouse 기본값
+
+8. 탭 모델
+   - `TerminalSession`
+   - `AppWindow.tabs`
+   - `active_tab`
+   - Cmd+T/Cmd+W/Cmd+1..9
+
+9. 설정 시스템
+   - TOML config
+   - action registry
+   - keybinding map
+   - hot reload
+
+10. daily-driver alpha
+    - search
+    - selection
+    - scrollback
+    - theme/font
+    - SSH/vim/tmux sanity
+
+## 15. 최종 결정
+
+Maru는 "더 큰 Ghostty"가 아니라 "더 작은 네이티브 셸"로 간다.
+
+핵심 결정:
 
 ```text
-Use Ghostty as the technical reference.
-Hide Ghostty/libghostty-vt behind a facade.
-Ship macOS first.
-Keep the product minimal.
-Make customization simple.
-Reserve WASM plugins for later.
+Ghostty는 기술 레퍼런스로 사용한다.
+Ghostty/libghostty-vt 의존성은 facade 뒤에 숨긴다.
+macOS를 먼저 출시한다.
+제품 표면은 작게 유지한다.
+커스텀은 config/action/keybinding부터 시작한다.
+WASM plugin은 v1 이후로 미룬다.
+```
+
+가장 중요한 원칙:
+
+```text
+성능은 더 많은 최적화보다 더 적은 제품 범위에서 먼저 나온다.
 ```

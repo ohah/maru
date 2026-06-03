@@ -7,7 +7,7 @@
 ## 목표
 
 ```text
-macOS 로컬 shell 1개 pane
+macOS 로컬 shell 1개 surface
 -> PTY output bytes
 -> TerminalCore
 -> snapshot/trace artifact
@@ -21,7 +21,7 @@ GUI가 붙기 전에는 headless 경로가 첫 성공 기준이다. macOS 창과
 - macOS local shell을 실행할 수 있는 `PtySession` facade.
 - PTY에서 읽은 raw bytes를 `TerminalCore.write`로 넣는 단방향 output path.
 - 사용자가 입력한 key bytes를 PTY로 보내기 위한 최소 input path.
-- pane 1개를 표현하는 `Pane` 모델.
+- surface 1개를 표현하는 `Surface` 모델.
 - `TerminalCore` snapshot과 실패 artifact.
 - raw input, resize, output을 나중에 replay할 수 있는 trace event 이름과 위치.
 - headless E2E: 실제 프로세스 또는 통제된 PTY workload가 최종 screen snapshot으로 검증되는 경로.
@@ -55,7 +55,7 @@ GUI가 붙기 전에는 headless 경로가 첫 성공 기준이다. macOS 창과
 1. `docs/facade-contracts.md`의 계약을 먼저 지킨다.
 2. trace/snapshot 산출물을 먼저 정의한다.
 3. macOS `PtySession`을 최소 기능으로 붙인다.
-4. `Pane`이 `PtySession`과 `TerminalCore`를 연결한다.
+4. `Surface`이 `PtySession`과 `TerminalCore`를 연결한다.
 5. headless E2E로 shell output이 snapshot까지 도달하는지 검증한다.
 6. 같은 snapshot 계약을 renderer와 macOS app host가 소비하게 만든다.
 

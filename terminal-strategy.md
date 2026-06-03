@@ -258,7 +258,7 @@ shell title/cwd/process 기반 탭 제목
 
 ```zig
 const AppWindow = struct {
-    tabs: []TerminalSession,
+    tabs: []Surface,
     active_tab: usize,
 };
 ```
@@ -266,8 +266,8 @@ const AppWindow = struct {
 각 탭:
 
 ```zig
-const TerminalSession = struct {
-    pty: PtyHandle,
+const Surface = struct {
+    pty: PtySession,
     core: TerminalCore,
     render_state: RenderSnapshot,
     title: []const u8,
@@ -624,7 +624,7 @@ SSH에서 확인할 것:
    - mouse 기본값
 
 8. 탭 모델
-   - `TerminalSession`
+   - `Surface`
    - `AppWindow.tabs`
    - `active_tab`
    - Cmd+T/Cmd+W/Cmd+1..9

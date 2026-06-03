@@ -1,9 +1,9 @@
-pub const session = @import("app/session.zig");
+pub const surface = @import("app/surface.zig");
 pub const window = @import("app/window.zig");
 
 pub const AppWindow = window.AppWindow;
-pub const ProcessState = session.ProcessState;
-pub const TerminalSession = session.TerminalSession;
+pub const Surface = surface.Surface;
+pub const ProcessState = surface.ProcessState;
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

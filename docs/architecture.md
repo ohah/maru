@@ -41,11 +41,11 @@ flowchart TD
     Platform --> AppHost
 
     AppHost --> Resolver[KeyBindingResolver<br/>AppAction 또는 TerminalInput 분류]
-    Resolver -->|AppAction| AppModel[App / Window / Tab / Pane Model]
+    Resolver -->|AppAction| AppModel[App / Window / Tab / Surface Model]
     Resolver -->|TerminalInput bytes| PtySession[PtySession Facade]
 
-    PtySession -->|raw output bytes| Pane[Pane<br/>PTY와 TerminalCore 연결]
-    Pane --> TerminalCore[TerminalCore Facade<br/>parser / screen state / cursor / scrollback]
+    PtySession -->|raw output bytes| Surface[Surface<br/>PTY와 TerminalCore 연결]
+    Surface --> TerminalCore[TerminalCore Facade<br/>parser / screen state / cursor / scrollback]
     TerminalCore --> Snapshot[RenderSnapshot / DebugSnapshot]
 
     Snapshot --> Renderer[Renderer Facade<br/>Metal now, WebGPU later]
@@ -75,8 +75,8 @@ AppWindow
   - active tab
   - UI action 적용
 
-TerminalSession
-  - PtyHandle
+Surface
+  - PtySession 연결
   - TerminalCore
   - RenderSnapshot
   - title/cwd/process state
@@ -96,7 +96,7 @@ Renderer
 
 구체적인 구현 순서는 [실제 구현 계획](implementation-plan.md)을 단일 출처로 둔다.
 
-이전에는 parser를 먼저 만든다고 표현했지만, 실제 순서는 더 좁게 잡는다. 먼저 facade 계약과 snapshot/artifact 경계를 고정하고, 초기 shell 경로에 필요한 parser 동작만 fixture 기반으로 작게 추가한다. 그다음 macOS PTY, pane 연결, headless E2E, renderer/app host 순서로 진행한다.
+이전에는 parser를 먼저 만든다고 표현했지만, 실제 순서는 더 좁게 잡는다. 먼저 facade 계약과 snapshot/artifact 경계를 고정하고, 초기 shell 경로에 필요한 parser 동작만 fixture 기반으로 작게 추가한다. 그다음 macOS PTY, surface 연결, headless E2E, renderer/app host 순서로 진행한다.
 
 ## 테스트 원칙
 
@@ -156,7 +156,7 @@ PTY/input/parser/terminal/renderer/workspace
 
 초기 구현 우선순위:
 
-1. `DebugSnapshot`: cursor, grid, mode, dirty region, pane/workspace 상태를 설명한다.
+1. `DebugSnapshot`: cursor, grid, mode, dirty region, surface/workspace 상태를 설명한다.
 2. `TraceRecorder`: raw bytes, key input, resize, parser event를 재생 가능한 이벤트로 저장한다.
 3. `ReplayRunner`: 저장된 trace를 headless test에서 다시 실행한다.
 4. `FailureArtifact`: 테스트 실패 시 trace, snapshot, config를 로컬 산출물로 남긴다.

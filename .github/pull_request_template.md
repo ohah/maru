@@ -26,6 +26,7 @@
 - [ ] 메모리 전략을 성급하게 복잡하게 만들지 않았습니다.
 - [ ] plugin/extension boundary를 나중에 막지 않습니다.
 - [ ] 가벼운 native shell/workspace UX 목표를 해치지 않습니다.
+- [ ] VT/parser 동작을 바꿨다면 유도한 공개 명세 섹션을 인용했습니다(해당 없으면 N/A).
 
 ## 테스트
 

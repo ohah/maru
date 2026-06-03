@@ -10,8 +10,10 @@ trace, snapshot, config, 로그 같은 실패 분석 자료가 들어갈 수 있
 
 ```text
 tests/artifacts/e2e/headless/*.screen.txt
+tests/artifacts/e2e/headless/*.snapshot.txt
 tests/artifacts/e2e/headless/*.stdout.txt
 tests/artifacts/oracle/*/*.actual.txt
 tests/artifacts/oracle/*/*.expected.txt
 tests/artifacts/oracle/*/*.decoded.txt
+tests/artifacts/oracle/*/*.snapshot.txt
 ```

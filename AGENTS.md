@@ -8,6 +8,7 @@
 - [필수 프로젝트 규칙](docs/project-rules.md)
 - [PR 체크리스트](docs/pr-checklist.md)
 - [파일/폴더 구조](docs/project-structure.md)
+- [검증 매트릭스](docs/verification-matrix.md)
 
 ## 설계 문서
 

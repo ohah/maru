@@ -95,8 +95,8 @@ TDD 방식:
 - screen text와 structured snapshot이 모두 생성된다.
 - artifact 포맷은 [Fixture와 Oracle 포맷](fixture-format.md)을 따른다.
 - snapshot이 renderer나 PTY 구현 세부사항을 몰라야 한다.
-- snapshot에 `schema=maru.snapshot.v0` 같은 버전 표시가 있다.
-- `future fields`를 어디에 추가할지 문서화되어 있다. cursor mode, style, alternate screen, scrollback이 붙어도 v0 consumer가 깨지지 않게 한다.
+- snapshot에 `schema=maru.snapshot.v1` 같은 버전 표시가 있다. (현재 코드가 실제로 내보내는 버전은 `maru.snapshot.v1`이다.)
+- `future fields`를 어디에 추가할지 문서화되어 있다. cursor mode, style, alternate screen, scrollback이 붙어도 기존 버전 consumer가 깨지지 않게 한다.
 
 아직 하지 않는다:
 
@@ -128,6 +128,9 @@ TDD 방식:
 - xterm 전체 호환성.
 - Kitty graphics protocol.
 - OSC/clipboard/advanced mouse mode 전체.
+- autowrap/line wrap(DECAWM pending-wrap). 현재 core는 마지막 열에서 셀을 덮어쓰며, 폭을 넘는 출력 보존은 이 단계 이후에 설계/테스트한다.
+- wide-character(East-Asian width/wcwidth) 셀 폭 처리. 현재는 모든 출력 가능 문자를 1열로 전진시키므로 한글/CJK/이모지가 어긋난다.
+- PTY read 경계에서 잘린 multi-byte UTF-8 처리. 현재 `write`는 버퍼 전체를 한 번에 검증하므로, 실제 forkpty(4단계)가 붙기 전에 증분 디코더가 필요하다.
 - Ghostty/libghostty-vt 코드 복사.
 
 ## 4단계: macOS `PtySession` 최소 구현
@@ -269,6 +272,11 @@ TDD 방식:
 
 - workspace restore 전체.
 - plugin ABI.
+
+이 단계에서 다루지 않고 별도로 확장하는 입력 영역:
+
+- 기본 terminal input 인코더의 modifier 처리(`Ctrl+letter` → C0 control, `Alt/Option` → meta-ESC). 현재 `encodeKey`는 `event.modifiers`를 읽지 않는다.
+- application-cursor-key 모드(DECCKM, `\x1bOA` vs `\x1b[A`)와 CSI-u/Kitty 키 인코딩. 이를 위해 `[4]u8` 키 버퍼는 더 긴 시퀀스를 담도록 확장해야 한다.
 
 ## 9단계: Workspace restore
 

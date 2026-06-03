@@ -107,7 +107,7 @@
 - test, debug log, replay, future inspector가 같은 terminal 상태를 보게 한다.
 - visible screen, cursor, size, pane/workspace metadata를 구조화한다.
 - 실패 artifact로 저장할 수 있는 안정된 텍스트 표현을 제공한다.
-- schema version을 포함한다. v0 consumer가 future field 추가 때문에 깨지지 않게 한다.
+- schema version을 포함한다. 현재 코드가 내보내는 버전은 `maru.snapshot.v1`이다. style, cursor mode, alternate screen, scrollback 같은 future field가 붙어도 기존 버전 consumer가 깨지지 않도록 추가 시 버전을 올린다.
 
 몰라야 하는 것:
 

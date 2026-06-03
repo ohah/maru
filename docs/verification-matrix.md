@@ -7,12 +7,13 @@
 | 영역 | 현재 검증 방법 | 산출물 | 의미 |
 | --- | --- | --- | --- |
 | 기본 Zig 빌드 | `mise run build` | 없음 | 프로젝트가 Zig 0.16.0으로 컴파일되는지 확인한다. |
-| 단위 테스트 | `mise run test` | 없음 | facade, config, terminal core 같은 작은 단위가 의도대로 동작하는지 확인한다. |
+| 단위 테스트 | `mise run test` | 없음 | facade, config, terminal core 같은 작은 단위가 의도대로 동작하는지 확인한다. 각 배럴(terminal/config/app/pty/renderer/plugin)에 refAllDecls 집계 블록을 두어 구현 파일의 inline 테스트가 모두 빌드에 포함된다. |
 | headless E2E | `mise run e2e` | `tests/artifacts/e2e/headless/*.screen.txt`, `*.snapshot.txt`, `*.stdout.txt` | 실제 프로세스 stdout이 terminal core 상태로 변환되는지 확인한다. |
-| recorded oracle 비교 | `mise run oracle` | `tests/artifacts/oracle/*/*.actual.txt`, `*.expected.txt`, `*.snapshot.txt`, `*.decoded.txt` | Maru의 화면 결과가 기록된 reference snapshot과 같은지 확인한다. |
+| recorded oracle 비교 | `mise run oracle` | `tests/artifacts/oracle/*/*.actual.txt`, `*.expected.txt`, `*.snapshot.txt`, `input.decoded.txt` | Maru의 화면 결과가 기록된 reference snapshot과 같은지 확인한다. 현재 golden은 사람이 손으로 기록한 기대값이며 실제 reference terminal 캡처가 아니다. |
 | 빠른 스트레스 | `mise run stress` | `tests/artifacts/stress/quick/*.screen.txt`, `*.snapshot.txt`, `*.summary.txt` | 대량 출력과 반복 resize가 terminal core 상태를 깨지 않는지 확인한다. |
 | 성능 예산 측정 | `mise run perf` | `tests/artifacts/perf/core.txt` | terminal core hot path가 보수적인 초기 성능 guardrail 안에 있는지 확인한다. |
-| 전체 확인 | `mise run check` | 위 산출물 전체 | format, unit, E2E, oracle, stress, build를 한 번에 확인한다. |
+| facade import 경계 | `mise run check-boundaries` | 없음 | terminal/renderer/plugin/pty가 금지된 레이어를 import하지 않는지 자동으로 확인한다. |
+| 전체 확인 | `mise run check` | 위 산출물 전체 | fmt-check, unit, E2E, oracle, stress, boundary, build를 한 번에 확인한다. |
 
 ## 구조화 스냅샷
 
@@ -38,16 +39,20 @@ fixture, golden, trace 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fix
 
 | 영역 | 불가 이유 | 현재 한계 | 손해 | 예정 검증 경로 |
 | --- | --- | --- | --- | --- |
-| 실제 외부 오라클 실행 | 구현 전, 환경 의존 | `xterm`, `libvterm`, `Alacritty`, Ghostty를 테스트 중 직접 실행하지 않는다. | recorded golden이 틀리면 Maru도 틀린 정답을 따라갈 수 있다. | 선택형 oracle runner를 추가하고, sanitized snapshot 갱신 흐름을 만든다. 새 필수 의존성은 사용자와 먼저 논의한다. |
+| 실제 외부 오라클 실행 | opt-in, 환경 의존 | `mise run oracle-ext`(libvterm), `mise run oracle-ghostty`(Ghostty libghostty-vt), `mise run oracle-alacritty`(Alacritty alacritty_terminal)가 golden을 검증한다(기본 `check`에는 미포함, 각 reference 설치/빌드 필요). xterm 직접 실행은 비현실적이라 없다. | opt-in을 돌리지 않으면 golden이 reference로 검증되지 않는다. | escape fixture가 늘면 세 reference로 golden을 생성/교차검증한다. |
 | PTY/forkpty controlled command | 구현 전 | 아직 `PTY` facade만 있고 실제 macOS PTY 연결은 없다. | shell process stdout, resize, lifecycle 문제를 검증하지 못한다. | `tests/integration/pty/`에서 deterministic command PTY test를 추가하고, 안정화 뒤 기본 `check` 편입을 검토한다. |
 | interactive shell smoke | 구현 전, 환경 의존 | 사용자의 login shell, prompt, dotfiles, locale에 따라 출력이 달라진다. | 실제 shell prompt, job control, shell startup escape 문제를 조기에 놓칠 수 있다. | `mise run pty` 같은 opt-in smoke로 분리하고 artifact를 남긴다. |
+| 터미널 내부 workload (tmux/vim/htop/less/ssh) | 구현 전, 환경 의존 | 실제 TUI 프로그램을 Maru PTY 안에서 돌리는 smoke가 아직 없다(PTY 미구현). 이들은 정답을 계산하는 오라클이 아니라 파서를 압박하는 workload다. | alt screen, 복잡한 CSI, resize/SIGWINCH, mouse 처리 회귀를 실제 프로그램으로 잡지 못한다. | PTY가 붙은 뒤 opt-in smoke로 tmux/vim/htop 등을 실행해 crash 없이 snapshot까지 도달하는지 확인한다. |
 | VT parser | 구현 전 | 현재 core는 UTF-8 텍스트와 일부 control만 처리한다. | ANSI 색상, cursor movement, alternate screen, mouse mode 같은 터미널 핵심 호환성을 검증하지 못한다. | 작은 ANSI fixture를 TDD로 추가하고 oracle snapshot을 함께 늘린다. |
+| autowrap/line wrap | 구현 전 | core는 마지막 열에서 셀을 덮어쓰고 줄바꿈하지 않는다(DECAWM 없음). | 폭을 넘는 셸 출력, 긴 프롬프트, man page가 손실된다. | step 3에서 pending-wrap 플래그 기반 DECAWM과 폭 초과 fixture를 추가한다. |
+| wide-character(East-Asian width) | 구현 전 | Cell에 width 개념이 없고 모든 출력 문자를 1열 전진시킨다. | 한글/CJK/이모지가 반칸 어긋나 TUI(vim/tmux/htop) 정렬이 깨진다. | Cell에 width 필드와 continuation cell을 도입하고 UAX#11 폭 테이블 + CJK/결합문자 fixture를 추가한다. |
+| PTY 경계 분할 UTF-8 | 구현 전 | `write`가 버퍼 전체를 한 번에 검증해, read 경계에 걸친 multi-byte는 청크째 버려질 수 있다. | 실제 forkpty가 붙으면 CJK/이모지가 read 경계에서 깨진다. | tail 버퍼 기반 증분 디코더로 교체하고, codepoint를 두 write로 쪼개는 fixture를 추가한다. |
+| modifier/application-cursor 키 인코딩 | 구현 전 | `encodeKey`가 modifiers를 읽지 않고 normal-mode 화살표만 낸다. | Ctrl+C→0x03, Alt meta, DECCKM(SS3), CSI-u가 없어 실제 대화형 프로그램 입력이 어긋난다. | C0 control/meta/DECCKM 분기와 modifier 단위 테스트를 추가하고 키 버퍼를 확장한다. |
 | GPU renderer | 구현 전, 환경 의존, 시스템 한계에 가까움 | Metal/WebGPU 렌더러가 아직 없다. 실제 화면 검증은 macOS window server, GPU driver, font stack 영향을 받는다. | 폰트, glyph atlas, frame pacing, dirty redraw 문제를 검증하지 못한다. | headless snapshot과 GUI screenshot artifact를 연결하는 app E2E를 추가한다. |
 | workspace/session restore | 구현 전 | 아직 session model만 초기 구조다. | cwd/env/command/layout restore가 실제 사용자 UX로 보장되지 않는다. | serialized workspace fixture와 restore E2E를 추가한다. |
 | Wasm plugin | 구현 전 | 현재 plugin registry는 no-op 구조다. | plugin boundary, 권한, event ABI, 실패 격리를 검증하지 못한다. | plugin hook API가 정해진 뒤 fixture plugin과 sandbox failure test를 추가한다. |
 | global shortcut | 구현 전, 환경 의존 | macOS 전역 핫키 등록과 충돌 검증이 아직 없다. | quick terminal/focus UX가 terminal input과 충돌하지 않는지 증명하지 못한다. | config conflict unit test, resolver test, macOS app smoke test를 추가한다. |
 | trace/replay | 구현 전 | snapshot은 있지만 event trace/replay는 아직 없다. | 실패를 시간순으로 재현하기 어렵다. | terminal input/output event를 domain event로 기록하고 replay test를 추가한다. |
-| boundary checker | 구현 전 | facade import 경계를 사람이 리뷰로만 확인한다. | `TerminalCore`가 PTY/platform/renderer를 몰래 import해도 자동으로 막지 못한다. | `tools/check-boundaries` 또는 `zig build check-boundaries`를 추가하고 `mise run check`에 연결한다. |
 | SSH workload | 구현 전, 환경 의존 | SSH 전용 integration은 아직 실행하지 않는다. 외부 네트워크나 특정 원격 서버에 묶이지 않는 방식이 필요하다. | 원격 shell, latency, locale, terminal mode 차이를 검증하지 못한다. | 로컬 테스트 서버나 opt-in 환경변수 기반 SSH smoke test를 추가한다. |
 | 긴 soak/제품 성능 예산 | 부분 구현, 환경 의존 | `mise run perf`는 core 기준만 측정한다. 앱 시작, 입력 지연, frame budget, RSS는 아직 없다. | GUI/PTY/renderer 성능 회귀는 아직 숫자로 실패시키지 못한다. | macOS host, PTY, renderer가 붙으면 startup, latency, memory, throughput 기준을 확장한다. |
 

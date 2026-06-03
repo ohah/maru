@@ -57,12 +57,9 @@ Renderer
 
 ## 개발 순서
 
-1. `TerminalCore` facade를 유지한 채 자체 VT parser를 만든다.
-2. [Fixture와 Oracle 포맷](fixture-format.md)에 맞춰 ANSI fixture와 golden test를 먼저 쌓는다.
-3. `forkpty`를 붙여 로컬 shell bytes를 core로 넣는다.
-4. `RenderSnapshot`을 Metal renderer로 그린다.
-5. 탭 모델과 action/keybinding/config를 얹는다.
-6. Ghostty, xterm, Alacritty, libvterm을 오라클로 비교한다.
+구체적인 구현 순서는 [실제 구현 계획](implementation-plan.md)을 단일 출처로 둔다.
+
+이전에는 parser를 먼저 만든다고 표현했지만, 실제 순서는 더 좁게 잡는다. 먼저 facade 계약과 snapshot/artifact 경계를 고정하고, v0 shell 경로에 필요한 parser 동작만 fixture 기반으로 작게 추가한다. 그다음 macOS PTY, pane 연결, headless E2E, renderer/app host 순서로 진행한다.
 
 ## 테스트 원칙
 

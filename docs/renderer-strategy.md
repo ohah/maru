@@ -18,6 +18,37 @@ TerminalCore
 
 이렇게 정하는 이유는 현재 Maru의 우선순위가 macOS-first, 가벼운 native shell, 런타임 의존성 0이기 때문이다. WebGPU-only로 시작하면 장기 이식성은 좋아지지만, native WebGPU 구현체(Dawn/wgpu-native/mach 계열)에 의존해야 하거나 직접 많은 glue를 만들어야 한다. 지금 단계에서는 그 비용이 터미널 본질보다 먼저 커진다.
 
+## 결정 기록
+
+2026-06-04 기준 결정:
+
+```text
+선택:
+  Metal-first
+
+유지할 경계:
+  RenderSnapshot -> DrawList -> Backend
+
+나중에 추가할 수 있는 것:
+  DrawList -> WebGPU backend
+
+지금 하지 않는 것:
+  WebGPU-only renderer
+  browser/Wasm target
+  native WebGPU runtime dependency
+```
+
+이 결정은 "WebGPU를 포기한다"는 뜻이 아니다. 초기 macOS 앱에서 WebGPU를 먼저 선택하지 않는다는 뜻이다.
+
+Maru가 지금 풀어야 할 1차 문제는 GPU API 통일이 아니라, PTY output이 `TerminalCore`, snapshot, artifact, renderer 입력까지 안정적으로 흐르는 것이다. WebGPU-first는 이 문제를 풀기 전에 graphics runtime 선택과 이식성 문제를 앞당긴다.
+
+WebGPU backend를 검토할 조건:
+
+- Metal backend가 `DrawList`만 소비하고 있다는 것이 테스트로 증명되어 있다.
+- renderer hot path가 PTY/parser/snapshot과 분리되어 있다.
+- Windows/Linux/browser target을 실제로 시작할 단계다.
+- 새 native WebGPU dependency를 추가해도 되는지 사용자와 별도 논의했다.
+
 ## WebGPU vs Metal
 
 터미널 렌더링은 일반적인 3D 앱보다 단순하다.

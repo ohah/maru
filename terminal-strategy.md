@@ -50,6 +50,8 @@ Maru    = 더 작고 단순한 네이티브 셸 + 쉬운 커스텀
 장기 웹:   Wasm + WebGPU backend, native 초기 renderer와 별도
 ```
 
+렌더러 선택의 단일 출처는 [렌더러 전략](docs/renderer-strategy.md)이다. 현재 결정은 macOS 초기 구현은 Metal-first, 장기 WebGPU는 `RenderSnapshot -> DrawList` 경계를 지킨 뒤 별도 backend로 검토하는 것이다.
+
 SwiftUI 레이아웃을 핵심으로 삼는 것이 아니다. Swift/AppKit은 macOS 앱으로서 필요한 얇은 호스트 레이어만 맡는다.
 
 Swift/AppKit이 맡을 것:

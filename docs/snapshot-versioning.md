@@ -53,7 +53,7 @@ Snapshot version은 제품 버전이 아니라 **테스트와 디버깅 데이�
 - dirty 상태는 `dirty start_row=<n> end_row=<n>` 또는 `dirty none` 중 하나다. `dirty none`은 renderer가 이미 변경 범위를 소비했거나 변경 범위가 없다는 뜻이다.
 - `cell-metadata` section은 width가 1이 아니거나 continuation cell이거나 combining mark가 있는 cell만 기록한다.
 - continuation cell은 앞 cell의 double-width glyph가 차지한 두 번째 cell이다. row text에는 중복 출력하지 않는다.
-- combining mark는 이전 printable cell에 붙는 zero-width codepoint다. cursor를 전진시키지 않는다.
+- combining mark는 직전에 출력된 printable cell에 붙는 zero-width codepoint다. cursor를 전진시키지 않으며, 마지막 열에서 cursor가 그 cell에 머물러도 같은 cell에 붙는다. 붙을 base가 없으면(스트림 시작, CR/LF 직후) 어디에도 기록되지 않는다.
 - 알 수 없는 semantic section을 만나면 실패한다.
 - `debug.` prefix를 가진 non-semantic line은 무시할 수 있다.
 

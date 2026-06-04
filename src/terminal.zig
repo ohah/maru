@@ -1,6 +1,7 @@
 pub const core = @import("terminal/core.zig");
 pub const input = @import("terminal/input.zig");
 pub const types = @import("terminal/types.zig");
+pub const width = @import("terminal/width.zig");
 
 pub const Cell = types.Cell;
 pub const Color = types.Color;
@@ -14,6 +15,7 @@ pub const Rgb = types.Rgb;
 pub const Size = types.Size;
 pub const Style = types.Style;
 pub const TerminalCore = core.TerminalCore;
+pub const cellWidth = width.cellWidth;
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

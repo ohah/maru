@@ -1,6 +1,7 @@
 const std = @import("std");
 const input = @import("input.zig");
 const types = @import("types.zig");
+const width = @import("width.zig");
 
 pub const TerminalCore = struct {
     allocator: std.mem.Allocator,
@@ -108,8 +109,13 @@ pub const TerminalCore = struct {
             for (0..self.size.cols) |col| {
                 var buffer: [4]u8 = undefined;
                 const cell = self.cells[self.index(row, col)];
+                if (cell.continuation) continue;
                 const len = try std.unicode.utf8Encode(cell.codepoint, &buffer);
                 try output.appendSlice(allocator, buffer[0..len]);
+                if (cell.combining) |combining| {
+                    const combining_len = try std.unicode.utf8Encode(combining, &buffer);
+                    try output.appendSlice(allocator, buffer[0..combining_len]);
+                }
             }
         }
 
@@ -126,6 +132,10 @@ pub const TerminalCore = struct {
             },
             else => {
                 if (codepoint < 0x20) return;
+                if (width.cellWidth(codepoint) == 0) {
+                    self.attachCombiningMark(codepoint);
+                    return;
+                }
                 self.putCell(codepoint);
             },
         }
@@ -183,12 +193,65 @@ pub const TerminalCore = struct {
         if (self.cursor.col >= self.size.cols) self.cursor.col = self.size.cols - 1;
         if (self.cursor.row >= self.size.rows) self.cursor.row = self.size.rows - 1;
 
-        self.cells[self.index(self.cursor.row, self.cursor.col)] = .{ .codepoint = codepoint };
+        const row = self.cursor.row;
+        const col = self.cursor.col;
+        const requested_width = width.cellWidth(codepoint);
+        // Without DECAWM/autowrap, a wide glyph cannot be represented at the
+        // last column. For this early core stage we degrade that edge case to a
+        // single visible cell instead of writing past the row. Normal in-row
+        // wide glyphs still get a continuation cell.
+        const cell_width: u2 = if (requested_width == 2 and col + 1 >= self.size.cols) 1 else requested_width;
+
+        self.clearCellForWrite(row, col);
+        if (cell_width == 2) self.clearCellForWrite(row, col + 1);
+
+        self.cells[self.index(row, col)] = .{
+            .codepoint = codepoint,
+            .width = cell_width,
+        };
+        if (cell_width == 2) {
+            self.cells[self.index(row, col + 1)] = .{
+                .width = 0,
+                .continuation = true,
+            };
+        }
         self.markDirty(self.cursor.row);
 
-        if (self.cursor.col + 1 < self.size.cols) {
-            self.cursor.col += 1;
+        if (self.cursor.col + cell_width < self.size.cols) {
+            self.cursor.col += cell_width;
+        } else {
+            self.cursor.col = self.size.cols - 1;
         }
+    }
+
+    fn attachCombiningMark(self: *TerminalCore, codepoint: u21) void {
+        if (self.size.cols == 0 or self.size.rows == 0) return;
+        if (self.cursor.col == 0) return;
+
+        var target_col = self.cursor.col - 1;
+        if (self.cells[self.index(self.cursor.row, target_col)].continuation and target_col > 0) {
+            target_col -= 1;
+        }
+
+        const target = &self.cells[self.index(self.cursor.row, target_col)];
+        if (target.continuation) return;
+        target.combining = codepoint;
+        self.markDirty(self.cursor.row);
+    }
+
+    fn clearCellForWrite(self: *TerminalCore, row: u16, col: u16) void {
+        const cell_index = self.index(row, col);
+        const cell = self.cells[cell_index];
+        if (cell.continuation and col > 0) {
+            const previous_index = self.index(row, col - 1);
+            if (self.cells[previous_index].width == 2) {
+                self.cells[previous_index] = .{};
+            }
+        }
+        if (cell.width == 2 and col + 1 < self.size.cols) {
+            self.cells[self.index(row, col + 1)] = .{};
+        }
+        self.cells[cell_index] = .{};
     }
 
     fn lineFeed(self: *TerminalCore) void {
@@ -298,7 +361,7 @@ test "terminal core preserves UTF-8 split across process read boundaries" {
 
     try std.testing.expect(std.mem.indexOf(u8, text, "한글") != null);
     try std.testing.expectEqual(@as(u16, 0), core.snapshot().cursor.row);
-    try std.testing.expectEqual(@as(u16, 2), core.snapshot().cursor.col);
+    try std.testing.expectEqual(@as(u16, 4), core.snapshot().cursor.col);
 }
 
 test "terminal core preserves four-byte UTF-8 split across multiple writes" {
@@ -315,7 +378,54 @@ test "terminal core preserves four-byte UTF-8 split across multiple writes" {
     defer std.testing.allocator.free(text);
 
     try std.testing.expect(std.mem.indexOf(u8, text, "go 🚀") != null);
-    try std.testing.expectEqual(@as(u16, 4), core.snapshot().cursor.col);
+    try std.testing.expectEqual(@as(u16, 5), core.snapshot().cursor.col);
+}
+
+test "terminal core stores wide characters with continuation cells" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
+    defer core.deinit();
+
+    // A terminal grid advances by cells, not by UTF-8 byte length or font
+    // advance. Korean/CJK characters occupy two cells, and the second cell
+    // must be marked as a continuation so cursor movement, snapshots, and the
+    // future renderer do not treat it as a separate printable character.
+    try core.write("A한B");
+
+    const snapshot = core.snapshot();
+    try std.testing.expectEqual(@as(u16, 4), snapshot.cursor.col);
+    try std.testing.expectEqual(@as(u21, 'A'), snapshot.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u2, 1), snapshot.cells[0].width);
+    try std.testing.expect(!snapshot.cells[0].continuation);
+    try std.testing.expectEqual(@as(u21, '한'), snapshot.cells[1].codepoint);
+    try std.testing.expectEqual(@as(u2, 2), snapshot.cells[1].width);
+    try std.testing.expect(!snapshot.cells[1].continuation);
+    try std.testing.expect(snapshot.cells[2].continuation);
+    try std.testing.expectEqual(@as(u2, 0), snapshot.cells[2].width);
+    try std.testing.expectEqual(@as(u21, 'B'), snapshot.cells[3].codepoint);
+
+    const text = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "A한B") != null);
+}
+
+test "terminal core attaches a combining mark without advancing the cursor" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // Combining marks are zero-width. They belong to the previous printable
+    // cell and must not move the cursor, otherwise prompts and editor grids
+    // drift when accents or other marks appear.
+    try core.write("e\u{0301}x");
+
+    const snapshot = core.snapshot();
+    try std.testing.expectEqual(@as(u16, 2), snapshot.cursor.col);
+    try std.testing.expectEqual(@as(u21, 'e'), snapshot.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 0x0301), snapshot.cells[0].combining.?);
+    try std.testing.expectEqual(@as(u21, 'x'), snapshot.cells[1].codepoint);
+
+    const text = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "e\u{0301}x") != null);
 }
 
 test "terminal core tab expansion stops at the row edge" {

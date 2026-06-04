@@ -6,7 +6,7 @@
 
 Snapshot version은 제품 버전이 아니라 **테스트와 디버깅 데이터 계약 버전**이다.
 
-현재 schema는 `maru.snapshot.v2`이다.
+현재 schema는 `maru.snapshot.v3`이다.
 
 ## 왜 필요한가
 
@@ -30,7 +30,7 @@ Snapshot version은 제품 버전이 아니라 **테스트와 디버깅 데이�
 - 기존 필드의 의미가 바뀐다.
 - cell 표현 방식이 바뀐다. 예: `text` 하나에서 `codepoint + width + continuation`으로 바뀐다.
 - cursor, style, alternate screen, scrollback을 reader가 다르게 해석해야 한다.
-- replay나 inspector가 기존 v2 reader로는 안전하게 읽을 수 없다.
+- replay나 inspector가 기존 reader로는 안전하게 읽을 수 없다.
 - 같은 terminal state가 기존 규칙과 다른 snapshot 의미를 갖게 된다.
 
 ## 버전을 유지할 수 있는 경우
@@ -45,12 +45,15 @@ Snapshot version은 제품 버전이 아니라 **테스트와 디버깅 데이�
 
 주의: version을 유지하려면 old consumer가 깨지지 않는다는 근거가 있어야 한다. 근거가 애매하면 version을 올리는 쪽이 안전하다.
 
-## v2 reader 규칙
+## v3 reader 규칙
 
-초기 v2 reader는 보수적으로 동작한다.
+초기 v3 reader는 보수적으로 동작한다.
 
-- 첫 줄 전체가 bare 토큰 `maru.snapshot.v2`인지 확인한다. `schema=` 같은 접두어 없이 첫 줄이 곧 schema 토큰이다(현재 코드가 내보내는 형식).
+- 첫 줄 전체가 bare 토큰 `maru.snapshot.v3`인지 확인한다. `schema=` 같은 접두어 없이 첫 줄이 곧 schema 토큰이다(현재 코드가 내보내는 형식).
 - dirty 상태는 `dirty start_row=<n> end_row=<n>` 또는 `dirty none` 중 하나다. `dirty none`은 renderer가 이미 변경 범위를 소비했거나 변경 범위가 없다는 뜻이다.
+- `cell-metadata` section은 width가 1이 아니거나 continuation cell이거나 combining mark가 있는 cell만 기록한다.
+- continuation cell은 앞 cell의 double-width glyph가 차지한 두 번째 cell이다. row text에는 중복 출력하지 않는다.
+- combining mark는 이전 printable cell에 붙는 zero-width codepoint다. cursor를 전진시키지 않는다.
 - 알 수 없는 semantic section을 만나면 실패한다.
 - `debug.` prefix를 가진 non-semantic line은 무시할 수 있다.
 
@@ -74,6 +77,6 @@ consumer 영향:
 ## 초기 테스트
 
 - snapshot text 첫 줄에 schema가 있다.
-- v2 reader가 v2 snapshot을 읽는다.
-- v2 reader가 모르는 semantic section을 만나면 실패한다.
+- v3 reader가 v3 snapshot을 읽는다.
+- v3 reader가 모르는 semantic section을 만나면 실패한다.
 - debug-only line 추가는 version bump 없이 허용된다.

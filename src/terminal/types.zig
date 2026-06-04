@@ -28,6 +28,9 @@ pub const Style = struct {
 pub const Cell = struct {
     codepoint: u21 = ' ',
     style: Style = .{},
+    width: u2 = 1,
+    continuation: bool = false,
+    combining: ?u21 = null,
 };
 
 pub const Cursor = struct {

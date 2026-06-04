@@ -56,6 +56,8 @@ fixture, golden, trace 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fix
 | SSH workload | 구현 전, 환경 의존 | SSH 전용 integration은 아직 실행하지 않는다. 외부 네트워크나 특정 원격 서버에 묶이지 않는 방식이 필요하다. | 원격 shell, latency, locale, terminal mode 차이를 검증하지 못한다. | 로컬 테스트 서버나 opt-in 환경변수 기반 SSH smoke test를 추가한다. |
 | 긴 soak/제품 성능 예산 | 부분 구현, 환경 의존 | `mise run perf`는 core 기준만 측정한다. 앱 시작, 입력 지연, frame budget, RSS는 아직 없다. | GUI/PTY/renderer 성능 회귀는 아직 숫자로 실패시키지 못한다. | macOS host, PTY, renderer가 붙으면 startup, latency, memory, throughput 기준을 확장한다. |
 
+호환성/보안 기본값(`TERM`, OSC52, bracketed paste, shell integration, command restore, plugin permission, update/telemetry, global shortcut)은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md)의 검증 계획을 따른다. 새 구현 PR이 이 기본값을 바꾸려면 사용자와 먼저 논의하고, 이 매트릭스의 자동/수동 검증 경로도 함께 갱신한다.
+
 ## PR마다 확인할 질문
 
 - 새 기능이 이 표의 어느 검증 경로에 연결되는가?

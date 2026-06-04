@@ -182,7 +182,7 @@ trace schema와 replay 동작은 [Trace와 Replay](trace-replay.md)를 따른다
 
 ## Plugin 경계
 
-초기 구현에서는 Wasm plugin을 구현하지 않는다. 다만 나중에 plugin이 들어와도 core를 직접 만지지 못하게 다음 방향만 유지한다.
+초기 구현에서는 Wasm plugin을 구현하지 않는다. 다만 나중에 plugin이 들어와도 core를 직접 만지지 못하게 다음 방향만 유지한다. 제품 정책과 권한 기본값은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#plugin--wasm)을 따른다.
 
 - plugin은 domain event와 action facade를 통해서만 상호작용한다.
 - plugin은 `TerminalCore` private storage, PTY handle, renderer resource를 직접 받지 않는다.
@@ -192,7 +192,7 @@ Plugin ABI나 권한 모델을 확정해야 하는 순간이 오면, 구현 전�
 
 ## 키 입력과 글로벌 핫키 경계
 
-글로벌 핫키는 platform/app layer 책임이다. `TerminalCore`와 `PtySession`은 글로벌 핫키가 있다는 사실을 몰라야 한다.
+글로벌 핫키는 platform/app layer 책임이다. `TerminalCore`와 `PtySession`은 글로벌 핫키가 있다는 사실을 몰라야 한다. 제품 정책은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#global-shortcut)을 따른다.
 
 계약:
 

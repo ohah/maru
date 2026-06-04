@@ -186,7 +186,7 @@ Esc      vim, readline, shell mode 전환에 자주 쓰인다.
 
 ## 초기 범위
 
-초기 구현에서는 글로벌 핫키를 구현하지 않는다. 지금은 다음 경계만 유지한다.
+초기 구현에서는 글로벌 핫키를 구현하지 않는다. 제품 정책은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#global-shortcut)을 따른다. 지금은 다음 경계만 유지한다.
 
 - `Action`/keybinding config가 terminal input과 분리될 수 있어야 한다.
 - `PtySession`은 이미 해석된 terminal input bytes만 받는다.

@@ -21,6 +21,7 @@
 - [Trace와 Replay](docs/trace-replay.md)
 - [PTY 운영 모델](docs/pty-operating-model.md)
 - [Workspace Restore 전략](docs/workspace-restore.md)
+- [터미널 호환성/보안 정책](docs/terminal-compatibility-policy.md)
 - [키 입력과 단축키 경계](docs/key-input-and-shortcuts.md)
 
 ## 설계 문서
@@ -41,6 +42,7 @@
 - [키 입력과 단축키 경계](docs/key-input-and-shortcuts.md)
 - [PTY 운영 모델](docs/pty-operating-model.md)
 - [Workspace Restore 전략](docs/workspace-restore.md)
+- [터미널 호환성/보안 정책](docs/terminal-compatibility-policy.md)
 - [메모리 전략](docs/architecture.md#메모리-전략)
 - [터미널 전략](terminal-strategy.md)
 - [디버깅/로그/리플레이 전략](terminal-strategy.md#12-디버깅로그리플레이-전략)

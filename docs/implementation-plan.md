@@ -294,6 +294,7 @@ TDD 방식:
 - 최근 workspace 빠른 복구.
 - repo별 기본 레이아웃과 scratch terminal 정책.
 - 저장 대상, env redaction, command restore 정책은 [Workspace Restore 전략](workspace-restore.md)을 따른다.
+- command 자동 재실행 금지와 shell integration opt-in 정책은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md)을 따른다.
 
 TDD 방식:
 
@@ -313,6 +314,7 @@ TDD 방식:
 
 - plugin은 domain event와 action facade로만 상호작용한다.
 - plugin이 `TerminalCore` private storage, PTY handle, renderer resource를 직접 만지지 못하게 한다.
+- v1에는 Wasm runtime을 넣지 않고, 장기 permission model 경계만 유지한다.
 
 TDD 방식:
 
@@ -322,7 +324,7 @@ TDD 방식:
 
 완료 기준:
 
-- plugin ABI와 권한 모델은 구현 전에 사용자와 별도 논의한다.
+- plugin ABI와 권한 모델은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#plugin--wasm)의 capability 방향을 기준으로 하되, 구현 전에 사용자와 별도 논의한다.
 - plugin 실패가 surface/window 전체를 죽이지 않는다.
 
 ## 현재 문서에서 정리해야 할 점

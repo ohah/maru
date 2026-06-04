@@ -86,16 +86,17 @@ snapshot schema version을 언제 유지하고 언제 올릴지는 [Snapshot Ver
 tests/fixtures/traces/*.trace.txt
 ```
 
-직렬화 포맷의 구현은 나중이지만, 최소 event 어휘는 지금 고정한다. step 4(PtySession) 이후 코드가 기능마다 ad-hoc trace 포맷을 만들지 않도록, 다음 네 가지 event 이름과 인자를 확정한다.
+직렬화 구현은 나중이지만, fixture 파일은 [Trace와 Replay](trace-replay.md)의 `maru.trace.v1` 형식을 따른다. step 4(PtySession) 이후 코드가 기능마다 ad-hoc trace 포맷을 만들지 않도록, schema token, event index, surface id, event kind를 지금 고정한다.
 
 ```text
-output escaped-bytes
-input escaped-bytes
-resize cols rows
-process-exit code
+maru.trace.v1
+event 1 output surface=1 bytes="hello\r\n"
+event 2 input surface=1 bytes="ls\r"
+event 3 resize surface=1 cols=120 rows=40
+event 4 process-exit surface=1 code=0
 ```
 
-이 어휘를 바꾸거나 새 event를 추가할 때는, 직렬화 구현 전이라도 먼저 `docs/facade-contracts.md`의 `Trace/Event` 계약을 갱신한 뒤 진행한다.
+event kind는 `output`, `input`, `resize`, `process-exit` 네 가지를 초기 어휘로 둔다. 이 어휘를 바꾸거나 새 event를 추가할 때는, 직렬화 구현 전이라도 먼저 `docs/facade-contracts.md`의 `Trace/Event` 계약을 갱신한 뒤 진행한다.
 
 trace가 어떤 기능이고 replay가 어떻게 동작하는지는 [Trace와 Replay](trace-replay.md)를 따른다.
 

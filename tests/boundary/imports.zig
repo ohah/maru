@@ -13,8 +13,9 @@ const std = @import("std");
 //     예) pty/plugin -> terminal. pty는 terminal.Size 같은 공개 타입은 써도 되지만
 //     terminal/core.zig 같은 내부 구현은 만지면 안 된다.
 //
-// 지금은 src 트리가 작고 알려져 있어 파일 목록을 직접 적는다.
-// 후속 작업: 디렉터리 워킹으로 바꿔 새 파일을 자동으로 포함한다.
+// 새 파일이 추가될 때마다 이 테스트 파일을 고치는 방식은 쉽게 빠뜨린다.
+// 그래서 facade barrel 파일은 명시하되, 구현 폴더는 재귀적으로 훑어 새
+// `*.zig` 파일도 자동으로 경계 검사를 받게 한다.
 
 const Forbidden = struct {
     layer: []const u8,
@@ -24,19 +25,16 @@ const Forbidden = struct {
 
 const Rule = struct {
     layer: []const u8,
-    files: []const []const u8,
+    barrel: []const u8,
+    implementation_dir: []const u8,
     forbidden: []const Forbidden,
 };
 
 const rules = [_]Rule{
     .{
         .layer = "terminal",
-        .files = &.{
-            "src/terminal.zig",
-            "src/terminal/core.zig",
-            "src/terminal/input.zig",
-            "src/terminal/types.zig",
-        },
+        .barrel = "src/terminal.zig",
+        .implementation_dir = "src/terminal",
         .forbidden = &.{
             .{ .layer = "pty" },
             .{ .layer = "platform" },
@@ -45,12 +43,14 @@ const rules = [_]Rule{
     },
     .{
         .layer = "renderer",
-        .files = &.{ "src/renderer.zig", "src/renderer/types.zig" },
+        .barrel = "src/renderer.zig",
+        .implementation_dir = "src/renderer",
         .forbidden = &.{.{ .layer = "pty" }},
     },
     .{
         .layer = "plugin",
-        .files = &.{ "src/plugin.zig", "src/plugin/registry.zig" },
+        .barrel = "src/plugin.zig",
+        .implementation_dir = "src/plugin",
         .forbidden = &.{
             .{ .layer = "pty" },
             .{ .layer = "terminal", .private_only = true },
@@ -58,7 +58,8 @@ const rules = [_]Rule{
     },
     .{
         .layer = "pty",
-        .files = &.{ "src/pty.zig", "src/pty/types.zig" },
+        .barrel = "src/pty.zig",
+        .implementation_dir = "src/pty",
         .forbidden = &.{.{ .layer = "terminal", .private_only = true }},
     },
 };
@@ -68,40 +69,71 @@ test "facade layers do not import forbidden layers" {
     var violations: usize = 0;
 
     for (rules) |rule| {
-        for (rule.files) |path| {
-            const text = std.Io.Dir.cwd().readFileAlloc(
-                std.testing.io,
-                path,
-                allocator,
-                .limited(256 * 1024),
-            ) catch |err| {
-                std.debug.print("boundary check could not read {s}: {s}\n", .{ path, @errorName(err) });
-                return err;
-            };
-            defer allocator.free(text);
-
-            var index: usize = 0;
-            const marker = "@import(\"";
-            while (std.mem.indexOfPos(u8, text, index, marker)) |start| {
-                const path_start = start + marker.len;
-                const end = std.mem.indexOfScalarPos(u8, text, path_start, '"') orelse break;
-                const import_path = text[path_start..end];
-                index = end + 1;
-
-                for (rule.forbidden) |forbidden| {
-                    if (importTraversesLayer(import_path, forbidden)) {
-                        std.debug.print(
-                            "boundary violation: {s} ({s} layer) imports forbidden layer '{s}' via \"{s}\"\n",
-                            .{ path, rule.layer, forbidden.layer, import_path },
-                        );
-                        violations += 1;
-                    }
-                }
-            }
-        }
+        try checkFile(allocator, rule, rule.barrel, &violations);
+        try checkDirectory(allocator, rule, rule.implementation_dir, &violations);
     }
 
     try std.testing.expectEqual(@as(usize, 0), violations);
+}
+
+fn checkDirectory(
+    allocator: std.mem.Allocator,
+    rule: Rule,
+    dir_path: []const u8,
+    violations: *usize,
+) !void {
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, dir_path, .{ .iterate = true });
+    defer dir.close(std.testing.io);
+
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.path });
+        defer allocator.free(path);
+
+        try checkFile(allocator, rule, path, violations);
+    }
+}
+
+fn checkFile(
+    allocator: std.mem.Allocator,
+    rule: Rule,
+    path: []const u8,
+    violations: *usize,
+) !void {
+    const text = std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        path,
+        allocator,
+        .limited(256 * 1024),
+    ) catch |err| {
+        std.debug.print("boundary check could not read {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
+    defer allocator.free(text);
+
+    var index: usize = 0;
+    const marker = "@import(\"";
+    while (std.mem.indexOfPos(u8, text, index, marker)) |start| {
+        const path_start = start + marker.len;
+        const end = std.mem.indexOfScalarPos(u8, text, path_start, '"') orelse break;
+        const import_path = text[path_start..end];
+        index = end + 1;
+
+        for (rule.forbidden) |forbidden| {
+            if (importTraversesLayer(import_path, forbidden)) {
+                std.debug.print(
+                    "boundary violation: {s} ({s} layer) imports forbidden layer '{s}' via \"{s}\"\n",
+                    .{ path, rule.layer, forbidden.layer, import_path },
+                );
+                violations.* += 1;
+            }
+        }
+    }
 }
 
 fn importTraversesLayer(import_path: []const u8, forbidden: Forbidden) bool {

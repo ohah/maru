@@ -80,7 +80,7 @@ src/plugin/**    -> src/terminal/** private 구현, src/pty/** handle import 금
 
 - 실패했을 때 볼 수 있는 공통 산출물을 먼저 만든다.
 - 테스트, 로그, replay, future inspector가 같은 도메인 데이터를 소비하게 한다.
-- snapshot schema는 `maru.snapshot.v1`로 versioning한다. 이 버전은 제품 버전이 아니라 테스트 산출물과 replay consumer가 읽는 데이터 포맷 버전이다.
+- snapshot schema는 `maru.snapshot.v2`로 versioning한다. 이 버전은 제품 버전이 아니라 테스트 산출물과 replay consumer가 읽는 데이터 포맷 버전이다.
 - version 유지/증가 기준은 [Snapshot Versioning](snapshot-versioning.md)을 따른다.
 
 TDD 방식:
@@ -95,7 +95,7 @@ TDD 방식:
 - screen text와 structured snapshot이 모두 생성된다.
 - artifact 포맷은 [Fixture와 Oracle 포맷](fixture-format.md)을 따른다.
 - snapshot이 renderer나 PTY 구현 세부사항을 몰라야 한다.
-- snapshot 첫 줄에 bare 토큰 `maru.snapshot.v1`이 버전 표시로 들어간다(`schema=` 접두어 없이 첫 줄 전체가 schema 토큰, 현재 코드 기준).
+- snapshot 첫 줄에 bare 토큰 `maru.snapshot.v2`가 버전 표시로 들어간다(`schema=` 접두어 없이 첫 줄 전체가 schema 토큰, 현재 코드 기준).
 - `future fields`를 어디에 추가할지 문서화되어 있다. cursor mode, style, alternate screen, scrollback이 붙어도 기존 버전 consumer가 깨지지 않게 한다.
 
 아직 하지 않는다:

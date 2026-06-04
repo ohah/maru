@@ -73,8 +73,9 @@ test "stress: repeated resize and writes keep storage invariants valid" {
         try std.testing.expectEqual(@as(usize, cols) * @as(usize, rows), snapshot.cells.len);
         try std.testing.expect(snapshot.cursor.row < rows);
         try std.testing.expect(snapshot.cursor.col < cols);
-        try std.testing.expect(snapshot.dirty.start_row <= snapshot.dirty.end_row);
-        try std.testing.expect(snapshot.dirty.end_row < rows);
+        const dirty = snapshot.dirty orelse return error.ExpectedDirtyRegion;
+        try std.testing.expect(dirty.start_row <= dirty.end_row);
+        try std.testing.expect(dirty.end_row < rows);
     }
 
     const screen = try core.dumpUtf8(allocator);

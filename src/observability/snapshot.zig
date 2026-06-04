@@ -19,16 +19,20 @@ pub fn renderTerminalSnapshot(
 }
 
 fn writeHeader(writer: *std.Io.Writer, snapshot: terminal.RenderSnapshot) !void {
-    try writer.writeAll("maru.snapshot.v1\n");
+    try writer.writeAll("maru.snapshot.v2\n");
     try writer.print("size cols={d} rows={d}\n", .{ snapshot.size.cols, snapshot.size.rows });
     try writer.print(
         "cursor row={d} col={d} visible={}\n",
         .{ snapshot.cursor.row, snapshot.cursor.col, snapshot.cursor.visible },
     );
-    try writer.print(
-        "dirty start_row={d} end_row={d}\n",
-        .{ snapshot.dirty.start_row, snapshot.dirty.end_row },
-    );
+    if (snapshot.dirty) |dirty| {
+        try writer.print(
+            "dirty start_row={d} end_row={d}\n",
+            .{ dirty.start_row, dirty.end_row },
+        );
+    } else {
+        try writer.writeAll("dirty none\n");
+    }
 }
 
 fn writeRows(writer: *std.Io.Writer, snapshot: terminal.RenderSnapshot) !void {
@@ -128,13 +132,27 @@ test "terminal snapshot records state that plain text cannot prove" {
     const rendered = try renderTerminalSnapshot(std.testing.allocator, core.snapshot());
     defer std.testing.allocator.free(rendered);
 
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "maru.snapshot.v1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "maru.snapshot.v2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "size cols=6 rows=2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "cursor row=1 col=1 visible=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "dirty start_row=0 end_row=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "row 0: |hi    |\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "row 1: |!     |\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "styled-cells\nnone\n") != null);
+}
+
+test "terminal snapshot records clean dirty state explicitly" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 1 });
+    defer core.deinit();
+
+    // 깨끗한 dirty 상태도 artifact에 보여야 한다. 그래야 renderer 테스트가
+    // "아무 것도 안 바뀜"과 "첫 번째 cell이 바뀜"을 구분할 수 있다.
+    core.clearDirty();
+
+    const rendered = try renderTerminalSnapshot(std.testing.allocator, core.snapshot());
+    defer std.testing.allocator.free(rendered);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "dirty none\n") != null);
 }
 
 test "terminal snapshot records styled cells separately from visible text" {

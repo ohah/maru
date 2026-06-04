@@ -37,13 +37,13 @@ pub const Cursor = struct {
 };
 
 pub const DirtyRegion = struct {
-    start_row: u16 = 0,
-    end_row: u16 = 0,
+    start_row: u16,
+    end_row: u16,
 };
 
 pub const RenderSnapshot = struct {
     size: Size,
     cursor: Cursor = .{},
     cells: []const Cell = &.{},
-    dirty: DirtyRegion = .{},
+    dirty: ?DirtyRegion = null,
 };

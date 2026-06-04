@@ -23,6 +23,8 @@ src/
   pty.zig               process/PTY facade
   renderer.zig          render facade
   terminal.zig          terminal-core facade
+  observability.zig     debug event/trace/snapshot facade
+  plugin.zig            action/plugin facade
 
   app/                  window/surface처럼 앱 상태 책임별 구현
   config/               action parsing, theme/font config
@@ -88,4 +90,7 @@ tools/
 ```text
 .github/
   pull_request_template.md  PR마다 전략 영향 평가와 한계 보고를 빠뜨리지 않게 하는 템플릿
+  workflows/
+    ci.yml                  check 게이트(`mise run check`: fmt-check/unit/e2e/recorded-oracle/stress/facade 경계/build) + opt-in 외부 오라클(libvterm, Alacritty)
+    pr-metadata.yml         라벨 1개 이상 + assignee=ohah 강제(required check 지정은 branch protection에서 한다)
 ```

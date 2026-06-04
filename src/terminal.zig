@@ -11,6 +11,7 @@ pub const Key = input.Key;
 pub const KeyEvent = input.KeyEvent;
 pub const ModifierSet = input.ModifierSet;
 pub const RenderSnapshot = types.RenderSnapshot;
+pub const RowCodepoints = types.RowCodepoints;
 pub const Rgb = types.Rgb;
 pub const Size = types.Size;
 pub const Style = types.Style;

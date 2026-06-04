@@ -41,12 +41,9 @@ fn writeRows(writer: *std.Io.Writer, snapshot: terminal.RenderSnapshot) !void {
 
     for (0..snapshot.size.rows) |row| {
         try writer.print("row {d}: |", .{row});
-        for (0..snapshot.size.cols) |col| {
-            const cell = snapshot.cells[index(snapshot.size, row, col)];
-            if (cell.continuation) continue;
-            try writeCodepoint(writer, cell.codepoint);
-            if (cell.combining) |combining| try writeCodepoint(writer, combining);
-        }
+        const row_start = index(snapshot.size, row, 0);
+        var codepoints: terminal.RowCodepoints = .{ .cells = snapshot.cells[row_start..][0..snapshot.size.cols] };
+        while (codepoints.next()) |codepoint| try writeCodepoint(writer, codepoint);
         try writer.writeAll("|\n");
     }
 }

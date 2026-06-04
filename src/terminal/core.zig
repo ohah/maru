@@ -11,6 +11,13 @@ pub const TerminalCore = struct {
     dirty: ?types.DirtyRegion = null,
     utf8_tail: [4]u8 = undefined,
     utf8_tail_len: usize = 0,
+    // The cell that received the most recent printable codepoint, so a
+    // following zero-width combining mark attaches to the real base glyph
+    // instead of being guessed from the cursor. The cursor is ambiguous: it
+    // advances past the base normally, but parks *on* the base at the last
+    // column (no autowrap) and moves to a fresh row after a line feed. Reset
+    // by anything that ends the current grapheme run (CR/LF/backspace/resize).
+    last_print: ?struct { row: u16, col: u16 } = null,
 
     pub fn init(allocator: std.mem.Allocator, size: types.Size) !TerminalCore {
         const cells = try allocator.alloc(types.Cell, cellCount(size));
@@ -64,6 +71,11 @@ pub const TerminalCore = struct {
         self.cells = next_cells;
         self.cursor = .{};
         self.dirty = fullDirty(next_size);
+        // The new buffer invalidates any remembered print position, and a
+        // partial UTF-8 tail captured against the old grid must not leak into
+        // the first write after a resize.
+        self.last_print = null;
+        self.utf8_tail_len = 0;
     }
 
     pub fn snapshot(self: *const TerminalCore) types.RenderSnapshot {
@@ -106,16 +118,12 @@ pub const TerminalCore = struct {
 
         for (0..self.size.rows) |row| {
             if (row != 0) try output.append(allocator, '\n');
-            for (0..self.size.cols) |col| {
+            const row_start = self.index(row, 0);
+            var codepoints: types.RowCodepoints = .{ .cells = self.cells[row_start..][0..self.size.cols] };
+            while (codepoints.next()) |codepoint| {
                 var buffer: [4]u8 = undefined;
-                const cell = self.cells[self.index(row, col)];
-                if (cell.continuation) continue;
-                const len = try std.unicode.utf8Encode(cell.codepoint, &buffer);
+                const len = try std.unicode.utf8Encode(codepoint, &buffer);
                 try output.appendSlice(allocator, buffer[0..len]);
-                if (cell.combining) |combining| {
-                    const combining_len = try std.unicode.utf8Encode(combining, &buffer);
-                    try output.appendSlice(allocator, buffer[0..combining_len]);
-                }
             }
         }
 
@@ -124,11 +132,27 @@ pub const TerminalCore = struct {
 
     fn writeCodepoint(self: *TerminalCore, codepoint: u21) void {
         switch (codepoint) {
-            '\r' => self.cursor.col = 0,
-            '\n' => self.lineFeed(),
+            '\r' => {
+                self.cursor.col = 0;
+                self.last_print = null;
+            },
+            '\n' => {
+                self.lineFeed();
+                self.last_print = null;
+            },
             '\t' => self.writeTab(),
             0x08 => {
                 if (self.cursor.col > 0) self.cursor.col -= 1;
+                // Stepping onto a wide glyph's continuation cell would strand
+                // the cursor inside the glyph, so a following write would clear
+                // its leading half and leave a gap. Move to the leading cell so
+                // the next write replaces the whole glyph cleanly.
+                if (self.cursor.col > 0 and
+                    self.cells[self.index(self.cursor.row, self.cursor.col)].continuation)
+                {
+                    self.cursor.col -= 1;
+                }
+                self.last_print = null;
             },
             else => {
                 if (codepoint < 0x20) return;
@@ -215,6 +239,7 @@ pub const TerminalCore = struct {
                 .continuation = true,
             };
         }
+        self.last_print = .{ .row = row, .col = col };
         self.markDirty(self.cursor.row);
 
         if (self.cursor.col + cell_width < self.size.cols) {
@@ -225,18 +250,16 @@ pub const TerminalCore = struct {
     }
 
     fn attachCombiningMark(self: *TerminalCore, codepoint: u21) void {
-        if (self.size.cols == 0 or self.size.rows == 0) return;
-        if (self.cursor.col == 0) return;
-
-        var target_col = self.cursor.col - 1;
-        if (self.cells[self.index(self.cursor.row, target_col)].continuation and target_col > 0) {
-            target_col -= 1;
-        }
-
-        const target = &self.cells[self.index(self.cursor.row, target_col)];
-        if (target.continuation) return;
-        target.combining = codepoint;
-        self.markDirty(self.cursor.row);
+        // A combining mark is zero-width and belongs to the most recently
+        // printed base cell, wherever the cursor ended up. Deriving the base
+        // from the cursor was wrong at the last column (cursor parks on the
+        // base, so cursor-1 pointed at the previous glyph) and after a line
+        // feed (cursor sat over a blank cell on the new row). With no base on
+        // the current run (stream start, or right after CR/LF), the mark has
+        // nothing to attach to and is dropped.
+        const last = self.last_print orelse return;
+        self.cells[self.index(last.row, last.col)].combining = codepoint;
+        self.markDirty(last.row);
     }
 
     fn clearCellForWrite(self: *TerminalCore, row: u16, col: u16) void {
@@ -426,6 +449,63 @@ test "terminal core attaches a combining mark without advancing the cursor" {
     const text = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "e\u{0301}x") != null);
+}
+
+test "terminal core attaches a combining mark to a base char in the last column" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 3, .rows = 1 });
+    defer core.deinit();
+
+    // Without autowrap the cursor parks *on* the base glyph when it lands in
+    // the last column, so deriving the base from cursor-1 attached the accent
+    // to the previous cell. The mark must land on the actual last-printed cell.
+    try core.write("abe\u{0301}");
+
+    const snapshot = core.snapshot();
+    try std.testing.expectEqual(@as(u21, 'b'), snapshot.cells[1].codepoint);
+    try std.testing.expect(snapshot.cells[1].combining == null);
+    try std.testing.expectEqual(@as(u21, 'e'), snapshot.cells[2].codepoint);
+    try std.testing.expectEqual(@as(u21, 0x0301), snapshot.cells[2].combining.?);
+
+    const text = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "abe\u{0301}") != null);
+}
+
+test "terminal core drops a combining mark with no base on the current row" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+
+    // A line feed ends the grapheme run and does not reset the column, so the
+    // cursor sits over a blank cell on the new row. A combining mark there has
+    // no base and must be dropped instead of accenting that blank cell.
+    try core.write("A\n\u{0301}");
+
+    const snapshot = core.snapshot();
+    try std.testing.expectEqual(@as(u21, 'A'), snapshot.cells[0].codepoint);
+    try std.testing.expect(snapshot.cells[0].combining == null);
+    for (snapshot.cells) |cell| try std.testing.expect(cell.combining == null);
+}
+
+test "terminal core backspaces over a wide glyph onto its leading cell" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // Backspace lands one column left, which is a wide glyph's continuation
+    // cell. Parking there would make the next write clear the leading half and
+    // leave a gap; instead the cursor steps to the leading cell so the write
+    // replaces the whole glyph cleanly.
+    try core.write("한\u{08}X");
+
+    const snapshot = core.snapshot();
+    try std.testing.expectEqual(@as(u21, 'X'), snapshot.cells[0].codepoint);
+    try std.testing.expect(!snapshot.cells[0].continuation);
+    try std.testing.expect(!snapshot.cells[1].continuation);
+    try std.testing.expectEqual(@as(u16, 1), snapshot.cursor.col);
+
+    const text = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "한") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "X") != null);
 }
 
 test "terminal core tab expansion stops at the row edge" {

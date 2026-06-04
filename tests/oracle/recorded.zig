@@ -12,6 +12,7 @@ const Case = struct {
     name: []const u8,
     size: maru.terminal.Size,
     input_fixture_path: []const u8,
+    write_chunks: ?[]const usize = null,
     oracles: []const RecordedOracle,
 };
 
@@ -45,6 +46,19 @@ test "recorded terminal oracle snapshots match Maru output" {
                 },
             },
         },
+        .{
+            .name = "split_utf8",
+            .size = .{ .cols = 9, .rows = 1 },
+            .input_fixture_path = "tests/fixtures/ansi/split_utf8.ansi",
+            .write_chunks = &.{ 1, 2, 1, 3, 4, 1 },
+            .oracles = &.{
+                .{
+                    .name = "xterm-compatible",
+                    .source = "recorded expectation for UTF-8 text split across process read boundaries",
+                    .expected_screen = "tests/golden/screen/xterm/split_utf8.txt",
+                },
+            },
+        },
     };
 
     inline for (cases) |case| {
@@ -69,7 +83,7 @@ fn compareCase(case: Case) !void {
     const input = try decodeEscapedFixture(allocator, input_fixture);
     defer allocator.free(input);
 
-    try core.write(input);
+    try writeInput(&core, input, case.write_chunks);
 
     const actual = try core.dumpUtf8(allocator);
     defer allocator.free(actual);
@@ -123,6 +137,26 @@ fn compareCase(case: Case) !void {
             .{ case.name, oracle.name, oracle.source },
         );
         try std.testing.expectEqualStrings(goldenText(expected_file), actual);
+    }
+}
+
+fn writeInput(core: *maru.terminal.TerminalCore, input: []const u8, chunks: ?[]const usize) !void {
+    const chunk_pattern = chunks orelse {
+        try core.write(input);
+        return;
+    };
+
+    // Recorded oracle cases normally write all bytes at once. This optional
+    // path proves stream behavior: process reads may cut text at any byte, and
+    // the terminal core must still end at the same screen snapshot.
+    var offset: usize = 0;
+    var chunk_index: usize = 0;
+    while (offset < input.len) {
+        const wanted = chunk_pattern[chunk_index % chunk_pattern.len];
+        const end = @min(input.len, offset + wanted);
+        try core.write(input[offset..end]);
+        offset = end;
+        chunk_index += 1;
     }
 }
 

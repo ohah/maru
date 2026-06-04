@@ -51,7 +51,7 @@ tests/
   oracle/               recorded reference terminal snapshot 비교
   stress/               대량 출력, 반복 resize, hot path 안정성 테스트
   integration/
-    pty/                forkpty, process, resize propagation
+    pty/                openpty, process, resize propagation
     ssh/                ssh localhost/통제된 원격 환경 smoke
   e2e/
     headless.zig        real process -> TerminalCore -> screen snapshot

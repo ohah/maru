@@ -122,10 +122,10 @@ TerminalCore
   - render snapshot
   - AppKit 없음
   - Metal 직접 노출 없음
-  - forkpty를 앱 코드에 직접 노출하지 않음
+  - openpty/process lifecycle을 앱 코드에 직접 노출하지 않음
 
 PtyBackend
-  - macOS: forkpty
+  - macOS: openpty
   - Windows: ConPTY later
   - Web: WebSocket remote PTY later
 
@@ -438,7 +438,7 @@ Maru 차별화:
 
 통합 테스트 영역:
 
-- `forkpty`
+- `openpty`
 - shell command execution
 - resize -> `TIOCSWINSZ`
 - `ssh localhost`
@@ -564,7 +564,7 @@ SSH에서 확인할 것:
   facade 계약, snapshot/artifact, headless bytes -> terminal core
 
 4-6주:
-  macOS forkpty, SurfaceRuntime 연결, deterministic headless E2E
+  macOS openpty, SurfaceRuntime 연결, deterministic headless E2E
 
 8-10주:
   RenderSnapshot -> DrawList, Metal smoke, 입력/resize 기본 경로
@@ -590,7 +590,7 @@ SSH에서 확인할 것:
 1. facade 계약과 import boundary
 2. snapshot/artifact
 3. 초기 TerminalCore fixture
-4. macOS forkpty
+4. macOS openpty
 5. SurfaceRuntime 연결
 6. headless E2E
 7. RenderSnapshot -> DrawList -> Metal

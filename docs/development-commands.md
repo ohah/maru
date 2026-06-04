@@ -22,6 +22,7 @@ Maru 작업에서 사용하는 기본 명령이다.
 - 빠른 스트레스 테스트: `mise run stress`
 - 긴 opt-in 스트레스 테스트: `mise run stress-soak`
 - 성능 예산 측정: `mise run perf`
+- macOS PTY opt-in 테스트: `mise run pty`
 - 포맷: `mise run fmt`
 - 포맷 검사(변경 없이): `mise run fmt-check`
 - facade import 경계 검사: `mise run check-boundaries`

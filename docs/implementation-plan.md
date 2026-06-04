@@ -136,8 +136,9 @@ TDD 방식:
 
 목표:
 
-- macOS `forkpty` 기반으로 먼저 통제된 command를 실행한다.
-- reader thread, queue, backpressure 같은 운영 모델은 [PTY 운영 모델](pty-operating-model.md)을 따른다.
+- macOS `openpty` 기반으로 먼저 통제된 command를 실행한다. `forkpty`는 child setup을 너무 많이 감추므로 초기 제품 backend로 쓰지 않는다.
+- 첫 backend는 테스트가 timing race 없이 검증할 수 있도록 blocking pull API인 `PtySession.readEvent`를 제공한다.
+- reader thread, queue, backpressure는 SurfaceRuntime 연결 단계에서 `readEvent` 루프 위에 얹는다. 운영 모델은 [PTY 운영 모델](pty-operating-model.md)을 따른다.
 - 통제된 command가 안정화된 뒤 interactive shell smoke를 opt-in으로 추가한다.
 - PTY output bytes를 domain event로 내보낸다.
 - terminal input bytes와 resize request를 PTY에 전달한다.
@@ -148,6 +149,7 @@ TDD 방식:
 - integration test: 통제된 command stdout을 읽는다.
 - integration test: resize request가 PTY layer까지 전달된다.
 - process lifecycle test: exit status가 event로 관측된다.
+- artifact test: raw PTY bytes, screen text, structured snapshot이 `tests/artifacts/integration/pty/`에 남는다.
 - opt-in smoke test: 사용자의 shell을 실행해 prompt/output이 crash 없이 snapshot까지 도달하는지 확인한다.
 
 완료 기준:
@@ -157,6 +159,7 @@ TDD 방식:
 - 실패 시 stdout bytes와 snapshot artifact가 남는다.
 - deterministic controlled command PTY test와 환경 의존 interactive shell smoke가 분리되어 있다.
 - interactive shell smoke는 처음부터 기본 `mise run check`에 넣지 않는다.
+- `mise run pty`는 macOS PTY opt-in 테스트를 실행한다.
 
 아직 하지 않는다:
 
@@ -164,6 +167,7 @@ TDD 방식:
 - login shell UX 완성.
 - job control 전체 호환성.
 - global shortcut.
+- SurfaceRuntime reader thread와 bounded queue.
 
 ## 5단계: `SurfaceRuntime`으로 PTY와 Surface 연결
 

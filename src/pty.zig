@@ -1,7 +1,11 @@
 pub const types = @import("pty/types.zig");
+pub const session = @import("pty/session.zig");
 
 pub const Backend = types.Backend;
+pub const ExitStatus = types.ExitStatus;
+pub const PtyEvent = types.PtyEvent;
 pub const PtyHandle = types.PtyHandle;
+pub const PtySession = session.PtySession;
 pub const SpawnRequest = types.SpawnRequest;
 pub const plannedBackendForMacOS = types.plannedBackendForMacOS;
 

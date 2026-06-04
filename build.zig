@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) void {
     const maru_mod = b.addModule("maru", .{
         .root_source_file = b.path("src/maru.zig"),
         .target = target,
+        .link_libc = true,
     });
     const test_support_mod = b.addModule("test_support", .{
         .root_source_file = b.path("tests/support/artifacts.zig"),
@@ -65,6 +66,24 @@ pub fn build(b: *std.Build) void {
 
     const e2e_step = b.step("test-e2e", "Run headless E2E tests");
     e2e_step.dependOn(&run_e2e_tests.step);
+
+    const pty_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/pty/macos.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "test_support", .module = test_support_mod },
+            },
+        }),
+    });
+    const run_pty_tests = b.addRunArtifact(pty_tests);
+    run_pty_tests.setCwd(b.path("."));
+
+    const pty_step = b.step("test-pty", "Run opt-in macOS PTY integration tests");
+    pty_step.dependOn(&run_pty_tests.step);
 
     const oracle_tests = b.addTest(.{
         .root_module = b.createModule(.{

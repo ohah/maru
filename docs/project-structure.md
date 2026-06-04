@@ -92,6 +92,6 @@ tools/
 .github/
   pull_request_template.md  PR마다 전략 영향 평가와 한계 보고를 빠뜨리지 않게 하는 템플릿
   workflows/
-    ci.yml                  check 게이트(`mise run check`: fmt-check/unit/e2e/recorded-oracle/stress/facade 경계/build) + opt-in 외부 오라클(libvterm, Alacritty)
+    ci.yml                  check 게이트(`mise run check`: fmt-check/unit/e2e/recorded-oracle/stress/facade 경계/build) + 외부 오라클 oracles 잡(libvterm·Alacritty를 매 푸시/PR에 강제, Ghostty는 CI 제외)
     pr-metadata.yml         라벨 1개 이상 + assignee=ohah 강제(required check 지정은 branch protection에서 한다)
 ```

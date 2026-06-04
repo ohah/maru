@@ -50,9 +50,9 @@ renderer, storage, platform interop는 VT 명세처럼 하나의 공개 표준�
 
 | 오라클 | 라이선스 | 받는 법 | 상태 |
 | --- | --- | --- | --- |
-| libvterm | MIT | `brew install libvterm` (또는 배포판 패키지) | ✅ opt-in (`mise run oracle-ext`) |
-| Ghostty `libghostty-vt` | MIT | `git clone --depth 1 https://github.com/ghostty-org/ghostty.git references/ghostty` 후 `mise exec zig@0.15.2 -- zig build -Demit-lib-vt=true` | ✅ opt-in (`mise run oracle-ghostty`) |
-| Alacritty `alacritty_terminal` | Apache-2.0 | `tests/oracle/alacritty-dumper`에서 `cargo build --release` (Rust 툴체인) | ✅ opt-in (`mise run oracle-alacritty`) |
+| libvterm | MIT | `brew install libvterm` (또는 배포판 패키지) | ✅ CI 강제(매 푸시/PR) + 로컬 opt-in (`mise run oracle-ext`) |
+| Ghostty `libghostty-vt` | MIT | `git clone --depth 1 https://github.com/ghostty-org/ghostty.git references/ghostty` 후 `mise exec zig@0.15.2 -- zig build -Demit-lib-vt=true` | ✅ 로컬 opt-in만 (`mise run oracle-ghostty`, 무거운 빌드라 CI 제외) |
+| Alacritty `alacritty_terminal` | Apache-2.0 | `tests/oracle/alacritty-dumper`에서 `cargo build --release` (Rust 툴체인) | ✅ CI 강제(매 푸시/PR) + 로컬 opt-in (`mise run oracle-alacritty`) |
 
 오라클이 **아닌** 것:
 

@@ -20,6 +20,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
       - run: mise run check
+      - name: Upload check artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maru-check-artifacts
+          path: tests/artifacts/**
+          if-no-files-found: warn
+          retention-days: 14
 
   # 외부 reference 오라클(opt-in). 손으로 기록한 golden을 실제 VT 구현과 대조한다.
   # CI에서는 설치가 가벼운 libvterm(apt)과 Alacritty(runner 기본 Rust)만 돌린다.
@@ -43,3 +51,11 @@ jobs:
 
       - name: Alacritty oracle
         run: mise run oracle-alacritty
+      - name: Upload external oracle artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maru-external-oracle-artifacts
+          path: tests/artifacts/**
+          if-no-files-found: warn
+          retention-days: 14

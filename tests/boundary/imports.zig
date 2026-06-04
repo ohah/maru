@@ -116,65 +116,80 @@ fn checkFile(
     };
     defer allocator.free(text);
 
-    scanImports(text, rule, path, violations);
+    // std.zig.Tokenizer는 sentinel 종료 버퍼([:0]u8)를 요구한다.
+    const text_z = try allocator.dupeZ(u8, text);
+    defer allocator.free(text_z);
+
+    scanImports(text_z, rule, path, violations);
 }
 
-// @import 경로를 훑어 금지 레이어 import를 센다. 단순 `@import("` 부분문자열이 아니라
-// @import / `(` / `"` 사이의 공백·개행을 허용한다. 그렇지 않으면 trailing comma가 붙은
-// 줄바꿈 형태(`@import(\n    "../pty/x.zig",\n)`)가 zig fmt를 통과하면서 경계 검사를
-// 빠져나가, 금지 import가 mise run check(fmt-check + check-boundaries)와 CI를 그대로
-// 통과한다.
-fn scanImports(text: []const u8, rule: Rule, path: []const u8, violations: *usize) void {
+// @import 경로를 훑어 금지 레이어 import를 센다. 단순 부분문자열 스캔이 아니라
+// std.zig.Tokenizer로 토큰화해 실제 `@import` `(` string_literal 시퀀스만 import로 본다.
+// 그래야 (1) `@import`와 `(` 사이에 주석·개행·공백이 있어도 잡고(부분문자열 스캐너는
+// `@import // 주석\n(...)`을 놓쳤다), (2) 주석이나 문자열 리터럴 안에 적힌
+// `@import("../x")`를 오탐하지 않는다. 토크나이저는 일반 주석을 토큰으로 내보내지 않고,
+// doc 주석·일반/multiline 문자열은 builtin이 아닌 단일 토큰으로 내보내므로 둘 다 자연히 처리된다.
+fn scanImports(text: [:0]const u8, rule: Rule, path: []const u8, violations: *usize) void {
     scanImportsWithDiagnostics(text, rule, path, violations, true);
 }
 
-fn scanImportsQuiet(text: []const u8, rule: Rule, path: []const u8, violations: *usize) void {
+fn scanImportsQuiet(text: [:0]const u8, rule: Rule, path: []const u8, violations: *usize) void {
     scanImportsWithDiagnostics(text, rule, path, violations, false);
 }
 
 fn scanImportsWithDiagnostics(
-    text: []const u8,
+    text: [:0]const u8,
     rule: Rule,
     path: []const u8,
     violations: *usize,
     emit_diagnostics: bool,
 ) void {
-    var index: usize = 0;
-    const builtin = "@import";
-    while (std.mem.indexOfPos(u8, text, index, builtin)) |found| {
-        index = found + builtin.len;
-
-        var cursor = skipWhitespace(text, found + builtin.len);
-        if (cursor >= text.len or text[cursor] != '(') continue;
-        cursor = skipWhitespace(text, cursor + 1);
-        if (cursor >= text.len or text[cursor] != '"') continue;
-
-        const path_start = cursor + 1;
-        const end = std.mem.indexOfScalarPos(u8, text, path_start, '"') orelse break;
-        const import_path = text[path_start..end];
-        index = end + 1;
-
-        for (rule.forbidden) |forbidden| {
-            if (importTraversesLayer(import_path, forbidden)) {
-                // 실제 파일을 검사할 때만 진단을 출력한다. 아래 unit test는 일부러
-                // 금지 import fixture를 넣기 때문에, 거기서 같은 메시지를 찍으면
-                // `mise run check`가 성공해도 실패처럼 보여 triage를 방해한다.
-                if (emit_diagnostics) {
-                    std.debug.print(
-                        "boundary violation: {s} ({s} layer) imports forbidden layer '{s}' via \"{s}\"\n",
-                        .{ path, rule.layer, forbidden.layer, import_path },
-                    );
+    var tokenizer = std.zig.Tokenizer.init(text);
+    // `@import` / `(` / string_literal 가 연속으로 나올 때만 실제 import로 본다.
+    var saw_import = false;
+    var saw_paren = false;
+    while (true) {
+        const token = tokenizer.next();
+        switch (token.tag) {
+            .eof => break,
+            .builtin => {
+                saw_import = std.mem.eql(u8, text[token.loc.start..token.loc.end], "@import");
+                saw_paren = false;
+            },
+            .l_paren => {
+                saw_paren = saw_import;
+                saw_import = false;
+            },
+            .string_literal => {
+                if (saw_paren) {
+                    // string_literal 토큰은 따옴표를 포함한다("..."). import 경로는
+                    // 이스케이프 없는 단순 경로라 양끝 따옴표만 벗긴다.
+                    const raw = text[token.loc.start..token.loc.end];
+                    const import_path = raw[1 .. raw.len - 1];
+                    for (rule.forbidden) |forbidden| {
+                        if (importTraversesLayer(import_path, forbidden)) {
+                            // 실제 파일을 검사할 때만 진단을 출력한다. 아래 unit test는 일부러
+                            // 금지 import fixture를 넣기 때문에, 거기서 같은 메시지를 찍으면
+                            // `mise run check`가 성공해도 실패처럼 보여 triage를 방해한다.
+                            if (emit_diagnostics) {
+                                std.debug.print(
+                                    "boundary violation: {s} ({s} layer) imports forbidden layer '{s}' via \"{s}\"\n",
+                                    .{ path, rule.layer, forbidden.layer, import_path },
+                                );
+                            }
+                            violations.* += 1;
+                        }
+                    }
                 }
-                violations.* += 1;
-            }
+                saw_import = false;
+                saw_paren = false;
+            },
+            else => {
+                saw_import = false;
+                saw_paren = false;
+            },
         }
     }
-}
-
-fn skipWhitespace(text: []const u8, start: usize) usize {
-    var i = start;
-    while (i < text.len and std.ascii.isWhitespace(text[i])) : (i += 1) {}
-    return i;
 }
 
 fn importTraversesLayer(import_path: []const u8, forbidden: Forbidden) bool {
@@ -233,6 +248,41 @@ test "scanImports catches zig fmt-clean whitespace and multi-line @import forms"
     {
         var v: usize = 0;
         scanImportsQuiet("const s = @import(\"std\");\nconst t = @import(\"../terminal.zig\");", rule, "test", &v);
+        try std.testing.expectEqual(@as(usize, 0), v);
+    }
+}
+
+test "scanImports tokenizes, so comments and string literals neither evade nor false-positive" {
+    const rule = Rule{
+        .layer = "terminal",
+        .barrel = "src/terminal.zig",
+        .implementation_dir = "src/terminal",
+        .forbidden = &.{.{ .layer = "pty" }},
+    };
+
+    // `@import`와 `(` 사이 줄 주석: zig fmt-clean이고 유효한 Zig지만 부분문자열 스캐너는
+    // 놓쳤다. 토크나이저는 주석을 건너뛰므로 실제 import로 잡아야 한다.
+    {
+        var v: usize = 0;
+        scanImportsQuiet("const a = @import // sneaky\n    (\"../pty/types.zig\");", rule, "test", &v);
+        try std.testing.expectEqual(@as(usize, 1), v);
+    }
+    // 줄 주석 안의 금지 경로 언급: 실제 import가 아니므로 오탐하면 안 된다.
+    {
+        var v: usize = 0;
+        scanImportsQuiet("// historically used @import(\"../pty/types.zig\")\nconst a = @import(\"std\");", rule, "test", &v);
+        try std.testing.expectEqual(@as(usize, 0), v);
+    }
+    // doc 주석 안의 금지 경로 언급: 오탐하면 안 된다.
+    {
+        var v: usize = 0;
+        scanImportsQuiet("/// see @import(\"../pty/types.zig\")\npub const a = @import(\"std\");", rule, "test", &v);
+        try std.testing.expectEqual(@as(usize, 0), v);
+    }
+    // multiline 문자열 안의 금지 경로 언급: 오탐하면 안 된다.
+    {
+        var v: usize = 0;
+        scanImportsQuiet("const s =\n    \\\\@import(\"../pty/types.zig\")\n;", rule, "test", &v);
         try std.testing.expectEqual(@as(usize, 0), v);
     }
 }

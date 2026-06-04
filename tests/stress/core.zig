@@ -49,6 +49,61 @@ test "stress: repeated output keeps final screen bounded and inspectable" {
     });
 }
 
+test "stress: split UTF-8 chunks keep final screen inspectable" {
+    // Real PTY output is allowed to split a Unicode codepoint at any byte
+    // boundary. This stress case repeats those awkward cuts many times so the
+    // decoder cannot only pass the small unit-test examples.
+    const allocator = std.testing.allocator;
+    const p = profile();
+
+    var core = try maru.terminal.TerminalCore.init(allocator, .{ .cols = 48, .rows = 8 });
+    defer core.deinit();
+
+    const chunk_pattern = [_]usize{ 1, 2, 1, 3, 4, 1 };
+    var chunk_index: usize = 0;
+    var input_bytes: usize = 0;
+
+    for (0..p.output_lines) |line_no| {
+        var line_buffer: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&line_buffer);
+        try writer.print("utf8-{d}-한글-🚀\r\n", .{line_no});
+
+        const bytes = writer.buffered();
+        input_bytes += bytes.len;
+
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const wanted = chunk_pattern[chunk_index % chunk_pattern.len];
+            const end = @min(bytes.len, offset + wanted);
+            try core.write(bytes[offset..end]);
+            offset = end;
+            chunk_index += 1;
+        }
+    }
+
+    const expected_last_line = try std.fmt.allocPrint(
+        allocator,
+        "utf8-{d}-한글-🚀",
+        .{p.output_lines - 1},
+    );
+    defer allocator.free(expected_last_line);
+
+    const screen = try core.dumpUtf8(allocator);
+    defer allocator.free(screen);
+
+    try std.testing.expect(std.mem.indexOf(u8, screen, expected_last_line) != null);
+    try std.testing.expectEqual(@as(usize, 48 * 8), core.snapshot().cells.len);
+
+    try writeScreenArtifact(allocator, p, "split-utf8.screen.txt", screen);
+    try writeSnapshotArtifact(allocator, p, "split-utf8.snapshot.txt", core.snapshot());
+    try writeSummaryArtifact(allocator, p, "split-utf8.summary.txt", .{
+        .lines = p.output_lines,
+        .input_bytes = input_bytes,
+        .cols = core.snapshot().size.cols,
+        .rows = core.snapshot().size.rows,
+    });
+}
+
 test "stress: repeated resize and writes keep storage invariants valid" {
     // Resize stress matters because terminal surfaces resize often: app window
     // changes, split surfaces, font-size changes, and future workspace restore

@@ -12,6 +12,7 @@
 ## 현재 범위
 
 - 많은 CRLF 라인을 terminal core에 입력한다.
+- 한글/이모지 UTF-8을 작은 byte chunk로 나누어 반복 입력한다.
 - 반복적으로 resize 후 write를 수행한다.
 - 최종 screen, structured snapshot, summary artifact를 `tests/artifacts/stress/` 아래에 남긴다.
 

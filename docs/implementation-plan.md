@@ -130,7 +130,6 @@ TDD 방식:
 - OSC/clipboard/advanced mouse mode 전체.
 - autowrap/line wrap(DECAWM pending-wrap). 현재 core는 마지막 열에서 셀을 덮어쓰며, 폭을 넘는 출력 보존은 이 단계 이후에 설계/테스트한다.
 - wide-character(East-Asian width/wcwidth) 셀 폭 처리. 현재는 모든 출력 가능 문자를 1열로 전진시키므로 한글/CJK/이모지가 어긋난다.
-- PTY read 경계에서 잘린 multi-byte UTF-8 처리. 현재 `write`는 버퍼 전체를 한 번에 검증하므로, 실제 forkpty(4단계)가 붙기 전에 증분 디코더가 필요하다.
 - Ghostty/libghostty-vt 코드 복사.
 
 ## 4단계: macOS `PtySession` 최소 구현

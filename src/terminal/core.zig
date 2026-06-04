@@ -8,6 +8,8 @@ pub const TerminalCore = struct {
     cursor: types.Cursor = .{},
     cells: []types.Cell,
     dirty: ?types.DirtyRegion = null,
+    utf8_tail: [4]u8 = undefined,
+    utf8_tail_len: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, size: types.Size) !TerminalCore {
         const cells = try allocator.alloc(types.Cell, cellCount(size));
@@ -31,10 +33,23 @@ pub const TerminalCore = struct {
         // UTF-8 process output into cells. Escape-sequence parsing will sit on
         // top of this path later, so E2E tests can start before the full VT
         // state machine exists.
-        const view = try std.unicode.Utf8View.init(bytes);
-        var iterator = view.iterator();
-        while (iterator.nextCodepoint()) |codepoint| {
+        var index_: usize = 0;
+        while (index_ < bytes.len) {
+            if (self.utf8_tail_len != 0) {
+                index_ = try self.completePendingUtf8(bytes, index_);
+                continue;
+            }
+
+            const sequence_len = utf8SequenceLength(bytes[index_]) catch return error.InvalidUtf8;
+            const end = index_ + sequence_len;
+            if (end > bytes.len) {
+                self.storePendingUtf8(bytes[index_..]);
+                return;
+            }
+
+            const codepoint = decodeUtf8(bytes[index_..end]) catch return error.InvalidUtf8;
             self.writeCodepoint(codepoint);
+            index_ = end;
         }
     }
 
@@ -116,6 +131,40 @@ pub const TerminalCore = struct {
         }
     }
 
+    fn completePendingUtf8(self: *TerminalCore, bytes: []const u8, index_: usize) !usize {
+        const sequence_len = utf8SequenceLength(self.utf8_tail[0]) catch {
+            self.utf8_tail_len = 0;
+            return error.InvalidUtf8;
+        };
+        const needed = sequence_len - self.utf8_tail_len;
+        const available = bytes.len - index_;
+        const take = @min(needed, available);
+
+        @memcpy(
+            self.utf8_tail[self.utf8_tail_len .. self.utf8_tail_len + take],
+            bytes[index_ .. index_ + take],
+        );
+        self.utf8_tail_len += take;
+
+        if (self.utf8_tail_len < sequence_len) return bytes.len;
+
+        const codepoint = decodeUtf8(self.utf8_tail[0..sequence_len]) catch {
+            self.utf8_tail_len = 0;
+            return error.InvalidUtf8;
+        };
+        self.utf8_tail_len = 0;
+        self.writeCodepoint(codepoint);
+        return index_ + take;
+    }
+
+    fn storePendingUtf8(self: *TerminalCore, bytes: []const u8) void {
+        // PTY reads can stop in the middle of a codepoint. Keeping the partial
+        // bytes inside TerminalCore preserves the layer boundary: PTY remains a
+        // byte transport and does not need text-decoding logic.
+        @memcpy(self.utf8_tail[0..bytes.len], bytes);
+        self.utf8_tail_len = bytes.len;
+    }
+
     fn writeTab(self: *TerminalCore) void {
         const next_tab = @min(self.size.cols, ((self.cursor.col / 8) + 1) * 8);
         while (self.cursor.col < next_tab) {
@@ -185,6 +234,14 @@ pub const TerminalCore = struct {
     }
 };
 
+fn utf8SequenceLength(first_byte: u8) !usize {
+    return std.unicode.utf8ByteSequenceLength(first_byte) catch error.InvalidUtf8;
+}
+
+fn decodeUtf8(bytes: []const u8) !u21 {
+    return std.unicode.utf8Decode(bytes) catch error.InvalidUtf8;
+}
+
 fn cellCount(size: types.Size) usize {
     return @as(usize, size.cols) * @as(usize, size.rows);
 }
@@ -219,6 +276,46 @@ test "terminal core writes process-like text into cells" {
     try std.testing.expect(std.mem.indexOf(u8, text, "hello") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "maru") != null);
     try std.testing.expectEqual(@as(u16, 1), core.snapshot().cursor.row);
+}
+
+test "terminal core preserves UTF-8 split across process read boundaries" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
+    defer core.deinit();
+
+    // PTY reads are byte streams, not UTF-8 string messages. A Korean
+    // character can arrive as one byte in one read and the remaining bytes in
+    // the next read; TerminalCore owns this tail buffering so PTY code does
+    // not need to understand text encoding.
+    const korean = "한";
+    try core.write(korean[0..1]);
+    try std.testing.expectEqual(@as(u16, 0), core.snapshot().cursor.col);
+
+    try core.write(korean[1..]);
+    try core.write("글");
+
+    const text = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "한글") != null);
+    try std.testing.expectEqual(@as(u16, 0), core.snapshot().cursor.row);
+    try std.testing.expectEqual(@as(u16, 2), core.snapshot().cursor.col);
+}
+
+test "terminal core preserves four-byte UTF-8 split across multiple writes" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
+    defer core.deinit();
+
+    const rocket = "🚀";
+    try core.write("go ");
+    try core.write(rocket[0..1]);
+    try core.write(rocket[1..3]);
+    try core.write(rocket[3..]);
+
+    const text = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "go 🚀") != null);
+    try std.testing.expectEqual(@as(u16, 4), core.snapshot().cursor.col);
 }
 
 test "terminal core tab expansion stops at the row edge" {

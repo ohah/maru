@@ -88,7 +88,13 @@ ANSI fixture
 - `recorded.zig`(기본 oracle): Maru == golden
 - `external*.zig`(opt-in oracle): golden == libvterm, golden == Ghostty, golden == Alacritty
 
-따라서 Maru == 세 reference가 transitively 성립한다. 세 reference가 서로 다른 구현이므로, golden이 한쪽 구현의 특이동작을 따라가지 않았는지도 교차 확인된다. 앞으로 escape sequence fixture가 늘어날 때 golden을 손으로 적지 않고 reference로 검증/생성할 수 있다.
+세 opt-in 오라클을 모두 실행하면 Maru == 세 reference가 transitively 성립한다. 다만 이 성립 범위는 실행 경로마다 다르다.
+
+- 로컬 기본 `mise run check`는 recorded 오라클(Maru == golden)만 강제한다.
+- CI는 매 푸시/PR에서 libvterm·Alacritty 다리(golden == reference)를 함께 돌리므로, recorded 오라클과 합쳐 Maru == libvterm, Maru == Alacritty까지 standing으로 강제된다.
+- Ghostty 다리는 무거운 빌드 때문에 CI에서도 제외되며 로컬 opt-in(`mise run oracle-ghostty`)으로만 검증한다.
+
+세 reference가 서로 다른 구현이므로, 실행했을 때 golden이 한쪽 구현의 특이동작을 따라가지 않았는지도 교차 확인된다. 단 현재 golden에는 escape sequence가 없어 이 교차검증은 평문과 일부 control 동작까지만 다룬다. 앞으로 escape sequence fixture가 늘어날 때 golden을 손으로 적지 않고 reference로 검증/생성할 수 있다.
 
 연동 방식은 reference마다 다르다. libvterm과 Ghostty libghostty-vt는 C 라이브러리라 in-process로 링크하되, bitfield/opaque 핸들 때문에 Zig translate-c로 직접 다루기 까다로워 셀 접근용 얇은 C shim을 둔다(`tests/oracle/vterm_shim.c`, `tests/oracle/ghostty_shim.c`). Alacritty `alacritty_terminal`은 Rust 크레이트라 작은 dumper 바이너리(`tests/oracle/alacritty-dumper`)로 빌드해 subprocess로 호출한다. 새 reference를 **필수**(기본 `check`) 의존성으로 승격할 때는 의존성 전략에 영향을 주므로 사용자와 먼저 논의한다.
 

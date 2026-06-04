@@ -116,10 +116,26 @@ fn checkFile(
     };
     defer allocator.free(text);
 
+    scanImports(text, rule, path, violations);
+}
+
+// @import 경로를 훑어 금지 레이어 import를 센다. 단순 `@import("` 부분문자열이 아니라
+// @import / `(` / `"` 사이의 공백·개행을 허용한다. 그렇지 않으면 trailing comma가 붙은
+// 줄바꿈 형태(`@import(\n    "../pty/x.zig",\n)`)가 zig fmt를 통과하면서 경계 검사를
+// 빠져나가, 금지 import가 mise run check(fmt-check + check-boundaries)와 CI를 그대로
+// 통과한다.
+fn scanImports(text: []const u8, rule: Rule, path: []const u8, violations: *usize) void {
     var index: usize = 0;
-    const marker = "@import(\"";
-    while (std.mem.indexOfPos(u8, text, index, marker)) |start| {
-        const path_start = start + marker.len;
+    const builtin = "@import";
+    while (std.mem.indexOfPos(u8, text, index, builtin)) |found| {
+        index = found + builtin.len;
+
+        var cursor = skipWhitespace(text, found + builtin.len);
+        if (cursor >= text.len or text[cursor] != '(') continue;
+        cursor = skipWhitespace(text, cursor + 1);
+        if (cursor >= text.len or text[cursor] != '"') continue;
+
+        const path_start = cursor + 1;
         const end = std.mem.indexOfScalarPos(u8, text, path_start, '"') orelse break;
         const import_path = text[path_start..end];
         index = end + 1;
@@ -134,6 +150,12 @@ fn checkFile(
             }
         }
     }
+}
+
+fn skipWhitespace(text: []const u8, start: usize) usize {
+    var i = start;
+    while (i < text.len and std.ascii.isWhitespace(text[i])) : (i += 1) {}
+    return i;
 }
 
 fn importTraversesLayer(import_path: []const u8, forbidden: Forbidden) bool {
@@ -160,4 +182,38 @@ test "importTraversesLayer distinguishes barrel from private implementation" {
     // 무관한 import는 잡지 않는다.
     try std.testing.expect(!importTraversesLayer("core.zig", .{ .layer = "pty" }));
     try std.testing.expect(!importTraversesLayer("std", .{ .layer = "renderer" }));
+}
+
+test "scanImports catches zig fmt-clean whitespace and multi-line @import forms" {
+    const rule = Rule{
+        .layer = "terminal",
+        .barrel = "src/terminal.zig",
+        .implementation_dir = "src/terminal",
+        .forbidden = &.{.{ .layer = "pty" }},
+    };
+
+    // 단일행: 기존에도 잡혔다.
+    {
+        var v: usize = 0;
+        scanImports("const a = @import(\"../pty/types.zig\");", rule, "test", &v);
+        try std.testing.expectEqual(@as(usize, 1), v);
+    }
+    // trailing comma 줄바꿈 형태: zig fmt --check를 통과하면서 예전 `@import("` 마커를 빠져나갔다.
+    {
+        var v: usize = 0;
+        scanImports("const a = @import(\n    \"../pty/types.zig\",\n);", rule, "test", &v);
+        try std.testing.expectEqual(@as(usize, 1), v);
+    }
+    // @import 와 `(` 사이 공백.
+    {
+        var v: usize = 0;
+        scanImports("const a = @import (\"../pty/types.zig\");", rule, "test", &v);
+        try std.testing.expectEqual(@as(usize, 1), v);
+    }
+    // 허용되는 import(std, 공개 barrel)는 잡지 않는다.
+    {
+        var v: usize = 0;
+        scanImports("const s = @import(\"std\");\nconst t = @import(\"../terminal.zig\");", rule, "test", &v);
+        try std.testing.expectEqual(@as(usize, 0), v);
+    }
 }

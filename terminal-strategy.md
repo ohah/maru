@@ -142,7 +142,8 @@ RendererBackend
   - Linux: Vulkan/WebGPU/OpenGL later
 
 FontBackend
-  - macOS: CoreText/HarfBuzz
+  - macOS: CoreText first
+  - HarfBuzz later behind the same shaping boundary
   - Windows: DirectWrite/HarfBuzz later
   - Web: browser font/canvas metrics later
 ```
@@ -558,13 +559,13 @@ SSH에서 확인할 것:
 
 ```text
 2주:
-  빈 macOS 창, Zig bridge, PTY 연결, bytes -> terminal core
+  facade 계약, snapshot/artifact, headless bytes -> terminal core
 
 4-6주:
-  기본 Metal 렌더링, ASCII/color/cursor, zsh/vim/htop 기본 동작
+  macOS forkpty, SurfaceRuntime 연결, deterministic headless E2E
 
 8-10주:
-  input, resize, selection, copy/paste, search, scrollback 안정화
+  RenderSnapshot -> DrawList, Metal smoke, 입력/resize 기본 경로
 
 3-4개월:
   tabs, config, actions, theme/font hot reload, daily-driver alpha
@@ -575,73 +576,26 @@ SSH에서 확인할 것:
 
 처음부터 완전 호환 parser를 한 번에 만들려고 하면 이 일정은 깨진다. Maru는 작은 clean-room core에서 시작해 oracle fixture를 늘리며 호환성을 확장한다.
 
-## 15. 1차 구현 순서
+## 15. 실제 구현 순서
 
-1. 저장소 기본 구조 만들기
-   - `src/core`
-   - `src/terminal`
-   - `src/pty`
-   - `src/renderer`
-   - `src/config`
-   - `macos`
+구체적인 구현 순서는 [실제 구현 계획](docs/implementation-plan.md)을 단일 출처로 둔다. 이 문서는 제품 방향과 결정 로그이고, 단계별 완료 기준과 TDD 방식은 `docs/implementation-plan.md`가 우선한다.
 
-2. macOS 빈 창 만들기
-   - Swift/AppKit host
-   - Zig library bridge
-   - 최소 event loop
+과거에는 "빈 macOS 창을 먼저 띄운다"는 순서가 있었지만, 현재 전략에서는 그 순서를 폐기한다. 먼저 GUI 없이 검증 가능한 경계를 고정하고, 실제 shell bytes가 snapshot/artifact까지 도달하는 경로를 만든 뒤 macOS host와 Metal을 붙인다.
 
-3. PTY 연결
-   - `forkpty`
-   - 기본 shell 실행
-   - shell output을 Zig core로 전달
-   - key input을 PTY로 전달
+요약:
 
-4. TerminalCore facade 만들기
-   - Maru clean-room core 연결
-   - `write`
-   - `resize`
-   - `snapshot`
-   - `encodeKey`
-
-5. RenderSnapshot 정의
-   - cell grid
-   - style
-   - cursor
-   - selection
-   - dirty region
-
-6. Metal renderer MVP
-   - background quad
-   - glyph atlas
-   - ASCII glyph
-   - cursor
-   - color
-
-7. 입력 안정화
-   - key encoding
-   - modifier
-   - IME
-   - paste
-   - mouse 기본값
-
-8. 탭 모델
-   - `Surface`
-   - `AppWindow.tabs`
-   - `active_tab`
-   - Cmd+T/Cmd+W/Cmd+1..9
-
-9. 설정 시스템
-   - TOML config
-   - action registry
-   - keybinding map
-   - hot reload
-
-10. daily-driver alpha
-    - search
-    - selection
-    - scrollback
-    - theme/font
-    - SSH/vim/tmux sanity
+```text
+1. facade 계약과 import boundary
+2. snapshot/artifact
+3. 초기 TerminalCore fixture
+4. macOS forkpty
+5. SurfaceRuntime 연결
+6. headless E2E
+7. RenderSnapshot -> DrawList -> Metal
+8. 탭, quick terminal, global shortcut
+9. workspace restore
+10. plugin/Wasm
+```
 
 ## 16. 최종 결정
 

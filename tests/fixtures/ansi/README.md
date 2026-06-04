@@ -8,7 +8,7 @@ ANSI/VT 입력 fixture를 담는다.
 
 - `split_utf8.ansi`: PTY read 경계가 UTF-8 codepoint 중간에서 잘려도 최종 화면에는 원래 한글/이모지 텍스트가 남는지 검증한다.
 - `mixed_width.ansi`: ASCII와 한글이 섞일 때 한글이 2 cell을 차지하고 다음 ASCII가 continuation cell 위에 겹치지 않는지 검증한다.
-- `combining_mark.ansi`: combining mark가 이전 cell에 붙고 cursor를 전진시키지 않는지 검증한다.
+- `combining_mark.ansi`: combining mark가 이전 cell에 붙어 화면 텍스트로 나타나는지 검증한다. recorded oracle은 화면 텍스트만 비교하므로, cursor를 전진시키지 않는다는 성질은 `src/terminal/core.zig`의 unit test가 함께 검증한다.
 
 제어 문자는 사람이 읽고 리뷰할 수 있게 escaped text로 저장한다. 예를 들어 실제 carriage return + line feed bytes는 `\r\n`으로 적고, oracle test가 실행 전에 실제 bytes로 디코딩한다.
 

@@ -33,6 +33,33 @@ pub const Cell = struct {
     combining: ?u21 = null,
 };
 
+/// Iterates the visible codepoints of a single row: each non-continuation
+/// cell yields its base codepoint, immediately followed by its combining mark
+/// when present. Both the plain-text dump (`TerminalCore.dumpUtf8`) and the
+/// snapshot row rendering consume this, so the rule for which cells actually
+/// show on screen (skip continuations, append combining marks) lives in
+/// exactly one place instead of being re-derived per consumer.
+pub const RowCodepoints = struct {
+    cells: []const Cell,
+    col: usize = 0,
+    pending_combining: ?u21 = null,
+
+    pub fn next(self: *RowCodepoints) ?u21 {
+        if (self.pending_combining) |combining| {
+            self.pending_combining = null;
+            return combining;
+        }
+        while (self.col < self.cells.len) {
+            const cell = self.cells[self.col];
+            self.col += 1;
+            if (cell.continuation) continue;
+            self.pending_combining = cell.combining;
+            return cell.codepoint;
+        }
+        return null;
+    }
+};
+
 pub const Cursor = struct {
     row: u16 = 0,
     col: u16 = 0,

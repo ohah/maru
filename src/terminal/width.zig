@@ -15,6 +15,12 @@ pub fn isCombiningMark(codepoint: u21) bool {
         0x1AB0...0x1AFF,
         0x1DC0...0x1DFF,
         0x20D0...0x20FF,
+        // These combining ranges sit inside the wide CJK block below, so they
+        // must be listed here to win over isWideCodepoint; otherwise a zero-
+        // width mark like U+3099 would be stored as a 2-cell glyph and drift
+        // the cursor for decomposed Japanese/CJK text.
+        0x302A...0x302F,
+        0x3099...0x309A,
         0xFE20...0xFE2F,
         => true,
         else => false,
@@ -54,4 +60,12 @@ test "cellWidth treats Hangul and CJK as double-cell" {
 
 test "cellWidth treats combining marks as zero-cell" {
     try std.testing.expectEqual(@as(u2, 0), cellWidth(0x0301));
+}
+
+test "cellWidth treats CJK combining marks inside the wide block as zero-cell" {
+    // These live inside the 0x2E80..0xA4CF wide range, so without an explicit
+    // combining entry they would be misread as 2-cell glyphs.
+    try std.testing.expectEqual(@as(u2, 0), cellWidth(0x3099)); // combining voiced sound mark
+    try std.testing.expectEqual(@as(u2, 0), cellWidth(0x309A)); // combining semi-voiced sound mark
+    try std.testing.expectEqual(@as(u2, 0), cellWidth(0x302A)); // combining CJK tone mark
 }

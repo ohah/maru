@@ -6,6 +6,7 @@
 
 - 기본 `mise run check`에는 성능 측정을 넣지 않는다. 하드웨어와 시스템 부하에 따라 결과가 흔들릴 수 있기 때문이다.
 - `mise run perf`는 로컬 opt-in 명령이다. 큰 구조 변경 전후에 실행한다.
+- GitHub `Performance` workflow는 `main` push, 수동 실행, 주간 schedule에서만 돌린다. PR required check로 쓰지 않는 이유는 GitHub hosted runner의 부하가 성능 숫자를 흔들 수 있기 때문이다.
 - 초기에 걸어두는 숫자는 보수적인 guardrail이다. 정확한 목표치는 macOS app, PTY, renderer가 붙은 뒤 다시 조정한다.
 - 성능 실패는 숫자만 보고 고치지 않는다. 어떤 책임 경계가 느린지 trace/snapshot/artifact로 확인한 뒤 루트커즈를 고친다.
 
@@ -20,6 +21,19 @@ mise run perf
 ```text
 tests/artifacts/perf/core.txt
 ```
+
+CI에서는 이 파일을 `maru-performance-artifacts` artifact로 업로드한다. 숫자가 나빠졌을 때는 먼저 artifact를 보고 어떤 측정 항목이 느려졌는지 확인한 뒤, 관련 책임 경계의 trace/snapshot을 추가해 루트커즈를 좁힌다.
+
+## CI 운영 모델
+
+| 실행 경로 | PR 머지 차단 | 목적 |
+| --- | --- | --- |
+| `mise run perf` | 해당 없음 | 로컬에서 큰 구조 변경 전후를 직접 비교한다. |
+| GitHub `Performance` 수동 실행 | 아니오 | 의심스러운 변경 후 같은 runner 환경에서 한 번 더 확인한다. |
+| GitHub `Performance` `main` push | 아니오 | 머지 후 장기 추세를 확인한다. |
+| GitHub `Performance` 주간 schedule | 아니오 | 조용히 쌓이는 성능 회귀를 정기적으로 발견한다. |
+
+성능 workflow가 실패해도 PR required check가 아니므로 즉시 머지를 막지는 않는다. 대신 실패 artifact와 PR/commit 변경 범위를 보고 다음 PR에서 예산 조정 또는 루트커즈 수정을 진행한다.
 
 ## 현재 자동 예산
 

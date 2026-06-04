@@ -1,0 +1,38 @@
+name: Performance
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 주간 성능 추적용이다. KST 월요일 새벽에 실행되도록 UTC 일요일에 둔다.
+    - cron: "0 18 * * 0"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/performance.yml"
+      - ".mise.toml"
+      - "build.zig"
+      - "src/**"
+      - "tests/**"
+      - "tools/perf/**"
+
+# 같은 ref에서 새 성능 실행이 오면 이전 실행은 취소한다.
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-performance-budget:
+    name: core performance budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: mise run perf
+      - name: Upload performance artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maru-performance-artifacts
+          path: tests/artifacts/perf/**
+          if-no-files-found: warn
+          retention-days: 30

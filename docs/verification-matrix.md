@@ -11,7 +11,7 @@
 | headless E2E | `mise run e2e` | `tests/artifacts/e2e/headless/*.screen.txt`, `*.snapshot.txt`, `*.stdout.txt` | 실제 프로세스 stdout이 terminal core 상태로 변환되는지 확인한다. |
 | recorded oracle 비교 | `mise run oracle` | `tests/artifacts/oracle/*/*.actual.txt`, `*.expected.txt`, `*.snapshot.txt`, `input.decoded.txt` | Maru의 화면 결과가 기록된 reference snapshot과 같은지 확인한다. 현재 golden은 사람이 손으로 기록한 기대값이며 실제 reference terminal 캡처가 아니다. |
 | 빠른 스트레스 | `mise run stress` | `tests/artifacts/stress/quick/*.screen.txt`, `*.snapshot.txt`, `*.summary.txt` | 대량 출력과 반복 resize가 terminal core 상태를 깨지 않는지 확인한다. |
-| 성능 예산 측정 | `mise run perf` | `tests/artifacts/perf/core.txt` | terminal core hot path가 보수적인 초기 성능 guardrail 안에 있는지 확인한다. |
+| 성능 예산 측정 | `mise run perf`, GitHub `Performance` workflow(main push/수동/주간) | `tests/artifacts/perf/core.txt`, CI `maru-performance-artifacts` | terminal core hot path가 보수적인 초기 성능 guardrail 안에 있는지 확인한다. PR required check는 아니다. |
 | facade import 경계 | `mise run check-boundaries` | 없음 | terminal/renderer/plugin/pty가 금지된 레이어를 import하지 않는지 자동으로 확인한다. |
 | 전체 확인 | `mise run check` | 위 산출물 전체 | fmt-check, unit, E2E, oracle, stress, boundary, build를 한 번에 확인한다. |
 
@@ -29,6 +29,8 @@
 이 포맷은 현재 테스트 산출물이면서, 나중에 replay trace와 inspector가 같은 도메인 데이터를 보도록 하기 위한 첫 관측 가능성 경계다.
 
 fixture, golden, trace 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fixture-format.md)을 따른다.
+
+GitHub `CI` workflow는 `mise run check`와 외부 오라클 실행 후 `tests/artifacts/**`를 각각 `maru-check-artifacts`, `maru-external-oracle-artifacts`로 업로드한다. 실패했을 때 로그만 보는 대신 실제 screen/snapshot/summary를 내려받아 원인을 확인하기 위한 장치다.
 
 ## 아직 완전 자동 검증이 아닌 영역
 
@@ -58,7 +60,7 @@ fixture, golden, trace 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fix
 | OSC52 ask flow | 구현 전 | clipboard 요청을 app/platform layer로 올리는 `AppRequest.clipboard` 구현이 아직 없다. | 기본 정책이 `ask`인데도 구현자가 임시로 allow/deny shortcut을 만들 위험이 있다. | OSC52 read/write fixture, `AppRequest.clipboard` unit test, deny/allow completion test, redacted artifact를 추가한다. |
 | shell integration domain event | 구현 전 | opt-in zsh hook과 shell event vocabulary는 문서화됐지만 trace schema에는 아직 들어가지 않았다. | cwd/session 복구 기능을 raw output parser나 workspace 코드가 제각각 구현할 위험이 있다. | hook fixture, `AppRequest.shell_integration` test, trace schema 갱신 PR에서 replay test를 추가한다. |
 | SSH workload | 구현 전, 환경 의존 | SSH 전용 integration은 아직 실행하지 않는다. 외부 네트워크나 특정 원격 서버에 묶이지 않는 방식이 필요하다. | 원격 shell, latency, locale, terminal mode 차이를 검증하지 못한다. | 로컬 테스트 서버나 opt-in 환경변수 기반 SSH smoke test를 추가한다. |
-| 긴 soak/제품 성능 예산 | 부분 구현, 환경 의존 | `mise run perf`는 core 기준만 측정한다. 앱 시작, 입력 지연, frame budget, RSS는 아직 없다. | GUI/PTY/renderer 성능 회귀는 아직 숫자로 실패시키지 못한다. | macOS host, PTY, renderer가 붙으면 startup, latency, memory, throughput 기준을 확장한다. |
+| 긴 soak/제품 성능 예산 | 부분 구현, 환경 의존 | `mise run perf`와 GitHub `Performance` workflow는 core 기준만 측정한다. 앱 시작, 입력 지연, frame budget, RSS는 아직 없다. | GUI/PTY/renderer 성능 회귀는 아직 숫자로 실패시키지 못한다. | macOS host, PTY, renderer가 붙으면 startup, latency, memory, throughput 기준을 확장한다. |
 
 호환성/보안 기본값(`TERM`, OSC52, bracketed paste, shell integration, command restore, plugin permission, update/telemetry, global shortcut)은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md)의 검증 계획을 따른다. 새 구현 PR이 이 기본값을 바꾸려면 사용자와 먼저 논의하고, 이 매트릭스의 자동/수동 검증 경로도 함께 갱신한다.
 

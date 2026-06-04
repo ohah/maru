@@ -47,6 +47,7 @@ src/
 ```text
 tests/
   unit/                 facade 밖에 둘 단위 테스트
+  boundary/             facade/import 책임 경계를 자동으로 확인하는 테스트
   oracle/               recorded reference terminal snapshot 비교
   stress/               대량 출력, 반복 resize, hot path 안정성 테스트
   integration/

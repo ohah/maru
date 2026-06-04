@@ -4,21 +4,38 @@
 
 ## 결론
 
-초기 macOS 구현은 `forkpty`와 **PTY마다 하나의 reader thread**를 사용한다.
+초기 macOS 구현은 `openpty`를 사용한다.
 
-이 선택은 최고 성능 설계가 아니라, 초기에 가장 이해하기 쉽고 테스트하기 쉬운 설계다. 여러 surface가 매우 많아지면 macOS `kqueue` 기반으로 바꿀 수 있지만, 먼저 맞춰야 할 것은 속도가 아니라 책임 경계와 재현 가능한 event 흐름이다.
+`forkpty`는 사용하지 않는다. `forkpty`는 PTY 생성, fork, child stdio 연결, controlling terminal 설정을 한 번에 감춰서 초기 구현은 짧아지지만, 나중에 process group, pre-exec, fd lifecycle, failure artifact를 세밀하게 다루려면 다시 뜯어야 한다.
+
+`posix_openpt + grantpt + unlockpt + ptsname`도 지금은 사용하지 않는다. 그 방식은 PTY 생성 과정을 가장 낮은 수준에서 제어할 수 있지만, 현재 단계에서 필요한 것은 slave path 조립이 아니라 child setup과 event 흐름을 안정적으로 검증하는 것이다.
+
+그래서 Maru의 첫 실제 PTY backend는 중간 지점인 `openpty`를 사용한다.
+
+```text
+openpty
+-> master/slave fd 획득
+-> fork
+-> child: setsid + TIOCSCTTY + dup2(slave, stdin/stdout/stderr) + exec
+-> parent: slave close, master fd 보관
+```
+
+이 선택은 최고 성능 설계가 아니라, 초기에 충분한 제어권을 가지면서도 테스트하기 쉬운 설계다. 여러 surface가 매우 많아지면 macOS `kqueue` 기반으로 바꿀 수 있지만, 먼저 맞춰야 할 것은 속도가 아니라 책임 경계와 재현 가능한 event 흐름이다.
+
+현재 `PtySession` 최소 구현은 테스트가 통제할 수 있도록 blocking pull API인 `readEvent`를 먼저 제공한다. 앱 runtime이 붙는 단계에서는 이 `readEvent` 루프를 reader thread가 실행하고, bounded queue를 통해 `SurfaceRuntime`으로 넘긴다. 즉 reader thread는 운영 모델의 다음 단계이지, 첫 macOS PTY backend가 반드시 thread를 직접 소유해야 한다는 뜻이 아니다.
 
 ## 기본 흐름
 
 ```text
 PtySession.spawn(command)
-  -> forkpty
-  -> child process 실행
-  -> parent는 master fd 보관
-  -> reader thread 시작
+  -> openpty로 master/slave fd 생성
+  -> fork
+  -> child process 실행 전 controlling terminal과 stdio 연결
+  -> parent는 master fd 보관하고 slave fd close
+  -> blocking readEvent로 output/exit event 읽기
 
-reader thread
-  -> master fd에서 bytes 읽기
+future reader thread
+  -> readEvent 루프 실행
   -> PtyEvent.output 생성
   -> bounded event queue에 넣기
 
@@ -29,7 +46,21 @@ app/runtime loop
   -> snapshot/artifact 갱신
 ```
 
+## 왜 `openpty`인가
+
+비교하면 다음과 같다.
+
+| 방식 | 장점 | 손해 | Maru 판단 |
+| --- | --- | --- | --- |
+| `forkpty` | 코드가 가장 짧고 초기 spike가 빠르다. | child setup이 감춰져 pre-exec, controlling terminal, fd lifecycle, 실패 단계별 artifact를 나중에 다시 뜯어야 한다. | 사용하지 않는다. facade 뒤에 숨겨도 장기 구조와 테스트가 약해질 가능성이 크다. |
+| `openpty` | master/slave 생성은 맡기고, fork/exec/pre-exec/stdio 연결은 직접 통제한다. | `forkpty`보다 코드가 길다. | 초기 구현으로 채택한다. Ghostty와 유사한 제어 지점을 얻으면서 `posix_openpt`보다 단순하다. |
+| `posix_openpt` | PTY master 생성부터 slave unlock/name/open까지 가장 낮은 수준에서 제어한다. | boilerplate와 실패 지점이 늘고 OS 차이를 더 많이 떠안는다. | 나중에 `openpty`가 막는 요구가 생길 때만 검토한다. |
+
 ## 왜 reader thread인가
+
+현재 구현의 자동 테스트는 blocking `readEvent`를 직접 호출한다. 통제된 command는 출력 후 종료되므로 테스트가 스레드와 타이밍 경합 없이 PTY 계약을 검증할 수 있다.
+
+SurfaceRuntime이 live shell을 연결하는 시점에는 reader thread를 둔다.
 
 대안은 macOS `kqueue` 또는 nonblocking fd event loop다. 장기적으로는 좋지만 초기에는 다음 비용이 크다.
 
@@ -48,7 +79,7 @@ reader thread는 단순하다.
 
 PTY output은 임의로 버리지 않는다.
 
-초기 queue는 bounded로 둔다. queue가 가득 차면 reader thread는 기다린다. 그러면 PTY master fd를 더 읽지 못하고, 결국 child process stdout도 막힐 수 있다.
+SurfaceRuntime 단계의 queue는 bounded로 둔다. queue가 가득 차면 reader thread는 기다린다. 그러면 PTY master fd를 더 읽지 못하고, 결국 child process stdout도 막힐 수 있다.
 
 이것은 의도된 backpressure다.
 
@@ -99,7 +130,7 @@ resize는 두 곳에 반영되어야 한다.
 
 ## process exit
 
-reader thread가 EOF를 보거나 child process 종료를 감지하면 `PtyEvent.exited`를 보낸다.
+현재 `readEvent`가 EOF를 보거나 child process 종료를 감지하면 `PtyEvent.exited`를 반환한다. SurfaceRuntime 단계에서는 reader thread가 같은 event를 queue에 넣는다.
 
 `SurfaceRuntime`은 이 event를 받아 surface metadata를 갱신한다. 이때 surface 자체를 바로 삭제하지 않는다. 사용자는 종료된 surface의 마지막 화면을 볼 수 있어야 하기 때문이다.
 
@@ -107,6 +138,11 @@ reader thread가 EOF를 보거나 child process 종료를 감지하면 `PtyEvent
 
 - controlled command가 stdout bytes를 event로 낸다.
 - output event는 drop되지 않는다.
-- queue가 가득 찼을 때 무한 메모리 증가가 없다.
 - process exit가 `PtyEvent.exited`로 관측된다.
 - resize request가 PTY layer까지 전달된다.
+
+SurfaceRuntime reader thread 단계에서 추가할 테스트:
+
+- queue가 가득 찼을 때 무한 메모리 증가가 없다.
+- 늦게 도착한 output이 detach된 surface로 흘러가지 않는다.
+- reader thread 종료와 process exit가 trace에 같은 domain event로 남는다.

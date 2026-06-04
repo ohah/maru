@@ -129,7 +129,7 @@ Headless E2E:
   real process -> stdout bytes -> TerminalCore -> screen snapshot
 
 PTY E2E:
-  forkpty -> shell/program -> TerminalCore -> screen snapshot
+  openpty -> shell/program -> TerminalCore -> screen snapshot
 
 App E2E:
   macOS app -> key input/resize/paste -> rendered result

@@ -16,7 +16,7 @@ Surface
   저장 가능
 
 PtySession
-  forkpty master fd + child process lifecycle
+  openpty master fd + child process lifecycle
   저장 불가능
 
 SurfaceRuntime

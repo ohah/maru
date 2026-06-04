@@ -2,4 +2,4 @@
 
 macOS 전용 bridge를 담는 폴더다.
 
-초기 후보 책임은 AppKit host, Metal surface, CoreText font access, forkpty, clipboard, IME, accessibility다. PTY 운영은 [문서](../../../docs/pty-operating-model.md)를 따른다.
+초기 후보 책임은 AppKit host, Metal surface, CoreText font access, openpty-backed PTY, clipboard, IME, accessibility다. PTY 운영은 [문서](../../../docs/pty-operating-model.md)를 따른다.

@@ -327,9 +327,9 @@ TDD 방식:
 - plugin ABI와 권한 모델은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#plugin--wasm)의 capability 방향을 기준으로 하되, 구현 전에 사용자와 별도 논의한다.
 - plugin 실패가 surface/window 전체를 죽이지 않는다.
 
-## 현재 문서에서 정리해야 할 점
+## 개발 순서 단일 출처
 
-[초기 아키텍처](architecture.md)의 기존 개발 순서는 parser를 너무 앞에 둔 표현이다. 실제 구현 순서는 이 문서를 따른다. `architecture.md`는 큰 구조 설명으로 유지하고, 구체적인 순서는 이 문서를 단일 출처로 둔다.
+개발 순서의 단일 출처는 이 문서다. [초기 아키텍처](architecture.md)는 이전에 parser를 너무 앞에 둔 표현이었지만, 지금은 본문에서 그 parser-first 표현을 철회하고 큰 구조 설명만 유지하며 구체적인 순서는 이 문서에 위임한다.
 
 ## PR마다 확인할 질문
 

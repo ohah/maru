@@ -15,14 +15,15 @@ Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
   repo root
   tab/surface layout
   각 surface의 cwd
-  각 surface의 command recipe
+  각 surface의 shell_entry
+  사용자가 명시한 startup_recipe
   사용자가 명시한 safe env overrides
 
 저장하지 않는 것:
   live PTY handle
   child process id
   임의의 전체 env dump
-  마지막 foreground command를 무조건 재실행하는 정보
+  last_observed_command 자동 재실행 정보
 ```
 
 ## 자동 복구와 명령 재실행은 다르다
@@ -43,9 +44,29 @@ workspace restore가 이것을 자동 재실행하면 위험하다.
 초기 정책:
 
 - 자동 restore는 layout, cwd, shell 시작까지만 한다.
-- 임의의 마지막 command는 자동 재실행하지 않는다.
-- repo별 기본 command는 사용자가 config로 명시한 경우에만 실행할 수 있다.
-- destructive할 수 있는 command 자동 실행은 나중에 confirmation이나 allowlist가 필요하다.
+- 임의의 마지막 command나 shell integration으로 관측한 `last_observed_command`는 자동 재실행하지 않는다.
+- repo별 기본 command는 사용자가 `startup_recipe`로 명시한 경우에만 실행 후보가 된다.
+- destructive할 수 있는 `startup_recipe` 자동 실행은 나중에 confirmation이나 allowlist가 필요하다.
+
+## command 관련 용어
+
+`shell_entry`:
+
+- pane을 다시 열 때 시작할 기본 shell argv다.
+- 예: `["zsh", "-l"]`.
+- workspace restore의 기본 동작은 shell_entry 실행까지만이다.
+
+`startup_recipe`:
+
+- 사용자가 config로 명시한 재시작용 command다.
+- 예: `["npm", "run", "dev"]`.
+- 자동 실행 후보가 될 수 있지만 v1 기본값은 보수적이어야 하며, confirmation/allowlist 정책 없이 destructive할 수 있는 command를 자동 실행하지 않는다.
+
+`last_observed_command`:
+
+- shell integration이 관측한 마지막 command다.
+- 최근 작업 세션 UI나 힌트에는 쓸 수 있지만 자동 재실행 대상은 아니다.
+- 이 값을 저장할 경우에도 민감정보 redaction과 사용자 동의가 필요하다.
 
 ## 저장 모델 초안
 
@@ -57,8 +78,9 @@ root /path/to/repo
 surface 1
   title api-server
   cwd /path/to/repo
-  shell zsh
-  startup argv ["zsh", "-l"]
+  shell-entry argv ["zsh", "-l"]
+  startup-recipe none
+  last-observed-command none
   env-override PATH=/usr/local/bin:/usr/bin:/bin
 
 layout
@@ -91,7 +113,7 @@ PRIVATE_KEY
 
 ## command 저장 정책
 
-명령은 shell string보다 argv 배열이 안전하다.
+명령은 shell string보다 argv 배열이 안전하다. 이 절에서 말하는 명령은 `startup_recipe`다. `last_observed_command`는 자동 재실행 대상이 아니므로 이 저장 정책에 섞지 않는다.
 
 권장:
 
@@ -105,7 +127,7 @@ argv ["npm", "run", "dev"]
 shell "npm run dev && deploy"
 ```
 
-shell string은 quoting, expansion, injection 문제가 있다. 초기에는 자동 restore command를 `argv` 형태로 제한한다. shell string 지원이 필요하면 별도 UX와 경고가 필요하다.
+shell string은 quoting, expansion, injection 문제가 있다. 초기에는 startup_recipe를 `argv` 형태로 제한한다. shell string 지원이 필요하면 별도 UX와 경고가 필요하다.
 
 ## 실패 처리
 
@@ -125,5 +147,6 @@ restore가 실패해도 workspace 전체를 버리지 않는다.
 - workspace fixture round-trip.
 - live PTY handle이 저장 모델에 들어가지 않는지 테스트.
 - 민감 env key가 저장되면 실패하는 테스트.
-- `argv` command가 round-trip되는 테스트.
+- `shell_entry`와 `startup_recipe argv`가 round-trip되는 테스트.
+- `last_observed_command`가 자동 실행 후보로 저장되지 않는 테스트.
 - cwd가 없을 때 surface별 restore failure artifact를 남기는 테스트.

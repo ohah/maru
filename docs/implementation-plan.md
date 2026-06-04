@@ -290,7 +290,8 @@ TDD 방식:
 
 - 프로젝트별 workspace 저장.
 - 탭/분할 layout restore.
-- 각 surface의 cwd/env/command restore.
+- 각 surface의 cwd/env/shell_entry/startup_recipe restore.
+- `last_observed_command`는 최근 작업 표시 후보일 뿐 자동 재실행 대상이 아님을 검증한다.
 - 최근 workspace 빠른 복구.
 - repo별 기본 레이아웃과 scratch terminal 정책.
 - 저장 대상, env redaction, command restore 정책은 [Workspace Restore 전략](workspace-restore.md)을 따른다.
@@ -299,8 +300,9 @@ TDD 방식:
 TDD 방식:
 
 - serialized workspace fixture round-trip.
-- restore E2E: 저장된 layout -> surface 생성 -> command/cwd/env 확인.
+- restore E2E: 저장된 layout -> surface 생성 -> shell_entry/startup_recipe/cwd/env 확인.
 - 민감정보 test: env/token/path가 fixture에 그대로 들어가지 않는지 확인.
+- 안전 test: `last_observed_command`가 startup_recipe처럼 자동 실행되지 않는다.
 
 완료 기준:
 

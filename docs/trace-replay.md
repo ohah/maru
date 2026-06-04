@@ -46,6 +46,8 @@ event 4 process-exit surface=1 code=0
 
 event kind는 `SurfaceRuntime`의 runtime event와 1:1로 맞춘다. 정식 대응표는 [Facade 계약](facade-contracts.md)의 `Trace/Event` 절을 단일 출처로 둔다. 요약하면 `process-exit`는 runtime의 `PtyEvent.exited`와 같은 사건이고, `PtyEvent.read_error`는 환경 의존적 실패라 trace에 남기지 않는다.
 
+Shell integration event는 아직 `maru.trace.v1`에 포함하지 않는다. `shell.cwd-changed`, `shell.prompt-start`, `shell.prompt-end`, `shell.command-start`, `shell.command-end`를 trace에 넣는 PR은 schema를 먼저 갱신하고, replay가 해당 metadata를 어떻게 surface/workspace에 반영하는지 테스트해야 한다.
+
 초기에는 wall-clock timestamp를 replay 의미에 쓰지 않는다. 시간은 디버깅 보조 정보일 수 있지만, replay의 정답은 event 순서다.
 
 ## replay가 하는 일

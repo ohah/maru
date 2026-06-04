@@ -42,6 +42,8 @@ COLORTERM=truecolor
 
 이 선택은 멋은 덜하지만 실사용 위험이 작다. 많은 CLI와 원격 서버는 `xterm-256color`를 이미 알고 있다. 반대로 `xterm-maru`나 `maru`를 기본값으로 두면 원격 서버에 terminfo가 없을 때 `vim`, `tmux`, `less`, `htop` 같은 프로그램이 색상, 키 입력, alternate screen을 잘못 처리할 수 있다.
 
+손해도 명확하다. Maru가 OSC52, bracketed paste, future keyboard protocol 같은 기능을 실제로 지원하더라도, `TERM=xterm-256color`만 보고 기능을 감지하는 프로그램은 Maru 고유 기능을 모를 수 있다. v1은 이 discoverability 손해를 받아들이고, SSH/원격 호환성과 안전한 fallback을 먼저 얻는다.
+
 자체 terminfo는 다음 조건이 갖춰진 뒤 opt-in 실험으로 추가한다.
 
 - `tests/oracle/` fixture로 주요 CSI/OSC/alternate screen 동작을 비교할 수 있다.
@@ -67,6 +69,24 @@ osc52.write = ask
 - 기본값은 읽기/쓰기 모두 `ask`다.
 - 사용자가 `allow`로 바꾸기 전까지 background clipboard 변경은 하지 않는다.
 - clipboard 요청은 trace fixture에 원문을 저장하지 않는다. 필요하면 redaction된 event만 남긴다.
+
+요청 흐름:
+
+```text
+PTY output
+-> TerminalCore parses OSC52
+-> TerminalCore emits ClipboardRequest domain event
+-> SurfaceRuntime queues AppRequest.clipboard
+-> app/platform asks the user or applies deny/allow policy
+-> app/platform completes the request
+```
+
+중요한 경계:
+
+- `TerminalCore`는 macOS pasteboard나 system clipboard API를 직접 호출하지 않는다.
+- `SurfaceRuntime`은 clipboard 요청을 app layer로 올리는 큐 역할만 한다.
+- app/platform layer만 사용자 확인 UI와 실제 clipboard read/write를 안다.
+- `ask` 정책을 구현하기 전에는 OSC52를 `allow`로 shortcut하지 않는다.
 
 ## Bracketed Paste
 
@@ -106,6 +126,18 @@ shell_integration = off
 
 이렇게 하는 이유는 사용자의 dotfiles, prompt theme, oh-my-zsh plugin이 다양하기 때문이다. 자동 주입이 깨지면 사용자는 Maru가 아니라 자신의 shell 환경이 망가졌다고 느낀다.
 
+초기 shell integration domain event 어휘:
+
+| event | 의미 | 저장/사용 |
+| --- | --- | --- |
+| `shell.cwd-changed` | shell이 현재 작업 디렉터리를 보고했다. | workspace metadata 갱신 후보. |
+| `shell.prompt-start` | prompt 렌더링이 시작됐다. | command 경계 추정, prompt-aware UX 후보. |
+| `shell.prompt-end` | prompt 입력 영역이 끝났다. | command 입력 영역 추정 후보. |
+| `shell.command-start` | 사용자가 command 실행을 시작했다. | 최근 작업 세션 metadata 후보. |
+| `shell.command-end` | command가 종료 상태와 함께 끝났다. | 알림, 최근 작업 세션 metadata 후보. |
+
+이 event들은 shell hook이 출력한 raw escape bytes 자체가 아니다. parser/shell-integration layer가 해석한 domain event다. trace/replay에 이 event를 저장하는 PR은 먼저 [Facade 계약](facade-contracts.md)의 `Trace/Event` 절과 [Trace와 Replay](trace-replay.md)의 schema를 갱신해야 한다.
+
 ## Workspace Restore와 Command Restore
 
 workspace restore는 live process를 저장하는 기능이 아니다. 저장하는 것은 다시 열기 위한 선언적 설명서다. 자세한 저장 모델은 [Workspace Restore 전략](workspace-restore.md)을 따른다.
@@ -113,11 +145,17 @@ workspace restore는 live process를 저장하는 기능이 아니다. 저장하
 v1 기본 정책:
 
 - 복구한다: workspace, tab/split layout, surface cwd, safe env override, shell 시작 정보.
-- 기본 자동 재실행하지 않는다: 마지막 foreground command, 임의 shell string, destructive 가능 command.
-- 사용자가 repo별 startup command를 명시한 경우에만 실행 후보가 된다.
-- command 실행은 `argv` 형태를 우선한다. shell string은 별도 UX와 경고가 필요하다.
+- 기본 자동 재실행하지 않는다: 마지막 foreground command, shell integration으로 관측한 command, 임의 shell string, destructive 가능 command.
+- 사용자가 repo별 `startup_recipe`를 명시한 경우에만 실행 후보가 된다.
+- command 실행은 `argv` 형태의 `startup_recipe`를 우선한다. shell string은 별도 UX와 경고가 필요하다.
 
 자동 command restore는 구현 전에 다시 논의한다. 이 결정은 UX가 아니라 안전 문제다.
+
+용어:
+
+- `shell_entry`: pane을 다시 열 때 시작할 기본 shell argv다. 예: `["zsh", "-l"]`.
+- `startup_recipe`: 사용자가 config로 명시한 재시작용 command다. 자동 실행 후보가 될 수 있지만 기본 confirm/allowlist 정책이 필요하다.
+- `last_observed_command`: shell integration으로 관측한 마지막 command다. 최근 작업 표시에는 쓸 수 있지만 자동 재실행 대상은 아니다.
 
 ## Plugin / Wasm
 

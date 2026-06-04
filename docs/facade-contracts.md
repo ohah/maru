@@ -169,6 +169,8 @@ trace schema와 replay 동작은 [Trace와 Replay](trace-replay.md)를 따른다
 | `process-exit` | `PtyEvent.exited` | 같은 사건의 두 이름이다. 새 이름을 추가하지 않는다. |
 | (없음) | `PtyEvent.read_error` | 환경 의존적 실패라 trace에 남기지 않고 실패 artifact로만 남긴다. |
 
+Shell integration event(`shell.cwd-changed`, `shell.prompt-start`, `shell.prompt-end`, `shell.command-start`, `shell.command-end`)는 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#shell-integration)의 어휘를 따른다. 이 event를 `maru.trace.v1`에 저장하는 구현 PR은 먼저 이 표와 [Trace와 Replay](trace-replay.md)의 schema를 함께 갱신해야 한다. raw OSC bytes를 각 기능이 임시로 파싱하지 않는다.
+
 몰라야 하는 것:
 
 - private parser storage.

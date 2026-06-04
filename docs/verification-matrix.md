@@ -53,6 +53,8 @@ fixture, golden, trace 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fix
 | Wasm plugin | 구현 전 | 현재 plugin registry는 no-op 구조다. | plugin boundary, 권한, event ABI, 실패 격리를 검증하지 못한다. | plugin hook API가 정해진 뒤 fixture plugin과 sandbox failure test를 추가한다. |
 | global shortcut | 구현 전, 환경 의존 | macOS 전역 핫키 등록과 충돌 검증이 아직 없다. | quick terminal/focus UX가 terminal input과 충돌하지 않는지 증명하지 못한다. | config conflict unit test, resolver test, macOS app smoke test를 추가한다. |
 | trace/replay | 구현 전 | snapshot은 있지만 event trace/replay는 아직 없다. | 실패를 시간순으로 재현하기 어렵다. | [Trace와 Replay](trace-replay.md)에 따라 terminal input/output event를 domain event로 기록하고 replay test를 추가한다. |
+| OSC52 ask flow | 구현 전 | clipboard 요청을 app/platform layer로 올리는 `AppRequest.clipboard` 구현이 아직 없다. | 기본 정책이 `ask`인데도 구현자가 임시로 allow/deny shortcut을 만들 위험이 있다. | OSC52 read/write fixture, `AppRequest.clipboard` unit test, deny/allow completion test, redacted artifact를 추가한다. |
+| shell integration domain event | 구현 전 | opt-in zsh hook과 shell event vocabulary는 문서화됐지만 trace schema에는 아직 들어가지 않았다. | cwd/session 복구 기능을 raw output parser나 workspace 코드가 제각각 구현할 위험이 있다. | hook fixture, `AppRequest.shell_integration` test, trace schema 갱신 PR에서 replay test를 추가한다. |
 | SSH workload | 구현 전, 환경 의존 | SSH 전용 integration은 아직 실행하지 않는다. 외부 네트워크나 특정 원격 서버에 묶이지 않는 방식이 필요하다. | 원격 shell, latency, locale, terminal mode 차이를 검증하지 못한다. | 로컬 테스트 서버나 opt-in 환경변수 기반 SSH smoke test를 추가한다. |
 | 긴 soak/제품 성능 예산 | 부분 구현, 환경 의존 | `mise run perf`는 core 기준만 측정한다. 앱 시작, 입력 지연, frame budget, RSS는 아직 없다. | GUI/PTY/renderer 성능 회귀는 아직 숫자로 실패시키지 못한다. | macOS host, PTY, renderer가 붙으면 startup, latency, memory, throughput 기준을 확장한다. |
 

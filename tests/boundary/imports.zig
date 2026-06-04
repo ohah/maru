@@ -125,6 +125,20 @@ fn checkFile(
 // 빠져나가, 금지 import가 mise run check(fmt-check + check-boundaries)와 CI를 그대로
 // 통과한다.
 fn scanImports(text: []const u8, rule: Rule, path: []const u8, violations: *usize) void {
+    scanImportsWithDiagnostics(text, rule, path, violations, true);
+}
+
+fn scanImportsQuiet(text: []const u8, rule: Rule, path: []const u8, violations: *usize) void {
+    scanImportsWithDiagnostics(text, rule, path, violations, false);
+}
+
+fn scanImportsWithDiagnostics(
+    text: []const u8,
+    rule: Rule,
+    path: []const u8,
+    violations: *usize,
+    emit_diagnostics: bool,
+) void {
     var index: usize = 0;
     const builtin = "@import";
     while (std.mem.indexOfPos(u8, text, index, builtin)) |found| {
@@ -142,10 +156,15 @@ fn scanImports(text: []const u8, rule: Rule, path: []const u8, violations: *usiz
 
         for (rule.forbidden) |forbidden| {
             if (importTraversesLayer(import_path, forbidden)) {
-                std.debug.print(
-                    "boundary violation: {s} ({s} layer) imports forbidden layer '{s}' via \"{s}\"\n",
-                    .{ path, rule.layer, forbidden.layer, import_path },
-                );
+                // 실제 파일을 검사할 때만 진단을 출력한다. 아래 unit test는 일부러
+                // 금지 import fixture를 넣기 때문에, 거기서 같은 메시지를 찍으면
+                // `mise run check`가 성공해도 실패처럼 보여 triage를 방해한다.
+                if (emit_diagnostics) {
+                    std.debug.print(
+                        "boundary violation: {s} ({s} layer) imports forbidden layer '{s}' via \"{s}\"\n",
+                        .{ path, rule.layer, forbidden.layer, import_path },
+                    );
+                }
                 violations.* += 1;
             }
         }
@@ -195,25 +214,25 @@ test "scanImports catches zig fmt-clean whitespace and multi-line @import forms"
     // 단일행: 기존에도 잡혔다.
     {
         var v: usize = 0;
-        scanImports("const a = @import(\"../pty/types.zig\");", rule, "test", &v);
+        scanImportsQuiet("const a = @import(\"../pty/types.zig\");", rule, "test", &v);
         try std.testing.expectEqual(@as(usize, 1), v);
     }
     // trailing comma 줄바꿈 형태: zig fmt --check를 통과하면서 예전 `@import("` 마커를 빠져나갔다.
     {
         var v: usize = 0;
-        scanImports("const a = @import(\n    \"../pty/types.zig\",\n);", rule, "test", &v);
+        scanImportsQuiet("const a = @import(\n    \"../pty/types.zig\",\n);", rule, "test", &v);
         try std.testing.expectEqual(@as(usize, 1), v);
     }
     // @import 와 `(` 사이 공백.
     {
         var v: usize = 0;
-        scanImports("const a = @import (\"../pty/types.zig\");", rule, "test", &v);
+        scanImportsQuiet("const a = @import (\"../pty/types.zig\");", rule, "test", &v);
         try std.testing.expectEqual(@as(usize, 1), v);
     }
     // 허용되는 import(std, 공개 barrel)는 잡지 않는다.
     {
         var v: usize = 0;
-        scanImports("const s = @import(\"std\");\nconst t = @import(\"../terminal.zig\");", rule, "test", &v);
+        scanImportsQuiet("const s = @import(\"std\");\nconst t = @import(\"../terminal.zig\");", rule, "test", &v);
         try std.testing.expectEqual(@as(usize, 0), v);
     }
 }

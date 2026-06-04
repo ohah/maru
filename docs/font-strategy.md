@@ -67,6 +67,9 @@ v1에서 약속하지 않는 것:
 - ligature 최적화.
 - subpixel positioning 품질 보장.
 - 모든 complex script의 완전한 shaping.
+- ZWJ 이모지 시퀀스·국기·skin-tone 같은 다중 코드포인트 grapheme의 완전한 폭/표시 정확도.
+- 폰트에 해당 face가 없을 때의 합성 bold/italic(faux) 품질.
+- box-drawing(U+2500 블록)/Powerline glyph를 cell에 정확히 맞추는 cell-snapping/stretching.
 - pixel-perfect golden을 기본 CI에서 강제.
 - HarfBuzz, FreeType, fontconfig, DirectWrite 같은 외부/타 플랫폼 폰트 스택 추가.
 
@@ -107,6 +110,8 @@ codepoint / grapheme
 - ASCII printable은 1 cell.
 - East Asian wide 문자는 2 cell.
 - combining mark는 이전 cell cluster에 붙인다.
+- grapheme cluster는 UAX#29 기준으로 분절하고, ZWJ 시퀀스·국기·skin-tone modifier는 하나의 cluster로 묶어 폭을 width policy로 정한다. 완전한 처리는 fixture로 확장한다.
+- ambiguous width(UAX#11 'A')는 기본 1 cell로 시작한다. 로케일/CJK 맥락에서 2 cell이 필요한 경우의 설정화는 구현 전에 다시 논의한다.
 - unsupported/ambiguous width는 보수적으로 1 cell로 시작하고 fixture로 확장한다.
 - emoji는 표시 폭과 실제 glyph bounds가 다를 수 있으므로, cursor advance는 width policy를 따른다.
 
@@ -288,5 +293,7 @@ renderer가 붙은 뒤 다음 숫자를 성능 예산에 추가한다.
 - 기본 font family를 `JetBrains Mono`로 유지할지, system monospace로 바꿀지.
 - ligature를 v1 이후 어느 단계에서 다룰지.
 - emoji 품질 기준을 replacement 허용으로 둘지, color glyph 필수로 둘지.
+- ambiguous width(UAX#11 'A')를 1 cell 고정으로 둘지, 로케일/설정으로 2 cell을 허용할지.
+- 폰트에 bold/italic face가 없을 때 합성(faux bold/italic)할지, regular로 대체할지.
 - font config에 fallback family list를 노출할지.
 - user-installed font 파일 경로를 직접 지정하게 할지.

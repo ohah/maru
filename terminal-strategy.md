@@ -179,8 +179,8 @@ Ghostty는 제품을 복제할 대상이 아니라 기술 레퍼런스다.
 - VT/render-state 경계
 - parser -> stream -> terminal-state 파이프라인
 - dirty tracking
-- row/cell render iterator
-- glyph atlas 구조
+- row/cell 렌더 경계 (반복 방식은 Maru 독자 설계)
+- glyph atlas를 둔다는 책임 경계 (레이아웃은 Maru 독자 설계)
 - Metal pipeline 구조
 - CoreText/HarfBuzz/font shaping 구성
 - macOS input/IME host 경계

@@ -62,7 +62,7 @@ snapshot 출력이 바뀌는 PR은 PR 설명에 다음을 적는다.
 
 ```text
 snapshot schema version:
-  유지 / v2로 증가
+  유지 / 다음 버전으로 증가 (현재 v2 -> v3)
 
 이유:
   schema 의미 변경인지, 단순 expected output 변경인지

@@ -232,10 +232,12 @@ TDD 방식:
 - renderer는 snapshot 계약만 소비한다.
 - macOS app host는 입력, window, focus, surface lifecycle을 관리한다.
 - 실제 backend 선택과 검증 순서는 [렌더러 전략](renderer-strategy.md)을 따른다.
+- font resolve, fallback, glyph atlas, emoji/CJK 처리 정책은 [폰트 전략](font-strategy.md)을 따른다.
 
 TDD 방식:
 
 - renderer unit/golden test: snapshot -> draw command model.
+- font layout test: fake font backend로 snapshot -> glyph run -> draw command model을 검증한다.
 - app smoke test: window 생성, resize, key input artifact.
 - screenshot artifact: 실제 화면 검증이 가능한 곳부터 opt-in으로 추가한다.
 

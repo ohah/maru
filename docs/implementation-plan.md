@@ -95,7 +95,7 @@ TDD 방식:
 - screen text와 structured snapshot이 모두 생성된다.
 - artifact 포맷은 [Fixture와 Oracle 포맷](fixture-format.md)을 따른다.
 - snapshot이 renderer나 PTY 구현 세부사항을 몰라야 한다.
-- snapshot에 `schema=maru.snapshot.v1` 같은 버전 표시가 있다. (현재 코드가 실제로 내보내는 버전은 `maru.snapshot.v1`이다.)
+- snapshot 첫 줄에 bare 토큰 `maru.snapshot.v1`이 버전 표시로 들어간다(`schema=` 접두어 없이 첫 줄 전체가 schema 토큰, 현재 코드 기준).
 - `future fields`를 어디에 추가할지 문서화되어 있다. cursor mode, style, alternate screen, scrollback이 붙어도 기존 버전 consumer가 깨지지 않게 한다.
 
 아직 하지 않는다:

@@ -159,6 +159,16 @@ trace schema와 replay 동작은 [Trace와 Replay](trace-replay.md)를 따른다
 - replay runner가 public facade만 통해 같은 상태를 재현할 수 있게 한다.
 - 민감정보가 들어갈 수 있는 cwd/env/command/raw bytes를 sanitized fixture로 바꿀 경계를 둔다.
 
+정식 event 어휘는 이 표를 단일 출처로 둔다. trace kind와 `SurfaceRuntime`의 `PtyEvent`/입력 경로는 다음과 같이 대응한다.
+
+| trace kind | runtime 대응 | 비고 |
+| --- | --- | --- |
+| `output` | `PtyEvent.output` | PTY → surface 방향. |
+| `input` | `SurfaceRuntime.writeInput`(`TerminalInput`) | app → PTY 방향이라 대응하는 `PtyEvent`가 없다. |
+| `resize` | `SurfaceRuntime.resize` | core resize와 PTY resize를 한 event로 묶는다. |
+| `process-exit` | `PtyEvent.exited` | 같은 사건의 두 이름이다. 새 이름을 추가하지 않는다. |
+| (없음) | `PtyEvent.read_error` | 환경 의존적 실패라 trace에 남기지 않고 실패 artifact로만 남긴다. |
+
 몰라야 하는 것:
 
 - private parser storage.

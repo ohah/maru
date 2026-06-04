@@ -29,7 +29,7 @@ Trace는 이 상황에서 "실제로 어떤 bytes와 resize/input event가 어�
 초기 trace schema는 `maru.trace.v1`이다.
 
 ```text
-schema maru.trace.v1
+maru.trace.v1
 event 1 output surface=1 bytes="hello\\r\\n"
 event 2 input surface=1 bytes="ls\\r"
 event 3 resize surface=1 cols=120 rows=40
@@ -38,11 +38,13 @@ event 4 process-exit surface=1 code=0
 
 필수 필드:
 
-- `schema`: trace 포맷 버전.
+- schema 토큰: 첫 줄 전체가 bare 토큰 `maru.trace.v1`이다. snapshot과 같은 규칙으로 `schema=` 접두어를 쓰지 않는다.
 - `event index`: 이벤트 순서. timestamp보다 중요하다.
 - `event kind`: `output`, `input`, `resize`, `process-exit`.
 - `surface`: 어느 surface에 속한 이벤트인지.
 - event별 payload.
+
+event kind는 `SurfaceRuntime`의 runtime event와 1:1로 맞춘다. 정식 대응표는 [Facade 계약](facade-contracts.md)의 `Trace/Event` 절을 단일 출처로 둔다. 요약하면 `process-exit`는 runtime의 `PtyEvent.exited`와 같은 사건이고, `PtyEvent.read_error`는 환경 의존적 실패라 trace에 남기지 않는다.
 
 초기에는 wall-clock timestamp를 replay 의미에 쓰지 않는다. 시간은 디버깅 보조 정보일 수 있지만, replay의 정답은 event 순서다.
 
@@ -60,6 +62,8 @@ trace file
 ```
 
 중요한 점은 replay가 private parser storage를 직접 만지지 않는다는 것이다. 실제 앱과 같은 public 경로로만 재현해야 버그를 제대로 잡는다.
+
+replay에는 live `PtySession`이 없다. trace는 이미 일어난 입력의 기록이므로, `writeInput`/`resize`의 PTY 방향 부수효과(child에게 bytes 전달, master fd ioctl)는 재현 대상이 아니다. 따라서 replay runner는 `SurfaceRuntime`에 no-op `PtySession`을 attach하거나 core 방향 효과만 적용하고, PTY 방향 호출은 무시한다. replay의 정답은 `output`/`resize` event가 `TerminalCore`에 반영된 결과이지 child process 재실행이 아니다.
 
 ## trace와 로그의 차이
 
@@ -83,12 +87,7 @@ event 4 output surface=1 bytes="..."
 
 raw output bytes에는 경로, 서버 이름, token, 환경변수 값이 섞일 수 있다. 그래서 trace는 기본적으로 로컬 산출물이다.
 
-git에 fixture로 넣으려면 다음을 지킨다.
-
-- token, secret, password, cookie, private key 조각을 제거한다.
-- 개인 홈 디렉터리 경로를 일반 경로로 바꾼다.
-- 서버 주소나 사용자 이름이 민감하면 익명화한다.
-- sanitize 후에도 같은 replay 결과가 나오는지 확인한다.
+git에 fixture로 넣으려면 [프로젝트 규칙](project-rules.md)의 "민감정보 redaction 기준 (단일 출처)"을 따른다. 같은 키 목록과 경로 일반화·익명화 규칙을 쓰며, 여기에 목록을 복제하지 않는다. sanitize 후에도 같은 replay 결과가 나오는지 확인하는 것까지가 fixture 추가 조건이다.
 
 ## 초기 테스트
 

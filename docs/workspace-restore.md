@@ -48,7 +48,7 @@ workspace restore가 이것을 자동 재실행하면 위험하다.
 ## 저장 모델 초안
 
 ```text
-schema maru.workspace.v1
+maru.workspace.v1
 workspace id=<stable-id>
 root /path/to/repo
 
@@ -63,7 +63,7 @@ layout
   tab 1 surface=1
 ```
 
-실제 직렬화는 나중에 정한다. 중요한 것은 저장 대상이 live object가 아니라 선언적 상태라는 점이다.
+실제 직렬화는 나중에 정한다. 중요한 것은 저장 대상이 live object가 아니라 선언적 상태라는 점이다. 첫 줄 schema 토큰은 snapshot/trace와 같은 규칙으로 bare 토큰(`maru.workspace.v1`)을 쓰고 `schema=` 접두어를 두지 않는다.
 
 ## env 저장 정책
 
@@ -85,9 +85,7 @@ PRIVATE_KEY
 
 - 현재 process의 전체 env를 자동 저장하지 않는다.
 - 사용자가 명시한 env override만 저장한다.
-- key 이름에 `TOKEN`, `SECRET`, `PASSWORD`, `COOKIE`, `KEY`, `AUTH`, `CREDENTIAL`이 들어가면 기본 redaction 대상이다.
-- `PATH`, `LANG`, `LC_*` 같은 안전한 값만 allowlist 후보로 둔다.
-- allowlist도 구현 전에 사용자와 다시 확인한다.
+- redaction 키 목록과 allowlist 기준은 [프로젝트 규칙](project-rules.md)의 "민감정보 redaction 기준 (단일 출처)"을 따른다. 이 문서에 키 목록을 따로 복제하지 않는다.
 
 ## command 저장 정책
 

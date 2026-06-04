@@ -49,7 +49,7 @@ Snapshot version은 제품 버전이 아니라 **테스트와 디버깅 데이�
 
 초기 v1 reader는 보수적으로 동작한다.
 
-- 첫 줄에서 `schema=maru.snapshot.v1`을 확인한다.
+- 첫 줄 전체가 bare 토큰 `maru.snapshot.v1`인지 확인한다. `schema=` 같은 접두어 없이 첫 줄이 곧 schema 토큰이다(현재 코드가 내보내는 형식).
 - 알 수 없는 semantic section을 만나면 실패한다.
 - `debug.` prefix를 가진 non-semantic line은 무시할 수 있다.
 

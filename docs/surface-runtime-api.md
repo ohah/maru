@@ -118,6 +118,7 @@ pub const SurfaceRuntime = struct {
 
 - surface가 닫히거나 process가 끝났을 때 live 연결을 끊는다.
 - surface의 복구 가능한 metadata는 남을 수 있지만, pty handle은 남기지 않는다.
+- attach가 만든 surface↔pty 매핑을 양방향으로 제거한다. 그래서 detach 이후 같은 `pty_id`로 들어온 `applyPtyEvent`는 `UnknownPty`로 떨어지고, 끊긴 surface로 늦게 도착한 output이 흘러들지 않는다.
 
 `writeInput`:
 
@@ -132,9 +133,10 @@ pub const SurfaceRuntime = struct {
 `applyPtyEvent`:
 
 - PTY reader가 만든 event를 surface에 반영한다.
+- `PtyEvent`는 `surface_id`를 직접 들고 있지 않다. event의 `pty_id`로 attach 매핑을 거꾸로 조회해 대상 surface를 찾는다. 매핑에 없는 `pty_id`면 `UnknownPty`다.
 - `output`은 해당 surface의 `TerminalCore.write`로 들어간다.
-- `exited`는 surface metadata와 artifact에 반영한다.
-- `read_error`는 실패 artifact에 남긴다.
+- `exited`는 surface metadata와 artifact에 반영한다. 이 event를 trace로 남길 때의 이름은 `process-exit`이며, 둘은 같은 사건의 두 이름이다(대응표는 [Facade 계약](facade-contracts.md)의 `Trace/Event` 절).
+- `read_error`는 실패 artifact에 남긴다. 환경 의존적 실패라 trace에는 기록하지 않는다.
 
 ## 반드시 지켜야 할 것
 

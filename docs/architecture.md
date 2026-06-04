@@ -173,7 +173,7 @@ PTY/input/parser/terminal/renderer/workspace
 
 릴리스 빌드에서는 이 관측 기능이 꺼졌을 때 hot path에 의미 있는 비용을 남기지 않아야 한다. trace와 artifact는 기본적으로 로컬 전용이며, 회귀 테스트로 추가할 때만 민감정보를 제거한 fixture를 git에 넣는다.
 
-렌더러 backend 선택은 [렌더러 전략](renderer-strategy.md)을 따른다. 현재 추천은 macOS Metal-first 구현과 backend-neutral `DrawList` 계약이다.
+렌더러 backend 선택은 [렌더러 전략](renderer-strategy.md)을 따른다. 현재 추천은 macOS Metal-first 구현과 backend-neutral `DrawList` 계약이다. 폰트 resolve, fallback, glyph atlas, emoji/CJK 처리는 [폰트 전략](font-strategy.md)을 따른다.
 
 ## 메모리 전략
 

@@ -20,6 +20,7 @@
 - 절대 시간 기준으로 실패시키지 않는다.
 - 실제 PTY backpressure를 검증하지 않는다.
 - Metal frame pacing을 검증하지 않는다. future WebGPU backend도 생기면 별도 검증한다.
+- CoreText font resolve, fallback cache, glyph atlas eviction을 검증하지 않는다.
 - 메모리 상한을 강제하지 않는다.
 
 이 항목들은 PTY, renderer, performance budget이 생긴 뒤 별도 스트레스/벤치마크로 추가한다.
@@ -29,5 +30,6 @@
 - parser: ANSI/OSC/DCS fixture corpus 반복 입력
 - PTY: 대량 stdout, resize storm, tab close 중 process cleanup
 - renderer: 큰 grid, dirty region storm, cursor blink와 redraw 압박
+- font/glyph atlas: CJK/emoji/fallback 반복 출력, font size 변경, atlas eviction storm
 - workspace: 여러 tab/surface restore 반복
 - plugin: event queue flood, timeout, 권한 거부, 실패 격리

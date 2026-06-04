@@ -38,6 +38,7 @@ tests/artifacts/perf/core.txt
 | 앱 시작 시간 | macOS host가 아직 없다. | app launch -> first drawable time |
 | 입력 지연 | PTY와 GUI input path가 아직 없다. | key event -> PTY write, PTY output -> snapshot update |
 | frame budget | Metal-first renderer가 아직 없다. future WebGPU backend도 같은 기준을 따른다. | snapshot -> GPU frame submit |
+| font/glyph atlas | font resolve와 atlas가 아직 없다. 세부 정책은 [폰트 전략](font-strategy.md)을 따른다. | first glyph resolve, frame당 atlas miss, atlas upload bytes, font size 변경 후 첫 frame |
 | RSS/memory baseline | platform별 측정 API가 필요하다. | cold start RSS, one tab RSS, scrollback RSS |
 | PTY backpressure | 실제 PTY backend가 아직 없다. | large stdout producer -> UI responsiveness |
 

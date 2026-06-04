@@ -30,7 +30,7 @@ src/
   config/               action parsing, theme/font config
   pty/                  PTY backend, spawn request, process handle
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding
-  renderer/             Metal-first renderer internals, future WebGPU backend boundary, glyph atlas, frame stats
+  renderer/             Metal-first renderer internals, future WebGPU backend boundary, font layout, glyph atlas, frame stats
   platform/             OS별 process/window/input bridge
     macos/
     windows/

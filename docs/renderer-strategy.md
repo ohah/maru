@@ -1,6 +1,6 @@
 # 렌더러 전략
 
-이 문서는 Maru의 렌더러가 무엇을 목표로 하고, Wasm과 WebGPU를 어떻게 구분하는지 정한다.
+이 문서는 Maru의 렌더러가 무엇을 목표로 하고, Wasm과 WebGPU를 어떻게 구분하는지 정한다. 폰트 선택, glyph cache, atlas, fallback 세부 정책은 [폰트 전략](font-strategy.md)을 단일 출처로 둔다.
 
 ## 결론
 
@@ -140,6 +140,7 @@ backend(Metal/WebGPU) 선택과 별개로, 두 가지를 어디서 처리하는�
 - 초기에는 macOS-first에 맞춰 **CoreText**로 shaping과 font fallback을 한다. 추가 런타임 의존성이 없고 Apple 글꼴 스택과 가장 잘 맞는다.
 - 단, shaping 결과는 backend-neutral한 glyph run(코드포인트, glyph id, 셀 좌표, 색)으로만 `DrawList`에 들어간다. CoreText 타입을 `DrawList` 공개 계약으로 노출하지 않는다.
 - 그래서 나중에 cross-platform이 필요하면 같은 경계 뒤에서 **HarfBuzz** 같은 shaper로 교체할 수 있다. ligature/complex script 최적화는 아래 "지금 선택하지 않는 것"으로 둔다.
+- 구체적인 fallback, cell width, glyph atlas cache key, emoji 정책은 [폰트 전략](font-strategy.md)을 따른다.
 
 dirty region 범위:
 
@@ -172,12 +173,14 @@ dirty region 범위:
 
 - snapshot을 draw command model로 바꾸는 unit/golden test.
 - dirty region이 draw command 범위를 줄이는지 확인하는 test.
+- fake font backend를 사용한 `RenderSnapshot -> GlyphRun -> DrawList` test.
 - renderer가 PTY, parser, live platform handle을 import하지 않는 boundary test.
 
 opt-in으로 둘 것:
 
 - macOS window server가 필요한 screenshot smoke.
 - 실제 Metal device 생성.
+- 실제 CoreText font resolve와 glyph rasterization smoke.
 - frame pacing, GPU timing, font stack 영향을 받는 성능 측정.
 
 ## clean-room 기준

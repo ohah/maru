@@ -131,6 +131,23 @@ Future browser target
 
 따라서 Wasm은 장기 target이고, WebGPU는 미래 backend 후보다. 지금 당장 Wasm runtime이나 browser build를 구현하지 않는다.
 
+## 텍스트 셰이핑과 dirty region
+
+backend(Metal/WebGPU) 선택과 별개로, 두 가지를 어디서 처리하는지 계약으로 고정해 둔다. 둘 다 `RenderSnapshot -> DrawList` 경계 안쪽 책임이고, `TerminalCore`와 app model은 몰라야 한다.
+
+텍스트 셰이핑:
+
+- 초기에는 macOS-first에 맞춰 **CoreText**로 shaping과 font fallback을 한다. 추가 런타임 의존성이 없고 Apple 글꼴 스택과 가장 잘 맞는다.
+- 단, shaping 결과는 backend-neutral한 glyph run(코드포인트, glyph id, 셀 좌표, 색)으로만 `DrawList`에 들어간다. CoreText 타입을 `DrawList` 공개 계약으로 노출하지 않는다.
+- 그래서 나중에 cross-platform이 필요하면 같은 경계 뒤에서 **HarfBuzz** 같은 shaper로 교체할 수 있다. ligature/complex script 최적화는 아래 "지금 선택하지 않는 것"으로 둔다.
+
+dirty region 범위:
+
+- dirty 단위는 cell이다. dirty 추적의 소유자는 `TerminalCore`/snapshot 쪽이고, renderer는 받은 dirty 범위만 다시 그린다. renderer가 화면을 스캔해 직접 dirty를 추론하지 않는다.
+- `DrawList`는 전체 화면이 아니라 변경된 cell 범위만 담을 수 있어야 한다. 한 cell만 바뀌면 그 cell만 draw command에 들어가는 것이 정상 경로다.
+- cursor 이동, selection 변경, resize는 각각 dirty 범위를 만든다. 이 범위 산출은 domain 쪽 계약이고 GPU와 무관하다.
+- 검증은 아래 "검증 전략"의 "dirty region이 draw command 범위를 줄이는지 확인하는 test"로 고정한다.
+
 ## 지금 선택하지 않는 것
 
 초기에는 다음을 하지 않는다.

@@ -55,6 +55,16 @@ Maru에서 작업하는 모든 에이전트와 개발자는 이 규칙을 따른
 - trace와 실패 산출물은 기본적으로 로컬 전용으로 둔다.
 - 회귀 테스트 fixture로 추가할 때만 민감정보를 제거한 데이터를 git에 넣는다.
 
+### 민감정보 redaction 기준 (단일 출처)
+
+env override 저장, trace fixture, 실패 artifact는 모두 같은 redaction 기준을 쓴다. 포맷별로 키 목록을 따로 두지 말고 이 절을 단일 출처로 참조한다.
+
+- key 이름에 다음 토큰이 들어가면(대소문자 무시, 부분 일치) 기본 redaction 대상이다: `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `COOKIE`, `KEY`, `AUTH`, `CREDENTIAL`, `SESSION`.
+- redaction은 deny-by-default다. 위 목록은 최소 보장이며, 애매하면 남기지 말고 제거한다.
+- `PATH`, `LANG`, `LC_*`처럼 명백히 안전한 값만 allowlist 후보로 둔다. allowlist는 구현 전에 사용자와 다시 확인한다.
+- raw output bytes, cwd, command에 섞인 홈 디렉터리 경로·서버 주소·사용자 이름은 일반화하거나 익명화한다.
+- sanitize 후에도 같은 replay/restore 결과가 나오는지 확인한다.
+
 ## 구조와 파일 분리
 
 - 확장 가능하고 책임 경계가 명확한 구조를 유지한다.

@@ -115,7 +115,7 @@ codepoint / grapheme
 - unsupported/ambiguous width는 보수적으로 1 cell로 시작하고 fixture로 확장한다.
 - emoji는 표시 폭과 실제 glyph bounds가 다를 수 있으므로, cursor advance는 width policy를 따른다.
 
-wide/combining 처리는 [검증 매트릭스](verification-matrix.md)의 `wide-character(East-Asian width)` 항목과 연결한다.
+wide/combining 처리는 [검증 매트릭스](verification-matrix.md)의 `wide-character(East-Asian width)` 항목과 연결한다. 현재 구현은 최소 width table, continuation cell, combining mark 1개 저장을 제공한다. UAX#11 전체, ambiguous width 설정, ZWJ emoji 폭 처리는 fixture를 추가하며 확장한다.
 
 ## Fallback 전략
 

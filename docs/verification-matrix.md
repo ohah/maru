@@ -23,6 +23,7 @@
 - 커서 위치와 표시 여부
 - dirty region
 - 각 row의 셀 텍스트
+- wide/continuation/combining cell metadata
 - non-default style이 있는 셀 목록
 
 이 포맷은 현재 테스트 산출물이면서, 나중에 replay trace와 inspector가 같은 도메인 데이터를 보도록 하기 위한 첫 관측 가능성 경계다.
@@ -45,7 +46,7 @@ fixture, golden, trace 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fix
 | 터미널 내부 workload (tmux/vim/htop/less/ssh) | 구현 전, 환경 의존 | 실제 TUI 프로그램을 Maru PTY 안에서 돌리는 smoke가 아직 없다(PTY 미구현). 이들은 정답을 계산하는 오라클이 아니라 파서를 압박하는 workload다. | alt screen, 복잡한 CSI, resize/SIGWINCH, mouse 처리 회귀를 실제 프로그램으로 잡지 못한다. | PTY가 붙은 뒤 opt-in smoke로 tmux/vim/htop 등을 실행해 crash 없이 snapshot까지 도달하는지 확인한다. |
 | VT parser | 구현 전 | 현재 core는 UTF-8 텍스트와 일부 control만 처리한다. | ANSI 색상, cursor movement, alternate screen, mouse mode 같은 터미널 핵심 호환성을 검증하지 못한다. | 작은 ANSI fixture를 TDD로 추가하고 oracle snapshot을 함께 늘린다. |
 | autowrap/line wrap | 구현 전 | core는 마지막 열에서 셀을 덮어쓰고 줄바꿈하지 않는다(DECAWM 없음). | 폭을 넘는 셸 출력, 긴 프롬프트, man page가 손실된다. | step 3에서 pending-wrap 플래그 기반 DECAWM과 폭 초과 fixture를 추가한다. |
-| wide-character(East-Asian width) | 구현 전 | Cell에 width 개념이 없고 모든 출력 문자를 1열 전진시킨다. | 한글/CJK/이모지가 반칸 어긋나 TUI(vim/tmux/htop) 정렬이 깨진다. | Cell에 width 필드와 continuation cell을 도입하고 UAX#11 폭 테이블 + CJK/결합문자 fixture를 추가한다. |
+| wide-character(East-Asian width) | 자동 검증 중 | `Cell.width`, `Cell.continuation`, `Cell.combining`이 있고 한글/CJK/emoji의 2-cell, combining mark의 0-cell을 기본 검증한다. UAX#11 전체와 ambiguous width 설정은 아직 없다. | ZWJ emoji, 국기, skin-tone, ambiguous width, box drawing alignment 같은 긴 꼬리 케이스는 아직 보장하지 못한다. | unit test, `mixed_width`/`combining_mark` recorded oracle, v3 snapshot metadata를 기본 `mise run check`에 포함한다. Unicode table 확장은 fixture를 추가하며 진행한다. |
 | PTY 경계 분할 UTF-8 | 자동 검증 중 | `TerminalCore`가 incomplete UTF-8 tail buffer를 보존한다. 아직 invalid UTF-8 복구 정책은 별도 설계 전이다. | malformed byte stream 처리 정책은 아직 제품 UX로 확정되지 않았다. | unit test, split UTF-8 recorded oracle fixture, split chunk stress가 기본 `mise run check`에 포함된다. invalid UTF-8 정책을 정할 때 별도 fixture를 추가한다. |
 | modifier/application-cursor 키 인코딩 | 구현 전 | `encodeKey`가 modifiers를 읽지 않고 normal-mode 화살표만 낸다. | Ctrl+C→0x03, Alt meta, DECCKM(SS3), CSI-u가 없어 실제 대화형 프로그램 입력이 어긋난다. | C0 control/meta/DECCKM 분기와 modifier 단위 테스트를 추가하고 키 버퍼를 확장한다. |
 | GPU renderer | 구현 전, 환경 의존, 시스템 한계에 가까움 | Metal-first renderer가 아직 없다. 실제 화면 검증은 macOS window server, GPU driver, font stack 영향을 받는다. | 폰트, glyph atlas, frame pacing, dirty redraw 문제를 검증하지 못한다. | [렌더러 전략](renderer-strategy.md)에 따라 `RenderSnapshot -> DrawList` golden을 먼저 만들고, 그 뒤 GUI screenshot artifact를 연결한다. |

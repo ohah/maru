@@ -13,13 +13,14 @@ pub fn renderTerminalSnapshot(
 
     try writeHeader(&output.writer, snapshot);
     try writeRows(&output.writer, snapshot);
+    try writeCellMetadata(&output.writer, snapshot);
     try writeStyledCells(&output.writer, snapshot);
 
     return output.toOwnedSlice();
 }
 
 fn writeHeader(writer: *std.Io.Writer, snapshot: terminal.RenderSnapshot) !void {
-    try writer.writeAll("maru.snapshot.v2\n");
+    try writer.writeAll("maru.snapshot.v3\n");
     try writer.print("size cols={d} rows={d}\n", .{ snapshot.size.cols, snapshot.size.rows });
     try writer.print(
         "cursor row={d} col={d} visible={}\n",
@@ -42,10 +43,38 @@ fn writeRows(writer: *std.Io.Writer, snapshot: terminal.RenderSnapshot) !void {
         try writer.print("row {d}: |", .{row});
         for (0..snapshot.size.cols) |col| {
             const cell = snapshot.cells[index(snapshot.size, row, col)];
+            if (cell.continuation) continue;
             try writeCodepoint(writer, cell.codepoint);
+            if (cell.combining) |combining| try writeCodepoint(writer, combining);
         }
         try writer.writeAll("|\n");
     }
+}
+
+fn writeCellMetadata(writer: *std.Io.Writer, snapshot: terminal.RenderSnapshot) !void {
+    try writer.writeAll("cell-metadata\n");
+
+    var wrote_any = false;
+    for (0..snapshot.size.rows) |row| {
+        for (0..snapshot.size.cols) |col| {
+            const cell = snapshot.cells[index(snapshot.size, row, col)];
+            if (cell.width == 1 and !cell.continuation and cell.combining == null) continue;
+
+            wrote_any = true;
+            try writer.print(
+                "cell row={d} col={d} codepoint=U+{X:0>4} width={d} continuation={} combining=",
+                .{ row, col, cell.codepoint, cell.width, cell.continuation },
+            );
+            if (cell.combining) |combining| {
+                try writer.print("U+{X:0>4}", .{combining});
+            } else {
+                try writer.writeAll("none");
+            }
+            try writer.writeByte('\n');
+        }
+    }
+
+    if (!wrote_any) try writer.writeAll("none\n");
 }
 
 fn writeStyledCells(writer: *std.Io.Writer, snapshot: terminal.RenderSnapshot) !void {
@@ -132,12 +161,13 @@ test "terminal snapshot records state that plain text cannot prove" {
     const rendered = try renderTerminalSnapshot(std.testing.allocator, core.snapshot());
     defer std.testing.allocator.free(rendered);
 
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "maru.snapshot.v2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "maru.snapshot.v3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "size cols=6 rows=2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "cursor row=1 col=1 visible=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "dirty start_row=0 end_row=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "row 0: |hi    |\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "row 1: |!     |\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "cell-metadata\nnone\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "styled-cells\nnone\n") != null);
 }
 
@@ -174,5 +204,35 @@ test "terminal snapshot records styled cells separately from visible text" {
         u8,
         rendered,
         "cell row=0 col=0 codepoint=U+0041 fg=indexed(2) bg=default bold=true italic=false underline=false\n",
+    ) != null);
+}
+
+test "terminal snapshot records wide and combining cell metadata" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
+    defer core.deinit();
+
+    // Row text alone cannot prove that a wide glyph has a continuation cell or
+    // that an accent did not advance the cursor. v3 records that metadata so
+    // future replay and renderer tests can diagnose grid bugs without guessing.
+    try core.write("A한e\u{0301}");
+
+    const rendered = try renderTerminalSnapshot(std.testing.allocator, core.snapshot());
+    defer std.testing.allocator.free(rendered);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "row 0: |A한é  |\n") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        rendered,
+        "cell row=0 col=1 codepoint=U+D55C width=2 continuation=false combining=none\n",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        rendered,
+        "cell row=0 col=2 codepoint=U+0020 width=0 continuation=true combining=none\n",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        rendered,
+        "cell row=0 col=3 codepoint=U+0065 width=1 continuation=false combining=U+0301\n",
     ) != null);
 }

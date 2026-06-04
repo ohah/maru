@@ -78,6 +78,8 @@ Snapshot artifact는 기본적으로 로컬 산출물이다. 회귀 테스트 fi
 
 snapshot schema version을 언제 유지하고 언제 올릴지는 [Snapshot Versioning](snapshot-versioning.md)을 따른다.
 
+현재 `maru.snapshot.v3`는 row text와 별도로 `cell-metadata` section을 기록한다. 이 section은 wide character의 continuation cell, zero-width combining mark, non-1-cell width를 확인하기 위한 것이다.
+
 ## Trace fixture 초안
 
 위치:

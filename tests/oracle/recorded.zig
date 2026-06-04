@@ -48,7 +48,7 @@ test "recorded terminal oracle snapshots match Maru output" {
         },
         .{
             .name = "split_utf8",
-            .size = .{ .cols = 9, .rows = 1 },
+            .size = .{ .cols = 12, .rows = 1 },
             .input_fixture_path = "tests/fixtures/ansi/split_utf8.ansi",
             .write_chunks = &.{ 1, 2, 1, 3, 4, 1 },
             .oracles = &.{
@@ -56,6 +56,30 @@ test "recorded terminal oracle snapshots match Maru output" {
                     .name = "xterm-compatible",
                     .source = "recorded expectation for UTF-8 text split across process read boundaries",
                     .expected_screen = "tests/golden/screen/xterm/split_utf8.txt",
+                },
+            },
+        },
+        .{
+            .name = "mixed_width",
+            .size = .{ .cols = 4, .rows = 1 },
+            .input_fixture_path = "tests/fixtures/ansi/mixed_width.ansi",
+            .oracles = &.{
+                .{
+                    .name = "xterm-compatible",
+                    .source = "recorded expectation for mixed ASCII and double-width Hangul cells",
+                    .expected_screen = "tests/golden/screen/xterm/mixed_width.txt",
+                },
+            },
+        },
+        .{
+            .name = "combining_mark",
+            .size = .{ .cols = 2, .rows = 1 },
+            .input_fixture_path = "tests/fixtures/ansi/combining_mark.ansi",
+            .oracles = &.{
+                .{
+                    .name = "xterm-compatible",
+                    .source = "recorded expectation for zero-width combining mark cursor behavior",
+                    .expected_screen = "tests/golden/screen/xterm/combining_mark.txt",
                 },
             },
         },

@@ -22,7 +22,7 @@ openpty
 
 이 선택은 최고 성능 설계가 아니라, 초기에 충분한 제어권을 가지면서도 테스트하기 쉬운 설계다. 여러 surface가 매우 많아지면 macOS `kqueue` 기반으로 바꿀 수 있지만, 먼저 맞춰야 할 것은 속도가 아니라 책임 경계와 재현 가능한 event 흐름이다.
 
-현재 `PtySession` 최소 구현은 테스트가 통제할 수 있도록 blocking pull API인 `readEvent`를 먼저 제공한다. 앱 runtime이 붙는 단계에서는 이 `readEvent` 루프를 reader thread가 실행하고, bounded queue를 통해 `SurfaceRuntime`으로 넘긴다. 즉 reader thread는 운영 모델의 다음 단계이지, 첫 macOS PTY backend가 반드시 thread를 직접 소유해야 한다는 뜻이 아니다.
+현재 `PtySession` 최소 구현은 테스트가 통제할 수 있도록 blocking pull API인 `readEvent`를 먼저 제공한다. 앱 runtime 단계에서는 `PtyReader`가 이 `readEvent` 루프를 별도 reader thread에서 실행하고, `PtyEventQueue` bounded queue를 통해 app/runtime loop로 넘긴다. 즉 `PtySession` backend는 여전히 thread를 직접 소유하지 않고, app layer가 reader lifecycle을 조립한다.
 
 ## 기본 흐름
 
@@ -34,13 +34,13 @@ PtySession.spawn(command)
   -> parent는 master fd 보관하고 slave fd close
   -> blocking readEvent로 output/exit event 읽기
 
-future reader thread
+PtyReader thread
   -> readEvent 루프 실행
   -> PtyEvent.output 생성
-  -> bounded event queue에 넣기
+  -> PtyEventQueue bounded queue에 넣기
 
 app/runtime loop
-  -> queue에서 PtyEvent 꺼내기
+  -> queue에서 QueuedPtyEvent 꺼내기
   -> SurfaceRuntime.applyPtyEvent
   -> Surface.TerminalCore.write
   -> snapshot/artifact 갱신
@@ -74,6 +74,7 @@ reader thread는 단순하다.
 - PTY output을 읽는 책임이 한 곳에 있다.
 - UI/runtime loop는 queue만 drain하면 된다.
 - deterministic command test를 만들기 쉽다.
+- queue event의 output bytes는 queue consumer가 소유권을 끝낸다. 그래서 consumer는 `SurfaceRuntime.applyPtyEvent` 후 `QueuedPtyEvent.deinit`으로 bytes를 해제해야 한다.
 
 ## backpressure 정책
 
@@ -148,7 +149,7 @@ close (child가 아직 살아 있을 때)
 
 `setsid`로 child가 process group leader가 되므로 group(`-pid`)과 child(`pid`) 양쪽에 보낸다. grace는 짧고 상한이 있어 close가 오래 멈추지 않는다. 마지막 `SIGKILL`은 무시할 수 없으므로 blocking reap이 반드시 진행되어 zombie가 남지 않는다.
 
-이 escalation은 현재 `deinit`에서 동기적으로 수행한다. SurfaceRuntime reader thread 단계에서 close 경로를 thread로 옮길 수 있지만, "신호를 올리며 반드시 reap한다"는 계약은 동일하게 유지한다.
+이 escalation은 현재 `deinit`에서 동기적으로 수행한다. reader thread가 `readEvent` 안에서 blocking 중인 interactive shell shutdown은 아직 별도 app lifecycle로 묶지 않았다. close 경로를 app host와 조립할 때도 "신호를 올리며 반드시 reap한다"는 계약은 동일하게 유지한다.
 
 ## 초기 테스트
 
@@ -158,8 +159,14 @@ close (child가 아직 살아 있을 때)
 - resize request가 PTY layer까지 전달된다.
 - 아직 살아 있는 child를 close할 때 HUP/TERM을 무시해도 escalation으로 reap되어 zombie가 남지 않는다.
 
-SurfaceRuntime reader thread 단계에서 추가할 테스트:
+SurfaceRuntime reader thread 단계에서 추가된 테스트:
 
-- queue가 가득 찼을 때 무한 메모리 증가가 없다.
+- queue가 가득 찼을 때 무한 메모리 증가가 없다(`tryPush`가 `QueueFull`을 반환하고, 실제 reader 경로는 `pushBlocking`으로 기다린다).
+- reader thread가 실제 macOS PTY controlled command output/exit를 bounded queue에 넣고, app/runtime loop가 이를 `SurfaceRuntime`에 적용한다.
+
+아직 추가하지 않은 테스트:
+
+- 대량 stdout에서 reader가 오래 backpressure를 걸 때 memory와 responsiveness가 유지되는지.
 - 늦게 도착한 output이 detach된 surface로 흘러가지 않는다.
 - reader thread 종료와 process exit가 trace에 같은 domain event로 남는다.
+- interactive shell에서 app close가 blocking read를 깨우고 reader thread까지 정리되는지.

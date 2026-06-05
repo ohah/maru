@@ -54,7 +54,7 @@ CI에서는 이 파일을 `maru-performance-artifacts` artifact로 업로드한�
 | frame budget | Metal-first renderer가 아직 없다. future WebGPU backend도 같은 기준을 따른다. | snapshot -> GPU frame submit |
 | font/glyph atlas | font resolve와 atlas가 아직 없다. 세부 정책은 [폰트 전략](font-strategy.md)을 따른다. | first glyph resolve, frame당 atlas miss, atlas upload bytes, font size 변경 후 첫 frame |
 | RSS/memory baseline | platform별 측정 API가 필요하다. | cold start RSS, one tab RSS, scrollback RSS |
-| PTY backpressure | 실제 PTY backend가 아직 없다. | large stdout producer -> UI responsiveness |
+| PTY backpressure | reader thread와 bounded queue는 있지만 대량 stdout 성능 예산은 아직 없다. | large stdout producer -> queue drain latency, UI responsiveness |
 
 ## 향후 목표 초안
 

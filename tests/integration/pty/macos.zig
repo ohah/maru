@@ -75,7 +75,14 @@ test "macOS openpty controlled command reaches SurfaceRuntime snapshot" {
     defer runtime.deinit();
     _ = try runtime.attach(&surface, 10, maru.app.PtyIo.fromSession(&session));
 
-    const raw = try driveRuntimeUntilExit(allocator, &session, &runtime, 10);
+    var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    try reader.start();
+    defer reader.join();
+    defer queue.close();
+
+    const raw = try drainRuntimeQueueUntilExit(allocator, &queue, &runtime);
     defer allocator.free(raw.bytes);
     // Write raw PTY bytes first so the PTY-layer evidence survives any later
     // failure in routing, core, or the assertions below.
@@ -187,39 +194,38 @@ fn collectUntilExit(allocator: std.mem.Allocator, session: *maru.pty.PtySession)
     }
 }
 
-fn driveRuntimeUntilExit(
+fn drainRuntimeQueueUntilExit(
     allocator: std.mem.Allocator,
-    session: *maru.pty.PtySession,
+    queue: *maru.app.PtyEventQueue,
     runtime: *maru.app.SurfaceRuntime,
-    pty_id: maru.app.PtyId,
 ) !CollectedOutput {
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(allocator);
 
     while (true) {
-        const event = try session.readEvent(allocator);
-        defer event.deinit(allocator);
+        var event = queue.popBlocking() orelse return error.ReaderQueueClosedBeforeExit;
+        errdefer event.deinit(allocator);
 
         switch (event) {
-            .output => |chunk| {
-                // 이 helper는 실제 reader thread가 생기기 전의 headless 대체 경로다.
-                // PTY backend가 만든 raw bytes를 SurfaceRuntime의 public event로만 넣어,
-                // 테스트가 private TerminalCore storage를 우회하지 않게 한다.
-                try bytes.appendSlice(allocator, chunk);
-                try runtime.applyPtyEvent(.{ .output = .{
-                    .pty_id = pty_id,
-                    .bytes = chunk,
-                } });
+            .output => |output| {
+                // Reader thread가 queue에 넣은 bytes는 runtime에 적용한 뒤 해제한다.
+                // 이렇게 해야 테스트도 실제 앱처럼 queue를 drain하는 쪽이 event ownership을 끝낸다.
+                try bytes.appendSlice(allocator, output.bytes);
+                try runtime.applyPtyEvent(event.runtimeEvent());
+                event.deinit(allocator);
             },
-            .exited => |status| {
-                try runtime.applyPtyEvent(.{ .exited = .{
-                    .pty_id = pty_id,
-                    .status = status,
-                } });
+            .exited => |exited| {
+                try runtime.applyPtyEvent(event.runtimeEvent());
+                event.deinit(allocator);
                 return .{
                     .bytes = try bytes.toOwnedSlice(allocator),
-                    .exit_status = status,
+                    .exit_status = exited.status,
                 };
+            },
+            .read_error => {
+                _ = runtime.applyPtyEvent(event.runtimeEvent()) catch {};
+                event.deinit(allocator);
+                return error.ReaderReadFailed;
             },
         }
     }

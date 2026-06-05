@@ -19,7 +19,7 @@
 ## 의도적으로 아직 하지 않는 것
 
 - 절대 시간 기준으로 실패시키지 않는다.
-- 실제 PTY backpressure를 검증하지 않는다.
+- 실제 PTY 대량 stdout backpressure를 stress로 검증하지 않는다. bounded queue의 capacity와 controlled command reader 경로는 기본/opt-in 테스트가 검증한다.
 - Metal frame pacing을 검증하지 않는다. future WebGPU backend도 생기면 별도 검증한다.
 - CoreText font resolve, fallback cache, glyph atlas eviction을 검증하지 않는다.
 - 메모리 상한을 강제하지 않는다.
@@ -29,7 +29,7 @@
 ## 추가해야 할 미래 스트레스
 
 - parser: ANSI/OSC/DCS fixture corpus 반복 입력
-- PTY: 대량 stdout, resize storm, tab close 중 process cleanup
+- PTY: 대량 stdout, resize storm, tab close 중 process cleanup, interactive shell reader shutdown
 - renderer: 큰 grid, dirty region storm, cursor blink와 redraw 압박
 - font/glyph atlas: CJK/emoji/fallback 반복 출력, font size 변경, atlas eviction storm
 - workspace: 여러 tab/surface restore 반복

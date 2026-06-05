@@ -1,5 +1,6 @@
 pub const pty_reader = @import("app/pty_reader.zig");
 pub const runtime = @import("app/runtime.zig");
+pub const runtime_pump = @import("app/runtime_pump.zig");
 pub const surface = @import("app/surface.zig");
 pub const window = @import("app/window.zig");
 
@@ -12,8 +13,13 @@ pub const QueuedPtyEvent = pty_reader.QueuedPtyEvent;
 pub const QueueError = pty_reader.QueueError;
 pub const RestorableSurfaceMetadata = surface.RestorableSurfaceMetadata;
 pub const RuntimeError = runtime.RuntimeError;
+pub const RuntimeEventPump = runtime_pump.RuntimeEventPump;
 pub const RuntimeLink = runtime.RuntimeLink;
 pub const RuntimePtyEvent = runtime.RuntimePtyEvent;
+pub const RuntimePumpError = runtime_pump.PumpError;
+pub const RuntimePumpDrainSummary = runtime_pump.DrainSummary;
+pub const RuntimePumpDrainUntilExitResult = runtime_pump.DrainUntilExitResult;
+pub const RuntimePumpedEventKind = runtime_pump.PumpedEventKind;
 pub const Surface = surface.Surface;
 pub const SurfaceId = runtime.SurfaceId;
 pub const SurfaceRuntime = runtime.SurfaceRuntime;

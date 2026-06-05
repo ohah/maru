@@ -139,6 +139,36 @@
 - interactive shell close가 blocking `readEvent`를 깨우고 reader thread를 정리하는 app lifecycle.
 - 대량 stdout backpressure stress.
 
+## `RuntimeEventPump`
+
+책임:
+
+- app/runtime loop가 `PtyEventQueue`에서 꺼낸 `QueuedPtyEvent`를 `SurfaceRuntime.applyPtyEvent`로 적용한다.
+- queue event의 output bytes 소유권을 정확히 한 번 끝낸다.
+- non-blocking drain과 headless integration용 blocking-until-exit drain을 제공한다.
+- 실패 경로에서도 event 해제를 한 곳에서 처리해 테스트 helper마다 별도 ownership 규칙이 생기지 않게 한다.
+
+몰라야 하는 것:
+
+- macOS window server나 renderer frame timing.
+- escape sequence 의미.
+- workspace 저장 포맷.
+- plugin 내부 메모리.
+
+초기 테스트:
+
+- queued output이 pump를 거쳐 surface core에 적용되고 output bytes가 해제된다.
+- queued exit가 surface `process_state`를 `exited`로 바꾼다.
+- 빈 queue에서 non-blocking drain이 즉시 끝난다.
+- exit가 오기 전에 queue가 닫히면 성공처럼 처리하지 않고 `ReaderQueueClosedBeforeExit`를 반환한다.
+- 알 수 없는 PTY로 들어온 output은 `UnknownPty`를 유지하면서도 output bytes를 해제한다.
+
+아직 하지 않는다:
+
+- 실제 macOS window/app event loop.
+- interactive shell shutdown lifecycle.
+- 대량 stdout backpressure stress.
+
 ## `Workspace`
 
 책임:

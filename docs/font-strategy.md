@@ -42,6 +42,7 @@ RenderSnapshot
 - glyph bitmap을 texture atlas에 캐시한다.
 - atlas miss, upload byte, eviction 같은 성능 관측 값을 남긴다.
 - renderer backend가 바뀌어도 cache key와 glyph run 의미가 흔들리지 않게 한다.
+- 초기 구현은 GPU texture가 아니라 `GlyphCacheKey -> AtlasSlot` domain cache 계약만 고정한다. 실제 bitmap 좌표와 rasterization은 macOS backend 단계에서 붙인다.
 
 `Metal backend`:
 
@@ -173,6 +174,8 @@ atlas invalidation 조건:
 - theme 색상 변경 중 glyph bitmap 자체가 색을 포함하는 경우.
 - atlas eviction policy 변경.
 
+현재 domain cache는 invalidation reason과 제거된 slot 수를 남긴다. 이 정보가 있어야 나중에 "왜 frame 전체가 다시 업로드됐는지"를 screenshot이나 성능 숫자만 보고 추측하지 않아도 된다.
+
 ## Emoji와 Color Glyph
 
 emoji는 v1에서 "완벽한 typography"가 아니라 "grid를 깨지 않는 표시"가 목표다.
@@ -223,7 +226,8 @@ dirty region의 장기 목표는 cell 단위지만, 현재 `TerminalCore`/snapsh
 - fake font backend를 사용한 `DrawList -> GlyphRunList` deterministic test.
 - ASCII, CJK, combining mark, emoji replacement에 대한 cell advance test.
 - fallback cache가 같은 cluster를 반복 조회하지 않는 unit test.
-- glyph atlas cache key가 size/scale/style/font id를 구분하는 test.
+- glyph atlas cache key가 size/scale/font id와 raster에 영향을 주는 style(bold/italic)을 구분하는 test.
+- GPU 없는 `GlyphCacheKey -> AtlasSlot` cache가 hit/miss, upload byte 후보, eviction, invalidation reason을 기록하는 test.
 - font 변경이 전체 redraw/invalidation event를 만드는 test.
 - renderer가 `TerminalCore`, `PtySession`, platform handle을 직접 import하지 않는 boundary test.
 

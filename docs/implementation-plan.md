@@ -252,6 +252,7 @@ TDD 방식:
 - 초기 draw command model은 현재 `TerminalCore` dirty 계약에 맞춰 row dirty 범위를 소비한다. cell 단위 dirty는 dirty 모델 확장 PR에서 별도로 다룬다.
 - cursor는 cell overlay로 그린다. cursor 이동이 dirty 범위를 만든다는 domain 계약(`renderer-strategy.md`)을 현재 core가 cursor-only 이동(CR/backspace)에서 아직 지키지 않으므로, cursor 렌더링과 cursor-move dirty는 dirty 모델 확장 또는 cursor 렌더링 PR에서 함께 다룬다.
 - font layout test: fake font backend로 `DrawList -> GlyphRunList` 계약을 검증한다.
+- glyph atlas test: GPU texture 없이 `GlyphCacheKey -> AtlasSlot` cache, upload byte 후보, eviction, invalidation reason을 검증한다.
 - app smoke test: window 생성, resize, key input artifact.
 - screenshot artifact: 실제 화면 검증이 가능한 곳부터 opt-in으로 추가한다.
 

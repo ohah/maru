@@ -12,6 +12,9 @@ extern "c" fn openpty(
     winp: ?*std.posix.winsize,
 ) c_int;
 
+// Used by the session-close grace window between escalation signals.
+extern "c" fn nanosleep(rqtp: *const std.c.timespec, rmtp: ?*std.c.timespec) c_int;
+
 const tio_cs_ctty: c_int = 0x20007461;
 const tio_cs_winsz: c_int = @bitCast(@as(u32, 0x80087467));
 
@@ -70,8 +73,7 @@ pub const PtySession = struct {
             self.master_fd = -1;
         }
         if (!self.exited) {
-            requestChildShutdown(self.child_pid);
-            reapChildNoHang(self.child_pid);
+            shutdownChild(self.child_pid);
         }
         self.* = undefined;
     }
@@ -93,8 +95,12 @@ pub const PtySession = struct {
             return .{ .output = owned };
         }
 
+        // Reap before latching `exited`: if waitForChild fails we must leave the
+        // session un-exited so deinit still attempts to reap the child instead of
+        // leaking it and silently dropping the exit status.
+        const status = try waitForChild(self.child_pid);
         self.exited = true;
-        return .{ .exited = try waitForChild(self.child_pid) };
+        return .{ .exited = status };
     }
 
     pub fn writeInput(self: *PtySession, bytes: []const u8) !void {
@@ -270,25 +276,81 @@ fn writeFd(fd: std.posix.fd_t, bytes: []const u8) !usize {
     }
 }
 
-fn requestChildShutdown(pid: std.c.pid_t) void {
+// Closing a session whose child is still alive escalates SIGHUP -> SIGTERM ->
+// SIGKILL, giving the child a bounded grace window to exit (and run shell close
+// traps) at each step before forcing the next. SIGKILL cannot be caught, so the
+// final blocking reap is guaranteed to make progress and the child can never be
+// left as a zombie. This is intentionally synchronous in deinit; the reader
+// thread step can move it off the close path later.
+const shutdown_grace_attempts = 6;
+const shutdown_grace_interval_ms = 10;
+
+fn shutdownChild(pid: std.c.pid_t) void {
     if (pid <= 0) return;
 
-    // childExec calls setsid, so the child normally becomes a process-group
-    // leader. Send HUP to the group first so shells can clean up their children.
-    _ = std.c.kill(-pid, .HUP);
-    _ = std.c.kill(pid, .HUP);
+    if (signalAndReap(pid, .HUP)) return;
+    if (signalAndReap(pid, .TERM)) return;
+
+    // Last resort: SIGKILL is uncatchable, so the child must terminate and the
+    // blocking reap below cannot hang or leave a zombie behind.
+    _ = std.c.kill(-pid, .KILL);
+    _ = std.c.kill(pid, .KILL);
+    reapBlocking(pid);
 }
 
-fn reapChildNoHang(pid: std.c.pid_t) void {
+// Sends `sig` to the child's process group (setsid made it a leader) and to the
+// child directly, then polls a bounded grace window. Returns true once the child
+// has been reaped or is already gone, false if it is still alive after the
+// window so the caller can escalate.
+fn signalAndReap(pid: std.c.pid_t, sig: std.c.SIG) bool {
+    _ = std.c.kill(-pid, sig);
+    _ = std.c.kill(pid, sig);
+
+    var attempt: usize = 0;
+    while (attempt < shutdown_grace_attempts) : (attempt += 1) {
+        if (tryReap(pid) != .alive) return true;
+        sleepMillis(shutdown_grace_interval_ms);
+    }
+    return tryReap(pid) != .alive;
+}
+
+const ReapResult = enum { reaped, alive, gone };
+
+fn tryReap(pid: std.c.pid_t) ReapResult {
     var status: c_int = 0;
     while (true) {
         const rc = std.c.waitpid(pid, &status, std.c.W.NOHANG);
-        if (rc >= 0) return;
+        if (rc == pid) return .reaped;
+        if (rc == 0) return .alive;
 
         const err = std.posix.errno(rc);
         if (err == .INTR) continue;
-        return;
+        // ECHILD (already reaped) or any other error: nothing left to wait on.
+        return .gone;
     }
+}
+
+fn reapBlocking(pid: std.c.pid_t) void {
+    var status: c_int = 0;
+    while (true) {
+        const rc = std.c.waitpid(pid, &status, 0);
+        if (rc == pid) return;
+        if (rc < 0) {
+            const err = std.posix.errno(rc);
+            if (err == .INTR) continue;
+            return; // ECHILD etc.: nothing to reap.
+        }
+        return; // rc == 0 needs WNOHANG; guard against an unexpected spin.
+    }
+}
+
+fn sleepMillis(ms: u32) void {
+    const req: std.c.timespec = .{
+        .sec = 0,
+        .nsec = @intCast(@as(u64, ms) * std.time.ns_per_ms),
+    };
+    // Best-effort grace delay; an EINTR just shortens this window, which is fine.
+    _ = nanosleep(&req, null);
 }
 
 fn waitForChild(pid: std.c.pid_t) !types.ExitStatus {

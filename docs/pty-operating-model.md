@@ -134,12 +134,29 @@ resize는 두 곳에 반영되어야 한다.
 
 `SurfaceRuntime`은 이 event를 받아 surface metadata를 갱신한다. 이때 surface 자체를 바로 삭제하지 않는다. 사용자는 종료된 surface의 마지막 화면을 볼 수 있어야 하기 때문이다.
 
+## session close
+
+이미 `PtyEvent.exited`로 종료가 관측된 session은 close 시 child를 다시 건드리지 않는다. 아직 살아 있는 child를 close할 때는 zombie를 남기지 않으면서도 shell이 정리할 기회를 주기 위해 신호를 단계적으로 올린다.
+
+```text
+close (child가 아직 살아 있을 때)
+  -> master fd close
+  -> SIGHUP  (process group + child) + 짧은 grace 동안 reap 시도
+  -> SIGTERM (process group + child) + 짧은 grace 동안 reap 시도
+  -> SIGKILL (process group + child) + blocking reap
+```
+
+`setsid`로 child가 process group leader가 되므로 group(`-pid`)과 child(`pid`) 양쪽에 보낸다. grace는 짧고 상한이 있어 close가 오래 멈추지 않는다. 마지막 `SIGKILL`은 무시할 수 없으므로 blocking reap이 반드시 진행되어 zombie가 남지 않는다.
+
+이 escalation은 현재 `deinit`에서 동기적으로 수행한다. SurfaceRuntime reader thread 단계에서 close 경로를 thread로 옮길 수 있지만, "신호를 올리며 반드시 reap한다"는 계약은 동일하게 유지한다.
+
 ## 초기 테스트
 
 - controlled command가 stdout bytes를 event로 낸다.
 - output event는 drop되지 않는다.
 - process exit가 `PtyEvent.exited`로 관측된다.
 - resize request가 PTY layer까지 전달된다.
+- 아직 살아 있는 child를 close할 때 HUP/TERM을 무시해도 escalation으로 reap되어 zombie가 남지 않는다.
 
 SurfaceRuntime reader thread 단계에서 추가할 테스트:
 

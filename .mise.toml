@@ -21,6 +21,14 @@ run = "zig build demo"
 description = "Run the app host frame smoke"
 run = "zig build app-smoke"
 
+[tasks.macos-window-smoke]
+description = "Run the visible macOS AppKit window smoke"
+run = "zig build macos-window-smoke"
+
+[tasks.test-macos-window-smoke]
+description = "Run macOS window smoke contract tests"
+run = "zig build test-macos-window-smoke"
+
 [tasks.pty]
 description = "Run opt-in macOS PTY integration tests"
 run = "zig build test-pty"

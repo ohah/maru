@@ -192,6 +192,36 @@ pub const SurfaceRuntime = struct {
 - 이번 순수 runtime PR에서는 구현하지 않는다.
 - OSC52 clipboard와 shell integration event는 `TerminalCore`가 app request를 만들 수 있게 된 뒤 별도 PR에서 이 문서에 다시 추가한다.
 
+## 향후 설계 메모: drain 종료 계약 (7단계 frame loop)
+
+이 절은 아직 확정된 규칙이 아니라, [실제 구현 계획](implementation-plan.md)의 7단계(Renderer와 macOS app host 연결)에서 GUI frame loop를 pump에 연결할 때 결정할 **열린 설계 사안**이다. 실제 변경은 그 단계에서 사용자와 합의한 뒤 진행한다.
+
+문제: 현재 `drainAvailable`/`drainBlockingUntilExit`는 "정상 종료(exit)"·"reader 읽기 실패(read_error)" 같은 **예상된 종료 조건**을 `UnknownPty`/`InvalidOutput` 같은 **진짜 결함**과 같은 Zig error 채널로 함께 던진다. `try`로 에러가 전파되는 순간 그때까지 누적한 `DrainSummary`가 통째로 폐기된다.
+
+왜 7단계에 중요한가: `drainAvailable`의 첫 실소비자가 GUI frame loop다. queue에 read_error나 exit가 들어온 프레임에서 현재 계약대로면 loop는 매번 `error.ReadFailed`/`ProcessExited`를 받고, 그 프레임에 이미 적용한 output들의 redraw 정보를 잃는다. frame loop가 실제로 원하는 동작은 "drain한 output 반영 -> 마지막 프레임 렌더 -> surface를 죽은 것으로 표시 -> 계속"이다.
+
+유력 방향(확정 아님): 종료를 에러가 아니라 **데이터**로 모델링한다.
+
+```zig
+const Termination = union(enum) { exited: pty.ExitStatus, read_error };
+const DrainSummary = struct {
+    output_events: usize = 0,
+    exit_events: usize = 0,
+    ended: ?Termination = null, // 이번 drain에서 관측한 종료. null이면 계속 진행
+};
+```
+
+- `throw`는 진짜 결함(`UnknownPty`, `InvalidOutput`, `OutOfMemory`)에만 남긴다.
+- 이 방향이면 PR #51에서 제거한 항상-0 `read_error_events` 카운터의 올바른 후신이 된다(read_error가 카운터가 아니라 1급 종료 값이 됨).
+- `drainBlockingUntilExit`의 비대칭(정상 exit는 반환값, read_error는 throw)도 함께 해소되고, `.exited` 적용이 `UnknownPty`로 실패할 때 exit_status를 잃지 않도록 다룰 수 있다.
+
+함께 정리할 후보:
+
+- integration test가 자체 drain 루프를 도는 중복(`tests/integration/pty/macos.zig`)을, output sink를 받는 helper로 흡수할지 결정한다. 흡수하지 않으면 미사용 `drainBlockingUntilExit`를 삭제하는 선택지도 같이 본다.
+- `expectError(error.ReadFailed, drainAvailable())` 단위 테스트는 이 계약 변경에 맞춰 다시 쓴다.
+
+원칙: 소비자(frame loop)가 붙기 전에 추측으로 미리 구현하지 않는다. 7단계 진입 시 실제 요구를 보고 위 union을 출발점으로 확정한다.
+
 ## 반드시 지켜야 할 것
 
 - `SurfaceRuntime`은 renderer resource를 알면 안 된다.

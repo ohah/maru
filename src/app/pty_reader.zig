@@ -179,7 +179,7 @@ pub const PtyReader = struct {
 
     pub fn start(self: *PtyReader) !void {
         std.debug.assert(self.thread == null);
-        self.thread = try std.Thread.spawn(.{}, readerMain, .{self});
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
 
     pub fn join(self: *PtyReader) void {
@@ -225,10 +225,6 @@ pub const PtyReader = struct {
             .pty_id = self.pty_id,
             .message = message,
         } }) catch {};
-    }
-
-    fn readerMain(self: *PtyReader) void {
-        self.run();
     }
 };
 

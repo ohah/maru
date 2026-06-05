@@ -223,8 +223,9 @@ fn drainRuntimeQueueUntilExit(
                 };
             },
             .read_error => {
+                // The error return below runs the `errdefer event.deinit`, so
+                // do not also deinit here or the event is released twice.
                 _ = runtime.applyPtyEvent(event.runtimeEvent()) catch {};
-                event.deinit(allocator);
                 return error.ReaderReadFailed;
             },
         }

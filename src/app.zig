@@ -1,8 +1,18 @@
+pub const runtime = @import("app/runtime.zig");
 pub const surface = @import("app/surface.zig");
 pub const window = @import("app/window.zig");
 
 pub const AppWindow = window.AppWindow;
+pub const PtyId = runtime.PtyId;
+pub const PtyIo = runtime.PtyIo;
+pub const RestorableSurfaceMetadata = surface.RestorableSurfaceMetadata;
+pub const RuntimeError = runtime.RuntimeError;
+pub const RuntimeLink = runtime.RuntimeLink;
+pub const RuntimePtyEvent = runtime.RuntimePtyEvent;
 pub const Surface = surface.Surface;
+pub const SurfaceId = runtime.SurfaceId;
+pub const SurfaceRuntime = runtime.SurfaceRuntime;
+pub const TerminalInput = runtime.TerminalInput;
 pub const ProcessState = surface.ProcessState;
 
 test {

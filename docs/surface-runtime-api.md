@@ -19,8 +19,12 @@ PtySession
   openpty master fd + child process lifecycle
   저장 불가능
 
+PtyIo
+  live PtySession 또는 fake PTY를 감싸는 작은 adapter
+  SurfaceRuntime unit test가 macOS PTY에 묶이지 않게 함
+
 SurfaceRuntime
-  Surface와 PtySession을 실행 중에만 연결
+  Surface와 PtyIo를 실행 중에만 연결
   저장 대상 아님
 ```
 
@@ -38,6 +42,9 @@ pub const RuntimeError = error{
     ProcessExited,
     WriteFailed,
     ResizeFailed,
+    ReadFailed,
+    InvalidOutput,
+    OutOfMemory,
 };
 
 pub const RuntimeLink = struct {
@@ -45,14 +52,14 @@ pub const RuntimeLink = struct {
     pty_id: PtyId,
 };
 
-pub const PtyEvent = union(enum) {
+pub const RuntimePtyEvent = union(enum) {
     output: struct {
         pty_id: PtyId,
         bytes: []const u8,
     },
     exited: struct {
         pty_id: PtyId,
-        code: ?u8,
+        status: maru.pty.ExitStatus,
     },
     read_error: struct {
         pty_id: PtyId,
@@ -64,48 +71,14 @@ pub const TerminalInput = struct {
     bytes: []const u8,
 };
 
-pub const TerminalSize = struct {
-    cols: u16,
-    rows: u16,
-};
+pub const PtyIo = struct {
+    ctx: *anyopaque,
+    write_input: *const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void,
+    resize_fn: *const fn (ctx: *anyopaque, size: maru.terminal.Size) anyerror!void,
 
-pub const AppRequest = union(enum) {
-    clipboard: ClipboardRequest,
-    shell_integration: ShellIntegrationEvent,
-};
-
-pub const ClipboardRequest = struct {
-    request_id: u64,
-    surface_id: SurfaceId,
-    access: ClipboardAccess,
-    // preview는 사용자 확인 UI와 debug artifact용이다. 원문 전체를 넣으면
-    // clipboard secret이 trace나 로그로 새기 쉬우므로 redaction된 짧은 값만 허용한다.
-    preview: []const u8,
-};
-
-pub const ClipboardAccess = enum {
-    read,
-    write,
-};
-
-pub const ClipboardDecision = union(enum) {
-    deny,
-    allow_read: []const u8,
-    allow_write,
-};
-
-pub const ShellIntegrationEvent = union(enum) {
-    cwd_changed: struct {
-        surface_id: SurfaceId,
-        cwd: []const u8,
-    },
-    prompt_start: struct { surface_id: SurfaceId },
-    prompt_end: struct { surface_id: SurfaceId },
-    command_start: struct { surface_id: SurfaceId },
-    command_end: struct {
-        surface_id: SurfaceId,
-        exit_code: ?u8,
-    },
+    pub fn fromSession(session: *maru.pty.PtySession) PtyIo;
+    pub fn writeInput(self: PtyIo, bytes: []const u8) !void;
+    pub fn resize(self: PtyIo, size: maru.terminal.Size) !void;
 };
 ```
 
@@ -121,7 +94,7 @@ pub const SurfaceRuntime = struct {
         surface_id: SurfaceId,
         surface: *Surface,
         pty_id: PtyId,
-        pty: *PtySession,
+        pty: PtyIo,
     ) RuntimeError!RuntimeLink;
 
     pub fn detachSurface(self: *SurfaceRuntime, surface_id: SurfaceId) void;
@@ -135,20 +108,12 @@ pub const SurfaceRuntime = struct {
     pub fn resize(
         self: *SurfaceRuntime,
         surface_id: SurfaceId,
-        size: TerminalSize,
+        size: maru.terminal.Size,
     ) RuntimeError!void;
 
     pub fn applyPtyEvent(
         self: *SurfaceRuntime,
-        event: PtyEvent,
-    ) RuntimeError!void;
-
-    pub fn drainAppRequests(self: *SurfaceRuntime, buffer: []AppRequest) []const AppRequest;
-
-    pub fn completeClipboardRequest(
-        self: *SurfaceRuntime,
-        request_id: u64,
-        decision: ClipboardDecision,
+        event: RuntimePtyEvent,
     ) RuntimeError!void;
 };
 ```
@@ -157,9 +122,10 @@ pub const SurfaceRuntime = struct {
 
 `attach`:
 
-- 하나의 `Surface`와 하나의 `PtySession`을 연결한다.
+- 하나의 `Surface`와 하나의 `PtyIo`를 연결한다.
 - 이미 연결된 surface나 pty를 다시 연결하면 오류다.
 - 이 함수는 workspace 저장 포맷을 만들지 않는다.
+- `PtyIo`를 받는 이유는 `SurfaceRuntime`의 routing 계약을 fake PTY로 빠르게 unit test하기 위해서다. 실제 macOS backend는 `PtyIo.fromSession`으로 감싼다.
 
 `detachSurface`:
 
@@ -180,23 +146,15 @@ pub const SurfaceRuntime = struct {
 `applyPtyEvent`:
 
 - PTY reader가 만든 event를 surface에 반영한다.
-- `PtyEvent`는 `surface_id`를 직접 들고 있지 않다. event의 `pty_id`로 attach 매핑을 거꾸로 조회해 대상 surface를 찾는다. 매핑에 없는 `pty_id`면 `UnknownPty`다.
+- `RuntimePtyEvent`는 `surface_id`를 직접 들고 있지 않다. event의 `pty_id`로 attach 매핑을 거꾸로 조회해 대상 surface를 찾는다. 매핑에 없는 `pty_id`면 `UnknownPty`다.
 - `output`은 해당 surface의 `TerminalCore.write`로 들어간다.
 - `exited`는 surface metadata와 artifact에 반영한다. 이 event를 trace로 남길 때의 이름은 `process-exit`이며, 둘은 같은 사건의 두 이름이다(대응표는 [Facade 계약](facade-contracts.md)의 `Trace/Event` 절).
-- `read_error`는 실패 artifact에 남긴다. 환경 의존적 실패라 trace에는 기록하지 않는다.
+- `read_error`는 `RuntimePtyEvent`에서만 쓰는 runtime 오류 event다. 실패 artifact에 남기고, 환경 의존적 실패라 trace에는 기록하지 않는다.
 
-`drainAppRequests`:
+`drainAppRequests`와 `completeClipboardRequest`:
 
-- `TerminalCore.write` 중 나온 clipboard 요청이나 shell integration event를 app layer로 올린다.
-- 이 함수는 platform API를 호출하지 않는다. 사용자 확인 UI, macOS pasteboard, 알림은 app/platform layer 책임이다.
-- 요청 payload에는 redaction된 preview만 들어가야 한다.
-
-`completeClipboardRequest`:
-
-- app/platform layer가 `ask` UI나 policy 판단을 끝낸 뒤 결과를 돌려준다.
-- `deny`는 running program에 아무 민감 데이터를 보내지 않는다.
-- `allow_read`는 app/platform이 읽은 clipboard text를 terminal 응답으로 encode할 수 있게 한다.
-- `allow_write`는 이미 app/platform이 write를 승인했다는 뜻이다.
+- 이번 순수 runtime PR에서는 구현하지 않는다.
+- OSC52 clipboard와 shell integration event는 `TerminalCore`가 app request를 만들 수 있게 된 뒤 별도 PR에서 이 문서에 다시 추가한다.
 
 ## 반드시 지켜야 할 것
 
@@ -212,8 +170,8 @@ pub const SurfaceRuntime = struct {
 
 - 연결되지 않은 surface에 `writeInput`하면 `UnknownSurface`가 난다.
 - 같은 surface를 두 번 attach하면 `SurfaceAlreadyAttached`가 난다.
-- `PtyEvent.output`이 올바른 surface의 `TerminalCore.write`로 전달된다.
+- `RuntimePtyEvent.output`이 올바른 surface의 `TerminalCore.write`로 전달된다.
 - `resize`는 core resize와 PTY resize를 모두 호출한다.
 - `detachSurface` 이후 `RestorableSurfaceMetadata`에는 live handle이 남지 않는다.
-- OSC52 read/write는 `AppRequest.clipboard`로 올라가고, 직접 clipboard API를 호출하지 않는다.
-- shell integration escape는 `AppRequest.shell_integration` domain event로 올라간다.
+- process exit event는 surface `process_state`를 `exited`로 바꾸고 이후 input을 막는다.
+- read error event는 `ReadFailed`로 관측된다.

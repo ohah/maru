@@ -7,6 +7,16 @@ pub const ProcessState = enum {
     exited,
 };
 
+pub const RestorableSurfaceMetadata = struct {
+    id: u64,
+    title: []const u8,
+    cwd: ?[]const u8,
+    command: ?[]const u8,
+    size: terminal.Size,
+    process_state: ProcessState,
+    env: []const []const u8 = &.{},
+};
+
 // `Surface`는 [Facade 계약](../../docs/facade-contracts.md)의 단일 출처 이름을 따른다.
 // 하나의 사용 가능한 terminal surface(TerminalCore + metadata)를 나타낸다.
 // live PtySession handle은 여기 저장하지 않는다. 장차 SurfaceRuntime이
@@ -17,6 +27,7 @@ pub const Surface = struct {
     id: u64,
     title: []const u8 = "shell",
     cwd: ?[]const u8 = null,
+    command: ?[]const u8 = null,
     process_state: ProcessState = .starting,
     core: terminal.TerminalCore,
 
@@ -30,4 +41,36 @@ pub const Surface = struct {
     pub fn deinit(self: *Surface) void {
         self.core.deinit();
     }
+
+    pub fn restorableMetadata(self: *const Surface) RestorableSurfaceMetadata {
+        // env는 allowlist/redaction 정책이 정해질 때까지 저장하지 않는다.
+        // workspace restore가 민감한 환경변수를 실수로 기록하지 않도록 비워 둔다.
+        return .{
+            .id = self.id,
+            .title = self.title,
+            .cwd = self.cwd,
+            .command = self.command,
+            .size = self.core.size,
+            .process_state = self.process_state,
+            .env = &.{},
+        };
+    }
 };
+
+test "surface metadata excludes live process handles and environment by default" {
+    var surface = try Surface.init(std.testing.allocator, 7, .{ .cols = 100, .rows = 30 });
+    defer surface.deinit();
+    surface.title = "dev shell";
+    surface.cwd = "/tmp/maru";
+    surface.command = "/bin/zsh";
+    surface.process_state = .running;
+
+    const metadata = surface.restorableMetadata();
+    try std.testing.expectEqual(@as(u64, 7), metadata.id);
+    try std.testing.expectEqualStrings("dev shell", metadata.title);
+    try std.testing.expectEqualStrings("/tmp/maru", metadata.cwd.?);
+    try std.testing.expectEqualStrings("/bin/zsh", metadata.command.?);
+    try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 30 }, metadata.size);
+    try std.testing.expectEqual(ProcessState.running, metadata.process_state);
+    try std.testing.expectEqual(@as(usize, 0), metadata.env.len);
+}

@@ -44,7 +44,7 @@ event 4 process-exit surface=1 code=0
 - `surface`: 어느 surface에 속한 이벤트인지.
 - event별 payload.
 
-event kind는 `SurfaceRuntime`의 runtime event와 1:1로 맞춘다. 정식 대응표는 [Facade 계약](facade-contracts.md)의 `Trace/Event` 절을 단일 출처로 둔다. 요약하면 `process-exit`는 runtime의 `PtyEvent.exited`와 같은 사건이고, `PtyEvent.read_error`는 환경 의존적 실패라 trace에 남기지 않는다.
+event kind는 `SurfaceRuntime`의 runtime event와 1:1로 맞춘다. 정식 대응표는 [Facade 계약](facade-contracts.md)의 `Trace/Event` 절을 단일 출처로 둔다. 요약하면 `process-exit`는 runtime의 `RuntimePtyEvent.exited`와 같은 사건이고, `RuntimePtyEvent.read_error`는 환경 의존적 실패라 trace에 남기지 않는다.
 
 Shell integration event는 아직 `maru.trace.v1`에 포함하지 않는다. `shell.cwd-changed`, `shell.prompt-start`, `shell.prompt-end`, `shell.command-start`, `shell.command-end`를 trace에 넣는 PR은 schema를 먼저 갱신하고, replay가 해당 metadata를 어떻게 surface/workspace에 반영하는지 테스트해야 한다.
 
@@ -65,7 +65,7 @@ trace file
 
 중요한 점은 replay가 private parser storage를 직접 만지지 않는다는 것이다. 실제 앱과 같은 public 경로로만 재현해야 버그를 제대로 잡는다.
 
-replay에는 live `PtySession`이 없다. trace는 이미 일어난 입력의 기록이므로, `writeInput`/`resize`의 PTY 방향 부수효과(child에게 bytes 전달, master fd ioctl)는 재현 대상이 아니다. 따라서 replay runner는 `SurfaceRuntime`에 no-op `PtySession`을 attach하거나 core 방향 효과만 적용하고, PTY 방향 호출은 무시한다. replay의 정답은 `output`/`resize` event가 `TerminalCore`에 반영된 결과이지 child process 재실행이 아니다.
+replay에는 live `PtySession`이 없다. trace는 이미 일어난 입력의 기록이므로, `writeInput`/`resize`의 PTY 방향 부수효과(child에게 bytes 전달, master fd ioctl)는 재현 대상이 아니다. 따라서 replay runner는 `SurfaceRuntime`에 no-op `PtyIo`를 attach하거나 core 방향 효과만 적용하고, PTY 방향 호출은 무시한다. replay의 정답은 `output`/`resize` event가 `TerminalCore`에 반영된 결과이지 child process 재실행이 아니다.
 
 ## trace와 로그의 차이
 

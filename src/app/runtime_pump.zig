@@ -18,13 +18,16 @@ pub const PumpedEventKind = enum {
 pub const DrainSummary = struct {
     output_events: usize = 0,
     exit_events: usize = 0,
-    read_error_events: usize = 0,
 
     fn record(self: *DrainSummary, kind: PumpedEventKind) void {
         switch (kind) {
             .output => self.output_events += 1,
             .exited => self.exit_events += 1,
-            .read_error => self.read_error_events += 1,
+            // read_error는 summary로 집계하지 않는다. applyQueuedEvent가 read_error를
+            // applyPtyEvent의 error.ReadFailed로 먼저 전파하므로 .read_error kind는
+            // record()까지 도달하지 못한다. 즉 reader 실패는 카운터가 아니라 반환된
+            // error로만 신호한다. (집계용 카운터를 두면 항상 0이라 오해를 부른다.)
+            .read_error => {},
         }
     }
 };
@@ -196,7 +199,6 @@ test "runtime event pump drainAvailable returns immediately on an empty queue" {
     const summary = try pump.drainAvailable();
     try std.testing.expectEqual(@as(usize, 0), summary.output_events);
     try std.testing.expectEqual(@as(usize, 0), summary.exit_events);
-    try std.testing.expectEqual(@as(usize, 0), summary.read_error_events);
 }
 
 test "runtime event pump can block until an exit event is applied" {

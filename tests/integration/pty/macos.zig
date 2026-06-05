@@ -386,7 +386,14 @@ fn drainRuntimeQueueUntilExit(
                 break :blk null;
             },
             .exited => |exited| exited.status,
-            .read_error => null,
+            .read_error => {
+                // read_error는 더 이상 applyQueuedEvent에서 throw되지 않고 termination
+                // 데이터로 반환된다. 여기서 명시적으로 종료를 신호하지 않으면, reader
+                // thread가 멈춘 뒤 queue를 닫는 주체가 없어 다음 popBlocking이 영원히
+                // 블록된다. 이벤트를 적용해 소유권을 끝낸 뒤 읽기 실패를 surface한다.
+                _ = try pump.applyQueuedEvent(event);
+                return error.ReadFailed;
+            },
         };
 
         _ = try pump.applyQueuedEvent(event);

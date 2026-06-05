@@ -133,7 +133,9 @@ pub const TerminalCore = struct {
     fn writeCodepoint(self: *TerminalCore, codepoint: u21) void {
         switch (codepoint) {
             '\r' => {
+                const old_cursor = self.cursor;
                 self.cursor.col = 0;
+                self.markCursorMoveDirty(old_cursor, self.cursor);
                 self.last_print = null;
             },
             '\n' => {
@@ -142,6 +144,7 @@ pub const TerminalCore = struct {
             },
             '\t' => self.writeTab(),
             0x08 => {
+                const old_cursor = self.cursor;
                 if (self.cursor.col > 0) self.cursor.col -= 1;
                 // Stepping onto a wide glyph's continuation cell would strand
                 // the cursor inside the glyph, so a following write would clear
@@ -152,6 +155,7 @@ pub const TerminalCore = struct {
                 {
                     self.cursor.col -= 1;
                 }
+                self.markCursorMoveDirty(old_cursor, self.cursor);
                 self.last_print = null;
             },
             else => {
@@ -279,9 +283,10 @@ pub const TerminalCore = struct {
 
     fn lineFeed(self: *TerminalCore) void {
         if (self.size.rows == 0) return;
+        const old_cursor = self.cursor;
         if (self.cursor.row + 1 < self.size.rows) {
             self.cursor.row += 1;
-            self.markDirty(self.cursor.row);
+            self.markCursorMoveDirty(old_cursor, self.cursor);
             return;
         }
 
@@ -313,6 +318,28 @@ pub const TerminalCore = struct {
         }
 
         self.dirty = .{ .start_row = row, .end_row = row };
+    }
+
+    fn markCursorMoveDirty(self: *TerminalCore, old_cursor: types.Cursor, new_cursor: types.Cursor) void {
+        // Cursor is drawn as an overlay, not as part of the cell glyph bitmap.
+        // Moving it still changes pixels: the old cursor cell must be erased
+        // and the new cursor cell must be drawn. Keeping that dirty decision in
+        // TerminalCore prevents a future renderer from guessing dirty rows by
+        // comparing snapshots on its own.
+        if (old_cursor.row == new_cursor.row and
+            old_cursor.col == new_cursor.col and
+            old_cursor.visible == new_cursor.visible)
+        {
+            return;
+        }
+
+        if (old_cursor.visible) self.markCursorRowDirty(old_cursor.row);
+        if (new_cursor.visible) self.markCursorRowDirty(new_cursor.row);
+    }
+
+    fn markCursorRowDirty(self: *TerminalCore, row: u16) void {
+        if (self.size.rows == 0) return;
+        self.markDirty(@min(row, self.size.rows - 1));
     }
 
     fn index(self: *const TerminalCore, row: usize, col: usize) usize {
@@ -537,4 +564,49 @@ test "terminal core lets renderer consume dirty region once" {
     try std.testing.expectEqual(@as(u16, 0), next_dirty.start_row);
     try std.testing.expectEqual(@as(u16, 0), next_dirty.end_row);
     try std.testing.expect(core.snapshot().dirty == null);
+}
+
+test "terminal core marks cursor-only movement dirty for cursor overlay redraw" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+
+    // Carriage return changes only the cursor position. It still needs a
+    // dirty row because the renderer must erase the old cursor overlay and
+    // draw the new one even when no cell text changed.
+    try core.write("AB");
+    core.clearDirty();
+    try core.write("\r");
+
+    const cr_dirty = core.takeDirty().?;
+    try std.testing.expectEqual(@as(u16, 0), cr_dirty.start_row);
+    try std.testing.expectEqual(@as(u16, 0), cr_dirty.end_row);
+    try std.testing.expectEqual(@as(u16, 0), core.snapshot().cursor.col);
+
+    // Backspace is the same class of visual change: the glyph grid can stay
+    // intact while the cursor overlay moves one cell left.
+    try core.write("AB");
+    core.clearDirty();
+    try core.write("\x08");
+
+    const bs_dirty = core.takeDirty().?;
+    try std.testing.expectEqual(@as(u16, 0), bs_dirty.start_row);
+    try std.testing.expectEqual(@as(u16, 0), bs_dirty.end_row);
+    try std.testing.expectEqual(@as(u16, 1), core.snapshot().cursor.col);
+}
+
+test "terminal core marks old and new cursor rows dirty across line feed" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+
+    // A line feed moves the cursor to a different row without necessarily
+    // changing cell text. Both rows are dirty because one loses the cursor
+    // overlay and the other gains it.
+    try core.write("A");
+    core.clearDirty();
+    try core.write("\n");
+
+    const dirty = core.takeDirty().?;
+    try std.testing.expectEqual(@as(u16, 0), dirty.start_row);
+    try std.testing.expectEqual(@as(u16, 1), dirty.end_row);
+    try std.testing.expectEqual(@as(u16, 1), core.snapshot().cursor.row);
 }

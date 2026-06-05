@@ -32,8 +32,9 @@ test "macOS renderer starts with Metal" {
 
 test "render frame owns and frees its draw list" {
     // RenderFrame이 DrawList의 heap cells를 소유한다는 계약을 고정한다. deinit이
-    // 그 슬라이스를 해제하지 않으면 testing.allocator가 누수로 잡아낸다.
+    // 그 슬라이스들을 해제하지 않으면 testing.allocator가 누수로 잡아낸다.
     const cells = try std.testing.allocator.alloc(draw_list.DrawCell, 2);
+    const overlays = try std.testing.allocator.alloc(draw_list.DrawOverlay, 1);
     var frame: RenderFrame = .{
         .backend = initialBackendForMacOS(),
         .draw_list = .{
@@ -41,6 +42,7 @@ test "render frame owns and frees its draw list" {
             .cursor = .{},
             .dirty = .{ .start_row = 0, .end_row = 0 },
             .cells = cells,
+            .overlays = overlays,
         },
     };
     frame.deinit(std.testing.allocator);

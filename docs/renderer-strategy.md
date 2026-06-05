@@ -147,7 +147,8 @@ dirty region 범위:
 - 장기 목표는 cell 단위 dirty다. 다만 현재 `TerminalCore`/snapshot 계약은 `start_row/end_row` row 범위만 가진다.
 - 초기 `DrawList`는 현재 코드 계약에 맞춰 dirty row 범위만 draw command로 만든다. 한 cell만 바뀌어도 그 row의 셀들이 들어가는 것이 현재 정상 경로다.
 - cell 단위 dirty는 `TerminalCore`의 dirty 모델을 확장하는 별도 PR에서 진행한다. renderer가 화면을 스캔해 직접 dirty를 추론하지 않는 원칙은 유지한다.
-- cursor 이동, selection 변경, resize는 각각 dirty 범위를 만든다. 이 범위 산출은 domain 쪽 계약이고 GPU와 무관하다. 다만 현재 `TerminalCore`는 CR/backspace 같은 cursor-only 이동에서 아직 dirty를 내지 않는다. cursor 렌더링(아래 "초기 구현 순서" 3번)과 cursor-move dirty는 dirty 모델 확장 PR에서 함께 맞추고, 그 전까지는 미구현 한계로 둔다.
+- cursor 이동과 resize는 각각 dirty 범위를 만든다. 이 범위 산출은 domain 쪽 계약이고 GPU와 무관하다. 현재 `TerminalCore`는 CR/backspace/line feed 같은 cursor-only 이동에서도 old/new cursor row를 dirty로 만든다. selection은 아직 domain data가 없으므로 selection dirty는 selection 모델을 도입할 때 별도 PR에서 고정한다.
+- cursor와 underline은 glyph bitmap이 아니라 draw-time overlay다. `DrawList`는 `DrawCell`과 별도로 overlay command를 내보내며, cursor overlay는 dirty row에 cursor가 포함될 때만 생성한다.
 - 검증은 아래 "검증 전략"의 "dirty region이 draw command 범위를 줄이는지 확인하는 test"로 고정한다.
 
 ## 지금 선택하지 않는 것
@@ -163,7 +164,7 @@ dirty region 범위:
 
 1. `RenderSnapshot`을 GPU와 무관한 domain data로 유지한다.
 2. `RenderSnapshot -> DrawList` 변환을 먼저 테스트한다.
-3. `DrawList`를 Metal backend가 소비하는 형태로 만든다. 이때 cursor를 cell overlay로 그리고, cursor 이동(old/new cell)이 dirty 범위에 들어오도록 domain 계약을 맞춘다.
+3. `DrawList`를 Metal backend가 소비하는 형태로 만든다. cursor/underline은 cell overlay로 두고, cursor 이동(old/new cell)이 dirty 범위에 들어오도록 domain 계약을 유지한다.
 4. macOS app smoke에서 screenshot artifact를 남긴다.
 
 이 순서가 중요한 이유는 GPU screenshot을 먼저 붙이면 실패 원인이 parser인지, snapshot인지, glyph atlas인지, GPU pipeline인지 구분하기 어렵기 때문이다. 먼저 deterministic한 `DrawList`를 만들면 renderer의 입력 계약을 작은 테스트로 고정할 수 있다.
@@ -174,6 +175,7 @@ dirty region 범위:
 
 - snapshot을 draw command model로 바꾸는 unit/golden test.
 - 현재 row dirty region이 draw command 범위를 줄이는지 확인하는 test.
+- cursor-only 이동이 dirty row를 만들고, `DrawList`가 cursor/underline overlay command를 내보내는 test.
 - fake font backend를 사용한 `DrawList -> GlyphRunList` test.
 - GPU 없는 `GlyphCacheKey -> AtlasSlot` cache/invalidation test.
 - renderer가 PTY, parser, live platform handle을 import하지 않는 boundary test.

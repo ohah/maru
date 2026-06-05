@@ -10,14 +10,34 @@ pub const DrawCell = struct {
     style: terminal.Style = .{},
 };
 
+pub const CursorOverlay = struct {
+    row: u16,
+    col: u16,
+    visible: bool = true,
+};
+
+pub const UnderlineOverlay = struct {
+    row: u16,
+    col: u16,
+    width: u2 = 1,
+    color: terminal.Color = .default,
+};
+
+pub const DrawOverlay = union(enum) {
+    cursor: CursorOverlay,
+    underline: UnderlineOverlay,
+};
+
 pub const DrawList = struct {
     size: terminal.Size,
     cursor: terminal.Cursor,
     dirty: ?terminal.DirtyRegion,
     cells: []DrawCell,
+    overlays: []DrawOverlay,
 
     pub fn deinit(self: *DrawList, allocator: std.mem.Allocator) void {
         allocator.free(self.cells);
+        allocator.free(self.overlays);
         self.* = undefined;
     }
 };
@@ -31,6 +51,8 @@ pub fn buildDrawList(
     // 나중에 바꿔도 terminal core를 다시 설계하지 않아도 된다.
     var cells: std.ArrayList(DrawCell) = .empty;
     errdefer cells.deinit(allocator);
+    var overlays: std.ArrayList(DrawOverlay) = .empty;
+    errdefer overlays.deinit(allocator);
 
     if (snapshot.dirty) |dirty| {
         const row_count: usize = snapshot.size.rows;
@@ -63,9 +85,33 @@ pub fn buildDrawList(
                             .width = cell.width,
                             .style = cell.style,
                         });
+
+                        if (cell.style.underline) {
+                            // Underline is a draw-time overlay. Keeping it
+                            // outside the glyph cell command prevents the
+                            // atlas from caching separate bitmaps for "A" and
+                            // "underlined A".
+                            try overlays.append(allocator, .{ .underline = .{
+                                .row = @intCast(row),
+                                .col = @intCast(col),
+                                .width = cell.width,
+                                .color = cell.style.foreground,
+                            } });
+                        }
                     }
                 }
             }
+        }
+
+        if (cursorVisibleInSnapshot(snapshot) and dirtyIncludesRow(dirty, snapshot.cursor.row)) {
+            // Cursor is also a draw-time overlay. TerminalCore owns the dirty
+            // decision for cursor movement, so the renderer only consumes the
+            // row range instead of comparing old/new snapshots itself.
+            try overlays.append(allocator, .{ .cursor = .{
+                .row = snapshot.cursor.row,
+                .col = snapshot.cursor.col,
+                .visible = snapshot.cursor.visible,
+            } });
         }
     }
 
@@ -74,11 +120,24 @@ pub fn buildDrawList(
         .cursor = snapshot.cursor,
         .dirty = snapshot.dirty,
         .cells = try cells.toOwnedSlice(allocator),
+        .overlays = try overlays.toOwnedSlice(allocator),
     };
 }
 
 fn index(size: terminal.Size, row: usize, col: usize) usize {
     return row * size.cols + col;
+}
+
+fn cursorVisibleInSnapshot(snapshot: terminal.RenderSnapshot) bool {
+    return snapshot.cursor.visible and
+        snapshot.size.rows != 0 and
+        snapshot.size.cols != 0 and
+        snapshot.cursor.row < snapshot.size.rows and
+        snapshot.cursor.col < snapshot.size.cols;
+}
+
+fn dirtyIncludesRow(dirty: terminal.DirtyRegion, row: u16) bool {
+    return row >= dirty.start_row and row <= dirty.end_row;
 }
 
 test "draw list emits drawable cells from dirty rows only" {
@@ -100,6 +159,9 @@ test "draw list emits drawable cells from dirty rows only" {
     try std.testing.expectEqual(@as(u21, 'A'), draw_list.cells[0].codepoint);
     try std.testing.expectEqual(@as(u16, 0), draw_list.dirty.?.start_row);
     try std.testing.expectEqual(@as(u16, 0), draw_list.dirty.?.end_row);
+    try std.testing.expectEqual(@as(usize, 1), draw_list.overlays.len);
+    try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].cursor.row);
+    try std.testing.expectEqual(@as(u16, 1), draw_list.overlays[0].cursor.col);
 }
 
 test "draw list emits no cells when snapshot is clean" {
@@ -115,6 +177,7 @@ test "draw list emits no cells when snapshot is clean" {
 
     try std.testing.expect(draw_list.dirty == null);
     try std.testing.expectEqual(@as(usize, 0), draw_list.cells.len);
+    try std.testing.expectEqual(@as(usize, 0), draw_list.overlays.len);
 }
 
 test "draw list keeps wide glyph metadata and skips continuation cells" {
@@ -157,4 +220,28 @@ test "draw list carries style and combining mark for font layout" {
     try std.testing.expectEqual(terminal.Color{ .indexed = 2 }, draw_list.cells[0].style.foreground);
     try std.testing.expectEqual(terminal.Color{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, draw_list.cells[0].style.background);
     try std.testing.expect(draw_list.cells[0].style.underline);
+    try std.testing.expectEqual(@as(usize, 2), draw_list.overlays.len);
+    try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].underline.row);
+    try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].underline.col);
+    try std.testing.expectEqual(@as(u2, 1), draw_list.overlays[0].underline.width);
+    try std.testing.expectEqual(terminal.Color{ .indexed = 2 }, draw_list.overlays[0].underline.color);
+}
+
+test "draw list emits cursor overlay for cursor-only dirty movement" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // Carriage return does not change glyph cells, but it moves the cursor.
+    // The DrawList must expose that as an overlay command so a future Metal
+    // backend does not bake cursor pixels into glyph atlas entries.
+    try core.write("AB");
+    core.clearDirty();
+    try core.write("\r");
+
+    var draw_list = try buildDrawList(std.testing.allocator, core.snapshot());
+    defer draw_list.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), draw_list.overlays.len);
+    try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].cursor.row);
+    try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].cursor.col);
 }

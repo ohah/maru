@@ -302,6 +302,39 @@ test "macOS PTY reader stopAndJoin closes a blocking child without leaking a zom
     try std.testing.expect(rc < 0);
 }
 
+test "macOS PTY reader stopAndJoin reaps a child that closed its stdio but keeps running" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var session = try maru.pty.PtySession.spawn(allocator, .{
+        // child가 stdin/stdout/stderr를 모두 닫으면 master는 EOF를 보지만 child는
+        // 계속 살아 있다(daemonize). 그러면 reader는 read 대기가 아니라 reap 경로의
+        // kqueue NOTE_EXIT 대기에 들어간다. HUP/TERM도 무시하므로 close는 SIGKILL로
+        // child를 끝내고 reap해야 한다. reap 경로가 bare blocking waitpid를 쓰면
+        // close가 깨우지 못해 stopAndJoin이 여기서 영원히 hang한다.
+        .command = "/bin/sh",
+        .args = &.{ "-c", "trap '' HUP TERM; exec 0<&- 1>&- 2>&-; while :; do sleep 1; done" },
+        .size = .{ .cols = 20, .rows = 8 },
+    });
+    defer session.deinit();
+    const child_pid = session.child_pid;
+
+    var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    try reader.start();
+
+    // child가 stdio를 닫고 reader가 EOF -> reap 경로(kqueue 대기)에 들어갈 시간을 준다.
+    try sleepMillis(50);
+    reader.stopAndJoin();
+
+    // 데드락이면 stopAndJoin이 반환하지 않아 이 줄에 도달하지 못한다. 도달했다면
+    // kqueue 대기가 깨어났고 child가 reap됐다는 뜻이므로 waitpid는 ECHILD다.
+    var status: c_int = 0;
+    const rc = std.c.waitpid(child_pid, &status, std.c.W.NOHANG);
+    try std.testing.expect(rc < 0);
+}
+
 const CollectedOutput = struct {
     bytes: []u8,
     exit_status: maru.pty.ExitStatus,

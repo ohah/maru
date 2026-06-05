@@ -13,6 +13,10 @@ run = "zig build test"
 description = "Run headless E2E tests"
 run = "zig build test-e2e"
 
+[tasks.demo]
+description = "Run the headless PTY demo"
+run = "zig build demo"
+
 [tasks.pty]
 description = "Run opt-in macOS PTY integration tests"
 run = "zig build test-pty"

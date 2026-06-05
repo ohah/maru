@@ -47,6 +47,7 @@ GUI가 붙기 전에는 headless 경로가 첫 성공 기준이다. macOS 창과
 
 - `mise run check`가 통과한다.
 - PTY/headless E2E가 자동화되어 있다.
+- `mise run demo`로 같은 경로를 사람이 직접 실행해 보고 `zig-out/maru-demo/` 산출물을 확인할 수 있다.
 - 실패 시 raw input, decoded screen, structured snapshot이 `tests/artifacts/` 아래에 남는다.
 - 구현 전 문서화된 경계와 실제 코드 경계가 다르면 PR에서 사용자에게 보고한다.
 - 자동 E2E가 불가능한 영역은 완료 처리 전에 이유와 수동 검증 방법을 남긴다.
@@ -58,7 +59,8 @@ GUI가 붙기 전에는 headless 경로가 첫 성공 기준이다. macOS 창과
 3. macOS `PtySession`을 최소 기능으로 붙인다.
 4. `SurfaceRuntime`이 `PtySession`과 `Surface`를 연결한다.
 5. headless E2E로 shell output이 snapshot까지 도달하는지 검증한다.
-6. 같은 snapshot 계약을 renderer와 macOS app host가 소비하게 만든다.
+6. `mise run demo`로 같은 PTY/runtime/snapshot 경로를 실행 가능한 개발용 세로 슬라이스로 노출한다.
+7. 같은 snapshot 계약을 renderer와 macOS app host가 소비하게 만든다.
 
 ## 중단하고 사용자와 논의할 조건
 

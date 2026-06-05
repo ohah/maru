@@ -1,3 +1,4 @@
+pub const headless_demo = @import("app/headless_demo.zig");
 pub const pty_reader = @import("app/pty_reader.zig");
 pub const runtime = @import("app/runtime.zig");
 pub const runtime_pump = @import("app/runtime_pump.zig");
@@ -5,6 +6,8 @@ pub const surface = @import("app/surface.zig");
 pub const window = @import("app/window.zig");
 
 pub const AppWindow = window.AppWindow;
+pub const HeadlessDemoConfig = headless_demo.DemoConfig;
+pub const HeadlessDemoResult = headless_demo.DemoResult;
 pub const PtyEventQueue = pty_reader.PtyEventQueue;
 pub const PtyId = runtime.PtyId;
 pub const PtyIo = runtime.PtyIo;
@@ -26,6 +29,8 @@ pub const SurfaceId = runtime.SurfaceId;
 pub const SurfaceRuntime = runtime.SurfaceRuntime;
 pub const TerminalInput = runtime.TerminalInput;
 pub const ProcessState = surface.ProcessState;
+
+pub const runHeadlessDemo = headless_demo.run;
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

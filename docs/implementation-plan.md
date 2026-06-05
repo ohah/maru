@@ -177,6 +177,7 @@ TDD 방식:
 - `PTY output event -> SurfaceRuntime -> Surface -> TerminalCore -> Snapshot` 경로를 완성한다.
 - `Surface`는 `TerminalCore`와 복구 가능한 metadata를 보관하고, live `PtySession` handle은 직접 저장하지 않는다.
 - `SurfaceRuntime`은 app layer에서 `Surface`와 `PtySession`의 live 연결만 관리한다.
+- `SurfaceRuntime`은 concrete `PtySession` 대신 `PtyIo` adapter를 저장한다. 그래야 unit test가 macOS 실제 PTY에 의존하지 않고 routing 계약을 검증할 수 있다.
 - surface metadata인 title, cwd, env, command, size를 복구 가능한 형태로 보관한다.
 - workspace restore는 구현하지 않더라도 `RestorableSurfaceMetadata` 초안은 만든다.
 
@@ -184,9 +185,11 @@ TDD 방식:
 
 - unit test: PTY output event가 `SurfaceRuntime`을 거쳐 surface의 `TerminalCore`로 전달된다.
 - unit test: surface resize가 `SurfaceRuntime`을 통해 core resize와 PTY resize request로 분리되어 전달된다.
+- unit test: terminal input bytes가 fake PTY로 전달된다.
+- unit test: duplicate attach, detach 이후 late output, process exit 이후 input 거부가 각각 오류로 관측된다.
 - snapshot test: surface metadata와 terminal state가 같은 artifact에 함께 보인다.
 - metadata test: cwd/env/command/size가 serializable draft model로 round-trip된다.
-- 민감정보 test 초안: env를 그대로 저장하지 않고 allowlist/redaction 경계를 둔다.
+- 민감정보 test 초안: env 저장 정책이 정해질 때까지 `RestorableSurfaceMetadata.env`가 비어 있음을 검증한다.
 
 완료 기준:
 
@@ -194,13 +197,15 @@ TDD 방식:
 - workspace 저장 포맷을 아직 확정하지 않아도, 저장 가능한 metadata 경계는 존재한다.
 - live PTY handle은 metadata에 들어가지 않는다.
 - live PTY handle은 `Surface`가 아니라 `SurfaceRuntime` 책임이다.
-- env 저장 정책은 최소 초안이라도 문서화한다.
+- env 저장은 이번 단계에서 하지 않는다. allowlist/redaction 정책이 정해질 때까지 빈 목록으로 고정한다.
 
 아직 하지 않는다:
 
 - 여러 탭.
 - split layout.
 - workspace restore.
+- reader thread, bounded queue, backpressure.
+- OSC52/shell integration app request queue.
 
 ## 6단계: Headless E2E를 초기 성공 기준으로 고정
 

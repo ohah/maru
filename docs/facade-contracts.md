@@ -94,6 +94,7 @@
 - PTY output event를 해당 surface의 `TerminalCore`로 전달한다.
 - terminal input bytes와 resize request를 해당 `PtySession`으로 전달한다.
 - process exit 같은 runtime event를 surface metadata 갱신이나 artifact로 연결한다.
+- concrete `PtySession`을 직접 저장하지 않고 `PtyIo` adapter를 통해 input/resize만 호출한다.
 
 몰라야 하는 것:
 
@@ -106,6 +107,9 @@
 - 하나의 PTY output event가 올바른 surface로 routing된다.
 - surface resize가 `TerminalCore.resize`와 `PtySession.resize` 요청으로 분리된다.
 - runtime 연결이 끊겨도 `RestorableSurfaceMetadata`에는 live handle이 남지 않는다.
+- 같은 surface나 pty를 두 번 attach하면 오류가 난다.
+- detach 이후 늦게 도착한 PTY output은 `UnknownPty`로 거부된다.
+- process exit event 이후 같은 surface로 input을 보내면 `ProcessExited`가 난다.
 
 ## `Workspace`
 
@@ -159,15 +163,15 @@ trace schema와 replay 동작은 [Trace와 Replay](trace-replay.md)를 따른다
 - replay runner가 public facade만 통해 같은 상태를 재현할 수 있게 한다.
 - 민감정보가 들어갈 수 있는 cwd/env/command/raw bytes를 sanitized fixture로 바꿀 경계를 둔다.
 
-정식 event 어휘는 이 표를 단일 출처로 둔다. trace kind와 `SurfaceRuntime`의 `PtyEvent`/입력 경로는 다음과 같이 대응한다.
+정식 event 어휘는 이 표를 단일 출처로 둔다. trace kind와 `SurfaceRuntime`의 `RuntimePtyEvent`/입력 경로는 다음과 같이 대응한다.
 
 | trace kind | runtime 대응 | 비고 |
 | --- | --- | --- |
-| `output` | `PtyEvent.output` | PTY → surface 방향. |
-| `input` | `SurfaceRuntime.writeInput`(`TerminalInput`) | app → PTY 방향이라 대응하는 `PtyEvent`가 없다. |
+| `output` | `RuntimePtyEvent.output` | PTY → surface 방향. |
+| `input` | `SurfaceRuntime.writeInput`(`TerminalInput`) | app → PTY 방향이라 대응하는 `RuntimePtyEvent`가 없다. |
 | `resize` | `SurfaceRuntime.resize` | core resize와 PTY resize를 한 event로 묶는다. |
-| `process-exit` | `PtyEvent.exited` | 같은 사건의 두 이름이다. 새 이름을 추가하지 않는다. |
-| (없음) | `PtyEvent.read_error` | 환경 의존적 실패라 trace에 남기지 않고 실패 artifact로만 남긴다. |
+| `process-exit` | `RuntimePtyEvent.exited` | 같은 사건의 두 이름이다. 새 이름을 추가하지 않는다. |
+| (없음) | `RuntimePtyEvent.read_error` | 환경 의존적 실패라 trace에 남기지 않고 실패 artifact로만 남긴다. |
 
 Shell integration event(`shell.cwd-changed`, `shell.prompt-start`, `shell.prompt-end`, `shell.command-start`, `shell.command-end`)는 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#shell-integration)의 어휘를 따른다. 이 event를 `maru.trace.v1`에 저장하는 구현 PR은 먼저 이 표와 [Trace와 Replay](trace-replay.md)의 schema를 함께 갱신해야 한다. raw OSC bytes를 각 기능이 임시로 파싱하지 않는다.
 

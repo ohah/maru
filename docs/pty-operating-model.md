@@ -149,7 +149,11 @@ close (child가 아직 살아 있을 때)
 
 `setsid`로 child가 process group leader가 되므로 group(`-pid`)과 child(`pid`) 양쪽에 보낸다. grace는 짧고 상한이 있어 close가 오래 멈추지 않는다. 마지막 `SIGKILL`은 무시할 수 없으므로 blocking reap이 반드시 진행되어 zombie가 남지 않는다.
 
-이 escalation은 현재 `deinit`에서 동기적으로 수행한다. reader thread가 `readEvent` 안에서 blocking 중인 interactive shell shutdown은 아직 별도 app lifecycle로 묶지 않았다. close 경로를 app host와 조립할 때도 "신호를 올리며 반드시 reap한다"는 계약은 동일하게 유지한다.
+이 escalation은 `PtySession.close`에서 동기적으로 수행하고, `deinit`은 같은 close 경로를 재사용한다. 이 분리가 필요한 이유는 app이 탭/창을 닫을 때 session memory를 바로 파괴하면 reader thread가 아직 `readEvent` 안에서 같은 session을 잡고 있을 수 있기 때문이다.
+
+reader thread가 blocking `readEvent`에 들어간 상태도 `PtyReader.stopAndJoin`으로 정리한다. 순서는 `queue.close -> session.close -> reader.join`이다. queue를 먼저 닫는 이유는 사용자가 닫은 pane에 새 output/read_error event를 더 쌓지 않기 위해서다. session close는 master fd를 닫고 child를 reap한다. macOS에서는 다른 thread가 fd를 닫는 것만으로 blocking read가 항상 즉시 깨어난다고 가정하지 않는다. 그래서 `readEvent`는 실제 `read` 전에 짧은 `poll` 대기 루프를 지나며 close flag를 관측한다. 현재 close 관측 지연 상한은 20ms다.
+
+아직 남은 범위는 macOS window/app host의 실제 close button, tab close command, app quit lifecycle에 이 API를 연결하는 일이다. close 경로를 app host와 조립할 때도 "신호를 올리며 반드시 reap한다"는 계약은 동일하게 유지한다.
 
 ## 초기 테스트
 
@@ -165,10 +169,11 @@ SurfaceRuntime reader thread와 pump 단계에서 추가된 테스트:
 - `RuntimeEventPump`가 queued event를 `SurfaceRuntime`에 적용하고 output bytes 소유권을 끝낸다.
 - reader thread가 실제 macOS PTY controlled command output/exit를 bounded queue에 넣고, `RuntimeEventPump`가 이를 `SurfaceRuntime`에 적용한다.
 - 대량 stdout을 queue capacity 1로 흘려도 marker가 drop되지 않고, 여러 output event가 pump를 통과하며, 마지막 화면과 summary artifact가 남는다.
+- 출력이 없는 long-running child에서 reader thread가 blocking read에 들어가도 `PtyReader.stopAndJoin`이 reader를 join하고 child를 reap한다.
 
 아직 추가하지 않은 테스트:
 
 - 대량 stdout에서 reader가 오래 backpressure를 걸 때 RSS 상한, drain latency, UI responsiveness가 유지되는지.
 - 늦게 도착한 output이 detach된 surface로 흘러가지 않는다.
 - reader thread 종료와 process exit가 trace에 같은 domain event로 남는다.
-- interactive shell에서 app close가 blocking read를 깨우고 reader thread까지 정리되는지.
+- macOS app host의 실제 tab/window close가 `PtyReader.stopAndJoin`을 호출하는지.

@@ -119,6 +119,7 @@
 - reader thread가 만든 output/exit/read_error event를 bounded queue에 넣는다.
 - queue가 가득 차면 output을 버리지 않고 reader thread를 기다리게 한다.
 - output bytes의 소유권을 queue event로 넘기고, consumer가 `QueuedPtyEvent.deinit`으로 끝내게 한다.
+- 탭/창 close 시 `stopAndJoin`으로 queue를 닫고, session을 close한 뒤 reader thread가 끝날 때까지 기다린다.
 
 몰라야 하는 것:
 
@@ -133,10 +134,11 @@
 - queue가 full일 때 무한히 늘리지 않고 `QueueFull`로 관측된다.
 - close된 queue는 새 push를 거부하고 empty pop을 종료한다.
 - 실제 macOS PTY controlled command output/exit가 reader thread와 queue를 지나 `SurfaceRuntime`에 적용된다.
+- 실제 macOS PTY에서 출력이 없는 long-running child 때문에 reader가 blocking read 중이어도 `stopAndJoin`이 reader를 정리하고 child zombie를 남기지 않는다.
 
 아직 하지 않는다:
 
-- interactive shell close가 blocking `readEvent`를 깨우고 reader thread를 정리하는 app lifecycle.
+- macOS window/app event loop의 tab/window close command와 `stopAndJoin` 연결.
 - 대량 stdout backpressure의 RSS/latency/UI responsiveness 성능 예산.
 
 ## `RuntimeEventPump`
@@ -166,7 +168,7 @@
 아직 하지 않는다:
 
 - 실제 macOS window/app event loop.
-- interactive shell shutdown lifecycle.
+- macOS window/app event loop에서 시작되는 interactive shell shutdown lifecycle.
 - 대량 stdout backpressure의 RSS/latency/UI responsiveness 성능 예산.
 
 ## `Workspace`

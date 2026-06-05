@@ -17,12 +17,15 @@ extern "c" fn nanosleep(rqtp: *const std.c.timespec, rmtp: ?*std.c.timespec) c_i
 
 const tio_cs_ctty: c_int = 0x20007461;
 const tio_cs_winsz: c_int = @bitCast(@as(u32, 0x80087467));
+const read_poll_interval_ms = 20;
 
 pub const PtySession = struct {
-    master_fd: std.posix.fd_t,
+    master_fd: std.atomic.Value(std.posix.fd_t),
     child_pid: std.c.pid_t,
     size: terminal.Size,
-    exited: bool = false,
+    exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    reaping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn spawn(allocator: std.mem.Allocator, request: types.SpawnRequest) !PtySession {
         try validateRequest(request);
@@ -59,33 +62,47 @@ pub const PtySession = struct {
 
         closeFd(slave_fd);
         return .{
-            .master_fd = master_fd,
+            .master_fd = std.atomic.Value(std.posix.fd_t).init(master_fd),
             .child_pid = pid,
             .size = request.size,
         };
     }
 
-    pub fn deinit(self: *PtySession) void {
-        if (self.master_fd >= 0) {
-            closeFd(self.master_fd);
-            self.master_fd = -1;
-        }
-        if (!self.exited) {
+    pub fn close(self: *PtySession) void {
+        // close는 reader thread를 깨우고 child를 정리하는 lifecycle API다.
+        // deinit처럼 객체를 undefined로 만들지 않기 때문에 app은 close -> reader.join
+        // -> deinit 순서로 안전하게 종료할 수 있다.
+        _ = self.closing.swap(true, .acq_rel);
+
+        const fd = self.master_fd.swap(-1, .acq_rel);
+        if (fd >= 0) closeFd(fd);
+
+        if (!self.exited.load(.acquire) and !self.reaping.swap(true, .acq_rel)) {
             shutdownChild(self.child_pid);
+            self.exited.store(true, .release);
         }
+    }
+
+    pub fn deinit(self: *PtySession) void {
+        self.close();
         self.* = undefined;
     }
 
     pub fn readEvent(self: *PtySession, allocator: std.mem.Allocator) !types.PtyEvent {
-        if (self.exited) return error.NoMoreEvents;
+        if (self.exited.load(.acquire)) return error.NoMoreEvents;
+        const fd = self.activeMasterFd() catch return error.SessionClosed;
+        try self.waitReadableOrClosing(fd);
 
         var buffer: [4096]u8 = undefined;
-        const read_len = std.posix.read(self.master_fd, &buffer) catch |err| switch (err) {
+        const read_len = std.posix.read(fd, &buffer) catch |err| switch (err) {
             // PTY EOF is reported as EIO on some Unix implementations after
             // the slave side closes. Treat it the same as a zero-byte read so
             // callers do not need OS-specific EOF rules.
             error.InputOutput => 0,
-            else => return err,
+            else => {
+                if (self.closing.load(.acquire)) return error.SessionClosed;
+                return err;
+            },
         };
 
         if (read_len > 0) {
@@ -93,33 +110,68 @@ pub const PtySession = struct {
             return .{ .output = owned };
         }
 
+        if (self.closing.load(.acquire)) return error.SessionClosed;
+        if (self.reaping.swap(true, .acq_rel)) return error.SessionClosed;
+
         // Reap before latching `exited`: if waitForChild fails we must leave the
         // session un-exited so deinit still attempts to reap the child instead of
         // leaking it and silently dropping the exit status.
         const status = try waitForChild(self.child_pid);
-        self.exited = true;
+        self.exited.store(true, .release);
         return .{ .exited = status };
     }
 
     pub fn writeInput(self: *PtySession, bytes: []const u8) !void {
+        const fd = try self.activeMasterFd();
         var written: usize = 0;
         while (written < bytes.len) {
-            const n = try writeFd(self.master_fd, bytes[written..]);
+            const n = try writeFd(fd, bytes[written..]);
             if (n == 0) return error.WriteFailed;
             written += n;
         }
     }
 
     pub fn resize(self: *PtySession, size: terminal.Size) !void {
+        const fd = try self.activeMasterFd();
         var window_size = winsizeFromTerminalSize(size);
-        if (std.c.ioctl(self.master_fd, tio_cs_winsz, &window_size) < 0) return error.IoctlFailed;
+        if (std.c.ioctl(fd, tio_cs_winsz, &window_size) < 0) return error.IoctlFailed;
         self.size = size;
     }
 
     pub fn currentSize(self: *PtySession) !terminal.Size {
+        const fd = try self.activeMasterFd();
         var window_size: std.posix.winsize = undefined;
-        if (std.c.ioctl(self.master_fd, std.c.T.IOCGWINSZ, &window_size) < 0) return error.IoctlFailed;
+        if (std.c.ioctl(fd, std.c.T.IOCGWINSZ, &window_size) < 0) return error.IoctlFailed;
         return .{ .cols = window_size.col, .rows = window_size.row };
+    }
+
+    fn activeMasterFd(self: *PtySession) !std.posix.fd_t {
+        const fd = self.master_fd.load(.acquire);
+        if (fd < 0) return error.SessionClosed;
+        return fd;
+    }
+
+    fn waitReadableOrClosing(self: *PtySession, fd: std.posix.fd_t) !void {
+        while (true) {
+            if (self.closing.load(.acquire)) return error.SessionClosed;
+
+            var fds = [_]std.posix.pollfd{.{
+                .fd = fd,
+                .events = @intCast(std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR),
+                .revents = 0,
+            }};
+            const ready = try std.posix.poll(&fds, read_poll_interval_ms);
+            if (ready == 0) continue;
+
+            const revents = fds[0].revents;
+            if ((revents & @as(i16, @intCast(std.posix.POLL.NVAL))) != 0) {
+                if (self.closing.load(.acquire)) return error.SessionClosed;
+                return error.PollFailed;
+            }
+            if ((revents & @as(i16, @intCast(std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR))) != 0) {
+                return;
+            }
+        }
     }
 };
 

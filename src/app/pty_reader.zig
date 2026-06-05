@@ -189,6 +189,15 @@ pub const PtyReader = struct {
         }
     }
 
+    pub fn stopAndJoin(self: *PtyReader) void {
+        // 앱이 탭/창을 닫을 때는 queue를 먼저 닫아 reader가 더 이상 event를
+        // 쌓지 못하게 하고, session.close로 blocking read를 깨운 뒤 join한다.
+        // session.deinit은 reader가 끝난 뒤 호출해야 session memory를 안전하게 파괴할 수 있다.
+        self.queue.close();
+        self.session.close();
+        self.join();
+    }
+
     pub fn run(self: *PtyReader) void {
         while (true) {
             const event = self.session.readEvent(self.allocator) catch |err| {

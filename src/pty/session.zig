@@ -21,6 +21,10 @@ const UnsupportedPtySession = struct {
         _ = self;
     }
 
+    pub fn close(self: *UnsupportedPtySession) void {
+        _ = self;
+    }
+
     pub fn readEvent(self: *UnsupportedPtySession, allocator: std.mem.Allocator) !types.PtyEvent {
         _ = self;
         _ = allocator;

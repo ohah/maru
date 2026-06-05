@@ -255,6 +255,53 @@ test "macOS PTY close reaps a signal-ignoring child without leaking a zombie" {
     try std.testing.expect(rc < 0);
 }
 
+test "macOS PTY reader stopAndJoin closes a blocking child without leaking a zombie" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var session = try maru.pty.PtySession.spawn(allocator, .{
+        // 출력이 없는 long-running child를 사용해 reader thread가 readEvent에서
+        // blocking 중인 상황을 만든다. HUP/TERM을 무시하므로 close path가
+        // SIGKILL escalation과 reap까지 실제로 수행해야 한다.
+        .command = "/bin/sh",
+        .args = &.{ "-c", "trap '' HUP TERM; while :; do sleep 1; done" },
+        .size = .{ .cols = 20, .rows = 8 },
+    });
+    defer session.deinit();
+    const child_pid = session.child_pid;
+
+    var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    try reader.start();
+
+    // 이 짧은 대기는 shell loop가 시작되고 reader가 PTY read에 들어갈 시간을 준다.
+    // 테스트의 핵심은 정확한 시간 측정이 아니라 stopAndJoin이 blocking read를 깨우는지다.
+    try sleepMillis(20);
+    reader.stopAndJoin();
+
+    const summary = try std.fmt.allocPrint(
+        allocator,
+        \\child_pid={d}
+        \\queue_capacity={d}
+        \\reader_joined=true
+        \\
+    ,
+        .{ child_pid, queue.capacity() },
+    );
+    defer allocator.free(summary);
+    try artifacts.writeText(
+        "tests/artifacts/integration/pty/reader-stop.summary.txt",
+        summary,
+    );
+
+    // stopAndJoin이 session.close를 통해 child를 reap했다면 waitpid는 ECHILD로
+    // 실패한다. 아직 살아 있거나 zombie라면 pid 또는 0이 돌아와 이 단언이 깨진다.
+    var status: c_int = 0;
+    const rc = std.c.waitpid(child_pid, &status, std.c.W.NOHANG);
+    try std.testing.expect(rc < 0);
+}
+
 const CollectedOutput = struct {
     bytes: []u8,
     exit_status: maru.pty.ExitStatus,
@@ -330,6 +377,13 @@ fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
         offset += relative + needle.len;
     }
     return count;
+}
+
+fn sleepMillis(ms: i64) !void {
+    // Zig 0.16에서는 sleep이 std.Thread가 아니라 std.Io의 clock-aware API다.
+    // 테스트도 같은 Io 경계를 쓰면 나중에 platform별 event loop와 섞일 때
+    // POSIX-only nanosleep 우회 코드가 남지 않는다.
+    try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(ms), .awake);
 }
 
 const PtyStressSummary = struct {

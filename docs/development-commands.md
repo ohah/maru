@@ -17,6 +17,8 @@ Maru 작업에서 사용하는 기본 명령이다.
 - app host smoke 실행: `mise run app-smoke`
 - macOS visible window smoke 실행: `mise run macos-window-smoke`
 - macOS window smoke 계약 테스트: `mise run test-macos-window-smoke`
+- macOS Metal clear-frame smoke 실행: `mise run macos-metal-smoke`
+- macOS Metal smoke 계약 테스트: `mise run test-macos-metal-smoke`
 - 테스트: `mise run test`
 - E2E 테스트: `mise run e2e`
 - 오라클 비교 테스트: `mise run oracle`

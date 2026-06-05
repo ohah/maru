@@ -253,13 +253,14 @@ TDD 방식:
 - cursor와 underline은 cell overlay로 그린다. cursor 이동이 dirty 범위를 만든다는 domain 계약(`renderer-strategy.md`)은 CR/backspace/line feed 같은 cursor-only 이동 단위 테스트와 `DrawList` overlay 테스트로 검증한다. selection overlay는 selection domain data가 생길 때 별도 PR에서 다룬다.
 - font layout test: fake font backend로 `DrawList -> GlyphRunList` 계약을 검증한다.
 - glyph atlas test: GPU texture 없이 `GlyphCacheKey -> AtlasSlot` cache, upload byte 후보, eviction, invalidation reason을 검증한다.
-- app smoke test: window 생성, resize, key input artifact.
+- app host smoke: 실제 UI 없이 `AppWindow -> SurfaceRuntime -> RuntimeEventPump -> DrawList` frame 조립, resize, focused input artifact를 `mise run app-smoke`로 남긴다.
 - screenshot artifact: 실제 화면 검증이 가능한 곳부터 opt-in으로 추가한다.
 
 완료 기준:
 
 - renderer는 PTY나 parser를 모른다.
 - app host는 terminal storage를 직접 수정하지 않는다.
+- 실제 AppKit/Metal UI가 아직 없으면 smoke summary에 `visible_ui=false`를 명시하고, UI로 확인 가능한 단계가 오면 사용자에게 보고한다.
 - 성능 예산에 startup, first drawable, frame budget 초안을 추가한다.
 
 아직 하지 않는다:

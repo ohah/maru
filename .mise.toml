@@ -17,6 +17,10 @@ run = "zig build test-e2e"
 description = "Run the headless PTY demo"
 run = "zig build demo"
 
+[tasks.app-smoke]
+description = "Run the app host frame smoke"
+run = "zig build app-smoke"
+
 [tasks.pty]
 description = "Run opt-in macOS PTY integration tests"
 run = "zig build test-pty"

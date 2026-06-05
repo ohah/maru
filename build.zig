@@ -42,6 +42,12 @@ pub fn build(b: *std.Build) void {
     demo_cmd.addArg("demo");
     demo_step.dependOn(&demo_cmd.step);
 
+    const app_smoke_step = b.step("app-smoke", "Run the app host frame smoke");
+    const app_smoke_cmd = b.addRunArtifact(exe);
+    app_smoke_cmd.step.dependOn(b.getInstallStep());
+    app_smoke_cmd.addArg("app-smoke");
+    app_smoke_step.dependOn(&app_smoke_cmd.step);
+
     const core_tests = b.addTest(.{
         .root_module = maru_mod,
     });

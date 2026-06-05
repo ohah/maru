@@ -19,7 +19,6 @@ const tio_cs_ctty: c_int = 0x20007461;
 const tio_cs_winsz: c_int = @bitCast(@as(u32, 0x80087467));
 
 pub const PtySession = struct {
-    allocator: std.mem.Allocator,
     master_fd: std.posix.fd_t,
     child_pid: std.c.pid_t,
     size: terminal.Size,
@@ -60,7 +59,6 @@ pub const PtySession = struct {
 
         closeFd(slave_fd);
         return .{
-            .allocator = allocator,
             .master_fd = master_fd,
             .child_pid = pid,
             .size = request.size,
@@ -367,12 +365,20 @@ fn waitForChild(pid: std.c.pid_t) !types.ExitStatus {
 }
 
 fn decodeExitStatus(status: c_int) types.ExitStatus {
-    if ((status & 0x7f) == 0) {
+    // macOS sys/wait.h: _WSTATUS(x) = x & 0x7f selects exit vs signal vs stop.
+    const wstatus = status & 0x7f;
+    // WIFEXITED: low 7 bits are 0 → normal exit, code in bits 8..15.
+    if (wstatus == 0) {
         return .{ .exited = @intCast((status >> 8) & 0xff) };
     }
-    const signal = status & 0x7f;
-    if (signal != 0) return .{ .signaled = @intCast(signal) };
-    return .{ .unknown = status };
+    // WIFSTOPPED: low 7 bits are 0x7f. waitForChild does not pass WUNTRACED so a
+    // stopped child is not expected here; report it as unknown rather than as a
+    // bogus terminating signal 0x7f.
+    if (wstatus == 0x7f) {
+        return .{ .unknown = status };
+    }
+    // WIFSIGNALED: terminating signal in the low 7 bits.
+    return .{ .signaled = @intCast(wstatus) };
 }
 
 fn winsizeFromTerminalSize(size: terminal.Size) std.posix.winsize {
@@ -386,6 +392,18 @@ fn winsizeFromTerminalSize(size: terminal.Size) std.posix.winsize {
 
 test "decodeExitStatus reports normal exit code" {
     try std.testing.expectEqual(types.ExitStatus{ .exited = 7 }, decodeExitStatus(7 << 8));
+}
+
+test "decodeExitStatus reports a terminating signal" {
+    // Killed by SIGKILL(9): low 7 bits hold the signal, with or without the
+    // 0x80 core-dump flag.
+    try std.testing.expectEqual(types.ExitStatus{ .signaled = 9 }, decodeExitStatus(9));
+    try std.testing.expectEqual(types.ExitStatus{ .signaled = 9 }, decodeExitStatus(0x80 | 9));
+}
+
+test "decodeExitStatus reports a stopped child as unknown" {
+    // WIFSTOPPED status (low 7 bits == 0x7f) must not be mistaken for signal 0x7f.
+    try std.testing.expectEqual(types.ExitStatus{ .unknown = 0x137f }, decodeExitStatus(0x137f));
 }
 
 test "validateRequest rejects requests that cannot produce a reliable PTY" {

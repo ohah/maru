@@ -175,6 +175,7 @@ dirty region 범위:
 - snapshot을 draw command model로 바꾸는 unit/golden test.
 - 현재 row dirty region이 draw command 범위를 줄이는지 확인하는 test.
 - fake font backend를 사용한 `DrawList -> GlyphRunList` test.
+- GPU 없는 `GlyphCacheKey -> AtlasSlot` cache/invalidation test.
 - renderer가 PTY, parser, live platform handle을 import하지 않는 boundary test.
 
 opt-in으로 둘 것:

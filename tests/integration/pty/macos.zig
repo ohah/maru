@@ -21,9 +21,12 @@ test "macOS openpty controlled command reaches TerminalCore snapshot" {
 
     const raw = try collectUntilExit(allocator, &session);
     defer allocator.free(raw.bytes);
-
-    try std.testing.expectEqual(maru.pty.ExitStatus{ .exited = 0 }, raw.exit_status);
-    try std.testing.expect(std.mem.indexOf(u8, raw.bytes, "pty maru") != null);
+    // Write the raw PTY bytes first so the PTY-layer evidence survives a later
+    // core-write failure or a failing assertion below.
+    try artifacts.writeText(
+        "tests/artifacts/integration/pty/controlled-command.raw.txt",
+        raw.bytes,
+    );
 
     var core = try maru.terminal.TerminalCore.init(allocator, .{ .cols = 40, .rows = 5 });
     defer core.deinit();
@@ -31,24 +34,24 @@ test "macOS openpty controlled command reaches TerminalCore snapshot" {
 
     const screen = try core.dumpUtf8(allocator);
     defer allocator.free(screen);
-    try std.testing.expect(std.mem.indexOf(u8, screen, "pty maru") != null);
+    const snapshot = try maru.observability.snapshot.renderTerminalSnapshot(allocator, core.snapshot());
+    defer allocator.free(snapshot);
 
-    try artifacts.writeText(
-        "tests/artifacts/integration/pty/controlled-command.raw.txt",
-        raw.bytes,
-    );
+    // Derived artifacts are written before the content assertions so a failing
+    // run still leaves the screen and snapshot on disk to diagnose.
     try artifacts.writeTextWithFinalNewline(
         allocator,
         "tests/artifacts/integration/pty/controlled-command.screen.txt",
         screen,
     );
-
-    const snapshot = try maru.observability.snapshot.renderTerminalSnapshot(allocator, core.snapshot());
-    defer allocator.free(snapshot);
     try artifacts.writeText(
         "tests/artifacts/integration/pty/controlled-command.snapshot.txt",
         snapshot,
     );
+
+    try std.testing.expectEqual(maru.pty.ExitStatus{ .exited = 0 }, raw.exit_status);
+    try std.testing.expect(std.mem.indexOf(u8, raw.bytes, "pty maru") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "pty maru") != null);
 }
 
 test "macOS openpty controlled command reaches SurfaceRuntime snapshot" {
@@ -74,38 +77,40 @@ test "macOS openpty controlled command reaches SurfaceRuntime snapshot" {
 
     const raw = try driveRuntimeUntilExit(allocator, &session, &runtime, 10);
     defer allocator.free(raw.bytes);
-
-    try std.testing.expectEqual(maru.pty.ExitStatus{ .exited = 0 }, raw.exit_status);
-    try std.testing.expectEqual(maru.app.ProcessState.exited, surface.process_state);
-    try std.testing.expect(std.mem.indexOf(u8, raw.bytes, "runtime pty maru") != null);
-
-    const screen = try surface.core.dumpUtf8(allocator);
-    defer allocator.free(screen);
-    try std.testing.expect(std.mem.indexOf(u8, screen, "runtime pty maru") != null);
-
+    // Write raw PTY bytes first so the PTY-layer evidence survives any later
+    // failure in routing, core, or the assertions below.
     try artifacts.writeText(
         "tests/artifacts/integration/pty/runtime-controlled-command.raw.txt",
         raw.bytes,
     );
+
+    const screen = try surface.core.dumpUtf8(allocator);
+    defer allocator.free(screen);
+    const snapshot = try maru.observability.snapshot.renderTerminalSnapshot(allocator, surface.core.snapshot());
+    defer allocator.free(snapshot);
+    const metadata = try renderSurfaceMetadata(allocator, surface.restorableMetadata());
+    defer allocator.free(metadata);
+
+    // Derived artifacts are written before the content assertions so a failing
+    // run still leaves the screen, snapshot, and surface metadata to diagnose.
     try artifacts.writeTextWithFinalNewline(
         allocator,
         "tests/artifacts/integration/pty/runtime-controlled-command.screen.txt",
         screen,
     );
-
-    const snapshot = try maru.observability.snapshot.renderTerminalSnapshot(allocator, surface.core.snapshot());
-    defer allocator.free(snapshot);
     try artifacts.writeText(
         "tests/artifacts/integration/pty/runtime-controlled-command.snapshot.txt",
         snapshot,
     );
-
-    const metadata = try renderSurfaceMetadata(allocator, surface.restorableMetadata());
-    defer allocator.free(metadata);
     try artifacts.writeText(
         "tests/artifacts/integration/pty/runtime-controlled-command.surface.txt",
         metadata,
     );
+
+    try std.testing.expectEqual(maru.pty.ExitStatus{ .exited = 0 }, raw.exit_status);
+    try std.testing.expectEqual(maru.app.ProcessState.exited, surface.process_state);
+    try std.testing.expect(std.mem.indexOf(u8, raw.bytes, "runtime pty maru") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "runtime pty maru") != null);
 }
 
 test "macOS PTY resize is visible to the child terminal" {
@@ -125,14 +130,15 @@ test "macOS PTY resize is visible to the child terminal" {
 
     const raw = try collectUntilExit(allocator, &session);
     defer allocator.free(raw.bytes);
-
-    try std.testing.expectEqual(maru.pty.ExitStatus{ .exited = 0 }, raw.exit_status);
-    try std.testing.expect(std.mem.indexOf(u8, raw.bytes, "13 42") != null);
-
+    // Write the raw bytes before asserting so a failing run still shows what the
+    // child reported for `stty size`.
     try artifacts.writeText(
         "tests/artifacts/integration/pty/resize.raw.txt",
         raw.bytes,
     );
+
+    try std.testing.expectEqual(maru.pty.ExitStatus{ .exited = 0 }, raw.exit_status);
+    try std.testing.expect(std.mem.indexOf(u8, raw.bytes, "13 42") != null);
 }
 
 test "macOS PTY close reaps a signal-ignoring child without leaking a zombie" {

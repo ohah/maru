@@ -133,7 +133,10 @@ pub const GlyphAtlas = struct {
 
     fn findSlot(self: *const GlyphAtlas, key: glyph_layout.GlyphCacheKey) ?AtlasSlot {
         for (self.entries.items) |entry| {
-            if (glyphCacheKeyEql(entry.slot.key, key)) return entry.slot;
+            // GlyphCacheKey는 raster에 영향을 주는 필드만 담는 plain value 타입이라(슬라이스·
+            // 포인터·union 없음) std.meta.eql이 정확한 구조적 동등성이다. 키에 필드가 추가돼도
+            // 손으로 비교를 갱신할 필요가 없어 "다른 bitmap을 같은 slot에 재사용"하는 누락을 막는다.
+            if (std.meta.eql(entry.slot.key, key)) return entry.slot;
         }
         return null;
     }
@@ -172,16 +175,6 @@ fn estimateGlyphBitmapSize(glyph: glyph_layout.GlyphRun) EstimatedGlyphBitmapSiz
         .height_px = side,
         .upload_bytes = upload_bytes,
     };
-}
-
-fn glyphCacheKeyEql(a: glyph_layout.GlyphCacheKey, b: glyph_layout.GlyphCacheKey) bool {
-    return a.font_id == b.font_id and
-        a.glyph_id == b.glyph_id and
-        a.font_size_px == b.font_size_px and
-        a.device_scale == b.device_scale and
-        a.style.bold == b.style.bold and
-        a.style.italic == b.style.italic and
-        a.color_glyph_kind == b.color_glyph_kind;
 }
 
 fn glyphForTest(

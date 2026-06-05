@@ -111,8 +111,14 @@ pub fn runSmoke(io: std.Io, allocator: std.mem.Allocator, config: AppSmokeConfig
     var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
 
     const output_bytes = try allocator.dupe(u8, config.output);
-    errdefer allocator.free(output_bytes);
-    try queue.pushBlocking(.{ .output = .{ .pty_id = 10, .bytes = output_bytes } });
+    // pushBlocking이 성공하면 output bytes 소유권은 queue로 넘어간다(drain 때 pump가
+    // event.deinit으로, 미소비 시 queue.deinit이 해제한다). 그래서 push 성공 뒤에도
+    // 살아남는 errdefer로 free하면 이미 해제된 bytes를 다시 free하는 double-free가 된다.
+    // PtyReader.run과 같은 "push 실패 때만 producer가 해제" 계약을 따른다.
+    queue.pushBlocking(.{ .output = .{ .pty_id = 10, .bytes = output_bytes } }) catch |err| {
+        allocator.free(output_bytes);
+        return err;
+    };
 
     try resizeActiveSurface(&app_window, &runtime, config.resized_size);
     try sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = config.input_bytes });
@@ -123,7 +129,7 @@ pub fn runSmoke(io: std.Io, allocator: std.mem.Allocator, config: AppSmokeConfig
     const draw_list_text = try renderDrawList(allocator, frame.draw_list);
     errdefer allocator.free(draw_list_text);
 
-    const summary = try renderSmokeSummary(allocator, config, frame, memory_pty);
+    const summary = try renderSmokeSummary(allocator, config, frame, &memory_pty);
     errdefer allocator.free(summary);
 
     try writeArtifacts(io, allocator, config.artifact_dir, .{
@@ -163,7 +169,7 @@ fn renderSmokeSummary(
     allocator: std.mem.Allocator,
     config: AppSmokeConfig,
     frame: AppHostFrame,
-    memory_pty: MemoryPty,
+    memory_pty: *const MemoryPty,
 ) ![]u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
@@ -288,8 +294,12 @@ test "app host frame drains runtime events and builds draw list for active surfa
     var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
 
     const bytes = try allocator.dupe(u8, "frame");
-    errdefer allocator.free(bytes);
-    try queue.pushBlocking(.{ .output = .{ .pty_id = 10, .bytes = bytes } });
+    // push 성공 시 queue가 bytes를 소유한다(아래 buildFrame의 drain이 pump를 통해 해제).
+    // 실패할 때만 직접 해제해야 double-free 없이 누수도 막는다(runSmoke와 같은 계약).
+    queue.pushBlocking(.{ .output = .{ .pty_id = 10, .bytes = bytes } }) catch |err| {
+        allocator.free(bytes);
+        return err;
+    };
 
     var frame = try buildFrame(allocator, &app_window, &pump);
     defer frame.deinit(allocator);
@@ -342,7 +352,7 @@ test "app smoke summary marks that real UI is not visible yet" {
         std.testing.allocator,
         .{ .artifact_dir = "zig-out/test-app-smoke" },
         frame,
-        memory_pty,
+        &memory_pty,
     );
     defer std.testing.allocator.free(summary);
 

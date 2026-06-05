@@ -156,6 +156,8 @@ style_flags
 color_glyph_kind
 ```
 
+`style_flags`는 rasterize(glyph bitmap)를 바꾸는 style만 포함한다(bold/italic). underline·strikethrough와 fg/bg 색은 glyph가 아니라 draw-time 오버레이/tint로 처리하므로 cache key에 넣지 않는다(밑줄 유무로 같은 glyph를 중복 캐시하지 않기 위해서다). 코드에서는 `RasterStyleFlags`가 이 경계를 표현한다.
+
 이 중 하나라도 빠지면 다음 버그가 난다.
 
 - Retina scale 전환 뒤 흐릿한 glyph가 재사용된다.

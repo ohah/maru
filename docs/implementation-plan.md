@@ -167,7 +167,7 @@ TDD 방식:
 - login shell UX 완성.
 - job control 전체 호환성.
 - global shortcut.
-- app close가 interactive shell의 blocking read를 깨우고 reader thread를 정리하는 lifecycle.
+- macOS app host의 실제 tab/window close command와 reader close lifecycle 연결.
 
 ## 5단계: `SurfaceRuntime`으로 PTY와 Surface 연결
 
@@ -232,7 +232,8 @@ TDD 방식:
 
 - app window screenshot E2E.
 - renderer frame budget.
-- 대량 stdout backpressure의 RSS/latency/UI responsiveness 성능 예산과 interactive shell shutdown lifecycle.
+- 대량 stdout backpressure의 RSS/latency/UI responsiveness 성능 예산.
+- macOS window/app event loop에서 시작되는 interactive shell shutdown lifecycle.
 
 ## 7단계: Renderer와 macOS app host 연결
 

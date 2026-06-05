@@ -6,7 +6,7 @@ const runtime_mod = @import("runtime.zig");
 const surface_mod = @import("surface.zig");
 
 pub const PumpError = runtime_mod.RuntimeError || error{
-    ReaderQueueClosedBeforeExit,
+    ReaderQueueClosedBeforeTermination,
 };
 
 pub const PumpedEventKind = enum {
@@ -15,26 +15,36 @@ pub const PumpedEventKind = enum {
     read_error,
 };
 
+pub const Termination = union(enum) {
+    exited: pty.ExitStatus,
+    read_error: []const u8,
+};
+
 pub const DrainSummary = struct {
     output_events: usize = 0,
     exit_events: usize = 0,
+    ended: ?Termination = null,
 
-    fn record(self: *DrainSummary, kind: PumpedEventKind) void {
+    fn record(self: *DrainSummary, event: PumpedEvent) void {
+        if (event.termination) |termination| {
+            self.ended = termination;
+        }
+
+        const kind = event.kind;
         switch (kind) {
             .output => self.output_events += 1,
             .exited => self.exit_events += 1,
-            // read_error는 summary로 집계하지 않는다. applyQueuedEvent가 read_error를
-            // applyPtyEvent의 error.ReadFailed로 먼저 전파하므로 .read_error kind는
-            // record()까지 도달하지 못한다. 즉 reader 실패는 카운터가 아니라 반환된
-            // error로만 신호한다. (집계용 카운터를 두면 항상 0이라 오해를 부른다.)
+            // read_error는 output/exit 개수가 아니라 종료 원인이다. frame loop는
+            // summary.ended를 보고 surface 표시를 바꾸면 되고, UnknownPty 같은 진짜
+            // 결함만 error로 받는다.
             .read_error => {},
         }
     }
 };
 
-pub const DrainUntilExitResult = struct {
-    summary: DrainSummary,
-    exit_status: pty.ExitStatus,
+pub const PumpedEvent = struct {
+    kind: PumpedEventKind,
+    termination: ?Termination = null,
 };
 
 pub const RuntimeEventPump = struct {
@@ -57,39 +67,44 @@ pub const RuntimeEventPump = struct {
     pub fn drainAvailable(self: *RuntimeEventPump) PumpError!DrainSummary {
         var summary: DrainSummary = .{};
         while (self.queue.tryPop()) |event| {
-            const kind = try self.applyQueuedEvent(event);
-            summary.record(kind);
+            const pumped = try self.applyQueuedEvent(event);
+            summary.record(pumped);
         }
         return summary;
     }
 
-    pub fn drainBlockingUntilExit(self: *RuntimeEventPump) PumpError!DrainUntilExitResult {
+    pub fn drainBlockingUntilTermination(self: *RuntimeEventPump) PumpError!DrainSummary {
         var summary: DrainSummary = .{};
 
         while (true) {
-            const event = self.queue.popBlocking() orelse return error.ReaderQueueClosedBeforeExit;
-            const exit_status = queuedExitStatus(event);
-            const kind = try self.applyQueuedEvent(event);
-            summary.record(kind);
+            const event = self.queue.popBlocking() orelse return error.ReaderQueueClosedBeforeTermination;
+            const pumped = try self.applyQueuedEvent(event);
+            summary.record(pumped);
 
-            if (exit_status) |status| {
-                return .{
-                    .summary = summary,
-                    .exit_status = status,
-                };
+            if (summary.ended != null) {
+                return summary;
             }
         }
     }
 
-    pub fn applyQueuedEvent(self: *RuntimeEventPump, event: pty_reader.QueuedPtyEvent) runtime_mod.RuntimeError!PumpedEventKind {
+    pub fn applyQueuedEvent(self: *RuntimeEventPump, event: pty_reader.QueuedPtyEvent) runtime_mod.RuntimeError!PumpedEvent {
         // 큐에서 꺼낸 event는 pump가 runtime에 적용한 뒤 반드시 여기서 소유권을 끝낸다.
         // app host, integration test, future trace recorder가 같은 함수를 쓰면 output bytes
         // 해제 규칙이 한 곳에 모여서 double-free와 leak을 함께 피할 수 있다.
         defer event.deinit(self.allocator);
 
         const kind = queuedEventKind(event);
-        try self.runtime.applyPtyEvent(event.runtimeEvent());
-        return kind;
+        const termination = queuedTermination(event);
+        self.runtime.applyPtyEvent(event.runtimeEvent()) catch |err| {
+            // RuntimePtyEvent.read_error는 SurfaceRuntime이 surface를 exited로 latch한 뒤
+            // error.ReadFailed를 반환한다. 이것은 환경 의존적 종료 신호이지 root-cause
+            // 결함이 아니므로 pump summary의 종료 데이터로 바꾼다.
+            if (kind == .read_error and err == error.ReadFailed) {
+                return .{ .kind = kind, .termination = termination };
+            }
+            return err;
+        };
+        return .{ .kind = kind, .termination = termination };
     }
 };
 
@@ -101,10 +116,11 @@ fn queuedEventKind(event: pty_reader.QueuedPtyEvent) PumpedEventKind {
     };
 }
 
-fn queuedExitStatus(event: pty_reader.QueuedPtyEvent) ?pty.ExitStatus {
+fn queuedTermination(event: pty_reader.QueuedPtyEvent) ?Termination {
     return switch (event) {
-        .output, .read_error => null,
-        .exited => |exited| exited.status,
+        .output => null,
+        .exited => |exited| .{ .exited = exited.status },
+        .read_error => |read_error| .{ .read_error = read_error.message },
     };
 }
 
@@ -221,14 +237,14 @@ test "runtime event pump can block until an exit event is applied" {
     try queue.pushBlocking(.{ .output = .{ .pty_id = 10, .bytes = bytes } });
     try queue.pushBlocking(.{ .exited = .{ .pty_id = 10, .status = .{ .exited = 7 } } });
 
-    const result = try pump.drainBlockingUntilExit();
-    try std.testing.expectEqual(pty.ExitStatus{ .exited = 7 }, result.exit_status);
-    try std.testing.expectEqual(@as(usize, 1), result.summary.output_events);
-    try std.testing.expectEqual(@as(usize, 1), result.summary.exit_events);
+    const summary = try pump.drainBlockingUntilTermination();
+    try std.testing.expectEqual(@as(usize, 1), summary.output_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.exit_events);
+    try std.testing.expectEqual(pty.ExitStatus{ .exited = 7 }, summary.ended.?.exited);
     try std.testing.expectEqual(surface_mod.ProcessState.exited, surface.process_state);
 }
 
-test "runtime event pump reports a closed queue before exit" {
+test "runtime event pump reports a closed queue before termination" {
     // app shutdown이 queue를 닫았는데 exit event가 오지 않았다면 성공처럼 보이면 안 된다.
     // 이 오류가 있어야 lifecycle PR에서 reader close 순서를 검증할 수 있다.
     const allocator = std.testing.allocator;
@@ -239,12 +255,13 @@ test "runtime event pump reports a closed queue before exit" {
     queue.close();
     var pump = RuntimeEventPump.init(allocator, &queue, &runtime);
 
-    try std.testing.expectError(error.ReaderQueueClosedBeforeExit, pump.drainBlockingUntilExit());
+    try std.testing.expectError(error.ReaderQueueClosedBeforeTermination, pump.drainBlockingUntilTermination());
 }
 
-test "runtime event pump latches read errors before reporting ReadFailed" {
+test "runtime event pump returns read errors as termination data" {
     // read_error는 성공한 출력이 아니라 PTY reader의 실패 신호다.
-    // SurfaceRuntime은 먼저 surface를 exited로 표시하고, pump는 그 오류를 숨기지 않는다.
+    // SurfaceRuntime은 먼저 surface를 exited로 표시하고, pump는 frame loop가 처리할 수
+    // 있도록 ReadFailed throw 대신 summary.ended에 종료 원인을 담아 반환한다.
     const allocator = std.testing.allocator;
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -259,9 +276,37 @@ test "runtime event pump latches read errors before reporting ReadFailed" {
 
     try queue.pushBlocking(.{ .read_error = .{ .pty_id = 10, .message = "EIO" } });
 
-    try std.testing.expectError(error.ReadFailed, pump.drainAvailable());
+    const summary = try pump.drainAvailable();
+    try std.testing.expectEqualStrings("EIO", summary.ended.?.read_error);
     try std.testing.expectEqual(surface_mod.ProcessState.exited, surface.process_state);
     try std.testing.expectEqual(@as(usize, 0), queue.count());
+}
+
+test "runtime event pump keeps output summary before a read error termination" {
+    // GUI frame loop는 한 frame에서 output을 적용한 뒤 reader 종료를 볼 수 있다.
+    // read_error를 error로 던지면 이미 적용한 output 개수를 잃기 때문에, 종료는
+    // summary.ended 데이터로 보존한다.
+    const allocator = std.testing.allocator;
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    var surface = try surface_mod.Surface.init(allocator, 1, terminal.Size.default);
+    defer surface.deinit();
+    var fake_pty: FakePty = .{};
+    try attachTestSurface(&runtime, &surface, &fake_pty, 10);
+
+    var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 2);
+    defer queue.deinit();
+    var pump = RuntimeEventPump.init(allocator, &queue, &runtime);
+
+    const bytes = try allocator.dupe(u8, "before read error");
+    try queue.pushBlocking(.{ .output = .{ .pty_id = 10, .bytes = bytes } });
+    try queue.pushBlocking(.{ .read_error = .{ .pty_id = 10, .message = "SessionClosed" } });
+
+    const summary = try pump.drainAvailable();
+    try std.testing.expectEqual(@as(usize, 1), summary.output_events);
+    try std.testing.expectEqual(@as(usize, 0), summary.exit_events);
+    try std.testing.expectEqualStrings("SessionClosed", summary.ended.?.read_error);
+    try std.testing.expectEqual(surface_mod.ProcessState.exited, surface.process_state);
 }
 
 test "runtime event pump releases output bytes even when runtime rejects the pty" {

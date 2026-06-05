@@ -375,7 +375,7 @@ fn drainRuntimeQueueUntilExit(
     var output_events: usize = 0;
 
     while (true) {
-        const event = queue.popBlocking() orelse return error.ReaderQueueClosedBeforeExit;
+        const event = queue.popBlocking() orelse return error.ReaderQueueClosedBeforeTermination;
         const exit_status: ?maru.pty.ExitStatus = switch (event) {
             .output => |output| blk: {
                 // 테스트는 raw PTY artifact를 남기기 위해 output bytes를 복사한다.

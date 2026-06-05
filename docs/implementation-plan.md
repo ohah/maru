@@ -243,7 +243,7 @@ TDD 방식:
 - macOS app host는 입력, window, focus, surface lifecycle을 관리한다.
 - 실제 backend 선택과 검증 순서는 [렌더러 전략](renderer-strategy.md)을 따른다.
 - font resolve, fallback, glyph atlas, emoji/CJK 처리 정책은 [폰트 전략](font-strategy.md)을 따른다.
-- app host가 `RuntimeEventPump`를 frame loop에 연결할 때, drain 종료 계약(종료를 error throw로 신호 -> `?Termination` 반환으로)을 [SurfaceRuntime API 계약](surface-runtime-api.md)의 "향후 설계 메모: drain 종료 계약" 절에 따라 먼저 결정한다.
+- app host가 `RuntimeEventPump`를 frame loop에 연결할 때, exit/read_error termination은 [SurfaceRuntime API 계약](surface-runtime-api.md)의 "drain 종료 계약" 절에 따라 `DrainSummary.ended` 데이터로 처리한다.
 
 TDD 방식:
 

@@ -27,6 +27,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "app-smoke")) {
+        try runAppSmoke(io, allocator, stdout);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         try printUsage(stdout);
         return;
@@ -46,6 +51,7 @@ fn printSmoke(stdout: *std.Io.Writer) !void {
         size.rows,
     });
     try stdout.writeAll("run `maru-dev demo` or `zig build demo` for the first runnable PTY slice\n");
+    try stdout.writeAll("run `maru-dev app-smoke` or `zig build app-smoke` for the first app-host frame slice\n");
     try stdout.flush();
 }
 
@@ -65,14 +71,30 @@ fn runDemo(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !vo
     try stdout.flush();
 }
 
+fn runAppSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
+    // 아직 실제 AppKit/Metal UI를 띄우지 않는다. 이 smoke는 app host가
+    // window/surface/runtime/renderer 계약을 한 frame으로 조립하는지 확인한다.
+    const config: maru.app.AppSmokeConfig = .{};
+    var result = try maru.app.runAppSmoke(io, allocator, config);
+    defer result.deinit(allocator);
+
+    try stdout.writeAll(result.summary);
+    try stdout.print("\nartifacts written to {s}/\n", .{config.artifact_dir});
+    try stdout.writeAll("draw list artifact: app-host.draw-list.txt\n");
+    try stdout.writeAll("visible UI: not yet; this is an app-host contract smoke.\n");
+    try stdout.flush();
+}
+
 fn printUsage(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\usage:
         \\  maru-dev
         \\  maru-dev demo
+        \\  maru-dev app-smoke
         \\
         \\commands:
-        \\  demo    run the headless PTY -> SurfaceRuntime -> snapshot demo
+        \\  demo       run the headless PTY -> SurfaceRuntime -> snapshot demo
+        \\  app-smoke  run the app host -> RuntimeEventPump -> DrawList smoke
         \\
     );
     try writer.flush();

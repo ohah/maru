@@ -173,6 +173,30 @@
 - macOS window/app event loop에서 시작되는 interactive shell shutdown lifecycle.
 - 대량 stdout backpressure의 RSS/latency/UI responsiveness 성능 예산.
 
+## `AppHost`
+
+책임:
+
+- app window의 active surface를 기준으로 한 frame을 조립한다.
+- `RuntimeEventPump.drainAvailable`로 PTY event를 surface에 반영한다.
+- active surface snapshot을 renderer facade의 `DrawList`로 변환한다.
+- focused input과 resize action을 `SurfaceRuntime`으로 보낸다.
+- 실제 UI가 아직 없을 때는 smoke artifact에 `visible_ui=false`를 명시한다.
+
+몰라야 하는 것:
+
+- PTY file descriptor나 concrete process handle.
+- `TerminalCore` private storage.
+- Metal/AppKit private resource handle.
+- workspace 저장 파일의 세부 포맷.
+
+초기 테스트:
+
+- queued output을 drain한 뒤 active surface의 `DrawList`를 만든다.
+- focused input은 active surface id로 `SurfaceRuntime.writeInput`에 전달된다.
+- resize는 `SurfaceRuntime.resize`를 통해 terminal storage와 PTY resize adapter 둘 다 갱신한다.
+- `mise run app-smoke`가 summary와 draw-list artifact를 남긴다.
+
 ## `Workspace`
 
 책임:

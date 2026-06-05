@@ -14,6 +14,7 @@ Maru 작업에서 사용하는 기본 명령이다.
 
 - 빌드: `mise run build`
 - headless PTY 데모 실행: `mise run demo`
+- app host smoke 실행: `mise run app-smoke`
 - 테스트: `mise run test`
 - E2E 테스트: `mise run e2e`
 - 오라클 비교 테스트: `mise run oracle`

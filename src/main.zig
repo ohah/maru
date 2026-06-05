@@ -53,13 +53,16 @@ fn printSmoke(stdout: *std.Io.Writer) !void {
 fn runDemo(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
     // GUI가 붙기 전에도 실제 PTY -> reader -> runtime -> snapshot 경로를 사람이
     // 실행해 볼 수 있어야 한다. 이 demo는 창을 띄우지 않고 같은 runtime 계약을 통과한다.
-    var result = try maru.app.runHeadlessDemo(io, allocator, .{});
+    const config: maru.app.HeadlessDemoConfig = .{};
+    var result = try maru.app.runHeadlessDemo(io, allocator, config);
     defer result.deinit(allocator);
 
     try stdout.writeAll(result.summary);
     try stdout.writeAll("\n--- screen ---\n");
     try stdout.writeAll(result.screen);
-    try stdout.writeAll("\nartifacts written to zig-out/maru-demo/\n");
+    // artifact 디렉터리는 config가 단일 출처다. 메시지에 경로를 다시 적으면
+    // default_artifact_dir이 바뀔 때 안내가 조용히 어긋난다.
+    try stdout.print("\nartifacts written to {s}/\n", .{config.artifact_dir});
     try stdout.flush();
 }
 

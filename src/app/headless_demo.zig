@@ -106,6 +106,9 @@ fn writeArtifacts(
 ) !void {
     // Demo artifact도 테스트 artifact와 같은 성격이다. 눈으로 실행 결과를 보되,
     // 실패했을 때 화면 텍스트와 구조화 snapshot을 파일로 남겨 원인을 좁힌다.
+    // 세 파일이 같은 디렉터리를 공유하므로 부모 디렉터리는 여기서 한 번만 만든다.
+    try ensureDir(io, artifact_dir);
+
     const screen_path = try std.fmt.allocPrint(allocator, "{s}/headless-pty.screen.txt", .{artifact_dir});
     defer allocator.free(screen_path);
     const snapshot_path = try std.fmt.allocPrint(allocator, "{s}/headless-pty.snapshot.txt", .{artifact_dir});
@@ -169,7 +172,8 @@ fn writeExitStatus(writer: *std.Io.Writer, status: pty.ExitStatus) !void {
 }
 
 fn writeText(io: std.Io, path: []const u8, contents: []const u8) !void {
-    try ensureParent(io, path);
+    // 부모 디렉터리는 writeArtifacts가 한 번 만든다. 여기서 파일마다 다시
+    // 만들지 않는다.
     try std.Io.Dir.cwd().writeFile(io, .{
         .sub_path = path,
         .data = contents,
@@ -188,11 +192,9 @@ fn writeTextWithFinalNewline(
     try writeText(io, path, with_newline);
 }
 
-fn ensureParent(io: std.Io, path: []const u8) !void {
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| {
-        if (slash == 0) return;
-        try std.Io.Dir.cwd().createDirPath(io, path[0..slash]);
-    }
+fn ensureDir(io: std.Io, dir: []const u8) !void {
+    if (dir.len == 0) return;
+    try std.Io.Dir.cwd().createDirPath(io, dir);
 }
 
 test "headless demo summary records the runnable vertical slice" {
@@ -210,5 +212,11 @@ test "headless demo summary records the runnable vertical slice" {
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.headless-demo.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "artifact_dir=zig-out/test-demo\n") != null);
+    // 설정한 size와 event 카운트가 실제로 summary에 기록되는지 확인한다. 이 값들을
+    // assert하지 않으면 잘못된 size/count가 찍혀도 테스트가 통과해 버린다.
+    try std.testing.expect(std.mem.indexOf(u8, summary, "size.cols=10\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "size.rows=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "output_events=2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "exit_events=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "termination=exited(code=0)\n") != null);
 }

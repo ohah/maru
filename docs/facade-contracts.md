@@ -147,7 +147,8 @@
 
 - app/runtime loop가 `PtyEventQueue`에서 꺼낸 `QueuedPtyEvent`를 `SurfaceRuntime.applyPtyEvent`로 적용한다.
 - queue event의 output bytes 소유권을 정확히 한 번 끝낸다.
-- non-blocking drain과 blocking-until-exit drain을 제공한다. 후자는 headless integration을 위해 설계했지만, byte 수집이 필요한 현재 integration test는 `applyQueuedEvent`로 자체 루프를 돌아서 blocking-until-exit drain은 아직 pump 단위 테스트에서만 쓰인다.
+- non-blocking drain과 blocking-until-termination drain을 제공한다. 후자는 headless integration을 위해 설계했지만, byte 수집이 필요한 현재 integration test는 `applyQueuedEvent`로 자체 루프를 돌아서 blocking-until-termination drain은 아직 pump 단위 테스트에서만 쓰인다.
+- exit/read_error 같은 예상 가능한 종료는 error가 아니라 `DrainSummary.ended` 데이터로 반환한다.
 - 실패 경로에서도 event 해제를 한 곳에서 처리해 테스트 helper마다 별도 ownership 규칙이 생기지 않게 한다.
 
 몰라야 하는 것:
@@ -162,7 +163,8 @@
 - queued output이 pump를 거쳐 surface core에 적용되고 output bytes가 해제된다.
 - queued exit가 surface `process_state`를 `exited`로 바꾼다.
 - 빈 queue에서 non-blocking drain이 즉시 끝난다.
-- exit가 오기 전에 queue가 닫히면 성공처럼 처리하지 않고 `ReaderQueueClosedBeforeExit`를 반환한다.
+- 종료 event가 오기 전에 queue가 닫히면 성공처럼 처리하지 않고 `ReaderQueueClosedBeforeTermination`을 반환한다.
+- read_error는 `ReadFailed` throw가 아니라 `DrainSummary.ended.read_error`로 반환되고, 그 전에 적용한 output summary를 잃지 않는다.
 - 알 수 없는 PTY로 들어온 output은 `UnknownPty`를 유지하면서도 output bytes를 해제한다.
 
 아직 하지 않는다:

@@ -93,8 +93,8 @@ pub const RuntimeEventPump = struct {
     ) RuntimeEventPump;
 
     pub fn drainAvailable(self: *RuntimeEventPump) PumpError!DrainSummary;
-    pub fn drainBlockingUntilExit(self: *RuntimeEventPump) PumpError!DrainUntilExitResult;
-    pub fn applyQueuedEvent(self: *RuntimeEventPump, event: QueuedPtyEvent) RuntimeError!PumpedEventKind;
+    pub fn drainBlockingUntilTermination(self: *RuntimeEventPump) PumpError!DrainSummary;
+    pub fn applyQueuedEvent(self: *RuntimeEventPump, event: QueuedPtyEvent) RuntimeError!PumpedEvent;
 };
 ```
 
@@ -173,37 +173,41 @@ pub const SurfaceRuntime = struct {
 
 - queue에서 꺼낸 `QueuedPtyEvent` 하나를 `SurfaceRuntime.applyPtyEvent`로 적용한다.
 - 함수가 성공하든 실패하든 event의 `deinit`을 정확히 한 번 호출한다.
+- `read_error`가 `SurfaceRuntime.applyPtyEvent`에서 `ReadFailed`로 관측되는 경우는 root-cause 결함이 아니라 reader 종료 신호로 보고 `PumpedEvent.termination`에 담아 반환한다.
 - integration test가 raw PTY artifact를 남겨야 할 때도 event 적용/해제는 이 함수를 사용한다.
 
 `RuntimeEventPump.drainAvailable`:
 
 - GUI frame loop에서 쓰기 위한 non-blocking drain이다.
 - 현재 queue에 있는 event만 처리하고 비어 있으면 즉시 반환한다.
+- output을 적용한 뒤 같은 drain에서 exit/read_error를 보더라도 `DrainSummary.output_events`와 `DrainSummary.ended`를 함께 보존한다.
 
-`RuntimeEventPump.drainBlockingUntilExit`:
+`RuntimeEventPump.drainBlockingUntilTermination`:
 
 - window loop가 붙기 전 headless integration을 위해 설계한 helper다.
 - 다만 현재 macOS PTY integration test는 raw artifact용 output bytes를 따로 모아야 해서 이 helper 대신 `applyQueuedEvent`로 자체 루프를 돈다. 그래서 지금은 pump 단위 테스트에서만 쓰인다.
-- exit event를 볼 때까지 기다린다.
-- queue가 먼저 닫히면 `ReaderQueueClosedBeforeExit`로 실패한다.
+- exit 또는 read_error termination을 볼 때까지 기다린다.
+- queue가 먼저 닫히면 `ReaderQueueClosedBeforeTermination`으로 실패한다.
 
 `drainAppRequests`와 `completeClipboardRequest`:
 
 - 이번 순수 runtime PR에서는 구현하지 않는다.
 - OSC52 clipboard와 shell integration event는 `TerminalCore`가 app request를 만들 수 있게 된 뒤 별도 PR에서 이 문서에 다시 추가한다.
 
-## 향후 설계 메모: drain 종료 계약 (7단계 frame loop)
+## drain 종료 계약
 
-이 절은 아직 확정된 규칙이 아니라, [실제 구현 계획](implementation-plan.md)의 7단계(Renderer와 macOS app host 연결)에서 GUI frame loop를 pump에 연결할 때 결정할 **열린 설계 사안**이다. 실제 변경은 그 단계에서 사용자와 합의한 뒤 진행한다.
+`drainAvailable`/`drainBlockingUntilTermination`은 "정상 종료(exit)"와 "reader 읽기 실패(read_error)"를 Zig error 채널로 던지지 않는다. 둘 다 terminal session이 끝났다는 예상 가능한 runtime event이므로 `DrainSummary.ended` 데이터로 반환한다.
 
-문제: 현재 `drainAvailable`/`drainBlockingUntilExit`는 "정상 종료(exit)"·"reader 읽기 실패(read_error)" 같은 **예상된 종료 조건**을 `UnknownPty`/`InvalidOutput` 같은 **진짜 결함**과 같은 Zig error 채널로 함께 던진다. `try`로 에러가 전파되는 순간 그때까지 누적한 `DrainSummary`가 통째로 폐기된다.
+왜 중요한가: `drainAvailable`의 첫 실소비자는 GUI frame loop다. queue에 output과 read_error가 같은 frame에 들어오면 frame loop가 원하는 동작은 "drain한 output 반영 -> 마지막 프레임 렌더 -> surface를 죽은 것으로 표시 -> 계속"이다. read_error를 `throw`하면 이미 적용한 output 개수와 redraw 판단을 잃는다.
 
-왜 7단계에 중요한가: `drainAvailable`의 첫 실소비자가 GUI frame loop다. queue에 read_error나 exit가 들어온 프레임에서 현재 계약대로면 loop는 매번 `error.ReadFailed`/`ProcessExited`를 받고, 그 프레임에 이미 적용한 output들의 redraw 정보를 잃는다. frame loop가 실제로 원하는 동작은 "drain한 output 반영 -> 마지막 프레임 렌더 -> surface를 죽은 것으로 표시 -> 계속"이다.
-
-유력 방향(확정 아님): 종료를 에러가 아니라 **데이터**로 모델링한다.
+현재 모델:
 
 ```zig
-const Termination = union(enum) { exited: pty.ExitStatus, read_error };
+const Termination = union(enum) {
+    exited: pty.ExitStatus,
+    read_error: []const u8,
+};
+
 const DrainSummary = struct {
     output_events: usize = 0,
     exit_events: usize = 0,
@@ -211,16 +215,15 @@ const DrainSummary = struct {
 };
 ```
 
-- `throw`는 진짜 결함(`UnknownPty`, `InvalidOutput`, `OutOfMemory`)에만 남긴다.
-- 이 방향이면 PR #51에서 제거한 항상-0 `read_error_events` 카운터의 올바른 후신이 된다(read_error가 카운터가 아니라 1급 종료 값이 됨).
-- `drainBlockingUntilExit`의 비대칭(정상 exit는 반환값, read_error는 throw)도 함께 해소되고, `.exited` 적용이 `UnknownPty`로 실패할 때 exit_status를 잃지 않도록 다룰 수 있다.
+- `throw`는 `UnknownPty`, `InvalidOutput`, `OutOfMemory` 같은 진짜 결함에만 남긴다.
+- `read_error`는 카운터가 아니라 1급 종료 값이다. 그래서 별도 `read_error_events` 카운터를 만들지 않는다.
+- `SurfaceRuntime.applyPtyEvent(.read_error)` 자체는 surface를 exited로 latch한 뒤 `ReadFailed`를 반환한다. `RuntimeEventPump`는 이 `ReadFailed`를 session termination 데이터로 바꿔 frame loop에 전달한다.
+- `UnknownPty`처럼 routing 자체가 틀린 경우는 여전히 error다. 이 경우는 종료가 아니라 app/runtime 연결 결함이다.
 
-함께 정리할 후보:
+아직 남은 후보:
 
-- integration test가 자체 drain 루프를 도는 중복(`tests/integration/pty/macos.zig`)을, output sink를 받는 helper로 흡수할지 결정한다. 흡수하지 않으면 미사용 `drainBlockingUntilExit`를 삭제하는 선택지도 같이 본다.
-- `expectError(error.ReadFailed, drainAvailable())` 단위 테스트는 이 계약 변경에 맞춰 다시 쓴다.
-
-원칙: 소비자(frame loop)가 붙기 전에 추측으로 미리 구현하지 않는다. 7단계 진입 시 실제 요구를 보고 위 union을 출발점으로 확정한다.
+- integration test가 자체 drain 루프를 도는 중복(`tests/integration/pty/macos.zig`)을, output sink를 받는 helper로 흡수할지 결정한다. 흡수하지 않으면 미사용 `drainBlockingUntilTermination`을 삭제하는 선택지도 같이 본다.
+- 실제 frame loop가 붙을 때 `DrainSummary.ended`를 어떤 UI state로 보여줄지 결정한다.
 
 ## 반드시 지켜야 할 것
 
@@ -240,5 +243,6 @@ const DrainSummary = struct {
 - `resize`는 core resize와 PTY resize를 모두 호출한다.
 - `detachSurface` 이후 `RestorableSurfaceMetadata`에는 live handle이 남지 않는다.
 - process exit event는 surface `process_state`를 `exited`로 바꾸고 이후 input을 막는다.
-- read error event는 `ReadFailed`로 관측된다.
+- `SurfaceRuntime` 단독으로 read error event를 적용하면 `ReadFailed`로 관측된다.
 - pump는 queued output/exit/read_error를 runtime에 적용하고 event ownership을 끝낸다.
+- pump는 read_error를 `DrainSummary.ended.read_error`로 반환하고, 같은 drain에서 먼저 처리한 output count를 잃지 않는다.

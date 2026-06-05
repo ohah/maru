@@ -138,7 +138,7 @@ TDD 방식:
 
 - macOS `openpty` 기반으로 먼저 통제된 command를 실행한다. `forkpty`는 child setup을 너무 많이 감추므로 초기 제품 backend로 쓰지 않는다.
 - 첫 backend는 테스트가 timing race 없이 검증할 수 있도록 blocking pull API인 `PtySession.readEvent`를 제공한다.
-- reader thread, queue, backpressure는 SurfaceRuntime 연결 단계에서 `readEvent` 루프 위에 얹는다. 운영 모델은 [PTY 운영 모델](pty-operating-model.md)을 따른다.
+- reader thread, queue, backpressure는 `PtySession.readEvent` 루프 위의 app layer 책임이다. 운영 모델은 [PTY 운영 모델](pty-operating-model.md)을 따른다.
 - 통제된 command가 안정화된 뒤 interactive shell smoke를 opt-in으로 추가한다.
 - PTY output bytes를 domain event로 내보낸다.
 - terminal input bytes와 resize request를 PTY에 전달한다.
@@ -167,7 +167,7 @@ TDD 방식:
 - login shell UX 완성.
 - job control 전체 호환성.
 - global shortcut.
-- SurfaceRuntime reader thread와 bounded queue.
+- app close가 interactive shell의 blocking read를 깨우고 reader thread를 정리하는 lifecycle.
 
 ## 5단계: `SurfaceRuntime`으로 PTY와 Surface 연결
 
@@ -204,7 +204,7 @@ TDD 방식:
 - 여러 탭.
 - split layout.
 - workspace restore.
-- reader thread, bounded queue, backpressure.
+- 실제 app host lifecycle. `PtyReader`와 `PtyEventQueue`는 생겼지만 macOS window/app loop가 아직 queue를 drain하지 않는다.
 - OSC52/shell integration app request queue.
 
 ## 6단계: Headless E2E를 초기 성공 기준으로 고정
@@ -232,7 +232,7 @@ TDD 방식:
 
 - app window screenshot E2E.
 - renderer frame budget.
-- reader thread, bounded queue, backpressure. 현재 headless E2E는 테스트가 `PtySession.readEvent`를 직접 호출해 `SurfaceRuntime`으로 event를 넣는다.
+- 대량 stdout backpressure stress와 interactive shell shutdown lifecycle.
 
 ## 7단계: Renderer와 macOS app host 연결
 

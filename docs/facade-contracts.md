@@ -111,6 +111,34 @@
 - detach 이후 늦게 도착한 PTY output은 `UnknownPty`로 거부된다.
 - process exit event 이후 같은 surface로 input을 보내면 `ProcessExited`가 난다.
 
+## `PtyReader` / `PtyEventQueue`
+
+책임:
+
+- `PtySession.readEvent`를 reader thread에서 반복 호출한다.
+- reader thread가 만든 output/exit/read_error event를 bounded queue에 넣는다.
+- queue가 가득 차면 output을 버리지 않고 reader thread를 기다리게 한다.
+- output bytes의 소유권을 queue event로 넘기고, consumer가 `QueuedPtyEvent.deinit`으로 끝내게 한다.
+
+몰라야 하는 것:
+
+- escape sequence 의미.
+- `TerminalCore` private storage.
+- renderer resource handle.
+- workspace 저장 포맷.
+
+초기 테스트:
+
+- queue capacity가 0이면 생성하지 않는다.
+- queue가 full일 때 무한히 늘리지 않고 `QueueFull`로 관측된다.
+- close된 queue는 새 push를 거부하고 empty pop을 종료한다.
+- 실제 macOS PTY controlled command output/exit가 reader thread와 queue를 지나 `SurfaceRuntime`에 적용된다.
+
+아직 하지 않는다:
+
+- interactive shell close가 blocking `readEvent`를 깨우고 reader thread를 정리하는 app lifecycle.
+- 대량 stdout backpressure stress.
+
 ## `Workspace`
 
 책임:

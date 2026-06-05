@@ -92,13 +92,15 @@ pub const SurfaceRuntime = struct {
 
     pub fn attach(
         self: *SurfaceRuntime,
-        surface_id: SurfaceId,
         surface: *surface_mod.Surface,
         pty_id: PtyId,
         pty_io: PtyIo,
     ) RuntimeError!RuntimeLink {
         // live handle은 Surface에 저장하지 않고 runtime의 연결 표에만 둔다.
         // 그래야 workspace restore가 저장 가능한 metadata와 process handle을 섞지 않는다.
+        // routing key는 surface가 이미 가진 id를 그대로 쓴다. 별도 surface_id 인자를
+        // 받으면 surface.id와 어긋나 detachSurface가 link을 못 찾는 stale link가 생길 수 있다.
+        const surface_id = surface.id;
         if (self.findBySurface(surface_id) != null) return error.SurfaceAlreadyAttached;
         if (self.findByPty(pty_id) != null) return error.PtyAlreadyAttached;
 
@@ -150,7 +152,12 @@ pub const SurfaceRuntime = struct {
             },
             .read_error => |read_error| {
                 _ = read_error.message;
-                if (self.linkByPty(read_error.pty_id) == null) return error.UnknownPty;
+                // A read error means the PTY is no longer usable. Latch the
+                // surface as exited (mirroring the .exited path) so later input
+                // and resize are rejected with ProcessExited instead of being
+                // routed to a dead PTY adapter.
+                const link = self.linkByPty(read_error.pty_id) orelse return error.UnknownPty;
+                link.surface.process_state = .exited;
                 return error.ReadFailed;
             },
         }
@@ -251,14 +258,14 @@ test "runtime rejects duplicate surface and pty attachments" {
     var pty_b = FakePty.init(allocator);
     defer pty_b.deinit();
 
-    _ = try runtime.attach(1, &surface_a, 10, pty_a.io());
+    _ = try runtime.attach(&surface_a, 10, pty_a.io());
     try std.testing.expectError(
         error.SurfaceAlreadyAttached,
-        runtime.attach(1, &surface_a, 11, pty_b.io()),
+        runtime.attach(&surface_a, 11, pty_b.io()),
     );
     try std.testing.expectError(
         error.PtyAlreadyAttached,
-        runtime.attach(2, &surface_b, 10, pty_b.io()),
+        runtime.attach(&surface_b, 10, pty_b.io()),
     );
 }
 
@@ -277,8 +284,8 @@ test "runtime routes pty output to the matching surface core" {
     var pty_b = FakePty.init(allocator);
     defer pty_b.deinit();
 
-    _ = try runtime.attach(1, &surface_a, 10, pty_a.io());
-    _ = try runtime.attach(2, &surface_b, 20, pty_b.io());
+    _ = try runtime.attach(&surface_a, 10, pty_a.io());
+    _ = try runtime.attach(&surface_b, 20, pty_b.io());
 
     try runtime.applyPtyEvent(.{ .output = .{ .pty_id = 20, .bytes = "runtime" } });
 
@@ -302,7 +309,7 @@ test "runtime sends terminal input through the attached pty io" {
     var fake_pty = FakePty.init(allocator);
     defer fake_pty.deinit();
 
-    _ = try runtime.attach(1, &surface, 10, fake_pty.io());
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
     try runtime.writeInput(1, .{ .bytes = "abc" });
 
     try std.testing.expectEqualStrings("abc", fake_pty.writes.items);
@@ -319,7 +326,7 @@ test "runtime maps pty input failures to WriteFailed" {
     defer fake_pty.deinit();
     fake_pty.fail_write = true;
 
-    _ = try runtime.attach(1, &surface, 10, fake_pty.io());
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
 
     try std.testing.expectError(
         error.WriteFailed,
@@ -337,7 +344,7 @@ test "runtime resize updates core and pty io together" {
     var fake_pty = FakePty.init(allocator);
     defer fake_pty.deinit();
 
-    _ = try runtime.attach(1, &surface, 10, fake_pty.io());
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
     try runtime.resize(1, .{ .cols = 42, .rows = 13 });
 
     try std.testing.expectEqual(terminal.Size{ .cols = 42, .rows = 13 }, surface.core.size);
@@ -356,7 +363,7 @@ test "runtime maps pty resize failures to ResizeFailed after updating the surfac
     defer fake_pty.deinit();
     fake_pty.fail_resize = true;
 
-    _ = try runtime.attach(1, &surface, 10, fake_pty.io());
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
 
     try std.testing.expectError(
         error.ResizeFailed,
@@ -375,7 +382,7 @@ test "runtime detaches surface and rejects late pty output" {
     var fake_pty = FakePty.init(allocator);
     defer fake_pty.deinit();
 
-    _ = try runtime.attach(1, &surface, 10, fake_pty.io());
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
     runtime.detachSurface(1);
 
     try std.testing.expectError(
@@ -398,7 +405,7 @@ test "runtime marks a surface exited and blocks further input" {
     var fake_pty = FakePty.init(allocator);
     defer fake_pty.deinit();
 
-    _ = try runtime.attach(1, &surface, 10, fake_pty.io());
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
     try runtime.applyPtyEvent(.{ .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } } });
 
     try std.testing.expectEqual(surface_mod.ProcessState.exited, surface.process_state);
@@ -418,10 +425,18 @@ test "runtime reports pty read errors without tracing them as output" {
     var fake_pty = FakePty.init(allocator);
     defer fake_pty.deinit();
 
-    _ = try runtime.attach(1, &surface, 10, fake_pty.io());
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
 
     try std.testing.expectError(
         error.ReadFailed,
         runtime.applyPtyEvent(.{ .read_error = .{ .pty_id = 10, .message = "read failed" } }),
+    );
+
+    // A fatal read error must latch the surface as terminal, so later input is
+    // rejected with ProcessExited rather than routed to the dead PTY.
+    try std.testing.expectEqual(surface_mod.ProcessState.exited, surface.process_state);
+    try std.testing.expectError(
+        error.ProcessExited,
+        runtime.writeInput(1, .{ .bytes = "after-read-error" }),
     );
 }

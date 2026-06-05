@@ -91,7 +91,6 @@ pub const SurfaceRuntime = struct {
 
     pub fn attach(
         self: *SurfaceRuntime,
-        surface_id: SurfaceId,
         surface: *Surface,
         pty_id: PtyId,
         pty: PtyIo,
@@ -123,6 +122,7 @@ pub const SurfaceRuntime = struct {
 `attach`:
 
 - 하나의 `Surface`와 하나의 `PtyIo`를 연결한다.
+- surface routing key는 `surface.id`를 그대로 쓴다. 별도 `surface_id` 인자를 받지 않아서, key가 surface의 실제 id와 어긋나 detach가 link을 못 찾는 stale link가 생기지 않는다.
 - 이미 연결된 surface나 pty를 다시 연결하면 오류다.
 - 이 함수는 workspace 저장 포맷을 만들지 않는다.
 - `PtyIo`를 받는 이유는 `SurfaceRuntime`의 routing 계약을 fake PTY로 빠르게 unit test하기 위해서다. 실제 macOS backend는 `PtyIo.fromSession`으로 감싼다.

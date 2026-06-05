@@ -249,6 +249,7 @@ TDD 방식:
 TDD 방식:
 
 - renderer unit/golden test: snapshot -> draw command model.
+- 초기 draw command model은 현재 `TerminalCore` dirty 계약에 맞춰 row dirty 범위를 소비한다. cell 단위 dirty는 dirty 모델 확장 PR에서 별도로 다룬다.
 - font layout test: fake font backend로 snapshot -> glyph run -> draw command model을 검증한다.
 - app smoke test: window 생성, resize, key input artifact.
 - screenshot artifact: 실제 화면 검증이 가능한 곳부터 opt-in으로 추가한다.

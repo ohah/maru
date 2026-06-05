@@ -1,4 +1,4 @@
-const terminal = @import("../terminal.zig");
+const draw_list = @import("draw_list.zig");
 
 pub const Backend = enum {
     // 미래 backend는 구현을 시작하기 전까지 public enum에 넣지 않는다.
@@ -9,7 +9,7 @@ pub const Backend = enum {
 
 pub const RenderFrame = struct {
     backend: Backend,
-    snapshot: terminal.RenderSnapshot,
+    draw_list: draw_list.DrawList,
 };
 
 pub fn initialBackendForMacOS() Backend {

@@ -27,4 +27,5 @@ tests/artifacts/perf/*.txt
 tests/artifacts/integration/pty/*.raw.txt
 tests/artifacts/integration/pty/*.screen.txt
 tests/artifacts/integration/pty/*.snapshot.txt
+tests/artifacts/integration/pty/*.surface.txt
 ```

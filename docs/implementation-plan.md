@@ -217,7 +217,7 @@ TDD 방식:
 TDD 방식:
 
 - E2E fixture: controlled command -> PTY -> SurfaceRuntime -> Surface -> TerminalCore -> screen snapshot.
-- failure artifact: raw output, decoded screen, structured snapshot.
+- failure artifact: raw output, decoded screen, structured snapshot, surface metadata.
 - replay 준비: event 이름과 저장 위치를 먼저 맞춘다.
 - trace/replay schema와 의미는 [Trace와 Replay](trace-replay.md)를 따른다.
 - opt-in smoke: interactive shell -> snapshot까지 crash 없이 도달하는지 확인한다.
@@ -225,13 +225,14 @@ TDD 방식:
 완료 기준:
 
 - `mise run check`가 deterministic headless E2E를 포함한다.
-- PTY 구현 PR에서 `mise run pty` 또는 동등한 opt-in 명령을 추가하고, 그 명령이 macOS PTY smoke를 실행한다.
+- `mise run pty`가 macOS PTY controlled command와 `SurfaceRuntime` routing 경로를 opt-in으로 검증한다.
 - 실패했을 때 원인을 parser, PTY, surface 연결 중 어디서 봐야 하는지 artifact로 판단할 수 있다.
 
 아직 하지 않는다:
 
 - app window screenshot E2E.
 - renderer frame budget.
+- reader thread, bounded queue, backpressure. 현재 headless E2E는 테스트가 `PtySession.readEvent`를 직접 호출해 `SurfaceRuntime`으로 event를 넣는다.
 
 ## 7단계: Renderer와 macOS app host 연결
 

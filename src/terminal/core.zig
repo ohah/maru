@@ -283,13 +283,15 @@ pub const TerminalCore = struct {
 
     fn lineFeed(self: *TerminalCore) void {
         if (self.size.rows == 0) return;
-        const old_cursor = self.cursor;
         if (self.cursor.row + 1 < self.size.rows) {
+            const old_cursor = self.cursor;
             self.cursor.row += 1;
             self.markCursorMoveDirty(old_cursor, self.cursor);
             return;
         }
 
+        // The scroll path repaints every row via fullDirty, so the bottom-row
+        // cursor is already covered without a cursor-move diff.
         self.scrollUpOneLine();
     }
 
@@ -564,6 +566,22 @@ test "terminal core lets renderer consume dirty region once" {
     try std.testing.expectEqual(@as(u16, 0), next_dirty.start_row);
     try std.testing.expectEqual(@as(u16, 0), next_dirty.end_row);
     try std.testing.expect(core.snapshot().dirty == null);
+}
+
+test "terminal core leaves frame clean when a cursor-only control does not move" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // At column 0 a carriage return and a backspace change nothing: the cursor
+    // is already there. markCursorMoveDirty must early-return so the renderer
+    // does not redraw a row whose pixels are unchanged.
+    core.clearDirty();
+    try core.write("\r");
+    try std.testing.expect(core.takeDirty() == null);
+
+    core.clearDirty();
+    try core.write("\x08");
+    try std.testing.expect(core.takeDirty() == null);
 }
 
 test "terminal core marks cursor-only movement dirty for cursor overlay redraw" {

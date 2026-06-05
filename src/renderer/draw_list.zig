@@ -71,6 +71,10 @@ pub fn buildDrawList(
                 // 한 번에 확보해 frame마다 append가 슬라이스를 반복 재할당하지 않게 한다.
                 // continuation cell은 건너뛰므로 실제 개수는 이 상한 이하라 안전하다.
                 try cells.ensureTotalCapacity(allocator, (end_row - start_row + 1) * col_count);
+                // overlay도 같은 상한을 쓴다: cell마다 underline overlay가 최대 1개,
+                // 루프 뒤에 cursor overlay가 최대 1개 더 붙으므로 +1이다. cells와 같은
+                // 이유로 미리 확보해 per-frame 재할당을 없앤다.
+                try overlays.ensureTotalCapacity(allocator, (end_row - start_row + 1) * col_count + 1);
 
                 for (start_row..end_row + 1) |row| {
                     for (0..col_count) |col| {
@@ -91,7 +95,7 @@ pub fn buildDrawList(
                             // outside the glyph cell command prevents the
                             // atlas from caching separate bitmaps for "A" and
                             // "underlined A".
-                            try overlays.append(allocator, .{ .underline = .{
+                            overlays.appendAssumeCapacity(.{ .underline = .{
                                 .row = @intCast(row),
                                 .col = @intCast(col),
                                 .width = cell.width,
@@ -107,7 +111,9 @@ pub fn buildDrawList(
             // Cursor is also a draw-time overlay. TerminalCore owns the dirty
             // decision for cursor movement, so the renderer only consumes the
             // row range instead of comparing old/new snapshots itself.
-            try overlays.append(allocator, .{ .cursor = .{
+            // rows/cols가 0이 아니면 위 dirty-row 블록이 반드시 실행돼 +1 자리를
+            // 확보해 두므로 cursor overlay도 assumeCapacity로 붙일 수 있다.
+            overlays.appendAssumeCapacity(.{ .cursor = .{
                 .row = snapshot.cursor.row,
                 .col = snapshot.cursor.col,
                 .visible = snapshot.cursor.visible,
@@ -225,6 +231,31 @@ test "draw list carries style and combining mark for font layout" {
     try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].underline.col);
     try std.testing.expectEqual(@as(u2, 1), draw_list.overlays[0].underline.width);
     try std.testing.expectEqual(terminal.Color{ .indexed = 2 }, draw_list.overlays[0].underline.color);
+    // The cursor overlay is appended after the cell loop, so it trails the
+    // underline. Pin its tag and position so a regression that drops or
+    // misplaces it (e.g. a second underline instead of the cursor) fails here.
+    try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[1].cursor.row);
+    try std.testing.expectEqual(@as(u16, 1), draw_list.overlays[1].cursor.col);
+}
+
+test "draw list suppresses cursor overlay when its row is outside the dirty range" {
+    // renderer-strategy.md의 계약: cursor overlay는 dirty row에 cursor가 포함될
+    // 때만 생성한다. TerminalCore는 cursor 이동 시 그 row를 항상 dirty로 만들지만,
+    // 다른 row만 바뀐 frame에서 cursor를 다시 그리면 redraw가 낭비된다. core 경로로는
+    // cursor row가 빠진 dirty를 만들 수 없어 snapshot을 직접 구성해 guard를 고정한다.
+    var cells = [_]terminal.Cell{.{}} ** 4;
+    const snapshot: terminal.RenderSnapshot = .{
+        .size = .{ .cols = 2, .rows = 2 },
+        .cursor = .{ .row = 1, .col = 0, .visible = true },
+        .cells = &cells,
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+    };
+
+    var draw_list = try buildDrawList(std.testing.allocator, snapshot);
+    defer draw_list.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), draw_list.cells.len);
+    try std.testing.expectEqual(@as(usize, 0), draw_list.overlays.len);
 }
 
 test "draw list emits cursor overlay for cursor-only dirty movement" {

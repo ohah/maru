@@ -36,16 +36,26 @@ pub fn buildDrawList(
         const row_count: usize = snapshot.size.rows;
         const col_count: usize = snapshot.size.cols;
         if (row_count != 0 and col_count != 0) {
+            // snapshot.cells는 size 그대로의 그리드를 담는다는 계약이다. dirty row를
+            // size 기준으로 인덱싱하므로, 이 전제가 깨진 snapshot(size/cells 불일치)은
+            // 조용히 엉뚱한 셀을 읽는 대신 여기서 바로 드러나야 한다.
+            std.debug.assert(snapshot.cells.len >= row_count * col_count);
+
             const start_row = @min(@as(usize, dirty.start_row), row_count - 1);
             const end_row = @min(@as(usize, dirty.end_row), row_count - 1);
 
             if (start_row <= end_row) {
+                // dirty row 전체를 그리므로 만들 cell 수의 상한이 정해져 있다. 미리
+                // 한 번에 확보해 frame마다 append가 슬라이스를 반복 재할당하지 않게 한다.
+                // continuation cell은 건너뛰므로 실제 개수는 이 상한 이하라 안전하다.
+                try cells.ensureTotalCapacity(allocator, (end_row - start_row + 1) * col_count);
+
                 for (start_row..end_row + 1) |row| {
                     for (0..col_count) |col| {
                         const cell = snapshot.cells[index(snapshot.size, row, col)];
                         if (cell.continuation) continue;
 
-                        try cells.append(allocator, .{
+                        cells.appendAssumeCapacity(.{
                             .row = @intCast(row),
                             .col = @intCast(col),
                             .codepoint = cell.codepoint,

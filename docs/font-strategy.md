@@ -203,7 +203,7 @@ ligature는 터미널에서 매력적인 기능이지만 v1 기본 품질 기준
 
 ## Dirty Region과 폰트
 
-dirty region은 cell 단위다. 폰트 레이어가 임의로 dirty 범위를 넓히면 안 된다.
+dirty region의 장기 목표는 cell 단위지만, 현재 `TerminalCore`/snapshot 계약은 row 범위(`start_row`/`end_row`)다. 단위와 무관하게 폰트 레이어가 임의로 dirty 범위를 넓히면 안 된다.
 
 예외적으로 다음 상황은 renderer/app layer가 명시적으로 전체 또는 넓은 범위를 dirty 처리할 수 있다.
 

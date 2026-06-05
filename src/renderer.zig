@@ -1,7 +1,11 @@
+pub const draw_list = @import("renderer/draw_list.zig");
 pub const types = @import("renderer/types.zig");
 
 pub const Backend = types.Backend;
+pub const DrawCell = draw_list.DrawCell;
+pub const DrawList = draw_list.DrawList;
 pub const RenderFrame = types.RenderFrame;
+pub const buildDrawList = draw_list.buildDrawList;
 pub const initialBackendForMacOS = types.initialBackendForMacOS;
 
 test {

@@ -144,8 +144,9 @@ backend(Metal/WebGPU) 선택과 별개로, 두 가지를 어디서 처리하는�
 
 dirty region 범위:
 
-- dirty 단위는 cell이다. dirty 추적의 소유자는 `TerminalCore`/snapshot 쪽이고, renderer는 받은 dirty 범위만 다시 그린다. renderer가 화면을 스캔해 직접 dirty를 추론하지 않는다.
-- `DrawList`는 전체 화면이 아니라 변경된 cell 범위만 담을 수 있어야 한다. 한 cell만 바뀌면 그 cell만 draw command에 들어가는 것이 정상 경로다.
+- 장기 목표는 cell 단위 dirty다. 다만 현재 `TerminalCore`/snapshot 계약은 `start_row/end_row` row 범위만 가진다.
+- 초기 `DrawList`는 현재 코드 계약에 맞춰 dirty row 범위만 draw command로 만든다. 한 cell만 바뀌어도 그 row의 셀들이 들어가는 것이 현재 정상 경로다.
+- cell 단위 dirty는 `TerminalCore`의 dirty 모델을 확장하는 별도 PR에서 진행한다. renderer가 화면을 스캔해 직접 dirty를 추론하지 않는 원칙은 유지한다.
 - cursor 이동, selection 변경, resize는 각각 dirty 범위를 만든다. 이 범위 산출은 domain 쪽 계약이고 GPU와 무관하다.
 - 검증은 아래 "검증 전략"의 "dirty region이 draw command 범위를 줄이는지 확인하는 test"로 고정한다.
 
@@ -172,7 +173,7 @@ dirty region 범위:
 기본 `mise run check`에 넣을 수 있는 것:
 
 - snapshot을 draw command model로 바꾸는 unit/golden test.
-- dirty region이 draw command 범위를 줄이는지 확인하는 test.
+- 현재 row dirty region이 draw command 범위를 줄이는지 확인하는 test.
 - fake font backend를 사용한 `RenderSnapshot -> GlyphRun -> DrawList` test.
 - renderer가 PTY, parser, live platform handle을 import하지 않는 boundary test.
 

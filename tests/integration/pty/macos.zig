@@ -120,6 +120,90 @@ test "macOS openpty controlled command reaches SurfaceRuntime snapshot" {
     try std.testing.expect(std.mem.indexOf(u8, screen, "runtime pty maru") != null);
 }
 
+test "macOS PTY reader and pump preserve large stdout through a bounded queue" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const expected_lines: usize = 2048;
+    const size: maru.terminal.Size = .{ .cols = 32, .rows = 8 };
+    const command = try std.fmt.allocPrint(
+        allocator,
+        "i=0; while [ \"$i\" -lt {d} ]; do printf 'pty-stress-%04d\\n' \"$i\"; i=$((i + 1)); done",
+        .{expected_lines},
+    );
+    defer allocator.free(command);
+
+    var session = try maru.pty.PtySession.spawn(allocator, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", command },
+        .size = size,
+    });
+    defer session.deinit();
+
+    var surface = try maru.app.Surface.init(allocator, 1, size);
+    defer surface.deinit();
+    surface.title = "runtime pty stress";
+    surface.command = "/bin/sh -c pty-stress";
+
+    var runtime = maru.app.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surface, 10, maru.app.PtyIo.fromSession(&session));
+
+    var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    try reader.start();
+    defer reader.join();
+    defer queue.close();
+
+    const raw = try drainRuntimeQueueUntilExit(allocator, &queue, &runtime);
+    defer allocator.free(raw.bytes);
+
+    const marker_count = countOccurrences(raw.bytes, "pty-stress-");
+    const expected_last_line = try std.fmt.allocPrint(allocator, "pty-stress-{d}", .{expected_lines - 1});
+    defer allocator.free(expected_last_line);
+
+    try artifacts.writeText(
+        "tests/artifacts/integration/pty/runtime-backpressure.raw.txt",
+        raw.bytes,
+    );
+
+    const screen = try surface.core.dumpUtf8(allocator);
+    defer allocator.free(screen);
+    const snapshot = try maru.observability.snapshot.renderTerminalSnapshot(allocator, surface.core.snapshot());
+    defer allocator.free(snapshot);
+    const summary = try renderPtyStressSummary(allocator, .{
+        .expected_lines = expected_lines,
+        .marker_count = marker_count,
+        .raw_bytes = raw.bytes.len,
+        .output_events = raw.output_events,
+        .queue_capacity = queue.capacity(),
+    });
+    defer allocator.free(summary);
+
+    // Stress artifacts are written before assertions so a failure shows whether
+    // bytes were lost before the queue, during pump drain, or inside TerminalCore.
+    try artifacts.writeTextWithFinalNewline(
+        allocator,
+        "tests/artifacts/integration/pty/runtime-backpressure.screen.txt",
+        screen,
+    );
+    try artifacts.writeText(
+        "tests/artifacts/integration/pty/runtime-backpressure.snapshot.txt",
+        snapshot,
+    );
+    try artifacts.writeText(
+        "tests/artifacts/integration/pty/runtime-backpressure.summary.txt",
+        summary,
+    );
+
+    try std.testing.expectEqual(maru.pty.ExitStatus{ .exited = 0 }, raw.exit_status);
+    try std.testing.expectEqual(expected_lines, marker_count);
+    try std.testing.expect(raw.output_events > 1);
+    try std.testing.expectEqual(maru.app.ProcessState.exited, surface.process_state);
+    try std.testing.expect(std.mem.indexOf(u8, screen, expected_last_line) != null);
+}
+
 test "macOS PTY resize is visible to the child terminal" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
 
@@ -174,21 +258,27 @@ test "macOS PTY close reaps a signal-ignoring child without leaking a zombie" {
 const CollectedOutput = struct {
     bytes: []u8,
     exit_status: maru.pty.ExitStatus,
+    output_events: usize,
 };
 
 fn collectUntilExit(allocator: std.mem.Allocator, session: *maru.pty.PtySession) !CollectedOutput {
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(allocator);
+    var output_events: usize = 0;
 
     while (true) {
         const event = try session.readEvent(allocator);
         defer event.deinit(allocator);
 
         switch (event) {
-            .output => |chunk| try bytes.appendSlice(allocator, chunk),
+            .output => |chunk| {
+                output_events += 1;
+                try bytes.appendSlice(allocator, chunk);
+            },
             .exited => |status| return .{
                 .bytes = try bytes.toOwnedSlice(allocator),
                 .exit_status = status,
+                .output_events = output_events,
             },
         }
     }
@@ -202,6 +292,7 @@ fn drainRuntimeQueueUntilExit(
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(allocator);
     var pump = maru.app.RuntimeEventPump.init(allocator, queue, runtime);
+    var output_events: usize = 0;
 
     while (true) {
         const event = queue.popBlocking() orelse return error.ReaderQueueClosedBeforeExit;
@@ -210,6 +301,7 @@ fn drainRuntimeQueueUntilExit(
                 // 테스트는 raw PTY artifact를 남기기 위해 output bytes를 복사한다.
                 // event 적용과 event 해제는 제품 코드인 RuntimeEventPump에 맡겨
                 // 테스트 전용 ownership 규칙이 따로 생기지 않게 한다.
+                output_events += 1;
                 try bytes.appendSlice(allocator, output.bytes);
                 break :blk null;
             },
@@ -222,9 +314,56 @@ fn drainRuntimeQueueUntilExit(
             return .{
                 .bytes = try bytes.toOwnedSlice(allocator),
                 .exit_status = status,
+                .output_events = output_events,
             };
         }
     }
+}
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    std.debug.assert(needle.len > 0);
+
+    var count: usize = 0;
+    var offset: usize = 0;
+    while (std.mem.indexOf(u8, haystack[offset..], needle)) |relative| {
+        count += 1;
+        offset += relative + needle.len;
+    }
+    return count;
+}
+
+const PtyStressSummary = struct {
+    expected_lines: usize,
+    marker_count: usize,
+    raw_bytes: usize,
+    output_events: usize,
+    queue_capacity: usize,
+};
+
+fn renderPtyStressSummary(
+    allocator: std.mem.Allocator,
+    summary: PtyStressSummary,
+) ![]u8 {
+    // Summary는 screen/snapshot만으로 보이지 않는 backpressure 단서를 남긴다.
+    // queue capacity와 output event 수가 있어야 대량 출력 실패가 drop인지,
+    // chunking인지, runtime 적용 문제인지 좁혀 볼 수 있다.
+    return std.fmt.allocPrint(
+        allocator,
+        \\expected_lines={d}
+        \\marker_count={d}
+        \\raw_bytes={d}
+        \\output_events={d}
+        \\queue_capacity={d}
+        \\
+    ,
+        .{
+            summary.expected_lines,
+            summary.marker_count,
+            summary.raw_bytes,
+            summary.output_events,
+            summary.queue_capacity,
+        },
+    );
 }
 
 fn renderSurfaceMetadata(

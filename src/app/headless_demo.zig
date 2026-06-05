@@ -1,0 +1,214 @@
+const std = @import("std");
+const observability = @import("../observability.zig");
+const pty = @import("../pty.zig");
+const terminal = @import("../terminal.zig");
+const pty_reader = @import("pty_reader.zig");
+const runtime_mod = @import("runtime.zig");
+const runtime_pump = @import("runtime_pump.zig");
+const surface_mod = @import("surface.zig");
+
+pub const default_artifact_dir = "zig-out/maru-demo";
+
+pub const DemoConfig = struct {
+    artifact_dir: []const u8 = default_artifact_dir,
+    size: terminal.Size = .{ .cols = 80, .rows = 12 },
+    command: []const u8 = "/bin/sh",
+    args: []const []const u8 = &.{
+        "-c",
+        "printf 'maru headless demo\\n'; pwd; printf 'demo complete\\n'",
+    },
+};
+
+pub const DemoResult = struct {
+    screen: []u8,
+    snapshot: []u8,
+    summary: []u8,
+
+    pub fn deinit(self: *DemoResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.screen);
+        allocator.free(self.snapshot);
+        allocator.free(self.summary);
+        self.* = undefined;
+    }
+};
+
+pub fn run(io: std.Io, allocator: std.mem.Allocator, config: DemoConfig) !DemoResult {
+    // 이 데모는 GUI를 만들기 전에 실제 프로세스 출력이 Maru의 런타임 경계를
+    // 끝까지 통과하는지 확인하기 위한 작은 앱이다. 테스트 fixture가 아니라
+    // 실제 PTY를 쓰기 때문에, 나중에 창이 붙어도 같은 실패 지점을 추적할 수 있다.
+    var session = try pty.PtySession.spawn(allocator, .{
+        .command = config.command,
+        .args = config.args,
+        .size = config.size,
+    });
+    defer session.deinit();
+
+    var surface = try surface_mod.Surface.init(allocator, 1, config.size);
+    defer surface.deinit();
+    surface.title = "headless demo";
+    surface.command = config.command;
+
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surface, 10, runtime_mod.PtyIo.fromSession(&session));
+
+    var queue = try pty_reader.PtyEventQueue.init(io, allocator, 32);
+    defer queue.deinit();
+
+    var reader = pty_reader.PtyReader.init(allocator, 10, &session, &queue);
+    try reader.start();
+    var reader_joined = false;
+    errdefer if (!reader_joined) reader.stopAndJoin();
+
+    // window loop가 아직 없으므로 pump가 종료 이벤트까지 직접 기다린다. 이 경로가
+    // 안정적이어야 이후 macOS app host가 같은 queue/runtime 계약을 frame loop에서
+    // 소비할 수 있다.
+    var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
+    const drain_summary = try pump.drainBlockingUntilTermination();
+
+    reader.join();
+    reader_joined = true;
+    queue.close();
+
+    const screen = try surface.core.dumpUtf8(allocator);
+    errdefer allocator.free(screen);
+
+    const snapshot = try observability.snapshot.renderTerminalSnapshot(allocator, surface.core.snapshot());
+    errdefer allocator.free(snapshot);
+
+    const summary = try renderSummary(allocator, config, drain_summary, surface.process_state);
+    errdefer allocator.free(summary);
+
+    try writeArtifacts(io, allocator, config.artifact_dir, .{
+        .screen = screen,
+        .snapshot = snapshot,
+        .summary = summary,
+    });
+
+    return .{
+        .screen = screen,
+        .snapshot = snapshot,
+        .summary = summary,
+    };
+}
+
+const ArtifactPayload = struct {
+    screen: []const u8,
+    snapshot: []const u8,
+    summary: []const u8,
+};
+
+fn writeArtifacts(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    artifact_dir: []const u8,
+    payload: ArtifactPayload,
+) !void {
+    // Demo artifact도 테스트 artifact와 같은 성격이다. 눈으로 실행 결과를 보되,
+    // 실패했을 때 화면 텍스트와 구조화 snapshot을 파일로 남겨 원인을 좁힌다.
+    const screen_path = try std.fmt.allocPrint(allocator, "{s}/headless-pty.screen.txt", .{artifact_dir});
+    defer allocator.free(screen_path);
+    const snapshot_path = try std.fmt.allocPrint(allocator, "{s}/headless-pty.snapshot.txt", .{artifact_dir});
+    defer allocator.free(snapshot_path);
+    const summary_path = try std.fmt.allocPrint(allocator, "{s}/headless-pty.summary.txt", .{artifact_dir});
+    defer allocator.free(summary_path);
+
+    try writeTextWithFinalNewline(io, allocator, screen_path, payload.screen);
+    try writeText(io, snapshot_path, payload.snapshot);
+    try writeText(io, summary_path, payload.summary);
+}
+
+fn renderSummary(
+    allocator: std.mem.Allocator,
+    config: DemoConfig,
+    drain_summary: runtime_pump.DrainSummary,
+    process_state: surface_mod.ProcessState,
+) ![]u8 {
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+
+    const writer = &output.writer;
+    try writer.writeAll("maru.headless-demo.v1\n");
+    try writer.print("artifact_dir={s}\n", .{config.artifact_dir});
+    try writer.print("command={s}\n", .{config.command});
+    try writer.print("args.len={d}\n", .{config.args.len});
+    try writer.print("size.cols={d}\n", .{config.size.cols});
+    try writer.print("size.rows={d}\n", .{config.size.rows});
+    try writer.print("output_events={d}\n", .{drain_summary.output_events});
+    try writer.print("exit_events={d}\n", .{drain_summary.exit_events});
+    try writer.print("process_state={s}\n", .{@tagName(process_state)});
+    try writer.writeAll("termination=");
+    try writeTermination(writer, drain_summary.ended);
+    try writer.writeByte('\n');
+
+    return output.toOwnedSlice();
+}
+
+fn writeTermination(writer: *std.Io.Writer, termination: ?runtime_pump.Termination) !void {
+    if (termination == null) {
+        try writer.writeAll("none");
+        return;
+    }
+
+    switch (termination.?) {
+        .exited => |status| {
+            try writer.writeAll("exited(");
+            try writeExitStatus(writer, status);
+            try writer.writeByte(')');
+        },
+        .read_error => |message| try writer.print("read_error({s})", .{message}),
+    }
+}
+
+fn writeExitStatus(writer: *std.Io.Writer, status: pty.ExitStatus) !void {
+    switch (status) {
+        .exited => |code| try writer.print("code={d}", .{code}),
+        .signaled => |signal| try writer.print("signal={d}", .{signal}),
+        .unknown => |raw| try writer.print("unknown={d}", .{raw}),
+    }
+}
+
+fn writeText(io: std.Io, path: []const u8, contents: []const u8) !void {
+    try ensureParent(io, path);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = path,
+        .data = contents,
+        .flags = .{ .truncate = true },
+    });
+}
+
+fn writeTextWithFinalNewline(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    contents: []const u8,
+) !void {
+    const with_newline = try std.fmt.allocPrint(allocator, "{s}\n", .{contents});
+    defer allocator.free(with_newline);
+    try writeText(io, path, with_newline);
+}
+
+fn ensureParent(io: std.Io, path: []const u8) !void {
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| {
+        if (slash == 0) return;
+        try std.Io.Dir.cwd().createDirPath(io, path[0..slash]);
+    }
+}
+
+test "headless demo summary records the runnable vertical slice" {
+    const summary = try renderSummary(
+        std.testing.allocator,
+        .{ .artifact_dir = "zig-out/test-demo", .size = .{ .cols = 10, .rows = 3 } },
+        .{
+            .output_events = 2,
+            .exit_events = 1,
+            .ended = .{ .exited = .{ .exited = 0 } },
+        },
+        .exited,
+    );
+    defer std.testing.allocator.free(summary);
+
+    try std.testing.expect(std.mem.indexOf(u8, summary, "maru.headless-demo.v1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "artifact_dir=zig-out/test-demo\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "termination=exited(code=0)\n") != null);
+}

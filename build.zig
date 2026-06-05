@@ -36,6 +36,12 @@ pub fn build(b: *std.Build) void {
     }
     run_step.dependOn(&run_cmd.step);
 
+    const demo_step = b.step("demo", "Run the headless PTY demo");
+    const demo_cmd = b.addRunArtifact(exe);
+    demo_cmd.step.dependOn(b.getInstallStep());
+    demo_cmd.addArg("demo");
+    demo_step.dependOn(&demo_cmd.step);
+
     const core_tests = b.addTest(.{
         .root_module = maru_mod,
     });

@@ -29,6 +29,14 @@ run = "zig build macos-window-smoke"
 description = "Run macOS window smoke contract tests"
 run = "zig build test-macos-window-smoke"
 
+[tasks.macos-metal-smoke]
+description = "Run the visible macOS Metal clear-frame smoke"
+run = "zig build macos-metal-smoke"
+
+[tasks.test-macos-metal-smoke]
+description = "Run macOS Metal smoke contract tests"
+run = "zig build test-macos-metal-smoke"
+
 [tasks.pty]
 description = "Run opt-in macOS PTY integration tests"
 run = "zig build test-pty"

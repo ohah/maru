@@ -93,6 +93,52 @@ pub fn build(b: *std.Build) void {
         const run_macos_window_smoke_tests = b.addRunArtifact(macos_window_smoke_tests);
         run_macos_window_smoke_tests.setCwd(b.path("."));
         test_macos_window_smoke_step.dependOn(&run_macos_window_smoke_tests.step);
+
+        // Metal smoke는 AppKit 창 위에 CAMetalLayer가 실제 drawable을 present하는지
+        // 확인한다. 아직 terminal grid나 glyph atlas를 그리지 않고, GPU surface
+        // lifecycle만 먼저 분리해 검증한다.
+        const macos_metal_smoke = b.addExecutable(.{
+            .name = "maru-macos-metal-smoke",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/metal_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        macos_metal_smoke.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/appkit_metal_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        macos_metal_smoke.root_module.linkFramework("Cocoa", .{});
+        macos_metal_smoke.root_module.linkFramework("Metal", .{});
+        macos_metal_smoke.root_module.linkFramework("QuartzCore", .{});
+
+        const macos_metal_smoke_step = b.step("macos-metal-smoke", "Run the visible macOS Metal clear-frame smoke");
+        const macos_metal_smoke_cmd = b.addRunArtifact(macos_metal_smoke);
+        macos_metal_smoke_cmd.setCwd(b.path("."));
+        macos_metal_smoke_step.dependOn(&macos_metal_smoke_cmd.step);
+
+        const macos_metal_smoke_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/metal_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        macos_metal_smoke_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/appkit_metal_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        macos_metal_smoke_tests.root_module.linkFramework("Cocoa", .{});
+        macos_metal_smoke_tests.root_module.linkFramework("Metal", .{});
+        macos_metal_smoke_tests.root_module.linkFramework("QuartzCore", .{});
+
+        const test_macos_metal_smoke_step = b.step("test-macos-metal-smoke", "Run macOS Metal smoke contract tests");
+        const run_macos_metal_smoke_tests = b.addRunArtifact(macos_metal_smoke_tests);
+        run_macos_metal_smoke_tests.setCwd(b.path("."));
+        test_macos_metal_smoke_step.dependOn(&run_macos_metal_smoke_tests.step);
     }
 
     const core_tests = b.addTest(.{

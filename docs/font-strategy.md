@@ -176,6 +176,13 @@ atlas invalidation 조건:
 
 현재 domain cache는 invalidation reason과 제거된 slot 수를 남긴다. 이 정보가 있어야 나중에 "왜 frame 전체가 다시 업로드됐는지"를 screenshot이나 성능 숫자만 보고 추측하지 않아도 된다.
 
+현재 atlas 구현 메모:
+
+- combining cluster cache 충돌은 지금 fake backend에서 고치지 않는다. Maru의 cache key는 `glyph_id` 기반이고, cluster가 어떤 `glyph_id`가 되는지는 실제 shaper(CoreText later)의 책임이다. fake backend에서 combining mark를 임의의 새 glyph id로 바꾸면 stub의 편의 구현이 제품 계약처럼 굳을 수 있다.
+- 현재 `GlyphAtlas`의 선형 scan, `orderedRemove`, FIFO eviction은 실제 제품 성능 정책이 아니라 contract-stage placeholder다. 이 단계의 목적은 cache hit/miss, upload 후보, eviction 발생, invalidation reason을 검증하는 것이다. 실제 texture atlas 압력이 보이면 HashMap + LRU/clock 같은 정책을 별도 PR에서 사용자와 논의한 뒤 바꾼다.
+- 테스트 artifact writer나 index helper를 바로 재사용하지 않는다. test -> production 의존 방향 역전이나 renderer -> observability 내부 구현 의존이 생길 수 있기 때문이다. 공용화가 필요하면 먼저 책임이 맞는 shared module로 승격한다.
+- 현재 upload byte 추정은 실제 raster bitmap이 아니므로 overflow 가능성이 작다. 하지만 실제 rasterizer/texture packer가 들어오면 `font_size * scale * bytes_per_pixel`, atlas dimension, backend texture limit은 checked arithmetic과 관측 가능한 error로 검증해야 한다. `assert` 정책은 프로젝트 전역 결정이므로 이 PR에서 renderer만 따로 바꾸지 않는다.
+
 ## Emoji와 Color Glyph
 
 emoji는 v1에서 "완벽한 typography"가 아니라 "grid를 깨지 않는 표시"가 목표다.

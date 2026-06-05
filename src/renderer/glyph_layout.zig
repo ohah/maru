@@ -10,10 +10,13 @@ pub const ColorGlyphKind = enum {
     color,
 };
 
-pub const StyleFlags = struct {
+pub const RasterStyleFlags = struct {
+    // 이름 그대로 "rasterize(glyph bitmap)에 영향을 주는 style"만 담는다. bold/italic은 face가
+    // 달라지거나 synthetic이라 같은 codepoint라도 다른 비트맵이 된다. underline은 glyph가
+    // 아니라 draw-time 오버레이 선이라(같은 'A' 비트맵을 색·밑줄과 무관하게 재사용) 키에
+    // 넣지 않는다. underline 정보는 `GlyphRun.style`에 그대로 남아 렌더러가 오버레이로 그린다.
     bold: bool = false,
     italic: bool = false,
-    underline: bool = false,
 };
 
 pub const TextLayoutConfig = struct {
@@ -26,7 +29,7 @@ pub const GlyphCacheKey = struct {
     glyph_id: GlyphId,
     font_size_px: u16,
     device_scale: u16,
-    style: StyleFlags = .{},
+    style: RasterStyleFlags = .{},
     color_glyph_kind: ColorGlyphKind = .monochrome,
 };
 
@@ -110,6 +113,10 @@ pub fn buildGlyphRunList(
     // GlyphRunList는 DrawList보다 한 단계 더 font/layout에 가까운 계약이다. 여기서도
     // CoreText 타입이나 atlas texture를 노출하지 않아야 나중에 Metal/WebGPU backend가
     // 같은 glyph run을 소비할 수 있다.
+    //
+    // shaper는 `shape(draw_list.DrawCell) ShapeResult`를 제공하는 값이면 된다(anytype).
+    // FakeFontBackend가 그 계약의 기준 구현이고, 실제 CoreText shaper도 같은 시그니처로
+    // 이 자리에 들어온다. anytype 뒤에 숨은 기대 시그니처를 이 주석으로 한곳에 고정한다.
     var glyphs: std.ArrayList(GlyphRun) = .empty;
     errdefer glyphs.deinit(allocator);
     try glyphs.ensureTotalCapacity(allocator, list.cells.len);
@@ -122,7 +129,7 @@ pub fn buildGlyphRunList(
         if (shaped.fallback) fallback_count += 1;
         if (shaped.replacement) replacement_count += 1;
 
-        const flags = styleFlags(cell.style);
+        const flags = rasterStyleFlags(cell.style);
         glyphs.appendAssumeCapacity(.{
             .row = cell.row,
             .col = cell.col,
@@ -155,11 +162,10 @@ pub fn buildGlyphRunList(
     };
 }
 
-fn styleFlags(style: terminal.Style) StyleFlags {
+fn rasterStyleFlags(style: terminal.Style) RasterStyleFlags {
     return .{
         .bold = style.bold,
         .italic = style.italic,
-        .underline = style.underline,
     };
 }
 
@@ -230,6 +236,12 @@ test "fake glyph layout records replacement glyphs" {
     try std.testing.expect(glyphs.glyphs[0].replacement);
     try std.testing.expectEqual(@as(GlyphId, 0xfffd), glyphs.glyphs[0].glyph_id);
     try std.testing.expectEqual(@as(GlyphId, 0xfffd), glyphs.glyphs[0].cache_key.glyph_id);
+
+    // replacement glyph는 fallback font로 그리므로 fallback에도 포함된다. 즉
+    // replacement_count는 fallback_count의 부분집합이다. 이 관계를 고정해 두지 않으면
+    // 나중에 두 카운터의 의미가 조용히 어긋나도 테스트가 잡지 못한다.
+    try std.testing.expect(glyphs.glyphs[0].fallback);
+    try std.testing.expectEqual(@as(usize, 1), glyphs.fallback_count);
 }
 
 test "glyph cache key separates style size scale and color glyph kind" {
@@ -254,7 +266,10 @@ test "glyph cache key separates style size scale and color glyph kind" {
     defer glyphs.deinit(std.testing.allocator);
 
     try std.testing.expect(glyphs.glyphs[0].cache_key.style.bold);
-    try std.testing.expect(glyphs.glyphs[0].cache_key.style.underline);
+    // underline은 glyph bitmap을 바꾸지 않는 draw-time 오버레이라 cache key에서 제외한다.
+    // (밑줄 유무로 같은 'A'를 atlas에 두 번 굽지 않게 한다.) 대신 렌더러가 오버레이로
+    // 그릴 수 있도록 GlyphRun.style에는 그대로 보존한다.
+    try std.testing.expect(glyphs.glyphs[0].style.underline);
     try std.testing.expectEqual(@as(u16, 16), glyphs.glyphs[0].cache_key.font_size_px);
     try std.testing.expectEqual(@as(u16, 2), glyphs.glyphs[0].cache_key.device_scale);
     try std.testing.expectEqual(ColorGlyphKind.color, glyphs.glyphs[1].cache_key.color_glyph_kind);

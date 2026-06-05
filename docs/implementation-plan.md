@@ -254,6 +254,7 @@ TDD 방식:
 - font layout test: fake font backend로 `DrawList -> GlyphRunList` 계약을 검증한다.
 - glyph atlas test: GPU texture 없이 `GlyphCacheKey -> AtlasSlot` cache, upload byte 후보, eviction, invalidation reason을 검증한다.
 - app host smoke: 실제 UI 없이 `AppWindow -> SurfaceRuntime -> RuntimeEventPump -> DrawList` frame 조립, resize, focused input artifact를 `mise run app-smoke`로 남긴다.
+- macOS window smoke: `mise run test-macos-window-smoke`로 summary 계약을 검증하고, `mise run macos-window-smoke`로 Metal/terminal grid 없이 AppKit 창을 실제로 띄워 `visible_ui=true` artifact를 남긴다. 이 단계는 app lifecycle smoke이며, terminal renderer 검증은 아니다.
 - screenshot artifact: 실제 화면 검증이 가능한 곳부터 opt-in으로 추가한다.
 
 완료 기준:
@@ -261,6 +262,7 @@ TDD 방식:
 - renderer는 PTY나 parser를 모른다.
 - app host는 terminal storage를 직접 수정하지 않는다.
 - 실제 AppKit/Metal UI가 아직 없으면 smoke summary에 `visible_ui=false`를 명시하고, UI로 확인 가능한 단계가 오면 사용자에게 보고한다.
+- `mise run macos-window-smoke`가 macOS에서 실제 창을 띄우고, 아직 Metal/terminal grid가 없다는 한계를 summary에 적는다.
 - 성능 예산에 startup, first drawable, frame budget 초안을 추가한다.
 
 아직 하지 않는다:

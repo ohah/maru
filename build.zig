@@ -48,6 +48,53 @@ pub fn build(b: *std.Build) void {
     app_smoke_cmd.addArg("app-smoke");
     app_smoke_step.dependOn(&app_smoke_cmd.step);
 
+    if (target.result.os.tag == .macos) {
+        // visible window smoke는 macOS window server와 Cocoa framework가 필요하다.
+        // Ubuntu CI의 기본 `zig build`가 이 플랫폼 코드를 컴파일하지 않도록
+        // macOS target일 때만 opt-in build step을 만든다.
+        const macos_window_smoke = b.addExecutable(.{
+            .name = "maru-macos-window-smoke",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/window_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        // AppKit은 Objective-C API라서 아주 얇은 platform bridge만 Objective-C로 둔다.
+        // Zig executable이 실행 시간, artifact, 실패 처리를 계속 소유하게 해 제품 구조가
+        // AppKit private 타입에 묶이지 않도록 한다.
+        macos_window_smoke.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/appkit_window_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        macos_window_smoke.root_module.linkFramework("Cocoa", .{});
+
+        const macos_window_smoke_step = b.step("macos-window-smoke", "Run the visible macOS AppKit window smoke");
+        const macos_window_smoke_cmd = b.addRunArtifact(macos_window_smoke);
+        macos_window_smoke_cmd.setCwd(b.path("."));
+        macos_window_smoke_step.dependOn(&macos_window_smoke_cmd.step);
+
+        const macos_window_smoke_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/window_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        macos_window_smoke_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/appkit_window_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        macos_window_smoke_tests.root_module.linkFramework("Cocoa", .{});
+
+        const test_macos_window_smoke_step = b.step("test-macos-window-smoke", "Run macOS window smoke contract tests");
+        const run_macos_window_smoke_tests = b.addRunArtifact(macos_window_smoke_tests);
+        run_macos_window_smoke_tests.setCwd(b.path("."));
+        test_macos_window_smoke_step.dependOn(&run_macos_window_smoke_tests.step);
+    }
+
     const core_tests = b.addTest(.{
         .root_module = maru_mod,
     });

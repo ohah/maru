@@ -17,6 +17,11 @@ pub const PumpedEventKind = enum {
 
 pub const Termination = union(enum) {
     exited: pty.ExitStatus,
+    // read_error의 message는 QueuedPtyEvent에서 빌려온 슬라이스다. applyQueuedEvent의
+    // `defer event.deinit`이 끝난 뒤에도 이 값이 DrainSummary.ended에 남으므로, message는
+    // 종료를 소비하는 쪽보다 오래 살아야 한다. 현재 PtyReader는 항상 `@errorName(err)`
+    // (정적 문자열)만 넘기고 QueuedPtyEvent.deinit은 read_error message를 해제하지 않아
+    // 안전하다. 나중에 heap message를 넣게 되면 여기서 소유권을 복사해야 한다.
     read_error: []const u8,
 };
 
@@ -27,7 +32,10 @@ pub const DrainSummary = struct {
 
     fn record(self: *DrainSummary, event: PumpedEvent) void {
         if (event.termination) |termination| {
-            self.ended = termination;
+            // 세션은 첫 termination에서 끝난다. 같은 drain에서 종료 뒤에 들어온 event가
+            // 종료 원인을 덮어쓰지 않도록 첫 termination만 latch한다(예: [exited, read_error]
+            // 순서에서 실제 종료인 exit이 read_error로 가려지지 않게).
+            if (self.ended == null) self.ended = termination;
         }
 
         const kind = event.kind;

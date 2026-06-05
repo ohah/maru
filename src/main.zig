@@ -34,7 +34,6 @@ pub fn main(init: std.process.Init) !void {
 
     try stderr.print("unknown maru-dev command: {s}\n\n", .{command});
     try printUsage(stderr);
-    try stderr.flush();
     return error.UnknownCommand;
 }
 

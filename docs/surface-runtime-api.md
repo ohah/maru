@@ -185,7 +185,7 @@ pub const SurfaceRuntime = struct {
 `RuntimeEventPump.drainBlockingUntilTermination`:
 
 - window loop가 붙기 전 headless integration을 위해 설계한 helper다.
-- 다만 현재 macOS PTY integration test는 raw artifact용 output bytes를 따로 모아야 해서 이 helper 대신 `applyQueuedEvent`로 자체 루프를 돈다. 그래서 지금은 pump 단위 테스트에서만 쓰인다.
+- `headless_demo`(`maru-dev demo` / `zig build demo`)가 이 helper의 첫 실소비자다. 다만 현재 macOS PTY integration test는 raw artifact용 output bytes를 따로 모아야 해서 이 helper 대신 `applyQueuedEvent`로 자체 루프를 돈다.
 - exit 또는 read_error termination을 볼 때까지 기다린다.
 - queue가 먼저 닫히면 `ReaderQueueClosedBeforeTermination`으로 실패한다.
 
@@ -222,7 +222,7 @@ const DrainSummary = struct {
 
 아직 남은 후보:
 
-- integration test가 자체 drain 루프를 도는 중복(`tests/integration/pty/macos.zig`)을, output sink를 받는 helper로 흡수할지 결정한다. 흡수하지 않으면 미사용 `drainBlockingUntilTermination`을 삭제하는 선택지도 같이 본다.
+- integration test가 자체 drain 루프를 도는 중복(`tests/integration/pty/macos.zig`)을, output sink를 받는 helper로 흡수할지 결정한다. (`drainBlockingUntilTermination` 자체는 `headless_demo`가 쓰므로 미사용은 아니다.)
 - 실제 frame loop가 붙을 때 `DrainSummary.ended`를 어떤 UI state로 보여줄지 결정한다.
 
 ## 반드시 지켜야 할 것

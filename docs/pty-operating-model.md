@@ -151,7 +151,11 @@ close (child가 아직 살아 있을 때)
 
 이 escalation은 `PtySession.close`에서 동기적으로 수행하고, `deinit`은 같은 close 경로를 재사용한다. 이 분리가 필요한 이유는 app이 탭/창을 닫을 때 session memory를 바로 파괴하면 reader thread가 아직 `readEvent` 안에서 같은 session을 잡고 있을 수 있기 때문이다.
 
-reader thread가 blocking `readEvent`에 들어간 상태도 `PtyReader.stopAndJoin`으로 정리한다. 순서는 `queue.close -> session.close -> reader.join`이다. queue를 먼저 닫는 이유는 사용자가 닫은 pane에 새 output/read_error event를 더 쌓지 않기 위해서다. session close는 master fd를 닫고 child를 reap한다. macOS에서는 다른 thread가 fd를 닫는 것만으로 blocking read가 항상 즉시 깨어난다고 가정하지 않는다. 그래서 `readEvent`는 실제 `read` 전에 짧은 `poll` 대기 루프를 지나며 close flag를 관측한다. 현재 close 관측 지연 상한은 20ms다.
+reader thread가 blocking `readEvent`에 들어간 상태도 `PtyReader.stopAndJoin`으로 정리한다. 순서는 `queue.close -> session.close -> reader.join`이다. queue를 먼저 닫는 이유는 사용자가 닫은 pane에 새 output/read_error event를 더 쌓지 않기 위해서다. session close는 child를 reap하고, reader를 깨운다. master fd 자체는 여기서 닫지 않고 reader가 join된 뒤 `deinit`에서 닫는다. reader가 아직 그 fd 번호로 poll/read 중일 때 닫으면 OS가 번호를 재사용해 reader가 엉뚱한 fd를 읽을 수 있기 때문이다.
+
+reader를 깨우는 방식은 self-pipe다. `readEvent`는 실제 `read` 전에 master fd와 wake fd를 함께 `poll`로 무한 대기하고, `close`는 wake fd에 1바이트를 보내 poll을 즉시 반환시킨다. 그래서 close 관측 지연은 사실상 0이고(timeout 폴링이 아니다), 출력이 없는 pane도 주기적 wakeup 없이 잠든다. macOS에서 다른 thread가 fd를 닫는 것만으로 blocking read가 깨어난다고 가정하지 않는다는 제약을, fd 자체가 아니라 별도의 wake 이벤트로 우회한 것이다.
+
+reap 경로도 마찬가지로 `close`가 끼어들 수 없는 bare blocking `waitpid`를 쓰지 않는다. EOF를 보면 먼저 `WNOHANG`로 거두고(보통 child가 이미 종료해 즉시 성공), child가 stdio만 닫고 계속 살아 있으면(드문 daemonize) `kqueue`로 child의 실제 종료(`EVFILT_PROC`/`NOTE_EXIT`)와 close의 wake(self-pipe `EVFILT_READ`)를 함께 기다린다. 그래서 child가 끝내 종료하지 않아도 `stopAndJoin`이 reader를 깨워 `join`이 멈추지 않고, child는 close의 SIGKILL escalation으로 정리된다.
 
 아직 남은 범위는 macOS window/app host의 실제 close button, tab close command, app quit lifecycle에 이 API를 연결하는 일이다. close 경로를 app host와 조립할 때도 "신호를 올리며 반드시 reap한다"는 계약은 동일하게 유지한다.
 
@@ -170,6 +174,7 @@ SurfaceRuntime reader thread와 pump 단계에서 추가된 테스트:
 - reader thread가 실제 macOS PTY controlled command output/exit를 bounded queue에 넣고, `RuntimeEventPump`가 이를 `SurfaceRuntime`에 적용한다.
 - 대량 stdout을 queue capacity 1로 흘려도 marker가 drop되지 않고, 여러 output event가 pump를 통과하며, 마지막 화면과 summary artifact가 남는다.
 - 출력이 없는 long-running child에서 reader thread가 blocking read에 들어가도 `PtyReader.stopAndJoin`이 reader를 join하고 child를 reap한다.
+- child가 stdio를 닫고 계속 살아 있어(daemonize) reader가 reap 경로의 kqueue 대기에 들어가도 `PtyReader.stopAndJoin`이 reader를 깨워 join하고 child를 reap한다(데드락 없음).
 
 아직 추가하지 않은 테스트:
 

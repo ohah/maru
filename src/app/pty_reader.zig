@@ -201,7 +201,12 @@ pub const PtyReader = struct {
     pub fn run(self: *PtyReader) void {
         while (true) {
             const event = self.session.readEvent(self.allocator) catch |err| {
-                self.pushReadError(@errorName(err));
+                // SessionClosed/NoMoreEvents는 사용자가 닫은 정상 종료다. read 실패가
+                // 아니므로 read_error로 surface하지 않는다(queue close 순서와 무관하게
+                // 깔끔히 멈춘다). 그 밖의 에러만 consumer에게 read_error로 알린다.
+                if (err != error.SessionClosed and err != error.NoMoreEvents) {
+                    self.pushReadError(@errorName(err));
+                }
                 return;
             };
 

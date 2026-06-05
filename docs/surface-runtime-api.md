@@ -182,7 +182,8 @@ pub const SurfaceRuntime = struct {
 
 `RuntimeEventPump.drainBlockingUntilExit`:
 
-- window loop가 붙기 전 headless integration에서 쓰기 위한 helper다.
+- window loop가 붙기 전 headless integration을 위해 설계한 helper다.
+- 다만 현재 macOS PTY integration test는 raw artifact용 output bytes를 따로 모아야 해서 이 helper 대신 `applyQueuedEvent`로 자체 루프를 돈다. 그래서 지금은 pump 단위 테스트에서만 쓰인다.
 - exit event를 볼 때까지 기다린다.
 - queue가 먼저 닫히면 `ReaderQueueClosedBeforeExit`로 실패한다.
 

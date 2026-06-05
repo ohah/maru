@@ -145,7 +145,7 @@
 
 - app/runtime loop가 `PtyEventQueue`에서 꺼낸 `QueuedPtyEvent`를 `SurfaceRuntime.applyPtyEvent`로 적용한다.
 - queue event의 output bytes 소유권을 정확히 한 번 끝낸다.
-- non-blocking drain과 headless integration용 blocking-until-exit drain을 제공한다.
+- non-blocking drain과 blocking-until-exit drain을 제공한다. 후자는 headless integration을 위해 설계했지만, byte 수집이 필요한 현재 integration test는 `applyQueuedEvent`로 자체 루프를 돌아서 blocking-until-exit drain은 아직 pump 단위 테스트에서만 쓰인다.
 - 실패 경로에서도 event 해제를 한 곳에서 처리해 테스트 helper마다 별도 ownership 규칙이 생기지 않게 한다.
 
 몰라야 하는 것:

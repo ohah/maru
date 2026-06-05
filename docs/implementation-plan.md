@@ -232,7 +232,7 @@ TDD 방식:
 
 - app window screenshot E2E.
 - renderer frame budget.
-- 대량 stdout backpressure stress와 interactive shell shutdown lifecycle.
+- 대량 stdout backpressure의 RSS/latency/UI responsiveness 성능 예산과 interactive shell shutdown lifecycle.
 
 ## 7단계: Renderer와 macOS app host 연결
 

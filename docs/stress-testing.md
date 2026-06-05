@@ -15,11 +15,13 @@
 - 한글/이모지 UTF-8을 작은 byte chunk로 나누어 반복 입력한다.
 - 반복적으로 resize 후 write를 수행한다.
 - 최종 screen, structured snapshot, summary artifact를 `tests/artifacts/stress/` 아래에 남긴다.
+- macOS opt-in PTY 경로(`mise run pty`)에서 대량 stdout이 `PtyReader -> PtyEventQueue(capacity=1) -> RuntimeEventPump -> SurfaceRuntime`을 지나도 drop되지 않는지 검증한다.
 
 ## 의도적으로 아직 하지 않는 것
 
 - 절대 시간 기준으로 실패시키지 않는다.
-- 실제 PTY 대량 stdout backpressure를 stress로 검증하지 않는다. bounded queue의 capacity와 controlled command reader 경로는 기본/opt-in 테스트가 검증한다.
+- 실제 PTY 대량 stdout을 기본 `mise run stress`에 넣지 않는다. macOS PTY는 환경 의존이므로 opt-in `mise run pty`에 남긴다.
+- PTY backpressure의 RSS 상한, drain latency, UI responsiveness를 성능 예산으로 실패시키지 않는다. 아직 window/app host와 renderer가 없어서 잘못된 숫자를 최적화할 위험이 크다.
 - Metal frame pacing을 검증하지 않는다. future WebGPU backend도 생기면 별도 검증한다.
 - CoreText font resolve, fallback cache, glyph atlas eviction을 검증하지 않는다.
 - 메모리 상한을 강제하지 않는다.
@@ -29,7 +31,7 @@
 ## 추가해야 할 미래 스트레스
 
 - parser: ANSI/OSC/DCS fixture corpus 반복 입력
-- PTY: 대량 stdout, resize storm, tab close 중 process cleanup, interactive shell reader shutdown
+- PTY: 더 긴 대량 stdout soak, resize storm, tab close 중 process cleanup, interactive shell reader shutdown
 - renderer: 큰 grid, dirty region storm, cursor blink와 redraw 압박
 - font/glyph atlas: CJK/emoji/fallback 반복 출력, font size 변경, atlas eviction storm
 - workspace: 여러 tab/surface restore 반복

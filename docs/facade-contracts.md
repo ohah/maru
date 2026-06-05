@@ -137,7 +137,7 @@
 아직 하지 않는다:
 
 - interactive shell close가 blocking `readEvent`를 깨우고 reader thread를 정리하는 app lifecycle.
-- 대량 stdout backpressure stress.
+- 대량 stdout backpressure의 RSS/latency/UI responsiveness 성능 예산.
 
 ## `RuntimeEventPump`
 
@@ -167,7 +167,7 @@
 
 - 실제 macOS window/app event loop.
 - interactive shell shutdown lifecycle.
-- 대량 stdout backpressure stress.
+- 대량 stdout backpressure의 RSS/latency/UI responsiveness 성능 예산.
 
 ## `Workspace`
 

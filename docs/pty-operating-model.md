@@ -164,10 +164,11 @@ SurfaceRuntime reader thread와 pump 단계에서 추가된 테스트:
 - queue가 가득 찼을 때 무한 메모리 증가가 없다(`tryPush`가 `QueueFull`을 반환하고, 실제 reader 경로는 `pushBlocking`으로 기다린다).
 - `RuntimeEventPump`가 queued event를 `SurfaceRuntime`에 적용하고 output bytes 소유권을 끝낸다.
 - reader thread가 실제 macOS PTY controlled command output/exit를 bounded queue에 넣고, `RuntimeEventPump`가 이를 `SurfaceRuntime`에 적용한다.
+- 대량 stdout을 queue capacity 1로 흘려도 marker가 drop되지 않고, 여러 output event가 pump를 통과하며, 마지막 화면과 summary artifact가 남는다.
 
 아직 추가하지 않은 테스트:
 
-- 대량 stdout에서 reader가 오래 backpressure를 걸 때 memory와 responsiveness가 유지되는지.
+- 대량 stdout에서 reader가 오래 backpressure를 걸 때 RSS 상한, drain latency, UI responsiveness가 유지되는지.
 - 늦게 도착한 output이 detach된 surface로 흘러가지 않는다.
 - reader thread 종료와 process exit가 trace에 같은 domain event로 남는다.
 - interactive shell에서 app close가 blocking read를 깨우고 reader thread까지 정리되는지.

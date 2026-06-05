@@ -78,6 +78,29 @@ test "macOS PTY resize is visible to the child terminal" {
     );
 }
 
+test "macOS PTY close reaps a signal-ignoring child without leaking a zombie" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var session = try maru.pty.PtySession.spawn(allocator, .{
+        // The child ignores HUP and TERM and would otherwise sleep for 30s, so a
+        // correct close must escalate to SIGKILL and still reap it promptly.
+        .command = "/bin/sh",
+        .args = &.{ "-c", "trap '' HUP TERM; sleep 30" },
+        .size = .{ .cols = 20, .rows = 8 },
+    });
+    const child_pid = session.child_pid;
+
+    session.deinit();
+
+    // The child must have been reaped during close: waitpid on a reaped pid
+    // fails with ECHILD. A leftover zombie would instead return the pid, and a
+    // still-running child would return 0 (WNOHANG keeps this from blocking).
+    var status: c_int = 0;
+    const rc = std.c.waitpid(child_pid, &status, std.c.W.NOHANG);
+    try std.testing.expect(rc < 0);
+}
+
 const CollectedOutput = struct {
     bytes: []u8,
     exit_status: maru.pty.ExitStatus,

@@ -8,11 +8,10 @@
 
 ```text
 RenderSnapshot
--> TextLayout
--> FontResolver / TextShaper
--> GlyphRun
--> GlyphAtlas
 -> DrawList
+-> TextLayout / FontResolver / TextShaper
+-> GlyphRunList
+-> GlyphAtlas
 -> Metal backend
 ```
 
@@ -28,7 +27,7 @@ RenderSnapshot
 
 `TextLayout`:
 
-- `RenderSnapshot`의 cell을 `GlyphRun` 후보로 바꾼다.
+- `DrawList`의 cell을 `GlyphRunList` 후보로 바꾼다. `DrawList`는 `RenderSnapshot`에서 온 renderer 입력 계약이다.
 - 같은 terminal cell이 같은 layout 결과를 만들도록 deterministic한 입력 계약을 유지한다.
 - CoreText 타입을 public contract로 노출하지 않는다.
 
@@ -59,6 +58,7 @@ v1에서 지원하는 것:
 - font size, device scale factor, bold/italic style을 반영한 glyph cache.
 - ASCII, 한글/CJK wide character, 기본 emoji fallback을 깨지지 않게 처리.
 - `RenderSnapshot -> DrawList` deterministic test.
+- fake font backend 기반 `DrawList -> GlyphRunList` deterministic test.
 - macOS opt-in screenshot/font smoke artifact.
 
 v1에서 약속하지 않는 것:
@@ -218,7 +218,7 @@ dirty region의 장기 목표는 cell 단위지만, 현재 `TerminalCore`/snapsh
 
 기본 `mise run check`에 넣을 수 있는 것:
 
-- fake font backend를 사용한 `RenderSnapshot -> GlyphRun -> DrawList` golden test.
+- fake font backend를 사용한 `DrawList -> GlyphRunList` deterministic test.
 - ASCII, CJK, combining mark, emoji replacement에 대한 cell advance test.
 - fallback cache가 같은 cluster를 반복 조회하지 않는 unit test.
 - glyph atlas cache key가 size/scale/style/font id를 구분하는 test.

@@ -82,6 +82,24 @@ pub const PtyIo = struct {
 };
 ```
 
+`PtyReader`가 만든 queue event를 실제 runtime에 적용하는 쪽은 별도 app-layer helper인 `RuntimeEventPump`가 맡는다. `SurfaceRuntime`은 routing과 state update만 책임지고, queue ownership이나 blocking drain 정책을 직접 소유하지 않는다.
+
+```zig
+pub const RuntimeEventPump = struct {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        queue: *PtyEventQueue,
+        runtime: *SurfaceRuntime,
+    ) RuntimeEventPump;
+
+    pub fn drainAvailable(self: *RuntimeEventPump) PumpError!DrainSummary;
+    pub fn drainBlockingUntilExit(self: *RuntimeEventPump) PumpError!DrainUntilExitResult;
+    pub fn applyQueuedEvent(self: *RuntimeEventPump, event: QueuedPtyEvent) RuntimeError!PumpedEventKind;
+};
+```
+
+이 분리가 필요한 이유는 초보자 관점에서 보면 간단하다. `SurfaceRuntime`이 queue까지 알면 "어떤 surface로 보낼지"와 "event memory를 언제 해제할지"가 한 파일에 섞인다. Maru는 후자를 `RuntimeEventPump`로 빼서 app host, integration test, future trace recorder가 같은 ownership 규칙을 쓰게 한다.
+
 ## 초기 함수
 
 ```zig
@@ -151,6 +169,23 @@ pub const SurfaceRuntime = struct {
 - `exited`는 surface metadata와 artifact에 반영한다. 이 event를 trace로 남길 때의 이름은 `process-exit`이며, 둘은 같은 사건의 두 이름이다(대응표는 [Facade 계약](facade-contracts.md)의 `Trace/Event` 절).
 - `read_error`는 `RuntimePtyEvent`에서만 쓰는 runtime 오류 event다. 실패 artifact에 남기고, 환경 의존적 실패라 trace에는 기록하지 않는다.
 
+`RuntimeEventPump.applyQueuedEvent`:
+
+- queue에서 꺼낸 `QueuedPtyEvent` 하나를 `SurfaceRuntime.applyPtyEvent`로 적용한다.
+- 함수가 성공하든 실패하든 event의 `deinit`을 정확히 한 번 호출한다.
+- integration test가 raw PTY artifact를 남겨야 할 때도 event 적용/해제는 이 함수를 사용한다.
+
+`RuntimeEventPump.drainAvailable`:
+
+- GUI frame loop에서 쓰기 위한 non-blocking drain이다.
+- 현재 queue에 있는 event만 처리하고 비어 있으면 즉시 반환한다.
+
+`RuntimeEventPump.drainBlockingUntilExit`:
+
+- window loop가 붙기 전 headless integration에서 쓰기 위한 helper다.
+- exit event를 볼 때까지 기다린다.
+- queue가 먼저 닫히면 `ReaderQueueClosedBeforeExit`로 실패한다.
+
 `drainAppRequests`와 `completeClipboardRequest`:
 
 - 이번 순수 runtime PR에서는 구현하지 않는다.
@@ -175,3 +210,4 @@ pub const SurfaceRuntime = struct {
 - `detachSurface` 이후 `RestorableSurfaceMetadata`에는 live handle이 남지 않는다.
 - process exit event는 surface `process_state`를 `exited`로 바꾸고 이후 input을 막는다.
 - read error event는 `ReadFailed`로 관측된다.
+- pump는 queued output/exit/read_error를 runtime에 적용하고 event ownership을 끝낸다.

@@ -22,7 +22,7 @@ openpty
 
 이 선택은 최고 성능 설계가 아니라, 초기에 충분한 제어권을 가지면서도 테스트하기 쉬운 설계다. 여러 surface가 매우 많아지면 macOS `kqueue` 기반으로 바꿀 수 있지만, 먼저 맞춰야 할 것은 속도가 아니라 책임 경계와 재현 가능한 event 흐름이다.
 
-현재 `PtySession` 최소 구현은 테스트가 통제할 수 있도록 blocking pull API인 `readEvent`를 먼저 제공한다. 앱 runtime 단계에서는 `PtyReader`가 이 `readEvent` 루프를 별도 reader thread에서 실행하고, `PtyEventQueue` bounded queue를 통해 app/runtime loop로 넘긴다. 즉 `PtySession` backend는 여전히 thread를 직접 소유하지 않고, app layer가 reader lifecycle을 조립한다.
+현재 `PtySession` 최소 구현은 테스트가 통제할 수 있도록 blocking pull API인 `readEvent`를 먼저 제공한다. 앱 runtime 단계에서는 `PtyReader`가 이 `readEvent` 루프를 별도 reader thread에서 실행하고, `PtyEventQueue` bounded queue를 통해 `RuntimeEventPump`로 넘긴다. 즉 `PtySession` backend는 여전히 thread를 직접 소유하지 않고, app layer가 reader lifecycle과 queue drain을 조립한다.
 
 ## 기본 흐름
 
@@ -39,7 +39,7 @@ PtyReader thread
   -> PtyEvent.output 생성
   -> PtyEventQueue bounded queue에 넣기
 
-app/runtime loop
+RuntimeEventPump
   -> queue에서 QueuedPtyEvent 꺼내기
   -> SurfaceRuntime.applyPtyEvent
   -> Surface.TerminalCore.write
@@ -72,9 +72,9 @@ SurfaceRuntime이 live shell을 연결하는 시점에는 reader thread를 둔�
 reader thread는 단순하다.
 
 - PTY output을 읽는 책임이 한 곳에 있다.
-- UI/runtime loop는 queue만 drain하면 된다.
+- UI/runtime loop는 `RuntimeEventPump.drainAvailable`만 호출하면 된다.
 - deterministic command test를 만들기 쉽다.
-- queue event의 output bytes는 queue consumer가 소유권을 끝낸다. 그래서 consumer는 `SurfaceRuntime.applyPtyEvent` 후 `QueuedPtyEvent.deinit`으로 bytes를 해제해야 한다.
+- queue event의 output bytes는 queue consumer가 소유권을 끝낸다. Maru 제품 코드에서는 그 consumer 역할을 `RuntimeEventPump`가 맡고, `SurfaceRuntime.applyPtyEvent` 성공/실패와 상관없이 `QueuedPtyEvent.deinit`을 정확히 한 번 호출한다.
 
 ## backpressure 정책
 
@@ -92,7 +92,7 @@ SurfaceRuntime 단계의 queue는 bounded로 둔다. queue가 가득 차면 read
 -> queue full
 -> reader blocks
 -> child stdout blocks
--> UI/runtime loop가 drain하면 다시 진행
+-> RuntimeEventPump가 drain하면 다시 진행
 ```
 
 ## UTF-8과 escape sequence 경계
@@ -159,10 +159,11 @@ close (child가 아직 살아 있을 때)
 - resize request가 PTY layer까지 전달된다.
 - 아직 살아 있는 child를 close할 때 HUP/TERM을 무시해도 escalation으로 reap되어 zombie가 남지 않는다.
 
-SurfaceRuntime reader thread 단계에서 추가된 테스트:
+SurfaceRuntime reader thread와 pump 단계에서 추가된 테스트:
 
 - queue가 가득 찼을 때 무한 메모리 증가가 없다(`tryPush`가 `QueueFull`을 반환하고, 실제 reader 경로는 `pushBlocking`으로 기다린다).
-- reader thread가 실제 macOS PTY controlled command output/exit를 bounded queue에 넣고, app/runtime loop가 이를 `SurfaceRuntime`에 적용한다.
+- `RuntimeEventPump`가 queued event를 `SurfaceRuntime`에 적용하고 output bytes 소유권을 끝낸다.
+- reader thread가 실제 macOS PTY controlled command output/exit를 bounded queue에 넣고, `RuntimeEventPump`가 이를 `SurfaceRuntime`에 적용한다.
 
 아직 추가하지 않은 테스트:
 

@@ -201,33 +201,28 @@ fn drainRuntimeQueueUntilExit(
 ) !CollectedOutput {
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(allocator);
+    var pump = maru.app.RuntimeEventPump.init(allocator, queue, runtime);
 
     while (true) {
-        var event = queue.popBlocking() orelse return error.ReaderQueueClosedBeforeExit;
-        errdefer event.deinit(allocator);
-
-        switch (event) {
-            .output => |output| {
-                // Reader thread가 queue에 넣은 bytes는 runtime에 적용한 뒤 해제한다.
-                // 이렇게 해야 테스트도 실제 앱처럼 queue를 drain하는 쪽이 event ownership을 끝낸다.
+        const event = queue.popBlocking() orelse return error.ReaderQueueClosedBeforeExit;
+        const exit_status: ?maru.pty.ExitStatus = switch (event) {
+            .output => |output| blk: {
+                // 테스트는 raw PTY artifact를 남기기 위해 output bytes를 복사한다.
+                // event 적용과 event 해제는 제품 코드인 RuntimeEventPump에 맡겨
+                // 테스트 전용 ownership 규칙이 따로 생기지 않게 한다.
                 try bytes.appendSlice(allocator, output.bytes);
-                try runtime.applyPtyEvent(event.runtimeEvent());
-                event.deinit(allocator);
+                break :blk null;
             },
-            .exited => |exited| {
-                try runtime.applyPtyEvent(event.runtimeEvent());
-                event.deinit(allocator);
-                return .{
-                    .bytes = try bytes.toOwnedSlice(allocator),
-                    .exit_status = exited.status,
-                };
-            },
-            .read_error => {
-                // The error return below runs the `errdefer event.deinit`, so
-                // do not also deinit here or the event is released twice.
-                _ = runtime.applyPtyEvent(event.runtimeEvent()) catch {};
-                return error.ReaderReadFailed;
-            },
+            .exited => |exited| exited.status,
+            .read_error => null,
+        };
+
+        _ = try pump.applyQueuedEvent(event);
+        if (exit_status) |status| {
+            return .{
+                .bytes = try bytes.toOwnedSlice(allocator),
+                .exit_status = status,
+            };
         }
     }
 }

@@ -204,7 +204,7 @@ TDD 방식:
 - 여러 탭.
 - split layout.
 - workspace restore.
-- 실제 app host lifecycle. `PtyReader`와 `PtyEventQueue`는 생겼지만 macOS window/app loop가 아직 queue를 drain하지 않는다.
+- 실제 app host lifecycle. `PtyReader`, `PtyEventQueue`, `RuntimeEventPump`는 생겼지만 macOS window/app loop가 아직 이 pump를 frame/input lifecycle에 연결하지 않는다.
 - OSC52/shell integration app request queue.
 
 ## 6단계: Headless E2E를 초기 성공 기준으로 고정
@@ -225,7 +225,7 @@ TDD 방식:
 완료 기준:
 
 - `mise run check`가 deterministic headless E2E를 포함한다.
-- `mise run pty`가 macOS PTY controlled command와 `SurfaceRuntime` routing 경로를 opt-in으로 검증한다.
+- `mise run pty`가 macOS PTY controlled command와 `PtyReader -> PtyEventQueue -> RuntimeEventPump -> SurfaceRuntime` routing 경로를 opt-in으로 검증한다.
 - 실패했을 때 원인을 parser, PTY, surface 연결 중 어디서 봐야 하는지 artifact로 판단할 수 있다.
 
 아직 하지 않는다:

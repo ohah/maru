@@ -26,7 +26,7 @@ src/
   observability.zig     debug event/trace/snapshot facade
   plugin.zig            action/plugin facade
 
-  app/                  window/surface/runtime/pty_reader처럼 앱 상태와 live 연결 책임별 구현
+  app/                  window/surface/runtime/pty_reader/runtime_pump처럼 앱 상태와 live 연결 책임별 구현
   config/               action parsing, theme/font config
   pty/                  PTY backend, spawn request, process handle
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding

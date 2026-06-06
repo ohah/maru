@@ -6,6 +6,7 @@ pub const AtlasSlotId = u32;
 pub const GlyphAtlasConfig = struct {
     max_slots: usize = 1024,
     atlas_width_px: u32 = 1024,
+    atlas_height_px: u32 = 1024,
 };
 
 pub const AtlasInvalidationReason = enum {

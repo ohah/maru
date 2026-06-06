@@ -75,6 +75,10 @@ pub fn build(b: *std.Build) void {
         macos_window_smoke_cmd.setCwd(b.path("."));
         macos_window_smoke_step.dependOn(&macos_window_smoke_cmd.step);
 
+        // 계약 테스트는 summary schema(renderSummary/durationFromEnv)만 검증하고
+        // native AppKit bridge는 호출하지 않는다. extern fn은 참조되지 않으므로
+        // 이 test 바이너리는 `.m`/Cocoa 링크 없이 순수 Zig로 빌드한다. 그래야
+        // "summary 포맷 변경"과 "창 생성 실패"가 toolchain 의존 없이 분리된다.
         const macos_window_smoke_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/window_smoke.zig"),
@@ -83,11 +87,6 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             }),
         });
-        macos_window_smoke_tests.root_module.addCSourceFile(.{
-            .file = b.path("src/platform/macos/appkit_window_smoke.m"),
-            .flags = &.{"-fobjc-arc"},
-        });
-        macos_window_smoke_tests.root_module.linkFramework("Cocoa", .{});
 
         const test_macos_window_smoke_step = b.step("test-macos-window-smoke", "Run macOS window smoke contract tests");
         const run_macos_window_smoke_tests = b.addRunArtifact(macos_window_smoke_tests);

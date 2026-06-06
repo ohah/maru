@@ -141,9 +141,10 @@ pub fn build(b: *std.Build) void {
         run_macos_metal_smoke_tests.setCwd(b.path("."));
         test_macos_metal_smoke_step.dependOn(&run_macos_metal_smoke_tests.step);
 
-        // CoreText smoke는 창이나 GPU를 만들지 않고 macOS font stack만 검증한다.
-        // 실제 text renderer를 붙이기 전에 font resolve/shaping 실패와 Metal 실패를
-        // 다른 artifact로 나누기 위한 opt-in platform smoke다.
+        // CoreText smoke는 창이나 GPU를 만들지 않고 macOS font stack과 CPU bitmap
+        // rasterization만 검증한다. 실제 text renderer를 붙이기 전에 font
+        // resolve/shaping/raster 실패와 Metal 실패를 다른 artifact로 나누기 위한
+        // opt-in platform smoke다.
         const macos_coretext_smoke = b.addExecutable(.{
             .name = "maru-macos-coretext-smoke",
             .root_module = b.createModule(.{
@@ -162,8 +163,9 @@ pub fn build(b: *std.Build) void {
         });
         macos_coretext_smoke.root_module.linkFramework("Foundation", .{});
         macos_coretext_smoke.root_module.linkFramework("CoreText", .{});
+        macos_coretext_smoke.root_module.linkFramework("CoreGraphics", .{});
 
-        const macos_coretext_smoke_step = b.step("macos-coretext-smoke", "Run the macOS CoreText font shaping smoke");
+        const macos_coretext_smoke_step = b.step("macos-coretext-smoke", "Run the macOS CoreText font shaping/raster smoke");
         const macos_coretext_smoke_cmd = b.addRunArtifact(macos_coretext_smoke);
         macos_coretext_smoke_cmd.setCwd(b.path("."));
         macos_coretext_smoke_step.dependOn(&macos_coretext_smoke_cmd.step);

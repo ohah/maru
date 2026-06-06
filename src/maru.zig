@@ -1,4 +1,5 @@
 pub const app = @import("app.zig");
+pub const color = @import("color.zig");
 pub const config = @import("config.zig");
 pub const observability = @import("observability.zig");
 pub const plugin = @import("plugin.zig");

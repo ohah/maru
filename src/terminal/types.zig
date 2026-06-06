@@ -1,3 +1,5 @@
+const color = @import("../color.zig");
+
 pub const Size = struct {
     cols: u16,
     rows: u16,
@@ -5,11 +7,10 @@ pub const Size = struct {
     pub const default: Size = .{ .cols = 80, .rows = 24 };
 };
 
-pub const Rgb = struct {
-    r: u8,
-    g: u8,
-    b: u8,
-};
+// Rgb는 terminal 전용 타입이 아니라 config/renderer도 쓰는 공용 색 primitive다.
+// 단일 출처를 src/color.zig에 두고 여기서는 재노출만 한다. `terminal.Rgb`와 아래
+// `Color` union은 그대로 동작한다.
+pub const Rgb = color.Rgb;
 
 pub const Color = union(enum) {
     default,

@@ -321,12 +321,16 @@ static id<MTLRenderPipelineState> maru_make_glyph_text_pipeline(
     descriptor.vertexFunction = [library newFunctionWithName:@"maru_glyph_text_vertex"];
     descriptor.fragmentFunction = [library newFunctionWithName:@"maru_glyph_text_fragment"];
     descriptor.colorAttachments[0].pixelFormat = pixel_format;
+    // glyph texture는 CoreGraphics가 kCGImageAlphaPremultipliedLast로 만든 premultiplied
+    // 데이터이고 fragment shader가 그 값을 그대로 반환한다. premultiplied source의 올바른
+    // "over" 합성은 source 계수가 One이다. SourceAlpha를 쓰면 alpha가 한 번 더 곱해져
+    // 반투명 glyph edge가 실제보다 어둡게(클리어 색에 가깝게) 합성된다.
     descriptor.colorAttachments[0].blendingEnabled = YES;
     descriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
     descriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
-    descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+    descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
     descriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-    descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorSourceAlpha;
+    descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
     descriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
 
     error = nil;

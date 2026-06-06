@@ -42,7 +42,7 @@ RenderSnapshot
 - glyph bitmap을 texture atlas에 캐시한다.
 - atlas miss, upload byte, eviction 같은 성능 관측 값을 남긴다.
 - renderer backend가 바뀌어도 cache key와 glyph run 의미가 흔들리지 않게 한다.
-- 초기 구현은 GPU texture가 아니라 `GlyphCacheKey -> AtlasSlot` domain cache 계약과 macOS CoreText CPU bitmap smoke를 먼저 고정한다. 실제 texture 좌표와 Metal upload는 macOS backend 단계에서 붙인다.
+- 초기 구현은 `GlyphCacheKey -> AtlasSlot` domain cache 계약, macOS CoreText CPU bitmap smoke, CPU bitmap -> Metal texture upload smoke를 먼저 고정한다. 실제 atlas packing 좌표와 shader sampling은 macOS backend 단계에서 붙인다.
 
 `Metal backend`:
 
@@ -244,14 +244,15 @@ macOS opt-in으로 둘 것:
 - CoreText가 ASCII/CJK/emoji probe를 glyph run으로 shape하고, 각 probe 구간이 `.notdef`가 아닌 glyph로 매핑되는지 확인하는 smoke.
 - CoreText glyph record가 Maru `GlyphAtlas` cache key 후보로 들어가는 smoke.
 - 같은 `CTLine`을 CPU bitmap에 그려 non-clear pixel이 생기는 smoke.
+- CoreText CPU bitmap을 Metal texture에 업로드하고 readback 결과가 source bitmap과 같은지 확인하는 smoke.
 - 설치되지 않은 font가 system monospace fallback으로 가는 smoke.
 - Retina scale factor별 atlas smoke.
 - screenshot artifact.
-- Metal texture upload와 glyph rasterization pixel comparison.
+- shader sampling과 glyph rasterization pixel comparison.
 
-이 smoke는 Metal texture upload나 실제 화면 glyph draw를 증명하지 않는다. 의도는 font resolve, shaping, rasterization, GPU upload 실패를 서로 다른 단계로 분리하는 것이다.
+이 smoke들은 실제 화면 glyph draw를 증명하지 않는다. 의도는 font resolve, shaping, rasterization, GPU upload, shader sampling 실패를 서로 다른 단계로 분리하는 것이다.
 
-기본 CI에서 pixel-perfect font test를 강제하지 않는 이유는 font stack이 OS 업데이트와 설치 폰트에 영향을 받기 때문이다. 대신 기본 CI는 Maru가 만든 domain data와 cache/invalidation 계약을 검증하고, 실제 픽셀은 opt-in artifact로 추적한다. macOS CoreText smoke는 CoreText가 준 glyph id/font id 후보가 atlas key 후보로 바뀌는지와 CPU bitmap까지 나오는지 확인하고, GPU texture upload는 다음 단계에서 별도로 확인한다.
+기본 CI에서 pixel-perfect font test를 강제하지 않는 이유는 font stack이 OS 업데이트와 설치 폰트에 영향을 받기 때문이다. 대신 기본 CI는 Maru가 만든 domain data와 cache/invalidation 계약을 검증하고, 실제 픽셀은 opt-in artifact로 추적한다. macOS CoreText smoke는 CoreText가 준 glyph id/font id 후보가 atlas key 후보로 바뀌는지와 CPU bitmap까지 나오는지 확인한다. glyph texture smoke는 그 CPU bitmap이 Metal texture에 byte-preserving upload/readback되는지 확인하고, shader sampling과 실제 화면 draw는 다음 단계에서 별도로 확인한다.
 
 ## 관측 가능성
 

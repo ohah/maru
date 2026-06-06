@@ -186,7 +186,8 @@ opt-in으로 둘 것:
 - 실제 Metal device 생성.
 - 실제 AppKit 창 위 CAMetalLayer `DrawList` placeholder present/readback smoke(`mise run macos-metal-smoke`).
 - 실제 CoreText font resolve/glyph run/atlas key/CPU glyph raster smoke(`mise run macos-coretext-smoke`).
-- 실제 glyph texture upload smoke.
+- 실제 CoreText CPU bitmap -> Metal texture upload/readback smoke(`mise run macos-glyph-texture-smoke`).
+- 실제 glyph texture shader sampling/text draw smoke.
 - frame pacing, GPU timing, font stack 영향을 받는 성능 측정.
 
 ## clean-room 기준

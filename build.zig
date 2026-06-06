@@ -186,6 +186,46 @@ pub fn build(b: *std.Build) void {
         const run_macos_coretext_smoke_tests = b.addRunArtifact(macos_coretext_smoke_tests);
         run_macos_coretext_smoke_tests.setCwd(b.path("."));
         test_macos_coretext_smoke_step.dependOn(&run_macos_coretext_smoke_tests.step);
+
+        // Glyph texture smoke는 창을 띄우지 않고 CoreText CPU bitmap을 Metal texture로
+        // 업로드한 뒤 blit readback으로 픽셀이 보존되는지 확인한다. 실제 text draw와
+        // window compositing은 다음 단계로 남기고, raster와 GPU upload 실패를 분리한다.
+        const macos_glyph_texture_smoke = b.addExecutable(.{
+            .name = "maru-macos-glyph-texture-smoke",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/glyph_texture_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        macos_glyph_texture_smoke.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/glyph_texture_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        macos_glyph_texture_smoke.root_module.linkFramework("Foundation", .{});
+        macos_glyph_texture_smoke.root_module.linkFramework("CoreText", .{});
+        macos_glyph_texture_smoke.root_module.linkFramework("CoreGraphics", .{});
+        macos_glyph_texture_smoke.root_module.linkFramework("Metal", .{});
+
+        const macos_glyph_texture_smoke_step = b.step("macos-glyph-texture-smoke", "Run the macOS CoreText-to-Metal glyph texture smoke");
+        const macos_glyph_texture_smoke_cmd = b.addRunArtifact(macos_glyph_texture_smoke);
+        macos_glyph_texture_smoke_cmd.setCwd(b.path("."));
+        macos_glyph_texture_smoke_step.dependOn(&macos_glyph_texture_smoke_cmd.step);
+
+        const macos_glyph_texture_smoke_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/glyph_texture_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+
+        const test_macos_glyph_texture_smoke_step = b.step("test-macos-glyph-texture-smoke", "Run macOS glyph texture smoke contract tests");
+        const run_macos_glyph_texture_smoke_tests = b.addRunArtifact(macos_glyph_texture_smoke_tests);
+        run_macos_glyph_texture_smoke_tests.setCwd(b.path("."));
+        test_macos_glyph_texture_smoke_step.dependOn(&run_macos_glyph_texture_smoke_tests.step);
     }
 
     const core_tests = b.addTest(.{

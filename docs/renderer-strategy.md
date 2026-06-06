@@ -195,7 +195,7 @@ opt-in으로 둘 것:
 
 - macOS window server가 필요한 screenshot smoke.
 - 실제 Metal device 생성.
-- 실제 AppKit 창 위 CAMetalLayer `RendererState -> GlyphFrame` placeholder present/readback smoke(`mise run macos-metal-smoke`).
+- 실제 AppKit 창 위 CAMetalLayer `RendererState -> GlyphFrame` placeholder present/readback smoke(`mise run macos-metal-smoke`). 이 smoke는 native cell이 atlas slot id와 placement 후보를 받았는지도 `renderer_atlas_slot_placement`로 남긴다.
 - 실제 CoreText font resolve/glyph run/atlas key/CPU glyph raster smoke(`mise run macos-coretext-smoke`).
 - 실제 CoreText CPU bitmap -> Metal texture upload/readback smoke(`mise run macos-glyph-texture-smoke`).
 - 실제 CoreText glyph texture를 AppKit/CAMetalLayer 창에서 shader sampling하고 drawable readback 및 PPM screenshot artifact로 glyph ink를 확인하는 smoke(`mise run macos-glyph-text-smoke`). 이 smoke는 동시에 Zig 제품 경로인 `TerminalCore -> RendererState -> GlyphFrame` probe를 만들어 summary에 `renderer_frame_prepared=true`와 glyph/atlas 통계를 남긴다. 이 probe는 아직 실제 CoreText shaper가 아니라 `FakeFontBackend`를 쓰므로 `renderer_shaper=fake_font_backend`로 한계를 드러낸다.

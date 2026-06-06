@@ -243,13 +243,13 @@ fn buildRendererFrameProbe(
     defer frame.deinit(allocator);
 
     const glyph_frame = frame.glyph_frame;
-    const frame_prepared = glyph_frame.size.cols == frame.draw_list.size.cols and
-        glyph_frame.size.rows == frame.draw_list.size.rows and
-        glyph_frame.stats.glyph_count == glyph_frame.glyphs.len and
-        glyph_frame.stats.upload_count == glyph_frame.uploads.len and
-        glyph_frame.stats.upload_count + glyph_frame.stats.reused_count == glyph_frame.glyphs.len and
+    const atlas_entries = renderer_state.atlas.entryCount();
+    // frame 일관성 계약(draw list와 glyph count/slice 정합)은 renderer가 소유한다
+    // (RenderFrame.glyphFrameConsistent). 이 probe는 거기에 더해 실제로 glyph가 잡혔고
+    // atlas가 채워졌는지(>0)만 확인해, 준비된 frame이 빈 frame이 아님을 함께 본다.
+    const frame_prepared = frame.glyphFrameConsistent() and
         glyph_frame.stats.glyph_count > 0 and
-        renderer_state.atlas.entryCount() > 0;
+        atlas_entries > 0;
 
     return .{
         .frame_prepared = frame_prepared,
@@ -265,7 +265,7 @@ fn buildRendererFrameProbe(
         .reused_count = glyph_frame.stats.reused_count,
         .fallback_count = glyph_frame.stats.fallback_count,
         .replacement_count = glyph_frame.stats.replacement_count,
-        .atlas_entries = renderer_state.atlas.entryCount(),
+        .atlas_entries = atlas_entries,
     };
 }
 

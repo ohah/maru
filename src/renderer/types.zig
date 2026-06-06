@@ -22,6 +22,20 @@ pub const RenderFrame = struct {
         self.draw_list.deinit(allocator);
         self.* = undefined;
     }
+
+    // glyph frame이 backend가 소비할 수 있을 만큼 draw list와 내부 count/slice가 서로
+    // 맞는지 본다. "draw cell 개수 == glyph 개수"를 뜻하지 않는다. 실제 shaper가 공백이나
+    // zero-ink glyph를 atlas upload 대상에서 제외할 수 있기 때문이다. 이 frame 준비 계약을
+    // RenderFrame이 직접 소유해, app host와 여러 smoke probe가 같은 일관성 검사를 각자
+    // 재구현하다 서로 어긋나지 않게 한다.
+    pub fn glyphFrameConsistent(self: RenderFrame) bool {
+        const frame = self.glyph_frame;
+        return frame.size.cols == self.draw_list.size.cols and
+            frame.size.rows == self.draw_list.size.rows and
+            frame.stats.glyph_count == frame.glyphs.len and
+            frame.stats.upload_count == frame.uploads.len and
+            frame.stats.upload_count + frame.stats.reused_count == frame.glyphs.len;
+    }
 };
 
 pub fn initialBackendForMacOS() Backend {

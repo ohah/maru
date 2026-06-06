@@ -114,8 +114,11 @@ fn renderSummary(
     try writer.print("glyph_texture_uploaded={}\n", .{smoke_status.glyph_texture_uploaded});
     try writer.writeAll("glyph_text=false\n");
     try writer.writeAll("ui_note=coretext_cpu_bitmap_to_metal_texture_no_window_no_text_draw\n");
-    // native_status 코드 의미는 glyph_texture_smoke.m의 status 범례 주석을 단일 출처로 둔다.
+    // artifact만 보고도 실패 단계를 읽을 수 있게 숫자 status와 사람이 읽는 label을
+    // 같이 남긴다. 새 native status를 추가할 때는 bridge의 status 범례와 이 label을
+    // 함께 갱신해야 한다.
     try writer.print("native_status={d}\n", .{native.status});
+    try writer.print("native_status_label={s}\n", .{nativeStatusLabel(native.status)});
     try writer.print("metal_device_created={d}\n", .{native.metal_device_created});
     try writer.print("command_queue_created={d}\n", .{native.command_queue_created});
     try writer.print("native_source_rasterized={d}\n", .{native.source_rasterized});
@@ -131,6 +134,20 @@ fn renderSummary(
     try writer.print("readback_failures={d}\n", .{native.readback_failures});
 
     return output.toOwnedSlice();
+}
+
+fn nativeStatusLabel(status: c_int) []const u8 {
+    return switch (status) {
+        -1 => "not_run",
+        0 => "ok",
+        2 => "cpu_raster_failed",
+        3 => "metal_device_failed",
+        4 => "command_queue_failed",
+        5 => "texture_create_failed",
+        6 => "readback_infra_failed",
+        7 => "readback_mismatch",
+        else => "unknown",
+    };
 }
 
 fn writeSummary(io: std.Io, summary: []const u8) !void {
@@ -170,10 +187,26 @@ test "macOS glyph texture smoke summary reports upload boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "metal_texture=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_texture_uploaded=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_text=false\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "native_status=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "native_status_label=ok\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "source_non_clear_pixels=77\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "texture_non_clear_pixels=77\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "texture_mismatched_pixels=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "upload_bytes=32768\n") != null);
+}
+
+test "glyph texture smoke status labels explain native failure stages" {
+    // 실패 artifact를 볼 때 숫자 status만 있으면 bridge 코드를 다시 열어봐야 한다.
+    // label 계약을 고정해 CI artifact만으로도 어느 단계에서 멈췄는지 바로 읽게 한다.
+    try std.testing.expectEqualStrings("not_run", nativeStatusLabel(-1));
+    try std.testing.expectEqualStrings("ok", nativeStatusLabel(0));
+    try std.testing.expectEqualStrings("cpu_raster_failed", nativeStatusLabel(2));
+    try std.testing.expectEqualStrings("metal_device_failed", nativeStatusLabel(3));
+    try std.testing.expectEqualStrings("command_queue_failed", nativeStatusLabel(4));
+    try std.testing.expectEqualStrings("texture_create_failed", nativeStatusLabel(5));
+    try std.testing.expectEqualStrings("readback_infra_failed", nativeStatusLabel(6));
+    try std.testing.expectEqualStrings("readback_mismatch", nativeStatusLabel(7));
+    try std.testing.expectEqualStrings("unknown", nativeStatusLabel(99));
 }
 
 test "glyph texture upload requires readback to match the source bitmap" {

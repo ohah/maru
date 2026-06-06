@@ -75,3 +75,115 @@ test "render frame owns and frees draw and glyph frame data" {
     };
     frame.deinit(std.testing.allocator);
 }
+
+const TestRenderFrameShape = struct {
+    draw_cols: u16 = 2,
+    draw_rows: u16 = 1,
+    glyph_cols: u16 = 2,
+    glyph_rows: u16 = 1,
+    glyph_len: usize = 0,
+    upload_len: usize = 0,
+    glyph_count: usize = 0,
+    upload_count: usize = 0,
+    reused_count: usize = 0,
+};
+
+fn makeTestRenderFrame(
+    allocator: std.mem.Allocator,
+    shape: TestRenderFrameShape,
+) !RenderFrame {
+    // glyphFrameConsistent는 slice의 실제 원소 값을 읽지 않고 frame metadata와 len만
+    // 검증한다. 그래서 테스트 fixture도 uninitialized slice로 충분하다. 이 helper는
+    // "frame 준비 계약"의 성공/실패 모양을 작게 만들기 위한 전용 fixture다.
+    const cells = try allocator.alloc(draw_list.DrawCell, 0);
+    errdefer allocator.free(cells);
+    const draw_overlays = try allocator.alloc(draw_list.DrawOverlay, 0);
+    errdefer allocator.free(draw_overlays);
+    const prepared = try allocator.alloc(glyph_frame.PreparedGlyph, shape.glyph_len);
+    errdefer allocator.free(prepared);
+    const frame_overlays = try allocator.alloc(draw_list.DrawOverlay, 0);
+    errdefer allocator.free(frame_overlays);
+    const uploads = try allocator.alloc(glyph_frame.GlyphUpload, shape.upload_len);
+    errdefer allocator.free(uploads);
+
+    return .{
+        .backend = initialBackendForMacOS(),
+        .draw_list = .{
+            .size = .{ .cols = shape.draw_cols, .rows = shape.draw_rows },
+            .cursor = .{},
+            .dirty = null,
+            .cells = cells,
+            .overlays = draw_overlays,
+        },
+        .glyph_frame = .{
+            .size = .{ .cols = shape.glyph_cols, .rows = shape.glyph_rows },
+            .cursor = .{},
+            .dirty = null,
+            .glyphs = prepared,
+            .overlays = frame_overlays,
+            .uploads = uploads,
+            .stats = .{
+                .glyph_count = shape.glyph_count,
+                .upload_count = shape.upload_count,
+                .reused_count = shape.reused_count,
+            },
+        },
+    };
+}
+
+test "render frame consistency accepts matching glyph frame metadata" {
+    var empty = try makeTestRenderFrame(std.testing.allocator, .{});
+    defer empty.deinit(std.testing.allocator);
+    try std.testing.expect(empty.glyphFrameConsistent());
+
+    var non_empty = try makeTestRenderFrame(std.testing.allocator, .{
+        .glyph_len = 2,
+        .upload_len = 1,
+        .glyph_count = 2,
+        .upload_count = 1,
+        .reused_count = 1,
+    });
+    defer non_empty.deinit(std.testing.allocator);
+    try std.testing.expect(non_empty.glyphFrameConsistent());
+}
+
+test "render frame consistency rejects size and count mismatches" {
+    // app host와 visible smoke가 이 helper를 공유하므로, false로 닫혀야 하는 모양을
+    // renderer 레이어에서 직접 고정한다. 그렇지 않으면 summary가 준비되지 않은 frame을
+    // `glyph_frame_ready=true`나 `renderer_frame_prepared=true`로 보고할 수 있다.
+    var size_mismatch = try makeTestRenderFrame(std.testing.allocator, .{
+        .glyph_cols = 3,
+    });
+    defer size_mismatch.deinit(std.testing.allocator);
+    try std.testing.expect(!size_mismatch.glyphFrameConsistent());
+
+    var glyph_count_mismatch = try makeTestRenderFrame(std.testing.allocator, .{
+        .glyph_len = 1,
+        .upload_len = 1,
+        .glyph_count = 2,
+        .upload_count = 1,
+        .reused_count = 0,
+    });
+    defer glyph_count_mismatch.deinit(std.testing.allocator);
+    try std.testing.expect(!glyph_count_mismatch.glyphFrameConsistent());
+
+    var upload_count_mismatch = try makeTestRenderFrame(std.testing.allocator, .{
+        .glyph_len = 1,
+        .upload_len = 0,
+        .glyph_count = 1,
+        .upload_count = 1,
+        .reused_count = 0,
+    });
+    defer upload_count_mismatch.deinit(std.testing.allocator);
+    try std.testing.expect(!upload_count_mismatch.glyphFrameConsistent());
+
+    var accounting_mismatch = try makeTestRenderFrame(std.testing.allocator, .{
+        .glyph_len = 2,
+        .upload_len = 1,
+        .glyph_count = 2,
+        .upload_count = 1,
+        .reused_count = 0,
+    });
+    defer accounting_mismatch.deinit(std.testing.allocator);
+    try std.testing.expect(!accounting_mismatch.glyphFrameConsistent());
+}

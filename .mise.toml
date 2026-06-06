@@ -38,12 +38,20 @@ description = "Run macOS Metal smoke contract tests"
 run = "zig build test-macos-metal-smoke"
 
 [tasks.macos-coretext-smoke]
-description = "Run macOS CoreText font shaping smoke"
+description = "Run macOS CoreText font shaping/raster smoke"
 run = "zig build macos-coretext-smoke"
 
 [tasks.test-macos-coretext-smoke]
 description = "Run macOS CoreText smoke contract tests"
 run = "zig build test-macos-coretext-smoke"
+
+[tasks.macos-glyph-texture-smoke]
+description = "Run macOS CoreText-to-Metal glyph texture smoke"
+run = "zig build macos-glyph-texture-smoke"
+
+[tasks.test-macos-glyph-texture-smoke]
+description = "Run macOS glyph texture smoke contract tests"
+run = "zig build test-macos-glyph-texture-smoke"
 
 [tasks.pty]
 description = "Run opt-in macOS PTY integration tests"

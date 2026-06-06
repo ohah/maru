@@ -257,6 +257,7 @@ TDD 방식:
 - macOS window smoke: `mise run test-macos-window-smoke`로 summary 계약을 검증하고, `mise run macos-window-smoke`로 Metal/terminal grid 없이 AppKit 창을 실제로 띄워 `visible_ui=true` artifact를 남긴다. 이 단계는 app lifecycle smoke이며, terminal renderer 검증은 아니다.
 - macOS Metal smoke: `mise run test-macos-metal-smoke`로 summary와 fixture 계약을 검증하고, `mise run macos-metal-smoke`로 AppKit 창 위 CAMetalLayer에 `DrawList` 기반 placeholder 셀을 present한 뒤 셀 중심 픽셀을 readback한다. `terminal_grid=true`는 입력 cell count가 아니라 샘플한 셀 중심 픽셀이 모두 clear 색이 아닐 때만 기록한다. 이 단계는 glyph/text renderer 검증은 아니지만, `DrawList -> Metal` 소비 경로의 첫 실제 UI 검증이다.
 - macOS CoreText smoke: `mise run test-macos-coretext-smoke`로 summary 계약을 검증하고, `mise run macos-coretext-smoke`로 창/GPU 없이 macOS CoreText가 기본 고정폭 폰트를 찾고 ASCII/CJK/emoji probe를 glyph run으로 shape하는지 확인한다. 또한 glyph id/font id 후보가 Zig `GlyphAtlas` cache key 후보로 들어갈 수 있는지 확인하고, 같은 `CTLine`을 CPU bitmap에 그려 non-clear pixel이 나오는지도 확인한다. 이 단계는 Metal texture upload나 실제 화면 text draw 검증은 아니지만, text renderer 전에 font stack/atlas-key/raster 실패를 분리하는 검증이다.
+- macOS glyph texture smoke: `mise run test-macos-glyph-texture-smoke`로 summary 계약을 검증하고, `mise run macos-glyph-texture-smoke`로 창 없이 CoreText CPU bitmap을 Metal texture에 업로드한 뒤 blit readback 결과가 source bitmap과 같은지 확인한다. 이 단계는 shader sampling이나 실제 화면 text draw 검증은 아니지만, raster 결과가 GPU texture로 보존되는지 분리하는 검증이다.
 - screenshot artifact: 실제 화면 검증이 가능한 곳부터 opt-in으로 추가한다.
 
 macOS bridge 언어 선택:
@@ -275,6 +276,7 @@ macOS bridge 언어 선택:
 - `mise run macos-window-smoke`가 macOS에서 실제 창을 띄우고, 아직 Metal/terminal grid가 없다는 한계를 summary에 적는다.
 - `mise run macos-metal-smoke`가 macOS에서 실제 Metal drawable을 한 frame 이상 present하고, `DrawList` placeholder 셀 중심 픽셀을 readback해 비-clear 픽셀을 확인한다. 아직 glyph text가 없다는 한계는 summary에 `glyph_text=false`로 적는다.
 - `mise run macos-coretext-smoke`가 macOS에서 창/GPU 없이 CoreText font resolve, glyph run 생성, atlas key 후보 생성, CPU bitmap rasterization을 확인한다. 아직 Metal texture upload와 실제 화면 text draw가 없다는 한계는 summary와 PR 설명에 적는다.
+- `mise run macos-glyph-texture-smoke`가 macOS에서 창 없이 CoreText CPU bitmap을 Metal texture에 업로드하고 readback한다. 아직 shader sampling과 실제 화면 text draw가 없다는 한계는 summary와 PR 설명에 적는다.
 - 성능 예산에 startup, first drawable, frame budget 초안을 추가한다.
 
 아직 하지 않는다:

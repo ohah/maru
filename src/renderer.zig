@@ -1,4 +1,5 @@
 pub const draw_list = @import("renderer/draw_list.zig");
+pub const frame_probe = @import("renderer/frame_probe.zig");
 pub const glyph_atlas = @import("renderer/glyph_atlas.zig");
 pub const glyph_frame = @import("renderer/glyph_frame.zig");
 pub const glyph_layout = @import("renderer/glyph_layout.zig");
@@ -30,8 +31,11 @@ pub const GlyphRunList = glyph_layout.GlyphRunList;
 pub const GlyphUpload = glyph_frame.GlyphUpload;
 pub const RasterStyleFlags = glyph_layout.RasterStyleFlags;
 pub const RenderFrame = types.RenderFrame;
+pub const RenderFrameStats = frame_probe.RenderFrameStats;
 pub const RendererState = state.RendererState;
 pub const RendererStateConfig = state.RendererStateConfig;
+pub const renderFrameStats = frame_probe.renderFrameStats;
+pub const writeRenderFrameStats = frame_probe.writeRenderFrameStats;
 pub const ShapeResult = glyph_layout.ShapeResult;
 pub const TextLayoutConfig = glyph_layout.TextLayoutConfig;
 pub const UnderlineOverlay = draw_list.UnderlineOverlay;

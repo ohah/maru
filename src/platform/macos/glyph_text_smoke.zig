@@ -177,21 +177,12 @@ const SmokeStatus = struct {
 };
 
 const RendererFrameProbe = struct {
-    frame_prepared: bool = false,
-    backend: renderer.Backend = renderer.initialBackendForMacOS(),
+    // 제품 frame 통계는 renderer가 소유한 공유 타입으로 들고, 이 smoke 고유의 config 라벨
+    // (어떤 shaper로, 어떤 font size/device scale로 준비했는지)만 따로 둔다.
+    stats: renderer.RenderFrameStats,
     shaper: []const u8 = renderer_probe_shaper,
     font_size_px: u16 = 0,
     device_scale: u16 = 0,
-    surface_cols: u16 = 0,
-    surface_rows: u16 = 0,
-    draw_cells: usize = 0,
-    draw_overlays: usize = 0,
-    glyph_count: usize = 0,
-    upload_count: usize = 0,
-    reused_count: usize = 0,
-    fallback_count: usize = 0,
-    replacement_count: usize = 0,
-    atlas_entries: usize = 0,
 };
 
 fn deriveSmokeStatus(native: NativeGlyphTextSmokeResult) SmokeStatus {
@@ -268,31 +259,12 @@ fn buildRendererFrameProbe(
     var frame = try renderer_state.buildFrame(allocator, core.snapshot(), renderer.FakeFontBackend{});
     defer frame.deinit(allocator);
 
-    const glyph_frame = frame.glyph_frame;
-    const atlas_entries = renderer_state.atlas.entryCount();
-    // frame 일관성 계약(draw list와 glyph count/slice 정합)은 renderer가 소유한다
-    // (RenderFrame.glyphFrameConsistent). 이 probe는 거기에 더해 실제로 glyph가 잡혔고
-    // atlas가 채워졌는지(>0)만 확인해, 준비된 frame이 빈 frame이 아님을 함께 본다.
-    const frame_prepared = frame.glyphFrameConsistent() and
-        glyph_frame.stats.glyph_count > 0 and
-        atlas_entries > 0;
-
+    // 통계 추출/prepared 판정은 renderer가 단일 출처로 소유한다(renderFrameStats). 이 smoke는
+    // 거기에 font size/device scale 같은 config 라벨만 덧붙인다.
     return .{
-        .frame_prepared = frame_prepared,
-        .backend = frame.backend,
-        .shaper = renderer_probe_shaper,
+        .stats = renderer.renderFrameStats(frame, renderer_state.atlas.entryCount()),
         .font_size_px = text_config.font_size_px,
         .device_scale = text_config.device_scale,
-        .surface_cols = glyph_frame.size.cols,
-        .surface_rows = glyph_frame.size.rows,
-        .draw_cells = frame.draw_list.cells.len,
-        .draw_overlays = frame.draw_list.overlays.len,
-        .glyph_count = glyph_frame.stats.glyph_count,
-        .upload_count = glyph_frame.stats.upload_count,
-        .reused_count = glyph_frame.stats.reused_count,
-        .fallback_count = glyph_frame.stats.fallback_count,
-        .replacement_count = glyph_frame.stats.replacement_count,
-        .atlas_entries = atlas_entries,
     };
 }
 
@@ -326,21 +298,13 @@ fn renderSummary(
     try writeAppliedColor(writer, "applied_cursor", appearance.cursor_r, appearance.cursor_g, appearance.cursor_b);
     try writer.writeAll("appearance_note=background_to_clear_color_foreground_to_glyph_color_cursor_resolved_but_not_drawn\n");
     try writer.writeAll("ui_note=appkit_window_with_metal_shader_sampling_coretext_glyph_texture_with_renderer_frame_probe_no_product_terminal_backend\n");
-    try writer.print("renderer_frame_prepared={}\n", .{renderer_frame_probe.frame_prepared});
-    try writer.print("renderer_backend={s}\n", .{@tagName(renderer_frame_probe.backend)});
+    // 제품 frame 통계는 renderer가 소유한 공유 직렬화기로 남긴다. metal smoke와 같은
+    // "renderer_" schema라, 두 smoke artifact의 키가 어긋나지 않는다. 그 뒤에 이 smoke
+    // 고유의 config 라벨(shaper/font size/device scale)을 덧붙인다.
+    try renderer.writeRenderFrameStats(writer, "renderer_", renderer_frame_probe.stats);
     try writer.print("renderer_shaper={s}\n", .{renderer_frame_probe.shaper});
     try writer.print("renderer_font_size_px={d}\n", .{renderer_frame_probe.font_size_px});
     try writer.print("renderer_device_scale={d}\n", .{renderer_frame_probe.device_scale});
-    try writer.print("renderer_surface_cols={d}\n", .{renderer_frame_probe.surface_cols});
-    try writer.print("renderer_surface_rows={d}\n", .{renderer_frame_probe.surface_rows});
-    try writer.print("renderer_draw_cells={d}\n", .{renderer_frame_probe.draw_cells});
-    try writer.print("renderer_draw_overlays={d}\n", .{renderer_frame_probe.draw_overlays});
-    try writer.print("renderer_glyph_count={d}\n", .{renderer_frame_probe.glyph_count});
-    try writer.print("renderer_glyph_upload_count={d}\n", .{renderer_frame_probe.upload_count});
-    try writer.print("renderer_glyph_reused_count={d}\n", .{renderer_frame_probe.reused_count});
-    try writer.print("renderer_glyph_fallback_count={d}\n", .{renderer_frame_probe.fallback_count});
-    try writer.print("renderer_glyph_replacement_count={d}\n", .{renderer_frame_probe.replacement_count});
-    try writer.print("renderer_atlas_entries={d}\n", .{renderer_frame_probe.atlas_entries});
     try writer.print("duration_ms={d}\n", .{duration_ms});
     try writer.print("native_status={d}\n", .{native.status});
     try writer.print("native_status_label={s}\n", .{nativeStatusLabel(native.status)});
@@ -404,21 +368,22 @@ fn writeSummary(io: std.Io, summary: []const u8) !void {
 
 fn successRendererFrameProbe() RendererFrameProbe {
     return .{
-        .frame_prepared = true,
-        .backend = .metal,
-        .shaper = renderer_probe_shaper,
+        .stats = .{
+            .consistent = true,
+            .backend = .metal,
+            .surface_cols = 16,
+            .surface_rows = 2,
+            .draw_cells = 32,
+            .draw_overlays = 1,
+            .glyph_count = 32,
+            .upload_count = 5,
+            .reused_count = 27,
+            .fallback_count = 2,
+            .replacement_count = 0,
+            .atlas_entries = 5,
+        },
         .font_size_px = 14,
         .device_scale = 2,
-        .surface_cols = 16,
-        .surface_rows = 2,
-        .draw_cells = 32,
-        .draw_overlays = 1,
-        .glyph_count = 32,
-        .upload_count = 5,
-        .reused_count = 27,
-        .fallback_count = 2,
-        .replacement_count = 0,
-        .atlas_entries = 5,
     };
 }
 
@@ -569,17 +534,17 @@ test "glyph text smoke prepares a renderer frame probe at the window device scal
     const appearance = try config.resolveAppearance(.{});
     const probe = try buildRendererFrameProbe(std.testing.allocator, appearance, 2);
 
-    try std.testing.expect(probe.frame_prepared);
-    try std.testing.expectEqual(renderer.Backend.metal, probe.backend);
+    try std.testing.expect(probe.stats.prepared());
+    try std.testing.expectEqual(renderer.Backend.metal, probe.stats.backend);
     try std.testing.expectEqualStrings("fake_font_backend", probe.shaper);
     try std.testing.expectEqual(@as(u16, 14), probe.font_size_px);
     try std.testing.expectEqual(@as(u16, 2), probe.device_scale);
-    try std.testing.expectEqual(@as(u16, 16), probe.surface_cols);
-    try std.testing.expectEqual(@as(u16, 2), probe.surface_rows);
-    try std.testing.expect(probe.draw_cells > 0);
-    try std.testing.expect(probe.glyph_count > 0);
-    try std.testing.expect(probe.upload_count > 0);
-    try std.testing.expect(probe.atlas_entries > 0);
+    try std.testing.expectEqual(@as(u16, 16), probe.stats.surface_cols);
+    try std.testing.expectEqual(@as(u16, 2), probe.stats.surface_rows);
+    try std.testing.expect(probe.stats.draw_cells > 0);
+    try std.testing.expect(probe.stats.glyph_count > 0);
+    try std.testing.expect(probe.stats.upload_count > 0);
+    try std.testing.expect(probe.stats.atlas_entries > 0);
 }
 
 test "device scale from native rounds, floors at 1, and caps display scale" {

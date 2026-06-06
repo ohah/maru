@@ -241,13 +241,13 @@ dirty region의 장기 목표는 cell 단위지만, 현재 `TerminalCore`/snapsh
 macOS opt-in으로 둘 것:
 
 - CoreText로 실제 font family를 resolve하는 smoke.
-- CoreText가 ASCII/CJK/emoji probe를 glyph run으로 shape하고, 각 probe 구간이 `.notdef`가 아닌 glyph로 매핑되는지 확인하는 smoke.
+- CoreText가 ASCII/CJK/emoji probe를 glyph run으로 shape하고, 각 probe 구간이 `.notdef`가 아닌 glyph로 매핑되며, 그 glyph id/font id 후보가 `GlyphAtlas` cache key로 들어갈 수 있는지 확인하는 smoke.
 - 설치되지 않은 font가 system monospace fallback으로 가는 smoke.
 - Retina scale factor별 atlas smoke.
 - screenshot artifact.
 - glyph rasterization pixel comparison.
 
-기본 CI에서 pixel-perfect font test를 강제하지 않는 이유는 font stack이 OS 업데이트와 설치 폰트에 영향을 받기 때문이다. 대신 기본 CI는 Maru가 만든 domain data와 cache/invalidation 계약을 검증하고, 실제 픽셀은 opt-in artifact로 추적한다.
+기본 CI에서 pixel-perfect font test를 강제하지 않는 이유는 font stack이 OS 업데이트와 설치 폰트에 영향을 받기 때문이다. 대신 기본 CI는 Maru가 만든 domain data와 cache/invalidation 계약을 검증하고, 실제 픽셀은 opt-in artifact로 추적한다. macOS CoreText smoke는 실제 glyph bitmap을 만들지는 않지만, CoreText가 준 glyph id/font id 후보가 atlas key 후보로 바뀌는지까지 확인한다.
 
 ## 관측 가능성
 

@@ -37,6 +37,9 @@ const NativeGlyphTextSmokeResult = extern struct {
     screenshot_height: u32,
     screenshot_bytes: u32,
     screenshot_failures: u32,
+    // 실제 창의 backing scale을 x100 정수로 받는다(Retina면 200). 필드 순서/타입은
+    // appkit_glyph_text_smoke.m의 MaruGlyphTextSmokeResult와 정확히 일치해야 한다.
+    backing_scale_x100: u32,
 };
 
 // config.ResolvedAppearance에서 온 검증된 색을 native bridge로 넘긴다. 필드 순서/타입은
@@ -88,10 +91,15 @@ pub fn main(init: std.process.Init) !void {
     // ResolvedAppearance로 바꿔 native bridge로 넘긴다. 기본 config는 항상 resolve된다.
     const appearance = try config.resolveAppearance(.{});
     const native_appearance = nativeAppearance(appearance);
-    const renderer_frame_probe = try buildRendererFrameProbe(allocator, appearance);
     var native = emptyNativeResult();
     try ensureArtifactDir(io);
     maru_macos_glyph_text_smoke_run(duration_ms, &native_appearance, screenshot_path.ptr, screenshot_path.len, &native);
+
+    // probe를 native 다음에 준비한다. device_scale은 glyph atlas cache key의 일부라,
+    // probe가 임의의 1x로 굳으면 같은 창이 그린 Retina(2x)와 다른 key를 만들어 scale
+    // 회귀를 못 잡는다. 그래서 같은 창이 실제로 쓴 backing scale을 그대로 받아 준비한다.
+    const device_scale = deviceScaleFromNative(native);
+    const renderer_frame_probe = try buildRendererFrameProbe(allocator, appearance, device_scale);
 
     const smoke_status = deriveSmokeStatus(native);
     const summary = try renderSummary(allocator, duration_ms, smoke_status, native, native_appearance, renderer_frame_probe);
@@ -131,7 +139,18 @@ fn emptyNativeResult() NativeGlyphTextSmokeResult {
         .screenshot_height = 0,
         .screenshot_bytes = 0,
         .screenshot_failures = 0,
+        .backing_scale_x100 = 0,
     };
+}
+
+fn deviceScaleFromNative(native: NativeGlyphTextSmokeResult) u16 {
+    // native가 준 backing scale(x100)을 renderer가 쓰는 정수 device_scale로 반올림한다.
+    // 창이 만들어지기 전에 native가 멈추면 0이 오는데, 이때는 최소 1로 막아 cache key가
+    // 정상 범위를 벗어나지 않게 한다(textConfigFromFontSize도 1로 clamp하지만 여기서 의도를
+    // 분명히 한다). macOS backing scale은 실무상 1.0/2.0이라 반올림으로 충분하다.
+    if (native.backing_scale_x100 == 0) return 1;
+    const rounded = (native.backing_scale_x100 + 50) / 100;
+    return @intCast(@max(@as(u32, 1), rounded));
 }
 
 fn readDurationMs() u32 {
@@ -226,19 +245,22 @@ fn writeAppliedColor(writer: anytype, label: []const u8, r: u8, g: u8, b: u8) !v
 fn buildRendererFrameProbe(
     allocator: std.mem.Allocator,
     appearance: config.ResolvedAppearance,
+    device_scale: u16,
 ) !RendererFrameProbe {
     // 이 visible smoke의 native bridge는 아직 자체 CoreText bitmap을 화면에 그린다.
     // renderer probe도 아직 실제 CoreText shaper가 아니라 FakeFontBackend를 쓴다. 이
     // 한계를 summary에 남긴 상태로 제품 frame 준비 경로를 함께 태워 둔다. 그래야 이
     // smoke가 "native fixture만 보이는 데모"로 굳지 않고, 다음 PR에서 Metal backend가
     // 실제 GlyphFrame을 소비할 때 실패 원인을 frame 준비와 화면 그리기로 나눠 볼 수 있다.
+    // device_scale은 같은 창이 실제로 그린 backing scale을 주입받는다. atlas cache key의
+    // 일부라 임의의 값으로 굳히면 화면이 쓰는 key와 어긋나기 때문이다.
     var core = try terminal.TerminalCore.init(allocator, .{ .cols = 16, .rows = 2 });
     defer core.deinit();
 
     core.clearDirty();
     try core.write("Maru 한 🍎");
 
-    const text_config = renderer.textConfigFromFontSize(appearance.font.size, 1);
+    const text_config = renderer.textConfigFromFontSize(appearance.font.size, device_scale);
     var renderer_state = renderer.RendererState.init(allocator, .{ .text = text_config });
     defer renderer_state.deinit();
 
@@ -428,6 +450,7 @@ test "macOS glyph text smoke summary reports shader sampling boundary" {
         .screenshot_height = 840,
         .screenshot_bytes = 3628800,
         .screenshot_failures = 0,
+        .backing_scale_x100 = 200,
     };
     const appearance: NativeGlyphTextAppearance = .{
         .background_r = 0x10,
@@ -537,24 +560,42 @@ test "glyph text smoke preserves per-channel theme colors" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "applied_foreground=#0099ff\n") != null);
 }
 
-test "glyph text smoke prepares a renderer frame probe before native drawing" {
+test "glyph text smoke prepares a renderer frame probe at the window device scale" {
     // 이 테스트는 visible smoke가 native CoreText/Metal fixture만 검증하고 끝나지 않도록
-    // 제품 renderer frame 준비 경로도 함께 탄다는 계약을 고정한다. 아직 이 frame을 화면에
-    // 그리지는 않지만, 다음 제품 Metal backend PR의 입력이 준비되어 있어야 한다.
+    // 제품 renderer frame 준비 경로도 함께 탄다는 계약을 고정한다. device_scale은 호출자가
+    // 같은 창의 실제 backing scale로 주입하며, atlas cache key의 일부라 1x로 굳지 않고
+    // 그대로 흘러야 한다. 여기서는 Retina를 모사해 2x를 넣고 probe까지 전달되는지 본다.
     const appearance = try config.resolveAppearance(.{});
-    const probe = try buildRendererFrameProbe(std.testing.allocator, appearance);
+    const probe = try buildRendererFrameProbe(std.testing.allocator, appearance, 2);
 
     try std.testing.expect(probe.frame_prepared);
     try std.testing.expectEqual(renderer.Backend.metal, probe.backend);
     try std.testing.expectEqualStrings("fake_font_backend", probe.shaper);
     try std.testing.expectEqual(@as(u16, 14), probe.font_size_px);
-    try std.testing.expectEqual(@as(u16, 1), probe.device_scale);
+    try std.testing.expectEqual(@as(u16, 2), probe.device_scale);
     try std.testing.expectEqual(@as(u16, 16), probe.surface_cols);
     try std.testing.expectEqual(@as(u16, 2), probe.surface_rows);
     try std.testing.expect(probe.draw_cells > 0);
     try std.testing.expect(probe.glyph_count > 0);
     try std.testing.expect(probe.upload_count > 0);
     try std.testing.expect(probe.atlas_entries > 0);
+}
+
+test "device scale from native rounds backing scale and falls back to 1" {
+    // backing scale을 native에서 받지 못한 이른 실패(0)는 1x로 막고, x100 정수는 가장
+    // 가까운 정수 scale로 반올림한다. 이 변환이 어긋나면 probe가 화면과 다른 atlas key를
+    // 준비하게 되므로 계약으로 고정한다.
+    var native = emptyNativeResult();
+    try std.testing.expectEqual(@as(u16, 1), deviceScaleFromNative(native));
+
+    native.backing_scale_x100 = 100;
+    try std.testing.expectEqual(@as(u16, 1), deviceScaleFromNative(native));
+
+    native.backing_scale_x100 = 200;
+    try std.testing.expectEqual(@as(u16, 2), deviceScaleFromNative(native));
+
+    native.backing_scale_x100 = 150;
+    try std.testing.expectEqual(@as(u16, 2), deviceScaleFromNative(native));
 }
 
 test "glyph text smoke status labels explain native failure stages" {
@@ -603,6 +644,7 @@ test "glyph text draw requires visible UI, shader sampling, and native success" 
         .screenshot_height = 840,
         .screenshot_bytes = 3628800,
         .screenshot_failures = 0,
+        .backing_scale_x100 = 200,
     };
     try std.testing.expect(deriveSmokeStatus(ok).glyph_text_drawn);
 

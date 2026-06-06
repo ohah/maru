@@ -35,6 +35,7 @@ typedef struct {
     uint32_t screenshot_height;
     uint32_t screenshot_bytes;
     uint32_t screenshot_failures;
+    uint32_t backing_scale_x100;
 } MaruGlyphTextSmokeResult;
 
 // Zig config.ResolvedAppearance에서 넘어온 검증된 색. raw 문자열이 아니라 이미 #RRGGBB가
@@ -124,6 +125,7 @@ static void maru_clear_result(MaruGlyphTextSmokeResult *result) {
     result->screenshot_height = 0;
     result->screenshot_bytes = 0;
     result->screenshot_failures = 0;
+    result->backing_scale_x100 = 0;
 }
 
 static void maru_pump_app_once(void) {
@@ -968,6 +970,9 @@ void maru_macos_glyph_text_smoke_run(
         // 최적화인 framebufferOnly를 이 smoke에서는 끈다.
         metal_layer.framebufferOnly = NO;
         metal_layer.contentsScale = window.backingScaleFactor;
+        // 제품 frame probe(Zig)가 같은 backing scale로 glyph atlas key를 준비하도록 실제
+        // 창이 쓴 scale을 x100 정수로 남긴다. pipeline/draw가 뒤에서 실패해도 이 값은 남는다.
+        result->backing_scale_x100 = (uint32_t)(window.backingScaleFactor * 100.0 + 0.5);
         metal_layer.frame = content.bounds;
         metal_layer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
         metal_layer.drawableSize = CGSizeMake(

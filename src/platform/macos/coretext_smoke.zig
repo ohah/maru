@@ -143,7 +143,13 @@ fn deriveSmokeStatus(native: NativeCoreTextSmokeResult) SmokeStatus {
 }
 
 fn hasNativeShapeFields(native: NativeCoreTextSmokeResult) bool {
-    return native.primary_font_found != 0 and
+    // status 7은 한 run의 glyph 수가 native 고정 버퍼(64)를 넘어 그 run의 glyph를
+    // 기록하지 못한 경우다. 이때는 아래 field만 봐서는 shape가 끝까지 됐는지 알 수
+    // 없으므로(먼저 기록된 다른 run은 정상으로 보일 수 있다) overflow status를 명시적으로
+    // 제외한다. status 6(raster 실패)은 shape와 무관하므로 그대로 통과시켜 shape/raster
+    // 신호 분리를 유지한다.
+    return native.status != 7 and
+        native.primary_font_found != 0 and
         native.line_created != 0 and
         native.run_count > 0 and
         native.glyph_count > 0 and
@@ -420,6 +426,43 @@ test "CoreText smoke keeps shaping and rasterization failures separate" {
     const status = deriveSmokeStatus(native);
     try std.testing.expect(status.shaped_text);
     try std.testing.expect(!status.glyph_rasterized);
+
+    // raster가 실패해도(shape는 성공) atlas key 후보 생성은 raster와 독립이다.
+    // 그래서 atlas_keys_ready는 그대로 true여야 한다. 이렇게 분리해야 summary만 보고
+    // "shape/atlas는 됐고 CPU raster에서 막혔다"를 집어낼 수 있다.
+    const probe = try buildAtlasProbe(std.testing.allocator, native, &[_]NativeGlyphRecord{
+        .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
+    });
+    try std.testing.expect(probe.atlas_keys_ready);
+}
+
+test "CoreText smoke treats native glyph-buffer overflow as incomplete shaping" {
+    // status 7은 한 run의 glyph 수가 native 고정 버퍼를 넘어 그 run을 기록하지 못한
+    // 상태다. 먼저 기록된 다른 run만 보면 shape가 성공한 것처럼 보일 수 있으므로,
+    // summary가 shape를 성공으로 잘못 보고하지 않는지 고정한다. 그래야 화면이 빈 원인을
+    // "shape는 됐는데 다음 단계 실패"로 오인하지 않는다.
+    var native = emptyNativeResult();
+    native.status = 7;
+    native.primary_font_found = 1;
+    native.line_created = 1;
+    native.run_count = 2;
+    native.glyph_count = 8;
+    native.ascii_glyph_present = 1;
+    native.cjk_glyph_present = 1;
+    native.emoji_glyph_present = 1;
+    native.missing_glyph_count = 0;
+    native.glyph_record_count = 3;
+    native.glyph_record_overflow = 0;
+
+    const status = deriveSmokeStatus(native);
+    try std.testing.expect(!status.shaped_text);
+    try std.testing.expect(!status.glyph_rasterized);
+
+    // atlas key 후보도 overflow run을 정상 shape로 취급하면 안 된다.
+    const probe = try buildAtlasProbe(std.testing.allocator, native, &[_]NativeGlyphRecord{
+        .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
+    });
+    try std.testing.expect(!probe.atlas_keys_ready);
 }
 
 test "CoreText smoke rejects missing font or empty glyph output" {

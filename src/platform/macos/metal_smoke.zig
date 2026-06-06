@@ -201,17 +201,25 @@ fn buildSmokeFixture(allocator: std.mem.Allocator) !SmokeFixture {
     const native_cells = try buildNativeCellsFromGlyphFrame(allocator, frame.glyph_frame);
     errdefer allocator.free(native_cells);
 
+    const glyph_frame = frame.glyph_frame;
+    const atlas_entries = state.atlas.entryCount();
+    // renderer_frame_prepared 의미를 glyph_text_smoke probe와 똑같이 맞춘다: frame 일관성에
+    // 더해 실제로 glyph가 잡혔고 atlas가 채워졌는지(>0)까지 봐야 빈 frame을 prepared로
+    // 보고하지 않고, 두 smoke의 같은 summary 키가 같은 뜻을 갖는다.
+    const frame_prepared = frame.glyphFrameConsistent() and
+        glyph_frame.stats.glyph_count > 0 and
+        atlas_entries > 0;
+
     return .{
-        .size = frame.glyph_frame.size,
+        .size = glyph_frame.size,
         .cells = native_cells,
-        .frame_prepared = frame.glyphFrameConsistent(),
+        .frame_prepared = frame_prepared,
         .backend = frame.backend,
-        .shaper = renderer_probe_shaper,
         .draw_cells = frame.draw_list.cells.len,
-        .glyph_count = frame.glyph_frame.stats.glyph_count,
-        .upload_count = frame.glyph_frame.stats.upload_count,
-        .reused_count = frame.glyph_frame.stats.reused_count,
-        .atlas_entries = state.atlas.entryCount(),
+        .glyph_count = glyph_frame.stats.glyph_count,
+        .upload_count = glyph_frame.stats.upload_count,
+        .reused_count = glyph_frame.stats.reused_count,
+        .atlas_entries = atlas_entries,
     };
 }
 
@@ -388,10 +396,15 @@ test "Metal smoke fixture comes from RendererState glyph frame" {
     // 사람이 보기 쉬운 신호를 위해 공백 cell을 native bridge로 넘기지 않는다.
     try std.testing.expect(fixture.upload_count > 0);
     try std.testing.expect(fixture.atlas_entries > 0);
+    // 모든 glyph는 upload 아니면 reuse 둘 중 하나라, 이 합이 glyph_count와 맞아야 probe
+    // 통계가 backend로 일관되게 흘러간다(slot 재사용 회귀를 통계 단계에서 잡는다).
+    try std.testing.expectEqual(fixture.glyph_count, fixture.upload_count + fixture.reused_count);
     try std.testing.expectEqual(@as(usize, 9), fixture.cells.len);
     try std.testing.expectEqual(@as(u32, 'M'), fixture.cells[0].codepoint);
     try std.testing.expectEqual(@as(u16, 0), fixture.cells[0].row);
     try std.testing.expectEqual(@as(u16, 0), fixture.cells[0].col);
+    // cell_width가 native bridge로 보존되는지 고정한다(ASCII placeholder는 1셀 폭).
+    try std.testing.expectEqual(@as(u16, 1), fixture.cells[0].width);
     try std.testing.expectEqual(@as(u32, 'M'), fixture.cells[4].codepoint);
     try std.testing.expectEqual(@as(u16, 1), fixture.cells[4].row);
     try std.testing.expectEqual(@as(u16, 0), fixture.cells[4].col);

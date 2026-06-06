@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
     // probe를 native 다음에 준비한다. device_scale은 glyph atlas cache key의 일부라,
     // probe가 임의의 1x로 굳으면 같은 창이 그린 Retina(2x)와 다른 key를 만들어 scale
     // 회귀를 못 잡는다. 그래서 같은 창이 실제로 쓴 backing scale을 그대로 받아 준비한다.
-    const device_scale = deviceScaleFromNative(native);
+    const device_scale = deviceScaleFromNative(native.backing_scale_x100);
     const renderer_frame_probe = try buildRendererFrameProbe(allocator, appearance, device_scale);
 
     const smoke_status = deriveSmokeStatus(native);
@@ -142,14 +142,15 @@ fn emptyNativeResult() NativeGlyphTextSmokeResult {
     };
 }
 
-fn deviceScaleFromNative(native: NativeGlyphTextSmokeResult) u16 {
+fn deviceScaleFromNative(backing_scale_x100: u32) u16 {
     // native가 준 backing scale(x100)을 renderer가 쓰는 정수 device_scale로 반올림한다.
-    // 창이 만들어지기 전에 native가 멈추면 0이 오는데, 이때는 최소 1로 막아 cache key가
-    // 정상 범위를 벗어나지 않게 한다(textConfigFromFontSize도 1로 clamp하지만 여기서 의도를
-    // 분명히 한다). macOS backing scale은 실무상 1.0/2.0이라 반올림으로 충분하다.
-    if (native.backing_scale_x100 == 0) return 1;
-    const rounded = (native.backing_scale_x100 + 50) / 100;
-    return @intCast(@max(@as(u32, 1), rounded));
+    // 창이 만들어지기 전 native가 멈추면 0이 오는데, 이때는 최소 1로 막는다. device_scale은
+    // glyph atlas key(=bitmap 크기)의 일부라, 손상된 FFI 값이 키를 비정상으로 키우지 않게
+    // 상한도 둔다(macOS backing scale은 실무상 1.0~3.0). 이렇게 하면 어떤 u32 입력에도
+    // +50 overflow나 u16 범위 초과 @intCast 없이 정상 범위를 돌려준다.
+    if (backing_scale_x100 == 0) return 1;
+    const rounded = backing_scale_x100 / 100 + @as(u32, @intFromBool(backing_scale_x100 % 100 >= 50));
+    return @intCast(std.math.clamp(rounded, 1, 8));
 }
 
 fn readDurationMs() u32 {
@@ -401,7 +402,7 @@ fn successRendererFrameProbe() RendererFrameProbe {
         .frame_prepared = true,
         .backend = .metal,
         .font_size_px = 14,
-        .device_scale = 1,
+        .device_scale = 2,
         .surface_cols = 16,
         .surface_rows = 2,
         .draw_cells = 32,
@@ -494,7 +495,7 @@ test "macOS glyph text smoke summary reports shader sampling boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_prepared=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_backend=metal\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_font_size_px=14\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_device_scale=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_device_scale=2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_draw_cells=32\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_upload_count=5\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_atlas_entries=5\n") != null);
@@ -573,21 +574,17 @@ test "glyph text smoke prepares a renderer frame probe at the window device scal
     try std.testing.expect(probe.atlas_entries > 0);
 }
 
-test "device scale from native rounds backing scale and falls back to 1" {
-    // backing scale을 native에서 받지 못한 이른 실패(0)는 1x로 막고, x100 정수는 가장
-    // 가까운 정수 scale로 반올림한다. 이 변환이 어긋나면 probe가 화면과 다른 atlas key를
-    // 준비하게 되므로 계약으로 고정한다.
-    var native = emptyNativeResult();
-    try std.testing.expectEqual(@as(u16, 1), deviceScaleFromNative(native));
-
-    native.backing_scale_x100 = 100;
-    try std.testing.expectEqual(@as(u16, 1), deviceScaleFromNative(native));
-
-    native.backing_scale_x100 = 200;
-    try std.testing.expectEqual(@as(u16, 2), deviceScaleFromNative(native));
-
-    native.backing_scale_x100 = 150;
-    try std.testing.expectEqual(@as(u16, 2), deviceScaleFromNative(native));
+test "device scale from native rounds, floors at 1, and caps display scale" {
+    // 이 변환이 어긋나면 probe가 화면과 다른 atlas key를 준비하므로 계약으로 고정한다.
+    // 이른 실패(0)는 1x로 막고, x100 정수는 가장 가까운 정수 scale로 반올림하며(반올림
+    // 경계는 .5), 손상된 큰 값은 display scale 상한(8)으로 막아 cache key를 보호한다.
+    try std.testing.expectEqual(@as(u16, 1), deviceScaleFromNative(0)); // 이른 실패 → 1x
+    try std.testing.expectEqual(@as(u16, 1), deviceScaleFromNative(100)); // 1.0x
+    try std.testing.expectEqual(@as(u16, 1), deviceScaleFromNative(149)); // 반올림 경계 바로 아래
+    try std.testing.expectEqual(@as(u16, 2), deviceScaleFromNative(150)); // 반올림 경계(.5)
+    try std.testing.expectEqual(@as(u16, 2), deviceScaleFromNative(200)); // 2.0x
+    try std.testing.expectEqual(@as(u16, 3), deviceScaleFromNative(300)); // 3.0x
+    try std.testing.expectEqual(@as(u16, 8), deviceScaleFromNative(1_000_000)); // 손상 값 → 상한
 }
 
 test "glyph text smoke status labels explain native failure stages" {

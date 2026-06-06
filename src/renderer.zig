@@ -1,5 +1,6 @@
 pub const draw_list = @import("renderer/draw_list.zig");
 pub const glyph_atlas = @import("renderer/glyph_atlas.zig");
+pub const glyph_frame = @import("renderer/glyph_frame.zig");
 pub const glyph_layout = @import("renderer/glyph_layout.zig");
 pub const types = @import("renderer/types.zig");
 
@@ -19,10 +20,13 @@ pub const FakeFontBackend = glyph_layout.FakeFontBackend;
 pub const GlyphAtlas = glyph_atlas.GlyphAtlas;
 pub const GlyphAtlasConfig = glyph_atlas.GlyphAtlasConfig;
 pub const FontId = glyph_layout.FontId;
+pub const GlyphFrame = glyph_frame.GlyphFrame;
+pub const GlyphFrameStats = glyph_frame.GlyphFrameStats;
 pub const GlyphCacheKey = glyph_layout.GlyphCacheKey;
 pub const GlyphId = glyph_layout.GlyphId;
 pub const GlyphRun = glyph_layout.GlyphRun;
 pub const GlyphRunList = glyph_layout.GlyphRunList;
+pub const GlyphUpload = glyph_frame.GlyphUpload;
 pub const RasterStyleFlags = glyph_layout.RasterStyleFlags;
 pub const RenderFrame = types.RenderFrame;
 pub const ShapeResult = glyph_layout.ShapeResult;
@@ -31,6 +35,7 @@ pub const UnderlineOverlay = draw_list.UnderlineOverlay;
 pub const buildDrawList = draw_list.buildDrawList;
 pub const buildGlyphRunList = glyph_layout.buildGlyphRunList;
 pub const initialBackendForMacOS = types.initialBackendForMacOS;
+pub const prepareGlyphFrame = glyph_frame.prepareGlyphFrame;
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

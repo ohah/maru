@@ -241,6 +241,7 @@ dirty region의 장기 목표는 cell 단위지만, 현재 `TerminalCore`/snapsh
 macOS opt-in으로 둘 것:
 
 - CoreText로 실제 font family를 resolve하는 smoke.
+- CoreText가 ASCII/CJK/emoji probe를 glyph run으로 shape하고, 각 probe 구간이 `.notdef`가 아닌 glyph로 매핑되는지 확인하는 smoke.
 - 설치되지 않은 font가 system monospace fallback으로 가는 smoke.
 - Retina scale factor별 atlas smoke.
 - screenshot artifact.

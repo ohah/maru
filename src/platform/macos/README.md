@@ -8,4 +8,4 @@ macOS 전용 bridge를 담는 폴더다.
 
 `metal_smoke.zig`와 `appkit_metal_smoke.m`은 첫 Metal DrawList readback smoke다. 이 경로는 아직 터미널 글자 glyph를 그리지 않지만, `TerminalCore -> DrawList`에서 만든 셀을 AppKit 창 위 CAMetalLayer에 placeholder quad로 실제 present하고 셀 중심 픽셀을 readback한다. 계약 테스트는 `mise run test-macos-metal-smoke`, 실제 Metal smoke는 `mise run macos-metal-smoke`다.
 
-`coretext_smoke.zig`와 `coretext_smoke.m`은 첫 CoreText font shaping smoke다. 이 경로는 창과 GPU를 만들지 않고 macOS 기본 고정폭 폰트를 찾은 뒤 ASCII/CJK/emoji probe 문자열이 glyph run으로 shape되는지 확인한다. glyph count만 보지 않고 각 probe 구간이 `.notdef`가 아닌 glyph로 매핑됐는지도 확인한다. 계약 테스트는 `mise run test-macos-coretext-smoke`, 실제 CoreText smoke는 `mise run macos-coretext-smoke`다.
+`coretext_smoke.zig`와 `coretext_smoke.m`은 첫 CoreText font shaping/atlas-key smoke다. 이 경로는 창과 GPU를 만들지 않고 macOS 기본 고정폭 폰트를 찾은 뒤 ASCII/CJK/emoji probe 문자열이 glyph run으로 shape되는지 확인한다. glyph count만 보지 않고 각 probe 구간이 `.notdef`가 아닌 glyph로 매핑됐는지도 확인한다. 그 다음 Zig 쪽 `GlyphAtlas` domain cache에 glyph id/font id 후보를 넣어 atlas key 후보가 만들어지는지도 확인한다. 계약 테스트는 `mise run test-macos-coretext-smoke`, 실제 CoreText smoke는 `mise run macos-coretext-smoke`다.

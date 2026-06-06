@@ -151,6 +151,9 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                },
             }),
         });
         macos_coretext_smoke.root_module.addCSourceFile(.{
@@ -171,6 +174,9 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                },
             }),
         });
 

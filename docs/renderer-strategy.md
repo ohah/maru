@@ -185,7 +185,7 @@ opt-in으로 둘 것:
 - macOS window server가 필요한 screenshot smoke.
 - 실제 Metal device 생성.
 - 실제 AppKit 창 위 CAMetalLayer `DrawList` placeholder present/readback smoke(`mise run macos-metal-smoke`).
-- 실제 CoreText font resolve/glyph run smoke(`mise run macos-coretext-smoke`).
+- 실제 CoreText font resolve/glyph run/atlas key smoke(`mise run macos-coretext-smoke`).
 - 실제 glyph rasterization smoke.
 - frame pacing, GPU timing, font stack 영향을 받는 성능 측정.
 

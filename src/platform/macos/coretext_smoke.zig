@@ -1,7 +1,10 @@
 const std = @import("std");
+const maru = @import("maru");
+const renderer = maru.renderer;
 
 const artifact_dir = "zig-out/maru-macos-coretext-smoke";
 const font_name_capacity = 128;
+const glyph_record_capacity = 64;
 
 const NativeCoreTextSmokeResult = extern struct {
     status: c_int,
@@ -14,11 +17,33 @@ const NativeCoreTextSmokeResult = extern struct {
     cjk_glyph_present: u32,
     emoji_glyph_present: u32,
     missing_glyph_count: u32,
+    glyph_record_count: u32,
+    glyph_record_overflow: u32,
     primary_font_name: [font_name_capacity]u8,
     first_fallback_font_name: [font_name_capacity]u8,
 };
 
-extern fn maru_macos_coretext_smoke_run(result: *NativeCoreTextSmokeResult) void;
+const NativeGlyphCategory = enum(u32) {
+    ascii = 1,
+    cjk = 2,
+    emoji = 3,
+    space = 4,
+    other = 5,
+};
+
+const NativeGlyphRecord = extern struct {
+    font_id: u32,
+    glyph_id: u32,
+    string_index: u32,
+    category: u32,
+    fallback: u32,
+};
+
+extern fn maru_macos_coretext_smoke_run(
+    result: *NativeCoreTextSmokeResult,
+    glyph_records: [*]NativeGlyphRecord,
+    glyph_record_capacity: usize,
+) void;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -29,10 +54,13 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_file_writer.interface;
 
     var native: NativeCoreTextSmokeResult = emptyNativeResult();
-    maru_macos_coretext_smoke_run(&native);
+    var glyph_records = [_]NativeGlyphRecord{emptyGlyphRecord()} ** glyph_record_capacity;
+    maru_macos_coretext_smoke_run(&native, &glyph_records, glyph_records.len);
 
     const smoke_status = deriveSmokeStatus(native);
-    const summary = try renderSummary(allocator, smoke_status, native);
+    const record_count = @min(@as(usize, @intCast(native.glyph_record_count)), glyph_records.len);
+    const atlas_probe = try buildAtlasProbe(allocator, native, glyph_records[0..record_count]);
+    const summary = try renderSummary(allocator, smoke_status, native, atlas_probe);
     defer allocator.free(summary);
 
     try writeSummary(io, summary);
@@ -55,8 +83,20 @@ fn emptyNativeResult() NativeCoreTextSmokeResult {
         .cjk_glyph_present = 0,
         .emoji_glyph_present = 0,
         .missing_glyph_count = 0,
+        .glyph_record_count = 0,
+        .glyph_record_overflow = 0,
         .primary_font_name = [_]u8{0} ** font_name_capacity,
         .first_fallback_font_name = [_]u8{0} ** font_name_capacity,
+    };
+}
+
+fn emptyGlyphRecord() NativeGlyphRecord {
+    return .{
+        .font_id = 0,
+        .glyph_id = 0,
+        .string_index = 0,
+        .category = 0,
+        .fallback = 0,
     };
 }
 
@@ -82,7 +122,9 @@ fn deriveSmokeStatus(native: NativeCoreTextSmokeResult) SmokeStatus {
         native.ascii_glyph_present != 0 and
         native.cjk_glyph_present != 0 and
         native.emoji_glyph_present != 0 and
-        native.missing_glyph_count == 0;
+        native.missing_glyph_count == 0 and
+        native.glyph_record_count > 0 and
+        native.glyph_record_overflow == 0;
 
     return .{
         .font_resolved = font_resolved,
@@ -95,6 +137,7 @@ fn renderSummary(
     allocator: std.mem.Allocator,
     smoke_status: SmokeStatus,
     native: NativeCoreTextSmokeResult,
+    atlas_probe: AtlasProbe,
 ) ![]u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
@@ -118,10 +161,120 @@ fn renderSummary(
     try writer.print("cjk_glyph_present={d}\n", .{native.cjk_glyph_present});
     try writer.print("emoji_glyph_present={d}\n", .{native.emoji_glyph_present});
     try writer.print("missing_glyph_count={d}\n", .{native.missing_glyph_count});
+    try writer.print("glyph_record_count={d}\n", .{native.glyph_record_count});
+    try writer.print("glyph_record_overflow={d}\n", .{native.glyph_record_overflow});
+    try writer.print("atlas_keys_ready={}\n", .{atlas_probe.atlas_keys_ready});
+    try writer.print("atlas_drawable_glyph_count={d}\n", .{atlas_probe.drawable_glyph_count});
+    try writer.print("atlas_entry_count={d}\n", .{atlas_probe.entry_count});
+    try writer.print("atlas_upload_candidates={d}\n", .{atlas_probe.upload_candidates});
+    try writer.print("atlas_upload_bytes={d}\n", .{atlas_probe.upload_bytes});
+    try writer.print("atlas_color_glyph_count={d}\n", .{atlas_probe.color_glyph_count});
     try writer.print("primary_font_name={s}\n", .{cStringField(&native.primary_font_name)});
     try writer.print("first_fallback_font_name={s}\n", .{cStringField(&native.first_fallback_font_name)});
 
     return output.toOwnedSlice();
+}
+
+const AtlasProbe = struct {
+    atlas_keys_ready: bool,
+    drawable_glyph_count: usize,
+    entry_count: usize,
+    upload_candidates: usize,
+    upload_bytes: usize,
+    color_glyph_count: usize,
+};
+
+fn buildAtlasProbe(
+    allocator: std.mem.Allocator,
+    native: NativeCoreTextSmokeResult,
+    records: []const NativeGlyphRecord,
+) !AtlasProbe {
+    // 이 단계는 아직 bitmap을 rasterize하지 않는다. 대신 CoreText가 준 실제
+    // font_id/glyph_id 후보가 Maru의 `GlyphCacheKey -> GlyphAtlas` 계약으로 들어갈
+    // 수 있는지 확인한다. 그래야 다음 Metal text draw에서 "폰트는 됐는데 atlas key가
+    // 없다" 같은 원인을 별도 summary로 분리할 수 있다.
+    var atlas = renderer.GlyphAtlas.init(allocator, .{});
+    defer atlas.deinit();
+
+    var drawable_glyph_count: usize = 0;
+    var upload_candidates: usize = 0;
+    var upload_bytes: usize = 0;
+    var color_glyph_count: usize = 0;
+
+    for (records) |record| {
+        if (!isDrawableAtlasRecord(record)) continue;
+
+        const glyph = glyphRunForAtlas(record);
+        const lookup = try atlas.ensureGlyph(glyph);
+        drawable_glyph_count += 1;
+        if (lookup.uploaded) {
+            upload_candidates += 1;
+            upload_bytes += lookup.upload_bytes;
+        }
+        if (glyph.cache_key.color_glyph_kind == .color) {
+            color_glyph_count += 1;
+        }
+    }
+
+    return .{
+        .atlas_keys_ready = native.status == 0 and
+            native.ascii_glyph_present != 0 and
+            native.cjk_glyph_present != 0 and
+            native.emoji_glyph_present != 0 and
+            native.missing_glyph_count == 0 and
+            native.glyph_record_overflow == 0 and
+            drawable_glyph_count > 0 and
+            atlas.entryCount() > 0,
+        .drawable_glyph_count = drawable_glyph_count,
+        .entry_count = atlas.entryCount(),
+        .upload_candidates = upload_candidates,
+        .upload_bytes = upload_bytes,
+        .color_glyph_count = color_glyph_count,
+    };
+}
+
+fn isDrawableAtlasRecord(record: NativeGlyphRecord) bool {
+    if (record.glyph_id == 0) return false;
+    return record.category != @intFromEnum(NativeGlyphCategory.space);
+}
+
+fn glyphRunForAtlas(record: NativeGlyphRecord) renderer.GlyphRun {
+    const color_kind: renderer.ColorGlyphKind = if (record.category == @intFromEnum(NativeGlyphCategory.emoji))
+        .color
+    else
+        .monochrome;
+    return .{
+        .row = 0,
+        .col = @intCast(@min(record.string_index, std.math.maxInt(u16))),
+        .cell_width = if (record.category == @intFromEnum(NativeGlyphCategory.cjk) or record.category == @intFromEnum(NativeGlyphCategory.emoji)) 2 else 1,
+        .codepoint = codepointForProbeRecord(record),
+        .font_id = record.font_id,
+        .glyph_id = record.glyph_id,
+        .fallback = record.fallback != 0,
+        .cache_key = .{
+            .font_id = record.font_id,
+            .glyph_id = record.glyph_id,
+            .font_size_px = 14,
+            .device_scale = 1,
+            .color_glyph_kind = color_kind,
+        },
+    };
+}
+
+fn codepointForProbeRecord(record: NativeGlyphRecord) u21 {
+    return switch (record.category) {
+        @intFromEnum(NativeGlyphCategory.ascii) => switch (record.string_index) {
+            0 => 'M',
+            1 => 'a',
+            2 => 'r',
+            3 => 'u',
+            else => '?',
+        },
+        @intFromEnum(NativeGlyphCategory.cjk) => '한',
+        @intFromEnum(NativeGlyphCategory.emoji) => 0x1f34e,
+        @intFromEnum(NativeGlyphCategory.space) => ' ',
+        else => '?',
+    };
 }
 
 fn cStringField(bytes: *const [font_name_capacity]u8) []const u8 {
@@ -152,10 +305,18 @@ test "macOS CoreText smoke summary reports font shaping boundary" {
     native.cjk_glyph_present = 1;
     native.emoji_glyph_present = 1;
     native.missing_glyph_count = 0;
+    native.glyph_record_count = 3;
+    native.glyph_record_overflow = 0;
     @memcpy(native.primary_font_name[0.."Menlo-Regular".len], "Menlo-Regular");
     @memcpy(native.first_fallback_font_name[0.."AppleColorEmoji".len], "AppleColorEmoji");
 
-    const summary = try renderSummary(std.testing.allocator, deriveSmokeStatus(native), native);
+    const records = [_]NativeGlyphRecord{
+        .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
+        .{ .font_id = 2, .glyph_id = 20, .string_index = 5, .category = @intFromEnum(NativeGlyphCategory.cjk), .fallback = 1 },
+        .{ .font_id = 3, .glyph_id = 30, .string_index = 7, .category = @intFromEnum(NativeGlyphCategory.emoji), .fallback = 1 },
+    };
+    const atlas_probe = try buildAtlasProbe(std.testing.allocator, native, &records);
+    const summary = try renderSummary(std.testing.allocator, deriveSmokeStatus(native), native, atlas_probe);
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.macos-coretext-smoke.v1\n") != null);
@@ -170,6 +331,13 @@ test "macOS CoreText smoke summary reports font shaping boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "cjk_glyph_present=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "emoji_glyph_present=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "missing_glyph_count=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_record_count=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_record_overflow=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_keys_ready=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_drawable_glyph_count=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_entry_count=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_upload_candidates=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_color_glyph_count=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "primary_font_name=Menlo-Regular\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "first_fallback_font_name=AppleColorEmoji\n") != null);
 }
@@ -188,6 +356,8 @@ test "CoreText smoke does not treat fallback as required for shaping" {
     native.cjk_glyph_present = 1;
     native.emoji_glyph_present = 1;
     native.missing_glyph_count = 0;
+    native.glyph_record_count = 1;
+    native.glyph_record_overflow = 0;
 
     const status = deriveSmokeStatus(native);
     try std.testing.expect(status.shaped_text);
@@ -223,10 +393,40 @@ test "CoreText smoke rejects probe categories that map to missing glyphs" {
     missing_cjk.cjk_glyph_present = 0;
     missing_cjk.emoji_glyph_present = 1;
     missing_cjk.missing_glyph_count = 1;
+    missing_cjk.glyph_record_count = 2;
     try std.testing.expect(!deriveSmokeStatus(missing_cjk).shaped_text);
 
     var missing_emoji = missing_cjk;
     missing_emoji.cjk_glyph_present = 1;
     missing_emoji.emoji_glyph_present = 0;
     try std.testing.expect(!deriveSmokeStatus(missing_emoji).shaped_text);
+}
+
+test "CoreText smoke atlas probe filters spaces and requires records" {
+    // CoreText는 space도 glyph run에 포함할 수 있지만, atlas가 bitmap으로 굽는 대상은
+    // 실제로 그릴 glyph다. space record를 제외해 atlas key 숫자가 과장되지 않게 한다.
+    var native = emptyNativeResult();
+    native.status = 0;
+    native.primary_font_found = 1;
+    native.line_created = 1;
+    native.run_count = 1;
+    native.glyph_count = 2;
+    native.ascii_glyph_present = 1;
+    native.cjk_glyph_present = 1;
+    native.emoji_glyph_present = 1;
+    native.glyph_record_count = 2;
+
+    const records = [_]NativeGlyphRecord{
+        .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
+        .{ .font_id = 1, .glyph_id = 5, .string_index = 4, .category = @intFromEnum(NativeGlyphCategory.space), .fallback = 0 },
+    };
+
+    const probe = try buildAtlasProbe(std.testing.allocator, native, &records);
+    try std.testing.expect(probe.atlas_keys_ready);
+    try std.testing.expectEqual(@as(usize, 1), probe.drawable_glyph_count);
+    try std.testing.expectEqual(@as(usize, 1), probe.entry_count);
+
+    native.glyph_record_overflow = 1;
+    const overflow_probe = try buildAtlasProbe(std.testing.allocator, native, &records);
+    try std.testing.expect(!overflow_probe.atlas_keys_ready);
 }

@@ -1,4 +1,5 @@
 #import <CoreText/CoreText.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -14,9 +15,27 @@ typedef struct {
     uint32_t cjk_glyph_present;
     uint32_t emoji_glyph_present;
     uint32_t missing_glyph_count;
+    uint32_t glyph_record_count;
+    uint32_t glyph_record_overflow;
     char primary_font_name[128];
     char first_fallback_font_name[128];
 } MaruCoreTextSmokeResult;
+
+typedef struct {
+    uint32_t font_id;
+    uint32_t glyph_id;
+    uint32_t string_index;
+    uint32_t category;
+    uint32_t fallback;
+} MaruCoreTextGlyphRecord;
+
+enum {
+    MaruGlyphCategoryAscii = 1,
+    MaruGlyphCategoryCjk = 2,
+    MaruGlyphCategoryEmoji = 3,
+    MaruGlyphCategorySpace = 4,
+    MaruGlyphCategoryOther = 5,
+};
 
 static void maru_clear_result(MaruCoreTextSmokeResult *result) {
     result->status = -1;
@@ -29,6 +48,8 @@ static void maru_clear_result(MaruCoreTextSmokeResult *result) {
     result->cjk_glyph_present = 0;
     result->emoji_glyph_present = 0;
     result->missing_glyph_count = 0;
+    result->glyph_record_count = 0;
+    result->glyph_record_overflow = 0;
     result->primary_font_name[0] = '\0';
     result->first_fallback_font_name[0] = '\0';
 }
@@ -86,10 +107,53 @@ static uint32_t maru_u32_from_cfindex(CFIndex value) {
     return (uint32_t)value;
 }
 
+static uint32_t maru_category_for_string_index(CFIndex string_index) {
+    if (string_index >= 0 && string_index <= 3) {
+        return MaruGlyphCategoryAscii;
+    }
+    if (string_index == 5) {
+        return MaruGlyphCategoryCjk;
+    }
+    if (string_index >= 7 && string_index <= 8) {
+        return MaruGlyphCategoryEmoji;
+    }
+    if (string_index == 4 || string_index == 6) {
+        return MaruGlyphCategorySpace;
+    }
+    return MaruGlyphCategoryOther;
+}
+
+static void maru_append_glyph_record(
+    MaruCoreTextSmokeResult *result,
+    MaruCoreTextGlyphRecord *records,
+    size_t record_capacity,
+    uint32_t font_id,
+    CGGlyph glyph,
+    CFIndex string_index,
+    uint32_t fallback
+) {
+    if (records == NULL || result->glyph_record_count >= record_capacity) {
+        result->glyph_record_overflow = 1;
+        return;
+    }
+
+    MaruCoreTextGlyphRecord *record = &records[result->glyph_record_count];
+    record->font_id = font_id;
+    record->glyph_id = (uint32_t)glyph;
+    record->string_index = maru_u32_from_cfindex(string_index);
+    record->category = maru_category_for_string_index(string_index);
+    record->fallback = fallback;
+    result->glyph_record_count += 1;
+}
+
 static void maru_record_probe_glyph(
     MaruCoreTextSmokeResult *result,
+    MaruCoreTextGlyphRecord *records,
+    size_t record_capacity,
+    uint32_t font_id,
     CGGlyph glyph,
-    CFIndex string_index
+    CFIndex string_index,
+    uint32_t fallback
 ) {
     // CTRunGetGlyphCount는 .notdef도 glyph로 센다. 그래서 glyph id 0을 따로 세고,
     // probe 문자열의 UTF-16 index별로 실제 glyph가 붙었는지 확인한다.
@@ -104,6 +168,8 @@ static void maru_record_probe_glyph(
         return;
     }
 
+    maru_append_glyph_record(result, records, record_capacity, font_id, glyph, string_index, fallback);
+
     if (string_index >= 0 && string_index <= 3) {
         result->ascii_glyph_present = 1;
     } else if (string_index == 5) {
@@ -113,7 +179,11 @@ static void maru_record_probe_glyph(
     }
 }
 
-void maru_macos_coretext_smoke_run(MaruCoreTextSmokeResult *result) {
+void maru_macos_coretext_smoke_run(
+    MaruCoreTextSmokeResult *result,
+    MaruCoreTextGlyphRecord *glyph_records,
+    size_t glyph_record_capacity
+) {
     @autoreleasepool {
         if (result == NULL) {
             return;
@@ -199,6 +269,32 @@ void maru_macos_coretext_smoke_run(MaruCoreTextSmokeResult *result) {
             if (run == NULL) {
                 continue;
             }
+
+            uint32_t run_font_id = 1;
+            uint32_t run_fallback = 0;
+            CFDictionaryRef run_attributes = CTRunGetAttributes(run);
+            CTFontRef run_font = run_attributes == NULL
+                ? NULL
+                : (CTFontRef)CFDictionaryGetValue(run_attributes, kCTFontAttributeName);
+            if (run_font != NULL && primary_name != NULL) {
+                CFStringRef run_name = CTFontCopyPostScriptName(run_font);
+                if (run_name != NULL) {
+                    if (CFStringCompare(run_name, primary_name, 0) != kCFCompareEqualTo) {
+                        result->fallback_run_count += 1;
+                        run_fallback = 1;
+                        run_font_id = 1 + result->fallback_run_count;
+                        if (result->first_fallback_font_name[0] == '\0') {
+                            maru_copy_cfstring(
+                                run_name,
+                                result->first_fallback_font_name,
+                                sizeof(result->first_fallback_font_name)
+                            );
+                        }
+                    }
+                    CFRelease(run_name);
+                }
+            }
+
             CFIndex glyph_count = CTRunGetGlyphCount(run);
             result->glyph_count += maru_u32_from_cfindex(glyph_count);
 
@@ -214,33 +310,16 @@ void maru_macos_coretext_smoke_run(MaruCoreTextSmokeResult *result) {
             CTRunGetGlyphs(run, CFRangeMake(0, glyph_count), glyphs);
             CTRunGetStringIndices(run, CFRangeMake(0, glyph_count), string_indices);
             for (CFIndex glyph_index = 0; glyph_index < glyph_count; glyph_index++) {
-                maru_record_probe_glyph(result, glyphs[glyph_index], string_indices[glyph_index]);
+                maru_record_probe_glyph(
+                    result,
+                    glyph_records,
+                    glyph_record_capacity,
+                    run_font_id,
+                    glyphs[glyph_index],
+                    string_indices[glyph_index],
+                    run_fallback
+                );
             }
-
-            CFDictionaryRef run_attributes = CTRunGetAttributes(run);
-            CTFontRef run_font = run_attributes == NULL
-                ? NULL
-                : (CTFontRef)CFDictionaryGetValue(run_attributes, kCTFontAttributeName);
-            if (run_font == NULL || primary_name == NULL) {
-                continue;
-            }
-
-            CFStringRef run_name = CTFontCopyPostScriptName(run_font);
-            if (run_name == NULL) {
-                continue;
-            }
-
-            if (CFStringCompare(run_name, primary_name, 0) != kCFCompareEqualTo) {
-                result->fallback_run_count += 1;
-                if (result->first_fallback_font_name[0] == '\0') {
-                    maru_copy_cfstring(
-                        run_name,
-                        result->first_fallback_font_name,
-                        sizeof(result->first_fallback_font_name)
-                    );
-                }
-            }
-            CFRelease(run_name);
         }
 
         if (result->status != 7) {
@@ -248,7 +327,9 @@ void maru_macos_coretext_smoke_run(MaruCoreTextSmokeResult *result) {
                     result->ascii_glyph_present != 0 &&
                     result->cjk_glyph_present != 0 &&
                     result->emoji_glyph_present != 0 &&
-                    result->missing_glyph_count == 0
+                    result->missing_glyph_count == 0 &&
+                    result->glyph_record_count > 0 &&
+                    result->glyph_record_overflow == 0
                 ? 0
                 : 6;
         }

@@ -43,7 +43,7 @@ RenderSnapshot
 - glyph bitmap을 texture atlas에 캐시한다.
 - atlas miss, upload byte, eviction 같은 성능 관측 값을 남긴다.
 - renderer backend가 바뀌어도 cache key와 glyph run 의미가 흔들리지 않게 한다.
-- 초기 구현은 `GlyphCacheKey -> AtlasSlot` domain cache 계약과 `GlyphRunList -> GlyphFrame` 준비 계약, macOS CoreText CPU bitmap smoke, CPU bitmap -> Metal texture upload smoke를 먼저 고정한다. 실제 atlas packing 좌표와 shader sampling은 macOS backend 단계에서 붙인다.
+- 초기 구현은 `GlyphCacheKey -> AtlasSlot` domain cache/placement 계약과 `GlyphRunList -> GlyphFrame` 준비 계약, macOS CoreText CPU bitmap smoke, CPU bitmap -> Metal texture upload smoke를 먼저 고정한다. 실제 atlas texture packing과 shader sampling은 macOS backend 단계에서 붙인다.
 
 `Metal backend`:
 
@@ -237,7 +237,7 @@ dirty region의 장기 목표는 cell 단위지만, 현재 `TerminalCore`/snapsh
 - ASCII, CJK, combining mark, emoji replacement에 대한 cell advance test.
 - fallback cache가 같은 cluster를 반복 조회하지 않는 unit test.
 - glyph atlas cache key가 size/scale/font id와 raster에 영향을 주는 style(bold/italic)을 구분하는 test.
-- GPU 없는 `GlyphCacheKey -> AtlasSlot` cache가 hit/miss, upload byte 후보, eviction, invalidation reason을 기록하는 test.
+- GPU 없는 `GlyphCacheKey -> AtlasSlot` cache가 hit/miss, upload byte 후보, row-packed texture 좌표 후보, eviction, invalidation reason을 기록하는 test.
 - GPU 없는 `GlyphRunList -> GlyphFrame` 준비 test가 atlas slot, upload 후보, eviction, cursor/underline overlay 보존을 기록하는 test.
 - font 변경이 전체 redraw/invalidation event를 만드는 test.
 - raw config의 font/theme/cursor 값이 `ResolvedAppearance`로 검증되는 test.
@@ -258,7 +258,7 @@ macOS opt-in으로 둘 것:
 
 CoreText/font/raster/upload smoke들은 실제 화면 glyph draw를 증명하지 않는다. glyph text smoke부터는 fixture texture가 실제 AppKit/CAMetalLayer 창에서 shader sampling되어 glyph ink로 보이는지까지 증명한다. 이때 제품 `RendererState/GlyphFrame` probe 통계도 summary에 같이 남긴다. 다만 probe는 아직 실제 CoreText shaper가 아니라 `FakeFontBackend`를 쓰며, 제품 terminal renderer가 그 frame을 직접 그린 것도 아니다. 의도는 font resolve, shaping, rasterization, GPU upload, shader sampling, 제품 atlas/layout 실패를 서로 다른 단계로 분리하는 것이다.
 
-기본 CI에서 pixel-perfect font test를 강제하지 않는 이유는 font stack이 OS 업데이트와 설치 폰트에 영향을 받기 때문이다. 대신 기본 CI는 Maru가 만든 domain data와 cache/invalidation 계약을 검증하고, 실제 픽셀은 opt-in artifact로 추적한다. macOS CoreText smoke는 `ResolvedAppearance`의 font 요청이 native bridge까지 전달되는지, 요청 font가 실제 이름/family와 일치했는지를 `requested_font_matched` 진단값으로 남기는지, CoreText가 준 glyph id/font id 후보가 `GlyphFrame` 준비 계약까지 들어가는지, CPU bitmap까지 나오는지 확인한다. 이 smoke는 설치 폰트 품질이나 설정 UI를 증명하지 않는다. glyph texture smoke는 그 CPU bitmap이 Metal texture에 byte-preserving upload/readback되는지 확인한다. glyph text smoke는 같은 fixture texture가 실제 AppKit/CAMetalLayer 창에서 shader sampling되어 glyph ink pixel로 보이는지 확인하고, PPM screenshot artifact와 제품 `RendererState/GlyphFrame` probe 통계도 남긴다. 이 probe는 `renderer_shaper=fake_font_backend`로 기록된다. Metal smoke는 `GlyphFrame`의 fake atlas slot id를 placeholder 색에 섞어 native 경계까지 전달한다. 실제 atlas texture packing, terminal cell text layout, 제품 renderer screenshot artifact는 그 다음 단계에서 별도로 확인한다.
+기본 CI에서 pixel-perfect font test를 강제하지 않는 이유는 font stack이 OS 업데이트와 설치 폰트에 영향을 받기 때문이다. 대신 기본 CI는 Maru가 만든 domain data와 cache/invalidation 계약을 검증하고, 실제 픽셀은 opt-in artifact로 추적한다. macOS CoreText smoke는 `ResolvedAppearance`의 font 요청이 native bridge까지 전달되는지, 요청 font가 실제 이름/family와 일치했는지를 `requested_font_matched` 진단값으로 남기는지, CoreText가 준 glyph id/font id 후보가 `GlyphFrame` 준비 계약까지 들어가는지, CPU bitmap까지 나오는지 확인한다. 이 smoke는 설치 폰트 품질이나 설정 UI를 증명하지 않는다. glyph texture smoke는 그 CPU bitmap이 Metal texture에 byte-preserving upload/readback되는지 확인한다. glyph text smoke는 같은 fixture texture가 실제 AppKit/CAMetalLayer 창에서 shader sampling되어 glyph ink pixel로 보이는지 확인하고, PPM screenshot artifact와 제품 `RendererState/GlyphFrame` probe 통계도 남긴다. 이 probe는 `renderer_shaper=fake_font_backend`로 기록된다. Metal smoke는 `GlyphFrame`의 fake atlas slot id를 placeholder 색에 섞어 native 경계까지 전달한다. `AtlasSlot`은 future backend UV를 위한 deterministic `x_px/y_px` 좌표 후보를 가진다. 실제 atlas texture packing, terminal cell text layout, 제품 renderer screenshot artifact는 그 다음 단계에서 별도로 확인한다.
 
 ## 관측 가능성
 

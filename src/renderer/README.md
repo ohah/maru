@@ -8,7 +8,7 @@
 
 font/layout 쪽은 `DrawList -> GlyphRunList` 계약을 먼저 고정한다. 실제 CoreText나 atlas texture는 그 뒤에 붙이고, fake font backend 기반 테스트는 기본 CI에서 deterministic하게 돌린다.
 
-glyph atlas는 먼저 `GlyphCacheKey -> AtlasSlot` domain cache 계약으로 둔다. 실제 GPU texture 좌표나 rasterization은 아직 없지만, hit/miss, upload byte 후보, eviction, invalidation reason은 이 폴더 아래에서 테스트한다. glyph atlas, frame stats, render snapshot 변환은 이 폴더 아래에 책임별로 둔다.
+glyph atlas는 먼저 `GlyphCacheKey -> AtlasSlot` domain cache 계약으로 둔다. `AtlasSlot`은 backend가 UV를 만들 수 있도록 deterministic한 texture 좌표 후보(`x_px`, `y_px`)를 가진다. 아직 실제 GPU texture packing/rasterization은 없지만, hit/miss, upload byte 후보, eviction, invalidation reason, placement reset은 이 폴더 아래에서 테스트한다. glyph atlas, frame stats, render snapshot 변환은 이 폴더 아래에 책임별로 둔다.
 
 `GlyphFrame`은 `GlyphRunList`와 `GlyphAtlas`를 묶어 backend가 소비할 frame 준비 결과를 만든다. 이 타입은 실제 Metal texture를 만들지 않고, 각 glyph가 어떤 atlas slot을 쓸지와 이번 frame에서 어떤 upload 후보가 생겼는지만 기록한다. cursor/underline overlay도 여기까지 보존해서, 다음 backend가 glyph bitmap과 draw-time overlay를 다시 해석하지 않게 한다.
 

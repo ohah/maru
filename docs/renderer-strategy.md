@@ -167,7 +167,7 @@ dirty region 범위:
 
 1. `RenderSnapshot`을 GPU와 무관한 domain data로 유지한다.
 2. `RenderSnapshot -> DrawList` 변환을 먼저 테스트한다.
-3. `DrawList -> GlyphRunList -> GlyphFrame` 변환을 테스트한다. 이 단계는 GPU 없이 atlas slot reuse, upload 후보, eviction 관측, cursor/underline overlay 보존을 증명한다.
+3. `DrawList -> GlyphRunList -> GlyphFrame` 변환을 테스트한다. 이 단계는 GPU 없이 atlas slot reuse, row-packed slot 좌표 후보, upload 후보, eviction 관측, cursor/underline overlay 보존을 증명한다.
 4. `Config -> ResolvedAppearance` 계약을 테스트한다. font family/size, theme colors, cursor shape/blink가 깨진 값이면 backend로 들어가기 전에 실패해야 한다. 이어서 default resolved font 요청이 CoreText smoke bridge와 glyph cache key 후보까지 전달되는지 확인한다.
 5. `RendererState`가 frame 사이에 살아남는 `GlyphAtlas`를 소유하고, `RenderSnapshot -> DrawList -> GlyphRunList -> GlyphFrame`을 한 제품 frame으로 준비한다. 이 단계의 app-smoke는 실제 UI가 아니라 `app-host.glyph-frame.txt` artifact로 backend 입력을 확인한다.
 6. visible glyph text smoke가 제품 `RendererState/GlyphFrame` probe를 함께 남기게 해, 화면 fixture와 제품 frame 준비 계약이 서로 멀어지지 않게 한다.
@@ -184,8 +184,8 @@ dirty region 범위:
 - 현재 row dirty region이 draw command 범위를 줄이는지 확인하는 test.
 - cursor-only 이동이 dirty row를 만들고, `DrawList`가 cursor/underline overlay command를 내보내는 test.
 - fake font backend를 사용한 `DrawList -> GlyphRunList` test.
-- GPU 없는 `GlyphCacheKey -> AtlasSlot` cache/invalidation test.
-- GPU 없는 `GlyphRunList -> GlyphFrame` test. 같은 glyph의 atlas slot reuse, upload 후보, eviction 카운터, overlay 보존을 확인한다.
+- GPU 없는 `GlyphCacheKey -> AtlasSlot` cache/placement/invalidation test.
+- GPU 없는 `GlyphRunList -> GlyphFrame` test. 같은 glyph의 atlas slot reuse, row-packed slot 좌표 후보, upload 후보, eviction 카운터, overlay 보존을 확인한다.
 - GPU 없는 `RendererState` test. 같은 renderer state로 여러 frame을 만들 때 atlas slot이 재사용되고, app host가 `RenderFrame` 전체를 소비하는지 확인한다.
 - GPU 없는 `Config -> ResolvedAppearance` test. `#RRGGBB` 색상, font size, cursor shape/blink를 renderer 입력 전 단계에서 검증한다.
 - macOS CoreText smoke summary test. default `ResolvedAppearance`의 font family/size가 native CoreText bridge와 glyph cache key 후보에 연결되는지 검증한다.

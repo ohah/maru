@@ -114,6 +114,7 @@ fn renderSummary(
     try writer.print("glyph_texture_uploaded={}\n", .{smoke_status.glyph_texture_uploaded});
     try writer.writeAll("glyph_text=false\n");
     try writer.writeAll("ui_note=coretext_cpu_bitmap_to_metal_texture_no_window_no_text_draw\n");
+    // native_status 코드 의미는 glyph_texture_smoke.m의 status 범례 주석을 단일 출처로 둔다.
     try writer.print("native_status={d}\n", .{native.status});
     try writer.print("metal_device_created={d}\n", .{native.metal_device_created});
     try writer.print("command_queue_created={d}\n", .{native.command_queue_created});
@@ -202,4 +203,79 @@ test "glyph texture upload requires readback to match the source bitmap" {
     var success = mismatch;
     success.texture_mismatched_pixels = 0;
     try std.testing.expect(deriveSmokeStatus(success).glyph_texture_uploaded);
+}
+
+test "glyph texture smoke fails closed on each raster, GPU, and readback stage" {
+    // 이 smoke의 목적은 "CPU raster는 됐는데 GPU upload/readback에서 막혔다"를 summary만
+    // 보고 분리하는 것이다. 그래서 성공 모양에서 단계별 신호를 하나씩 뒤집어, gate의 각
+    // 항이 실제로 부하를 받는지(없으면 false로 닫히는지) 고정한다. native_status 코드
+    // 의미는 glyph_texture_smoke.m의 범례를 참조한다.
+    const ok: NativeGlyphTextureSmokeResult = .{
+        .status = 0,
+        .metal_device_created = 1,
+        .command_queue_created = 1,
+        .source_rasterized = 1,
+        .texture_created = 1,
+        .texture_uploaded = 1,
+        .texture_readback = 1,
+        .source_width = 128,
+        .source_height = 64,
+        .source_non_clear_pixels = 77,
+        .texture_non_clear_pixels = 77,
+        .texture_mismatched_pixels = 0,
+        .upload_bytes = 32768,
+        .readback_failures = 0,
+    };
+    // 기준선: 성공 모양은 통과해야 한다.
+    try std.testing.expect(deriveSmokeStatus(ok).glyph_texture_uploaded);
+
+    // GPU가 없는 headless 실행(device 생성 실패, status 3): metal_texture=false이고
+    // 전체 gate도 false여서 프로세스가 non-zero로 종료된다.
+    var no_device = ok;
+    no_device.metal_device_created = 0;
+    no_device.status = 3;
+    try std.testing.expect(!deriveSmokeStatus(no_device).metal_texture);
+    try std.testing.expect(!deriveSmokeStatus(no_device).glyph_texture_uploaded);
+
+    // command queue 생성 실패(status 4).
+    var no_queue = ok;
+    no_queue.command_queue_created = 0;
+    no_queue.status = 4;
+    try std.testing.expect(!deriveSmokeStatus(no_queue).metal_texture);
+    try std.testing.expect(!deriveSmokeStatus(no_queue).glyph_texture_uploaded);
+
+    // texture 생성 실패(status 5, 예: storage mode 미지원).
+    var no_texture = ok;
+    no_texture.texture_created = 0;
+    no_texture.status = 5;
+    try std.testing.expect(!deriveSmokeStatus(no_texture).metal_texture);
+    try std.testing.expect(!deriveSmokeStatus(no_texture).glyph_texture_uploaded);
+
+    // 단계 status가 비-0이면(예: 내부 단계 실패) 다른 신호가 성공 모양이어도 닫힌다.
+    var bad_status = ok;
+    bad_status.status = 6;
+    try std.testing.expect(!deriveSmokeStatus(bad_status).glyph_texture_uploaded);
+
+    // upload는 표시됐지만 readback 산출물이 없는 경우.
+    var no_readback = ok;
+    no_readback.texture_readback = 0;
+    try std.testing.expect(!deriveSmokeStatus(no_readback).glyph_texture_uploaded);
+
+    // readback은 됐지만 실패 카운터가 올라간 경우에도 닫혀야 한다(GPU readback 신뢰 불가).
+    var readback_failed = ok;
+    readback_failed.readback_failures = 1;
+    try std.testing.expect(!deriveSmokeStatus(readback_failed).glyph_texture_uploaded);
+
+    // upload가 일어나지 않아 upload_bytes=0이면 닫힌다(GPU에 올린 byte가 없다).
+    var no_upload_bytes = ok;
+    no_upload_bytes.texture_uploaded = 0;
+    no_upload_bytes.upload_bytes = 0;
+    try std.testing.expect(!deriveSmokeStatus(no_upload_bytes).glyph_texture_uploaded);
+
+    // CPU raster가 0-ink면 source_rasterized=false이고 gate도 false다.
+    var no_ink = ok;
+    no_ink.source_non_clear_pixels = 0;
+    no_ink.texture_non_clear_pixels = 0;
+    try std.testing.expect(!deriveSmokeStatus(no_ink).source_rasterized);
+    try std.testing.expect(!deriveSmokeStatus(no_ink).glyph_texture_uploaded);
 }

@@ -217,7 +217,6 @@ static int maru_make_coretext_bitmap(
     result->source_height = (uint32_t)height;
     result->source_non_clear_pixels = bitmap->non_clear_pixels;
     result->source_rasterized = bitmap->non_clear_pixels > 0 ? 1 : 0;
-    result->upload_bytes = (byte_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)byte_count;
 
     CGContextRelease(context);
     CGColorSpaceRelease(color_space);
@@ -265,6 +264,10 @@ static int maru_upload_and_readback_texture(
                  withBytes:bitmap->pixels
                bytesPerRow:bitmap->bytes_per_row];
     result->texture_uploaded = 1;
+    // upload_bytes는 "실제로 texture에 올린 byte 수"를 뜻해야 한다. 그래서 source bitmap을
+    // 만들 때가 아니라 replaceRegion이 끝난 직후에 기록한다. device가 없어 upload가
+    // 일어나지 않은 run에서는 0으로 남아, summary만 보고 "GPU에 올린 게 없다"를 구분할 수 있다.
+    result->upload_bytes = (bitmap->byte_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)bitmap->byte_count;
 
     id<MTLBuffer> readback_buffer = [device
         newBufferWithLength:bitmap->byte_count
@@ -320,6 +323,15 @@ static int maru_upload_and_readback_texture(
         : 7;
 }
 
+// result->status는 어느 단계에서 멈췄는지 summary(native_status)로 분리하기 위한 값이다:
+//   0  = 성공(raster + upload + readback + byte 일치)
+//   2  = CoreText/CoreGraphics CPU bitmap raster 실패(폰트/컨텍스트 생성 또는 0-ink)
+//   3  = Metal device 생성 실패(headless/GPU 없음)
+//   4  = command queue 생성 실패
+//   5  = texture 생성 실패(예: storage mode 미지원)
+//   6  = readback 인프라 실패(buffer/command buffer/blit encoder/contents가 nil)
+//   7  = readback 픽셀이 source bitmap과 불일치
+//  -1  = 아직 실행되지 않음
 void maru_macos_glyph_texture_smoke_run(MaruGlyphTextureSmokeResult *result) {
     @autoreleasepool {
         if (result == NULL) {

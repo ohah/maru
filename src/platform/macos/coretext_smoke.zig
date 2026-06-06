@@ -1,5 +1,6 @@
 const std = @import("std");
 const maru = @import("maru");
+const config = maru.config;
 const renderer = maru.renderer;
 
 const artifact_dir = "zig-out/maru-macos-coretext-smoke";
@@ -9,6 +10,7 @@ const glyph_record_capacity = 64;
 const NativeCoreTextSmokeResult = extern struct {
     status: c_int,
     primary_font_found: u32,
+    requested_font_matched: u32,
     line_created: u32,
     run_count: u32,
     glyph_count: u32,
@@ -45,6 +47,9 @@ const NativeGlyphRecord = extern struct {
 };
 
 extern fn maru_macos_coretext_smoke_run(
+    requested_font_family: [*]const u8,
+    requested_font_family_len: usize,
+    requested_font_size: f64,
     result: *NativeCoreTextSmokeResult,
     glyph_records: [*]NativeGlyphRecord,
     glyph_record_capacity: usize,
@@ -58,14 +63,27 @@ pub fn main(init: std.process.Init) !void {
     var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
 
+    const appearance = try config.resolveAppearance(.{});
     var native: NativeCoreTextSmokeResult = emptyNativeResult();
     var glyph_records = [_]NativeGlyphRecord{emptyGlyphRecord()} ** glyph_record_capacity;
-    maru_macos_coretext_smoke_run(&native, &glyph_records, glyph_records.len);
+    maru_macos_coretext_smoke_run(
+        appearance.font.family.ptr,
+        appearance.font.family.len,
+        @floatCast(appearance.font.size),
+        &native,
+        &glyph_records,
+        glyph_records.len,
+    );
 
     const smoke_status = deriveSmokeStatus(native);
     const record_count = @min(@as(usize, @intCast(native.glyph_record_count)), glyph_records.len);
-    const glyph_frame_probe = try buildGlyphFrameProbe(allocator, native, glyph_records[0..record_count]);
-    const summary = try renderSummary(allocator, smoke_status, native, glyph_frame_probe);
+    const glyph_frame_probe = try buildGlyphFrameProbe(
+        allocator,
+        appearance,
+        native,
+        glyph_records[0..record_count],
+    );
+    const summary = try renderSummary(allocator, appearance, smoke_status, native, glyph_frame_probe);
     defer allocator.free(summary);
 
     try writeSummary(io, summary);
@@ -80,6 +98,7 @@ fn emptyNativeResult() NativeCoreTextSmokeResult {
     return .{
         .status = -1,
         .primary_font_found = 0,
+        .requested_font_matched = 0,
         .line_created = 0,
         .run_count = 0,
         .glyph_count = 0,
@@ -163,6 +182,7 @@ fn hasNativeShapeFields(native: NativeCoreTextSmokeResult) bool {
 
 fn renderSummary(
     allocator: std.mem.Allocator,
+    appearance: config.ResolvedAppearance,
     smoke_status: SmokeStatus,
     native: NativeCoreTextSmokeResult,
     glyph_frame_probe: GlyphFrameProbe,
@@ -173,7 +193,12 @@ fn renderSummary(
     const writer = &output.writer;
     try writer.writeAll("maru.macos-coretext-smoke.v1\n");
     try writer.print("artifact_dir={s}\n", .{artifact_dir});
+    try writer.writeAll("resolved_appearance=true\n");
+    try writer.print("requested_font_family={s}\n", .{appearance.font.family});
+    try writer.print("requested_font_size={d:.1}\n", .{@as(f64, @floatCast(appearance.font.size))});
+    try writer.print("requested_font_size_px={d}\n", .{fontSizePxForAtlas(appearance.font.size)});
     try writer.print("font_resolved={}\n", .{smoke_status.font_resolved});
+    try writer.print("requested_font_matched={d}\n", .{native.requested_font_matched});
     try writer.print("shaped_text={}\n", .{smoke_status.shaped_text});
     try writer.print("fallback_observed={}\n", .{smoke_status.fallback_observed});
     try writer.print("glyph_rasterized={}\n", .{smoke_status.glyph_rasterized});
@@ -232,6 +257,7 @@ const GlyphFrameProbe = struct {
 
 fn buildGlyphFrameProbe(
     allocator: std.mem.Allocator,
+    appearance: config.ResolvedAppearance,
     native: NativeCoreTextSmokeResult,
     records: []const NativeGlyphRecord,
 ) !GlyphFrameProbe {
@@ -249,7 +275,7 @@ fn buildGlyphFrameProbe(
     for (records) |record| {
         if (!isDrawableAtlasRecord(record)) continue;
 
-        const glyph = glyphRunForAtlas(record);
+        const glyph = glyphRunForAtlas(record, fontSizePxForAtlas(appearance.font.size));
         if (glyph.fallback) fallback_count += 1;
         if (glyph.cache_key.color_glyph_kind == .color) color_glyph_count += 1;
         runs.appendAssumeCapacity(glyph);
@@ -324,7 +350,7 @@ fn isDrawableAtlasRecord(record: NativeGlyphRecord) bool {
     return record.category != @intFromEnum(NativeGlyphCategory.space);
 }
 
-fn glyphRunForAtlas(record: NativeGlyphRecord) renderer.GlyphRun {
+fn glyphRunForAtlas(record: NativeGlyphRecord, font_size_px: u16) renderer.GlyphRun {
     const color_kind: renderer.ColorGlyphKind = if (record.category == @intFromEnum(NativeGlyphCategory.emoji))
         .color
     else
@@ -340,11 +366,19 @@ fn glyphRunForAtlas(record: NativeGlyphRecord) renderer.GlyphRun {
         .cache_key = .{
             .font_id = record.font_id,
             .glyph_id = record.glyph_id,
-            .font_size_px = 14,
+            .font_size_px = font_size_px,
             .device_scale = 1,
             .color_glyph_kind = color_kind,
         },
     };
+}
+
+fn fontSizePxForAtlas(font_size: f32) u16 {
+    // `ResolvedAppearance`가 1..512 범위를 이미 보장한다. renderer의 현재 glyph cache
+    // 계약은 정수 px이므로 smoke에서는 반올림해 넣는다. fractional point/px 정밀도는
+    // 실제 제품 renderer에서 device scale과 함께 별도 정책으로 고정해야 한다.
+    std.debug.assert(font_size >= 1.0 and font_size <= 512.0);
+    return @intFromFloat(@round(font_size));
 }
 
 fn codepointForProbeRecord(record: NativeGlyphRecord) u21 {
@@ -383,6 +417,7 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     var native = emptyNativeResult();
     native.status = 0;
     native.primary_font_found = 1;
+    native.requested_font_matched = 1;
     native.line_created = 1;
     native.run_count = 3;
     native.glyph_count = 8;
@@ -406,12 +441,18 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
         .{ .font_id = 2, .glyph_id = 20, .string_index = 5, .category = @intFromEnum(NativeGlyphCategory.cjk), .fallback = 1 },
         .{ .font_id = 3, .glyph_id = 30, .string_index = 7, .category = @intFromEnum(NativeGlyphCategory.emoji), .fallback = 1 },
     };
-    const glyph_frame_probe = try buildGlyphFrameProbe(std.testing.allocator, native, &records);
-    const summary = try renderSummary(std.testing.allocator, deriveSmokeStatus(native), native, glyph_frame_probe);
+    const appearance = try config.resolveAppearance(.{});
+    const glyph_frame_probe = try buildGlyphFrameProbe(std.testing.allocator, appearance, native, &records);
+    const summary = try renderSummary(std.testing.allocator, appearance, deriveSmokeStatus(native), native, glyph_frame_probe);
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.macos-coretext-smoke.v1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "resolved_appearance=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "requested_font_family=JetBrains Mono\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "requested_font_size=14.0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "requested_font_size_px=14\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "font_resolved=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "requested_font_matched=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "shaped_text=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "fallback_observed=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_rasterized=true\n") != null);
@@ -496,7 +537,8 @@ test "CoreText smoke keeps shaping and rasterization failures separate" {
     // raster가 실패해도(shape는 성공) GlyphFrame 준비는 raster와 독립이다.
     // 그래서 glyph_frame_ready와 atlas_keys_ready는 그대로 true여야 한다. 이렇게 분리해야
     // summary만 보고 "shape/frame 준비는 됐고 CPU raster에서 막혔다"를 집어낼 수 있다.
-    const probe = try buildGlyphFrameProbe(std.testing.allocator, native, &[_]NativeGlyphRecord{
+    const appearance = try config.resolveAppearance(.{});
+    const probe = try buildGlyphFrameProbe(std.testing.allocator, appearance, native, &[_]NativeGlyphRecord{
         .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
     });
     try std.testing.expect(probe.atlas_keys_ready);
@@ -526,7 +568,8 @@ test "CoreText smoke treats native glyph-buffer overflow as incomplete shaping" 
     try std.testing.expect(!status.glyph_rasterized);
 
     // GlyphFrame 준비도 overflow run을 정상 shape로 취급하면 안 된다.
-    const probe = try buildGlyphFrameProbe(std.testing.allocator, native, &[_]NativeGlyphRecord{
+    const appearance = try config.resolveAppearance(.{});
+    const probe = try buildGlyphFrameProbe(std.testing.allocator, appearance, native, &[_]NativeGlyphRecord{
         .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
     });
     try std.testing.expect(!probe.atlas_keys_ready);
@@ -590,7 +633,8 @@ test "CoreText smoke glyph frame probe filters spaces and requires records" {
         .{ .font_id = 1, .glyph_id = 5, .string_index = 4, .category = @intFromEnum(NativeGlyphCategory.space), .fallback = 0 },
     };
 
-    const probe = try buildGlyphFrameProbe(std.testing.allocator, native, &records);
+    const appearance = try config.resolveAppearance(.{ .font = .{ .family = "Menlo", .size = 16.4 } });
+    const probe = try buildGlyphFrameProbe(std.testing.allocator, appearance, native, &records);
     try std.testing.expect(probe.atlas_keys_ready);
     try std.testing.expect(probe.glyph_frame_ready);
     try std.testing.expectEqual(@as(usize, 1), probe.drawable_glyph_count);
@@ -599,7 +643,45 @@ test "CoreText smoke glyph frame probe filters spaces and requires records" {
     try std.testing.expectEqual(@as(usize, 1), probe.upload_count);
 
     native.glyph_record_overflow = 1;
-    const overflow_probe = try buildGlyphFrameProbe(std.testing.allocator, native, &records);
+    const overflow_probe = try buildGlyphFrameProbe(std.testing.allocator, appearance, native, &records);
     try std.testing.expect(!overflow_probe.atlas_keys_ready);
     try std.testing.expect(!overflow_probe.glyph_frame_ready);
+}
+
+test "CoreText smoke rounds resolved font size into atlas cache key" {
+    // CoreText는 fractional size를 받을 수 있지만, 현재 Maru glyph cache key는 정수 px를
+    // 쓴다. bridge smoke가 hardcoded 14로 되돌아가면 설정 변경 후 atlas miss/hit 진단이
+    // 틀어지므로 resolved size가 cache key까지 들어가는지 고정한다.
+    const appearance = try config.resolveAppearance(.{ .font = .{ .family = "Menlo", .size = 16.6 } });
+    const glyph = glyphRunForAtlas(.{
+        .font_id = 1,
+        .glyph_id = 42,
+        .string_index = 0,
+        .category = @intFromEnum(NativeGlyphCategory.ascii),
+        .fallback = 0,
+    }, fontSizePxForAtlas(appearance.font.size));
+
+    try std.testing.expectEqual(@as(u16, 17), glyph.cache_key.font_size_px);
+}
+
+test "CoreText smoke treats requested font mismatch as a diagnostic fallback" {
+    // JetBrains Mono는 기본 요청값이지만 사용자의 Mac에 없을 수 있다. 그 경우 앱을
+    // 시작하지 못하게 하기보다 system monospace fallback으로 화면을 띄우고,
+    // requested_font_matched=0을 남겨 설정/폰트 문제를 숨기지 않는다.
+    var native = emptyNativeResult();
+    native.status = 0;
+    native.primary_font_found = 1;
+    native.requested_font_matched = 0;
+    native.line_created = 1;
+    native.run_count = 2;
+    native.glyph_count = 8;
+    native.ascii_glyph_present = 1;
+    native.cjk_glyph_present = 1;
+    native.emoji_glyph_present = 1;
+    native.missing_glyph_count = 0;
+    native.glyph_record_count = 3;
+
+    const status = deriveSmokeStatus(native);
+    try std.testing.expect(status.font_resolved);
+    try std.testing.expect(status.shaped_text);
 }

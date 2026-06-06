@@ -5,6 +5,7 @@ pub const AtlasSlotId = u32;
 
 pub const GlyphAtlasConfig = struct {
     max_slots: usize = 1024,
+    atlas_width_px: u32 = 1024,
 };
 
 pub const AtlasInvalidationReason = enum {
@@ -19,6 +20,8 @@ pub const AtlasInvalidationReason = enum {
 pub const AtlasSlot = struct {
     id: AtlasSlotId,
     key: glyph_layout.GlyphCacheKey,
+    x_px: u32,
+    y_px: u32,
     width_px: u32,
     height_px: u32,
     upload_bytes: usize,
@@ -57,6 +60,9 @@ pub const GlyphAtlas = struct {
     stats: AtlasStats = .{},
     next_slot_id: AtlasSlotId = 1,
     generation: u32 = 0,
+    next_x_px: u32 = 0,
+    next_y_px: u32 = 0,
+    row_height_px: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator, config: GlyphAtlasConfig) GlyphAtlas {
         return .{
@@ -120,6 +126,9 @@ pub const GlyphAtlas = struct {
         self.entries.clearRetainingCapacity();
         self.stats.invalidations += 1;
         self.generation += 1;
+        self.next_x_px = 0;
+        self.next_y_px = 0;
+        self.row_height_px = 0;
         return .{
             .reason = reason,
             .removed_slots = removed,
@@ -143,9 +152,12 @@ pub const GlyphAtlas = struct {
 
     fn makeSlot(self: *GlyphAtlas, glyph: glyph_layout.GlyphRun) AtlasSlot {
         const dimensions = estimateGlyphBitmapSize(glyph);
+        const placement = self.placeGlyph(dimensions);
         const slot: AtlasSlot = .{
             .id = self.next_slot_id,
             .key = glyph.cache_key,
+            .x_px = placement.x_px,
+            .y_px = placement.y_px,
             .width_px = dimensions.width_px,
             .height_px = dimensions.height_px,
             .upload_bytes = dimensions.upload_bytes,
@@ -154,12 +166,41 @@ pub const GlyphAtlas = struct {
         self.next_slot_id += 1;
         return slot;
     }
+
+    fn placeGlyph(self: *GlyphAtlas, dimensions: EstimatedGlyphBitmapSize) AtlasPlacement {
+        // 실제 texture packer를 붙이기 전까지는 단순 row packer로 좌표를 고정한다.
+        // 이 좌표가 있어야 Metal backend가 AtlasSlot만 보고 UV를 만들 수 있고,
+        // backend마다 "slot id -> 임시 좌표"를 다시 발명하지 않는다.
+        const atlas_width = @max(self.config.atlas_width_px, dimensions.width_px);
+        if (self.next_x_px != 0 and self.next_x_px > atlas_width - dimensions.width_px) {
+            self.next_x_px = 0;
+            if (self.next_y_px > std.math.maxInt(u32) - self.row_height_px) {
+                self.next_y_px = std.math.maxInt(u32);
+            } else {
+                self.next_y_px += self.row_height_px;
+            }
+            self.row_height_px = 0;
+        }
+
+        const placement: AtlasPlacement = .{
+            .x_px = self.next_x_px,
+            .y_px = self.next_y_px,
+        };
+        self.next_x_px += dimensions.width_px;
+        self.row_height_px = @max(self.row_height_px, dimensions.height_px);
+        return placement;
+    }
 };
 
 const EstimatedGlyphBitmapSize = struct {
     width_px: u32,
     height_px: u32,
     upload_bytes: usize,
+};
+
+const AtlasPlacement = struct {
+    x_px: u32,
+    y_px: u32,
 };
 
 fn estimateGlyphBitmapSize(glyph: glyph_layout.GlyphRun) EstimatedGlyphBitmapSize {
@@ -214,10 +255,88 @@ test "glyph atlas reuses a slot for repeated cache keys" {
     try std.testing.expect(first.uploaded);
     try std.testing.expect(!second.uploaded);
     try std.testing.expectEqual(first.slot.id, second.slot.id);
+    try std.testing.expectEqual(first.slot.x_px, second.slot.x_px);
+    try std.testing.expectEqual(first.slot.y_px, second.slot.y_px);
     try std.testing.expect(first.upload_bytes > 0);
     try std.testing.expectEqual(@as(usize, 1), atlas.stats.misses);
     try std.testing.expectEqual(@as(usize, 1), atlas.stats.hits);
     try std.testing.expectEqual(first.upload_bytes, atlas.stats.upload_bytes);
+}
+
+test "glyph atlas assigns deterministic row-packed slot coordinates" {
+    var atlas = GlyphAtlas.init(std.testing.allocator, .{ .atlas_width_px = 28 });
+    defer atlas.deinit();
+
+    // atlas slot 좌표는 future Metal shader의 UV 입력이 된다. 여기서 좌표를 고정하지
+    // 않으면 backend가 slot id만 보고 임시 좌표를 만들게 되고, Metal/WebGPU가 서로 다른
+    // layout 규칙을 발명할 수 있다. 14px glyph 두 개는 같은 row에, 세 번째는 다음 row에 간다.
+    const first = try atlas.ensureGlyph(glyphForTest('A', .{
+        .font_id = 1,
+        .glyph_id = 'A',
+        .font_size_px = 14,
+        .device_scale = 1,
+    }, .{}));
+    const second = try atlas.ensureGlyph(glyphForTest('B', .{
+        .font_id = 1,
+        .glyph_id = 'B',
+        .font_size_px = 14,
+        .device_scale = 1,
+    }, .{}));
+    const third = try atlas.ensureGlyph(glyphForTest('C', .{
+        .font_id = 1,
+        .glyph_id = 'C',
+        .font_size_px = 14,
+        .device_scale = 1,
+    }, .{}));
+
+    try std.testing.expectEqual(@as(u32, 0), first.slot.x_px);
+    try std.testing.expectEqual(@as(u32, 0), first.slot.y_px);
+    try std.testing.expectEqual(@as(u32, 14), first.slot.width_px);
+    try std.testing.expectEqual(@as(u32, 14), first.slot.height_px);
+    try std.testing.expectEqual(@as(u32, 14), second.slot.x_px);
+    try std.testing.expectEqual(@as(u32, 0), second.slot.y_px);
+    try std.testing.expectEqual(@as(u32, 0), third.slot.x_px);
+    try std.testing.expectEqual(@as(u32, 14), third.slot.y_px);
+}
+
+test "glyph atlas invalidation resets placement for the next generation" {
+    var atlas = GlyphAtlas.init(std.testing.allocator, .{ .atlas_width_px = 28 });
+    defer atlas.deinit();
+
+    _ = try atlas.ensureGlyph(glyphForTest('A', .{ .font_id = 1, .glyph_id = 'A', .font_size_px = 14, .device_scale = 1 }, .{}));
+    _ = try atlas.ensureGlyph(glyphForTest('B', .{ .font_id = 1, .glyph_id = 'B', .font_size_px = 14, .device_scale = 1 }, .{}));
+
+    _ = atlas.invalidate(.font_size_changed);
+    const after = try atlas.ensureGlyph(glyphForTest('C', .{ .font_id = 1, .glyph_id = 'C', .font_size_px = 14, .device_scale = 1 }, .{}));
+
+    // invalidation 후 첫 slot이 예전 row offset을 이어받으면 새 texture generation의
+    // UV가 비어 있는 위치를 가리키게 된다. 그래서 placement cursor도 generation과 함께
+    // 처음으로 되돌아가야 한다.
+    try std.testing.expectEqual(@as(u32, 0), after.slot.x_px);
+    try std.testing.expectEqual(@as(u32, 0), after.slot.y_px);
+    try std.testing.expectEqual(@as(u32, 1), after.slot.generation);
+}
+
+test "glyph atlas placement saturates instead of overflowing the y cursor" {
+    var atlas = GlyphAtlas.init(std.testing.allocator, .{ .atlas_width_px = 14 });
+    defer atlas.deinit();
+
+    // 이 상태는 정상 제품 사용에서는 나오기 어렵지만, placement cursor가 손상되거나 아주
+    // 긴 세션에서 누적됐을 때 ReleaseFast overflow로 터지지 않아야 한다. wrap이 필요한
+    // 상태를 직접 만들고 다음 slot을 요청해 y 좌표가 maxInt로 포화되는지 확인한다.
+    atlas.next_x_px = 1;
+    atlas.next_y_px = std.math.maxInt(u32) - 5;
+    atlas.row_height_px = 10;
+
+    const placed = try atlas.ensureGlyph(glyphForTest('A', .{
+        .font_id = 1,
+        .glyph_id = 'A',
+        .font_size_px = 14,
+        .device_scale = 1,
+    }, .{}));
+
+    try std.testing.expectEqual(@as(u32, 0), placed.slot.x_px);
+    try std.testing.expectEqual(std.math.maxInt(u32), placed.slot.y_px);
 }
 
 test "glyph atlas key ignores underline but separates raster-affecting style" {

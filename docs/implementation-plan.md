@@ -259,6 +259,14 @@ TDD 방식:
 - macOS CoreText smoke: `mise run test-macos-coretext-smoke`로 summary 계약을 검증하고, `mise run macos-coretext-smoke`로 창/GPU 없이 macOS CoreText가 기본 고정폭 폰트를 찾고 ASCII/CJK/emoji probe를 glyph run으로 shape하는지 확인한다. 또한 glyph id/font id 후보가 Zig `GlyphAtlas` cache key 후보로 들어갈 수 있는지 확인한다. 이 단계는 glyph bitmap 검증은 아니지만, text renderer 전에 font stack/atlas-key 실패를 분리하는 검증이다.
 - screenshot artifact: 실제 화면 검증이 가능한 곳부터 opt-in으로 추가한다.
 
+macOS bridge 언어 선택:
+
+- 현재 `*.m` bridge는 제품 UI가 아니라 window/Metal/CoreText smoke를 위한 얇은 C ABI 경계다.
+- 이 smoke bridge는 Objective-C로 유지한다. Zig와 C ABI로 직접 붙고, Swift module/build/runtime/actor/lifecycle 복잡도를 초기 smoke에 끌어들이지 않기 위해서다.
+- Swift는 실제 macOS app host를 시작할 때 다시 도입한다. 대상은 지속 실행되는 `NSApplication`, window/tab/split lifecycle, menu/command, preferences, IME, accessibility, focus/input routing 같은 제품 UX 영역이다.
+- Swift app host를 도입하더라도 기존 Objective-C smoke는 삭제하지 않는다. 제품 UI 회귀와 low-level AppKit/Metal/CoreText 경계 회귀를 분리해 보기 위한 regression smoke로 남긴다.
+- Swift 도입 PR을 시작하기 전에 Swift/Zig C ABI 경계, ownership, main-thread/MainActor 규칙, build.zig 구성, smoke 유지 범위를 사용자와 다시 확인한다.
+
 완료 기준:
 
 - renderer는 PTY나 parser를 모른다.

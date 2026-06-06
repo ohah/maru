@@ -37,6 +37,21 @@ typedef struct {
     uint32_t screenshot_failures;
 } MaruGlyphTextSmokeResult;
 
+// Zig config.ResolvedAppearance에서 넘어온 검증된 색. raw 문자열이 아니라 이미 #RRGGBB가
+// Rgb로 parse된 값이라, 이 bridge는 정규화(0..1)만 하고 그대로 그린다. 필드 순서/타입은
+// glyph_text_smoke.zig의 NativeGlyphTextAppearance와 정확히 일치해야 한다.
+typedef struct {
+    uint8_t background_r;
+    uint8_t background_g;
+    uint8_t background_b;
+    uint8_t foreground_r;
+    uint8_t foreground_g;
+    uint8_t foreground_b;
+    uint8_t cursor_r;
+    uint8_t cursor_g;
+    uint8_t cursor_b;
+} MaruGlyphTextAppearance;
+
 typedef struct {
     uint8_t *pixels;
     size_t width;
@@ -168,6 +183,7 @@ static uint32_t maru_count_non_clear_rgba_pixels(const uint8_t *pixels, size_t b
 
 static int maru_make_coretext_bitmap(
     MaruGlyphTextSmokeResult *result,
+    const MaruGlyphTextAppearance *appearance,
     MaruGlyphTextBitmap *bitmap
 ) {
     // 이 bitmap은 제품 glyph atlas가 아니라 shader sampling smoke의 입력 fixture다.
@@ -199,7 +215,10 @@ static int maru_make_coretext_bitmap(
         return 2;
     }
 
-    CGColorRef foreground_color = CGColorCreateGenericRGB(1.0, 1.0, 1.0, 1.0);
+    const CGFloat fg_r = (CGFloat)appearance->foreground_r / 255.0;
+    const CGFloat fg_g = (CGFloat)appearance->foreground_g / 255.0;
+    const CGFloat fg_b = (CGFloat)appearance->foreground_b / 255.0;
+    CGColorRef foreground_color = CGColorCreateGenericRGB(fg_r, fg_g, fg_b, 1.0);
     if (foreground_color == NULL) {
         CFRelease(probe);
         CFRelease(font);
@@ -281,7 +300,9 @@ static int maru_make_coretext_bitmap(
     CGContextTranslateCTM(context, 0.0, (CGFloat)height);
     CGContextScaleCTM(context, 1.0, -1.0);
     CGContextSetShouldAntialias(context, true);
-    CGContextSetRGBFillColor(context, 1.0, 1.0, 1.0, 1.0);
+    // attributed string의 kCTForegroundColorAttributeName이 실제 색을 정하지만, context
+    // fill color도 같은 resolved foreground로 맞춰 둔다(둘이 어긋나 헷갈리지 않게).
+    CGContextSetRGBFillColor(context, fg_r, fg_g, fg_b, 1.0);
     CGContextSetTextPosition(context, 8.0, 36.0);
     CTLineDraw(line, context);
 
@@ -562,13 +583,13 @@ static MaruGlyphTextVertex *maru_build_glyph_text_vertices(size_t *vertex_count)
     return vertices;
 }
 
-static BOOL maru_pixel_is_non_clear(const uint8_t *pixel) {
-    // BGRA8Unorm clear color는 MTLClearColorMake(0.06, 0.08, 0.12, 1.0)이다.
-    // glyph는 흰색에 가까운 texture이므로 clear와 충분히 떨어져 있다. 허용 오차는
-    // GPU float->unorm 반올림 차이를 흡수하기 위한 값이다.
-    const int expected_b = 31;
-    const int expected_g = 20;
-    const int expected_r = 15;
+static BOOL maru_pixel_is_non_clear(const uint8_t *pixel, const MaruGlyphTextAppearance *appearance) {
+    // drawable은 BGRA8Unorm이라 메모리 순서가 B,G,R,A다. clear 색은 더 이상 하드코딩이
+    // 아니라 resolved theme.background이므로, 그 background와 충분히 다른 픽셀만 non-clear로
+    // 본다. 허용 오차는 GPU float->unorm 반올림 차이를 흡수하기 위한 값이다.
+    const int expected_b = appearance->background_b;
+    const int expected_g = appearance->background_g;
+    const int expected_r = appearance->background_r;
     const int expected_a = 255;
     const int tolerance = 8;
     return abs((int)pixel[0] - expected_b) > tolerance ||
@@ -577,14 +598,17 @@ static BOOL maru_pixel_is_non_clear(const uint8_t *pixel) {
         abs((int)pixel[3] - expected_a) > tolerance;
 }
 
-static BOOL maru_pixel_is_visible_glyph(const uint8_t *pixel) {
-    // non-clear만 보면 "검정 glyph가 어두운 배경에 찍힌" 상태도 성공으로 보인다.
-    // 이 smoke는 사람이 볼 수 있는 glyph를 검증해야 하므로, clear 배경보다 충분히
-    // 밝은 픽셀인지도 별도로 센다.
+static BOOL maru_pixel_is_visible_glyph(const uint8_t *pixel, const MaruGlyphTextAppearance *appearance) {
+    // non-clear만 보면 "배경과 비슷한 밝기의 glyph"도 성공으로 보인다. 이 smoke는 사람이
+    // 볼 수 있는 glyph를 검증해야 하므로, resolved background보다 충분히 밝은 픽셀인지도
+    // 별도로 센다. (R*299+G*587+B*114)/1000 luma를 background와 같은 가중치로 비교한다.
     const int luma =
         ((int)pixel[2] * 299 + (int)pixel[1] * 587 + (int)pixel[0] * 114) / 1000;
-    const int clear_luma = (15 * 299 + 20 * 587 + 31 * 114) / 1000;
-    return luma > clear_luma + 40;
+    const int background_luma =
+        ((int)appearance->background_r * 299 +
+         (int)appearance->background_g * 587 +
+         (int)appearance->background_b * 114) / 1000;
+    return luma > background_luma + 40;
 }
 
 // non-clear 카운트와 visible-glyph 카운트는 같은 readback buffer를 같은 stride로
@@ -593,6 +617,7 @@ static BOOL maru_pixel_is_visible_glyph(const uint8_t *pixel) {
 static void maru_count_readback_pixels(
     id<MTLBuffer> readback_buffer,
     size_t sample_count,
+    const MaruGlyphTextAppearance *appearance,
     uint32_t *non_clear_out,
     uint32_t *visible_glyph_out
 ) {
@@ -602,10 +627,10 @@ static void maru_count_readback_pixels(
     if (bytes != NULL) {
         for (size_t i = 0; i < sample_count; i++) {
             const uint8_t *pixel = bytes + (i * maru_glyph_text_readback_stride);
-            if (maru_pixel_is_non_clear(pixel)) {
+            if (maru_pixel_is_non_clear(pixel, appearance)) {
                 non_clear += 1;
             }
-            if (maru_pixel_is_visible_glyph(pixel)) {
+            if (maru_pixel_is_visible_glyph(pixel, appearance)) {
                 visible += 1;
             }
         }
@@ -620,6 +645,7 @@ static BOOL maru_draw_glyph_text_frame(
     id<MTLRenderPipelineState> pipeline,
     id<MTLTexture> glyph_texture,
     const MaruGlyphTextBitmap *bitmap,
+    const MaruGlyphTextAppearance *appearance,
     const char *screenshot_path,
     MaruGlyphTextSmokeResult *result
 ) {
@@ -633,7 +659,14 @@ static BOOL maru_draw_glyph_text_frame(
     pass.colorAttachments[0].texture = drawable.texture;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    pass.colorAttachments[0].clearColor = MTLClearColorMake(0.06, 0.08, 0.12, 1.0);
+    // clear 색을 resolved theme.background로 칠한다. readback 예측자도 같은 background를
+    // 참조하므로, 사용자가 배경색을 바꿔도 glyph ink 검증 gate는 그대로 유효하다.
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(
+        (double)appearance->background_r / 255.0,
+        (double)appearance->background_g / 255.0,
+        (double)appearance->background_b / 255.0,
+        1.0
+    );
 
     id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
     if (command_buffer == nil) {
@@ -780,6 +813,7 @@ static BOOL maru_draw_glyph_text_frame(
     maru_count_readback_pixels(
         readback_buffer,
         drawable_sample_count,
+        appearance,
         &result->readback_non_clear_pixels,
         &result->readback_visible_glyph_pixels
     );
@@ -836,6 +870,7 @@ static BOOL maru_draw_glyph_text_frame(
 //  -1  = 아직 실행되지 않음
 void maru_macos_glyph_text_smoke_run(
     uint32_t duration_ms,
+    const MaruGlyphTextAppearance *appearance,
     const char *screenshot_path,
     size_t screenshot_path_len,
     MaruGlyphTextSmokeResult *result
@@ -845,9 +880,25 @@ void maru_macos_glyph_text_smoke_run(
     }
     maru_clear_result(result);
 
+    // appearance가 NULL이면(방어적) 기존 기본 색(dark background + 흰 glyph)으로 진행한다.
+    // 15/20/31은 옛 clear color(0.06,0.08,0.12)*255 근사값이라 기본 동작이 유지된다.
+    const MaruGlyphTextAppearance default_appearance = {
+        .background_r = 15,
+        .background_g = 20,
+        .background_b = 31,
+        .foreground_r = 255,
+        .foreground_g = 255,
+        .foreground_b = 255,
+        .cursor_r = 255,
+        .cursor_g = 255,
+        .cursor_b = 255,
+    };
+    const MaruGlyphTextAppearance *appr =
+        (appearance != NULL) ? appearance : &default_appearance;
+
     @autoreleasepool {
         MaruGlyphTextBitmap bitmap = {0};
-        int status = maru_make_coretext_bitmap(result, &bitmap);
+        int status = maru_make_coretext_bitmap(result, appr, &bitmap);
         if (status != 0) {
             result->status = status;
             maru_free_bitmap(&bitmap);
@@ -964,6 +1015,7 @@ void maru_macos_glyph_text_smoke_run(
                     pipeline,
                     glyph_texture,
                     &bitmap,
+                    appr,
                     screenshot_path_copy,
                     result
                 );

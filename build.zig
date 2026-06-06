@@ -237,6 +237,9 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                },
             }),
         });
         macos_glyph_text_smoke.root_module.addCSourceFile(.{
@@ -260,6 +263,9 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                },
             }),
         });
 

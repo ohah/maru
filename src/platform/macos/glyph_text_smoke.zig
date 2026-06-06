@@ -1,4 +1,6 @@
 const std = @import("std");
+const maru = @import("maru");
+const config = maru.config;
 
 const artifact_dir = "zig-out/maru-macos-glyph-text-smoke";
 const screenshot_path = artifact_dir ++ "/glyph-text-frame.ppm";
@@ -34,12 +36,41 @@ const NativeGlyphTextSmokeResult = extern struct {
     screenshot_failures: u32,
 };
 
+// config.ResolvedAppearance에서 온 검증된 색을 native bridge로 넘긴다. 필드 순서/타입은
+// appkit_glyph_text_smoke.m의 MaruGlyphTextAppearance와 정확히 일치해야 한다.
+const NativeGlyphTextAppearance = extern struct {
+    background_r: u8,
+    background_g: u8,
+    background_b: u8,
+    foreground_r: u8,
+    foreground_g: u8,
+    foreground_b: u8,
+    cursor_r: u8,
+    cursor_g: u8,
+    cursor_b: u8,
+};
+
 extern fn maru_macos_glyph_text_smoke_run(
     duration_ms: u32,
+    appearance: *const NativeGlyphTextAppearance,
     screenshot_path_ptr: [*]const u8,
     screenshot_path_len: usize,
     result: *NativeGlyphTextSmokeResult,
 ) void;
+
+fn nativeAppearance(appearance: config.ResolvedAppearance) NativeGlyphTextAppearance {
+    return .{
+        .background_r = appearance.theme.background.r,
+        .background_g = appearance.theme.background.g,
+        .background_b = appearance.theme.background.b,
+        .foreground_r = appearance.theme.foreground.r,
+        .foreground_g = appearance.theme.foreground.g,
+        .foreground_b = appearance.theme.foreground.b,
+        .cursor_r = appearance.theme.cursor.r,
+        .cursor_g = appearance.theme.cursor.g,
+        .cursor_b = appearance.theme.cursor.b,
+    };
+}
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -50,12 +81,16 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_file_writer.interface;
 
     const duration_ms = readDurationMs();
+    // raw config 색 문자열을 frame loop 안에서 해석하지 않고, 시작 시점에 한 번 검증된
+    // ResolvedAppearance로 바꿔 native bridge로 넘긴다. 기본 config는 항상 resolve된다.
+    const appearance = try config.resolveAppearance(.{});
+    const native_appearance = nativeAppearance(appearance);
     var native = emptyNativeResult();
     try ensureArtifactDir(io);
-    maru_macos_glyph_text_smoke_run(duration_ms, screenshot_path.ptr, screenshot_path.len, &native);
+    maru_macos_glyph_text_smoke_run(duration_ms, &native_appearance, screenshot_path.ptr, screenshot_path.len, &native);
 
     const smoke_status = deriveSmokeStatus(native);
-    const summary = try renderSummary(allocator, duration_ms, smoke_status, native);
+    const summary = try renderSummary(allocator, duration_ms, smoke_status, native, native_appearance);
     defer allocator.free(summary);
 
     try writeSummary(io, summary);
@@ -165,6 +200,7 @@ fn renderSummary(
     duration_ms: u32,
     smoke_status: SmokeStatus,
     native: NativeGlyphTextSmokeResult,
+    appearance: NativeGlyphTextAppearance,
 ) ![]u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
@@ -180,6 +216,13 @@ fn renderSummary(
     try writer.print("screenshot_path={s}\n", .{screenshot_path});
     try writer.writeAll("screenshot_format=ppm_rgb_from_bgra8_drawable_readback\n");
     try writer.print("glyph_text={}\n", .{smoke_status.glyph_text_drawn});
+    // resolved ResolvedAppearance 색이 실제 렌더에 쓰였음을 artifact로 남긴다. background는
+    // Metal clear color로, foreground는 CoreText glyph fill로 적용된다. cursor 색은 resolve해
+    // 기록만 하고 이 smoke에서는 아직 그리지 않는다(다음 단계).
+    try writer.print("applied_background=#{x:0>2}{x:0>2}{x:0>2}\n", .{ appearance.background_r, appearance.background_g, appearance.background_b });
+    try writer.print("applied_foreground=#{x:0>2}{x:0>2}{x:0>2}\n", .{ appearance.foreground_r, appearance.foreground_g, appearance.foreground_b });
+    try writer.print("applied_cursor=#{x:0>2}{x:0>2}{x:0>2}\n", .{ appearance.cursor_r, appearance.cursor_g, appearance.cursor_b });
+    try writer.writeAll("appearance_note=background_to_clear_color_foreground_to_glyph_color_cursor_resolved_but_not_drawn\n");
     try writer.writeAll("ui_note=appkit_window_with_metal_shader_sampling_coretext_glyph_texture_no_terminal_renderer\n");
     try writer.print("duration_ms={d}\n", .{duration_ms});
     try writer.print("native_status={d}\n", .{native.status});
@@ -272,7 +315,18 @@ test "macOS glyph text smoke summary reports shader sampling boundary" {
         .screenshot_bytes = 3628800,
         .screenshot_failures = 0,
     };
-    const summary = try renderSummary(std.testing.allocator, 1500, deriveSmokeStatus(native), native);
+    const appearance: NativeGlyphTextAppearance = .{
+        .background_r = 0x10,
+        .background_g = 0x10,
+        .background_b = 0x10,
+        .foreground_r = 0xe8,
+        .foreground_g = 0xe8,
+        .foreground_b = 0xe8,
+        .cursor_r = 0xff,
+        .cursor_g = 0xff,
+        .cursor_b = 0xff,
+    };
+    const summary = try renderSummary(std.testing.allocator, 1500, deriveSmokeStatus(native), native, appearance);
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.macos-glyph-text-smoke.v1\n") != null);
@@ -294,6 +348,28 @@ test "macOS glyph text smoke summary reports shader sampling boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_height=840\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_bytes=3628800\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_failures=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "applied_background=#101010\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "applied_foreground=#e8e8e8\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "applied_cursor=#ffffff\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "appearance_note=background_to_clear_color_foreground_to_glyph_color_cursor_resolved_but_not_drawn\n") != null);
+}
+
+test "glyph text smoke maps resolved appearance colors into the native bridge" {
+    // ResolvedAppearance의 theme 색이 native bridge struct로 정확히 매핑되는지 고정한다.
+    // 이게 어긋나면 잘못된 색이 clear/glyph로 그려져도 summary가 진짜 적용된 색을 못 남긴다.
+    const appearance = nativeAppearance(try config.resolveAppearance(.{}));
+    // 기본 theme: background #101010, foreground #e8e8e8, cursor #ffffff
+    try std.testing.expectEqual(@as(u8, 0x10), appearance.background_r);
+    try std.testing.expectEqual(@as(u8, 0x10), appearance.background_g);
+    try std.testing.expectEqual(@as(u8, 0x10), appearance.background_b);
+    try std.testing.expectEqual(@as(u8, 0xe8), appearance.foreground_r);
+    try std.testing.expectEqual(@as(u8, 0xff), appearance.cursor_r);
+
+    const native = emptyNativeResult();
+    const summary = try renderSummary(std.testing.allocator, 1500, deriveSmokeStatus(native), native, appearance);
+    defer std.testing.allocator.free(summary);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "applied_background=#101010\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "applied_foreground=#e8e8e8\n") != null);
 }
 
 test "glyph text smoke status labels explain native failure stages" {

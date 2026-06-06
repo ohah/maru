@@ -29,6 +29,10 @@ const NativeMetalCell = extern struct {
     reserved: u16 = 0,
     codepoint: u32,
     slot_id: u32,
+    atlas_x_px: u32,
+    atlas_y_px: u32,
+    atlas_width_px: u32,
+    atlas_height_px: u32,
 };
 
 extern fn maru_macos_metal_smoke_run(
@@ -141,6 +145,7 @@ fn renderSummary(
     try writer.writeAll("glyph_text=false\n");
     try writer.writeAll("ui_note=appkit_window_with_metal_glyph_frame_placeholder_readback_no_glyph_text\n");
     try writer.writeAll("renderer_input=renderer_state_glyph_frame\n");
+    try writer.print("renderer_atlas_slot_placement={}\n", .{nativeCellsHaveAtlasPlacement(fixture.cells)});
     // 제품 frame 통계는 renderer가 소유한 공유 직렬화기로 남긴다. glyph text smoke와 같은
     // "renderer_" schema를 쓰므로 두 artifact의 키가 어긋나지 않는다.
     try renderer.writeRenderFrameStats(writer, "renderer_", fixture.stats);
@@ -219,10 +224,26 @@ fn buildNativeCellsFromGlyphFrame(
             .width = glyph.run.cell_width,
             .codepoint = glyph.run.codepoint,
             .slot_id = glyph.slot.id,
+            .atlas_x_px = glyph.slot.x_px,
+            .atlas_y_px = glyph.slot.y_px,
+            .atlas_width_px = glyph.slot.width_px,
+            .atlas_height_px = glyph.slot.height_px,
         });
     }
 
     return cells.toOwnedSlice(allocator);
+}
+
+fn nativeCellsHaveAtlasPlacement(cells: []const NativeMetalCell) bool {
+    // 이 값은 "Metal이 glyph bitmap을 그렸다"는 뜻이 아니다. 다음 제품 text renderer에서
+    // UV를 만들 수 있는 atlas placement 데이터가 Zig -> ObjC ABI까지 건너갔는지 보는
+    // 중간 계약이다. 빈 배열이면 검증할 데이터가 없으므로 false로 둔다.
+    if (cells.len == 0) return false;
+    for (cells) |cell| {
+        if (cell.slot_id == 0) return false;
+        if (cell.atlas_width_px == 0 or cell.atlas_height_px == 0) return false;
+    }
+    return true;
 }
 
 fn writeSummary(io: std.Io, summary: []const u8) !void {
@@ -248,10 +269,20 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
         .readback_non_clear_pixels = 9,
         .readback_failures = 0,
     };
-    var empty_cells = [_]NativeMetalCell{};
+    var cells = [_]NativeMetalCell{.{
+        .row = 0,
+        .col = 0,
+        .width = 1,
+        .codepoint = 'M',
+        .slot_id = 1,
+        .atlas_x_px = 0,
+        .atlas_y_px = 0,
+        .atlas_width_px = 14,
+        .atlas_height_px = 14,
+    }};
     const fixture: SmokeFixture = .{
         .size = .{ .cols = 24, .rows = 6 },
-        .cells = empty_cells[0..],
+        .cells = cells[0..],
         .stats = .{
             .consistent = true,
             .backend = .metal,
@@ -277,6 +308,7 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_text=false\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "ui_note=appkit_window_with_metal_glyph_frame_placeholder_readback_no_glyph_text\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=renderer_state_glyph_frame\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_atlas_slot_placement=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_prepared=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_backend=metal\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_shaper=fake_font_backend\n") != null);
@@ -300,6 +332,14 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "readback_samples=9\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "readback_non_clear_pixels=9\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "readback_failures=0\n") != null);
+}
+
+test "NativeMetalCell ABI keeps atlas placement fields tightly packed" {
+    // NativeMetalCell은 appkit_metal_smoke.m의 MaruMetalSmokeCell과 같은 메모리 모양이어야
+    // 한다. 필드를 추가할 때 이 크기가 예고 없이 바뀌면 ObjC bridge가 atlas 좌표를 다른
+    // 값으로 읽어 Metal smoke가 거짓 신호를 낼 수 있다.
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(NativeMetalCell));
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(NativeMetalCell));
 }
 
 test "Metal smoke terminal grid requires every sampled readback pixel non-clear" {
@@ -400,4 +440,44 @@ test "Metal smoke fixture comes from RendererState glyph frame" {
     try std.testing.expectEqual(@as(u16, 0), fixture.cells[4].col);
     try std.testing.expect(fixture.cells[0].slot_id > 0);
     try std.testing.expectEqual(fixture.cells[0].slot_id, fixture.cells[4].slot_id);
+    try std.testing.expect(fixture.cells[0].atlas_width_px > 0);
+    try std.testing.expect(fixture.cells[0].atlas_height_px > 0);
+    // 같은 glyph/cache key는 같은 atlas slot 좌표를 재사용해야 한다. native bridge가
+    // slot_id만 넘기고 좌표를 잃어버리면 다음 Metal text shader가 UV를 만들 수 없다.
+    try std.testing.expectEqual(fixture.cells[0].atlas_x_px, fixture.cells[4].atlas_x_px);
+    try std.testing.expectEqual(fixture.cells[0].atlas_y_px, fixture.cells[4].atlas_y_px);
+    try std.testing.expect(nativeCellsHaveAtlasPlacement(fixture.cells));
+}
+
+test "Metal smoke atlas placement gate rejects missing slot coordinates" {
+    // summary의 renderer_atlas_slot_placement는 단순히 cell_count가 있다는 뜻이 아니다.
+    // 모든 native cell이 slot id와 bitmap 크기 후보를 가져야 다음 text renderer가 UV를
+    // 계산할 수 있으므로, 빈/손상 fixture를 false로 닫는다.
+    try std.testing.expect(!nativeCellsHaveAtlasPlacement(&[_]NativeMetalCell{}));
+
+    const missing_slot = [_]NativeMetalCell{.{
+        .row = 0,
+        .col = 0,
+        .width = 1,
+        .codepoint = 'A',
+        .slot_id = 0,
+        .atlas_x_px = 0,
+        .atlas_y_px = 0,
+        .atlas_width_px = 14,
+        .atlas_height_px = 14,
+    }};
+    try std.testing.expect(!nativeCellsHaveAtlasPlacement(&missing_slot));
+
+    const missing_dimensions = [_]NativeMetalCell{.{
+        .row = 0,
+        .col = 0,
+        .width = 1,
+        .codepoint = 'A',
+        .slot_id = 1,
+        .atlas_x_px = 0,
+        .atlas_y_px = 0,
+        .atlas_width_px = 0,
+        .atlas_height_px = 14,
+    }};
+    try std.testing.expect(!nativeCellsHaveAtlasPlacement(&missing_dimensions));
 }

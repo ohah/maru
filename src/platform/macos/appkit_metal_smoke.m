@@ -25,6 +25,10 @@ typedef struct {
     uint16_t reserved;
     uint32_t codepoint;
     uint32_t slot_id;
+    uint32_t atlas_x_px;
+    uint32_t atlas_y_px;
+    uint32_t atlas_width_px;
+    uint32_t atlas_height_px;
 } MaruMetalSmokeCell;
 
 typedef struct {
@@ -99,12 +103,18 @@ static id<MTLRenderPipelineState> maru_make_cell_pipeline(
 
 static void maru_cell_color(MaruMetalSmokeCell cell, float *r, float *g, float *b) {
     // 이 색은 터미널 theme가 아니다. glyph가 붙기 전에도 셀 위치를 눈으로 확인하기 위한
-    // 진단용 색이다. slot_id를 섞어 Zig의 GlyphFrame/atlas slot 데이터가 native bridge까지
-    // 넘어왔다는 신호를 만든다. 실제 glyph 색상은 제품 renderer 단계에서 별도로 다룬다.
+    // 진단용 색이다. slot_id와 atlas placement를 섞어 Zig의 GlyphFrame/atlas slot 좌표가
+    // native bridge까지 넘어왔다는 신호를 만든다. 실제 glyph 색상은 제품 renderer 단계에서
+    // 별도로 다룬다.
     const uint32_t codepoint = cell.codepoint;
     const uint32_t slot_id = cell.slot_id == 0 ? 1u : cell.slot_id;
-    *r = 0.20f + (float)((codepoint + slot_id) % 3u) * 0.10f;
-    *g = 0.56f + (float)((codepoint + slot_id) % 5u) * 0.05f;
+    const uint32_t atlas_mix =
+        cell.atlas_x_px ^
+        (cell.atlas_y_px << 1) ^
+        cell.atlas_width_px ^
+        (cell.atlas_height_px << 1);
+    *r = 0.20f + (float)((codepoint + slot_id + atlas_mix) % 3u) * 0.10f;
+    *g = 0.56f + (float)((codepoint + slot_id + atlas_mix) % 5u) * 0.05f;
     *b = 0.78f;
 }
 

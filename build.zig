@@ -103,6 +103,9 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                },
             }),
         });
         macos_metal_smoke.root_module.addCSourceFile(.{
@@ -113,7 +116,7 @@ pub fn build(b: *std.Build) void {
         macos_metal_smoke.root_module.linkFramework("Metal", .{});
         macos_metal_smoke.root_module.linkFramework("QuartzCore", .{});
 
-        const macos_metal_smoke_step = b.step("macos-metal-smoke", "Run the visible macOS Metal clear-frame smoke");
+        const macos_metal_smoke_step = b.step("macos-metal-smoke", "Run the visible macOS Metal DrawList placeholder smoke");
         const macos_metal_smoke_cmd = b.addRunArtifact(macos_metal_smoke);
         macos_metal_smoke_cmd.setCwd(b.path("."));
         macos_metal_smoke_step.dependOn(&macos_metal_smoke_cmd.step);
@@ -124,6 +127,9 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                },
             }),
         });
 

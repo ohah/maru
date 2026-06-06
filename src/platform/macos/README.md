@@ -6,4 +6,4 @@ macOS 전용 bridge를 담는 폴더다.
 
 `window_smoke.zig`와 `appkit_window_smoke.m`은 첫 visible UI smoke다. 이 경로는 실제 터미널 화면이나 Metal renderer를 검증하지 않고, macOS window server와 AppKit lifecycle에 접근할 수 있는지만 확인한다. 계약 테스트는 `mise run test-macos-window-smoke`, 실제 창 smoke는 `mise run macos-window-smoke`다.
 
-`metal_smoke.zig`와 `appkit_metal_smoke.m`은 첫 Metal surface smoke다. 이 경로는 터미널 글자를 그리지 않고, AppKit 창 위 CAMetalLayer에 clear frame을 실제로 present할 수 있는지만 확인한다. 계약 테스트는 `mise run test-macos-metal-smoke`, 실제 Metal smoke는 `mise run macos-metal-smoke`다.
+`metal_smoke.zig`와 `appkit_metal_smoke.m`은 첫 Metal DrawList smoke다. 이 경로는 아직 터미널 글자 glyph를 그리지 않지만, `TerminalCore -> DrawList`에서 만든 셀을 AppKit 창 위 CAMetalLayer에 placeholder quad로 실제 present한다. 계약 테스트는 `mise run test-macos-metal-smoke`, 실제 Metal smoke는 `mise run macos-metal-smoke`다.

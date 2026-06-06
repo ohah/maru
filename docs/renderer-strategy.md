@@ -171,9 +171,9 @@ dirty region 범위:
 3. `DrawList -> GlyphRunList -> GlyphFrame` 변환을 테스트한다. 이 단계는 GPU 없이 atlas slot reuse, row-packed slot 좌표 후보, upload 후보, eviction 관측, cursor/underline overlay 보존을 증명한다.
 4. `GlyphFrame -> GlyphQuadFrame` 변환을 테스트한다. 이 단계는 atlas slot pixel rect가 shader UV로 바뀌고, texture bounds 오류가 backend 전에 드러나는지 증명한다.
 5. `Config -> ResolvedAppearance` 계약을 테스트한다. font family/size, theme colors, cursor shape/blink가 깨진 값이면 backend로 들어가기 전에 실패해야 한다. 이어서 default resolved font 요청이 CoreText smoke bridge와 glyph cache key 후보까지 전달되는지 확인한다.
-6. `RendererState`가 frame 사이에 살아남는 `GlyphAtlas`를 소유하고, `RenderSnapshot -> DrawList -> GlyphRunList -> GlyphFrame`을 한 제품 frame으로 준비한다. 이 단계의 app-smoke는 실제 UI가 아니라 `app-host.glyph-frame.txt` artifact로 backend 입력을 확인한다.
-7. visible glyph text smoke가 제품 `RendererState/GlyphFrame` probe를 함께 남기게 해, 화면 fixture와 제품 frame 준비 계약이 서로 멀어지지 않게 한다.
-8. `DrawList`/`GlyphFrame`/`GlyphQuadFrame`을 Metal backend가 소비하는 형태로 만든다. cursor/underline은 cell overlay로 두고, cursor 이동(old/new cell)이 dirty 범위에 들어오도록 domain 계약을 유지한다.
+6. `RendererState`가 frame 사이에 살아남는 `GlyphAtlas`를 소유하고, `RenderSnapshot -> DrawList -> GlyphRunList -> GlyphFrame -> GlyphQuadFrame`을 한 제품 `RenderFrame`으로 준비한다. 이 단계의 app-smoke는 실제 UI가 아니라 `app-host.glyph-frame.txt` artifact로 backend 입력과 UV 준비 상태를 확인한다.
+7. visible glyph text smoke가 제품 `RendererState/RenderFrame` probe를 함께 남기게 해, 화면 fixture와 제품 frame 준비 계약이 서로 멀어지지 않게 한다.
+8. `RenderFrame` 안의 `DrawList`/`GlyphFrame`/`GlyphQuadFrame`을 Metal backend가 소비하는 형태로 만든다. cursor/underline은 cell overlay로 두고, cursor 이동(old/new cell)이 dirty 범위에 들어오도록 domain 계약을 유지한다.
 9. macOS app smoke에서 screenshot artifact를 남긴다.
 
 이 순서가 중요한 이유는 GPU screenshot을 먼저 붙이면 실패 원인이 parser인지, snapshot인지, glyph atlas인지, GPU pipeline인지 구분하기 어렵기 때문이다. 먼저 deterministic한 `DrawList`를 만들면 renderer의 입력 계약을 작은 테스트로 고정할 수 있다.
@@ -189,7 +189,7 @@ dirty region 범위:
 - GPU 없는 `GlyphCacheKey -> AtlasSlot` cache/placement/invalidation test.
 - GPU 없는 `GlyphRunList -> GlyphFrame` test. 같은 glyph의 atlas slot reuse, row-packed slot 좌표 후보, upload 후보, eviction 카운터, overlay 보존을 확인한다.
 - GPU 없는 `GlyphFrame -> GlyphQuadFrame` test. atlas slot pixel rect가 normalized UV로 바뀌고 texture bounds 오류가 backend 전에 실패하는지 확인한다.
-- GPU 없는 `RendererState` test. 같은 renderer state로 여러 frame을 만들 때 atlas slot이 재사용되고, app host가 `RenderFrame` 전체를 소비하는지 확인한다.
+- GPU 없는 `RendererState` test. 같은 renderer state로 여러 frame을 만들 때 atlas slot이 재사용되고, `RenderFrame`이 `GlyphQuadFrame`까지 소유해 UV 누락을 숨기지 않는지 확인한다.
 - GPU 없는 `Config -> ResolvedAppearance` test. `#RRGGBB` 색상, font size, cursor shape/blink를 renderer 입력 전 단계에서 검증한다.
 - macOS CoreText smoke summary test. default `ResolvedAppearance`의 font family/size가 native CoreText bridge와 glyph cache key 후보에 연결되는지 검증한다.
 - renderer가 PTY, parser, live platform handle을 import하지 않는 boundary test.
@@ -201,7 +201,7 @@ opt-in으로 둘 것:
 - 실제 AppKit 창 위 CAMetalLayer `RendererState -> GlyphFrame -> GlyphQuadFrame` placeholder present/readback smoke(`mise run macos-metal-smoke`). 이 smoke는 native cell이 atlas slot id와 placement 후보를 받았는지 `renderer_atlas_slot_placement`로, shader UV 준비가 됐는지 `renderer_glyph_uv_ready`로 남긴다.
 - 실제 CoreText font resolve/glyph run/atlas key/CPU glyph raster smoke(`mise run macos-coretext-smoke`).
 - 실제 CoreText CPU bitmap -> Metal texture upload/readback smoke(`mise run macos-glyph-texture-smoke`).
-- 실제 CoreText glyph texture를 AppKit/CAMetalLayer 창에서 shader sampling하고 drawable readback 및 PPM screenshot artifact로 glyph ink를 확인하는 smoke(`mise run macos-glyph-text-smoke`). 이 smoke는 동시에 Zig 제품 경로인 `TerminalCore -> RendererState -> GlyphFrame` probe를 만들어 summary에 `renderer_frame_prepared=true`와 glyph/atlas 통계를 남긴다. 이 probe는 아직 실제 CoreText shaper가 아니라 `FakeFontBackend`를 쓰므로 `renderer_shaper=fake_font_backend`로 한계를 드러낸다.
+- 실제 CoreText glyph texture를 AppKit/CAMetalLayer 창에서 shader sampling하고 drawable readback 및 PPM screenshot artifact로 glyph ink를 확인하는 smoke(`mise run macos-glyph-text-smoke`). 이 smoke는 동시에 Zig 제품 경로인 `TerminalCore -> RendererState -> RenderFrame` probe를 만들어 summary에 `renderer_frame_prepared=true`, `renderer_glyph_uv_ready=true`, glyph/atlas 통계를 남긴다. 이 probe는 아직 실제 CoreText shaper가 아니라 `FakeFontBackend`를 쓰므로 `renderer_shaper=fake_font_backend`로 한계를 드러낸다.
 - frame pacing, GPU timing, font stack 영향을 받는 성능 측정.
 
 ## clean-room 기준

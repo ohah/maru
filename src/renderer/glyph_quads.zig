@@ -111,7 +111,10 @@ pub fn buildGlyphQuadFrame(
         // 건너뛴다. (atlas가 자기 texture 밖에 slot을 놓을 수 있는 문제 자체는 별도 overflow
         // 정책 PR에서 다룬다.) skip이 생기면 uv_count < glyph_count가 되어 ready()가 false가
         // 되므로 누락이 통계로 드러난다.
-        const uv = uvRectForSlot(glyph.slot, texture_size) catch continue;
+        const uv = uvRectForSlot(glyph.slot, texture_size) catch |err| switch (err) {
+            error.AtlasSlotOutsideTexture => continue,
+            else => return err,
+        };
         stats.uv_count += 1;
         glyphs.appendAssumeCapacity(.{
             .run = glyph.run,
@@ -284,4 +287,38 @@ test "glyph quad frame skips slots outside the texture instead of failing the wh
     try std.testing.expectEqual(@as(u21, 'A'), quads.glyphs[0].run.codepoint);
     // 경계 밖 slot을 건너뛰어도 overlay 같은 frame-level 데이터는 그대로 보존된다.
     try std.testing.expectEqual(frame.overlays.len, quads.overlays.len);
+}
+
+test "glyph quad frame rejects invalid texture size instead of hiding configuration bugs" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 1, .rows = 1 });
+    defer core.deinit();
+
+    // out-of-bounds slot은 일부 glyph 누락으로 관측할 수 있지만, 0 크기 texture는 renderer
+    // 설정 자체가 깨진 것이다. 이를 skip으로 삼키면 app/smoke가 glyph_uv_ready=false만
+    // 남기고 근본 원인인 잘못된 texture 설정을 놓치므로 에러로 닫는다.
+    core.clearDirty();
+    try core.write("A");
+
+    var list = try @import("draw_list.zig").buildDrawList(std.testing.allocator, core.snapshot());
+    defer list.deinit(std.testing.allocator);
+
+    var glyph_runs = try @import("glyph_layout.zig").buildGlyphRunList(
+        std.testing.allocator,
+        list,
+        .{ .font_size_px = 14, .device_scale = 1 },
+        @import("glyph_layout.zig").FakeFontBackend{},
+    );
+    defer glyph_runs.deinit(std.testing.allocator);
+
+    var atlas = glyph_atlas.GlyphAtlas.init(std.testing.allocator, .{});
+    defer atlas.deinit();
+
+    var frame = try glyph_frame.prepareGlyphFrame(std.testing.allocator, glyph_runs, &atlas);
+    defer frame.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.InvalidAtlasTextureSize, buildGlyphQuadFrame(
+        std.testing.allocator,
+        frame,
+        .{ .width_px = 0, .height_px = 64 },
+    ));
 }

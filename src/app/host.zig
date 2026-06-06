@@ -9,7 +9,7 @@ const window_mod = @import("window.zig");
 
 pub const default_artifact_dir = "zig-out/maru-app-smoke";
 
-pub const HostError = std.mem.Allocator.Error || runtime_pump.PumpError || error{
+pub const HostError = std.mem.Allocator.Error || runtime_pump.PumpError || renderer.GlyphQuadError || error{
     NoActiveSurface,
 };
 
@@ -225,11 +225,18 @@ fn renderGlyphFrame(allocator: std.mem.Allocator, render_frame: renderer.RenderF
     // glyph/atlas 입력을 사람이 볼 수 있게 만든다. 나중에 실제 Metal renderer가 붙으면
     // screenshot 실패와 frame data 실패를 분리해서 추적할 수 있다.
     const glyph_frame = render_frame.glyph_frame;
+    const quad_frame = render_frame.glyph_quad_frame;
     const writer = &output.writer;
     try writer.writeAll("maru.glyph-frame.v1\n");
     try writer.print("backend={s}\n", .{@tagName(render_frame.backend)});
     try writer.print("size cols={d} rows={d}\n", .{ glyph_frame.size.cols, glyph_frame.size.rows });
     try writer.print("glyphs len={d}\n", .{glyph_frame.glyphs.len});
+    try writer.print("quads len={d}\n", .{quad_frame.glyphs.len});
+    try writer.print("quad_stats glyph_count={d} uv_count={d} ready={}\n", .{
+        quad_frame.stats.glyph_count,
+        quad_frame.stats.uv_count,
+        quad_frame.stats.ready(),
+    });
     try writer.print("uploads len={d}\n", .{glyph_frame.uploads.len});
     try writer.print("stats glyph_count={d} upload_count={d} reused_count={d} fallback_count={d} replacement_count={d}\n", .{
         glyph_frame.stats.glyph_count,
@@ -403,6 +410,8 @@ test "app smoke summary marks that real UI is not visible yet" {
     const glyphs = try std.testing.allocator.alloc(renderer.glyph_frame.PreparedGlyph, 0);
     const glyph_overlays = try std.testing.allocator.alloc(renderer.DrawOverlay, 0);
     const uploads = try std.testing.allocator.alloc(renderer.GlyphUpload, 0);
+    const quads = try std.testing.allocator.alloc(renderer.GlyphQuad, 0);
+    const quad_overlays = try std.testing.allocator.alloc(renderer.DrawOverlay, 0);
 
     var render_frame: renderer.RenderFrame = .{
         .backend = renderer.initialBackendForMacOS(),
@@ -420,6 +429,14 @@ test "app smoke summary marks that real UI is not visible yet" {
             .glyphs = glyphs,
             .overlays = glyph_overlays,
             .uploads = uploads,
+            .stats = .{},
+        },
+        .glyph_quad_frame = .{
+            .size = .{ .cols = 3, .rows = 1 },
+            .cursor = .{},
+            .dirty = null,
+            .glyphs = quads,
+            .overlays = quad_overlays,
             .stats = .{},
         },
     };
@@ -449,6 +466,9 @@ test "app smoke summary marks that real UI is not visible yet" {
         .draw_cells = 3,
         .draw_overlays = 0,
         .glyph_count = 3,
+        .glyph_quad_count = 3,
+        .glyph_uv_count = 3,
+        .glyph_uv_ready = true,
         .upload_count = 2,
         .reused_count = 1,
         .fallback_count = 0,
@@ -495,5 +515,7 @@ test "app smoke glyph artifact records backend frame input" {
 
     try std.testing.expect(std.mem.indexOf(u8, artifact, "maru.glyph-frame.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, artifact, "backend=metal\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, artifact, "quads len=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, artifact, "quad_stats glyph_count=") != null);
     try std.testing.expect(std.mem.indexOf(u8, artifact, "glyph row=0 col=0 codepoint=U+0041") != null);
 }

@@ -27,7 +27,7 @@ src/
   plugin.zig            action/plugin facade
 
   app/                  window/surface/runtime/pty_reader/runtime_pump처럼 앱 상태와 live 연결 책임별 구현
-  config/               action parsing, theme/font config
+  config/               action parsing, raw theme/font/cursor config, resolved appearance config
   pty/                  PTY backend, spawn request, process handle
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding
   renderer/             Metal-first renderer internals, future WebGPU backend boundary, font layout, glyph atlas, frame stats

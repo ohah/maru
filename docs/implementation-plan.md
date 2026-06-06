@@ -253,6 +253,7 @@ TDD 방식:
 - cursor와 underline은 cell overlay로 그린다. cursor 이동이 dirty 범위를 만든다는 domain 계약(`renderer-strategy.md`)은 CR/backspace/line feed 같은 cursor-only 이동 단위 테스트와 `DrawList` overlay 테스트로 검증한다. selection overlay는 selection domain data가 생길 때 별도 PR에서 다룬다.
 - font layout test: fake font backend로 `DrawList -> GlyphRunList` 계약을 검증한다.
 - glyph atlas test: GPU texture 없이 `GlyphCacheKey -> AtlasSlot` cache, upload byte 후보, eviction, invalidation reason을 검증한다.
+- config resolve test: raw font/theme/cursor config를 `ResolvedAppearance`로 바꾸고, 빈 font family, 잘못된 font size, 잘못된 `#RRGGBB` 색상을 renderer/backend에 보내기 전에 거부한다.
 - app host smoke: 실제 UI 없이 `AppWindow -> SurfaceRuntime -> RuntimeEventPump -> DrawList` frame 조립, resize, focused input artifact를 `mise run app-smoke`로 남긴다.
 - macOS window smoke: `mise run test-macos-window-smoke`로 summary 계약을 검증하고, `mise run macos-window-smoke`로 Metal/terminal grid 없이 AppKit 창을 실제로 띄워 `visible_ui=true` artifact를 남긴다. 이 단계는 app lifecycle smoke이며, terminal renderer 검증은 아니다.
 - macOS Metal smoke: `mise run test-macos-metal-smoke`로 summary와 fixture 계약을 검증하고, `mise run macos-metal-smoke`로 AppKit 창 위 CAMetalLayer에 `DrawList` 기반 placeholder 셀을 present한 뒤 셀 중심 픽셀을 readback한다. `terminal_grid=true`는 입력 cell count가 아니라 샘플한 셀 중심 픽셀이 모두 clear 색이 아닐 때만 기록한다. 이 단계는 glyph/text renderer 검증은 아니지만, `DrawList -> Metal` 소비 경로의 첫 실제 UI 검증이다.
@@ -277,6 +278,7 @@ macOS bridge 언어 선택:
 - `mise run macos-window-smoke`가 macOS에서 실제 창을 띄우고, 아직 Metal/terminal grid가 없다는 한계를 summary에 적는다.
 - `mise run macos-metal-smoke`가 macOS에서 실제 Metal drawable을 한 frame 이상 present하고, `DrawList` placeholder 셀 중심 픽셀을 readback해 비-clear 픽셀을 확인한다. 아직 glyph text가 없다는 한계는 summary에 `glyph_text=false`로 적는다.
 - `mise run macos-coretext-smoke`가 macOS에서 창/GPU 없이 CoreText font resolve, glyph run 생성, `GlyphFrame` 준비, CPU bitmap rasterization을 확인한다. 아직 Metal texture upload와 실제 화면 text draw가 없다는 한계는 summary와 PR 설명에 적는다.
+- raw font/theme/cursor config는 `ResolvedAppearance` 계약으로 검증된다. 아직 설정 파일 로딩, 설정 UI, runtime reload는 없다는 한계는 PR 설명에 적는다.
 - `mise run macos-glyph-texture-smoke`가 macOS에서 창 없이 CoreText CPU bitmap을 Metal texture에 업로드하고 readback한다. 아직 shader sampling과 실제 화면 text draw가 없다는 한계는 summary와 PR 설명에 적는다.
 - 성능 예산에 startup, first drawable, frame budget 초안을 추가한다.
 

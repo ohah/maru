@@ -86,6 +86,7 @@ font.size = 14
 해석 규칙:
 
 - `family`는 사용자가 원하는 primary monospace family다.
+- raw `FontConfig`는 `ResolvedFontRequest`로 먼저 검증한다. 빈 family와 1px 미만 또는 512px 초과 font size는 renderer로 보내지 않는다.
 - family가 설치되어 있지 않으면 앱은 죽지 않고 system monospaced font로 fallback한다.
 - fallback이 발생하면 debug artifact와 structured log에 남긴다.
 - 사용자가 proportional font를 지정해도 v1은 터미널 품질을 보장하지 않는다. 이 경우 경고 artifact를 남기고, cell metric은 primary monospace fallback 기준으로 잡는다.
@@ -237,6 +238,7 @@ dirty region의 장기 목표는 cell 단위지만, 현재 `TerminalCore`/snapsh
 - GPU 없는 `GlyphCacheKey -> AtlasSlot` cache가 hit/miss, upload byte 후보, eviction, invalidation reason을 기록하는 test.
 - GPU 없는 `GlyphRunList -> GlyphFrame` 준비 test가 atlas slot, upload 후보, eviction, cursor/underline overlay 보존을 기록하는 test.
 - font 변경이 전체 redraw/invalidation event를 만드는 test.
+- raw config의 font/theme/cursor 값이 `ResolvedAppearance`로 검증되는 test.
 - renderer가 `TerminalCore`, `PtySession`, platform handle을 직접 import하지 않는 boundary test.
 
 macOS opt-in으로 둘 것:

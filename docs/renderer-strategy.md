@@ -170,8 +170,9 @@ dirty region 범위:
 3. `DrawList -> GlyphRunList -> GlyphFrame` 변환을 테스트한다. 이 단계는 GPU 없이 atlas slot reuse, upload 후보, eviction 관측, cursor/underline overlay 보존을 증명한다.
 4. `Config -> ResolvedAppearance` 계약을 테스트한다. font family/size, theme colors, cursor shape/blink가 깨진 값이면 backend로 들어가기 전에 실패해야 한다. 이어서 default resolved font 요청이 CoreText smoke bridge와 glyph cache key 후보까지 전달되는지 확인한다.
 5. `RendererState`가 frame 사이에 살아남는 `GlyphAtlas`를 소유하고, `RenderSnapshot -> DrawList -> GlyphRunList -> GlyphFrame`을 한 제품 frame으로 준비한다. 이 단계의 app-smoke는 실제 UI가 아니라 `app-host.glyph-frame.txt` artifact로 backend 입력을 확인한다.
-6. `DrawList`/`GlyphFrame`을 Metal backend가 소비하는 형태로 만든다. cursor/underline은 cell overlay로 두고, cursor 이동(old/new cell)이 dirty 범위에 들어오도록 domain 계약을 유지한다.
-7. macOS app smoke에서 screenshot artifact를 남긴다.
+6. visible glyph text smoke가 제품 `RendererState/GlyphFrame` probe를 함께 남기게 해, 화면 fixture와 제품 frame 준비 계약이 서로 멀어지지 않게 한다.
+7. `DrawList`/`GlyphFrame`을 Metal backend가 소비하는 형태로 만든다. cursor/underline은 cell overlay로 두고, cursor 이동(old/new cell)이 dirty 범위에 들어오도록 domain 계약을 유지한다.
+8. macOS app smoke에서 screenshot artifact를 남긴다.
 
 이 순서가 중요한 이유는 GPU screenshot을 먼저 붙이면 실패 원인이 parser인지, snapshot인지, glyph atlas인지, GPU pipeline인지 구분하기 어렵기 때문이다. 먼저 deterministic한 `DrawList`를 만들면 renderer의 입력 계약을 작은 테스트로 고정할 수 있다.
 
@@ -197,7 +198,7 @@ opt-in으로 둘 것:
 - 실제 AppKit 창 위 CAMetalLayer `DrawList` placeholder present/readback smoke(`mise run macos-metal-smoke`).
 - 실제 CoreText font resolve/glyph run/atlas key/CPU glyph raster smoke(`mise run macos-coretext-smoke`).
 - 실제 CoreText CPU bitmap -> Metal texture upload/readback smoke(`mise run macos-glyph-texture-smoke`).
-- 실제 CoreText glyph texture를 AppKit/CAMetalLayer 창에서 shader sampling하고 drawable readback 및 PPM screenshot artifact로 glyph ink를 확인하는 smoke(`mise run macos-glyph-text-smoke`).
+- 실제 CoreText glyph texture를 AppKit/CAMetalLayer 창에서 shader sampling하고 drawable readback 및 PPM screenshot artifact로 glyph ink를 확인하는 smoke(`mise run macos-glyph-text-smoke`). 이 smoke는 동시에 Zig 제품 경로인 `TerminalCore -> RendererState -> GlyphFrame` probe를 만들어 summary에 `renderer_frame_prepared=true`와 glyph/atlas 통계를 남긴다.
 - frame pacing, GPU timing, font stack 영향을 받는 성능 측정.
 
 ## clean-room 기준

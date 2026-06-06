@@ -1,6 +1,8 @@
 const std = @import("std");
 const maru = @import("maru");
 const config = maru.config;
+const renderer = maru.renderer;
+const terminal = maru.terminal;
 
 const artifact_dir = "zig-out/maru-macos-glyph-text-smoke";
 const screenshot_path = artifact_dir ++ "/glyph-text-frame.ppm";
@@ -85,12 +87,13 @@ pub fn main(init: std.process.Init) !void {
     // ResolvedAppearance로 바꿔 native bridge로 넘긴다. 기본 config는 항상 resolve된다.
     const appearance = try config.resolveAppearance(.{});
     const native_appearance = nativeAppearance(appearance);
+    const renderer_frame_probe = try buildRendererFrameProbe(allocator, appearance);
     var native = emptyNativeResult();
     try ensureArtifactDir(io);
     maru_macos_glyph_text_smoke_run(duration_ms, &native_appearance, screenshot_path.ptr, screenshot_path.len, &native);
 
     const smoke_status = deriveSmokeStatus(native);
-    const summary = try renderSummary(allocator, duration_ms, smoke_status, native, native_appearance);
+    const summary = try renderSummary(allocator, duration_ms, smoke_status, native, native_appearance, renderer_frame_probe);
     defer allocator.free(summary);
 
     try writeSummary(io, summary);
@@ -152,6 +155,23 @@ const SmokeStatus = struct {
     glyph_text_drawn: bool,
 };
 
+const RendererFrameProbe = struct {
+    frame_prepared: bool = false,
+    backend: renderer.Backend = renderer.initialBackendForMacOS(),
+    font_size_px: u16 = 0,
+    device_scale: u16 = 0,
+    surface_cols: u16 = 0,
+    surface_rows: u16 = 0,
+    draw_cells: usize = 0,
+    draw_overlays: usize = 0,
+    glyph_count: usize = 0,
+    upload_count: usize = 0,
+    reused_count: usize = 0,
+    fallback_count: usize = 0,
+    replacement_count: usize = 0,
+    atlas_entries: usize = 0,
+};
+
 fn deriveSmokeStatus(native: NativeGlyphTextSmokeResult) SmokeStatus {
     // 이 smoke의 핵심은 "texture를 만들었다"가 아니라 "그 texture를 fragment shader가
     // 실제 CAMetalDrawable에 샘플링했고, glyph ink 위치를 readback했다"이다. 그래서
@@ -201,12 +221,61 @@ fn writeAppliedColor(writer: anytype, label: []const u8, r: u8, g: u8, b: u8) !v
     try writer.print("{s}=#{x:0>2}{x:0>2}{x:0>2}\n", .{ label, r, g, b });
 }
 
+fn buildRendererFrameProbe(
+    allocator: std.mem.Allocator,
+    appearance: config.ResolvedAppearance,
+) !RendererFrameProbe {
+    // 이 visible smoke의 native bridge는 아직 자체 CoreText bitmap을 화면에 그린다.
+    // 그래도 같은 smoke에서 제품 renderer frame 준비 경로를 함께 태워 둔다. 그래야 이
+    // smoke가 "native fixture만 보이는 데모"로 굳지 않고, 다음 PR에서 Metal backend가
+    // 실제 GlyphFrame을 소비할 때 실패 원인을 frame 준비와 화면 그리기로 나눠 볼 수 있다.
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 16, .rows = 2 });
+    defer core.deinit();
+
+    core.clearDirty();
+    try core.write("Maru 한 🍎");
+
+    const text_config = renderer.textConfigFromFontSize(appearance.font.size, 1);
+    var renderer_state = renderer.RendererState.init(allocator, .{ .text = text_config });
+    defer renderer_state.deinit();
+
+    var frame = try renderer_state.buildFrame(allocator, core.snapshot(), renderer.FakeFontBackend{});
+    defer frame.deinit(allocator);
+
+    const glyph_frame = frame.glyph_frame;
+    const frame_prepared = glyph_frame.size.cols == frame.draw_list.size.cols and
+        glyph_frame.size.rows == frame.draw_list.size.rows and
+        glyph_frame.stats.glyph_count == glyph_frame.glyphs.len and
+        glyph_frame.stats.upload_count == glyph_frame.uploads.len and
+        glyph_frame.stats.upload_count + glyph_frame.stats.reused_count == glyph_frame.glyphs.len and
+        glyph_frame.stats.glyph_count > 0 and
+        renderer_state.atlas.entryCount() > 0;
+
+    return .{
+        .frame_prepared = frame_prepared,
+        .backend = frame.backend,
+        .font_size_px = text_config.font_size_px,
+        .device_scale = text_config.device_scale,
+        .surface_cols = glyph_frame.size.cols,
+        .surface_rows = glyph_frame.size.rows,
+        .draw_cells = frame.draw_list.cells.len,
+        .draw_overlays = frame.draw_list.overlays.len,
+        .glyph_count = glyph_frame.stats.glyph_count,
+        .upload_count = glyph_frame.stats.upload_count,
+        .reused_count = glyph_frame.stats.reused_count,
+        .fallback_count = glyph_frame.stats.fallback_count,
+        .replacement_count = glyph_frame.stats.replacement_count,
+        .atlas_entries = renderer_state.atlas.entryCount(),
+    };
+}
+
 fn renderSummary(
     allocator: std.mem.Allocator,
     duration_ms: u32,
     smoke_status: SmokeStatus,
     native: NativeGlyphTextSmokeResult,
     appearance: NativeGlyphTextAppearance,
+    renderer_frame_probe: RendererFrameProbe,
 ) ![]u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
@@ -229,7 +298,21 @@ fn renderSummary(
     try writeAppliedColor(writer, "applied_foreground", appearance.foreground_r, appearance.foreground_g, appearance.foreground_b);
     try writeAppliedColor(writer, "applied_cursor", appearance.cursor_r, appearance.cursor_g, appearance.cursor_b);
     try writer.writeAll("appearance_note=background_to_clear_color_foreground_to_glyph_color_cursor_resolved_but_not_drawn\n");
-    try writer.writeAll("ui_note=appkit_window_with_metal_shader_sampling_coretext_glyph_texture_no_terminal_renderer\n");
+    try writer.writeAll("ui_note=appkit_window_with_metal_shader_sampling_coretext_glyph_texture_with_renderer_frame_probe_no_product_terminal_backend\n");
+    try writer.print("renderer_frame_prepared={}\n", .{renderer_frame_probe.frame_prepared});
+    try writer.print("renderer_backend={s}\n", .{@tagName(renderer_frame_probe.backend)});
+    try writer.print("renderer_font_size_px={d}\n", .{renderer_frame_probe.font_size_px});
+    try writer.print("renderer_device_scale={d}\n", .{renderer_frame_probe.device_scale});
+    try writer.print("renderer_surface_cols={d}\n", .{renderer_frame_probe.surface_cols});
+    try writer.print("renderer_surface_rows={d}\n", .{renderer_frame_probe.surface_rows});
+    try writer.print("renderer_draw_cells={d}\n", .{renderer_frame_probe.draw_cells});
+    try writer.print("renderer_draw_overlays={d}\n", .{renderer_frame_probe.draw_overlays});
+    try writer.print("renderer_glyph_count={d}\n", .{renderer_frame_probe.glyph_count});
+    try writer.print("renderer_glyph_upload_count={d}\n", .{renderer_frame_probe.upload_count});
+    try writer.print("renderer_glyph_reused_count={d}\n", .{renderer_frame_probe.reused_count});
+    try writer.print("renderer_glyph_fallback_count={d}\n", .{renderer_frame_probe.fallback_count});
+    try writer.print("renderer_glyph_replacement_count={d}\n", .{renderer_frame_probe.replacement_count});
+    try writer.print("renderer_atlas_entries={d}\n", .{renderer_frame_probe.atlas_entries});
     try writer.print("duration_ms={d}\n", .{duration_ms});
     try writer.print("native_status={d}\n", .{native.status});
     try writer.print("native_status_label={s}\n", .{nativeStatusLabel(native.status)});
@@ -291,6 +374,25 @@ fn writeSummary(io: std.Io, summary: []const u8) !void {
     });
 }
 
+fn successRendererFrameProbe() RendererFrameProbe {
+    return .{
+        .frame_prepared = true,
+        .backend = .metal,
+        .font_size_px = 14,
+        .device_scale = 1,
+        .surface_cols = 16,
+        .surface_rows = 2,
+        .draw_cells = 32,
+        .draw_overlays = 1,
+        .glyph_count = 32,
+        .upload_count = 5,
+        .reused_count = 27,
+        .fallback_count = 2,
+        .replacement_count = 0,
+        .atlas_entries = 5,
+    };
+}
+
 test "macOS glyph text smoke summary reports shader sampling boundary" {
     // native Metal을 호출하지 않는 계약 테스트에서도 artifact 의미를 고정한다.
     // 제품 renderer가 아직 없어도 "texture upload"와 "shader sampling text draw"는
@@ -332,7 +434,14 @@ test "macOS glyph text smoke summary reports shader sampling boundary" {
         .cursor_g = 0xff,
         .cursor_b = 0xff,
     };
-    const summary = try renderSummary(std.testing.allocator, 1500, deriveSmokeStatus(native), native, appearance);
+    const summary = try renderSummary(
+        std.testing.allocator,
+        1500,
+        deriveSmokeStatus(native),
+        native,
+        appearance,
+        successRendererFrameProbe(),
+    );
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.macos-glyph-text-smoke.v1\n") != null);
@@ -358,6 +467,14 @@ test "macOS glyph text smoke summary reports shader sampling boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "applied_foreground=#e8e8e8\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "applied_cursor=#ffffff\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "appearance_note=background_to_clear_color_foreground_to_glyph_color_cursor_resolved_but_not_drawn\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "ui_note=appkit_window_with_metal_shader_sampling_coretext_glyph_texture_with_renderer_frame_probe_no_product_terminal_backend\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_prepared=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_backend=metal\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_font_size_px=14\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_device_scale=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_draw_cells=32\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_upload_count=5\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_atlas_entries=5\n") != null);
 }
 
 test "glyph text smoke maps resolved appearance colors into the native bridge" {
@@ -372,7 +489,14 @@ test "glyph text smoke maps resolved appearance colors into the native bridge" {
     try std.testing.expectEqual(@as(u8, 0xff), appearance.cursor_r);
 
     const native = emptyNativeResult();
-    const summary = try renderSummary(std.testing.allocator, 1500, deriveSmokeStatus(native), native, appearance);
+    const summary = try renderSummary(
+        std.testing.allocator,
+        1500,
+        deriveSmokeStatus(native),
+        native,
+        appearance,
+        successRendererFrameProbe(),
+    );
     defer std.testing.allocator.free(summary);
     try std.testing.expect(std.mem.indexOf(u8, summary, "applied_background=#101010\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "applied_foreground=#e8e8e8\n") != null);
@@ -393,10 +517,36 @@ test "glyph text smoke preserves per-channel theme colors" {
     try std.testing.expectEqual(@as(u8, 0xff), appearance.foreground_b);
 
     const native = emptyNativeResult();
-    const summary = try renderSummary(std.testing.allocator, 1500, deriveSmokeStatus(native), native, appearance);
+    const summary = try renderSummary(
+        std.testing.allocator,
+        1500,
+        deriveSmokeStatus(native),
+        native,
+        appearance,
+        successRendererFrameProbe(),
+    );
     defer std.testing.allocator.free(summary);
     try std.testing.expect(std.mem.indexOf(u8, summary, "applied_background=#ab12cd\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "applied_foreground=#0099ff\n") != null);
+}
+
+test "glyph text smoke prepares a renderer frame probe before native drawing" {
+    // 이 테스트는 visible smoke가 native CoreText/Metal fixture만 검증하고 끝나지 않도록
+    // 제품 renderer frame 준비 경로도 함께 탄다는 계약을 고정한다. 아직 이 frame을 화면에
+    // 그리지는 않지만, 다음 제품 Metal backend PR의 입력이 준비되어 있어야 한다.
+    const appearance = try config.resolveAppearance(.{});
+    const probe = try buildRendererFrameProbe(std.testing.allocator, appearance);
+
+    try std.testing.expect(probe.frame_prepared);
+    try std.testing.expectEqual(renderer.Backend.metal, probe.backend);
+    try std.testing.expectEqual(@as(u16, 14), probe.font_size_px);
+    try std.testing.expectEqual(@as(u16, 1), probe.device_scale);
+    try std.testing.expectEqual(@as(u16, 16), probe.surface_cols);
+    try std.testing.expectEqual(@as(u16, 2), probe.surface_rows);
+    try std.testing.expect(probe.draw_cells > 0);
+    try std.testing.expect(probe.glyph_count > 0);
+    try std.testing.expect(probe.upload_count > 0);
+    try std.testing.expect(probe.atlas_entries > 0);
 }
 
 test "glyph text smoke status labels explain native failure stages" {

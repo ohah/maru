@@ -250,15 +250,15 @@ macOS opt-in으로 둘 것:
 - CoreText glyph record가 Maru `GlyphAtlas` cache key 후보로 들어가는 smoke.
 - 같은 `CTLine`을 CPU bitmap에 그려 non-clear pixel이 생기는 smoke.
 - CoreText CPU bitmap을 Metal texture에 업로드하고 readback 결과가 source bitmap과 같은지 확인하는 smoke.
-- CoreText glyph texture를 실제 AppKit/CAMetalLayer 창에서 fragment shader로 샘플링하고, source glyph ink 위치의 drawable pixel이 clear 색이 아닌지 readback하며, 같은 drawable을 PPM screenshot artifact로 남기는 smoke.
+- CoreText glyph texture를 실제 AppKit/CAMetalLayer 창에서 fragment shader로 샘플링하고, source glyph ink 위치의 drawable pixel이 clear 색이 아닌지 readback하며, 같은 drawable을 PPM screenshot artifact로 남기는 smoke. 이 smoke는 제품 `RendererState -> GlyphFrame` probe도 함께 남겨, visible text smoke가 native fixture 검증으로만 고립되지 않게 한다.
 - 설치되지 않은 font가 system monospace fallback으로 가는 smoke.
 - Retina scale factor별 atlas smoke.
 - 제품 renderer screenshot artifact.
 - 제품 atlas slot 기반 glyph rasterization pixel comparison.
 
-CoreText/font/raster/upload smoke들은 실제 화면 glyph draw를 증명하지 않는다. glyph text smoke부터는 fixture texture가 실제 AppKit/CAMetalLayer 창에서 shader sampling되어 glyph ink로 보이는지까지 증명한다. 다만 이것도 제품 terminal renderer는 아니다. 의도는 font resolve, shaping, rasterization, GPU upload, shader sampling, 제품 atlas/layout 실패를 서로 다른 단계로 분리하는 것이다.
+CoreText/font/raster/upload smoke들은 실제 화면 glyph draw를 증명하지 않는다. glyph text smoke부터는 fixture texture가 실제 AppKit/CAMetalLayer 창에서 shader sampling되어 glyph ink로 보이는지까지 증명한다. 이때 제품 `RendererState/GlyphFrame` probe 통계도 summary에 같이 남긴다. 다만 이것도 제품 terminal renderer가 그 frame을 직접 그린 것은 아니다. 의도는 font resolve, shaping, rasterization, GPU upload, shader sampling, 제품 atlas/layout 실패를 서로 다른 단계로 분리하는 것이다.
 
-기본 CI에서 pixel-perfect font test를 강제하지 않는 이유는 font stack이 OS 업데이트와 설치 폰트에 영향을 받기 때문이다. 대신 기본 CI는 Maru가 만든 domain data와 cache/invalidation 계약을 검증하고, 실제 픽셀은 opt-in artifact로 추적한다. macOS CoreText smoke는 `ResolvedAppearance`의 font 요청이 native bridge까지 전달되는지, 요청 font가 실제 이름/family와 일치했는지를 `requested_font_matched` 진단값으로 남기는지, CoreText가 준 glyph id/font id 후보가 `GlyphFrame` 준비 계약까지 들어가는지, CPU bitmap까지 나오는지 확인한다. 이 smoke는 설치 폰트 품질이나 설정 UI를 증명하지 않는다. glyph texture smoke는 그 CPU bitmap이 Metal texture에 byte-preserving upload/readback되는지 확인한다. glyph text smoke는 같은 fixture texture가 실제 AppKit/CAMetalLayer 창에서 shader sampling되어 glyph ink pixel로 보이는지 확인하고, PPM screenshot artifact도 남긴다. 제품 atlas slot, terminal cell layout, 제품 renderer screenshot artifact는 그 다음 단계에서 별도로 확인한다.
+기본 CI에서 pixel-perfect font test를 강제하지 않는 이유는 font stack이 OS 업데이트와 설치 폰트에 영향을 받기 때문이다. 대신 기본 CI는 Maru가 만든 domain data와 cache/invalidation 계약을 검증하고, 실제 픽셀은 opt-in artifact로 추적한다. macOS CoreText smoke는 `ResolvedAppearance`의 font 요청이 native bridge까지 전달되는지, 요청 font가 실제 이름/family와 일치했는지를 `requested_font_matched` 진단값으로 남기는지, CoreText가 준 glyph id/font id 후보가 `GlyphFrame` 준비 계약까지 들어가는지, CPU bitmap까지 나오는지 확인한다. 이 smoke는 설치 폰트 품질이나 설정 UI를 증명하지 않는다. glyph texture smoke는 그 CPU bitmap이 Metal texture에 byte-preserving upload/readback되는지 확인한다. glyph text smoke는 같은 fixture texture가 실제 AppKit/CAMetalLayer 창에서 shader sampling되어 glyph ink pixel로 보이는지 확인하고, PPM screenshot artifact와 제품 `RendererState/GlyphFrame` probe 통계도 남긴다. 제품 atlas slot, terminal cell layout, 제품 renderer screenshot artifact는 그 다음 단계에서 별도로 확인한다.
 
 ## 관측 가능성
 

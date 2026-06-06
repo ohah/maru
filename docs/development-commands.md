@@ -17,7 +17,7 @@ Maru 작업에서 사용하는 기본 명령이다.
 - app host smoke 실행: `mise run app-smoke`
 - macOS visible window smoke 실행: `mise run macos-window-smoke` (창이 너무 빨리 닫히면 `MARU_WINDOW_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)
 - macOS window smoke 계약 테스트: `mise run test-macos-window-smoke`
-- macOS Metal clear-frame smoke 실행: `mise run macos-metal-smoke`
+- macOS Metal clear-frame smoke 실행: `mise run macos-metal-smoke` (창이 너무 빨리 닫히면 `MARU_METAL_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)
 - macOS Metal smoke 계약 테스트: `mise run test-macos-metal-smoke`
 - 테스트: `mise run test`
 - E2E 테스트: `mise run e2e`

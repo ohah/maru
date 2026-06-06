@@ -149,7 +149,16 @@ void maru_macos_metal_smoke_run(uint32_t duration_ms, MaruMetalSmokeResult *resu
             }
         } while ([[NSDate date] compare:deadline] == NSOrderedAscending);
 
+        // Metal drawable present만으로는 "사용자가 볼 수 있는 UI"를 증명하지 못한다.
+        // window smoke와 같은 기준으로 실제 NSWindow visibility를 함께 확인해야
+        // headless/activation 실패에서 visible_ui=true 오탐을 막을 수 있다.
+        BOOL became_visible = [window isVisible];
         [window orderOut:nil];
+
+        if (!became_visible) {
+            result->status = 5;
+            return;
+        }
 
         result->status = result->presented_frames > 0 ? 0 : 6;
     }

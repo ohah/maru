@@ -81,6 +81,7 @@ fn runAppSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer)
     try stdout.writeAll(result.summary);
     try stdout.print("\nartifacts written to {s}/\n", .{config.artifact_dir});
     try stdout.writeAll("draw list artifact: app-host.draw-list.txt\n");
+    try stdout.writeAll("glyph frame artifact: app-host.glyph-frame.txt\n");
     try stdout.writeAll("visible UI: not yet; this is an app-host contract smoke.\n");
     try stdout.flush();
 }
@@ -94,7 +95,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\
         \\commands:
         \\  demo       run the headless PTY -> SurfaceRuntime -> snapshot demo
-        \\  app-smoke  run the app host -> RuntimeEventPump -> DrawList smoke
+        \\  app-smoke  run the app host -> RuntimeEventPump -> RenderFrame smoke
         \\
     );
     try writer.flush();

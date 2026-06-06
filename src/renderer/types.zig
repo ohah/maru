@@ -1,5 +1,6 @@
 const std = @import("std");
 const draw_list = @import("draw_list.zig");
+const glyph_frame = @import("glyph_frame.zig");
 
 pub const Backend = enum {
     // 미래 backend는 구현을 시작하기 전까지 public enum에 넣지 않는다.
@@ -11,12 +12,13 @@ pub const Backend = enum {
 pub const RenderFrame = struct {
     backend: Backend,
     draw_list: draw_list.DrawList,
+    glyph_frame: glyph_frame.GlyphFrame,
 
-    // RenderFrame은 이제 backend가 그릴 DrawList를 그대로 들고 있다. DrawList의
-    // cells는 heap 슬라이스라, snapshot을 빌려오기만 하던 이전 계약과 달리 frame이
-    // 메모리를 소유한다. frame을 다 쓴 쪽이 이 deinit을 호출해야 frame loop가 매
-    // 프레임 DrawList를 누수하지 않는다.
+    // RenderFrame은 backend가 그릴 DrawList와 glyph 준비 결과를 함께 소유한다.
+    // DrawList만 들고 있으면 Metal backend가 font/layout/atlas 정책을 다시 해석해야
+    // 하므로, 제품 frame 경계에서 GlyphFrame까지 준비해 둔다.
     pub fn deinit(self: *RenderFrame, allocator: std.mem.Allocator) void {
+        self.glyph_frame.deinit(allocator);
         self.draw_list.deinit(allocator);
         self.* = undefined;
     }
@@ -30,11 +32,14 @@ test "macOS renderer starts with Metal" {
     try @import("std").testing.expectEqual(Backend.metal, initialBackendForMacOS());
 }
 
-test "render frame owns and frees its draw list" {
-    // RenderFrame이 DrawList의 heap cells를 소유한다는 계약을 고정한다. deinit이
-    // 그 슬라이스들을 해제하지 않으면 testing.allocator가 누수로 잡아낸다.
+test "render frame owns and frees draw and glyph frame data" {
+    // RenderFrame이 DrawList와 GlyphFrame의 heap slice를 모두 소유한다는 계약을
+    // 고정한다. deinit이 하나라도 빼먹으면 testing.allocator가 누수로 잡아낸다.
     const cells = try std.testing.allocator.alloc(draw_list.DrawCell, 2);
     const overlays = try std.testing.allocator.alloc(draw_list.DrawOverlay, 1);
+    const prepared = try std.testing.allocator.alloc(glyph_frame.PreparedGlyph, 0);
+    const frame_overlays = try std.testing.allocator.alloc(draw_list.DrawOverlay, 0);
+    const uploads = try std.testing.allocator.alloc(glyph_frame.GlyphUpload, 0);
     var frame: RenderFrame = .{
         .backend = initialBackendForMacOS(),
         .draw_list = .{
@@ -43,6 +48,15 @@ test "render frame owns and frees its draw list" {
             .dirty = .{ .start_row = 0, .end_row = 0 },
             .cells = cells,
             .overlays = overlays,
+        },
+        .glyph_frame = .{
+            .size = .{ .cols = 2, .rows = 1 },
+            .cursor = .{},
+            .dirty = .{ .start_row = 0, .end_row = 0 },
+            .glyphs = prepared,
+            .overlays = frame_overlays,
+            .uploads = uploads,
+            .stats = .{},
         },
     };
     frame.deinit(std.testing.allocator);

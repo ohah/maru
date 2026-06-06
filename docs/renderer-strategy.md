@@ -6,7 +6,7 @@
 
 Maru의 초기 실제 backend는 **Metal-first**로 둔다.
 
-다만 `TerminalCore`와 app model은 Metal을 직접 알면 안 된다. 중간에 `RenderSnapshot -> DrawList` 계약을 두고, Metal backend는 그 `DrawList`만 소비한다. 장기적으로 WebGPU backend를 추가하더라도 같은 `DrawList`를 소비하게 만든다.
+다만 `TerminalCore`와 app model은 Metal을 직접 알면 안 된다. 중간에 `RenderSnapshot -> DrawList -> GlyphRunList -> GlyphFrame` 계약을 두고, Metal backend는 그 준비된 frame만 소비한다. 장기적으로 WebGPU backend를 추가하더라도 같은 frame 계약을 소비하게 만든다.
 
 ```text
 TerminalCore
@@ -29,10 +29,10 @@ TerminalCore
   Metal-first
 
 유지할 경계:
-  RenderSnapshot -> DrawList -> Backend
+  RenderSnapshot -> DrawList -> GlyphRunList -> GlyphFrame -> Backend
 
 나중에 추가할 수 있는 것:
-  DrawList -> WebGPU backend
+  GlyphFrame -> WebGPU backend
 
 지금 하지 않는 것:
   WebGPU-only renderer
@@ -46,7 +46,7 @@ Maru가 지금 풀어야 할 1차 문제는 GPU API 통일이 아니라, PTY out
 
 WebGPU backend를 검토할 조건:
 
-- Metal backend가 `DrawList`만 소비하고 있다는 것이 테스트로 증명되어 있다.
+- Metal backend가 `GlyphFrame`까지 준비된 backend-neutral frame만 소비하고 있다는 것이 테스트로 증명되어 있다.
 - renderer hot path가 PTY/parser/snapshot과 분리되어 있다.
 - Windows/Linux/browser target을 실제로 시작할 단계다.
 - 새 native WebGPU dependency를 추가해도 되는지 사용자와 별도 논의했다.
@@ -169,8 +169,9 @@ dirty region 범위:
 2. `RenderSnapshot -> DrawList` 변환을 먼저 테스트한다.
 3. `DrawList -> GlyphRunList -> GlyphFrame` 변환을 테스트한다. 이 단계는 GPU 없이 atlas slot reuse, upload 후보, eviction 관측, cursor/underline overlay 보존을 증명한다.
 4. `Config -> ResolvedAppearance` 계약을 테스트한다. font family/size, theme colors, cursor shape/blink가 깨진 값이면 backend로 들어가기 전에 실패해야 한다. 이어서 default resolved font 요청이 CoreText smoke bridge와 glyph cache key 후보까지 전달되는지 확인한다.
-5. `DrawList`/`GlyphFrame`을 Metal backend가 소비하는 형태로 만든다. cursor/underline은 cell overlay로 두고, cursor 이동(old/new cell)이 dirty 범위에 들어오도록 domain 계약을 유지한다.
-6. macOS app smoke에서 screenshot artifact를 남긴다.
+5. `RendererState`가 frame 사이에 살아남는 `GlyphAtlas`를 소유하고, `RenderSnapshot -> DrawList -> GlyphRunList -> GlyphFrame`을 한 제품 frame으로 준비한다. 이 단계의 app-smoke는 실제 UI가 아니라 `app-host.glyph-frame.txt` artifact로 backend 입력을 확인한다.
+6. `DrawList`/`GlyphFrame`을 Metal backend가 소비하는 형태로 만든다. cursor/underline은 cell overlay로 두고, cursor 이동(old/new cell)이 dirty 범위에 들어오도록 domain 계약을 유지한다.
+7. macOS app smoke에서 screenshot artifact를 남긴다.
 
 이 순서가 중요한 이유는 GPU screenshot을 먼저 붙이면 실패 원인이 parser인지, snapshot인지, glyph atlas인지, GPU pipeline인지 구분하기 어렵기 때문이다. 먼저 deterministic한 `DrawList`를 만들면 renderer의 입력 계약을 작은 테스트로 고정할 수 있다.
 
@@ -184,6 +185,7 @@ dirty region 범위:
 - fake font backend를 사용한 `DrawList -> GlyphRunList` test.
 - GPU 없는 `GlyphCacheKey -> AtlasSlot` cache/invalidation test.
 - GPU 없는 `GlyphRunList -> GlyphFrame` test. 같은 glyph의 atlas slot reuse, upload 후보, eviction 카운터, overlay 보존을 확인한다.
+- GPU 없는 `RendererState` test. 같은 renderer state로 여러 frame을 만들 때 atlas slot이 재사용되고, app host가 `RenderFrame` 전체를 소비하는지 확인한다.
 - GPU 없는 `Config -> ResolvedAppearance` test. `#RRGGBB` 색상, font size, cursor shape/blink를 renderer 입력 전 단계에서 검증한다.
 - macOS CoreText smoke summary test. default `ResolvedAppearance`의 font family/size가 native CoreText bridge와 glyph cache key 후보에 연결되는지 검증한다.
 - renderer가 PTY, parser, live platform handle을 import하지 않는 boundary test.

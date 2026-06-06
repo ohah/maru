@@ -2,6 +2,7 @@ pub const draw_list = @import("renderer/draw_list.zig");
 pub const glyph_atlas = @import("renderer/glyph_atlas.zig");
 pub const glyph_frame = @import("renderer/glyph_frame.zig");
 pub const glyph_layout = @import("renderer/glyph_layout.zig");
+pub const state = @import("renderer/state.zig");
 pub const types = @import("renderer/types.zig");
 
 pub const AtlasInvalidation = glyph_atlas.AtlasInvalidation;
@@ -29,6 +30,8 @@ pub const GlyphRunList = glyph_layout.GlyphRunList;
 pub const GlyphUpload = glyph_frame.GlyphUpload;
 pub const RasterStyleFlags = glyph_layout.RasterStyleFlags;
 pub const RenderFrame = types.RenderFrame;
+pub const RendererState = state.RendererState;
+pub const RendererStateConfig = state.RendererStateConfig;
 pub const ShapeResult = glyph_layout.ShapeResult;
 pub const TextLayoutConfig = glyph_layout.TextLayoutConfig;
 pub const UnderlineOverlay = draw_list.UnderlineOverlay;
@@ -36,6 +39,7 @@ pub const buildDrawList = draw_list.buildDrawList;
 pub const buildGlyphRunList = glyph_layout.buildGlyphRunList;
 pub const initialBackendForMacOS = types.initialBackendForMacOS;
 pub const prepareGlyphFrame = glyph_frame.prepareGlyphFrame;
+pub const textConfigFromFontSize = state.textConfigFromFontSize;
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

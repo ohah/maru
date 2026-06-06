@@ -18,10 +18,10 @@ pub const AppHostFrame = struct {
     size: terminal.Size,
     process_state: surface_mod.ProcessState,
     drain_summary: runtime_pump.DrainSummary,
-    draw_list: renderer.DrawList,
+    render_frame: renderer.RenderFrame,
 
     pub fn deinit(self: *AppHostFrame, allocator: std.mem.Allocator) void {
-        self.draw_list.deinit(allocator);
+        self.render_frame.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -30,20 +30,23 @@ pub fn buildFrame(
     allocator: std.mem.Allocator,
     app_window: *window_mod.AppWindow,
     pump: *runtime_pump.RuntimeEventPump,
+    renderer_state: *renderer.RendererState,
+    shaper: anytype,
 ) HostError!AppHostFrame {
     // 실제 AppKit frame loop가 붙기 전에도 "한 frame에서 할 일"을 먼저 고정한다.
-    // app host는 queue를 비우고, active surface snapshot을 renderer 입력으로 바꾼다.
-    // 이 경계가 있어야 나중에 macOS window loop가 terminal storage를 직접 만지지 않는다.
+    // app host는 queue를 비우고, active surface snapshot을 renderer frame으로 바꾼다.
+    // 이 경계가 있어야 나중에 macOS window loop가 terminal storage나 glyph atlas를
+    // 직접 만지지 않는다.
     const drain_summary = try pump.drainAvailable();
     const active = app_window.active() orelse return error.NoActiveSurface;
-    const draw_list = try renderer.buildDrawList(allocator, active.core.snapshot());
+    const render_frame = try renderer_state.buildFrame(allocator, active.core.snapshot(), shaper);
 
     return .{
         .surface_id = active.id,
         .size = active.core.size,
         .process_state = active.process_state,
         .drain_summary = drain_summary,
-        .draw_list = draw_list,
+        .render_frame = render_frame,
     };
 }
 
@@ -80,10 +83,12 @@ pub const AppSmokeConfig = struct {
 pub const AppSmokeResult = struct {
     summary: []u8,
     draw_list: []u8,
+    glyph_frame: []u8,
 
     pub fn deinit(self: *AppSmokeResult, allocator: std.mem.Allocator) void {
         allocator.free(self.summary);
         allocator.free(self.draw_list);
+        allocator.free(self.glyph_frame);
         self.* = undefined;
     }
 };
@@ -109,6 +114,8 @@ pub fn runSmoke(io: std.Io, allocator: std.mem.Allocator, config: AppSmokeConfig
     var queue = try pty_reader.PtyEventQueue.init(io, allocator, 4);
     defer queue.deinit();
     var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
+    var renderer_state = renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
 
     const output_bytes = try allocator.dupe(u8, config.output);
     // pushBlocking이 성공하면 output bytes 소유권은 queue로 넘어간다(drain 때 pump가
@@ -123,11 +130,13 @@ pub fn runSmoke(io: std.Io, allocator: std.mem.Allocator, config: AppSmokeConfig
     try resizeActiveSurface(&app_window, &runtime, config.resized_size);
     try sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = config.input_bytes });
 
-    var frame = try buildFrame(allocator, &app_window, &pump);
+    var frame = try buildFrame(allocator, &app_window, &pump, &renderer_state, renderer.FakeFontBackend{});
     defer frame.deinit(allocator);
 
-    const draw_list_text = try renderDrawList(allocator, frame.draw_list);
+    const draw_list_text = try renderDrawList(allocator, frame.render_frame.draw_list);
     errdefer allocator.free(draw_list_text);
+    const glyph_frame_text = try renderGlyphFrame(allocator, frame.render_frame);
+    errdefer allocator.free(glyph_frame_text);
 
     const summary = try renderSmokeSummary(allocator, config, frame, &memory_pty);
     errdefer allocator.free(summary);
@@ -135,17 +144,20 @@ pub fn runSmoke(io: std.Io, allocator: std.mem.Allocator, config: AppSmokeConfig
     try writeArtifacts(io, allocator, config.artifact_dir, .{
         .summary = summary,
         .draw_list = draw_list_text,
+        .glyph_frame = glyph_frame_text,
     });
 
     return .{
         .summary = summary,
         .draw_list = draw_list_text,
+        .glyph_frame = glyph_frame_text,
     };
 }
 
 const SmokeArtifacts = struct {
     summary: []const u8,
     draw_list: []const u8,
+    glyph_frame: []const u8,
 };
 
 fn writeArtifacts(
@@ -160,9 +172,12 @@ fn writeArtifacts(
     defer allocator.free(summary_path);
     const draw_list_path = try std.fmt.allocPrint(allocator, "{s}/app-host.draw-list.txt", .{artifact_dir});
     defer allocator.free(draw_list_path);
+    const glyph_frame_path = try std.fmt.allocPrint(allocator, "{s}/app-host.glyph-frame.txt", .{artifact_dir});
+    defer allocator.free(glyph_frame_path);
 
     try writeText(io, summary_path, artifacts.summary);
     try writeText(io, draw_list_path, artifacts.draw_list);
+    try writeText(io, glyph_frame_path, artifacts.glyph_frame);
 }
 
 fn renderSmokeSummary(
@@ -185,8 +200,15 @@ fn renderSmokeSummary(
     try writer.print("process_state={s}\n", .{@tagName(frame.process_state)});
     try writer.print("output_events={d}\n", .{frame.drain_summary.output_events});
     try writer.print("exit_events={d}\n", .{frame.drain_summary.exit_events});
-    try writer.print("draw_cells={d}\n", .{frame.draw_list.cells.len});
-    try writer.print("draw_overlays={d}\n", .{frame.draw_list.overlays.len});
+    try writer.print("renderer_backend={s}\n", .{@tagName(frame.render_frame.backend)});
+    try writer.print("draw_cells={d}\n", .{frame.render_frame.draw_list.cells.len});
+    try writer.print("draw_overlays={d}\n", .{frame.render_frame.draw_list.overlays.len});
+    try writer.print("glyph_frame_ready={}\n", .{glyphFrameReady(frame.render_frame)});
+    try writer.print("glyph_count={d}\n", .{frame.render_frame.glyph_frame.stats.glyph_count});
+    try writer.print("glyph_upload_count={d}\n", .{frame.render_frame.glyph_frame.stats.upload_count});
+    try writer.print("glyph_reused_count={d}\n", .{frame.render_frame.glyph_frame.stats.reused_count});
+    try writer.print("glyph_fallback_count={d}\n", .{frame.render_frame.glyph_frame.stats.fallback_count});
+    try writer.print("glyph_replacement_count={d}\n", .{frame.render_frame.glyph_frame.stats.replacement_count});
     try writer.print("input_bytes.len={d}\n", .{memory_pty.writes.items.len});
     try writer.print("resize_calls={d}\n", .{memory_pty.resize_calls});
     if (memory_pty.last_size) |size| {
@@ -194,6 +216,64 @@ fn renderSmokeSummary(
         try writer.print("pty_last_size.rows={d}\n", .{size.rows});
     } else {
         try writer.writeAll("pty_last_size=none\n");
+    }
+
+    return output.toOwnedSlice();
+}
+
+fn glyphFrameReady(render_frame: renderer.RenderFrame) bool {
+    // "ready"는 draw cell 개수와 glyph 개수가 항상 같다는 뜻이 아니다. 실제 shaper가
+    // 공백이나 zero-ink glyph를 atlas upload 대상에서 제외할 수 있기 때문이다.
+    // 여기서는 backend가 frame을 소비할 수 있도록 내부 count와 slice가 서로 맞는지만 본다.
+    const glyph_frame = render_frame.glyph_frame;
+    return glyph_frame.size.cols == render_frame.draw_list.size.cols and
+        glyph_frame.size.rows == render_frame.draw_list.size.rows and
+        glyph_frame.stats.glyph_count == glyph_frame.glyphs.len and
+        glyph_frame.stats.upload_count == glyph_frame.uploads.len and
+        glyph_frame.stats.upload_count + glyph_frame.stats.reused_count == glyph_frame.glyphs.len;
+}
+
+fn renderGlyphFrame(allocator: std.mem.Allocator, render_frame: renderer.RenderFrame) ![]u8 {
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+
+    // app-smoke는 아직 픽셀을 보여주지 않는다. 대신 이 artifact가 backend가 받을
+    // glyph/atlas 입력을 사람이 볼 수 있게 만든다. 나중에 실제 Metal renderer가 붙으면
+    // screenshot 실패와 frame data 실패를 분리해서 추적할 수 있다.
+    const glyph_frame = render_frame.glyph_frame;
+    const writer = &output.writer;
+    try writer.writeAll("maru.glyph-frame.v1\n");
+    try writer.print("backend={s}\n", .{@tagName(render_frame.backend)});
+    try writer.print("size cols={d} rows={d}\n", .{ glyph_frame.size.cols, glyph_frame.size.rows });
+    try writer.print("glyphs len={d}\n", .{glyph_frame.glyphs.len});
+    try writer.print("uploads len={d}\n", .{glyph_frame.uploads.len});
+    try writer.print("stats glyph_count={d} upload_count={d} reused_count={d} fallback_count={d} replacement_count={d}\n", .{
+        glyph_frame.stats.glyph_count,
+        glyph_frame.stats.upload_count,
+        glyph_frame.stats.reused_count,
+        glyph_frame.stats.fallback_count,
+        glyph_frame.stats.replacement_count,
+    });
+    for (glyph_frame.glyphs) |glyph| {
+        try writer.print(
+            "glyph row={d} col={d} codepoint=U+{X:0>4} font_id={d} glyph_id={d} slot={d} fallback={} replacement={}\n",
+            .{
+                glyph.run.row,
+                glyph.run.col,
+                glyph.run.codepoint,
+                glyph.run.font_id,
+                glyph.run.glyph_id,
+                glyph.slot.id,
+                glyph.run.fallback,
+                glyph.run.replacement,
+            },
+        );
+    }
+    for (glyph_frame.uploads) |upload| {
+        try writer.print(
+            "upload glyph_index={d} slot={d} bytes={d} evicted={}\n",
+            .{ upload.glyph_index, upload.slot.id, upload.upload_bytes, upload.evicted != null },
+        );
     }
 
     return output.toOwnedSlice();
@@ -277,7 +357,7 @@ const MemoryPty = struct {
     }
 };
 
-test "app host frame drains runtime events and builds draw list for active surface" {
+test "app host frame drains runtime events and builds renderer frame for active surface" {
     const allocator = std.testing.allocator;
     var memory_pty = MemoryPty.init(allocator);
     defer memory_pty.deinit();
@@ -292,6 +372,8 @@ test "app host frame drains runtime events and builds draw list for active surfa
     var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 4);
     defer queue.deinit();
     var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
+    var renderer_state = renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
 
     const bytes = try allocator.dupe(u8, "frame");
     // push 성공 시 queue가 bytes를 소유한다(아래 buildFrame의 drain이 pump를 통해 해제).
@@ -301,12 +383,13 @@ test "app host frame drains runtime events and builds draw list for active surfa
         return err;
     };
 
-    var frame = try buildFrame(allocator, &app_window, &pump);
+    var frame = try buildFrame(allocator, &app_window, &pump, &renderer_state, renderer.FakeFontBackend{});
     defer frame.deinit(allocator);
 
     try std.testing.expectEqual(@as(runtime_mod.SurfaceId, 1), frame.surface_id);
     try std.testing.expectEqual(@as(usize, 1), frame.drain_summary.output_events);
-    try std.testing.expect(frame.draw_list.cells.len >= 5);
+    try std.testing.expect(frame.render_frame.draw_list.cells.len >= 5);
+    try std.testing.expect(glyphFrameReady(frame.render_frame));
 }
 
 test "app host routes focused input and resize through SurfaceRuntime" {
@@ -331,20 +414,43 @@ test "app host routes focused input and resize through SurfaceRuntime" {
 }
 
 test "app smoke summary marks that real UI is not visible yet" {
-    const draw_list: renderer.DrawList = .{
-        .size = .{ .cols = 3, .rows = 1 },
-        .cursor = .{},
-        .dirty = null,
-        .cells = &.{},
-        .overlays = &.{},
+    const cells = try std.testing.allocator.alloc(renderer.DrawCell, 0);
+    const draw_overlays = try std.testing.allocator.alloc(renderer.DrawOverlay, 0);
+    const glyphs = try std.testing.allocator.alloc(renderer.glyph_frame.PreparedGlyph, 0);
+    const glyph_overlays = try std.testing.allocator.alloc(renderer.DrawOverlay, 0);
+    const uploads = try std.testing.allocator.alloc(renderer.GlyphUpload, 0);
+
+    var render_frame: renderer.RenderFrame = .{
+        .backend = renderer.initialBackendForMacOS(),
+        .draw_list = .{
+            .size = .{ .cols = 3, .rows = 1 },
+            .cursor = .{},
+            .dirty = null,
+            .cells = cells,
+            .overlays = draw_overlays,
+        },
+        .glyph_frame = .{
+            .size = .{ .cols = 3, .rows = 1 },
+            .cursor = .{},
+            .dirty = null,
+            .glyphs = glyphs,
+            .overlays = glyph_overlays,
+            .uploads = uploads,
+            .stats = .{},
+        },
     };
+    defer render_frame.deinit(std.testing.allocator);
+
     const frame: AppHostFrame = .{
         .surface_id = 1,
-        .size = draw_list.size,
+        .size = render_frame.draw_list.size,
         .process_state = .running,
         .drain_summary = .{ .output_events = 1 },
-        .draw_list = draw_list,
+        .render_frame = render_frame,
     };
+    // 이 테스트는 renderSmokeSummary의 문자열 계약만 확인한다. frame 소유권은 위의
+    // render_frame defer가 관리하므로 AppHostFrame.deinit은 호출하지 않는다.
+
     var memory_pty = MemoryPty.init(std.testing.allocator);
     defer memory_pty.deinit();
 
@@ -359,4 +465,30 @@ test "app smoke summary marks that real UI is not visible yet" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.app-smoke.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "visible_ui=false\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "ui_note=not_yet_appkit_or_metal\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_backend=metal\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_frame_ready=true\n") != null);
+}
+
+test "app smoke glyph artifact records backend frame input" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 1 });
+    defer core.deinit();
+
+    var renderer_state = renderer.RendererState.init(std.testing.allocator, .{});
+    defer renderer_state.deinit();
+
+    core.clearDirty();
+    try core.write("A");
+    var render_frame = try renderer_state.buildFrame(
+        std.testing.allocator,
+        core.snapshot(),
+        renderer.FakeFontBackend{},
+    );
+    defer render_frame.deinit(std.testing.allocator);
+
+    const artifact = try renderGlyphFrame(std.testing.allocator, render_frame);
+    defer std.testing.allocator.free(artifact);
+
+    try std.testing.expect(std.mem.indexOf(u8, artifact, "maru.glyph-frame.v1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, artifact, "backend=metal\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, artifact, "glyph row=0 col=0 codepoint=U+0041") != null);
 }

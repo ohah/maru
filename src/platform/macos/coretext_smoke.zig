@@ -269,7 +269,6 @@ fn buildGlyphFrameProbe(
         .fallback_count = fallback_count,
         .replacement_count = 0,
     };
-    defer glyph_runs.deinit(allocator);
 
     var atlas = renderer.GlyphAtlas.init(allocator, .{});
     defer atlas.deinit();
@@ -279,7 +278,7 @@ fn buildGlyphFrameProbe(
 
     const shape_complete = hasNativeShapeFields(native);
 
-    return .{
+    const probe: GlyphFrameProbe = .{
         .atlas_keys_ready = shape_complete and
             frame.stats.glyph_count > 0 and
             atlas.entryCount() > 0,
@@ -298,6 +297,14 @@ fn buildGlyphFrameProbe(
         .fallback_count = frame.stats.fallback_count,
         .replacement_count = frame.stats.replacement_count,
     };
+
+    // glyph_runs는 이 함수가 소유하는 입력 fixture다. prepareGlyphFrame은 값으로 받아
+    // overlays를 dupe하고 glyph를 복사하므로 입력 소유권을 가져가지 않는다. 성공 경로에서는
+    // 여기서 glyph_slice/overlays를 한 번만 해제한다. 오류 경로는 위의 errdefer 두 개가
+    // 정확히 한 번씩 해제한다. (defer glyph_runs.deinit를 함께 두면 오류 시 errdefer와
+    // 겹쳐 이중 free가 되므로 두지 않는다.)
+    glyph_runs.deinit(allocator);
+    return probe;
 }
 
 fn colsForGlyphRuns(glyphs: []const renderer.GlyphRun) u16 {

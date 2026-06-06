@@ -600,15 +600,17 @@ static BOOL maru_pixel_is_non_clear(const uint8_t *pixel, const MaruGlyphTextApp
 
 static BOOL maru_pixel_is_visible_glyph(const uint8_t *pixel, const MaruGlyphTextAppearance *appearance) {
     // non-clear만 보면 "배경과 비슷한 밝기의 glyph"도 성공으로 보인다. 이 smoke는 사람이
-    // 볼 수 있는 glyph를 검증해야 하므로, resolved background보다 충분히 밝은 픽셀인지도
-    // 별도로 센다. (R*299+G*587+B*114)/1000 luma를 background와 같은 가중치로 비교한다.
+    // 볼 수 있는 glyph를 검증해야 하므로, resolved background와 luma가 충분히 대비되는지도
+    // 별도로 센다. theme는 밝은 배경/어두운 글자(light theme)일 수도 있으므로 "더 밝다"가
+    // 아니라 "절댓값 대비가 충분히 크다"로 본다. 그래야 background를 어떤 색으로 바꿔도
+    // gate가 유효하다. (R*299+G*587+B*114)/1000 luma를 background와 같은 가중치로 비교한다.
     const int luma =
         ((int)pixel[2] * 299 + (int)pixel[1] * 587 + (int)pixel[0] * 114) / 1000;
     const int background_luma =
         ((int)appearance->background_r * 299 +
          (int)appearance->background_g * 587 +
          (int)appearance->background_b * 114) / 1000;
-    return luma > background_luma + 40;
+    return abs(luma - background_luma) > 40;
 }
 
 // non-clear 카운트와 visible-glyph 카운트는 같은 readback buffer를 같은 stride로

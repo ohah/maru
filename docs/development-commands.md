@@ -19,6 +19,8 @@ Maru 작업에서 사용하는 기본 명령이다.
 - macOS window smoke 계약 테스트: `mise run test-macos-window-smoke`
 - macOS Metal DrawList readback smoke 실행: `mise run macos-metal-smoke` (창이 너무 빨리 닫히면 `MARU_METAL_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)
 - macOS Metal smoke 계약 테스트: `mise run test-macos-metal-smoke`
+- macOS CoreText font shaping smoke 실행: `mise run macos-coretext-smoke` (창이나 GPU 없이 CoreText font resolve와 glyph run 생성만 확인한다)
+- macOS CoreText smoke 계약 테스트: `mise run test-macos-coretext-smoke`
 - 테스트: `mise run test`
 - E2E 테스트: `mise run e2e`
 - 오라클 비교 테스트: `mise run oracle`

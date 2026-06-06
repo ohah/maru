@@ -93,9 +93,9 @@ pub fn build(b: *std.Build) void {
         run_macos_window_smoke_tests.setCwd(b.path("."));
         test_macos_window_smoke_step.dependOn(&run_macos_window_smoke_tests.step);
 
-        // Metal smoke는 AppKit 창 위에 CAMetalLayer가 실제 drawable을 present하는지
-        // 확인한다. 아직 terminal grid나 glyph atlas를 그리지 않고, GPU surface
-        // lifecycle만 먼저 분리해 검증한다.
+        // Metal smoke는 AppKit 창 위에 CAMetalLayer가 실제 drawable을 present하고,
+        // DrawList에서 온 placeholder 셀 중심 픽셀을 readback한다. 아직 glyph atlas는
+        // 없지만, "GPU surface만 됨"과 "renderer 입력을 Metal이 소비함"을 분리한다.
         const macos_metal_smoke = b.addExecutable(.{
             .name = "maru-macos-metal-smoke",
             .root_module = b.createModule(.{
@@ -140,6 +140,44 @@ pub fn build(b: *std.Build) void {
         const run_macos_metal_smoke_tests = b.addRunArtifact(macos_metal_smoke_tests);
         run_macos_metal_smoke_tests.setCwd(b.path("."));
         test_macos_metal_smoke_step.dependOn(&run_macos_metal_smoke_tests.step);
+
+        // CoreText smoke는 창이나 GPU를 만들지 않고 macOS font stack만 검증한다.
+        // 실제 text renderer를 붙이기 전에 font resolve/shaping 실패와 Metal 실패를
+        // 다른 artifact로 나누기 위한 opt-in platform smoke다.
+        const macos_coretext_smoke = b.addExecutable(.{
+            .name = "maru-macos-coretext-smoke",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/coretext_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        macos_coretext_smoke.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        macos_coretext_smoke.root_module.linkFramework("Foundation", .{});
+        macos_coretext_smoke.root_module.linkFramework("CoreText", .{});
+
+        const macos_coretext_smoke_step = b.step("macos-coretext-smoke", "Run the macOS CoreText font shaping smoke");
+        const macos_coretext_smoke_cmd = b.addRunArtifact(macos_coretext_smoke);
+        macos_coretext_smoke_cmd.setCwd(b.path("."));
+        macos_coretext_smoke_step.dependOn(&macos_coretext_smoke_cmd.step);
+
+        const macos_coretext_smoke_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/coretext_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+
+        const test_macos_coretext_smoke_step = b.step("test-macos-coretext-smoke", "Run macOS CoreText smoke contract tests");
+        const run_macos_coretext_smoke_tests = b.addRunArtifact(macos_coretext_smoke_tests);
+        run_macos_coretext_smoke_tests.setCwd(b.path("."));
+        test_macos_coretext_smoke_step.dependOn(&run_macos_coretext_smoke_tests.step);
     }
 
     const core_tests = b.addTest(.{

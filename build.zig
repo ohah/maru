@@ -126,14 +126,10 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             }),
         });
-        macos_metal_smoke_tests.root_module.addCSourceFile(.{
-            .file = b.path("src/platform/macos/appkit_metal_smoke.m"),
-            .flags = &.{"-fobjc-arc"},
-        });
-        macos_metal_smoke_tests.root_module.linkFramework("Cocoa", .{});
-        macos_metal_smoke_tests.root_module.linkFramework("Metal", .{});
-        macos_metal_smoke_tests.root_module.linkFramework("QuartzCore", .{});
 
+        // Metal 계약 테스트도 실제 GPU를 만들지 않는다. summary schema와 duration
+        // guard만 검증하므로 `.m`/Cocoa/Metal 링크 없이 빌드해 native 실패와
+        // artifact 계약 변경을 분리한다.
         const test_macos_metal_smoke_step = b.step("test-macos-metal-smoke", "Run macOS Metal smoke contract tests");
         const run_macos_metal_smoke_tests = b.addRunArtifact(macos_metal_smoke_tests);
         run_macos_metal_smoke_tests.setCwd(b.path("."));

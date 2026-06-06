@@ -19,6 +19,11 @@ const NativeCoreTextSmokeResult = extern struct {
     missing_glyph_count: u32,
     glyph_record_count: u32,
     glyph_record_overflow: u32,
+    glyph_rasterized: u32,
+    raster_width: u32,
+    raster_height: u32,
+    raster_non_clear_pixels: u32,
+    raster_failures: u32,
     primary_font_name: [font_name_capacity]u8,
     first_fallback_font_name: [font_name_capacity]u8,
 };
@@ -68,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("\nartifacts written to {s}/\n", .{artifact_dir});
     try stdout.flush();
 
-    if (!smoke_status.shaped_text) return error.MacosCoreTextSmokeFailed;
+    if (!smoke_status.shaped_text or !smoke_status.glyph_rasterized) return error.MacosCoreTextSmokeFailed;
 }
 
 fn emptyNativeResult() NativeCoreTextSmokeResult {
@@ -85,6 +90,11 @@ fn emptyNativeResult() NativeCoreTextSmokeResult {
         .missing_glyph_count = 0,
         .glyph_record_count = 0,
         .glyph_record_overflow = 0,
+        .glyph_rasterized = 0,
+        .raster_width = 0,
+        .raster_height = 0,
+        .raster_non_clear_pixels = 0,
+        .raster_failures = 0,
         .primary_font_name = [_]u8{0} ** font_name_capacity,
         .first_fallback_font_name = [_]u8{0} ** font_name_capacity,
     };
@@ -103,6 +113,7 @@ fn emptyGlyphRecord() NativeGlyphRecord {
 const SmokeStatus = struct {
     font_resolved: bool,
     shaped_text: bool,
+    glyph_rasterized: bool,
     fallback_observed: bool,
 };
 
@@ -114,8 +125,25 @@ fn deriveSmokeStatus(native: NativeCoreTextSmokeResult) SmokeStatus {
     // 이렇게 쪼개야 나중에 화면이 비었을 때 원인이 font resolve인지 GPU draw인지
     // summary만 보고 분리할 수 있다.
     const font_resolved = native.primary_font_found != 0;
-    const shaped_text = font_resolved and
+    const shaped_text = hasNativeShapeFields(native);
+    const glyph_rasterized = shaped_text and
         native.status == 0 and
+        native.glyph_rasterized != 0 and
+        native.raster_width > 0 and
+        native.raster_height > 0 and
+        native.raster_non_clear_pixels > 0 and
+        native.raster_failures == 0;
+
+    return .{
+        .font_resolved = font_resolved,
+        .shaped_text = shaped_text,
+        .glyph_rasterized = glyph_rasterized,
+        .fallback_observed = native.fallback_run_count > 0,
+    };
+}
+
+fn hasNativeShapeFields(native: NativeCoreTextSmokeResult) bool {
+    return native.primary_font_found != 0 and
         native.line_created != 0 and
         native.run_count > 0 and
         native.glyph_count > 0 and
@@ -125,12 +153,6 @@ fn deriveSmokeStatus(native: NativeCoreTextSmokeResult) SmokeStatus {
         native.missing_glyph_count == 0 and
         native.glyph_record_count > 0 and
         native.glyph_record_overflow == 0;
-
-    return .{
-        .font_resolved = font_resolved,
-        .shaped_text = shaped_text,
-        .fallback_observed = native.fallback_run_count > 0,
-    };
 }
 
 fn renderSummary(
@@ -148,8 +170,8 @@ fn renderSummary(
     try writer.print("font_resolved={}\n", .{smoke_status.font_resolved});
     try writer.print("shaped_text={}\n", .{smoke_status.shaped_text});
     try writer.print("fallback_observed={}\n", .{smoke_status.fallback_observed});
-    try writer.writeAll("glyph_rasterized=false\n");
-    try writer.writeAll("ui_note=coretext_font_resolve_and_shape_no_window_no_metal_no_atlas\n");
+    try writer.print("glyph_rasterized={}\n", .{smoke_status.glyph_rasterized});
+    try writer.writeAll("ui_note=coretext_font_shape_and_cpu_raster_no_window_no_metal_no_texture\n");
     try writer.writeAll("probe=ascii_cjk_emoji\n");
     try writer.print("native_status={d}\n", .{native.status});
     try writer.print("primary_font_found={d}\n", .{native.primary_font_found});
@@ -163,6 +185,10 @@ fn renderSummary(
     try writer.print("missing_glyph_count={d}\n", .{native.missing_glyph_count});
     try writer.print("glyph_record_count={d}\n", .{native.glyph_record_count});
     try writer.print("glyph_record_overflow={d}\n", .{native.glyph_record_overflow});
+    try writer.print("raster_width={d}\n", .{native.raster_width});
+    try writer.print("raster_height={d}\n", .{native.raster_height});
+    try writer.print("raster_non_clear_pixels={d}\n", .{native.raster_non_clear_pixels});
+    try writer.print("raster_failures={d}\n", .{native.raster_failures});
     try writer.print("atlas_keys_ready={}\n", .{atlas_probe.atlas_keys_ready});
     try writer.print("atlas_drawable_glyph_count={d}\n", .{atlas_probe.drawable_glyph_count});
     try writer.print("atlas_entry_count={d}\n", .{atlas_probe.entry_count});
@@ -217,12 +243,7 @@ fn buildAtlasProbe(
     }
 
     return .{
-        .atlas_keys_ready = native.status == 0 and
-            native.ascii_glyph_present != 0 and
-            native.cjk_glyph_present != 0 and
-            native.emoji_glyph_present != 0 and
-            native.missing_glyph_count == 0 and
-            native.glyph_record_overflow == 0 and
+        .atlas_keys_ready = hasNativeShapeFields(native) and
             drawable_glyph_count > 0 and
             atlas.entryCount() > 0,
         .drawable_glyph_count = drawable_glyph_count,
@@ -291,7 +312,7 @@ fn writeSummary(io: std.Io, summary: []const u8) !void {
     });
 }
 
-test "macOS CoreText smoke summary reports font shaping boundary" {
+test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     // native CoreText를 호출하지 않는 테스트에서도 summary 계약은 고정한다.
     // 그래야 폰트 스택 실패와 artifact 포맷 변경을 서로 다른 문제로 다룰 수 있다.
     var native = emptyNativeResult();
@@ -307,6 +328,11 @@ test "macOS CoreText smoke summary reports font shaping boundary" {
     native.missing_glyph_count = 0;
     native.glyph_record_count = 3;
     native.glyph_record_overflow = 0;
+    native.glyph_rasterized = 1;
+    native.raster_width = 512;
+    native.raster_height = 128;
+    native.raster_non_clear_pixels = 42;
+    native.raster_failures = 0;
     @memcpy(native.primary_font_name[0.."Menlo-Regular".len], "Menlo-Regular");
     @memcpy(native.first_fallback_font_name[0.."AppleColorEmoji".len], "AppleColorEmoji");
 
@@ -323,7 +349,7 @@ test "macOS CoreText smoke summary reports font shaping boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "font_resolved=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "shaped_text=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "fallback_observed=true\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_rasterized=false\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_rasterized=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "probe=ascii_cjk_emoji\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "run_count=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_count=8\n") != null);
@@ -333,6 +359,10 @@ test "macOS CoreText smoke summary reports font shaping boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "missing_glyph_count=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_record_count=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_record_overflow=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "raster_width=512\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "raster_height=128\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "raster_non_clear_pixels=42\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "raster_failures=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_keys_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_drawable_glyph_count=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_entry_count=3\n") != null);
@@ -361,7 +391,35 @@ test "CoreText smoke does not treat fallback as required for shaping" {
 
     const status = deriveSmokeStatus(native);
     try std.testing.expect(status.shaped_text);
+    try std.testing.expect(!status.glyph_rasterized);
     try std.testing.expect(!status.fallback_observed);
+}
+
+test "CoreText smoke keeps shaping and rasterization failures separate" {
+    // CoreText smoke는 font shaping과 glyph bitmap rasterization을 같은 native 호출에서
+    // 실행하지만, 두 신호를 섞으면 디버깅이 어려워진다. 이 테스트는 "shape는 성공,
+    // CPU bitmap은 실패"인 상태가 summary에서 분리되어 보이는지 고정한다.
+    var native = emptyNativeResult();
+    native.status = 6;
+    native.primary_font_found = 1;
+    native.line_created = 1;
+    native.run_count = 2;
+    native.glyph_count = 8;
+    native.ascii_glyph_present = 1;
+    native.cjk_glyph_present = 1;
+    native.emoji_glyph_present = 1;
+    native.missing_glyph_count = 0;
+    native.glyph_record_count = 3;
+    native.glyph_record_overflow = 0;
+    native.glyph_rasterized = 0;
+    native.raster_width = 512;
+    native.raster_height = 128;
+    native.raster_non_clear_pixels = 0;
+    native.raster_failures = 0;
+
+    const status = deriveSmokeStatus(native);
+    try std.testing.expect(status.shaped_text);
+    try std.testing.expect(!status.glyph_rasterized);
 }
 
 test "CoreText smoke rejects missing font or empty glyph output" {

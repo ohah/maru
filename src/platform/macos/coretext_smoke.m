@@ -3,6 +3,8 @@
 #import <Foundation/Foundation.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
+#include <stdlib.h>
 
 typedef struct {
     int32_t status;
@@ -17,6 +19,11 @@ typedef struct {
     uint32_t missing_glyph_count;
     uint32_t glyph_record_count;
     uint32_t glyph_record_overflow;
+    uint32_t glyph_rasterized;
+    uint32_t raster_width;
+    uint32_t raster_height;
+    uint32_t raster_non_clear_pixels;
+    uint32_t raster_failures;
     char primary_font_name[128];
     char first_fallback_font_name[128];
 } MaruCoreTextSmokeResult;
@@ -50,6 +57,11 @@ static void maru_clear_result(MaruCoreTextSmokeResult *result) {
     result->missing_glyph_count = 0;
     result->glyph_record_count = 0;
     result->glyph_record_overflow = 0;
+    result->glyph_rasterized = 0;
+    result->raster_width = 0;
+    result->raster_height = 0;
+    result->raster_non_clear_pixels = 0;
+    result->raster_failures = 0;
     result->primary_font_name[0] = '\0';
     result->first_fallback_font_name[0] = '\0';
 }
@@ -177,6 +189,73 @@ static void maru_record_probe_glyph(
     } else if (string_index >= 7 && string_index <= 8) {
         result->emoji_glyph_present = 1;
     }
+}
+
+static void maru_rasterize_line_into_cpu_bitmap(MaruCoreTextSmokeResult *result, CTLineRef line) {
+    // 이 smoke는 아직 Metal texture upload를 검증하지 않는다. 대신 CoreText가 만든
+    // glyph run을 CPU bitmap에 한 번 그려서 "glyph id가 있다"와 "실제 픽셀이
+    // 나온다"를 분리한다. 그래야 다음 Metal text draw 단계에서 실패 원인을
+    // font stack, rasterizer, GPU upload 중 어디에서 봐야 하는지 좁힐 수 있다.
+    const size_t width = 512;
+    const size_t height = 128;
+    const size_t bytes_per_pixel = 4;
+    const size_t bytes_per_row = width * bytes_per_pixel;
+    const size_t byte_count = bytes_per_row * height;
+
+    result->raster_width = (uint32_t)width;
+    result->raster_height = (uint32_t)height;
+
+    uint8_t *pixels = (uint8_t *)calloc(byte_count, 1);
+    if (pixels == NULL) {
+        result->raster_failures += 1;
+        return;
+    }
+
+    CGColorSpaceRef color_space = CGColorSpaceCreateDeviceRGB();
+    if (color_space == NULL) {
+        free(pixels);
+        result->raster_failures += 1;
+        return;
+    }
+
+    CGContextRef context = CGBitmapContextCreate(
+        pixels,
+        width,
+        height,
+        8,
+        bytes_per_row,
+        color_space,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
+    );
+    if (context == NULL) {
+        CGColorSpaceRelease(color_space);
+        free(pixels);
+        result->raster_failures += 1;
+        return;
+    }
+
+    CGContextSetTextMatrix(context, CGAffineTransformIdentity);
+    CGContextTranslateCTM(context, 0.0, (CGFloat)height);
+    CGContextScaleCTM(context, 1.0, -1.0);
+    CGContextSetShouldAntialias(context, true);
+    CGContextSetRGBFillColor(context, 1.0, 1.0, 1.0, 1.0);
+    CGContextSetTextPosition(context, 16.0, 64.0);
+    CTLineDraw(line, context);
+
+    uint32_t non_clear_pixels = 0;
+    for (size_t offset = 0; offset + 3 < byte_count; offset += bytes_per_pixel) {
+        const uint8_t alpha = pixels[offset + 3];
+        if (alpha != 0) {
+            non_clear_pixels += 1;
+        }
+    }
+
+    result->raster_non_clear_pixels = non_clear_pixels;
+    result->glyph_rasterized = non_clear_pixels > 0 ? 1 : 0;
+
+    CGContextRelease(context);
+    CGColorSpaceRelease(color_space);
+    free(pixels);
 }
 
 void maru_macos_coretext_smoke_run(
@@ -323,13 +402,19 @@ void maru_macos_coretext_smoke_run(
         }
 
         if (result->status != 7) {
+            maru_rasterize_line_into_cpu_bitmap(result, line);
+        }
+
+        if (result->status != 7) {
             result->status = result->glyph_count > 0 &&
                     result->ascii_glyph_present != 0 &&
                     result->cjk_glyph_present != 0 &&
                     result->emoji_glyph_present != 0 &&
                     result->missing_glyph_count == 0 &&
                     result->glyph_record_count > 0 &&
-                    result->glyph_record_overflow == 0
+                    result->glyph_record_overflow == 0 &&
+                    result->glyph_rasterized != 0 &&
+                    result->raster_failures == 0
                 ? 0
                 : 6;
         }

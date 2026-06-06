@@ -69,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
         &native,
     );
 
-    const smoke_status = deriveSmokeStatus(native, fixture.cells.len);
+    const smoke_status = deriveSmokeStatus(native);
     const summary = try renderSummary(allocator, duration_ms, smoke_status, native);
     defer allocator.free(summary);
 
@@ -100,19 +100,15 @@ const SmokeStatus = struct {
     terminal_grid: bool,
 };
 
-fn deriveSmokeStatus(native: NativeMetalSmokeResult, expected_cells: usize) SmokeStatus {
-    // terminal_grid는 "cell_count를 되돌려받았다"가 아니라 "실제 GPU 결과에서
-    // clear 색이 아닌 픽셀을 readback했다"는 신호여야 한다. 이 함수에 판정을 모아
-    // summary와 종료 코드가 서로 다른 기준을 쓰지 않게 한다.
-    const expected_cells_u32: u32 = if (expected_cells > std.math.maxInt(u32))
-        std.math.maxInt(u32)
-    else
-        @intCast(expected_cells);
+fn deriveSmokeStatus(native: NativeMetalSmokeResult) SmokeStatus {
+    // terminal_grid는 "cell_count를 되돌려받았다"가 아니라 "실제 GPU 결과에서 clear
+    // 색이 아닌 픽셀을 readback했다"는 신호여야 한다. 샘플한 셀 중심이 하나라도가
+    // 아니라 전부 비-clear여야 부분 렌더 회귀까지 잡는다. rendered_cells==requested는
+    // 항상 참이라(제출 셀 수를 그대로 돌려줌) 게이트에 넣지 않는다.
     const visible_ui = native.window_visible != 0;
     const metal_surface = native.presented_frames > 0;
-    const rendered_expected_cells = native.rendered_cells == expected_cells_u32;
     const readback_found_cell_pixels = native.readback_samples > 0 and
-        native.readback_non_clear_pixels > 0 and
+        native.readback_non_clear_pixels == native.readback_samples and
         native.readback_failures == 0;
 
     return .{
@@ -120,7 +116,6 @@ fn deriveSmokeStatus(native: NativeMetalSmokeResult, expected_cells: usize) Smok
         .metal_surface = metal_surface,
         .terminal_grid = visible_ui and
             metal_surface and
-            rendered_expected_cells and
             readback_found_cell_pixels,
     };
 }
@@ -229,7 +224,7 @@ test "macOS Metal smoke summary reports DrawList placeholder boundary" {
         .readback_non_clear_pixels = 9,
         .readback_failures = 0,
     };
-    const summary = try renderSummary(std.testing.allocator, 1500, deriveSmokeStatus(native, 9), native);
+    const summary = try renderSummary(std.testing.allocator, 1500, deriveSmokeStatus(native), native);
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.macos-metal-smoke.v1\n") != null);
@@ -247,10 +242,10 @@ test "macOS Metal smoke summary reports DrawList placeholder boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "readback_failures=0\n") != null);
 }
 
-test "Metal smoke terminal grid requires a non-clear readback pixel" {
+test "Metal smoke terminal grid requires every sampled readback pixel non-clear" {
     // 이 테스트가 없으면 native bridge가 입력 cell_count를 그대로 되돌려도
-    // terminal_grid=true가 된다. 실제 GPU 결과를 읽어 clear 색이 아닌 픽셀을
-    // 발견했을 때만 terminal_grid를 true로 올린다는 계약을 고정한다.
+    // terminal_grid=true가 된다. 샘플한 셀 중심이 전부 clear 색이 아닐 때만
+    // terminal_grid를 true로 올린다는 계약을 고정한다(부분 렌더/readback 실패는 false).
     const no_readback: NativeMetalSmokeResult = .{
         .status = 9,
         .window_visible = 1,
@@ -262,18 +257,29 @@ test "Metal smoke terminal grid requires a non-clear readback pixel" {
         .readback_non_clear_pixels = 0,
         .readback_failures = 0,
     };
-    const partial_render: NativeMetalSmokeResult = .{
-        .status = 6,
+    const partial_readback: NativeMetalSmokeResult = .{
+        .status = 9,
         .window_visible = 1,
         .presented_frames = 3,
         .drawable_failures = 0,
         .requested_cells = 9,
-        .rendered_cells = 8,
+        .rendered_cells = 9,
         .readback_samples = 9,
-        .readback_non_clear_pixels = 9,
+        .readback_non_clear_pixels = 8,
         .readback_failures = 0,
     };
-    const visible_pixels: NativeMetalSmokeResult = .{
+    const readback_failed: NativeMetalSmokeResult = .{
+        .status = 9,
+        .window_visible = 1,
+        .presented_frames = 3,
+        .drawable_failures = 0,
+        .requested_cells = 9,
+        .rendered_cells = 9,
+        .readback_samples = 9,
+        .readback_non_clear_pixels = 9,
+        .readback_failures = 1,
+    };
+    const all_pixels: NativeMetalSmokeResult = .{
         .status = 0,
         .window_visible = 1,
         .presented_frames = 3,
@@ -281,13 +287,14 @@ test "Metal smoke terminal grid requires a non-clear readback pixel" {
         .requested_cells = 9,
         .rendered_cells = 9,
         .readback_samples = 9,
-        .readback_non_clear_pixels = 1,
+        .readback_non_clear_pixels = 9,
         .readback_failures = 0,
     };
 
-    try std.testing.expect(!deriveSmokeStatus(no_readback, 9).terminal_grid);
-    try std.testing.expect(!deriveSmokeStatus(partial_render, 9).terminal_grid);
-    try std.testing.expect(deriveSmokeStatus(visible_pixels, 9).terminal_grid);
+    try std.testing.expect(!deriveSmokeStatus(no_readback).terminal_grid);
+    try std.testing.expect(!deriveSmokeStatus(partial_readback).terminal_grid);
+    try std.testing.expect(!deriveSmokeStatus(readback_failed).terminal_grid);
+    try std.testing.expect(deriveSmokeStatus(all_pixels).terminal_grid);
 }
 
 test "Metal smoke duration override clamps invalid, zero, and oversized values" {

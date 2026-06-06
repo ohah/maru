@@ -374,8 +374,8 @@ static BOOL maru_draw_cell_frame(
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
     result->presented_frames += 1;
-    // requested_cells와 같은 포화 규칙을 써야 status==0 비교(rendered==requested)가
-    // cell_count 좁힘 방식 차이로 어긋나지 않는다.
+    // rendered_cells는 "draw에 제출한 셀 수"라는 관측값이다(실제 렌더 검증은 readback이
+    // 한다). summary에서 requested_cells와 같은 포화 규칙으로 맞춰 둔다.
     result->rendered_cells = (cell_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)cell_count;
     result->readback_samples = (sample_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)sample_count;
     result->readback_non_clear_pixels = maru_count_non_clear_readback_pixels(
@@ -527,11 +527,16 @@ void maru_macos_metal_smoke_run(
             return;
         }
 
-        if (result->presented_frames == 0 || result->rendered_cells != result->requested_cells) {
+        if (result->presented_frames == 0) {
             result->status = 6;
             return;
         }
-        if (result->readback_samples == 0 || result->readback_non_clear_pixels == 0 ||
+        // readback이 실제 렌더 검증의 단일 게이트다. 샘플한 셀 중심이 "하나라도"가
+        // 아니라 "전부" clear가 아니어야 부분 렌더 회귀(셀 일부만 그려짐)까지 잡는다.
+        // readback은 compositing 전 drawable 텍스처를 읽으므로 "GPU가 셀을 렌더했다"를
+        // 증명하고, "화면에 안 가려졌다"는 window_visible이 따로 담당한다.
+        if (result->readback_samples == 0 ||
+            result->readback_non_clear_pixels != result->readback_samples ||
             result->readback_failures > 0)
         {
             result->status = 9;

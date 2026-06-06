@@ -64,8 +64,8 @@ pub fn main(init: std.process.Init) !void {
 
     const smoke_status = deriveSmokeStatus(native);
     const record_count = @min(@as(usize, @intCast(native.glyph_record_count)), glyph_records.len);
-    const atlas_probe = try buildAtlasProbe(allocator, native, glyph_records[0..record_count]);
-    const summary = try renderSummary(allocator, smoke_status, native, atlas_probe);
+    const glyph_frame_probe = try buildGlyphFrameProbe(allocator, native, glyph_records[0..record_count]);
+    const summary = try renderSummary(allocator, smoke_status, native, glyph_frame_probe);
     defer allocator.free(summary);
 
     try writeSummary(io, summary);
@@ -165,7 +165,7 @@ fn renderSummary(
     allocator: std.mem.Allocator,
     smoke_status: SmokeStatus,
     native: NativeCoreTextSmokeResult,
-    atlas_probe: AtlasProbe,
+    glyph_frame_probe: GlyphFrameProbe,
 ) ![]u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
@@ -195,69 +195,121 @@ fn renderSummary(
     try writer.print("raster_height={d}\n", .{native.raster_height});
     try writer.print("raster_non_clear_pixels={d}\n", .{native.raster_non_clear_pixels});
     try writer.print("raster_failures={d}\n", .{native.raster_failures});
-    try writer.print("atlas_keys_ready={}\n", .{atlas_probe.atlas_keys_ready});
-    try writer.print("atlas_drawable_glyph_count={d}\n", .{atlas_probe.drawable_glyph_count});
-    try writer.print("atlas_entry_count={d}\n", .{atlas_probe.entry_count});
-    try writer.print("atlas_upload_candidates={d}\n", .{atlas_probe.upload_candidates});
-    try writer.print("atlas_upload_bytes={d}\n", .{atlas_probe.upload_bytes});
-    try writer.print("atlas_color_glyph_count={d}\n", .{atlas_probe.color_glyph_count});
+    try writer.print("atlas_keys_ready={}\n", .{glyph_frame_probe.atlas_keys_ready});
+    try writer.print("atlas_drawable_glyph_count={d}\n", .{glyph_frame_probe.drawable_glyph_count});
+    try writer.print("atlas_entry_count={d}\n", .{glyph_frame_probe.entry_count});
+    try writer.print("atlas_upload_candidates={d}\n", .{glyph_frame_probe.upload_candidates});
+    try writer.print("atlas_upload_bytes={d}\n", .{glyph_frame_probe.upload_bytes});
+    try writer.print("atlas_color_glyph_count={d}\n", .{glyph_frame_probe.color_glyph_count});
+    try writer.print("glyph_frame_ready={}\n", .{glyph_frame_probe.glyph_frame_ready});
+    try writer.print("glyph_frame_glyph_count={d}\n", .{glyph_frame_probe.glyph_count});
+    try writer.print("glyph_frame_upload_count={d}\n", .{glyph_frame_probe.upload_count});
+    try writer.print("glyph_frame_reused_count={d}\n", .{glyph_frame_probe.reused_count});
+    try writer.print("glyph_frame_evicted_count={d}\n", .{glyph_frame_probe.evicted_count});
+    try writer.print("glyph_frame_fallback_count={d}\n", .{glyph_frame_probe.fallback_count});
+    try writer.print("glyph_frame_replacement_count={d}\n", .{glyph_frame_probe.replacement_count});
     try writer.print("primary_font_name={s}\n", .{cStringField(&native.primary_font_name)});
     try writer.print("first_fallback_font_name={s}\n", .{cStringField(&native.first_fallback_font_name)});
 
     return output.toOwnedSlice();
 }
 
-const AtlasProbe = struct {
+const GlyphFrameProbe = struct {
     atlas_keys_ready: bool,
+    glyph_frame_ready: bool,
     drawable_glyph_count: usize,
     entry_count: usize,
     upload_candidates: usize,
     upload_bytes: usize,
     color_glyph_count: usize,
+    glyph_count: usize,
+    upload_count: usize,
+    reused_count: usize,
+    evicted_count: usize,
+    fallback_count: usize,
+    replacement_count: usize,
 };
 
-fn buildAtlasProbe(
+fn buildGlyphFrameProbe(
     allocator: std.mem.Allocator,
     native: NativeCoreTextSmokeResult,
     records: []const NativeGlyphRecord,
-) !AtlasProbe {
+) !GlyphFrameProbe {
     // 이 단계는 아직 bitmap을 rasterize하지 않는다. 대신 CoreText가 준 실제
-    // font_id/glyph_id 후보가 Maru의 `GlyphCacheKey -> GlyphAtlas` 계약으로 들어갈
-    // 수 있는지 확인한다. 그래야 다음 Metal text draw에서 "폰트는 됐는데 atlas key가
-    // 없다" 같은 원인을 별도 summary로 분리할 수 있다.
-    var atlas = renderer.GlyphAtlas.init(allocator, .{});
-    defer atlas.deinit();
+    // font_id/glyph_id 후보를 Maru의 제품 renderer 계약인 `GlyphRunList -> GlyphFrame`
+    // 경로에 태운다. 그래야 다음 Metal text draw에서 "폰트는 됐는데 frame/atlas 준비가
+    // 안 됐다" 같은 원인을 summary로 분리할 수 있다.
+    var runs: std.ArrayList(renderer.GlyphRun) = .empty;
+    errdefer runs.deinit(allocator);
+    try runs.ensureTotalCapacity(allocator, records.len);
 
-    var drawable_glyph_count: usize = 0;
-    var upload_candidates: usize = 0;
-    var upload_bytes: usize = 0;
+    var fallback_count: usize = 0;
     var color_glyph_count: usize = 0;
 
     for (records) |record| {
         if (!isDrawableAtlasRecord(record)) continue;
 
         const glyph = glyphRunForAtlas(record);
-        const lookup = try atlas.ensureGlyph(glyph);
-        drawable_glyph_count += 1;
-        if (lookup.uploaded) {
-            upload_candidates += 1;
-            upload_bytes += lookup.upload_bytes;
-        }
-        if (glyph.cache_key.color_glyph_kind == .color) {
-            color_glyph_count += 1;
-        }
+        if (glyph.fallback) fallback_count += 1;
+        if (glyph.cache_key.color_glyph_kind == .color) color_glyph_count += 1;
+        runs.appendAssumeCapacity(glyph);
     }
 
-    return .{
-        .atlas_keys_ready = hasNativeShapeFields(native) and
-            drawable_glyph_count > 0 and
-            atlas.entryCount() > 0,
-        .drawable_glyph_count = drawable_glyph_count,
-        .entry_count = atlas.entryCount(),
-        .upload_candidates = upload_candidates,
-        .upload_bytes = upload_bytes,
-        .color_glyph_count = color_glyph_count,
+    const glyph_slice = try runs.toOwnedSlice(allocator);
+    errdefer allocator.free(glyph_slice);
+    const overlays = try allocator.alloc(renderer.DrawOverlay, 0);
+    errdefer allocator.free(overlays);
+
+    var glyph_runs: renderer.GlyphRunList = .{
+        .size = .{ .cols = colsForGlyphRuns(glyph_slice), .rows = 1 },
+        .cursor = .{},
+        .dirty = if (glyph_slice.len > 0) .{ .start_row = 0, .end_row = 0 } else null,
+        .glyphs = glyph_slice,
+        .overlays = overlays,
+        .fallback_count = fallback_count,
+        .replacement_count = 0,
     };
+    defer glyph_runs.deinit(allocator);
+
+    var atlas = renderer.GlyphAtlas.init(allocator, .{});
+    defer atlas.deinit();
+
+    var frame = try renderer.prepareGlyphFrame(allocator, glyph_runs, &atlas);
+    defer frame.deinit(allocator);
+
+    const shape_complete = hasNativeShapeFields(native);
+
+    return .{
+        .atlas_keys_ready = shape_complete and
+            frame.stats.glyph_count > 0 and
+            atlas.entryCount() > 0,
+        .glyph_frame_ready = shape_complete and
+            frame.glyphs.len == frame.stats.glyph_count and
+            frame.stats.glyph_count > 0,
+        .drawable_glyph_count = frame.stats.glyph_count,
+        .entry_count = atlas.entryCount(),
+        .upload_candidates = frame.stats.upload_count,
+        .upload_bytes = frame.stats.upload_bytes,
+        .color_glyph_count = color_glyph_count,
+        .glyph_count = frame.stats.glyph_count,
+        .upload_count = frame.stats.upload_count,
+        .reused_count = frame.stats.reused_count,
+        .evicted_count = frame.stats.evicted_count,
+        .fallback_count = frame.stats.fallback_count,
+        .replacement_count = frame.stats.replacement_count,
+    };
+}
+
+fn colsForGlyphRuns(glyphs: []const renderer.GlyphRun) u16 {
+    // CoreText smoke의 glyph records는 probe 한 줄의 UTF-16 index를 col처럼 사용한다.
+    // 제품 layout metric은 아니지만, GlyphRunList가 비어 있지 않은 유효한 surface
+    // metadata를 갖도록 최소 cols를 계산한다.
+    var max_col: u16 = 0;
+    for (glyphs) |glyph| {
+        const end = std.math.add(u16, glyph.col, @as(u16, glyph.cell_width)) catch std.math.maxInt(u16);
+        max_col = @max(max_col, end);
+    }
+    return @max(max_col, 1);
 }
 
 fn isDrawableAtlasRecord(record: NativeGlyphRecord) bool {
@@ -347,8 +399,8 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
         .{ .font_id = 2, .glyph_id = 20, .string_index = 5, .category = @intFromEnum(NativeGlyphCategory.cjk), .fallback = 1 },
         .{ .font_id = 3, .glyph_id = 30, .string_index = 7, .category = @intFromEnum(NativeGlyphCategory.emoji), .fallback = 1 },
     };
-    const atlas_probe = try buildAtlasProbe(std.testing.allocator, native, &records);
-    const summary = try renderSummary(std.testing.allocator, deriveSmokeStatus(native), native, atlas_probe);
+    const glyph_frame_probe = try buildGlyphFrameProbe(std.testing.allocator, native, &records);
+    const summary = try renderSummary(std.testing.allocator, deriveSmokeStatus(native), native, glyph_frame_probe);
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.macos-coretext-smoke.v1\n") != null);
@@ -374,6 +426,13 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_entry_count=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_upload_candidates=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_color_glyph_count=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_frame_ready=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_frame_glyph_count=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_frame_upload_count=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_frame_reused_count=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_frame_evicted_count=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_frame_fallback_count=2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_frame_replacement_count=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "primary_font_name=Menlo-Regular\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "first_fallback_font_name=AppleColorEmoji\n") != null);
 }
@@ -427,13 +486,14 @@ test "CoreText smoke keeps shaping and rasterization failures separate" {
     try std.testing.expect(status.shaped_text);
     try std.testing.expect(!status.glyph_rasterized);
 
-    // raster가 실패해도(shape는 성공) atlas key 후보 생성은 raster와 독립이다.
-    // 그래서 atlas_keys_ready는 그대로 true여야 한다. 이렇게 분리해야 summary만 보고
-    // "shape/atlas는 됐고 CPU raster에서 막혔다"를 집어낼 수 있다.
-    const probe = try buildAtlasProbe(std.testing.allocator, native, &[_]NativeGlyphRecord{
+    // raster가 실패해도(shape는 성공) GlyphFrame 준비는 raster와 독립이다.
+    // 그래서 glyph_frame_ready와 atlas_keys_ready는 그대로 true여야 한다. 이렇게 분리해야
+    // summary만 보고 "shape/frame 준비는 됐고 CPU raster에서 막혔다"를 집어낼 수 있다.
+    const probe = try buildGlyphFrameProbe(std.testing.allocator, native, &[_]NativeGlyphRecord{
         .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
     });
     try std.testing.expect(probe.atlas_keys_ready);
+    try std.testing.expect(probe.glyph_frame_ready);
 }
 
 test "CoreText smoke treats native glyph-buffer overflow as incomplete shaping" {
@@ -458,11 +518,12 @@ test "CoreText smoke treats native glyph-buffer overflow as incomplete shaping" 
     try std.testing.expect(!status.shaped_text);
     try std.testing.expect(!status.glyph_rasterized);
 
-    // atlas key 후보도 overflow run을 정상 shape로 취급하면 안 된다.
-    const probe = try buildAtlasProbe(std.testing.allocator, native, &[_]NativeGlyphRecord{
+    // GlyphFrame 준비도 overflow run을 정상 shape로 취급하면 안 된다.
+    const probe = try buildGlyphFrameProbe(std.testing.allocator, native, &[_]NativeGlyphRecord{
         .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
     });
     try std.testing.expect(!probe.atlas_keys_ready);
+    try std.testing.expect(!probe.glyph_frame_ready);
 }
 
 test "CoreText smoke rejects missing font or empty glyph output" {
@@ -503,9 +564,9 @@ test "CoreText smoke rejects probe categories that map to missing glyphs" {
     try std.testing.expect(!deriveSmokeStatus(missing_emoji).shaped_text);
 }
 
-test "CoreText smoke atlas probe filters spaces and requires records" {
+test "CoreText smoke glyph frame probe filters spaces and requires records" {
     // CoreText는 space도 glyph run에 포함할 수 있지만, atlas가 bitmap으로 굽는 대상은
-    // 실제로 그릴 glyph다. space record를 제외해 atlas key 숫자가 과장되지 않게 한다.
+    // 실제로 그릴 glyph다. space record를 제외해 frame/atlas 숫자가 과장되지 않게 한다.
     var native = emptyNativeResult();
     native.status = 0;
     native.primary_font_found = 1;
@@ -522,12 +583,16 @@ test "CoreText smoke atlas probe filters spaces and requires records" {
         .{ .font_id = 1, .glyph_id = 5, .string_index = 4, .category = @intFromEnum(NativeGlyphCategory.space), .fallback = 0 },
     };
 
-    const probe = try buildAtlasProbe(std.testing.allocator, native, &records);
+    const probe = try buildGlyphFrameProbe(std.testing.allocator, native, &records);
     try std.testing.expect(probe.atlas_keys_ready);
+    try std.testing.expect(probe.glyph_frame_ready);
     try std.testing.expectEqual(@as(usize, 1), probe.drawable_glyph_count);
     try std.testing.expectEqual(@as(usize, 1), probe.entry_count);
+    try std.testing.expectEqual(@as(usize, 1), probe.glyph_count);
+    try std.testing.expectEqual(@as(usize, 1), probe.upload_count);
 
     native.glyph_record_overflow = 1;
-    const overflow_probe = try buildAtlasProbe(std.testing.allocator, native, &records);
+    const overflow_probe = try buildGlyphFrameProbe(std.testing.allocator, native, &records);
     try std.testing.expect(!overflow_probe.atlas_keys_ready);
+    try std.testing.expect(!overflow_probe.glyph_frame_ready);
 }

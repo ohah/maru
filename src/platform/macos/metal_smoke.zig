@@ -141,14 +141,10 @@ fn renderSummary(
     try writer.writeAll("glyph_text=false\n");
     try writer.writeAll("ui_note=appkit_window_with_metal_glyph_frame_placeholder_readback_no_glyph_text\n");
     try writer.writeAll("renderer_input=renderer_state_glyph_frame\n");
-    try writer.print("renderer_frame_prepared={}\n", .{fixture.frame_prepared});
-    try writer.print("renderer_backend={s}\n", .{@tagName(fixture.backend)});
+    // 제품 frame 통계는 renderer가 소유한 공유 직렬화기로 남긴다. glyph text smoke와 같은
+    // "renderer_" schema를 쓰므로 두 artifact의 키가 어긋나지 않는다.
+    try renderer.writeRenderFrameStats(writer, "renderer_", fixture.stats);
     try writer.print("renderer_shaper={s}\n", .{fixture.shaper});
-    try writer.print("renderer_draw_cells={d}\n", .{fixture.draw_cells});
-    try writer.print("renderer_glyph_count={d}\n", .{fixture.glyph_count});
-    try writer.print("renderer_glyph_upload_count={d}\n", .{fixture.upload_count});
-    try writer.print("renderer_glyph_reused_count={d}\n", .{fixture.reused_count});
-    try writer.print("renderer_atlas_entries={d}\n", .{fixture.atlas_entries});
     try writer.print("duration_ms={d}\n", .{duration_ms});
     try writer.print("native_status={d}\n", .{native.status});
     try writer.print("window_visible={d}\n", .{native.window_visible});
@@ -166,14 +162,10 @@ fn renderSummary(
 const SmokeFixture = struct {
     size: terminal.Size,
     cells: []NativeMetalCell,
-    frame_prepared: bool,
-    backend: renderer.Backend,
+    // 제품 frame 통계는 renderer가 소유한 공유 타입으로 들고, native 입력(size, cells)과
+    // 진단 통계를 한 struct에 모은다. shaper는 어떤 shaper로 frame을 준비했는지의 라벨이다.
+    stats: renderer.RenderFrameStats,
     shaper: []const u8 = renderer_probe_shaper,
-    draw_cells: usize,
-    glyph_count: usize,
-    upload_count: usize,
-    reused_count: usize,
-    atlas_entries: usize,
 
     fn deinit(self: *SmokeFixture, allocator: std.mem.Allocator) void {
         allocator.free(self.cells);
@@ -201,25 +193,10 @@ fn buildSmokeFixture(allocator: std.mem.Allocator) !SmokeFixture {
     const native_cells = try buildNativeCellsFromGlyphFrame(allocator, frame.glyph_frame);
     errdefer allocator.free(native_cells);
 
-    const glyph_frame = frame.glyph_frame;
-    const atlas_entries = state.atlas.entryCount();
-    // renderer_frame_prepared 의미를 glyph_text_smoke probe와 똑같이 맞춘다: frame 일관성에
-    // 더해 실제로 glyph가 잡혔고 atlas가 채워졌는지(>0)까지 봐야 빈 frame을 prepared로
-    // 보고하지 않고, 두 smoke의 같은 summary 키가 같은 뜻을 갖는다.
-    const frame_prepared = frame.glyphFrameConsistent() and
-        glyph_frame.stats.glyph_count > 0 and
-        atlas_entries > 0;
-
     return .{
-        .size = glyph_frame.size,
+        .size = frame.glyph_frame.size,
         .cells = native_cells,
-        .frame_prepared = frame_prepared,
-        .backend = frame.backend,
-        .draw_cells = frame.draw_list.cells.len,
-        .glyph_count = glyph_frame.stats.glyph_count,
-        .upload_count = glyph_frame.stats.upload_count,
-        .reused_count = glyph_frame.stats.reused_count,
-        .atlas_entries = atlas_entries,
+        .stats = renderer.renderFrameStats(frame, state.atlas.entryCount()),
     };
 }
 
@@ -275,14 +252,20 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
     const fixture: SmokeFixture = .{
         .size = .{ .cols = 24, .rows = 6 },
         .cells = empty_cells[0..],
-        .frame_prepared = true,
-        .backend = .metal,
-        .shaper = renderer_probe_shaper,
-        .draw_cells = 48,
-        .glyph_count = 48,
-        .upload_count = 8,
-        .reused_count = 40,
-        .atlas_entries = 8,
+        .stats = .{
+            .consistent = true,
+            .backend = .metal,
+            .surface_cols = 24,
+            .surface_rows = 6,
+            .draw_cells = 48,
+            .draw_overlays = 1,
+            .glyph_count = 48,
+            .upload_count = 8,
+            .reused_count = 40,
+            .fallback_count = 0,
+            .replacement_count = 0,
+            .atlas_entries = 8,
+        },
     };
     const summary = try renderSummary(std.testing.allocator, 1500, deriveSmokeStatus(native), native, fixture);
     defer std.testing.allocator.free(summary);
@@ -302,6 +285,13 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_upload_count=8\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_reused_count=40\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_atlas_entries=8\n") != null);
+    // glyph text smoke와 같은 공유 schema라, metal summary도 surface/overlay/fallback/
+    // replacement 줄을 함께 남긴다(예전엔 metal에서 빠져 있던 키들).
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_surface_cols=24\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_surface_rows=6\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_draw_overlays=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_fallback_count=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_replacement_count=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "window_visible=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "presented_frames=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "drawable_failures=1\n") != null);
@@ -387,18 +377,18 @@ test "Metal smoke fixture comes from RendererState glyph frame" {
 
     try std.testing.expectEqual(@as(u16, 24), fixture.size.cols);
     try std.testing.expectEqual(@as(u16, 6), fixture.size.rows);
-    try std.testing.expect(fixture.frame_prepared);
-    try std.testing.expectEqual(renderer.Backend.metal, fixture.backend);
+    try std.testing.expect(fixture.stats.prepared());
+    try std.testing.expectEqual(renderer.Backend.metal, fixture.stats.backend);
     try std.testing.expectEqualStrings("fake_font_backend", fixture.shaper);
-    try std.testing.expect(fixture.draw_cells >= fixture.cells.len);
-    try std.testing.expect(fixture.glyph_count >= fixture.cells.len);
+    try std.testing.expect(fixture.stats.draw_cells >= fixture.cells.len);
+    try std.testing.expect(fixture.stats.glyph_count >= fixture.cells.len);
     // frame 통계는 dirty row의 공백 glyph까지 포함하지만, visible placeholder smoke는
     // 사람이 보기 쉬운 신호를 위해 공백 cell을 native bridge로 넘기지 않는다.
-    try std.testing.expect(fixture.upload_count > 0);
-    try std.testing.expect(fixture.atlas_entries > 0);
+    try std.testing.expect(fixture.stats.upload_count > 0);
+    try std.testing.expect(fixture.stats.atlas_entries > 0);
     // 모든 glyph는 upload 아니면 reuse 둘 중 하나라, 이 합이 glyph_count와 맞아야 probe
     // 통계가 backend로 일관되게 흘러간다(slot 재사용 회귀를 통계 단계에서 잡는다).
-    try std.testing.expectEqual(fixture.glyph_count, fixture.upload_count + fixture.reused_count);
+    try std.testing.expectEqual(fixture.stats.glyph_count, fixture.stats.upload_count + fixture.stats.reused_count);
     try std.testing.expectEqual(@as(usize, 9), fixture.cells.len);
     try std.testing.expectEqual(@as(u32, 'M'), fixture.cells[0].codepoint);
     try std.testing.expectEqual(@as(u16, 0), fixture.cells[0].row);

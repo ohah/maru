@@ -7,14 +7,14 @@ pub const Config = theme.Config;
 pub const CursorConfig = theme.CursorConfig;
 pub const CursorShape = theme.CursorShape;
 pub const FontConfig = theme.FontConfig;
+pub const ResolveError = appearance.ResolveError;
 pub const ResolvedAppearance = appearance.ResolvedAppearance;
 pub const ResolvedCursor = appearance.ResolvedCursor;
 pub const ResolvedFontRequest = appearance.ResolvedFontRequest;
 pub const ResolvedTheme = appearance.ResolvedTheme;
-pub const ResolveError = appearance.ResolveError;
 pub const ThemeConfig = theme.ThemeConfig;
-pub const parseHexColor = appearance.parseHexColor;
 pub const parseAction = action.parseAction;
+pub const parseHexColor = appearance.parseHexColor;
 pub const resolveAppearance = appearance.resolve;
 
 test {

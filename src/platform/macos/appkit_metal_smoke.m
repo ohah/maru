@@ -24,6 +24,7 @@ typedef struct {
     uint16_t width;
     uint16_t reserved;
     uint32_t codepoint;
+    uint32_t slot_id;
 } MaruMetalSmokeCell;
 
 typedef struct {
@@ -96,11 +97,14 @@ static id<MTLRenderPipelineState> maru_make_cell_pipeline(
     return [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
 }
 
-static void maru_cell_color(uint32_t codepoint, float *r, float *g, float *b) {
+static void maru_cell_color(MaruMetalSmokeCell cell, float *r, float *g, float *b) {
     // 이 색은 터미널 theme가 아니다. glyph가 붙기 전에도 셀 위치를 눈으로 확인하기 위한
-    // 진단용 색이다. codepoint를 조금 섞어 행렬이 단색 덩어리처럼 보이지 않게 한다.
-    *r = 0.20f + (float)(codepoint % 3u) * 0.10f;
-    *g = 0.56f + (float)(codepoint % 5u) * 0.05f;
+    // 진단용 색이다. slot_id를 섞어 Zig의 GlyphFrame/atlas slot 데이터가 native bridge까지
+    // 넘어왔다는 신호를 만든다. 실제 glyph 색상은 제품 renderer 단계에서 별도로 다룬다.
+    const uint32_t codepoint = cell.codepoint;
+    const uint32_t slot_id = cell.slot_id == 0 ? 1u : cell.slot_id;
+    *r = 0.20f + (float)((codepoint + slot_id) % 3u) * 0.10f;
+    *g = 0.56f + (float)((codepoint + slot_id) % 5u) * 0.05f;
     *b = 0.78f;
 }
 
@@ -234,7 +238,7 @@ static MaruMetalSmokeVertex *maru_build_cell_vertices(
         float r = 0.0f;
         float g = 0.0f;
         float b = 0.0f;
-        maru_cell_color(cell.codepoint, &r, &g, &b);
+        maru_cell_color(cell, &r, &g, &b);
 
         MaruMetalSmokeVertex quad[6] = {
             {left, top, r, g, b, 1.0f},
@@ -404,9 +408,10 @@ void maru_macos_metal_smoke_run(
     result->readback_failures = 0;
 
     @autoreleasepool {
-        // 이 bridge는 "Metal glyph renderer 완성"이 아니라 첫 DrawList 소비 smoke다.
-        // Zig 쪽이 TerminalCore/DrawList/artifact 계약을 소유하고, 여기서는 그 셀
-        // 배열을 실제 CAMetalLayer 위에 placeholder quad로 present할 수 있는지 확인한다.
+        // 이 bridge는 "Metal glyph renderer 완성"이 아니라 첫 GlyphFrame 소비 smoke다.
+        // Zig 쪽이 TerminalCore/RendererState/GlyphFrame/artifact 계약을 소유하고,
+        // 여기서는 그 slot-backed 셀 배열을 실제 CAMetalLayer 위에 placeholder quad로
+        // present할 수 있는지 확인한다.
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         [NSApp finishLaunching];

@@ -94,8 +94,9 @@ pub fn build(b: *std.Build) void {
         test_macos_window_smoke_step.dependOn(&run_macos_window_smoke_tests.step);
 
         // Metal smoke는 AppKit 창 위에 CAMetalLayer가 실제 drawable을 present하고,
-        // DrawList에서 온 placeholder 셀 중심 픽셀을 readback한다. 아직 glyph atlas는
-        // 없지만, "GPU surface만 됨"과 "renderer 입력을 Metal이 소비함"을 분리한다.
+        // RendererState/GlyphFrame에서 온 placeholder 셀 중심 픽셀을 readback한다.
+        // 아직 실제 glyph bitmap text renderer는 아니지만, "GPU surface만 됨"과
+        // "renderer frame 입력을 Metal이 소비함"을 분리한다.
         const macos_metal_smoke = b.addExecutable(.{
             .name = "maru-macos-metal-smoke",
             .root_module = b.createModule(.{
@@ -116,7 +117,7 @@ pub fn build(b: *std.Build) void {
         macos_metal_smoke.root_module.linkFramework("Metal", .{});
         macos_metal_smoke.root_module.linkFramework("QuartzCore", .{});
 
-        const macos_metal_smoke_step = b.step("macos-metal-smoke", "Run the visible macOS Metal DrawList readback smoke");
+        const macos_metal_smoke_step = b.step("macos-metal-smoke", "Run the visible macOS Metal GlyphFrame placeholder readback smoke");
         const macos_metal_smoke_cmd = b.addRunArtifact(macos_metal_smoke);
         macos_metal_smoke_cmd.setCwd(b.path("."));
         macos_metal_smoke_step.dependOn(&macos_metal_smoke_cmd.step);

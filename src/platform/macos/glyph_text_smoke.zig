@@ -7,6 +7,7 @@ const terminal = maru.terminal;
 const artifact_dir = "zig-out/maru-macos-glyph-text-smoke";
 const screenshot_path = artifact_dir ++ "/glyph-text-frame.ppm";
 const default_duration_ms: u32 = 1500;
+const renderer_probe_shaper = "fake_font_backend";
 // 이 smoke는 사람이 실제 창에서 글자를 볼 수 있게 잠깐 유지한다. 환경변수 오타나
 // CI 설정 실수로 창이 오래 떠 있지 않도록 다른 visible smoke와 같은 상한을 둔다.
 const max_duration_ms: u32 = 600_000;
@@ -158,6 +159,7 @@ const SmokeStatus = struct {
 const RendererFrameProbe = struct {
     frame_prepared: bool = false,
     backend: renderer.Backend = renderer.initialBackendForMacOS(),
+    shaper: []const u8 = renderer_probe_shaper,
     font_size_px: u16 = 0,
     device_scale: u16 = 0,
     surface_cols: u16 = 0,
@@ -226,7 +228,8 @@ fn buildRendererFrameProbe(
     appearance: config.ResolvedAppearance,
 ) !RendererFrameProbe {
     // 이 visible smoke의 native bridge는 아직 자체 CoreText bitmap을 화면에 그린다.
-    // 그래도 같은 smoke에서 제품 renderer frame 준비 경로를 함께 태워 둔다. 그래야 이
+    // renderer probe도 아직 실제 CoreText shaper가 아니라 FakeFontBackend를 쓴다. 이
+    // 한계를 summary에 남긴 상태로 제품 frame 준비 경로를 함께 태워 둔다. 그래야 이
     // smoke가 "native fixture만 보이는 데모"로 굳지 않고, 다음 PR에서 Metal backend가
     // 실제 GlyphFrame을 소비할 때 실패 원인을 frame 준비와 화면 그리기로 나눠 볼 수 있다.
     var core = try terminal.TerminalCore.init(allocator, .{ .cols = 16, .rows = 2 });
@@ -254,6 +257,7 @@ fn buildRendererFrameProbe(
     return .{
         .frame_prepared = frame_prepared,
         .backend = frame.backend,
+        .shaper = renderer_probe_shaper,
         .font_size_px = text_config.font_size_px,
         .device_scale = text_config.device_scale,
         .surface_cols = glyph_frame.size.cols,
@@ -301,6 +305,7 @@ fn renderSummary(
     try writer.writeAll("ui_note=appkit_window_with_metal_shader_sampling_coretext_glyph_texture_with_renderer_frame_probe_no_product_terminal_backend\n");
     try writer.print("renderer_frame_prepared={}\n", .{renderer_frame_probe.frame_prepared});
     try writer.print("renderer_backend={s}\n", .{@tagName(renderer_frame_probe.backend)});
+    try writer.print("renderer_shaper={s}\n", .{renderer_frame_probe.shaper});
     try writer.print("renderer_font_size_px={d}\n", .{renderer_frame_probe.font_size_px});
     try writer.print("renderer_device_scale={d}\n", .{renderer_frame_probe.device_scale});
     try writer.print("renderer_surface_cols={d}\n", .{renderer_frame_probe.surface_cols});
@@ -378,6 +383,7 @@ fn successRendererFrameProbe() RendererFrameProbe {
     return .{
         .frame_prepared = true,
         .backend = .metal,
+        .shaper = renderer_probe_shaper,
         .font_size_px = 14,
         .device_scale = 1,
         .surface_cols = 16,
@@ -470,6 +476,7 @@ test "macOS glyph text smoke summary reports shader sampling boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "ui_note=appkit_window_with_metal_shader_sampling_coretext_glyph_texture_with_renderer_frame_probe_no_product_terminal_backend\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_prepared=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_backend=metal\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_shaper=fake_font_backend\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_font_size_px=14\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_device_scale=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_draw_cells=32\n") != null);
@@ -539,6 +546,7 @@ test "glyph text smoke prepares a renderer frame probe before native drawing" {
 
     try std.testing.expect(probe.frame_prepared);
     try std.testing.expectEqual(renderer.Backend.metal, probe.backend);
+    try std.testing.expectEqualStrings("fake_font_backend", probe.shaper);
     try std.testing.expectEqual(@as(u16, 14), probe.font_size_px);
     try std.testing.expectEqual(@as(u16, 1), probe.device_scale);
     try std.testing.expectEqual(@as(u16, 16), probe.surface_cols);

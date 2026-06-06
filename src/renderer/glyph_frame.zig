@@ -133,6 +133,7 @@ test "glyph frame prepares atlas slots and upload plan" {
     defer frame.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 4), frame.glyphs.len);
+    try std.testing.expectEqual(@as(usize, 4), frame.stats.glyph_count);
     try std.testing.expectEqual(frame.glyphs[0].slot.id, frame.glyphs[1].slot.id);
     try std.testing.expectEqual(@as(usize, 2), frame.stats.upload_count);
     try std.testing.expectEqual(@as(usize, 2), frame.stats.reused_count);
@@ -140,6 +141,16 @@ test "glyph frame prepares atlas slots and upload plan" {
     try std.testing.expect(frame.stats.upload_bytes > 0);
     try std.testing.expectEqual(@as(usize, 2), atlas.stats.hits);
     try std.testing.expectEqual(@as(usize, 2), atlas.stats.misses);
+
+    // upload 항목은 자기 PreparedGlyph를 glyph_index로 가리켜야 backend가 업로드한
+    // bitmap을 올바른 glyph/slot에 매핑할 수 있다. "AA  "에서 첫 'A'(0)와 첫
+    // space(2)만 miss이고, 그 index의 PreparedGlyph slot과 upload slot이 같아야 한다.
+    try std.testing.expectEqual(@as(usize, 0), frame.uploads[0].glyph_index);
+    try std.testing.expectEqual(@as(usize, 2), frame.uploads[1].glyph_index);
+    try std.testing.expectEqual(
+        frame.glyphs[frame.uploads[0].glyph_index].slot.id,
+        frame.uploads[0].slot.id,
+    );
 }
 
 test "glyph frame preserves overlays for draw-time effects" {
@@ -206,5 +217,42 @@ test "glyph frame reports atlas evictions without hiding reuse stats" {
     try std.testing.expectEqual(@as(usize, 3), frame.stats.upload_count);
     try std.testing.expectEqual(@as(usize, 1), frame.stats.evicted_count);
     try std.testing.expectEqual(@as(usize, 3), frame.uploads.len);
+    // "ABC"는 셀 순서대로 모두 miss라 upload index도 0,1,2여야 한다. evict는 C(2)에서만.
+    try std.testing.expectEqual(@as(usize, 0), frame.uploads[0].glyph_index);
+    try std.testing.expectEqual(@as(usize, 2), frame.uploads[2].glyph_index);
     try std.testing.expect(frame.uploads[2].evicted != null);
+}
+
+test "glyph frame passes through fallback and replacement counts" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 3, .rows = 1 });
+    defer core.deinit();
+
+    // fallback/replacement_count는 font resolve 단계의 관측값이다. GlyphFrame이 이를
+    // GlyphRunList에서 그대로 전달하지 않으면, backend나 진단이 "왜 fallback/replacement가
+    // 늘었나"를 추적할 때 frame 단계에서 정보가 끊긴다. 'A'(primary), U+E000(PUA →
+    // replacement, fallback 포함), 'B'(primary)로 두 카운터를 0이 아니게 만들어 고정한다.
+    core.clearDirty();
+    try core.write("A\u{e000}B");
+
+    var list = try draw_list.buildDrawList(std.testing.allocator, core.snapshot());
+    defer list.deinit(std.testing.allocator);
+
+    var glyph_runs = try glyph_layout.buildGlyphRunList(
+        std.testing.allocator,
+        list,
+        .{},
+        glyph_layout.FakeFontBackend{},
+    );
+    defer glyph_runs.deinit(std.testing.allocator);
+
+    var atlas = glyph_atlas.GlyphAtlas.init(std.testing.allocator, .{});
+    defer atlas.deinit();
+
+    var frame = try prepareGlyphFrame(std.testing.allocator, glyph_runs, &atlas);
+    defer frame.deinit(std.testing.allocator);
+
+    try std.testing.expect(glyph_runs.fallback_count > 0);
+    try std.testing.expect(glyph_runs.replacement_count > 0);
+    try std.testing.expectEqual(glyph_runs.fallback_count, frame.stats.fallback_count);
+    try std.testing.expectEqual(glyph_runs.replacement_count, frame.stats.replacement_count);
 }

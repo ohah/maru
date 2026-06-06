@@ -65,8 +65,13 @@ pub fn textConfigFromFontSize(font_size: f32, device_scale: u16) glyph_layout.Te
     // public 정책 변경 지점이 된다.
     std.debug.assert(font_size >= 1.0 and font_size <= 512.0);
     std.debug.assert(device_scale > 0);
+    // assert는 ReleaseFast에서 사라진다. 그 빌드에서도 범위 밖/NaN/inf 입력이 들어와
+    // @intFromFloat가 UB(쓰레기 px -> atlas cache key 오염)가 되지 않도록 supported
+    // 범위로 clamp한다. resolved(정상) 입력에서는 값이 그대로다.
+    const finite_size = if (std.math.isFinite(font_size)) font_size else 1.0;
+    const clamped_size = @max(@as(f32, 1.0), @min(@as(f32, 512.0), finite_size));
     return .{
-        .font_size_px = @intFromFloat(@round(font_size)),
+        .font_size_px = @intFromFloat(@round(clamped_size)),
         .device_scale = device_scale,
     };
 }

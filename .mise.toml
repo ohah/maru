@@ -53,6 +53,14 @@ run = "zig build macos-glyph-texture-smoke"
 description = "Run macOS glyph texture smoke contract tests"
 run = "zig build test-macos-glyph-texture-smoke"
 
+[tasks.macos-glyph-text-smoke]
+description = "Run visible macOS glyph text shader sampling smoke"
+run = "zig build macos-glyph-text-smoke"
+
+[tasks.test-macos-glyph-text-smoke]
+description = "Run macOS glyph text smoke contract tests"
+run = "zig build test-macos-glyph-text-smoke"
+
 [tasks.pty]
 description = "Run opt-in macOS PTY integration tests"
 run = "zig build test-pty"

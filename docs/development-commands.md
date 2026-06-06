@@ -23,6 +23,8 @@ Maru 작업에서 사용하는 기본 명령이다.
 - macOS CoreText smoke 계약 테스트: `mise run test-macos-coretext-smoke`
 - macOS glyph texture smoke 실행: `mise run macos-glyph-texture-smoke` (창 없이 CoreText CPU bitmap을 Metal texture에 업로드하고 readback한다)
 - macOS glyph texture smoke 계약 테스트: `mise run test-macos-glyph-texture-smoke`
+- macOS glyph text smoke 실행: `mise run macos-glyph-text-smoke` (CoreText glyph texture를 실제 AppKit/CAMetalLayer 창에서 shader sampling으로 그리고 readback한다. 창이 너무 빨리 닫히면 `MARU_GLYPH_TEXT_SMOKE_MS`로 노출 시간을 ms 단위로 늘린다. 기본 1500ms, 상한 600000ms)
+- macOS glyph text smoke 계약 테스트: `mise run test-macos-glyph-text-smoke`
 - 테스트: `mise run test`
 - E2E 테스트: `mise run e2e`
 - 오라클 비교 테스트: `mise run oracle`

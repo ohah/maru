@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const artifact_dir = "zig-out/maru-macos-glyph-text-smoke";
+const screenshot_path = artifact_dir ++ "/glyph-text-frame.ppm";
 const default_duration_ms: u32 = 1500;
 // 이 smoke는 사람이 실제 창에서 글자를 볼 수 있게 잠깐 유지한다. 환경변수 오타나
 // CI 설정 실수로 창이 오래 떠 있지 않도록 다른 visible smoke와 같은 상한을 둔다.
@@ -23,11 +24,22 @@ const NativeGlyphTextSmokeResult = extern struct {
     source_non_clear_pixels: u32,
     readback_samples: u32,
     readback_non_clear_pixels: u32,
+    readback_visible_glyph_pixels: u32,
     readback_failures: u32,
     upload_bytes: u32,
+    screenshot_written: u32,
+    screenshot_width: u32,
+    screenshot_height: u32,
+    screenshot_bytes: u32,
+    screenshot_failures: u32,
 };
 
-extern fn maru_macos_glyph_text_smoke_run(duration_ms: u32, result: *NativeGlyphTextSmokeResult) void;
+extern fn maru_macos_glyph_text_smoke_run(
+    duration_ms: u32,
+    screenshot_path_ptr: [*]const u8,
+    screenshot_path_len: usize,
+    result: *NativeGlyphTextSmokeResult,
+) void;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -39,7 +51,8 @@ pub fn main(init: std.process.Init) !void {
 
     const duration_ms = readDurationMs();
     var native = emptyNativeResult();
-    maru_macos_glyph_text_smoke_run(duration_ms, &native);
+    try ensureArtifactDir(io);
+    maru_macos_glyph_text_smoke_run(duration_ms, screenshot_path.ptr, screenshot_path.len, &native);
 
     const smoke_status = deriveSmokeStatus(native);
     const summary = try renderSummary(allocator, duration_ms, smoke_status, native);
@@ -71,8 +84,14 @@ fn emptyNativeResult() NativeGlyphTextSmokeResult {
         .source_non_clear_pixels = 0,
         .readback_samples = 0,
         .readback_non_clear_pixels = 0,
+        .readback_visible_glyph_pixels = 0,
         .readback_failures = 0,
         .upload_bytes = 0,
+        .screenshot_written = 0,
+        .screenshot_width = 0,
+        .screenshot_height = 0,
+        .screenshot_bytes = 0,
+        .screenshot_failures = 0,
     };
 }
 
@@ -94,6 +113,7 @@ const SmokeStatus = struct {
     metal_surface: bool,
     source_rasterized: bool,
     glyph_texture_sampled: bool,
+    screenshot_artifact: bool,
     glyph_text_drawn: bool,
 };
 
@@ -117,15 +137,24 @@ fn deriveSmokeStatus(native: NativeGlyphTextSmokeResult) SmokeStatus {
         native.upload_bytes > 0 and
         native.readback_samples > 0 and
         native.readback_non_clear_pixels == native.readback_samples and
+        native.readback_visible_glyph_pixels == native.readback_samples and
         native.readback_failures == 0;
+    const screenshot_artifact = glyph_texture_sampled and
+        native.screenshot_written != 0 and
+        native.screenshot_width > 0 and
+        native.screenshot_height > 0 and
+        native.screenshot_bytes > 0 and
+        native.screenshot_failures == 0;
 
     return .{
         .visible_ui = visible_ui,
         .metal_surface = metal_surface,
         .source_rasterized = source_rasterized,
         .glyph_texture_sampled = glyph_texture_sampled,
+        .screenshot_artifact = screenshot_artifact,
         .glyph_text_drawn = visible_ui and
             glyph_texture_sampled and
+            screenshot_artifact and
             native.status == 0 and
             native.glyph_text_drawn != 0,
     };
@@ -147,6 +176,9 @@ fn renderSummary(
     try writer.print("metal_surface={}\n", .{smoke_status.metal_surface});
     try writer.print("source_rasterized={}\n", .{smoke_status.source_rasterized});
     try writer.print("glyph_texture_sampled={}\n", .{smoke_status.glyph_texture_sampled});
+    try writer.print("screenshot_artifact={}\n", .{smoke_status.screenshot_artifact});
+    try writer.print("screenshot_path={s}\n", .{screenshot_path});
+    try writer.writeAll("screenshot_format=ppm_rgb_from_bgra8_drawable_readback\n");
     try writer.print("glyph_text={}\n", .{smoke_status.glyph_text_drawn});
     try writer.writeAll("ui_note=appkit_window_with_metal_shader_sampling_coretext_glyph_texture_no_terminal_renderer\n");
     try writer.print("duration_ms={d}\n", .{duration_ms});
@@ -167,8 +199,14 @@ fn renderSummary(
     try writer.print("source_non_clear_pixels={d}\n", .{native.source_non_clear_pixels});
     try writer.print("readback_samples={d}\n", .{native.readback_samples});
     try writer.print("readback_non_clear_pixels={d}\n", .{native.readback_non_clear_pixels});
+    try writer.print("readback_visible_glyph_pixels={d}\n", .{native.readback_visible_glyph_pixels});
     try writer.print("readback_failures={d}\n", .{native.readback_failures});
     try writer.print("upload_bytes={d}\n", .{native.upload_bytes});
+    try writer.print("screenshot_written={d}\n", .{native.screenshot_written});
+    try writer.print("screenshot_width={d}\n", .{native.screenshot_width});
+    try writer.print("screenshot_height={d}\n", .{native.screenshot_height});
+    try writer.print("screenshot_bytes={d}\n", .{native.screenshot_bytes});
+    try writer.print("screenshot_failures={d}\n", .{native.screenshot_failures});
 
     return output.toOwnedSlice();
 }
@@ -186,12 +224,17 @@ fn nativeStatusLabel(status: c_int) []const u8 {
         7 => "drawable_or_frame_failed",
         8 => "readback_infra_failed",
         9 => "readback_pixels_clear_or_partial",
+        10 => "screenshot_write_failed",
         else => "unknown",
     };
 }
 
-fn writeSummary(io: std.Io, summary: []const u8) !void {
+fn ensureArtifactDir(io: std.Io) !void {
     try std.Io.Dir.cwd().createDirPath(io, artifact_dir);
+}
+
+fn writeSummary(io: std.Io, summary: []const u8) !void {
+    try ensureArtifactDir(io);
     try std.Io.Dir.cwd().writeFile(io, .{
         .sub_path = artifact_dir ++ "/glyph-text.summary.txt",
         .data = summary,
@@ -220,8 +263,14 @@ test "macOS glyph text smoke summary reports shader sampling boundary" {
         .source_non_clear_pixels = 77,
         .readback_samples = 16,
         .readback_non_clear_pixels = 16,
+        .readback_visible_glyph_pixels = 16,
         .readback_failures = 0,
         .upload_bytes = 32768,
+        .screenshot_written = 1,
+        .screenshot_width = 1440,
+        .screenshot_height = 840,
+        .screenshot_bytes = 3628800,
+        .screenshot_failures = 0,
     };
     const summary = try renderSummary(std.testing.allocator, 1500, deriveSmokeStatus(native), native);
     defer std.testing.allocator.free(summary);
@@ -231,11 +280,20 @@ test "macOS glyph text smoke summary reports shader sampling boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "metal_surface=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "source_rasterized=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_texture_sampled=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_artifact=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_path=zig-out/maru-macos-glyph-text-smoke/glyph-text-frame.ppm\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_format=ppm_rgb_from_bgra8_drawable_readback\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_text=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "native_status_label=ok\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "readback_samples=16\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "readback_non_clear_pixels=16\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "readback_visible_glyph_pixels=16\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "upload_bytes=32768\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_written=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_width=1440\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_height=840\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_bytes=3628800\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_failures=0\n") != null);
 }
 
 test "glyph text smoke status labels explain native failure stages" {
@@ -252,6 +310,7 @@ test "glyph text smoke status labels explain native failure stages" {
     try std.testing.expectEqualStrings("drawable_or_frame_failed", nativeStatusLabel(7));
     try std.testing.expectEqualStrings("readback_infra_failed", nativeStatusLabel(8));
     try std.testing.expectEqualStrings("readback_pixels_clear_or_partial", nativeStatusLabel(9));
+    try std.testing.expectEqualStrings("screenshot_write_failed", nativeStatusLabel(10));
     try std.testing.expectEqualStrings("unknown", nativeStatusLabel(99));
 }
 
@@ -275,8 +334,14 @@ test "glyph text draw requires visible UI, shader sampling, and native success" 
         .source_non_clear_pixels = 77,
         .readback_samples = 16,
         .readback_non_clear_pixels = 16,
+        .readback_visible_glyph_pixels = 16,
         .readback_failures = 0,
         .upload_bytes = 32768,
+        .screenshot_written = 1,
+        .screenshot_width = 1440,
+        .screenshot_height = 840,
+        .screenshot_bytes = 3628800,
+        .screenshot_failures = 0,
     };
     try std.testing.expect(deriveSmokeStatus(ok).glyph_text_drawn);
 
@@ -299,6 +364,47 @@ test "glyph text draw requires visible UI, shader sampling, and native success" 
     try std.testing.expect(!deriveSmokeStatus(no_draw).glyph_text_drawn);
 }
 
+test "glyph text smoke requires a screenshot artifact before reporting final success" {
+    // readback 숫자만 있으면 실패한 프레임을 사람이 바로 볼 수 없다. 이 smoke는 첫
+    // visible glyph draw 경계이므로, 최종 성공은 PPM screenshot artifact까지 남겼을
+    // 때만 true가 된다.
+    var no_screenshot = emptyNativeResult();
+    no_screenshot.status = 0;
+    no_screenshot.window_visible = 1;
+    no_screenshot.metal_device_created = 1;
+    no_screenshot.command_queue_created = 1;
+    no_screenshot.source_rasterized = 1;
+    no_screenshot.texture_created = 1;
+    no_screenshot.texture_uploaded = 1;
+    no_screenshot.pipeline_created = 1;
+    no_screenshot.glyph_text_drawn = 1;
+    no_screenshot.presented_frames = 1;
+    no_screenshot.source_width = 128;
+    no_screenshot.source_height = 64;
+    no_screenshot.source_non_clear_pixels = 77;
+    no_screenshot.readback_samples = 16;
+    no_screenshot.readback_non_clear_pixels = 16;
+    no_screenshot.readback_visible_glyph_pixels = 16;
+    no_screenshot.upload_bytes = 32768;
+
+    try std.testing.expect(deriveSmokeStatus(no_screenshot).glyph_texture_sampled);
+    try std.testing.expect(!deriveSmokeStatus(no_screenshot).screenshot_artifact);
+    try std.testing.expect(!deriveSmokeStatus(no_screenshot).glyph_text_drawn);
+
+    var screenshot_failed = no_screenshot;
+    screenshot_failed.screenshot_written = 1;
+    screenshot_failed.screenshot_width = 1440;
+    screenshot_failed.screenshot_height = 840;
+    screenshot_failed.screenshot_bytes = 3628800;
+    screenshot_failed.screenshot_failures = 1;
+    try std.testing.expect(!deriveSmokeStatus(screenshot_failed).screenshot_artifact);
+
+    var success = screenshot_failed;
+    success.screenshot_failures = 0;
+    try std.testing.expect(deriveSmokeStatus(success).screenshot_artifact);
+    try std.testing.expect(deriveSmokeStatus(success).glyph_text_drawn);
+}
+
 test "glyph text smoke readback must sample every selected glyph ink pixel" {
     // 한두 픽셀만 읽으면 글자가 비어 있거나 텍스처 좌표가 틀린 회귀를 놓친다.
     // smoke는 source glyph의 ink 위치 여러 개를 고르고, 그 위치가 모두 non-clear로
@@ -319,12 +425,18 @@ test "glyph text smoke readback must sample every selected glyph ink pixel" {
     partial.source_non_clear_pixels = 77;
     partial.readback_samples = 16;
     partial.readback_non_clear_pixels = 15;
+    partial.readback_visible_glyph_pixels = 15;
     partial.upload_bytes = 32768;
+    partial.screenshot_written = 1;
+    partial.screenshot_width = 1440;
+    partial.screenshot_height = 840;
+    partial.screenshot_bytes = 3628800;
     try std.testing.expect(!deriveSmokeStatus(partial).glyph_texture_sampled);
     try std.testing.expect(!deriveSmokeStatus(partial).glyph_text_drawn);
 
     var failed = partial;
     failed.readback_non_clear_pixels = 16;
+    failed.readback_visible_glyph_pixels = 16;
     failed.readback_failures = 1;
     try std.testing.expect(!deriveSmokeStatus(failed).glyph_texture_sampled);
 
@@ -332,6 +444,37 @@ test "glyph text smoke readback must sample every selected glyph ink pixel" {
     success.readback_failures = 0;
     try std.testing.expect(deriveSmokeStatus(success).glyph_texture_sampled);
     try std.testing.expect(deriveSmokeStatus(success).glyph_text_drawn);
+}
+
+test "glyph text smoke rejects non-clear but visually dark glyph samples" {
+    // 검정 glyph는 clear 색과 다르므로 non-clear readback만 보면 성공처럼 보인다.
+    // 하지만 사용자가 보는 터미널에서는 어두운 배경에 묻히므로, 밝은 glyph pixel도
+    // 별도로 세어야 screenshot artifact와 summary가 실제 UX를 반영한다.
+    var dark = emptyNativeResult();
+    dark.status = 0;
+    dark.window_visible = 1;
+    dark.metal_device_created = 1;
+    dark.command_queue_created = 1;
+    dark.source_rasterized = 1;
+    dark.texture_created = 1;
+    dark.texture_uploaded = 1;
+    dark.pipeline_created = 1;
+    dark.glyph_text_drawn = 1;
+    dark.presented_frames = 1;
+    dark.source_width = 128;
+    dark.source_height = 64;
+    dark.source_non_clear_pixels = 77;
+    dark.readback_samples = 16;
+    dark.readback_non_clear_pixels = 16;
+    dark.readback_visible_glyph_pixels = 0;
+    dark.upload_bytes = 32768;
+    dark.screenshot_written = 1;
+    dark.screenshot_width = 1440;
+    dark.screenshot_height = 840;
+    dark.screenshot_bytes = 3628800;
+
+    try std.testing.expect(!deriveSmokeStatus(dark).glyph_texture_sampled);
+    try std.testing.expect(!deriveSmokeStatus(dark).glyph_text_drawn);
 }
 
 test "glyph text smoke duration override clamps invalid, zero, and oversized values" {

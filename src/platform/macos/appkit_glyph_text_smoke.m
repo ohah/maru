@@ -6,6 +6,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -26,8 +27,14 @@ typedef struct {
     uint32_t source_non_clear_pixels;
     uint32_t readback_samples;
     uint32_t readback_non_clear_pixels;
+    uint32_t readback_visible_glyph_pixels;
     uint32_t readback_failures;
     uint32_t upload_bytes;
+    uint32_t screenshot_written;
+    uint32_t screenshot_width;
+    uint32_t screenshot_height;
+    uint32_t screenshot_bytes;
+    uint32_t screenshot_failures;
 } MaruGlyphTextSmokeResult;
 
 typedef struct {
@@ -94,8 +101,14 @@ static void maru_clear_result(MaruGlyphTextSmokeResult *result) {
     result->source_non_clear_pixels = 0;
     result->readback_samples = 0;
     result->readback_non_clear_pixels = 0;
+    result->readback_visible_glyph_pixels = 0;
     result->readback_failures = 0;
     result->upload_bytes = 0;
+    result->screenshot_written = 0;
+    result->screenshot_width = 0;
+    result->screenshot_height = 0;
+    result->screenshot_bytes = 0;
+    result->screenshot_failures = 0;
 }
 
 static void maru_pump_app_once(void) {
@@ -186,17 +199,25 @@ static int maru_make_coretext_bitmap(
         return 2;
     }
 
-    const void *keys[] = { kCTFontAttributeName };
-    const void *values[] = { font };
+    CGColorRef foreground_color = CGColorCreateGenericRGB(1.0, 1.0, 1.0, 1.0);
+    if (foreground_color == NULL) {
+        CFRelease(probe);
+        CFRelease(font);
+        return 2;
+    }
+
+    const void *keys[] = { kCTFontAttributeName, kCTForegroundColorAttributeName };
+    const void *values[] = { font, foreground_color };
     CFDictionaryRef attributes = CFDictionaryCreate(
         kCFAllocatorDefault,
         keys,
         values,
-        1,
+        2,
         &kCFTypeDictionaryKeyCallBacks,
         &kCFTypeDictionaryValueCallBacks
     );
     if (attributes == NULL) {
+        CGColorRelease(foreground_color);
         CFRelease(probe);
         CFRelease(font);
         return 2;
@@ -209,6 +230,7 @@ static int maru_make_coretext_bitmap(
     );
     if (attributed == NULL) {
         CFRelease(attributes);
+        CGColorRelease(foreground_color);
         CFRelease(probe);
         CFRelease(font);
         return 2;
@@ -218,6 +240,7 @@ static int maru_make_coretext_bitmap(
     if (line == NULL) {
         CFRelease(attributed);
         CFRelease(attributes);
+        CGColorRelease(foreground_color);
         CFRelease(probe);
         CFRelease(font);
         return 2;
@@ -228,6 +251,7 @@ static int maru_make_coretext_bitmap(
         CFRelease(line);
         CFRelease(attributed);
         CFRelease(attributes);
+        CGColorRelease(foreground_color);
         CFRelease(probe);
         CFRelease(font);
         return 2;
@@ -247,6 +271,7 @@ static int maru_make_coretext_bitmap(
         CFRelease(line);
         CFRelease(attributed);
         CFRelease(attributes);
+        CGColorRelease(foreground_color);
         CFRelease(probe);
         CFRelease(font);
         return 2;
@@ -271,6 +296,7 @@ static int maru_make_coretext_bitmap(
     CFRelease(line);
     CFRelease(attributed);
     CFRelease(attributes);
+    CGColorRelease(foreground_color);
     CFRelease(probe);
     CFRelease(font);
 
@@ -349,6 +375,77 @@ static NSUInteger maru_clamp_pixel(double value, NSUInteger upper_bound) {
         return upper_bound - 1;
     }
     return (NSUInteger)value;
+}
+
+static size_t maru_align_up_size(size_t value, size_t alignment) {
+    if (alignment == 0) {
+        return value;
+    }
+    const size_t remainder = value % alignment;
+    if (remainder == 0) {
+        return value;
+    }
+    const size_t increment = alignment - remainder;
+    if (value > SIZE_MAX - increment) {
+        return 0;
+    }
+    return value + increment;
+}
+
+static char *maru_copy_path(const char *path, size_t path_len) {
+    if (path == NULL || path_len == 0) {
+        return NULL;
+    }
+    char *copy = (char *)malloc(path_len + 1);
+    if (copy == NULL) {
+        return NULL;
+    }
+    memcpy(copy, path, path_len);
+    copy[path_len] = '\0';
+    return copy;
+}
+
+static BOOL maru_write_ppm_from_bgra8_buffer(
+    const char *path,
+    const uint8_t *bgra_pixels,
+    size_t width,
+    size_t height,
+    size_t bytes_per_row
+) {
+    if (path == NULL || bgra_pixels == NULL || width == 0 || height == 0) {
+        return NO;
+    }
+
+    FILE *file = fopen(path, "wb");
+    if (file == NULL) {
+        return NO;
+    }
+
+    // PPM(P6)은 압축도 메타데이터도 없지만, 외부 이미지 라이브러리 없이도 사람이
+    // Preview/이미지 도구로 열어볼 수 있다. smoke artifact의 목적은 픽셀 압축 효율이
+    // 아니라 실패 프레임을 바로 보는 것이다.
+    if (fprintf(file, "P6\n%zu %zu\n255\n", width, height) < 0) {
+        fclose(file);
+        return NO;
+    }
+
+    BOOL ok = YES;
+    for (size_t y = 0; y < height && ok; y++) {
+        const uint8_t *row = bgra_pixels + y * bytes_per_row;
+        for (size_t x = 0; x < width; x++) {
+            const uint8_t *pixel = row + x * 4;
+            const uint8_t rgb[3] = { pixel[2], pixel[1], pixel[0] };
+            if (fwrite(rgb, sizeof(rgb), 1, file) != 1) {
+                ok = NO;
+                break;
+            }
+        }
+    }
+
+    if (fclose(file) != 0) {
+        ok = NO;
+    }
+    return ok;
 }
 
 static MaruGlyphTextSourceSample *maru_build_source_samples(
@@ -479,6 +576,16 @@ static BOOL maru_pixel_is_non_clear(const uint8_t *pixel) {
         abs((int)pixel[3] - expected_a) > tolerance;
 }
 
+static BOOL maru_pixel_is_visible_glyph(const uint8_t *pixel) {
+    // non-clear만 보면 "검정 glyph가 어두운 배경에 찍힌" 상태도 성공으로 보인다.
+    // 이 smoke는 사람이 볼 수 있는 glyph를 검증해야 하므로, clear 배경보다 충분히
+    // 밝은 픽셀인지도 별도로 센다.
+    const int luma =
+        ((int)pixel[2] * 299 + (int)pixel[1] * 587 + (int)pixel[0] * 114) / 1000;
+    const int clear_luma = (15 * 299 + 20 * 587 + 31 * 114) / 1000;
+    return luma > clear_luma + 40;
+}
+
 static uint32_t maru_count_non_clear_readback_pixels(
     id<MTLBuffer> readback_buffer,
     size_t sample_count
@@ -498,12 +605,32 @@ static uint32_t maru_count_non_clear_readback_pixels(
     return non_clear;
 }
 
+static uint32_t maru_count_visible_glyph_readback_pixels(
+    id<MTLBuffer> readback_buffer,
+    size_t sample_count
+) {
+    const uint8_t *bytes = (const uint8_t *)[readback_buffer contents];
+    if (bytes == NULL) {
+        return 0;
+    }
+
+    uint32_t visible = 0;
+    for (size_t i = 0; i < sample_count; i++) {
+        const uint8_t *pixel = bytes + (i * maru_glyph_text_readback_stride);
+        if (maru_pixel_is_visible_glyph(pixel)) {
+            visible += 1;
+        }
+    }
+    return visible;
+}
+
 static BOOL maru_draw_glyph_text_frame(
     CAMetalLayer *layer,
     id<MTLCommandQueue> queue,
     id<MTLRenderPipelineState> pipeline,
     id<MTLTexture> glyph_texture,
     const MaruGlyphTextBitmap *bitmap,
+    const char *screenshot_path,
     MaruGlyphTextSmokeResult *result
 ) {
     id<CAMetalDrawable> drawable = [layer nextDrawable];
@@ -589,6 +716,30 @@ static BOOL maru_draw_glyph_text_frame(
         return NO;
     }
 
+    const BOOL should_write_screenshot =
+        screenshot_path != NULL &&
+        result->screenshot_written == 0;
+    id<MTLBuffer> screenshot_buffer = nil;
+    size_t screenshot_bytes_per_row = 0;
+    size_t screenshot_byte_count = 0;
+    if (should_write_screenshot) {
+        const size_t raw_bytes_per_row = (size_t)drawable.texture.width * 4;
+        screenshot_bytes_per_row = maru_align_up_size(raw_bytes_per_row, 256);
+        if (screenshot_bytes_per_row == 0 ||
+            drawable.texture.height > SIZE_MAX / screenshot_bytes_per_row)
+        {
+            result->screenshot_failures += 1;
+        } else {
+            screenshot_byte_count = screenshot_bytes_per_row * (size_t)drawable.texture.height;
+            screenshot_buffer = [layer.device
+                newBufferWithLength:screenshot_byte_count
+                            options:MTLResourceStorageModeShared];
+            if (screenshot_buffer == nil) {
+                result->screenshot_failures += 1;
+            }
+        }
+    }
+
     [encoder setRenderPipelineState:pipeline];
     [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
     [encoder setFragmentTexture:glyph_texture atIndex:0];
@@ -614,6 +765,17 @@ static BOOL maru_draw_glyph_text_frame(
        destinationBytesPerRow:maru_glyph_text_readback_stride
      destinationBytesPerImage:maru_glyph_text_readback_stride];
     }
+    if (screenshot_buffer != nil) {
+        [blit copyFromTexture:drawable.texture
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(drawable.texture.width, drawable.texture.height, 1)
+                     toBuffer:screenshot_buffer
+            destinationOffset:0
+       destinationBytesPerRow:screenshot_bytes_per_row
+     destinationBytesPerImage:screenshot_byte_count];
+    }
     [blit endEncoding];
     free(drawable_samples);
 
@@ -629,11 +791,43 @@ static BOOL maru_draw_glyph_text_frame(
         readback_buffer,
         drawable_sample_count
     );
+    result->readback_visible_glyph_pixels = maru_count_visible_glyph_readback_pixels(
+        readback_buffer,
+        drawable_sample_count
+    );
     result->glyph_text_drawn =
         result->readback_samples > 0 &&
-        result->readback_non_clear_pixels == result->readback_samples
+        result->readback_non_clear_pixels == result->readback_samples &&
+        result->readback_visible_glyph_pixels == result->readback_samples
         ? 1
         : 0;
+    if (screenshot_buffer != nil && result->glyph_text_drawn != 0) {
+        const uint8_t *screenshot_bytes = (const uint8_t *)[screenshot_buffer contents];
+        const BOOL wrote = maru_write_ppm_from_bgra8_buffer(
+            screenshot_path,
+            screenshot_bytes,
+            (size_t)drawable.texture.width,
+            (size_t)drawable.texture.height,
+            screenshot_bytes_per_row
+        );
+        if (wrote) {
+            result->screenshot_written = 1;
+            result->screenshot_width = (drawable.texture.width > UINT32_MAX)
+                ? UINT32_MAX
+                : (uint32_t)drawable.texture.width;
+            result->screenshot_height = (drawable.texture.height > UINT32_MAX)
+                ? UINT32_MAX
+                : (uint32_t)drawable.texture.height;
+            const size_t rgb_payload_bytes = (size_t)drawable.texture.width *
+                (size_t)drawable.texture.height *
+                3;
+            result->screenshot_bytes = (rgb_payload_bytes > UINT32_MAX)
+                ? UINT32_MAX
+                : (uint32_t)rgb_payload_bytes;
+        } else {
+            result->screenshot_failures += 1;
+        }
+    }
     return result->glyph_text_drawn != 0;
 }
 
@@ -650,9 +844,12 @@ static BOOL maru_draw_glyph_text_frame(
 //   7  = drawable/frame 생성 실패
 //   8  = readback 인프라 실패(buffer/blit/contents)
 //   9  = readback 픽셀이 clear이거나 일부만 glyph로 보임
+//   10 = screenshot artifact 쓰기 실패
 //  -1  = 아직 실행되지 않음
 void maru_macos_glyph_text_smoke_run(
     uint32_t duration_ms,
+    const char *screenshot_path,
+    size_t screenshot_path_len,
     MaruGlyphTextSmokeResult *result
 ) {
     if (result == NULL) {
@@ -748,6 +945,11 @@ void maru_macos_glyph_text_smoke_run(
         }
         result->pipeline_created = 1;
 
+        char *screenshot_path_copy = maru_copy_path(screenshot_path, screenshot_path_len);
+        if (screenshot_path_copy == NULL) {
+            result->screenshot_failures += 1;
+        }
+
         content.layer = metal_layer;
         content.wantsLayer = YES;
         [window setTitle:@"Maru glyph text smoke"];
@@ -774,6 +976,7 @@ void maru_macos_glyph_text_smoke_run(
                     pipeline,
                     glyph_texture,
                     &bitmap,
+                    screenshot_path_copy,
                     result
                 );
             }
@@ -782,6 +985,7 @@ void maru_macos_glyph_text_smoke_run(
         BOOL became_visible = [window isVisible];
         result->window_visible = became_visible ? 1 : 0;
         [window orderOut:nil];
+        free(screenshot_path_copy);
         maru_free_bitmap(&bitmap);
 
         if (!became_visible) {
@@ -801,6 +1005,10 @@ void maru_macos_glyph_text_smoke_run(
             result->glyph_text_drawn == 0)
         {
             result->status = 9;
+            return;
+        }
+        if (result->screenshot_written == 0 || result->screenshot_failures > 0) {
+            result->status = 10;
             return;
         }
 

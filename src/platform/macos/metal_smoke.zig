@@ -310,7 +310,6 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
         .quad_stats = .{
             .glyph_count = 48,
             .uv_count = 48,
-            .overlay_count = 1,
         },
     };
     const summary = try renderSummary(std.testing.allocator, 1500, deriveSmokeStatus(native), native, fixture);

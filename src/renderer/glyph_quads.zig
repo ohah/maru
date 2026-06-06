@@ -26,8 +26,10 @@ pub const GlyphQuad = struct {
 pub const GlyphQuadFrameStats = struct {
     glyph_count: usize = 0,
     uv_count: usize = 0,
-    overlay_count: usize = 0,
 
+    // glyph이 하나라도 있고 그 전부가 UV로 변환됐는가. 경계를 벗어난 slot은
+    // buildGlyphQuadFrame이 개별 skip하므로, 그런 frame은 uv_count < glyph_count가 되어
+    // 여기서 false로 드러난다.
     pub fn ready(self: GlyphQuadFrameStats) bool {
         return self.glyph_count > 0 and self.glyph_count == self.uv_count;
     }
@@ -102,11 +104,14 @@ pub fn buildGlyphQuadFrame(
 
     var stats: GlyphQuadFrameStats = .{
         .glyph_count = frame.glyphs.len,
-        .overlay_count = frame.overlays.len,
     };
 
     for (frame.glyphs) |glyph| {
-        const uv = try uvRectForSlot(glyph.slot, texture_size);
+        // 경계를 벗어난 slot 하나가 frame 전체를 날리지 않도록, UV 변환에 실패한 glyph만
+        // 건너뛴다. (atlas가 자기 texture 밖에 slot을 놓을 수 있는 문제 자체는 별도 overflow
+        // 정책 PR에서 다룬다.) skip이 생기면 uv_count < glyph_count가 되어 ready()가 false가
+        // 되므로 누락이 통계로 드러난다.
+        const uv = uvRectForSlot(glyph.slot, texture_size) catch continue;
         stats.uv_count += 1;
         glyphs.appendAssumeCapacity(.{
             .run = glyph.run,
@@ -118,7 +123,6 @@ pub fn buildGlyphQuadFrame(
     const overlay_copy = try allocator.dupe(draw_list.DrawOverlay, frame.overlays);
     errdefer allocator.free(overlay_copy);
     const glyph_slice = try glyphs.toOwnedSlice(allocator);
-    errdefer allocator.free(glyph_slice);
 
     return .{
         .size = frame.size,
@@ -236,4 +240,48 @@ test "glyph quad frame converts glyph frame slots into shader uv input" {
     try std.testing.expectEqual(quads.glyphs[0].slot.id, quads.glyphs[1].slot.id);
     try std.testing.expectEqual(quads.glyphs[0].uv.u0, quads.glyphs[1].uv.u0);
     try std.testing.expectEqual(quads.glyphs[0].uv.u1, quads.glyphs[1].uv.u1);
+}
+
+test "glyph quad frame skips slots outside the texture instead of failing the whole frame" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 3, .rows = 1 });
+    defer core.deinit();
+
+    // 'A','B','C'는 row-packer에서 x=0,14,28에 놓인다. 일부러 atlas보다 좁은 texture를 넘겨
+    // 'B','C' slot이 width 경계를 벗어나게 만든다. 경계 밖 slot 하나가 frame 전체를 실패시키면
+    // 큰 폰트/긴 세션에서 화면이 통째로 비므로, 그런 glyph만 개별 skip하고 in-bounds 'A'는
+    // 그대로 변환되어야 한다. 누락이 생겼으니 ready()는 false여야 한다.
+    core.clearDirty();
+    try core.write("ABC");
+
+    var list = try @import("draw_list.zig").buildDrawList(std.testing.allocator, core.snapshot());
+    defer list.deinit(std.testing.allocator);
+
+    var glyph_runs = try @import("glyph_layout.zig").buildGlyphRunList(
+        std.testing.allocator,
+        list,
+        .{ .font_size_px = 14, .device_scale = 1 },
+        @import("glyph_layout.zig").FakeFontBackend{},
+    );
+    defer glyph_runs.deinit(std.testing.allocator);
+
+    var atlas = glyph_atlas.GlyphAtlas.init(std.testing.allocator, .{ .atlas_width_px = 64 });
+    defer atlas.deinit();
+
+    var frame = try glyph_frame.prepareGlyphFrame(std.testing.allocator, glyph_runs, &atlas);
+    defer frame.deinit(std.testing.allocator);
+
+    var quads = try buildGlyphQuadFrame(std.testing.allocator, frame, .{
+        .width_px = 20,
+        .height_px = 64,
+    });
+    defer quads.deinit(std.testing.allocator);
+
+    // glyph_count는 준비된 전체 glyph 수, uv_count는 실제 변환된 수. 둘이 어긋나면 ready()=false.
+    try std.testing.expectEqual(@as(usize, 3), quads.stats.glyph_count);
+    try std.testing.expectEqual(@as(usize, 1), quads.stats.uv_count);
+    try std.testing.expectEqual(@as(usize, 1), quads.glyphs.len);
+    try std.testing.expect(!quads.stats.ready());
+    try std.testing.expectEqual(@as(u21, 'A'), quads.glyphs[0].run.codepoint);
+    // 경계 밖 slot을 건너뛰어도 overlay 같은 frame-level 데이터는 그대로 보존된다.
+    try std.testing.expectEqual(frame.overlays.len, quads.overlays.len);
 }

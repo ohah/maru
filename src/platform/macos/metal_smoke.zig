@@ -146,8 +146,6 @@ fn renderSummary(
     try writer.writeAll("ui_note=appkit_window_with_metal_glyph_frame_placeholder_readback_no_glyph_text\n");
     try writer.writeAll("renderer_input=renderer_state_glyph_frame\n");
     try writer.print("renderer_atlas_slot_placement={}\n", .{nativeCellsHaveAtlasPlacement(fixture.cells)});
-    try writer.print("renderer_glyph_uv_ready={}\n", .{fixture.quad_stats.ready()});
-    try writer.print("renderer_glyph_quad_count={d}\n", .{fixture.quad_stats.glyph_count});
     // 제품 frame 통계는 renderer가 소유한 공유 직렬화기로 남긴다. glyph text smoke와 같은
     // "renderer_" schema를 쓰므로 두 artifact의 키가 어긋나지 않는다.
     try renderer.writeRenderFrameStats(writer, "renderer_", fixture.stats);
@@ -172,7 +170,6 @@ const SmokeFixture = struct {
     // 제품 frame 통계는 renderer가 소유한 공유 타입으로 들고, native 입력(size, cells)과
     // 진단 통계를 한 struct에 모은다. shaper는 어떤 shaper로 frame을 준비했는지의 라벨이다.
     stats: renderer.RenderFrameStats,
-    quad_stats: renderer.GlyphQuadFrameStats,
     shaper: []const u8 = renderer_probe_shaper,
 
     fn deinit(self: *SmokeFixture, allocator: std.mem.Allocator) void {
@@ -183,7 +180,7 @@ const SmokeFixture = struct {
 
 fn buildSmokeFixture(allocator: std.mem.Allocator) !SmokeFixture {
     // 아직 glyph rasterizer가 없으므로, native bridge는 셀 사각형 placeholder를 그린다.
-    // 대신 입력 출처를 RendererState -> GlyphFrame까지 올린다. 이렇게 해야 Metal smoke가
+    // 대신 입력 출처를 RendererState -> RenderFrame/GlyphQuadFrame까지 올린다. 이렇게 해야 Metal smoke가
     // DrawList 직행 demo로 굳지 않고, backend가 제품 renderer frame 경계에서 받은 slot
     // 단위 데이터를 소비한다는 사실을 artifact로 남길 수 있다.
     var core = try terminal.TerminalCore.init(allocator, .{ .cols = 24, .rows = 6 });
@@ -198,20 +195,13 @@ fn buildSmokeFixture(allocator: std.mem.Allocator) !SmokeFixture {
     var frame = try state.buildFrame(allocator, core.snapshot(), renderer.FakeFontBackend{});
     defer frame.deinit(allocator);
 
-    var quad_frame = try renderer.buildGlyphQuadFrame(allocator, frame.glyph_frame, .{
-        .width_px = state.atlas.config.atlas_width_px,
-        .height_px = state.atlas.config.atlas_height_px,
-    });
-    defer quad_frame.deinit(allocator);
-
-    const native_cells = try buildNativeCellsFromGlyphQuads(allocator, quad_frame);
+    const native_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame);
     errdefer allocator.free(native_cells);
 
     return .{
         .size = frame.glyph_frame.size,
         .cells = native_cells,
         .stats = renderer.renderFrameStats(frame, state.atlas.entryCount()),
-        .quad_stats = quad_frame.stats,
     };
 }
 
@@ -301,15 +291,14 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
             .draw_cells = 48,
             .draw_overlays = 1,
             .glyph_count = 48,
+            .glyph_quad_count = 48,
+            .glyph_uv_count = 48,
+            .glyph_uv_ready = true,
             .upload_count = 8,
             .reused_count = 40,
             .fallback_count = 0,
             .replacement_count = 0,
             .atlas_entries = 8,
-        },
-        .quad_stats = .{
-            .glyph_count = 48,
-            .uv_count = 48,
         },
     };
     const summary = try renderSummary(std.testing.allocator, 1500, deriveSmokeStatus(native), native, fixture);
@@ -442,8 +431,9 @@ test "Metal smoke fixture comes from RendererState glyph frame" {
     // 사람이 보기 쉬운 신호를 위해 공백 cell을 native bridge로 넘기지 않는다.
     try std.testing.expect(fixture.stats.upload_count > 0);
     try std.testing.expect(fixture.stats.atlas_entries > 0);
-    try std.testing.expect(fixture.quad_stats.ready());
-    try std.testing.expectEqual(fixture.stats.glyph_count, fixture.quad_stats.glyph_count);
+    try std.testing.expect(fixture.stats.glyph_uv_ready);
+    try std.testing.expectEqual(fixture.stats.glyph_count, fixture.stats.glyph_quad_count);
+    try std.testing.expectEqual(fixture.stats.glyph_count, fixture.stats.glyph_uv_count);
     // 모든 glyph는 upload 아니면 reuse 둘 중 하나라, 이 합이 glyph_count와 맞아야 probe
     // 통계가 backend로 일관되게 흘러간다(slot 재사용 회귀를 통계 단계에서 잡는다).
     try std.testing.expectEqual(fixture.stats.glyph_count, fixture.stats.upload_count + fixture.stats.reused_count);

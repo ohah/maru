@@ -418,8 +418,8 @@ void maru_macos_metal_smoke_run(
     result->readback_failures = 0;
 
     @autoreleasepool {
-        // 이 bridge는 "Metal glyph renderer 완성"이 아니라 첫 GlyphFrame 소비 smoke다.
-        // Zig 쪽이 TerminalCore/RendererState/GlyphFrame/artifact 계약을 소유하고,
+        // 이 bridge는 "Metal glyph renderer 완성"이 아니라 첫 RenderFrame/GlyphQuadFrame 소비 smoke다.
+        // Zig 쪽이 TerminalCore/RendererState/RenderFrame/artifact 계약을 소유하고,
         // 여기서는 그 slot-backed 셀 배열을 실제 CAMetalLayer 위에 placeholder quad로
         // present할 수 있는지 확인한다.
         [NSApplication sharedApplication];

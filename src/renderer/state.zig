@@ -3,6 +3,7 @@ const draw_list = @import("draw_list.zig");
 const glyph_atlas = @import("glyph_atlas.zig");
 const glyph_frame = @import("glyph_frame.zig");
 const glyph_layout = @import("glyph_layout.zig");
+const glyph_quads = @import("glyph_quads.zig");
 const terminal = @import("../terminal.zig");
 const types = @import("types.zig");
 
@@ -51,10 +52,17 @@ pub const RendererState = struct {
         var frame = try glyph_frame.prepareGlyphFrame(allocator, glyphs, &self.atlas);
         errdefer frame.deinit(allocator);
 
+        var quad_frame = try glyph_quads.buildGlyphQuadFrame(allocator, frame, .{
+            .width_px = self.atlas.config.atlas_width_px,
+            .height_px = self.atlas.config.atlas_height_px,
+        });
+        errdefer quad_frame.deinit(allocator);
+
         return .{
             .backend = self.backend,
             .draw_list = list,
             .glyph_frame = frame,
+            .glyph_quad_frame = quad_frame,
         };
     }
 };
@@ -91,6 +99,7 @@ test "renderer state builds glyph frame and reuses atlas across frames" {
     try std.testing.expectEqual(types.Backend.metal, first.backend);
     try std.testing.expectEqual(@as(usize, 3), first.draw_list.cells.len);
     try std.testing.expectEqual(@as(usize, 3), first.glyph_frame.stats.glyph_count);
+    try std.testing.expect(first.glyph_quad_frame.stats.ready());
     try std.testing.expect(first.glyph_frame.stats.upload_count > 0);
 
     // 같은 glyph를 다음 frame에서 다시 그리면 atlas slot을 재사용해야 한다.
@@ -101,6 +110,8 @@ test "renderer state builds glyph frame and reuses atlas across frames" {
     defer second.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 3), second.glyph_frame.stats.glyph_count);
+    try std.testing.expectEqual(second.glyph_frame.stats.glyph_count, second.glyph_quad_frame.stats.glyph_count);
+    try std.testing.expect(second.glyph_quad_frame.stats.ready());
     try std.testing.expectEqual(@as(usize, 0), second.glyph_frame.stats.upload_count);
     try std.testing.expectEqual(@as(usize, 3), second.glyph_frame.stats.reused_count);
     try std.testing.expect(state.atlas.stats.hits > 0);

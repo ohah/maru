@@ -1,6 +1,7 @@
 const std = @import("std");
 const draw_list = @import("draw_list.zig");
 const glyph_frame = @import("glyph_frame.zig");
+const glyph_quads = @import("glyph_quads.zig");
 
 pub const Backend = enum {
     // 미래 backend는 구현을 시작하기 전까지 public enum에 넣지 않는다.
@@ -13,11 +14,14 @@ pub const RenderFrame = struct {
     backend: Backend,
     draw_list: draw_list.DrawList,
     glyph_frame: glyph_frame.GlyphFrame,
+    glyph_quad_frame: glyph_quads.GlyphQuadFrame,
 
-    // RenderFrame은 backend가 그릴 DrawList와 glyph 준비 결과를 함께 소유한다.
-    // DrawList만 들고 있으면 Metal backend가 font/layout/atlas 정책을 다시 해석해야
-    // 하므로, 제품 frame 경계에서 GlyphFrame까지 준비해 둔다.
+    // RenderFrame은 backend가 그릴 DrawList, atlas slot 준비 결과, shader UV 입력을
+    // 함께 소유한다. Metal backend가 각자 GlyphFrame -> GlyphQuadFrame 변환을 다시
+    // 호출하면 texture bounds/UV 정책이 smoke마다 갈라지므로 제품 frame 경계에서
+    // GlyphQuadFrame까지 준비해 둔다.
     pub fn deinit(self: *RenderFrame, allocator: std.mem.Allocator) void {
+        self.glyph_quad_frame.deinit(allocator);
         self.glyph_frame.deinit(allocator);
         self.draw_list.deinit(allocator);
         self.* = undefined;
@@ -30,11 +34,18 @@ pub const RenderFrame = struct {
     // 재구현하다 서로 어긋나지 않게 한다.
     pub fn glyphFrameConsistent(self: RenderFrame) bool {
         const frame = self.glyph_frame;
+        const quads = self.glyph_quad_frame;
         return frame.size.cols == self.draw_list.size.cols and
             frame.size.rows == self.draw_list.size.rows and
             frame.stats.glyph_count == frame.glyphs.len and
             frame.stats.upload_count == frame.uploads.len and
-            frame.stats.upload_count + frame.stats.reused_count == frame.glyphs.len;
+            frame.stats.upload_count + frame.stats.reused_count == frame.glyphs.len and
+            quads.size.cols == frame.size.cols and
+            quads.size.rows == frame.size.rows and
+            quads.stats.glyph_count == frame.stats.glyph_count and
+            quads.stats.uv_count == quads.glyphs.len and
+            quads.overlays.len == frame.overlays.len and
+            (quads.stats.glyph_count == 0 or quads.stats.ready());
     }
 };
 
@@ -54,6 +65,8 @@ test "render frame owns and frees draw and glyph frame data" {
     const prepared = try std.testing.allocator.alloc(glyph_frame.PreparedGlyph, 0);
     const frame_overlays = try std.testing.allocator.alloc(draw_list.DrawOverlay, 0);
     const uploads = try std.testing.allocator.alloc(glyph_frame.GlyphUpload, 0);
+    const quads = try std.testing.allocator.alloc(glyph_quads.GlyphQuad, 0);
+    const quad_overlays = try std.testing.allocator.alloc(draw_list.DrawOverlay, 0);
     var frame: RenderFrame = .{
         .backend = initialBackendForMacOS(),
         .draw_list = .{
@@ -72,6 +85,14 @@ test "render frame owns and frees draw and glyph frame data" {
             .uploads = uploads,
             .stats = .{},
         },
+        .glyph_quad_frame = .{
+            .size = .{ .cols = 2, .rows = 1 },
+            .cursor = .{},
+            .dirty = .{ .start_row = 0, .end_row = 0 },
+            .glyphs = quads,
+            .overlays = quad_overlays,
+            .stats = .{},
+        },
     };
     frame.deinit(std.testing.allocator);
 }
@@ -86,6 +107,10 @@ const TestRenderFrameShape = struct {
     glyph_count: usize = 0,
     upload_count: usize = 0,
     reused_count: usize = 0,
+    quad_len: usize = 0,
+    quad_glyph_count: usize = 0,
+    quad_uv_count: usize = 0,
+    quad_overlay_len: usize = 0,
 };
 
 fn makeTestRenderFrame(
@@ -105,6 +130,10 @@ fn makeTestRenderFrame(
     errdefer allocator.free(frame_overlays);
     const uploads = try allocator.alloc(glyph_frame.GlyphUpload, shape.upload_len);
     errdefer allocator.free(uploads);
+    const quads = try allocator.alloc(glyph_quads.GlyphQuad, shape.quad_len);
+    errdefer allocator.free(quads);
+    const quad_overlays = try allocator.alloc(draw_list.DrawOverlay, shape.quad_overlay_len);
+    errdefer allocator.free(quad_overlays);
 
     return .{
         .backend = initialBackendForMacOS(),
@@ -128,6 +157,17 @@ fn makeTestRenderFrame(
                 .reused_count = shape.reused_count,
             },
         },
+        .glyph_quad_frame = .{
+            .size = .{ .cols = shape.glyph_cols, .rows = shape.glyph_rows },
+            .cursor = .{},
+            .dirty = null,
+            .glyphs = quads,
+            .overlays = quad_overlays,
+            .stats = .{
+                .glyph_count = shape.quad_glyph_count,
+                .uv_count = shape.quad_uv_count,
+            },
+        },
     };
 }
 
@@ -142,6 +182,9 @@ test "render frame consistency accepts matching glyph frame metadata" {
         .glyph_count = 2,
         .upload_count = 1,
         .reused_count = 1,
+        .quad_len = 2,
+        .quad_glyph_count = 2,
+        .quad_uv_count = 2,
     });
     defer non_empty.deinit(std.testing.allocator);
     try std.testing.expect(non_empty.glyphFrameConsistent());
@@ -164,6 +207,9 @@ test "render frame consistency rejects size and count mismatches" {
         .glyph_count = 2,
         .upload_count = 1,
         .reused_count = 0,
+        .quad_len = 2,
+        .quad_glyph_count = 2,
+        .quad_uv_count = 2,
     });
     defer glyph_count_mismatch.deinit(std.testing.allocator);
     try std.testing.expect(!glyph_count_mismatch.glyphFrameConsistent());
@@ -174,6 +220,9 @@ test "render frame consistency rejects size and count mismatches" {
         .glyph_count = 1,
         .upload_count = 1,
         .reused_count = 0,
+        .quad_len = 1,
+        .quad_glyph_count = 1,
+        .quad_uv_count = 1,
     });
     defer upload_count_mismatch.deinit(std.testing.allocator);
     try std.testing.expect(!upload_count_mismatch.glyphFrameConsistent());
@@ -184,7 +233,29 @@ test "render frame consistency rejects size and count mismatches" {
         .glyph_count = 2,
         .upload_count = 1,
         .reused_count = 0,
+        .quad_len = 2,
+        .quad_glyph_count = 2,
+        .quad_uv_count = 2,
     });
     defer accounting_mismatch.deinit(std.testing.allocator);
     try std.testing.expect(!accounting_mismatch.glyphFrameConsistent());
+}
+
+test "render frame consistency rejects incomplete glyph quad uv data" {
+    // GlyphQuadFrame이 제품 RenderFrame 안으로 들어오면 UV 준비 실패도 frame 준비 실패다.
+    // atlas bounds 밖 slot을 개별 skip하더라도 그 누락이 consistent=true로 숨으면 Metal
+    // backend가 일부 glyph가 빠진 frame을 정상 입력처럼 그릴 수 있다.
+    var missing_uv = try makeTestRenderFrame(std.testing.allocator, .{
+        .glyph_len = 2,
+        .upload_len = 1,
+        .glyph_count = 2,
+        .upload_count = 1,
+        .reused_count = 1,
+        .quad_len = 1,
+        .quad_glyph_count = 2,
+        .quad_uv_count = 1,
+    });
+    defer missing_uv.deinit(std.testing.allocator);
+
+    try std.testing.expect(!missing_uv.glyphFrameConsistent());
 }

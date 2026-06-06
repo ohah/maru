@@ -25,6 +25,7 @@ pub const GlyphAtlas = glyph_atlas.GlyphAtlas;
 pub const GlyphAtlasConfig = glyph_atlas.GlyphAtlasConfig;
 pub const FontId = glyph_layout.FontId;
 pub const GlyphFrame = glyph_frame.GlyphFrame;
+pub const GlyphQuadError = glyph_quads.GlyphQuadError;
 pub const GlyphFrameStats = glyph_frame.GlyphFrameStats;
 pub const GlyphQuad = glyph_quads.GlyphQuad;
 pub const GlyphQuadFrame = glyph_quads.GlyphQuadFrame;

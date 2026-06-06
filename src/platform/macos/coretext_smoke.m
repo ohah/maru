@@ -9,6 +9,7 @@
 typedef struct {
     int32_t status;
     uint32_t primary_font_found;
+    uint32_t requested_font_matched;
     uint32_t line_created;
     uint32_t run_count;
     uint32_t glyph_count;
@@ -47,6 +48,7 @@ enum {
 static void maru_clear_result(MaruCoreTextSmokeResult *result) {
     result->status = -1;
     result->primary_font_found = 0;
+    result->requested_font_matched = 0;
     result->line_created = 0;
     result->run_count = 0;
     result->glyph_count = 0;
@@ -98,15 +100,104 @@ static CFStringRef maru_create_probe_string(void) {
     );
 }
 
-static CTFontRef maru_create_primary_font(void) {
-    // UserFixedPitch는 macOS 사용자가 기대하는 기본 고정폭 계열에 가장 가깝다.
-    // 만약 OS 정책상 nil이 오면 Menlo로 한 번 더 fallback해서 smoke가 "폰트 없음"이
-    // 아니라 "CoreText 자체 접근 실패"에 가까운 상황에서만 실패하게 한다.
-    CTFontRef font = CTFontCreateUIFontForLanguage(kCTFontUIFontUserFixedPitch, 14.0, NULL);
-    if (font != NULL) {
-        return font;
+static CFStringRef maru_create_font_name(const char *font_family, size_t font_family_len) {
+    if (font_family == NULL || font_family_len == 0) {
+        return NULL;
     }
-    return CTFontCreateWithName(CFSTR("Menlo-Regular"), 14.0, NULL);
+    return CFStringCreateWithBytes(
+        kCFAllocatorDefault,
+        (const UInt8 *)font_family,
+        (CFIndex)font_family_len,
+        kCFStringEncodingUTF8,
+        false
+    );
+}
+
+static bool maru_cfstring_equals_requested(CFStringRef actual, CFStringRef requested) {
+    if (actual == NULL || requested == NULL) {
+        return false;
+    }
+    return CFStringCompare(actual, requested, kCFCompareCaseInsensitive) == kCFCompareEqualTo;
+}
+
+static bool maru_font_matches_requested(CTFontRef font, CFStringRef requested_name) {
+    if (font == NULL || requested_name == NULL) {
+        return false;
+    }
+
+    bool matched = false;
+
+    CFStringRef family_name = CTFontCopyFamilyName(font);
+    if (maru_cfstring_equals_requested(family_name, requested_name)) {
+        matched = true;
+    }
+    if (family_name != NULL) {
+        CFRelease(family_name);
+    }
+
+    if (matched) {
+        return true;
+    }
+
+    CFStringRef postscript_name = CTFontCopyPostScriptName(font);
+    if (maru_cfstring_equals_requested(postscript_name, requested_name)) {
+        matched = true;
+    }
+    if (postscript_name != NULL) {
+        CFRelease(postscript_name);
+    }
+
+    if (matched) {
+        return true;
+    }
+
+    CFStringRef full_name = CTFontCopyFullName(font);
+    if (maru_cfstring_equals_requested(full_name, requested_name)) {
+        matched = true;
+    }
+    if (full_name != NULL) {
+        CFRelease(full_name);
+    }
+
+    return matched;
+}
+
+static CTFontRef maru_create_primary_font(
+    const char *font_family,
+    size_t font_family_len,
+    double font_size,
+    uint32_t *requested_font_matched
+) {
+    // Zig의 ResolvedAppearance가 빈 family와 잘못된 크기를 먼저 거른다. 이 native smoke는
+    // 그 resolved 요청을 CoreText 경계까지 전달하는지 보는 단계다. CoreText는 요청 font가
+    // 없어도 Helvetica 같은 대체 font를 돌려줄 수 있으므로 실제 이름/family까지 맞는지
+    // 확인한다. 맞지 않으면 그 대체 font를 primary로 쓰지 않고 macOS system monospace로
+    // 명시적으로 물러난다.
+    CFStringRef requested_name = maru_create_font_name(font_family, font_family_len);
+    if (requested_name != NULL) {
+        CTFontRef requested_font = CTFontCreateWithName(requested_name, (CGFloat)font_size, NULL);
+        if (requested_font != NULL) {
+            if (maru_font_matches_requested(requested_font, requested_name)) {
+                if (requested_font_matched != NULL) {
+                    *requested_font_matched = 1;
+                }
+                CFRelease(requested_name);
+                return requested_font;
+            }
+            CFRelease(requested_font);
+        }
+        CFRelease(requested_name);
+    }
+
+    CTFontRef system_font = CTFontCreateUIFontForLanguage(
+        kCTFontUIFontUserFixedPitch,
+        (CGFloat)font_size,
+        NULL
+    );
+    if (system_font != NULL) {
+        return system_font;
+    }
+    return CTFontCreateWithName(CFSTR("Menlo-Regular"), (CGFloat)font_size, NULL);
 }
 
 static uint32_t maru_u32_from_cfindex(CFIndex value) {
@@ -259,6 +350,9 @@ static void maru_rasterize_line_into_cpu_bitmap(MaruCoreTextSmokeResult *result,
 }
 
 void maru_macos_coretext_smoke_run(
+    const char *requested_font_family,
+    size_t requested_font_family_len,
+    double requested_font_size,
     MaruCoreTextSmokeResult *result,
     MaruCoreTextGlyphRecord *glyph_records,
     size_t glyph_record_capacity
@@ -269,7 +363,12 @@ void maru_macos_coretext_smoke_run(
         }
         maru_clear_result(result);
 
-        CTFontRef primary_font = maru_create_primary_font();
+        CTFontRef primary_font = maru_create_primary_font(
+            requested_font_family,
+            requested_font_family_len,
+            requested_font_size,
+            &result->requested_font_matched
+        );
         if (primary_font == NULL) {
             result->status = 1;
             return;

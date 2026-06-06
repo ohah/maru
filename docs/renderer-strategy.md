@@ -161,14 +161,14 @@ dirty region 범위:
 - browser/Wasm build를 초기 성공 기준에 넣지 않는다.
 - WebGL fallback을 넣지 않는다.
 - 고급 glyph atlas, ligature shaping, subpixel positioning을 먼저 최적화하지 않는다.
-- 설정 파일 로딩이나 설정 UI를 먼저 만들지 않는다. 다만 raw font/theme/cursor config를 renderer가 소비할 수 있는 `ResolvedAppearance`로 검증하는 계약은 Metal 연결 전에 둔다.
+- 설정 파일 로딩이나 설정 UI를 먼저 만들지 않는다. 다만 raw font/theme/cursor config를 renderer가 소비할 수 있는 `ResolvedAppearance`로 검증하고, 그 font 요청이 macOS CoreText smoke bridge까지 들어가는 경계는 Metal 제품 renderer 전에 둔다.
 
 ## 초기 구현 순서
 
 1. `RenderSnapshot`을 GPU와 무관한 domain data로 유지한다.
 2. `RenderSnapshot -> DrawList` 변환을 먼저 테스트한다.
 3. `DrawList -> GlyphRunList -> GlyphFrame` 변환을 테스트한다. 이 단계는 GPU 없이 atlas slot reuse, upload 후보, eviction 관측, cursor/underline overlay 보존을 증명한다.
-4. `Config -> ResolvedAppearance` 계약을 테스트한다. font family/size, theme colors, cursor shape/blink가 깨진 값이면 backend로 들어가기 전에 실패해야 한다.
+4. `Config -> ResolvedAppearance` 계약을 테스트한다. font family/size, theme colors, cursor shape/blink가 깨진 값이면 backend로 들어가기 전에 실패해야 한다. 이어서 default resolved font 요청이 CoreText smoke bridge와 glyph cache key 후보까지 전달되는지 확인한다.
 5. `DrawList`/`GlyphFrame`을 Metal backend가 소비하는 형태로 만든다. cursor/underline은 cell overlay로 두고, cursor 이동(old/new cell)이 dirty 범위에 들어오도록 domain 계약을 유지한다.
 6. macOS app smoke에서 screenshot artifact를 남긴다.
 
@@ -185,6 +185,7 @@ dirty region 범위:
 - GPU 없는 `GlyphCacheKey -> AtlasSlot` cache/invalidation test.
 - GPU 없는 `GlyphRunList -> GlyphFrame` test. 같은 glyph의 atlas slot reuse, upload 후보, eviction 카운터, overlay 보존을 확인한다.
 - GPU 없는 `Config -> ResolvedAppearance` test. `#RRGGBB` 색상, font size, cursor shape/blink를 renderer 입력 전 단계에서 검증한다.
+- macOS CoreText smoke summary test. default `ResolvedAppearance`의 font family/size가 native CoreText bridge와 glyph cache key 후보에 연결되는지 검증한다.
 - renderer가 PTY, parser, live platform handle을 import하지 않는 boundary test.
 
 opt-in으로 둘 것:

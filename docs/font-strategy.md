@@ -243,7 +243,7 @@ dirty region의 장기 목표는 cell 단위지만, 현재 `TerminalCore`/snapsh
 
 macOS opt-in으로 둘 것:
 
-- CoreText로 실제 font family를 resolve하는 smoke.
+- `ResolvedAppearance`의 font family/size 요청이 CoreText smoke bridge까지 전달되고, CoreText로 실제 font family를 resolve하는 smoke.
 - CoreText가 ASCII/CJK/emoji probe를 glyph run으로 shape하고, 각 probe 구간이 `.notdef`가 아닌 glyph로 매핑되는지 확인하는 smoke.
 - CoreText glyph record가 Maru `GlyphAtlas` cache key 후보로 들어가는 smoke.
 - 같은 `CTLine`을 CPU bitmap에 그려 non-clear pixel이 생기는 smoke.
@@ -256,7 +256,7 @@ macOS opt-in으로 둘 것:
 
 CoreText/font/raster/upload smoke들은 실제 화면 glyph draw를 증명하지 않는다. glyph text smoke부터는 fixture texture가 실제 AppKit/CAMetalLayer 창에서 shader sampling되어 glyph ink로 보이는지까지 증명한다. 다만 이것도 제품 terminal renderer는 아니다. 의도는 font resolve, shaping, rasterization, GPU upload, shader sampling, 제품 atlas/layout 실패를 서로 다른 단계로 분리하는 것이다.
 
-기본 CI에서 pixel-perfect font test를 강제하지 않는 이유는 font stack이 OS 업데이트와 설치 폰트에 영향을 받기 때문이다. 대신 기본 CI는 Maru가 만든 domain data와 cache/invalidation 계약을 검증하고, 실제 픽셀은 opt-in artifact로 추적한다. macOS CoreText smoke는 CoreText가 준 glyph id/font id 후보가 `GlyphFrame` 준비 계약까지 들어가는지와 CPU bitmap까지 나오는지 확인한다. glyph texture smoke는 그 CPU bitmap이 Metal texture에 byte-preserving upload/readback되는지 확인한다. glyph text smoke는 같은 fixture texture가 실제 AppKit/CAMetalLayer 창에서 shader sampling되어 glyph ink pixel로 보이는지 확인하고, PPM screenshot artifact도 남긴다. 제품 atlas slot, terminal cell layout, 제품 renderer screenshot artifact는 그 다음 단계에서 별도로 확인한다.
+기본 CI에서 pixel-perfect font test를 강제하지 않는 이유는 font stack이 OS 업데이트와 설치 폰트에 영향을 받기 때문이다. 대신 기본 CI는 Maru가 만든 domain data와 cache/invalidation 계약을 검증하고, 실제 픽셀은 opt-in artifact로 추적한다. macOS CoreText smoke는 `ResolvedAppearance`의 font 요청이 native bridge까지 전달되는지, 요청 font가 실제 이름/family와 일치했는지를 `requested_font_matched` 진단값으로 남기는지, CoreText가 준 glyph id/font id 후보가 `GlyphFrame` 준비 계약까지 들어가는지, CPU bitmap까지 나오는지 확인한다. 이 smoke는 설치 폰트 품질이나 설정 UI를 증명하지 않는다. glyph texture smoke는 그 CPU bitmap이 Metal texture에 byte-preserving upload/readback되는지 확인한다. glyph text smoke는 같은 fixture texture가 실제 AppKit/CAMetalLayer 창에서 shader sampling되어 glyph ink pixel로 보이는지 확인하고, PPM screenshot artifact도 남긴다. 제품 atlas slot, terminal cell layout, 제품 renderer screenshot artifact는 그 다음 단계에서 별도로 확인한다.
 
 ## 관측 가능성
 
@@ -313,7 +313,6 @@ renderer가 붙은 뒤 다음 숫자를 성능 예산에 추가한다.
 
 다음은 코드 구현 전에 사용자와 다시 확인한다.
 
-- 기본 font family를 `JetBrains Mono`로 유지할지, system monospace로 바꿀지.
 - ligature를 v1 이후 어느 단계에서 다룰지.
 - emoji 품질 기준을 replacement 허용으로 둘지, color glyph 필수로 둘지.
 - ambiguous width(UAX#11 'A')를 1 cell 고정으로 둘지, 로케일/설정으로 2 cell을 허용할지.

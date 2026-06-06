@@ -4,6 +4,6 @@
 
 `theme.zig`는 아직 파일 parser가 아니라 raw config 타입을 둔다. 예를 들어 색상은 `"#101010"`처럼 사용자가 적은 문자열 그대로 보관한다.
 
-`appearance.zig`는 raw config를 검증된 `ResolvedAppearance`로 바꾼다. renderer와 platform backend는 가능하면 raw 문자열을 직접 해석하지 말고 resolved 값을 소비해야 한다. 그래야 잘못된 색상, 빈 폰트 이름, 잘못된 font size가 frame loop 안에서 늦게 터지지 않는다.
+`appearance.zig`는 raw config를 검증된 `ResolvedAppearance`로 바꾼다. renderer와 platform backend는 가능하면 raw 문자열을 직접 해석하지 말고 resolved 값을 소비해야 한다. 그래야 잘못된 색상, 빈 폰트 이름, 잘못된 font size가 frame loop 안에서 늦게 터지지 않는다. 현재 첫 platform 소비자는 macOS CoreText smoke다. 이 smoke는 default resolved font family/size가 native CoreText bridge까지 전달되는지만 확인하며, 설정 파일 로딩이나 runtime reload를 의미하지 않는다.
 
 현재는 설정 파일 로딩, 설정 UI, runtime reload를 구현하지 않는다. 이 폴더는 그 기능들이 들어올 때 같은 검증 계약을 재사용하기 위한 초기 경계다.

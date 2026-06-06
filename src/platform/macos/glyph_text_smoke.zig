@@ -181,8 +181,10 @@ const RendererFrameProbe = struct {
     // (어떤 shaper로, 어떤 font size/device scale로 준비했는지)만 따로 둔다.
     stats: renderer.RenderFrameStats,
     shaper: []const u8 = renderer_probe_shaper,
-    font_size_px: u16 = 0,
-    device_scale: u16 = 0,
+    // font_size/device_scale는 항상 호출자가 채운다(buildRendererFrameProbe는 text_config에서,
+    // 테스트 fixture는 명시값으로). default를 두면 0이 의미 있는 값처럼 보고될 수 있어 빼 둔다.
+    font_size_px: u16,
+    device_scale: u16,
 };
 
 fn deriveSmokeStatus(native: NativeGlyphTextSmokeResult) SmokeStatus {

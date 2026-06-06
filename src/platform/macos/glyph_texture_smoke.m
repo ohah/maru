@@ -323,7 +323,9 @@ static int maru_upload_and_readback_texture(
         : 7;
 }
 
-// result->status는 어느 단계에서 멈췄는지 summary(native_status)로 분리하기 위한 값이다:
+// result->status는 어느 단계에서 멈췄는지 summary(native_status/native_status_label)로
+// 분리하기 위한 값이다. 새 값을 추가하면 glyph_texture_smoke.zig의 nativeStatusLabel도
+// 같이 갱신해야 artifact와 native bridge가 같은 말을 한다:
 //   0  = 성공(raster + upload + readback + byte 일치)
 //   2  = CoreText/CoreGraphics CPU bitmap raster 실패(폰트/컨텍스트 생성 또는 0-ink)
 //   3  = Metal device 생성 실패(headless/GPU 없음)

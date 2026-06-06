@@ -12,6 +12,7 @@ RenderSnapshot
 -> TextLayout / FontResolver / TextShaper
 -> GlyphRunList
 -> GlyphAtlas
+-> GlyphFrame
 -> Metal backend
 ```
 
@@ -46,7 +47,7 @@ RenderSnapshot
 
 `Metal backend`:
 
-- `DrawList`와 atlas texture만 소비한다.
+- `GlyphFrame`과 atlas texture만 소비한다.
 - 문자열을 직접 shaping하거나 fallback을 찾지 않는다.
 
 ## v1 정책
@@ -60,6 +61,7 @@ v1에서 지원하는 것:
 - ASCII, 한글/CJK wide character, 기본 emoji fallback을 깨지지 않게 처리.
 - `RenderSnapshot -> DrawList` deterministic test.
 - fake font backend 기반 `DrawList -> GlyphRunList` deterministic test.
+- persistent `RendererState` 기반 `DrawList -> GlyphRunList -> GlyphFrame` deterministic test.
 - macOS opt-in screenshot/font/raster smoke artifact.
 
 v1에서 약속하지 않는 것:

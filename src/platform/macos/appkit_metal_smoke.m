@@ -8,10 +8,14 @@
 
 typedef struct {
     int32_t status;
+    uint32_t window_visible;
     uint32_t presented_frames;
     uint32_t drawable_failures;
     uint32_t requested_cells;
     uint32_t rendered_cells;
+    uint32_t readback_samples;
+    uint32_t readback_non_clear_pixels;
+    uint32_t readback_failures;
 } MaruMetalSmokeResult;
 
 typedef struct {
@@ -30,6 +34,13 @@ typedef struct {
     float b;
     float a;
 } MaruMetalSmokeVertex;
+
+typedef struct {
+    NSUInteger x;
+    NSUInteger y;
+} MaruMetalSmokeSample;
+
+static const NSUInteger maru_readback_stride = 256;
 
 // VertexIn은 host쪽 MaruMetalSmokeVertex(float 6개, 24바이트, tight-packed)와 같은
 // 메모리 레이아웃을 가져야 한다. MSL에서 float4는 16바이트 정렬이라 { float2; float4; }는
@@ -91,6 +102,102 @@ static void maru_cell_color(uint32_t codepoint, float *r, float *g, float *b) {
     *r = 0.20f + (float)(codepoint % 3u) * 0.10f;
     *g = 0.56f + (float)(codepoint % 5u) * 0.05f;
     *b = 0.78f;
+}
+
+static NSUInteger maru_clamp_pixel(double value, NSUInteger upper_bound) {
+    if (upper_bound == 0) {
+        return 0;
+    }
+    if (value <= 0.0) {
+        return 0;
+    }
+    double max_value = (double)(upper_bound - 1);
+    if (value >= max_value) {
+        return upper_bound - 1;
+    }
+    return (NSUInteger)value;
+}
+
+static MaruMetalSmokeSample *maru_build_cell_samples(
+    const MaruMetalSmokeCell *cells,
+    size_t cell_count,
+    uint16_t cols,
+    uint16_t rows,
+    NSUInteger texture_width,
+    NSUInteger texture_height,
+    size_t *sample_count
+) {
+    *sample_count = 0;
+    if (cells == NULL || cell_count == 0 || cols == 0 || rows == 0 ||
+        texture_width == 0 || texture_height == 0)
+    {
+        return NULL;
+    }
+
+    // smoke는 전체 화면 readback이 아니라 셀 중심 픽셀만 읽는다. fixture가 커져도
+    // GPU 검증 비용이 폭증하지 않게 앞쪽 셀 일부만 샘플링한다.
+    const size_t max_samples = 64;
+    const size_t count = cell_count < max_samples ? cell_count : max_samples;
+    MaruMetalSmokeSample *samples = calloc(count, sizeof(MaruMetalSmokeSample));
+    if (samples == NULL) {
+        return NULL;
+    }
+
+    const double grid_left = -0.92;
+    const double grid_top = 0.86;
+    const double grid_width = 1.84;
+    const double grid_height = 1.72;
+
+    for (size_t i = 0; i < count; i++) {
+        const MaruMetalSmokeCell cell = cells[i];
+        const double cell_width = (double)(cell.width == 0 ? 1 : cell.width);
+        const double left = grid_left + ((double)cell.col / (double)cols) * grid_width;
+        const double right = grid_left + (((double)cell.col + cell_width) / (double)cols) * grid_width;
+        const double top = grid_top - ((double)cell.row / (double)rows) * grid_height;
+        const double bottom = grid_top - (((double)cell.row + 1.0) / (double)rows) * grid_height;
+        const double center_x = (left + right) * 0.5;
+        const double center_y = (top + bottom) * 0.5;
+
+        samples[i].x = maru_clamp_pixel(((center_x + 1.0) * 0.5) * (double)texture_width, texture_width);
+        samples[i].y = maru_clamp_pixel(((1.0 - center_y) * 0.5) * (double)texture_height, texture_height);
+    }
+
+    *sample_count = count;
+    return samples;
+}
+
+static BOOL maru_pixel_is_non_clear(const uint8_t *pixel) {
+    // BGRA8Unorm clear color는 MTLClearColorMake(0.06, 0.08, 0.12, 1.0)이다.
+    // GPU의 float->unorm 반올림 차이를 감안해 작은 허용 오차를 둔다. placeholder
+    // 셀 색은 clear보다 훨씬 밝아서 이 기준을 안정적으로 넘는다.
+    const int expected_b = 31;
+    const int expected_g = 20;
+    const int expected_r = 15;
+    const int expected_a = 255;
+    const int tolerance = 8;
+    return abs((int)pixel[0] - expected_b) > tolerance ||
+        abs((int)pixel[1] - expected_g) > tolerance ||
+        abs((int)pixel[2] - expected_r) > tolerance ||
+        abs((int)pixel[3] - expected_a) > tolerance;
+}
+
+static uint32_t maru_count_non_clear_readback_pixels(
+    id<MTLBuffer> readback_buffer,
+    size_t sample_count
+) {
+    const uint8_t *bytes = (const uint8_t *)[readback_buffer contents];
+    if (bytes == NULL) {
+        return 0;
+    }
+
+    uint32_t non_clear = 0;
+    for (size_t i = 0; i < sample_count; i++) {
+        const uint8_t *pixel = bytes + (i * maru_readback_stride);
+        if (maru_pixel_is_non_clear(pixel)) {
+            non_clear += 1;
+        }
+    }
+    return non_clear;
 }
 
 static MaruMetalSmokeVertex *maru_build_cell_vertices(
@@ -209,12 +316,60 @@ static BOOL maru_draw_cell_frame(
         return NO;
     }
 
+    size_t sample_count = 0;
+    MaruMetalSmokeSample *samples = maru_build_cell_samples(
+        cells,
+        cell_count,
+        cols,
+        rows,
+        drawable.texture.width,
+        drawable.texture.height,
+        &sample_count
+    );
+    if (samples == NULL || sample_count == 0) {
+        [encoder endEncoding];
+        free(samples);
+        result->readback_failures += 1;
+        return NO;
+    }
+
+    id<MTLBuffer> readback_buffer = [layer.device
+        newBufferWithLength:sample_count * maru_readback_stride
+                    options:MTLResourceStorageModeShared];
+    if (readback_buffer == nil) {
+        [encoder endEncoding];
+        free(samples);
+        result->readback_failures += 1;
+        return NO;
+    }
+
     [encoder setRenderPipelineState:cell_pipeline];
     [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:vertex_count];
     [encoder endEncoding];
+
+    id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+    if (blit == nil) {
+        free(samples);
+        result->readback_failures += 1;
+        return NO;
+    }
+    for (size_t i = 0; i < sample_count; i++) {
+        [blit copyFromTexture:drawable.texture
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(samples[i].x, samples[i].y, 0)
+                   sourceSize:MTLSizeMake(1, 1, 1)
+                     toBuffer:readback_buffer
+            destinationOffset:i * maru_readback_stride
+       destinationBytesPerRow:maru_readback_stride
+     destinationBytesPerImage:maru_readback_stride];
+    }
+    [blit endEncoding];
+    free(samples);
+
     [command_buffer presentDrawable:drawable];
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
@@ -222,6 +377,11 @@ static BOOL maru_draw_cell_frame(
     // requested_cells와 같은 포화 규칙을 써야 status==0 비교(rendered==requested)가
     // cell_count 좁힘 방식 차이로 어긋나지 않는다.
     result->rendered_cells = (cell_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)cell_count;
+    result->readback_samples = (sample_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)sample_count;
+    result->readback_non_clear_pixels = maru_count_non_clear_readback_pixels(
+        readback_buffer,
+        sample_count
+    );
     return YES;
 }
 
@@ -234,10 +394,14 @@ void maru_macos_metal_smoke_run(
     MaruMetalSmokeResult *result
 ) {
     result->status = -1;
+    result->window_visible = 0;
     result->presented_frames = 0;
     result->drawable_failures = 0;
     result->requested_cells = (cell_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)cell_count;
     result->rendered_cells = 0;
+    result->readback_samples = 0;
+    result->readback_non_clear_pixels = 0;
+    result->readback_failures = 0;
 
     @autoreleasepool {
         // 이 bridge는 "Metal glyph renderer 완성"이 아니라 첫 DrawList 소비 smoke다.
@@ -291,7 +455,9 @@ void maru_macos_metal_smoke_run(
         CAMetalLayer *metal_layer = [CAMetalLayer layer];
         metal_layer.device = device;
         metal_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        metal_layer.framebufferOnly = YES;
+        // 이 smoke는 drawable의 셀 중심 픽셀을 blit-readback해야 한다. framebufferOnly=YES는
+        // render target 전용 최적화라 readback 검증 신호를 만들 수 없으므로 smoke에서만 끈다.
+        metal_layer.framebufferOnly = NO;
         metal_layer.contentsScale = window.backingScaleFactor;
         metal_layer.frame = content.bounds;
         metal_layer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
@@ -325,8 +491,8 @@ void maru_macos_metal_smoke_run(
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
 
         // window smoke와 마찬가지로 직접 짧은 event pump를 돌린다. 매 루프마다
-        // drawableSize를 최신 backing scale과 view bounds에 맞춰 갱신하고 clear
-        // frame을 present해, "창은 뜨지만 Metal drawable은 못 얻는" 오탐을 막는다.
+        // drawableSize를 최신 backing scale과 view bounds에 맞춰 갱신하고 cell
+        // frame을 present/readback해, "창은 뜨지만 셀이 안 그려지는" 오탐을 막는다.
         do {
             @autoreleasepool {
                 maru_pump_app_once();
@@ -353,6 +519,7 @@ void maru_macos_metal_smoke_run(
         // window smoke와 같은 기준으로 실제 NSWindow visibility를 함께 확인해야
         // headless/activation 실패에서 visible_ui=true 오탐을 막을 수 있다.
         BOOL became_visible = [window isVisible];
+        result->window_visible = became_visible ? 1 : 0;
         [window orderOut:nil];
 
         if (!became_visible) {
@@ -360,8 +527,17 @@ void maru_macos_metal_smoke_run(
             return;
         }
 
-        result->status = (result->presented_frames > 0 && result->rendered_cells == result->requested_cells)
-            ? 0
-            : 6;
+        if (result->presented_frames == 0 || result->rendered_cells != result->requested_cells) {
+            result->status = 6;
+            return;
+        }
+        if (result->readback_samples == 0 || result->readback_non_clear_pixels == 0 ||
+            result->readback_failures > 0)
+        {
+            result->status = 9;
+            return;
+        }
+
+        result->status = 0;
     }
 }

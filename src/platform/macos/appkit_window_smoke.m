@@ -64,7 +64,17 @@ int maru_macos_window_smoke_run(uint32_t duration_ms) {
             }
         } while ([[NSDate date] compare:deadline] == NSOrderedAscending);
 
+        // makeKeyAndOrderFront만으로는 "창이 실제로 화면에 올라왔다"를 보장하지 못한다.
+        // window server 접근이 막혔거나(automation/세션 제약) 다른 앱이 activation을
+        // 거부하면 alloc은 성공해도 창은 끝내 안 보일 수 있다. 그 경우 status 0을
+        // 돌려주면 screens==0 가드(return 2)가 막으려던 것과 같은 visible_ui=true
+        // 오탐이 난다. orderOut 전에 isVisible로 확인해 별도 코드(3)로 구분한다.
+        BOOL became_visible = [window isVisible];
         [window orderOut:nil];
+
+        if (!became_visible) {
+            return 3;
+        }
     }
 
     return 0;

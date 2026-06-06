@@ -148,9 +148,10 @@ test "render frame consistency accepts matching glyph frame metadata" {
 }
 
 test "render frame consistency rejects size and count mismatches" {
-    // app host와 visible smoke가 이 helper를 공유하므로, false로 닫혀야 하는 모양을
-    // renderer 레이어에서 직접 고정한다. 그렇지 않으면 summary가 준비되지 않은 frame을
-    // `glyph_frame_ready=true`나 `renderer_frame_prepared=true`로 보고할 수 있다.
+    // app host와 visible smoke가 이 helper를 공유하므로(모두 writeRenderFrameStats로
+    // renderer_frame_prepared를 낸다), false로 닫혀야 하는 모양을 renderer 레이어에서 직접
+    // 고정한다. 그렇지 않으면 summary가 준비되지 않은 frame을 renderer_frame_prepared=true로
+    // 보고할 수 있다.
     var size_mismatch = try makeTestRenderFrame(std.testing.allocator, .{
         .glyph_cols = 3,
     });

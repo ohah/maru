@@ -138,7 +138,8 @@ pub fn runSmoke(io: std.Io, allocator: std.mem.Allocator, config: AppSmokeConfig
     const glyph_frame_text = try renderGlyphFrame(allocator, frame.render_frame);
     errdefer allocator.free(glyph_frame_text);
 
-    const summary = try renderSmokeSummary(allocator, config, frame, &memory_pty);
+    const render_stats = renderer.renderFrameStats(frame.render_frame, renderer_state.atlas.entryCount());
+    const summary = try renderSmokeSummary(allocator, config, frame, render_stats, &memory_pty);
     errdefer allocator.free(summary);
 
     try writeArtifacts(io, allocator, config.artifact_dir, .{
@@ -184,6 +185,7 @@ fn renderSmokeSummary(
     allocator: std.mem.Allocator,
     config: AppSmokeConfig,
     frame: AppHostFrame,
+    render_stats: renderer.RenderFrameStats,
     memory_pty: *const MemoryPty,
 ) ![]u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
@@ -200,15 +202,9 @@ fn renderSmokeSummary(
     try writer.print("process_state={s}\n", .{@tagName(frame.process_state)});
     try writer.print("output_events={d}\n", .{frame.drain_summary.output_events});
     try writer.print("exit_events={d}\n", .{frame.drain_summary.exit_events});
-    try writer.print("renderer_backend={s}\n", .{@tagName(frame.render_frame.backend)});
-    try writer.print("draw_cells={d}\n", .{frame.render_frame.draw_list.cells.len});
-    try writer.print("draw_overlays={d}\n", .{frame.render_frame.draw_list.overlays.len});
-    try writer.print("glyph_frame_ready={}\n", .{frame.render_frame.glyphFrameConsistent()});
-    try writer.print("glyph_count={d}\n", .{frame.render_frame.glyph_frame.stats.glyph_count});
-    try writer.print("glyph_upload_count={d}\n", .{frame.render_frame.glyph_frame.stats.upload_count});
-    try writer.print("glyph_reused_count={d}\n", .{frame.render_frame.glyph_frame.stats.reused_count});
-    try writer.print("glyph_fallback_count={d}\n", .{frame.render_frame.glyph_frame.stats.fallback_count});
-    try writer.print("glyph_replacement_count={d}\n", .{frame.render_frame.glyph_frame.stats.replacement_count});
+    // 제품 frame 통계는 renderer가 소유한 공유 직렬화기로 남긴다. visible smoke들과 같은
+    // "renderer_" schema를 써서 app-smoke artifact의 frame 통계 키도 서로 일치시킨다.
+    try renderer.writeRenderFrameStats(writer, "renderer_", render_stats);
     try writer.print("input_bytes.len={d}\n", .{memory_pty.writes.items.len});
     try writer.print("resize_calls={d}\n", .{memory_pty.resize_calls});
     if (memory_pty.last_size) |size| {
@@ -442,10 +438,28 @@ test "app smoke summary marks that real UI is not visible yet" {
     var memory_pty = MemoryPty.init(std.testing.allocator);
     defer memory_pty.deinit();
 
+    // frame 통계는 공유 직렬화기로 남기므로, 이 문자열 계약 테스트는 통계를 직접 주입한다
+    // (visible smoke들의 success fixture와 같은 방식). prepared()=true가 되도록 비어 있지
+    // 않은 frame을 흉내 낸다.
+    const render_stats: renderer.RenderFrameStats = .{
+        .consistent = true,
+        .backend = .metal,
+        .surface_cols = 3,
+        .surface_rows = 1,
+        .draw_cells = 3,
+        .draw_overlays = 0,
+        .glyph_count = 3,
+        .upload_count = 2,
+        .reused_count = 1,
+        .fallback_count = 0,
+        .replacement_count = 0,
+        .atlas_entries = 2,
+    };
     const summary = try renderSmokeSummary(
         std.testing.allocator,
         .{ .artifact_dir = "zig-out/test-app-smoke" },
         frame,
+        render_stats,
         &memory_pty,
     );
     defer std.testing.allocator.free(summary);
@@ -454,7 +468,10 @@ test "app smoke summary marks that real UI is not visible yet" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "visible_ui=false\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "ui_note=not_yet_appkit_or_metal\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_backend=metal\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_frame_ready=true\n") != null);
+    // app host도 visible smoke들과 같은 renderer_* 키를 쓴다(예전 glyph_frame_ready/glyph_count).
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_prepared=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_count=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_atlas_entries=2\n") != null);
 }
 
 test "app smoke glyph artifact records backend frame input" {

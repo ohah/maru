@@ -60,19 +60,16 @@ pub const RendererState = struct {
 };
 
 pub fn textConfigFromFontSize(font_size: f32, device_scale: u16) glyph_layout.TextLayoutConfig {
-    // ResolvedAppearance가 font_size의 1..512 범위를 보장한다. renderer는 현재 atlas key에
-    // 정수 px를 쓰므로 반올림한다. fractional point/px까지 필요해지는 시점에는 이 함수가
-    // public 정책 변경 지점이 된다.
-    std.debug.assert(font_size >= 1.0 and font_size <= 512.0);
-    std.debug.assert(device_scale > 0);
-    // assert는 ReleaseFast에서 사라진다. 그 빌드에서도 범위 밖/NaN/inf 입력이 들어와
-    // @intFromFloat가 UB(쓰레기 px -> atlas cache key 오염)가 되지 않도록 supported
-    // 범위로 clamp한다. resolved(정상) 입력에서는 값이 그대로다.
+    // ResolvedAppearance는 정상 font_size를 보장하고, macOS backing scale은 정상적으로
+    // 1 이상이다. 그래도 이 함수는 cache key의 마지막 방어선이다. debug assert에만
+    // 기대면 ReleaseFast에서 NaN/inf가 @intFromFloat UB로 이어지거나, device_scale=0이
+    // atlas key에 들어가 같은 glyph를 잘못된 scale로 캐시할 수 있다.
     const finite_size = if (std.math.isFinite(font_size)) font_size else 1.0;
     const clamped_size = @max(@as(f32, 1.0), @min(@as(f32, 512.0), finite_size));
+    const clamped_scale = @max(@as(u16, 1), device_scale);
     return .{
         .font_size_px = @intFromFloat(@round(clamped_size)),
-        .device_scale = device_scale,
+        .device_scale = clamped_scale,
     };
 }
 
@@ -113,4 +110,25 @@ test "text config converts resolved font size into cache key units" {
     const text = textConfigFromFontSize(16.6, 2);
     try std.testing.expectEqual(@as(u16, 17), text.font_size_px);
     try std.testing.expectEqual(@as(u16, 2), text.device_scale);
+}
+
+test "text config clamps invalid cache key inputs before renderer state uses them" {
+    // 이 테스트는 ReleaseFast에서 사라지는 assert가 아니라 실제 정규화 계약을 고정한다.
+    // font size와 device scale은 glyph atlas key 일부라, 비정상 값이 그대로 들어가면 같은
+    // glyph가 서로 다른/불가능한 scale로 캐시되어 renderer 진단이 틀어진다.
+    const nan_size = textConfigFromFontSize(std.math.nan(f32), 0);
+    try std.testing.expectEqual(@as(u16, 1), nan_size.font_size_px);
+    try std.testing.expectEqual(@as(u16, 1), nan_size.device_scale);
+
+    const non_finite_size = textConfigFromFontSize(std.math.inf(f32), 0);
+    try std.testing.expectEqual(@as(u16, 1), non_finite_size.font_size_px);
+    try std.testing.expectEqual(@as(u16, 1), non_finite_size.device_scale);
+
+    const below_range = textConfigFromFontSize(-10.0, 0);
+    try std.testing.expectEqual(@as(u16, 1), below_range.font_size_px);
+    try std.testing.expectEqual(@as(u16, 1), below_range.device_scale);
+
+    const above_range = textConfigFromFontSize(900.0, 3);
+    try std.testing.expectEqual(@as(u16, 512), above_range.font_size_px);
+    try std.testing.expectEqual(@as(u16, 3), above_range.device_scale);
 }

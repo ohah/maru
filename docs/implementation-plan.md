@@ -255,7 +255,7 @@ TDD 방식:
 - glyph atlas test: GPU texture 없이 `GlyphCacheKey -> AtlasSlot` cache, upload byte 후보, eviction, invalidation reason을 검증한다.
 - app host smoke: 실제 UI 없이 `AppWindow -> SurfaceRuntime -> RuntimeEventPump -> DrawList` frame 조립, resize, focused input artifact를 `mise run app-smoke`로 남긴다.
 - macOS window smoke: `mise run test-macos-window-smoke`로 summary 계약을 검증하고, `mise run macos-window-smoke`로 Metal/terminal grid 없이 AppKit 창을 실제로 띄워 `visible_ui=true` artifact를 남긴다. 이 단계는 app lifecycle smoke이며, terminal renderer 검증은 아니다.
-- macOS Metal smoke: `mise run test-macos-metal-smoke`로 summary 계약을 검증하고, `mise run macos-metal-smoke`로 AppKit 창 위 CAMetalLayer에 clear frame을 present해 `metal_surface=true` artifact를 남긴다. 이 단계는 GPU surface lifecycle smoke이며, terminal renderer 검증은 아니다.
+- macOS Metal smoke: `mise run test-macos-metal-smoke`로 summary와 fixture 계약을 검증하고, `mise run macos-metal-smoke`로 AppKit 창 위 CAMetalLayer에 `DrawList` 기반 placeholder 셀을 present해 `metal_surface=true`, `terminal_grid=true`, `glyph_text=false` artifact를 남긴다. 이 단계는 glyph/text renderer 검증은 아니지만, `DrawList -> Metal` 소비 경로의 첫 실제 UI 검증이다.
 - screenshot artifact: 실제 화면 검증이 가능한 곳부터 opt-in으로 추가한다.
 
 완료 기준:
@@ -264,7 +264,7 @@ TDD 방식:
 - app host는 terminal storage를 직접 수정하지 않는다.
 - 실제 AppKit/Metal UI가 아직 없으면 smoke summary에 `visible_ui=false`를 명시하고, UI로 확인 가능한 단계가 오면 사용자에게 보고한다.
 - `mise run macos-window-smoke`가 macOS에서 실제 창을 띄우고, 아직 Metal/terminal grid가 없다는 한계를 summary에 적는다.
-- `mise run macos-metal-smoke`가 macOS에서 실제 Metal drawable을 한 frame 이상 present하고, 아직 terminal grid가 없다는 한계를 summary에 적는다.
+- `mise run macos-metal-smoke`가 macOS에서 실제 Metal drawable을 한 frame 이상 present하고, `DrawList` placeholder 셀을 그린다. 아직 glyph text가 없다는 한계는 summary에 `glyph_text=false`로 적는다.
 - 성능 예산에 startup, first drawable, frame budget 초안을 추가한다.
 
 아직 하지 않는다:

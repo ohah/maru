@@ -1,4 +1,7 @@
 const std = @import("std");
+const maru = @import("maru");
+const renderer = maru.renderer;
+const terminal = maru.terminal;
 
 const artifact_dir = "zig-out/maru-macos-metal-smoke";
 const default_duration_ms: u32 = 1500;
@@ -10,9 +13,26 @@ const NativeMetalSmokeResult = extern struct {
     status: c_int,
     presented_frames: u32,
     drawable_failures: u32,
+    requested_cells: u32,
+    rendered_cells: u32,
 };
 
-extern fn maru_macos_metal_smoke_run(duration_ms: u32, result: *NativeMetalSmokeResult) void;
+const NativeMetalCell = extern struct {
+    row: u16,
+    col: u16,
+    width: u16,
+    reserved: u16 = 0,
+    codepoint: u32,
+};
+
+extern fn maru_macos_metal_smoke_run(
+    duration_ms: u32,
+    cols: u16,
+    rows: u16,
+    cells: [*]const NativeMetalCell,
+    cell_count: usize,
+    result: *NativeMetalSmokeResult,
+) void;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -27,11 +47,23 @@ pub fn main(init: std.process.Init) !void {
         .status = -1,
         .presented_frames = 0,
         .drawable_failures = 0,
+        .requested_cells = 0,
+        .rendered_cells = 0,
     };
-    maru_macos_metal_smoke_run(duration_ms, &native);
+    var fixture = try buildSmokeFixture(allocator);
+    defer fixture.deinit(allocator);
+    maru_macos_metal_smoke_run(
+        duration_ms,
+        fixture.size.cols,
+        fixture.size.rows,
+        fixture.cells.ptr,
+        fixture.cells.len,
+        &native,
+    );
 
     const metal_surface = native.status == 0 and native.presented_frames > 0;
-    const summary = try renderSummary(allocator, duration_ms, metal_surface, native);
+    const terminal_grid = metal_surface and native.rendered_cells == fixture.cells.len;
+    const summary = try renderSummary(allocator, duration_ms, metal_surface, terminal_grid, native);
     defer allocator.free(summary);
 
     try writeSummary(io, summary);
@@ -39,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("\nartifacts written to {s}/\n", .{artifact_dir});
     try stdout.flush();
 
-    if (!metal_surface) return error.MacosMetalSmokeFailed;
+    if (!terminal_grid) return error.MacosMetalSmokeFailed;
 }
 
 fn readDurationMs() u32 {
@@ -59,6 +91,7 @@ fn renderSummary(
     allocator: std.mem.Allocator,
     duration_ms: u32,
     metal_surface: bool,
+    terminal_grid: bool,
     native: NativeMetalSmokeResult,
 ) ![]u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
@@ -69,13 +102,67 @@ fn renderSummary(
     try writer.print("artifact_dir={s}\n", .{artifact_dir});
     try writer.print("visible_ui={}\n", .{metal_surface});
     try writer.print("metal_surface={}\n", .{metal_surface});
-    try writer.writeAll("ui_note=appkit_window_with_metal_clear_frame_no_terminal_grid\n");
+    try writer.print("terminal_grid={}\n", .{terminal_grid});
+    try writer.writeAll("glyph_text=false\n");
+    try writer.writeAll("ui_note=appkit_window_with_metal_drawlist_placeholder_no_glyph_text\n");
     try writer.print("duration_ms={d}\n", .{duration_ms});
     try writer.print("native_status={d}\n", .{native.status});
     try writer.print("presented_frames={d}\n", .{native.presented_frames});
     try writer.print("drawable_failures={d}\n", .{native.drawable_failures});
+    try writer.print("requested_cells={d}\n", .{native.requested_cells});
+    try writer.print("rendered_cells={d}\n", .{native.rendered_cells});
 
     return output.toOwnedSlice();
+}
+
+const SmokeFixture = struct {
+    size: terminal.Size,
+    cells: []NativeMetalCell,
+
+    fn deinit(self: *SmokeFixture, allocator: std.mem.Allocator) void {
+        allocator.free(self.cells);
+        self.* = undefined;
+    }
+};
+
+fn buildSmokeFixture(allocator: std.mem.Allocator) !SmokeFixture {
+    // 아직 glyph rasterizer가 없으므로, terminal 문자열을 셀 사각형으로만 그린다.
+    // 그래도 데이터 출처는 실제 TerminalCore -> DrawList 경로여야 한다. 이렇게 해야
+    // smoke가 "Metal만 됨"이 아니라 "renderer 입력 계약을 Metal backend가 소비함"을 증명한다.
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 24, .rows = 6 });
+    defer core.deinit();
+
+    core.clearDirty();
+    try core.write("Maru\r\nMetal");
+
+    var list = try renderer.buildDrawList(allocator, core.snapshot());
+    defer list.deinit(allocator);
+
+    return .{
+        .size = list.size,
+        .cells = try buildNativeCells(allocator, list),
+    };
+}
+
+fn buildNativeCells(allocator: std.mem.Allocator, list: renderer.DrawList) ![]NativeMetalCell {
+    var cells: std.ArrayList(NativeMetalCell) = .empty;
+    errdefer cells.deinit(allocator);
+
+    try cells.ensureTotalCapacity(allocator, list.cells.len);
+    for (list.cells) |cell| {
+        // DrawList는 dirty row 전체를 담기 때문에 blank cell도 많다. Metal smoke의
+        // 목적은 terminal-cell placeholder가 눈에 보이는지 확인하는 것이므로, 실제
+        // 글자가 있는 셀만 native bridge로 넘겨 검증 신호를 선명하게 만든다.
+        if (cell.codepoint == ' ') continue;
+        cells.appendAssumeCapacity(.{
+            .row = cell.row,
+            .col = cell.col,
+            .width = cell.width,
+            .codepoint = cell.codepoint,
+        });
+    }
+
+    return cells.toOwnedSlice(allocator);
 }
 
 fn writeSummary(io: std.Io, summary: []const u8) !void {
@@ -87,21 +174,27 @@ fn writeSummary(io: std.Io, summary: []const u8) !void {
     });
 }
 
-test "macOS Metal smoke summary reports clear-frame boundary" {
+test "macOS Metal smoke summary reports DrawList placeholder boundary" {
     // 실제 Metal device를 만들지 않는 테스트에서도 artifact 계약은 고정한다.
     // GPU 실패와 summary schema 변경을 분리해야 triage가 쉬워진다.
-    const summary = try renderSummary(std.testing.allocator, 1500, true, .{
+    const summary = try renderSummary(std.testing.allocator, 1500, true, true, .{
         .status = 0,
         .presented_frames = 3,
         .drawable_failures = 1,
+        .requested_cells = 9,
+        .rendered_cells = 9,
     });
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.macos-metal-smoke.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "visible_ui=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "metal_surface=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_grid=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_text=false\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "presented_frames=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "drawable_failures=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "requested_cells=9\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "rendered_cells=9\n") != null);
 }
 
 test "Metal smoke duration override clamps invalid, zero, and oversized values" {
@@ -113,4 +206,22 @@ test "Metal smoke duration override clamps invalid, zero, and oversized values" 
     try std.testing.expectEqual(default_duration_ms, durationFromEnv("99999999999")); // > u32 max
     try std.testing.expectEqual(@as(u32, 250), durationFromEnv("250"));
     try std.testing.expectEqual(max_duration_ms, durationFromEnv("99999999")); // > 상한
+}
+
+test "Metal smoke fixture comes from DrawList cells" {
+    // 이 테스트는 native bridge 없이도 smoke 입력이 실제 renderer 계약에서 왔는지
+    // 증명한다. 나중에 CoreText/glyph atlas가 붙어도 이 fixture는 "터미널 셀을
+    // backend 입력으로 넘긴다"는 가장 작은 세로 슬라이스로 남는다.
+    var fixture = try buildSmokeFixture(std.testing.allocator);
+    defer fixture.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u16, 24), fixture.size.cols);
+    try std.testing.expectEqual(@as(u16, 6), fixture.size.rows);
+    try std.testing.expectEqual(@as(usize, 9), fixture.cells.len);
+    try std.testing.expectEqual(@as(u32, 'M'), fixture.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u16, 0), fixture.cells[0].row);
+    try std.testing.expectEqual(@as(u16, 0), fixture.cells[0].col);
+    try std.testing.expectEqual(@as(u32, 'M'), fixture.cells[4].codepoint);
+    try std.testing.expectEqual(@as(u16, 1), fixture.cells[4].row);
+    try std.testing.expectEqual(@as(u16, 0), fixture.cells[4].col);
 }

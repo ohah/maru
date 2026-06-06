@@ -19,6 +19,7 @@ src/
   maru.zig              public import facade
   main.zig              개발용 CLI entrypoint
   app.zig               탭/창/surface facade
+  color.zig             backend-neutral 색 primitive(Rgb). terminal/renderer/config가 공유
   config.zig            action/config facade
   pty.zig               process/PTY facade
   renderer.zig          render facade

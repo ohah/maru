@@ -1,5 +1,5 @@
 const std = @import("std");
-const terminal = @import("../terminal.zig");
+const color = @import("../color.zig");
 const theme = @import("theme.zig");
 
 pub const ResolveError = error{
@@ -15,10 +15,10 @@ pub const ResolvedFontRequest = struct {
 };
 
 pub const ResolvedTheme = struct {
-    background: terminal.Rgb,
-    foreground: terminal.Rgb,
-    cursor: terminal.Rgb,
-    selection: terminal.Rgb,
+    background: color.Rgb,
+    foreground: color.Rgb,
+    cursor: color.Rgb,
+    selection: color.Rgb,
 };
 
 pub const ResolvedCursor = struct {
@@ -71,7 +71,7 @@ fn resolveTheme(config: theme.ThemeConfig) ResolveError!ResolvedTheme {
     };
 }
 
-pub fn parseHexColor(value: []const u8) ResolveError!terminal.Rgb {
+pub fn parseHexColor(value: []const u8) ResolveError!color.Rgb {
     // v1 설정은 일부러 #RRGGBB만 허용한다. CSS 색 이름이나 짧은 #RGB까지 받으면
     // 사용자는 편하지만, 어느 단계에서 어떤 형식으로 normalize됐는지 추적하기 어렵다.
     if (value.len != 7 or value[0] != '#') return error.InvalidHexColorFormat;
@@ -105,10 +105,10 @@ test "default appearance resolves to renderer-friendly values" {
 
     try std.testing.expectEqualStrings("JetBrains Mono", resolved.font.family);
     try std.testing.expectEqual(@as(f32, 14), resolved.font.size);
-    try std.testing.expectEqual(terminal.Rgb{ .r = 0x10, .g = 0x10, .b = 0x10 }, resolved.theme.background);
-    try std.testing.expectEqual(terminal.Rgb{ .r = 0xe8, .g = 0xe8, .b = 0xe8 }, resolved.theme.foreground);
-    try std.testing.expectEqual(terminal.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff }, resolved.theme.cursor);
-    try std.testing.expectEqual(terminal.Rgb{ .r = 0x33, .g = 0x44, .b = 0x55 }, resolved.theme.selection);
+    try std.testing.expectEqual(color.Rgb{ .r = 0x10, .g = 0x10, .b = 0x10 }, resolved.theme.background);
+    try std.testing.expectEqual(color.Rgb{ .r = 0xe8, .g = 0xe8, .b = 0xe8 }, resolved.theme.foreground);
+    try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff }, resolved.theme.cursor);
+    try std.testing.expectEqual(color.Rgb{ .r = 0x33, .g = 0x44, .b = 0x55 }, resolved.theme.selection);
     try std.testing.expectEqual(theme.CursorShape.block, resolved.cursor.shape);
     try std.testing.expect(resolved.cursor.blink);
 }
@@ -127,8 +127,8 @@ test "appearance resolver trims font family and preserves cursor options" {
 
     try std.testing.expectEqualStrings("Menlo", resolved.font.family);
     try std.testing.expectEqual(@as(f32, 16), resolved.font.size);
-    try std.testing.expectEqual(terminal.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff }, resolved.theme.foreground);
-    try std.testing.expectEqual(terminal.Rgb{ .r = 0xff, .g = 0x00, .b = 0xaa }, resolved.theme.cursor);
+    try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff }, resolved.theme.foreground);
+    try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0x00, .b = 0xaa }, resolved.theme.cursor);
     try std.testing.expectEqual(theme.CursorShape.bar, resolved.cursor.shape);
     try std.testing.expect(!resolved.cursor.blink);
 }
@@ -141,7 +141,7 @@ test "appearance resolver rejects invalid font values" {
 }
 
 test "hex color parser accepts only full rgb hex colors" {
-    try std.testing.expectEqual(terminal.Rgb{ .r = 0xab, .g = 0xcd, .b = 0xef }, try parseHexColor("#ABCdef"));
+    try std.testing.expectEqual(color.Rgb{ .r = 0xab, .g = 0xcd, .b = 0xef }, try parseHexColor("#ABCdef"));
     try std.testing.expectError(error.InvalidHexColorFormat, parseHexColor("101010"));
     try std.testing.expectError(error.InvalidHexColorFormat, parseHexColor("#fff"));
     try std.testing.expectError(error.InvalidHexColorFormat, parseHexColor("1234567")); // 7자이지만 '#'가 없음

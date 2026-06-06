@@ -30,7 +30,7 @@ description = "Run macOS window smoke contract tests"
 run = "zig build test-macos-window-smoke"
 
 [tasks.macos-metal-smoke]
-description = "Run the visible macOS Metal DrawList readback smoke"
+description = "Run the visible macOS Metal GlyphFrame placeholder readback smoke"
 run = "zig build macos-metal-smoke"
 
 [tasks.test-macos-metal-smoke]

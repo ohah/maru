@@ -972,7 +972,14 @@ void maru_macos_glyph_text_smoke_run(
         metal_layer.contentsScale = window.backingScaleFactor;
         // 제품 frame probe(Zig)가 같은 backing scale로 glyph atlas key를 준비하도록 실제
         // 창이 쓴 scale을 x100 정수로 남긴다. pipeline/draw가 뒤에서 실패해도 이 값은 남는다.
-        result->backing_scale_x100 = (uint32_t)(window.backingScaleFactor * 100.0 + 0.5);
+        // AppKit은 backingScaleFactor를 보통 1.0~3.0으로 보장하지만, 손상된/비표준 디스플레이
+        // 값(음수·NaN·과도한 값)이 float -> uint32 캐스트 UB(C11 6.3.1.4)로 이어지지 않게
+        // sane 범위로 먼저 막는다. Zig deviceScaleFromNative가 다시 [1,8]로 clamp하지만,
+        // 캐스트 자체를 정의된 상태로 두는 것이 Zig 쪽 방어 clamp와 대칭이다.
+        double backing_scale = window.backingScaleFactor;
+        if (!(backing_scale > 0.0)) backing_scale = 1.0; // 음수/NaN 방어(NaN은 모든 비교가 false)
+        if (backing_scale > 80.0) backing_scale = 80.0; // 실제 디스플레이 scale보다 충분히 큰 상한
+        result->backing_scale_x100 = (uint32_t)(backing_scale * 100.0 + 0.5);
         metal_layer.frame = content.bounds;
         metal_layer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
         metal_layer.drawableSize = CGSizeMake(

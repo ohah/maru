@@ -52,11 +52,13 @@ pub const GlyphRunList = struct {
     cursor: terminal.Cursor,
     dirty: ?terminal.DirtyRegion,
     glyphs: []GlyphRun,
+    overlays: []draw_list.DrawOverlay,
     fallback_count: usize = 0,
     replacement_count: usize = 0,
 
     pub fn deinit(self: *GlyphRunList, allocator: std.mem.Allocator) void {
         allocator.free(self.glyphs);
+        allocator.free(self.overlays);
         self.* = undefined;
     }
 };
@@ -152,11 +154,15 @@ pub fn buildGlyphRunList(
         });
     }
 
+    const overlays = try allocator.dupe(draw_list.DrawOverlay, list.overlays);
+    errdefer allocator.free(overlays);
+
     return .{
         .size = list.size,
         .cursor = list.cursor,
         .dirty = list.dirty,
         .glyphs = try glyphs.toOwnedSlice(allocator),
+        .overlays = overlays,
         .fallback_count = fallback_count,
         .replacement_count = replacement_count,
     };
@@ -215,6 +221,7 @@ test "fake glyph layout maps primary fallback and combining data" {
     try std.testing.expectEqual(@as(u2, 2), glyphs.glyphs[1].cell_width);
     try std.testing.expectEqual(@as(u21, 'e'), glyphs.glyphs[2].codepoint);
     try std.testing.expectEqual(@as(?u21, 0x0301), glyphs.glyphs[2].combining);
+    try std.testing.expect(glyphs.overlays.len > 0);
 }
 
 test "fake glyph layout records replacement glyphs" {

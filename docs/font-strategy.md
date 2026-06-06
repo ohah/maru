@@ -42,7 +42,7 @@ RenderSnapshot
 - glyph bitmap을 texture atlas에 캐시한다.
 - atlas miss, upload byte, eviction 같은 성능 관측 값을 남긴다.
 - renderer backend가 바뀌어도 cache key와 glyph run 의미가 흔들리지 않게 한다.
-- 초기 구현은 `GlyphCacheKey -> AtlasSlot` domain cache 계약, macOS CoreText CPU bitmap smoke, CPU bitmap -> Metal texture upload smoke를 먼저 고정한다. 실제 atlas packing 좌표와 shader sampling은 macOS backend 단계에서 붙인다.
+- 초기 구현은 `GlyphCacheKey -> AtlasSlot` domain cache 계약과 `GlyphRunList -> GlyphFrame` 준비 계약, macOS CoreText CPU bitmap smoke, CPU bitmap -> Metal texture upload smoke를 먼저 고정한다. 실제 atlas packing 좌표와 shader sampling은 macOS backend 단계에서 붙인다.
 
 `Metal backend`:
 
@@ -235,6 +235,7 @@ dirty region의 장기 목표는 cell 단위지만, 현재 `TerminalCore`/snapsh
 - fallback cache가 같은 cluster를 반복 조회하지 않는 unit test.
 - glyph atlas cache key가 size/scale/font id와 raster에 영향을 주는 style(bold/italic)을 구분하는 test.
 - GPU 없는 `GlyphCacheKey -> AtlasSlot` cache가 hit/miss, upload byte 후보, eviction, invalidation reason을 기록하는 test.
+- GPU 없는 `GlyphRunList -> GlyphFrame` 준비 test가 atlas slot, upload 후보, eviction, cursor/underline overlay 보존을 기록하는 test.
 - font 변경이 전체 redraw/invalidation event를 만드는 test.
 - renderer가 `TerminalCore`, `PtySession`, platform handle을 직접 import하지 않는 boundary test.
 

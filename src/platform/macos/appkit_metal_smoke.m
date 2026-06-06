@@ -31,15 +31,19 @@ typedef struct {
     float a;
 } MaruMetalSmokeVertex;
 
+// VertexIn은 host쪽 MaruMetalSmokeVertex(float 6개, 24바이트, tight-packed)와 같은
+// 메모리 레이아웃을 가져야 한다. MSL에서 float4는 16바이트 정렬이라 { float2; float4; }는
+// 32바이트가 되어, host 24바이트 배열을 stride 32로 읽게 된다(색/위치 깨짐 + buffer OOB
+// read). packed_float2/packed_float4는 4바이트 정렬이라 host struct와 정확히 일치한다.
 static NSString *const maru_cell_shader_source =
     @"#include <metal_stdlib>\n"
      "using namespace metal;\n"
-     "struct VertexIn { float2 position; float4 color; };\n"
+     "struct VertexIn { packed_float2 position; packed_float4 color; };\n"
      "struct VertexOut { float4 position [[position]]; float4 color; };\n"
      "vertex VertexOut maru_cell_vertex(uint vid [[vertex_id]], const device VertexIn *vertices [[buffer(0)]]) {\n"
      "  VertexOut out;\n"
-     "  out.position = float4(vertices[vid].position, 0.0, 1.0);\n"
-     "  out.color = vertices[vid].color;\n"
+     "  out.position = float4(float2(vertices[vid].position), 0.0, 1.0);\n"
+     "  out.color = float4(vertices[vid].color);\n"
      "  return out;\n"
      "}\n"
      "fragment float4 maru_cell_fragment(VertexOut in [[stage_in]]) {\n"
@@ -183,15 +187,30 @@ static BOOL maru_draw_cell_frame(
         &vertex_count
     );
     if (vertices == NULL || vertex_count == 0) {
+        // 이미 만든 encoder를 endEncoding 없이 버리면 Metal API 위반이다(검증 레이어
+        // assert/명령버퍼 손상). 정점 생성 실패 시에도 encoder를 정상 종료한 뒤 빠진다.
+        [encoder endEncoding];
         free(vertices);
         result->drawable_failures += 1;
         return NO;
     }
 
+    // setVertexBytes는 4KB 인라인 한도가 있어 셀 수가 늘면(현재 fixture는 9셀이라
+    // 안전) 한도를 넘는다. 셀 개수와 무관하도록 프레임마다 transient MTLBuffer로
+    // 올린다(ARC가 프레임 끝에서 해제). 재사용 buffer 모델은 제품 renderer 몫이다.
+    id<MTLBuffer> vertex_buffer = [layer.device
+        newBufferWithBytes:vertices
+                    length:vertex_count * sizeof(MaruMetalSmokeVertex)
+                   options:MTLResourceStorageModeShared];
+    free(vertices);
+    if (vertex_buffer == nil) {
+        [encoder endEncoding];
+        result->drawable_failures += 1;
+        return NO;
+    }
+
     [encoder setRenderPipelineState:cell_pipeline];
-    [encoder setVertexBytes:vertices
-                     length:vertex_count * sizeof(MaruMetalSmokeVertex)
-                    atIndex:0];
+    [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:vertex_count];
@@ -199,9 +218,10 @@ static BOOL maru_draw_cell_frame(
     [command_buffer presentDrawable:drawable];
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
-    free(vertices);
     result->presented_frames += 1;
-    result->rendered_cells = (uint32_t)cell_count;
+    // requested_cells와 같은 포화 규칙을 써야 status==0 비교(rendered==requested)가
+    // cell_count 좁힘 방식 차이로 어긋나지 않는다.
+    result->rendered_cells = (cell_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)cell_count;
     return YES;
 }
 
@@ -267,7 +287,6 @@ void maru_macos_metal_smoke_run(
 
         NSView *content = [[NSView alloc]
             initWithFrame:NSMakeRect(0.0, 0.0, frame.size.width, frame.size.height)];
-        content.wantsLayer = YES;
 
         CAMetalLayer *metal_layer = [CAMetalLayer layer];
         metal_layer.device = device;
@@ -290,7 +309,12 @@ void maru_macos_metal_smoke_run(
             return;
         }
 
+        // 레이어 호스팅 뷰는 .layer를 먼저 지정한 뒤 wantsLayer=YES로 둬야 한다.
+        // 순서가 반대면 AppKit이 layer-backed로 보고 backing layer를 직접 만들고
+        // 교체할 수 있어(스케일 변경/재표시), CAMetalLayer가 합성 트리에서 분리돼
+        // present는 되지만 화면에 안 보이는 오탐이 생길 수 있다.
         content.layer = metal_layer;
+        content.wantsLayer = YES;
         [window setTitle:@"Maru Metal smoke"];
         [window setReleasedWhenClosed:NO];
         [window setContentView:content];

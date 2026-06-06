@@ -203,7 +203,7 @@ fn renderSmokeSummary(
     try writer.print("renderer_backend={s}\n", .{@tagName(frame.render_frame.backend)});
     try writer.print("draw_cells={d}\n", .{frame.render_frame.draw_list.cells.len});
     try writer.print("draw_overlays={d}\n", .{frame.render_frame.draw_list.overlays.len});
-    try writer.print("glyph_frame_ready={}\n", .{glyphFrameReady(frame.render_frame)});
+    try writer.print("glyph_frame_ready={}\n", .{frame.render_frame.glyphFrameConsistent()});
     try writer.print("glyph_count={d}\n", .{frame.render_frame.glyph_frame.stats.glyph_count});
     try writer.print("glyph_upload_count={d}\n", .{frame.render_frame.glyph_frame.stats.upload_count});
     try writer.print("glyph_reused_count={d}\n", .{frame.render_frame.glyph_frame.stats.reused_count});
@@ -219,18 +219,6 @@ fn renderSmokeSummary(
     }
 
     return output.toOwnedSlice();
-}
-
-fn glyphFrameReady(render_frame: renderer.RenderFrame) bool {
-    // "ready"는 draw cell 개수와 glyph 개수가 항상 같다는 뜻이 아니다. 실제 shaper가
-    // 공백이나 zero-ink glyph를 atlas upload 대상에서 제외할 수 있기 때문이다.
-    // 여기서는 backend가 frame을 소비할 수 있도록 내부 count와 slice가 서로 맞는지만 본다.
-    const glyph_frame = render_frame.glyph_frame;
-    return glyph_frame.size.cols == render_frame.draw_list.size.cols and
-        glyph_frame.size.rows == render_frame.draw_list.size.rows and
-        glyph_frame.stats.glyph_count == glyph_frame.glyphs.len and
-        glyph_frame.stats.upload_count == glyph_frame.uploads.len and
-        glyph_frame.stats.upload_count + glyph_frame.stats.reused_count == glyph_frame.glyphs.len;
 }
 
 fn renderGlyphFrame(allocator: std.mem.Allocator, render_frame: renderer.RenderFrame) ![]u8 {
@@ -389,7 +377,7 @@ test "app host frame drains runtime events and builds renderer frame for active 
     try std.testing.expectEqual(@as(runtime_mod.SurfaceId, 1), frame.surface_id);
     try std.testing.expectEqual(@as(usize, 1), frame.drain_summary.output_events);
     try std.testing.expect(frame.render_frame.draw_list.cells.len >= 5);
-    try std.testing.expect(glyphFrameReady(frame.render_frame));
+    try std.testing.expect(frame.render_frame.glyphFrameConsistent());
 }
 
 test "app host routes focused input and resize through SurfaceRuntime" {

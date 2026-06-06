@@ -46,8 +46,11 @@ pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
     };
 }
 
-pub fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
-    const family = std.mem.trim(u8, config.family, " \t\r\n");
+fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
+    // space/tab/CR/LF만이 아니라 vertical tab(0x0b)/form feed(0x0c)를 포함한 ASCII 공백
+    // 전체를 trim한다. 일부만 깎으면 그런 공백만으로 된 family가 len 검사를 통과해 빈
+    // 폰트명이 renderer로 샌다.
+    const family = std.mem.trim(u8, config.family, &std.ascii.whitespace);
     if (family.len == 0) return error.EmptyFontFamily;
     if (!(config.size >= 1.0 and config.size <= 512.0)) return error.InvalidFontSize;
 
@@ -59,7 +62,7 @@ pub fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
     };
 }
 
-pub fn resolveTheme(config: theme.ThemeConfig) ResolveError!ResolvedTheme {
+fn resolveTheme(config: theme.ThemeConfig) ResolveError!ResolvedTheme {
     return .{
         .background = try parseHexColor(config.background),
         .foreground = try parseHexColor(config.foreground),
@@ -141,5 +144,41 @@ test "hex color parser accepts only full rgb hex colors" {
     try std.testing.expectEqual(terminal.Rgb{ .r = 0xab, .g = 0xcd, .b = 0xef }, try parseHexColor("#ABCdef"));
     try std.testing.expectError(error.InvalidHexColorFormat, parseHexColor("101010"));
     try std.testing.expectError(error.InvalidHexColorFormat, parseHexColor("#fff"));
+    try std.testing.expectError(error.InvalidHexColorFormat, parseHexColor("1234567")); // 7자이지만 '#'가 없음
     try std.testing.expectError(error.InvalidHexColorDigit, parseHexColor("#12GG00"));
+    try std.testing.expectError(error.InvalidHexColorDigit, parseHexColor("#12#456")); // 중간 '#'는 hex digit이 아님
+}
+
+test "appearance resolver trims all ascii whitespace from font family" {
+    // space/tab/CR/LF만이 아니라 vertical tab(0x0b)/form feed(0x0c)까지 trim해야,
+    // 그런 공백만으로 이뤄진 family가 빈 폰트명으로 새지 않는다.
+    const resolved = try resolve(.{ .font = .{ .family = "\x0b\x0c Menlo \x0c\x0b", .size = 14 } });
+    try std.testing.expectEqualStrings("Menlo", resolved.font.family);
+    try std.testing.expectError(error.EmptyFontFamily, resolve(.{ .font = .{ .family = "\x0b\x0c", .size = 14 } }));
+}
+
+test "appearance resolver font size accepts inclusive bounds and rejects non-finite" {
+    // 가드는 의도적으로 !(size>=1 and size<=512) 형태다. naive한 (size<1 or size>512)로
+    // 바꾸면 NaN이 통과하므로, 경계값과 NaN/inf를 함께 고정한다.
+    try std.testing.expectEqual(@as(f32, 1), (try resolve(.{ .font = .{ .family = "Menlo", .size = 1.0 } })).font.size);
+    try std.testing.expectEqual(@as(f32, 512), (try resolve(.{ .font = .{ .family = "Menlo", .size = 512.0 } })).font.size);
+    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = std.math.nan(f32) } }));
+    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = std.math.inf(f32) } }));
+    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = -std.math.inf(f32) } }));
+}
+
+test "appearance resolver rejects an invalid color in any theme field" {
+    // resolveTheme이 background/foreground/cursor/selection 4개 필드를 각각 검증하는지
+    // 고정한다. 한 필드라도 parseHexColor를 빠뜨리면 깨진 색이 renderer로 샌다.
+    try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .background = "bad" } }));
+    try std.testing.expectError(error.InvalidHexColorDigit, resolve(.{ .theme = .{ .foreground = "#0011ZZ" } }));
+    try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .cursor = "#fff" } }));
+    try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .selection = "123456" } }));
+}
+
+test "appearance resolver preserves the underline cursor shape" {
+    // .block/.bar 외에 세 번째 shape도 frame까지 그대로 전달되는지 고정한다.
+    const resolved = try resolve(.{ .cursor = .{ .shape = .underline, .blink = false } });
+    try std.testing.expectEqual(theme.CursorShape.underline, resolved.cursor.shape);
+    try std.testing.expect(!resolved.cursor.blink);
 }

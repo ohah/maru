@@ -195,6 +195,12 @@ fn deriveSmokeStatus(native: NativeGlyphTextSmokeResult) SmokeStatus {
     };
 }
 
+// applied_* 색을 #RRGGBB로 찍는다. 세 채널을 한 곳에서 같은 순서(r,g,b)로 포맷해,
+// 호출부마다 {x:0>2} triple을 반복하다 채널 순서를 헷갈리는 실수를 막는다.
+fn writeAppliedColor(writer: anytype, label: []const u8, r: u8, g: u8, b: u8) !void {
+    try writer.print("{s}=#{x:0>2}{x:0>2}{x:0>2}\n", .{ label, r, g, b });
+}
+
 fn renderSummary(
     allocator: std.mem.Allocator,
     duration_ms: u32,
@@ -219,9 +225,9 @@ fn renderSummary(
     // resolved ResolvedAppearance 색이 실제 렌더에 쓰였음을 artifact로 남긴다. background는
     // Metal clear color로, foreground는 CoreText glyph fill로 적용된다. cursor 색은 resolve해
     // 기록만 하고 이 smoke에서는 아직 그리지 않는다(다음 단계).
-    try writer.print("applied_background=#{x:0>2}{x:0>2}{x:0>2}\n", .{ appearance.background_r, appearance.background_g, appearance.background_b });
-    try writer.print("applied_foreground=#{x:0>2}{x:0>2}{x:0>2}\n", .{ appearance.foreground_r, appearance.foreground_g, appearance.foreground_b });
-    try writer.print("applied_cursor=#{x:0>2}{x:0>2}{x:0>2}\n", .{ appearance.cursor_r, appearance.cursor_g, appearance.cursor_b });
+    try writeAppliedColor(writer, "applied_background", appearance.background_r, appearance.background_g, appearance.background_b);
+    try writeAppliedColor(writer, "applied_foreground", appearance.foreground_r, appearance.foreground_g, appearance.foreground_b);
+    try writeAppliedColor(writer, "applied_cursor", appearance.cursor_r, appearance.cursor_g, appearance.cursor_b);
     try writer.writeAll("appearance_note=background_to_clear_color_foreground_to_glyph_color_cursor_resolved_but_not_drawn\n");
     try writer.writeAll("ui_note=appkit_window_with_metal_shader_sampling_coretext_glyph_texture_no_terminal_renderer\n");
     try writer.print("duration_ms={d}\n", .{duration_ms});
@@ -370,6 +376,27 @@ test "glyph text smoke maps resolved appearance colors into the native bridge" {
     defer std.testing.allocator.free(summary);
     try std.testing.expect(std.mem.indexOf(u8, summary, "applied_background=#101010\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "applied_foreground=#e8e8e8\n") != null);
+}
+
+test "glyph text smoke preserves per-channel theme colors" {
+    // 기본 theme는 회색(r==g==b)이라 채널 전치 버그(예: background_b = .r)를 못 잡는다.
+    // r/g/b가 모두 다른 색을 넣어 nativeAppearance 매핑과 summary echo가 채널을 섞지
+    // 않는지 고정한다.
+    const appearance = nativeAppearance(try config.resolveAppearance(.{
+        .theme = .{ .background = "#ab12cd", .foreground = "#0099ff" },
+    }));
+    try std.testing.expectEqual(@as(u8, 0xab), appearance.background_r);
+    try std.testing.expectEqual(@as(u8, 0x12), appearance.background_g);
+    try std.testing.expectEqual(@as(u8, 0xcd), appearance.background_b);
+    try std.testing.expectEqual(@as(u8, 0x00), appearance.foreground_r);
+    try std.testing.expectEqual(@as(u8, 0x99), appearance.foreground_g);
+    try std.testing.expectEqual(@as(u8, 0xff), appearance.foreground_b);
+
+    const native = emptyNativeResult();
+    const summary = try renderSummary(std.testing.allocator, 1500, deriveSmokeStatus(native), native, appearance);
+    defer std.testing.allocator.free(summary);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "applied_background=#ab12cd\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "applied_foreground=#0099ff\n") != null);
 }
 
 test "glyph text smoke status labels explain native failure stages" {

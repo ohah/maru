@@ -54,7 +54,7 @@ CI에서는 이 파일을 `maru-performance-artifacts` artifact로 업로드한�
 | 앱 시작 시간 | macOS host가 아직 없다. | app launch -> first drawable time |
 | 입력 지연 | PTY와 GUI input path가 아직 없다. | key event -> PTY write, PTY output -> snapshot update |
 | frame budget | Metal-first renderer가 아직 없다. future WebGPU backend도 같은 기준을 따른다. | snapshot -> GPU frame submit |
-| font/glyph atlas | smoke 수준의 CoreText CPU raster와 Metal texture upload 검증은 있지만, 제품 renderer의 atlas packing/eviction/shader sampling은 아직 없다. 현재 제품 경계는 GlyphCacheKey -> AtlasSlot 도메인 cache 계약이다. 세부 정책은 [폰트 전략](font-strategy.md)을 따른다. | first glyph resolve, frame당 atlas miss, atlas upload bytes, font size 변경 후 첫 frame |
+| font/glyph atlas | smoke 수준의 CoreText CPU raster와 Metal texture upload 검증은 있지만, 제품 renderer의 atlas packing/eviction/shader sampling은 아직 없다. 현재 제품 경계는 `GlyphCacheKey -> AtlasSlot -> GlyphFrame -> GlyphQuadFrame` 도메인 계약이다. 세부 정책은 [폰트 전략](font-strategy.md)을 따른다. | first glyph resolve, frame당 atlas miss, atlas upload bytes, font size 변경 후 첫 frame |
 | RSS/memory baseline | platform별 측정 API가 필요하다. | cold start RSS, one tab RSS, scrollback RSS |
 | PTY backpressure | opt-in correctness stress는 있지만 대량 stdout 성능 예산은 아직 없다. | large stdout producer -> queue drain latency, UI responsiveness |
 

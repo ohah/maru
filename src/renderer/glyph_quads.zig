@@ -1,0 +1,239 @@
+const std = @import("std");
+const draw_list = @import("draw_list.zig");
+const glyph_atlas = @import("glyph_atlas.zig");
+const glyph_frame = @import("glyph_frame.zig");
+const glyph_layout = @import("glyph_layout.zig");
+const terminal = @import("../terminal.zig");
+
+pub const AtlasTextureSize = struct {
+    width_px: u32,
+    height_px: u32,
+};
+
+pub const GlyphUvRect = struct {
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+};
+
+pub const GlyphQuad = struct {
+    run: glyph_layout.GlyphRun,
+    slot: glyph_atlas.AtlasSlot,
+    uv: GlyphUvRect,
+};
+
+pub const GlyphQuadFrameStats = struct {
+    glyph_count: usize = 0,
+    uv_count: usize = 0,
+    overlay_count: usize = 0,
+
+    pub fn ready(self: GlyphQuadFrameStats) bool {
+        return self.glyph_count > 0 and self.glyph_count == self.uv_count;
+    }
+};
+
+pub const GlyphQuadFrame = struct {
+    size: terminal.Size,
+    cursor: terminal.Cursor,
+    dirty: ?terminal.DirtyRegion,
+    glyphs: []GlyphQuad,
+    overlays: []draw_list.DrawOverlay,
+    stats: GlyphQuadFrameStats,
+
+    pub fn deinit(self: *GlyphQuadFrame, allocator: std.mem.Allocator) void {
+        allocator.free(self.glyphs);
+        allocator.free(self.overlays);
+        self.* = undefined;
+    }
+};
+
+pub const GlyphQuadError = error{
+    InvalidAtlasTextureSize,
+    InvalidAtlasSlotSize,
+    AtlasSlotOutsideTexture,
+};
+
+pub fn uvRectForSlot(
+    slot: glyph_atlas.AtlasSlot,
+    texture_size: AtlasTextureSize,
+) GlyphQuadError!GlyphUvRect {
+    // AtlasSlot은 pixel 좌표를 가진다. Metal/WebGPU shader는 0.0~1.0 UV를 쓰므로,
+    // 이 변환을 renderer domain에서 한 번만 정의한다. backend가 각자 나눗셈과 bounds
+    // check를 다시 만들면 slot overflow/scale bug가 platform마다 다르게 난다.
+    if (texture_size.width_px == 0 or texture_size.height_px == 0) {
+        return error.InvalidAtlasTextureSize;
+    }
+    if (slot.width_px == 0 or slot.height_px == 0) {
+        return error.InvalidAtlasSlotSize;
+    }
+    if (!rangeFits(slot.x_px, slot.width_px, texture_size.width_px) or
+        !rangeFits(slot.y_px, slot.height_px, texture_size.height_px))
+    {
+        return error.AtlasSlotOutsideTexture;
+    }
+
+    const width_f: f32 = @floatFromInt(texture_size.width_px);
+    const height_f: f32 = @floatFromInt(texture_size.height_px);
+    const x0: f32 = @floatFromInt(slot.x_px);
+    const y0: f32 = @floatFromInt(slot.y_px);
+    const x1: f32 = @floatFromInt(slot.x_px + slot.width_px);
+    const y1: f32 = @floatFromInt(slot.y_px + slot.height_px);
+
+    return .{
+        .u0 = x0 / width_f,
+        .v0 = y0 / height_f,
+        .u1 = x1 / width_f,
+        .v1 = y1 / height_f,
+    };
+}
+
+pub fn buildGlyphQuadFrame(
+    allocator: std.mem.Allocator,
+    frame: glyph_frame.GlyphFrame,
+    texture_size: AtlasTextureSize,
+) !GlyphQuadFrame {
+    // GlyphFrame은 "어떤 atlas slot을 쓸지"까지만 결정한다. GlyphQuadFrame은 그 다음
+    // backend 입력 단계로, slot pixel rect를 shader UV로 바꾼다. 이 경계를 따로 두면
+    // Metal backend가 font/layout/cache 정책을 다시 해석하지 않아도 된다.
+    var glyphs: std.ArrayList(GlyphQuad) = .empty;
+    errdefer glyphs.deinit(allocator);
+    try glyphs.ensureTotalCapacity(allocator, frame.glyphs.len);
+
+    var stats: GlyphQuadFrameStats = .{
+        .glyph_count = frame.glyphs.len,
+        .overlay_count = frame.overlays.len,
+    };
+
+    for (frame.glyphs) |glyph| {
+        const uv = try uvRectForSlot(glyph.slot, texture_size);
+        stats.uv_count += 1;
+        glyphs.appendAssumeCapacity(.{
+            .run = glyph.run,
+            .slot = glyph.slot,
+            .uv = uv,
+        });
+    }
+
+    const overlay_copy = try allocator.dupe(draw_list.DrawOverlay, frame.overlays);
+    errdefer allocator.free(overlay_copy);
+    const glyph_slice = try glyphs.toOwnedSlice(allocator);
+    errdefer allocator.free(glyph_slice);
+
+    return .{
+        .size = frame.size,
+        .cursor = frame.cursor,
+        .dirty = frame.dirty,
+        .glyphs = glyph_slice,
+        .overlays = overlay_copy,
+        .stats = stats,
+    };
+}
+
+fn rangeFits(start: u32, len: u32, limit: u32) bool {
+    if (len == 0 or start >= limit) return false;
+    return len <= limit - start;
+}
+
+fn testSlot(x: u32, y: u32, width: u32, height: u32) glyph_atlas.AtlasSlot {
+    return .{
+        .id = 1,
+        .key = .{
+            .font_id = 1,
+            .glyph_id = 'A',
+            .font_size_px = 14,
+            .device_scale = 1,
+        },
+        .x_px = x,
+        .y_px = y,
+        .width_px = width,
+        .height_px = height,
+        .upload_bytes = @as(usize, width) * @as(usize, height) * 4,
+        .generation = 0,
+    };
+}
+
+test "glyph uv rect normalizes atlas slot pixels" {
+    // 이 테스트는 atlas slot 좌표가 shader UV로 바뀌는 수학을 고정한다. 제품 Metal
+    // shader가 같은 계산을 다른 곳에서 반복하지 않게 renderer domain의 단일 계약으로 둔다.
+    const uv = try uvRectForSlot(testSlot(16, 8, 16, 8), .{
+        .width_px = 64,
+        .height_px = 32,
+    });
+
+    try std.testing.expectEqual(@as(f32, 0.25), uv.u0);
+    try std.testing.expectEqual(@as(f32, 0.25), uv.v0);
+    try std.testing.expectEqual(@as(f32, 0.5), uv.u1);
+    try std.testing.expectEqual(@as(f32, 0.5), uv.v1);
+}
+
+test "glyph uv rect rejects invalid texture and out-of-bounds slots" {
+    // UV 계산이 실패해야 하는 모양을 명시한다. 여기서 걸러야 native backend가 texture 밖을
+    // 샘플링하거나 0 크기 texture에서 NaN/inf UV를 만드는 문제를 피할 수 있다.
+    try std.testing.expectError(
+        error.InvalidAtlasTextureSize,
+        uvRectForSlot(testSlot(0, 0, 8, 8), .{ .width_px = 0, .height_px = 32 }),
+    );
+    try std.testing.expectError(
+        error.InvalidAtlasSlotSize,
+        uvRectForSlot(testSlot(0, 0, 0, 8), .{ .width_px = 32, .height_px = 32 }),
+    );
+    try std.testing.expectError(
+        error.AtlasSlotOutsideTexture,
+        uvRectForSlot(testSlot(24, 0, 16, 8), .{ .width_px = 32, .height_px = 32 }),
+    );
+    try std.testing.expectError(
+        error.AtlasSlotOutsideTexture,
+        uvRectForSlot(testSlot(0, 24, 8, 16), .{ .width_px = 32, .height_px = 32 }),
+    );
+}
+
+test "glyph quad frame converts glyph frame slots into shader uv input" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // 이 테스트는 제품 renderer 준비 경계의 다음 단계다. GlyphFrame의 slot 좌표가
+    // GlyphQuadFrame의 UV로 변환되고, cursor/underline overlay도 보존되어야 Metal
+    // backend가 텍스트와 draw-time 효과를 같은 frame에서 그릴 수 있다.
+    core.clearDirty();
+    try core.write("AA");
+    core.cells[0].style.underline = true;
+
+    var list = try @import("draw_list.zig").buildDrawList(std.testing.allocator, core.snapshot());
+    defer list.deinit(std.testing.allocator);
+
+    var glyph_runs = try @import("glyph_layout.zig").buildGlyphRunList(
+        std.testing.allocator,
+        list,
+        .{ .font_size_px = 16, .device_scale = 1 },
+        @import("glyph_layout.zig").FakeFontBackend{},
+    );
+    defer glyph_runs.deinit(std.testing.allocator);
+
+    var atlas = glyph_atlas.GlyphAtlas.init(std.testing.allocator, .{ .atlas_width_px = 64 });
+    defer atlas.deinit();
+
+    var frame = try glyph_frame.prepareGlyphFrame(std.testing.allocator, glyph_runs, &atlas);
+    defer frame.deinit(std.testing.allocator);
+
+    var quads = try buildGlyphQuadFrame(std.testing.allocator, frame, .{
+        .width_px = 64,
+        .height_px = 64,
+    });
+    defer quads.deinit(std.testing.allocator);
+
+    try std.testing.expect(quads.stats.ready());
+    try std.testing.expectEqual(frame.glyphs.len, quads.glyphs.len);
+    try std.testing.expectEqual(frame.overlays.len, quads.overlays.len);
+    try std.testing.expectEqual(frame.glyphs[0].slot.id, quads.glyphs[0].slot.id);
+    try std.testing.expectEqual(frame.glyphs[0].run.codepoint, quads.glyphs[0].run.codepoint);
+    try std.testing.expectEqual(@as(f32, 0.0), quads.glyphs[0].uv.u0);
+    try std.testing.expectEqual(@as(f32, 0.0), quads.glyphs[0].uv.v0);
+    try std.testing.expectEqual(@as(f32, 0.25), quads.glyphs[0].uv.u1);
+    try std.testing.expectEqual(@as(f32, 0.25), quads.glyphs[0].uv.v1);
+
+    // 같은 'A'는 같은 atlas slot을 재사용하므로 UV도 같아야 한다.
+    try std.testing.expectEqual(quads.glyphs[0].slot.id, quads.glyphs[1].slot.id);
+    try std.testing.expectEqual(quads.glyphs[0].uv.u0, quads.glyphs[1].uv.u0);
+    try std.testing.expectEqual(quads.glyphs[0].uv.u1, quads.glyphs[1].uv.u1);
+}

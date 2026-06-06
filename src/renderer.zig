@@ -3,9 +3,11 @@ pub const frame_probe = @import("renderer/frame_probe.zig");
 pub const glyph_atlas = @import("renderer/glyph_atlas.zig");
 pub const glyph_frame = @import("renderer/glyph_frame.zig");
 pub const glyph_layout = @import("renderer/glyph_layout.zig");
+pub const glyph_quads = @import("renderer/glyph_quads.zig");
 pub const state = @import("renderer/state.zig");
 pub const types = @import("renderer/types.zig");
 
+pub const AtlasTextureSize = glyph_quads.AtlasTextureSize;
 pub const AtlasInvalidation = glyph_atlas.AtlasInvalidation;
 pub const AtlasInvalidationReason = glyph_atlas.AtlasInvalidationReason;
 pub const AtlasLookup = glyph_atlas.AtlasLookup;
@@ -24,6 +26,10 @@ pub const GlyphAtlasConfig = glyph_atlas.GlyphAtlasConfig;
 pub const FontId = glyph_layout.FontId;
 pub const GlyphFrame = glyph_frame.GlyphFrame;
 pub const GlyphFrameStats = glyph_frame.GlyphFrameStats;
+pub const GlyphQuad = glyph_quads.GlyphQuad;
+pub const GlyphQuadFrame = glyph_quads.GlyphQuadFrame;
+pub const GlyphQuadFrameStats = glyph_quads.GlyphQuadFrameStats;
+pub const GlyphUvRect = glyph_quads.GlyphUvRect;
 pub const GlyphCacheKey = glyph_layout.GlyphCacheKey;
 pub const GlyphId = glyph_layout.GlyphId;
 pub const GlyphRun = glyph_layout.GlyphRun;
@@ -40,10 +46,12 @@ pub const ShapeResult = glyph_layout.ShapeResult;
 pub const TextLayoutConfig = glyph_layout.TextLayoutConfig;
 pub const UnderlineOverlay = draw_list.UnderlineOverlay;
 pub const buildDrawList = draw_list.buildDrawList;
+pub const buildGlyphQuadFrame = glyph_quads.buildGlyphQuadFrame;
 pub const buildGlyphRunList = glyph_layout.buildGlyphRunList;
 pub const initialBackendForMacOS = types.initialBackendForMacOS;
 pub const prepareGlyphFrame = glyph_frame.prepareGlyphFrame;
 pub const textConfigFromFontSize = state.textConfigFromFontSize;
+pub const uvRectForSlot = glyph_quads.uvRectForSlot;
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

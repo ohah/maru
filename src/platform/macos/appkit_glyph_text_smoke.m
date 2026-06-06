@@ -422,8 +422,9 @@ static BOOL maru_write_ppm_from_bgra8_buffer(
     }
 
     // PPM(P6)은 압축도 메타데이터도 없지만, 외부 이미지 라이브러리 없이도 사람이
-    // Preview/이미지 도구로 열어볼 수 있다. smoke artifact의 목적은 픽셀 압축 효율이
-    // 아니라 실패 프레임을 바로 보는 것이다.
+    // Preview/이미지 도구로 열어볼 수 있다. 이 artifact는 gate를 통과한(검증된) glyph
+    // 프레임을 그대로 남겨, summary 숫자뿐 아니라 실제 그려진 픽셀을 사람이 눈으로
+    // 확인하게 한다. 목적은 픽셀 압축 효율이 아니라 그 시각 확인이다.
     if (fprintf(file, "P6\n%zu %zu\n255\n", width, height) < 0) {
         fclose(file);
         return NO;
@@ -586,42 +587,31 @@ static BOOL maru_pixel_is_visible_glyph(const uint8_t *pixel) {
     return luma > clear_luma + 40;
 }
 
-static uint32_t maru_count_non_clear_readback_pixels(
+// non-clear 카운트와 visible-glyph 카운트는 같은 readback buffer를 같은 stride로
+// 도는 동일 루프라, 예측자만 다른 두 함수를 하나로 합쳐 한 번만 스캔한다. bytes가
+// NULL이면(드물게 GPU buffer mapping 실패) 둘 다 0으로 남겨 기존 동작을 유지한다.
+static void maru_count_readback_pixels(
     id<MTLBuffer> readback_buffer,
-    size_t sample_count
+    size_t sample_count,
+    uint32_t *non_clear_out,
+    uint32_t *visible_glyph_out
 ) {
-    const uint8_t *bytes = (const uint8_t *)[readback_buffer contents];
-    if (bytes == NULL) {
-        return 0;
-    }
-
     uint32_t non_clear = 0;
-    for (size_t i = 0; i < sample_count; i++) {
-        const uint8_t *pixel = bytes + (i * maru_glyph_text_readback_stride);
-        if (maru_pixel_is_non_clear(pixel)) {
-            non_clear += 1;
-        }
-    }
-    return non_clear;
-}
-
-static uint32_t maru_count_visible_glyph_readback_pixels(
-    id<MTLBuffer> readback_buffer,
-    size_t sample_count
-) {
-    const uint8_t *bytes = (const uint8_t *)[readback_buffer contents];
-    if (bytes == NULL) {
-        return 0;
-    }
-
     uint32_t visible = 0;
-    for (size_t i = 0; i < sample_count; i++) {
-        const uint8_t *pixel = bytes + (i * maru_glyph_text_readback_stride);
-        if (maru_pixel_is_visible_glyph(pixel)) {
-            visible += 1;
+    const uint8_t *bytes = (const uint8_t *)[readback_buffer contents];
+    if (bytes != NULL) {
+        for (size_t i = 0; i < sample_count; i++) {
+            const uint8_t *pixel = bytes + (i * maru_glyph_text_readback_stride);
+            if (maru_pixel_is_non_clear(pixel)) {
+                non_clear += 1;
+            }
+            if (maru_pixel_is_visible_glyph(pixel)) {
+                visible += 1;
+            }
         }
     }
-    return visible;
+    *non_clear_out = non_clear;
+    *visible_glyph_out = visible;
 }
 
 static BOOL maru_draw_glyph_text_frame(
@@ -787,13 +777,11 @@ static BOOL maru_draw_glyph_text_frame(
     result->readback_samples = (drawable_sample_count > UINT32_MAX)
         ? UINT32_MAX
         : (uint32_t)drawable_sample_count;
-    result->readback_non_clear_pixels = maru_count_non_clear_readback_pixels(
+    maru_count_readback_pixels(
         readback_buffer,
-        drawable_sample_count
-    );
-    result->readback_visible_glyph_pixels = maru_count_visible_glyph_readback_pixels(
-        readback_buffer,
-        drawable_sample_count
+        drawable_sample_count,
+        &result->readback_non_clear_pixels,
+        &result->readback_visible_glyph_pixels
     );
     result->glyph_text_drawn =
         result->readback_samples > 0 &&

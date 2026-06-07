@@ -285,9 +285,24 @@ pub fn build(b: *std.Build) void {
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    const macos_coretext_font_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/coretext_font.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+            },
+        }),
+    });
+    const run_macos_coretext_font_tests = b.addRunArtifact(macos_coretext_font_tests);
+
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    // coretext_font.zig는 Objective-C/CoreText runtime을 직접 호출하지 않는 제품 후보
+    // adapter다. 그래서 macOS smoke opt-in에 숨기지 말고 기본 Zig test에서 돌린다.
+    test_step.dependOn(&run_macos_coretext_font_tests.step);
 
     const e2e_tests = b.addTest(.{
         .root_module = b.createModule(.{

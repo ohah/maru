@@ -2,6 +2,7 @@ const std = @import("std");
 const maru = @import("maru");
 const config = maru.config;
 const renderer = maru.renderer;
+const coretext_font = @import("coretext_font.zig");
 
 const artifact_dir = "zig-out/maru-macos-coretext-smoke";
 const font_name_capacity = 128;
@@ -620,27 +621,17 @@ fn shapedRecordForCoreTextProbe(
     record: NativeGlyphRecord,
     font_registry: *renderer.FontIdentityRegistry,
 ) !renderer.ShapedGlyphRecord {
-    const drawable = drawableCoreTextProbeRecord(record);
-    const font_id: renderer.FontId = if (drawable)
-        try font_registry.intern(.{ .postscript_name = cStringField(&record.font_name) })
-    else
-        0;
-
-    return .{
+    return coretext_font.shapedRecordFromCoreTextGlyph(.{
         .row = 0,
         .col = @intCast(@min(record.string_index, std.math.maxInt(u16))),
         .cell_width = cellWidthForCoreTextProbe(record.category),
         .codepoint = codepointForProbeRecord(record),
-        .font_id = font_id,
         .glyph_id = record.glyph_id,
+        .font_name = cStringField(&record.font_name),
         .fallback = record.fallback != 0,
         .color_glyph_kind = colorGlyphKindForCoreTextProbe(record.category),
-        .drawable = drawable,
-    };
-}
-
-fn drawableCoreTextProbeRecord(record: NativeGlyphRecord) bool {
-    return record.glyph_id != 0 and record.category != @intFromEnum(NativeGlyphCategory.space);
+        .drawable = record.glyph_id != 0 and record.category != @intFromEnum(NativeGlyphCategory.space),
+    }, font_registry);
 }
 
 fn cellWidthForCoreTextProbe(category: u32) u2 {

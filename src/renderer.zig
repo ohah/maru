@@ -1,5 +1,6 @@
 pub const draw_list = @import("renderer/draw_list.zig");
 pub const frame_probe = @import("renderer/frame_probe.zig");
+pub const font_identity = @import("renderer/font_identity.zig");
 pub const glyph_atlas = @import("renderer/glyph_atlas.zig");
 pub const glyph_frame = @import("renderer/glyph_frame.zig");
 pub const glyph_layout = @import("renderer/glyph_layout.zig");
@@ -26,6 +27,10 @@ pub const FakeFontBackend = glyph_layout.FakeFontBackend;
 pub const FakeGlyphRasterizer = glyph_raster.FakeGlyphRasterizer;
 pub const GlyphAtlas = glyph_atlas.GlyphAtlas;
 pub const GlyphAtlasConfig = glyph_atlas.GlyphAtlasConfig;
+pub const FontIdentity = font_identity.FontIdentity;
+pub const FontIdentityError = font_identity.FontIdentityError;
+pub const FontIdentityKey = font_identity.FontIdentityKey;
+pub const FontIdentityRegistry = font_identity.FontIdentityRegistry;
 pub const FontId = glyph_layout.FontId;
 pub const GlyphFrame = glyph_frame.GlyphFrame;
 pub const GlyphQuadError = glyph_quads.GlyphQuadError;

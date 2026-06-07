@@ -151,6 +151,7 @@ backend(Metal/WebGPU) 선택과 별개로, 두 가지를 어디서 처리하는�
 
 - 초기에는 macOS-first에 맞춰 **CoreText**로 shaping과 font fallback을 한다. 추가 런타임 의존성이 없고 Apple 글꼴 스택과 가장 잘 맞는다.
 - 단, shaping 결과는 backend-neutral한 `GlyphRunList`(코드포인트, glyph id, 셀 좌표, 색)로만 표현한다. CoreText 타입을 `DrawList`나 `GlyphRunList` 공개 계약으로 노출하지 않는다.
+- native shaper 결과는 먼저 `ShapedGlyphRecord`로 정규화한다. 이 adapter는 `.notdef`/space처럼 atlas 후보가 아닌 record를 걸러내고, CJK/emoji width, fallback 여부, color glyph kind, font size/scale cache key를 `GlyphRunList`로 전달한다.
 - 그래서 나중에 cross-platform이 필요하면 같은 경계 뒤에서 **HarfBuzz** 같은 shaper로 교체할 수 있다. ligature/complex script 최적화는 아래 "지금 선택하지 않는 것"으로 둔다.
 - 구체적인 fallback, cell width, glyph atlas cache key, emoji 정책은 [폰트 전략](font-strategy.md)을 따른다.
 
@@ -202,7 +203,7 @@ dirty region 범위:
 - GPU 없는 `GlyphFrame -> GlyphRasterFrame` test. upload 후보가 backend가 복사할 contiguous RGBA bytes 또는 명시적 skip으로 바뀌고, 공백 같은 zero-ink glyph가 실패가 아니라 진단값으로 남는지 확인한다. 경계 밖 slot과 단일 glyph rasterizer 실패는 frame 전체 abort가 아니라 skip 통계로 드러나야 한다.
 - GPU 없는 `RendererState` test. 같은 renderer state로 여러 frame을 만들 때 atlas slot이 재사용되고, `RenderFrame`이 `GlyphQuadFrame`과 `GlyphRasterFrame`까지 소유해 UV, upload byte, raster skip 누락을 숨기지 않는지 확인한다.
 - GPU 없는 `Config -> ResolvedAppearance` test. `#RRGGBB` 색상, font size, cursor shape/blink를 renderer 입력 전 단계에서 검증한다.
-- macOS CoreText smoke summary test. default `ResolvedAppearance`의 font family/size가 native CoreText bridge와 glyph cache key 후보에 연결되는지 검증한다.
+- macOS CoreText smoke summary test. default `ResolvedAppearance`의 font family/size가 native CoreText bridge와 `ShapedGlyphRecord -> GlyphRunList -> GlyphFrame` cache key 후보에 연결되는지 검증한다.
 - renderer가 PTY, parser, live platform handle을 import하지 않는 boundary test.
 
 opt-in으로 둘 것:

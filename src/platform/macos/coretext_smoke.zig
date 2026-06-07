@@ -265,41 +265,25 @@ fn buildGlyphFrameProbe(
     // font_id/glyph_id 후보를 Maru의 제품 renderer 계약인 `GlyphRunList -> GlyphFrame`
     // 경로에 태운다. 그래야 다음 Metal text draw에서 "폰트는 됐는데 frame/atlas 준비가
     // 안 됐다" 같은 원인을 summary로 분리할 수 있다.
-    var runs: std.ArrayList(renderer.GlyphRun) = .empty;
-    errdefer runs.deinit(allocator);
-    try runs.ensureTotalCapacity(allocator, records.len);
-
-    var fallback_count: usize = 0;
-    var color_glyph_count: usize = 0;
+    var shaped_records: std.ArrayList(renderer.ShapedGlyphRecord) = .empty;
+    defer shaped_records.deinit(allocator);
+    try shaped_records.ensureTotalCapacity(allocator, records.len);
 
     for (records) |record| {
-        if (!isDrawableAtlasRecord(record)) continue;
-
-        const glyph = glyphRunForAtlas(record, fontSizePxForAtlas(appearance.font.size));
-        if (glyph.fallback) fallback_count += 1;
-        if (glyph.cache_key.color_glyph_kind == .color) color_glyph_count += 1;
-        runs.appendAssumeCapacity(glyph);
+        shaped_records.appendAssumeCapacity(shapedRecordForCoreTextProbe(record));
     }
 
-    const glyph_slice = try runs.toOwnedSlice(allocator);
-    errdefer allocator.free(glyph_slice);
-    const overlays = try allocator.alloc(renderer.DrawOverlay, 0);
-    errdefer allocator.free(overlays);
-
-    var glyph_runs: renderer.GlyphRunList = .{
-        .size = .{ .cols = colsForGlyphRuns(glyph_slice), .rows = 1 },
-        .cursor = .{},
-        .dirty = if (glyph_slice.len > 0) .{ .start_row = 0, .end_row = 0 } else null,
-        .glyphs = glyph_slice,
-        .overlays = overlays,
-        .fallback_count = fallback_count,
-        .replacement_count = 0,
-    };
+    var shaped = try renderer.buildGlyphRunListFromShapedRecords(
+        allocator,
+        shaped_records.items,
+        renderer.textConfigFromFontSize(appearance.font.size, 1),
+    );
+    defer shaped.deinit(allocator);
 
     var atlas = renderer.GlyphAtlas.init(allocator, .{});
     defer atlas.deinit();
 
-    var frame = try renderer.prepareGlyphFrame(allocator, glyph_runs, &atlas);
+    var frame = try renderer.prepareGlyphFrame(allocator, shaped.runs, &atlas);
     defer frame.deinit(allocator);
 
     const shape_complete = hasNativeShapeFields(native);
@@ -315,7 +299,7 @@ fn buildGlyphFrameProbe(
         .entry_count = atlas.entryCount(),
         .upload_candidates = frame.stats.upload_count,
         .upload_bytes = frame.stats.upload_bytes,
-        .color_glyph_count = color_glyph_count,
+        .color_glyph_count = shaped.color_glyph_count,
         .glyph_count = frame.stats.glyph_count,
         .upload_count = frame.stats.upload_count,
         .reused_count = frame.stats.reused_count,
@@ -323,62 +307,54 @@ fn buildGlyphFrameProbe(
         .fallback_count = frame.stats.fallback_count,
         .replacement_count = frame.stats.replacement_count,
     };
-
-    // glyph_runs는 이 함수가 소유하는 입력 fixture다. prepareGlyphFrame은 값으로 받아
-    // overlays를 dupe하고 glyph를 복사하므로 입력 소유권을 가져가지 않는다. 성공 경로에서는
-    // 여기서 glyph_slice/overlays를 한 번만 해제한다. 오류 경로는 위의 errdefer 두 개가
-    // 정확히 한 번씩 해제한다. (defer glyph_runs.deinit를 함께 두면 오류 시 errdefer와
-    // 겹쳐 이중 free가 되므로 두지 않는다.)
-    glyph_runs.deinit(allocator);
     return probe;
 }
 
-fn colsForGlyphRuns(glyphs: []const renderer.GlyphRun) u16 {
-    // CoreText smoke의 glyph records는 probe 한 줄의 UTF-16 index를 col처럼 사용한다.
-    // 제품 layout metric은 아니지만, GlyphRunList가 비어 있지 않은 유효한 surface
-    // metadata를 갖도록 최소 cols를 계산한다.
-    var max_col: u16 = 0;
-    for (glyphs) |glyph| {
-        const end = std.math.add(u16, glyph.col, @as(u16, glyph.cell_width)) catch std.math.maxInt(u16);
-        max_col = @max(max_col, end);
-    }
-    return @max(max_col, 1);
-}
-
-fn isDrawableAtlasRecord(record: NativeGlyphRecord) bool {
-    if (record.glyph_id == 0) return false;
-    return record.category != @intFromEnum(NativeGlyphCategory.space);
-}
-
-fn glyphRunForAtlas(record: NativeGlyphRecord, font_size_px: u16) renderer.GlyphRun {
-    const color_kind: renderer.ColorGlyphKind = if (record.category == @intFromEnum(NativeGlyphCategory.emoji))
-        .color
-    else
-        .monochrome;
+fn shapedRecordForCoreTextProbe(record: NativeGlyphRecord) renderer.ShapedGlyphRecord {
     return .{
         .row = 0,
         .col = @intCast(@min(record.string_index, std.math.maxInt(u16))),
-        .cell_width = if (record.category == @intFromEnum(NativeGlyphCategory.cjk) or record.category == @intFromEnum(NativeGlyphCategory.emoji)) 2 else 1,
+        .cell_width = cellWidthForCoreTextProbe(record.category),
         .codepoint = codepointForProbeRecord(record),
         .font_id = record.font_id,
         .glyph_id = record.glyph_id,
         .fallback = record.fallback != 0,
-        .cache_key = .{
-            .font_id = record.font_id,
-            .glyph_id = record.glyph_id,
-            .font_size_px = font_size_px,
-            .device_scale = 1,
-            .color_glyph_kind = color_kind,
-        },
+        .color_glyph_kind = colorGlyphKindForCoreTextProbe(record.category),
+        .drawable = record.glyph_id != 0 and record.category != @intFromEnum(NativeGlyphCategory.space),
     };
 }
 
+fn cellWidthForCoreTextProbe(category: u32) u2 {
+    if (category == @intFromEnum(NativeGlyphCategory.cjk) or
+        category == @intFromEnum(NativeGlyphCategory.emoji))
+    {
+        return 2;
+    }
+    return 1;
+}
+
+fn colorGlyphKindForCoreTextProbe(category: u32) renderer.ColorGlyphKind {
+    if (category == @intFromEnum(NativeGlyphCategory.emoji)) return .color;
+    return .monochrome;
+}
+
 fn fontSizePxForAtlas(font_size: f32) u16 {
-    // `ResolvedAppearance`가 1..512 범위를 이미 보장한다. renderer의 현재 glyph cache
-    // 계약은 정수 px이므로 smoke에서는 반올림해 넣는다. fractional point/px 정밀도는
-    // 실제 제품 renderer에서 device scale과 함께 별도 정책으로 고정해야 한다.
-    std.debug.assert(font_size >= 1.0 and font_size <= 512.0);
-    return @intFromFloat(@round(font_size));
+    return renderer.textConfigFromFontSize(font_size, 1).font_size_px;
+}
+
+fn shapedGlyphRunForTest(
+    allocator: std.mem.Allocator,
+    record: NativeGlyphRecord,
+    font_size: f32,
+) !renderer.ShapedGlyphRunList {
+    // 테스트가 CoreText private helper의 세부 구현에 직접 매달리지 않도록, native probe
+    // record도 제품 renderer의 neutral adapter를 거쳐 cache key까지 확인한다.
+    const shaped = [_]renderer.ShapedGlyphRecord{shapedRecordForCoreTextProbe(record)};
+    return renderer.buildGlyphRunListFromShapedRecords(
+        allocator,
+        &shaped,
+        renderer.textConfigFromFontSize(font_size, 1),
+    );
 }
 
 fn codepointForProbeRecord(record: NativeGlyphRecord) u21 {
@@ -653,15 +629,17 @@ test "CoreText smoke rounds resolved font size into atlas cache key" {
     // 쓴다. bridge smoke가 hardcoded 14로 되돌아가면 설정 변경 후 atlas miss/hit 진단이
     // 틀어지므로 resolved size가 cache key까지 들어가는지 고정한다.
     const appearance = try config.resolveAppearance(.{ .font = .{ .family = "Menlo", .size = 16.6 } });
-    const glyph = glyphRunForAtlas(.{
+    var shaped = try shapedGlyphRunForTest(std.testing.allocator, .{
         .font_id = 1,
         .glyph_id = 42,
         .string_index = 0,
         .category = @intFromEnum(NativeGlyphCategory.ascii),
         .fallback = 0,
-    }, fontSizePxForAtlas(appearance.font.size));
+    }, appearance.font.size);
+    defer shaped.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u16, 17), glyph.cache_key.font_size_px);
+    try std.testing.expectEqual(@as(usize, 1), shaped.runs.glyphs.len);
+    try std.testing.expectEqual(@as(u16, 17), shaped.runs.glyphs[0].cache_key.font_size_px);
 }
 
 test "CoreText smoke treats requested font mismatch as a diagnostic fallback" {

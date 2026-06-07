@@ -43,10 +43,14 @@ pub fn shapedRecordFromCoreTextGlyph(
     };
 }
 
-pub fn needsFontIdentity(record: CoreTextGlyphRecord) bool {
+fn needsFontIdentity(record: CoreTextGlyphRecord) bool {
     // CoreText glyph id는 font face 안에서만 의미가 있다. 그래서 실제 bitmap을 만들
     // drawable glyph만 registry에 넣는다. 공백, .notdef, width 0 record까지 intern하면
     // `font_identity_count`가 rasterizer 조회 대상보다 커져 디버깅 신호가 흐려진다.
+    //
+    // 이 intern 정책은 adapter 내부 규칙이라 비공개로 둔다. 외부 caller는 분기 없이
+    // `shapedRecordFromCoreTextGlyph` 한 진입점만 쓰게 해, 같은 규칙이 여러 곳으로
+    // 갈라지지 않게 한다.
     return record.drawable and record.glyph_id != 0 and record.cell_width != 0;
 }
 

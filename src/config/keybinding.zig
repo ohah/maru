@@ -150,6 +150,17 @@ pub const KeyBindingResolver = struct {
             for (self.terminal_bindings[left_index + 1 ..]) |right| {
                 if (left.chord.eql(right.chord)) return error.DuplicateTerminalBinding;
             }
+            // A send_control macro whose codepoint has no C0 mapping (e.g. a
+            // digit) can only fail when the key is pressed. Validate it up front
+            // so a bad binding is a config-load error, not a mid-session key
+            // failure. resolve() relies on this so it never has to handle an
+            // invalid control codepoint at runtime.
+            switch (left.input) {
+                .send_control => |codepoint| {
+                    _ = terminal.input.controlByte(codepoint) catch return error.InvalidControlKey;
+                },
+                else => {},
+            }
         }
     }
 
@@ -223,6 +234,9 @@ fn parseKey(raw: []const u8) KeyBindingError!KeyName {
     if (std.ascii.eqlIgnoreCase(raw, "Tab")) return .tab;
     if (std.ascii.eqlIgnoreCase(raw, "Enter")) return .enter;
     if (std.ascii.eqlIgnoreCase(raw, "Space")) return .{ .char = ' ' };
+    // '+' is the chord-part separator, so the literal plus key cannot be written
+    // inline. Accept the "Plus" spelling so `Cmd+Plus` binds the '+' key.
+    if (std.ascii.eqlIgnoreCase(raw, "Plus")) return .{ .char = '+' };
     if (std.ascii.eqlIgnoreCase(raw, "Backspace")) return .backspace;
     if (std.ascii.eqlIgnoreCase(raw, "Delete")) return .delete;
     if (std.ascii.eqlIgnoreCase(raw, "Up")) return .arrow_up;
@@ -239,6 +253,12 @@ fn parseKey(raw: []const u8) KeyBindingError!KeyName {
 }
 
 fn keyNameFromTerminalKey(key: terminal.Key) ?KeyName {
+    // KNOWN LIMITATION: KeyName has .delete and .function (F1-F24) so configs can
+    // parse them, but terminal.Key (the normalized runtime key event) has no such
+    // variants yet, so this function can never produce them. A binding on
+    // `Delete` or `F13` therefore parses and validates but can never match a real
+    // key event — it is dead config until terminal.Key gains those variants and
+    // their byte encodings. Tracked in docs/key-input-and-shortcuts.md.
     return switch (key) {
         .char => |codepoint| .{ .char = normalizeEventChar(codepoint) },
         .enter => .enter,
@@ -253,8 +273,11 @@ fn keyNameFromTerminalKey(key: terminal.Key) ?KeyName {
 }
 
 fn normalizeEventChar(codepoint: u21) u21 {
-    if (codepoint >= 'a' and codepoint <= 'z') return codepoint - 'a' + 'A';
-    return codepoint;
+    // Fold ASCII letters to uppercase so a typed 'b' matches a parsed 'B'. parseKey
+    // uses std.ascii.toUpper for the same fold; reuse it here so the two paths
+    // cannot drift. Non-ASCII codepoints pass through unchanged.
+    if (codepoint > std.math.maxInt(u8)) return codepoint;
+    return std.ascii.toUpper(@intCast(codepoint));
 }
 
 fn isAllowedPunctuation(byte: u8) bool {
@@ -282,6 +305,49 @@ test "rejects ambiguous key chord strings" {
     try std.testing.expectError(error.MissingKey, KeyChord.parse("Ctrl+Cmd"));
     try std.testing.expectError(error.MultipleKeys, KeyChord.parse("Ctrl+B+C"));
     try std.testing.expectError(error.InvalidFunctionKey, KeyChord.parse("F25"));
+}
+
+test "parses the literal plus key via the Plus spelling" {
+    try std.testing.expect((try KeyChord.parse("Cmd+Plus")).key.eql(.{ .char = '+' }));
+    // The bare '+' separator still cannot be a key, so an empty part errors.
+    try std.testing.expectError(error.EmptyChordPart, KeyChord.parse("Cmd++"));
+}
+
+test "validate rejects a send_control macro with no C0 mapping" {
+    // A digit has no control byte; this must fail at config validation, not when
+    // the key is later pressed.
+    try std.testing.expectError(error.InvalidControlKey, (KeyBindingResolver{
+        .terminal_bindings = &.{
+            .{ .chord = try KeyChord.parse("Ctrl+1"), .input = .{ .send_control = '1' } },
+        },
+    }).validate());
+}
+
+test "send_control accepts non-letter C0 controls like Ctrl+[" {
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{
+        .terminal_bindings = &.{
+            .{ .chord = try KeyChord.parse("Cmd+E"), .input = .{ .send_control = '[' } },
+        },
+    };
+    try resolver.validate();
+    const resolved = try resolver.resolve(.{
+        .key = .{ .char = 'e' },
+        .modifiers = .{ .command = true },
+    }, &buffer);
+    try std.testing.expectEqualStrings("\x1b", resolved.terminal_input); // Ctrl+[ == ESC
+}
+
+test "unbound Ctrl with an unmapped key types the character instead of erroring" {
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{};
+    try std.testing.expectEqualStrings(
+        "1",
+        (try resolver.resolve(.{
+            .key = .{ .char = '1' },
+            .modifiers = .{ .control = true },
+        }, &buffer)).terminal_input,
+    );
 }
 
 test "resolver prioritizes app actions and blocks conflicting terminal macros" {

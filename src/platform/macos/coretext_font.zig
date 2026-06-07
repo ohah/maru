@@ -15,7 +15,10 @@ pub const CoreTextGlyphRecord = struct {
     replacement: bool = false,
     style: terminal.Style = .{},
     color_glyph_kind: renderer.ColorGlyphKind = .monochrome,
-    drawable: bool = true,
+    // CoreText는 공백도 font run 안에 포함할 수 있다. 이 값을 필수로 두면 caller가
+    // "실제로 bitmap을 만들 glyph인가"를 명시해야 해서, 공백을 실수로 rasterizer
+    // 입력에 섞는 버그를 컴파일 단계에서 더 빨리 발견할 수 있다.
+    drawable: bool,
 };
 
 pub fn shapedRecordFromCoreTextGlyph(
@@ -66,6 +69,7 @@ test "CoreText font bridge interns only drawable glyph faces" {
         .codepoint = 'A',
         .glyph_id = 42,
         .font_name = "Menlo-Regular",
+        .drawable = true,
     }, &registry);
     const space = try shapedRecordFromCoreTextGlyph(.{
         .col = 1,
@@ -104,6 +108,7 @@ test "CoreText font bridge rejects missing face names only when rasterizing woul
             .codepoint = 'A',
             .glyph_id = 42,
             .font_name = "",
+            .drawable = true,
         }, &registry),
     );
 }
@@ -126,6 +131,7 @@ test "CoreText font bridge preserves renderer-neutral glyph metadata" {
         .fallback = true,
         .style = .{ .bold = true, .underline = true },
         .color_glyph_kind = .color,
+        .drawable = true,
     }, &registry);
 
     try std.testing.expectEqual(@as(u16, 2), shaped.row);

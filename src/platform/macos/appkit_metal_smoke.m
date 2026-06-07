@@ -240,6 +240,17 @@ static uint32_t maru_saturating_add_u32(uint32_t left, size_t right) {
     return left + (uint32_t)right;
 }
 
+static size_t maru_align_up_size(size_t value, size_t alignment) {
+    if (alignment == 0) {
+        return value;
+    }
+    const size_t remainder = value % alignment;
+    if (remainder == 0) {
+        return value;
+    }
+    return value + (alignment - remainder);
+}
+
 static uint32_t maru_count_mismatched_bytes(
     const uint8_t *left,
     const uint8_t *right,
@@ -285,6 +296,11 @@ static BOOL maru_upload_fits_atlas(
     }
     const size_t expected_bytes = upload.bytes_per_row * height;
     if (upload.byte_count != expected_bytes) {
+        return NO;
+    }
+    // readback 비교는 source가 width*4로 tight하게 packing됐다고 보고 row 단위로 한다.
+    // bytes_per_row가 slot width와 어긋나면 그 가정이 깨지므로 여기서 막는다(RGBA8 = 4 byte).
+    if (upload.bytes_per_row != (size_t)upload.atlas_width_px * 4) {
         return NO;
     }
     if (upload.bytes_offset > raster_pixel_count ||
@@ -359,8 +375,16 @@ static BOOL maru_upload_and_readback_product_atlas(
     for (size_t index = 0; index < upload_count; index++) {
         const MaruMetalRasterUpload upload = uploads[index];
         const uint8_t *source = raster_pixels + upload.bytes_offset;
+        // Metal texture->buffer blit은 destinationBytesPerRow가 정렬(여기선 256)된 값이어야
+        // 하는 GPU가 있다(이 파일의 cell readback이 maru_readback_stride=256을 쓰는 이유,
+        // docs/font-strategy.md도 같은 제약을 적는다). 그래서 source의 tight stride 대신
+        // 정렬된 row stride로 readback buffer를 잡고, 비교는 각 row의 실제 byte만 한다.
+        const size_t aligned_bytes_per_row =
+            maru_align_up_size(upload.bytes_per_row, maru_readback_stride);
+        const size_t readback_height = (size_t)upload.atlas_height_px;
+        const size_t readback_length = aligned_bytes_per_row * readback_height;
         id<MTLBuffer> readback_buffer = [device
-            newBufferWithLength:upload.byte_count
+            newBufferWithLength:readback_length
                         options:MTLResourceStorageModeShared];
         if (readback_buffer == nil) {
             result->atlas_readback_failures += 1;
@@ -392,8 +416,8 @@ static BOOL maru_upload_and_readback_product_atlas(
                                   1)
                      toBuffer:readback_buffer
             destinationOffset:0
-       destinationBytesPerRow:upload.bytes_per_row
-     destinationBytesPerImage:upload.byte_count];
+       destinationBytesPerRow:aligned_bytes_per_row
+     destinationBytesPerImage:readback_length];
         [blit endEncoding];
         [command_buffer commit];
         [command_buffer waitUntilCompleted];
@@ -404,10 +428,16 @@ static BOOL maru_upload_and_readback_product_atlas(
             return NO;
         }
         result->atlas_readback_uploads = maru_saturating_add_u32(result->atlas_readback_uploads, 1);
-        result->atlas_readback_mismatched_bytes = maru_saturating_add_u32(
-            result->atlas_readback_mismatched_bytes,
-            maru_count_mismatched_bytes(source, readback, upload.byte_count)
-        );
+        // source는 tight(bytes_per_row)하고 readback은 정렬 stride라, 각 row의 padding을 빼고
+        // 실제 픽셀 byte(bytes_per_row)만 비교한다.
+        for (size_t row = 0; row < readback_height; row++) {
+            result->atlas_readback_mismatched_bytes = maru_saturating_add_u32(
+                result->atlas_readback_mismatched_bytes,
+                maru_count_mismatched_bytes(
+                    source + row * upload.bytes_per_row,
+                    readback + row * aligned_bytes_per_row,
+                    upload.bytes_per_row));
+        }
     }
 
     return result->atlas_uploads_uploaded == result->atlas_uploads_requested &&
@@ -788,17 +818,9 @@ void maru_macos_metal_smoke_run(
             result->status = 9;
             return;
         }
-        if (result->atlas_texture_created == 0 ||
-            result->atlas_uploads_requested == 0 ||
-            result->atlas_uploads_uploaded != result->atlas_uploads_requested ||
-            result->atlas_readback_uploads != result->atlas_uploads_uploaded ||
-            result->atlas_readback_mismatched_bytes > 0 ||
-            result->atlas_readback_failures > 0)
-        {
-            result->status = 10;
-            return;
-        }
-
+        // atlas upload/readback 검증은 위 maru_upload_and_readback_product_atlas가 NO를
+        // 돌려주면 이미 status=10으로 early-return했다. 그래서 여기서 다시 게이트하지 않고,
+        // 제품 gate(product_atlas_uploaded)는 Zig deriveSmokeStatus 한 곳에서만 판정한다.
         result->status = 0;
     }
 }

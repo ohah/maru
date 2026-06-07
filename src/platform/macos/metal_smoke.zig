@@ -157,15 +157,16 @@ const SmokeStatus = struct {
 };
 
 fn deriveSmokeStatus(native: NativeMetalSmokeResult) SmokeStatus {
-    // terminal_grid는 "cell_count를 되돌려받았다"가 아니라 "실제 GPU 결과에서 clear
-    // 색이 아닌 픽셀을 readback했다"는 신호여야 한다. 샘플한 source ink 위치가 하나라도가
-    // 아니라 전부 비-clear여야 부분 렌더 회귀까지 잡는다. rendered_cells==requested는
-    // 항상 참이라(제출 셀 수를 그대로 돌려줌) 게이트에 넣지 않는다.
+    // terminal_grid는 "cell_count를 되돌려받았다"가 아니라 "shader가 제품 atlas texel을
+    // 실제 drawable에 샘플링했다"는 신호여야 한다. non-clear 픽셀 수는 여전히 유용한
+    // 진단값이지만, 실제 glyph 색이 clear 색에 가까울 수 있으므로 pass/fail gate로 쓰지
+    // 않는다. rendered_cells==requested도 항상 참이라(제출 셀 수) gate에 넣지 않는다.
     const visible_ui = native.window_visible != 0;
     const metal_surface = native.presented_frames > 0;
-    const readback_found_cell_pixels = native.readback_samples > 0 and
-        native.readback_non_clear_pixels == native.readback_samples and
-        native.readback_failures == 0;
+    const readback_sampled_atlas_texels = native.readback_samples > 0 and
+        native.readback_failures == 0 and
+        native.atlas_sample_missing_cells == 0 and
+        native.atlas_sampled_cells == native.readback_samples;
     const product_atlas_uploaded = native.atlas_texture_created != 0 and
         native.atlas_uploads_requested > 0 and
         native.atlas_uploads_uploaded == native.atlas_uploads_requested and
@@ -174,16 +175,14 @@ fn deriveSmokeStatus(native: NativeMetalSmokeResult) SmokeStatus {
         native.atlas_readback_mismatched_bytes == 0 and
         native.atlas_readback_failures == 0;
     const product_atlas_sampled = product_atlas_uploaded and
-        native.atlas_sample_missing_cells == 0 and
-        native.atlas_sampled_cells == native.readback_samples and
-        readback_found_cell_pixels;
+        readback_sampled_atlas_texels;
 
     return .{
         .visible_ui = visible_ui,
         .metal_surface = metal_surface,
         .terminal_grid = visible_ui and
             metal_surface and
-            readback_found_cell_pixels,
+            readback_sampled_atlas_texels,
         .product_atlas_uploaded = product_atlas_uploaded,
         .product_atlas_sampled = product_atlas_sampled,
     };
@@ -519,10 +518,10 @@ test "NativeMetalSmokeResult ABI keeps atlas diagnostics visible to Zig" {
     try std.testing.expectEqual(@as(usize, 4), @alignOf(NativeMetalSmokeResult));
 }
 
-test "Metal smoke terminal grid requires every sampled readback pixel non-clear" {
-    // 이 테스트가 없으면 native bridge가 입력 cell_count를 그대로 되돌려도
-    // terminal_grid=true가 된다. 샘플한 source ink 위치가 전부 clear 색이 아닐 때만
-    // terminal_grid를 true로 올린다는 계약을 고정한다(부분 렌더/readback 실패는 false).
+test "Metal smoke terminal grid requires matched atlas texel samples" {
+    // 이 테스트가 없으면 native bridge가 입력 cell_count를 그대로 되돌리거나, clear 색과
+    // 가까운 glyph를 non-clear heuristic으로 오판해도 terminal_grid=true/false가 흔들린다.
+    // source atlas texel과 drawable readback 픽셀이 모두 일치할 때만 grid를 true로 본다.
     const no_readback: NativeMetalSmokeResult = .{
         .status = 9,
         .window_visible = 1,
@@ -540,10 +539,10 @@ test "Metal smoke terminal grid requires every sampled readback pixel non-clear"
         .atlas_readback_uploads = 8,
         .atlas_readback_mismatched_bytes = 0,
         .atlas_readback_failures = 0,
-        .atlas_sampled_cells = 9,
+        .atlas_sampled_cells = 0,
         .atlas_sample_missing_cells = 0,
     };
-    const partial_readback: NativeMetalSmokeResult = .{
+    const partial_sampling: NativeMetalSmokeResult = .{
         .status = 9,
         .window_visible = 1,
         .presented_frames = 3,
@@ -560,7 +559,7 @@ test "Metal smoke terminal grid requires every sampled readback pixel non-clear"
         .atlas_readback_uploads = 8,
         .atlas_readback_mismatched_bytes = 0,
         .atlas_readback_failures = 0,
-        .atlas_sampled_cells = 9,
+        .atlas_sampled_cells = 8,
         .atlas_sample_missing_cells = 0,
     };
     const readback_failed: NativeMetalSmokeResult = .{
@@ -583,7 +582,7 @@ test "Metal smoke terminal grid requires every sampled readback pixel non-clear"
         .atlas_sampled_cells = 9,
         .atlas_sample_missing_cells = 0,
     };
-    const all_pixels: NativeMetalSmokeResult = .{
+    const matched_pixels_near_clear: NativeMetalSmokeResult = .{
         .status = 0,
         .window_visible = 1,
         .presented_frames = 3,
@@ -591,7 +590,7 @@ test "Metal smoke terminal grid requires every sampled readback pixel non-clear"
         .requested_cells = 9,
         .rendered_cells = 9,
         .readback_samples = 9,
-        .readback_non_clear_pixels = 9,
+        .readback_non_clear_pixels = 0,
         .readback_failures = 0,
         .atlas_texture_created = 1,
         .atlas_uploads_requested = 8,
@@ -603,16 +602,20 @@ test "Metal smoke terminal grid requires every sampled readback pixel non-clear"
         .atlas_sampled_cells = 9,
         .atlas_sample_missing_cells = 0,
     };
+    var missing_sample_source = matched_pixels_near_clear;
+    missing_sample_source.atlas_sample_missing_cells = 1;
 
     try std.testing.expect(!deriveSmokeStatus(no_readback).terminal_grid);
-    try std.testing.expect(!deriveSmokeStatus(partial_readback).terminal_grid);
+    try std.testing.expect(!deriveSmokeStatus(partial_sampling).terminal_grid);
     try std.testing.expect(!deriveSmokeStatus(readback_failed).terminal_grid);
-    try std.testing.expect(deriveSmokeStatus(all_pixels).terminal_grid);
-    try std.testing.expect(deriveSmokeStatus(all_pixels).product_atlas_uploaded);
+    try std.testing.expect(!deriveSmokeStatus(missing_sample_source).terminal_grid);
+    try std.testing.expect(deriveSmokeStatus(matched_pixels_near_clear).terminal_grid);
+    try std.testing.expect(deriveSmokeStatus(matched_pixels_near_clear).product_atlas_uploaded);
     try std.testing.expect(!deriveSmokeStatus(no_readback).product_atlas_sampled);
-    try std.testing.expect(!deriveSmokeStatus(partial_readback).product_atlas_sampled);
+    try std.testing.expect(!deriveSmokeStatus(partial_sampling).product_atlas_sampled);
     try std.testing.expect(!deriveSmokeStatus(readback_failed).product_atlas_sampled);
-    try std.testing.expect(deriveSmokeStatus(all_pixels).product_atlas_sampled);
+    try std.testing.expect(!deriveSmokeStatus(missing_sample_source).product_atlas_sampled);
+    try std.testing.expect(deriveSmokeStatus(matched_pixels_near_clear).product_atlas_sampled);
 }
 
 test "Metal smoke product atlas gates require upload, byte-matching readback, and shader sampling" {

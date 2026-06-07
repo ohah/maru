@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
+#include <math.h>
 
 typedef struct {
     int32_t status;
@@ -36,6 +38,11 @@ typedef struct {
     uint32_t category;
     uint32_t fallback;
 } MaruCoreTextGlyphRecord;
+
+typedef struct {
+    int32_t status;
+    uint32_t non_clear_pixels;
+} MaruCoreTextGlyphRasterResult;
 
 enum {
     MaruGlyphCategoryAscii = 1,
@@ -226,6 +233,82 @@ static uint32_t maru_category_for_string_index(CFIndex string_index) {
     return MaruGlyphCategoryOther;
 }
 
+static CFStringRef maru_create_scalar_string(uint32_t codepoint) {
+    if (codepoint > 0x10ffff) {
+        return NULL;
+    }
+    if (codepoint >= 0xd800 && codepoint <= 0xdfff) {
+        return NULL;
+    }
+
+    UniChar chars[2];
+    CFIndex length = 1;
+    if (codepoint > 0xffff) {
+        uint32_t scalar = codepoint - 0x10000;
+        chars[0] = (UniChar)(0xd800 + (scalar >> 10));
+        chars[1] = (UniChar)(0xdc00 + (scalar & 0x3ff));
+        length = 2;
+    } else {
+        chars[0] = (UniChar)codepoint;
+    }
+
+    return CFStringCreateWithCharacters(kCFAllocatorDefault, chars, length);
+}
+
+static bool maru_validate_raster_request(
+    const uint8_t *pixels,
+    size_t width,
+    size_t height,
+    size_t bytes_per_row,
+    size_t pixel_capacity,
+    size_t *byte_count
+) {
+    if (pixels == NULL || byte_count == NULL) {
+        return false;
+    }
+    if (width == 0 || height == 0 || bytes_per_row == 0) {
+        return false;
+    }
+    if (width > SIZE_MAX / 4) {
+        return false;
+    }
+
+    const size_t tight_row = width * 4;
+    if (bytes_per_row < tight_row) {
+        return false;
+    }
+    if (height > SIZE_MAX / bytes_per_row) {
+        return false;
+    }
+
+    const size_t needed = height * bytes_per_row;
+    if (needed > pixel_capacity) {
+        return false;
+    }
+
+    *byte_count = needed;
+    return true;
+}
+
+static uint32_t maru_count_non_clear_rgba_pixels(
+    const uint8_t *pixels,
+    size_t width,
+    size_t height,
+    size_t bytes_per_row
+) {
+    uint32_t count = 0;
+    for (size_t y = 0; y < height; y++) {
+        const uint8_t *row = pixels + y * bytes_per_row;
+        for (size_t x = 0; x < width; x++) {
+            const uint8_t alpha = row[x * 4 + 3];
+            if (alpha != 0 && count < UINT32_MAX) {
+                count += 1;
+            }
+        }
+    }
+    return count;
+}
+
 static void maru_append_glyph_record(
     MaruCoreTextSmokeResult *result,
     MaruCoreTextGlyphRecord *records,
@@ -347,6 +430,157 @@ static void maru_rasterize_line_into_cpu_bitmap(MaruCoreTextSmokeResult *result,
     CGContextRelease(context);
     CGColorSpaceRelease(color_space);
     free(pixels);
+}
+
+void maru_macos_coretext_smoke_rasterize_glyph(
+    const char *requested_font_family,
+    size_t requested_font_family_len,
+    double requested_font_size,
+    uint32_t codepoint,
+    uint32_t font_id,
+    uint32_t glyph_id,
+    uint32_t fallback,
+    size_t width_px,
+    size_t height_px,
+    size_t bytes_per_row,
+    uint8_t *pixels,
+    size_t pixel_capacity,
+    MaruCoreTextGlyphRasterResult *result
+) {
+    @autoreleasepool {
+        if (result == NULL) {
+            return;
+        }
+        result->status = -1;
+        result->non_clear_pixels = 0;
+
+        size_t byte_count = 0;
+        if (!maru_validate_raster_request(
+            pixels,
+            width_px,
+            height_px,
+            bytes_per_row,
+            pixel_capacity,
+            &byte_count
+        )) {
+            result->status = 1;
+            return;
+        }
+        if (glyph_id == 0 || glyph_id > UINT16_MAX) {
+            result->status = 2;
+            return;
+        }
+
+        // Zig의 GlyphRasterFrame builder가 buffer를 pre-clear하는 계약이지만, 이 native
+        // smoke bridge는 C ABI 경계에 있으므로 한 번 더 0으로 닫는다. 실패/부분 draw가
+        // 이전 upload byte를 재사용하는 상황을 만들지 않는 것이 디버깅에 더 유리하다.
+        memset(pixels, 0, byte_count);
+
+        CTFontRef primary_font = maru_create_primary_font(
+            requested_font_family,
+            requested_font_family_len,
+            requested_font_size,
+            NULL
+        );
+        if (primary_font == NULL) {
+            result->status = 3;
+            return;
+        }
+
+        CFStringRef scalar_string = maru_create_scalar_string(codepoint);
+        if (scalar_string == NULL) {
+            CFRelease(primary_font);
+            result->status = 4;
+            return;
+        }
+
+        CTFontRef draw_font = primary_font;
+        CTFontRef fallback_font = NULL;
+        if (fallback != 0 || font_id != 1) {
+            fallback_font = CTFontCreateForString(
+                primary_font,
+                scalar_string,
+                CFRangeMake(0, CFStringGetLength(scalar_string))
+            );
+            if (fallback_font != NULL) {
+                draw_font = fallback_font;
+            }
+        }
+
+        CGColorSpaceRef color_space = CGColorSpaceCreateDeviceRGB();
+        if (color_space == NULL) {
+            if (fallback_font != NULL) {
+                CFRelease(fallback_font);
+            }
+            CFRelease(scalar_string);
+            CFRelease(primary_font);
+            result->status = 5;
+            return;
+        }
+
+        CGContextRef context = CGBitmapContextCreate(
+            pixels,
+            width_px,
+            height_px,
+            8,
+            bytes_per_row,
+            color_space,
+            kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
+        );
+        if (context == NULL) {
+            CGColorSpaceRelease(color_space);
+            if (fallback_font != NULL) {
+                CFRelease(fallback_font);
+            }
+            CFRelease(scalar_string);
+            CFRelease(primary_font);
+            result->status = 6;
+            return;
+        }
+
+        CGContextSetTextMatrix(context, CGAffineTransformIdentity);
+        CGContextTranslateCTM(context, 0.0, (CGFloat)height_px);
+        CGContextScaleCTM(context, 1.0, -1.0);
+        CGContextSetShouldAntialias(context, true);
+        CGContextSetRGBFillColor(context, 1.0, 1.0, 1.0, 1.0);
+
+        CGGlyph glyph = (CGGlyph)glyph_id;
+        CGRect bounds = CTFontGetBoundingRectsForGlyphs(
+            draw_font,
+            kCTFontOrientationDefault,
+            &glyph,
+            NULL,
+            1
+        );
+        CGFloat x = -bounds.origin.x + floor(((CGFloat)width_px - bounds.size.width) / 2.0);
+        CGFloat y = -bounds.origin.y + floor(((CGFloat)height_px - bounds.size.height) / 2.0);
+        if (!isfinite((double)x)) {
+            x = 0.0;
+        }
+        if (!isfinite((double)y)) {
+            y = (CGFloat)height_px * 0.75;
+        }
+
+        CGPoint position = CGPointMake(x, y);
+        CTFontDrawGlyphs(draw_font, &glyph, &position, 1, context);
+
+        const uint32_t non_clear = maru_count_non_clear_rgba_pixels(
+            pixels,
+            width_px,
+            height_px,
+            bytes_per_row
+        );
+        result->non_clear_pixels = non_clear;
+        result->status = non_clear > 0 ? 0 : 7;
+
+        CGContextRelease(context);
+        CGColorSpaceRelease(color_space);
+        if (fallback_font != NULL) {
+            CFRelease(fallback_font);
+        }
+        CFRelease(scalar_string);
+        CFRelease(primary_font);
+    }
 }
 
 void maru_macos_coretext_smoke_run(

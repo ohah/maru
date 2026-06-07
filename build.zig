@@ -297,6 +297,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_macos_coretext_font_tests = b.addRunArtifact(macos_coretext_font_tests);
 
+    const macos_coretext_probe_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/coretext_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+            },
+        }),
+    });
+    const run_macos_coretext_probe_tests = b.addRunArtifact(macos_coretext_probe_tests);
+
     const macos_coretext_shaper_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/coretext_shaper.zig"),
@@ -327,6 +339,10 @@ pub fn build(b: *std.Build) void {
     // coretext_font.zig는 Objective-C/CoreText runtime을 직접 호출하지 않는 제품 후보
     // adapter다. 그래서 macOS smoke opt-in에 숨기지 말고 기본 Zig test에서 돌린다.
     test_step.dependOn(&run_macos_coretext_font_tests.step);
+    // coretext_probe.zig는 native smoke ABI record를 제품 후보 CoreText record로 바꾸는
+    // probe 전용 경계다. Objective-C 없이 돌려서 smoke 파일이 변환 규칙을 다시 소유하지
+    // 않는지 기본 테스트에서 고정한다.
+    test_step.dependOn(&run_macos_coretext_probe_tests.step);
     // coretext_shaper.zig도 native CoreText runtime을 직접 호출하지 않고, 이미 shape된
     // CoreText glyph record를 renderer GlyphRunList로 넘기는 제품 후보 경계만 검증한다.
     test_step.dependOn(&run_macos_coretext_shaper_tests.step);

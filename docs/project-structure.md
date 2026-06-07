@@ -31,7 +31,7 @@ src/
   config/               action parsing, raw theme/font/cursor config, resolved appearance config
   pty/                  PTY backend, spawn request, process handle
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding
-  renderer/             Metal-first renderer internals, future WebGPU backend boundary, font layout, persistent renderer state, glyph atlas, frame stats
+  renderer/             Metal-first renderer internals, future WebGPU backend boundary, font layout, font identity registry, persistent renderer state, glyph atlas, frame stats
   platform/             OS별 process/window/input bridge
     macos/
     windows/

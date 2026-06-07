@@ -40,6 +40,14 @@ RenderSnapshot
 - config의 font family를 실제 macOS font face로 해석한다.
 - primary font에 없는 문자는 fallback font를 찾는다.
 - codepoint cluster를 glyph id와 font id로 바꾼다.
+- native font face는 `FontIdentityRegistry`를 거쳐 renderer의 안정적인 `FontId`로 바꾼다.
+
+`FontIdentityRegistry`:
+
+- CoreText의 `CTFont` 같은 platform 타입을 renderer public contract에 노출하지 않는다.
+- 대신 PostScript name 같은 안정적인 face identity를 소유 복사하고, 같은 face는 같은 `FontId`로 재사용한다.
+- glyph id는 font face 안에서만 의미가 있으므로 `font_id + glyph_id` 쌍으로만 cache key와 raster request를 만든다.
+- 제품 CoreText backend는 shaping 때 registry에 intern한 font identity를 rasterizer 조회에도 그대로 사용해야 한다. smoke처럼 codepoint만 보고 fallback font를 다시 고르면, 같은 glyph id를 다른 font에 그리는 wrong-glyph 버그가 생길 수 있다.
 
 `GlyphAtlas`:
 
@@ -165,6 +173,8 @@ color_glyph_kind
 ```
 
 `style_flags`는 rasterize(glyph bitmap)를 바꾸는 style만 포함한다(bold/italic). underline·strikethrough와 fg/bg 색은 glyph가 아니라 draw-time 오버레이/tint로 처리하므로 cache key에 넣지 않는다(밑줄 유무로 같은 glyph를 중복 캐시하지 않기 위해서다). 코드에서는 `RasterStyleFlags`가 이 경계를 표현하고, `DrawList`는 underline을 glyph cell과 별도 overlay command로 내보낸다.
+
+`font_id`는 임의 증가 숫자가 아니라 `FontIdentityRegistry`가 소유한 face identity를 뜻한다. 이 구분이 필요한 이유는 CoreText의 `CGGlyph` 값이 전역 glyph 번호가 아니라 해당 `CTFont` 안에서만 유효한 번호이기 때문이다. 예를 들어 primary font와 CJK fallback font가 둘 다 glyph id `42`를 낼 수 있지만, 두 bitmap은 서로 다른 atlas entry여야 한다.
 
 이 중 하나라도 빠지면 다음 버그가 난다.
 

@@ -378,12 +378,7 @@ fn buildGlyphFrameProbeWithRasterizer(
     var probe_draw_list = try coretext_shaper.buildProbeDrawListFromCoreTextGlyphs(
         allocator,
         coretext_records.items,
-        .{
-            .size = shaped.runs.size,
-            .cursor = shaped.runs.cursor,
-            .dirty = shaped.runs.dirty,
-            .overlays = shaped.runs.overlays,
-        },
+        probe_surface,
     );
     var probe_draw_list_owned = true;
     errdefer if (probe_draw_list_owned) probe_draw_list.deinit(allocator);
@@ -558,6 +553,19 @@ fn coreTextGlyphRecordForProbe(record: NativeGlyphRecord) coretext_font.CoreText
         .color_glyph_kind = colorGlyphKindForCoreTextProbe(record.category),
         .drawable = record.glyph_id != 0 and record.category != @intFromEnum(NativeGlyphCategory.space),
     };
+}
+
+fn shapedRecordForCoreTextProbe(
+    record: NativeGlyphRecord,
+    font_registry: *renderer.FontIdentityRegistry,
+) !renderer.ShapedGlyphRecord {
+    // 테스트는 native smoke record가 어떤 순서로 변환되는지 읽기 쉬워야 한다.
+    // CoreText 전용 record 변환과 renderer 중립 record 변환을 한 곳에 묶어,
+    // 테스트 본문이 변환 파이프라인의 중첩 괄호보다 검증 의도에 집중하게 한다.
+    return coretext_font.shapedRecordFromCoreTextGlyph(
+        coreTextGlyphRecordForProbe(record),
+        font_registry,
+    );
 }
 
 fn cellWidthForCoreTextProbe(category: u32) u2 {
@@ -971,28 +979,28 @@ test "CoreText smoke uses font identity registry instead of native record ids" {
     var font_registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
     defer font_registry.deinit();
 
-    const primary = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
+    const primary = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
         .native_font_id = 99,
         .glyph_id = 42,
         .string_index = 0,
         .category = .ascii,
         .font_name = "Menlo-Regular",
-    })), &font_registry);
-    const cjk = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
+    }), &font_registry);
+    const cjk = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
         .native_font_id = 99,
         .glyph_id = 42,
         .string_index = 5,
         .category = .cjk,
         .fallback = true,
         .font_name = "AppleSDGothicNeo-Regular",
-    })), &font_registry);
-    const primary_again = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
+    }), &font_registry);
+    const primary_again = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
         .native_font_id = 123,
         .glyph_id = 43,
         .string_index = 1,
         .category = .ascii,
         .font_name = "Menlo-Regular",
-    })), &font_registry);
+    }), &font_registry);
 
     try std.testing.expectEqual(@as(usize, 2), font_registry.count());
     try std.testing.expect(primary.font_id != cjk.font_id);
@@ -1006,20 +1014,20 @@ test "CoreText smoke only interns drawable font identities" {
     var font_registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
     defer font_registry.deinit();
 
-    const primary = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
+    const primary = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
         .native_font_id = 99,
         .glyph_id = 42,
         .string_index = 0,
         .category = .ascii,
         .font_name = "Menlo-Regular",
-    })), &font_registry);
-    const space = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
+    }), &font_registry);
+    const space = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
         .native_font_id = 100,
         .glyph_id = 5,
         .string_index = 4,
         .category = .space,
         .font_name = "SpaceOnlyFallback-Regular",
-    })), &font_registry);
+    }), &font_registry);
 
     try std.testing.expect(primary.drawable);
     try std.testing.expect(!space.drawable);
@@ -1034,12 +1042,12 @@ test "CoreText smoke ignores empty font names on non-drawable records" {
     var font_registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
     defer font_registry.deinit();
 
-    const space = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
+    const space = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
         .glyph_id = 5,
         .string_index = 4,
         .category = .space,
         .font_name = "",
-    })), &font_registry);
+    }), &font_registry);
 
     try std.testing.expect(!space.drawable);
     try std.testing.expectEqual(@as(renderer.FontId, 0), space.font_id);
@@ -1055,12 +1063,12 @@ test "CoreText smoke rejects empty font names on drawable records" {
 
     try std.testing.expectError(
         renderer.FontIdentityError.EmptyPostScriptName,
-        coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
+        shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
             .glyph_id = 42,
             .string_index = 0,
             .category = .ascii,
             .font_name = "",
-        })), &font_registry),
+        }), &font_registry),
     );
 }
 
@@ -1073,13 +1081,13 @@ test "CoreText smoke shaped record font id resolves back to its PostScript name"
     var font_registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
     defer font_registry.deinit();
 
-    const record = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
+    const record = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
         .glyph_id = 42,
         .string_index = 0,
         .category = .cjk,
         .fallback = true,
         .font_name = "AppleSDGothicNeo-Regular",
-    })), &font_registry);
+    }), &font_registry);
 
     const identity = font_registry.get(record.font_id) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("AppleSDGothicNeo-Regular", identity.postscript_name);

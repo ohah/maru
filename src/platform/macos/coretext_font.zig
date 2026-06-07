@@ -15,9 +15,11 @@ pub const CoreTextGlyphRecord = struct {
     replacement: bool = false,
     style: terminal.Style = .{},
     color_glyph_kind: renderer.ColorGlyphKind = .monochrome,
-    // CoreText는 공백도 font run 안에 포함할 수 있다. 이 값을 필수로 두면 caller가
-    // "실제로 bitmap을 만들 glyph인가"를 명시해야 해서, 공백을 실수로 rasterizer
-    // 입력에 섞는 버그를 컴파일 단계에서 더 빨리 발견할 수 있다.
+    // CoreText는 공백도 font run 안에 포함할 수 있다. 이 값을 (기본값 없이) 필수로 두면
+    // caller가 호출 지점마다 "실제로 bitmap을 만들 glyph인가"를 의식적으로 정해야 한다.
+    // 공백이 drawable 기본값을 조용히 물려받아 intern/rasterizer 입력에 섞이는 일을 막는다.
+    // 다만 잘못된 값(공백에 drawable=true)은 런타임 bool이라 타입체커가 잡지 못하므로,
+    // 실제 drawable 판정은 호출 지점(coretext_smoke.zig의 native record 변환)이 책임진다.
     drawable: bool,
 };
 

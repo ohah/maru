@@ -106,6 +106,7 @@ F1..F24
 - 같은 modifier를 두 번 쓰면 오류다.
 - key가 없으면 오류다.
 - 알 수 없는 key 이름은 오류다.
+- `+`는 chord part 구분자라 키 이름으로 직접 쓸 수 없다. 리터럴 `+` 키는 `Plus`로 표기한다(예: `Cmd+Plus`). `Cmd++`처럼 빈 part가 생기는 표기는 오류다.
 
 예시:
 
@@ -125,7 +126,10 @@ Command+B      -> 초기에는 오류
 - `Cmd+B`, `ctrl+cmd+,`, `Shift+Alt+F13` 같은 key chord 문자열은 parser 단위 테스트로 검증한다.
 - `mise run macos-app-pty-metal-smoke`는 기본적으로 AppKit synthetic `keyDown:`에서 얻은 `Cmd+B` payload가 `AppHost.handleKeyEvent -> KeyBindingResolver -> SurfaceRuntime.writeInput`을 거쳐 PTY와 visible Metal frame까지 도달하는지 검증한다.
 - `MARU_APP_PTY_METAL_KEYDOWN_SOURCE=manual MARU_APP_PTY_METAL_KEYDOWN_MS=15000 mise run macos-app-pty-metal-smoke`는 사용자가 key capture 창에서 직접 누른 `Cmd+B`를 같은 경로에 태운다. 이 smoke는 물리 키 한 번의 AppKit 경계를 검증하지만, 아직 지속 interactive shell loop는 아니다.
-- `F1..F24`는 설정 문자열로는 파싱하지만, 현재 `TerminalKeyEvent` 타입에는 function key variant가 아직 없다. AppKit bridge가 실제 function key event를 넘기는 PR에서 `TerminalKeyEvent` 타입을 확장한다.
+- `Ctrl+<key>` 인코딩은 `a-z`/`A-Z`뿐 아니라 전체 C0 테이블을 다룬다: `Ctrl+@`=0x00, `Ctrl+A..Z`=0x01..0x1a, `Ctrl+[`=0x1b(ESC), `Ctrl+\`=0x1c, `Ctrl+]`=0x1d, `Ctrl+^`=0x1e, `Ctrl+_`=0x1f, `Ctrl+Space`=NUL, `Ctrl+?`=DEL. C0 매핑이 없는 `Ctrl+1` 같은 조합은 키 이벤트를 실패시키지 않고 그냥 문자를 보낸다.
+- `Option/Alt`(Meta) ESC prefix는 plain-byte 키(문자/Enter/Tab/Backspace)에만 붙인다. 화살표·Esc처럼 base 인코딩이 이미 ESC로 시작하는 키에는 붙이지 않는다(`Option+Up`이 `\x1b\x1b[A` 같은 double-ESC가 되지 않게). 화살표류의 modifier 인코딩(CSI 파라미터)은 이후 계약이다.
+- `send_control` 매크로의 codepoint는 config validation 단계에서 C0 매핑 가능 여부를 검사한다. 잘못된 codepoint는 키를 누를 때가 아니라 설정 로드 시점에 오류로 보고한다.
+- `F1..F24`와 `Delete`는 설정 문자열로는 파싱·validate되지만, 현재 `terminal.Key`(정규화된 런타임 키 이벤트)에는 function/delete variant가 없어 실제 키 이벤트와 절대 매칭되지 않는 죽은 설정이다. AppKit bridge가 실제 function/delete event를 넘기는 PR에서 `terminal.Key` 타입과 byte 인코딩을 함께 확장한다.
 - 실제 TOML 파일 parser, runtime reload, 설정 UI는 아직 없다.
 
 ## 충돌 규칙
@@ -210,7 +214,8 @@ Esc      vim, readline, shell mode 전환에 자주 쓰인다.
 - resolver unit test: app action과 terminal input macro가 같은 key chord를 쓰면 오류다.
 - resolver unit test: app action으로 소비된 key는 terminal input으로 내려가지 않는다.
 - resolver unit test: 등록하지 않은 `Ctrl+B` 같은 조합은 global shortcut 때문에 소비되지 않는다.
-- terminal input encoder test: `Ctrl+letter`는 C0 control byte로, `Alt/Option`은 ESC prefix로 변환된다.
+- terminal input encoder test: `Ctrl+<key>`는 전체 C0 테이블(`@`, `A-Z`, `[ \ ] ^ _`, `Space`, `?`)로, C0 매핑이 없는 조합은 문자 그대로, `Alt/Option`은 ESC prefix(화살표·Esc 제외)로 변환된다.
+- config validation test: `send_control` codepoint가 C0로 매핑되지 않으면 설정 로드 시점에 오류로 보고한다.
 - PTY E2E: terminal input으로 분류된 key만 shell에 전달된다.
 - macOS app E2E: global shortcut registration 실패/성공을 artifact로 남긴다.
 

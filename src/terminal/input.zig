@@ -31,11 +31,14 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8) ![]const 
     // for modifiers, application cursor mode, and platform shortcuts should not
     // force storage or parser files to change.
     var len: usize = 0;
-    if (event.modifiers.option) {
+    if (event.modifiers.option and !keyBaseStartsWithEscape(event.key)) {
         // macOS Option/Alt is the traditional terminal "Meta" modifier. The
         // terminal byte stream represents Meta by prefixing the normal key bytes
         // with ESC, which lets shells/readline see Alt+B without Maru inventing
-        // a platform-specific control path.
+        // a platform-specific control path. Keys whose base encoding is itself an
+        // ESC-introduced sequence (arrows, escape) are excluded: prefixing ESC
+        // would produce a double-ESC like \x1b\x1b[A that no terminal recognizes.
+        // Modifier encoding for those keys (CSI parameters) is a later contract.
         buffer[len] = 0x1b;
         len += 1;
     }
@@ -43,9 +46,15 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8) ![]const 
     return switch (event.key) {
         .char => |codepoint| blk: {
             if (event.modifiers.control) {
-                buffer[len] = try controlByte(codepoint);
-                len += 1;
-                break :blk buffer[0..len];
+                // Ctrl+<key> maps to a C0 control byte when the key has one. Keys
+                // with no C0 mapping (digits, most punctuation) fall back to the
+                // plain character so an unbound Ctrl+1 types "1" instead of
+                // erroring the whole key event.
+                if (controlByte(codepoint)) |byte| {
+                    buffer[len] = byte;
+                    len += 1;
+                    break :blk buffer[0..len];
+                } else |_| {}
             }
 
             var encoded: [4]u8 = undefined;
@@ -66,12 +75,27 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8) ![]const 
 }
 
 pub fn controlByte(codepoint: u21) !u8 {
-    // Ctrl+letter maps to ASCII C0 controls: Ctrl+A=0x01 ... Ctrl+Z=0x1a.
-    // Keeping this as a small helper lets keybinding macros reuse the exact
+    // Ctrl maps an ASCII key to its C0 control byte by clearing the upper bits
+    // (codepoint & 0x1f over the 0x40-0x5f range). This is the full terminal
+    // contract, not just letters:
+    //   Ctrl+@ = 0x00, Ctrl+A..Z = 0x01..0x1a, Ctrl+[ = 0x1b (ESC),
+    //   Ctrl+\ = 0x1c, Ctrl+] = 0x1d, Ctrl+^ = 0x1e, Ctrl+_ = 0x1f.
+    // Lowercase letters fold to uppercase first so Ctrl+b == Ctrl+B. Ctrl+Space
+    // (NUL) and Ctrl+? (DEL) are the two well-known controls outside 0x40-0x5f.
+    // Keeping the complete table here lets keybinding macros reuse the exact
     // terminal contract instead of copying arithmetic in app/config code.
     if (codepoint >= 'a' and codepoint <= 'z') return @intCast(codepoint - 'a' + 1);
-    if (codepoint >= 'A' and codepoint <= 'Z') return @intCast(codepoint - 'A' + 1);
+    if (codepoint >= '@' and codepoint <= '_') return @intCast(codepoint - '@');
+    if (codepoint == ' ') return 0x00;
+    if (codepoint == '?') return 0x7f;
     return error.InvalidControlKey;
+}
+
+fn keyBaseStartsWithEscape(key: Key) bool {
+    return switch (key) {
+        .escape, .arrow_up, .arrow_down, .arrow_left, .arrow_right => true,
+        else => false,
+    };
 }
 
 fn appendBytes(buffer: *[encoded_key_buffer_len]u8, len: *usize, bytes: []const u8) []const u8 {
@@ -113,5 +137,61 @@ test "encodes control letters and option-prefixed terminal input" {
     try std.testing.expectEqualStrings(
         "\x1b한",
         try encodeKey(.{ .key = .{ .char = '한' }, .modifiers = .{ .option = true } }, &buffer),
+    );
+}
+
+test "controlByte covers the full C0 table, not just letters" {
+    try std.testing.expectEqual(@as(u8, 0x00), try controlByte('@'));
+    try std.testing.expectEqual(@as(u8, 0x01), try controlByte('A'));
+    try std.testing.expectEqual(@as(u8, 0x1a), try controlByte('Z'));
+    try std.testing.expectEqual(@as(u8, 0x1b), try controlByte('[')); // Ctrl+[ == ESC
+    try std.testing.expectEqual(@as(u8, 0x1c), try controlByte('\\'));
+    try std.testing.expectEqual(@as(u8, 0x1d), try controlByte(']'));
+    try std.testing.expectEqual(@as(u8, 0x1e), try controlByte('^'));
+    try std.testing.expectEqual(@as(u8, 0x1f), try controlByte('_'));
+    try std.testing.expectEqual(@as(u8, 0x00), try controlByte(' ')); // Ctrl+Space == NUL
+    try std.testing.expectEqual(@as(u8, 0x7f), try controlByte('?')); // Ctrl+? == DEL
+    try std.testing.expectEqual(@as(u8, 0x02), try controlByte('b')); // lowercase folds to upper
+    try std.testing.expectError(error.InvalidControlKey, controlByte('1'));
+}
+
+test "encodes Ctrl+[ and Ctrl+Space as their C0 bytes" {
+    var buffer: [encoded_key_buffer_len]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "\x1b",
+        try encodeKey(.{ .key = .{ .char = '[' }, .modifiers = .{ .control = true } }, &buffer),
+    );
+    try std.testing.expectEqualStrings(
+        "\x00",
+        try encodeKey(.{ .key = .{ .char = ' ' }, .modifiers = .{ .control = true } }, &buffer),
+    );
+}
+
+test "Ctrl with an unmapped key falls back to the plain character" {
+    var buffer: [encoded_key_buffer_len]u8 = undefined;
+    // Ctrl+1 has no C0 control byte; encode the digit rather than erroring the
+    // whole key event.
+    try std.testing.expectEqualStrings(
+        "1",
+        try encodeKey(.{ .key = .{ .char = '1' }, .modifiers = .{ .control = true } }, &buffer),
+    );
+}
+
+test "option modifier does not double-escape ESC-introduced keys" {
+    var buffer: [encoded_key_buffer_len]u8 = undefined;
+    // Arrows/escape already begin with ESC; the Meta prefix must not turn
+    // Option+Up into \x1b\x1b[A.
+    try std.testing.expectEqualStrings(
+        "\x1b[A",
+        try encodeKey(.{ .key = .arrow_up, .modifiers = .{ .option = true } }, &buffer),
+    );
+    try std.testing.expectEqualStrings(
+        "\x1b",
+        try encodeKey(.{ .key = .escape, .modifiers = .{ .option = true } }, &buffer),
+    );
+    // Plain-byte keys still get the Meta ESC prefix.
+    try std.testing.expectEqualStrings(
+        "\x1b\r",
+        try encodeKey(.{ .key = .enter, .modifiers = .{ .option = true } }, &buffer),
     );
 }

@@ -50,6 +50,10 @@ const AppPtyMetalSmokeConfig = struct {
     },
     ready_marker: []const u8 = "Maru input ready",
     scripted_input: []const u8 = "scripted input\n",
+    // synthetic mode의 native keyDown 이벤트는 appkit_metal_smoke.m에 Cmd+B로
+    // 하드코딩되어 있다. 따라서 synthetic mode에서는 이 값이 "Cmd+B"여야 하고, 다른
+    // 값을 쓰면 ensureNativeKeyMatchesChord가 실패한다. manual mode는 사용자가 누른
+    // 실제 chord를 이 값과 비교하므로 이 값이 곧 기대 chord다.
     scripted_key_chord: []const u8 = "Cmd+B",
     native_keydown_source: NativeKeyDownSource = .synthetic,
     native_keydown_duration_ms: u32 = default_synthetic_keydown_duration_ms,
@@ -421,6 +425,13 @@ fn keyEventFromNativeKeyDown(native_keydown: NativeKeyDownSmokeResult) !terminal
 
     const codepoint = std.math.cast(u21, native_keydown.codepoint) orelse
         return error.NativeKeyDownCodepointOutOfRange;
+    // The native side reads a single UTF-16 unit (characterAtIndex:0), so an
+    // astral key yields a lone surrogate. Reject it at the conversion boundary
+    // rather than letting a surrogate flow into encodeKey -> utf8Encode, which
+    // would fail there with a less clear error.
+    if (codepoint >= 0xd800 and codepoint <= 0xdfff) {
+        return error.NativeKeyDownCodepointIsSurrogate;
+    }
     return .{
         .key = .{ .char = codepoint },
         .modifiers = .{
@@ -447,11 +458,9 @@ fn nativeKeyDownSourceName(source: NativeKeyDownSource) []const u8 {
 }
 
 fn keyHandlingResultName(result: app.KeyHandlingResult) []const u8 {
-    return switch (result) {
-        .app_action => "app_action",
-        .terminal_input => "terminal_input",
-        .ignored => "ignored",
-    };
+    // The summary label is exactly the union tag name; @tagName keeps it in sync
+    // if a KeyHandlingResult variant is ever added or renamed.
+    return @tagName(result);
 }
 
 fn writeTermination(writer: *std.Io.Writer, termination: ?app.RuntimePumpTermination) !void {

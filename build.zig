@@ -155,6 +155,58 @@ pub fn build(b: *std.Build) void {
         run_macos_metal_smoke_tests.setCwd(b.path("."));
         test_macos_metal_smoke_step.dependOn(&run_macos_metal_smoke_tests.step);
 
+        // App PTY Metal smoke는 headless app-pty-smoke와 visible Metal smoke를 잇는다.
+        // controlled PTY command output이 SurfaceRuntime/AppWindow를 거쳐 CoreText
+        // DrawList shaper와 Metal atlas shader sampling까지 도달하는지 확인한다.
+        const macos_app_pty_metal_smoke = b.addExecutable(.{
+            .name = "maru-macos-app-pty-metal-smoke",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_pty_metal_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                },
+            }),
+        });
+        macos_app_pty_metal_smoke.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/appkit_metal_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        macos_app_pty_metal_smoke.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        macos_app_pty_metal_smoke.root_module.linkFramework("Cocoa", .{});
+        macos_app_pty_metal_smoke.root_module.linkFramework("Foundation", .{});
+        macos_app_pty_metal_smoke.root_module.linkFramework("CoreText", .{});
+        macos_app_pty_metal_smoke.root_module.linkFramework("CoreGraphics", .{});
+        macos_app_pty_metal_smoke.root_module.linkFramework("Metal", .{});
+        macos_app_pty_metal_smoke.root_module.linkFramework("QuartzCore", .{});
+
+        const macos_app_pty_metal_smoke_step = b.step("macos-app-pty-metal-smoke", "Run the visible macOS live PTY Metal smoke");
+        const macos_app_pty_metal_smoke_cmd = b.addRunArtifact(macos_app_pty_metal_smoke);
+        macos_app_pty_metal_smoke_cmd.setCwd(b.path("."));
+        macos_app_pty_metal_smoke_step.dependOn(&macos_app_pty_metal_smoke_cmd.step);
+
+        const macos_app_pty_metal_smoke_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_pty_metal_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                },
+            }),
+        });
+
+        const test_macos_app_pty_metal_smoke_step = b.step("test-macos-app-pty-metal-smoke", "Run macOS live PTY Metal smoke contract tests");
+        const run_macos_app_pty_metal_smoke_tests = b.addRunArtifact(macos_app_pty_metal_smoke_tests);
+        run_macos_app_pty_metal_smoke_tests.setCwd(b.path("."));
+        test_macos_app_pty_metal_smoke_step.dependOn(&run_macos_app_pty_metal_smoke_tests.step);
+
         // CoreText smoke는 창이나 GPU를 만들지 않고 macOS font stack과 CPU bitmap
         // rasterization만 검증한다. 실제 text renderer를 붙이기 전에 font
         // resolve/shaping/raster 실패와 Metal 실패를 다른 artifact로 나누기 위한

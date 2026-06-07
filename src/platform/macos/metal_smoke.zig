@@ -20,7 +20,7 @@ const renderer_input_draw_list = "terminal_core_draw_list";
 // 로컬 작업이나 CI runner가 오래 붙잡히지 않도록 window smoke와 같은 상한을 둔다.
 const max_duration_ms: u32 = 600_000;
 
-const NativeMetalSmokeResult = extern struct {
+pub const NativeMetalSmokeResult = extern struct {
     status: c_int,
     window_visible: u32,
     presented_frames: u32,
@@ -46,7 +46,7 @@ const NativeMetalSmokeResult = extern struct {
     screenshot_failures: u32,
 };
 
-const NativeMetalCell = extern struct {
+pub const NativeMetalCell = extern struct {
     row: u16,
     col: u16,
     width: u16,
@@ -63,7 +63,7 @@ const NativeMetalCell = extern struct {
     v1: f32,
 };
 
-const NativeMetalRasterUpload = extern struct {
+pub const NativeMetalRasterUpload = extern struct {
     slot_id: u32,
     atlas_x_px: u32,
     atlas_y_px: u32,
@@ -75,7 +75,7 @@ const NativeMetalRasterUpload = extern struct {
     non_clear_pixels: usize,
 };
 
-extern fn maru_macos_metal_smoke_run(
+pub extern fn maru_macos_metal_smoke_run(
     duration_ms: u32,
     cols: u16,
     rows: u16,
@@ -176,7 +176,7 @@ fn durationFromEnv(raw: []const u8) u32 {
     return @min(parsed, max_duration_ms);
 }
 
-const SmokeStatus = struct {
+pub const SmokeStatus = struct {
     visible_ui: bool,
     metal_surface: bool,
     terminal_grid: bool,
@@ -185,7 +185,7 @@ const SmokeStatus = struct {
     screenshot_artifact: bool,
 };
 
-fn deriveSmokeStatus(native: NativeMetalSmokeResult) SmokeStatus {
+pub fn deriveSmokeStatus(native: NativeMetalSmokeResult) SmokeStatus {
     // terminal_grid는 "cell_count를 되돌려받았다"가 아니라 "shader가 제품 atlas texel을
     // 실제 drawable에 샘플링했다"는 신호여야 한다. non-clear 픽셀 수는 여전히 유용한
     // 진단값이지만, 실제 glyph 색이 clear 색에 가까울 수 있으므로 pass/fail gate로 쓰지
@@ -293,7 +293,7 @@ fn renderSummary(
     return output.toOwnedSlice();
 }
 
-const SmokeFixture = struct {
+pub const SmokeFixture = struct {
     size: terminal.Size,
     cells: []NativeMetalCell,
     atlas_width_px: u32,
@@ -314,7 +314,7 @@ const SmokeFixture = struct {
     shaper: []const u8 = coretext_shaper.CoreTextDrawListShaper.name,
     rasterizer: []const u8 = coretext_raster.CoreTextGlyphRasterizer.name,
 
-    fn deinit(self: *SmokeFixture, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *SmokeFixture, allocator: std.mem.Allocator) void {
         allocator.free(self.cells);
         allocator.free(self.raster_uploads);
         allocator.free(self.raster_pixels);
@@ -347,9 +347,36 @@ fn buildSmokeFixtureFromDrawListShaper(
     // Metal smoke의 입력은 실제 TerminalCore snapshot에서 나온 DrawList다. 이 경로가
     // probe-derived surface를 쓰면 shell text layout, cursor, dirty row, underline overlay가
     // 제품 shaper와 Metal backend 사이에서 보존되는지 증명하지 못한다.
-    var draw_list = try buildTerminalDrawListFixture(allocator);
+    const draw_list = try buildTerminalDrawListFixture(allocator);
+    return buildSmokeFixtureFromOwnedDrawList(
+        allocator,
+        appearance,
+        draw_list,
+        shape_draw_list,
+        rasterize_glyph,
+        rasterizer_name,
+        uses_coretext_bytes,
+        renderer_input_draw_list,
+    );
+}
+
+pub fn buildSmokeFixtureFromOwnedDrawList(
+    allocator: std.mem.Allocator,
+    appearance: config.ResolvedAppearance,
+    draw_list: renderer.DrawList,
+    shape_draw_list: coretext_shaper.ShapeDrawListFn,
+    rasterize_glyph: coretext_raster.RasterizeGlyphFn,
+    rasterizer_name: []const u8,
+    uses_coretext_bytes: bool,
+    input: []const u8,
+) !SmokeFixture {
+    // visible smoke들은 서로 다른 source(고정 fixture, live PTY)를 쓰더라도 이후 Metal
+    // 입력은 같은 제품 경계를 지나야 한다. 이 helper가 DrawList ownership과
+    // CoreTextDrawListShaper -> RendererState -> GlyphRasterFrame 변환을 한 곳에 묶어
+    // 새 smoke가 atlas/native DTO 조립을 다시 구현하지 않게 한다.
+    var owned_draw_list = draw_list;
     var draw_list_owned = true;
-    errdefer if (draw_list_owned) draw_list.deinit(allocator);
+    errdefer if (draw_list_owned) owned_draw_list.deinit(allocator);
 
     var font_registry = renderer.FontIdentityRegistry.init(allocator);
     defer font_registry.deinit();
@@ -360,7 +387,7 @@ fn buildSmokeFixtureFromDrawListShaper(
     };
     var shaped = try shaper.shape(
         allocator,
-        draw_list,
+        owned_draw_list,
         &font_registry,
     );
     defer shaped.deinit(allocator);
@@ -378,7 +405,7 @@ fn buildSmokeFixtureFromDrawListShaper(
     };
     var frame = try state.buildFrameFromGlyphRunListWithRasterizer(
         allocator,
-        draw_list,
+        owned_draw_list,
         shaped.runs,
         rasterizer,
     );
@@ -401,6 +428,7 @@ fn buildSmokeFixtureFromDrawListShaper(
         .raster_pixels = native_raster_pixels,
         .uses_coretext_bytes = uses_coretext_bytes,
         .stats = renderer.renderFrameStats(frame, state.atlas.entryCount()),
+        .input = input,
         .shaper = coretext_shaper.CoreTextDrawListShaper.name,
         .rasterizer = rasterizer_name,
     };
@@ -543,7 +571,7 @@ fn testRasterizeGlyph(
     };
 }
 
-fn buildNativeCellsFromGlyphQuads(
+pub fn buildNativeCellsFromGlyphQuads(
     allocator: std.mem.Allocator,
     frame: renderer.GlyphQuadFrame,
 ) ![]NativeMetalCell {
@@ -576,7 +604,7 @@ fn buildNativeCellsFromGlyphQuads(
     return cells.toOwnedSlice(allocator);
 }
 
-fn buildNativeRasterUploads(
+pub fn buildNativeRasterUploads(
     allocator: std.mem.Allocator,
     frame: renderer.GlyphRasterFrame,
 ) ![]NativeMetalRasterUpload {
@@ -601,7 +629,7 @@ fn buildNativeRasterUploads(
     return uploads.toOwnedSlice(allocator);
 }
 
-fn nativeCellsHaveAtlasPlacement(cells: []const NativeMetalCell) bool {
+pub fn nativeCellsHaveAtlasPlacement(cells: []const NativeMetalCell) bool {
     // 이 값은 "Metal이 glyph bitmap을 그렸다"는 뜻이 아니다. 다음 제품 text renderer에서
     // UV를 만들 수 있는 atlas placement 데이터가 Zig -> ObjC ABI까지 건너갔는지 보는
     // 중간 계약이다. 빈 배열이면 검증할 데이터가 없으므로 false로 둔다.

@@ -643,3 +643,36 @@ test "render frame consistency rejects raster byte range gaps and overflow" {
     frame.glyph_raster_frame.uploads[0].bytes_offset = 1;
     try std.testing.expect(!frame.glyphFrameConsistent());
 }
+
+test "render frame consistency rejects an in-bounds glyph that failed to rasterize" {
+    // out-of-bounds skip은 quad 단계가 glyph_uv_ready=false로 이미 신호한다. 하지만 in-bounds
+    // glyph가 rasterizer 실패로 skip되면 quad에는 UV가 남아 backend가 atlas bitmap이 없는 빈
+    // 영역을 샘플링할 수 있다. 그래서 rasterizer 실패가 있는 frame은 prepared로 보지 않는다.
+    var frame = try makeTestRenderFrame(std.testing.allocator, .{
+        .glyph_len = 2,
+        .upload_len = 2,
+        .glyph_count = 2,
+        .upload_count = 2,
+        .reused_count = 0,
+        .quad_len = 2,
+        .quad_glyph_count = 2,
+        .quad_uv_count = 2,
+        .raster_upload_len = 1,
+        .raster_skip_len = 1,
+        .raster_upload_count = 2,
+        .rasterized_count = 1,
+        .raster_skipped_count = 1,
+        .raster_out_of_bounds_skip_count = 1,
+        .raster_byte_len = 4,
+        .raster_byte_count = 4,
+    });
+    defer frame.deinit(std.testing.allocator);
+
+    // out-of-bounds였던 skip을 rasterizer 실패로 바꾼다(이유 카운트와 skip.reason을 함께 맞춰
+    // accounting/skip-reason 검증은 통과시키고 ready()만 떨어지게 한다).
+    frame.glyph_raster_frame.stats.out_of_bounds_skip_count = 0;
+    frame.glyph_raster_frame.stats.rasterizer_error_skip_count = 1;
+    frame.glyph_raster_frame.skips[0].reason = .rasterizer_failed;
+
+    try std.testing.expect(!frame.glyphFrameConsistent());
+}

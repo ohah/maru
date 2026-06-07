@@ -69,9 +69,7 @@ pub fn uvRectForSlot(
     if (slot.width_px == 0 or slot.height_px == 0) {
         return error.InvalidAtlasSlotSize;
     }
-    if (!rangeFits(slot.x_px, slot.width_px, texture_size.width_px) or
-        !rangeFits(slot.y_px, slot.height_px, texture_size.height_px))
-    {
+    if (!slotFitsTexture(slot, texture_size)) {
         return error.AtlasSlotOutsideTexture;
     }
 
@@ -135,6 +133,14 @@ pub fn buildGlyphQuadFrame(
         .overlays = overlay_copy,
         .stats = stats,
     };
+}
+
+/// slot의 pixel rect가 texture 경계 안에 완전히 들어가는지 본다. quad 단계(UV 변환)와 raster
+/// 단계(upload byte)가 같은 판정을 써야 두 단계가 같은 out-of-bounds slot을 skip한다. 그래서
+/// 이 bounds 계산은 여기 한 곳에만 둔다.
+pub fn slotFitsTexture(slot: glyph_atlas.AtlasSlot, texture_size: AtlasTextureSize) bool {
+    return rangeFits(slot.x_px, slot.width_px, texture_size.width_px) and
+        rangeFits(slot.y_px, slot.height_px, texture_size.height_px);
 }
 
 fn rangeFits(start: u32, len: u32, limit: u32) bool {

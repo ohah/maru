@@ -8,6 +8,7 @@ const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
 
 const artifact_dir = "zig-out/maru-macos-metal-smoke";
+const screenshot_path = artifact_dir ++ "/metal-frame.ppm";
 const default_duration_ms: u32 = 1500;
 const renderer_input_draw_list = "terminal_core_draw_list";
 // Metal smoke도 사람이 볼 수 있는 짧은 UI 확인이 목적이다. 환경변수 오타로
@@ -33,6 +34,11 @@ const NativeMetalSmokeResult = extern struct {
     atlas_readback_failures: u32,
     atlas_sampled_cells: u32,
     atlas_sample_missing_cells: u32,
+    screenshot_written: u32,
+    screenshot_width: u32,
+    screenshot_height: u32,
+    screenshot_bytes: u32,
+    screenshot_failures: u32,
 };
 
 const NativeMetalCell = extern struct {
@@ -76,6 +82,8 @@ extern fn maru_macos_metal_smoke_run(
     raster_upload_count: usize,
     raster_pixels: [*]const u8,
     raster_pixel_count: usize,
+    screenshot_path_ptr: [*]const u8,
+    screenshot_path_len: usize,
     result: *NativeMetalSmokeResult,
 ) void;
 
@@ -134,10 +142,17 @@ pub fn main(init: std.process.Init) !void {
         .atlas_readback_failures = 0,
         .atlas_sampled_cells = 0,
         .atlas_sample_missing_cells = 0,
+        .screenshot_written = 0,
+        .screenshot_width = 0,
+        .screenshot_height = 0,
+        .screenshot_bytes = 0,
+        .screenshot_failures = 0,
     };
     const appearance = try config.resolveAppearance(.{});
     var fixture = try buildSmokeFixture(allocator, appearance);
     defer fixture.deinit(allocator);
+
+    try resetArtifacts(io);
     maru_macos_metal_smoke_run(
         duration_ms,
         fixture.size.cols,
@@ -150,6 +165,8 @@ pub fn main(init: std.process.Init) !void {
         fixture.raster_uploads.len,
         fixture.raster_pixels.ptr,
         fixture.raster_pixels.len,
+        screenshot_path.ptr,
+        screenshot_path.len,
         &native,
     );
 
@@ -164,7 +181,8 @@ pub fn main(init: std.process.Init) !void {
 
     if (!smoke_status.terminal_grid or
         !smoke_status.product_atlas_uploaded or
-        !smoke_status.product_atlas_sampled) return error.MacosMetalSmokeFailed;
+        !smoke_status.product_atlas_sampled or
+        !smoke_status.screenshot_artifact) return error.MacosMetalSmokeFailed;
 }
 
 fn readDurationMs() u32 {
@@ -186,6 +204,7 @@ const SmokeStatus = struct {
     terminal_grid: bool,
     product_atlas_uploaded: bool,
     product_atlas_sampled: bool,
+    screenshot_artifact: bool,
 };
 
 fn deriveSmokeStatus(native: NativeMetalSmokeResult) SmokeStatus {
@@ -208,6 +227,11 @@ fn deriveSmokeStatus(native: NativeMetalSmokeResult) SmokeStatus {
         native.atlas_readback_failures == 0;
     const product_atlas_sampled = product_atlas_uploaded and
         readback_sampled_atlas_texels;
+    const screenshot_artifact = native.screenshot_written != 0 and
+        native.screenshot_width > 0 and
+        native.screenshot_height > 0 and
+        native.screenshot_bytes > 0 and
+        native.screenshot_failures == 0;
 
     return .{
         .visible_ui = visible_ui,
@@ -217,6 +241,7 @@ fn deriveSmokeStatus(native: NativeMetalSmokeResult) SmokeStatus {
             readback_sampled_atlas_texels,
         .product_atlas_uploaded = product_atlas_uploaded,
         .product_atlas_sampled = product_atlas_sampled,
+        .screenshot_artifact = screenshot_artifact,
     };
 }
 
@@ -238,6 +263,11 @@ fn renderSummary(
     try writer.print("terminal_grid={}\n", .{smoke_status.terminal_grid});
     try writer.print("product_atlas_uploaded={}\n", .{smoke_status.product_atlas_uploaded});
     try writer.print("product_atlas_sampled={}\n", .{smoke_status.product_atlas_sampled});
+    try writer.print("screenshot_artifact={}\n", .{smoke_status.screenshot_artifact});
+    if (smoke_status.screenshot_artifact) {
+        try writer.print("screenshot_path={s}\n", .{screenshot_path});
+        try writer.writeAll("screenshot_format=ppm_rgb_from_bgra8_drawable_readback\n");
+    }
     try writer.print("glyph_text={}\n", .{fixture.glyph_text});
     if (fixture.glyph_text) {
         try writer.writeAll("ui_note=appkit_window_with_coretext_drawlist_glyph_atlas_sampling\n");
@@ -270,6 +300,11 @@ fn renderSummary(
     try writer.print("atlas_readback_failures={d}\n", .{native.atlas_readback_failures});
     try writer.print("atlas_sampled_cells={d}\n", .{native.atlas_sampled_cells});
     try writer.print("atlas_sample_missing_cells={d}\n", .{native.atlas_sample_missing_cells});
+    try writer.print("screenshot_written={d}\n", .{native.screenshot_written});
+    try writer.print("screenshot_width={d}\n", .{native.screenshot_width});
+    try writer.print("screenshot_height={d}\n", .{native.screenshot_height});
+    try writer.print("screenshot_bytes={d}\n", .{native.screenshot_bytes});
+    try writer.print("screenshot_failures={d}\n", .{native.screenshot_failures});
 
     return output.toOwnedSlice();
 }
@@ -598,6 +633,17 @@ fn writeSummary(io: std.Io, summary: []const u8) !void {
     });
 }
 
+fn resetArtifacts(io: std.Io) !void {
+    try std.Io.Dir.cwd().createDirPath(io, artifact_dir);
+    // smoke가 실패해 새 screenshot을 쓰지 못했는데 예전 파일이 남아 있으면, 사용자가
+    // stale artifact를 이번 실행 결과로 오해한다. 실행 전에 지우고, native summary의
+    // screenshot_written 값만 현재 run의 단일 출처로 둔다.
+    std.Io.Dir.cwd().deleteFile(io, screenshot_path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+}
+
 test "macOS Metal smoke summary reports product atlas shader sampling boundary" {
     // 실제 Metal device를 만들지 않는 테스트에서도 artifact 계약은 고정한다.
     // GPU 실패와 summary schema 변경을 분리해야 triage가 쉬워진다.
@@ -620,6 +666,11 @@ test "macOS Metal smoke summary reports product atlas shader sampling boundary" 
         .atlas_readback_failures = 0,
         .atlas_sampled_cells = 9,
         .atlas_sample_missing_cells = 0,
+        .screenshot_written = 1,
+        .screenshot_width = 1440,
+        .screenshot_height = 840,
+        .screenshot_bytes = 3_628_800,
+        .screenshot_failures = 0,
     };
     var cells = [_]NativeMetalCell{.{
         .row = 0,
@@ -681,6 +732,9 @@ test "macOS Metal smoke summary reports product atlas shader sampling boundary" 
     try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_grid=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "product_atlas_uploaded=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "product_atlas_sampled=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_artifact=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_path=zig-out/maru-macos-metal-smoke/metal-frame.ppm\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_format=ppm_rgb_from_bgra8_drawable_readback\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_text=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "ui_note=appkit_window_with_coretext_drawlist_glyph_atlas_sampling\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=terminal_core_draw_list\n") != null);
@@ -723,6 +777,11 @@ test "macOS Metal smoke summary reports product atlas shader sampling boundary" 
     try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_readback_failures=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_sampled_cells=9\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_sample_missing_cells=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_written=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_width=1440\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_height=840\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_bytes=3628800\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_failures=0\n") != null);
 }
 
 test "NativeMetalCell ABI keeps atlas placement and uv fields tightly packed" {
@@ -744,7 +803,7 @@ test "NativeMetalRasterUpload ABI keeps raster byte ranges visible to ObjC" {
 test "NativeMetalSmokeResult ABI keeps atlas diagnostics visible to Zig" {
     // native result는 Objective-C가 채우고 Zig가 summary gate로 해석한다. 크기나 정렬이
     // 예고 없이 달라지면 product_atlas_uploaded 같은 진단값을 다른 필드로 읽을 수 있다.
-    try std.testing.expectEqual(@as(usize, 72), @sizeOf(NativeMetalSmokeResult));
+    try std.testing.expectEqual(@as(usize, 92), @sizeOf(NativeMetalSmokeResult));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(NativeMetalSmokeResult));
 }
 
@@ -771,6 +830,11 @@ test "Metal smoke terminal grid requires matched atlas texel samples" {
         .atlas_readback_failures = 0,
         .atlas_sampled_cells = 0,
         .atlas_sample_missing_cells = 0,
+        .screenshot_written = 1,
+        .screenshot_width = 1440,
+        .screenshot_height = 840,
+        .screenshot_bytes = 3_628_800,
+        .screenshot_failures = 0,
     };
     const partial_sampling: NativeMetalSmokeResult = .{
         .status = 9,
@@ -791,6 +855,11 @@ test "Metal smoke terminal grid requires matched atlas texel samples" {
         .atlas_readback_failures = 0,
         .atlas_sampled_cells = 8,
         .atlas_sample_missing_cells = 0,
+        .screenshot_written = 1,
+        .screenshot_width = 1440,
+        .screenshot_height = 840,
+        .screenshot_bytes = 3_628_800,
+        .screenshot_failures = 0,
     };
     const readback_failed: NativeMetalSmokeResult = .{
         .status = 9,
@@ -811,6 +880,11 @@ test "Metal smoke terminal grid requires matched atlas texel samples" {
         .atlas_readback_failures = 0,
         .atlas_sampled_cells = 9,
         .atlas_sample_missing_cells = 0,
+        .screenshot_written = 1,
+        .screenshot_width = 1440,
+        .screenshot_height = 840,
+        .screenshot_bytes = 3_628_800,
+        .screenshot_failures = 0,
     };
     const matched_pixels_near_clear: NativeMetalSmokeResult = .{
         .status = 0,
@@ -831,6 +905,11 @@ test "Metal smoke terminal grid requires matched atlas texel samples" {
         .atlas_readback_failures = 0,
         .atlas_sampled_cells = 9,
         .atlas_sample_missing_cells = 0,
+        .screenshot_written = 1,
+        .screenshot_width = 1440,
+        .screenshot_height = 840,
+        .screenshot_bytes = 3_628_800,
+        .screenshot_failures = 0,
     };
     var missing_sample_source = matched_pixels_near_clear;
     missing_sample_source.atlas_sample_missing_cells = 1;
@@ -873,6 +952,11 @@ test "Metal smoke product atlas gates require upload, byte-matching readback, an
         .atlas_readback_failures = 0,
         .atlas_sampled_cells = 9,
         .atlas_sample_missing_cells = 0,
+        .screenshot_written = 1,
+        .screenshot_width = 1440,
+        .screenshot_height = 840,
+        .screenshot_bytes = 3_628_800,
+        .screenshot_failures = 0,
     };
     var no_texture = success;
     no_texture.atlas_texture_created = 0;
@@ -897,9 +981,17 @@ test "Metal smoke product atlas gates require upload, byte-matching readback, an
     all_sample_sources_missing.atlas_readback_uploads = 0;
     all_sample_sources_missing.atlas_sampled_cells = 0;
     all_sample_sources_missing.atlas_sample_missing_cells = 9;
+    var missing_screenshot = success;
+    missing_screenshot.screenshot_written = 0;
+    missing_screenshot.screenshot_width = 0;
+    missing_screenshot.screenshot_height = 0;
+    missing_screenshot.screenshot_bytes = 0;
+    var screenshot_failed = success;
+    screenshot_failed.screenshot_failures = 1;
 
     try std.testing.expect(deriveSmokeStatus(success).product_atlas_uploaded);
     try std.testing.expect(deriveSmokeStatus(success).product_atlas_sampled);
+    try std.testing.expect(deriveSmokeStatus(success).screenshot_artifact);
     try std.testing.expect(!deriveSmokeStatus(no_texture).product_atlas_uploaded);
     try std.testing.expect(!deriveSmokeStatus(no_uploads).product_atlas_uploaded);
     try std.testing.expect(!deriveSmokeStatus(mismatch).product_atlas_uploaded);
@@ -907,6 +999,8 @@ test "Metal smoke product atlas gates require upload, byte-matching readback, an
     try std.testing.expect(!deriveSmokeStatus(no_sampling).product_atlas_sampled);
     try std.testing.expect(!deriveSmokeStatus(partial_sampling).product_atlas_sampled);
     try std.testing.expect(!deriveSmokeStatus(missing_sample_source).product_atlas_sampled);
+    try std.testing.expect(!deriveSmokeStatus(missing_screenshot).screenshot_artifact);
+    try std.testing.expect(!deriveSmokeStatus(screenshot_failed).screenshot_artifact);
     // 모든 glyph가 raster 단계에서 skip되면 upload/readback 인프라는 실패하지 않았어도
     // 제품 atlas 검증은 false여야 한다. 그래야 "GPU가 고장"이 아니라 "sample source가 없음"
     // 이라는 원인을 summary에서 분리해서 볼 수 있다.

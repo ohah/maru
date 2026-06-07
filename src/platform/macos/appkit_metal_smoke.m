@@ -3,6 +3,7 @@
 #import <QuartzCore/QuartzCore.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -25,6 +26,11 @@ typedef struct {
     uint32_t atlas_readback_failures;
     uint32_t atlas_sampled_cells;
     uint32_t atlas_sample_missing_cells;
+    uint32_t screenshot_written;
+    uint32_t screenshot_width;
+    uint32_t screenshot_height;
+    uint32_t screenshot_bytes;
+    uint32_t screenshot_failures;
 } MaruMetalSmokeResult;
 
 typedef struct {
@@ -400,6 +406,62 @@ static size_t maru_align_up_size(size_t value, size_t alignment) {
     return value + (alignment - remainder);
 }
 
+static char *maru_copy_path(const char *path, size_t path_len) {
+    if (path == NULL || path_len == 0) {
+        return NULL;
+    }
+    char *copy = (char *)malloc(path_len + 1);
+    if (copy == NULL) {
+        return NULL;
+    }
+    memcpy(copy, path, path_len);
+    copy[path_len] = '\0';
+    return copy;
+}
+
+static BOOL maru_write_ppm_from_bgra8_buffer(
+    const char *path,
+    const uint8_t *bgra_pixels,
+    size_t width,
+    size_t height,
+    size_t bytes_per_row
+) {
+    if (path == NULL || bgra_pixels == NULL || width == 0 || height == 0) {
+        return NO;
+    }
+
+    FILE *file = fopen(path, "wb");
+    if (file == NULL) {
+        return NO;
+    }
+
+    // 제품 Metal smoke는 대표 픽셀 readback으로 gate를 닫지만, 그 숫자만으로는 glyph
+    // bitmap 자체가 뒤집힌 회귀를 사람이 확인할 수 없다. PPM(P6)은 외부 이미지
+    // 라이브러리 없이 전체 drawable을 남기는 가장 단순한 artifact 포맷이다.
+    if (fprintf(file, "P6\n%zu %zu\n255\n", width, height) < 0) {
+        fclose(file);
+        return NO;
+    }
+
+    BOOL ok = YES;
+    for (size_t y = 0; y < height && ok; y++) {
+        const uint8_t *row = bgra_pixels + y * bytes_per_row;
+        for (size_t x = 0; x < width; x++) {
+            const uint8_t *pixel = row + x * 4;
+            const uint8_t rgb[3] = { pixel[2], pixel[1], pixel[0] };
+            if (fwrite(rgb, sizeof(rgb), 1, file) != 1) {
+                ok = NO;
+                break;
+            }
+        }
+    }
+
+    if (fclose(file) != 0) {
+        ok = NO;
+    }
+    return ok;
+}
+
 static uint32_t maru_count_mismatched_bytes(
     const uint8_t *left,
     const uint8_t *right,
@@ -675,6 +737,7 @@ static BOOL maru_draw_cell_frame(
     size_t upload_count,
     const uint8_t *raster_pixels,
     size_t raster_pixel_count,
+    const char *screenshot_path,
     MaruMetalSmokeResult *result
 ) {
     id<CAMetalDrawable> drawable = [layer nextDrawable];
@@ -773,6 +836,31 @@ static BOOL maru_draw_cell_frame(
         }
     }
 
+    const BOOL should_write_screenshot =
+        screenshot_path != NULL &&
+        result->screenshot_written == 0 &&
+        result->screenshot_failures == 0;
+    id<MTLBuffer> screenshot_buffer = nil;
+    size_t screenshot_bytes_per_row = 0;
+    size_t screenshot_byte_count = 0;
+    if (should_write_screenshot) {
+        const size_t raw_bytes_per_row = (size_t)drawable.texture.width * 4;
+        screenshot_bytes_per_row = maru_align_up_size(raw_bytes_per_row, maru_readback_stride);
+        if (screenshot_bytes_per_row == 0 ||
+            drawable.texture.height > SIZE_MAX / screenshot_bytes_per_row)
+        {
+            result->screenshot_failures += 1;
+        } else {
+            screenshot_byte_count = screenshot_bytes_per_row * (size_t)drawable.texture.height;
+            screenshot_buffer = [layer.device
+                newBufferWithLength:screenshot_byte_count
+                            options:MTLResourceStorageModeShared];
+            if (screenshot_buffer == nil) {
+                result->screenshot_failures += 1;
+            }
+        }
+    }
+
     [encoder setRenderPipelineState:cell_pipeline];
     [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
     [encoder setFragmentTexture:atlas_texture atIndex:0];
@@ -799,6 +887,17 @@ static BOOL maru_draw_cell_frame(
            destinationBytesPerRow:maru_readback_stride
          destinationBytesPerImage:maru_readback_stride];
         }
+        if (screenshot_buffer != nil) {
+            [blit copyFromTexture:drawable.texture
+                      sourceSlice:0
+                      sourceLevel:0
+                     sourceOrigin:MTLOriginMake(0, 0, 0)
+                       sourceSize:MTLSizeMake(drawable.texture.width, drawable.texture.height, 1)
+                         toBuffer:screenshot_buffer
+                destinationOffset:0
+           destinationBytesPerRow:screenshot_bytes_per_row
+         destinationBytesPerImage:screenshot_byte_count];
+        }
         [blit endEncoding];
     }
 
@@ -819,6 +918,36 @@ static BOOL maru_draw_cell_frame(
             &result->atlas_sampled_cells
         );
     }
+    if (screenshot_buffer != nil &&
+        sample_count > 0 &&
+        result->atlas_sampled_cells == result->readback_samples)
+    {
+        const uint8_t *screenshot_bytes = (const uint8_t *)[screenshot_buffer contents];
+        const BOOL wrote = maru_write_ppm_from_bgra8_buffer(
+            screenshot_path,
+            screenshot_bytes,
+            (size_t)drawable.texture.width,
+            (size_t)drawable.texture.height,
+            screenshot_bytes_per_row
+        );
+        if (wrote) {
+            result->screenshot_written = 1;
+            result->screenshot_width = (drawable.texture.width > UINT32_MAX)
+                ? UINT32_MAX
+                : (uint32_t)drawable.texture.width;
+            result->screenshot_height = (drawable.texture.height > UINT32_MAX)
+                ? UINT32_MAX
+                : (uint32_t)drawable.texture.height;
+            const size_t rgb_payload_bytes = (size_t)drawable.texture.width *
+                (size_t)drawable.texture.height *
+                3;
+            result->screenshot_bytes = (rgb_payload_bytes > UINT32_MAX)
+                ? UINT32_MAX
+                : (uint32_t)rgb_payload_bytes;
+        } else {
+            result->screenshot_failures += 1;
+        }
+    }
     free(samples);
     return YES;
 }
@@ -835,6 +964,8 @@ void maru_macos_metal_smoke_run(
     size_t raster_upload_count,
     const uint8_t *raster_pixels,
     size_t raster_pixel_count,
+    const char *screenshot_path,
+    size_t screenshot_path_len,
     MaruMetalSmokeResult *result
 ) {
     result->status = -1;
@@ -855,6 +986,11 @@ void maru_macos_metal_smoke_run(
     result->atlas_readback_failures = 0;
     result->atlas_sampled_cells = 0;
     result->atlas_sample_missing_cells = 0;
+    result->screenshot_written = 0;
+    result->screenshot_width = 0;
+    result->screenshot_height = 0;
+    result->screenshot_bytes = 0;
+    result->screenshot_failures = 0;
 
     @autoreleasepool {
         // 이 bridge는 "Metal glyph renderer 완성"이 아니라 첫 RenderFrame/GlyphQuadFrame/
@@ -969,6 +1105,11 @@ void maru_macos_metal_smoke_run(
         [window makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
 
+        char *screenshot_path_copy = maru_copy_path(screenshot_path, screenshot_path_len);
+        if (screenshot_path_copy == NULL) {
+            result->screenshot_failures += 1;
+        }
+
         NSTimeInterval seconds = ((NSTimeInterval)duration_ms) / 1000.0;
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
 
@@ -997,6 +1138,7 @@ void maru_macos_metal_smoke_run(
                     raster_upload_count,
                     raster_pixels,
                     raster_pixel_count,
+                    screenshot_path_copy,
                     result
                 );
             }
@@ -1008,6 +1150,7 @@ void maru_macos_metal_smoke_run(
         BOOL became_visible = [window isVisible];
         result->window_visible = became_visible ? 1 : 0;
         [window orderOut:nil];
+        free(screenshot_path_copy);
 
         if (!became_visible) {
             result->status = 5;
@@ -1037,6 +1180,10 @@ void maru_macos_metal_smoke_run(
         }
         if (result->atlas_sampled_cells != result->readback_samples) {
             result->status = 11;
+            return;
+        }
+        if (result->screenshot_written == 0 || result->screenshot_failures > 0) {
+            result->status = 12;
             return;
         }
         // atlas upload/readback 검증은 위 maru_upload_and_readback_product_atlas가 NO를

@@ -37,6 +37,7 @@ typedef struct {
     uint32_t string_index;
     uint32_t category;
     uint32_t fallback;
+    char font_name[128];
 } MaruCoreTextGlyphRecord;
 
 typedef struct {
@@ -233,28 +234,6 @@ static uint32_t maru_category_for_string_index(CFIndex string_index) {
     return MaruGlyphCategoryOther;
 }
 
-static CFStringRef maru_create_scalar_string(uint32_t codepoint) {
-    if (codepoint > 0x10ffff) {
-        return NULL;
-    }
-    if (codepoint >= 0xd800 && codepoint <= 0xdfff) {
-        return NULL;
-    }
-
-    UniChar chars[2];
-    CFIndex length = 1;
-    if (codepoint > 0xffff) {
-        uint32_t scalar = codepoint - 0x10000;
-        chars[0] = (UniChar)(0xd800 + (scalar >> 10));
-        chars[1] = (UniChar)(0xdc00 + (scalar & 0x3ff));
-        length = 2;
-    } else {
-        chars[0] = (UniChar)codepoint;
-    }
-
-    return CFStringCreateWithCharacters(kCFAllocatorDefault, chars, length);
-}
-
 static bool maru_validate_raster_request(
     const uint8_t *pixels,
     size_t width,
@@ -314,6 +293,7 @@ static void maru_append_glyph_record(
     MaruCoreTextGlyphRecord *records,
     size_t record_capacity,
     uint32_t font_id,
+    CFStringRef font_name,
     CGGlyph glyph,
     CFIndex string_index,
     uint32_t fallback
@@ -329,6 +309,7 @@ static void maru_append_glyph_record(
     record->string_index = maru_u32_from_cfindex(string_index);
     record->category = maru_category_for_string_index(string_index);
     record->fallback = fallback;
+    maru_copy_cfstring(font_name, record->font_name, sizeof(record->font_name));
     result->glyph_record_count += 1;
 }
 
@@ -337,6 +318,7 @@ static void maru_record_probe_glyph(
     MaruCoreTextGlyphRecord *records,
     size_t record_capacity,
     uint32_t font_id,
+    CFStringRef font_name,
     CGGlyph glyph,
     CFIndex string_index,
     uint32_t fallback
@@ -354,7 +336,7 @@ static void maru_record_probe_glyph(
         return;
     }
 
-    maru_append_glyph_record(result, records, record_capacity, font_id, glyph, string_index, fallback);
+    maru_append_glyph_record(result, records, record_capacity, font_id, font_name, glyph, string_index, fallback);
 
     if (string_index >= 0 && string_index <= 3) {
         result->ascii_glyph_present = 1;
@@ -436,10 +418,10 @@ void maru_macos_coretext_smoke_rasterize_glyph(
     const char *requested_font_family,
     size_t requested_font_family_len,
     double requested_font_size,
+    const char *font_postscript_name,
+    size_t font_postscript_name_len,
     uint32_t codepoint,
-    uint32_t font_id,
     uint32_t glyph_id,
-    uint32_t fallback,
     size_t width_px,
     size_t height_px,
     size_t bytes_per_row,
@@ -476,44 +458,37 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         // 이전 upload byte를 재사용하는 상황을 만들지 않는 것이 디버깅에 더 유리하다.
         memset(pixels, 0, byte_count);
 
-        CTFontRef primary_font = maru_create_primary_font(
-            requested_font_family,
-            requested_font_family_len,
-            requested_font_size,
-            NULL
+        (void)requested_font_family;
+        (void)requested_font_family_len;
+        (void)codepoint;
+
+        CFStringRef draw_font_name = maru_create_font_name(
+            font_postscript_name,
+            font_postscript_name_len
         );
-        if (primary_font == NULL) {
+        if (draw_font_name == NULL) {
             result->status = 3;
             return;
         }
 
-        CFStringRef scalar_string = maru_create_scalar_string(codepoint);
-        if (scalar_string == NULL) {
-            CFRelease(primary_font);
+        // glyph_id는 shaping 때 선택된 font face 안에서만 유효하다. 그래서 smoke
+        // rasterizer도 codepoint로 fallback을 다시 찾지 않고, Zig registry가 넘긴
+        // 같은 PostScript name으로 CTFont를 만든 뒤 그 glyph id를 그린다.
+        CTFontRef draw_font = CTFontCreateWithName(
+            draw_font_name,
+            (CGFloat)requested_font_size,
+            NULL
+        );
+        if (draw_font == NULL) {
+            CFRelease(draw_font_name);
             result->status = 4;
             return;
         }
 
-        CTFontRef draw_font = primary_font;
-        CTFontRef fallback_font = NULL;
-        if (fallback != 0 || font_id != 1) {
-            fallback_font = CTFontCreateForString(
-                primary_font,
-                scalar_string,
-                CFRangeMake(0, CFStringGetLength(scalar_string))
-            );
-            if (fallback_font != NULL) {
-                draw_font = fallback_font;
-            }
-        }
-
         CGColorSpaceRef color_space = CGColorSpaceCreateDeviceRGB();
         if (color_space == NULL) {
-            if (fallback_font != NULL) {
-                CFRelease(fallback_font);
-            }
-            CFRelease(scalar_string);
-            CFRelease(primary_font);
+            CFRelease(draw_font);
+            CFRelease(draw_font_name);
             result->status = 5;
             return;
         }
@@ -529,11 +504,8 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         );
         if (context == NULL) {
             CGColorSpaceRelease(color_space);
-            if (fallback_font != NULL) {
-                CFRelease(fallback_font);
-            }
-            CFRelease(scalar_string);
-            CFRelease(primary_font);
+            CFRelease(draw_font);
+            CFRelease(draw_font_name);
             result->status = 6;
             return;
         }
@@ -575,11 +547,8 @@ void maru_macos_coretext_smoke_rasterize_glyph(
 
         CGContextRelease(context);
         CGColorSpaceRelease(color_space);
-        if (fallback_font != NULL) {
-            CFRelease(fallback_font);
-        }
-        CFRelease(scalar_string);
-        CFRelease(primary_font);
+        CFRelease(draw_font);
+        CFRelease(draw_font_name);
     }
 }
 
@@ -684,14 +653,17 @@ void maru_macos_coretext_smoke_run(
 
             uint32_t run_font_id = 1;
             uint32_t run_fallback = 0;
+            CFStringRef run_name = NULL;
             CFDictionaryRef run_attributes = CTRunGetAttributes(run);
             CTFontRef run_font = run_attributes == NULL
                 ? NULL
                 : (CTFontRef)CFDictionaryGetValue(run_attributes, kCTFontAttributeName);
-            if (run_font != NULL && primary_name != NULL) {
-                CFStringRef run_name = CTFontCopyPostScriptName(run_font);
+            if (run_font != NULL) {
+                run_name = CTFontCopyPostScriptName(run_font);
                 if (run_name != NULL) {
-                    if (CFStringCompare(run_name, primary_name, 0) != kCFCompareEqualTo) {
+                    if (primary_name != NULL &&
+                        CFStringCompare(run_name, primary_name, 0) != kCFCompareEqualTo)
+                    {
                         result->fallback_run_count += 1;
                         run_fallback = 1;
                         run_font_id = 1 + result->fallback_run_count;
@@ -703,9 +675,9 @@ void maru_macos_coretext_smoke_run(
                             );
                         }
                     }
-                    CFRelease(run_name);
                 }
             }
+            CFStringRef record_font_name = run_name != NULL ? run_name : primary_name;
 
             CFIndex glyph_count = CTRunGetGlyphCount(run);
             result->glyph_count += maru_u32_from_cfindex(glyph_count);
@@ -714,6 +686,9 @@ void maru_macos_coretext_smoke_run(
             // native bridge가 과도한 동적 할당을 하지 않게 한다. 상한 초과는 smoke 실패다.
             if (glyph_count > 64) {
                 result->status = 7;
+                if (run_name != NULL) {
+                    CFRelease(run_name);
+                }
                 continue;
             }
 
@@ -727,10 +702,15 @@ void maru_macos_coretext_smoke_run(
                     glyph_records,
                     glyph_record_capacity,
                     run_font_id,
+                    record_font_name,
                     glyphs[glyph_index],
                     string_indices[glyph_index],
                     run_fallback
                 );
+            }
+
+            if (run_name != NULL) {
+                CFRelease(run_name);
             }
         }
 

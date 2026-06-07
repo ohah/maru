@@ -14,13 +14,21 @@ const metal_smoke = @import("metal_smoke.zig");
 const artifact_dir = "zig-out/maru-macos-app-pty-metal-smoke";
 const screenshot_path = artifact_dir ++ "/app-pty-metal-frame.ppm";
 const default_duration_ms: u32 = 1500;
-const default_keydown_duration_ms: u32 = 250;
+const default_synthetic_keydown_duration_ms: u32 = 250;
+const default_manual_keydown_duration_ms: u32 = 15_000;
 const max_duration_ms: u32 = 600_000;
 const renderer_input_live_pty = "surface_runtime_live_pty_draw_list";
 const input_source_appkit_keydown_resolver = "appkit_keydown_to_app_host_keybinding_resolver";
 const native_key_event_source_appkit_synthetic = "appkit_synthetic_keydown";
+const native_key_event_source_appkit_manual = "appkit_manual_keydown";
 
 extern fn maru_macos_keydown_smoke_run(duration_ms: u32, result: *NativeKeyDownSmokeResult) void;
+extern fn maru_macos_manual_keydown_smoke_run(duration_ms: u32, result: *NativeKeyDownSmokeResult) void;
+
+const NativeKeyDownSource = enum {
+    synthetic,
+    manual,
+};
 
 const NativeKeyDownSmokeResult = extern struct {
     status: i32,
@@ -43,7 +51,8 @@ const AppPtyMetalSmokeConfig = struct {
     ready_marker: []const u8 = "Maru input ready",
     scripted_input: []const u8 = "scripted input\n",
     scripted_key_chord: []const u8 = "Cmd+B",
-    native_keydown_duration_ms: u32 = default_keydown_duration_ms,
+    native_keydown_source: NativeKeyDownSource = .synthetic,
+    native_keydown_duration_ms: u32 = default_synthetic_keydown_duration_ms,
     expected_text: []const u8 = "typed:scripted input",
 };
 
@@ -56,8 +65,13 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_file_writer.interface;
 
     const duration_ms = readDurationMs();
+    const native_keydown_source = readNativeKeyDownSource();
+    const smoke_config: AppPtyMetalSmokeConfig = .{
+        .native_keydown_source = native_keydown_source,
+        .native_keydown_duration_ms = readNativeKeyDownDurationMs(native_keydown_source),
+    };
     const appearance = try config.resolveAppearance(.{});
-    var fixture = try buildLivePtyFixture(io, allocator, .{}, appearance);
+    var fixture = try buildLivePtyFixture(io, allocator, smoke_config, appearance);
     defer fixture.deinit(allocator);
 
     try resetArtifacts(io);
@@ -115,6 +129,7 @@ const LivePtyMetalFixture = struct {
     process_state: app.ProcessState,
     screen_contains_expected: bool,
     native_keydown: NativeKeyDownSmokeResult,
+    native_keydown_source: NativeKeyDownSource,
     scripted_key_event_sent: bool,
     scripted_key_event_result: []const u8,
     scripted_terminal_input_bytes_len: usize,
@@ -139,7 +154,10 @@ fn buildLivePtyFixture(
 ) !LivePtyMetalFixture {
     // 이 smoke는 첫 visible PTY 경로다. shell UX가 아니라 app/PTY/renderer/platform 결합을
     // 검증하므로 prompt와 dotfile 영향을 받지 않는 controlled command만 실행한다.
-    const native_keydown = try runNativeKeyDownSmoke(smoke_config.native_keydown_duration_ms);
+    const native_keydown = try runNativeKeyDownSmoke(
+        smoke_config.native_keydown_source,
+        smoke_config.native_keydown_duration_ms,
+    );
 
     var session = try pty.PtySession.spawn(allocator, .{
         .command = smoke_config.command,
@@ -183,18 +201,21 @@ fn buildLivePtyFixture(
         // native bridge가 실제 keyDown: 메서드에서 만든 payload를 Zig terminal.KeyEvent로
         // 바꾼 뒤 app host에 넣는다. 이렇게 해야 macOS view가 키를 받는 증거와
         // Maru의 app-vs-terminal 정책이 같은 summary에서 이어진다.
+        const scripted_chord = try config.KeyChord.parse(smoke_config.scripted_key_chord);
         const resolver: config.KeyBindingResolver = .{
             .terminal_bindings = &.{.{
-                .chord = try config.KeyChord.parse(smoke_config.scripted_key_chord),
+                .chord = scripted_chord,
                 .input = .{ .send_text = smoke_config.scripted_input },
             }},
         };
         try resolver.validate();
+        const native_key_event = try keyEventFromNativeKeyDown(native_keydown);
+        try ensureNativeKeyMatchesChord(native_key_event, scripted_chord);
         const key_result = try app.handleKeyEvent(
             &app_window,
             &runtime,
             resolver,
-            try keyEventFromNativeKeyDown(native_keydown),
+            native_key_event,
         );
         scripted_key_event_result = keyHandlingResultName(key_result);
         switch (key_result) {
@@ -247,6 +268,7 @@ fn buildLivePtyFixture(
         .process_state = active.process_state,
         .screen_contains_expected = std.mem.indexOf(u8, screen, smoke_config.expected_text) != null,
         .native_keydown = native_keydown,
+        .native_keydown_source = smoke_config.native_keydown_source,
         .scripted_key_event_sent = scripted_key_event_sent,
         .scripted_key_event_result = scripted_key_event_result,
         .scripted_terminal_input_bytes_len = scripted_terminal_input_bytes_len,
@@ -335,7 +357,7 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.print("command={s}\n", .{input.fixture.command});
     try writer.print("args.len={d}\n", .{input.fixture.args_len});
     try writer.print("input_source={s}\n", .{input_source_appkit_keydown_resolver});
-    try writer.print("native_key_event_source={s}\n", .{native_key_event_source_appkit_synthetic});
+    try writer.print("native_key_event_source={s}\n", .{nativeKeyDownSourceName(input.fixture.native_keydown_source)});
     try writer.print("native_keydown_status={d}\n", .{input.fixture.native_keydown.status});
     try writer.print("native_keydown_window_visible={}\n", .{input.fixture.native_keydown.window_visible != 0});
     try writer.print("native_keydown_received={}\n", .{input.fixture.native_keydown.key_down_received != 0});
@@ -378,10 +400,13 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     return output.toOwnedSlice();
 }
 
-fn runNativeKeyDownSmoke(duration_ms: u32) !NativeKeyDownSmokeResult {
+fn runNativeKeyDownSmoke(source: NativeKeyDownSource, duration_ms: u32) !NativeKeyDownSmokeResult {
     var native_keydown = std.mem.zeroes(NativeKeyDownSmokeResult);
     native_keydown.status = -1;
-    maru_macos_keydown_smoke_run(duration_ms, &native_keydown);
+    switch (source) {
+        .synthetic => maru_macos_keydown_smoke_run(duration_ms, &native_keydown),
+        .manual => maru_macos_manual_keydown_smoke_run(duration_ms, &native_keydown),
+    }
     if (native_keydown.status != 0) return error.NativeKeyDownSmokeFailed;
     if (native_keydown.key_down_received == 0 or native_keydown.codepoint == 0) {
         return error.NativeKeyDownSmokeMissingKey;
@@ -404,6 +429,20 @@ fn keyEventFromNativeKeyDown(native_keydown: NativeKeyDownSmokeResult) !terminal
             .option = native_keydown.modifier_option != 0,
             .command = native_keydown.modifier_command != 0,
         },
+    };
+}
+
+fn ensureNativeKeyMatchesChord(event: terminal.KeyEvent, expected: config.KeyChord) !void {
+    // manual smoke는 사용자가 다른 키를 누를 수 있다. 잘못된 키를 PTY에 쓰면
+    // controlled command가 종료되지 않아 실패 원인이 key capture인지 PTY인지 흐려진다.
+    const actual = config.KeyChord.fromKeyEvent(event) orelse return error.NativeKeyDownUnexpectedChord;
+    if (!actual.eql(expected)) return error.NativeKeyDownUnexpectedChord;
+}
+
+fn nativeKeyDownSourceName(source: NativeKeyDownSource) []const u8 {
+    return switch (source) {
+        .synthetic => native_key_event_source_appkit_synthetic,
+        .manual => native_key_event_source_appkit_manual,
     };
 }
 
@@ -478,9 +517,36 @@ fn readDurationMs() u32 {
 }
 
 fn durationFromEnv(raw: []const u8) u32 {
-    const parsed = std.fmt.parseInt(u32, raw, 10) catch return default_duration_ms;
-    if (parsed == 0) return default_duration_ms;
+    return durationFromEnvWithDefault(raw, default_duration_ms);
+}
+
+fn durationFromEnvWithDefault(raw: []const u8, default: u32) u32 {
+    const parsed = std.fmt.parseInt(u32, raw, 10) catch return default;
+    if (parsed == 0) return default;
     return @min(parsed, max_duration_ms);
+}
+
+fn readNativeKeyDownSource() NativeKeyDownSource {
+    const raw_ptr = std.c.getenv("MARU_APP_PTY_METAL_KEYDOWN_SOURCE") orelse return .synthetic;
+    return nativeKeyDownSourceFromEnvValue(std.mem.span(raw_ptr));
+}
+
+fn nativeKeyDownSourceFromEnvValue(raw: []const u8) NativeKeyDownSource {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(trimmed, "manual")) return .manual;
+    return .synthetic;
+}
+
+fn readNativeKeyDownDurationMs(source: NativeKeyDownSource) u32 {
+    const raw_ptr = std.c.getenv("MARU_APP_PTY_METAL_KEYDOWN_MS") orelse return nativeKeyDownDefaultDurationMs(source);
+    return durationFromEnvWithDefault(std.mem.span(raw_ptr), nativeKeyDownDefaultDurationMs(source));
+}
+
+fn nativeKeyDownDefaultDurationMs(source: NativeKeyDownSource) u32 {
+    return switch (source) {
+        .synthetic => default_synthetic_keydown_duration_ms,
+        .manual => default_manual_keydown_duration_ms,
+    };
 }
 
 test "app PTY Metal summary records live PTY and visible Metal evidence" {
@@ -574,6 +640,7 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
             .modifier_option = 0,
             .modifier_command = 1,
         },
+        .native_keydown_source = .synthetic,
         .scripted_key_event_sent = true,
         .scripted_key_event_result = "terminal_input",
         .scripted_terminal_input_bytes_len = "scripted input\n".len,
@@ -648,6 +715,26 @@ test "app PTY Metal keyDown bridge rejects missing native key evidence" {
     }));
 }
 
+test "app PTY Metal keyDown bridge rejects a physical key that is not the scripted chord" {
+    try std.testing.expectError(
+        error.NativeKeyDownUnexpectedChord,
+        ensureNativeKeyMatchesChord(.{
+            .key = .{ .char = 'x' },
+            .modifiers = .{ .command = true },
+        }, try config.KeyChord.parse("Cmd+B")),
+    );
+}
+
+test "app PTY Metal keyDown source stays synthetic unless manual is explicitly requested" {
+    try std.testing.expectEqual(NativeKeyDownSource.synthetic, nativeKeyDownSourceFromEnvValue(""));
+    try std.testing.expectEqual(NativeKeyDownSource.synthetic, nativeKeyDownSourceFromEnvValue("synthetic"));
+    try std.testing.expectEqual(NativeKeyDownSource.synthetic, nativeKeyDownSourceFromEnvValue("unknown"));
+    try std.testing.expectEqual(NativeKeyDownSource.manual, nativeKeyDownSourceFromEnvValue("manual"));
+    try std.testing.expectEqual(NativeKeyDownSource.manual, nativeKeyDownSourceFromEnvValue(" Manual \n"));
+    try std.testing.expectEqualStrings(native_key_event_source_appkit_synthetic, nativeKeyDownSourceName(.synthetic));
+    try std.testing.expectEqualStrings(native_key_event_source_appkit_manual, nativeKeyDownSourceName(.manual));
+}
+
 test "app PTY Metal duration override clamps invalid, zero, and oversized values" {
     try std.testing.expectEqual(default_duration_ms, durationFromEnv("abc"));
     try std.testing.expectEqual(default_duration_ms, durationFromEnv(""));
@@ -655,4 +742,7 @@ test "app PTY Metal duration override clamps invalid, zero, and oversized values
     try std.testing.expectEqual(default_duration_ms, durationFromEnv("99999999999"));
     try std.testing.expectEqual(@as(u32, 250), durationFromEnv("250"));
     try std.testing.expectEqual(max_duration_ms, durationFromEnv("99999999"));
+    try std.testing.expectEqual(default_synthetic_keydown_duration_ms, durationFromEnvWithDefault("abc", default_synthetic_keydown_duration_ms));
+    try std.testing.expectEqual(default_manual_keydown_duration_ms, durationFromEnvWithDefault("0", default_manual_keydown_duration_ms));
+    try std.testing.expectEqual(@as(u32, 20_000), durationFromEnvWithDefault("20000", default_manual_keydown_duration_ms));
 }

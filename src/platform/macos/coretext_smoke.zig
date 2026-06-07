@@ -561,9 +561,11 @@ fn shapedRecordForCoreTextProbe(
     // 테스트는 native smoke record가 어떤 순서로 변환되는지 읽기 쉬워야 한다.
     // CoreText 전용 record 변환과 renderer 중립 record 변환을 한 곳에 묶어,
     // 테스트 본문이 변환 파이프라인의 중첩 괄호보다 검증 의도에 집중하게 한다.
-    const stable_record = record;
+    // by-value 파라미터 `record`는 이 함수 동안 유효하므로 `shapedGlyphRunForTest`와
+    // 같이 그 주소를 그대로 넘긴다. font_name slice가 가리킬 storage가 변환 직후
+    // intern까지 살아 있다.
     return coretext_font.shapedRecordFromCoreTextGlyph(
-        coreTextGlyphRecordForProbe(&stable_record),
+        coreTextGlyphRecordForProbe(&record),
         font_registry,
     );
 }

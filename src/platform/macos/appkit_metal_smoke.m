@@ -16,6 +16,13 @@ typedef struct {
     uint32_t readback_samples;
     uint32_t readback_non_clear_pixels;
     uint32_t readback_failures;
+    uint32_t atlas_texture_created;
+    uint32_t atlas_uploads_requested;
+    uint32_t atlas_uploads_uploaded;
+    uint32_t atlas_upload_bytes;
+    uint32_t atlas_readback_uploads;
+    uint32_t atlas_readback_mismatched_bytes;
+    uint32_t atlas_readback_failures;
 } MaruMetalSmokeResult;
 
 typedef struct {
@@ -30,6 +37,18 @@ typedef struct {
     uint32_t atlas_width_px;
     uint32_t atlas_height_px;
 } MaruMetalSmokeCell;
+
+typedef struct {
+    uint32_t slot_id;
+    uint32_t atlas_x_px;
+    uint32_t atlas_y_px;
+    uint32_t atlas_width_px;
+    uint32_t atlas_height_px;
+    size_t bytes_offset;
+    size_t byte_count;
+    size_t bytes_per_row;
+    size_t non_clear_pixels;
+} MaruMetalRasterUpload;
 
 typedef struct {
     float x;
@@ -212,6 +231,189 @@ static uint32_t maru_count_non_clear_readback_pixels(
         }
     }
     return non_clear;
+}
+
+static uint32_t maru_saturating_add_u32(uint32_t left, size_t right) {
+    if (right > UINT32_MAX - left) {
+        return UINT32_MAX;
+    }
+    return left + (uint32_t)right;
+}
+
+static uint32_t maru_count_mismatched_bytes(
+    const uint8_t *left,
+    const uint8_t *right,
+    size_t byte_count
+) {
+    uint32_t mismatches = 0;
+    for (size_t index = 0; index < byte_count; index++) {
+        if (left[index] != right[index]) {
+            mismatches = maru_saturating_add_u32(mismatches, 1);
+        }
+    }
+    return mismatches;
+}
+
+static BOOL maru_upload_fits_atlas(
+    MaruMetalRasterUpload upload,
+    uint32_t atlas_width_px,
+    uint32_t atlas_height_px,
+    size_t raster_pixel_count
+) {
+    if (upload.slot_id == 0 ||
+        upload.atlas_width_px == 0 ||
+        upload.atlas_height_px == 0 ||
+        upload.bytes_per_row == 0 ||
+        upload.byte_count == 0)
+    {
+        return NO;
+    }
+    if (atlas_width_px == 0 || atlas_height_px == 0) {
+        return NO;
+    }
+    if (upload.atlas_x_px >= atlas_width_px ||
+        upload.atlas_y_px >= atlas_height_px ||
+        upload.atlas_width_px > atlas_width_px - upload.atlas_x_px ||
+        upload.atlas_height_px > atlas_height_px - upload.atlas_y_px)
+    {
+        return NO;
+    }
+
+    const size_t height = (size_t)upload.atlas_height_px;
+    if (upload.bytes_per_row > SIZE_MAX / height) {
+        return NO;
+    }
+    const size_t expected_bytes = upload.bytes_per_row * height;
+    if (upload.byte_count != expected_bytes) {
+        return NO;
+    }
+    if (upload.bytes_offset > raster_pixel_count ||
+        upload.byte_count > raster_pixel_count - upload.bytes_offset)
+    {
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL maru_upload_and_readback_product_atlas(
+    id<MTLDevice> device,
+    id<MTLCommandQueue> queue,
+    uint32_t atlas_width_px,
+    uint32_t atlas_height_px,
+    const MaruMetalRasterUpload *uploads,
+    size_t upload_count,
+    const uint8_t *raster_pixels,
+    size_t raster_pixel_count,
+    MaruMetalSmokeResult *result
+) {
+    // 이 smoke는 아직 glyph를 화면에 샘플링하지 않는다. 대신 제품 GlyphRasterFrame이 만든
+    // RGBA bytes가 native Metal texture 경계까지 손실 없이 건너가는지 먼저 분리해서 검증한다.
+    // 이 단계를 따로 두면 나중에 text shader가 깨졌을 때 "업로드 문제"와 "샘플링 문제"를
+    // 같은 로그에서 구분할 수 있다.
+    result->atlas_uploads_requested =
+        (upload_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)upload_count;
+    if (device == nil || queue == nil ||
+        atlas_width_px == 0 || atlas_height_px == 0 ||
+        uploads == NULL || upload_count == 0 ||
+        raster_pixels == NULL || raster_pixel_count == 0)
+    {
+        result->atlas_readback_failures += 1;
+        return NO;
+    }
+
+    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                     width:(NSUInteger)atlas_width_px
+                                    height:(NSUInteger)atlas_height_px
+                                 mipmapped:NO];
+    descriptor.storageMode = MTLStorageModeShared;
+    descriptor.usage = MTLTextureUsageShaderRead;
+
+    id<MTLTexture> atlas_texture = [device newTextureWithDescriptor:descriptor];
+    if (atlas_texture == nil) {
+        result->atlas_readback_failures += 1;
+        return NO;
+    }
+    result->atlas_texture_created = 1;
+
+    for (size_t index = 0; index < upload_count; index++) {
+        const MaruMetalRasterUpload upload = uploads[index];
+        if (!maru_upload_fits_atlas(upload, atlas_width_px, atlas_height_px, raster_pixel_count)) {
+            result->atlas_readback_failures += 1;
+            return NO;
+        }
+
+        const uint8_t *source = raster_pixels + upload.bytes_offset;
+        [atlas_texture replaceRegion:MTLRegionMake2D(
+                                      (NSUInteger)upload.atlas_x_px,
+                                      (NSUInteger)upload.atlas_y_px,
+                                      (NSUInteger)upload.atlas_width_px,
+                                      (NSUInteger)upload.atlas_height_px)
+                          mipmapLevel:0
+                            withBytes:source
+                          bytesPerRow:upload.bytes_per_row];
+        result->atlas_uploads_uploaded = maru_saturating_add_u32(result->atlas_uploads_uploaded, 1);
+        result->atlas_upload_bytes = maru_saturating_add_u32(result->atlas_upload_bytes, upload.byte_count);
+    }
+
+    for (size_t index = 0; index < upload_count; index++) {
+        const MaruMetalRasterUpload upload = uploads[index];
+        const uint8_t *source = raster_pixels + upload.bytes_offset;
+        id<MTLBuffer> readback_buffer = [device
+            newBufferWithLength:upload.byte_count
+                        options:MTLResourceStorageModeShared];
+        if (readback_buffer == nil) {
+            result->atlas_readback_failures += 1;
+            return NO;
+        }
+
+        id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+        if (command_buffer == nil) {
+            result->atlas_readback_failures += 1;
+            return NO;
+        }
+
+        id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+        if (blit == nil) {
+            result->atlas_readback_failures += 1;
+            return NO;
+        }
+
+        [blit copyFromTexture:atlas_texture
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(
+                                  (NSUInteger)upload.atlas_x_px,
+                                  (NSUInteger)upload.atlas_y_px,
+                                  0)
+                   sourceSize:MTLSizeMake(
+                                  (NSUInteger)upload.atlas_width_px,
+                                  (NSUInteger)upload.atlas_height_px,
+                                  1)
+                     toBuffer:readback_buffer
+            destinationOffset:0
+       destinationBytesPerRow:upload.bytes_per_row
+     destinationBytesPerImage:upload.byte_count];
+        [blit endEncoding];
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+
+        const uint8_t *readback = (const uint8_t *)[readback_buffer contents];
+        if (readback == NULL) {
+            result->atlas_readback_failures += 1;
+            return NO;
+        }
+        result->atlas_readback_uploads = maru_saturating_add_u32(result->atlas_readback_uploads, 1);
+        result->atlas_readback_mismatched_bytes = maru_saturating_add_u32(
+            result->atlas_readback_mismatched_bytes,
+            maru_count_mismatched_bytes(source, readback, upload.byte_count)
+        );
+    }
+
+    return result->atlas_uploads_uploaded == result->atlas_uploads_requested &&
+        result->atlas_readback_uploads == result->atlas_uploads_uploaded &&
+        result->atlas_readback_mismatched_bytes == 0 &&
+        result->atlas_readback_failures == 0;
 }
 
 static MaruMetalSmokeVertex *maru_build_cell_vertices(
@@ -405,6 +607,12 @@ void maru_macos_metal_smoke_run(
     uint16_t rows,
     const MaruMetalSmokeCell *cells,
     size_t cell_count,
+    uint32_t atlas_width_px,
+    uint32_t atlas_height_px,
+    const MaruMetalRasterUpload *raster_uploads,
+    size_t raster_upload_count,
+    const uint8_t *raster_pixels,
+    size_t raster_pixel_count,
     MaruMetalSmokeResult *result
 ) {
     result->status = -1;
@@ -416,12 +624,20 @@ void maru_macos_metal_smoke_run(
     result->readback_samples = 0;
     result->readback_non_clear_pixels = 0;
     result->readback_failures = 0;
+    result->atlas_texture_created = 0;
+    result->atlas_uploads_requested = 0;
+    result->atlas_uploads_uploaded = 0;
+    result->atlas_upload_bytes = 0;
+    result->atlas_readback_uploads = 0;
+    result->atlas_readback_mismatched_bytes = 0;
+    result->atlas_readback_failures = 0;
 
     @autoreleasepool {
-        // 이 bridge는 "Metal glyph renderer 완성"이 아니라 첫 RenderFrame/GlyphQuadFrame 소비 smoke다.
+        // 이 bridge는 "Metal glyph renderer 완성"이 아니라 첫 RenderFrame/GlyphQuadFrame/
+        // GlyphRasterFrame 소비 smoke다.
         // Zig 쪽이 TerminalCore/RendererState/RenderFrame/artifact 계약을 소유하고,
-        // 여기서는 그 slot-backed 셀 배열을 실제 CAMetalLayer 위에 placeholder quad로
-        // present할 수 있는지 확인한다.
+        // 여기서는 그 slot-backed 셀 배열을 실제 CAMetalLayer 위에 placeholder quad로 present하고,
+        // raster bytes를 Metal atlas texture에 업로드할 수 있는지 확인한다.
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         [NSApp finishLaunching];
@@ -444,6 +660,21 @@ void maru_macos_metal_smoke_run(
         }
         if (cells == NULL || cell_count == 0 || cols == 0 || rows == 0) {
             result->status = 7;
+            return;
+        }
+
+        if (!maru_upload_and_readback_product_atlas(
+                device,
+                queue,
+                atlas_width_px,
+                atlas_height_px,
+                raster_uploads,
+                raster_upload_count,
+                raster_pixels,
+                raster_pixel_count,
+                result))
+        {
+            result->status = 10;
             return;
         }
 
@@ -555,6 +786,16 @@ void maru_macos_metal_smoke_run(
             result->readback_failures > 0)
         {
             result->status = 9;
+            return;
+        }
+        if (result->atlas_texture_created == 0 ||
+            result->atlas_uploads_requested == 0 ||
+            result->atlas_uploads_uploaded != result->atlas_uploads_requested ||
+            result->atlas_readback_uploads != result->atlas_uploads_uploaded ||
+            result->atlas_readback_mismatched_bytes > 0 ||
+            result->atlas_readback_failures > 0)
+        {
+            result->status = 10;
             return;
         }
 

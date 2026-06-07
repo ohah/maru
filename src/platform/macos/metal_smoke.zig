@@ -20,6 +20,13 @@ const NativeMetalSmokeResult = extern struct {
     readback_samples: u32,
     readback_non_clear_pixels: u32,
     readback_failures: u32,
+    atlas_texture_created: u32,
+    atlas_uploads_requested: u32,
+    atlas_uploads_uploaded: u32,
+    atlas_upload_bytes: u32,
+    atlas_readback_uploads: u32,
+    atlas_readback_mismatched_bytes: u32,
+    atlas_readback_failures: u32,
 };
 
 const NativeMetalCell = extern struct {
@@ -35,12 +42,30 @@ const NativeMetalCell = extern struct {
     atlas_height_px: u32,
 };
 
+const NativeMetalRasterUpload = extern struct {
+    slot_id: u32,
+    atlas_x_px: u32,
+    atlas_y_px: u32,
+    atlas_width_px: u32,
+    atlas_height_px: u32,
+    bytes_offset: usize,
+    byte_count: usize,
+    bytes_per_row: usize,
+    non_clear_pixels: usize,
+};
+
 extern fn maru_macos_metal_smoke_run(
     duration_ms: u32,
     cols: u16,
     rows: u16,
     cells: [*]const NativeMetalCell,
     cell_count: usize,
+    atlas_width_px: u32,
+    atlas_height_px: u32,
+    raster_uploads: [*]const NativeMetalRasterUpload,
+    raster_upload_count: usize,
+    raster_pixels: [*]const u8,
+    raster_pixel_count: usize,
     result: *NativeMetalSmokeResult,
 ) void;
 
@@ -63,6 +88,13 @@ pub fn main(init: std.process.Init) !void {
         .readback_samples = 0,
         .readback_non_clear_pixels = 0,
         .readback_failures = 0,
+        .atlas_texture_created = 0,
+        .atlas_uploads_requested = 0,
+        .atlas_uploads_uploaded = 0,
+        .atlas_upload_bytes = 0,
+        .atlas_readback_uploads = 0,
+        .atlas_readback_mismatched_bytes = 0,
+        .atlas_readback_failures = 0,
     };
     var fixture = try buildSmokeFixture(allocator);
     defer fixture.deinit(allocator);
@@ -72,6 +104,12 @@ pub fn main(init: std.process.Init) !void {
         fixture.size.rows,
         fixture.cells.ptr,
         fixture.cells.len,
+        fixture.atlas_width_px,
+        fixture.atlas_height_px,
+        fixture.raster_uploads.ptr,
+        fixture.raster_uploads.len,
+        fixture.raster_pixels.ptr,
+        fixture.raster_pixels.len,
         &native,
     );
 
@@ -84,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("\nartifacts written to {s}/\n", .{artifact_dir});
     try stdout.flush();
 
-    if (!smoke_status.terminal_grid) return error.MacosMetalSmokeFailed;
+    if (!smoke_status.terminal_grid or !smoke_status.product_atlas_uploaded) return error.MacosMetalSmokeFailed;
 }
 
 fn readDurationMs() u32 {
@@ -104,6 +142,7 @@ const SmokeStatus = struct {
     visible_ui: bool,
     metal_surface: bool,
     terminal_grid: bool,
+    product_atlas_uploaded: bool,
 };
 
 fn deriveSmokeStatus(native: NativeMetalSmokeResult) SmokeStatus {
@@ -116,6 +155,13 @@ fn deriveSmokeStatus(native: NativeMetalSmokeResult) SmokeStatus {
     const readback_found_cell_pixels = native.readback_samples > 0 and
         native.readback_non_clear_pixels == native.readback_samples and
         native.readback_failures == 0;
+    const product_atlas_uploaded = native.atlas_texture_created != 0 and
+        native.atlas_uploads_requested > 0 and
+        native.atlas_uploads_uploaded == native.atlas_uploads_requested and
+        native.atlas_readback_uploads == native.atlas_uploads_uploaded and
+        native.atlas_upload_bytes > 0 and
+        native.atlas_readback_mismatched_bytes == 0 and
+        native.atlas_readback_failures == 0;
 
     return .{
         .visible_ui = visible_ui,
@@ -123,6 +169,7 @@ fn deriveSmokeStatus(native: NativeMetalSmokeResult) SmokeStatus {
         .terminal_grid = visible_ui and
             metal_surface and
             readback_found_cell_pixels,
+        .product_atlas_uploaded = product_atlas_uploaded,
     };
 }
 
@@ -142,8 +189,9 @@ fn renderSummary(
     try writer.print("visible_ui={}\n", .{smoke_status.visible_ui});
     try writer.print("metal_surface={}\n", .{smoke_status.metal_surface});
     try writer.print("terminal_grid={}\n", .{smoke_status.terminal_grid});
+    try writer.print("product_atlas_uploaded={}\n", .{smoke_status.product_atlas_uploaded});
     try writer.writeAll("glyph_text=false\n");
-    try writer.writeAll("ui_note=appkit_window_with_metal_glyph_frame_placeholder_readback_no_glyph_text\n");
+    try writer.writeAll("ui_note=appkit_window_with_metal_glyph_frame_placeholder_and_product_atlas_upload_readback_no_glyph_text\n");
     try writer.writeAll("renderer_input=renderer_state_glyph_frame\n");
     try writer.print("renderer_atlas_slot_placement={}\n", .{nativeCellsHaveAtlasPlacement(fixture.cells)});
     // 제품 frame 통계는 renderer가 소유한 공유 직렬화기로 남긴다. glyph text smoke와 같은
@@ -160,6 +208,13 @@ fn renderSummary(
     try writer.print("readback_samples={d}\n", .{native.readback_samples});
     try writer.print("readback_non_clear_pixels={d}\n", .{native.readback_non_clear_pixels});
     try writer.print("readback_failures={d}\n", .{native.readback_failures});
+    try writer.print("atlas_texture_created={d}\n", .{native.atlas_texture_created});
+    try writer.print("atlas_uploads_requested={d}\n", .{native.atlas_uploads_requested});
+    try writer.print("atlas_uploads_uploaded={d}\n", .{native.atlas_uploads_uploaded});
+    try writer.print("atlas_upload_bytes={d}\n", .{native.atlas_upload_bytes});
+    try writer.print("atlas_readback_uploads={d}\n", .{native.atlas_readback_uploads});
+    try writer.print("atlas_readback_mismatched_bytes={d}\n", .{native.atlas_readback_mismatched_bytes});
+    try writer.print("atlas_readback_failures={d}\n", .{native.atlas_readback_failures});
 
     return output.toOwnedSlice();
 }
@@ -167,6 +222,10 @@ fn renderSummary(
 const SmokeFixture = struct {
     size: terminal.Size,
     cells: []NativeMetalCell,
+    atlas_width_px: u32,
+    atlas_height_px: u32,
+    raster_uploads: []NativeMetalRasterUpload,
+    raster_pixels: []u8,
     // 제품 frame 통계는 renderer가 소유한 공유 타입으로 들고, native 입력(size, cells)과
     // 진단 통계를 한 struct에 모은다. shaper는 어떤 shaper로 frame을 준비했는지의 라벨이다.
     stats: renderer.RenderFrameStats,
@@ -174,6 +233,8 @@ const SmokeFixture = struct {
 
     fn deinit(self: *SmokeFixture, allocator: std.mem.Allocator) void {
         allocator.free(self.cells);
+        allocator.free(self.raster_uploads);
+        allocator.free(self.raster_pixels);
         self.* = undefined;
     }
 };
@@ -197,10 +258,18 @@ fn buildSmokeFixture(allocator: std.mem.Allocator) !SmokeFixture {
 
     const native_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame);
     errdefer allocator.free(native_cells);
+    const native_raster_uploads = try buildNativeRasterUploads(allocator, frame.glyph_raster_frame);
+    errdefer allocator.free(native_raster_uploads);
+    const native_raster_pixels = try allocator.dupe(u8, frame.glyph_raster_frame.pixels);
+    errdefer allocator.free(native_raster_pixels);
 
     return .{
         .size = frame.glyph_frame.size,
         .cells = native_cells,
+        .atlas_width_px = state.atlas.config.atlas_width_px,
+        .atlas_height_px = state.atlas.config.atlas_height_px,
+        .raster_uploads = native_raster_uploads,
+        .raster_pixels = native_raster_pixels,
         .stats = renderer.renderFrameStats(frame, state.atlas.entryCount()),
     };
 }
@@ -232,6 +301,31 @@ fn buildNativeCellsFromGlyphQuads(
     }
 
     return cells.toOwnedSlice(allocator);
+}
+
+fn buildNativeRasterUploads(
+    allocator: std.mem.Allocator,
+    frame: renderer.GlyphRasterFrame,
+) ![]NativeMetalRasterUpload {
+    var uploads: std.ArrayList(NativeMetalRasterUpload) = .empty;
+    errdefer uploads.deinit(allocator);
+
+    try uploads.ensureTotalCapacity(allocator, frame.uploads.len);
+    for (frame.uploads) |upload| {
+        uploads.appendAssumeCapacity(.{
+            .slot_id = upload.slot.id,
+            .atlas_x_px = upload.slot.x_px,
+            .atlas_y_px = upload.slot.y_px,
+            .atlas_width_px = upload.slot.width_px,
+            .atlas_height_px = upload.slot.height_px,
+            .bytes_offset = upload.bytes_offset,
+            .byte_count = upload.byte_count,
+            .bytes_per_row = upload.bytes_per_row,
+            .non_clear_pixels = upload.non_clear_pixels,
+        });
+    }
+
+    return uploads.toOwnedSlice(allocator);
 }
 
 fn nativeCellsHaveAtlasPlacement(cells: []const NativeMetalCell) bool {
@@ -268,6 +362,13 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
         .readback_samples = 9,
         .readback_non_clear_pixels = 9,
         .readback_failures = 0,
+        .atlas_texture_created = 1,
+        .atlas_uploads_requested = 8,
+        .atlas_uploads_uploaded = 8,
+        .atlas_upload_bytes = 6272,
+        .atlas_readback_uploads = 8,
+        .atlas_readback_mismatched_bytes = 0,
+        .atlas_readback_failures = 0,
     };
     var cells = [_]NativeMetalCell{.{
         .row = 0,
@@ -280,9 +381,15 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
         .atlas_width_px = 14,
         .atlas_height_px = 14,
     }};
+    var raster_uploads = [_]NativeMetalRasterUpload{};
+    var raster_pixels = [_]u8{};
     const fixture: SmokeFixture = .{
         .size = .{ .cols = 24, .rows = 6 },
         .cells = cells[0..],
+        .atlas_width_px = 1024,
+        .atlas_height_px = 1024,
+        .raster_uploads = raster_uploads[0..],
+        .raster_pixels = raster_pixels[0..],
         .stats = .{
             .consistent = true,
             .backend = .metal,
@@ -315,8 +422,9 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "visible_ui=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "metal_surface=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_grid=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "product_atlas_uploaded=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_text=false\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "ui_note=appkit_window_with_metal_glyph_frame_placeholder_readback_no_glyph_text\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "ui_note=appkit_window_with_metal_glyph_frame_placeholder_and_product_atlas_upload_readback_no_glyph_text\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=renderer_state_glyph_frame\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_atlas_slot_placement=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_uv_ready=true\n") != null);
@@ -347,6 +455,13 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "readback_samples=9\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "readback_non_clear_pixels=9\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "readback_failures=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_texture_created=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_uploads_requested=8\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_uploads_uploaded=8\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_upload_bytes=6272\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_readback_uploads=8\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_readback_mismatched_bytes=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "atlas_readback_failures=0\n") != null);
 }
 
 test "NativeMetalCell ABI keeps atlas placement fields tightly packed" {
@@ -355,6 +470,21 @@ test "NativeMetalCell ABI keeps atlas placement fields tightly packed" {
     // 값으로 읽어 Metal smoke가 거짓 신호를 낼 수 있다.
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(NativeMetalCell));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(NativeMetalCell));
+}
+
+test "NativeMetalRasterUpload ABI keeps raster byte ranges visible to ObjC" {
+    // NativeMetalRasterUpload은 Zig 제품 GlyphRasterFrame의 upload metadata를 ObjC bridge에
+    // 넘기는 계약이다. offset/length 필드는 64-bit macOS에서 size_t와 같은 크기여야
+    // native가 pixels slice의 올바른 byte range를 atlas texture에 복사할 수 있다.
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(NativeMetalRasterUpload));
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(NativeMetalRasterUpload));
+}
+
+test "NativeMetalSmokeResult ABI keeps atlas diagnostics visible to Zig" {
+    // native result는 Objective-C가 채우고 Zig가 summary gate로 해석한다. 크기나 정렬이
+    // 예고 없이 달라지면 product_atlas_uploaded 같은 진단값을 다른 필드로 읽을 수 있다.
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(NativeMetalSmokeResult));
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(NativeMetalSmokeResult));
 }
 
 test "Metal smoke terminal grid requires every sampled readback pixel non-clear" {
@@ -371,6 +501,13 @@ test "Metal smoke terminal grid requires every sampled readback pixel non-clear"
         .readback_samples = 9,
         .readback_non_clear_pixels = 0,
         .readback_failures = 0,
+        .atlas_texture_created = 1,
+        .atlas_uploads_requested = 8,
+        .atlas_uploads_uploaded = 8,
+        .atlas_upload_bytes = 6272,
+        .atlas_readback_uploads = 8,
+        .atlas_readback_mismatched_bytes = 0,
+        .atlas_readback_failures = 0,
     };
     const partial_readback: NativeMetalSmokeResult = .{
         .status = 9,
@@ -382,6 +519,13 @@ test "Metal smoke terminal grid requires every sampled readback pixel non-clear"
         .readback_samples = 9,
         .readback_non_clear_pixels = 8,
         .readback_failures = 0,
+        .atlas_texture_created = 1,
+        .atlas_uploads_requested = 8,
+        .atlas_uploads_uploaded = 8,
+        .atlas_upload_bytes = 6272,
+        .atlas_readback_uploads = 8,
+        .atlas_readback_mismatched_bytes = 0,
+        .atlas_readback_failures = 0,
     };
     const readback_failed: NativeMetalSmokeResult = .{
         .status = 9,
@@ -393,6 +537,13 @@ test "Metal smoke terminal grid requires every sampled readback pixel non-clear"
         .readback_samples = 9,
         .readback_non_clear_pixels = 9,
         .readback_failures = 1,
+        .atlas_texture_created = 1,
+        .atlas_uploads_requested = 8,
+        .atlas_uploads_uploaded = 8,
+        .atlas_upload_bytes = 6272,
+        .atlas_readback_uploads = 8,
+        .atlas_readback_mismatched_bytes = 0,
+        .atlas_readback_failures = 0,
     };
     const all_pixels: NativeMetalSmokeResult = .{
         .status = 0,
@@ -404,12 +555,58 @@ test "Metal smoke terminal grid requires every sampled readback pixel non-clear"
         .readback_samples = 9,
         .readback_non_clear_pixels = 9,
         .readback_failures = 0,
+        .atlas_texture_created = 1,
+        .atlas_uploads_requested = 8,
+        .atlas_uploads_uploaded = 8,
+        .atlas_upload_bytes = 6272,
+        .atlas_readback_uploads = 8,
+        .atlas_readback_mismatched_bytes = 0,
+        .atlas_readback_failures = 0,
     };
 
     try std.testing.expect(!deriveSmokeStatus(no_readback).terminal_grid);
     try std.testing.expect(!deriveSmokeStatus(partial_readback).terminal_grid);
     try std.testing.expect(!deriveSmokeStatus(readback_failed).terminal_grid);
     try std.testing.expect(deriveSmokeStatus(all_pixels).terminal_grid);
+    try std.testing.expect(deriveSmokeStatus(all_pixels).product_atlas_uploaded);
+}
+
+test "Metal smoke product atlas gate requires upload and byte-matching readback" {
+    // terminal_grid는 placeholder quad 검증이고, product_atlas_uploaded는 제품
+    // GlyphRasterFrame bytes가 Metal atlas texture에 들어갔는지의 별도 검증이다.
+    // 둘을 분리해야 placeholder가 보여도 atlas upload가 비어 있는 회귀를 잡을 수 있다.
+    const success: NativeMetalSmokeResult = .{
+        .status = 0,
+        .window_visible = 1,
+        .presented_frames = 3,
+        .drawable_failures = 0,
+        .requested_cells = 9,
+        .rendered_cells = 9,
+        .readback_samples = 9,
+        .readback_non_clear_pixels = 9,
+        .readback_failures = 0,
+        .atlas_texture_created = 1,
+        .atlas_uploads_requested = 8,
+        .atlas_uploads_uploaded = 8,
+        .atlas_upload_bytes = 6272,
+        .atlas_readback_uploads = 8,
+        .atlas_readback_mismatched_bytes = 0,
+        .atlas_readback_failures = 0,
+    };
+    var no_texture = success;
+    no_texture.atlas_texture_created = 0;
+    var no_uploads = success;
+    no_uploads.atlas_uploads_uploaded = 7;
+    var mismatch = success;
+    mismatch.atlas_readback_mismatched_bytes = 1;
+    var readback_failed = success;
+    readback_failed.atlas_readback_failures = 1;
+
+    try std.testing.expect(deriveSmokeStatus(success).product_atlas_uploaded);
+    try std.testing.expect(!deriveSmokeStatus(no_texture).product_atlas_uploaded);
+    try std.testing.expect(!deriveSmokeStatus(no_uploads).product_atlas_uploaded);
+    try std.testing.expect(!deriveSmokeStatus(mismatch).product_atlas_uploaded);
+    try std.testing.expect(!deriveSmokeStatus(readback_failed).product_atlas_uploaded);
 }
 
 test "Metal smoke duration override clamps invalid, zero, and oversized values" {
@@ -447,6 +644,16 @@ test "Metal smoke fixture comes from RendererState glyph frame" {
     try std.testing.expect(fixture.stats.glyph_raster_ready);
     try std.testing.expectEqual(fixture.stats.upload_count, fixture.stats.glyph_raster_upload_count);
     try std.testing.expect(fixture.stats.glyph_raster_byte_count > 0);
+    try std.testing.expectEqual(fixture.stats.glyph_raster_upload_count, fixture.raster_uploads.len);
+    try std.testing.expectEqual(fixture.stats.glyph_raster_byte_count, fixture.raster_pixels.len);
+    try std.testing.expect(fixture.atlas_width_px > 0);
+    try std.testing.expect(fixture.atlas_height_px > 0);
+    try std.testing.expect(fixture.raster_uploads[0].slot_id > 0);
+    try std.testing.expect(fixture.raster_uploads[0].atlas_width_px > 0);
+    try std.testing.expect(fixture.raster_uploads[0].atlas_height_px > 0);
+    try std.testing.expect(fixture.raster_uploads[0].byte_count > 0);
+    try std.testing.expectEqual(@as(usize, 0), fixture.raster_uploads[0].bytes_offset);
+    try std.testing.expect(fixture.raster_uploads[0].bytes_offset + fixture.raster_uploads[0].byte_count <= fixture.raster_pixels.len);
     // 모든 glyph는 upload 아니면 reuse 둘 중 하나라, 이 합이 glyph_count와 맞아야 probe
     // 통계가 backend로 일관되게 흘러간다(slot 재사용 회귀를 통계 단계에서 잡는다).
     try std.testing.expectEqual(fixture.stats.glyph_count, fixture.stats.upload_count + fixture.stats.reused_count);

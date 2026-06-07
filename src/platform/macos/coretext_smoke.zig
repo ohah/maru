@@ -45,6 +45,7 @@ const NativeGlyphRecord = extern struct {
     string_index: u32,
     category: u32,
     fallback: u32,
+    font_name: [font_name_capacity]u8,
 };
 
 const NativeGlyphRasterResult = extern struct {
@@ -65,10 +66,10 @@ extern fn maru_macos_coretext_smoke_rasterize_glyph(
     requested_font_family: [*]const u8,
     requested_font_family_len: usize,
     requested_font_size: f64,
+    font_postscript_name: [*]const u8,
+    font_postscript_name_len: usize,
     codepoint: u32,
-    font_id: u32,
     glyph_id: u32,
-    fallback: u32,
     width_px: usize,
     height_px: usize,
     bytes_per_row: usize,
@@ -148,6 +149,7 @@ fn emptyGlyphRecord() NativeGlyphRecord {
         .string_index = 0,
         .category = 0,
         .fallback = 0,
+        .font_name = [_]u8{0} ** font_name_capacity,
     };
 }
 
@@ -238,6 +240,8 @@ fn renderSummary(
     try writer.print("missing_glyph_count={d}\n", .{native.missing_glyph_count});
     try writer.print("glyph_record_count={d}\n", .{native.glyph_record_count});
     try writer.print("glyph_record_overflow={d}\n", .{native.glyph_record_overflow});
+    try writer.print("font_identity_ready={}\n", .{glyph_frame_probe.font_identity_ready});
+    try writer.print("font_identity_count={d}\n", .{glyph_frame_probe.font_identity_count});
     try writer.print("raster_width={d}\n", .{native.raster_width});
     try writer.print("raster_height={d}\n", .{native.raster_height});
     try writer.print("raster_non_clear_pixels={d}\n", .{native.raster_non_clear_pixels});
@@ -279,6 +283,8 @@ fn renderSummary(
 }
 
 const GlyphFrameProbe = struct {
+    font_identity_ready: bool,
+    font_identity_count: usize,
     atlas_keys_ready: bool,
     glyph_frame_ready: bool,
     drawable_glyph_count: usize,
@@ -316,12 +322,19 @@ fn buildGlyphFrameProbe(
     native: NativeCoreTextSmokeResult,
     records: []const NativeGlyphRecord,
 ) !GlyphFrameProbe {
+    var font_registry = renderer.FontIdentityRegistry.init(allocator);
+    defer font_registry.deinit();
+
     return buildGlyphFrameProbeWithRasterizer(
         allocator,
         appearance,
         native,
         records,
-        CoreTextSmokeGlyphRasterizer{ .appearance = appearance },
+        &font_registry,
+        CoreTextSmokeGlyphRasterizer{
+            .appearance = appearance,
+            .font_registry = &font_registry,
+        },
         "coretext_glyph_rasterizer",
     );
 }
@@ -331,6 +344,7 @@ fn buildGlyphFrameProbeWithRasterizer(
     appearance: config.ResolvedAppearance,
     native: NativeCoreTextSmokeResult,
     records: []const NativeGlyphRecord,
+    font_registry: *renderer.FontIdentityRegistry,
     rasterizer: anytype,
     rasterizer_name: []const u8,
 ) !GlyphFrameProbe {
@@ -346,7 +360,7 @@ fn buildGlyphFrameProbeWithRasterizer(
     defer native_shaped_records.deinit(allocator);
     try native_shaped_records.ensureTotalCapacity(allocator, records.len);
     for (records) |record| {
-        native_shaped_records.appendAssumeCapacity(shapedRecordForCoreTextProbe(record));
+        native_shaped_records.appendAssumeCapacity(try shapedRecordForCoreTextProbe(record, font_registry));
     }
 
     const probe_surface = probeSurfaceFromShapedRecords(native_shaped_records.items);
@@ -381,6 +395,8 @@ fn buildGlyphFrameProbeWithRasterizer(
     const render_stats = renderer.renderFrameStats(frame, renderer_state.atlas.entryCount());
 
     const probe: GlyphFrameProbe = .{
+        .font_identity_ready = font_registry.count() > 0,
+        .font_identity_count = font_registry.count(),
         .atlas_keys_ready = frame.glyph_frame.stats.glyph_count > 0 and
             renderer_state.atlas.entryCount() > 0,
         .glyph_frame_ready = frame.glyph_frame.glyphs.len == frame.glyph_frame.stats.glyph_count and
@@ -424,11 +440,15 @@ fn buildTestGlyphFrameProbe(
     // 단위 계약 테스트는 임의 glyph id를 쓰므로 CoreText native rasterizer에 묶이면
     // OS font implementation detail에 따라 흔들린다. 테스트에서는 fake rasterizer를
     // 명시 주입하고, 실제 native rasterizer는 `mise run macos-coretext-smoke`에서 검증한다.
+    var font_registry = renderer.FontIdentityRegistry.init(allocator);
+    defer font_registry.deinit();
+
     return buildGlyphFrameProbeWithRasterizer(
         allocator,
         appearance,
         native,
         records,
+        &font_registry,
         renderer.FakeGlyphRasterizer{},
         "fake_glyph_rasterizer",
     );
@@ -436,6 +456,8 @@ fn buildTestGlyphFrameProbe(
 
 fn emptyGlyphFrameProbe(rasterizer_name: []const u8) GlyphFrameProbe {
     return .{
+        .font_identity_ready = false,
+        .font_identity_count = 0,
         .atlas_keys_ready = false,
         .glyph_frame_ready = false,
         .drawable_glyph_count = 0,
@@ -469,6 +491,7 @@ fn emptyGlyphFrameProbe(rasterizer_name: []const u8) GlyphFrameProbe {
 
 const CoreTextSmokeGlyphRasterizer = struct {
     appearance: config.ResolvedAppearance,
+    font_registry: *const renderer.FontIdentityRegistry,
 
     pub fn rasterize(
         self: CoreTextSmokeGlyphRasterizer,
@@ -479,6 +502,8 @@ const CoreTextSmokeGlyphRasterizer = struct {
         // 바뀔 수 있는지 확인하는 얇은 bridge다. 실패는 renderer의 기존 per-glyph skip
         // 회계로 들어가게 generic RasterizerFailed로 닫는다.
         if (request.pixels.len == 0) return error.RasterizerFailed;
+        const font_identity = self.font_registry.get(request.run.font_id) orelse
+            return error.RasterizerFailed;
 
         var native: NativeGlyphRasterResult = .{
             .status = -1,
@@ -488,10 +513,10 @@ const CoreTextSmokeGlyphRasterizer = struct {
             self.appearance.font.family.ptr,
             self.appearance.font.family.len,
             @floatCast(self.appearance.font.size),
+            font_identity.postscript_name.ptr,
+            font_identity.postscript_name.len,
             request.run.codepoint,
-            request.run.font_id,
             request.run.glyph_id,
-            if (request.run.fallback) 1 else 0,
             request.slot.width_px,
             request.slot.height_px,
             request.bytes_per_row,
@@ -591,13 +616,20 @@ fn ensureRecordFitsGlyphSurface(
     if (end_col > size.cols) return error.CoreTextProbeRecordOutsideSurface;
 }
 
-fn shapedRecordForCoreTextProbe(record: NativeGlyphRecord) renderer.ShapedGlyphRecord {
+fn shapedRecordForCoreTextProbe(
+    record: NativeGlyphRecord,
+    font_registry: *renderer.FontIdentityRegistry,
+) !renderer.ShapedGlyphRecord {
+    const font_id = try font_registry.intern(.{
+        .postscript_name = cStringField(&record.font_name),
+    });
+
     return .{
         .row = 0,
         .col = @intCast(@min(record.string_index, std.math.maxInt(u16))),
         .cell_width = cellWidthForCoreTextProbe(record.category),
         .codepoint = codepointForProbeRecord(record),
-        .font_id = record.font_id,
+        .font_id = font_id,
         .glyph_id = record.glyph_id,
         .fallback = record.fallback != 0,
         .color_glyph_kind = colorGlyphKindForCoreTextProbe(record.category),
@@ -630,7 +662,10 @@ fn shapedGlyphRunForTest(
 ) !renderer.ShapedGlyphRunList {
     // 테스트가 CoreText private helper의 세부 구현에 직접 매달리지 않도록, native probe
     // record도 제품 renderer의 neutral adapter를 거쳐 cache key까지 확인한다.
-    const shaped = [_]renderer.ShapedGlyphRecord{shapedRecordForCoreTextProbe(record)};
+    var font_registry = renderer.FontIdentityRegistry.init(allocator);
+    defer font_registry.deinit();
+
+    const shaped = [_]renderer.ShapedGlyphRecord{try shapedRecordForCoreTextProbe(record, &font_registry)};
     return renderer.buildGlyphRunListFromShapedRecords(
         allocator,
         &shaped,
@@ -657,6 +692,28 @@ fn codepointForProbeRecord(record: NativeGlyphRecord) u21 {
 fn cStringField(bytes: *const [font_name_capacity]u8) []const u8 {
     const len = std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len;
     return bytes[0..len];
+}
+
+const NativeGlyphRecordFixture = struct {
+    native_font_id: u32 = 1,
+    glyph_id: u32,
+    string_index: u32,
+    category: NativeGlyphCategory,
+    fallback: bool = false,
+    font_name: []const u8 = "Menlo-Regular",
+};
+
+fn nativeGlyphRecordForTest(args: NativeGlyphRecordFixture) NativeGlyphRecord {
+    var record = emptyGlyphRecord();
+    record.font_id = args.native_font_id;
+    record.glyph_id = args.glyph_id;
+    record.string_index = args.string_index;
+    record.category = @intFromEnum(args.category);
+    record.fallback = if (args.fallback) 1 else 0;
+
+    const len = @min(args.font_name.len, record.font_name.len - 1);
+    @memcpy(record.font_name[0..len], args.font_name[0..len]);
+    return record;
 }
 
 fn writeSummary(io: std.Io, summary: []const u8) !void {
@@ -694,9 +751,23 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     @memcpy(native.first_fallback_font_name[0.."AppleColorEmoji".len], "AppleColorEmoji");
 
     const records = [_]NativeGlyphRecord{
-        .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
-        .{ .font_id = 2, .glyph_id = 20, .string_index = 5, .category = @intFromEnum(NativeGlyphCategory.cjk), .fallback = 1 },
-        .{ .font_id = 3, .glyph_id = 30, .string_index = 7, .category = @intFromEnum(NativeGlyphCategory.emoji), .fallback = 1 },
+        nativeGlyphRecordForTest(.{ .glyph_id = 10, .string_index = 0, .category = .ascii }),
+        nativeGlyphRecordForTest(.{
+            .native_font_id = 2,
+            .glyph_id = 20,
+            .string_index = 5,
+            .category = .cjk,
+            .fallback = true,
+            .font_name = "AppleSDGothicNeo-Regular",
+        }),
+        nativeGlyphRecordForTest(.{
+            .native_font_id = 3,
+            .glyph_id = 30,
+            .string_index = 7,
+            .category = .emoji,
+            .fallback = true,
+            .font_name = "AppleColorEmoji",
+        }),
     };
     const appearance = try config.resolveAppearance(.{});
     const glyph_frame_probe = try buildTestGlyphFrameProbe(std.testing.allocator, appearance, native, &records);
@@ -722,6 +793,8 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "missing_glyph_count=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_record_count=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_record_overflow=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "font_identity_ready=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "font_identity_count=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "raster_width=512\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "raster_height=128\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "raster_non_clear_pixels=42\n") != null);
@@ -813,8 +886,10 @@ test "CoreText smoke keeps shaping and rasterization failures separate" {
     // summary만 보고 "shape/frame 준비는 됐고 CPU raster에서 막혔다"를 집어낼 수 있다.
     const appearance = try config.resolveAppearance(.{});
     const probe = try buildTestGlyphFrameProbe(std.testing.allocator, appearance, native, &[_]NativeGlyphRecord{
-        .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
+        nativeGlyphRecordForTest(.{ .glyph_id = 10, .string_index = 0, .category = .ascii }),
     });
+    try std.testing.expect(probe.font_identity_ready);
+    try std.testing.expectEqual(@as(usize, 1), probe.font_identity_count);
     try std.testing.expect(probe.atlas_keys_ready);
     try std.testing.expect(probe.glyph_frame_ready);
     try std.testing.expect(probe.renderer_frame_prepared);
@@ -848,8 +923,10 @@ test "CoreText smoke treats native glyph-buffer overflow as incomplete shaping" 
     // GlyphFrame 준비도 overflow run을 정상 shape로 취급하면 안 된다.
     const appearance = try config.resolveAppearance(.{});
     const probe = try buildTestGlyphFrameProbe(std.testing.allocator, appearance, native, &[_]NativeGlyphRecord{
-        .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
+        nativeGlyphRecordForTest(.{ .glyph_id = 10, .string_index = 0, .category = .ascii }),
     });
+    try std.testing.expect(!probe.font_identity_ready);
+    try std.testing.expectEqual(@as(usize, 0), probe.font_identity_count);
     try std.testing.expect(!probe.atlas_keys_ready);
     try std.testing.expect(!probe.glyph_frame_ready);
     try std.testing.expect(!probe.renderer_frame_prepared);
@@ -911,12 +988,14 @@ test "CoreText smoke glyph frame probe filters spaces and requires records" {
     native.glyph_record_count = 2;
 
     const records = [_]NativeGlyphRecord{
-        .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
-        .{ .font_id = 1, .glyph_id = 5, .string_index = 4, .category = @intFromEnum(NativeGlyphCategory.space), .fallback = 0 },
+        nativeGlyphRecordForTest(.{ .glyph_id = 10, .string_index = 0, .category = .ascii }),
+        nativeGlyphRecordForTest(.{ .glyph_id = 5, .string_index = 4, .category = .space }),
     };
 
     const appearance = try config.resolveAppearance(.{ .font = .{ .family = "Menlo", .size = 16.4 } });
     const probe = try buildTestGlyphFrameProbe(std.testing.allocator, appearance, native, &records);
+    try std.testing.expect(probe.font_identity_ready);
+    try std.testing.expectEqual(@as(usize, 1), probe.font_identity_count);
     try std.testing.expect(probe.atlas_keys_ready);
     try std.testing.expect(probe.glyph_frame_ready);
     try std.testing.expectEqual(@as(usize, 1), probe.drawable_glyph_count);
@@ -948,17 +1027,50 @@ test "CoreText smoke rounds resolved font size into atlas cache key" {
     // 쓴다. bridge smoke가 hardcoded 14로 되돌아가면 설정 변경 후 atlas miss/hit 진단이
     // 틀어지므로 resolved size가 cache key까지 들어가는지 고정한다.
     const appearance = try config.resolveAppearance(.{ .font = .{ .family = "Menlo", .size = 16.6 } });
-    var shaped = try shapedGlyphRunForTest(std.testing.allocator, .{
-        .font_id = 1,
-        .glyph_id = 42,
-        .string_index = 0,
-        .category = @intFromEnum(NativeGlyphCategory.ascii),
-        .fallback = 0,
-    }, appearance.font.size);
+    var shaped = try shapedGlyphRunForTest(
+        std.testing.allocator,
+        nativeGlyphRecordForTest(.{ .glyph_id = 42, .string_index = 0, .category = .ascii }),
+        appearance.font.size,
+    );
     defer shaped.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), shaped.runs.glyphs.len);
     try std.testing.expectEqual(@as(u16, 17), shaped.runs.glyphs[0].cache_key.font_size_px);
+}
+
+test "CoreText smoke uses font identity registry instead of native record ids" {
+    // C bridge의 `font_id`는 smoke 내부 진단용 임시 번호일 수 있다. renderer cache key는
+    // 그 숫자를 그대로 믿지 않고, native font face name을 registry에 intern한 FontId를
+    // 써야 한다. 그래야 같은 glyph id가 서로 다른 fallback face에서 충돌하지 않는다.
+    var font_registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
+    defer font_registry.deinit();
+
+    const primary = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+        .native_font_id = 99,
+        .glyph_id = 42,
+        .string_index = 0,
+        .category = .ascii,
+        .font_name = "Menlo-Regular",
+    }), &font_registry);
+    const cjk = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+        .native_font_id = 99,
+        .glyph_id = 42,
+        .string_index = 5,
+        .category = .cjk,
+        .fallback = true,
+        .font_name = "AppleSDGothicNeo-Regular",
+    }), &font_registry);
+    const primary_again = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+        .native_font_id = 123,
+        .glyph_id = 43,
+        .string_index = 1,
+        .category = .ascii,
+        .font_name = "Menlo-Regular",
+    }), &font_registry);
+
+    try std.testing.expectEqual(@as(usize, 2), font_registry.count());
+    try std.testing.expect(primary.font_id != cjk.font_id);
+    try std.testing.expectEqual(primary.font_id, primary_again.font_id);
 }
 
 test "CoreText smoke treats requested font mismatch as a diagnostic fallback" {

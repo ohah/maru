@@ -17,7 +17,7 @@ Maru 작업에서 사용하는 기본 명령이다.
 - app host smoke 실행: `mise run app-smoke` (`zig-out/maru-app-smoke/app-host.summary.txt`, `app-host.draw-list.txt`, `app-host.glyph-frame.txt`를 남긴다. 아직 실제 UI는 아니다)
 - macOS visible window smoke 실행: `mise run macos-window-smoke` (창이 너무 빨리 닫히면 `MARU_WINDOW_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)
 - macOS window smoke 계약 테스트: `mise run test-macos-window-smoke`
-- macOS Metal GlyphFrame placeholder + 제품 atlas upload/readback smoke 실행: `mise run macos-metal-smoke` (창이 너무 빨리 닫히면 `MARU_METAL_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)
+- macOS Metal 제품 atlas shader sampling smoke 실행: `mise run macos-metal-smoke` (창이 너무 빨리 닫히면 `MARU_METAL_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)
 - macOS Metal smoke 계약 테스트: `mise run test-macos-metal-smoke`
 - macOS CoreText font shaping/raster smoke 실행: `mise run macos-coretext-smoke` (창이나 GPU 없이 CoreText font resolve, glyph run 생성, `GlyphFrame` 준비 계약, CPU bitmap raster를 확인한다)
 - macOS CoreText smoke 계약 테스트: `mise run test-macos-coretext-smoke`

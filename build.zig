@@ -309,6 +309,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_macos_coretext_shaper_tests = b.addRunArtifact(macos_coretext_shaper_tests);
 
+    const macos_coretext_raster_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/coretext_raster.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+            },
+        }),
+    });
+    const run_macos_coretext_raster_tests = b.addRunArtifact(macos_coretext_raster_tests);
+
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_exe_tests.step);
@@ -318,6 +330,10 @@ pub fn build(b: *std.Build) void {
     // coretext_shaper.zig도 native CoreText runtime을 직접 호출하지 않고, 이미 shape된
     // CoreText glyph record를 renderer GlyphRunList로 넘기는 제품 후보 경계만 검증한다.
     test_step.dependOn(&run_macos_coretext_shaper_tests.step);
+    // coretext_raster.zig는 Objective-C bridge를 함수 포인터로 주입받는 제품 후보
+    // rasterizer 경계다. 기본 테스트에서는 native CoreText 없이 FontId -> PostScript name
+    // 조회와 renderer RasterizerFailed 매핑 계약만 고정한다.
+    test_step.dependOn(&run_macos_coretext_raster_tests.step);
 
     const e2e_tests = b.addTest(.{
         .root_module = b.createModule(.{

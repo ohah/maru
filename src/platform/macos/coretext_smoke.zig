@@ -3,6 +3,7 @@ const maru = @import("maru");
 const config = maru.config;
 const renderer = maru.renderer;
 const coretext_font = @import("coretext_font.zig");
+const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
 
 const artifact_dir = "zig-out/maru-macos-coretext-smoke";
@@ -50,11 +51,6 @@ const NativeGlyphRecord = extern struct {
     font_name: [font_name_capacity]u8,
 };
 
-const NativeGlyphRasterResult = extern struct {
-    status: c_int,
-    non_clear_pixels: u32,
-};
-
 extern fn maru_macos_coretext_smoke_run(
     requested_font_family: [*]const u8,
     requested_font_family_len: usize,
@@ -77,7 +73,7 @@ extern fn maru_macos_coretext_smoke_rasterize_glyph(
     bytes_per_row: usize,
     pixels: [*]u8,
     pixel_capacity: usize,
-    result: *NativeGlyphRasterResult,
+    result: *coretext_raster.NativeGlyphRasterResult,
 ) void;
 
 pub fn main(init: std.process.Init) !void {
@@ -333,11 +329,12 @@ fn buildGlyphFrameProbe(
         native,
         records,
         &font_registry,
-        CoreTextSmokeGlyphRasterizer{
+        coretext_raster.CoreTextGlyphRasterizer{
             .appearance = appearance,
             .font_registry = &font_registry,
+            .rasterize_glyph = maru_macos_coretext_smoke_rasterize_glyph,
         },
-        "coretext_glyph_rasterizer",
+        coretext_raster.CoreTextGlyphRasterizer.name,
     );
 }
 
@@ -494,51 +491,6 @@ fn emptyGlyphFrameProbe(rasterizer_name: []const u8) GlyphFrameProbe {
         .renderer_draw_overlays = 0,
     };
 }
-
-const CoreTextSmokeGlyphRasterizer = struct {
-    appearance: config.ResolvedAppearance,
-    font_registry: *const renderer.FontIdentityRegistry,
-
-    pub fn rasterize(
-        self: CoreTextSmokeGlyphRasterizer,
-        request: renderer.GlyphRasterRequest,
-    ) renderer.GlyphRasterError!renderer.GlyphRasterResult {
-        // 이 rasterizer는 아직 제품 macOS font backend가 아니다. CoreText smoke 안에서
-        // native glyph id/font id 후보가 fake byte fill 대신 실제 CoreText glyph bitmap으로
-        // 바뀔 수 있는지 확인하는 얇은 bridge다. 실패는 renderer의 기존 per-glyph skip
-        // 회계로 들어가게 generic RasterizerFailed로 닫는다.
-        if (request.pixels.len == 0) return error.RasterizerFailed;
-        const font_identity = self.font_registry.get(request.run.font_id) orelse
-            return error.RasterizerFailed;
-
-        var native: NativeGlyphRasterResult = .{
-            .status = -1,
-            .non_clear_pixels = 0,
-        };
-        maru_macos_coretext_smoke_rasterize_glyph(
-            self.appearance.font.family.ptr,
-            self.appearance.font.family.len,
-            @floatCast(self.appearance.font.size),
-            font_identity.postscript_name.ptr,
-            font_identity.postscript_name.len,
-            request.run.codepoint,
-            request.run.glyph_id,
-            request.slot.width_px,
-            request.slot.height_px,
-            request.bytes_per_row,
-            request.pixels.ptr,
-            request.pixels.len,
-            &native,
-        );
-        // native rasterizer는 ink가 0인 drawable glyph를 status 7로 닫는다. 그래서 이 status
-        // 검사가 zero-ink 실패까지 포함하므로 codepoint별(space 등) 분기를 따로 두지 않는다.
-        // space 같은 non-drawable record는 glyph run 생성 단계에서 이미 걸러져 이 rasterizer에
-        // 도달하지 않는다.
-        if (native.status != 0) return error.RasterizerFailed;
-
-        return .{ .non_clear_pixels = native.non_clear_pixels };
-    }
-};
 
 fn coreTextGlyphRecordForProbe(record: *const NativeGlyphRecord) coretext_font.CoreTextGlyphRecord {
     return .{

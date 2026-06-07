@@ -529,7 +529,7 @@ test "Metal smoke terminal grid requires matched atlas texel samples" {
         .drawable_failures = 0,
         .requested_cells = 9,
         .rendered_cells = 9,
-        .readback_samples = 9,
+        .readback_samples = 0,
         .readback_non_clear_pixels = 0,
         .readback_failures = 0,
         .atlas_texture_created = 1,

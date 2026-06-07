@@ -1022,12 +1022,14 @@ void maru_macos_metal_smoke_run(
             result->status = 11;
             return;
         }
-        // readback이 실제 렌더 검증의 단일 게이트다. 샘플한 source ink 위치가 "하나라도"가
-        // 아니라 "전부" clear가 아니어야 부분 렌더 회귀(셀 일부만 그려짐)까지 잡는다.
-        // readback은 compositing 전 drawable 텍스처를 읽으므로 "GPU가 셀을 렌더했다"를
-        // 증명하고, "화면에 안 가려졌다"는 window_visible이 따로 담당한다.
+        // readback이 실제 렌더 검증의 게이트다. shader가 제품 atlas texel을 drawable에
+        // 샘플링했는지는 아래 atlas_sampled_cells == readback_samples 비교가 판정하므로
+        // (near-clear glyph도 통과), 여기서는 readback 자체가 성공했는지만 본다. non-clear
+        // 픽셀 수는 summary 진단값으로만 남기고 pass/fail 게이트로 쓰지 않는다(Zig
+        // deriveSmokeStatus와 같은 규칙). readback은 compositing 전 drawable 텍스처를
+        // 읽으므로 "GPU가 셀을 렌더했다"를 증명하고, "화면에 안 가려졌다"는 window_visible이
+        // 따로 담당한다.
         if (result->readback_samples == 0 ||
-            result->readback_non_clear_pixels != result->readback_samples ||
             result->readback_failures > 0)
         {
             result->status = 9;

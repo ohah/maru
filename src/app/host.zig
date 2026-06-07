@@ -1,4 +1,5 @@
 const std = @import("std");
+const config_mod = @import("../config.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal.zig");
 const pty_reader = @import("pty_reader.zig");
@@ -11,6 +12,14 @@ pub const default_artifact_dir = "zig-out/maru-app-smoke";
 
 pub const HostError = std.mem.Allocator.Error || runtime_pump.PumpError || renderer.GlyphQuadError || renderer.GlyphRasterError || error{
     NoActiveSurface,
+};
+
+pub const KeyHandlingResult = union(enum) {
+    app_action: config_mod.Action,
+    terminal_input: struct {
+        bytes_len: usize,
+    },
+    ignored,
 };
 
 pub const AppHostFrame = struct {
@@ -72,6 +81,27 @@ pub fn sendInputToActiveSurface(
     // app host는 active surface를 고르는 책임만 갖고, key encoding 자체는 하지 않는다.
     const active = app_window.active() orelse return error.NoActiveSurface;
     try runtime.writeInput(active.id, input);
+}
+
+pub fn handleKeyEvent(
+    app_window: *window_mod.AppWindow,
+    runtime: *runtime_mod.SurfaceRuntime,
+    resolver: config_mod.KeyBindingResolver,
+    event: terminal.KeyEvent,
+) !KeyHandlingResult {
+    // Platform code gives us a normalized key event, but it must not decide
+    // whether that key is an app action or terminal bytes. Keeping that choice
+    // here gives AppKit, future Windows, and tests one shared policy.
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolved = try resolver.resolve(event, &buffer);
+    return switch (resolved) {
+        .app_action => |action| .{ .app_action = action },
+        .ignored => .ignored,
+        .terminal_input => |bytes| blk: {
+            try sendInputToActiveSurface(app_window, runtime, .{ .bytes = bytes });
+            break :blk .{ .terminal_input = .{ .bytes_len = bytes.len } };
+        },
+    };
 }
 
 pub fn resizeActiveSurface(
@@ -450,6 +480,67 @@ test "app host routes focused input and resize through SurfaceRuntime" {
     try std.testing.expectEqual(@as(usize, 1), memory_pty.resize_calls);
     try std.testing.expectEqual(terminal.Size{ .cols = 30, .rows = 5 }, memory_pty.last_size.?);
     try std.testing.expectEqual(terminal.Size{ .cols = 30, .rows = 5 }, surfaces[0].core.size);
+}
+
+test "app host resolves terminal key events before writing to active PTY" {
+    const allocator = std.testing.allocator;
+    var memory_pty = MemoryPty.init(allocator);
+    defer memory_pty.deinit();
+    var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 })};
+    defer surfaces[0].deinit();
+    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surfaces[0], 10, memory_pty.io());
+
+    const resolver: config_mod.KeyBindingResolver = .{
+        .terminal_bindings = &.{.{
+            .chord = try config_mod.KeyChord.parse("Cmd+B"),
+            .input = .{ .send_control = 'b' },
+        }},
+    };
+    try resolver.validate();
+
+    const result = try handleKeyEvent(&app_window, &runtime, resolver, .{
+        .key = .{ .char = 'b' },
+        .modifiers = .{ .command = true },
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), result.terminal_input.bytes_len);
+    try std.testing.expectEqualStrings("\x02", memory_pty.writes.items);
+}
+
+test "app host does not leak app actions or ignored Cmd keys to PTY" {
+    const allocator = std.testing.allocator;
+    var memory_pty = MemoryPty.init(allocator);
+    defer memory_pty.deinit();
+    var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 })};
+    defer surfaces[0].deinit();
+    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surfaces[0], 10, memory_pty.io());
+
+    const resolver: config_mod.KeyBindingResolver = .{
+        .app_bindings = &.{.{ .chord = try config_mod.KeyChord.parse("Cmd+T"), .action = .new_tab }},
+    };
+    try resolver.validate();
+
+    const app_result = try handleKeyEvent(&app_window, &runtime, resolver, .{
+        .key = .{ .char = 't' },
+        .modifiers = .{ .command = true },
+    });
+    try std.testing.expectEqual(config_mod.Action.new_tab, app_result.app_action);
+    try std.testing.expectEqual(@as(usize, 0), memory_pty.writes.items.len);
+
+    const ignored = try handleKeyEvent(&app_window, &runtime, resolver, .{
+        .key = .{ .char = 's' },
+        .modifiers = .{ .command = true },
+    });
+    try std.testing.expectEqual(KeyHandlingResult.ignored, ignored);
+    try std.testing.expectEqual(@as(usize, 0), memory_pty.writes.items.len);
 }
 
 test "app smoke summary marks that real UI is not visible yet" {

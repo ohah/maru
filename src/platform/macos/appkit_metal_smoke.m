@@ -23,6 +23,7 @@ typedef struct {
     uint32_t atlas_readback_uploads;
     uint32_t atlas_readback_mismatched_bytes;
     uint32_t atlas_readback_failures;
+    uint32_t atlas_sampled_cells;
 } MaruMetalSmokeResult;
 
 typedef struct {
@@ -36,6 +37,10 @@ typedef struct {
     uint32_t atlas_y_px;
     uint32_t atlas_width_px;
     uint32_t atlas_height_px;
+    float u0;
+    float v0;
+    float u1;
+    float v1;
 } MaruMetalSmokeCell;
 
 typedef struct {
@@ -53,36 +58,38 @@ typedef struct {
 typedef struct {
     float x;
     float y;
-    float r;
-    float g;
-    float b;
-    float a;
+    float u;
+    float v;
 } MaruMetalSmokeVertex;
 
 typedef struct {
     NSUInteger x;
     NSUInteger y;
+    uint8_t expected_b;
+    uint8_t expected_g;
+    uint8_t expected_r;
+    uint8_t expected_a;
 } MaruMetalSmokeSample;
 
 static const NSUInteger maru_readback_stride = 256;
 
-// VertexIn은 host쪽 MaruMetalSmokeVertex(float 6개, 24바이트, tight-packed)와 같은
-// 메모리 레이아웃을 가져야 한다. MSL에서 float4는 16바이트 정렬이라 { float2; float4; }는
-// 32바이트가 되어, host 24바이트 배열을 stride 32로 읽게 된다(색/위치 깨짐 + buffer OOB
-// read). packed_float2/packed_float4는 4바이트 정렬이라 host struct와 정확히 일치한다.
+// VertexIn은 host쪽 MaruMetalSmokeVertex(float 4개, 16바이트, tight-packed)와 같은
+// 메모리 레이아웃을 가져야 한다. packed_float2 두 개를 쓰면 MSL과 C struct stride가
+// 같아져 shader가 UV를 잘못 읽는 숨은 회귀를 피할 수 있다.
 static NSString *const maru_cell_shader_source =
     @"#include <metal_stdlib>\n"
      "using namespace metal;\n"
-     "struct VertexIn { packed_float2 position; packed_float4 color; };\n"
-     "struct VertexOut { float4 position [[position]]; float4 color; };\n"
+     "struct VertexIn { packed_float2 position; packed_float2 uv; };\n"
+     "struct VertexOut { float4 position [[position]]; float2 uv; };\n"
      "vertex VertexOut maru_cell_vertex(uint vid [[vertex_id]], const device VertexIn *vertices [[buffer(0)]]) {\n"
      "  VertexOut out;\n"
      "  out.position = float4(float2(vertices[vid].position), 0.0, 1.0);\n"
-     "  out.color = float4(vertices[vid].color);\n"
+     "  out.uv = float2(vertices[vid].uv);\n"
      "  return out;\n"
      "}\n"
-     "fragment float4 maru_cell_fragment(VertexOut in [[stage_in]]) {\n"
-     "  return in.color;\n"
+     "fragment float4 maru_cell_fragment(VertexOut in [[stage_in]], texture2d<float> atlas_texture [[texture(0)]]) {\n"
+     "  constexpr sampler atlas_sampler(coord::normalized, address::clamp_to_edge, filter::nearest);\n"
+     "  return atlas_texture.sample(atlas_sampler, in.uv);\n"
      "}\n";
 
 static void maru_pump_app_once(void) {
@@ -120,23 +127,6 @@ static id<MTLRenderPipelineState> maru_make_cell_pipeline(
     return [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
 }
 
-static void maru_cell_color(MaruMetalSmokeCell cell, float *r, float *g, float *b) {
-    // 이 색은 터미널 theme가 아니다. glyph가 붙기 전에도 셀 위치를 눈으로 확인하기 위한
-    // 진단용 색이다. slot_id와 atlas placement를 섞어 Zig의 GlyphFrame/atlas slot 좌표가
-    // native bridge까지 넘어왔다는 신호를 만든다. 실제 glyph 색상은 제품 renderer 단계에서
-    // 별도로 다룬다.
-    const uint32_t codepoint = cell.codepoint;
-    const uint32_t slot_id = cell.slot_id == 0 ? 1u : cell.slot_id;
-    const uint32_t atlas_mix =
-        cell.atlas_x_px ^
-        (cell.atlas_y_px << 1) ^
-        cell.atlas_width_px ^
-        (cell.atlas_height_px << 1);
-    *r = 0.20f + (float)((codepoint + slot_id + atlas_mix) % 3u) * 0.10f;
-    *g = 0.56f + (float)((codepoint + slot_id + atlas_mix) % 5u) * 0.05f;
-    *b = 0.78f;
-}
-
 static NSUInteger maru_clamp_pixel(double value, NSUInteger upper_bound) {
     if (upper_bound == 0) {
         return 0;
@@ -158,11 +148,17 @@ static MaruMetalSmokeSample *maru_build_cell_samples(
     uint16_t rows,
     NSUInteger texture_width,
     NSUInteger texture_height,
+    const MaruMetalRasterUpload *uploads,
+    size_t upload_count,
+    const uint8_t *raster_pixels,
+    size_t raster_pixel_count,
     size_t *sample_count
 ) {
     *sample_count = 0;
     if (cells == NULL || cell_count == 0 || cols == 0 || rows == 0 ||
-        texture_width == 0 || texture_height == 0)
+        texture_width == 0 || texture_height == 0 ||
+        uploads == NULL || upload_count == 0 ||
+        raster_pixels == NULL || raster_pixel_count == 0)
     {
         return NULL;
     }
@@ -193,6 +189,46 @@ static MaruMetalSmokeSample *maru_build_cell_samples(
 
         samples[i].x = maru_clamp_pixel(((center_x + 1.0) * 0.5) * (double)texture_width, texture_width);
         samples[i].y = maru_clamp_pixel(((1.0 - center_y) * 0.5) * (double)texture_height, texture_height);
+
+        BOOL found_source_pixel = NO;
+        for (size_t upload_index = 0; upload_index < upload_count; upload_index++) {
+            const MaruMetalRasterUpload upload = uploads[upload_index];
+            if (upload.slot_id != cell.slot_id) {
+                continue;
+            }
+            if (upload.atlas_width_px == 0 ||
+                upload.atlas_height_px == 0 ||
+                upload.bytes_per_row != (size_t)upload.atlas_width_px * 4 ||
+                upload.bytes_per_row > SIZE_MAX / (size_t)upload.atlas_height_px ||
+                upload.byte_count != upload.bytes_per_row * (size_t)upload.atlas_height_px ||
+                upload.bytes_offset > raster_pixel_count ||
+                upload.byte_count > raster_pixel_count - upload.bytes_offset)
+            {
+                continue;
+            }
+
+            // 이 smoke의 fake rasterizer는 glyph slot 전체를 같은 RGBA 색으로 채운다.
+            // 그래서 셀 중심 readback이 source tile 중심 texel과 같으면 shader가 실제
+            // atlas texture를 샘플링했다는 강한 신호가 된다. 실제 CoreText glyph는 중심이
+            // 비어 있을 수 있으므로 그 단계에서는 glyph_text_smoke처럼 ink sample을 따로 고른다.
+            const size_t local_x = (size_t)upload.atlas_width_px / 2;
+            const size_t local_y = (size_t)upload.atlas_height_px / 2;
+            const size_t offset =
+                upload.bytes_offset + local_y * upload.bytes_per_row + local_x * 4;
+            if (offset + 3 >= raster_pixel_count) {
+                continue;
+            }
+            samples[i].expected_b = raster_pixels[offset + 2];
+            samples[i].expected_g = raster_pixels[offset + 1];
+            samples[i].expected_r = raster_pixels[offset + 0];
+            samples[i].expected_a = raster_pixels[offset + 3];
+            found_source_pixel = YES;
+            break;
+        }
+        if (!found_source_pixel) {
+            free(samples);
+            return NULL;
+        }
     }
 
     *sample_count = count;
@@ -214,23 +250,41 @@ static BOOL maru_pixel_is_non_clear(const uint8_t *pixel) {
         abs((int)pixel[3] - expected_a) > tolerance;
 }
 
-static uint32_t maru_count_non_clear_readback_pixels(
-    id<MTLBuffer> readback_buffer,
-    size_t sample_count
+static BOOL maru_pixel_matches_expected_atlas_sample(
+    const uint8_t *pixel,
+    MaruMetalSmokeSample sample
 ) {
-    const uint8_t *bytes = (const uint8_t *)[readback_buffer contents];
-    if (bytes == NULL) {
-        return 0;
-    }
+    const int tolerance = 2;
+    return abs((int)pixel[0] - (int)sample.expected_b) <= tolerance &&
+        abs((int)pixel[1] - (int)sample.expected_g) <= tolerance &&
+        abs((int)pixel[2] - (int)sample.expected_r) <= tolerance &&
+        abs((int)pixel[3] - (int)sample.expected_a) <= tolerance;
+}
 
+static void maru_count_cell_readback_pixels(
+    id<MTLBuffer> readback_buffer,
+    const MaruMetalSmokeSample *samples,
+    size_t sample_count,
+    uint32_t *non_clear_out,
+    uint32_t *atlas_sampled_out
+) {
     uint32_t non_clear = 0;
-    for (size_t i = 0; i < sample_count; i++) {
-        const uint8_t *pixel = bytes + (i * maru_readback_stride);
-        if (maru_pixel_is_non_clear(pixel)) {
-            non_clear += 1;
+    uint32_t atlas_sampled = 0;
+    const uint8_t *bytes = (const uint8_t *)[readback_buffer contents];
+    if (bytes != NULL && samples != NULL) {
+        for (size_t i = 0; i < sample_count; i++) {
+            const uint8_t *pixel = bytes + (i * maru_readback_stride);
+            if (maru_pixel_is_non_clear(pixel)) {
+                non_clear += 1;
+            }
+            if (maru_pixel_matches_expected_atlas_sample(pixel, samples[i])) {
+                atlas_sampled += 1;
+            }
         }
     }
-    return non_clear;
+
+    *non_clear_out = non_clear;
+    *atlas_sampled_out = atlas_sampled;
 }
 
 static uint32_t maru_saturating_add_u32(uint32_t left, size_t right) {
@@ -311,30 +365,15 @@ static BOOL maru_upload_fits_atlas(
     return YES;
 }
 
-static BOOL maru_upload_and_readback_product_atlas(
+static id<MTLTexture> maru_make_product_atlas_texture(
     id<MTLDevice> device,
-    id<MTLCommandQueue> queue,
     uint32_t atlas_width_px,
     uint32_t atlas_height_px,
-    const MaruMetalRasterUpload *uploads,
-    size_t upload_count,
-    const uint8_t *raster_pixels,
-    size_t raster_pixel_count,
     MaruMetalSmokeResult *result
 ) {
-    // 이 smoke는 아직 glyph를 화면에 샘플링하지 않는다. 대신 제품 GlyphRasterFrame이 만든
-    // RGBA bytes가 native Metal texture 경계까지 손실 없이 건너가는지 먼저 분리해서 검증한다.
-    // 이 단계를 따로 두면 나중에 text shader가 깨졌을 때 "업로드 문제"와 "샘플링 문제"를
-    // 같은 로그에서 구분할 수 있다.
-    result->atlas_uploads_requested =
-        (upload_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)upload_count;
-    if (device == nil || queue == nil ||
-        atlas_width_px == 0 || atlas_height_px == 0 ||
-        uploads == NULL || upload_count == 0 ||
-        raster_pixels == NULL || raster_pixel_count == 0)
-    {
+    if (device == nil || atlas_width_px == 0 || atlas_height_px == 0) {
         result->atlas_readback_failures += 1;
-        return NO;
+        return nil;
     }
 
     MTLTextureDescriptor *descriptor = [MTLTextureDescriptor
@@ -348,9 +387,37 @@ static BOOL maru_upload_and_readback_product_atlas(
     id<MTLTexture> atlas_texture = [device newTextureWithDescriptor:descriptor];
     if (atlas_texture == nil) {
         result->atlas_readback_failures += 1;
-        return NO;
+        return nil;
     }
     result->atlas_texture_created = 1;
+    return atlas_texture;
+}
+
+static BOOL maru_upload_and_readback_product_atlas(
+    id<MTLDevice> device,
+    id<MTLCommandQueue> queue,
+    id<MTLTexture> atlas_texture,
+    uint32_t atlas_width_px,
+    uint32_t atlas_height_px,
+    const MaruMetalRasterUpload *uploads,
+    size_t upload_count,
+    const uint8_t *raster_pixels,
+    size_t raster_pixel_count,
+    MaruMetalSmokeResult *result
+) {
+    // 제품 GlyphRasterFrame이 만든 RGBA bytes가 native Metal texture 경계까지 손실 없이
+    // 건너가는지 먼저 검증한다. draw 단계는 이 texture를 다시 shader sampling하므로,
+    // upload/readback과 sampling을 같은 summary에서 분리해 원인을 좁힐 수 있다.
+    result->atlas_uploads_requested =
+        (upload_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)upload_count;
+    if (device == nil || queue == nil || atlas_texture == nil ||
+        atlas_width_px == 0 || atlas_height_px == 0 ||
+        uploads == NULL || upload_count == 0 ||
+        raster_pixels == NULL || raster_pixel_count == 0)
+    {
+        result->atlas_readback_failures += 1;
+        return NO;
+    }
 
     for (size_t index = 0; index < upload_count; index++) {
         const MaruMetalRasterUpload upload = uploads[index];
@@ -477,18 +544,13 @@ static MaruMetalSmokeVertex *maru_build_cell_vertices(
         const float right = grid_left + (((float)cell.col + cell_width) / (float)cols) * grid_width;
         const float top = grid_top - ((float)cell.row / (float)rows) * grid_height;
         const float bottom = grid_top - (((float)cell.row + 1.0f) / (float)rows) * grid_height;
-        float r = 0.0f;
-        float g = 0.0f;
-        float b = 0.0f;
-        maru_cell_color(cell, &r, &g, &b);
-
         MaruMetalSmokeVertex quad[6] = {
-            {left, top, r, g, b, 1.0f},
-            {left, bottom, r, g, b, 1.0f},
-            {right, bottom, r, g, b, 1.0f},
-            {left, top, r, g, b, 1.0f},
-            {right, bottom, r, g, b, 1.0f},
-            {right, top, r, g, b, 1.0f},
+            {left, top, cell.u0, cell.v0},
+            {left, bottom, cell.u0, cell.v1},
+            {right, bottom, cell.u1, cell.v1},
+            {left, top, cell.u0, cell.v0},
+            {right, bottom, cell.u1, cell.v1},
+            {right, top, cell.u1, cell.v0},
         };
         memcpy(&vertices[i * vertices_per_cell], quad, sizeof(quad));
     }
@@ -501,14 +563,23 @@ static BOOL maru_draw_cell_frame(
     CAMetalLayer *layer,
     id<MTLCommandQueue> queue,
     id<MTLRenderPipelineState> cell_pipeline,
+    id<MTLTexture> atlas_texture,
     const MaruMetalSmokeCell *cells,
     size_t cell_count,
     uint16_t cols,
     uint16_t rows,
+    const MaruMetalRasterUpload *uploads,
+    size_t upload_count,
+    const uint8_t *raster_pixels,
+    size_t raster_pixel_count,
     MaruMetalSmokeResult *result
 ) {
     id<CAMetalDrawable> drawable = [layer nextDrawable];
     if (drawable == nil) {
+        result->drawable_failures += 1;
+        return NO;
+    }
+    if (atlas_texture == nil) {
         result->drawable_failures += 1;
         return NO;
     }
@@ -570,6 +641,10 @@ static BOOL maru_draw_cell_frame(
         rows,
         drawable.texture.width,
         drawable.texture.height,
+        uploads,
+        upload_count,
+        raster_pixels,
+        raster_pixel_count,
         &sample_count
     );
     if (samples == NULL || sample_count == 0) {
@@ -591,6 +666,7 @@ static BOOL maru_draw_cell_frame(
 
     [encoder setRenderPipelineState:cell_pipeline];
     [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+    [encoder setFragmentTexture:atlas_texture atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:vertex_count];
@@ -614,7 +690,6 @@ static BOOL maru_draw_cell_frame(
      destinationBytesPerImage:maru_readback_stride];
     }
     [blit endEncoding];
-    free(samples);
 
     [command_buffer presentDrawable:drawable];
     [command_buffer commit];
@@ -624,10 +699,14 @@ static BOOL maru_draw_cell_frame(
     // 한다). summary에서 requested_cells와 같은 포화 규칙으로 맞춰 둔다.
     result->rendered_cells = (cell_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)cell_count;
     result->readback_samples = (sample_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)sample_count;
-    result->readback_non_clear_pixels = maru_count_non_clear_readback_pixels(
+    maru_count_cell_readback_pixels(
         readback_buffer,
-        sample_count
+        samples,
+        sample_count,
+        &result->readback_non_clear_pixels,
+        &result->atlas_sampled_cells
     );
+    free(samples);
     return YES;
 }
 
@@ -661,13 +740,14 @@ void maru_macos_metal_smoke_run(
     result->atlas_readback_uploads = 0;
     result->atlas_readback_mismatched_bytes = 0;
     result->atlas_readback_failures = 0;
+    result->atlas_sampled_cells = 0;
 
     @autoreleasepool {
         // 이 bridge는 "Metal glyph renderer 완성"이 아니라 첫 RenderFrame/GlyphQuadFrame/
         // GlyphRasterFrame 소비 smoke다.
         // Zig 쪽이 TerminalCore/RendererState/RenderFrame/artifact 계약을 소유하고,
-        // 여기서는 그 slot-backed 셀 배열을 실제 CAMetalLayer 위에 placeholder quad로 present하고,
-        // raster bytes를 Metal atlas texture에 업로드할 수 있는지 확인한다.
+        // 여기서는 그 slot-backed 셀 배열을 실제 CAMetalLayer 위에서 제품 atlas texture
+        // sampling quad로 present하고, raster bytes를 Metal atlas texture에 업로드/readback한다.
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         [NSApp finishLaunching];
@@ -693,9 +773,21 @@ void maru_macos_metal_smoke_run(
             return;
         }
 
+        id<MTLTexture> atlas_texture = maru_make_product_atlas_texture(
+            device,
+            atlas_width_px,
+            atlas_height_px,
+            result
+        );
+        if (atlas_texture == nil) {
+            result->status = 10;
+            return;
+        }
+
         if (!maru_upload_and_readback_product_atlas(
                 device,
                 queue,
+                atlas_texture,
                 atlas_width_px,
                 atlas_height_px,
                 raster_uploads,
@@ -782,10 +874,15 @@ void maru_macos_metal_smoke_run(
                     metal_layer,
                     queue,
                     cell_pipeline,
+                    atlas_texture,
                     cells,
                     cell_count,
                     cols,
                     rows,
+                    raster_uploads,
+                    raster_upload_count,
+                    raster_pixels,
+                    raster_pixel_count,
                     result
                 );
             }
@@ -816,6 +913,10 @@ void maru_macos_metal_smoke_run(
             result->readback_failures > 0)
         {
             result->status = 9;
+            return;
+        }
+        if (result->atlas_sampled_cells != result->readback_samples) {
+            result->status = 11;
             return;
         }
         // atlas upload/readback 검증은 위 maru_upload_and_readback_product_atlas가 NO를

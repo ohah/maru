@@ -47,6 +47,11 @@ const NativeGlyphRecord = extern struct {
     fallback: u32,
 };
 
+const NativeGlyphRasterResult = extern struct {
+    status: c_int,
+    non_clear_pixels: u32,
+};
+
 extern fn maru_macos_coretext_smoke_run(
     requested_font_family: [*]const u8,
     requested_font_family_len: usize,
@@ -54,6 +59,22 @@ extern fn maru_macos_coretext_smoke_run(
     result: *NativeCoreTextSmokeResult,
     glyph_records: [*]NativeGlyphRecord,
     glyph_record_capacity: usize,
+) void;
+
+extern fn maru_macos_coretext_smoke_rasterize_glyph(
+    requested_font_family: [*]const u8,
+    requested_font_family_len: usize,
+    requested_font_size: f64,
+    codepoint: u32,
+    font_id: u32,
+    glyph_id: u32,
+    fallback: u32,
+    width_px: usize,
+    height_px: usize,
+    bytes_per_row: usize,
+    pixels: [*]u8,
+    pixel_capacity: usize,
+    result: *NativeGlyphRasterResult,
 ) void;
 
 pub fn main(init: std.process.Init) !void {
@@ -241,6 +262,13 @@ fn renderSummary(
     try writer.print("renderer_surface_rows={d}\n", .{glyph_frame_probe.renderer_surface_rows});
     try writer.print("renderer_glyph_uv_ready={}\n", .{glyph_frame_probe.renderer_glyph_uv_ready});
     try writer.print("renderer_glyph_raster_ready={}\n", .{glyph_frame_probe.renderer_glyph_raster_ready});
+    try writer.print("renderer_rasterizer={s}\n", .{glyph_frame_probe.renderer_rasterizer});
+    try writer.print("renderer_glyph_raster_upload_count={d}\n", .{glyph_frame_probe.renderer_glyph_raster_upload_count});
+    try writer.print("renderer_glyph_raster_skipped_count={d}\n", .{glyph_frame_probe.renderer_glyph_raster_skipped_count});
+    try writer.print("renderer_glyph_raster_error_skip_count={d}\n", .{glyph_frame_probe.renderer_glyph_raster_error_skip_count});
+    try writer.print("renderer_glyph_raster_zero_ink_count={d}\n", .{glyph_frame_probe.renderer_glyph_raster_zero_ink_count});
+    try writer.print("renderer_glyph_raster_non_clear_pixels={d}\n", .{glyph_frame_probe.renderer_glyph_raster_non_clear_pixels});
+    try writer.print("renderer_glyph_raster_byte_count={d}\n", .{glyph_frame_probe.renderer_glyph_raster_byte_count});
     try writer.print("renderer_draw_cells={d}\n", .{glyph_frame_probe.renderer_draw_cells});
     try writer.print("renderer_draw_overlays={d}\n", .{glyph_frame_probe.renderer_draw_overlays});
     try writer.print("renderer_shaper={s}\n", .{glyph_frame_probe.renderer_shaper});
@@ -270,6 +298,13 @@ const GlyphFrameProbe = struct {
     renderer_surface_rows: u16,
     renderer_glyph_uv_ready: bool,
     renderer_glyph_raster_ready: bool,
+    renderer_rasterizer: []const u8,
+    renderer_glyph_raster_upload_count: usize,
+    renderer_glyph_raster_skipped_count: usize,
+    renderer_glyph_raster_error_skip_count: usize,
+    renderer_glyph_raster_zero_ink_count: usize,
+    renderer_glyph_raster_non_clear_pixels: usize,
+    renderer_glyph_raster_byte_count: usize,
     renderer_draw_cells: usize,
     renderer_draw_overlays: usize,
     renderer_shaper: []const u8 = renderer_probe_shaper,
@@ -280,6 +315,24 @@ fn buildGlyphFrameProbe(
     appearance: config.ResolvedAppearance,
     native: NativeCoreTextSmokeResult,
     records: []const NativeGlyphRecord,
+) !GlyphFrameProbe {
+    return buildGlyphFrameProbeWithRasterizer(
+        allocator,
+        appearance,
+        native,
+        records,
+        CoreTextSmokeGlyphRasterizer{ .appearance = appearance },
+        "coretext_glyph_rasterizer",
+    );
+}
+
+fn buildGlyphFrameProbeWithRasterizer(
+    allocator: std.mem.Allocator,
+    appearance: config.ResolvedAppearance,
+    native: NativeCoreTextSmokeResult,
+    records: []const NativeGlyphRecord,
+    rasterizer: anytype,
+    rasterizer_name: []const u8,
 ) !GlyphFrameProbe {
     const shape_complete = hasNativeShapeFields(native);
     if (!shape_complete) return emptyGlyphFrameProbe();
@@ -312,7 +365,12 @@ fn buildGlyphFrameProbe(
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
 
-    var frame = try renderer_state.buildFrameFromGlyphRunList(allocator, probe_draw_list, shaped.runs);
+    var frame = try renderer_state.buildFrameFromGlyphRunListWithRasterizer(
+        allocator,
+        probe_draw_list,
+        shaped.runs,
+        rasterizer,
+    );
     probe_draw_list_owned = false;
     defer frame.deinit(allocator);
 
@@ -344,10 +402,36 @@ fn buildGlyphFrameProbe(
         .renderer_surface_rows = render_stats.surface_rows,
         .renderer_glyph_uv_ready = render_stats.glyph_uv_ready,
         .renderer_glyph_raster_ready = render_stats.glyph_raster_ready,
+        .renderer_rasterizer = rasterizer_name,
+        .renderer_glyph_raster_upload_count = render_stats.glyph_raster_upload_count,
+        .renderer_glyph_raster_skipped_count = render_stats.glyph_raster_skipped_count,
+        .renderer_glyph_raster_error_skip_count = render_stats.glyph_raster_error_skip_count,
+        .renderer_glyph_raster_zero_ink_count = render_stats.glyph_raster_zero_ink_count,
+        .renderer_glyph_raster_non_clear_pixels = frame.glyph_raster_frame.stats.non_clear_pixels,
+        .renderer_glyph_raster_byte_count = render_stats.glyph_raster_byte_count,
         .renderer_draw_cells = render_stats.draw_cells,
         .renderer_draw_overlays = render_stats.draw_overlays,
     };
     return probe;
+}
+
+fn buildTestGlyphFrameProbe(
+    allocator: std.mem.Allocator,
+    appearance: config.ResolvedAppearance,
+    native: NativeCoreTextSmokeResult,
+    records: []const NativeGlyphRecord,
+) !GlyphFrameProbe {
+    // 단위 계약 테스트는 임의 glyph id를 쓰므로 CoreText native rasterizer에 묶이면
+    // OS font implementation detail에 따라 흔들린다. 테스트에서는 fake rasterizer를
+    // 명시 주입하고, 실제 native rasterizer는 `mise run macos-coretext-smoke`에서 검증한다.
+    return buildGlyphFrameProbeWithRasterizer(
+        allocator,
+        appearance,
+        native,
+        records,
+        renderer.FakeGlyphRasterizer{},
+        "fake_glyph_rasterizer",
+    );
 }
 
 fn emptyGlyphFrameProbe() GlyphFrameProbe {
@@ -371,10 +455,58 @@ fn emptyGlyphFrameProbe() GlyphFrameProbe {
         .renderer_surface_rows = 0,
         .renderer_glyph_uv_ready = false,
         .renderer_glyph_raster_ready = false,
+        .renderer_rasterizer = "coretext_glyph_rasterizer",
+        .renderer_glyph_raster_upload_count = 0,
+        .renderer_glyph_raster_skipped_count = 0,
+        .renderer_glyph_raster_error_skip_count = 0,
+        .renderer_glyph_raster_zero_ink_count = 0,
+        .renderer_glyph_raster_non_clear_pixels = 0,
+        .renderer_glyph_raster_byte_count = 0,
         .renderer_draw_cells = 0,
         .renderer_draw_overlays = 0,
     };
 }
+
+const CoreTextSmokeGlyphRasterizer = struct {
+    appearance: config.ResolvedAppearance,
+
+    pub fn rasterize(
+        self: CoreTextSmokeGlyphRasterizer,
+        request: renderer.GlyphRasterRequest,
+    ) renderer.GlyphRasterError!renderer.GlyphRasterResult {
+        // 이 rasterizer는 아직 제품 macOS font backend가 아니다. CoreText smoke 안에서
+        // native glyph id/font id 후보가 fake byte fill 대신 실제 CoreText glyph bitmap으로
+        // 바뀔 수 있는지 확인하는 얇은 bridge다. 실패는 renderer의 기존 per-glyph skip
+        // 회계로 들어가게 generic RasterizerFailed로 닫는다.
+        if (request.pixels.len == 0) return error.RasterizerFailed;
+
+        var native: NativeGlyphRasterResult = .{
+            .status = -1,
+            .non_clear_pixels = 0,
+        };
+        maru_macos_coretext_smoke_rasterize_glyph(
+            self.appearance.font.family.ptr,
+            self.appearance.font.family.len,
+            @floatCast(self.appearance.font.size),
+            request.run.codepoint,
+            request.run.font_id,
+            request.run.glyph_id,
+            if (request.run.fallback) 1 else 0,
+            request.slot.width_px,
+            request.slot.height_px,
+            request.bytes_per_row,
+            request.pixels.ptr,
+            request.pixels.len,
+            &native,
+        );
+        if (native.status != 0) return error.RasterizerFailed;
+        if (native.non_clear_pixels == 0 and request.run.codepoint != ' ') {
+            return error.RasterizerFailed;
+        }
+
+        return .{ .non_clear_pixels = native.non_clear_pixels };
+    }
+};
 
 fn probeSurfaceFromShapedRecords(records: []const renderer.ShapedGlyphRecord) renderer.ShapedGlyphSurface {
     // CoreText smoke는 아직 실제 TerminalCore DrawList가 없어서 surface를 직접 만든다.
@@ -566,7 +698,7 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
         .{ .font_id = 3, .glyph_id = 30, .string_index = 7, .category = @intFromEnum(NativeGlyphCategory.emoji), .fallback = 1 },
     };
     const appearance = try config.resolveAppearance(.{});
-    const glyph_frame_probe = try buildGlyphFrameProbe(std.testing.allocator, appearance, native, &records);
+    const glyph_frame_probe = try buildTestGlyphFrameProbe(std.testing.allocator, appearance, native, &records);
     const summary = try renderSummary(std.testing.allocator, appearance, deriveSmokeStatus(native), native, glyph_frame_probe);
     defer std.testing.allocator.free(summary);
 
@@ -612,6 +744,13 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_surface_rows=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_uv_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_ready=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_rasterizer=fake_glyph_rasterizer\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_upload_count=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_skipped_count=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_error_skip_count=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_zero_ink_count=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_non_clear_pixels=588\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_byte_count=2352\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_draw_cells=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_draw_overlays=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_shaper=coretext_shaped_records\n") != null);
@@ -672,7 +811,7 @@ test "CoreText smoke keeps shaping and rasterization failures separate" {
     // 그래서 glyph_frame_ready와 atlas_keys_ready는 그대로 true여야 한다. 이렇게 분리해야
     // summary만 보고 "shape/frame 준비는 됐고 CPU raster에서 막혔다"를 집어낼 수 있다.
     const appearance = try config.resolveAppearance(.{});
-    const probe = try buildGlyphFrameProbe(std.testing.allocator, appearance, native, &[_]NativeGlyphRecord{
+    const probe = try buildTestGlyphFrameProbe(std.testing.allocator, appearance, native, &[_]NativeGlyphRecord{
         .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
     });
     try std.testing.expect(probe.atlas_keys_ready);
@@ -707,7 +846,7 @@ test "CoreText smoke treats native glyph-buffer overflow as incomplete shaping" 
 
     // GlyphFrame 준비도 overflow run을 정상 shape로 취급하면 안 된다.
     const appearance = try config.resolveAppearance(.{});
-    const probe = try buildGlyphFrameProbe(std.testing.allocator, appearance, native, &[_]NativeGlyphRecord{
+    const probe = try buildTestGlyphFrameProbe(std.testing.allocator, appearance, native, &[_]NativeGlyphRecord{
         .{ .font_id = 1, .glyph_id = 10, .string_index = 0, .category = @intFromEnum(NativeGlyphCategory.ascii), .fallback = 0 },
     });
     try std.testing.expect(!probe.atlas_keys_ready);
@@ -776,7 +915,7 @@ test "CoreText smoke glyph frame probe filters spaces and requires records" {
     };
 
     const appearance = try config.resolveAppearance(.{ .font = .{ .family = "Menlo", .size = 16.4 } });
-    const probe = try buildGlyphFrameProbe(std.testing.allocator, appearance, native, &records);
+    const probe = try buildTestGlyphFrameProbe(std.testing.allocator, appearance, native, &records);
     try std.testing.expect(probe.atlas_keys_ready);
     try std.testing.expect(probe.glyph_frame_ready);
     try std.testing.expectEqual(@as(usize, 1), probe.drawable_glyph_count);
@@ -786,11 +925,18 @@ test "CoreText smoke glyph frame probe filters spaces and requires records" {
     try std.testing.expect(probe.renderer_frame_prepared);
     try std.testing.expectEqual(@as(u16, 5), probe.renderer_surface_cols);
     try std.testing.expectEqual(@as(u16, 1), probe.renderer_surface_rows);
+    try std.testing.expectEqualStrings("fake_glyph_rasterizer", probe.renderer_rasterizer);
+    try std.testing.expectEqual(@as(usize, 1), probe.renderer_glyph_raster_upload_count);
+    try std.testing.expectEqual(@as(usize, 0), probe.renderer_glyph_raster_skipped_count);
+    try std.testing.expectEqual(@as(usize, 0), probe.renderer_glyph_raster_error_skip_count);
+    try std.testing.expectEqual(@as(usize, 0), probe.renderer_glyph_raster_zero_ink_count);
+    try std.testing.expectEqual(@as(usize, 256), probe.renderer_glyph_raster_non_clear_pixels);
+    try std.testing.expectEqual(@as(usize, 1024), probe.renderer_glyph_raster_byte_count);
     try std.testing.expectEqual(@as(usize, 2), probe.renderer_draw_cells);
     try std.testing.expectEqualStrings(renderer_probe_shaper, probe.renderer_shaper);
 
     native.glyph_record_overflow = 1;
-    const overflow_probe = try buildGlyphFrameProbe(std.testing.allocator, appearance, native, &records);
+    const overflow_probe = try buildTestGlyphFrameProbe(std.testing.allocator, appearance, native, &records);
     try std.testing.expect(!overflow_probe.atlas_keys_ready);
     try std.testing.expect(!overflow_probe.glyph_frame_ready);
     try std.testing.expect(!overflow_probe.renderer_frame_prepared);

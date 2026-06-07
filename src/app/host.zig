@@ -9,7 +9,7 @@ const window_mod = @import("window.zig");
 
 pub const default_artifact_dir = "zig-out/maru-app-smoke";
 
-pub const HostError = std.mem.Allocator.Error || runtime_pump.PumpError || renderer.GlyphQuadError || error{
+pub const HostError = std.mem.Allocator.Error || runtime_pump.PumpError || renderer.GlyphQuadError || renderer.GlyphRasterError || error{
     NoActiveSurface,
 };
 
@@ -226,6 +226,7 @@ fn renderGlyphFrame(allocator: std.mem.Allocator, render_frame: renderer.RenderF
     // screenshot 실패와 frame data 실패를 분리해서 추적할 수 있다.
     const glyph_frame = render_frame.glyph_frame;
     const quad_frame = render_frame.glyph_quad_frame;
+    const raster_frame = render_frame.glyph_raster_frame;
     const writer = &output.writer;
     try writer.writeAll("maru.glyph-frame.v1\n");
     try writer.print("backend={s}\n", .{@tagName(render_frame.backend)});
@@ -236,6 +237,12 @@ fn renderGlyphFrame(allocator: std.mem.Allocator, render_frame: renderer.RenderF
         quad_frame.stats.glyph_count,
         quad_frame.stats.uv_count,
         quad_frame.stats.ready(),
+    });
+    try writer.print("raster_uploads len={d} bytes={d} zero_ink={d} ready={}\n", .{
+        raster_frame.uploads.len,
+        raster_frame.stats.byte_count,
+        raster_frame.stats.zero_ink_uploads,
+        raster_frame.stats.ready(),
     });
     try writer.print("uploads len={d}\n", .{glyph_frame.uploads.len});
     try writer.print("stats glyph_count={d} upload_count={d} reused_count={d} fallback_count={d} replacement_count={d}\n", .{
@@ -264,6 +271,19 @@ fn renderGlyphFrame(allocator: std.mem.Allocator, render_frame: renderer.RenderF
         try writer.print(
             "upload glyph_index={d} slot={d} bytes={d} evicted={}\n",
             .{ upload.glyph_index, upload.slot.id, upload.upload_bytes, upload.evicted != null },
+        );
+    }
+    for (raster_frame.uploads) |upload| {
+        try writer.print(
+            "raster glyph_index={d} slot={d} offset={d} bytes={d} row_bytes={d} non_clear={d}\n",
+            .{
+                upload.glyph_index,
+                upload.slot.id,
+                upload.bytes_offset,
+                upload.byte_count,
+                upload.bytes_per_row,
+                upload.non_clear_pixels,
+            },
         );
     }
 
@@ -412,6 +432,8 @@ test "app smoke summary marks that real UI is not visible yet" {
     const uploads = try std.testing.allocator.alloc(renderer.GlyphUpload, 0);
     const quads = try std.testing.allocator.alloc(renderer.GlyphQuad, 0);
     const quad_overlays = try std.testing.allocator.alloc(renderer.DrawOverlay, 0);
+    const raster_uploads = try std.testing.allocator.alloc(renderer.GlyphRasterUpload, 0);
+    const raster_pixels = try std.testing.allocator.alloc(u8, 0);
 
     var render_frame: renderer.RenderFrame = .{
         .backend = renderer.initialBackendForMacOS(),
@@ -437,6 +459,11 @@ test "app smoke summary marks that real UI is not visible yet" {
             .dirty = null,
             .glyphs = quads,
             .overlays = quad_overlays,
+            .stats = .{},
+        },
+        .glyph_raster_frame = .{
+            .uploads = raster_uploads,
+            .pixels = raster_pixels,
             .stats = .{},
         },
     };
@@ -469,6 +496,10 @@ test "app smoke summary marks that real UI is not visible yet" {
         .glyph_quad_count = 3,
         .glyph_uv_count = 3,
         .glyph_uv_ready = true,
+        .glyph_raster_upload_count = 2,
+        .glyph_raster_byte_count = 392,
+        .glyph_raster_zero_ink_count = 1,
+        .glyph_raster_ready = true,
         .upload_count = 2,
         .reused_count = 1,
         .fallback_count = 0,
@@ -491,6 +522,7 @@ test "app smoke summary marks that real UI is not visible yet" {
     // app host도 visible smoke들과 같은 renderer_* 키를 쓴다(예전 glyph_frame_ready/glyph_count).
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_prepared=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_count=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_atlas_entries=2\n") != null);
 }
 
@@ -517,5 +549,6 @@ test "app smoke glyph artifact records backend frame input" {
     try std.testing.expect(std.mem.indexOf(u8, artifact, "backend=metal\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, artifact, "quads len=") != null);
     try std.testing.expect(std.mem.indexOf(u8, artifact, "quad_stats glyph_count=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, artifact, "raster_uploads len=") != null);
     try std.testing.expect(std.mem.indexOf(u8, artifact, "glyph row=0 col=0 codepoint=U+0041") != null);
 }

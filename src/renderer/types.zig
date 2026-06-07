@@ -2,6 +2,7 @@ const std = @import("std");
 const draw_list = @import("draw_list.zig");
 const glyph_frame = @import("glyph_frame.zig");
 const glyph_quads = @import("glyph_quads.zig");
+const glyph_raster = @import("glyph_raster.zig");
 
 pub const Backend = enum {
     // 미래 backend는 구현을 시작하기 전까지 public enum에 넣지 않는다.
@@ -15,12 +16,14 @@ pub const RenderFrame = struct {
     draw_list: draw_list.DrawList,
     glyph_frame: glyph_frame.GlyphFrame,
     glyph_quad_frame: glyph_quads.GlyphQuadFrame,
+    glyph_raster_frame: glyph_raster.GlyphRasterFrame,
 
-    // RenderFrame은 backend가 그릴 DrawList, atlas slot 준비 결과, shader UV 입력을
-    // 함께 소유한다. Metal backend가 각자 GlyphFrame -> GlyphQuadFrame 변환을 다시
-    // 호출하면 texture bounds/UV 정책이 smoke마다 갈라지므로 제품 frame 경계에서
-    // GlyphQuadFrame까지 준비해 둔다.
+    // RenderFrame은 backend가 그릴 DrawList, atlas slot 준비 결과, shader UV 입력,
+    // texture upload bytes를 함께 소유한다. Metal backend가 각자 glyph raster/upload
+    // 정책을 다시 추론하면 texture copy 크기와 UV 정책이 smoke마다 갈라지므로 제품
+    // frame 경계에서 필요한 입력을 모은다.
     pub fn deinit(self: *RenderFrame, allocator: std.mem.Allocator) void {
+        self.glyph_raster_frame.deinit(allocator);
         self.glyph_quad_frame.deinit(allocator);
         self.glyph_frame.deinit(allocator);
         self.draw_list.deinit(allocator);
@@ -35,6 +38,7 @@ pub const RenderFrame = struct {
     pub fn glyphFrameConsistent(self: RenderFrame) bool {
         const frame = self.glyph_frame;
         const quads = self.glyph_quad_frame;
+        const raster = self.glyph_raster_frame;
         return frame.size.cols == self.draw_list.size.cols and
             frame.size.rows == self.draw_list.size.rows and
             frame.stats.glyph_count == frame.glyphs.len and
@@ -45,7 +49,11 @@ pub const RenderFrame = struct {
             quads.stats.glyph_count == frame.stats.glyph_count and
             quads.stats.uv_count == quads.glyphs.len and
             quads.overlays.len == frame.overlays.len and
-            (quads.stats.glyph_count == 0 or quads.stats.ready());
+            (quads.stats.glyph_count == 0 or quads.stats.ready()) and
+            raster.uploads.len == frame.uploads.len and
+            raster.stats.upload_count == frame.stats.upload_count and
+            raster.pixels.len == raster.stats.byte_count and
+            raster.stats.ready();
     }
 };
 
@@ -67,6 +75,8 @@ test "render frame owns and frees draw and glyph frame data" {
     const uploads = try std.testing.allocator.alloc(glyph_frame.GlyphUpload, 0);
     const quads = try std.testing.allocator.alloc(glyph_quads.GlyphQuad, 0);
     const quad_overlays = try std.testing.allocator.alloc(draw_list.DrawOverlay, 0);
+    const raster_uploads = try std.testing.allocator.alloc(glyph_raster.GlyphRasterUpload, 0);
+    const raster_pixels = try std.testing.allocator.alloc(u8, 0);
     var frame: RenderFrame = .{
         .backend = initialBackendForMacOS(),
         .draw_list = .{
@@ -93,6 +103,11 @@ test "render frame owns and frees draw and glyph frame data" {
             .overlays = quad_overlays,
             .stats = .{},
         },
+        .glyph_raster_frame = .{
+            .uploads = raster_uploads,
+            .pixels = raster_pixels,
+            .stats = .{},
+        },
     };
     frame.deinit(std.testing.allocator);
 }
@@ -111,6 +126,11 @@ const TestRenderFrameShape = struct {
     quad_glyph_count: usize = 0,
     quad_uv_count: usize = 0,
     quad_overlay_len: usize = 0,
+    raster_upload_len: usize = 0,
+    raster_upload_count: usize = 0,
+    rasterized_count: usize = 0,
+    raster_byte_len: usize = 0,
+    raster_byte_count: usize = 0,
 };
 
 fn makeTestRenderFrame(
@@ -134,6 +154,10 @@ fn makeTestRenderFrame(
     errdefer allocator.free(quads);
     const quad_overlays = try allocator.alloc(draw_list.DrawOverlay, shape.quad_overlay_len);
     errdefer allocator.free(quad_overlays);
+    const raster_uploads = try allocator.alloc(glyph_raster.GlyphRasterUpload, shape.raster_upload_len);
+    errdefer allocator.free(raster_uploads);
+    const raster_pixels = try allocator.alloc(u8, shape.raster_byte_len);
+    errdefer allocator.free(raster_pixels);
 
     return .{
         .backend = initialBackendForMacOS(),
@@ -168,6 +192,15 @@ fn makeTestRenderFrame(
                 .uv_count = shape.quad_uv_count,
             },
         },
+        .glyph_raster_frame = .{
+            .uploads = raster_uploads,
+            .pixels = raster_pixels,
+            .stats = .{
+                .upload_count = shape.raster_upload_count,
+                .rasterized_count = shape.rasterized_count,
+                .byte_count = shape.raster_byte_count,
+            },
+        },
     };
 }
 
@@ -185,6 +218,11 @@ test "render frame consistency accepts matching glyph frame metadata" {
         .quad_len = 2,
         .quad_glyph_count = 2,
         .quad_uv_count = 2,
+        .raster_upload_len = 1,
+        .raster_upload_count = 1,
+        .rasterized_count = 1,
+        .raster_byte_len = 4,
+        .raster_byte_count = 4,
     });
     defer non_empty.deinit(std.testing.allocator);
     try std.testing.expect(non_empty.glyphFrameConsistent());
@@ -210,6 +248,11 @@ test "render frame consistency rejects size and count mismatches" {
         .quad_len = 2,
         .quad_glyph_count = 2,
         .quad_uv_count = 2,
+        .raster_upload_len = 1,
+        .raster_upload_count = 1,
+        .rasterized_count = 1,
+        .raster_byte_len = 4,
+        .raster_byte_count = 4,
     });
     defer glyph_count_mismatch.deinit(std.testing.allocator);
     try std.testing.expect(!glyph_count_mismatch.glyphFrameConsistent());
@@ -223,6 +266,11 @@ test "render frame consistency rejects size and count mismatches" {
         .quad_len = 1,
         .quad_glyph_count = 1,
         .quad_uv_count = 1,
+        .raster_upload_len = 0,
+        .raster_upload_count = 1,
+        .rasterized_count = 0,
+        .raster_byte_len = 0,
+        .raster_byte_count = 0,
     });
     defer upload_count_mismatch.deinit(std.testing.allocator);
     try std.testing.expect(!upload_count_mismatch.glyphFrameConsistent());
@@ -236,6 +284,11 @@ test "render frame consistency rejects size and count mismatches" {
         .quad_len = 2,
         .quad_glyph_count = 2,
         .quad_uv_count = 2,
+        .raster_upload_len = 1,
+        .raster_upload_count = 1,
+        .rasterized_count = 1,
+        .raster_byte_len = 4,
+        .raster_byte_count = 4,
     });
     defer accounting_mismatch.deinit(std.testing.allocator);
     try std.testing.expect(!accounting_mismatch.glyphFrameConsistent());
@@ -254,8 +307,61 @@ test "render frame consistency rejects incomplete glyph quad uv data" {
         .quad_len = 1,
         .quad_glyph_count = 2,
         .quad_uv_count = 1,
+        .raster_upload_len = 1,
+        .raster_upload_count = 1,
+        .rasterized_count = 1,
+        .raster_byte_len = 4,
+        .raster_byte_count = 4,
     });
     defer missing_uv.deinit(std.testing.allocator);
 
     try std.testing.expect(!missing_uv.glyphFrameConsistent());
+}
+
+test "render frame consistency rejects incomplete glyph raster upload data" {
+    // GlyphRasterFrame이 제품 RenderFrame 안으로 들어오면 upload 후보가 전부 rasterize됐는지도
+    // frame 준비 계약의 일부다. 그렇지 않으면 Metal backend가 texture에 복사할 bytes 없이
+    // 정상 frame처럼 진행할 수 있다.
+    var missing_raster = try makeTestRenderFrame(std.testing.allocator, .{
+        .glyph_len = 2,
+        .upload_len = 1,
+        .glyph_count = 2,
+        .upload_count = 1,
+        .reused_count = 1,
+        .quad_len = 2,
+        .quad_glyph_count = 2,
+        .quad_uv_count = 2,
+        .raster_upload_len = 1,
+        .raster_upload_count = 1,
+        .rasterized_count = 0,
+        .raster_byte_len = 4,
+        .raster_byte_count = 4,
+    });
+    defer missing_raster.deinit(std.testing.allocator);
+
+    try std.testing.expect(!missing_raster.glyphFrameConsistent());
+}
+
+test "render frame consistency rejects missing glyph raster bytes" {
+    // Raster metadata만 맞고 실제 pixel buffer가 비어 있으면 backend는 texture에 복사할
+    // 원본 bytes 없이 정상 frame처럼 진행할 수 있다. frame consistency는 metadata와
+    // byte storage를 함께 확인해야 한다.
+    var missing_bytes = try makeTestRenderFrame(std.testing.allocator, .{
+        .glyph_len = 2,
+        .upload_len = 1,
+        .glyph_count = 2,
+        .upload_count = 1,
+        .reused_count = 1,
+        .quad_len = 2,
+        .quad_glyph_count = 2,
+        .quad_uv_count = 2,
+        .raster_upload_len = 1,
+        .raster_upload_count = 1,
+        .rasterized_count = 1,
+        .raster_byte_len = 0,
+        .raster_byte_count = 4,
+    });
+    defer missing_bytes.deinit(std.testing.allocator);
+
+    try std.testing.expect(!missing_bytes.glyphFrameConsistent());
 }

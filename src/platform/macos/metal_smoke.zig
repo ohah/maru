@@ -179,10 +179,10 @@ const SmokeFixture = struct {
 };
 
 fn buildSmokeFixture(allocator: std.mem.Allocator) !SmokeFixture {
-    // 아직 glyph rasterizer가 없으므로, native bridge는 셀 사각형 placeholder를 그린다.
-    // 대신 입력 출처를 RendererState -> RenderFrame/GlyphQuadFrame까지 올린다. 이렇게 해야 Metal smoke가
-    // DrawList 직행 demo로 굳지 않고, backend가 제품 renderer frame 경계에서 받은 slot
-    // 단위 데이터를 소비한다는 사실을 artifact로 남길 수 있다.
+    // 아직 제품 glyph rasterizer가 Metal cell text를 그리지 않으므로, native bridge는 셀
+    // 사각형 placeholder를 그린다. 대신 입력 출처를 RendererState -> RenderFrame까지
+    // 올려서 backend가 제품 renderer frame 경계에서 받은 slot/UV/raster upload 준비
+    // 데이터를 소비한다는 사실을 artifact로 남긴다.
     var core = try terminal.TerminalCore.init(allocator, .{ .cols = 24, .rows = 6 });
     defer core.deinit();
 
@@ -294,6 +294,10 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
             .glyph_quad_count = 48,
             .glyph_uv_count = 48,
             .glyph_uv_ready = true,
+            .glyph_raster_upload_count = 8,
+            .glyph_raster_byte_count = 6272,
+            .glyph_raster_zero_ink_count = 1,
+            .glyph_raster_ready = true,
             .upload_count = 8,
             .reused_count = 40,
             .fallback_count = 0,
@@ -314,6 +318,8 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_atlas_slot_placement=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_uv_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_quad_count=48\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_upload_count=8\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_prepared=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_backend=metal\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_shaper=fake_font_backend\n") != null);
@@ -434,6 +440,9 @@ test "Metal smoke fixture comes from RendererState glyph frame" {
     try std.testing.expect(fixture.stats.glyph_uv_ready);
     try std.testing.expectEqual(fixture.stats.glyph_count, fixture.stats.glyph_quad_count);
     try std.testing.expectEqual(fixture.stats.glyph_count, fixture.stats.glyph_uv_count);
+    try std.testing.expect(fixture.stats.glyph_raster_ready);
+    try std.testing.expectEqual(fixture.stats.upload_count, fixture.stats.glyph_raster_upload_count);
+    try std.testing.expect(fixture.stats.glyph_raster_byte_count > 0);
     // 모든 glyph는 upload 아니면 reuse 둘 중 하나라, 이 합이 glyph_count와 맞아야 probe
     // 통계가 backend로 일관되게 흘러간다(slot 재사용 회귀를 통계 단계에서 잡는다).
     try std.testing.expectEqual(fixture.stats.glyph_count, fixture.stats.upload_count + fixture.stats.reused_count);

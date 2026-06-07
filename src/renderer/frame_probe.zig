@@ -19,6 +19,10 @@ pub const RenderFrameStats = struct {
     glyph_quad_count: usize,
     glyph_uv_count: usize,
     glyph_uv_ready: bool,
+    glyph_raster_upload_count: usize,
+    glyph_raster_byte_count: usize,
+    glyph_raster_zero_ink_count: usize,
+    glyph_raster_ready: bool,
     upload_count: usize,
     reused_count: usize,
     fallback_count: usize,
@@ -29,7 +33,11 @@ pub const RenderFrameStats = struct {
     // (glyphFrameConsistent)에 더해 실제로 glyph가 잡혔고 atlas가 채워졌는지(>0)까지 봐서,
     // 빈-but-consistent frame을 prepared로 보고하지 않게 한다.
     pub fn prepared(self: RenderFrameStats) bool {
-        return self.consistent and self.glyph_count > 0 and self.glyph_uv_ready and self.atlas_entries > 0;
+        return self.consistent and
+            self.glyph_count > 0 and
+            self.glyph_uv_ready and
+            self.glyph_raster_ready and
+            self.atlas_entries > 0;
     }
 };
 
@@ -48,6 +56,10 @@ pub fn renderFrameStats(frame: types.RenderFrame, atlas_entries: usize) RenderFr
         .glyph_quad_count = frame.glyph_quad_frame.stats.glyph_count,
         .glyph_uv_count = frame.glyph_quad_frame.stats.uv_count,
         .glyph_uv_ready = frame.glyph_quad_frame.stats.ready(),
+        .glyph_raster_upload_count = frame.glyph_raster_frame.stats.upload_count,
+        .glyph_raster_byte_count = frame.glyph_raster_frame.stats.byte_count,
+        .glyph_raster_zero_ink_count = frame.glyph_raster_frame.stats.zero_ink_uploads,
+        .glyph_raster_ready = frame.glyph_raster_frame.stats.ready(),
         .upload_count = glyph_frame.stats.upload_count,
         .reused_count = glyph_frame.stats.reused_count,
         .fallback_count = glyph_frame.stats.fallback_count,
@@ -70,6 +82,10 @@ pub fn writeRenderFrameStats(writer: anytype, prefix: []const u8, stats: RenderF
     try writer.print("{s}glyph_quad_count={d}\n", .{ prefix, stats.glyph_quad_count });
     try writer.print("{s}glyph_uv_count={d}\n", .{ prefix, stats.glyph_uv_count });
     try writer.print("{s}glyph_uv_ready={}\n", .{ prefix, stats.glyph_uv_ready });
+    try writer.print("{s}glyph_raster_upload_count={d}\n", .{ prefix, stats.glyph_raster_upload_count });
+    try writer.print("{s}glyph_raster_byte_count={d}\n", .{ prefix, stats.glyph_raster_byte_count });
+    try writer.print("{s}glyph_raster_zero_ink_count={d}\n", .{ prefix, stats.glyph_raster_zero_ink_count });
+    try writer.print("{s}glyph_raster_ready={}\n", .{ prefix, stats.glyph_raster_ready });
     try writer.print("{s}glyph_upload_count={d}\n", .{ prefix, stats.upload_count });
     try writer.print("{s}glyph_reused_count={d}\n", .{ prefix, stats.reused_count });
     try writer.print("{s}glyph_fallback_count={d}\n", .{ prefix, stats.fallback_count });
@@ -101,6 +117,9 @@ test "render frame stats extracts frame metadata and derives prepared" {
     try std.testing.expectEqual(@as(usize, 4), stats.glyph_quad_count);
     try std.testing.expectEqual(@as(usize, 4), stats.glyph_uv_count);
     try std.testing.expect(stats.glyph_uv_ready);
+    try std.testing.expectEqual(stats.upload_count, stats.glyph_raster_upload_count);
+    try std.testing.expect(stats.glyph_raster_byte_count > 0);
+    try std.testing.expect(stats.glyph_raster_ready);
     try std.testing.expectEqual(stats.glyph_count, stats.upload_count + stats.reused_count);
     try std.testing.expect(stats.atlas_entries > 0);
     // glyph가 잡혔고 atlas가 채워졌으므로 prepared는 참이다.
@@ -121,6 +140,10 @@ test "render frame stats prepared is false for an empty-but-consistent frame" {
         .glyph_quad_count = 0,
         .glyph_uv_count = 0,
         .glyph_uv_ready = false,
+        .glyph_raster_upload_count = 0,
+        .glyph_raster_byte_count = 0,
+        .glyph_raster_zero_ink_count = 0,
+        .glyph_raster_ready = true,
         .upload_count = 0,
         .reused_count = 0,
         .fallback_count = 0,
@@ -142,6 +165,10 @@ test "write render frame stats emits prefixed canonical lines" {
         .glyph_quad_count = 32,
         .glyph_uv_count = 32,
         .glyph_uv_ready = true,
+        .glyph_raster_upload_count = 5,
+        .glyph_raster_byte_count = 1280,
+        .glyph_raster_zero_ink_count = 1,
+        .glyph_raster_ready = true,
         .upload_count = 5,
         .reused_count = 27,
         .fallback_count = 2,
@@ -165,6 +192,10 @@ test "write render frame stats emits prefixed canonical lines" {
     try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_quad_count=32\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_uv_count=32\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_uv_ready=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_raster_upload_count=5\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_raster_byte_count=1280\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_raster_zero_ink_count=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_raster_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_upload_count=5\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_reused_count=27\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_fallback_count=2\n") != null);

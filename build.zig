@@ -48,6 +48,12 @@ pub fn build(b: *std.Build) void {
     app_smoke_cmd.addArg("app-smoke");
     app_smoke_step.dependOn(&app_smoke_cmd.step);
 
+    const app_pty_smoke_step = b.step("app-pty-smoke", "Run the live PTY app host frame smoke");
+    const app_pty_smoke_cmd = b.addRunArtifact(exe);
+    app_pty_smoke_cmd.step.dependOn(b.getInstallStep());
+    app_pty_smoke_cmd.addArg("app-pty-smoke");
+    app_pty_smoke_step.dependOn(&app_pty_smoke_cmd.step);
+
     if (target.result.os.tag == .macos) {
         // visible window smoke는 macOS window server와 Cocoa framework가 필요하다.
         // Ubuntu CI의 기본 `zig build`가 이 플랫폼 코드를 컴파일하지 않도록

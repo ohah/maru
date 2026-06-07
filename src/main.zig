@@ -32,6 +32,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "app-pty-smoke")) {
+        try runAppPtySmoke(io, allocator, stdout);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         try printUsage(stdout);
         return;
@@ -52,6 +57,7 @@ fn printSmoke(stdout: *std.Io.Writer) !void {
     });
     try stdout.writeAll("run `maru-dev demo` or `zig build demo` for the first runnable PTY slice\n");
     try stdout.writeAll("run `maru-dev app-smoke` or `zig build app-smoke` for the first app-host frame slice\n");
+    try stdout.writeAll("run `maru-dev app-pty-smoke` or `zig build app-pty-smoke` for the live PTY app-host frame slice\n");
     try stdout.flush();
 }
 
@@ -86,16 +92,35 @@ fn runAppSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer)
     try stdout.flush();
 }
 
+fn runAppPtySmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
+    // 실제 PTY output이 app host renderer frame까지 들어가는지 확인한다.
+    // 아직 창을 띄우지 않기 때문에 visible UI 확인은 Metal/AppKit smoke가 맡는다.
+    const config: maru.app.AppPtySmokeConfig = .{};
+    var result = try maru.app.runAppPtySmoke(io, allocator, config);
+    defer result.deinit(allocator);
+
+    try stdout.writeAll(result.summary);
+    try stdout.print("\nartifacts written to {s}/\n", .{config.artifact_dir});
+    try stdout.writeAll("raw PTY artifact: app-pty.raw.txt\n");
+    try stdout.writeAll("screen artifact: app-pty.screen.txt\n");
+    try stdout.writeAll("snapshot artifact: app-pty.snapshot.txt\n");
+    try stdout.writeAll("renderer frame artifact: app-pty.frame.txt\n");
+    try stdout.writeAll("visible UI: not yet; this is a live PTY app-host contract smoke.\n");
+    try stdout.flush();
+}
+
 fn printUsage(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\usage:
         \\  maru-dev
         \\  maru-dev demo
         \\  maru-dev app-smoke
+        \\  maru-dev app-pty-smoke
         \\
         \\commands:
         \\  demo       run the headless PTY -> SurfaceRuntime -> snapshot demo
         \\  app-smoke  run the app host -> RuntimeEventPump -> RenderFrame smoke
+        \\  app-pty-smoke run the live PTY -> app host -> RenderFrame smoke
         \\
     );
     try writer.flush();

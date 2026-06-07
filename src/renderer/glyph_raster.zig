@@ -80,7 +80,8 @@ pub const FakeGlyphRasterizer = struct {
             return error.RasterByteCountMismatch;
         }
 
-        @memset(request.pixels, 0);
+        // buffer는 buildGlyphRasterFrame이 이미 0으로 지워 넘긴다(계약). 그래서 여기서 다시
+        // clear하지 않는다. space는 ink가 없으므로 그대로 두고 zero-ink로 보고한다.
         if (request.run.codepoint == ' ') return .{ .non_clear_pixels = 0 };
 
         const red: u8 = @truncate(request.run.glyph_id);
@@ -141,6 +142,9 @@ pub fn buildGlyphRasterFrame(
         const end = std.math.add(usize, offset, shape.byte_count) catch
             return error.RasterByteCountOverflow;
         const pixel_slice = pixels[offset..end];
+        // 이 slice를 미리 0으로 지워 rasterizer에 넘기는 것이 계약이다. rasterizer는 ink가
+        // 있는 pixel만 칠하면 되고, ink가 없는 영역(공백 glyph 포함)은 여기서 보장한 0으로
+        // 남으므로 rasterizer가 buffer를 다시 clear할 필요가 없다.
         @memset(pixel_slice, 0);
 
         const result = try rasterizer.rasterize(.{

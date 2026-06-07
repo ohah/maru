@@ -176,7 +176,12 @@ static void maru_pump_app_once(void) {
     [CATransaction flush];
 }
 
-void maru_macos_keydown_smoke_run(uint32_t duration_ms, MaruKeyDownSmokeResult *result) {
+static void maru_run_keydown_smoke(
+    uint32_t duration_ms,
+    BOOL post_synthetic_event,
+    NSString *title,
+    MaruKeyDownSmokeResult *result
+) {
     result->status = -1;
     result->window_visible = 0;
     result->key_down_received = 0;
@@ -187,9 +192,9 @@ void maru_macos_keydown_smoke_run(uint32_t duration_ms, MaruKeyDownSmokeResult *
     result->modifier_command = 0;
 
     @autoreleasepool {
-        // 이 smoke는 실제 사용자의 물리 키보드 입력이 아니라 AppKit event queue가
-        // `keyDown:`을 view에 전달할 수 있는지를 고정한다. Zig app host가 이미
-        // app-vs-terminal 정책을 소유하므로 native 쪽은 normalized payload만 만든다.
+        // 이 helper는 synthetic smoke와 manual smoke가 같은 first-responder/keyDown
+        // 경계를 쓰도록 한다. 둘을 분리 구현하면 자동 smoke와 사람이 누르는 smoke가
+        // 서로 다른 AppKit setup을 검증하는 오탐이 생긴다.
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         [NSApp finishLaunching];
@@ -216,7 +221,7 @@ void maru_macos_keydown_smoke_run(uint32_t duration_ms, MaruKeyDownSmokeResult *
             return;
         }
 
-        [window setTitle:@"Maru keyDown smoke"];
+        [window setTitle:title];
         [window setReleasedWhenClosed:NO];
         [window setContentView:view];
         [window makeKeyAndOrderFront:nil];
@@ -228,23 +233,25 @@ void maru_macos_keydown_smoke_run(uint32_t duration_ms, MaruKeyDownSmokeResult *
         }
 
         result->window_visible = [window isVisible] ? 1 : 0;
-        NSEvent *event = [NSEvent
-            keyEventWithType:NSEventTypeKeyDown
-                    location:NSMakePoint(8.0, 8.0)
-               modifierFlags:NSEventModifierFlagCommand
-                   timestamp:0.0
-                windowNumber:[window windowNumber]
-                     context:nil
-                  characters:@"b"
- charactersIgnoringModifiers:@"b"
-                   isARepeat:NO
-                     keyCode:11];
-        if (event == nil) {
-            result->status = 5;
-            [window orderOut:nil];
-            return;
+        if (post_synthetic_event) {
+            NSEvent *event = [NSEvent
+                keyEventWithType:NSEventTypeKeyDown
+                        location:NSMakePoint(8.0, 8.0)
+                   modifierFlags:NSEventModifierFlagCommand
+                       timestamp:0.0
+                    windowNumber:[window windowNumber]
+                         context:nil
+                      characters:@"b"
+     charactersIgnoringModifiers:@"b"
+                       isARepeat:NO
+                         keyCode:11];
+            if (event == nil) {
+                result->status = 5;
+                [window orderOut:nil];
+                return;
+            }
+            [NSApp postEvent:event atStart:NO];
         }
-        [NSApp postEvent:event atStart:NO];
 
         NSTimeInterval seconds = ((NSTimeInterval)duration_ms) / 1000.0;
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
@@ -269,6 +276,28 @@ void maru_macos_keydown_smoke_run(uint32_t duration_ms, MaruKeyDownSmokeResult *
         }
         result->status = 0;
     }
+}
+
+void maru_macos_keydown_smoke_run(uint32_t duration_ms, MaruKeyDownSmokeResult *result) {
+    // 자동 smoke는 물리 키보드가 없는 CI/원격 실행에서도 keyDown delivery 계약을
+    // 검증해야 하므로 AppKit event queue에 Cmd+B를 직접 넣는다.
+    maru_run_keydown_smoke(
+        duration_ms,
+        YES,
+        @"Maru synthetic keyDown smoke",
+        result
+    );
+}
+
+void maru_macos_manual_keydown_smoke_run(uint32_t duration_ms, MaruKeyDownSmokeResult *result) {
+    // manual smoke는 사용자가 실제로 누른 키를 기다린다. 제품 interactive loop는
+    // 아직 아니지만, 물리 키보드 -> AppKit keyDown -> Zig payload 경계를 확인할 수 있다.
+    maru_run_keydown_smoke(
+        duration_ms,
+        NO,
+        @"Maru manual keyDown smoke - press Cmd+B",
+        result
+    );
 }
 
 static id<MTLRenderPipelineState> maru_make_cell_pipeline(

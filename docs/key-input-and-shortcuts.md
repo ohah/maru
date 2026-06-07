@@ -123,7 +123,8 @@ Command+B      -> 초기에는 오류
 
 - `src/config/keybinding.zig`가 `KeyChord.parse`와 `KeyBindingResolver`의 최소 계약을 구현한다.
 - `Cmd+B`, `ctrl+cmd+,`, `Shift+Alt+F13` 같은 key chord 문자열은 parser 단위 테스트로 검증한다.
-- `mise run macos-app-pty-metal-smoke`는 AppKit synthetic `keyDown:`에서 얻은 `Cmd+B` payload가 `AppHost.handleKeyEvent -> KeyBindingResolver -> SurfaceRuntime.writeInput`을 거쳐 PTY와 visible Metal frame까지 도달하는지 검증한다.
+- `mise run macos-app-pty-metal-smoke`는 기본적으로 AppKit synthetic `keyDown:`에서 얻은 `Cmd+B` payload가 `AppHost.handleKeyEvent -> KeyBindingResolver -> SurfaceRuntime.writeInput`을 거쳐 PTY와 visible Metal frame까지 도달하는지 검증한다.
+- `MARU_APP_PTY_METAL_KEYDOWN_SOURCE=manual MARU_APP_PTY_METAL_KEYDOWN_MS=15000 mise run macos-app-pty-metal-smoke`는 사용자가 key capture 창에서 직접 누른 `Cmd+B`를 같은 경로에 태운다. 이 smoke는 물리 키 한 번의 AppKit 경계를 검증하지만, 아직 지속 interactive shell loop는 아니다.
 - `F1..F24`는 설정 문자열로는 파싱하지만, 현재 `TerminalKeyEvent` 타입에는 function key variant가 아직 없다. AppKit bridge가 실제 function key event를 넘기는 PR에서 `TerminalKeyEvent` 타입을 확장한다.
 - 실제 TOML 파일 parser, runtime reload, 설정 UI는 아직 없다.
 

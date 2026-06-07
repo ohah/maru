@@ -8,6 +8,12 @@ pub const NativeGlyphRasterResult = extern struct {
     non_clear_pixels: u32,
 };
 
+// rasterize_glyph bridge가 status 7로 닫는 경우는 CoreText가 glyph를 실제로 그렸지만
+// non-clear pixel이 하나도 없는 zero-ink glyph다(coretext_smoke.m). 다른 non-zero status는
+// glyph 자체를 만들 수 없었던 실패다.
+const native_status_ok: c_int = 0;
+const native_status_zero_ink: c_int = 7;
+
 pub const RasterizeGlyphFn = *const fn (
     requested_font_family: [*]const u8,
     requested_font_family_len: usize,
@@ -62,10 +68,17 @@ pub const CoreTextGlyphRasterizer = struct {
             &native,
         );
 
-        // native bridge는 CoreText가 glyph를 실제 bitmap으로 만들 수 없으면 status를
-        // non-zero로 닫는다. renderer는 한 glyph 실패를 frame abort가 아니라 skip으로
-        // 기록하므로 여기서는 공통 RasterizerFailed로만 되돌린다.
-        if (native.status != 0) return error.RasterizerFailed;
+        // CoreText가 glyph를 그렸지만 잉크가 없는 경우(공백/combining mark/치환된 비가시
+        // glyph)는 실패가 아니다. renderer 계약은 이것을 non_clear_pixels=0인 정상 결과로
+        // 보고 GlyphRasterFrame의 zero_ink_uploads로 회계한다. 실패 매핑 정책을 가진 이
+        // 제품 후보 경계가 native zero-ink status를 성공으로 닫아, zero-ink가 rasterizer
+        // 실패로 잘못 집계되지 않게 한다.
+        if (native.status == native_status_zero_ink) return .{ .non_clear_pixels = 0 };
+
+        // 그 밖의 non-zero status는 CoreText가 glyph를 실제 bitmap으로 만들 수 없었던
+        // 실패다. renderer는 한 glyph 실패를 frame abort가 아니라 skip으로 기록하므로
+        // 여기서는 공통 RasterizerFailed로만 되돌린다.
+        if (native.status != native_status_ok) return error.RasterizerFailed;
 
         return .{ .non_clear_pixels = native.non_clear_pixels };
     }
@@ -212,6 +225,42 @@ test "CoreText rasterizer fails closed when font identity is missing" {
         .bytes_per_row = 8,
     }));
     try std.testing.expectEqual(@as(usize, 0), test_bridge_capture.call_count);
+}
+
+test "NativeGlyphRasterResult matches the native C ABI size" {
+    // coretext_smoke.m의 MaruCoreTextGlyphRasterResult와 layout이 어긋나면 status/pixel을
+    // 엉뚱한 offset에서 읽어 모든 raster 결과가 조용히 깨진다. DrawList ABI 구조체처럼
+    // 크기를 컴파일 타임 계약으로 고정해 드리프트를 빌드에서 잡는다.
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(NativeGlyphRasterResult));
+}
+
+test "CoreText rasterizer maps native zero-ink to a successful zero-ink upload" {
+    // drawable glyph가 잉크 없이 그려지는 경우(combining mark, 치환된 비가시 glyph)는
+    // renderer 계약상 실패가 아니라 non_clear_pixels=0인 정상 결과다. 경계가 native
+    // status 7을 RasterizerFailed로 닫으면 zero_ink_uploads가 rasterizer 실패로 잘못
+    // 집계되어 GlyphRasterFrame.ready()가 거짓이 된다.
+    resetTestBridge(7, 0);
+    var registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    const font_id = try registry.intern(.{ .postscript_name = "Menlo-Regular" });
+    const run = testRun(font_id, 42);
+    const slot = testSlot(run.cache_key);
+    var pixels = [_]u8{0} ** 16;
+
+    const rasterizer = CoreTextGlyphRasterizer{
+        .appearance = try config.resolveAppearance(.{}),
+        .font_registry = &registry,
+        .rasterize_glyph = captureRasterizeGlyph,
+    };
+    const result = try rasterizer.rasterize(.{
+        .run = run,
+        .slot = slot,
+        .pixels = &pixels,
+        .bytes_per_row = 8,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.non_clear_pixels);
+    try std.testing.expectEqual(@as(usize, 1), test_bridge_capture.call_count);
 }
 
 test "CoreText rasterizer maps native failure to renderer raster skip error" {

@@ -6,6 +6,11 @@ const terminal = maru.terminal;
 const coretext_probe = @import("coretext_probe.zig");
 const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
+const coretext_bridge = @import("coretext_smoke_bridge.zig");
+// shape/raster native bridge 시그니처는 coretext_smoke_bridge.zig가 단일 출처로 소유한다.
+// CoreText smoke와 같은 선언을 공유해, 한쪽만 파라미터를 바꿔 ABI가 어긋나는 것을 막는다.
+const maru_macos_coretext_shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list;
+const maru_macos_coretext_smoke_rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph;
 
 const artifact_dir = "zig-out/maru-macos-metal-smoke";
 const screenshot_path = artifact_dir ++ "/metal-frame.ppm";
@@ -85,33 +90,6 @@ extern fn maru_macos_metal_smoke_run(
     screenshot_path_ptr: [*]const u8,
     screenshot_path_len: usize,
     result: *NativeMetalSmokeResult,
-) void;
-
-extern fn maru_macos_coretext_shape_draw_list(
-    requested_font_family: [*]const u8,
-    requested_font_family_len: usize,
-    requested_font_size: f64,
-    cells: [*]const coretext_shaper.NativeDrawCell,
-    cell_count: usize,
-    result: *coretext_shaper.NativeDrawListShapeResult,
-    glyph_records: [*]coretext_shaper.NativeDrawGlyphRecord,
-    glyph_record_capacity: usize,
-) void;
-
-extern fn maru_macos_coretext_smoke_rasterize_glyph(
-    requested_font_family: [*]const u8,
-    requested_font_family_len: usize,
-    requested_font_size: f64,
-    font_postscript_name: [*]const u8,
-    font_postscript_name_len: usize,
-    codepoint: u32,
-    glyph_id: u32,
-    width_px: usize,
-    height_px: usize,
-    bytes_per_row: usize,
-    pixels: [*]u8,
-    pixel_capacity: usize,
-    result: *coretext_raster.NativeGlyphRasterResult,
 ) void;
 
 pub fn main(init: std.process.Init) !void {
@@ -268,8 +246,14 @@ fn renderSummary(
         try writer.print("screenshot_path={s}\n", .{screenshot_path});
         try writer.writeAll("screenshot_format=ppm_rgb_from_bgra8_drawable_readback\n");
     }
-    try writer.print("glyph_text={}\n", .{fixture.glyph_text});
-    if (fixture.glyph_text) {
+    // glyph_text는 "실제 CoreText glyph bytes를 화면에서 샘플링했다"는 주장이다. 라벨을
+    // fixture 능력만으로 단정하지 않고, 실제 atlas 샘플링 증거(product_atlas_sampled)와
+    // CoreText bytes 사용 여부를 AND로 도출한다. 그래야 rasterizer가 빈 bitmap으로 퇴화하거나
+    // 샘플링이 실패하면 glyph_text도 false가 된다. ui_note는 어떤 경로(CoreText vs test
+    // fixture)를 탔는지 설명하는 라벨이므로 능력 플래그를 그대로 쓴다.
+    const glyph_text = fixture.uses_coretext_bytes and smoke_status.product_atlas_sampled;
+    try writer.print("glyph_text={}\n", .{glyph_text});
+    if (fixture.uses_coretext_bytes) {
         try writer.writeAll("ui_note=appkit_window_with_coretext_drawlist_glyph_atlas_sampling\n");
     } else {
         try writer.writeAll("ui_note=appkit_window_with_product_atlas_shader_sampling_non_coretext_test_fixture\n");
@@ -316,7 +300,12 @@ const SmokeFixture = struct {
     atlas_height_px: u32,
     raster_uploads: []NativeMetalRasterUpload,
     raster_pixels: []u8,
-    glyph_text: bool,
+    // 이 fixture의 raster bytes가 실제 CoreText rasterizer에서 왔는지(true) 아니면 native
+    // 런타임 없는 test fixture에서 왔는지(false)를 나타내는 "능력" 플래그다. summary의
+    // glyph_text는 이 능력만으로 결정하지 않고, 실제로 atlas texel을 샘플링했는지(증거)와
+    // 함께 도출한다. 그래야 라벨이 "실제 CoreText glyph를 화면에서 샘플링했다"는 주장을
+    // 스스로의 증거 없이 단정하지 않는다.
+    uses_coretext_bytes: bool,
     // 제품 frame 통계는 renderer가 소유한 공유 타입으로 들고, native 입력(size, cells)과
     // 진단 통계를 한 struct에 모은다. shaper/rasterizer는 어떤 font stack으로 frame을
     // 준비했는지 summary에서 바로 분리하기 위한 라벨이다.
@@ -353,7 +342,7 @@ fn buildSmokeFixtureFromDrawListShaper(
     shape_draw_list: coretext_shaper.ShapeDrawListFn,
     rasterize_glyph: coretext_raster.RasterizeGlyphFn,
     rasterizer_name: []const u8,
-    glyph_text: bool,
+    uses_coretext_bytes: bool,
 ) !SmokeFixture {
     // Metal smoke의 입력은 실제 TerminalCore snapshot에서 나온 DrawList다. 이 경로가
     // probe-derived surface를 쓰면 shell text layout, cursor, dirty row, underline overlay가
@@ -410,7 +399,7 @@ fn buildSmokeFixtureFromDrawListShaper(
         .atlas_height_px = state.atlas.config.atlas_height_px,
         .raster_uploads = native_raster_uploads,
         .raster_pixels = native_raster_pixels,
-        .glyph_text = glyph_text,
+        .uses_coretext_bytes = uses_coretext_bytes,
         .stats = renderer.renderFrameStats(frame, state.atlas.entryCount()),
         .shaper = coretext_shaper.CoreTextDrawListShaper.name,
         .rasterizer = rasterizer_name,
@@ -696,7 +685,7 @@ test "macOS Metal smoke summary reports product atlas shader sampling boundary" 
         .atlas_height_px = 1024,
         .raster_uploads = raster_uploads[0..],
         .raster_pixels = raster_pixels[0..],
-        .glyph_text = true,
+        .uses_coretext_bytes = true,
         .stats = .{
             .consistent = true,
             .backend = .metal,
@@ -782,6 +771,38 @@ test "macOS Metal smoke summary reports product atlas shader sampling boundary" 
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_height=840\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_bytes=3628800\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_failures=0\n") != null);
+}
+
+test "glyph_text stays false when CoreText fixture did not sample atlas texels" {
+    // glyph_text는 fixture가 CoreText bytes를 쓴다는 "능력"만으로 참이 되면 안 된다. 실제
+    // atlas 샘플링 증거(product_atlas_sampled)가 없으면 거짓이어야, rasterizer가 빈 bitmap으로
+    // 퇴화하거나 샘플링이 실패한 경우를 라벨이 과장하지 않는다.
+    var native = std.mem.zeroes(NativeMetalSmokeResult);
+    native.status = 0; // upload/sample 신호가 전부 0이라 product_atlas_sampled=false다.
+
+    var cells = [_]NativeMetalCell{};
+    var raster_uploads = [_]NativeMetalRasterUpload{};
+    var raster_pixels = [_]u8{};
+    const fixture: SmokeFixture = .{
+        .size = .{ .cols = 12, .rows = 2 },
+        .cells = cells[0..],
+        .atlas_width_px = 1024,
+        .atlas_height_px = 1024,
+        .raster_uploads = raster_uploads[0..],
+        .raster_pixels = raster_pixels[0..],
+        .uses_coretext_bytes = true,
+        .stats = std.mem.zeroInit(renderer.RenderFrameStats, .{ .backend = renderer.Backend.metal }),
+    };
+
+    const smoke_status = deriveSmokeStatus(native);
+    const summary = try renderSummary(std.testing.allocator, 1500, smoke_status, native, fixture);
+    defer std.testing.allocator.free(summary);
+
+    try std.testing.expect(!smoke_status.product_atlas_sampled);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_text=false\n") != null);
+    // ui_note는 어떤 경로(CoreText vs test fixture)를 탔는지 설명하는 라벨이라, 증거가 아니라
+    // fixture 능력 그대로 CoreText 경로를 적는다.
+    try std.testing.expect(std.mem.indexOf(u8, summary, "ui_note=appkit_window_with_coretext_drawlist_glyph_atlas_sampling\n") != null);
 }
 
 test "NativeMetalCell ABI keeps atlas placement and uv fields tightly packed" {
@@ -1033,7 +1054,7 @@ test "Metal smoke fixture comes from TerminalCore DrawList shaper" {
     try std.testing.expectEqualStrings(renderer_input_draw_list, fixture.input);
     try std.testing.expectEqualStrings(coretext_shaper.CoreTextDrawListShaper.name, fixture.shaper);
     try std.testing.expectEqualStrings(test_coretext_rasterizer, fixture.rasterizer);
-    try std.testing.expect(!fixture.glyph_text);
+    try std.testing.expect(!fixture.uses_coretext_bytes);
     try std.testing.expect(fixture.stats.draw_cells >= fixture.cells.len);
     try std.testing.expect(fixture.stats.glyph_count >= fixture.cells.len);
     // frame 통계는 dirty row의 공백 glyph까지 포함하지만, visible placeholder smoke는

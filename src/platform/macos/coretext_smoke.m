@@ -643,6 +643,10 @@ void maru_macos_coretext_shape_draw_list(
                 continue;
             }
 
+            // 이 cell이 실제 glyph record를 하나라도 만들었는지 보려고 처리 전 record 수를
+            // 기억한다. 모든 glyph가 .notdef(glyph 0)면 record가 안 늘므로 shaped로 세지 않는다.
+            const uint32_t records_before_cell = result->glyph_record_count;
+
             CFStringRef string = maru_create_string_for_draw_cell(cell);
             if (string == NULL) {
                 result->missing_glyph_count += 1;
@@ -731,7 +735,9 @@ void maru_macos_coretext_shape_draw_list(
                 }
             }
 
-            if (result->status == -1) {
+            // glyph record를 하나라도 만든 cell만 shaped로 센다. CTLine/run은 만들어졌지만
+            // 모든 glyph가 .notdef라 record가 0개인 cell은 "shape됨"이 아니라 missing이다.
+            if (result->status == -1 && result->glyph_record_count > records_before_cell) {
                 result->shaped_cell_count += 1;
             }
 
@@ -886,6 +892,16 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         if (!isfinite((double)y)) {
             y = (CGFloat)height_px * 0.75;
         }
+        // ink box가 slot보다 큰 glyph(큰 CJK/이모지)는 centering 값이 음수가 되어 glyph가
+        // bitmap 왼쪽/아래로 벗어난다. 그러면 잉크가 잘려 non_clear pixel이 0이 되고, 실제로는
+        // 그릴 수 있는 glyph가 zero-ink로 잘못 보고된다. origin을 0 이상으로 묶어 최소한
+        // glyph가 통째로 화면 밖으로 나가지 않게 한다(우/하단 clipping은 slot 크기 문제로 별도).
+        if (x < 0.0) {
+            x = 0.0;
+        }
+        if (y < 0.0) {
+            y = 0.0;
+        }
 
         CGPoint position = CGPointMake(x, y);
         CTFontDrawGlyphs(draw_font, &glyph, &position, 1, context);
@@ -897,6 +913,9 @@ void maru_macos_coretext_smoke_rasterize_glyph(
             bytes_per_row
         );
         result->non_clear_pixels = non_clear;
+        // status 7은 "glyph를 그렸으나 non-clear pixel이 없다"는 zero-ink 신호다. 이건 실패가
+        // 아니라 renderer가 zero_ink_uploads로 회계하는 정상 결과이므로, Zig 경계
+        // (coretext_raster.zig)가 status 7을 RasterizerFailed가 아닌 non_clear=0 성공으로 닫는다.
         result->status = non_clear > 0 ? 0 : 7;
 
         CGContextRelease(context);

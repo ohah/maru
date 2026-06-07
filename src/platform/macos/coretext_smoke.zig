@@ -6,6 +6,11 @@ const terminal = maru.terminal;
 const coretext_probe = @import("coretext_probe.zig");
 const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
+const coretext_bridge = @import("coretext_smoke_bridge.zig");
+// shape/raster native bridge 시그니처는 coretext_smoke_bridge.zig가 단일 출처로 소유한다.
+// Metal smoke와 같은 선언을 공유해 ABI 드리프트를 한 곳에서만 관리한다.
+const maru_macos_coretext_shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list;
+const maru_macos_coretext_smoke_rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph;
 
 const artifact_dir = "zig-out/maru-macos-coretext-smoke";
 const renderer_probe_shaper = "coretext_shaped_records";
@@ -22,33 +27,6 @@ extern fn maru_macos_coretext_smoke_run(
     requested_font_size: f64,
     result: *NativeCoreTextSmokeResult,
     glyph_records: [*]NativeGlyphRecord,
-    glyph_record_capacity: usize,
-) void;
-
-extern fn maru_macos_coretext_smoke_rasterize_glyph(
-    requested_font_family: [*]const u8,
-    requested_font_family_len: usize,
-    requested_font_size: f64,
-    font_postscript_name: [*]const u8,
-    font_postscript_name_len: usize,
-    codepoint: u32,
-    glyph_id: u32,
-    width_px: usize,
-    height_px: usize,
-    bytes_per_row: usize,
-    pixels: [*]u8,
-    pixel_capacity: usize,
-    result: *coretext_raster.NativeGlyphRasterResult,
-) void;
-
-extern fn maru_macos_coretext_shape_draw_list(
-    requested_font_family: [*]const u8,
-    requested_font_family_len: usize,
-    requested_font_size: f64,
-    cells: [*]const coretext_shaper.NativeDrawCell,
-    cell_count: usize,
-    result: *coretext_shaper.NativeDrawListShapeResult,
-    glyph_records: [*]coretext_shaper.NativeDrawGlyphRecord,
     glyph_record_capacity: usize,
 ) void;
 
@@ -74,13 +52,29 @@ pub fn main(init: std.process.Init) !void {
 
     const smoke_status = deriveSmokeStatus(native);
     const record_count = @min(@as(usize, @intCast(native.glyph_record_count)), glyph_records.len);
-    const glyph_frame_probe = try buildGlyphFrameProbe(
+
+    // 이 smoke의 가치는 실패 위치(font/shape/raster/frame)를 summary로 좁히는 것이다. probe
+    // build가 throw로 빠져나가면 정작 실패한 경로의 진단 artifact가 안 남는다. 그래서 probe
+    // 실패를 error로 흘리지 않고 summary에 기록한 뒤, artifact를 쓴 다음 종료 코드로 보고한다.
+    var fixed_probe_error: ?anyerror = null;
+    const glyph_frame_probe = buildGlyphFrameProbe(
         allocator,
         appearance,
         native,
         glyph_records[0..record_count],
-    );
-    const draw_list_probe = try buildDrawListGlyphFrameProbe(allocator, appearance);
+    ) catch |err| blk: {
+        fixed_probe_error = err;
+        break :blk emptyGlyphFrameProbe(coretext_raster.CoreTextGlyphRasterizer.name);
+    };
+
+    var draw_list_probe_error: ?anyerror = null;
+    const draw_list_probe = buildDrawListGlyphFrameProbe(allocator, appearance) catch |err| blk: {
+        draw_list_probe_error = err;
+        var empty = emptyGlyphFrameProbe(coretext_raster.CoreTextGlyphRasterizer.name);
+        empty.renderer_shaper = coretext_shaper.CoreTextDrawListShaper.name;
+        break :blk empty;
+    };
+
     const summary = try renderSummary(
         allocator,
         appearance,
@@ -88,6 +82,8 @@ pub fn main(init: std.process.Init) !void {
         native,
         glyph_frame_probe,
         draw_list_probe,
+        fixed_probe_error,
+        draw_list_probe_error,
     );
     defer allocator.free(summary);
 
@@ -96,7 +92,14 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("\nartifacts written to {s}/\n", .{artifact_dir});
     try stdout.flush();
 
+    // 요약을 먼저 남긴 뒤 실패를 보고한다.
+    if (fixed_probe_error) |err| return err;
+    if (draw_list_probe_error) |err| return err;
     if (!smoke_status.shaped_text or !smoke_status.glyph_rasterized) return error.MacosCoreTextSmokeFailed;
+    // 헤드라인인 실제 TerminalCore -> DrawList 경로도 exit gate에 포함한다. 요약에만 출력하고
+    // 게이팅하지 않으면, DrawList 프레임이 조용히 unprepared여도 smoke가 통과한다.
+    if (!draw_list_probe.renderer_frame_prepared or
+        !draw_list_probe.renderer_glyph_raster_ready) return error.MacosCoreTextSmokeFailed;
 }
 
 const SmokeStatus = struct {
@@ -145,6 +148,8 @@ fn renderSummary(
     native: NativeCoreTextSmokeResult,
     glyph_frame_probe: GlyphFrameProbe,
     draw_list_probe: GlyphFrameProbe,
+    fixed_probe_error: ?anyerror,
+    draw_list_probe_error: ?anyerror,
 ) ![]u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
@@ -226,6 +231,10 @@ fn renderSummary(
     try writer.print("drawlist_glyph_raster_error_skip_count={d}\n", .{draw_list_probe.renderer_glyph_raster_error_skip_count});
     try writer.print("drawlist_renderer_shaper={s}\n", .{draw_list_probe.renderer_shaper});
     try writer.print("drawlist_renderer_rasterizer={s}\n", .{draw_list_probe.renderer_rasterizer});
+    // probe build가 던진 Zig error를 summary로 남겨, native 신호가 정상이어도 제품 후보 경계
+    // (shaper/raster/frame 조립)에서 실패한 경우를 artifact만 보고 분리할 수 있게 한다.
+    try writer.print("fixed_probe_error={s}\n", .{if (fixed_probe_error) |err| @errorName(err) else "none"});
+    try writer.print("drawlist_probe_error={s}\n", .{if (draw_list_probe_error) |err| @errorName(err) else "none"});
     try writer.print("primary_font_name={s}\n", .{coretext_probe.cStringField(&native.primary_font_name)});
     try writer.print("first_fallback_font_name={s}\n", .{coretext_probe.cStringField(&native.first_fallback_font_name)});
 
@@ -606,10 +615,14 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
         native,
         glyph_frame_probe,
         draw_list_probe,
+        null,
+        null,
     );
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.macos-coretext-smoke.v1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "fixed_probe_error=none\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_probe_error=none\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "resolved_appearance=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "requested_font_family=JetBrains Mono\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "requested_font_size=14.0\n") != null);

@@ -10,6 +10,7 @@ pub const window = @import("app/window.zig");
 pub const AppWindow = window.AppWindow;
 pub const AppHostFrame = host.AppHostFrame;
 pub const AppHostError = host.HostError;
+pub const KeyHandlingResult = host.KeyHandlingResult;
 pub const AppPtySmokeConfig = pty_smoke.AppPtySmokeConfig;
 pub const AppPtySmokeResult = pty_smoke.AppPtySmokeResult;
 pub const AppSmokeConfig = host.AppSmokeConfig;
@@ -40,6 +41,7 @@ pub const ProcessState = surface.ProcessState;
 
 pub const buildAppHostFrame = host.buildFrame;
 pub const buildAppHostFrameAfterDrain = host.buildFrameAfterDrain;
+pub const handleKeyEvent = host.handleKeyEvent;
 pub const resizeActiveSurface = host.resizeActiveSurface;
 pub const runAppPtySmoke = pty_smoke.run;
 pub const runAppSmoke = host.runSmoke;

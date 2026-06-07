@@ -16,6 +16,7 @@ const screenshot_path = artifact_dir ++ "/app-pty-metal-frame.ppm";
 const default_duration_ms: u32 = 1500;
 const max_duration_ms: u32 = 600_000;
 const renderer_input_live_pty = "surface_runtime_live_pty_draw_list";
+const input_source_keybinding_resolver = "app_host_keybinding_resolver";
 
 const AppPtyMetalSmokeConfig = struct {
     size: terminal.Size = .{ .cols = 40, .rows = 6 },
@@ -26,6 +27,11 @@ const AppPtyMetalSmokeConfig = struct {
     },
     ready_marker: []const u8 = "Maru input ready",
     scripted_input: []const u8 = "scripted input\n",
+    scripted_key_chord: []const u8 = "Cmd+B",
+    scripted_key_event: terminal.KeyEvent = .{
+        .key = .{ .char = 'b' },
+        .modifiers = .{ .command = true },
+    },
     expected_text: []const u8 = "typed:scripted input",
 };
 
@@ -96,8 +102,9 @@ const LivePtyMetalFixture = struct {
     drain_summary: app.RuntimePumpDrainSummary,
     process_state: app.ProcessState,
     screen_contains_expected: bool,
-    scripted_input_sent: bool,
-    scripted_input_bytes_len: usize,
+    scripted_key_event_sent: bool,
+    scripted_key_event_result: []const u8,
+    scripted_terminal_input_bytes_len: usize,
     command: []const u8,
     args_len: usize,
     size: terminal.Size,
@@ -150,20 +157,39 @@ fn buildLivePtyFixture(
     errdefer raw_bytes.deinit(allocator);
     var drain_summary: app.RuntimePumpDrainSummary = .{};
 
-    var scripted_input_sent = false;
+    var scripted_key_event_sent = false;
+    var scripted_key_event_result: []const u8 = "none";
+    var scripted_terminal_input_bytes_len: usize = 0;
     if (smoke_config.scripted_input.len > 0) {
         // 먼저 PTY output을 runtime에 적용해 ready marker를 관측한다. 입력을 process spawn
         // 직후 바로 쓰면 kernel line discipline echo가 command의 "ready"보다 먼저 화면에
         // 나타날 수 있어, 사람이 키를 누르는 흐름과 다르고 회귀 artifact도 흔들린다.
         try drainUntilRawContains(&queue, &pump, &raw_bytes, allocator, &drain_summary, smoke_config.ready_marker);
-        // 이 입력은 사람이 누른 키 이벤트가 아니다. 하지만 실제 macOS PTY master fd로
-        // 내려가는 동일한 SurfaceRuntime.writeInput 경로를 쓰므로, 다음 AppKit key event
-        // PR 전에 "terminal input bytes가 live PTY에 도달하고 다시 화면으로 돌아온다"는
-        // 루트 계약을 고정한다.
-        try app.sendInputToActiveSurface(&app_window, &runtime, .{
-            .bytes = smoke_config.scripted_input,
-        });
-        scripted_input_sent = true;
+        // 이 입력은 아직 Objective-C keyDown에서 온 실제 사용자 이벤트가 아니다. 대신
+        // AppKit bridge가 넘길 normalized KeyEvent와 같은 타입을 app host에 넣어
+        // KeyBindingResolver -> SurfaceRuntime.writeInput 경계가 live PTY에서 동작함을
+        // 검증한다. native keyDown은 이 helper를 호출하는 얇은 다음 단계로 남긴다.
+        const resolver: config.KeyBindingResolver = .{
+            .terminal_bindings = &.{.{
+                .chord = try config.KeyChord.parse(smoke_config.scripted_key_chord),
+                .input = .{ .send_text = smoke_config.scripted_input },
+            }},
+        };
+        try resolver.validate();
+        const key_result = try app.handleKeyEvent(
+            &app_window,
+            &runtime,
+            resolver,
+            smoke_config.scripted_key_event,
+        );
+        scripted_key_event_result = keyHandlingResultName(key_result);
+        switch (key_result) {
+            .terminal_input => |terminal_input| {
+                scripted_key_event_sent = true;
+                scripted_terminal_input_bytes_len = terminal_input.bytes_len;
+            },
+            .app_action, .ignored => return error.ScriptedKeyEventDidNotWriteTerminalInput,
+        }
     }
 
     try drainBlockingUntilTerminationWithRaw(&queue, &pump, &raw_bytes, allocator, &drain_summary);
@@ -206,8 +232,9 @@ fn buildLivePtyFixture(
         .drain_summary = drain_summary,
         .process_state = active.process_state,
         .screen_contains_expected = std.mem.indexOf(u8, screen, smoke_config.expected_text) != null,
-        .scripted_input_sent = scripted_input_sent,
-        .scripted_input_bytes_len = smoke_config.scripted_input.len,
+        .scripted_key_event_sent = scripted_key_event_sent,
+        .scripted_key_event_result = scripted_key_event_result,
+        .scripted_terminal_input_bytes_len = scripted_terminal_input_bytes_len,
         .command = smoke_config.command,
         .args_len = smoke_config.args.len,
         .size = smoke_config.size,
@@ -292,9 +319,10 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.print("renderer_rasterizer={s}\n", .{input.fixture.metal.rasterizer});
     try writer.print("command={s}\n", .{input.fixture.command});
     try writer.print("args.len={d}\n", .{input.fixture.args_len});
-    try writer.writeAll("input_source=surface_runtime_write_input\n");
-    try writer.print("scripted_input_sent={}\n", .{input.fixture.scripted_input_sent});
-    try writer.print("scripted_input_bytes={d}\n", .{input.fixture.scripted_input_bytes_len});
+    try writer.print("input_source={s}\n", .{input_source_keybinding_resolver});
+    try writer.print("scripted_key_event_sent={}\n", .{input.fixture.scripted_key_event_sent});
+    try writer.print("scripted_key_event_result={s}\n", .{input.fixture.scripted_key_event_result});
+    try writer.print("scripted_terminal_input_bytes={d}\n", .{input.fixture.scripted_terminal_input_bytes_len});
     try writer.print("size.cols={d}\n", .{input.fixture.size.cols});
     try writer.print("size.rows={d}\n", .{input.fixture.size.rows});
     try writer.print("output_events={d}\n", .{input.fixture.drain_summary.output_events});
@@ -324,6 +352,14 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.print("snapshot_artifact={s}/app-pty-metal.snapshot.txt\n", .{artifact_dir});
 
     return output.toOwnedSlice();
+}
+
+fn keyHandlingResultName(result: app.KeyHandlingResult) []const u8 {
+    return switch (result) {
+        .app_action => "app_action",
+        .terminal_input => "terminal_input",
+        .ignored => "ignored",
+    };
 }
 
 fn writeTermination(writer: *std.Io.Writer, termination: ?app.RuntimePumpTermination) !void {
@@ -475,8 +511,9 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
         },
         .process_state = .exited,
         .screen_contains_expected = true,
-        .scripted_input_sent = true,
-        .scripted_input_bytes_len = "scripted input\n".len,
+        .scripted_key_event_sent = true,
+        .scripted_key_event_result = "terminal_input",
+        .scripted_terminal_input_bytes_len = "scripted input\n".len,
         .command = "/bin/sh",
         .args_len = 2,
         .size = .{ .cols = 40, .rows = 6 },
@@ -497,9 +534,10 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=surface_runtime_live_pty_draw_list\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_shaper=coretext_draw_list\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_rasterizer=coretext_glyph_rasterizer\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "input_source=surface_runtime_write_input\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "scripted_input_sent=true\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "scripted_input_bytes=15\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "input_source=app_host_keybinding_resolver\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "scripted_key_event_sent=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "scripted_key_event_result=terminal_input\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "scripted_terminal_input_bytes=15\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "termination=exited(code=0)\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screen_contains_expected=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_path=zig-out/maru-macos-app-pty-metal-smoke/app-pty-metal-frame.ppm\n") != null);

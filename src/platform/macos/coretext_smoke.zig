@@ -3,6 +3,7 @@ const maru = @import("maru");
 const config = maru.config;
 const renderer = maru.renderer;
 const coretext_font = @import("coretext_font.zig");
+const coretext_shaper = @import("coretext_shaper.zig");
 
 const artifact_dir = "zig-out/maru-macos-coretext-smoke";
 const font_name_capacity = 128;
@@ -357,23 +358,33 @@ fn buildGlyphFrameProbeWithRasterizer(
     // `ShapedGlyphRecord -> GlyphRunList -> RendererState -> RenderFrame` 경로에 태운다.
     // 그래야 다음 Metal text draw에서 "폰트는 됐는데 frame/atlas/UV/raster 준비가 안 됐다"
     // 같은 원인을 summary로 분리할 수 있다.
-    var native_shaped_records: std.ArrayList(renderer.ShapedGlyphRecord) = .empty;
-    defer native_shaped_records.deinit(allocator);
-    try native_shaped_records.ensureTotalCapacity(allocator, records.len);
+    var coretext_records: std.ArrayList(coretext_font.CoreTextGlyphRecord) = .empty;
+    defer coretext_records.deinit(allocator);
+    try coretext_records.ensureTotalCapacity(allocator, records.len);
     for (records) |record| {
-        native_shaped_records.appendAssumeCapacity(try shapedRecordForCoreTextProbe(record, font_registry));
+        coretext_records.appendAssumeCapacity(coreTextGlyphRecordForProbe(record));
     }
 
-    const probe_surface = probeSurfaceFromShapedRecords(native_shaped_records.items);
-    var shaped = try renderer.buildGlyphRunListFromShapedRecordsWithSurface(
+    const probe_surface = coretext_shaper.deriveProbeSurfaceFromCoreTextGlyphs(coretext_records.items);
+    var shaped = try coretext_shaper.buildGlyphRunListFromCoreTextGlyphs(
         allocator,
-        native_shaped_records.items,
+        coretext_records.items,
         renderer.textConfigFromFontSize(appearance.font.size, 1),
         probe_surface,
+        font_registry,
     );
     defer shaped.deinit(allocator);
 
-    var probe_draw_list = try drawListFromShapedRecords(allocator, native_shaped_records.items, shaped.runs);
+    var probe_draw_list = try coretext_shaper.buildProbeDrawListFromCoreTextGlyphs(
+        allocator,
+        coretext_records.items,
+        .{
+            .size = shaped.runs.size,
+            .cursor = shaped.runs.cursor,
+            .dirty = shaped.runs.dirty,
+            .overlays = shaped.runs.overlays,
+        },
+    );
     var probe_draw_list_owned = true;
     errdefer if (probe_draw_list_owned) probe_draw_list.deinit(allocator);
 
@@ -535,93 +546,8 @@ const CoreTextSmokeGlyphRasterizer = struct {
     }
 };
 
-fn probeSurfaceFromShapedRecords(records: []const renderer.ShapedGlyphRecord) renderer.ShapedGlyphSurface {
-    // CoreText smoke는 아직 실제 TerminalCore DrawList가 없어서 surface를 직접 만든다.
-    // 여기서는 drawable glyph만이 아니라 space 같은 non-drawable record도 포함해 bounds를
-    // 계산한다. 그래야 probe DrawList에 space cell을 남기더라도 col이 surface 밖으로 새는
-    // 거짓 artifact가 생기지 않는다. 제품 shaper는 이 helper가 아니라 실제 DrawList metadata를
-    // `buildGlyphRunListFromShapedRecordsWithSurface`에 넘겨야 한다.
-    var max_row: u16 = 0;
-    var max_col: u16 = 0;
-    var any_cell = false;
-
-    for (records) |record| {
-        if (record.cell_width == 0) continue;
-
-        any_cell = true;
-        const end_col = std.math.add(u16, record.col, @as(u16, record.cell_width)) catch
-            std.math.maxInt(u16);
-        max_row = @max(max_row, record.row);
-        max_col = @max(max_col, end_col);
-    }
-
-    const rows: u16 = if (any_cell) std.math.add(u16, max_row, 1) catch
-        std.math.maxInt(u16) else 1;
-
+fn coreTextGlyphRecordForProbe(record: NativeGlyphRecord) coretext_font.CoreTextGlyphRecord {
     return .{
-        .size = .{
-            .cols = @max(max_col, 1),
-            .rows = rows,
-        },
-        .dirty = if (any_cell) .{ .start_row = 0, .end_row = rows - 1 } else null,
-    };
-}
-
-fn drawListFromShapedRecords(
-    allocator: std.mem.Allocator,
-    records: []const renderer.ShapedGlyphRecord,
-    glyphs: renderer.GlyphRunList,
-) !renderer.DrawList {
-    // CoreText smoke에는 실제 TerminalCore snapshot에서 온 DrawList가 없다. 하지만 제품
-    // renderer state entrypoint는 성공하면 DrawList를 RenderFrame으로 이동시키는 계약이므로,
-    // native shaped record와 같은 surface metadata를 가진 최소 DrawList를 만들어 그
-    // ownership/consistency 경계를 검증한다. space record도 draw cell로 남겨 "shape된 입력"
-    // 전체가 frame artifact에 들어왔는지 볼 수 있게 한다.
-    var cells: std.ArrayList(renderer.DrawCell) = .empty;
-    errdefer cells.deinit(allocator);
-    try cells.ensureTotalCapacity(allocator, records.len);
-
-    for (records) |record| {
-        if (record.cell_width == 0) continue;
-        try ensureRecordFitsGlyphSurface(record, glyphs.size);
-        cells.appendAssumeCapacity(.{
-            .row = record.row,
-            .col = record.col,
-            .codepoint = record.codepoint,
-            .combining = record.combining,
-            .width = record.cell_width,
-            .style = record.style,
-        });
-    }
-
-    const overlays = try allocator.dupe(renderer.DrawOverlay, glyphs.overlays);
-    errdefer allocator.free(overlays);
-
-    return .{
-        .size = glyphs.size,
-        .cursor = glyphs.cursor,
-        .dirty = glyphs.dirty,
-        .cells = try cells.toOwnedSlice(allocator),
-        .overlays = overlays,
-    };
-}
-
-fn ensureRecordFitsGlyphSurface(
-    record: renderer.ShapedGlyphRecord,
-    size: maru.terminal.Size,
-) !void {
-    if (size.cols == 0 or size.rows == 0) return error.CoreTextProbeRecordOutsideSurface;
-    if (record.row >= size.rows or record.col >= size.cols) return error.CoreTextProbeRecordOutsideSurface;
-    const end_col = std.math.add(u16, record.col, @as(u16, record.cell_width)) catch
-        return error.CoreTextProbeRecordOutsideSurface;
-    if (end_col > size.cols) return error.CoreTextProbeRecordOutsideSurface;
-}
-
-fn shapedRecordForCoreTextProbe(
-    record: NativeGlyphRecord,
-    font_registry: *renderer.FontIdentityRegistry,
-) !renderer.ShapedGlyphRecord {
-    return coretext_font.shapedRecordFromCoreTextGlyph(.{
         .row = 0,
         .col = @intCast(@min(record.string_index, std.math.maxInt(u16))),
         .cell_width = cellWidthForCoreTextProbe(record.category),
@@ -631,7 +557,7 @@ fn shapedRecordForCoreTextProbe(
         .fallback = record.fallback != 0,
         .color_glyph_kind = colorGlyphKindForCoreTextProbe(record.category),
         .drawable = record.glyph_id != 0 and record.category != @intFromEnum(NativeGlyphCategory.space),
-    }, font_registry);
+    };
 }
 
 fn cellWidthForCoreTextProbe(category: u32) u2 {
@@ -662,11 +588,14 @@ fn shapedGlyphRunForTest(
     var font_registry = renderer.FontIdentityRegistry.init(allocator);
     defer font_registry.deinit();
 
-    const shaped = [_]renderer.ShapedGlyphRecord{try shapedRecordForCoreTextProbe(record, &font_registry)};
-    return renderer.buildGlyphRunListFromShapedRecords(
+    const shaped = [_]coretext_font.CoreTextGlyphRecord{coreTextGlyphRecordForProbe(record)};
+    const surface = coretext_shaper.deriveProbeSurfaceFromCoreTextGlyphs(&shaped);
+    return coretext_shaper.buildGlyphRunListFromCoreTextGlyphs(
         allocator,
         &shaped,
         renderer.textConfigFromFontSize(font_size, 1),
+        surface,
+        &font_registry,
     );
 }
 
@@ -1042,28 +971,28 @@ test "CoreText smoke uses font identity registry instead of native record ids" {
     var font_registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
     defer font_registry.deinit();
 
-    const primary = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+    const primary = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
         .native_font_id = 99,
         .glyph_id = 42,
         .string_index = 0,
         .category = .ascii,
         .font_name = "Menlo-Regular",
-    }), &font_registry);
-    const cjk = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+    })), &font_registry);
+    const cjk = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
         .native_font_id = 99,
         .glyph_id = 42,
         .string_index = 5,
         .category = .cjk,
         .fallback = true,
         .font_name = "AppleSDGothicNeo-Regular",
-    }), &font_registry);
-    const primary_again = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+    })), &font_registry);
+    const primary_again = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
         .native_font_id = 123,
         .glyph_id = 43,
         .string_index = 1,
         .category = .ascii,
         .font_name = "Menlo-Regular",
-    }), &font_registry);
+    })), &font_registry);
 
     try std.testing.expectEqual(@as(usize, 2), font_registry.count());
     try std.testing.expect(primary.font_id != cjk.font_id);
@@ -1077,20 +1006,20 @@ test "CoreText smoke only interns drawable font identities" {
     var font_registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
     defer font_registry.deinit();
 
-    const primary = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+    const primary = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
         .native_font_id = 99,
         .glyph_id = 42,
         .string_index = 0,
         .category = .ascii,
         .font_name = "Menlo-Regular",
-    }), &font_registry);
-    const space = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+    })), &font_registry);
+    const space = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
         .native_font_id = 100,
         .glyph_id = 5,
         .string_index = 4,
         .category = .space,
         .font_name = "SpaceOnlyFallback-Regular",
-    }), &font_registry);
+    })), &font_registry);
 
     try std.testing.expect(primary.drawable);
     try std.testing.expect(!space.drawable);
@@ -1105,12 +1034,12 @@ test "CoreText smoke ignores empty font names on non-drawable records" {
     var font_registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
     defer font_registry.deinit();
 
-    const space = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+    const space = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
         .glyph_id = 5,
         .string_index = 4,
         .category = .space,
         .font_name = "",
-    }), &font_registry);
+    })), &font_registry);
 
     try std.testing.expect(!space.drawable);
     try std.testing.expectEqual(@as(renderer.FontId, 0), space.font_id);
@@ -1126,12 +1055,12 @@ test "CoreText smoke rejects empty font names on drawable records" {
 
     try std.testing.expectError(
         renderer.FontIdentityError.EmptyPostScriptName,
-        shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+        coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
             .glyph_id = 42,
             .string_index = 0,
             .category = .ascii,
             .font_name = "",
-        }), &font_registry),
+        })), &font_registry),
     );
 }
 
@@ -1144,13 +1073,13 @@ test "CoreText smoke shaped record font id resolves back to its PostScript name"
     var font_registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
     defer font_registry.deinit();
 
-    const record = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+    const record = try coretext_font.shapedRecordFromCoreTextGlyph(coreTextGlyphRecordForProbe(nativeGlyphRecordForTest(.{
         .glyph_id = 42,
         .string_index = 0,
         .category = .cjk,
         .fallback = true,
         .font_name = "AppleSDGothicNeo-Regular",
-    }), &font_registry);
+    })), &font_registry);
 
     const identity = font_registry.get(record.font_id) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("AppleSDGothicNeo-Regular", identity.postscript_name);

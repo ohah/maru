@@ -191,6 +191,16 @@ pub fn nativeGlyphRecordForTest(args: NativeGlyphRecordFixture) NativeGlyphRecor
     return record;
 }
 
+test "native probe ABI structs match the native C ABI size" {
+    // NativeCoreTextSmokeResult와 NativeGlyphRecord는 coretext_smoke.m의
+    // MaruCoreTextSmokeResult/MaruCoreTextGlyphRecord와 같은 C ABI 경계를 넘는다. DrawList
+    // 구조체(coretext_shaper.zig)는 이미 @sizeOf 어설션으로 layout 드리프트를 잡지만 probe
+    // 구조체에는 그 보호가 없었다. 한쪽만 필드를 추가/재정렬하면 glyph_id/font_name을
+    // 엉뚱한 offset에서 읽어 모든 probe glyph가 조용히 깨지므로, 같은 계약을 여기서 고정한다.
+    try std.testing.expectEqual(@as(usize, 328), @sizeOf(NativeCoreTextSmokeResult));
+    try std.testing.expectEqual(@as(usize, 148), @sizeOf(NativeGlyphRecord));
+}
+
 test "CoreText probe record keeps font names tied to caller storage" {
     // font_name slice가 caller-owned native buffer를 가리키는지 고정한다. 이 계약이 깨지면
     // shape는 성공해도 raster 단계에서 PostScript name이 손상되어 모든 glyph가 skip된다.

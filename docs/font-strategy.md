@@ -64,6 +64,7 @@ v1에서 지원하는 것:
 - ASCII, 한글/CJK wide character, 기본 emoji fallback을 깨지지 않게 처리.
 - `RenderSnapshot -> DrawList` deterministic test.
 - fake font backend 기반 `DrawList -> GlyphRunList` deterministic test.
+- native shaper 후보 기반 `ShapedGlyphRecord -> GlyphRunList -> RendererState -> RenderFrame` deterministic test.
 - persistent `RendererState` 기반 `DrawList -> GlyphRunList -> GlyphFrame -> GlyphQuadFrame -> GlyphRasterFrame` deterministic test.
 - macOS opt-in screenshot/font/raster smoke artifact.
 
@@ -250,6 +251,7 @@ dirty region의 장기 목표는 cell 단위지만, 현재 `TerminalCore`/snapsh
 - raw config의 font/theme/cursor 값이 `ResolvedAppearance`로 검증되는 test.
 - renderer가 `TerminalCore`, `PtySession`, platform handle을 직접 import하지 않는 boundary test.
 - native shaper 결과를 `ShapedGlyphRecord -> GlyphRunList`로 변환하는 adapter test. 이 테스트는 space/.notdef 필터링, CJK/emoji cell width, fallback/color glyph count, cache key size/scale 전달을 GPU 없이 고정한다. 제품 경로용 adapter는 `ShapedGlyphSurface`를 받아 `DrawList`의 size/cursor/dirty/overlay가 보존되는지도 검증한다.
+- 제품 shaper entrypoint test. `RendererState`가 `GlyphRunList`를 직접 받아 `RenderFrame`을 만들 수 있어야 한다. 이 테스트가 필요한 이유는 macOS CoreText 제품 shaper를 fake backend의 `shape(cell)` 모양으로 억지로 끼워 넣지 않고, 줄/런 단위 shaping 결과를 renderer 준비 단계에 넣기 위해서다. 성공하면 `DrawList` ownership은 `RenderFrame`으로 이동하고, 실패하면 caller가 그대로 정리할 수 있어야 한다.
 
 macOS opt-in으로 둘 것:
 

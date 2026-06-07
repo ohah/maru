@@ -9,7 +9,7 @@ const coretext_shaper = @import("coretext_shaper.zig");
 
 const artifact_dir = "zig-out/maru-macos-metal-smoke";
 const default_duration_ms: u32 = 1500;
-const renderer_probe_shaper = "coretext_shaped_records";
+const renderer_input_draw_list = "terminal_core_draw_list";
 // Metal smoke도 사람이 볼 수 있는 짧은 UI 확인이 목적이다. 환경변수 오타로
 // 로컬 작업이나 CI runner가 오래 붙잡히지 않도록 window smoke와 같은 상한을 둔다.
 const max_duration_ms: u32 = 600_000;
@@ -79,12 +79,14 @@ extern fn maru_macos_metal_smoke_run(
     result: *NativeMetalSmokeResult,
 ) void;
 
-extern fn maru_macos_coretext_smoke_run(
+extern fn maru_macos_coretext_shape_draw_list(
     requested_font_family: [*]const u8,
     requested_font_family_len: usize,
     requested_font_size: f64,
-    result: *coretext_probe.NativeCoreTextSmokeResult,
-    glyph_records: [*]coretext_probe.NativeGlyphRecord,
+    cells: [*]const coretext_shaper.NativeDrawCell,
+    cell_count: usize,
+    result: *coretext_shaper.NativeDrawListShapeResult,
+    glyph_records: [*]coretext_shaper.NativeDrawGlyphRecord,
     glyph_record_capacity: usize,
 ) void;
 
@@ -238,11 +240,11 @@ fn renderSummary(
     try writer.print("product_atlas_sampled={}\n", .{smoke_status.product_atlas_sampled});
     try writer.print("glyph_text={}\n", .{fixture.glyph_text});
     if (fixture.glyph_text) {
-        try writer.writeAll("ui_note=appkit_window_with_coretext_shaped_glyph_atlas_sampling_probe_surface\n");
+        try writer.writeAll("ui_note=appkit_window_with_coretext_drawlist_glyph_atlas_sampling\n");
     } else {
         try writer.writeAll("ui_note=appkit_window_with_product_atlas_shader_sampling_non_coretext_test_fixture\n");
     }
-    try writer.writeAll("renderer_input=renderer_state_glyph_frame\n");
+    try writer.print("renderer_input={s}\n", .{fixture.input});
     try writer.print("renderer_atlas_slot_placement={}\n", .{nativeCellsHaveAtlasPlacement(fixture.cells)});
     // 제품 frame 통계는 renderer가 소유한 공유 직렬화기로 남긴다. glyph text smoke와 같은
     // "renderer_" schema를 쓰므로 두 artifact의 키가 어긋나지 않는다.
@@ -284,7 +286,8 @@ const SmokeFixture = struct {
     // 진단 통계를 한 struct에 모은다. shaper/rasterizer는 어떤 font stack으로 frame을
     // 준비했는지 summary에서 바로 분리하기 위한 라벨이다.
     stats: renderer.RenderFrameStats,
-    shaper: []const u8 = renderer_probe_shaper,
+    input: []const u8 = renderer_input_draw_list,
+    shaper: []const u8 = coretext_shaper.CoreTextDrawListShaper.name,
     rasterizer: []const u8 = coretext_raster.CoreTextGlyphRasterizer.name,
 
     fn deinit(self: *SmokeFixture, allocator: std.mem.Allocator) void {
@@ -299,68 +302,44 @@ fn buildSmokeFixture(
     allocator: std.mem.Allocator,
     appearance: config.ResolvedAppearance,
 ) !SmokeFixture {
-    var native = coretext_probe.emptyNativeResult();
-    var glyph_records = [_]coretext_probe.NativeGlyphRecord{coretext_probe.emptyGlyphRecord()} ** coretext_probe.glyph_record_capacity;
-    maru_macos_coretext_smoke_run(
-        appearance.font.family.ptr,
-        appearance.font.family.len,
-        @floatCast(appearance.font.size),
-        &native,
-        &glyph_records,
-        glyph_records.len,
-    );
-
-    if (!coretext_probe.hasCompleteShapeFields(native)) return error.MacosCoreTextShapeIncomplete;
-    const record_count = @min(@as(usize, @intCast(native.glyph_record_count)), glyph_records.len);
-
-    return buildSmokeFixtureFromCoreTextRecords(
+    return buildSmokeFixtureFromDrawListShaper(
         allocator,
         appearance,
-        glyph_records[0..record_count],
+        maru_macos_coretext_shape_draw_list,
         maru_macos_coretext_smoke_rasterize_glyph,
         coretext_raster.CoreTextGlyphRasterizer.name,
         true,
     );
 }
 
-fn buildSmokeFixtureFromCoreTextRecords(
+fn buildSmokeFixtureFromDrawListShaper(
     allocator: std.mem.Allocator,
     appearance: config.ResolvedAppearance,
-    records: []const coretext_probe.NativeGlyphRecord,
+    shape_draw_list: coretext_shaper.ShapeDrawListFn,
     rasterize_glyph: coretext_raster.RasterizeGlyphFn,
     rasterizer_name: []const u8,
     glyph_text: bool,
 ) !SmokeFixture {
-    // Metal smoke는 이제 fake font backend가 아니라 CoreText가 만든 glyph id/font face
-    // 후보를 제품 renderer frame에 태운다. 아직 입력 surface는 실제 TerminalCore가 아닌
-    // probe bounds지만, GPU가 소비하는 glyph bitmap bytes는 CoreText rasterizer 산출물이다.
+    // Metal smoke의 입력은 실제 TerminalCore snapshot에서 나온 DrawList다. 이 경로가
+    // probe-derived surface를 쓰면 shell text layout, cursor, dirty row, underline overlay가
+    // 제품 shaper와 Metal backend 사이에서 보존되는지 증명하지 못한다.
+    var draw_list = try buildTerminalDrawListFixture(allocator);
+    var draw_list_owned = true;
+    errdefer if (draw_list_owned) draw_list.deinit(allocator);
+
     var font_registry = renderer.FontIdentityRegistry.init(allocator);
     defer font_registry.deinit();
 
-    var coretext_records: std.ArrayList(coretext_probe.CoreTextGlyphRecord) = .empty;
-    defer coretext_records.deinit(allocator);
-    try coretext_records.ensureTotalCapacity(allocator, records.len);
-    for (records) |*record| {
-        coretext_records.appendAssumeCapacity(coretext_probe.coreTextGlyphRecord(record));
-    }
-
-    const probe_surface = coretext_shaper.deriveProbeSurfaceFromCoreTextGlyphs(coretext_records.items);
-    var shaped = try coretext_shaper.buildGlyphRunListFromCoreTextGlyphs(
+    const shaper = coretext_shaper.CoreTextDrawListShaper{
+        .appearance = appearance,
+        .shape_draw_list = shape_draw_list,
+    };
+    var shaped = try shaper.shape(
         allocator,
-        coretext_records.items,
-        renderer.textConfigFromFontSize(appearance.font.size, 1),
-        probe_surface,
+        draw_list,
         &font_registry,
     );
     defer shaped.deinit(allocator);
-
-    var draw_list = try coretext_shaper.buildProbeDrawListFromCoreTextGlyphs(
-        allocator,
-        coretext_records.items,
-        probe_surface,
-    );
-    var draw_list_owned = true;
-    errdefer if (draw_list_owned) draw_list.deinit(allocator);
 
     var state = renderer.RendererState.init(allocator, .{});
     defer state.deinit();
@@ -398,46 +377,113 @@ fn buildSmokeFixtureFromCoreTextRecords(
         .raster_pixels = native_raster_pixels,
         .glyph_text = glyph_text,
         .stats = renderer.renderFrameStats(frame, state.atlas.entryCount()),
+        .shaper = coretext_shaper.CoreTextDrawListShaper.name,
         .rasterizer = rasterizer_name,
     };
+}
+
+fn buildTerminalDrawListFixture(allocator: std.mem.Allocator) !renderer.DrawList {
+    // 실제 shell/PTY는 아직 없지만, TerminalCore가 만드는 snapshot과 dirty/cursor/overlay
+    // 계약을 그대로 거치는 fixture다. 다음 실제 입력 PR 전까지 Metal smoke가 볼 수 있는
+    // 가장 제품에 가까운 text source로 둔다.
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 12, .rows = 2 });
+    defer core.deinit();
+    core.clearDirty();
+    try core.write("Maru 한");
+    return renderer.buildDrawList(allocator, core.snapshot());
 }
 
 const test_coretext_rasterizer = "test_coretext_glyph_rasterizer";
 
 fn buildTestSmokeFixture(allocator: std.mem.Allocator) !SmokeFixture {
-    // 기본 테스트는 Objective-C/CoreText runtime을 링크하지 않는다. 대신 native probe와 같은
-    // record shape를 만들고, rasterizer만 테스트 bridge로 바꿔 Metal smoke fixture가
-    // fake font backend가 아니라 shaped-record entrypoint를 타는지 고정한다.
+    // 기본 테스트는 Objective-C/CoreText runtime을 링크하지 않는다. 대신 DrawList native
+    // bridge와 같은 ABI shape 결과를 fake로 만들고, Metal smoke fixture가 probe surface가
+    // 아니라 TerminalCore DrawList shaper entrypoint를 타는지 고정한다.
     const appearance = try config.resolveAppearance(.{});
-    const records = [_]coretext_probe.NativeGlyphRecord{
-        coretext_probe.nativeGlyphRecordForTest(.{
-            .glyph_id = 10,
-            .string_index = 0,
-            .category = .ascii,
-        }),
-        coretext_probe.nativeGlyphRecordForTest(.{
-            .glyph_id = 20,
-            .string_index = 5,
-            .category = .cjk,
-            .fallback = true,
-            .font_name = "AppleSDGothicNeo-Regular",
-        }),
-        coretext_probe.nativeGlyphRecordForTest(.{
-            .glyph_id = 30,
-            .string_index = 7,
-            .category = .emoji,
-            .fallback = true,
-            .font_name = "AppleColorEmoji",
-        }),
-    };
-    return buildSmokeFixtureFromCoreTextRecords(
+    return buildSmokeFixtureFromDrawListShaper(
         allocator,
         appearance,
-        &records,
+        testShapeDrawList,
         testRasterizeGlyph,
         test_coretext_rasterizer,
         false,
     );
+}
+
+fn writeTestFontName(record: *coretext_shaper.NativeDrawGlyphRecord, name: []const u8) void {
+    const len = @min(name.len, record.font_name.len - 1);
+    @memcpy(record.font_name[0..len], name[0..len]);
+    record.font_name[len] = 0;
+}
+
+fn emptyTestDrawGlyphRecord() coretext_shaper.NativeDrawGlyphRecord {
+    return .{
+        .cell_index = 0,
+        .row = 0,
+        .col = 0,
+        .cell_width = 0,
+        .codepoint = 0,
+        .combining = 0,
+        .glyph_id = 0,
+        .drawable = 0,
+        .fallback = 0,
+        .color_glyph_kind = 0,
+        .font_name = [_]u8{0} ** coretext_probe.font_name_capacity,
+    };
+}
+
+fn testShapeDrawList(
+    _: [*]const u8,
+    _: usize,
+    _: f64,
+    cells_ptr: [*]const coretext_shaper.NativeDrawCell,
+    cell_count: usize,
+    result: *coretext_shaper.NativeDrawListShapeResult,
+    records_ptr: [*]coretext_shaper.NativeDrawGlyphRecord,
+    record_capacity: usize,
+) callconv(.c) void {
+    const cells = cells_ptr[0..cell_count];
+    var record_count: usize = 0;
+    result.* = .{
+        .status = 0,
+        .primary_font_found = 1,
+        .requested_font_matched = 1,
+        .shaped_cell_count = 0,
+        .glyph_record_count = 0,
+        .glyph_record_overflow = 0,
+        .missing_glyph_count = 0,
+        .fallback_run_count = 0,
+    };
+
+    for (cells, 0..) |cell, index| {
+        if (cell.codepoint == 0 or cell.codepoint == ' ') continue;
+        if (record_count >= record_capacity) {
+            result.glyph_record_overflow = 1;
+            result.status = 7;
+            return;
+        }
+
+        const fallback = cell.codepoint > 0x7f;
+        var record = emptyTestDrawGlyphRecord();
+        record.cell_index = @intCast(index);
+        record.row = cell.row;
+        record.col = cell.col;
+        record.cell_width = cell.width;
+        record.codepoint = cell.codepoint;
+        record.combining = cell.combining;
+        record.glyph_id = cell.codepoint + 10;
+        record.drawable = 1;
+        record.fallback = if (fallback) 1 else 0;
+        writeTestFontName(
+            &record,
+            if (fallback) "AppleSDGothicNeo-Regular" else "Menlo-Regular",
+        );
+        records_ptr[record_count] = record;
+        record_count += 1;
+        result.shaped_cell_count += 1;
+        if (fallback) result.fallback_run_count += 1;
+    }
+    result.glyph_record_count = @intCast(record_count);
 }
 
 fn testRasterizeGlyph(
@@ -636,8 +682,8 @@ test "macOS Metal smoke summary reports product atlas shader sampling boundary" 
     try std.testing.expect(std.mem.indexOf(u8, summary, "product_atlas_uploaded=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "product_atlas_sampled=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_text=true\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "ui_note=appkit_window_with_coretext_shaped_glyph_atlas_sampling_probe_surface\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=renderer_state_glyph_frame\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "ui_note=appkit_window_with_coretext_drawlist_glyph_atlas_sampling\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=terminal_core_draw_list\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_atlas_slot_placement=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_uv_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_quad_count=48\n") != null);
@@ -646,7 +692,7 @@ test "macOS Metal smoke summary reports product atlas shader sampling boundary" 
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_prepared=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_backend=metal\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_shaper=coretext_shaped_records\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_shaper=coretext_draw_list\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_rasterizer=coretext_glyph_rasterizer\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_draw_cells=48\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_count=48\n") != null);
@@ -879,18 +925,19 @@ test "Metal smoke duration override clamps invalid, zero, and oversized values" 
     try std.testing.expectEqual(max_duration_ms, durationFromEnv("99999999")); // > 상한
 }
 
-test "Metal smoke fixture comes from RendererState glyph frame" {
+test "Metal smoke fixture comes from TerminalCore DrawList shaper" {
     // 이 테스트는 native bridge 없이도 smoke 입력이 제품 renderer frame 계약에서 왔는지
-    // 증명한다. 아직 placeholder quad를 그려도, Metal 경계에 넘기는 데이터는 DrawList가
-    // 아니라 atlas slot이 준비된 GlyphFrame이어야 다음 text renderer 단계와 이어진다.
+    // 증명한다. Metal 경계에 넘기는 데이터는 TerminalCore snapshot에서 만든 DrawList를
+    // CoreTextDrawListShaper로 shape한 뒤 atlas slot이 준비된 GlyphFrame이어야 한다.
     var fixture = try buildTestSmokeFixture(std.testing.allocator);
     defer fixture.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u16, 9), fixture.size.cols);
-    try std.testing.expectEqual(@as(u16, 1), fixture.size.rows);
+    try std.testing.expectEqual(@as(u16, 12), fixture.size.cols);
+    try std.testing.expectEqual(@as(u16, 2), fixture.size.rows);
     try std.testing.expect(fixture.stats.prepared());
     try std.testing.expectEqual(renderer.Backend.metal, fixture.stats.backend);
-    try std.testing.expectEqualStrings(renderer_probe_shaper, fixture.shaper);
+    try std.testing.expectEqualStrings(renderer_input_draw_list, fixture.input);
+    try std.testing.expectEqualStrings(coretext_shaper.CoreTextDrawListShaper.name, fixture.shaper);
     try std.testing.expectEqualStrings(test_coretext_rasterizer, fixture.rasterizer);
     try std.testing.expect(!fixture.glyph_text);
     try std.testing.expect(fixture.stats.draw_cells >= fixture.cells.len);
@@ -918,22 +965,22 @@ test "Metal smoke fixture comes from RendererState glyph frame" {
     // 모든 glyph는 upload 아니면 reuse 둘 중 하나라, 이 합이 glyph_count와 맞아야 probe
     // 통계가 backend로 일관되게 흘러간다(slot 재사용 회귀를 통계 단계에서 잡는다).
     try std.testing.expectEqual(fixture.stats.glyph_count, fixture.stats.upload_count + fixture.stats.reused_count);
-    try std.testing.expectEqual(@as(usize, 3), fixture.cells.len);
+    try std.testing.expectEqual(@as(usize, 5), fixture.cells.len);
     try std.testing.expectEqual(@as(u32, 'M'), fixture.cells[0].codepoint);
     try std.testing.expectEqual(@as(u16, 0), fixture.cells[0].row);
     try std.testing.expectEqual(@as(u16, 0), fixture.cells[0].col);
     // cell_width가 native bridge로 보존되는지 고정한다(ASCII placeholder는 1셀 폭).
     try std.testing.expectEqual(@as(u16, 1), fixture.cells[0].width);
-    try std.testing.expectEqual(@as(u32, '한'), fixture.cells[1].codepoint);
-    try std.testing.expectEqual(@as(u16, 0), fixture.cells[1].row);
-    try std.testing.expectEqual(@as(u16, 5), fixture.cells[1].col);
-    try std.testing.expectEqual(@as(u16, 2), fixture.cells[1].width);
+    try std.testing.expectEqual(@as(u32, '한'), fixture.cells[4].codepoint);
+    try std.testing.expectEqual(@as(u16, 0), fixture.cells[4].row);
+    try std.testing.expectEqual(@as(u16, 5), fixture.cells[4].col);
+    try std.testing.expectEqual(@as(u16, 2), fixture.cells[4].width);
     try std.testing.expect(fixture.cells[0].slot_id > 0);
     try std.testing.expect(fixture.cells[0].atlas_width_px > 0);
     try std.testing.expect(fixture.cells[0].atlas_height_px > 0);
-    try std.testing.expect(fixture.cells[1].slot_id > 0);
-    try std.testing.expect(fixture.cells[1].atlas_width_px > 0);
-    try std.testing.expect(fixture.cells[1].atlas_height_px > 0);
+    try std.testing.expect(fixture.cells[4].slot_id > 0);
+    try std.testing.expect(fixture.cells[4].atlas_width_px > 0);
+    try std.testing.expect(fixture.cells[4].atlas_height_px > 0);
     try std.testing.expect(nativeCellsHaveAtlasPlacement(fixture.cells));
 }
 

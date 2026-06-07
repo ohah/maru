@@ -41,6 +41,41 @@ typedef struct {
 } MaruCoreTextGlyphRecord;
 
 typedef struct {
+    uint16_t row;
+    uint16_t col;
+    uint16_t width;
+    uint16_t reserved;
+    uint32_t codepoint;
+    uint32_t combining;
+} MaruCoreTextDrawCell;
+
+typedef struct {
+    uint32_t cell_index;
+    uint16_t row;
+    uint16_t col;
+    uint16_t cell_width;
+    uint16_t reserved;
+    uint32_t codepoint;
+    uint32_t combining;
+    uint32_t glyph_id;
+    uint32_t drawable;
+    uint32_t fallback;
+    uint32_t color_glyph_kind;
+    char font_name[128];
+} MaruCoreTextDrawGlyphRecord;
+
+typedef struct {
+    int32_t status;
+    uint32_t primary_font_found;
+    uint32_t requested_font_matched;
+    uint32_t shaped_cell_count;
+    uint32_t glyph_record_count;
+    uint32_t glyph_record_overflow;
+    uint32_t missing_glyph_count;
+    uint32_t fallback_run_count;
+} MaruCoreTextDrawListShapeResult;
+
+typedef struct {
     int32_t status;
     uint32_t non_clear_pixels;
 } MaruCoreTextGlyphRasterResult;
@@ -250,6 +285,63 @@ static uint32_t maru_category_for_string_index(CFIndex string_index) {
     return MaruGlyphCategoryOther;
 }
 
+static uint32_t maru_category_for_codepoint(uint32_t codepoint) {
+    if (codepoint == 0 || codepoint == ' ') {
+        return MaruGlyphCategorySpace;
+    }
+    if (codepoint < 0x80) {
+        return MaruGlyphCategoryAscii;
+    }
+    if ((codepoint >= 0x3000 && codepoint <= 0x9FFF) ||
+        (codepoint >= 0xAC00 && codepoint <= 0xD7AF))
+    {
+        return MaruGlyphCategoryCjk;
+    }
+    if (codepoint >= 0x1F300 && codepoint <= 0x1FAFF) {
+        return MaruGlyphCategoryEmoji;
+    }
+    return MaruGlyphCategoryOther;
+}
+
+static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFIndex *len, CFIndex capacity) {
+    if (buffer == NULL || len == NULL) {
+        return false;
+    }
+    if (codepoint > 0x10FFFF || (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
+        return false;
+    }
+    if (codepoint <= 0xFFFF) {
+        if (*len >= capacity) {
+            return false;
+        }
+        buffer[*len] = (UniChar)codepoint;
+        *len += 1;
+        return true;
+    }
+
+    if (*len + 1 >= capacity) {
+        return false;
+    }
+    uint32_t value = codepoint - 0x10000;
+    buffer[*len] = (UniChar)(0xD800 + (value >> 10));
+    *len += 1;
+    buffer[*len] = (UniChar)(0xDC00 + (value & 0x3FF));
+    *len += 1;
+    return true;
+}
+
+static CFStringRef maru_create_string_for_draw_cell(MaruCoreTextDrawCell cell) {
+    UniChar units[4];
+    CFIndex len = 0;
+    if (!maru_append_utf16_scalar(cell.codepoint, units, &len, 4)) {
+        return NULL;
+    }
+    if (cell.combining != 0 && !maru_append_utf16_scalar(cell.combining, units, &len, 4)) {
+        return NULL;
+    }
+    return CFStringCreateWithCharacters(kCFAllocatorDefault, units, len);
+}
+
 static bool maru_validate_raster_request(
     const uint8_t *pixels,
     size_t width,
@@ -332,6 +424,50 @@ static void maru_append_glyph_record(
         // Drawable glyph의 PostScript name이 없으면 Zig registry가 어떤 face의 glyph인지
         // 알 수 없다. 공백처럼 rasterizer까지 가지 않는 record는 best-effort 진단으로
         // 남기지만, 실제 glyph는 wrong-glyph를 만들기 전에 incomplete shape로 닫는다.
+        result->glyph_record_overflow = 1;
+        record->font_name[0] = '\0';
+        return;
+    }
+    result->glyph_record_count += 1;
+}
+
+static void maru_append_draw_glyph_record(
+    MaruCoreTextDrawListShapeResult *result,
+    MaruCoreTextDrawGlyphRecord *records,
+    size_t record_capacity,
+    size_t cell_index,
+    MaruCoreTextDrawCell cell,
+    CFStringRef font_name,
+    CGGlyph glyph,
+    uint32_t fallback
+) {
+    if (records == NULL || result->glyph_record_count >= record_capacity || cell_index > UINT32_MAX) {
+        result->glyph_record_overflow = 1;
+        return;
+    }
+
+    const uint32_t category = maru_category_for_codepoint(cell.codepoint);
+    const bool drawable = glyph != 0 &&
+        category != MaruGlyphCategorySpace &&
+        cell.width != 0;
+    if (glyph == 0) {
+        result->missing_glyph_count += 1;
+        return;
+    }
+
+    MaruCoreTextDrawGlyphRecord *record = &records[result->glyph_record_count];
+    record->cell_index = (uint32_t)cell_index;
+    record->row = cell.row;
+    record->col = cell.col;
+    record->cell_width = cell.width;
+    record->reserved = 0;
+    record->codepoint = cell.codepoint;
+    record->combining = cell.combining;
+    record->glyph_id = (uint32_t)glyph;
+    record->drawable = drawable ? 1 : 0;
+    record->fallback = fallback;
+    record->color_glyph_kind = category == MaruGlyphCategoryEmoji ? 1 : 0;
+    if (!maru_copy_cfstring(font_name, record->font_name, sizeof(record->font_name)) && drawable) {
         result->glyph_record_overflow = 1;
         record->font_name[0] = '\0';
         return;
@@ -438,6 +574,189 @@ static void maru_rasterize_line_into_cpu_bitmap(MaruCoreTextSmokeResult *result,
     CGContextRelease(context);
     CGColorSpaceRelease(color_space);
     free(pixels);
+}
+
+void maru_macos_coretext_shape_draw_list(
+    const char *requested_font_family,
+    size_t requested_font_family_len,
+    double requested_font_size,
+    const MaruCoreTextDrawCell *cells,
+    size_t cell_count,
+    MaruCoreTextDrawListShapeResult *result,
+    MaruCoreTextDrawGlyphRecord *glyph_records,
+    size_t glyph_record_capacity
+) {
+    @autoreleasepool {
+        if (result == NULL) {
+            return;
+        }
+        result->status = -1;
+        result->primary_font_found = 0;
+        result->requested_font_matched = 0;
+        result->shaped_cell_count = 0;
+        result->glyph_record_count = 0;
+        result->glyph_record_overflow = 0;
+        result->missing_glyph_count = 0;
+        result->fallback_run_count = 0;
+
+        if (cells == NULL && cell_count != 0) {
+            result->status = 1;
+            return;
+        }
+
+        CTFontRef primary_font = maru_create_primary_font(
+            requested_font_family,
+            requested_font_family_len,
+            requested_font_size,
+            &result->requested_font_matched
+        );
+        if (primary_font == NULL) {
+            result->status = 2;
+            return;
+        }
+        result->primary_font_found = 1;
+
+        CFStringRef primary_name = CTFontCopyPostScriptName(primary_font);
+        const void *keys[] = { kCTFontAttributeName };
+        const void *values[] = { primary_font };
+        CFDictionaryRef attributes = CFDictionaryCreate(
+            kCFAllocatorDefault,
+            keys,
+            values,
+            1,
+            &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks
+        );
+        if (attributes == NULL) {
+            if (primary_name != NULL) {
+                CFRelease(primary_name);
+            }
+            CFRelease(primary_font);
+            result->status = 3;
+            return;
+        }
+
+        for (size_t cell_index = 0; cell_index < cell_count; cell_index++) {
+            const MaruCoreTextDrawCell cell = cells[cell_index];
+            const uint32_t category = maru_category_for_codepoint(cell.codepoint);
+            if (category == MaruGlyphCategorySpace || cell.width == 0) {
+                continue;
+            }
+
+            CFStringRef string = maru_create_string_for_draw_cell(cell);
+            if (string == NULL) {
+                result->missing_glyph_count += 1;
+                continue;
+            }
+
+            CFAttributedStringRef attributed = CFAttributedStringCreate(
+                kCFAllocatorDefault,
+                string,
+                attributes
+            );
+            if (attributed == NULL) {
+                CFRelease(string);
+                result->status = 4;
+                break;
+            }
+
+            CTLineRef line = CTLineCreateWithAttributedString(attributed);
+            if (line == NULL) {
+                CFRelease(attributed);
+                CFRelease(string);
+                result->status = 5;
+                break;
+            }
+
+            CFArrayRef runs = CTLineGetGlyphRuns(line);
+            CFIndex run_count = runs == NULL ? 0 : CFArrayGetCount(runs);
+            for (CFIndex run_index = 0; run_index < run_count; run_index++) {
+                CTRunRef run = (CTRunRef)CFArrayGetValueAtIndex(runs, run_index);
+                if (run == NULL) {
+                    continue;
+                }
+
+                uint32_t run_fallback = 0;
+                CFStringRef run_name = NULL;
+                CFDictionaryRef run_attributes = CTRunGetAttributes(run);
+                CTFontRef run_font = run_attributes == NULL
+                    ? NULL
+                    : (CTFontRef)CFDictionaryGetValue(run_attributes, kCTFontAttributeName);
+                if (run_font != NULL) {
+                    run_name = CTFontCopyPostScriptName(run_font);
+                    if (run_name != NULL &&
+                        primary_name != NULL &&
+                        CFStringCompare(run_name, primary_name, 0) != kCFCompareEqualTo)
+                    {
+                        run_fallback = 1;
+                        result->fallback_run_count += 1;
+                    }
+                }
+                CFStringRef record_font_name = run_name != NULL ? run_name : primary_name;
+
+                CFIndex glyph_count = CTRunGetGlyphCount(run);
+                if (glyph_count > 16) {
+                    result->glyph_record_overflow = 1;
+                    result->status = 7;
+                    if (run_name != NULL) {
+                        CFRelease(run_name);
+                    }
+                    break;
+                }
+
+                CGGlyph glyphs[16];
+                CTRunGetGlyphs(run, CFRangeMake(0, glyph_count), glyphs);
+                for (CFIndex glyph_index = 0; glyph_index < glyph_count; glyph_index++) {
+                    maru_append_draw_glyph_record(
+                        result,
+                        glyph_records,
+                        glyph_record_capacity,
+                        cell_index,
+                        cell,
+                        record_font_name,
+                        glyphs[glyph_index],
+                        run_fallback
+                    );
+                    if (result->glyph_record_overflow != 0) {
+                        result->status = 7;
+                        break;
+                    }
+                }
+
+                if (run_name != NULL) {
+                    CFRelease(run_name);
+                }
+                if (result->status == 7) {
+                    break;
+                }
+            }
+
+            if (result->status == -1) {
+                result->shaped_cell_count += 1;
+            }
+
+            CFRelease(line);
+            CFRelease(attributed);
+            CFRelease(string);
+
+            if (result->status == 4 || result->status == 5 || result->status == 7) {
+                break;
+            }
+        }
+
+        if (result->status == -1) {
+            result->status = result->glyph_record_overflow == 0 &&
+                    result->missing_glyph_count == 0
+                ? 0
+                : 6;
+        }
+
+        CFRelease(attributes);
+        if (primary_name != NULL) {
+            CFRelease(primary_name);
+        }
+        CFRelease(primary_font);
+    }
 }
 
 void maru_macos_coretext_smoke_rasterize_glyph(

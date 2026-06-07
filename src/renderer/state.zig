@@ -69,7 +69,12 @@ pub const RendererState = struct {
         });
         errdefer quad_frame.deinit(allocator);
 
-        var raster_frame = try glyph_raster.buildGlyphRasterFrame(allocator, frame, rasterizer);
+        var raster_frame = try glyph_raster.buildGlyphRasterFrame(allocator, frame, .{
+            .texture_size = .{
+                .width_px = self.atlas.config.atlas_width_px,
+                .height_px = self.atlas.config.atlas_height_px,
+            },
+        }, rasterizer);
         errdefer raster_frame.deinit(allocator);
 
         return .{

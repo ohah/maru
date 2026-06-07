@@ -45,7 +45,7 @@ RenderSnapshot
 - glyph bitmap을 texture atlas에 캐시한다.
 - atlas miss, upload byte, eviction 같은 성능 관측 값을 남긴다.
 - renderer backend가 바뀌어도 cache key와 glyph run 의미가 흔들리지 않게 한다.
-- 초기 구현은 `GlyphCacheKey -> AtlasSlot` domain cache/placement 계약, `GlyphRunList -> GlyphFrame` 준비 계약, `GlyphFrame -> GlyphQuadFrame` UV 변환 계약, `GlyphFrame -> GlyphRasterFrame` upload byte 계약, macOS CoreText CPU bitmap smoke, CPU bitmap -> Metal texture upload smoke를 먼저 고정한다. 실제 atlas texture packing과 제품 shader sampling은 macOS backend 단계에서 붙인다.
+- 초기 구현은 `GlyphCacheKey -> AtlasSlot` domain cache/placement 계약, `GlyphRunList -> GlyphFrame` 준비 계약, `GlyphFrame -> GlyphQuadFrame` UV 변환 계약, `GlyphFrame -> GlyphRasterFrame` upload byte/skip 계약, macOS CoreText CPU bitmap smoke, CPU bitmap -> Metal texture upload smoke를 먼저 고정한다. 실제 atlas texture packing과 제품 shader sampling은 macOS backend 단계에서 붙인다.
 
 `Metal backend`:
 
@@ -187,7 +187,8 @@ atlas invalidation 조건:
 - 현재 `GlyphAtlas`의 선형 scan, `orderedRemove`, FIFO eviction은 실제 제품 성능 정책이 아니라 contract-stage placeholder다. 이 단계의 목적은 cache hit/miss, upload 후보, eviction 발생, invalidation reason을 검증하는 것이다. 실제 texture atlas 압력이 보이면 HashMap + LRU/clock 같은 정책을 별도 PR에서 사용자와 논의한 뒤 바꾼다.
 - 테스트 artifact writer나 index helper를 바로 재사용하지 않는다. test -> production 의존 방향 역전이나 renderer -> observability 내부 구현 의존이 생길 수 있기 때문이다. 공용화가 필요하면 먼저 책임이 맞는 shared module로 승격한다.
 - 현재 upload byte 추정은 실제 raster bitmap이 아니므로 overflow 가능성이 작다. 하지만 실제 rasterizer/texture packer가 들어오면 `font_size * scale * bytes_per_pixel`, atlas dimension, backend texture limit은 checked arithmetic과 관측 가능한 error로 검증해야 한다. `assert` 정책은 프로젝트 전역 결정이므로 이 PR에서 renderer만 따로 바꾸지 않는다.
-- 현재 `GlyphRasterFrame`은 제품 CoreText rasterizer가 아니라 fake rasterizer로 RGBA upload byte 계약을 고정한다. 이 단계의 목적은 글자 품질이 아니라, backend가 복사할 contiguous byte buffer, `bytes_offset`, `bytes_per_row`, zero-ink 진단값이 frame 안에 들어오는지 확인하는 것이다. 실제 CoreText glyph bitmap과 이 계약을 연결하는 작업은 Metal 제품 renderer 단계에서 별도 PR로 진행한다.
+- 현재 `GlyphRasterFrame`은 제품 CoreText rasterizer가 아니라 fake rasterizer로 RGBA upload byte 계약을 고정한다. 이 단계의 목적은 글자 품질이 아니라, backend가 복사할 contiguous byte buffer, `bytes_offset`, `bytes_per_row`, zero-ink 진단값, 그리고 upload 후보별 skip 이유가 frame 안에 들어오는지 확인하는 것이다. atlas texture 경계 밖 slot은 실제 byte buffer를 만들지 않고 `GlyphRasterSkip`으로 남긴다. 단일 glyph rasterizer 실패도 frame 전체 실패가 아니라 skip으로 남긴다. 실제 CoreText glyph bitmap과 이 계약을 연결하는 작업은 Metal 제품 renderer 단계에서 별도 PR로 진행한다.
+- 현재 raster upload buffer는 tightly-packed row(`bytes_per_row = width * 4`)를 renderer domain의 canonical byte 계약으로 둔다. Metal의 `replaceRegion` 경로는 이 계약을 직접 소비할 수 있다. 미래 WebGPU backend는 `writeTexture`의 `bytesPerRow` 256-byte alignment 요구가 있으므로, backend adapter에서 repack할지 renderer 계약 자체를 padded row로 바꿀지 WebGPU 구현 PR 전에 다시 결정한다. 지금 단계에서 WebGPU 요구를 조용히 가정하면 Metal-first 계약과 테스트 의미가 흐려진다.
 
 ## Emoji와 Color Glyph
 
@@ -243,7 +244,7 @@ dirty region의 장기 목표는 cell 단위지만, 현재 `TerminalCore`/snapsh
 - GPU 없는 `GlyphCacheKey -> AtlasSlot` cache가 hit/miss, upload byte 후보, row-packed texture 좌표 후보, eviction, invalidation reason을 기록하는 test.
 - GPU 없는 `GlyphRunList -> GlyphFrame` 준비 test가 atlas slot, upload 후보, eviction, cursor/underline overlay 보존을 기록하는 test.
 - GPU 없는 `GlyphFrame -> GlyphQuadFrame` test가 slot pixel rect를 normalized UV로 바꾸고, atlas texture bounds 오류를 backend 전에 실패시키는 test.
-- GPU 없는 `GlyphFrame -> GlyphRasterFrame` test가 upload 후보를 contiguous RGBA bytes로 바꾸고, zero-ink glyph를 실패가 아닌 진단값으로 남기는 test.
+- GPU 없는 `GlyphFrame -> GlyphRasterFrame` test가 upload 후보를 contiguous RGBA bytes 또는 명시적 skip으로 바꾸고, zero-ink glyph를 실패가 아닌 진단값으로 남기는 test.
 - font 변경이 전체 redraw/invalidation event를 만드는 test.
 - raw config의 font/theme/cursor 값이 `ResolvedAppearance`로 검증되는 test.
 - renderer가 `TerminalCore`, `PtySession`, platform handle을 직접 import하지 않는 boundary test.
@@ -263,7 +264,7 @@ macOS opt-in으로 둘 것:
 
 CoreText/font/raster/upload smoke들은 실제 화면 glyph draw를 증명하지 않는다. glyph text smoke부터는 fixture texture가 실제 AppKit/CAMetalLayer 창에서 shader sampling되어 glyph ink로 보이는지까지 증명한다. 이때 제품 `RendererState/RenderFrame` probe 통계도 summary에 같이 남긴다. 다만 probe는 아직 실제 CoreText shaper가 아니라 `FakeFontBackend`를 쓰며, 제품 terminal renderer가 그 frame을 직접 그린 것도 아니다. 의도는 font resolve, shaping, rasterization, GPU upload, shader sampling, 제품 atlas/layout 실패를 서로 다른 단계로 분리하는 것이다.
 
-기본 CI에서 pixel-perfect font test를 강제하지 않는 이유는 font stack이 OS 업데이트와 설치 폰트에 영향을 받기 때문이다. 대신 기본 CI는 Maru가 만든 domain data와 cache/invalidation 계약을 검증하고, 실제 픽셀은 opt-in artifact로 추적한다. macOS CoreText smoke는 `ResolvedAppearance`의 font 요청이 native bridge까지 전달되는지, 요청 font가 실제 이름/family와 일치했는지를 `requested_font_matched` 진단값으로 남기는지, CoreText가 준 glyph id/font id 후보가 `GlyphFrame` 준비 계약까지 들어가는지, CPU bitmap까지 나오는지 확인한다. 이 smoke는 설치 폰트 품질이나 설정 UI를 증명하지 않는다. glyph texture smoke는 그 CPU bitmap이 Metal texture에 byte-preserving upload/readback되는지 확인한다. glyph text smoke는 같은 fixture texture가 실제 AppKit/CAMetalLayer 창에서 shader sampling되어 glyph ink pixel로 보이는지 확인하고, PPM screenshot artifact와 제품 `RendererState/RenderFrame` probe 통계도 남긴다. 이 probe는 `renderer_shaper=fake_font_backend`로 기록된다. Metal smoke는 제품 `RenderFrame`이 소유한 fake atlas slot id와 placement 후보를 native 경계까지 전달하고, `GlyphQuadFrame`이 slot pixel rect를 shader UV로 바꿨는지도 `renderer_glyph_uv_ready`로 남긴다. `GlyphRasterFrame`은 아직 fake rasterizer를 쓰지만, upload 후보가 byte buffer로 준비됐는지는 `renderer_glyph_raster_ready`와 `renderer_glyph_raster_upload_count`로 남긴다. `AtlasSlot`은 future backend UV를 위한 deterministic `x_px/y_px` 좌표 후보를 가진다. 실제 atlas texture packing, terminal cell text layout, 제품 renderer screenshot artifact는 그 다음 단계에서 별도로 확인한다.
+기본 CI에서 pixel-perfect font test를 강제하지 않는 이유는 font stack이 OS 업데이트와 설치 폰트에 영향을 받기 때문이다. 대신 기본 CI는 Maru가 만든 domain data와 cache/invalidation 계약을 검증하고, 실제 픽셀은 opt-in artifact로 추적한다. macOS CoreText smoke는 `ResolvedAppearance`의 font 요청이 native bridge까지 전달되는지, 요청 font가 실제 이름/family와 일치했는지를 `requested_font_matched` 진단값으로 남기는지, CoreText가 준 glyph id/font id 후보가 `GlyphFrame` 준비 계약까지 들어가는지, CPU bitmap까지 나오는지 확인한다. 이 smoke는 설치 폰트 품질이나 설정 UI를 증명하지 않는다. glyph texture smoke는 그 CPU bitmap이 Metal texture에 byte-preserving upload/readback되는지 확인한다. glyph text smoke는 같은 fixture texture가 실제 AppKit/CAMetalLayer 창에서 shader sampling되어 glyph ink pixel로 보이는지 확인하고, PPM screenshot artifact와 제품 `RendererState/RenderFrame` probe 통계도 남긴다. 이 probe는 `renderer_shaper=fake_font_backend`로 기록된다. Metal smoke는 제품 `RenderFrame`이 소유한 fake atlas slot id와 placement 후보를 native 경계까지 전달하고, `GlyphQuadFrame`이 slot pixel rect를 shader UV로 바꿨는지도 `renderer_glyph_uv_ready`로 남긴다. `GlyphRasterFrame`은 아직 fake rasterizer를 쓰지만, upload 후보가 byte buffer 또는 skip으로 회계 처리됐는지는 `renderer_glyph_raster_ready`, `renderer_glyph_raster_upload_count`, `renderer_glyph_raster_skipped_count`로 남긴다. `AtlasSlot`은 future backend UV를 위한 deterministic `x_px/y_px` 좌표 후보를 가진다. 실제 atlas texture packing, terminal cell text layout, 제품 renderer screenshot artifact는 그 다음 단계에서 별도로 확인한다.
 
 ## 관측 가능성
 

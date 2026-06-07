@@ -238,8 +238,9 @@ fn renderGlyphFrame(allocator: std.mem.Allocator, render_frame: renderer.RenderF
         quad_frame.stats.uv_count,
         quad_frame.stats.ready(),
     });
-    try writer.print("raster_uploads len={d} bytes={d} zero_ink={d} ready={}\n", .{
+    try writer.print("raster_uploads len={d} skips={d} bytes={d} zero_ink={d} ready={}\n", .{
         raster_frame.uploads.len,
+        raster_frame.skips.len,
         raster_frame.stats.byte_count,
         raster_frame.stats.zero_ink_uploads,
         raster_frame.stats.ready(),
@@ -275,14 +276,28 @@ fn renderGlyphFrame(allocator: std.mem.Allocator, render_frame: renderer.RenderF
     }
     for (raster_frame.uploads) |upload| {
         try writer.print(
-            "raster glyph_index={d} slot={d} offset={d} bytes={d} row_bytes={d} non_clear={d}\n",
+            "raster upload_index={d} glyph_index={d} slot={d} offset={d} bytes={d} row_bytes={d} non_clear={d} evicted={}\n",
             .{
+                upload.upload_index,
                 upload.glyph_index,
                 upload.slot.id,
                 upload.bytes_offset,
                 upload.byte_count,
                 upload.bytes_per_row,
                 upload.non_clear_pixels,
+                upload.evicted != null,
+            },
+        );
+    }
+    for (raster_frame.skips) |skip| {
+        try writer.print(
+            "raster_skip upload_index={d} glyph_index={d} slot={d} reason={s} evicted={}\n",
+            .{
+                skip.upload_index,
+                skip.glyph_index,
+                skip.slot.id,
+                @tagName(skip.reason),
+                skip.evicted != null,
             },
         );
     }
@@ -433,6 +448,7 @@ test "app smoke summary marks that real UI is not visible yet" {
     const quads = try std.testing.allocator.alloc(renderer.GlyphQuad, 0);
     const quad_overlays = try std.testing.allocator.alloc(renderer.DrawOverlay, 0);
     const raster_uploads = try std.testing.allocator.alloc(renderer.GlyphRasterUpload, 0);
+    const raster_skips = try std.testing.allocator.alloc(renderer.GlyphRasterSkip, 0);
     const raster_pixels = try std.testing.allocator.alloc(u8, 0);
 
     var render_frame: renderer.RenderFrame = .{
@@ -463,6 +479,7 @@ test "app smoke summary marks that real UI is not visible yet" {
         },
         .glyph_raster_frame = .{
             .uploads = raster_uploads,
+            .skips = raster_skips,
             .pixels = raster_pixels,
             .stats = .{},
         },
@@ -497,6 +514,9 @@ test "app smoke summary marks that real UI is not visible yet" {
         .glyph_uv_count = 3,
         .glyph_uv_ready = true,
         .glyph_raster_upload_count = 2,
+        .glyph_raster_skipped_count = 0,
+        .glyph_raster_out_of_bounds_skip_count = 0,
+        .glyph_raster_error_skip_count = 0,
         .glyph_raster_byte_count = 392,
         .glyph_raster_zero_ink_count = 1,
         .glyph_raster_ready = true,

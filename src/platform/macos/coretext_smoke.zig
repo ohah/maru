@@ -310,6 +310,12 @@ fn buildGlyphFrameProbe(
     probe_draw_list_owned = false;
     defer frame.deinit(allocator);
 
+    // 제품 RenderFrame의 prepared/consistent/UV/raster/draw 신호는 renderer가 단일 출처로
+    // 소유한다(frame_probe). 이 smoke가 같은 gate를 손으로 다시 조립하면 glyph text/metal
+    // smoke와 schema가 갈라지고(예: prepared의 glyph_count>0 절 누락) GlyphFrameStats가 바뀔
+    // 때 한 곳만 빠뜨린다. 그래서 같은 renderFrameStats 계약을 그대로 쓴다.
+    const render_stats = renderer.renderFrameStats(frame, renderer_state.atlas.entryCount());
+
     const probe: GlyphFrameProbe = .{
         .atlas_keys_ready = frame.glyph_frame.stats.glyph_count > 0 and
             renderer_state.atlas.entryCount() > 0,
@@ -326,15 +332,12 @@ fn buildGlyphFrameProbe(
         .evicted_count = frame.glyph_frame.stats.evicted_count,
         .fallback_count = frame.glyph_frame.stats.fallback_count,
         .replacement_count = frame.glyph_frame.stats.replacement_count,
-        .renderer_frame_prepared = frame.glyphFrameConsistent() and
-            frame.glyph_quad_frame.stats.ready() and
-            frame.glyph_raster_frame.stats.ready() and
-            renderer_state.atlas.entryCount() > 0,
-        .renderer_frame_consistent = frame.glyphFrameConsistent(),
-        .renderer_glyph_uv_ready = frame.glyph_quad_frame.stats.ready(),
-        .renderer_glyph_raster_ready = frame.glyph_raster_frame.stats.ready(),
-        .renderer_draw_cells = frame.draw_list.cells.len,
-        .renderer_draw_overlays = frame.draw_list.overlays.len,
+        .renderer_frame_prepared = render_stats.prepared(),
+        .renderer_frame_consistent = render_stats.consistent,
+        .renderer_glyph_uv_ready = render_stats.glyph_uv_ready,
+        .renderer_glyph_raster_ready = render_stats.glyph_raster_ready,
+        .renderer_draw_cells = render_stats.draw_cells,
+        .renderer_draw_overlays = render_stats.draw_overlays,
     };
     return probe;
 }

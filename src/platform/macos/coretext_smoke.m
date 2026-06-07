@@ -861,9 +861,12 @@ void maru_macos_coretext_smoke_rasterize_glyph(
             return;
         }
 
+        // CTFontDrawGlyphs는 이 CGBitmapContext에서 이미 Metal upload가 기대하는
+        // top-to-bottom memory order로 glyph를 그린다. CTLineDraw용 y-flip 관용구를
+        // 여기에도 적용하면 raster source 자체가 뒤집히고, Metal은 그 뒤집힌 bitmap을
+        // 정확히 샘플링해 smoke가 green이 된다. 즉 readback만으로는 못 잡는 시각적
+        // 회귀라서 single-glyph rasterizer에서는 CTM을 뒤집지 않는다.
         CGContextSetTextMatrix(context, CGAffineTransformIdentity);
-        CGContextTranslateCTM(context, 0.0, (CGFloat)height_px);
-        CGContextScaleCTM(context, 1.0, -1.0);
         CGContextSetShouldAntialias(context, true);
         CGContextSetRGBFillColor(context, 1.0, 1.0, 1.0, 1.0);
 

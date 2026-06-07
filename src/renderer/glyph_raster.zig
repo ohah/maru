@@ -3,6 +3,7 @@ const draw_list = @import("draw_list.zig");
 const glyph_atlas = @import("glyph_atlas.zig");
 const glyph_frame = @import("glyph_frame.zig");
 const glyph_layout = @import("glyph_layout.zig");
+const glyph_quads = @import("glyph_quads.zig");
 const terminal = @import("../terminal.zig");
 
 const bytes_per_pixel: usize = 4;
@@ -15,6 +16,11 @@ pub const GlyphRasterError = error{
     RasterCountOverflow,
     UploadSlotMismatch,
     RasterNonClearPixelCountInvalid,
+    InvalidAtlasTextureSize,
+};
+
+pub const GlyphRasterFrameConfig = struct {
+    texture_size: glyph_quads.AtlasTextureSize,
 };
 
 pub const GlyphRasterRequest = struct {
@@ -28,34 +34,54 @@ pub const GlyphRasterResult = struct {
     non_clear_pixels: usize,
 };
 
+pub const GlyphRasterSkipReason = enum {
+    atlas_slot_outside_texture,
+    rasterizer_failed,
+};
+
 pub const GlyphRasterUpload = struct {
+    upload_index: usize,
     glyph_index: usize,
     slot: glyph_atlas.AtlasSlot,
+    evicted: ?glyph_atlas.AtlasSlot = null,
     bytes_offset: usize,
     byte_count: usize,
     bytes_per_row: usize,
     non_clear_pixels: usize,
 };
 
+pub const GlyphRasterSkip = struct {
+    upload_index: usize,
+    glyph_index: usize,
+    slot: glyph_atlas.AtlasSlot,
+    evicted: ?glyph_atlas.AtlasSlot = null,
+    reason: GlyphRasterSkipReason,
+};
+
 pub const GlyphRasterFrameStats = struct {
     upload_count: usize = 0,
     rasterized_count: usize = 0,
+    skipped_count: usize = 0,
+    out_of_bounds_skip_count: usize = 0,
+    rasterizer_error_skip_count: usize = 0,
     byte_count: usize = 0,
     non_clear_pixels: usize = 0,
     zero_ink_uploads: usize = 0,
 
     pub fn ready(self: GlyphRasterFrameStats) bool {
-        return self.upload_count == self.rasterized_count;
+        return self.upload_count == self.rasterized_count + self.skipped_count;
     }
 };
 
 pub const GlyphRasterFrame = struct {
     uploads: []GlyphRasterUpload,
+    skips: []GlyphRasterSkip,
     pixels: []u8,
     stats: GlyphRasterFrameStats,
 
     pub fn deinit(self: *GlyphRasterFrame, allocator: std.mem.Allocator) void {
         allocator.free(self.uploads);
+        allocator.free(self.skips);
         allocator.free(self.pixels);
         self.* = undefined;
     }
@@ -107,64 +133,83 @@ pub const FakeGlyphRasterizer = struct {
 pub fn buildGlyphRasterFrame(
     allocator: std.mem.Allocator,
     frame: glyph_frame.GlyphFrame,
+    config: GlyphRasterFrameConfig,
     rasterizer: anytype,
 ) !GlyphRasterFrame {
     // GlyphFrame.uploads는 "어떤 slot을 업로드해야 하는가"까지만 말한다. GlyphRasterFrame은
     // 그 다음 단계로, 실제 backend가 atlas texture에 복사할 contiguous RGBA byte buffer를
     // 만든다. 이 경계를 renderer domain에 두면 Metal bridge가 upload byte 수와 slot 크기를
     // 다시 추론하지 않아도 된다.
-    var total_bytes: usize = 0;
-    for (frame.uploads) |upload| {
-        if (upload.glyph_index >= frame.glyphs.len) return error.InvalidGlyphIndex;
-        if (!std.meta.eql(frame.glyphs[upload.glyph_index].slot, upload.slot)) {
-            return error.UploadSlotMismatch;
-        }
-        const shape = try bitmapShapeForSlot(upload.slot);
-        if (upload.upload_bytes != shape.byte_count) return error.RasterByteCountMismatch;
-        total_bytes = std.math.add(usize, total_bytes, shape.byte_count) catch
-            return error.RasterByteCountOverflow;
+    if (config.texture_size.width_px == 0 or config.texture_size.height_px == 0) {
+        return error.InvalidAtlasTextureSize;
     }
 
-    const uploads = try allocator.alloc(GlyphRasterUpload, frame.uploads.len);
-    errdefer allocator.free(uploads);
-    const pixels = try allocator.alloc(u8, total_bytes);
-    errdefer allocator.free(pixels);
+    var uploads: std.ArrayList(GlyphRasterUpload) = .empty;
+    errdefer uploads.deinit(allocator);
+    try uploads.ensureTotalCapacity(allocator, frame.uploads.len);
 
-    var offset: usize = 0;
+    var skips: std.ArrayList(GlyphRasterSkip) = .empty;
+    errdefer skips.deinit(allocator);
+    try skips.ensureTotalCapacity(allocator, frame.uploads.len);
+
+    var pixels: std.ArrayList(u8) = .empty;
+    errdefer pixels.deinit(allocator);
+
     var stats: GlyphRasterFrameStats = .{
         .upload_count = frame.uploads.len,
-        .byte_count = total_bytes,
     };
 
-    for (frame.uploads, 0..) |upload, index| {
+    for (frame.uploads, 0..) |upload, upload_index| {
+        if (upload.glyph_index >= frame.glyphs.len) return error.InvalidGlyphIndex;
         const prepared = frame.glyphs[upload.glyph_index];
+        if (!std.meta.eql(prepared.slot, upload.slot)) {
+            return error.UploadSlotMismatch;
+        }
+
         const shape = try bitmapShapeForSlot(upload.slot);
+        if (upload.upload_bytes != shape.byte_count) return error.RasterByteCountMismatch;
+
+        if (!slotFitsTexture(upload.slot, config.texture_size)) {
+            try recordSkip(&skips, &stats, upload_index, upload, .atlas_slot_outside_texture);
+            continue;
+        }
+
+        const offset = pixels.items.len;
+        const pixel_slice = try pixels.addManyAsSlice(allocator, shape.byte_count);
         const end = std.math.add(usize, offset, shape.byte_count) catch
             return error.RasterByteCountOverflow;
-        const pixel_slice = pixels[offset..end];
         // 이 slice를 미리 0으로 지워 rasterizer에 넘기는 것이 계약이다. rasterizer는 ink가
         // 있는 pixel만 칠하면 되고, ink가 없는 영역(공백 glyph 포함)은 여기서 보장한 0으로
         // 남으므로 rasterizer가 buffer를 다시 clear할 필요가 없다.
         @memset(pixel_slice, 0);
 
-        const result = try rasterizer.rasterize(.{
+        const result = rasterizer.rasterize(.{
             .run = prepared.run,
             .slot = upload.slot,
             .pixels = pixel_slice,
             .bytes_per_row = shape.bytes_per_row,
-        });
+        }) catch {
+            // 실제 CoreText rasterizer가 붙으면 한 glyph만 실패할 수 있다. 그때 frame 전체를
+            // 버리면 다른 glyph까지 사라지므로, 이미 예약한 byte range를 되돌리고 skip으로
+            // 관측한다. allocator/slot 불일치 같은 구조적 오류는 rasterizer 호출 전 검증한다.
+            pixels.items.len = offset;
+            try recordSkip(&skips, &stats, upload_index, upload, .rasterizer_failed);
+            continue;
+        };
         if (result.non_clear_pixels > shape.pixel_count) {
             return error.RasterNonClearPixelCountInvalid;
         }
 
-        uploads[index] = .{
+        uploads.appendAssumeCapacity(.{
+            .upload_index = upload_index,
             .glyph_index = upload.glyph_index,
             .slot = upload.slot,
+            .evicted = upload.evicted,
             .bytes_offset = offset,
             .byte_count = shape.byte_count,
             .bytes_per_row = shape.bytes_per_row,
             .non_clear_pixels = result.non_clear_pixels,
-        };
+        });
         stats.rasterized_count = std.math.add(usize, stats.rasterized_count, 1) catch
             return error.RasterCountOverflow;
         stats.non_clear_pixels = std.math.add(usize, stats.non_clear_pixels, result.non_clear_pixels) catch
@@ -173,15 +218,52 @@ pub fn buildGlyphRasterFrame(
             stats.zero_ink_uploads = std.math.add(usize, stats.zero_ink_uploads, 1) catch
                 return error.RasterCountOverflow;
         }
-
-        offset = end;
+        if (end != pixels.items.len) return error.RasterByteCountMismatch;
     }
 
+    stats.byte_count = pixels.items.len;
+
+    const upload_slice = try uploads.toOwnedSlice(allocator);
+    errdefer allocator.free(upload_slice);
+    const skip_slice = try skips.toOwnedSlice(allocator);
+    errdefer allocator.free(skip_slice);
+    const pixel_slice = try pixels.toOwnedSlice(allocator);
+    errdefer allocator.free(pixel_slice);
+
     return .{
-        .uploads = uploads,
-        .pixels = pixels,
+        .uploads = upload_slice,
+        .skips = skip_slice,
+        .pixels = pixel_slice,
         .stats = stats,
     };
+}
+
+fn recordSkip(
+    skips: *std.ArrayList(GlyphRasterSkip),
+    stats: *GlyphRasterFrameStats,
+    upload_index: usize,
+    upload: glyph_frame.GlyphUpload,
+    reason: GlyphRasterSkipReason,
+) GlyphRasterError!void {
+    skips.appendAssumeCapacity(.{
+        .upload_index = upload_index,
+        .glyph_index = upload.glyph_index,
+        .slot = upload.slot,
+        .evicted = upload.evicted,
+        .reason = reason,
+    });
+    stats.skipped_count = std.math.add(usize, stats.skipped_count, 1) catch
+        return error.RasterCountOverflow;
+    switch (reason) {
+        .atlas_slot_outside_texture => {
+            stats.out_of_bounds_skip_count = std.math.add(usize, stats.out_of_bounds_skip_count, 1) catch
+                return error.RasterCountOverflow;
+        },
+        .rasterizer_failed => {
+            stats.rasterizer_error_skip_count = std.math.add(usize, stats.rasterizer_error_skip_count, 1) catch
+                return error.RasterCountOverflow;
+        },
+    }
 }
 
 fn bitmapShapeForSlot(slot: glyph_atlas.AtlasSlot) GlyphRasterError!GlyphBitmapShape {
@@ -201,6 +283,16 @@ fn bitmapShapeForSlot(slot: glyph_atlas.AtlasSlot) GlyphRasterError!GlyphBitmapS
         .byte_count = byte_count,
         .pixel_count = pixel_count,
     };
+}
+
+fn slotFitsTexture(slot: glyph_atlas.AtlasSlot, texture_size: glyph_quads.AtlasTextureSize) bool {
+    return rangeFits(slot.x_px, slot.width_px, texture_size.width_px) and
+        rangeFits(slot.y_px, slot.height_px, texture_size.height_px);
+}
+
+fn rangeFits(start: u32, len: u32, limit: u32) bool {
+    if (len == 0 or start >= limit) return false;
+    return len <= limit - start;
 }
 
 fn buildTestGlyphFrame(
@@ -239,17 +331,21 @@ test "glyph raster frame builds contiguous upload bytes for glyph frame misses" 
     // 이 upload 후보를 실제 byte buffer로 바꿔 Metal texture upload가 소비할 수 있게 한다.
     try std.testing.expectEqual(@as(usize, 1), frame.uploads.len);
 
-    var raster = try buildGlyphRasterFrame(std.testing.allocator, frame, FakeGlyphRasterizer{});
+    var raster = try buildGlyphRasterFrame(std.testing.allocator, frame, .{
+        .texture_size = .{ .width_px = 1024, .height_px = 1024 },
+    }, FakeGlyphRasterizer{});
     defer raster.deinit(std.testing.allocator);
 
     try std.testing.expect(raster.stats.ready());
     try std.testing.expectEqual(@as(usize, 1), raster.uploads.len);
     try std.testing.expectEqual(@as(usize, 1), raster.stats.upload_count);
     try std.testing.expectEqual(@as(usize, 1), raster.stats.rasterized_count);
+    try std.testing.expectEqual(@as(usize, 0), raster.stats.skipped_count);
     try std.testing.expectEqual(frame.uploads[0].upload_bytes, raster.stats.byte_count);
     try std.testing.expectEqual(frame.uploads[0].upload_bytes, raster.pixels.len);
     try std.testing.expect(raster.stats.non_clear_pixels > 0);
     try std.testing.expectEqual(@as(usize, 0), raster.uploads[0].bytes_offset);
+    try std.testing.expectEqual(@as(usize, 0), raster.uploads[0].upload_index);
     try std.testing.expectEqual(frame.uploads[0].slot.id, raster.uploads[0].slot.id);
 }
 
@@ -259,7 +355,9 @@ test "glyph raster frame records zero-ink uploads without failing the frame" {
 
     // 두 번째 cell은 공백이다. 현재 fake path에서는 공백도 atlas miss/upload 후보가 될 수
     // 있으므로, zero-ink upload를 실패로 보지 말고 진단값으로만 남긴다.
-    var raster = try buildGlyphRasterFrame(std.testing.allocator, frame, FakeGlyphRasterizer{});
+    var raster = try buildGlyphRasterFrame(std.testing.allocator, frame, .{
+        .texture_size = .{ .width_px = 1024, .height_px = 1024 },
+    }, FakeGlyphRasterizer{});
     defer raster.deinit(std.testing.allocator);
 
     try std.testing.expect(raster.stats.ready());
@@ -279,6 +377,61 @@ test "glyph raster frame rejects upload byte mismatches" {
     try std.testing.expectError(error.RasterByteCountMismatch, buildGlyphRasterFrame(
         std.testing.allocator,
         frame,
+        .{ .texture_size = .{ .width_px = 1024, .height_px = 1024 } },
         FakeGlyphRasterizer{},
     ));
+}
+
+test "glyph raster frame skips uploads outside the atlas texture without allocating bytes" {
+    var frame = try buildTestGlyphFrame(std.testing.allocator, "ABC", 3);
+    defer frame.deinit(std.testing.allocator);
+
+    // 'A','B','C'는 row-packer에서 x=0,14,28에 놓인다. texture width 20이면 'B','C'는
+    // GlyphQuadFrame과 마찬가지로 경계 밖이다. RasterFrame도 같은 slot을 skip해야
+    // 준비 실패 frame에 큰 upload buffer를 만들지 않는다.
+    var raster = try buildGlyphRasterFrame(std.testing.allocator, frame, .{
+        .texture_size = .{ .width_px = 20, .height_px = 1024 },
+    }, FakeGlyphRasterizer{});
+    defer raster.deinit(std.testing.allocator);
+
+    try std.testing.expect(raster.stats.ready());
+    try std.testing.expectEqual(@as(usize, 3), raster.stats.upload_count);
+    try std.testing.expectEqual(@as(usize, 1), raster.stats.rasterized_count);
+    try std.testing.expectEqual(@as(usize, 2), raster.stats.skipped_count);
+    try std.testing.expectEqual(@as(usize, 2), raster.stats.out_of_bounds_skip_count);
+    try std.testing.expectEqual(@as(usize, 1), raster.uploads.len);
+    try std.testing.expectEqual(@as(usize, 2), raster.skips.len);
+    try std.testing.expectEqual(frame.uploads[0].upload_bytes, raster.pixels.len);
+    try std.testing.expectEqual(GlyphRasterSkipReason.atlas_slot_outside_texture, raster.skips[0].reason);
+}
+
+const FailingGlyphRasterizer = struct {
+    fail_codepoint: u21,
+
+    pub fn rasterize(self: FailingGlyphRasterizer, request: GlyphRasterRequest) GlyphRasterError!GlyphRasterResult {
+        if (request.run.codepoint == self.fail_codepoint) return error.RasterByteCountMismatch;
+        return (FakeGlyphRasterizer{}).rasterize(request);
+    }
+};
+
+test "glyph raster frame skips one rasterizer failure without aborting the frame" {
+    var frame = try buildTestGlyphFrame(std.testing.allocator, "AB", 2);
+    defer frame.deinit(std.testing.allocator);
+
+    // 실제 shaper/rasterizer에서는 특정 glyph만 rasterize에 실패할 수 있다. 그런 실패를
+    // frame 전체 에러로 올리면 나머지 glyph까지 사라지므로, 실패 glyph만 skip으로 남긴다.
+    var raster = try buildGlyphRasterFrame(std.testing.allocator, frame, .{
+        .texture_size = .{ .width_px = 1024, .height_px = 1024 },
+    }, FailingGlyphRasterizer{ .fail_codepoint = 'B' });
+    defer raster.deinit(std.testing.allocator);
+
+    try std.testing.expect(raster.stats.ready());
+    try std.testing.expectEqual(@as(usize, 2), raster.stats.upload_count);
+    try std.testing.expectEqual(@as(usize, 1), raster.stats.rasterized_count);
+    try std.testing.expectEqual(@as(usize, 1), raster.stats.skipped_count);
+    try std.testing.expectEqual(@as(usize, 1), raster.stats.rasterizer_error_skip_count);
+    try std.testing.expectEqual(@as(usize, 1), raster.uploads.len);
+    try std.testing.expectEqual(@as(usize, 1), raster.skips.len);
+    try std.testing.expectEqual(GlyphRasterSkipReason.rasterizer_failed, raster.skips[0].reason);
+    try std.testing.expectEqual(@as(usize, 1), raster.skips[0].upload_index);
 }

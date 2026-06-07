@@ -20,6 +20,9 @@ pub const RenderFrameStats = struct {
     glyph_uv_count: usize,
     glyph_uv_ready: bool,
     glyph_raster_upload_count: usize,
+    glyph_raster_skipped_count: usize,
+    glyph_raster_out_of_bounds_skip_count: usize,
+    glyph_raster_error_skip_count: usize,
     glyph_raster_byte_count: usize,
     glyph_raster_zero_ink_count: usize,
     glyph_raster_ready: bool,
@@ -57,6 +60,9 @@ pub fn renderFrameStats(frame: types.RenderFrame, atlas_entries: usize) RenderFr
         .glyph_uv_count = frame.glyph_quad_frame.stats.uv_count,
         .glyph_uv_ready = frame.glyph_quad_frame.stats.ready(),
         .glyph_raster_upload_count = frame.glyph_raster_frame.stats.upload_count,
+        .glyph_raster_skipped_count = frame.glyph_raster_frame.stats.skipped_count,
+        .glyph_raster_out_of_bounds_skip_count = frame.glyph_raster_frame.stats.out_of_bounds_skip_count,
+        .glyph_raster_error_skip_count = frame.glyph_raster_frame.stats.rasterizer_error_skip_count,
         .glyph_raster_byte_count = frame.glyph_raster_frame.stats.byte_count,
         .glyph_raster_zero_ink_count = frame.glyph_raster_frame.stats.zero_ink_uploads,
         .glyph_raster_ready = frame.glyph_raster_frame.stats.ready(),
@@ -83,6 +89,9 @@ pub fn writeRenderFrameStats(writer: anytype, prefix: []const u8, stats: RenderF
     try writer.print("{s}glyph_uv_count={d}\n", .{ prefix, stats.glyph_uv_count });
     try writer.print("{s}glyph_uv_ready={}\n", .{ prefix, stats.glyph_uv_ready });
     try writer.print("{s}glyph_raster_upload_count={d}\n", .{ prefix, stats.glyph_raster_upload_count });
+    try writer.print("{s}glyph_raster_skipped_count={d}\n", .{ prefix, stats.glyph_raster_skipped_count });
+    try writer.print("{s}glyph_raster_out_of_bounds_skip_count={d}\n", .{ prefix, stats.glyph_raster_out_of_bounds_skip_count });
+    try writer.print("{s}glyph_raster_error_skip_count={d}\n", .{ prefix, stats.glyph_raster_error_skip_count });
     try writer.print("{s}glyph_raster_byte_count={d}\n", .{ prefix, stats.glyph_raster_byte_count });
     try writer.print("{s}glyph_raster_zero_ink_count={d}\n", .{ prefix, stats.glyph_raster_zero_ink_count });
     try writer.print("{s}glyph_raster_ready={}\n", .{ prefix, stats.glyph_raster_ready });
@@ -118,6 +127,9 @@ test "render frame stats extracts frame metadata and derives prepared" {
     try std.testing.expectEqual(@as(usize, 4), stats.glyph_uv_count);
     try std.testing.expect(stats.glyph_uv_ready);
     try std.testing.expectEqual(stats.upload_count, stats.glyph_raster_upload_count);
+    try std.testing.expectEqual(@as(usize, 0), stats.glyph_raster_skipped_count);
+    try std.testing.expectEqual(@as(usize, 0), stats.glyph_raster_out_of_bounds_skip_count);
+    try std.testing.expectEqual(@as(usize, 0), stats.glyph_raster_error_skip_count);
     try std.testing.expect(stats.glyph_raster_byte_count > 0);
     try std.testing.expect(stats.glyph_raster_ready);
     try std.testing.expectEqual(stats.glyph_count, stats.upload_count + stats.reused_count);
@@ -141,6 +153,9 @@ test "render frame stats prepared is false for an empty-but-consistent frame" {
         .glyph_uv_count = 0,
         .glyph_uv_ready = false,
         .glyph_raster_upload_count = 0,
+        .glyph_raster_skipped_count = 0,
+        .glyph_raster_out_of_bounds_skip_count = 0,
+        .glyph_raster_error_skip_count = 0,
         .glyph_raster_byte_count = 0,
         .glyph_raster_zero_ink_count = 0,
         .glyph_raster_ready = true,
@@ -166,6 +181,9 @@ test "write render frame stats emits prefixed canonical lines" {
         .glyph_uv_count = 32,
         .glyph_uv_ready = true,
         .glyph_raster_upload_count = 5,
+        .glyph_raster_skipped_count = 1,
+        .glyph_raster_out_of_bounds_skip_count = 1,
+        .glyph_raster_error_skip_count = 0,
         .glyph_raster_byte_count = 1280,
         .glyph_raster_zero_ink_count = 1,
         .glyph_raster_ready = true,
@@ -193,6 +211,9 @@ test "write render frame stats emits prefixed canonical lines" {
     try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_uv_count=32\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_uv_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_raster_upload_count=5\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_raster_skipped_count=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_raster_out_of_bounds_skip_count=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_raster_error_skip_count=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_raster_byte_count=1280\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_raster_zero_ink_count=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "renderer_glyph_raster_ready=true\n") != null);

@@ -295,6 +295,9 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
             .glyph_uv_count = 48,
             .glyph_uv_ready = true,
             .glyph_raster_upload_count = 8,
+            .glyph_raster_skipped_count = 0,
+            .glyph_raster_out_of_bounds_skip_count = 0,
+            .glyph_raster_error_skip_count = 0,
             .glyph_raster_byte_count = 6272,
             .glyph_raster_zero_ink_count = 1,
             .glyph_raster_ready = true,
@@ -319,6 +322,7 @@ test "macOS Metal smoke summary reports GlyphFrame placeholder boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_uv_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_quad_count=48\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_upload_count=8\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_skipped_count=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_prepared=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_backend=metal\n") != null);

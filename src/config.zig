@@ -1,5 +1,6 @@
 pub const action = @import("config/action.zig");
 pub const appearance = @import("config/appearance.zig");
+pub const keybinding = @import("config/keybinding.zig");
 pub const theme = @import("config/theme.zig");
 
 pub const Action = action.Action;
@@ -13,6 +14,11 @@ pub const ResolvedCursor = appearance.ResolvedCursor;
 pub const ResolvedFontRequest = appearance.ResolvedFontRequest;
 pub const ResolvedTheme = appearance.ResolvedTheme;
 pub const ThemeConfig = theme.ThemeConfig;
+pub const AppBinding = keybinding.AppBinding;
+pub const KeyBindingResolver = keybinding.KeyBindingResolver;
+pub const KeyChord = keybinding.KeyChord;
+pub const TerminalBinding = keybinding.TerminalBinding;
+pub const TerminalInputMacro = keybinding.TerminalInputMacro;
 pub const parseAction = action.parseAction;
 pub const parseHexColor = appearance.parseHexColor;
 pub const resolveAppearance = appearance.resolve;

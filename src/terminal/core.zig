@@ -103,7 +103,7 @@ pub const TerminalCore = struct {
         self.dirty = null;
     }
 
-    pub fn encodeKey(self: *const TerminalCore, event: input.KeyEvent, buffer: *[4]u8) ![]const u8 {
+    pub fn encodeKey(self: *const TerminalCore, event: input.KeyEvent, buffer: *[input.encoded_key_buffer_len]u8) ![]const u8 {
         _ = self;
         return input.encodeKey(event, buffer);
     }

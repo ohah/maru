@@ -335,7 +335,7 @@ fn buildGlyphFrameProbeWithRasterizer(
     rasterizer_name: []const u8,
 ) !GlyphFrameProbe {
     const shape_complete = hasNativeShapeFields(native);
-    if (!shape_complete) return emptyGlyphFrameProbe();
+    if (!shape_complete) return emptyGlyphFrameProbe(rasterizer_name);
 
     // 이 단계는 아직 제품 CoreText bitmap을 Metal cell renderer에 연결하지 않는다. 대신
     // CoreText가 준 실제 font_id/glyph_id 후보를 Maru의 제품 renderer state 계약인
@@ -434,7 +434,7 @@ fn buildTestGlyphFrameProbe(
     );
 }
 
-fn emptyGlyphFrameProbe() GlyphFrameProbe {
+fn emptyGlyphFrameProbe(rasterizer_name: []const u8) GlyphFrameProbe {
     return .{
         .atlas_keys_ready = false,
         .glyph_frame_ready = false,
@@ -455,7 +455,7 @@ fn emptyGlyphFrameProbe() GlyphFrameProbe {
         .renderer_surface_rows = 0,
         .renderer_glyph_uv_ready = false,
         .renderer_glyph_raster_ready = false,
-        .renderer_rasterizer = "coretext_glyph_rasterizer",
+        .renderer_rasterizer = rasterizer_name,
         .renderer_glyph_raster_upload_count = 0,
         .renderer_glyph_raster_skipped_count = 0,
         .renderer_glyph_raster_error_skip_count = 0,
@@ -499,10 +499,11 @@ const CoreTextSmokeGlyphRasterizer = struct {
             request.pixels.len,
             &native,
         );
+        // native rasterizer는 ink가 0인 drawable glyph를 status 7로 닫는다. 그래서 이 status
+        // 검사가 zero-ink 실패까지 포함하므로 codepoint별(space 등) 분기를 따로 두지 않는다.
+        // space 같은 non-drawable record는 glyph run 생성 단계에서 이미 걸러져 이 rasterizer에
+        // 도달하지 않는다.
         if (native.status != 0) return error.RasterizerFailed;
-        if (native.non_clear_pixels == 0 and request.run.codepoint != ' ') {
-            return error.RasterizerFailed;
-        }
 
         return .{ .non_clear_pixels = native.non_clear_pixels };
     }

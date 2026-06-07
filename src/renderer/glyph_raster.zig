@@ -69,7 +69,12 @@ pub const GlyphRasterFrameStats = struct {
     zero_ink_uploads: usize = 0,
 
     pub fn ready(self: GlyphRasterFrameStats) bool {
-        return self.upload_count == self.rasterized_count + self.skipped_count;
+        // 모든 upload가 회계 처리됐는지(rasterize 또는 skip)는 buildGlyphRasterFrame이 구조적으로
+        // 보장하므로 여기서 다시 보지 않는다. out-of-bounds skip은 quad 단계가 이미
+        // glyph_uv_ready=false로 신호하므로, 여기서는 "예상 못한 rasterizer 실패가 없는가"만 본다.
+        // rasterizer가 실패한 glyph는 UV는 있는데 atlas bitmap이 없어 backend가 빈 영역을
+        // 샘플링하므로, 그런 frame은 ready로 보지 않는다.
+        return self.upload_count == self.rasterized_count + self.out_of_bounds_skip_count;
     }
 };
 
@@ -169,7 +174,7 @@ pub fn buildGlyphRasterFrame(
         const shape = try bitmapShapeForSlot(upload.slot);
         if (upload.upload_bytes != shape.byte_count) return error.RasterByteCountMismatch;
 
-        if (!slotFitsTexture(upload.slot, config.texture_size)) {
+        if (!glyph_quads.slotFitsTexture(upload.slot, config.texture_size)) {
             try recordSkip(&skips, &stats, upload_index, upload, .atlas_slot_outside_texture);
             continue;
         }
@@ -283,16 +288,6 @@ fn bitmapShapeForSlot(slot: glyph_atlas.AtlasSlot) GlyphRasterError!GlyphBitmapS
         .byte_count = byte_count,
         .pixel_count = pixel_count,
     };
-}
-
-fn slotFitsTexture(slot: glyph_atlas.AtlasSlot, texture_size: glyph_quads.AtlasTextureSize) bool {
-    return rangeFits(slot.x_px, slot.width_px, texture_size.width_px) and
-        rangeFits(slot.y_px, slot.height_px, texture_size.height_px);
-}
-
-fn rangeFits(start: u32, len: u32, limit: u32) bool {
-    if (len == 0 or start >= limit) return false;
-    return len <= limit - start;
 }
 
 fn buildTestGlyphFrame(
@@ -425,7 +420,10 @@ test "glyph raster frame skips one rasterizer failure without aborting the frame
     }, FailingGlyphRasterizer{ .fail_codepoint = 'B' });
     defer raster.deinit(std.testing.allocator);
 
-    try std.testing.expect(raster.stats.ready());
+    // rasterizer가 'B' 하나를 실패시켰으므로 frame은 그려질 완전한 준비 상태가 아니다.
+    // ready()는 "회계 완료"가 아니라 "rasterizer 실패 없음"을 뜻한다(out-of-bounds skip은
+    // quad의 glyph_uv_ready가 신호하므로 ready를 떨어뜨리지 않는다).
+    try std.testing.expect(!raster.stats.ready());
     try std.testing.expectEqual(@as(usize, 2), raster.stats.upload_count);
     try std.testing.expectEqual(@as(usize, 1), raster.stats.rasterized_count);
     try std.testing.expectEqual(@as(usize, 1), raster.stats.skipped_count);

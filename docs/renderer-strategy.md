@@ -209,7 +209,7 @@ opt-in으로 둘 것:
 
 - macOS window server가 필요한 screenshot smoke.
 - 실제 Metal device 생성.
-- 실제 AppKit 창 위 CAMetalLayer `RendererState -> GlyphFrame -> GlyphQuadFrame` placeholder present/readback smoke(`mise run macos-metal-smoke`). 이 smoke는 native cell이 atlas slot id와 placement 후보를 받았는지 `renderer_atlas_slot_placement`로, shader UV 준비가 됐는지 `renderer_glyph_uv_ready`로, renderer upload byte/skip 계약이 준비됐는지 `renderer_glyph_raster_ready`와 raster skip count로 남긴다.
+- 실제 AppKit 창 위 CAMetalLayer `RendererState -> GlyphFrame -> GlyphQuadFrame` placeholder present/readback smoke(`mise run macos-metal-smoke`). 이 smoke는 native cell이 atlas slot id와 placement 후보를 받았는지 `renderer_atlas_slot_placement`로, shader UV 준비가 됐는지 `renderer_glyph_uv_ready`로, renderer upload byte/skip 계약이 준비됐는지 `renderer_glyph_raster_ready`와 raster skip count로 남긴다. 같은 run에서 제품 `GlyphRasterFrame.uploads/pixels`를 Metal atlas texture에 올리고 readback byte 비교를 통과해야 `product_atlas_uploaded=true`가 된다. 이 값은 아직 glyph를 화면에 샘플링했다는 뜻이 아니라, 제품 raster bytes가 native Metal texture 경계까지 도달했다는 뜻이다.
 - 실제 CoreText font resolve/glyph run/atlas key/CPU glyph raster smoke(`mise run macos-coretext-smoke`).
 - 실제 CoreText CPU bitmap -> Metal texture upload/readback smoke(`mise run macos-glyph-texture-smoke`).
 - 실제 CoreText glyph texture를 AppKit/CAMetalLayer 창에서 shader sampling하고 drawable readback 및 PPM screenshot artifact로 glyph ink를 확인하는 smoke(`mise run macos-glyph-text-smoke`). 이 smoke는 동시에 Zig 제품 경로인 `TerminalCore -> RendererState -> RenderFrame` probe를 만들어 summary에 `renderer_frame_prepared=true`, `renderer_glyph_uv_ready=true`, `renderer_glyph_raster_ready=true`, glyph/atlas 통계를 남긴다. 이 probe는 아직 실제 CoreText shaper가 아니라 `FakeFontBackend`를 쓰므로 `renderer_shaper=fake_font_backend`로 한계를 드러낸다.

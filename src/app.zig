@@ -1,5 +1,6 @@
 pub const headless_demo = @import("app/headless_demo.zig");
 pub const host = @import("app/host.zig");
+pub const pty_smoke = @import("app/pty_smoke.zig");
 pub const pty_reader = @import("app/pty_reader.zig");
 pub const runtime = @import("app/runtime.zig");
 pub const runtime_pump = @import("app/runtime_pump.zig");
@@ -9,6 +10,8 @@ pub const window = @import("app/window.zig");
 pub const AppWindow = window.AppWindow;
 pub const AppHostFrame = host.AppHostFrame;
 pub const AppHostError = host.HostError;
+pub const AppPtySmokeConfig = pty_smoke.AppPtySmokeConfig;
+pub const AppPtySmokeResult = pty_smoke.AppPtySmokeResult;
 pub const AppSmokeConfig = host.AppSmokeConfig;
 pub const AppSmokeResult = host.AppSmokeResult;
 pub const HeadlessDemoConfig = headless_demo.DemoConfig;
@@ -36,7 +39,9 @@ pub const TerminalInput = runtime.TerminalInput;
 pub const ProcessState = surface.ProcessState;
 
 pub const buildAppHostFrame = host.buildFrame;
+pub const buildAppHostFrameAfterDrain = host.buildFrameAfterDrain;
 pub const resizeActiveSurface = host.resizeActiveSurface;
+pub const runAppPtySmoke = pty_smoke.run;
 pub const runAppSmoke = host.runSmoke;
 pub const sendInputToActiveSurface = host.sendInputToActiveSurface;
 pub const runHeadlessDemo = headless_demo.run;

@@ -38,6 +38,19 @@ pub fn buildFrame(
     // 이 경계가 있어야 나중에 macOS window loop가 terminal storage나 glyph atlas를
     // 직접 만지지 않는다.
     const drain_summary = try pump.drainAvailable();
+    return try buildFrameAfterDrain(allocator, app_window, renderer_state, shaper, drain_summary);
+}
+
+pub fn buildFrameAfterDrain(
+    allocator: std.mem.Allocator,
+    app_window: *window_mod.AppWindow,
+    renderer_state: *renderer.RendererState,
+    shaper: anytype,
+    drain_summary: runtime_pump.DrainSummary,
+) HostError!AppHostFrame {
+    // 실제 app loop에서는 queue drain과 frame 조립이 같은 frame 안에 있지만, smoke나
+    // trace recorder는 raw event를 먼저 관찰해야 할 수 있다. 이 helper는 drain 결과를
+    // 받은 뒤 active surface만 renderer frame으로 바꾸므로 두 경로가 같은 조립 코드를 쓴다.
     const active = app_window.active() orelse return error.NoActiveSurface;
     const render_frame = try renderer_state.buildFrame(allocator, active.core.snapshot(), shaper);
 

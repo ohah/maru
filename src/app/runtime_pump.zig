@@ -30,7 +30,10 @@ pub const DrainSummary = struct {
     exit_events: usize = 0,
     ended: ?Termination = null,
 
-    fn record(self: *DrainSummary, event: PumpedEvent) void {
+    pub fn recordPumpedEvent(self: *DrainSummary, event: PumpedEvent) void {
+        // 일부 smoke는 pump가 output bytes를 해제하기 전에 raw artifact를 남겨야 한다.
+        // 그래도 event 적용과 해제는 applyQueuedEvent를 쓰고, 집계만 이 함수를 호출하게
+        // 해서 기본 drain helper와 같은 summary 의미를 유지한다.
         if (event.termination) |termination| {
             // 세션은 첫 termination에서 끝난다. 같은 drain에서 종료 뒤에 들어온 event가
             // 종료 원인을 덮어쓰지 않도록 첫 termination만 latch한다(예: [exited, read_error]
@@ -76,7 +79,7 @@ pub const RuntimeEventPump = struct {
         var summary: DrainSummary = .{};
         while (self.queue.tryPop()) |event| {
             const pumped = try self.applyQueuedEvent(event);
-            summary.record(pumped);
+            summary.recordPumpedEvent(pumped);
         }
         return summary;
     }
@@ -87,7 +90,7 @@ pub const RuntimeEventPump = struct {
         while (true) {
             const event = self.queue.popBlocking() orelse return error.ReaderQueueClosedBeforeTermination;
             const pumped = try self.applyQueuedEvent(event);
-            summary.record(pumped);
+            summary.recordPumpedEvent(pumped);
 
             if (summary.ended != null) {
                 return summary;

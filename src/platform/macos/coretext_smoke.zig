@@ -112,22 +112,10 @@ fn deriveSmokeStatus(native: NativeCoreTextSmokeResult) SmokeStatus {
 }
 
 fn hasNativeShapeFields(native: NativeCoreTextSmokeResult) bool {
-    // status 7은 한 run의 glyph 수가 native 고정 버퍼(64)를 넘어 그 run의 glyph를
-    // 기록하지 못한 경우다. 이때는 아래 field만 봐서는 shape가 끝까지 됐는지 알 수
-    // 없으므로(먼저 기록된 다른 run은 정상으로 보일 수 있다) overflow status를 명시적으로
-    // 제외한다. status 6(raster 실패)은 shape와 무관하므로 그대로 통과시켜 shape/raster
-    // 신호 분리를 유지한다.
-    return native.status != 7 and
-        native.primary_font_found != 0 and
-        native.line_created != 0 and
-        native.run_count > 0 and
-        native.glyph_count > 0 and
-        native.ascii_glyph_present != 0 and
-        native.cjk_glyph_present != 0 and
-        native.emoji_glyph_present != 0 and
-        native.missing_glyph_count == 0 and
-        native.glyph_record_count > 0 and
-        native.glyph_record_overflow == 0;
+    // shape 완료 판정은 CoreText smoke와 Metal smoke가 같은 probe result를 해석하므로
+    // `coretext_probe.zig`를 단일 출처로 둔다. status 6(raster 실패)은 shape와 무관하므로
+    // 그대로 통과시켜 shape/raster 신호 분리를 유지한다.
+    return coretext_probe.hasCompleteShapeFields(native);
 }
 
 fn renderSummary(

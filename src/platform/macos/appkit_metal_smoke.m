@@ -257,9 +257,12 @@ static MaruMetalSmokeSample *maru_build_cell_samples(
     *sample_count = 0;
     *missing_count = 0;
     if (cells == NULL || cell_count == 0 || cols == 0 || rows == 0 ||
-        texture_width == 0 || texture_height == 0 ||
-        uploads == NULL || upload_count == 0 ||
-        raster_pixels == NULL || raster_pixel_count == 0)
+        texture_width == 0 || texture_height == 0)
+    {
+        return NULL;
+    }
+    if (upload_count > 0 &&
+        (uploads == NULL || raster_pixels == NULL || raster_pixel_count == 0))
     {
         return NULL;
     }
@@ -289,6 +292,9 @@ static MaruMetalSmokeSample *maru_build_cell_samples(
 
         MaruMetalSourceSample source_sample = {0};
         BOOL found_source_sample = NO;
+        // upload가 0개인 frame은 all-skip 또는 warm atlas 같은 renderer 상태일 수 있다.
+        // 이 경우는 Metal readback 인프라 실패가 아니라 visible cell에 대응하는 source
+        // sample이 없다는 도메인 신호이므로 missing_count로 따로 회계한다.
         for (size_t upload_index = 0; upload_index < upload_count; upload_index++) {
             const MaruMetalRasterUpload upload = uploads[upload_index];
             if (upload.slot_id != cell.slot_id) {
@@ -500,10 +506,18 @@ static BOOL maru_upload_and_readback_product_atlas(
     result->atlas_uploads_requested =
         (upload_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)upload_count;
     if (device == nil || queue == nil || atlas_texture == nil ||
-        atlas_width_px == 0 || atlas_height_px == 0 ||
-        uploads == NULL || upload_count == 0 ||
-        raster_pixels == NULL || raster_pixel_count == 0)
+        atlas_width_px == 0 || atlas_height_px == 0)
     {
+        result->atlas_readback_failures += 1;
+        return NO;
+    }
+    if (upload_count == 0) {
+        // upload 후보가 전혀 없는 것은 byte upload/readback 인프라 실패가 아니다.
+        // draw 단계에서 visible cell의 atlas sample source 누락으로 기록해야 원인이
+        // readback path가 아니라 raster/slot 준비 단계라는 점이 보인다.
+        return YES;
+    }
+    if (uploads == NULL || raster_pixels == NULL || raster_pixel_count == 0) {
         result->atlas_readback_failures += 1;
         return NO;
     }

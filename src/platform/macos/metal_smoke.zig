@@ -655,6 +655,15 @@ test "Metal smoke product atlas gates require upload, byte-matching readback, an
     partial_sampling.atlas_sampled_cells = 8;
     var missing_sample_source = success;
     missing_sample_source.atlas_sample_missing_cells = 1;
+    var all_sample_sources_missing = success;
+    all_sample_sources_missing.readback_samples = 0;
+    all_sample_sources_missing.readback_non_clear_pixels = 0;
+    all_sample_sources_missing.atlas_uploads_requested = 0;
+    all_sample_sources_missing.atlas_uploads_uploaded = 0;
+    all_sample_sources_missing.atlas_upload_bytes = 0;
+    all_sample_sources_missing.atlas_readback_uploads = 0;
+    all_sample_sources_missing.atlas_sampled_cells = 0;
+    all_sample_sources_missing.atlas_sample_missing_cells = 9;
 
     try std.testing.expect(deriveSmokeStatus(success).product_atlas_uploaded);
     try std.testing.expect(deriveSmokeStatus(success).product_atlas_sampled);
@@ -665,6 +674,11 @@ test "Metal smoke product atlas gates require upload, byte-matching readback, an
     try std.testing.expect(!deriveSmokeStatus(no_sampling).product_atlas_sampled);
     try std.testing.expect(!deriveSmokeStatus(partial_sampling).product_atlas_sampled);
     try std.testing.expect(!deriveSmokeStatus(missing_sample_source).product_atlas_sampled);
+    // 모든 glyph가 raster 단계에서 skip되면 upload/readback 인프라는 실패하지 않았어도
+    // 제품 atlas 검증은 false여야 한다. 그래야 "GPU가 고장"이 아니라 "sample source가 없음"
+    // 이라는 원인을 summary에서 분리해서 볼 수 있다.
+    try std.testing.expect(!deriveSmokeStatus(all_sample_sources_missing).product_atlas_uploaded);
+    try std.testing.expect(!deriveSmokeStatus(all_sample_sources_missing).product_atlas_sampled);
 }
 
 test "Metal smoke duration override clamps invalid, zero, and oversized values" {

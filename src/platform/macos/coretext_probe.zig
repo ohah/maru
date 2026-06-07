@@ -83,6 +83,23 @@ pub fn emptyGlyphRecord() NativeGlyphRecord {
     };
 }
 
+pub fn hasCompleteShapeFields(native: NativeCoreTextSmokeResult) bool {
+    // status 7은 native 고정 record buffer가 넘친 경우다. 먼저 기록된 run만 보면 shape가
+    // 성공한 것처럼 보일 수 있으므로, downstream Metal/CoreText probe는 이 상태를
+    // incomplete shape로 닫아야 한다.
+    return native.status != 7 and
+        native.primary_font_found != 0 and
+        native.line_created != 0 and
+        native.run_count > 0 and
+        native.glyph_count > 0 and
+        native.ascii_glyph_present != 0 and
+        native.cjk_glyph_present != 0 and
+        native.emoji_glyph_present != 0 and
+        native.missing_glyph_count == 0 and
+        native.glyph_record_count > 0 and
+        native.glyph_record_overflow == 0;
+}
+
 pub fn coreTextGlyphRecord(record: *const NativeGlyphRecord) CoreTextGlyphRecord {
     // NativeGlyphRecord는 C ABI buffer이고, font_name은 고정 배열이다. 반환하는
     // CoreTextGlyphRecord.font_name은 문자열을 소유하지 않는 slice라 caller가 가진 record

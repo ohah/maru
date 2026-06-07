@@ -95,7 +95,8 @@ pub fn build(b: *std.Build) void {
 
         // Metal smoke는 AppKit 창 위에 CAMetalLayer가 실제 drawable을 present하고,
         // RendererState/GlyphFrame에서 온 atlas slot/UV/raster bytes를 제품 atlas texture
-        // shader sampling까지 연결한다. 아직 CoreText glyph bitmap text renderer는 아니다.
+        // shader sampling까지 연결한다. 현재 입력은 실제 TerminalCore text가 아니라 CoreText
+        // probe surface이지만, glyph bitmap bytes는 CoreText rasterizer 산출물이다.
         const macos_metal_smoke = b.addExecutable(.{
             .name = "maru-macos-metal-smoke",
             .root_module = b.createModule(.{
@@ -112,7 +113,14 @@ pub fn build(b: *std.Build) void {
             .file = b.path("src/platform/macos/appkit_metal_smoke.m"),
             .flags = &.{"-fobjc-arc"},
         });
+        macos_metal_smoke.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
         macos_metal_smoke.root_module.linkFramework("Cocoa", .{});
+        macos_metal_smoke.root_module.linkFramework("Foundation", .{});
+        macos_metal_smoke.root_module.linkFramework("CoreText", .{});
+        macos_metal_smoke.root_module.linkFramework("CoreGraphics", .{});
         macos_metal_smoke.root_module.linkFramework("Metal", .{});
         macos_metal_smoke.root_module.linkFramework("QuartzCore", .{});
 

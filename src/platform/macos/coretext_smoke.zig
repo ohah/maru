@@ -1073,6 +1073,27 @@ test "CoreText smoke uses font identity registry instead of native record ids" {
     try std.testing.expectEqual(primary.font_id, primary_again.font_id);
 }
 
+test "CoreText smoke shaped record font id resolves back to its PostScript name" {
+    // 제품 smoke rasterizer는 GlyphRun.font_id로 registry를 조회해(get) PostScript name을
+    // 얻은 뒤 그 이름으로 CTFont를 만들어 glyph를 그린다. 이 왕복 계약(intern이 만든 font_id가
+    // 같은 registry에서 원래 face name으로 다시 나오는가)이 깨지면 glyph가 엉뚱한 face로
+    // 그려진다. native CoreText 없이도 그 lookup 경계를 고정해, fake rasterizer만 도는
+    // 단위 테스트에서도 registry 배선 회귀를 잡는다.
+    var font_registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
+    defer font_registry.deinit();
+
+    const record = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+        .glyph_id = 42,
+        .string_index = 0,
+        .category = .cjk,
+        .fallback = true,
+        .font_name = "AppleSDGothicNeo-Regular",
+    }), &font_registry);
+
+    const identity = font_registry.get(record.font_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("AppleSDGothicNeo-Regular", identity.postscript_name);
+}
+
 test "CoreText smoke treats requested font mismatch as a diagnostic fallback" {
     // JetBrains Mono는 기본 요청값이지만 사용자의 Mac에 없을 수 있다. 그 경우 앱을
     // 시작하지 못하게 하기보다 system monospace fallback으로 화면을 띄우고,

@@ -190,3 +190,34 @@ test "font identity keeps glyph cache keys font-relative" {
     // 포함해야 fallback glyph가 primary glyph처럼 재사용되는 버그를 막는다.
     try std.testing.expect(!std.meta.eql(primary_key, fallback_key));
 }
+
+test "font identity registry normalizes surrounding whitespace before interning" {
+    var registry = FontIdentityRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+
+    // native font source는 같은 face 이름을 공백이 붙은 채로 줄 수 있다. trim 후 같은
+    // PostScript name이면 같은 FontId여야 한다. 그렇지 않으면 같은 face가 atlas에 중복
+    // entry를 만들어 cache hit/miss 진단이 흔들린다. family도 trim해 저장하는지 함께 고정한다.
+    const padded = try registry.intern(.{
+        .postscript_name = "  JetBrainsMono-Regular\t",
+        .family_name = "  JetBrains Mono  ",
+    });
+    const tight = try registry.intern(.{ .postscript_name = "JetBrainsMono-Regular" });
+
+    try std.testing.expectEqual(padded, tight);
+    try std.testing.expectEqual(@as(usize, 1), registry.count());
+    try std.testing.expectEqualStrings("JetBrains Mono", registry.get(padded).?.family_name);
+}
+
+test "font identity registry returns null for an unknown font id" {
+    var registry = FontIdentityRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+
+    // get은 아직 등록되지 않은 FontId에 대해 null을 돌려줘야 한다. miss를 임의 entry로
+    // 돌려주면 rasterizer가 잘못된 native face로 glyph를 굽게 된다. font id가 1부터
+    // 시작하므로 0은 항상 미등록 sentinel이다.
+    const known = try registry.intern(.{ .postscript_name = "JetBrainsMono-Regular" });
+    try std.testing.expect(registry.get(known) != null);
+    try std.testing.expect(registry.get(known + 1) == null);
+    try std.testing.expect(registry.get(0) == null);
+}

@@ -34,6 +34,17 @@ typedef struct {
 } MaruMetalSmokeResult;
 
 typedef struct {
+    int32_t status;
+    uint32_t window_visible;
+    uint32_t key_down_received;
+    uint32_t codepoint;
+    uint32_t modifier_shift;
+    uint32_t modifier_control;
+    uint32_t modifier_option;
+    uint32_t modifier_command;
+} MaruKeyDownSmokeResult;
+
+typedef struct {
     uint16_t row;
     uint16_t col;
     uint16_t width;
@@ -108,6 +119,49 @@ static NSString *const maru_cell_shader_source =
      "  return atlas_texture.sample(atlas_sampler, in.uv);\n"
      "}\n";
 
+@interface MaruKeyCaptureView : NSView {
+@public
+    MaruKeyDownSmokeResult *_result;
+}
+- (instancetype)initWithFrame:(NSRect)frame result:(MaruKeyDownSmokeResult *)result;
+@end
+
+@implementation MaruKeyCaptureView
+
+- (instancetype)initWithFrame:(NSRect)frame result:(MaruKeyDownSmokeResult *)result {
+    self = [super initWithFrame:frame];
+    if (self != nil) {
+        _result = result;
+    }
+    return self;
+}
+
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+
+- (void)keyDown:(NSEvent *)event {
+    if (_result == NULL) {
+        return;
+    }
+
+    _result->key_down_received = 1;
+    NSEventModifierFlags flags = [event modifierFlags];
+    _result->modifier_shift = (flags & NSEventModifierFlagShift) ? 1 : 0;
+    _result->modifier_control = (flags & NSEventModifierFlagControl) ? 1 : 0;
+    _result->modifier_option = (flags & NSEventModifierFlagOption) ? 1 : 0;
+    _result->modifier_command = (flags & NSEventModifierFlagCommand) ? 1 : 0;
+
+    NSString *characters = [event charactersIgnoringModifiers];
+    if ([characters length] > 0) {
+        // 이번 smoke는 Cmd+B처럼 단일 BMP 문자를 검증한다. IME, dead key, surrogate
+        // pair는 제품 key bridge 단계에서 별도 계약으로 다룬다.
+        _result->codepoint = (uint32_t)[characters characterAtIndex:0];
+    }
+}
+
+@end
+
 static void maru_pump_app_once(void) {
     NSDate *until = [NSDate dateWithTimeIntervalSinceNow:0.016];
     NSEvent *event = [NSApp
@@ -120,6 +174,101 @@ static void maru_pump_app_once(void) {
     }
     [NSApp updateWindows];
     [CATransaction flush];
+}
+
+void maru_macos_keydown_smoke_run(uint32_t duration_ms, MaruKeyDownSmokeResult *result) {
+    result->status = -1;
+    result->window_visible = 0;
+    result->key_down_received = 0;
+    result->codepoint = 0;
+    result->modifier_shift = 0;
+    result->modifier_control = 0;
+    result->modifier_option = 0;
+    result->modifier_command = 0;
+
+    @autoreleasepool {
+        // 이 smoke는 실제 사용자의 물리 키보드 입력이 아니라 AppKit event queue가
+        // `keyDown:`을 view에 전달할 수 있는지를 고정한다. Zig app host가 이미
+        // app-vs-terminal 정책을 소유하므로 native 쪽은 normalized payload만 만든다.
+        [NSApplication sharedApplication];
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [NSApp finishLaunching];
+
+        if ([[NSScreen screens] count] == 0) {
+            result->status = 2;
+            return;
+        }
+
+        NSRect frame = NSMakeRect(180.0, 180.0, 320.0, 120.0);
+        NSWindow *window = [[NSWindow alloc]
+            initWithContentRect:frame
+                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+                        backing:NSBackingStoreBuffered
+                          defer:NO];
+        if (window == nil) {
+            result->status = 1;
+            return;
+        }
+
+        MaruKeyCaptureView *view = [[MaruKeyCaptureView alloc] initWithFrame:frame result:result];
+        if (view == nil) {
+            result->status = 3;
+            return;
+        }
+
+        [window setTitle:@"Maru keyDown smoke"];
+        [window setReleasedWhenClosed:NO];
+        [window setContentView:view];
+        [window makeKeyAndOrderFront:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+        if (![window makeFirstResponder:view]) {
+            result->status = 4;
+            [window orderOut:nil];
+            return;
+        }
+
+        result->window_visible = [window isVisible] ? 1 : 0;
+        NSEvent *event = [NSEvent
+            keyEventWithType:NSEventTypeKeyDown
+                    location:NSMakePoint(8.0, 8.0)
+               modifierFlags:NSEventModifierFlagCommand
+                   timestamp:0.0
+                windowNumber:[window windowNumber]
+                     context:nil
+                  characters:@"b"
+ charactersIgnoringModifiers:@"b"
+                   isARepeat:NO
+                     keyCode:11];
+        if (event == nil) {
+            result->status = 5;
+            [window orderOut:nil];
+            return;
+        }
+        [NSApp postEvent:event atStart:NO];
+
+        NSTimeInterval seconds = ((NSTimeInterval)duration_ms) / 1000.0;
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
+        do {
+            @autoreleasepool {
+                maru_pump_app_once();
+            }
+        } while (result->key_down_received == 0 &&
+                 [[NSDate date] compare:deadline] == NSOrderedAscending);
+
+        const BOOL visible = [window isVisible];
+        result->window_visible = visible ? 1 : 0;
+        [window orderOut:nil];
+
+        if (!visible) {
+            result->status = 6;
+            return;
+        }
+        if (result->key_down_received == 0 || result->codepoint == 0) {
+            result->status = 7;
+            return;
+        }
+        result->status = 0;
+    }
 }
 
 static id<MTLRenderPipelineState> maru_make_cell_pipeline(

@@ -361,7 +361,7 @@ fn buildGlyphFrameProbeWithRasterizer(
     var coretext_records: std.ArrayList(coretext_font.CoreTextGlyphRecord) = .empty;
     defer coretext_records.deinit(allocator);
     try coretext_records.ensureTotalCapacity(allocator, records.len);
-    for (records) |record| {
+    for (records) |*record| {
         coretext_records.appendAssumeCapacity(coreTextGlyphRecordForProbe(record));
     }
 
@@ -374,7 +374,6 @@ fn buildGlyphFrameProbeWithRasterizer(
         font_registry,
     );
     defer shaped.deinit(allocator);
-
     var probe_draw_list = try coretext_shaper.buildProbeDrawListFromCoreTextGlyphs(
         allocator,
         coretext_records.items,
@@ -541,7 +540,7 @@ const CoreTextSmokeGlyphRasterizer = struct {
     }
 };
 
-fn coreTextGlyphRecordForProbe(record: NativeGlyphRecord) coretext_font.CoreTextGlyphRecord {
+fn coreTextGlyphRecordForProbe(record: *const NativeGlyphRecord) coretext_font.CoreTextGlyphRecord {
     return .{
         .row = 0,
         .col = @intCast(@min(record.string_index, std.math.maxInt(u16))),
@@ -562,8 +561,9 @@ fn shapedRecordForCoreTextProbe(
     // 테스트는 native smoke record가 어떤 순서로 변환되는지 읽기 쉬워야 한다.
     // CoreText 전용 record 변환과 renderer 중립 record 변환을 한 곳에 묶어,
     // 테스트 본문이 변환 파이프라인의 중첩 괄호보다 검증 의도에 집중하게 한다.
+    const stable_record = record;
     return coretext_font.shapedRecordFromCoreTextGlyph(
-        coreTextGlyphRecordForProbe(record),
+        coreTextGlyphRecordForProbe(&stable_record),
         font_registry,
     );
 }
@@ -596,7 +596,7 @@ fn shapedGlyphRunForTest(
     var font_registry = renderer.FontIdentityRegistry.init(allocator);
     defer font_registry.deinit();
 
-    const shaped = [_]coretext_font.CoreTextGlyphRecord{coreTextGlyphRecordForProbe(record)};
+    const shaped = [_]coretext_font.CoreTextGlyphRecord{coreTextGlyphRecordForProbe(&record)};
     const surface = coretext_shaper.deriveProbeSurfaceFromCoreTextGlyphs(&shaped);
     return coretext_shaper.buildGlyphRunListFromCoreTextGlyphs(
         allocator,
@@ -607,7 +607,7 @@ fn shapedGlyphRunForTest(
     );
 }
 
-fn codepointForProbeRecord(record: NativeGlyphRecord) u21 {
+fn codepointForProbeRecord(record: *const NativeGlyphRecord) u21 {
     return switch (record.category) {
         @intFromEnum(NativeGlyphCategory.ascii) => switch (record.string_index) {
             0 => 'M',
@@ -970,6 +970,23 @@ test "CoreText smoke rounds resolved font size into atlas cache key" {
 
     try std.testing.expectEqual(@as(usize, 1), shaped.runs.glyphs.len);
     try std.testing.expectEqual(@as(u16, 17), shaped.runs.glyphs[0].cache_key.font_size_px);
+}
+
+test "CoreText smoke probe record keeps font names tied to caller storage" {
+    // `CoreTextGlyphRecord.font_name`은 slice라서 문자열을 소유하지 않는다. native record를
+    // 값으로 받아 그 stack copy를 가리키게 만들면, 실제 shaper가 나중에 registry에 intern할
+    // 때 깨진 PostScript name을 복사하고 rasterizer가 모든 glyph를 실패시킨다. 그래서
+    // 변환 helper는 caller가 소유한 native buffer를 직접 가리키는 포인터 입력만 받는다.
+    const native = nativeGlyphRecordForTest(.{
+        .glyph_id = 42,
+        .string_index = 0,
+        .category = .ascii,
+        .font_name = "Menlo-Regular",
+    });
+    const record = coreTextGlyphRecordForProbe(&native);
+
+    try std.testing.expectEqualStrings("Menlo-Regular", record.font_name);
+    try std.testing.expectEqual(@intFromPtr(&native.font_name[0]), @intFromPtr(record.font_name.ptr));
 }
 
 test "CoreText smoke uses font identity registry instead of native record ids" {

@@ -620,9 +620,11 @@ fn shapedRecordForCoreTextProbe(
     record: NativeGlyphRecord,
     font_registry: *renderer.FontIdentityRegistry,
 ) !renderer.ShapedGlyphRecord {
-    const font_id = try font_registry.intern(.{
-        .postscript_name = cStringField(&record.font_name),
-    });
+    const drawable = drawableCoreTextProbeRecord(record);
+    const font_id: renderer.FontId = if (drawable)
+        try font_registry.intern(.{ .postscript_name = cStringField(&record.font_name) })
+    else
+        0;
 
     return .{
         .row = 0,
@@ -633,8 +635,12 @@ fn shapedRecordForCoreTextProbe(
         .glyph_id = record.glyph_id,
         .fallback = record.fallback != 0,
         .color_glyph_kind = colorGlyphKindForCoreTextProbe(record.category),
-        .drawable = record.glyph_id != 0 and record.category != @intFromEnum(NativeGlyphCategory.space),
+        .drawable = drawable,
     };
+}
+
+fn drawableCoreTextProbeRecord(record: NativeGlyphRecord) bool {
+    return record.glyph_id != 0 and record.category != @intFromEnum(NativeGlyphCategory.space);
 }
 
 fn cellWidthForCoreTextProbe(category: u32) u2 {
@@ -1071,6 +1077,71 @@ test "CoreText smoke uses font identity registry instead of native record ids" {
     try std.testing.expectEqual(@as(usize, 2), font_registry.count());
     try std.testing.expect(primary.font_id != cjk.font_id);
     try std.testing.expectEqual(primary.font_id, primary_again.font_id);
+}
+
+test "CoreText smoke only interns drawable font identities" {
+    // font_identity_count는 rasterizer가 실제로 조회할 face 수를 뜻해야 한다. 공백처럼
+    // glyph bitmap을 만들지 않는 record까지 registry에 넣으면 summary가 "그릴 font"보다
+    // 큰 숫자를 보고해 wrong-glyph 디버깅 신호가 흐려진다.
+    var font_registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
+    defer font_registry.deinit();
+
+    const primary = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+        .native_font_id = 99,
+        .glyph_id = 42,
+        .string_index = 0,
+        .category = .ascii,
+        .font_name = "Menlo-Regular",
+    }), &font_registry);
+    const space = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+        .native_font_id = 100,
+        .glyph_id = 5,
+        .string_index = 4,
+        .category = .space,
+        .font_name = "SpaceOnlyFallback-Regular",
+    }), &font_registry);
+
+    try std.testing.expect(primary.drawable);
+    try std.testing.expect(!space.drawable);
+    try std.testing.expectEqual(@as(renderer.FontId, 0), space.font_id);
+    try std.testing.expectEqual(@as(usize, 1), font_registry.count());
+}
+
+test "CoreText smoke ignores empty font names on non-drawable records" {
+    // native bridge가 공백 record의 font name을 못 적어도 rasterizer에는 도달하지 않는다.
+    // 이 경우 Zig adapter가 EmptyPostScriptName으로 summary 생성을 중단하면 진짜 원인인
+    // shape/raster 단계가 아니라 진단 경계에서 smoke가 죽는다.
+    var font_registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
+    defer font_registry.deinit();
+
+    const space = try shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+        .glyph_id = 5,
+        .string_index = 4,
+        .category = .space,
+        .font_name = "",
+    }), &font_registry);
+
+    try std.testing.expect(!space.drawable);
+    try std.testing.expectEqual(@as(renderer.FontId, 0), space.font_id);
+    try std.testing.expectEqual(@as(usize, 0), font_registry.count());
+}
+
+test "CoreText smoke rejects empty font names on drawable records" {
+    // drawable glyph의 glyph_id는 font-relative 값이다. PostScript name 없이 임시 FontId를
+    // 만들면 rasterizer가 어느 CTFont에 그 glyph_id를 적용해야 하는지 알 수 없으므로,
+    // 이 입력은 fallback이 아니라 명시적인 계약 위반이다.
+    var font_registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
+    defer font_registry.deinit();
+
+    try std.testing.expectError(
+        renderer.FontIdentityError.EmptyPostScriptName,
+        shapedRecordForCoreTextProbe(nativeGlyphRecordForTest(.{
+            .glyph_id = 42,
+            .string_index = 0,
+            .category = .ascii,
+            .font_name = "",
+        }), &font_registry),
+    );
 }
 
 test "CoreText smoke shaped record font id resolves back to its PostScript name" {

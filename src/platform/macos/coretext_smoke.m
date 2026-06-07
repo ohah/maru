@@ -76,17 +76,19 @@ static void maru_clear_result(MaruCoreTextSmokeResult *result) {
     result->first_fallback_font_name[0] = '\0';
 }
 
-static void maru_copy_cfstring(CFStringRef value, char *buffer, size_t capacity) {
+static bool maru_copy_cfstring(CFStringRef value, char *buffer, size_t capacity) {
     if (capacity == 0) {
-        return;
+        return false;
     }
     buffer[0] = '\0';
     if (value == NULL) {
-        return;
+        return false;
     }
     if (!CFStringGetCString(value, buffer, capacity, kCFStringEncodingUTF8)) {
         buffer[0] = '\0';
+        return false;
     }
+    return true;
 }
 
 static CFStringRef maru_create_probe_string(void) {
@@ -167,6 +169,20 @@ static bool maru_font_matches_requested(CTFontRef font, CFStringRef requested_na
         CFRelease(full_name);
     }
 
+    return matched;
+}
+
+static bool maru_font_postscript_name_matches(CTFontRef font, CFStringRef expected_name) {
+    if (font == NULL || expected_name == NULL) {
+        return false;
+    }
+
+    bool matched = false;
+    CFStringRef actual_name = CTFontCopyPostScriptName(font);
+    if (actual_name != NULL) {
+        matched = CFStringCompare(actual_name, expected_name, 0) == kCFCompareEqualTo;
+        CFRelease(actual_name);
+    }
     return matched;
 }
 
@@ -303,13 +319,23 @@ static void maru_append_glyph_record(
         return;
     }
 
+    const uint32_t category = maru_category_for_string_index(string_index);
+    const bool drawable = glyph != 0 && category != MaruGlyphCategorySpace;
+
     MaruCoreTextGlyphRecord *record = &records[result->glyph_record_count];
     record->font_id = font_id;
     record->glyph_id = (uint32_t)glyph;
     record->string_index = maru_u32_from_cfindex(string_index);
-    record->category = maru_category_for_string_index(string_index);
+    record->category = category;
     record->fallback = fallback;
-    maru_copy_cfstring(font_name, record->font_name, sizeof(record->font_name));
+    if (!maru_copy_cfstring(font_name, record->font_name, sizeof(record->font_name)) && drawable) {
+        // Drawable glyph의 PostScript name이 없으면 Zig registry가 어떤 face의 glyph인지
+        // 알 수 없다. 공백처럼 rasterizer까지 가지 않는 record는 best-effort 진단으로
+        // 남기지만, 실제 glyph는 wrong-glyph를 만들기 전에 incomplete shape로 닫는다.
+        result->glyph_record_overflow = 1;
+        record->font_name[0] = '\0';
+        return;
+    }
     result->glyph_record_count += 1;
 }
 
@@ -482,6 +508,12 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         if (draw_font == NULL) {
             CFRelease(draw_font_name);
             result->status = 4;
+            return;
+        }
+        if (!maru_font_postscript_name_matches(draw_font, draw_font_name)) {
+            CFRelease(draw_font);
+            CFRelease(draw_font_name);
+            result->status = 8;
             return;
         }
 

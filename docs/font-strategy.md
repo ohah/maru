@@ -33,7 +33,7 @@ RenderSnapshot
 - `DrawList`의 cell을 `GlyphRunList` 후보로 바꾼다. `DrawList`는 `RenderSnapshot`에서 온 renderer 입력 계약이다.
 - 같은 terminal cell이 같은 layout 결과를 만들도록 deterministic한 입력 계약을 유지한다.
 - CoreText 타입을 public contract로 노출하지 않는다.
-- native shaper가 준 font id/glyph id 후보는 `ShapedGlyphRecord` 같은 renderer 중립 record로 한 번 바꾼 뒤 `GlyphRunList`를 만든다. 이 adapter가 필요한 이유는 CoreText smoke, future 제품 CoreText shaper, future HarfBuzz shaper가 같은 frame 준비 계약을 쓰게 하기 위해서다.
+- native shaper가 준 font id/glyph id 후보는 `ShapedGlyphRecord` 같은 renderer 중립 record로 한 번 바꾼 뒤 `GlyphRunList`를 만든다. 이 adapter가 필요한 이유는 CoreText smoke, future 제품 CoreText shaper, future HarfBuzz shaper가 같은 frame 준비 계약을 쓰게 하기 위해서다. 단, 제품 shaper 경로는 `DrawList`의 size/cursor/dirty/overlay metadata를 `ShapedGlyphSurface`로 함께 넘겨야 한다. probe처럼 record 위치만 보고 metadata를 유도하면 실제 terminal surface의 빈 행, cursor, overlay가 사라질 수 있다.
 
 `FontResolver / TextShaper`:
 
@@ -249,7 +249,7 @@ dirty region의 장기 목표는 cell 단위지만, 현재 `TerminalCore`/snapsh
 - font 변경이 전체 redraw/invalidation event를 만드는 test.
 - raw config의 font/theme/cursor 값이 `ResolvedAppearance`로 검증되는 test.
 - renderer가 `TerminalCore`, `PtySession`, platform handle을 직접 import하지 않는 boundary test.
-- native shaper 결과를 `ShapedGlyphRecord -> GlyphRunList`로 변환하는 adapter test. 이 테스트는 space/.notdef 필터링, CJK/emoji cell width, fallback/color glyph count, cache key size/scale 전달을 GPU 없이 고정한다.
+- native shaper 결과를 `ShapedGlyphRecord -> GlyphRunList`로 변환하는 adapter test. 이 테스트는 space/.notdef 필터링, CJK/emoji cell width, fallback/color glyph count, cache key size/scale 전달을 GPU 없이 고정한다. 제품 경로용 adapter는 `ShapedGlyphSurface`를 받아 `DrawList`의 size/cursor/dirty/overlay가 보존되는지도 검증한다.
 
 macOS opt-in으로 둘 것:
 

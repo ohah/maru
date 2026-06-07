@@ -29,6 +29,13 @@ pub const ShapedGlyphRunList = struct {
     }
 };
 
+pub const ShapedGlyphSurface = struct {
+    size: terminal.Size,
+    cursor: terminal.Cursor = .{},
+    dirty: ?terminal.DirtyRegion = null,
+    overlays: []const draw_list.DrawOverlay = &.{},
+};
+
 pub fn buildGlyphRunListFromShapedRecords(
     allocator: std.mem.Allocator,
     records: []const ShapedGlyphRecord,
@@ -38,6 +45,19 @@ pub fn buildGlyphRunListFromShapedRecords(
     // renderer 중립 record 형태로 모여야 한다. 그래야 `GlyphRunList`에 native font
     // 타입이 새지 않고, Metal과 future WebGPU backend가 같은 renderer-domain 데이터를
     // 소비할 수 있다.
+    const derived = derivedSurfaceFromRecords(records);
+    return buildGlyphRunListFromShapedRecordsWithSurface(allocator, records, config, derived);
+}
+
+pub fn buildGlyphRunListFromShapedRecordsWithSurface(
+    allocator: std.mem.Allocator,
+    records: []const ShapedGlyphRecord,
+    config: glyph_layout.TextLayoutConfig,
+    surface: ShapedGlyphSurface,
+) !ShapedGlyphRunList {
+    // 제품 shaper 경로에서는 `DrawList`가 이미 surface size, cursor, dirty, overlay를
+    // 소유한다. native shaper record만 보고 이 값을 다시 유도하면 trailing blank rows,
+    // cursor overlay, underline overlay가 조용히 사라질 수 있으므로 명시적으로 전달받는다.
     var glyphs: std.ArrayList(glyph_layout.GlyphRun) = .empty;
     errdefer glyphs.deinit(allocator);
     try glyphs.ensureTotalCapacity(allocator, records.len);
@@ -46,8 +66,6 @@ pub fn buildGlyphRunListFromShapedRecords(
     var replacement_count: usize = 0;
     var color_glyph_count: usize = 0;
     var skipped_count: usize = 0;
-    var max_row: u16 = 0;
-    var max_col: u16 = 0;
 
     for (records) |record| {
         if (!record.drawable or record.glyph_id == 0 or record.cell_width == 0) {
@@ -55,14 +73,11 @@ pub fn buildGlyphRunListFromShapedRecords(
             continue;
         }
 
+        try validateRecordWithinSurface(record, surface.size);
+
         if (record.fallback) fallback_count += 1;
         if (record.replacement) replacement_count += 1;
         if (record.color_glyph_kind == .color) color_glyph_count += 1;
-
-        const end_col = std.math.add(u16, record.col, @as(u16, record.cell_width)) catch
-            std.math.maxInt(u16);
-        max_row = @max(max_row, record.row);
-        max_col = @max(max_col, end_col);
 
         const flags = glyph_layout.rasterStyleFlags(record.style);
         glyphs.appendAssumeCapacity(.{
@@ -89,17 +104,14 @@ pub fn buildGlyphRunListFromShapedRecords(
 
     const glyph_slice = try glyphs.toOwnedSlice(allocator);
     errdefer allocator.free(glyph_slice);
-    const overlays = try allocator.alloc(draw_list.DrawOverlay, 0);
+    const overlays = try allocator.dupe(draw_list.DrawOverlay, surface.overlays);
     errdefer allocator.free(overlays);
-
-    const rows: u16 = if (glyph_slice.len > 0) std.math.add(u16, max_row, 1) catch
-        std.math.maxInt(u16) else 1;
 
     return .{
         .runs = .{
-            .size = .{ .cols = @max(max_col, 1), .rows = rows },
-            .cursor = .{},
-            .dirty = if (glyph_slice.len > 0) .{ .start_row = 0, .end_row = rows - 1 } else null,
+            .size = surface.size,
+            .cursor = surface.cursor,
+            .dirty = surface.dirty,
             .glyphs = glyph_slice,
             .overlays = overlays,
             .fallback_count = fallback_count,
@@ -108,6 +120,44 @@ pub fn buildGlyphRunListFromShapedRecords(
         .color_glyph_count = color_glyph_count,
         .skipped_count = skipped_count,
     };
+}
+
+fn derivedSurfaceFromRecords(records: []const ShapedGlyphRecord) ShapedGlyphSurface {
+    // CoreText smoke 같은 probe 경로는 DrawList가 없으므로 drawable record 위치에서 최소
+    // surface metadata를 만든다. 제품 경로는 이 helper를 쓰지 않고 `DrawList` metadata를
+    // 직접 넘겨 trailing blank 영역과 overlay를 보존해야 한다.
+    var max_row: u16 = 0;
+    var max_col: u16 = 0;
+    var any_drawable = false;
+
+    for (records) |record| {
+        if (!record.drawable or record.glyph_id == 0 or record.cell_width == 0) continue;
+
+        any_drawable = true;
+        const end_col = std.math.add(u16, record.col, @as(u16, record.cell_width)) catch
+            std.math.maxInt(u16);
+        max_row = @max(max_row, record.row);
+        max_col = @max(max_col, end_col);
+    }
+
+    const rows: u16 = if (any_drawable) std.math.add(u16, max_row, 1) catch
+        std.math.maxInt(u16) else 1;
+
+    return .{
+        .size = .{
+            .cols = @max(max_col, 1),
+            .rows = rows,
+        },
+        .dirty = if (any_drawable) .{ .start_row = 0, .end_row = rows - 1 } else null,
+    };
+}
+
+fn validateRecordWithinSurface(record: ShapedGlyphRecord, size: terminal.Size) !void {
+    if (size.cols == 0 or size.rows == 0) return error.ShapedRecordOutsideSurface;
+    if (record.row >= size.rows or record.col >= size.cols) return error.ShapedRecordOutsideSurface;
+    const end_col = std.math.add(u16, record.col, @as(u16, record.cell_width)) catch
+        return error.ShapedRecordOutsideSurface;
+    if (end_col > size.cols) return error.ShapedRecordOutsideSurface;
 }
 
 test "shaped records build backend neutral glyph runs" {
@@ -132,6 +182,56 @@ test "shaped records build backend neutral glyph runs" {
     try std.testing.expectEqual(@as(glyph_layout.ColorGlyphKind, .color), result.runs.glyphs[2].cache_key.color_glyph_kind);
     try std.testing.expectEqual(@as(u16, 17), result.runs.glyphs[0].cache_key.font_size_px);
     try std.testing.expectEqual(@as(u16, 2), result.runs.glyphs[0].cache_key.device_scale);
+}
+
+test "shaped records preserve product surface metadata when provided" {
+    // 실제 제품 shaper는 `DrawList`의 surface metadata를 그대로 보존해야 한다. record만
+    // 보고 size/dirty를 재계산하면 빈 trailing row, cursor 위치, underline overlay가
+    // 사라져 resize와 overlay redraw가 실제 앱에서 틀어진다.
+    const overlays = [_]draw_list.DrawOverlay{
+        .{ .cursor = .{ .row = 5, .col = 6 } },
+        .{ .underline = .{ .row = 4, .col = 2, .width = 1 } },
+    };
+    const records = [_]ShapedGlyphRecord{
+        .{ .row = 4, .col = 2, .codepoint = 'A', .font_id = 1, .glyph_id = 10 },
+    };
+
+    var result = try buildGlyphRunListFromShapedRecordsWithSurface(
+        std.testing.allocator,
+        &records,
+        .{},
+        .{
+            .size = .{ .cols = 80, .rows = 24 },
+            .cursor = .{ .row = 5, .col = 6, .visible = true },
+            .dirty = .{ .start_row = 4, .end_row = 5 },
+            .overlays = &overlays,
+        },
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 24 }, result.runs.size);
+    try std.testing.expectEqual(terminal.Cursor{ .row = 5, .col = 6, .visible = true }, result.runs.cursor);
+    try std.testing.expectEqual(terminal.DirtyRegion{ .start_row = 4, .end_row = 5 }, result.runs.dirty.?);
+    try std.testing.expectEqual(@as(usize, 2), result.runs.overlays.len);
+    try std.testing.expectEqual(@as(u16, 4), result.runs.glyphs[0].row);
+}
+
+test "shaped records reject drawable glyphs outside the provided surface" {
+    // native shaper가 surface 밖 glyph를 돌려주면 renderer가 조용히 더 큰 surface를 만들면
+    // 안 된다. 그런 상태는 size 계산 버그이므로 제품 경계에서 바로 실패시킨다.
+    const records = [_]ShapedGlyphRecord{
+        .{ .row = 0, .col = 9, .cell_width = 2, .codepoint = '한', .font_id = 1, .glyph_id = 10 },
+    };
+
+    try std.testing.expectError(
+        error.ShapedRecordOutsideSurface,
+        buildGlyphRunListFromShapedRecordsWithSurface(
+            std.testing.allocator,
+            &records,
+            .{},
+            .{ .size = .{ .cols = 10, .rows = 1 } },
+        ),
+    );
 }
 
 test "shaped records filter non drawable records before atlas preparation" {

@@ -117,8 +117,9 @@ pub fn buildGlyphRunList(
     // 같은 glyph run을 소비할 수 있다.
     //
     // shaper는 `shape(draw_list.DrawCell) ShapeResult`를 제공하는 값이면 된다(anytype).
-    // FakeFontBackend가 그 계약의 기준 구현이고, 실제 CoreText shaper도 같은 시그니처로
-    // 이 자리에 들어온다. anytype 뒤에 숨은 기대 시그니처를 이 주석으로 한곳에 고정한다.
+    // 이 함수는 deterministic fake/backend 테스트와 간단한 probe를 위한 per-cell 경로다.
+    // 실제 CoreText 제품 shaper는 줄/런 단위 결과를 `ShapedGlyphRecord -> GlyphRunList`로
+    // 만든 뒤 `RendererState.buildFrameFromGlyphRunList`로 들어간다.
     var glyphs: std.ArrayList(GlyphRun) = .empty;
     errdefer glyphs.deinit(allocator);
     try glyphs.ensureTotalCapacity(allocator, list.cells.len);

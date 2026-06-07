@@ -6,6 +6,7 @@ const renderer = maru.renderer;
 const artifact_dir = "zig-out/maru-macos-coretext-smoke";
 const font_name_capacity = 128;
 const glyph_record_capacity = 64;
+const renderer_probe_shaper = "coretext_shaped_records";
 
 const NativeCoreTextSmokeResult = extern struct {
     status: c_int,
@@ -233,6 +234,14 @@ fn renderSummary(
     try writer.print("glyph_frame_evicted_count={d}\n", .{glyph_frame_probe.evicted_count});
     try writer.print("glyph_frame_fallback_count={d}\n", .{glyph_frame_probe.fallback_count});
     try writer.print("glyph_frame_replacement_count={d}\n", .{glyph_frame_probe.replacement_count});
+    try writer.writeAll("renderer_input=coretext_shaped_glyph_run_list\n");
+    try writer.print("renderer_frame_prepared={}\n", .{glyph_frame_probe.renderer_frame_prepared});
+    try writer.print("renderer_frame_consistent={}\n", .{glyph_frame_probe.renderer_frame_consistent});
+    try writer.print("renderer_glyph_uv_ready={}\n", .{glyph_frame_probe.renderer_glyph_uv_ready});
+    try writer.print("renderer_glyph_raster_ready={}\n", .{glyph_frame_probe.renderer_glyph_raster_ready});
+    try writer.print("renderer_draw_cells={d}\n", .{glyph_frame_probe.renderer_draw_cells});
+    try writer.print("renderer_draw_overlays={d}\n", .{glyph_frame_probe.renderer_draw_overlays});
+    try writer.print("renderer_shaper={s}\n", .{glyph_frame_probe.renderer_shaper});
     try writer.print("primary_font_name={s}\n", .{cStringField(&native.primary_font_name)});
     try writer.print("first_fallback_font_name={s}\n", .{cStringField(&native.first_fallback_font_name)});
 
@@ -253,6 +262,13 @@ const GlyphFrameProbe = struct {
     evicted_count: usize,
     fallback_count: usize,
     replacement_count: usize,
+    renderer_frame_prepared: bool,
+    renderer_frame_consistent: bool,
+    renderer_glyph_uv_ready: bool,
+    renderer_glyph_raster_ready: bool,
+    renderer_draw_cells: usize,
+    renderer_draw_overlays: usize,
+    renderer_shaper: []const u8 = renderer_probe_shaper,
 };
 
 fn buildGlyphFrameProbe(
@@ -261,53 +277,128 @@ fn buildGlyphFrameProbe(
     native: NativeCoreTextSmokeResult,
     records: []const NativeGlyphRecord,
 ) !GlyphFrameProbe {
-    // 이 단계는 아직 bitmap을 rasterize하지 않는다. 대신 CoreText가 준 실제
-    // font_id/glyph_id 후보를 Maru의 제품 renderer 계약인 `GlyphRunList -> GlyphFrame`
-    // 경로에 태운다. 그래야 다음 Metal text draw에서 "폰트는 됐는데 frame/atlas 준비가
-    // 안 됐다" 같은 원인을 summary로 분리할 수 있다.
-    var shaped_records: std.ArrayList(renderer.ShapedGlyphRecord) = .empty;
-    defer shaped_records.deinit(allocator);
-    try shaped_records.ensureTotalCapacity(allocator, records.len);
+    const shape_complete = hasNativeShapeFields(native);
+    if (!shape_complete) return emptyGlyphFrameProbe();
 
+    // 이 단계는 아직 제품 CoreText bitmap을 Metal cell renderer에 연결하지 않는다. 대신
+    // CoreText가 준 실제 font_id/glyph_id 후보를 Maru의 제품 renderer state 계약인
+    // `ShapedGlyphRecord -> GlyphRunList -> RendererState -> RenderFrame` 경로에 태운다.
+    // 그래야 다음 Metal text draw에서 "폰트는 됐는데 frame/atlas/UV/raster 준비가 안 됐다"
+    // 같은 원인을 summary로 분리할 수 있다.
+    var native_shaped_records: std.ArrayList(renderer.ShapedGlyphRecord) = .empty;
+    defer native_shaped_records.deinit(allocator);
+    try native_shaped_records.ensureTotalCapacity(allocator, records.len);
     for (records) |record| {
-        shaped_records.appendAssumeCapacity(shapedRecordForCoreTextProbe(record));
+        native_shaped_records.appendAssumeCapacity(shapedRecordForCoreTextProbe(record));
     }
 
     var shaped = try renderer.buildGlyphRunListFromShapedRecords(
         allocator,
-        shaped_records.items,
+        native_shaped_records.items,
         renderer.textConfigFromFontSize(appearance.font.size, 1),
     );
     defer shaped.deinit(allocator);
 
-    var atlas = renderer.GlyphAtlas.init(allocator, .{});
-    defer atlas.deinit();
+    var probe_draw_list = try drawListFromShapedRecords(allocator, native_shaped_records.items, shaped.runs);
+    var probe_draw_list_owned = true;
+    errdefer if (probe_draw_list_owned) probe_draw_list.deinit(allocator);
 
-    var frame = try renderer.prepareGlyphFrame(allocator, shaped.runs, &atlas);
+    var renderer_state = renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
+
+    var frame = try renderer_state.buildFrameFromGlyphRunList(allocator, probe_draw_list, shaped.runs);
+    probe_draw_list_owned = false;
     defer frame.deinit(allocator);
 
-    const shape_complete = hasNativeShapeFields(native);
-
     const probe: GlyphFrameProbe = .{
-        .atlas_keys_ready = shape_complete and
-            frame.stats.glyph_count > 0 and
-            atlas.entryCount() > 0,
-        .glyph_frame_ready = shape_complete and
-            frame.glyphs.len == frame.stats.glyph_count and
-            frame.stats.glyph_count > 0,
-        .drawable_glyph_count = frame.stats.glyph_count,
-        .entry_count = atlas.entryCount(),
-        .upload_candidates = frame.stats.upload_count,
-        .upload_bytes = frame.stats.upload_bytes,
+        .atlas_keys_ready = frame.glyph_frame.stats.glyph_count > 0 and
+            renderer_state.atlas.entryCount() > 0,
+        .glyph_frame_ready = frame.glyph_frame.glyphs.len == frame.glyph_frame.stats.glyph_count and
+            frame.glyph_frame.stats.glyph_count > 0,
+        .drawable_glyph_count = frame.glyph_frame.stats.glyph_count,
+        .entry_count = renderer_state.atlas.entryCount(),
+        .upload_candidates = frame.glyph_frame.stats.upload_count,
+        .upload_bytes = frame.glyph_frame.stats.upload_bytes,
         .color_glyph_count = shaped.color_glyph_count,
-        .glyph_count = frame.stats.glyph_count,
-        .upload_count = frame.stats.upload_count,
-        .reused_count = frame.stats.reused_count,
-        .evicted_count = frame.stats.evicted_count,
-        .fallback_count = frame.stats.fallback_count,
-        .replacement_count = frame.stats.replacement_count,
+        .glyph_count = frame.glyph_frame.stats.glyph_count,
+        .upload_count = frame.glyph_frame.stats.upload_count,
+        .reused_count = frame.glyph_frame.stats.reused_count,
+        .evicted_count = frame.glyph_frame.stats.evicted_count,
+        .fallback_count = frame.glyph_frame.stats.fallback_count,
+        .replacement_count = frame.glyph_frame.stats.replacement_count,
+        .renderer_frame_prepared = frame.glyphFrameConsistent() and
+            frame.glyph_quad_frame.stats.ready() and
+            frame.glyph_raster_frame.stats.ready() and
+            renderer_state.atlas.entryCount() > 0,
+        .renderer_frame_consistent = frame.glyphFrameConsistent(),
+        .renderer_glyph_uv_ready = frame.glyph_quad_frame.stats.ready(),
+        .renderer_glyph_raster_ready = frame.glyph_raster_frame.stats.ready(),
+        .renderer_draw_cells = frame.draw_list.cells.len,
+        .renderer_draw_overlays = frame.draw_list.overlays.len,
     };
     return probe;
+}
+
+fn emptyGlyphFrameProbe() GlyphFrameProbe {
+    return .{
+        .atlas_keys_ready = false,
+        .glyph_frame_ready = false,
+        .drawable_glyph_count = 0,
+        .entry_count = 0,
+        .upload_candidates = 0,
+        .upload_bytes = 0,
+        .color_glyph_count = 0,
+        .glyph_count = 0,
+        .upload_count = 0,
+        .reused_count = 0,
+        .evicted_count = 0,
+        .fallback_count = 0,
+        .replacement_count = 0,
+        .renderer_frame_prepared = false,
+        .renderer_frame_consistent = false,
+        .renderer_glyph_uv_ready = false,
+        .renderer_glyph_raster_ready = false,
+        .renderer_draw_cells = 0,
+        .renderer_draw_overlays = 0,
+    };
+}
+
+fn drawListFromShapedRecords(
+    allocator: std.mem.Allocator,
+    records: []const renderer.ShapedGlyphRecord,
+    glyphs: renderer.GlyphRunList,
+) !renderer.DrawList {
+    // CoreText smoke에는 실제 TerminalCore snapshot에서 온 DrawList가 없다. 하지만 제품
+    // renderer state entrypoint는 성공하면 DrawList를 RenderFrame으로 이동시키는 계약이므로,
+    // native shaped record와 같은 surface metadata를 가진 최소 DrawList를 만들어 그
+    // ownership/consistency 경계를 검증한다. space record도 draw cell로 남겨 "shape된 입력"
+    // 전체가 frame artifact에 들어왔는지 볼 수 있게 한다.
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    try cells.ensureTotalCapacity(allocator, records.len);
+
+    for (records) |record| {
+        if (record.cell_width == 0) continue;
+        cells.appendAssumeCapacity(.{
+            .row = record.row,
+            .col = record.col,
+            .codepoint = record.codepoint,
+            .combining = record.combining,
+            .width = record.cell_width,
+            .style = record.style,
+        });
+    }
+
+    const overlays = try allocator.dupe(renderer.DrawOverlay, glyphs.overlays);
+    errdefer allocator.free(overlays);
+
+    return .{
+        .size = glyphs.size,
+        .cursor = glyphs.cursor,
+        .dirty = glyphs.dirty,
+        .cells = try cells.toOwnedSlice(allocator),
+        .overlays = overlays,
+    };
 }
 
 fn shapedRecordForCoreTextProbe(record: NativeGlyphRecord) renderer.ShapedGlyphRecord {
@@ -457,6 +548,14 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_frame_evicted_count=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_frame_fallback_count=2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_frame_replacement_count=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=coretext_shaped_glyph_run_list\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_prepared=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_consistent=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_uv_ready=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_ready=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_draw_cells=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_draw_overlays=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_shaper=coretext_shaped_records\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "primary_font_name=Menlo-Regular\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "first_fallback_font_name=AppleColorEmoji\n") != null);
 }
@@ -519,6 +618,10 @@ test "CoreText smoke keeps shaping and rasterization failures separate" {
     });
     try std.testing.expect(probe.atlas_keys_ready);
     try std.testing.expect(probe.glyph_frame_ready);
+    try std.testing.expect(probe.renderer_frame_prepared);
+    try std.testing.expect(probe.renderer_frame_consistent);
+    try std.testing.expect(probe.renderer_glyph_uv_ready);
+    try std.testing.expect(probe.renderer_glyph_raster_ready);
 }
 
 test "CoreText smoke treats native glyph-buffer overflow as incomplete shaping" {
@@ -550,6 +653,8 @@ test "CoreText smoke treats native glyph-buffer overflow as incomplete shaping" 
     });
     try std.testing.expect(!probe.atlas_keys_ready);
     try std.testing.expect(!probe.glyph_frame_ready);
+    try std.testing.expect(!probe.renderer_frame_prepared);
+    try std.testing.expect(!probe.renderer_frame_consistent);
 }
 
 test "CoreText smoke rejects missing font or empty glyph output" {
@@ -617,11 +722,15 @@ test "CoreText smoke glyph frame probe filters spaces and requires records" {
     try std.testing.expectEqual(@as(usize, 1), probe.entry_count);
     try std.testing.expectEqual(@as(usize, 1), probe.glyph_count);
     try std.testing.expectEqual(@as(usize, 1), probe.upload_count);
+    try std.testing.expect(probe.renderer_frame_prepared);
+    try std.testing.expectEqual(@as(usize, 2), probe.renderer_draw_cells);
+    try std.testing.expectEqualStrings(renderer_probe_shaper, probe.renderer_shaper);
 
     native.glyph_record_overflow = 1;
     const overflow_probe = try buildGlyphFrameProbe(std.testing.allocator, appearance, native, &records);
     try std.testing.expect(!overflow_probe.atlas_keys_ready);
     try std.testing.expect(!overflow_probe.glyph_frame_ready);
+    try std.testing.expect(!overflow_probe.renderer_frame_prepared);
 }
 
 test "CoreText smoke rounds resolved font size into atlas cache key" {

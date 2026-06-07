@@ -237,6 +237,8 @@ fn renderSummary(
     try writer.writeAll("renderer_input=coretext_shaped_glyph_run_list\n");
     try writer.print("renderer_frame_prepared={}\n", .{glyph_frame_probe.renderer_frame_prepared});
     try writer.print("renderer_frame_consistent={}\n", .{glyph_frame_probe.renderer_frame_consistent});
+    try writer.print("renderer_surface_cols={d}\n", .{glyph_frame_probe.renderer_surface_cols});
+    try writer.print("renderer_surface_rows={d}\n", .{glyph_frame_probe.renderer_surface_rows});
     try writer.print("renderer_glyph_uv_ready={}\n", .{glyph_frame_probe.renderer_glyph_uv_ready});
     try writer.print("renderer_glyph_raster_ready={}\n", .{glyph_frame_probe.renderer_glyph_raster_ready});
     try writer.print("renderer_draw_cells={d}\n", .{glyph_frame_probe.renderer_draw_cells});
@@ -264,6 +266,8 @@ const GlyphFrameProbe = struct {
     replacement_count: usize,
     renderer_frame_prepared: bool,
     renderer_frame_consistent: bool,
+    renderer_surface_cols: u16,
+    renderer_surface_rows: u16,
     renderer_glyph_uv_ready: bool,
     renderer_glyph_raster_ready: bool,
     renderer_draw_cells: usize,
@@ -292,10 +296,12 @@ fn buildGlyphFrameProbe(
         native_shaped_records.appendAssumeCapacity(shapedRecordForCoreTextProbe(record));
     }
 
-    var shaped = try renderer.buildGlyphRunListFromShapedRecords(
+    const probe_surface = probeSurfaceFromShapedRecords(native_shaped_records.items);
+    var shaped = try renderer.buildGlyphRunListFromShapedRecordsWithSurface(
         allocator,
         native_shaped_records.items,
         renderer.textConfigFromFontSize(appearance.font.size, 1),
+        probe_surface,
     );
     defer shaped.deinit(allocator);
 
@@ -334,6 +340,8 @@ fn buildGlyphFrameProbe(
         .replacement_count = frame.glyph_frame.stats.replacement_count,
         .renderer_frame_prepared = render_stats.prepared(),
         .renderer_frame_consistent = render_stats.consistent,
+        .renderer_surface_cols = render_stats.surface_cols,
+        .renderer_surface_rows = render_stats.surface_rows,
         .renderer_glyph_uv_ready = render_stats.glyph_uv_ready,
         .renderer_glyph_raster_ready = render_stats.glyph_raster_ready,
         .renderer_draw_cells = render_stats.draw_cells,
@@ -359,10 +367,44 @@ fn emptyGlyphFrameProbe() GlyphFrameProbe {
         .replacement_count = 0,
         .renderer_frame_prepared = false,
         .renderer_frame_consistent = false,
+        .renderer_surface_cols = 0,
+        .renderer_surface_rows = 0,
         .renderer_glyph_uv_ready = false,
         .renderer_glyph_raster_ready = false,
         .renderer_draw_cells = 0,
         .renderer_draw_overlays = 0,
+    };
+}
+
+fn probeSurfaceFromShapedRecords(records: []const renderer.ShapedGlyphRecord) renderer.ShapedGlyphSurface {
+    // CoreText smoke는 아직 실제 TerminalCore DrawList가 없어서 surface를 직접 만든다.
+    // 여기서는 drawable glyph만이 아니라 space 같은 non-drawable record도 포함해 bounds를
+    // 계산한다. 그래야 probe DrawList에 space cell을 남기더라도 col이 surface 밖으로 새는
+    // 거짓 artifact가 생기지 않는다. 제품 shaper는 이 helper가 아니라 실제 DrawList metadata를
+    // `buildGlyphRunListFromShapedRecordsWithSurface`에 넘겨야 한다.
+    var max_row: u16 = 0;
+    var max_col: u16 = 0;
+    var any_cell = false;
+
+    for (records) |record| {
+        if (record.cell_width == 0) continue;
+
+        any_cell = true;
+        const end_col = std.math.add(u16, record.col, @as(u16, record.cell_width)) catch
+            std.math.maxInt(u16);
+        max_row = @max(max_row, record.row);
+        max_col = @max(max_col, end_col);
+    }
+
+    const rows: u16 = if (any_cell) std.math.add(u16, max_row, 1) catch
+        std.math.maxInt(u16) else 1;
+
+    return .{
+        .size = .{
+            .cols = @max(max_col, 1),
+            .rows = rows,
+        },
+        .dirty = if (any_cell) .{ .start_row = 0, .end_row = rows - 1 } else null,
     };
 }
 
@@ -382,6 +424,7 @@ fn drawListFromShapedRecords(
 
     for (records) |record| {
         if (record.cell_width == 0) continue;
+        try ensureRecordFitsGlyphSurface(record, glyphs.size);
         cells.appendAssumeCapacity(.{
             .row = record.row,
             .col = record.col,
@@ -402,6 +445,17 @@ fn drawListFromShapedRecords(
         .cells = try cells.toOwnedSlice(allocator),
         .overlays = overlays,
     };
+}
+
+fn ensureRecordFitsGlyphSurface(
+    record: renderer.ShapedGlyphRecord,
+    size: maru.terminal.Size,
+) !void {
+    if (size.cols == 0 or size.rows == 0) return error.CoreTextProbeRecordOutsideSurface;
+    if (record.row >= size.rows or record.col >= size.cols) return error.CoreTextProbeRecordOutsideSurface;
+    const end_col = std.math.add(u16, record.col, @as(u16, record.cell_width)) catch
+        return error.CoreTextProbeRecordOutsideSurface;
+    if (end_col > size.cols) return error.CoreTextProbeRecordOutsideSurface;
 }
 
 fn shapedRecordForCoreTextProbe(record: NativeGlyphRecord) renderer.ShapedGlyphRecord {
@@ -554,6 +608,8 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=coretext_shaped_glyph_run_list\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_prepared=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_consistent=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_surface_cols=9\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_surface_rows=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_uv_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_draw_cells=3\n") != null);
@@ -700,7 +756,9 @@ test "CoreText smoke rejects probe categories that map to missing glyphs" {
 
 test "CoreText smoke glyph frame probe filters spaces and requires records" {
     // CoreText는 space도 glyph run에 포함할 수 있지만, atlas가 bitmap으로 굽는 대상은
-    // 실제로 그릴 glyph다. space record를 제외해 frame/atlas 숫자가 과장되지 않게 한다.
+    // 실제로 그릴 glyph다. space record는 glyph upload에서 제외하되 probe DrawList에는
+    // 남긴다. 그래서 renderer surface는 drawable glyph만이 아니라 space 위치까지 덮어야
+    // 한다. 그렇지 않으면 col=4 space가 width=1 surface 밖에 놓이는 거짓 artifact가 된다.
     var native = emptyNativeResult();
     native.status = 0;
     native.primary_font_found = 1;
@@ -726,6 +784,8 @@ test "CoreText smoke glyph frame probe filters spaces and requires records" {
     try std.testing.expectEqual(@as(usize, 1), probe.glyph_count);
     try std.testing.expectEqual(@as(usize, 1), probe.upload_count);
     try std.testing.expect(probe.renderer_frame_prepared);
+    try std.testing.expectEqual(@as(u16, 5), probe.renderer_surface_cols);
+    try std.testing.expectEqual(@as(u16, 1), probe.renderer_surface_rows);
     try std.testing.expectEqual(@as(usize, 2), probe.renderer_draw_cells);
     try std.testing.expectEqualStrings(renderer_probe_shaper, probe.renderer_shaper);
 

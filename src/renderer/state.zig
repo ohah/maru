@@ -4,6 +4,7 @@ const glyph_atlas = @import("glyph_atlas.zig");
 const glyph_frame = @import("glyph_frame.zig");
 const glyph_layout = @import("glyph_layout.zig");
 const glyph_quads = @import("glyph_quads.zig");
+const glyph_raster = @import("glyph_raster.zig");
 const terminal = @import("../terminal.zig");
 const types = @import("types.zig");
 
@@ -40,6 +41,16 @@ pub const RendererState = struct {
         snapshot: terminal.RenderSnapshot,
         shaper: anytype,
     ) !types.RenderFrame {
+        return self.buildFrameWithRasterizer(allocator, snapshot, shaper, glyph_raster.FakeGlyphRasterizer{});
+    }
+
+    pub fn buildFrameWithRasterizer(
+        self: *RendererState,
+        allocator: std.mem.Allocator,
+        snapshot: terminal.RenderSnapshot,
+        shaper: anytype,
+        rasterizer: anytype,
+    ) !types.RenderFrame {
         // 이 함수는 제품 backend가 소비할 한 frame을 준비하는 facade다. app/platform layer는
         // TerminalCore snapshot만 넘기고, font layout과 atlas reuse는 renderer 내부에서
         // 끝난다. 이렇게 해야 Metal backend가 DrawList를 다시 해석하지 않는다.
@@ -58,11 +69,15 @@ pub const RendererState = struct {
         });
         errdefer quad_frame.deinit(allocator);
 
+        var raster_frame = try glyph_raster.buildGlyphRasterFrame(allocator, frame, rasterizer);
+        errdefer raster_frame.deinit(allocator);
+
         return .{
             .backend = self.backend,
             .draw_list = list,
             .glyph_frame = frame,
             .glyph_quad_frame = quad_frame,
+            .glyph_raster_frame = raster_frame,
         };
     }
 };
@@ -100,7 +115,9 @@ test "renderer state builds glyph frame and reuses atlas across frames" {
     try std.testing.expectEqual(@as(usize, 3), first.draw_list.cells.len);
     try std.testing.expectEqual(@as(usize, 3), first.glyph_frame.stats.glyph_count);
     try std.testing.expect(first.glyph_quad_frame.stats.ready());
+    try std.testing.expect(first.glyph_raster_frame.stats.ready());
     try std.testing.expect(first.glyph_frame.stats.upload_count > 0);
+    try std.testing.expectEqual(first.glyph_frame.stats.upload_count, first.glyph_raster_frame.stats.upload_count);
 
     // 같은 glyph를 다음 frame에서 다시 그리면 atlas slot을 재사용해야 한다.
     // persistent RendererState가 없으면 이 테스트는 매번 upload_count>0이 된다.
@@ -112,7 +129,9 @@ test "renderer state builds glyph frame and reuses atlas across frames" {
     try std.testing.expectEqual(@as(usize, 3), second.glyph_frame.stats.glyph_count);
     try std.testing.expectEqual(second.glyph_frame.stats.glyph_count, second.glyph_quad_frame.stats.glyph_count);
     try std.testing.expect(second.glyph_quad_frame.stats.ready());
+    try std.testing.expect(second.glyph_raster_frame.stats.ready());
     try std.testing.expectEqual(@as(usize, 0), second.glyph_frame.stats.upload_count);
+    try std.testing.expectEqual(@as(usize, 0), second.glyph_raster_frame.stats.upload_count);
     try std.testing.expectEqual(@as(usize, 3), second.glyph_frame.stats.reused_count);
     try std.testing.expect(state.atlas.stats.hits > 0);
 }

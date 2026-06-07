@@ -381,6 +381,10 @@ fn successRendererFrameProbe() RendererFrameProbe {
             .glyph_quad_count = 32,
             .glyph_uv_count = 32,
             .glyph_uv_ready = true,
+            .glyph_raster_upload_count = 5,
+            .glyph_raster_byte_count = 15680,
+            .glyph_raster_zero_ink_count = 1,
+            .glyph_raster_ready = true,
             .upload_count = 5,
             .reused_count = 27,
             .fallback_count = 2,
@@ -477,6 +481,8 @@ test "macOS glyph text smoke summary reports shader sampling boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_quad_count=32\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_uv_count=32\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_uv_ready=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_upload_count=5\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_raster_ready=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_glyph_upload_count=5\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_atlas_entries=5\n") != null);
 }

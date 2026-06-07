@@ -24,6 +24,7 @@ typedef struct {
     uint32_t atlas_readback_mismatched_bytes;
     uint32_t atlas_readback_failures;
     uint32_t atlas_sampled_cells;
+    uint32_t atlas_sample_missing_cells;
 } MaruMetalSmokeResult;
 
 typedef struct {
@@ -70,6 +71,15 @@ typedef struct {
     uint8_t expected_r;
     uint8_t expected_a;
 } MaruMetalSmokeSample;
+
+typedef struct {
+    double rel_x;
+    double rel_y;
+    uint8_t expected_b;
+    uint8_t expected_g;
+    uint8_t expected_r;
+    uint8_t expected_a;
+} MaruMetalSourceSample;
 
 static const NSUInteger maru_readback_stride = 256;
 
@@ -141,6 +151,95 @@ static NSUInteger maru_clamp_pixel(double value, NSUInteger upper_bound) {
     return (NSUInteger)value;
 }
 
+static BOOL maru_rgba_source_pixel_has_ink(const uint8_t *pixel) {
+    // atlas source buffer의 clear 값은 0이다. 실제 glyph rasterizer가 붙으면 중심 픽셀이
+    // 비어 있을 수 있으므로, 특정 위치를 가정하지 않고 source tile 안의 잉크 픽셀을 고른다.
+    return pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 || pixel[3] != 0;
+}
+
+static BOOL maru_upload_source_range_is_valid(
+    MaruMetalRasterUpload upload,
+    size_t raster_pixel_count
+) {
+    if (upload.atlas_width_px == 0 || upload.atlas_height_px == 0) {
+        return NO;
+    }
+    if (upload.bytes_per_row != (size_t)upload.atlas_width_px * 4) {
+        return NO;
+    }
+    if (upload.bytes_per_row > SIZE_MAX / (size_t)upload.atlas_height_px) {
+        return NO;
+    }
+    if (upload.byte_count != upload.bytes_per_row * (size_t)upload.atlas_height_px) {
+        return NO;
+    }
+    if (upload.bytes_offset > raster_pixel_count ||
+        upload.byte_count > raster_pixel_count - upload.bytes_offset)
+    {
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL maru_find_source_ink_sample(
+    MaruMetalRasterUpload upload,
+    const uint8_t *raster_pixels,
+    size_t raster_pixel_count,
+    MaruMetalSourceSample *sample
+) {
+    if (raster_pixels == NULL || sample == NULL ||
+        !maru_upload_source_range_is_valid(upload, raster_pixel_count))
+    {
+        return NO;
+    }
+
+    BOOL found = NO;
+    size_t best_x = 0;
+    size_t best_y = 0;
+    double best_score = 0.0;
+    const size_t width = (size_t)upload.atlas_width_px;
+    const size_t height = (size_t)upload.atlas_height_px;
+    const double center_x = ((double)width - 1.0) * 0.5;
+    const double center_y = ((double)height - 1.0) * 0.5;
+
+    for (size_t y = 0; y < height; y++) {
+        for (size_t x = 0; x < width; x++) {
+            const size_t offset = upload.bytes_offset + y * upload.bytes_per_row + x * 4;
+            if (offset + 3 >= raster_pixel_count) {
+                continue;
+            }
+            const uint8_t *pixel = raster_pixels + offset;
+            if (!maru_rgba_source_pixel_has_ink(pixel)) {
+                continue;
+            }
+
+            // edge texel보다 중심에 가까운 잉크 texel을 고르면, 실제 glyph가 얇거나
+            // punctuation처럼 작은 경우에도 quad 경계 rasterization 오차를 덜 탄다.
+            const double dx = (double)x - center_x;
+            const double dy = (double)y - center_y;
+            const double score = dx * dx + dy * dy;
+            if (!found || score < best_score) {
+                found = YES;
+                best_x = x;
+                best_y = y;
+                best_score = score;
+            }
+        }
+    }
+    if (!found) {
+        return NO;
+    }
+
+    const size_t offset = upload.bytes_offset + best_y * upload.bytes_per_row + best_x * 4;
+    sample->rel_x = ((double)best_x + 0.5) / (double)width;
+    sample->rel_y = ((double)best_y + 0.5) / (double)height;
+    sample->expected_b = raster_pixels[offset + 2];
+    sample->expected_g = raster_pixels[offset + 1];
+    sample->expected_r = raster_pixels[offset + 0];
+    sample->expected_a = raster_pixels[offset + 3];
+    return YES;
+}
+
 static MaruMetalSmokeSample *maru_build_cell_samples(
     const MaruMetalSmokeCell *cells,
     size_t cell_count,
@@ -152,9 +251,11 @@ static MaruMetalSmokeSample *maru_build_cell_samples(
     size_t upload_count,
     const uint8_t *raster_pixels,
     size_t raster_pixel_count,
-    size_t *sample_count
+    size_t *sample_count,
+    size_t *missing_count
 ) {
     *sample_count = 0;
+    *missing_count = 0;
     if (cells == NULL || cell_count == 0 || cols == 0 || rows == 0 ||
         texture_width == 0 || texture_height == 0 ||
         uploads == NULL || upload_count == 0 ||
@@ -163,7 +264,7 @@ static MaruMetalSmokeSample *maru_build_cell_samples(
         return NULL;
     }
 
-    // smoke는 전체 화면 readback이 아니라 셀 중심 픽셀만 읽는다. fixture가 커져도
+    // smoke는 전체 화면 readback이 아니라 대표 잉크 픽셀만 읽는다. fixture가 커져도
     // GPU 검증 비용이 폭증하지 않게 앞쪽 셀 일부만 샘플링한다.
     const size_t max_samples = 64;
     const size_t count = cell_count < max_samples ? cell_count : max_samples;
@@ -177,6 +278,7 @@ static MaruMetalSmokeSample *maru_build_cell_samples(
     const double grid_width = 1.84;
     const double grid_height = 1.72;
 
+    size_t written = 0;
     for (size_t i = 0; i < count; i++) {
         const MaruMetalSmokeCell cell = cells[i];
         const double cell_width = (double)(cell.width == 0 ? 1 : cell.width);
@@ -184,61 +286,48 @@ static MaruMetalSmokeSample *maru_build_cell_samples(
         const double right = grid_left + (((double)cell.col + cell_width) / (double)cols) * grid_width;
         const double top = grid_top - ((double)cell.row / (double)rows) * grid_height;
         const double bottom = grid_top - (((double)cell.row + 1.0) / (double)rows) * grid_height;
-        const double center_x = (left + right) * 0.5;
-        const double center_y = (top + bottom) * 0.5;
 
-        samples[i].x = maru_clamp_pixel(((center_x + 1.0) * 0.5) * (double)texture_width, texture_width);
-        samples[i].y = maru_clamp_pixel(((1.0 - center_y) * 0.5) * (double)texture_height, texture_height);
-
-        BOOL found_source_pixel = NO;
+        MaruMetalSourceSample source_sample = {0};
+        BOOL found_source_sample = NO;
         for (size_t upload_index = 0; upload_index < upload_count; upload_index++) {
             const MaruMetalRasterUpload upload = uploads[upload_index];
             if (upload.slot_id != cell.slot_id) {
                 continue;
             }
-            if (upload.atlas_width_px == 0 ||
-                upload.atlas_height_px == 0 ||
-                upload.bytes_per_row != (size_t)upload.atlas_width_px * 4 ||
-                upload.bytes_per_row > SIZE_MAX / (size_t)upload.atlas_height_px ||
-                upload.byte_count != upload.bytes_per_row * (size_t)upload.atlas_height_px ||
-                upload.bytes_offset > raster_pixel_count ||
-                upload.byte_count > raster_pixel_count - upload.bytes_offset)
+            if (maru_find_source_ink_sample(
+                    upload,
+                    raster_pixels,
+                    raster_pixel_count,
+                    &source_sample))
             {
-                continue;
+                found_source_sample = YES;
+                break;
             }
+        }
+        if (!found_source_sample) {
+            *missing_count += 1;
+            continue;
+        }
 
-            // 이 smoke의 fake rasterizer는 glyph slot 전체를 같은 RGBA 색으로 채운다.
-            // 그래서 셀 중심 readback이 source tile 중심 texel과 같으면 shader가 실제
-            // atlas texture를 샘플링했다는 강한 신호가 된다. 실제 CoreText glyph는 중심이
-            // 비어 있을 수 있으므로 그 단계에서는 glyph_text_smoke처럼 ink sample을 따로 고른다.
-            const size_t local_x = (size_t)upload.atlas_width_px / 2;
-            const size_t local_y = (size_t)upload.atlas_height_px / 2;
-            const size_t offset =
-                upload.bytes_offset + local_y * upload.bytes_per_row + local_x * 4;
-            if (offset + 3 >= raster_pixel_count) {
-                continue;
-            }
-            samples[i].expected_b = raster_pixels[offset + 2];
-            samples[i].expected_g = raster_pixels[offset + 1];
-            samples[i].expected_r = raster_pixels[offset + 0];
-            samples[i].expected_a = raster_pixels[offset + 3];
-            found_source_pixel = YES;
-            break;
-        }
-        if (!found_source_pixel) {
-            free(samples);
-            return NULL;
-        }
+        const double sample_x = left + (right - left) * source_sample.rel_x;
+        const double sample_y = top + (bottom - top) * source_sample.rel_y;
+        samples[written].x = maru_clamp_pixel(((sample_x + 1.0) * 0.5) * (double)texture_width, texture_width);
+        samples[written].y = maru_clamp_pixel(((1.0 - sample_y) * 0.5) * (double)texture_height, texture_height);
+        samples[written].expected_b = source_sample.expected_b;
+        samples[written].expected_g = source_sample.expected_g;
+        samples[written].expected_r = source_sample.expected_r;
+        samples[written].expected_a = source_sample.expected_a;
+        written += 1;
     }
 
-    *sample_count = count;
+    *sample_count = written;
     return samples;
 }
 
 static BOOL maru_pixel_is_non_clear(const uint8_t *pixel) {
     // BGRA8Unorm clear color는 MTLClearColorMake(0.06, 0.08, 0.12, 1.0)이다.
-    // GPU의 float->unorm 반올림 차이를 감안해 작은 허용 오차를 둔다. placeholder
-    // 셀 색은 clear보다 훨씬 밝아서 이 기준을 안정적으로 넘는다.
+    // GPU의 float->unorm 반올림 차이를 감안해 작은 허용 오차를 둔다. 실제 atlas
+    // sampling 여부는 이 함수가 아니라 expected atlas texel 비교가 판단한다.
     const int expected_b = 31;
     const int expected_g = 20;
     const int expected_r = 15;
@@ -634,6 +723,7 @@ static BOOL maru_draw_cell_frame(
     }
 
     size_t sample_count = 0;
+    size_t missing_count = 0;
     MaruMetalSmokeSample *samples = maru_build_cell_samples(
         cells,
         cell_count,
@@ -645,23 +735,28 @@ static BOOL maru_draw_cell_frame(
         upload_count,
         raster_pixels,
         raster_pixel_count,
-        &sample_count
+        &sample_count,
+        &missing_count
     );
-    if (samples == NULL || sample_count == 0) {
+    result->atlas_sample_missing_cells =
+        (missing_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)missing_count;
+    if (samples == NULL) {
         [encoder endEncoding];
-        free(samples);
         result->readback_failures += 1;
         return NO;
     }
 
-    id<MTLBuffer> readback_buffer = [layer.device
-        newBufferWithLength:sample_count * maru_readback_stride
-                    options:MTLResourceStorageModeShared];
-    if (readback_buffer == nil) {
-        [encoder endEncoding];
-        free(samples);
-        result->readback_failures += 1;
-        return NO;
+    id<MTLBuffer> readback_buffer = nil;
+    if (sample_count > 0) {
+        readback_buffer = [layer.device
+            newBufferWithLength:sample_count * maru_readback_stride
+                        options:MTLResourceStorageModeShared];
+        if (readback_buffer == nil) {
+            [encoder endEncoding];
+            free(samples);
+            result->readback_failures += 1;
+            return NO;
+        }
     }
 
     [encoder setRenderPipelineState:cell_pipeline];
@@ -672,24 +767,26 @@ static BOOL maru_draw_cell_frame(
                 vertexCount:vertex_count];
     [encoder endEncoding];
 
-    id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
-    if (blit == nil) {
-        free(samples);
-        result->readback_failures += 1;
-        return NO;
+    if (sample_count > 0) {
+        id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+        if (blit == nil) {
+            free(samples);
+            result->readback_failures += 1;
+            return NO;
+        }
+        for (size_t i = 0; i < sample_count; i++) {
+            [blit copyFromTexture:drawable.texture
+                      sourceSlice:0
+                      sourceLevel:0
+                     sourceOrigin:MTLOriginMake(samples[i].x, samples[i].y, 0)
+                       sourceSize:MTLSizeMake(1, 1, 1)
+                         toBuffer:readback_buffer
+                destinationOffset:i * maru_readback_stride
+           destinationBytesPerRow:maru_readback_stride
+         destinationBytesPerImage:maru_readback_stride];
+        }
+        [blit endEncoding];
     }
-    for (size_t i = 0; i < sample_count; i++) {
-        [blit copyFromTexture:drawable.texture
-                  sourceSlice:0
-                  sourceLevel:0
-                 sourceOrigin:MTLOriginMake(samples[i].x, samples[i].y, 0)
-                   sourceSize:MTLSizeMake(1, 1, 1)
-                     toBuffer:readback_buffer
-            destinationOffset:i * maru_readback_stride
-       destinationBytesPerRow:maru_readback_stride
-     destinationBytesPerImage:maru_readback_stride];
-    }
-    [blit endEncoding];
 
     [command_buffer presentDrawable:drawable];
     [command_buffer commit];
@@ -699,13 +796,15 @@ static BOOL maru_draw_cell_frame(
     // 한다). summary에서 requested_cells와 같은 포화 규칙으로 맞춰 둔다.
     result->rendered_cells = (cell_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)cell_count;
     result->readback_samples = (sample_count > UINT32_MAX) ? UINT32_MAX : (uint32_t)sample_count;
-    maru_count_cell_readback_pixels(
-        readback_buffer,
-        samples,
-        sample_count,
-        &result->readback_non_clear_pixels,
-        &result->atlas_sampled_cells
-    );
+    if (sample_count > 0) {
+        maru_count_cell_readback_pixels(
+            readback_buffer,
+            samples,
+            sample_count,
+            &result->readback_non_clear_pixels,
+            &result->atlas_sampled_cells
+        );
+    }
     free(samples);
     return YES;
 }
@@ -741,6 +840,7 @@ void maru_macos_metal_smoke_run(
     result->atlas_readback_mismatched_bytes = 0;
     result->atlas_readback_failures = 0;
     result->atlas_sampled_cells = 0;
+    result->atlas_sample_missing_cells = 0;
 
     @autoreleasepool {
         // 이 bridge는 "Metal glyph renderer 완성"이 아니라 첫 RenderFrame/GlyphQuadFrame/
@@ -823,7 +923,7 @@ void maru_macos_metal_smoke_run(
         CAMetalLayer *metal_layer = [CAMetalLayer layer];
         metal_layer.device = device;
         metal_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        // 이 smoke는 drawable의 셀 중심 픽셀을 blit-readback해야 한다. framebufferOnly=YES는
+        // 이 smoke는 drawable의 source ink 위치를 blit-readback해야 한다. framebufferOnly=YES는
         // render target 전용 최적화라 readback 검증 신호를 만들 수 없으므로 smoke에서만 끈다.
         metal_layer.framebufferOnly = NO;
         metal_layer.contentsScale = window.backingScaleFactor;
@@ -904,7 +1004,11 @@ void maru_macos_metal_smoke_run(
             result->status = 6;
             return;
         }
-        // readback이 실제 렌더 검증의 단일 게이트다. 샘플한 셀 중심이 "하나라도"가
+        if (result->atlas_sample_missing_cells > 0) {
+            result->status = 11;
+            return;
+        }
+        // readback이 실제 렌더 검증의 단일 게이트다. 샘플한 source ink 위치가 "하나라도"가
         // 아니라 "전부" clear가 아니어야 부분 렌더 회귀(셀 일부만 그려짐)까지 잡는다.
         // readback은 compositing 전 drawable 텍스처를 읽으므로 "GPU가 셀을 렌더했다"를
         // 증명하고, "화면에 안 가려졌다"는 window_visible이 따로 담당한다.

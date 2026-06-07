@@ -168,7 +168,7 @@ pub fn buildGlyphRunList(
     };
 }
 
-fn rasterStyleFlags(style: terminal.Style) RasterStyleFlags {
+pub fn rasterStyleFlags(style: terminal.Style) RasterStyleFlags {
     return .{
         .bold = style.bold,
         .italic = style.italic,

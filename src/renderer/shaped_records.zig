@@ -64,10 +64,7 @@ pub fn buildGlyphRunListFromShapedRecords(
         max_row = @max(max_row, record.row);
         max_col = @max(max_col, end_col);
 
-        const flags = glyph_layout.RasterStyleFlags{
-            .bold = record.style.bold,
-            .italic = record.style.italic,
-        };
+        const flags = glyph_layout.rasterStyleFlags(record.style);
         glyphs.appendAssumeCapacity(.{
             .row = record.row,
             .col = record.col,
@@ -174,4 +171,22 @@ test "shaped records preserve raster style boundary" {
     try std.testing.expect(result.runs.glyphs[0].style.underline);
     try std.testing.expect(result.runs.glyphs[0].cache_key.style.bold);
     try std.testing.expect(result.runs.glyphs[0].cache_key.style.italic);
+}
+
+test "shaped records derive rows and dirty span from record rows" {
+    // 이 adapter는 CoreText probe(한 줄)뿐 아니라 future 제품 shaper(여러 줄 grid)도
+    // 소비한다. drawable record의 최대 row에서 size.rows와 dirty span을 끌어내는 경로를
+    // 고정해, 한 줄만 쓰는 현재 caller가 다중 행 회계를 깨지 않게 한다.
+    const records = [_]ShapedGlyphRecord{
+        .{ .row = 0, .col = 0, .codepoint = 'A', .font_id = 1, .glyph_id = 10 },
+        .{ .row = 2, .col = 1, .codepoint = 'B', .font_id = 1, .glyph_id = 11 },
+    };
+
+    var result = try buildGlyphRunListFromShapedRecords(std.testing.allocator, &records, .{});
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u16, 3), result.runs.size.rows);
+    try std.testing.expect(result.runs.dirty != null);
+    try std.testing.expectEqual(@as(u16, 0), result.runs.dirty.?.start_row);
+    try std.testing.expectEqual(@as(u16, 2), result.runs.dirty.?.end_row);
 }

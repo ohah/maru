@@ -8,6 +8,8 @@
 
 font/layout 쪽은 `DrawList -> GlyphRunList` 계약을 먼저 고정한다. 실제 CoreText나 atlas texture는 그 뒤에 붙이고, fake font backend 기반 테스트는 기본 CI에서 deterministic하게 돌린다.
 
+`ShapedGlyphRecord`는 native shaper가 만든 font id/glyph id 후보를 renderer domain으로 넘기는 중립 adapter 계약이다. CoreText smoke는 native record를 이 타입으로 바꾼 뒤 `GlyphRunList`를 만들고, `GlyphRunList` 자체에는 CoreText/CTFont/CTRun 타입을 넣지 않는다. 이 경계가 있어야 나중에 HarfBuzz나 WebGPU backend를 붙여도 glyph frame 준비 로직을 다시 만들지 않는다.
+
 glyph atlas는 먼저 `GlyphCacheKey -> AtlasSlot` domain cache 계약으로 둔다. `AtlasSlot`은 backend가 UV를 만들 수 있도록 deterministic한 texture 좌표 후보(`x_px`, `y_px`)를 가진다. 아직 실제 GPU texture packing/rasterization은 없지만, hit/miss, upload byte 후보, eviction, invalidation reason, placement reset은 이 폴더 아래에서 테스트한다. glyph atlas, frame stats, render snapshot 변환은 이 폴더 아래에 책임별로 둔다.
 
 `GlyphFrame`은 `GlyphRunList`와 `GlyphAtlas`를 묶어 backend가 소비할 frame 준비 결과를 만든다. 이 타입은 실제 Metal texture를 만들지 않고, 각 glyph가 어떤 atlas slot을 쓸지와 이번 frame에서 어떤 upload 후보가 생겼는지만 기록한다. cursor/underline overlay도 여기까지 보존해서, 다음 backend가 glyph bitmap과 draw-time overlay를 다시 해석하지 않게 한다.

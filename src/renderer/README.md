@@ -20,4 +20,6 @@ glyph atlas는 먼저 `GlyphCacheKey -> AtlasSlot` domain cache 계약으로 둔
 
 `RendererState`는 frame 사이에 살아남는 renderer 소유 상태다. 현재는 `GlyphAtlas`를 오래 들고 가며 `RenderSnapshot -> DrawList -> GlyphRunList -> GlyphFrame -> GlyphQuadFrame -> GlyphRasterFrame`을 한 `RenderFrame`으로 준비한다. app host와 future Metal backend는 이 facade만 호출해야 하고, atlas reuse, font layout, UV 변환, raster upload byte 정책을 각자 다시 구현하면 안 된다.
 
+CoreText 같은 제품 shaper는 `RendererState.buildFrame`의 fake-friendly `shape(cell)` 계약에 맞추지 않는다. 대신 `DrawList` 전체를 shape해 `ShapedGlyphRecord -> GlyphRunList`를 만든 뒤 `RendererState.buildFrameFromGlyphRunList`로 들어온다. 이 entrypoint는 성공하면 `DrawList` ownership을 반환된 `RenderFrame`으로 옮기고, 실패하면 caller가 여전히 `DrawList`를 정리하거나 artifact로 남길 수 있게 한다. 아직 실제 CoreText 제품 shaper가 붙은 것은 아니며, 다음 단계가 이 경계를 소비한다.
+
 현재 atlas의 선형 scan/FIFO eviction은 실제 제품 성능 정책이 아니라 contract-stage placeholder다. 실제 texture atlas가 붙을 때 HashMap, LRU/clock, overflow check, texture limit 처리는 [폰트 전략](../../docs/font-strategy.md)의 구현 메모를 다시 확인하고 별도 PR에서 결정한다.

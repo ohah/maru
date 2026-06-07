@@ -5,6 +5,7 @@ const glyph_frame = @import("glyph_frame.zig");
 const glyph_layout = @import("glyph_layout.zig");
 const glyph_quads = @import("glyph_quads.zig");
 const glyph_raster = @import("glyph_raster.zig");
+const shaped_records = @import("shaped_records.zig");
 const terminal = @import("../terminal.zig");
 const types = @import("types.zig");
 
@@ -60,6 +61,33 @@ pub const RendererState = struct {
         var glyphs = try glyph_layout.buildGlyphRunList(allocator, list, self.text_config, shaper);
         defer glyphs.deinit(allocator);
 
+        return self.buildFrameFromGlyphRunListWithRasterizer(allocator, list, glyphs, rasterizer);
+    }
+
+    pub fn buildFrameFromGlyphRunList(
+        self: *RendererState,
+        allocator: std.mem.Allocator,
+        list: draw_list.DrawList,
+        glyphs: glyph_layout.GlyphRunList,
+    ) !types.RenderFrame {
+        return self.buildFrameFromGlyphRunListWithRasterizer(allocator, list, glyphs, glyph_raster.FakeGlyphRasterizer{});
+    }
+
+    pub fn buildFrameFromGlyphRunListWithRasterizer(
+        self: *RendererState,
+        allocator: std.mem.Allocator,
+        list: draw_list.DrawList,
+        glyphs: glyph_layout.GlyphRunList,
+        rasterizer: anytype,
+    ) !types.RenderFrame {
+        // 실제 CoreText shaper는 cell마다 `shape(cell)`을 호출하는 fake backend 계약에
+        // 맞지 않는다. CoreText는 DrawList 전체를 보고 이미 shaped glyph run을 만든 뒤
+        // 여기로 들어와야 한다. 이 함수는 그 다음 단계인 atlas/UV/raster 준비만 맡는다.
+        //
+        // ownership 규칙은 의도적으로 명확히 둔다. 성공하면 반환된 RenderFrame이 `list`를
+        // 소유하고 deinit한다. 실패하면 caller가 여전히 `list`를 소유하므로 caller의
+        // errdefer가 정리해야 한다. 이렇게 해야 CoreText shaper 실패와 frame 준비 실패를
+        // 같은 DrawList artifact로 디버깅할 수 있다.
         var frame = try glyph_frame.prepareGlyphFrame(allocator, glyphs, &self.atlas);
         errdefer frame.deinit(allocator);
 
@@ -139,6 +167,91 @@ test "renderer state builds glyph frame and reuses atlas across frames" {
     try std.testing.expectEqual(@as(usize, 0), second.glyph_raster_frame.stats.upload_count);
     try std.testing.expectEqual(@as(usize, 3), second.glyph_frame.stats.reused_count);
     try std.testing.expect(state.atlas.stats.hits > 0);
+}
+
+test "renderer state builds a frame from already-shaped product glyph runs" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
+    defer core.deinit();
+
+    // CoreText 제품 shaper는 DrawList 전체를 보고 shaped record를 만든 뒤 renderer에
+    // 넘긴다. 이 테스트는 그 다음 단계가 per-cell fake shaper 없이도 같은 RenderFrame
+    // 준비 경로를 쓰고, surface metadata와 overlay를 잃지 않는지 고정한다.
+    core.clearDirty();
+    try core.write("A한");
+    core.cells[0].style.underline = true;
+
+    var list = try draw_list.buildDrawList(std.testing.allocator, core.snapshot());
+    var list_owned_by_test = true;
+    errdefer if (list_owned_by_test) list.deinit(std.testing.allocator);
+    const expected_size = list.size;
+    const expected_overlay_count = list.overlays.len;
+
+    const records = [_]shaped_records.ShapedGlyphRecord{
+        .{ .row = 0, .col = 0, .cell_width = 1, .codepoint = 'A', .font_id = 1, .glyph_id = 10, .style = list.cells[0].style },
+        .{ .row = 0, .col = 1, .cell_width = 2, .codepoint = '한', .font_id = 2, .glyph_id = 20, .fallback = true },
+        .{ .row = 0, .col = 3, .cell_width = 1, .codepoint = ' ', .font_id = 1, .glyph_id = 30, .drawable = false },
+    };
+
+    var shaped = try shaped_records.buildGlyphRunListFromShapedRecordsWithSurface(
+        std.testing.allocator,
+        &records,
+        .{ .font_size_px = 15, .device_scale = 2 },
+        .{
+            .size = list.size,
+            .cursor = list.cursor,
+            .dirty = list.dirty,
+            .overlays = list.overlays,
+        },
+    );
+    defer shaped.deinit(std.testing.allocator);
+
+    var state = RendererState.init(std.testing.allocator, .{});
+    defer state.deinit();
+
+    var frame = try state.buildFrameFromGlyphRunList(std.testing.allocator, list, shaped.runs);
+    list_owned_by_test = false;
+    defer frame.deinit(std.testing.allocator);
+
+    try std.testing.expect(frame.glyphFrameConsistent());
+    try std.testing.expect(frame.glyph_quad_frame.stats.ready());
+    try std.testing.expect(frame.glyph_raster_frame.stats.ready());
+    try std.testing.expectEqual(expected_size, frame.draw_list.size);
+    try std.testing.expectEqual(@as(usize, 2), frame.glyph_frame.stats.glyph_count);
+    try std.testing.expectEqual(@as(usize, 1), frame.glyph_frame.stats.fallback_count);
+    try std.testing.expectEqual(@as(usize, 1), shaped.skipped_count);
+    try std.testing.expectEqual(expected_overlay_count, frame.glyph_frame.overlays.len);
+    try std.testing.expect(frame.glyph_frame.glyphs[0].run.style.underline);
+    try std.testing.expect(frame.glyph_frame.glyphs[0].run.cache_key.style.bold == false);
+    try std.testing.expectEqual(@as(u16, 15), frame.glyph_frame.glyphs[0].run.cache_key.font_size_px);
+    try std.testing.expectEqual(@as(u16, 2), frame.glyph_frame.glyphs[0].run.cache_key.device_scale);
+}
+
+test "renderer state leaves draw list ownership with caller when shaped frame preparation fails" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 1, .rows = 1 });
+    defer core.deinit();
+
+    // buildFrameFromGlyphRunList는 성공하면 DrawList를 RenderFrame으로 이동시키지만,
+    // 실패하면 caller가 같은 DrawList artifact를 정리하거나 기록할 수 있어야 한다.
+    // texture 크기 0은 quad 단계에서 deterministic하게 실패하므로 이 ownership 경계를
+    // GPU 없이 검증하기 좋다.
+    core.clearDirty();
+    try core.write("A");
+
+    var list = try draw_list.buildDrawList(std.testing.allocator, core.snapshot());
+    defer list.deinit(std.testing.allocator);
+
+    var glyphs = try glyph_layout.buildGlyphRunList(std.testing.allocator, list, .{}, glyph_layout.FakeFontBackend{});
+    defer glyphs.deinit(std.testing.allocator);
+
+    var state = RendererState.init(std.testing.allocator, .{
+        .atlas = .{ .atlas_width_px = 0, .atlas_height_px = 0 },
+    });
+    defer state.deinit();
+
+    try std.testing.expectError(
+        error.InvalidAtlasTextureSize,
+        state.buildFrameFromGlyphRunList(std.testing.allocator, list, glyphs),
+    );
 }
 
 test "text config converts resolved font size into cache key units" {

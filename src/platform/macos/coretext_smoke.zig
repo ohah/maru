@@ -2,6 +2,7 @@ const std = @import("std");
 const maru = @import("maru");
 const config = maru.config;
 const renderer = maru.renderer;
+const terminal = maru.terminal;
 const coretext_probe = @import("coretext_probe.zig");
 const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
@@ -40,6 +41,17 @@ extern fn maru_macos_coretext_smoke_rasterize_glyph(
     result: *coretext_raster.NativeGlyphRasterResult,
 ) void;
 
+extern fn maru_macos_coretext_shape_draw_list(
+    requested_font_family: [*]const u8,
+    requested_font_family_len: usize,
+    requested_font_size: f64,
+    cells: [*]const coretext_shaper.NativeDrawCell,
+    cell_count: usize,
+    result: *coretext_shaper.NativeDrawListShapeResult,
+    glyph_records: [*]coretext_shaper.NativeDrawGlyphRecord,
+    glyph_record_capacity: usize,
+) void;
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
@@ -68,7 +80,15 @@ pub fn main(init: std.process.Init) !void {
         native,
         glyph_records[0..record_count],
     );
-    const summary = try renderSummary(allocator, appearance, smoke_status, native, glyph_frame_probe);
+    const draw_list_probe = try buildDrawListGlyphFrameProbe(allocator, appearance);
+    const summary = try renderSummary(
+        allocator,
+        appearance,
+        smoke_status,
+        native,
+        glyph_frame_probe,
+        draw_list_probe,
+    );
     defer allocator.free(summary);
 
     try writeSummary(io, summary);
@@ -124,6 +144,7 @@ fn renderSummary(
     smoke_status: SmokeStatus,
     native: NativeCoreTextSmokeResult,
     glyph_frame_probe: GlyphFrameProbe,
+    draw_list_probe: GlyphFrameProbe,
 ) ![]u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
@@ -190,6 +211,21 @@ fn renderSummary(
     try writer.print("renderer_draw_cells={d}\n", .{glyph_frame_probe.renderer_draw_cells});
     try writer.print("renderer_draw_overlays={d}\n", .{glyph_frame_probe.renderer_draw_overlays});
     try writer.print("renderer_shaper={s}\n", .{glyph_frame_probe.renderer_shaper});
+    try writer.writeAll("drawlist_input=terminal_core_draw_list\n");
+    try writer.print("drawlist_frame_prepared={}\n", .{draw_list_probe.renderer_frame_prepared});
+    try writer.print("drawlist_frame_consistent={}\n", .{draw_list_probe.renderer_frame_consistent});
+    try writer.print("drawlist_font_identity_count={d}\n", .{draw_list_probe.font_identity_count});
+    try writer.print("drawlist_surface_cols={d}\n", .{draw_list_probe.renderer_surface_cols});
+    try writer.print("drawlist_surface_rows={d}\n", .{draw_list_probe.renderer_surface_rows});
+    try writer.print("drawlist_draw_cells={d}\n", .{draw_list_probe.renderer_draw_cells});
+    try writer.print("drawlist_draw_overlays={d}\n", .{draw_list_probe.renderer_draw_overlays});
+    try writer.print("drawlist_glyph_count={d}\n", .{draw_list_probe.glyph_count});
+    try writer.print("drawlist_fallback_count={d}\n", .{draw_list_probe.fallback_count});
+    try writer.print("drawlist_glyph_raster_ready={}\n", .{draw_list_probe.renderer_glyph_raster_ready});
+    try writer.print("drawlist_glyph_raster_upload_count={d}\n", .{draw_list_probe.renderer_glyph_raster_upload_count});
+    try writer.print("drawlist_glyph_raster_error_skip_count={d}\n", .{draw_list_probe.renderer_glyph_raster_error_skip_count});
+    try writer.print("drawlist_renderer_shaper={s}\n", .{draw_list_probe.renderer_shaper});
+    try writer.print("drawlist_renderer_rasterizer={s}\n", .{draw_list_probe.renderer_rasterizer});
     try writer.print("primary_font_name={s}\n", .{coretext_probe.cStringField(&native.primary_font_name)});
     try writer.print("first_fallback_font_name={s}\n", .{coretext_probe.cStringField(&native.first_fallback_font_name)});
 
@@ -307,6 +343,77 @@ fn buildGlyphFrameProbeWithRasterizer(
     probe_draw_list_owned = false;
     defer frame.deinit(allocator);
 
+    return glyphFrameProbeFromRenderFrame(
+        font_registry,
+        frame,
+        &renderer_state,
+        shaped.color_glyph_count,
+        rasterizer_name,
+        renderer_probe_shaper,
+    );
+}
+
+fn buildDrawListGlyphFrameProbe(
+    allocator: std.mem.Allocator,
+    appearance: config.ResolvedAppearance,
+) !GlyphFrameProbe {
+    // 이 경로는 fixed CoreText probe 문자열이 아니라 실제 TerminalCore snapshot에서 나온
+    // DrawList를 CoreText runtime shaper로 넘긴다. 아직 Metal smoke 입력으로 쓰지는 않지만,
+    // 다음 PR에서 probe-derived surface를 제거하기 전에 제품 shaper 경계를 독립적으로
+    // 검증하기 위한 세로 슬라이스다.
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 12, .rows = 2 });
+    defer core.deinit();
+    core.clearDirty();
+    try core.write("Maru 한");
+
+    var draw_list = try renderer.buildDrawList(allocator, core.snapshot());
+    var draw_list_owned = true;
+    errdefer if (draw_list_owned) draw_list.deinit(allocator);
+
+    var font_registry = renderer.FontIdentityRegistry.init(allocator);
+    defer font_registry.deinit();
+
+    const shaper = coretext_shaper.CoreTextDrawListShaper{
+        .appearance = appearance,
+        .shape_draw_list = maru_macos_coretext_shape_draw_list,
+    };
+    var shaped = try shaper.shape(allocator, draw_list, &font_registry);
+    defer shaped.deinit(allocator);
+
+    var renderer_state = renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
+    const rasterizer = coretext_raster.CoreTextGlyphRasterizer{
+        .appearance = appearance,
+        .font_registry = &font_registry,
+        .rasterize_glyph = maru_macos_coretext_smoke_rasterize_glyph,
+    };
+    var frame = try renderer_state.buildFrameFromGlyphRunListWithRasterizer(
+        allocator,
+        draw_list,
+        shaped.runs,
+        rasterizer,
+    );
+    draw_list_owned = false;
+    defer frame.deinit(allocator);
+
+    return glyphFrameProbeFromRenderFrame(
+        &font_registry,
+        frame,
+        &renderer_state,
+        shaped.color_glyph_count,
+        coretext_raster.CoreTextGlyphRasterizer.name,
+        coretext_shaper.CoreTextDrawListShaper.name,
+    );
+}
+
+fn glyphFrameProbeFromRenderFrame(
+    font_registry: *const renderer.FontIdentityRegistry,
+    frame: renderer.RenderFrame,
+    renderer_state: *const renderer.RendererState,
+    color_glyph_count: usize,
+    rasterizer_name: []const u8,
+    shaper_name: []const u8,
+) GlyphFrameProbe {
     // 제품 RenderFrame의 prepared/consistent/UV/raster/draw 신호는 renderer가 단일 출처로
     // 소유한다(frame_probe). 이 smoke가 같은 gate를 손으로 다시 조립하면 glyph text/metal
     // smoke와 schema가 갈라지고(예: prepared의 glyph_count>0 절 누락) GlyphFrameStats가 바뀔
@@ -324,7 +431,7 @@ fn buildGlyphFrameProbeWithRasterizer(
         .entry_count = renderer_state.atlas.entryCount(),
         .upload_candidates = frame.glyph_frame.stats.upload_count,
         .upload_bytes = frame.glyph_frame.stats.upload_bytes,
-        .color_glyph_count = shaped.color_glyph_count,
+        .color_glyph_count = color_glyph_count,
         .glyph_count = frame.glyph_frame.stats.glyph_count,
         .upload_count = frame.glyph_frame.stats.upload_count,
         .reused_count = frame.glyph_frame.stats.reused_count,
@@ -346,6 +453,7 @@ fn buildGlyphFrameProbeWithRasterizer(
         .renderer_glyph_raster_byte_count = render_stats.glyph_raster_byte_count,
         .renderer_draw_cells = render_stats.draw_cells,
         .renderer_draw_overlays = render_stats.draw_overlays,
+        .renderer_shaper = shaper_name,
     };
     return probe;
 }
@@ -488,7 +596,17 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     };
     const appearance = try config.resolveAppearance(.{});
     const glyph_frame_probe = try buildTestGlyphFrameProbe(std.testing.allocator, appearance, native, &records);
-    const summary = try renderSummary(std.testing.allocator, appearance, deriveSmokeStatus(native), native, glyph_frame_probe);
+    var draw_list_probe = glyph_frame_probe;
+    draw_list_probe.renderer_shaper = coretext_shaper.CoreTextDrawListShaper.name;
+    draw_list_probe.renderer_rasterizer = coretext_raster.CoreTextGlyphRasterizer.name;
+    const summary = try renderSummary(
+        std.testing.allocator,
+        appearance,
+        deriveSmokeStatus(native),
+        native,
+        glyph_frame_probe,
+        draw_list_probe,
+    );
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.macos-coretext-smoke.v1\n") != null);
@@ -545,6 +663,21 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_draw_cells=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_draw_overlays=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_shaper=coretext_shaped_records\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_input=terminal_core_draw_list\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_frame_prepared=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_frame_consistent=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_font_identity_count=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_surface_cols=9\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_surface_rows=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_draw_cells=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_draw_overlays=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_glyph_count=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_fallback_count=2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_glyph_raster_ready=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_glyph_raster_upload_count=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_glyph_raster_error_skip_count=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_renderer_shaper=coretext_draw_list\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_renderer_rasterizer=coretext_glyph_rasterizer\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "primary_font_name=Menlo-Regular\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "first_fallback_font_name=AppleColorEmoji\n") != null);
 }

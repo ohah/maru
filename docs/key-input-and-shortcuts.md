@@ -119,6 +119,13 @@ Command+B      -> 초기에는 오류
 
 이 parser 계약은 실제 TOML parser보다 먼저 구현할 수 있다. `KeyChord.parse("Ctrl+Cmd+,")` 같은 작은 단위 테스트로 시작하고, 나중에 config 파일 parser가 이 함수를 호출하게 만든다.
 
+현재 구현 상태:
+
+- `src/config/keybinding.zig`가 `KeyChord.parse`와 `KeyBindingResolver`의 최소 계약을 구현한다.
+- `Cmd+B`, `ctrl+cmd+,`, `Shift+Alt+F13` 같은 key chord 문자열은 parser 단위 테스트로 검증한다.
+- `F1..F24`는 설정 문자열로는 파싱하지만, 현재 `TerminalKeyEvent` 타입에는 function key variant가 아직 없다. AppKit bridge가 실제 function key event를 넘기는 PR에서 `TerminalKeyEvent` 타입을 확장한다.
+- 실제 TOML 파일 parser, runtime reload, 설정 UI는 아직 없다.
+
 ## 충돌 규칙
 
 - global shortcut은 정확히 등록한 key chord만 소비한다. 예를 들어 `Ctrl+Cmd+,`를 등록해도 `Ctrl+B`, `Ctrl+C`, `Esc`에는 영향을 주지 않는다.
@@ -194,12 +201,14 @@ Esc      vim, readline, shell mode 전환에 자주 쓰인다.
 
 ## 검증 계획
 
-- config parser test: 같은 key 조합이 app action과 terminal override에 동시에 있으면 실패한다.
+- key chord parser test: modifier 중복, 알 수 없는 alias, key 누락, key 중복, F-key 범위 오류를 실패로 보고한다.
+- config/keybinding resolver test: 같은 key 조합이 app action과 terminal override에 동시에 있으면 실패한다.
 - config validation test: terminal 관용 조합을 app/global shortcut으로 등록하면 경고한다.
 - resolver unit test: `Cmd+B -> send_control("b")`는 `0x02` terminal input으로 변환된다.
 - resolver unit test: app action과 terminal input macro가 같은 key chord를 쓰면 오류다.
 - resolver unit test: app action으로 소비된 key는 terminal input으로 내려가지 않는다.
 - resolver unit test: 등록하지 않은 `Ctrl+B` 같은 조합은 global shortcut 때문에 소비되지 않는다.
+- terminal input encoder test: `Ctrl+letter`는 C0 control byte로, `Alt/Option`은 ESC prefix로 변환된다.
 - PTY E2E: terminal input으로 분류된 key만 shell에 전달된다.
 - macOS app E2E: global shortcut registration 실패/성공을 artifact로 남긴다.
 

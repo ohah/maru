@@ -326,8 +326,9 @@ TDD 방식:
 
 이 단계에서 다루지 않고 별도로 확장하는 입력 영역:
 
-- 기본 terminal input 인코더의 modifier 처리(`Ctrl+letter` → C0 control, `Alt/Option` → meta-ESC). 현재 `encodeKey`는 `event.modifiers`를 읽지 않는다.
-- application-cursor-key 모드(DECCKM, `\x1bOA` vs `\x1b[A`)와 CSI-u/Kitty 키 인코딩. 이를 위해 `[4]u8` 키 버퍼는 더 긴 시퀀스를 담도록 확장해야 한다.
+- 기본 terminal input 인코더는 `Ctrl+letter` → C0 control, `Alt/Option` → meta-ESC까지 처리한다. 이 계약은 `src/terminal/input.zig`와 `src/config/keybinding.zig`의 단위 테스트가 지킨다.
+- application-cursor-key 모드(DECCKM, `\x1bOA` vs `\x1b[A`)와 CSI-u/Kitty 키 인코딩은 아직 하지 않는다. 키 버퍼는 `encoded_key_buffer_len`으로 확장되어 있으므로, 다음 입력 확장은 같은 상수와 테스트를 갱신하면서 진행한다.
+- AppKit native key event에서 function key, keypad, dead key, IME 조합을 `TerminalKeyEvent`로 옮기는 일은 아직 하지 않는다. 이번 단계는 그 앞의 config/resolver 계약만 고정한다.
 
 ## 9단계: Workspace restore
 

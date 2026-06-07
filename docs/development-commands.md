@@ -20,7 +20,7 @@ Maru 작업에서 사용하는 기본 명령이다.
 - macOS window smoke 계약 테스트: `mise run test-macos-window-smoke`
 - macOS Metal 제품 atlas shader sampling smoke 실행: `mise run macos-metal-smoke` (창이 너무 빨리 닫히면 `MARU_METAL_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)
 - macOS Metal smoke 계약 테스트: `mise run test-macos-metal-smoke`
-- macOS live PTY Metal smoke 실행: `mise run macos-app-pty-metal-smoke` (controlled PTY command output을 실제 AppKit/CAMetalLayer 창의 CoreText glyph atlas shader sampling까지 태우고 `zig-out/maru-macos-app-pty-metal-smoke/app-pty-metal-frame.ppm` screenshot artifact를 남긴다. 창이 너무 빨리 닫히면 `MARU_APP_PTY_METAL_SMOKE_MS`로 조절한다. 아직 사용자 키 입력/interactive shell loop는 아니다)
+- macOS live PTY Metal smoke 실행: `mise run macos-app-pty-metal-smoke` (controlled PTY command output과 scripted input roundtrip을 실제 AppKit/CAMetalLayer 창의 CoreText glyph atlas shader sampling까지 태우고 `zig-out/maru-macos-app-pty-metal-smoke/app-pty-metal-frame.ppm` screenshot artifact를 남긴다. 창이 너무 빨리 닫히면 `MARU_APP_PTY_METAL_SMOKE_MS`로 조절한다. 아직 AppKit 키 이벤트나 interactive shell loop는 아니다)
 - macOS live PTY Metal smoke 계약 테스트: `mise run test-macos-app-pty-metal-smoke`
 - macOS CoreText font shaping/raster smoke 실행: `mise run macos-coretext-smoke` (창이나 GPU 없이 CoreText font resolve, glyph run 생성, `RendererState -> RenderFrame` 준비 계약, 제품 후보 `coretext_raster.zig` wrapper와 smoke native bridge를 통한 `GlyphRasterFrame` byte 생성, CPU bitmap raster를 확인한다)
 - macOS CoreText smoke 계약 테스트: `mise run test-macos-coretext-smoke`

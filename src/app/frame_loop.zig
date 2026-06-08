@@ -70,6 +70,15 @@ pub const FrameLoop = struct {
         return self.finishTick(frame);
     }
 
+    pub fn tickWithFrameBuilder(self: *FrameLoop, frame_builder: anytype) !FrameLoopTick {
+        // tick(shaper)와 같은 비차단 drain을 하되, frame 조립은 주입받은 builder가 맡는다.
+        // CoreText 같은 제품 shaper는 DrawList 전체를 shape한 뒤 RenderFrame을 만들기
+        // 때문에, 제품 dev session이 fake backend 대신 실제 glyph frame을 만들려면 이
+        // 경로를 쓴다. drain 순서는 여전히 FrameLoop가 소유한다.
+        const drain_summary = try self.pump.drainAvailable();
+        return self.tickAfterDrainWithFrameBuilder(drain_summary, frame_builder);
+    }
+
     pub fn tickAfterDrainWithFrameBuilder(
         self: *FrameLoop,
         drain_summary: runtime_pump.DrainSummary,

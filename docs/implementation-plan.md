@@ -294,7 +294,10 @@ macOS bridge 언어 선택:
 - 그 다음 PR은 `mise run macos-app-dev-build`, `mise run macos-app-dev-smoke`, `mise run macos-app-dev`로 실제 Swift `NSApplication` executable과 placeholder window lifecycle을 검증했다. 이 단계는 summary에 `terminal_surface=false`를 명시하고, shell/FrameLoop/render surface 연결은 하지 않았다.
 - 그 다음 PR은 Swift host가 opaque Zig dev session handle을 만들고, Zig가 shell 1개 surface와 `LivePtySession -> SurfaceRuntime -> FrameLoop -> RendererState`를 소유하도록 연결한다. summary에는 `terminal_surface=true`와 frame/output/exit 통계를 남기지만, Swift window 안에 Metal terminal view는 아직 붙이지 않는다.
 - 그 다음 PR은 placeholder view의 `keyDown`, window resize, window close를 같은 opaque dev session ABI로 내려보낸다. 자동 smoke는 scripted key events와 scripted resize를 보내 `key_events=2`, `terminal_input_events=2`, `resize_events=1`, `close_events=1`을 남긴다. resize cell 수는 아직 실제 renderer font metrics가 아니라 placeholder dev 추정값이다.
-- 실제 Swift window에 terminal glyph를 그리는 제품 앱은 그 다음 PR에서 시작한다.
+- 실제 Swift window에 terminal glyph를 그리는 제품 앱은 다음 단계들로 나눠 시작한다.
+  - 먼저 dev session이 fake font backend 대신 실제 CoreText shaper/rasterizer로 frame을 만든다(`FrameLoop.tickWithFrameBuilder` + `CoreTextFrameBuilder`). 그래서 `macos-app-dev-smoke` summary의 `glyph_count`/`atlas_entries`/`glyph_raster_ready`가 실제 rasterized glyph를 반영한다. CoreText 브리지는 macOS 정적 라이브러리·계약 테스트·Swift 링크에만 들어가고, Linux CI는 tick의 macOS 분기를 comptime으로 제외해 fake backend 계약만 유지한다. 화면은 아직 placeholder다.
+  - 그 다음 PR은 이 RenderFrame을 Swift가 가져갈 수 있는 Metal-frame ABI(cells/atlas uploads/raster pixels DTO)를 추가한다.
+  - 그 다음 PR은 placeholder view를 실제 Metal terminal view(CAMetalLayer)로 바꿔 같은 DTO를 그리고, 실제 atlas/font metrics로 resize cell 수를 계산한다.
 
 완료 기준:
 

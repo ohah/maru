@@ -49,8 +49,13 @@ final class MaruMetalTerminalView: NSView {
         let scale = window?.backingScaleFactor ?? layer?.contentsScale ?? 1.0
         let width = max(1.0, bounds.width * scale)
         let height = max(1.0, bounds.height * scale)
+        let newSize = CGSize(width: width, height: height)
         metalLayer.contentsScale = scale
-        metalLayer.drawableSize = CGSize(width: width, height: height)
+        if metalLayer.drawableSize != newSize {
+            metalLayer.drawableSize = newSize
+            // drawable이 새 크기로 재할당됐으니 generation이 그대로여도 다시 그려야 한다.
+            controller?.markMetalNeedsRedraw()
+        }
     }
 
     override func keyDown(with event: NSEvent) {
@@ -86,6 +91,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var metalRenderer: OpaquePointer?
     private var lastDrawnGeneration: UInt64 = 0
     private var metalFramesDrawn = 0
+    // surface(drawableSize/backing-scale) 변경 시 generation이 그대로여도 다시 그려야 한다.
+    private var metalNeedsRedraw = false
     // create 성공 여부를 영구 기록한다. metalRenderer는 shutdown에서 nil이 되므로 summary가
     // 종료 후 쓰일 때 "생성됐었다"를 잃지 않게 별도 플래그로 둔다.
     private var metalRendererCreated = false
@@ -239,32 +246,49 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard maru_macos_app_dev_session_metal_frame(devSession, &frame) == Self.statusOK else {
             return
         }
-        if frame.generation == lastDrawnGeneration {
+        // 새 frame(generation 변경)일 때뿐 아니라, drawableSize/backing-scale 변경 등 surface가
+        // 무효화돼 다시 칠해야 할 때(metalNeedsRedraw)도 그린다. generation만 보면 한가한 셸이
+        // 리사이즈/디스플레이 전환 후 stale/blank로 남는다.
+        let newFrame = frame.generation != lastDrawnGeneration
+        if !newFrame && !metalNeedsRedraw {
             return
         }
-        // atlas slot은 누적된다. 같은 크기면 새 glyph delta만 올리고, 크기가 바뀌면 renderer가
-        // texture를 새로 만든다.
-        _ = maru_metal_renderer_set_atlas(
-            renderer,
-            frame.atlas_width_px,
-            frame.atlas_height_px,
-            frame.raster_uploads,
-            frame.raster_upload_count,
-            frame.raster_pixels,
-            frame.raster_pixel_count
-        )
+        // atlas slot은 누적된다(같은 크기면 새 glyph delta만 올린다). 새 generation일 때만
+        // 업로드하면 되고, surface-only 재칠은 기존 atlas를 그대로 쓴다.
+        if newFrame {
+            _ = maru_metal_renderer_set_atlas(
+                renderer,
+                frame.atlas_width_px,
+                frame.atlas_height_px,
+                frame.raster_uploads,
+                frame.raster_upload_count,
+                frame.raster_pixels,
+                frame.raster_pixel_count
+            )
+        }
+        // cols/rows는 u32이지만 grid 좌표(cell.col/row)는 u16이다. 비현실적으로 큰 값은
+        // truncate-wrap(0이 되면 draw가 거부됨) 대신 u16 상한으로 클램프한다.
+        let cols = UInt16(min(frame.cols, UInt32(UInt16.max)))
+        let rows = UInt16(min(frame.rows, UInt32(UInt16.max)))
         let drew = maru_metal_renderer_draw(
             renderer,
             metalLayer,
-            UInt16(truncatingIfNeeded: frame.cols),
-            UInt16(truncatingIfNeeded: frame.rows),
+            cols,
+            rows,
             frame.cells,
             frame.cell_count
         )
         if drew {
             lastDrawnGeneration = frame.generation
+            metalNeedsRedraw = false
             metalFramesDrawn += 1
         }
+    }
+
+    // view가 drawableSize/backing-scale 변경을 알리면, 다음 tick이 generation 변화가 없어도
+    // 현재 frame을 새 surface에 다시 그리게 표시한다.
+    func markMetalNeedsRedraw() {
+        metalNeedsRedraw = true
     }
 
     private func startDevSession(smokeMode: Bool) -> Bool {

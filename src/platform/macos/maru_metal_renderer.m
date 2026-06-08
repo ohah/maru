@@ -91,13 +91,27 @@ bool maru_metal_renderer_set_atlas(
     }
     for (size_t i = 0; i < upload_count; i++) {
         const MaruAppHostDevMetalRasterUpload upload = uploads[i];
-        // atlas 범위와 source 범위를 벗어나는 upload는 건너뛴다(손상된 frame 방어).
+        // atlas 범위와 source 범위를 벗어나는 upload는 건너뛴다(손상된 frame 방어). 검증된
+        // smoke의 maru_upload_fits_atlas와 같은 invariant를 모두 확인한다 — replaceRegion은
+        // bytes_per_row*atlas_height_px 바이트를 읽으므로, byte_count만 봐선 OOB read를 막지
+        // 못한다.
         if (upload.atlas_width_px == 0 || upload.atlas_height_px == 0 || upload.bytes_per_row == 0) {
             continue;
         }
         if (upload.atlas_x_px >= atlas_width_px || upload.atlas_y_px >= atlas_height_px ||
             upload.atlas_width_px > atlas_width_px - upload.atlas_x_px ||
             upload.atlas_height_px > atlas_height_px - upload.atlas_y_px) {
+            continue;
+        }
+        // RGBA8 tight row(width*4)와 byte_count == bytes_per_row*height를 강제해, Metal이 읽는
+        // 범위가 정확히 byte_count와 일치하게 한다(곱셈 overflow도 막는다).
+        if (upload.bytes_per_row != (size_t)upload.atlas_width_px * 4) {
+            continue;
+        }
+        if (upload.bytes_per_row > SIZE_MAX / upload.atlas_height_px) {
+            continue;
+        }
+        if (upload.byte_count != upload.bytes_per_row * (size_t)upload.atlas_height_px) {
             continue;
         }
         if (upload.bytes_offset > raster_pixel_count ||
@@ -133,6 +147,57 @@ bool maru_metal_renderer_draw(
         return false;
     }
 
+    // vertex buffer를 drawable 획득 전에 만든다. 그래야 calloc/buffer 생성 실패가 이미 잡은
+    // drawable을 present/commit 없이 새게 만들지 않는다(drawable pool starvation 방지).
+    id<MTLBuffer> vertex_buffer = nil;
+    size_t total_vertices = 0;
+    if (cells != NULL && cell_count > 0) {
+        const size_t vertices_per_cell = 6;
+        // total_vertices와 byte length 곱셈 overflow를 막는다(손상된 cell_count 방어).
+        if (cell_count > SIZE_MAX / vertices_per_cell) {
+            return false;
+        }
+        total_vertices = cell_count * vertices_per_cell;
+        if (total_vertices > SIZE_MAX / sizeof(MaruRendererVertex)) {
+            return false;
+        }
+        MaruRendererVertex *vertices = calloc(total_vertices, sizeof(MaruRendererVertex));
+        if (vertices == NULL) {
+            return false;
+        }
+        // smoke와 같은 inset grid 매핑(NDC). 실제 font metrics 기반 layout은 Swift view 단계에서
+        // 다룬다.
+        const float grid_left = -0.92f;
+        const float grid_top = 0.86f;
+        const float grid_width = 1.84f;
+        const float grid_height = 1.72f;
+        for (size_t i = 0; i < cell_count; i++) {
+            const MaruAppHostDevMetalCell cell = cells[i];
+            const float cell_width = (float)(cell.width == 0 ? 1 : cell.width);
+            const float left = grid_left + ((float)cell.col / (float)cols) * grid_width;
+            const float right = grid_left + (((float)cell.col + cell_width) / (float)cols) * grid_width;
+            const float top = grid_top - ((float)cell.row / (float)rows) * grid_height;
+            const float bottom = grid_top - (((float)cell.row + 1.0f) / (float)rows) * grid_height;
+            MaruRendererVertex quad[6] = {
+                {{left, top}, {cell.u0, cell.v0}},
+                {{left, bottom}, {cell.u0, cell.v1}},
+                {{right, bottom}, {cell.u1, cell.v1}},
+                {{left, top}, {cell.u0, cell.v0}},
+                {{right, bottom}, {cell.u1, cell.v1}},
+                {{right, top}, {cell.u1, cell.v0}},
+            };
+            memcpy(&vertices[i * vertices_per_cell], quad, sizeof(quad));
+        }
+        vertex_buffer = [impl.device
+            newBufferWithBytes:vertices
+                        length:total_vertices * sizeof(MaruRendererVertex)
+                       options:MTLResourceStorageModeShared];
+        free(vertices);
+        if (vertex_buffer == nil) {
+            return false;
+        }
+    }
+
     id<CAMetalDrawable> drawable = [layer nextDrawable];
     if (drawable == nil) {
         return false;
@@ -153,61 +218,16 @@ bool maru_metal_renderer_draw(
         return false;
     }
 
-    // cell이 없으면 clear만 한 빈 frame을 present한다(encoder는 반드시 endEncoding).
-    if (cells == NULL || cell_count == 0) {
-        [encoder endEncoding];
-        [command_buffer presentDrawable:drawable];
-        [command_buffer commit];
-        return true;
+    // vertex_buffer가 nil이면(cell 없음) clear만 한 빈 frame이다. 어떤 경우든 encoder는 반드시
+    // endEncoding하고 present/commit한다.
+    if (vertex_buffer != nil) {
+        [encoder setRenderPipelineState:impl.pipeline];
+        [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+        [encoder setFragmentTexture:impl.atlas atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                    vertexStart:0
+                    vertexCount:total_vertices];
     }
-
-    const size_t vertices_per_cell = 6;
-    const size_t total_vertices = cell_count * vertices_per_cell;
-    MaruRendererVertex *vertices = calloc(total_vertices, sizeof(MaruRendererVertex));
-    if (vertices == NULL) {
-        [encoder endEncoding];
-        return false;
-    }
-    // smoke와 같은 inset grid 매핑(NDC). 실제 font metrics 기반 layout은 Swift view 단계에서
-    // 다룬다.
-    const float grid_left = -0.92f;
-    const float grid_top = 0.86f;
-    const float grid_width = 1.84f;
-    const float grid_height = 1.72f;
-    for (size_t i = 0; i < cell_count; i++) {
-        const MaruAppHostDevMetalCell cell = cells[i];
-        const float cell_width = (float)(cell.width == 0 ? 1 : cell.width);
-        const float left = grid_left + ((float)cell.col / (float)cols) * grid_width;
-        const float right = grid_left + (((float)cell.col + cell_width) / (float)cols) * grid_width;
-        const float top = grid_top - ((float)cell.row / (float)rows) * grid_height;
-        const float bottom = grid_top - (((float)cell.row + 1.0f) / (float)rows) * grid_height;
-        MaruRendererVertex quad[6] = {
-            {{left, top}, {cell.u0, cell.v0}},
-            {{left, bottom}, {cell.u0, cell.v1}},
-            {{right, bottom}, {cell.u1, cell.v1}},
-            {{left, top}, {cell.u0, cell.v0}},
-            {{right, bottom}, {cell.u1, cell.v1}},
-            {{right, top}, {cell.u1, cell.v0}},
-        };
-        memcpy(&vertices[i * vertices_per_cell], quad, sizeof(quad));
-    }
-
-    id<MTLBuffer> vertex_buffer = [impl.device
-        newBufferWithBytes:vertices
-                    length:total_vertices * sizeof(MaruRendererVertex)
-                   options:MTLResourceStorageModeShared];
-    free(vertices);
-    if (vertex_buffer == nil) {
-        [encoder endEncoding];
-        return false;
-    }
-
-    [encoder setRenderPipelineState:impl.pipeline];
-    [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
-    [encoder setFragmentTexture:impl.atlas atIndex:0];
-    [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                vertexStart:0
-                vertexCount:total_vertices];
     [encoder endEncoding];
 
     [command_buffer presentDrawable:drawable];

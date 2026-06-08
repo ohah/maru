@@ -506,6 +506,12 @@ pub fn build(b: *std.Build) void {
             // symbol로 링크가 실패한다.
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
         });
+        // 제품 Metal renderer(Swift Metal view가 호출)를 같은 .a에 담는다. Metal/QuartzCore
+        // framework는 Swift 최종 링크에서 제공한다. 같은 이유로 UBSan을 끈다.
+        macos_app_host_abi_lib.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/maru_metal_renderer.m"),
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
     }
     const install_macos_app_host_abi_lib = b.addInstallArtifact(macos_app_host_abi_lib, .{});
 
@@ -539,11 +545,16 @@ pub fn build(b: *std.Build) void {
             "-framework",
             "AppKit",
             // dev session이 정적 라이브러리에 담긴 CoreText 브리지로 glyph를 rasterize하므로
-            // 최종 링크에서 CoreText/CoreGraphics framework를 제공한다.
+            // 최종 링크에서 CoreText/CoreGraphics framework를 제공한다. Metal/QuartzCore는
+            // 정적 라이브러리에 담긴 제품 Metal renderer가 쓴다.
             "-framework",
             "CoreText",
             "-framework",
             "CoreGraphics",
+            "-framework",
+            "Metal",
+            "-framework",
+            "QuartzCore",
             "-o",
             "zig-out/bin/maru-macos-app-dev",
         });

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#import "maru_metal_shader.h"
 
 typedef struct {
     int32_t status;
@@ -127,24 +128,8 @@ typedef struct {
 
 static const NSUInteger maru_readback_stride = 256;
 
-// VertexIn은 host쪽 MaruMetalSmokeVertex(float 4개, 16바이트, tight-packed)와 같은
-// 메모리 레이아웃을 가져야 한다. packed_float2 두 개를 쓰면 MSL과 C struct stride가
-// 같아져 shader가 UV를 잘못 읽는 숨은 회귀를 피할 수 있다.
-static NSString *const maru_cell_shader_source =
-    @"#include <metal_stdlib>\n"
-     "using namespace metal;\n"
-     "struct VertexIn { packed_float2 position; packed_float2 uv; };\n"
-     "struct VertexOut { float4 position [[position]]; float2 uv; };\n"
-     "vertex VertexOut maru_cell_vertex(uint vid [[vertex_id]], const device VertexIn *vertices [[buffer(0)]]) {\n"
-     "  VertexOut out;\n"
-     "  out.position = float4(float2(vertices[vid].position), 0.0, 1.0);\n"
-     "  out.uv = float2(vertices[vid].uv);\n"
-     "  return out;\n"
-     "}\n"
-     "fragment float4 maru_cell_fragment(VertexOut in [[stage_in]], texture2d<float> atlas_texture [[texture(0)]]) {\n"
-     "  constexpr sampler atlas_sampler(coord::normalized, address::clamp_to_edge, filter::nearest);\n"
-     "  return atlas_texture.sample(atlas_sampler, in.uv);\n"
-     "}\n";
+// cell quad shader는 maru_metal_shader.h(MARU_METAL_CELL_SHADER_SOURCE)가 단일 출처다.
+// 제품 Metal renderer와 같은 GPU 코드를 공유해, smoke가 그 셰이더를 회귀 검증한다.
 
 @interface MaruKeyCaptureView : NSView {
 @public
@@ -497,7 +482,7 @@ static id<MTLRenderPipelineState> maru_make_cell_pipeline(
     MTLPixelFormat pixel_format
 ) {
     NSError *error = nil;
-    id<MTLLibrary> library = [device newLibraryWithSource:maru_cell_shader_source
+    id<MTLLibrary> library = [device newLibraryWithSource:MARU_METAL_CELL_SHADER_SOURCE
                                                   options:nil
                                                     error:&error];
     if (library == nil) {

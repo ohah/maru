@@ -40,22 +40,45 @@ pub const FrameLoop = struct {
         // 먼저 PTY queue를 non-blocking으로 비우고, 그 결과가 반영된 active surface만
         // renderer frame으로 만든다. 이 순서를 여기서 고정해야 native UI가
         // TerminalCore나 GlyphAtlas를 직접 만지지 않는다.
-        var frame = try host.buildFrame(
+        const frame = try host.buildFrame(
             self.allocator,
             self.app_window,
             self.pump,
             self.renderer_state,
             shaper,
         );
-        errdefer frame.deinit(self.allocator);
+        return self.finishTick(frame);
+    }
+
+    pub fn tickAfterDrain(
+        self: *FrameLoop,
+        drain_summary: runtime_pump.DrainSummary,
+        shaper: anytype,
+    ) !FrameLoopTick {
+        // 일부 smoke는 queue event bytes를 artifact로 복사한 뒤 pump에 적용해야 한다.
+        // 그런 경로도 frame 조립과 atlas state 관리는 같은 FrameLoop가 소유하도록
+        // 이미 적용된 drain summary를 받아 frame만 만드는 진입점을 둔다.
+        const frame = try host.buildFrameAfterDrain(
+            self.allocator,
+            self.app_window,
+            self.renderer_state,
+            shaper,
+            drain_summary,
+        );
+        return self.finishTick(frame);
+    }
+
+    fn finishTick(self: *FrameLoop, frame: host.AppHostFrame) !FrameLoopTick {
+        var owned_frame = frame;
+        errdefer owned_frame.deinit(self.allocator);
 
         const index = self.frame_index;
         self.frame_index += 1;
 
         return .{
             .index = index,
-            .frame = frame,
-            .render_stats = renderer.renderFrameStats(frame.render_frame, self.renderer_state.atlas.entryCount()),
+            .frame = owned_frame,
+            .render_stats = renderer.renderFrameStats(owned_frame.render_frame, self.renderer_state.atlas.entryCount()),
         };
     }
 

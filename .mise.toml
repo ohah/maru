@@ -25,6 +25,10 @@ run = "zig build app-smoke"
 description = "Run the app frame-loop contract smoke"
 run = "zig build app-loop-smoke"
 
+[tasks.app-pty-loop-smoke]
+description = "Run the live PTY app frame-loop smoke"
+run = "zig build app-pty-loop-smoke"
+
 [tasks.app-pty-smoke]
 description = "Run the live PTY app host frame smoke"
 run = "zig build app-pty-smoke"

@@ -15,6 +15,7 @@ Maru 작업에서 사용하는 기본 명령이다.
 - 빌드: `mise run build`
 - headless PTY 데모 실행: `mise run demo`
 - app host smoke 실행: `mise run app-smoke` (`zig-out/maru-app-smoke/app-host.summary.txt`, `app-host.draw-list.txt`, `app-host.glyph-frame.txt`를 남긴다. 아직 실제 UI는 아니다)
+- app frame loop smoke 실행: `mise run app-loop-smoke` (`zig-out/maru-app-loop-smoke/app-loop.summary.txt`, `app-loop.frames.txt`, `app-loop.screen.txt`를 남긴다. 실제 AppKit event loop는 아니지만, output frame, idle frame, termination frame을 반복 tick으로 만들 수 있는지 검증한다)
 - live PTY app host smoke 실행: `mise run app-pty-smoke` (`zig-out/maru-app-pty-smoke/app-pty.summary.txt`, `app-pty.raw.txt`, `app-pty.screen.txt`, `app-pty.snapshot.txt`, `app-pty.frame.txt`를 남긴다. 실제 PTY output이 app host renderer frame까지 들어가는지 검증하지만 아직 실제 UI는 아니다)
 - macOS visible window smoke 실행: `mise run macos-window-smoke` (창이 너무 빨리 닫히면 `MARU_WINDOW_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)
 - macOS window smoke 계약 테스트: `mise run test-macos-window-smoke`

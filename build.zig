@@ -48,6 +48,12 @@ pub fn build(b: *std.Build) void {
     app_smoke_cmd.addArg("app-smoke");
     app_smoke_step.dependOn(&app_smoke_cmd.step);
 
+    const app_loop_smoke_step = b.step("app-loop-smoke", "Run the app frame-loop contract smoke");
+    const app_loop_smoke_cmd = b.addRunArtifact(exe);
+    app_loop_smoke_cmd.step.dependOn(b.getInstallStep());
+    app_loop_smoke_cmd.addArg("app-loop-smoke");
+    app_loop_smoke_step.dependOn(&app_loop_smoke_cmd.step);
+
     const app_pty_smoke_step = b.step("app-pty-smoke", "Run the live PTY app host frame smoke");
     const app_pty_smoke_cmd = b.addRunArtifact(exe);
     app_pty_smoke_cmd.step.dependOn(b.getInstallStep());

@@ -96,6 +96,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // tick summary가 알려주는 metal generation(u32). 이 값이 그대로면 metalFrame() ABI 호출과
     // draw를 idle tick에서 건너뛴다.
     private var lastSeenMetalGeneration: UInt32 = 0
+    // renderer가 알려준 cell 픽셀 크기. resize가 같은 메트릭으로 cols/rows를 계산하도록 캐시한다.
+    private var lastCellWidthPx: UInt32 = 0
+    private var lastCellHeightPx: UInt32 = 0
     // create 성공 여부를 영구 기록한다. metalRenderer는 shutdown에서 nil이 되므로 summary가
     // 종료 후 쓰일 때 "생성됐었다"를 잃지 않게 별도 플래그로 둔다.
     private var metalRendererCreated = false
@@ -144,6 +147,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
 
+        // 첫 tick(startDevSession 안)이 cell 메트릭을 캐시했으니, 창 크기에 맞춰 cols/rows를
+        // 한 번 맞춘다(80×24 기본에서 실제 창 grid로). smoke는 자체 scripted resize를 쓴다.
+        if !smokeMode {
+            resizeDevSessionFromWindow()
+        }
+
         startFrameLoopTicks()
         if smokeMode {
             sendSmokeDevEvents()
@@ -183,6 +192,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     func windowDidResize(_ notification: Notification) {
         _ = notification
+        // drawableSize를 창에 맞춰 즉시 갱신한다(setFrameSize 경로에만 의존하지 않는다). 이게
+        // 늦으면 CAMetalLayer가 옛 크기 drawable을 새 창에 스케일해 글자가 늘어나 보인다.
+        metalTerminalView?.updateDrawableSize()
         resizeDevSessionFromWindow()
     }
 
@@ -273,11 +285,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // truncate-wrap(0이 되면 draw가 거부됨) 대신 u16 상한으로 클램프한다.
         let cols = UInt16(min(frame.cols, UInt32(UInt16.max)))
         let rows = UInt16(min(frame.rows, UInt32(UInt16.max)))
+        // resize가 renderer와 같은 cell 픽셀 크기를 쓰도록 캐시한다(매 frame 일정한 값).
+        if frame.cell_width_px > 0 { lastCellWidthPx = frame.cell_width_px }
+        if frame.cell_height_px > 0 { lastCellHeightPx = frame.cell_height_px }
         let drew = maru_metal_renderer_draw(
             renderer,
             metalLayer,
             cols,
             rows,
+            frame.cell_width_px,
+            frame.cell_height_px,
             frame.cells,
             frame.cell_count
         )
@@ -325,14 +342,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         tickTimer?.invalidate()
         // Swift는 frame pacing만 정한다. PTY queue drain, SurfaceRuntime 적용,
         // RenderFrame 준비는 모두 Zig FrameLoop.tick이 소유한다.
-        tickTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            // Timer 콜백은 이 timer를 스케줄한 main run loop(main thread)에서 실행되고 이
-            // controller는 @MainActor다. Task로 감싸면 매 tick(30/sec)마다 async hop과 할당이
-            // 생기고 key/resize 동기 ABI 호출과 순서가 흔들린다. main에서 바로 호출한다.
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            // Timer 콜백은 main run loop(main thread)에서 실행되고 이 controller는 @MainActor다.
+            // Task로 감싸면 매 tick(30/sec)마다 async hop과 할당이 생기므로 main에서 바로 호출한다.
             MainActor.assumeIsolated {
                 self?.tickDevSession()
             }
         }
+        // .common 모드로 등록해야 창 live-resize(.eventTracking) 중에도 tick이 멈추지 않는다.
+        // 기본 scheduledTimer(.default)는 드래그 리사이즈 동안 발화하지 않아, 옛 drawable이
+        // 새 창 크기로 스케일되며 글자가 늘어나 보인다.
+        RunLoop.main.add(timer, forMode: .common)
+        tickTimer = timer
     }
 
     private func tickDevSession() {
@@ -429,15 +450,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
 
         let bounds = contentView.bounds
-        // placeholder 단계에는 CoreText font metrics가 아직 Swift view에 없다. 그래서 실제 제품
-        // cell 계산이 아니라 dev smoke용 추정 cell size로 resize ABI 경로만 검증한다.
-        let cols = max(UInt32(1), clampedUInt32(floor(bounds.width / placeholderCellWidthPx)))
-        let rows = max(UInt32(1), clampedUInt32(floor(bounds.height / placeholderCellHeightPx)))
+        let scale = window.backingScaleFactor
+        // renderer가 cell을 backing 픽셀 단위로 깔고 drawableSize(backing)로 투영하므로, cols/rows도
+        // backing 픽셀을 cell 픽셀 크기로 나눠 계산해야 grid가 창에 정합한다. cell 메트릭은 첫
+        // frame에서 캐시되며, 그 전(첫 resize)에는 placeholder 추정값으로 대체한다.
+        let backingWidth = bounds.width * scale
+        let backingHeight = bounds.height * scale
+        let cellW = CGFloat(lastCellWidthPx > 0 ? lastCellWidthPx : UInt32(placeholderCellWidthPx))
+        let cellH = CGFloat(lastCellHeightPx > 0 ? lastCellHeightPx : UInt32(placeholderCellHeightPx))
+        let cols = max(UInt32(1), clampedUInt32(floor(backingWidth / cellW)))
+        let rows = max(UInt32(1), clampedUInt32(floor(backingHeight / cellH)))
         resizeDevSession(
             cols: cols,
             rows: rows,
-            widthPx: clampedUInt32(bounds.width),
-            heightPx: clampedUInt32(bounds.height)
+            widthPx: clampedUInt32(backingWidth),
+            heightPx: clampedUInt32(backingHeight)
         )
     }
 

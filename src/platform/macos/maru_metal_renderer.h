@@ -35,12 +35,16 @@ bool maru_metal_renderer_set_atlas(
     size_t raster_pixel_count
 );
 
-/* 현재 atlas로 cell quad들을 layer의 다음 drawable에 그리고 present한다. 성공 시 true. */
+/* 현재 atlas로 cell quad들을 layer의 다음 drawable에 그리고 present한다. cell_width_px/
+   cell_height_px(고정 cell 픽셀 크기)와 layer.drawableSize로 픽셀 정확 배치를 한다(좌상단
+   기준, grid를 창에 맞춰 늘이지 않는다). 성공 시 true. */
 bool maru_metal_renderer_draw(
     MaruMetalRenderer *renderer,
     CAMetalLayer *layer,
     uint16_t cols,
     uint16_t rows,
+    uint32_t cell_width_px,
+    uint32_t cell_height_px,
     const MaruAppHostDevMetalCell *cells,
     size_t cell_count
 );

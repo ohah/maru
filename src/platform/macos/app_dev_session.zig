@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 6;
+pub const abi_version: u32 = 7;
 pub const default_queue_capacity: u32 = 16;
 
 // app_host_abi.zig가 이 파일을 import하므로 EventKind는 여기서 정의하고 거기서 re-export한다
@@ -95,6 +95,9 @@ pub const DevSession = struct {
     // 제품 dev shell은 fake font backend가 아니라 실제 CoreText로 glyph frame을 만든다.
     // appearance(폰트/색)는 init에서 한 번 resolve해 매 tick의 CoreTextFrameBuilder에 쓴다.
     appearance: config_mod.ResolvedAppearance = undefined,
+    // 한 cell의 픽셀 크기(정사각 glyph = font_size_px × device_scale). renderer fixed-cell
+    // layout과 host resize가 같은 값을 쓰도록 init에서 한 번 계산해 metal frame으로 노출한다.
+    cell_px: u32 = 0,
     live_initialized: bool = false,
     surface_initialized: bool = false,
     runtime_initialized: bool = false,
@@ -150,6 +153,9 @@ pub const DevSession = struct {
         self.renderer_state = renderer.RendererState.init(allocator, .{});
         self.renderer_initialized = true;
         self.appearance = try config_mod.resolveAppearance(.{});
+        // shaper와 같은 정책(textConfigFromFontSize, device_scale=1)으로 cell 픽셀 크기를
+        // 도출해, renderer/host가 atlas glyph와 같은 크기로 cell을 깐다.
+        self.cell_px = renderer.textConfigFromFontSize(self.appearance.font.size, 1).font_size_px;
         self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.pump, &self.renderer_state);
         self.writeSummaryFromState();
     }
@@ -236,7 +242,7 @@ pub const DevSession = struct {
         if (self.metal_dirty) {
             // Metal view 데이터 투영 실패(OOM 등)는 터미널 코어 동작과 무관하다. 마지막
             // frame을 유지하고 dirty를 남겨 다음 tick에 재시도한다(세션을 죽이지 않는다).
-            if (self.metal_buffer.replace(self.allocator, tick_result.frame.render_frame, self.renderer_state.atlas.config)) |_| {
+            if (self.metal_buffer.replace(self.allocator, tick_result.frame.render_frame, self.renderer_state.atlas.config, self.cell_px, self.cell_px)) |_| {
                 self.metal_dirty = false;
             } else |_| {}
         }

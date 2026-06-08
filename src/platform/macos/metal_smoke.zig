@@ -412,6 +412,32 @@ pub fn buildSmokeFixtureFromOwnedDrawList(
     draw_list_owned = false;
     defer frame.deinit(allocator);
 
+    return buildSmokeFixtureFromRenderFrame(
+        allocator,
+        frame,
+        state.atlas.config,
+        state.atlas.entryCount(),
+        uses_coretext_bytes,
+        input,
+        coretext_shaper.CoreTextDrawListShaper.name,
+        rasterizer_name,
+    );
+}
+
+pub fn buildSmokeFixtureFromRenderFrame(
+    allocator: std.mem.Allocator,
+    frame: renderer.RenderFrame,
+    atlas_config: renderer.GlyphAtlasConfig,
+    atlas_entry_count: usize,
+    uses_coretext_bytes: bool,
+    input: []const u8,
+    shaper_name: []const u8,
+    rasterizer_name: []const u8,
+) !SmokeFixture {
+    // Metal backend가 소비해야 할 입력은 DrawList나 TerminalCore snapshot이 아니라
+    // renderer가 이미 준비한 RenderFrame이다. 이 helper는 RenderFrame의 backend-neutral
+    // 결과를 native smoke ABI용 DTO로만 투영한다. frame ownership은 caller에게 남겨,
+    // 실제 app loop가 FrameLoopTick을 유지한 채 같은 투영 경계를 재사용할 수 있게 한다.
     const native_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame);
     errdefer allocator.free(native_cells);
     const native_raster_uploads = try buildNativeRasterUploads(allocator, frame.glyph_raster_frame);
@@ -422,14 +448,14 @@ pub fn buildSmokeFixtureFromOwnedDrawList(
     return .{
         .size = frame.glyph_frame.size,
         .cells = native_cells,
-        .atlas_width_px = state.atlas.config.atlas_width_px,
-        .atlas_height_px = state.atlas.config.atlas_height_px,
+        .atlas_width_px = atlas_config.atlas_width_px,
+        .atlas_height_px = atlas_config.atlas_height_px,
         .raster_uploads = native_raster_uploads,
         .raster_pixels = native_raster_pixels,
         .uses_coretext_bytes = uses_coretext_bytes,
-        .stats = renderer.renderFrameStats(frame, state.atlas.entryCount()),
+        .stats = renderer.renderFrameStats(frame, atlas_entry_count),
         .input = input,
-        .shaper = coretext_shaper.CoreTextDrawListShaper.name,
+        .shaper = shaper_name,
         .rasterizer = rasterizer_name,
     };
 }
@@ -1124,6 +1150,55 @@ test "Metal smoke fixture comes from TerminalCore DrawList shaper" {
     try std.testing.expect(fixture.cells[4].slot_id > 0);
     try std.testing.expect(fixture.cells[4].atlas_width_px > 0);
     try std.testing.expect(fixture.cells[4].atlas_height_px > 0);
+    try std.testing.expect(nativeCellsHaveAtlasPlacement(fixture.cells));
+}
+
+test "Metal smoke fixture can be projected from an already prepared RenderFrame" {
+    // 실제 app loop는 TerminalCore나 DrawList를 Metal bridge에 직접 넘기지 말아야 한다.
+    // renderer가 만든 RenderFrame만 native DTO로 투영할 수 있어야, visible UI smoke와
+    // 나중의 Swift/AppKit loop가 같은 backend 입력 경계를 재사용한다.
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
+    defer core.deinit();
+
+    core.clearDirty();
+    try core.write("Maru");
+
+    var state = renderer.RendererState.init(std.testing.allocator, .{});
+    defer state.deinit();
+
+    var frame = try state.buildFrame(std.testing.allocator, core.snapshot(), renderer.FakeFontBackend{});
+    defer frame.deinit(std.testing.allocator);
+
+    const atlas_entries = state.atlas.entryCount();
+    var fixture = try buildSmokeFixtureFromRenderFrame(
+        std.testing.allocator,
+        frame,
+        state.atlas.config,
+        atlas_entries,
+        false,
+        "test_prepared_render_frame",
+        "fake_font_backend",
+        "fake_glyph_rasterizer",
+    );
+    defer fixture.deinit(std.testing.allocator);
+
+    try std.testing.expect(fixture.stats.prepared());
+    try std.testing.expectEqual(renderer.Backend.metal, fixture.stats.backend);
+    try std.testing.expectEqual(frame.glyph_frame.size, fixture.size);
+    try std.testing.expectEqual(state.atlas.config.atlas_width_px, fixture.atlas_width_px);
+    try std.testing.expectEqual(state.atlas.config.atlas_height_px, fixture.atlas_height_px);
+    try std.testing.expectEqual(atlas_entries, fixture.stats.atlas_entries);
+    try std.testing.expectEqualStrings("test_prepared_render_frame", fixture.input);
+    try std.testing.expectEqualStrings("fake_font_backend", fixture.shaper);
+    try std.testing.expectEqualStrings("fake_glyph_rasterizer", fixture.rasterizer);
+    var visible_glyph_count: usize = 0;
+    for (frame.glyph_quad_frame.glyphs) |glyph| {
+        if (glyph.run.codepoint != ' ') visible_glyph_count += 1;
+    }
+    try std.testing.expectEqual(visible_glyph_count, fixture.cells.len);
+    try std.testing.expectEqual(frame.glyph_raster_frame.uploads.len, fixture.raster_uploads.len);
+    try std.testing.expectEqual(frame.glyph_raster_frame.pixels.len, fixture.raster_pixels.len);
+    try std.testing.expectEqual(frame.glyph_raster_frame.stats.byte_count, fixture.raster_pixels.len);
     try std.testing.expect(nativeCellsHaveAtlasPlacement(fixture.cells));
 }
 

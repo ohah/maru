@@ -136,16 +136,29 @@ bool maru_metal_renderer_draw(
     CAMetalLayer *layer,
     uint16_t cols,
     uint16_t rows,
+    uint32_t cell_width_px,
+    uint32_t cell_height_px,
     const MaruAppHostDevMetalCell *cells,
     size_t cell_count
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
     }
+    if (cell_width_px == 0 || cell_height_px == 0) {
+        return false;
+    }
     MaruMetalRendererImpl *impl = (__bridge MaruMetalRendererImpl *)renderer;
     if (impl.atlas == nil) {
         return false;
     }
+    // drawable의 backing 픽셀 크기. fixed-cell layout은 cell을 고정 픽셀 크기로 깔고 이 크기로
+    // NDC에 투영하므로, 창을 키우면 글자가 늘어나는 게 아니라 더 많은 cell이 보인다.
+    const CGSize drawable_size = layer.drawableSize;
+    if (drawable_size.width < 1.0 || drawable_size.height < 1.0) {
+        return false;
+    }
+    const float drawable_w = (float)drawable_size.width;
+    const float drawable_h = (float)drawable_size.height;
 
     // vertex buffer를 drawable 획득 전에 만든다. 그래야 calloc/buffer 생성 실패가 이미 잡은
     // drawable을 present/commit 없이 새게 만들지 않는다(drawable pool starvation 방지).
@@ -172,19 +185,22 @@ bool maru_metal_renderer_draw(
             return false;
         }
         MaruRendererVertex *vertices = (MaruRendererVertex *)vertex_buffer.contents;
-        // smoke와 같은 inset grid 매핑(NDC). 실제 font metrics 기반 layout은 Swift view 단계에서
-        // 다룬다.
-        const float grid_left = -0.92f;
-        const float grid_top = 0.86f;
-        const float grid_width = 1.84f;
-        const float grid_height = 1.72f;
+        // fixed-cell pixel layout: 각 cell을 고정 픽셀 사각형(col×cw, row×ch)에 두고 drawable
+        // 픽셀 크기로 NDC에 투영한다(좌상단 원점, Y는 아래로 증가 → NDC Y는 위로). grid를 창에
+        // 맞춰 늘이지 않으므로 glyph가 왜곡되지 않는다.
+        const float cw = (float)cell_width_px;
+        const float ch = (float)cell_height_px;
         for (size_t i = 0; i < cell_count; i++) {
             const MaruAppHostDevMetalCell cell = cells[i];
-            const float cell_width = (float)(cell.width == 0 ? 1 : cell.width);
-            const float left = grid_left + ((float)cell.col / (float)cols) * grid_width;
-            const float right = grid_left + (((float)cell.col + cell_width) / (float)cols) * grid_width;
-            const float top = grid_top - ((float)cell.row / (float)rows) * grid_height;
-            const float bottom = grid_top - (((float)cell.row + 1.0f) / (float)rows) * grid_height;
+            const float span = (float)(cell.width == 0 ? 1 : cell.width);
+            const float px_left = (float)cell.col * cw;
+            const float px_right = px_left + cw * span;
+            const float px_top = (float)cell.row * ch;
+            const float px_bottom = px_top + ch;
+            const float left = (px_left / drawable_w) * 2.0f - 1.0f;
+            const float right = (px_right / drawable_w) * 2.0f - 1.0f;
+            const float top = 1.0f - (px_top / drawable_h) * 2.0f;
+            const float bottom = 1.0f - (px_bottom / drawable_h) * 2.0f;
             const MaruRendererVertex quad[6] = {
                 {{left, top}, {cell.u0, cell.v0}},
                 {{left, bottom}, {cell.u0, cell.v1}},

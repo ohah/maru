@@ -113,6 +113,11 @@ pub const MetalFrame = extern struct {
     rows: u32 = 0,
     atlas_width_px: u32 = 0,
     atlas_height_px: u32 = 0,
+    // 한 terminal cell의 픽셀 크기(현재 rasterizer는 정사각 glyph라 둘이 같다 = font_size_px ×
+    // device_scale). renderer가 fixed-cell pixel layout에, host가 resize의 cols/rows 계산에
+    // 같은 값을 써서 grid가 창에 정합한다.
+    cell_width_px: u32 = 0,
+    cell_height_px: u32 = 0,
     // 실제로 새 frame을 투영할 때만 증가한다(idle/미변경 tick에서는 그대로). 소비자는 이
     // 값이 바뀌었을 때만 atlas 재업로드/재드로우하면 된다.
     generation: u64 = 0,
@@ -134,16 +139,20 @@ pub const MetalFrameBuffer = struct {
     size: terminal.Size = .{ .cols = 0, .rows = 0 },
     atlas_width_px: u32 = 0,
     atlas_height_px: u32 = 0,
+    cell_width_px: u32 = 0,
+    cell_height_px: u32 = 0,
     generation: u64 = 0,
 
     /// 새 frame을 투영해 교체한다. 새 배열을 먼저 만들고(실패 시 errdefer로 정리, 기존
     /// retained 배열은 그대로 유지) 성공하면 기존 것을 해제하고 swap한다. generation은
-    /// 성공했을 때만 증가한다.
+    /// 성공했을 때만 증가한다. cell_px는 caller(dev session)가 font 메트릭에서 계산해 넘긴다.
     pub fn replace(
         self: *MetalFrameBuffer,
         allocator: std.mem.Allocator,
         frame: renderer.RenderFrame,
         atlas_config: renderer.GlyphAtlasConfig,
+        cell_width_px: u32,
+        cell_height_px: u32,
     ) !void {
         const new_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame);
         errdefer allocator.free(new_cells);
@@ -160,6 +169,8 @@ pub const MetalFrameBuffer = struct {
         self.size = frame.glyph_frame.size;
         self.atlas_width_px = atlas_config.atlas_width_px;
         self.atlas_height_px = atlas_config.atlas_height_px;
+        self.cell_width_px = cell_width_px;
+        self.cell_height_px = cell_height_px;
         self.generation += 1;
     }
 
@@ -169,6 +180,8 @@ pub const MetalFrameBuffer = struct {
             .rows = @intCast(self.size.rows),
             .atlas_width_px = self.atlas_width_px,
             .atlas_height_px = self.atlas_height_px,
+            .cell_width_px = self.cell_width_px,
+            .cell_height_px = self.cell_height_px,
             .generation = self.generation,
             .cells = if (self.cells.len > 0) self.cells.ptr else null,
             .cell_count = self.cells.len,

@@ -37,6 +37,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "app-pty-loop-smoke")) {
+        try runAppPtyLoopSmoke(io, allocator, stdout);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "app-pty-smoke")) {
         try runAppPtySmoke(io, allocator, stdout);
         return;
@@ -63,6 +68,7 @@ fn printSmoke(stdout: *std.Io.Writer) !void {
     try stdout.writeAll("run `maru-dev demo` or `zig build demo` for the first runnable PTY slice\n");
     try stdout.writeAll("run `maru-dev app-smoke` or `zig build app-smoke` for the first app-host frame slice\n");
     try stdout.writeAll("run `maru-dev app-loop-smoke` or `zig build app-loop-smoke` for the headless app frame-loop slice\n");
+    try stdout.writeAll("run `maru-dev app-pty-loop-smoke` or `zig build app-pty-loop-smoke` for the live PTY frame-loop slice\n");
     try stdout.writeAll("run `maru-dev app-pty-smoke` or `zig build app-pty-smoke` for the live PTY app-host frame slice\n");
     try stdout.flush();
 }
@@ -113,6 +119,24 @@ fn runAppLoopSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wri
     try stdout.flush();
 }
 
+fn runAppPtyLoopSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
+    // 실제 PTY reader thread를 쓰지만 아직 native window loop는 아니다.
+    // 이 단계는 AppKit loop가 붙기 전에 PTY event batch마다 FrameLoop가 반복 frame을
+    // 만들 수 있는지 확인한다.
+    const config: maru.app.AppPtyLoopSmokeConfig = .{};
+    var result = try maru.app.runAppPtyLoopSmoke(io, allocator, config);
+    defer result.deinit(allocator);
+
+    try stdout.writeAll(result.summary);
+    try stdout.print("\nartifacts written to {s}/\n", .{config.artifact_dir});
+    try stdout.writeAll("frame loop artifact: app-pty-loop.frames.txt\n");
+    try stdout.writeAll("raw PTY artifact: app-pty-loop.raw.txt\n");
+    try stdout.writeAll("screen artifact: app-pty-loop.screen.txt\n");
+    try stdout.writeAll("snapshot artifact: app-pty-loop.snapshot.txt\n");
+    try stdout.writeAll("visible UI: not yet; this is a live PTY frame-loop contract smoke.\n");
+    try stdout.flush();
+}
+
 fn runAppPtySmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
     // 실제 PTY output이 app host renderer frame까지 들어가는지 확인한다.
     // 아직 창을 띄우지 않기 때문에 visible UI 확인은 Metal/AppKit smoke가 맡는다.
@@ -137,12 +161,14 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru-dev demo
         \\  maru-dev app-smoke
         \\  maru-dev app-loop-smoke
+        \\  maru-dev app-pty-loop-smoke
         \\  maru-dev app-pty-smoke
         \\
         \\commands:
         \\  demo       run the headless PTY -> SurfaceRuntime -> snapshot demo
         \\  app-smoke  run the app host -> RuntimeEventPump -> RenderFrame smoke
         \\  app-loop-smoke run the repeated app frame-loop smoke
+        \\  app-pty-loop-smoke run the live PTY -> repeated app frame-loop smoke
         \\  app-pty-smoke run the live PTY -> app host -> RenderFrame smoke
         \\
     );

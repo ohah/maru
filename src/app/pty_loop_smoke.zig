@@ -1,4 +1,5 @@
 const std = @import("std");
+const config_mod = @import("../config.zig");
 const observability = @import("../observability.zig");
 const pty = @import("../pty.zig");
 const renderer = @import("../renderer.zig");
@@ -12,6 +13,7 @@ const surface_mod = @import("surface.zig");
 const window_mod = @import("window.zig");
 
 pub const default_artifact_dir = "zig-out/maru-app-pty-loop-smoke";
+pub const default_interactive_artifact_dir = "zig-out/maru-app-pty-interactive-loop-smoke";
 
 pub const AppPtyLoopSmokeConfig = struct {
     artifact_dir: []const u8 = default_artifact_dir,
@@ -23,6 +25,9 @@ pub const AppPtyLoopSmokeConfig = struct {
     },
     expected_text: []const u8 = "Maru PTY loop second",
     max_event_frames: usize = 16,
+    interactive_shell: bool = false,
+    scripted_key_chord: []const u8 = "Cmd+I",
+    scripted_input: []const u8 = "",
 };
 
 pub const AppPtyLoopSmokeResult = struct {
@@ -73,6 +78,8 @@ pub fn run(
     defer renderer_state.deinit();
     var frame_loop = frame_loop_mod.FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
 
+    const scripted_input = try sendScriptedInputIfConfigured(&frame_loop, smoke_config);
+
     var raw_bytes: std.ArrayList(u8) = .empty;
     errdefer raw_bytes.deinit(allocator);
     var frame_log: std.Io.Writer.Allocating = .init(allocator);
@@ -121,6 +128,7 @@ pub fn run(
         .process_state = surfaces[0].process_state,
         .screen_contains_expected = std.mem.indexOf(u8, screen, smoke_config.expected_text) != null,
         .raw_bytes_len = raw.len,
+        .scripted_input = scripted_input,
     });
     errdefer allocator.free(summary);
 
@@ -201,6 +209,7 @@ const SummaryInput = struct {
     process_state: surface_mod.ProcessState,
     screen_contains_expected: bool,
     raw_bytes_len: usize,
+    scripted_input: ScriptedInputProbe,
 };
 
 fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
@@ -214,8 +223,12 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.writeAll("ui_note=real_pty_reader_repeated_frame_loop_without_appkit_window\n");
     try writer.writeAll("renderer_input=surface_runtime_live_pty_frame_loop\n");
     try writer.writeAll("renderer_shaper=fake_font_backend\n");
+    try writer.print("interactive_shell={}\n", .{input.config.interactive_shell});
     try writer.print("command={s}\n", .{input.config.command});
     try writer.print("args.len={d}\n", .{input.config.args.len});
+    try writer.print("scripted_key_event_sent={}\n", .{input.scripted_input.sent});
+    try writer.print("scripted_key_event_result={s}\n", .{input.scripted_input.result});
+    try writer.print("scripted_terminal_input_bytes={d}\n", .{input.scripted_input.terminal_input_bytes_len});
     try writer.print("size.cols={d}\n", .{input.config.size.cols});
     try writer.print("size.rows={d}\n", .{input.config.size.rows});
     try writer.print("frame_ticks={d}\n", .{input.frame_ticks});
@@ -235,6 +248,63 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.print("snapshot_artifact={s}/app-pty-loop.snapshot.txt\n", .{input.config.artifact_dir});
 
     return output.toOwnedSlice();
+}
+
+const ScriptedInputProbe = struct {
+    sent: bool = false,
+    result: []const u8 = "none",
+    terminal_input_bytes_len: usize = 0,
+};
+
+fn sendScriptedInputIfConfigured(
+    frame_loop: *frame_loop_mod.FrameLoop,
+    smoke_config: AppPtyLoopSmokeConfig,
+) !ScriptedInputProbe {
+    if (smoke_config.scripted_input.len == 0) return .{};
+
+    const chord = try config_mod.KeyChord.parse(smoke_config.scripted_key_chord);
+    const resolver: config_mod.KeyBindingResolver = .{
+        .terminal_bindings = &.{.{
+            .chord = chord,
+            .input = .{ .send_text = smoke_config.scripted_input },
+        }},
+    };
+    try resolver.validate();
+
+    // 이 synthetic event는 OS native key capture를 흉내 내려는 것이 아니다.
+    // 목적은 app frame loop가 이미 가진 keybinding resolver 경계로 terminal bytes를
+    // 쓰는지 고정하는 것이다. 실제 AppKit keyDown payload는 visible Metal smoke가 맡는다.
+    const key_event = try keyEventFromChord(chord);
+    const key_result = try frame_loop.handleKeyEvent(resolver, key_event);
+    return switch (key_result) {
+        .terminal_input => |terminal_input| .{
+            .sent = true,
+            .result = @tagName(key_result),
+            .terminal_input_bytes_len = terminal_input.bytes_len,
+        },
+        .app_action, .ignored => .{
+            .sent = false,
+            .result = @tagName(key_result),
+        },
+    };
+}
+
+fn keyEventFromChord(chord: config_mod.KeyChord) !terminal.KeyEvent {
+    return .{
+        .key = switch (chord.key) {
+            .char => |codepoint| .{ .char = codepoint },
+            .enter => .enter,
+            .escape => .escape,
+            .tab => .tab,
+            .backspace => .backspace,
+            .arrow_up => .arrow_up,
+            .arrow_down => .arrow_down,
+            .arrow_left => .arrow_left,
+            .arrow_right => .arrow_right,
+            .delete, .function => return error.ScriptedChordCannotBecomeTerminalKeyEvent,
+        },
+        .modifiers = chord.modifiers,
+    };
 }
 
 fn writeTick(writer: *std.Io.Writer, tick: frame_loop_mod.FrameLoopTick) !void {
@@ -335,6 +405,9 @@ fn ensureDir(io: std.Io, dir: []const u8) !void {
 }
 
 const FakePty = struct {
+    written: [128]u8 = undefined,
+    written_len: usize = 0,
+
     fn io(self: *FakePty) runtime_mod.PtyIo {
         return .{
             .ctx = self,
@@ -344,8 +417,10 @@ const FakePty = struct {
     }
 
     fn writeInput(ctx: *anyopaque, bytes: []const u8) !void {
-        _ = ctx;
-        _ = bytes;
+        const self: *FakePty = @ptrCast(@alignCast(ctx));
+        if (self.written_len + bytes.len > self.written.len) return error.FakePtyWriteTooLarge;
+        @memcpy(self.written[self.written_len..][0..bytes.len], bytes);
+        self.written_len += bytes.len;
     }
 
     fn resize(ctx: *anyopaque, size: terminal.Size) !void {
@@ -382,6 +457,38 @@ test "app PTY loop batch drain copies raw bytes before pump ownership ends" {
     try std.testing.expectEqual(surface_mod.ProcessState.exited, surface.process_state);
 }
 
+test "app PTY loop scripted input goes through FrameLoop keybinding boundary" {
+    // interactive shell smoke는 직접 PtySession.writeInput을 부르지 않는다. app host가
+    // 실제로 사용할 FrameLoop.handleKeyEvent 경계를 지나야, shortcut 정책과 terminal
+    // input 정책이 제품 loop와 smoke에서 갈라지지 않는다.
+    const allocator = std.testing.allocator;
+    var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 20, .rows = 3 })};
+    defer surfaces[0].deinit();
+    var fake_pty: FakePty = .{};
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surfaces[0], 10, fake_pty.io());
+
+    var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 2);
+    defer queue.deinit();
+    var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
+    var renderer_state = renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
+    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var frame_loop = frame_loop_mod.FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
+
+    const input = "printf smoke\nexit\n";
+    const probe = try sendScriptedInputIfConfigured(&frame_loop, .{
+        .scripted_input = input,
+        .scripted_key_chord = "Cmd+I",
+    });
+
+    try std.testing.expect(probe.sent);
+    try std.testing.expectEqualStrings("terminal_input", probe.result);
+    try std.testing.expectEqual(input.len, probe.terminal_input_bytes_len);
+    try std.testing.expectEqualStrings(input, fake_pty.written[0..fake_pty.written_len]);
+}
+
 test "app PTY loop summary records repeated event and idle frame contract" {
     // summary는 PR에서 사람이 보는 계약이다. 실제 UI가 아니며, event frame과 idle frame이
     // 둘 다 존재한다는 사실을 명확히 남겨야 다음 AppKit loop PR의 기준점이 된다.
@@ -399,12 +506,16 @@ test "app PTY loop summary records repeated event and idle frame contract" {
         .process_state = .exited,
         .screen_contains_expected = true,
         .raw_bytes_len = 40,
+        .scripted_input = .{},
     });
     defer std.testing.allocator.free(summary);
 
     try std.testing.expect(std.mem.indexOf(u8, summary, "maru.app-pty-loop-smoke.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "visible_ui=false\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=surface_runtime_live_pty_frame_loop\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "interactive_shell=false\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "scripted_key_event_sent=false\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "scripted_key_event_result=none\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "frame_ticks=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "event_frame_ticks=2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "idle_frame_ticks=1\n") != null);

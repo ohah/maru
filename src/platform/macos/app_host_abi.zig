@@ -75,6 +75,9 @@ pub const DevCommandKind = app_dev_session.CommandKind;
 pub const DevSession = app_dev_session.DevSession;
 pub const DevSessionConfig = app_dev_session.SessionConfig;
 pub const DevFrameSummary = app_dev_session.FrameSummary;
+pub const DevMetalCell = app_dev_session.MetalCell;
+pub const DevMetalRasterUpload = app_dev_session.MetalRasterUpload;
+pub const DevMetalFrame = app_dev_session.MetalFrame;
 
 pub fn defaultCapabilities() Capabilities {
     // Swift host는 macOS 앱 생명주기와 focus/input만 소유한다. PTY와 frame loop는
@@ -183,6 +186,19 @@ pub export fn maru_macos_app_dev_session_destroy(session: ?*DevSession) void {
     allocator.destroy(dev_session);
 }
 
+pub export fn maru_macos_app_dev_session_metal_frame(
+    session: ?*DevSession,
+    out_frame: ?*DevMetalFrame,
+) c_int {
+    // 가장 최근 tick의 RenderFrame을 Metal DTO(cells/atlas uploads/raster pixels)로 노출한다.
+    // 포인터는 dev session이 소유한 retained 배열을 가리키며 다음 tick까지 유효하다. caller는
+    // 같은 main thread에서 tick 직후 동기적으로 읽는다.
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const out = out_frame orelse return @intFromEnum(Status.null_out);
+    out.* = dev_session.metalFrame();
+    return @intFromEnum(Status.ok);
+}
+
 fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
     // codepoint -> char 변환과 surrogate/범위 거부는 terminal.input이 단일 출처로 소유한다.
     // native keyDown smoke(keyEventFromNativeKeyDown)와 같은 변환을 공유해, 한쪽만 고치면
@@ -244,6 +260,12 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@alignOf(c.MaruAppHostDevSessionConfig), @alignOf(DevSessionConfig));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevFrameSummary), @sizeOf(DevFrameSummary));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostDevFrameSummary), @alignOf(DevFrameSummary));
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevMetalCell), @sizeOf(DevMetalCell));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostDevMetalCell), @alignOf(DevMetalCell));
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevMetalRasterUpload), @sizeOf(DevMetalRasterUpload));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostDevMetalRasterUpload), @alignOf(DevMetalRasterUpload));
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevMetalFrame), @sizeOf(DevMetalFrame));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostDevMetalFrame), @alignOf(DevMetalFrame));
 }
 
 test "macOS app host capabilities describe ownership before runtime exists" {

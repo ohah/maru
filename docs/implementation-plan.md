@@ -296,8 +296,8 @@ macOS bridge 언어 선택:
 - 그 다음 PR은 placeholder view의 `keyDown`, window resize, window close를 같은 opaque dev session ABI로 내려보낸다. 자동 smoke는 scripted key events와 scripted resize를 보내 `key_events=2`, `terminal_input_events=2`, `resize_events=1`, `close_events=1`을 남긴다. resize cell 수는 아직 실제 renderer font metrics가 아니라 placeholder dev 추정값이다.
 - 실제 Swift window에 terminal glyph를 그리는 제품 앱은 다음 단계들로 나눠 시작한다.
   - 먼저 dev session이 fake font backend 대신 실제 CoreText shaper/rasterizer로 frame을 만든다(`FrameLoop.tickWithFrameBuilder` + `CoreTextFrameBuilder`). 그래서 `macos-app-dev-smoke` summary의 `glyph_count`/`atlas_entries`/`glyph_raster_ready`가 실제 rasterized glyph를 반영한다. CoreText 브리지는 macOS 정적 라이브러리·계약 테스트·Swift 링크에만 들어가고, Linux CI는 tick의 macOS 분기를 comptime으로 제외해 fake backend 계약만 유지한다. 화면은 아직 placeholder다.
-  - 그 다음 PR은 이 RenderFrame을 Swift가 가져갈 수 있는 Metal-frame ABI(cells/atlas uploads/raster pixels DTO)를 추가한다.
-  - 그 다음 PR은 placeholder view를 실제 Metal terminal view(CAMetalLayer)로 바꿔 같은 DTO를 그리고, 실제 atlas/font metrics로 resize cell 수를 계산한다.
+  - 그 다음 단계는 이 RenderFrame을 Swift가 가져갈 수 있는 Metal-frame ABI를 추가한다(완료). RenderFrame을 native Metal DTO(cells/atlas uploads/raster pixels)로 투영하는 책임은 순수 모듈 `metal_frame.zig`가 단일 출처로 소유하고, visible Metal smoke와 제품 app host가 같은 표현을 쓴다. dev session은 매 tick RenderFrame을 DTO로 투영해 retain하고, `maru_macos_app_dev_session_metal_frame`이 그 retained 배열을 가리키는 view를 돌려준다(포인터는 다음 tick까지 유효, ABI v5). 투영은 CoreText에 의존하지 않아 cross-platform이다.
+  - 그 다음 PR은 placeholder view를 실제 Metal terminal view(CAMetalLayer)로 바꿔 그 DTO를 그리고(여기서 visible glyph가 처음 보인다), 실제 atlas/font metrics로 resize cell 수를 계산한다.
 
 완료 기준:
 

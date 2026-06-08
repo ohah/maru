@@ -73,6 +73,8 @@ pub fn build(b: *std.Build) void {
     app_pty_smoke_step.dependOn(&app_pty_smoke_cmd.step);
 
     if (target.result.os.tag == .macos) {
+        const macos_swift_target = swiftMacOSTarget(b, target.result);
+
         // visible window smoke는 macOS window server와 Cocoa framework가 필요하다.
         // Ubuntu CI의 기본 `zig build`가 이 플랫폼 코드를 컴파일하지 않도록
         // macOS target일 때만 opt-in build step을 만든다.
@@ -231,15 +233,16 @@ pub fn build(b: *std.Build) void {
         run_macos_app_pty_metal_smoke_tests.setCwd(b.path("."));
         test_macos_app_pty_metal_smoke_step.dependOn(&run_macos_app_pty_metal_smoke_tests.step);
 
-        // Swift host skeleton은 아직 제품 앱을 실행하지 않는다. C header를 import하고
-        // AppKit 타입을 type-check할 수 있는지만 확인해, 다음 제품 app loop PR에서
-        // Swift/Zig 경계 문제가 한꺼번에 터지지 않게 한다.
-        const macos_app_host_swift_check_step = b.step("macos-app-host-swift-check", "Type-check the Swift macOS app host skeleton");
+        // Swift host type-check는 앱을 실행하지 않고 C header import와 AppKit 타입 사용만 본다.
+        // 실행 smoke와 분리해 두면 launch 실패와 Swift/Zig ABI shape 실패를 따로 볼 수 있다.
+        const macos_app_host_swift_check_step = b.step("macos-app-host-swift-check", "Type-check the Swift macOS app host");
         const macos_app_host_swift_check_cmd = b.addSystemCommand(&.{
             "xcrun",
             "swiftc",
             "-typecheck",
             "-parse-as-library",
+            "-target",
+            macos_swift_target,
             "-import-objc-header",
         });
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/app_host_abi.h"));
@@ -478,8 +481,55 @@ pub fn build(b: *std.Build) void {
     const test_macos_app_host_abi_step = b.step("test-macos-app-host-abi", "Run macOS Swift/Zig app host ABI contract tests");
     test_macos_app_host_abi_step.dependOn(&run_macos_app_host_abi_tests.step);
 
-    const macos_app_host_abi_lib_step = b.step("macos-app-host-abi-lib", "Build the Zig static library exported to the future Swift macOS app host");
+    const macos_app_host_abi_lib_step = b.step("macos-app-host-abi-lib", "Build the Zig static library exported to the Swift macOS app host");
     macos_app_host_abi_lib_step.dependOn(&install_macos_app_host_abi_lib.step);
+
+    if (target.result.os.tag == .macos) {
+        const macos_swift_target = swiftMacOSTarget(b, target.result);
+
+        // Swift 제품 host는 Zig compiler가 직접 만들 수 없으므로 xcrun swiftc를 build graph의
+        // system command로 둔다. 대신 입력은 C header와 Zig static library로 제한해서
+        // Swift가 Zig 내부 타입이나 allocator-owned storage에 묶이지 않게 한다.
+        const macos_app_dev_mkdir = b.addSystemCommand(&.{ "mkdir", "-p", "zig-out/bin" });
+        macos_app_dev_mkdir.setCwd(b.path("."));
+
+        const macos_app_dev_compile = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-parse-as-library",
+            "-target",
+            macos_swift_target,
+            "-import-objc-header",
+        });
+        macos_app_dev_compile.addFileArg(b.path("src/platform/macos/app_host_abi.h"));
+        macos_app_dev_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
+        macos_app_dev_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
+        macos_app_dev_compile.addArgs(&.{
+            "-framework",
+            "AppKit",
+            "-o",
+            "zig-out/bin/maru-macos-app-dev",
+        });
+        macos_app_dev_compile.setCwd(b.path("."));
+        macos_app_dev_compile.step.dependOn(&macos_app_dev_mkdir.step);
+        macos_app_dev_compile.step.dependOn(&install_macos_app_host_abi_lib.step);
+
+        const macos_app_dev_build_step = b.step("macos-app-dev-build", "Build the runnable macOS Swift app host dev shell");
+        macos_app_dev_build_step.dependOn(&macos_app_dev_compile.step);
+
+        const macos_app_dev_step = b.step("macos-app-dev", "Run the macOS Swift app host dev shell");
+        const macos_app_dev_run = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-app-dev"});
+        macos_app_dev_run.setCwd(b.path("."));
+        macos_app_dev_run.step.dependOn(&macos_app_dev_compile.step);
+        macos_app_dev_step.dependOn(&macos_app_dev_run.step);
+
+        const macos_app_dev_smoke_step = b.step("macos-app-dev-smoke", "Run the macOS Swift app host dev shell smoke");
+        const macos_app_dev_smoke = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-app-dev"});
+        macos_app_dev_smoke.setCwd(b.path("."));
+        macos_app_dev_smoke.setEnvironmentVariable("MARU_MACOS_APP_DEV_SMOKE_MS", "1500");
+        macos_app_dev_smoke.step.dependOn(&macos_app_dev_compile.step);
+        macos_app_dev_smoke_step.dependOn(&macos_app_dev_smoke.step);
+    }
 
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
@@ -695,4 +745,14 @@ pub fn build(b: *std.Build) void {
 
     const perf_step = b.step("perf", "Run local performance budget harness");
     perf_step.dependOn(&run_perf.step);
+}
+
+fn swiftMacOSTarget(b: *std.Build, target: std.Target) []const u8 {
+    const arch = switch (target.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86_64 => "x86_64",
+        else => @panic("macOS Swift app host only supports arm64 and x86_64 targets"),
+    };
+    const version = target.os.version_range.semver.min;
+    return b.fmt("{s}-apple-macosx{d}.{d}", .{ arch, version.major, version.minor });
 }

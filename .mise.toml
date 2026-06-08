@@ -70,12 +70,24 @@ description = "Run macOS Swift/Zig app host ABI contract tests"
 run = "zig build test-macos-app-host-abi"
 
 [tasks.macos-app-host-abi-lib]
-description = "Build the Zig static library exported to the future Swift macOS app host"
+description = "Build the Zig static library exported to the Swift macOS app host"
 run = "zig build macos-app-host-abi-lib"
 
 [tasks.macos-app-host-swift-check]
-description = "Type-check the Swift macOS app host skeleton"
+description = "Type-check the Swift macOS app host"
 run = "zig build macos-app-host-swift-check"
+
+[tasks.macos-app-dev-build]
+description = "Build the runnable macOS Swift app host dev shell"
+run = "zig build macos-app-dev-build"
+
+[tasks.macos-app-dev]
+description = "Run the macOS Swift app host dev shell"
+run = "zig build macos-app-dev"
+
+[tasks.macos-app-dev-smoke]
+description = "Run the macOS Swift app host dev shell smoke"
+run = "zig build macos-app-dev-smoke"
 
 [tasks.macos-coretext-smoke]
 description = "Run macOS CoreText font shaping/raster smoke"

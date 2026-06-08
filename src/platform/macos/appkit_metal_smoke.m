@@ -44,6 +44,16 @@ typedef struct {
     uint32_t modifier_command;
 } MaruKeyDownSmokeResult;
 
+typedef int32_t (*MaruWindowCloseCallback)(void *ctx);
+
+typedef struct {
+    int32_t status;
+    uint32_t window_visible;
+    uint32_t close_requested;
+    uint32_t callback_called;
+    int32_t callback_status;
+} MaruWindowCloseSmokeResult;
+
 typedef struct {
     uint16_t row;
     uint16_t col;
@@ -126,6 +136,17 @@ static NSString *const maru_cell_shader_source =
 - (instancetype)initWithFrame:(NSRect)frame result:(MaruKeyDownSmokeResult *)result;
 @end
 
+@interface MaruCloseSmokeDelegate : NSObject <NSWindowDelegate> {
+@public
+    MaruWindowCloseSmokeResult *_result;
+    MaruWindowCloseCallback _callback;
+    void *_callback_context;
+}
+- (instancetype)initWithResult:(MaruWindowCloseSmokeResult *)result
+                      callback:(MaruWindowCloseCallback)callback
+                       context:(void *)context;
+@end
+
 @implementation MaruKeyCaptureView
 
 - (instancetype)initWithFrame:(NSRect)frame result:(MaruKeyDownSmokeResult *)result {
@@ -158,6 +179,39 @@ static NSString *const maru_cell_shader_source =
         // pair는 제품 key bridge 단계에서 별도 계약으로 다룬다.
         _result->codepoint = (uint32_t)[characters characterAtIndex:0];
     }
+}
+
+@end
+
+@implementation MaruCloseSmokeDelegate
+
+- (instancetype)initWithResult:(MaruWindowCloseSmokeResult *)result
+                      callback:(MaruWindowCloseCallback)callback
+                       context:(void *)context {
+    self = [super init];
+    if (self != nil) {
+        _result = result;
+        _callback = callback;
+        _callback_context = context;
+    }
+    return self;
+}
+
+- (BOOL)windowShouldClose:(id)sender {
+    (void)sender;
+    if (_result == NULL) {
+        return NO;
+    }
+
+    _result->close_requested = 1;
+    if (_callback == NULL) {
+        _result->callback_status = 1001;
+        return NO;
+    }
+
+    _result->callback_called = 1;
+    _result->callback_status = _callback(_callback_context);
+    return _result->callback_status == 0;
 }
 
 @end
@@ -298,6 +352,101 @@ void maru_macos_manual_keydown_smoke_run(uint32_t duration_ms, MaruKeyDownSmokeR
         @"Maru manual keyDown smoke - press Cmd+B",
         result
     );
+}
+
+void maru_macos_window_close_smoke_run(
+    uint32_t duration_ms,
+    MaruWindowCloseCallback callback,
+    void *callback_context,
+    MaruWindowCloseSmokeResult *result
+) {
+    result->status = -1;
+    result->window_visible = 0;
+    result->close_requested = 0;
+    result->callback_called = 0;
+    result->callback_status = -1;
+
+    @autoreleasepool {
+        // 제품 Swift host가 붙기 전에도 "AppKit close request -> Zig app close action"
+        // 경계를 볼 수 있어야 한다. 이 smoke는 작은 NSWindow delegate가 close 요청을
+        // 받아 Zig callback으로 넘기는지만 검증하고, 제품 window/tab UI는 아직 만들지 않는다.
+        [NSApplication sharedApplication];
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [NSApp finishLaunching];
+
+        if ([[NSScreen screens] count] == 0) {
+            result->status = 2;
+            return;
+        }
+
+        NSRect frame = NSMakeRect(220.0, 220.0, 360.0, 140.0);
+        NSWindow *window = [[NSWindow alloc]
+            initWithContentRect:frame
+                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+                        backing:NSBackingStoreBuffered
+                          defer:NO];
+        if (window == nil) {
+            result->status = 1;
+            return;
+        }
+
+        MaruCloseSmokeDelegate *delegate =
+            [[MaruCloseSmokeDelegate alloc] initWithResult:result
+                                                  callback:callback
+                                                   context:callback_context];
+        if (delegate == nil) {
+            result->status = 3;
+            [window orderOut:nil];
+            return;
+        }
+
+        [window setTitle:@"Maru close lifecycle smoke"];
+        [window setReleasedWhenClosed:NO];
+        [window setDelegate:delegate];
+        [window makeKeyAndOrderFront:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+        result->window_visible = [window isVisible] ? 1 : 0;
+        if (result->window_visible == 0) {
+            result->status = 4;
+            [window orderOut:nil];
+            return;
+        }
+
+        [window performClose:nil];
+
+        NSTimeInterval seconds = ((NSTimeInterval)duration_ms) / 1000.0;
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
+        do {
+            @autoreleasepool {
+                maru_pump_app_once();
+            }
+        } while (result->close_requested == 0 &&
+                 [[NSDate date] compare:deadline] == NSOrderedAscending);
+
+        const BOOL visible = [window isVisible];
+        result->window_visible = visible ? 1 : 0;
+        if (visible) {
+            [window orderOut:nil];
+        }
+
+        if (result->close_requested == 0) {
+            result->status = 5;
+            return;
+        }
+        if (result->callback_called == 0) {
+            result->status = 6;
+            return;
+        }
+        if (result->callback_status != 0) {
+            result->status = 7;
+            return;
+        }
+        if (visible) {
+            result->status = 8;
+            return;
+        }
+        result->status = 0;
+    }
 }
 
 static id<MTLRenderPipelineState> maru_make_cell_pipeline(

@@ -304,7 +304,11 @@ static void maru_run_keydown_smoke(
                 [window orderOut:nil];
                 return;
             }
-            [NSApp postEvent:event atStart:NO];
+            // Synthetic smoke가 검증하려는 것은 "우리가 만든 Cmd+B event가 AppKit
+            // keyDown: 경계를 통과한다"는 계약이다. 이전 visible smoke가 남긴 AppKit
+            // event가 먼저 처리되면 capture view가 그 stale event를 기록해 Zig chord
+            // 검증이 흔들릴 수 있으므로 synthetic event는 queue 앞에 넣는다.
+            [NSApp postEvent:event atStart:YES];
         }
 
         NSTimeInterval seconds = ((NSTimeInterval)duration_ms) / 1000.0;

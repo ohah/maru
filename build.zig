@@ -208,6 +208,12 @@ pub fn build(b: *std.Build) void {
         macos_app_pty_metal_smoke_cmd.setCwd(b.path("."));
         macos_app_pty_metal_smoke_step.dependOn(&macos_app_pty_metal_smoke_cmd.step);
 
+        const macos_app_pty_interactive_metal_smoke_step = b.step("macos-app-pty-interactive-metal-smoke", "Run the visible macOS interactive shell PTY Metal smoke");
+        const macos_app_pty_interactive_metal_smoke_cmd = b.addRunArtifact(macos_app_pty_metal_smoke);
+        macos_app_pty_interactive_metal_smoke_cmd.setCwd(b.path("."));
+        macos_app_pty_interactive_metal_smoke_cmd.setEnvironmentVariable("MARU_APP_PTY_METAL_SCENARIO", "interactive-shell");
+        macos_app_pty_interactive_metal_smoke_step.dependOn(&macos_app_pty_interactive_metal_smoke_cmd.step);
+
         const macos_app_pty_metal_smoke_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_pty_metal_smoke.zig"),

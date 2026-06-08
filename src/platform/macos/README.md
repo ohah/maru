@@ -6,6 +6,8 @@ macOS 전용 bridge를 담는 폴더다.
 
 현재 `*.m` 파일들은 제품 UI가 아니라 smoke bridge다. 얇은 C ABI로 Zig에서 AppKit/Metal/CoreText의 저수준 경계를 검증하기 위해 Objective-C로 둔다. Swift는 실제 macOS app host를 시작할 때 도입한다. 그때 대상은 지속 실행되는 `NSApplication`, window/tab/split lifecycle, menu/command, preferences, IME/accessibility/focus/input routing 같은 제품 UX 영역이다. Swift app host가 생겨도 기존 Objective-C smoke는 low-level regression smoke로 남긴다.
 
+`app_host_abi.h`와 `app_host_abi.zig`는 제품 Swift host가 Zig에 호출할 C ABI의 첫 고정점이다. Swift는 이 header의 fixed-width DTO만 보고 key/resize/close 같은 app event를 넘기며, Zig는 `PtySession`, `SurfaceRuntime`, `FrameLoop`, renderer resource를 계속 소유한다. `MaruAppHost.swift`는 아직 실행되는 앱이 아니라 C header와 AppKit 타입을 type-check하는 skeleton이다. 실제 macOS 제품 앱 경계는 [문서](../../../docs/macos-app-host-boundary.md)를 따른다.
+
 `coretext_probe.zig`는 smoke native ABI의 결과/record shape와 probe category 해석을 소유한다. 이 파일은 제품 shaper가 아니라 `coretext_smoke.m`이 만든 고정 C record를 `coretext_font.zig`가 받을 수 있는 record로 바꾸는 probe 경계다. 이 경계를 따로 둔 이유는 다음 Metal/CoreText 화면 smoke가 `coretext_smoke.zig`의 summary code를 import하거나 같은 category/font-name 변환을 다시 쓰지 않게 하기 위해서다.
 
 `coretext_font.zig`는 smoke 전용 Objective-C ABI가 아니라 제품 macOS font backend 후보 경계다. CoreText가 선택한 glyph id와 PostScript font name을 renderer 중립 `ShapedGlyphRecord`로 바꾸고, 실제 bitmap을 만들 drawable glyph만 `FontIdentityRegistry`에 intern한다. 이 파일이 필요한 이유는 `coretext_smoke.zig` 안에 font identity 규칙을 계속 두면 다음 제품 shaper가 smoke 파일을 의존하거나 같은 규칙을 복제하게 되기 때문이다.

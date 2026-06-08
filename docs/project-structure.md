@@ -33,7 +33,7 @@ src/
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding
   renderer/             Metal-first renderer internals, future WebGPU backend boundary, font layout, font identity registry, persistent renderer state, glyph atlas, frame stats
   platform/             OS별 process/window/input bridge
-    macos/              AppKit/Metal/CoreText smoke bridge, Swift app host skeleton, Swift/Zig C ABI 계약
+    macos/              AppKit/Metal/CoreText smoke bridge, Swift app host dev shell, Swift/Zig C ABI 계약
     windows/
     linux/
   workspace/            project workspace, layout restore, recent workspaces

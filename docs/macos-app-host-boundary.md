@@ -11,9 +11,23 @@
 - Swift가 Zig에 넘기는 값은 `src/platform/macos/app_host_abi.h`의 fixed-width C ABI record만 사용한다.
 - Objective-C `*.m` smoke bridge는 삭제하지 않는다. 제품 앱 회귀와 low-level AppKit/Metal/CoreText 회귀를 분리해서 보기 위한 regression smoke로 남긴다.
 
-## 첫 제품 앱 범위
+## 현재 제품 앱 dev shell 범위
 
-첫 제품 앱 PR은 다음만 목표로 한다.
+현재 dev shell PR은 다음만 목표로 한다.
+
+- Swift `@main` entrypoint가 실제 `NSApplication`을 실행한다.
+- Swift가 Zig C ABI static library를 링크하고 startup 때 capability/version을 확인한다.
+- placeholder window가 계속 떠 있다.
+- smoke 실행은 `zig-out/maru-macos-app-dev/app-dev.summary.txt`에 `visible_ui=true`, `swift_host=true`, `abi_ready=true`, `terminal_surface=false`를 남긴다.
+
+현재 dev shell PR에서 하지 않는 것:
+
+- shell surface 생성
+- Swift window event loop와 Zig `FrameLoop` 반복 호출 연결
+- Swift `keyDown:` payload의 Zig keybinding resolver 전달
+- window close의 `FrameLoop.closeActiveLivePty` 연결
+
+다음 shell 연결 PR은 다음만 목표로 한다.
 
 - shell 1개 surface를 만든다.
 - 창이 계속 떠 있다.
@@ -21,7 +35,7 @@
 - Swift `keyDown:` payload는 C ABI record로 정규화된 뒤 Zig keybinding resolver로 들어간다.
 - window close는 Zig `FrameLoop.closeActiveLivePty`로 내려간다.
 
-첫 제품 앱 PR에서 하지 않는 것:
+다음 shell 연결 PR에서 하지 않는 것:
 
 - 탭/분할 UI
 - workspace restore
@@ -49,10 +63,13 @@
 ## 검증 경로
 
 - `mise run test-macos-app-host-abi`: C header와 Zig extern layout/version이 맞는지 확인한다.
-- `mise run macos-app-host-abi-lib`: 다음 제품 Swift host가 링크할 Zig exported C ABI static library를 만든다.
-- `mise run macos-app-host-swift-check`: Swift skeleton이 C header를 import하고 AppKit 타입을 type-check할 수 있는지 확인한다.
+- `mise run macos-app-host-abi-lib`: Swift host가 링크할 Zig exported C ABI static library를 만든다.
+- `mise run macos-app-host-swift-check`: Swift host가 C header를 import하고 AppKit 타입을 type-check할 수 있는지 확인한다.
+- `mise run macos-app-dev-build`: Swift host executable을 만들고 Zig static ABI library를 링크한다.
+- `mise run macos-app-dev-smoke`: 실제 `NSApplication` placeholder window를 잠깐 띄우고 summary에 `terminal_surface=false`를 남긴다.
+- `mise run macos-app-dev`: 같은 executable을 smoke timeout 없이 실행해 사용자가 window lifecycle을 수동 확인한다.
 - 기존 `mise run macos-app-pty-metal-smoke`: Objective-C smoke bridge가 PTY/output/keyDown/close/render 경계를 계속 검증한다.
 
 ## 남은 한계
 
-이번 경계 문서는 실제 제품 앱 loop를 실행하지 않는다. 다음 PR에서 `mise run macos-app-dev` 같은 실행 명령을 추가하고, 그때 summary/artifact 경로와 수동 검증 방법을 함께 문서화한다.
+현재 dev shell은 실제 제품 앱 loop를 실행하지만 terminal surface를 붙이지 않는다. 따라서 `NSApplication` 실행, window lifecycle, Swift/Zig ABI 링크 실패는 볼 수 있지만, shell output, 지속 입력, resize-to-frame, close-to-PTY cleanup은 아직 Objective-C smoke와 headless smoke가 검증한다. 다음 PR에서 Swift host가 Zig `FrameLoop`와 shell 1개 surface를 직접 호출하도록 연결한다.

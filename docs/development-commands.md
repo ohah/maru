@@ -28,8 +28,11 @@ Maru 작업에서 사용하는 기본 명령이다.
 - macOS live PTY Metal manual keyDown smoke 실행: `MARU_APP_PTY_METAL_KEYDOWN_SOURCE=manual MARU_APP_PTY_METAL_KEYDOWN_MS=15000 mise run macos-app-pty-metal-smoke` (Metal terminal window가 뜨면 사용자가 `Cmd+B`를 직접 누른다. 이 경로는 물리 키보드 -> 같은 Metal terminal window의 AppKit `keyDown:` -> Zig `terminal.KeyEvent` -> app host resolver -> PTY write -> Metal screenshot까지 확인하지만, 여전히 한 번의 smoke이고 지속 실행되는 제품 shell loop는 아니다)
 - macOS live PTY Metal smoke 계약 테스트: `mise run test-macos-app-pty-metal-smoke`
 - macOS Swift/Zig app host ABI 계약 테스트: `mise run test-macos-app-host-abi` (Swift 제품 app host가 호출할 C ABI version, ownership capability, key/resize DTO layout을 Zig와 C header 양쪽에서 검증한다)
-- macOS Swift/Zig app host ABI static library 빌드: `mise run macos-app-host-abi-lib` (다음 제품 Swift host가 링크할 Zig exported C ABI static library를 `zig-out/lib/`에 만든다. 아직 앱을 실행하지 않는다)
-- macOS Swift app host skeleton type-check: `mise run macos-app-host-swift-check` (`MaruAppHost.swift`가 `app_host_abi.h`를 import하고 AppKit 타입을 type-check할 수 있는지만 확인한다. 아직 실제 제품 앱을 실행하지 않는다)
+- macOS Swift/Zig app host ABI static library 빌드: `mise run macos-app-host-abi-lib` (Swift host가 링크할 Zig exported C ABI static library를 `zig-out/lib/`에 만든다. 이 명령 자체는 앱을 실행하지 않는다)
+- macOS Swift app host type-check: `mise run macos-app-host-swift-check` (`MaruAppHost.swift`가 `app_host_abi.h`를 import하고 AppKit 타입을 type-check할 수 있는지 확인한다)
+- macOS Swift app host dev shell 빌드: `mise run macos-app-dev-build` (`zig-out/bin/maru-macos-app-dev`를 만든다. 이 executable은 Zig ABI static library를 링크하지만 아직 terminal surface를 붙이지 않는다)
+- macOS Swift app host dev shell 실행: `mise run macos-app-dev` (지속 실행되는 `NSApplication` placeholder window를 띄운다. 현재 summary는 `terminal_surface=false`를 기록하므로 실제 shell 입력/출력 검증 명령이 아니다)
+- macOS Swift app host dev shell smoke 실행: `mise run macos-app-dev-smoke` (`MARU_MACOS_APP_DEV_SMOKE_MS=1500`으로 placeholder window를 잠깐 띄운 뒤 `zig-out/maru-macos-app-dev/app-dev.summary.txt`를 남긴다. `visible_ui=true`, `swift_host=true`, `abi_ready=true`, `terminal_surface=false`를 확인한다)
 - macOS CoreText font shaping/raster smoke 실행: `mise run macos-coretext-smoke` (창이나 GPU 없이 CoreText font resolve, glyph run 생성, `RendererState -> RenderFrame` 준비 계약, 제품 후보 `coretext_raster.zig` wrapper와 smoke native bridge를 통한 `GlyphRasterFrame` byte 생성, CPU bitmap raster를 확인한다)
 - macOS CoreText smoke 계약 테스트: `mise run test-macos-coretext-smoke`
 - macOS glyph texture smoke 실행: `mise run macos-glyph-texture-smoke` (창 없이 CoreText CPU bitmap을 Metal texture에 업로드하고 readback한다)

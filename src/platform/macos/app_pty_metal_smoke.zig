@@ -78,6 +78,7 @@ const AppPtyMetalSmokeConfig = struct {
     native_keydown_source: NativeKeyDownSource = .synthetic,
     native_keydown_duration_ms: u32 = default_synthetic_keydown_duration_ms,
     expected_text: []const u8 = "typed:scripted input",
+    drain_timeout_ms: i64 = app.smoke_drain.default_timeout_ms,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -165,6 +166,7 @@ const LivePtyMetalFixture = struct {
     command: []const u8,
     args_len: usize,
     size: terminal.Size,
+    drain_timeout_ms: i64,
 
     fn deinit(self: *LivePtyMetalFixture, allocator: std.mem.Allocator) void {
         self.metal.deinit(allocator);
@@ -254,7 +256,16 @@ fn buildLivePtyFixture(
         // 먼저 PTY output을 runtime에 적용해 ready marker를 관측한다. 입력을 process spawn
         // 직후 바로 쓰면 kernel line discipline echo가 command의 "ready"보다 먼저 화면에
         // 나타날 수 있어, 사람이 키를 누르는 흐름과 다르고 회귀 artifact도 흔들린다.
-        try drainUntilRawContains(live_pty.eventQueue(), &pump, &raw_bytes, allocator, &drain_summary, smoke_config.ready_marker);
+        try drainUntilRawContains(
+            io,
+            live_pty.eventQueue(),
+            &pump,
+            &raw_bytes,
+            allocator,
+            &drain_summary,
+            smoke_config.ready_marker,
+            smoke_config.drain_timeout_ms,
+        );
         // native bridge가 실제 keyDown: 메서드에서 만든 payload를 Zig terminal.KeyEvent로
         // 바꾼 뒤 app host에 넣는다. 이렇게 해야 macOS view가 키를 받는 증거와
         // Maru의 app-vs-terminal 정책이 같은 summary에서 이어진다.
@@ -282,7 +293,15 @@ fn buildLivePtyFixture(
         }
     }
 
-    try drainBlockingUntilTerminationWithRaw(live_pty.eventQueue(), &pump, &raw_bytes, allocator, &drain_summary);
+    try drainUntilTerminationWithRaw(
+        io,
+        live_pty.eventQueue(),
+        &pump,
+        &raw_bytes,
+        allocator,
+        &drain_summary,
+        smoke_config.drain_timeout_ms,
+    );
 
     live_pty.finishAfterTermination();
 
@@ -337,18 +356,21 @@ fn buildLivePtyFixture(
         .command = smoke_config.command,
         .args_len = smoke_config.args.len,
         .size = smoke_config.size,
+        .drain_timeout_ms = smoke_config.drain_timeout_ms,
     };
 }
 
-fn drainBlockingUntilTerminationWithRaw(
+fn drainUntilTerminationWithRaw(
+    io: std.Io,
     queue: *app.PtyEventQueue,
     pump: *app.RuntimeEventPump,
     raw_bytes: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     summary: *app.RuntimePumpDrainSummary,
+    timeout_ms: i64,
 ) !void {
     while (true) {
-        const event = queue.popBlocking() orelse return error.ReaderQueueClosedBeforeTermination;
+        const event = try app.smoke_drain.popWithDeadline(io, queue, .{ .timeout_ms = timeout_ms });
         if (event == .output) {
             // applyQueuedEvent가 output bytes를 해제하므로, screenshot과 함께 볼 raw artifact는
             // 적용 전에 복사한다. 이 복사는 smoke 전용이며 제품 frame loop에는 들어가지 않는다.
@@ -437,17 +459,19 @@ fn nativeCloseErrorCode(err: anyerror) i32 {
 }
 
 fn drainUntilRawContains(
+    io: std.Io,
     queue: *app.PtyEventQueue,
     pump: *app.RuntimeEventPump,
     raw_bytes: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     summary: *app.RuntimePumpDrainSummary,
     marker: []const u8,
+    timeout_ms: i64,
 ) !void {
     if (marker.len == 0) return;
 
     while (std.mem.indexOf(u8, raw_bytes.items, marker) == null) {
-        const event = queue.popBlocking() orelse return error.ReaderQueueClosedBeforeTermination;
+        const event = try app.smoke_drain.popWithDeadline(io, queue, .{ .timeout_ms = timeout_ms });
         if (event == .output) {
             try raw_bytes.appendSlice(allocator, event.output.bytes);
         }
@@ -494,6 +518,7 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.print("renderer_rasterizer={s}\n", .{input.fixture.metal.rasterizer});
     try writer.print("command={s}\n", .{input.fixture.command});
     try writer.print("args.len={d}\n", .{input.fixture.args_len});
+    try writer.print("drain_timeout_ms={d}\n", .{input.fixture.drain_timeout_ms});
     try writer.print("input_source={s}\n", .{input_source_appkit_keydown_resolver});
     try writer.print("native_key_event_source={s}\n", .{nativeKeyDownSourceName(input.fixture.native_keydown_source)});
     try writer.print("native_keydown_status={d}\n", .{input.fixture.native_keydown.status});
@@ -821,6 +846,7 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
         .command = "/bin/sh",
         .args_len = 2,
         .size = .{ .cols = 40, .rows = 6 },
+        .drain_timeout_ms = app.smoke_drain.default_timeout_ms,
     };
     const summary = try renderSummary(std.testing.allocator, .{
         .duration_ms = 1500,
@@ -838,6 +864,7 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=surface_runtime_live_pty_frame_loop_coretext_render_frame\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_shaper=coretext_draw_list\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_rasterizer=coretext_glyph_rasterizer\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drain_timeout_ms=5000\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "input_source=appkit_keydown_to_app_host_keybinding_resolver\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "native_key_event_source=appkit_synthetic_keydown\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "native_keydown_status=0\n") != null);

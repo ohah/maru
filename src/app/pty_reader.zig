@@ -89,6 +89,16 @@ pub const PtyEventQueue = struct {
         return self.len;
     }
 
+    pub fn closedAndEmpty(self: *PtyEventQueue) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        // Deadline 기반 smoke drain은 `tryPop`만으로는 "아직 output이 없음"과
+        // "reader가 이미 queue를 닫음"을 구분할 수 없다. 이 관찰 API를 통해
+        // 조기 close는 timeout이 아니라 lifecycle 실패로 보고하게 한다.
+        return self.closed and self.len == 0;
+    }
+
     pub fn close(self: *PtyEventQueue) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);

@@ -466,6 +466,19 @@ pub fn build(b: *std.Build) void {
         }),
     });
     macos_app_host_abi_tests.root_module.addIncludePath(b.path("src/platform/macos"));
+    if (target.result.os.tag == .macos) {
+        // macOS에서는 dev session이 실제 CoreText로 frame을 만들므로 계약 테스트도 그
+        // ObjC 브리지와 framework를 링크해야 한다. Linux 빌드는 tick의 macOS 분기가
+        // comptime으로 제외되어 이 심볼을 참조하지 않으므로 추가가 필요 없다.
+        macos_app_host_abi_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            // lib과 같은 flag를 쓴다(아래 swiftc 링크와 .o 동작을 일치시킨다).
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        macos_app_host_abi_tests.root_module.linkFramework("Foundation", .{});
+        macos_app_host_abi_tests.root_module.linkFramework("CoreText", .{});
+        macos_app_host_abi_tests.root_module.linkFramework("CoreGraphics", .{});
+    }
     const run_macos_app_host_abi_tests = b.addRunArtifact(macos_app_host_abi_tests);
 
     const macos_app_host_abi_lib = b.addLibrary(.{
@@ -482,6 +495,18 @@ pub fn build(b: *std.Build) void {
         }),
     });
     macos_app_host_abi_lib.root_module.addIncludePath(b.path("src/platform/macos"));
+    if (target.result.os.tag == .macos) {
+        // CoreText 브리지 object를 정적 라이브러리에 함께 담아, Swift 최종 링크가 .a 하나로
+        // dev session의 glyph rasterize 심볼을 모두 얻게 한다. CoreText/CoreGraphics
+        // framework는 Swift 링크 단계에서 제공한다.
+        macos_app_host_abi_lib.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            // UBSan 계측을 끈다. 이 .a는 Zig가 아니라 swiftc가 최종 링크하므로 Zig의
+            // compiler-rt(__ubsan_handle_*)가 들어오지 않아, 계측을 켜 두면 undefined
+            // symbol로 링크가 실패한다.
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+    }
     const install_macos_app_host_abi_lib = b.addInstallArtifact(macos_app_host_abi_lib, .{});
 
     const test_macos_app_host_abi_step = b.step("test-macos-app-host-abi", "Run macOS Swift/Zig app host ABI contract tests");
@@ -513,6 +538,12 @@ pub fn build(b: *std.Build) void {
         macos_app_dev_compile.addArgs(&.{
             "-framework",
             "AppKit",
+            // dev session이 정적 라이브러리에 담긴 CoreText 브리지로 glyph를 rasterize하므로
+            // 최종 링크에서 CoreText/CoreGraphics framework를 제공한다.
+            "-framework",
+            "CoreText",
+            "-framework",
+            "CoreGraphics",
             "-o",
             "zig-out/bin/maru-macos-app-dev",
         });

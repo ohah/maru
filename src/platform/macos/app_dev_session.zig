@@ -1,10 +1,13 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
 
 const app = maru.app;
 const config_mod = maru.config;
 const renderer = maru.renderer;
 const terminal = maru.terminal;
+const coretext_bridge = @import("coretext_smoke_bridge.zig");
+const coretext_frame_builder = @import("coretext_frame_builder.zig");
 
 pub const abi_version: u32 = 4;
 pub const default_queue_capacity: u32 = 16;
@@ -80,6 +83,9 @@ pub const DevSession = struct {
     pump: app.RuntimeEventPump = undefined,
     renderer_state: renderer.RendererState = undefined,
     frame_loop: app.AppFrameLoop = undefined,
+    // 제품 dev shell은 fake font backend가 아니라 실제 CoreText로 glyph frame을 만든다.
+    // appearance(폰트/색)는 init에서 한 번 resolve해 매 tick의 CoreTextFrameBuilder에 쓴다.
+    appearance: config_mod.ResolvedAppearance = undefined,
     live_initialized: bool = false,
     surface_initialized: bool = false,
     runtime_initialized: bool = false,
@@ -130,6 +136,7 @@ pub const DevSession = struct {
         self.pump = self.live_pty.pump(&self.runtime);
         self.renderer_state = renderer.RendererState.init(allocator, .{});
         self.renderer_initialized = true;
+        self.appearance = try config_mod.resolveAppearance(.{});
         self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.pump, &self.renderer_state);
         self.writeSummaryFromState();
     }
@@ -179,7 +186,22 @@ pub const DevSession = struct {
     }
 
     pub fn tick(self: *DevSession) !FrameSummary {
-        var tick_result = try self.frame_loop.tick(renderer.FakeFontBackend{});
+        // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
+        // 아님). 그래야 summary의 glyph/atlas 통계가 실제 rasterized glyph를 반영하고, 이후
+        // 제품 Metal view가 같은 RenderFrame을 그대로 그릴 수 있다. CoreText는 platform
+        // 경계라 builder가 소유한다.
+        //
+        // 비-macOS(주로 Linux CI의 ABI 계약 테스트)에는 CoreText 브리지 심볼이 없다. OS
+        // 게이트는 comptime이라 Linux 빌드는 macOS 분기를 codegen에서 제외하므로 extern
+        // 참조가 생기지 않고, frame loop 계약만 fake backend로 유지한다.
+        var tick_result = if (builtin.os.tag == .macos) blk: {
+            const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
+                .appearance = self.appearance,
+                .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+                .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+            };
+            break :blk try self.frame_loop.tickWithFrameBuilder(frame_builder);
+        } else try self.frame_loop.tick(renderer.FakeFontBackend{});
         defer tick_result.deinit(self.allocator);
 
         self.total_output_events += tick_result.frame.drain_summary.output_events;

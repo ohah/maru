@@ -3,6 +3,7 @@ const config_mod = @import("../config.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal.zig");
 const host = @import("host.zig");
+const live_pty_mod = @import("live_pty.zig");
 const pty_reader = @import("pty_reader.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
@@ -113,6 +114,13 @@ pub const FrameLoop = struct {
         // resize도 frame loop가 직접 storage를 고치는 대신 SurfaceRuntime action으로 보낸다.
         // 그래야 PTY resize와 TerminalCore resize가 한 경로에서 같이 일어난다.
         try host.resizeActiveSurface(self.app_window, self.runtime, size);
+    }
+
+    pub fn closeActiveLivePty(self: *FrameLoop, live_pty: *live_pty_mod.LivePtySession) !void {
+        // native close event가 붙으면 여기만 호출하게 한다. AppKit/Swift code가
+        // runtime detach, queue close, reader join 순서를 다시 구현하면 close 경로가
+        // smoke와 제품에서 갈라지므로 FrameLoop가 host action을 노출한다.
+        try host.closeActiveLivePty(self.app_window, self.runtime, live_pty);
     }
 };
 

@@ -35,9 +35,16 @@ pub const LivePtySession = struct {
             .pty_id = pty_id,
         };
 
-        // PtyReader는 session/queue 포인터를 들고 실행된다. LivePtySession 값 자체가
-        // 나중에 배열이나 app state 안에서 이동돼도 reader 포인터가 낡지 않도록,
-        // thread가 참조하는 두 객체는 owner가 heap에 고정한다.
+        // PtyReader는 session/queue 포인터를 들고 실행된다. 이 두 객체는 owner가 heap에
+        // 고정하므로 reader thread가 읽는 session/queue는 안정적이다.
+        //
+        // 불변식: 단, reader thread는 `&self.reader`(이 구조체 안의 embedded reader 필드)도
+        // 잡고 실행된다. heap 고정은 session/queue 객체만 보호하고 reader self 포인터는
+        // 보호하지 않으므로, init()으로 reader.start()가 실행된 뒤에는 이 LivePtySession 값을
+        // 절대 이동/복사하면 안 된다(by-value 반환, realloc되는 ArrayList/HashMap 저장 등).
+        // 모든 호출부는 고정 지역변수(`var x: LivePtySession = undefined; x.init(&x, ...)`)로
+        // 제자리에서 소유한다. 값 이동이 필요해지면 reader도 heap-pin하거나 LivePtySession
+        // 자체를 heap에 둬야 한다.
         self.session = try allocator.create(pty.PtySession);
         var session_allocated = true;
         errdefer if (session_allocated) allocator.destroy(self.session);
@@ -114,6 +121,12 @@ pub const LivePtySession = struct {
             self.reader.join();
             self.reader_finished = true;
         }
+        // 종료 관측 시점에 child를 직접 종료/reap한다. 정상 exit 경로는 reader가 EOF에서
+        // 이미 reap했으므로 session.close()가 atomic 가드로 no-op이지만, read_error처럼
+        // reader가 child를 reap하지 않고 끝난 경로에서는 여기서 reap해야 한다. 이 단계를
+        // 빼면 reader_finished=true 이후의 close()/closeAndDetach 수명 경계가 else 분기로
+        // 빠져 session.close()를 부르지 않으므로, child가 deinit() 전까지 좀비로 남는다.
+        self.session.close();
         self.queue.close();
     }
 

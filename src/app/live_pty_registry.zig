@@ -14,6 +14,17 @@ pub const RegistryError = error{
 };
 
 pub const LivePtyRegistry = struct {
+    // 수명 계약(비소유 map): registry는 `*LivePtySession`을 가리키기만 하고 소유하지 않는다.
+    // 따라서 가리키는 session보다 entry가 더 오래 살면 dangling 포인터가 된다. 호출자는
+    // 다음을 지켜야 한다.
+    //   1) closeActive()는 close 성공 시 mapping을 제거한다. 하지만 closeActive를 거치지
+    //      않고 정상 종료해 deinit되는 session은 자동으로 unregister되지 않으므로, owner가
+    //      session을 deinit하기 전에 unregisterSurface()로 entry를 직접 제거해야 한다.
+    //   2) closeActive의 link-invariant 실패 경로는 mapping을 보존하므로, 그 session을
+    //      deinit하기 전에도 unregisterSurface()로 entry를 비워야 한다.
+    //   3) registry.deinit()은 entries 배열만 해제하고 session은 deref하지 않으므로 가리키는
+    //      session보다 먼저 호출돼도 안전하다(다만 그 뒤 findBySurface/register/closeActive를
+    //      부르면 안 된다).
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
 
@@ -61,12 +72,15 @@ pub const LivePtyRegistry = struct {
         // 현재 active surface를 기준으로 registry가 session을 찾고, close 뒤 mapping을
         // 제거해 닫힌 surface로 같은 live handle을 다시 선택하지 못하게 한다.
         const active = app_window.active() orelse return error.ActiveSurfaceNotAttachedToLivePty;
-        const live_pty = self.findBySurface(active.id) orelse return error.ActiveSurfaceNotAttachedToLivePty;
+        // surface entry는 한 번만 조회한다. close 후 같은 surface_id를 다시 스캔하지 않고
+        // 이 index로 바로 제거한다(closeAndDetach는 registry entries를 건드리지 않으므로
+        // index가 그대로 유효하다).
+        const index = self.findIndexBySurface(active.id) orelse return error.ActiveSurfaceNotAttachedToLivePty;
+        const live_pty = self.entries.items[index].live_pty;
         const link = live_pty.link orelse return error.ActiveSurfaceNotAttachedToLivePty;
         if (link.surface_id != active.id) return error.ActiveSurfaceNotAttachedToLivePty;
         live_pty.closeAndDetach(runtime);
-        const removed = self.unregisterSurface(active.id).?;
-        std.debug.assert(removed == live_pty);
+        _ = self.entries.orderedRemove(index);
     }
 
     fn findIndexBySurface(self: *const LivePtyRegistry, surface_id: runtime_mod.SurfaceId) ?usize {

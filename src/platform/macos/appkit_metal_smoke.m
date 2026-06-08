@@ -31,6 +31,11 @@ typedef struct {
     uint32_t screenshot_height;
     uint32_t screenshot_bytes;
     uint32_t screenshot_failures;
+    int32_t terminal_close_status;
+    uint32_t terminal_close_requested;
+    uint32_t terminal_close_callback_called;
+    int32_t terminal_close_callback_status;
+    uint32_t terminal_window_closed;
 } MaruMetalSmokeResult;
 
 typedef struct {
@@ -53,6 +58,12 @@ typedef struct {
     uint32_t callback_called;
     int32_t callback_status;
 } MaruWindowCloseSmokeResult;
+
+typedef struct {
+    uint32_t *close_requested;
+    uint32_t *callback_called;
+    int32_t *callback_status;
+} MaruCloseSmokeSink;
 
 typedef struct {
     uint16_t row;
@@ -138,11 +149,11 @@ static NSString *const maru_cell_shader_source =
 
 @interface MaruCloseSmokeDelegate : NSObject <NSWindowDelegate> {
 @public
-    MaruWindowCloseSmokeResult *_result;
+    MaruCloseSmokeSink _sink;
     MaruWindowCloseCallback _callback;
     void *_callback_context;
 }
-- (instancetype)initWithResult:(MaruWindowCloseSmokeResult *)result
+- (instancetype)initWithSink:(MaruCloseSmokeSink)sink
                       callback:(MaruWindowCloseCallback)callback
                        context:(void *)context;
 @end
@@ -185,12 +196,12 @@ static NSString *const maru_cell_shader_source =
 
 @implementation MaruCloseSmokeDelegate
 
-- (instancetype)initWithResult:(MaruWindowCloseSmokeResult *)result
+- (instancetype)initWithSink:(MaruCloseSmokeSink)sink
                       callback:(MaruWindowCloseCallback)callback
                        context:(void *)context {
     self = [super init];
     if (self != nil) {
-        _result = result;
+        _sink = sink;
         _callback = callback;
         _callback_context = context;
     }
@@ -199,19 +210,22 @@ static NSString *const maru_cell_shader_source =
 
 - (BOOL)windowShouldClose:(id)sender {
     (void)sender;
-    if (_result == NULL) {
+    if (_sink.close_requested == NULL ||
+        _sink.callback_called == NULL ||
+        _sink.callback_status == NULL)
+    {
         return NO;
     }
 
-    _result->close_requested = 1;
+    *_sink.close_requested = 1;
     if (_callback == NULL) {
-        _result->callback_status = 1001;
+        *_sink.callback_status = 1001;
         return NO;
     }
 
-    _result->callback_called = 1;
-    _result->callback_status = _callback(_callback_context);
-    return _result->callback_status == 0;
+    *_sink.callback_called = 1;
+    *_sink.callback_status = _callback(_callback_context);
+    return *_sink.callback_status == 0;
 }
 
 @end
@@ -394,10 +408,15 @@ void maru_macos_window_close_smoke_run(
             return;
         }
 
+        MaruCloseSmokeSink sink = {
+            .close_requested = &result->close_requested,
+            .callback_called = &result->callback_called,
+            .callback_status = &result->callback_status,
+        };
         MaruCloseSmokeDelegate *delegate =
-            [[MaruCloseSmokeDelegate alloc] initWithResult:result
-                                                  callback:callback
-                                                   context:callback_context];
+            [[MaruCloseSmokeDelegate alloc] initWithSink:sink
+                                                callback:callback
+                                                 context:callback_context];
         if (delegate == nil) {
             result->status = 3;
             [window orderOut:nil];
@@ -1297,7 +1316,9 @@ void maru_macos_metal_smoke_run(
     size_t raster_pixel_count,
     const char *screenshot_path,
     size_t screenshot_path_len,
-    MaruMetalSmokeResult *result
+    MaruMetalSmokeResult *result,
+    MaruWindowCloseCallback close_callback,
+    void *close_callback_context
 ) {
     result->status = -1;
     result->window_visible = 0;
@@ -1322,6 +1343,11 @@ void maru_macos_metal_smoke_run(
     result->screenshot_height = 0;
     result->screenshot_bytes = 0;
     result->screenshot_failures = 0;
+    result->terminal_close_status = -1;
+    result->terminal_close_requested = 0;
+    result->terminal_close_callback_called = 0;
+    result->terminal_close_callback_status = -1;
+    result->terminal_window_closed = 0;
 
     @autoreleasepool {
         // 이 bridge는 "Metal glyph renderer 완성"이 아니라 첫 RenderFrame/GlyphQuadFrame/
@@ -1432,6 +1458,23 @@ void maru_macos_metal_smoke_run(
         content.wantsLayer = YES;
         [window setTitle:@"Maru Metal smoke"];
         [window setReleasedWhenClosed:NO];
+        MaruCloseSmokeDelegate *close_delegate = nil;
+        if (close_callback != NULL) {
+            MaruCloseSmokeSink close_sink = {
+                .close_requested = &result->terminal_close_requested,
+                .callback_called = &result->terminal_close_callback_called,
+                .callback_status = &result->terminal_close_callback_status,
+            };
+            close_delegate = [[MaruCloseSmokeDelegate alloc] initWithSink:close_sink
+                                                                 callback:close_callback
+                                                                  context:close_callback_context];
+            if (close_delegate == nil) {
+                result->terminal_close_status = 1;
+                result->status = 13;
+                return;
+            }
+            [window setDelegate:close_delegate];
+        }
         [window setContentView:content];
         [window makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
@@ -1480,7 +1523,35 @@ void maru_macos_metal_smoke_run(
         // headless/activation 실패에서 visible_ui=true 오탐을 막을 수 있다.
         BOOL became_visible = [window isVisible];
         result->window_visible = became_visible ? 1 : 0;
-        [window orderOut:nil];
+        if (close_callback != NULL) {
+            // app PTY Metal smoke는 같은 terminal window의 close request가 Zig app close
+            // action으로 내려가는지 보려 한다. 별도 작은 창을 닫으면 AppKit delegate 경계만
+            // 검증하고 실제 terminal window lifecycle과는 분리되므로 여기서 performClose한다.
+            [window performClose:nil];
+            NSDate *close_deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
+            do {
+                @autoreleasepool {
+                    maru_pump_app_once();
+                }
+            } while (result->terminal_close_requested == 0 &&
+                     [[NSDate date] compare:close_deadline] == NSOrderedAscending);
+
+            result->terminal_window_closed = [window isVisible] ? 0 : 1;
+            if (result->terminal_close_requested == 0) {
+                result->terminal_close_status = 2;
+            } else if (result->terminal_close_callback_called == 0) {
+                result->terminal_close_status = 3;
+            } else if (result->terminal_close_callback_status != 0) {
+                result->terminal_close_status = result->terminal_close_callback_status;
+            } else if (result->terminal_window_closed == 0) {
+                result->terminal_close_status = 4;
+            } else {
+                result->terminal_close_status = 0;
+            }
+        }
+        if ([window isVisible]) {
+            [window orderOut:nil];
+        }
         free(screenshot_path_copy);
 
         if (!became_visible) {

@@ -23,20 +23,12 @@ const renderer_input_live_pty_frame_loop = "surface_runtime_live_pty_frame_loop_
 const input_source_appkit_keydown_resolver = "appkit_keydown_to_app_host_keybinding_resolver";
 const native_key_event_source_appkit_synthetic = "appkit_synthetic_keydown";
 const native_key_event_source_appkit_manual = "appkit_manual_keydown";
-const close_lifecycle_appkit_window_close_callback = "appkit_window_close_callback_after_visible_frame";
-const default_native_close_duration_ms: u32 = 250;
+const close_lifecycle_appkit_window_close_callback = "appkit_terminal_window_close_callback_after_visible_frame";
 const native_close_success: i32 = 0;
 const native_close_missing_context: i32 = 1000;
 
 extern fn maru_macos_keydown_smoke_run(duration_ms: u32, result: *NativeKeyDownSmokeResult) void;
 extern fn maru_macos_manual_keydown_smoke_run(duration_ms: u32, result: *NativeKeyDownSmokeResult) void;
-const NativeCloseCallback = *const fn (?*anyopaque) callconv(.c) i32;
-extern fn maru_macos_window_close_smoke_run(
-    duration_ms: u32,
-    callback: NativeCloseCallback,
-    context: ?*anyopaque,
-    result: *NativeCloseSmokeResult,
-) void;
 
 const NativeKeyDownSource = enum {
     synthetic,
@@ -57,14 +49,6 @@ const NativeKeyDownSmokeResult = extern struct {
     modifier_control: u32,
     modifier_option: u32,
     modifier_command: u32,
-};
-
-const NativeCloseSmokeResult = extern struct {
-    status: i32,
-    window_visible: u32,
-    close_requested: u32,
-    callback_called: u32,
-    callback_status: i32,
 };
 
 const AppPtyMetalSmokeConfig = struct {
@@ -105,28 +89,13 @@ pub fn main(init: std.process.Init) !void {
     const screenshot_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ smoke_config.artifact_dir, screenshot_filename });
     defer allocator.free(screenshot_path);
     const appearance = try config.resolveAppearance(.{});
-    var fixture = try buildLivePtyFixture(io, allocator, smoke_config, appearance);
-    defer fixture.deinit(allocator);
-
-    try resetArtifacts(io, smoke_config.artifact_dir, screenshot_path);
     var native: metal_smoke.NativeMetalSmokeResult = std.mem.zeroes(metal_smoke.NativeMetalSmokeResult);
     native.status = -1;
-    metal_smoke.maru_macos_metal_smoke_run(
-        duration_ms,
-        fixture.metal.size.cols,
-        fixture.metal.size.rows,
-        fixture.metal.cells.ptr,
-        fixture.metal.cells.len,
-        fixture.metal.atlas_width_px,
-        fixture.metal.atlas_height_px,
-        fixture.metal.raster_uploads.ptr,
-        fixture.metal.raster_uploads.len,
-        fixture.metal.raster_pixels.ptr,
-        fixture.metal.raster_pixels.len,
-        screenshot_path.ptr,
-        screenshot_path.len,
-        &native,
-    );
+    native.terminal_close_status = -1;
+    native.terminal_close_callback_status = -1;
+    try resetArtifacts(io, smoke_config.artifact_dir, screenshot_path);
+    var fixture = try buildLivePtyFixture(io, allocator, smoke_config, appearance, duration_ms, screenshot_path, &native);
+    defer fixture.deinit(allocator);
 
     const smoke_status = metal_smoke.deriveSmokeStatus(native);
     const summary = try renderSummary(allocator, .{
@@ -222,6 +191,9 @@ fn buildLivePtyFixture(
     allocator: std.mem.Allocator,
     smoke_config: AppPtyMetalSmokeConfig,
     appearance: config.ResolvedAppearance,
+    duration_ms: u32,
+    screenshot_path: []const u8,
+    native: *metal_smoke.NativeMetalSmokeResult,
 ) !LivePtyMetalFixture {
     // 이 smoke는 첫 visible PTY 경로다. controlled mode는 shell UX가 아니라
     // app/PTY/renderer/platform 결합을 검증한다. interactive_shell mode는 같은 경로에
@@ -347,7 +319,29 @@ fn buildLivePtyFixture(
         var fixture_for_cleanup = metal_fixture;
         fixture_for_cleanup.deinit(allocator);
     }
-    const close_lifecycle = try verifyCloseLifecycle(&frame_loop, &live_registry, &live_pty, &runtime, active.id, live_pty.pty_id);
+    var close_context: NativeCloseContext = .{
+        .frame_loop = &frame_loop,
+        .registry = &live_registry,
+    };
+    metal_smoke.maru_macos_metal_smoke_run(
+        duration_ms,
+        metal_fixture.size.cols,
+        metal_fixture.size.rows,
+        metal_fixture.cells.ptr,
+        metal_fixture.cells.len,
+        metal_fixture.atlas_width_px,
+        metal_fixture.atlas_height_px,
+        metal_fixture.raster_uploads.ptr,
+        metal_fixture.raster_uploads.len,
+        metal_fixture.raster_pixels.ptr,
+        metal_fixture.raster_pixels.len,
+        screenshot_path.ptr,
+        screenshot_path.len,
+        native,
+        appPtyNativeCloseCallback,
+        &close_context,
+    );
+    const close_lifecycle = try verifyCloseLifecycle(&live_pty, &runtime, &live_registry, active.id, live_pty.pty_id, native.*);
 
     return .{
         .metal = metal_fixture,
@@ -398,30 +392,16 @@ fn drainUntilTerminationWithRaw(
 }
 
 fn verifyCloseLifecycle(
-    frame_loop: *app.AppFrameLoop,
-    live_registry: *app.LivePtyRegistry,
     live_pty: *app.LivePtySession,
     runtime: *app.SurfaceRuntime,
+    live_registry: *app.LivePtyRegistry,
     surface_id: app.SurfaceId,
     pty_id: app.PtyId,
+    native: metal_smoke.NativeMetalSmokeResult,
 ) !CloseLifecycleProbe {
-    // 실제 제품 tab/window UI는 아직 없지만, AppKit close delegate가 Zig callback을
-    // 호출하는 C ABI 경계를 먼저 고정한다. 다음 Swift/AppKit command는 close 순서를
-    // 다시 만들지 않고 같은 FrameLoop action만 호출하면 된다.
-    var native_close = std.mem.zeroes(NativeCloseSmokeResult);
-    native_close.status = -1;
-    native_close.callback_status = -1;
-    var close_context: NativeCloseContext = .{
-        .frame_loop = frame_loop,
-        .registry = live_registry,
-    };
-    maru_macos_window_close_smoke_run(
-        default_native_close_duration_ms,
-        appPtyNativeCloseCallback,
-        &close_context,
-        &native_close,
-    );
-
+    // native Metal window delegate가 이미 FrameLoop.closeActiveLivePty를 호출한 뒤의
+    // app-level 불변식을 확인한다. 별도 작은 창 close smoke가 아니라 같은 terminal
+    // window close 결과를 사용해야 제품 close button으로 가는 경계가 갈라지지 않는다.
     const surface_detached = live_pty.link == null;
     const registry_unregistered = live_registry.findBySurface(surface_id) == null;
     const input_rejected = if (runtime.writeInput(surface_id, .{ .bytes = "after close" })) false else |err| err == error.UnknownSurface;
@@ -434,11 +414,11 @@ fn verifyCloseLifecycle(
 
     live_pty.closeAndDetach(runtime);
     return .{
-        .native_close_status = native_close.status,
-        .native_close_requested = native_close.close_requested != 0,
-        .native_close_callback_called = native_close.callback_called != 0,
-        .native_close_callback_status = native_close.callback_status,
-        .native_close_window_closed = native_close.window_visible == 0,
+        .native_close_status = native.terminal_close_status,
+        .native_close_requested = native.terminal_close_requested != 0,
+        .native_close_callback_called = native.terminal_close_callback_called != 0,
+        .native_close_callback_status = native.terminal_close_callback_status,
+        .native_close_window_closed = native.terminal_window_closed != 0,
         .surface_detached = surface_detached,
         .registry_unregistered = registry_unregistered,
         .late_output_rejected = late_output_rejected,
@@ -588,6 +568,11 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.print("atlas_sample_missing_cells={d}\n", .{input.native.atlas_sample_missing_cells});
     try writer.print("screenshot_written={d}\n", .{input.native.screenshot_written});
     try writer.print("screenshot_bytes={d}\n", .{input.native.screenshot_bytes});
+    try writer.print("terminal_close_status={d}\n", .{input.native.terminal_close_status});
+    try writer.print("terminal_close_requested={}\n", .{input.native.terminal_close_requested != 0});
+    try writer.print("terminal_close_callback_called={}\n", .{input.native.terminal_close_callback_called != 0});
+    try writer.print("terminal_close_callback_status={d}\n", .{input.native.terminal_close_callback_status});
+    try writer.print("terminal_window_closed={}\n", .{input.native.terminal_window_closed != 0});
     try writer.print("raw_artifact={s}/app-pty-metal.raw.txt\n", .{input.fixture.artifact_dir});
     try writer.print("screen_artifact={s}/app-pty-metal.screen.txt\n", .{input.fixture.artifact_dir});
     try writer.print("snapshot_artifact={s}/app-pty-metal.snapshot.txt\n", .{input.fixture.artifact_dir});
@@ -813,6 +798,11 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
     native.screenshot_width = 800;
     native.screenshot_height = 400;
     native.screenshot_bytes = 960_000;
+    native.terminal_close_status = 0;
+    native.terminal_close_requested = 1;
+    native.terminal_close_callback_called = 1;
+    native.terminal_close_callback_status = 0;
+    native.terminal_window_closed = 1;
 
     var cells = [_]metal_smoke.NativeMetalCell{.{
         .row = 0,
@@ -947,7 +937,7 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "frame_loop_ticks=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "frame_loop_final_tick_index=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "frame_loop_final_ended=true\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "close_lifecycle=appkit_window_close_callback_after_visible_frame\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "close_lifecycle=appkit_terminal_window_close_callback_after_visible_frame\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "native_close_status=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "native_close_requested=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "native_close_callback_called=true\n") != null);
@@ -959,6 +949,11 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "close_input_rejected=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "close_queue_closed=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "close_idempotent=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_close_status=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_close_requested=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_close_callback_called=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_close_callback_status=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_window_closed=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "termination=exited(code=0)\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screen_contains_expected=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_path=zig-out/maru-macos-app-pty-metal-smoke/app-pty-metal-frame.ppm\n") != null);
@@ -1005,10 +1000,11 @@ test "app PTY Metal keyDown bridge maps native payload into terminal KeyEvent" {
     try std.testing.expect(event.modifiers.command);
 }
 
-test "app PTY Metal native close bridge keeps ABI and error labels stable" {
-    // AppKit delegate가 Zig callback으로 넘기는 close smoke 결과다. 크기와 에러 label이
-    // 흔들리면 native close request가 app host close action을 호출했는지 구분하기 어렵다.
-    try std.testing.expectEqual(@as(usize, 20), @sizeOf(NativeCloseSmokeResult));
+test "app PTY Metal terminal window close bridge keeps error labels stable" {
+    // AppKit delegate가 같은 terminal window에서 Zig callback을 호출한다. 에러 label이
+    // 흔들리면 terminal window close request가 app host close action을 호출했는지
+    // summary에서 구분하기 어렵다.
+    try std.testing.expectEqual(@as(usize, 112), @sizeOf(metal_smoke.NativeMetalSmokeResult));
     try std.testing.expectEqual(native_close_missing_context, appPtyNativeCloseCallback(null));
     try std.testing.expectEqual(@as(i32, 1), nativeCloseErrorCode(error.NoActiveSurface));
     try std.testing.expectEqual(@as(i32, 2), nativeCloseErrorCode(error.ActiveSurfaceNotAttachedToLivePty));

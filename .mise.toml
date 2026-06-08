@@ -82,7 +82,7 @@ description = "Run macOS glyph text smoke contract tests"
 run = "zig build test-macos-glyph-text-smoke"
 
 [tasks.pty]
-description = "Run opt-in macOS PTY integration tests"
+description = "Run opt-in macOS PTY integration tests, including interactive shell smoke"
 run = "zig build test-pty"
 
 [tasks.oracle]

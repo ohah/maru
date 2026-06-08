@@ -158,7 +158,7 @@ TDD 방식:
 - `TerminalCore`는 PTY file descriptor를 모른다.
 - 실패 시 stdout bytes와 snapshot artifact가 남는다.
 - deterministic controlled command PTY test와 환경 의존 interactive shell smoke가 분리되어 있다.
-- interactive shell smoke는 처음부터 기본 `mise run check`에 넣지 않는다.
+- interactive shell smoke는 `mise run pty`에서 `$MARU_INTERACTIVE_SHELL` 또는 `$SHELL`을 `-i`로 실행하고 marker command를 입력해 raw/screen/snapshot/summary artifact를 남긴다. 사용자 dotfile/prompt escape 영향이 있으므로 처음부터 기본 `mise run check`에는 넣지 않는다.
 - `mise run pty`는 macOS PTY opt-in 테스트를 실행한다.
 - app/demo/smoke 코드는 정상 종료와 close/error cleanup에서 `LivePtySession` owner를 사용한다. 이 owner는 `PtySession`, `PtyEventQueue`, `PtyReader`, runtime attach link를 한 live terminal session 단위로 묶고, 정상 종료 뒤 cleanup이 `stopAndJoin`을 다시 부르지 않게 하며, 조기 실패 경로에서는 아직 join되지 않은 reader를 같은 `PtyReader.stopAndJoin` 순서로 닫게 한다. surface도 함께 닫히는 경로는 `LivePtySession.closeAndDetach`를 통해 runtime routing을 먼저 끊고 같은 close 순서를 탄다.
 

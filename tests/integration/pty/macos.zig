@@ -232,6 +232,88 @@ test "macOS PTY resize is visible to the child terminal" {
     try std.testing.expect(std.mem.indexOf(u8, raw.bytes, "13 42") != null);
 }
 
+test "macOS interactive shell accepts scripted input through a real PTY" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const size: maru.terminal.Size = .{ .cols = 50, .rows = 8 };
+    const marker = "MARU_INTERACTIVE_SHELL_OK";
+    const shell_path = interactiveShellPath();
+
+    var session = try maru.pty.PtySession.spawn(allocator, .{
+        .command = shell_path,
+        .args = &.{"-i"},
+        .size = size,
+    });
+    defer session.deinit();
+
+    var surface = try maru.app.Surface.init(allocator, 1, size);
+    defer surface.deinit();
+    surface.title = "interactive shell pty";
+    surface.command = shell_path;
+
+    var runtime = maru.app.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surface, 10, maru.app.PtyIo.fromSession(&session));
+
+    var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 8);
+    defer queue.deinit();
+    var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    try reader.start();
+    // interactive shell은 사용자의 dotfile 영향을 받을 수 있다. 실패 경로에서도
+    // reader를 깨우고 child를 reap해야 opt-in smoke가 개발 세션을 멈추지 않는다.
+    defer reader.stopAndJoin();
+
+    const command = try std.fmt.allocPrint(allocator, "printf '{s}\\n'; exit\n", .{marker});
+    defer allocator.free(command);
+    try session.writeInput(command);
+
+    const raw = try drainRuntimeQueueUntilExitWithDeadline(allocator, &queue, &runtime, 5_000);
+    defer allocator.free(raw.bytes);
+
+    try artifacts.writeText(
+        "tests/artifacts/integration/pty/interactive-shell.raw.txt",
+        raw.bytes,
+    );
+
+    const screen = try surface.core.dumpUtf8(allocator);
+    defer allocator.free(screen);
+    const snapshot = try maru.observability.snapshot.renderTerminalSnapshot(allocator, surface.core.snapshot());
+    defer allocator.free(snapshot);
+    const summary = try renderInteractiveShellSummary(allocator, .{
+        .shell_path = shell_path,
+        .marker = marker,
+        .raw = raw.bytes,
+        .screen = screen,
+        .exit_status = raw.exit_status,
+        .output_events = raw.output_events,
+        .queue_capacity = queue.capacity(),
+        .process_state = surface.process_state,
+    });
+    defer allocator.free(summary);
+
+    // Artifact를 먼저 남긴다. 이 테스트가 깨졌을 때는 shell startup output,
+    // prompt escape, marker echo 중 어디서 막혔는지 raw/screen/snapshot이 더 중요하다.
+    try artifacts.writeTextWithFinalNewline(
+        allocator,
+        "tests/artifacts/integration/pty/interactive-shell.screen.txt",
+        screen,
+    );
+    try artifacts.writeText(
+        "tests/artifacts/integration/pty/interactive-shell.snapshot.txt",
+        snapshot,
+    );
+    try artifacts.writeText(
+        "tests/artifacts/integration/pty/interactive-shell.summary.txt",
+        summary,
+    );
+
+    try std.testing.expectEqual(maru.pty.ExitStatus{ .exited = 0 }, raw.exit_status);
+    try std.testing.expectEqual(maru.app.ProcessState.exited, surface.process_state);
+    try std.testing.expect(std.mem.indexOf(u8, raw.bytes, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, marker) != null);
+}
+
 test "macOS PTY close reaps a signal-ignoring child without leaking a zombie" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
 
@@ -407,6 +489,51 @@ fn drainRuntimeQueueUntilExit(
     }
 }
 
+fn drainRuntimeQueueUntilExitWithDeadline(
+    allocator: std.mem.Allocator,
+    queue: *maru.app.PtyEventQueue,
+    runtime: *maru.app.SurfaceRuntime,
+    timeout_ms: i64,
+) !CollectedOutput {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    var pump = maru.app.RuntimeEventPump.init(allocator, queue, runtime);
+    var output_events: usize = 0;
+    const started = std.Io.Timestamp.now(std.testing.io, .awake);
+
+    while (true) {
+        if (queue.tryPop()) |event| {
+            const exit_status: ?maru.pty.ExitStatus = switch (event) {
+                .output => |output| blk: {
+                    output_events += 1;
+                    try bytes.appendSlice(allocator, output.bytes);
+                    break :blk null;
+                },
+                .exited => |exited| exited.status,
+                .read_error => {
+                    _ = try pump.applyQueuedEvent(event);
+                    return error.ReadFailed;
+                },
+            };
+
+            _ = try pump.applyQueuedEvent(event);
+            if (exit_status) |status| {
+                return .{
+                    .bytes = try bytes.toOwnedSlice(allocator),
+                    .exit_status = status,
+                    .output_events = output_events,
+                };
+            }
+            continue;
+        }
+
+        if (started.untilNow(std.testing.io, .awake).toMilliseconds() >= timeout_ms) {
+            return error.InteractiveShellTimedOut;
+        }
+        try sleepMillis(10);
+    }
+}
+
 fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
     std.debug.assert(needle.len > 0);
 
@@ -458,6 +585,73 @@ fn renderPtyStressSummary(
             summary.queue_capacity,
         },
     );
+}
+
+const InteractiveShellSummary = struct {
+    shell_path: []const u8,
+    marker: []const u8,
+    raw: []const u8,
+    screen: []const u8,
+    exit_status: maru.pty.ExitStatus,
+    output_events: usize,
+    queue_capacity: usize,
+    process_state: maru.app.ProcessState,
+};
+
+fn renderInteractiveShellSummary(
+    allocator: std.mem.Allocator,
+    summary: InteractiveShellSummary,
+) ![]u8 {
+    const raw_contains_marker = std.mem.indexOf(u8, summary.raw, summary.marker) != null;
+    const screen_contains_marker = std.mem.indexOf(u8, summary.screen, summary.marker) != null;
+    return std.fmt.allocPrint(
+        allocator,
+        \\maru.pty-interactive-shell-smoke.v1
+        \\shell={s}
+        \\interactive=true
+        \\raw_contains_marker={}
+        \\screen_contains_marker={}
+        \\exit_status={s}
+        \\process_state={s}
+        \\raw_bytes={d}
+        \\output_events={d}
+        \\queue_capacity={d}
+        \\raw_artifact=tests/artifacts/integration/pty/interactive-shell.raw.txt
+        \\screen_artifact=tests/artifacts/integration/pty/interactive-shell.screen.txt
+        \\snapshot_artifact=tests/artifacts/integration/pty/interactive-shell.snapshot.txt
+        \\
+    ,
+        .{
+            summary.shell_path,
+            raw_contains_marker,
+            screen_contains_marker,
+            exitStatusLabel(summary.exit_status),
+            @tagName(summary.process_state),
+            summary.raw.len,
+            summary.output_events,
+            summary.queue_capacity,
+        },
+    );
+}
+
+fn interactiveShellPath() []const u8 {
+    if (std.c.getenv("MARU_INTERACTIVE_SHELL")) |raw| {
+        const value = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
+        if (value.len > 0) return value;
+    }
+    if (std.c.getenv("SHELL")) |raw| {
+        const value = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
+        if (value.len > 0) return value;
+    }
+    return "/bin/sh";
+}
+
+fn exitStatusLabel(status: maru.pty.ExitStatus) []const u8 {
+    return switch (status) {
+        .exited => "exited",
+        .signaled => "signaled",
+        .unknown => "unknown",
+    };
 }
 
 fn renderSurfaceMetadata(

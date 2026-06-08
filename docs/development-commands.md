@@ -40,7 +40,7 @@ Maru 작업에서 사용하는 기본 명령이다.
 - 빠른 스트레스 테스트: `mise run stress`
 - 긴 opt-in 스트레스 테스트: `mise run stress-soak`
 - 성능 예산 측정: `mise run perf`
-- macOS PTY opt-in 테스트: `mise run pty`
+- macOS PTY opt-in 테스트: `mise run pty` (macOS `openpty` controlled command, SurfaceRuntime routing, resize, reader close/reap, bounded queue stress, 그리고 `$MARU_INTERACTIVE_SHELL` 또는 `$SHELL`을 `-i`로 실행하는 interactive shell smoke를 검증한다. interactive shell smoke는 `tests/artifacts/integration/pty/interactive-shell.*` raw/screen/snapshot/summary artifact를 남기지만, 사용자 dotfile/prompt escape 영향을 받으므로 기본 `mise run check`에는 넣지 않는다)
 - 포맷: `mise run fmt`
 - 포맷 검사(변경 없이): `mise run fmt-check`
 - facade import 경계 검사: `mise run check-boundaries`

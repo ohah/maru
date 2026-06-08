@@ -175,6 +175,7 @@ SurfaceRuntime reader thread와 pump 단계에서 추가된 테스트:
 - `RuntimeEventPump`가 queued event를 `SurfaceRuntime`에 적용하고 output bytes 소유권을 끝낸다.
 - reader thread가 실제 macOS PTY controlled command output/exit를 bounded queue에 넣고, `RuntimeEventPump`가 이를 `SurfaceRuntime`에 적용한다.
 - 대량 stdout을 queue capacity 1로 흘려도 marker가 drop되지 않고, 여러 output event가 pump를 통과하며, 마지막 화면과 summary artifact가 남는다.
+- `$MARU_INTERACTIVE_SHELL` 또는 `$SHELL`을 `-i`로 띄운 interactive shell smoke가 marker command를 PTY input으로 받고 종료하며, raw/screen/snapshot/summary artifact를 남긴다. 이 테스트는 실제 사용자의 dotfile과 prompt escape 영향을 일부러 통과시키지만, 현재 VT parser가 ANSI escape를 완전히 해석하지 못해 screen artifact가 지저분할 수 있다는 한계도 함께 드러낸다.
 - `LivePtySession`이 controlled command의 정상 종료까지 PTY event queue를 소유하고, `finishAfterTermination` 뒤 cleanup이 다시 `stopAndJoin`을 부르지 않는다.
 - close/error cleanup 경로에서 `LivePtySession.deinit`이 아직 join되지 않은 reader를 정확히 한 번 `stopAndJoin`한다.
 - `LivePtySession.closeAndDetach`가 runtime routing을 먼저 끊고 queue를 닫아, 닫힌 surface로 late output/input이 들어가지 않는다.

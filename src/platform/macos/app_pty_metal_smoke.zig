@@ -22,7 +22,7 @@ const renderer_input_live_pty_frame_loop = "surface_runtime_live_pty_frame_loop_
 const input_source_appkit_keydown_resolver = "appkit_keydown_to_app_host_keybinding_resolver";
 const native_key_event_source_appkit_synthetic = "appkit_synthetic_keydown";
 const native_key_event_source_appkit_manual = "appkit_manual_keydown";
-const close_lifecycle_live_pty_close_and_detach = "live_pty_close_and_detach_after_visible_frame";
+const close_lifecycle_app_host_close_active_live_pty = "app_host_close_active_live_pty_after_visible_frame";
 
 extern fn maru_macos_keydown_smoke_run(duration_ms: u32, result: *NativeKeyDownSmokeResult) void;
 extern fn maru_macos_manual_keydown_smoke_run(duration_ms: u32, result: *NativeKeyDownSmokeResult) void;
@@ -282,7 +282,7 @@ fn buildLivePtyFixture(
         var fixture_for_cleanup = metal_fixture;
         fixture_for_cleanup.deinit(allocator);
     }
-    const close_lifecycle = verifyCloseLifecycle(&live_pty, &runtime, active.id, live_pty.pty_id);
+    const close_lifecycle = try verifyCloseLifecycle(&frame_loop, &live_pty, &runtime, active.id, live_pty.pty_id);
 
     return .{
         .metal = metal_fixture,
@@ -328,15 +328,16 @@ fn drainBlockingUntilTerminationWithRaw(
 }
 
 fn verifyCloseLifecycle(
+    frame_loop: *app.AppFrameLoop,
     live_pty: *app.LivePtySession,
     runtime: *app.SurfaceRuntime,
     surface_id: app.SurfaceId,
     pty_id: app.PtyId,
-) CloseLifecycleProbe {
+) !CloseLifecycleProbe {
     // 실제 AppKit close button은 아직 제품 host에 없지만, visible smoke가 마지막 frame을
-    // 만든 뒤 app-layer close primitive를 호출해 둔다. 다음 Swift/AppKit command는
+    // 만든 뒤 FrameLoop의 close action을 호출해 둔다. 다음 Swift/AppKit command는
     // close 순서를 다시 만들지 않고 같은 API만 호출하면 된다.
-    live_pty.closeAndDetach(runtime);
+    try frame_loop.closeActiveLivePty(live_pty);
     const surface_detached = live_pty.link == null;
     const input_rejected = if (runtime.writeInput(surface_id, .{ .bytes = "after close" })) false else |err| err == error.UnknownSurface;
     const late_output_rejected = if (runtime.applyPtyEvent(.{
@@ -430,7 +431,7 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.print("frame_loop_ticks={d}\n", .{input.fixture.frame_loop_ticks});
     try writer.print("frame_loop_final_tick_index={d}\n", .{input.fixture.frame_loop_final_tick_index});
     try writer.print("frame_loop_final_ended={}\n", .{input.fixture.frame_loop_final_ended});
-    try writer.print("close_lifecycle={s}\n", .{close_lifecycle_live_pty_close_and_detach});
+    try writer.print("close_lifecycle={s}\n", .{close_lifecycle_app_host_close_active_live_pty});
     try writer.print("close_surface_detached={}\n", .{input.fixture.close_lifecycle.surface_detached});
     try writer.print("close_late_output_rejected={}\n", .{input.fixture.close_lifecycle.late_output_rejected});
     try writer.print("close_input_rejected={}\n", .{input.fixture.close_lifecycle.input_rejected});
@@ -759,7 +760,7 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "frame_loop_ticks=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "frame_loop_final_tick_index=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "frame_loop_final_ended=true\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "close_lifecycle=live_pty_close_and_detach_after_visible_frame\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "close_lifecycle=app_host_close_active_live_pty_after_visible_frame\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "close_surface_detached=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "close_late_output_rejected=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "close_input_rejected=true\n") != null);

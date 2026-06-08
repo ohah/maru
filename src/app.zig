@@ -51,6 +51,7 @@ pub const ProcessState = surface.ProcessState;
 
 pub const buildAppHostFrame = host.buildFrame;
 pub const buildAppHostFrameAfterDrain = host.buildFrameAfterDrain;
+pub const closeActiveLivePty = host.closeActiveLivePty;
 pub const handleKeyEvent = host.handleKeyEvent;
 pub const resizeActiveSurface = host.resizeActiveSurface;
 pub const runAppFrameLoopSmoke = frame_loop.runSmoke;

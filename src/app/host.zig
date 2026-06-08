@@ -2,6 +2,7 @@ const std = @import("std");
 const config_mod = @import("../config.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal.zig");
+const live_pty_mod = @import("live_pty.zig");
 const pty_reader = @import("pty_reader.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
@@ -12,6 +13,7 @@ pub const default_artifact_dir = "zig-out/maru-app-smoke";
 
 pub const HostError = std.mem.Allocator.Error || runtime_pump.PumpError || renderer.GlyphQuadError || renderer.GlyphRasterError || error{
     NoActiveSurface,
+    ActiveSurfaceNotAttachedToLivePty,
 };
 
 pub const KeyHandlingResult = union(enum) {
@@ -113,6 +115,20 @@ pub fn resizeActiveSurface(
     // 두 경로가 같은 action에서 함께 일어나고, app host가 TerminalCore를 직접 고치지 않는다.
     const active = app_window.active() orelse return error.NoActiveSurface;
     try runtime.resize(active.id, size);
+}
+
+pub fn closeActiveLivePty(
+    app_window: *window_mod.AppWindow,
+    runtime: *runtime_mod.SurfaceRuntime,
+    live_pty: *live_pty_mod.LivePtySession,
+) HostError!void {
+    // platform close event는 PTY owner를 직접 부르지 않고 app host 정책으로 들어와야 한다.
+    // 그래야 "현재 어떤 surface를 닫는가"와 "live PTY를 어떤 순서로 닫는가"가
+    // future Swift/AppKit code에서도 하나의 app-level 경계에 남는다.
+    const active = app_window.active() orelse return error.NoActiveSurface;
+    const link = live_pty.link orelse return error.ActiveSurfaceNotAttachedToLivePty;
+    if (link.surface_id != active.id) return error.ActiveSurfaceNotAttachedToLivePty;
+    live_pty.closeAndDetach(runtime);
 }
 
 pub const AppSmokeConfig = struct {
@@ -425,6 +441,85 @@ const MemoryPty = struct {
         self.last_size = size;
     }
 };
+
+test "app host close action detaches active live PTY before closing queue" {
+    // 이 테스트는 future AppKit close button이 호출할 app-level 진입점을 고정한다.
+    // platform code가 LivePtySession을 직접 닫으면 active surface 검증을 건너뛸 수 있으므로,
+    // host boundary에서 active tab과 live PTY link가 맞는지 먼저 확인해야 한다.
+    const allocator = std.testing.allocator;
+    var memory_pty = MemoryPty.init(allocator);
+    defer memory_pty.deinit();
+    var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 })};
+    defer surfaces[0].deinit();
+    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    const link = try runtime.attach(&surfaces[0], 10, memory_pty.io());
+
+    var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var live: live_pty_mod.LivePtySession = .{
+        .allocator = allocator,
+        .session = undefined,
+        .queue = &queue,
+        .reader = undefined,
+        .pty_id = 10,
+        .link = link,
+        .reader_finished = true,
+    };
+
+    try closeActiveLivePty(&app_window, &runtime, &live);
+
+    try std.testing.expect(live.link == null);
+    try std.testing.expectError(error.UnknownSurface, runtime.writeInput(1, .{ .bytes = "after close" }));
+    try std.testing.expectError(error.UnknownPty, runtime.applyPtyEvent(.{
+        .output = .{ .pty_id = 10, .bytes = "late output" },
+    }));
+    try std.testing.expectError(error.QueueClosed, queue.tryPush(.{
+        .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } },
+    }));
+}
+
+test "app host close action refuses to close a live PTY attached to another tab" {
+    // close command는 현재 active tab만 닫아야 한다. 이 guard가 없으면 focus가 다른
+    // tab으로 이동한 뒤 늦게 도착한 close event가 엉뚱한 PTY를 끊을 수 있다.
+    const allocator = std.testing.allocator;
+    var memory_pty = MemoryPty.init(allocator);
+    defer memory_pty.deinit();
+    var surfaces = [_]surface_mod.Surface{
+        try surface_mod.Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 }),
+        try surface_mod.Surface.init(allocator, 2, .{ .cols = 10, .rows = 2 }),
+    };
+    defer surfaces[0].deinit();
+    defer surfaces[1].deinit();
+    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces, .active_tab = 1 };
+
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    const link = try runtime.attach(&surfaces[0], 10, memory_pty.io());
+
+    var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var live: live_pty_mod.LivePtySession = .{
+        .allocator = allocator,
+        .session = undefined,
+        .queue = &queue,
+        .reader = undefined,
+        .pty_id = 10,
+        .link = link,
+        .reader_finished = true,
+    };
+
+    try std.testing.expectError(
+        error.ActiveSurfaceNotAttachedToLivePty,
+        closeActiveLivePty(&app_window, &runtime, &live),
+    );
+    try std.testing.expect(live.link != null);
+    try runtime.writeInput(1, .{ .bytes = "still attached" });
+    try std.testing.expectEqualStrings("still attached", memory_pty.writes.items);
+    try queue.tryPush(.{ .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } } });
+}
 
 test "app host frame drains runtime events and builds renderer frame for active surface" {
     const allocator = std.testing.allocator;

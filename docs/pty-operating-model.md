@@ -159,7 +159,7 @@ reader를 깨우는 방식은 self-pipe다. `readEvent`는 실제 `read` 전에 
 
 reap 경로도 마찬가지로 `close`가 끼어들 수 없는 bare blocking `waitpid`를 쓰지 않는다. EOF를 보면 먼저 `WNOHANG`로 거두고(보통 child가 이미 종료해 즉시 성공), child가 stdio만 닫고 계속 살아 있으면(드문 daemonize) `kqueue`로 child의 실제 종료(`EVFILT_PROC`/`NOTE_EXIT`)와 close의 wake(self-pipe `EVFILT_READ`)를 함께 기다린다. 그래서 child가 끝내 종료하지 않아도 `stopAndJoin`이 reader를 깨워 `join`이 멈추지 않고, child는 close의 SIGKILL escalation으로 정리된다.
 
-아직 남은 범위는 macOS window/app host의 실제 close button, tab close command, app quit lifecycle이 `LivePtySession.closeAndDetach`를 호출하도록 연결하는 일이다. close 경로를 app host와 조립할 때도 "신호를 올리며 반드시 reap한다"는 계약은 동일하게 유지한다.
+아직 남은 범위는 macOS window/app host의 실제 close button, tab close command, app quit lifecycle이 `FrameLoop.closeActiveLivePty`를 호출하도록 native lifecycle에 연결하는 일이다. `FrameLoop.closeActiveLivePty`는 active surface와 live PTY link가 맞는지 app host에서 확인한 뒤 `LivePtySession.closeAndDetach`로 내려간다. close 경로를 native UI와 조립할 때도 "신호를 올리며 반드시 reap한다"는 계약은 동일하게 유지한다.
 
 ## 초기 테스트
 
@@ -178,6 +178,7 @@ SurfaceRuntime reader thread와 pump 단계에서 추가된 테스트:
 - `LivePtySession`이 controlled command의 정상 종료까지 PTY event queue를 소유하고, `finishAfterTermination` 뒤 cleanup이 다시 `stopAndJoin`을 부르지 않는다.
 - close/error cleanup 경로에서 `LivePtySession.deinit`이 아직 join되지 않은 reader를 정확히 한 번 `stopAndJoin`한다.
 - `LivePtySession.closeAndDetach`가 runtime routing을 먼저 끊고 queue를 닫아, 닫힌 surface로 late output/input이 들어가지 않는다.
+- `host.closeActiveLivePty`가 active surface와 live PTY link가 다르면 엉뚱한 tab의 PTY를 닫지 않는다.
 - 출력이 없는 long-running child에서 reader thread가 blocking read에 들어가도 `PtyReader.stopAndJoin`이 reader를 join하고 child를 reap한다.
 - child가 stdio를 닫고 계속 살아 있어(daemonize) reader가 reap 경로의 kqueue 대기에 들어가도 `PtyReader.stopAndJoin`이 reader를 깨워 join하고 child를 reap한다(데드락 없음).
 
@@ -185,4 +186,4 @@ SurfaceRuntime reader thread와 pump 단계에서 추가된 테스트:
 
 - 대량 stdout에서 reader가 오래 backpressure를 걸 때 RSS 상한, drain latency, UI responsiveness가 유지되는지.
 - reader thread 종료와 process exit가 trace에 같은 domain event로 남는다.
-- macOS app host의 실제 tab/window close가 `LivePtySession.closeAndDetach`를 통해 `SurfaceRuntime.detachSurface`와 `PtyReader.stopAndJoin`을 호출하는지.
+- macOS app host의 실제 tab/window close event가 `FrameLoop.closeActiveLivePty`를 통해 active surface를 검증하고 `LivePtySession.closeAndDetach`로 내려가는지.

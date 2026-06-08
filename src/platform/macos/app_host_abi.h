@@ -2,11 +2,12 @@
 #define MARU_PLATFORM_MACOS_APP_HOST_ABI_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 4u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 5u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -125,6 +126,56 @@ typedef struct MaruAppHostDevFrameSummary {
     uint32_t reserved1;
 } MaruAppHostDevFrameSummary;
 
+/* 가장 최근 tick의 RenderFrame을 Metal로 그리기 위한 DTO. cell 하나가 atlas slot 1개와 그
+   UV 사각형을 가리킨다. layout은 Zig metal_frame.NativeMetalCell과 1:1로 맞춘다. */
+typedef struct MaruAppHostDevMetalCell {
+    uint16_t row;
+    uint16_t col;
+    uint16_t width;
+    uint16_t reserved;
+    uint32_t codepoint;
+    uint32_t slot_id;
+    uint32_t atlas_x_px;
+    uint32_t atlas_y_px;
+    uint32_t atlas_width_px;
+    uint32_t atlas_height_px;
+    float u0;
+    float v0;
+    float u1;
+    float v1;
+} MaruAppHostDevMetalCell;
+
+/* 한 glyph slot의 raster bytes를 atlas texture에 올리기 위한 업로드 기술자. bytes_offset/
+   byte_count는 MaruAppHostDevMetalFrame.raster_pixels 버퍼 안의 범위다. */
+typedef struct MaruAppHostDevMetalRasterUpload {
+    uint32_t slot_id;
+    uint32_t atlas_x_px;
+    uint32_t atlas_y_px;
+    uint32_t atlas_width_px;
+    uint32_t atlas_height_px;
+    size_t bytes_offset;
+    size_t byte_count;
+    size_t bytes_per_row;
+    size_t non_clear_pixels;
+} MaruAppHostDevMetalRasterUpload;
+
+/* 가장 최근 tick의 Metal frame view. 모든 포인터는 dev session이 소유한 retained 배열을
+   가리키며 다음 tick(재투영) 또는 close/destroy까지만 유효하다. caller는 tick 직후 같은
+   main thread에서 동기적으로 소비해야 한다. generation은 매 tick 증가한다. */
+typedef struct MaruAppHostDevMetalFrame {
+    uint32_t cols;
+    uint32_t rows;
+    uint32_t atlas_width_px;
+    uint32_t atlas_height_px;
+    uint64_t generation;
+    const MaruAppHostDevMetalCell *cells;
+    size_t cell_count;
+    const MaruAppHostDevMetalRasterUpload *raster_uploads;
+    size_t raster_upload_count;
+    const uint8_t *raster_pixels;
+    size_t raster_pixel_count;
+} MaruAppHostDevMetalFrame;
+
 uint32_t maru_macos_app_host_abi_version(void);
 int32_t maru_macos_app_host_capabilities(MaruAppHostCapabilities *out_capabilities);
 int32_t maru_macos_app_dev_session_create(
@@ -150,5 +201,9 @@ int32_t maru_macos_app_dev_session_close(
     MaruAppHostDevFrameSummary *out_summary
 );
 void maru_macos_app_dev_session_destroy(MaruAppHostDevSession *session);
+int32_t maru_macos_app_dev_session_metal_frame(
+    MaruAppHostDevSession *session,
+    MaruAppHostDevMetalFrame *out_frame
+);
 
 #endif

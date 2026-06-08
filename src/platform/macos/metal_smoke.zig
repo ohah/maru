@@ -7,6 +7,7 @@ const coretext_probe = @import("coretext_probe.zig");
 const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
+const metal_frame = @import("metal_frame.zig");
 // shape/raster native bridge 시그니처는 coretext_smoke_bridge.zig가 단일 출처로 소유한다.
 // CoreText smoke와 같은 선언을 공유해, 한쪽만 파라미터를 바꿔 ABI가 어긋나는 것을 막는다.
 const maru_macos_coretext_shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list;
@@ -70,34 +71,10 @@ pub const NativeKeyDownSmokeResult = extern struct {
     modifier_command: u32,
 };
 
-pub const NativeMetalCell = extern struct {
-    row: u16,
-    col: u16,
-    width: u16,
-    reserved: u16 = 0,
-    codepoint: u32,
-    slot_id: u32,
-    atlas_x_px: u32,
-    atlas_y_px: u32,
-    atlas_width_px: u32,
-    atlas_height_px: u32,
-    u0: f32,
-    v0: f32,
-    u1: f32,
-    v1: f32,
-};
-
-pub const NativeMetalRasterUpload = extern struct {
-    slot_id: u32,
-    atlas_x_px: u32,
-    atlas_y_px: u32,
-    atlas_width_px: u32,
-    atlas_height_px: u32,
-    bytes_offset: usize,
-    byte_count: usize,
-    bytes_per_row: usize,
-    non_clear_pixels: usize,
-};
+// Metal DTO와 투영 helper는 순수 모듈 metal_frame이 소유한다. visible smoke와 제품 app
+// host ABI가 같은 표현을 쓰도록 여기서는 re-export만 한다.
+pub const NativeMetalCell = metal_frame.NativeMetalCell;
+pub const NativeMetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 
 pub extern fn maru_macos_metal_smoke_run(
     duration_ms: u32,
@@ -639,75 +616,9 @@ fn testRasterizeGlyph(
     };
 }
 
-pub fn buildNativeCellsFromGlyphQuads(
-    allocator: std.mem.Allocator,
-    frame: renderer.GlyphQuadFrame,
-) ![]NativeMetalCell {
-    var cells: std.ArrayList(NativeMetalCell) = .empty;
-    errdefer cells.deinit(allocator);
-
-    try cells.ensureTotalCapacity(allocator, frame.glyphs.len);
-    for (frame.glyphs) |glyph| {
-        // GlyphQuadFrame은 probe surface 전체의 glyph와 UV 준비 결과를 담기 때문에 blank cell도
-        // 들어올 수 있다. Metal smoke의 목적은 CoreText glyph ink가 atlas texture를 통해
-        // 보이는지 확인하는 것이므로, 실제 잉크 후보가 있는 glyph만 native bridge로 넘긴다.
-        if (glyph.run.codepoint == ' ') continue;
-        cells.appendAssumeCapacity(.{
-            .row = glyph.run.row,
-            .col = glyph.run.col,
-            .width = glyph.run.cell_width,
-            .codepoint = glyph.run.codepoint,
-            .slot_id = glyph.slot.id,
-            .atlas_x_px = glyph.slot.x_px,
-            .atlas_y_px = glyph.slot.y_px,
-            .atlas_width_px = glyph.slot.width_px,
-            .atlas_height_px = glyph.slot.height_px,
-            .u0 = glyph.uv.u0,
-            .v0 = glyph.uv.v0,
-            .u1 = glyph.uv.u1,
-            .v1 = glyph.uv.v1,
-        });
-    }
-
-    return cells.toOwnedSlice(allocator);
-}
-
-pub fn buildNativeRasterUploads(
-    allocator: std.mem.Allocator,
-    frame: renderer.GlyphRasterFrame,
-) ![]NativeMetalRasterUpload {
-    var uploads: std.ArrayList(NativeMetalRasterUpload) = .empty;
-    errdefer uploads.deinit(allocator);
-
-    try uploads.ensureTotalCapacity(allocator, frame.uploads.len);
-    for (frame.uploads) |upload| {
-        uploads.appendAssumeCapacity(.{
-            .slot_id = upload.slot.id,
-            .atlas_x_px = upload.slot.x_px,
-            .atlas_y_px = upload.slot.y_px,
-            .atlas_width_px = upload.slot.width_px,
-            .atlas_height_px = upload.slot.height_px,
-            .bytes_offset = upload.bytes_offset,
-            .byte_count = upload.byte_count,
-            .bytes_per_row = upload.bytes_per_row,
-            .non_clear_pixels = upload.non_clear_pixels,
-        });
-    }
-
-    return uploads.toOwnedSlice(allocator);
-}
-
-pub fn nativeCellsHaveAtlasPlacement(cells: []const NativeMetalCell) bool {
-    // 이 값은 "Metal이 glyph bitmap을 그렸다"는 뜻이 아니다. 다음 제품 text renderer에서
-    // UV를 만들 수 있는 atlas placement 데이터가 Zig -> ObjC ABI까지 건너갔는지 보는
-    // 중간 계약이다. 빈 배열이면 검증할 데이터가 없으므로 false로 둔다.
-    if (cells.len == 0) return false;
-    for (cells) |cell| {
-        if (cell.slot_id == 0) return false;
-        if (cell.atlas_width_px == 0 or cell.atlas_height_px == 0) return false;
-    }
-    return true;
-}
+pub const buildNativeCellsFromGlyphQuads = metal_frame.buildNativeCellsFromGlyphQuads;
+pub const buildNativeRasterUploads = metal_frame.buildNativeRasterUploads;
+pub const nativeCellsHaveAtlasPlacement = metal_frame.nativeCellsHaveAtlasPlacement;
 
 fn writeSummary(io: std.Io, summary: []const u8) !void {
     try std.Io.Dir.cwd().createDirPath(io, artifact_dir);

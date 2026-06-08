@@ -159,6 +159,7 @@ const LivePtyMetalFixture = struct {
 
 const CloseLifecycleProbe = struct {
     surface_detached: bool,
+    registry_unregistered: bool,
     late_output_rejected: bool,
     input_rejected: bool,
     queue_closed: bool,
@@ -166,6 +167,7 @@ const CloseLifecycleProbe = struct {
 
     fn passed(self: CloseLifecycleProbe) bool {
         return self.surface_detached and
+            self.registry_unregistered and
             self.late_output_rejected and
             self.input_rejected and
             self.queue_closed and
@@ -204,6 +206,9 @@ fn buildLivePtyFixture(
     var runtime = app.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
     _ = try live_pty.attachSurface(&runtime, &surfaces[0]);
+    var live_registry = app.LivePtyRegistry.init(allocator);
+    defer live_registry.deinit();
+    try live_registry.register(&live_pty);
 
     var pump = live_pty.pump(&runtime);
     var renderer_state = renderer.RendererState.init(allocator, .{});
@@ -282,7 +287,7 @@ fn buildLivePtyFixture(
         var fixture_for_cleanup = metal_fixture;
         fixture_for_cleanup.deinit(allocator);
     }
-    const close_lifecycle = try verifyCloseLifecycle(&frame_loop, &live_pty, &runtime, active.id, live_pty.pty_id);
+    const close_lifecycle = try verifyCloseLifecycle(&frame_loop, &live_registry, &live_pty, &runtime, active.id, live_pty.pty_id);
 
     return .{
         .metal = metal_fixture,
@@ -329,6 +334,7 @@ fn drainBlockingUntilTerminationWithRaw(
 
 fn verifyCloseLifecycle(
     frame_loop: *app.AppFrameLoop,
+    live_registry: *app.LivePtyRegistry,
     live_pty: *app.LivePtySession,
     runtime: *app.SurfaceRuntime,
     surface_id: app.SurfaceId,
@@ -337,8 +343,9 @@ fn verifyCloseLifecycle(
     // 실제 AppKit close button은 아직 제품 host에 없지만, visible smoke가 마지막 frame을
     // 만든 뒤 FrameLoop의 close action을 호출해 둔다. 다음 Swift/AppKit command는
     // close 순서를 다시 만들지 않고 같은 API만 호출하면 된다.
-    try frame_loop.closeActiveLivePty(live_pty);
+    try frame_loop.closeActiveLivePty(live_registry);
     const surface_detached = live_pty.link == null;
+    const registry_unregistered = live_registry.findBySurface(surface_id) == null;
     const input_rejected = if (runtime.writeInput(surface_id, .{ .bytes = "after close" })) false else |err| err == error.UnknownSurface;
     const late_output_rejected = if (runtime.applyPtyEvent(.{
         .output = .{ .pty_id = pty_id, .bytes = "late output after close" },
@@ -350,6 +357,7 @@ fn verifyCloseLifecycle(
     live_pty.closeAndDetach(runtime);
     return .{
         .surface_detached = surface_detached,
+        .registry_unregistered = registry_unregistered,
         .late_output_rejected = late_output_rejected,
         .input_rejected = input_rejected,
         .queue_closed = queue_closed,
@@ -433,6 +441,7 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.print("frame_loop_final_ended={}\n", .{input.fixture.frame_loop_final_ended});
     try writer.print("close_lifecycle={s}\n", .{close_lifecycle_app_host_close_active_live_pty});
     try writer.print("close_surface_detached={}\n", .{input.fixture.close_lifecycle.surface_detached});
+    try writer.print("close_registry_unregistered={}\n", .{input.fixture.close_lifecycle.registry_unregistered});
     try writer.print("close_late_output_rejected={}\n", .{input.fixture.close_lifecycle.late_output_rejected});
     try writer.print("close_input_rejected={}\n", .{input.fixture.close_lifecycle.input_rejected});
     try writer.print("close_queue_closed={}\n", .{input.fixture.close_lifecycle.queue_closed});
@@ -722,6 +731,7 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
         .frame_loop_final_ended = true,
         .close_lifecycle = .{
             .surface_detached = true,
+            .registry_unregistered = true,
             .late_output_rejected = true,
             .input_rejected = true,
             .queue_closed = true,
@@ -762,6 +772,7 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "frame_loop_final_ended=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "close_lifecycle=app_host_close_active_live_pty_after_visible_frame\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "close_surface_detached=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "close_registry_unregistered=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "close_late_output_rejected=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "close_input_rejected=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "close_queue_closed=true\n") != null);

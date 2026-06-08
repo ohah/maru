@@ -231,6 +231,22 @@ pub fn build(b: *std.Build) void {
         run_macos_app_pty_metal_smoke_tests.setCwd(b.path("."));
         test_macos_app_pty_metal_smoke_step.dependOn(&run_macos_app_pty_metal_smoke_tests.step);
 
+        // Swift host skeleton은 아직 제품 앱을 실행하지 않는다. C header를 import하고
+        // AppKit 타입을 type-check할 수 있는지만 확인해, 다음 제품 app loop PR에서
+        // Swift/Zig 경계 문제가 한꺼번에 터지지 않게 한다.
+        const macos_app_host_swift_check_step = b.step("macos-app-host-swift-check", "Type-check the Swift macOS app host skeleton");
+        const macos_app_host_swift_check_cmd = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-typecheck",
+            "-parse-as-library",
+            "-import-objc-header",
+        });
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/app_host_abi.h"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
+        macos_app_host_swift_check_cmd.setCwd(b.path("."));
+        macos_app_host_swift_check_step.dependOn(&macos_app_host_swift_check_cmd.step);
+
         // CoreText smoke는 창이나 GPU를 만들지 않고 macOS font stack과 CPU bitmap
         // rasterization만 검증한다. 실제 text renderer를 붙이기 전에 font
         // resolve/shaping/raster 실패와 Metal 실패를 다른 artifact로 나누기 위한
@@ -435,6 +451,36 @@ pub fn build(b: *std.Build) void {
     });
     const run_macos_coretext_frame_builder_tests = b.addRunArtifact(macos_coretext_frame_builder_tests);
 
+    const macos_app_host_abi_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/app_host_abi.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    macos_app_host_abi_tests.root_module.addIncludePath(b.path("src/platform/macos"));
+    const run_macos_app_host_abi_tests = b.addRunArtifact(macos_app_host_abi_tests);
+
+    const macos_app_host_abi_lib = b.addLibrary(.{
+        .name = "maru-macos-app-host-abi",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/app_host_abi.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    macos_app_host_abi_lib.root_module.addIncludePath(b.path("src/platform/macos"));
+    const install_macos_app_host_abi_lib = b.addInstallArtifact(macos_app_host_abi_lib, .{});
+
+    const test_macos_app_host_abi_step = b.step("test-macos-app-host-abi", "Run macOS Swift/Zig app host ABI contract tests");
+    test_macos_app_host_abi_step.dependOn(&run_macos_app_host_abi_tests.step);
+
+    const macos_app_host_abi_lib_step = b.step("macos-app-host-abi-lib", "Build the Zig static library exported to the future Swift macOS app host");
+    macos_app_host_abi_lib_step.dependOn(&install_macos_app_host_abi_lib.step);
+
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_exe_tests.step);
@@ -456,6 +502,10 @@ pub fn build(b: *std.Build) void {
     // AppHostFrame으로 조립하는 제품 후보 경계다. native bridge는 함수 포인터로 주입하므로
     // 기본 테스트에서는 Objective-C 없이 FrameLoop가 호출할 builder 계약을 고정한다.
     test_step.dependOn(&run_macos_coretext_frame_builder_tests.step);
+    // app_host_abi.zig는 제품 Swift host가 호출할 C ABI의 version/layout/ownership
+    // 신호를 고정한다. Swift 자체는 macOS opt-in type-check로만 검증하지만, ABI layout은
+    // 플랫폼 독립 테스트로 기본 check에 넣어 drift를 빨리 잡는다.
+    test_step.dependOn(&run_macos_app_host_abi_tests.step);
 
     const e2e_tests = b.addTest(.{
         .root_module = b.createModule(.{

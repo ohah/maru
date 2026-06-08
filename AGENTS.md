@@ -25,6 +25,7 @@
 - [Workspace Restore 전략](docs/workspace-restore.md)
 - [터미널 호환성/보안 정책](docs/terminal-compatibility-policy.md)
 - [키 입력과 단축키 경계](docs/key-input-and-shortcuts.md)
+- [macOS 앱 호스트 경계](docs/macos-app-host-boundary.md)
 
 ## 설계 문서
 
@@ -44,6 +45,7 @@
 - [Fixture와 Oracle 포맷](docs/fixture-format.md)
 - [Snapshot Versioning](docs/snapshot-versioning.md)
 - [키 입력과 단축키 경계](docs/key-input-and-shortcuts.md)
+- [macOS 앱 호스트 경계](docs/macos-app-host-boundary.md)
 - [PTY 운영 모델](docs/pty-operating-model.md)
 - [Workspace Restore 전략](docs/workspace-restore.md)
 - [터미널 호환성/보안 정책](docs/terminal-compatibility-policy.md)

@@ -65,6 +65,18 @@ run = "zig build macos-app-pty-interactive-metal-smoke"
 description = "Run macOS live PTY Metal smoke contract tests"
 run = "zig build test-macos-app-pty-metal-smoke"
 
+[tasks.test-macos-app-host-abi]
+description = "Run macOS Swift/Zig app host ABI contract tests"
+run = "zig build test-macos-app-host-abi"
+
+[tasks.macos-app-host-abi-lib]
+description = "Build the Zig static library exported to the future Swift macOS app host"
+run = "zig build macos-app-host-abi-lib"
+
+[tasks.macos-app-host-swift-check]
+description = "Type-check the Swift macOS app host skeleton"
+run = "zig build macos-app-host-swift-check"
+
 [tasks.macos-coretext-smoke]
 description = "Run macOS CoreText font shaping/raster smoke"
 run = "zig build macos-coretext-smoke"

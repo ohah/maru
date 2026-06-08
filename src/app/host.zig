@@ -3,6 +3,7 @@ const config_mod = @import("../config.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal.zig");
 const live_pty_mod = @import("live_pty.zig");
+const live_pty_registry = @import("live_pty_registry.zig");
 const pty_reader = @import("pty_reader.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
@@ -120,15 +121,15 @@ pub fn resizeActiveSurface(
 pub fn closeActiveLivePty(
     app_window: *window_mod.AppWindow,
     runtime: *runtime_mod.SurfaceRuntime,
-    live_pty: *live_pty_mod.LivePtySession,
+    registry: *live_pty_registry.LivePtyRegistry,
 ) HostError!void {
-    // platform close event는 PTY owner를 직접 부르지 않고 app host 정책으로 들어와야 한다.
-    // 그래야 "현재 어떤 surface를 닫는가"와 "live PTY를 어떤 순서로 닫는가"가
-    // future Swift/AppKit code에서도 하나의 app-level 경계에 남는다.
-    const active = app_window.active() orelse return error.NoActiveSurface;
-    const link = live_pty.link orelse return error.ActiveSurfaceNotAttachedToLivePty;
-    if (link.surface_id != active.id) return error.ActiveSurfaceNotAttachedToLivePty;
-    live_pty.closeAndDetach(runtime);
+    // platform close event는 PTY owner 포인터를 직접 고르지 않고 app host 정책으로 들어와야 한다.
+    // registry가 active surface에 붙은 live PTY를 찾고 닫으므로, future Swift/AppKit code는
+    // 현재 focus와 다른 tab의 session을 실수로 닫을 수 없다.
+    _ = app_window.active() orelse return error.NoActiveSurface;
+    registry.closeActive(app_window, runtime) catch |err| switch (err) {
+        error.ActiveSurfaceNotAttachedToLivePty => return error.ActiveSurfaceNotAttachedToLivePty,
+    };
 }
 
 pub const AppSmokeConfig = struct {
@@ -468,10 +469,14 @@ test "app host close action detaches active live PTY before closing queue" {
         .link = link,
         .reader_finished = true,
     };
+    var registry = live_pty_registry.LivePtyRegistry.init(allocator);
+    defer registry.deinit();
+    try registry.register(&live);
 
-    try closeActiveLivePty(&app_window, &runtime, &live);
+    try closeActiveLivePty(&app_window, &runtime, &registry);
 
     try std.testing.expect(live.link == null);
+    try std.testing.expect(registry.findBySurface(1) == null);
     try std.testing.expectError(error.UnknownSurface, runtime.writeInput(1, .{ .bytes = "after close" }));
     try std.testing.expectError(error.UnknownPty, runtime.applyPtyEvent(.{
         .output = .{ .pty_id = 10, .bytes = "late output" },
@@ -479,6 +484,22 @@ test "app host close action detaches active live PTY before closing queue" {
     try std.testing.expectError(error.QueueClosed, queue.tryPush(.{
         .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } },
     }));
+}
+
+test "app host close action reports an empty window as no active surface" {
+    // 빈 window는 "active surface에 live PTY가 붙어 있지 않다"가 아니라
+    // 닫을 active surface 자체가 없는 상태다. 오류를 분리해야 native close event 로그가
+    // focus 문제와 PTY registry 문제를 구분할 수 있다.
+    const allocator = std.testing.allocator;
+    var surfaces: [0]surface_mod.Surface = .{};
+    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    var registry = live_pty_registry.LivePtyRegistry.init(allocator);
+    defer registry.deinit();
+
+    try std.testing.expectError(error.NoActiveSurface, closeActiveLivePty(&app_window, &runtime, &registry));
 }
 
 test "app host close action refuses to close a live PTY attached to another tab" {
@@ -510,10 +531,13 @@ test "app host close action refuses to close a live PTY attached to another tab"
         .link = link,
         .reader_finished = true,
     };
+    var registry = live_pty_registry.LivePtyRegistry.init(allocator);
+    defer registry.deinit();
+    try registry.register(&live);
 
     try std.testing.expectError(
         error.ActiveSurfaceNotAttachedToLivePty,
-        closeActiveLivePty(&app_window, &runtime, &live),
+        closeActiveLivePty(&app_window, &runtime, &registry),
     );
     try std.testing.expect(live.link != null);
     try runtime.writeInput(1, .{ .bytes = "still attached" });

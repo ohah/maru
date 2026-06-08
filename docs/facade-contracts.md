@@ -111,17 +111,18 @@
 - detach 이후 늦게 도착한 PTY output은 `UnknownPty`로 거부된다.
 - process exit event 이후 같은 surface로 input을 보내면 `ProcessExited`가 난다.
 
-## `LivePtySession` / `PtyReader` / `PtyEventQueue`
+## `LivePtySession` / `LivePtyRegistry` / `PtyReader` / `PtyEventQueue`
 
 책임:
 
 - `LivePtySession`은 하나의 live terminal session에 필요한 `PtySession`, `PtyEventQueue`, `PtyReader`, runtime attach link를 한 owner로 묶는다.
-- app/demo/smoke는 개별 session/queue/reader를 따로 닫지 않고 `LivePtySession.close`, `LivePtySession.closeAndDetach`, 또는 `LivePtySession.deinit`을 호출한다. tab/window close command는 active surface와 live PTY link가 일치하는지 먼저 확인하는 `FrameLoop.closeActiveLivePty`/`host.closeActiveLivePty`를 거쳐 `LivePtySession.closeAndDetach`로 내려간다.
+- `LivePtyRegistry`는 app state가 소유한 `LivePtySession`을 surface id/pty id로 찾는 non-owning mapping이다. session memory를 파괴하지 않고, native host가 active surface만으로 닫을 live PTY를 찾게 한다.
+- app/demo/smoke는 개별 session/queue/reader를 따로 닫지 않고 `LivePtySession.close`, `LivePtySession.closeAndDetach`, 또는 `LivePtySession.deinit`을 호출한다. tab/window close command는 `FrameLoop.closeActiveLivePty`/`host.closeActiveLivePty`를 거쳐 registry가 active surface와 live PTY mapping을 찾고, 그 뒤 `LivePtySession.closeAndDetach`로 내려간다.
 - `PtySession.readEvent`를 reader thread에서 반복 호출한다.
 - reader thread가 만든 output/exit/read_error event를 bounded queue에 넣는다.
 - queue가 가득 차면 output을 버리지 않고 reader thread를 기다리게 한다.
 - output bytes의 소유권을 queue event로 넘기고, consumer가 `QueuedPtyEvent.deinit`으로 끝내게 한다.
-- 탭/창 close 시 app host close action이 active surface와 live PTY link를 먼저 대조하고, 통과하면 `LivePtySession.closeAndDetach`가 `SurfaceRuntime.detachSurface`로 runtime routing을 먼저 끊고, 내부적으로 `PtyReader.stopAndJoin`을 사용해 queue를 닫고, session을 close한 뒤 reader thread가 끝날 때까지 기다린다.
+- 탭/창 close 시 app host close action이 registry에서 active surface의 live PTY를 찾고 link 불변식을 검증한다. 통과하면 `LivePtySession.closeAndDetach`가 `SurfaceRuntime.detachSurface`로 runtime routing을 먼저 끊고, 내부적으로 `PtyReader.stopAndJoin`을 사용해 queue를 닫고, session을 close한 뒤 reader thread가 끝날 때까지 기다린다. registry mapping은 close가 성공한 뒤에 제거한다. close 전 검증이 실패하면 원인 추적을 위해 mapping을 보존한다.
 
 몰라야 하는 것:
 
@@ -137,7 +138,10 @@
 - close된 queue는 새 push를 거부하고 empty pop을 종료한다.
 - `LivePtySession`이 실제 macOS controlled command output/exit를 정상 종료까지 소유하고, `finishAfterTermination` 뒤 cleanup이 중복 stop하지 않는다.
 - `LivePtySession.closeAndDetach`가 닫힌 surface를 runtime에서 detach하고 queue를 닫아 late output/input을 거부한다.
-- `host.closeActiveLivePty`가 active surface와 live PTY link가 다르면 닫지 않고 오류를 반환한다.
+- `LivePtyRegistry`가 중복 surface/pty 등록을 거부한다.
+- `LivePtyRegistry.closeActive`가 active surface mapping만 닫고, active가 아닌 surface의 PTY는 닫지 않는다.
+- `LivePtyRegistry.closeActive`가 link 불변식 실패 시 mapping을 삭제하지 않는다.
+- `host.closeActiveLivePty`가 registry를 통해 active surface live PTY를 닫고 mapping을 제거한다.
 - 실제 macOS PTY controlled command output/exit가 reader thread와 queue를 지나 `SurfaceRuntime`에 적용된다.
 - 실제 macOS PTY에서 출력이 없는 long-running child 때문에 reader가 blocking read 중이어도 `stopAndJoin`이 reader를 정리하고 child zombie를 남기지 않는다.
 

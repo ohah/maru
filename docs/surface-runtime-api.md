@@ -84,7 +84,7 @@ pub const PtyIo = struct {
 
 `PtyReader`가 만든 queue event를 실제 runtime에 적용하는 쪽은 별도 app-layer helper인 `RuntimeEventPump`가 맡는다. `SurfaceRuntime`은 routing과 state update만 책임지고, queue ownership이나 blocking drain 정책을 직접 소유하지 않는다.
 
-reader thread 자체의 종료 책임도 `SurfaceRuntime`에 넣지 않는다. reader thread는 live process/file descriptor와 같은 수명주기를 가지므로 app host가 `LivePtySession` owner로 소유한다. `SurfaceRuntime`은 output/exit/read_error event를 surface state에 반영할 뿐이고, 실제 window/tab close에서는 app host lifecycle이 `FrameLoop.closeActiveLivePty`를 호출한다. 이 app host action은 active surface와 live PTY link가 맞는지 확인한 뒤 `LivePtySession.closeAndDetach`로 내려가 `detachSurface`와 reader join을 같은 close operation으로 묶는다.
+reader thread 자체의 종료 책임도 `SurfaceRuntime`에 넣지 않는다. reader thread는 live process/file descriptor와 같은 수명주기를 가지므로 app host가 `LivePtySession` owner로 소유한다. `SurfaceRuntime`은 output/exit/read_error event를 surface state에 반영할 뿐이고, 실제 window/tab close에서는 app host lifecycle이 `FrameLoop.closeActiveLivePty`를 호출한다. 이 app host action은 `LivePtyRegistry`에서 active surface의 live PTY mapping을 찾고 link 불변식을 검증한 뒤 `LivePtySession.closeAndDetach`로 내려가 `detachSurface`와 reader join을 같은 close operation으로 묶는다. registry mapping은 close가 성공한 뒤 제거하고, 검증 실패 시에는 진단 가능한 상태를 남기기 위해 보존한다.
 
 ```zig
 pub const RuntimeEventPump = struct {

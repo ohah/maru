@@ -161,10 +161,17 @@ bool maru_metal_renderer_draw(
         if (total_vertices > SIZE_MAX / sizeof(MaruRendererVertex)) {
             return false;
         }
-        MaruRendererVertex *vertices = calloc(total_vertices, sizeof(MaruRendererVertex));
-        if (vertices == NULL) {
+        // 정점을 별도 calloc 버퍼에 만든 뒤 복사(newBufferWithBytes)하지 않고, shared MTLBuffer를
+        // 바로 잡아 그 contents에 직접 채운다. calloc + 복사 한 번을 없앤다(draw는 dirty-gate
+        // 덕에 변경 frame에서만 일어난다). 매 draw 새 버퍼라 GPU가 이전 frame을 읽는 중 덮어쓰는
+        // 경합은 없다(true reuse는 triple-buffering이 필요한 후속 작업).
+        vertex_buffer = [impl.device
+            newBufferWithLength:total_vertices * sizeof(MaruRendererVertex)
+                        options:MTLResourceStorageModeShared];
+        if (vertex_buffer == nil) {
             return false;
         }
+        MaruRendererVertex *vertices = (MaruRendererVertex *)vertex_buffer.contents;
         // smoke와 같은 inset grid 매핑(NDC). 실제 font metrics 기반 layout은 Swift view 단계에서
         // 다룬다.
         const float grid_left = -0.92f;
@@ -178,7 +185,7 @@ bool maru_metal_renderer_draw(
             const float right = grid_left + (((float)cell.col + cell_width) / (float)cols) * grid_width;
             const float top = grid_top - ((float)cell.row / (float)rows) * grid_height;
             const float bottom = grid_top - (((float)cell.row + 1.0f) / (float)rows) * grid_height;
-            MaruRendererVertex quad[6] = {
+            const MaruRendererVertex quad[6] = {
                 {{left, top}, {cell.u0, cell.v0}},
                 {{left, bottom}, {cell.u0, cell.v1}},
                 {{right, bottom}, {cell.u1, cell.v1}},
@@ -187,14 +194,6 @@ bool maru_metal_renderer_draw(
                 {{right, top}, {cell.u1, cell.v0}},
             };
             memcpy(&vertices[i * vertices_per_cell], quad, sizeof(quad));
-        }
-        vertex_buffer = [impl.device
-            newBufferWithBytes:vertices
-                        length:total_vertices * sizeof(MaruRendererVertex)
-                       options:MTLResourceStorageModeShared];
-        free(vertices);
-        if (vertex_buffer == nil) {
-            return false;
         }
     }
 

@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 5;
+pub const abi_version: u32 = 6;
 pub const default_queue_capacity: u32 = 16;
 
 // app_host_abi.zig가 이 파일을 import하므로 EventKind는 여기서 정의하고 거기서 re-export한다
@@ -70,7 +70,10 @@ pub const FrameSummary = extern struct {
     glyph_raster_ready: u32 = 0,
     ended: u32 = 0,
     last_event_kind: u32 = @intFromEnum(EventKind.none),
-    reserved1: u32 = 0,
+    // 현재 retain된 Metal frame의 generation(u64를 u32로 truncate). host는 이 값이 그대로면
+    // metalFrame() ABI를 부르지 않고 draw를 건너뛸 수 있다(idle tick 비용 절감). u32 wrap은
+    // 사실상 발생하지 않고, 충돌해도 redraw 한 번 누락/추가일 뿐이라 무해하다.
+    metal_generation: u32 = 0,
 };
 
 const NormalizedConfig = struct {
@@ -327,6 +330,7 @@ pub const DevSession = struct {
         self.last_summary.resize_events = self.total_resize_events;
         self.last_summary.close_events = self.total_close_events;
         self.last_summary.ended = boolCode(self.ended_seen);
+        self.last_summary.metal_generation = @truncate(self.metal_buffer.generation);
         if (self.surface_initialized) {
             self.last_summary.surface_id = self.surfaces[0].id;
             self.last_summary.cols = self.surfaces[0].core.size.cols;

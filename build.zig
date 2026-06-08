@@ -245,7 +245,7 @@ pub fn build(b: *std.Build) void {
             macos_swift_target,
             "-import-objc-header",
         });
-        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/app_host_abi.h"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_host_swift_check_cmd.setCwd(b.path("."));
         macos_app_host_swift_check_step.dependOn(&macos_app_host_swift_check_cmd.step);
@@ -538,7 +538,7 @@ pub fn build(b: *std.Build) void {
             macos_swift_target,
             "-import-objc-header",
         });
-        macos_app_dev_compile.addFileArg(b.path("src/platform/macos/app_host_abi.h"));
+        macos_app_dev_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
         macos_app_dev_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_dev_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         macos_app_dev_compile.addArgs(&.{

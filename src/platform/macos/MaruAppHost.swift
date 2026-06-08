@@ -1,18 +1,56 @@
 import AppKit
 import Darwin
 import Foundation
+import Metal
+import QuartzCore
 
 @MainActor
-final class MaruPlaceholderView: NSView {
+final class MaruMetalTerminalView: NSView {
     weak var controller: MaruAppHostController?
 
     override var acceptsFirstResponder: Bool {
         return true
     }
 
+    // CAMetalLayer를 backing layer로 쓴다. Zig dev session이 만든 RenderFrame을 제품 Metal
+    // renderer가 이 layer의 drawable에 그린다.
+    override func makeBackingLayer() -> CALayer {
+        let metalLayer = CAMetalLayer()
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.device = MTLCreateSystemDefaultDevice()
+        metalLayer.framebufferOnly = true
+        metalLayer.isOpaque = true
+        return metalLayer
+    }
+
+    var metalLayer: CAMetalLayer? {
+        return layer as? CAMetalLayer
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
+        updateDrawableSize()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateDrawableSize()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        updateDrawableSize()
+    }
+
+    // drawableSize는 point가 아니라 backing pixel이어야 nextDrawable이 올바른 크기를 준다.
+    func updateDrawableSize() {
+        guard let metalLayer else { return }
+        let scale = window?.backingScaleFactor ?? layer?.contentsScale ?? 1.0
+        let width = max(1.0, bounds.width * scale)
+        let height = max(1.0, bounds.height * scale)
+        metalLayer.contentsScale = scale
+        metalLayer.drawableSize = CGSize(width: width, height: height)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -43,6 +81,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var devSessionStatus = MaruAppHostController.statusOK
     private var smokeMode = false
     private var exitCode: Int32 = 0
+    // 제품 Metal renderer(maru_metal_renderer.h). dev session의 metal-frame DTO를 창의
+    // CAMetalLayer에 그린다. generation이 바뀐 frame에서만 atlas 갱신/draw한다.
+    private var metalRenderer: OpaquePointer?
+    private var lastDrawnGeneration: UInt64 = 0
+    private var metalFramesDrawn = 0
+    // create 성공 여부를 영구 기록한다. metalRenderer는 shutdown에서 nil이 되므로 summary가
+    // 종료 후 쓰일 때 "생성됐었다"를 잃지 않게 별도 플래그로 둔다.
+    private var metalRendererCreated = false
 
     static func main() {
         let app = NSApplication.shared
@@ -78,6 +124,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(window.contentView)
         NSApp.activate(ignoringOtherApps: true)
+
+        // dev session의 첫 tick(startDevSession 안)이 바로 그릴 수 있도록 renderer를 먼저 만든다.
+        setupMetalRenderer()
 
         if !startDevSession(smokeMode: smokeMode) {
             writeSummary(visibleUI: true, abiReady: true, smokeDurationMs: smokeDuration)
@@ -156,13 +205,66 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         )
         window.title = "Maru"
 
-        let content = MaruPlaceholderView(frame: window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 960, height: 600))
+        let content = MaruMetalTerminalView(frame: window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 960, height: 600))
         content.controller = self
+        // wantsLayer를 켜면 NSView가 makeBackingLayer()로 만든 CAMetalLayer를 backing layer로 쓴다.
         content.wantsLayer = true
-        content.layer?.backgroundColor = NSColor(calibratedWhite: 0.04, alpha: 1.0).cgColor
         window.contentView = content
 
         return window
+    }
+
+    private var metalTerminalView: MaruMetalTerminalView? {
+        return window?.contentView as? MaruMetalTerminalView
+    }
+
+    private func setupMetalRenderer() {
+        guard let view = metalTerminalView, let metalLayer = view.metalLayer, let device = metalLayer.device else {
+            return
+        }
+        view.updateDrawableSize()
+        metalRenderer = maru_metal_renderer_create(device, metalLayer.pixelFormat)
+        metalRendererCreated = metalRenderer != nil
+    }
+
+    // dev session이 노출한 최신 Metal frame을 창의 CAMetalLayer에 그린다. generation이 바뀐
+    // frame(새 output/resize)에서만 atlas를 갱신하고 다시 그린다. idle tick은 마지막으로
+    // present한 frame을 그대로 둔다.
+    private func drawMetalFrame() {
+        guard let devSession, let renderer = metalRenderer,
+              let view = metalTerminalView, let metalLayer = view.metalLayer else {
+            return
+        }
+        var frame = MaruAppHostDevMetalFrame()
+        guard maru_macos_app_dev_session_metal_frame(devSession, &frame) == Self.statusOK else {
+            return
+        }
+        if frame.generation == lastDrawnGeneration {
+            return
+        }
+        // atlas slot은 누적된다. 같은 크기면 새 glyph delta만 올리고, 크기가 바뀌면 renderer가
+        // texture를 새로 만든다.
+        _ = maru_metal_renderer_set_atlas(
+            renderer,
+            frame.atlas_width_px,
+            frame.atlas_height_px,
+            frame.raster_uploads,
+            frame.raster_upload_count,
+            frame.raster_pixels,
+            frame.raster_pixel_count
+        )
+        let drew = maru_metal_renderer_draw(
+            renderer,
+            metalLayer,
+            UInt16(truncatingIfNeeded: frame.cols),
+            UInt16(truncatingIfNeeded: frame.rows),
+            frame.cells,
+            frame.cell_count
+        )
+        if drew {
+            lastDrawnGeneration = frame.generation
+            metalFramesDrawn += 1
+        }
     }
 
     private func startDevSession(smokeMode: Bool) -> Bool {
@@ -216,6 +318,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         devSessionStatus = status
         if status == Self.statusOK {
             latestFrameSummary = summary
+            drawMetalFrame()
             if summary.frame_loop_ticks <= 1 {
                 writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
             }
@@ -392,6 +495,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         maru_macos_app_dev_session_destroy(devSession)
         self.devSession = nil
+
+        if let renderer = metalRenderer {
+            maru_metal_renderer_destroy(renderer)
+            metalRenderer = nil
+        }
     }
 
     private func smokeDurationMs() -> UInt32? {
@@ -424,7 +532,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         abi_ready=\(abiReady)
         placeholder_window=true
         terminal_surface=\(terminalSurface)
-        terminal_surface_note=zig_runtime_attached_placeholder_view_no_metal_surface
+        terminal_surface_note=zig_runtime_rendered_to_swift_cametal_layer
+        metal_renderer_created=\(metalRendererCreated)
+        metal_frames_drawn=\(metalFramesDrawn)
         dev_session_status=\(devSessionStatus)
         frame_loop_ticks=\(latestFrameSummary.frame_loop_ticks)
         frame_loop_last_tick_index=\(latestFrameSummary.last_tick_index)

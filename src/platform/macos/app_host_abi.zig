@@ -6,7 +6,7 @@ const c = @cImport({
     @cInclude("app_host_abi.h");
 });
 
-pub const abi_version: u32 = 3;
+pub const abi_version: u32 = app_dev_session.abi_version;
 const allocator = std.heap.smp_allocator;
 const terminal = maru.terminal;
 
@@ -20,16 +20,14 @@ pub const Status = enum(c_int) {
     close_failed = 6,
     key_failed = 7,
     resize_failed = 8,
+    // tick이 PTY 세션 종료를 관측했다(shell exit/read_error). fault가 아니라 정상 종료
+    // 신호이므로 host는 frame loop를 멈추고 우아하게 내려간다.
+    session_ended = 9,
 };
 
-pub const EventKind = enum(u32) {
-    none = 0,
-    frame_tick = 1,
-    key_down = 2,
-    resize = 3,
-    close_requested = 4,
-    app_should_terminate = 5,
-};
+// EventKind는 app_dev_session.zig가 소유한다(FrameSummary.last_event_kind에 실린다).
+// 여기서는 ABI 표면으로 re-export만 한다.
+pub const EventKind = app_dev_session.EventKind;
 
 pub const KeyCode = enum(u32) {
     unknown = 0,
@@ -133,6 +131,9 @@ pub export fn maru_macos_app_dev_session_tick(
     const dev_session = session orelse return @intFromEnum(Status.null_out);
     const out = out_summary orelse return @intFromEnum(Status.null_out);
     out.* = dev_session.tick() catch return @intFromEnum(Status.tick_failed);
+    // PTY 세션이 종료되면 ok가 아니라 session_ended를 올려, host가 죽은 세션을 무한 tick하지
+    // 않고 frame loop를 멈춰 우아하게 내려가게 한다. ended는 latch라 이후 tick도 동일 신호다.
+    if (out.ended != 0) return @intFromEnum(Status.session_ended);
     return @intFromEnum(Status.ok);
 }
 
@@ -173,6 +174,10 @@ pub export fn maru_macos_app_dev_session_close(
 }
 
 pub export fn maru_macos_app_dev_session_destroy(session: ?*DevSession) void {
+    // 수명 계약: destroy는 단발성이다. null은 안전하게 무시하지만, 이미 해제된 handle은
+    // 감지할 수 없으므로(메모리가 freed) 같은 non-null handle로 두 번 호출하면 use-after-free /
+    // double-free다. caller(Swift host)는 destroy 직후 handle을 nil로 비워 재호출을 막아야
+    // 한다. 반복 호출이 안전한 idempotent 종료가 필요하면 close()를 쓴다.
     const dev_session = session orelse return;
     dev_session.deinit();
     allocator.destroy(dev_session);
@@ -227,7 +232,9 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusOk), @intFromEnum(Status.ok));
     try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusNullOut), @intFromEnum(Status.null_out));
     try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusInvalidConfig), @intFromEnum(Status.invalid_config));
+    try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusSessionEnded), @intFromEnum(Status.session_ended));
     try std.testing.expectEqual(@as(u32, c.MaruAppHostEventKeyDown), @intFromEnum(EventKind.key_down));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostEventAppShouldTerminate), @intFromEnum(EventKind.app_should_terminate));
     try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeArrowUp)), @intFromEnum(KeyCode.arrow_up));
     try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostDevCommandControlledSmoke)), @intFromEnum(DevCommandKind.controlled_smoke));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostCapabilities), @sizeOf(Capabilities));

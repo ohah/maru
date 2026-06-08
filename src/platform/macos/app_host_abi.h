@@ -6,8 +6,11 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 3u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 4u
 
+/* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
+   per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
+   fault와 다르게 처리해야 한다. */
 typedef enum MaruAppHostStatus {
     MaruAppHostStatusOk = 0,
     MaruAppHostStatusNullOut = 1,
@@ -18,6 +21,9 @@ typedef enum MaruAppHostStatus {
     MaruAppHostStatusCloseFailed = 6,
     MaruAppHostStatusKeyFailed = 7,
     MaruAppHostStatusResizeFailed = 8,
+    /* tick이 PTY 세션 종료(shell exit/read_error)를 관측했다. fault가 아니라 정상 종료
+       신호이므로 host는 frame loop를 멈추고 우아하게 내려가야 한다. */
+    MaruAppHostStatusSessionEnded = 9,
 } MaruAppHostStatus;
 
 typedef enum MaruAppHostEventKind {
@@ -113,7 +119,9 @@ typedef struct MaruAppHostDevFrameSummary {
     uint32_t glyph_uv_ready;
     uint32_t glyph_raster_ready;
     uint32_t ended;
-    uint32_t reserved0;
+    /* 이 summary를 만든 lifecycle event(MaruAppHostEventKind). frame_tick / key_down /
+       resize / close_requested, 그리고 tick이 종료를 본 경우 app_should_terminate. */
+    uint32_t last_event_kind;
     uint32_t reserved1;
 } MaruAppHostDevFrameSummary;
 

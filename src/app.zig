@@ -1,6 +1,7 @@
 pub const headless_demo = @import("app/headless_demo.zig");
 pub const frame_loop = @import("app/frame_loop.zig");
 pub const host = @import("app/host.zig");
+pub const live_pty = @import("app/live_pty.zig");
 pub const pty_loop_smoke = @import("app/pty_loop_smoke.zig");
 pub const pty_smoke = @import("app/pty_smoke.zig");
 pub const pty_reader = @import("app/pty_reader.zig");
@@ -19,6 +20,7 @@ pub const AppFrameLoopTick = frame_loop.FrameLoopTick;
 pub const AppPtyLoopSmokeConfig = pty_loop_smoke.AppPtyLoopSmokeConfig;
 pub const AppPtyLoopSmokeResult = pty_loop_smoke.AppPtyLoopSmokeResult;
 pub const KeyHandlingResult = host.KeyHandlingResult;
+pub const LivePtySession = live_pty.LivePtySession;
 pub const AppPtySmokeConfig = pty_smoke.AppPtySmokeConfig;
 pub const AppPtySmokeResult = pty_smoke.AppPtySmokeResult;
 pub const AppSmokeConfig = host.AppSmokeConfig;

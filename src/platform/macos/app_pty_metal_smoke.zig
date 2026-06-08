@@ -167,12 +167,13 @@ fn buildLivePtyFixture(
         smoke_config.native_keydown_duration_ms,
     );
 
-    var session = try pty.PtySession.spawn(allocator, .{
+    var live_pty: app.LivePtySession = undefined;
+    try live_pty.init(io, allocator, 10, .{
         .command = smoke_config.command,
         .args = smoke_config.args,
         .size = smoke_config.size,
-    });
-    defer session.deinit();
+    }, 16);
+    defer live_pty.deinit();
 
     var surfaces = [_]app.Surface{try app.Surface.init(allocator, 1, smoke_config.size)};
     defer surfaces[0].deinit();
@@ -183,17 +184,9 @@ fn buildLivePtyFixture(
 
     var runtime = app.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
-    _ = try runtime.attach(&surfaces[0], 10, app.PtyIo.fromSession(&session));
+    _ = try live_pty.attachSurface(&runtime, &surfaces[0]);
 
-    var queue = try app.PtyEventQueue.init(io, allocator, 16);
-    defer queue.deinit();
-
-    var reader = app.PtyReader.init(allocator, 10, &session, &queue);
-    try reader.start();
-    var reader_joined = false;
-    errdefer if (!reader_joined) reader.stopAndJoin();
-
-    var pump = app.RuntimeEventPump.init(allocator, &queue, &runtime);
+    var pump = live_pty.pump(&runtime);
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
     var frame_loop = app.AppFrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
@@ -209,7 +202,7 @@ fn buildLivePtyFixture(
         // 먼저 PTY output을 runtime에 적용해 ready marker를 관측한다. 입력을 process spawn
         // 직후 바로 쓰면 kernel line discipline echo가 command의 "ready"보다 먼저 화면에
         // 나타날 수 있어, 사람이 키를 누르는 흐름과 다르고 회귀 artifact도 흔들린다.
-        try drainUntilRawContains(&queue, &pump, &raw_bytes, allocator, &drain_summary, smoke_config.ready_marker);
+        try drainUntilRawContains(live_pty.eventQueue(), &pump, &raw_bytes, allocator, &drain_summary, smoke_config.ready_marker);
         // native bridge가 실제 keyDown: 메서드에서 만든 payload를 Zig terminal.KeyEvent로
         // 바꾼 뒤 app host에 넣는다. 이렇게 해야 macOS view가 키를 받는 증거와
         // Maru의 app-vs-terminal 정책이 같은 summary에서 이어진다.
@@ -237,11 +230,9 @@ fn buildLivePtyFixture(
         }
     }
 
-    try drainBlockingUntilTerminationWithRaw(&queue, &pump, &raw_bytes, allocator, &drain_summary);
+    try drainBlockingUntilTerminationWithRaw(live_pty.eventQueue(), &pump, &raw_bytes, allocator, &drain_summary);
 
-    reader.join();
-    reader_joined = true;
-    queue.close();
+    live_pty.finishAfterTermination();
 
     const active = app_window.active() orelse return error.NoActiveSurface;
     const screen = try active.core.dumpUtf8(allocator);

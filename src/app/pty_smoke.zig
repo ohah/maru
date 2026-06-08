@@ -4,6 +4,7 @@ const pty = @import("../pty.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal.zig");
 const host = @import("host.zig");
+const live_pty_mod = @import("live_pty.zig");
 const pty_reader = @import("pty_reader.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
@@ -44,12 +45,13 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, config: AppPtySmokeConfig) 
     // 이 smoke는 실제 UI 직전의 결합점이다. 실제 PTY process를 띄우고,
     // reader/queue/runtime/app host/renderer frame까지 통과시킨다. 창은 아직 띄우지
     // 않으므로 visible_ui=false로 남겨, "실행 가능한 app 경로"와 "보이는 앱"을 섞지 않는다.
-    var session = try pty.PtySession.spawn(allocator, .{
+    var live_pty: live_pty_mod.LivePtySession = undefined;
+    try live_pty.init(io, allocator, 10, .{
         .command = config.command,
         .args = config.args,
         .size = config.size,
-    });
-    defer session.deinit();
+    }, 16);
+    defer live_pty.deinit();
 
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, config.size)};
     defer surfaces[0].deinit();
@@ -60,24 +62,14 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, config: AppPtySmokeConfig) 
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
-    _ = try runtime.attach(&surfaces[0], 10, runtime_mod.PtyIo.fromSession(&session));
+    _ = try live_pty.attachSurface(&runtime, &surfaces[0]);
 
-    var queue = try pty_reader.PtyEventQueue.init(io, allocator, 16);
-    defer queue.deinit();
-
-    var reader = pty_reader.PtyReader.init(allocator, 10, &session, &queue);
-    try reader.start();
-    var reader_joined = false;
-    errdefer if (!reader_joined) reader.stopAndJoin();
-
-    var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
+    var pump = live_pty.pump(&runtime);
     var raw_bytes: std.ArrayList(u8) = .empty;
     errdefer raw_bytes.deinit(allocator);
-    const drain_summary = try drainBlockingUntilTerminationWithRaw(allocator, &queue, &pump, &raw_bytes);
+    const drain_summary = try drainBlockingUntilTerminationWithRaw(allocator, live_pty.eventQueue(), &pump, &raw_bytes);
 
-    reader.join();
-    reader_joined = true;
-    queue.close();
+    live_pty.finishAfterTermination();
 
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();

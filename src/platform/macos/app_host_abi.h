@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 5u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 6u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -123,7 +123,9 @@ typedef struct MaruAppHostDevFrameSummary {
     /* 이 summary를 만든 lifecycle event(MaruAppHostEventKind). frame_tick / key_down /
        resize / close_requested, 그리고 tick이 종료를 본 경우 app_should_terminate. */
     uint32_t last_event_kind;
-    uint32_t reserved1;
+    /* 현재 retain된 Metal frame의 generation(u32 truncate). host는 이 값이 그대로면
+       maru_macos_app_dev_session_metal_frame 호출을 건너뛰어 idle tick 비용을 줄일 수 있다. */
+    uint32_t metal_generation;
 } MaruAppHostDevFrameSummary;
 
 /* 가장 최근 tick의 RenderFrame을 Metal로 그리기 위한 DTO. cell 하나가 atlas slot 1개와 그

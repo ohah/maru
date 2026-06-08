@@ -93,6 +93,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var metalFramesDrawn = 0
     // surface(drawableSize/backing-scale) 변경 시 generation이 그대로여도 다시 그려야 한다.
     private var metalNeedsRedraw = false
+    // tick summary가 알려주는 metal generation(u32). 이 값이 그대로면 metalFrame() ABI 호출과
+    // draw를 idle tick에서 건너뛴다.
+    private var lastSeenMetalGeneration: UInt32 = 0
     // create 성공 여부를 영구 기록한다. metalRenderer는 shutdown에서 nil이 되므로 summary가
     // 종료 후 쓰일 때 "생성됐었다"를 잃지 않게 별도 플래그로 둔다.
     private var metalRendererCreated = false
@@ -342,7 +345,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         devSessionStatus = status
         if status == Self.statusOK {
             latestFrameSummary = summary
-            drawMetalFrame()
+            // metal frame이 바뀌었거나(generation) surface 재칠이 필요할 때만 그린다. idle tick은
+            // metalFrame() ABI 호출 자체를 건너뛴다(tick이 준 summary의 metal_generation으로 판단).
+            if summary.metal_generation != lastSeenMetalGeneration || metalNeedsRedraw {
+                lastSeenMetalGeneration = summary.metal_generation
+                drawMetalFrame()
+            }
             if summary.frame_loop_ticks <= 1 {
                 writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
             }

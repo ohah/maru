@@ -10,26 +10,10 @@ const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const metal_frame = @import("metal_frame.zig");
 
+// Metal DTO·view·owned 버퍼는 순수 모듈 metal_frame이 소유한다. ABI 표면으로 re-export만 한다.
 pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
-
-// Swift Metal view가 매 tick의 RenderFrame을 그릴 수 있도록 노출하는 ABI view다. 포인터는
-// dev session이 소유한 retained 배열을 가리키며, 다음 tick(재투영) 또는 close/destroy까지만
-// 유효하다. caller(Swift host)는 같은 main thread에서 tick 직후 동기적으로 소비한다.
-pub const MetalFrame = extern struct {
-    cols: u32 = 0,
-    rows: u32 = 0,
-    atlas_width_px: u32 = 0,
-    atlas_height_px: u32 = 0,
-    // 매 tick 증가. Swift는 이전 값과 비교해 새 frame인지 안다.
-    generation: u64 = 0,
-    cells: ?[*]const MetalCell = null,
-    cell_count: usize = 0,
-    raster_uploads: ?[*]const MetalRasterUpload = null,
-    raster_upload_count: usize = 0,
-    raster_pixels: ?[*]const u8 = null,
-    raster_pixel_count: usize = 0,
-};
+pub const MetalFrame = metal_frame.MetalFrame;
 
 pub const abi_version: u32 = 5;
 pub const default_queue_capacity: u32 = 16;
@@ -124,15 +108,10 @@ pub const DevSession = struct {
     total_close_events: u64 = 0,
     ended_seen: bool = false,
     last_summary: FrameSummary = .{},
-    // 매 tick의 RenderFrame을 Metal DTO로 투영해 retain한다. metalFrame()이 이 배열들을
-    // 가리키는 view를 돌려준다. 다음 tick에서 교체(해제 후 재할당)된다.
-    metal_cells: []MetalCell = &.{},
-    metal_uploads: []MetalRasterUpload = &.{},
-    metal_pixels: []u8 = &.{},
-    metal_size: terminal.Size = .{ .cols = 0, .rows = 0 },
-    metal_atlas_width_px: u32 = 0,
-    metal_atlas_height_px: u32 = 0,
-    metal_generation: u64 = 0,
+    // 가장 최근 RenderFrame의 Metal 투영을 retain하는 owned 버퍼. metalFrame()이 이걸 가리키는
+    // view를 돌려준다. metal_dirty가 true일 때만(첫 frame, 새 output, resize) 재투영한다.
+    metal_buffer: metal_frame.MetalFrameBuffer = .{},
+    metal_dirty: bool = true,
 
     pub fn init(
         self: *DevSession,
@@ -211,6 +190,8 @@ pub const DevSession = struct {
             return self.last_summary;
         }
         try self.frame_loop.resizeActiveSurface(size);
+        // grid가 reflow됐으므로 다음 tick이 Metal frame을 재투영하게 dirty로 표시한다.
+        self.metal_dirty = true;
         self.writeSummaryFromState();
         self.last_summary.last_event_kind = @intFromEnum(EventKind.resize);
         return self.last_summary;
@@ -235,16 +216,26 @@ pub const DevSession = struct {
         } else try self.frame_loop.tick(renderer.FakeFontBackend{});
         defer tick_result.deinit(self.allocator);
 
-        // RenderFrame이 deinit되기 전에 Metal DTO로 투영해 retain한다. 이렇게 해야 Swift
-        // Metal view가 tick 직후 metalFrame()으로 같은 frame을 그릴 수 있다.
-        try self.captureMetalFrame(tick_result.frame.render_frame);
-
+        // 생명주기 회계(이벤트 합산, 종료 reap)를 먼저 끝낸다. Metal 투영은 이 뒤에 둬야
+        // 투영 실패가 drained 이벤트나 finishAfterTermination(reader join/child reap)을
+        // 건너뛰게 만들지 않는다.
         self.total_output_events += tick_result.frame.drain_summary.output_events;
         self.total_exit_events += tick_result.frame.drain_summary.exit_events;
         if (tick_result.ended() and !self.termination_finished) {
             self.ended_seen = true;
             self.live_pty.finishAfterTermination();
             self.termination_finished = true;
+        }
+
+        // 새 output이 있을 때만 frame이 바뀐다(resize는 resize()가 dirty를 세운다). idle tick은
+        // 재투영하지 않아 generation이 그대로이고, 소비자는 재업로드를 건너뛸 수 있다.
+        if (tick_result.frame.drain_summary.output_events > 0) self.metal_dirty = true;
+        if (self.metal_dirty) {
+            // Metal view 데이터 투영 실패(OOM 등)는 터미널 코어 동작과 무관하다. 마지막
+            // frame을 유지하고 dirty를 남겨 다음 tick에 재시도한다(세션을 죽이지 않는다).
+            if (self.metal_buffer.replace(self.allocator, tick_result.frame.render_frame, self.renderer_state.atlas.config)) |_| {
+                self.metal_dirty = false;
+            } else |_| {}
         }
 
         self.writeSummaryFromTick(tick_result);
@@ -276,46 +267,12 @@ pub const DevSession = struct {
         return self.last_summary;
     }
 
-    fn captureMetalFrame(self: *DevSession, render_frame: renderer.RenderFrame) !void {
-        // 새 frame을 먼저 만들고(실패하면 이전 retained 배열을 유지), 성공하면 교체한다.
-        const cells = try metal_frame.buildNativeCellsFromGlyphQuads(self.allocator, render_frame.glyph_quad_frame);
-        errdefer self.allocator.free(cells);
-        const uploads = try metal_frame.buildNativeRasterUploads(self.allocator, render_frame.glyph_raster_frame);
-        errdefer self.allocator.free(uploads);
-        const pixels = try self.allocator.dupe(u8, render_frame.glyph_raster_frame.pixels);
-
-        self.allocator.free(self.metal_cells);
-        self.allocator.free(self.metal_uploads);
-        self.allocator.free(self.metal_pixels);
-        self.metal_cells = cells;
-        self.metal_uploads = uploads;
-        self.metal_pixels = pixels;
-        self.metal_size = render_frame.glyph_frame.size;
-        self.metal_atlas_width_px = self.renderer_state.atlas.config.atlas_width_px;
-        self.metal_atlas_height_px = self.renderer_state.atlas.config.atlas_height_px;
-        self.metal_generation += 1;
-    }
-
     pub fn metalFrame(self: *const DevSession) MetalFrame {
-        return .{
-            .cols = @intCast(self.metal_size.cols),
-            .rows = @intCast(self.metal_size.rows),
-            .atlas_width_px = self.metal_atlas_width_px,
-            .atlas_height_px = self.metal_atlas_height_px,
-            .generation = self.metal_generation,
-            .cells = if (self.metal_cells.len > 0) self.metal_cells.ptr else null,
-            .cell_count = self.metal_cells.len,
-            .raster_uploads = if (self.metal_uploads.len > 0) self.metal_uploads.ptr else null,
-            .raster_upload_count = self.metal_uploads.len,
-            .raster_pixels = if (self.metal_pixels.len > 0) self.metal_pixels.ptr else null,
-            .raster_pixel_count = self.metal_pixels.len,
-        };
+        return self.metal_buffer.view();
     }
 
     pub fn deinit(self: *DevSession) void {
-        self.allocator.free(self.metal_cells);
-        self.allocator.free(self.metal_uploads);
-        self.allocator.free(self.metal_pixels);
+        self.metal_buffer.deinit(self.allocator);
         if (self.live_initialized) {
             if (self.runtime_initialized) {
                 self.live_pty.closeAndDetach(&self.runtime);

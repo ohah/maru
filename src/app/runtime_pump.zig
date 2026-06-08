@@ -25,6 +25,34 @@ pub const Termination = union(enum) {
     read_error: []const u8,
 };
 
+/// Termination을 summary artifact 텍스트로 직렬화한다. headless demo와 모든 PTY smoke가
+/// 같은 형식(`none` / `exited(code=N)` / `signal=N` / `unknown=N` / `read_error(...)`)을
+/// 공유하도록 Termination 타입 옆에 둔다. 이전에는 각 smoke가 이 함수를 복사해, 새
+/// ExitStatus variant나 형식 변경 시 한 곳을 빠뜨리면 artifact가 조용히 갈라졌다.
+pub fn writeTermination(writer: *std.Io.Writer, termination: ?Termination) !void {
+    if (termination == null) {
+        try writer.writeAll("none");
+        return;
+    }
+
+    switch (termination.?) {
+        .exited => |status| {
+            try writer.writeAll("exited(");
+            try writeExitStatus(writer, status);
+            try writer.writeByte(')');
+        },
+        .read_error => |message| try writer.print("read_error({s})", .{message}),
+    }
+}
+
+pub fn writeExitStatus(writer: *std.Io.Writer, status: pty.ExitStatus) !void {
+    switch (status) {
+        .exited => |code| try writer.print("code={d}", .{code}),
+        .signaled => |signal| try writer.print("signal={d}", .{signal}),
+        .unknown => |raw| try writer.print("unknown={d}", .{raw}),
+    }
+}
+
 pub const DrainSummary = struct {
     output_events: usize = 0,
     exit_events: usize = 0,

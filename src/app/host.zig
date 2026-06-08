@@ -7,6 +7,7 @@ const live_pty_registry = @import("live_pty_registry.zig");
 const pty_reader = @import("pty_reader.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
+const artifact_io = @import("artifact_io.zig");
 const surface_mod = @import("surface.zig");
 const window_mod = @import("window.zig");
 
@@ -396,18 +397,8 @@ fn renderDrawList(allocator: std.mem.Allocator, draw_list: renderer.DrawList) ![
     return output.toOwnedSlice();
 }
 
-fn writeText(io: std.Io, path: []const u8, contents: []const u8) !void {
-    try std.Io.Dir.cwd().writeFile(io, .{
-        .sub_path = path,
-        .data = contents,
-        .flags = .{ .truncate = true },
-    });
-}
-
-fn ensureDir(io: std.Io, dir: []const u8) !void {
-    if (dir.len == 0) return;
-    try std.Io.Dir.cwd().createDirPath(io, dir);
-}
+const writeText = artifact_io.writeText;
+const ensureDir = artifact_io.ensureDir;
 
 const MemoryPty = struct {
     allocator: std.mem.Allocator,

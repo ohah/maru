@@ -1,3 +1,4 @@
+pub const artifact_io = @import("app/artifact_io.zig");
 pub const headless_demo = @import("app/headless_demo.zig");
 pub const frame_loop = @import("app/frame_loop.zig");
 pub const host = @import("app/host.zig");

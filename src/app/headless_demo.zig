@@ -5,6 +5,7 @@ const terminal = @import("../terminal.zig");
 const live_pty_mod = @import("live_pty.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
+const artifact_io = @import("artifact_io.zig");
 const surface_mod = @import("surface.zig");
 
 pub const default_artifact_dir = "zig-out/maru-demo";
@@ -138,55 +139,11 @@ fn renderSummary(
     return output.toOwnedSlice();
 }
 
-fn writeTermination(writer: *std.Io.Writer, termination: ?runtime_pump.Termination) !void {
-    if (termination == null) {
-        try writer.writeAll("none");
-        return;
-    }
-
-    switch (termination.?) {
-        .exited => |status| {
-            try writer.writeAll("exited(");
-            try writeExitStatus(writer, status);
-            try writer.writeByte(')');
-        },
-        .read_error => |message| try writer.print("read_error({s})", .{message}),
-    }
-}
-
-fn writeExitStatus(writer: *std.Io.Writer, status: pty.ExitStatus) !void {
-    switch (status) {
-        .exited => |code| try writer.print("code={d}", .{code}),
-        .signaled => |signal| try writer.print("signal={d}", .{signal}),
-        .unknown => |raw| try writer.print("unknown={d}", .{raw}),
-    }
-}
-
-fn writeText(io: std.Io, path: []const u8, contents: []const u8) !void {
-    // 부모 디렉터리는 writeArtifacts가 한 번 만든다. 여기서 파일마다 다시
-    // 만들지 않는다.
-    try std.Io.Dir.cwd().writeFile(io, .{
-        .sub_path = path,
-        .data = contents,
-        .flags = .{ .truncate = true },
-    });
-}
-
-fn writeTextWithFinalNewline(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    contents: []const u8,
-) !void {
-    const with_newline = try std.fmt.allocPrint(allocator, "{s}\n", .{contents});
-    defer allocator.free(with_newline);
-    try writeText(io, path, with_newline);
-}
-
-fn ensureDir(io: std.Io, dir: []const u8) !void {
-    if (dir.len == 0) return;
-    try std.Io.Dir.cwd().createDirPath(io, dir);
-}
+const writeTermination = runtime_pump.writeTermination;
+const writeExitStatus = runtime_pump.writeExitStatus;
+const writeText = artifact_io.writeText;
+const writeTextWithFinalNewline = artifact_io.writeTextWithFinalNewline;
+const ensureDir = artifact_io.ensureDir;
 
 test "headless demo summary records the runnable vertical slice" {
     const summary = try renderSummary(

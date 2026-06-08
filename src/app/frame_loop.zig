@@ -7,6 +7,7 @@ const live_pty_registry = @import("live_pty_registry.zig");
 const pty_reader = @import("pty_reader.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
+const artifact_io = @import("artifact_io.zig");
 const surface_mod = @import("surface.zig");
 const window_mod = @import("window.zig");
 
@@ -376,29 +377,9 @@ fn writeArtifacts(
     try writeTextWithFinalNewline(io, allocator, screen_path, artifacts.screen);
 }
 
-fn writeText(io: std.Io, path: []const u8, contents: []const u8) !void {
-    try std.Io.Dir.cwd().writeFile(io, .{
-        .sub_path = path,
-        .data = contents,
-        .flags = .{ .truncate = true },
-    });
-}
-
-fn writeTextWithFinalNewline(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    contents: []const u8,
-) !void {
-    const text = try std.fmt.allocPrint(allocator, "{s}\n", .{contents});
-    defer allocator.free(text);
-    try writeText(io, path, text);
-}
-
-fn ensureDir(io: std.Io, dir: []const u8) !void {
-    if (dir.len == 0) return;
-    try std.Io.Dir.cwd().createDirPath(io, dir);
-}
+const writeText = artifact_io.writeText;
+const writeTextWithFinalNewline = artifact_io.writeTextWithFinalNewline;
+const ensureDir = artifact_io.ensureDir;
 
 const MemoryPty = struct {
     allocator: std.mem.Allocator,

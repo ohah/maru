@@ -1,0 +1,312 @@
+const std = @import("std");
+const maru = @import("maru");
+
+const app = maru.app;
+const renderer = maru.renderer;
+const terminal = maru.terminal;
+
+pub const abi_version: u32 = 2;
+pub const default_queue_capacity: u32 = 16;
+
+pub const CommandKind = enum(u32) {
+    controlled_smoke = 0,
+    interactive_shell = 1,
+};
+
+pub const SessionConfig = extern struct {
+    abi_version: u32,
+    cols: u32,
+    rows: u32,
+    queue_capacity: u32,
+    command_kind: u32,
+    reserved: u32 = 0,
+};
+
+pub const FrameSummary = extern struct {
+    abi_version: u32 = abi_version,
+    terminal_surface: u32 = 0,
+    frame_loop_ticks: u64 = 0,
+    last_tick_index: u64 = 0,
+    output_events: u64 = 0,
+    exit_events: u64 = 0,
+    surface_id: u64 = 0,
+    glyph_count: u64 = 0,
+    draw_cells: u64 = 0,
+    atlas_entries: u64 = 0,
+    cols: u32 = 0,
+    rows: u32 = 0,
+    process_state: u32 = 0,
+    frame_prepared: u32 = 0,
+    frame_consistent: u32 = 0,
+    glyph_uv_ready: u32 = 0,
+    glyph_raster_ready: u32 = 0,
+    ended: u32 = 0,
+    reserved0: u32 = 0,
+    reserved1: u32 = 0,
+};
+
+const NormalizedConfig = struct {
+    size: terminal.Size,
+    queue_capacity: usize,
+    command_kind: CommandKind,
+};
+
+pub const DevSession = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    live_pty: app.LivePtySession = undefined,
+    surfaces: [1]app.Surface = undefined,
+    app_window: app.AppWindow = undefined,
+    runtime: app.SurfaceRuntime = undefined,
+    pump: app.RuntimeEventPump = undefined,
+    renderer_state: renderer.RendererState = undefined,
+    frame_loop: app.AppFrameLoop = undefined,
+    live_initialized: bool = false,
+    surface_initialized: bool = false,
+    runtime_initialized: bool = false,
+    renderer_initialized: bool = false,
+    termination_finished: bool = false,
+    total_output_events: u64 = 0,
+    total_exit_events: u64 = 0,
+    ended_seen: bool = false,
+    last_summary: FrameSummary = .{},
+
+    pub fn init(
+        self: *DevSession,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        raw_config: SessionConfig,
+    ) !void {
+        const config = try normalizeConfig(raw_config);
+
+        self.* = .{
+            .allocator = allocator,
+            .io = io,
+        };
+        errdefer self.deinit();
+
+        // Swift는 opaque handle만 보유하고, 이 구조체는 heap에 고정된다. LivePtySession의
+        // reader thread가 `&live_pty.reader`를 잡고 돌기 때문에, 이 값을 만든 뒤에는
+        // 절대 by-value로 이동하지 않는 것이 이번 ABI의 핵심 수명 계약이다.
+        try self.live_pty.init(io, allocator, 10, spawnRequest(config), config.queue_capacity);
+        self.live_initialized = true;
+
+        self.surfaces[0] = try app.Surface.init(allocator, 1, config.size);
+        self.surface_initialized = true;
+        self.surfaces[0].title = "Maru dev shell";
+        self.surfaces[0].command = commandName(config.command_kind);
+
+        self.app_window = .{ .tabs = self.surfaces[0..] };
+        self.runtime = app.SurfaceRuntime.init(allocator);
+        self.runtime_initialized = true;
+        _ = try self.live_pty.attachSurface(&self.runtime, &self.surfaces[0]);
+
+        self.pump = self.live_pty.pump(&self.runtime);
+        self.renderer_state = renderer.RendererState.init(allocator, .{});
+        self.renderer_initialized = true;
+        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.pump, &self.renderer_state);
+        self.writeSummaryFromState();
+    }
+
+    pub fn tick(self: *DevSession) !FrameSummary {
+        var tick_result = try self.frame_loop.tick(renderer.FakeFontBackend{});
+        defer tick_result.deinit(self.allocator);
+
+        self.total_output_events += tick_result.frame.drain_summary.output_events;
+        self.total_exit_events += tick_result.frame.drain_summary.exit_events;
+        if (tick_result.ended() and !self.termination_finished) {
+            self.ended_seen = true;
+            self.live_pty.finishAfterTermination();
+            self.termination_finished = true;
+        }
+
+        self.writeSummaryFromTick(tick_result);
+        return self.last_summary;
+    }
+
+    pub fn close(self: *DevSession) FrameSummary {
+        if (self.live_initialized and self.runtime_initialized) {
+            self.live_pty.closeAndDetach(&self.runtime);
+        } else if (self.live_initialized) {
+            self.live_pty.close();
+        }
+        if (self.surface_initialized) {
+            // App/window close는 더 이상 이 surface가 live input/output을 받을 수 없다는
+            // 뜻이다. exit event를 기다리지 않고 close가 child를 정리한 경우에도 summary가
+            // running으로 남으면 close lifecycle을 오해하므로 dev session summary에서는
+            // 종료 상태로 latch한다.
+            self.surfaces[0].process_state = .exited;
+            self.ended_seen = true;
+        }
+        self.writeSummaryFromState();
+        return self.last_summary;
+    }
+
+    pub fn deinit(self: *DevSession) void {
+        if (self.live_initialized) {
+            if (self.runtime_initialized) {
+                self.live_pty.closeAndDetach(&self.runtime);
+            }
+            self.live_pty.deinit();
+            self.live_initialized = false;
+        }
+        if (self.renderer_initialized) {
+            self.renderer_state.deinit();
+            self.renderer_initialized = false;
+        }
+        if (self.runtime_initialized) {
+            self.runtime.deinit();
+            self.runtime_initialized = false;
+        }
+        if (self.surface_initialized) {
+            self.surfaces[0].deinit();
+            self.surface_initialized = false;
+        }
+        self.* = undefined;
+    }
+
+    fn writeSummaryFromTick(self: *DevSession, tick_result: app.AppFrameLoopTick) void {
+        const stats = tick_result.render_stats;
+        self.last_summary = .{
+            .abi_version = abi_version,
+            .terminal_surface = 1,
+            .frame_loop_ticks = @intCast(self.frame_loop.frame_index),
+            .last_tick_index = @intCast(tick_result.index),
+            .output_events = self.total_output_events,
+            .exit_events = self.total_exit_events,
+            .surface_id = self.surfaces[0].id,
+            .glyph_count = @intCast(stats.glyph_count),
+            .draw_cells = @intCast(stats.draw_cells),
+            .atlas_entries = @intCast(stats.atlas_entries),
+            .cols = self.surfaces[0].core.size.cols,
+            .rows = self.surfaces[0].core.size.rows,
+            .process_state = processStateCode(self.surfaces[0].process_state),
+            .frame_prepared = boolCode(stats.prepared()),
+            .frame_consistent = boolCode(stats.consistent),
+            .glyph_uv_ready = boolCode(stats.glyph_uv_ready),
+            .glyph_raster_ready = boolCode(stats.glyph_raster_ready),
+            .ended = boolCode(self.ended_seen),
+        };
+    }
+
+    fn writeSummaryFromState(self: *DevSession) void {
+        self.last_summary.abi_version = abi_version;
+        self.last_summary.terminal_surface = boolCode(self.surface_initialized);
+        self.last_summary.frame_loop_ticks = if (self.renderer_initialized) @intCast(self.frame_loop.frame_index) else 0;
+        self.last_summary.output_events = self.total_output_events;
+        self.last_summary.exit_events = self.total_exit_events;
+        self.last_summary.ended = boolCode(self.ended_seen);
+        if (self.surface_initialized) {
+            self.last_summary.surface_id = self.surfaces[0].id;
+            self.last_summary.cols = self.surfaces[0].core.size.cols;
+            self.last_summary.rows = self.surfaces[0].core.size.rows;
+            self.last_summary.process_state = processStateCode(self.surfaces[0].process_state);
+        }
+    }
+};
+
+pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
+    if (config.abi_version != abi_version) return error.UnsupportedAbi;
+    if (config.cols == 0 or config.rows == 0) return error.InvalidConfig;
+    if (config.cols > std.math.maxInt(u16) or config.rows > std.math.maxInt(u16)) return error.InvalidConfig;
+
+    const command_kind: CommandKind = switch (config.command_kind) {
+        @intFromEnum(CommandKind.controlled_smoke) => .controlled_smoke,
+        @intFromEnum(CommandKind.interactive_shell) => .interactive_shell,
+        else => return error.InvalidConfig,
+    };
+
+    return .{
+        .size = .{ .cols = @intCast(config.cols), .rows = @intCast(config.rows) },
+        .queue_capacity = if (config.queue_capacity == 0) default_queue_capacity else config.queue_capacity,
+        .command_kind = command_kind,
+    };
+}
+
+fn spawnRequest(config: NormalizedConfig) maru.pty.SpawnRequest {
+    return switch (config.command_kind) {
+        .controlled_smoke => .{
+            .command = "/bin/sh",
+            .args = &.{
+                "-c",
+                "printf 'Maru app dev shell\\r\\n'; sleep 0.05; printf 'Maru app dev frame loop\\r\\n'",
+            },
+            .size = config.size,
+        },
+        .interactive_shell => .{
+            .command = interactiveShellPath(),
+            .args = &.{"-i"},
+            .size = config.size,
+        },
+    };
+}
+
+fn interactiveShellPath() []const u8 {
+    if (std.c.getenv("MARU_INTERACTIVE_SHELL")) |raw| {
+        const value = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
+        if (value.len > 0) return value;
+    }
+    if (std.c.getenv("SHELL")) |raw| {
+        const value = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
+        if (value.len > 0) return value;
+    }
+    return "/bin/sh";
+}
+
+fn commandName(kind: CommandKind) []const u8 {
+    return switch (kind) {
+        .controlled_smoke => "/bin/sh -c maru-app-dev-smoke",
+        .interactive_shell => interactiveShellPath(),
+    };
+}
+
+fn processStateCode(state: app.ProcessState) u32 {
+    return switch (state) {
+        .starting => 0,
+        .running => 1,
+        .exited => 2,
+    };
+}
+
+fn boolCode(value: bool) u32 {
+    return if (value) 1 else 0;
+}
+
+test "macOS app dev session config rejects unsafe fixed-width ABI input" {
+    // Swift가 넘긴 config는 Zig allocator나 slice를 포함하지 않는 fixed-width record다.
+    // 이 검증이 있어야 잘못된 window size나 오래된 ABI가 PTY spawn까지 내려가지 않는다.
+    try std.testing.expectError(error.UnsupportedAbi, normalizeConfig(.{
+        .abi_version = abi_version - 1,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    }));
+    try std.testing.expectError(error.InvalidConfig, normalizeConfig(.{
+        .abi_version = abi_version,
+        .cols = 0,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    }));
+    try std.testing.expectError(error.InvalidConfig, normalizeConfig(.{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = 999,
+    }));
+}
+
+test "macOS app dev session config defaults queue capacity without changing command intent" {
+    const normalized = try normalizeConfig(.{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 0,
+        .command_kind = @intFromEnum(CommandKind.interactive_shell),
+    });
+    try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 24 }, normalized.size);
+    try std.testing.expectEqual(@as(usize, default_queue_capacity), normalized.queue_capacity);
+    try std.testing.expectEqual(CommandKind.interactive_shell, normalized.command_kind);
+}

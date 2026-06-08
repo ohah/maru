@@ -460,6 +460,9 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+            },
         }),
     });
     macos_app_host_abi_tests.root_module.addIncludePath(b.path("src/platform/macos"));
@@ -473,6 +476,9 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+            },
         }),
     });
     macos_app_host_abi_lib.root_module.addIncludePath(b.path("src/platform/macos"));

@@ -372,14 +372,32 @@ pub const TerminalCore = struct {
         const next_cells = try self.allocator.alloc(types.Cell, cellCount(next_size));
         @memset(next_cells, .{});
 
+        // 보이는 내용을 보존한다. 이전에는 resize가 화면을 비워서, 창을 줄이면 셸이 SIGWINCH로
+        // 다시 그리기 전까지 빈 화면이 보였다. 아직 wrap을 추적하지 않으므로 reflow는 못 하고,
+        // 겹치는 좌상단 영역(min(old,new))을 그대로 복사한다. 셸은 SIGWINCH로 prompt를 다시
+        // 그려 정렬을 맞춘다.
+        const copy_rows = @min(self.size.rows, rows);
+        const copy_cols = @min(self.size.cols, cols);
+        var row: u16 = 0;
+        while (row < copy_rows) : (row += 1) {
+            const old_start = @as(usize, row) * self.size.cols;
+            const new_start = @as(usize, row) * cols;
+            @memcpy(
+                next_cells[new_start..][0..copy_cols],
+                self.cells[old_start..][0..copy_cols],
+            );
+        }
+
         self.allocator.free(self.cells);
         self.size = .{ .cols = cols, .rows = rows };
         self.cells = next_cells;
-        self.cursor = .{};
+        // 커서를 0으로 리셋하지 않고 새 크기 안으로 clamp해, 보존한 내용 위에서 커서가 튀지
+        // 않게 한다.
+        self.cursor.row = if (rows == 0) 0 else @min(self.cursor.row, rows - 1);
+        self.cursor.col = if (cols == 0) 0 else @min(self.cursor.col, cols - 1);
         self.dirty = fullDirty(next_size);
-        // The new buffer invalidates any remembered print position, and a
-        // partial UTF-8 tail captured against the old grid must not leak into
-        // the first write after a resize.
+        // A partial UTF-8 tail captured against the old grid must not leak into
+        // the first write after a resize, and last_print referenced old coords.
         self.last_print = null;
         self.utf8_tail_len = 0;
         // resize 경계에서 끊긴 escape sequence가 새 grid로 새지 않게 파서를 ground로 되돌린다.
@@ -1063,4 +1081,54 @@ test "private CSI sequences are consumed without printing" {
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("hi    ", dump);
+}
+
+test "resize preserves overlapping content when growing" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("hello");
+    try core.resize(8, 1);
+
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("hello   ", dump);
+}
+
+test "resize keeps the visible region when shrinking instead of blanking" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("hello");
+    try core.resize(3, 1);
+
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("hel", dump);
+}
+
+test "resize preserves content across multiple rows" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 3, .rows = 2 });
+    defer core.deinit();
+
+    try core.write("ab");
+    try core.write("\x1b[2;1Hcd");
+    try core.resize(4, 3);
+
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("ab  \ncd  \n    ", dump);
+}
+
+test "resize clamps the cursor into the new bounds instead of resetting it" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 3 });
+    defer core.deinit();
+
+    try core.write("\x1b[3;5H");
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 4), core.cursor.col);
+
+    try core.resize(2, 2);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
 }

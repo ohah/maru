@@ -720,29 +720,8 @@ fn smokeScenarioFromEnvValue(raw: []const u8) SmokeScenario {
     return .controlled;
 }
 
-fn writeTermination(writer: *std.Io.Writer, termination: ?app.RuntimePumpTermination) !void {
-    if (termination == null) {
-        try writer.writeAll("none");
-        return;
-    }
-
-    switch (termination.?) {
-        .exited => |status| {
-            try writer.writeAll("exited(");
-            try writeExitStatus(writer, status);
-            try writer.writeByte(')');
-        },
-        .read_error => |message| try writer.print("read_error({s})", .{message}),
-    }
-}
-
-fn writeExitStatus(writer: *std.Io.Writer, status: pty.ExitStatus) !void {
-    switch (status) {
-        .exited => |code| try writer.print("code={d}", .{code}),
-        .signaled => |signal| try writer.print("signal={d}", .{signal}),
-        .unknown => |raw| try writer.print("unknown={d}", .{raw}),
-    }
-}
+const writeTermination = app.runtime_pump.writeTermination;
+const writeExitStatus = app.runtime_pump.writeExitStatus;
 
 const ArtifactInput = struct {
     summary: []const u8,
@@ -770,13 +749,7 @@ fn writeArtifacts(io: std.Io, allocator: std.mem.Allocator, artifact_dir: []cons
     try writeText(io, snapshot_path, artifacts.snapshot);
 }
 
-fn writeText(io: std.Io, path: []const u8, contents: []const u8) !void {
-    try std.Io.Dir.cwd().writeFile(io, .{
-        .sub_path = path,
-        .data = contents,
-        .flags = .{ .truncate = true },
-    });
-}
+const writeText = app.artifact_io.writeText;
 
 fn resetArtifacts(io: std.Io, artifact_dir: []const u8, screenshot_path: []const u8) !void {
     try std.Io.Dir.cwd().createDirPath(io, artifact_dir);

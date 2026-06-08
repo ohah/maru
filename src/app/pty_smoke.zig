@@ -8,6 +8,7 @@ const live_pty_mod = @import("live_pty.zig");
 const pty_reader = @import("pty_reader.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
+const artifact_io = @import("artifact_io.zig");
 const smoke_drain = @import("smoke_drain.zig");
 const surface_mod = @import("surface.zig");
 const window_mod = @import("window.zig");
@@ -256,53 +257,11 @@ fn renderFrameArtifact(
     return output.toOwnedSlice();
 }
 
-fn writeTermination(writer: *std.Io.Writer, termination: ?runtime_pump.Termination) !void {
-    if (termination == null) {
-        try writer.writeAll("none");
-        return;
-    }
-
-    switch (termination.?) {
-        .exited => |status| {
-            try writer.writeAll("exited(");
-            try writeExitStatus(writer, status);
-            try writer.writeByte(')');
-        },
-        .read_error => |message| try writer.print("read_error({s})", .{message}),
-    }
-}
-
-fn writeExitStatus(writer: *std.Io.Writer, status: pty.ExitStatus) !void {
-    switch (status) {
-        .exited => |code| try writer.print("code={d}", .{code}),
-        .signaled => |signal| try writer.print("signal={d}", .{signal}),
-        .unknown => |raw| try writer.print("unknown={d}", .{raw}),
-    }
-}
-
-fn writeText(io: std.Io, path: []const u8, contents: []const u8) !void {
-    try std.Io.Dir.cwd().writeFile(io, .{
-        .sub_path = path,
-        .data = contents,
-        .flags = .{ .truncate = true },
-    });
-}
-
-fn writeTextWithFinalNewline(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    contents: []const u8,
-) !void {
-    const with_newline = try std.fmt.allocPrint(allocator, "{s}\n", .{contents});
-    defer allocator.free(with_newline);
-    try writeText(io, path, with_newline);
-}
-
-fn ensureDir(io: std.Io, dir: []const u8) !void {
-    if (dir.len == 0) return;
-    try std.Io.Dir.cwd().createDirPath(io, dir);
-}
+const writeTermination = runtime_pump.writeTermination;
+const writeExitStatus = runtime_pump.writeExitStatus;
+const writeText = artifact_io.writeText;
+const writeTextWithFinalNewline = artifact_io.writeTextWithFinalNewline;
+const ensureDir = artifact_io.ensureDir;
 
 test "app PTY smoke summary records live PTY to renderer frame boundary" {
     const summary = try renderSummary(std.testing.allocator, .{

@@ -17,7 +17,7 @@ const default_duration_ms: u32 = 1500;
 const default_synthetic_keydown_duration_ms: u32 = 250;
 const default_manual_keydown_duration_ms: u32 = 15_000;
 const max_duration_ms: u32 = 600_000;
-const renderer_input_live_pty = "surface_runtime_live_pty_draw_list";
+const renderer_input_live_pty_frame_loop = "surface_runtime_live_pty_frame_loop_coretext_render_frame";
 const input_source_appkit_keydown_resolver = "appkit_keydown_to_app_host_keybinding_resolver";
 const native_key_event_source_appkit_synthetic = "appkit_synthetic_keydown";
 const native_key_event_source_appkit_manual = "appkit_manual_keydown";
@@ -137,6 +137,9 @@ const LivePtyMetalFixture = struct {
     scripted_key_event_sent: bool,
     scripted_key_event_result: []const u8,
     scripted_terminal_input_bytes_len: usize,
+    frame_loop_ticks: usize,
+    frame_loop_final_tick_index: usize,
+    frame_loop_final_ended: bool,
     command: []const u8,
     args_len: usize,
     size: terminal.Size,
@@ -190,6 +193,10 @@ fn buildLivePtyFixture(
     errdefer if (!reader_joined) reader.stopAndJoin();
 
     var pump = app.RuntimeEventPump.init(allocator, &queue, &runtime);
+    var renderer_state = renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
+    var frame_loop = app.AppFrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
+
     var raw_bytes: std.ArrayList(u8) = .empty;
     errdefer raw_bytes.deinit(allocator);
     var drain_summary: app.RuntimePumpDrainSummary = .{};
@@ -215,9 +222,7 @@ fn buildLivePtyFixture(
         try resolver.validate();
         const native_key_event = try keyEventFromNativeKeyDown(native_keydown);
         try ensureNativeKeyMatchesChord(native_key_event, scripted_chord);
-        const key_result = try app.handleKeyEvent(
-            &app_window,
-            &runtime,
+        const key_result = try frame_loop.handleKeyEvent(
             resolver,
             native_key_event,
         );
@@ -245,19 +250,23 @@ fn buildLivePtyFixture(
     const raw = try raw_bytes.toOwnedSlice(allocator);
     errdefer allocator.free(raw);
 
-    const draw_list = try renderer.buildDrawList(allocator, active.core.snapshot());
-    const metal_fixture = try metal_smoke.buildSmokeFixtureFromOwnedDrawList(
+    var final_tick = try frame_loop.tickAfterDrainWithFrameBuilder(drain_summary, CoreTextFrameBuilder{
+        .appearance = appearance,
+        .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+        .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+    });
+    defer final_tick.deinit(allocator);
+
+    const metal_fixture = try metal_smoke.buildSmokeFixtureFromRenderFrame(
         allocator,
-        appearance,
-        draw_list,
-        coretext_bridge.maru_macos_coretext_shape_draw_list,
-        coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
-        coretext_raster.CoreTextGlyphRasterizer.name,
+        final_tick.frame.render_frame,
+        renderer_state.atlas.config,
+        renderer_state.atlas.entryCount(),
         true,
-        renderer_input_live_pty,
+        renderer_input_live_pty_frame_loop,
+        coretext_shaper.CoreTextDrawListShaper.name,
+        coretext_raster.CoreTextGlyphRasterizer.name,
     );
-    // buildSmokeFixtureFromOwnedDrawList가 성공하면 RenderFrame이 DrawList ownership을 가져간다.
-    // 이후 이 scope에서 draw_list를 deinit하지 않는 것이 double-free를 막는 소유권 계약이다.
     errdefer {
         var fixture_for_cleanup = metal_fixture;
         fixture_for_cleanup.deinit(allocator);
@@ -276,11 +285,67 @@ fn buildLivePtyFixture(
         .scripted_key_event_sent = scripted_key_event_sent,
         .scripted_key_event_result = scripted_key_event_result,
         .scripted_terminal_input_bytes_len = scripted_terminal_input_bytes_len,
+        .frame_loop_ticks = frame_loop.frame_index,
+        .frame_loop_final_tick_index = final_tick.index,
+        .frame_loop_final_ended = final_tick.ended(),
         .command = smoke_config.command,
         .args_len = smoke_config.args.len,
         .size = smoke_config.size,
     };
 }
+
+const CoreTextFrameBuilder = struct {
+    appearance: config.ResolvedAppearance,
+    shape_draw_list: coretext_shaper.ShapeDrawListFn,
+    rasterize_glyph: coretext_raster.RasterizeGlyphFn,
+
+    pub fn build(
+        self: CoreTextFrameBuilder,
+        allocator: std.mem.Allocator,
+        app_window: *app.AppWindow,
+        renderer_state: *renderer.RendererState,
+        drain_summary: app.RuntimePumpDrainSummary,
+    ) !app.AppHostFrame {
+        // live PTY Metal smoke는 fake per-cell shaper가 아니라 제품 후보 CoreText shaper를
+        // 쓴다. FrameLoop는 순서만 소유하고, 이 builder가 active surface snapshot을
+        // DrawList -> CoreText GlyphRunList -> RenderFrame으로 바꾼다.
+        const active = app_window.active() orelse return error.NoActiveSurface;
+        var draw_list = try renderer.buildDrawList(allocator, active.core.snapshot());
+        var draw_list_owned = true;
+        errdefer if (draw_list_owned) draw_list.deinit(allocator);
+
+        var font_registry = renderer.FontIdentityRegistry.init(allocator);
+        defer font_registry.deinit();
+
+        const shaper = coretext_shaper.CoreTextDrawListShaper{
+            .appearance = self.appearance,
+            .shape_draw_list = self.shape_draw_list,
+        };
+        var shaped = try shaper.shape(allocator, draw_list, &font_registry);
+        defer shaped.deinit(allocator);
+
+        const rasterizer = coretext_raster.CoreTextGlyphRasterizer{
+            .appearance = self.appearance,
+            .font_registry = &font_registry,
+            .rasterize_glyph = self.rasterize_glyph,
+        };
+        const render_frame = try renderer_state.buildFrameFromGlyphRunListWithRasterizer(
+            allocator,
+            draw_list,
+            shaped.runs,
+            rasterizer,
+        );
+        draw_list_owned = false;
+
+        return .{
+            .surface_id = active.id,
+            .size = active.core.size,
+            .process_state = active.process_state,
+            .drain_summary = drain_summary,
+            .render_frame = render_frame,
+        };
+    }
+};
 
 fn drainBlockingUntilTerminationWithRaw(
     queue: *app.PtyEventQueue,
@@ -373,6 +438,9 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.print("scripted_key_event_sent={}\n", .{input.fixture.scripted_key_event_sent});
     try writer.print("scripted_key_event_result={s}\n", .{input.fixture.scripted_key_event_result});
     try writer.print("scripted_terminal_input_bytes={d}\n", .{input.fixture.scripted_terminal_input_bytes_len});
+    try writer.print("frame_loop_ticks={d}\n", .{input.fixture.frame_loop_ticks});
+    try writer.print("frame_loop_final_tick_index={d}\n", .{input.fixture.frame_loop_final_tick_index});
+    try writer.print("frame_loop_final_ended={}\n", .{input.fixture.frame_loop_final_ended});
     try writer.print("size.cols={d}\n", .{input.fixture.size.cols});
     try writer.print("size.rows={d}\n", .{input.fixture.size.rows});
     try writer.print("output_events={d}\n", .{input.fixture.drain_summary.output_events});
@@ -624,7 +692,7 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
             .replacement_count = 0,
             .atlas_entries = 3,
         },
-        .input = renderer_input_live_pty,
+        .input = renderer_input_live_pty_frame_loop,
         .rasterizer = coretext_raster.CoreTextGlyphRasterizer.name,
     };
     const fixture: LivePtyMetalFixture = .{
@@ -653,6 +721,9 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
         .scripted_key_event_sent = true,
         .scripted_key_event_result = "terminal_input",
         .scripted_terminal_input_bytes_len = "scripted input\n".len,
+        .frame_loop_ticks = 1,
+        .frame_loop_final_tick_index = 0,
+        .frame_loop_final_ended = true,
         .command = "/bin/sh",
         .args_len = 2,
         .size = .{ .cols = 40, .rows = 6 },
@@ -670,7 +741,7 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_grid=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "product_atlas_sampled=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "glyph_text=true\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=surface_runtime_live_pty_draw_list\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=surface_runtime_live_pty_frame_loop_coretext_render_frame\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_shaper=coretext_draw_list\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_rasterizer=coretext_glyph_rasterizer\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "input_source=appkit_keydown_to_app_host_keybinding_resolver\n") != null);
@@ -683,6 +754,9 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "scripted_key_event_sent=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "scripted_key_event_result=terminal_input\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "scripted_terminal_input_bytes=15\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "frame_loop_ticks=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "frame_loop_final_tick_index=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "frame_loop_final_ended=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "termination=exited(code=0)\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screen_contains_expected=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_path=zig-out/maru-macos-app-pty-metal-smoke/app-pty-metal-frame.ppm\n") != null);

@@ -477,7 +477,7 @@ pub fn build(b: *std.Build) void {
     const run_pty_tests = b.addRunArtifact(pty_tests);
     run_pty_tests.setCwd(b.path("."));
 
-    const pty_step = b.step("test-pty", "Run opt-in macOS PTY integration tests");
+    const pty_step = b.step("test-pty", "Run opt-in macOS PTY integration tests, including interactive shell smoke");
     pty_step.dependOn(&run_pty_tests.step);
 
     const oracle_tests = b.addTest(.{

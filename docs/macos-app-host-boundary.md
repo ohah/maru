@@ -20,21 +20,22 @@
 - placeholder window가 계속 떠 있다.
 - Swift는 opaque dev session handle만 보유하고, Zig가 shell surface, `LivePtySession`, `SurfaceRuntime`, `RuntimeEventPump`, `FrameLoop`, `RendererState`를 소유한다.
 - Swift timer가 Zig `maru_macos_app_dev_session_tick`을 반복 호출해 frame loop를 진행한다.
-- smoke 실행은 `zig-out/maru-macos-app-dev/app-dev.summary.txt`에 `visible_ui=true`, `swift_host=true`, `abi_ready=true`, `terminal_surface=true`, `frame_prepared=true`, `output_events>0`, `exit_events=1`을 남긴다.
+- placeholder view의 `keyDown`, window resize, window close가 fixed-width C ABI record를 통해 Zig dev session으로 내려간다.
+- smoke 실행은 `zig-out/maru-macos-app-dev/app-dev.summary.txt`에 `visible_ui=true`, `swift_host=true`, `abi_ready=true`, `terminal_surface=true`, `frame_prepared=true`, `output_events>0`, `exit_events=1`, `key_events=2`, `terminal_input_events=2`, `resize_events=1`, `close_events=1`을 남긴다.
 
 현재 dev shell PR에서 하지 않는 것:
 
 - Swift window 안에 Metal terminal view를 붙여 glyph를 그리는 일
-- Swift `keyDown:` payload의 Zig keybinding resolver 전달
-- window close의 `FrameLoop.closeActiveLivePty` 연결
+- 실제 renderer view의 font metrics로 resize cell 수를 계산하는 일
+- 제품 tab/window close button UX
 
 다음 Swift host 통합 PR은 다음만 목표로 한다.
 
 - Swift placeholder view를 실제 terminal Metal view 또는 제품 renderer host view로 교체한다.
-- Swift `keyDown:` payload는 C ABI record로 정규화된 뒤 Zig keybinding resolver로 들어간다.
-- window close는 Zig `FrameLoop.closeActiveLivePty`로 내려간다.
+- 실제 renderer view가 가진 font metrics로 resize cell 수를 계산한다.
+- 보이는 terminal glyph를 Swift window에서 확인한다.
 
-다음 shell 연결 PR에서 하지 않는 것:
+다음 visible renderer PR에서 하지 않는 것:
 
 - 탭/분할 UI
 - workspace restore
@@ -65,10 +66,10 @@
 - `mise run macos-app-host-abi-lib`: Swift host가 링크할 Zig exported C ABI static library를 만든다.
 - `mise run macos-app-host-swift-check`: Swift host가 C header를 import하고 AppKit 타입을 type-check할 수 있는지 확인한다.
 - `mise run macos-app-dev-build`: Swift host executable을 만들고 Zig static ABI library를 링크한다.
-- `mise run macos-app-dev-smoke`: 실제 `NSApplication` placeholder window를 잠깐 띄우고 controlled PTY command가 Zig dev session의 `FrameLoop`까지 도달했는지 summary에 `terminal_surface=true`, `frame_loop_ticks`, `output_events`, `exit_events`, renderer frame 통계로 남긴다.
+- `mise run macos-app-dev-smoke`: 실제 `NSApplication` placeholder window를 잠깐 띄우고 controlled PTY command, scripted key events, scripted resize, app close가 Zig dev session의 `FrameLoop`까지 도달했는지 summary에 `terminal_surface=true`, `frame_loop_ticks`, `output_events`, `exit_events`, `key_events`, `terminal_input_events`, `resize_events`, `close_events`, renderer frame 통계로 남긴다.
 - `mise run macos-app-dev`: 같은 executable을 smoke timeout 없이 실행해 사용자가 window lifecycle을 수동 확인한다. 이때 Zig session은 interactive shell을 띄우지만 아직 Swift window에 terminal glyph를 그리지는 않는다.
 - 기존 `mise run macos-app-pty-metal-smoke`: Objective-C smoke bridge가 PTY/output/keyDown/close/render 경계를 계속 검증한다.
 
 ## 남은 한계
 
-현재 dev shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하지만, Swift window 안에 Metal terminal view를 붙이지 않는다. 따라서 `NSApplication` 실행, window lifecycle, Swift/Zig ABI 링크, Zig-owned shell surface/tick 실패는 볼 수 있지만, 지속 사용자 입력, resize-to-frame, close button-to-PTY cleanup, glyph draw는 아직 Objective-C smoke와 headless smoke가 검증한다. 다음 PR부터 Swift host의 key/resize/close event를 같은 opaque session ABI로 내려보내고, 그 다음 visible renderer view를 붙인다.
+현재 dev shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, placeholder view의 key/resize/close event도 Zig dev session ABI로 내려보낸다. 하지만 Swift window 안에 Metal terminal view를 붙이지 않는다. 따라서 `NSApplication` 실행, window lifecycle, Swift/Zig ABI 링크, Zig-owned shell surface/tick, key/resize/close ABI 실패는 볼 수 있지만, 보이는 glyph draw와 실제 font metrics 기반 resize는 아직 Objective-C smoke와 headless smoke가 검증한다. 다음 PR부터 visible renderer view를 붙인다.

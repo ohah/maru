@@ -110,6 +110,12 @@ TDD 방식:
 - 완전한 VT parser가 아니라, 초기 shell smoke에 필요한 최소 terminal core 동작만 TDD로 추가한다.
 - CR/LF, printable text, resize, cursor 위치 같은 기본기를 먼저 안정화한다.
 
+진행 상태:
+
+- CR/LF/Tab/backspace, printable text -> cell은 초기부터 동작한다.
+- `TerminalCore.write`에 VT escape 상태기계(ground/escape/CSI/OSC)를 붙였다(완료). 실제 shell prompt가 내보내는 escape를 글자로 찍지 않고 해석한다: SGR(`m` — bold/italic/underline, 16색·256색·rgb 전경/배경, reset)을 pen으로 적용하고, cursor 이동/위치(CUU/CUD/CUF/CUB, CUP, CHA, VPA), erase(EL `K`, ED `J`)를 처리하며, OSC(title 등)와 private(`CSI ? ...`) 시퀀스는 소비만 한다. 시퀀스가 PTY read 경계로 쪼개져도 파서 상태가 write() 호출 사이에 유지된다.
+- 아직: SGR가 정한 cell 색은 cell.style에만 담기고 Metal renderer가 화면 색으로 적용하는 것은 별도(renderer 단계). reverse(`7`/`27`)는 Style에 필드가 없어 소비만 한다. scroll region/insert/delete line, 탭스톱 설정 등 나머지 CSI는 소비만 한다.
+
 TDD 방식:
 
 - ANSI fixture -> `TerminalCore.write` -> screen golden.

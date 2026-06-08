@@ -22,6 +22,7 @@ const renderer_input_live_pty_frame_loop = "surface_runtime_live_pty_frame_loop_
 const input_source_appkit_keydown_resolver = "appkit_keydown_to_app_host_keybinding_resolver";
 const native_key_event_source_appkit_synthetic = "appkit_synthetic_keydown";
 const native_key_event_source_appkit_manual = "appkit_manual_keydown";
+const close_lifecycle_live_pty_close_and_detach = "live_pty_close_and_detach_after_visible_frame";
 
 extern fn maru_macos_keydown_smoke_run(duration_ms: u32, result: *NativeKeyDownSmokeResult) void;
 extern fn maru_macos_manual_keydown_smoke_run(duration_ms: u32, result: *NativeKeyDownSmokeResult) void;
@@ -119,6 +120,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout.flush();
 
     if (!fixture.screen_contains_expected or
+        !fixture.close_lifecycle.passed() or
         !smoke_status.terminal_grid or
         !smoke_status.product_atlas_uploaded or
         !smoke_status.product_atlas_sampled or
@@ -141,6 +143,7 @@ const LivePtyMetalFixture = struct {
     frame_loop_ticks: usize,
     frame_loop_final_tick_index: usize,
     frame_loop_final_ended: bool,
+    close_lifecycle: CloseLifecycleProbe,
     command: []const u8,
     args_len: usize,
     size: terminal.Size,
@@ -151,6 +154,22 @@ const LivePtyMetalFixture = struct {
         allocator.free(self.screen);
         allocator.free(self.snapshot);
         self.* = undefined;
+    }
+};
+
+const CloseLifecycleProbe = struct {
+    surface_detached: bool,
+    late_output_rejected: bool,
+    input_rejected: bool,
+    queue_closed: bool,
+    idempotent: bool,
+
+    fn passed(self: CloseLifecycleProbe) bool {
+        return self.surface_detached and
+            self.late_output_rejected and
+            self.input_rejected and
+            self.queue_closed and
+            self.idempotent;
     }
 };
 
@@ -263,6 +282,7 @@ fn buildLivePtyFixture(
         var fixture_for_cleanup = metal_fixture;
         fixture_for_cleanup.deinit(allocator);
     }
+    const close_lifecycle = verifyCloseLifecycle(&live_pty, &runtime, active.id, live_pty.pty_id);
 
     return .{
         .metal = metal_fixture,
@@ -280,6 +300,7 @@ fn buildLivePtyFixture(
         .frame_loop_ticks = frame_loop.frame_index,
         .frame_loop_final_tick_index = final_tick.index,
         .frame_loop_final_ended = final_tick.ended(),
+        .close_lifecycle = close_lifecycle,
         .command = smoke_config.command,
         .args_len = smoke_config.args.len,
         .size = smoke_config.size,
@@ -304,6 +325,35 @@ fn drainBlockingUntilTerminationWithRaw(
         summary.recordPumpedEvent(pumped);
         if (summary.ended != null) return;
     }
+}
+
+fn verifyCloseLifecycle(
+    live_pty: *app.LivePtySession,
+    runtime: *app.SurfaceRuntime,
+    surface_id: app.SurfaceId,
+    pty_id: app.PtyId,
+) CloseLifecycleProbe {
+    // 실제 AppKit close button은 아직 제품 host에 없지만, visible smoke가 마지막 frame을
+    // 만든 뒤 app-layer close primitive를 호출해 둔다. 다음 Swift/AppKit command는
+    // close 순서를 다시 만들지 않고 같은 API만 호출하면 된다.
+    live_pty.closeAndDetach(runtime);
+    const surface_detached = live_pty.link == null;
+    const input_rejected = if (runtime.writeInput(surface_id, .{ .bytes = "after close" })) false else |err| err == error.UnknownSurface;
+    const late_output_rejected = if (runtime.applyPtyEvent(.{
+        .output = .{ .pty_id = pty_id, .bytes = "late output after close" },
+    })) false else |err| err == error.UnknownPty;
+    const queue_closed = if (live_pty.eventQueue().tryPush(.{
+        .exited = .{ .pty_id = pty_id, .status = .{ .exited = 0 } },
+    })) false else |err| err == error.QueueClosed;
+
+    live_pty.closeAndDetach(runtime);
+    return .{
+        .surface_detached = surface_detached,
+        .late_output_rejected = late_output_rejected,
+        .input_rejected = input_rejected,
+        .queue_closed = queue_closed,
+        .idempotent = live_pty.link == null,
+    };
 }
 
 fn drainUntilRawContains(
@@ -380,6 +430,12 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.print("frame_loop_ticks={d}\n", .{input.fixture.frame_loop_ticks});
     try writer.print("frame_loop_final_tick_index={d}\n", .{input.fixture.frame_loop_final_tick_index});
     try writer.print("frame_loop_final_ended={}\n", .{input.fixture.frame_loop_final_ended});
+    try writer.print("close_lifecycle={s}\n", .{close_lifecycle_live_pty_close_and_detach});
+    try writer.print("close_surface_detached={}\n", .{input.fixture.close_lifecycle.surface_detached});
+    try writer.print("close_late_output_rejected={}\n", .{input.fixture.close_lifecycle.late_output_rejected});
+    try writer.print("close_input_rejected={}\n", .{input.fixture.close_lifecycle.input_rejected});
+    try writer.print("close_queue_closed={}\n", .{input.fixture.close_lifecycle.queue_closed});
+    try writer.print("close_idempotent={}\n", .{input.fixture.close_lifecycle.idempotent});
     try writer.print("size.cols={d}\n", .{input.fixture.size.cols});
     try writer.print("size.rows={d}\n", .{input.fixture.size.rows});
     try writer.print("output_events={d}\n", .{input.fixture.drain_summary.output_events});
@@ -663,6 +719,13 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
         .frame_loop_ticks = 1,
         .frame_loop_final_tick_index = 0,
         .frame_loop_final_ended = true,
+        .close_lifecycle = .{
+            .surface_detached = true,
+            .late_output_rejected = true,
+            .input_rejected = true,
+            .queue_closed = true,
+            .idempotent = true,
+        },
         .command = "/bin/sh",
         .args_len = 2,
         .size = .{ .cols = 40, .rows = 6 },
@@ -696,6 +759,12 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "frame_loop_ticks=1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "frame_loop_final_tick_index=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "frame_loop_final_ended=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "close_lifecycle=live_pty_close_and_detach_after_visible_frame\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "close_surface_detached=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "close_late_output_rejected=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "close_input_rejected=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "close_queue_closed=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "close_idempotent=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "termination=exited(code=0)\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screen_contains_expected=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_path=zig-out/maru-macos-app-pty-metal-smoke/app-pty-metal-frame.ppm\n") != null);

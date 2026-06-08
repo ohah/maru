@@ -1,12 +1,14 @@
 const std = @import("std");
+const maru = @import("maru");
 const app_dev_session = @import("app_dev_session.zig");
 
 const c = @cImport({
     @cInclude("app_host_abi.h");
 });
 
-pub const abi_version: u32 = 2;
+pub const abi_version: u32 = 3;
 const allocator = std.heap.smp_allocator;
+const terminal = maru.terminal;
 
 pub const Status = enum(c_int) {
     ok = 0,
@@ -16,6 +18,8 @@ pub const Status = enum(c_int) {
     create_failed = 4,
     tick_failed = 5,
     close_failed = 6,
+    key_failed = 7,
+    resize_failed = 8,
 };
 
 pub const EventKind = enum(u32) {
@@ -25,6 +29,18 @@ pub const EventKind = enum(u32) {
     resize = 3,
     close_requested = 4,
     app_should_terminate = 5,
+};
+
+pub const KeyCode = enum(u32) {
+    unknown = 0,
+    enter = 1,
+    escape = 2,
+    tab = 3,
+    backspace = 4,
+    arrow_up = 5,
+    arrow_down = 6,
+    arrow_left = 7,
+    arrow_right = 8,
 };
 
 pub const Capabilities = extern struct {
@@ -120,6 +136,32 @@ pub export fn maru_macos_app_dev_session_tick(
     return @intFromEnum(Status.ok);
 }
 
+pub export fn maru_macos_app_dev_session_key_down(
+    session: ?*DevSession,
+    event: ?*const KeyEvent,
+    out_summary: ?*DevFrameSummary,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const raw_event = (event orelse return @intFromEnum(Status.null_out)).*;
+    const out = out_summary orelse return @intFromEnum(Status.null_out);
+    const key_event = keyEventFromAbi(raw_event) catch return @intFromEnum(Status.invalid_config);
+    out.* = dev_session.handleKeyEvent(key_event) catch return @intFromEnum(Status.key_failed);
+    return @intFromEnum(Status.ok);
+}
+
+pub export fn maru_macos_app_dev_session_resize(
+    session: ?*DevSession,
+    event: ?*const ResizeEvent,
+    out_summary: ?*DevFrameSummary,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const raw_event = (event orelse return @intFromEnum(Status.null_out)).*;
+    const out = out_summary orelse return @intFromEnum(Status.null_out);
+    const size = sizeFromAbi(raw_event) catch return @intFromEnum(Status.invalid_config);
+    out.* = dev_session.resize(size) catch return @intFromEnum(Status.resize_failed);
+    return @intFromEnum(Status.ok);
+}
+
 pub export fn maru_macos_app_dev_session_close(
     session: ?*DevSession,
     out_summary: ?*DevFrameSummary,
@@ -136,6 +178,48 @@ pub export fn maru_macos_app_dev_session_destroy(session: ?*DevSession) void {
     allocator.destroy(dev_session);
 }
 
+fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
+    const key: terminal.Key = if (event.codepoint != 0) blk: {
+        const codepoint = std.math.cast(u21, event.codepoint) orelse return error.InvalidConfig;
+        // AppKit 문자열은 surrogate pair를 만들 수 있다. 반쪽 surrogate가 Zig UTF-8 encoder까지
+        // 내려가면 원인 파악이 어려우므로 ABI 경계에서 바로 거부한다.
+        if (codepoint >= 0xd800 and codepoint <= 0xdfff) return error.InvalidConfig;
+        break :blk .{ .char = codepoint };
+    } else switch (event.key_code) {
+        @intFromEnum(KeyCode.unknown) => return error.InvalidConfig,
+        @intFromEnum(KeyCode.enter) => .enter,
+        @intFromEnum(KeyCode.escape) => .escape,
+        @intFromEnum(KeyCode.tab) => .tab,
+        @intFromEnum(KeyCode.backspace) => .backspace,
+        @intFromEnum(KeyCode.arrow_up) => .arrow_up,
+        @intFromEnum(KeyCode.arrow_down) => .arrow_down,
+        @intFromEnum(KeyCode.arrow_left) => .arrow_left,
+        @intFromEnum(KeyCode.arrow_right) => .arrow_right,
+        else => return error.InvalidConfig,
+    };
+
+    return .{
+        .key = key,
+        .modifiers = .{
+            .shift = event.modifier_shift != 0,
+            .control = event.modifier_control != 0,
+            .option = event.modifier_option != 0,
+            .command = event.modifier_command != 0,
+        },
+    };
+}
+
+fn sizeFromAbi(event: ResizeEvent) !terminal.Size {
+    _ = event.width_px;
+    _ = event.height_px;
+    _ = event.scale_milli;
+    if (event.cols == 0 or event.rows == 0) return error.InvalidConfig;
+    if (event.cols > std.math.maxInt(u16) or event.rows > std.math.maxInt(u16)) {
+        return error.InvalidConfig;
+    }
+    return .{ .cols = @intCast(event.cols), .rows = @intCast(event.rows) };
+}
+
 test "macOS app host ABI header and Zig declarations stay aligned" {
     // Swift는 C header를 보고, Zig는 이 파일의 extern struct를 쓴다. 둘의 숫자와
     // layout이 갈라지면 다음 제품 앱 PR에서 런타임 버그가 되므로 컴파일 단계에서 막는다.
@@ -144,6 +228,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusNullOut), @intFromEnum(Status.null_out));
     try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusInvalidConfig), @intFromEnum(Status.invalid_config));
     try std.testing.expectEqual(@as(u32, c.MaruAppHostEventKeyDown), @intFromEnum(EventKind.key_down));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeArrowUp)), @intFromEnum(KeyCode.arrow_up));
     try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostDevCommandControlledSmoke)), @intFromEnum(DevCommandKind.controlled_smoke));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostCapabilities), @sizeOf(Capabilities));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostCapabilities), @alignOf(Capabilities));
@@ -176,8 +261,79 @@ test "macOS app host event DTOs are explicit fixed-width C ABI records" {
     try std.testing.expectEqual(@as(usize, 4), @alignOf(KeyEvent));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(ResizeEvent));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DevSessionConfig));
-    try std.testing.expectEqual(@as(usize, 112), @sizeOf(DevFrameSummary));
+    try std.testing.expectEqual(@as(usize, 168), @sizeOf(DevFrameSummary));
     try std.testing.expectEqual(@as(usize, 8), @alignOf(DevFrameSummary));
+}
+
+test "macOS app host ABI converts key and resize events before session dispatch" {
+    const char_event = try keyEventFromAbi(.{
+        .codepoint = 'b',
+        .key_code = @intFromEnum(KeyCode.unknown),
+        .modifier_control = 1,
+        .modifier_shift = 0,
+        .modifier_option = 0,
+        .modifier_command = 0,
+        .is_repeat = 0,
+        .reserved = 0,
+    });
+    try std.testing.expect(switch (char_event.key) {
+        .char => |codepoint| codepoint == 'b',
+        else => false,
+    });
+    try std.testing.expect(char_event.modifiers.control);
+
+    const arrow_event = try keyEventFromAbi(.{
+        .codepoint = 0,
+        .key_code = @intFromEnum(KeyCode.arrow_up),
+        .modifier_option = 1,
+        .modifier_shift = 0,
+        .modifier_control = 0,
+        .modifier_command = 0,
+        .is_repeat = 0,
+        .reserved = 0,
+    });
+    try std.testing.expect(switch (arrow_event.key) {
+        .arrow_up => true,
+        else => false,
+    });
+    try std.testing.expect(arrow_event.modifiers.option);
+
+    try std.testing.expectError(error.InvalidConfig, keyEventFromAbi(.{
+        .codepoint = 0xd800,
+        .key_code = @intFromEnum(KeyCode.unknown),
+        .modifier_shift = 0,
+        .modifier_control = 0,
+        .modifier_option = 0,
+        .modifier_command = 0,
+        .is_repeat = 0,
+        .reserved = 0,
+    }));
+    try std.testing.expectError(error.InvalidConfig, keyEventFromAbi(.{
+        .codepoint = 0,
+        .key_code = 999,
+        .modifier_shift = 0,
+        .modifier_control = 0,
+        .modifier_option = 0,
+        .modifier_command = 0,
+        .is_repeat = 0,
+        .reserved = 0,
+    }));
+    try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 30 }, try sizeFromAbi(.{
+        .width_px = 1200,
+        .height_px = 720,
+        .scale_milli = 2000,
+        .cols = 100,
+        .rows = 30,
+        .reserved = 0,
+    }));
+    try std.testing.expectError(error.InvalidConfig, sizeFromAbi(.{
+        .width_px = 0,
+        .height_px = 0,
+        .scale_milli = 0,
+        .cols = 0,
+        .rows = 30,
+        .reserved = 0,
+    }));
 }
 
 test "macOS app dev exported session API reports null outputs as ABI errors" {
@@ -195,6 +351,14 @@ test "macOS app dev exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(
         @as(c_int, @intFromEnum(Status.null_out)),
         maru_macos_app_dev_session_tick(null, null),
+    );
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(Status.null_out)),
+        maru_macos_app_dev_session_key_down(null, null, null),
+    );
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(Status.null_out)),
+        maru_macos_app_dev_session_resize(null, null, null),
     );
     try std.testing.expectEqual(
         @as(c_int, @intFromEnum(Status.null_out)),

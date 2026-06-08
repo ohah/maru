@@ -6,7 +6,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 2u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 3u
 
 typedef enum MaruAppHostStatus {
     MaruAppHostStatusOk = 0,
@@ -16,6 +16,8 @@ typedef enum MaruAppHostStatus {
     MaruAppHostStatusCreateFailed = 4,
     MaruAppHostStatusTickFailed = 5,
     MaruAppHostStatusCloseFailed = 6,
+    MaruAppHostStatusKeyFailed = 7,
+    MaruAppHostStatusResizeFailed = 8,
 } MaruAppHostStatus;
 
 typedef enum MaruAppHostEventKind {
@@ -26,6 +28,18 @@ typedef enum MaruAppHostEventKind {
     MaruAppHostEventCloseRequested = 4,
     MaruAppHostEventAppShouldTerminate = 5,
 } MaruAppHostEventKind;
+
+typedef enum MaruAppHostKeyCode {
+    MaruAppHostKeyCodeUnknown = 0,
+    MaruAppHostKeyCodeEnter = 1,
+    MaruAppHostKeyCodeEscape = 2,
+    MaruAppHostKeyCodeTab = 3,
+    MaruAppHostKeyCodeBackspace = 4,
+    MaruAppHostKeyCodeArrowUp = 5,
+    MaruAppHostKeyCodeArrowDown = 6,
+    MaruAppHostKeyCodeArrowLeft = 7,
+    MaruAppHostKeyCodeArrowRight = 8,
+} MaruAppHostKeyCode;
 
 typedef struct MaruAppHostCapabilities {
     uint32_t abi_version;
@@ -84,6 +98,13 @@ typedef struct MaruAppHostDevFrameSummary {
     uint64_t glyph_count;
     uint64_t draw_cells;
     uint64_t atlas_entries;
+    uint64_t key_events;
+    uint64_t terminal_input_events;
+    uint64_t terminal_input_bytes;
+    uint64_t app_key_events;
+    uint64_t ignored_key_events;
+    uint64_t resize_events;
+    uint64_t close_events;
     uint32_t cols;
     uint32_t rows;
     uint32_t process_state;
@@ -104,6 +125,16 @@ int32_t maru_macos_app_dev_session_create(
 );
 int32_t maru_macos_app_dev_session_tick(
     MaruAppHostDevSession *session,
+    MaruAppHostDevFrameSummary *out_summary
+);
+int32_t maru_macos_app_dev_session_key_down(
+    MaruAppHostDevSession *session,
+    const MaruAppHostKeyEvent *event,
+    MaruAppHostDevFrameSummary *out_summary
+);
+int32_t maru_macos_app_dev_session_resize(
+    MaruAppHostDevSession *session,
+    const MaruAppHostResizeEvent *event,
     MaruAppHostDevFrameSummary *out_summary
 );
 int32_t maru_macos_app_dev_session_close(

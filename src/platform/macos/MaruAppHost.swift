@@ -2,6 +2,24 @@ import AppKit
 import Darwin
 import Foundation
 
+@MainActor
+final class MaruPlaceholderView: NSView {
+    weak var controller: MaruAppHostController?
+
+    override var acceptsFirstResponder: Bool {
+        return true
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.makeFirstResponder(self)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        controller?.handleKeyDown(event)
+    }
+}
+
 @main
 @MainActor
 final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -10,6 +28,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private let artifactDirectory = "zig-out/maru-macos-app-dev"
     private let summaryPath = "zig-out/maru-macos-app-dev/app-dev.summary.txt"
+    private let placeholderCellWidthPx: CGFloat = 12
+    private let placeholderCellHeightPx: CGFloat = 24
     private var capabilities = MaruAppHostCapabilities()
     private var window: NSWindow?
     private var devSession: OpaquePointer?
@@ -51,6 +71,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window.delegate = self
         window.center()
         window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(window.contentView)
         NSApp.activate(ignoringOtherApps: true)
 
         if !startDevSession(smokeMode: smokeMode) {
@@ -60,6 +81,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
 
         startFrameLoopTicks()
+        if smokeMode {
+            sendSmokeDevEvents()
+        }
 
         if let smokeDuration {
             Timer.scheduledTimer(withTimeInterval: Double(smokeDuration) / 1000.0, repeats: false) { _ in
@@ -84,7 +108,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     func windowWillClose(_ notification: Notification) {
         _ = notification
+        shutdownDevSession()
+        writeSummary(visibleUI: true, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
         NSApp.terminate(nil)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        _ = notification
+        resizeDevSessionFromWindow()
     }
 
     private func validateZigBoundary() -> Bool {
@@ -116,7 +147,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         )
         window.title = "Maru"
 
-        let content = NSView(frame: window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 960, height: 600))
+        let content = MaruPlaceholderView(frame: window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 960, height: 600))
+        content.controller = self
         content.wantsLayer = true
         content.layer?.backgroundColor = NSColor(calibratedWhite: 0.04, alpha: 1.0).cgColor
         window.contentView = content
@@ -182,6 +214,150 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    func handleKeyDown(_ event: NSEvent) {
+        guard let keyEvent = normalizedKeyEvent(from: event) else {
+            return
+        }
+        sendKeyEvent(keyEvent)
+    }
+
+    private func sendSmokeDevEvents() {
+        // 자동 smoke는 물리 키보드나 사용자의 resize 동작을 기다릴 수 없다. 대신 같은 C ABI를
+        // 직접 호출해 key/resize event가 Zig dev session까지 내려가는 최소 E2E 신호를 남긴다.
+        resizeDevSession(cols: 100, rows: 30, widthPx: 1_200, heightPx: 720)
+        let keyEvent = MaruAppHostKeyEvent(
+            codepoint: UInt32(UnicodeScalar("a").value),
+            key_code: UInt32(MaruAppHostKeyCodeUnknown.rawValue),
+            modifier_shift: 0,
+            modifier_control: 0,
+            modifier_option: 0,
+            modifier_command: 0,
+            is_repeat: 0,
+            reserved: 0
+        )
+        sendKeyEvent(keyEvent)
+        let enterEvent = MaruAppHostKeyEvent(
+            codepoint: 0,
+            key_code: UInt32(MaruAppHostKeyCodeEnter.rawValue),
+            modifier_shift: 0,
+            modifier_control: 0,
+            modifier_option: 0,
+            modifier_command: 0,
+            is_repeat: 0,
+            reserved: 0
+        )
+        sendKeyEvent(enterEvent)
+    }
+
+    private func sendKeyEvent(_ event: MaruAppHostKeyEvent) {
+        guard let devSession else {
+            return
+        }
+
+        var keyEvent = event
+        var summary = MaruAppHostDevFrameSummary()
+        let status = maru_macos_app_dev_session_key_down(devSession, &keyEvent, &summary)
+        devSessionStatus = status
+        if status == Self.statusOK {
+            latestFrameSummary = summary
+        } else {
+            exitCode = 1
+            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func resizeDevSessionFromWindow() {
+        guard let window, let contentView = window.contentView else {
+            return
+        }
+
+        let bounds = contentView.bounds
+        // placeholder 단계에는 CoreText font metrics가 아직 Swift view에 없다. 그래서 실제 제품
+        // cell 계산이 아니라 dev smoke용 추정 cell size로 resize ABI 경로만 검증한다.
+        let cols = max(UInt32(1), clampedUInt32(floor(bounds.width / placeholderCellWidthPx)))
+        let rows = max(UInt32(1), clampedUInt32(floor(bounds.height / placeholderCellHeightPx)))
+        resizeDevSession(
+            cols: cols,
+            rows: rows,
+            widthPx: clampedUInt32(bounds.width),
+            heightPx: clampedUInt32(bounds.height)
+        )
+    }
+
+    private func resizeDevSession(cols: UInt32, rows: UInt32, widthPx: UInt32, heightPx: UInt32) {
+        guard let devSession else {
+            return
+        }
+
+        var event = MaruAppHostResizeEvent(
+            width_px: widthPx,
+            height_px: heightPx,
+            scale_milli: clampedUInt32((window?.backingScaleFactor ?? 1.0) * 1_000),
+            cols: cols,
+            rows: rows,
+            reserved: 0
+        )
+        var summary = MaruAppHostDevFrameSummary()
+        let status = maru_macos_app_dev_session_resize(devSession, &event, &summary)
+        devSessionStatus = status
+        if status == Self.statusOK {
+            latestFrameSummary = summary
+        } else {
+            exitCode = 1
+            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func normalizedKeyEvent(from event: NSEvent) -> MaruAppHostKeyEvent? {
+        var codepoint: UInt32 = 0
+        var keyCode = UInt32(MaruAppHostKeyCodeUnknown.rawValue)
+
+        switch event.keyCode {
+        case 36:
+            keyCode = UInt32(MaruAppHostKeyCodeEnter.rawValue)
+        case 53:
+            keyCode = UInt32(MaruAppHostKeyCodeEscape.rawValue)
+        case 48:
+            keyCode = UInt32(MaruAppHostKeyCodeTab.rawValue)
+        case 51:
+            keyCode = UInt32(MaruAppHostKeyCodeBackspace.rawValue)
+        case 126:
+            keyCode = UInt32(MaruAppHostKeyCodeArrowUp.rawValue)
+        case 125:
+            keyCode = UInt32(MaruAppHostKeyCodeArrowDown.rawValue)
+        case 123:
+            keyCode = UInt32(MaruAppHostKeyCodeArrowLeft.rawValue)
+        case 124:
+            keyCode = UInt32(MaruAppHostKeyCodeArrowRight.rawValue)
+        default:
+            guard let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first else {
+                return nil
+            }
+            codepoint = scalar.value
+        }
+
+        let flags = event.modifierFlags
+        return MaruAppHostKeyEvent(
+            codepoint: codepoint,
+            key_code: keyCode,
+            modifier_shift: flags.contains(.shift) ? 1 : 0,
+            modifier_control: flags.contains(.control) ? 1 : 0,
+            modifier_option: flags.contains(.option) ? 1 : 0,
+            modifier_command: flags.contains(.command) ? 1 : 0,
+            is_repeat: event.isARepeat ? 1 : 0,
+            reserved: 0
+        )
+    }
+
+    private func clampedUInt32(_ value: CGFloat) -> UInt32 {
+        if !value.isFinite || value <= 0 {
+            return 0
+        }
+        return UInt32(min(value, CGFloat(UInt32.max)))
+    }
+
     private func shutdownDevSession() {
         guard let devSession else {
             return
@@ -235,6 +411,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         frame_loop_last_tick_index=\(latestFrameSummary.last_tick_index)
         output_events=\(latestFrameSummary.output_events)
         exit_events=\(latestFrameSummary.exit_events)
+        key_events=\(latestFrameSummary.key_events)
+        terminal_input_events=\(latestFrameSummary.terminal_input_events)
+        terminal_input_bytes=\(latestFrameSummary.terminal_input_bytes)
+        app_key_events=\(latestFrameSummary.app_key_events)
+        ignored_key_events=\(latestFrameSummary.ignored_key_events)
+        resize_events=\(latestFrameSummary.resize_events)
+        close_events=\(latestFrameSummary.close_events)
         process_state=\(latestFrameSummary.process_state)
         frame_prepared=\(framePrepared)
         frame_consistent=\(frameConsistent)

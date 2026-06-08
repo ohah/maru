@@ -2,10 +2,11 @@ const std = @import("std");
 const maru = @import("maru");
 
 const app = maru.app;
+const config_mod = maru.config;
 const renderer = maru.renderer;
 const terminal = maru.terminal;
 
-pub const abi_version: u32 = 2;
+pub const abi_version: u32 = 3;
 pub const default_queue_capacity: u32 = 16;
 
 pub const CommandKind = enum(u32) {
@@ -33,6 +34,13 @@ pub const FrameSummary = extern struct {
     glyph_count: u64 = 0,
     draw_cells: u64 = 0,
     atlas_entries: u64 = 0,
+    key_events: u64 = 0,
+    terminal_input_events: u64 = 0,
+    terminal_input_bytes: u64 = 0,
+    app_key_events: u64 = 0,
+    ignored_key_events: u64 = 0,
+    resize_events: u64 = 0,
+    close_events: u64 = 0,
     cols: u32 = 0,
     rows: u32 = 0,
     process_state: u32 = 0,
@@ -68,6 +76,13 @@ pub const DevSession = struct {
     termination_finished: bool = false,
     total_output_events: u64 = 0,
     total_exit_events: u64 = 0,
+    total_key_events: u64 = 0,
+    total_terminal_input_events: u64 = 0,
+    total_terminal_input_bytes: u64 = 0,
+    total_app_key_events: u64 = 0,
+    total_ignored_key_events: u64 = 0,
+    total_resize_events: u64 = 0,
+    total_close_events: u64 = 0,
     ended_seen: bool = false,
     last_summary: FrameSummary = .{},
 
@@ -108,6 +123,32 @@ pub const DevSession = struct {
         self.writeSummaryFromState();
     }
 
+    pub fn handleKeyEvent(self: *DevSession, event: terminal.KeyEvent) !FrameSummary {
+        // Swift/AppKit는 normalized key event만 전달한다. app-vs-terminal 판정과 PTY
+        // write는 기존 FrameLoop 경계를 통과해야 smoke와 제품 app이 같은 shortcut 정책을 쓴다.
+        const result = try self.frame_loop.handleKeyEvent(config_mod.KeyBindingResolver{}, event);
+        self.total_key_events += 1;
+        switch (result) {
+            .terminal_input => |terminal_input| {
+                self.total_terminal_input_events += 1;
+                self.total_terminal_input_bytes += terminal_input.bytes_len;
+            },
+            .app_action => self.total_app_key_events += 1,
+            .ignored => self.total_ignored_key_events += 1,
+        }
+        self.writeSummaryFromState();
+        return self.last_summary;
+    }
+
+    pub fn resize(self: *DevSession, size: terminal.Size) !FrameSummary {
+        // resize는 terminal grid와 PTY winsize가 함께 바뀌어야 한다. FrameLoop API를
+        // 통해 SurfaceRuntime action으로 내려보내면 Swift가 두 책임을 다시 구현하지 않는다.
+        try self.frame_loop.resizeActiveSurface(size);
+        self.total_resize_events += 1;
+        self.writeSummaryFromState();
+        return self.last_summary;
+    }
+
     pub fn tick(self: *DevSession) !FrameSummary {
         var tick_result = try self.frame_loop.tick(renderer.FakeFontBackend{});
         defer tick_result.deinit(self.allocator);
@@ -125,6 +166,7 @@ pub const DevSession = struct {
     }
 
     pub fn close(self: *DevSession) FrameSummary {
+        self.total_close_events += 1;
         if (self.live_initialized and self.runtime_initialized) {
             self.live_pty.closeAndDetach(&self.runtime);
         } else if (self.live_initialized) {
@@ -178,6 +220,13 @@ pub const DevSession = struct {
             .glyph_count = @intCast(stats.glyph_count),
             .draw_cells = @intCast(stats.draw_cells),
             .atlas_entries = @intCast(stats.atlas_entries),
+            .key_events = self.total_key_events,
+            .terminal_input_events = self.total_terminal_input_events,
+            .terminal_input_bytes = self.total_terminal_input_bytes,
+            .app_key_events = self.total_app_key_events,
+            .ignored_key_events = self.total_ignored_key_events,
+            .resize_events = self.total_resize_events,
+            .close_events = self.total_close_events,
             .cols = self.surfaces[0].core.size.cols,
             .rows = self.surfaces[0].core.size.rows,
             .process_state = processStateCode(self.surfaces[0].process_state),
@@ -195,6 +244,13 @@ pub const DevSession = struct {
         self.last_summary.frame_loop_ticks = if (self.renderer_initialized) @intCast(self.frame_loop.frame_index) else 0;
         self.last_summary.output_events = self.total_output_events;
         self.last_summary.exit_events = self.total_exit_events;
+        self.last_summary.key_events = self.total_key_events;
+        self.last_summary.terminal_input_events = self.total_terminal_input_events;
+        self.last_summary.terminal_input_bytes = self.total_terminal_input_bytes;
+        self.last_summary.app_key_events = self.total_app_key_events;
+        self.last_summary.ignored_key_events = self.total_ignored_key_events;
+        self.last_summary.resize_events = self.total_resize_events;
+        self.last_summary.close_events = self.total_close_events;
         self.last_summary.ended = boolCode(self.ended_seen);
         if (self.surface_initialized) {
             self.last_summary.surface_id = self.surfaces[0].id;
@@ -229,7 +285,7 @@ fn spawnRequest(config: NormalizedConfig) maru.pty.SpawnRequest {
             .command = "/bin/sh",
             .args = &.{
                 "-c",
-                "printf 'Maru app dev shell\\r\\n'; sleep 0.05; printf 'Maru app dev frame loop\\r\\n'",
+                "printf 'Maru app dev shell\\r\\n'; IFS= read -r line; printf 'Maru app dev input:%s\\r\\n' \"$line\"; printf 'Maru app dev frame loop\\r\\n'",
             },
             .size = config.size,
         },

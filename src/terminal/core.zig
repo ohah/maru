@@ -18,6 +18,21 @@ pub const TerminalCore = struct {
     // column (no autowrap) and moves to a fresh row after a line feed. Reset
     // by anything that ends the current grapheme run (CR/LF/backspace/resize).
     last_print: ?struct { row: u16, col: u16 } = null,
+    // 현재 SGR 스타일(pen). printable cell을 쓸 때마다 stamp한다. CSI ... m 이 갱신한다.
+    pen: types.Style = .{},
+    // VT escape 파서 상태기계. ground 외 상태에서는 byte를 escape sequence로 소비한다.
+    parser: ParserState = .ground,
+    // CSI 파라미터 누적 버퍼. 대부분의 시퀀스는 파라미터가 적으므로 작은 고정 크기로 충분하고,
+    // 넘치면 무시한다(악성/비정상 입력 방어).
+    csi_params: [max_csi_params]u16 = [_]u16{0} ** max_csi_params,
+    csi_param_count: usize = 0,
+    csi_has_digit: bool = false,
+    csi_private: bool = false,
+    csi_overflow: bool = false,
+
+    pub const ParserState = enum { ground, escape, escape_intermediate, csi, osc, osc_escape };
+
+    const max_csi_params = 16;
 
     pub fn init(allocator: std.mem.Allocator, size: types.Size) !TerminalCore {
         const cells = try allocator.alloc(types.Cell, cellCount(size));
@@ -37,28 +52,319 @@ pub const TerminalCore = struct {
     }
 
     pub fn write(self: *TerminalCore, bytes: []const u8) !void {
-        // The first clean-room core step is intentionally small: convert real
-        // UTF-8 process output into cells. Escape-sequence parsing will sit on
-        // top of this path later, so E2E tests can start before the full VT
-        // state machine exists.
+        // Process output bytes through a small VT escape-sequence state machine
+        // (planned in implementation-plan.md: expand the parser only as the
+        // shell path needs). ground state still converts UTF-8 to cells; ESC
+        // switches into escape/CSI/OSC handling so shell prompt color/cursor
+        // sequences are interpreted instead of printed as literal text. State
+        // persists across write() calls, so sequences split across PTY reads
+        // are handled.
         var index_: usize = 0;
         while (index_ < bytes.len) {
-            if (self.utf8_tail_len != 0) {
-                index_ = try self.completePendingUtf8(bytes, index_);
-                continue;
-            }
+            switch (self.parser) {
+                .ground => {
+                    if (self.utf8_tail_len != 0) {
+                        index_ = try self.completePendingUtf8(bytes, index_);
+                        continue;
+                    }
+                    const byte = bytes[index_];
+                    if (byte == 0x1b) {
+                        self.parser = .escape;
+                        index_ += 1;
+                        continue;
+                    }
 
-            const sequence_len = utf8SequenceLength(bytes[index_]) catch return error.InvalidUtf8;
-            const end = index_ + sequence_len;
-            if (end > bytes.len) {
-                self.storePendingUtf8(bytes[index_..]);
-                return;
-            }
+                    const sequence_len = utf8SequenceLength(byte) catch return error.InvalidUtf8;
+                    const end = index_ + sequence_len;
+                    if (end > bytes.len) {
+                        self.storePendingUtf8(bytes[index_..]);
+                        return;
+                    }
 
-            const codepoint = decodeUtf8(bytes[index_..end]) catch return error.InvalidUtf8;
-            self.writeCodepoint(codepoint);
-            index_ = end;
+                    const codepoint = decodeUtf8(bytes[index_..end]) catch return error.InvalidUtf8;
+                    self.writeCodepoint(codepoint);
+                    index_ = end;
+                },
+                .escape => {
+                    self.handleEscapeByte(bytes[index_]);
+                    index_ += 1;
+                },
+                .escape_intermediate => {
+                    // ESC <intermediate> <final>: charset designators 등. final 1바이트를
+                    // 소비하고 ground로 돌아간다(A1은 적용하지 않고 소비만 한다).
+                    self.parser = .ground;
+                    index_ += 1;
+                },
+                .csi => {
+                    self.handleCsiByte(bytes[index_]);
+                    index_ += 1;
+                },
+                .osc => {
+                    const byte = bytes[index_];
+                    // OSC string은 BEL(0x07) 또는 ST(ESC \)로 끝난다. A1은 내용(title 등)을
+                    // 적용하지 않고 소비만 한다.
+                    if (byte == 0x07) {
+                        self.parser = .ground;
+                    } else if (byte == 0x1b) {
+                        self.parser = .osc_escape;
+                    }
+                    index_ += 1;
+                },
+                .osc_escape => {
+                    // OSC 안에서 ESC 다음 바이트. ST(ESC \)든 아니든 OSC를 끝낸다(관대 처리).
+                    self.parser = .ground;
+                    index_ += 1;
+                },
+            }
         }
+    }
+
+    fn handleEscapeByte(self: *TerminalCore, byte: u8) void {
+        switch (byte) {
+            '[' => {
+                self.beginCsi();
+                self.parser = .csi;
+            },
+            ']' => self.parser = .osc,
+            // ESC <intermediate>(0x20..0x2f) <final>: charset designation 등 2바이트 시퀀스.
+            0x20...0x2f => self.parser = .escape_intermediate,
+            // 그 밖의 ESC <final>(RIS, DECSC/DECRC, index 등)은 A1에서 소비만 한다.
+            else => self.parser = .ground,
+        }
+    }
+
+    fn beginCsi(self: *TerminalCore) void {
+        self.csi_params = [_]u16{0} ** max_csi_params;
+        // 항상 최소 1개의 (비어 있을 수도 있는) 파라미터가 있다고 본다.
+        self.csi_param_count = 1;
+        self.csi_has_digit = false;
+        self.csi_private = false;
+        self.csi_overflow = false;
+    }
+
+    fn handleCsiByte(self: *TerminalCore, byte: u8) void {
+        switch (byte) {
+            '0'...'9' => {
+                self.csi_has_digit = true;
+                const slot = self.csi_param_count - 1;
+                if (slot < max_csi_params) {
+                    const digit: u16 = byte - '0';
+                    const value = self.csi_params[slot];
+                    // saturating: 손상/악성 입력이 u16을 넘기지 않게 한다.
+                    self.csi_params[slot] = if (value > (std.math.maxInt(u16) - digit) / 10)
+                        std.math.maxInt(u16)
+                    else
+                        value * 10 + digit;
+                } else {
+                    self.csi_overflow = true;
+                }
+            },
+            ';', ':' => {
+                // ';'는 파라미터 구분자. ':'는 sub-parameter 구분자지만 A1은 동일하게 다음
+                // 파라미터로 취급한다(38;5;n 형태를 처리하기 위함).
+                if (self.csi_param_count >= max_csi_params) {
+                    self.csi_overflow = true;
+                } else {
+                    self.csi_param_count += 1;
+                }
+                self.csi_has_digit = false;
+            },
+            // private/marker bytes: < = > ? (예: CSI ? 25 h). A1은 private 시퀀스를 소비만 한다.
+            0x3c...0x3f => self.csi_private = true,
+            // intermediate bytes(공백~/)는 A1에서 무시한다.
+            0x20...0x2f => {},
+            // final byte: 시퀀스를 dispatch하고 ground로 돌아간다.
+            0x40...0x7e => {
+                self.dispatchCsi(byte);
+                self.parser = .ground;
+            },
+            // 그 밖(C0 control 등)은 CSI를 중단하고 소비한다(관대 처리).
+            else => self.parser = .ground,
+        }
+    }
+
+    /// i번째 CSI 파라미터를 raw로 돌려준다(없으면 0). erase mode처럼 0이 유효값인 곳에 쓴다.
+    fn csiRawParam(self: *const TerminalCore, i: usize) u16 {
+        const count = @min(self.csi_param_count, max_csi_params);
+        return if (i >= count) 0 else self.csi_params[i];
+    }
+
+    /// i번째 CSI 파라미터(없거나 0이면 default). cursor move처럼 0을 1로 보는 곳에 쓴다.
+    fn csiParam(self: *const TerminalCore, i: usize, default: u16) u16 {
+        const value = self.csiRawParam(i);
+        return if (value == 0) default else value;
+    }
+
+    fn dispatchCsi(self: *TerminalCore, final: u8) void {
+        // private 시퀀스(CSI ? ...: DECSET/DECRST 등)는 A1에서 적용하지 않고 소비만 한다.
+        if (self.csi_private) return;
+        switch (final) {
+            'm' => self.applySgr(),
+            'H', 'f' => self.cursorPosition(),
+            'A' => self.cursorVertical(self.csiParam(0, 1), true),
+            'B', 'e' => self.cursorVertical(self.csiParam(0, 1), false),
+            'C', 'a' => self.cursorHorizontal(self.csiParam(0, 1), true),
+            'D' => self.cursorHorizontal(self.csiParam(0, 1), false),
+            'G', '`' => self.cursorToColumn(self.csiParam(0, 1)),
+            'd' => self.cursorToRow(self.csiParam(0, 1)),
+            'J' => self.eraseInDisplay(self.csiRawParam(0)),
+            'K' => self.eraseInLine(self.csiRawParam(0)),
+            else => {},
+        }
+    }
+
+    fn applySgr(self: *TerminalCore) void {
+        const count = @min(self.csi_param_count, max_csi_params);
+        var i: usize = 0;
+        while (i < count) {
+            const p = self.csi_params[i];
+            switch (p) {
+                0 => self.pen = .{},
+                1 => self.pen.bold = true,
+                3 => self.pen.italic = true,
+                4 => self.pen.underline = true,
+                22 => self.pen.bold = false,
+                23 => self.pen.italic = false,
+                24 => self.pen.underline = false,
+                30...37 => self.pen.foreground = .{ .indexed = @intCast(p - 30) },
+                39 => self.pen.foreground = .default,
+                40...47 => self.pen.background = .{ .indexed = @intCast(p - 40) },
+                49 => self.pen.background = .default,
+                90...97 => self.pen.foreground = .{ .indexed = @intCast(p - 90 + 8) },
+                100...107 => self.pen.background = .{ .indexed = @intCast(p - 100 + 8) },
+                38 => {
+                    i = self.applyExtendedColor(i, true);
+                    continue;
+                },
+                48 => {
+                    i = self.applyExtendedColor(i, false);
+                    continue;
+                },
+                else => {},
+            }
+            i += 1;
+        }
+    }
+
+    /// 38/48 (확장 색)을 처리하고 다음으로 읽을 파라미터 인덱스를 돌려준다.
+    fn applyExtendedColor(self: *TerminalCore, start: usize, foreground: bool) usize {
+        const count = @min(self.csi_param_count, max_csi_params);
+        const mode = if (start + 1 < count) self.csi_params[start + 1] else 0;
+        if (mode == 5 and start + 2 < count) {
+            const color: types.Color = .{ .indexed = @intCast(@min(self.csi_params[start + 2], 255)) };
+            if (foreground) self.pen.foreground = color else self.pen.background = color;
+            return start + 3;
+        }
+        if (mode == 2 and start + 4 < count) {
+            const color: types.Color = .{ .rgb = .{
+                .r = @intCast(@min(self.csi_params[start + 2], 255)),
+                .g = @intCast(@min(self.csi_params[start + 3], 255)),
+                .b = @intCast(@min(self.csi_params[start + 4], 255)),
+            } };
+            if (foreground) self.pen.foreground = color else self.pen.background = color;
+            return start + 5;
+        }
+        // 형식이 안 맞으면 나머지 파라미터를 버린다.
+        return count;
+    }
+
+    fn cursorPosition(self: *TerminalCore) void {
+        if (self.size.rows == 0 or self.size.cols == 0) return;
+        const old = self.cursor;
+        const row = self.csiParam(0, 1);
+        const col = self.csiParam(1, 1);
+        self.cursor.row = @intCast(@min(@as(u32, row) - 1, @as(u32, self.size.rows) - 1));
+        self.cursor.col = @intCast(@min(@as(u32, col) - 1, @as(u32, self.size.cols) - 1));
+        self.markCursorMoveDirty(old, self.cursor);
+        self.last_print = null;
+    }
+
+    fn cursorVertical(self: *TerminalCore, amount: u16, up: bool) void {
+        if (self.size.rows == 0) return;
+        const old = self.cursor;
+        if (up) {
+            self.cursor.row -|= amount;
+        } else {
+            const max_row = self.size.rows - 1;
+            self.cursor.row = @intCast(@min(@as(u32, self.cursor.row) + amount, max_row));
+        }
+        self.markCursorMoveDirty(old, self.cursor);
+        self.last_print = null;
+    }
+
+    fn cursorHorizontal(self: *TerminalCore, amount: u16, right: bool) void {
+        if (self.size.cols == 0) return;
+        const old = self.cursor;
+        if (right) {
+            const max_col = self.size.cols - 1;
+            self.cursor.col = @intCast(@min(@as(u32, self.cursor.col) + amount, max_col));
+        } else {
+            self.cursor.col -|= amount;
+        }
+        self.markCursorMoveDirty(old, self.cursor);
+        self.last_print = null;
+    }
+
+    fn cursorToColumn(self: *TerminalCore, col: u16) void {
+        if (self.size.cols == 0) return;
+        const old = self.cursor;
+        self.cursor.col = @intCast(@min(@as(u32, col) - 1, @as(u32, self.size.cols) - 1));
+        self.markCursorMoveDirty(old, self.cursor);
+        self.last_print = null;
+    }
+
+    fn cursorToRow(self: *TerminalCore, row: u16) void {
+        if (self.size.rows == 0) return;
+        const old = self.cursor;
+        self.cursor.row = @intCast(@min(@as(u32, row) - 1, @as(u32, self.size.rows) - 1));
+        self.markCursorMoveDirty(old, self.cursor);
+        self.last_print = null;
+    }
+
+    fn eraseInLine(self: *TerminalCore, mode: u16) void {
+        const row = self.cursor.row;
+        if (self.size.cols == 0 or row >= self.size.rows) return;
+        const start: u16 = switch (mode) {
+            1, 2 => 0,
+            else => self.cursor.col,
+        };
+        const end: u16 = switch (mode) {
+            1 => @min(self.cursor.col + 1, self.size.cols),
+            else => self.size.cols,
+        };
+        var col = start;
+        while (col < end) : (col += 1) {
+            // erase는 현재 pen의 배경색으로 채워야 하므로 blank cell에 style만 남긴다.
+            self.cells[self.index(row, col)] = .{ .style = self.pen };
+        }
+        self.markDirty(row);
+    }
+
+    fn eraseInDisplay(self: *TerminalCore, mode: u16) void {
+        if (self.size.rows == 0 or self.size.cols == 0) return;
+        const blank: types.Cell = .{ .style = self.pen };
+        switch (mode) {
+            // 2/3: 화면 전체.
+            2, 3 => {
+                @memset(self.cells, blank);
+                self.dirty = fullDirty(self.size);
+            },
+            // 1: 화면 시작 ~ 커서까지.
+            1 => {
+                const cursor_index = self.index(self.cursor.row, self.cursor.col);
+                var i: usize = 0;
+                while (i <= cursor_index and i < self.cells.len) : (i += 1) self.cells[i] = blank;
+                self.dirty = .{ .start_row = 0, .end_row = self.cursor.row };
+            },
+            // 0(기본): 커서 ~ 화면 끝까지.
+            else => {
+                const cursor_index = self.index(self.cursor.row, self.cursor.col);
+                var i: usize = cursor_index;
+                while (i < self.cells.len) : (i += 1) self.cells[i] = blank;
+                self.dirty = .{ .start_row = self.cursor.row, .end_row = self.size.rows - 1 };
+            },
+        }
+        self.last_print = null;
     }
 
     pub fn resize(self: *TerminalCore, cols: u16, rows: u16) !void {
@@ -76,6 +382,8 @@ pub const TerminalCore = struct {
         // the first write after a resize.
         self.last_print = null;
         self.utf8_tail_len = 0;
+        // resize 경계에서 끊긴 escape sequence가 새 grid로 새지 않게 파서를 ground로 되돌린다.
+        self.parser = .ground;
     }
 
     pub fn snapshot(self: *const TerminalCore) types.RenderSnapshot {
@@ -235,10 +543,12 @@ pub const TerminalCore = struct {
 
         self.cells[self.index(row, col)] = .{
             .codepoint = codepoint,
+            .style = self.pen,
             .width = cell_width,
         };
         if (cell_width == 2) {
             self.cells[self.index(row, col + 1)] = .{
+                .style = self.pen,
                 .width = 0,
                 .continuation = true,
             };
@@ -627,4 +937,130 @@ test "terminal core marks old and new cursor rows dirty across line feed" {
     try std.testing.expectEqual(@as(u16, 0), dirty.start_row);
     try std.testing.expectEqual(@as(u16, 1), dirty.end_row);
     try std.testing.expectEqual(@as(u16, 1), core.snapshot().cursor.row);
+}
+
+test "SGR escape sequences are interpreted, not printed as text" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 1 });
+    defer core.deinit();
+
+    // The shell prompt problem: color codes must not show as literal "[31m" text.
+    try core.write("\x1b[31mhi\x1b[0m");
+
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("hi        ", dump);
+}
+
+test "SGR sets the pen style stamped onto written cells" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("\x1b[1;4;31mA");
+    const cell = core.cells[core.index(0, 0)];
+    try std.testing.expectEqual(@as(u21, 'A'), cell.codepoint);
+    try std.testing.expect(cell.style.bold);
+    try std.testing.expect(cell.style.underline);
+    try std.testing.expectEqual(types.Color{ .indexed = 1 }, cell.style.foreground);
+}
+
+test "SGR reset returns the pen to default for following cells" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("\x1b[1;31mA\x1b[0mB");
+    const a = core.cells[core.index(0, 0)];
+    const b = core.cells[core.index(0, 1)];
+    try std.testing.expect(a.style.bold);
+    try std.testing.expect(!b.style.bold);
+    try std.testing.expectEqual(types.Color.default, b.style.foreground);
+}
+
+test "SGR 256-color and rgb extended forms set the foreground" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("\x1b[38;5;200mA");
+    try std.testing.expectEqual(types.Color{ .indexed = 200 }, core.cells[core.index(0, 0)].style.foreground);
+
+    try core.write("\x1b[38;2;10;20;30mB");
+    try std.testing.expectEqual(
+        types.Color{ .rgb = .{ .r = 10, .g = 20, .b = 30 } },
+        core.cells[core.index(0, 1)].style.foreground,
+    );
+}
+
+test "CSI cursor position moves the cursor with 1-based params" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 5 });
+    defer core.deinit();
+
+    try core.write("\x1b[3;5H");
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 4), core.cursor.col);
+
+    // A bare CSI H homes the cursor.
+    try core.write("\x1b[H");
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.col);
+}
+
+test "CSI K erases from the cursor to the end of the line" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("abcde");
+    // Column 3 (1-based) is index 2, then erase to end of line.
+    try core.write("\x1b[3G\x1b[K");
+
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("ab   ", dump);
+}
+
+test "CSI 2J clears the whole screen" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 3, .rows = 2 });
+    defer core.deinit();
+
+    try core.write("ab\ncd");
+    try core.write("\x1b[2J");
+
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("   \n   ", dump);
+}
+
+test "escape sequence split across writes is parsed as one sequence" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // PTY reads can split a sequence; parser state must persist across write().
+    try core.write("\x1b[3");
+    try core.write("1mX");
+
+    const cell = core.cells[core.index(0, 0)];
+    try std.testing.expectEqual(@as(u21, 'X'), cell.codepoint);
+    try std.testing.expectEqual(types.Color{ .indexed = 1 }, cell.style.foreground);
+}
+
+test "OSC sequence is consumed and does not print" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+
+    // OSC 0 sets the window title, terminated by BEL; the title text must not show.
+    try core.write("\x1b]0;title\x07hi");
+
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("hi      ", dump);
+}
+
+test "private CSI sequences are consumed without printing" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
+    defer core.deinit();
+
+    // Cursor visibility toggles (DECTCEM) must not leak as text.
+    try core.write("\x1b[?25lhi\x1b[?25h");
+
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("hi    ", dump);
 }

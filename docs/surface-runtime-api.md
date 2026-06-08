@@ -84,6 +84,8 @@ pub const PtyIo = struct {
 
 `PtyReader`가 만든 queue event를 실제 runtime에 적용하는 쪽은 별도 app-layer helper인 `RuntimeEventPump`가 맡는다. `SurfaceRuntime`은 routing과 state update만 책임지고, queue ownership이나 blocking drain 정책을 직접 소유하지 않는다.
 
+reader thread 자체의 종료 책임도 `SurfaceRuntime`에 넣지 않는다. reader thread는 live process/file descriptor와 같은 수명주기를 가지므로 app host가 `LivePtySession` owner로 소유한다. `SurfaceRuntime`은 output/exit/read_error event를 surface state에 반영할 뿐이고, 실제 window/tab close에서 reader를 깨우고 join하는 일은 app host lifecycle이 맡는다.
+
 ```zig
 pub const RuntimeEventPump = struct {
     pub fn init(

@@ -4,6 +4,7 @@ const pty = @import("../pty.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal.zig");
 const frame_loop_mod = @import("frame_loop.zig");
+const live_pty_mod = @import("live_pty.zig");
 const pty_reader = @import("pty_reader.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
@@ -48,12 +49,13 @@ pub fn run(
 ) !AppPtyLoopSmokeResult {
     // 이 smoke는 실제 macOS PTY reader thread와 FrameLoop를 같이 태운다.
     // 아직 AppKit event loop는 아니지만, UI main loop가 할 일을 headless로 반복한다.
-    var session = try pty.PtySession.spawn(allocator, .{
+    var live_pty: live_pty_mod.LivePtySession = undefined;
+    try live_pty.init(io, allocator, 10, .{
         .command = smoke_config.command,
         .args = smoke_config.args,
         .size = smoke_config.size,
-    });
-    defer session.deinit();
+    }, 16);
+    defer live_pty.deinit();
 
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, smoke_config.size)};
     defer surfaces[0].deinit();
@@ -64,17 +66,9 @@ pub fn run(
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
-    _ = try runtime.attach(&surfaces[0], 10, runtime_mod.PtyIo.fromSession(&session));
+    _ = try live_pty.attachSurface(&runtime, &surfaces[0]);
 
-    var queue = try pty_reader.PtyEventQueue.init(io, allocator, 16);
-    defer queue.deinit();
-
-    var reader = pty_reader.PtyReader.init(allocator, 10, &session, &queue);
-    try reader.start();
-    var reader_joined = false;
-    errdefer if (!reader_joined) reader.stopAndJoin();
-
-    var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
+    var pump = live_pty.pump(&runtime);
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
     var frame_loop = frame_loop_mod.FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
@@ -87,7 +81,7 @@ pub fn run(
 
     var counts: LoopCounts = .{};
     while (counts.event_frames < smoke_config.max_event_frames) {
-        const drain_summary = try drainBlockingOneBatchWithRaw(allocator, &queue, &pump, &raw_bytes);
+        const drain_summary = try drainBlockingOneBatchWithRaw(allocator, live_pty.eventQueue(), &pump, &raw_bytes);
         counts.recordDrain(drain_summary);
 
         var event_tick = try frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
@@ -110,9 +104,7 @@ pub fn run(
         return error.AppPtyLoopSmokeExceededMaxFrames;
     }
 
-    reader.join();
-    reader_joined = true;
-    queue.close();
+    live_pty.finishAfterTermination();
 
     const raw = try raw_bytes.toOwnedSlice(allocator);
     errdefer allocator.free(raw);

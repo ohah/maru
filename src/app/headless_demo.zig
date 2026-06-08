@@ -2,7 +2,7 @@ const std = @import("std");
 const observability = @import("../observability.zig");
 const pty = @import("../pty.zig");
 const terminal = @import("../terminal.zig");
-const pty_reader = @import("pty_reader.zig");
+const live_pty_mod = @import("live_pty.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
 const surface_mod = @import("surface.zig");
@@ -36,12 +36,13 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, config: DemoConfig) !DemoRe
     // 이 데모는 GUI를 만들기 전에 실제 프로세스 출력이 Maru의 런타임 경계를
     // 끝까지 통과하는지 확인하기 위한 작은 앱이다. 테스트 fixture가 아니라
     // 실제 PTY를 쓰기 때문에, 나중에 창이 붙어도 같은 실패 지점을 추적할 수 있다.
-    var session = try pty.PtySession.spawn(allocator, .{
+    var live_pty: live_pty_mod.LivePtySession = undefined;
+    try live_pty.init(io, allocator, 10, .{
         .command = config.command,
         .args = config.args,
         .size = config.size,
-    });
-    defer session.deinit();
+    }, 32);
+    defer live_pty.deinit();
 
     var surface = try surface_mod.Surface.init(allocator, 1, config.size);
     defer surface.deinit();
@@ -50,25 +51,15 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, config: DemoConfig) !DemoRe
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
-    _ = try runtime.attach(&surface, 10, runtime_mod.PtyIo.fromSession(&session));
-
-    var queue = try pty_reader.PtyEventQueue.init(io, allocator, 32);
-    defer queue.deinit();
-
-    var reader = pty_reader.PtyReader.init(allocator, 10, &session, &queue);
-    try reader.start();
-    var reader_joined = false;
-    errdefer if (!reader_joined) reader.stopAndJoin();
+    _ = try live_pty.attachSurface(&runtime, &surface);
 
     // window loop가 아직 없으므로 pump가 종료 이벤트까지 직접 기다린다. 이 경로가
     // 안정적이어야 이후 macOS app host가 같은 queue/runtime 계약을 frame loop에서
     // 소비할 수 있다.
-    var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
+    var pump = live_pty.pump(&runtime);
     const drain_summary = try pump.drainBlockingUntilTermination();
 
-    reader.join();
-    reader_joined = true;
-    queue.close();
+    live_pty.finishAfterTermination();
 
     const screen = try surface.core.dumpUtf8(allocator);
     errdefer allocator.free(screen);

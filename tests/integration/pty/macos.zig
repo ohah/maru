@@ -284,7 +284,7 @@ test "macOS PTY reader stopAndJoin closes a blocking child without leaking a zom
         allocator,
         \\child_pid={d}
         \\queue_capacity={d}
-        \\reader_joined=true
+        \\reader_stopped_and_joined=true
         \\
     ,
         .{ child_pid, queue.capacity() },

@@ -44,7 +44,14 @@ pub const NativeMetalSmokeResult = extern struct {
     screenshot_height: u32,
     screenshot_bytes: u32,
     screenshot_failures: u32,
+    terminal_close_status: c_int = -1,
+    terminal_close_requested: u32 = 0,
+    terminal_close_callback_called: u32 = 0,
+    terminal_close_callback_status: c_int = -1,
+    terminal_window_closed: u32 = 0,
 };
+
+pub const NativeWindowCloseCallback = ?*const fn (?*anyopaque) callconv(.c) i32;
 
 pub const NativeMetalCell = extern struct {
     row: u16,
@@ -90,6 +97,8 @@ pub extern fn maru_macos_metal_smoke_run(
     screenshot_path_ptr: [*]const u8,
     screenshot_path_len: usize,
     result: *NativeMetalSmokeResult,
+    close_callback: NativeWindowCloseCallback,
+    close_callback_context: ?*anyopaque,
 ) void;
 
 pub fn main(init: std.process.Init) !void {
@@ -125,6 +134,11 @@ pub fn main(init: std.process.Init) !void {
         .screenshot_height = 0,
         .screenshot_bytes = 0,
         .screenshot_failures = 0,
+        .terminal_close_status = -1,
+        .terminal_close_requested = 0,
+        .terminal_close_callback_called = 0,
+        .terminal_close_callback_status = -1,
+        .terminal_window_closed = 0,
     };
     const appearance = try config.resolveAppearance(.{});
     var fixture = try buildSmokeFixture(allocator, appearance);
@@ -146,6 +160,8 @@ pub fn main(init: std.process.Init) !void {
         screenshot_path.ptr,
         screenshot_path.len,
         &native,
+        null,
+        null,
     );
 
     const smoke_status = deriveSmokeStatus(native);
@@ -289,6 +305,11 @@ fn renderSummary(
     try writer.print("screenshot_height={d}\n", .{native.screenshot_height});
     try writer.print("screenshot_bytes={d}\n", .{native.screenshot_bytes});
     try writer.print("screenshot_failures={d}\n", .{native.screenshot_failures});
+    try writer.print("terminal_close_status={d}\n", .{native.terminal_close_status});
+    try writer.print("terminal_close_requested={}\n", .{native.terminal_close_requested != 0});
+    try writer.print("terminal_close_callback_called={}\n", .{native.terminal_close_callback_called != 0});
+    try writer.print("terminal_close_callback_status={d}\n", .{native.terminal_close_callback_status});
+    try writer.print("terminal_window_closed={}\n", .{native.terminal_window_closed != 0});
 
     return output.toOwnedSlice();
 }
@@ -825,6 +846,11 @@ test "macOS Metal smoke summary reports product atlas shader sampling boundary" 
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_height=840\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_bytes=3628800\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_failures=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_close_status=-1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_close_requested=false\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_close_callback_called=false\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_close_callback_status=-1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "terminal_window_closed=false\n") != null);
 }
 
 test "glyph_text stays false when CoreText fixture did not sample atlas texels" {
@@ -878,7 +904,7 @@ test "NativeMetalRasterUpload ABI keeps raster byte ranges visible to ObjC" {
 test "NativeMetalSmokeResult ABI keeps atlas diagnostics visible to Zig" {
     // native result는 Objective-C가 채우고 Zig가 summary gate로 해석한다. 크기나 정렬이
     // 예고 없이 달라지면 product_atlas_uploaded 같은 진단값을 다른 필드로 읽을 수 있다.
-    try std.testing.expectEqual(@as(usize, 92), @sizeOf(NativeMetalSmokeResult));
+    try std.testing.expectEqual(@as(usize, 112), @sizeOf(NativeMetalSmokeResult));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(NativeMetalSmokeResult));
 }
 

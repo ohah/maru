@@ -1,4 +1,22 @@
+const std = @import("std");
 const terminal = @import("../terminal.zig");
+
+/// 대화형 shell 경로를 한 곳에서 결정한다. 진입점(main, app dev session, metal smoke)마다
+/// 복사하면 fallback이나 trim 정책이 갈라진다(실제로 `/bin/sh` vs `/bin/zsh`, trim 유무로
+/// 어긋나 있었다). 환경값은 앞뒤 공백을 제거해 trailing newline이 경로에 섞여 spawn이
+/// 실패하는 것을 막고, 우선순위는 `MARU_INTERACTIVE_SHELL` -> `SHELL` -> `/bin/sh`다.
+/// 반환 slice는 process environ 또는 정적 리터럴을 가리키므로 caller가 소유/해제하지 않는다.
+pub fn resolveInteractiveShell() []const u8 {
+    if (std.c.getenv("MARU_INTERACTIVE_SHELL")) |raw| {
+        const value = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
+        if (value.len > 0) return value;
+    }
+    if (std.c.getenv("SHELL")) |raw| {
+        const value = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
+        if (value.len > 0) return value;
+    }
+    return "/bin/sh";
+}
 
 pub const Backend = enum {
     macos_openpty,

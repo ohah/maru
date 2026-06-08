@@ -288,11 +288,7 @@ pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
     if (config.cols == 0 or config.rows == 0) return error.InvalidConfig;
     if (config.cols > std.math.maxInt(u16) or config.rows > std.math.maxInt(u16)) return error.InvalidConfig;
 
-    const command_kind: CommandKind = switch (config.command_kind) {
-        @intFromEnum(CommandKind.controlled_smoke) => .controlled_smoke,
-        @intFromEnum(CommandKind.interactive_shell) => .interactive_shell,
-        else => return error.InvalidConfig,
-    };
+    const command_kind = std.enums.fromInt(CommandKind, config.command_kind) orelse return error.InvalidConfig;
 
     return .{
         .size = .{ .cols = @intCast(config.cols), .rows = @intCast(config.rows) },
@@ -312,29 +308,17 @@ fn spawnRequest(config: NormalizedConfig) maru.pty.SpawnRequest {
             .size = config.size,
         },
         .interactive_shell => .{
-            .command = interactiveShellPath(),
+            .command = maru.pty.resolveInteractiveShell(),
             .args = &.{"-i"},
             .size = config.size,
         },
     };
 }
 
-fn interactiveShellPath() []const u8 {
-    if (std.c.getenv("MARU_INTERACTIVE_SHELL")) |raw| {
-        const value = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
-        if (value.len > 0) return value;
-    }
-    if (std.c.getenv("SHELL")) |raw| {
-        const value = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
-        if (value.len > 0) return value;
-    }
-    return "/bin/sh";
-}
-
 fn commandName(kind: CommandKind) []const u8 {
     return switch (kind) {
         .controlled_smoke => "/bin/sh -c maru-app-dev-smoke",
-        .interactive_shell => interactiveShellPath(),
+        .interactive_shell => maru.pty.resolveInteractiveShell(),
     };
 }
 

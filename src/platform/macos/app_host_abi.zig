@@ -184,23 +184,22 @@ pub export fn maru_macos_app_dev_session_destroy(session: ?*DevSession) void {
 }
 
 fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
-    const key: terminal.Key = if (event.codepoint != 0) blk: {
-        const codepoint = std.math.cast(u21, event.codepoint) orelse return error.InvalidConfig;
-        // AppKit 문자열은 surrogate pair를 만들 수 있다. 반쪽 surrogate가 Zig UTF-8 encoder까지
-        // 내려가면 원인 파악이 어려우므로 ABI 경계에서 바로 거부한다.
-        if (codepoint >= 0xd800 and codepoint <= 0xdfff) return error.InvalidConfig;
-        break :blk .{ .char = codepoint };
-    } else switch (event.key_code) {
-        @intFromEnum(KeyCode.unknown) => return error.InvalidConfig,
-        @intFromEnum(KeyCode.enter) => .enter,
-        @intFromEnum(KeyCode.escape) => .escape,
-        @intFromEnum(KeyCode.tab) => .tab,
-        @intFromEnum(KeyCode.backspace) => .backspace,
-        @intFromEnum(KeyCode.arrow_up) => .arrow_up,
-        @intFromEnum(KeyCode.arrow_down) => .arrow_down,
-        @intFromEnum(KeyCode.arrow_left) => .arrow_left,
-        @intFromEnum(KeyCode.arrow_right) => .arrow_right,
-        else => return error.InvalidConfig,
+    // codepoint -> char 변환과 surrogate/범위 거부는 terminal.input이 단일 출처로 소유한다.
+    // native keyDown smoke(keyEventFromNativeKeyDown)와 같은 변환을 공유해, 한쪽만 고치면
+    // 두 입력 경계가 키 의미를 다르게 해석하는 일을 막는다. 잘못된 codepoint/key_code는 ABI
+    // 계약대로 InvalidConfig로 닫는다.
+    const key: terminal.Key = if (event.codepoint != 0)
+        (terminal.input.charKeyFromCodepoint(event.codepoint) catch return error.InvalidConfig)
+    else switch (std.enums.fromInt(KeyCode, event.key_code) orelse return error.InvalidConfig) {
+        .unknown => return error.InvalidConfig,
+        .enter => .enter,
+        .escape => .escape,
+        .tab => .tab,
+        .backspace => .backspace,
+        .arrow_up => .arrow_up,
+        .arrow_down => .arrow_down,
+        .arrow_left => .arrow_left,
+        .arrow_right => .arrow_right,
     };
 
     return .{
@@ -307,6 +306,18 @@ test "macOS app host ABI converts key and resize events before session dispatch"
 
     try std.testing.expectError(error.InvalidConfig, keyEventFromAbi(.{
         .codepoint = 0xd800,
+        .key_code = @intFromEnum(KeyCode.unknown),
+        .modifier_shift = 0,
+        .modifier_control = 0,
+        .modifier_option = 0,
+        .modifier_command = 0,
+        .is_repeat = 0,
+        .reserved = 0,
+    }));
+    // U+10FFFF 초과는 valid Unicode scalar가 아니다. surrogate처럼 경계에서 거부해야
+    // downstream utf8Encode에서 덜 명확하게 터지지 않는다.
+    try std.testing.expectError(error.InvalidConfig, keyEventFromAbi(.{
+        .codepoint = 0x110000,
         .key_code = @intFromEnum(KeyCode.unknown),
         .modifier_shift = 0,
         .modifier_control = 0,

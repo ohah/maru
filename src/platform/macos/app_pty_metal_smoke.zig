@@ -643,17 +643,16 @@ fn keyEventFromNativeKeyDown(native_keydown: metal_smoke.NativeKeyDownSmokeResul
         return error.NativeKeyDownSmokeMissingKey;
     }
 
-    const codepoint = std.math.cast(u21, native_keydown.codepoint) orelse
-        return error.NativeKeyDownCodepointOutOfRange;
-    // The native side reads a single UTF-16 unit (characterAtIndex:0), so an
-    // astral key yields a lone surrogate. Reject it at the conversion boundary
-    // rather than letting a surrogate flow into encodeKey -> utf8Encode, which
-    // would fail there with a less clear error.
-    if (codepoint >= 0xd800 and codepoint <= 0xdfff) {
-        return error.NativeKeyDownCodepointIsSurrogate;
-    }
+    // codepoint -> char 변환과 surrogate/범위 거부는 terminal.input이 단일 출처로 소유한다
+    // (Swift app host ABI의 keyEventFromAbi와 같은 변환). native side는 single UTF-16 unit을
+    // 읽으므로 astral key는 lone surrogate가 될 수 있고, U+10FFFF 초과 값도 올 수 있다. 둘 다
+    // 여기서 거부해 encodeKey -> utf8Encode까지 흘리지 않는다.
+    const key = terminal.input.charKeyFromCodepoint(native_keydown.codepoint) catch |err| switch (err) {
+        error.CodepointOutOfRange => return error.NativeKeyDownCodepointOutOfRange,
+        error.CodepointIsSurrogate => return error.NativeKeyDownCodepointIsSurrogate,
+    };
     return .{
-        .key = .{ .char = codepoint },
+        .key = key,
         .modifiers = .{
             .shift = native_keydown.modifier_shift != 0,
             .control = native_keydown.modifier_control != 0,
@@ -695,7 +694,7 @@ fn configForScenario(scenario: SmokeScenario) AppPtyMetalSmokeConfig {
         .controlled => .{},
         .interactive_shell => .{
             .artifact_dir = interactive_artifact_dir,
-            .command = interactiveShellPath(),
+            .command = pty.resolveInteractiveShell(),
             .args = &.{"-i"},
             .ready_marker = "",
             .scripted_input = "printf 'MARU_APP_PTY_INTERACTIVE_METAL_OK\\n'; exit\n",
@@ -719,14 +718,6 @@ fn smokeScenarioFromEnvValue(raw: []const u8) SmokeScenario {
         return .interactive_shell;
     }
     return .controlled;
-}
-
-fn interactiveShellPath() []const u8 {
-    // 테스트와 smoke가 같은 우선순위를 쓰게 한다. 사용자가 명시한 shell이 있으면
-    // 그것을 우선하고, 없으면 현재 login shell, 마지막으로 macOS 기본 zsh를 쓴다.
-    if (std.c.getenv("MARU_INTERACTIVE_SHELL")) |raw| return std.mem.span(raw);
-    if (std.c.getenv("SHELL")) |raw| return std.mem.span(raw);
-    return "/bin/zsh";
 }
 
 fn writeTermination(writer: *std.Io.Writer, termination: ?app.RuntimePumpTermination) !void {

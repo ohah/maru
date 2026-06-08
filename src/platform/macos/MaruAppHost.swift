@@ -36,6 +36,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var window: NSWindow?
     private var devSession: OpaquePointer?
     private var tickTimer: Timer?
+    // smoke 자동 종료용 one-shot timer. 창이 먼저 닫혀도 run loop에 남아 teardown 뒤
+    // NSApp.terminate를 다시 부르지 않도록 저장해 두고 종료 시 invalidate한다.
+    private var smokeTimer: Timer?
     private var latestFrameSummary = MaruAppHostDevFrameSummary()
     private var devSessionStatus = MaruAppHostController.statusOK
     private var smokeMode = false
@@ -88,7 +91,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
 
         if let smokeDuration {
-            Timer.scheduledTimer(withTimeInterval: Double(smokeDuration) / 1000.0, repeats: false) { _ in
+            smokeTimer = Timer.scheduledTimer(withTimeInterval: Double(smokeDuration) / 1000.0, repeats: false) { _ in
                 NSApp.terminate(nil)
             }
         }
@@ -98,6 +101,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = notification
         tickTimer?.invalidate()
         tickTimer = nil
+        smokeTimer?.invalidate()
+        smokeTimer = nil
         // 종료 중에는 추가 tick을 돌리지 않는다. tick은 session_ended에서 NSApp.terminate를
         // 부르므로, 여기서 다시 tick하면 재진입 terminate가 된다. 마지막 counter는
         // shutdownDevSession의 close()가 summary에 담는다.
@@ -192,7 +197,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // Swift는 frame pacing만 정한다. PTY queue drain, SurfaceRuntime 적용,
         // RenderFrame 준비는 모두 Zig FrameLoop.tick이 소유한다.
         tickTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            // Timer 콜백은 이 timer를 스케줄한 main run loop(main thread)에서 실행되고 이
+            // controller는 @MainActor다. Task로 감싸면 매 tick(30/sec)마다 async hop과 할당이
+            // 생기고 key/resize 동기 ABI 호출과 순서가 흔들린다. main에서 바로 호출한다.
+            MainActor.assumeIsolated {
                 self?.tickDevSession()
             }
         }
@@ -217,6 +225,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             latestFrameSummary = summary
             tickTimer?.invalidate()
             tickTimer = nil
+            smokeTimer?.invalidate()
+            smokeTimer = nil
             writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
             NSApp.terminate(nil)
         } else {

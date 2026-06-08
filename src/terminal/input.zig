@@ -26,6 +26,21 @@ pub const KeyEvent = struct {
     modifiers: ModifierSet = .{},
 };
 
+pub const CodepointError = error{
+    CodepointOutOfRange,
+    CodepointIsSurrogate,
+};
+
+/// AppKit/ABI key event가 준 raw codepoint를 char Key로 바꾼다. 유효한 Unicode scalar가
+/// 아닌 값(U+10FFFF 초과, lone surrogate 0xd800..0xdfff)은 여기서 거부한다. 그대로 두면
+/// 나중에 encodeKey -> utf8Encode에서 덜 명확한 오류로 터지기 때문에 platform/ABI 경계에서
+/// 막는 게 낫다. native keyDown smoke와 Swift app host ABI가 같은 변환을 공유한다.
+pub fn charKeyFromCodepoint(codepoint: u32) CodepointError!Key {
+    if (codepoint > 0x10ffff) return error.CodepointOutOfRange;
+    if (codepoint >= 0xd800 and codepoint <= 0xdfff) return error.CodepointIsSurrogate;
+    return .{ .char = @intCast(codepoint) };
+}
+
 pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8) ![]const u8 {
     // Key encoding is separate from TerminalCore because input policy changes
     // for modifiers, application cursor mode, and platform shortcuts should not
@@ -138,6 +153,14 @@ test "encodes control letters and option-prefixed terminal input" {
         "\x1b한",
         try encodeKey(.{ .key = .{ .char = '한' }, .modifiers = .{ .option = true } }, &buffer),
     );
+}
+
+test "charKeyFromCodepoint rejects non-scalar codepoints" {
+    try std.testing.expectEqual(Key{ .char = 'b' }, try charKeyFromCodepoint('b'));
+    try std.testing.expectEqual(Key{ .char = 0x10ffff }, try charKeyFromCodepoint(0x10ffff));
+    try std.testing.expectError(error.CodepointOutOfRange, charKeyFromCodepoint(0x110000));
+    try std.testing.expectError(error.CodepointIsSurrogate, charKeyFromCodepoint(0xd800));
+    try std.testing.expectError(error.CodepointIsSurrogate, charKeyFromCodepoint(0xdfff));
 }
 
 test "controlByte covers the full C0 table, not just letters" {

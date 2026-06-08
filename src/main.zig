@@ -150,7 +150,7 @@ fn runAppPtyInteractiveLoopSmoke(io: std.Io, allocator: std.mem.Allocator, stdou
     const marker = "MARU_APP_PTY_INTERACTIVE_LOOP_OK";
     const config: maru.app.AppPtyLoopSmokeConfig = .{
         .artifact_dir = maru.app.pty_loop_smoke.default_interactive_artifact_dir,
-        .command = interactiveShellPath(),
+        .command = maru.pty.resolveInteractiveShell(),
         .args = &.{"-i"},
         .expected_text = marker,
         .interactive_shell = true,
@@ -186,18 +186,6 @@ fn runAppPtySmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
     try stdout.writeAll("renderer frame artifact: app-pty.frame.txt\n");
     try stdout.writeAll("visible UI: not yet; this is a live PTY app-host contract smoke.\n");
     try stdout.flush();
-}
-
-fn interactiveShellPath() []const u8 {
-    if (std.c.getenv("MARU_INTERACTIVE_SHELL")) |raw| {
-        const value = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
-        if (value.len > 0) return value;
-    }
-    if (std.c.getenv("SHELL")) |raw| {
-        const value = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
-        if (value.len > 0) return value;
-    }
-    return "/bin/sh";
 }
 
 fn printUsage(writer: *std.Io.Writer) !void {

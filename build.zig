@@ -411,6 +411,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_macos_coretext_raster_tests = b.addRunArtifact(macos_coretext_raster_tests);
 
+    const macos_coretext_frame_builder_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/coretext_frame_builder.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+            },
+        }),
+    });
+    const run_macos_coretext_frame_builder_tests = b.addRunArtifact(macos_coretext_frame_builder_tests);
+
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_exe_tests.step);
@@ -428,6 +440,10 @@ pub fn build(b: *std.Build) void {
     // rasterizer 경계다. 기본 테스트에서는 native CoreText 없이 FontId -> PostScript name
     // 조회와 renderer RasterizerFailed 매핑 계약만 고정한다.
     test_step.dependOn(&run_macos_coretext_raster_tests.step);
+    // coretext_frame_builder.zig는 active surface를 CoreText shaper/rasterizer가 들어간
+    // AppHostFrame으로 조립하는 제품 후보 경계다. native bridge는 함수 포인터로 주입하므로
+    // 기본 테스트에서는 Objective-C 없이 FrameLoop가 호출할 builder 계약을 고정한다.
+    test_step.dependOn(&run_macos_coretext_frame_builder_tests.step);
 
     const e2e_tests = b.addTest(.{
         .root_module = b.createModule(.{

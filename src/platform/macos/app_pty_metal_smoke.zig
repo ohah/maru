@@ -6,6 +6,7 @@ const observability = maru.observability;
 const pty = maru.pty;
 const renderer = maru.renderer;
 const terminal = maru.terminal;
+const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
@@ -250,7 +251,7 @@ fn buildLivePtyFixture(
     const raw = try raw_bytes.toOwnedSlice(allocator);
     errdefer allocator.free(raw);
 
-    var final_tick = try frame_loop.tickAfterDrainWithFrameBuilder(drain_summary, CoreTextFrameBuilder{
+    var final_tick = try frame_loop.tickAfterDrainWithFrameBuilder(drain_summary, coretext_frame_builder.CoreTextFrameBuilder{
         .appearance = appearance,
         .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
         .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
@@ -293,59 +294,6 @@ fn buildLivePtyFixture(
         .size = smoke_config.size,
     };
 }
-
-const CoreTextFrameBuilder = struct {
-    appearance: config.ResolvedAppearance,
-    shape_draw_list: coretext_shaper.ShapeDrawListFn,
-    rasterize_glyph: coretext_raster.RasterizeGlyphFn,
-
-    pub fn build(
-        self: CoreTextFrameBuilder,
-        allocator: std.mem.Allocator,
-        app_window: *app.AppWindow,
-        renderer_state: *renderer.RendererState,
-        drain_summary: app.RuntimePumpDrainSummary,
-    ) !app.AppHostFrame {
-        // live PTY Metal smoke는 fake per-cell shaper가 아니라 제품 후보 CoreText shaper를
-        // 쓴다. FrameLoop는 순서만 소유하고, 이 builder가 active surface snapshot을
-        // DrawList -> CoreText GlyphRunList -> RenderFrame으로 바꾼다.
-        const active = app_window.active() orelse return error.NoActiveSurface;
-        var draw_list = try renderer.buildDrawList(allocator, active.core.snapshot());
-        var draw_list_owned = true;
-        errdefer if (draw_list_owned) draw_list.deinit(allocator);
-
-        var font_registry = renderer.FontIdentityRegistry.init(allocator);
-        defer font_registry.deinit();
-
-        const shaper = coretext_shaper.CoreTextDrawListShaper{
-            .appearance = self.appearance,
-            .shape_draw_list = self.shape_draw_list,
-        };
-        var shaped = try shaper.shape(allocator, draw_list, &font_registry);
-        defer shaped.deinit(allocator);
-
-        const rasterizer = coretext_raster.CoreTextGlyphRasterizer{
-            .appearance = self.appearance,
-            .font_registry = &font_registry,
-            .rasterize_glyph = self.rasterize_glyph,
-        };
-        const render_frame = try renderer_state.buildFrameFromGlyphRunListWithRasterizer(
-            allocator,
-            draw_list,
-            shaped.runs,
-            rasterizer,
-        );
-        draw_list_owned = false;
-
-        return .{
-            .surface_id = active.id,
-            .size = active.core.size,
-            .process_state = active.process_state,
-            .drain_summary = drain_summary,
-            .render_frame = render_frame,
-        };
-    }
-};
 
 fn drainBlockingUntilTerminationWithRaw(
     queue: *app.PtyEventQueue,

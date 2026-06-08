@@ -124,7 +124,7 @@ Command+B      -> 초기에는 오류
 
 - `src/config/keybinding.zig`가 `KeyChord.parse`와 `KeyBindingResolver`의 최소 계약을 구현한다.
 - `Cmd+B`, `ctrl+cmd+,`, `Shift+Alt+F13` 같은 key chord 문자열은 parser 단위 테스트로 검증한다.
-- `mise run macos-app-pty-metal-smoke`는 기본적으로 AppKit synthetic `keyDown:`에서 얻은 `Cmd+B` payload가 `AppHost.handleKeyEvent -> KeyBindingResolver -> SurfaceRuntime.writeInput`을 거쳐 PTY와 visible Metal frame까지 도달하는지 검증한다.
+- `mise run macos-app-pty-metal-smoke`는 기본적으로 AppKit synthetic `keyDown:`에서 얻은 `Cmd+B` payload가 `FrameLoop.handleKeyEvent -> KeyBindingResolver -> SurfaceRuntime.writeInput`을 거쳐 PTY와 visible Metal frame까지 도달하는지 검증한다.
 - `MARU_APP_PTY_METAL_KEYDOWN_SOURCE=manual MARU_APP_PTY_METAL_KEYDOWN_MS=15000 mise run macos-app-pty-metal-smoke`는 사용자가 key capture 창에서 직접 누른 `Cmd+B`를 같은 경로에 태운다. 이 smoke는 물리 키 한 번의 AppKit 경계를 검증하지만, 아직 지속 interactive shell loop는 아니다.
 - `Ctrl+<key>` 인코딩은 `a-z`/`A-Z`뿐 아니라 전체 C0 테이블을 다룬다: `Ctrl+@`=0x00, `Ctrl+A..Z`=0x01..0x1a, `Ctrl+[`=0x1b(ESC), `Ctrl+\`=0x1c, `Ctrl+]`=0x1d, `Ctrl+^`=0x1e, `Ctrl+_`=0x1f, `Ctrl+Space`=NUL, `Ctrl+?`=DEL. C0 매핑이 없는 `Ctrl+1` 같은 조합은 키 이벤트를 실패시키지 않고 그냥 문자를 보낸다.
 - `Option/Alt`(Meta) ESC prefix는 plain-byte 키(문자/Enter/Tab/Backspace)에만 붙인다. 화살표·Esc처럼 base 인코딩이 이미 ESC로 시작하는 키에는 붙이지 않는다(`Option+Up`이 `\x1b\x1b[A` 같은 double-ESC가 되지 않게). 화살표류의 modifier 인코딩(CSI 파라미터)은 이후 계약이다.

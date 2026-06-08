@@ -68,6 +68,23 @@ pub const FrameLoop = struct {
         return self.finishTick(frame);
     }
 
+    pub fn tickAfterDrainWithFrameBuilder(
+        self: *FrameLoop,
+        drain_summary: runtime_pump.DrainSummary,
+        frame_builder: anytype,
+    ) !FrameLoopTick {
+        // CoreText 같은 제품 shaper는 DrawList 전체를 먼저 shape한 뒤 RenderFrame을 만든다.
+        // app layer가 CoreText를 import하면 platform 경계가 깨지므로, FrameLoop는
+        // "drain 뒤 frame을 만든다"는 순서만 소유하고 실제 frame 조립은 주입받는다.
+        const frame = try frame_builder.build(
+            self.allocator,
+            self.app_window,
+            self.renderer_state,
+            drain_summary,
+        );
+        return self.finishTick(frame);
+    }
+
     fn finishTick(self: *FrameLoop, frame: host.AppHostFrame) !FrameLoopTick {
         var owned_frame = frame;
         errdefer owned_frame.deinit(self.allocator);
@@ -96,6 +113,24 @@ pub const FrameLoop = struct {
         // resize도 frame loop가 직접 storage를 고치는 대신 SurfaceRuntime action으로 보낸다.
         // 그래야 PTY resize와 TerminalCore resize가 한 경로에서 같이 일어난다.
         try host.resizeActiveSurface(self.app_window, self.runtime, size);
+    }
+};
+
+const FakeFrameBuilder = struct {
+    pub fn build(
+        _: FakeFrameBuilder,
+        allocator: std.mem.Allocator,
+        app_window: *window_mod.AppWindow,
+        renderer_state: *renderer.RendererState,
+        drain_summary: runtime_pump.DrainSummary,
+    ) !host.AppHostFrame {
+        return host.buildFrameAfterDrain(
+            allocator,
+            app_window,
+            renderer_state,
+            renderer.FakeFontBackend{},
+            drain_summary,
+        );
     }
 };
 
@@ -434,6 +469,41 @@ test "app frame loop ticks keep building frames while the queue is empty or acti
     try std.testing.expectEqual(@as(usize, 1), final.frame.drain_summary.exit_events);
     try std.testing.expect(final.ended());
     try std.testing.expectEqual(surface_mod.ProcessState.exited, surfaces[0].process_state);
+}
+
+test "app frame loop can delegate frame construction after an already applied drain" {
+    // macOS CoreText/Metal smoke는 PTY bytes를 artifact로 복사한 뒤 drain을 적용하고,
+    // 그 다음 제품 CoreText shaper로 RenderFrame을 만든다. 이 테스트는 FrameLoop가
+    // 그런 custom frame builder를 받아도 tick index와 render stats를 같은 방식으로
+    // 기록한다는 계약을 GPU 없이 고정한다.
+    const allocator = std.testing.allocator;
+    var memory_pty = MemoryPty.init(allocator);
+    defer memory_pty.deinit();
+    var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 16, .rows = 3 })};
+    defer surfaces[0].deinit();
+    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surfaces[0], 10, memory_pty.io());
+
+    var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 4);
+    defer queue.deinit();
+    var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
+    var renderer_state = renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
+    var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
+
+    try pushOutput(&queue, allocator, 10, "builder");
+    const drain_summary = try pump.drainAvailable();
+
+    var tick = try loop.tickAfterDrainWithFrameBuilder(drain_summary, FakeFrameBuilder{});
+    defer tick.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), tick.index);
+    try std.testing.expectEqual(@as(usize, 1), tick.frame.drain_summary.output_events);
+    try std.testing.expect(tick.render_stats.prepared());
+    try std.testing.expectEqual(@as(usize, 1), loop.frame_index);
 }
 
 test "app frame loop routes key events through the same app host policy" {

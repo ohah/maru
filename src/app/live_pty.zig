@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const pty = @import("../pty.zig");
+const terminal = @import("../terminal.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
 const surface_mod = @import("surface.zig");
@@ -85,8 +86,9 @@ pub const LivePtySession = struct {
         runtime: *runtime_mod.SurfaceRuntime,
         surface: *surface_mod.Surface,
     ) runtime_mod.RuntimeError!runtime_mod.RuntimeLink {
-        // attach link도 live PTY owner가 기록한다. 아직 detach 정책은 실제 tab/window close
-        // PR에서 정하지만, 어느 PTY가 어느 surface와 연결됐는지는 이 owner가 알아야 한다.
+        // attach link도 live PTY owner가 기록한다. closeAndDetach가 이 link를 이용해
+        // runtime routing을 먼저 끊으므로, 어느 PTY가 어느 surface와 연결됐는지는
+        // 이 owner가 알아야 한다.
         const link = try runtime.attach(surface, self.pty_id, self.ptyIo());
         self.link = link;
         return link;
@@ -113,6 +115,24 @@ pub const LivePtySession = struct {
             self.reader_finished = true;
         }
         self.queue.close();
+    }
+
+    pub fn detachSurface(self: *LivePtySession, runtime: *runtime_mod.SurfaceRuntime) void {
+        // Pane close는 surface routing부터 끊어야 한다. 그래야 닫힌 pane으로 늦게 도착한
+        // output이나 input이 살아 있는 surface에 섞이지 않고 UnknownPty/UnknownSurface로
+        // 떨어진다. 실제 PTY 종료는 close()가 맡고, detach는 runtime 연결만 제거한다.
+        if (self.link) |link| {
+            runtime.detachSurface(link.surface_id);
+            self.link = null;
+        }
+    }
+
+    pub fn closeAndDetach(self: *LivePtySession, runtime: *runtime_mod.SurfaceRuntime) void {
+        // 실제 tab/window close command가 호출할 app-layer 수명 경계다.
+        // detach와 PTY close 순서를 호출자마다 다시 쓰게 두면 late event 처리와 reader
+        // cleanup이 갈라질 수 있으므로, owner가 하나의 idempotent operation으로 제공한다.
+        self.detachSurface(runtime);
+        self.close();
     }
 
     pub fn close(self: *LivePtySession) void {
@@ -159,4 +179,63 @@ test "live pty session owns controlled command until normal termination" {
     live.finishAfterTermination();
     try std.testing.expect(saw_output);
     try std.testing.expect(live.reader_finished);
+}
+
+const FakePty = struct {
+    fn io(self: *FakePty) runtime_mod.PtyIo {
+        return .{
+            .ctx = self,
+            .write_input = fakeWriteInput,
+            .resize_fn = fakeResize,
+        };
+    }
+
+    fn fakeWriteInput(ctx: *anyopaque, bytes: []const u8) !void {
+        _ = ctx;
+        _ = bytes;
+    }
+
+    fn fakeResize(ctx: *anyopaque, size: terminal.Size) !void {
+        _ = ctx;
+        _ = size;
+    }
+};
+
+test "live pty closeAndDetach removes runtime routing before closing the queue" {
+    // 이 테스트는 실제 macOS PTY 없이 close lifecycle의 app-level 계약을 고정한다.
+    // 핵심은 닫힌 pane이 runtime link에서 먼저 빠지고, reader가 이미 끝난 session이면
+    // close가 queue만 닫아도 idempotent하게 동작한다는 점이다.
+    const allocator = std.testing.allocator;
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+
+    var surface = try surface_mod.Surface.init(allocator, 1, .{ .cols = 20, .rows = 3 });
+    defer surface.deinit();
+    var fake_pty: FakePty = .{};
+    const link = try runtime.attach(&surface, 10, fake_pty.io());
+
+    var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var live: LivePtySession = .{
+        .allocator = allocator,
+        .session = undefined,
+        .queue = &queue,
+        .reader = undefined,
+        .pty_id = 10,
+        .link = link,
+        .reader_finished = true,
+    };
+
+    live.closeAndDetach(&runtime);
+    try std.testing.expect(live.link == null);
+    try std.testing.expectError(error.UnknownSurface, runtime.writeInput(1, .{ .bytes = "x" }));
+    try std.testing.expectError(error.UnknownPty, runtime.applyPtyEvent(.{
+        .output = .{ .pty_id = 10, .bytes = "late output" },
+    }));
+    try std.testing.expectError(error.QueueClosed, queue.tryPush(.{
+        .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } },
+    }));
+
+    live.closeAndDetach(&runtime);
+    try std.testing.expect(live.link == null);
 }

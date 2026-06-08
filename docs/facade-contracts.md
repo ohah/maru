@@ -116,12 +116,12 @@
 책임:
 
 - `LivePtySession`은 하나의 live terminal session에 필요한 `PtySession`, `PtyEventQueue`, `PtyReader`, runtime attach link를 한 owner로 묶는다.
-- app/demo/smoke와 나중의 tab/window close는 개별 session/queue/reader를 따로 닫지 않고 `LivePtySession.close` 또는 `LivePtySession.deinit`을 호출한다.
+- app/demo/smoke와 나중의 tab/window close는 개별 session/queue/reader를 따로 닫지 않고 `LivePtySession.close`, `LivePtySession.closeAndDetach`, 또는 `LivePtySession.deinit`을 호출한다.
 - `PtySession.readEvent`를 reader thread에서 반복 호출한다.
 - reader thread가 만든 output/exit/read_error event를 bounded queue에 넣는다.
 - queue가 가득 차면 output을 버리지 않고 reader thread를 기다리게 한다.
 - output bytes의 소유권을 queue event로 넘기고, consumer가 `QueuedPtyEvent.deinit`으로 끝내게 한다.
-- 탭/창 close 시 `LivePtySession.close`가 내부적으로 `PtyReader.stopAndJoin`을 사용해 queue를 닫고, session을 close한 뒤 reader thread가 끝날 때까지 기다린다.
+- 탭/창 close 시 `LivePtySession.closeAndDetach`가 `SurfaceRuntime.detachSurface`로 runtime routing을 먼저 끊고, 내부적으로 `PtyReader.stopAndJoin`을 사용해 queue를 닫고, session을 close한 뒤 reader thread가 끝날 때까지 기다린다.
 
 몰라야 하는 것:
 
@@ -136,12 +136,13 @@
 - queue가 full일 때 무한히 늘리지 않고 `QueueFull`로 관측된다.
 - close된 queue는 새 push를 거부하고 empty pop을 종료한다.
 - `LivePtySession`이 실제 macOS controlled command output/exit를 정상 종료까지 소유하고, `finishAfterTermination` 뒤 cleanup이 중복 stop하지 않는다.
+- `LivePtySession.closeAndDetach`가 닫힌 surface를 runtime에서 detach하고 queue를 닫아 late output/input을 거부한다.
 - 실제 macOS PTY controlled command output/exit가 reader thread와 queue를 지나 `SurfaceRuntime`에 적용된다.
 - 실제 macOS PTY에서 출력이 없는 long-running child 때문에 reader가 blocking read 중이어도 `stopAndJoin`이 reader를 정리하고 child zombie를 남기지 않는다.
 
 아직 하지 않는다:
 
-- macOS window/app event loop의 tab/window close command와 `LivePtySession.close` 연결.
+- macOS window/app event loop의 tab/window close command와 `LivePtySession.closeAndDetach` 연결.
 - 대량 stdout backpressure의 RSS/latency/UI responsiveness 성능 예산.
 
 ## `RuntimeEventPump`

@@ -12,8 +12,9 @@ const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
 const metal_smoke = @import("metal_smoke.zig");
 
-const artifact_dir = "zig-out/maru-macos-app-pty-metal-smoke";
-const screenshot_path = artifact_dir ++ "/app-pty-metal-frame.ppm";
+const default_artifact_dir = "zig-out/maru-macos-app-pty-metal-smoke";
+const interactive_artifact_dir = "zig-out/maru-macos-app-pty-interactive-metal-smoke";
+const screenshot_filename = "app-pty-metal-frame.ppm";
 const default_duration_ms: u32 = 1500;
 const default_synthetic_keydown_duration_ms: u32 = 250;
 const default_manual_keydown_duration_ms: u32 = 15_000;
@@ -42,6 +43,11 @@ const NativeKeyDownSource = enum {
     manual,
 };
 
+const SmokeScenario = enum {
+    controlled,
+    interactive_shell,
+};
+
 const NativeKeyDownSmokeResult = extern struct {
     status: i32,
     window_visible: u32,
@@ -62,6 +68,7 @@ const NativeCloseSmokeResult = extern struct {
 };
 
 const AppPtyMetalSmokeConfig = struct {
+    artifact_dir: []const u8 = default_artifact_dir,
     size: terminal.Size = .{ .cols = 40, .rows = 6 },
     command: []const u8 = "/bin/sh",
     args: []const []const u8 = &.{
@@ -79,6 +86,7 @@ const AppPtyMetalSmokeConfig = struct {
     native_keydown_duration_ms: u32 = default_synthetic_keydown_duration_ms,
     expected_text: []const u8 = "typed:scripted input",
     drain_timeout_ms: i64 = app.smoke_drain.default_timeout_ms,
+    interactive_shell: bool = false,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -91,15 +99,16 @@ pub fn main(init: std.process.Init) !void {
 
     const duration_ms = readDurationMs();
     const native_keydown_source = readNativeKeyDownSource();
-    const smoke_config: AppPtyMetalSmokeConfig = .{
-        .native_keydown_source = native_keydown_source,
-        .native_keydown_duration_ms = readNativeKeyDownDurationMs(native_keydown_source),
-    };
+    var smoke_config = configForScenario(readSmokeScenario());
+    smoke_config.native_keydown_source = native_keydown_source;
+    smoke_config.native_keydown_duration_ms = readNativeKeyDownDurationMs(native_keydown_source);
+    const screenshot_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ smoke_config.artifact_dir, screenshot_filename });
+    defer allocator.free(screenshot_path);
     const appearance = try config.resolveAppearance(.{});
     var fixture = try buildLivePtyFixture(io, allocator, smoke_config, appearance);
     defer fixture.deinit(allocator);
 
-    try resetArtifacts(io);
+    try resetArtifacts(io, smoke_config.artifact_dir, screenshot_path);
     var native: metal_smoke.NativeMetalSmokeResult = std.mem.zeroes(metal_smoke.NativeMetalSmokeResult);
     native.status = -1;
     metal_smoke.maru_macos_metal_smoke_run(
@@ -125,17 +134,18 @@ pub fn main(init: std.process.Init) !void {
         .status = smoke_status,
         .native = native,
         .fixture = fixture,
+        .screenshot_path = screenshot_path,
     });
     defer allocator.free(summary);
 
-    try writeArtifacts(io, allocator, .{
+    try writeArtifacts(io, allocator, smoke_config.artifact_dir, .{
         .summary = summary,
         .raw = fixture.raw,
         .screen = fixture.screen,
         .snapshot = fixture.snapshot,
     });
     try stdout.writeAll(summary);
-    try stdout.print("\nartifacts written to {s}/\n", .{artifact_dir});
+    try stdout.print("\nartifacts written to {s}/\n", .{smoke_config.artifact_dir});
     try stdout.flush();
 
     if (!fixture.screen_contains_expected or
@@ -163,10 +173,12 @@ const LivePtyMetalFixture = struct {
     frame_loop_final_tick_index: usize,
     frame_loop_final_ended: bool,
     close_lifecycle: CloseLifecycleProbe,
+    artifact_dir: []const u8,
     command: []const u8,
     args_len: usize,
     size: terminal.Size,
     drain_timeout_ms: i64,
+    interactive_shell: bool,
 
     fn deinit(self: *LivePtyMetalFixture, allocator: std.mem.Allocator) void {
         self.metal.deinit(allocator);
@@ -211,8 +223,9 @@ fn buildLivePtyFixture(
     smoke_config: AppPtyMetalSmokeConfig,
     appearance: config.ResolvedAppearance,
 ) !LivePtyMetalFixture {
-    // 이 smoke는 첫 visible PTY 경로다. shell UX가 아니라 app/PTY/renderer/platform 결합을
-    // 검증하므로 prompt와 dotfile 영향을 받지 않는 controlled command만 실행한다.
+    // 이 smoke는 첫 visible PTY 경로다. controlled mode는 shell UX가 아니라
+    // app/PTY/renderer/platform 결합을 검증한다. interactive_shell mode는 같은 경로에
+    // 실제 `$SHELL -i`를 태우되, 아직 사용자가 계속 조작하는 제품 loop는 아니다.
     const native_keydown = try runNativeKeyDownSmoke(
         smoke_config.native_keydown_source,
         smoke_config.native_keydown_duration_ms,
@@ -353,10 +366,12 @@ fn buildLivePtyFixture(
         .frame_loop_final_tick_index = final_tick.index,
         .frame_loop_final_ended = final_tick.ended(),
         .close_lifecycle = close_lifecycle,
+        .artifact_dir = smoke_config.artifact_dir,
         .command = smoke_config.command,
         .args_len = smoke_config.args.len,
         .size = smoke_config.size,
         .drain_timeout_ms = smoke_config.drain_timeout_ms,
+        .interactive_shell = smoke_config.interactive_shell,
     };
 }
 
@@ -489,6 +504,7 @@ const SummaryInput = struct {
     status: metal_smoke.SmokeStatus,
     native: metal_smoke.NativeMetalSmokeResult,
     fixture: LivePtyMetalFixture,
+    screenshot_path: []const u8,
 };
 
 fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
@@ -497,7 +513,7 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
 
     const writer = &output.writer;
     try writer.writeAll("maru.macos-app-pty-metal-smoke.v1\n");
-    try writer.print("artifact_dir={s}\n", .{artifact_dir});
+    try writer.print("artifact_dir={s}\n", .{input.fixture.artifact_dir});
     try writer.print("visible_ui={}\n", .{input.status.visible_ui});
     try writer.print("metal_surface={}\n", .{input.status.metal_surface});
     try writer.print("terminal_grid={}\n", .{input.status.terminal_grid});
@@ -505,7 +521,7 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.print("product_atlas_sampled={}\n", .{input.status.product_atlas_sampled});
     try writer.print("screenshot_artifact={}\n", .{input.status.screenshot_artifact});
     if (input.status.screenshot_artifact) {
-        try writer.print("screenshot_path={s}\n", .{screenshot_path});
+        try writer.print("screenshot_path={s}\n", .{input.screenshot_path});
         try writer.writeAll("screenshot_format=ppm_rgb_from_bgra8_drawable_readback\n");
     }
     const glyph_text = input.fixture.metal.uses_coretext_bytes and input.status.product_atlas_sampled;
@@ -516,6 +532,7 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try renderer.writeRenderFrameStats(writer, "renderer_", input.fixture.metal.stats);
     try writer.print("renderer_shaper={s}\n", .{input.fixture.metal.shaper});
     try writer.print("renderer_rasterizer={s}\n", .{input.fixture.metal.rasterizer});
+    try writer.print("interactive_shell={}\n", .{input.fixture.interactive_shell});
     try writer.print("command={s}\n", .{input.fixture.command});
     try writer.print("args.len={d}\n", .{input.fixture.args_len});
     try writer.print("drain_timeout_ms={d}\n", .{input.fixture.drain_timeout_ms});
@@ -571,9 +588,9 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.print("atlas_sample_missing_cells={d}\n", .{input.native.atlas_sample_missing_cells});
     try writer.print("screenshot_written={d}\n", .{input.native.screenshot_written});
     try writer.print("screenshot_bytes={d}\n", .{input.native.screenshot_bytes});
-    try writer.print("raw_artifact={s}/app-pty-metal.raw.txt\n", .{artifact_dir});
-    try writer.print("screen_artifact={s}/app-pty-metal.screen.txt\n", .{artifact_dir});
-    try writer.print("snapshot_artifact={s}/app-pty-metal.snapshot.txt\n", .{artifact_dir});
+    try writer.print("raw_artifact={s}/app-pty-metal.raw.txt\n", .{input.fixture.artifact_dir});
+    try writer.print("screen_artifact={s}/app-pty-metal.screen.txt\n", .{input.fixture.artifact_dir});
+    try writer.print("snapshot_artifact={s}/app-pty-metal.snapshot.txt\n", .{input.fixture.artifact_dir});
 
     return output.toOwnedSlice();
 }
@@ -637,6 +654,45 @@ fn keyHandlingResultName(result: app.KeyHandlingResult) []const u8 {
     return @tagName(result);
 }
 
+fn configForScenario(scenario: SmokeScenario) AppPtyMetalSmokeConfig {
+    return switch (scenario) {
+        .controlled => .{},
+        .interactive_shell => .{
+            .artifact_dir = interactive_artifact_dir,
+            .command = interactiveShellPath(),
+            .args = &.{"-i"},
+            .ready_marker = "",
+            .scripted_input = "printf 'MARU_APP_PTY_INTERACTIVE_METAL_OK\\n'; exit\n",
+            .expected_text = "MARU_APP_PTY_INTERACTIVE_METAL_OK",
+            .interactive_shell = true,
+        },
+    };
+}
+
+fn readSmokeScenario() SmokeScenario {
+    const raw_ptr = std.c.getenv("MARU_APP_PTY_METAL_SCENARIO") orelse return .controlled;
+    return smokeScenarioFromEnvValue(std.mem.span(raw_ptr));
+}
+
+fn smokeScenarioFromEnvValue(raw: []const u8) SmokeScenario {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(trimmed, "interactive") or
+        std.ascii.eqlIgnoreCase(trimmed, "interactive-shell") or
+        std.ascii.eqlIgnoreCase(trimmed, "interactive_shell"))
+    {
+        return .interactive_shell;
+    }
+    return .controlled;
+}
+
+fn interactiveShellPath() []const u8 {
+    // 테스트와 smoke가 같은 우선순위를 쓰게 한다. 사용자가 명시한 shell이 있으면
+    // 그것을 우선하고, 없으면 현재 login shell, 마지막으로 macOS 기본 zsh를 쓴다.
+    if (std.c.getenv("MARU_INTERACTIVE_SHELL")) |raw| return std.mem.span(raw);
+    if (std.c.getenv("SHELL")) |raw| return std.mem.span(raw);
+    return "/bin/zsh";
+}
+
 fn writeTermination(writer: *std.Io.Writer, termination: ?app.RuntimePumpTermination) !void {
     if (termination == null) {
         try writer.writeAll("none");
@@ -668,14 +724,23 @@ const ArtifactInput = struct {
     snapshot: []const u8,
 };
 
-fn writeArtifacts(io: std.Io, allocator: std.mem.Allocator, artifacts: ArtifactInput) !void {
+fn writeArtifacts(io: std.Io, allocator: std.mem.Allocator, artifact_dir: []const u8, artifacts: ArtifactInput) !void {
     try std.Io.Dir.cwd().createDirPath(io, artifact_dir);
-    try writeText(io, artifact_dir ++ "/app-pty-metal.summary.txt", artifacts.summary);
-    try writeText(io, artifact_dir ++ "/app-pty-metal.raw.txt", artifacts.raw);
+    const summary_path = try std.fmt.allocPrint(allocator, "{s}/app-pty-metal.summary.txt", .{artifact_dir});
+    defer allocator.free(summary_path);
+    const raw_path = try std.fmt.allocPrint(allocator, "{s}/app-pty-metal.raw.txt", .{artifact_dir});
+    defer allocator.free(raw_path);
+    const screen_path = try std.fmt.allocPrint(allocator, "{s}/app-pty-metal.screen.txt", .{artifact_dir});
+    defer allocator.free(screen_path);
+    const snapshot_path = try std.fmt.allocPrint(allocator, "{s}/app-pty-metal.snapshot.txt", .{artifact_dir});
+    defer allocator.free(snapshot_path);
+
+    try writeText(io, summary_path, artifacts.summary);
+    try writeText(io, raw_path, artifacts.raw);
     const screen_with_newline = try std.fmt.allocPrint(allocator, "{s}\n", .{artifacts.screen});
     defer allocator.free(screen_with_newline);
-    try writeText(io, artifact_dir ++ "/app-pty-metal.screen.txt", screen_with_newline);
-    try writeText(io, artifact_dir ++ "/app-pty-metal.snapshot.txt", artifacts.snapshot);
+    try writeText(io, screen_path, screen_with_newline);
+    try writeText(io, snapshot_path, artifacts.snapshot);
 }
 
 fn writeText(io: std.Io, path: []const u8, contents: []const u8) !void {
@@ -686,7 +751,7 @@ fn writeText(io: std.Io, path: []const u8, contents: []const u8) !void {
     });
 }
 
-fn resetArtifacts(io: std.Io) !void {
+fn resetArtifacts(io: std.Io, artifact_dir: []const u8, screenshot_path: []const u8) !void {
     try std.Io.Dir.cwd().createDirPath(io, artifact_dir);
     std.Io.Dir.cwd().deleteFile(io, screenshot_path) catch |err| switch (err) {
         error.FileNotFound => {},
@@ -843,16 +908,19 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
             .queue_closed = true,
             .idempotent = true,
         },
+        .artifact_dir = default_artifact_dir,
         .command = "/bin/sh",
         .args_len = 2,
         .size = .{ .cols = 40, .rows = 6 },
         .drain_timeout_ms = app.smoke_drain.default_timeout_ms,
+        .interactive_shell = false,
     };
     const summary = try renderSummary(std.testing.allocator, .{
         .duration_ms = 1500,
         .status = metal_smoke.deriveSmokeStatus(native),
         .native = native,
         .fixture = fixture,
+        .screenshot_path = default_artifact_dir ++ "/" ++ screenshot_filename,
     });
     defer std.testing.allocator.free(summary);
 
@@ -864,6 +932,7 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=surface_runtime_live_pty_frame_loop_coretext_render_frame\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_shaper=coretext_draw_list\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_rasterizer=coretext_glyph_rasterizer\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "interactive_shell=false\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "drain_timeout_ms=5000\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "input_source=appkit_keydown_to_app_host_keybinding_resolver\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "native_key_event_source=appkit_synthetic_keydown\n") != null);
@@ -893,6 +962,24 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "termination=exited(code=0)\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screen_contains_expected=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screenshot_path=zig-out/maru-macos-app-pty-metal-smoke/app-pty-metal-frame.ppm\n") != null);
+}
+
+test "app PTY Metal scenario parser keeps controlled and interactive modes explicit" {
+    // 하나의 executable이 두 smoke를 처리하므로 env 문자열이 곧 제품 검증 범위다.
+    // 알 수 없는 값은 controlled로 닫아 CI가 우연히 interactive shell을 실행하지 않게 한다.
+    try std.testing.expectEqual(SmokeScenario.controlled, smokeScenarioFromEnvValue(""));
+    try std.testing.expectEqual(SmokeScenario.controlled, smokeScenarioFromEnvValue("controlled"));
+    try std.testing.expectEqual(SmokeScenario.controlled, smokeScenarioFromEnvValue("unknown"));
+    try std.testing.expectEqual(SmokeScenario.interactive_shell, smokeScenarioFromEnvValue("interactive"));
+    try std.testing.expectEqual(SmokeScenario.interactive_shell, smokeScenarioFromEnvValue("interactive-shell"));
+    try std.testing.expectEqual(SmokeScenario.interactive_shell, smokeScenarioFromEnvValue(" interactive_shell\n"));
+
+    const interactive = configForScenario(.interactive_shell);
+    try std.testing.expect(interactive.interactive_shell);
+    try std.testing.expectEqualStrings(interactive_artifact_dir, interactive.artifact_dir);
+    try std.testing.expectEqualStrings("", interactive.ready_marker);
+    try std.testing.expect(std.mem.indexOf(u8, interactive.scripted_input, "MARU_APP_PTY_INTERACTIVE_METAL_OK") != null);
+    try std.testing.expectEqualStrings("MARU_APP_PTY_INTERACTIVE_METAL_OK", interactive.expected_text);
 }
 
 test "app PTY Metal keyDown bridge maps native payload into terminal KeyEvent" {

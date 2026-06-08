@@ -160,7 +160,7 @@ TDD 방식:
 - deterministic controlled command PTY test와 환경 의존 interactive shell smoke가 분리되어 있다.
 - interactive shell smoke는 처음부터 기본 `mise run check`에 넣지 않는다.
 - `mise run pty`는 macOS PTY opt-in 테스트를 실행한다.
-- app/demo/smoke 코드는 정상 종료와 close/error cleanup에서 `LivePtySession` owner를 사용한다. 이 owner는 `PtySession`, `PtyEventQueue`, `PtyReader`, runtime attach link를 한 live terminal session 단위로 묶고, 정상 종료 뒤 cleanup이 `stopAndJoin`을 다시 부르지 않게 하며, 조기 실패 경로에서는 아직 join되지 않은 reader를 같은 `PtyReader.stopAndJoin` 순서로 닫게 한다.
+- app/demo/smoke 코드는 정상 종료와 close/error cleanup에서 `LivePtySession` owner를 사용한다. 이 owner는 `PtySession`, `PtyEventQueue`, `PtyReader`, runtime attach link를 한 live terminal session 단위로 묶고, 정상 종료 뒤 cleanup이 `stopAndJoin`을 다시 부르지 않게 하며, 조기 실패 경로에서는 아직 join되지 않은 reader를 같은 `PtyReader.stopAndJoin` 순서로 닫게 한다. surface도 함께 닫히는 경로는 `LivePtySession.closeAndDetach`를 통해 runtime routing을 먼저 끊고 같은 close 순서를 탄다.
 
 아직 하지 않는다:
 
@@ -168,7 +168,7 @@ TDD 방식:
 - login shell UX 완성.
 - job control 전체 호환성.
 - global shortcut.
-- macOS app host의 실제 tab/window close command와 `LivePtySession.close` 연결.
+- macOS app host의 실제 tab/window close command와 `LivePtySession.closeAndDetach` 연결.
 
 ## 5단계: `SurfaceRuntime`으로 PTY와 Surface 연결
 
@@ -232,14 +232,14 @@ TDD 방식:
 - `mise run app-pty-loop-smoke`가 실제 PTY reader thread에서 온 event batch를 반복 `FrameLoop`에 태우고 `zig-out/maru-app-pty-loop-smoke/`에 raw PTY bytes, screen, snapshot, frame loop artifact를 남긴다. 이 smoke는 실제 PTY와 반복 frame loop를 같이 검증하지만 아직 AppKit/Metal 창을 띄우지 않으므로 `visible_ui=false`를 명시한다.
 - `mise run app-pty-smoke`가 실제 PTY controlled command를 `SurfaceRuntime -> AppWindow -> AppHostFrame -> RendererState`까지 통과시키고 `zig-out/maru-app-pty-smoke/`에 raw PTY bytes, screen, snapshot, renderer frame artifact를 남긴다. 이 smoke는 실제 app host 결합 경로를 검증하지만 아직 AppKit/Metal 창을 띄우지 않으므로 `visible_ui=false`를 명시한다.
 - 실패했을 때 원인을 parser, PTY, surface 연결 중 어디서 봐야 하는지 artifact로 판단할 수 있다.
-- `headless_demo`, `app-pty-smoke`, `app-pty-loop-smoke`, `macos-app-pty-metal-smoke`는 `LivePtySession` owner를 사용한다. 이 단계에서는 아직 실제 close button을 누르지 않지만, app-level smoke들이 같은 live PTY ownership primitive를 쓰도록 먼저 고정해 둔다.
+- `headless_demo`, `app-pty-smoke`, `app-pty-loop-smoke`, `macos-app-pty-metal-smoke`는 `LivePtySession` owner를 사용한다. `LivePtySession.closeAndDetach`는 실제 close button이 들어오기 전에 app-level close 순서(`detachSurface -> close`)를 단위 테스트로 먼저 고정한다. 이 단계에서는 아직 실제 close button을 누르지 않지만, app-level smoke들이 같은 live PTY ownership primitive를 쓰도록 먼저 고정해 둔다.
 
 아직 하지 않는다:
 
 - app window screenshot E2E.
 - renderer frame budget.
 - 대량 stdout backpressure의 RSS/latency/UI responsiveness 성능 예산.
-- macOS window/app event loop에서 시작되는 interactive shell shutdown lifecycle. 실제 window/tab close는 이후 PR에서 `LivePtySession.close`를 app host surface lifecycle에 연결해 검증한다.
+- macOS window/app event loop에서 시작되는 interactive shell shutdown lifecycle. 실제 window/tab close는 이후 PR에서 `LivePtySession.closeAndDetach`를 app host surface lifecycle에 연결해 검증한다.
 
 ## 7단계: Renderer와 macOS app host 연결
 

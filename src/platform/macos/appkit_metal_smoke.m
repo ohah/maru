@@ -49,6 +49,12 @@ typedef struct {
     uint32_t modifier_command;
 } MaruKeyDownSmokeResult;
 
+enum {
+    MaruKeyDownModeNone = 0,
+    MaruKeyDownModeSynthetic = 1,
+    MaruKeyDownModeManual = 2,
+};
+
 typedef int32_t (*MaruWindowCloseCallback)(void *ctx);
 
 typedef struct {
@@ -244,12 +250,10 @@ static void maru_pump_app_once(void) {
     [CATransaction flush];
 }
 
-static void maru_run_keydown_smoke(
-    uint32_t duration_ms,
-    BOOL post_synthetic_event,
-    NSString *title,
-    MaruKeyDownSmokeResult *result
-) {
+static void maru_reset_keydown_result(MaruKeyDownSmokeResult *result) {
+    if (result == NULL) {
+        return;
+    }
     result->status = -1;
     result->window_visible = 0;
     result->key_down_received = 0;
@@ -258,6 +262,38 @@ static void maru_run_keydown_smoke(
     result->modifier_control = 0;
     result->modifier_option = 0;
     result->modifier_command = 0;
+}
+
+static BOOL maru_post_synthetic_keydown_event(NSWindow *window) {
+    NSEvent *event = [NSEvent
+        keyEventWithType:NSEventTypeKeyDown
+                location:NSMakePoint(8.0, 8.0)
+           modifierFlags:NSEventModifierFlagCommand
+               timestamp:0.0
+            windowNumber:[window windowNumber]
+                 context:nil
+              characters:@"b"
+charactersIgnoringModifiers:@"b"
+               isARepeat:NO
+                 keyCode:11];
+    if (event == nil) {
+        return NO;
+    }
+    // Synthetic smoke가 검증하려는 것은 "우리가 만든 Cmd+B event가 AppKit
+    // keyDown: 경계를 통과한다"는 계약이다. 이전 visible smoke가 남긴 AppKit
+    // event가 먼저 처리되면 capture view가 그 stale event를 기록해 Zig chord
+    // 검증이 흔들릴 수 있으므로 synthetic event는 queue 앞에 넣는다.
+    [NSApp postEvent:event atStart:YES];
+    return YES;
+}
+
+static void maru_run_keydown_smoke(
+    uint32_t duration_ms,
+    BOOL post_synthetic_event,
+    NSString *title,
+    MaruKeyDownSmokeResult *result
+) {
+    maru_reset_keydown_result(result);
 
     @autoreleasepool {
         // 이 helper는 synthetic smoke와 manual smoke가 같은 first-responder/keyDown
@@ -302,27 +338,11 @@ static void maru_run_keydown_smoke(
 
         result->window_visible = [window isVisible] ? 1 : 0;
         if (post_synthetic_event) {
-            NSEvent *event = [NSEvent
-                keyEventWithType:NSEventTypeKeyDown
-                        location:NSMakePoint(8.0, 8.0)
-                   modifierFlags:NSEventModifierFlagCommand
-                       timestamp:0.0
-                    windowNumber:[window windowNumber]
-                         context:nil
-                      characters:@"b"
-     charactersIgnoringModifiers:@"b"
-                       isARepeat:NO
-                         keyCode:11];
-            if (event == nil) {
+            if (!maru_post_synthetic_keydown_event(window)) {
                 result->status = 5;
                 [window orderOut:nil];
                 return;
             }
-            // Synthetic smoke가 검증하려는 것은 "우리가 만든 Cmd+B event가 AppKit
-            // keyDown: 경계를 통과한다"는 계약이다. 이전 visible smoke가 남긴 AppKit
-            // event가 먼저 처리되면 capture view가 그 stale event를 기록해 Zig chord
-            // 검증이 흔들릴 수 있으므로 synthetic event는 queue 앞에 넣는다.
-            [NSApp postEvent:event atStart:YES];
         }
 
         NSTimeInterval seconds = ((NSTimeInterval)duration_ms) / 1000.0;
@@ -1318,8 +1338,11 @@ void maru_macos_metal_smoke_run(
     size_t screenshot_path_len,
     MaruMetalSmokeResult *result,
     MaruWindowCloseCallback close_callback,
-    void *close_callback_context
+    void *close_callback_context,
+    MaruKeyDownSmokeResult *keydown_result,
+    uint32_t keydown_mode
 ) {
+    maru_reset_keydown_result(keydown_result);
     result->status = -1;
     result->window_visible = 0;
     result->presented_frames = 0;
@@ -1424,8 +1447,24 @@ void maru_macos_metal_smoke_run(
             return;
         }
 
-        NSView *content = [[NSView alloc]
-            initWithFrame:NSMakeRect(0.0, 0.0, frame.size.width, frame.size.height)];
+        NSView *content = nil;
+        if (keydown_result != NULL) {
+            // app PTY Metal smoke는 keyDown payload도 같은 terminal window에서 얻어야 한다.
+            // 별도 capture window를 쓰면 AppKit input 증거와 visible terminal lifecycle이 갈라진다.
+            content = [[MaruKeyCaptureView alloc]
+                initWithFrame:NSMakeRect(0.0, 0.0, frame.size.width, frame.size.height)
+                       result:keydown_result];
+        } else {
+            content = [[NSView alloc]
+                initWithFrame:NSMakeRect(0.0, 0.0, frame.size.width, frame.size.height)];
+        }
+        if (content == nil) {
+            result->status = 14;
+            if (keydown_result != NULL) {
+                keydown_result->status = 3;
+            }
+            return;
+        }
 
         CAMetalLayer *metal_layer = [CAMetalLayer layer];
         metal_layer.device = device;
@@ -1478,6 +1517,27 @@ void maru_macos_metal_smoke_run(
         [window setContentView:content];
         [window makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
+        if (keydown_result != NULL) {
+            if (![window makeFirstResponder:content]) {
+                keydown_result->status = 4;
+                result->status = 14;
+                [window orderOut:nil];
+                return;
+            }
+            if (keydown_mode == MaruKeyDownModeSynthetic) {
+                if (!maru_post_synthetic_keydown_event(window)) {
+                    keydown_result->status = 5;
+                    result->status = 14;
+                    [window orderOut:nil];
+                    return;
+                }
+            } else if (keydown_mode != MaruKeyDownModeManual) {
+                keydown_result->status = 8;
+                result->status = 14;
+                [window orderOut:nil];
+                return;
+            }
+        }
 
         char *screenshot_path_copy = maru_copy_path(screenshot_path, screenshot_path_len);
         if (screenshot_path_copy == NULL) {
@@ -1523,6 +1583,16 @@ void maru_macos_metal_smoke_run(
         // headless/activation 실패에서 visible_ui=true 오탐을 막을 수 있다.
         BOOL became_visible = [window isVisible];
         result->window_visible = became_visible ? 1 : 0;
+        if (keydown_result != NULL) {
+            keydown_result->window_visible = result->window_visible;
+            if (!became_visible) {
+                keydown_result->status = 6;
+            } else if (keydown_result->key_down_received == 0 || keydown_result->codepoint == 0) {
+                keydown_result->status = 7;
+            } else {
+                keydown_result->status = 0;
+            }
+        }
         if (close_callback != NULL) {
             // app PTY Metal smoke는 같은 terminal window의 close request가 Zig app close
             // action으로 내려가는지 보려 한다. 별도 작은 창을 닫으면 AppKit delegate 경계만

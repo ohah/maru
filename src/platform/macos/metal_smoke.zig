@@ -53,6 +53,23 @@ pub const NativeMetalSmokeResult = extern struct {
 
 pub const NativeWindowCloseCallback = ?*const fn (?*anyopaque) callconv(.c) i32;
 
+pub const NativeKeyDownMode = enum(u32) {
+    none = 0,
+    synthetic = 1,
+    manual = 2,
+};
+
+pub const NativeKeyDownSmokeResult = extern struct {
+    status: c_int,
+    window_visible: u32,
+    key_down_received: u32,
+    codepoint: u32,
+    modifier_shift: u32,
+    modifier_control: u32,
+    modifier_option: u32,
+    modifier_command: u32,
+};
+
 pub const NativeMetalCell = extern struct {
     row: u16,
     col: u16,
@@ -99,6 +116,8 @@ pub extern fn maru_macos_metal_smoke_run(
     result: *NativeMetalSmokeResult,
     close_callback: NativeWindowCloseCallback,
     close_callback_context: ?*anyopaque,
+    keydown_result: ?*NativeKeyDownSmokeResult,
+    keydown_mode: u32,
 ) void;
 
 pub fn main(init: std.process.Init) !void {
@@ -162,6 +181,8 @@ pub fn main(init: std.process.Init) !void {
         &native,
         null,
         null,
+        null,
+        @intFromEnum(NativeKeyDownMode.none),
     );
 
     const smoke_status = deriveSmokeStatus(native);
@@ -906,6 +927,16 @@ test "NativeMetalSmokeResult ABI keeps atlas diagnostics visible to Zig" {
     // 예고 없이 달라지면 product_atlas_uploaded 같은 진단값을 다른 필드로 읽을 수 있다.
     try std.testing.expectEqual(@as(usize, 112), @sizeOf(NativeMetalSmokeResult));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(NativeMetalSmokeResult));
+}
+
+test "NativeKeyDownSmokeResult ABI keeps Metal terminal key payload visible to Zig" {
+    // 같은 Metal terminal window가 받은 keyDown payload를 app host resolver에 넣는다.
+    // 이 구조체 크기가 흔들리면 modifier나 codepoint를 잘못 읽어 PTY 입력 검증이 오염된다.
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(NativeKeyDownSmokeResult));
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(NativeKeyDownSmokeResult));
+    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(NativeKeyDownMode.none));
+    try std.testing.expectEqual(@as(u32, 1), @intFromEnum(NativeKeyDownMode.synthetic));
+    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(NativeKeyDownMode.manual));
 }
 
 test "Metal smoke terminal grid requires matched atlas texel samples" {

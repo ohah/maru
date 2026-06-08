@@ -21,14 +21,11 @@ const default_manual_keydown_duration_ms: u32 = 15_000;
 const max_duration_ms: u32 = 600_000;
 const renderer_input_live_pty_frame_loop = "surface_runtime_live_pty_frame_loop_coretext_render_frame";
 const input_source_appkit_keydown_resolver = "appkit_keydown_to_app_host_keybinding_resolver";
-const native_key_event_source_appkit_synthetic = "appkit_synthetic_keydown";
-const native_key_event_source_appkit_manual = "appkit_manual_keydown";
+const native_key_event_source_appkit_synthetic = "metal_terminal_synthetic_keydown";
+const native_key_event_source_appkit_manual = "metal_terminal_manual_keydown";
 const close_lifecycle_appkit_window_close_callback = "appkit_terminal_window_close_callback_after_visible_frame";
 const native_close_success: i32 = 0;
 const native_close_missing_context: i32 = 1000;
-
-extern fn maru_macos_keydown_smoke_run(duration_ms: u32, result: *NativeKeyDownSmokeResult) void;
-extern fn maru_macos_manual_keydown_smoke_run(duration_ms: u32, result: *NativeKeyDownSmokeResult) void;
 
 const NativeKeyDownSource = enum {
     synthetic,
@@ -38,17 +35,6 @@ const NativeKeyDownSource = enum {
 const SmokeScenario = enum {
     controlled,
     interactive_shell,
-};
-
-const NativeKeyDownSmokeResult = extern struct {
-    status: i32,
-    window_visible: u32,
-    key_down_received: u32,
-    codepoint: u32,
-    modifier_shift: u32,
-    modifier_control: u32,
-    modifier_option: u32,
-    modifier_command: u32,
 };
 
 const AppPtyMetalSmokeConfig = struct {
@@ -61,10 +47,10 @@ const AppPtyMetalSmokeConfig = struct {
     },
     ready_marker: []const u8 = "Maru input ready",
     scripted_input: []const u8 = "scripted input\n",
-    // synthetic mode의 native keyDown 이벤트는 appkit_metal_smoke.m에 Cmd+B로
+    // synthetic mode의 native keyDown 이벤트는 Metal terminal window에 Cmd+B로
     // 하드코딩되어 있다. 따라서 synthetic mode에서는 이 값이 "Cmd+B"여야 하고, 다른
-    // 값을 쓰면 ensureNativeKeyMatchesChord가 실패한다. manual mode는 사용자가 누른
-    // 실제 chord를 이 값과 비교하므로 이 값이 곧 기대 chord다.
+    // 값을 쓰면 ensureNativeKeyMatchesChord가 실패한다. manual mode는 사용자가 같은
+    // Metal terminal window에서 누른 실제 chord를 이 값과 비교하므로 이 값이 곧 기대 chord다.
     scripted_key_chord: []const u8 = "Cmd+B",
     native_keydown_source: NativeKeyDownSource = .synthetic,
     native_keydown_duration_ms: u32 = default_synthetic_keydown_duration_ms,
@@ -133,7 +119,7 @@ const LivePtyMetalFixture = struct {
     drain_summary: app.RuntimePumpDrainSummary,
     process_state: app.ProcessState,
     screen_contains_expected: bool,
-    native_keydown: NativeKeyDownSmokeResult,
+    native_keydown: metal_smoke.NativeKeyDownSmokeResult,
     native_keydown_source: NativeKeyDownSource,
     scripted_key_event_sent: bool,
     scripted_key_event_result: []const u8,
@@ -198,11 +184,6 @@ fn buildLivePtyFixture(
     // 이 smoke는 첫 visible PTY 경로다. controlled mode는 shell UX가 아니라
     // app/PTY/renderer/platform 결합을 검증한다. interactive_shell mode는 같은 경로에
     // 실제 `$SHELL -i`를 태우되, 아직 사용자가 계속 조작하는 제품 loop는 아니다.
-    const native_keydown = try runNativeKeyDownSmoke(
-        smoke_config.native_keydown_source,
-        smoke_config.native_keydown_duration_ms,
-    );
-
     var live_pty: app.LivePtySession = undefined;
     try live_pty.init(io, allocator, 10, .{
         .command = smoke_config.command,
@@ -233,6 +214,8 @@ fn buildLivePtyFixture(
     var raw_bytes: std.ArrayList(u8) = .empty;
     errdefer raw_bytes.deinit(allocator);
     var drain_summary: app.RuntimePumpDrainSummary = .{};
+    var native_keydown: metal_smoke.NativeKeyDownSmokeResult = std.mem.zeroes(metal_smoke.NativeKeyDownSmokeResult);
+    native_keydown.status = -1;
 
     var scripted_key_event_sent = false;
     var scripted_key_event_result: []const u8 = "none";
@@ -251,8 +234,42 @@ fn buildLivePtyFixture(
             smoke_config.ready_marker,
             smoke_config.drain_timeout_ms,
         );
+        // keyDown을 받기 위한 ready frame은 실제 final frame과 다른 native Metal
+        // window/texture에서 그려진다. 같은 RendererState를 재사용하면 glyph atlas cache만
+        // warmed 되고 final native texture에는 해당 glyph bytes가 올라가지 않아 sample
+        // missing이 생긴다. 그래서 key capture용 frame은 별도 renderer state로 격리한다.
+        var keydown_renderer_state = renderer.RendererState.init(allocator, .{});
+        defer keydown_renderer_state.deinit();
+        var keydown_frame_loop = app.AppFrameLoop.init(allocator, &app_window, &runtime, &pump, &keydown_renderer_state);
+        var ready_tick = try keydown_frame_loop.tickAfterDrainWithFrameBuilder(drain_summary, coretext_frame_builder.CoreTextFrameBuilder{
+            .appearance = appearance,
+            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+        });
+        defer ready_tick.deinit(allocator);
+
+        const ready_metal_fixture = try metal_smoke.buildSmokeFixtureFromRenderFrame(
+            allocator,
+            ready_tick.frame.render_frame,
+            keydown_renderer_state.atlas.config,
+            keydown_renderer_state.atlas.entryCount(),
+            true,
+            renderer_input_live_pty_frame_loop,
+            coretext_shaper.CoreTextDrawListShaper.name,
+            coretext_raster.CoreTextGlyphRasterizer.name,
+        );
+        defer {
+            var fixture_for_cleanup = ready_metal_fixture;
+            fixture_for_cleanup.deinit(allocator);
+        }
+        native_keydown = try runNativeTerminalKeyDownSmoke(
+            smoke_config.native_keydown_source,
+            smoke_config.native_keydown_duration_ms,
+            screenshot_path,
+            ready_metal_fixture,
+        );
         // native bridge가 실제 keyDown: 메서드에서 만든 payload를 Zig terminal.KeyEvent로
-        // 바꾼 뒤 app host에 넣는다. 이렇게 해야 macOS view가 키를 받는 증거와
+        // 바꾼 뒤 app host에 넣는다. 이렇게 해야 Metal terminal window가 키를 받는 증거와
         // Maru의 app-vs-terminal 정책이 같은 summary에서 이어진다.
         const scripted_chord = try config.KeyChord.parse(smoke_config.scripted_key_chord);
         const resolver: config.KeyBindingResolver = .{
@@ -340,6 +357,8 @@ fn buildLivePtyFixture(
         native,
         appPtyNativeCloseCallback,
         &close_context,
+        null,
+        @intFromEnum(metal_smoke.NativeKeyDownMode.none),
     );
     const close_lifecycle = try verifyCloseLifecycle(&live_pty, &runtime, &live_registry, active.id, live_pty.pty_id, native.*);
 
@@ -580,21 +599,46 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     return output.toOwnedSlice();
 }
 
-fn runNativeKeyDownSmoke(source: NativeKeyDownSource, duration_ms: u32) !NativeKeyDownSmokeResult {
-    var native_keydown = std.mem.zeroes(NativeKeyDownSmokeResult);
+fn runNativeTerminalKeyDownSmoke(
+    source: NativeKeyDownSource,
+    duration_ms: u32,
+    screenshot_path: []const u8,
+    fixture: metal_smoke.SmokeFixture,
+) !metal_smoke.NativeKeyDownSmokeResult {
+    var native = std.mem.zeroes(metal_smoke.NativeMetalSmokeResult);
+    native.status = -1;
+    native.terminal_close_status = -1;
+    native.terminal_close_callback_status = -1;
+    var native_keydown = std.mem.zeroes(metal_smoke.NativeKeyDownSmokeResult);
     native_keydown.status = -1;
-    switch (source) {
-        .synthetic => maru_macos_keydown_smoke_run(duration_ms, &native_keydown),
-        .manual => maru_macos_manual_keydown_smoke_run(duration_ms, &native_keydown),
-    }
-    if (native_keydown.status != 0) return error.NativeKeyDownSmokeFailed;
+    metal_smoke.maru_macos_metal_smoke_run(
+        duration_ms,
+        fixture.size.cols,
+        fixture.size.rows,
+        fixture.cells.ptr,
+        fixture.cells.len,
+        fixture.atlas_width_px,
+        fixture.atlas_height_px,
+        fixture.raster_uploads.ptr,
+        fixture.raster_uploads.len,
+        fixture.raster_pixels.ptr,
+        fixture.raster_pixels.len,
+        screenshot_path.ptr,
+        screenshot_path.len,
+        &native,
+        null,
+        null,
+        &native_keydown,
+        @intFromEnum(nativeKeyDownMode(source)),
+    );
+    if (native.status != 0 or native_keydown.status != 0) return error.NativeKeyDownSmokeFailed;
     if (native_keydown.key_down_received == 0 or native_keydown.codepoint == 0) {
         return error.NativeKeyDownSmokeMissingKey;
     }
     return native_keydown;
 }
 
-fn keyEventFromNativeKeyDown(native_keydown: NativeKeyDownSmokeResult) !terminal.KeyEvent {
+fn keyEventFromNativeKeyDown(native_keydown: metal_smoke.NativeKeyDownSmokeResult) !terminal.KeyEvent {
     if (native_keydown.status != 0 or native_keydown.key_down_received == 0) {
         return error.NativeKeyDownSmokeMissingKey;
     }
@@ -621,7 +665,7 @@ fn keyEventFromNativeKeyDown(native_keydown: NativeKeyDownSmokeResult) !terminal
 
 fn ensureNativeKeyMatchesChord(event: terminal.KeyEvent, expected: config.KeyChord) !void {
     // manual smoke는 사용자가 다른 키를 누를 수 있다. 잘못된 키를 PTY에 쓰면
-    // controlled command가 종료되지 않아 실패 원인이 key capture인지 PTY인지 흐려진다.
+    // controlled command가 종료되지 않아 실패 원인이 terminal window keyDown인지 PTY인지 흐려진다.
     const actual = config.KeyChord.fromKeyEvent(event) orelse return error.NativeKeyDownUnexpectedChord;
     if (!actual.eql(expected)) return error.NativeKeyDownUnexpectedChord;
 }
@@ -630,6 +674,13 @@ fn nativeKeyDownSourceName(source: NativeKeyDownSource) []const u8 {
     return switch (source) {
         .synthetic => native_key_event_source_appkit_synthetic,
         .manual => native_key_event_source_appkit_manual,
+    };
+}
+
+fn nativeKeyDownMode(source: NativeKeyDownSource) metal_smoke.NativeKeyDownMode {
+    return switch (source) {
+        .synthetic => .synthetic,
+        .manual => .manual,
     };
 }
 
@@ -925,7 +976,7 @@ test "app PTY Metal summary records live PTY and visible Metal evidence" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "interactive_shell=false\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "drain_timeout_ms=5000\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "input_source=appkit_keydown_to_app_host_keybinding_resolver\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "native_key_event_source=appkit_synthetic_keydown\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "native_key_event_source=metal_terminal_synthetic_keydown\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "native_keydown_status=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "native_keydown_window_visible=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "native_keydown_received=true\n") != null);
@@ -980,7 +1031,7 @@ test "app PTY Metal scenario parser keeps controlled and interactive modes expli
 test "app PTY Metal keyDown bridge maps native payload into terminal KeyEvent" {
     // native `.m`과 Zig가 이 struct를 C ABI로 공유한다. 크기가 조용히 바뀌면
     // modifier나 codepoint 위치가 밀려서 Cmd+B가 다른 키로 해석될 수 있다.
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(NativeKeyDownSmokeResult));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(metal_smoke.NativeKeyDownSmokeResult));
 
     const event = try keyEventFromNativeKeyDown(.{
         .status = 0,

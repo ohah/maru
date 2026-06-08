@@ -514,6 +514,84 @@ test "app frame loop can delegate frame construction after an already applied dr
     try std.testing.expectEqual(@as(usize, 1), loop.frame_index);
 }
 
+test "app frame loop can reuse an injected frame builder across interactive ticks" {
+    // Swift/AppKit 제품 loop가 붙으면 한 번 만든 renderer state와 app window 위에서
+    // output, key input, idle, exit tick이 계속 반복된다. 이 테스트는 CoreText builder
+    // 주입 경로가 한 프레임짜리 smoke에 갇히지 않고 지속 실행 loop의 호출 모양을
+    // 미리 만족한다는 계약을 고정한다.
+    const allocator = std.testing.allocator;
+    var memory_pty = MemoryPty.init(allocator);
+    defer memory_pty.deinit();
+    var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 24, .rows = 4 })};
+    defer surfaces[0].deinit();
+    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surfaces[0], 10, memory_pty.io());
+
+    var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 8);
+    defer queue.deinit();
+    var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
+    var renderer_state = renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
+    var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
+
+    try pushOutput(&queue, allocator, 10, "maru$ ");
+    const prompt_drain = try pump.drainAvailable();
+    var prompt_tick = try loop.tickAfterDrainWithFrameBuilder(prompt_drain, FakeFrameBuilder{});
+    defer prompt_tick.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), prompt_tick.index);
+    try std.testing.expectEqual(@as(usize, 1), prompt_tick.frame.drain_summary.output_events);
+    try std.testing.expect(prompt_tick.render_stats.prepared());
+
+    const resolver: config_mod.KeyBindingResolver = .{
+        .terminal_bindings = &.{.{
+            .chord = try config_mod.KeyChord.parse("Cmd+B"),
+            .input = .{ .send_text = "echo maru\n" },
+        }},
+    };
+    try resolver.validate();
+    const input_result = try loop.handleKeyEvent(resolver, .{
+        .key = .{ .char = 'b' },
+        .modifiers = .{ .command = true },
+    });
+    try std.testing.expectEqual(@as(usize, "echo maru\n".len), input_result.terminal_input.bytes_len);
+    try std.testing.expectEqualStrings("echo maru\n", memory_pty.writes.items);
+
+    try pushOutput(&queue, allocator, 10, "echo maru\r\nmaru\r\n");
+    const command_drain = try pump.drainAvailable();
+    var command_tick = try loop.tickAfterDrainWithFrameBuilder(command_drain, FakeFrameBuilder{});
+    defer command_tick.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), command_tick.index);
+    try std.testing.expectEqual(@as(usize, 1), command_tick.frame.drain_summary.output_events);
+    try std.testing.expect(command_tick.render_stats.prepared());
+
+    const idle_drain = try pump.drainAvailable();
+    var idle_tick = try loop.tickAfterDrainWithFrameBuilder(idle_drain, FakeFrameBuilder{});
+    defer idle_tick.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), idle_tick.index);
+    try std.testing.expectEqual(@as(usize, 0), idle_tick.frame.drain_summary.output_events);
+    try std.testing.expectEqual(@as(usize, 0), idle_tick.frame.drain_summary.exit_events);
+    try std.testing.expect(idle_tick.render_stats.prepared());
+
+    try queue.pushBlocking(.{ .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } } });
+    const exit_drain = try pump.drainAvailable();
+    var exit_tick = try loop.tickAfterDrainWithFrameBuilder(exit_drain, FakeFrameBuilder{});
+    defer exit_tick.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), exit_tick.index);
+    try std.testing.expectEqual(@as(usize, 1), exit_tick.frame.drain_summary.exit_events);
+    try std.testing.expect(exit_tick.ended());
+    try std.testing.expectEqual(@as(usize, 4), loop.frame_index);
+    try std.testing.expectEqual(surface_mod.ProcessState.exited, surfaces[0].process_state);
+
+    const screen = try surfaces[0].core.dumpUtf8(allocator);
+    defer allocator.free(screen);
+    try std.testing.expect(screenContainsOutput(screen, "echo maru\r\n"));
+    try std.testing.expect(screenContainsOutput(screen, "maru\r\n"));
+    try std.testing.expect(renderer_state.atlas.entryCount() > 0);
+}
+
 test "app frame loop routes key events through the same app host policy" {
     // keyboard input은 platform별 코드가 가장 쉽게 갈라지는 영역이다. frame loop가
     // 별도 정책을 만들지 않고 AppHost keybinding resolver를 그대로 쓰는지 고정한다.

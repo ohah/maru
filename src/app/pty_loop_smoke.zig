@@ -9,6 +9,7 @@ const live_pty_mod = @import("live_pty.zig");
 const pty_reader = @import("pty_reader.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
+const smoke_drain = @import("smoke_drain.zig");
 const surface_mod = @import("surface.zig");
 const window_mod = @import("window.zig");
 
@@ -25,6 +26,7 @@ pub const AppPtyLoopSmokeConfig = struct {
     },
     expected_text: []const u8 = "Maru PTY loop second",
     max_event_frames: usize = 16,
+    drain_timeout_ms: i64 = smoke_drain.default_timeout_ms,
     interactive_shell: bool = false,
     scripted_key_chord: []const u8 = "Cmd+I",
     scripted_input: []const u8 = "",
@@ -88,7 +90,14 @@ pub fn run(
 
     var counts: LoopCounts = .{};
     while (counts.event_frames < smoke_config.max_event_frames) {
-        const drain_summary = try drainBlockingOneBatchWithRaw(allocator, live_pty.eventQueue(), &pump, &raw_bytes);
+        const drain_summary = try drainOneBatchWithRaw(
+            io,
+            allocator,
+            live_pty.eventQueue(),
+            &pump,
+            &raw_bytes,
+            smoke_config.drain_timeout_ms,
+        );
         counts.recordDrain(drain_summary);
 
         var event_tick = try frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
@@ -171,16 +180,19 @@ const LoopCounts = struct {
     }
 };
 
-fn drainBlockingOneBatchWithRaw(
+fn drainOneBatchWithRaw(
+    io: std.Io,
     allocator: std.mem.Allocator,
     queue: *pty_reader.PtyEventQueue,
     pump: *runtime_pump.RuntimeEventPump,
     raw_bytes: *std.ArrayList(u8),
+    timeout_ms: i64,
 ) !runtime_pump.DrainSummary {
-    // popBlocking으로 최소 event 하나를 기다린 뒤, 이미 쌓인 event는 같은 frame에 묶는다.
+    // deadline으로 최소 event 하나를 기다린 뒤, 이미 쌓인 event는 같은 frame에 묶는다.
+    // smoke가 멈춰도 실패 원인을 남겨야 하므로 제품용 blocking queue를 그대로 쓰지 않는다.
     // raw artifact는 applyQueuedEvent가 output bytes를 해제하기 전에 복사해야 한다.
     var summary: runtime_pump.DrainSummary = .{};
-    const first = queue.popBlocking() orelse return error.ReaderQueueClosedBeforeTermination;
+    const first = try smoke_drain.popWithDeadline(io, queue, .{ .timeout_ms = timeout_ms });
     try applyEventWithRaw(allocator, pump, raw_bytes, first, &summary);
     while (queue.tryPop()) |event| {
         try applyEventWithRaw(allocator, pump, raw_bytes, event, &summary);
@@ -226,6 +238,7 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.print("interactive_shell={}\n", .{input.config.interactive_shell});
     try writer.print("command={s}\n", .{input.config.command});
     try writer.print("args.len={d}\n", .{input.config.args.len});
+    try writer.print("drain_timeout_ms={d}\n", .{input.config.drain_timeout_ms});
     try writer.print("scripted_key_event_sent={}\n", .{input.scripted_input.sent});
     try writer.print("scripted_key_event_result={s}\n", .{input.scripted_input.result});
     try writer.print("scripted_terminal_input_bytes={d}\n", .{input.scripted_input.terminal_input_bytes_len});
@@ -450,11 +463,41 @@ test "app PTY loop batch drain copies raw bytes before pump ownership ends" {
     try queue.pushBlocking(.{ .output = .{ .pty_id = 10, .bytes = bytes } });
     try queue.pushBlocking(.{ .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } } });
 
-    const summary = try drainBlockingOneBatchWithRaw(allocator, &queue, &pump, &raw);
+    const summary = try drainOneBatchWithRaw(
+        std.testing.io,
+        allocator,
+        &queue,
+        &pump,
+        &raw,
+        smoke_drain.default_timeout_ms,
+    );
     try std.testing.expectEqual(@as(usize, 1), summary.output_events);
     try std.testing.expectEqual(@as(usize, 1), summary.exit_events);
     try std.testing.expectEqualStrings("loop raw", raw.items);
     try std.testing.expectEqual(surface_mod.ProcessState.exited, surface.process_state);
+}
+
+test "app PTY loop drain reports a smoke timeout instead of hanging forever" {
+    // shell startup이나 reader thread가 멈추면 smoke가 CI를 붙잡으면 안 된다.
+    // 첫 event가 오지 않는 queue에서 deadline error가 나오는지 고정한다.
+    const allocator = std.testing.allocator;
+    var surface = try surface_mod.Surface.init(allocator, 1, .{ .cols = 20, .rows = 3 });
+    defer surface.deinit();
+    var fake_pty: FakePty = .{};
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
+
+    var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(allocator);
+
+    try std.testing.expectError(
+        error.SmokeDrainTimedOut,
+        drainOneBatchWithRaw(std.testing.io, allocator, &queue, &pump, &raw, 1),
+    );
 }
 
 test "app PTY loop scripted input goes through FrameLoop keybinding boundary" {
@@ -514,6 +557,7 @@ test "app PTY loop summary records repeated event and idle frame contract" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "visible_ui=false\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=surface_runtime_live_pty_frame_loop\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "interactive_shell=false\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drain_timeout_ms=5000\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "scripted_key_event_sent=false\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "scripted_key_event_result=none\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "frame_ticks=3\n") != null);

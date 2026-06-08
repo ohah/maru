@@ -8,6 +8,7 @@ pub const pty_smoke = @import("app/pty_smoke.zig");
 pub const pty_reader = @import("app/pty_reader.zig");
 pub const runtime = @import("app/runtime.zig");
 pub const runtime_pump = @import("app/runtime_pump.zig");
+pub const smoke_drain = @import("app/smoke_drain.zig");
 pub const surface = @import("app/surface.zig");
 pub const window = @import("app/window.zig");
 
@@ -46,6 +47,7 @@ pub const RuntimePumpDrainSummary = runtime_pump.DrainSummary;
 pub const RuntimePumpTermination = runtime_pump.Termination;
 pub const RuntimePumpedEvent = runtime_pump.PumpedEvent;
 pub const RuntimePumpedEventKind = runtime_pump.PumpedEventKind;
+pub const SmokeDrainDeadlineConfig = smoke_drain.DeadlineConfig;
 pub const Surface = surface.Surface;
 pub const SurfaceId = runtime.SurfaceId;
 pub const SurfaceRuntime = runtime.SurfaceRuntime;

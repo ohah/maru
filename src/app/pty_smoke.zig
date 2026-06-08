@@ -8,6 +8,7 @@ const live_pty_mod = @import("live_pty.zig");
 const pty_reader = @import("pty_reader.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
+const smoke_drain = @import("smoke_drain.zig");
 const surface_mod = @import("surface.zig");
 const window_mod = @import("window.zig");
 
@@ -22,6 +23,7 @@ pub const AppPtySmokeConfig = struct {
         "printf 'maru app pty\\n'; printf 'renderer frame\\n'",
     },
     expected_text: []const u8 = "maru app pty",
+    drain_timeout_ms: i64 = smoke_drain.default_timeout_ms,
 };
 
 pub const AppPtySmokeResult = struct {
@@ -67,7 +69,14 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, config: AppPtySmokeConfig) 
     var pump = live_pty.pump(&runtime);
     var raw_bytes: std.ArrayList(u8) = .empty;
     errdefer raw_bytes.deinit(allocator);
-    const drain_summary = try drainBlockingUntilTerminationWithRaw(allocator, live_pty.eventQueue(), &pump, &raw_bytes);
+    const drain_summary = try drainUntilTerminationWithRaw(
+        io,
+        allocator,
+        live_pty.eventQueue(),
+        &pump,
+        &raw_bytes,
+        config.drain_timeout_ms,
+    );
 
     live_pty.finishAfterTermination();
 
@@ -122,16 +131,18 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, config: AppPtySmokeConfig) 
     };
 }
 
-fn drainBlockingUntilTerminationWithRaw(
+fn drainUntilTerminationWithRaw(
+    io: std.Io,
     allocator: std.mem.Allocator,
     queue: *pty_reader.PtyEventQueue,
     pump: *runtime_pump.RuntimeEventPump,
     raw_bytes: *std.ArrayList(u8),
+    timeout_ms: i64,
 ) !runtime_pump.DrainSummary {
     var summary: runtime_pump.DrainSummary = .{};
 
     while (true) {
-        const event = queue.popBlocking() orelse return error.ReaderQueueClosedBeforeTermination;
+        const event = try smoke_drain.popWithDeadline(io, queue, .{ .timeout_ms = timeout_ms });
         if (event == .output) {
             // applyQueuedEvent가 event bytes를 해제하므로, artifact로 남길 raw bytes는
             // 그 전에 별도 버퍼에 복사한다. 이 복사는 smoke/debug 경로에만 있고
@@ -201,6 +212,7 @@ fn renderSummary(allocator: std.mem.Allocator, input: SummaryInput) ![]u8 {
     try writer.writeAll("renderer_shaper=fake_font_backend\n");
     try writer.print("command={s}\n", .{input.config.command});
     try writer.print("args.len={d}\n", .{input.config.args.len});
+    try writer.print("drain_timeout_ms={d}\n", .{input.config.drain_timeout_ms});
     try writer.print("size.cols={d}\n", .{input.config.size.cols});
     try writer.print("size.rows={d}\n", .{input.config.size.rows});
     try writer.print("output_events={d}\n", .{input.drain_summary.output_events});
@@ -334,6 +346,7 @@ test "app PTY smoke summary records live PTY to renderer frame boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "visible_ui=false\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_input=surface_runtime_live_pty\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_shaper=fake_font_backend\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "drain_timeout_ms=5000\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "termination=exited(code=0)\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "screen_contains_expected=true\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "renderer_frame_prepared=true\n") != null);

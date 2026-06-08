@@ -6,8 +6,19 @@ const config_mod = maru.config;
 const renderer = maru.renderer;
 const terminal = maru.terminal;
 
-pub const abi_version: u32 = 3;
+pub const abi_version: u32 = 4;
 pub const default_queue_capacity: u32 = 16;
+
+// app_host_abi.zig가 이 파일을 import하므로 EventKind는 여기서 정의하고 거기서 re-export한다
+// (순환 import 회피). FrameSummary.last_event_kind가 이 값을 그대로 싣는다.
+pub const EventKind = enum(u32) {
+    none = 0,
+    frame_tick = 1,
+    key_down = 2,
+    resize = 3,
+    close_requested = 4,
+    app_should_terminate = 5,
+};
 
 pub const CommandKind = enum(u32) {
     controlled_smoke = 0,
@@ -49,7 +60,7 @@ pub const FrameSummary = extern struct {
     glyph_uv_ready: u32 = 0,
     glyph_raster_ready: u32 = 0,
     ended: u32 = 0,
-    reserved0: u32 = 0,
+    last_event_kind: u32 = @intFromEnum(EventKind.none),
     reserved1: u32 = 0,
 };
 
@@ -126,8 +137,17 @@ pub const DevSession = struct {
     pub fn handleKeyEvent(self: *DevSession, event: terminal.KeyEvent) !FrameSummary {
         // Swift/AppKit는 normalized key event만 전달한다. app-vs-terminal 판정과 PTY
         // write는 기존 FrameLoop 경계를 통과해야 smoke와 제품 app이 같은 shortcut 정책을 쓴다.
-        const result = try self.frame_loop.handleKeyEvent(config_mod.KeyBindingResolver{}, event);
         self.total_key_events += 1;
+        // 셸이 이미 종료/close된 뒤 도착한 입력은 라우팅할 live surface가 없다. FrameLoop로
+        // 내려보내면 UnknownSurface/SessionClosed로 실패하는데, 그건 치명적 세션 fault가
+        // 아니라 닫힌 pane의 late input이므로 ignored로 회계만 하고 정상으로 닫는다.
+        if (self.ended_seen) {
+            self.total_ignored_key_events += 1;
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+            return self.last_summary;
+        }
+        const result = try self.frame_loop.handleKeyEvent(config_mod.KeyBindingResolver{}, event);
         switch (result) {
             .terminal_input => |terminal_input| {
                 self.total_terminal_input_events += 1;
@@ -137,15 +157,24 @@ pub const DevSession = struct {
             .ignored => self.total_ignored_key_events += 1,
         }
         self.writeSummaryFromState();
+        self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
         return self.last_summary;
     }
 
     pub fn resize(self: *DevSession, size: terminal.Size) !FrameSummary {
         // resize는 terminal grid와 PTY winsize가 함께 바뀌어야 한다. FrameLoop API를
         // 통해 SurfaceRuntime action으로 내려보내면 Swift가 두 책임을 다시 구현하지 않는다.
-        try self.frame_loop.resizeActiveSurface(size);
         self.total_resize_events += 1;
+        // 종료된 세션의 resize도 live surface가 없어 실패한다. 닫히는 창의 late resize는
+        // 치명적 오류가 아니므로 무시하고 정상으로 닫는다(key와 같은 정책).
+        if (self.ended_seen) {
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.resize);
+            return self.last_summary;
+        }
+        try self.frame_loop.resizeActiveSurface(size);
         self.writeSummaryFromState();
+        self.last_summary.last_event_kind = @intFromEnum(EventKind.resize);
         return self.last_summary;
     }
 
@@ -162,6 +191,11 @@ pub const DevSession = struct {
         }
 
         self.writeSummaryFromTick(tick_result);
+        // 세션이 종료되면 host가 frame loop를 멈추고 우아하게 내려가도록 app_should_terminate를
+        // 싣는다. ABI의 tick export는 이 ended를 SessionEnded status로 올려준다.
+        self.last_summary.last_event_kind = @intFromEnum(
+            if (self.ended_seen) EventKind.app_should_terminate else EventKind.frame_tick,
+        );
         return self.last_summary;
     }
 
@@ -181,6 +215,7 @@ pub const DevSession = struct {
             self.ended_seen = true;
         }
         self.writeSummaryFromState();
+        self.last_summary.last_event_kind = @intFromEnum(EventKind.close_requested);
         return self.last_summary;
     }
 
@@ -208,34 +243,21 @@ pub const DevSession = struct {
     }
 
     fn writeSummaryFromTick(self: *DevSession, tick_result: app.AppFrameLoopTick) void {
+        // 공유 counter/size/state는 writeSummaryFromState가 단일 출처로 채운다. tick만 아는
+        // per-frame render 통계와 tick index만 여기서 덧씌운다. 이렇게 해야 두 writer가
+        // 필드별로 어긋나지 않고, 새 counter가 추가돼도 한 곳만 고치면 된다. key/resize/close
+        // summary의 render 필드는 "마지막으로 그려진 frame" 값(화면의 현재 상태)을 그대로
+        // 유지한다.
+        self.writeSummaryFromState();
         const stats = tick_result.render_stats;
-        self.last_summary = .{
-            .abi_version = abi_version,
-            .terminal_surface = 1,
-            .frame_loop_ticks = @intCast(self.frame_loop.frame_index),
-            .last_tick_index = @intCast(tick_result.index),
-            .output_events = self.total_output_events,
-            .exit_events = self.total_exit_events,
-            .surface_id = self.surfaces[0].id,
-            .glyph_count = @intCast(stats.glyph_count),
-            .draw_cells = @intCast(stats.draw_cells),
-            .atlas_entries = @intCast(stats.atlas_entries),
-            .key_events = self.total_key_events,
-            .terminal_input_events = self.total_terminal_input_events,
-            .terminal_input_bytes = self.total_terminal_input_bytes,
-            .app_key_events = self.total_app_key_events,
-            .ignored_key_events = self.total_ignored_key_events,
-            .resize_events = self.total_resize_events,
-            .close_events = self.total_close_events,
-            .cols = self.surfaces[0].core.size.cols,
-            .rows = self.surfaces[0].core.size.rows,
-            .process_state = processStateCode(self.surfaces[0].process_state),
-            .frame_prepared = boolCode(stats.prepared()),
-            .frame_consistent = boolCode(stats.consistent),
-            .glyph_uv_ready = boolCode(stats.glyph_uv_ready),
-            .glyph_raster_ready = boolCode(stats.glyph_raster_ready),
-            .ended = boolCode(self.ended_seen),
-        };
+        self.last_summary.last_tick_index = @intCast(tick_result.index);
+        self.last_summary.glyph_count = @intCast(stats.glyph_count);
+        self.last_summary.draw_cells = @intCast(stats.draw_cells);
+        self.last_summary.atlas_entries = @intCast(stats.atlas_entries);
+        self.last_summary.frame_prepared = boolCode(stats.prepared());
+        self.last_summary.frame_consistent = boolCode(stats.consistent);
+        self.last_summary.glyph_uv_ready = boolCode(stats.glyph_uv_ready);
+        self.last_summary.glyph_raster_ready = boolCode(stats.glyph_raster_ready);
     }
 
     fn writeSummaryFromState(self: *DevSession) void {

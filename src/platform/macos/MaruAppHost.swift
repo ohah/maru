@@ -25,6 +25,8 @@ final class MaruPlaceholderView: NSView {
 final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private static var retainedDelegate: MaruAppHostController?
     private static let statusOK = Int32(MaruAppHostStatusOk.rawValue)
+    // PTY 셸이 정상 종료했다는 신호. fault가 아니라 우아한 종료 대상이다.
+    private static let statusSessionEnded = Int32(MaruAppHostStatusSessionEnded.rawValue)
 
     private let artifactDirectory = "zig-out/maru-macos-app-dev"
     private let summaryPath = "zig-out/maru-macos-app-dev/app-dev.summary.txt"
@@ -96,7 +98,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = notification
         tickTimer?.invalidate()
         tickTimer = nil
-        tickDevSession()
+        // 종료 중에는 추가 tick을 돌리지 않는다. tick은 session_ended에서 NSApp.terminate를
+        // 부르므로, 여기서 다시 tick하면 재진입 terminate가 된다. 마지막 counter는
+        // shutdownDevSession의 close()가 summary에 담는다.
         shutdownDevSession()
         writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
     }
@@ -207,7 +211,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             if summary.frame_loop_ticks <= 1 {
                 writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
             }
+        } else if status == Self.statusSessionEnded {
+            // PTY 셸이 정상 종료했다. fault가 아니므로 죽은 세션을 무한 tick하지 않고 frame loop를
+            // 멈춘 뒤 마지막 summary를 남기고 우아하게(exitCode 0) 내려간다.
+            latestFrameSummary = summary
+            tickTimer?.invalidate()
+            tickTimer = nil
+            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+            NSApp.terminate(nil)
         } else {
+            // tick_failed 등 세션 자체 fault만 비정상 종료로 처리한다.
             exitCode = 1
             writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
             NSApp.terminate(nil)
@@ -258,12 +271,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var summary = MaruAppHostDevFrameSummary()
         let status = maru_macos_app_dev_session_key_down(devSession, &keyEvent, &summary)
         devSessionStatus = status
+        // 한 key event의 실패(닫힌 pane의 late input, 변환 거부 등)는 세션 fault가 아니다.
+        // 앱을 죽이지 않고 status만 기록한다. 종료 자체는 tick 경로의 session_ended가 처리한다.
         if status == Self.statusOK {
             latestFrameSummary = summary
-        } else {
-            exitCode = 1
-            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
-            NSApp.terminate(nil)
         }
     }
 
@@ -301,12 +312,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var summary = MaruAppHostDevFrameSummary()
         let status = maru_macos_app_dev_session_resize(devSession, &event, &summary)
         devSessionStatus = status
+        // 한 resize event의 실패(닫히는 창의 late resize 등)도 세션 fault가 아니므로 앱을
+        // 죽이지 않고 status만 기록한다.
         if status == Self.statusOK {
             latestFrameSummary = summary
-        } else {
-            exitCode = 1
-            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
-            NSApp.terminate(nil)
         }
     }
 

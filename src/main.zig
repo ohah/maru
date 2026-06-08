@@ -42,6 +42,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "app-pty-interactive-loop-smoke")) {
+        try runAppPtyInteractiveLoopSmoke(io, allocator, stdout);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "app-pty-smoke")) {
         try runAppPtySmoke(io, allocator, stdout);
         return;
@@ -69,6 +74,7 @@ fn printSmoke(stdout: *std.Io.Writer) !void {
     try stdout.writeAll("run `maru-dev app-smoke` or `zig build app-smoke` for the first app-host frame slice\n");
     try stdout.writeAll("run `maru-dev app-loop-smoke` or `zig build app-loop-smoke` for the headless app frame-loop slice\n");
     try stdout.writeAll("run `maru-dev app-pty-loop-smoke` or `zig build app-pty-loop-smoke` for the live PTY frame-loop slice\n");
+    try stdout.writeAll("run `maru-dev app-pty-interactive-loop-smoke` or `zig build app-pty-interactive-loop-smoke` for the interactive shell frame-loop slice\n");
     try stdout.writeAll("run `maru-dev app-pty-smoke` or `zig build app-pty-smoke` for the live PTY app-host frame slice\n");
     try stdout.flush();
 }
@@ -137,6 +143,34 @@ fn runAppPtyLoopSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.
     try stdout.flush();
 }
 
+fn runAppPtyInteractiveLoopSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
+    // 이 smoke는 사용자의 실제 interactive shell을 실행하지만, 제품 UI는 아직 아니다.
+    // 입력은 FrameLoop.handleKeyEvent를 통과해 PTY로 내려가므로, shell과 app input 경계가
+    // 같이 검증된다. dotfile/prompt 영향이 있어 기본 check에는 넣지 않는다.
+    const marker = "MARU_APP_PTY_INTERACTIVE_LOOP_OK";
+    const config: maru.app.AppPtyLoopSmokeConfig = .{
+        .artifact_dir = maru.app.pty_loop_smoke.default_interactive_artifact_dir,
+        .command = interactiveShellPath(),
+        .args = &.{"-i"},
+        .expected_text = marker,
+        .interactive_shell = true,
+        .scripted_input = "printf 'MARU_APP_PTY_INTERACTIVE_LOOP_OK\\n'; exit\n",
+        .scripted_key_chord = "Cmd+I",
+        .max_event_frames = 64,
+    };
+    var result = try maru.app.runAppPtyLoopSmoke(io, allocator, config);
+    defer result.deinit(allocator);
+
+    try stdout.writeAll(result.summary);
+    try stdout.print("\nartifacts written to {s}/\n", .{config.artifact_dir});
+    try stdout.writeAll("frame loop artifact: app-pty-loop.frames.txt\n");
+    try stdout.writeAll("raw PTY artifact: app-pty-loop.raw.txt\n");
+    try stdout.writeAll("screen artifact: app-pty-loop.screen.txt\n");
+    try stdout.writeAll("snapshot artifact: app-pty-loop.snapshot.txt\n");
+    try stdout.writeAll("visible UI: not yet; this is an interactive shell frame-loop contract smoke.\n");
+    try stdout.flush();
+}
+
 fn runAppPtySmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
     // 실제 PTY output이 app host renderer frame까지 들어가는지 확인한다.
     // 아직 창을 띄우지 않기 때문에 visible UI 확인은 Metal/AppKit smoke가 맡는다.
@@ -154,6 +188,18 @@ fn runAppPtySmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
     try stdout.flush();
 }
 
+fn interactiveShellPath() []const u8 {
+    if (std.c.getenv("MARU_INTERACTIVE_SHELL")) |raw| {
+        const value = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
+        if (value.len > 0) return value;
+    }
+    if (std.c.getenv("SHELL")) |raw| {
+        const value = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
+        if (value.len > 0) return value;
+    }
+    return "/bin/sh";
+}
+
 fn printUsage(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\usage:
@@ -162,6 +208,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru-dev app-smoke
         \\  maru-dev app-loop-smoke
         \\  maru-dev app-pty-loop-smoke
+        \\  maru-dev app-pty-interactive-loop-smoke
         \\  maru-dev app-pty-smoke
         \\
         \\commands:
@@ -169,6 +216,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  app-smoke  run the app host -> RuntimeEventPump -> RenderFrame smoke
         \\  app-loop-smoke run the repeated app frame-loop smoke
         \\  app-pty-loop-smoke run the live PTY -> repeated app frame-loop smoke
+        \\  app-pty-interactive-loop-smoke run the interactive shell -> repeated app frame-loop smoke
         \\  app-pty-smoke run the live PTY -> app host -> RenderFrame smoke
         \\
     );

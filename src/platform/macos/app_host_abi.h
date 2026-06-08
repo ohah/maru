@@ -159,9 +159,12 @@ typedef struct MaruAppHostDevMetalRasterUpload {
     size_t non_clear_pixels;
 } MaruAppHostDevMetalRasterUpload;
 
-/* 가장 최근 tick의 Metal frame view. 모든 포인터는 dev session이 소유한 retained 배열을
-   가리키며 다음 tick(재투영) 또는 close/destroy까지만 유효하다. caller는 tick 직후 같은
-   main thread에서 동기적으로 소비해야 한다. generation은 매 tick 증가한다. */
+/* 가장 최근 frame의 Metal view. 모든 포인터는 dev session이 소유한 retained 배열을 가리키며,
+   "다음으로 재투영하는 tick"(새 output 또는 resize가 있는 tick) 또는 destroy까지 유효하다.
+   idle tick은 재투영하지 않으므로 포인터가 유지되고 generation도 그대로다. close는 이 배열을
+   해제하지 않는다(destroy에서만 해제). caller는 같은 main thread에서 동기적으로 소비해야
+   한다. generation은 실제 재투영이 일어난 frame에서만 증가하므로, 값이 바뀌었을 때만 atlas
+   재업로드/재드로우하면 된다. */
 typedef struct MaruAppHostDevMetalFrame {
     uint32_t cols;
     uint32_t rows;

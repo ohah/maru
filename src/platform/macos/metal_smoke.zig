@@ -458,7 +458,7 @@ pub fn buildSmokeFixtureFromRenderFrame(
     // 결과를 native smoke ABI용 DTO로만 투영한다. frame ownership은 caller에게 남겨,
     // 실제 app loop가 FrameLoopTick을 유지한 채 같은 투영 경계를 재사용할 수 있게 한다.
     // visible smoke는 흰색 glyph coverage를 그대로 검증하므로 전경색은 흰색으로 둔다.
-    const native_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, .{ .r = 255, .g = 255, .b = 255 });
+    const native_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, frame.draw_list.cells, .{ .r = 255, .g = 255, .b = 255 });
     errdefer allocator.free(native_cells);
     const native_raster_uploads = try buildNativeRasterUploads(allocator, frame.glyph_raster_frame);
     errdefer allocator.free(native_raster_uploads);
@@ -821,11 +821,13 @@ test "glyph_text stays false when CoreText fixture did not sample atlas texels" 
 test "NativeMetalCell ABI keeps atlas placement and uv fields tightly packed" {
     // NativeMetalCell은 appkit_metal_smoke.m의 MaruMetalSmokeCell과 같은 메모리 모양이어야
     // 한다. 필드를 추가할 때 이 크기가 예고 없이 바뀌면 ObjC bridge가 atlas 좌표를 다른
-    // 값으로 읽어 Metal smoke가 거짓 신호를 낼 수 있다. foreground(u32) 추가로 52바이트가
-    // 됐다. offset도 고정해, 새 필드를 끼워 넣어 기존 필드가 밀리면 크기는 같아도 잡히게 한다.
-    try std.testing.expectEqual(@as(usize, 52), @sizeOf(NativeMetalCell));
+    // 값으로 읽어 Metal smoke가 거짓 신호를 낼 수 있다. foreground(u32)에 이어 background(u32)
+    // 추가로 56바이트가 됐다. offset도 고정해, 새 필드를 끼워 넣어 기존 필드가 밀리면 크기는
+    // 같아도 잡히게 한다.
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(NativeMetalCell));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(NativeMetalCell));
     try std.testing.expectEqual(@as(usize, 48), @offsetOf(NativeMetalCell, "foreground"));
+    try std.testing.expectEqual(@as(usize, 52), @offsetOf(NativeMetalCell, "background"));
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(NativeMetalCell, "codepoint"));
 }
 

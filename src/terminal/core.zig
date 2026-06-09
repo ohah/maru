@@ -38,11 +38,20 @@ pub const TerminalCore = struct {
     // ITU colon 형식 38:2:colorspace:r:g:b는 38;2;r;g;b와 달리 colorspace 컴포넌트가 하나 더
     // 있어, 이 구분 없이는 RGB가 한 칸 밀린다.
     csi_subparam: [max_csi_params]bool = [_]bool{false} ** max_csi_params,
+    // 활성 화면의 soft-wrap 추적. wrapped[r]==true는 "행 r이 autowrap으로 행 r+1로 이어진다"는
+    // r↔r+1 경계의 속성이다(내용이 아니라 경계). hard 줄끝(LF, 또는 셸이 그린 뒤 CR/LF/CUP로 떠난
+    // 줄)은 wrapped[r]=false다. autowrap(마지막 칸 넘침)일 때만 true가 되고, 그 행에 새로 쓰면 다시
+    // false로 리셋된다(redraw가 스스로 교정됨). resize 시 reflow가 이 플래그로 논리 줄을 잇는다.
+    // 길이는 항상 size.rows.
+    wrapped: []bool = &.{},
     // 스크롤백: 화면 위로 밀려난(scroll된) 맨 윗줄을 보관한다. ring buffer로, 가장 오래된 행이
     // sb_head, 보관 개수가 sb_count다. 슬롯 버퍼를 재사용해 scroll마다 alloc 없이 memcpy만 하므로
     // 출력 hot path(매 줄 scroll)를 느리게 하지 않는다. 과거를 스크롤해서 보는 뷰포트와 reflow는
     // 이 저장 위에 올린다(다음 단계). 첫 scroll에서 max_scrollback 크기로 lazy 할당한다.
     scrollback: []?[]types.Cell = &.{},
+    // 각 스크롤백 행의 soft-wrap 플래그. scrollback과 병렬 ring(같은 max_scrollback 길이, 같은
+    // (sb_head+i)%len 인덱싱). 슬롯 cell 버퍼 재사용 경로를 건드리지 않는 평평한 []bool이다.
+    sb_wrapped: []bool = &.{},
     sb_head: usize = 0,
     sb_count: usize = 0,
     max_scrollback: usize = default_max_scrollback,
@@ -63,21 +72,26 @@ pub const TerminalCore = struct {
         const grid = clampGridSize(size);
         const cells = try allocator.alloc(types.Cell, cellCount(grid));
         @memset(cells, .{});
+        const wrapped = try allocator.alloc(bool, grid.rows);
+        @memset(wrapped, false);
 
         return .{
             .allocator = allocator,
             .size = grid,
             .cells = cells,
+            .wrapped = wrapped,
             .dirty = fullDirty(grid),
         };
     }
 
     pub fn deinit(self: *TerminalCore) void {
         self.allocator.free(self.cells);
+        if (self.wrapped.len > 0) self.allocator.free(self.wrapped);
         for (self.scrollback) |slot| {
             if (slot) |cells| self.allocator.free(cells);
         }
         if (self.scrollback.len > 0) self.allocator.free(self.scrollback);
+        if (self.sb_wrapped.len > 0) self.allocator.free(self.sb_wrapped);
         if (self.viewport_cells.len > 0) self.allocator.free(self.viewport_cells);
         self.* = undefined;
     }
@@ -135,12 +149,25 @@ pub const TerminalCore = struct {
 
     /// scroll로 위로 밀려나는 맨 윗줄을 스크롤백 ring에 보관한다. 슬롯 버퍼를 재사용해(같은 길이면
     /// memcpy만) 매 scroll에 alloc하지 않는다. OOM이면 그 행은 보관하지 않고 넘어간다(best-effort).
-    fn pushScrollback(self: *TerminalCore, row_cells: []const types.Cell) void {
+    /// i=0이 가장 오래된 스크롤백 행의 soft-wrap 플래그.
+    pub fn scrollbackRowWrapped(self: *const TerminalCore, i: usize) bool {
+        if (i >= self.sb_count or self.sb_wrapped.len == 0) return false;
+        return self.sb_wrapped[(self.sb_head + i) % self.sb_wrapped.len];
+    }
+
+    fn pushScrollback(self: *TerminalCore, row_cells: []const types.Cell, wrapped_flag: bool) void {
         if (self.max_scrollback == 0) return;
         if (self.scrollback.len == 0) {
             const ring = self.allocator.alloc(?[]types.Cell, self.max_scrollback) catch return;
             @memset(ring, null);
+            // wrap 병렬 ring도 함께 할당한다. 실패하면 둘 다 포기해 두 ring 길이를 항상 같게 유지한다.
+            const wring = self.allocator.alloc(bool, self.max_scrollback) catch {
+                self.allocator.free(ring);
+                return;
+            };
+            @memset(wring, false);
             self.scrollback = ring;
+            self.sb_wrapped = wring;
         }
         const cap = self.scrollback.len;
         // 가득 차면 (sb_head+sb_count)%cap == sb_head라, 가장 오래된 슬롯을 재사용해 덮어쓴다.
@@ -156,6 +183,7 @@ pub const TerminalCore = struct {
         } else {
             self.scrollback[idx] = self.allocator.dupe(types.Cell, row_cells) catch return;
         }
+        self.sb_wrapped[idx] = wrapped_flag;
         if (self.sb_count == cap) {
             self.sb_head = (self.sb_head + 1) % cap;
         } else {
@@ -503,6 +531,8 @@ pub const TerminalCore = struct {
             self.cells[self.index(row, col)] = .{ .style = self.pen };
         }
         self.repairWideGlyphEdges(row, start, end);
+        // 행을 (부분) 지우면 그 논리 줄의 soft-wrap 연속성이 끝난다.
+        self.wrapped[row] = false;
         self.markDirty(row);
         // 다른 cursor/erase op과 같이 grapheme run을 끝낸다. 안 하면 CSI K 뒤 combining mark가
         // 방금 지운 셀에 붙는다.
@@ -516,6 +546,7 @@ pub const TerminalCore = struct {
             // 2/3: 화면 전체.
             2, 3 => {
                 @memset(self.cells, blank);
+                @memset(self.wrapped, false);
                 self.dirty = fullDirty(self.size);
             },
             // 1: 화면 시작 ~ 커서까지.
@@ -523,6 +554,7 @@ pub const TerminalCore = struct {
                 const cursor_index = self.index(self.cursor.row, self.cursor.col);
                 var i: usize = 0;
                 while (i <= cursor_index and i < self.cells.len) : (i += 1) self.cells[i] = blank;
+                for (0..@min(@as(usize, self.cursor.row) + 1, self.wrapped.len)) |r| self.wrapped[r] = false;
                 self.repairWideGlyphEdges(self.cursor.row, 0, @min(self.cursor.col + 1, self.size.cols));
                 // dirty를 덮어쓰지 않고 markDirty로 병합한다 — 같은 write()에서 앞서 dirty된 행
                 // (예: 방금 출력한 아래쪽 행)을 잃어 렌더가 stale glyph를 남기지 않게 한다.
@@ -534,6 +566,7 @@ pub const TerminalCore = struct {
                 const cursor_index = self.index(self.cursor.row, self.cursor.col);
                 var i: usize = cursor_index;
                 while (i < self.cells.len) : (i += 1) self.cells[i] = blank;
+                for (self.cursor.row..self.size.rows) |r| self.wrapped[r] = false;
                 self.repairWideGlyphEdges(self.cursor.row, self.cursor.col, self.size.cols);
                 self.markDirty(self.cursor.row);
                 self.markDirty(self.size.rows - 1);
@@ -548,12 +581,14 @@ pub const TerminalCore = struct {
         const cols = next_size.cols;
         const rows = next_size.rows;
         const next_cells = try self.allocator.alloc(types.Cell, cellCount(next_size));
+        errdefer self.allocator.free(next_cells);
         @memset(next_cells, .{});
+        const next_wrapped = try self.allocator.alloc(bool, rows);
+        @memset(next_wrapped, false);
 
         // 보이는 내용을 보존한다. 이전에는 resize가 화면을 비워서, 창을 줄이면 셸이 SIGWINCH로
-        // 다시 그리기 전까지 빈 화면이 보였다. 아직 wrap을 추적하지 않으므로 reflow는 못 하고,
-        // 겹치는 좌상단 영역(min(old,new))을 그대로 복사한다. 셸은 SIGWINCH로 prompt를 다시
-        // 그려 정렬을 맞춘다.
+        // 다시 그리기 전까지 빈 화면이 보였다. (reflow는 다음 단계 — 여기선 겹치는 좌상단 영역
+        // (min(old,new))을 wrap 플래그와 함께 그대로 복사한다. 셸은 SIGWINCH로 prompt를 다시 그린다.)
         const copy_rows = @min(self.size.rows, rows);
         const copy_cols = @min(self.size.cols, cols);
         var row: u16 = 0;
@@ -564,6 +599,7 @@ pub const TerminalCore = struct {
                 next_cells[new_start..][0..copy_cols],
                 self.cells[old_start..][0..copy_cols],
             );
+            next_wrapped[row] = self.wrapped[row];
             // cols가 줄어 wide glyph(width=2) base만 복사되고 continuation이 잘려 나가면, 짝 없는
             // base를 blank로 정리한다(half-glyph가 1칸 공간에 2칸 폭으로 렌더되는 것 방지).
             // putCell은 마지막 열에 width=2를 만들지 않으므로 이 case는 잘림에서만 생긴다.
@@ -573,8 +609,10 @@ pub const TerminalCore = struct {
         }
 
         self.allocator.free(self.cells);
+        if (self.wrapped.len > 0) self.allocator.free(self.wrapped);
         self.size = .{ .cols = cols, .rows = rows };
         self.cells = next_cells;
+        self.wrapped = next_wrapped;
         // 커서를 0으로 리셋하지 않고 새 크기 안으로 clamp해, 보존한 내용 위에서 커서가 튀지
         // 않게 한다.
         self.cursor.row = if (rows == 0) 0 else @min(self.cursor.row, rows - 1);
@@ -773,6 +811,8 @@ pub const TerminalCore = struct {
         // 정확히 채운 마지막 글자마다 빈 줄이 끼지 않는다(표준 VT 동작, zsh prompt 등이 의존).
         if (self.pending_wrap) {
             // 다음 줄로 넘긴다. lineFeed가 pending_wrap을 끄므로 여기서 따로 끄지 않는다.
+            // 이 행은 autowrap으로 다음 줄로 이어지는 soft-wrap이다(reflow가 이 플래그로 잇는다).
+            self.wrapped[self.cursor.row] = true;
             self.cursor.col = 0;
             self.lineFeed();
         }
@@ -784,12 +824,17 @@ pub const TerminalCore = struct {
         // (이전 줄 마지막 칸은 빈칸으로 남는다). grid는 항상 cols>=2라(clampGridSize) 넘긴 뒤엔
         // 반드시 들어가므로, 칸을 줄이는 degrade 없이 그대로 width 2로 쓴다.
         if (cell_width == 2 and self.cursor.col + 1 >= self.size.cols) {
+            // wide glyph를 통째로 다음 줄로 넘긴다 — 이 행은 soft-wrap으로 이어진다.
+            self.wrapped[self.cursor.row] = true;
             self.cursor.col = 0;
             self.lineFeed();
         }
 
         const row = self.cursor.row;
         const col = self.cursor.col;
+        // 이 행에 새로 쓰므로 wrap 상태를 리셋한다. 다시 채워 마지막 칸을 넘기면 위 autowrap 분기가
+        // true로 재설정한다. 덕분에 셸이 한 줄을 다시 그리면(redraw) wrap 플래그가 스스로 교정된다.
+        self.wrapped[row] = false;
 
         self.clearCellForWrite(row, col);
         if (cell_width == 2) self.clearCellForWrite(row, col + 1);
@@ -869,8 +914,8 @@ pub const TerminalCore = struct {
     fn scrollUpOneLine(self: *TerminalCore) void {
         if (self.size.cols == 0 or self.size.rows == 0) return;
 
-        // 위로 밀려나는 맨 윗줄(row 0)을 스크롤백에 보관한 뒤 화면을 위로 민다.
-        self.pushScrollback(self.cells[0..self.size.cols]);
+        // 위로 밀려나는 맨 윗줄(row 0)을 그 soft-wrap 플래그와 함께 스크롤백에 보관한 뒤 화면을 민다.
+        self.pushScrollback(self.cells[0..self.size.cols], self.wrapped[0]);
         // 과거를 보고 있는 중(view_offset>0)이면 새 줄이 들어와도 같은 내용을 계속 보도록 offset도
         // 함께 올린다(scroll-lock). 맨 위(sb_count)에 닿으면 더 올리지 않는다.
         if (self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
@@ -882,10 +927,12 @@ pub const TerminalCore = struct {
                 self.cells[dst_start .. dst_start + self.size.cols],
                 self.cells[src_start .. src_start + self.size.cols],
             );
+            self.wrapped[row - 1] = self.wrapped[row];
         }
 
         const last_start = self.index(self.size.rows - 1, 0);
         @memset(self.cells[last_start .. last_start + self.size.cols], .{});
+        self.wrapped[self.size.rows - 1] = false;
         self.dirty = fullDirty(self.size);
     }
 
@@ -1772,4 +1819,49 @@ test "renderSnapshot shows active at bottom and composes the viewport (cursor hi
     try std.testing.expectEqual(@as(u21, 'a'), scrolled.cells[0].codepoint);
     try std.testing.expectEqual(@as(u21, 'b'), scrolled.cells[core.index(1, 0)].codepoint);
     try std.testing.expect(!scrolled.cursor.visible);
+}
+
+test "wrapped flag: autowrap sets it, rewriting the row clears it" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    try core.write("abcde"); // abcd가 row0를 채우고 'e'가 autowrap으로 row1로 넘어간다
+    try std.testing.expect(core.wrapped[0]); // row0는 soft-wrap
+    try std.testing.expect(!core.wrapped[1]); // row1은 아직 wrap 아님
+    try core.write("\x1b[1;1Hxy"); // CUP (0,0) 후 짧게 다시 그림 -> wrapped[0] 리셋
+    try std.testing.expect(!core.wrapped[0]);
+}
+
+test "wrapped flag: a wide glyph pushed whole to the next row marks soft-wrap" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    try core.write("abc한"); // abc가 0..2를 채우고 한(width2)이 col3에 안 들어가 통째로 row1로
+    try std.testing.expect(core.wrapped[0]);
+}
+
+test "wrapped flag: a hard line-end stays false even with the cursor parked past content" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    try core.write("ab\r"); // 줄을 안 채운 프롬프트 + CR -> 커서 (0,0). row0는 hard 줄끝
+    try std.testing.expect(!core.wrapped[0]);
+    try core.write("\x1b[1;6H"); // 커서를 내용 너머(col5)로 이동 -> wrap은 안 변함
+    try std.testing.expect(!core.wrapped[0]);
+}
+
+test "wrapped flag: scrolled-off soft-wrapped row carries its flag into scrollback" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("abcde"); // wrapped[0]=true (abcd가 'e'로 soft-wrap)
+    try std.testing.expect(core.wrapped[0]);
+    try core.write("\r\nfg"); // 바닥에서 scroll -> abcd(wrapped=true)가 스크롤백으로
+    try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen());
+    try std.testing.expect(core.scrollbackRowWrapped(0));
+}
+
+test "wrapped flag: erase-in-display mode 2 clears all wrap flags" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    try core.write("abcde"); // wrapped[0]=true
+    try std.testing.expect(core.wrapped[0]);
+    try core.write("\x1b[2J"); // 화면 전체 지움 -> 모든 wrap 플래그 false
+    try std.testing.expect(!core.wrapped[0]);
 }

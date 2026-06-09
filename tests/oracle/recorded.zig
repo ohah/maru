@@ -107,6 +107,18 @@ test "recorded terminal oracle snapshots match Maru output" {
                 },
             },
         },
+        .{
+            .name = "insert_delete_lines",
+            .size = .{ .cols = 4, .rows = 4 },
+            .input_fixture_path = "tests/fixtures/ansi/insert_delete_lines.ansi",
+            .oracles = &.{
+                .{
+                    .name = "xterm-compatible",
+                    .source = "recorded expectation for IL/DL (CSI L/M) line edits",
+                    .expected_screen = "tests/golden/screen/xterm/insert_delete_lines.txt",
+                },
+            },
+        },
     };
 
     inline for (cases) |case| {

@@ -445,6 +445,8 @@ pub const DevSession = struct {
             // frame을 유지하고 dirty를 남겨 다음 tick에 재시도한다(세션을 죽이지 않는다).
             const cell_colors: metal_frame.CellColors = .{
                 .default_fg = self.appearance.theme.foreground,
+                .default_bg = self.appearance.theme.background, // SGR reverse의 default 색 스왑용
+
                 // 커서는 반전 블록으로 그린다: 칸 배경=theme.cursor, 그 위 glyph=theme.background.
                 .cursor = .{
                     .block = self.appearance.theme.cursor,

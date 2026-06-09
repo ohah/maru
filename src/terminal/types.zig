@@ -24,6 +24,8 @@ pub const Style = struct {
     bold: bool = false,
     italic: bool = false,
     underline: bool = false,
+    // SGR 7/27(reverse video): 렌더 시 전경/배경을 맞바꾼다(default 색은 theme 값으로 풀어 스왑).
+    reverse: bool = false,
 };
 
 pub const Cell = struct {

@@ -366,7 +366,8 @@ TDD 방식:
 이 단계에서 다루지 않고 별도로 확장하는 입력 영역:
 
 - 기본 terminal input 인코더는 `Ctrl+letter` → C0 control, `Alt/Option` → meta-ESC까지 처리한다. 이 계약은 `src/terminal/input.zig`와 `src/config/keybinding.zig`의 단위 테스트가 지킨다.
-- application-cursor-key 모드(DECCKM, `\x1bOA` vs `\x1b[A`)와 CSI-u/Kitty 키 인코딩은 아직 하지 않는다. 키 버퍼는 `encoded_key_buffer_len`으로 확장되어 있으므로, 다음 입력 확장은 같은 상수와 테스트를 갱신하면서 진행한다.
+- **application-cursor-key 모드(DECCKM)를 구현했다(완료)**: TerminalCore가 `CSI ?1h/l`로 모드를 추적하고, `input.encodeKey`가 `EncodeOptions`로 받아 화살표를 SS3(`\x1bOA`)/CSI(`\x1b[A`)로 전환한다. app host의 `handleKeyEvent`가 매 키마다 active surface core의 현재 모드를 읽어 resolver에 넘기므로(인코더는 터미널 상태를 직접 들지 않음), vim/less가 모드를 켜고 끄는 대로 즉시 따라간다. unit + host E2E(`?1h` 후 같은 키가 SS3로 PTY에 쓰임)로 검증.
+- CSI-u/Kitty 키 인코딩과 function key terminal encoding은 아직 하지 않는다. 키 버퍼는 `encoded_key_buffer_len`으로 확장되어 있으므로, 다음 입력 확장은 같은 상수와 테스트를 갱신하면서 진행한다.
 - AppKit native key event에서 function key, keypad, dead key, IME 조합을 `TerminalKeyEvent`로 옮기는 일은 아직 하지 않는다. 이번 단계는 그 앞의 config/resolver 계약만 고정한다.
 
 ## 9단계: Workspace restore

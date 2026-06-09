@@ -43,6 +43,9 @@ pub const TerminalCore = struct {
     // 셸 화면을 복원하는 보조 버퍼다. 활성이면 saved_*에 primary 그리드가 보관돼 있고, alt 출력은
     // 스크롤백에 쌓이지 않으며 스크롤백 뷰포트도 잠긴다(표준 xterm 동작).
     alt_active: bool = false,
+    // DECCKM(CSI ?1 h/l, application cursor keys). vim/less가 켜면 화살표 입력이 SS3(`ESC O A`)로
+    // 인코딩돼야 한다. core는 모드만 추적하고, 인코딩은 input.encodeKey가 EncodeOptions로 받는다.
+    application_cursor_keys: bool = false,
     saved_cells: []types.Cell = &.{},
     saved_wrapped: []bool = &.{},
     // DECSC/DECRC + 1048/1049가 쓰는 저장 커서(위치+pen+pending_wrap).
@@ -425,6 +428,7 @@ pub const TerminalCore = struct {
         var i: usize = 0;
         while (i < self.csi_param_count) : (i += 1) {
             switch (self.csiRawParam(i)) {
+                1 => self.application_cursor_keys = set, // DECCKM: 화살표 SS3/CSI 인코딩 전환
                 47 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
                 1047 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
                 1048 => if (set) self.saveCursorState() else self.restoreCursorState(),
@@ -1084,8 +1088,13 @@ pub const TerminalCore = struct {
     }
 
     pub fn encodeKey(self: *const TerminalCore, event: input.KeyEvent, buffer: *[input.encoded_key_buffer_len]u8) ![]const u8 {
-        _ = self;
-        return input.encodeKey(event, buffer);
+        return input.encodeKey(event, buffer, self.encodeOptions());
+    }
+
+    /// 이 surface의 현재 입력 인코딩 모드. 키를 인코딩하는 쪽(keybinding resolver 경유 포함)이
+    /// 매 키마다 읽어 전달한다 — DECCKM은 프로그램이 수시로 켜고 끈다(vim 진입/이탈).
+    pub fn encodeOptions(self: *const TerminalCore) input.EncodeOptions {
+        return .{ .application_cursor_keys = self.application_cursor_keys };
     }
 
     pub fn dumpUtf8(self: *const TerminalCore, allocator: std.mem.Allocator) ![]u8 {
@@ -2601,4 +2610,29 @@ test "entering the alt screen twice is a no-op (no buffer leak/overwrite)" {
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("ok  \n    ", dump);
+}
+
+test "CSI ?1h/l (DECCKM) flips arrow encoding between SS3 and CSI" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    var buffer: [input.encoded_key_buffer_len]u8 = undefined;
+    // 기본(normal): CSI 형식
+    try std.testing.expectEqualStrings("\x1b[A", try core.encodeKey(.{ .key = .arrow_up }, &buffer));
+    try core.write("\x1b[?1h"); // vim이 켜는 application cursor mode
+    try std.testing.expect(core.application_cursor_keys);
+    try std.testing.expectEqualStrings("\x1bOA", try core.encodeKey(.{ .key = .arrow_up }, &buffer));
+    try core.write("\x1b[?1l"); // 끄면 다시 normal
+    try std.testing.expectEqualStrings("\x1b[A", try core.encodeKey(.{ .key = .arrow_up }, &buffer));
+}
+
+test "DECCKM combined with alt screen (vim startup sequence) round-trips" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    var buffer: [input.encoded_key_buffer_len]u8 = undefined;
+    try core.write("\x1b[?1049h\x1b[?1h"); // vim 진입: alt screen + DECCKM
+    try std.testing.expect(core.alt_active);
+    try std.testing.expectEqualStrings("\x1bOB", try core.encodeKey(.{ .key = .arrow_down }, &buffer));
+    try core.write("\x1b[?1l\x1b[?1049l"); // vim 종료
+    try std.testing.expect(!core.alt_active);
+    try std.testing.expectEqualStrings("\x1b[B", try core.encodeKey(.{ .key = .arrow_down }, &buffer));
 }

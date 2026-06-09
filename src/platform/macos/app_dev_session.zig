@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 10;
+pub const abi_version: u32 = 11;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -257,6 +257,34 @@ pub const DevSession = struct {
         if (!self.surface_initialized) return;
         self.surfaces[0].core.scrollViewport(@as(isize, delta_up));
         self.metal_dirty = true;
+    }
+
+    /// 마우스/트랙패드 휠 스크롤. Swift는 raw NSEvent 값(델타 포인트 + 정밀 델타 여부)만 넘기고,
+    /// 줄 수 환산은 여기서 실제 cell 메트릭으로 한다(네이티브 최소화). 정밀(트랙패드) 델타는 포인트
+    /// 단위라 한 줄 높이(포인트)로 나눠 줄 수로 바꾸고, 줄 단위(마우스 휠) 델타는 그대로 줄 수다.
+    /// NaN/∞·거대값은 무시/clamp한다(@intFromFloat trap 방지).
+    pub fn scrollWheel(self: *DevSession, delta_y: f64, precise: bool) void {
+        if (!self.surface_initialized) return;
+        if (!std.math.isFinite(delta_y)) return;
+        var lines_f: f64 = delta_y;
+        if (precise) {
+            const scale: f64 = @as(f64, @floatFromInt(self.scale_milli)) / 1000.0;
+            const ch_px: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
+            const line_pts: f64 = if (scale > 0) ch_px / scale else ch_px;
+            if (line_pts > 0) lines_f = delta_y / line_pts;
+        }
+        const clamped = std.math.clamp(@round(lines_f), -1000.0, 1000.0);
+        const lines: i32 = @intFromFloat(clamped);
+        if (lines != 0) self.scroll(lines);
+    }
+
+    /// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면은 rows-1줄(한 줄 겹침)이고,
+    /// rows는 dev session이 권위 있게 알고 있어 Swift가 stale 값으로 계산하지 않게 여기서 구한다.
+    pub fn scrollPage(self: *DevSession, delta_pages: i32) void {
+        if (!self.surface_initialized) return;
+        const rows = self.surfaces[0].core.size.rows;
+        const page: i32 = @max(@as(i32, 1), @as(i32, rows) - 1);
+        self.scroll(delta_pages *| page);
     }
 
     pub fn resize(self: *DevSession, width_px: u32, height_px: u32, scale_milli: u32) !FrameSummary {

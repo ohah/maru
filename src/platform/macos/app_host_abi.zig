@@ -180,15 +180,26 @@ pub export fn maru_macos_app_dev_session_close(
     return @intFromEnum(Status.ok);
 }
 
-// 뷰포트 스크롤. delta_lines>0=위(과거), <0=아래(현재). 스크롤 로직은 TerminalCore가 소유하고,
-// 여기선 dev session이 viewport offset을 옮기고 metal_dirty를 세운다(다음 tick이 새 뷰를 그린다).
-// Swift는 휠/Shift+PageUp·Down 이벤트를 줄 수로 환산해 이 함수만 부른다(얇은 글루).
-pub export fn maru_macos_app_dev_session_scroll(
+// 휠 스크롤: Swift는 raw 델타(포인트)와 정밀 델타 여부만 넘기고, 줄 수 환산(매직 상수·clamp·NaN
+// 가드)은 dev session이 실제 cell 메트릭으로 한다. 스크롤 자체는 TerminalCore가 소유한다.
+pub export fn maru_macos_app_dev_session_scroll_wheel(
     session: ?*DevSession,
-    delta_lines: i32,
+    delta_y: f64,
+    precise: i32,
 ) c_int {
     const dev_session = session orelse return @intFromEnum(Status.null_out);
-    dev_session.scroll(delta_lines);
+    dev_session.scrollWheel(delta_y, precise != 0);
+    return @intFromEnum(Status.ok);
+}
+
+// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면(rows-1) 계산은 dev session이
+// 권위 있는 rows로 한다(Swift가 stale frame summary로 계산하지 않게).
+pub export fn maru_macos_app_dev_session_scroll_page(
+    session: ?*DevSession,
+    delta_pages: i32,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    dev_session.scrollPage(delta_pages);
     return @intFromEnum(Status.ok);
 }
 

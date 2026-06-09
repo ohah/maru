@@ -106,6 +106,10 @@ pub const TerminalCore = struct {
     // 스크롤백(과거)이 보이고 활성 화면 아랫부분은 가려진다. 과거를 보는 중 새 출력이 scroll되면
     // 같은 내용을 계속 보도록 함께 올린다(scroll-lock).
     view_offset: usize = 0,
+    // 스크롤백 재-wrap 지연 마크. resize는 비싼 ring 재구성(행 1000개 재할당)을 즉시 하지 않고
+    // 이 플래그만 세우고, 사용자가 실제로 과거를 보는 순간(scrollViewport/renderSnapshot)에 현재
+    // 폭으로 1회 수행한다 — 연속 드래그 resize가 와도 마지막 폭으로 한 번만 재-wrap된다.
+    sb_rewrap_pending: bool = false,
     // 스크롤된(view_offset>0) 상태의 렌더용 합성 버퍼(rows×cols). renderSnapshot이 뷰포트 윈도를
     // 여기에 합성한다. view_offset==0이면 안 쓰므로 lazy 할당한다(스크롤할 때만 메모리 사용).
     viewport_cells: []types.Cell = &.{},
@@ -174,6 +178,8 @@ pub const TerminalCore = struct {
     pub fn scrollViewport(self: *TerminalCore, delta_up: isize) void {
         // alt screen에서는 스크롤백 뷰가 잠긴다(xterm 동작) — TUI 화면 위로 history가 겹치지 않게.
         if (self.alt_active) return;
+        // 지연된 재-wrap을 먼저 수행한다 — sb_count(스크롤 범위)가 재-wrap으로 바뀔 수 있다.
+        self.ensureScrollbackRewrapped();
         const max_off: isize = @intCast(self.sb_count);
         var off: isize = @as(isize, @intCast(self.view_offset)) + delta_up;
         if (off < 0) off = 0;
@@ -231,6 +237,157 @@ pub const TerminalCore = struct {
         self.sb_head = 0;
         self.sb_count = 0;
         self.view_offset = 0;
+    }
+
+    /// 스크롤백 전체를 새 폭으로 재-wrap한다(resize 시). 활성 화면 reflow와 같은 규칙을 ring에
+    /// 적용한다: sb_wrapped로 논리 줄을 복원해 새 폭에 다시 자르고(hard 행 끝 빈칸은 trim, soft
+    /// 행은 저장 폭 전체가 내용), wide glyph base가 행 끝에 안 들어가면 먼저 줄을 넘긴다. 재-wrap
+    /// 행 수가 cap을 넘으면 가장 오래된 것부터 버린다. OOM이면 통째로 포기하고 기존 ring을
+    /// 유지한다(best-effort — 잘못된 절반 상태보다 옛 폭 표시가 낫다).
+    /// 지연된 스크롤백 재-wrap을 지금 수행한다(있다면). 과거를 보는 경로(scrollViewport/
+    /// renderSnapshot)가 진입할 때 불러, 뷰가 항상 현재 폭 기준의 행 수/내용을 보게 한다.
+    fn ensureScrollbackRewrapped(self: *TerminalCore) void {
+        if (!self.sb_rewrap_pending) return;
+        self.sb_rewrap_pending = false;
+        self.rewrapScrollback(self.size.cols);
+    }
+
+    fn rewrapScrollback(self: *TerminalCore, new_cols: u16) void {
+        if (self.sb_count == 0 or new_cols == 0) return;
+        self.rewrapScrollbackInner(new_cols) catch {};
+    }
+
+    fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16) !void {
+        // 1차 패스: 출력 행 수만 센다(할당/복사 없음). cap을 넘는 앞쪽(가장 오래된) 행들은 어차피
+        // 버려지므로 2차 패스에서 아예 생성하지 않는다 — 좁힘 재-wrap의 alloc 비용을 절반 가까이
+        // 줄인다(perf 게이트 scrollback_rewrap이 1회 비용을 잰다).
+        var total_out: usize = 0;
+        {
+            var i: usize = 0;
+            while (i < self.sb_count) {
+                var j = i;
+                while (j + 1 < self.sb_count and self.scrollbackRowWrapped(j)) j += 1;
+                total_out += self.countRewrapRows(i, j, new_cols);
+                i = j + 1;
+            }
+        }
+        const keep = @min(total_out, self.max_scrollback);
+        const skip = total_out - keep; // 생성 없이 건너뛸 산출 행 수(가장 오래된 쪽)
+
+        var rows: std.ArrayList([]types.Cell) = .empty;
+        var wraps: std.ArrayList(bool) = .empty;
+        // 성공 경로에선 행 소유권이 ring으로 넘어가므로(items.len = 0으로 비움), 이 defer는
+        // 실패 경로에서만 만든 행들을 해제한다.
+        defer {
+            for (rows.items) |r| self.allocator.free(r);
+            rows.deinit(self.allocator);
+            wraps.deinit(self.allocator);
+        }
+        try rows.ensureTotalCapacity(self.allocator, keep);
+        try wraps.ensureTotalCapacity(self.allocator, keep);
+
+        var emitted: usize = 0; // 전체 산출 행 인덱스(skip 비교용)
+        var i: usize = 0;
+        while (i < self.sb_count) {
+            // 논리 줄 [i, j]: 연속된 soft-wrap 행 + 마지막 행.
+            var j = i;
+            while (j + 1 < self.sb_count and self.scrollbackRowWrapped(j)) j += 1;
+            // 줄의 마지막 산출 행이 물려받을 wrap 플래그: 논리 줄이 스크롤백의 끝을 넘어 활성
+            // 화면으로 이어지면(마지막 행의 sb_wrapped=true) 그 경계 연속성을 보존한다.
+            const tail_wrap = self.scrollbackRowWrapped(j);
+
+            var cur: ?[]types.Cell = null;
+            errdefer if (cur) |c| self.allocator.free(c);
+            var oc: u16 = 0;
+
+            var r = i;
+            while (r <= j) : (r += 1) {
+                const src = self.scrollbackRow(r) orelse continue;
+                // soft 행은 저장 폭 전체가 내용(꽉 찼다는 뜻), hard(마지막) 행은 뒤 빈칸 trim.
+                const contrib: usize = if (r < j) src.len else trimmedLen(src);
+                var c: usize = 0;
+                while (c < contrib) : (c += 1) {
+                    const cell = src[c];
+                    const needs: u16 = if (cell.width == 2) 2 else 1;
+                    if (oc + needs > new_cols) {
+                        if (cur) |full| {
+                            rows.appendAssumeCapacity(full);
+                            wraps.appendAssumeCapacity(true);
+                            cur = null;
+                        }
+                        emitted += 1;
+                        oc = 0;
+                    }
+                    // skip 범위를 지나서야 행 버퍼를 만든다(버려질 행은 셀 스캔만 하고 할당 생략).
+                    if (cur == null and emitted >= skip) {
+                        cur = try self.allocator.alloc(types.Cell, new_cols);
+                        @memset(cur.?, .{});
+                    }
+                    if (cur) |dst| dst[oc] = cell;
+                    oc += 1;
+                }
+            }
+            // 논리 줄의 마지막 행을 닫는다(내용이 전혀 없던 빈 줄도 한 행으로 보존).
+            if (cur == null and emitted >= skip) {
+                cur = try self.allocator.alloc(types.Cell, new_cols);
+                @memset(cur.?, .{});
+            }
+            if (cur) |last| {
+                rows.appendAssumeCapacity(last);
+                wraps.appendAssumeCapacity(tail_wrap);
+                cur = null;
+            }
+            emitted += 1;
+            i = j + 1;
+        }
+
+        // 기존 ring 행을 비우고(슬롯 배열은 재사용) 새 행으로 채운다. ring이 아직 lazy 미할당이면
+        // sb_count==0이라 여기 못 온다(가드).
+        for (self.scrollback) |*slot| {
+            if (slot.*) |old_row| {
+                self.allocator.free(old_row);
+                slot.* = null;
+            }
+        }
+        for (rows.items, 0..) |row_cells, k| {
+            self.scrollback[k] = row_cells;
+            self.sb_wrapped[k] = wraps.items[k];
+        }
+        self.sb_head = 0;
+        self.sb_count = rows.items.len;
+        // 소유권 이전 완료 — defer가 이중 해제하지 않게 목록을 비운다.
+        rows.items.len = 0;
+    }
+
+    /// 논리 줄 [first, last]가 new_cols로 재-wrap될 때의 산출 행 수(할당/복사 없는 시뮬레이션).
+    fn countRewrapRows(self: *const TerminalCore, first: usize, last: usize, new_cols: u16) usize {
+        var count: usize = 0;
+        var oc: u16 = 0;
+        var r = first;
+        while (r <= last) : (r += 1) {
+            const src = self.scrollbackRow(r) orelse continue;
+            const contrib: usize = if (r < last) src.len else trimmedLen(src);
+            var c: usize = 0;
+            while (c < contrib) : (c += 1) {
+                const needs: u16 = if (src[c].width == 2) 2 else 1;
+                if (oc + needs > new_cols) {
+                    count += 1;
+                    oc = 0;
+                }
+                oc += 1;
+            }
+        }
+        return count + 1; // 마지막(열린) 행
+    }
+
+    /// 행 슬라이스의 내용 길이(뒤 빈칸 trim). 활성 화면의 trimmedRowLen과 같은 기준을 스크롤백
+    /// 행(저장 폭이 현재와 다를 수 있음)에 적용한다.
+    fn trimmedLen(row: []const types.Cell) usize {
+        var len: usize = row.len;
+        while (len > 0) : (len -= 1) {
+            if (!isBlankCell(row[len - 1])) break;
+        }
+        return len;
     }
 
     /// 행을 스크롤백에 보관한다. OOM 등으로 실제 보관에 실패하면 false — 호출자(scroll-lock)는
@@ -978,8 +1135,13 @@ pub const TerminalCore = struct {
             return;
         }
 
-        // reflow: soft-wrap 플래그(wrapped)로 연속 줄(논리 줄)을 합쳐 새 폭에 다시 wrap한다. 활성
-        // 화면만 reflow하고(스크롤백 행은 그대로 둔다 — O(스크롤백)을 피해 perf 예산 보호), 넘치는
+        // 스크롤백 재-wrap은 지연 마크만 한다(폭이 그대로면 불변이라 생략). 즉시 하면 resize마다
+        // O(스크롤백) 재할당이라 perf 예산(core_resize_loop)을 수십 배 넘는다 — 실제 재-wrap은
+        // 사용자가 과거를 보는 순간(scrollViewport/renderSnapshot) 1회만 일어난다. 그 사이에 활성
+        // reflow가 밀어내는 새 폭 행이 ring에 섞여도, 재-wrap은 행별 저장 폭 기준이라 혼재가 안전하다.
+        if (new_cols != old_cols and self.sb_count > 0) self.sb_rewrap_pending = true;
+
+        // reflow: soft-wrap 플래그(wrapped)로 연속 줄(논리 줄)을 합쳐 새 폭에 다시 wrap한다. 넘치는
         // 위쪽 행은 스크롤백으로 밀어낸다. 핵심: 커서 위치는 어떤 셀이 나가는지/행이 soft인지를 절대
         // 바꾸지 않는다(hard 줄끝은 항상 hard로 남아 reflow가 프롬프트를 합치지 않는다 — 라이브 garble
         // 회귀의 근본 원인 차단). 커서의 trailing-blank는 내용을 늘리지 않고 좌표로만 환산한다.
@@ -1165,6 +1327,7 @@ pub const TerminalCore = struct {
     /// 합성 버퍼는 스크롤 중에만 lazy 할당하므로 일반(바닥) 렌더 경로는 추가 비용이 없다.
     pub fn renderSnapshot(self: *TerminalCore) types.RenderSnapshot {
         if (self.view_offset == 0) return self.snapshot();
+        self.ensureScrollbackRewrapped(); // 과거가 보이는 합성 직전, 행들을 현재 폭으로
 
         const needed = cellCount(self.size);
         if (self.viewport_cells.len != needed) {
@@ -3057,4 +3220,63 @@ test "IL/DL with count > 1 move the block once (CSI 2L / CSI 2M)" {
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("a \nb \n  \n  ", dump);
     try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen());
+}
+
+test "scrollback rows re-wrap to the new width when the user scrolls back after a resize" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    // "abcdefgh" 한 줄(8칸 꽉 참 — hard)과 "xy"가 스크롤백으로 밀린다.
+    try core.write("abcdefgh\r\nxy\r\n1\r\n2");
+    try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
+
+    try core.resize(4, 2); // 좁힘: 스크롤백의 "abcdefgh"는 4칸 두 행이 되어야 한다
+    core.scrollViewport(10); // 과거 보기(여기서 지연 재-wrap 수행) — 맨 위로
+    try std.testing.expectEqual(@as(usize, 3), core.scrollbackLen()); // abcd|efgh|xy
+    try std.testing.expectEqualSlices(u8, "abcd", &cellsText4(core.scrollbackRow(0).?));
+    try std.testing.expectEqualSlices(u8, "efgh", &cellsText4(core.scrollbackRow(1).?));
+    try std.testing.expect(core.scrollbackRowWrapped(0)); // abcd -> efgh 연속
+    try std.testing.expect(!core.scrollbackRowWrapped(1)); // efgh는 hard 끝
+
+    try core.resize(8, 2); // 다시 넓힘: 쪼개졌던 행이 한 행으로 합쳐져야 한다
+    core.scrollViewport(10);
+    try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
+    const joined = core.scrollbackRow(0).?;
+    try std.testing.expectEqual(@as(u21, 'a'), joined[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'h'), joined[7].codepoint);
+}
+
+fn cellsText4(row: []const types.Cell) [4]u8 {
+    var out: [4]u8 = .{ ' ', ' ', ' ', ' ' };
+    for (row[0..@min(row.len, 4)], 0..) |cell, k| out[k] = @intCast(cell.codepoint);
+    return out;
+}
+
+test "scrollback re-wrap keeps hard line boundaries separate and drops oldest rows past the cap" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    core.max_scrollback = 4; // 작은 cap으로 드랍 검증
+    try core.write("aaaa\r\nbb\r\ncccc\r\ndd\r\n1\r\n2"); // 4줄이 스크롤백(각각 hard)
+    try std.testing.expectEqual(@as(usize, 4), core.scrollbackLen());
+
+    try core.resize(2, 2); // 2칸: aaaa->aa|aa, bb->bb, cccc->cc|cc, dd->dd = 6행 > cap 4
+    core.scrollViewport(10);
+    try std.testing.expectEqual(@as(usize, 4), core.scrollbackLen()); // 오래된 2행 드랍
+    // 남은 것은 최신 4행: cc, cc, dd 쪽이 보존되고 hard 경계(bb/cccc 사이 등)는 안 합쳐졌다.
+    const last = core.scrollbackRow(3).?;
+    try std.testing.expectEqual(@as(u21, 'd'), last[0].codepoint);
+    try std.testing.expect(!core.scrollbackRowWrapped(3));
+}
+
+test "scrollback re-wrap is deferred until the scrollback is actually viewed" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("abcdefgh\r\n1\r\n2");
+    try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen());
+    try core.resize(4, 2);
+    // 아직 안 봤으니 ring은 옛 폭 그대로(지연) — 행 수 불변.
+    try std.testing.expect(core.sb_rewrap_pending);
+    try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen());
+    core.scrollViewport(1); // 보는 순간 재-wrap
+    try std.testing.expect(!core.sb_rewrap_pending);
+    try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
 }

@@ -16,6 +16,10 @@ const budgets = struct {
     const core_large_output_ns = 2 * std.time.ns_per_s;
     const core_resize_loop_ns = 1 * std.time.ns_per_s;
     const snapshot_serialize_ns = 1 * std.time.ns_per_s;
+    // 재-wrap은 "resize 후 처음 과거를 보는 순간" 1회 비용이다(지연 마크). cap(1000행) 기준
+    // 회당 ~30ms(행당 free+alloc+복사) — 60fps 두 프레임으로 사용자 체감이 없는 수준이고, 50회
+    // 예산 2s는 회당 40ms를 상한으로 고정한다(행 버퍼 풀링 등 구조 변경으로 더 줄이는 건 후속).
+    const scrollback_rewrap_ns = 2 * std.time.ns_per_s;
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -32,6 +36,7 @@ pub fn main(init: std.process.Init) !void {
         try measureLargeOutput(allocator, io),
         try measureResizeLoop(allocator, io),
         try measureSnapshotSerialization(allocator, io),
+        try measureScrollbackRewrap(allocator, io),
     };
 
     const report = try renderReport(allocator, &results);
@@ -104,6 +109,39 @@ fn measureResizeLoop(allocator: std.mem.Allocator, io: std.Io) !Budget {
         .name = "core_resize_loop",
         .elapsed_ns = elapsed,
         .budget_ns = budgets.core_resize_loop_ns,
+        .units = iterations,
+    };
+}
+
+fn measureScrollbackRewrap(allocator: std.mem.Allocator, io: std.Io) !Budget {
+    var core = try maru.terminal.TerminalCore.init(allocator, .{ .cols = 120, .rows = 24 });
+    defer core.deinit();
+
+    // 스크롤백을 cap(1000행)까지 채운다 — 재-wrap은 사용자가 resize 후 처음 과거를 보는 순간
+    // 1회 일어나는 비용이므로(지연 마크), "폭 변경 + 스크롤 시작"을 반복해 그 1회 비용을 잰다.
+    for (0..1200) |line_no| {
+        var line_buffer: [160]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&line_buffer);
+        try writer.print("rewrap-source-{d}-abcdefghijklmnopqrstuvwxyz0123456789\r\n", .{line_no});
+        try core.write(writer.buffered());
+    }
+
+    const iterations = 50;
+    const start = now(io);
+    for (0..iterations) |iteration| {
+        const cols: u16 = @intCast(40 + (iteration % 100));
+        try core.resize(cols, 24);
+        core.scrollViewport(5); // 과거 보기 — 지연 재-wrap이 여기서 1회 수행된다
+        core.scrollToBottom();
+    }
+    const elapsed = now(io) - start;
+
+    if (core.scrollbackLen() == 0) return error.PerfResultMissingScrollback;
+
+    return .{
+        .name = "scrollback_rewrap",
+        .elapsed_ns = elapsed,
+        .budget_ns = budgets.scrollback_rewrap_ns,
         .units = iterations,
     };
 }

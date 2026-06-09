@@ -3,6 +3,22 @@ const input = @import("input.zig");
 const types = @import("types.zig");
 const width = @import("width.zig");
 
+/// DECSC/DECRC(ESC 7/8)·DECSET 1048/1049가 쓰는 저장 커서 상태. 화면(primary/alt)마다 하나씩 둔다.
+pub const SavedCursor = struct {
+    cursor: types.Cursor = .{},
+    pen: types.Style = .{},
+    pending_wrap: bool = false,
+};
+
+/// 저장 커서를 새 grid 안으로 clamp한다. col이 잘려 더는 마지막 칸이 아니면 pending_wrap도 끈다
+/// (deferred wrap은 "마지막 칸에 머무는 중"일 때만 유효한 상태다).
+fn clampSavedCursor(slot: *SavedCursor, size: types.Size) void {
+    const clamped_col = @min(slot.cursor.col, size.cols - 1);
+    if (clamped_col != slot.cursor.col) slot.pending_wrap = false;
+    slot.cursor.row = @min(slot.cursor.row, size.rows - 1);
+    slot.cursor.col = clamped_col;
+}
+
 pub const TerminalCore = struct {
     allocator: std.mem.Allocator,
     size: types.Size,
@@ -55,10 +71,11 @@ pub const TerminalCore = struct {
     cursor_visible: bool = true,
     saved_cells: []types.Cell = &.{},
     saved_wrapped: []bool = &.{},
-    // DECSC/DECRC + 1048/1049가 쓰는 저장 커서(위치+pen+pending_wrap).
-    saved_cursor: types.Cursor = .{},
-    saved_pen: types.Style = .{},
-    saved_pending_wrap: bool = false,
+    // DECSC/DECRC + 1048/1049가 쓰는 저장 커서. xterm처럼 화면(primary/alt)마다 별도 슬롯을 둔다 —
+    // 한 슬롯을 공유하면 TUI가 alt 안에서 ESC 7/8을 쓸 때 1049가 저장한 셸 커서가 덮여, 종료 시
+    // 프롬프트가 엉뚱한 위치(예: 화면 맨 위)로 복원된다.
+    saved_cursor_primary: SavedCursor = .{},
+    saved_cursor_alt: SavedCursor = .{},
     // 각 CSI 파라미터가 ';'(새 파라미터)가 아니라 ':'(sub-parameter)로 들어왔는지 표시한다.
     // ITU colon 형식 38:2:colorspace:r:g:b는 38;2;r;g;b와 달리 colorspace 컴포넌트가 하나 더
     // 있어, 이 구분 없이는 RGB가 한 칸 밀린다.
@@ -468,30 +485,47 @@ pub const TerminalCore = struct {
         }
     }
 
+    /// 현재 활성 화면의 DECSC 저장 슬롯. ESC 7/8과 1048은 항상 "지금 보이는 화면"의 슬롯을 쓴다
+    /// (xterm 동일). 1049의 enter(저장)/leave(복원)는 primary 슬롯을 쓴다 — 셸 커서를 보관했다가
+    /// TUI 종료 시 되돌리는 용도라서다.
+    fn activeSavedCursor(self: *TerminalCore) *SavedCursor {
+        return if (self.alt_active) &self.saved_cursor_alt else &self.saved_cursor_primary;
+    }
+
     fn saveCursorState(self: *TerminalCore) void {
-        self.saved_cursor = self.cursor;
-        self.saved_pen = self.pen;
-        self.saved_pending_wrap = self.pending_wrap;
+        self.activeSavedCursor().* = .{
+            .cursor = self.cursor,
+            .pen = self.pen,
+            .pending_wrap = self.pending_wrap,
+        };
     }
 
     fn restoreCursorState(self: *TerminalCore) void {
+        self.restoreFromSlot(self.activeSavedCursor().*);
+    }
+
+    fn restoreFromSlot(self: *TerminalCore, slot: SavedCursor) void {
         const old_cursor = self.cursor;
         self.cursor = .{
-            .row = @min(self.saved_cursor.row, self.size.rows - 1),
-            .col = @min(self.saved_cursor.col, self.size.cols - 1),
+            .row = @min(slot.cursor.row, self.size.rows - 1),
+            .col = @min(slot.cursor.col, self.size.cols - 1),
         };
-        self.pen = self.saved_pen;
-        self.pending_wrap = self.saved_pending_wrap;
+        self.pen = slot.pen;
+        self.pending_wrap = slot.pending_wrap;
         self.markCursorMoveDirty(old_cursor, self.cursor);
         self.last_print = null;
     }
 
     /// alt screen으로 전환한다. primary 그리드(cells/wrapped)를 saved_*로 옮기고 빈 alt 버퍼를
     /// 만든다(1049는 들어가며 clear — TUI가 어차피 전체를 그린다). 할당 실패면 전환하지 않는다
-    /// (primary 유지가 안전). 이미 alt면 무시.
+    /// (primary 유지가 안전 — 커서 저장도 두 할당이 성공한 뒤에 해 실패가 부작용 없게 한다).
+    /// 1049의 커서 저장은 이미 alt여도 수행한다(xterm: "unconditionally saves the cursor").
     fn enterAltScreen(self: *TerminalCore, save_cursor: bool) void {
-        if (self.alt_active) return;
-        if (save_cursor) self.saveCursorState();
+        if (self.alt_active) {
+            // 화면은 이미 alt지만 1049h의 커서 저장 의미는 유지한다(중첩 tmux/SIGCONT 재초기화).
+            if (save_cursor) self.saveCursorState();
+            return;
+        }
 
         const alt_cells = self.allocator.alloc(types.Cell, cellCount(self.size)) catch return;
         @memset(alt_cells, .{});
@@ -501,6 +535,8 @@ pub const TerminalCore = struct {
         };
         @memset(alt_wrapped, false);
 
+        // 두 할당이 성공한 뒤에야 상태를 바꾼다(OOM 경로가 저장 슬롯을 오염시키지 않게).
+        if (save_cursor) self.saveCursorState(); // primary 슬롯(아직 alt_active=false)
         self.saved_cells = self.cells;
         self.saved_wrapped = self.wrapped;
         self.cells = alt_cells;
@@ -514,9 +550,14 @@ pub const TerminalCore = struct {
     }
 
     /// primary screen으로 복귀한다. alt 버퍼를 버리고 saved 그리드를 복원한다. 1049는 커서도
-    /// DECRC로 복원해 vim 종료 시 프롬프트가 원래 자리로 돌아온다. alt가 아니면 무시.
+    /// primary 슬롯에서 복원해 vim 종료 시 프롬프트가 원래 자리로 돌아온다 — alt 안에서 TUI가
+    /// ESC 7/8을 써도(alt 슬롯) 셸 커서는 안전하다. 1049l의 커서 복원은 이미 primary여도
+    /// 수행한다(xterm 동작 — 방어적 `\e[?1049l` 정리 스크립트 호환).
     fn leaveAltScreen(self: *TerminalCore, restore_cursor: bool) void {
-        if (!self.alt_active) return;
+        if (!self.alt_active) {
+            if (restore_cursor) self.restoreFromSlot(self.saved_cursor_primary);
+            return;
+        }
         self.allocator.free(self.cells);
         self.allocator.free(self.wrapped);
         self.cells = self.saved_cells;
@@ -526,7 +567,7 @@ pub const TerminalCore = struct {
         self.alt_active = false;
         self.pending_wrap = false;
         self.last_print = null;
-        if (restore_cursor) self.restoreCursorState();
+        if (restore_cursor) self.restoreFromSlot(self.saved_cursor_primary);
         self.dirty = fullDirty(self.size);
     }
 
@@ -863,6 +904,12 @@ pub const TerminalCore = struct {
             @memset(new_wrapped, false);
             const new_saved_wrapped = try self.allocator.alloc(bool, new_rows);
             @memset(new_saved_wrapped, false);
+            // 살아남는 행의 soft-wrap 플래그는 보존한다. 특히 saved primary의 것을 버리면 복귀 후
+            // 리사이즈에서 긴 wrap 줄이 영영 재합쳐지지 않는다(alt 것은 TUI가 다시 그리지만 동일
+            // 규칙로 보존). 폭이 줄어 행이 clip돼도 논리 연속성 자체는 유지된다.
+            const keep_rows = @min(old_rows, new_rows);
+            @memcpy(new_wrapped[0..keep_rows], self.wrapped[0..keep_rows]);
+            @memcpy(new_saved_wrapped[0..keep_rows], self.saved_wrapped[0..keep_rows]);
 
             self.allocator.free(self.cells);
             self.allocator.free(self.saved_cells);
@@ -877,8 +924,8 @@ pub const TerminalCore = struct {
             self.scroll_bottom = new_rows - 1;
             self.cursor.row = @min(self.cursor.row, new_rows - 1);
             self.cursor.col = @min(self.cursor.col, new_cols - 1);
-            self.saved_cursor.row = @min(self.saved_cursor.row, new_rows - 1);
-            self.saved_cursor.col = @min(self.saved_cursor.col, new_cols - 1);
+            clampSavedCursor(&self.saved_cursor_primary, next_size);
+            clampSavedCursor(&self.saved_cursor_alt, next_size);
             self.pending_wrap = false;
             self.last_print = null;
             self.parser = .ground;
@@ -2814,4 +2861,39 @@ test "DA1 (CSI c) answers with a VT102 identification over the response path" {
     core.clearResponse();
     try core.write("\x1b[0c"); // 명시적 0도 동일
     try std.testing.expectEqualStrings("\x1b[?6c", core.pendingResponse());
+}
+
+test "DECSC inside the alt screen does not clobber the cursor saved by 1049 (per-screen slots)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer core.deinit();
+    try core.write("one\r\ntwo"); // 셸 커서 (1,3)
+    try core.write("\x1b[?1049h"); // 셸 커서를 primary 슬롯에 저장
+    try core.write("\x1b[3;5H\x1b7\x1b[1;1H\x1b8"); // alt 안에서 ESC 7/8 사용(claude 패턴)
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.row); // alt 슬롯 복원 동작
+    try core.write("\x1b[?1049l!"); // 종료: primary 슬롯에서 셸 커서 복원
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("one     \ntwo!    \n        \n        ", dump);
+}
+
+test "1049l on the primary screen still restores the saved cursor (xterm unconditional restore)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    try core.write("ab\x1b[?1049h\x1b[?47l"); // 1049 진입 후 47로 이탈(커서 비복원 leave)
+    try core.write("\x1b[3;7H"); // 커서를 멀리
+    try core.write("\x1b[?1049l"); // 방어적 정리: primary지만 저장 커서 복원해야 한다
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
+}
+
+test "resize while in the alt screen preserves the saved primary's soft-wrap flags" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 4 });
+    defer core.deinit();
+    try core.write("abcdef"); // abcd|ef soft-wrap: wrapped[0]=true
+    try std.testing.expect(core.wrapped[0]);
+    try core.write("\x1b[?1049h");
+    try core.resize(4, 3); // alt 중 행 수만 축소
+    try core.write("\x1b[?1049l");
+    try std.testing.expect(core.wrapped[0]); // primary 복원 후에도 wrap 메타데이터 생존
 }

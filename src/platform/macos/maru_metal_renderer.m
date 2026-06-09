@@ -4,12 +4,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-// shader의 VertexIn(packed_float2 position + packed_float2 uv + packed_float3 color)과 같은
-// 28바이트 tight-packed 레이아웃. 셀당 6정점(삼각형 2개)로 quad를 만든다.
+// shader의 VertexIn(packed_float2 position + packed_float2 uv + packed_float3 color +
+// packed_float4 bg)과 같은 44바이트 tight-packed 레이아웃. 셀당 6정점(삼각형 2개)로 quad를
+// 만든다. bg는 (r,g,b,a)이고 a=1이면 cell을 그 색으로 채운다(배경 없으면 a=0).
 typedef struct {
     float position[2];
     float uv[2];
     float color[3];
+    float bg[4];
 } MaruRendererVertex;
 
 @interface MaruMetalRendererImpl : NSObject
@@ -206,13 +208,18 @@ bool maru_metal_renderer_draw(
             const float fr = (float)((cell.foreground >> 16) & 0xff) / 255.0f;
             const float fg = (float)((cell.foreground >> 8) & 0xff) / 255.0f;
             const float fb = (float)(cell.foreground & 0xff) / 255.0f;
+            // 배경색(0xAARRGGBB). a=1이면 cell을 채우고, a=0이면 배경 없음(shader가 기존처럼 그림).
+            const float ba = (float)((cell.background >> 24) & 0xff) / 255.0f;
+            const float br = (float)((cell.background >> 16) & 0xff) / 255.0f;
+            const float bg = (float)((cell.background >> 8) & 0xff) / 255.0f;
+            const float bb = (float)(cell.background & 0xff) / 255.0f;
             const MaruRendererVertex quad[6] = {
-                {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}},
-                {{left, bottom}, {cell.u0, cell.v1}, {fr, fg, fb}},
-                {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}},
-                {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}},
-                {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}},
-                {{right, top}, {cell.u1, cell.v0}, {fr, fg, fb}},
+                {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}, {br, bg, bb, ba}},
+                {{left, bottom}, {cell.u0, cell.v1}, {fr, fg, fb}, {br, bg, bb, ba}},
+                {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}, {br, bg, bb, ba}},
+                {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}, {br, bg, bb, ba}},
+                {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}, {br, bg, bb, ba}},
+                {{right, top}, {cell.u1, cell.v0}, {fr, fg, fb}, {br, bg, bb, ba}},
             };
             memcpy(&vertices[i * vertices_per_cell], quad, sizeof(quad));
         }

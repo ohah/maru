@@ -116,7 +116,8 @@ TDD 방식:
 - resize는 화면을 비우지 않고 겹치는 영역(min(old,new) 좌상단)을 보존하고 커서를 새 크기로 clamp한다(완료). 이전에는 resize가 매번 화면을 `@memset`으로 지워, 창을 줄이면 셸이 SIGWINCH로 다시 그리기 전까지 빈 화면이 보였다. cols가 줄어 wide glyph(width=2)의 continuation이 잘리면 짝 없는 base를 blank로 정리한다. 아직 wrap을 추적하지 않으므로 reflow(폭을 넘는 줄 재배치)는 다음 단계다.
 - `TerminalCore.write`에 VT escape 상태기계(ground/escape/CSI/OSC)를 붙였다(완료). 실제 shell prompt가 내보내는 escape를 글자로 찍지 않고 해석한다: SGR(`m` — bold/italic/underline, 16색·256색·rgb 전경/배경, reset)을 pen으로 적용하고, cursor 이동/위치(CUU/CUD/CUF/CUB, CUP, CHA, VPA), erase(EL `K`, ED `J`)를 처리하며, OSC(title 등)와 private(`CSI ? ...`) 시퀀스는 소비만 한다. 시퀀스가 PTY read 경계로 쪼개져도 파서 상태가 write() 호출 사이에 유지된다. CSI 안의 ESC는 시퀀스를 취소하고 새 escape로 재시작하며, C0 control은 실행하고 CSI를 계속한다. 파라미터가 16개를 넘으면 이후는 버린다(마지막 파라미터 오염 방지). erase/eraseInDisplay는 dirty를 덮어쓰지 않고 markDirty로 병합하고, 경계에 걸친 wide glyph 짝을 정리하며, last_print를 비운다.
 - SGR 38/48 확장색은 세미콜론(`38;2;r;g;b`, `38;5;n`)과 colon sub-parameter(`38:2:colorspace:r:g:b`, `38:5:n`) 형식을 모두 정확히 처리한다. 파라미터마다 `:`로 들어왔는지(sub-parameter) 추적해, colon mode 2의 colorspace 컴포넌트를 건너뛰고 r/g/b를 읽는다.
-- 아직: SGR가 정한 cell 배경색은 cell.style에만 담기고 Metal renderer가 배경 fill로 적용하는 것은 별도(전경색은 적용됨). reverse(`7`/`27`)는 Style에 필드가 없어 소비만 한다. scroll region/insert/delete line 등 나머지 CSI는 소비만 한다.
+- SGR가 정한 cell 배경색은 Metal renderer가 칠한다. 투영이 glyph cell엔 배경색을 같이 싣고, glyph 없는 공백 중 non-default 배경은 배경 전용 cell(sentinel UV)로 내며, 공유 셰이더가 `mix(bg, fg, coverage)`로 배경 위에 glyph를 blend한다(기본 배경은 a=0이라 기존 전경 전용 경로와 동일).
+- 아직: reverse(`7`/`27`)는 Style에 필드가 없어 소비만 한다. 배경색 erase(BCE — 현재 pen 배경으로 지우기)는 아직 없다. scroll region/insert/delete line 등 나머지 CSI는 소비만 한다.
 
 TDD 방식:
 

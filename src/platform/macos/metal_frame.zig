@@ -26,6 +26,10 @@ pub const NativeMetalCell = extern struct {
     v1: f32,
     // 전경 색(0x00RRGGBB). renderer가 흰색 glyph coverage에 이 색을 곱해 화면에 칠한다.
     foreground: u32 = 0,
+    // 배경 색(0xAARRGGBB). A=0xFF면 non-default 배경이라 셰이더가 cell을 그 색으로 채우고
+    // glyph를 위에 blend한다(out = mix(bg, fg, coverage)). A=0이면 배경 없음 — 셰이더는
+    // 기존처럼 glyph coverage만 그려 theme 기본 배경(clear color)이 비친다.
+    background: u32 = 0,
 };
 
 /// terminal cell의 전경 Color를 화면 RGB로 풀어 0x00RRGGBB로 packing한다. default는 theme
@@ -37,6 +41,18 @@ fn packForeground(style: terminal.Style, default_fg: color.Rgb) u32 {
         .rgb => |value| value,
     };
     return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+}
+
+/// terminal cell의 배경 Color를 0xAARRGGBB로 packing한다. default 배경은 theme 기본 배경
+/// (=clear color)과 같아 따로 칠할 필요가 없으므로 0(A=0, "배경 없음")을 돌려준다. indexed/rgb는
+/// A=0xFF를 세워 셰이더가 cell을 그 색으로 채우게 한다.
+fn packBackground(style: terminal.Style) u32 {
+    const rgb = switch (style.background) {
+        .default => return 0,
+        .indexed => |index| color.xterm256(index),
+        .rgb => |value| value,
+    };
+    return 0xFF00_0000 | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
 }
 
 pub const NativeMetalRasterUpload = extern struct {
@@ -51,18 +67,23 @@ pub const NativeMetalRasterUpload = extern struct {
     non_clear_pixels: usize,
 };
 
+/// glyph quad(ink 있는 cell)와 draw cell(전체 cell의 style)을 native Metal cell로 투영한다.
+/// glyph는 atlas UV로, non-default 배경을 가진 공백은 배경만 칠하는 cell(sentinel UV)로 낸다.
 pub fn buildNativeCellsFromGlyphQuads(
     allocator: std.mem.Allocator,
     frame: renderer.GlyphQuadFrame,
+    draw_cells: []const renderer.DrawCell,
     default_fg: color.Rgb,
 ) ![]NativeMetalCell {
     var cells: std.ArrayList(NativeMetalCell) = .empty;
     errdefer cells.deinit(allocator);
 
-    try cells.ensureTotalCapacity(allocator, frame.glyphs.len);
+    try cells.ensureTotalCapacity(allocator, frame.glyphs.len + draw_cells.len);
+
+    // 1) ink가 있는 glyph cell. 전경색 + (있으면) 배경색을 같이 싣는다. blank cell도
+    //    GlyphQuadFrame에 들어올 수 있으므로 그릴 게 없는 space는 여기서 제외하고, 배경이
+    //    있는 space는 아래 2)에서 배경 전용 cell로 처리한다.
     for (frame.glyphs) |glyph| {
-        // GlyphQuadFrame은 surface 전체의 glyph와 UV 준비 결과를 담아 blank cell도 들어올 수
-        // 있다. 그릴 ink가 없는 space는 native bridge로 넘기지 않는다(렌더링/검증 모두 동일).
         if (glyph.run.codepoint == ' ') continue;
         cells.appendAssumeCapacity(.{
             .row = glyph.run.row,
@@ -79,6 +100,33 @@ pub fn buildNativeCellsFromGlyphQuads(
             .u1 = glyph.uv.u1,
             .v1 = glyph.uv.v1,
             .foreground = packForeground(glyph.run.style, default_fg),
+            .background = packBackground(glyph.run.style),
+        });
+    }
+
+    // 2) glyph이 없는 공백 cell이 non-default 배경을 가지면 배경 전용 cell을 낸다. UV를
+    //    sentinel(-1)로 둬 셰이더가 atlas를 sampling하지 않고 coverage 0(=배경만)으로 본다.
+    //    이게 없으면 "\e[44m   \e[0m" 같은 색칠된 공백 구간이 글자 사이로 끊겨 보인다.
+    for (draw_cells) |cell| {
+        if (cell.codepoint != ' ') continue;
+        const background = packBackground(cell.style);
+        if (background == 0) continue;
+        cells.appendAssumeCapacity(.{
+            .row = cell.row,
+            .col = cell.col,
+            .width = cell.width,
+            .codepoint = cell.codepoint,
+            .slot_id = 0,
+            .atlas_x_px = 0,
+            .atlas_y_px = 0,
+            .atlas_width_px = 0,
+            .atlas_height_px = 0,
+            .u0 = -1.0,
+            .v0 = -1.0,
+            .u1 = -1.0,
+            .v1 = -1.0,
+            .foreground = 0,
+            .background = background,
         });
     }
 
@@ -171,7 +219,7 @@ pub const MetalFrameBuffer = struct {
         cell_height_px: u32,
         default_fg: color.Rgb,
     ) !void {
-        const new_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, default_fg);
+        const new_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, frame.draw_list.cells, default_fg);
         errdefer allocator.free(new_cells);
         const new_uploads = try buildNativeRasterUploads(allocator, frame.glyph_raster_frame);
         errdefer allocator.free(new_uploads);
@@ -216,3 +264,37 @@ pub const MetalFrameBuffer = struct {
         self.* = .{};
     }
 };
+
+test "background projection emits bg-only cells for non-default-background spaces" {
+    const allocator = std.testing.allocator;
+    // glyph이 없는 빈 frame이라도, 배경이 있는 공백은 배경 전용 cell로 나와야 한다.
+    const empty_frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 3, .rows = 1 },
+        .cursor = .{},
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &.{},
+        .stats = .{},
+    };
+    var blue = terminal.Style{};
+    blue.background = .{ .rgb = .{ .r = 0, .g = 0, .b = 255 } };
+    const draw_cells = [_]renderer.DrawCell{
+        .{ .row = 0, .col = 0, .codepoint = ' ', .style = blue }, // 파란 배경 공백 -> emit
+        .{ .row = 0, .col = 1, .codepoint = ' ', .style = .{} }, // 기본 배경 공백 -> skip
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, empty_frame, &draw_cells, .{ .r = 255, .g = 255, .b = 255 });
+    defer allocator.free(cells);
+
+    try std.testing.expectEqual(@as(usize, 1), cells.len);
+    try std.testing.expectEqual(@as(u32, 0xFF0000FF), cells[0].background);
+    // sentinel UV(-1): 셰이더가 atlas를 sampling하지 않고 배경만 칠한다.
+    try std.testing.expectEqual(@as(f32, -1.0), cells[0].u0);
+    try std.testing.expectEqual(@as(u16, 0), cells[0].col);
+}
+
+test "background projection packs glyph cell background and leaves default as zero" {
+    try std.testing.expectEqual(@as(u32, 0), packBackground(.{}));
+    var red = terminal.Style{};
+    red.background = .{ .rgb = .{ .r = 255, .g = 0, .b = 0 } };
+    try std.testing.expectEqual(@as(u32, 0xFFFF0000), packBackground(red));
+}

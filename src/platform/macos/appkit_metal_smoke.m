@@ -90,6 +90,9 @@ typedef struct {
     // Zig NativeMetalCell.foreground와 layout을 맞춘다. smoke는 흰색 coverage를 검증하므로
     // 이 값을 쓰지 않는다.
     uint32_t foreground;
+    // Zig NativeMetalCell.background와 layout을 맞춘다(0xAARRGGBB). smoke fixture는 기본 배경
+    // (a=0)이라 그리기는 기존과 같지만, ABI 크기/오프셋 계약을 위해 필드를 둔다.
+    uint32_t background;
 } MaruMetalSmokeCell;
 
 typedef struct {
@@ -112,6 +115,9 @@ typedef struct {
     // 공유 셰이더(maru_metal_shader.h)의 VertexIn은 packed_float3 color를 갖는다. smoke는
     // 흰색 coverage를 검증하므로 정점 색을 흰색으로 채운다.
     float color[3];
+    // 공유 셰이더의 packed_float4 bg. smoke fixture는 기본 배경이라 (0,0,0,0)으로 채워, bg.a=0
+    // 경로(기존 float4(fg*coverage, coverage))를 그대로 탄다.
+    float bg[4];
 } MaruMetalSmokeVertex;
 
 typedef struct {
@@ -1070,13 +1076,15 @@ static MaruMetalSmokeVertex *maru_build_cell_vertices(
         const float right = grid_left + (((float)cell.col + cell_width) / (float)cols) * grid_width;
         const float top = grid_top - ((float)cell.row / (float)rows) * grid_height;
         const float bottom = grid_top - (((float)cell.row + 1.0f) / (float)rows) * grid_height;
+        // smoke fixture는 기본 배경이라 bg=(0,0,0,0)으로 둔다 → 셰이더의 bg.a=0 경로(흰색
+        // coverage만)를 타 기존 readback 검증과 동일하다.
         MaruMetalSmokeVertex quad[6] = {
-            {left, top, cell.u0, cell.v0, {1.0f, 1.0f, 1.0f}},
-            {left, bottom, cell.u0, cell.v1, {1.0f, 1.0f, 1.0f}},
-            {right, bottom, cell.u1, cell.v1, {1.0f, 1.0f, 1.0f}},
-            {left, top, cell.u0, cell.v0, {1.0f, 1.0f, 1.0f}},
-            {right, bottom, cell.u1, cell.v1, {1.0f, 1.0f, 1.0f}},
-            {right, top, cell.u1, cell.v0, {1.0f, 1.0f, 1.0f}},
+            {left, top, cell.u0, cell.v0, {1.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 0.0f}},
+            {left, bottom, cell.u0, cell.v1, {1.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 0.0f}},
+            {right, bottom, cell.u1, cell.v1, {1.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 0.0f}},
+            {left, top, cell.u0, cell.v0, {1.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 0.0f}},
+            {right, bottom, cell.u1, cell.v1, {1.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 0.0f}},
+            {right, top, cell.u1, cell.v0, {1.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 0.0f}},
         };
         memcpy(&vertices[i * vertices_per_cell], quad, sizeof(quad));
     }

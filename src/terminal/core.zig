@@ -73,6 +73,9 @@ pub const TerminalCore = struct {
     // 프로그램에 보낸다(less/vim이 자체 스크롤). 스크롤백이 잠긴 alt에서 스크롤이 무반응이 되지
     // 않게 하는 표준 장치로, iTerm2/Terminal.app처럼 기본 켠다(프로그램이 ?1007l로 끌 수 있음).
     alternate_scroll: bool = true,
+    // bracketed paste(DECSET 2004): 켜져 있으면 붙여넣기를 ESC[200~ ... ESC[201~로 감싸 보낸다.
+    // zsh/vim/claude가 켜며, 붙여넣은 텍스트를 타이핑과 구분해(자동 들여쓰기·즉시 실행 방지) 처리한다.
+    bracketed_paste: bool = false,
     // DECTCEM(CSI ?25 h/l): 커서 표시. TUI가 화면을 그리는 동안 커서 깜빡임/잔상을 숨기려고 끈다.
     // snapshot/renderSnapshot이 내보내는 cursor.visible에 합성된다(내부 self.cursor.visible은 불변).
     cursor_visible: bool = true,
@@ -232,6 +235,27 @@ pub const TerminalCore = struct {
     pub fn scrollbackRowWrapped(self: *const TerminalCore, i: usize) bool {
         if (i >= self.sb_count or self.sb_wrapped.len == 0) return false;
         return self.sb_wrapped[(self.sb_head + i) % self.sb_wrapped.len];
+    }
+
+    /// 붙여넣기 바이트를 PTY 입력으로 인코딩한다: 개행을 CR로 정규화(\r\n/\n -> \r — 셸 입력의
+    /// 줄바꿈 관례)하고, 프로그램이 bracketed paste(DECSET 2004)를 켰으면 ESC[200~ ... ESC[201~로
+    /// 감싼다(타이핑과 구분돼 자동 들여쓰기/즉시 실행 방지). 호출자가 free한다.
+    pub fn encodePaste(self: *const TerminalCore, allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        if (self.bracketed_paste) try out.appendSlice(allocator, "\x1b[200~");
+        var i: usize = 0;
+        while (i < bytes.len) : (i += 1) {
+            const b = bytes[i];
+            if (b == '\r' or b == '\n') {
+                try out.append(allocator, '\r');
+                if (b == '\r' and i + 1 < bytes.len and bytes[i + 1] == '\n') i += 1; // CRLF는 한 번만
+            } else {
+                try out.append(allocator, b);
+            }
+        }
+        if (self.bracketed_paste) try out.appendSlice(allocator, "\x1b[201~");
+        return try out.toOwnedSlice(allocator);
     }
 
     /// 선택 시작(마우스 다운). 뷰포트 행/열을 받아 절대 행으로 저장한다.
@@ -895,6 +919,7 @@ pub const TerminalCore = struct {
                     self.markDirty(self.cursor.row);
                 },
                 1007 => self.alternate_scroll = set, // alt screen 휠 -> 화살표 변환 on/off
+                2004 => self.bracketed_paste = set, // bracketed paste(붙여넣기 감싸기)
                 47, 1047 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
                 1048 => if (set) self.saveCursorState() else self.restoreCursorState(),
                 1049 => if (set) self.enterAltScreen(true) else self.leaveAltScreen(true),
@@ -3696,4 +3721,21 @@ test "triple-click selects the whole logical line including wrapped rows" {
     const text = (try core.extractSelection(std.testing.allocator)).?;
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("abcdef", text);
+}
+
+test "encodePaste normalizes newlines and wraps with bracketed paste when DECSET 2004 is on" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    // 기본(비-bracketed): \r\n/\n -> \r 정규화만.
+    const plain = try core.encodePaste(std.testing.allocator, "a\r\nb\nc");
+    defer std.testing.allocator.free(plain);
+    try std.testing.expectEqualStrings("a\rb\rc", plain);
+
+    try core.write("\x1b[?2004h"); // zsh/claude가 켜는 bracketed paste
+    const wrapped_paste = try core.encodePaste(std.testing.allocator, "ls\n");
+    defer std.testing.allocator.free(wrapped_paste);
+    try std.testing.expectEqualStrings("\x1b[200~ls\r\x1b[201~", wrapped_paste);
+
+    try core.write("\x1b[?2004l");
+    try std.testing.expect(!core.bracketed_paste);
 }

@@ -34,7 +34,6 @@
 현재 dev shell에서 아직 하지 않는 것:
 
 - fixed-cell layout(현재는 NDC inset 매핑이라 glyph가 창 크기에 맞춰 늘어난다)
-- resize 시 wrap된 줄을 새 폭으로 재배치하는 reflow
 - 커서 shape(bar/underline)·blink, underline overlay 렌더
 - 스크롤백, 선택/클립보드, 탭/분할 UI
 - workspace restore
@@ -76,4 +75,4 @@
 
 ## 남은 한계
 
-현재 dev shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, `MaruMetalTerminalView`(CAMetalLayer)에 dev session의 shell glyph와 반전 블록 커서를 그리며, key/resize/close event를 Zig dev session ABI로 내려보낸다. resize cell 수는 실제 CoreText font metrics에서 Zig가 계산한다(`metal_renderer_created`/`metal_frames_drawn`로 gate). 다만 NDC inset 매핑이라 glyph가 창 크기에 맞춰 늘어나고, fixed-cell layout·resize reflow·스크롤백·탭/분할·선택/클립보드 같은 제품 interactive UX와 커서 shape/blink는 아직 없다.
+현재 dev shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, `MaruMetalTerminalView`(CAMetalLayer)에 dev session의 shell glyph와 반전 블록 커서를 그리며, key/resize/close event를 Zig dev session ABI로 내려보낸다. resize cell 수는 실제 CoreText font metrics에서 Zig가 계산한다(`metal_renderer_created`/`metal_frames_drawn`로 gate). resize 때는 soft-wrap된 줄을 새 폭에 다시 wrap하는 reflow가 동작한다. 다만 NDC inset 매핑이라 glyph가 창 크기에 맞춰 늘어나고, fixed-cell layout·스크롤백·탭/분할·선택/클립보드 같은 제품 interactive UX와 커서 shape/blink는 아직 없다.

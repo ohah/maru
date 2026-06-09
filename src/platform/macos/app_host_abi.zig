@@ -169,6 +169,39 @@ pub export fn maru_macos_app_dev_session_resize(
     return @intFromEnum(Status.ok);
 }
 
+// cell 메트릭이 아직 없을 때(첫 frame 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
+const placeholder_cell_width_px: u32 = 12;
+const placeholder_cell_height_px: u32 = 24;
+
+/// backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다. cell 크기가 0이면
+/// (아직 메트릭 없음) placeholder로 대체하고, 최소 1×1, u16 상한으로 막는다. Swift가 직접
+/// floor/clamp 계산을 들고 있던 것을 Zig로 옮겨 std.testing으로 고정한다.
+fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px: u32, cell_height_px: u32) terminal.Size {
+    const cell_w = if (cell_width_px > 0) cell_width_px else placeholder_cell_width_px;
+    const cell_h = if (cell_height_px > 0) cell_height_px else placeholder_cell_height_px;
+    const cols = @max(@as(u32, 1), backing_width_px / cell_w);
+    const rows = @max(@as(u32, 1), backing_height_px / cell_h);
+    return .{
+        .cols = @intCast(@min(cols, std.math.maxInt(u16))),
+        .rows = @intCast(@min(rows, std.math.maxInt(u16))),
+    };
+}
+
+/// Swift host가 창 backing 픽셀 크기에서 grid를 계산할 때 부르는 순수 helper(상태 없음, 세션
+/// ABI 버전과 무관). out_cols/out_rows에 결과를 쓴다.
+pub export fn maru_macos_grid_from_backing(
+    backing_width_px: u32,
+    backing_height_px: u32,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    out_cols: ?*u32,
+    out_rows: ?*u32,
+) void {
+    const size = gridFromBacking(backing_width_px, backing_height_px, cell_width_px, cell_height_px);
+    if (out_cols) |p| p.* = size.cols;
+    if (out_rows) |p| p.* = size.rows;
+}
+
 pub export fn maru_macos_app_dev_session_close(
     session: ?*DevSession,
     out_summary: ?*DevFrameSummary,
@@ -411,4 +444,15 @@ test "macOS app dev exported session API reports null outputs as ABI errors" {
 
 test {
     std.testing.refAllDecls(app_dev_session);
+}
+
+test "gridFromBacking divides backing pixels by cell size with placeholder + clamps" {
+    // 960×600 backing at 8×16 cell -> 120×37.
+    try std.testing.expectEqual(terminal.Size{ .cols = 120, .rows = 37 }, gridFromBacking(960, 600, 8, 16));
+    // cell 크기 0(메트릭 없음) -> placeholder 12×24 사용.
+    try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 25 }, gridFromBacking(960, 600, 0, 0));
+    // floor 동작: 부족한 픽셀은 버린다.
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(25, 16, 10, 16));
+    // 최소 1×1.
+    try std.testing.expectEqual(terminal.Size{ .cols = 1, .rows = 1 }, gridFromBacking(1, 1, 100, 100));
 }

@@ -2,13 +2,19 @@
 
 이 문서는 실제 macOS 제품 앱을 만들기 직전에 Swift와 Zig가 어디서 만나는지 정한다. 목적은 빨리 창을 띄우는 것이 아니라, 제품 앱이 smoke 전용 Objective-C bridge를 복제하거나 PTY/runtime 책임을 AppKit 쪽으로 끌고 가지 않게 하는 것이다.
 
+## 정책: 네이티브 레이어는 최대한 얇게
+
+**Swift/Objective-C 같은 네이티브 의존성은 최소화한다.** 플랫폼에 묶이지 않는 모든 로직(계산·결정·정책)은 Zig에 두고 `std.testing`으로 테스트한다. 네이티브 레이어는 다음만 한다: AppKit/window lifecycle, focus/input, Metal draw 호출, ABI record marshaling. **비즈니스 로직·수치 계산·상태 결정은 네이티브에 두지 않는다** — 네이티브엔 단위 테스트 프레임워크가 없어 회귀를 못 막고, Linux/headless에서 재사용도 안 되기 때문이다.
+
+판단 기준: "이 코드를 테스트하려면 window/run loop가 필요한가?" 아니라면 Zig로 간다. 예: 창 backing 픽셀 → grid(cols/rows) 계산, resize 중복 방지(같은 size+scale skip), backing scale → 폰트 device 픽셀 크기는 모두 Zig가 소유하고(`maru_macos_grid_from_backing`, dev session resize dedup, `renderer.deviceFontSizeFromMilli`), Swift는 AppKit 값만 모아 넘긴다.
+
 ## 현재 결정
 
 - Swift는 지속 실행되는 `NSApplication`을 소유한다.
 - Swift는 window/tab/split lifecycle, focus, `keyDown:`, close/menu/preferences, IME, accessibility 같은 macOS UX를 소유한다.
-- Zig는 `PtySession`, `LivePtySession`, `SurfaceRuntime`, `RuntimeEventPump`, `FrameLoop`, keybinding resolver, renderer frame 조립을 소유한다.
+- Zig는 `PtySession`, `LivePtySession`, `SurfaceRuntime`, `RuntimeEventPump`, `FrameLoop`, keybinding resolver, renderer frame 조립, 그리고 grid 계산·resize 중복 방지·device 픽셀 메트릭 같은 플랫폼 비의존 로직을 소유한다.
 - Swift는 terminal storage, PTY file descriptor, renderer atlas/resource를 직접 만지지 않는다.
-- Swift가 Zig에 넘기는 값은 `src/platform/macos/app_host_abi.h`의 fixed-width C ABI record만 사용한다.
+- Swift가 Zig에 넘기는 값은 `src/platform/macos/app_host_abi.h`의 fixed-width C ABI record만 사용한다. cols/rows 같은 파생값도 Swift가 계산하지 않고 Zig helper(`maru_macos_grid_from_backing`)를 부른다.
 - Objective-C `*.m` smoke bridge는 삭제하지 않는다. 제품 앱 회귀와 low-level AppKit/Metal/CoreText 회귀를 분리해서 보기 위한 regression smoke로 남긴다.
 
 ## 현재 제품 앱 dev shell 범위

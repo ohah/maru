@@ -818,3 +818,38 @@ test "app smoke glyph artifact records backend frame input" {
     try std.testing.expect(std.mem.indexOf(u8, artifact, "raster_uploads len=") != null);
     try std.testing.expect(std.mem.indexOf(u8, artifact, "glyph row=0 col=0 codepoint=U+0041") != null);
 }
+
+test "app host builds frames from the scrolled viewport, not just the active screen" {
+    const allocator = std.testing.allocator;
+    var memory_pty = MemoryPty.init(allocator);
+    defer memory_pty.deinit();
+    var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 8, .rows = 2 })};
+    defer surfaces[0].deinit();
+    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surfaces[0], 10, memory_pty.io());
+
+    var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 4);
+    defer queue.deinit();
+    var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
+    var renderer_state = renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
+
+    // "one"이 스크롤백으로 밀리고 활성 화면은 two/three. 한 줄 위로 스크롤하면 뷰포트 첫 행이
+    // 스크롤백의 "one"이어야 한다 — snapshot()을 쓰면 여전히 "two"가 나와 이 테스트가 잡는다.
+    try surfaces[0].core.write("one\r\ntwo\r\nthree");
+    surfaces[0].core.scrollViewport(1);
+
+    var frame = try buildFrame(allocator, &app_window, &pump, &renderer_state, renderer.FakeFontBackend{});
+    defer frame.deinit(allocator);
+
+    var row0: [8]u21 = .{' '} ** 8;
+    for (frame.render_frame.draw_list.cells) |cell| {
+        if (cell.row == 0 and cell.col < 8) row0[cell.col] = cell.codepoint;
+    }
+    try std.testing.expectEqual(@as(u21, 'o'), row0[0]);
+    try std.testing.expectEqual(@as(u21, 'n'), row0[1]);
+    try std.testing.expectEqual(@as(u21, 'e'), row0[2]);
+}

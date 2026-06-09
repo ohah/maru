@@ -527,3 +527,23 @@ test "runtime reports pty read errors without tracing them as output" {
         runtime.writeInput(1, .{ .bytes = "after-read-error" }),
     );
 }
+
+test "escapeForLog escapes controls and never writes past the buffer (OOB regression)" {
+    var buf: [16]u8 = undefined;
+    // 기본 escape들.
+    try std.testing.expectEqualStrings("\\e[A\\r\\n", escapeForLog("\x1b[A\r\n", &buf));
+    try std.testing.expectEqualStrings("\\x80ok", escapeForLog("\x80ok", &buf));
+
+    // OOB 회귀(#202): 가드(n+5>=len)를 통과한 4바이트 \xNN 쓰기가 n을 buf.len-2까지 밀 수 있다.
+    // 옛 코드는 거기서 말줄임 3바이트를 무조건 써서 한 칸 넘었다. 모든 잘림 지점에서 안전해야 한다.
+    var small: [8]u8 = undefined;
+    var i: usize = 0;
+    while (i <= 12) : (i += 1) {
+        // printable i개 + 제어 바이트들: n이 모든 정렬로 끝에 닿게 만든다.
+        var input: [16]u8 = undefined;
+        for (0..i) |k| input[k] = 'a';
+        for (i..16) |k| input[k] = 0x80; // 4바이트 \x80으로 확장됨
+        const out = escapeForLog(input[0..16], &small);
+        try std.testing.expect(out.len <= small.len); // 패닉 없이 버퍼 안에서 끝나야 한다
+    }
+}

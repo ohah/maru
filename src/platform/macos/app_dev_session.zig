@@ -37,6 +37,18 @@ fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px:
     };
 }
 
+// 화면 상태 진단 logger. MARU_DEBUG일 때 frame build마다 TerminalCore의 cell 격자(cursor 위치 +
+// 줄별 텍스트/배경)를 찍어, "개행 안 되고 덮어씀" 같은 cursor/scroll 동작을 데이터로 확인한다.
+const screen_diag = std.log.scoped(.screen);
+var screen_diag_cache: ?bool = null;
+
+fn screenDiagEnabled() bool {
+    if (screen_diag_cache == null) {
+        screen_diag_cache = std.c.getenv("MARU_DEBUG") != null;
+    }
+    return screen_diag_cache.?;
+}
+
 // app_host_abi.zig가 이 파일을 import하므로 EventKind는 여기서 정의하고 거기서 re-export한다
 // (순환 import 회피). FrameSummary.last_event_kind가 이 값을 그대로 싣는다.
 pub const EventKind = enum(u32) {
@@ -284,6 +296,38 @@ pub const DevSession = struct {
         return self.last_summary;
     }
 
+    /// MARU_DEBUG일 때 활성 surface의 cell 격자를 찍는다. CJK 등 비-ASCII는 텍스트 줄에서
+    /// 공백으로 보이지만 배경 줄(b...)의 'B'로 영역을 알 수 있어, 파란 배경 줄과 프롬프트 줄이
+    /// 같은 row에 겹치는지(개행 안 됨) 다른 row인지 데이터로 구분한다.
+    fn logScreenIfDebug(self: *DevSession) void {
+        if (!screenDiagEnabled() or !self.surface_initialized) return;
+        const core = &self.surfaces[0].core;
+        const cols = @min(@as(usize, core.size.cols), 240);
+        screen_diag.info("=== screen {d}x{d} cursor=({d},{d}) ===", .{
+            core.size.cols, core.size.rows, core.cursor.row, core.cursor.col,
+        });
+        var text: [240]u8 = undefined;
+        var bg: [240]u8 = undefined;
+        const grid_cols: usize = core.size.cols;
+        for (0..core.size.rows) |row| {
+            var any = false;
+            for (0..cols) |col| {
+                const cell = core.cells[row * grid_cols + col];
+                const cp = cell.codepoint;
+                text[col] = if (cp >= 0x20 and cp < 0x7f) @intCast(cp) else ' ';
+                const has_bg = switch (cell.style.background) {
+                    .default => false,
+                    else => true,
+                };
+                bg[col] = if (has_bg) 'B' else '.';
+                if ((cp != 0 and cp != ' ') or has_bg) any = true;
+            }
+            if (!any) continue;
+            screen_diag.info("r{d:0>2} t|{s}|", .{ row, text[0..cols] });
+            screen_diag.info("r{d:0>2} b|{s}|", .{ row, bg[0..cols] });
+        }
+    }
+
     pub fn tick(self: *DevSession) !FrameSummary {
         // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
         // 아님). 그래야 summary의 glyph/atlas 통계가 실제 rasterized glyph를 반영하고, 이후
@@ -333,6 +377,7 @@ pub const DevSession = struct {
 
             // tick만 아는 per-frame render 통계와 tick index를 summary에 덧씌운다.
             self.writeSummaryFromTick(tick_result);
+            self.logScreenIfDebug();
         } else {
             // idle: build/project를 건너뛰므로 summary는 마지막 frame render 통계를 그대로 둔다.
             self.writeSummaryFromState();

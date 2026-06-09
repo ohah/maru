@@ -44,14 +44,15 @@ pub const TerminalCore = struct {
     const max_csi_params = 16;
 
     pub fn init(allocator: std.mem.Allocator, size: types.Size) !TerminalCore {
-        const cells = try allocator.alloc(types.Cell, cellCount(size));
+        const grid = clampGridSize(size);
+        const cells = try allocator.alloc(types.Cell, cellCount(grid));
         @memset(cells, .{});
 
         return .{
             .allocator = allocator,
-            .size = size,
+            .size = grid,
             .cells = cells,
-            .dirty = fullDirty(size),
+            .dirty = fullDirty(grid),
         };
     }
 
@@ -422,8 +423,11 @@ pub const TerminalCore = struct {
         self.last_print = null;
     }
 
-    pub fn resize(self: *TerminalCore, cols: u16, rows: u16) !void {
-        const next_size: types.Size = .{ .cols = cols, .rows = rows };
+    pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
+        // grid를 최소 2칸×1행으로 맞춘다(clampGridSize 참고). 이후 본문은 clamp된 cols/rows를 쓴다.
+        const next_size = clampGridSize(.{ .cols = cols_in, .rows = rows_in });
+        const cols = next_size.cols;
+        const rows = next_size.rows;
         const next_cells = try self.allocator.alloc(types.Cell, cellCount(next_size));
         @memset(next_cells, .{});
 
@@ -620,20 +624,17 @@ pub const TerminalCore = struct {
         if (self.cursor.row >= self.size.rows) self.cursor.row = self.size.rows - 1;
 
         const requested_width = width.cellWidth(codepoint);
-        // wide glyph가 줄 끝에 1칸만 남으면 통째로 다음 줄로 넘긴다(이전 줄 마지막 칸은 빈칸).
-        // cols가 2 미만이면 wrap해도 못 담으므로 아래에서 한 칸으로 줄인다.
-        if (requested_width == 2 and self.cursor.col + 1 >= self.size.cols and self.size.cols >= 2) {
+        // wide glyph(2칸)가 줄 끝(마지막 칸, 1칸만 남음)에 안 들어가면 통째로 다음 줄로 넘긴다
+        // (이전 줄 마지막 칸은 빈칸으로 남는다). grid는 항상 cols>=2라(clampGridSize) 넘긴 뒤엔
+        // 반드시 들어가므로, 칸을 줄이는 degrade 없이 그대로 width 2로 쓴다.
+        if (requested_width == 2 and self.cursor.col + 1 >= self.size.cols) {
             self.cursor.col = 0;
             self.lineFeed();
         }
 
         const row = self.cursor.row;
         const col = self.cursor.col;
-        // OOB 방어: cols가 1이면(config는 cols>=1만 보장) 위 wrap을 해도 wide glyph를 못 담는다.
-        // 그대로 width 2로 쓰면 아래에서 col+1 칸에 continuation을 쓰는데, cols==1의 마지막 행에선
-        // index(row, col+1)이 cell 버퍼 밖이라 OOB write가 난다. 그래서 이 degenerate 입력(1칸
-        // 터미널 + 2칸 글자)에서만 한 칸으로 줄인다. 표준 동작이 아니라 크래시 방지용 가드다.
-        const cell_width: u2 = if (requested_width == 2 and col + 1 >= self.size.cols) 1 else requested_width;
+        const cell_width: u2 = requested_width;
 
         self.clearCellForWrite(row, col);
         if (cell_width == 2) self.clearCellForWrite(row, col + 1);
@@ -774,6 +775,14 @@ fn decodeUtf8(bytes: []const u8) !u21 {
 
 fn cellCount(size: types.Size) usize {
     return @as(usize, size.cols) * @as(usize, size.rows);
+}
+
+/// grid를 최소 cols>=2, rows>=1로 맞춘다. 한 cell 글자 모델은 wide glyph(2칸)의 continuation을
+/// 옆 칸에 쓰므로 1칸짜리 grid는 마지막 칸에서 col+1 OOB를 부른다. init/resize에서 항상 이 최소
+/// 크기를 보장해 그 degenerate 입력을 원천 차단한다(1칸 터미널은 실사용도 없다). 그래서 putCell은
+/// cols>=2를 가정하고 wide glyph가 줄 끝에 안 들어가면 단순히 다음 줄로 넘기면 된다.
+fn clampGridSize(size: types.Size) types.Size {
+    return .{ .cols = @max(size.cols, 2), .rows = @max(size.rows, 1) };
 }
 
 fn fullDirty(size: types.Size) ?types.DirtyRegion {
@@ -1389,14 +1398,18 @@ test "a wide glyph with one column left wraps whole to the next line" {
     try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
 }
 
-test "a wide glyph in a 1-column terminal degrades to one cell instead of writing out of bounds" {
-    // cols==1은 config가 허용하는 degenerate 입력이다(normalizeConfig는 cols>=1만 보장). 마지막
-    // 행에서 wide glyph를 width 2로 쓰면 col+1 continuation이 cell 버퍼 밖으로 나가 OOB write가
-    // 난다. putCell이 이 경우 한 칸으로 줄여 OOB 없이 안전하게 쓴다(이 가드가 없으면 크래시).
-    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 1, .rows = 2 });
+test "the grid is clamped to at least 2 columns so wide glyphs never write out of bounds" {
+    // 1칸 grid는 wide glyph(2칸) continuation에서 col+1 OOB를 부른다. init/resize가 최소 2칸으로
+    // 맞춰 그 degenerate 입력을 원천 차단하므로, wide glyph는 degrade 없이 통째로 들어간다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 1, .rows = 1 });
     defer core.deinit();
-    try core.write("\x1b[2;1H"); // 마지막 행으로 이동
-    try core.write("한"); // wide(2) in 1-col 마지막 행: 한 칸으로 줄어들고 OOB 없음
-    try std.testing.expectEqual(@as(u21, '한'), core.cells[core.index(1, 0)].codepoint);
-    try std.testing.expectEqual(@as(u2, 1), core.cells[core.index(1, 0)].width);
+    try std.testing.expectEqual(@as(u16, 2), core.size.cols);
+    try std.testing.expectEqual(@as(u16, 1), core.size.rows);
+    try core.write("한"); // wide(2)가 OOB/degrade 없이 2칸으로 들어간다
+    try std.testing.expectEqual(@as(u21, '한'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u2, 2), core.cells[core.index(0, 0)].width);
+    try std.testing.expect(core.cells[core.index(0, 1)].continuation);
+    // resize도 같은 최소 크기를 보장한다.
+    try core.resize(1, 4);
+    try std.testing.expectEqual(@as(u16, 2), core.size.cols);
 }

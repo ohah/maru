@@ -36,6 +36,13 @@ const cases = [_]Case{
         .input_fixture_path = "tests/fixtures/ansi/scroll_crlf.ansi",
         .golden_path = "tests/golden/screen/xterm/scroll_crlf.txt",
     },
+    .{
+        .name = "scroll_region",
+        .cols = 4,
+        .rows = 4,
+        .input_fixture_path = "tests/fixtures/ansi/scroll_region.ansi",
+        .golden_path = "tests/golden/screen/xterm/scroll_region.txt",
+    },
 };
 
 test "committed goldens match Alacritty alacritty_terminal" {

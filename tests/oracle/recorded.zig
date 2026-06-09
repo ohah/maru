@@ -83,6 +83,18 @@ test "recorded terminal oracle snapshots match Maru output" {
                 },
             },
         },
+        .{
+            .name = "scroll_region",
+            .size = .{ .cols = 4, .rows = 4 },
+            .input_fixture_path = "tests/fixtures/ansi/scroll_region.ansi",
+            .oracles = &.{
+                .{
+                    .name = "xterm-compatible",
+                    .source = "recorded expectation for DECSTBM scroll region (region scrolls, outside rows fixed)",
+                    .expected_screen = "tests/golden/screen/xterm/scroll_region.txt",
+                },
+            },
+        },
     };
 
     inline for (cases) |case| {

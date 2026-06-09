@@ -2,19 +2,12 @@ const std = @import("std");
 const maru = @import("maru");
 const config = maru.config;
 const renderer = maru.renderer;
+const diag_gate = @import("diag.zig");
 
 // 렌더링/메트릭 진단 logger. ad-hoc getenv+fprintf를 ObjC hot path에 두는 대신, slot 결정이
-// 일어나는 Zig 렌더 계층에서 std.log scoped logger로 찍는다. MARU_DEBUG가 켜졌을 때만 emit하며,
-// 프로세스 수명 동안 안 바뀌므로 환경변수는 한 번만 조회해 캐시한다.
+// 일어나는 Zig 렌더 계층에서 std.log scoped logger로 찍는다. MARU_DEBUG 게이트는 diag.zig가
+// 단일 출처로 소유한다(env 이름·read-once 캐시 공유).
 const diag = std.log.scoped(.font_metrics);
-var diag_enabled_cache: ?bool = null;
-
-fn diagEnabled() bool {
-    if (diag_enabled_cache == null) {
-        diag_enabled_cache = std.c.getenv("MARU_DEBUG") != null;
-    }
-    return diag_enabled_cache.?;
-}
 
 pub const NativeGlyphRasterResult = extern struct {
     status: c_int,
@@ -87,7 +80,7 @@ pub const CoreTextGlyphRasterizer = struct {
         // MARU_DEBUG 진단: cell 메트릭(cache_key)과 atlas slot 크기를 함께 찍는다. 둘이 어긋나면
         // (slot != cell × span) glyph가 cell보다 넓거나 좁은 slot에 그려져 간격이 틀어진다 —
         // "m i s e" 간격 버그를 이 비교로 잡았다.
-        if (diagEnabled()) {
+        if (diag_gate.maruDebugEnabled()) {
             diag.info(
                 "cp={d} scale_milli={d} cell={d}x{d} slot={d}x{d} ink_px={d} status={d}",
                 .{

@@ -23,33 +23,26 @@
 
 - Swift `@main` entrypoint가 실제 `NSApplication`을 실행한다.
 - Swift가 Zig C ABI static library를 링크하고 startup 때 capability/version을 확인한다.
-- placeholder window가 계속 떠 있다.
+- terminal window(`MaruMetalTerminalView`, CAMetalLayer)가 계속 떠 있고, dev session의 shell glyph와 반전 블록 커서를 그린다.
 - Swift는 opaque dev session handle만 보유하고, Zig가 shell surface, `LivePtySession`, `SurfaceRuntime`, `RuntimeEventPump`, `FrameLoop`, `RendererState`를 소유한다.
-- Swift timer가 Zig `maru_macos_app_dev_session_tick`을 반복 호출해 frame loop를 진행한다.
-- placeholder view의 `keyDown`, window resize, window close가 fixed-width C ABI record를 통해 Zig dev session으로 내려간다.
-- smoke 실행은 `zig-out/maru-macos-app-dev/app-dev.summary.txt`에 `visible_ui=true`, `swift_host=true`, `abi_ready=true`, `terminal_surface=true`, `frame_prepared=true`, `output_events>0`, `exit_events=1`, `key_events=2`, `terminal_input_events=2`, `resize_events=1`, `close_events=1`을 남긴다.
+- Swift timer가 Zig `maru_macos_app_dev_session_tick`을 반복 호출해 frame loop를 진행하고, metal generation이 바뀐 tick에만 lean renderer로 다시 그린다(idle tick은 재드로우 생략).
+- terminal view의 `keyDown`, window resize, window close가 fixed-width C ABI record를 통해 Zig dev session으로 내려간다. resize는 backing 픽셀·scale만 넘기고 grid(cols/rows)는 Zig가 실제 cell 메트릭으로 계산한다.
+- smoke 실행은 `zig-out/maru-macos-app-dev/app-dev.summary.txt`에 `visible_ui=true`, `swift_host=true`, `abi_ready=true`, `terminal_surface=true`, `terminal_surface_note=zig_runtime_rendered_to_swift_cametal_layer`, `metal_renderer_created=true`, `metal_frames_drawn>0`, `frame_prepared=true`, `output_events>0`, `exit_events=1`, `key_events=2`, `terminal_input_events=2`, `resize_events=1`, `close_events=1`을 남긴다.
 
-현재 dev shell PR에서 하지 않는 것:
+여기까지로 dev session의 shell glyph·커서가 실제 Swift window에 그려지고, resize cell 수도 실제 CoreText font metrics(advance×line-height)와 분수 backing scale에서 Zig가 계산한다.
 
-- Swift window 안에 Metal terminal view를 붙여 glyph를 그리는 일
-- 실제 renderer view의 font metrics로 resize cell 수를 계산하는 일
-- 제품 tab/window close button UX
+현재 dev shell에서 아직 하지 않는 것:
 
-다음 Swift host 통합 PR은 다음만 목표로 한다.
-
-- Swift placeholder view를 실제 terminal Metal view 또는 제품 renderer host view로 교체한다.
-- 실제 renderer view가 가진 font metrics로 resize cell 수를 계산한다.
-- 보이는 terminal glyph를 Swift window에서 확인한다.
-
-다음 visible renderer PR에서 하지 않는 것:
-
-- 탭/분할 UI
+- fixed-cell layout(현재는 NDC inset 매핑이라 glyph가 창 크기에 맞춰 늘어난다)
+- resize 시 wrap된 줄을 새 폭으로 재배치하는 reflow
+- 커서 shape(bar/underline)·blink, underline overlay 렌더
+- 스크롤백, 선택/클립보드, 탭/분할 UI
 - workspace restore
 - settings UI/runtime reload
 - plugin/Wasm
 - global shortcut
 - IME 완성
-- full VT parser 호환성
+- full VT parser 호환성(alternate screen, scroll region, mouse mode 등)
 
 ## C ABI 규칙
 
@@ -83,4 +76,4 @@
 
 ## 남은 한계
 
-현재 dev shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, placeholder view의 key/resize/close event도 Zig dev session ABI로 내려보낸다. 하지만 Swift window 안에 Metal terminal view를 붙이지 않는다. 따라서 `NSApplication` 실행, window lifecycle, Swift/Zig ABI 링크, Zig-owned shell surface/tick, key/resize/close ABI 실패는 볼 수 있지만, 보이는 glyph draw와 실제 font metrics 기반 resize는 아직 Objective-C smoke와 headless smoke가 검증한다. 다음 PR부터 visible renderer view를 붙인다.
+현재 dev shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, `MaruMetalTerminalView`(CAMetalLayer)에 dev session의 shell glyph와 반전 블록 커서를 그리며, key/resize/close event를 Zig dev session ABI로 내려보낸다. resize cell 수는 실제 CoreText font metrics에서 Zig가 계산한다(`metal_renderer_created`/`metal_frames_drawn`로 gate). 다만 NDC inset 매핑이라 glyph가 창 크기에 맞춰 늘어나고, fixed-cell layout·resize reflow·스크롤백·탭/분할·선택/클립보드 같은 제품 interactive UX와 커서 shape/blink는 아직 없다.

@@ -32,15 +32,35 @@ pub const NativeMetalCell = extern struct {
     background: u32 = 0,
 };
 
+/// 반전 블록 커서의 두 색. block은 커서 칸 배경(theme.cursor), text는 그 위 glyph를 그릴 색
+/// (theme.background) — 글자가 커서 위에서 배경색으로 반전돼 보이게 한다.
+pub const CursorColors = struct {
+    block: color.Rgb,
+    text: color.Rgb,
+};
+
+/// renderer가 셰이더에 넘기는 색 묶음. cell 투영마다 같은 값을 쓰므로 한 곳에 모은다.
+pub const CellColors = struct {
+    /// default 전경(theme.foreground). glyph의 .default 색을 이 값으로 푼다.
+    default_fg: color.Rgb,
+    /// 커서 overlay 투영 색. null이면 커서를 투영하지 않는다 — glyph-atlas 픽셀을 그대로 검증하는
+    /// visible smoke는 커서 블록이 readback을 바꾸지 않게 null로 둔다(제품 dev session만 켠다).
+    cursor: ?CursorColors = null,
+};
+
+/// Rgb를 0x00RRGGBB로 packing한다(공용 — 전경/커서/배경 packing이 같은 byte 순서를 쓰게).
+fn packRgb(rgb: color.Rgb) u32 {
+    return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+}
+
 /// terminal cell의 전경 Color를 화면 RGB로 풀어 0x00RRGGBB로 packing한다. default는 theme
 /// 기본 전경, indexed는 xterm-256 팔레트, rgb는 그대로.
 fn packForeground(style: terminal.Style, default_fg: color.Rgb) u32 {
-    const rgb = switch (style.foreground) {
+    return packRgb(switch (style.foreground) {
         .default => default_fg,
         .indexed => |index| color.xterm256(index),
         .rgb => |value| value,
-    };
-    return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+    });
 }
 
 /// terminal cell의 배경 Color를 0xAARRGGBB로 packing한다. default 배경은 theme 기본 배경
@@ -52,7 +72,7 @@ fn packBackground(style: terminal.Style) u32 {
         .indexed => |index| color.xterm256(index),
         .rgb => |value| value,
     };
-    return 0xFF00_0000 | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+    return 0xFF00_0000 | packRgb(rgb);
 }
 
 pub const NativeMetalRasterUpload = extern struct {
@@ -73,12 +93,13 @@ pub fn buildNativeCellsFromGlyphQuads(
     allocator: std.mem.Allocator,
     frame: renderer.GlyphQuadFrame,
     draw_cells: []const renderer.DrawCell,
-    default_fg: color.Rgb,
+    colors: CellColors,
 ) ![]NativeMetalCell {
     var cells: std.ArrayList(NativeMetalCell) = .empty;
     errdefer cells.deinit(allocator);
 
-    try cells.ensureTotalCapacity(allocator, frame.glyphs.len + draw_cells.len);
+    // glyph(1) + 배경 전용(2) + 커서/overlay(3) 상한. overlay마다 cell 하나면 충분하다.
+    try cells.ensureTotalCapacity(allocator, frame.glyphs.len + draw_cells.len + frame.overlays.len);
 
     // 1) ink가 있는 glyph cell. 전경색 + (있으면) 배경색을 같이 싣는다. blank cell도
     //    GlyphQuadFrame에 들어올 수 있으므로 그릴 게 없는 space는 여기서 제외하고, 배경이
@@ -99,7 +120,7 @@ pub fn buildNativeCellsFromGlyphQuads(
             .v0 = glyph.uv.v0,
             .u1 = glyph.uv.u1,
             .v1 = glyph.uv.v1,
-            .foreground = packForeground(glyph.run.style, default_fg),
+            .foreground = packForeground(glyph.run.style, colors.default_fg),
             .background = packBackground(glyph.run.style),
         });
     }
@@ -131,6 +152,69 @@ pub fn buildNativeCellsFromGlyphQuads(
             .foreground = 0,
             .background = background,
         });
+    }
+
+    // 3) 커서 overlay를 반전 블록으로 맨 마지막에 낸다(블렌딩 ON이라 앞 cell 위에 덮인다). 커서 cell의
+    //    배경을 커서 색으로 채우고, 그 자리에 glyph가 있으면 같은 glyph를 배경색(cursor.text)으로 다시
+    //    그려 글자가 커서 위에서 반전돼 보이게 한다(글자를 가리지 않음). 빈 cell이면 sentinel UV로 커서
+    //    색 블록만 칠한다. colors.cursor가 null이면(glyph-atlas readback 검증 smoke) 통째로 건너뛴다.
+    //    underline overlay는 sub-cell 선이라 아직 다루지 않는다(whole-cell 모델).
+    if (colors.cursor) |cursor_colors| {
+        const cursor_bg = 0xFF00_0000 | packRgb(cursor_colors.block);
+        for (frame.overlays) |overlay| {
+            const cur = switch (overlay) {
+                .cursor => |c| c,
+                .underline => continue,
+            };
+            if (!cur.visible) continue;
+
+            // 커서 cell에 그려진 glyph를 찾아 같은 모양을 반전색으로 다시 그린다(없으면 솔리드 블록).
+            var glyph_at_cursor: ?renderer.GlyphQuad = null;
+            for (frame.glyphs) |glyph| {
+                if (glyph.run.row == cur.row and glyph.run.col == cur.col and glyph.run.codepoint != ' ') {
+                    glyph_at_cursor = glyph;
+                    break;
+                }
+            }
+
+            if (glyph_at_cursor) |glyph| {
+                cells.appendAssumeCapacity(.{
+                    .row = cur.row,
+                    .col = cur.col,
+                    .width = glyph.run.cell_width,
+                    .codepoint = glyph.run.codepoint,
+                    .slot_id = glyph.slot.id,
+                    .atlas_x_px = glyph.slot.x_px,
+                    .atlas_y_px = glyph.slot.y_px,
+                    .atlas_width_px = glyph.slot.width_px,
+                    .atlas_height_px = glyph.slot.height_px,
+                    .u0 = glyph.uv.u0,
+                    .v0 = glyph.uv.v0,
+                    .u1 = glyph.uv.u1,
+                    .v1 = glyph.uv.v1,
+                    .foreground = packRgb(cursor_colors.text),
+                    .background = cursor_bg,
+                });
+            } else {
+                cells.appendAssumeCapacity(.{
+                    .row = cur.row,
+                    .col = cur.col,
+                    .width = 1,
+                    .codepoint = ' ',
+                    .slot_id = 0,
+                    .atlas_x_px = 0,
+                    .atlas_y_px = 0,
+                    .atlas_width_px = 0,
+                    .atlas_height_px = 0,
+                    .u0 = -1.0,
+                    .v0 = -1.0,
+                    .u1 = -1.0,
+                    .v1 = -1.0,
+                    .foreground = 0,
+                    .background = cursor_bg,
+                });
+            }
+        }
     }
 
     return cells.toOwnedSlice(allocator);
@@ -220,9 +304,9 @@ pub const MetalFrameBuffer = struct {
         atlas_config: renderer.GlyphAtlasConfig,
         cell_width_px: u32,
         cell_height_px: u32,
-        default_fg: color.Rgb,
+        colors: CellColors,
     ) !void {
-        const new_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, frame.draw_list.cells, default_fg);
+        const new_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, frame.draw_list.cells, colors);
         errdefer allocator.free(new_cells);
         const new_uploads = try buildNativeRasterUploads(allocator, frame.glyph_raster_frame);
         errdefer allocator.free(new_uploads);
@@ -286,7 +370,9 @@ test "background projection emits bg-only cells for non-default-background space
         .{ .row = 0, .col = 1, .codepoint = ' ', .style = .{} }, // 기본 배경 공백 -> skip
         .{ .row = 0, .col = 2, .codepoint = 0, .style = blue }, // 미기록 cell + 파란 배경(BCE) -> emit
     };
-    const cells = try buildNativeCellsFromGlyphQuads(allocator, empty_frame, &draw_cells, .{ .r = 255, .g = 255, .b = 255 });
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, empty_frame, &draw_cells, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+    });
     defer allocator.free(cells);
 
     // space(0x20)와 미기록(0) 둘 다 배경이 있으면 배경 전용 cell로 나온다(기본 배경 공백만 skip).
@@ -303,4 +389,108 @@ test "background projection packs glyph cell background and leaves default as ze
     var red = terminal.Style{};
     red.background = .{ .rgb = .{ .r = 255, .g = 0, .b = 0 } };
     try std.testing.expectEqual(@as(u32, 0xFFFF0000), packBackground(red));
+}
+
+test "cursor overlay projects an inverted block reusing the glyph at the cursor cell" {
+    const allocator = std.testing.allocator;
+    // (0,0)에 glyph 'A'가 있고 커서도 (0,0)에 있으면, 커서 cell은 같은 glyph를 배경색(text)으로 다시
+    // 그리고 배경을 커서 색(block)으로 채워 반전 블록이 된다(글자를 가리지 않음).
+    const glyph = renderer.GlyphQuad{
+        .run = .{
+            .row = 0,
+            .col = 0,
+            .cell_width = 1,
+            .codepoint = 'A',
+            .font_id = 1,
+            .glyph_id = 1,
+            .cache_key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1 },
+        },
+        .slot = .{ .id = 7, .key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1 }, .x_px = 10, .y_px = 20, .width_px = 8, .height_px = 16, .upload_bytes = 0, .generation = 0 },
+        .uv = .{ .u0 = 0.1, .v0 = 0.2, .u1 = 0.3, .v1 = 0.4 },
+    };
+    var glyphs = [_]renderer.GlyphQuad{glyph};
+    var overlays = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0, .visible = true } }};
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 2, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &glyphs,
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .cursor = .{ .block = .{ .r = 0, .g = 255, .b = 0 }, .text = .{ .r = 0, .g = 0, .b = 0 } },
+    });
+    defer allocator.free(cells);
+
+    // glyph cell(1) + 커서 cell(3, 맨 뒤) = 2개. 커서 cell이 마지막이라 블렌딩 시 위에 덮인다.
+    try std.testing.expectEqual(@as(usize, 2), cells.len);
+    const cursor_cell = cells[cells.len - 1];
+    try std.testing.expectEqual(@as(u32, 0xFF00FF00), cursor_cell.background); // 커서 블록(녹색, A=FF)
+    try std.testing.expectEqual(@as(u32, 0x00000000), cursor_cell.foreground); // 반전 glyph = 배경색(검정)
+    try std.testing.expectEqual(@as(f32, 0.1), cursor_cell.u0); // 같은 glyph 모양 유지
+    try std.testing.expectEqual(@as(u32, 7), cursor_cell.slot_id);
+}
+
+test "cursor overlay on an empty cell projects a solid block with sentinel UV" {
+    const allocator = std.testing.allocator;
+    var overlays = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 1, .visible = true } }};
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 3, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 1 },
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .cursor = .{ .block = .{ .r = 0, .g = 255, .b = 0 }, .text = .{ .r = 0, .g = 0, .b = 0 } },
+    });
+    defer allocator.free(cells);
+
+    // glyph 없는 cell의 커서는 sentinel UV의 솔리드 블록.
+    try std.testing.expectEqual(@as(usize, 1), cells.len);
+    try std.testing.expectEqual(@as(u32, 0xFF00FF00), cells[0].background);
+    try std.testing.expectEqual(@as(f32, -1.0), cells[0].u0);
+    try std.testing.expectEqual(@as(u16, 1), cells[0].col);
+}
+
+test "cursor projection is skipped when cursor colors are null" {
+    const allocator = std.testing.allocator;
+    // glyph-atlas readback을 그대로 검증하는 visible smoke는 cursor=null로 커서 cell을 내지 않는다.
+    var overlays = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0, .visible = true } }};
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 2, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+    });
+    defer allocator.free(cells);
+    try std.testing.expectEqual(@as(usize, 0), cells.len);
+}
+
+test "an invisible cursor overlay projects no cursor cell" {
+    const allocator = std.testing.allocator;
+    var overlays = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0, .visible = false } }};
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 2, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .cursor = .{ .block = .{ .r = 0, .g = 255, .b = 0 }, .text = .{ .r = 0, .g = 0, .b = 0 } },
+    });
+    defer allocator.free(cells);
+    try std.testing.expectEqual(@as(usize, 0), cells.len);
 }

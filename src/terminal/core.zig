@@ -485,7 +485,11 @@ pub const TerminalCore = struct {
         while (old_r < self.size.rows) : (old_r += 1) {
             const soft = self.wrapped[old_r];
             // 기여 길이: soft 행은 꽉 찼으므로 전체, 마지막(non-soft) 행은 뒤 빈칸을 잘라낸 길이.
-            const contrib: u16 = if (soft) self.size.cols else self.trimmedRowLen(old_r);
+            var contrib: u16 = if (soft) self.size.cols else self.trimmedRowLen(old_r);
+            // 단, 커서가 있는 행에서는 커서 앞 빈 칸까지 보존한다. zsh는 줄 끝을 PROMPT_SP 공백 +
+            // 커서로 표시하는데, 그 trailing 공백을 잘라내면 reflow 후 커서 컬럼이 zsh의 기대와
+            // 어긋나, SIGWINCH redraw가 기존 줄 위에 겹쳐 찍혀 프롬프트가 중복된다(실제 관측됨).
+            if (old_r == self.cursor.row) contrib = @max(contrib, self.cursor.col);
 
             var c: u16 = 0;
             while (c < contrib) : (c += 1) {
@@ -1730,4 +1734,19 @@ test "resize narrowing wraps a wide glyph whole instead of splitting it" {
     try std.testing.expectEqual(@as(u21, '한'), core.cells[core.index(1, 0)].codepoint);
     try std.testing.expectEqual(@as(u2, 2), core.cells[core.index(1, 0)].width);
     try std.testing.expect(core.cells[core.index(1, 1)].continuation);
+}
+
+test "resize preserves the cursor column past trimmed trailing blanks (zsh PROMPT_SP)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    // "abc" 뒤 커서를 (0,6)으로 옮긴다 — content는 3칸인데 커서는 trailing 공백 뒤(6)에 있다
+    // (zsh가 줄 끝을 공백+커서로 표시하는 상황의 일반형).
+    try core.write("abc");
+    try core.write("\x1b[1;7H"); // CUP -> (0,6)
+    try std.testing.expectEqual(@as(u16, 6), core.cursor.col);
+    // 4칸으로 줄이면 커서 앞 빈 칸까지 보존된 논리 줄("abc   ", 6칸)이 "abc "/"  "로 재배치되고,
+    // 커서는 논리 offset 6 = (1,2)로 따라온다. trailing 공백을 잘랐다면 (0,3)에 잘못 박힌다.
+    try core.resize(4, 2);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
 }

@@ -46,6 +46,10 @@ pub const TerminalCore = struct {
     // DECCKM(CSI ?1 h/l, application cursor keys). vim/less가 켜면 화살표 입력이 SS3(`ESC O A`)로
     // 인코딩돼야 한다. core는 모드만 추적하고, 인코딩은 input.encodeKey가 EncodeOptions로 받는다.
     application_cursor_keys: bool = false,
+    // alternate scroll(xterm DECSET 1007): alt screen에서 휠/트랙패드 스크롤을 화살표 키로 변환해
+    // 프로그램에 보낸다(less/vim이 자체 스크롤). 스크롤백이 잠긴 alt에서 스크롤이 무반응이 되지
+    // 않게 하는 표준 장치로, iTerm2/Terminal.app처럼 기본 켠다(프로그램이 ?1007l로 끌 수 있음).
+    alternate_scroll: bool = true,
     saved_cells: []types.Cell = &.{},
     saved_wrapped: []bool = &.{},
     // DECSC/DECRC + 1048/1049가 쓰는 저장 커서(위치+pen+pending_wrap).
@@ -429,6 +433,7 @@ pub const TerminalCore = struct {
         while (i < self.csi_param_count) : (i += 1) {
             switch (self.csiRawParam(i)) {
                 1 => self.application_cursor_keys = set, // DECCKM: 화살표 SS3/CSI 인코딩 전환
+                1007 => self.alternate_scroll = set, // alt screen 휠 -> 화살표 변환 on/off
                 47 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
                 1047 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
                 1048 => if (set) self.saveCursorState() else self.restoreCursorState(),
@@ -2635,4 +2640,14 @@ test "DECCKM combined with alt screen (vim startup sequence) round-trips" {
     try core.write("\x1b[?1l\x1b[?1049l"); // vim 종료
     try std.testing.expect(!core.alt_active);
     try std.testing.expectEqualStrings("\x1b[B", try core.encodeKey(.{ .key = .arrow_down }, &buffer));
+}
+
+test "CSI ?1007h/l toggles alternate scroll (default on)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try std.testing.expect(core.alternate_scroll); // iTerm2/Terminal.app처럼 기본 on
+    try core.write("\x1b[?1007l");
+    try std.testing.expect(!core.alternate_scroll);
+    try core.write("\x1b[?1007h");
+    try std.testing.expect(core.alternate_scroll);
 }

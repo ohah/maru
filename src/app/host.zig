@@ -100,7 +100,11 @@ pub fn handleKeyEvent(
     // whether that key is an app action or terminal bytes. Keeping that choice
     // here gives AppKit, future Windows, and tests one shared policy.
     var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
-    const resolved = try resolver.resolve(event, &buffer);
+    // 인코딩 모드(DECCKM 등)는 active surface의 프로그램이 정한다 — vim이 ?1h를 보냈으면 화살표가
+    // SS3로 가야 하므로 매 키마다 core의 현재 모드를 읽어 인코더에 넘긴다.
+    const encode_options: terminal.input.EncodeOptions =
+        if (app_window.active()) |active| active.core.encodeOptions() else .{};
+    const resolved = try resolver.resolve(event, &buffer, encode_options);
     return switch (resolved) {
         .app_action => |action| .{ .app_action = action },
         .ignored => .ignored,
@@ -622,6 +626,31 @@ test "app host resolves terminal key events before writing to active PTY" {
 
     try std.testing.expectEqual(@as(usize, 1), result.terminal_input.bytes_len);
     try std.testing.expectEqualStrings("\x02", memory_pty.writes.items);
+}
+
+test "app host encodes arrows per the active surface's DECCKM mode" {
+    const allocator = std.testing.allocator;
+    var memory_pty = MemoryPty.init(allocator);
+    defer memory_pty.deinit();
+    var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 })};
+    defer surfaces[0].deinit();
+    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surfaces[0], 10, memory_pty.io());
+
+    const resolver: config_mod.KeyBindingResolver = .{};
+
+    // normal mode: CSI 화살표
+    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .arrow_up });
+    try std.testing.expectEqualStrings("\x1b[A", memory_pty.writes.items);
+
+    // 프로그램(vim)이 DECCKM을 켜면 같은 키가 SS3로 인코딩돼야 한다.
+    try surfaces[0].core.write("\x1b[?1h");
+    memory_pty.writes.clearRetainingCapacity();
+    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .arrow_up });
+    try std.testing.expectEqualStrings("\x1bOA", memory_pty.writes.items);
 }
 
 test "app host does not leak app actions or ignored Cmd keys to PTY" {

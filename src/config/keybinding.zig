@@ -168,6 +168,9 @@ pub const KeyBindingResolver = struct {
         self: KeyBindingResolver,
         event: terminal.KeyEvent,
         buffer: *[terminal.input.encoded_key_buffer_len]u8,
+        // active surface의 현재 인코딩 모드(DECCKM 등). 매크로 binding엔 영향 없고 fallback
+        // encodeKey에만 적용된다 — 모드는 TerminalCore가 추적하고 호출자가 매 키마다 읽어 넘긴다.
+        encode_options: terminal.input.EncodeOptions,
     ) !ResolvedKey {
         const chord = KeyChord.fromKeyEvent(event) orelse return .ignored;
 
@@ -188,7 +191,7 @@ pub const KeyBindingResolver = struct {
             return .ignored;
         }
 
-        return .{ .terminal_input = try terminal.input.encodeKey(event, buffer) };
+        return .{ .terminal_input = try terminal.input.encodeKey(event, buffer, encode_options) };
     }
 };
 
@@ -334,7 +337,7 @@ test "send_control accepts non-letter C0 controls like Ctrl+[" {
     const resolved = try resolver.resolve(.{
         .key = .{ .char = 'e' },
         .modifiers = .{ .command = true },
-    }, &buffer);
+    }, &buffer, .{});
     try std.testing.expectEqualStrings("\x1b", resolved.terminal_input); // Ctrl+[ == ESC
 }
 
@@ -346,7 +349,7 @@ test "unbound Ctrl with an unmapped key types the character instead of erroring"
         (try resolver.resolve(.{
             .key = .{ .char = '1' },
             .modifiers = .{ .control = true },
-        }, &buffer)).terminal_input,
+        }, &buffer, .{})).terminal_input,
     );
 }
 
@@ -370,7 +373,7 @@ test "resolver consumes configured app actions before terminal input" {
     const resolved = try resolver.resolve(.{
         .key = .{ .char = 't' },
         .modifiers = .{ .command = true },
-    }, &buffer);
+    }, &buffer, .{});
 
     try std.testing.expectEqual(action_mod.Action.new_tab, resolved.app_action);
 }
@@ -404,7 +407,7 @@ test "resolver maps focused terminal macro to terminal bytes" {
     const resolved = try resolver.resolve(.{
         .key = .{ .char = 'b' },
         .modifiers = .{ .command = true },
-    }, &buffer);
+    }, &buffer, .{});
 
     try std.testing.expectEqualStrings("\x02", resolved.terminal_input);
 }
@@ -421,11 +424,11 @@ test "resolver maps text and escape sequence terminal macros to terminal bytes" 
 
     try std.testing.expectEqualStrings(
         "\x1b[1;5A",
-        (try resolver.resolve(.{ .key = .arrow_up, .modifiers = .{ .control = true } }, &buffer)).terminal_input,
+        (try resolver.resolve(.{ .key = .arrow_up, .modifiers = .{ .control = true } }, &buffer, .{})).terminal_input,
     );
     try std.testing.expectEqualStrings(
         "one",
-        (try resolver.resolve(.{ .key = .{ .char = '1' }, .modifiers = .{ .command = true } }, &buffer)).terminal_input,
+        (try resolver.resolve(.{ .key = .{ .char = '1' }, .modifiers = .{ .command = true } }, &buffer, .{})).terminal_input,
     );
 }
 
@@ -438,17 +441,17 @@ test "resolver leaves ordinary terminal keys alone and ignores unbound command k
         (try resolver.resolve(.{
             .key = .{ .char = 'b' },
             .modifiers = .{ .control = true },
-        }, &buffer)).terminal_input,
+        }, &buffer, .{})).terminal_input,
     );
     try std.testing.expectEqualStrings(
         "b",
-        (try resolver.resolve(.{ .key = .{ .char = 'b' } }, &buffer)).terminal_input,
+        (try resolver.resolve(.{ .key = .{ .char = 'b' } }, &buffer, .{})).terminal_input,
     );
     try std.testing.expectEqual(
         ResolvedKey.ignored,
         try resolver.resolve(.{
             .key = .{ .char = 's' },
             .modifiers = .{ .command = true },
-        }, &buffer),
+        }, &buffer, .{}),
     );
 }

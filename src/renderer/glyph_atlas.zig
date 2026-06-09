@@ -15,6 +15,9 @@ pub const AtlasInvalidationReason = enum {
     device_scale_changed,
     color_glyph_theme_changed,
     eviction_policy_changed,
+    // row packer 좌표가 텍스처를 소진했다(eviction은 슬롯 수만 줄이고 좌표는 재활용하지 않으므로,
+    // 고유 글리프가 많으면 y가 텍스처 높이를 넘는다). 전체 invalidate 후 (0,0)부터 재배치한다.
+    atlas_full,
     manual,
 };
 
@@ -153,7 +156,12 @@ pub const GlyphAtlas = struct {
 
     fn makeSlot(self: *GlyphAtlas, glyph: glyph_layout.GlyphRun) AtlasSlot {
         const dimensions = estimateGlyphBitmapSize(glyph);
-        const placement = self.placeGlyph(dimensions);
+        const placement = self.placeGlyph(dimensions) orelse blk: {
+            // 좌표 소진: atlas 전체를 invalidate(generation++ — 이후 frame의 글리프는 전부 miss로
+            // 재배치+재업로드돼 텍스처가 일관되게 다시 채워진다)하고 (0,0)부터 다시 시작한다.
+            _ = self.invalidate(.atlas_full);
+            break :blk self.placeGlyph(dimensions) orelse AtlasPlacement{ .x_px = 0, .y_px = 0 };
+        };
         const slot: AtlasSlot = .{
             .id = self.next_slot_id,
             .key = glyph.cache_key,
@@ -168,7 +176,10 @@ pub const GlyphAtlas = struct {
         return slot;
     }
 
-    fn placeGlyph(self: *GlyphAtlas, dimensions: EstimatedGlyphBitmapSize) AtlasPlacement {
+    /// row packer로 글리프 자리를 잡는다. 텍스처 세로 공간이 소진되면 null — 호출자(makeSlot)가
+    /// 전체 invalidate 후 재배치한다. 이 검사가 없으면 좌표가 증가만 해(eviction도 좌표는 재활용
+    /// 안 함) y가 텍스처 높이를 넘은 슬롯이 생기고, UV가 범위 밖이 돼 글자가 깨지다가 안 보인다.
+    fn placeGlyph(self: *GlyphAtlas, dimensions: EstimatedGlyphBitmapSize) ?AtlasPlacement {
         // 실제 texture packer를 붙이기 전까지는 단순 row packer로 좌표를 고정한다.
         // 이 좌표가 있어야 Metal backend가 AtlasSlot만 보고 UV를 만들 수 있고,
         // backend마다 "slot id -> 임시 좌표"를 다시 발명하지 않는다.
@@ -182,6 +193,11 @@ pub const GlyphAtlas = struct {
             }
             self.row_height_px = 0;
         }
+
+        // 이 글리프의 아래 끝이 텍스처를 넘으면 공간 소진(단일 글리프가 atlas보다 큰 극단은
+        // width와 같은 정책으로 유효 높이를 키워 통과시킨다 — 별도 이슈).
+        const atlas_height = @max(self.config.atlas_height_px, dimensions.height_px);
+        if (self.next_y_px > atlas_height - dimensions.height_px) return null;
 
         const placement: AtlasPlacement = .{
             .x_px = self.next_x_px,
@@ -330,16 +346,16 @@ test "glyph atlas invalidation resets placement for the next generation" {
     try std.testing.expectEqual(@as(u32, 1), after.slot.generation);
 }
 
-test "glyph atlas placement saturates instead of overflowing the y cursor" {
+test "glyph atlas recycles via full invalidation when the texture rows run out" {
+    // 옛 동작은 y가 maxInt까지 포화하며 텍스처 밖 슬롯을 만들었다 — UV가 범위 밖이 돼 글자가
+    // 깨지다가 안 보이는 라이브 버그의 원인. 이제 소진되면 전체 invalidate 후 (0,0)부터 재배치한다.
     var atlas = GlyphAtlas.init(std.testing.allocator, .{ .atlas_width_px = 14 });
     defer atlas.deinit();
 
-    // 이 상태는 정상 제품 사용에서는 나오기 어렵지만, placement cursor가 손상되거나 아주
-    // 긴 세션에서 누적됐을 때 ReleaseFast overflow로 터지지 않아야 한다. wrap이 필요한
-    // 상태를 직접 만들고 다음 slot을 요청해 y 좌표가 maxInt로 포화되는지 확인한다.
     atlas.next_x_px = 1;
     atlas.next_y_px = std.math.maxInt(u32) - 5;
     atlas.row_height_px = 10;
+    const generation_before = atlas.generation;
 
     const placed = try atlas.ensureGlyph(glyphForTest('A', .{
         .font_id = 1,
@@ -349,7 +365,29 @@ test "glyph atlas placement saturates instead of overflowing the y cursor" {
     }, .{}));
 
     try std.testing.expectEqual(@as(u32, 0), placed.slot.x_px);
-    try std.testing.expectEqual(std.math.maxInt(u32), placed.slot.y_px);
+    try std.testing.expectEqual(@as(u32, 0), placed.slot.y_px); // 텍스처 안으로 재배치
+    try std.testing.expect(atlas.generation > generation_before); // 전체 재업로드 신호
+    try std.testing.expectEqual(@as(usize, 1), atlas.stats.invalidations);
+}
+
+test "glyph atlas slots never exceed the texture height across many unique glyphs" {
+    // 라이브 재현(claude CLI 스크롤): 고유 글리프가 텍스처 용량을 넘게 들어와도 모든 슬롯의
+    // 아래 끝이 항상 텍스처 안이어야 한다(밖이면 UV 범위 밖 → 깨짐/빈 화면).
+    var atlas = GlyphAtlas.init(std.testing.allocator, .{ .atlas_width_px = 64, .atlas_height_px = 64 });
+    defer atlas.deinit();
+
+    var cp: u21 = 0x4e00; // 고유 CJK 글리프를 대량 투입
+    while (cp < 0x4e00 + 200) : (cp += 1) {
+        const placed = try atlas.ensureGlyph(glyphForTest(cp, .{
+            .font_id = 1,
+            .glyph_id = @intCast(cp),
+            .font_size_px = 14,
+            .device_scale = 1,
+        }, .{}));
+        try std.testing.expect(placed.slot.y_px + placed.slot.height_px <= 64);
+        try std.testing.expect(placed.slot.x_px + placed.slot.width_px <= 64);
+    }
+    try std.testing.expect(atlas.stats.invalidations > 0); // 소진 -> 재활용이 실제로 일어났다
 }
 
 test "glyph atlas key ignores underline but separates raster-affecting style" {

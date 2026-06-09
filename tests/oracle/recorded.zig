@@ -95,6 +95,18 @@ test "recorded terminal oracle snapshots match Maru output" {
                 },
             },
         },
+        .{
+            .name = "alt_screen",
+            .size = .{ .cols = 8, .rows = 3 },
+            .input_fixture_path = "tests/fixtures/ansi/alt_screen.ansi",
+            .oracles = &.{
+                .{
+                    .name = "xterm-compatible",
+                    .source = "recorded expectation for DECSET 1049 alt screen enter/leave (primary + cursor restored)",
+                    .expected_screen = "tests/golden/screen/xterm/alt_screen.txt",
+                },
+            },
+        },
     };
 
     inline for (cases) |case| {

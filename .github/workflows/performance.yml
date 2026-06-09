@@ -14,6 +14,10 @@ on:
       - "src/**"
       - "tests/**"
       - "tools/perf/**"
+  # PR 필수 체크로 쓰므로 모든 PR에서 돈다(paths 필터를 두면 무관한 PR에서 skip돼 required 체크가
+  # 영원히 pending으로 머지를 막는다). perf job은 ~30s로 짧다. 이번 reflow perf 회귀가 PR 체크에
+  # 없어 main에 들어간 일을 막기 위함이다.
+  pull_request:
 
 # 같은 ref·같은 트리거에서 새 실행이 오면 이전 실행만 취소한다. group에
 # event_name을 포함하지 않으면 main push가 진행 중인 주간 schedule 실행을

@@ -555,6 +555,19 @@ pub fn build(b: *std.Build) void {
             "Metal",
             "-framework",
             "QuartzCore",
+            // Retina HiDPI: bare 실행파일(.app 번들 없음)에 Info.plist를 __TEXT,__info_plist
+            // 섹션으로 임베드해 NSHighResolutionCapable을 켠다. 없으면 macOS가 창을 1x backing
+            // store로 렌더해 window.backingScaleFactor가 1.0이 되고 Retina에서 흐려진다.
+            "-Xlinker",
+            "-sectcreate",
+            "-Xlinker",
+            "__TEXT",
+            "-Xlinker",
+            "__info_plist",
+            "-Xlinker",
+        });
+        macos_app_dev_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Info.plist"));
+        macos_app_dev_compile.addArgs(&.{
             "-o",
             "zig-out/bin/maru-macos-app-dev",
         });
@@ -565,10 +578,28 @@ pub fn build(b: *std.Build) void {
         const macos_app_dev_build_step = b.step("macos-app-dev-build", "Build the runnable macOS Swift app host dev shell");
         macos_app_dev_build_step.dependOn(&macos_app_dev_compile.step);
 
+        // bare 터미널 실행파일은 HiDPI(NSHighResolutionCapable)를 신뢰성 있게 못 켠다. 정식
+        // .app 번들을 만들고 그 안의 바이너리를 직접 실행하면, AppKit이 실행파일 경로에서
+        // Contents/Info.plist를 찾아 HiDPI를 켜고(Retina에서 또렷), open과 달리 CWD가 유지돼
+        // summary 상대 경로 기록도 정상 동작한다.
+        const macos_app_dev_bundle = b.addSystemCommand(&.{
+            "sh", "-c",
+            "rm -rf zig-out/Maru.app && mkdir -p zig-out/Maru.app/Contents/MacOS zig-out/Maru.app/Contents/Resources/Fonts && " ++
+                "cp zig-out/bin/maru-macos-app-dev zig-out/Maru.app/Contents/MacOS/maru-macos-app-dev && " ++
+                "cp src/platform/macos/MaruAppHost-Info.plist zig-out/Maru.app/Contents/Info.plist && " ++
+                "cp assets/fonts/JetBrainsMono/*.ttf assets/fonts/JetBrainsMono/OFL.txt zig-out/Maru.app/Contents/Resources/Fonts/ && " ++
+                "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo",
+        });
+        macos_app_dev_bundle.setCwd(b.path("."));
+        macos_app_dev_bundle.step.dependOn(&macos_app_dev_compile.step);
+
+        const macos_app_dev_bundle_step = b.step("macos-app-dev-bundle", "Package the macOS dev shell as a HiDPI .app bundle");
+        macos_app_dev_bundle_step.dependOn(&macos_app_dev_bundle.step);
+
         const macos_app_dev_step = b.step("macos-app-dev", "Run the macOS Swift app host dev shell");
-        const macos_app_dev_run = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-app-dev"});
+        const macos_app_dev_run = b.addSystemCommand(&.{"./zig-out/Maru.app/Contents/MacOS/maru-macos-app-dev"});
         macos_app_dev_run.setCwd(b.path("."));
-        macos_app_dev_run.step.dependOn(&macos_app_dev_compile.step);
+        macos_app_dev_run.step.dependOn(&macos_app_dev_bundle.step);
         macos_app_dev_step.dependOn(&macos_app_dev_run.step);
 
         const macos_app_dev_smoke_step = b.step("macos-app-dev-smoke", "Run the macOS Swift app host dev shell smoke");

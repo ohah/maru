@@ -57,6 +57,20 @@ pub const CoreTextDrawListShaper = struct {
 
     appearance: app_config.ResolvedAppearance,
     shape_draw_list: ShapeDrawListFn,
+    // backing(Retina) scale. glyph cache key/atlas slot 크기가 font_size_px × device_scale라,
+    // 2면 slot이 2배가 되어 Retina에서 또렷하게 그릴 수 있다.
+    device_scale: u16 = 1,
+    // 실제 폰트 메트릭에서 온 cell 픽셀 크기(advance 폭 × line-height, device px). 0이면
+    // 메트릭이 없어 atlas가 정사각으로 대체한다. dev session이 CoreText에서 뽑아 넘긴다.
+    cell_width_px: u16 = 0,
+    cell_height_px: u16 = 0,
+
+    fn layoutConfig(self: CoreTextDrawListShaper) renderer.TextLayoutConfig {
+        var config = renderer.textConfigFromFontSize(self.appearance.font.size, self.device_scale);
+        config.cell_width_px = self.cell_width_px;
+        config.cell_height_px = self.cell_height_px;
+        return config;
+    }
 
     pub fn shape(
         self: CoreTextDrawListShaper,
@@ -78,7 +92,7 @@ pub const CoreTextDrawListShaper = struct {
             return renderer.buildGlyphRunListFromShapedRecordsWithSurface(
                 allocator,
                 &.{},
-                renderer.textConfigFromFontSize(self.appearance.font.size, 1),
+                self.layoutConfig(),
                 surface,
             );
         }
@@ -130,7 +144,7 @@ pub const CoreTextDrawListShaper = struct {
         return buildGlyphRunListFromCoreTextGlyphs(
             allocator,
             coretext_records.items,
-            renderer.textConfigFromFontSize(self.appearance.font.size, 1),
+            self.layoutConfig(),
             surface,
             font_registry,
         );

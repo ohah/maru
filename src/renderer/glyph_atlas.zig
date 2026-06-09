@@ -205,16 +205,28 @@ const AtlasPlacement = struct {
 };
 
 fn estimateGlyphBitmapSize(glyph: glyph_layout.GlyphRun) EstimatedGlyphBitmapSize {
-    // 실제 rasterizer가 붙기 전까지 upload byte는 보수적인 관측 후보값이다.
-    // slot/cache 동작을 테스트할 수 있게 하되, 픽셀 품질 계약으로 오해되지 않게
-    // font size와 scale만 사용한다.
-    const font_size = @max(@as(u32, glyph.cache_key.font_size_px), 1);
-    const scale = @max(@as(u32, glyph.cache_key.device_scale), 1);
-    const side = font_size * scale;
-    const upload_bytes: usize = @as(usize, side) * @as(usize, side) * 4;
+    // cell 메트릭(advance 폭 × line-height)이 있으면 그 크기로 slot을 잡아 실제 모노스페이스
+    // 셀에 맞게 그린다. wide glyph(cell_width=2)는 advance의 2배 폭이다. 메트릭이 없는 경로
+    // (테스트/fake backend)는 font_size × scale 정사각으로 대체한다(기존 동작 보존).
+    const cell_w = @as(u32, glyph.cache_key.cell_width_px);
+    const cell_h = @as(u32, glyph.cache_key.cell_height_px);
+    var width_px: u32 = undefined;
+    var height_px: u32 = undefined;
+    if (cell_w > 0 and cell_h > 0) {
+        const span = @max(@as(u32, glyph.cell_width), 1);
+        width_px = cell_w * span;
+        height_px = cell_h;
+    } else {
+        const font_size = @max(@as(u32, glyph.cache_key.font_size_px), 1);
+        const scale = @max(@as(u32, glyph.cache_key.device_scale), 1);
+        const side = font_size * scale;
+        width_px = side;
+        height_px = side;
+    }
+    const upload_bytes: usize = @as(usize, width_px) * @as(usize, height_px) * 4;
     return .{
-        .width_px = side,
-        .height_px = side,
+        .width_px = width_px,
+        .height_px = height_px,
         .upload_bytes = upload_bytes,
     };
 }

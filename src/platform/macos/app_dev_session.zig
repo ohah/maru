@@ -95,9 +95,13 @@ pub const DevSession = struct {
     // 제품 dev shell은 fake font backend가 아니라 실제 CoreText로 glyph frame을 만든다.
     // appearance(폰트/색)는 init에서 한 번 resolve해 매 tick의 CoreTextFrameBuilder에 쓴다.
     appearance: config_mod.ResolvedAppearance = undefined,
-    // 한 cell의 픽셀 크기(정사각 glyph = font_size_px × device_scale). renderer fixed-cell
-    // layout과 host resize가 같은 값을 쓰도록 init에서 한 번 계산해 metal frame으로 노출한다.
-    cell_px: u32 = 0,
+    // 한 cell의 device 픽셀 크기(advance 폭 × line-height). 실제 CoreText 메트릭에서 뽑아
+    // shaper(atlas slot 크기)·rasterizer·renderer fixed-cell layout·host resize가 모두 같은 값을
+    // 쓰게 한다. 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다.
+    cell_width_px: u32 = 0,
+    cell_height_px: u32 = 0,
+    // backing(Retina) scale. resize 이벤트의 scale_milli에서 갱신한다.
+    device_scale: u16 = 1,
     live_initialized: bool = false,
     surface_initialized: bool = false,
     runtime_initialized: bool = false,
@@ -153,11 +157,36 @@ pub const DevSession = struct {
         self.renderer_state = renderer.RendererState.init(allocator, .{});
         self.renderer_initialized = true;
         self.appearance = try config_mod.resolveAppearance(.{});
-        // shaper와 같은 정책(textConfigFromFontSize, device_scale=1)으로 cell 픽셀 크기를
-        // 도출해, renderer/host가 atlas glyph와 같은 크기로 cell을 깐다.
-        self.cell_px = renderer.textConfigFromFontSize(self.appearance.font.size, 1).font_size_px;
+        // 실제 폰트 메트릭에서 cell 픽셀 크기를 뽑는다. shaper(atlas slot)·rasterizer·renderer가
+        // 모두 같은 값을 쓰게 하는 단일 출처다.
+        self.refreshCellMetrics();
         self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.pump, &self.renderer_state);
         self.writeSummaryFromState();
+    }
+
+    /// 현재 font·device_scale에 대한 cell 픽셀 크기(advance 폭 × line-height)를 CoreText에서
+    /// 뽑아 갱신한다. macOS가 아니거나(테스트/CI) 조회 실패면 font_size_px × device_scale
+    /// 정사각으로 대체한다(기존 동작). device_scale이 바뀌는 resize에서도 호출한다.
+    fn refreshCellMetrics(self: *DevSession) void {
+        const font_size_px = renderer.textConfigFromFontSize(self.appearance.font.size, self.device_scale).font_size_px;
+        const square: u32 = @as(u32, font_size_px) * @as(u32, self.device_scale);
+        self.cell_width_px = square;
+        self.cell_height_px = square;
+        // extern native 호출은 macOS에서만 컴파일/링크한다(.m을 링크하지 않는 Linux 계약
+        // 빌드에서 undefined symbol이 되지 않게 comptime으로 막는다).
+        if (builtin.os.tag == .macos) {
+            var metrics: coretext_bridge.CellMetricsResult = .{};
+            coretext_bridge.maru_macos_coretext_font_cell_metrics(
+                self.appearance.font.family.ptr,
+                self.appearance.font.family.len,
+                @as(f64, @floatCast(self.appearance.font.size)) * @as(f64, @floatFromInt(self.device_scale)),
+                &metrics,
+            );
+            if (metrics.status == 0 and metrics.cell_width_px > 0 and metrics.cell_height_px > 0) {
+                self.cell_width_px = metrics.cell_width_px;
+                self.cell_height_px = metrics.cell_height_px;
+            }
+        }
     }
 
     pub fn handleKeyEvent(self: *DevSession, event: terminal.KeyEvent) !FrameSummary {
@@ -187,10 +216,17 @@ pub const DevSession = struct {
         return self.last_summary;
     }
 
-    pub fn resize(self: *DevSession, size: terminal.Size) !FrameSummary {
+    pub fn resize(self: *DevSession, size: terminal.Size, device_scale: u16) !FrameSummary {
         // resize는 terminal grid와 PTY winsize가 함께 바뀌어야 한다. FrameLoop API를
         // 통해 SurfaceRuntime action으로 내려보내면 Swift가 두 책임을 다시 구현하지 않는다.
         self.total_resize_events += 1;
+        // backing scale이 바뀌면(다른 DPI 디스플레이로 이동 등) cell 메트릭을 다시 뽑는다.
+        // glyph는 device_scale 배율로 rasterize되어야 또렷하다.
+        const next_scale = std.math.clamp(device_scale, 1, 8);
+        if (next_scale != self.device_scale) {
+            self.device_scale = next_scale;
+            self.refreshCellMetrics();
+        }
         // 종료된 세션의 resize도 live surface가 없어 실패한다. 닫히는 창의 late resize는
         // 치명적 오류가 아니므로 무시하고 정상으로 닫는다(key와 같은 정책).
         if (self.ended_seen) {
@@ -220,6 +256,9 @@ pub const DevSession = struct {
                 .appearance = self.appearance,
                 .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
                 .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+                .device_scale = self.device_scale,
+                .cell_width_px = @intCast(self.cell_width_px),
+                .cell_height_px = @intCast(self.cell_height_px),
             };
             break :blk try self.frame_loop.tickWithFrameBuilder(frame_builder);
         } else try self.frame_loop.tick(renderer.FakeFontBackend{});
@@ -242,7 +281,7 @@ pub const DevSession = struct {
         if (self.metal_dirty) {
             // Metal view 데이터 투영 실패(OOM 등)는 터미널 코어 동작과 무관하다. 마지막
             // frame을 유지하고 dirty를 남겨 다음 tick에 재시도한다(세션을 죽이지 않는다).
-            if (self.metal_buffer.replace(self.allocator, tick_result.frame.render_frame, self.renderer_state.atlas.config, self.cell_px, self.cell_px, self.appearance.theme.foreground)) |_| {
+            if (self.metal_buffer.replace(self.allocator, tick_result.frame.render_frame, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, self.appearance.theme.foreground)) |_| {
                 self.metal_dirty = false;
             } else |_| {}
         }

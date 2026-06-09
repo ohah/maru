@@ -36,6 +36,9 @@ pub const CoreTextGlyphRasterizer = struct {
     appearance: config.ResolvedAppearance,
     font_registry: *const renderer.FontIdentityRegistry,
     rasterize_glyph: RasterizeGlyphFn,
+    // backing(Retina) scale. atlas slot이 font_size_px × device_scale로 커지므로, glyph도
+    // 같은 배율의 폰트로 그려야 slot을 또렷하게 채운다(작게 그려져 흐려지지 않게).
+    device_scale: u16 = 1,
 
     pub fn rasterize(
         self: CoreTextGlyphRasterizer,
@@ -55,7 +58,7 @@ pub const CoreTextGlyphRasterizer = struct {
         self.rasterize_glyph(
             self.appearance.font.family.ptr,
             self.appearance.font.family.len,
-            @floatCast(self.appearance.font.size),
+            @as(f64, @floatCast(self.appearance.font.size)) * @as(f64, @floatFromInt(self.device_scale)),
             font_identity.postscript_name.ptr,
             font_identity.postscript_name.len,
             request.run.codepoint,

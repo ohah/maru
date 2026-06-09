@@ -259,6 +259,88 @@ static CTFontRef maru_create_primary_font(
     return CTFontCreateWithName(CFSTR("Menlo-Regular"), (CGFloat)font_size, NULL);
 }
 
+typedef struct {
+    int32_t status;
+    uint32_t cell_width_px;
+    uint32_t cell_height_px;
+    uint32_t ascent_px;
+    uint32_t descent_px;
+} MaruCoreTextCellMetrics;
+
+// 모노스페이스 cell 메트릭(advance 폭 × line-height)을 device 픽셀로 돌려준다. font_size_px는
+// 이미 device_scale이 곱해진(예: 14pt × 2 = 28) device 크기다. dev session이 atlas slot 크기와
+// 화면 cell 크기를 모두 이 값으로 맞춰, glyph가 정확한 모노스페이스 격자로 그려진다.
+void maru_macos_coretext_font_cell_metrics(
+    const char *requested_font_family,
+    size_t requested_font_family_len,
+    double font_size_px,
+    MaruCoreTextCellMetrics *result
+) {
+    @autoreleasepool {
+        if (result == NULL) {
+            return;
+        }
+        result->status = -1;
+        result->cell_width_px = 0;
+        result->cell_height_px = 0;
+        result->ascent_px = 0;
+        result->descent_px = 0;
+
+        uint32_t matched = 0;
+        CTFontRef font = maru_create_primary_font(
+            requested_font_family,
+            requested_font_family_len,
+            font_size_px,
+            &matched
+        );
+        if (font == NULL) {
+            result->status = 1;
+            return;
+        }
+
+        const CGFloat ascent = CTFontGetAscent(font);
+        const CGFloat descent = CTFontGetDescent(font);
+        const CGFloat leading = CTFontGetLeading(font);
+
+        // 모노스페이스 폰트는 모든 glyph advance가 같다. 대표 glyph('M')의 advance를 cell 폭으로
+        // 쓴다. glyph 조회/advance가 실패하면 0.6em 근사로 물러난다.
+        UniChar character = (UniChar)'M';
+        CGGlyph glyph = 0;
+        CGFloat advance = 0.0;
+        if (CTFontGetGlyphsForCharacters(font, &character, &glyph, 1) && glyph != 0) {
+            advance = CTFontGetAdvancesForGlyphs(font, kCTFontOrientationHorizontal, &glyph, NULL, 1);
+        }
+        if (!(advance > 0.0)) {
+            advance = font_size_px * 0.6;
+        }
+
+        CGFloat line_height = ascent + descent + leading;
+        if (!(line_height > 0.0)) {
+            line_height = font_size_px * 1.2;
+        }
+
+        result->cell_width_px = (uint32_t)lround((double)advance);
+        result->cell_height_px = (uint32_t)lround((double)line_height);
+        result->ascent_px = (uint32_t)lround((double)ascent);
+        result->descent_px = (uint32_t)lround((double)descent);
+        result->status = 0;
+
+        if (getenv("MARU_DEBUG")) {
+            CFStringRef ps = CTFontCopyPostScriptName(font);
+            char ps_buf[128] = {0};
+            if (ps) {
+                CFStringGetCString(ps, ps_buf, sizeof(ps_buf), kCFStringEncodingUTF8);
+                CFRelease(ps);
+            }
+            fprintf(stderr, "[METRICS] req-family='%.*s' size_px=%.1f -> font='%s' advance(M)=%.2f ascent=%.2f descent=%.2f leading=%.2f => cell=%ux%u\n",
+                    (int)requested_font_family_len, requested_font_family, font_size_px,
+                    ps_buf, advance, ascent, descent, leading,
+                    result->cell_width_px, result->cell_height_px);
+        }
+        CFRelease(font);
+    }
+}
+
 static uint32_t maru_u32_from_cfindex(CFIndex value) {
     if (value <= 0) {
         return 0;
@@ -884,6 +966,20 @@ void maru_macos_coretext_smoke_rasterize_glyph(
             NULL,
             1
         );
+
+        if (getenv("MARU_DEBUG")) {
+            CGSize adv = CGSizeZero;
+            CTFontGetAdvancesForGlyphs(draw_font, kCTFontOrientationHorizontal, &glyph, &adv, 1);
+            CFStringRef ps = CTFontCopyPostScriptName(draw_font);
+            char ps_buf[128] = {0};
+            if (ps) {
+                CFStringGetCString(ps, ps_buf, sizeof(ps_buf), kCFStringEncodingUTF8);
+                CFRelease(ps);
+            }
+            fprintf(stderr, "[RASTER] cp=%u gid=%u font='%s' size=%.1f slot=%zux%zu ink=%.1fx%.1f advance=%.2f\n",
+                    codepoint, glyph_id, ps_buf, requested_font_size,
+                    width_px, height_px, bounds.size.width, bounds.size.height, adv.width);
+        }
         // 수직은 모든 glyph를 공통 baseline에 앉혀 정렬한다(이전엔 ink bounds 기준 가운데
         // 정렬이라 글자마다 baseline이 달라 'm'은 위로 'a'는 아래로 흔들렸다). CTFontDrawGlyphs는
         // position.y를 baseline으로 쓰므로(이 context는 y-up), baseline = descent + 위아래

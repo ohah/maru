@@ -13,6 +13,23 @@
 const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
 
+/// 모노스페이스 cell 메트릭(device 픽셀). native maru_macos_coretext_font_cell_metrics와 layout
+/// 일치. status 0이면 성공.
+pub const CellMetricsResult = extern struct {
+    status: c_int = -1,
+    cell_width_px: u32 = 0,
+    cell_height_px: u32 = 0,
+    ascent_px: u32 = 0,
+    descent_px: u32 = 0,
+};
+
+pub extern fn maru_macos_coretext_font_cell_metrics(
+    requested_font_family: [*]const u8,
+    requested_font_family_len: usize,
+    font_size_px: f64,
+    result: *CellMetricsResult,
+) void;
+
 pub extern fn maru_macos_coretext_shape_draw_list(
     requested_font_family: [*]const u8,
     requested_font_family_len: usize,

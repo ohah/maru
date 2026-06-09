@@ -342,7 +342,6 @@ const EnvStorage = struct {
     allocator: std.mem.Allocator,
     strings: [][:0]u8,
     envp: ?[:null]?[*:0]const u8,
-    uses_parent: bool,
 
     fn init(allocator: std.mem.Allocator, env: []const []const u8) !EnvStorage {
         if (env.len == 0) {
@@ -375,7 +374,6 @@ const EnvStorage = struct {
             .allocator = allocator,
             .strings = strings,
             .envp = envp,
-            .uses_parent = false,
         };
     }
 
@@ -412,19 +410,18 @@ const EnvStorage = struct {
             .allocator = allocator,
             .strings = strings,
             .envp = envp,
-            .uses_parent = false,
         };
     }
 
+    // 두 init 경로 모두 owned envp를 만든다(빈 env면 부모 복사 + TERM 덮어쓰기, 명시 env면 그대로).
+    // 그래서 항상 owned 메모리를 해제하고 owned envp를 반환한다(예전 uses_parent 분기는 제거됨).
     fn deinit(self: *EnvStorage) void {
-        if (self.uses_parent) return;
         for (self.strings) |entry| self.allocator.free(entry);
         self.allocator.free(self.strings);
         self.allocator.free(self.envp.?);
     }
 
     fn envpPtr(self: *const EnvStorage) [*:null]const ?[*:0]const u8 {
-        if (self.uses_parent) return std.c.environ;
         return self.envp.?.ptr;
     }
 };

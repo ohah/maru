@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 9u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 10u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -213,6 +213,12 @@ int32_t maru_macos_app_dev_session_resize(
 int32_t maru_macos_app_dev_session_close(
     MaruAppHostDevSession *session,
     MaruAppHostDevFrameSummary *out_summary
+);
+/* 뷰포트 스크롤. delta_lines>0=위(과거), <0=아래(현재). 스크롤 로직은 Zig TerminalCore가 소유하고,
+   Swift는 휠/Shift+PageUp·Down 이벤트를 줄 수로 환산해 이 함수만 부른다. */
+int32_t maru_macos_app_dev_session_scroll(
+    MaruAppHostDevSession *session,
+    int32_t delta_lines
 );
 void maru_macos_app_dev_session_destroy(MaruAppHostDevSession *session);
 int32_t maru_macos_app_dev_session_metal_frame(

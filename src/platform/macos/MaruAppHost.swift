@@ -64,6 +64,10 @@ final class MaruMetalTerminalView: NSView {
     override func keyDown(with event: NSEvent) {
         controller?.handleKeyDown(event)
     }
+
+    override func scrollWheel(with event: NSEvent) {
+        controller?.handleScroll(event)
+    }
 }
 
 @main
@@ -431,10 +435,40 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func handleKeyDown(_ event: NSEvent) {
+        // Shift+PageUp/Down는 PTY로 보내지 않고 스크롤백 뷰포트를 한 화면씩 스크롤한다. 스크롤 로직은
+        // Zig가 소유하고, 여기선 줄 수(한 화면 = rows-1)만 환산해 scroll ABI를 부른다.
+        if event.modifierFlags.contains(.shift), let session = devSession {
+            let page = max(Int32(1), Int32(latestFrameSummary.rows) - 1)
+            if event.keyCode == 116 { // PageUp -> 과거(위)
+                _ = maru_macos_app_dev_session_scroll(session, page)
+                markMetalNeedsRedraw()
+                return
+            }
+            if event.keyCode == 121 { // PageDown -> 현재(아래)
+                _ = maru_macos_app_dev_session_scroll(session, -page)
+                markMetalNeedsRedraw()
+                return
+            }
+        }
         guard let keyEvent = normalizedKeyEvent(from: event) else {
             return
         }
         sendKeyEvent(keyEvent)
+    }
+
+    // 마우스 휠/트랙패드 스크롤 -> 뷰포트 스크롤. delta를 줄 수로 환산해 scroll ABI만 부른다(얇은
+    // 글루). scrollingDeltaY>0이면 위(과거)로 본다 — 표준 터미널 방향. 정밀(트랙패드) 델타는
+    // 픽셀이라 대략 한 줄(pt)로 나눈다.
+    func handleScroll(_ event: NSEvent) {
+        guard let session = devSession else { return }
+        let dy = Double(event.scrollingDeltaY)
+        let lines: Int32 = event.hasPreciseScrollingDeltas
+            ? Int32((dy / 18.0).rounded())
+            : Int32(dy.rounded())
+        if lines != 0 {
+            _ = maru_macos_app_dev_session_scroll(session, lines)
+            markMetalNeedsRedraw()
+        }
     }
 
     private func sendSmokeDevEvents() {

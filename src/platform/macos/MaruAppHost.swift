@@ -450,7 +450,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // Shift+PageUp/Down는 PTY로 보내지 않고 스크롤백 뷰포트를 한 화면씩 스크롤한다. 스크롤 로직은
         // Zig가 소유하고, 여기선 줄 수(한 화면 = rows-1)만 환산해 scroll ABI를 부른다.
         if event.modifierFlags.contains(.shift), let session = devSession {
-            let page = max(Int32(1), Int32(latestFrameSummary.rows) - 1)
+            // 첫 frame summary 전엔 rows==0이라 page=1(한 줄)이 된다. 합리적 fallback(24행)로 막는다.
+            let rows = latestFrameSummary.rows > 0 ? latestFrameSummary.rows : 24
+            let page = max(Int32(1), Int32(rows) - 1)
             if event.keyCode == 116 { // PageUp -> 과거(위)
                 _ = maru_macos_app_dev_session_scroll(session, page)
                 markMetalNeedsRedraw()
@@ -474,9 +476,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func handleScroll(_ event: NSEvent) {
         guard let session = devSession else { return }
         let dy = Double(event.scrollingDeltaY)
-        let lines: Int32 = event.hasPreciseScrollingDeltas
-            ? Int32((dy / 18.0).rounded())
-            : Int32(dy.rounded())
+        guard dy.isFinite else { return } // NaN/∞면 Int32(...) 변환이 trap(크래시)한다
+        let raw = event.hasPreciseScrollingDeltas ? (dy / 18.0) : dy
+        // 거대값도 trap을 일으키므로 합리적 범위로 clamp한 뒤 정수화한다.
+        let lines = Int32(max(-1000.0, min(1000.0, raw.rounded())))
         if lines != 0 {
             _ = maru_macos_app_dev_session_scroll(session, lines)
             markMetalNeedsRedraw()

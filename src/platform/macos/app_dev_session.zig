@@ -331,9 +331,12 @@ pub const DevSession = struct {
                 bg[col] = if (has_bg) 'B' else '.';
                 if ((cp != 0 and cp != ' ') or has_bg) any = true;
             }
-            if (!any) continue;
-            screen_diag.info("r{d:0>2} t|{s}|", .{ row, text[0..cols] });
-            screen_diag.info("r{d:0>2} b|{s}|", .{ row, bg[0..cols] });
+            // soft-wrap 플래그를 함께 찍는다(w=다음 줄로 이어짐, .=hard 줄끝). reflow 피드백 루프
+            // 회귀는 hard 줄(프롬프트)이 w로 잘못 찍히는 것으로 드러나므로, wrapped인 빈 줄도 보인다.
+            const w_mark: u8 = if (row < core.wrapped.len and core.wrapped[row]) 'w' else '.';
+            if (!any and w_mark != 'w') continue;
+            screen_diag.info("r{d:0>2} {c} t|{s}|", .{ row, w_mark, text[0..cols] });
+            screen_diag.info("r{d:0>2} {c} b|{s}|", .{ row, w_mark, bg[0..cols] });
         }
     }
 

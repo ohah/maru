@@ -16,6 +16,7 @@ pub const Rgb = types.Rgb;
 pub const Size = types.Size;
 pub const Style = types.Style;
 pub const TerminalCore = core.TerminalCore;
+pub const clampGridSize = core.clampGridSize;
 pub const cellWidth = width.cellWidth;
 
 test {

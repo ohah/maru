@@ -24,19 +24,14 @@ const placeholder_cell_width_px: u32 = 12;
 const placeholder_cell_height_px: u32 = 24;
 
 /// backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다. cell 크기가 0이면
-/// placeholder로 대체하고, 최소 1×1, u16 상한으로 막는다. dev session이 resize에서 backing
-/// 픽셀과 자기 cell 메트릭으로 grid를 직접 잡을 때 쓴다(Swift가 계산하지 않는다).
+/// placeholder로 대체하고, u16 상한으로 막은 뒤 terminal.clampGridSize로 최소 크기(cols>=2)를
+/// 적용한다 — cols>=2 불변식은 TerminalCore가 단일 소유하므로 여기서 직접 하드코딩하지 않는다.
 fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px: u32, cell_height_px: u32) terminal.Size {
     const cell_w = if (cell_width_px > 0) cell_width_px else placeholder_cell_width_px;
     const cell_h = if (cell_height_px > 0) cell_height_px else placeholder_cell_height_px;
-    // cols는 최소 2를 보장한다. TerminalCore가 wide glyph continuation 때문에 cols>=2를 요구하고
-    // (clampGridSize), PTY winsize도 같은 grid를 써야 셸과 어긋나지 않는다.
-    const cols = @max(@as(u32, 2), backing_width_px / cell_w);
-    const rows = @max(@as(u32, 1), backing_height_px / cell_h);
-    return .{
-        .cols = @intCast(@min(cols, std.math.maxInt(u16))),
-        .rows = @intCast(@min(rows, std.math.maxInt(u16))),
-    };
+    const raw_cols = @min(backing_width_px / cell_w, std.math.maxInt(u16));
+    const raw_rows = @min(backing_height_px / cell_h, std.math.maxInt(u16));
+    return terminal.clampGridSize(.{ .cols = @intCast(raw_cols), .rows = @intCast(raw_rows) });
 }
 
 // 화면 상태 진단 logger. MARU_DEBUG일 때 frame build마다 TerminalCore의 cell 격자(cursor 위치 +
@@ -490,7 +485,10 @@ pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
     const command_kind = std.enums.fromInt(CommandKind, config.command_kind) orelse return error.InvalidConfig;
 
     return .{
-        .size = .{ .cols = @intCast(config.cols), .rows = @intCast(config.rows) },
+        // PTY spawn winsize와 Surface의 TerminalCore grid가 같은 최소 크기를 쓰도록 clamp한다
+        // (cols>=2). 안 그러면 cols=1 config에서 grid는 2칸(core가 clamp)인데 PTY winsize는 1칸이
+        // 되어 셸과 어긋난다.
+        .size = terminal.clampGridSize(.{ .cols = @intCast(config.cols), .rows = @intCast(config.rows) }),
         .queue_capacity = if (config.queue_capacity == 0) default_queue_capacity else config.queue_capacity,
         .command_kind = command_kind,
     };

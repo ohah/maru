@@ -131,8 +131,12 @@ pub const SurfaceRuntime = struct {
         const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
         if (link.surface.process_state == .exited) return error.ProcessExited;
 
-        try link.surface.core.resize(size.cols, size.rows);
-        link.pty_io.resize(size) catch return error.ResizeFailed;
+        // grid와 PTY winsize가 같은 최소 크기를 쓰도록 한 곳에서 clamp한다. TerminalCore는 wide
+        // glyph continuation 때문에 cols>=2를 요구하고 init/resize에서 자체 clamp하는데, PTY
+        // winsize를 raw size로 보내면 grid(2칸)와 셸 winsize(1칸)가 어긋난다. 같은 clamp 값을 둘 다에.
+        const grid = terminal.clampGridSize(size);
+        try link.surface.core.resize(grid.cols, grid.rows);
+        link.pty_io.resize(grid) catch return error.ResizeFailed;
     }
 
     pub fn applyPtyEvent(self: *SurfaceRuntime, event: RuntimePtyEvent) RuntimeError!void {
@@ -350,6 +354,26 @@ test "runtime resize updates core and pty io together" {
     try std.testing.expectEqual(terminal.Size{ .cols = 42, .rows = 13 }, surface.core.size);
     try std.testing.expectEqual(@as(usize, 1), fake_pty.resize_calls);
     try std.testing.expectEqual(terminal.Size{ .cols = 42, .rows = 13 }, fake_pty.last_size.?);
+}
+
+test "runtime resize clamps to at least 2 columns for both core and pty winsize" {
+    const allocator = std.testing.allocator;
+    var runtime = SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+
+    var surface = try surface_mod.Surface.init(allocator, 1, .{ .cols = 20, .rows = 5 });
+    defer surface.deinit();
+    var fake_pty = FakePty.init(allocator);
+    defer fake_pty.deinit();
+
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
+
+    // cols<2 resize: TerminalCore grid와 PTY winsize 둘 다 cols>=2로 clamp돼 일치해야 한다.
+    // 한쪽만 clamp하면 grid(2칸)와 셸 winsize(1칸)가 어긋난다.
+    try runtime.resize(1, .{ .cols = 1, .rows = 5 });
+    try std.testing.expectEqual(@as(u16, 2), surface.core.size.cols);
+    try std.testing.expectEqual(@as(u16, 2), fake_pty.last_size.?.cols);
+    try std.testing.expectEqual(@as(u16, 5), fake_pty.last_size.?.rows);
 }
 
 test "runtime maps pty resize failures to ResizeFailed after updating the surface size" {

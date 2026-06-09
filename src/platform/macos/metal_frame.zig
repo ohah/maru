@@ -13,6 +13,8 @@ pub const NativeMetalCell = extern struct {
     row: u16,
     col: u16,
     width: u16,
+    // overlay 종류(0=일반 cell, 2=커서 underline, 3=커서 bar — DECSCUSR). renderer가 underline/
+    // bar를 cell의 부분 사각형으로 그린다. block 커서는 일반 cell과 같은 전체 사각형이라 0.
     reserved: u16 = 0,
     codepoint: u32,
     slot_id: u32,
@@ -178,7 +180,36 @@ pub fn buildNativeCellsFromGlyphQuads(
             };
             if (!cur.visible) continue;
 
-            // 커서 cell에 그려진 glyph를 찾아 같은 모양을 반전색으로 다시 그린다(없으면 솔리드 블록).
+            // underline/bar 커서(DECSCUSR 3~6)는 글리프를 가리지 않는 부분 사각형이다 — 반전
+            // 없이 sentinel UV 솔리드 cell로 내고, kind(reserved)로 renderer가 하단/좌측 일부만
+            // 칠하게 한다. block(기본)만 아래의 반전 투영을 탄다.
+            if (cur.shape != .block) {
+                cells.appendAssumeCapacity(.{
+                    .row = cur.row,
+                    .col = cur.col,
+                    .width = 1,
+                    .reserved = switch (cur.shape) {
+                        .underline => 2,
+                        .bar => 3,
+                        .block => unreachable,
+                    },
+                    .codepoint = ' ',
+                    .slot_id = 0,
+                    .atlas_x_px = 0,
+                    .atlas_y_px = 0,
+                    .atlas_width_px = 0,
+                    .atlas_height_px = 0,
+                    .u0 = -1.0,
+                    .v0 = -1.0,
+                    .u1 = -1.0,
+                    .v1 = -1.0,
+                    .foreground = 0,
+                    .background = cursor_bg,
+                });
+                continue;
+            }
+
+            // block: 커서 cell에 그려진 glyph를 찾아 같은 모양을 반전색으로 다시 그린다(없으면 솔리드 블록).
             var glyph_at_cursor: ?renderer.GlyphQuad = null;
             var glyph_col = cur.col;
             for (frame.glyphs) |glyph| {
@@ -701,4 +732,33 @@ test "SGR reverse swaps foreground and background, resolving defaults to theme c
     rev.background = .{ .rgb = .{ .r = 9, .g = 8, .b = 7 } };
     try std.testing.expectEqual(@as(u32, 0x090807), packForeground(rev, colors));
     try std.testing.expectEqual(@as(u32, 0xFF010203), packBackground(rev, colors));
+}
+
+test "bar and underline cursors project partial-rect kinds without inverting the glyph" {
+    const allocator = std.testing.allocator;
+    var overlays = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 1, .visible = true, .shape = .bar } }};
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 4, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 1 },
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .cursor = .{ .block = .{ .r = 0, .g = 255, .b = 0 }, .text = .{ .r = 0, .g = 0, .b = 0 } },
+    });
+    defer allocator.free(cells);
+    const cursor_cell = cells[cells.len - 1];
+    try std.testing.expectEqual(@as(u16, 3), cursor_cell.reserved); // bar kind
+    try std.testing.expectEqual(@as(f32, -1.0), cursor_cell.u0); // sentinel UV(글리프 반전 없음)
+
+    overlays[0] = .{ .cursor = .{ .row = 0, .col = 1, .visible = true, .shape = .underline } };
+    const cells2 = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .cursor = .{ .block = .{ .r = 0, .g = 255, .b = 0 }, .text = .{ .r = 0, .g = 0, .b = 0 } },
+    });
+    defer allocator.free(cells2);
+    try std.testing.expectEqual(@as(u16, 2), cells2[cells2.len - 1].reserved); // underline kind
 }

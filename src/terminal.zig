@@ -6,6 +6,7 @@ pub const width = @import("terminal/width.zig");
 pub const Cell = types.Cell;
 pub const Color = types.Color;
 pub const Cursor = types.Cursor;
+pub const CursorShape = types.CursorShape;
 pub const DirtyRegion = types.DirtyRegion;
 pub const Key = input.Key;
 pub const KeyEvent = input.KeyEvent;

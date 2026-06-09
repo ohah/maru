@@ -161,45 +161,13 @@ pub export fn maru_macos_app_dev_session_resize(
     const dev_session = session orelse return @intFromEnum(Status.null_out);
     const raw_event = (event orelse return @intFromEnum(Status.null_out)).*;
     const out = out_summary orelse return @intFromEnum(Status.null_out);
-    const size = sizeFromAbi(raw_event) catch return @intFromEnum(Status.invalid_config);
-    // backing scale은 천분율(scale_milli)을 그대로 dev session에 넘긴다. dev session이 분수 scale로
-    // glyph rasterize 크기와 cell 메트릭을 device 해상도에 정확히 맞춘다(정수 반올림은 atlas
-    // fallback에서만, renderer.deviceScaleFromMilli).
-    out.* = dev_session.resize(size, raw_event.scale_milli) catch return @intFromEnum(Status.resize_failed);
+    if (raw_event.width_px == 0 or raw_event.height_px == 0) return @intFromEnum(Status.invalid_config);
+    // grid(cols/rows)는 dev session이 backing 픽셀 + 자기 cell 메트릭으로 직접 계산한다. Swift는
+    // 창의 backing 픽셀과 scale만 넘기고 cols/rows를 계산하지 않는다(event.cols/rows는 무시).
+    // dev session이 분수 scale로 cell 메트릭을 device 해상도에 맞춘 뒤 grid를 잡으므로, Swift가
+    // 메트릭 준비 전 placeholder로 grid를 잘못 잡던(창과 grid가 어긋나던) 문제가 사라진다.
+    out.* = dev_session.resize(raw_event.width_px, raw_event.height_px, raw_event.scale_milli) catch return @intFromEnum(Status.resize_failed);
     return @intFromEnum(Status.ok);
-}
-
-// cell 메트릭이 아직 없을 때(첫 frame 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
-const placeholder_cell_width_px: u32 = 12;
-const placeholder_cell_height_px: u32 = 24;
-
-/// backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다. cell 크기가 0이면
-/// (아직 메트릭 없음) placeholder로 대체하고, 최소 1×1, u16 상한으로 막는다. Swift가 직접
-/// floor/clamp 계산을 들고 있던 것을 Zig로 옮겨 std.testing으로 고정한다.
-fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px: u32, cell_height_px: u32) terminal.Size {
-    const cell_w = if (cell_width_px > 0) cell_width_px else placeholder_cell_width_px;
-    const cell_h = if (cell_height_px > 0) cell_height_px else placeholder_cell_height_px;
-    const cols = @max(@as(u32, 1), backing_width_px / cell_w);
-    const rows = @max(@as(u32, 1), backing_height_px / cell_h);
-    return .{
-        .cols = @intCast(@min(cols, std.math.maxInt(u16))),
-        .rows = @intCast(@min(rows, std.math.maxInt(u16))),
-    };
-}
-
-/// Swift host가 창 backing 픽셀 크기에서 grid를 계산할 때 부르는 순수 helper(상태 없음, 세션
-/// ABI 버전과 무관). out_cols/out_rows에 결과를 쓴다.
-pub export fn maru_macos_grid_from_backing(
-    backing_width_px: u32,
-    backing_height_px: u32,
-    cell_width_px: u32,
-    cell_height_px: u32,
-    out_cols: ?*u32,
-    out_rows: ?*u32,
-) void {
-    const size = gridFromBacking(backing_width_px, backing_height_px, cell_width_px, cell_height_px);
-    if (out_cols) |p| p.* = size.cols;
-    if (out_rows) |p| p.* = size.rows;
 }
 
 pub export fn maru_macos_app_dev_session_close(
@@ -264,18 +232,6 @@ fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
         },
     };
 }
-
-fn sizeFromAbi(event: ResizeEvent) !terminal.Size {
-    _ = event.width_px;
-    _ = event.height_px;
-    _ = event.scale_milli;
-    if (event.cols == 0 or event.rows == 0) return error.InvalidConfig;
-    if (event.cols > std.math.maxInt(u16) or event.rows > std.math.maxInt(u16)) {
-        return error.InvalidConfig;
-    }
-    return .{ .cols = @intCast(event.cols), .rows = @intCast(event.rows) };
-}
-
 test "macOS app host ABI header and Zig declarations stay aligned" {
     // Swift는 C header를 보고, Zig는 이 파일의 extern struct를 쓴다. 둘의 숫자와
     // layout이 갈라지면 다음 제품 앱 PR에서 런타임 버그가 되므로 컴파일 단계에서 막는다.
@@ -328,90 +284,6 @@ test "macOS app host event DTOs are explicit fixed-width C ABI records" {
     try std.testing.expectEqual(@as(usize, 168), @sizeOf(DevFrameSummary));
     try std.testing.expectEqual(@as(usize, 8), @alignOf(DevFrameSummary));
 }
-
-test "macOS app host ABI converts key and resize events before session dispatch" {
-    const char_event = try keyEventFromAbi(.{
-        .codepoint = 'b',
-        .key_code = @intFromEnum(KeyCode.unknown),
-        .modifier_control = 1,
-        .modifier_shift = 0,
-        .modifier_option = 0,
-        .modifier_command = 0,
-        .is_repeat = 0,
-        .reserved = 0,
-    });
-    try std.testing.expect(switch (char_event.key) {
-        .char => |codepoint| codepoint == 'b',
-        else => false,
-    });
-    try std.testing.expect(char_event.modifiers.control);
-
-    const arrow_event = try keyEventFromAbi(.{
-        .codepoint = 0,
-        .key_code = @intFromEnum(KeyCode.arrow_up),
-        .modifier_option = 1,
-        .modifier_shift = 0,
-        .modifier_control = 0,
-        .modifier_command = 0,
-        .is_repeat = 0,
-        .reserved = 0,
-    });
-    try std.testing.expect(switch (arrow_event.key) {
-        .arrow_up => true,
-        else => false,
-    });
-    try std.testing.expect(arrow_event.modifiers.option);
-
-    try std.testing.expectError(error.InvalidConfig, keyEventFromAbi(.{
-        .codepoint = 0xd800,
-        .key_code = @intFromEnum(KeyCode.unknown),
-        .modifier_shift = 0,
-        .modifier_control = 0,
-        .modifier_option = 0,
-        .modifier_command = 0,
-        .is_repeat = 0,
-        .reserved = 0,
-    }));
-    // U+10FFFF 초과는 valid Unicode scalar가 아니다. surrogate처럼 경계에서 거부해야
-    // downstream utf8Encode에서 덜 명확하게 터지지 않는다.
-    try std.testing.expectError(error.InvalidConfig, keyEventFromAbi(.{
-        .codepoint = 0x110000,
-        .key_code = @intFromEnum(KeyCode.unknown),
-        .modifier_shift = 0,
-        .modifier_control = 0,
-        .modifier_option = 0,
-        .modifier_command = 0,
-        .is_repeat = 0,
-        .reserved = 0,
-    }));
-    try std.testing.expectError(error.InvalidConfig, keyEventFromAbi(.{
-        .codepoint = 0,
-        .key_code = 999,
-        .modifier_shift = 0,
-        .modifier_control = 0,
-        .modifier_option = 0,
-        .modifier_command = 0,
-        .is_repeat = 0,
-        .reserved = 0,
-    }));
-    try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 30 }, try sizeFromAbi(.{
-        .width_px = 1200,
-        .height_px = 720,
-        .scale_milli = 2000,
-        .cols = 100,
-        .rows = 30,
-        .reserved = 0,
-    }));
-    try std.testing.expectError(error.InvalidConfig, sizeFromAbi(.{
-        .width_px = 0,
-        .height_px = 0,
-        .scale_milli = 0,
-        .cols = 0,
-        .rows = 30,
-        .reserved = 0,
-    }));
-}
-
 test "macOS app dev exported session API reports null outputs as ABI errors" {
     const config: DevSessionConfig = .{
         .abi_version = abi_version,
@@ -444,15 +316,4 @@ test "macOS app dev exported session API reports null outputs as ABI errors" {
 
 test {
     std.testing.refAllDecls(app_dev_session);
-}
-
-test "gridFromBacking divides backing pixels by cell size with placeholder + clamps" {
-    // 960×600 backing at 8×16 cell -> 120×37.
-    try std.testing.expectEqual(terminal.Size{ .cols = 120, .rows = 37 }, gridFromBacking(960, 600, 8, 16));
-    // cell 크기 0(메트릭 없음) -> placeholder 12×24 사용.
-    try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 25 }, gridFromBacking(960, 600, 0, 0));
-    // floor 동작: 부족한 픽셀은 버린다.
-    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(25, 16, 10, 16));
-    // 최소 1×1.
-    try std.testing.expectEqual(terminal.Size{ .cols = 1, .rows = 1 }, gridFromBacking(1, 1, 100, 100));
 }

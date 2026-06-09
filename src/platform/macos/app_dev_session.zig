@@ -18,6 +18,25 @@ pub const MetalFrame = metal_frame.MetalFrame;
 pub const abi_version: u32 = 9;
 pub const default_queue_capacity: u32 = 16;
 
+// cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
+// 실제로는 init이 refreshCellMetrics를 부르므로 resize 시점엔 항상 실제 메트릭이 있다.
+const placeholder_cell_width_px: u32 = 12;
+const placeholder_cell_height_px: u32 = 24;
+
+/// backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다. cell 크기가 0이면
+/// placeholder로 대체하고, 최소 1×1, u16 상한으로 막는다. dev session이 resize에서 backing
+/// 픽셀과 자기 cell 메트릭으로 grid를 직접 잡을 때 쓴다(Swift가 계산하지 않는다).
+fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px: u32, cell_height_px: u32) terminal.Size {
+    const cell_w = if (cell_width_px > 0) cell_width_px else placeholder_cell_width_px;
+    const cell_h = if (cell_height_px > 0) cell_height_px else placeholder_cell_height_px;
+    const cols = @max(@as(u32, 1), backing_width_px / cell_w);
+    const rows = @max(@as(u32, 1), backing_height_px / cell_h);
+    return .{
+        .cols = @intCast(@min(cols, std.math.maxInt(u16))),
+        .rows = @intCast(@min(rows, std.math.maxInt(u16))),
+    };
+}
+
 // app_host_abi.zig가 이 파일을 import하므로 EventKind는 여기서 정의하고 거기서 re-export한다
 // (순환 import 회피). FrameSummary.last_event_kind가 이 값을 그대로 싣는다.
 pub const EventKind = enum(u32) {
@@ -221,13 +240,23 @@ pub const DevSession = struct {
         return self.last_summary;
     }
 
-    pub fn resize(self: *DevSession, size: terminal.Size, scale_milli: u32) !FrameSummary {
+    pub fn resize(self: *DevSession, width_px: u32, height_px: u32, scale_milli: u32) !FrameSummary {
         // resize는 terminal grid와 PTY winsize가 함께 바뀌어야 한다. FrameLoop API를
         // 통해 SurfaceRuntime action으로 내려보내면 Swift가 두 책임을 다시 구현하지 않는다.
         self.total_resize_events += 1;
         // scale_milli를 [250,8000]로 막아 손상된 값에서도 곱이 비정상으로 커지지 않게 한다.
         const next_scale = std.math.clamp(scale_milli, 250, 8000);
         const scale_changed = next_scale != self.scale_milli;
+        // backing scale이 바뀌면(다른 DPI 디스플레이로 이동 등) cell 메트릭을 분수 scale로 먼저
+        // 다시 뽑는다. grid 계산이 placeholder가 아니라 실제 cell 크기를 쓰도록 순서가 중요하다.
+        if (scale_changed) {
+            self.scale_milli = next_scale;
+            self.refreshCellMetrics();
+        }
+        // grid(cols/rows)를 Swift가 아니라 dev session이 backing 픽셀 + 자기 cell 메트릭에서 직접
+        // 계산한다. init이 메트릭을 미리 뽑으므로 cell 크기는 항상 준비돼 있어, Swift가 첫 resize에서
+        // placeholder 크기로 cols/rows를 잘못 잡던(창과 grid가 어긋나던) 문제가 사라진다.
+        const size = gridFromBacking(width_px, height_px, self.cell_width_px, self.cell_height_px);
         const size_changed = self.last_resize_size == null or
             self.last_resize_size.?.cols != size.cols or self.last_resize_size.?.rows != size.rows;
         // 같은 size+scale이면 비싼 재작업(TerminalCore.resize alloc/memcpy + PTY winsize/SIGWINCH)을
@@ -238,11 +267,6 @@ pub const DevSession = struct {
             self.writeSummaryFromState();
             self.last_summary.last_event_kind = @intFromEnum(EventKind.resize);
             return self.last_summary;
-        }
-        // backing scale이 바뀌면(다른 DPI 디스플레이로 이동 등) cell 메트릭을 분수 scale로 다시 뽑는다.
-        if (scale_changed) {
-            self.scale_milli = next_scale;
-            self.refreshCellMetrics();
         }
         // 종료된 세션의 resize도 live surface가 없어 실패한다. 닫히는 창의 late resize는
         // 치명적 오류가 아니므로 무시하고 정상으로 닫는다(key와 같은 정책).
@@ -499,4 +523,15 @@ test "macOS app dev session config defaults queue capacity without changing comm
     try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 24 }, normalized.size);
     try std.testing.expectEqual(@as(usize, default_queue_capacity), normalized.queue_capacity);
     try std.testing.expectEqual(CommandKind.interactive_shell, normalized.command_kind);
+}
+
+test "gridFromBacking divides backing pixels by cell size with placeholder + clamps" {
+    // 960×600 backing at 8×18 cell -> 120×33 (이전엔 Swift가 placeholder 12×24로 80×25를 잡아
+    // 창과 grid가 어긋났다). 이제 dev session이 실제 메트릭으로 직접 계산한다.
+    try std.testing.expectEqual(terminal.Size{ .cols = 120, .rows = 33 }, gridFromBacking(960, 600, 8, 18));
+    // cell 크기 0(메트릭 없음, 이론상) -> placeholder 12×24.
+    try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 25 }, gridFromBacking(960, 600, 0, 0));
+    // floor 동작 + 최소 1×1.
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(25, 16, 10, 16));
+    try std.testing.expectEqual(terminal.Size{ .cols = 1, .rows = 1 }, gridFromBacking(1, 1, 100, 100));
 }

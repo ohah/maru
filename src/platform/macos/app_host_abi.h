@@ -210,16 +210,6 @@ int32_t maru_macos_app_dev_session_resize(
     const MaruAppHostResizeEvent *event,
     MaruAppHostDevFrameSummary *out_summary
 );
-/* backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다(상태 없는 순수 helper).
-   cell 크기 0이면 placeholder, 최소 1x1. out_cols/out_rows에 결과를 쓴다. */
-void maru_macos_grid_from_backing(
-    uint32_t backing_width_px,
-    uint32_t backing_height_px,
-    uint32_t cell_width_px,
-    uint32_t cell_height_px,
-    uint32_t *out_cols,
-    uint32_t *out_rows
-);
 int32_t maru_macos_app_dev_session_close(
     MaruAppHostDevSession *session,
     MaruAppHostDevFrameSummary *out_summary

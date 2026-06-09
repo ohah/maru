@@ -290,7 +290,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // truncate-wrap(0이 되면 draw가 거부됨) 대신 u16 상한으로 클램프한다.
         let cols = UInt16(min(frame.cols, UInt32(UInt16.max)))
         let rows = UInt16(min(frame.rows, UInt32(UInt16.max)))
-        // resize가 renderer와 같은 cell 픽셀 크기를 쓰도록 캐시한다(매 frame 일정한 값).
+        // 제목줄 진단(MARU_DEBUG)에 쓰도록 cell 픽셀 크기를 기록한다. grid 계산은 Zig dev
+        // session이 하므로 Swift는 이 값을 resize에 쓰지 않는다(진단 표시 전용).
         if frame.cell_width_px > 0 { lastCellWidthPx = frame.cell_width_px }
         if frame.cell_height_px > 0 { lastCellHeightPx = frame.cell_height_px }
         let drew = maru_metal_renderer_draw(
@@ -439,7 +440,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func sendSmokeDevEvents() {
         // 자동 smoke는 물리 키보드나 사용자의 resize 동작을 기다릴 수 없다. 대신 같은 C ABI를
         // 직접 호출해 key/resize event가 Zig dev session까지 내려가는 최소 E2E 신호를 남긴다.
-        resizeDevSession(cols: 100, rows: 30, widthPx: 1_200, heightPx: 720)
+        // grid는 dev session이 backing 픽셀에서 계산하므로 픽셀 크기만 보낸다.
+        resizeDevSession(widthPx: 1_200, heightPx: 720)
         let keyEvent = MaruAppHostKeyEvent(
             codepoint: UInt32(UnicodeScalar("a").value),
             key_code: UInt32(MaruAppHostKeyCodeUnknown.rawValue),
@@ -487,35 +489,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         let bounds = contentView.bounds
         let scale = window.backingScaleFactor
-        // renderer가 cell을 backing 픽셀 단위로 깔고 drawableSize(backing)로 투영하므로, cols/rows는
-        // backing 픽셀을 cell 픽셀 크기로 나눠야 한다. 그 floor/clamp/placeholder 계산은 Zig
-        // (maru_macos_grid_from_backing)가 소유한다(std.testing으로 고정). Swift는 backing 픽셀만
-        // 모아 넘긴다.
+        // grid(cols/rows)는 Zig dev session이 backing 픽셀 + 자기 cell 메트릭으로 직접 계산한다.
+        // Swift는 창의 backing 픽셀만 모아 넘긴다(cell 크기·floor·placeholder 계산을 들고 있지
+        // 않으므로, 메트릭이 준비되기 전 placeholder로 grid를 잘못 잡는 일이 없다).
         let widthPx = clampedUInt32(bounds.width * scale)
         let heightPx = clampedUInt32(bounds.height * scale)
-        var cols: UInt32 = 0
-        var rows: UInt32 = 0
-        maru_macos_grid_from_backing(widthPx, heightPx, lastCellWidthPx, lastCellHeightPx, &cols, &rows)
-        resizeDevSession(cols: cols, rows: rows, widthPx: widthPx, heightPx: heightPx)
+        resizeDevSession(widthPx: widthPx, heightPx: heightPx)
     }
 
-    private func resizeDevSession(cols: UInt32, rows: UInt32, widthPx: UInt32, heightPx: UInt32) {
+    private func resizeDevSession(widthPx: UInt32, heightPx: UInt32) {
         guard let devSession else {
             return
         }
 
         let scaleMilli = clampedUInt32((window?.backingScaleFactor ?? 1.0) * 1_000)
-        // 같은 size+scale 중복 resize 방지(SIGWINCH storm)는 Zig dev session이 한 곳에서 처리한다.
-        // Swift는 매번 보내고, dev session이 변화 없으면 비싼 재작업을 건너뛴다.
-        // tick의 scale-변화 감지용으로 보낸 backing scale만 기록한다.
+        // 같은 size+scale 중복 resize 방지(SIGWINCH storm)와 grid 계산 모두 Zig dev session이
+        // 한 곳에서 처리한다. Swift는 매번 backing 픽셀+scale만 보내고, dev session이 변화 없으면
+        // 비싼 재작업을 건너뛴다. tick의 scale-변화 감지용으로 보낸 backing scale만 기록한다.
         lastSentBackingScale = window?.backingScaleFactor ?? 1.0
 
+        // cols/rows는 dev session이 무시하고 backing 픽셀에서 계산하므로 0으로 둔다.
         var event = MaruAppHostResizeEvent(
             width_px: widthPx,
             height_px: heightPx,
             scale_milli: scaleMilli,
-            cols: cols,
-            rows: rows,
+            cols: 0,
+            rows: 0,
             reserved: 0
         )
         var summary = MaruAppHostDevFrameSummary()

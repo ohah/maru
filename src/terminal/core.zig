@@ -29,6 +29,11 @@ pub const TerminalCore = struct {
     csi_has_digit: bool = false,
     csi_private: bool = false,
     csi_overflow: bool = false,
+    // deferred autowrap(DECAWM, 기본 켜짐). 마지막 칸을 채운 직후 커서는 그 칸에 머물고 이 플래그가
+    // 선다. 다음 printable 글자가 먼저 다음 줄 첫 칸으로 넘어간 뒤 그려진다. 마지막 칸이 그 줄의
+    // 끝 글자면 wrap하지 않으려고(끝 글자마다 빈 줄이 끼지 않게) 즉시가 아니라 "다음 글자에서"
+    // 넘긴다. 명시적 커서 이동(CR/LF/backspace/커서 위치 지정/resize)은 이 상태를 무효화한다.
+    pending_wrap: bool = false,
     // 각 CSI 파라미터가 ';'(새 파라미터)가 아니라 ':'(sub-parameter)로 들어왔는지 표시한다.
     // ITU colon 형식 38:2:colorspace:r:g:b는 38;2;r;g;b와 달리 colorspace 컴포넌트가 하나 더
     // 있어, 이 구분 없이는 RGB가 한 칸 밀린다.
@@ -456,6 +461,8 @@ pub const TerminalCore = struct {
         // the first write after a resize, and last_print referenced old coords.
         self.last_print = null;
         self.utf8_tail_len = 0;
+        // 새 grid 폭에서 옛 마지막 칸 기준의 deferred wrap은 의미가 없다.
+        self.pending_wrap = false;
         // resize 경계에서 끊긴 escape sequence가 새 grid로 새지 않게 파서를 ground로 되돌린다.
         self.parser = .ground;
     }
@@ -586,30 +593,43 @@ pub const TerminalCore = struct {
     }
 
     fn writeTab(self: *TerminalCore) void {
+        // 탭은 수평 이동이라 다음 줄로 wrap하지 않는다(끝 칸에 멈춘다). pending_wrap이 이미
+        // 서 있어도 소비하지 않도록 먼저 끄고, putCell이 채우다 마지막 칸에서 다시 세운
+        // pending_wrap도 끝나고 끈다(탭이 wrap을 남기지 않게).
+        self.pending_wrap = false;
         const next_tab = @min(self.size.cols, ((self.cursor.col / 8) + 1) * 8);
-        while (self.cursor.col < next_tab) {
+        while (self.cursor.col < next_tab and !self.pending_wrap) {
             const before = self.cursor.col;
             self.putCell(' ');
-            // The current MVP core does not implement automatic line wrapping
-            // yet. When the cursor is already at the last column, putCell must
-            // keep it there; this guard prevents tab expansion from looping
-            // forever until full wrap semantics are designed and tested.
             if (self.cursor.col == before) break;
         }
+        self.pending_wrap = false;
     }
 
     fn putCell(self: *TerminalCore, codepoint: u21) void {
         if (self.size.cols == 0 or self.size.rows == 0) return;
+        // deferred autowrap: 직전 글자가 마지막 칸을 채웠으면(pending_wrap), 이 글자를 그리기
+        // 전에 다음 줄 첫 칸으로 넘긴다(바닥이면 scroll). 이렇게 다음 글자 시점에 wrap해야 줄을
+        // 정확히 채운 마지막 글자마다 빈 줄이 끼지 않는다(표준 VT 동작, zsh prompt 등이 의존).
+        if (self.pending_wrap) {
+            self.pending_wrap = false;
+            self.cursor.col = 0;
+            self.lineFeed();
+        }
         if (self.cursor.col >= self.size.cols) self.cursor.col = self.size.cols - 1;
         if (self.cursor.row >= self.size.rows) self.cursor.row = self.size.rows - 1;
 
+        const requested_width = width.cellWidth(codepoint);
+        // wide glyph가 줄 끝에 1칸만 남으면 통째로 다음 줄로 넘긴다(이전 줄 마지막 칸은 빈칸).
+        // cols가 2 미만이면 wrap해도 못 담으므로 아래에서 한 칸으로 줄인다.
+        if (requested_width == 2 and self.cursor.col + 1 >= self.size.cols and self.size.cols >= 2) {
+            self.cursor.col = 0;
+            self.lineFeed();
+        }
+
         const row = self.cursor.row;
         const col = self.cursor.col;
-        const requested_width = width.cellWidth(codepoint);
-        // Without DECAWM/autowrap, a wide glyph cannot be represented at the
-        // last column. For this early core stage we degrade that edge case to a
-        // single visible cell instead of writing past the row. Normal in-row
-        // wide glyphs still get a continuation cell.
+        // cols < 2라 wide glyph를 wrap해도 못 담는 극단적 경우에만 한 칸으로 줄인다.
         const cell_width: u2 = if (requested_width == 2 and col + 1 >= self.size.cols) 1 else requested_width;
 
         self.clearCellForWrite(row, col);
@@ -633,7 +653,10 @@ pub const TerminalCore = struct {
         if (self.cursor.col + cell_width < self.size.cols) {
             self.cursor.col += cell_width;
         } else {
+            // 마지막 칸을 채웠다. 커서는 마지막 칸에 두되 pending_wrap을 세워, 다음 printable
+            // 글자가 먼저 다음 줄로 넘어가게 한다(deferred autowrap).
             self.cursor.col = self.size.cols - 1;
+            self.pending_wrap = true;
         }
     }
 
@@ -707,6 +730,11 @@ pub const TerminalCore = struct {
     }
 
     fn markCursorMoveDirty(self: *TerminalCore, old_cursor: types.Cursor, new_cursor: types.Cursor) void {
+        // 명시적 커서 이동(CR/LF/backspace/CUP/CHA/VPA/CUU..CUB 등 이 함수를 거치는 모든 이동)은
+        // deferred autowrap을 무효화한다. putCell의 cursor 전진은 이 함수를 거치지 않으므로
+        // pending_wrap을 직접 관리한다. 위치가 안 바뀌는 이동(아래 early-return)도 wrap 의도는
+        // 취소되므로 early-return 전에 끈다.
+        self.pending_wrap = false;
         // Cursor is drawn as an overlay, not as part of the cell glyph bitmap.
         // Moving it still changes pixels: the old cursor cell must be erased
         // and the new cursor cell must be drawn. Keeping that dirty decision in
@@ -1297,4 +1325,63 @@ test "SGR colon sub-parameter direct color (38:2:cs:r:g:b) reads RGB past the co
         types.Color{ .rgb = .{ .r = 1, .g = 2, .b = 3 } },
         core.cells[core.index(0, 2)].style.background,
     );
+}
+
+test "printable characters auto-wrap to the next line at the right edge (DECAWM)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    try core.write("ABCDE"); // ABCD fills row 0; E wraps to row 1
+    try std.testing.expectEqual(@as(u21, 'A'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'D'), core.cells[core.index(0, 3)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'E'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
+}
+
+test "a line filled exactly then CR/LF does not insert a blank wrapped line" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    // ABCD가 row 0을 정확히 채워 pending_wrap이 서지만, \r\n이 그걸 무효화해 X는 row 1에 온다
+    // (deferred wrap이 아니면 \n이 한 줄 더 내려가 X가 row 2에 떨어진다).
+    try core.write("ABCD\r\nX");
+    try std.testing.expectEqual(@as(u21, 'D'), core.cells[core.index(0, 3)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'X'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+}
+
+test "overflow fill wraps so a following prompt lands on a new line, not over the content" {
+    // 사용자 실제 시나리오: 개행 없이 끝난 출력(파란 배경) 뒤에 zsh PROMPT_SP가 줄 끝을 넘겨
+    // 공백을 채워 다음 줄로 wrap시키고 \r + 프롬프트를 그린다. autowrap이 있어야 프롬프트가
+    // wrap된 줄(row 1)에 떨어지고 파란 줄(row 0)을 덮지 않는다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer core.deinit();
+    try core.write("\x1b[44mBLUE\x1b[0m"); // BLUE(파란 배경) at row 0, cursor (0,4)
+    try core.write("            "); // 12 spaces: 4 fill row 0, wrap, 8 fill row 1
+    try core.write("\rPROMPT"); // \r clears pending_wrap; PROMPT at row 1
+    try std.testing.expectEqual(@as(u21, 'B'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(types.Color{ .indexed = 4 }, core.cells[core.index(0, 0)].style.background);
+    try std.testing.expectEqual(@as(u21, 'P'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+}
+
+test "cursor positioning cancels a pending wrap" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    try core.write("ABCD"); // fills row 0, pending_wrap set
+    try core.write("\x1b[1;1H"); // CUP to (0,0) cancels pending_wrap
+    try core.write("X"); // X overwrites (0,0), does NOT wrap to row 1
+    try std.testing.expectEqual(@as(u21, 'X'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
+}
+
+test "a wide glyph with one column left wraps whole to the next line" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    try core.write("ABC"); // A,B,C at cols 0,1,2; cursor (0,3) one column left
+    try core.write("한"); // wide(2): doesn't fit in 1 col -> wraps to row 1
+    try std.testing.expectEqual(@as(u21, '한'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u2, 2), core.cells[core.index(1, 0)].width);
+    try std.testing.expect(core.cells[core.index(1, 1)].continuation);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
 }

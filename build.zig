@@ -583,11 +583,17 @@ pub fn build(b: *std.Build) void {
         // Contents/Info.plist를 찾아 HiDPI를 켜고(Retina에서 또렷), open과 달리 CWD가 유지돼
         // summary 상대 경로 기록도 정상 동작한다.
         const macos_app_dev_bundle = b.addSystemCommand(&.{
-            "sh", "-c",
-            "rm -rf zig-out/Maru.app && mkdir -p zig-out/Maru.app/Contents/MacOS zig-out/Maru.app/Contents/Resources/Fonts && " ++
-                "cp zig-out/bin/maru-macos-app-dev zig-out/Maru.app/Contents/MacOS/maru-macos-app-dev && " ++
-                "cp src/platform/macos/MaruAppHost-Info.plist zig-out/Maru.app/Contents/Info.plist && " ++
-                "cp assets/fonts/JetBrainsMono/*.ttf assets/fonts/JetBrainsMono/OFL.txt zig-out/Maru.app/Contents/Resources/Fonts/ && " ++
+            "sh", "-eu", "-c",
+            // set -e로 어느 단계든 실패하면 즉시 멈춘다. 폰트가 없는 clean checkout에서 glob이
+            // 빈 채 cp가 조용히 실패하지 않도록, 번들 전에 .ttf 존재를 명시적으로 확인하고 명확한
+            // 에러를 낸다. 번들은 매 실행 새로 만들어지므로 stale resource는 생기지 않는다.
+            "ttfs=$(ls assets/fonts/JetBrainsMono/*.ttf 2>/dev/null) || true; " ++
+                "[ -n \"$ttfs\" ] || { echo 'error: no .ttf in assets/fonts/JetBrainsMono (font assets missing)' >&2; exit 1; }; " ++
+                "rm -rf zig-out/Maru.app; " ++
+                "mkdir -p zig-out/Maru.app/Contents/MacOS zig-out/Maru.app/Contents/Resources/Fonts; " ++
+                "cp zig-out/bin/maru-macos-app-dev zig-out/Maru.app/Contents/MacOS/maru-macos-app-dev; " ++
+                "cp src/platform/macos/MaruAppHost-Info.plist zig-out/Maru.app/Contents/Info.plist; " ++
+                "cp assets/fonts/JetBrainsMono/*.ttf assets/fonts/JetBrainsMono/OFL.txt zig-out/Maru.app/Contents/Resources/Fonts/; " ++
                 "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo",
         });
         macos_app_dev_bundle.setCwd(b.path("."));

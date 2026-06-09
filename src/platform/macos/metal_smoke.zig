@@ -821,9 +821,12 @@ test "glyph_text stays false when CoreText fixture did not sample atlas texels" 
 test "NativeMetalCell ABI keeps atlas placement and uv fields tightly packed" {
     // NativeMetalCell은 appkit_metal_smoke.m의 MaruMetalSmokeCell과 같은 메모리 모양이어야
     // 한다. 필드를 추가할 때 이 크기가 예고 없이 바뀌면 ObjC bridge가 atlas 좌표를 다른
-    // 값으로 읽어 Metal smoke가 거짓 신호를 낼 수 있다.
-    try std.testing.expectEqual(@as(usize, 48), @sizeOf(NativeMetalCell));
+    // 값으로 읽어 Metal smoke가 거짓 신호를 낼 수 있다. foreground(u32) 추가로 52바이트가
+    // 됐다. offset도 고정해, 새 필드를 끼워 넣어 기존 필드가 밀리면 크기는 같아도 잡히게 한다.
+    try std.testing.expectEqual(@as(usize, 52), @sizeOf(NativeMetalCell));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(NativeMetalCell));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(NativeMetalCell, "foreground"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(NativeMetalCell, "codepoint"));
 }
 
 test "NativeMetalRasterUpload ABI keeps raster byte ranges visible to ObjC" {

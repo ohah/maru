@@ -162,10 +162,10 @@ pub export fn maru_macos_app_dev_session_resize(
     const raw_event = (event orelse return @intFromEnum(Status.null_out)).*;
     const out = out_summary orelse return @intFromEnum(Status.null_out);
     const size = sizeFromAbi(raw_event) catch return @intFromEnum(Status.invalid_config);
-    // scale_milli(예: 2000 = 2.0×)를 정수 backing scale로 반올림한다. dev session이 이 값으로
-    // glyph rasterize 배율과 cell 메트릭을 device 해상도에 맞춘다.
-    const device_scale: u16 = @intCast(std.math.clamp((raw_event.scale_milli + 500) / 1000, 1, 8));
-    out.* = dev_session.resize(size, device_scale) catch return @intFromEnum(Status.resize_failed);
+    // backing scale은 천분율(scale_milli)을 그대로 dev session에 넘긴다. dev session이 분수 scale로
+    // glyph rasterize 크기와 cell 메트릭을 device 해상도에 정확히 맞춘다(정수 반올림은 atlas
+    // fallback에서만, renderer.deviceScaleFromMilli).
+    out.* = dev_session.resize(size, raw_event.scale_milli) catch return @intFromEnum(Status.resize_failed);
     return @intFromEnum(Status.ok);
 }
 

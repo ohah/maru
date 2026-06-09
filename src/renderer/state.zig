@@ -131,6 +131,26 @@ pub fn textConfigFromFontSize(font_size: f32, device_scale: u16) glyph_layout.Te
     };
 }
 
+/// backing scale을 천분율(scale_milli, 예: 2000 = 2.0×)에서 정수 device_scale[1,8]로 반올림한다.
+/// 정수 device_scale는 atlas 정사각 fallback(메트릭 없는 테스트/fake backend 경로)과 cache key의
+/// 거친 식별자로만 쓰인다. 실제 화면 경로는 cell_width_px/cell_height_px(분수 scale에서 나온 실제
+/// 픽셀 크기)로 정밀 식별하므로 반올림 손실이 렌더에 영향을 주지 않는다. scale_milli는 C ABI
+/// 경계의 u32라 범위를 보장하지 않으므로 +500 반올림을 u64로 계산해 overflow하지 않는다.
+pub fn deviceScaleFromMilli(scale_milli: u32) u16 {
+    return @intCast(std.math.clamp((@as(u64, scale_milli) + 500) / 1000, 1, 8));
+}
+
+/// 논리 font size와 backing scale(천분율)에서 device 픽셀 font size를 구한다. 정수 배율로
+/// 반올림하지 않고 분수 scale을 그대로 곱해, 분수 Retina(1.5×/2.5×)에서도 glyph가 실제 해상도로
+/// rasterize되고 cell 메트릭이 drawable과 어긋나지 않게 한다. font_size는 [1,512], scale_milli는
+/// [250,8000](0.25×~8×)로 막아 손상된 값에서도 곱이 overflow하지 않게 한다.
+pub fn deviceFontSizeFromMilli(font_size: f32, scale_milli: u32) f64 {
+    const finite_size: f64 = if (std.math.isFinite(font_size)) @floatCast(font_size) else 1.0;
+    const clamped_size = @max(@as(f64, 1.0), @min(@as(f64, 512.0), finite_size));
+    const clamped_milli = std.math.clamp(scale_milli, 250, 8000);
+    return clamped_size * @as(f64, @floatFromInt(clamped_milli)) / 1000.0;
+}
+
 test "renderer state builds glyph frame and reuses atlas across frames" {
     var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 3, .rows = 1 });
     defer core.deinit();
@@ -287,4 +307,25 @@ test "text config clamps invalid cache key inputs before renderer state uses the
     const scale_above_range = textConfigFromFontSize(14.0, 99);
     try std.testing.expectEqual(@as(u16, 14), scale_above_range.font_size_px);
     try std.testing.expectEqual(@as(u16, 8), scale_above_range.device_scale);
+}
+
+test "deviceScaleFromMilli rounds and clamps without overflow" {
+    try std.testing.expectEqual(@as(u16, 1), deviceScaleFromMilli(1000));
+    try std.testing.expectEqual(@as(u16, 2), deviceScaleFromMilli(2000));
+    try std.testing.expectEqual(@as(u16, 2), deviceScaleFromMilli(1500));
+    try std.testing.expectEqual(@as(u16, 1), deviceScaleFromMilli(0));
+    try std.testing.expectEqual(@as(u16, 8), deviceScaleFromMilli(8000));
+    // C ABI boundary value with no range guarantee must clamp, not overflow on +500.
+    try std.testing.expectEqual(@as(u16, 8), deviceScaleFromMilli(std.math.maxInt(u32)));
+}
+
+test "deviceFontSizeFromMilli keeps fractional scale instead of rounding to an integer" {
+    // 14pt at exact 2x -> 28 device px.
+    try std.testing.expectEqual(@as(f64, 28.0), deviceFontSizeFromMilli(14.0, 2000));
+    // 14pt at 1.5x -> 21 device px (NOT 14*2=28 from an integer round).
+    try std.testing.expectEqual(@as(f64, 21.0), deviceFontSizeFromMilli(14.0, 1500));
+    // 14pt at 2.5x -> 35 device px.
+    try std.testing.expectEqual(@as(f64, 35.0), deviceFontSizeFromMilli(14.0, 2500));
+    // Hostile huge scale clamps (8x) instead of overflowing.
+    try std.testing.expectEqual(@as(f64, 14.0 * 8.0), deviceFontSizeFromMilli(14.0, std.math.maxInt(u32)));
 }

@@ -12,9 +12,10 @@ pub const CoreTextFrameBuilder = struct {
     appearance: config.ResolvedAppearance,
     shape_draw_list: coretext_shaper.ShapeDrawListFn,
     rasterize_glyph: coretext_raster.RasterizeGlyphFn,
-    // backing(Retina) scale. shaper(cache key)와 rasterizer(폰트 크기)에 같은 값을 흘려 device
-    // 해상도로 또렷하게 그린다.
-    device_scale: u16 = 1,
+    // backing(Retina) scale을 천분율로 보관한다(예: 2000 = 2.0×). rasterizer는 이 분수 scale로
+    // 폰트 크기를 device 픽셀에 정확히 맞추고, shaper config의 정수 device_scale은 여기서
+    // 반올림해 파생한다(atlas 정사각 fallback/cache key 보조용).
+    scale_milli: u32 = 1000,
     // 실제 폰트 메트릭에서 온 cell 픽셀 크기(advance 폭 × line-height, device px). shaper config로
     // 흘러 atlas slot이 정사각이 아니라 실제 모노스페이스 격자 크기가 된다.
     cell_width_px: u16 = 0,
@@ -42,7 +43,9 @@ pub const CoreTextFrameBuilder = struct {
         const shaper = coretext_shaper.CoreTextDrawListShaper{
             .appearance = self.appearance,
             .shape_draw_list = self.shape_draw_list,
-            .device_scale = self.device_scale,
+            // shaper config의 device_scale은 정수(정사각 fallback/cache key 거친 식별자)로만 쓰이고,
+            // 실제 화면 경로는 아래 cell_width_px/cell_height_px(분수 메트릭)로 정밀 식별한다.
+            .device_scale = renderer.deviceScaleFromMilli(self.scale_milli),
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
         };
@@ -53,7 +56,7 @@ pub const CoreTextFrameBuilder = struct {
             .appearance = self.appearance,
             .font_registry = &font_registry,
             .rasterize_glyph = self.rasterize_glyph,
-            .device_scale = self.device_scale,
+            .scale_milli = self.scale_milli,
         };
         const render_frame = try renderer_state.buildFrameFromGlyphRunListWithRasterizer(
             allocator,

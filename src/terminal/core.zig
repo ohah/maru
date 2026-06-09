@@ -146,18 +146,18 @@ pub const TerminalCore = struct {
         switch (byte) {
             '0'...'9' => {
                 self.csi_has_digit = true;
+                // 파라미터가 max(16)를 넘으면(';'가 csi_overflow를 세움) 이후 자릿수는 버린다.
+                // 안 그러면 17번째+ 파라미터의 숫자가 params[15]에 누적돼 마지막 파라미터를
+                // 오염시킨다.
+                if (self.csi_overflow) return;
                 const slot = self.csi_param_count - 1;
-                if (slot < max_csi_params) {
-                    const digit: u16 = byte - '0';
-                    const value = self.csi_params[slot];
-                    // saturating: 손상/악성 입력이 u16을 넘기지 않게 한다.
-                    self.csi_params[slot] = if (value > (std.math.maxInt(u16) - digit) / 10)
-                        std.math.maxInt(u16)
-                    else
-                        value * 10 + digit;
-                } else {
-                    self.csi_overflow = true;
-                }
+                const digit: u16 = byte - '0';
+                const value = self.csi_params[slot];
+                // saturating: 손상/악성 입력이 u16을 넘기지 않게 한다.
+                self.csi_params[slot] = if (value > (std.math.maxInt(u16) - digit) / 10)
+                    std.math.maxInt(u16)
+                else
+                    value * 10 + digit;
             },
             ';', ':' => {
                 // ';'는 파라미터 구분자. ':'는 sub-parameter 구분자지만 A1은 동일하게 다음
@@ -178,7 +178,13 @@ pub const TerminalCore = struct {
                 self.dispatchCsi(byte);
                 self.parser = .ground;
             },
-            // 그 밖(C0 control 등)은 CSI를 중단하고 소비한다(관대 처리).
+            // ESC는 진행 중인 CSI를 취소하고 새 escape를 시작한다(VT abort-and-restart). 안 하면
+            // ESC[ ESC[31m 같은 입력에서 두 번째 시퀀스가 글자로 샌다.
+            0x1b => self.parser = .escape,
+            // CSI 안의 C0 control(ESC 제외)은 실행하고 CSI 파싱을 계속한다(VT spec). writeCodepoint가
+            // CR/LF/Tab/BS를 처리하고 나머지 C0는 버린다. parser는 .csi로 유지된다.
+            0x00...0x1a, 0x1c...0x1f => self.writeCodepoint(byte),
+            // 그 밖(DEL/high byte)은 CSI를 중단하고 소비한다(관대 처리).
             else => self.parser = .ground,
         }
     }
@@ -321,6 +327,21 @@ pub const TerminalCore = struct {
         self.last_print = null;
     }
 
+    /// erase로 [start, end) 범위를 비울 때, 경계에 걸친 wide glyph(width=2)의 반쪽을 정리한다.
+    /// clearCellForWrite가 쓰기 시 하던 짝 정리를 erase에도 적용해, 짝 잃은 base나 orphan
+    /// continuation이 남아 half-glyph로 그려지는 것을 막는다.
+    fn repairWideGlyphEdges(self: *TerminalCore, row: u16, start: u16, end: u16) void {
+        const blank: types.Cell = .{ .style = self.pen };
+        // 왼쪽 경계: start-1이 width=2 base면 그 continuation(start)이 지워졌으므로 base도 비운다.
+        if (start > 0 and self.cells[self.index(row, start - 1)].width == 2) {
+            self.cells[self.index(row, start - 1)] = blank;
+        }
+        // 오른쪽 경계: end가 continuation이면 그 base(end-1)가 지워졌으므로 continuation도 비운다.
+        if (end < self.size.cols and self.cells[self.index(row, end)].continuation) {
+            self.cells[self.index(row, end)] = blank;
+        }
+    }
+
     fn eraseInLine(self: *TerminalCore, mode: u16) void {
         const row = self.cursor.row;
         if (self.size.cols == 0 or row >= self.size.rows) return;
@@ -337,7 +358,11 @@ pub const TerminalCore = struct {
             // erase는 현재 pen의 배경색으로 채워야 하므로 blank cell에 style만 남긴다.
             self.cells[self.index(row, col)] = .{ .style = self.pen };
         }
+        self.repairWideGlyphEdges(row, start, end);
         self.markDirty(row);
+        // 다른 cursor/erase op과 같이 grapheme run을 끝낸다. 안 하면 CSI K 뒤 combining mark가
+        // 방금 지운 셀에 붙는다.
+        self.last_print = null;
     }
 
     fn eraseInDisplay(self: *TerminalCore, mode: u16) void {
@@ -354,14 +379,20 @@ pub const TerminalCore = struct {
                 const cursor_index = self.index(self.cursor.row, self.cursor.col);
                 var i: usize = 0;
                 while (i <= cursor_index and i < self.cells.len) : (i += 1) self.cells[i] = blank;
-                self.dirty = .{ .start_row = 0, .end_row = self.cursor.row };
+                self.repairWideGlyphEdges(self.cursor.row, 0, @min(self.cursor.col + 1, self.size.cols));
+                // dirty를 덮어쓰지 않고 markDirty로 병합한다 — 같은 write()에서 앞서 dirty된 행
+                // (예: 방금 출력한 아래쪽 행)을 잃어 렌더가 stale glyph를 남기지 않게 한다.
+                self.markDirty(0);
+                self.markDirty(self.cursor.row);
             },
             // 0(기본): 커서 ~ 화면 끝까지.
             else => {
                 const cursor_index = self.index(self.cursor.row, self.cursor.col);
                 var i: usize = cursor_index;
                 while (i < self.cells.len) : (i += 1) self.cells[i] = blank;
-                self.dirty = .{ .start_row = self.cursor.row, .end_row = self.size.rows - 1 };
+                self.repairWideGlyphEdges(self.cursor.row, self.cursor.col, self.size.cols);
+                self.markDirty(self.cursor.row);
+                self.markDirty(self.size.rows - 1);
             },
         }
         self.last_print = null;
@@ -386,6 +417,12 @@ pub const TerminalCore = struct {
                 next_cells[new_start..][0..copy_cols],
                 self.cells[old_start..][0..copy_cols],
             );
+            // cols가 줄어 wide glyph(width=2) base만 복사되고 continuation이 잘려 나가면, 짝 없는
+            // base를 blank로 정리한다(half-glyph가 1칸 공간에 2칸 폭으로 렌더되는 것 방지).
+            // putCell은 마지막 열에 width=2를 만들지 않으므로 이 case는 잘림에서만 생긴다.
+            if (copy_cols > 0 and next_cells[new_start + copy_cols - 1].width == 2) {
+                next_cells[new_start + copy_cols - 1] = .{};
+            }
         }
 
         self.allocator.free(self.cells);
@@ -1131,4 +1168,90 @@ test "resize clamps the cursor into the new bounds instead of resetting it" {
     try core.resize(2, 2);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
+}
+
+test "eraseInDisplay merges dirty instead of dropping earlier-dirtied rows" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 3, .rows = 4 });
+    defer core.deinit();
+    core.clearDirty();
+
+    // Print on the bottom row, then move the cursor up and erase start-to-cursor (mode 1).
+    try core.write("\x1b[4;1HX");
+    try core.write("\x1b[2;1H\x1b[1J");
+
+    // The bottom row (3) where X was printed must remain dirty — not be dropped by the erase.
+    const dirty = core.takeDirty().?;
+    try std.testing.expectEqual(@as(u16, 0), dirty.start_row);
+    try std.testing.expect(dirty.end_row >= 3);
+}
+
+test "ESC inside a CSI restarts as a new escape instead of leaking as text" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
+    defer core.deinit();
+
+    // CSI opened by '[', then ESC cancels it and a fresh CSI sets red and prints X.
+    try core.write("\x1b[\x1b[31mX");
+
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("X     ", dump);
+    try std.testing.expectEqual(types.Color{ .indexed = 1 }, core.cells[core.index(0, 0)].style.foreground);
+}
+
+test "C0 control inside a CSI is executed and the CSI still completes" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // Backspace (0x08) embedded mid-CSI must not abort it: the SGR red still applies, X prints red.
+    try core.write("\x1b[31\x08mX");
+
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("X   ", dump);
+    try std.testing.expectEqual(types.Color{ .indexed = 1 }, core.cells[core.index(0, 0)].style.foreground);
+}
+
+test "CSI with more than 16 parameters discards the overflow instead of corrupting param 15" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 1 });
+    defer core.deinit();
+
+    // 16 zero params fill the buffer; the 17th param (1 = bold) is past the cap and must be dropped,
+    // not folded into params[15] (which the old guard did, applying spurious bold).
+    try core.write("\x1b[0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;1mA");
+    try std.testing.expect(!core.cells[core.index(0, 0)].style.bold);
+}
+
+test "resize clears a wide glyph whose continuation is clipped at the new right edge" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("A한");
+    try std.testing.expectEqual(@as(u2, 2), core.cells[core.index(0, 1)].width);
+
+    // Shrink so the wide glyph's continuation (col 2) is clipped; the dangling base must be cleared.
+    try core.resize(2, 1);
+    try std.testing.expect(core.cells[core.index(0, 1)].width != 2);
+}
+
+test "erasing the continuation half of a wide glyph clears its dangling base" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("한X");
+    try std.testing.expectEqual(@as(u2, 2), core.cells[core.index(0, 0)].width);
+
+    // Cursor onto the continuation (col 1), erase cursor-to-end: the base at col 0 is now dangling.
+    try core.write("\x1b[2G\x1b[K");
+    try std.testing.expect(core.cells[core.index(0, 0)].width != 2);
+}
+
+test "eraseInLine ends the grapheme run so a later combining mark is dropped" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("A");
+    try core.write("\x1b[1G\x1b[K");
+    try core.write("\u{0301}");
+
+    try std.testing.expectEqual(@as(?u21, null), core.cells[core.index(0, 0)].combining);
 }

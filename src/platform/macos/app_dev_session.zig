@@ -100,8 +100,10 @@ pub const DevSession = struct {
     // 쓰게 한다. 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다.
     cell_width_px: u32 = 0,
     cell_height_px: u32 = 0,
-    // backing(Retina) scale. resize 이벤트의 scale_milli에서 갱신한다.
-    device_scale: u16 = 1,
+    // backing(Retina) scale을 천분율로 보관한다(예: 2000 = 2.0×, 1500 = 1.5×). 정수 배율로
+    // 반올림하지 않고 분수 그대로 들고 있어, glyph rasterize 크기와 cell 메트릭을 분수 Retina
+    // 해상도에 정확히 맞춘다. resize 이벤트의 scale_milli에서 갱신한다.
+    scale_milli: u32 = 1000,
     live_initialized: bool = false,
     surface_initialized: bool = false,
     runtime_initialized: bool = false,
@@ -164,12 +166,13 @@ pub const DevSession = struct {
         self.writeSummaryFromState();
     }
 
-    /// 현재 font·device_scale에 대한 cell 픽셀 크기(advance 폭 × line-height)를 CoreText에서
-    /// 뽑아 갱신한다. macOS가 아니거나(테스트/CI) 조회 실패면 font_size_px × device_scale
-    /// 정사각으로 대체한다(기존 동작). device_scale이 바뀌는 resize에서도 호출한다.
+    /// 현재 font·scale_milli에 대한 cell 픽셀 크기(advance 폭 × line-height)를 CoreText에서
+    /// 뽑아 갱신한다. 분수 scale을 그대로 곱한 device 픽셀 font size로 조회한다. macOS가
+    /// 아니거나(테스트/CI) 조회 실패면 같은 device 픽셀 font size의 정사각으로 대체한다.
+    /// scale_milli가 바뀌는 resize에서도 호출한다.
     fn refreshCellMetrics(self: *DevSession) void {
-        const font_size_px = renderer.textConfigFromFontSize(self.appearance.font.size, self.device_scale).font_size_px;
-        const square: u32 = @as(u32, font_size_px) * @as(u32, self.device_scale);
+        const device_font_size = renderer.deviceFontSizeFromMilli(self.appearance.font.size, self.scale_milli);
+        const square: u32 = @intFromFloat(@round(device_font_size));
         self.cell_width_px = square;
         self.cell_height_px = square;
         // extern native 호출은 macOS에서만 컴파일/링크한다(.m을 링크하지 않는 Linux 계약
@@ -179,7 +182,7 @@ pub const DevSession = struct {
             coretext_bridge.maru_macos_coretext_font_cell_metrics(
                 self.appearance.font.family.ptr,
                 self.appearance.font.family.len,
-                @as(f64, @floatCast(self.appearance.font.size)) * @as(f64, @floatFromInt(self.device_scale)),
+                device_font_size,
                 &metrics,
             );
             if (metrics.status == 0 and metrics.cell_width_px > 0 and metrics.cell_height_px > 0) {
@@ -216,15 +219,16 @@ pub const DevSession = struct {
         return self.last_summary;
     }
 
-    pub fn resize(self: *DevSession, size: terminal.Size, device_scale: u16) !FrameSummary {
+    pub fn resize(self: *DevSession, size: terminal.Size, scale_milli: u32) !FrameSummary {
         // resize는 terminal grid와 PTY winsize가 함께 바뀌어야 한다. FrameLoop API를
         // 통해 SurfaceRuntime action으로 내려보내면 Swift가 두 책임을 다시 구현하지 않는다.
         self.total_resize_events += 1;
         // backing scale이 바뀌면(다른 DPI 디스플레이로 이동 등) cell 메트릭을 다시 뽑는다.
-        // glyph는 device_scale 배율로 rasterize되어야 또렷하다.
-        const next_scale = std.math.clamp(device_scale, 1, 8);
-        if (next_scale != self.device_scale) {
-            self.device_scale = next_scale;
+        // glyph는 분수 scale 그대로 rasterize되어야 분수 Retina에서도 또렷하고 drawable과 맞는다.
+        // scale_milli를 [250,8000]로 막아 손상된 값에서도 곱이 비정상으로 커지지 않게 한다.
+        const next_scale = std.math.clamp(scale_milli, 250, 8000);
+        if (next_scale != self.scale_milli) {
+            self.scale_milli = next_scale;
             self.refreshCellMetrics();
         }
         // 종료된 세션의 resize도 live surface가 없어 실패한다. 닫히는 창의 late resize는
@@ -256,7 +260,7 @@ pub const DevSession = struct {
                 .appearance = self.appearance,
                 .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
                 .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
-                .device_scale = self.device_scale,
+                .scale_milli = self.scale_milli,
                 .cell_width_px = @intCast(self.cell_width_px),
                 .cell_height_px = @intCast(self.cell_height_px),
             };

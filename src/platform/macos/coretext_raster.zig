@@ -3,6 +3,19 @@ const maru = @import("maru");
 const config = maru.config;
 const renderer = maru.renderer;
 
+// 렌더링/메트릭 진단 logger. ad-hoc getenv+fprintf를 ObjC hot path에 두는 대신, slot 결정이
+// 일어나는 Zig 렌더 계층에서 std.log scoped logger로 찍는다. MARU_DEBUG가 켜졌을 때만 emit하며,
+// 프로세스 수명 동안 안 바뀌므로 환경변수는 한 번만 조회해 캐시한다.
+const diag = std.log.scoped(.font_metrics);
+var diag_enabled_cache: ?bool = null;
+
+fn diagEnabled() bool {
+    if (diag_enabled_cache == null) {
+        diag_enabled_cache = std.c.getenv("MARU_DEBUG") != null;
+    }
+    return diag_enabled_cache.?;
+}
+
 pub const NativeGlyphRasterResult = extern struct {
     status: c_int,
     non_clear_pixels: u32,
@@ -36,9 +49,9 @@ pub const CoreTextGlyphRasterizer = struct {
     appearance: config.ResolvedAppearance,
     font_registry: *const renderer.FontIdentityRegistry,
     rasterize_glyph: RasterizeGlyphFn,
-    // backing(Retina) scale. atlas slot이 font_size_px × device_scale로 커지므로, glyph도
-    // 같은 배율의 폰트로 그려야 slot을 또렷하게 채운다(작게 그려져 흐려지지 않게).
-    device_scale: u16 = 1,
+    // backing(Retina) scale을 천분율로 보관한다(예: 1500 = 1.5×). glyph를 정수 배율로 반올림하지
+    // 않고 분수 scale 그대로의 device 픽셀 크기로 그려, 분수 Retina에서도 slot을 또렷하게 채운다.
+    scale_milli: u32 = 1000,
 
     pub fn rasterize(
         self: CoreTextGlyphRasterizer,
@@ -58,7 +71,7 @@ pub const CoreTextGlyphRasterizer = struct {
         self.rasterize_glyph(
             self.appearance.font.family.ptr,
             self.appearance.font.family.len,
-            @as(f64, @floatCast(self.appearance.font.size)) * @as(f64, @floatFromInt(self.device_scale)),
+            renderer.deviceFontSizeFromMilli(self.appearance.font.size, self.scale_milli),
             font_identity.postscript_name.ptr,
             font_identity.postscript_name.len,
             request.run.codepoint,
@@ -70,6 +83,21 @@ pub const CoreTextGlyphRasterizer = struct {
             request.pixels.len,
             &native,
         );
+
+        // MARU_DEBUG 진단: cell 메트릭(cache_key)과 atlas slot 크기를 함께 찍는다. 둘이 어긋나면
+        // (slot != cell × span) glyph가 cell보다 넓거나 좁은 slot에 그려져 간격이 틀어진다 —
+        // "m i s e" 간격 버그를 이 비교로 잡았다.
+        if (diagEnabled()) {
+            diag.info(
+                "cp={d} scale_milli={d} cell={d}x{d} slot={d}x{d} ink_px={d} status={d}",
+                .{
+                    request.run.codepoint,               self.scale_milli,
+                    request.run.cache_key.cell_width_px, request.run.cache_key.cell_height_px,
+                    request.slot.width_px,               request.slot.height_px,
+                    native.non_clear_pixels,             native.status,
+                },
+            );
+        }
 
         // CoreText가 glyph를 그렸지만 잉크가 없는 경우(공백/combining mark/치환된 비가시
         // glyph)는 실패가 아니다. renderer 계약은 이것을 non_clear_pixels=0인 정상 결과로

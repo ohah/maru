@@ -104,6 +104,8 @@ pub const DevSession = struct {
     // 반올림하지 않고 분수 그대로 들고 있어, glyph rasterize 크기와 cell 메트릭을 분수 Retina
     // 해상도에 정확히 맞춘다. resize 이벤트의 scale_milli에서 갱신한다.
     scale_milli: u32 = 1000,
+    // 마지막으로 적용한 grid 크기. 같은 size+scale resize 중복을 여기서 건너뛴다(Swift가 아니라).
+    last_resize_size: ?terminal.Size = null,
     live_initialized: bool = false,
     surface_initialized: bool = false,
     runtime_initialized: bool = false,
@@ -223,11 +225,22 @@ pub const DevSession = struct {
         // resize는 terminal grid와 PTY winsize가 함께 바뀌어야 한다. FrameLoop API를
         // 통해 SurfaceRuntime action으로 내려보내면 Swift가 두 책임을 다시 구현하지 않는다.
         self.total_resize_events += 1;
-        // backing scale이 바뀌면(다른 DPI 디스플레이로 이동 등) cell 메트릭을 다시 뽑는다.
-        // glyph는 분수 scale 그대로 rasterize되어야 분수 Retina에서도 또렷하고 drawable과 맞는다.
         // scale_milli를 [250,8000]로 막아 손상된 값에서도 곱이 비정상으로 커지지 않게 한다.
         const next_scale = std.math.clamp(scale_milli, 250, 8000);
-        if (next_scale != self.scale_milli) {
+        const scale_changed = next_scale != self.scale_milli;
+        const size_changed = self.last_resize_size == null or
+            self.last_resize_size.?.cols != size.cols or self.last_resize_size.?.rows != size.rows;
+        // 같은 size+scale이면 비싼 재작업(TerminalCore.resize alloc/memcpy + PTY winsize/SIGWINCH)을
+        // 건너뛴다. Swift의 windowDidResize·backing 콜백·tick 폴링이 한 변화에 여러 번 부를 수
+        // 있는데, 매번 적용하면 셸이 SIGWINCH storm으로 다시 그린다(중복방지를 Swift가 아니라
+        // 여기서 한 곳에서 처리).
+        if (!scale_changed and !size_changed) {
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.resize);
+            return self.last_summary;
+        }
+        // backing scale이 바뀌면(다른 DPI 디스플레이로 이동 등) cell 메트릭을 분수 scale로 다시 뽑는다.
+        if (scale_changed) {
             self.scale_milli = next_scale;
             self.refreshCellMetrics();
         }
@@ -239,6 +252,7 @@ pub const DevSession = struct {
             return self.last_summary;
         }
         try self.frame_loop.resizeActiveSurface(size);
+        self.last_resize_size = size;
         // grid가 reflow됐으므로 다음 tick이 Metal frame을 재투영하게 dirty로 표시한다.
         self.metal_dirty = true;
         self.writeSummaryFromState();

@@ -76,8 +76,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private let artifactDirectory = "zig-out/maru-macos-app-dev"
     private let summaryPath = "zig-out/maru-macos-app-dev/app-dev.summary.txt"
-    private let placeholderCellWidthPx: CGFloat = 12
-    private let placeholderCellHeightPx: CGFloat = 24
     private var capabilities = MaruAppHostCapabilities()
     private var window: NSWindow?
     private var devSession: OpaquePointer?
@@ -104,16 +102,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var lastCellHeightPx: UInt32 = 0
     // dev session에 마지막으로 보낸 backing scale. 런치 후 backingScaleFactor가 늦게 Retina로
     // 정착하면(콜백이 dev session 생성 전에 발화한 경우) tick이 변화를 감지해 재-resize한다.
+    // (같은 size+scale 중복 resize 방지는 Zig dev session이 담당한다.)
     private var lastSentBackingScale: CGFloat = 0
-    // dev session에 마지막으로 보낸 resize 값. 같은 값으로 중복 resize(SIGWINCH storm)를 막는다.
-    private struct ResizeSignature: Equatable {
-        var cols: UInt32
-        var rows: UInt32
-        var widthPx: UInt32
-        var heightPx: UInt32
-        var scaleMilli: UInt32
-    }
-    private var lastSentResize: ResizeSignature?
     // create 성공 여부를 영구 기록한다. metalRenderer는 shutdown에서 nil이 되므로 summary가
     // 종료 후 쓰일 때 "생성됐었다"를 잃지 않게 별도 플래그로 둔다.
     private var metalRendererCreated = false
@@ -497,21 +487,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         let bounds = contentView.bounds
         let scale = window.backingScaleFactor
-        // renderer가 cell을 backing 픽셀 단위로 깔고 drawableSize(backing)로 투영하므로, cols/rows도
-        // backing 픽셀을 cell 픽셀 크기로 나눠 계산해야 grid가 창에 정합한다. cell 메트릭은 첫
-        // frame에서 캐시되며, 그 전(첫 resize)에는 placeholder 추정값으로 대체한다.
-        let backingWidth = bounds.width * scale
-        let backingHeight = bounds.height * scale
-        let cellW = CGFloat(lastCellWidthPx > 0 ? lastCellWidthPx : UInt32(placeholderCellWidthPx))
-        let cellH = CGFloat(lastCellHeightPx > 0 ? lastCellHeightPx : UInt32(placeholderCellHeightPx))
-        let cols = max(UInt32(1), clampedUInt32(floor(backingWidth / cellW)))
-        let rows = max(UInt32(1), clampedUInt32(floor(backingHeight / cellH)))
-        resizeDevSession(
-            cols: cols,
-            rows: rows,
-            widthPx: clampedUInt32(backingWidth),
-            heightPx: clampedUInt32(backingHeight)
-        )
+        // renderer가 cell을 backing 픽셀 단위로 깔고 drawableSize(backing)로 투영하므로, cols/rows는
+        // backing 픽셀을 cell 픽셀 크기로 나눠야 한다. 그 floor/clamp/placeholder 계산은 Zig
+        // (maru_macos_grid_from_backing)가 소유한다(std.testing으로 고정). Swift는 backing 픽셀만
+        // 모아 넘긴다.
+        let widthPx = clampedUInt32(bounds.width * scale)
+        let heightPx = clampedUInt32(bounds.height * scale)
+        var cols: UInt32 = 0
+        var rows: UInt32 = 0
+        maru_macos_grid_from_backing(widthPx, heightPx, lastCellWidthPx, lastCellHeightPx, &cols, &rows)
+        resizeDevSession(cols: cols, rows: rows, widthPx: widthPx, heightPx: heightPx)
     }
 
     private func resizeDevSession(cols: UInt32, rows: UInt32, widthPx: UInt32, heightPx: UInt32) {
@@ -520,16 +505,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
 
         let scaleMilli = clampedUInt32((window?.backingScaleFactor ?? 1.0) * 1_000)
-        // 같은 (cols,rows,width,height,scale)로 다시 resize하지 않는다. windowDidResize +
-        // viewDidChangeBackingProperties + tick scale-check가 한 변화에 여러 번 호출될 수 있는데,
-        // 매번 ABI resize를 보내면 TerminalCore.resize(alloc/memcpy)와 PTY winsize/SIGWINCH가
-        // 반복돼 셸이 불필요하게 다시 그린다(SIGWINCH storm). 값이 같으면 일찍 반환한다.
-        let signature = ResizeSignature(cols: cols, rows: rows, widthPx: widthPx, heightPx: heightPx, scaleMilli: scaleMilli)
-        if signature == lastSentResize {
-            return
-        }
-        lastSentResize = signature
-        // 보낸 backing scale을 기록해, tick의 scale-변화 감지가 같은 값에 다시 resize하지 않게 한다.
+        // 같은 size+scale 중복 resize 방지(SIGWINCH storm)는 Zig dev session이 한 곳에서 처리한다.
+        // Swift는 매번 보내고, dev session이 변화 없으면 비싼 재작업을 건너뛴다.
+        // tick의 scale-변화 감지용으로 보낸 backing scale만 기록한다.
         lastSentBackingScale = window?.backingScaleFactor ?? 1.0
 
         var event = MaruAppHostResizeEvent(

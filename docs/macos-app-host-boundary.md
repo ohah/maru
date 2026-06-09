@@ -29,11 +29,10 @@
 - terminal view의 `keyDown`, window resize, window close가 fixed-width C ABI record를 통해 Zig dev session으로 내려간다. resize는 backing 픽셀·scale만 넘기고 grid(cols/rows)는 Zig가 실제 cell 메트릭으로 계산한다.
 - smoke 실행은 `zig-out/maru-macos-app-dev/app-dev.summary.txt`에 `visible_ui=true`, `swift_host=true`, `abi_ready=true`, `terminal_surface=true`, `terminal_surface_note=zig_runtime_rendered_to_swift_cametal_layer`, `metal_renderer_created=true`, `metal_frames_drawn>0`, `frame_prepared=true`, `output_events>0`, `exit_events=1`, `key_events=2`, `terminal_input_events=2`, `resize_events=1`, `close_events=1`을 남긴다.
 
-여기까지로 dev session의 shell glyph·커서가 실제 Swift window에 그려지고, resize cell 수도 실제 CoreText font metrics(advance×line-height)와 분수 backing scale에서 Zig가 계산한다.
+여기까지로 dev session의 shell glyph·커서가 실제 Swift window에 그려지고, resize cell 수도 실제 CoreText font metrics(advance×line-height)와 분수 backing scale에서 Zig가 계산한다. 렌더는 **fixed-cell pixel layout**이다(각 cell을 고정 픽셀 사각형 col×cw, row×ch에 두고 drawable 크기로 NDC 투영 — 창을 키우면 글자가 늘어나는 대신 더 많은 cell이 보인다).
 
 현재 dev shell에서 아직 하지 않는 것:
 
-- fixed-cell layout(현재는 NDC inset 매핑이라 glyph가 창 크기에 맞춰 늘어난다)
 - 커서 shape(bar/underline)·blink, underline overlay 렌더
 - 기존 스크롤백 행의 재-wrap(resize reflow는 활성 화면에 적용되고 넘치는 줄은 스크롤백으로 가지만,
   이미 스크롤백에 있던 행은 다시 wrap하지 않아 과거를 스크롤하면 저장된 폭 그대로 보인다)
@@ -77,4 +76,4 @@
 
 ## 남은 한계
 
-현재 dev shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, `MaruMetalTerminalView`(CAMetalLayer)에 dev session의 shell glyph와 반전 블록 커서를 그리며, key/resize/close event를 Zig dev session ABI로 내려보낸다. resize cell 수는 실제 CoreText font metrics에서 Zig가 계산한다(`metal_renderer_created`/`metal_frames_drawn`로 gate). 스크롤백은 구현돼 휠/Shift+PageUp으로 과거를 볼 수 있고(타이핑하면 live로 복귀), resize 시 활성 화면을 새 폭으로 reflow하고 넘치는 줄은 스크롤백으로 민다(Ghostty 오라클로 그리드+커서 검증). 스크롤 입력도 Swift는 raw 값만 넘긴다 — 휠은 델타 포인트+정밀 여부를(`scroll_wheel`), Shift+PageUp/Down은 방향만(`scroll_page`) 보내고, 줄 수·page 크기(rows-1) 환산·1줄 미만 델타 누적·NaN/clamp 가드는 권위 있는 cell 메트릭·rows를 가진 Zig가 한다(네이티브 최소화). alt screen(vim/less)에서는 같은 스크롤이 화살표 키로 변환돼 프로그램에 전달된다(xterm alternate scroll, DECSET 1007 기본 on). 다만 NDC inset 매핑이라 glyph가 창 크기에 맞춰 늘어나고, fixed-cell layout·기존 스크롤백 행 재-wrap·탭/분할·선택/클립보드 같은 제품 interactive UX와 커서 shape/blink는 아직 없다.
+현재 dev shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, `MaruMetalTerminalView`(CAMetalLayer)에 dev session의 shell glyph와 반전 블록 커서를 그리며, key/resize/close event를 Zig dev session ABI로 내려보낸다. resize cell 수는 실제 CoreText font metrics에서 Zig가 계산한다(`metal_renderer_created`/`metal_frames_drawn`로 gate). 스크롤백은 구현돼 휠/Shift+PageUp으로 과거를 볼 수 있고(타이핑하면 live로 복귀), resize 시 활성 화면을 새 폭으로 reflow하고 넘치는 줄은 스크롤백으로 민다(Ghostty 오라클로 그리드+커서 검증). 스크롤 입력도 Swift는 raw 값만 넘긴다 — 휠은 델타 포인트+정밀 여부를(`scroll_wheel`), Shift+PageUp/Down은 방향만(`scroll_page`) 보내고, 줄 수·page 크기(rows-1) 환산·1줄 미만 델타 누적·NaN/clamp 가드는 권위 있는 cell 메트릭·rows를 가진 Zig가 한다(네이티브 최소화). alt screen(vim/less)에서는 같은 스크롤이 화살표 키로 변환돼 프로그램에 전달된다(xterm alternate scroll, DECSET 1007 기본 on). 렌더는 fixed-cell pixel layout이라 창 크기에 따라 glyph가 늘어나지 않는다(창을 키우면 cell이 더 보임). 기존 스크롤백 행 재-wrap·탭/분할·선택/클립보드 같은 제품 interactive UX와 커서 shape/blink는 아직 없다.

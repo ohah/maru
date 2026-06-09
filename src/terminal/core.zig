@@ -318,9 +318,21 @@ pub const TerminalCore = struct {
                 self.reverseIndex();
                 self.parser = .ground;
             },
+            // DECSC(ESC 7)/DECRC(ESC 8): 커서(위치+pen+pending_wrap) 저장/복원. claude CLI 등이
+            // 시작 시 `ESC 7, CSI r, ESC 8`로 scroll region을 리셋하는데, CSI r의 부수효과(커서
+            // home)를 ESC 8이 되돌린다 — 복원이 없으면 커서가 (0,0)에 남아 UI가 기존 화면 맨 위를
+            // 덮는다. DECSET 1048과 같은 저장 슬롯을 쓴다(xterm 동일).
+            '7' => {
+                self.saveCursorState();
+                self.parser = .ground;
+            },
+            '8' => {
+                self.restoreCursorState();
+                self.parser = .ground;
+            },
             // ESC <intermediate>(0x20..0x2f) <final>: charset designation 등 2바이트 시퀀스.
             0x20...0x2f => self.parser = .escape_intermediate,
-            // 그 밖의 ESC <final>(RIS, DECSC/DECRC, NEL 등)은 A1에서 소비만 한다.
+            // 그 밖의 ESC <final>(RIS, NEL 등)은 A1에서 소비만 한다.
             else => self.parser = .ground,
         }
     }
@@ -426,6 +438,10 @@ pub const TerminalCore = struct {
             'r' => self.setScrollRegion(),
             'L' => self.insertLines(self.csiParam(0, 1)),
             'M' => self.deleteLines(self.csiParam(0, 1)),
+            // DA1(CSI c / CSI 0 c): 터미널 식별 질의. 프로그램(claude CLI 등)이 시작 시 기능 협상
+            // 으로 보내며, 응답이 없으면 타임아웃을 기다리거나 기능을 보수적으로 끈다. VT102로
+            // 식별한다(CSI ?6c) — 현재 구현 수준(커서/erase/scroll region/IL/DL)과 부합.
+            'c' => if (self.csiRawParam(0) == 0) self.appendResponse("\x1b[?6c"),
             else => {},
         }
     }
@@ -2762,4 +2778,40 @@ test "SGR 7/27 set and clear reverse video on the pen (0 resets it too)" {
     try std.testing.expect(!core.cells[1].style.reverse);
     try core.write("\x1b[7m\x1b[0mZ"); // SGR 0이 reverse도 리셋
     try std.testing.expect(!core.cells[2].style.reverse);
+}
+
+test "DECSC/DECRC (ESC 7/8) save and restore the cursor around a DECSTBM reset (claude CLI startup)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer core.deinit();
+    try core.write("one\r\ntwo");
+    // claude CLI 시작 시퀀스: ESC 7(저장), CSI r(region 리셋 — 부수효과로 커서 home), ESC 8(복원).
+    try core.write("\x1b7\x1b[r\x1b8!");
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row); // 복원돼 (1,3)에서 이어 그림
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("one     \ntwo!    \n        \n        ", dump);
+}
+
+test "DECRC restores the pen and clamps a cursor saved on a larger screen" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer core.deinit();
+    try core.write("\x1b[31m\x1b[3;5H\x1b7"); // 빨강 pen + (2,4) 저장
+    try core.write("\x1b[0m\x1b[1;1H"); // pen 리셋 + 이동
+    try core.write("\x1b8"); // 복원
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 4), core.cursor.col);
+    try std.testing.expectEqual(types.Color{ .indexed = 1 }, core.pen.foreground);
+    try core.resize(4, 2); // 저장 좌표보다 작은 화면으로
+    try core.write("\x1b8"); // clamp돼 grid 안
+    try std.testing.expect(core.cursor.row < 2 and core.cursor.col < 4);
+}
+
+test "DA1 (CSI c) answers with a VT102 identification over the response path" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[c");
+    try std.testing.expectEqualStrings("\x1b[?6c", core.pendingResponse());
+    core.clearResponse();
+    try core.write("\x1b[0c"); // 명시적 0도 동일
+    try std.testing.expectEqualStrings("\x1b[?6c", core.pendingResponse());
 }

@@ -502,8 +502,9 @@ pub const TerminalCore = struct {
     }
 
     /// DECSET(h)/DECRST(l)의 alternate-screen 계열 모드를 적용한다. 파라미터가 여러 개면 각각 적용.
-    /// 47=alt 전환만, 1047=alt 전환(+나갈 때 alt clear), 1048=커서 저장/복원만, 1049=1048+1047 결합
-    /// (들어갈 때 커서 저장+alt clear, 나갈 때 커서 복원) — vim/less가 쓰는 표준 조합이다.
+    /// 47/1047=alt 전환만(둘의 차이인 "1047은 나갈 때 alt clear"는 alt 버퍼를 해제하는 현 구현에선
+    /// 구분이 무의미하다), 1048=커서 저장/복원만, 1049=결합(들어갈 때 커서 저장+빈 alt, 나갈 때
+    /// 커서 복원) — vim/less가 쓰는 표준 조합이다.
     fn setPrivateModes(self: *TerminalCore, set: bool) void {
         var i: usize = 0;
         while (i < self.csi_param_count) : (i += 1) {
@@ -514,8 +515,7 @@ pub const TerminalCore = struct {
                     self.markDirty(self.cursor.row);
                 },
                 1007 => self.alternate_scroll = set, // alt screen 휠 -> 화살표 변환 on/off
-                47 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
-                1047 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
+                47, 1047 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
                 1048 => if (set) self.saveCursorState() else self.restoreCursorState(),
                 1049 => if (set) self.enterAltScreen(true) else self.leaveAltScreen(true),
                 else => {}, // 그 외 private 모드(25 커서 표시 등)는 아직 소비만 한다.
@@ -1468,72 +1468,86 @@ pub const TerminalCore = struct {
     fn scrollRegionUp(self: *TerminalCore) void {
         // alt screen의 출력은 history가 아니다(vim 화면이 스크롤백을 오염시키지 않게).
         const push = self.scroll_top == 0 and !self.alt_active;
-        self.scrollRangeUp(self.scroll_top, self.scroll_bottom, push);
+        self.scrollRangeUp(self.scroll_top, self.scroll_bottom, 1, push);
     }
 
     fn scrollRegionDown(self: *TerminalCore) void {
-        self.scrollRangeDown(self.scroll_top, self.scroll_bottom);
+        self.scrollRangeDown(self.scroll_top, self.scroll_bottom, 1);
     }
 
-    /// [top, bottom] 범위를 위로 한 줄 민다(bottom에 빈 줄). push_history면 top 행을 스크롤백에
-    /// 보관한다 — LF 스크롤만 history고, DL(줄 삭제) 같은 편집 연산은 보관하지 않는다(xterm 동작).
-    fn scrollRangeUp(self: *TerminalCore, top: u16, bottom: u16, push_history: bool) void {
-        if (self.size.cols == 0 or self.size.rows == 0) return;
+    /// [top, bottom] 범위를 위로 n줄 민다(아래쪽에 빈 줄 n개). push_history면 밀려나는 행들을
+    /// 스크롤백에 보관한다 — LF 스크롤만 history고, DL(줄 삭제) 같은 편집 연산은 보관하지 않는다
+    /// (xterm 동작). n줄을 한 번의 블록 이동으로 처리해 IL/DL n이 O(범위)다(줄당 반복 아님).
+    fn scrollRangeUp(self: *TerminalCore, top: u16, bottom: u16, count: u16, push_history: bool) void {
+        if (self.size.cols == 0 or self.size.rows == 0 or count == 0) return;
         // bottom == top(한 줄 범위)도 허용한다 — IL/DL이 region 마지막 행에서 그 행만 비운다.
         if (bottom < top or bottom >= self.size.rows) return;
+        const span: u16 = bottom - top + 1;
+        const n = @min(count, span);
 
         if (push_history) {
-            const pushed = self.pushScrollback(self.cells[self.index(top, 0)..][0..self.size.cols], self.wrapped[top]);
-            // 과거를 보는 중(view_offset>0)이면 같은 내용을 계속 보도록 offset도 올린다(scroll-lock).
-            // 단 보관이 실패(OOM)했으면 보정하지 않는다 — 안 그러면 뷰가 내용과 한 줄씩 어긋난다.
-            if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
+            var pr: u16 = 0;
+            while (pr < n) : (pr += 1) {
+                const pushed = self.pushScrollback(self.cells[self.index(top + pr, 0)..][0..self.size.cols], self.wrapped[top + pr]);
+                // 과거를 보는 중(view_offset>0)이면 같은 내용을 계속 보도록 offset도 올린다
+                // (scroll-lock). 보관 실패(OOM) 시엔 보정하지 않는다 — 뷰가 내용과 어긋나지 않게.
+                if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
+            }
         }
 
-        var row: u16 = top + 1;
+        var row: u16 = top + n;
         while (row <= bottom) : (row += 1) {
-            const dst_start = self.index(row - 1, 0);
+            const dst_start = self.index(row - n, 0);
             const src_start = self.index(row, 0);
             @memcpy(
                 self.cells[dst_start .. dst_start + self.size.cols],
                 self.cells[src_start .. src_start + self.size.cols],
             );
-            self.wrapped[row - 1] = self.wrapped[row];
+            self.wrapped[row - n] = self.wrapped[row];
         }
 
-        const last_start = self.index(bottom, 0);
-        @memset(self.cells[last_start .. last_start + self.size.cols], .{});
-        self.wrapped[bottom] = false;
+        var blank_row: u16 = bottom + 1 - n;
+        while (blank_row <= bottom) : (blank_row += 1) {
+            const blank_start = self.index(blank_row, 0);
+            @memset(self.cells[blank_start .. blank_start + self.size.cols], .{});
+            self.wrapped[blank_row] = false;
+        }
         // 범위 경계의 wrap 정합: shift가 old wrapped[bottom]("old bottom ↔ bottom+1" — 범위 밖과의
-        // 연속)을 bottom-1로 끌어왔는데, bottom+1은 안 움직였으니 그 연속은 깨졌다. 마찬가지로
+        // 연속)을 bottom-n으로 끌어왔는데, bottom+1은 안 움직였으니 그 연속은 깨졌다. 마찬가지로
         // 범위 위 행(top-1)이 주장하던 "top으로의 연속"도 top 내용이 바뀌어 깨졌다. 안 끊으면
         // 다음 resize reflow가 무관한 줄(상태줄 등)을 한 논리 줄로 합친다.
-        if (bottom > top) self.wrapped[bottom - 1] = false;
+        if (bottom + 1 >= n and bottom + 1 - n > top) self.wrapped[bottom - n] = false;
         if (top > 0) self.wrapped[top - 1] = false;
         self.dirty = fullDirty(self.size);
     }
 
-    /// [top, bottom] 범위를 아래로 한 줄 민다(top에 빈 줄 삽입). 아래로 밀려나는 bottom 줄은
+    /// [top, bottom] 범위를 아래로 n줄 민다(top쪽에 빈 줄 n개 삽입). 아래로 밀려나는 줄은
     /// history가 아니므로 버린다(스크롤백에 안 넣는다).
-    fn scrollRangeDown(self: *TerminalCore, top: u16, bottom: u16) void {
-        if (self.size.cols == 0 or self.size.rows == 0) return;
+    fn scrollRangeDown(self: *TerminalCore, top: u16, bottom: u16, count: u16) void {
+        if (self.size.cols == 0 or self.size.rows == 0 or count == 0) return;
         // bottom == top(한 줄 범위)도 허용한다(scrollRangeUp과 동일한 이유).
         if (bottom < top or bottom >= self.size.rows) return;
+        const span: u16 = bottom - top + 1;
+        const n = @min(count, span);
 
         var row: u16 = bottom;
-        while (row > top) : (row -= 1) {
+        while (row >= top + n) : (row -= 1) {
             const dst_start = self.index(row, 0);
-            const src_start = self.index(row - 1, 0);
+            const src_start = self.index(row - n, 0);
             @memcpy(
                 self.cells[dst_start .. dst_start + self.size.cols],
                 self.cells[src_start .. src_start + self.size.cols],
             );
-            self.wrapped[row] = self.wrapped[row - 1];
+            self.wrapped[row] = self.wrapped[row - n];
         }
 
-        const top_start = self.index(top, 0);
-        @memset(self.cells[top_start .. top_start + self.size.cols], .{});
-        self.wrapped[top] = false;
-        // 범위 경계의 wrap 정합(scrollRangeUp과 대칭): 새 bottom 행(=old bottom-1 내용)이 범위 밖
+        var blank_row: u16 = top;
+        while (blank_row < top + n) : (blank_row += 1) {
+            const blank_start = self.index(blank_row, 0);
+            @memset(self.cells[blank_start .. blank_start + self.size.cols], .{});
+            self.wrapped[blank_row] = false;
+        }
+        // 범위 경계의 wrap 정합(scrollRangeUp과 대칭): 새 bottom 행(=old bottom-n 내용)이 범위 밖
         // bottom+1로 이어진다는 플래그는 거짓이고, top-1 행의 "top으로의 연속"도 top이 빈 줄이 돼
         // 깨졌다.
         self.wrapped[bottom] = false;
@@ -1546,9 +1560,7 @@ pub const TerminalCore = struct {
     /// xterm/DEC 동작). vim이 줄 열기/삭제를 전체 redraw 없이 하는 핵심 시퀀스.
     fn insertLines(self: *TerminalCore, count: u16) void {
         if (self.cursor.row < self.scroll_top or self.cursor.row > self.scroll_bottom) return;
-        const n = @min(count, self.scroll_bottom - self.cursor.row + 1);
-        var i: u16 = 0;
-        while (i < n) : (i += 1) self.scrollRangeDown(self.cursor.row, self.scroll_bottom);
+        self.scrollRangeDown(self.cursor.row, self.scroll_bottom, count);
         self.pending_wrap = false;
         self.cursor.col = 0;
         self.last_print = null;
@@ -1558,9 +1570,7 @@ pub const TerminalCore = struct {
     /// 삭제된 줄은 history가 아니다(스크롤백에 안 넣음). 커서가 region 밖이면 무시, 후처리 CR.
     fn deleteLines(self: *TerminalCore, count: u16) void {
         if (self.cursor.row < self.scroll_top or self.cursor.row > self.scroll_bottom) return;
-        const n = @min(count, self.scroll_bottom - self.cursor.row + 1);
-        var i: u16 = 0;
-        while (i < n) : (i += 1) self.scrollRangeUp(self.cursor.row, self.scroll_bottom, false);
+        self.scrollRangeUp(self.cursor.row, self.scroll_bottom, count, false);
         self.pending_wrap = false;
         self.cursor.col = 0;
         self.last_print = null;
@@ -3030,4 +3040,21 @@ test "ED 3 (CSI 3J) clears the scrollback while ED 2 keeps it" {
     try std.testing.expectEqual(@as(usize, 0), core.view_offset);
     try core.write("x\r\ny\r\nz"); // 비운 뒤 ring 재사용이 정상인지(커서가 바닥이라 2회 스크롤)
     try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
+}
+
+test "IL/DL with count > 1 move the block once (CSI 2L / CSI 2M)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 4 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\nd");
+    try core.write("\x1b[1;1H\x1b[2L"); // 행0에 빈 줄 2개 삽입: _,_,a,b
+    {
+        const dump = try core.dumpUtf8(std.testing.allocator);
+        defer std.testing.allocator.free(dump);
+        try std.testing.expectEqualStrings("  \n  \na \nb ", dump);
+    }
+    try core.write("\x1b[2M"); // 행0부터 2줄 삭제: a,b,_,_
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("a \nb \n  \n  ", dump);
+    try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen());
 }

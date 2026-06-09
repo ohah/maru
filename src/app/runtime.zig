@@ -3,6 +3,46 @@ const pty = @import("../pty.zig");
 const terminal = @import("../terminal.zig");
 const surface_mod = @import("surface.zig");
 
+// PTY 출력의 제어 시퀀스를 찍는 진단 logger(드래그 시 zsh redraw 분석용). 게이트는 host가
+// SurfaceRuntime.debug_input으로 주입한다(플랫폼 무관 — runtime은 libc/env에 직접 의존하지 않음).
+const input_diag = std.log.scoped(.input);
+
+// bytes를 사람이 읽을 escape 형태로 buf에 쓴다(ESC→\e, 제어→\xNN). 최대 cap까지, 넘으면 끝에 "...".
+fn escapeForLog(bytes: []const u8, buf: []u8) []const u8 {
+    var n: usize = 0;
+    for (bytes) |b| {
+        if (n + 5 >= buf.len) {
+            const ell = "...";
+            @memcpy(buf[n..][0..ell.len], ell);
+            n += ell.len;
+            break;
+        }
+        switch (b) {
+            0x1b => {
+                @memcpy(buf[n..][0..2], "\\e");
+                n += 2;
+            },
+            '\r' => {
+                @memcpy(buf[n..][0..2], "\\r");
+                n += 2;
+            },
+            '\n' => {
+                @memcpy(buf[n..][0..2], "\\n");
+                n += 2;
+            },
+            0x20...0x7e => {
+                buf[n] = b;
+                n += 1;
+            },
+            else => {
+                _ = std.fmt.bufPrint(buf[n..][0..4], "\\x{x:0>2}", .{b}) catch break;
+                n += 4;
+            },
+        }
+    }
+    return buf[0..n];
+}
+
 pub const SurfaceId = u64;
 pub const PtyId = u64;
 
@@ -80,6 +120,8 @@ pub const PtyIo = struct {
 pub const SurfaceRuntime = struct {
     allocator: std.mem.Allocator,
     links: std.ArrayList(Link) = .empty,
+    // host가 켜면 PTY 출력의 제어 시퀀스를 진단 로깅한다(MARU_DEBUG 드래그 분석용). 기본 off.
+    debug_input: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) SurfaceRuntime {
         return .{ .allocator = allocator };
@@ -146,6 +188,12 @@ pub const SurfaceRuntime = struct {
                 // escape parsing과 UTF-8 tail buffering은 terminal layer 책임이다.
                 const link = self.linkByPty(output.pty_id) orelse return error.UnknownPty;
                 if (link.surface.process_state == .exited) return error.ProcessExited;
+                // 진단: ESC를 포함한 출력 청크의 제어 시퀀스를 찍는다(zsh가 SIGWINCH 때 보내는
+                // 커서 이동/clear/CPR 질의를 보기 위함). MARU_DEBUG에서만.
+                if (self.debug_input and std.mem.indexOfScalar(u8, output.bytes, 0x1b) != null) {
+                    var ebuf: [320]u8 = undefined;
+                    input_diag.info("pty->core {d}B: {s}", .{ output.bytes.len, escapeForLog(output.bytes, &ebuf) });
+                }
                 link.surface.core.write(output.bytes) catch return error.InvalidOutput;
                 link.surface.process_state = .running;
                 // 터미널이 만든 응답(CPR 커서 위치 보고 등 query 답)을 PTY로 되쓴다 — 프로그램이
@@ -153,6 +201,10 @@ pub const SurfaceRuntime = struct {
                 // redraw가 어긋나 프롬프트가 중복된다. best-effort(실패해도 출력 적용은 유지).
                 const reply = link.surface.core.pendingResponse();
                 if (reply.len > 0) {
+                    if (self.debug_input) {
+                        var rbuf: [64]u8 = undefined;
+                        input_diag.info("core->pty reply: {s}", .{escapeForLog(reply, &rbuf)});
+                    }
                     link.pty_io.writeInput(reply) catch {};
                     link.surface.core.clearResponse();
                 }

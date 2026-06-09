@@ -457,7 +457,8 @@ pub fn buildSmokeFixtureFromRenderFrame(
     // renderer가 이미 준비한 RenderFrame이다. 이 helper는 RenderFrame의 backend-neutral
     // 결과를 native smoke ABI용 DTO로만 투영한다. frame ownership은 caller에게 남겨,
     // 실제 app loop가 FrameLoopTick을 유지한 채 같은 투영 경계를 재사용할 수 있게 한다.
-    const native_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame);
+    // visible smoke는 흰색 glyph coverage를 그대로 검증하므로 전경색은 흰색으로 둔다.
+    const native_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, .{ .r = 255, .g = 255, .b = 255 });
     errdefer allocator.free(native_cells);
     const native_raster_uploads = try buildNativeRasterUploads(allocator, frame.glyph_raster_frame);
     errdefer allocator.free(native_raster_uploads);

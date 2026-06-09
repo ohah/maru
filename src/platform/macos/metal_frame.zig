@@ -7,6 +7,7 @@ const std = @import("std");
 const maru = @import("maru");
 const renderer = maru.renderer;
 const terminal = maru.terminal;
+const color = maru.color;
 
 pub const NativeMetalCell = extern struct {
     row: u16,
@@ -23,7 +24,20 @@ pub const NativeMetalCell = extern struct {
     v0: f32,
     u1: f32,
     v1: f32,
+    // 전경 색(0x00RRGGBB). renderer가 흰색 glyph coverage에 이 색을 곱해 화면에 칠한다.
+    foreground: u32 = 0,
 };
+
+/// terminal cell의 전경 Color를 화면 RGB로 풀어 0x00RRGGBB로 packing한다. default는 theme
+/// 기본 전경, indexed는 xterm-256 팔레트, rgb는 그대로.
+fn packForeground(style: terminal.Style, default_fg: color.Rgb) u32 {
+    const rgb = switch (style.foreground) {
+        .default => default_fg,
+        .indexed => |index| color.xterm256(index),
+        .rgb => |value| value,
+    };
+    return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+}
 
 pub const NativeMetalRasterUpload = extern struct {
     slot_id: u32,
@@ -40,6 +54,7 @@ pub const NativeMetalRasterUpload = extern struct {
 pub fn buildNativeCellsFromGlyphQuads(
     allocator: std.mem.Allocator,
     frame: renderer.GlyphQuadFrame,
+    default_fg: color.Rgb,
 ) ![]NativeMetalCell {
     var cells: std.ArrayList(NativeMetalCell) = .empty;
     errdefer cells.deinit(allocator);
@@ -63,6 +78,7 @@ pub fn buildNativeCellsFromGlyphQuads(
             .v0 = glyph.uv.v0,
             .u1 = glyph.uv.u1,
             .v1 = glyph.uv.v1,
+            .foreground = packForeground(glyph.run.style, default_fg),
         });
     }
 
@@ -153,8 +169,9 @@ pub const MetalFrameBuffer = struct {
         atlas_config: renderer.GlyphAtlasConfig,
         cell_width_px: u32,
         cell_height_px: u32,
+        default_fg: color.Rgb,
     ) !void {
-        const new_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame);
+        const new_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, default_fg);
         errdefer allocator.free(new_cells);
         const new_uploads = try buildNativeRasterUploads(allocator, frame.glyph_raster_frame);
         errdefer allocator.free(new_uploads);

@@ -4,11 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-// shader의 VertexIn(packed_float2 position + packed_float2 uv)과 같은 16바이트 tight-packed
-// 레이아웃. 셀당 6정점(삼각형 2개)로 quad를 만든다.
+// shader의 VertexIn(packed_float2 position + packed_float2 uv + packed_float3 color)과 같은
+// 28바이트 tight-packed 레이아웃. 셀당 6정점(삼각형 2개)로 quad를 만든다.
 typedef struct {
     float position[2];
     float uv[2];
+    float color[3];
 } MaruRendererVertex;
 
 @interface MaruMetalRendererImpl : NSObject
@@ -201,13 +202,17 @@ bool maru_metal_renderer_draw(
             const float right = (px_right / drawable_w) * 2.0f - 1.0f;
             const float top = 1.0f - (px_top / drawable_h) * 2.0f;
             const float bottom = 1.0f - (px_bottom / drawable_h) * 2.0f;
+            // 전경색(0x00RRGGBB)을 0..1 float로 푼다. shader가 흰색 glyph coverage에 곱한다.
+            const float fr = (float)((cell.foreground >> 16) & 0xff) / 255.0f;
+            const float fg = (float)((cell.foreground >> 8) & 0xff) / 255.0f;
+            const float fb = (float)(cell.foreground & 0xff) / 255.0f;
             const MaruRendererVertex quad[6] = {
-                {{left, top}, {cell.u0, cell.v0}},
-                {{left, bottom}, {cell.u0, cell.v1}},
-                {{right, bottom}, {cell.u1, cell.v1}},
-                {{left, top}, {cell.u0, cell.v0}},
-                {{right, bottom}, {cell.u1, cell.v1}},
-                {{right, top}, {cell.u1, cell.v0}},
+                {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}},
+                {{left, bottom}, {cell.u0, cell.v1}, {fr, fg, fb}},
+                {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}},
+                {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}},
+                {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}},
+                {{right, top}, {cell.u1, cell.v0}, {fr, fg, fb}},
             };
             memcpy(&vertices[i * vertices_per_cell], quad, sizeof(quad));
         }

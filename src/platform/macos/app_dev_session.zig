@@ -36,15 +36,9 @@ fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px:
 
 // 화면 상태 진단 logger. MARU_DEBUG일 때 frame build마다 TerminalCore의 cell 격자(cursor 위치 +
 // 줄별 텍스트/배경)를 찍어, "개행 안 되고 덮어씀" 같은 cursor/scroll 동작을 데이터로 확인한다.
+// MARU_DEBUG 게이트는 diag.zig가 단일 출처로 소유한다.
 const screen_diag = std.log.scoped(.screen);
-var screen_diag_cache: ?bool = null;
-
-fn screenDiagEnabled() bool {
-    if (screen_diag_cache == null) {
-        screen_diag_cache = std.c.getenv("MARU_DEBUG") != null;
-    }
-    return screen_diag_cache.?;
-}
+const diag_gate = @import("diag.zig");
 
 // app_host_abi.zig가 이 파일을 import하므로 EventKind는 여기서 정의하고 거기서 re-export한다
 // (순환 import 회피). FrameSummary.last_event_kind가 이 값을 그대로 싣는다.
@@ -252,7 +246,8 @@ pub const DevSession = struct {
     pub fn resize(self: *DevSession, width_px: u32, height_px: u32, scale_milli: u32) !FrameSummary {
         // resize는 terminal grid와 PTY winsize가 함께 바뀌어야 한다. FrameLoop API를
         // 통해 SurfaceRuntime action으로 내려보내면 Swift가 두 책임을 다시 구현하지 않는다.
-        self.total_resize_events += 1;
+        // total_resize_events는 아래 dedup early-return 뒤(실제 변화가 있는 resize)에서만 센다.
+        // Swift가 콜백마다 backing 픽셀을 보내므로, 같은 size+scale 중복은 카운트에 넣지 않는다.
         // scale_milli를 [250,8000]로 막아 손상된 값에서도 곱이 비정상으로 커지지 않게 한다.
         const next_scale = std.math.clamp(scale_milli, 250, 8000);
         const scale_changed = next_scale != self.scale_milli;
@@ -277,6 +272,8 @@ pub const DevSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.resize);
             return self.last_summary;
         }
+        // dedup을 통과한(실제 size/scale 변화가 있는) resize만 센다.
+        self.total_resize_events += 1;
         // 종료된 세션의 resize도 live surface가 없어 실패한다. 닫히는 창의 late resize는
         // 치명적 오류가 아니므로 무시하고 정상으로 닫는다(key와 같은 정책).
         if (self.ended_seen) {
@@ -297,7 +294,7 @@ pub const DevSession = struct {
     /// 공백으로 보이지만 배경 줄(b...)의 'B'로 영역을 알 수 있어, 파란 배경 줄과 프롬프트 줄이
     /// 같은 row에 겹치는지(개행 안 됨) 다른 row인지 데이터로 구분한다.
     fn logScreenIfDebug(self: *DevSession) void {
-        if (!screenDiagEnabled() or !self.surface_initialized) return;
+        if (!diag_gate.maruDebugEnabled() or !self.surface_initialized) return;
         const core = &self.surfaces[0].core;
         const cols = @min(@as(usize, core.size.cols), 240);
         screen_diag.info("=== screen {d}x{d} cursor=({d},{d}) ===", .{
@@ -351,6 +348,8 @@ pub const DevSession = struct {
         // 비싼 부분(buildDrawList + 전체 grid CoreText shape + atlas/raster 준비)을 통째로
         // 건너뛴다 — 출력 없는 셸이 매 30Hz tick마다 grid를 다시 shape하느라 CPU를 태우거나
         // 머신이 idle/sleep으로 못 들어가게 하지 않는다. generation도 그대로라 재드로우도 생략된다.
+        // 가정: 모든 시각 변화는 PTY output(또는 resize)에서 온다. cursor blink나 주기적 redraw
+        // 같은 PTY와 무관한 변화를 넣게 되면, 그 트리거에서도 metal_dirty를 세워야 한다.
         if (drain_summary.output_events > 0) self.metal_dirty = true;
         if (self.metal_dirty) {
             var tick_result = if (builtin.os.tag == .macos) blk: {

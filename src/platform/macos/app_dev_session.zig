@@ -34,6 +34,24 @@ fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px:
     return terminal.clampGridSize(.{ .cols = @intCast(raw_cols), .rows = @intCast(raw_rows) });
 }
 
+/// 휠/트랙패드 델타(포인트 또는 줄)를 정수 줄 수로 바꾼다. 정밀(트랙패드) 델타는 실제 cell 높이를
+/// scale로 나눈 한 줄 포인트로 환산하고, 1줄 미만 잔여분은 accum에 누적한다 — round로 버리면
+/// 천천히 굴릴 때 무반응이 된다. NaN/∞는 무시하고 누적은 ±1000줄로 clamp한다(trap 방지).
+fn wheelDeltaToLines(accum: *f64, delta_y: f64, precise: bool, cell_height_px: u32, scale_milli: u32) i32 {
+    if (!std.math.isFinite(delta_y)) return 0;
+    var lines_f: f64 = delta_y;
+    if (precise) {
+        const scale: f64 = @as(f64, @floatFromInt(scale_milli)) / 1000.0;
+        const ch_px: f64 = @floatFromInt(if (cell_height_px > 0) cell_height_px else placeholder_cell_height_px);
+        const line_pts: f64 = if (scale > 0) ch_px / scale else ch_px;
+        if (line_pts > 0) lines_f = delta_y / line_pts;
+    }
+    accum.* = std.math.clamp(accum.* + lines_f, -1000.0, 1000.0);
+    const whole: f64 = std.math.trunc(accum.*);
+    accum.* -= whole;
+    return @intFromFloat(whole);
+}
+
 // 화면 상태 진단 logger. MARU_DEBUG일 때 frame build마다 TerminalCore의 cell 격자(cursor 위치 +
 // 줄별 텍스트/배경)를 찍어, "개행 안 되고 덮어씀" 같은 cursor/scroll 동작을 데이터로 확인한다.
 // MARU_DEBUG 게이트는 diag.zig가 단일 출처로 소유한다.
@@ -148,6 +166,8 @@ pub const DevSession = struct {
     // view를 돌려준다. metal_dirty가 true일 때만(첫 frame, 새 output, resize) 재투영한다.
     metal_buffer: metal_frame.MetalFrameBuffer = .{},
     metal_dirty: bool = true,
+    // 트랙패드 정밀 스크롤의 1줄 미만 잔여 델타(줄 단위). scrollWheel이 누적/소비한다.
+    wheel_accum: f64 = 0,
 
     pub fn init(
         self: *DevSession,
@@ -262,20 +282,29 @@ pub const DevSession = struct {
     /// 마우스/트랙패드 휠 스크롤. Swift는 raw NSEvent 값(델타 포인트 + 정밀 델타 여부)만 넘기고,
     /// 줄 수 환산은 여기서 실제 cell 메트릭으로 한다(네이티브 최소화). 정밀(트랙패드) 델타는 포인트
     /// 단위라 한 줄 높이(포인트)로 나눠 줄 수로 바꾸고, 줄 단위(마우스 휠) 델타는 그대로 줄 수다.
+    /// 한 줄 미만의 정밀 델타는 wheel_accum에 누적해 천천히 스크롤해도 줄이 소실되지 않는다.
     /// NaN/∞·거대값은 무시/clamp한다(@intFromFloat trap 방지).
     pub fn scrollWheel(self: *DevSession, delta_y: f64, precise: bool) void {
         if (!self.surface_initialized) return;
-        if (!std.math.isFinite(delta_y)) return;
-        var lines_f: f64 = delta_y;
-        if (precise) {
-            const scale: f64 = @as(f64, @floatFromInt(self.scale_milli)) / 1000.0;
-            const ch_px: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
-            const line_pts: f64 = if (scale > 0) ch_px / scale else ch_px;
-            if (line_pts > 0) lines_f = delta_y / line_pts;
+        const lines = wheelDeltaToLines(&self.wheel_accum, delta_y, precise, self.cell_height_px, self.scale_milli);
+        if (lines == 0) return;
+
+        const core = &self.surfaces[0].core;
+        if (core.alt_active and core.alternate_scroll) {
+            // alternate scroll(xterm DECSET 1007): alt screen에서는 스크롤백이 잠기므로, 스크롤을
+            // 화살표 키로 변환해 프로그램(less/vim)에 보내 자체 스크롤하게 한다(iTerm2/Terminal.app
+            // 기본 동작). DECCKM이면 encodeKey가 자동으로 SS3 형식을 쓴다.
+            const key: terminal.input.Key = if (lines > 0) .arrow_up else .arrow_down;
+            var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+            const bytes = core.encodeKey(.{ .key = key }, &buffer) catch return;
+            var remaining: u32 = @abs(lines);
+            while (remaining > 0) : (remaining -= 1) {
+                // 입력 쓰기 실패(PTY 버퍼 풀 등)는 스크롤 입력 일부 드랍일 뿐이라 무시한다.
+                self.runtime.writeInput(self.surfaces[0].id, .{ .bytes = bytes }) catch break;
+            }
+            return;
         }
-        const clamped = std.math.clamp(@round(lines_f), -1000.0, 1000.0);
-        const lines: i32 = @intFromFloat(clamped);
-        if (lines != 0) self.scroll(lines);
+        self.scroll(lines);
     }
 
     /// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면은 rows-1줄(한 줄 겹침)이고,
@@ -634,4 +663,19 @@ test "gridFromBacking divides backing pixels by cell size with placeholder + cla
     try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(25, 16, 10, 16));
     // cols는 최소 2(TerminalCore가 wide glyph continuation 때문에 요구). 1픽셀/100px cell이라도 2칸.
     try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(1, 1, 100, 100));
+}
+
+test "wheelDeltaToLines accumulates sub-line trackpad deltas instead of dropping them" {
+    var accum: f64 = 0;
+    // cell 34px @2.0x -> 한 줄 17pt. 6pt씩 천천히 굴리면 3번째에 1줄이 나와야 한다(이전엔 전부 0).
+    try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, 6, true, 34, 2000));
+    try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, 6, true, 34, 2000));
+    try std.testing.expectEqual(@as(i32, 1), wheelDeltaToLines(&accum, 6, true, 34, 2000));
+    // 비정밀(휠)은 델타가 곧 줄 수.
+    accum = 0;
+    try std.testing.expectEqual(@as(i32, 3), wheelDeltaToLines(&accum, 3, false, 34, 2000));
+    try std.testing.expectEqual(@as(i32, -2), wheelDeltaToLines(&accum, -2, false, 34, 2000));
+    // NaN/∞는 무시.
+    try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, std.math.nan(f64), true, 34, 2000));
+    try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, std.math.inf(f64), false, 34, 2000));
 }

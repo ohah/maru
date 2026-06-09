@@ -634,3 +634,42 @@ test "validateRequest rejects requests that cannot produce a reliable PTY" {
         validateRequest(.{ .command = "/bin/sh", .env = &.{"NOT_AN_ENV_PAIR"} }),
     );
 }
+
+test "EnvStorage empty env inherits the parent but forces TERM/COLORTERM to Maru's values" {
+    var storage = try EnvStorage.init(std.testing.allocator, &.{});
+    defer storage.deinit();
+
+    var term_count: usize = 0;
+    var colorterm_count: usize = 0;
+    var maru_term = false;
+    var maru_colorterm = false;
+    const envp = storage.envpPtr();
+    var i: usize = 0;
+    while (envp[i]) |entry| : (i += 1) {
+        const slice = std.mem.span(entry);
+        if (std.mem.startsWith(u8, slice, "TERM=")) {
+            term_count += 1;
+            maru_term = std.mem.eql(u8, slice, "TERM=xterm-256color");
+        }
+        if (std.mem.startsWith(u8, slice, "COLORTERM=")) {
+            colorterm_count += 1;
+            maru_colorterm = std.mem.eql(u8, slice, "COLORTERM=truecolor");
+        }
+    }
+    // 부모 TERM/COLORTERM은 제거되고 Maru 값이 정확히 하나씩 있어야 한다(중복 키는 첫 항목이
+    // 이기므로 부모 것이 남으면 override가 안 먹는다).
+    try std.testing.expectEqual(@as(usize, 1), term_count);
+    try std.testing.expectEqual(@as(usize, 1), colorterm_count);
+    try std.testing.expect(maru_term);
+    try std.testing.expect(maru_colorterm);
+    try std.testing.expect(i >= 2); // 부모 env도 물려받았다(최소 PATH 등)
+}
+
+test "EnvStorage explicit env is passed through verbatim (no TERM injection)" {
+    var storage = try EnvStorage.init(std.testing.allocator, &.{ "FOO=bar", "TERM=dumb" });
+    defer storage.deinit();
+    const envp = storage.envpPtr();
+    try std.testing.expectEqualStrings("FOO=bar", std.mem.span(envp[0].?));
+    try std.testing.expectEqualStrings("TERM=dumb", std.mem.span(envp[1].?));
+    try std.testing.expectEqual(@as(?[*:0]const u8, null), envp[2]);
+}

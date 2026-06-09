@@ -679,3 +679,21 @@ test "wheelDeltaToLines accumulates sub-line trackpad deltas instead of dropping
     try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, std.math.nan(f64), true, 34, 2000));
     try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, std.math.inf(f64), false, 34, 2000));
 }
+
+test "scrollPage scrolls one screen (rows-1) per page using the core's authoritative rows" {
+    var session: DevSession = undefined;
+    session.surfaces[0] = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
+    defer session.surfaces[0].deinit();
+    session.surface_initialized = true;
+    session.metal_dirty = false;
+    // 9줄 출력 -> 5행 화면 위로 4줄이 스크롤백에 쌓인다.
+    try session.surfaces[0].core.write("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9");
+    try std.testing.expectEqual(@as(usize, 4), session.surfaces[0].core.scrollbackLen());
+
+    session.scrollPage(1); // 위로 한 화면 = rows-1 = 4줄
+    try std.testing.expectEqual(@as(usize, 4), session.surfaces[0].core.view_offset);
+    try std.testing.expect(session.metal_dirty);
+
+    session.scrollPage(-1); // 아래로 한 화면 -> 바닥
+    try std.testing.expectEqual(@as(usize, 0), session.surfaces[0].core.view_offset);
+}

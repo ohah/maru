@@ -50,6 +50,9 @@ pub const TerminalCore = struct {
     // 프로그램에 보낸다(less/vim이 자체 스크롤). 스크롤백이 잠긴 alt에서 스크롤이 무반응이 되지
     // 않게 하는 표준 장치로, iTerm2/Terminal.app처럼 기본 켠다(프로그램이 ?1007l로 끌 수 있음).
     alternate_scroll: bool = true,
+    // DECTCEM(CSI ?25 h/l): 커서 표시. TUI가 화면을 그리는 동안 커서 깜빡임/잔상을 숨기려고 끈다.
+    // snapshot/renderSnapshot이 내보내는 cursor.visible에 합성된다(내부 self.cursor.visible은 불변).
+    cursor_visible: bool = true,
     saved_cells: []types.Cell = &.{},
     saved_wrapped: []bool = &.{},
     // DECSC/DECRC + 1048/1049가 쓰는 저장 커서(위치+pen+pending_wrap).
@@ -421,6 +424,8 @@ pub const TerminalCore = struct {
             'K' => self.eraseInLine(self.csiRawParam(0)),
             'n' => self.deviceStatusReport(),
             'r' => self.setScrollRegion(),
+            'L' => self.insertLines(self.csiParam(0, 1)),
+            'M' => self.deleteLines(self.csiParam(0, 1)),
             else => {},
         }
     }
@@ -433,6 +438,10 @@ pub const TerminalCore = struct {
         while (i < self.csi_param_count) : (i += 1) {
             switch (self.csiRawParam(i)) {
                 1 => self.application_cursor_keys = set, // DECCKM: 화살표 SS3/CSI 인코딩 전환
+                25 => { // DECTCEM: 커서 표시/숨김. 커서 행만 다시 그리면 된다.
+                    self.cursor_visible = set;
+                    self.markDirty(self.cursor.row);
+                },
                 1007 => self.alternate_scroll = set, // alt screen 휠 -> 화살표 변환 on/off
                 47 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
                 1047 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
@@ -543,6 +552,8 @@ pub const TerminalCore = struct {
             const p = self.csi_params[i];
             switch (p) {
                 0 => self.pen = .{},
+                7 => self.pen.reverse = true,
+                27 => self.pen.reverse = false,
                 1 => self.pen.bold = true,
                 3 => self.pen.italic = true,
                 4 => self.pen.underline = true,
@@ -1030,9 +1041,11 @@ pub const TerminalCore = struct {
     }
 
     pub fn snapshot(self: *const TerminalCore) types.RenderSnapshot {
+        var cursor = self.cursor;
+        cursor.visible = cursor.visible and self.cursor_visible; // DECTCEM(?25l)이면 숨김
         return .{
             .size = self.size,
-            .cursor = self.cursor,
+            .cursor = cursor,
             .cells = self.cells,
             .dirty = self.dirty,
         };
@@ -1341,14 +1354,24 @@ pub const TerminalCore = struct {
     /// 스크롤백에 보관한다 — 화면 위로 나가는 줄만 history다. 부분 region(top>0)의 스크롤아웃은
     /// 버린다(xterm 동작). 기본 region [0, rows-1]이면 전체 화면 스크롤과 같다.
     fn scrollRegionUp(self: *TerminalCore) void {
-        if (self.size.cols == 0 or self.size.rows == 0) return;
-        const top = self.scroll_top;
-        const bottom = self.scroll_bottom;
-        if (bottom <= top or bottom >= self.size.rows) return;
-
         // alt screen의 출력은 history가 아니다(vim 화면이 스크롤백을 오염시키지 않게).
-        if (top == 0 and !self.alt_active) {
-            self.pushScrollback(self.cells[0..self.size.cols], self.wrapped[0]);
+        const push = self.scroll_top == 0 and !self.alt_active;
+        self.scrollRangeUp(self.scroll_top, self.scroll_bottom, push);
+    }
+
+    fn scrollRegionDown(self: *TerminalCore) void {
+        self.scrollRangeDown(self.scroll_top, self.scroll_bottom);
+    }
+
+    /// [top, bottom] 범위를 위로 한 줄 민다(bottom에 빈 줄). push_history면 top 행을 스크롤백에
+    /// 보관한다 — LF 스크롤만 history고, DL(줄 삭제) 같은 편집 연산은 보관하지 않는다(xterm 동작).
+    fn scrollRangeUp(self: *TerminalCore, top: u16, bottom: u16, push_history: bool) void {
+        if (self.size.cols == 0 or self.size.rows == 0) return;
+        // bottom == top(한 줄 범위)도 허용한다 — IL/DL이 region 마지막 행에서 그 행만 비운다.
+        if (bottom < top or bottom >= self.size.rows) return;
+
+        if (push_history) {
+            self.pushScrollback(self.cells[self.index(top, 0)..][0..self.size.cols], self.wrapped[top]);
             // 과거를 보는 중(view_offset>0)이면 같은 내용을 계속 보도록 offset도 올린다(scroll-lock).
             if (self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
         }
@@ -1370,13 +1393,12 @@ pub const TerminalCore = struct {
         self.dirty = fullDirty(self.size);
     }
 
-    /// scroll region [top, bottom]을 아래로 한 줄 민다(top에 빈 줄 삽입). 아래로 밀려나는 bottom
-    /// 줄은 history가 아니므로 버린다(스크롤백에 안 넣는다).
-    fn scrollRegionDown(self: *TerminalCore) void {
+    /// [top, bottom] 범위를 아래로 한 줄 민다(top에 빈 줄 삽입). 아래로 밀려나는 bottom 줄은
+    /// history가 아니므로 버린다(스크롤백에 안 넣는다).
+    fn scrollRangeDown(self: *TerminalCore, top: u16, bottom: u16) void {
         if (self.size.cols == 0 or self.size.rows == 0) return;
-        const top = self.scroll_top;
-        const bottom = self.scroll_bottom;
-        if (bottom <= top or bottom >= self.size.rows) return;
+        // bottom == top(한 줄 범위)도 허용한다(scrollRangeUp과 동일한 이유).
+        if (bottom < top or bottom >= self.size.rows) return;
 
         var row: u16 = bottom;
         while (row > top) : (row -= 1) {
@@ -1393,6 +1415,31 @@ pub const TerminalCore = struct {
         @memset(self.cells[top_start .. top_start + self.size.cols], .{});
         self.wrapped[top] = false;
         self.dirty = fullDirty(self.size);
+    }
+
+    /// IL(CSI Ps L): 커서 행에 빈 줄 n개를 삽입한다. 커서 행~region 하단이 아래로 밀리고 넘치는
+    /// 줄은 버려진다. 커서가 scroll region 밖이면 무시. 후처리로 커서를 행 첫 칸으로 옮긴다(CR —
+    /// xterm/DEC 동작). vim이 줄 열기/삭제를 전체 redraw 없이 하는 핵심 시퀀스.
+    fn insertLines(self: *TerminalCore, count: u16) void {
+        if (self.cursor.row < self.scroll_top or self.cursor.row > self.scroll_bottom) return;
+        const n = @min(count, self.scroll_bottom - self.cursor.row + 1);
+        var i: u16 = 0;
+        while (i < n) : (i += 1) self.scrollRangeDown(self.cursor.row, self.scroll_bottom);
+        self.pending_wrap = false;
+        self.cursor.col = 0;
+        self.last_print = null;
+    }
+
+    /// DL(CSI Ps M): 커서 행부터 n줄을 삭제한다. 아래 줄들이 올라오고 region 하단에 빈 줄이 생긴다.
+    /// 삭제된 줄은 history가 아니다(스크롤백에 안 넣음). 커서가 region 밖이면 무시, 후처리 CR.
+    fn deleteLines(self: *TerminalCore, count: u16) void {
+        if (self.cursor.row < self.scroll_top or self.cursor.row > self.scroll_bottom) return;
+        const n = @min(count, self.scroll_bottom - self.cursor.row + 1);
+        var i: u16 = 0;
+        while (i < n) : (i += 1) self.scrollRangeUp(self.cursor.row, self.scroll_bottom, false);
+        self.pending_wrap = false;
+        self.cursor.col = 0;
+        self.last_print = null;
     }
 
     /// DECSTBM(CSI Pt ; Pb r): scroll region을 설정한다. 1-indexed, 기본 Pt=1·Pb=rows. region 안으로
@@ -2650,4 +2697,69 @@ test "CSI ?1007h/l toggles alternate scroll (default on)" {
     try std.testing.expect(!core.alternate_scroll);
     try core.write("\x1b[?1007h");
     try std.testing.expect(core.alternate_scroll);
+}
+
+test "IL inserts blank lines at the cursor, pushing rows down within the scroll region" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 4 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\nd");
+    try core.write("\x1b[2;1H\x1b[L"); // 커서 행1, IL 1: b/c가 내려가고 d는 밀려나감
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("a \n  \nb \nc ", dump);
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.col); // IL 후 CR
+    try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen()); // 편집 연산은 history 아님
+}
+
+test "DL deletes lines at the cursor, pulling rows up; scroll region confines both" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 4 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\nd");
+    try core.write("\x1b[2;1H\x1b[M"); // DL 1: b 삭제, c/d가 올라오고 바닥 빈 줄
+    {
+        const dump = try core.dumpUtf8(std.testing.allocator);
+        defer std.testing.allocator.free(dump);
+        try std.testing.expectEqualStrings("a \nc \nd \n  ", dump);
+    }
+    try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen());
+
+    // scroll region [1,2]에서 DL: region 밖(행0/3)은 불변, region 하단에만 빈 줄.
+    try core.write("\x1b[1;1Ha\r\nb\r\nc\r\nd"); // 화면 재구성 a/b/c/d... 행0부터 덮어씀
+    try core.write("\x1b[2;3r\x1b[2;1H\x1b[M"); // region 1~2, 커서 행1, DL
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("a \nc \n  \nd ", dump);
+}
+
+test "IL/DL are ignored when the cursor is outside the scroll region" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 4 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\nd");
+    try core.write("\x1b[2;3r"); // region 1~2
+    try core.write("\x1b[4;1H\x1b[L\x1b[M"); // 커서 행3(밖): 둘 다 무시
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("a \nb \nc \nd ", dump);
+}
+
+test "DECTCEM (CSI ?25 l/h) hides and shows the cursor in snapshots" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try std.testing.expect(core.snapshot().cursor.visible);
+    try core.write("\x1b[?25l");
+    try std.testing.expect(!core.snapshot().cursor.visible);
+    try std.testing.expect(!core.renderSnapshot().cursor.visible);
+    try core.write("\x1b[?25h");
+    try std.testing.expect(core.snapshot().cursor.visible);
+}
+
+test "SGR 7/27 set and clear reverse video on the pen (0 resets it too)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    try core.write("\x1b[7mX");
+    try std.testing.expect(core.cells[0].style.reverse);
+    try core.write("\x1b[27mY");
+    try std.testing.expect(!core.cells[1].style.reverse);
+    try core.write("\x1b[7m\x1b[0mZ"); // SGR 0이 reverse도 리셋
+    try std.testing.expect(!core.cells[2].style.reverse);
 }

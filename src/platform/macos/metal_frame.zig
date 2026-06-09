@@ -43,6 +43,9 @@ pub const CursorColors = struct {
 pub const CellColors = struct {
     /// default 전경(theme.foreground). glyph의 .default 색을 이 값으로 푼다.
     default_fg: color.Rgb,
+    /// default 배경(theme.background). SGR reverse가 default 전경/배경을 스왑할 때 실제 색이
+    /// 필요해 받는다(기본 0x101010 — 명시 안 한 smoke도 안전).
+    default_bg: color.Rgb = .{ .r = 0x10, .g = 0x10, .b = 0x10 },
     /// 커서 overlay 투영 색. null이면 커서를 투영하지 않는다 — glyph-atlas 픽셀을 그대로 검증하는
     /// visible smoke는 커서 블록이 readback을 바꾸지 않게 null로 둔다(제품 dev session만 켠다).
     cursor: ?CursorColors = null,
@@ -53,20 +56,27 @@ fn packRgb(rgb: color.Rgb) u32 {
     return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
 }
 
-/// terminal cell의 전경 Color를 화면 RGB로 풀어 0x00RRGGBB로 packing한다. default는 theme
-/// 기본 전경, indexed는 xterm-256 팔레트, rgb는 그대로.
-fn packForeground(style: terminal.Style, default_fg: color.Rgb) u32 {
-    return packRgb(switch (style.foreground) {
-        .default => default_fg,
+fn resolveColor(c: terminal.Color, default_rgb: color.Rgb) color.Rgb {
+    return switch (c) {
+        .default => default_rgb,
         .indexed => |index| color.xterm256(index),
         .rgb => |value| value,
-    });
+    };
+}
+
+/// terminal cell의 전경 Color를 화면 RGB로 풀어 0x00RRGGBB로 packing한다. default는 theme
+/// 기본 전경, indexed는 xterm-256 팔레트, rgb는 그대로. SGR reverse(7)면 배경색을 전경으로 쓴다.
+fn packForeground(style: terminal.Style, colors: CellColors) u32 {
+    if (style.reverse) return packRgb(resolveColor(style.background, colors.default_bg));
+    return packRgb(resolveColor(style.foreground, colors.default_fg));
 }
 
 /// terminal cell의 배경 Color를 0xAARRGGBB로 packing한다. default 배경은 theme 기본 배경
 /// (=clear color)과 같아 따로 칠할 필요가 없으므로 0(A=0, "배경 없음")을 돌려준다. indexed/rgb는
-/// A=0xFF를 세워 셰이더가 cell을 그 색으로 채우게 한다.
-fn packBackground(style: terminal.Style) u32 {
+/// A=0xFF를 세워 셰이더가 cell을 그 색으로 채우게 한다. SGR reverse(7)면 전경색으로 칠한다
+/// (default 전경도 theme 값으로 풀어 실제로 칠한다 — 안 하면 반전이 안 보인다).
+fn packBackground(style: terminal.Style, colors: CellColors) u32 {
+    if (style.reverse) return 0xFF00_0000 | packRgb(resolveColor(style.foreground, colors.default_fg));
     const rgb = switch (style.background) {
         .default => return 0,
         .indexed => |index| color.xterm256(index),
@@ -120,8 +130,8 @@ pub fn buildNativeCellsFromGlyphQuads(
             .v0 = glyph.uv.v0,
             .u1 = glyph.uv.u1,
             .v1 = glyph.uv.v1,
-            .foreground = packForeground(glyph.run.style, colors.default_fg),
-            .background = packBackground(glyph.run.style),
+            .foreground = packForeground(glyph.run.style, colors),
+            .background = packBackground(glyph.run.style, colors),
         });
     }
 
@@ -133,7 +143,7 @@ pub fn buildNativeCellsFromGlyphQuads(
     //    1)이 glyph와 함께 배경을 싣는다).
     for (draw_cells) |cell| {
         if (cell.codepoint != ' ' and cell.codepoint != 0) continue;
-        const background = packBackground(cell.style);
+        const background = packBackground(cell.style, colors);
         if (background == 0) continue;
         cells.appendAssumeCapacity(.{
             .row = cell.row,
@@ -399,10 +409,10 @@ test "background projection emits bg-only cells for non-default-background space
 }
 
 test "background projection packs glyph cell background and leaves default as zero" {
-    try std.testing.expectEqual(@as(u32, 0), packBackground(.{}));
+    try std.testing.expectEqual(@as(u32, 0), packBackground(.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
     var red = terminal.Style{};
     red.background = .{ .rgb = .{ .r = 255, .g = 0, .b = 0 } };
-    try std.testing.expectEqual(@as(u32, 0xFFFF0000), packBackground(red));
+    try std.testing.expectEqual(@as(u32, 0xFFFF0000), packBackground(red, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
 }
 
 test "cursor overlay projects an inverted block reusing the glyph at the cursor cell" {
@@ -667,12 +677,28 @@ test "packRgb, packForeground, and packBackground pack channels in 0xRRGGBB orde
     try std.testing.expectEqual(@as(u32, 0x0A141E), packRgb(.{ .r = 10, .g = 20, .b = 30 }));
 
     // 전경: default는 default_fg, rgb는 그대로, indexed는 xterm256 팔레트.
-    try std.testing.expectEqual(@as(u32, 0xFF8040), packForeground(.{}, .{ .r = 0xFF, .g = 0x80, .b = 0x40 }));
-    try std.testing.expectEqual(@as(u32, 0x0A141E), packForeground(.{ .foreground = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } } }, .{ .r = 0, .g = 0, .b = 0 }));
-    try std.testing.expectEqual(packRgb(color.xterm256(5)), packForeground(.{ .foreground = .{ .indexed = 5 } }, .{ .r = 0, .g = 0, .b = 0 }));
+    try std.testing.expectEqual(@as(u32, 0xFF8040), packForeground(.{}, .{ .default_fg = .{ .r = 0xFF, .g = 0x80, .b = 0x40 } }));
+    try std.testing.expectEqual(@as(u32, 0x0A141E), packForeground(.{ .foreground = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } } }, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }));
+    try std.testing.expectEqual(packRgb(color.xterm256(5)), packForeground(.{ .foreground = .{ .indexed = 5 } }, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }));
 
     // 배경: default는 0(A=0, "배경 없음"), indexed/rgb는 A=0xFF.
-    try std.testing.expectEqual(@as(u32, 0), packBackground(.{}));
-    try std.testing.expectEqual(@as(u32, 0xFF0A141E), packBackground(.{ .background = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } } }));
-    try std.testing.expectEqual(@as(u32, 0xFF00_0000) | packRgb(color.xterm256(5)), packBackground(.{ .background = .{ .indexed = 5 } }));
+    try std.testing.expectEqual(@as(u32, 0), packBackground(.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
+    try std.testing.expectEqual(@as(u32, 0xFF0A141E), packBackground(.{ .background = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } } }, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
+    try std.testing.expectEqual(@as(u32, 0xFF00_0000) | packRgb(color.xterm256(5)), packBackground(.{ .background = .{ .indexed = 5 } }, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
+}
+
+test "SGR reverse swaps foreground and background, resolving defaults to theme colors" {
+    const colors: CellColors = .{
+        .default_fg = .{ .r = 200, .g = 200, .b = 200 },
+        .default_bg = .{ .r = 16, .g = 16, .b = 16 },
+    };
+    var rev = terminal.Style{ .reverse = true };
+    // default끼리 반전: 전경=theme 배경, 배경=theme 전경(A=0xFF로 실제 칠함 — 아니면 반전이 안 보임).
+    try std.testing.expectEqual(@as(u32, 0x101010), packForeground(rev, colors));
+    try std.testing.expectEqual(@as(u32, 0xFFC8C8C8), packBackground(rev, colors));
+    // 명시 색 반전: fg<->bg 스왑.
+    rev.foreground = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } };
+    rev.background = .{ .rgb = .{ .r = 9, .g = 8, .b = 7 } };
+    try std.testing.expectEqual(@as(u32, 0x090807), packForeground(rev, colors));
+    try std.testing.expectEqual(@as(u32, 0xFF010203), packBackground(rev, colors));
 }

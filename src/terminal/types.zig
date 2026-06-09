@@ -63,6 +63,19 @@ pub const RowCodepoints = struct {
     }
 };
 
+/// 선택의 한 끝점. row는 "절대 행"(스크롤백 0..sb_count-1, 이어서 활성 화면 행) — 스크롤해도
+/// 선택이 내용을 따라가게 하는 좌표계다.
+pub const SelectionPoint = struct {
+    row: usize,
+    col: u16,
+};
+
+/// 뷰포트 좌표로 클립된 선택 범위(렌더용). [start, end]는 선형(행 단위 이어짐) 포함 범위다.
+pub const SelectionSpan = struct {
+    start: struct { row: u16, col: u16 },
+    end: struct { row: u16, col: u16 },
+};
+
 /// DECSCUSR(CSI Ps SP q)의 커서 모양. blink 여부는 별도 플래그로 추적한다.
 pub const CursorShape = enum { block, underline, bar };
 

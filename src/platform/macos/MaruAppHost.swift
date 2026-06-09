@@ -68,6 +68,20 @@ final class MaruMetalTerminalView: NSView {
     override func scrollWheel(with event: NSEvent) {
         controller?.handleScroll(event)
     }
+
+    // 마우스 선택: raw 좌표만 backing 픽셀(좌상단 원점)로 바꿔 Zig에 넘긴다 — 셀 변환·선택 모델은
+    // Zig가 소유한다(네이티브 최소화). NSView 좌표는 좌하단 원점이라 y를 뒤집는다.
+    override func mouseDown(with event: NSEvent) {
+        controller?.handleMouse(event, kind: 1, in: self)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        controller?.handleMouse(event, kind: 2, in: self)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        controller?.handleMouse(event, kind: 3, in: self)
+    }
 }
 
 @main
@@ -447,6 +461,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func handleKeyDown(_ event: NSEvent) {
+        // Cmd+C는 선택 텍스트 복사(클립보드는 OS 소유라 여기서 처리). 선택 추출은 Zig가 한다.
+        if event.modifierFlags.contains(.command),
+           event.charactersIgnoringModifiers?.lowercased() == "c" {
+            copySelectionToPasteboard()
+            return
+        }
         // Shift+PageUp/Down는 PTY로 보내지 않고 스크롤백 뷰포트를 한 화면씩 스크롤한다. page 크기
         // (rows-1) 계산은 권위 있는 rows를 가진 Zig가 하고, 여기선 방향(위 +1 / 아래 -1)만 넘긴다.
         if event.modifierFlags.contains(.shift), let session = devSession {
@@ -478,6 +498,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             event.hasPreciseScrollingDeltas ? 1 : 0
         )
         markMetalNeedsRedraw()
+    }
+
+    // 마우스 좌표를 backing 픽셀(좌상단 원점)로 환산해 Zig 선택 모델에 넘긴다(kind 1=down/2=drag/3=up).
+    func handleMouse(_ event: NSEvent, kind: Int32, in view: NSView) {
+        guard let session = devSession else { return }
+        let local = view.convert(event.locationInWindow, from: nil)
+        let scale = window?.backingScaleFactor ?? 1.0
+        let xPx = Double(local.x * scale)
+        let yPx = Double((view.bounds.height - local.y) * scale) // NSView는 좌하단 원점 — 위가 0이 되게 뒤집는다
+        _ = maru_macos_app_dev_session_mouse(session, kind, xPx, yPx)
+        markMetalNeedsRedraw()
+    }
+
+    // Cmd+C: Zig가 추출한 선택 텍스트(UTF-8, Zig 소유 버퍼)를 NSPasteboard에 쓴다 — 클립보드는
+    // OS API라 Swift가 소유하는 경계다. 선택이 없으면 아무것도 하지 않는다(셸에 ^C를 보내지 않는
+    // 것은 macOS 터미널 관례와 동일 — 인터럽트는 Ctrl+C).
+    private func copySelectionToPasteboard() {
+        guard let session = devSession else { return }
+        var ptr: UnsafePointer<UInt8>? = nil
+        var len: size_t = 0
+        guard maru_macos_app_dev_session_copy_text(session, &ptr, &len) == Self.statusOK,
+              let bytes = ptr, len > 0 else { return }
+        let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     private func sendSmokeDevEvents() {

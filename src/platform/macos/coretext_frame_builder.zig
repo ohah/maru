@@ -33,7 +33,9 @@ pub const CoreTextFrameBuilder = struct {
         // builder가 active TerminalCore snapshot을 DrawList -> CoreText GlyphRunList ->
         // RenderFrame으로 바꾸는 제품 후보 조립 책임을 맡는다.
         const active = app_window.active() orelse return error.NoActiveSurface;
-        var draw_list = try renderer.buildDrawList(allocator, active.core.snapshot());
+        // renderSnapshot: 위로 스크롤한 상태면 뷰포트 윈도(스크롤백+활성)를 합성해 그린다. 바닥이면
+        // snapshot()과 동일(합성 없음).
+        var draw_list = try renderer.buildDrawList(allocator, active.core.renderSnapshot());
         var draw_list_owned = true;
         errdefer if (draw_list_owned) draw_list.deinit(allocator);
 

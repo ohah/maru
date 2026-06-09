@@ -392,10 +392,24 @@ const EnvStorage = struct {
         while (environ[index]) |entry| : (index += 1) {
             const slice = std.mem.span(entry);
             if (std.mem.startsWith(u8, slice, "TERM=") or std.mem.startsWith(u8, slice, "COLORTERM=")) continue;
-            try entries.append(allocator, try allocator.dupeZ(u8, slice));
+            // dupe를 지역 변수로 받아 append 실패(OOM) 시에도 고아가 되지 않게 한다 — errdefer는
+            // entries.items만 해제하므로 append 인자 안에서 dupe하면 그 문자열이 샌다.
+            const owned = try allocator.dupeZ(u8, slice);
+            entries.append(allocator, owned) catch |err| {
+                allocator.free(owned);
+                return err;
+            };
         }
-        try entries.append(allocator, try allocator.dupeZ(u8, "TERM=xterm-256color"));
-        try entries.append(allocator, try allocator.dupeZ(u8, "COLORTERM=truecolor"));
+        const term_owned = try allocator.dupeZ(u8, "TERM=xterm-256color");
+        entries.append(allocator, term_owned) catch |err| {
+            allocator.free(term_owned);
+            return err;
+        };
+        const colorterm_owned = try allocator.dupeZ(u8, "COLORTERM=truecolor");
+        entries.append(allocator, colorterm_owned) catch |err| {
+            allocator.free(colorterm_owned);
+            return err;
+        };
 
         const strings = try entries.toOwnedSlice(allocator);
         errdefer {

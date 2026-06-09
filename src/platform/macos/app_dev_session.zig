@@ -286,21 +286,39 @@ pub const DevSession = struct {
     /// NaN/∞·거대값은 무시/clamp한다(@intFromFloat trap 방지).
     pub fn scrollWheel(self: *DevSession, delta_y: f64, precise: bool) void {
         if (!self.surface_initialized) return;
+        // 방향이 뒤집히면 1줄 미만 잔여를 버린다 — 이전 방향의 residue가 첫 반대 틱을 상쇄해
+        // 방향 전환이 굼뜨게 느껴지는 것 방지(iTerm2/xterm.js 동작).
+        if (std.math.isFinite(delta_y) and delta_y * self.wheel_accum < 0) self.wheel_accum = 0;
         const lines = wheelDeltaToLines(&self.wheel_accum, delta_y, precise, self.cell_height_px, self.scale_milli);
-        if (lines == 0) return;
+        self.scrollLines(lines);
+    }
 
+    /// 줄 수만큼 스크롤한다. alt screen + alternate scroll(DECSET 1007)이면 화살표 키로 변환해
+    /// 프로그램(less/vim)에 보낸다(iTerm2/Terminal.app 동작, DECCKM이면 SS3 형식). 휠과
+    /// Shift+PageUp/Down이 같은 경로를 타 일관되게 동작한다.
+    fn scrollLines(self: *DevSession, lines: i32) void {
+        if (lines == 0) return;
         const core = &self.surfaces[0].core;
         if (core.alt_active and core.alternate_scroll) {
-            // alternate scroll(xterm DECSET 1007): alt screen에서는 스크롤백이 잠기므로, 스크롤을
-            // 화살표 키로 변환해 프로그램(less/vim)에 보내 자체 스크롤하게 한다(iTerm2/Terminal.app
-            // 기본 동작). DECCKM이면 encodeKey가 자동으로 SS3 형식을 쓴다.
             const key: terminal.input.Key = if (lines > 0) .arrow_up else .arrow_down;
-            var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
-            const bytes = core.encodeKey(.{ .key = key }, &buffer) catch return;
+            var key_buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+            const bytes = core.encodeKey(.{ .key = key }, &key_buffer) catch return;
+            // 시퀀스를 한 버퍼에 반복해 묶어 보낸다 — 줄마다 writeInput(쓰기 시스콜)을 하면 빠른
+            // 플릭에서 초당 수백 회가 되고, PTY 버퍼가 차면 나머지가 통째로 드랍된다.
+            var batch: [512]u8 = undefined;
+            const per_batch = batch.len / bytes.len;
             var remaining: u32 = @abs(lines);
-            while (remaining > 0) : (remaining -= 1) {
-                // 입력 쓰기 실패(PTY 버퍼 풀 등)는 스크롤 입력 일부 드랍일 뿐이라 무시한다.
-                self.runtime.writeInput(self.surfaces[0].id, .{ .bytes = bytes }) catch break;
+            while (remaining > 0) {
+                const count = @min(remaining, @as(u32, @intCast(per_batch)));
+                var len: usize = 0;
+                var i: u32 = 0;
+                while (i < count) : (i += 1) {
+                    @memcpy(batch[len..][0..bytes.len], bytes);
+                    len += bytes.len;
+                }
+                // 쓰기 실패(PTY 버퍼 풀 등)는 남은 스크롤 입력 드랍일 뿐이라 중단한다.
+                self.runtime.writeInput(self.surfaces[0].id, .{ .bytes = batch[0..len] }) catch break;
+                remaining -= count;
             }
             return;
         }
@@ -309,11 +327,12 @@ pub const DevSession = struct {
 
     /// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면은 rows-1줄(한 줄 겹침)이고,
     /// rows는 dev session이 권위 있게 알고 있어 Swift가 stale 값으로 계산하지 않게 여기서 구한다.
+    /// alt screen에서는 휠과 동일하게 화살표 변환으로 폴백한다(이전엔 완전 무반응이었다).
     pub fn scrollPage(self: *DevSession, delta_pages: i32) void {
         if (!self.surface_initialized) return;
         const rows = self.surfaces[0].core.size.rows;
         const page: i32 = @max(@as(i32, 1), @as(i32, rows) - 1);
-        self.scroll(delta_pages *| page);
+        self.scrollLines(delta_pages *| page);
     }
 
     pub fn resize(self: *DevSession, width_px: u32, height_px: u32, scale_milli: u32) !FrameSummary {
@@ -698,4 +717,15 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
 
     session.scrollPage(-1); // 아래로 한 화면 -> 바닥
     try std.testing.expectEqual(@as(usize, 0), session.surfaces[0].core.view_offset);
+}
+
+test "wheelDeltaToLines drops sub-line residue when the scroll direction flips" {
+    var accum: f64 = 0;
+    // 위로 0.9줄 잔여를 만든다(6pt×2 @ 17pt/줄 — 아래 scrollWheel의 방향 리셋과 짝).
+    _ = wheelDeltaToLines(&accum, 6, true, 34, 2000);
+    _ = wheelDeltaToLines(&accum, 6, true, 34, 2000);
+    try std.testing.expect(accum > 0.5);
+    // 방향 반전 잔여 리셋은 scrollWheel이 수행한다 — 여기선 그 계약(잔여가 반대 틱을 상쇄하면
+    // 첫 반응이 사라짐)을 수치로 고정한다: 리셋 없이 -6pt를 주면 0줄이 나온다(굼뜬 반전).
+    try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, -6, true, 34, 2000));
 }

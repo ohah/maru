@@ -37,6 +37,10 @@ pub const AtlasLookup = struct {
     uploaded: bool,
     upload_bytes: usize = 0,
     evicted: ?AtlasSlot = null,
+    // 이번 배치가 좌표 소진으로 atlas 전체 invalidate를 일으켰다. frame builder는 이걸 보면 같은
+    // frame에서 이미 나눠준 슬롯들이 무효이므로 frame을 처음부터 다시 빌드해야 한다(한 frame에
+    // 두 좌표 세대가 섞이면 앞 글리프들이 덮어쓰인 텍셀을 샘플한다).
+    invalidated: bool = false,
 };
 
 pub const AtlasInvalidation = struct {
@@ -64,6 +68,8 @@ pub const GlyphAtlas = struct {
     stats: AtlasStats = .{},
     next_slot_id: AtlasSlotId = 1,
     generation: u32 = 0,
+    // 직전 makeSlot이 좌표 소진으로 atlas_full invalidate를 일으켰는지(ensureGlyph가 lookup에 실음).
+    place_invalidated: bool = false,
     next_x_px: u32 = 0,
     next_y_px: u32 = 0,
     row_height_px: u32 = 0,
@@ -95,12 +101,14 @@ pub const GlyphAtlas = struct {
         if (self.config.max_slots == 0) {
             // 0-slot atlas는 캐시를 끄는 테스트/진단 모드다. upload 후보는 만들지만
             // 저장하지 않으므로 다음 요청도 miss가 된다.
+            self.place_invalidated = false;
             const uncached = self.makeSlot(glyph);
             self.stats.upload_bytes += uncached.upload_bytes;
             return .{
                 .slot = uncached,
                 .uploaded = true,
                 .upload_bytes = uncached.upload_bytes,
+                .invalidated = self.place_invalidated,
             };
         }
 
@@ -110,6 +118,7 @@ pub const GlyphAtlas = struct {
             self.stats.evictions += 1;
         }
 
+        self.place_invalidated = false;
         const slot = self.makeSlot(glyph);
         try self.entries.append(self.allocator, .{ .slot = slot });
         self.stats.upload_bytes += slot.upload_bytes;
@@ -118,7 +127,9 @@ pub const GlyphAtlas = struct {
             .slot = slot,
             .uploaded = true,
             .upload_bytes = slot.upload_bytes,
-            .evicted = evicted,
+            // invalidate가 일어났으면 evicted는 의미를 잃는다(전부 제거됨) — invalidated가 우선 신호.
+            .evicted = if (self.place_invalidated) null else evicted,
+            .invalidated = self.place_invalidated,
         };
     }
 
@@ -155,11 +166,20 @@ pub const GlyphAtlas = struct {
     }
 
     fn makeSlot(self: *GlyphAtlas, glyph: glyph_layout.GlyphRun) AtlasSlot {
-        const dimensions = estimateGlyphBitmapSize(glyph);
+        var dimensions = estimateGlyphBitmapSize(glyph);
+        // 단일 글리프가 텍스처보다 크면 슬롯을 텍스처 크기로 clamp한다 — 글리프가 잘리지만 UV가
+        // 범위 밖으로 새 화면 전체가 깨지는 것(#213이 고친 버그와 같은 증상)은 막는다.
+        if (dimensions.width_px > self.config.atlas_width_px or dimensions.height_px > self.config.atlas_height_px) {
+            dimensions.width_px = @min(dimensions.width_px, self.config.atlas_width_px);
+            dimensions.height_px = @min(dimensions.height_px, self.config.atlas_height_px);
+            dimensions.upload_bytes = @as(usize, dimensions.width_px) * @as(usize, dimensions.height_px) * 4;
+        }
         const placement = self.placeGlyph(dimensions) orelse blk: {
             // 좌표 소진: atlas 전체를 invalidate(generation++ — 이후 frame의 글리프는 전부 miss로
             // 재배치+재업로드돼 텍스처가 일관되게 다시 채워진다)하고 (0,0)부터 다시 시작한다.
+            // frame builder가 재시작할 수 있도록 신호를 남긴다(ensureGlyph가 lookup에 실음).
             _ = self.invalidate(.atlas_full);
+            self.place_invalidated = true;
             break :blk self.placeGlyph(dimensions) orelse AtlasPlacement{ .x_px = 0, .y_px = 0 };
         };
         const slot: AtlasSlot = .{
@@ -498,4 +518,18 @@ test "glyph atlas invalidation clears slots and records the reason" {
     try std.testing.expect(after.uploaded);
     try std.testing.expectEqual(@as(u32, 1), after.slot.generation);
     try std.testing.expectEqual(@as(usize, 1), atlas.stats.invalidations);
+}
+
+test "a glyph larger than the atlas is clamped into the texture instead of overflowing it" {
+    var atlas = GlyphAtlas.init(std.testing.allocator, .{ .atlas_width_px = 16, .atlas_height_px = 16 });
+    defer atlas.deinit();
+    // 32px 추정 글리프(font 32 × scale 1) — clamp 없이는 slot이 텍스처(16px)를 넘는다.
+    const placed = try atlas.ensureGlyph(glyphForTest('W', .{
+        .font_id = 1,
+        .glyph_id = 'W',
+        .font_size_px = 32,
+        .device_scale = 1,
+    }, .{}));
+    try std.testing.expect(placed.slot.x_px + placed.slot.width_px <= 16);
+    try std.testing.expect(placed.slot.y_px + placed.slot.height_px <= 16);
 }

@@ -66,26 +66,49 @@ pub fn prepareGlyphFrame(
         .replacement_count = glyphs.replacement_count,
     };
 
-    for (glyphs.glyphs, 0..) |glyph, index| {
-        const lookup = try atlas.ensureGlyph(glyph);
-        prepared.appendAssumeCapacity(.{
-            .run = glyph,
-            .slot = lookup.slot,
-        });
-
-        if (lookup.uploaded) {
-            stats.upload_count += 1;
-            stats.upload_bytes += lookup.upload_bytes;
-            if (lookup.evicted != null) stats.evicted_count += 1;
-            uploads.appendAssumeCapacity(.{
-                .glyph_index = index,
+    // atlas 좌표가 frame 중간에 소진되면(lookup.invalidated) 이미 나눠준 슬롯들이 무효가 된다 —
+    // 한 frame에 두 좌표 세대가 섞이면 앞 글리프들이 덮어쓰인 텍셀을 샘플해 화면이 깨진다.
+    // invalidate 직후 atlas는 비어 있으므로 frame을 처음부터 다시 빌드해 모든 글리프가 일관된
+    // 새 좌표를 받게 한다. 재시작은 1회만 — 두 번째 패스에서 또 소진되면(한 frame의 고유 글리프가
+    // 텍스처 용량 자체를 초과) 어쩔 수 없이 진행한다(부분 깨짐, 다음 frame에 회복).
+    var attempt: u8 = 0;
+    build: while (true) {
+        for (glyphs.glyphs, 0..) |glyph, index| {
+            const lookup = try atlas.ensureGlyph(glyph);
+            if (lookup.invalidated and attempt == 0) {
+                attempt = 1;
+                prepared.clearRetainingCapacity();
+                uploads.clearRetainingCapacity();
+                stats.upload_count = 0;
+                stats.upload_bytes = 0;
+                stats.evicted_count = 0;
+                stats.reused_count = 0;
+                // invalidate를 일으킨 글리프의 슬롯은 이미 atlas에 들어가 있다 — 그대로 두면
+                // 재시작 패스에서 hit이 돼 uploads에서 빠지고, Metal 텍스처엔 비트맵이 안 올라가
+                // 그 글리프만 빈 칸이 된다. 한 번 더 비워 재시작 패스가 전부 miss(=업로드)가 되게.
+                _ = atlas.invalidate(.atlas_full);
+                continue :build;
+            }
+            prepared.appendAssumeCapacity(.{
+                .run = glyph,
                 .slot = lookup.slot,
-                .upload_bytes = lookup.upload_bytes,
-                .evicted = lookup.evicted,
             });
-        } else {
-            stats.reused_count += 1;
+
+            if (lookup.uploaded) {
+                stats.upload_count += 1;
+                stats.upload_bytes += lookup.upload_bytes;
+                if (lookup.evicted != null) stats.evicted_count += 1;
+                uploads.appendAssumeCapacity(.{
+                    .glyph_index = index,
+                    .slot = lookup.slot,
+                    .upload_bytes = lookup.upload_bytes,
+                    .evicted = lookup.evicted,
+                });
+            } else {
+                stats.reused_count += 1;
+            }
         }
+        break;
     }
 
     const overlay_copy = try allocator.dupe(draw_list.DrawOverlay, glyphs.overlays);
@@ -255,4 +278,47 @@ test "glyph frame passes through fallback and replacement counts" {
     try std.testing.expect(glyph_runs.replacement_count > 0);
     try std.testing.expectEqual(glyph_runs.fallback_count, frame.stats.fallback_count);
     try std.testing.expectEqual(glyph_runs.replacement_count, frame.stats.replacement_count);
+}
+
+test "glyph frame restarts once when the atlas exhausts mid-build, keeping one coordinate generation" {
+    const allocator = std.testing.allocator;
+    // 14px 글리프가 2×4=8개 들어가는 atlas. 이전 frame이 6칸을 채운 뒤, 8개짜리 새 frame이
+    // 빌드 중간에 좌표를 소진하면 invalidate+재시작으로 8개 전부 한 세대가 돼야 한다.
+    var atlas = glyph_atlas.GlyphAtlas.init(allocator, .{ .atlas_width_px = 28, .atlas_height_px = 56 });
+    defer atlas.deinit();
+
+    var warm = try terminal.TerminalCore.init(allocator, .{ .cols = 6, .rows = 1 });
+    defer warm.deinit();
+    warm.clearDirty();
+    try warm.write("ijklmn"); // atlas를 6/8 채워두는 이전 frame
+    var warm_list = try draw_list.buildDrawList(allocator, warm.snapshot());
+    defer warm_list.deinit(allocator);
+    var warm_runs = try glyph_layout.buildGlyphRunList(allocator, warm_list, .{ .font_size_px = 14, .device_scale = 1 }, glyph_layout.FakeFontBackend{});
+    defer warm_runs.deinit(allocator);
+    var warm_frame = try prepareGlyphFrame(allocator, warm_runs, &atlas);
+    warm_frame.deinit(allocator);
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+    core.clearDirty();
+    try core.write("abcdefgh"); // 고유 8개 — 잔여 2칸뿐이라 3번째에서 소진
+    var list = try draw_list.buildDrawList(allocator, core.snapshot());
+    defer list.deinit(allocator);
+    var glyph_runs = try glyph_layout.buildGlyphRunList(allocator, list, .{ .font_size_px = 14, .device_scale = 1 }, glyph_layout.FakeFontBackend{});
+    defer glyph_runs.deinit(allocator);
+
+    var frame = try prepareGlyphFrame(allocator, glyph_runs, &atlas);
+    defer frame.deinit(allocator);
+
+    // 재시작 후 한 세대로 일관: 모든 슬롯이 같은 generation이고 텍스처 범위 안이어야 한다.
+    // (재시작이 없으면 invalidate 이전 슬롯들이 옛 세대/충돌 좌표로 남는다.)
+    try std.testing.expect(atlas.stats.invalidations > 0);
+    const expect_generation = frame.glyphs[frame.glyphs.len - 1].slot.generation;
+    for (frame.glyphs) |g| {
+        try std.testing.expectEqual(expect_generation, g.slot.generation);
+        try std.testing.expect(g.slot.x_px + g.slot.width_px <= 28);
+        try std.testing.expect(g.slot.y_px + g.slot.height_px <= 56);
+    }
+    // 재빌드된 frame의 모든 슬롯은 이번 패스 업로드와 짝이 맞아야 한다(8개 전부 miss→업로드).
+    try std.testing.expectEqual(frame.glyphs.len, frame.uploads.len);
 }

@@ -51,8 +51,9 @@ renderer, storage, platform interop는 VT 명세처럼 하나의 공개 표준�
 | 오라클 | 라이선스 | 받는 법 | 상태 |
 | --- | --- | --- | --- |
 | libvterm | MIT | `brew install libvterm` (또는 배포판 패키지) | ✅ CI 강제(매 푸시/PR) + 로컬 opt-in (`mise run oracle-ext`) |
-| Ghostty `libghostty-vt` | MIT | `git clone --depth 1 https://github.com/ghostty-org/ghostty.git references/ghostty` 후 `mise exec zig@0.15.2 -- zig build -Demit-lib-vt=true` | ✅ 로컬 opt-in만 (`mise run oracle-ghostty`, 무거운 빌드라 CI 제외). golden 화면 비교. reflow 비교 경로(shim `maru_ghostty_dump_resize`)도 준비돼 있으나, reflow가 copy-region으로 되돌려져 현재는 skip — 스크롤백 기반 reflow 재구현 시 재활성화 |
+| Ghostty `libghostty-vt` | MIT | `git clone --depth 1 https://github.com/ghostty-org/ghostty.git references/ghostty` 후 `mise exec zig@0.15.2 -- zig build -Demit-lib-vt=true` | ✅ 로컬 opt-in만 (`mise run oracle-ghostty`, 무거운 빌드라 CI 제외). golden 화면 비교. reflow 비교 경로(shim `maru_ghostty_dump_resize`)도 있으나, Maru가 커서 줄 reflow를 생략(xterm.js식)해 libghostty-vt와 분기하므로 현재 skip — 커서 없는 줄 reflow 검증으로 확장 시 재활성화. Ghostty의 셸 통합(OSC 133 semantic_prompt) reflow 처리도 동작 참고함 |
 | Alacritty `alacritty_terminal` | Apache-2.0 | `tests/oracle/alacritty-dumper`에서 `cargo build --release` (Rust 툴체인) | ✅ CI 강제(매 푸시/PR) + 로컬 opt-in (`mise run oracle-alacritty`) |
+| xterm.js | MIT | `git clone --depth 1 https://github.com/xtermjs/xterm.js.git references/xterm.js` | 📖 동작/코드 레퍼런스(headless oracle 아님). resize reflow에서 **커서가 있는 줄을 건드리지 않는**(`reflowCursorLine=false`) 방식을 참고했다(셸이 SIGWINCH로 그 줄을 다시 그림). 동작 비교만 — 코드 미복사 |
 
 오라클이 **아닌** 것:
 

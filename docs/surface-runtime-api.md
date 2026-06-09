@@ -161,6 +161,7 @@ pub const SurfaceRuntime = struct {
 `resize`:
 
 - `Surface.TerminalCore.resize`와 `PtySession.resize`를 둘 다 요청한다.
+- size를 `terminal.clampGridSize`(최소 cols>=2, rows>=1)로 한 번 clamp해 core grid와 PTY winsize에 같은 값을 보낸다. TerminalCore가 wide glyph continuation 때문에 cols>=2를 요구하므로, 한쪽만 clamp하면 grid와 셸 winsize가 어긋난다.
 - 두 작업을 같은 user action에서 발생한 하나의 runtime event로 trace에 남긴다.
 
 `applyPtyEvent`:

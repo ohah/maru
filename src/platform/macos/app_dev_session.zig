@@ -367,7 +367,15 @@ pub const DevSession = struct {
 
             // Metal view 데이터 투영 실패(OOM 등)는 터미널 코어 동작과 무관하다. 마지막
             // frame을 유지하고 dirty를 남겨 다음 tick에 재시도한다(세션을 죽이지 않는다).
-            if (self.metal_buffer.replace(self.allocator, tick_result.frame.render_frame, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, self.appearance.theme.foreground)) |_| {
+            const cell_colors: metal_frame.CellColors = .{
+                .default_fg = self.appearance.theme.foreground,
+                // 커서는 반전 블록으로 그린다: 칸 배경=theme.cursor, 그 위 glyph=theme.background.
+                .cursor = .{
+                    .block = self.appearance.theme.cursor,
+                    .text = self.appearance.theme.background,
+                },
+            };
+            if (self.metal_buffer.replace(self.allocator, tick_result.frame.render_frame, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, cell_colors)) |_| {
                 self.metal_dirty = false;
             } else |_| {}
 

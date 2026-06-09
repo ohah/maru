@@ -46,9 +46,11 @@ pub const TerminalCore = struct {
     // CSI의 private marker 바이트(0x3c-0x3f: '<','=','>','?'). 0이면 없음. xterm은 marker별로
     // 의미가 다르다 — DECSET/DECRST는 '?' 전용이고 '>'는 DA2/XTVERSION 등 별도 명령이다.
     csi_marker: u8 = 0,
-    // CSI intermediate(0x20-0x2f, 예: DECCARA의 '$')가 있었는지. intermediate가 붙은 시퀀스는
-    // 같은 final이라도 다른 명령이므로(예: `$r`=DECCARA vs `r`=DECSTBM) dispatch하지 않고 소비한다.
-    csi_has_intermediate: bool = false,
+    // CSI intermediate 바이트(0x20-0x2f, 예: DECSCUSR의 ' ', DECCARA의 '$'). 0이면 없음.
+    // intermediate가 붙은 시퀀스는 같은 final이라도 다른 명령이므로 (intermediate, final) 튜플로
+    // dispatch하고, 모르는 조합은 소비한다(VT500 파서 의미). 여러 개면 마지막 것만 기억한다
+    // (실사용 시퀀스는 intermediate 1개).
+    csi_intermediate: u8 = 0,
     csi_overflow: bool = false,
     // deferred autowrap(DECAWM, 기본 켜짐). 마지막 칸을 채운 직후 커서는 그 칸에 머물고 이 플래그가
     // 선다. 다음 printable 글자가 먼저 다음 줄 첫 칸으로 넘어간 뒤 그려진다. 마지막 칸이 그 줄의
@@ -74,6 +76,9 @@ pub const TerminalCore = struct {
     // DECTCEM(CSI ?25 h/l): 커서 표시. TUI가 화면을 그리는 동안 커서 깜빡임/잔상을 숨기려고 끈다.
     // snapshot/renderSnapshot이 내보내는 cursor.visible에 합성된다(내부 self.cursor.visible은 불변).
     cursor_visible: bool = true,
+    // DECSCUSR(CSI Ps SP q): 커서 모양과 깜빡임. vim이 모드별로 bar/block을 전환하는 표준 수단.
+    cursor_shape: types.CursorShape = .block,
+    cursor_blink: bool = true,
     saved_cells: []types.Cell = &.{},
     saved_wrapped: []bool = &.{},
     // DECSC/DECRC + 1048/1049가 쓰는 저장 커서. xterm처럼 화면(primary/alt)마다 별도 슬롯을 둔다 —
@@ -568,7 +573,7 @@ pub const TerminalCore = struct {
         self.csi_param_count = 1;
         self.csi_has_digit = false;
         self.csi_marker = 0;
-        self.csi_has_intermediate = false;
+        self.csi_intermediate = 0;
         self.csi_overflow = false;
     }
 
@@ -607,9 +612,9 @@ pub const TerminalCore = struct {
             ':' => self.csiNextParam(true),
             // private/marker bytes: < = > ? (예: CSI ? 25 h). 어떤 marker였는지 기억한다.
             0x3c...0x3f => self.csi_marker = byte,
-            // intermediate bytes(공백~/): 같은 final이라도 다른 명령이 되므로 표시만 하고 dispatch는
-            // 막는다(아래 dispatchCsi).
-            0x20...0x2f => self.csi_has_intermediate = true,
+            // intermediate bytes(공백~/): 같은 final이라도 다른 명령이 된다 — 바이트를 기억해
+            // (intermediate, final) 튜플로 dispatch한다(아래 dispatchCsi).
+            0x20...0x2f => self.csi_intermediate = byte,
             // final byte: 시퀀스를 dispatch하고 ground로 돌아간다.
             0x40...0x7e => {
                 self.dispatchCsi(byte);
@@ -639,10 +644,18 @@ pub const TerminalCore = struct {
     }
 
     fn dispatchCsi(self: *TerminalCore, final: u8) void {
-        // intermediate가 붙은 시퀀스(예: `CSI ...$r` DECCARA, `CSI Ps SP q` DECSCUSR)는 bare final과
-        // 다른 명령이다 — 잘못 dispatch하지 않도록 소비만 한다(Williams VT500 파서의 (intermediate,
-        // final) 튜플 dispatch에서 미지원 조합 무시에 해당).
-        if (self.csi_has_intermediate) return;
+        // intermediate가 붙은 시퀀스는 bare final과 다른 명령이다 — 아는 (intermediate, final)
+        // 조합만 dispatch하고 나머지는 소비한다(Williams VT500 파서의 튜플 dispatch 의미).
+        if (self.csi_intermediate != 0) {
+            switch (self.csi_intermediate) {
+                ' ' => switch (final) {
+                    'q' => self.setCursorStyle(self.csiRawParam(0)), // DECSCUSR
+                    else => {},
+                },
+                else => {}, // `$r`(DECCARA) 등 미지원 조합은 무시
+            }
+            return;
+        }
         // marker별 처리: '?'는 DEC private mode(DECSET/DECRST), '>'는 secondary DA. 그 외 marker
         // 시퀀스(>m modifyOtherKeys, <u kitty 등)는 소비만 한다 — bare final로 흘리면 SGR 등을
         // 오염시킨다.
@@ -792,6 +805,39 @@ pub const TerminalCore = struct {
         self.last_print = null;
         if (restore_cursor) self.restoreFromSlot(self.saved_cursor_primary);
         self.dirty = fullDirty(self.size);
+    }
+
+    /// DECSCUSR(CSI Ps SP q): 커서 모양/깜빡임. 0|1=깜빡 block, 2=고정 block, 3=깜빡 underline,
+    /// 4=고정 underline, 5=깜빡 bar, 6=고정 bar. 모르는 값은 무시한다. vim이 모드 전환마다 보낸다.
+    fn setCursorStyle(self: *TerminalCore, param: u16) void {
+        switch (param) {
+            0, 1 => {
+                self.cursor_shape = .block;
+                self.cursor_blink = true;
+            },
+            2 => {
+                self.cursor_shape = .block;
+                self.cursor_blink = false;
+            },
+            3 => {
+                self.cursor_shape = .underline;
+                self.cursor_blink = true;
+            },
+            4 => {
+                self.cursor_shape = .underline;
+                self.cursor_blink = false;
+            },
+            5 => {
+                self.cursor_shape = .bar;
+                self.cursor_blink = true;
+            },
+            6 => {
+                self.cursor_shape = .bar;
+                self.cursor_blink = false;
+            },
+            else => return,
+        }
+        self.markDirty(self.cursor.row); // 모양이 바뀐 커서 칸을 다시 그린다
     }
 
     /// DSR(CSI Ps n): 호스트의 상태 질의에 응답한다. 응답은 response 버퍼에 쌓이고 app이 PTY로 되쓴다.
@@ -1357,6 +1403,8 @@ pub const TerminalCore = struct {
         return .{
             .size = self.size,
             .cursor = cursor,
+            .cursor_shape = self.cursor_shape,
+            .cursor_blink = self.cursor_blink,
             .cells = self.cells,
             .dirty = self.dirty,
         };
@@ -3354,4 +3402,22 @@ test "resize overflow pushed to scrollback keeps the scrolled view in place (scr
     try core.resize(4, 2); // 행 수 축소: 화면 위쪽이 스크롤백으로 밀린다(overflow push)
     // 보던 행(aa)이 여전히 뷰 최상단이어야 한다 — push마다 offset이 같이 올라갔어야(scroll-lock).
     try std.testing.expectEqual(@as(u21, 'a'), core.viewportRow(0)[0].codepoint);
+}
+
+test "DECSCUSR (CSI Ps SP q) sets the cursor shape and blink" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try std.testing.expectEqual(types.CursorShape.block, core.cursor_shape); // 기본 blink block
+    try std.testing.expect(core.cursor_blink);
+    try core.write("\x1b[5 q"); // 깜빡 bar(vim 삽입 모드가 흔히 씀)
+    try std.testing.expectEqual(types.CursorShape.bar, core.cursor_shape);
+    try std.testing.expect(core.cursor_blink);
+    try core.write("\x1b[4 q"); // 고정 underline
+    try std.testing.expectEqual(types.CursorShape.underline, core.cursor_shape);
+    try std.testing.expect(!core.cursor_blink);
+    try core.write("\x1b[0 q"); // 0 -> 기본(깜빡 block)
+    try std.testing.expectEqual(types.CursorShape.block, core.cursor_shape);
+    try std.testing.expect(core.snapshot().cursor_shape == .block);
+    try core.write("\x1b[9 q"); // 모르는 값은 무시
+    try std.testing.expectEqual(types.CursorShape.block, core.cursor_shape);
 }

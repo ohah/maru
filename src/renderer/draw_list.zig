@@ -14,6 +14,8 @@ pub const CursorOverlay = struct {
     row: u16,
     col: u16,
     visible: bool = true,
+    // DECSCUSR 모양. 렌더러가 block(반전)/underline(하단 바)/bar(좌측 세로 바)로 투영한다.
+    shape: terminal.CursorShape = .block,
 };
 
 pub const UnderlineOverlay = struct {
@@ -117,6 +119,7 @@ pub fn buildDrawList(
                 .row = snapshot.cursor.row,
                 .col = snapshot.cursor.col,
                 .visible = snapshot.cursor.visible,
+                .shape = snapshot.cursor_shape,
             } });
         }
     }

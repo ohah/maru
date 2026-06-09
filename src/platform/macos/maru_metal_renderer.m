@@ -208,10 +208,19 @@ bool maru_metal_renderer_draw(
         for (size_t i = 0; i < cell_count; i++) {
             const MaruAppHostDevMetalCell cell = cells[i];
             const float span = (float)(cell.width == 0 ? 1 : cell.width);
-            const float px_left = (float)cell.col * cw;
-            const float px_right = px_left + cw * span;
-            const float px_top = (float)cell.row * ch;
-            const float px_bottom = px_top + ch;
+            float px_left = (float)cell.col * cw;
+            float px_right = px_left + cw * span;
+            float px_top = (float)cell.row * ch;
+            float px_bottom = px_top + ch;
+            // 커서 모양(DECSCUSR): reserved 2=underline(하단 ~15%), 3=bar(좌측 ~15%, 최소 2px).
+            // block(0)은 전체 cell. 부분 사각형은 글리프를 가리지 않아 반전이 필요 없다.
+            if (cell.reserved == 2) {
+                const float thickness = fmaxf(2.0f, ch * 0.15f);
+                px_top = px_bottom - thickness;
+            } else if (cell.reserved == 3) {
+                const float thickness = fmaxf(2.0f, cw * 0.15f);
+                px_right = px_left + thickness;
+            }
             const float left = (px_left / drawable_w) * 2.0f - 1.0f;
             const float right = (px_right / drawable_w) * 2.0f - 1.0f;
             const float top = 1.0f - (px_top / drawable_h) * 2.0f;

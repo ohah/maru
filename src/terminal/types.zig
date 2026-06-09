@@ -63,6 +63,9 @@ pub const RowCodepoints = struct {
     }
 };
 
+/// DECSCUSR(CSI Ps SP q)의 커서 모양. blink 여부는 별도 플래그로 추적한다.
+pub const CursorShape = enum { block, underline, bar };
+
 pub const Cursor = struct {
     row: u16 = 0,
     col: u16 = 0,
@@ -77,6 +80,10 @@ pub const DirtyRegion = struct {
 pub const RenderSnapshot = struct {
     size: Size,
     cursor: Cursor = .{},
+    // DECSCUSR가 정한 커서 모양/깜빡임. 렌더러가 block(반전)/underline(하단 바)/bar(좌측 바)로
+    // 투영한다. blink는 추적만 하고 깜빡임 타이머는 아직 렌더하지 않는다.
+    cursor_shape: CursorShape = .block,
+    cursor_blink: bool = true,
     cells: []const Cell = &.{},
     dirty: ?DirtyRegion = null,
 };

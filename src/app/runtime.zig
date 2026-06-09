@@ -148,6 +148,14 @@ pub const SurfaceRuntime = struct {
                 if (link.surface.process_state == .exited) return error.ProcessExited;
                 link.surface.core.write(output.bytes) catch return error.InvalidOutput;
                 link.surface.process_state = .running;
+                // 터미널이 만든 응답(CPR 커서 위치 보고 등 query 답)을 PTY로 되쓴다 — 프로그램이
+                // 입력처럼 읽는다. zsh는 SIGWINCH redraw 때 CSI 6n으로 커서를 묻고, 응답이 없으면
+                // redraw가 어긋나 프롬프트가 중복된다. best-effort(실패해도 출력 적용은 유지).
+                const reply = link.surface.core.pendingResponse();
+                if (reply.len > 0) {
+                    link.pty_io.writeInput(reply) catch {};
+                    link.surface.core.clearResponse();
+                }
             },
             .exited => |exited| {
                 const link = self.linkByPty(exited.pty_id) orelse return error.UnknownPty;

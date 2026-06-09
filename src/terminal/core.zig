@@ -67,6 +67,10 @@ pub const TerminalCore = struct {
     // alloc churn을 없애야 한다(되돌린 구현이 ArrayList realloc으로 예산을 깼다).
     reflow_cells: []types.Cell = &.{},
     reflow_wrapped: []bool = &.{},
+    // 터미널이 호스트로 돌려보낼 응답(CPR 커서 위치 보고, DSR 상태 등). write() 중 query를 만나면
+    // 여기에 쌓이고, app 레이어가 매 write 후 drain해 PTY로 되쓴다(프로그램이 입력처럼 읽는다).
+    // zsh 등은 SIGWINCH redraw 때 CSI 6n으로 커서를 묻는데, 응답이 없으면 redraw가 어긋난다.
+    response: std.ArrayList(u8) = .empty,
 
     pub const ParserState = enum { ground, escape, escape_intermediate, csi, osc, osc_escape };
 
@@ -100,6 +104,7 @@ pub const TerminalCore = struct {
         if (self.viewport_cells.len > 0) self.allocator.free(self.viewport_cells);
         if (self.reflow_cells.len > 0) self.allocator.free(self.reflow_cells);
         if (self.reflow_wrapped.len > 0) self.allocator.free(self.reflow_wrapped);
+        self.response.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -369,8 +374,40 @@ pub const TerminalCore = struct {
             'd' => self.cursorToRow(self.csiParam(0, 1)),
             'J' => self.eraseInDisplay(self.csiRawParam(0)),
             'K' => self.eraseInLine(self.csiRawParam(0)),
+            'n' => self.deviceStatusReport(),
             else => {},
         }
+    }
+
+    /// DSR(CSI Ps n): 호스트의 상태 질의에 응답한다. 응답은 response 버퍼에 쌓이고 app이 PTY로 되쓴다.
+    /// 5n=터미널 OK(CSI 0n), 6n=커서 위치 보고(CPR, CSI row;col R, 1-indexed). zsh가 SIGWINCH
+    /// redraw 때 6n으로 커서를 물으므로 응답이 없으면 redraw가 어긋난다(프롬프트 중복 등).
+    fn deviceStatusReport(self: *TerminalCore) void {
+        switch (self.csiRawParam(0)) {
+            5 => self.appendResponse("\x1b[0n"),
+            6 => {
+                var buf: [40]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{
+                    self.cursor.row + 1,
+                    self.cursor.col + 1,
+                }) catch return;
+                self.appendResponse(s);
+            },
+            else => {},
+        }
+    }
+
+    fn appendResponse(self: *TerminalCore, bytes: []const u8) void {
+        self.response.appendSlice(self.allocator, bytes) catch {}; // best-effort(OOM이면 응답 생략)
+    }
+
+    /// 아직 호스트(PTY)로 안 보낸 터미널 응답 바이트. app이 매 write 후 이걸 PTY로 쓰고 clearResponse한다.
+    pub fn pendingResponse(self: *const TerminalCore) []const u8 {
+        return self.response.items;
+    }
+
+    pub fn clearResponse(self: *TerminalCore) void {
+        self.response.clearRetainingCapacity();
     }
 
     fn applySgr(self: *TerminalCore) void {
@@ -2074,4 +2111,29 @@ test "reflow: a hard prompt line never merges into the next across repeated resi
     defer std.testing.allocator.free(dump);
     try std.testing.expect(std.mem.startsWith(u8, dump, "ok")); // 첫 줄은 여전히 프롬프트
     try std.testing.expect(std.mem.indexOf(u8, dump, "okabc") == null); // 프롬프트에 명령이 안 붙음
+}
+
+test "DSR: CSI 6n replies with the cursor position (CPR, 1-indexed)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 5 });
+    defer core.deinit();
+    try core.write("\x1b[3;5H"); // 커서 (2,4) 0-indexed
+    try core.write("\x1b[6n"); // CPR 질의
+    try std.testing.expectEqualStrings("\x1b[3;5R", core.pendingResponse());
+    core.clearResponse();
+    try std.testing.expectEqual(@as(usize, 0), core.pendingResponse().len);
+}
+
+test "DSR: CSI 5n replies terminal-OK" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    try core.write("\x1b[5n");
+    try std.testing.expectEqualStrings("\x1b[0n", core.pendingResponse());
+}
+
+test "DSR: CPR reports the parked-cursor column at the last column" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("abcd"); // 마지막 칸을 채워 parked(pending_wrap), 커서 (0,3)
+    try core.write("\x1b[6n");
+    try std.testing.expectEqualStrings("\x1b[1;4R", core.pendingResponse()); // row1 col4(1-indexed)
 }

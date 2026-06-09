@@ -575,8 +575,10 @@ pub const TerminalCore = struct {
             self.cells[self.index(row, col)] = .{ .style = self.pen };
         }
         self.repairWideGlyphEdges(row, start, end);
-        // 행을 (부분) 지우면 그 논리 줄의 soft-wrap 연속성이 끝난다.
-        self.wrapped[row] = false;
+        // 행의 오른쪽 끝을 지우면(mode 0=커서~끝, mode 2=전체) soft-wrap 연속성이 끊긴다. mode 1
+        // (시작~커서)은 오른쪽 끝이 멀쩡해 줄이 여전히 다음 행으로 이어질 수 있으므로 wrapped를 끄지
+        // 않는다 — 안 그러면 reflow가 한 논리 줄을 둘로 쪼갠다.
+        if (mode != 1) self.wrapped[row] = false;
         self.markDirty(row);
         // 다른 cursor/erase op과 같이 grapheme run을 끝낸다. 안 하면 CSI K 뒤 combining mark가
         // 방금 지운 셀에 붙는다.
@@ -645,6 +647,13 @@ pub const TerminalCore = struct {
         return true;
     }
 
+    /// 폭이 줄어 행 마지막 칸에 wide glyph base(width 2)만 남고 continuation이 잘렸으면 그 base를
+    /// 비운다(한 칸 공간에 2칸 폭 half-glyph가 렌더되는 것 방지). 폭 축소로 내용을 clip하는 모든
+    /// 경로(resize 커서 줄 verbatim, renderSnapshot 스크롤백 합성)가 공유한다.
+    fn clearTruncatedWideBase(row: []types.Cell) void {
+        if (row.len > 0 and row[row.len - 1].width == 2) row[row.len - 1] = .{};
+    }
+
     /// reflow 출력 스크래치를 cap_rows×cols 이상으로 키운다(grow-only, 내용 보존 안 함).
     fn ensureReflowScratch(self: *TerminalCore, cap_rows: usize, cols: u16) !void {
         const need_cells = cap_rows * @as(usize, cols);
@@ -680,8 +689,12 @@ pub const TerminalCore = struct {
                 total_content += if (self.wrapped[r]) old_cols else self.trimmedRowLen(r);
             }
         }
-        // verbatim(커서 줄)+rewrap 혼합이라 상한을 넉넉히 잡는다(2*old_rows + 재배치된 행).
-        const cap_rows: usize = 2 * @as(usize, old_rows) + (total_content + new_cols - 1) / new_cols + 2;
+        // 출력 행 상한. soft-flush마다 행에 들어가는 최소 내용은 new_cols-1(줄 끝에서 wide glyph가
+        // 한 칸을 못 채우고 넘어가는 경우)이므로 재배치 행 수는 total_content/(new_cols-1)로 막힌다.
+        // (이전엔 /new_cols로 나눠 wide glyph의 열 낭비를 과소 계산 → 좁은 폭에서 스크래치 OOB였다.)
+        // 2*old_rows는 verbatim 커서 줄(≤old_rows)+hard-flush 빈 행(≤old_rows)을, +4는 ceil/열린 행/
+        // 방어 flush 여유다. new_cols>=2(clampGridSize)라 new_cols-1>=1.
+        const cap_rows: usize = 2 * @as(usize, old_rows) + total_content / (new_cols - 1) + 4;
         try self.ensureReflowScratch(cap_rows, new_cols);
         const scratch = self.reflow_cells;
         const swrap = self.reflow_wrapped;
@@ -713,10 +726,7 @@ pub const TerminalCore = struct {
                     @memset(scratch[dst0..][0..new_cols], blank);
                     const n = @min(old_cols, new_cols);
                     @memcpy(scratch[dst0..][0..n], self.cells[self.index(r, 0)..][0..n]);
-                    // 폭이 줄어 잘린 wide glyph base를 정리한다(half-glyph가 한 칸에 2칸 폭 렌더 방지).
-                    if (new_cols > 0 and scratch[dst0 + new_cols - 1].width == 2) {
-                        scratch[dst0 + new_cols - 1] = .{};
-                    }
+                    clearTruncatedWideBase(scratch[dst0..][0..new_cols]);
                     swrap[out_rows] = self.wrapped[r];
                     if (r == self.cursor.row) {
                         cursor_out_row = out_rows;
@@ -865,6 +875,9 @@ pub const TerminalCore = struct {
             const n = @min(src.len, cols);
             @memcpy(dst[0..n], src[0..n]);
             if (n < cols) @memset(dst[n..cols], .{});
+            // 스크롤백 행이 현재 폭보다 넓게 저장돼 clip되면 마지막 칸의 wide glyph base가 잘려
+            // half-glyph로 렌더될 수 있다 — resize 경로와 같은 정리를 적용한다.
+            clearTruncatedWideBase(dst);
         }
 
         return .{
@@ -2153,4 +2166,39 @@ test "DSR: CPR reports the parked-cursor column at the last column" {
     try core.write("abcd"); // 마지막 칸을 채워 parked(pending_wrap), 커서 (0,3)
     try core.write("\x1b[6n");
     try std.testing.expectEqualStrings("\x1b[1;4R", core.pendingResponse()); // row1 col4(1-indexed)
+}
+
+test "reflow: many wide glyphs shrunk to a narrow width does not overflow the scratch" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 12 });
+    defer core.deinit();
+    // 비-커서 줄을 wide glyph로 가득 채운다(soft-wrap). 좁은 폭에서 wide glyph는 줄 끝 한 칸을
+    // 낭비하며 wrap돼, 재배치 행 수가 옛 cap_rows(total_content/new_cols) 추정을 초과한다(힙 OOB였음).
+    try core.write("한" ** 80); // 160칸 = 8행의 한(rows 0-7, soft-wrap)
+    try core.write("\r\nx"); // 커서를 짧은 줄(아래)로 옮겨 한 줄이 비-커서가 되게 함
+    try core.resize(3, 12); // 3칸으로 축소: 한 1개/행 -> ~80행 -> 옛 cap 초과(크래시 없어야)
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expect(dump.len > 0); // 크래시 없이 통과 + 내용 보존
+    try std.testing.expect(core.scrollbackLen() > 0 or std.mem.indexOf(u8, dump, "한") != null);
+}
+
+test "eraseInLine mode 1 (erase to cursor) keeps the row's soft-wrap flag" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    try core.write("abcde"); // abcd|e: wrapped[0]=true
+    try std.testing.expect(core.wrapped[0]);
+    try core.write("\x1b[1;2H\x1b[1K"); // CUP (0,1) 후 CSI 1K(시작~커서 지움) — 오른쪽 끝은 멀쩡
+    try std.testing.expect(core.wrapped[0]); // mode 1은 wrap 연속성을 안 끊는다
+}
+
+test "renderSnapshot clears a wide-glyph base truncated by narrowing in a scrollback row" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
+    defer core.deinit();
+    try core.write("ab한c\r\nX\r\nY"); // "ab한c"(한 at cols 2-3)이 scroll돼 스크롤백으로
+    try std.testing.expect(core.scrollbackLen() >= 1);
+    try core.resize(3, 2); // 3칸: 스크롤백 행은 그대로 저장되나, 보일 땐 col 2의 한 base가 잘린다
+    core.scrollViewport(@as(isize, @intCast(core.scrollbackLen()))); // 맨 위로
+    const snap = core.renderSnapshot();
+    // 잘린 한 base(width 2)가 마지막 칸에 남으면 half-glyph가 렌더된다 — 정리됐는지 확인.
+    try std.testing.expect(snap.cells[2].width != 2);
 }

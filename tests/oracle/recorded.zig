@@ -1,6 +1,7 @@
 const std = @import("std");
 const maru = @import("maru");
 const artifacts = @import("test_support");
+const case_manifest = @import("cases.zig");
 
 const RecordedOracle = struct {
     name: []const u8,
@@ -22,30 +23,6 @@ test "recorded terminal oracle snapshots match Maru output" {
     // path deterministic while preserving the shape we need for real oracle
     // runners later.
     const cases = [_]Case{
-        .{
-            .name = "basic_crlf",
-            .size = .{ .cols = 12, .rows = 3 },
-            .input_fixture_path = "tests/fixtures/ansi/basic_crlf.ansi",
-            .oracles = &.{
-                .{
-                    .name = "xterm-compatible",
-                    .source = "recorded expectation for CRLF text placement",
-                    .expected_screen = "tests/golden/screen/xterm/basic_crlf.txt",
-                },
-            },
-        },
-        .{
-            .name = "scroll_crlf",
-            .size = .{ .cols = 8, .rows = 2 },
-            .input_fixture_path = "tests/fixtures/ansi/scroll_crlf.ansi",
-            .oracles = &.{
-                .{
-                    .name = "xterm-compatible",
-                    .source = "recorded expectation for bottom-row line feed scrolling",
-                    .expected_screen = "tests/golden/screen/xterm/scroll_crlf.txt",
-                },
-            },
-        },
         .{
             .name = "split_utf8",
             .size = .{ .cols = 12, .rows = 1 },
@@ -83,58 +60,25 @@ test "recorded terminal oracle snapshots match Maru output" {
                 },
             },
         },
-        .{
-            .name = "scroll_region",
-            .size = .{ .cols = 4, .rows = 4 },
-            .input_fixture_path = "tests/fixtures/ansi/scroll_region.ansi",
-            .oracles = &.{
-                .{
-                    .name = "xterm-compatible",
-                    .source = "recorded expectation for DECSTBM scroll region (region scrolls, outside rows fixed)",
-                    .expected_screen = "tests/golden/screen/xterm/scroll_region.txt",
-                },
-            },
-        },
-        .{
-            .name = "alt_screen",
-            .size = .{ .cols = 8, .rows = 3 },
-            .input_fixture_path = "tests/fixtures/ansi/alt_screen.ansi",
-            .oracles = &.{
-                .{
-                    .name = "xterm-compatible",
-                    .source = "recorded expectation for DECSET 1049 alt screen enter/leave (primary + cursor restored)",
-                    .expected_screen = "tests/golden/screen/xterm/alt_screen.txt",
-                },
-            },
-        },
-        .{
-            .name = "insert_delete_lines",
-            .size = .{ .cols = 4, .rows = 4 },
-            .input_fixture_path = "tests/fixtures/ansi/insert_delete_lines.ansi",
-            .oracles = &.{
-                .{
-                    .name = "xterm-compatible",
-                    .source = "recorded expectation for IL/DL (CSI L/M) line edits",
-                    .expected_screen = "tests/golden/screen/xterm/insert_delete_lines.txt",
-                },
-            },
-        },
-        .{
-            .name = "cursor_save_restore",
-            .size = .{ .cols = 8, .rows = 4 },
-            .input_fixture_path = "tests/fixtures/ansi/cursor_save_restore.ansi",
-            .oracles = &.{
-                .{
-                    .name = "xterm-compatible",
-                    .source = "recorded expectation for DECSC/DECRC around a DECSTBM reset (claude CLI startup)",
-                    .expected_screen = "tests/golden/screen/xterm/cursor_save_restore.txt",
-                },
-            },
-        },
     };
 
     inline for (cases) |case| {
         try compareCase(case);
+    }
+
+    // 공유 매니페스트(cases.zig)의 케이스도 같은 비교를 돈다 — libvterm/Alacritty 오라클과
+    // 동일한 목록을 보장해, 한 파일에만 케이스를 추가해 다른 오라클이 조용히 빠지는 일을 막는다.
+    inline for (case_manifest.cases) |case| {
+        try compareCase(.{
+            .name = case.name,
+            .size = .{ .cols = case.cols, .rows = case.rows },
+            .input_fixture_path = case.input_fixture_path,
+            .oracles = &.{.{
+                .name = "xterm-compatible",
+                .source = "shared oracle manifest (cases.zig)",
+                .expected_screen = case.golden_path,
+            }},
+        });
     }
 }
 

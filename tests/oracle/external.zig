@@ -20,58 +20,9 @@ const c = @cImport({
 // 않으려고 일부러 `check`에 넣지 않는다. libvterm은 `brew install libvterm`
 // (또는 배포판 패키지)으로 설치한다.
 
-const Case = struct {
-    name: []const u8,
-    cols: u16,
-    rows: u16,
-    input_fixture_path: []const u8,
-    golden_path: []const u8,
-};
-
-const cases = [_]Case{
-    .{
-        .name = "basic_crlf",
-        .cols = 12,
-        .rows = 3,
-        .input_fixture_path = "tests/fixtures/ansi/basic_crlf.ansi",
-        .golden_path = "tests/golden/screen/xterm/basic_crlf.txt",
-    },
-    .{
-        .name = "scroll_crlf",
-        .cols = 8,
-        .rows = 2,
-        .input_fixture_path = "tests/fixtures/ansi/scroll_crlf.ansi",
-        .golden_path = "tests/golden/screen/xterm/scroll_crlf.txt",
-    },
-    .{
-        .name = "scroll_region",
-        .cols = 4,
-        .rows = 4,
-        .input_fixture_path = "tests/fixtures/ansi/scroll_region.ansi",
-        .golden_path = "tests/golden/screen/xterm/scroll_region.txt",
-    },
-    .{
-        .name = "alt_screen",
-        .cols = 8,
-        .rows = 3,
-        .input_fixture_path = "tests/fixtures/ansi/alt_screen.ansi",
-        .golden_path = "tests/golden/screen/xterm/alt_screen.txt",
-    },
-    .{
-        .name = "insert_delete_lines",
-        .cols = 4,
-        .rows = 4,
-        .input_fixture_path = "tests/fixtures/ansi/insert_delete_lines.ansi",
-        .golden_path = "tests/golden/screen/xterm/insert_delete_lines.txt",
-    },
-    .{
-        .name = "cursor_save_restore",
-        .cols = 8,
-        .rows = 4,
-        .input_fixture_path = "tests/fixtures/ansi/cursor_save_restore.ansi",
-        .golden_path = "tests/golden/screen/xterm/cursor_save_restore.txt",
-    },
-};
+const case_manifest = @import("cases.zig");
+const Case = case_manifest.Case;
+const cases = case_manifest.cases;
 
 test "committed goldens match a real libvterm reference" {
     inline for (cases) |case| {

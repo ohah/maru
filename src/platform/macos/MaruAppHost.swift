@@ -204,6 +204,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // drawableSize를 창에 맞춰 즉시 갱신한다(setFrameSize 경로에만 의존하지 않는다). 이게
         // 늦으면 CAMetalLayer가 옛 크기 drawable을 새 창에 스케일해 글자가 늘어나 보인다.
         metalTerminalView?.updateDrawableSize()
+        // 라이브 드래그 중에는 grid resize(+PTY SIGWINCH)를 보류한다. 매 단계 SIGWINCH를 보내면
+        // zsh는 상대 커서 이동(\e[A)으로 redraw하는데 reflow를 한 박자씩 못 따라와, 명령이 여러 줄로
+        // 늘어나는 좁은 폭에서 프롬프트가 중복된다. 드래그가 끝나면(windowDidEndLiveResize) 최종
+        // 크기로 한 번만 resize해 zsh가 한 번 redraw하게 한다(단일 resize는 reflow가 Ghostty와 일치).
+        // 비-라이브(프로그램/스모크) resize는 즉시 적용한다.
+        if metalTerminalView?.inLiveResize == true { return }
+        resizeDevSessionFromWindow()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        _ = notification
+        metalTerminalView?.updateDrawableSize()
         resizeDevSessionFromWindow()
     }
 

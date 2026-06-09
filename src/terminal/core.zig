@@ -39,6 +39,16 @@ pub const TerminalCore = struct {
     // 등이 상태줄을 고정하고 본문만 스크롤하는 데 쓴다.
     scroll_top: u16 = 0,
     scroll_bottom: u16 = 0,
+    // alternate screen(DECSET 1049/47/1047). vim·less 같은 TUI가 전체 화면을 쓰고 종료 시 원래
+    // 셸 화면을 복원하는 보조 버퍼다. 활성이면 saved_*에 primary 그리드가 보관돼 있고, alt 출력은
+    // 스크롤백에 쌓이지 않으며 스크롤백 뷰포트도 잠긴다(표준 xterm 동작).
+    alt_active: bool = false,
+    saved_cells: []types.Cell = &.{},
+    saved_wrapped: []bool = &.{},
+    // DECSC/DECRC + 1048/1049가 쓰는 저장 커서(위치+pen+pending_wrap).
+    saved_cursor: types.Cursor = .{},
+    saved_pen: types.Style = .{},
+    saved_pending_wrap: bool = false,
     // 각 CSI 파라미터가 ';'(새 파라미터)가 아니라 ':'(sub-parameter)로 들어왔는지 표시한다.
     // ITU colon 형식 38:2:colorspace:r:g:b는 38;2;r;g;b와 달리 colorspace 컴포넌트가 하나 더
     // 있어, 이 구분 없이는 RGB가 한 칸 밀린다.
@@ -102,6 +112,8 @@ pub const TerminalCore = struct {
     pub fn deinit(self: *TerminalCore) void {
         self.allocator.free(self.cells);
         if (self.wrapped.len > 0) self.allocator.free(self.wrapped);
+        if (self.saved_cells.len > 0) self.allocator.free(self.saved_cells);
+        if (self.saved_wrapped.len > 0) self.allocator.free(self.saved_wrapped);
         for (self.scrollback) |slot| {
             if (slot) |cells| self.allocator.free(cells);
         }
@@ -128,6 +140,8 @@ pub const TerminalCore = struct {
     /// 뷰포트를 delta_up줄만큼 위(과거, 양수)/아래(현재, 음수)로 스크롤한다. [0, sb_count]로 clamp.
     /// 뷰가 바뀌면 화면 전체를 dirty로 표시한다(렌더가 새 윈도를 다시 그리도록).
     pub fn scrollViewport(self: *TerminalCore, delta_up: isize) void {
+        // alt screen에서는 스크롤백 뷰가 잠긴다(xterm 동작) — TUI 화면 위로 history가 겹치지 않게.
+        if (self.alt_active) return;
         const max_off: isize = @intCast(self.sb_count);
         var off: isize = @as(isize, @intCast(self.view_offset)) + delta_up;
         if (off < 0) off = 0;
@@ -377,8 +391,16 @@ pub const TerminalCore = struct {
     }
 
     fn dispatchCsi(self: *TerminalCore, final: u8) void {
-        // private 시퀀스(CSI ? ...: DECSET/DECRST 등)는 A1에서 적용하지 않고 소비만 한다.
-        if (self.csi_private) return;
+        // private 시퀀스(CSI ? ...): DECSET(h)/DECRST(l)의 alternate-screen 계열만 적용하고
+        // 나머지 모드는 소비만 한다.
+        if (self.csi_private) {
+            switch (final) {
+                'h' => self.setPrivateModes(true),
+                'l' => self.setPrivateModes(false),
+                else => {},
+            }
+            return;
+        }
         switch (final) {
             'm' => self.applySgr(),
             'H', 'f' => self.cursorPosition(),
@@ -394,6 +416,84 @@ pub const TerminalCore = struct {
             'r' => self.setScrollRegion(),
             else => {},
         }
+    }
+
+    /// DECSET(h)/DECRST(l)의 alternate-screen 계열 모드를 적용한다. 파라미터가 여러 개면 각각 적용.
+    /// 47=alt 전환만, 1047=alt 전환(+나갈 때 alt clear), 1048=커서 저장/복원만, 1049=1048+1047 결합
+    /// (들어갈 때 커서 저장+alt clear, 나갈 때 커서 복원) — vim/less가 쓰는 표준 조합이다.
+    fn setPrivateModes(self: *TerminalCore, set: bool) void {
+        var i: usize = 0;
+        while (i < self.csi_param_count) : (i += 1) {
+            switch (self.csiRawParam(i)) {
+                47 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
+                1047 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
+                1048 => if (set) self.saveCursorState() else self.restoreCursorState(),
+                1049 => if (set) self.enterAltScreen(true) else self.leaveAltScreen(true),
+                else => {}, // 그 외 private 모드(25 커서 표시 등)는 아직 소비만 한다.
+            }
+        }
+    }
+
+    fn saveCursorState(self: *TerminalCore) void {
+        self.saved_cursor = self.cursor;
+        self.saved_pen = self.pen;
+        self.saved_pending_wrap = self.pending_wrap;
+    }
+
+    fn restoreCursorState(self: *TerminalCore) void {
+        const old_cursor = self.cursor;
+        self.cursor = .{
+            .row = @min(self.saved_cursor.row, self.size.rows - 1),
+            .col = @min(self.saved_cursor.col, self.size.cols - 1),
+        };
+        self.pen = self.saved_pen;
+        self.pending_wrap = self.saved_pending_wrap;
+        self.markCursorMoveDirty(old_cursor, self.cursor);
+        self.last_print = null;
+    }
+
+    /// alt screen으로 전환한다. primary 그리드(cells/wrapped)를 saved_*로 옮기고 빈 alt 버퍼를
+    /// 만든다(1049는 들어가며 clear — TUI가 어차피 전체를 그린다). 할당 실패면 전환하지 않는다
+    /// (primary 유지가 안전). 이미 alt면 무시.
+    fn enterAltScreen(self: *TerminalCore, save_cursor: bool) void {
+        if (self.alt_active) return;
+        if (save_cursor) self.saveCursorState();
+
+        const alt_cells = self.allocator.alloc(types.Cell, cellCount(self.size)) catch return;
+        @memset(alt_cells, .{});
+        const alt_wrapped = self.allocator.alloc(bool, self.size.rows) catch {
+            self.allocator.free(alt_cells);
+            return;
+        };
+        @memset(alt_wrapped, false);
+
+        self.saved_cells = self.cells;
+        self.saved_wrapped = self.wrapped;
+        self.cells = alt_cells;
+        self.wrapped = alt_wrapped;
+        self.alt_active = true;
+        // alt에서 스크롤백 뷰는 잠긴다 — 보고 있던 과거는 닫는다.
+        self.view_offset = 0;
+        self.pending_wrap = false;
+        self.last_print = null;
+        self.dirty = fullDirty(self.size);
+    }
+
+    /// primary screen으로 복귀한다. alt 버퍼를 버리고 saved 그리드를 복원한다. 1049는 커서도
+    /// DECRC로 복원해 vim 종료 시 프롬프트가 원래 자리로 돌아온다. alt가 아니면 무시.
+    fn leaveAltScreen(self: *TerminalCore, restore_cursor: bool) void {
+        if (!self.alt_active) return;
+        self.allocator.free(self.cells);
+        self.allocator.free(self.wrapped);
+        self.cells = self.saved_cells;
+        self.wrapped = self.saved_wrapped;
+        self.saved_cells = &.{};
+        self.saved_wrapped = &.{};
+        self.alt_active = false;
+        self.pending_wrap = false;
+        self.last_print = null;
+        if (restore_cursor) self.restoreCursorState();
+        self.dirty = fullDirty(self.size);
     }
 
     /// DSR(CSI Ps n): 호스트의 상태 질의에 응답한다. 응답은 response 버퍼에 쌓이고 app이 PTY로 되쓴다.
@@ -684,6 +784,28 @@ pub const TerminalCore = struct {
         }
     }
 
+    /// 그리드를 reflow 없이 새 크기로 clip/pad해 복사한다(왼쪽 위 기준, 넘치는 내용은 버림).
+    /// alt screen resize 등 재배치가 의미 없는 경로가 쓴다. 잘린 wide glyph base는 정리한다.
+    fn copyRegionResize(
+        allocator: std.mem.Allocator,
+        src: []const types.Cell,
+        old_rows: u16,
+        old_cols: u16,
+        next_size: types.Size,
+    ) ![]types.Cell {
+        const dst = try allocator.alloc(types.Cell, cellCount(next_size));
+        @memset(dst, .{});
+        const copy_rows = @min(old_rows, next_size.rows);
+        const copy_cols = @min(old_cols, next_size.cols);
+        var r: u16 = 0;
+        while (r < copy_rows) : (r += 1) {
+            const row_dst = dst[@as(usize, r) * next_size.cols ..][0..next_size.cols];
+            @memcpy(row_dst[0..copy_cols], src[@as(usize, r) * old_cols ..][0..copy_cols]);
+            clearTruncatedWideBase(row_dst);
+        }
+        return dst;
+    }
+
     pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
         // grid를 최소 2칸×1행으로 맞춘다(clampGridSize 참고).
         const next_size = clampGridSize(.{ .cols = cols_in, .rows = rows_in });
@@ -691,6 +813,42 @@ pub const TerminalCore = struct {
         const new_rows = next_size.rows;
         const old_rows = self.size.rows;
         const old_cols = self.size.cols;
+
+        // alt screen 중 resize: reflow/스크롤백 없이 두 그리드(활성 alt + 저장된 primary)를 단순
+        // clip/pad한다. TUI는 SIGWINCH로 전체를 다시 그리므로 alt 내용 재배치는 의미가 없고, 저장된
+        // primary는 복귀 시 크기가 맞아야 한다(복귀 후 첫 resize부터 다시 reflow).
+        if (self.alt_active) {
+            const new_alt = try copyRegionResize(self.allocator, self.cells, old_rows, old_cols, next_size);
+            errdefer self.allocator.free(new_alt);
+            const new_saved = try copyRegionResize(self.allocator, self.saved_cells, old_rows, old_cols, next_size);
+            errdefer self.allocator.free(new_saved);
+            const new_wrapped = try self.allocator.alloc(bool, new_rows);
+            errdefer self.allocator.free(new_wrapped);
+            @memset(new_wrapped, false);
+            const new_saved_wrapped = try self.allocator.alloc(bool, new_rows);
+            @memset(new_saved_wrapped, false);
+
+            self.allocator.free(self.cells);
+            self.allocator.free(self.saved_cells);
+            if (self.wrapped.len > 0) self.allocator.free(self.wrapped);
+            if (self.saved_wrapped.len > 0) self.allocator.free(self.saved_wrapped);
+            self.cells = new_alt;
+            self.saved_cells = new_saved;
+            self.wrapped = new_wrapped;
+            self.saved_wrapped = new_saved_wrapped;
+            self.size = next_size;
+            self.scroll_top = 0;
+            self.scroll_bottom = new_rows - 1;
+            self.cursor.row = @min(self.cursor.row, new_rows - 1);
+            self.cursor.col = @min(self.cursor.col, new_cols - 1);
+            self.saved_cursor.row = @min(self.saved_cursor.row, new_rows - 1);
+            self.saved_cursor.col = @min(self.saved_cursor.col, new_cols - 1);
+            self.pending_wrap = false;
+            self.last_print = null;
+            self.parser = .ground;
+            self.dirty = fullDirty(next_size);
+            return;
+        }
 
         // reflow: soft-wrap 플래그(wrapped)로 연속 줄(논리 줄)을 합쳐 새 폭에 다시 wrap한다. 활성
         // 화면만 reflow하고(스크롤백 행은 그대로 둔다 — O(스크롤백)을 피해 perf 예산 보호), 넘치는
@@ -1174,7 +1332,8 @@ pub const TerminalCore = struct {
         const bottom = self.scroll_bottom;
         if (bottom <= top or bottom >= self.size.rows) return;
 
-        if (top == 0) {
+        // alt screen의 출력은 history가 아니다(vim 화면이 스크롤백을 오염시키지 않게).
+        if (top == 0 and !self.alt_active) {
             self.pushScrollback(self.cells[0..self.size.cols], self.wrapped[0]);
             // 과거를 보는 중(view_offset>0)이면 같은 내용을 계속 보도록 offset도 올린다(scroll-lock).
             if (self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
@@ -2345,4 +2504,101 @@ test "resize resets the scroll region to full screen" {
     try core.resize(2, 6);
     try std.testing.expectEqual(@as(u16, 0), core.scroll_top);
     try std.testing.expectEqual(@as(u16, 5), core.scroll_bottom); // 새 rows-1
+}
+
+test "DECSET 1049 switches to a cleared alt screen and restores primary + cursor on exit" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    try core.write("one\r\ntwo");
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 3), core.cursor.col);
+
+    try core.write("\x1b[?1049h"); // alt 진입: 커서 저장 + 빈 화면
+    try std.testing.expect(core.alt_active);
+    {
+        const dump = try core.dumpUtf8(std.testing.allocator);
+        defer std.testing.allocator.free(dump);
+        try std.testing.expectEqualStrings("        \n        \n        ", dump);
+    }
+    try core.write("\x1b[1;1HALT"); // alt에 그리기
+
+    try core.write("\x1b[?1049l"); // 복귀: primary 내용 + 커서 복원
+    try std.testing.expect(!core.alt_active);
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("one     \ntwo     \n        ", dump);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 3), core.cursor.col);
+}
+
+test "alt screen output never reaches the scrollback and the viewport is locked" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc"); // primary에서 한 줄 스크롤 -> 스크롤백 1
+    try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen());
+
+    try core.write("\x1b[?1049h");
+    try core.write("1\r\n2\r\n3\r\n4\r\n5"); // alt에서 여러 줄 스크롤
+    try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen()); // 그대로
+    core.scrollViewport(1); // alt에선 잠김
+    try std.testing.expectEqual(@as(usize, 0), core.view_offset);
+
+    try core.write("\x1b[?1049l");
+    core.scrollViewport(1); // primary 복귀 후엔 다시 동작
+    try std.testing.expectEqual(@as(usize, 1), core.view_offset);
+}
+
+test "DECSET 47 switches screens without saving the cursor" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("hi"); // 커서 (0,2)
+    try core.write("\x1b[?47h\x1b[2;5H"); // alt에서 커서 (1,4)로 이동
+    try core.write("\x1b[?47l"); // 복귀: 1049와 달리 커서 비복원
+    try std.testing.expect(!core.alt_active);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 4), core.cursor.col);
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("hi      \n        ", dump); // primary 내용은 복원
+}
+
+test "DECSET 1048 saves and restores the cursor without switching screens" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("ab\x1b[?1048h"); // (0,2) 저장
+    try core.write("\x1b[2;6H"); // (1,5)로 이동
+    try core.write("\x1b[?1048l"); // 복원
+    try std.testing.expect(!core.alt_active);
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
+}
+
+test "resize while in the alt screen clips both grids and restores a matching primary" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 3 });
+    defer core.deinit();
+    try core.write("hello\r\nworld");
+    try core.write("\x1b[?1049h\x1b[1;1HALTALT");
+    try core.resize(4, 2); // alt 중 축소: 둘 다 clip/pad, 스크롤백 push 없음
+    try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen());
+    {
+        const dump = try core.dumpUtf8(std.testing.allocator);
+        defer std.testing.allocator.free(dump);
+        try std.testing.expectEqualStrings("ALTA\n    ", dump); // alt 잘림
+    }
+    try core.write("\x1b[?1049l"); // 복귀: 잘린 primary
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("hell\nworl", dump);
+}
+
+test "entering the alt screen twice is a no-op (no buffer leak/overwrite)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("ok");
+    try core.write("\x1b[?1049h\x1b[?47h"); // 두 번째 enter는 무시
+    try std.testing.expect(core.alt_active);
+    try core.write("\x1b[?1049l");
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("ok  \n    ", dump);
 }

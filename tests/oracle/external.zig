@@ -50,6 +50,13 @@ const cases = [_]Case{
         .input_fixture_path = "tests/fixtures/ansi/scroll_region.ansi",
         .golden_path = "tests/golden/screen/xterm/scroll_region.txt",
     },
+    .{
+        .name = "alt_screen",
+        .cols = 8,
+        .rows = 3,
+        .input_fixture_path = "tests/fixtures/ansi/alt_screen.ansi",
+        .golden_path = "tests/golden/screen/xterm/alt_screen.txt",
+    },
 };
 
 test "committed goldens match a real libvterm reference" {
@@ -104,6 +111,9 @@ fn renderWithLibvterm(allocator: std.mem.Allocator, cols: u16, rows: u16, input:
     c.vterm_set_utf8(vt, 1);
 
     const screen = c.vterm_obtain_screen(vt) orelse return error.VTermScreenFailed;
+    // libvterm은 alt screen(DECSET 1049/47)이 기본 비활성이라 켜야 실제 터미널처럼 동작한다.
+    // 안 켜면 1049가 무시돼 alt 출력이 primary에 그대로 남아 오라클 비교가 어긋난다.
+    c.vterm_screen_enable_altscreen(screen, 1);
     c.vterm_screen_reset(screen, 1);
 
     _ = c.vterm_input_write(vt, input.ptr, input.len);

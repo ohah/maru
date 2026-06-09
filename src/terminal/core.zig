@@ -29,6 +29,10 @@ pub const TerminalCore = struct {
     csi_has_digit: bool = false,
     csi_private: bool = false,
     csi_overflow: bool = false,
+    // 각 CSI 파라미터가 ';'(새 파라미터)가 아니라 ':'(sub-parameter)로 들어왔는지 표시한다.
+    // ITU colon 형식 38:2:colorspace:r:g:b는 38;2;r;g;b와 달리 colorspace 컴포넌트가 하나 더
+    // 있어, 이 구분 없이는 RGB가 한 칸 밀린다.
+    csi_subparam: [max_csi_params]bool = [_]bool{false} ** max_csi_params,
 
     pub const ParserState = enum { ground, escape, escape_intermediate, csi, osc, osc_escape };
 
@@ -135,11 +139,24 @@ pub const TerminalCore = struct {
 
     fn beginCsi(self: *TerminalCore) void {
         self.csi_params = [_]u16{0} ** max_csi_params;
+        self.csi_subparam = [_]bool{false} ** max_csi_params;
         // 항상 최소 1개의 (비어 있을 수도 있는) 파라미터가 있다고 본다.
         self.csi_param_count = 1;
         self.csi_has_digit = false;
         self.csi_private = false;
         self.csi_overflow = false;
+    }
+
+    /// ';'(is_sub=false)나 ':'(is_sub=true)로 다음 파라미터 슬롯을 연다. ':'로 연 슬롯은
+    /// sub-parameter로 표시해, 38/48 확장 색의 colon 형식을 세미콜론 형식과 구분한다.
+    fn csiNextParam(self: *TerminalCore, is_sub: bool) void {
+        if (self.csi_param_count >= max_csi_params) {
+            self.csi_overflow = true;
+        } else {
+            self.csi_param_count += 1;
+            self.csi_subparam[self.csi_param_count - 1] = is_sub;
+        }
+        self.csi_has_digit = false;
     }
 
     fn handleCsiByte(self: *TerminalCore, byte: u8) void {
@@ -159,16 +176,10 @@ pub const TerminalCore = struct {
                 else
                     value * 10 + digit;
             },
-            ';', ':' => {
-                // ';'는 파라미터 구분자. ':'는 sub-parameter 구분자지만 A1은 동일하게 다음
-                // 파라미터로 취급한다(38;5;n 형태를 처리하기 위함).
-                if (self.csi_param_count >= max_csi_params) {
-                    self.csi_overflow = true;
-                } else {
-                    self.csi_param_count += 1;
-                }
-                self.csi_has_digit = false;
-            },
+            // ';'는 파라미터 구분자, ':'는 sub-parameter 구분자다. 둘 다 다음 슬롯을 열되,
+            // ':'로 연 슬롯은 sub-parameter로 표시해 colon 확장색 형식을 구분한다.
+            ';' => self.csiNextParam(false),
+            ':' => self.csiNextParam(true),
             // private/marker bytes: < = > ? (예: CSI ? 25 h). A1은 private 시퀀스를 소비만 한다.
             0x3c...0x3f => self.csi_private = true,
             // intermediate bytes(공백~/)는 A1에서 무시한다.
@@ -252,23 +263,31 @@ pub const TerminalCore = struct {
         }
     }
 
-    /// 38/48 (확장 색)을 처리하고 다음으로 읽을 파라미터 인덱스를 돌려준다.
+    /// 38/48 (확장 색)을 처리하고 다음으로 읽을 파라미터 인덱스를 돌려준다. 세미콜론
+    /// (38;2;r;g;b, 38;5;n)과 colon sub-parameter(38:2:colorspace:r:g:b, 38:5:n)를 모두 지원한다.
     fn applyExtendedColor(self: *TerminalCore, start: usize, foreground: bool) usize {
         const count = @min(self.csi_param_count, max_csi_params);
         const mode = if (start + 1 < count) self.csi_params[start + 1] else 0;
+        // mode가 ':'로 들어왔으면 colon 형식이다. colon mode 2는 r,g,b 앞에 colorspace
+        // 컴포넌트가 하나 더 있다(빈 경우 '::'). mode 5는 두 형식 모두 n 위치가 같다.
+        const colon_form = start + 1 < count and self.csi_subparam[start + 1];
         if (mode == 5 and start + 2 < count) {
             const color: types.Color = .{ .indexed = @intCast(@min(self.csi_params[start + 2], 255)) };
             if (foreground) self.pen.foreground = color else self.pen.background = color;
             return start + 3;
         }
-        if (mode == 2 and start + 4 < count) {
-            const color: types.Color = .{ .rgb = .{
-                .r = @intCast(@min(self.csi_params[start + 2], 255)),
-                .g = @intCast(@min(self.csi_params[start + 3], 255)),
-                .b = @intCast(@min(self.csi_params[start + 4], 255)),
-            } };
-            if (foreground) self.pen.foreground = color else self.pen.background = color;
-            return start + 5;
+        if (mode == 2) {
+            // colon 형식은 colorspace 컴포넌트를 건너뛰어 r,g,b를 한 칸 뒤에서 읽는다.
+            const rgb_start = if (colon_form) start + 3 else start + 2;
+            if (rgb_start + 2 < count) {
+                const color: types.Color = .{ .rgb = .{
+                    .r = @intCast(@min(self.csi_params[rgb_start], 255)),
+                    .g = @intCast(@min(self.csi_params[rgb_start + 1], 255)),
+                    .b = @intCast(@min(self.csi_params[rgb_start + 2], 255)),
+                } };
+                if (foreground) self.pen.foreground = color else self.pen.background = color;
+                return rgb_start + 3;
+            }
         }
         // 형식이 안 맞으면 나머지 파라미터를 버린다.
         return count;
@@ -1254,4 +1273,28 @@ test "eraseInLine ends the grapheme run so a later combining mark is dropped" {
     try core.write("\u{0301}");
 
     try std.testing.expectEqual(@as(?u21, null), core.cells[core.index(0, 0)].combining);
+}
+
+test "SGR colon sub-parameter direct color (38:2:cs:r:g:b) reads RGB past the colorspace slot" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // ITU colon form with an empty colorspace slot: '::' inserts an extra component before r,g,b.
+    // The parser must skip the colorspace and read 10/20/30 — not 0/10/20.
+    try core.write("\x1b[38:2::10:20:30mA");
+    try std.testing.expectEqual(
+        types.Color{ .rgb = .{ .r = 10, .g = 20, .b = 30 } },
+        core.cells[core.index(0, 0)].style.foreground,
+    );
+
+    // Colon 256-color form: n sits at the same offset as the semicolon form.
+    try core.write("\x1b[38:5:200mB");
+    try std.testing.expectEqual(types.Color{ .indexed = 200 }, core.cells[core.index(0, 1)].style.foreground);
+
+    // Semicolon form must stay correct (no colorspace component).
+    try core.write("\x1b[48;2;1;2;3mC");
+    try std.testing.expectEqual(
+        types.Color{ .rgb = .{ .r = 1, .g = 2, .b = 3 } },
+        core.cells[core.index(0, 2)].style.background,
+    );
 }

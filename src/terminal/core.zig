@@ -50,6 +50,9 @@ pub const TerminalCore = struct {
     // 스크롤백(과거)이 보이고 활성 화면 아랫부분은 가려진다. 과거를 보는 중 새 출력이 scroll되면
     // 같은 내용을 계속 보도록 함께 올린다(scroll-lock).
     view_offset: usize = 0,
+    // 스크롤된(view_offset>0) 상태의 렌더용 합성 버퍼(rows×cols). renderSnapshot이 뷰포트 윈도를
+    // 여기에 합성한다. view_offset==0이면 안 쓰므로 lazy 할당한다(스크롤할 때만 메모리 사용).
+    viewport_cells: []types.Cell = &.{},
 
     pub const ParserState = enum { ground, escape, escape_intermediate, csi, osc, osc_escape };
 
@@ -75,6 +78,7 @@ pub const TerminalCore = struct {
             if (slot) |cells| self.allocator.free(cells);
         }
         if (self.scrollback.len > 0) self.allocator.free(self.scrollback);
+        if (self.viewport_cells.len > 0) self.allocator.free(self.viewport_cells);
         self.* = undefined;
     }
 
@@ -591,6 +595,41 @@ pub const TerminalCore = struct {
             .size = self.size,
             .cursor = self.cursor,
             .cells = self.cells,
+            .dirty = self.dirty,
+        };
+    }
+
+    /// 렌더용 snapshot. 바닥(view_offset==0)이면 snapshot()과 같다(합성 없음 — 일반 경로). 위로
+    /// 스크롤한 상태면 뷰포트 윈도([스크롤백 ++ 활성])를 viewport_cells에 합성해 돌려준다. 스크롤백
+    /// 행이 현재 폭과 다르면(resize) 폭에 맞춰 clamp/pad한다. 과거를 보는 중엔 커서를 숨긴다.
+    /// 합성 버퍼는 스크롤 중에만 lazy 할당하므로 일반(바닥) 렌더 경로는 추가 비용이 없다.
+    pub fn renderSnapshot(self: *TerminalCore) types.RenderSnapshot {
+        if (self.view_offset == 0) return self.snapshot();
+
+        const needed = cellCount(self.size);
+        if (self.viewport_cells.len != needed) {
+            if (self.viewport_cells.len > 0) self.allocator.free(self.viewport_cells);
+            self.viewport_cells = self.allocator.alloc(types.Cell, needed) catch {
+                self.viewport_cells = &.{};
+                return self.snapshot(); // OOM이면 활성 화면으로 폴백(스크롤 뷰 포기)
+            };
+        }
+
+        const cols = self.size.cols;
+        var r: u16 = 0;
+        while (r < self.size.rows) : (r += 1) {
+            const src = self.viewportRow(r);
+            const dst = self.viewport_cells[@as(usize, r) * cols ..][0..cols];
+            const n = @min(src.len, cols);
+            @memcpy(dst[0..n], src[0..n]);
+            if (n < cols) @memset(dst[n..cols], .{});
+        }
+
+        return .{
+            .size = self.size,
+            // 과거를 보는 중엔 활성 커서가 화면 밖(아래)에 가려져 있으므로 커서를 숨긴다.
+            .cursor = .{ .row = 0, .col = 0, .visible = false },
+            .cells = self.viewport_cells,
             .dirty = self.dirty,
         };
     }
@@ -1714,4 +1753,23 @@ test "scroll-lock keeps the viewport on the same content as new output scrolls i
     try std.testing.expectEqual(@as(usize, 2), core.viewOffset()); // offset이 함께 올라감
     try std.testing.expectEqual(@as(u21, 'a'), core.viewportRow(0)[0].codepoint);
     try std.testing.expectEqual(@as(u21, 'b'), core.viewportRow(1)[0].codepoint);
+}
+
+test "renderSnapshot shows active at bottom and composes the viewport (cursor hidden) when scrolled" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\nd"); // 스크롤백=[a,b], 활성=[c,d], 커서 (1,1)
+
+    // 바닥: 활성 화면 그대로 + 실제 커서(보임).
+    const at_bottom = core.renderSnapshot();
+    try std.testing.expectEqual(@as(u21, 'c'), at_bottom.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'd'), at_bottom.cells[core.index(1, 0)].codepoint);
+    try std.testing.expect(at_bottom.cursor.visible);
+
+    // 맨 위로 스크롤: 뷰포트가 스크롤백(a,b)을 합성, 커서 숨김.
+    core.scrollViewport(2);
+    const scrolled = core.renderSnapshot();
+    try std.testing.expectEqual(@as(u21, 'a'), scrolled.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'b'), scrolled.cells[core.index(1, 0)].codepoint);
+    try std.testing.expect(!scrolled.cursor.visible);
 }

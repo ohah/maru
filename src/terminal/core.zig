@@ -46,6 +46,10 @@ pub const TerminalCore = struct {
     sb_head: usize = 0,
     sb_count: usize = 0,
     max_scrollback: usize = default_max_scrollback,
+    // 뷰포트: 바닥(0=활성 화면)에서 위로 스크롤한 줄 수. [0, sb_count] 범위. >0이면 화면 윗부분에
+    // 스크롤백(과거)이 보이고 활성 화면 아랫부분은 가려진다. 과거를 보는 중 새 출력이 scroll되면
+    // 같은 내용을 계속 보도록 함께 올린다(scroll-lock).
+    view_offset: usize = 0,
 
     pub const ParserState = enum { ground, escape, escape_intermediate, csi, osc, osc_escape };
 
@@ -83,6 +87,46 @@ pub const TerminalCore = struct {
     pub fn scrollbackRow(self: *const TerminalCore, i: usize) ?[]const types.Cell {
         if (i >= self.sb_count) return null;
         return self.scrollback[(self.sb_head + i) % self.scrollback.len];
+    }
+
+    /// 뷰포트를 delta_up줄만큼 위(과거, 양수)/아래(현재, 음수)로 스크롤한다. [0, sb_count]로 clamp.
+    /// 뷰가 바뀌면 화면 전체를 dirty로 표시한다(렌더가 새 윈도를 다시 그리도록).
+    pub fn scrollViewport(self: *TerminalCore, delta_up: isize) void {
+        const max_off: isize = @intCast(self.sb_count);
+        var off: isize = @as(isize, @intCast(self.view_offset)) + delta_up;
+        if (off < 0) off = 0;
+        if (off > max_off) off = max_off;
+        const new_off: usize = @intCast(off);
+        if (new_off != self.view_offset) {
+            self.view_offset = new_off;
+            self.dirty = fullDirty(self.size);
+        }
+    }
+
+    /// 뷰포트를 바닥(활성 화면)으로 되돌린다.
+    pub fn scrollToBottom(self: *TerminalCore) void {
+        if (self.view_offset != 0) {
+            self.view_offset = 0;
+            self.dirty = fullDirty(self.size);
+        }
+    }
+
+    /// 현재 위로 스크롤한 줄 수(0=바닥).
+    pub fn viewOffset(self: *const TerminalCore) usize {
+        return self.view_offset;
+    }
+
+    /// 보이는 행 r(0..rows-1)의 cells. view_offset만큼 [스크롤백 ++ 활성]을 위로 본 윈도다. 윗부분
+    /// view_offset줄은 가장 최근 스크롤백, 나머지는 활성 화면 윗부분이다. 스크롤백 행이 비었으면(OOM)
+    /// 빈 슬라이스를 준다. resize로 폭이 달라진 스크롤백 행은 저장된 폭 그대로 — 렌더가 clamp/pad한다.
+    pub fn viewportRow(self: *const TerminalCore, r: u16) []const types.Cell {
+        const ci = self.sb_count - self.view_offset + r; // content index (sb_count>=view_offset 보장)
+        if (ci < self.sb_count) {
+            return self.scrollbackRow(ci) orelse &.{};
+        }
+        const active_row = ci - self.sb_count;
+        const start = active_row * self.size.cols;
+        return self.cells[start .. start + self.size.cols];
     }
 
     /// scroll로 위로 밀려나는 맨 윗줄을 스크롤백 ring에 보관한다. 슬롯 버퍼를 재사용해(같은 길이면
@@ -788,6 +832,9 @@ pub const TerminalCore = struct {
 
         // 위로 밀려나는 맨 윗줄(row 0)을 스크롤백에 보관한 뒤 화면을 위로 민다.
         self.pushScrollback(self.cells[0..self.size.cols]);
+        // 과거를 보고 있는 중(view_offset>0)이면 새 줄이 들어와도 같은 내용을 계속 보도록 offset도
+        // 함께 올린다(scroll-lock). 맨 위(sb_count)에 닿으면 더 올리지 않는다.
+        if (self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
 
         for (1..self.size.rows) |row| {
             const dst_start = self.index(row - 1, 0);
@@ -1630,4 +1677,41 @@ test "scrollback disabled when max_scrollback is zero" {
     core.max_scrollback = 0;
     try core.write("a\r\nb\r\nc\r\nd");
     try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen());
+}
+
+test "scrollViewport reveals scrollback at the top and scrollToBottom returns to active" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\nd"); // 스크롤백=[a,b], 활성=[c,d]
+    // 바닥(0): 활성 화면이 보인다.
+    try std.testing.expectEqual(@as(u21, 'c'), core.viewportRow(0)[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'd'), core.viewportRow(1)[0].codepoint);
+    // 1줄 위로: 윗줄에 가장 최근 스크롤백('b'), 아랫줄에 활성 첫 줄('c'). 'd'는 가려진다.
+    core.scrollViewport(1);
+    try std.testing.expectEqual(@as(usize, 1), core.viewOffset());
+    try std.testing.expectEqual(@as(u21, 'b'), core.viewportRow(0)[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'c'), core.viewportRow(1)[0].codepoint);
+    // 더 위로: 스크롤백 맨 위(a,b). 범위를 넘겨도 sb_count(2)로 clamp.
+    core.scrollViewport(5);
+    try std.testing.expectEqual(@as(usize, 2), core.viewOffset());
+    try std.testing.expectEqual(@as(u21, 'a'), core.viewportRow(0)[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'b'), core.viewportRow(1)[0].codepoint);
+    // 바닥으로: 다시 활성.
+    core.scrollToBottom();
+    try std.testing.expectEqual(@as(usize, 0), core.viewOffset());
+    try std.testing.expectEqual(@as(u21, 'c'), core.viewportRow(0)[0].codepoint);
+}
+
+test "scroll-lock keeps the viewport on the same content as new output scrolls in" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc"); // 스크롤백=[a], 활성=[b,c]
+    core.scrollViewport(1); // 위로 -> 뷰는 'a','b'
+    try std.testing.expectEqual(@as(u21, 'a'), core.viewportRow(0)[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'b'), core.viewportRow(1)[0].codepoint);
+    // 새 출력이 scroll돼 들어와도(b가 스크롤백으로), 뷰는 같은 'a','b'를 계속 보여준다(scroll-lock).
+    try core.write("\r\nd");
+    try std.testing.expectEqual(@as(usize, 2), core.viewOffset()); // offset이 함께 올라감
+    try std.testing.expectEqual(@as(u21, 'a'), core.viewportRow(0)[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'b'), core.viewportRow(1)[0].codepoint);
 }

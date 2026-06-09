@@ -38,10 +38,19 @@ pub const TerminalCore = struct {
     // ITU colon 형식 38:2:colorspace:r:g:b는 38;2;r;g;b와 달리 colorspace 컴포넌트가 하나 더
     // 있어, 이 구분 없이는 RGB가 한 칸 밀린다.
     csi_subparam: [max_csi_params]bool = [_]bool{false} ** max_csi_params,
+    // 스크롤백: 화면 위로 밀려난(scroll된) 맨 윗줄을 보관한다. ring buffer로, 가장 오래된 행이
+    // sb_head, 보관 개수가 sb_count다. 슬롯 버퍼를 재사용해 scroll마다 alloc 없이 memcpy만 하므로
+    // 출력 hot path(매 줄 scroll)를 느리게 하지 않는다. 과거를 스크롤해서 보는 뷰포트와 reflow는
+    // 이 저장 위에 올린다(다음 단계). 첫 scroll에서 max_scrollback 크기로 lazy 할당한다.
+    scrollback: []?[]types.Cell = &.{},
+    sb_head: usize = 0,
+    sb_count: usize = 0,
+    max_scrollback: usize = default_max_scrollback,
 
     pub const ParserState = enum { ground, escape, escape_intermediate, csi, osc, osc_escape };
 
     const max_csi_params = 16;
+    const default_max_scrollback = 1000;
 
     pub fn init(allocator: std.mem.Allocator, size: types.Size) !TerminalCore {
         const grid = clampGridSize(size);
@@ -58,7 +67,52 @@ pub const TerminalCore = struct {
 
     pub fn deinit(self: *TerminalCore) void {
         self.allocator.free(self.cells);
+        for (self.scrollback) |slot| {
+            if (slot) |cells| self.allocator.free(cells);
+        }
+        if (self.scrollback.len > 0) self.allocator.free(self.scrollback);
         self.* = undefined;
+    }
+
+    /// 스크롤백에 보관된 행 수.
+    pub fn scrollbackLen(self: *const TerminalCore) usize {
+        return self.sb_count;
+    }
+
+    /// i=0이 가장 오래된 스크롤백 행. 범위 밖이거나 OOM으로 비어 있으면 null.
+    pub fn scrollbackRow(self: *const TerminalCore, i: usize) ?[]const types.Cell {
+        if (i >= self.sb_count) return null;
+        return self.scrollback[(self.sb_head + i) % self.scrollback.len];
+    }
+
+    /// scroll로 위로 밀려나는 맨 윗줄을 스크롤백 ring에 보관한다. 슬롯 버퍼를 재사용해(같은 길이면
+    /// memcpy만) 매 scroll에 alloc하지 않는다. OOM이면 그 행은 보관하지 않고 넘어간다(best-effort).
+    fn pushScrollback(self: *TerminalCore, row_cells: []const types.Cell) void {
+        if (self.max_scrollback == 0) return;
+        if (self.scrollback.len == 0) {
+            const ring = self.allocator.alloc(?[]types.Cell, self.max_scrollback) catch return;
+            @memset(ring, null);
+            self.scrollback = ring;
+        }
+        const cap = self.scrollback.len;
+        // 가득 차면 (sb_head+sb_count)%cap == sb_head라, 가장 오래된 슬롯을 재사용해 덮어쓴다.
+        const idx = (self.sb_head + self.sb_count) % cap;
+        if (self.scrollback[idx]) |existing| {
+            if (existing.len == row_cells.len) {
+                @memcpy(existing, row_cells);
+            } else {
+                const dup = self.allocator.dupe(types.Cell, row_cells) catch return; // OOM이면 옛 행 유지
+                self.allocator.free(existing);
+                self.scrollback[idx] = dup;
+            }
+        } else {
+            self.scrollback[idx] = self.allocator.dupe(types.Cell, row_cells) catch return;
+        }
+        if (self.sb_count == cap) {
+            self.sb_head = (self.sb_head + 1) % cap;
+        } else {
+            self.sb_count += 1;
+        }
     }
 
     pub fn write(self: *TerminalCore, bytes: []const u8) !void {
@@ -731,6 +785,9 @@ pub const TerminalCore = struct {
 
     fn scrollUpOneLine(self: *TerminalCore) void {
         if (self.size.cols == 0 or self.size.rows == 0) return;
+
+        // 위로 밀려나는 맨 윗줄(row 0)을 스크롤백에 보관한 뒤 화면을 위로 민다.
+        self.pushScrollback(self.cells[0..self.size.cols]);
 
         for (1..self.size.rows) |row| {
             const dst_start = self.index(row - 1, 0);
@@ -1539,4 +1596,38 @@ test "tab advances to the next 8-column stop mid-line" {
     // 엣지(마지막 칸)가 아니라 일반 전진: 'a'(col 1) 뒤 tab은 다음 8-stop(col 8)으로 간다.
     try core.write("a\t");
     try std.testing.expectEqual(@as(u16, 8), core.cursor.col);
+}
+
+test "scrollback keeps rows that scroll off the top" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    // rows=2. 각 줄이 바닥에서 scroll될 때 맨 윗줄이 스크롤백으로 들어간다.
+    try core.write("a\r\nb\r\nc\r\nd");
+    // 'a' 줄과 'b' 줄이 밀려났다. 화면엔 c/d가 남는다.
+    try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
+    try std.testing.expectEqual(@as(u21, 'a'), core.scrollbackRow(0).?[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'b'), core.scrollbackRow(1).?[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'c'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'd'), core.cells[core.index(1, 0)].codepoint);
+}
+
+test "scrollback ring drops the oldest rows past max_scrollback" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    core.max_scrollback = 2; // 첫 scroll 전에 cap을 작게 둔다(lazy 할당이 이 값을 쓴다).
+    // a,b,c가 차례로 밀려난다(d/e는 화면에 남음). cap=2라 가장 최근 2개(b,c)만 남는다.
+    try core.write("a\r\nb\r\nc\r\nd\r\ne");
+    try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
+    try std.testing.expectEqual(@as(u21, 'b'), core.scrollbackRow(0).?[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'c'), core.scrollbackRow(1).?[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'd'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'e'), core.cells[core.index(1, 0)].codepoint);
+}
+
+test "scrollback disabled when max_scrollback is zero" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    core.max_scrollback = 0;
+    try core.write("a\r\nb\r\nc\r\nd");
+    try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen());
 }

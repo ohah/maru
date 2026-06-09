@@ -254,10 +254,28 @@ pub const TerminalCore = struct {
 
     fn rewrapScrollback(self: *TerminalCore, new_cols: u16) void {
         if (self.sb_count == 0 or new_cols == 0) return;
-        self.rewrapScrollbackInner(new_cols) catch {};
+        _ = self.rewrapScrollbackInner(new_cols, null) catch null;
     }
 
-    fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16) !void {
+    /// 보던 위치(옛 스크롤백 행 anchor)를 유지하며 재-wrap한다. 과거를 보는 중 resize가 오면
+    /// 바닥으로 튕기지 않고, 그 행이 재-wrap 후 어느 행이 됐는지로 view_offset을 재계산한다
+    /// (Ghostty/iTerm2처럼 보던 내용이 그대로 보이게).
+    fn rewrapScrollbackAnchored(self: *TerminalCore, new_cols: u16, anchor_row: usize) void {
+        if (self.sb_count == 0 or new_cols == 0) return;
+        const new_anchor = self.rewrapScrollbackInner(new_cols, anchor_row) catch {
+            // 재-wrap 실패(OOM): ring이 그대로이므로 offset도 그대로 유효하다.
+            return;
+        };
+        if (new_anchor) |row_index| {
+            // 뷰 최상단이 그 행을 다시 가리키게: viewportRow(0) = sb_count - view_offset.
+            self.view_offset = @min(self.sb_count - @min(row_index, self.sb_count), self.sb_count);
+        } else {
+            // 앵커 행이 cap 드랍으로 사라졌다 — 남은 가장 오래된 행(맨 위)으로.
+            self.view_offset = self.sb_count;
+        }
+    }
+
+    fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16, anchor_row: ?usize) !?usize {
         // 1차 패스: 출력 행 수만 센다(할당/복사 없음). cap을 넘는 앞쪽(가장 오래된) 행들은 어차피
         // 버려지므로 2차 패스에서 아예 생성하지 않는다 — 좁힘 재-wrap의 alloc 비용을 절반 가까이
         // 줄인다(perf 게이트 scrollback_rewrap이 1회 비용을 잰다).
@@ -287,6 +305,7 @@ pub const TerminalCore = struct {
         try wraps.ensureTotalCapacity(self.allocator, keep);
 
         var emitted: usize = 0; // 전체 산출 행 인덱스(skip 비교용)
+        var anchor_out: ?usize = null; // anchor_row(옛 행)가 떨어진 새 행 인덱스(skip 반영 전)
         var i: usize = 0;
         while (i < self.sb_count) {
             // 논리 줄 [i, j]: 연속된 soft-wrap 행 + 마지막 행.
@@ -302,6 +321,9 @@ pub const TerminalCore = struct {
 
             var r = i;
             while (r <= j) : (r += 1) {
+                // 앵커 옛 행이 시작되는 시점의 산출 행이 "보던 줄"의 새 위치다(셀 단위 정밀도까지는
+                // 불필요 — 행 단위면 보던 내용이 화면 안에 유지된다).
+                if (anchor_row != null and r == anchor_row.?) anchor_out = emitted;
                 const src = self.scrollbackRow(r) orelse continue;
                 // soft 행은 저장 폭 전체가 내용(꽉 찼다는 뜻), hard(마지막) 행은 뒤 빈칸 trim.
                 const contrib: usize = if (r < j) src.len else trimmedLen(src);
@@ -357,6 +379,12 @@ pub const TerminalCore = struct {
         self.sb_count = rows.items.len;
         // 소유권 이전 완료 — defer가 이중 해제하지 않게 목록을 비운다.
         rows.items.len = 0;
+
+        if (anchor_out) |a| {
+            if (a >= skip) return a - skip; // cap 드랍을 반영한 새 행 인덱스
+            return null; // 보던 행이 드랍됨
+        }
+        return null;
     }
 
     /// 논리 줄 [first, last]가 new_cols로 재-wrap될 때의 산출 행 수(할당/복사 없는 시뮬레이션).
@@ -1135,11 +1163,21 @@ pub const TerminalCore = struct {
             return;
         }
 
-        // 스크롤백 재-wrap은 지연 마크만 한다(폭이 그대로면 불변이라 생략). 즉시 하면 resize마다
-        // O(스크롤백) 재할당이라 perf 예산(core_resize_loop)을 수십 배 넘는다 — 실제 재-wrap은
+        // 스크롤백 재-wrap은 보통 지연 마크만 한다(폭이 그대로면 불변이라 생략). 즉시 하면 resize
+        // 마다 O(스크롤백) 재할당이라 perf 예산(core_resize_loop)을 수십 배 넘는다 — 실제 재-wrap은
         // 사용자가 과거를 보는 순간(scrollViewport/renderSnapshot) 1회만 일어난다. 그 사이에 활성
         // reflow가 밀어내는 새 폭 행이 ring에 섞여도, 재-wrap은 행별 저장 폭 기준이라 혼재가 안전하다.
-        if (new_cols != old_cols and self.sb_count > 0) self.sb_rewrap_pending = true;
+        // 단 지금 과거를 보는 중(view_offset>0)이면 즉시 재-wrap하면서 보던 행을 앵커로 offset을
+        // 재계산한다 — 바닥으로 튕기지 않고 보던 내용이 유지된다(드물어서 1회 비용 수용).
+        if (new_cols != old_cols and self.sb_count > 0) {
+            if (self.view_offset > 0) {
+                const anchor = self.sb_count - @min(self.view_offset, self.sb_count);
+                self.rewrapScrollbackAnchored(new_cols, anchor);
+                self.sb_rewrap_pending = false;
+            } else {
+                self.sb_rewrap_pending = true;
+            }
+        }
 
         // reflow: soft-wrap 플래그(wrapped)로 연속 줄(논리 줄)을 합쳐 새 폭에 다시 wrap한다. 넘치는
         // 위쪽 행은 스크롤백으로 밀어낸다. 핵심: 커서 위치는 어떤 셀이 나가는지/행이 soft인지를 절대
@@ -1266,7 +1304,9 @@ pub const TerminalCore = struct {
         var pr: usize = 0;
         while (pr < push_count) : (pr += 1) {
             if (!outputRowBlank(scratch, pr, new_cols)) {
-                _ = self.pushScrollback(scratch[pr * new_cols ..][0..new_cols], swrap[pr]);
+                const pushed = self.pushScrollback(scratch[pr * new_cols ..][0..new_cols], swrap[pr]);
+                // 과거를 보는 중이면 새로 밀려든 행만큼 offset도 올린다(scroll-lock — 보던 내용 유지).
+                if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
             }
         }
 
@@ -1299,8 +1339,9 @@ pub const TerminalCore = struct {
             self.cursor.col = @min(self.cursor.col, new_cols - 1);
         }
 
-        // resize는 바닥으로 스냅한다(스크롤 중이었어도 뷰가 어긋나지 않게).
-        self.view_offset = 0;
+        // 스크롤 위치는 유지한다(과거를 보는 중이었으면 위의 anchored 재-wrap이 offset을 새 행
+        // 수 기준으로 보정했고, 아래 overflow push의 scroll-lock 보정이 이어진다). 범위만 방어.
+        self.view_offset = @min(self.view_offset, self.sb_count);
         self.dirty = fullDirty(next_size);
         // 옛 grid 좌표에 묶인 상태(grapheme run, deferred wrap)만 끊는다. CSI 파서 상태와
         // partial UTF-8 꼬리는 grid와 무관한 바이트 스트림 상태라 유지한다 — 리셋하면 PTY read
@@ -3279,4 +3320,38 @@ test "scrollback re-wrap is deferred until the scrollback is actually viewed" {
     core.scrollViewport(1); // 보는 순간 재-wrap
     try std.testing.expect(!core.sb_rewrap_pending);
     try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
+}
+
+test "resize while scrolled back keeps the viewed scrollback row anchored (Ghostty tracked-pin semantics)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    // 스크롤백 4행: aaaa / abcdefgh / cccc / dddd (모두 hard).
+    try core.write("aaaa\r\nabcdefgh\r\ncccc\r\ndddd\r\n1\r\n2");
+    try std.testing.expectEqual(@as(usize, 4), core.scrollbackLen());
+    core.scrollViewport(3); // 뷰 최상단 = 스크롤백 행1("abcdefgh")
+    try std.testing.expectEqual(@as(u21, 'a'), core.viewportRow(0)[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'b'), core.viewportRow(0)[1].codepoint);
+
+    try core.resize(4, 2); // 좁힘: abcdefgh -> abcd|efgh. 보던 행("abcd...")이 그대로 보여야 한다.
+    try std.testing.expect(core.view_offset > 0); // 바닥으로 안 튕김
+    const top = core.viewportRow(0);
+    try std.testing.expectEqual(@as(u21, 'a'), top[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'b'), top[1].codepoint);
+
+    try core.resize(8, 2); // 다시 넓힘(행 합쳐져 sb_count 감소): 여전히 같은 내용이 보인다.
+    const top2 = core.viewportRow(0);
+    try std.testing.expectEqual(@as(u21, 'a'), top2[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'b'), top2[1].codepoint);
+    try std.testing.expect(core.view_offset <= core.scrollbackLen()); // Ghostty 회귀 클래스(범위 초과) 방어
+}
+
+test "resize overflow pushed to scrollback keeps the scrolled view in place (scroll-lock)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 4 });
+    defer core.deinit();
+    try core.write("aa\r\nbb\r\ncc\r\ndd\r\nee\r\nff"); // 스크롤백 2(aa,bb) + 화면 cc,dd,ee,ff
+    core.scrollViewport(2); // 맨 위(aa)를 본다
+    try std.testing.expectEqual(@as(u21, 'a'), core.viewportRow(0)[0].codepoint);
+    try core.resize(4, 2); // 행 수 축소: 화면 위쪽이 스크롤백으로 밀린다(overflow push)
+    // 보던 행(aa)이 여전히 뷰 최상단이어야 한다 — push마다 offset이 같이 올라갔어야(scroll-lock).
+    try std.testing.expectEqual(@as(u21, 'a'), core.viewportRow(0)[0].codepoint);
 }

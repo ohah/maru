@@ -51,7 +51,7 @@ renderer, storage, platform interop는 VT 명세처럼 하나의 공개 표준�
 | 오라클 | 라이선스 | 받는 법 | 상태 |
 | --- | --- | --- | --- |
 | libvterm | MIT | `brew install libvterm` (또는 배포판 패키지) | ✅ CI 강제(매 푸시/PR) + 로컬 opt-in (`mise run oracle-ext`) |
-| Ghostty `libghostty-vt` | MIT | `git clone --depth 1 https://github.com/ghostty-org/ghostty.git references/ghostty` 후 `mise exec zig@0.15.2 -- zig build -Demit-lib-vt=true` | ✅ 로컬 opt-in만 (`mise run oracle-ghostty`, 무거운 빌드라 CI 제외). golden 화면 비교 + **resize reflow 비교**(입력→resize 후 그리드와 커서 위치를 libghostty-vt와 직접 대조) |
+| Ghostty `libghostty-vt` | MIT | `git clone --depth 1 https://github.com/ghostty-org/ghostty.git references/ghostty` 후 `mise exec zig@0.15.2 -- zig build -Demit-lib-vt=true` | ✅ 로컬 opt-in만 (`mise run oracle-ghostty`, 무거운 빌드라 CI 제외). golden 화면 비교. reflow 비교 경로(shim `maru_ghostty_dump_resize`)도 준비돼 있으나, reflow가 copy-region으로 되돌려져 현재는 skip — 스크롤백 기반 reflow 재구현 시 재활성화 |
 | Alacritty `alacritty_terminal` | Apache-2.0 | `tests/oracle/alacritty-dumper`에서 `cargo build --release` (Rust 툴체인) | ✅ CI 강제(매 푸시/PR) + 로컬 opt-in (`mise run oracle-alacritty`) |
 
 오라클이 **아닌** 것:

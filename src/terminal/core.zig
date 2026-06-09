@@ -34,11 +34,6 @@ pub const TerminalCore = struct {
     // 끝 글자면 wrap하지 않으려고(끝 글자마다 빈 줄이 끼지 않게) 즉시가 아니라 "다음 글자에서"
     // 넘긴다. 명시적 커서 이동(CR/LF/backspace/커서 위치 지정/resize)은 이 상태를 무효화한다.
     pending_wrap: bool = false,
-    // soft-wrap 추적: wrapped[r]=true면 행 r의 내용이 autowrap으로 행 r+1에 이어진다(논리적으로 한
-    // 줄). resize reflow가 이 플래그로 연속 줄을 합쳐 새 폭에 다시 wrap한다. autowrap이 일어나면
-    // 떠나는 행을 true로, 그 행에 글자를 쓰면(줄을 새로 그리면) false로 되돌린다. cells와 함께
-    // 할당/해제되며 길이는 rows다.
-    wrapped: []bool = &.{},
     // 각 CSI 파라미터가 ';'(새 파라미터)가 아니라 ':'(sub-parameter)로 들어왔는지 표시한다.
     // ITU colon 형식 38:2:colorspace:r:g:b는 38;2;r;g;b와 달리 colorspace 컴포넌트가 하나 더
     // 있어, 이 구분 없이는 RGB가 한 칸 밀린다.
@@ -52,21 +47,17 @@ pub const TerminalCore = struct {
         const grid = clampGridSize(size);
         const cells = try allocator.alloc(types.Cell, cellCount(grid));
         @memset(cells, .{});
-        const wrapped = try allocator.alloc(bool, grid.rows);
-        @memset(wrapped, false);
 
         return .{
             .allocator = allocator,
             .size = grid,
             .cells = cells,
-            .wrapped = wrapped,
             .dirty = fullDirty(grid),
         };
     }
 
     pub fn deinit(self: *TerminalCore) void {
         self.allocator.free(self.cells);
-        self.allocator.free(self.wrapped);
         self.* = undefined;
     }
 
@@ -410,8 +401,6 @@ pub const TerminalCore = struct {
             self.cells[self.index(row, col)] = .{ .style = self.pen };
         }
         self.repairWideGlyphEdges(row, start, end);
-        // 줄을 지우거나 짧게 만들면 더는 soft-wrap이 아니다(reflow가 이 행에서 줄을 끊게).
-        self.wrapped[row] = false;
         self.markDirty(row);
         // 다른 cursor/erase op과 같이 grapheme run을 끝낸다. 안 하면 CSI K 뒤 combining mark가
         // 방금 지운 셀에 붙는다.
@@ -425,7 +414,6 @@ pub const TerminalCore = struct {
             // 2/3: 화면 전체.
             2, 3 => {
                 @memset(self.cells, blank);
-                @memset(self.wrapped, false);
                 self.dirty = fullDirty(self.size);
             },
             // 1: 화면 시작 ~ 커서까지.
@@ -434,9 +422,6 @@ pub const TerminalCore = struct {
                 var i: usize = 0;
                 while (i <= cursor_index and i < self.cells.len) : (i += 1) self.cells[i] = blank;
                 self.repairWideGlyphEdges(self.cursor.row, 0, @min(self.cursor.col + 1, self.size.cols));
-                // 지운 행(0..cursor.row)은 더는 soft-wrap이 아니다.
-                var wr: u16 = 0;
-                while (wr <= self.cursor.row and wr < self.size.rows) : (wr += 1) self.wrapped[wr] = false;
                 // dirty를 덮어쓰지 않고 markDirty로 병합한다 — 같은 write()에서 앞서 dirty된 행
                 // (예: 방금 출력한 아래쪽 행)을 잃어 렌더가 stale glyph를 남기지 않게 한다.
                 self.markDirty(0);
@@ -448,9 +433,6 @@ pub const TerminalCore = struct {
                 var i: usize = cursor_index;
                 while (i < self.cells.len) : (i += 1) self.cells[i] = blank;
                 self.repairWideGlyphEdges(self.cursor.row, self.cursor.col, self.size.cols);
-                // 지운 행(cursor.row..끝)은 더는 soft-wrap이 아니다.
-                var wr: u16 = self.cursor.row;
-                while (wr < self.size.rows) : (wr += 1) self.wrapped[wr] = false;
                 self.markDirty(self.cursor.row);
                 self.markDirty(self.size.rows - 1);
             },
@@ -459,152 +441,51 @@ pub const TerminalCore = struct {
     }
 
     pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
-        // grid를 최소 2칸×1행으로 맞춘다(clampGridSize 참고).
+        // grid를 최소 2칸×1행으로 맞춘다(clampGridSize 참고). 이후 본문은 clamp된 cols/rows를 쓴다.
         const next_size = clampGridSize(.{ .cols = cols_in, .rows = rows_in });
-        const new_cols = next_size.cols;
-        const new_rows = next_size.rows;
-
-        // reflow: soft-wrap 플래그(wrapped)로 연속 줄(논리 줄)을 합쳐 새 폭에 다시 wrap한다. 이전에는
-        // 좌상단 영역만 복사해, 창 폭을 바꾸면 wrap된 줄이 새 폭에 안 맞아 어긋났다. 재배치 결과를
-        // 행 단위로 누적하고(각 행 new_cols개), 넘치면 아래(최근) new_rows개만 남긴다(위가 스크롤아웃).
-        var out_cells: std.ArrayList(types.Cell) = .empty;
-        defer out_cells.deinit(self.allocator);
-        var out_wrapped: std.ArrayList(bool) = .empty;
-        defer out_wrapped.deinit(self.allocator);
-
-        const line_buf = try self.allocator.alloc(types.Cell, new_cols);
-        defer self.allocator.free(line_buf);
-        @memset(line_buf, .{});
-        var oc: u16 = 0; // 현재 만들고 있는 출력 행의 열
-
-        // 옛 커서가 매핑될 출력 위치. 출력 행 인덱스 = 지금까지 flush된 행 수.
-        var cursor_out_row: ?usize = null;
-        var cursor_out_col: u16 = 0;
-
-        var old_r: u16 = 0;
-        while (old_r < self.size.rows) : (old_r += 1) {
-            const soft = self.wrapped[old_r];
-            // 기여 길이: soft 행은 꽉 찼으므로 전체, 마지막(non-soft) 행은 뒤 빈칸을 잘라낸 길이.
-            var contrib: u16 = if (soft) self.size.cols else self.trimmedRowLen(old_r);
-            // 단, 커서가 있는 행에서는 커서 앞 빈 칸까지 보존한다. zsh는 줄 끝을 PROMPT_SP 공백 +
-            // 커서로 표시하는데, 그 trailing 공백을 잘라내면 reflow 후 커서 컬럼이 zsh의 기대와
-            // 어긋나, SIGWINCH redraw가 기존 줄 위에 겹쳐 찍혀 프롬프트가 중복된다(실제 관측됨).
-            if (old_r == self.cursor.row) contrib = @max(contrib, self.cursor.col);
-
-            var c: u16 = 0;
-            while (c < contrib) : (c += 1) {
-                const cell = self.cells[self.index(old_r, c)];
-                // wide glyph base가 현재 출력 행 끝에 안 들어가면(continuation과 분리 방지) 먼저 행을
-                // soft-wrap으로 flush한다.
-                const needs: u16 = if (cell.width == 2) 2 else 1;
-                if (oc + needs > new_cols) {
-                    @memset(line_buf[oc..new_cols], .{});
-                    try out_cells.appendSlice(self.allocator, line_buf);
-                    try out_wrapped.append(self.allocator, true);
-                    @memset(line_buf, .{});
-                    oc = 0;
-                }
-                if (old_r == self.cursor.row and c == self.cursor.col and cursor_out_row == null) {
-                    cursor_out_row = out_wrapped.items.len;
-                    cursor_out_col = oc;
-                }
-                line_buf[oc] = cell;
-                oc += 1;
-            }
-            // 커서가 이 행의 기여 내용보다 뒤(빈 영역)에 있으면 현재 출력 위치에 둔다. oc가 new_cols
-            // (행이 정확히 꽉 참)면 그대로 두고 — 최종 재배치에서 다음 행 col 0으로 넘긴다(clamp 아님).
-            if (old_r == self.cursor.row and cursor_out_row == null) {
-                cursor_out_row = out_wrapped.items.len;
-                cursor_out_col = @min(oc + (self.cursor.col -| contrib), new_cols);
-            }
-            if (!soft) {
-                // 논리 줄 끝: 부분 출력 행을 hard(wrapped=false)로 flush한다.
-                @memset(line_buf[oc..new_cols], .{});
-                try out_cells.appendSlice(self.allocator, line_buf);
-                try out_wrapped.append(self.allocator, false);
-                @memset(line_buf, .{});
-                oc = 0;
-            }
-        }
-        // soft로 끝났는데 더 옛 행이 없는 경우(방어) 부분 행 flush.
-        if (oc > 0) {
-            @memset(line_buf[oc..new_cols], .{});
-            try out_cells.appendSlice(self.allocator, line_buf);
-            try out_wrapped.append(self.allocator, false);
-        }
-
-        // 콘텐츠 아래의 빈 출력 행(빈 옛 행에서 나온 것)이 콘텐츠를 위로 밀어내지 않게 끝쪽 빈 행을
-        // 잘라낸다. 단 커서가 있는 행까지는 남긴다(커서가 콘텐츠 아래 빈 줄에 있을 수 있다).
-        var content_len = out_wrapped.items.len;
-        while (content_len > 0) {
-            const r = content_len - 1;
-            if (cursor_out_row) |cr| {
-                if (r <= cr) break;
-            }
-            if (out_wrapped.items[r]) break; // soft-wrap 행은 콘텐츠
-            if (!outputRowBlank(out_cells.items, r, new_cols)) break;
-            content_len -= 1;
-        }
-        const drop: usize = if (content_len > new_rows) content_len - new_rows else 0;
-
+        const cols = next_size.cols;
+        const rows = next_size.rows;
         const next_cells = try self.allocator.alloc(types.Cell, cellCount(next_size));
-        errdefer self.allocator.free(next_cells);
         @memset(next_cells, .{});
-        const next_wrapped = try self.allocator.alloc(bool, new_rows);
-        @memset(next_wrapped, false);
 
-        var dst: u16 = 0;
-        var src: usize = drop;
-        while (src < content_len and dst < new_rows) {
+        // 보이는 내용을 보존한다. 이전에는 resize가 화면을 비워서, 창을 줄이면 셸이 SIGWINCH로
+        // 다시 그리기 전까지 빈 화면이 보였다. 아직 wrap을 추적하지 않으므로 reflow는 못 하고,
+        // 겹치는 좌상단 영역(min(old,new))을 그대로 복사한다. 셸은 SIGWINCH로 prompt를 다시
+        // 그려 정렬을 맞춘다.
+        const copy_rows = @min(self.size.rows, rows);
+        const copy_cols = @min(self.size.cols, cols);
+        var row: u16 = 0;
+        while (row < copy_rows) : (row += 1) {
+            const old_start = @as(usize, row) * self.size.cols;
+            const new_start = @as(usize, row) * cols;
             @memcpy(
-                next_cells[@as(usize, dst) * @as(usize, new_cols) ..][0..new_cols],
-                out_cells.items[src * @as(usize, new_cols) ..][0..new_cols],
+                next_cells[new_start..][0..copy_cols],
+                self.cells[old_start..][0..copy_cols],
             );
-            next_wrapped[dst] = out_wrapped.items[src];
-            dst += 1;
-            src += 1;
+            // cols가 줄어 wide glyph(width=2) base만 복사되고 continuation이 잘려 나가면, 짝 없는
+            // base를 blank로 정리한다(half-glyph가 1칸 공간에 2칸 폭으로 렌더되는 것 방지).
+            // putCell은 마지막 열에 width=2를 만들지 않으므로 이 case는 잘림에서만 생긴다.
+            if (copy_cols > 0 and next_cells[new_start + copy_cols - 1].width == 2) {
+                next_cells[new_start + copy_cols - 1] = .{};
+            }
         }
 
         self.allocator.free(self.cells);
-        self.allocator.free(self.wrapped);
-        self.size = next_size;
+        self.size = .{ .cols = cols, .rows = rows };
         self.cells = next_cells;
-        self.wrapped = next_wrapped;
-
-        // 커서를 보존한 내용에 맞춰 재배치한다: 기록한 출력 위치에서 스크롤아웃된 행 수를 빼고 clamp.
-        if (cursor_out_row) |cr_raw| {
-            var cr = cr_raw;
-            var cc = cursor_out_col;
-            // 출력 행이 정확히 꽉 차 커서가 마지막 칸을 넘으면(exact-fill) 다음 행 col 0으로 간다.
-            // 마지막 칸에 clamp하면 커서가 한 칸 뒤처져 셸 redraw와 어긋난다(Ghostty와 동일하게 처리).
-            if (cc >= new_cols) {
-                cr += 1;
-                cc = 0;
-            }
-            const r = if (cr >= drop) cr - drop else 0;
-            self.cursor.row = @intCast(@min(r, @as(usize, new_rows - 1)));
-            self.cursor.col = @min(cc, new_cols - 1);
-        } else {
-            self.cursor.row = @min(self.cursor.row, new_rows - 1);
-            self.cursor.col = @min(self.cursor.col, new_cols - 1);
-        }
+        // 커서를 0으로 리셋하지 않고 새 크기 안으로 clamp해, 보존한 내용 위에서 커서가 튀지
+        // 않게 한다.
+        self.cursor.row = if (rows == 0) 0 else @min(self.cursor.row, rows - 1);
+        self.cursor.col = if (cols == 0) 0 else @min(self.cursor.col, cols - 1);
         self.dirty = fullDirty(next_size);
-        // 옛 grid 기준의 partial UTF-8 tail/last_print/deferred wrap은 새 grid로 새면 안 된다.
+        // A partial UTF-8 tail captured against the old grid must not leak into
+        // the first write after a resize, and last_print referenced old coords.
         self.last_print = null;
         self.utf8_tail_len = 0;
+        // 새 grid 폭에서 옛 마지막 칸 기준의 deferred wrap은 의미가 없다.
         self.pending_wrap = false;
         // resize 경계에서 끊긴 escape sequence가 새 grid로 새지 않게 파서를 ground로 되돌린다.
         self.parser = .ground;
-    }
-
-    /// 행의 뒤쪽 빈 cell을 제외한 내용 길이. reflow가 마지막(non-soft) 행을 합칠 때 trailing 공백을
-    /// 끌고 다니지 않게 한다. 배경색이 있는 공백(BCE)이나 wide glyph continuation은 내용으로 본다.
-    fn trimmedRowLen(self: *const TerminalCore, row: u16) u16 {
-        var len: u16 = self.size.cols;
-        while (len > 0) : (len -= 1) {
-            if (!isBlankCell(self.cells[self.index(row, len - 1)])) break;
-        }
-        return len;
     }
 
     pub fn snapshot(self: *const TerminalCore) types.RenderSnapshot {
@@ -754,9 +635,7 @@ pub const TerminalCore = struct {
         // 전에 다음 줄 첫 칸으로 넘긴다(바닥이면 scroll). 이렇게 다음 글자 시점에 wrap해야 줄을
         // 정확히 채운 마지막 글자마다 빈 줄이 끼지 않는다(표준 VT 동작, zsh prompt 등이 의존).
         if (self.pending_wrap) {
-            // autowrap: 떠나는 행은 다음 행으로 이어지는 soft-wrap이다(reflow가 합칠 수 있게 표시).
             // 다음 줄로 넘긴다. lineFeed가 pending_wrap을 끄므로 여기서 따로 끄지 않는다.
-            self.wrapped[self.cursor.row] = true;
             self.cursor.col = 0;
             self.lineFeed();
         }
@@ -768,16 +647,12 @@ pub const TerminalCore = struct {
         // (이전 줄 마지막 칸은 빈칸으로 남는다). grid는 항상 cols>=2라(clampGridSize) 넘긴 뒤엔
         // 반드시 들어가므로, 칸을 줄이는 degrade 없이 그대로 width 2로 쓴다.
         if (cell_width == 2 and self.cursor.col + 1 >= self.size.cols) {
-            self.wrapped[self.cursor.row] = true; // wide glyph도 줄을 다음 행으로 이어간다
             self.cursor.col = 0;
             self.lineFeed();
         }
 
         const row = self.cursor.row;
         const col = self.cursor.col;
-        // 이 행에 글자를 쓴다 = 이 행을 (다시) 그리는 중이다. soft-wrap 표시를 일단 끈다. 이 행이
-        // 다시 꽉 차 다음 글자가 autowrap하면 위에서 true로 돌아간다.
-        self.wrapped[row] = false;
 
         self.clearCellForWrite(row, col);
         if (cell_width == 2) self.clearCellForWrite(row, col + 1);
@@ -864,13 +739,10 @@ pub const TerminalCore = struct {
                 self.cells[dst_start .. dst_start + self.size.cols],
                 self.cells[src_start .. src_start + self.size.cols],
             );
-            // soft-wrap 플래그도 cell과 함께 위로 옮긴다.
-            self.wrapped[row - 1] = self.wrapped[row];
         }
 
         const last_start = self.index(self.size.rows - 1, 0);
         @memset(self.cells[last_start .. last_start + self.size.cols], .{});
-        self.wrapped[self.size.rows - 1] = false;
         self.dirty = fullDirty(self.size);
     }
 
@@ -926,24 +798,6 @@ fn decodeUtf8(bytes: []const u8) !u21 {
 
 fn cellCount(size: types.Size) usize {
     return @as(usize, size.cols) * @as(usize, size.rows);
-}
-
-/// reflow trim 판정: 그릴 ink도 배경도 없는 진짜 빈 cell인가. wide glyph continuation은 base와
-/// 한 쌍이라 빈 칸으로 보지 않고, 배경색이 있는 공백(BCE)도 내용으로 본다.
-fn isBlankCell(cell: types.Cell) bool {
-    return cell.codepoint == ' ' and
-        !cell.continuation and
-        cell.combining == null and
-        std.meta.activeTag(cell.style.background) == .default;
-}
-
-/// reflow가 누적한 출력 행(row-major, cols개)이 통째로 빈 행인지.
-fn outputRowBlank(cells: []const types.Cell, row: usize, cols: u16) bool {
-    var c: usize = 0;
-    while (c < cols) : (c += 1) {
-        if (!isBlankCell(cells[row * @as(usize, cols) + c])) return false;
-    }
-    return true;
 }
 
 /// grid를 최소 cols>=2, rows>=1로 맞춘다. 한 cell 글자 모델은 wide glyph(2칸)의 continuation을
@@ -1361,18 +1215,16 @@ test "resize preserves overlapping content when growing" {
     try std.testing.expectEqualStrings("hello   ", dump);
 }
 
-test "resize reflows a long line when shrinking instead of truncating" {
+test "resize keeps the visible region when shrinking instead of blanking" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 1 });
     defer core.deinit();
 
-    // "hello"(5칸)를 3칸으로 줄이면 reflow가 "hel"/"lo"로 다시 wrap한다. 1행만 보이므로 커서가 있는
-    // 아래 줄("lo")을 남긴다(이전 placeholder는 좌상단을 잘라 "hel"을 남겼다).
     try core.write("hello");
     try core.resize(3, 1);
 
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
-    try std.testing.expectEqualStrings("lo ", dump);
+    try std.testing.expectEqualStrings("hel", dump);
 }
 
 test "resize preserves content across multiple rows" {
@@ -1388,20 +1240,17 @@ test "resize preserves content across multiple rows" {
     try std.testing.expectEqualStrings("ab  \ncd  \n    ", dump);
 }
 
-test "resize keeps the cursor within bounds from a degenerate empty-grid position" {
+test "resize clamps the cursor into the new bounds instead of resetting it" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 3 });
     defer core.deinit();
 
-    try core.write("\x1b[3;5H"); // 빈 grid에서 CUP -> (2,4)
+    try core.write("\x1b[3;5H");
     try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
     try std.testing.expectEqual(@as(u16, 4), core.cursor.col);
 
-    // 내용 없는 grid에서 far CUP 후 극소 축소는 degenerate(실사용 없음, libghostty-vt도 이 resize에서
-    // 패닉해 오라클 비교 불가). 정확 위치는 정의가 모호하므로 reflow가 OOB 없이 새 경계 안에 두는지
-    // (안전 불변식)만 보장한다. 커서가 실제 내용을 따라가는 검증은 widen/narrow reflow 테스트가 한다.
     try core.resize(2, 2);
-    try std.testing.expect(core.cursor.row < 2);
-    try std.testing.expect(core.cursor.col < 2);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
 }
 
 test "eraseInDisplay merges dirty instead of dropping earlier-dirtied rows" {
@@ -1690,75 +1539,4 @@ test "tab advances to the next 8-column stop mid-line" {
     // 엣지(마지막 칸)가 아니라 일반 전진: 'a'(col 1) 뒤 tab은 다음 8-stop(col 8)으로 간다.
     try core.write("a\t");
     try std.testing.expectEqual(@as(u16, 8), core.cursor.col);
-}
-
-test "resize widening joins a soft-wrapped line and relocates the cursor" {
-    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
-    defer core.deinit();
-    try core.write("ABCDEF"); // ABCD(soft-wrap) / EF, 커서 (1,2)
-    try std.testing.expect(core.wrapped[0]); // sanity: row 0이 soft-wrap
-    try core.resize(8, 3);
-    // 8칸으로 넓히면 ABCDEF가 한 줄로 합쳐지고 더는 wrap이 아니다.
-    try std.testing.expectEqual(@as(u21, 'A'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'F'), core.cells[core.index(0, 5)].codepoint);
-    try std.testing.expect(!core.wrapped[0]);
-    // 커서는 합쳐진 줄에서 F 다음(0,6)으로 따라온다.
-    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
-    try std.testing.expectEqual(@as(u16, 6), core.cursor.col);
-}
-
-test "resize narrowing splits a long line and marks the wrap" {
-    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
-    defer core.deinit();
-    try core.write("ABCDEF"); // 8칸에 6글자, wrap 아님
-    try std.testing.expect(!core.wrapped[0]);
-    try core.resize(4, 3);
-    // 4칸으로 줄이면 ABCD(soft-wrap) / EF로 나뉜다.
-    try std.testing.expectEqual(@as(u21, 'D'), core.cells[core.index(0, 3)].codepoint);
-    try std.testing.expect(core.wrapped[0]);
-    try std.testing.expectEqual(@as(u21, 'E'), core.cells[core.index(1, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'F'), core.cells[core.index(1, 1)].codepoint);
-    try std.testing.expect(!core.wrapped[1]);
-}
-
-test "resize keeps hard-newline lines separate (does not join them)" {
-    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
-    defer core.deinit();
-    try core.write("AB\r\nCD"); // 하드 개행(CR+LF)이라 wrap 아님 — 두 논리 줄
-    try std.testing.expect(!core.wrapped[0]);
-    try core.resize(8, 3);
-    // 넓혀도 합쳐지지 않고 각자 자기 줄에 남는다.
-    try std.testing.expectEqual(@as(u21, 'A'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'B'), core.cells[core.index(0, 1)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'C'), core.cells[core.index(1, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'D'), core.cells[core.index(1, 1)].codepoint);
-}
-
-test "resize narrowing wraps a wide glyph whole instead of splitting it" {
-    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
-    defer core.deinit();
-    try core.write("AB한"); // A,B,한(2칸) — 4칸을 정확히 채움
-    try core.resize(3, 3);
-    // 3칸으로 줄이면 한이 잘리지 않고 통째로 다음 줄로 간다: row0 "AB"(soft), row1 한(2칸).
-    try std.testing.expectEqual(@as(u21, 'A'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'B'), core.cells[core.index(0, 1)].codepoint);
-    try std.testing.expect(core.wrapped[0]);
-    try std.testing.expectEqual(@as(u21, '한'), core.cells[core.index(1, 0)].codepoint);
-    try std.testing.expectEqual(@as(u2, 2), core.cells[core.index(1, 0)].width);
-    try std.testing.expect(core.cells[core.index(1, 1)].continuation);
-}
-
-test "resize preserves the cursor column past trimmed trailing blanks (zsh PROMPT_SP)" {
-    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
-    defer core.deinit();
-    // "abc" 뒤 커서를 (0,6)으로 옮긴다 — content는 3칸인데 커서는 trailing 공백 뒤(6)에 있다
-    // (zsh가 줄 끝을 공백+커서로 표시하는 상황의 일반형).
-    try core.write("abc");
-    try core.write("\x1b[1;7H"); // CUP -> (0,6)
-    try std.testing.expectEqual(@as(u16, 6), core.cursor.col);
-    // 4칸으로 줄이면 커서 앞 빈 칸까지 보존된 논리 줄("abc   ", 6칸)이 "abc "/"  "로 재배치되고,
-    // 커서는 논리 offset 6 = (1,2)로 따라온다. trailing 공백을 잘랐다면 (0,3)에 잘못 박힌다.
-    try core.resize(4, 2);
-    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
-    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
 }

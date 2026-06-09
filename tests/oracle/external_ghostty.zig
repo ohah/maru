@@ -158,10 +158,13 @@ const reflow_cases = [_]ReflowCase{
     // integer overflow로 패닉한다(Ghostty 측 edge). 유효한 오라클 비교가 안 되므로 제외한다.
 };
 
-test "reflow matches Ghostty libghostty-vt" {
-    inline for (reflow_cases) |case| {
-        try compareReflowCase(case);
-    }
+// DISABLED: reflow를 copy-region으로 되돌렸다(스크롤백 없이 라이브에서 zsh redraw와 피드백 루프 +
+// resize perf budget 초과). 스크롤백 기반 reflow를 다시 올릴 때 아래 skip을 제거해 재활성화한다.
+// shim(maru_ghostty_dump_resize)·케이스·비교 로직은 그대로 두어 그때 바로 정답 검증에 쓴다.
+test "reflow matches Ghostty libghostty-vt (disabled until scrollback-based reflow)" {
+    _ = &compareReflowCase; // 케이스/비교 로직과 maru·shim 참조를 컴파일 상태로 유지
+    _ = reflow_cases;
+    return error.SkipZigTest;
 }
 
 fn compareReflowCase(case: ReflowCase) !void {

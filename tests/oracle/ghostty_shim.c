@@ -31,26 +31,14 @@ static size_t enc_utf8(uint32_t cp, uint8_t *o, size_t cap) {
     return 4;
 }
 
-long maru_ghostty_dump(uint16_t cols, uint16_t rows,
-                       const uint8_t *input, size_t input_len,
-                       uint8_t *out, size_t out_cap) {
-    GhosttyTerminal terminal;
-    GhosttyTerminalOptions opts = {
-        .cols = cols,
-        .rows = rows,
-        .max_scrollback = 0,
-    };
-    if (ghostty_terminal_new(NULL, &terminal, opts) != GHOSTTY_SUCCESS) return -1;
-
-    ghostty_terminal_vt_write(terminal, input, input_len);
-
+// 활성 그리드(cols×rows)를 UTF-8 텍스트로 out에 쓴다(행은 '\n' 연결, 빈 셀은 space).
+// 쓴 바이트 수, 실패/버퍼 부족이면 -1.
+static long dump_grid(GhosttyTerminal terminal, uint16_t cols, uint16_t rows,
+                      uint8_t *out, size_t out_cap) {
     size_t pos = 0;
     for (uint16_t row = 0; row < rows; row++) {
         if (row != 0) {
-            if (pos >= out_cap) {
-                ghostty_terminal_free(terminal);
-                return -1;
-            }
+            if (pos >= out_cap) return -1;
             out[pos++] = '\n';
         }
         for (uint16_t col = 0; col < cols; col++) {
@@ -75,14 +63,64 @@ long maru_ghostty_dump(uint16_t cols, uint16_t rows,
             }
 
             size_t n = enc_utf8(cp, out + pos, out_cap - pos);
-            if (n == 0) {
-                ghostty_terminal_free(terminal);
-                return -1;
-            }
+            if (n == 0) return -1;
             pos += n;
         }
     }
-
-    ghostty_terminal_free(terminal);
     return (long)pos;
+}
+
+long maru_ghostty_dump(uint16_t cols, uint16_t rows,
+                       const uint8_t *input, size_t input_len,
+                       uint8_t *out, size_t out_cap) {
+    GhosttyTerminal terminal;
+    GhosttyTerminalOptions opts = {
+        .cols = cols,
+        .rows = rows,
+        .max_scrollback = 0,
+    };
+    if (ghostty_terminal_new(NULL, &terminal, opts) != GHOSTTY_SUCCESS) return -1;
+
+    ghostty_terminal_vt_write(terminal, input, input_len);
+
+    long n = dump_grid(terminal, cols, rows, out, out_cap);
+    ghostty_terminal_free(terminal);
+    return n;
+}
+
+long maru_ghostty_dump_resize(uint16_t cols0, uint16_t rows0,
+                              uint16_t cols1, uint16_t rows1,
+                              const uint8_t *input, size_t input_len,
+                              uint8_t *out, size_t out_cap,
+                              uint16_t *cursor_x, uint16_t *cursor_y,
+                              int *pending_wrap) {
+    GhosttyTerminal terminal;
+    GhosttyTerminalOptions opts = {
+        .cols = cols0,
+        .rows = rows0,
+        .max_scrollback = 0,
+    };
+    if (ghostty_terminal_new(NULL, &terminal, opts) != GHOSTTY_SUCCESS) return -1;
+
+    // 초기 크기로 입력을 처리한 뒤 새 크기로 resize한다(primary screen은 wraparound면 reflow).
+    // cell 픽셀 크기는 그리드 레이아웃과 무관하므로 1×1로 둔다.
+    ghostty_terminal_vt_write(terminal, input, input_len);
+    if (ghostty_terminal_resize(terminal, cols1, rows1, 1, 1) != GHOSTTY_SUCCESS) {
+        ghostty_terminal_free(terminal);
+        return -1;
+    }
+
+    // resize 후 커서 위치/pending-wrap을 함께 돌려준다(Maru reflow의 커서 재배치 비교용).
+    uint16_t cx = 0, cy = 0;
+    bool pw = false;
+    ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_CURSOR_X, &cx);
+    ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &cy);
+    ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_CURSOR_PENDING_WRAP, &pw);
+    if (cursor_x) *cursor_x = cx;
+    if (cursor_y) *cursor_y = cy;
+    if (pending_wrap) *pending_wrap = pw ? 1 : 0;
+
+    long n = dump_grid(terminal, cols1, rows1, out, out_cap);
+    ghostty_terminal_free(terminal);
+    return n;
 }

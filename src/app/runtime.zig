@@ -12,9 +12,12 @@ fn escapeForLog(bytes: []const u8, buf: []u8) []const u8 {
     var n: usize = 0;
     for (bytes) |b| {
         if (n + 5 >= buf.len) {
+            // 말줄임을 남은 칸만큼만 쓴다. 직전 반복이 4바이트(\xNN)를 써서 n이 buf.len-2까지
+            // 갈 수 있어, 무조건 3바이트를 쓰면 버퍼를 한 칸 넘는다(OOB write).
             const ell = "...";
-            @memcpy(buf[n..][0..ell.len], ell);
-            n += ell.len;
+            const tail = @min(ell.len, buf.len - n);
+            @memcpy(buf[n..][0..tail], ell[0..tail]);
+            n += tail;
             break;
         }
         switch (b) {

@@ -65,7 +65,10 @@ pub fn buildFrameAfterDrain(
     // trace recorder는 raw event를 먼저 관찰해야 할 수 있다. 이 helper는 drain 결과를
     // 받은 뒤 active surface만 renderer frame으로 바꾸므로 두 경로가 같은 조립 코드를 쓴다.
     const active = app_window.active() orelse return error.NoActiveSurface;
-    const render_frame = try renderer_state.buildFrame(allocator, active.core.snapshot(), shaper);
+    // renderSnapshot: 스크롤백 뷰포트가 열려 있으면(view_offset>0) 합성된 윈도를, 바닥이면 활성
+    // 화면을 준다. snapshot()을 쓰면 이 frame 조립 경로(비-CoreText/fake backend 포함)가 스크롤
+    // 위치를 무시한다.
+    const render_frame = try renderer_state.buildFrame(allocator, active.core.renderSnapshot(), shaper);
 
     return .{
         .surface_id = active.id,

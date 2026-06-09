@@ -72,6 +72,11 @@ final class MaruMetalTerminalView: NSView {
     // 마우스 선택: raw 좌표만 backing 픽셀(좌상단 원점)로 바꿔 Zig에 넘긴다 — 셀 변환·선택 모델은
     // Zig가 소유한다(네이티브 최소화). NSView 좌표는 좌하단 원점이라 y를 뒤집는다.
     override func mouseDown(with event: NSEvent) {
+        // Cmd+클릭 = 그 위치의 URL 열기(선택하지 않음). URL 인식은 Zig가 한다.
+        if event.modifierFlags.contains(.command) {
+            controller?.handleCommandClick(event, in: self)
+            return
+        }
         // 더블클릭=단어 선택(4), 트리플클릭=논리 줄 선택(5). 선택 의미론은 Zig가 소유한다.
         let kind: Int32 = event.clickCount >= 3 ? 5 : (event.clickCount == 2 ? 4 : 1)
         controller?.handleMouse(event, kind: kind, in: self)
@@ -523,6 +528,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // Cmd+C: Zig가 추출한 선택 텍스트(UTF-8, Zig 소유 버퍼)를 NSPasteboard에 쓴다 — 클립보드는
     // OS API라 Swift가 소유하는 경계다. 선택이 없으면 아무것도 하지 않는다(셸에 ^C를 보내지 않는
     // 것은 macOS 터미널 관례와 동일 — 인터럽트는 Ctrl+C).
+    // Cmd+클릭: Zig가 인식한 URL을 기본 브라우저로 연다(NSWorkspace는 OS 소유 경계).
+    func handleCommandClick(_ event: NSEvent, in view: NSView) {
+        guard let session = devSession else { return }
+        let local = view.convert(event.locationInWindow, from: nil)
+        let scale = window?.backingScaleFactor ?? 1.0
+        let xPx = Double(local.x * scale)
+        let yPx = Double((view.bounds.height - local.y) * scale)
+        var ptr: UnsafePointer<UInt8>? = nil
+        var len: size_t = 0
+        guard maru_macos_app_dev_session_url_at(session, xPx, yPx, &ptr, &len) == Self.statusOK,
+              let bytes = ptr, len > 0 else { return }
+        let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
+        guard let url = URL(string: text) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     private func pastePasteboardText() {
         guard let session = devSession,
               let text = NSPasteboard.general.string(forType: .string),

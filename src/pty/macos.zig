@@ -346,12 +346,12 @@ const EnvStorage = struct {
 
     fn init(allocator: std.mem.Allocator, env: []const []const u8) !EnvStorage {
         if (env.len == 0) {
-            return .{
-                .allocator = allocator,
-                .strings = &.{},
-                .envp = null,
-                .uses_parent = true,
-            };
+            // 부모 환경을 물려주되 TERM/COLORTERM은 Maru 값으로 덮어쓴다. 부모 TERM을 그대로 주면
+            // (예: tmux/screen TERM, 또는 Maru 동작과 안 맞는 terminfo) zsh의 SIGWINCH redraw가
+            // wrap 행 수를 잘못 계산해(상대 커서 이동 \e[A 횟수가 어긋남) 프롬프트가 중복된다.
+            // Maru는 xterm식(auto-wrap + deferred wrap)이라 xterm-256color terminfo와 맞는다.
+            // (Ghostty도 TERM을 자기 값으로 명시 설정하고 폴백이 xterm-256color다 — 동작 비교 확인.)
+            return initFromParentWithTermOverride(allocator);
         }
 
         const strings = try allocator.alloc([:0]u8, env.len);
@@ -370,6 +370,43 @@ const EnvStorage = struct {
         const envp = try allocator.allocSentinel(?[*:0]const u8, env.len, null);
         errdefer allocator.free(envp);
         for (strings, 0..) |entry, index| envp[index] = entry.ptr;
+
+        return .{
+            .allocator = allocator,
+            .strings = strings,
+            .envp = envp,
+            .uses_parent = false,
+        };
+    }
+
+    // 부모 환경(std.c.environ)을 복사하되 TERM/COLORTERM을 Maru 표준값으로 교체한 owned envp를 만든다.
+    fn initFromParentWithTermOverride(allocator: std.mem.Allocator) !EnvStorage {
+        var entries: std.ArrayList([:0]u8) = .empty;
+        errdefer {
+            for (entries.items) |owned| allocator.free(owned);
+            entries.deinit(allocator);
+        }
+
+        // 부모의 모든 env entry를 복사한다. 단 TERM/COLORTERM은 건너뛰고 아래에서 우리 값으로 넣는다
+        // (중복 키는 첫 항목이 이기므로, 우리 값만 남도록 부모 것을 빼야 한다).
+        const environ = std.c.environ;
+        var index: usize = 0;
+        while (environ[index]) |entry| : (index += 1) {
+            const slice = std.mem.span(entry);
+            if (std.mem.startsWith(u8, slice, "TERM=") or std.mem.startsWith(u8, slice, "COLORTERM=")) continue;
+            try entries.append(allocator, try allocator.dupeZ(u8, slice));
+        }
+        try entries.append(allocator, try allocator.dupeZ(u8, "TERM=xterm-256color"));
+        try entries.append(allocator, try allocator.dupeZ(u8, "COLORTERM=truecolor"));
+
+        const strings = try entries.toOwnedSlice(allocator);
+        errdefer {
+            for (strings) |owned| allocator.free(owned);
+            allocator.free(strings);
+        }
+
+        const envp = try allocator.allocSentinel(?[*:0]const u8, strings.len, null);
+        for (strings, 0..) |entry, i| envp[i] = entry.ptr;
 
         return .{
             .allocator = allocator,

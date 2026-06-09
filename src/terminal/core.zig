@@ -629,7 +629,10 @@ pub const TerminalCore = struct {
 
         const row = self.cursor.row;
         const col = self.cursor.col;
-        // cols < 2라 wide glyph를 wrap해도 못 담는 극단적 경우에만 한 칸으로 줄인다.
+        // OOB 방어: cols가 1이면(config는 cols>=1만 보장) 위 wrap을 해도 wide glyph를 못 담는다.
+        // 그대로 width 2로 쓰면 아래에서 col+1 칸에 continuation을 쓰는데, cols==1의 마지막 행에선
+        // index(row, col+1)이 cell 버퍼 밖이라 OOB write가 난다. 그래서 이 degenerate 입력(1칸
+        // 터미널 + 2칸 글자)에서만 한 칸으로 줄인다. 표준 동작이 아니라 크래시 방지용 가드다.
         const cell_width: u2 = if (requested_width == 2 and col + 1 >= self.size.cols) 1 else requested_width;
 
         self.clearCellForWrite(row, col);
@@ -1384,4 +1387,16 @@ test "a wide glyph with one column left wraps whole to the next line" {
     try std.testing.expectEqual(@as(u2, 2), core.cells[core.index(1, 0)].width);
     try std.testing.expect(core.cells[core.index(1, 1)].continuation);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+}
+
+test "a wide glyph in a 1-column terminal degrades to one cell instead of writing out of bounds" {
+    // cols==1은 config가 허용하는 degenerate 입력이다(normalizeConfig는 cols>=1만 보장). 마지막
+    // 행에서 wide glyph를 width 2로 쓰면 col+1 continuation이 cell 버퍼 밖으로 나가 OOB write가
+    // 난다. putCell이 이 경우 한 칸으로 줄여 OOB 없이 안전하게 쓴다(이 가드가 없으면 크래시).
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 1, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[2;1H"); // 마지막 행으로 이동
+    try core.write("한"); // wide(2) in 1-col 마지막 행: 한 칸으로 줄어들고 OOB 없음
+    try std.testing.expectEqual(@as(u21, '한'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u2, 1), core.cells[core.index(1, 0)].width);
 }

@@ -34,9 +34,9 @@
 현재 dev shell에서 아직 하지 않는 것:
 
 - fixed-cell layout(현재는 NDC inset 매핑이라 glyph가 창 크기에 맞춰 늘어난다)
-- resize 시 wrap된 줄을 새 폭으로 재배치하는 reflow
 - 커서 shape(bar/underline)·blink, underline overlay 렌더
-- 스크롤백 위 reflow(스크롤백 저장·뷰포트·휠/Shift+PageUp 스크롤은 구현됨 — 과거를 폭 그대로 보여준다)
+- 기존 스크롤백 행의 재-wrap(resize reflow는 활성 화면에 적용되고 넘치는 줄은 스크롤백으로 가지만,
+  이미 스크롤백에 있던 행은 다시 wrap하지 않아 과거를 스크롤하면 저장된 폭 그대로 보인다)
 - 선택/클립보드, 탭/분할 UI
 - workspace restore
 - settings UI/runtime reload
@@ -77,4 +77,4 @@
 
 ## 남은 한계
 
-현재 dev shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, `MaruMetalTerminalView`(CAMetalLayer)에 dev session의 shell glyph와 반전 블록 커서를 그리며, key/resize/close event를 Zig dev session ABI로 내려보낸다. resize cell 수는 실제 CoreText font metrics에서 Zig가 계산한다(`metal_renderer_created`/`metal_frames_drawn`로 gate). 스크롤백은 구현돼 휠/Shift+PageUp으로 과거를 볼 수 있고(타이핑하면 live로 복귀), 다만 NDC inset 매핑이라 glyph가 창 크기에 맞춰 늘어나고, fixed-cell layout·resize/스크롤백 reflow·탭/분할·선택/클립보드 같은 제품 interactive UX와 커서 shape/blink는 아직 없다.
+현재 dev shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, `MaruMetalTerminalView`(CAMetalLayer)에 dev session의 shell glyph와 반전 블록 커서를 그리며, key/resize/close event를 Zig dev session ABI로 내려보낸다. resize cell 수는 실제 CoreText font metrics에서 Zig가 계산한다(`metal_renderer_created`/`metal_frames_drawn`로 gate). 스크롤백은 구현돼 휠/Shift+PageUp으로 과거를 볼 수 있고(타이핑하면 live로 복귀), resize 시 활성 화면을 새 폭으로 reflow하고 넘치는 줄은 스크롤백으로 민다(Ghostty 오라클로 그리드+커서 검증). 다만 NDC inset 매핑이라 glyph가 창 크기에 맞춰 늘어나고, fixed-cell layout·기존 스크롤백 행 재-wrap·탭/분할·선택/클립보드 같은 제품 interactive UX와 커서 shape/blink는 아직 없다.

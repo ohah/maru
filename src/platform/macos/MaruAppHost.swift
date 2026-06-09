@@ -72,7 +72,9 @@ final class MaruMetalTerminalView: NSView {
     // 마우스 선택: raw 좌표만 backing 픽셀(좌상단 원점)로 바꿔 Zig에 넘긴다 — 셀 변환·선택 모델은
     // Zig가 소유한다(네이티브 최소화). NSView 좌표는 좌하단 원점이라 y를 뒤집는다.
     override func mouseDown(with event: NSEvent) {
-        controller?.handleMouse(event, kind: 1, in: self)
+        // 더블클릭=단어 선택(4), 트리플클릭=논리 줄 선택(5). 선택 의미론은 Zig가 소유한다.
+        let kind: Int32 = event.clickCount >= 3 ? 5 : (event.clickCount == 2 ? 4 : 1)
+        controller?.handleMouse(event, kind: kind, in: self)
     }
 
     override func mouseDragged(with event: NSEvent) {

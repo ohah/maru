@@ -249,6 +249,69 @@ pub const TerminalCore = struct {
         self.dirty = fullDirty(self.size);
     }
 
+    /// 더블클릭 단어 선택: 클릭한 셀이 속한 비공백 run을 좌우로 확장한다. soft-wrap 경계는
+    /// 논리 줄로 이어지므로 행을 넘어 계속 확장한다(wrap된 긴 URL을 통째로 선택). 공백을
+    /// 클릭하면 선택하지 않는다(해제).
+    pub fn selectWordAt(self: *TerminalCore, viewport_row: u16, col: u16) void {
+        const abs = self.absRowFromViewport(viewport_row);
+        const row_cells = self.absRow(abs) orelse return;
+        const c = @min(col, @as(u16, @intCast(row_cells.len -| 1)));
+        if (isBlankCell(row_cells[c])) {
+            self.selectionClear();
+            return;
+        }
+
+        // 왼쪽 경계: 행 안에서 공백까지, 행 시작에 닿으면 이전 행이 soft-wrap으로 이어질 때 계속.
+        var start_row = abs;
+        var start_col: u16 = c;
+        outer_left: while (true) {
+            const cells_row = self.absRow(start_row) orelse break;
+            while (start_col > 0) {
+                if (isBlankCell(cells_row[start_col - 1])) break :outer_left;
+                start_col -= 1;
+            }
+            if (start_row == 0 or !self.absRowWrapped(start_row - 1)) break;
+            const prev = self.absRow(start_row - 1) orelse break;
+            if (prev.len == 0 or isBlankCell(prev[prev.len - 1])) break;
+            start_row -= 1;
+            start_col = @intCast(prev.len - 1);
+        }
+
+        // 오른쪽 경계: 대칭 — 행 끝에 닿으면 이 행이 soft-wrap일 때 다음 행으로 계속.
+        var end_row = abs;
+        var end_col: u16 = c;
+        outer_right: while (true) {
+            const cells_row = self.absRow(end_row) orelse break;
+            while (end_col + 1 < cells_row.len) {
+                if (isBlankCell(cells_row[end_col + 1])) break :outer_right;
+                end_col += 1;
+            }
+            if (!self.absRowWrapped(end_row)) break;
+            const next = self.absRow(end_row + 1) orelse break;
+            if (next.len == 0 or isBlankCell(next[0])) break;
+            end_row += 1;
+            end_col = 0;
+        }
+
+        self.selection_anchor = .{ .row = start_row, .col = start_col };
+        self.selection_head = .{ .row = end_row, .col = end_col };
+        self.dirty = fullDirty(self.size);
+    }
+
+    /// 트리플클릭 줄 선택: 클릭한 행이 속한 논리 줄 전체(soft-wrap된 행들 포함)를 선택한다.
+    pub fn selectLineAt(self: *TerminalCore, viewport_row: u16) void {
+        const abs = self.absRowFromViewport(viewport_row);
+        if (self.absRow(abs) == null) return;
+        var start_row = abs;
+        while (start_row > 0 and self.absRowWrapped(start_row - 1)) start_row -= 1;
+        var end_row = abs;
+        while (self.absRowWrapped(end_row) and self.absRow(end_row + 1) != null) end_row += 1;
+        const end_cells = self.absRow(end_row) orelse return;
+        self.selection_anchor = .{ .row = start_row, .col = 0 };
+        self.selection_head = .{ .row = end_row, .col = @intCast(end_cells.len -| 1) };
+        self.dirty = fullDirty(self.size);
+    }
+
     pub fn selectionClear(self: *TerminalCore) void {
         if (self.selection_anchor == null) return;
         self.selection_anchor = null;
@@ -3603,4 +3666,34 @@ test "selection survives new output until eviction shifts it off the ring" {
     try std.testing.expectEqualStrings("b", t2);
     try core.write("\r\nf"); // b도 evict — 선택이 ring 밖으로: 해제
     try std.testing.expect(core.selection_anchor == null);
+}
+
+test "double-click selects the word run, extending across a soft-wrap boundary" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    try core.write("ab cdefghij kl"); // 8칸: "ab cdefg"|"hij kl" — 단어 cdefghij가 wrap을 넘는다
+    try std.testing.expect(core.wrapped[0]);
+
+    core.selectWordAt(0, 4); // 행0 col4('e') 더블클릭
+    const text = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("cdefghij", text); // wrap 경계 너머까지 한 단어
+
+    core.selectWordAt(1, 4); // 행1 col4 ('k') — 같은 행 안 단어
+    const text2 = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings("kl", text2);
+
+    core.selectWordAt(0, 2); // 공백 더블클릭 -> 해제
+    try std.testing.expect(core.selection_anchor == null);
+}
+
+test "triple-click selects the whole logical line including wrapped rows" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    try core.write("abcdef\r\nxy"); // abcd|ef(논리 한 줄) + xy
+    core.selectLineAt(1); // wrap된 두 번째 행을 트리플클릭해도 논리 줄 전체
+    const text = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("abcdef", text);
 }

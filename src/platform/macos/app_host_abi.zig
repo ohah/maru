@@ -192,7 +192,7 @@ pub export fn maru_macos_app_dev_session_scroll_wheel(
     return @intFromEnum(Status.ok);
 }
 
-// 마우스 선택(kind 1=down/2=drag/3=up, backing px). 셀 변환·선택 모델은 Zig가 소유한다.
+// 마우스 선택(kind 1=down/2=drag/3=up/4=더블클릭 단어/5=트리플클릭 줄, backing px). 셀 변환·선택 모델은 Zig가 소유한다.
 pub export fn maru_macos_app_dev_session_mouse(
     session: ?*DevSession,
     kind: i32,

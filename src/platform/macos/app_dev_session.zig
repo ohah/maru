@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 13;
+pub const abi_version: u32 = 14;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -170,6 +170,9 @@ pub const DevSession = struct {
     wheel_accum: f64 = 0,
     // copyText()가 돌려준 추출 텍스트의 소유 버퍼(다음 copyText/destroy까지 유효 — ABI 수명 계약).
     copy_buffer: []u8 = &.{},
+    // 현재 선택이 down(1) 드래그로 시작했는지. 더블/트리플클릭(4/5) 선택은 직후의 up(3)이
+    // "이동 없는 클릭 -> 해제" 판정을 타면 안 되므로 이 플래그로 구분한다.
+    mouse_drag_selecting: bool = false,
 
     pub fn init(
         self: *DevSession,
@@ -327,8 +330,9 @@ pub const DevSession = struct {
         self.scroll(lines);
     }
 
-    /// 마우스 선택. kind 1=down(선택 시작), 2=drag(확장), 3=up(확정 — 이동 없었으면 클릭으로 보고
-    /// 해제). 좌표는 backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
+    /// 마우스 선택. kind 1=down(선택 시작), 2=drag(확장), 3=up(확정 — 드래그 선택인데 이동이
+    /// 없었으면 클릭으로 보고 해제), 4=더블클릭(단어 선택), 5=트리플클릭(논리 줄 선택). 좌표는
+    /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *DevSession, kind: i32, x_px: f64, y_px: f64) void {
         if (!self.surface_initialized) return;
         if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return;
@@ -338,9 +342,16 @@ pub const DevSession = struct {
         const col: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(x_px, 0) / cw)), 0, @as(i64, core.size.cols) - 1));
         const row: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(y_px, 0) / ch)), 0, @as(i64, core.size.rows) - 1));
         switch (kind) {
-            1 => core.selectionStart(row, col),
+            1 => {
+                self.mouse_drag_selecting = true;
+                core.selectionStart(row, col);
+            },
             2 => core.selectionExtend(row, col),
             3 => {
+                // 더블/트리플클릭 직후의 up은 그 선택을 건드리면 안 된다(단어가 1칸이면 "이동 없는
+                // 클릭" 판정에 걸려 즉시 해제돼 버린다).
+                if (!self.mouse_drag_selecting) return;
+                self.mouse_drag_selecting = false;
                 core.selectionExtend(row, col);
                 // 이동 없는 클릭은 선택이 아니라 해제다(다른 터미널과 동일).
                 if (core.selection_anchor) |a| {
@@ -348,6 +359,14 @@ pub const DevSession = struct {
                         core.selectionClear();
                     }
                 }
+            },
+            4 => {
+                self.mouse_drag_selecting = false;
+                core.selectWordAt(row, col);
+            },
+            5 => {
+                self.mouse_drag_selecting = false;
+                core.selectLineAt(row);
             },
             else => return,
         }

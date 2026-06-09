@@ -154,6 +154,7 @@ const reflow_cases = [_]ReflowCase{
     .{ .name = "hard newlines stay separate", .cols0 = 12, .rows0 = 6, .cols1 = 24, .rows1 = 6, .input = "alpha\r\nbeta\r\ngamma" },
     .{ .name = "cursor past trailing blanks then narrow", .cols0 = 12, .rows0 = 4, .cols1 = 5, .rows1 = 8, .input = "abc\x1b[1;9H" },
     .{ .name = "prompt then long command narrowed", .cols0 = 40, .rows0 = 8, .cols1 = 28, .rows1 = 10, .input = "user@host maru % echo abcdefghijklmnopqrstuvwxyz0123456789" },
+    .{ .name = "live prompt+long cmd 113->71", .cols0 = 113, .rows0 = 33, .cols1 = 71, .rows1 = 33, .input = "yoon@ip-10-10-10-185 maru % dsafdsafsdfadsfasdfasdfasdfasdfasdfadsfasdfasdfadsfadsfadsfadsfdasfadsfdasfdsafdsafggeqgqgqegeqggasdgasdgasdgdassadf" },
     // NOTE: 극소 폭(예: 5x3 -> 2x2)으로의 resize는 libghostty-vt의 ghostty_terminal_resize가
     // integer overflow로 패닉한다(Ghostty 측 edge). 유효한 오라클 비교가 안 되므로 제외한다.
 };

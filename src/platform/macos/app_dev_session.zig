@@ -269,42 +269,50 @@ pub const DevSession = struct {
         // 비-macOS(주로 Linux CI의 ABI 계약 테스트)에는 CoreText 브리지 심볼이 없다. OS
         // 게이트는 comptime이라 Linux 빌드는 macOS 분기를 codegen에서 제외하므로 extern
         // 참조가 생기지 않고, frame loop 계약만 fake backend로 유지한다.
-        var tick_result = if (builtin.os.tag == .macos) blk: {
-            const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
-                .appearance = self.appearance,
-                .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
-                .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
-                .scale_milli = self.scale_milli,
-                .cell_width_px = @intCast(self.cell_width_px),
-                .cell_height_px = @intCast(self.cell_height_px),
-            };
-            break :blk try self.frame_loop.tickWithFrameBuilder(frame_builder);
-        } else try self.frame_loop.tick(renderer.FakeFontBackend{});
-        defer tick_result.deinit(self.allocator);
-
-        // 생명주기 회계(이벤트 합산, 종료 reap)를 먼저 끝낸다. Metal 투영은 이 뒤에 둬야
-        // 투영 실패가 drained 이벤트나 finishAfterTermination(reader join/child reap)을
-        // 건너뛰게 만들지 않는다.
-        self.total_output_events += tick_result.frame.drain_summary.output_events;
-        self.total_exit_events += tick_result.frame.drain_summary.exit_events;
-        if (tick_result.ended() and !self.termination_finished) {
+        // PTY queue를 non-blocking으로 비운다(output/exit 감지). 이 drain은 매 tick 필요하지만
+        // 싸다. 생명주기 회계(이벤트 합산, 종료 reap)도 build 여부와 무관하게 매 tick 한다 —
+        // Metal 투영이나 비싼 build가 실패/생략돼도 drained 이벤트나 finishAfterTermination
+        // (reader join/child reap)을 건너뛰지 않게 한다.
+        const drain_summary = try self.pump.drainAvailable();
+        self.total_output_events += drain_summary.output_events;
+        self.total_exit_events += drain_summary.exit_events;
+        if (drain_summary.ended != null and !self.termination_finished) {
             self.ended_seen = true;
             self.live_pty.finishAfterTermination();
             self.termination_finished = true;
         }
 
         // 새 output이 있을 때만 frame이 바뀐다(resize는 resize()가 dirty를 세운다). idle tick은
-        // 재투영하지 않아 generation이 그대로이고, 소비자는 재업로드를 건너뛸 수 있다.
-        if (tick_result.frame.drain_summary.output_events > 0) self.metal_dirty = true;
+        // 비싼 부분(buildDrawList + 전체 grid CoreText shape + atlas/raster 준비)을 통째로
+        // 건너뛴다 — 출력 없는 셸이 매 30Hz tick마다 grid를 다시 shape하느라 CPU를 태우거나
+        // 머신이 idle/sleep으로 못 들어가게 하지 않는다. generation도 그대로라 재드로우도 생략된다.
+        if (drain_summary.output_events > 0) self.metal_dirty = true;
         if (self.metal_dirty) {
+            var tick_result = if (builtin.os.tag == .macos) blk: {
+                const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
+                    .appearance = self.appearance,
+                    .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+                    .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+                    .scale_milli = self.scale_milli,
+                    .cell_width_px = @intCast(self.cell_width_px),
+                    .cell_height_px = @intCast(self.cell_height_px),
+                };
+                break :blk try self.frame_loop.tickAfterDrainWithFrameBuilder(drain_summary, frame_builder);
+            } else try self.frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
+            defer tick_result.deinit(self.allocator);
+
             // Metal view 데이터 투영 실패(OOM 등)는 터미널 코어 동작과 무관하다. 마지막
             // frame을 유지하고 dirty를 남겨 다음 tick에 재시도한다(세션을 죽이지 않는다).
             if (self.metal_buffer.replace(self.allocator, tick_result.frame.render_frame, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, self.appearance.theme.foreground)) |_| {
                 self.metal_dirty = false;
             } else |_| {}
-        }
 
-        self.writeSummaryFromTick(tick_result);
+            // tick만 아는 per-frame render 통계와 tick index를 summary에 덧씌운다.
+            self.writeSummaryFromTick(tick_result);
+        } else {
+            // idle: build/project를 건너뛰므로 summary는 마지막 frame render 통계를 그대로 둔다.
+            self.writeSummaryFromState();
+        }
         // 세션이 종료되면 host가 frame loop를 멈추고 우아하게 내려가도록 app_should_terminate를
         // 싣는다. ABI의 tick export는 이 ended를 SessionEnded status로 올려준다.
         self.last_summary.last_event_kind = @intFromEnum(

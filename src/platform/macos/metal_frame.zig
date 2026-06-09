@@ -104,11 +104,14 @@ pub fn buildNativeCellsFromGlyphQuads(
         });
     }
 
-    // 2) glyph이 없는 공백 cell이 non-default 배경을 가지면 배경 전용 cell을 낸다. UV를
-    //    sentinel(-1)로 둬 셰이더가 atlas를 sampling하지 않고 coverage 0(=배경만)으로 본다.
-    //    이게 없으면 "\e[44m   \e[0m" 같은 색칠된 공백 구간이 글자 사이로 끊겨 보인다.
+    // 2) ink가 없는 빈 cell이 non-default 배경을 가지면 배경 전용 cell을 낸다. UV를 sentinel(-1)로
+    //    둬 셰이더가 atlas를 sampling하지 않고 coverage 0(=배경만)으로 본다. 이게 없으면
+    //    "\e[44m   \e[0m"나 배경색으로 erase한(BCE) 구간이 글자 사이로 끊겨 보인다. 빈 cell은
+    //    space(0x20, Cell 기본값/erase 결과)이거나 미기록(0)이라 shaper가 glyph로 만들지 않으므로
+    //    1)에서 빠진다. 두 코드포인트를 모두 잡아 BCE 배경이 유실되지 않게 한다(non-space 글자는
+    //    1)이 glyph와 함께 배경을 싣는다).
     for (draw_cells) |cell| {
-        if (cell.codepoint != ' ') continue;
+        if (cell.codepoint != ' ' and cell.codepoint != 0) continue;
         const background = packBackground(cell.style);
         if (background == 0) continue;
         cells.appendAssumeCapacity(.{
@@ -281,15 +284,18 @@ test "background projection emits bg-only cells for non-default-background space
     const draw_cells = [_]renderer.DrawCell{
         .{ .row = 0, .col = 0, .codepoint = ' ', .style = blue }, // 파란 배경 공백 -> emit
         .{ .row = 0, .col = 1, .codepoint = ' ', .style = .{} }, // 기본 배경 공백 -> skip
+        .{ .row = 0, .col = 2, .codepoint = 0, .style = blue }, // 미기록 cell + 파란 배경(BCE) -> emit
     };
     const cells = try buildNativeCellsFromGlyphQuads(allocator, empty_frame, &draw_cells, .{ .r = 255, .g = 255, .b = 255 });
     defer allocator.free(cells);
 
-    try std.testing.expectEqual(@as(usize, 1), cells.len);
-    try std.testing.expectEqual(@as(u32, 0xFF0000FF), cells[0].background);
-    // sentinel UV(-1): 셰이더가 atlas를 sampling하지 않고 배경만 칠한다.
-    try std.testing.expectEqual(@as(f32, -1.0), cells[0].u0);
-    try std.testing.expectEqual(@as(u16, 0), cells[0].col);
+    // space(0x20)와 미기록(0) 둘 다 배경이 있으면 배경 전용 cell로 나온다(기본 배경 공백만 skip).
+    try std.testing.expectEqual(@as(usize, 2), cells.len);
+    for (cells) |cell| {
+        try std.testing.expectEqual(@as(u32, 0xFF0000FF), cell.background);
+        // sentinel UV(-1): 셰이더가 atlas를 sampling하지 않고 배경만 칠한다.
+        try std.testing.expectEqual(@as(f32, -1.0), cell.u0);
+    }
 }
 
 test "background projection packs glyph cell background and leaves default as zero" {

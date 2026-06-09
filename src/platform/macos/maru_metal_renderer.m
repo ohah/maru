@@ -40,6 +40,18 @@ MaruMetalRenderer *maru_metal_renderer_create(id<MTLDevice> device, MTLPixelForm
     descriptor.vertexFunction = [library newFunctionWithName:@"maru_cell_vertex"];
     descriptor.fragmentFunction = [library newFunctionWithName:@"maru_cell_fragment"];
     descriptor.colorAttachments[0].pixelFormat = pixel_format;
+    // premultiplied-alpha over 블렌딩을 켠다. 셰이더는 cell quad를 premultiplied(rgb는 이미 alpha를
+    // 곱한 값, alpha=coverage 또는 1)로 낸다. 블렌딩이 꺼져 있으면 default 배경 glyph cell의 여백
+    // (coverage 0 -> float4(0,0,0,0))이 clear color 대신 검정으로 덮여, 밝은 theme에선 글자마다
+    // 검은 박스가 생긴다. over 블렌딩으로 여백이 clear(=theme 배경)에 합성되게 한다. 배경색 cell은
+    // alpha=1이라 그대로 불투명하게 덮는다.
+    descriptor.colorAttachments[0].blendingEnabled = YES;
+    descriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+    descriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+    descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+    descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    descriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    descriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
     id<MTLRenderPipelineState> pipeline =
         [device newRenderPipelineStateWithDescriptor:descriptor error:NULL];
     if (pipeline == nil) {

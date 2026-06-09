@@ -884,13 +884,24 @@ void maru_macos_coretext_smoke_rasterize_glyph(
             NULL,
             1
         );
+        // 수직은 모든 glyph를 공통 baseline에 앉혀 정렬한다(이전엔 ink bounds 기준 가운데
+        // 정렬이라 글자마다 baseline이 달라 'm'은 위로 'a'는 아래로 흔들렸다). CTFontDrawGlyphs는
+        // position.y를 baseline으로 쓰므로(이 context는 y-up), baseline = descent + 위아래
+        // 여백/2로 두면 셀 안에서 일관된 줄에 글자가 앉는다. 수평은 정사각 slot 안에서 가운데로
+        // 둔다(advance 폭 기반 cell은 다음 단계). line height가 slot보다 크면 위/아래 약간 잘림.
+        const CGFloat ascent = CTFontGetAscent(draw_font);
+        const CGFloat descent = CTFontGetDescent(draw_font);
+        const CGFloat line_height = ascent + descent;
         CGFloat x = -bounds.origin.x + floor(((CGFloat)width_px - bounds.size.width) / 2.0);
-        CGFloat y = -bounds.origin.y + floor(((CGFloat)height_px - bounds.size.height) / 2.0);
+        CGFloat y = descent;
+        if (line_height > 0.0 && line_height <= (CGFloat)height_px) {
+            y = descent + floor(((CGFloat)height_px - line_height) / 2.0);
+        }
         if (!isfinite((double)x)) {
             x = 0.0;
         }
         if (!isfinite((double)y)) {
-            y = (CGFloat)height_px * 0.75;
+            y = (CGFloat)height_px * 0.2;
         }
         // ink box가 slot보다 큰 glyph(큰 CJK/이모지)는 centering 값이 음수가 되어 glyph가
         // bitmap 왼쪽/아래로 벗어난다. 그러면 잉크가 잘려 non_clear pixel이 0이 되고, 실제로는

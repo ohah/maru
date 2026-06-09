@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 13u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 14u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -229,7 +229,8 @@ int32_t maru_macos_app_dev_session_scroll_page(
     MaruAppHostDevSession *session,
     int32_t delta_pages
 );
-/* 마우스 선택. kind 1=down(시작) 2=drag(확장) 3=up(확정 — 이동 없으면 클릭으로 보고 해제).
+/* 마우스 선택. kind 1=down(시작) 2=drag(확장) 3=up(확정 — 드래그 선택에서 이동 없으면 클릭으로
+   보고 해제) 4=더블클릭(단어 선택, soft-wrap 경계 너머까지 확장) 5=트리플클릭(논리 줄 선택).
    좌표는 backing 픽셀(좌상단 원점) — 셀 변환은 Zig가 cell 메트릭으로 한다. */
 int32_t maru_macos_app_dev_session_mouse(
     MaruAppHostDevSession *session,

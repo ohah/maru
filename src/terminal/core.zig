@@ -283,16 +283,33 @@ pub const TerminalCore = struct {
             return start + 3;
         }
         if (mode == 2) {
-            // colon 형식은 colorspace 컴포넌트를 건너뛰어 r,g,b를 한 칸 뒤에서 읽는다.
-            const rgb_start = if (colon_form) start + 3 else start + 2;
-            if (rgb_start + 2 < count) {
+            if (colon_form) {
+                // colon 형식은 mode 뒤의 colon sub-parameter가 [r,g,b](3개) 또는
+                // [colorspace,r,g,b](4개, colorspace는 빈 '::'일 수 있음)다. colorspace가
+                // 있는지 개수로 정해진 게 아니므로(38:2:r:g:b처럼 생략 가능) mode 뒤 colon
+                // 컴포넌트 수를 세어, r,g,b는 항상 마지막 3개로 읽는다. 이전에는 colorspace가
+                // 항상 있다고 가정해 38:2:r:g:b(5컴포넌트)를 통째로 버렸다.
+                var n: usize = 0;
+                while (start + 2 + n < count and self.csi_subparam[start + 2 + n]) : (n += 1) {}
+                if (n >= 3) {
+                    const rgb_start = start + 2 + (n - 3);
+                    const color: types.Color = .{ .rgb = .{
+                        .r = @intCast(@min(self.csi_params[rgb_start], 255)),
+                        .g = @intCast(@min(self.csi_params[rgb_start + 1], 255)),
+                        .b = @intCast(@min(self.csi_params[rgb_start + 2], 255)),
+                    } };
+                    if (foreground) self.pen.foreground = color else self.pen.background = color;
+                    return start + 2 + n;
+                }
+            } else if (start + 4 < count) {
+                // 세미콜론 형식 38;2;r;g;b — r,g,b가 mode 바로 뒤.
                 const color: types.Color = .{ .rgb = .{
-                    .r = @intCast(@min(self.csi_params[rgb_start], 255)),
-                    .g = @intCast(@min(self.csi_params[rgb_start + 1], 255)),
-                    .b = @intCast(@min(self.csi_params[rgb_start + 2], 255)),
+                    .r = @intCast(@min(self.csi_params[start + 2], 255)),
+                    .g = @intCast(@min(self.csi_params[start + 3], 255)),
+                    .b = @intCast(@min(self.csi_params[start + 4], 255)),
                 } };
                 if (foreground) self.pen.foreground = color else self.pen.background = color;
-                return rgb_start + 3;
+                return start + 5;
             }
         }
         // 형식이 안 맞으면 나머지 파라미터를 버린다.
@@ -601,7 +618,9 @@ pub const TerminalCore = struct {
         // 서 있어도 소비하지 않도록 먼저 끄고, putCell이 채우다 마지막 칸에서 다시 세운
         // pending_wrap도 끝나고 끈다(탭이 wrap을 남기지 않게).
         self.pending_wrap = false;
-        const next_tab = @min(self.size.cols, ((self.cursor.col / 8) + 1) * 8);
+        // 다음 8-탭스톱. 포화 곱셈(*|)으로, cols가 maxInt(u16)까지 커도(거대 창) 마지막 탭에서
+        // (col/8+1)*8이 u16을 넘겨 패닉하지 않게 한다. @min은 곱셈 뒤라 포화로 막아야 한다.
+        const next_tab = @min(self.size.cols, ((self.cursor.col / 8) + 1) *| 8);
         while (self.cursor.col < next_tab and !self.pending_wrap) {
             const before = self.cursor.col;
             self.putCell(' ');
@@ -616,25 +635,24 @@ pub const TerminalCore = struct {
         // 전에 다음 줄 첫 칸으로 넘긴다(바닥이면 scroll). 이렇게 다음 글자 시점에 wrap해야 줄을
         // 정확히 채운 마지막 글자마다 빈 줄이 끼지 않는다(표준 VT 동작, zsh prompt 등이 의존).
         if (self.pending_wrap) {
-            self.pending_wrap = false;
+            // 다음 줄로 넘긴다. lineFeed가 pending_wrap을 끄므로 여기서 따로 끄지 않는다.
             self.cursor.col = 0;
             self.lineFeed();
         }
         if (self.cursor.col >= self.size.cols) self.cursor.col = self.size.cols - 1;
         if (self.cursor.row >= self.size.rows) self.cursor.row = self.size.rows - 1;
 
-        const requested_width = width.cellWidth(codepoint);
+        const cell_width: u2 = width.cellWidth(codepoint);
         // wide glyph(2칸)가 줄 끝(마지막 칸, 1칸만 남음)에 안 들어가면 통째로 다음 줄로 넘긴다
         // (이전 줄 마지막 칸은 빈칸으로 남는다). grid는 항상 cols>=2라(clampGridSize) 넘긴 뒤엔
         // 반드시 들어가므로, 칸을 줄이는 degrade 없이 그대로 width 2로 쓴다.
-        if (requested_width == 2 and self.cursor.col + 1 >= self.size.cols) {
+        if (cell_width == 2 and self.cursor.col + 1 >= self.size.cols) {
             self.cursor.col = 0;
             self.lineFeed();
         }
 
         const row = self.cursor.row;
         const col = self.cursor.col;
-        const cell_width: u2 = requested_width;
 
         self.clearCellForWrite(row, col);
         if (cell_width == 2) self.clearCellForWrite(row, col + 1);
@@ -694,6 +712,11 @@ pub const TerminalCore = struct {
 
     fn lineFeed(self: *TerminalCore) void {
         if (self.size.rows == 0) return;
+        // LF는 deferred autowrap을 무효화한다. 비-scroll 분기는 markCursorMoveDirty가 끄지만,
+        // scroll 분기(scrollUpOneLine)는 그걸 안 거치므로 여기서 한 번에 끈다. 안 그러면 마지막
+        // 행이 꽉 찬(pending_wrap) 상태에서 bare LF가 와도 플래그가 남아, 다음 printable 글자가
+        // 또 한 줄 내려가(scroll) 직전 줄을 잃는다(이중 스크롤).
+        self.pending_wrap = false;
         if (self.cursor.row + 1 < self.size.rows) {
             const old_cursor = self.cursor;
             self.cursor.row += 1;
@@ -1412,4 +1435,48 @@ test "the grid is clamped to at least 2 columns so wide glyphs never write out o
     // resize도 같은 최소 크기를 보장한다.
     try core.resize(1, 4);
     try std.testing.expectEqual(@as(u16, 2), core.size.cols);
+}
+
+test "a bottom-row line feed clears pending wrap so the next char does not double-scroll" {
+    // 바닥 행이 꽉 차(pending_wrap) bare LF가 오면 scroll이 일어나는데, pending_wrap이 안 지워지면
+    // 다음 printable 글자가 또 scroll해 직전 줄을 잃었다(이중 스크롤). lineFeed가 pending_wrap을
+    // 끄므로 ABCD가 row 0에 보존되고 X가 row 1에 와야 한다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("\r\nABCD"); // row 1을 채움 -> pending_wrap at (1,3)
+    try core.write("\n"); // 바닥 bare LF -> scrollUpOneLine 한 번(ABCD -> row 0), 컬럼은 보존
+    try core.write("X"); // pending_wrap stale면 또 scroll돼 ABCD 유실. 고쳐지면 한 번만 scroll.
+    // 핵심: ABCD가 row 0에 보존된다(버그면 두 번 scroll돼 row 0이 빈칸). bare LF는 컬럼을
+    // 보존하므로 X는 (1,3)에 온다.
+    try std.testing.expectEqual(@as(u21, 'A'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'D'), core.cells[core.index(0, 3)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'X'), core.cells[core.index(1, 3)].codepoint);
+}
+
+test "SGR colon direct color without a colorspace component (38:2:r:g:b) sets RGB" {
+    // ITU colon form은 colorspace 슬롯이 생략될 수 있다(38:2:r:g:b, 5컴포넌트). 이전엔 colorspace가
+    // 항상 있다고 가정해 색을 통째로 버렸다. r,g,b는 colon 컴포넌트의 마지막 3개로 읽어야 한다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    try core.write("\x1b[38:2:10:20:30mA");
+    try std.testing.expectEqual(
+        types.Color{ .rgb = .{ .r = 10, .g = 20, .b = 30 } },
+        core.cells[core.index(0, 0)].style.foreground,
+    );
+    // 빈 colorspace(38:2::r:g:b)와 colorspace 있는(38:2:1:r:g:b) 6컴포넌트도 여전히 정확.
+    try core.write("\x1b[38:2::40:50:60mB");
+    try std.testing.expectEqual(
+        types.Color{ .rgb = .{ .r = 40, .g = 50, .b = 60 } },
+        core.cells[core.index(0, 1)].style.foreground,
+    );
+}
+
+test "a tab near the last column does not overflow the tab-stop arithmetic" {
+    // cols가 maxInt(u16)까지 허용되므로(거대 창), 마지막 칸 근처 탭에서 (col/8+1)*8이 u16을 넘길 수
+    // 있다. 포화 곱셈으로 패닉/OOB 없이 마지막 칸에 멈춰야 한다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 65535, .rows = 1 });
+    defer core.deinit();
+    try core.write("\x1b[65535G"); // CHA -> 마지막 칸(65534)으로 clamp
+    try core.write("\t"); // 패닉하면 안 됨
+    try std.testing.expectEqual(@as(u16, 65534), core.cursor.col);
 }

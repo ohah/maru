@@ -29,7 +29,9 @@ const placeholder_cell_height_px: u32 = 24;
 fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px: u32, cell_height_px: u32) terminal.Size {
     const cell_w = if (cell_width_px > 0) cell_width_px else placeholder_cell_width_px;
     const cell_h = if (cell_height_px > 0) cell_height_px else placeholder_cell_height_px;
-    const cols = @max(@as(u32, 1), backing_width_px / cell_w);
+    // cols는 최소 2를 보장한다. TerminalCore가 wide glyph continuation 때문에 cols>=2를 요구하고
+    // (clampGridSize), PTY winsize도 같은 grid를 써야 셸과 어긋나지 않는다.
+    const cols = @max(@as(u32, 2), backing_width_px / cell_w);
     const rows = @max(@as(u32, 1), backing_height_px / cell_h);
     return .{
         .cols = @intCast(@min(cols, std.math.maxInt(u16))),
@@ -578,5 +580,6 @@ test "gridFromBacking divides backing pixels by cell size with placeholder + cla
     try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 25 }, gridFromBacking(960, 600, 0, 0));
     // floor 동작 + 최소 1×1.
     try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(25, 16, 10, 16));
-    try std.testing.expectEqual(terminal.Size{ .cols = 1, .rows = 1 }, gridFromBacking(1, 1, 100, 100));
+    // cols는 최소 2(TerminalCore가 wide glyph continuation 때문에 요구). 1픽셀/100px cell이라도 2칸.
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(1, 1, 100, 100));
 }

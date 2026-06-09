@@ -170,17 +170,31 @@ pub fn buildNativeCellsFromGlyphQuads(
 
             // 커서 cell에 그려진 glyph를 찾아 같은 모양을 반전색으로 다시 그린다(없으면 솔리드 블록).
             var glyph_at_cursor: ?renderer.GlyphQuad = null;
+            var glyph_col = cur.col;
             for (frame.glyphs) |glyph| {
                 if (glyph.run.row == cur.row and glyph.run.col == cur.col and glyph.run.codepoint != ' ') {
                     glyph_at_cursor = glyph;
                     break;
                 }
             }
+            // 커서가 wide glyph의 continuation 칸(base.col+1)에 있으면 base를 찾아 그 위에 그린다.
+            // 안 그러면 1칸 솔리드 블록이 wide glyph의 오른쪽 절반만 덮어 글자가 쪼개져 보인다.
+            if (glyph_at_cursor == null and cur.col > 0) {
+                for (frame.glyphs) |glyph| {
+                    if (glyph.run.row == cur.row and glyph.run.col == cur.col - 1 and
+                        glyph.run.cell_width == 2 and glyph.run.codepoint != ' ')
+                    {
+                        glyph_at_cursor = glyph;
+                        glyph_col = cur.col - 1;
+                        break;
+                    }
+                }
+            }
 
             if (glyph_at_cursor) |glyph| {
                 cells.appendAssumeCapacity(.{
                     .row = cur.row,
-                    .col = cur.col,
+                    .col = glyph_col,
                     .width = glyph.run.cell_width,
                     .codepoint = glyph.run.codepoint,
                     .slot_id = glyph.slot.id,
@@ -527,6 +541,43 @@ test "cursor overlay over a wide glyph projects a width-2 inverted block" {
     defer allocator.free(cells);
     const cursor_cell = cells[cells.len - 1];
     try std.testing.expectEqual(@as(u16, 2), cursor_cell.width); // wide glyph 폭 유지
+    try std.testing.expectEqual(@as(f32, 0.5), cursor_cell.u0); // 같은 glyph UV 재사용
+}
+
+test "cursor overlay on a wide glyph's continuation cell covers the base glyph, not just the right half" {
+    const allocator = std.testing.allocator;
+    const glyph = renderer.GlyphQuad{
+        .run = .{
+            .row = 0,
+            .col = 0,
+            .cell_width = 2,
+            .codepoint = '한',
+            .font_id = 1,
+            .glyph_id = 1,
+            .cache_key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1 },
+        },
+        .slot = .{ .id = 9, .key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1 }, .x_px = 0, .y_px = 0, .width_px = 16, .height_px = 16, .upload_bytes = 0, .generation = 0 },
+        .uv = .{ .u0 = 0.5, .v0 = 0.6, .u1 = 0.7, .v1 = 0.8 },
+    };
+    var glyphs = [_]renderer.GlyphQuad{glyph};
+    // 커서가 wide glyph의 continuation 칸(col 1)에 놓였다(CUF/CHA로 가능).
+    var overlays = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 1, .visible = true } }};
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 4, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 1 },
+        .dirty = null,
+        .glyphs = &glyphs,
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .cursor = .{ .block = .{ .r = 0, .g = 255, .b = 0 }, .text = .{ .r = 0, .g = 0, .b = 0 } },
+    });
+    defer allocator.free(cells);
+    const cursor_cell = cells[cells.len - 1];
+    try std.testing.expectEqual(@as(u16, 0), cursor_cell.col); // base col(0)에 그려 오른쪽 절반만 덮지 않음
+    try std.testing.expectEqual(@as(u16, 2), cursor_cell.width); // wide glyph 통째로
     try std.testing.expectEqual(@as(f32, 0.5), cursor_cell.u0); // 같은 glyph UV 재사용
 }
 

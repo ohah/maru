@@ -219,15 +219,31 @@ pub const TerminalCore = struct {
         return self.sb_wrapped[(self.sb_head + i) % self.sb_wrapped.len];
     }
 
-    fn pushScrollback(self: *TerminalCore, row_cells: []const types.Cell, wrapped_flag: bool) void {
-        if (self.max_scrollback == 0) return;
+    /// 스크롤백을 비운다(ED 3). 행 버퍼는 해제하고 ring 슬롯 배열은 유지해 다음 push가 재할당
+    /// 없이 다시 쓴다. 뷰포트는 바닥으로 스냅한다(지워진 과거를 보고 있을 수 없으니).
+    fn clearScrollback(self: *TerminalCore) void {
+        for (self.scrollback) |*slot| {
+            if (slot.*) |cells_row| {
+                self.allocator.free(cells_row);
+                slot.* = null;
+            }
+        }
+        self.sb_head = 0;
+        self.sb_count = 0;
+        self.view_offset = 0;
+    }
+
+    /// 행을 스크롤백에 보관한다. OOM 등으로 실제 보관에 실패하면 false — 호출자(scroll-lock)는
+    /// 보관된 경우에만 view_offset을 보정해야 보던 위치가 어긋나지 않는다.
+    fn pushScrollback(self: *TerminalCore, row_cells: []const types.Cell, wrapped_flag: bool) bool {
+        if (self.max_scrollback == 0) return false;
         if (self.scrollback.len == 0) {
-            const ring = self.allocator.alloc(?[]types.Cell, self.max_scrollback) catch return;
+            const ring = self.allocator.alloc(?[]types.Cell, self.max_scrollback) catch return false;
             @memset(ring, null);
             // wrap 병렬 ring도 함께 할당한다. 실패하면 둘 다 포기해 두 ring 길이를 항상 같게 유지한다.
             const wring = self.allocator.alloc(bool, self.max_scrollback) catch {
                 self.allocator.free(ring);
-                return;
+                return false;
             };
             @memset(wring, false);
             self.scrollback = ring;
@@ -240,12 +256,12 @@ pub const TerminalCore = struct {
             if (existing.len == row_cells.len) {
                 @memcpy(existing, row_cells);
             } else {
-                const dup = self.allocator.dupe(types.Cell, row_cells) catch return; // OOM이면 옛 행 유지
+                const dup = self.allocator.dupe(types.Cell, row_cells) catch return false; // OOM이면 옛 행 유지
                 self.allocator.free(existing);
                 self.scrollback[idx] = dup;
             }
         } else {
-            self.scrollback[idx] = self.allocator.dupe(types.Cell, row_cells) catch return;
+            self.scrollback[idx] = self.allocator.dupe(types.Cell, row_cells) catch return false;
         }
         self.sb_wrapped[idx] = wrapped_flag;
         if (self.sb_count == cap) {
@@ -253,6 +269,7 @@ pub const TerminalCore = struct {
         } else {
             self.sb_count += 1;
         }
+        return true;
     }
 
     pub fn write(self: *TerminalCore, bytes: []const u8) !void {
@@ -809,10 +826,12 @@ pub const TerminalCore = struct {
         self.pending_wrap = false;
         const blank: types.Cell = .{ .style = self.pen };
         switch (mode) {
-            // 2/3: 화면 전체.
+            // 2/3: 화면 전체. 3(xterm E3)은 저장된 줄(스크롤백)까지 지운다 — `clear`가 보내는
+            // \e[3J의 핵심 의미로, 비밀 출력 후 history를 비우는 용도다.
             2, 3 => {
                 @memset(self.cells, blank);
                 @memset(self.wrapped, false);
+                if (mode == 3) self.clearScrollback();
                 self.dirty = fullDirty(self.size);
             },
             // 1: 화면 시작 ~ 커서까지.
@@ -1085,7 +1104,7 @@ pub const TerminalCore = struct {
         var pr: usize = 0;
         while (pr < push_count) : (pr += 1) {
             if (!outputRowBlank(scratch, pr, new_cols)) {
-                self.pushScrollback(scratch[pr * new_cols ..][0..new_cols], swrap[pr]);
+                _ = self.pushScrollback(scratch[pr * new_cols ..][0..new_cols], swrap[pr]);
             }
         }
 
@@ -1464,9 +1483,10 @@ pub const TerminalCore = struct {
         if (bottom < top or bottom >= self.size.rows) return;
 
         if (push_history) {
-            self.pushScrollback(self.cells[self.index(top, 0)..][0..self.size.cols], self.wrapped[top]);
+            const pushed = self.pushScrollback(self.cells[self.index(top, 0)..][0..self.size.cols], self.wrapped[top]);
             // 과거를 보는 중(view_offset>0)이면 같은 내용을 계속 보도록 offset도 올린다(scroll-lock).
-            if (self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
+            // 단 보관이 실패(OOM)했으면 보정하지 않는다 — 안 그러면 뷰가 내용과 한 줄씩 어긋난다.
+            if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
         }
 
         var row: u16 = top + 1;
@@ -2994,4 +3014,20 @@ test "DA2 (CSI > c) is answered and '>'-marked sequences never leak into SGR" {
     try core.write("\x1b[>4;2m"); // modifyOtherKeys — SGR(4;2=underline)로 새면 안 된다
     try core.write("X");
     try std.testing.expect(!core.cells[0].style.underline);
+}
+
+test "ED 3 (CSI 3J) clears the scrollback while ED 2 keeps it" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\nd"); // 스크롤백 2줄 생성
+    try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
+    try core.write("\x1b[2J");
+    try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen()); // ED 2는 화면만
+    core.scrollViewport(1);
+    try std.testing.expectEqual(@as(usize, 1), core.view_offset);
+    try core.write("\x1b[3J"); // E3: history까지 비우고 뷰포트도 바닥으로
+    try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen());
+    try std.testing.expectEqual(@as(usize, 0), core.view_offset);
+    try core.write("x\r\ny\r\nz"); // 비운 뒤 ring 재사용이 정상인지(커서가 바닥이라 2회 스크롤)
+    try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
 }

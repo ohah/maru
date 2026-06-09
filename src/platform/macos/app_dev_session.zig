@@ -176,6 +176,7 @@ pub const DevSession = struct {
 
         self.app_window = .{ .tabs = self.surfaces[0..] };
         self.runtime = app.SurfaceRuntime.init(allocator);
+        self.runtime.debug_input = diag_gate.maruDebugEnabled(); // MARU_DEBUG면 zsh redraw 시퀀스 로깅
         self.runtime_initialized = true;
         _ = try self.live_pty.attachSurface(&self.runtime, &self.surfaces[0]);
 

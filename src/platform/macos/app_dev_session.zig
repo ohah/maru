@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 14;
+pub const abi_version: u32 = 15;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -371,6 +371,15 @@ pub const DevSession = struct {
             else => return,
         }
         self.metal_dirty = true;
+    }
+
+    /// 클립보드 텍스트 붙여넣기(Cmd+V). 인코딩(개행 정규화 + bracketed paste 감싸기)은 core가
+    /// 하고, 여기선 한 번의 writeInput으로 보낸다(부분 쓰기 실패로 감싸기가 깨지지 않게).
+    pub fn pasteText(self: *DevSession, bytes: []const u8) void {
+        if (!self.surface_initialized or bytes.len == 0) return;
+        const encoded = self.surfaces[0].core.encodePaste(self.allocator, bytes) catch return;
+        defer self.allocator.free(encoded);
+        self.runtime.writeInput(self.surfaces[0].id, .{ .bytes = encoded }) catch {};
     }
 
     /// 선택 텍스트를 추출해 내부 버퍼로 돌려준다(없으면 빈 슬라이스). Swift가 NSPasteboard에 쓴다.

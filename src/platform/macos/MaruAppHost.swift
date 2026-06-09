@@ -469,6 +469,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             copySelectionToPasteboard()
             return
         }
+        // Cmd+V: NSPasteboard의 텍스트를 Zig에 넘긴다 — 개행 정규화·bracketed paste 감싸기는
+        // Zig가 한다(클립보드 읽기만 OS 소유).
+        if event.modifierFlags.contains(.command),
+           event.charactersIgnoringModifiers?.lowercased() == "v" {
+            pastePasteboardText()
+            return
+        }
         // Shift+PageUp/Down는 PTY로 보내지 않고 스크롤백 뷰포트를 한 화면씩 스크롤한다. page 크기
         // (rows-1) 계산은 권위 있는 rows를 가진 Zig가 하고, 여기선 방향(위 +1 / 아래 -1)만 넘긴다.
         if event.modifierFlags.contains(.shift), let session = devSession {
@@ -516,6 +523,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // Cmd+C: Zig가 추출한 선택 텍스트(UTF-8, Zig 소유 버퍼)를 NSPasteboard에 쓴다 — 클립보드는
     // OS API라 Swift가 소유하는 경계다. 선택이 없으면 아무것도 하지 않는다(셸에 ^C를 보내지 않는
     // 것은 macOS 터미널 관례와 동일 — 인터럽트는 Ctrl+C).
+    private func pastePasteboardText() {
+        guard let session = devSession,
+              let text = NSPasteboard.general.string(forType: .string),
+              !text.isEmpty else { return }
+        var bytes = Array(text.utf8)
+        _ = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_dev_session_paste_text(session, buf.baseAddress, buf.count)
+        }
+    }
+
     private func copySelectionToPasteboard() {
         guard let session = devSession else { return }
         var ptr: UnsafePointer<UInt8>? = nil

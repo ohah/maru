@@ -204,6 +204,19 @@ pub export fn maru_macos_app_dev_session_mouse(
     return @intFromEnum(Status.ok);
 }
 
+// 클립보드 붙여넣기. 개행 정규화(\n->\r)와 bracketed paste(DECSET 2004) 감싸기는 Zig가 한다.
+pub export fn maru_macos_app_dev_session_paste_text(
+    session: ?*DevSession,
+    bytes: ?[*]const u8,
+    len: usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    if (len == 0) return @intFromEnum(Status.ok);
+    const ptr = bytes orelse return @intFromEnum(Status.null_out);
+    dev_session.pasteText(ptr[0..len]);
+    return @intFromEnum(Status.ok);
+}
+
 // 선택 텍스트 추출. 반환 버퍼는 Zig 소유로 다음 copy_text/destroy까지 유효하다. 비어 있으면 len 0.
 pub export fn maru_macos_app_dev_session_copy_text(
     session: ?*DevSession,

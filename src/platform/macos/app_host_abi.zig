@@ -217,6 +217,23 @@ pub export fn maru_macos_app_dev_session_paste_text(
     return @intFromEnum(Status.ok);
 }
 
+// Cmd+클릭 위치의 URL(backing px). 버퍼는 Zig 소유로 다음 url_at/destroy까지 유효, 없으면 len 0.
+pub export fn maru_macos_app_dev_session_url_at(
+    session: ?*DevSession,
+    x_px: f64,
+    y_px: f64,
+    out_ptr: ?*?[*]const u8,
+    out_len: ?*usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
+    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const url = dev_session.urlAt(x_px, y_px);
+    ptr_out.* = if (url.len > 0) url.ptr else null;
+    len_out.* = url.len;
+    return @intFromEnum(Status.ok);
+}
+
 // 선택 텍스트 추출. 반환 버퍼는 Zig 소유로 다음 copy_text/destroy까지 유효하다. 비어 있으면 len 0.
 pub export fn maru_macos_app_dev_session_copy_text(
     session: ?*DevSession,

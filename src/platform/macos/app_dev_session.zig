@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 15;
+pub const abi_version: u32 = 16;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -170,6 +170,8 @@ pub const DevSession = struct {
     wheel_accum: f64 = 0,
     // copyText()가 돌려준 추출 텍스트의 소유 버퍼(다음 copyText/destroy까지 유효 — ABI 수명 계약).
     copy_buffer: []u8 = &.{},
+    // urlAt()이 돌려준 URL의 소유 버퍼(다음 urlAt/destroy까지 유효).
+    url_buffer: []u8 = &.{},
     // 현재 선택이 down(1) 드래그로 시작했는지. 더블/트리플클릭(4/5) 선택은 직후의 up(3)이
     // "이동 없는 클릭 -> 해제" 판정을 타면 안 되므로 이 플래그로 구분한다.
     mouse_drag_selecting: bool = false,
@@ -382,6 +384,25 @@ pub const DevSession = struct {
         self.runtime.writeInput(self.surfaces[0].id, .{ .bytes = encoded }) catch {};
     }
 
+    /// Cmd+클릭 위치의 URL(없으면 빈 슬라이스). Swift가 NSWorkspace로 연다 — URL 인식(단어 경계,
+    /// soft-wrap 이어 붙임, http(s) 검사, 끝 문장부호 다듬기)은 core가 소유한다.
+    pub fn urlAt(self: *DevSession, x_px: f64, y_px: f64) []const u8 {
+        if (!self.surface_initialized) return &.{};
+        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return &.{};
+        const core = &self.surfaces[0].core;
+        const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
+        const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
+        const col: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(x_px, 0) / cw)), 0, @as(i64, core.size.cols) - 1));
+        const row: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(y_px, 0) / ch)), 0, @as(i64, core.size.rows) - 1));
+        if (self.url_buffer.len > 0) {
+            self.allocator.free(self.url_buffer);
+            self.url_buffer = &.{};
+        }
+        const url = core.extractUrlAt(self.allocator, row, col) catch null orelse return &.{};
+        self.url_buffer = url;
+        return self.url_buffer;
+    }
+
     /// 선택 텍스트를 추출해 내부 버퍼로 돌려준다(없으면 빈 슬라이스). Swift가 NSPasteboard에 쓴다.
     pub fn copyText(self: *DevSession) []const u8 {
         if (!self.surface_initialized) return &.{};
@@ -588,6 +609,7 @@ pub const DevSession = struct {
 
     pub fn deinit(self: *DevSession) void {
         if (self.copy_buffer.len > 0) self.allocator.free(self.copy_buffer);
+        if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
 
         self.metal_buffer.deinit(self.allocator);
         if (self.live_initialized) {

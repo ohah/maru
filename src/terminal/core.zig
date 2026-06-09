@@ -277,13 +277,22 @@ pub const TerminalCore = struct {
     /// 논리 줄로 이어지므로 행을 넘어 계속 확장한다(wrap된 긴 URL을 통째로 선택). 공백을
     /// 클릭하면 선택하지 않는다(해제).
     pub fn selectWordAt(self: *TerminalCore, viewport_row: u16, col: u16) void {
-        const abs = self.absRowFromViewport(viewport_row);
-        const row_cells = self.absRow(abs) orelse return;
-        const c = @min(col, @as(u16, @intCast(row_cells.len -| 1)));
-        if (isBlankCell(row_cells[c])) {
+        const bounds = self.wordBoundsAt(viewport_row, col) orelse {
             self.selectionClear();
             return;
-        }
+        };
+        self.selection_anchor = bounds.start;
+        self.selection_head = bounds.end;
+        self.dirty = fullDirty(self.size);
+    }
+
+    /// 클릭 위치가 속한 비공백 run(단어)의 절대 좌표 경계. soft-wrap을 넘어 확장한다.
+    /// 공백 위치면 null.
+    fn wordBoundsAt(self: *const TerminalCore, viewport_row: u16, col: u16) ?struct { start: types.SelectionPoint, end: types.SelectionPoint } {
+        const abs = self.absRowFromViewport(viewport_row);
+        const row_cells = self.absRow(abs) orelse return null;
+        const c = @min(col, @as(u16, @intCast(row_cells.len -| 1)));
+        if (isBlankCell(row_cells[c])) return null;
 
         // 왼쪽 경계: 행 안에서 공백까지, 행 시작에 닿으면 이전 행이 soft-wrap으로 이어질 때 계속.
         var start_row = abs;
@@ -317,9 +326,49 @@ pub const TerminalCore = struct {
             end_col = 0;
         }
 
-        self.selection_anchor = .{ .row = start_row, .col = start_col };
-        self.selection_head = .{ .row = end_row, .col = end_col };
-        self.dirty = fullDirty(self.size);
+        return .{ .start = .{ .row = start_row, .col = start_col }, .end = .{ .row = end_row, .col = end_col } };
+    }
+
+    /// Cmd+클릭 위치의 URL을 추출한다(없으면 null). 클릭 셀이 속한 비공백 run(soft-wrap 포함)
+    /// 안에서 http:// 또는 https:// 부터 run 끝까지를 URL로 보고, 끝에 붙은 문장 부호(괄호/마침표
+    /// 등)는 다듬는다. 호출자가 free한다.
+    pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, viewport_row: u16, col: u16) !?[]u8 {
+        const bounds = self.wordBoundsAt(viewport_row, col) orelse return null;
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        var abs = bounds.start.row;
+        while (abs <= bounds.end.row) : (abs += 1) {
+            const row_cells = self.absRow(abs) orelse break;
+            const from: usize = if (abs == bounds.start.row) bounds.start.col else 0;
+            const to: usize = if (abs == bounds.end.row) @min(@as(usize, bounds.end.col) + 1, row_cells.len) else row_cells.len;
+            var c = from;
+            while (c < to) : (c += 1) {
+                const cell = row_cells[c];
+                if (cell.continuation) continue;
+                var buf: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(cell.codepoint, &buf) catch continue;
+                try out.appendSlice(allocator, buf[0..n]);
+            }
+        }
+        const word = out.items;
+        const start_http = std.mem.indexOf(u8, word, "https://") orelse std.mem.indexOf(u8, word, "http://") orelse {
+            out.deinit(allocator);
+            return null;
+        };
+        // 끝의 흔한 마무리 문장 부호를 다듬는다(예: "(...url)." 같은 산문 속 URL).
+        var end_idx = word.len;
+        while (end_idx > start_http) : (end_idx -= 1) {
+            const ch = word[end_idx - 1];
+            if (ch == '.' or ch == ',' or ch == ')' or ch == ']' or ch == '>' or ch == ';' or ch == '\'' or ch == '"') continue;
+            break;
+        }
+        if (end_idx <= start_http + "http://".len) {
+            out.deinit(allocator);
+            return null; // 스킴만 있고 본문이 없다
+        }
+        const url = try allocator.dupe(u8, word[start_http..end_idx]);
+        out.deinit(allocator);
+        return url;
     }
 
     /// 트리플클릭 줄 선택: 클릭한 행이 속한 논리 줄 전체(soft-wrap된 행들 포함)를 선택한다.
@@ -3738,4 +3787,21 @@ test "encodePaste normalizes newlines and wraps with bracketed paste when DECSET
 
     try core.write("\x1b[?2004l");
     try std.testing.expect(!core.bracketed_paste);
+}
+
+test "extractUrlAt finds an http(s) URL in the clicked word, across soft-wrap, trimming punctuation" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 3 });
+    defer core.deinit();
+    try core.write("see (https://a.bc/dpath)."); // 12칸 wrap: "see (https:/"|"/a.bc/dpath)"|"."
+    try std.testing.expect(core.wrapped[0]);
+
+    // wrap된 URL의 두 번째 행을 Cmd+클릭해도 전체 URL이 나오고, 끝 ")."는 다듬어진다.
+    const url = (try core.extractUrlAt(std.testing.allocator, 1, 3)).?;
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://a.bc/dpath", url);
+
+    // URL이 아닌 단어는 null.
+    try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 0)) == null);
+    // 공백도 null.
+    try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 3)) == null);
 }

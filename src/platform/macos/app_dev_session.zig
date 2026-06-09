@@ -316,12 +316,9 @@ pub const DevSession = struct {
                 bg[col] = if (has_bg) 'B' else '.';
                 if ((cp != 0 and cp != ' ') or has_bg) any = true;
             }
-            // soft-wrap된 행은 비어 보여도 표시한다(reflow가 잘못 합치는지 진단).
-            if (!any and !core.wrapped[row]) continue;
-            // 'w' = 이 행이 다음 행으로 이어지는 soft-wrap(reflow가 합칠 대상), '.' = 하드 줄 끝.
-            const wrap_mark: u8 = if (core.wrapped[row]) 'w' else '.';
-            screen_diag.info("r{d:0>2} {c} t|{s}|", .{ row, wrap_mark, text[0..cols] });
-            screen_diag.info("r{d:0>2} {c} b|{s}|", .{ row, wrap_mark, bg[0..cols] });
+            if (!any) continue;
+            screen_diag.info("r{d:0>2} t|{s}|", .{ row, text[0..cols] });
+            screen_diag.info("r{d:0>2} b|{s}|", .{ row, bg[0..cols] });
         }
     }
 

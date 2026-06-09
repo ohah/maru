@@ -160,13 +160,15 @@ const reflow_cases = [_]ReflowCase{
     // integer overflow로 패닉한다(Ghostty 측 edge). 유효한 오라클 비교가 안 되므로 제외한다.
 };
 
-// 스크롤백 기반 reflow(3b)가 들어와 재활성화한다. 활성 화면을 새 폭에 다시 wrap하고 넘치는 위쪽
-// 행은 스크롤백으로 민다. 아래 케이스는 모두 스크롤백이 안 차는 단일 resize라 활성-only reflow가
-// Ghostty와 일치한다(그리드 + 커서).
-test "reflow matches Ghostty libghostty-vt" {
-    inline for (reflow_cases) |case| {
-        try compareReflowCase(case);
-    }
+// DISABLED: Maru는 커서가 있는 논리 줄을 reflow하지 않고 그대로 둔다(xterm.js의 reflowCursorLine=
+// false 방식 — 셸이 SIGWINCH로 그 줄을 다시 그리게 맡겨 프롬프트 중복을 막는다). 반면 libghostty-vt는
+// 그 줄도 reflow하므로, 커서가 내용 안에 있는 아래 케이스들은 더 이상 그리드/커서가 일치하지 않는다
+// (의도된 분기). shim·케이스·비교 로직은 그대로 두고, 커서가 없는 줄의 reflow 검증으로 확장할 때
+// 재활성화한다.
+test "reflow matches Ghostty libghostty-vt (disabled: Maru skips cursor-line reflow, xterm.js-style)" {
+    _ = &compareReflowCase;
+    _ = reflow_cases;
+    return error.SkipZigTest;
 }
 
 fn compareReflowCase(case: ReflowCase) !void {

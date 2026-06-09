@@ -680,7 +680,8 @@ pub const TerminalCore = struct {
                 total_content += if (self.wrapped[r]) old_cols else self.trimmedRowLen(r);
             }
         }
-        const cap_rows: usize = @as(usize, old_rows) + (total_content + new_cols - 1) / new_cols + 2;
+        // verbatim(커서 줄)+rewrap 혼합이라 상한을 넉넉히 잡는다(2*old_rows + 재배치된 행).
+        const cap_rows: usize = 2 * @as(usize, old_rows) + (total_content + new_cols - 1) / new_cols + 2;
         try self.ensureReflowScratch(cap_rows, new_cols);
         const scratch = self.reflow_cells;
         const swrap = self.reflow_wrapped;
@@ -691,16 +692,48 @@ pub const TerminalCore = struct {
         @memset(scratch[0..new_cols], blank); // 열린 출력 행 0
         var cursor_out_row: ?usize = null;
         var cursor_out_col: u16 = 0;
-        // parked 커서(pending_wrap)는 마지막 칸 다음(논리적으로 한 칸 뒤)에 있으므로 +1로 본다.
-        const eff_cursor_col: u16 = self.cursor.col + @as(u16, if (self.pending_wrap) 1 else 0);
+
+        // 커서가 있는 논리 줄(wrapped run)의 범위. 이 줄은 reflow하지 않고 그대로 둔다 — 셸이
+        // SIGWINCH로 직접 다시 그린다(xterm.js의 reflowCursorLine=false 기본 동작). 커서가 있는 줄을
+        // 재배치하면 커서가 옮겨져, 옛 폭 기준으로 상대 이동(\e[A)하는 셸 redraw가 어긋나 프롬프트가
+        // 중복된다. 그 줄은 셸이 알아서 새 폭으로 다시 그리므로 건드리지 않는 게 안전하다.
+        var cur_start: u16 = self.cursor.row;
+        while (cur_start > 0 and self.wrapped[cur_start - 1]) cur_start -= 1;
+        var cur_end: u16 = self.cursor.row;
+        while (cur_end + 1 < old_rows and self.wrapped[cur_end]) cur_end += 1;
 
         var old_r: u16 = 0;
-        while (old_r < old_rows) : (old_r += 1) {
+        while (old_r < old_rows) {
+            // 커서 줄: reflow 없이 각 옛 행을 그대로(새 폭으로 clip/pad) 출력한다. cur_start는 논리
+            // 줄 시작이라 직전 줄이 닫혀 oc==0이다.
+            if (old_r == cur_start) {
+                var r: u16 = cur_start;
+                while (r <= cur_end) : (r += 1) {
+                    const dst0 = out_rows * new_cols;
+                    @memset(scratch[dst0..][0..new_cols], blank);
+                    const n = @min(old_cols, new_cols);
+                    @memcpy(scratch[dst0..][0..n], self.cells[self.index(r, 0)..][0..n]);
+                    // 폭이 줄어 잘린 wide glyph base를 정리한다(half-glyph가 한 칸에 2칸 폭 렌더 방지).
+                    if (new_cols > 0 and scratch[dst0 + new_cols - 1].width == 2) {
+                        scratch[dst0 + new_cols - 1] = .{};
+                    }
+                    swrap[out_rows] = self.wrapped[r];
+                    if (r == self.cursor.row) {
+                        cursor_out_row = out_rows;
+                        cursor_out_col = @min(self.cursor.col, new_cols - 1);
+                    }
+                    out_rows += 1;
+                }
+                @memset(scratch[out_rows * new_cols ..][0..new_cols], blank);
+                oc = 0;
+                old_r = cur_end + 1;
+                continue;
+            }
+
+            // 그 외 논리 줄은 새 폭으로 다시 wrap한다(이 줄엔 커서가 없다).
             const soft = self.wrapped[old_r];
-            // 기여 길이: soft 행은 꽉 찼으므로 전체, hard 행은 뒤 빈칸을 잘라낸 길이. 커서로 늘리지
-            // 않는다(되돌린 #186 버그 회피).
+            // 기여 길이: soft 행은 꽉 찼으므로 전체, hard 행은 뒤 빈칸을 잘라낸 길이.
             const contrib: u16 = if (soft) old_cols else self.trimmedRowLen(old_r);
-            const is_cursor_row = (old_r == self.cursor.row);
 
             var c: u16 = 0;
             while (c < contrib) : (c += 1) {
@@ -713,27 +746,8 @@ pub const TerminalCore = struct {
                     oc = 0;
                     @memset(scratch[out_rows * new_cols ..][0..new_cols], blank);
                 }
-                if (is_cursor_row and cursor_out_row == null and c == eff_cursor_col) {
-                    cursor_out_row = out_rows;
-                    cursor_out_col = oc;
-                }
                 scratch[out_rows * new_cols + oc] = cell;
                 oc += 1;
-            }
-            // 커서가 이 행의 내용보다 뒤(parked/빈 영역)면, 내용을 안 늘리고 좌표로만 환산한다.
-            if (is_cursor_row and cursor_out_row == null) {
-                if (contrib == 0) {
-                    // 빈 행의 커서는 이어갈 내용이 없으니 가상 행으로 wrap하지 않고 이 출력 행에
-                    // clamp한다(안 그러면 빈 화면 resize가 커서를 멀리 보내 빈 줄을 스크롤백에 밀어냄).
-                    cursor_out_row = out_rows;
-                    cursor_out_col = @min(eff_cursor_col, new_cols - 1);
-                } else {
-                    // 내용 있는 줄 끝 너머: 커서 열을 새 폭으로 wrap한다(exact-fill: 꽉 찬 줄 다음
-                    // 커서는 다음 행 col 0).
-                    const raw: u16 = oc + (eff_cursor_col -| contrib);
-                    cursor_out_row = out_rows + raw / new_cols;
-                    cursor_out_col = raw % new_cols;
-                }
             }
             if (!soft) {
                 // 논리 줄 끝: 부분 출력 행을 hard(wrapped=false)로 닫는다.
@@ -742,6 +756,7 @@ pub const TerminalCore = struct {
                 oc = 0;
                 @memset(scratch[out_rows * new_cols ..][0..new_cols], blank);
             }
+            old_r += 1;
         }
         if (oc > 0) { // soft로 끝났는데 더 옛 행이 없음(방어)
             swrap[out_rows] = false;
@@ -1594,19 +1609,21 @@ test "resize preserves overlapping content when growing" {
     try std.testing.expectEqualStrings("hello   ", dump);
 }
 
-test "resize reflows a wrapped line when shrinking, keeping the cursor row visible" {
+test "resize leaves the cursor's line verbatim when shrinking (shell redraws it)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 1 });
     defer core.deinit();
 
     try core.write("hello");
     try core.resize(3, 1);
 
-    // "hello"가 3칸에서 "hel"/"lo"로 다시 wrap된다. 1행만 보이므로 커서가 있는 아래 행("lo")이
-    // 남고, "hel"은 스크롤백으로 밀려난다(copy-region이라면 "hel"만 남겼겠지만 reflow는 재배치한다).
+    // "hello"는 커서가 있는 줄이므로 reflow하지 않고 그대로 둔다(xterm.js 방식 — 셸이 SIGWINCH로
+    // 다시 그린다). 새 폭(3)으로 clip돼 "hel"이 남고, 커서는 폭 안으로 clamp된다. 스크롤백 push 없음.
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
-    try std.testing.expectEqualStrings("lo ", dump);
-    try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen());
+    try std.testing.expectEqualStrings("hel", dump);
+    try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen());
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col); // col 4 -> clamp 2
 }
 
 test "resize preserves content across multiple rows" {
@@ -2058,43 +2075,43 @@ test "wrapped flag: erase-in-display mode 2 clears all wrap flags" {
     try std.testing.expect(!core.wrapped[0]);
 }
 
-test "reflow: widening joins a soft-wrapped line and the cursor follows" {
+test "reflow: the cursor's wrapped line is left unchanged, not re-wrapped" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
     defer core.deinit();
     try core.write("abcdef"); // 4칸에서 abcd|ef로 soft-wrap, 커서 (1,2)
     try std.testing.expect(core.wrapped[0]);
-    try core.resize(8, 3); // 넓히면 한 줄로 합쳐진다
+    try core.resize(8, 3); // 넓혀도 커서 줄이라 합치지 않고 그대로 둔다(셸이 다시 그림)
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("abcd    \nef      \n        ", dump);
+    try std.testing.expect(core.wrapped[0]); // verbatim이라 wrap 플래그 유지
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
+}
+
+test "reflow: a non-cursor wrapped line IS reflowed (joined on widen)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    try core.write("abcdef\r\n"); // abcd|ef(행0~1)는 wrap, \r\n으로 커서를 행2로 -> abcdef는 커서 줄 아님
+    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
+    try core.resize(8, 3); // 커서가 다른 줄이라 abcdef는 reflow돼 한 줄로 합쳐진다
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("abcdef  \n        \n        ", dump);
     try std.testing.expect(!core.wrapped[0]); // 합쳐져 더는 wrap 아님
-    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
-    try std.testing.expectEqual(@as(u16, 6), core.cursor.col); // "abcdef" 바로 뒤
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row); // 커서(빈 줄)는 한 칸 위로
 }
 
-test "reflow: narrowing splits a line and pushes overflow into scrollback" {
-    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
-    defer core.deinit();
-    try core.write("abcdefghij"); // 8칸에서 abcdefgh|ij, 커서 (1,2)
-    try core.resize(4, 2); // 4칸: abcd|efgh|ij -> 3행, 2행만 보임
-    const dump = try core.dumpUtf8(std.testing.allocator);
-    defer std.testing.allocator.free(dump);
-    try std.testing.expectEqualStrings("efgh\nij  ", dump); // 커서가 있는 아래 2행
-    try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen());
-    try std.testing.expect(core.scrollbackRowWrapped(0)); // 밀려난 "abcd"는 soft-wrap
-    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
-    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
-}
-
-test "reflow: a cursor parked past content wraps to the new width (issue #186 regression)" {
+test "reflow: a cursor parked past content on its line clamps (line not reflowed)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 3 });
     defer core.deinit();
-    try core.write("abc\x1b[1;7H"); // "abc" 후 커서를 (0,6)로(내용 너머)
+    try core.write("abc\x1b[1;7H"); // "abc" 후 커서를 (0,6)로(내용 너머) — 커서 줄
     try std.testing.expectEqual(@as(u16, 6), core.cursor.col);
-    try core.resize(4, 3); // 4칸: 논리 열 6 -> 행 1 열 2
-    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
-    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
-    try std.testing.expect(!core.wrapped[0]); // "abc" 줄은 여전히 hard(좌표로만 환산, 내용 안 늘림)
+    try core.resize(4, 3); // 커서 줄이라 reflow 안 함. 커서는 새 폭으로 clamp(6 -> 3).
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 3), core.cursor.col);
+    try std.testing.expect(!core.wrapped[0]);
 }
 
 test "reflow: a hard prompt line never merges into the next across repeated resizes (no cascade)" {

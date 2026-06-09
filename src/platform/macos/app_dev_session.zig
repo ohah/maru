@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 9;
+pub const abi_version: u32 = 10;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -229,6 +229,12 @@ pub const DevSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
+        // 타이핑하면 live(바닥)로 돌아간다 — 과거를 보다가 입력하면 현재 화면으로 점프(표준 터미널).
+        // 스크롤 중이었으면 즉시 다시 그리도록 metal_dirty도 세운다(echo 출력 전에라도 뷰 복귀).
+        if (self.surface_initialized and self.surfaces[0].core.viewOffset() != 0) {
+            self.surfaces[0].core.scrollToBottom();
+            self.metal_dirty = true;
+        }
         const result = try self.frame_loop.handleKeyEvent(config_mod.KeyBindingResolver{}, event);
         switch (result) {
             .terminal_input => |terminal_input| {
@@ -241,6 +247,15 @@ pub const DevSession = struct {
         self.writeSummaryFromState();
         self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
         return self.last_summary;
+    }
+
+    /// 뷰포트를 delta_up줄만큼 스크롤한다(+위=과거, -아래=현재). 스크롤 로직은 TerminalCore가
+    /// 소유하고, 여기선 다음 tick이 새 뷰를 그리도록 metal_dirty만 세운다(Swift는 휠/키 이벤트를
+    /// 이 함수로 넘기는 얇은 글루다).
+    pub fn scroll(self: *DevSession, delta_up: i32) void {
+        if (!self.surface_initialized) return;
+        self.surfaces[0].core.scrollViewport(@as(isize, delta_up));
+        self.metal_dirty = true;
     }
 
     pub fn resize(self: *DevSession, width_px: u32, height_px: u32, scale_milli: u32) !FrameSummary {

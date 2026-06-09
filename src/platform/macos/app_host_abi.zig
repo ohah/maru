@@ -180,6 +180,18 @@ pub export fn maru_macos_app_dev_session_close(
     return @intFromEnum(Status.ok);
 }
 
+// 뷰포트 스크롤. delta_lines>0=위(과거), <0=아래(현재). 스크롤 로직은 TerminalCore가 소유하고,
+// 여기선 dev session이 viewport offset을 옮기고 metal_dirty를 세운다(다음 tick이 새 뷰를 그린다).
+// Swift는 휠/Shift+PageUp·Down 이벤트를 줄 수로 환산해 이 함수만 부른다(얇은 글루).
+pub export fn maru_macos_app_dev_session_scroll(
+    session: ?*DevSession,
+    delta_lines: i32,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    dev_session.scroll(delta_lines);
+    return @intFromEnum(Status.ok);
+}
+
 pub export fn maru_macos_app_dev_session_destroy(session: ?*DevSession) void {
     // 수명 계약: destroy는 단발성이다. null은 안전하게 무시하지만, 이미 해제된 handle은
     // 감지할 수 없으므로(메모리가 freed) 같은 non-null handle로 두 번 호출하면 use-after-free /

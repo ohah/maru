@@ -75,6 +75,8 @@ pub const buildGlyphRunListFromShapedRecordsWithSurface = shaped_records.buildGl
 pub const initialBackendForMacOS = types.initialBackendForMacOS;
 pub const prepareGlyphFrame = glyph_frame.prepareGlyphFrame;
 pub const textConfigFromFontSize = state.textConfigFromFontSize;
+pub const deviceScaleFromMilli = state.deviceScaleFromMilli;
+pub const deviceFontSizeFromMilli = state.deviceFontSizeFromMilli;
 pub const uvRectForSlot = glyph_quads.uvRectForSlot;
 
 test {

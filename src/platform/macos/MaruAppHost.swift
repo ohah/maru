@@ -105,6 +105,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // dev session에 마지막으로 보낸 backing scale. 런치 후 backingScaleFactor가 늦게 Retina로
     // 정착하면(콜백이 dev session 생성 전에 발화한 경우) tick이 변화를 감지해 재-resize한다.
     private var lastSentBackingScale: CGFloat = 0
+    // dev session에 마지막으로 보낸 resize 값. 같은 값으로 중복 resize(SIGWINCH storm)를 막는다.
+    private struct ResizeSignature: Equatable {
+        var cols: UInt32
+        var rows: UInt32
+        var widthPx: UInt32
+        var heightPx: UInt32
+        var scaleMilli: UInt32
+    }
+    private var lastSentResize: ResizeSignature?
     // create 성공 여부를 영구 기록한다. metalRenderer는 shutdown에서 nil이 되므로 summary가
     // 종료 후 쓰일 때 "생성됐었다"를 잃지 않게 별도 플래그로 둔다.
     private var metalRendererCreated = false
@@ -510,13 +519,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
 
+        let scaleMilli = clampedUInt32((window?.backingScaleFactor ?? 1.0) * 1_000)
+        // 같은 (cols,rows,width,height,scale)로 다시 resize하지 않는다. windowDidResize +
+        // viewDidChangeBackingProperties + tick scale-check가 한 변화에 여러 번 호출될 수 있는데,
+        // 매번 ABI resize를 보내면 TerminalCore.resize(alloc/memcpy)와 PTY winsize/SIGWINCH가
+        // 반복돼 셸이 불필요하게 다시 그린다(SIGWINCH storm). 값이 같으면 일찍 반환한다.
+        let signature = ResizeSignature(cols: cols, rows: rows, widthPx: widthPx, heightPx: heightPx, scaleMilli: scaleMilli)
+        if signature == lastSentResize {
+            return
+        }
+        lastSentResize = signature
         // 보낸 backing scale을 기록해, tick의 scale-변화 감지가 같은 값에 다시 resize하지 않게 한다.
         lastSentBackingScale = window?.backingScaleFactor ?? 1.0
 
         var event = MaruAppHostResizeEvent(
             width_px: widthPx,
             height_px: heightPx,
-            scale_milli: clampedUInt32((window?.backingScaleFactor ?? 1.0) * 1_000),
+            scale_milli: scaleMilli,
             cols: cols,
             rows: rows,
             reserved: 0
@@ -624,7 +643,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let glyphUvReady = latestFrameSummary.glyph_uv_ready != 0
         let glyphRasterReady = latestFrameSummary.glyph_raster_ready != 0
         let frameEnded = latestFrameSummary.ended != 0
-        let summary = """
+        var summary = """
         maru.macos-app-dev.v1
         visible_ui=\(visibleUI)
         swift_host=true
@@ -634,15 +653,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         terminal_surface_note=zig_runtime_rendered_to_swift_cametal_layer
         metal_renderer_created=\(metalRendererCreated)
         metal_frames_drawn=\(metalFramesDrawn)
-        diag_last_sent_backing_scale=\(lastSentBackingScale)
-        diag_cell_width_px=\(lastCellWidthPx)
-        diag_cell_height_px=\(lastCellHeightPx)
-        diag_screen_scale=\(NSScreen.main?.backingScaleFactor ?? -1)
-        diag_window_scale=\(window?.backingScaleFactor ?? -1)
-        diag_window_screen_scale=\(window?.screen?.backingScaleFactor ?? -1)
-        diag_layer_contents_scale=\(metalTerminalView?.metalLayer?.contentsScale ?? -1)
-        diag_drawable_w=\(metalTerminalView?.metalLayer?.drawableSize.width ?? -1)
-        diag_drawable_h=\(metalTerminalView?.metalLayer?.drawableSize.height ?? -1)
         dev_session_status=\(devSessionStatus)
         frame_loop_ticks=\(latestFrameSummary.frame_loop_ticks)
         frame_loop_last_tick_index=\(latestFrameSummary.last_tick_index)
@@ -670,6 +680,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         smoke_duration_ms=\(duration)
 
         """
+
+        // 진단 필드는 MARU_DEBUG일 때만 붙인다. 평소엔 summary 계약을 안정적으로 유지하고,
+        // 스케일/레이아웃을 디버깅할 때만 화면/창 scale·cell·drawable 값을 남긴다.
+        if debugEnabled {
+            summary += """
+            diag_last_sent_backing_scale=\(lastSentBackingScale)
+            diag_cell_width_px=\(lastCellWidthPx)
+            diag_cell_height_px=\(lastCellHeightPx)
+            diag_screen_scale=\(NSScreen.main?.backingScaleFactor ?? -1)
+            diag_window_scale=\(window?.backingScaleFactor ?? -1)
+            diag_window_screen_scale=\(window?.screen?.backingScaleFactor ?? -1)
+            diag_layer_contents_scale=\(metalTerminalView?.metalLayer?.contentsScale ?? -1)
+            diag_drawable_w=\(metalTerminalView?.metalLayer?.drawableSize.width ?? -1)
+            diag_drawable_h=\(metalTerminalView?.metalLayer?.drawableSize.height ?? -1)
+
+            """
+        }
 
         do {
             try FileManager.default.createDirectory(atPath: artifactDirectory, withIntermediateDirectories: true)

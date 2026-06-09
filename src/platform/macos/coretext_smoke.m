@@ -324,19 +324,6 @@ void maru_macos_coretext_font_cell_metrics(
         result->ascent_px = (uint32_t)lround((double)ascent);
         result->descent_px = (uint32_t)lround((double)descent);
         result->status = 0;
-
-        if (getenv("MARU_DEBUG")) {
-            CFStringRef ps = CTFontCopyPostScriptName(font);
-            char ps_buf[128] = {0};
-            if (ps) {
-                CFStringGetCString(ps, ps_buf, sizeof(ps_buf), kCFStringEncodingUTF8);
-                CFRelease(ps);
-            }
-            fprintf(stderr, "[METRICS] req-family='%.*s' size_px=%.1f -> font='%s' advance(M)=%.2f ascent=%.2f descent=%.2f leading=%.2f => cell=%ux%u\n",
-                    (int)requested_font_family_len, requested_font_family, font_size_px,
-                    ps_buf, advance, ascent, descent, leading,
-                    result->cell_width_px, result->cell_height_px);
-        }
         CFRelease(font);
     }
 }
@@ -966,20 +953,6 @@ void maru_macos_coretext_smoke_rasterize_glyph(
             NULL,
             1
         );
-
-        if (getenv("MARU_DEBUG")) {
-            CGSize adv = CGSizeZero;
-            CTFontGetAdvancesForGlyphs(draw_font, kCTFontOrientationHorizontal, &glyph, &adv, 1);
-            CFStringRef ps = CTFontCopyPostScriptName(draw_font);
-            char ps_buf[128] = {0};
-            if (ps) {
-                CFStringGetCString(ps, ps_buf, sizeof(ps_buf), kCFStringEncodingUTF8);
-                CFRelease(ps);
-            }
-            fprintf(stderr, "[RASTER] cp=%u gid=%u font='%s' size=%.1f slot=%zux%zu ink=%.1fx%.1f advance=%.2f\n",
-                    codepoint, glyph_id, ps_buf, requested_font_size,
-                    width_px, height_px, bounds.size.width, bounds.size.height, adv.width);
-        }
         // 수직은 모든 glyph를 공통 baseline에 앉혀 정렬한다(이전엔 ink bounds 기준 가운데
         // 정렬이라 글자마다 baseline이 달라 'm'은 위로 'a'는 아래로 흔들렸다). CTFontDrawGlyphs는
         // position.y를 baseline으로 쓰므로(이 context는 y-up), baseline = descent + 위아래

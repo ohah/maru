@@ -57,6 +57,13 @@ const cases = [_]Case{
         .input_fixture_path = "tests/fixtures/ansi/insert_delete_lines.ansi",
         .golden_path = "tests/golden/screen/xterm/insert_delete_lines.txt",
     },
+    .{
+        .name = "cursor_save_restore",
+        .cols = 8,
+        .rows = 4,
+        .input_fixture_path = "tests/fixtures/ansi/cursor_save_restore.ansi",
+        .golden_path = "tests/golden/screen/xterm/cursor_save_restore.txt",
+    },
 };
 
 test "committed goldens match Alacritty alacritty_terminal" {

@@ -119,6 +119,18 @@ test "recorded terminal oracle snapshots match Maru output" {
                 },
             },
         },
+        .{
+            .name = "cursor_save_restore",
+            .size = .{ .cols = 8, .rows = 4 },
+            .input_fixture_path = "tests/fixtures/ansi/cursor_save_restore.ansi",
+            .oracles = &.{
+                .{
+                    .name = "xterm-compatible",
+                    .source = "recorded expectation for DECSC/DECRC around a DECSTBM reset (claude CLI startup)",
+                    .expected_screen = "tests/golden/screen/xterm/cursor_save_restore.txt",
+                },
+            },
+        },
     };
 
     inline for (cases) |case| {

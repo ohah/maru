@@ -494,3 +494,134 @@ test "an invisible cursor overlay projects no cursor cell" {
     defer allocator.free(cells);
     try std.testing.expectEqual(@as(usize, 0), cells.len);
 }
+
+test "cursor overlay over a wide glyph projects a width-2 inverted block" {
+    const allocator = std.testing.allocator;
+    const glyph = renderer.GlyphQuad{
+        .run = .{
+            .row = 0,
+            .col = 0,
+            .cell_width = 2,
+            .codepoint = '한',
+            .font_id = 1,
+            .glyph_id = 1,
+            .cache_key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1 },
+        },
+        .slot = .{ .id = 9, .key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1 }, .x_px = 0, .y_px = 0, .width_px = 16, .height_px = 16, .upload_bytes = 0, .generation = 0 },
+        .uv = .{ .u0 = 0.5, .v0 = 0.6, .u1 = 0.7, .v1 = 0.8 },
+    };
+    var glyphs = [_]renderer.GlyphQuad{glyph};
+    var overlays = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0, .visible = true } }};
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 4, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &glyphs,
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .cursor = .{ .block = .{ .r = 0, .g = 255, .b = 0 }, .text = .{ .r = 0, .g = 0, .b = 0 } },
+    });
+    defer allocator.free(cells);
+    const cursor_cell = cells[cells.len - 1];
+    try std.testing.expectEqual(@as(u16, 2), cursor_cell.width); // wide glyph 폭 유지
+    try std.testing.expectEqual(@as(f32, 0.5), cursor_cell.u0); // 같은 glyph UV 재사용
+}
+
+test "cursor overlay projects at the overlay's own row and col" {
+    const allocator = std.testing.allocator;
+    var overlays = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 1, .col = 2, .visible = true } }};
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 4, .rows = 3 },
+        .cursor = .{ .row = 1, .col = 2 },
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .cursor = .{ .block = .{ .r = 0, .g = 255, .b = 0 }, .text = .{ .r = 0, .g = 0, .b = 0 } },
+    });
+    defer allocator.free(cells);
+    try std.testing.expectEqual(@as(usize, 1), cells.len);
+    try std.testing.expectEqual(@as(u16, 1), cells[0].row);
+    try std.testing.expectEqual(@as(u16, 2), cells[0].col);
+}
+
+test "an underline overlay is skipped while the cursor overlay still projects" {
+    const allocator = std.testing.allocator;
+    // underline overlay는 sub-cell 선이라 아직 투영하지 않는다. 같이 와도 커서만 cell로 나와야 한다.
+    var overlays = [_]renderer.DrawOverlay{
+        .{ .underline = .{ .row = 0, .col = 0, .width = 1, .color = .default } },
+        .{ .cursor = .{ .row = 0, .col = 1, .visible = true } },
+    };
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 3, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 1 },
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .cursor = .{ .block = .{ .r = 0, .g = 255, .b = 0 }, .text = .{ .r = 0, .g = 0, .b = 0 } },
+    });
+    defer allocator.free(cells);
+    try std.testing.expectEqual(@as(usize, 1), cells.len); // underline은 skip, 커서만
+    try std.testing.expectEqual(@as(u16, 1), cells[0].col);
+}
+
+test "cursor over a space-codepoint glyph projects a solid block, not an inverted glyph" {
+    const allocator = std.testing.allocator;
+    // space glyph는 그릴 ink가 없으므로 커서는 반전 glyph가 아니라 솔리드 블록(sentinel UV)이어야 한다.
+    const glyph = renderer.GlyphQuad{
+        .run = .{
+            .row = 0,
+            .col = 0,
+            .cell_width = 1,
+            .codepoint = ' ',
+            .font_id = 1,
+            .glyph_id = 1,
+            .cache_key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1 },
+        },
+        .slot = .{ .id = 3, .key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1 }, .x_px = 0, .y_px = 0, .width_px = 8, .height_px = 16, .upload_bytes = 0, .generation = 0 },
+        .uv = .{ .u0 = 0.1, .v0 = 0.1, .u1 = 0.2, .v1 = 0.2 },
+    };
+    var glyphs = [_]renderer.GlyphQuad{glyph};
+    var overlays = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0, .visible = true } }};
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 2, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &glyphs,
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .cursor = .{ .block = .{ .r = 0, .g = 255, .b = 0 }, .text = .{ .r = 0, .g = 0, .b = 0 } },
+    });
+    defer allocator.free(cells);
+    // space glyph는 pass 1에서 제외되고, 커서는 솔리드 블록(sentinel UV) 1개.
+    try std.testing.expectEqual(@as(usize, 1), cells.len);
+    try std.testing.expectEqual(@as(f32, -1.0), cells[0].u0);
+    try std.testing.expectEqual(@as(u32, 0xFF00FF00), cells[0].background);
+}
+
+test "packRgb, packForeground, and packBackground pack channels in 0xRRGGBB order" {
+    try std.testing.expectEqual(@as(u32, 0x0A141E), packRgb(.{ .r = 10, .g = 20, .b = 30 }));
+
+    // 전경: default는 default_fg, rgb는 그대로, indexed는 xterm256 팔레트.
+    try std.testing.expectEqual(@as(u32, 0xFF8040), packForeground(.{}, .{ .r = 0xFF, .g = 0x80, .b = 0x40 }));
+    try std.testing.expectEqual(@as(u32, 0x0A141E), packForeground(.{ .foreground = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } } }, .{ .r = 0, .g = 0, .b = 0 }));
+    try std.testing.expectEqual(packRgb(color.xterm256(5)), packForeground(.{ .foreground = .{ .indexed = 5 } }, .{ .r = 0, .g = 0, .b = 0 }));
+
+    // 배경: default는 0(A=0, "배경 없음"), indexed/rgb는 A=0xFF.
+    try std.testing.expectEqual(@as(u32, 0), packBackground(.{}));
+    try std.testing.expectEqual(@as(u32, 0xFF0A141E), packBackground(.{ .background = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } } }));
+    try std.testing.expectEqual(@as(u32, 0xFF00_0000) | packRgb(color.xterm256(5)), packBackground(.{ .background = .{ .indexed = 5 } }));
+}

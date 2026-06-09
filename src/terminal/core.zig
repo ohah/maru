@@ -1481,3 +1481,62 @@ test "a tab near the last column does not overflow the tab-stop arithmetic" {
     try core.write("\t"); // 패닉하면 안 됨
     try std.testing.expectEqual(@as(u16, 65534), core.cursor.col);
 }
+
+test "backspace cancels a pending wrap so the next char does not wrap" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    try core.write("ABCD"); // row 0을 채움 -> pending_wrap at (0,3)
+    try core.write("\x08"); // backspace -> (0,2), markCursorMoveDirty가 pending_wrap을 끈다
+    try core.write("X"); // (0,2)에 덮어쓰고 wrap하지 않는다
+    try std.testing.expectEqual(@as(u21, 'X'), core.cells[core.index(0, 2)].codepoint);
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
+}
+
+test "SGR colon background direct color (48:2:r:g:b) sets the cell background" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    // 전경(38)뿐 아니라 배경(48)도 colon 형식 + colorspace 생략을 처리해야 한다.
+    try core.write("\x1b[48:2:10:20:30mA");
+    try std.testing.expectEqual(
+        types.Color{ .rgb = .{ .r = 10, .g = 20, .b = 30 } },
+        core.cells[core.index(0, 0)].style.background,
+    );
+}
+
+test "printable text wraps across multiple rows filling each line" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 3 });
+    defer core.deinit();
+    try core.write("ABCDEF"); // AB / CD / EF
+    try std.testing.expectEqual(@as(u21, 'A'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'B'), core.cells[core.index(0, 1)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'C'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'D'), core.cells[core.index(1, 1)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'E'), core.cells[core.index(2, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'F'), core.cells[core.index(2, 1)].codepoint);
+}
+
+test "a wide glyph filling the last two columns sets pending wrap and the next char wraps" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("AB"); // A(0,0) B(0,1), 커서 (0,2)
+    try core.write("한"); // 마지막 두 칸(2,3)을 채움 -> 커서 (0,3) pending_wrap
+    try core.write("X"); // 다음 줄로 wrap
+    try std.testing.expectEqual(@as(u21, '한'), core.cells[core.index(0, 2)].codepoint);
+    try std.testing.expect(core.cells[core.index(0, 3)].continuation);
+    try std.testing.expectEqual(@as(u21, 'X'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+}
+
+test "clampGridSize enforces a minimum of 2 columns and 1 row" {
+    try std.testing.expectEqual(types.Size{ .cols = 2, .rows = 5 }, clampGridSize(.{ .cols = 1, .rows = 5 }));
+    try std.testing.expectEqual(types.Size{ .cols = 2, .rows = 1 }, clampGridSize(.{ .cols = 0, .rows = 0 }));
+    try std.testing.expectEqual(types.Size{ .cols = 80, .rows = 24 }, clampGridSize(.{ .cols = 80, .rows = 24 }));
+}
+
+test "tab advances to the next 8-column stop mid-line" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 16, .rows = 1 });
+    defer core.deinit();
+    // 엣지(마지막 칸)가 아니라 일반 전진: 'a'(col 1) 뒤 tab은 다음 8-stop(col 8)으로 간다.
+    try core.write("a\t");
+    try std.testing.expectEqual(@as(u16, 8), core.cursor.col);
+}

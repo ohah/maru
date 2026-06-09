@@ -87,6 +87,9 @@ typedef struct {
     float v0;
     float u1;
     float v1;
+    // Zig NativeMetalCell.foreground와 layout을 맞춘다. smoke는 흰색 coverage를 검증하므로
+    // 이 값을 쓰지 않는다.
+    uint32_t foreground;
 } MaruMetalSmokeCell;
 
 typedef struct {
@@ -106,6 +109,9 @@ typedef struct {
     float y;
     float u;
     float v;
+    // 공유 셰이더(maru_metal_shader.h)의 VertexIn은 packed_float3 color를 갖는다. smoke는
+    // 흰색 coverage를 검증하므로 정점 색을 흰색으로 채운다.
+    float color[3];
 } MaruMetalSmokeVertex;
 
 typedef struct {
@@ -1065,12 +1071,12 @@ static MaruMetalSmokeVertex *maru_build_cell_vertices(
         const float top = grid_top - ((float)cell.row / (float)rows) * grid_height;
         const float bottom = grid_top - (((float)cell.row + 1.0f) / (float)rows) * grid_height;
         MaruMetalSmokeVertex quad[6] = {
-            {left, top, cell.u0, cell.v0},
-            {left, bottom, cell.u0, cell.v1},
-            {right, bottom, cell.u1, cell.v1},
-            {left, top, cell.u0, cell.v0},
-            {right, bottom, cell.u1, cell.v1},
-            {right, top, cell.u1, cell.v0},
+            {left, top, cell.u0, cell.v0, {1.0f, 1.0f, 1.0f}},
+            {left, bottom, cell.u0, cell.v1, {1.0f, 1.0f, 1.0f}},
+            {right, bottom, cell.u1, cell.v1, {1.0f, 1.0f, 1.0f}},
+            {left, top, cell.u0, cell.v0, {1.0f, 1.0f, 1.0f}},
+            {right, bottom, cell.u1, cell.v1, {1.0f, 1.0f, 1.0f}},
+            {right, top, cell.u1, cell.v0, {1.0f, 1.0f, 1.0f}},
         };
         memcpy(&vertices[i * vertices_per_cell], quad, sizeof(quad));
     }

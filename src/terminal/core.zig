@@ -43,7 +43,12 @@ pub const TerminalCore = struct {
     csi_params: [max_csi_params]u16 = [_]u16{0} ** max_csi_params,
     csi_param_count: usize = 0,
     csi_has_digit: bool = false,
-    csi_private: bool = false,
+    // CSI의 private marker 바이트(0x3c-0x3f: '<','=','>','?'). 0이면 없음. xterm은 marker별로
+    // 의미가 다르다 — DECSET/DECRST는 '?' 전용이고 '>'는 DA2/XTVERSION 등 별도 명령이다.
+    csi_marker: u8 = 0,
+    // CSI intermediate(0x20-0x2f, 예: DECCARA의 '$')가 있었는지. intermediate가 붙은 시퀀스는
+    // 같은 final이라도 다른 명령이므로(예: `$r`=DECCARA vs `r`=DECSTBM) dispatch하지 않고 소비한다.
+    csi_has_intermediate: bool = false,
     csi_overflow: bool = false,
     // deferred autowrap(DECAWM, 기본 켜짐). 마지막 칸을 채운 직후 커서는 그 칸에 머물고 이 플래그가
     // 선다. 다음 printable 글자가 먼저 다음 줄 첫 칸으로 넘어간 뒤 그려진다. 마지막 칸이 그 줄의
@@ -360,7 +365,8 @@ pub const TerminalCore = struct {
         // 항상 최소 1개의 (비어 있을 수도 있는) 파라미터가 있다고 본다.
         self.csi_param_count = 1;
         self.csi_has_digit = false;
-        self.csi_private = false;
+        self.csi_marker = 0;
+        self.csi_has_intermediate = false;
         self.csi_overflow = false;
     }
 
@@ -397,10 +403,11 @@ pub const TerminalCore = struct {
             // ':'로 연 슬롯은 sub-parameter로 표시해 colon 확장색 형식을 구분한다.
             ';' => self.csiNextParam(false),
             ':' => self.csiNextParam(true),
-            // private/marker bytes: < = > ? (예: CSI ? 25 h). A1은 private 시퀀스를 소비만 한다.
-            0x3c...0x3f => self.csi_private = true,
-            // intermediate bytes(공백~/)는 A1에서 무시한다.
-            0x20...0x2f => {},
+            // private/marker bytes: < = > ? (예: CSI ? 25 h). 어떤 marker였는지 기억한다.
+            0x3c...0x3f => self.csi_marker = byte,
+            // intermediate bytes(공백~/): 같은 final이라도 다른 명령이 되므로 표시만 하고 dispatch는
+            // 막는다(아래 dispatchCsi).
+            0x20...0x2f => self.csi_has_intermediate = true,
             // final byte: 시퀀스를 dispatch하고 ground로 돌아간다.
             0x40...0x7e => {
                 self.dispatchCsi(byte);
@@ -430,12 +437,26 @@ pub const TerminalCore = struct {
     }
 
     fn dispatchCsi(self: *TerminalCore, final: u8) void {
-        // private 시퀀스(CSI ? ...): DECSET(h)/DECRST(l)의 alternate-screen 계열만 적용하고
-        // 나머지 모드는 소비만 한다.
-        if (self.csi_private) {
-            switch (final) {
-                'h' => self.setPrivateModes(true),
-                'l' => self.setPrivateModes(false),
+        // intermediate가 붙은 시퀀스(예: `CSI ...$r` DECCARA, `CSI Ps SP q` DECSCUSR)는 bare final과
+        // 다른 명령이다 — 잘못 dispatch하지 않도록 소비만 한다(Williams VT500 파서의 (intermediate,
+        // final) 튜플 dispatch에서 미지원 조합 무시에 해당).
+        if (self.csi_has_intermediate) return;
+        // marker별 처리: '?'는 DEC private mode(DECSET/DECRST), '>'는 secondary DA. 그 외 marker
+        // 시퀀스(>m modifyOtherKeys, <u kitty 등)는 소비만 한다 — bare final로 흘리면 SGR 등을
+        // 오염시킨다.
+        if (self.csi_marker != 0) {
+            switch (self.csi_marker) {
+                '?' => switch (final) {
+                    'h' => self.setPrivateModes(true),
+                    'l' => self.setPrivateModes(false),
+                    else => {},
+                },
+                '>' => switch (final) {
+                    // DA2(CSI > c): 단말 버전 식별. DA1만 답하고 침묵하면 vim 등이 DA2 응답을
+                    // 타임아웃까지 기다린다. VT220급(1), 버전 10, ROM 0으로 답한다.
+                    'c' => if (self.csiRawParam(0) == 0) self.appendResponse("\x1b[>1;10;0c"),
+                    else => {},
+                },
                 else => {},
             }
             return;
@@ -774,6 +795,9 @@ pub const TerminalCore = struct {
         // 않는다 — 안 그러면 reflow가 한 논리 줄을 둘로 쪼갠다.
         if (mode != 1) self.wrapped[row] = false;
         self.markDirty(row);
+        // 모든 EL 모드는 deferred autowrap을 무효화한다(xterm/Ghostty 동작). 안 끄면 마지막 칸
+        // 출력(pending) 후 EL+글자 시퀀스가 한 줄 일찍 wrap돼 상대 커서 이동이 어긋난다.
+        self.pending_wrap = false;
         // 다른 cursor/erase op과 같이 grapheme run을 끝낸다. 안 하면 CSI K 뒤 combining mark가
         // 방금 지운 셀에 붙는다.
         self.last_print = null;
@@ -781,6 +805,8 @@ pub const TerminalCore = struct {
 
     fn eraseInDisplay(self: *TerminalCore, mode: u16) void {
         if (self.size.rows == 0 or self.size.cols == 0) return;
+        // 모든 ED 모드는 deferred autowrap을 무효화한다(EL과 동일한 이유, xterm/Ghostty 동작).
+        self.pending_wrap = false;
         const blank: types.Cell = .{ .style = self.pen };
         switch (mode) {
             // 2/3: 화면 전체.
@@ -928,7 +954,7 @@ pub const TerminalCore = struct {
             clampSavedCursor(&self.saved_cursor_alt, next_size);
             self.pending_wrap = false;
             self.last_print = null;
-            self.parser = .ground;
+            // CSI 파서 상태/UTF-8 꼬리는 유지(아래 일반 경로와 동일한 이유).
             self.dirty = fullDirty(next_size);
             return;
         }
@@ -1095,12 +1121,12 @@ pub const TerminalCore = struct {
         // resize는 바닥으로 스냅한다(스크롤 중이었어도 뷰가 어긋나지 않게).
         self.view_offset = 0;
         self.dirty = fullDirty(next_size);
-        // 옛 grid 기준의 partial UTF-8 tail/last_print/deferred wrap은 새 grid로 새면 안 된다.
+        // 옛 grid 좌표에 묶인 상태(grapheme run, deferred wrap)만 끊는다. CSI 파서 상태와
+        // partial UTF-8 꼬리는 grid와 무관한 바이트 스트림 상태라 유지한다 — 리셋하면 PTY read
+        // 경계로 쪼개진 시퀀스 한가운데에 resize가 끼었을 때 꼬리 바이트가 글자로 새고 SGR이
+        // 유실된다(xterm도 resize에 파서를 리셋하지 않는다).
         self.last_print = null;
-        self.utf8_tail_len = 0;
         self.pending_wrap = false;
-        // resize 경계에서 끊긴 escape sequence가 새 grid로 새지 않게 파서를 ground로 되돌린다.
-        self.parser = .ground;
     }
 
     pub fn snapshot(self: *const TerminalCore) types.RenderSnapshot {
@@ -1384,6 +1410,9 @@ pub const TerminalCore = struct {
         // 마지막 행이 꽉 찬(pending_wrap) 상태에서 bare LF가 와도 플래그가 남아, 다음 printable
         // 글자가 또 한 줄 내려가(scroll) 직전 줄을 잃는다(이중 스크롤).
         self.pending_wrap = false;
+        // 스크롤/이동으로 grapheme run이 끝난다 — 다음 combining mark가 옮겨진 셀에 붙지 않게.
+        // (\n 경로는 writeCodepoint가 이미 끊지만 ESC D(IND)는 이 함수로 직행한다.)
+        self.last_print = null;
         // 커서가 scroll region 하단 margin이면 region을 위로 스크롤(커서는 그대로). 그 외엔 화면
         // 끝 전까지 한 줄 내려간다(region 위/아래 모두 동일). scrollRegionUp의 fullDirty가 커서
         // 행까지 다시 칠하므로 scroll 분기는 cursor-move diff가 따로 필요 없다.
@@ -1402,6 +1431,7 @@ pub const TerminalCore = struct {
     fn reverseIndex(self: *TerminalCore) void {
         if (self.size.rows == 0) return;
         self.pending_wrap = false;
+        self.last_print = null; // IND와 동일 — 스크롤/이동으로 grapheme run 종료
         if (self.cursor.row == self.scroll_top) {
             self.scrollRegionDown();
             return;
@@ -1453,6 +1483,12 @@ pub const TerminalCore = struct {
         const last_start = self.index(bottom, 0);
         @memset(self.cells[last_start .. last_start + self.size.cols], .{});
         self.wrapped[bottom] = false;
+        // 범위 경계의 wrap 정합: shift가 old wrapped[bottom]("old bottom ↔ bottom+1" — 범위 밖과의
+        // 연속)을 bottom-1로 끌어왔는데, bottom+1은 안 움직였으니 그 연속은 깨졌다. 마찬가지로
+        // 범위 위 행(top-1)이 주장하던 "top으로의 연속"도 top 내용이 바뀌어 깨졌다. 안 끊으면
+        // 다음 resize reflow가 무관한 줄(상태줄 등)을 한 논리 줄로 합친다.
+        if (bottom > top) self.wrapped[bottom - 1] = false;
+        if (top > 0) self.wrapped[top - 1] = false;
         self.dirty = fullDirty(self.size);
     }
 
@@ -1477,6 +1513,11 @@ pub const TerminalCore = struct {
         const top_start = self.index(top, 0);
         @memset(self.cells[top_start .. top_start + self.size.cols], .{});
         self.wrapped[top] = false;
+        // 범위 경계의 wrap 정합(scrollRangeUp과 대칭): 새 bottom 행(=old bottom-1 내용)이 범위 밖
+        // bottom+1로 이어진다는 플래그는 거짓이고, top-1 행의 "top으로의 연속"도 top이 빈 줄이 돼
+        // 깨졌다.
+        self.wrapped[bottom] = false;
+        if (top > 0) self.wrapped[top - 1] = false;
         self.dirty = fullDirty(self.size);
     }
 
@@ -2896,4 +2937,61 @@ test "resize while in the alt screen preserves the saved primary's soft-wrap fla
     try core.resize(4, 3); // alt 중 행 수만 축소
     try core.write("\x1b[?1049l");
     try std.testing.expect(core.wrapped[0]); // primary 복원 후에도 wrap 메타데이터 생존
+}
+
+test "region scrolls break stale soft-wrap links at the range boundaries" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 4 });
+    defer core.deinit();
+    // 행2-3에 걸친 soft-wrap 줄을 만든다: 행0/1 채우고 "abcdef"(행2 abcd|행3 ef).
+    try core.write("x\r\ny\r\nabcdef");
+    try std.testing.expect(core.wrapped[2]);
+    // 커서 행3에서 IL: 행3이 비고 wrapped[2]의 연속 주장은 깨져야 한다.
+    try core.write("\x1b[L");
+    try std.testing.expect(!core.wrapped[2]);
+    // resize가 빈 행을 이전 줄에 합치지 않는다.
+    try core.resize(8, 4);
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("x       \ny       \nabcd    \n        ", dump);
+}
+
+test "EL and ED clear the deferred-autowrap state (xterm behavior)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("abcd"); // 마지막 칸 채움 -> pending_wrap
+    try std.testing.expect(core.pending_wrap);
+    try core.write("\x1b[K!"); // EL 0 후 글자: wrap 없이 같은 행에 찍혀야 한다
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
+    try core.write("\x1b[2J");
+    try std.testing.expect(!core.pending_wrap); // ED도 동일
+}
+
+test "a CSI split across writes survives a resize in between (parser state kept)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[31"); // SGR 빨강의 앞부분(쪼개진 read)
+    try core.resize(10, 3); // 시퀀스 한가운데 resize
+    try core.write("mX"); // 꼬리 도착: 'm'은 글자가 아니라 SGR 완성이어야 한다
+    try std.testing.expectEqual(@as(u21, 'X'), core.cells[0].codepoint);
+    try std.testing.expectEqual(types.Color{ .indexed = 1 }, core.cells[0].style.foreground);
+}
+
+test "CSI sequences with intermediates are consumed, not dispatched as their bare final" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 4 });
+    defer core.deinit();
+    try core.write("\x1b[2;3r"); // region [1,2]
+    try core.write("\x1b[1;1;2;2$r"); // DECCARA($r) — DECSTBM으로 오발동하면 region이 바뀐다
+    try std.testing.expectEqual(@as(u16, 1), core.scroll_top);
+    try std.testing.expectEqual(@as(u16, 2), core.scroll_bottom);
+}
+
+test "DA2 (CSI > c) is answered and '>'-marked sequences never leak into SGR" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[>c");
+    try std.testing.expectEqualStrings("\x1b[>1;10;0c", core.pendingResponse());
+    core.clearResponse();
+    try core.write("\x1b[>4;2m"); // modifyOtherKeys — SGR(4;2=underline)로 새면 안 된다
+    try core.write("X");
+    try std.testing.expect(!core.cells[0].style.underline);
 }

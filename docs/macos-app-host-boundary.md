@@ -34,7 +34,7 @@
 현재 dev shell에서 아직 하지 않는 것:
 
 - 커서 blink 렌더(깜빡임 타이머 — DECSCUSR의 blink 여부는 추적함), underline overlay 렌더
-- 선택/클립보드, 탭/분할 UI
+- 탭/분할 UI (선택/클립보드는 구현됨 — 아래)
 - workspace restore
 - settings UI/runtime reload
 - plugin/Wasm
@@ -74,4 +74,4 @@
 
 ## 남은 한계
 
-현재 dev shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, `MaruMetalTerminalView`(CAMetalLayer)에 dev session의 shell glyph와 반전 블록 커서를 그리며, key/resize/close event를 Zig dev session ABI로 내려보낸다. resize cell 수는 실제 CoreText font metrics에서 Zig가 계산한다(`metal_renderer_created`/`metal_frames_drawn`로 gate). 스크롤백은 구현돼 휠/Shift+PageUp으로 과거를 볼 수 있고(타이핑하면 live로 복귀), resize 시 활성 화면을 새 폭으로 reflow하고 넘치는 줄은 스크롤백으로 민다(Ghostty 오라클로 그리드+커서 검증). 스크롤 입력도 Swift는 raw 값만 넘긴다 — 휠은 델타 포인트+정밀 여부를(`scroll_wheel`), Shift+PageUp/Down은 방향만(`scroll_page`) 보내고, 줄 수·page 크기(rows-1) 환산·1줄 미만 델타 누적·NaN/clamp 가드는 권위 있는 cell 메트릭·rows를 가진 Zig가 한다(네이티브 최소화). alt screen(vim/less)에서는 같은 스크롤이 화살표 키로 변환돼 프로그램에 전달된다(xterm alternate scroll, DECSET 1007 기본 on) — 휠/트랙패드와 Shift+PageUp/Down이 같은 경로를 타며, 변환 시퀀스는 배칭해 한 번에 쓴다. 렌더는 fixed-cell pixel layout이라 창 크기에 따라 glyph가 늘어나지 않는다(창을 키우면 cell이 더 보임). 탭/분할·선택/클립보드 같은 제품 interactive UX와 커서 blink 렌더는 아직 없다(커서 shape는 DECSCUSR로 bar/underline/block 지원, 스크롤백 재-wrap도 구현됨).
+현재 dev shell은 실제 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, `MaruMetalTerminalView`(CAMetalLayer)에 dev session의 shell glyph와 반전 블록 커서를 그리며, key/resize/close event를 Zig dev session ABI로 내려보낸다. resize cell 수는 실제 CoreText font metrics에서 Zig가 계산한다(`metal_renderer_created`/`metal_frames_drawn`로 gate). 스크롤백은 구현돼 휠/Shift+PageUp으로 과거를 볼 수 있고(타이핑하면 live로 복귀), resize 시 활성 화면을 새 폭으로 reflow하고 넘치는 줄은 스크롤백으로 민다(Ghostty 오라클로 그리드+커서 검증). 스크롤 입력도 Swift는 raw 값만 넘긴다 — 휠은 델타 포인트+정밀 여부를(`scroll_wheel`), Shift+PageUp/Down은 방향만(`scroll_page`) 보내고, 줄 수·page 크기(rows-1) 환산·1줄 미만 델타 누적·NaN/clamp 가드는 권위 있는 cell 메트릭·rows를 가진 Zig가 한다(네이티브 최소화). alt screen(vim/less)에서는 같은 스크롤이 화살표 키로 변환돼 프로그램에 전달된다(xterm alternate scroll, DECSET 1007 기본 on) — 휠/트랙패드와 Shift+PageUp/Down이 같은 경로를 타며, 변환 시퀀스는 배칭해 한 번에 쓴다. 렌더는 fixed-cell pixel layout이라 창 크기에 따라 glyph가 늘어나지 않는다(창을 키우면 cell이 더 보임). 마우스 드래그 선택과 Cmd+C 복사가 동작한다 — Swift는 마우스 raw 좌표(backing px)와 Cmd+C만 처리하고, 셀 변환·선택 모델(절대 행 좌표, 스크롤 추적·eviction 보정)·텍스트 추출(soft-wrap은 줄바꿈 없이 합침)은 Zig가 소유한다. 클립보드 쓰기(NSPasteboard)만 OS API라 Swift다(ABI v13 mouse/copy_text). 탭/분할 UI와 커서 blink 렌더는 아직 없다.

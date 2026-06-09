@@ -192,6 +192,33 @@ pub export fn maru_macos_app_dev_session_scroll_wheel(
     return @intFromEnum(Status.ok);
 }
 
+// 마우스 선택(kind 1=down/2=drag/3=up, backing px). 셀 변환·선택 모델은 Zig가 소유한다.
+pub export fn maru_macos_app_dev_session_mouse(
+    session: ?*DevSession,
+    kind: i32,
+    x_px: f64,
+    y_px: f64,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    dev_session.mouse(kind, x_px, y_px);
+    return @intFromEnum(Status.ok);
+}
+
+// 선택 텍스트 추출. 반환 버퍼는 Zig 소유로 다음 copy_text/destroy까지 유효하다. 비어 있으면 len 0.
+pub export fn maru_macos_app_dev_session_copy_text(
+    session: ?*DevSession,
+    out_ptr: ?*?[*]const u8,
+    out_len: ?*usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
+    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const text = dev_session.copyText();
+    ptr_out.* = if (text.len > 0) text.ptr else null;
+    len_out.* = text.len;
+    return @intFromEnum(Status.ok);
+}
+
 // 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면(rows-1) 계산은 dev session이
 // 권위 있는 rows로 한다(Swift가 stale frame summary로 계산하지 않게).
 pub export fn maru_macos_app_dev_session_scroll_page(

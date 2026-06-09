@@ -51,11 +51,24 @@ pub const CellColors = struct {
     /// 커서 overlay 투영 색. null이면 커서를 투영하지 않는다 — glyph-atlas 픽셀을 그대로 검증하는
     /// visible smoke는 커서 블록이 readback을 바꾸지 않게 null로 둔다(제품 dev session만 켠다).
     cursor: ?CursorColors = null,
+    /// 선택 하이라이트 배경(theme.selection). selection span 안의 cell 배경을 이 색으로 덮는다.
+    selection_bg: color.Rgb = .{ .r = 0x33, .g = 0x44, .b = 0x55 },
+    /// 현재 뷰포트의 선택 범위(없으면 null). 선형(행 이어짐) 포함 범위.
+    selection: ?terminal.SelectionSpan = null,
 };
 
 /// Rgb를 0x00RRGGBB로 packing한다(공용 — 전경/커서/배경 packing이 같은 byte 순서를 쓰게).
 fn packRgb(rgb: color.Rgb) u32 {
     return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+}
+
+/// (row,col)이 선형 선택 범위 안인지(시작 행은 start.col부터, 끝 행은 end.col까지, 중간 행 전체).
+fn inSelection(span: ?terminal.SelectionSpan, row: u16, col: u16) bool {
+    const s = span orelse return false;
+    if (row < s.start.row or row > s.end.row) return false;
+    if (row == s.start.row and col < s.start.col) return false;
+    if (row == s.end.row and col > s.end.col) return false;
+    return true;
 }
 
 fn resolveColor(c: terminal.Color, default_rgb: color.Rgb) color.Rgb {
@@ -133,7 +146,10 @@ pub fn buildNativeCellsFromGlyphQuads(
             .u1 = glyph.uv.u1,
             .v1 = glyph.uv.v1,
             .foreground = packForeground(glyph.run.style, colors),
-            .background = packBackground(glyph.run.style, colors),
+            .background = if (inSelection(colors.selection, glyph.run.row, glyph.run.col))
+                0xFF00_0000 | packRgb(colors.selection_bg)
+            else
+                packBackground(glyph.run.style, colors),
         });
     }
 
@@ -145,7 +161,11 @@ pub fn buildNativeCellsFromGlyphQuads(
     //    1)이 glyph와 함께 배경을 싣는다).
     for (draw_cells) |cell| {
         if (cell.codepoint != ' ' and cell.codepoint != 0) continue;
-        const background = packBackground(cell.style, colors);
+        const selected = inSelection(colors.selection, cell.row, cell.col);
+        const background = if (selected)
+            0xFF00_0000 | packRgb(colors.selection_bg)
+        else
+            packBackground(cell.style, colors);
         if (background == 0) continue;
         cells.appendAssumeCapacity(.{
             .row = cell.row,

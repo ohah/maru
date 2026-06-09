@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 12;
+pub const abi_version: u32 = 13;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -168,6 +168,8 @@ pub const DevSession = struct {
     metal_dirty: bool = true,
     // 트랙패드 정밀 스크롤의 1줄 미만 잔여 델타(줄 단위). scrollWheel이 누적/소비한다.
     wheel_accum: f64 = 0,
+    // copyText()가 돌려준 추출 텍스트의 소유 버퍼(다음 copyText/destroy까지 유효 — ABI 수명 계약).
+    copy_buffer: []u8 = &.{},
 
     pub fn init(
         self: *DevSession,
@@ -325,6 +327,45 @@ pub const DevSession = struct {
         self.scroll(lines);
     }
 
+    /// 마우스 선택. kind 1=down(선택 시작), 2=drag(확장), 3=up(확정 — 이동 없었으면 클릭으로 보고
+    /// 해제). 좌표는 backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
+    pub fn mouse(self: *DevSession, kind: i32, x_px: f64, y_px: f64) void {
+        if (!self.surface_initialized) return;
+        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return;
+        const core = &self.surfaces[0].core;
+        const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
+        const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
+        const col: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(x_px, 0) / cw)), 0, @as(i64, core.size.cols) - 1));
+        const row: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(y_px, 0) / ch)), 0, @as(i64, core.size.rows) - 1));
+        switch (kind) {
+            1 => core.selectionStart(row, col),
+            2 => core.selectionExtend(row, col),
+            3 => {
+                core.selectionExtend(row, col);
+                // 이동 없는 클릭은 선택이 아니라 해제다(다른 터미널과 동일).
+                if (core.selection_anchor) |a| {
+                    if (core.selection_head != null and a.row == core.selection_head.?.row and a.col == core.selection_head.?.col) {
+                        core.selectionClear();
+                    }
+                }
+            },
+            else => return,
+        }
+        self.metal_dirty = true;
+    }
+
+    /// 선택 텍스트를 추출해 내부 버퍼로 돌려준다(없으면 빈 슬라이스). Swift가 NSPasteboard에 쓴다.
+    pub fn copyText(self: *DevSession) []const u8 {
+        if (!self.surface_initialized) return &.{};
+        if (self.copy_buffer.len > 0) {
+            self.allocator.free(self.copy_buffer);
+            self.copy_buffer = &.{};
+        }
+        const extracted = self.surfaces[0].core.extractSelection(self.allocator) catch null orelse return &.{};
+        self.copy_buffer = extracted;
+        return self.copy_buffer;
+    }
+
     /// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면은 rows-1줄(한 줄 겹침)이고,
     /// rows는 dev session이 권위 있게 알고 있어 Swift가 stale 값으로 계산하지 않게 여기서 구한다.
     /// alt screen에서는 휠과 동일하게 화살표 변환으로 폴백한다(이전엔 완전 무반응이었다).
@@ -465,6 +506,8 @@ pub const DevSession = struct {
             const cell_colors: metal_frame.CellColors = .{
                 .default_fg = self.appearance.theme.foreground,
                 .default_bg = self.appearance.theme.background, // SGR reverse의 default 색 스왑용
+                .selection_bg = self.appearance.theme.selection,
+                .selection = self.surfaces[0].core.selectionViewportSpan(),
 
                 // 커서는 반전 블록으로 그린다: 칸 배경=theme.cursor, 그 위 glyph=theme.background.
                 .cursor = .{
@@ -516,6 +559,8 @@ pub const DevSession = struct {
     }
 
     pub fn deinit(self: *DevSession) void {
+        if (self.copy_buffer.len > 0) self.allocator.free(self.copy_buffer);
+
         self.metal_buffer.deinit(self.allocator);
         if (self.live_initialized) {
             if (self.runtime_initialized) {

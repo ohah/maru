@@ -115,6 +115,10 @@ pub const TerminalCore = struct {
     // 이 플래그만 세우고, 사용자가 실제로 과거를 보는 순간(scrollViewport/renderSnapshot)에 현재
     // 폭으로 1회 수행한다 — 연속 드래그 resize가 와도 마지막 폭으로 한 번만 재-wrap된다.
     sb_rewrap_pending: bool = false,
+    // 마우스 드래그 선택(anchor=누른 곳, head=현재 끝). 절대 행 좌표라 스크롤해도 내용을 따라간다.
+    // 스크롤백 eviction(가득 찬 ring)·재-wrap·clear 때 보정/해제된다.
+    selection_anchor: ?types.SelectionPoint = null,
+    selection_head: ?types.SelectionPoint = null,
     // 스크롤된(view_offset>0) 상태의 렌더용 합성 버퍼(rows×cols). renderSnapshot이 뷰포트 윈도를
     // 여기에 합성한다. view_offset==0이면 안 쓰므로 lazy 할당한다(스크롤할 때만 메모리 사용).
     viewport_cells: []types.Cell = &.{},
@@ -230,6 +234,115 @@ pub const TerminalCore = struct {
         return self.sb_wrapped[(self.sb_head + i) % self.sb_wrapped.len];
     }
 
+    /// 선택 시작(마우스 다운). 뷰포트 행/열을 받아 절대 행으로 저장한다.
+    pub fn selectionStart(self: *TerminalCore, viewport_row: u16, col: u16) void {
+        const abs = self.absRowFromViewport(viewport_row);
+        self.selection_anchor = .{ .row = abs, .col = @min(col, self.size.cols -| 1) };
+        self.selection_head = self.selection_anchor;
+        self.dirty = fullDirty(self.size);
+    }
+
+    /// 선택 확장(드래그). anchor가 없으면 무시.
+    pub fn selectionExtend(self: *TerminalCore, viewport_row: u16, col: u16) void {
+        if (self.selection_anchor == null) return;
+        self.selection_head = .{ .row = self.absRowFromViewport(viewport_row), .col = @min(col, self.size.cols -| 1) };
+        self.dirty = fullDirty(self.size);
+    }
+
+    pub fn selectionClear(self: *TerminalCore) void {
+        if (self.selection_anchor == null) return;
+        self.selection_anchor = null;
+        self.selection_head = null;
+        self.dirty = fullDirty(self.size);
+    }
+
+    fn shiftSelectionForEviction(self: *TerminalCore) void {
+        if (self.selection_anchor == null) return;
+        const a = &self.selection_anchor.?;
+        const h = &self.selection_head.?;
+        if (a.row == 0 or h.row == 0) {
+            self.selectionClear();
+            return;
+        }
+        a.row -= 1;
+        h.row -= 1;
+    }
+
+    fn absRowFromViewport(self: *const TerminalCore, viewport_row: u16) usize {
+        // 절대 행 = 스크롤백 시작 기준. 뷰포트 첫 행은 sb_count - view_offset.
+        return self.sb_count - @min(self.view_offset, self.sb_count) + viewport_row;
+    }
+
+    /// 정규화된 선택(start <= end). 없으면 null.
+    fn normalizedSelection(self: *const TerminalCore) ?struct { start: types.SelectionPoint, end: types.SelectionPoint } {
+        const a = self.selection_anchor orelse return null;
+        const h = self.selection_head orelse return null;
+        if (a.row < h.row or (a.row == h.row and a.col <= h.col)) return .{ .start = a, .end = h };
+        return .{ .start = h, .end = a };
+    }
+
+    /// 현재 뷰포트에 보이는 선택 범위(렌더용). 화면 밖이면 null.
+    pub fn selectionViewportSpan(self: *const TerminalCore) ?types.SelectionSpan {
+        const sel = self.normalizedSelection() orelse return null;
+        const top_abs = self.sb_count - @min(self.view_offset, self.sb_count);
+        const bottom_abs = top_abs + self.size.rows - 1;
+        if (sel.end.row < top_abs or sel.start.row > bottom_abs) return null;
+        // 뷰포트로 클립: 화면 위로 나가면 (0,0)부터, 아래로 나가면 마지막 행 끝까지.
+        const start_row: u16 = if (sel.start.row < top_abs) 0 else @intCast(sel.start.row - top_abs);
+        const start_col: u16 = if (sel.start.row < top_abs) 0 else sel.start.col;
+        const end_row: u16 = if (sel.end.row > bottom_abs) self.size.rows - 1 else @intCast(sel.end.row - top_abs);
+        const end_col: u16 = if (sel.end.row > bottom_abs) self.size.cols - 1 else sel.end.col;
+        return .{ .start = .{ .row = start_row, .col = start_col }, .end = .{ .row = end_row, .col = end_col } };
+    }
+
+    /// 선택된 텍스트를 추출한다(클립보드 복사용). 행 단위 선형 선택 — soft-wrap으로 이어진 행은
+    /// 줄바꿈 없이 잇고, hard 줄끝에서만 \n을 넣는다. 각 행은 뒤 빈칸을 trim한다(soft 행 제외).
+    pub fn extractSelection(self: *const TerminalCore, allocator: std.mem.Allocator) !?[]u8 {
+        const sel = self.normalizedSelection() orelse return null;
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+
+        var abs = sel.start.row;
+        while (abs <= sel.end.row) : (abs += 1) {
+            const row_cells = self.absRow(abs) orelse continue;
+            const wrapped_flag = self.absRowWrapped(abs);
+            const from: usize = if (abs == sel.start.row) sel.start.col else 0;
+            const full_to: usize = if (abs == sel.end.row) @min(@as(usize, sel.end.col) + 1, row_cells.len) else row_cells.len;
+            // hard 줄끝(또는 선택 끝 행)은 뒤 빈칸을 잘라 복사한다 — 패딩이 텍스트로 들어가지 않게.
+            const to: usize = if (wrapped_flag and abs != sel.end.row) full_to else @max(from, @min(full_to, trimmedLen(row_cells)));
+            var c: usize = from;
+            while (c < to) : (c += 1) {
+                const cell = row_cells[c];
+                if (cell.continuation) continue; // wide glyph 두 번째 칸은 base가 이미 실었다
+                var buf: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(cell.codepoint, &buf) catch continue;
+                try out.appendSlice(allocator, buf[0..n]);
+                if (cell.combining) |mark| {
+                    const m = std.unicode.utf8Encode(mark, &buf) catch 0;
+                    if (m > 0) try out.appendSlice(allocator, buf[0..m]);
+                }
+            }
+            if (abs != sel.end.row and !wrapped_flag) try out.append(allocator, '\n');
+        }
+        return try out.toOwnedSlice(allocator);
+    }
+
+    /// 절대 행 -> 셀(스크롤백 또는 활성 화면). 범위 밖이면 null.
+    fn absRow(self: *const TerminalCore, abs: usize) ?[]const types.Cell {
+        if (abs < self.sb_count) return self.scrollbackRow(abs);
+        const active = abs - self.sb_count;
+        if (active >= self.size.rows) return null;
+        const start = @as(usize, @intCast(active)) * self.size.cols;
+        return self.cells[start .. start + self.size.cols];
+    }
+
+    fn absRowWrapped(self: *const TerminalCore, abs: usize) bool {
+        if (abs < self.sb_count) return self.scrollbackRowWrapped(abs);
+        const active = abs - self.sb_count;
+        if (active >= self.size.rows) return false;
+        return self.wrapped[active];
+    }
+
     /// 스크롤백을 비운다(ED 3). 행 버퍼는 해제하고 ring 슬롯 배열은 유지해 다음 push가 재할당
     /// 없이 다시 쓴다. 뷰포트는 바닥으로 스냅한다(지워진 과거를 보고 있을 수 없으니).
     fn clearScrollback(self: *TerminalCore) void {
@@ -259,6 +372,7 @@ pub const TerminalCore = struct {
 
     fn rewrapScrollback(self: *TerminalCore, new_cols: u16) void {
         if (self.sb_count == 0 or new_cols == 0) return;
+        self.selectionClear(); // 행 좌표가 재배치된다 — 선택은 해제가 안전(다른 터미널도 동일)
         _ = self.rewrapScrollbackInner(new_cols, null) catch null;
     }
 
@@ -267,6 +381,8 @@ pub const TerminalCore = struct {
     /// (Ghostty/iTerm2처럼 보던 내용이 그대로 보이게).
     fn rewrapScrollbackAnchored(self: *TerminalCore, new_cols: u16, anchor_row: usize) void {
         if (self.sb_count == 0 or new_cols == 0) return;
+        self.selectionClear(); // rewrapScrollback과 동일 — 좌표 재배치
+
         const new_anchor = self.rewrapScrollbackInner(new_cols, anchor_row) catch {
             // 재-wrap 실패(OOM): ring이 그대로이므로 offset도 그대로 유효하다.
             return;
@@ -456,6 +572,9 @@ pub const TerminalCore = struct {
         self.sb_wrapped[idx] = wrapped_flag;
         if (self.sb_count == cap) {
             self.sb_head = (self.sb_head + 1) % cap;
+            // ring이 가득 차 가장 오래된 행이 밀려나면 절대 행 좌표가 한 칸 당겨진다 — 선택도
+            // 따라 보정하고, 선택이 밀려난 행을 포함했으면 해제한다.
+            self.shiftSelectionForEviction();
         } else {
             self.sb_count += 1;
         }
@@ -3420,4 +3539,68 @@ test "DECSCUSR (CSI Ps SP q) sets the cursor shape and blink" {
     try std.testing.expect(core.snapshot().cursor_shape == .block);
     try core.write("\x1b[9 q"); // 모르는 값은 무시
     try std.testing.expectEqual(types.CursorShape.block, core.cursor_shape);
+}
+
+test "selection extracts text across soft-wrapped and hard rows (scrollback + active)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    // "abcdef"(abcd|ef soft-wrap) + "hi" — abcd가 스크롤백으로 밀린 상태를 만든다.
+    try core.write("abcdef\r\nhi\r\nx");
+    try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen()); // abcd, ef
+
+    // 스크롤백 행0(abcd)부터 활성 행0(x 이전의 hi... 레이아웃: sb=[abcd,ef], 화면=[hi, x])
+    core.scrollViewport(2); // 맨 위 — 뷰포트 [abcd, ef]
+    core.selectionStart(0, 0); // abs 0 (abcd 시작)
+    core.selectionExtend(1, 3); // abs 1 (ef 행 끝)
+    const text = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text);
+    // soft-wrap 경계는 줄바꿈 없이 이어진다: "abcdef"
+    try std.testing.expectEqualStrings("abcdef", text);
+
+    // hard 경계를 포함한 선택: ef(abs1) ~ hi(abs2, 활성 행0)
+    core.selectionStart(1, 0);
+    core.scrollToBottom(); // 선택은 절대 좌표라 스크롤해도 유지
+    core.selectionExtend(0, 3); // 바닥 뷰포트 행0 = abs2(hi)
+    const text2 = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings("ef\nhi", text2);
+}
+
+test "selection span clips to the viewport and follows scrolling" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\nd"); // sb=[a,b], 화면=[c,d]
+    core.selectionStart(0, 0); // abs 2(c)
+    core.selectionExtend(1, 1); // abs 3(d)
+    const span = core.selectionViewportSpan().?;
+    try std.testing.expectEqual(@as(u16, 0), span.start.row);
+    try std.testing.expectEqual(@as(u16, 1), span.end.row);
+
+    core.scrollViewport(2); // 위로 — 선택(c,d)은 화면 밖
+    try std.testing.expect(core.selectionViewportSpan() == null);
+    core.scrollViewport(-1); // 한 줄 내림 — 뷰포트 [b, c]: 선택 시작(c)이 행1에 보인다
+    const span2 = core.selectionViewportSpan().?;
+    try std.testing.expectEqual(@as(u16, 1), span2.start.row);
+    try std.testing.expectEqual(@as(u16, 1), span2.end.row); // d는 아래로 클립
+    try std.testing.expectEqual(@as(u16, 3), span2.end.col);
+}
+
+test "selection survives new output until eviction shifts it off the ring" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    core.max_scrollback = 2;
+    try core.write("a\r\nb\r\nc"); // sb=[a], 화면=[b,c]
+    core.selectionStart(0, 0);
+    core.selectionExtend(0, 0); // abs 0 = "a"(스크롤백 첫 행 — 화면 첫 행 b가 아님? 뷰포트 행0=b... )
+    // 주: 바닥 뷰포트 행0 = abs sb_count(1)=b. 위 선택은 b를 가리킨다.
+    try core.write("\r\nd"); // 스크롤 1회: sb=[a,b] (cap 2, eviction 없음) — 선택 abs는 불변(내용 b 유지)
+    const t1 = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(t1);
+    try std.testing.expectEqualStrings("b", t1);
+    try core.write("\r\ne"); // 또 스크롤: cap 도달, a가 evict — 선택(b)은 -1 보정돼 유지
+    const t2 = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(t2);
+    try std.testing.expectEqualStrings("b", t2);
+    try core.write("\r\nf"); // b도 evict — 선택이 ring 밖으로: 해제
+    try std.testing.expect(core.selection_anchor == null);
 }

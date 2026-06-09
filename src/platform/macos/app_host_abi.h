@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 12u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 13u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -228,6 +228,21 @@ int32_t maru_macos_app_dev_session_scroll_wheel(
 int32_t maru_macos_app_dev_session_scroll_page(
     MaruAppHostDevSession *session,
     int32_t delta_pages
+);
+/* 마우스 선택. kind 1=down(시작) 2=drag(확장) 3=up(확정 — 이동 없으면 클릭으로 보고 해제).
+   좌표는 backing 픽셀(좌상단 원점) — 셀 변환은 Zig가 cell 메트릭으로 한다. */
+int32_t maru_macos_app_dev_session_mouse(
+    MaruAppHostDevSession *session,
+    int32_t kind,
+    double x_px,
+    double y_px
+);
+/* 선택 텍스트 추출(UTF-8). 반환 버퍼는 Zig 소유로 다음 copy_text 또는 destroy까지 유효하다.
+   선택이 없으면 *out_ptr=NULL, *out_len=0. Swift가 NSPasteboard에 쓴다(클립보드는 OS 소유). */
+int32_t maru_macos_app_dev_session_copy_text(
+    MaruAppHostDevSession *session,
+    const uint8_t **out_ptr,
+    size_t *out_len
 );
 void maru_macos_app_dev_session_destroy(MaruAppHostDevSession *session);
 int32_t maru_macos_app_dev_session_metal_frame(

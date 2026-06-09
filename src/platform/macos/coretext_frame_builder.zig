@@ -12,6 +12,13 @@ pub const CoreTextFrameBuilder = struct {
     appearance: config.ResolvedAppearance,
     shape_draw_list: coretext_shaper.ShapeDrawListFn,
     rasterize_glyph: coretext_raster.RasterizeGlyphFn,
+    // backing(Retina) scale. shaper(cache key)와 rasterizer(폰트 크기)에 같은 값을 흘려 device
+    // 해상도로 또렷하게 그린다.
+    device_scale: u16 = 1,
+    // 실제 폰트 메트릭에서 온 cell 픽셀 크기(advance 폭 × line-height, device px). shaper config로
+    // 흘러 atlas slot이 정사각이 아니라 실제 모노스페이스 격자 크기가 된다.
+    cell_width_px: u16 = 0,
+    cell_height_px: u16 = 0,
 
     pub fn build(
         self: CoreTextFrameBuilder,
@@ -35,6 +42,9 @@ pub const CoreTextFrameBuilder = struct {
         const shaper = coretext_shaper.CoreTextDrawListShaper{
             .appearance = self.appearance,
             .shape_draw_list = self.shape_draw_list,
+            .device_scale = self.device_scale,
+            .cell_width_px = self.cell_width_px,
+            .cell_height_px = self.cell_height_px,
         };
         var shaped = try shaper.shape(allocator, draw_list, &font_registry);
         defer shaped.deinit(allocator);
@@ -43,6 +53,7 @@ pub const CoreTextFrameBuilder = struct {
             .appearance = self.appearance,
             .font_registry = &font_registry,
             .rasterize_glyph = self.rasterize_glyph,
+            .device_scale = self.device_scale,
         };
         const render_frame = try renderer_state.buildFrameFromGlyphRunListWithRasterizer(
             allocator,

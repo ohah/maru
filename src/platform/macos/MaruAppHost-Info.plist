@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- bare 실행파일(.app 번들 없음)에 __TEXT,__info_plist 섹션으로 임베드한다. macOS는
+         번들이 없는 앱의 이 섹션을 Info.plist로 읽는다. NSHighResolutionCapable이 없으면
+         창이 1x backing store로 렌더되어 Retina에서 업스케일로 흐려진다. -->
+    <key>CFBundleName</key>
+    <string>Maru</string>
+    <key>CFBundleDisplayName</key>
+    <string>Maru</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.maru.apphost</string>
+    <key>CFBundleExecutable</key>
+    <string>maru-macos-app-dev</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- 번들 Contents/Resources/Fonts 안의 폰트를 앱 실행 시 자동 등록한다. 시스템에 폰트가
+         설치돼 있지 않아도 기본 폰트(JetBrains Mono)를 항상 쓸 수 있게 한다(self-contained). -->
+    <key>ATSApplicationFontsPath</key>
+    <string>Fonts</string>
+</dict>
+</plist>

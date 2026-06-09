@@ -96,6 +96,8 @@ pub fn buildGlyphRunListFromShapedRecordsWithSurface(
                 .glyph_id = record.glyph_id,
                 .font_size_px = config.font_size_px,
                 .device_scale = config.device_scale,
+                .cell_width_px = config.cell_width_px,
+                .cell_height_px = config.cell_height_px,
                 .style = flags,
                 .color_glyph_kind = record.color_glyph_kind,
             },

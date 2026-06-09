@@ -22,6 +22,11 @@ pub const RasterStyleFlags = struct {
 pub const TextLayoutConfig = struct {
     font_size_px: u16 = 14,
     device_scale: u16 = 1,
+    // 한 cell의 device 픽셀 크기(advance 폭 × line-height). 실제 폰트 메트릭에서 채운다.
+    // 0이면 메트릭이 없는 경로(테스트/fake backend)라 font_size_px × device_scale 정사각으로
+    // 대체한다(기존 동작).
+    cell_width_px: u16 = 0,
+    cell_height_px: u16 = 0,
 };
 
 pub const GlyphCacheKey = struct {
@@ -29,6 +34,10 @@ pub const GlyphCacheKey = struct {
     glyph_id: GlyphId,
     font_size_px: u16,
     device_scale: u16,
+    // atlas slot 크기의 단일 출처(advance×line-height). 0이면 정사각 대체. cell 크기가 바뀌면
+    // 같은 glyph라도 새 slot이어야 하므로 cache identity의 일부다.
+    cell_width_px: u16 = 0,
+    cell_height_px: u16 = 0,
     style: RasterStyleFlags = .{},
     color_glyph_kind: ColorGlyphKind = .monochrome,
 };
@@ -149,6 +158,8 @@ pub fn buildGlyphRunList(
                 .glyph_id = shaped.glyph_id,
                 .font_size_px = config.font_size_px,
                 .device_scale = config.device_scale,
+                .cell_width_px = config.cell_width_px,
+                .cell_height_px = config.cell_height_px,
                 .style = flags,
                 .color_glyph_kind = shaped.color_glyph_kind,
             },

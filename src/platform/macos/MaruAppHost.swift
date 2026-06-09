@@ -36,6 +36,9 @@ final class MaruMetalTerminalView: NSView {
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         updateDrawableSize()
+        // backing scale이 바뀌면 dev session에 새 scale로 resize를 다시 보내, glyph가 device
+        // 해상도로 rasterize되고 cell 메트릭이 갱신되게 한다(런치 후 Retina 정착 등).
+        controller?.handleBackingScaleChange()
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -99,6 +102,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // renderer가 알려준 cell 픽셀 크기. resize가 같은 메트릭으로 cols/rows를 계산하도록 캐시한다.
     private var lastCellWidthPx: UInt32 = 0
     private var lastCellHeightPx: UInt32 = 0
+    // dev session에 마지막으로 보낸 backing scale. 런치 후 backingScaleFactor가 늦게 Retina로
+    // 정착하면(콜백이 dev session 생성 전에 발화한 경우) tick이 변화를 감지해 재-resize한다.
+    private var lastSentBackingScale: CGFloat = 0
     // create 성공 여부를 영구 기록한다. metalRenderer는 shutdown에서 nil이 되므로 summary가
     // 종료 후 쓰일 때 "생성됐었다"를 잃지 않게 별도 플래그로 둔다.
     private var metalRendererCreated = false
@@ -311,6 +317,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         metalNeedsRedraw = true
     }
 
+    // backing scale(Retina) 변경 시 dev session에 resize를 다시 보낸다. 그래야 dev session이
+    // 새 scale로 glyph를 rasterize하고 cell 메트릭을 device 해상도에 맞춘다. 런치 시점에
+    // backingScaleFactor가 아직 1.0이고 창이 Retina로 정착하며 바뀌는 경우를 잡는다.
+    func handleBackingScaleChange() {
+        guard !smokeMode else { return }
+        resizeDevSessionFromWindow()
+    }
+
     private func startDevSession(smokeMode: Bool) -> Bool {
         var config = MaruAppHostDevSessionConfig(
             abi_version: MARU_MACOS_APP_HOST_ABI_VERSION,
@@ -356,9 +370,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         tickTimer = timer
     }
 
+    // MARU_DEBUG=1일 때만 켜지는 진단. 렌더링/스케일 문제를 추적할 때 창 제목에 live
+    // scale/cell/drawable 값을 띄운다(summary 파일·launch 방식과 무관하게 제목줄만 보면 됨).
+    private let debugEnabled = ProcessInfo.processInfo.environment["MARU_DEBUG"] != nil
+
+    private func updateDiagnosticTitle() {
+        guard debugEnabled, let window else { return }
+        let scr = NSScreen.main?.backingScaleFactor ?? -1
+        let win = window.backingScaleFactor
+        let drawW = Int(metalTerminalView?.metalLayer?.drawableSize.width ?? -1)
+        window.title = "Maru  scr:\(scr) win:\(win) cell:\(lastCellWidthPx)x\(lastCellHeightPx) draw:\(drawW)"
+    }
+
     private func tickDevSession() {
         guard let devSession else {
             return
+        }
+        updateDiagnosticTitle()
+
+        // backing scale이 런치 후 늦게 정착/변경되면(콜백이 dev session 생성 전 발화한 경우 등)
+        // dev session의 device_scale이 옛 값에 머문다. 변했을 때만 resize를 다시 보낸다(매 tick
+        // float 비교 하나라 싸고, resize는 실제 변화 시에만 일어난다).
+        if !smokeMode, let window {
+            let scale = window.backingScaleFactor
+            if scale != lastSentBackingScale {
+                resizeDevSessionFromWindow()
+            }
         }
 
         var summary = MaruAppHostDevFrameSummary()
@@ -472,6 +509,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let devSession else {
             return
         }
+
+        // 보낸 backing scale을 기록해, tick의 scale-변화 감지가 같은 값에 다시 resize하지 않게 한다.
+        lastSentBackingScale = window?.backingScaleFactor ?? 1.0
 
         var event = MaruAppHostResizeEvent(
             width_px: widthPx,
@@ -594,6 +634,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         terminal_surface_note=zig_runtime_rendered_to_swift_cametal_layer
         metal_renderer_created=\(metalRendererCreated)
         metal_frames_drawn=\(metalFramesDrawn)
+        diag_last_sent_backing_scale=\(lastSentBackingScale)
+        diag_cell_width_px=\(lastCellWidthPx)
+        diag_cell_height_px=\(lastCellHeightPx)
+        diag_screen_scale=\(NSScreen.main?.backingScaleFactor ?? -1)
+        diag_window_scale=\(window?.backingScaleFactor ?? -1)
+        diag_window_screen_scale=\(window?.screen?.backingScaleFactor ?? -1)
+        diag_layer_contents_scale=\(metalTerminalView?.metalLayer?.contentsScale ?? -1)
+        diag_drawable_w=\(metalTerminalView?.metalLayer?.drawableSize.width ?? -1)
+        diag_drawable_h=\(metalTerminalView?.metalLayer?.drawableSize.height ?? -1)
         dev_session_status=\(devSessionStatus)
         frame_loop_ticks=\(latestFrameSummary.frame_loop_ticks)
         frame_loop_last_tick_index=\(latestFrameSummary.last_tick_index)

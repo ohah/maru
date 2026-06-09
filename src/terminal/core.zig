@@ -34,6 +34,11 @@ pub const TerminalCore = struct {
     // 끝 글자면 wrap하지 않으려고(끝 글자마다 빈 줄이 끼지 않게) 즉시가 아니라 "다음 글자에서"
     // 넘긴다. 명시적 커서 이동(CR/LF/backspace/커서 위치 지정/resize)은 이 상태를 무효화한다.
     pending_wrap: bool = false,
+    // DECSTBM scroll region(top/bottom margin, 0-indexed inclusive). LF/IND/RI 스크롤은 이 구간
+    // 안에서만 일어난다. 기본은 화면 전체 [0, rows-1]. init/resize에서 전체로 리셋한다. less/vim
+    // 등이 상태줄을 고정하고 본문만 스크롤하는 데 쓴다.
+    scroll_top: u16 = 0,
+    scroll_bottom: u16 = 0,
     // 각 CSI 파라미터가 ';'(새 파라미터)가 아니라 ':'(sub-parameter)로 들어왔는지 표시한다.
     // ITU colon 형식 38:2:colorspace:r:g:b는 38;2;r;g;b와 달리 colorspace 컴포넌트가 하나 더
     // 있어, 이 구분 없이는 RGB가 한 칸 밀린다.
@@ -90,6 +95,7 @@ pub const TerminalCore = struct {
             .cells = cells,
             .wrapped = wrapped,
             .dirty = fullDirty(grid),
+            .scroll_bottom = grid.rows - 1,
         };
     }
 
@@ -278,9 +284,19 @@ pub const TerminalCore = struct {
                 self.parser = .csi;
             },
             ']' => self.parser = .osc,
+            // IND(ESC D): index. CR 없이 한 줄 내림 + 하단 margin이면 scroll region을 위로 민다(LF와 동일).
+            'D' => {
+                self.lineFeed();
+                self.parser = .ground;
+            },
+            // RI(ESC M): reverse index. 한 줄 올림 + 상단 margin이면 scroll region을 아래로 민다.
+            'M' => {
+                self.reverseIndex();
+                self.parser = .ground;
+            },
             // ESC <intermediate>(0x20..0x2f) <final>: charset designation 등 2바이트 시퀀스.
             0x20...0x2f => self.parser = .escape_intermediate,
-            // 그 밖의 ESC <final>(RIS, DECSC/DECRC, index 등)은 A1에서 소비만 한다.
+            // 그 밖의 ESC <final>(RIS, DECSC/DECRC, NEL 등)은 A1에서 소비만 한다.
             else => self.parser = .ground,
         }
     }
@@ -375,6 +391,7 @@ pub const TerminalCore = struct {
             'J' => self.eraseInDisplay(self.csiRawParam(0)),
             'K' => self.eraseInLine(self.csiRawParam(0)),
             'n' => self.deviceStatusReport(),
+            'r' => self.setScrollRegion(),
             else => {},
         }
     }
@@ -820,6 +837,9 @@ pub const TerminalCore = struct {
         self.size = next_size;
         self.cells = next_cells;
         self.wrapped = next_wrapped;
+        // scroll region margin은 화면 크기에 묶이므로 resize 때 전체로 리셋한다(xterm 동작).
+        self.scroll_top = 0;
+        self.scroll_bottom = new_rows - 1;
 
         // 커서 재배치: 기록한 출력 위치에서 스크롤아웃된 행 수를 빼고 grid 안으로 clamp.
         if (cursor_out_row) |cr_raw| {
@@ -1111,33 +1131,57 @@ pub const TerminalCore = struct {
 
     fn lineFeed(self: *TerminalCore) void {
         if (self.size.rows == 0) return;
-        // LF는 deferred autowrap을 무효화한다. 비-scroll 분기는 markCursorMoveDirty가 끄지만,
-        // scroll 분기(scrollUpOneLine)는 그걸 안 거치므로 여기서 한 번에 끈다. 안 그러면 마지막
-        // 행이 꽉 찬(pending_wrap) 상태에서 bare LF가 와도 플래그가 남아, 다음 printable 글자가
-        // 또 한 줄 내려가(scroll) 직전 줄을 잃는다(이중 스크롤).
+        // LF(및 IND)는 deferred autowrap을 무효화한다. 비-scroll 분기는 markCursorMoveDirty가
+        // 끄지만, scroll 분기(scrollRegionUp)는 그걸 안 거치므로 여기서 한 번에 끈다. 안 그러면
+        // 마지막 행이 꽉 찬(pending_wrap) 상태에서 bare LF가 와도 플래그가 남아, 다음 printable
+        // 글자가 또 한 줄 내려가(scroll) 직전 줄을 잃는다(이중 스크롤).
         self.pending_wrap = false;
+        // 커서가 scroll region 하단 margin이면 region을 위로 스크롤(커서는 그대로). 그 외엔 화면
+        // 끝 전까지 한 줄 내려간다(region 위/아래 모두 동일). scrollRegionUp의 fullDirty가 커서
+        // 행까지 다시 칠하므로 scroll 분기는 cursor-move diff가 따로 필요 없다.
+        if (self.cursor.row == self.scroll_bottom) {
+            self.scrollRegionUp();
+            return;
+        }
         if (self.cursor.row + 1 < self.size.rows) {
             const old_cursor = self.cursor;
             self.cursor.row += 1;
             self.markCursorMoveDirty(old_cursor, self.cursor);
-            return;
         }
-
-        // The scroll path repaints every row via fullDirty, so the bottom-row
-        // cursor is already covered without a cursor-move diff.
-        self.scrollUpOneLine();
     }
 
-    fn scrollUpOneLine(self: *TerminalCore) void {
+    /// RI(ESC M): 커서를 한 줄 올리고, scroll region 상단 margin이면 region을 아래로 스크롤한다.
+    fn reverseIndex(self: *TerminalCore) void {
+        if (self.size.rows == 0) return;
+        self.pending_wrap = false;
+        if (self.cursor.row == self.scroll_top) {
+            self.scrollRegionDown();
+            return;
+        }
+        if (self.cursor.row > 0) {
+            const old_cursor = self.cursor;
+            self.cursor.row -= 1;
+            self.markCursorMoveDirty(old_cursor, self.cursor);
+        }
+    }
+
+    /// scroll region [top, bottom]을 위로 한 줄 민다. top==0(화면 최상단)일 때만 밀려나는 줄을
+    /// 스크롤백에 보관한다 — 화면 위로 나가는 줄만 history다. 부분 region(top>0)의 스크롤아웃은
+    /// 버린다(xterm 동작). 기본 region [0, rows-1]이면 전체 화면 스크롤과 같다.
+    fn scrollRegionUp(self: *TerminalCore) void {
         if (self.size.cols == 0 or self.size.rows == 0) return;
+        const top = self.scroll_top;
+        const bottom = self.scroll_bottom;
+        if (bottom <= top or bottom >= self.size.rows) return;
 
-        // 위로 밀려나는 맨 윗줄(row 0)을 그 soft-wrap 플래그와 함께 스크롤백에 보관한 뒤 화면을 민다.
-        self.pushScrollback(self.cells[0..self.size.cols], self.wrapped[0]);
-        // 과거를 보고 있는 중(view_offset>0)이면 새 줄이 들어와도 같은 내용을 계속 보도록 offset도
-        // 함께 올린다(scroll-lock). 맨 위(sb_count)에 닿으면 더 올리지 않는다.
-        if (self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
+        if (top == 0) {
+            self.pushScrollback(self.cells[0..self.size.cols], self.wrapped[0]);
+            // 과거를 보는 중(view_offset>0)이면 같은 내용을 계속 보도록 offset도 올린다(scroll-lock).
+            if (self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
+        }
 
-        for (1..self.size.rows) |row| {
+        var row: u16 = top + 1;
+        while (row <= bottom) : (row += 1) {
             const dst_start = self.index(row - 1, 0);
             const src_start = self.index(row, 0);
             @memcpy(
@@ -1147,10 +1191,51 @@ pub const TerminalCore = struct {
             self.wrapped[row - 1] = self.wrapped[row];
         }
 
-        const last_start = self.index(self.size.rows - 1, 0);
+        const last_start = self.index(bottom, 0);
         @memset(self.cells[last_start .. last_start + self.size.cols], .{});
-        self.wrapped[self.size.rows - 1] = false;
+        self.wrapped[bottom] = false;
         self.dirty = fullDirty(self.size);
+    }
+
+    /// scroll region [top, bottom]을 아래로 한 줄 민다(top에 빈 줄 삽입). 아래로 밀려나는 bottom
+    /// 줄은 history가 아니므로 버린다(스크롤백에 안 넣는다).
+    fn scrollRegionDown(self: *TerminalCore) void {
+        if (self.size.cols == 0 or self.size.rows == 0) return;
+        const top = self.scroll_top;
+        const bottom = self.scroll_bottom;
+        if (bottom <= top or bottom >= self.size.rows) return;
+
+        var row: u16 = bottom;
+        while (row > top) : (row -= 1) {
+            const dst_start = self.index(row, 0);
+            const src_start = self.index(row - 1, 0);
+            @memcpy(
+                self.cells[dst_start .. dst_start + self.size.cols],
+                self.cells[src_start .. src_start + self.size.cols],
+            );
+            self.wrapped[row] = self.wrapped[row - 1];
+        }
+
+        const top_start = self.index(top, 0);
+        @memset(self.cells[top_start .. top_start + self.size.cols], .{});
+        self.wrapped[top] = false;
+        self.dirty = fullDirty(self.size);
+    }
+
+    /// DECSTBM(CSI Pt ; Pb r): scroll region을 설정한다. 1-indexed, 기본 Pt=1·Pb=rows. region 안으로
+    /// clamp하고 최소 2행이 아니면 무시한다. 설정 후 커서를 home(0,0)으로 옮긴다(DECOM off 기준).
+    fn setScrollRegion(self: *TerminalCore) void {
+        const rows = self.size.rows;
+        if (rows == 0) return;
+        const top: u16 = self.csiParam(0, 1) - 1;
+        const bottom: u16 = @min(self.csiParam(1, rows), rows) - 1;
+        if (top >= bottom or bottom >= rows) return; // 2행 미만이면 무시
+        self.scroll_top = top;
+        self.scroll_bottom = bottom;
+        const old_cursor = self.cursor;
+        self.cursor = .{ .row = 0, .col = 0 };
+        self.pending_wrap = false;
+        self.markCursorMoveDirty(old_cursor, self.cursor);
     }
 
     fn markDirty(self: *TerminalCore, row: u16) void {
@@ -1857,7 +1942,7 @@ test "a bottom-row line feed clears pending wrap so the next char does not doubl
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
     defer core.deinit();
     try core.write("\r\nABCD"); // row 1을 채움 -> pending_wrap at (1,3)
-    try core.write("\n"); // 바닥 bare LF -> scrollUpOneLine 한 번(ABCD -> row 0), 컬럼은 보존
+    try core.write("\n"); // 바닥 bare LF -> scrollRegionUp 한 번(ABCD -> row 0), 컬럼은 보존
     try core.write("X"); // pending_wrap stale면 또 scroll돼 ABCD 유실. 고쳐지면 한 번만 scroll.
     // 핵심: ABCD가 row 0에 보존된다(버그면 두 번 scroll돼 row 0이 빈칸). bare LF는 컬럼을
     // 보존하므로 X는 (1,3)에 온다.
@@ -2201,4 +2286,63 @@ test "renderSnapshot clears a wide-glyph base truncated by narrowing in a scroll
     const snap = core.renderSnapshot();
     // 잘린 한 base(width 2)가 마지막 칸에 남으면 half-glyph가 렌더된다 — 정리됐는지 확인.
     try std.testing.expect(snap.cells[2].width != 2);
+}
+
+test "DECSTBM confines scrolling to the region; partial region discards the scrolled-off line" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 4 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\nd"); // 행0~3 = a,b,c,d
+    try core.write("\x1b[2;3r"); // DECSTBM region = 행1~2(1-indexed 2;3), 커서 home으로
+    try std.testing.expectEqual(@as(u16, 1), core.scroll_top);
+    try std.testing.expectEqual(@as(u16, 2), core.scroll_bottom);
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row); // DECSTBM은 커서를 home으로
+    try core.write("\x1b[3;1H"); // 커서를 하단 margin(행2)로
+    try core.write("\n"); // region [1,2] 위로 스크롤: b 버려지고 c가 행1로, 행2는 빈칸
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("a \nc \n  \nd ", dump); // 행0(a)·행3(d)는 그대로
+    try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen()); // top>0라 스크롤백 보관 안 함
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.row); // 커서는 하단 margin 유지
+}
+
+test "DECSTBM region at screen top pushes the evicted line to scrollback" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 4 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\nd");
+    try core.write("\x1b[1;3r"); // region = 행0~2(top==0), 커서 home
+    try core.write("\x1b[3;1H"); // 하단 margin(행2)
+    try core.write("\n"); // region [0,2] 위로: a는 화면 최상단에서 밀려나므로 스크롤백으로
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("b \nc \n  \nd ", dump);
+    try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen());
+}
+
+test "RI scrolls the region down when the cursor is at the top margin" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 4 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\nd");
+    try core.write("\x1b[1;3r"); // region 행0~2, 커서 home(행0=상단 margin)
+    try core.write("\x1bM"); // RI: 상단 margin이라 region을 아래로 — 행0 빈칸, a->행1, b->행2
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("  \na \nb \nd ", dump); // 행3(d)는 region 밖이라 그대로
+}
+
+test "DECSTBM ignores an invalid (top>=bottom) region and keeps the prior one" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 4 });
+    defer core.deinit();
+    try core.write("\x1b[2;3r"); // region 행1~2 설정
+    try core.write("\x1b[4;2r"); // top(3)>=bottom(1) -> 무시
+    try std.testing.expectEqual(@as(u16, 1), core.scroll_top);
+    try std.testing.expectEqual(@as(u16, 2), core.scroll_bottom);
+}
+
+test "resize resets the scroll region to full screen" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 4 });
+    defer core.deinit();
+    try core.write("\x1b[2;3r"); // region 행1~2
+    try core.resize(2, 6);
+    try std.testing.expectEqual(@as(u16, 0), core.scroll_top);
+    try std.testing.expectEqual(@as(u16, 5), core.scroll_bottom); // 새 rows-1
 }

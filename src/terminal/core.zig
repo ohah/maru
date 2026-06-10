@@ -2046,17 +2046,14 @@ pub const TerminalCore = struct {
             },
             '\t' => self.writeTab(),
             0x08 => {
+                // BS는 정확히 1칸 왼쪽이다(ECMA-48; xterm.js InputHandler.backspace와 동일).
+                // 예전엔 wide continuation 위에 서면 base로 한 칸 더 당겼는데, 셸은 BS를 항상
+                // 1칸으로 계산하고 wide 글자엔 BS를 두 번 보내므로(zsh 캡처: "\b\b  \b\b")
+                // 그 친절이 셸 계산과 한 칸 어긋나 지우기 공백이 프롬프트를 침범했다(라이브
+                // 한글 삭제에서 실제 발생). continuation 위에 선 커서의 다음 쓰기는
+                // clearCellForWrite가 base/continuation을 정리하므로 안전하다.
                 const old_cursor = self.cursor;
                 if (self.cursor.col > 0) self.cursor.col -= 1;
-                // Stepping onto a wide glyph's continuation cell would strand
-                // the cursor inside the glyph, so a following write would clear
-                // its leading half and leave a gap. Move to the leading cell so
-                // the next write replaces the whole glyph cleanly.
-                if (self.cursor.col > 0 and
-                    self.cells[self.index(self.cursor.row, self.cursor.col)].continuation)
-                {
-                    self.cursor.col -= 1;
-                }
                 self.markCursorMoveDirty(old_cursor, self.cursor);
                 self.last_print = null;
             },
@@ -2605,24 +2602,25 @@ test "terminal core drops a combining mark with no base on the current row" {
     for (snapshot.cells) |cell| try std.testing.expect(cell.combining == null);
 }
 
-test "terminal core backspaces over a wide glyph onto its leading cell" {
+test "terminal core backspace moves exactly one column even over a wide continuation" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
     defer core.deinit();
 
-    // Backspace lands one column left, which is a wide glyph's continuation
-    // cell. Parking there would make the next write clear the leading half and
-    // leave a gap; instead the cursor steps to the leading cell so the write
-    // replaces the whole glyph cleanly.
+    // BS는 정확히 1칸이다(ECMA-48, xterm.js 동일). 셸은 wide 글자에 BS를 두 번 보내므로,
+    // continuation을 건너뛰는 "친절"은 셸 계산과 한 칸 어긋나 지우기가 프롬프트를 침범한다
+    // (라이브 한글 삭제에서 실제 발생). BS 한 번이면 커서는 continuation 칸(col 1)에 서고,
+    // 그 자리 쓰기는 clearCellForWrite가 base/continuation을 함께 정리해 글자가 깨지지 않는다.
     try core.write("한\u{08}X");
 
     const snapshot = core.snapshot();
-    try std.testing.expectEqual(@as(u21, 'X'), snapshot.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'X'), snapshot.cells[1].codepoint);
     try std.testing.expect(!snapshot.cells[0].continuation);
     try std.testing.expect(!snapshot.cells[1].continuation);
-    try std.testing.expectEqual(@as(u16, 1), snapshot.cursor.col);
+    try std.testing.expectEqual(@as(u16, 2), snapshot.cursor.col);
 
     const text = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(text);
+    // base 반쪽(한)은 continuation 자리에 X를 쓰며 정리된다 — half-glyph가 남지 않는다.
     try std.testing.expect(std.mem.indexOf(u8, text, "한") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "X") != null);
 }
@@ -4301,4 +4299,18 @@ test "preedit clips at the row end instead of wrapping" {
     const snap = core.renderSnapshot();
     try std.testing.expectEqual(@as(u21, 'c'), snap.cells[2].codepoint);
     try std.testing.expectEqual(@as(u16, 3), snap.cursor.col);
+}
+
+test "zsh wide-glyph erase sequence (BS BS SP SP BS BS) cleans the hangul cell pair" {
+    // 실제 zsh 캡처: "ls 안"에서 Backspace 1회에 zsh가 보내는 시퀀스는 "\x08\x08  \x08\x08".
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    try core.write("ls \xec\x95\x88"); // "ls 안" — 안은 col3(wide)+col4(continuation)
+    try std.testing.expectEqual(@as(u2, 2), core.cells[3].width);
+    try core.write("\x08\x08  \x08\x08");
+    // 한글이 지워지고 "ls "만 남는다 — continuation 잔재 없이.
+    try std.testing.expectEqual(@as(u21, ' '), core.cells[3].codepoint);
+    try std.testing.expectEqual(@as(u21, ' '), core.cells[4].codepoint);
+    try std.testing.expect(!core.cells[4].continuation);
+    try std.testing.expectEqual(@as(u16, 3), core.cursor.col);
 }

@@ -89,8 +89,10 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         }
     }
 
-    // IME 상태: doCommand가 원본 키를 알 수 있게 현재 처리 중 이벤트를 든다.
+    // IME 상태: doCommand가 원본 키를 알 수 있게 현재 처리 중 이벤트를 들고, 같은 키에서
+    // 입력기가 텍스트(setMarkedText/insertText)를 이미 처리했는지를 기억한다.
     private var currentKeyEvent: NSEvent?
+    private var imeTextHandledForCurrentKey = false
     // 조합 중(marked) 텍스트. 아직 화면 preedit 렌더는 없고(다음 단계), 입력기 상태 추적용.
     private var markedTextBuffer: String = ""
 
@@ -109,13 +111,19 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // 입력기가 키를 비동기로 처리하는 순간(입력 소스 전환 직후 등) 같은 키가 fallback과
         // 나중에 도착한 insertText로 두 번 들어가 타이핑이 꼬인다(라이브에서 실제 발생).
         currentKeyEvent = event
+        imeTextHandledForCurrentKey = false
         interpretKeyEvents([event])
         currentKeyEvent = nil
     }
 
-    // 입력기가 텍스트로 만들지 않은 키(Enter/Backspace/방향/Tab/Esc 등 — 조합 확정 직후의
-    // Enter 포함). 셀렉터를 해석하지 않고 원본 키 이벤트를 기존 인코딩 경로로 보낸다.
+    // 입력기가 텍스트로 만들지 않은 키(Enter/Backspace/방향/Tab/Esc 등). 셀렉터를 해석하지
+    // 않고 원본 키 이벤트를 기존 인코딩 경로로 보낸다. 단, 같은 키에서 입력기가 이미 조합을
+    // 조작했다면(setMarkedText/insertText — 조합 중 Backspace의 자모 삭제, 조합 확정 Enter)
+    // 그 키는 입력기가 소비한 것이므로 PTY로 보내지 않는다 — 안 막으면 조합 중 Backspace가
+    // 자모도 줄이고 셸의 진짜 글자까지 지운다(라이브에서 "셸 명령 침범"으로 실제 발생).
+    // Terminal.app/iTerm2도 같은 의미론(조합 확정 Enter는 확정만, 개행 없음)이다.
     override func doCommand(by selector: Selector) {
+        if imeTextHandledForCurrentKey { return }
         if let event = currentKeyEvent {
             controller?.handleKeyDown(event)
         }
@@ -126,6 +134,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     // 입력기가 텍스트를 확정했다(한글 음절, 영문 일반 타이핑 모두 여기로 온다).
     func insertText(_ string: Any, replacementRange: NSRange) {
+        imeTextHandledForCurrentKey = true
         markedTextBuffer = ""
         controller?.updatePreedit("") // 조합 표시 제거 후 확정 텍스트 전송
         let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
@@ -140,6 +149,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     func unmarkText() {
+        imeTextHandledForCurrentKey = true
         markedTextBuffer = ""
         controller?.updatePreedit("")
     }

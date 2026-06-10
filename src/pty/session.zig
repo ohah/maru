@@ -37,6 +37,12 @@ const UnsupportedPtySession = struct {
         return error.UnsupportedPlatform;
     }
 
+    pub fn writeInputNonBlocking(self: *UnsupportedPtySession, bytes: []const u8) !usize {
+        _ = self;
+        _ = bytes;
+        return error.UnsupportedPlatform;
+    }
+
     pub fn resize(self: *UnsupportedPtySession, size: terminal.Size) !void {
         _ = self;
         _ = size;

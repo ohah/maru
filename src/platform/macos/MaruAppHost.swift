@@ -235,7 +235,22 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 창 근처에 뜨는 정도 — 커서 위치 정밀 배치는 preedit 렌더와 함께 다음 단계).
     func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
         guard let window else { return .zero }
-        let local = NSRect(x: 0, y: 0, width: 1, height: 16)
+        // Zig가 커서 셀 사각형을 backing px(좌상단 원점)로 준다. view points(y-flip) -> window
+        // -> screen으로 변환해 입력기 후보창이 커서 위치에 뜨게 한다.
+        guard let (x, y, w, h) = controller?.imeCursorRectPx() else {
+            return window.convertToScreen(convert(NSRect(x: 0, y: 0, width: 1, height: 16), to: nil))
+        }
+        let scale = window.backingScaleFactor
+        let viewW = w / scale
+        let viewH = h / scale
+        // backing px의 y는 위에서 아래로(좌상단 원점). view 좌표는 아래에서 위로 증가하므로
+        // 셀 하단(y+h)을 기준으로 뒤집어 후보창이 글자 아래에 뜨게 한다.
+        let local = NSRect(
+            x: x / scale,
+            y: bounds.height - (y / scale) - viewH,
+            width: viewW,
+            height: viewH
+        )
         return window.convertToScreen(convert(local, to: nil))
     }
 
@@ -917,6 +932,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func imeFocus(_ focused: Bool) {
         guard let session = devSession else { return }
         _ = maru_macos_app_dev_session_set_focus(session, focused ? 1 : 0)
+    }
+
+    // IME 후보창 배치용 커서 셀 사각형(backing px, 좌상단 원점). 화면 좌표 변환은 view가 한다.
+    func imeCursorRectPx() -> (Double, Double, Double, Double)? {
+        guard let session = devSession else { return nil }
+        var x = 0.0, y = 0.0, w = 0.0, h = 0.0
+        guard maru_macos_app_dev_session_ime_cursor_rect(session, &x, &y, &w, &h) == Self.statusOK else { return nil }
+        return (x, y, w, h)
     }
 
     private func normalizedKeyEvent(from event: NSEvent) -> MaruAppHostKeyEvent? {

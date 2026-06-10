@@ -39,7 +39,7 @@
 - settings UI/runtime reload
 - plugin/Wasm
 - global shortcut
-- IME 후보창 커서 위치 정밀 배치(조합/확정·preedit 표시·레이아웃 독립 단축키·판정 상태 머신의 Zig 이전(ABI v20, unit 고정)은 완료)
+- function key/keypad/dead key·CSI-u 인코딩(조합/확정·preedit 표시·레이아웃 독립 단축키·판정 상태 머신 Zig 이전·후보창 커서 위치 배치(ABI v22)는 완료)
 - full VT parser 호환성(alternate screen, scroll region, mouse mode 등)
 
 ## C ABI 규칙

@@ -122,6 +122,17 @@ pub const TerminalCore = struct {
     // 스크롤백 eviction(가득 찬 ring)·재-wrap·clear 때 보정/해제된다.
     selection_anchor: ?types.SelectionPoint = null,
     selection_head: ?types.SelectionPoint = null,
+    // OSC 8 하이퍼링크. URI는 link_store에 intern(중복 제거)하고 셀에는 id(인덱스+1)만 둔다.
+    // pen_link는 현재 열린 링크 id — 링크가 열린 동안 출력되는 셀에 찍힌다. store는 세션 수명
+    // 동안 유지된다(셀이 스크롤백에 남아 있는 한 URI도 살아 있어야 하므로 GC하지 않는다).
+    link_store: std.ArrayListUnmanaged([]u8) = .empty,
+    link_ids: std.StringHashMapUnmanaged(u32) = .empty,
+    pen_link: u32 = 0,
+    // OSC 내용 축적 버퍼(OSC 8 하이퍼링크 파싱용). 넘치면 그 OSC는 통째로 무시한다(악의적/거대
+    // URI가 메모리를 못 잡게). title 등 다른 OSC는 여전히 소비만 한다.
+    osc_buffer: [2048]u8 = undefined,
+    osc_len: usize = 0,
+    osc_overflow: bool = false,
     // 스크롤된(view_offset>0) 상태의 렌더용 합성 버퍼(rows×cols). renderSnapshot이 뷰포트 윈도를
     // 여기에 합성한다. view_offset==0이면 안 쓰므로 lazy 할당한다(스크롤할 때만 메모리 사용).
     viewport_cells: []types.Cell = &.{},
@@ -158,6 +169,9 @@ pub const TerminalCore = struct {
     }
 
     pub fn deinit(self: *TerminalCore) void {
+        for (self.link_store.items) |uri| self.allocator.free(uri);
+        self.link_store.deinit(self.allocator);
+        self.link_ids.deinit(self.allocator);
         self.allocator.free(self.cells);
         if (self.wrapped.len > 0) self.allocator.free(self.wrapped);
         if (self.saved_cells.len > 0) self.allocator.free(self.saved_cells);
@@ -356,9 +370,54 @@ pub const TerminalCore = struct {
         return .{ .start = .{ .row = start_row, .col = start_col }, .end = .{ .row = end_row, .col = end_col } };
     }
 
-    /// Cmd+클릭/hover 위치가 URL이면 그 단어 run의 시작 셀 절대 좌표를 돌려준다(밑줄 anchor용,
-    /// 할당 없음). URL 판정은 extractUrlAt과 동일(스킴+본문). 아니면 null.
+    /// 클릭 셀의 OSC 8 링크 id(0=없음).
+    fn cellLinkAt(self: *const TerminalCore, abs: usize, col: u16) u32 {
+        const row_cells = self.absRow(abs) orelse return 0;
+        if (col >= row_cells.len) return 0;
+        return row_cells[col].link;
+    }
+
+    /// 같은 OSC 8 링크 id가 이어지는 셀 run의 절대 좌표 경계. 링크 텍스트 안의 공백도 포함하고
+    /// (보이는 텍스트 전체에 밑줄), soft-wrap 경계 너머로도 이어진다. 행이 바뀌는 hard 줄도 같은
+    /// id면 잇는다 — 한 링크가 여러 줄에 걸쳐 출력된 경우(개행 포함 echo) 모두 한 링크다.
+    fn linkBoundsAt(self: *const TerminalCore, abs: usize, col: u16, id: u32) struct { start: types.SelectionPoint, end: types.SelectionPoint } {
+        var start_row = abs;
+        var start_col: u16 = col;
+        outer_left: while (true) {
+            const cells_row = self.absRow(start_row) orelse break;
+            while (start_col > 0) {
+                if (cells_row[start_col - 1].link != id) break :outer_left;
+                start_col -= 1;
+            }
+            if (start_row == 0) break;
+            const prev = self.absRow(start_row - 1) orelse break;
+            if (prev.len == 0 or prev[prev.len - 1].link != id) break;
+            start_row -= 1;
+            start_col = @intCast(prev.len - 1);
+        }
+        var end_row = abs;
+        var end_col: u16 = col;
+        outer_right: while (true) {
+            const cells_row = self.absRow(end_row) orelse break;
+            while (end_col + 1 < cells_row.len) {
+                if (cells_row[end_col + 1].link != id) break :outer_right;
+                end_col += 1;
+            }
+            const next = self.absRow(end_row + 1) orelse break;
+            if (next.len == 0 or next[0].link != id) break;
+            end_row += 1;
+            end_col = 0;
+        }
+        return .{ .start = .{ .row = start_row, .col = start_col }, .end = .{ .row = end_row, .col = end_col } };
+    }
+
+    /// Cmd+클릭/hover 위치가 URL이면 그 run의 시작 셀 절대 좌표를 돌려준다(밑줄 anchor용,
+    /// 할당 없음). OSC 8 명시적 링크가 있으면 그것이 우선이고(보이는 텍스트와 무관), 없으면
+    /// 화면 글자의 http(s) 휴리스틱(extractUrlAt과 동일 판정)이다.
     pub fn urlAnchorAt(self: *const TerminalCore, viewport_row: u16, col: u16) ?types.SelectionPoint {
+        const abs = self.absRowFromViewport(viewport_row);
+        const id = self.cellLinkAt(abs, col);
+        if (id != 0) return self.linkBoundsAt(abs, col, id).start;
         if (!self.wordIsUrl(viewport_row, col)) return null;
         const bounds = self.wordBoundsAt(viewport_row, col) orelse return null;
         return bounds.start;
@@ -370,6 +429,11 @@ pub const TerminalCore = struct {
         const top_abs = self.sb_count - @min(self.view_offset, self.sb_count);
         const bottom_abs = top_abs + self.size.rows - 1;
         if (anchor.row < top_abs or anchor.row > bottom_abs) return null; // anchor가 화면 밖
+        const id = self.cellLinkAt(anchor.row, anchor.col);
+        if (id != 0) {
+            const bounds = self.linkBoundsAt(anchor.row, anchor.col, id);
+            return self.clipAbsSpanToViewport(bounds.start, bounds.end);
+        }
         const vp_row: u16 = @intCast(anchor.row - top_abs);
         const bounds = self.wordBoundsAt(vp_row, anchor.col) orelse return null;
         return self.clipAbsSpanToViewport(bounds.start, bounds.end);
@@ -379,6 +443,13 @@ pub const TerminalCore = struct {
     /// 안에서 http:// 또는 https:// 부터 run 끝까지를 URL로 보고, 끝에 붙은 문장 부호(괄호/마침표
     /// 등)는 다듬는다. 호출자가 free한다.
     pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, viewport_row: u16, col: u16) !?[]u8 {
+        // OSC 8 명시적 링크가 우선 — 프로그램이 지정한 URI를 그대로 연다(보이는 텍스트와 무관,
+        // 휴리스틱의 문장부호 다듬기도 적용하지 않는다).
+        const link_id = self.cellLinkAt(self.absRowFromViewport(viewport_row), col);
+        if (link_id != 0) {
+            const uri = self.linkUri(link_id) orelse return null;
+            return try allocator.dupe(u8, uri);
+        }
         const bounds = self.wordBoundsAt(viewport_row, col) orelse return null;
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
@@ -443,6 +514,7 @@ pub const TerminalCore = struct {
     /// 클릭 셀이 속한 단어가 URL인지(할당 없이) 판정한다. hover의 매-mouseMove 비용을 줄이려
     /// extractUrlAt의 alloc 없이 같은 판정만 한다.
     pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16) bool {
+        if (self.cellLinkAt(self.absRowFromViewport(viewport_row), col) != 0) return true;
         const bounds = self.wordBoundsAt(viewport_row, col) orelse return false;
         // URL은 보통 한 단어라 짧은 스택 버퍼로 충분하고, 넘치면 URL일 수 있으니 통과시킨다.
         var buf: [2048]u8 = undefined;
@@ -856,22 +928,67 @@ pub const TerminalCore = struct {
                 },
                 .osc => {
                     const byte = bytes[index_];
-                    // OSC string은 BEL(0x07) 또는 ST(ESC \)로 끝난다. A1은 내용(title 등)을
-                    // 적용하지 않고 소비만 한다.
+                    // OSC string은 BEL(0x07) 또는 ST(ESC \)로 끝난다. 내용은 버퍼에 모아 종료
+                    // 시점에 해석한다(현재 OSC 8 하이퍼링크만 적용, title 등은 소비).
                     if (byte == 0x07) {
+                        self.dispatchOsc();
                         self.parser = .ground;
                     } else if (byte == 0x1b) {
                         self.parser = .osc_escape;
+                    } else if (self.osc_len < self.osc_buffer.len) {
+                        self.osc_buffer[self.osc_len] = byte;
+                        self.osc_len += 1;
+                    } else {
+                        self.osc_overflow = true; // 너무 긴 OSC — 통째로 무시
                     }
                     index_ += 1;
                 },
                 .osc_escape => {
-                    // OSC 안에서 ESC 다음 바이트. ST(ESC \)든 아니든 OSC를 끝낸다(관대 처리).
+                    // OSC 안에서 ESC 다음 바이트. ST(ESC \)면 정상 종료로 해석하고, 그 외도
+                    // OSC를 끝낸다(관대 처리 — 내용은 버린다).
+                    if (bytes[index_] == '\\') self.dispatchOsc();
                     self.parser = .ground;
                     index_ += 1;
                 },
             }
         }
+    }
+
+    /// 종료된 OSC 내용을 해석한다. 현재 OSC 8(하이퍼링크)만 적용한다:
+    /// `8 ; params ; URI` — URI가 비면 링크 닫기, 있으면 열기(이후 출력 셀에 id가 찍힌다).
+    /// params(`id=...` 등)는 무시한다(xterm ctlseqs의 OSC 8 확장 — 시각 묶음 힌트일 뿐).
+    /// URI 안의 ';'는 보존된다(두 번째 구분자 이후 전부 URI).
+    fn dispatchOsc(self: *TerminalCore) void {
+        if (self.osc_overflow) return;
+        const body = self.osc_buffer[0..self.osc_len];
+        if (!std.mem.startsWith(u8, body, "8;")) return;
+        const after_code = body[2..];
+        const params_end = std.mem.indexOfScalar(u8, after_code, ';') orelse return;
+        const uri = after_code[params_end + 1 ..];
+        if (uri.len == 0) {
+            self.pen_link = 0;
+            return;
+        }
+        self.pen_link = self.internLink(uri) catch 0; // OOM이면 링크 없이 출력(텍스트는 보존)
+    }
+
+    /// URI를 link_store에 intern하고 id(인덱스+1)를 돌려준다. 같은 URI는 한 번만 저장된다 —
+    /// ls --hyperlink처럼 수백 셀이 같은 파일 URI를 가리켜도 문자열은 하나다.
+    fn internLink(self: *TerminalCore, uri: []const u8) !u32 {
+        if (self.link_ids.get(uri)) |id| return id;
+        const owned = try self.allocator.dupe(u8, uri);
+        errdefer self.allocator.free(owned);
+        const id: u32 = @intCast(self.link_store.items.len + 1);
+        try self.link_store.append(self.allocator, owned);
+        errdefer _ = self.link_store.pop();
+        try self.link_ids.put(self.allocator, owned, id);
+        return id;
+    }
+
+    /// 링크 id -> URI(없으면 null).
+    fn linkUri(self: *const TerminalCore, id: u32) ?[]const u8 {
+        if (id == 0 or id > self.link_store.items.len) return null;
+        return self.link_store.items[id - 1];
     }
 
     fn handleEscapeByte(self: *TerminalCore, byte: u8) void {
@@ -880,7 +997,11 @@ pub const TerminalCore = struct {
                 self.beginCsi();
                 self.parser = .csi;
             },
-            ']' => self.parser = .osc,
+            ']' => {
+                self.osc_len = 0;
+                self.osc_overflow = false;
+                self.parser = .osc;
+            },
             // IND(ESC D): index. CR 없이 한 줄 내림 + 하단 margin이면 scroll region을 위로 민다(LF와 동일).
             'D' => {
                 self.lineFeed();
@@ -1979,12 +2100,14 @@ pub const TerminalCore = struct {
             .codepoint = codepoint,
             .style = self.pen,
             .width = cell_width,
+            .link = self.pen_link,
         };
         if (cell_width == 2) {
             self.cells[self.index(row, col + 1)] = .{
                 .style = self.pen,
                 .width = 0,
                 .continuation = true,
+                .link = self.pen_link,
             };
         }
         self.last_print = .{ .row = row, .col = col };
@@ -4018,4 +4141,66 @@ test "scrollback re-wrap clears a truncated wide-glyph base at narrow widths" {
         const row = core.scrollbackRow(r).?;
         if (row.len > 0) try std.testing.expect(row[row.len - 1].width != 2);
     }
+}
+
+test "OSC 8 hyperlink: click returns the stored URI regardless of visible text" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 3 });
+    defer core.deinit();
+    // "여기" 두 글자(wide)에 링크. ST(ESC \) 종료.
+    try core.write("\x1b]8;;https://maru.dev/docs\x1b\\click here\x1b]8;;\x1b\\ tail");
+    // 링크 텍스트 위 클릭 — 보이는 텍스트("click here")가 아니라 지정 URI가 나온다.
+    const url = (try core.extractUrlAt(std.testing.allocator, 0, 2)).?;
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://maru.dev/docs", url);
+    try std.testing.expect(core.wordIsUrl(0, 2));
+    // 링크 안 공백("click here"의 ' ')도 같은 링크다.
+    try std.testing.expect(core.wordIsUrl(0, 5));
+    // 링크 밖("tail")은 아니다.
+    try std.testing.expect(!core.wordIsUrl(0, 12));
+    // 닫은 뒤 출력엔 링크가 없다.
+    try std.testing.expectEqual(@as(u32, 0), core.cells[12].link);
+}
+
+test "OSC 8 hyperlink: BEL terminator, id= params ignored, same URI interned once" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 30, .rows = 3 });
+    defer core.deinit();
+    try core.write("\x1b]8;id=x;https://a.bc\x07one\x1b]8;;\x07 \x1b]8;;https://a.bc\x07two\x1b]8;;\x07");
+    try std.testing.expectEqual(@as(usize, 1), core.link_store.items.len); // dedup
+    try std.testing.expectEqual(core.cells[0].link, core.cells[5].link); // 같은 id 재사용
+    const url = (try core.extractUrlAt(std.testing.allocator, 0, 0)).?;
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://a.bc", url);
+}
+
+test "OSC 8 hyperlink: span underlines the whole link run and survives soft-wrap" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 3 });
+    defer core.deinit();
+    try core.write("\x1b]8;;https://a.bc/long\x1b\\abcdefgh\x1b]8;;\x1b\\"); // 6칸 wrap: abcdef|gh
+    try std.testing.expect(core.wrapped[0]);
+    const anchor = core.urlAnchorAt(1, 1).?; // 둘째 줄에서 클릭해도
+    try std.testing.expectEqual(@as(usize, 0), anchor.row); // run 시작은 첫 줄
+    const span = core.urlSpanAtAbs(anchor).?;
+    try std.testing.expectEqual(@as(u16, 0), span.start.row);
+    try std.testing.expectEqual(@as(u16, 0), span.start.col);
+    try std.testing.expectEqual(@as(u16, 1), span.end.row);
+    try std.testing.expectEqual(@as(u16, 1), span.end.col); // "gh"까지
+    const url = (try core.extractUrlAt(std.testing.allocator, 1, 0)).?;
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://a.bc/long", url);
+}
+
+test "OSC 8 oversized URI is ignored and plain heuristic still works" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 30, .rows = 3 });
+    defer core.deinit();
+    // 버퍼(2048)를 넘는 OSC — 통째로 무시되고 출력은 정상.
+    var big: [3000]u8 = undefined;
+    @memset(&big, 'u');
+    try core.write("\x1b]8;;https://");
+    try core.write(&big);
+    try core.write("\x07hello");
+    try std.testing.expectEqual(@as(usize, 0), core.link_store.items.len);
+    try std.testing.expectEqual(@as(u21, 'h'), core.cells[0].codepoint);
+    // 휴리스틱은 여전히 동작.
+    try core.write("\r\nhttps://x.yz ");
+    try std.testing.expect(core.wordIsUrl(1, 3));
 }

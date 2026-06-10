@@ -34,6 +34,9 @@ pub const Cell = struct {
     width: u2 = 1,
     continuation: bool = false,
     combining: ?u21 = null,
+    // OSC 8 하이퍼링크 id(0=없음). URI 자체는 TerminalCore.link_store에 한 번만 저장하고
+    // 셀은 id만 든다 — 링크가 걸린 긴 출력에서도 셀 메모리가 URI 길이에 비례하지 않는다.
+    link: u32 = 0,
 };
 
 /// Iterates the visible codepoints of a single row: each non-continuation

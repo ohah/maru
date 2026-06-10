@@ -132,6 +132,12 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 없고 조합 변화도 없으면 일반 키로 인코딩).
     override func doCommand(by selector: Selector) {
         imeLog("doCommand:\(NSStringFromSelector(selector))")
+        // deleteBackward는 Zig 트랜잭션에 기록한다 — 한글 마지막 자모 백스페이스에서 입력기가
+        // insertText(조합 글자) + deleteBackward를 함께 보내면 둘이 상쇄돼야 한다(글자가 PTY에
+        // 박히지 않게). 그 외 편집 명령(insertNewline 등)은 ime_end가 일반 키로 인코딩한다.
+        if selector == #selector(NSStandardKeyBindingResponding.deleteBackward(_:)) {
+            controller?.imeDeleteBackward()
+        }
     }
 
     // ── NSTextInputClient — 입력기(IME) 통합. 조합 의미론은 macOS 입력기가, 확정 텍스트의
@@ -896,6 +902,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_dev_session_ime_marked(session, buf.baseAddress, buf.count)
         }
+    }
+
+    func imeDeleteBackward() {
+        guard let session = devSession else { return }
+        _ = maru_macos_app_dev_session_ime_delete_backward(session)
     }
 
     func imeFocus(_ focused: Bool) {

@@ -265,6 +265,14 @@ pub export fn maru_macos_app_dev_session_ime_end(
     return @intFromEnum(Status.ok);
 }
 
+// IME deleteBackward 편집 명령(doCommand). 트랜잭션에 기록만 — 한글 마지막 자모 백스페이스의
+// insertText+deleteBackward 상쇄 판정에 쓴다.
+pub export fn maru_macos_app_dev_session_ime_delete_backward(session: ?*DevSession) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    dev_session.imeDeleteBackward();
+    return @intFromEnum(Status.ok);
+}
+
 // 포커스 변화. 잃으면 조합 중 텍스트를 확정(커밋)한다 — Terminal.app/Ghostty 의미론.
 pub export fn maru_macos_app_dev_session_set_focus(session: ?*DevSession, focused: i32) c_int {
     const dev_session = session orelse return @intFromEnum(Status.null_out);

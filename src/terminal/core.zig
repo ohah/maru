@@ -411,6 +411,15 @@ pub const TerminalCore = struct {
         self.dirty = fullDirty(self.size);
     }
 
+    /// 행을 재배치하는 연산이 선택의 절대-행 좌표 불변식을 깨면 선택을 해제하는 단일 chokepoint.
+    /// 절대 좌표가 내용을 자연히 따라가는 경우는 전체 화면 LF 스크롤(밀려난 줄이 스크롤백으로 가고
+    /// eviction은 shiftSelectionForEviction가 보정)뿐이고, 그 외 모든 재배치(부분 region 스크롤,
+    /// IL/DL/RI, alt 전환, resize reflow, ED3 clear)는 좌표가 어긋나므로 해제한다. selectionClear의
+    /// 별칭이지만, 호출부가 "왜 해제하나"(불변식 보호)를 드러내게 별도 이름을 둔다.
+    fn invalidateSelection(self: *TerminalCore) void {
+        self.selectionClear();
+    }
+
     fn shiftSelectionForEviction(self: *TerminalCore) void {
         if (self.selection_anchor == null) return;
         const a = &self.selection_anchor.?;
@@ -510,6 +519,7 @@ pub const TerminalCore = struct {
         self.sb_head = 0;
         self.sb_count = 0;
         self.view_offset = 0;
+        self.invalidateSelection(); // 스크롤백을 지우면 abs 좌표가 무효 — 선택 해제(필드 주석의 약속)
     }
 
     /// 스크롤백 전체를 새 폭으로 재-wrap한다(resize 시). 활성 화면 reflow와 같은 규칙을 ring에
@@ -609,6 +619,7 @@ pub const TerminalCore = struct {
                     const needs: u16 = if (cell.width == 2) 2 else 1;
                     if (oc + needs > new_cols) {
                         if (cur) |full| {
+                            clearTruncatedWideBase(full); // 마지막 칸의 잘린 wide base 정리(new_cols==1 등)
                             rows.appendAssumeCapacity(full);
                             wraps.appendAssumeCapacity(true);
                             cur = null;
@@ -631,6 +642,7 @@ pub const TerminalCore = struct {
                 @memset(cur.?, .{});
             }
             if (cur) |last| {
+                clearTruncatedWideBase(last);
                 rows.appendAssumeCapacity(last);
                 wraps.appendAssumeCapacity(tail_wrap);
                 cur = null;
@@ -1053,8 +1065,10 @@ pub const TerminalCore = struct {
         self.cells = alt_cells;
         self.wrapped = alt_wrapped;
         self.alt_active = true;
-        // alt에서 스크롤백 뷰는 잠긴다 — 보고 있던 과거는 닫는다.
+        // alt에서 스크롤백 뷰는 잠긴다 — 보고 있던 과거는 닫는다. 선택도 해제(활성 cells가 alt로
+        // 바뀌어 abs>=sb_count 좌표가 다른 내용을 가리키므로 — xterm.js도 버퍼 전환 시 선택 해제).
         self.view_offset = 0;
+        self.invalidateSelection();
         self.pending_wrap = false;
         self.last_print = null;
         self.dirty = fullDirty(self.size);
@@ -1078,6 +1092,7 @@ pub const TerminalCore = struct {
         self.alt_active = false;
         self.pending_wrap = false;
         self.last_print = null;
+        self.invalidateSelection(); // primary 복귀 — 활성 cells가 다시 바뀌므로 선택 해제
         if (restore_cursor) self.restoreFromSlot(self.saved_cursor_primary);
         self.dirty = fullDirty(self.size);
     }
@@ -1441,6 +1456,12 @@ pub const TerminalCore = struct {
         const new_rows = next_size.rows;
         const old_rows = self.size.rows;
         const old_cols = self.size.cols;
+
+        // resize는 활성 화면을 reflow하고(폭 변경 시) 행을 스크롤백으로 밀어내 모든 cell이 재배치
+        // 된다 — 선택의 절대-행 좌표는 보존할 수 없으니 진입부에서 무조건 해제한다(폭/높이 변경,
+        // alt 경로 공통). 스크롤백 재-wrap의 selectionClear와 별개로 여기서도 처리해, 폭 불변 높이
+        // 변경이나 빈 스크롤백 같은 경로가 새지 않게 한다.
+        self.invalidateSelection();
 
         // alt screen 중 resize: reflow/스크롤백 없이 두 그리드(활성 alt + 저장된 primary)를 단순
         // clip/pad한다. TUI는 SIGWINCH로 전체를 다시 그리므로 alt 내용 재배치는 의미가 없고, 저장된
@@ -2012,6 +2033,10 @@ pub const TerminalCore = struct {
         const span: u16 = bottom - top + 1;
         const n = @min(count, span);
 
+        // 선택 좌표가 자연히 따라가는 경우는 전체 화면 history 스크롤(아래 push + eviction 보정)뿐.
+        // 부분 region 스크롤·DL(push 없음)은 활성 영역 안에서 행만 옮겨 abs 좌표가 어긋나므로 해제.
+        if (!(push_history and top == 0 and bottom == self.size.rows - 1)) self.invalidateSelection();
+
         if (push_history) {
             var pr: u16 = 0;
             while (pr < n) : (pr += 1) {
@@ -2056,6 +2081,9 @@ pub const TerminalCore = struct {
         if (bottom < top or bottom >= self.size.rows) return;
         const span: u16 = bottom - top + 1;
         const n = @min(count, span);
+
+        // 아래로 스크롤(IL/RI)은 항상 활성 영역 안에서 행을 옮기므로 선택 좌표가 어긋난다 — 해제.
+        self.invalidateSelection();
 
         var row: u16 = bottom;
         while (row >= top + n) : (row -= 1) {
@@ -3833,4 +3861,73 @@ test "urlSpanAt returns the viewport span of a hovered URL word and null for non
     try std.testing.expectEqual(@as(u16, 0), span.start.row);
     try std.testing.expectEqual(@as(u16, 3), span.start.col); // "https://..." 단어 시작
     try std.testing.expect((try core.urlSpanAt(std.testing.allocator, 0, 0)) == null); // "go"
+}
+
+test "selection is invalidated by row-relocating ops that break absolute coords" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+
+    // resize(폭 변경): 활성 화면이 reflow돼 선택 해제.
+    try core.write("ab\r\ncd");
+    core.selectionStart(0, 0);
+    core.selectionExtend(1, 1);
+    try std.testing.expect(core.selection_anchor != null);
+    try core.resize(6, 3);
+    try std.testing.expect(core.selection_anchor == null);
+
+    // resize(높이만): 폭 불변이라도 해제(이전엔 안 했음).
+    core.selectionStart(0, 0);
+    try core.resize(6, 2);
+    try std.testing.expect(core.selection_anchor == null);
+
+    // IL/DL(scrollRangeDown/Up, 부분 이동): 해제.
+    try core.write("\x1b[1;1Hx\r\ny");
+    core.selectionStart(0, 0);
+    try core.write("\x1b[L"); // IL
+    try std.testing.expect(core.selection_anchor == null);
+    core.selectionStart(0, 0);
+    try core.write("\x1b[M"); // DL
+    try std.testing.expect(core.selection_anchor == null);
+
+    // alt screen 전환: 진입/복귀 모두 해제.
+    core.selectionStart(0, 0);
+    try core.write("\x1b[?1049h");
+    try std.testing.expect(core.selection_anchor == null);
+    core.selectionStart(0, 0);
+    try core.write("\x1b[?1049l");
+    try std.testing.expect(core.selection_anchor == null);
+
+    // ED 3(clearScrollback): 해제.
+    try core.write("p\r\nq\r\nr\r\ns"); // 스크롤백 생성
+    core.selectionStart(0, 0);
+    try core.write("\x1b[3J");
+    try std.testing.expect(core.selection_anchor == null);
+}
+
+test "selection still follows content through a full-screen scroll (preserved case)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("aa\r\nbb"); // 화면 [aa, bb]
+    core.selectionStart(0, 0);
+    core.selectionExtend(0, 1); // "aa"(활성 행0)
+    try core.write("\r\ncc"); // 전체 화면 스크롤: aa -> 스크롤백, 선택은 따라가 유지
+    try std.testing.expect(core.selection_anchor != null);
+    const text = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("aa", text);
+}
+
+test "scrollback re-wrap clears a truncated wide-glyph base at narrow widths" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("\xed\x95\x9c\xed\x95\x9c\r\n1\r\n2"); // "한한"(wide) 한 줄이 스크롤백으로
+    try std.testing.expect(core.scrollbackLen() >= 1);
+    try core.resize(2, 2); // 2칸 — 한(width2)이 한 칸씩 차지
+    core.scrollViewport(10); // 재-wrap 트리거
+    // 재-wrap된 스크롤백 행의 마지막 칸이 잘린 wide base(width 2)로 남지 않아야 한다.
+    var r: usize = 0;
+    while (r < core.scrollbackLen()) : (r += 1) {
+        const row = core.scrollbackRow(r).?;
+        if (row.len > 0) try std.testing.expect(row[row.len - 1].width != 2);
+    }
 }

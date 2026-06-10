@@ -23,6 +23,9 @@ pub const default_queue_capacity: u32 = 16;
 const placeholder_cell_width_px: u32 = 12;
 const placeholder_cell_height_px: u32 = 24;
 
+// 커서 깜빡임 반주기(30Hz tick 단위). 15틱 = 500ms — 일반 터미널 관례(on 500ms / off 500ms).
+const blink_interval_ticks: u32 = 15;
+
 /// backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다. cell 크기가 0이면
 /// placeholder로 대체하고, u16 상한으로 막은 뒤 terminal.clampGridSize로 최소 크기(cols>=2)를
 /// 적용한다 — cols>=2 불변식은 TerminalCore가 단일 소유하므로 여기서 직접 하드코딩하지 않는다.
@@ -182,6 +185,10 @@ pub const DevSession = struct {
     drag_autoscroll: i8 = 0,
     // 자동 스크롤 중 선택 확장에 쓸 마지막 드래그 열.
     last_drag_col: u16 = 0,
+    // 커서 깜빡임 위상(DECSCUSR blink가 켜진 커서만). 30Hz tick 15회(=500ms)마다 토글하고,
+    // 입력/출력이 있으면 보이는 상태로 리셋한다(타이핑 중 커서가 사라지지 않게).
+    blink_visible: bool = true,
+    blink_ticks: u32 = 0,
 
     pub fn init(
         self: *DevSession,
@@ -275,6 +282,7 @@ pub const DevSession = struct {
             .terminal_input => |terminal_input| {
                 self.total_terminal_input_events += 1;
                 self.total_terminal_input_bytes += terminal_input.bytes_len;
+                self.resetCursorBlink(); // 타이핑 중 커서가 사라지지 않게
             },
             .app_action => self.total_app_key_events += 1,
             .ignored => self.total_ignored_key_events += 1,
@@ -388,6 +396,31 @@ pub const DevSession = struct {
             else => return,
         }
         self.metal_dirty = true;
+    }
+
+    /// 커서 깜빡임 한 스텝(30Hz tick마다). steady 커서(DECSCUSR 2/4/6)나 ?25l(숨김)이면 위상을
+    /// 보이는 상태로 고정한다 — 토글 자체가 없으니 idle 재투영도 없다.
+    fn updateCursorBlink(self: *DevSession) void {
+        const core = &self.surfaces[0].core;
+        if (!core.cursor_blink or !core.cursor_visible) {
+            self.resetCursorBlink();
+            return;
+        }
+        self.blink_ticks += 1;
+        if (self.blink_ticks >= blink_interval_ticks) {
+            self.blink_ticks = 0;
+            self.blink_visible = !self.blink_visible;
+            self.metal_dirty = true; // 커서 overlay만 바뀌어도 재투영이 필요하다
+        }
+    }
+
+    /// 깜빡임을 보이는 위상으로 리셋한다(입력/출력 직후 — 커서가 항상 보이며 새 주기를 시작).
+    fn resetCursorBlink(self: *DevSession) void {
+        self.blink_ticks = 0;
+        if (!self.blink_visible) {
+            self.blink_visible = true;
+            self.metal_dirty = true;
+        }
     }
 
     /// 드래그 자동 스크롤 한 스텝(30Hz tick마다). 드래그가 grid 밖에 머무는 동안 한 줄씩
@@ -588,6 +621,9 @@ pub const DevSession = struct {
         // 가정: 모든 시각 변화는 PTY output(또는 resize)에서 온다. cursor blink나 주기적 redraw
         // 같은 PTY와 무관한 변화를 넣게 되면, 그 트리거에서도 metal_dirty를 세워야 한다.
         if (drain_summary.output_events > 0) self.metal_dirty = true;
+        // 깜빡임: 출력이 흐르면 보이는 위상으로 리셋(커서가 움직이는 동안 항상 보이게), idle이면
+        // 500ms마다 토글. steady/숨김 커서는 updateCursorBlink가 무토글로 고정한다.
+        if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink();
         if (self.metal_dirty) {
             var tick_result = if (builtin.os.tag == .macos) blk: {
                 const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
@@ -612,10 +648,11 @@ pub const DevSession = struct {
                 .hover_link = self.hover_url_span,
 
                 // 커서는 반전 블록으로 그린다: 칸 배경=theme.cursor, 그 위 glyph=theme.background.
-                .cursor = .{
+                // 깜빡임 off 위상이면 null로 둬 커서 투영 자체를 생략한다(기존 opt-in 메커니즘 재사용).
+                .cursor = if (self.blink_visible) .{
                     .block = self.appearance.theme.cursor,
                     .text = self.appearance.theme.background,
-                },
+                } else null,
             };
             if (self.metal_buffer.replace(self.allocator, tick_result.frame.render_frame, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, cell_colors)) |_| {
                 self.metal_dirty = false;
@@ -912,4 +949,37 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     // up(3)이 자동 스크롤을 멈춘다.
     session.mouse(3, 8.0, 8.0);
     try std.testing.expectEqual(@as(i8, 0), session.drag_autoscroll);
+}
+
+test "cursor blink toggles every interval, stays solid for steady cursors, and resets on activity" {
+    var session: DevSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.surfaces[0] = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer session.surfaces[0].deinit();
+    session.surface_initialized = true;
+    session.metal_dirty = false;
+    session.blink_visible = true;
+    session.blink_ticks = 0;
+
+    // 기본(DECSCUSR 1 = 깜빡 block): interval 틱마다 토글.
+    var i: u32 = 0;
+    while (i < blink_interval_ticks) : (i += 1) session.updateCursorBlink();
+    try std.testing.expect(!session.blink_visible);
+    try std.testing.expect(session.metal_dirty);
+    while (i < blink_interval_ticks * 2) : (i += 1) session.updateCursorBlink();
+    try std.testing.expect(session.blink_visible);
+
+    // 입력/출력 리셋: off 위상이어도 즉시 보이게.
+    session.blink_visible = false;
+    session.blink_ticks = 7;
+    session.resetCursorBlink();
+    try std.testing.expect(session.blink_visible);
+    try std.testing.expectEqual(@as(u32, 0), session.blink_ticks);
+
+    // steady 커서(DECSCUSR 2): 토글하지 않고 보이는 위상 고정.
+    try session.surfaces[0].core.write("\x1b[2 q");
+    session.blink_visible = true;
+    i = 0;
+    while (i < blink_interval_ticks * 3) : (i += 1) session.updateCursorBlink();
+    try std.testing.expect(session.blink_visible);
 }

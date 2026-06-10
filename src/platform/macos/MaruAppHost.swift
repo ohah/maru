@@ -599,7 +599,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let session = devSession,
               let text = NSPasteboard.general.string(forType: .string),
               !text.isEmpty else { return }
-        var bytes = Array(text.utf8)
+        let bytes = Array(text.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_dev_session_paste_text(session, buf.baseAddress, buf.count)
         }

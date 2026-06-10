@@ -387,7 +387,15 @@ pub const DevSession = struct {
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *DevSession, kind: i32, x_px: f64, y_px: f64) void {
         if (!self.surface_initialized) return;
-        const cell = self.pxToCell(x_px, y_px) orelse return;
+        const cell = self.pxToCell(x_px, y_px) orelse {
+            // 비유한(NaN/Inf) 좌표 — 셀로 못 바꾼다. up(3)/down(1)이면 드래그 자동 스크롤을
+            // 멈춘다(안 그러면 mouseUp이 좌표 손상으로 와도 autoscroll이 30Hz로 영원히 돈다).
+            if (kind == 1 or kind == 3) {
+                self.drag_autoscroll = 0;
+                self.mouse_drag_selecting = false;
+            }
+            return;
+        };
         const col = cell.col;
         const row = cell.row;
         const core = &self.surfaces[0].core;
@@ -485,6 +493,12 @@ pub const DevSession = struct {
     /// 텍스트/조합 변화를 모으기 시작한다.
     pub fn imeBegin(self: *DevSession) void {
         if (!self.surface_initialized) return;
+        // 조합도 타이핑이다 — 과거를 보는 중이면 바닥으로 스냅해 preedit이 보이게 한다
+        // (handleKeyEvent의 "입력하면 live 복귀"와 같은 동작; 조합 키는 그 경로를 안 타므로 여기서).
+        if (self.surfaces[0].core.viewOffset() != 0) {
+            self.surfaces[0].core.scrollToBottom();
+            self.metal_dirty = true;
+        }
         self.ime_active = true;
         self.ime_inserted.clearRetainingCapacity();
         self.ime_marked_changed = false;
@@ -634,7 +648,12 @@ pub const DevSession = struct {
         const view = std.unicode.Utf8View.init(bytes) catch return;
         var it = view.iterator();
         while (it.nextCodepoint()) |cp| {
-            const key = terminal.input.charKeyFromCodepoint(cp) catch continue;
+            // 개행은 .enter로 보낸다(\r로 인코딩) — Services/받아쓰기 등 멀티라인 insertText가
+            // LF를 그대로 PTY에 넣으면 셸 line discipline이 어긋난다(paste 경로와 같은 규칙).
+            const key: terminal.input.Key = if (cp == '\n' or cp == '\r')
+                .enter
+            else
+                (terminal.input.charKeyFromCodepoint(cp) catch continue);
             _ = self.handleKeyEvent(.{ .key = key, .modifiers = .{} }) catch return;
         }
     }
@@ -1403,4 +1422,36 @@ test "shouldReplayAfterCommit: arrows replay after candidate commit (left only w
     try std.testing.expect(!DevSession.shouldReplayAfterCommit(.{ .key = .arrow_left, .modifiers = .{} }));
     try std.testing.expect(DevSession.shouldReplayAfterCommit(.{ .key = .arrow_left, .modifiers = .{ .shift = true } }));
     try std.testing.expect(!DevSession.shouldReplayAfterCommit(.{ .key = .enter, .modifiers = .{} }));
+}
+
+test "sendCommittedText normalizes newlines to CR and imeBegin snaps to bottom" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const core = &session.surfaces[0].core;
+
+    // 스크롤백을 만들고 과거를 본 뒤 imeBegin → 바닥으로 스냅(조합이 보이게).
+    try core.write("a\r\nb\r\nc\r\nd\r\ne\r\nf");
+    core.scrollViewport(3);
+    try std.testing.expect(core.viewOffset() != 0);
+    session.imeBegin();
+    try std.testing.expectEqual(@as(usize, 0), core.viewOffset());
+    session.imeEnd(null);
+
+    // 멀티라인 확정 텍스트의 \n이 \r로 정규화돼 PTY에 들어간다(LF 아님).
+    // (controlled 셸의 read가 \r에 반응하도록 — 바이트 카운트만 확인: "a\nb" → 'a',\r,'b' = 3바이트)
+    const before = session.total_terminal_input_bytes;
+    session.imeBegin();
+    session.imeInsert("a\nb");
+    session.imeEnd(null);
+    try std.testing.expectEqual(before + 3, session.total_terminal_input_bytes);
 }

@@ -481,6 +481,14 @@ test "macOS app dev exported session API reports null outputs as ABI errors" {
         @as(c_int, @intFromEnum(Status.null_out)),
         maru_macos_app_dev_session_close(null, null),
     );
+    // v18~v21 신규 IME/focus export도 null session을 ABI 오류로 닫는지 — 헤더에 선언만 되고
+    // 계약 테스트가 안 건드리던 공백(리뷰 #13)을 메운다(심볼 존재 + null-safety 동시 확인).
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_ime_begin(null));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_ime_insert(null, null, 0));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_ime_marked(null, null, 0));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_ime_end(null, null));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_ime_delete_backward(null));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_set_focus(null, 0));
 }
 
 test {

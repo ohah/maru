@@ -60,6 +60,23 @@ pub const CellColors = struct {
     hover_link: ?terminal.SelectionSpan = null,
 };
 
+/// 컬러 글리프(이모지)인지 codepoint로 판정한다. 셰이더는 이 cell의 UV에 +2.0이 더해져 오면
+/// atlas의 컬러 RGBA를 그대로 쓴다(전경색 무시). 래스터라이저가 이미 emoji 폰트로 컬러를 그려
+/// atlas에 올려둔다. 주요 그림문자 블록을 덮는다(일부 기호-범위 이모지는 후속).
+fn isColorGlyph(codepoint: u21) bool {
+    return switch (codepoint) {
+        0x1F000...0x1FAFF, // 마작/도미노/카드 + 주요 이모지/그림문자
+        0x2600...0x27BF, // 기타 기호 + dingbats(❤ ✅ ☀ 등)
+        0x2B00...0x2BFF, // 기타 화살표/별 기호
+        => true,
+        else => false,
+    };
+}
+
+/// 컬러 글리프면 UV u에 더하는 sentinel 오프셋(셰이더가 빼고 샘플). u<0(배경)·[0,1](일반)과
+/// 겹치지 않는 [2,3] 범위로 보낸다.
+const color_glyph_uv_offset: f32 = 2.0;
+
 /// Rgb를 0x00RRGGBB로 packing한다(공용 — 전경/커서/배경 packing이 같은 byte 순서를 쓰게).
 fn packRgb(rgb: color.Rgb) u32 {
     return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
@@ -171,9 +188,9 @@ pub fn buildNativeCellsSplit(
             .atlas_y_px = glyph.slot.y_px,
             .atlas_width_px = glyph.slot.width_px,
             .atlas_height_px = glyph.slot.height_px,
-            .u0 = glyph.uv.u0,
+            .u0 = if (isColorGlyph(glyph.run.codepoint)) glyph.uv.u0 + color_glyph_uv_offset else glyph.uv.u0,
             .v0 = glyph.uv.v0,
-            .u1 = glyph.uv.u1,
+            .u1 = if (isColorGlyph(glyph.run.codepoint)) glyph.uv.u1 + color_glyph_uv_offset else glyph.uv.u1,
             .v1 = glyph.uv.v1,
             .foreground = packForeground(glyph.run.style, colors),
             .background = if (inSelection(colors.selection, glyph.run.row, glyph.run.col))
@@ -981,4 +998,46 @@ test "SGR underline overlays project a foreground-colored underline cell (kind 2
     try std.testing.expectEqual(@as(u16, 2), cells[0].reserved); // underline 부분 사각형
     try std.testing.expectEqual(@as(u32, 0xFFAABBCC), cells[0].background); // 전경색
     try std.testing.expectEqual(@as(f32, -1.0), cells[0].u0); // sentinel UV(atlas 미샘플)
+}
+
+test "color emoji glyph cells get the +2.0 UV sentinel; normal glyphs do not" {
+    const allocator = std.testing.allocator;
+    const mkGlyph = struct {
+        fn f(cp: u21) renderer.GlyphQuad {
+            return .{
+                .run = .{ .row = 0, .col = 0, .cell_width = 2, .codepoint = cp, .font_id = 1, .glyph_id = 1, .cache_key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1 } },
+                .slot = .{ .id = 1, .key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1 }, .x_px = 0, .y_px = 0, .width_px = 16, .height_px = 16, .upload_bytes = 0, .generation = 0 },
+                .uv = .{ .u0 = 0.1, .v0 = 0.2, .u1 = 0.3, .v1 = 0.4 },
+            };
+        }
+    }.f;
+
+    // 이모지(😀 U+1F600): u에 +2.0.
+    var emoji = [_]renderer.GlyphQuad{mkGlyph(0x1F600)};
+    const ec = try buildNativeCellsFromGlyphQuads(allocator, .{
+        .size = .{ .cols = 4, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &emoji,
+        .overlays = &.{},
+        .stats = .{},
+    }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
+    defer allocator.free(ec);
+    try std.testing.expectEqual(@as(usize, 1), ec.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.1), ec[0].u0, 0.001); // 0.1 + 2.0
+    try std.testing.expectApproxEqAbs(@as(f32, 2.3), ec[0].u1, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), ec[0].v0, 0.001); // v는 그대로
+
+    // 일반 글자('A'): 오프셋 없음.
+    var ascii = [_]renderer.GlyphQuad{mkGlyph('A')};
+    const ac = try buildNativeCellsFromGlyphQuads(allocator, .{
+        .size = .{ .cols = 4, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &ascii,
+        .overlays = &.{},
+        .stats = .{},
+    }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
+    defer allocator.free(ac);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1), ac[0].u0, 0.001);
 }

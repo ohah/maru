@@ -24,10 +24,17 @@ static NSString *const MARU_METAL_CELL_SHADER_SOURCE =
      "}\n"
      "fragment float4 maru_cell_fragment(VertexOut in [[stage_in]], texture2d<float> atlas_texture [[texture(0)]]) {\n"
      "  constexpr sampler atlas_sampler(coord::normalized, address::clamp_to_edge, filter::nearest);\n"
-     // 배경 전용 cell은 sentinel UV(u<0)라 atlas를 sampling하지 않고 coverage 0(배경만)으로 본다.
-     // 그 외엔 glyph atlas의 흰색 coverage를 샘플링한다. premultiplied 출력: mix(bg.rgb, fg, cov)는
-     // bg.a=0일 때 fg*cov(=기존 float4(fg*coverage, coverage))로 정확히 환원되고, bg.a=1이면
-     // alpha 1이라 mix 색이 그대로 premultiplied가 된다.
+     // UV 규약: u<0 = 배경 전용(atlas 미샘플), u in [0,1] = 일반 글리프(흰색 coverage x 전경색),
+     // u in [2,3] = 컬러 글리프(이모지). 컬러는 atlas의 premultiplied RGBA를 그대로 쓰고(전경색
+     // 무시), 셀 배경 위에 합성한다. host가 컬러 글리프 UV에 +2.0 sentinel을 더해 보낸다.
+     "  if (in.uv.x >= 2.0) {\n"
+     "    float4 c = atlas_texture.sample(atlas_sampler, float2(in.uv.x - 2.0, in.uv.y));\n"
+     "    float3 rgb = c.rgb + in.bg.rgb * (1.0 - c.a);\n"
+     "    float a = max(in.bg.a, c.a);\n"
+     "    return float4(rgb, a);\n"
+     "  }\n"
+     // 일반 글리프: premultiplied 출력. mix(bg.rgb, fg, cov)는 bg.a=0일 때 fg*cov로 환원되고,
+     // bg.a=1이면 alpha 1이라 mix 색이 그대로 premultiplied가 된다.
      "  float coverage = (in.uv.x < 0.0) ? 0.0 : atlas_texture.sample(atlas_sampler, in.uv).a;\n"
      "  float3 rgb = mix(in.bg.rgb, in.color, coverage);\n"
      "  float a = max(in.bg.a, coverage);\n"

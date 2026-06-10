@@ -553,11 +553,27 @@ fn shutdownChild(pid: std.c.pid_t) void {
     if (signalAndReap(pid, .HUP)) return;
     if (signalAndReap(pid, .TERM)) return;
 
-    // Last resort: SIGKILL is uncatchable, so the child must terminate and the
-    // blocking reap below cannot hang or leave a zombie behind.
+    // Last resort: SIGKILL is uncatchable. 그래도 reap을 무한 blocking wait4로 기다리지 않는다 —
+    // 멀티스레드 + reader thread의 reap 경합, PTY 버퍼 상태 등으로 wait4(pid, 0)이 영영 안
+    // 돌아오는 경우가 관측됐다(close/deinit이 22분 hang). bounded poll로 바꿔, SIGKILL 후
+    // 정해진 창 안에 reap되면 거두고(보통 수 ms), 안 되면 포기한다 — close는 절대 막히지 않는다.
+    // 남은 자식은 부모(테스트/앱) 종료 시 launchd/init이 거둔다(고아 reap). reaped 못 해도
+    // zombie 누수는 프로세스 수명 한정이라 무한 hang보다 안전하다.
     _ = std.c.kill(-pid, .KILL);
     _ = std.c.kill(pid, .KILL);
-    reapBlocking(pid);
+    reapBoundedAfterKill(pid);
+}
+
+// SIGKILL 이후 유계 reap: WNOHANG poll을 짧게 반복하며 최대 shutdown_kill_reap_attempts번
+// 기다린다. 무한 blocking wait4 대신 — close/deinit이 어떤 OS 이상에서도 막히지 않게.
+const shutdown_kill_reap_attempts = 300; // 300 × 10ms = 최대 3s(보통 1~2회에 거둠)
+fn reapBoundedAfterKill(pid: std.c.pid_t) void {
+    var attempt: usize = 0;
+    while (attempt < shutdown_kill_reap_attempts) : (attempt += 1) {
+        if (tryReap(pid) != .alive) return; // reaped 또는 이미 gone
+        sleepMillis(shutdown_grace_interval_ms);
+    }
+    // 여기 도달 = SIGKILL 후에도 정해진 창 안에 reap 안 됨(드문 OS 이상). 무한 대기 대신 포기한다.
 }
 
 // Sends `sig` to the child's process group (setsid made it a leader) and to the
@@ -589,20 +605,6 @@ fn tryReap(pid: std.c.pid_t) ReapResult {
         if (err == .INTR) continue;
         // ECHILD (already reaped) or any other error: nothing left to wait on.
         return .gone;
-    }
-}
-
-fn reapBlocking(pid: std.c.pid_t) void {
-    var status: c_int = 0;
-    while (true) {
-        const rc = std.c.waitpid(pid, &status, 0);
-        if (rc == pid) return;
-        if (rc < 0) {
-            const err = std.posix.errno(rc);
-            if (err == .INTR) continue;
-            return; // ECHILD etc.: nothing to reap.
-        }
-        return; // rc == 0 needs WNOHANG; guard against an unexpected spin.
     }
 }
 

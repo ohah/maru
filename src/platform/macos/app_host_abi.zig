@@ -217,6 +217,21 @@ pub export fn maru_macos_app_dev_session_paste_text(
     return @intFromEnum(Status.ok);
 }
 
+// Cmd+hover 갱신(backing px). URL 위면 *out_is_url=1 — Swift가 마우스 커서(pointingHand)를 정하고,
+// Zig는 밑줄 하이라이트를 다음 frame에 투영한다. cmd_held=0이면 hover 해제.
+pub export fn maru_macos_app_dev_session_hover(
+    session: ?*DevSession,
+    x_px: f64,
+    y_px: f64,
+    cmd_held: i32,
+    out_is_url: ?*i32,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const out = out_is_url orelse return @intFromEnum(Status.null_out);
+    out.* = if (dev_session.hoverUrl(x_px, y_px, cmd_held != 0)) 1 else 0;
+    return @intFromEnum(Status.ok);
+}
+
 // Cmd+클릭 위치의 URL(backing px). 버퍼는 Zig 소유로 다음 url_at/destroy까지 유효, 없으면 len 0.
 pub export fn maru_macos_app_dev_session_url_at(
     session: ?*DevSession,

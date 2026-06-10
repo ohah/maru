@@ -55,6 +55,9 @@ pub const CellColors = struct {
     selection_bg: color.Rgb = .{ .r = 0x33, .g = 0x44, .b = 0x55 },
     /// 현재 뷰포트의 선택 범위(없으면 null). 선형(행 이어짐) 포함 범위.
     selection: ?terminal.SelectionSpan = null,
+    /// Cmd+hover 중인 URL의 뷰포트 범위(없으면 null). 범위 셀 하단에 전경색 밑줄을 긋는다
+    /// (커서 underline과 같은 부분-사각형 kind 재사용 — 셰이더/렌더러 변경 없음).
+    hover_link: ?terminal.SelectionSpan = null,
 };
 
 /// Rgb를 0x00RRGGBB로 packing한다(공용 — 전경/커서/배경 packing이 같은 byte 순서를 쓰게).
@@ -123,8 +126,13 @@ pub fn buildNativeCellsFromGlyphQuads(
     var cells: std.ArrayList(NativeMetalCell) = .empty;
     errdefer cells.deinit(allocator);
 
-    // glyph(1) + 배경 전용(2) + 커서/overlay(3) 상한. overlay마다 cell 하나면 충분하다.
-    try cells.ensureTotalCapacity(allocator, frame.glyphs.len + draw_cells.len + frame.overlays.len);
+    // glyph(1) + 배경 전용(2) + hover 밑줄(2.5) + 커서/overlay(3) 상한. hover 밑줄은 범위 셀당
+    // 하나씩이라 상한을 행×폭으로 잡는다.
+    const hover_cells: usize = if (colors.hover_link) |span|
+        (@as(usize, span.end.row - span.start.row) + 1) * @as(usize, frame.size.cols)
+    else
+        0;
+    try cells.ensureTotalCapacity(allocator, frame.glyphs.len + draw_cells.len + frame.overlays.len + hover_cells);
 
     // 1) ink가 있는 glyph cell. 전경색 + (있으면) 배경색을 같이 싣는다. blank cell도
     //    GlyphQuadFrame에 들어올 수 있으므로 그릴 게 없는 space는 여기서 제외하고, 배경이
@@ -184,6 +192,37 @@ pub fn buildNativeCellsFromGlyphQuads(
             .foreground = 0,
             .background = background,
         });
+    }
+
+    // 2.5) Cmd+hover 중인 URL 범위에 전경색 밑줄을 긋는다(underline kind=2 부분 사각형 재사용).
+    if (colors.hover_link) |span| {
+        const underline_color = 0xFF00_0000 | packRgb(colors.default_fg);
+        var hover_row = span.start.row;
+        while (hover_row <= span.end.row) : (hover_row += 1) {
+            const from: u16 = if (hover_row == span.start.row) span.start.col else 0;
+            const to: u16 = if (hover_row == span.end.row) span.end.col else frame.size.cols - 1;
+            var hover_col = from;
+            while (hover_col <= to) : (hover_col += 1) {
+                cells.appendAssumeCapacity(.{
+                    .row = hover_row,
+                    .col = hover_col,
+                    .width = 1,
+                    .reserved = 2, // underline 부분 사각형
+                    .codepoint = ' ',
+                    .slot_id = 0,
+                    .atlas_x_px = 0,
+                    .atlas_y_px = 0,
+                    .atlas_width_px = 0,
+                    .atlas_height_px = 0,
+                    .u0 = -1.0,
+                    .v0 = -1.0,
+                    .u1 = -1.0,
+                    .v1 = -1.0,
+                    .foreground = 0,
+                    .background = underline_color,
+                });
+            }
+        }
     }
 
     // 3) 커서 overlay를 반전 블록으로 맨 마지막에 낸다(블렌딩 ON이라 앞 cell 위에 덮인다). 커서 cell의
@@ -781,4 +820,29 @@ test "bar and underline cursors project partial-rect kinds without inverting the
     });
     defer allocator.free(cells2);
     try std.testing.expectEqual(@as(u16, 2), cells2[cells2.len - 1].reserved); // underline kind
+}
+
+test "hover link span projects underline-kind cells across its rows" {
+    const allocator = std.testing.allocator;
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 4, .rows = 2 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &.{},
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 1, .g = 2, .b = 3 },
+        .hover_link = .{ .start = .{ .row = 0, .col = 2 }, .end = .{ .row = 1, .col = 1 } },
+    });
+    defer allocator.free(cells);
+    // 행0 col2-3 + 행1 col0-1 = 4개 underline cell, 전경색으로.
+    try std.testing.expectEqual(@as(usize, 4), cells.len);
+    for (cells) |cell| {
+        try std.testing.expectEqual(@as(u16, 2), cell.reserved);
+        try std.testing.expectEqual(@as(u32, 0xFF010203), cell.background);
+    }
+    try std.testing.expectEqual(@as(u16, 2), cells[0].col);
+    try std.testing.expectEqual(@as(u16, 1), cells[3].row);
 }

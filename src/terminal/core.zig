@@ -171,6 +171,35 @@ pub const TerminalCore = struct {
         };
     }
 
+    /// intern된 OSC 8 URI 저장소를 비운다(RIS 등 하드 리셋 — 이후 셀은 어차피 지워져 링크 id가
+    /// 가리킬 대상이 없다). pen_link도 0으로.
+    fn clearLinkStore(self: *TerminalCore) void {
+        for (self.link_store.items) |uri| self.allocator.free(uri);
+        self.link_store.clearRetainingCapacity();
+        self.link_ids.clearRetainingCapacity();
+        self.pen_link = 0;
+    }
+
+    /// RIS(ESC c) 하드 리셋: 화면을 비우고 스크롤백·선택·링크 저장소를 지우고 pen·모드를
+    /// 공장 초기 상태로 되돌린다(VT100 RIS 의미론 근사). alt 화면이면 primary로 복귀한다.
+    fn fullReset(self: *TerminalCore) void {
+        if (self.alt_active) self.leaveAltScreen(false);
+        @memset(self.cells, .{});
+        @memset(self.wrapped, false);
+        self.clearScrollback(); // sb 비우기 + 선택 해제
+        self.clearLinkStore();
+        self.cursor = .{};
+        self.pen = .{};
+        self.pending_wrap = false;
+        self.last_print = null;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.size.rows - 1;
+        self.application_cursor_keys = false;
+        self.cursor_visible = true;
+        self.bracketed_paste = false;
+        self.dirty = fullDirty(self.size);
+    }
+
     pub fn deinit(self: *TerminalCore) void {
         if (self.preedit) |p| self.allocator.free(p);
         for (self.link_store.items) |uri| self.allocator.free(uri);
@@ -1039,9 +1068,15 @@ pub const TerminalCore = struct {
                 self.restoreCursorState();
                 self.parser = .ground;
             },
+            // RIS(ESC c): 하드 리셋. 화면/스크롤백/선택/링크 저장소를 비우고 pen·pen_link·모드를
+            // 초기화한다. 안 하면 열린 OSC 8 링크(pen_link)·intern된 URI가 리셋을 넘어 살아남는다.
+            'c' => {
+                self.fullReset();
+                self.parser = .ground;
+            },
             // ESC <intermediate>(0x20..0x2f) <final>: charset designation 등 2바이트 시퀀스.
             0x20...0x2f => self.parser = .escape_intermediate,
-            // 그 밖의 ESC <final>(RIS, NEL 등)은 A1에서 소비만 한다.
+            // 그 밖의 ESC <final>(NEL 등)은 A1에서 소비만 한다.
             else => self.parser = .ground,
         }
     }
@@ -1263,6 +1298,7 @@ pub const TerminalCore = struct {
         // 바뀌어 abs>=sb_count 좌표가 다른 내용을 가리키므로 — xterm.js도 버퍼 전환 시 선택 해제).
         self.view_offset = 0;
         self.invalidateSelection();
+        self.pen_link = 0; // OSC 8 링크는 화면에 스코프된다 — 전환 시 닫는다(Ghostty endHyperlink)
         self.pending_wrap = false;
         self.last_print = null;
         self.dirty = fullDirty(self.size);
@@ -1286,6 +1322,7 @@ pub const TerminalCore = struct {
         self.alt_active = false;
         self.pending_wrap = false;
         self.last_print = null;
+        self.pen_link = 0; // 화면 전환 — 열린 링크를 닫는다(Ghostty endHyperlink)
         self.invalidateSelection(); // primary 복귀 — 활성 cells가 다시 바뀌므로 선택 해제
         if (restore_cursor) self.restoreFromSlot(self.saved_cursor_primary);
         self.dirty = fullDirty(self.size);
@@ -4316,4 +4353,32 @@ test "zsh wide-glyph erase sequence (BS BS SP SP BS BS) cleans the hangul cell p
     try std.testing.expectEqual(@as(u21, ' '), core.cells[4].codepoint);
     try std.testing.expect(!core.cells[4].continuation);
     try std.testing.expectEqual(@as(u16, 3), core.cursor.col);
+}
+
+test "OSC 8 pen_link resets on alt-screen switch and RIS (no stale clickable cells)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    // 링크를 열고 닫지 않은 채(악성/부분 출력) 글자 출력 — 그 글자엔 링크가 찍힌다.
+    try core.write("\x1b]8;;https://x.yz\x1b\\ab");
+    try std.testing.expect(core.cells[0].link != 0);
+
+    // alt 진입: pen_link이 리셋돼 alt에서 출력한 글자엔 링크가 안 찍힌다.
+    try core.write("\x1b[?1049h");
+    try core.write("Z");
+    try std.testing.expectEqual(@as(u32, 0), core.cells[0].link); // alt 화면 cell
+    try std.testing.expectEqual(@as(u32, 0), core.pen_link);
+
+    // primary 복귀도 pen_link 0.
+    try core.write("\x1b[?1049l");
+    try std.testing.expectEqual(@as(u32, 0), core.pen_link);
+
+    // 다시 링크 열고 RIS(ESC c) — 저장소가 비고 화면/스크롤백/링크가 초기화된다.
+    try core.write("\x1b]8;;https://a.bc\x1b\\q\r\nr");
+    try std.testing.expect(core.link_store.items.len >= 1);
+    try core.write("\x1bc"); // RIS
+    try std.testing.expectEqual(@as(usize, 0), core.link_store.items.len);
+    try std.testing.expectEqual(@as(u32, 0), core.pen_link);
+    try std.testing.expectEqual(@as(u21, ' '), core.cells[0].codepoint); // 화면 비움
+    try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen()); // 스크롤백 비움
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.col);
 }

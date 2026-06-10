@@ -177,6 +177,11 @@ pub const DevSession = struct {
     // 현재 선택이 down(1) 드래그로 시작했는지. 더블/트리플클릭(4/5) 선택은 직후의 up(3)이
     // "이동 없는 클릭 -> 해제" 판정을 타면 안 되므로 이 플래그로 구분한다.
     mouse_drag_selecting: bool = false,
+    // 드래그 자동 스크롤 방향(+1=위/과거, -1=아래, 0=없음). 드래그 좌표가 grid 위/아래 밖으로
+    // 나가면 세워지고, 30Hz tick마다 한 줄 스크롤하며 선택을 가장자리 행으로 확장한다.
+    drag_autoscroll: i8 = 0,
+    // 자동 스크롤 중 선택 확장에 쓸 마지막 드래그 열.
+    last_drag_col: u16 = 0,
 
     pub fn init(
         self: *DevSession,
@@ -348,10 +353,18 @@ pub const DevSession = struct {
         switch (kind) {
             1 => {
                 self.mouse_drag_selecting = true;
+                self.drag_autoscroll = 0;
                 core.selectionStart(row, col);
             },
-            2 => core.selectionExtend(row, col),
+            2 => {
+                // 드래그가 grid 위/아래 밖으로 나가면 자동 스크롤을 건다(tick이 수행).
+                const grid_height: f64 = @as(f64, @floatFromInt(core.size.rows)) * ch;
+                self.drag_autoscroll = if (y_px < 0) 1 else if (y_px > grid_height) -1 else 0;
+                self.last_drag_col = col;
+                core.selectionExtend(row, col);
+            },
             3 => {
+                self.drag_autoscroll = 0;
                 // 더블/트리플클릭 직후의 up은 그 선택을 건드리면 안 된다(단어가 1칸이면 "이동 없는
                 // 클릭" 판정에 걸려 즉시 해제돼 버린다).
                 if (!self.mouse_drag_selecting) return;
@@ -374,6 +387,17 @@ pub const DevSession = struct {
             },
             else => return,
         }
+        self.metal_dirty = true;
+    }
+
+    /// 드래그 자동 스크롤 한 스텝(30Hz tick마다). 드래그가 grid 밖에 머무는 동안 한 줄씩
+    /// 스크롤하며 선택을 가장자리 행으로 확장한다 — 화면보다 긴 내용을 드래그로 선택하는 표준 UX.
+    fn applyDragAutoscroll(self: *DevSession) void {
+        if (!self.mouse_drag_selecting or self.drag_autoscroll == 0) return;
+        const core = &self.surfaces[0].core;
+        core.scrollViewport(@as(isize, self.drag_autoscroll));
+        const row: u16 = if (self.drag_autoscroll > 0) 0 else core.size.rows - 1;
+        core.selectionExtend(row, self.last_drag_col);
         self.metal_dirty = true;
     }
 
@@ -547,6 +571,7 @@ pub const DevSession = struct {
         // 싸다. 생명주기 회계(이벤트 합산, 종료 reap)도 build 여부와 무관하게 매 tick 한다 —
         // Metal 투영이나 비싼 build가 실패/생략돼도 drained 이벤트나 finishAfterTermination
         // (reader join/child reap)을 건너뛰지 않게 한다.
+        self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 30Hz로 한 줄씩 스크롤+확장
         const drain_summary = try self.pump.drainAvailable();
         self.total_output_events += drain_summary.output_events;
         self.total_exit_events += drain_summary.exit_events;
@@ -851,4 +876,40 @@ test "wheelDeltaToLines drops sub-line residue when the scroll direction flips" 
     // 방향 반전 잔여 리셋은 scrollWheel이 수행한다 — 여기선 그 계약(잔여가 반대 틱을 상쇄하면
     // 첫 반응이 사라짐)을 수치로 고정한다: 리셋 없이 -6pt를 주면 0줄이 나온다(굼뜬 반전).
     try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, -6, true, 34, 2000));
+}
+
+test "drag autoscroll scrolls one line per tick and extends the selection to the edge row" {
+    var session: DevSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.surfaces[0] = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer session.surfaces[0].deinit();
+    session.surface_initialized = true;
+    session.metal_dirty = false;
+    session.mouse_drag_selecting = true;
+    session.drag_autoscroll = 0;
+    session.last_drag_col = 1;
+    session.cell_width_px = 8;
+    session.cell_height_px = 16;
+    session.scale_milli = 1000;
+
+    const core = &session.surfaces[0].core;
+    try core.write("a\r\nb\r\nc\r\nd"); // 스크롤백 2(a,b) + 화면 c,d
+    core.selectionStart(1, 0); // 화면 행1(d)에서 드래그 시작
+
+    // 드래그가 grid 위 밖으로(y<0) — kind 2가 자동 스크롤 방향을 세운다.
+    session.mouse(2, 0.0, -5.0); // col 0, grid 위 밖
+    try std.testing.expectEqual(@as(i8, 1), session.drag_autoscroll);
+
+    session.applyDragAutoscroll(); // tick 1: 한 줄 위로 + 선택이 뷰 최상단으로 확장
+    try std.testing.expectEqual(@as(usize, 1), core.view_offset);
+    session.applyDragAutoscroll(); // tick 2: 맨 위까지
+    try std.testing.expectEqual(@as(usize, 2), core.view_offset);
+    const text = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text);
+    // 선택이 a(맨 위)까지 닿았다.
+    try std.testing.expectEqualStrings("a\nb\nc\nd", text);
+
+    // up(3)이 자동 스크롤을 멈춘다.
+    session.mouse(3, 8.0, 8.0);
+    try std.testing.expectEqual(@as(i8, 0), session.drag_autoscroll);
 }

@@ -884,8 +884,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let session = devSession else { return }
         _ = maru_macos_app_dev_session_ime_begin(session)
         interpret()
-        guard var keyEvent = normalizedKeyEvent(from: event) else { return }
-        _ = maru_macos_app_dev_session_ime_end(session, &keyEvent)
+        // ime_end는 정규화 실패(codepoint/keyCode 없음)에도 반드시 호출한다 — 안 그러면 ime_begin
+        // 후 트랜잭션이 안 닫혀 누적 텍스트가 유실되고 ime_active가 박힌다. 키가 없으면 nil 전달.
+        if var keyEvent = normalizedKeyEvent(from: event) {
+            _ = maru_macos_app_dev_session_ime_end(session, &keyEvent)
+        } else {
+            _ = maru_macos_app_dev_session_ime_end(session, nil)
+        }
     }
 
     func imeInsert(_ text: String) {

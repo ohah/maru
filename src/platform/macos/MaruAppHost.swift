@@ -93,7 +93,22 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 표시·판정 상태의 단일 출처는 Zig(core.preedit + IME 트랜잭션)다.
     private var markedTextBuffer: String = ""
 
+    // IME 콜백 진단 트레이스(MARU_IME_DEBUG=1). 입력기가 실제로 보내는 콜백 순서/인자를
+    // 그대로 찍어, 한글 조합/삭제의 실측 시퀀스로 버그를 잡는다(추측 금지).
+    private static let imeDebug = ProcessInfo.processInfo.environment["MARU_IME_DEBUG"] != nil
+    private func imeLog(_ label: String, _ text: String? = nil, keyCode: UInt16? = nil) {
+        guard Self.imeDebug else { return }
+        var line = "[IME] \(label)"
+        if let text {
+            let hex = text.unicodeScalars.map { String(format: "U+%04X", $0.value) }.joined(separator: " ")
+            line += " text=\"\(text)\" [\(hex)] len=\(text.utf16.count)"
+        }
+        if let keyCode { line += " keyCode=\(keyCode)" }
+        fputs(line + "\n", stderr)
+    }
+
     override func keyDown(with event: NSEvent) {
+        imeLog("keyDown", event.characters, keyCode: event.keyCode)
         // Ctrl/Cmd/Option 조합은 입력기에 보내지 않고 바로 단축키/인코딩 경로로 — 한글 입력
         // 모드에서도 Ctrl+B(tmux prefix)나 Cmd+C가 동작하고(레이아웃 독립 매칭은 Zig가 물리
         // 키코드로 한다), Option+글자는 특수문자 입력이 아니라 기존 meta-ESC 인코딩을 유지한다.
@@ -115,7 +130,9 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 입력기가 텍스트로 만들지 않은 키의 편집 명령. 여기서 아무것도 하지 않는다(시스템 비프
     // 방지용 오버라이드만) — 그 키의 전송 여부는 Zig의 ime_end가 일괄 판정한다(확정 텍스트가
     // 없고 조합 변화도 없으면 일반 키로 인코딩).
-    override func doCommand(by selector: Selector) {}
+    override func doCommand(by selector: Selector) {
+        imeLog("doCommand:\(NSStringFromSelector(selector))")
+    }
 
     // ── NSTextInputClient — 입력기(IME) 통합. 조합 의미론은 macOS 입력기가, 확정 텍스트의
     // 인코딩/전달은 Zig가 소유한다(여기는 이벤트 캡처와 전달만).
@@ -124,6 +141,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     func insertText(_ string: Any, replacementRange: NSRange) {
         markedTextBuffer = ""
         let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
+        imeLog("insertText", text)
         controller?.imeMarked("") // 조합 표시 제거(전송 판정은 Zig ime_end가)
         controller?.imeInsert(text)
     }
@@ -131,10 +149,12 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 조합 중 텍스트(예: 'ㅇ' -> '아' -> '안'). 표시는 Zig가 커서 위치에 합성한다.
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         markedTextBuffer = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
+        imeLog("setMarkedText", markedTextBuffer)
         controller?.imeMarked(markedTextBuffer)
     }
 
     func unmarkText() {
+        imeLog("unmarkText")
         markedTextBuffer = ""
         controller?.imeMarked("")
     }

@@ -775,9 +775,10 @@ test "cursor overlay projects at the overlay's own row and col" {
     try std.testing.expectEqual(@as(u16, 2), cells[0].col);
 }
 
-test "an underline overlay is skipped while the cursor overlay still projects" {
+test "an underline overlay and a cursor overlay both project (underline rendered, not skipped)" {
     const allocator = std.testing.allocator;
-    // underline overlay는 sub-cell 선이라 아직 투영하지 않는다. 같이 와도 커서만 cell로 나와야 한다.
+    // SGR 4 밑줄은 이제 투영된다(pass 2.6). underline + cursor가 함께 오면 두 cell: col0에 밑줄
+    // (reserved=2, 전경색), col1에 커서. 밑줄 pass(2.6)가 커서 pass(3)보다 먼저라 cells[0]이 밑줄.
     var overlays = [_]renderer.DrawOverlay{
         .{ .underline = .{ .row = 0, .col = 0, .width = 1, .color = .default } },
         .{ .cursor = .{ .row = 0, .col = 1, .visible = true } },
@@ -795,8 +796,11 @@ test "an underline overlay is skipped while the cursor overlay still projects" {
         .cursor = .{ .block = .{ .r = 0, .g = 255, .b = 0 }, .text = .{ .r = 0, .g = 0, .b = 0 } },
     });
     defer allocator.free(cells);
-    try std.testing.expectEqual(@as(usize, 1), cells.len); // underline은 skip, 커서만
-    try std.testing.expectEqual(@as(u16, 1), cells[0].col);
+    try std.testing.expectEqual(@as(usize, 2), cells.len); // 밑줄(col0) + 커서(col1)
+    try std.testing.expectEqual(@as(u16, 0), cells[0].col);
+    try std.testing.expectEqual(@as(u16, 2), cells[0].reserved); // underline 부분 사각형
+    try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), cells[0].background); // 전경색(흰색)
+    try std.testing.expectEqual(@as(u16, 1), cells[1].col); // 커서
 }
 
 test "cursor over a space-codepoint glyph projects a solid block, not an inverted glyph" {

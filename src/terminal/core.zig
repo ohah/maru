@@ -1978,7 +1978,10 @@ pub const TerminalCore = struct {
 
         return .{
             .size = self.size,
-            .cursor = .{ .row = row, .col = @min(cursor_col, self.size.cols - 1), .visible = self.cursor_visible },
+            // 조합 중에는 블록 커서를 숨긴다 — 반전 스타일 preedit이 커서 역할을 하므로, preedit
+            // 끝에 또 블록 커서를 그리면 커서가 둘로 보인다(라이브 제보). 위치는 preedit 끝에
+            // 둬 후속(후보창 배치 등)이 참조할 수 있게 하되 그리지는 않는다.
+            .cursor = .{ .row = row, .col = @min(cursor_col, self.size.cols - 1), .visible = false },
             .cells = self.viewport_cells,
             .dirty = self.dirty,
         };
@@ -4275,7 +4278,7 @@ test "preedit composition shows the in-progress hangul at the cursor without tou
     try std.testing.expect(snap.cells[2].style.reverse);
     try std.testing.expectEqual(@as(u2, 2), snap.cells[2].width);
     try std.testing.expect(snap.cells[3].continuation);
-    try std.testing.expectEqual(@as(u16, 4), snap.cursor.col);
+    try std.testing.expect(!snap.cursor.visible); // 조합 중 블록 커서 숨김(반전 preedit이 커서 역할)
     // 실제 그리드는 오염되지 않는다.
     try std.testing.expectEqual(@as(u21, ' '), core.cells[2].codepoint);
 
@@ -4298,7 +4301,7 @@ test "preedit clips at the row end instead of wrapping" {
     try core.setPreedit("한"); // wide(2칸)는 안 들어간다 — 잘림
     const snap = core.renderSnapshot();
     try std.testing.expectEqual(@as(u21, 'c'), snap.cells[2].codepoint);
-    try std.testing.expectEqual(@as(u16, 3), snap.cursor.col);
+    try std.testing.expect(!snap.cursor.visible);
 }
 
 test "zsh wide-glyph erase sequence (BS BS SP SP BS BS) cleans the hangul cell pair" {

@@ -197,10 +197,16 @@ pub fn buildNativeCellsFromGlyphQuads(
     // 2.5) Cmd+hover 중인 URL 범위에 전경색 밑줄을 긋는다(underline kind=2 부분 사각형 재사용).
     if (colors.hover_link) |span| {
         const underline_color = 0xFF00_0000 | packRgb(colors.default_fg);
+        // 행 범위도 grid 안으로 clamp(예약 용량은 cols-기준이므로 row가 넘쳐도 안전하지만, 좌표를
+        // 화면 안으로 묶어 둔다). end.col은 cols-1로 clamp해 행당 예약 용량(cols)을 못 넘게 한다 —
+        // hover span이 어떤 경로로든 현재 폭보다 넓게 들어와도 appendAssumeCapacity OOB를 막는다.
+        const last_col: u16 = frame.size.cols -| 1;
+        const last_row: u16 = frame.size.rows -| 1;
         var hover_row = span.start.row;
-        while (hover_row <= span.end.row) : (hover_row += 1) {
-            const from: u16 = if (hover_row == span.start.row) span.start.col else 0;
-            const to: u16 = if (hover_row == span.end.row) span.end.col else frame.size.cols - 1;
+        while (hover_row <= @min(span.end.row, last_row)) : (hover_row += 1) {
+            const from: u16 = if (hover_row == span.start.row) @min(span.start.col, last_col) else 0;
+            const raw_to: u16 = if (hover_row == span.end.row) span.end.col else last_col;
+            const to: u16 = @min(raw_to, last_col);
             var hover_col = from;
             while (hover_col <= to) : (hover_col += 1) {
                 cells.appendAssumeCapacity(.{

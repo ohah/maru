@@ -175,8 +175,9 @@ pub const DevSession = struct {
     copy_buffer: []u8 = &.{},
     // urlAt()이 돌려준 URL의 소유 버퍼(다음 urlAt/destroy까지 유효).
     url_buffer: []u8 = &.{},
-    // Cmd+hover 중인 URL의 뷰포트 범위(밑줄 하이라이트 렌더용). 없으면 null.
-    hover_url_span: ?terminal.SelectionSpan = null,
+    // Cmd+hover 중인 URL 시작 셀의 절대 좌표(밑줄 렌더용). 뷰포트가 아니라 절대 좌표라 스크롤/출력
+    // 으로 내용이 움직여도 따라간다(매 frame hoverLinkSpan이 현재 뷰포트로 클립).
+    hover_url_anchor: ?terminal.SelectionPoint = null,
     // 현재 선택이 down(1) 드래그로 시작했는지. 더블/트리플클릭(4/5) 선택은 직후의 up(3)이
     // "이동 없는 클릭 -> 해제" 판정을 타면 안 되므로 이 플래그로 구분한다.
     mouse_drag_selecting: bool = false,
@@ -347,17 +348,31 @@ pub const DevSession = struct {
         self.scroll(lines);
     }
 
+    /// backing 픽셀 좌표를 (row, col) 셀로 변환한다(grid 안으로 clamp). 핵심: clamp를 float
+    /// 도메인에서 먼저 한 뒤 @intFromFloat 한다 — 거대한 finite 좌표(손상/악성 입력)가 i64 변환
+    /// 에서 trap(앱 패닉)하던 것을 막는다(wheelDeltaToLines와 같은 규율). 비유한값은 null.
+    fn pxToCell(self: *const DevSession, x_px: f64, y_px: f64) ?struct { row: u16, col: u16 } {
+        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
+        const core = &self.surfaces[0].core;
+        const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
+        const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
+        const max_col: f64 = @floatFromInt(core.size.cols - 1);
+        const max_row: f64 = @floatFromInt(core.size.rows - 1);
+        const col_f = std.math.clamp(@max(x_px, 0) / cw, 0, max_col);
+        const row_f = std.math.clamp(@max(y_px, 0) / ch, 0, max_row);
+        return .{ .row = @intFromFloat(row_f), .col = @intFromFloat(col_f) };
+    }
+
     /// 마우스 선택. kind 1=down(선택 시작), 2=drag(확장), 3=up(확정 — 드래그 선택인데 이동이
     /// 없었으면 클릭으로 보고 해제), 4=더블클릭(단어 선택), 5=트리플클릭(논리 줄 선택). 좌표는
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *DevSession, kind: i32, x_px: f64, y_px: f64) void {
         if (!self.surface_initialized) return;
-        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return;
+        const cell = self.pxToCell(x_px, y_px) orelse return;
+        const col = cell.col;
+        const row = cell.row;
         const core = &self.surfaces[0].core;
-        const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
-        const col: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(x_px, 0) / cw)), 0, @as(i64, core.size.cols) - 1));
-        const row: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(y_px, 0) / ch)), 0, @as(i64, core.size.rows) - 1));
         switch (kind) {
             1 => {
                 self.mouse_drag_selecting = true;
@@ -447,22 +462,30 @@ pub const DevSession = struct {
     /// 저장하고 true를 돌려준다 — Swift가 이 값으로 마우스 커서(pointingHand)를 정한다.
     pub fn hoverUrl(self: *DevSession, x_px: f64, y_px: f64, cmd_held: bool) bool {
         if (!self.surface_initialized) return false;
-        var next: ?terminal.SelectionSpan = null;
-        if (cmd_held and std.math.isFinite(x_px) and std.math.isFinite(y_px)) {
-            const core = &self.surfaces[0].core;
-            const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
-            const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
-            const col: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(x_px, 0) / cw)), 0, @as(i64, core.size.cols) - 1));
-            const row: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(y_px, 0) / ch)), 0, @as(i64, core.size.rows) - 1));
-            next = core.urlSpanAt(self.allocator, row, col) catch null;
+        var next: ?terminal.SelectionPoint = null;
+        if (cmd_held) {
+            if (self.pxToCell(x_px, y_px)) |cell| {
+                const core = &self.surfaces[0].core;
+                // URL이면 그 시작 셀의 절대 좌표를 저장한다(뷰포트 좌표가 아님) — 스크롤/출력으로
+                // 내용이 움직여도 밑줄이 내용을 따라가고, 좁아진 폭에서도 매 frame 뷰포트로 다시
+                // 클립(아래 hoverLinkSpan)되므로 stale·OOB가 안 생긴다.
+                if (core.urlAnchorAt(cell.row, cell.col)) |anchor| next = anchor;
+            }
         }
-        const changed = !spanEql(self.hover_url_span, next);
-        self.hover_url_span = next;
+        const changed = !pointEql(self.hover_url_anchor, next);
+        self.hover_url_anchor = next;
         if (changed) self.metal_dirty = true; // 밑줄이 생기거나 사라지면 다시 그린다
         return next != null;
     }
 
-    fn spanEql(a: ?terminal.SelectionSpan, b: ?terminal.SelectionSpan) bool {
+    /// hover URL의 현재 뷰포트 밑줄 범위. 매 frame 절대 좌표 anchor에서 다시 계산해 클립하므로
+    /// 스크롤·출력·resize 후에도 항상 현재 폭/위치에 맞는다(stale 좌표 OOB 차단).
+    pub fn hoverLinkSpan(self: *DevSession) ?terminal.SelectionSpan {
+        const anchor = self.hover_url_anchor orelse return null;
+        return self.surfaces[0].core.urlSpanAtAbs(anchor);
+    }
+
+    fn pointEql(a: ?terminal.SelectionPoint, b: ?terminal.SelectionPoint) bool {
         if (a == null and b == null) return true;
         if (a == null or b == null) return false;
         return std.meta.eql(a.?, b.?);
@@ -645,7 +668,7 @@ pub const DevSession = struct {
                 .default_bg = self.appearance.theme.background, // SGR reverse의 default 색 스왑용
                 .selection_bg = self.appearance.theme.selection,
                 .selection = self.surfaces[0].core.selectionViewportSpan(),
-                .hover_link = self.hover_url_span,
+                .hover_link = self.hoverLinkSpan(),
 
                 // 커서는 반전 블록으로 그린다: 칸 배경=theme.cursor, 그 위 glyph=theme.background.
                 // 깜빡임 off 위상이면 null로 둬 커서 투영 자체를 생략한다(기존 opt-in 메커니즘 재사용).

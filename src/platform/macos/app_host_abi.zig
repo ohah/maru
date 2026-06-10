@@ -220,15 +220,55 @@ pub export fn maru_macos_app_dev_session_paste_text(
     return @intFromEnum(Status.ok);
 }
 
-// IME 조합 중(preedit) 텍스트(UTF-8). len 0 = 조합 종료. 커서 위치에 반전으로 합성 표시된다.
-pub export fn maru_macos_app_dev_session_set_preedit(
+// IME 키 트랜잭션(v20). Swift keyDown은 begin -> interpretKeyEvents -> end 순서로 부르고,
+// 입력기 콜백은 insert/marked로 쌓는다. 판정(전송/무시/인코딩)은 전부 Zig가 한다 — Swift엔
+// IME 분기 로직이 없다(unit 테스트 가능).
+pub export fn maru_macos_app_dev_session_ime_begin(session: ?*DevSession) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    dev_session.imeBegin();
+    return @intFromEnum(Status.ok);
+}
+
+// 입력기가 확정한 텍스트(insertText, UTF-8). 누적만 — 전송 판정은 ime_end가 한다.
+pub export fn maru_macos_app_dev_session_ime_insert(
     session: ?*DevSession,
     bytes: ?[*]const u8,
     len: usize,
 ) c_int {
     const dev_session = session orelse return @intFromEnum(Status.null_out);
     const slice: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
-    dev_session.setPreedit(slice);
+    dev_session.imeInsert(slice);
+    return @intFromEnum(Status.ok);
+}
+
+// 입력기의 조합 중(marked) 텍스트(UTF-8). len 0 = 조합 해제. 커서 위치에 반전 합성 표시된다.
+pub export fn maru_macos_app_dev_session_ime_marked(
+    session: ?*DevSession,
+    bytes: ?[*]const u8,
+    len: usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const slice: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
+    dev_session.imeMarked(slice);
+    return @intFromEnum(Status.ok);
+}
+
+// IME 키 트랜잭션 종료 — 일괄 판정(확정 텍스트 전송 / 조합 조작 무시 / 일반 키 인코딩).
+pub export fn maru_macos_app_dev_session_ime_end(
+    session: ?*DevSession,
+    event: ?*const KeyEvent,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const raw_event = (event orelse return @intFromEnum(Status.null_out)).*;
+    const key_event = keyEventFromAbi(raw_event) catch return @intFromEnum(Status.invalid_config);
+    dev_session.imeEnd(key_event);
+    return @intFromEnum(Status.ok);
+}
+
+// 포커스 변화. 잃으면 조합 중 텍스트를 확정(커밋)한다 — Terminal.app/Ghostty 의미론.
+pub export fn maru_macos_app_dev_session_set_focus(session: ?*DevSession, focused: i32) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    dev_session.setFocused(focused != 0);
     return @intFromEnum(Status.ok);
 }
 

@@ -227,5 +227,9 @@ macOS 전역 핫키는 window server와 권한 상태에 영향을 받을 수 �
 
 - Ctrl/Cmd가 눌린 키는 입력기(IME)에 보내지 않고 바로 단축키/인코딩 경로로 간다. 매칭은 글자가 아니라 **물리 키코드** 기준이다: 한글 입력 모드에서 Ctrl+B를 누르면 AppKit 글자는 'ㅂ'이지만 물리 키는 B이므로 0x02(tmux prefix)가 PTY로 간다. Cmd+C/V도 동일하다(kVK_ANSI_C/V).
 - 변환 규칙은 Zig(`src/platform/macos/keycode.zig`)가 소유한다: Ctrl/Cmd 조합에서 현재 레이아웃의 글자가 라틴이 아니면(>= 0x80) 물리 키코드를 US 배열 라틴으로 되돌린다. 라틴 레이아웃(영어/Dvorak)의 결과는 그대로 둔다 — 사용자가 고른 라틴 배열의 글자 배치를 존중한다. Swift는 `NSEvent.keyCode`를 ABI(`raw_key_code`, v18)로 전달만 한다.
-- 수정자 없는 일반 타이핑(Shift 포함)은 `NSTextInputClient`/`interpretKeyEvents`로 입력기를 거친다 — 한글 조합(`insertText`)이 여기서 일어나고, 확정 텍스트는 코드포인트 단위로 기존 key event 경로(encodeKey)에 태운다. 입력기가 텍스트로 만들지 않은 키(Enter/Backspace/방향 등 — 조합 확정 직후 포함)는 `doCommand(by:)`로 돌아오고, 원본 키 이벤트로 기존 인코딩 경로에 들어간다. **interpretKeyEvents 뒤 fallback 재전송은 두지 않는다** — AppKit 계약상 미처리 키는 반드시 doCommand로 오므로, fallback이 있으면 입력기의 비동기 처리와 겹쳐 같은 키가 두 번 들어간다(라이브에서 타이핑 꼬임으로 실제 발생). Option+글자는 입력기를 우회해 기존 meta-ESC 인코딩을 유지한다(특수문자 입력이 아님).
+- 수정자 없는 일반 타이핑(Shift 포함)은 `NSTextInputClient`/`interpretKeyEvents`로 입력기를 거친다 — 한글 조합이 여기서 일어난다. **IME 판정은 전부 Zig의 키 트랜잭션이 소유한다**(ABI v20: `ime_begin` → 입력기 콜백이 `ime_insert`(확정 누적)/`ime_marked`(조합 표시)로 쌓음 → `ime_end`가 일괄 판정 — Ghostty의 keyTextAccumulator와 같은 구조). Swift에는 IME 분기 로직이 없다(전달만). 판정 규칙(위에서부터 첫 일치, 전부 unit 검증):
+  1. 확정 텍스트가 쌓였으면 그것만 코드포인트 단위로 기존 encodeKey 경로에 보낸다(키 자체는 입력기가 소비 — 조합 확정 Enter는 확정만, 개행 없음). 단 조합 중 단일 C0(조합 조작용 Ctrl+H류)는 입력기 소유라 버린다.
+  2. 텍스트는 없지만 조합이 변했으면(자모 삭제 등) 키를 보내지 않는다.
+  3. 둘 다 아니면 일반 키 — 기존 인코딩 경로(Enter/Backspace/기능키).
+  Option+글자는 입력기를 우회해 기존 meta-ESC 인코딩을 유지한다(특수문자 입력이 아님). 포커스 변화도 Zig가 소유한다(`set_focus`) — 잃으면 조합 중 텍스트를 버리지 않고 확정 커밋한다(Terminal.app/Ghostty 의미론, unit 검증).
 - 조합 중(preedit) 글자는 커서 위치에 반전 스타일로 합성 표시되고, 그동안 커서는 깜빡이지 않는다(보이는 위상 고정 — Terminal.app/Ghostty 동일). 포커스 이탈(view resign + 창 key 상실 — 앱 전환 포함)에는 조합 중 텍스트를 버리지 않고 확정(커밋)해 입력기 상태와 화면이 어긋나지 않게 한다. 아직: 입력기 후보창의 커서 위치 정밀 배치, preedit 밑줄 스타일(현재 반전).

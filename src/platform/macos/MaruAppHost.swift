@@ -31,6 +31,33 @@ final class MaruMetalTerminalView: NSView {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
         updateDrawableSize()
+        updateTrackingAreas()
+    }
+
+    // Cmd+hover URL 하이라이트용 mouseMoved 추적. 보이는 영역 전체를 따라가게 inVisibleRect로 둔다.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        controller?.handleHover(event, in: self)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        controller?.clearHover()
+    }
+
+    // Cmd 키를 누르거나 떼는 순간에도 (마우스를 안 움직여도) hover 상태를 재평가한다.
+    override func flagsChanged(with event: NSEvent) {
+        controller?.handleHover(event, in: self)
+        super.flagsChanged(with: event)
     }
 
     override func viewDidChangeBackingProperties() {
@@ -528,6 +555,30 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // Cmd+C: Zig가 추출한 선택 텍스트(UTF-8, Zig 소유 버퍼)를 NSPasteboard에 쓴다 — 클립보드는
     // OS API라 Swift가 소유하는 경계다. 선택이 없으면 아무것도 하지 않는다(셸에 ^C를 보내지 않는
     // 것은 macOS 터미널 관례와 동일 — 인터럽트는 Ctrl+C).
+    // Cmd+hover: Zig가 URL 여부를 판정(+밑줄 투영)하고, 여기선 마우스 커서만 바꾼다.
+    func handleHover(_ event: NSEvent, in view: NSView) {
+        guard let session = devSession else { return }
+        let local = view.convert(event.locationInWindow, from: nil)
+        let scale = window?.backingScaleFactor ?? 1.0
+        let xPx = Double(local.x * scale)
+        let yPx = Double((view.bounds.height - local.y) * scale)
+        let cmdHeld: Int32 = event.modifierFlags.contains(.command) ? 1 : 0
+        var isUrl: Int32 = 0
+        guard maru_macos_app_dev_session_hover(session, xPx, yPx, cmdHeld, &isUrl) == Self.statusOK else { return }
+        if isUrl == 1 {
+            NSCursor.pointingHand.set()
+        } else {
+            NSCursor.iBeam.set()
+        }
+    }
+
+    func clearHover() {
+        guard let session = devSession else { return }
+        var isUrl: Int32 = 0
+        _ = maru_macos_app_dev_session_hover(session, 0, 0, 0, &isUrl)
+        NSCursor.arrow.set()
+    }
+
     // Cmd+클릭: Zig가 인식한 URL을 기본 브라우저로 연다(NSWorkspace는 OS 소유 경계).
     func handleCommandClick(_ event: NSEvent, in view: NSView) {
         guard let session = devSession else { return }

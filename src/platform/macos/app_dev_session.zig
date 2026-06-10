@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 16;
+pub const abi_version: u32 = 17;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -172,6 +172,8 @@ pub const DevSession = struct {
     copy_buffer: []u8 = &.{},
     // urlAt()이 돌려준 URL의 소유 버퍼(다음 urlAt/destroy까지 유효).
     url_buffer: []u8 = &.{},
+    // Cmd+hover 중인 URL의 뷰포트 범위(밑줄 하이라이트 렌더용). 없으면 null.
+    hover_url_span: ?terminal.SelectionSpan = null,
     // 현재 선택이 down(1) 드래그로 시작했는지. 더블/트리플클릭(4/5) 선택은 직후의 up(3)이
     // "이동 없는 클릭 -> 해제" 판정을 타면 안 되므로 이 플래그로 구분한다.
     mouse_drag_selecting: bool = false,
@@ -384,6 +386,31 @@ pub const DevSession = struct {
         self.runtime.writeInput(self.surfaces[0].id, .{ .bytes = encoded }) catch {};
     }
 
+    /// Cmd+hover 갱신. cmd_held가 아니거나 URL이 아니면 hover를 해제한다. URL 위면 밑줄 범위를
+    /// 저장하고 true를 돌려준다 — Swift가 이 값으로 마우스 커서(pointingHand)를 정한다.
+    pub fn hoverUrl(self: *DevSession, x_px: f64, y_px: f64, cmd_held: bool) bool {
+        if (!self.surface_initialized) return false;
+        var next: ?terminal.SelectionSpan = null;
+        if (cmd_held and std.math.isFinite(x_px) and std.math.isFinite(y_px)) {
+            const core = &self.surfaces[0].core;
+            const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
+            const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
+            const col: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(x_px, 0) / cw)), 0, @as(i64, core.size.cols) - 1));
+            const row: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(y_px, 0) / ch)), 0, @as(i64, core.size.rows) - 1));
+            next = core.urlSpanAt(self.allocator, row, col) catch null;
+        }
+        const changed = !spanEql(self.hover_url_span, next);
+        self.hover_url_span = next;
+        if (changed) self.metal_dirty = true; // 밑줄이 생기거나 사라지면 다시 그린다
+        return next != null;
+    }
+
+    fn spanEql(a: ?terminal.SelectionSpan, b: ?terminal.SelectionSpan) bool {
+        if (a == null and b == null) return true;
+        if (a == null or b == null) return false;
+        return std.meta.eql(a.?, b.?);
+    }
+
     /// Cmd+클릭 위치의 URL(없으면 빈 슬라이스). Swift가 NSWorkspace로 연다 — URL 인식(단어 경계,
     /// soft-wrap 이어 붙임, http(s) 검사, 끝 문장부호 다듬기)은 core가 소유한다.
     pub fn urlAt(self: *DevSession, x_px: f64, y_px: f64) []const u8 {
@@ -557,6 +584,7 @@ pub const DevSession = struct {
                 .default_bg = self.appearance.theme.background, // SGR reverse의 default 색 스왑용
                 .selection_bg = self.appearance.theme.selection,
                 .selection = self.surfaces[0].core.selectionViewportSpan(),
+                .hover_link = self.hover_url_span,
 
                 // 커서는 반전 블록으로 그린다: 칸 배경=theme.cursor, 그 위 glyph=theme.background.
                 .cursor = .{

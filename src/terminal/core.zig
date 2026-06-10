@@ -329,6 +329,25 @@ pub const TerminalCore = struct {
         return .{ .start = .{ .row = start_row, .col = start_col }, .end = .{ .row = end_row, .col = end_col } };
     }
 
+    /// Cmd+hover 위치의 URL 단어 범위(뷰포트 좌표로 클립). URL이 아니면 null. 밑줄 하이라이트
+    /// 렌더용 — 단어 run 전체에 밑줄을 긋는다(http 시작 전 괄호까지 포함될 수 있음, 시각 피드백
+    /// 용도라 충분).
+    pub fn urlSpanAt(self: *const TerminalCore, allocator: std.mem.Allocator, viewport_row: u16, col: u16) !?types.SelectionSpan {
+        // URL 여부는 extractUrlAt과 같은 판정을 거친다(스킴 검사 + 본문 존재).
+        const url = (try self.extractUrlAt(allocator, viewport_row, col)) orelse return null;
+        allocator.free(url);
+        const bounds = self.wordBoundsAt(viewport_row, col) orelse return null;
+        // 절대 좌표 -> 뷰포트 좌표 클립(selectionViewportSpan과 동일 규칙).
+        const top_abs = self.sb_count - @min(self.view_offset, self.sb_count);
+        const bottom_abs = top_abs + self.size.rows - 1;
+        if (bounds.end.row < top_abs or bounds.start.row > bottom_abs) return null;
+        const start_row: u16 = if (bounds.start.row < top_abs) 0 else @intCast(bounds.start.row - top_abs);
+        const start_col: u16 = if (bounds.start.row < top_abs) 0 else bounds.start.col;
+        const end_row: u16 = if (bounds.end.row > bottom_abs) self.size.rows - 1 else @intCast(bounds.end.row - top_abs);
+        const end_col: u16 = if (bounds.end.row > bottom_abs) self.size.cols - 1 else bounds.end.col;
+        return .{ .start = .{ .row = start_row, .col = start_col }, .end = .{ .row = end_row, .col = end_col } };
+    }
+
     /// Cmd+클릭 위치의 URL을 추출한다(없으면 null). 클릭 셀이 속한 비공백 run(soft-wrap 포함)
     /// 안에서 http:// 또는 https:// 부터 run 끝까지를 URL로 보고, 끝에 붙은 문장 부호(괄호/마침표
     /// 등)는 다듬는다. 호출자가 free한다.
@@ -3804,4 +3823,14 @@ test "extractUrlAt finds an http(s) URL in the clicked word, across soft-wrap, t
     try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 0)) == null);
     // 공백도 null.
     try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 3)) == null);
+}
+
+test "urlSpanAt returns the viewport span of a hovered URL word and null for non-URLs" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 3 });
+    defer core.deinit();
+    try core.write("go https://a.bc/d now");
+    const span = (try core.urlSpanAt(std.testing.allocator, 0, 5)).?; // URL 위
+    try std.testing.expectEqual(@as(u16, 0), span.start.row);
+    try std.testing.expectEqual(@as(u16, 3), span.start.col); // "https://..." 단어 시작
+    try std.testing.expect((try core.urlSpanAt(std.testing.allocator, 0, 0)) == null); // "go"
 }

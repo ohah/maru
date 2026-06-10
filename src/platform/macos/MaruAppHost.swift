@@ -109,6 +109,14 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     override func keyDown(with event: NSEvent) {
         imeLog("keyDown", event.characters, keyCode: event.keyCode)
+        // Control+Command+Space(이모지 & 기호 피커)는 시스템 character palette를 연다. 우리가
+        // Ctrl/Cmd 조합을 전부 가로채면 이 피커가 안 떠서 명시적으로 처리한다(keyCode 49 = Space).
+        // 피커에서 고른 이모지는 입력기의 insertText로 들어와 PTY로 전송된다.
+        let exactChord = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if exactChord == [.command, .control], event.keyCode == 49 {
+            NSApp.orderFrontCharacterPalette(self)
+            return
+        }
         // Ctrl/Cmd/Option 조합은 입력기에 보내지 않고 바로 단축키/인코딩 경로로 — 한글 입력
         // 모드에서도 Ctrl+B(tmux prefix)나 Cmd+C가 동작하고(레이아웃 독립 매칭은 Zig가 물리
         // 키코드로 한다), Option+글자는 특수문자 입력이 아니라 기존 meta-ESC 인코딩을 유지한다.

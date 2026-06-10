@@ -39,7 +39,7 @@
 - settings UI/runtime reload
 - plugin/Wasm
 - global shortcut
-- IME 완성
+- IME preedit(조합 중 글자) 표시·후보창 커서 위치(1단계 조합/확정·레이아웃 독립 단축키는 완료)
 - full VT parser 호환성(alternate screen, scroll region, mouse mode 등)
 
 ## C ABI 규칙

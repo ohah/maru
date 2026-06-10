@@ -221,3 +221,11 @@ Esc      vim, readline, shell mode 전환에 자주 쓰인다.
 - macOS app E2E: global shortcut registration 실패/성공을 artifact로 남긴다.
 
 macOS 전역 핫키는 window server와 권한 상태에 영향을 받을 수 있다. 자동 E2E가 안정적이지 않으면 opt-in app smoke test와 수동 검증 산출물을 먼저 둔다.
+
+
+## 레이아웃 독립 단축키와 IME
+
+- Ctrl/Cmd가 눌린 키는 입력기(IME)에 보내지 않고 바로 단축키/인코딩 경로로 간다. 매칭은 글자가 아니라 **물리 키코드** 기준이다: 한글 입력 모드에서 Ctrl+B를 누르면 AppKit 글자는 'ㅂ'이지만 물리 키는 B이므로 0x02(tmux prefix)가 PTY로 간다. Cmd+C/V도 동일하다(kVK_ANSI_C/V).
+- 변환 규칙은 Zig(`src/platform/macos/keycode.zig`)가 소유한다: Ctrl/Cmd 조합에서 현재 레이아웃의 글자가 라틴이 아니면(>= 0x80) 물리 키코드를 US 배열 라틴으로 되돌린다. 라틴 레이아웃(영어/Dvorak)의 결과는 그대로 둔다 — 사용자가 고른 라틴 배열의 글자 배치를 존중한다. Swift는 `NSEvent.keyCode`를 ABI(`raw_key_code`, v18)로 전달만 한다.
+- 수정자 없는 일반 타이핑(Shift 포함)은 `NSTextInputClient`/`interpretKeyEvents`로 입력기를 거친다 — 한글 조합(`insertText`)이 여기서 일어나고, 확정 텍스트는 코드포인트 단위로 기존 key event 경로(encodeKey)에 태운다. 입력기가 소비하지 않은 키(기능키)와 편집 명령(Enter/Backspace — 조합 확정 직후 포함)은 원본 키 이벤트로 기존 인코딩 경로에 들어간다.
+- 아직: 조합 중(preedit) 글자의 화면 표시와 입력기 후보창의 커서 위치 배치는 다음 단계다(조합 확정 시점에 글자가 나타난다).

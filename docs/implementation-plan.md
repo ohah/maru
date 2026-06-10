@@ -370,7 +370,7 @@ TDD 방식:
 - 기본 terminal input 인코더는 `Ctrl+letter` → C0 control, `Alt/Option` → meta-ESC까지 처리한다. 이 계약은 `src/terminal/input.zig`와 `src/config/keybinding.zig`의 단위 테스트가 지킨다.
 - **application-cursor-key 모드(DECCKM)를 구현했다(완료)**: TerminalCore가 `CSI ?1h/l`로 모드를 추적하고, `input.encodeKey`가 `EncodeOptions`로 받아 화살표를 SS3(`\x1bOA`)/CSI(`\x1b[A`)로 전환한다. app host의 `handleKeyEvent`가 매 키마다 active surface core의 현재 모드를 읽어 resolver에 넘기므로(인코더는 터미널 상태를 직접 들지 않음), vim/less가 모드를 켜고 끄는 대로 즉시 따라간다. unit + host E2E(`?1h` 후 같은 키가 SS3로 PTY에 쓰임)로 검증.
 - CSI-u/Kitty 키 인코딩과 function key terminal encoding은 아직 하지 않는다. 키 버퍼는 `encoded_key_buffer_len`으로 확장되어 있으므로, 다음 입력 확장은 같은 상수와 테스트를 갱신하면서 진행한다.
-- **IME 1단계를 구현했다(완료)**: `MaruMetalTerminalView`가 `NSTextInputClient`를 채택해 수정자 없는 타이핑을 입력기에 위임한다(한글 조합 동작, 확정 텍스트는 코드포인트 단위로 기존 encodeKey 경로). Ctrl/Cmd 조합은 입력기를 우회하고 **물리 키코드 기준으로 레이아웃 독립 매칭**한다(ABI v18 raw_key_code + Zig keycode.zig — 한글 모드에서도 Ctrl+B=0x02·Cmd+C/V 동작, 라틴 배열 결과는 보존). 자세한 정책은 [키 입력과 단축키 경계](key-input-and-shortcuts.md). 아직: preedit(조합 중 글자) 화면 표시·후보창 커서 위치 배치(다음 단계), function key/keypad/dead key, CSI-u/Kitty 인코딩.
+- **IME 1단계를 구현했다(완료)**: `MaruMetalTerminalView`가 `NSTextInputClient`를 채택해 수정자 없는 타이핑을 입력기에 위임한다(한글 조합 동작, 확정 텍스트는 코드포인트 단위로 기존 encodeKey 경로). Ctrl/Cmd 조합은 입력기를 우회하고 **물리 키코드 기준으로 레이아웃 독립 매칭**한다(ABI v18 raw_key_code + Zig keycode.zig — 한글 모드에서도 Ctrl+B=0x02·Cmd+C/V 동작, 라틴 배열 결과는 보존). 자세한 정책은 [키 입력과 단축키 경계](key-input-and-shortcuts.md). preedit(조합 중 글자)는 커서 위치에 반전으로 합성 표시된다(ABI v19 set_preedit — core renderSnapshot 합성, 그리드 비오염, unit 검증). 아직: 후보창 커서 위치 정밀 배치, function key/keypad/dead key, CSI-u/Kitty 인코딩.
 
 ## 9단계: Workspace restore
 

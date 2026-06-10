@@ -220,6 +220,18 @@ pub export fn maru_macos_app_dev_session_paste_text(
     return @intFromEnum(Status.ok);
 }
 
+// IME 조합 중(preedit) 텍스트(UTF-8). len 0 = 조합 종료. 커서 위치에 반전으로 합성 표시된다.
+pub export fn maru_macos_app_dev_session_set_preedit(
+    session: ?*DevSession,
+    bytes: ?[*]const u8,
+    len: usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const slice: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
+    dev_session.setPreedit(slice);
+    return @intFromEnum(Status.ok);
+}
+
 // Cmd+hover 갱신(backing px). URL 위면 *out_is_url=1 — Swift가 마우스 커서(pointingHand)를 정하고,
 // Zig는 밑줄 하이라이트를 다음 frame에 투영한다. cmd_held=0이면 hover 해제.
 pub export fn maru_macos_app_dev_session_hover(

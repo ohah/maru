@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 18;
+pub const abi_version: u32 = 19;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -462,6 +462,13 @@ pub const DevSession = struct {
         if (core.view_offset != before_offset or !pointEql(core.selection_head, before_head)) {
             self.metal_dirty = true;
         }
+    }
+
+    /// IME 조합 중(preedit) 텍스트 갱신(빈 입력 = 종료). 커서 위치 합성 표시는 core가 한다.
+    pub fn setPreedit(self: *DevSession, bytes: []const u8) void {
+        if (!self.surface_initialized) return;
+        self.surfaces[0].core.setPreedit(bytes) catch return;
+        self.metal_dirty = true; // 조합 글자는 즉시 보여야 한다
     }
 
     /// 클립보드 텍스트 붙여넣기(Cmd+V). 인코딩(개행 정규화 + bracketed paste 감싸기)은 core가

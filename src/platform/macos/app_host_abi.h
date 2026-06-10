@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 20u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 21u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -268,6 +268,8 @@ int32_t maru_macos_app_dev_session_ime_end(
     MaruAppHostDevSession *session,
     const MaruAppHostKeyEvent *event
 );
+/* IME deleteBackward 편집 명령. 한글 마지막 자모 백스페이스(insertText+deleteBackward 상쇄)에 쓴다. */
+int32_t maru_macos_app_dev_session_ime_delete_backward(MaruAppHostDevSession *session);
 /* 포커스 변화. 잃으면(0) 조합 중 텍스트를 확정 커밋한다. */
 int32_t maru_macos_app_dev_session_set_focus(MaruAppHostDevSession *session, int32_t focused);
 /* Cmd+hover 갱신(backing px). URL 위면 *out_is_url=1(Swift가 pointingHand 커서), Zig는 밑줄

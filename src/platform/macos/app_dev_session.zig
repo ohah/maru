@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 20;
+pub const abi_version: u32 = 21;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -198,6 +198,10 @@ pub const DevSession = struct {
     ime_inserted: std.ArrayList(u8) = .empty,
     ime_had_marked: bool = false,
     ime_marked_changed: bool = false,
+    // 이번 키 트랜잭션에서 입력기가 deleteBackward 편집 명령을 보냈는지. 한글 마지막 자모
+    // 백스페이스에서 입력기는 insertText(조합 글자) + deleteBackward를 같은 keyDown에 보내는데
+    // (커밋 후 삭제 = net 0), 이게 있으면 확정 텍스트의 마지막 글자를 그 삭제가 상쇄한다.
+    ime_did_delete: bool = false,
     // 커서 깜빡임 위상(DECSCUSR blink가 켜진 커서만). 30Hz tick 15회(=500ms)마다 토글하고,
     // 입력/출력이 있으면 보이는 상태로 리셋한다(타이핑 중 커서가 사라지지 않게).
     blink_visible: bool = true,
@@ -481,6 +485,7 @@ pub const DevSession = struct {
         self.ime_active = true;
         self.ime_inserted.clearRetainingCapacity();
         self.ime_marked_changed = false;
+        self.ime_did_delete = false;
         self.ime_had_marked = self.surfaces[0].core.preedit != null;
     }
 
@@ -504,6 +509,11 @@ pub const DevSession = struct {
         if (self.ime_active) self.ime_marked_changed = true;
     }
 
+    /// 입력기의 deleteBackward 편집 명령(doCommand). 트랜잭션에 기록만 하고 판정은 imeEnd가 한다.
+    pub fn imeDeleteBackward(self: *DevSession) void {
+        if (self.ime_active) self.ime_did_delete = true;
+    }
+
     /// imeEnd의 순수 판정 결과. 부작용(PTY 전송)에서 분리해 라이브 PTY 없이 unit 테스트한다
     /// (Ghostty가 shouldSuppressComposingControlInput를 순수 함수로 테스트하는 것과 같은 방식).
     pub const ImeDecision = union(enum) {
@@ -516,14 +526,32 @@ pub const DevSession = struct {
     /// 1. 확정 텍스트가 쌓였으면 그것만 보낸다. 단 조합 중 단일 C0(조합 조작용 Ctrl+H류)은 버림.
     /// 2. 텍스트는 없지만 조합이 변했으면(자모 삭제) 키를 보내지 않는다.
     /// 3. 둘 다 아니면 일반 키.
-    pub fn imeDecide(composing: bool, inserted: []const u8, marked_changed: bool) ImeDecision {
+    pub fn imeDecide(composing: bool, inserted: []const u8, marked_changed: bool, did_delete: bool) ImeDecision {
         if (inserted.len > 0) {
             const lone_c0 = inserted.len == 1 and inserted[0] < 0x20;
             if (composing and lone_c0) return .ignore;
+            if (did_delete) {
+                // insertText + deleteBackward가 한 keyDown에 왔다(한글 마지막 자모 백스페이스):
+                // 입력기가 조합 글자를 커밋한 뒤 그 삭제를 보낸 것 — 삭제가 확정 텍스트의 마지막
+                // 코드포인트를 상쇄한다. 남는 게 있으면 그만 커밋하고, 없으면 아무것도 안 보낸다
+                // (PTY에 글자가 박혔다가 다음 BS로 지워야 하는 문제를 없앤다 — 실측 기반).
+                const kept = dropLastCodepoint(inserted);
+                if (kept.len == 0) return .ignore;
+                return .{ .commit_text = kept };
+            }
             return .{ .commit_text = inserted };
         }
         if (marked_changed) return .ignore;
         return .encode_key;
+    }
+
+    /// UTF-8 문자열에서 마지막 코드포인트를 뗀 슬라이스. continuation 바이트(0x80~0xBF)를 지나
+    /// lead 바이트까지 되돌린다. 잘못된 UTF-8이면 1바이트만 뗀다(안전).
+    fn dropLastCodepoint(s: []const u8) []const u8 {
+        if (s.len == 0) return s;
+        var i: usize = s.len - 1;
+        while (i > 0 and (s[i] & 0xC0) == 0x80) i -= 1;
+        return s[0..i];
     }
 
     /// IME 키 트랜잭션 종료(Swift keyDown이 interpretKeyEvents 직후 호출) — 일괄 판정.
@@ -540,8 +568,9 @@ pub const DevSession = struct {
             self.ime_active = false;
             self.ime_inserted.clearRetainingCapacity();
             self.ime_marked_changed = false;
+            self.ime_did_delete = false;
         }
-        switch (imeDecide(composing, self.ime_inserted.items, self.ime_marked_changed)) {
+        switch (imeDecide(composing, self.ime_inserted.items, self.ime_marked_changed, self.ime_did_delete)) {
             .commit_text => |text| self.sendCommittedText(text),
             .ignore => {}, // 조합 조작 키(자모 삭제) 또는 조합 중 단일 C0 — 입력기 소유
             .encode_key => _ = self.handleKeyEvent(event) catch {},
@@ -1281,17 +1310,22 @@ test "large paste drains through the non-blocking queue without freezing ticks" 
 test "imeDecide routes IME keys: commit text once, ignore composition edits, encode plain keys" {
     const D = DevSession.ImeDecision;
     // 1) 확정 텍스트가 있으면 그것만 보낸다(키는 입력기 소비 — 조합 확정 Enter는 개행 없음).
-    try std.testing.expect(DevSession.imeDecide(true, "\xec\x95\x88", false) == .commit_text);
-    try std.testing.expectEqualStrings("\xec\x95\x88", DevSession.imeDecide(true, "\xec\x95\x88", false).commit_text);
+    try std.testing.expect(DevSession.imeDecide(true, "\xec\x95\x88", false, false) == .commit_text);
+    try std.testing.expectEqualStrings("\xec\x95\x88", DevSession.imeDecide(true, "\xec\x95\x88", false, false).commit_text);
     // 2) 텍스트 없이 조합만 변하면(자모 삭제) 키 무전송.
-    try std.testing.expect(DevSession.imeDecide(true, "", true) == .ignore);
+    try std.testing.expect(DevSession.imeDecide(true, "", true, false) == .ignore);
     // 3) 조합 중 단일 C0(조합 조작용 Ctrl+H류)은 버린다.
-    try std.testing.expect(DevSession.imeDecide(true, "\x08", false) == .ignore);
+    try std.testing.expect(DevSession.imeDecide(true, "\x08", false, false) == .ignore);
     // 4) 조합 아닐 때의 C0는 정상 텍스트로 본다(commit) — 조합 보호는 composing일 때만.
-    try std.testing.expect(DevSession.imeDecide(false, "\x08", false) == .commit_text);
+    try std.testing.expect(DevSession.imeDecide(false, "\x08", false, false) == .commit_text);
     // 5) 텍스트도 조합 변화도 없으면 일반 키(Enter/Backspace/기능키).
-    try std.testing.expect(DevSession.imeDecide(false, "", false) == .encode_key);
+    try std.testing.expect(DevSession.imeDecide(false, "", false, false) == .encode_key);
     // 6) 여러 글자 확정도 통째로 commit(영문 일반 타이핑 포함).
-    try std.testing.expectEqualStrings("ab", DevSession.imeDecide(false, "ab", false).commit_text);
+    try std.testing.expectEqualStrings("ab", DevSession.imeDecide(false, "ab", false, false).commit_text);
+    // 7) 마지막 자모 백스페이스: insertText("ㄴ") + deleteBackward 상쇄 -> 아무것도 안 보냄
+    //    (실측: 가나->BS->가ㄴ->BS->가. ㄴ이 PTY에 박히지 않는다).
+    try std.testing.expect(DevSession.imeDecide(true, "\xe3\x84\xb4", false, true) == .ignore); // "ㄴ"
+    // 8) 다중 글자 insert + 삭제: 마지막 코드포인트만 상쇄, 나머지는 commit.
+    try std.testing.expectEqualStrings("a", DevSession.imeDecide(false, "ab", false, true).commit_text);
     _ = D;
 }

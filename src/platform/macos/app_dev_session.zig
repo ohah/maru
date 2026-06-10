@@ -983,3 +983,40 @@ test "cursor blink toggles every interval, stays solid for steady cursors, and r
     while (i < blink_interval_ticks * 3) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(session.blink_visible);
 }
+
+test "headless ticks toggle the blink phase and bump the metal generation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 CoreText frame builder 경로
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var toggles: usize = 0;
+    var gen_changes: usize = 0;
+    var last_vis = session.blink_visible;
+    var last_gen: u64 = session.metal_buffer.generation;
+    var i: usize = 0;
+    while (i < blink_interval_ticks * 3) : (i += 1) {
+        _ = try session.tick();
+        if (session.blink_visible != last_vis) {
+            toggles += 1;
+            last_vis = session.blink_visible;
+        }
+        if (session.metal_buffer.generation != last_gen) {
+            gen_changes += 1;
+            last_gen = session.metal_buffer.generation;
+        }
+    }
+    // 45틱 동안 출력이 잦아 리셋될 수 있지만, 출력이 멎은 뒤(controlled command 종료)에는
+    // 토글이 최소 1회는 일어나고, 토글마다 재투영(generation 증가)이 따라야 한다.
+    std.debug.print("\nblink probe: toggles={d} gen_changes={d}\n", .{ toggles, gen_changes });
+    try std.testing.expect(toggles >= 1);
+    try std.testing.expect(gen_changes >= toggles);
+}

@@ -62,6 +62,11 @@ pub const PtySession = struct {
         }
 
         try setCloseOnExec(master_fd);
+        // master fd를 non-blocking으로 둔다. write는 버퍼에 들어가는 만큼만 쓰고 EAGAIN이면
+        // 0을 돌려줘(아래 writeFd) 큰 붙여넣기가 UI tick을 동결시키지 않는다 — poll만으로는
+        // 512B 여유를 보장 못 해 blocking fd에선 write가 막힐 수 있었다(#5). reader는 poll-
+        // readable 후 read하므로 EAGAIN은 드문 race이고 readEvent가 재시도한다.
+        try setNonBlocking(master_fd);
 
         // close()가 blocking poll을 깨우는 self-pipe. child에게 새지 않도록 양 끝을
         // close-on-exec로 둔다(exec 시 닫히고, 다른 session spawn에도 상속되지 않는다).
@@ -140,18 +145,23 @@ pub const PtySession = struct {
     pub fn readEvent(self: *PtySession, allocator: std.mem.Allocator) !types.PtyEvent {
         if (self.exited.load(.acquire)) return error.NoMoreEvents;
         const fd = self.activeMasterFd() catch return error.SessionClosed;
-        try self.waitReadableOrClosing(fd);
 
         var buffer: [4096]u8 = undefined;
-        const read_len = std.posix.read(fd, &buffer) catch |err| switch (err) {
-            // PTY EOF is reported as EIO on some Unix implementations after
-            // the slave side closes. Treat it the same as a zero-byte read so
-            // callers do not need OS-specific EOF rules.
-            error.InputOutput => 0,
-            else => {
-                if (self.closing.load(.acquire)) return error.SessionClosed;
-                return err;
-            },
+        const read_len = while (true) {
+            try self.waitReadableOrClosing(fd);
+            break std.posix.read(fd, &buffer) catch |err| switch (err) {
+                // PTY EOF is reported as EIO on some Unix implementations after
+                // the slave side closes. Treat it the same as a zero-byte read so
+                // callers do not need OS-specific EOF rules.
+                error.InputOutput => 0,
+                // master fd가 O_NONBLOCK이라 poll-readable과 read 사이의 드문 race에서 EAGAIN이
+                // 날 수 있다 — 데이터가 아직 없다는 뜻이니 다시 기다린다(루프, 스택 안전).
+                error.WouldBlock => continue,
+                else => {
+                    if (self.closing.load(.acquire)) return error.SessionClosed;
+                    return err;
+                },
+            };
         };
 
         if (read_len > 0) {
@@ -191,23 +201,34 @@ pub const PtySession = struct {
         var written: usize = 0;
         while (written < bytes.len) {
             const n = try writeFd(fd, bytes[written..]);
-            if (n == 0) return error.WriteFailed;
+            if (n == 0) {
+                // non-blocking 버퍼가 찼다 — writable이 될 때까지(또는 close) 기다렸다 재시도한다.
+                // 키 입력은 작아 거의 안 걸리지만, 전량 전달 계약은 지킨다.
+                try self.waitWritableOrClosing(fd);
+                continue;
+            }
             written += n;
         }
     }
 
-    /// non-blocking 한 청크 쓰기: master가 writable하면(POLLOUT, 대기 0) 최대 512바이트를 쓰고
-    /// 쓴 길이를 돌려준다. writable하지 않으면 0 — 자식이 stdin을 안 읽어도 호출자(UI tick)가
-    /// 동결되지 않는다. 큰 붙여넣기를 tick에 걸쳐 흘려보내는 paste 큐가 쓴다. 단일 writer라
-    /// POLLOUT 직후의 소량 write는 막히지 않는다.
+    fn waitWritableOrClosing(self: *PtySession, fd: std.posix.fd_t) !void {
+        if (self.closing.load(.acquire)) return error.SessionClosed;
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 },
+            .{ .fd = self.wake_read_fd, .events = poll_in_events, .revents = 0 },
+        };
+        _ = std.posix.poll(&fds, -1) catch return error.WriteFailed;
+        if (self.closing.load(.acquire)) return error.SessionClosed;
+    }
+
+    /// non-blocking 한 청크 쓰기: master fd가 O_NONBLOCK이라 버퍼에 들어가는 만큼만 쓰고(부분
+    /// 쓰기 가능) 쓴 길이를 돌려준다. 버퍼가 차면 EAGAIN→0 — 자식이 stdin을 안 읽어도 절대
+    /// 막히지 않는다(블록 fd+poll은 512B 여유를 보장 못 해 막힐 수 있었다, #5). 큰 붙여넣기를
+    /// tick에 걸쳐 흘려보내는 paste 큐가 쓴다.
     pub fn writeInputNonBlocking(self: *PtySession, bytes: []const u8) !usize {
         if (bytes.len == 0) return 0;
         const fd = try self.activeMasterFd();
-        var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
-        const ready = std.posix.poll(&fds, 0) catch return 0;
-        if (ready == 0 or (fds[0].revents & std.posix.POLL.OUT) == 0) return 0;
-        const chunk = @min(bytes.len, 512);
-        return try writeFd(fd, bytes[0..chunk]);
+        return try writeFd(fd, bytes[0..@min(bytes.len, 512)]);
     }
 
     pub fn resize(self: *PtySession, size: terminal.Size) !void {
@@ -488,6 +509,12 @@ fn childExec(
     std.c._exit(127);
 }
 
+fn setNonBlocking(fd: std.posix.fd_t) !void {
+    const flags = std.c.fcntl(fd, std.c.F.GETFL, @as(c_int, 0));
+    if (flags < 0) return error.FcntlFailed;
+    if (std.c.fcntl(fd, std.c.F.SETFL, flags | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true }))) < 0) return error.FcntlFailed;
+}
+
 fn setCloseOnExec(fd: std.posix.fd_t) !void {
     // master fd는 parent runtime만 소유해야 한다. exec된 child에게 새면 EOF/exit 감지가 늦어질 수 있다.
     const flags = std.c.fcntl(fd, std.c.F.GETFD, @as(c_int, 0));
@@ -506,6 +533,7 @@ fn writeFd(fd: std.posix.fd_t, bytes: []const u8) !usize {
 
         const err = std.posix.errno(rc);
         if (err == .INTR) continue;
+        if (err == .AGAIN) return 0; // non-blocking: 지금은 더 못 쓴다(버퍼 참)
         return error.WriteFailed;
     }
 }

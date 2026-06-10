@@ -130,8 +130,16 @@ fn measureScrollbackRewrap(allocator: std.mem.Allocator, io: std.Io) !Budget {
     const start = now(io);
     for (0..iterations) |iteration| {
         const cols: u16 = @intCast(40 + (iteration % 100));
-        try core.resize(cols, 24);
-        core.scrollViewport(5); // 과거 보기 — 지연 재-wrap이 여기서 1회 수행된다
+        if (iteration % 2 == 0) {
+            // 지연(deferred) 경로: 바닥에서 resize -> 첫 과거 보기에서 재-wrap 1회.
+            try core.resize(cols, 24);
+            core.scrollViewport(5);
+        } else {
+            // 앵커(anchored) 경로: 과거를 보는 중 resize -> 그 자리에서 즉시 재-wrap + 뷰 보정.
+            // 사용자가 스크롤백을 읽는 중 창을 끌 때 매 SIGWINCH마다 도는 경로라 함께 잰다.
+            core.scrollViewport(5);
+            try core.resize(cols, 24);
+        }
         core.scrollToBottom();
     }
     const elapsed = now(io) - start;

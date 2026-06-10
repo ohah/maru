@@ -92,17 +92,28 @@ pub const PtyIo = struct {
     ctx: *anyopaque,
     write_input: *const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void,
     resize_fn: *const fn (ctx: *anyopaque, size: terminal.Size) anyerror!void,
+    // non-blocking 변형(없으면 writeInputNonBlocking이 blocking으로 폴백). 실제 PTY만 채운다.
+    write_input_nb: ?*const fn (ctx: *anyopaque, bytes: []const u8) anyerror!usize = null,
 
     pub fn fromSession(session: *pty.PtySession) PtyIo {
         return .{
             .ctx = session,
             .write_input = writeSessionInput,
             .resize_fn = resizeSession,
+            .write_input_nb = writeSessionInputNonBlocking,
         };
     }
 
     pub fn writeInput(self: PtyIo, bytes: []const u8) !void {
         try self.write_input(self.ctx, bytes);
+    }
+
+    /// non-blocking 쓰기(가능한 만큼, 0이면 지금은 못 씀). 백엔드가 지원하지 않으면(fake 등)
+    /// blocking 전체 쓰기로 폴백한다 — 테스트 더블이 큐 의미론을 깨지 않게.
+    pub fn writeInputNonBlocking(self: PtyIo, bytes: []const u8) !usize {
+        if (self.write_input_nb) |write_nb| return write_nb(self.ctx, bytes);
+        try self.write_input(self.ctx, bytes);
+        return bytes.len;
     }
 
     pub fn resize(self: PtyIo, size: terminal.Size) !void {
@@ -112,6 +123,11 @@ pub const PtyIo = struct {
     fn writeSessionInput(ctx: *anyopaque, bytes: []const u8) !void {
         const session: *pty.PtySession = @ptrCast(@alignCast(ctx));
         try session.writeInput(bytes);
+    }
+
+    fn writeSessionInputNonBlocking(ctx: *anyopaque, bytes: []const u8) !usize {
+        const session: *pty.PtySession = @ptrCast(@alignCast(ctx));
+        return session.writeInputNonBlocking(bytes);
     }
 
     fn resizeSession(ctx: *anyopaque, size: terminal.Size) !void {
@@ -170,6 +186,14 @@ pub const SurfaceRuntime = struct {
         const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
         if (link.surface.process_state == .exited) return error.ProcessExited;
         link.pty_io.writeInput(input.bytes) catch return error.WriteFailed;
+    }
+
+    /// non-blocking 쓰기: 지금 쓸 수 있는 만큼만 쓰고 길이를 돌려준다(0 = 다음에). paste 큐가
+    /// 자식이 stdin을 안 읽는 동안에도 UI tick을 동결시키지 않으려고 쓴다.
+    pub fn writeInputNonBlocking(self: *SurfaceRuntime, surface_id: SurfaceId, bytes: []const u8) RuntimeError!usize {
+        const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
+        if (link.surface.process_state == .exited) return error.ProcessExited;
+        return link.pty_io.writeInputNonBlocking(bytes) catch return error.WriteFailed;
     }
 
     pub fn resize(self: *SurfaceRuntime, surface_id: SurfaceId, size: terminal.Size) RuntimeError!void {

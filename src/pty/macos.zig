@@ -196,6 +196,20 @@ pub const PtySession = struct {
         }
     }
 
+    /// non-blocking 한 청크 쓰기: master가 writable하면(POLLOUT, 대기 0) 최대 512바이트를 쓰고
+    /// 쓴 길이를 돌려준다. writable하지 않으면 0 — 자식이 stdin을 안 읽어도 호출자(UI tick)가
+    /// 동결되지 않는다. 큰 붙여넣기를 tick에 걸쳐 흘려보내는 paste 큐가 쓴다. 단일 writer라
+    /// POLLOUT 직후의 소량 write는 막히지 않는다.
+    pub fn writeInputNonBlocking(self: *PtySession, bytes: []const u8) !usize {
+        if (bytes.len == 0) return 0;
+        const fd = try self.activeMasterFd();
+        var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
+        const ready = std.posix.poll(&fds, 0) catch return 0;
+        if (ready == 0 or (fds[0].revents & std.posix.POLL.OUT) == 0) return 0;
+        const chunk = @min(bytes.len, 512);
+        return try writeFd(fd, bytes[0..chunk]);
+    }
+
     pub fn resize(self: *PtySession, size: terminal.Size) !void {
         const fd = try self.activeMasterFd();
         var window_size = winsizeFromTerminalSize(size);

@@ -202,6 +202,9 @@ pub const DevSession = struct {
     // 백스페이스에서 입력기는 insertText(조합 글자) + deleteBackward를 같은 keyDown에 보내는데
     // (커밋 후 삭제 = net 0), 이게 있으면 확정 텍스트의 마지막 글자를 그 삭제가 상쇄한다.
     ime_did_delete: bool = false,
+    // 이번 트랜잭션에서 imeInsert가 OOM으로 일부를 못 담았는지. 그러면 imeEnd는 잘린 텍스트를
+    // 보내지 않고 통째로 버린다(fail-closed — 반쪽 문자열이 PTY에 들어가지 않게).
+    ime_insert_failed: bool = false,
     // 커서 깜빡임 위상(DECSCUSR blink가 켜진 커서만). 30Hz tick 15회(=500ms)마다 토글하고,
     // 입력/출력이 있으면 보이는 상태로 리셋한다(타이핑 중 커서가 사라지지 않게).
     blink_visible: bool = true,
@@ -486,6 +489,7 @@ pub const DevSession = struct {
         self.ime_inserted.clearRetainingCapacity();
         self.ime_marked_changed = false;
         self.ime_did_delete = false;
+        self.ime_insert_failed = false;
         self.ime_had_marked = self.surfaces[0].core.preedit != null;
     }
 
@@ -498,7 +502,9 @@ pub const DevSession = struct {
             self.sendCommittedText(bytes);
             return;
         }
-        self.ime_inserted.appendSlice(self.allocator, bytes) catch return;
+        self.ime_inserted.appendSlice(self.allocator, bytes) catch {
+            self.ime_insert_failed = true; // imeEnd가 잘린 커밋을 보내지 않게
+        };
     }
 
     /// 입력기의 조합 중(marked) 텍스트 갱신(빈 입력 = 조합 해제). 표시는 core 합성이 한다.
@@ -561,7 +567,11 @@ pub const DevSession = struct {
     /// 2. 텍스트는 없지만 조합이 변했으면(자모 삭제 등) 키를 보내지 않는다 — 안 막으면 조합
     ///    중 Backspace가 자모도 줄이고 셸 글자까지 지운다(라이브에서 발생).
     /// 3. 둘 다 아니면 일반 키 — 기존 인코딩 경로(Enter/Backspace/기능키).
-    pub fn imeEnd(self: *DevSession, event: terminal.KeyEvent) void {
+    /// IME 키 트랜잭션 종료. event가 null이면(정규화 불가 키 — 정의되지 않은 codepoint/keyCode)
+    /// 트랜잭션은 그래도 닫고(누적 텍스트 커밋/조합 무시 판정), 일반 키 인코딩만 건너뛴다 —
+    /// ime_begin 후 ime_end를 영영 안 닫아 ime_active가 박히고 누적 텍스트가 유실되던 누수를
+    /// 막는다(라이브 회귀 클래스).
+    pub fn imeEnd(self: *DevSession, event: ?terminal.KeyEvent) void {
         if (!self.surface_initialized) return;
         const composing = self.surfaces[0].core.preedit != null or self.ime_had_marked;
         defer {
@@ -569,12 +579,36 @@ pub const DevSession = struct {
             self.ime_inserted.clearRetainingCapacity();
             self.ime_marked_changed = false;
             self.ime_did_delete = false;
+            self.ime_insert_failed = false;
         }
+        // OOM으로 누적이 잘렸으면 통째로 버린다 — 반쪽 문자열을 PTY에 보내지 않는다(#14).
+        if (self.ime_insert_failed) return;
         switch (imeDecide(composing, self.ime_inserted.items, self.ime_marked_changed, self.ime_did_delete)) {
-            .commit_text => |text| self.sendCommittedText(text),
+            .commit_text => |text| {
+                self.sendCommittedText(text);
+                // 한글 후보를 화살표로 확정하는 경우(insertText('안') + 화살표): 텍스트만 보내고
+                // 화살표를 버리면 커서가 안 움직인다. 확정 후 그 화살표를 다시 보낸다(Ghostty
+                // shouldReplayCommittedPreeditKey와 같은 의미론 — 위/오른/아래는 항상, 왼쪽은
+                // 수정자 있을 때만; plain 왼쪽은 AppKit이 이미 커서를 제자리에 둬 중복 이동 방지).
+                if (event) |ev| if (shouldReplayAfterCommit(ev)) {
+                    _ = self.handleKeyEvent(ev) catch {};
+                };
+            },
             .ignore => {}, // 조합 조작 키(자모 삭제) 또는 조합 중 단일 C0 — 입력기 소유
-            .encode_key => _ = self.handleKeyEvent(event) catch {},
+            .encode_key => if (event) |ev| {
+                _ = self.handleKeyEvent(ev) catch {};
+            },
         }
+    }
+
+    /// 한글 후보를 확정시키며 함께 온 키를 확정 후 다시 보낼지(Ghostty 정책 동작 비교).
+    fn shouldReplayAfterCommit(event: terminal.KeyEvent) bool {
+        return switch (event.key) {
+            .arrow_up, .arrow_right, .arrow_down => true,
+            .arrow_left => event.modifiers.shift or event.modifiers.control or
+                event.modifiers.option or event.modifiers.command,
+            else => false,
+        };
     }
 
     /// 포커스 변화. 잃으면 조합 중 텍스트를 버리지 않고 확정(커밋)한다 — 버리면 글자가
@@ -1328,4 +1362,45 @@ test "imeDecide routes IME keys: commit text once, ignore composition edits, enc
     // 8) 다중 글자 insert + 삭제: 마지막 코드포인트만 상쇄, 나머지는 commit.
     try std.testing.expectEqualStrings("a", DevSession.imeDecide(false, "ab", false, true).commit_text);
     _ = D;
+}
+
+test "imeEnd always closes the transaction even with a null key (no leak) and fails closed on OOM" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // null 키로 닫아도 트랜잭션이 닫히고(ime_active=false), 누적 텍스트는 커밋된다.
+    session.imeBegin();
+    session.imeInsert("\xec\x95\x88"); // '안'
+    const before = session.total_terminal_input_bytes;
+    session.imeEnd(null); // 정규화 불가 키
+    try std.testing.expect(!session.ime_active);
+    try std.testing.expectEqual(before + 3, session.total_terminal_input_bytes);
+
+    // OOM 플래그면 커밋을 통째로 버린다(잘린 문자열 방지).
+    session.imeBegin();
+    session.imeInsert("ab");
+    session.ime_insert_failed = true;
+    const before2 = session.total_terminal_input_bytes;
+    session.imeEnd(.{ .key = .{ .char = 'x' }, .modifiers = .{} });
+    try std.testing.expectEqual(before2, session.total_terminal_input_bytes);
+    try std.testing.expect(!session.ime_active);
+}
+
+test "shouldReplayAfterCommit: arrows replay after candidate commit (left only when modified)" {
+    try std.testing.expect(DevSession.shouldReplayAfterCommit(.{ .key = .arrow_right, .modifiers = .{} }));
+    try std.testing.expect(DevSession.shouldReplayAfterCommit(.{ .key = .arrow_down, .modifiers = .{} }));
+    try std.testing.expect(DevSession.shouldReplayAfterCommit(.{ .key = .arrow_up, .modifiers = .{} }));
+    try std.testing.expect(!DevSession.shouldReplayAfterCommit(.{ .key = .arrow_left, .modifiers = .{} }));
+    try std.testing.expect(DevSession.shouldReplayAfterCommit(.{ .key = .arrow_left, .modifiers = .{ .shift = true } }));
+    try std.testing.expect(!DevSession.shouldReplayAfterCommit(.{ .key = .enter, .modifiers = .{} }));
 }

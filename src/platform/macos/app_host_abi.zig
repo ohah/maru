@@ -259,8 +259,11 @@ pub export fn maru_macos_app_dev_session_ime_end(
     event: ?*const KeyEvent,
 ) c_int {
     const dev_session = session orelse return @intFromEnum(Status.null_out);
-    const raw_event = (event orelse return @intFromEnum(Status.null_out)).*;
-    const key_event = keyEventFromAbi(raw_event) catch return @intFromEnum(Status.invalid_config);
+    // event가 null이면 정규화 불가 키 — 트랜잭션은 닫되 일반 키 인코딩은 생략한다(imeEnd가 처리).
+    const key_event: ?terminal.KeyEvent = if (event) |e|
+        (keyEventFromAbi(e.*) catch return @intFromEnum(Status.invalid_config))
+    else
+        null;
     dev_session.imeEnd(key_event);
     return @intFromEnum(Status.ok);
 }

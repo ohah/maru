@@ -128,6 +128,9 @@ pub const TerminalCore = struct {
     link_store: std.ArrayListUnmanaged([]u8) = .empty,
     link_ids: std.StringHashMapUnmanaged(u32) = .empty,
     pen_link: u32 = 0,
+    // IME 조합 중(preedit) 텍스트(UTF-8, core 소유). 셀 그리드를 더럽히지 않고 renderSnapshot
+    // 합성 단계에서만 커서 위치에 반전 스타일로 표시된다 — 조합이 끝나면(확정/취소) 비워진다.
+    preedit: ?[]u8 = null,
     // OSC 내용 축적 버퍼(OSC 8 하이퍼링크 파싱용). 넘치면 그 OSC는 통째로 무시한다(악의적/거대
     // URI가 메모리를 못 잡게). title 등 다른 OSC는 여전히 소비만 한다.
     osc_buffer: [2048]u8 = undefined,
@@ -169,6 +172,7 @@ pub const TerminalCore = struct {
     }
 
     pub fn deinit(self: *TerminalCore) void {
+        if (self.preedit) |p| self.allocator.free(p);
         for (self.link_store.items) |uri| self.allocator.free(uri);
         self.link_store.deinit(self.allocator);
         self.link_ids.deinit(self.allocator);
@@ -550,6 +554,17 @@ pub const TerminalCore = struct {
         const end_cells = self.absRow(end_row) orelse return;
         self.selection_anchor = .{ .row = start_row, .col = 0 };
         self.selection_head = .{ .row = end_row, .col = @intCast(end_cells.len -| 1) };
+        self.dirty = fullDirty(self.size);
+    }
+
+    /// IME 조합 중 텍스트를 설정한다(빈 입력 = 조합 종료/취소). 렌더 합성 전용 상태라 셀
+    /// 그리드·커서는 변하지 않는다. 표시는 renderSnapshot이 한다.
+    pub fn setPreedit(self: *TerminalCore, bytes: []const u8) !void {
+        if (self.preedit) |old| {
+            self.allocator.free(old);
+            self.preedit = null;
+        }
+        if (bytes.len > 0) self.preedit = try self.allocator.dupe(u8, bytes);
         self.dirty = fullDirty(self.size);
     }
 
@@ -1890,7 +1905,10 @@ pub const TerminalCore = struct {
     /// 행이 현재 폭과 다르면(resize) 폭에 맞춰 clamp/pad한다. 과거를 보는 중엔 커서를 숨긴다.
     /// 합성 버퍼는 스크롤 중에만 lazy 할당하므로 일반(바닥) 렌더 경로는 추가 비용이 없다.
     pub fn renderSnapshot(self: *TerminalCore) types.RenderSnapshot {
-        if (self.view_offset == 0) return self.snapshot();
+        if (self.view_offset == 0) {
+            if (self.preedit) |preedit_bytes| return self.snapshotWithPreedit(preedit_bytes);
+            return self.snapshot();
+        }
         self.ensureScrollbackRewrapped(); // 과거가 보이는 합성 직전, 행들을 현재 폭으로
 
         const needed = cellCount(self.size);
@@ -1919,6 +1937,48 @@ pub const TerminalCore = struct {
             .size = self.size,
             // 과거를 보는 중엔 활성 커서가 화면 밖(아래)에 가려져 있으므로 커서를 숨긴다.
             .cursor = .{ .row = 0, .col = 0, .visible = false },
+            .cells = self.viewport_cells,
+            .dirty = self.dirty,
+        };
+    }
+
+    /// IME 조합 중 텍스트를 커서 위치에 반전 스타일로 합성한 snapshot. 셀 그리드는 그대로 두고
+    /// 합성 버퍼(viewport_cells 재사용)에만 그린다. 커서는 preedit 끝으로 옮겨 보여(다음 글자
+    /// 위치) 입력기 사용감을 따른다. 행 끝을 넘는 조합은 잘린다(조합은 보통 1~2칸).
+    fn snapshotWithPreedit(self: *TerminalCore, preedit_bytes: []const u8) types.RenderSnapshot {
+        const needed = cellCount(self.size);
+        if (self.viewport_cells.len != needed) {
+            if (self.viewport_cells.len > 0) self.allocator.free(self.viewport_cells);
+            self.viewport_cells = self.allocator.alloc(types.Cell, needed) catch {
+                self.viewport_cells = &.{};
+                return self.snapshot(); // OOM이면 preedit 표시만 포기
+            };
+        }
+        @memcpy(self.viewport_cells, self.cells[0..needed]);
+
+        var cursor_col: u16 = self.cursor.col;
+        const row = self.cursor.row;
+        var iter = std.unicode.Utf8View.init(preedit_bytes) catch {
+            return self.snapshot(); // 잘못된 UTF-8 — 표시만 포기
+        };
+        var it = iter.iterator();
+        while (it.nextCodepoint()) |cp| {
+            const w = width.cellWidth(cp);
+            if (w == 0) continue;
+            if (@as(usize, cursor_col) + w > self.size.cols) break; // 행 끝 — 잘림
+            const idx = @as(usize, row) * self.size.cols + cursor_col;
+            var style = self.pen;
+            style.reverse = true; // 조합 중임을 반전으로 표시(밑줄 렌더는 후속)
+            self.viewport_cells[idx] = .{ .codepoint = cp, .style = style, .width = w };
+            if (w == 2) {
+                self.viewport_cells[idx + 1] = .{ .style = style, .width = 0, .continuation = true };
+            }
+            cursor_col += w;
+        }
+
+        return .{
+            .size = self.size,
+            .cursor = .{ .row = row, .col = @min(cursor_col, self.size.cols - 1), .visible = self.cursor_visible },
             .cells = self.viewport_cells,
             .dirty = self.dirty,
         };
@@ -4203,4 +4263,42 @@ test "OSC 8 oversized URI is ignored and plain heuristic still works" {
     // 휴리스틱은 여전히 동작.
     try core.write("\r\nhttps://x.yz ");
     try std.testing.expect(core.wordIsUrl(1, 3));
+}
+
+test "preedit composition shows the in-progress hangul at the cursor without touching the grid" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("$ ");
+
+    try core.setPreedit("안"); // 조합 중(wide)
+    const snap = core.renderSnapshot();
+    // 커서 위치(0,2)에 '안'이 반전으로 합성되고, 커서는 그 뒤(0,4)로 보인다.
+    try std.testing.expectEqual(@as(u21, 0xC548), snap.cells[2].codepoint);
+    try std.testing.expect(snap.cells[2].style.reverse);
+    try std.testing.expectEqual(@as(u2, 2), snap.cells[2].width);
+    try std.testing.expect(snap.cells[3].continuation);
+    try std.testing.expectEqual(@as(u16, 4), snap.cursor.col);
+    // 실제 그리드는 오염되지 않는다.
+    try std.testing.expectEqual(@as(u21, ' '), core.cells[2].codepoint);
+
+    // 조합 갱신('않' 등 다른 글자로 교체)도 같은 자리에.
+    try core.setPreedit("않");
+    const snap2 = core.renderSnapshot();
+    try std.testing.expectEqual(@as(u21, 0xC54A), snap2.cells[2].codepoint);
+
+    // 조합 종료 — 합성이 사라지고 일반 snapshot으로 돌아간다.
+    try core.setPreedit("");
+    const snap3 = core.renderSnapshot();
+    try std.testing.expectEqual(@as(u21, ' '), snap3.cells[2].codepoint);
+    try std.testing.expectEqual(@as(u16, 2), snap3.cursor.col);
+}
+
+test "preedit clips at the row end instead of wrapping" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("abc"); // 커서 (0,3) — 한 칸 남음
+    try core.setPreedit("한"); // wide(2칸)는 안 들어간다 — 잘림
+    const snap = core.renderSnapshot();
+    try std.testing.expectEqual(@as(u21, 'c'), snap.cells[2].codepoint);
+    try std.testing.expectEqual(@as(u16, 3), snap.cursor.col);
 }

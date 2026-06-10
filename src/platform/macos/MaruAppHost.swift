@@ -127,6 +127,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 입력기가 텍스트를 확정했다(한글 음절, 영문 일반 타이핑 모두 여기로 온다).
     func insertText(_ string: Any, replacementRange: NSRange) {
         markedTextBuffer = ""
+        controller?.updatePreedit("") // 조합 표시 제거 후 확정 텍스트 전송
         let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
         controller?.sendText(text)
     }
@@ -135,10 +136,21 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 단계 — 조합 확정 시점에 글자가 나타난다). 상태만 추적해 hasMarkedText 계약을 지킨다.
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         markedTextBuffer = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
+        controller?.updatePreedit(markedTextBuffer) // 조합 중 글자를 커서 위치에 표시(Zig 합성)
     }
 
     func unmarkText() {
         markedTextBuffer = ""
+        controller?.updatePreedit("")
+    }
+
+    // 포커스를 잃으면 조합 상태를 정리한다 — 입력기 세션이 뷰와 어긋난 채 남지 않게(IMK mach
+    // port 경고 유발 요인 완화) 입력 컨텍스트도 비활성 정리한다.
+    override func resignFirstResponder() -> Bool {
+        inputContext?.discardMarkedText()
+        markedTextBuffer = ""
+        controller?.updatePreedit("")
+        return super.resignFirstResponder()
     }
 
     func hasMarkedText() -> Bool {
@@ -808,6 +820,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 죽이지 않고 status만 기록한다.
         if status == Self.statusOK {
             latestFrameSummary = summary
+        }
+    }
+
+    // IME 조합 중 텍스트를 Zig에 전달한다(빈 문자열 = 종료). 커서 위치 합성은 Zig가 한다.
+    func updatePreedit(_ text: String) {
+        guard let session = devSession else { return }
+        let bytes = Array(text.utf8)
+        _ = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_dev_session_set_preedit(session, buf.baseAddress, buf.count)
         }
     }
 

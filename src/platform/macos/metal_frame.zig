@@ -152,7 +152,9 @@ pub fn buildNativeCellsSplit(
         (@as(usize, span.end.row - span.start.row) + 1) * @as(usize, frame.size.cols)
     else
         0;
-    try cells.ensureTotalCapacity(allocator, frame.glyphs.len + draw_cells.len + frame.overlays.len + hover_cells);
+    // underline overlay는 셀당 밑줄 1개를 추가로 낸다(커서 overlay 예산과 별개) — overlays.len을
+    // 한 번 더 더해 두 pass(2.6 밑줄 + 3 커서)가 같은 예산을 다투지 않게 한다.
+    try cells.ensureTotalCapacity(allocator, frame.glyphs.len + draw_cells.len + 2 * frame.overlays.len + hover_cells);
 
     // 1) ink가 있는 glyph cell. 전경색 + (있으면) 배경색을 같이 싣는다. blank cell도
     //    GlyphQuadFrame에 들어올 수 있으므로 그릴 게 없는 space는 여기서 제외하고, 배경이
@@ -251,12 +253,40 @@ pub fn buildNativeCellsSplit(
         }
     }
 
+    // 2.6) SGR 4(밑줄) 텍스트: draw_list가 만든 underline overlay마다 셀 하단에 전경색 밑줄을
+    //      긋는다(hover/커서 underline과 같은 부분-사각형 kind=2 재사용 — 셰이더 변경 없음).
+    //      커서와 무관하게 그려야 하므로(colors.cursor null인 smoke 포함) 별도 pass다. wide
+    //      글자는 base 칸에만 — 셰이더가 width로 두 칸 폭의 선을 그린다.
+    for (frame.overlays) |overlay| switch (overlay) {
+        .underline => |u| {
+            if (u.row >= frame.size.rows or u.col >= frame.size.cols) continue;
+            cells.appendAssumeCapacity(.{
+                .row = u.row,
+                .col = u.col,
+                .width = u.width,
+                .reserved = 2, // underline 부분 사각형
+                .codepoint = ' ',
+                .slot_id = 0,
+                .atlas_x_px = 0,
+                .atlas_y_px = 0,
+                .atlas_width_px = 0,
+                .atlas_height_px = 0,
+                .u0 = -1.0,
+                .v0 = -1.0,
+                .u1 = -1.0,
+                .v1 = -1.0,
+                .foreground = 0,
+                .background = 0xFF00_0000 | packRgb(resolveColor(u.color, colors.default_fg)),
+            });
+        },
+        .cursor => {},
+    };
+
     const cells_before_cursor = cells.items.len;
     // 3) 커서 overlay를 반전 블록으로 맨 마지막에 낸다(블렌딩 ON이라 앞 cell 위에 덮인다). 커서 cell의
     //    배경을 커서 색으로 채우고, 그 자리에 glyph가 있으면 같은 glyph를 배경색(cursor.text)으로 다시
     //    그려 글자가 커서 위에서 반전돼 보이게 한다(글자를 가리지 않음). 빈 cell이면 sentinel UV로 커서
     //    색 블록만 칠한다. colors.cursor가 null이면(glyph-atlas readback 검증 smoke) 통째로 건너뛴다.
-    //    underline overlay는 sub-cell 선이라 아직 다루지 않는다(whole-cell 모델).
     if (colors.cursor) |cursor_colors| {
         const cursor_bg = 0xFF00_0000 | packRgb(cursor_colors.block);
         for (frame.overlays) |overlay| {
@@ -921,4 +951,30 @@ test "cursor cells are a suffix and setCursorVisible toggles exposure without re
     try std.testing.expectEqual(@as(u64, 1), buffer.generation);
     buffer.setCursorVisible(true);
     try std.testing.expectEqual(built.cells.len, buffer.view().cell_count);
+}
+
+test "SGR underline overlays project a foreground-colored underline cell (kind 2), cursor-independent" {
+    const allocator = std.testing.allocator;
+    var overlays = [_]renderer.DrawOverlay{
+        .{ .underline = .{ .row = 1, .col = 2, .width = 1, .color = .default } },
+    };
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 6, .rows = 3 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    // colors.cursor = null(smoke 경로)이어도 밑줄은 그려진다.
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 0xAA, .g = 0xBB, .b = 0xCC },
+    });
+    defer allocator.free(cells);
+    try std.testing.expectEqual(@as(usize, 1), cells.len);
+    try std.testing.expectEqual(@as(u16, 1), cells[0].row);
+    try std.testing.expectEqual(@as(u16, 2), cells[0].col);
+    try std.testing.expectEqual(@as(u16, 2), cells[0].reserved); // underline 부분 사각형
+    try std.testing.expectEqual(@as(u32, 0xFFAABBCC), cells[0].background); // 전경색
+    try std.testing.expectEqual(@as(f32, -1.0), cells[0].u0); // sentinel UV(atlas 미샘플)
 }

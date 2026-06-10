@@ -1,6 +1,7 @@
 const std = @import("std");
 const maru = @import("maru");
 const app_dev_session = @import("app_dev_session.zig");
+const keycode = @import("keycode.zig");
 
 const c = @cImport({
     @cInclude("app_host_abi.h");
@@ -59,7 +60,9 @@ pub const KeyEvent = extern struct {
     modifier_option: u32,
     modifier_command: u32,
     is_repeat: u32,
-    reserved: u32,
+    // macOS 물리 키코드(NSEvent.keyCode). Ctrl/Cmd 단축키를 레이아웃과 무관하게(한글 입력
+    // 모드에서도) 매칭하기 위해 Swift가 그대로 싣는다 — 변환은 Zig(keycode.zig)가 소유한다.
+    raw_key_code: u32,
 };
 
 pub const ResizeEvent = extern struct {
@@ -299,12 +302,20 @@ pub export fn maru_macos_app_dev_session_metal_frame(
 }
 
 fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
+    // 레이아웃 독립 단축키: Ctrl/Cmd 조합인데 현재 입력 소스의 글자가 라틴이 아니면(한글 'ㅂ'
+    // 등 >= 0x80) 물리 키코드를 US 배열 라틴으로 되돌린다 — 한글 모드에서도 Ctrl+B가 0x02로
+    // 인코딩된다(tmux prefix 등). 라틴 레이아웃(영어/Dvorak)의 결과는 존중해 건드리지 않는다.
+    var codepoint = event.codepoint;
+    if ((event.modifier_control != 0 or event.modifier_command != 0) and codepoint >= 0x80) {
+        if (keycode.usAsciiForKeyCode(event.raw_key_code)) |latin| codepoint = latin;
+    }
+
     // codepoint -> char 변환과 surrogate/범위 거부는 terminal.input이 단일 출처로 소유한다.
     // native keyDown smoke(keyEventFromNativeKeyDown)와 같은 변환을 공유해, 한쪽만 고치면
     // 두 입력 경계가 키 의미를 다르게 해석하는 일을 막는다. 잘못된 codepoint/key_code는 ABI
     // 계약대로 InvalidConfig로 닫는다.
-    const key: terminal.Key = if (event.codepoint != 0)
-        (terminal.input.charKeyFromCodepoint(event.codepoint) catch return error.InvalidConfig)
+    const key: terminal.Key = if (codepoint != 0)
+        (terminal.input.charKeyFromCodepoint(codepoint) catch return error.InvalidConfig)
     else switch (std.enums.fromInt(KeyCode, event.key_code) orelse return error.InvalidConfig) {
         .unknown => return error.InvalidConfig,
         .enter => .enter,
@@ -411,4 +422,41 @@ test "macOS app dev exported session API reports null outputs as ABI errors" {
 
 test {
     std.testing.refAllDecls(app_dev_session);
+}
+
+test "layout-independent shortcut: Hangul-mode Ctrl+B normalizes to latin b via the physical keycode" {
+    // 한글 입력 모드에서 Ctrl+B: AppKit 글자는 'ㅂ'(0x3142)이지만 물리 키코드는 B(0x0B).
+    const event = KeyEvent{
+        .codepoint = 0x3142, // 'ㅂ'
+        .key_code = 0, // unknown
+        .modifier_shift = 0,
+        .modifier_control = 1,
+        .modifier_option = 0,
+        .modifier_command = 0,
+        .is_repeat = 0,
+        .raw_key_code = 0x0B, // kVK_ANSI_B
+    };
+    const key_event = try keyEventFromAbi(event);
+    try std.testing.expectEqual(terminal.Key{ .char = 'b' }, key_event.key);
+    try std.testing.expect(key_event.modifiers.control);
+    // 인코딩까지: Ctrl+b -> 0x02 (tmux prefix가 한글 모드에서도 동작).
+    var buffer: [8]u8 = undefined;
+    const encoded = try terminal.input.encodeKey(key_event, &buffer, .{});
+    try std.testing.expectEqualSlices(u8, &.{0x02}, encoded);
+}
+
+test "latin layouts are preserved: Ctrl+B with an ascii codepoint does not consult the keycode table" {
+    // Dvorak 등 라틴 배열: 현재 레이아웃 결과(ASCII)를 존중한다 — 물리 키코드로 덮지 않는다.
+    const event = KeyEvent{
+        .codepoint = 'x', // Dvorak에서 다른 물리 키가 'x'를 낼 수 있다
+        .key_code = 0,
+        .modifier_shift = 0,
+        .modifier_control = 1,
+        .modifier_option = 0,
+        .modifier_command = 0,
+        .is_repeat = 0,
+        .raw_key_code = 0x0B, // 물리 B여도
+    };
+    const key_event = try keyEventFromAbi(event);
+    try std.testing.expectEqual(terminal.Key{ .char = 'x' }, key_event.key);
 }

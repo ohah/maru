@@ -5,7 +5,7 @@ import Metal
 import QuartzCore
 
 @MainActor
-final class MaruMetalTerminalView: NSView {
+final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     weak var controller: MaruAppHostController?
 
     override var acceptsFirstResponder: Bool {
@@ -89,8 +89,96 @@ final class MaruMetalTerminalView: NSView {
         }
     }
 
+    // IME 상태: interpretKeyEvents가 insertText/setMarkedText를 불렀는지(입력기가 키를 소비
+    // 했는지)와, doCommand fallback이 원본 키를 알 수 있게 현재 처리 중 이벤트를 든다.
+    private var imeConsumedKey = false
+    private var currentKeyEvent: NSEvent?
+    // 조합 중(marked) 텍스트. 아직 화면 preedit 렌더는 없고(다음 단계), 입력기 상태 추적용.
+    private var markedTextBuffer: String = ""
+
     override func keyDown(with event: NSEvent) {
-        controller?.handleKeyDown(event)
+        // Ctrl/Cmd 조합은 입력기에 보내지 않고 바로 단축키/인코딩 경로로 — 한글 입력 모드에서도
+        // Ctrl+B(tmux prefix)나 Cmd+C가 동작한다(레이아웃 독립 매칭은 Zig가 물리 키코드로 한다).
+        let chord = event.modifierFlags.intersection([.command, .control])
+        if !chord.isEmpty {
+            controller?.handleKeyDown(event)
+            return
+        }
+        // 그 외(일반 타이핑·Shift·Option)는 입력기(IME)를 거친다 — 한글 조합이 여기서 일어난다.
+        imeConsumedKey = false
+        currentKeyEvent = event
+        interpretKeyEvents([event])
+        // 입력기가 텍스트도 명령도 만들지 않은 키(기능키 등)는 기존 인코딩 경로로 보낸다.
+        if !imeConsumedKey {
+            controller?.handleKeyDown(event)
+        }
+        currentKeyEvent = nil
+    }
+
+    // 입력기가 처리하지 않은 편집 명령(Enter/Backspace/방향키 등). 셀렉터를 해석하지 않고
+    // 원본 키 이벤트를 기존 인코딩 경로로 보낸다 — Enter는 enter로, Backspace는 backspace로
+    // 이미 정규화돼 있다. (조합 확정 직후의 Enter도 insertText 다음 여기로 와 개행이 전달된다.)
+    override func doCommand(by selector: Selector) {
+        imeConsumedKey = true
+        if let event = currentKeyEvent {
+            controller?.handleKeyDown(event)
+        }
+    }
+
+    // ── NSTextInputClient — 입력기(IME) 통합. 조합 의미론은 macOS 입력기가, 확정 텍스트의
+    // 인코딩/전달은 Zig가 소유한다(여기는 이벤트 캡처와 전달만).
+
+    // 입력기가 텍스트를 확정했다(한글 음절, 영문 일반 타이핑 모두 여기로 온다).
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        imeConsumedKey = true
+        markedTextBuffer = ""
+        let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
+        controller?.sendText(text)
+    }
+
+    // 조합 중 텍스트(예: 'ㅇ' -> '아' -> '안'). 아직 화면에 preedit로 그리지는 않는다(다음
+    // 단계 — 조합 확정 시점에 글자가 나타난다). 상태만 추적해 hasMarkedText 계약을 지킨다.
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        imeConsumedKey = true
+        markedTextBuffer = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
+    }
+
+    func unmarkText() {
+        markedTextBuffer = ""
+    }
+
+    func hasMarkedText() -> Bool {
+        return !markedTextBuffer.isEmpty
+    }
+
+    func markedRange() -> NSRange {
+        return markedTextBuffer.isEmpty
+            ? NSRange(location: NSNotFound, length: 0)
+            : NSRange(location: 0, length: markedTextBuffer.utf16.count)
+    }
+
+    func selectedRange() -> NSRange {
+        return NSRange(location: NSNotFound, length: 0)
+    }
+
+    func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        return nil
+    }
+
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] {
+        return []
+    }
+
+    // 입력기 후보창 위치. 아직 커서 셀 좌표를 노출하지 않아 view 좌하단 기준으로 둔다(후보창이
+    // 창 근처에 뜨는 정도 — 커서 위치 정밀 배치는 preedit 렌더와 함께 다음 단계).
+    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        guard let window else { return .zero }
+        let local = NSRect(x: 0, y: 0, width: 1, height: 16)
+        return window.convertToScreen(convert(local, to: nil))
+    }
+
+    func characterIndex(for point: NSPoint) -> Int {
+        return 0
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -498,17 +586,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func handleKeyDown(_ event: NSEvent) {
         // Cmd만 눌린 조합인지(Shift/Option/Control 동반 아님). 이렇게 정확히 봐야 Cmd+Shift+C 같은
         // 조합이 복사/붙여넣기로 삼켜지지 않고 키 인코더(향후 별도 바인딩)로 흘러간다.
+        // 키 비교는 글자가 아니라 물리 키코드다(kVK_ANSI_C=8, V=9) — 한글 입력 모드('ㅊ'/'ㅍ')
+        // 에서도 Cmd+C/V가 동작한다(레이아웃 독립 단축키 정책).
         let chordMods = event.modifierFlags.intersection([.command, .shift, .option, .control])
         // Cmd+C는 선택 텍스트 복사(클립보드는 OS 소유라 여기서 처리). 선택 추출은 Zig가 한다.
-        if chordMods == .command,
-           event.charactersIgnoringModifiers?.lowercased() == "c" {
+        if chordMods == .command, event.keyCode == 8 {
             copySelectionToPasteboard()
             return
         }
         // Cmd+V: NSPasteboard의 텍스트를 Zig에 넘긴다 — 개행 정규화·bracketed paste 감싸기는
         // Zig가 한다(클립보드 읽기만 OS 소유).
-        if chordMods == .command,
-           event.charactersIgnoringModifiers?.lowercased() == "v" {
+        if chordMods == .command, event.keyCode == 9 {
             pastePasteboardText()
             return
         }
@@ -652,7 +740,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             modifier_option: 0,
             modifier_command: 0,
             is_repeat: 0,
-            reserved: 0
+            raw_key_code: 0
         )
         sendKeyEvent(keyEvent)
         let enterEvent = MaruAppHostKeyEvent(
@@ -663,7 +751,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             modifier_option: 0,
             modifier_command: 0,
             is_repeat: 0,
-            reserved: 0
+            raw_key_code: 0
         )
         sendKeyEvent(enterEvent)
     }
@@ -729,6 +817,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    // 입력기가 확정한 텍스트를 코드포인트 단위로 기존 key event ABI에 태운다 — 새 ABI 없이
+    // encodeKey(UTF-8 인코딩)가 단일 출처로 남는다. 수정자 없는 일반 텍스트 입력이다.
+    func sendText(_ text: String) {
+        guard let session = devSession, !text.isEmpty else { return }
+        for scalar in text.unicodeScalars {
+            var event = MaruAppHostKeyEvent(
+                codepoint: scalar.value,
+                key_code: UInt32(MaruAppHostKeyCodeUnknown.rawValue),
+                modifier_shift: 0,
+                modifier_control: 0,
+                modifier_option: 0,
+                modifier_command: 0,
+                is_repeat: 0,
+                raw_key_code: 0
+            )
+            var summary = MaruAppHostDevFrameSummary()
+            guard maru_macos_app_dev_session_key_down(session, &event, &summary) == Self.statusOK else { return }
+            latestFrameSummary = summary
+        }
+    }
+
     private func normalizedKeyEvent(from event: NSEvent) -> MaruAppHostKeyEvent? {
         var codepoint: UInt32 = 0
         var keyCode = UInt32(MaruAppHostKeyCodeUnknown.rawValue)
@@ -766,7 +875,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             modifier_option: flags.contains(.option) ? 1 : 0,
             modifier_command: flags.contains(.command) ? 1 : 0,
             is_repeat: event.isARepeat ? 1 : 0,
-            reserved: 0
+            raw_key_code: UInt32(event.keyCode)
         )
     }
 

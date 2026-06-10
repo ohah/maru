@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 17;
+pub const abi_version: u32 = 18;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.

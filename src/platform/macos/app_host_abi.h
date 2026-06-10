@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 21u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 22u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -267,6 +267,14 @@ int32_t maru_macos_app_dev_session_ime_marked(
 int32_t maru_macos_app_dev_session_ime_end(
     MaruAppHostDevSession *session,
     const MaruAppHostKeyEvent *event
+);
+/* IME 후보창 배치용 커서 셀 사각형(backing px, 좌상단 원점). Swift가 화면 좌표로 변환한다. */
+int32_t maru_macos_app_dev_session_ime_cursor_rect(
+    MaruAppHostDevSession *session,
+    double *out_x,
+    double *out_y,
+    double *out_w,
+    double *out_h
 );
 /* IME deleteBackward 편집 명령. 한글 마지막 자모 백스페이스(insertText+deleteBackward 상쇄)에 쓴다. */
 int32_t maru_macos_app_dev_session_ime_delete_backward(MaruAppHostDevSession *session);

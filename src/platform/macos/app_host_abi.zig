@@ -268,6 +268,28 @@ pub export fn maru_macos_app_dev_session_ime_end(
     return @intFromEnum(Status.ok);
 }
 
+// IME 후보창 배치용 커서 셀 사각형(backing px, 좌상단 원점). Swift가 화면 좌표로 변환해
+// 후보창을 커서 위치에 띄운다(firstRect).
+pub export fn maru_macos_app_dev_session_ime_cursor_rect(
+    session: ?*DevSession,
+    out_x: ?*f64,
+    out_y: ?*f64,
+    out_w: ?*f64,
+    out_h: ?*f64,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const rx = out_x orelse return @intFromEnum(Status.null_out);
+    const ry = out_y orelse return @intFromEnum(Status.null_out);
+    const rw = out_w orelse return @intFromEnum(Status.null_out);
+    const rh = out_h orelse return @intFromEnum(Status.null_out);
+    const rect = dev_session.imeCursorRect();
+    rx.* = rect.x;
+    ry.* = rect.y;
+    rw.* = rect.w;
+    rh.* = rect.h;
+    return @intFromEnum(Status.ok);
+}
+
 // IME deleteBackward 편집 명령(doCommand). 트랜잭션에 기록만 — 한글 마지막 자모 백스페이스의
 // insertText+deleteBackward 상쇄 판정에 쓴다.
 pub export fn maru_macos_app_dev_session_ime_delete_backward(session: ?*DevSession) c_int {
@@ -489,6 +511,7 @@ test "macOS app dev exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_ime_end(null, null));
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_ime_delete_backward(null));
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_set_focus(null, 0));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_ime_cursor_rect(null, null, null, null, null));
 }
 
 test {

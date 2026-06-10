@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 21;
+pub const abi_version: u32 = 22;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -622,6 +622,23 @@ pub const DevSession = struct {
             .arrow_left => event.modifiers.shift or event.modifiers.control or
                 event.modifiers.option or event.modifiers.command,
             else => false,
+        };
+    }
+
+    /// IME 후보창 배치용 커서 셀 사각형(backing px, 좌상단 원점 — 마우스 좌표와 같은 규약).
+    /// 입력기가 firstRect로 물어보면 Swift가 이 값을 화면 좌표로 바꿔 후보창을 커서 위치에
+    /// 띄운다. 조합 중에는 커서가 preedit 시작(core.cursor)에 있어 후보창이 조합 글자 옆에 뜬다.
+    /// 반환: row*cell_h, col*cell_w, cell_w, cell_h.
+    pub fn imeCursorRect(self: *const DevSession) struct { x: f64, y: f64, w: f64, h: f64 } {
+        const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
+        const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
+        if (!self.surface_initialized) return .{ .x = 0, .y = 0, .w = cw, .h = ch };
+        const cursor = self.surfaces[0].core.cursor;
+        return .{
+            .x = @as(f64, @floatFromInt(cursor.col)) * cw,
+            .y = @as(f64, @floatFromInt(cursor.row)) * ch,
+            .w = cw,
+            .h = ch,
         };
     }
 
@@ -1454,4 +1471,27 @@ test "sendCommittedText normalizes newlines to CR and imeBegin snaps to bottom" 
     session.imeInsert("a\nb");
     session.imeEnd(null);
     try std.testing.expectEqual(before + 3, session.total_terminal_input_bytes);
+}
+
+test "imeCursorRect returns the cursor cell rect in backing px for IME candidate placement" {
+    var session: DevSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.surfaces[0] = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
+    defer session.surfaces[0].deinit();
+    session.surface_initialized = true;
+    session.cell_width_px = 8;
+    session.cell_height_px = 16;
+
+    const core = &session.surfaces[0].core;
+    try core.write("ab"); // 커서가 (0,2)로
+    const r = session.imeCursorRect();
+    try std.testing.expectEqual(@as(f64, 16), r.x); // col 2 * 8
+    try std.testing.expectEqual(@as(f64, 0), r.y); // row 0 * 16
+    try std.testing.expectEqual(@as(f64, 8), r.w);
+    try std.testing.expectEqual(@as(f64, 16), r.h);
+
+    try core.write("\r\nXY"); // 둘째 줄로
+    const r2 = session.imeCursorRect();
+    try std.testing.expectEqual(@as(f64, 16), r2.x); // col 2
+    try std.testing.expectEqual(@as(f64, 16), r2.y); // row 1 * 16
 }

@@ -54,9 +54,10 @@ final class MaruMetalTerminalView: NSView {
         controller?.clearHover()
     }
 
-    // Cmd 키를 누르거나 떼는 순간에도 (마우스를 안 움직여도) hover 상태를 재평가한다.
+    // Cmd 키를 누르거나 떼는 순간에도 (마우스를 안 움직여도) hover 상태를 재평가한다. 키 이벤트라
+    // locationInWindow가 무효이므로 controller가 창의 현재 포인터 위치를 쓴다.
     override func flagsChanged(with event: NSEvent) {
-        controller?.handleHover(event, in: self)
+        controller?.handleModifierHover(event, in: self)
         super.flagsChanged(with: event)
     }
 
@@ -495,15 +496,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func handleKeyDown(_ event: NSEvent) {
+        // Cmd만 눌린 조합인지(Shift/Option/Control 동반 아님). 이렇게 정확히 봐야 Cmd+Shift+C 같은
+        // 조합이 복사/붙여넣기로 삼켜지지 않고 키 인코더(향후 별도 바인딩)로 흘러간다.
+        let chordMods = event.modifierFlags.intersection([.command, .shift, .option, .control])
         // Cmd+C는 선택 텍스트 복사(클립보드는 OS 소유라 여기서 처리). 선택 추출은 Zig가 한다.
-        if event.modifierFlags.contains(.command),
+        if chordMods == .command,
            event.charactersIgnoringModifiers?.lowercased() == "c" {
             copySelectionToPasteboard()
             return
         }
         // Cmd+V: NSPasteboard의 텍스트를 Zig에 넘긴다 — 개행 정규화·bracketed paste 감싸기는
         // Zig가 한다(클립보드 읽기만 OS 소유).
-        if event.modifierFlags.contains(.command),
+        if chordMods == .command,
            event.charactersIgnoringModifiers?.lowercased() == "v" {
             pastePasteboardText()
             return
@@ -556,15 +560,33 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // OS API라 Swift가 소유하는 경계다. 선택이 없으면 아무것도 하지 않는다(셸에 ^C를 보내지 않는
     // 것은 macOS 터미널 관례와 동일 — 인터럽트는 Ctrl+C).
     // Cmd+hover: Zig가 URL 여부를 판정(+밑줄 투영)하고, 여기선 마우스 커서만 바꾼다.
+    // mouseMoved는 event.locationInWindow가 유효하므로 그대로 쓴다.
     func handleHover(_ event: NSEvent, in view: NSView) {
+        updateHover(atWindowPoint: event.locationInWindow, cmdHeld: event.modifierFlags.contains(.command), in: view)
+    }
+
+    // Cmd 키를 누르거나 떼는 순간의 재평가. flagsChanged(키 이벤트)의 locationInWindow는 정의되지
+    // 않으므로 쓰지 않고, 창의 현재 포인터 위치(mouseLocationOutsideOfEventStream)를 권위 있는
+    // 좌표로 쓴다.
+    func handleModifierHover(_ event: NSEvent, in view: NSView) {
+        guard let point = view.window?.mouseLocationOutsideOfEventStream else { return }
+        updateHover(atWindowPoint: point, cmdHeld: event.modifierFlags.contains(.command), in: view)
+    }
+
+    private func updateHover(atWindowPoint windowPoint: NSPoint, cmdHeld: Bool, in view: NSView) {
         guard let session = devSession else { return }
-        let local = view.convert(event.locationInWindow, from: nil)
+        let local = view.convert(windowPoint, from: nil)
+        // 포인터가 view 밖(타이틀바·다른 뷰 위)이면 hover를 강제하지 않는다 — 시스템/이웃 커서를
+        // iBeam으로 덮어쓰지 않게. 밑줄도 해제한다.
+        guard view.bounds.contains(local) else {
+            clearHover()
+            return
+        }
         let scale = window?.backingScaleFactor ?? 1.0
         let xPx = Double(local.x * scale)
         let yPx = Double((view.bounds.height - local.y) * scale)
-        let cmdHeld: Int32 = event.modifierFlags.contains(.command) ? 1 : 0
         var isUrl: Int32 = 0
-        guard maru_macos_app_dev_session_hover(session, xPx, yPx, cmdHeld, &isUrl) == Self.statusOK else { return }
+        guard maru_macos_app_dev_session_hover(session, xPx, yPx, cmdHeld ? 1 : 0, &isUrl) == Self.statusOK else { return }
         if isUrl == 1 {
             NSCursor.pointingHand.set()
         } else {

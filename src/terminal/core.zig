@@ -250,6 +250,13 @@ pub const TerminalCore = struct {
             if (b == '\r' or b == '\n') {
                 try out.append(allocator, '\r');
                 if (b == '\r' and i + 1 < bytes.len and bytes[i + 1] == '\n') i += 1; // CRLF는 한 번만
+            } else if (b == 0x1b) {
+                // 보안: 붙여넣기 본문의 ESC를 공백으로 치환한다. 안 그러면 악성 클립보드가 ESC[201~
+                // 를 심어 bracketed paste 괄호를 일찍 닫고, 뒤따르는 \r-종료 바이트가 "타이핑"으로
+                // 실행된다(고전적 paste 인젝션). bracketed paste를 안 쓸 때도 ESC 시퀀스가 그대로
+                // 터미널에 주입되는 걸 막는다. ECMA-48의 C1/CSI는 ESC로 시작하므로 ESC만 막으면
+                // 시퀀스가 무력화된다. Ghostty(input/paste.zig)도 같은 보호를 한다.
+                try out.append(allocator, ' ');
             } else {
                 try out.append(allocator, b);
             }
@@ -3880,6 +3887,24 @@ test "encodePaste normalizes newlines and wraps with bracketed paste when DECSET
 
     try core.write("\x1b[?2004l");
     try std.testing.expect(!core.bracketed_paste);
+}
+
+test "encodePaste strips ESC from the body to prevent bracketed-paste injection" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[?2004h"); // bracketed paste on
+    // 악성 클립보드: 본문에 ESC[201~를 심어 괄호를 일찍 닫고 명령을 주입하려 함.
+    const malicious = "x\x1b[201~\rrm -rf ~\r";
+    const encoded = try core.encodePaste(std.testing.allocator, malicious);
+    defer std.testing.allocator.free(encoded);
+    // 본문의 ESC가 공백이 돼 인젝션 시퀀스가 무력화되고, 진짜 종료 괄호는 끝에 하나뿐이어야 한다.
+    try std.testing.expectEqualStrings("\x1b[200~x [201~\rrm -rf ~\r\x1b[201~", encoded);
+    // 본문 안에는 ESC가 없다(시작/끝 괄호의 ESC 2개만).
+    var esc_count: usize = 0;
+    for (encoded) |b| {
+        if (b == 0x1b) esc_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), esc_count);
 }
 
 test "extractUrlAt finds an http(s) URL in the clicked word, across soft-wrap, trimming punctuation" {

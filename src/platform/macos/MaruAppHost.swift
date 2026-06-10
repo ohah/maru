@@ -154,13 +154,44 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         controller?.updatePreedit("")
     }
 
-    // 포커스를 잃으면 조합 상태를 정리한다 — 입력기 세션이 뷰와 어긋난 채 남지 않게(IMK mach
-    // port 경고 유발 요인 완화) 입력 컨텍스트도 비활성 정리한다.
-    override func resignFirstResponder() -> Bool {
+    // 포커스를 잃으면 조합 중 텍스트를 버리지 않고 확정(커밋)한다 — Terminal.app/Ghostty와
+    // 같은 동작. 버리면 조합 중이던 글자가 화면에서 사라졌다가 재포커스 후 입력 위치가 어긋나
+    // "이전 글자가 덮어씌워지는" 사용감이 된다(라이브 제보). 입력기 세션도 함께 정리해 재포커스
+    // 후 입력기 상태와 화면이 어긋나지 않게 한다.
+    func commitComposition() {
+        if !markedTextBuffer.isEmpty {
+            let pending = markedTextBuffer
+            markedTextBuffer = ""
+            controller?.updatePreedit("")
+            controller?.sendText(pending) // 조합 중이던 글자를 확정 입력으로
+        }
         inputContext?.discardMarkedText()
-        markedTextBuffer = ""
-        controller?.updatePreedit("")
+    }
+
+    override func resignFirstResponder() -> Bool {
+        commitComposition()
         return super.resignFirstResponder()
+    }
+
+    // 앱/창 전환은 view의 resignFirstResponder를 부르지 않는다 — window key 상실 알림에서도
+    // 같은 커밋을 해야 조합 상태가 입력기와 어긋난 채 남지 않는다.
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if let old = window {
+            NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: old)
+        }
+        if let newWindow {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(windowLostKey(_:)),
+                name: NSWindow.didResignKeyNotification,
+                object: newWindow
+            )
+        }
+    }
+
+    @objc private func windowLostKey(_ note: Notification) {
+        commitComposition()
     }
 
     func hasMarkedText() -> Bool {

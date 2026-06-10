@@ -421,7 +421,9 @@ pub const DevSession = struct {
     /// 보이는 상태로 고정한다 — 토글 자체가 없으니 idle 재투영도 없다.
     fn updateCursorBlink(self: *DevSession) void {
         const core = &self.surfaces[0].core;
-        if (!core.cursor_blink or !core.cursor_visible) {
+        // IME 조합 중에는 깜빡이지 않는다 — 커서가 preedit 끝에 고정 표시되어 조합 글자 옆에서
+        // 반짝이지 않는다(Terminal.app/Ghostty와 같은 사용감).
+        if (!core.cursor_blink or !core.cursor_visible or core.preedit != null) {
             self.resetCursorBlink();
             return;
         }
@@ -1055,6 +1057,15 @@ test "cursor blink toggles every interval, stays solid for steady cursors, and r
     i = 0;
     while (i < blink_interval_ticks * 3) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(session.blink_visible);
+
+    // IME 조합 중(preedit): 깜빡이지 않고 보이는 위상 고정 — 조합 글자 옆에서 반짝이지 않는다.
+    try session.surfaces[0].core.write("\x1b[1 q"); // 다시 blink 커서로
+    try session.surfaces[0].core.setPreedit("\xec\x95\x88");
+    session.blink_visible = true;
+    i = 0;
+    while (i < blink_interval_ticks * 3) : (i += 1) session.updateCursorBlink();
+    try std.testing.expect(session.blink_visible);
+    try session.surfaces[0].core.setPreedit("");
 }
 
 test "headless ticks toggle the blink phase and bump the metal generation" {

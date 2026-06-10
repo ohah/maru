@@ -15,7 +15,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 19;
+pub const abi_version: u32 = 20;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -190,6 +190,14 @@ pub const DevSession = struct {
     // non-blocking으로 흘려보낸다 — 멀티MB 붙여넣기가 UI를 동결시키지 않게.
     pending_paste: std.ArrayList(u8) = .empty,
     pending_paste_offset: usize = 0,
+    // IME 키 트랜잭션 상태(Ghostty의 keyTextAccumulator 패턴과 같은 구조). Swift keyDown이
+    // imeBegin으로 열고 입력기 콜백(imeInsert/imeMarked)이 쌓은 것을 imeEnd가 일괄 판정한다 —
+    // 콜백마다 즉석 판단하면 입력기의 비동기/다중 호출에서 이중 전송·유실이 생긴다(라이브에서
+    // 실제 발생했던 클래스). 판정 로직이 Zig에 있어 전부 unit으로 고정된다.
+    ime_active: bool = false,
+    ime_inserted: std.ArrayList(u8) = .empty,
+    ime_had_marked: bool = false,
+    ime_marked_changed: bool = false,
     // 커서 깜빡임 위상(DECSCUSR blink가 켜진 커서만). 30Hz tick 15회(=500ms)마다 토글하고,
     // 입력/출력이 있으면 보이는 상태로 리셋한다(타이핑 중 커서가 사라지지 않게).
     blink_visible: bool = true,
@@ -466,11 +474,106 @@ pub const DevSession = struct {
         }
     }
 
-    /// IME 조합 중(preedit) 텍스트 갱신(빈 입력 = 종료). 커서 위치 합성 표시는 core가 한다.
-    pub fn setPreedit(self: *DevSession, bytes: []const u8) void {
+    /// IME 키 트랜잭션 시작(Swift keyDown 진입 — 수정자 없는 키). 이번 키에서 입력기가 만들
+    /// 텍스트/조합 변화를 모으기 시작한다.
+    pub fn imeBegin(self: *DevSession) void {
+        if (!self.surface_initialized) return;
+        self.ime_active = true;
+        self.ime_inserted.clearRetainingCapacity();
+        self.ime_marked_changed = false;
+        self.ime_had_marked = self.surfaces[0].core.preedit != null;
+    }
+
+    /// 입력기가 확정한 텍스트(insertText). 즉시 보내지 않고 누적한다 — 전송 여부·시점은
+    /// imeEnd가 일괄 판정한다(이중 전송 차단). 트랜잭션 밖(드물게 입력기가 keyDown 없이 직접
+    /// 커밋 — 포커스 전환 등)이면 그대로 확정 전송한다.
+    pub fn imeInsert(self: *DevSession, bytes: []const u8) void {
+        if (!self.surface_initialized) return;
+        if (!self.ime_active) {
+            self.sendCommittedText(bytes);
+            return;
+        }
+        self.ime_inserted.appendSlice(self.allocator, bytes) catch return;
+    }
+
+    /// 입력기의 조합 중(marked) 텍스트 갱신(빈 입력 = 조합 해제). 표시는 core 합성이 한다.
+    pub fn imeMarked(self: *DevSession, bytes: []const u8) void {
         if (!self.surface_initialized) return;
         self.surfaces[0].core.setPreedit(bytes) catch return;
         self.metal_dirty = true; // 조합 글자는 즉시 보여야 한다
+        if (self.ime_active) self.ime_marked_changed = true;
+    }
+
+    /// imeEnd의 순수 판정 결과. 부작용(PTY 전송)에서 분리해 라이브 PTY 없이 unit 테스트한다
+    /// (Ghostty가 shouldSuppressComposingControlInput를 순수 함수로 테스트하는 것과 같은 방식).
+    pub const ImeDecision = union(enum) {
+        commit_text: []const u8, // 확정 텍스트만 전송(키 자체는 입력기가 소비)
+        ignore, // 조합 조작 키(자모 삭제) / 조합 중 단일 C0 — 아무것도 안 보냄
+        encode_key, // 일반 키 — 기존 인코딩 경로
+    };
+
+    /// IME 키의 일괄 판정(순수). 규칙(위에서 첫 일치):
+    /// 1. 확정 텍스트가 쌓였으면 그것만 보낸다. 단 조합 중 단일 C0(조합 조작용 Ctrl+H류)은 버림.
+    /// 2. 텍스트는 없지만 조합이 변했으면(자모 삭제) 키를 보내지 않는다.
+    /// 3. 둘 다 아니면 일반 키.
+    pub fn imeDecide(composing: bool, inserted: []const u8, marked_changed: bool) ImeDecision {
+        if (inserted.len > 0) {
+            const lone_c0 = inserted.len == 1 and inserted[0] < 0x20;
+            if (composing and lone_c0) return .ignore;
+            return .{ .commit_text = inserted };
+        }
+        if (marked_changed) return .ignore;
+        return .encode_key;
+    }
+
+    /// IME 키 트랜잭션 종료(Swift keyDown이 interpretKeyEvents 직후 호출) — 일괄 판정.
+    /// 규칙(위에서부터 첫 일치):
+    /// 1. 확정 텍스트가 쌓였으면 그것만 보낸다(키 자체는 입력기가 소비). 단 조합 중 단일
+    ///    C0(예: 조합 조작용 Ctrl+H)는 입력기 소유라 버린다(Ghostty와 같은 보호).
+    /// 2. 텍스트는 없지만 조합이 변했으면(자모 삭제 등) 키를 보내지 않는다 — 안 막으면 조합
+    ///    중 Backspace가 자모도 줄이고 셸 글자까지 지운다(라이브에서 발생).
+    /// 3. 둘 다 아니면 일반 키 — 기존 인코딩 경로(Enter/Backspace/기능키).
+    pub fn imeEnd(self: *DevSession, event: terminal.KeyEvent) void {
+        if (!self.surface_initialized) return;
+        const composing = self.surfaces[0].core.preedit != null or self.ime_had_marked;
+        defer {
+            self.ime_active = false;
+            self.ime_inserted.clearRetainingCapacity();
+            self.ime_marked_changed = false;
+        }
+        switch (imeDecide(composing, self.ime_inserted.items, self.ime_marked_changed)) {
+            .commit_text => |text| self.sendCommittedText(text),
+            .ignore => {}, // 조합 조작 키(자모 삭제) 또는 조합 중 단일 C0 — 입력기 소유
+            .encode_key => _ = self.handleKeyEvent(event) catch {},
+        }
+    }
+
+    /// 포커스 변화. 잃으면 조합 중 텍스트를 버리지 않고 확정(커밋)한다 — 버리면 글자가
+    /// 사라졌다가 재포커스 후 입력 위치가 어긋나는 사용감(라이브 제보)이 된다.
+    /// Terminal.app/Ghostty와 같은 의미론.
+    pub fn setFocused(self: *DevSession, focused: bool) void {
+        if (!self.surface_initialized) return;
+        if (focused) return;
+        const core = &self.surfaces[0].core;
+        if (core.preedit) |pending| {
+            // setPreedit가 버퍼를 해제하므로 먼저 사본을 떠서 보낸다.
+            const copy = self.allocator.dupe(u8, pending) catch return;
+            defer self.allocator.free(copy);
+            core.setPreedit("") catch {};
+            self.metal_dirty = true;
+            self.sendCommittedText(copy);
+        }
+    }
+
+    /// 확정 텍스트를 코드포인트 단위로 기존 key event 경로에 태운다 — 인코딩 단일 출처
+    /// (encodeKey)와 입력 회계(terminal_input 카운터)를 유지한다.
+    fn sendCommittedText(self: *DevSession, bytes: []const u8) void {
+        const view = std.unicode.Utf8View.init(bytes) catch return;
+        var it = view.iterator();
+        while (it.nextCodepoint()) |cp| {
+            const key = terminal.input.charKeyFromCodepoint(cp) catch continue;
+            _ = self.handleKeyEvent(.{ .key = key, .modifiers = .{} }) catch return;
+        }
     }
 
     /// 클립보드 텍스트 붙여넣기(Cmd+V). 인코딩(개행 정규화 + bracketed paste 감싸기)은 core가
@@ -771,6 +874,7 @@ pub const DevSession = struct {
         if (self.copy_buffer.len > 0) self.allocator.free(self.copy_buffer);
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
         self.pending_paste.deinit(self.allocator);
+        self.ime_inserted.deinit(self.allocator);
 
         self.metal_buffer.deinit(self.allocator);
         if (self.live_initialized) {
@@ -1172,4 +1276,22 @@ test "large paste drains through the non-blocking queue without freezing ticks" 
     }
     // 자식(read 대기 중)이 소비하므로 결국 큐가 빈다.
     try std.testing.expectEqual(session.pending_paste_offset, session.pending_paste.items.len);
+}
+
+test "imeDecide routes IME keys: commit text once, ignore composition edits, encode plain keys" {
+    const D = DevSession.ImeDecision;
+    // 1) 확정 텍스트가 있으면 그것만 보낸다(키는 입력기 소비 — 조합 확정 Enter는 개행 없음).
+    try std.testing.expect(DevSession.imeDecide(true, "\xec\x95\x88", false) == .commit_text);
+    try std.testing.expectEqualStrings("\xec\x95\x88", DevSession.imeDecide(true, "\xec\x95\x88", false).commit_text);
+    // 2) 텍스트 없이 조합만 변하면(자모 삭제) 키 무전송.
+    try std.testing.expect(DevSession.imeDecide(true, "", true) == .ignore);
+    // 3) 조합 중 단일 C0(조합 조작용 Ctrl+H류)은 버린다.
+    try std.testing.expect(DevSession.imeDecide(true, "\x08", false) == .ignore);
+    // 4) 조합 아닐 때의 C0는 정상 텍스트로 본다(commit) — 조합 보호는 composing일 때만.
+    try std.testing.expect(DevSession.imeDecide(false, "\x08", false) == .commit_text);
+    // 5) 텍스트도 조합 변화도 없으면 일반 키(Enter/Backspace/기능키).
+    try std.testing.expect(DevSession.imeDecide(false, "", false) == .encode_key);
+    // 6) 여러 글자 확정도 통째로 commit(영문 일반 타이핑 포함).
+    try std.testing.expectEqualStrings("ab", DevSession.imeDecide(false, "ab", false).commit_text);
+    _ = D;
 }

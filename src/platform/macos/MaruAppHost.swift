@@ -89,11 +89,8 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         }
     }
 
-    // IME 상태: doCommand가 원본 키를 알 수 있게 현재 처리 중 이벤트를 들고, 같은 키에서
-    // 입력기가 텍스트(setMarkedText/insertText)를 이미 처리했는지를 기억한다.
-    private var currentKeyEvent: NSEvent?
-    private var imeTextHandledForCurrentKey = false
-    // 조합 중(marked) 텍스트. 아직 화면 preedit 렌더는 없고(다음 단계), 입력기 상태 추적용.
+    // 조합 중(marked) 텍스트 — NSTextInputClient 프로토콜 응답(hasMarkedText/markedRange)용.
+    // 표시·판정 상태의 단일 출처는 Zig(core.preedit + IME 트랜잭션)다.
     private var markedTextBuffer: String = ""
 
     override func keyDown(with event: NSEvent) {
@@ -106,71 +103,59 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
             return
         }
         // 그 외(일반 타이핑·Shift)는 입력기(IME)를 거친다 — 한글 조합이 여기서 일어난다.
-        // interpretKeyEvents 뒤에 fallback으로 다시 보내지 않는다: AppKit 계약상 입력기가
-        // 텍스트로 만들지 않은 키는 반드시 doCommand(by:)로 돌아오므로, fallback을 두면
-        // 입력기가 키를 비동기로 처리하는 순간(입력 소스 전환 직후 등) 같은 키가 fallback과
-        // 나중에 도착한 insertText로 두 번 들어가 타이핑이 꼬인다(라이브에서 실제 발생).
-        currentKeyEvent = event
-        imeTextHandledForCurrentKey = false
-        interpretKeyEvents([event])
-        currentKeyEvent = nil
-    }
-
-    // 입력기가 텍스트로 만들지 않은 키(Enter/Backspace/방향/Tab/Esc 등). 셀렉터를 해석하지
-    // 않고 원본 키 이벤트를 기존 인코딩 경로로 보낸다. 단, 같은 키에서 입력기가 이미 조합을
-    // 조작했다면(setMarkedText/insertText — 조합 중 Backspace의 자모 삭제, 조합 확정 Enter)
-    // 그 키는 입력기가 소비한 것이므로 PTY로 보내지 않는다 — 안 막으면 조합 중 Backspace가
-    // 자모도 줄이고 셸의 진짜 글자까지 지운다(라이브에서 "셸 명령 침범"으로 실제 발생).
-    // Terminal.app/iTerm2도 같은 의미론(조합 확정 Enter는 확정만, 개행 없음)이다.
-    override func doCommand(by selector: Selector) {
-        if imeTextHandledForCurrentKey { return }
-        if let event = currentKeyEvent {
-            controller?.handleKeyDown(event)
+        // 판정(확정 전송/조합 조작 무시/일반 키 인코딩)은 전부 Zig의 IME 트랜잭션이 한다:
+        // begin -> interpretKeyEvents(입력기 콜백이 insert/marked로 쌓음) -> end(일괄 판정).
+        // Swift에는 IME 분기 로직이 없다 — 입력기의 비동기/다중 콜백에서도 이중 전송이
+        // 구조적으로 불가능하고, 판정 규칙은 Zig unit으로 고정된다.
+        controller?.imeKeyTransaction(event) {
+            self.interpretKeyEvents([event])
         }
     }
+
+    // 입력기가 텍스트로 만들지 않은 키의 편집 명령. 여기서 아무것도 하지 않는다(시스템 비프
+    // 방지용 오버라이드만) — 그 키의 전송 여부는 Zig의 ime_end가 일괄 판정한다(확정 텍스트가
+    // 없고 조합 변화도 없으면 일반 키로 인코딩).
+    override func doCommand(by selector: Selector) {}
 
     // ── NSTextInputClient — 입력기(IME) 통합. 조합 의미론은 macOS 입력기가, 확정 텍스트의
     // 인코딩/전달은 Zig가 소유한다(여기는 이벤트 캡처와 전달만).
 
     // 입력기가 텍스트를 확정했다(한글 음절, 영문 일반 타이핑 모두 여기로 온다).
     func insertText(_ string: Any, replacementRange: NSRange) {
-        imeTextHandledForCurrentKey = true
         markedTextBuffer = ""
-        controller?.updatePreedit("") // 조합 표시 제거 후 확정 텍스트 전송
         let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
-        controller?.sendText(text)
+        controller?.imeMarked("") // 조합 표시 제거(전송 판정은 Zig ime_end가)
+        controller?.imeInsert(text)
     }
 
-    // 조합 중 텍스트(예: 'ㅇ' -> '아' -> '안'). 아직 화면에 preedit로 그리지는 않는다(다음
-    // 단계 — 조합 확정 시점에 글자가 나타난다). 상태만 추적해 hasMarkedText 계약을 지킨다.
+    // 조합 중 텍스트(예: 'ㅇ' -> '아' -> '안'). 표시는 Zig가 커서 위치에 합성한다.
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         markedTextBuffer = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
-        controller?.updatePreedit(markedTextBuffer) // 조합 중 글자를 커서 위치에 표시(Zig 합성)
+        controller?.imeMarked(markedTextBuffer)
     }
 
     func unmarkText() {
-        imeTextHandledForCurrentKey = true
         markedTextBuffer = ""
-        controller?.updatePreedit("")
+        controller?.imeMarked("")
     }
 
-    // 포커스를 잃으면 조합 중 텍스트를 버리지 않고 확정(커밋)한다 — Terminal.app/Ghostty와
-    // 같은 동작. 버리면 조합 중이던 글자가 화면에서 사라졌다가 재포커스 후 입력 위치가 어긋나
-    // "이전 글자가 덮어씌워지는" 사용감이 된다(라이브 제보). 입력기 세션도 함께 정리해 재포커스
-    // 후 입력기 상태와 화면이 어긋나지 않게 한다.
+    // 포커스 변화는 Zig에 전달만 한다 — 조합 중 텍스트의 확정(커밋)은 Zig setFocused가 소유
+    // (Terminal.app/Ghostty 의미론, unit 검증). 여기선 입력기 세션 정리만(재포커스 후 입력기
+    // 상태와 화면이 어긋나지 않게).
     func commitComposition() {
-        if !markedTextBuffer.isEmpty {
-            let pending = markedTextBuffer
-            markedTextBuffer = ""
-            controller?.updatePreedit("")
-            controller?.sendText(pending) // 조합 중이던 글자를 확정 입력으로
-        }
+        markedTextBuffer = ""
+        controller?.imeFocus(false)
         inputContext?.discardMarkedText()
     }
 
     override func resignFirstResponder() -> Bool {
         commitComposition()
         return super.resignFirstResponder()
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        controller?.imeFocus(true)
+        return super.becomeFirstResponder()
     }
 
     // 앱/창 전환은 view의 resignFirstResponder를 부르지 않는다 — window key 상실 알림에서도
@@ -198,14 +183,18 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         return !markedTextBuffer.isEmpty
     }
 
+    // NSNotFound가 아니라 빈 NSRange를 돌려준다(Ghostty와 동일). NSNotFound를 주면 입력기가
+    // "이 클라이언트는 marked 교체를 지원하지 않는다"로 보고 보수적으로 동작해 — 한국어 조합의
+    // 마지막 자모에서 Backspace가 자모 삭제 대신 확정(insertText)으로 처리돼 삭제에 키가 한 번
+    // 더 들었다(라이브: 가ㄴ -> BS -> 가ㄴ -> BS -> 가).
     func markedRange() -> NSRange {
         return markedTextBuffer.isEmpty
-            ? NSRange(location: NSNotFound, length: 0)
+            ? NSRange()
             : NSRange(location: 0, length: markedTextBuffer.utf16.count)
     }
 
     func selectedRange() -> NSRange {
-        return NSRange(location: NSNotFound, length: 0)
+        return NSRange()
     }
 
     func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
@@ -864,34 +853,34 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
-    // IME 조합 중 텍스트를 Zig에 전달한다(빈 문자열 = 종료). 커서 위치 합성은 Zig가 한다.
-    func updatePreedit(_ text: String) {
+    // IME 키 트랜잭션: begin -> 입력기 해석(클로저) -> end. 판정은 전부 Zig가 한다.
+    func imeKeyTransaction(_ event: NSEvent, interpret: () -> Void) {
+        guard let session = devSession else { return }
+        _ = maru_macos_app_dev_session_ime_begin(session)
+        interpret()
+        guard var keyEvent = normalizedKeyEvent(from: event) else { return }
+        _ = maru_macos_app_dev_session_ime_end(session, &keyEvent)
+    }
+
+    func imeInsert(_ text: String) {
         guard let session = devSession else { return }
         let bytes = Array(text.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_dev_session_set_preedit(session, buf.baseAddress, buf.count)
+            maru_macos_app_dev_session_ime_insert(session, buf.baseAddress, buf.count)
         }
     }
 
-    // 입력기가 확정한 텍스트를 코드포인트 단위로 기존 key event ABI에 태운다 — 새 ABI 없이
-    // encodeKey(UTF-8 인코딩)가 단일 출처로 남는다. 수정자 없는 일반 텍스트 입력이다.
-    func sendText(_ text: String) {
-        guard let session = devSession, !text.isEmpty else { return }
-        for scalar in text.unicodeScalars {
-            var event = MaruAppHostKeyEvent(
-                codepoint: scalar.value,
-                key_code: UInt32(MaruAppHostKeyCodeUnknown.rawValue),
-                modifier_shift: 0,
-                modifier_control: 0,
-                modifier_option: 0,
-                modifier_command: 0,
-                is_repeat: 0,
-                raw_key_code: 0
-            )
-            var summary = MaruAppHostDevFrameSummary()
-            guard maru_macos_app_dev_session_key_down(session, &event, &summary) == Self.statusOK else { return }
-            latestFrameSummary = summary
+    func imeMarked(_ text: String) {
+        guard let session = devSession else { return }
+        let bytes = Array(text.utf8)
+        _ = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_dev_session_ime_marked(session, buf.baseAddress, buf.count)
         }
+    }
+
+    func imeFocus(_ focused: Bool) {
+        guard let session = devSession else { return }
+        _ = maru_macos_app_dev_session_set_focus(session, focused ? 1 : 0)
     }
 
     private func normalizedKeyEvent(from event: NSEvent) -> MaruAppHostKeyEvent? {

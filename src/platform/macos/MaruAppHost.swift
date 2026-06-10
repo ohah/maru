@@ -89,37 +89,33 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         }
     }
 
-    // IME 상태: interpretKeyEvents가 insertText/setMarkedText를 불렀는지(입력기가 키를 소비
-    // 했는지)와, doCommand fallback이 원본 키를 알 수 있게 현재 처리 중 이벤트를 든다.
-    private var imeConsumedKey = false
+    // IME 상태: doCommand가 원본 키를 알 수 있게 현재 처리 중 이벤트를 든다.
     private var currentKeyEvent: NSEvent?
     // 조합 중(marked) 텍스트. 아직 화면 preedit 렌더는 없고(다음 단계), 입력기 상태 추적용.
     private var markedTextBuffer: String = ""
 
     override func keyDown(with event: NSEvent) {
-        // Ctrl/Cmd 조합은 입력기에 보내지 않고 바로 단축키/인코딩 경로로 — 한글 입력 모드에서도
-        // Ctrl+B(tmux prefix)나 Cmd+C가 동작한다(레이아웃 독립 매칭은 Zig가 물리 키코드로 한다).
-        let chord = event.modifierFlags.intersection([.command, .control])
+        // Ctrl/Cmd/Option 조합은 입력기에 보내지 않고 바로 단축키/인코딩 경로로 — 한글 입력
+        // 모드에서도 Ctrl+B(tmux prefix)나 Cmd+C가 동작하고(레이아웃 독립 매칭은 Zig가 물리
+        // 키코드로 한다), Option+글자는 특수문자 입력이 아니라 기존 meta-ESC 인코딩을 유지한다.
+        let chord = event.modifierFlags.intersection([.command, .control, .option])
         if !chord.isEmpty {
             controller?.handleKeyDown(event)
             return
         }
-        // 그 외(일반 타이핑·Shift·Option)는 입력기(IME)를 거친다 — 한글 조합이 여기서 일어난다.
-        imeConsumedKey = false
+        // 그 외(일반 타이핑·Shift)는 입력기(IME)를 거친다 — 한글 조합이 여기서 일어난다.
+        // interpretKeyEvents 뒤에 fallback으로 다시 보내지 않는다: AppKit 계약상 입력기가
+        // 텍스트로 만들지 않은 키는 반드시 doCommand(by:)로 돌아오므로, fallback을 두면
+        // 입력기가 키를 비동기로 처리하는 순간(입력 소스 전환 직후 등) 같은 키가 fallback과
+        // 나중에 도착한 insertText로 두 번 들어가 타이핑이 꼬인다(라이브에서 실제 발생).
         currentKeyEvent = event
         interpretKeyEvents([event])
-        // 입력기가 텍스트도 명령도 만들지 않은 키(기능키 등)는 기존 인코딩 경로로 보낸다.
-        if !imeConsumedKey {
-            controller?.handleKeyDown(event)
-        }
         currentKeyEvent = nil
     }
 
-    // 입력기가 처리하지 않은 편집 명령(Enter/Backspace/방향키 등). 셀렉터를 해석하지 않고
-    // 원본 키 이벤트를 기존 인코딩 경로로 보낸다 — Enter는 enter로, Backspace는 backspace로
-    // 이미 정규화돼 있다. (조합 확정 직후의 Enter도 insertText 다음 여기로 와 개행이 전달된다.)
+    // 입력기가 텍스트로 만들지 않은 키(Enter/Backspace/방향/Tab/Esc 등 — 조합 확정 직후의
+    // Enter 포함). 셀렉터를 해석하지 않고 원본 키 이벤트를 기존 인코딩 경로로 보낸다.
     override func doCommand(by selector: Selector) {
-        imeConsumedKey = true
         if let event = currentKeyEvent {
             controller?.handleKeyDown(event)
         }
@@ -130,7 +126,6 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     // 입력기가 텍스트를 확정했다(한글 음절, 영문 일반 타이핑 모두 여기로 온다).
     func insertText(_ string: Any, replacementRange: NSRange) {
-        imeConsumedKey = true
         markedTextBuffer = ""
         let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
         controller?.sendText(text)
@@ -139,7 +134,6 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 조합 중 텍스트(예: 'ㅇ' -> '아' -> '안'). 아직 화면에 preedit로 그리지는 않는다(다음
     // 단계 — 조합 확정 시점에 글자가 나타난다). 상태만 추적해 hasMarkedText 계약을 지킨다.
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        imeConsumedKey = true
         markedTextBuffer = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
     }
 

@@ -186,6 +186,10 @@ pub const DevSession = struct {
     drag_autoscroll: i8 = 0,
     // 자동 스크롤 중 선택 확장에 쓸 마지막 드래그 열.
     last_drag_col: u16 = 0,
+    // 큰 붙여넣기의 미전송 잔여(인코딩 완료분). 자식이 stdin을 읽는 속도에 맞춰 tick마다
+    // non-blocking으로 흘려보낸다 — 멀티MB 붙여넣기가 UI를 동결시키지 않게.
+    pending_paste: std.ArrayList(u8) = .empty,
+    pending_paste_offset: usize = 0,
     // 커서 깜빡임 위상(DECSCUSR blink가 켜진 커서만). 30Hz tick 15회(=500ms)마다 토글하고,
     // 입력/출력이 있으면 보이는 상태로 리셋한다(타이핑 중 커서가 사라지지 않게).
     blink_visible: bool = true,
@@ -466,7 +470,28 @@ pub const DevSession = struct {
         if (!self.surface_initialized or bytes.len == 0) return;
         const encoded = self.surfaces[0].core.encodePaste(self.allocator, bytes) catch return;
         defer self.allocator.free(encoded);
-        self.runtime.writeInput(self.surfaces[0].id, .{ .bytes = encoded }) catch {};
+        // 큐에 쌓고 즉시 flush를 시도한다. 자식이 읽는 중이면 보통 이 자리에서 다 들어가고,
+        // 안 읽으면(vim 다이얼로그 등) 잔여가 tick마다 흘러나간다 — blocking 단일 write로 UI가
+        // 동결되던 것을 없앤다. 큐는 FIFO라 bracketed paste 감싸기 순서는 깨지지 않는다.
+        self.pending_paste.appendSlice(self.allocator, encoded) catch return;
+        self.flushPendingPaste();
+    }
+
+    /// pending paste를 지금 쓸 수 있는 만큼 non-blocking으로 흘려보낸다(0이 나오면 다음 tick).
+    fn flushPendingPaste(self: *DevSession) void {
+        while (self.pending_paste_offset < self.pending_paste.items.len) {
+            const remaining = self.pending_paste.items[self.pending_paste_offset..];
+            const written = self.runtime.writeInputNonBlocking(self.surfaces[0].id, remaining) catch {
+                // 세션 종료 등 — 잔여는 버린다(다시 쓸 수 없는 대상).
+                self.pending_paste.clearRetainingCapacity();
+                self.pending_paste_offset = 0;
+                return;
+            };
+            if (written == 0) return; // PTY 버퍼가 찼다 — 다음 tick에 이어서
+            self.pending_paste_offset += written;
+        }
+        self.pending_paste.clearRetainingCapacity();
+        self.pending_paste_offset = 0;
     }
 
     /// Cmd+hover 갱신. cmd_held가 아니거나 URL이 아니면 hover를 해제한다. URL 위면 밑줄 범위를
@@ -639,6 +664,7 @@ pub const DevSession = struct {
         // Metal 투영이나 비싼 build가 실패/생략돼도 drained 이벤트나 finishAfterTermination
         // (reader join/child reap)을 건너뛰지 않게 한다.
         self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 30Hz로 한 줄씩 스크롤+확장
+        self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
         const drain_summary = try self.pump.drainAvailable();
         self.total_output_events += drain_summary.output_events;
         self.total_exit_events += drain_summary.exit_events;
@@ -735,6 +761,7 @@ pub const DevSession = struct {
     pub fn deinit(self: *DevSession) void {
         if (self.copy_buffer.len > 0) self.allocator.free(self.copy_buffer);
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
+        self.pending_paste.deinit(self.allocator);
 
         self.metal_buffer.deinit(self.allocator);
         if (self.live_initialized) {
@@ -1037,12 +1064,15 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
     });
     defer session.deinit();
 
+    // 출력 타이밍에 흔들리지 않게(느린 CI에서 controlled 출력이 여러 tick에 걸쳐 와 위상을
+    // 계속 리셋할 수 있다) "첫 토글이 관측될 때까지" 충분한 상한으로 tick한다 — 출력은 유한하니
+    // 멎은 뒤 interval 틱이 지나면 반드시 토글된다.
     var toggles: usize = 0;
     var gen_changes: usize = 0;
     var last_vis = session.blink_visible;
     var last_gen: u64 = session.metal_buffer.generation;
     var i: usize = 0;
-    while (i < blink_interval_ticks * 3) : (i += 1) {
+    while (i < blink_interval_ticks * 20 and toggles == 0) : (i += 1) {
         _ = try session.tick();
         if (session.blink_visible != last_vis) {
             toggles += 1;
@@ -1053,10 +1083,8 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
             last_gen = session.metal_buffer.generation;
         }
     }
-    // 45틱 동안 출력이 잦아 리셋될 수 있지만, 출력이 멎은 뒤(controlled command 종료)에는
-    // 토글이 최소 1회는 일어나고, 토글마다 재투영(generation 증가)이 따라야 한다.
-    std.debug.print("\nblink probe: toggles={d} gen_changes={d}\n", .{ toggles, gen_changes });
     try std.testing.expect(toggles >= 1);
+    // 토글은 rebuild 없이도 재드로우를 유발해야 한다(setCursorVisible의 generation 증가).
     try std.testing.expect(gen_changes >= toggles);
 }
 
@@ -1092,4 +1120,38 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.applyDragAutoscroll();
     try std.testing.expectEqual(@as(usize, 1), core.view_offset);
     try std.testing.expect(!session.metal_dirty);
+}
+
+test "large paste drains through the non-blocking queue without freezing ticks" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 PTY 경로
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // PTY 입력 버퍼보다 큰 페이로드 — blocking 단일 write라면 여기서 동결됐을 크기. 개행을
+    // 포함한 줄 단위로 만든다: controlled 자식(read -r line)은 canonical 모드라 개행 없는
+    // 대용량은 줄을 영영 못 끝내 read에 갇히고, deinit의 자식 reap(wait4)이 hang된다 — 첫
+    // 줄이 들어가면 자식이 진행해 정상 종료한다.
+    const big = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(big);
+    @memset(big, 'x');
+    var li: usize = 79;
+    while (li < big.len) : (li += 80) big[li] = '\n';
+    session.pasteText(big);
+
+    // pasteText는 즉시 반환해야 하고(동결 없음), 잔여는 tick들이 흘려보낸다.
+    var i: usize = 0;
+    while (i < 600 and session.pending_paste.items.len > session.pending_paste_offset) : (i += 1) {
+        _ = try session.tick();
+    }
+    // 자식(read 대기 중)이 소비하므로 결국 큐가 빈다.
+    try std.testing.expectEqual(session.pending_paste_offset, session.pending_paste.items.len);
 }

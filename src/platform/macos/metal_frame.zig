@@ -115,6 +115,14 @@ pub const NativeMetalRasterUpload = extern struct {
     non_clear_pixels: usize,
 };
 
+/// buildNativeCellsSplit의 결과: cells와 그중 suffix를 차지하는 커서 overlay cell 수.
+/// 커서는 항상 맨 마지막에 emit되므로(블렌딩 순서), cells[0..len-cursor_cells]가 커서 없는
+/// frame과 동일하다 — blink off 위상은 이 분리 덕에 frame rebuild 없이 노출 길이만 줄인다.
+pub const BuiltCells = struct {
+    cells: []NativeMetalCell,
+    cursor_cells: usize,
+};
+
 /// glyph quad(ink 있는 cell)와 draw cell(전체 cell의 style)을 native Metal cell로 투영한다.
 /// glyph는 atlas UV로, non-default 배경을 가진 공백은 배경만 칠하는 cell(sentinel UV)로 낸다.
 pub fn buildNativeCellsFromGlyphQuads(
@@ -123,6 +131,18 @@ pub fn buildNativeCellsFromGlyphQuads(
     draw_cells: []const renderer.DrawCell,
     colors: CellColors,
 ) ![]NativeMetalCell {
+    const built = try buildNativeCellsSplit(allocator, frame, draw_cells, colors);
+    return built.cells;
+}
+
+/// buildNativeCellsFromGlyphQuads + 커서 suffix 길이. MetalFrameBuffer가 blink를 rebuild 없이
+/// 처리하는 데 쓴다.
+pub fn buildNativeCellsSplit(
+    allocator: std.mem.Allocator,
+    frame: renderer.GlyphQuadFrame,
+    draw_cells: []const renderer.DrawCell,
+    colors: CellColors,
+) !BuiltCells {
     var cells: std.ArrayList(NativeMetalCell) = .empty;
     errdefer cells.deinit(allocator);
 
@@ -231,6 +251,7 @@ pub fn buildNativeCellsFromGlyphQuads(
         }
     }
 
+    const cells_before_cursor = cells.items.len;
     // 3) 커서 overlay를 반전 블록으로 맨 마지막에 낸다(블렌딩 ON이라 앞 cell 위에 덮인다). 커서 cell의
     //    배경을 커서 색으로 채우고, 그 자리에 glyph가 있으면 같은 glyph를 배경색(cursor.text)으로 다시
     //    그려 글자가 커서 위에서 반전돼 보이게 한다(글자를 가리지 않음). 빈 cell이면 sentinel UV로 커서
@@ -337,7 +358,8 @@ pub fn buildNativeCellsFromGlyphQuads(
         }
     }
 
-    return cells.toOwnedSlice(allocator);
+    const owned = try cells.toOwnedSlice(allocator);
+    return .{ .cells = owned, .cursor_cells = owned.len - cells_before_cursor };
 }
 
 pub fn buildNativeRasterUploads(
@@ -413,6 +435,10 @@ pub const MetalFrameBuffer = struct {
     cell_width_px: u32 = 0,
     cell_height_px: u32 = 0,
     generation: u64 = 0,
+    // cells의 suffix를 차지하는 커서 overlay cell 수(buildNativeCellsSplit). show_cursor가
+    // 꺼지면 view()가 이 길이만큼 잘라 노출한다 — 커서 blink가 frame rebuild 없이 동작한다.
+    cursor_cells: usize = 0,
+    show_cursor: bool = true,
 
     /// 새 frame을 투영해 교체한다. 새 배열을 먼저 만들고(실패 시 errdefer로 정리, 기존
     /// retained 배열은 그대로 유지) 성공하면 기존 것을 해제하고 swap한다. generation은
@@ -426,7 +452,8 @@ pub const MetalFrameBuffer = struct {
         cell_height_px: u32,
         colors: CellColors,
     ) !void {
-        const new_cells = try buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, frame.draw_list.cells, colors);
+        const built = try buildNativeCellsSplit(allocator, frame.glyph_quad_frame, frame.draw_list.cells, colors);
+        const new_cells = built.cells;
         errdefer allocator.free(new_cells);
         const new_uploads = try buildNativeRasterUploads(allocator, frame.glyph_raster_frame);
         errdefer allocator.free(new_uploads);
@@ -436,6 +463,7 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.uploads);
         allocator.free(self.pixels);
         self.cells = new_cells;
+        self.cursor_cells = built.cursor_cells;
         self.uploads = new_uploads;
         self.pixels = new_pixels;
         self.size = frame.glyph_frame.size;
@@ -446,7 +474,16 @@ pub const MetalFrameBuffer = struct {
         self.generation += 1;
     }
 
+    /// 커서 blink 위상을 반영한다(rebuild 없음). 바뀌면 generation을 올려 Swift가 다시 그린다 —
+    /// 같은 cells에서 커서 suffix만 노출/숨김이 달라진다.
+    pub fn setCursorVisible(self: *MetalFrameBuffer, visible: bool) void {
+        if (self.show_cursor == visible) return;
+        self.show_cursor = visible;
+        self.generation += 1;
+    }
+
     pub fn view(self: *const MetalFrameBuffer) MetalFrame {
+        const exposed = if (self.show_cursor) self.cells.len else self.cells.len - self.cursor_cells;
         return .{
             .cols = @intCast(self.size.cols),
             .rows = @intCast(self.size.rows),
@@ -455,8 +492,8 @@ pub const MetalFrameBuffer = struct {
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
             .generation = self.generation,
-            .cells = if (self.cells.len > 0) self.cells.ptr else null,
-            .cell_count = self.cells.len,
+            .cells = if (exposed > 0) self.cells.ptr else null,
+            .cell_count = exposed,
             .raster_uploads = if (self.uploads.len > 0) self.uploads.ptr else null,
             .raster_upload_count = self.uploads.len,
             .raster_pixels = if (self.pixels.len > 0) self.pixels.ptr else null,
@@ -851,4 +888,37 @@ test "hover link span projects underline-kind cells across its rows" {
     }
     try std.testing.expectEqual(@as(u16, 2), cells[0].col);
     try std.testing.expectEqual(@as(u16, 1), cells[3].row);
+}
+
+test "cursor cells are a suffix and setCursorVisible toggles exposure without rebuild" {
+    const allocator = std.testing.allocator;
+    var overlays = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 1 } }};
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 4, .rows = 2 },
+        .cursor = .{ .row = 0, .col = 1 },
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const built = try buildNativeCellsSplit(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 1, .g = 2, .b = 3 },
+        .cursor = .{ .block = .{ .r = 9, .g = 9, .b = 9 }, .text = .{ .r = 0, .g = 0, .b = 0 } },
+    });
+    defer allocator.free(built.cells);
+    try std.testing.expect(built.cursor_cells > 0);
+    try std.testing.expectEqual(built.cells.len, built.cursor_cells); // glyph 없음 — 전부 커서 cell
+
+    var buffer = MetalFrameBuffer{ .cells = built.cells, .cursor_cells = built.cursor_cells };
+    defer {
+        buffer.cells = &.{}; // built.cells는 위 defer가 해제
+    }
+    try std.testing.expectEqual(built.cells.len, buffer.view().cell_count);
+    buffer.setCursorVisible(false);
+    try std.testing.expectEqual(@as(usize, 0), buffer.view().cell_count);
+    try std.testing.expectEqual(@as(u64, 1), buffer.generation);
+    buffer.setCursorVisible(false); // 같은 값 — generation 불변
+    try std.testing.expectEqual(@as(u64, 1), buffer.generation);
+    buffer.setCursorVisible(true);
+    try std.testing.expectEqual(built.cells.len, buffer.view().cell_count);
 }

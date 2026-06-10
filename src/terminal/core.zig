@@ -265,8 +265,11 @@ pub const TerminalCore = struct {
         return try out.toOwnedSlice(allocator);
     }
 
-    /// 선택 시작(마우스 다운). 뷰포트 행/열을 받아 절대 행으로 저장한다.
+    /// 선택 시작(마우스 다운). 뷰포트 행/열을 받아 절대 행으로 저장한다. 미뤄둔 스크롤백 재-wrap이
+    /// 있으면 먼저 끝낸다 — 안 하면 절대 좌표를 옛 ring 기준으로 만들었다가 드래그 도중 첫
+    /// scrollViewport(자동 스크롤 포함)가 재-wrap을 수행하며 선택을 지워버린다.
     pub fn selectionStart(self: *TerminalCore, viewport_row: u16, col: u16) void {
+        self.ensureScrollbackRewrapped();
         const abs = self.absRowFromViewport(viewport_row);
         self.selection_anchor = .{ .row = abs, .col = @min(col, self.size.cols -| 1) };
         self.selection_head = self.selection_anchor;
@@ -284,6 +287,7 @@ pub const TerminalCore = struct {
     /// 논리 줄로 이어지므로 행을 넘어 계속 확장한다(wrap된 긴 URL을 통째로 선택). 공백을
     /// 클릭하면 선택하지 않는다(해제).
     pub fn selectWordAt(self: *TerminalCore, viewport_row: u16, col: u16) void {
+        self.ensureScrollbackRewrapped(); // selectionStart와 같은 이유(절대 좌표를 최종 ring 기준으로)
         const bounds = self.wordBoundsAt(viewport_row, col) orelse {
             self.selectionClear();
             return;
@@ -464,6 +468,7 @@ pub const TerminalCore = struct {
 
     /// 트리플클릭 줄 선택: 클릭한 행이 속한 논리 줄 전체(soft-wrap된 행들 포함)를 선택한다.
     pub fn selectLineAt(self: *TerminalCore, viewport_row: u16) void {
+        self.ensureScrollbackRewrapped(); // selectionStart와 같은 이유
         const abs = self.absRowFromViewport(viewport_row);
         if (self.absRow(abs) == null) return;
         var start_row = abs;

@@ -425,7 +425,9 @@ pub const DevSession = struct {
         if (self.blink_ticks >= blink_interval_ticks) {
             self.blink_ticks = 0;
             self.blink_visible = !self.blink_visible;
-            self.metal_dirty = true; // 커서 overlay만 바뀌어도 재투영이 필요하다
+            // frame rebuild 없이 커서 suffix 노출만 토글한다(generation이 올라 Swift가 다시
+            // 그린다). 500ms마다 full-grid reshape를 돌리지 않게 — idle 절전을 깨지 않는다.
+            self.metal_buffer.setCursorVisible(self.blink_visible);
         }
     }
 
@@ -434,19 +436,28 @@ pub const DevSession = struct {
         self.blink_ticks = 0;
         if (!self.blink_visible) {
             self.blink_visible = true;
-            self.metal_dirty = true;
+            self.metal_buffer.setCursorVisible(true);
         }
     }
 
     /// 드래그 자동 스크롤 한 스텝(30Hz tick마다). 드래그가 grid 밖에 머무는 동안 한 줄씩
     /// 스크롤하며 선택을 가장자리 행으로 확장한다 — 화면보다 긴 내용을 드래그로 선택하는 표준 UX.
     fn applyDragAutoscroll(self: *DevSession) void {
-        if (!self.mouse_drag_selecting or self.drag_autoscroll == 0) return;
+        if (self.drag_autoscroll == 0) return;
         const core = &self.surfaces[0].core;
+        // 게이트는 "확장할 선택이 있는가"다 — mouse_drag_selecting로 걸면 더블/트리플클릭(4/5)으로
+        // 시작한 선택을 드래그로 화면 밖까지 늘릴 때 자동 스크롤이 영원히 안 걸린다.
+        if (core.selection_anchor == null) return;
+        const before_offset = core.view_offset;
+        const before_head = core.selection_head;
         core.scrollViewport(@as(isize, self.drag_autoscroll));
         const row: u16 = if (self.drag_autoscroll > 0) 0 else core.size.rows - 1;
         core.selectionExtend(row, self.last_drag_col);
-        self.metal_dirty = true;
+        // 변화가 없으면(스크롤백 끝/alt screen에서 잠겨 view도 head도 그대로) 재투영하지 않는다 —
+        // 포인터를 grid 밖에 누른 채 둬도 30Hz full rebuild 루프가 돌지 않게.
+        if (core.view_offset != before_offset or !pointEql(core.selection_head, before_head)) {
+            self.metal_dirty = true;
+        }
     }
 
     /// 클립보드 텍스트 붙여넣기(Cmd+V). 인코딩(개행 정규화 + bracketed paste 감싸기)은 core가
@@ -671,11 +682,12 @@ pub const DevSession = struct {
                 .hover_link = self.hoverLinkSpan(),
 
                 // 커서는 반전 블록으로 그린다: 칸 배경=theme.cursor, 그 위 glyph=theme.background.
-                // 깜빡임 off 위상이면 null로 둬 커서 투영 자체를 생략한다(기존 opt-in 메커니즘 재사용).
-                .cursor = if (self.blink_visible) .{
+                // blink와 무관하게 항상 투영한다 — off 위상 숨김은 metal_buffer가 커서 suffix 노출
+                // 길이로 처리해(setCursorVisible) frame rebuild가 필요 없다.
+                .cursor = .{
                     .block = self.appearance.theme.cursor,
                     .text = self.appearance.theme.background,
-                } else null,
+                },
             };
             if (self.metal_buffer.replace(self.allocator, tick_result.frame.render_frame, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, cell_colors)) |_| {
                 self.metal_dirty = false;
@@ -981,14 +993,18 @@ test "cursor blink toggles every interval, stays solid for steady cursors, and r
     defer session.surfaces[0].deinit();
     session.surface_initialized = true;
     session.metal_dirty = false;
+    session.metal_buffer = .{};
     session.blink_visible = true;
     session.blink_ticks = 0;
 
-    // 기본(DECSCUSR 1 = 깜빡 block): interval 틱마다 토글.
+    // 기본(DECSCUSR 1 = 깜빡 block): interval 틱마다 토글. rebuild(metal_dirty) 없이 metal
+    // generation만 올라야 한다(커서 suffix 노출 토글).
     var i: u32 = 0;
     while (i < blink_interval_ticks) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(!session.blink_visible);
-    try std.testing.expect(session.metal_dirty);
+    try std.testing.expect(!session.metal_dirty);
+    try std.testing.expectEqual(@as(u64, 1), session.metal_buffer.generation);
+    try std.testing.expect(!session.metal_buffer.show_cursor);
     while (i < blink_interval_ticks * 2) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(session.blink_visible);
 
@@ -1042,4 +1058,38 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
     std.debug.print("\nblink probe: toggles={d} gen_changes={d}\n", .{ toggles, gen_changes });
     try std.testing.expect(toggles >= 1);
     try std.testing.expect(gen_changes >= toggles);
+}
+
+test "drag autoscroll works after a double-click word selection and skips redraw when nothing moves" {
+    var session: DevSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.surfaces[0] = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer session.surfaces[0].deinit();
+    session.surface_initialized = true;
+    session.metal_dirty = false;
+    session.metal_buffer = .{};
+    session.mouse_drag_selecting = false; // 더블클릭(kind 4) 후 상태
+    session.drag_autoscroll = 0;
+    session.last_drag_col = 0;
+    session.cell_width_px = 8;
+    session.cell_height_px = 16;
+    session.scale_milli = 1000;
+
+    const core = &session.surfaces[0].core;
+    try core.write("aa\r\nbb\r\ncc"); // 스크롤백 1(aa) + 화면 bb,cc
+    core.selectWordAt(1, 0); // 더블클릭 단어 선택(cc)
+    try std.testing.expect(core.selection_anchor != null);
+
+    // 더블클릭 직후 드래그가 grid 위 밖으로 — mouse_drag_selecting=false여도 autoscroll이 돈다.
+    session.mouse(2, 0.0, -5.0);
+    try std.testing.expectEqual(@as(i8, 1), session.drag_autoscroll);
+    session.applyDragAutoscroll();
+    try std.testing.expectEqual(@as(usize, 1), core.view_offset);
+    try std.testing.expect(session.metal_dirty);
+
+    // 더 갈 곳이 없으면(스크롤백 끝 + head 그대로) 재투영을 걸지 않는다 — 30Hz 루프 방지.
+    session.metal_dirty = false;
+    session.applyDragAutoscroll();
+    try std.testing.expectEqual(@as(usize, 1), core.view_offset);
+    try std.testing.expect(!session.metal_dirty);
 }

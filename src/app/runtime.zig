@@ -185,6 +185,12 @@ pub const SurfaceRuntime = struct {
     pub fn writeInput(self: *SurfaceRuntime, surface_id: SurfaceId, input: TerminalInput) RuntimeError!void {
         const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
         if (link.surface.process_state == .exited) return error.ProcessExited;
+        // 진단: Maru가 PTY로 보내는 키 바이트(키 인코딩 검증용 — 예: Option+Backspace가 \e\x7f인지).
+        // pty->core(출력)와 대칭으로 core->pty(입력)를 찍는다. MARU_DEBUG에서만.
+        if (self.debug_input) {
+            var ebuf: [320]u8 = undefined;
+            input_diag.info("core->pty {d}B: {s}", .{ input.bytes.len, escapeForLog(input.bytes, &ebuf) });
+        }
         link.pty_io.writeInput(input.bytes) catch return error.WriteFailed;
     }
 

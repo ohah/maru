@@ -19,6 +19,15 @@ pub const Key = union(enum) {
     arrow_down,
     arrow_left,
     arrow_right,
+    // PC-style 기능키(xterm legacy 인코딩). cursor 계열(home/end)은 화살표처럼 DECCKM 적용,
+    // 편집 계열(insert/delete/page_up/page_down)은 CSI ~ 형식, function은 F1~F12.
+    home,
+    end,
+    insert,
+    delete,
+    page_up,
+    page_down,
+    function: u8, // F1..F12 (1-indexed)
 };
 
 pub const KeyEvent = struct {
@@ -96,6 +105,37 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: 
         .arrow_down => appendBytes(buffer, &len, if (options.application_cursor_keys) "\x1bOB" else "\x1b[B"),
         .arrow_right => appendBytes(buffer, &len, if (options.application_cursor_keys) "\x1bOC" else "\x1b[C"),
         .arrow_left => appendBytes(buffer, &len, if (options.application_cursor_keys) "\x1bOD" else "\x1b[D"),
+        // home/end는 화살표와 같은 cursor key라 DECCKM(application cursor) 적용 — vim/less가
+        // application 모드에서 SS3 형식을 기대한다.
+        .home => appendBytes(buffer, &len, if (options.application_cursor_keys) "\x1bOH" else "\x1b[H"),
+        .end => appendBytes(buffer, &len, if (options.application_cursor_keys) "\x1bOF" else "\x1b[F"),
+        // 편집키는 CSI ~ 형식(모드 무관). PC-style xterm 표준.
+        .insert => appendBytes(buffer, &len, "\x1b[2~"),
+        .delete => appendBytes(buffer, &len, "\x1b[3~"),
+        .page_up => appendBytes(buffer, &len, "\x1b[5~"),
+        .page_down => appendBytes(buffer, &len, "\x1b[6~"),
+        .function => |n| appendBytes(buffer, &len, try functionKeySequence(n)),
+    };
+}
+
+/// F1~F12의 xterm legacy 시퀀스. F1~F4는 SS3(`ESC O P..S`), F5~F12는 CSI ~ 형식(15/17~21/23/24 —
+/// 16·22가 빠진 건 역사적 xterm 표다). 물리 Mac 키보드는 F1~F12라 그 범위만 인코딩하고, 범위 밖
+/// (F13+)은 표준이 갈려 거부한다(Ghostty도 f13+는 todo).
+fn functionKeySequence(n: u8) ![]const u8 {
+    return switch (n) {
+        1 => "\x1bOP",
+        2 => "\x1bOQ",
+        3 => "\x1bOR",
+        4 => "\x1bOS",
+        5 => "\x1b[15~",
+        6 => "\x1b[17~",
+        7 => "\x1b[18~",
+        8 => "\x1b[19~",
+        9 => "\x1b[20~",
+        10 => "\x1b[21~",
+        11 => "\x1b[23~",
+        12 => "\x1b[24~",
+        else => error.UnsupportedFunctionKey,
     };
 }
 
@@ -118,7 +158,21 @@ pub fn controlByte(codepoint: u21) !u8 {
 
 fn keyBaseStartsWithEscape(key: Key) bool {
     return switch (key) {
-        .escape, .arrow_up, .arrow_down, .arrow_left, .arrow_right => true,
+        // base 인코딩이 ESC로 시작하는 키들. Option(Meta)이 눌려도 ESC를 한 번 더 붙이지 않는다
+        // (안 그러면 \x1b\x1b[3~ 같은 이중 ESC가 된다). modifier 조합 인코딩(CSI 파라미터)은 후속.
+        .escape,
+        .arrow_up,
+        .arrow_down,
+        .arrow_left,
+        .arrow_right,
+        .home,
+        .end,
+        .insert,
+        .delete,
+        .page_up,
+        .page_down,
+        .function,
+        => true,
         else => false,
     };
 }
@@ -238,4 +292,33 @@ test "DECCKM (application cursor keys) switches arrows from CSI to SS3" {
     try std.testing.expectEqualStrings("\x1bOD", try encodeKey(.{ .key = .arrow_left }, &buffer, app));
     // 비-화살표 키는 모드와 무관하다.
     try std.testing.expectEqualStrings("\r", try encodeKey(.{ .key = .enter }, &buffer, app));
+}
+
+test "encodeKey: PC-style function keys (legacy xterm sequences)" {
+    var buf: [encoded_key_buffer_len]u8 = undefined;
+    const normal: EncodeOptions = .{};
+    const app: EncodeOptions = .{ .application_cursor_keys = true };
+    // 편집키(모드 무관)
+    try std.testing.expectEqualStrings("\x1b[2~", try encodeKey(.{ .key = .insert }, &buf, normal));
+    try std.testing.expectEqualStrings("\x1b[3~", try encodeKey(.{ .key = .delete }, &buf, normal));
+    try std.testing.expectEqualStrings("\x1b[5~", try encodeKey(.{ .key = .page_up }, &buf, normal));
+    try std.testing.expectEqualStrings("\x1b[6~", try encodeKey(.{ .key = .page_down }, &buf, normal));
+    // home/end는 cursor key라 DECCKM
+    try std.testing.expectEqualStrings("\x1b[H", try encodeKey(.{ .key = .home }, &buf, normal));
+    try std.testing.expectEqualStrings("\x1bOH", try encodeKey(.{ .key = .home }, &buf, app));
+    try std.testing.expectEqualStrings("\x1b[F", try encodeKey(.{ .key = .end }, &buf, normal));
+    try std.testing.expectEqualStrings("\x1bOF", try encodeKey(.{ .key = .end }, &buf, app));
+    // function keys
+    try std.testing.expectEqualStrings("\x1bOP", try encodeKey(.{ .key = .{ .function = 1 } }, &buf, normal));
+    try std.testing.expectEqualStrings("\x1bOS", try encodeKey(.{ .key = .{ .function = 4 } }, &buf, normal));
+    try std.testing.expectEqualStrings("\x1b[15~", try encodeKey(.{ .key = .{ .function = 5 } }, &buf, normal));
+    try std.testing.expectEqualStrings("\x1b[24~", try encodeKey(.{ .key = .{ .function = 12 } }, &buf, normal));
+    try std.testing.expectError(error.UnsupportedFunctionKey, encodeKey(.{ .key = .{ .function = 13 } }, &buf, normal));
+}
+
+test "encodeKey: Option does not double-ESC function keys" {
+    var buf: [encoded_key_buffer_len]u8 = undefined;
+    // base가 ESC로 시작하므로 Option(Meta)이 눌려도 ESC를 또 안 붙인다.
+    try std.testing.expectEqualStrings("\x1b[3~", try encodeKey(.{ .key = .delete, .modifiers = .{ .option = true } }, &buf, .{}));
+    try std.testing.expectEqualStrings("\x1bOP", try encodeKey(.{ .key = .{ .function = 1 }, .modifiers = .{ .option = true } }, &buf, .{}));
 }

@@ -130,7 +130,7 @@ Command+B      -> 초기에는 오류
 - `Ctrl+<key>` 인코딩은 `a-z`/`A-Z`뿐 아니라 전체 C0 테이블을 다룬다: `Ctrl+@`=0x00, `Ctrl+A..Z`=0x01..0x1a, `Ctrl+[`=0x1b(ESC), `Ctrl+\`=0x1c, `Ctrl+]`=0x1d, `Ctrl+^`=0x1e, `Ctrl+_`=0x1f, `Ctrl+Space`=NUL, `Ctrl+?`=DEL. C0 매핑이 없는 `Ctrl+1` 같은 조합은 키 이벤트를 실패시키지 않고 그냥 문자를 보낸다.
 - `Option/Alt`(Meta) ESC prefix는 plain-byte 키(문자/Enter/Tab/Backspace)에만 붙인다. 화살표·Esc처럼 base 인코딩이 이미 ESC로 시작하는 키에는 붙이지 않는다(`Option+Up`이 `\x1b\x1b[A` 같은 double-ESC가 되지 않게). 화살표류의 modifier 인코딩(CSI 파라미터)은 이후 계약이다.
 - `send_control` 매크로의 codepoint는 config validation 단계에서 C0 매핑 가능 여부를 검사한다. 잘못된 codepoint는 키를 누를 때가 아니라 설정 로드 시점에 오류로 보고한다.
-- `F1..F24`와 `Delete`는 설정 문자열로는 파싱·validate되지만, 현재 `terminal.Key`(정규화된 런타임 키 이벤트)에는 function/delete variant가 없어 실제 키 이벤트와 절대 매칭되지 않는 죽은 설정이다. AppKit bridge가 실제 function/delete event를 넘기는 PR에서 `terminal.Key` 타입과 byte 인코딩을 함께 확장한다.
+- 기능키(Home/End/Insert/Delete/PageUp/PageDown/F1~F12)는 `terminal.Key` 변형 + `encodeKey`의 xterm legacy 인코딩(편집키 `CSI ~`, Home/End는 DECCKM, F1~F4 SS3·F5~F12 `CSI ~`) + 키바인딩 매핑(`keyNameFromTerminalKey`, KeyName/parseKey)으로 구현돼 설정 바인딩이 실제 이벤트와 매칭된다(순수 Zig, Linux CI 단위 테스트). **단 AppKit bridge가 아직 이 keyCode들을 ABI로 넘기지 않아 물리 키 동작은 다음 PR(ABI KeyCode + Swift normalizedKeyEvent 매핑)에서 연결한다.** F13~F24와 modifier 조합(`CSI 1;{mod}~`)·CSI-u/Kitty는 후속.
 - 실제 TOML 파일 parser, runtime reload, 설정 UI는 아직 없다.
 
 ## 충돌 규칙

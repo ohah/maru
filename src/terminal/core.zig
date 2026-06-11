@@ -90,6 +90,8 @@ pub const TerminalCore = struct {
     cursor_blink: bool = true,
     saved_cells: []types.Cell = &.{},
     saved_wrapped: []bool = &.{},
+    // alt screen 전환 때 primary의 OSC 133 행 태그를 보관(saved_wrapped와 같은 슬롯 패턴).
+    saved_prompt_marks: []types.SemanticPrompt = &.{},
     // DECSC/DECRC + 1048/1049가 쓰는 저장 커서. xterm처럼 화면(primary/alt)마다 별도 슬롯을 둔다 —
     // 한 슬롯을 공유하면 TUI가 alt 안에서 ESC 7/8을 쓸 때 1049가 저장한 셸 커서가 덮여, 종료 시
     // 프롬프트가 엉뚱한 위치(예: 화면 맨 위)로 복원된다.
@@ -105,6 +107,17 @@ pub const TerminalCore = struct {
     // false로 리셋된다(redraw가 스스로 교정됨). resize 시 reflow가 이 플래그로 논리 줄을 잇는다.
     // 길이는 항상 size.rows.
     wrapped: []bool = &.{},
+    // 활성 화면의 행별 OSC 133 semantic 분류(길이=size.rows). `wrapped`와 같은 병렬 배열 패턴이지만
+    // 결정적 차이: glyph 쓰기(putCell)로 리셋하지 않는다 — 셸이 프롬프트를 redraw해도 그 행의
+    // 프롬프트/입력/출력 분류는 유지돼야 한다. 상태 머신(semantic_state)·scroll·clear·OSC 마커만
+    // 이 배열을 건드린다. OSC 133 마킹이 없으면 전부 .unknown이다.
+    prompt_marks: []types.SemanticPrompt = &.{},
+    // 현재 활성 중인 semantic 영역(OSC 133 A→prompt, B→input, C→command, D→unknown). lineFeed가
+    // 다음 행에 이 값을 전파해 여러 줄 프롬프트/출력이 전부 태깅된다.
+    semantic_state: types.SemanticPrompt = .unknown,
+    // 가장 최근에 끝난 명령의 종료코드(OSC 133 ; D ; <code>, 없으면 null). shell이 음수도 보낼 수
+    // 있어 i32. 이후 단계가 프롬프트 거터에 ✓/✗로 투영한다.
+    last_command_exit: ?i32 = null,
     // 스크롤백: 화면 위로 밀려난(scroll된) 맨 윗줄을 보관한다. ring buffer로, 가장 오래된 행이
     // sb_head, 보관 개수가 sb_count다. 슬롯 버퍼를 재사용해 scroll마다 alloc 없이 memcpy만 하므로
     // 출력 hot path(매 줄 scroll)를 느리게 하지 않는다. 과거를 스크롤해서 보는 뷰포트와 reflow는
@@ -113,6 +126,10 @@ pub const TerminalCore = struct {
     // 각 스크롤백 행의 soft-wrap 플래그. scrollback과 병렬 ring(같은 max_scrollback 길이, 같은
     // (sb_head+i)%len 인덱싱). 슬롯 cell 버퍼 재사용 경로를 건드리지 않는 평평한 []bool이다.
     sb_wrapped: []bool = &.{},
+    // 각 스크롤백 행의 OSC 133 semantic 태그. scrollback/sb_wrapped와 병렬 ring(같은 max_scrollback
+    // 길이, 같은 (sb_head+i)%len 인덱싱). 세 ring의 길이는 항상 같아야 한다(pushScrollback이 함께
+    // 할당). 스크롤백으로 밀려난 프롬프트/출력 행의 분류를 보존한다.
+    sb_prompt_marks: []types.SemanticPrompt = &.{},
     sb_head: usize = 0,
     sb_count: usize = 0,
     max_scrollback: usize = default_max_scrollback,
@@ -145,6 +162,9 @@ pub const TerminalCore = struct {
     // 스크롤된(view_offset>0) 상태의 렌더용 합성 버퍼(rows×cols). renderSnapshot이 뷰포트 윈도를
     // 여기에 합성한다. view_offset==0이면 안 쓰므로 lazy 할당한다(스크롤할 때만 메모리 사용).
     viewport_cells: []types.Cell = &.{},
+    // 스크롤된 뷰포트의 행별 OSC 133 태그(viewport_cells와 병렬, rows 길이). renderSnapshot이
+    // 보이는 행에 맞춰 합성한다. view_offset==0이면 안 쓰므로 lazy 할당한다.
+    viewport_prompt_marks: []types.SemanticPrompt = &.{},
     // resize reflow가 출력 행을 누적하는 재사용 스크래치(grow-only, rows×cols). 매 resize에
     // ArrayList를 새로 키우지 않도록 struct에 들고 다닌다 — core_resize_loop perf 예산을 지키려면
     // alloc churn을 없애야 한다(되돌린 구현이 ArrayList realloc으로 예산을 깼다).
@@ -166,12 +186,15 @@ pub const TerminalCore = struct {
         @memset(cells, .{});
         const wrapped = try allocator.alloc(bool, grid.rows);
         @memset(wrapped, false);
+        const prompt_marks = try allocator.alloc(types.SemanticPrompt, grid.rows);
+        @memset(prompt_marks, .unknown);
 
         return .{
             .allocator = allocator,
             .size = grid,
             .cells = cells,
             .wrapped = wrapped,
+            .prompt_marks = prompt_marks,
             .dirty = fullDirty(grid),
             .scroll_bottom = grid.rows - 1,
         };
@@ -192,6 +215,9 @@ pub const TerminalCore = struct {
         if (self.alt_active) self.leaveAltScreen(false);
         @memset(self.cells, .{});
         @memset(self.wrapped, false);
+        @memset(self.prompt_marks, .unknown);
+        self.semantic_state = .unknown;
+        self.last_command_exit = null;
         self.clearScrollback(); // sb 비우기 + 선택 해제
         self.clearLinkStore();
         self.cursor = .{};
@@ -215,14 +241,18 @@ pub const TerminalCore = struct {
         self.link_ids.deinit(self.allocator);
         self.allocator.free(self.cells);
         if (self.wrapped.len > 0) self.allocator.free(self.wrapped);
+        if (self.prompt_marks.len > 0) self.allocator.free(self.prompt_marks);
         if (self.saved_cells.len > 0) self.allocator.free(self.saved_cells);
         if (self.saved_wrapped.len > 0) self.allocator.free(self.saved_wrapped);
+        if (self.saved_prompt_marks.len > 0) self.allocator.free(self.saved_prompt_marks);
         for (self.scrollback) |slot| {
             if (slot) |cells| self.allocator.free(cells);
         }
         if (self.scrollback.len > 0) self.allocator.free(self.scrollback);
         if (self.sb_wrapped.len > 0) self.allocator.free(self.sb_wrapped);
+        if (self.sb_prompt_marks.len > 0) self.allocator.free(self.sb_prompt_marks);
         if (self.viewport_cells.len > 0) self.allocator.free(self.viewport_cells);
+        if (self.viewport_prompt_marks.len > 0) self.allocator.free(self.viewport_prompt_marks);
         if (self.reflow_cells.len > 0) self.allocator.free(self.reflow_cells);
         if (self.reflow_wrapped.len > 0) self.allocator.free(self.reflow_wrapped);
         self.response.deinit(self.allocator);
@@ -284,12 +314,26 @@ pub const TerminalCore = struct {
         return self.cells[start .. start + self.size.cols];
     }
 
+    /// 보이는 행 r의 OSC 133 semantic 태그(viewportRow와 같은 [스크롤백 ++ 활성] 윈도 인덱싱).
+    pub fn viewportRowPrompt(self: *const TerminalCore, r: u16) types.SemanticPrompt {
+        const ci = self.sb_count - self.view_offset + r;
+        if (ci < self.sb_count) return self.scrollbackRowPrompt(ci);
+        return self.prompt_marks[ci - self.sb_count];
+    }
+
     /// scroll로 위로 밀려나는 맨 윗줄을 스크롤백 ring에 보관한다. 슬롯 버퍼를 재사용해(같은 길이면
     /// memcpy만) 매 scroll에 alloc하지 않는다. OOM이면 그 행은 보관하지 않고 넘어간다(best-effort).
     /// i=0이 가장 오래된 스크롤백 행의 soft-wrap 플래그.
     pub fn scrollbackRowWrapped(self: *const TerminalCore, i: usize) bool {
         if (i >= self.sb_count or self.sb_wrapped.len == 0) return false;
         return self.sb_wrapped[(self.sb_head + i) % self.sb_wrapped.len];
+    }
+
+    /// i번째 스크롤백 행의 OSC 133 semantic 태그(i=0이 가장 오래된 행). sb_wrapped와 같은 ring
+    /// 인덱싱. 없거나 범위 밖이면 .unknown.
+    pub fn scrollbackRowPrompt(self: *const TerminalCore, i: usize) types.SemanticPrompt {
+        if (i >= self.sb_count or self.sb_prompt_marks.len == 0) return .unknown;
+        return self.sb_prompt_marks[(self.sb_head + i) % self.sb_prompt_marks.len];
     }
 
     /// 붙여넣기 바이트를 PTY 입력으로 인코딩한다: 개행을 CR로 정규화(\r\n/\n -> \r — 셸 입력의
@@ -890,19 +934,27 @@ pub const TerminalCore = struct {
 
     /// 행을 스크롤백에 보관한다. OOM 등으로 실제 보관에 실패하면 false — 호출자(scroll-lock)는
     /// 보관된 경우에만 view_offset을 보정해야 보던 위치가 어긋나지 않는다.
-    fn pushScrollback(self: *TerminalCore, row_cells: []const types.Cell, wrapped_flag: bool) bool {
+    fn pushScrollback(self: *TerminalCore, row_cells: []const types.Cell, wrapped_flag: bool, mark: types.SemanticPrompt) bool {
         if (self.max_scrollback == 0) return false;
         if (self.scrollback.len == 0) {
             const ring = self.allocator.alloc(?[]types.Cell, self.max_scrollback) catch return false;
             @memset(ring, null);
-            // wrap 병렬 ring도 함께 할당한다. 실패하면 둘 다 포기해 두 ring 길이를 항상 같게 유지한다.
+            // wrap·semantic 병렬 ring도 함께 할당한다. 하나라도 실패하면 전부 포기해 세 ring 길이를
+            // 항상 같게 유지한다((sb_head+i)%len 인덱싱이 어긋나면 안 된다).
             const wring = self.allocator.alloc(bool, self.max_scrollback) catch {
                 self.allocator.free(ring);
                 return false;
             };
             @memset(wring, false);
+            const pring = self.allocator.alloc(types.SemanticPrompt, self.max_scrollback) catch {
+                self.allocator.free(ring);
+                self.allocator.free(wring);
+                return false;
+            };
+            @memset(pring, .unknown);
             self.scrollback = ring;
             self.sb_wrapped = wring;
+            self.sb_prompt_marks = pring;
         }
         const cap = self.scrollback.len;
         // 가득 차면 (sb_head+sb_count)%cap == sb_head라, 가장 오래된 슬롯을 재사용해 덮어쓴다.
@@ -919,6 +971,7 @@ pub const TerminalCore = struct {
             self.scrollback[idx] = self.allocator.dupe(types.Cell, row_cells) catch return false;
         }
         self.sb_wrapped[idx] = wrapped_flag;
+        self.sb_prompt_marks[idx] = mark;
         if (self.sb_count == cap) {
             self.sb_head = (self.sb_head + 1) % cap;
             // ring이 가득 차 가장 오래된 행이 밀려나면 절대 행 좌표가 한 칸 당겨진다 — 선택도
@@ -1006,15 +1059,21 @@ pub const TerminalCore = struct {
         }
     }
 
-    /// 종료된 OSC 내용을 해석한다. 현재 OSC 8(하이퍼링크)만 적용한다:
-    /// `8 ; params ; URI` — URI가 비면 링크 닫기, 있으면 열기(이후 출력 셀에 id가 찍힌다).
+    /// 종료된 OSC 내용을 코드별로 분기한다. 현재 OSC 8(하이퍼링크)·OSC 133(semantic prompt)을 적용한다.
+    fn dispatchOsc(self: *TerminalCore) void {
+        if (self.osc_overflow) return; // 2048 버퍼를 넘긴 OSC는 통째로 무시(거대/악의적 시퀀스 방어)
+        const body = self.osc_buffer[0..self.osc_len];
+        if (std.mem.startsWith(u8, body, "8;")) {
+            self.dispatchOscHyperlink(body[2..]);
+        } else if (std.mem.startsWith(u8, body, "133;")) {
+            self.dispatchOscSemanticPrompt(body[4..]);
+        }
+    }
+
+    /// OSC 8: `8 ; params ; URI` — URI가 비면 링크 닫기, 있으면 열기(이후 출력 셀에 id가 찍힌다).
     /// params(`id=...` 등)는 무시한다(xterm ctlseqs의 OSC 8 확장 — 시각 묶음 힌트일 뿐).
     /// URI 안의 ';'는 보존된다(두 번째 구분자 이후 전부 URI).
-    fn dispatchOsc(self: *TerminalCore) void {
-        if (self.osc_overflow) return;
-        const body = self.osc_buffer[0..self.osc_len];
-        if (!std.mem.startsWith(u8, body, "8;")) return;
-        const after_code = body[2..];
+    fn dispatchOscHyperlink(self: *TerminalCore, after_code: []const u8) void {
         const params_end = std.mem.indexOfScalar(u8, after_code, ';') orelse return;
         const uri = after_code[params_end + 1 ..];
         if (uri.len == 0) {
@@ -1022,6 +1081,43 @@ pub const TerminalCore = struct {
             return;
         }
         self.pen_link = self.internLink(uri) catch 0; // OOM이면 링크 없이 출력(텍스트는 보존)
+    }
+
+    /// OSC 133(semantic prompt): 셸이 프롬프트/입력/출력 경계를 마킹한다. `133 ; <action> [; opts]`.
+    /// 명세: freedesktop semantic-prompts.md(FinalTerm 발) + kitty/Ghostty 확장. 동작 비교만 했고
+    /// 레퍼런스 코드 표현은 옮기지 않았다(clean-room). 옵션은 liberal하게 파싱 — 모르는 키는 무시한다.
+    ///   A/P = 프롬프트 시작, B = 프롬프트 끝·입력 시작, C = 입력 끝·출력 시작, D[;code] = 명령 끝.
+    /// 각 마커는 현재 커서 행을 그 영역으로 태깅하고 semantic_state를 갱신한다(lineFeed가 다음 행에
+    /// 전파). D는 행을 태깅하지 않고 종료코드만 기록한 뒤 영역을 닫는다(.unknown).
+    fn dispatchOscSemanticPrompt(self: *TerminalCore, rest: []const u8) void {
+        if (rest.len == 0) return;
+        const action = rest[0];
+        // action 뒤에 내용이 더 있으면 반드시 ';'로 시작해야 한다(아니면 `Pextra`류 — invalid).
+        if (rest.len > 1 and rest[1] != ';') return;
+        const opts: []const u8 = if (rest.len > 2) rest[2..] else "";
+        switch (action) {
+            // A(fresh_line_new_prompt)·P(prompt_start) — PR1은 동일 취급(prompt_kind 옵션은 파싱·무시).
+            'A', 'P' => {
+                self.semantic_state = .prompt;
+                self.prompt_marks[self.cursor.row] = .prompt;
+            },
+            'B' => {
+                self.semantic_state = .input;
+                self.prompt_marks[self.cursor.row] = .input;
+            },
+            'C' => {
+                self.semantic_state = .command;
+                self.prompt_marks[self.cursor.row] = .command;
+            },
+            'D' => {
+                // 첫 ';' 구분 토큰을 종료코드로(없거나 정수 아니면 이전 값 유지 — 명세상 D는 code 없이도 옴).
+                const first = if (std.mem.indexOfScalar(u8, opts, ';')) |s| opts[0..s] else opts;
+                if (std.fmt.parseInt(i32, first, 10) catch null) |code| self.last_command_exit = code;
+                self.semantic_state = .unknown; // 명령 끝 — 영역을 닫는다(커서 행은 태깅하지 않음)
+            },
+            // L(fresh_line)·I·N 등은 수용하되 무동작(분류 상태 변화 없음).
+            else => {},
+        }
     }
 
     /// URI를 link_store에 intern하고 id(인덱스+1)를 돌려준다. 같은 URI는 한 번만 저장된다 —
@@ -1302,13 +1398,22 @@ pub const TerminalCore = struct {
             return;
         };
         @memset(alt_wrapped, false);
+        const alt_prompt_marks = self.allocator.alloc(types.SemanticPrompt, self.size.rows) catch {
+            self.allocator.free(alt_cells);
+            self.allocator.free(alt_wrapped);
+            return;
+        };
+        @memset(alt_prompt_marks, .unknown);
 
-        // 두 할당이 성공한 뒤에야 상태를 바꾼다(OOM 경로가 저장 슬롯을 오염시키지 않게).
+        // 세 할당이 성공한 뒤에야 상태를 바꾼다(OOM 경로가 저장 슬롯을 오염시키지 않게).
         if (save_cursor) self.saveCursorState(); // primary 슬롯(아직 alt_active=false)
         self.saved_cells = self.cells;
         self.saved_wrapped = self.wrapped;
+        self.saved_prompt_marks = self.prompt_marks; // primary의 OSC 133 분류 보관
         self.cells = alt_cells;
         self.wrapped = alt_wrapped;
+        self.prompt_marks = alt_prompt_marks; // alt 화면은 셸 프롬프트 의미가 없다(전부 .unknown)
+        self.semantic_state = .unknown; // alt 진입 — primary의 진행 중 영역을 이어받지 않는다
         self.alt_active = true;
         // alt에서 스크롤백 뷰는 잠긴다 — 보고 있던 과거는 닫는다. 선택도 해제(활성 cells가 alt로
         // 바뀌어 abs>=sb_count 좌표가 다른 내용을 가리키므로 — xterm.js도 버퍼 전환 시 선택 해제).
@@ -1331,10 +1436,14 @@ pub const TerminalCore = struct {
         }
         self.allocator.free(self.cells);
         self.allocator.free(self.wrapped);
+        if (self.prompt_marks.len > 0) self.allocator.free(self.prompt_marks);
         self.cells = self.saved_cells;
         self.wrapped = self.saved_wrapped;
+        self.prompt_marks = self.saved_prompt_marks; // primary 분류 복원
         self.saved_cells = &.{};
         self.saved_wrapped = &.{};
+        self.saved_prompt_marks = &.{};
+        self.semantic_state = .unknown; // primary 복귀 — 진행 중 영역을 이어받지 않는다(다음 프롬프트가 재마킹)
         self.alt_active = false;
         self.pending_wrap = false;
         self.last_print = null;
@@ -1615,6 +1724,8 @@ pub const TerminalCore = struct {
             2, 3 => {
                 @memset(self.cells, blank);
                 @memset(self.wrapped, false);
+                @memset(self.prompt_marks, .unknown); // 전체 clear는 OSC 133 분류도 지운다
+                self.semantic_state = .unknown; // 진행 중 영역도 끝낸다(셸이 곧 프롬프트를 재마킹)
                 if (mode == 3) self.clearScrollback();
                 self.dirty = fullDirty(self.size);
             },
@@ -1738,22 +1849,35 @@ pub const TerminalCore = struct {
             errdefer self.allocator.free(new_wrapped);
             @memset(new_wrapped, false);
             const new_saved_wrapped = try self.allocator.alloc(bool, new_rows);
+            errdefer self.allocator.free(new_saved_wrapped);
             @memset(new_saved_wrapped, false);
+            const new_prompt_marks = try self.allocator.alloc(types.SemanticPrompt, new_rows);
+            errdefer self.allocator.free(new_prompt_marks);
+            @memset(new_prompt_marks, .unknown);
+            const new_saved_prompt_marks = try self.allocator.alloc(types.SemanticPrompt, new_rows);
+            @memset(new_saved_prompt_marks, .unknown);
             // 살아남는 행의 soft-wrap 플래그는 보존한다. 특히 saved primary의 것을 버리면 복귀 후
             // 리사이즈에서 긴 wrap 줄이 영영 재합쳐지지 않는다(alt 것은 TUI가 다시 그리지만 동일
-            // 규칙로 보존). 폭이 줄어 행이 clip돼도 논리 연속성 자체는 유지된다.
+            // 규칙로 보존). 폭이 줄어 행이 clip돼도 논리 연속성 자체는 유지된다. OSC 133 태그도 같은
+            // 규칙으로 보존한다(저장된 primary의 프롬프트 분류가 복귀 후에도 살아 있어야 한다).
             const keep_rows = @min(old_rows, new_rows);
             @memcpy(new_wrapped[0..keep_rows], self.wrapped[0..keep_rows]);
             @memcpy(new_saved_wrapped[0..keep_rows], self.saved_wrapped[0..keep_rows]);
+            if (self.prompt_marks.len >= keep_rows) @memcpy(new_prompt_marks[0..keep_rows], self.prompt_marks[0..keep_rows]);
+            if (self.saved_prompt_marks.len >= keep_rows) @memcpy(new_saved_prompt_marks[0..keep_rows], self.saved_prompt_marks[0..keep_rows]);
 
             self.allocator.free(self.cells);
             self.allocator.free(self.saved_cells);
             if (self.wrapped.len > 0) self.allocator.free(self.wrapped);
             if (self.saved_wrapped.len > 0) self.allocator.free(self.saved_wrapped);
+            if (self.prompt_marks.len > 0) self.allocator.free(self.prompt_marks);
+            if (self.saved_prompt_marks.len > 0) self.allocator.free(self.saved_prompt_marks);
             self.cells = new_alt;
             self.saved_cells = new_saved;
             self.wrapped = new_wrapped;
             self.saved_wrapped = new_saved_wrapped;
+            self.prompt_marks = new_prompt_marks;
+            self.saved_prompt_marks = new_saved_prompt_marks;
             self.size = next_size;
             self.scroll_top = 0;
             self.scroll_bottom = new_rows - 1;
@@ -1902,14 +2026,20 @@ pub const TerminalCore = struct {
         errdefer self.allocator.free(next_cells);
         @memset(next_cells, .{});
         const next_wrapped = try self.allocator.alloc(bool, new_rows);
+        errdefer self.allocator.free(next_wrapped); // 아래 next_prompt_marks alloc 실패 시 누수 방지
         @memset(next_wrapped, false);
+        // OSC 133 태그: reflow 너머로 태그를 옮기는 정밀 carry는 PR3(reflow 정확화)로 미룬다. PR1은
+        // reflow된 행을 .unknown으로 둔다 — 누수/크래시 없이(길이/값 유효) resize 후 태그만 부정확.
+        // 비-resize 스크롤(scrollRangeUp)은 태그를 정상 보존하므로, 분류 손실은 resize 이벤트 한정.
+        const next_prompt_marks = try self.allocator.alloc(types.SemanticPrompt, new_rows);
+        @memset(next_prompt_marks, .unknown);
 
         // 밀려나는 위쪽 콘텐츠 행을 그 wrap 플래그와 함께 스크롤백으로(가장 오래된 것부터). 빈 행은
-        // 스크롤백을 오염시키므로 보관하지 않는다(빈 화면 resize 등).
+        // 스크롤백을 오염시키므로 보관하지 않는다(빈 화면 resize 등). OSC 133 태그는 .unknown(위 참고).
         var pr: usize = 0;
         while (pr < push_count) : (pr += 1) {
             if (!outputRowBlank(scratch, pr, new_cols)) {
-                const pushed = self.pushScrollback(scratch[pr * new_cols ..][0..new_cols], swrap[pr]);
+                const pushed = self.pushScrollback(scratch[pr * new_cols ..][0..new_cols], swrap[pr], .unknown);
                 // 과거를 보는 중이면 새로 밀려든 행만큼 offset도 올린다(scroll-lock — 보던 내용 유지).
                 if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
             }
@@ -1927,9 +2057,12 @@ pub const TerminalCore = struct {
 
         self.allocator.free(self.cells);
         if (self.wrapped.len > 0) self.allocator.free(self.wrapped);
+        if (self.prompt_marks.len > 0) self.allocator.free(self.prompt_marks);
         self.size = next_size;
         self.cells = next_cells;
         self.wrapped = next_wrapped;
+        self.prompt_marks = next_prompt_marks;
+        self.semantic_state = .unknown; // reflow가 영역 경계를 흐리므로 상태 머신도 리셋(다음 프롬프트가 재마킹)
         // scroll region margin은 화면 크기에 묶이므로 resize 때 전체로 리셋한다(xterm 동작).
         self.scroll_top = 0;
         self.scroll_bottom = new_rows - 1;
@@ -1965,6 +2098,8 @@ pub const TerminalCore = struct {
             .cursor_shape = self.cursor_shape,
             .cursor_blink = self.cursor_blink,
             .cells = self.cells,
+            .prompt_marks = self.prompt_marks, // 활성 화면 행 태그를 그대로 빌려준다(zero-copy)
+            .last_command_exit = self.last_command_exit,
             .dirty = self.dirty,
         };
     }
@@ -1988,6 +2123,14 @@ pub const TerminalCore = struct {
                 return self.snapshot(); // OOM이면 활성 화면으로 폴백(스크롤 뷰 포기)
             };
         }
+        // 행별 OSC 133 태그도 보이는 윈도에 맞춰 합성한다(viewport_cells와 병렬, rows 길이).
+        if (self.viewport_prompt_marks.len != self.size.rows) {
+            if (self.viewport_prompt_marks.len > 0) self.allocator.free(self.viewport_prompt_marks);
+            self.viewport_prompt_marks = self.allocator.alloc(types.SemanticPrompt, self.size.rows) catch {
+                self.viewport_prompt_marks = &.{};
+                return self.snapshot();
+            };
+        }
 
         const cols = self.size.cols;
         var r: u16 = 0;
@@ -2000,6 +2143,7 @@ pub const TerminalCore = struct {
             // 스크롤백 행이 현재 폭보다 넓게 저장돼 clip되면 마지막 칸의 wide glyph base가 잘려
             // half-glyph로 렌더될 수 있다 — resize 경로와 같은 정리를 적용한다.
             clearTruncatedWideBase(dst);
+            self.viewport_prompt_marks[r] = self.viewportRowPrompt(r);
         }
 
         return .{
@@ -2007,6 +2151,8 @@ pub const TerminalCore = struct {
             // 과거를 보는 중엔 활성 커서가 화면 밖(아래)에 가려져 있으므로 커서를 숨긴다.
             .cursor = .{ .row = 0, .col = 0, .visible = false },
             .cells = self.viewport_cells,
+            .prompt_marks = self.viewport_prompt_marks,
+            .last_command_exit = self.last_command_exit,
             .dirty = self.dirty,
         };
     }
@@ -2052,6 +2198,8 @@ pub const TerminalCore = struct {
             // 둬 후속(후보창 배치 등)이 참조할 수 있게 하되 그리지는 않는다.
             .cursor = .{ .row = row, .col = @min(cursor_col, self.size.cols - 1), .visible = false },
             .cells = self.viewport_cells,
+            .prompt_marks = self.prompt_marks, // preedit은 행 태그를 바꾸지 않는다(활성 그대로)
+            .last_command_exit = self.last_command_exit,
             .dirty = self.dirty,
         };
     }
@@ -2404,6 +2552,9 @@ pub const TerminalCore = struct {
             const old_cursor = self.cursor;
             self.cursor.row += 1;
             self.markCursorMoveDirty(old_cursor, self.cursor);
+            // OSC 133 영역이 활성이면(프롬프트/입력/출력) 다음 행에 전파한다 — 여러 줄 프롬프트·출력이
+            // 전부 같은 분류로 태깅된다. unknown 상태에선 기존 태그를 지우지 않는다(분류 보존).
+            if (self.semantic_state != .unknown) self.prompt_marks[self.cursor.row] = self.semantic_state;
         }
     }
 
@@ -2450,10 +2601,15 @@ pub const TerminalCore = struct {
         // 부분 region 스크롤·DL(push 없음)은 활성 영역 안에서 행만 옮겨 abs 좌표가 어긋나므로 해제.
         if (!(push_history and top == 0 and bottom == self.size.rows - 1)) self.invalidateSelection();
 
+        // 전체 화면 LF 스크롤일 때만 새로 생기는 맨 아래 blank 행이 현재 semantic 영역에 속한다
+        // (커서가 거기로 이어져 명령 출력 등이 계속된다). 부분 region 스크롤·IL/DL의 빈 행은 .unknown.
+        const lf_scroll = push_history and top == 0 and bottom == self.size.rows - 1;
+
         if (push_history) {
             var pr: u16 = 0;
             while (pr < n) : (pr += 1) {
-                const pushed = self.pushScrollback(self.cells[self.index(top + pr, 0)..][0..self.size.cols], self.wrapped[top + pr]);
+                // 밀려나는 행의 OSC 133 태그도 함께 스크롤백으로 보낸다(분류 보존).
+                const pushed = self.pushScrollback(self.cells[self.index(top + pr, 0)..][0..self.size.cols], self.wrapped[top + pr], self.prompt_marks[top + pr]);
                 // 과거를 보는 중(view_offset>0)이면 같은 내용을 계속 보도록 offset도 올린다
                 // (scroll-lock). 보관 실패(OOM) 시엔 보정하지 않는다 — 뷰가 내용과 어긋나지 않게.
                 if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
@@ -2469,6 +2625,7 @@ pub const TerminalCore = struct {
                 self.cells[src_start .. src_start + self.size.cols],
             );
             self.wrapped[row - n] = self.wrapped[row];
+            self.prompt_marks[row - n] = self.prompt_marks[row]; // 태그를 옮긴 내용과 함께 끌어온다
         }
 
         var blank_row: u16 = bottom + 1 - n;
@@ -2476,6 +2633,7 @@ pub const TerminalCore = struct {
             const blank_start = self.index(blank_row, 0);
             @memset(self.cells[blank_start .. blank_start + self.size.cols], .{});
             self.wrapped[blank_row] = false;
+            self.prompt_marks[blank_row] = if (lf_scroll) self.semantic_state else .unknown;
         }
         // 범위 경계의 wrap 정합: shift가 old wrapped[bottom]("old bottom ↔ bottom+1" — 범위 밖과의
         // 연속)을 bottom-n으로 끌어왔는데, bottom+1은 안 움직였으니 그 연속은 깨졌다. 마찬가지로
@@ -4701,4 +4859,181 @@ test "backspace + overwrite renders word deletion (zsh meta-DEL response)" {
     defer std.testing.allocator.free(line);
     try std.testing.expect(std.mem.startsWith(u8, line, "foo bar    ")); // baz가 공백으로
     try std.testing.expectEqual(@as(u16, 8), core.cursor.col); // "foo bar " 다음(baz 시작)
+}
+
+// ── OSC 133 semantic prompt ────────────────────────────────────────────────────────────────────
+
+test "OSC 133: A/B/C tag the cursor row and update state (ST + BEL terminators)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x1b\\"); // ST 종료
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0]);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.semantic_state);
+    try core.write("\x1b]133;B\x07"); // BEL 종료 — 같은 행을 최신 마커로 덮어쓴다
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[0]);
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.semantic_state);
+    try core.write("\x1b]133;C\x1b\\");
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.prompt_marks[0]);
+}
+
+test "OSC 133: regions tag distinct rows via line-feed propagation" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 5 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x1b\\"); // row0 = prompt
+    try core.write("\r\n"); // row1 ← prompt 전파
+    try core.write("\x1b]133;B\x1b\\"); // row1 = input
+    try core.write("\r\n"); // row2 ← input 전파
+    try core.write("\x1b]133;C\x1b\\"); // row2 = command
+    try core.write("\r\nout"); // row3 ← command 전파
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0]);
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[1]);
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.prompt_marks[2]);
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.prompt_marks[3]);
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[4]); // 영역 밖
+}
+
+test "OSC 133: a multi-row prompt propagates prompt to every line" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x1b\\"); // row0 = prompt
+    try core.write("\n\n"); // LF×2 → row1·row2 ← prompt 전파
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0]);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[1]);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[2]);
+    try core.write("\x1b]133;B\x1b\\"); // 현재 행(row2)만 input으로
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[2]);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[1]); // 앞 행은 유지
+}
+
+test "OSC 133: autowrap continuation keeps the tag (glyph writes do NOT reset it)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 4 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x1b\\");
+    try core.write("abcdef"); // abcd|ef soft-wrap: row0 채움 → 자동 wrap → row1
+    try std.testing.expect(core.wrapped[0]); // soft-wrap 표시
+    // 핵심: 글자 쓰기가 태그를 리셋하지 않는다(wrapped와 다른 점). 두 행 모두 prompt.
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0]);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[1]);
+}
+
+test "OSC 133: D decodes the exit code; bare/invalid leaves it unchanged" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b]133;D;0\x07");
+    try std.testing.expectEqual(@as(?i32, 0), core.last_command_exit);
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.semantic_state); // 영역 닫힘
+    try core.write("\x1b]133;D;12;aid=foo\x07"); // 첫 토큰만 코드, 나머지 옵션 무시
+    try std.testing.expectEqual(@as(?i32, 12), core.last_command_exit);
+    try core.write("\x1b]133;D;-1\x07"); // 음수 허용
+    try std.testing.expectEqual(@as(?i32, -1), core.last_command_exit);
+    try core.write("\x1b]133;D\x07"); // 코드 없음 → 이전 값 유지
+    try std.testing.expectEqual(@as(?i32, -1), core.last_command_exit);
+    try core.write("\x1b]133;D;abc\x07"); // 정수 아님 → 유지
+    try std.testing.expectEqual(@as(?i32, -1), core.last_command_exit);
+}
+
+test "OSC 133: D resets state so the next row is not tagged" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    try core.write("\x1b]133;C\x1b\\"); // state=command
+    try core.write("\x1b]133;D;0\x07"); // state=unknown
+    try core.write("\r\nx"); // 다음 행은 전파되지 않아야 한다
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[1]);
+}
+
+test "OSC 133: a tagged row scrolled off carries its tag into scrollback" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x1b\\"); // row0 = prompt
+    try core.write("X"); // 글자(태그 유지)
+    try core.write("\x1b]133;D;0\x07"); // state=unknown (이후 행은 태깅 안 됨)
+    try core.write("\r\n\r\n"); // 두 번째 LF가 바닥에서 scroll → row0(prompt)이 스크롤백으로
+    try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen());
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.scrollbackRowPrompt(0));
+}
+
+test "OSC 133: RIS clears all tags, exit code, and state" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x1b\\X\x1b]133;D;5\x07");
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0]);
+    try std.testing.expectEqual(@as(?i32, 5), core.last_command_exit);
+    try core.write("\x1bc"); // RIS
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0]);
+    try std.testing.expectEqual(@as(?i32, null), core.last_command_exit);
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.semantic_state);
+}
+
+test "OSC 133: erase-in-display mode 2 clears tags" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x1b\\");
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0]);
+    try core.write("\x1b[2J");
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0]);
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.semantic_state);
+}
+
+test "OSC 133: alt screen is isolated; primary tags survive the round trip" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x1b\\"); // primary row0 = prompt
+    try core.write("\x1b[?1049h"); // alt 진입
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0]); // alt는 비분류
+    try core.write("\x1b]133;C\x1b\\"); // alt row0 = command
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.prompt_marks[0]);
+    try core.write("\x1b[?1049l"); // primary 복귀
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0]); // primary 분류 복원
+}
+
+test "OSC 133: liberal option parsing ignores unknown keys" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b]133;A;aid=14;cl=line;k=i\x07"); // 모르는 옵션 무시, 여전히 prompt
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0]);
+    try core.write("\x1b]133;B;barekey\x07"); // 정수 아닌 옵션도 무해
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[0]);
+}
+
+test "OSC 133: malformed or unknown action is ignored" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b]133;Pextra\x07"); // action 뒤 ';' 없는 잉여 내용 → invalid
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0]);
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.semantic_state);
+    try core.write("\x1b]133;Z\x07"); // 모르는 action → no-op
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0]);
+}
+
+test "OSC 133: an overflowing sequence is ignored, later OSC still works" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    var big: [2100]u8 = undefined;
+    @memset(&big, 'x');
+    try core.write("\x1b]133;A;"); // OSC 시작
+    try core.write(&big); // 2048 버퍼 초과 → osc_overflow
+    try core.write("\x07"); // 종료 — overflow라 dispatch가 무시
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0]); // 태깅 안 됨
+    try core.write("\x1b]133;A\x07"); // 다음 OSC는 정상 동작(overflow 리셋)
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0]);
+}
+
+test "OSC 133: snapshot exposes prompt_marks and last_command_exit (non-scrolled)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x1b\\X\x1b]133;D;3\x07");
+    const snap = core.snapshot();
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, snap.prompt_marks[0]);
+    try std.testing.expectEqual(@as(?i32, 3), snap.last_command_exit);
+}
+
+test "OSC 133: renderSnapshot composes prompt_marks for the scrolled viewport" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x1b\\"); // row0 = prompt
+    try core.write("X\x1b]133;D;0\x07"); // 태그 고정 + state 닫기
+    try core.write("\r\n\r\n"); // row0(prompt) → 스크롤백
+    core.scrollViewport(1); // 한 줄 위로: 윗줄에 스크롤백(prompt)
+    const snap = core.renderSnapshot();
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, snap.prompt_marks[0]);
 }

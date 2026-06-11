@@ -39,6 +39,19 @@ pub const Cell = struct {
     link: u32 = 0,
 };
 
+/// OSC 133 semantic prompt — 셸이 알려주는 한 행의 의미 분류. 터미널은 raw 바이트만 봐선
+/// 프롬프트/입력/출력을 구분 못 하므로, 셸 통합이 `OSC 133 ; A|B|C|D`로 경계를 마킹한다.
+/// 행 단위로 보관(`wrapped`와 같은 병렬 배열 패턴)해, 이후 단계가 거터 마크(✓/✗)·프롬프트
+/// 점프·출력 선택·reflow 정확화에 쓴다. 명세: freedesktop semantic-prompts.md(FinalTerm 발).
+/// 주의: `wrapped`와 달리 glyph 쓰기(putCell)로 리셋되지 않는다 — 셸이 프롬프트를 다시 그려도
+/// 그 행의 분류는 유지돼야 하기 때문이다.
+pub const SemanticPrompt = enum(u8) {
+    unknown, // OSC 133 분류 없음(모든 행 기본값)
+    prompt, // A(또는 P)~B 사이 — 프롬프트 텍스트 자체
+    input, // B~C 사이 — 사용자가 친 명령줄
+    command, // C~D 사이 — 실행 중인 명령의 출력
+};
+
 /// Iterates the visible codepoints of a single row: each non-continuation
 /// cell yields its base codepoint, immediately followed by its combining mark
 /// when present. Both the plain-text dump (`TerminalCore.dumpUtf8`) and the
@@ -101,5 +114,11 @@ pub const RenderSnapshot = struct {
     cursor_shape: CursorShape = .block,
     cursor_blink: bool = true,
     cells: []const Cell = &.{},
+    // 행별 OSC 133 semantic 분류(길이=size.rows, cells와 같은 행 인덱싱). 스크롤된 뷰포트에서도
+    // 보이는 행에 맞춰 합성된다. OSC 133 마킹이 없으면 전부 .unknown이라 렌더러는 무시해도 된다.
+    prompt_marks: []const SemanticPrompt = &.{},
+    // 가장 최근에 끝난 명령의 종료코드(OSC 133 ; D ; <code>). 없으면 null. 이후 단계가 프롬프트
+    // 거터에 ✓/✗로 투영한다. shell이 음수(-1 등)를 보낼 수 있어 i32.
+    last_command_exit: ?i32 = null,
     dirty: ?DirtyRegion = null,
 };

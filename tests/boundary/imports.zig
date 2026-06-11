@@ -109,7 +109,9 @@ fn checkFile(
         std.testing.io,
         path,
         allocator,
-        .limited(256 * 1024),
+        // 소스 한 파일당 읽기 상한. import 스캔용이라 넉넉히 둔다 — core.zig가 256KB를 넘어서며
+        // (정상적 코드 성장) StreamTooLong이 났다. 1MB면 당분간 모든 파일을 커버한다.
+        .limited(1024 * 1024),
     ) catch |err| {
         std.debug.print("boundary check could not read {s}: {s}\n", .{ path, @errorName(err) });
         return err;

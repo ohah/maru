@@ -46,6 +46,25 @@ typedef enum MaruAppHostKeyCode {
     MaruAppHostKeyCodeArrowDown = 6,
     MaruAppHostKeyCodeArrowLeft = 7,
     MaruAppHostKeyCodeArrowRight = 8,
+    /* PC-style 기능키 — Swift normalizedKeyEvent가 NSEvent.keyCode를 이 값으로 매핑한다. */
+    MaruAppHostKeyCodeHome = 9,
+    MaruAppHostKeyCodeEnd = 10,
+    MaruAppHostKeyCodeInsert = 11,
+    MaruAppHostKeyCodeDelete = 12,
+    MaruAppHostKeyCodePageUp = 13,
+    MaruAppHostKeyCodePageDown = 14,
+    MaruAppHostKeyCodeF1 = 15,
+    MaruAppHostKeyCodeF2 = 16,
+    MaruAppHostKeyCodeF3 = 17,
+    MaruAppHostKeyCodeF4 = 18,
+    MaruAppHostKeyCodeF5 = 19,
+    MaruAppHostKeyCodeF6 = 20,
+    MaruAppHostKeyCodeF7 = 21,
+    MaruAppHostKeyCodeF8 = 22,
+    MaruAppHostKeyCodeF9 = 23,
+    MaruAppHostKeyCodeF10 = 24,
+    MaruAppHostKeyCodeF11 = 25,
+    MaruAppHostKeyCodeF12 = 26,
 } MaruAppHostKeyCode;
 
 typedef struct MaruAppHostCapabilities {

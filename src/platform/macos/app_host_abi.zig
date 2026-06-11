@@ -40,6 +40,26 @@ pub const KeyCode = enum(u32) {
     arrow_down = 6,
     arrow_left = 7,
     arrow_right = 8,
+    // PC-style 기능키. Swift normalizedKeyEvent가 NSEvent.keyCode를 이 값으로 매핑하고,
+    // keyEventFromAbi가 terminal.Key로 바꿔 input.encodeKey가 xterm legacy 시퀀스를 낸다.
+    home = 9,
+    end = 10,
+    insert = 11,
+    delete = 12,
+    page_up = 13,
+    page_down = 14,
+    f1 = 15,
+    f2 = 16,
+    f3 = 17,
+    f4 = 18,
+    f5 = 19,
+    f6 = 20,
+    f7 = 21,
+    f8 = 22,
+    f9 = 23,
+    f10 = 24,
+    f11 = 25,
+    f12 = 26,
 };
 
 pub const Capabilities = extern struct {
@@ -411,6 +431,24 @@ fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
         .arrow_down => .arrow_down,
         .arrow_left => .arrow_left,
         .arrow_right => .arrow_right,
+        .home => .home,
+        .end => .end,
+        .insert => .insert,
+        .delete => .delete,
+        .page_up => .page_up,
+        .page_down => .page_down,
+        .f1 => .{ .function = 1 },
+        .f2 => .{ .function = 2 },
+        .f3 => .{ .function = 3 },
+        .f4 => .{ .function = 4 },
+        .f5 => .{ .function = 5 },
+        .f6 => .{ .function = 6 },
+        .f7 => .{ .function = 7 },
+        .f8 => .{ .function = 8 },
+        .f9 => .{ .function = 9 },
+        .f10 => .{ .function = 10 },
+        .f11 => .{ .function = 11 },
+        .f12 => .{ .function = 12 },
     };
 
     return .{
@@ -434,6 +472,11 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u32, c.MaruAppHostEventKeyDown), @intFromEnum(EventKind.key_down));
     try std.testing.expectEqual(@as(u32, c.MaruAppHostEventAppShouldTerminate), @intFromEnum(EventKind.app_should_terminate));
     try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeArrowUp)), @intFromEnum(KeyCode.arrow_up));
+    // PC-style 기능키 C 상수 ↔ enum 정합(경계 1개씩 + F12로 확인).
+    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeHome)), @intFromEnum(KeyCode.home));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodePageDown)), @intFromEnum(KeyCode.page_down));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeF1)), @intFromEnum(KeyCode.f1));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeF12)), @intFromEnum(KeyCode.f12));
     try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostDevCommandControlledSmoke)), @intFromEnum(DevCommandKind.controlled_smoke));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostCapabilities), @sizeOf(Capabilities));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostCapabilities), @alignOf(Capabilities));
@@ -553,4 +596,17 @@ test "latin layouts are preserved: Ctrl+B with an ascii codepoint does not consu
     };
     const key_event = try keyEventFromAbi(event);
     try std.testing.expectEqual(terminal.Key{ .char = 'x' }, key_event.key);
+}
+
+test "keyEventFromAbi maps function keys to terminal.Key" {
+    const mk = struct {
+        fn f(code: KeyCode) KeyEvent {
+            return .{ .codepoint = 0, .key_code = @intFromEnum(code), .modifier_shift = 0, .modifier_control = 0, .modifier_option = 0, .modifier_command = 0, .is_repeat = 0, .raw_key_code = 0 };
+        }
+    }.f;
+    try std.testing.expectEqual(terminal.input.Key.delete, (try keyEventFromAbi(mk(.delete))).key);
+    try std.testing.expectEqual(terminal.input.Key.page_up, (try keyEventFromAbi(mk(.page_up))).key);
+    try std.testing.expectEqual(terminal.input.Key.home, (try keyEventFromAbi(mk(.home))).key);
+    try std.testing.expectEqual(@as(u8, 1), (try keyEventFromAbi(mk(.f1))).key.function);
+    try std.testing.expectEqual(@as(u8, 12), (try keyEventFromAbi(mk(.f12))).key.function);
 }

@@ -971,6 +971,46 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             keyCode = UInt32(MaruAppHostKeyCodeArrowLeft.rawValue)
         case 124:
             keyCode = UInt32(MaruAppHostKeyCodeArrowRight.rawValue)
+        // PC-style 기능키(kVK_* 물리 키코드). 인코딩·바인딩은 Zig가 한다 — 여기선 캡처만.
+        // 명시적으로 잡지 않으면 default가 F키의 private-use 문자(NSF1FunctionKey=0xF704 등)를
+        // codepoint로 넘겨 엉뚱하게 인코딩된다. Shift+PageUp/Down 스크롤백은 handleKeyDown에서
+        // 먼저 소비되므로(plain PageUp만 여기 도달) 충돌하지 않는다.
+        case 115:
+            keyCode = UInt32(MaruAppHostKeyCodeHome.rawValue)
+        case 119:
+            keyCode = UInt32(MaruAppHostKeyCodeEnd.rawValue)
+        case 116:
+            keyCode = UInt32(MaruAppHostKeyCodePageUp.rawValue)
+        case 121:
+            keyCode = UInt32(MaruAppHostKeyCodePageDown.rawValue)
+        case 117:
+            keyCode = UInt32(MaruAppHostKeyCodeDelete.rawValue) // forward delete
+        case 114:
+            keyCode = UInt32(MaruAppHostKeyCodeInsert.rawValue) // Help/Insert(확장 키보드)
+        case 122:
+            keyCode = UInt32(MaruAppHostKeyCodeF1.rawValue)
+        case 120:
+            keyCode = UInt32(MaruAppHostKeyCodeF2.rawValue)
+        case 99:
+            keyCode = UInt32(MaruAppHostKeyCodeF3.rawValue)
+        case 118:
+            keyCode = UInt32(MaruAppHostKeyCodeF4.rawValue)
+        case 96:
+            keyCode = UInt32(MaruAppHostKeyCodeF5.rawValue)
+        case 97:
+            keyCode = UInt32(MaruAppHostKeyCodeF6.rawValue)
+        case 98:
+            keyCode = UInt32(MaruAppHostKeyCodeF7.rawValue)
+        case 100:
+            keyCode = UInt32(MaruAppHostKeyCodeF8.rawValue)
+        case 101:
+            keyCode = UInt32(MaruAppHostKeyCodeF9.rawValue)
+        case 109:
+            keyCode = UInt32(MaruAppHostKeyCodeF10.rawValue)
+        case 103:
+            keyCode = UInt32(MaruAppHostKeyCodeF11.rawValue)
+        case 111:
+            keyCode = UInt32(MaruAppHostKeyCodeF12.rawValue)
         default:
             guard let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first else {
                 return nil

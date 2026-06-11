@@ -76,6 +76,12 @@ pub const TerminalCore = struct {
     // bracketed paste(DECSET 2004): 켜져 있으면 붙여넣기를 ESC[200~ ... ESC[201~로 감싸 보낸다.
     // zsh/vim/claude가 켜며, 붙여넣은 텍스트를 타이핑과 구분해(자동 들여쓰기·즉시 실행 방지) 처리한다.
     bracketed_paste: bool = false,
+    // grapheme cluster mode(DECSET 2027, terminal-unicode-core): 앱이 "나도 grapheme 단위 너비를
+    // 쓴다"고 합의하면 켠다. 켜지면 VS16(이모지 표현)·스킨톤·국기 같은 grapheme을 한 셀로 묶고
+    // 너비를 EAW 대신 cluster 기준(❤️=2칸 등)으로 잰다 — 앱과 너비가 일치하므로 붙여넣기 redraw가
+    // 안 깨지면서 풀사이즈로 그릴 수 있다. 기본 off면 EAW per-codepoint(레거시 앱 호환). 앱은
+    // DECRQM(CSI ?2027$p)로 지원 여부를 먼저 묻는다 — Ghostty/xterm.js와 같은 opt-in 모델이다.
+    grapheme_cluster_mode: bool = false,
     // DECTCEM(CSI ?25 h/l): 커서 표시. TUI가 화면을 그리는 동안 커서 깜빡임/잔상을 숨기려고 끈다.
     // snapshot/renderSnapshot이 내보내는 cursor.visible에 합성된다(내부 self.cursor.visible은 불변).
     cursor_visible: bool = true,
@@ -197,6 +203,7 @@ pub const TerminalCore = struct {
         self.application_cursor_keys = false;
         self.cursor_visible = true;
         self.bracketed_paste = false;
+        self.grapheme_cluster_mode = false;
         self.dirty = fullDirty(self.size);
     }
 
@@ -1167,6 +1174,13 @@ pub const TerminalCore = struct {
                     'q' => self.setCursorStyle(self.csiRawParam(0)), // DECSCUSR
                     else => {},
                 },
+                '$' => switch (final) {
+                    // DECRQM(CSI ? Ps $ p): private mode 상태 질의. 앱(terminal-unicode-core 등)이
+                    // mode 2027 지원 여부를 이걸로 먼저 묻고, "지원함"이면 DECSET 2027로 켠다. 응답이
+                    // 없으면 미지원으로 보고 안 켜므로, 우리가 아는 모드는 현재 상태를 보고한다.
+                    'p' => if (self.csi_marker == '?') self.reportPrivateMode(self.csiRawParam(0)),
+                    else => {},
+                },
                 else => {}, // `$r`(DECCARA) 등 미지원 조합은 무시
             }
             return;
@@ -1229,6 +1243,7 @@ pub const TerminalCore = struct {
                 },
                 1007 => self.alternate_scroll = set, // alt screen 휠 -> 화살표 변환 on/off
                 2004 => self.bracketed_paste = set, // bracketed paste(붙여넣기 감싸기)
+                2027 => self.grapheme_cluster_mode = set, // grapheme cluster 너비(이모지 풀사이즈 합의)
                 47, 1047 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
                 1048 => if (set) self.saveCursorState() else self.restoreCursorState(),
                 1049 => if (set) self.enterAltScreen(true) else self.leaveAltScreen(true),
@@ -1377,6 +1392,22 @@ pub const TerminalCore = struct {
             },
             else => {},
         }
+    }
+
+    /// DECRQM(CSI ? Ps $ p) 응답 — DECRPM(CSI ? Ps ; Pm $ y). Pm: 0=미인식, 1=set, 2=reset,
+    /// 3=영구 set, 4=영구 reset. 우리가 추적하는 모드는 현재 상태(1/2)를 알려 앱이 지원을 감지하고
+    /// 켤 수 있게 한다(특히 mode 2027). 모르는 모드는 0(미인식)으로 답해 앱이 폴백하게 둔다.
+    fn reportPrivateMode(self: *TerminalCore, mode: u16) void {
+        const state: u8 = switch (mode) {
+            2027 => if (self.grapheme_cluster_mode) 1 else 2,
+            2004 => if (self.bracketed_paste) 1 else 2,
+            25 => if (self.cursor_visible) 1 else 2,
+            1 => if (self.application_cursor_keys) 1 else 2,
+            else => 0, // 미인식 — 앱이 보수적으로 폴백
+        };
+        var buf: [32]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "\x1b[?{d};{d}$y", .{ mode, state }) catch return;
+        self.appendResponse(s);
     }
 
     fn appendResponse(self: *TerminalCore, bytes: []const u8) void {
@@ -2101,11 +2132,28 @@ pub const TerminalCore = struct {
                 if (codepoint < 0x20) return;
                 if (width.cellWidth(codepoint) == 0) {
                     // VS16(U+FE0F) 등 변형 선택자/결합 문자는 0폭 combining으로 앞 글자에 붙인다.
-                    // 폭은 EAW per-codepoint를 그대로 둔다(승격 안 함) — zsh의 ZLE는 ❤+VS16을
-                    // EAW 1칸(heart 1 + VS16 0)으로 보므로, 폭을 2로 키우면 zsh의 redraw
-                    // (출력 후 CSI <N> D로 되돌려 재출력)가 1칸 어긋나 붙여넣기 명령줄이 깨졌다.
+                    // 기본(mode 2027 off)은 폭을 EAW 그대로 둔다 — zsh의 ZLE는 ❤+VS16을 EAW 1칸으로
+                    // 보므로, 폭을 키우면 zsh의 redraw(CSI <N> D 재출력)가 어긋나 붙여넣기가 깨진다.
                     self.attachCombiningMark(codepoint);
+                    // mode 2027(grapheme cluster)에서는 앱과 너비를 합의한 상태라, VS16이 앞 글자를
+                    // 이모지 표현(width 2)으로 승격해 풀사이즈로 그려도 안전하다(❤+VS16 = ❤️ 2칸).
+                    if (self.grapheme_cluster_mode and codepoint == 0xFE0F) self.promoteLastToEmojiWidth();
                     return;
+                }
+                // mode 2027: grapheme을 한 셀로 묶는다(앱과 너비 합의 상태라 안전).
+                if (self.grapheme_cluster_mode) {
+                    // 스킨톤 modifier(👍 + 🏽): 앞 이모지에 combining으로 붙여 한 글자. base는 이미
+                    // width 2(EAW Wide)라 폭 승격 불필요.
+                    if (isSkinToneModifier(codepoint) and self.lastCellIsWideEmoji()) {
+                        self.attachCombiningMark(codepoint);
+                        return;
+                    }
+                    // 국기: 지역 표시자(RI) 2개를 한 셀(width 2)로. 직전이 짝 없는 RI면 combining + 승격.
+                    if (isRegionalIndicator(codepoint) and self.lastCellIsLoneRegionalIndicator()) {
+                        self.attachCombiningMark(codepoint);
+                        self.promoteLastToEmojiWidth();
+                        return;
+                    }
                 }
                 self.putCell(codepoint);
             },
@@ -2221,6 +2269,55 @@ pub const TerminalCore = struct {
             // 글자가 먼저 다음 줄로 넘어가게 한다(deferred autowrap).
             self.cursor.col = self.size.cols - 1;
             self.pending_wrap = true;
+        }
+    }
+
+    fn isSkinToneModifier(codepoint: u21) bool {
+        return codepoint >= 0x1F3FB and codepoint <= 0x1F3FF; // Fitzpatrick modifiers
+    }
+
+    fn isRegionalIndicator(codepoint: u21) bool {
+        return codepoint >= 0x1F1E6 and codepoint <= 0x1F1FF;
+    }
+
+    /// 직전 출력 셀이 wide 이모지인지 — 스킨톤 modifier를 거기에 붙이기 위함(mode 2027).
+    fn lastCellIsWideEmoji(self: *const TerminalCore) bool {
+        const last = self.last_print orelse return false;
+        return self.cells[self.index(last.row, last.col)].width == 2;
+    }
+
+    /// 직전 출력 셀이 짝 없는(combining 안 붙은) 지역 표시자인지 — 다음 RI와 국기로 묶기 위함.
+    fn lastCellIsLoneRegionalIndicator(self: *const TerminalCore) bool {
+        const last = self.last_print orelse return false;
+        const cell = self.cells[self.index(last.row, last.col)];
+        return isRegionalIndicator(cell.codepoint) and cell.combining == null;
+    }
+
+    /// grapheme(VS16/RI 페어 등)이 붙은 직전 base 셀을 width 1 -> 2로 승격한다(이미 2면 무시).
+    /// 오른쪽 칸을 continuation으로 만들고, 커서가 base 바로 뒤면 한 칸 더 전진(범위 넘으면
+    /// pending_wrap). base가 줄 끝이라 오른쪽 칸이 없으면 승격하지 않는다(드문 경계). mode 2027
+    /// 에서만 호출되므로 앱과 너비가 합의된 상태다.
+    fn promoteLastToEmojiWidth(self: *TerminalCore) void {
+        const last = self.last_print orelse return;
+        const base_idx = self.index(last.row, last.col);
+        if (self.cells[base_idx].width == 2) return; // 이미 wide
+        if (last.col + 1 >= self.size.cols) return; // 줄 끝 — 오른쪽 칸 없음
+        self.cells[base_idx].width = 2;
+        self.cells[self.index(last.row, last.col + 1)] = .{
+            .style = self.cells[base_idx].style,
+            .width = 0,
+            .continuation = true,
+            .link = self.cells[base_idx].link,
+        };
+        self.markDirty(last.row);
+        if (self.cursor.row == last.row and self.cursor.col == last.col + 1) {
+            if (last.col + 2 < self.size.cols) {
+                self.cursor.col = last.col + 2;
+                self.pending_wrap = false;
+            } else {
+                self.cursor.col = self.size.cols - 1;
+                self.pending_wrap = true;
+            }
         }
     }
 
@@ -4407,4 +4504,58 @@ test "emoji grapheme: skin tone modifier and flag (RI pair) cluster into one wid
     try std.testing.expectEqual(@as(u2, 1), core.cells[10].width); // RI = width 1(EAW Neutral)
     try std.testing.expectEqual(@as(u21, 0x1F1F7), core.cells[11].codepoint); // 둘째 RI 별도 셀
     try std.testing.expectEqual(@as(?u21, null), core.cells[10].combining);
+}
+
+test "mode 2027: VS16 promotes to width 2 only when grapheme cluster mode is on" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    // 기본(2027 off): ❤+VS16 = width 1(EAW, zsh 일치).
+    try core.write("\xe2\x9d\xa4\xef\xb8\x8f"); // ❤️
+    try std.testing.expectEqual(@as(u2, 1), core.cells[0].width);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
+
+    // 2027 on: 풀사이즈 width 2.
+    try core.write("\r\n\x1b[?2027h\xe2\x9d\xa4\xef\xb8\x8f");
+    try std.testing.expect(core.grapheme_cluster_mode);
+    try std.testing.expectEqual(@as(u21, 0x2764), core.cells[10].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0xFE0F), core.cells[10].combining);
+    try std.testing.expectEqual(@as(u2, 2), core.cells[10].width);
+    try std.testing.expect(core.cells[11].continuation);
+}
+
+test "mode 2027: skin tone and flags cluster only when on" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[?2027h");
+    // 스킨톤: 👍🏽 한 셀 width 2.
+    try core.write("\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd");
+    try std.testing.expectEqual(@as(u21, 0x1F44D), core.cells[0].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0x1F3FD), core.cells[0].combining);
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
+    // 국기: 🇰🇷 한 셀 width 2.
+    try core.write("\xf0\x9f\x87\xb0\xf0\x9f\x87\xb7");
+    try std.testing.expectEqual(@as(u21, 0x1F1F0), core.cells[2].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0x1F1F7), core.cells[2].combining);
+    try std.testing.expectEqual(@as(u2, 2), core.cells[2].width);
+
+    // 2027 off면 스킨톤은 별도 셀(EAW Wide).
+    try core.write("\x1b[?2027l\r\n\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd");
+    try std.testing.expectEqual(@as(?u21, null), core.cells[12].combining);
+    try std.testing.expectEqual(@as(u21, 0x1F3FD), core.cells[14].codepoint); // 별도 셀
+}
+
+test "DECRQM reports mode 2027 state so apps can detect support" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    // 미설정: reset이지만 인식함(2) — 앱이 지원을 감지하고 켤 수 있다.
+    try core.write("\x1b[?2027$p");
+    try std.testing.expectEqualStrings("\x1b[?2027;2$y", core.pendingResponse());
+    core.clearResponse();
+    // 켠 뒤: set(1).
+    try core.write("\x1b[?2027h\x1b[?2027$p");
+    try std.testing.expectEqualStrings("\x1b[?2027;1$y", core.pendingResponse());
+    core.clearResponse();
+    // 모르는 모드: 미인식(0).
+    try core.write("\x1b[?9999$p");
+    try std.testing.expectEqualStrings("\x1b[?9999;0$y", core.pendingResponse());
 }

@@ -2100,10 +2100,11 @@ pub const TerminalCore = struct {
             else => {
                 if (codepoint < 0x20) return;
                 if (width.cellWidth(codepoint) == 0) {
+                    // VS16(U+FE0F) 등 변형 선택자/결합 문자는 0폭 combining으로 앞 글자에 붙인다.
+                    // 폭은 EAW per-codepoint를 그대로 둔다(승격 안 함) — zsh의 ZLE는 ❤+VS16을
+                    // EAW 1칸(heart 1 + VS16 0)으로 보므로, 폭을 2로 키우면 zsh의 redraw
+                    // (출력 후 CSI <N> D로 되돌려 재출력)가 1칸 어긋나 붙여넣기 명령줄이 깨졌다.
                     self.attachCombiningMark(codepoint);
-                    // VS16(U+FE0F)은 앞 글자를 이모지 표현으로 만든다 — 텍스트-default 글자(❤
-                    // U+2764 등)도 width 2로 그려야 slot이 2칸이라 안 잘린다.
-                    if (codepoint == 0xFE0F) self.promoteLastToEmojiWidth();
                     return;
                 }
                 self.putCell(codepoint);
@@ -2234,34 +2235,6 @@ pub const TerminalCore = struct {
         const last = self.last_print orelse return;
         self.cells[self.index(last.row, last.col)].combining = codepoint;
         self.markDirty(last.row);
-    }
-
-    /// VS16이 붙은 직전 base 셀을 width 1 -> 2로 승격한다(이미 2면 무시). 오른쪽 칸을
-    /// continuation으로 만들고, 커서가 base 바로 뒤에 있으면 한 칸 더 전진시킨다. base가 줄
-    /// 끝이라 오른쪽 칸이 없으면 승격하지 않는다(드문 경계 — width 1로 남아 약간 좁게 그려진다).
-    fn promoteLastToEmojiWidth(self: *TerminalCore) void {
-        const last = self.last_print orelse return;
-        const base_idx = self.index(last.row, last.col);
-        if (self.cells[base_idx].width == 2) return; // 이미 wide(default-emoji 등)
-        if (last.col + 1 >= self.size.cols) return; // 줄 끝 — 오른쪽 칸 없음
-        self.cells[base_idx].width = 2;
-        self.cells[self.index(last.row, last.col + 1)] = .{
-            .style = self.cells[base_idx].style,
-            .width = 0,
-            .continuation = true,
-            .link = self.cells[base_idx].link,
-        };
-        self.markDirty(last.row);
-        // 커서가 base 바로 뒤(width-1 전진 위치)에 있으면 2칸짜리로 한 칸 더 민다.
-        if (self.cursor.row == last.row and self.cursor.col == last.col + 1) {
-            if (last.col + 2 < self.size.cols) {
-                self.cursor.col = last.col + 2;
-                self.pending_wrap = false;
-            } else {
-                self.cursor.col = self.size.cols - 1;
-                self.pending_wrap = true;
-            }
-        }
     }
 
     fn clearCellForWrite(self: *TerminalCore, row: u16, col: u16) void {

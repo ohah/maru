@@ -2106,13 +2106,6 @@ pub const TerminalCore = struct {
                     if (codepoint == 0xFE0F) self.promoteLastToEmojiWidth();
                     return;
                 }
-                // 국기: 지역 표시자(RI) 2개가 한 국기다(🇰🇷 = U+1F1F0 U+1F1F7). 직전 셀이 짝
-                // 없는 RI면 이 RI를 그 셀에 combining으로 붙여 한 글자(width 2)로 만든다.
-                if (isRegionalIndicator(codepoint) and self.lastCellIsLoneRegionalIndicator()) {
-                    self.attachCombiningMark(codepoint);
-                    self.promoteLastToEmojiWidth();
-                    return;
-                }
                 self.putCell(codepoint);
             },
         }
@@ -2228,17 +2221,6 @@ pub const TerminalCore = struct {
             self.cursor.col = self.size.cols - 1;
             self.pending_wrap = true;
         }
-    }
-
-    fn isRegionalIndicator(codepoint: u21) bool {
-        return codepoint >= 0x1F1E6 and codepoint <= 0x1F1FF;
-    }
-
-    /// 직전 출력 셀이 짝 없는(combining 안 붙은) 지역 표시자인지 — 다음 RI와 국기로 묶기 위함.
-    fn lastCellIsLoneRegionalIndicator(self: *const TerminalCore) bool {
-        const last = self.last_print orelse return false;
-        const cell = self.cells[self.index(last.row, last.col)];
-        return isRegionalIndicator(cell.codepoint) and cell.combining == null;
     }
 
     fn attachCombiningMark(self: *TerminalCore, codepoint: u21) void {
@@ -4445,22 +4427,11 @@ test "emoji grapheme: skin tone modifier and flag (RI pair) cluster into one wid
     try std.testing.expectEqual(@as(u21, 0x1F3FD), core.cells[2].codepoint); // 스킨톤은 별도 셀
     try std.testing.expectEqual(@as(u16, 4), core.cursor.col); // 4칸(zsh와 일치)
 
-    // 국기: 🇰🇷 = U+1F1F0 U+1F1F7 -> 한 셀, width 2(zsh도 RI=1+1=2라 일치).
+    // 국기 RI(🇰🇷 = U+1F1F0 U+1F1F7)는 zsh와 같이 낱자(각 width 1)로 둔다 — 클러스터하면
+    // 우리는 width-2 한 셀, zsh는 width-1 둘이라 구조가 달라 붙여넣기 redraw가 깨졌다.
     try core.write("\r\n\xf0\x9f\x87\xb0\xf0\x9f\x87\xb7");
     try std.testing.expectEqual(@as(u21, 0x1F1F0), core.cells[10].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x1F1F7), core.cells[10].combining);
-    try std.testing.expectEqual(@as(u2, 2), core.cells[10].width);
-    try std.testing.expect(core.cells[11].continuation);
-}
-
-test "two flags in a row pair correctly (not cross-paired)" {
-    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 1 });
-    defer core.deinit();
-    // 🇰🇷🇺🇸 = KR(1F1F0 1F1F7) US(1F1FA 1F1F8) -> 두 국기, 각 width 2.
-    try core.write("\xf0\x9f\x87\xb0\xf0\x9f\x87\xb7\xf0\x9f\x87\xba\xf0\x9f\x87\xb8");
-    try std.testing.expectEqual(@as(u21, 0x1F1F0), core.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x1F1F7), core.cells[0].combining); // KR
-    try std.testing.expectEqual(@as(u21, 0x1F1FA), core.cells[2].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x1F1F8), core.cells[2].combining); // US
-    try std.testing.expectEqual(@as(u16, 4), core.cursor.col);
+    try std.testing.expectEqual(@as(u2, 1), core.cells[10].width); // RI = width 1(EAW Neutral)
+    try std.testing.expectEqual(@as(u21, 0x1F1F7), core.cells[11].codepoint); // 둘째 RI 별도 셀
+    try std.testing.expectEqual(@as(?u21, null), core.cells[10].combining);
 }

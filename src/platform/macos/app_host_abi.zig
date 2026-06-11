@@ -610,3 +610,21 @@ test "keyEventFromAbi maps function keys to terminal.Key" {
     try std.testing.expectEqual(@as(u8, 1), (try keyEventFromAbi(mk(.f1))).key.function);
     try std.testing.expectEqual(@as(u8, 12), (try keyEventFromAbi(mk(.f12))).key.function);
 }
+
+test "Option+Backspace chains through ABI to meta-DEL (\\e\\x7f, word delete)" {
+    const abi_event = KeyEvent{
+        .codepoint = 0,
+        .key_code = @intFromEnum(KeyCode.backspace),
+        .modifier_shift = 0,
+        .modifier_control = 0,
+        .modifier_option = 1,
+        .modifier_command = 0,
+        .is_repeat = 0,
+        .raw_key_code = 51,
+    };
+    const ev = try keyEventFromAbi(abi_event);
+    try std.testing.expect(ev.modifiers.option);
+    try std.testing.expectEqual(terminal.input.Key.backspace, ev.key);
+    var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    try std.testing.expectEqualStrings("\x1b\x7f", try terminal.input.encodeKey(ev, &buf, .{}));
+}

@@ -55,7 +55,16 @@ pub const SpawnRequest = struct {
     command: []const u8,
     args: []const []const u8 = &.{},
     cwd: ?[]const u8 = null,
+    // login shell로 띄울지. true면 argv[0]을 `-` + basename(예: `-zsh`)으로 줘서 셸이 login으로
+    // 동작하게 한다(Terminal.app·iTerm2·Ghostty와 같은 관례). login shell은 .zprofile/.zlogin까지
+    // source하므로 PATH·EDITOR·키바인딩(예: `bindkey -e`) 등 사용자 환경이 완전히 잡힌다. non-login
+    // (`-i`만)이면 .zshrc만 읽어 키맵이 달라질 수 있다(예: $EDITOR=nvim → vi-keymap, Ctrl+A self-insert).
+    login: bool = false,
     env: []const []const u8 = &.{},
+    // env가 빈(부모 상속) 경로에서 셸에 줄 TERM 값. 사용자 config(`term =`)로 바꿀 수 있다 —
+    // 일부 셸 설정/통합이 $TERM에 따라 키바인딩을 다르게 잡기 때문이다(예: Ctrl+A 줄-시작).
+    // env를 명시로 넘기면(테스트) 이 값은 무시된다.
+    term: []const u8 = "xterm-256color",
     size: terminal.Size = terminal.Size.default,
 };
 

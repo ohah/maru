@@ -136,6 +136,13 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "input.page-keys는 passthrough|scroll — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "term")) {
+        const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
+        if (trimmed.len == 0) {
+            try diags.append(a, .{ .line = line_no, .message = "term이 비어 있음 — 기본값 유지" });
+            return;
+        }
+        config.term = try a.dupe(u8, trimmed);
     } else {
         try diags.append(a, .{ .line = line_no, .message = "알 수 없는 key — 무시" });
     }
@@ -364,6 +371,25 @@ test "parse: input.page-keys passthrough(default)/scroll + invalid is forgiving"
         var p = try parse(std.testing.allocator, "input.page-keys = bogus\n");
         defer p.deinit();
         try std.testing.expectEqual(theme.PageKeys.passthrough, p.config.input.page_keys); // 잘못된 값 → 기본 유지
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+}
+
+test "parse: term default xterm-256color, override, empty is forgiving" {
+    {
+        var p = try parse(std.testing.allocator, "");
+        defer p.deinit();
+        try std.testing.expectEqualStrings("xterm-256color", p.config.term);
+    }
+    {
+        var p = try parse(std.testing.allocator, "term = xterm-ghostty\n");
+        defer p.deinit();
+        try std.testing.expectEqualStrings("xterm-ghostty", p.config.term);
+    }
+    {
+        var p = try parse(std.testing.allocator, "term =   \n");
+        defer p.deinit();
+        try std.testing.expectEqualStrings("xterm-256color", p.config.term); // 빈 값 → 기본 유지
         try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
     }
 }

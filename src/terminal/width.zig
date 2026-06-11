@@ -125,8 +125,10 @@ test "VS16 attaches to the base as a combining mark (one cell), shaper sees the 
     var core = try @import("core.zig").TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
     defer core.deinit();
     try core.write("\xe2\x9d\xa4\xef\xb8\x8f"); // ❤(U+2764) + VS16(U+FE0F)
-    // 한 셀에 base + combining(VS16)으로 들어간다 — 두 셀로 갈라지지 않는다.
+    // base + combining(VS16)이 한 글자이고, VS16이 width 2로 승격해 slot이 2칸이라 안 잘린다.
     try std.testing.expectEqual(@as(u21, 0x2764), core.cells[0].codepoint);
     try std.testing.expectEqual(@as(?u21, 0xFE0F), core.cells[0].combining);
-    try std.testing.expectEqual(@as(u21, ' '), core.cells[1].codepoint); // 다음 셀은 비어 있음
+    try std.testing.expectEqual(@as(u2, 2), core.cells[0].width); // 이모지 표현 = wide
+    try std.testing.expect(core.cells[1].continuation); // 오른쪽 칸은 continuation
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col); // 커서가 2칸 뒤
 }

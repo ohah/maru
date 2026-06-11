@@ -64,7 +64,7 @@ pub const PtySession = struct {
         var argv_storage = try ArgvStorage.init(allocator, eff_command, eff_args);
         defer argv_storage.deinit();
 
-        var env_storage = try EnvStorage.init(allocator, request.env, request.term);
+        var env_storage = try EnvStorage.init(allocator, request.env, request.term, request.zdotdir);
         defer env_storage.deinit();
 
         var window_size = winsizeFromTerminalSize(request.size);
@@ -462,15 +462,14 @@ const EnvStorage = struct {
     strings: [][:0]u8,
     envp: ?[:null]?[*:0]const u8,
 
-    fn init(allocator: std.mem.Allocator, env: []const []const u8, term: []const u8) !EnvStorage {
+    fn init(allocator: std.mem.Allocator, env: []const []const u8, term: []const u8, zdotdir: ?[]const u8) !EnvStorage {
         if (env.len == 0) {
             // 부모 환경을 물려주되 TERM/COLORTERM은 Maru 값으로 덮어쓴다. 부모 TERM을 그대로 주면
             // (예: tmux/screen TERM, 또는 Maru 동작과 안 맞는 terminfo) zsh의 SIGWINCH redraw가
             // wrap 행 수를 잘못 계산해(상대 커서 이동 \e[A 횟수가 어긋남) 프롬프트가 중복된다.
             // 기본 xterm-256color는 Maru의 xterm식(auto-wrap + deferred wrap) 동작과 맞는다. 단
-            // 사용자 config(`term =`)로 바꿀 수 있다 — 셸 설정/통합이 $TERM에 따라 키바인딩을 다르게
-            // 잡는 경우(예: Ctrl+A 줄-시작) 사용자가 자기 환경에 맞는 값을 줄 수 있게 한다.
-            return initFromParentWithTermOverride(allocator, term);
+            // 사용자 config(`term =`)로 바꿀 수 있다. zdotdir이 있으면 셸 통합용 ZDOTDIR을 주입한다.
+            return initFromParentWithTermOverride(allocator, term, zdotdir);
         }
 
         const strings = try allocator.alloc([:0]u8, env.len);
@@ -498,21 +497,30 @@ const EnvStorage = struct {
     }
 
     // 부모 환경(std.c.environ)을 복사하되 TERM은 인자 값(기본 xterm-256color, 사용자 config로 변경
-    // 가능)으로, COLORTERM은 truecolor로 교체한 owned envp를 만든다.
-    fn initFromParentWithTermOverride(allocator: std.mem.Allocator, term: []const u8) !EnvStorage {
+    // 가능)으로, COLORTERM은 truecolor로 교체한 owned envp를 만든다. zdotdir이 있으면 ZDOTDIR을
+    // 그 값으로 주입하고(셸 통합), 기존 ZDOTDIR은 MARU_ZDOTDIR_PREV로 보존해 통합 .zshenv가 복원한다.
+    fn initFromParentWithTermOverride(allocator: std.mem.Allocator, term: []const u8, zdotdir: ?[]const u8) !EnvStorage {
         var entries: std.ArrayList([:0]u8) = .empty;
         errdefer {
             for (entries.items) |owned| allocator.free(owned);
             entries.deinit(allocator);
         }
 
-        // 부모의 모든 env entry를 복사한다. 단 TERM/COLORTERM은 건너뛰고 아래에서 우리 값으로 넣는다
-        // (중복 키는 첫 항목이 이기므로, 우리 값만 남도록 부모 것을 빼야 한다).
+        // 부모의 모든 env entry를 복사한다. 단 TERM/COLORTERM(+통합 시 ZDOTDIR/MARU_ZDOTDIR_PREV)은
+        // 건너뛰고 아래에서 우리 값으로 넣는다(중복 키는 첫 항목이 이기므로 부모 것을 빼야 한다).
+        var old_zdotdir: ?[]const u8 = null; // environ 슬라이스(프로세스 수명 동안 유효) — 루프 후 사용
         const environ = std.c.environ;
         var index: usize = 0;
         while (environ[index]) |entry| : (index += 1) {
             const slice = std.mem.span(entry);
             if (std.mem.startsWith(u8, slice, "TERM=") or std.mem.startsWith(u8, slice, "COLORTERM=")) continue;
+            if (zdotdir != null) {
+                if (std.mem.startsWith(u8, slice, "ZDOTDIR=")) {
+                    old_zdotdir = slice["ZDOTDIR=".len..];
+                    continue;
+                }
+                if (std.mem.startsWith(u8, slice, "MARU_ZDOTDIR_PREV=")) continue; // stale 제거
+            }
             // dupe를 지역 변수로 받아 append 실패(OOM) 시에도 고아가 되지 않게 한다 — errdefer는
             // entries.items만 해제하므로 append 인자 안에서 dupe하면 그 문자열이 샌다.
             const owned = try allocator.dupeZ(u8, slice);
@@ -531,6 +539,20 @@ const EnvStorage = struct {
             allocator.free(colorterm_owned);
             return err;
         };
+        if (zdotdir) |zd| {
+            const z = try std.fmt.allocPrintSentinel(allocator, "ZDOTDIR={s}", .{zd}, 0);
+            entries.append(allocator, z) catch |err| {
+                allocator.free(z);
+                return err;
+            };
+            if (old_zdotdir) |prev| {
+                const p = try std.fmt.allocPrintSentinel(allocator, "MARU_ZDOTDIR_PREV={s}", .{prev}, 0);
+                entries.append(allocator, p) catch |err| {
+                    allocator.free(p);
+                    return err;
+                };
+            }
+        }
 
         const strings = try entries.toOwnedSlice(allocator);
         errdefer {
@@ -780,7 +802,7 @@ test "validateRequest rejects requests that cannot produce a reliable PTY" {
 }
 
 test "EnvStorage empty env inherits the parent but forces TERM/COLORTERM to Maru's values" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-256color");
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-256color", null);
     defer storage.deinit();
 
     var term_count: usize = 0;
@@ -811,7 +833,7 @@ test "EnvStorage empty env inherits the parent but forces TERM/COLORTERM to Maru
 
 test "EnvStorage explicit env is passed through verbatim (term arg ignored)" {
     // 명시 env면 term 인자는 무시된다(테스트가 완전한 env를 직접 준다).
-    var storage = try EnvStorage.init(std.testing.allocator, &.{ "FOO=bar", "TERM=dumb" }, "xterm-ghostty");
+    var storage = try EnvStorage.init(std.testing.allocator, &.{ "FOO=bar", "TERM=dumb" }, "xterm-ghostty", null);
     defer storage.deinit();
     const envp = storage.envpPtr();
     try std.testing.expectEqualStrings("FOO=bar", std.mem.span(envp[0].?));
@@ -845,7 +867,7 @@ test "MacosLogin wraps the shell in login(1) -flp <user> bash exec -l" {
 }
 
 test "EnvStorage empty env uses the supplied TERM (configurable)" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-ghostty");
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-ghostty", null);
     defer storage.deinit();
     var found = false;
     const envp = storage.envpPtr();
@@ -854,4 +876,16 @@ test "EnvStorage empty env uses the supplied TERM (configurable)" {
         if (std.mem.eql(u8, std.mem.span(entry), "TERM=xterm-ghostty")) found = true;
     }
     try std.testing.expect(found); // config term이 셸 env에 반영된다
+}
+
+test "EnvStorage injects ZDOTDIR for shell integration and preserves the old one" {
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-256color", "/cache/maru/zsh");
+    defer storage.deinit();
+    var saw_zdotdir = false;
+    const envp = storage.envpPtr();
+    var i: usize = 0;
+    while (envp[i]) |entry| : (i += 1) {
+        if (std.mem.eql(u8, std.mem.span(entry), "ZDOTDIR=/cache/maru/zsh")) saw_zdotdir = true;
+    }
+    try std.testing.expect(saw_zdotdir); // 통합 디렉터리가 ZDOTDIR로 주입됨
 }

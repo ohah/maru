@@ -21,8 +21,23 @@ pub const CursorConfig = struct {
     blink: bool = true,
 };
 
+/// 메인 화면(셸)에서 PageUp/PageDown를 어떻게 다룰지. alt 화면(vim/less)에선 어느 쪽이든 항상
+/// 앱으로 `\e[5~`/`\e[6~`를 보낸다(앱이 자체 페이징).
+pub const PageKeys = enum {
+    /// xterm/Ghostty 기본: 그대로 PTY로 `\e[5~`/`\e[6~`를 보낸다. 예측 가능하고 레퍼런스와 일치.
+    /// 셸 기본 keymap이 unbound면 BEL+'~'가 입력줄에 박힐 수 있다(셸에서 bindkey로 해결).
+    passthrough,
+    /// Terminal.app/iTerm2식: 메인 화면에선 Maru 스크롤백을 한 페이지씩 스크롤한다.
+    scroll,
+};
+
+pub const InputConfig = struct {
+    page_keys: PageKeys = .passthrough,
+};
+
 pub const Config = struct {
     font: FontConfig = .{},
     theme: ThemeConfig = .{},
     cursor: CursorConfig = .{},
+    input: InputConfig = .{},
 };

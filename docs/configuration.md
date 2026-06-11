@@ -49,7 +49,21 @@ cursor.blink = true
 | `theme.selection` | `#RRGGBB` | `#334455` | 선택 하이라이트 배경 |
 | `cursor.shape` | `block`\|`bar`\|`underline` | `block` | 그 외 값은 무시 |
 | `cursor.blink` | `true`\|`false` | `true` | |
+| `input.page-keys` | `passthrough`\|`scroll` | `passthrough` | 메인 화면 PageUp/Down 동작. 아래 참조 |
 | `keybind` | `<조합> = <action>` | (없음) | 여러 줄 가능. 아래 참조 |
+
+### PageUp/PageDown (`input.page-keys`)
+
+메인 화면(셸 프롬프트)에서 PageUp/PageDown를 어떻게 다룰지 정한다. **alt 화면(vim·less 등)에선
+어느 값이든 항상 `\e[5~`/`\e[6~`를 앱으로 보내** 앱이 자체 페이징한다.
+
+- `passthrough` (기본): xterm/Ghostty처럼 메인 화면에서도 `\e[5~`/`\e[6~`를 PTY로 보낸다. 예측
+  가능하고 레퍼런스·원격(SSH)과 일치한다. 단, 셸 기본 keymap에 이 키가 바인딩돼 있지 않으면(zsh
+  기본) BEL이 울리고 남은 `~`가 입력줄에 박힌다 — 셸에서 `bindkey`로 바인딩하거나 `scroll`을 쓴다.
+- `scroll`: Terminal.app/iTerm2처럼 메인 화면에서 Maru 스크롤백을 한 페이지씩 스크롤한다(`~`가
+  박히지 않음). 대신 메인 화면 앱(드물게 PageUp을 쓰는 TUI)에는 키가 전달되지 않는다.
+
+> `Shift+PageUp`/`Shift+PageDown`은 이 설정과 무관하게 항상 스크롤백을 스크롤한다.
 
 ### 키바인딩 (`keybind`)
 

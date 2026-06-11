@@ -4690,3 +4690,15 @@ test "mode 2027: emoji wrap at the last column on the scroll-bottom keeps the so
     try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
     try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
 }
+
+test "backspace + overwrite renders word deletion (zsh meta-DEL response)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 2 });
+    defer core.deinit();
+    try core.write("foo bar baz");
+    // zsh가 meta-DEL(\e\x7f)에 보내는 응답: 왼쪽3 + 공백3 + 왼쪽3 = "baz" 삭제.
+    try core.write("\x08\x08\x08   \x08\x08\x08");
+    const line = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(line);
+    try std.testing.expect(std.mem.startsWith(u8, line, "foo bar    ")); // baz가 공백으로
+    try std.testing.expectEqual(@as(u16, 8), core.cursor.col); // "foo bar " 다음(baz 시작)
+}

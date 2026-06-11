@@ -144,6 +144,9 @@ pub const DevSession = struct {
     // loaded_config가 실제로 초기화됐는지. init 초반(live/surface 생성)이 실패하면 deinit이 아직
     // undefined인 arena를 free하지 않도록, 다른 자원과 같은 *_initialized 가드 패턴을 쓴다.
     config_loaded: bool = false,
+    // input.page-keys=scroll이면 메인 화면에서 PageUp/Down이 Maru 스크롤백을 스크롤한다. 기본
+    // (false=passthrough)은 xterm/Ghostty처럼 \e[5~/\e[6~를 PTY로 보낸다.
+    page_keys_scroll: bool = false,
     // 한 cell의 device 픽셀 크기(advance 폭 × line-height). 실제 CoreText 메트릭에서 뽑아
     // shaper(atlas slot 크기)·rasterizer·renderer fixed-cell layout·host resize가 모두 같은 값을
     // 쓰게 한다. 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다.
@@ -260,6 +263,7 @@ pub const DevSession = struct {
         else
             try config_mod.loadConfigDefault(io, allocator);
         self.config_loaded = true;
+        self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
         // 로더가 모든 값을 valid-아니면-default로 걸러주므로 resolve는 사실상 실패하지 않지만,
         // 방어적으로 실패 시 기본값으로 떨어진다.
         self.appearance = config_mod.resolveAppearance(self.loaded_config.config) catch
@@ -321,7 +325,7 @@ pub const DevSession = struct {
         // 인코딩한다(아래 frame_loop 경로). 스크롤 키라 '타이핑하면 바닥으로' 로직보다 먼저 처리해
         // 매 PageUp마다 뷰가 바닥으로 튀지 않게 한다.
         if (self.surface_initialized) {
-            const page_delta = pageScrollDelta(self.surfaces[0].core.alt_active, event.key);
+            const page_delta = pageScrollDelta(self.page_keys_scroll, self.surfaces[0].core.alt_active, event.key);
             if (page_delta != 0) {
                 self.scrollPage(page_delta);
                 self.total_app_key_events += 1; // 앱(터미널)이 소비 — PTY로 안 보냄
@@ -812,11 +816,11 @@ pub const DevSession = struct {
     /// rows는 dev session이 권위 있게 알고 있어 Swift가 stale 값으로 계산하지 않게 여기서 구한다.
     /// alt screen에서는 휠과 동일하게 화살표 변환으로 폴백한다(이전엔 완전 무반응이었다).
     /// 메인 화면에서 PageUp/PageDown를 스크롤백 페이지 스크롤로 돌릴 때의 페이지 델타
-    /// (+1=위/과거, -1=아래/현재). alt 화면이거나 page 키가 아니면 0 — 그땐 일반 인코딩 경로로
-    /// 보내 앱(vim/less)이 \e[5~/\e[6~로 페이징한다. 셸 메인 화면에서 PTY로 보내면 zsh 기본
-    /// keymap이 unbound라 BEL+'~' 삽입으로 입력줄이 깨지므로 여기서 가른다(PTY 캡처 근거).
-    fn pageScrollDelta(alt_active: bool, key: terminal.input.Key) i32 {
-        if (alt_active) return 0;
+    /// (+1=위/과거, -1=아래/현재). scroll_mode(input.page-keys=scroll)가 아니거나 alt 화면이거나
+    /// page 키가 아니면 0 — 그땐 일반 인코딩 경로로 보내 앱(vim/less)이 \e[5~/\e[6~로 페이징하거나,
+    /// 셸이 그대로 받는다. 기본(passthrough)은 xterm/Ghostty와 일치, scroll은 Terminal.app/iTerm2식.
+    fn pageScrollDelta(scroll_mode: bool, alt_active: bool, key: terminal.input.Key) i32 {
+        if (!scroll_mode or alt_active) return 0;
         return switch (key) {
             .page_up => 1,
             .page_down => -1,
@@ -1554,15 +1558,17 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     try std.testing.expectEqual(@as(f64, 16), r2.y); // row 1 * 16
 }
 
-test "pageScrollDelta: main screen scrolls, alt screen sends to app" {
-    // 메인 화면: PageUp=위(+1), PageDown=아래(-1) 스크롤.
-    try std.testing.expectEqual(@as(i32, 1), DevSession.pageScrollDelta(false, .page_up));
-    try std.testing.expectEqual(@as(i32, -1), DevSession.pageScrollDelta(false, .page_down));
-    // alt 화면(vim/less): 0 — 일반 인코딩(\e[5~/\e[6~)으로 앱이 페이징.
-    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(true, .page_up));
-    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(true, .page_down));
-    // page 키가 아니면 메인/alt 무관하게 0(일반 키 경로).
-    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(false, .{ .function = 5 }));
-    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(false, .home));
-    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(false, .{ .char = 'a' }));
+test "pageScrollDelta: scroll mode + main screen scrolls; passthrough/alt sends to app" {
+    // scroll 모드 + 메인 화면: PageUp=위(+1), PageDown=아래(-1) 스크롤.
+    try std.testing.expectEqual(@as(i32, 1), DevSession.pageScrollDelta(true, false, .page_up));
+    try std.testing.expectEqual(@as(i32, -1), DevSession.pageScrollDelta(true, false, .page_down));
+    // scroll 모드라도 alt 화면(vim/less): 0 — 앱이 \e[5~/\e[6~로 페이징.
+    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(true, true, .page_up));
+    // passthrough(기본, xterm/Ghostty): 메인 화면이어도 0 — \e[5~/\e[6~를 그대로 PTY로.
+    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(false, false, .page_up));
+    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(false, false, .page_down));
+    // page 키가 아니면 무조건 0(일반 키 경로).
+    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(true, false, .{ .function = 5 }));
+    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(true, false, .home));
+    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(true, false, .{ .char = 'a' }));
 }

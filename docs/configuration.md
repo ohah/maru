@@ -50,6 +50,7 @@ cursor.blink = true
 | `cursor.shape` | `block`\|`bar`\|`underline` | `block` | 그 외 값은 무시 |
 | `cursor.blink` | `true`\|`false` | `true` | |
 | `input.page-keys` | `passthrough`\|`scroll` | `passthrough` | 메인 화면 PageUp/Down 동작. 아래 참조 |
+| `term` | 문자열 | `xterm-256color` | 셸에 줄 `$TERM`. 아래 참조 |
 | `keybind` | `<조합> = <action>` | (없음) | 여러 줄 가능. 아래 참조 |
 
 ### PageUp/PageDown (`input.page-keys`)
@@ -64,6 +65,23 @@ cursor.blink = true
   박히지 않음). 대신 메인 화면 앱(드물게 PageUp을 쓰는 TUI)에는 키가 전달되지 않는다.
 
 > `Shift+PageUp`/`Shift+PageDown`은 이 설정과 무관하게 항상 스크롤백을 스크롤한다.
+
+### `$TERM` (`term`)
+
+셸에 줄 `$TERM` 값이다(기본 `xterm-256color`, Maru의 xterm식 동작과 맞는 표준값). 보통 바꿀
+필요 없다. 드물게 셸 설정/프레임워크가 `$TERM`에 따라 다르게 동작하는 경우, 셸이 기대하는 값으로
+맞출 수 있다:
+
+```conf
+term = xterm-ghostty   # 그 terminfo가 설치돼 있어야 한다
+```
+
+> Maru는 대화형 셸을 **login shell로 띄우므로**(Terminal.app·iTerm2와 동일) `.zprofile`/`.zlogin`까지
+> source돼 PATH·EDITOR·키바인딩(예: `bindkey -e`로 `Cmd+Left`=줄-시작)이 사용자 환경대로 잡힌다.
+> 그래서 키바인딩 같은 건 대개 `term`을 안 건드려도 정상 동작한다. 키바인딩 해석은 터미널이 아니라
+> 셸의 책임이다 — 터미널은 `\x01` 같은 바이트만 보낸다.
+
+> 빈 값(`term =`)은 무시하고 기본값을 유지한다. env를 명시로 주는 테스트 경로에선 이 값이 무시된다.
 
 ### 키바인딩 (`keybind`)
 

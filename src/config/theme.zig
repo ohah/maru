@@ -40,4 +40,7 @@ pub const Config = struct {
     theme: ThemeConfig = .{},
     cursor: CursorConfig = .{},
     input: InputConfig = .{},
+    /// 셸에 줄 TERM 값. 셸 설정/통합이 $TERM에 따라 키바인딩(예: Ctrl+A 줄-시작)을 다르게 잡는
+    /// 경우, 사용자가 자기 환경이 기대하는 값(예: xterm-ghostty)으로 바꿀 수 있다. 빈 값은 무시.
+    term: []const u8 = "xterm-256color",
 };

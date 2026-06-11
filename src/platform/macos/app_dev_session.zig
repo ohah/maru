@@ -233,10 +233,22 @@ pub const DevSession = struct {
         };
         errdefer self.deinit();
 
+        // 사용자 config(~/.config/maru/config 또는 $MARU_CONFIG)를 가장 먼저 로드한다 — PTY를 띄울 때
+        // 셸에 줄 TERM 값(`term =`)이 필요하기 때문이다(셸 설정/통합이 $TERM에 따라 키바인딩을 다르게
+        // 잡는다). 단위 테스트에서는 개발자의 실제 config를 읽으면 비결정적이라 빈 config로 고정한다
+        // (파싱 규칙은 loader 단위 테스트가 본다). loaded_config는 세션 동안 보관(family 슬라이스 빌림).
+        // config_loaded 가드를 세워 이후 init 실패가 이 arena를 이중 해제하지 않게 한다.
+        self.loaded_config = if (builtin.is_test)
+            try config_mod.parseConfig(allocator, "")
+        else
+            try config_mod.loadConfigDefault(io, allocator);
+        self.config_loaded = true;
+        self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
+
         // Swift는 opaque handle만 보유하고, 이 구조체는 heap에 고정된다. LivePtySession의
         // reader thread가 `&live_pty.reader`를 잡고 돌기 때문에, 이 값을 만든 뒤에는
         // 절대 by-value로 이동하지 않는 것이 이번 ABI의 핵심 수명 계약이다.
-        try self.live_pty.init(io, allocator, 10, spawnRequest(config), config.queue_capacity);
+        try self.live_pty.init(io, allocator, 10, spawnRequest(config, self.loaded_config.config.term), config.queue_capacity);
         self.live_initialized = true;
 
         self.surfaces[0] = try app.Surface.init(allocator, 1, config.size);
@@ -253,19 +265,8 @@ pub const DevSession = struct {
         self.pump = self.live_pty.pump(&self.runtime);
         self.renderer_state = renderer.RendererState.init(allocator, .{});
         self.renderer_initialized = true;
-        // 사용자 config(~/.config/maru/config 또는 $MARU_CONFIG)를 로드해 appearance를 resolve한다.
-        // 단위 테스트에서는 개발자의 실제 config 파일을 읽으면 결과가 비결정적이 되므로 빈 config로
-        // 고정한다(파싱 규칙은 loader 단위 테스트가 본다). loaded_config는 세션 동안 보관(family
-        // 슬라이스 빌림). config_loaded 가드를 세워 이후 init 실패가 이 arena를 이중 해제하지 않게
-        // 한다 — 별도 errdefer는 두지 않는다(deinit의 broad errdefer가 같은 자원을 가드로 정리).
-        self.loaded_config = if (builtin.is_test)
-            try config_mod.parseConfig(allocator, "")
-        else
-            try config_mod.loadConfigDefault(io, allocator);
-        self.config_loaded = true;
-        self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
         // 로더가 모든 값을 valid-아니면-default로 걸러주므로 resolve는 사실상 실패하지 않지만,
-        // 방어적으로 실패 시 기본값으로 떨어진다.
+        // 방어적으로 실패 시 기본값으로 떨어진다.(loaded_config는 위에서 PTY spawn 전에 로드했다.)
         self.appearance = config_mod.resolveAppearance(self.loaded_config.config) catch
             try config_mod.resolveAppearance(.{});
         // config의 무시된 줄(알 수 없는 key·잘못된 값)을 알린다 — 사용자가 오타를 눈치채게.
@@ -1119,8 +1120,8 @@ pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
     };
 }
 
-fn spawnRequest(config: NormalizedConfig) maru.pty.SpawnRequest {
-    return switch (config.command_kind) {
+fn spawnRequest(config: NormalizedConfig, term: []const u8) maru.pty.SpawnRequest {
+    var request: maru.pty.SpawnRequest = switch (config.command_kind) {
         .controlled_smoke => .{
             .command = "/bin/sh",
             .args = &.{
@@ -1132,9 +1133,18 @@ fn spawnRequest(config: NormalizedConfig) maru.pty.SpawnRequest {
         .interactive_shell => .{
             .command = maru.pty.resolveInteractiveShell(),
             .args = &.{"-i"},
+            // login shell로 띄운다(Terminal.app·iTerm2·Ghostty와 동일) — .zprofile/.zlogin까지
+            // source해 PATH·EDITOR·키바인딩 등 사용자 환경이 완전히 잡힌다. non-login이면 .zshrc만
+            // 읽어 키맵이 어긋날 수 있다(예: $EDITOR=nvim이면 vi-keymap → Ctrl+A self-insert →
+            // Cmd+Left가 줄-시작으로 안 감). controlled_smoke(/bin/sh -c)는 login이 아니다.
+            .login = true,
             .size = config.size,
         },
     };
+    // 사용자 config의 TERM을 셸에 준다(기본 xterm-256color). env는 빈 채로 둬 부모 상속 +
+    // TERM/COLORTERM override 경로를 타게 한다.
+    request.term = term;
+    return request;
 }
 
 fn commandName(kind: CommandKind) []const u8 {

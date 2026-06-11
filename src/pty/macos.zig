@@ -49,7 +49,7 @@ pub const PtySession = struct {
         var argv_storage = try ArgvStorage.init(allocator, request);
         defer argv_storage.deinit();
 
-        var env_storage = try EnvStorage.init(allocator, request.env);
+        var env_storage = try EnvStorage.init(allocator, request.env, request.term);
         defer env_storage.deinit();
 
         var window_size = winsizeFromTerminalSize(request.size);
@@ -349,7 +349,13 @@ const ArgvStorage = struct {
             for (strings[0..initialized]) |owned| allocator.free(owned);
         }
 
-        strings[0] = try allocator.dupeZ(u8, request.command);
+        // login shell 관례: argv[0]을 `-` + basename(예: /bin/zsh → `-zsh`)으로 주면 셸이 자신을
+        // login shell로 인식해 .zprofile/.zlogin까지 source한다(Terminal.app과 동일). non-login이면
+        // command 경로를 그대로 argv[0]로 쓴다.
+        strings[0] = if (request.login)
+            try std.fmt.allocPrintSentinel(allocator, "-{s}", .{std.fs.path.basename(request.command)}, 0)
+        else
+            try allocator.dupeZ(u8, request.command);
         initialized += 1;
 
         for (request.args, 0..) |arg, index| {
@@ -378,14 +384,15 @@ const EnvStorage = struct {
     strings: [][:0]u8,
     envp: ?[:null]?[*:0]const u8,
 
-    fn init(allocator: std.mem.Allocator, env: []const []const u8) !EnvStorage {
+    fn init(allocator: std.mem.Allocator, env: []const []const u8, term: []const u8) !EnvStorage {
         if (env.len == 0) {
             // 부모 환경을 물려주되 TERM/COLORTERM은 Maru 값으로 덮어쓴다. 부모 TERM을 그대로 주면
             // (예: tmux/screen TERM, 또는 Maru 동작과 안 맞는 terminfo) zsh의 SIGWINCH redraw가
             // wrap 행 수를 잘못 계산해(상대 커서 이동 \e[A 횟수가 어긋남) 프롬프트가 중복된다.
-            // Maru는 xterm식(auto-wrap + deferred wrap)이라 xterm-256color terminfo와 맞는다.
-            // (Ghostty도 TERM을 자기 값으로 명시 설정하고 폴백이 xterm-256color다 — 동작 비교 확인.)
-            return initFromParentWithTermOverride(allocator);
+            // 기본 xterm-256color는 Maru의 xterm식(auto-wrap + deferred wrap) 동작과 맞는다. 단
+            // 사용자 config(`term =`)로 바꿀 수 있다 — 셸 설정/통합이 $TERM에 따라 키바인딩을 다르게
+            // 잡는 경우(예: Ctrl+A 줄-시작) 사용자가 자기 환경에 맞는 값을 줄 수 있게 한다.
+            return initFromParentWithTermOverride(allocator, term);
         }
 
         const strings = try allocator.alloc([:0]u8, env.len);
@@ -412,8 +419,9 @@ const EnvStorage = struct {
         };
     }
 
-    // 부모 환경(std.c.environ)을 복사하되 TERM/COLORTERM을 Maru 표준값으로 교체한 owned envp를 만든다.
-    fn initFromParentWithTermOverride(allocator: std.mem.Allocator) !EnvStorage {
+    // 부모 환경(std.c.environ)을 복사하되 TERM은 인자 값(기본 xterm-256color, 사용자 config로 변경
+    // 가능)으로, COLORTERM은 truecolor로 교체한 owned envp를 만든다.
+    fn initFromParentWithTermOverride(allocator: std.mem.Allocator, term: []const u8) !EnvStorage {
         var entries: std.ArrayList([:0]u8) = .empty;
         errdefer {
             for (entries.items) |owned| allocator.free(owned);
@@ -435,7 +443,7 @@ const EnvStorage = struct {
                 return err;
             };
         }
-        const term_owned = try allocator.dupeZ(u8, "TERM=xterm-256color");
+        const term_owned = try std.fmt.allocPrintSentinel(allocator, "TERM={s}", .{term}, 0);
         entries.append(allocator, term_owned) catch |err| {
             allocator.free(term_owned);
             return err;
@@ -694,7 +702,7 @@ test "validateRequest rejects requests that cannot produce a reliable PTY" {
 }
 
 test "EnvStorage empty env inherits the parent but forces TERM/COLORTERM to Maru's values" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{});
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-256color");
     defer storage.deinit();
 
     var term_count: usize = 0;
@@ -723,11 +731,38 @@ test "EnvStorage empty env inherits the parent but forces TERM/COLORTERM to Maru
     try std.testing.expect(i >= 2); // 부모 env도 물려받았다(최소 PATH 등)
 }
 
-test "EnvStorage explicit env is passed through verbatim (no TERM injection)" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{ "FOO=bar", "TERM=dumb" });
+test "EnvStorage explicit env is passed through verbatim (term arg ignored)" {
+    // 명시 env면 term 인자는 무시된다(테스트가 완전한 env를 직접 준다).
+    var storage = try EnvStorage.init(std.testing.allocator, &.{ "FOO=bar", "TERM=dumb" }, "xterm-ghostty");
     defer storage.deinit();
     const envp = storage.envpPtr();
     try std.testing.expectEqualStrings("FOO=bar", std.mem.span(envp[0].?));
     try std.testing.expectEqualStrings("TERM=dumb", std.mem.span(envp[1].?));
     try std.testing.expectEqual(@as(?[*:0]const u8, null), envp[2]);
+}
+
+test "ArgvStorage login uses dash-prefixed basename as argv[0] (login shell convention)" {
+    var storage = try ArgvStorage.init(std.testing.allocator, .{ .command = "/bin/zsh", .args = &.{"-i"}, .login = true });
+    defer storage.deinit();
+    try std.testing.expectEqualStrings("-zsh", std.mem.span(storage.argv[0].?)); // login: -zsh
+    try std.testing.expectEqualStrings("-i", std.mem.span(storage.argv[1].?));
+    try std.testing.expectEqual(@as(?[*:0]const u8, null), storage.argv[2]);
+}
+
+test "ArgvStorage non-login uses the command path as argv[0]" {
+    var storage = try ArgvStorage.init(std.testing.allocator, .{ .command = "/bin/zsh", .args = &.{"-i"} });
+    defer storage.deinit();
+    try std.testing.expectEqualStrings("/bin/zsh", std.mem.span(storage.argv[0].?)); // 경로 그대로
+}
+
+test "EnvStorage empty env uses the supplied TERM (configurable)" {
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-ghostty");
+    defer storage.deinit();
+    var found = false;
+    const envp = storage.envpPtr();
+    var i: usize = 0;
+    while (envp[i]) |entry| : (i += 1) {
+        if (std.mem.eql(u8, std.mem.span(entry), "TERM=xterm-ghostty")) found = true;
+    }
+    try std.testing.expect(found); // config term이 셸 env에 반영된다
 }

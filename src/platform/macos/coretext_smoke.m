@@ -961,30 +961,54 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         const CGFloat ascent = CTFontGetAscent(draw_font);
         const CGFloat descent = CTFontGetDescent(draw_font);
         const CGFloat line_height = ascent + descent;
-        CGFloat x = -bounds.origin.x + floor(((CGFloat)width_px - bounds.size.width) / 2.0);
-        CGFloat y = descent;
-        if (line_height > 0.0 && line_height <= (CGFloat)height_px) {
-            y = descent + floor(((CGFloat)height_px - line_height) / 2.0);
-        }
-        if (!isfinite((double)x)) {
-            x = 0.0;
-        }
-        if (!isfinite((double)y)) {
-            y = (CGFloat)height_px * 0.2;
-        }
-        // ink box가 slot보다 큰 glyph(큰 CJK/이모지)는 centering 값이 음수가 되어 glyph가
-        // bitmap 왼쪽/아래로 벗어난다. 그러면 잉크가 잘려 non_clear pixel이 0이 되고, 실제로는
-        // 그릴 수 있는 glyph가 zero-ink로 잘못 보고된다. origin을 0 이상으로 묶어 최소한
-        // glyph가 통째로 화면 밖으로 나가지 않게 한다(우/하단 clipping은 slot 크기 문제로 별도).
-        if (x < 0.0) {
-            x = 0.0;
-        }
-        if (y < 0.0) {
-            y = 0.0;
-        }
+        const CGFloat avail_w = (CGFloat)width_px;
+        const CGFloat avail_h = (CGFloat)height_px;
 
-        CGPoint position = CGPointMake(x, y);
-        CTFontDrawGlyphs(draw_font, &glyph, &position, 1, context);
+        // ink box가 slot보다 크면(폭이 좁은 셀의 이모지 — 예: EAW 1칸인 ❤️, 또는 큰 CJK) 잘라서
+        // 우/하단이 날아가던 것을 막는다. 대신 종횡비를 유지한 채 슬롯에 들어가게 축소하고 가운데에
+        // 맞춘다. 이는 Ghostty가 이모지에 적용하는 constraint(.size=.cover, align center)와 같은
+        // 접근이다(SharedGrid.zig의 동작을 비교 — 레퍼런스 코드 미복사). 셀에 잘 들어가는 일반
+        // 글자는 글자마다 baseline이 흔들리지 않도록 기존 공통-baseline 정렬을 그대로 쓴다.
+        const bool overflows = bounds.size.width > avail_w || bounds.size.height > avail_h;
+        if (overflows && bounds.size.width > 0.0 && bounds.size.height > 0.0) {
+            CGFloat scale = fmin(avail_w / bounds.size.width, avail_h / bounds.size.height);
+            if (!isfinite((double)scale) || scale <= 0.0) {
+                scale = 1.0;
+            }
+            if (scale > 1.0) {
+                scale = 1.0; // 축소만 — 작은 글리프를 키워 흐려지게 하지 않는다.
+            }
+            CGContextSaveGState(context);
+            // 슬롯 중심으로 옮긴 뒤 축소하고, glyph의 ink box 중심을 원점(=슬롯 중심)에 맞춰 그린다.
+            CGContextTranslateCTM(context, avail_w / 2.0, avail_h / 2.0);
+            CGContextScaleCTM(context, scale, scale);
+            const CGFloat ink_center_x = bounds.origin.x + bounds.size.width / 2.0;
+            const CGFloat ink_center_y = bounds.origin.y + bounds.size.height / 2.0;
+            CGPoint position = CGPointMake(-ink_center_x, -ink_center_y);
+            CTFontDrawGlyphs(draw_font, &glyph, &position, 1, context);
+            CGContextRestoreGState(context);
+        } else {
+            // 기존 경로: 수평 가운데 + 공통 baseline(descent + 위아래 여백/2).
+            CGFloat x = -bounds.origin.x + floor((avail_w - bounds.size.width) / 2.0);
+            CGFloat y = descent;
+            if (line_height > 0.0 && line_height <= avail_h) {
+                y = descent + floor((avail_h - line_height) / 2.0);
+            }
+            if (!isfinite((double)x)) {
+                x = 0.0;
+            }
+            if (!isfinite((double)y)) {
+                y = avail_h * 0.2;
+            }
+            if (x < 0.0) {
+                x = 0.0;
+            }
+            if (y < 0.0) {
+                y = 0.0;
+            }
+            CGPoint position = CGPointMake(x, y);
+            CTFontDrawGlyphs(draw_font, &glyph, &position, 1, context);
+        }
 
         const uint32_t non_clear = maru_count_non_clear_rgba_pixels(
             pixels,

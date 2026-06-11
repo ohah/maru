@@ -115,7 +115,9 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     ]
 
     override func keyDown(with event: NSEvent) {
-        imeLog("keyDown", event.characters, keyCode: event.keyCode)
+        let m = event.modifierFlags
+        let mods = "\(m.contains(.command) ? "Cmd " : "")\(m.contains(.control) ? "Ctrl " : "")\(m.contains(.option) ? "Opt " : "")\(m.contains(.shift) ? "Shift " : "")"
+        imeLog("keyDown mods=[\(mods)]", event.characters, keyCode: event.keyCode)
         // Control+Command+Space(이모지 & 기호 피커)는 시스템 character palette를 연다. 우리가
         // Ctrl/Cmd 조합을 전부 가로채면 이 피커가 안 떠서 명시적으로 처리한다(keyCode 49 = Space).
         // 피커에서 고른 이모지는 입력기의 insertText로 들어와 PTY로 전송된다.

@@ -31,24 +31,12 @@ pub fn isCombiningMark(codepoint: u21) bool {
     };
 }
 
-fn isWideCodepoint(codepoint: u21) bool {
-    // Minimal UAX#11-inspired ranges for the first terminal grid model. The
-    // ranges cover Hangul, CJK, Kana, fullwidth forms, and common emoji blocks
-    // without pulling in a generated Unicode table before the parser/storage
-    // shape is stable.
+/// Unicode Emoji_Presentation=Yes 중 0x1F300 미만의 큐레이션 집합(기본 이모지 표현 — VS16 없이도
+/// width 2이고 컬러). ✅(2705)·⌚(231A)·⏰(23F0)·⭐(2B50)·❌(274C) 등. 0x2600~0x27BF·0x2B00~0x2BFF
+/// 블록을 통째로 넣지 않는다 — 그 안엔 ✓(2713)·★(2605)·♠(2660) 같은 단색 텍스트 기호가 많아,
+/// 통째로 이모지로 분류하면 SGR 전경색을 잃고(컬러 경로로 가) 잘못 그려진다.
+fn isDefaultEmojiPresentation(codepoint: u21) bool {
     return switch (codepoint) {
-        0x1100...0x115F,
-        0x2329...0x232A,
-        0x2E80...0xA4CF,
-        0xAC00...0xD7A3,
-        0xF900...0xFAFF,
-        0xFE10...0xFE19,
-        0xFE30...0xFE6F,
-        0xFF00...0xFF60,
-        0xFFE0...0xFFE6,
-        // Unicode Emoji_Presentation=Yes 중 0x1F300 미만(기본 이모지 표현 — VS16 없이도 width 2,
-        // 컬러). ✅(2705)·⌚(231A)·⏰(23F0)·⭐(2B50)·❌(274C) 등. 이게 없으면 width 1 slot에
-        // 그려져 반 잘렸다.
         0x231A...0x231B,
         0x23E9...0x23EC,
         0x23F0,
@@ -82,10 +70,43 @@ fn isWideCodepoint(codepoint: u21) bool {
         0x2B1B...0x2B1C,
         0x2B50,
         0x2B55,
+        => true,
+        else => false,
+    };
+}
+
+/// 컬러 이모지로 렌더되는(emoji 폰트로 래스터되는) codepoint인지 — 렌더 단일 출처. 셀 너비와는
+/// 별개다(지역 표시자 RI는 컬러지만 폭 1). metal_frame의 컬러 UV sentinel과 coretext 래스터의
+/// 이모지 scale-맞춤이 이 집합을 공유해야 단색 텍스트 기호가 컬러 경로로 새지 않는다.
+/// coretext_smoke.m의 maru_is_emoji_codepoint는 FFI 경계 때문에 손으로 미러링하므로 함께 갱신한다.
+pub fn isEmojiPresentation(codepoint: u21) bool {
+    return switch (codepoint) {
+        0x1F1E6...0x1F1FF, // 지역 표시자(국기 — 컬러, 폭은 1)
+        0x1F300...0x1FAFF, // 주요 이모지/그림문자 + 스킨톤 modifier
+        => true,
+        else => isDefaultEmojiPresentation(codepoint),
+    };
+}
+
+fn isWideCodepoint(codepoint: u21) bool {
+    // Minimal UAX#11-inspired ranges for the first terminal grid model. The
+    // ranges cover Hangul, CJK, Kana, fullwidth forms, and common emoji blocks
+    // without pulling in a generated Unicode table before the parser/storage
+    // shape is stable. 0x1F300 미만 default-emoji는 isDefaultEmojiPresentation과 공유한다.
+    return switch (codepoint) {
+        0x1100...0x115F,
+        0x2329...0x232A,
+        0x2E80...0xA4CF,
+        0xAC00...0xD7A3,
+        0xF900...0xFAFF,
+        0xFE10...0xFE19,
+        0xFE30...0xFE6F,
+        0xFF00...0xFF60,
+        0xFFE0...0xFFE6,
         0x1F300...0x1FAFF,
         0x20000...0x3FFFD,
         => true,
-        else => false,
+        else => isDefaultEmojiPresentation(codepoint),
     };
 }
 
@@ -132,4 +153,21 @@ test "VS16 attaches to the base as a combining mark (one cell), shaper sees the 
     try std.testing.expectEqual(@as(u2, 1), core.cells[0].width); // EAW Neutral = 1(zsh 일치)
     try std.testing.expectEqual(@as(u21, ' '), core.cells[1].codepoint); // 다음 칸은 빈칸
     try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
+}
+
+test "isEmojiPresentation: default-emoji yes, mono text symbols no (SGR fg preserved)" {
+    // default-emoji-presentation = true(VS16 없이도 컬러)
+    try std.testing.expect(isEmojiPresentation(0x2705)); // ✅
+    try std.testing.expect(isEmojiPresentation(0x1F389)); // 🎉
+    try std.testing.expect(isEmojiPresentation(0x2B50)); // ⭐
+    try std.testing.expect(isEmojiPresentation(0x1F1F0)); // 🇰(RI, 컬러)
+    // ❤(U+2764)는 text-default라 단독은 false — 컬러는 VS16 결합 시에만(metal_frame이 combining
+    // 으로 판정). 단독 ❤는 SGR 전경색을 따르는 텍스트 글자다.
+    try std.testing.expect(!isEmojiPresentation(0x2764));
+    // 단색 텍스트 기호 = false (SGR 전경색을 잃지 않게)
+    try std.testing.expect(!isEmojiPresentation(0x2713)); // ✓ 텍스트 체크
+    try std.testing.expect(!isEmojiPresentation(0x2605)); // ★
+    try std.testing.expect(!isEmojiPresentation(0x2660)); // ♠
+    try std.testing.expect(!isEmojiPresentation(0x2717)); // ✗
+    try std.testing.expect(!isEmojiPresentation('A'));
 }

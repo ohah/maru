@@ -835,15 +835,28 @@ void maru_macos_coretext_shape_draw_list(
 }
 
 // 컬러 이모지 codepoint인지(축소-맞춤을 이모지에만 적용하기 위함 — 텍스트는 baseline 정렬 유지).
-// metal_frame.zig의 isColorGlyph와 같은 범위를 쓴다(주요 그림문자 + 기호 이모지 + default-emoji).
-static bool maru_is_emoji_codepoint(uint32_t cp) {
-    return (cp >= 0x1F000 && cp <= 0x1FAFF) || // 마작/카드 + 주요 이모지/그림문자
-           (cp >= 0x2600 && cp <= 0x27BF) ||   // 기타 기호 + dingbats(❤ ✅ 등)
-           (cp >= 0x2B00 && cp <= 0x2BFF) ||   // 화살표/별 기호(⭐ 등)
-           (cp >= 0x231A && cp <= 0x231B) ||   // ⌚⌛
-           (cp >= 0x23E9 && cp <= 0x23EC) ||   // ⏩⏪⏫⏬
-           cp == 0x23F0 || cp == 0x23F3 ||     // ⏰⏳
-           (cp >= 0x25FD && cp <= 0x25FE);     // ◽◾
+// 글리프가 컬러 이모지인지 — 그린 폰트가 컬러 글리프 테이블(sbix/COLR)을 가졌는지로 판정한다.
+// codepoint 휴리스틱(단색 텍스트 기호를 잘못 포함, ❤+VS16의 base U+2764를 놓침)보다 정확하다:
+// 셰이퍼가 이미 이모지/텍스트 폰트를 골라줬으므로, 그 폰트가 컬러면 이 글리프는 컬러 이모지다.
+// 이모지에만 scale-맞춤(.cover)을 적용해 단색 텍스트(한글/CJK 포함)의 baseline 정렬을 지킨다.
+static bool maru_font_is_color(CTFontRef font) {
+    if (font == NULL) {
+        return false;
+    }
+    // 'sbix'(Apple Color Emoji) 또는 'COLR'(컬러 벡터 폰트) 테이블이 있으면 컬러 폰트.
+    const CTFontTableTag sbix = ('s' << 24) | ('b' << 16) | ('i' << 8) | 'x';
+    const CTFontTableTag colr = ('C' << 24) | ('O' << 16) | ('L' << 8) | 'R';
+    CFDataRef t = CTFontCopyTable(font, sbix, kCTFontTableOptionNoOptions);
+    if (t != NULL) {
+        CFRelease(t);
+        return true;
+    }
+    t = CTFontCopyTable(font, colr, kCTFontTableOptionNoOptions);
+    if (t != NULL) {
+        CFRelease(t);
+        return true;
+    }
+    return false;
 }
 
 void maru_macos_coretext_smoke_rasterize_glyph(
@@ -981,7 +994,7 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         // 축소+가운데정렬하면 baseline이 흔들려 윗/아랫줄과 어긋나 보인다(이게 회귀의 원인이었다).
         // 텍스트는 공통-baseline 정렬을 그대로 써 줄이 일관되게 맞고, 큰 글자는 셀 메트릭으로 맞춘다.
         // 좁은 셀(EAW 1칸)의 이모지는 ink가 슬롯을 넘으므로 종횡비 유지 축소로 안 잘리게 한다.
-        const bool is_emoji = maru_is_emoji_codepoint(codepoint);
+        const bool is_emoji = maru_font_is_color(draw_font);
         if (is_emoji && bounds.size.width > 0.0 && bounds.size.height > 0.0) {
             // 이모지는 슬롯을 꽉 채우도록 종횡비 유지하며 키우거나 줄인다(Ghostty의 .cover와 같은
             // 의도 — 풀사이즈). 두 축 비율 중 작은 쪽으로 스케일하면 슬롯 안에 정확히 들어맞고

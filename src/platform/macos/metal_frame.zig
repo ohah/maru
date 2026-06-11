@@ -60,23 +60,19 @@ pub const CellColors = struct {
     hover_link: ?terminal.SelectionSpan = null,
 };
 
-/// 컬러 글리프(이모지)인지 codepoint로 판정한다. 셰이더는 이 cell의 UV에 +2.0이 더해져 오면
-/// atlas의 컬러 RGBA를 그대로 쓴다(전경색 무시). 래스터라이저가 이미 emoji 폰트로 컬러를 그려
-/// atlas에 올려둔다. 주요 그림문자 블록을 덮는다(일부 기호-범위 이모지는 후속).
-fn isColorGlyph(codepoint: u21) bool {
-    return switch (codepoint) {
-        0x1F000...0x1FAFF, // 마작/도미노/카드 + 주요 이모지/그림문자
-        0x2600...0x27BF, // 기타 기호 + dingbats(❤ ✅ ☀ 등)
-        0x2B00...0x2BFF, // 기타 화살표/별 기호(⭐ 등)
-        // width.zig의 default-emoji 범위(0x2600 미만)와 맞춰 ⌚⏰⏳ 등도 컬러로.
-        0x231A...0x231B,
-        0x23E9...0x23EC,
-        0x23F0,
-        0x23F3,
-        0x25FD...0x25FE,
-        => true,
-        else => false,
-    };
+/// 컬러 글리프(이모지)인지 판정한다. 셰이더는 이 cell의 UV에 +2.0이 더해져 오면 atlas의 컬러
+/// RGBA를 그대로 쓴다(전경색 무시). 단일 출처는 width.isEmojiPresentation — 단색 텍스트 기호
+/// (✓★♠ 등)를 컬러 경로로 보내 SGR 전경색을 잃던 버그를 막으려고, 손으로 넓힌 블록 대신
+/// 큐레이션 집합을 공유한다. VS16(U+FE0F)이 결합된 글자(❤+VS16=❤️)는 text-default codepoint라도
+/// 이모지 표현이라 컬러다 — codepoint만으론 ❤(텍스트)와 ❤️(이모지)를 못 가르므로 combining도 본다.
+fn isColorGlyph(codepoint: u21, combining: ?u21) bool {
+    if (terminal.width.isEmojiPresentation(codepoint)) return true;
+    return combining == 0xFE0F; // VS16 = 이모지 표현
+}
+
+/// 컬러 글리프면 UV u에 sentinel(+2.0)을 더한다(셰이더가 빼고 샘플해 atlas 컬러를 쓴다).
+fn colorUv(uv: f32, codepoint: u21, combining: ?u21) f32 {
+    return if (isColorGlyph(codepoint, combining)) uv + color_glyph_uv_offset else uv;
 }
 
 /// 컬러 글리프면 UV u에 더하는 sentinel 오프셋(셰이더가 빼고 샘플). u<0(배경)·[0,1](일반)과
@@ -194,9 +190,9 @@ pub fn buildNativeCellsSplit(
             .atlas_y_px = glyph.slot.y_px,
             .atlas_width_px = glyph.slot.width_px,
             .atlas_height_px = glyph.slot.height_px,
-            .u0 = if (isColorGlyph(glyph.run.codepoint)) glyph.uv.u0 + color_glyph_uv_offset else glyph.uv.u0,
+            .u0 = colorUv(glyph.uv.u0, glyph.run.codepoint, glyph.run.combining),
             .v0 = glyph.uv.v0,
-            .u1 = if (isColorGlyph(glyph.run.codepoint)) glyph.uv.u1 + color_glyph_uv_offset else glyph.uv.u1,
+            .u1 = colorUv(glyph.uv.u1, glyph.run.codepoint, glyph.run.combining),
             .v1 = glyph.uv.v1,
             .foreground = packForeground(glyph.run.style, colors),
             .background = if (inSelection(colors.selection, glyph.run.row, glyph.run.col))
@@ -382,9 +378,11 @@ pub fn buildNativeCellsSplit(
                     .atlas_y_px = glyph.slot.y_px,
                     .atlas_width_px = glyph.slot.width_px,
                     .atlas_height_px = glyph.slot.height_px,
-                    .u0 = glyph.uv.u0,
+                    // 커서 아래 컬러 이모지도 컬러로 유지한다 — 메인 pass와 같은 +2.0 sentinel을
+                    // 적용하지 않으면 셰이더가 단색 분기로 그려 이모지가 색을 잃는다.
+                    .u0 = colorUv(glyph.uv.u0, glyph.run.codepoint, glyph.run.combining),
                     .v0 = glyph.uv.v0,
-                    .u1 = glyph.uv.u1,
+                    .u1 = colorUv(glyph.uv.u1, glyph.run.codepoint, glyph.run.combining),
                     .v1 = glyph.uv.v1,
                     .foreground = packRgb(cursor_colors.text),
                     .background = cursor_bg,
@@ -1046,4 +1044,32 @@ test "color emoji glyph cells get the +2.0 UV sentinel; normal glyphs do not" {
     }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
     defer allocator.free(ac);
     try std.testing.expectApproxEqAbs(@as(f32, 0.1), ac[0].u0, 0.001);
+
+    // 단색 텍스트 기호(✓ U+2713): 0x2600-0x27BF 블록 안이지만 이모지 아님 → 오프셋 없음(SGR
+    // 전경색 유지). 이게 +2.0이 되면 셰이더 컬러 분기로 가 전경색을 잃는 버그였다.
+    var check = [_]renderer.GlyphQuad{mkGlyph(0x2713)};
+    const cc = try buildNativeCellsFromGlyphQuads(allocator, .{
+        .size = .{ .cols = 4, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &check,
+        .overlays = &.{},
+        .stats = .{},
+    }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
+    defer allocator.free(cc);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1), cc[0].u0, 0.001); // 오프셋 없음
+
+    // ❤ + VS16(combining 0xFE0F): text-default codepoint(U+2764)지만 이모지 표현 → +2.0.
+    var heart = [_]renderer.GlyphQuad{mkGlyph(0x2764)};
+    heart[0].run.combining = 0xFE0F;
+    const hc = try buildNativeCellsFromGlyphQuads(allocator, .{
+        .size = .{ .cols = 4, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &heart,
+        .overlays = &.{},
+        .stats = .{},
+    }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
+    defer allocator.free(hc);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.1), hc[0].u0, 0.001); // VS16 → +2.0
 }

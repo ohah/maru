@@ -834,6 +834,18 @@ void maru_macos_coretext_shape_draw_list(
     }
 }
 
+// 컬러 이모지 codepoint인지(축소-맞춤을 이모지에만 적용하기 위함 — 텍스트는 baseline 정렬 유지).
+// metal_frame.zig의 isColorGlyph와 같은 범위를 쓴다(주요 그림문자 + 기호 이모지 + default-emoji).
+static bool maru_is_emoji_codepoint(uint32_t cp) {
+    return (cp >= 0x1F000 && cp <= 0x1FAFF) || // 마작/카드 + 주요 이모지/그림문자
+           (cp >= 0x2600 && cp <= 0x27BF) ||   // 기타 기호 + dingbats(❤ ✅ 등)
+           (cp >= 0x2B00 && cp <= 0x2BFF) ||   // 화살표/별 기호(⭐ 등)
+           (cp >= 0x231A && cp <= 0x231B) ||   // ⌚⌛
+           (cp >= 0x23E9 && cp <= 0x23EC) ||   // ⏩⏪⏫⏬
+           cp == 0x23F0 || cp == 0x23F3 ||     // ⏰⏳
+           (cp >= 0x25FD && cp <= 0x25FE);     // ◽◾
+}
+
 void maru_macos_coretext_smoke_rasterize_glyph(
     const char *requested_font_family,
     size_t requested_font_family_len,
@@ -964,19 +976,20 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         const CGFloat avail_w = (CGFloat)width_px;
         const CGFloat avail_h = (CGFloat)height_px;
 
-        // ink box가 slot보다 크면(폭이 좁은 셀의 이모지 — 예: EAW 1칸인 ❤️, 또는 큰 CJK) 잘라서
-        // 우/하단이 날아가던 것을 막는다. 대신 종횡비를 유지한 채 슬롯에 들어가게 축소하고 가운데에
-        // 맞춘다. 이는 Ghostty가 이모지에 적용하는 constraint(.size=.cover, align center)와 같은
-        // 접근이다(SharedGrid.zig의 동작을 비교 — 레퍼런스 코드 미복사). 셀에 잘 들어가는 일반
-        // 글자는 글자마다 baseline이 흔들리지 않도록 기존 공통-baseline 정렬을 그대로 쓴다.
-        const bool overflows = bounds.size.width > avail_w || bounds.size.height > avail_h;
-        if (overflows && bounds.size.width > 0.0 && bounds.size.height > 0.0) {
+        // 축소-맞춤은 이모지(컬러 글리프)에만 적용한다 — Ghostty도 constraint(.cover)를 이모지에만
+        // 건다(SharedGrid.zig: `if (p == .emoji)`). 일반 텍스트(한글/CJK 포함)는 ink가 셀보다 커도
+        // 축소+가운데정렬하면 baseline이 흔들려 윗/아랫줄과 어긋나 보인다(이게 회귀의 원인이었다).
+        // 텍스트는 공통-baseline 정렬을 그대로 써 줄이 일관되게 맞고, 큰 글자는 셀 메트릭으로 맞춘다.
+        // 좁은 셀(EAW 1칸)의 이모지는 ink가 슬롯을 넘으므로 종횡비 유지 축소로 안 잘리게 한다.
+        const bool is_emoji = maru_is_emoji_codepoint(codepoint);
+        if (is_emoji && bounds.size.width > 0.0 && bounds.size.height > 0.0) {
+            // 이모지는 슬롯을 꽉 채우도록 종횡비 유지하며 키우거나 줄인다(Ghostty의 .cover와 같은
+            // 의도 — 풀사이즈). 두 축 비율 중 작은 쪽으로 스케일하면 슬롯 안에 정확히 들어맞고
+            // 넘치지 않는다(width 2 슬롯이면 2칸을 가득, width 1이면 셀 폭에 맞춰 온전히). cap 없이
+            // 작은 글리프도 키워 텍스트 줄 높이만큼 또렷하게 보이게 한다.
             CGFloat scale = fmin(avail_w / bounds.size.width, avail_h / bounds.size.height);
             if (!isfinite((double)scale) || scale <= 0.0) {
                 scale = 1.0;
-            }
-            if (scale > 1.0) {
-                scale = 1.0; // 축소만 — 작은 글리프를 키워 흐려지게 하지 않는다.
             }
             CGContextSaveGState(context);
             // 슬롯 중심으로 옮긴 뒤 축소하고, glyph의 ink box 중심을 원점(=슬롯 중심)에 맞춰 그린다.

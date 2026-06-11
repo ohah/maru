@@ -66,6 +66,7 @@ pub const CellColors = struct {
 /// 큐레이션 집합을 공유한다. VS16(U+FE0F)이 결합된 글자(❤+VS16=❤️)는 text-default codepoint라도
 /// 이모지 표현이라 컬러다 — codepoint만으론 ❤(텍스트)와 ❤️(이모지)를 못 가르므로 combining도 본다.
 fn isColorGlyph(codepoint: u21, combining: ?u21) bool {
+    if (combining == 0xFE0E) return false; // VS15 = 텍스트 표현 강제(default-emoji라도 단색)
     if (terminal.width.isEmojiPresentation(codepoint)) return true;
     return combining == 0xFE0F; // VS16 = 이모지 표현
 }

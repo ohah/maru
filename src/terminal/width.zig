@@ -37,6 +37,19 @@ pub fn isCombiningMark(codepoint: u21) bool {
 /// 통째로 이모지로 분류하면 SGR 전경색을 잃고(컬러 경로로 가) 잘못 그려진다.
 fn isDefaultEmojiPresentation(codepoint: u21) bool {
     return switch (codepoint) {
+        // 0x1F000~0x1F2FF의 Emoji_Presentation=Yes(전부 EAW-Wide): 마작 🀄, 조커 🃏, 스퀘어드
+        // 기호 🆎🆑🆒🈁🈚 등. 이전 isColorGlyph(0x1F000~0x1FAFF)가 컬러로 칠하던 것을 단일화하며
+        // 빠뜨려 단색으로 그려졌다(회귀). EAW-Wide라 width 2도 함께 복원한다.
+        0x1F004,
+        0x1F0CF,
+        0x1F18E,
+        0x1F191...0x1F19A,
+        0x1F201,
+        0x1F21A,
+        0x1F22F,
+        0x1F232...0x1F236,
+        0x1F238...0x1F23A,
+        0x1F250...0x1F251,
         0x231A...0x231B,
         0x23E9...0x23EC,
         0x23F0,
@@ -75,10 +88,10 @@ fn isDefaultEmojiPresentation(codepoint: u21) bool {
     };
 }
 
-/// 컬러 이모지로 렌더되는(emoji 폰트로 래스터되는) codepoint인지 — 렌더 단일 출처. 셀 너비와는
-/// 별개다(지역 표시자 RI는 컬러지만 폭 1). metal_frame의 컬러 UV sentinel과 coretext 래스터의
-/// 이모지 scale-맞춤이 이 집합을 공유해야 단색 텍스트 기호가 컬러 경로로 새지 않는다.
-/// coretext_smoke.m의 maru_is_emoji_codepoint는 FFI 경계 때문에 손으로 미러링하므로 함께 갱신한다.
+/// 컬러 이모지로 렌더되는(emoji 폰트로 래스터되는) codepoint인지 — metal_frame 컬러 UV sentinel의
+/// 단일 출처. 셀 너비와는 별개다(지역 표시자 RI는 컬러지만 폭 1). 래스터라이저(coretext_smoke.m)는
+/// codepoint가 아니라 그린 폰트의 컬러 테이블(sbix/COLR)로 이모지를 판정하므로(maru_font_is_color)
+/// 이 집합을 미러링하지 않는다 — VS16 결합(❤️)처럼 codepoint만으론 못 가르는 경우까지 정확하다.
 pub fn isEmojiPresentation(codepoint: u21) bool {
     return switch (codepoint) {
         0x1F1E6...0x1F1FF, // 지역 표시자(국기 — 컬러, 폭은 1)
@@ -153,6 +166,18 @@ test "VS16 attaches to the base as a combining mark (one cell), shaper sees the 
     try std.testing.expectEqual(@as(u2, 1), core.cells[0].width); // EAW Neutral = 1(zsh 일치)
     try std.testing.expectEqual(@as(u21, ' '), core.cells[1].codepoint); // 다음 칸은 빈칸
     try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
+}
+
+test "isEmojiPresentation: 0x1F000-block default-emoji restored (color + wide)" {
+    // 회귀: 단일화 때 0x1F000~0x1F2FF 컬러 이모지가 빠졌다.
+    try std.testing.expect(isEmojiPresentation(0x1F004)); // 🀄 마작
+    try std.testing.expect(isEmojiPresentation(0x1F0CF)); // 🃏 조커
+    try std.testing.expect(isEmojiPresentation(0x1F18E)); // 🆎
+    try std.testing.expect(isEmojiPresentation(0x1F19A)); // 🆚
+    try std.testing.expectEqual(@as(u2, 2), cellWidth(0x1F004)); // EAW-Wide라 width 2도
+    try std.testing.expectEqual(@as(u2, 2), cellWidth(0x1F0CF));
+    // 비-이모지 enclosed alphanumeric은 그대로 false(블록 전체를 넣지 않음).
+    try std.testing.expect(!isEmojiPresentation(0x1F100)); // 🄀 (Emoji_Presentation 아님)
 }
 
 test "isEmojiPresentation: default-emoji yes, mono text symbols no (SGR fg preserved)" {

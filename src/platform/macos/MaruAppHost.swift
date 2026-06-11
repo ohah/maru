@@ -107,6 +107,13 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         fputs(line + "\n", stderr)
     }
 
+    // IME(텍스트 합성)를 거치지 않고 바로 인코딩 경로로 보낼 특수 키의 물리 키코드(kVK_*). 화살표
+    // (123~126)는 일부러 제외 — 한글 확정 후 커서 이동 replay가 IME 트랜잭션 경로에서 일어난다.
+    private static let directEncodeKeyCodes: Set<UInt16> = [
+        115, 119, 116, 121, 117, 114, // Home, End, PageUp, PageDown, ForwardDelete, Help(Insert)
+        122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, // F1~F12
+    ]
+
     override func keyDown(with event: NSEvent) {
         imeLog("keyDown", event.characters, keyCode: event.keyCode)
         // Control+Command+Space(이모지 & 기호 피커)는 시스템 character palette를 연다. 우리가
@@ -122,6 +129,16 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // 키코드로 한다), Option+글자는 특수문자 입력이 아니라 기존 meta-ESC 인코딩을 유지한다.
         let chord = event.modifierFlags.intersection([.command, .control, .option])
         if !chord.isEmpty {
+            controller?.handleKeyDown(event)
+            return
+        }
+        // 특수 비-텍스트 키(편집/네비/기능: Home/End/PageUp/PageDown/ForwardDelete/Insert/F1~F12)는
+        // IME 텍스트가 아니다 — interpretKeyEvents→doCommand→ime_end 경로에 맡기면 안정적으로
+        // 인코딩되지 않는다(편집/스크롤 selector라 입력기가 텍스트로 안 만든다). 바로 인코딩/단축키
+        // 경로(handleKeyDown)로 보낸다. handleKeyDown이 Shift+PageUp/Down 스크롤백과 plain 키
+        // 인코딩(sendKeyEvent → ABI → encodeKey)을 가른다. 화살표는 제외한다 — 한글 확정 후 커서
+        // 이동 replay(ime_end의 shouldReplayAfterCommit)가 화살표를 IME 트랜잭션에서 받아야 한다.
+        if Self.directEncodeKeyCodes.contains(event.keyCode) {
             controller?.handleKeyDown(event)
             return
         }

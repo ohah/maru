@@ -141,6 +141,9 @@ pub const DevSession = struct {
     // 시작 시 로드한 raw config(~/.config/maru/config). arena가 font.family 문자열을 소유하고,
     // resolve된 appearance.font.family가 그 슬라이스를 빌리므로 세션 동안 살아 있어야 한다.
     loaded_config: config_mod.ParsedConfig = undefined,
+    // loaded_config가 실제로 초기화됐는지. init 초반(live/surface 생성)이 실패하면 deinit이 아직
+    // undefined인 arena를 free하지 않도록, 다른 자원과 같은 *_initialized 가드 패턴을 쓴다.
+    config_loaded: bool = false,
     // 한 cell의 device 픽셀 크기(advance 폭 × line-height). 실제 CoreText 메트릭에서 뽑아
     // shaper(atlas slot 크기)·rasterizer·renderer fixed-cell layout·host resize가 모두 같은 값을
     // 쓰게 한다. 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다.
@@ -248,10 +251,17 @@ pub const DevSession = struct {
         self.renderer_state = renderer.RendererState.init(allocator, .{});
         self.renderer_initialized = true;
         // 사용자 config(~/.config/maru/config 또는 $MARU_CONFIG)를 로드해 appearance를 resolve한다.
+        // 단위 테스트에서는 개발자의 실제 config 파일을 읽으면 결과가 비결정적이 되므로 빈 config로
+        // 고정한다(파싱 규칙은 loader 단위 테스트가 본다). loaded_config는 세션 동안 보관(family
+        // 슬라이스 빌림). config_loaded 가드를 세워 이후 init 실패가 이 arena를 이중 해제하지 않게
+        // 한다 — 별도 errdefer는 두지 않는다(deinit의 broad errdefer가 같은 자원을 가드로 정리).
+        self.loaded_config = if (builtin.is_test)
+            try config_mod.parseConfig(allocator, "")
+        else
+            try config_mod.loadConfigDefault(io, allocator);
+        self.config_loaded = true;
         // 로더가 모든 값을 valid-아니면-default로 걸러주므로 resolve는 사실상 실패하지 않지만,
-        // 방어적으로 실패 시 기본값으로 떨어진다. loaded_config는 세션 동안 보관(family 슬라이스 빌림).
-        self.loaded_config = try config_mod.loadConfigDefault(io, allocator);
-        errdefer self.loaded_config.deinit();
+        // 방어적으로 실패 시 기본값으로 떨어진다.
         self.appearance = config_mod.resolveAppearance(self.loaded_config.config) catch
             try config_mod.resolveAppearance(.{});
         // config의 무시된 줄(알 수 없는 key·잘못된 값)을 알린다 — 사용자가 오타를 눈치채게.
@@ -1008,7 +1018,12 @@ pub const DevSession = struct {
             self.surfaces[0].deinit();
             self.surface_initialized = false;
         }
-        self.loaded_config.deinit(); // appearance가 family를 빌리므로 surface 정리 뒤에 해제.
+        // appearance가 family를 빌리므로 surface 정리 뒤에 해제. 가드로 init 초반 실패 시 undefined
+        // arena를 free하지 않게(다른 자원과 같은 패턴).
+        if (self.config_loaded) {
+            self.loaded_config.deinit();
+            self.config_loaded = false;
+        }
         self.* = undefined;
     }
 

@@ -2106,6 +2106,13 @@ pub const TerminalCore = struct {
                     if (codepoint == 0xFE0F) self.promoteLastToEmojiWidth();
                     return;
                 }
+                // 국기: 지역 표시자(RI) 2개가 한 국기다(🇰🇷 = U+1F1F0 U+1F1F7). 직전 셀이 짝
+                // 없는 RI면 이 RI를 그 셀에 combining으로 붙여 한 글자(width 2)로 만든다.
+                if (isRegionalIndicator(codepoint) and self.lastCellIsLoneRegionalIndicator()) {
+                    self.attachCombiningMark(codepoint);
+                    self.promoteLastToEmojiWidth();
+                    return;
+                }
                 self.putCell(codepoint);
             },
         }
@@ -2221,6 +2228,17 @@ pub const TerminalCore = struct {
             self.cursor.col = self.size.cols - 1;
             self.pending_wrap = true;
         }
+    }
+
+    fn isRegionalIndicator(codepoint: u21) bool {
+        return codepoint >= 0x1F1E6 and codepoint <= 0x1F1FF;
+    }
+
+    /// 직전 출력 셀이 짝 없는(combining 안 붙은) 지역 표시자인지 — 다음 RI와 국기로 묶기 위함.
+    fn lastCellIsLoneRegionalIndicator(self: *const TerminalCore) bool {
+        const last = self.last_print orelse return false;
+        const cell = self.cells[self.index(last.row, last.col)];
+        return isRegionalIndicator(cell.codepoint) and cell.combining == null;
     }
 
     fn attachCombiningMark(self: *TerminalCore, codepoint: u21) void {
@@ -4412,4 +4430,36 @@ test "OSC 8 pen_link resets on alt-screen switch and RIS (no stale clickable cel
     try std.testing.expectEqual(@as(u21, ' '), core.cells[0].codepoint); // 화면 비움
     try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen()); // 스크롤백 비움
     try std.testing.expectEqual(@as(u16, 0), core.cursor.col);
+}
+
+test "emoji grapheme: skin tone modifier and flag (RI pair) cluster into one wide cell" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+
+    // 스킨톤: 👍(U+1F44D) + 🏽(U+1F3FD) -> 한 셀(👍🏽), width 2, combining = 스킨톤.
+    try core.write("\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd");
+    try std.testing.expectEqual(@as(u21, 0x1F44D), core.cells[0].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0x1F3FD), core.cells[0].combining);
+    try std.testing.expectEqual(@as(u2, 2), core.cells[0].width);
+    try std.testing.expect(core.cells[1].continuation);
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
+
+    // 국기: 🇰🇷 = U+1F1F0 U+1F1F7 -> 한 셀, width 2.
+    try core.write("\r\n\xf0\x9f\x87\xb0\xf0\x9f\x87\xb7");
+    try std.testing.expectEqual(@as(u21, 0x1F1F0), core.cells[10].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0x1F1F7), core.cells[10].combining);
+    try std.testing.expectEqual(@as(u2, 2), core.cells[10].width);
+    try std.testing.expect(core.cells[11].continuation);
+}
+
+test "two flags in a row pair correctly (not cross-paired)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 1 });
+    defer core.deinit();
+    // 🇰🇷🇺🇸 = KR(1F1F0 1F1F7) US(1F1FA 1F1F8) -> 두 국기, 각 width 2.
+    try core.write("\xf0\x9f\x87\xb0\xf0\x9f\x87\xb7\xf0\x9f\x87\xba\xf0\x9f\x87\xb8");
+    try std.testing.expectEqual(@as(u21, 0x1F1F0), core.cells[0].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0x1F1F7), core.cells[0].combining); // KR
+    try std.testing.expectEqual(@as(u21, 0x1F1FA), core.cells[2].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0x1F1F8), core.cells[2].combining); // US
+    try std.testing.expectEqual(@as(u16, 4), core.cursor.col);
 }

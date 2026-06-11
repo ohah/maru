@@ -26,6 +26,9 @@ pub fn isCombiningMark(codepoint: u21) bool {
         // 컬러로 그려진다(예: ❤+VS16=❤️). 별도 셀이면 base만 텍스트 폰트로 그려져 단색이 됐다.
         0xFE00...0xFE0F,
         0xFE20...0xFE2F,
+        // 이모지 스킨톤 modifier(Fitzpatrick): 앞 이모지에 붙어 한 글자(👍 + 🏽 = 👍🏽). 0폭이
+        // 아니면 별도 이모지로 갈라진다. base 이모지가 이미 width 2라 폭 승격은 불필요.
+        0x1F3FB...0x1F3FF,
         => true,
         else => false,
     };

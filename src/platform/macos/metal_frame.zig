@@ -67,7 +67,13 @@ fn isColorGlyph(codepoint: u21) bool {
     return switch (codepoint) {
         0x1F000...0x1FAFF, // 마작/도미노/카드 + 주요 이모지/그림문자
         0x2600...0x27BF, // 기타 기호 + dingbats(❤ ✅ ☀ 등)
-        0x2B00...0x2BFF, // 기타 화살표/별 기호
+        0x2B00...0x2BFF, // 기타 화살표/별 기호(⭐ 등)
+        // width.zig의 default-emoji 범위(0x2600 미만)와 맞춰 ⌚⏰⏳ 등도 컬러로.
+        0x231A...0x231B,
+        0x23E9...0x23EC,
+        0x23F0,
+        0x23F3,
+        0x25FD...0x25FE,
         => true,
         else => false,
     };

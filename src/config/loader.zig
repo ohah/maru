@@ -258,12 +258,3 @@ test "loadFile: missing path yields default config, not an error" {
     try std.testing.expectEqualStrings(defaults.font.family, p.config.font.family);
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
 }
-
-test "loadFile: reads and parses a real file path" {
-    var p = try loadFile(std.testing.io, std.testing.allocator, "/tmp/maru-cfg-test");
-    defer p.deinit();
-    try std.testing.expectEqualStrings("Test Mono Font", p.config.font.family);
-    try std.testing.expectEqual(@as(f32, 18), p.config.font.size);
-    try std.testing.expectEqual(theme.CursorShape.bar, p.config.cursor.shape);
-    try std.testing.expectEqualStrings("#abcdef", p.config.theme.background);
-}

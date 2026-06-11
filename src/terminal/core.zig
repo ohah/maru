@@ -4436,15 +4436,16 @@ test "emoji grapheme: skin tone modifier and flag (RI pair) cluster into one wid
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer core.deinit();
 
-    // 스킨톤: 👍(U+1F44D) + 🏽(U+1F3FD) -> 한 셀(👍🏽), width 2, combining = 스킨톤.
+    // 스킨톤 modifier(🏽 U+1F3FD)는 EAW Wide(2)라 별도 셀로 둔다 — zsh의 ZLE 너비(👍2+🏽2=4)와
+    // 일치시켜 붙여넣기 redraw가 안 깨지게(너비 합의). 👍는 col0-1, 🏽는 col2-3.
     try core.write("\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd");
     try std.testing.expectEqual(@as(u21, 0x1F44D), core.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x1F3FD), core.cells[0].combining);
+    try std.testing.expectEqual(@as(?u21, null), core.cells[0].combining); // 클러스터 안 함
     try std.testing.expectEqual(@as(u2, 2), core.cells[0].width);
-    try std.testing.expect(core.cells[1].continuation);
-    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
+    try std.testing.expectEqual(@as(u21, 0x1F3FD), core.cells[2].codepoint); // 스킨톤은 별도 셀
+    try std.testing.expectEqual(@as(u16, 4), core.cursor.col); // 4칸(zsh와 일치)
 
-    // 국기: 🇰🇷 = U+1F1F0 U+1F1F7 -> 한 셀, width 2.
+    // 국기: 🇰🇷 = U+1F1F0 U+1F1F7 -> 한 셀, width 2(zsh도 RI=1+1=2라 일치).
     try core.write("\r\n\xf0\x9f\x87\xb0\xf0\x9f\x87\xb7");
     try std.testing.expectEqual(@as(u21, 0x1F1F0), core.cells[10].codepoint);
     try std.testing.expectEqual(@as(?u21, 0x1F1F7), core.cells[10].combining);

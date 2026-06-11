@@ -160,3 +160,7 @@ run = "zig build check-boundaries"
 [tasks.check]
 description = "Check format, tests, boundaries, and build"
 depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "build"]
+
+[tasks.vttest]
+description = "Launch the Maru dev app for local vttest visual conformance (BSD tool; run `vttest` inside)"
+run = "echo 'Maru dev 앱을 띄웁니다. 터미널 안에서 `vttest`를 실행해 시각 점검하세요(brew install vttest). docs/conformance-testing.md 참조.' && zig build macos-app-dev"

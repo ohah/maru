@@ -2316,11 +2316,14 @@ pub const TerminalCore = struct {
         if (last.col + 1 >= self.size.cols) {
             const base = self.cells[base_idx];
             self.cells[base_idx] = .{}; // 이전 줄 마지막 칸은 빈칸으로
-            self.wrapped[last.row] = true;
             self.markDirty(last.row);
             self.cursor.col = 0;
             self.lineFeed();
             const row = self.cursor.row;
+            // soft-wrap 플래그는 lineFeed '후'에 세운다. lineFeed가 scroll(커서가 scroll_bottom)일
+            // 때 scrollRangeUp의 경계 fixup이 lineFeed 전에 세운 wrapped를 지우기 때문이다 —
+            // scroll 여부와 무관하게 "이전 줄(row-1)이 이 이모지 줄로 이어진다"를 정확히 남긴다.
+            if (row > 0) self.wrapped[row - 1] = true;
             self.wrapped[row] = false;
             self.cells[self.index(row, 0)] = base;
             self.cells[self.index(row, 0)].width = 2;
@@ -4668,4 +4671,22 @@ test "conformance: CPR reflects cursor position after CUP and reverts after a mo
     // CUF(CSI C) 2칸 -> col 9. 응답이 새 위치를 반영.
     try core.write("\x1b[2C\x1b[6n");
     try std.testing.expectEqualStrings("\x1b[3;9R", core.pendingResponse());
+}
+
+test "mode 2027: emoji wrap at the last column on the scroll-bottom keeps the soft-wrap flag (re-check)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 3 });
+    defer core.deinit();
+    try core.write("\x1b[?2027h");
+    // 커서를 마지막 행(scroll_bottom=2)으로 내리고 그 행 마지막 칸까지 채운다.
+    try core.write("\r\n\r\nabcd"); // row2에 abcd, 커서 col4(마지막)
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
+    try core.write("\xe2\x9d\xa4\xef\xb8\x8f"); // ❤+VS16 -> 마지막 칸 승격 불가 -> wrap + scroll
+    // scroll로 한 줄 올라가고, '이전 줄'(이제 row1)이 이모지 줄(row2)로 soft-wrap돼야 한다 —
+    // scrollRangeUp 경계 fixup이 지우지 않게 lineFeed 후에 세운다.
+    try std.testing.expect(core.wrapped[1]); // 이전 줄 soft-wrap 유지(핵심)
+    try std.testing.expectEqual(@as(u21, 0x2764), core.cells[core.index(2, 0)].codepoint);
+    try std.testing.expectEqual(@as(u2, 2), core.cells[core.index(2, 0)].width);
+    try std.testing.expect(core.cells[core.index(2, 1)].continuation);
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
 }

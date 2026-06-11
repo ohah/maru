@@ -76,10 +76,11 @@ cursor.blink = true
 term = xterm-ghostty   # 그 terminfo가 설치돼 있어야 한다
 ```
 
-> Maru는 대화형 셸을 **login shell로 띄우므로**(Terminal.app·iTerm2와 동일) `.zprofile`/`.zlogin`까지
-> source돼 PATH·EDITOR·키바인딩(예: `bindkey -e`로 `Cmd+Left`=줄-시작)이 사용자 환경대로 잡힌다.
-> 그래서 키바인딩 같은 건 대개 `term`을 안 건드려도 정상 동작한다. 키바인딩 해석은 터미널이 아니라
-> 셸의 책임이다 — 터미널은 `\x01` 같은 바이트만 보낸다.
+> Maru는 대화형 셸을 macOS `login(1)`로 감싸 띄운다(Terminal.app·Ghostty와 동일) — 전체 로그인
+> 세션(getlogin·SHELL·utmp·hushlogin)을 셋업하고 `.zprofile`/`.zlogin`까지 source한다. 그래서
+> PATH·EDITOR·키바인딩(예: `bindkey -e`로 `Cmd+←/→`=줄 시작/끝)이 사용자 환경대로 잡혀, 대개 `term`을
+> 안 건드려도 정상 동작한다. 키바인딩 해석은 터미널이 아니라 셸의 책임이다 — 터미널은 `\x01` 같은
+> 바이트만 보낸다.
 
 > 빈 값(`term =`)은 무시하고 기본값을 유지한다. env를 명시로 주는 테스트 경로에선 이 값이 무시된다.
 

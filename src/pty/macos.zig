@@ -40,13 +40,28 @@ pub const PtySession = struct {
     pub fn spawn(allocator: std.mem.Allocator, request: types.SpawnRequest) !PtySession {
         try validateRequest(request);
 
-        const command_z = try allocator.dupeZ(u8, request.command);
+        // login=true면 login(1)으로 감싸 전체 로그인 세션을 셋업한다(Terminal.app·Ghostty와 동일).
+        // 셋업 실패(getpwuid 등 — 정상 사용자에선 사실상 없음)면 평범한 비-login 셸로 fallback한다
+        // (Ghostty와 동일하게 dash-argv0가 아니라 그냥 plain).
+        var login_wrap: ?MacosLogin = if (request.login)
+            (MacosLogin.build(allocator, request) catch |err| blk: {
+                std.log.scoped(.pty).warn("login(1) 래핑 실패({}) — 비-login 셸로 fallback", .{err});
+                break :blk null;
+            })
+        else
+            null;
+        defer if (login_wrap) |*lw| lw.deinit(allocator);
+
+        const eff_command: []const u8 = if (login_wrap != null) "/usr/bin/login" else request.command;
+        const eff_args: []const []const u8 = if (login_wrap) |lw| lw.args else request.args;
+
+        const command_z = try allocator.dupeZ(u8, eff_command);
         defer allocator.free(command_z);
 
         const cwd_z = if (request.cwd) |cwd| try allocator.dupeZ(u8, cwd) else null;
         defer if (cwd_z) |cwd| allocator.free(cwd);
 
-        var argv_storage = try ArgvStorage.init(allocator, request);
+        var argv_storage = try ArgvStorage.init(allocator, eff_command, eff_args);
         defer argv_storage.deinit();
 
         var env_storage = try EnvStorage.init(allocator, request.env, request.term);
@@ -339,8 +354,10 @@ const ArgvStorage = struct {
     strings: [][:0]u8,
     argv: [:null]?[*:0]const u8,
 
-    fn init(allocator: std.mem.Allocator, request: types.SpawnRequest) !ArgvStorage {
-        const argc = 1 + request.args.len;
+    // argv[0]=command(경로 그대로), argv[1..]=args. login shell 셋업은 spawn에서 login(1) 래핑으로
+    // 처리하므로(MacosLogin) 여기는 평범하게 둔다.
+    fn init(allocator: std.mem.Allocator, command: []const u8, args: []const []const u8) !ArgvStorage {
+        const argc = 1 + args.len;
         const strings = try allocator.alloc([:0]u8, argc);
         errdefer allocator.free(strings);
 
@@ -349,16 +366,10 @@ const ArgvStorage = struct {
             for (strings[0..initialized]) |owned| allocator.free(owned);
         }
 
-        // login shell 관례: argv[0]을 `-` + basename(예: /bin/zsh → `-zsh`)으로 주면 셸이 자신을
-        // login shell로 인식해 .zprofile/.zlogin까지 source한다(Terminal.app과 동일). non-login이면
-        // command 경로를 그대로 argv[0]로 쓴다.
-        strings[0] = if (request.login)
-            try std.fmt.allocPrintSentinel(allocator, "-{s}", .{std.fs.path.basename(request.command)}, 0)
-        else
-            try allocator.dupeZ(u8, request.command);
+        strings[0] = try allocator.dupeZ(u8, command);
         initialized += 1;
 
-        for (request.args, 0..) |arg, index| {
+        for (args, 0..) |arg, index| {
             strings[index + 1] = try allocator.dupeZ(u8, arg);
             initialized += 1;
         }
@@ -374,6 +385,73 @@ const ArgvStorage = struct {
         for (self.strings) |arg| self.allocator.free(arg);
         self.allocator.free(self.strings);
         self.allocator.free(self.argv);
+    }
+};
+
+// macOS login(1) 래핑 — Terminal.app·Ghostty와 동일하게 전체 로그인 세션(getlogin()·SHELL·utmp·
+// hushlogin)을 셋업한 뒤 셸을 login shell로 exec한다. 단순히 argv[0]에 `-`만 붙이면 .zprofile은
+// 읽지만 getlogin()/SHELL/세션 env가 안 잡혀, 그에 의존하는 셸 설정(예: $TERM_PROGRAM별 키바인딩)이
+// 어긋난다(실측: Cmd+Left는 되는데 Cmd+Right는 안 됨). 형태(Ghostty가 Apple login.c를 읽고 찾은):
+//   /usr/bin/login [-q] -flp <user> /bin/bash --noprofile --norc -c "exec -l <shell> <args>"
+//   -f 인증 생략, -l login(1)이 cwd를 home으로 안 바꾸게, -p env 보존, -q hushlogin(.hushlogin 있을 때).
+//   설정 무로드 bash가 `exec -l`로 최종 셸을 login shell로 교체한다(bash가 zsh보다 exec ~2배 빠름).
+const MacosLogin = struct {
+    owned: [][]u8, // 동적 할당 인자(username 복사, "exec -l ..." 문자열) — deinit이 해제
+    args: [][]const u8, // ArgvStorage에 넘길 login(1) 인자(리터럴 + owned 슬라이스 혼합)
+
+    fn build(allocator: std.mem.Allocator, request: types.SpawnRequest) !MacosLogin {
+        const pw = std.c.getpwuid(std.c.getuid()) orelse return error.NoPasswd;
+        const username = std.mem.span(pw.name orelse return error.NoUsername);
+
+        // hushlogin: 홈에 .hushlogin이 있으면 login 배너를 억제(-q). login(1) -l은 cwd 기준으로
+        // 보므로 우리가 홈을 직접 확인해 -q를 준다(Ghostty와 동일 이유).
+        const hush = if (pw.dir) |dir_ptr| blk: {
+            const home = std.mem.span(dir_ptr);
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const path = std.fmt.bufPrintZ(&path_buf, "{s}/.hushlogin", .{home}) catch break :blk false;
+            break :blk std.c.access(path.ptr, std.posix.F_OK) == 0;
+        } else false;
+
+        // "exec -l <command> <arg1> ..." — bash가 실행해 최종 셸을 login shell로 교체한다.
+        var cmd_buf: std.ArrayList(u8) = .empty;
+        defer cmd_buf.deinit(allocator);
+        try cmd_buf.appendSlice(allocator, "exec -l ");
+        try cmd_buf.appendSlice(allocator, request.command);
+        for (request.args) |a| {
+            try cmd_buf.append(allocator, ' ');
+            try cmd_buf.appendSlice(allocator, a);
+        }
+        const exec_cmd = try cmd_buf.toOwnedSlice(allocator);
+        errdefer allocator.free(exec_cmd);
+        const user_dup = try allocator.dupe(u8, username);
+        errdefer allocator.free(user_dup);
+
+        var owned: std.ArrayList([]u8) = .empty;
+        errdefer owned.deinit(allocator);
+        try owned.append(allocator, exec_cmd);
+        try owned.append(allocator, user_dup);
+
+        var args: std.ArrayList([]const u8) = .empty;
+        errdefer args.deinit(allocator);
+        if (hush) try args.append(allocator, "-q");
+        try args.append(allocator, "-flp");
+        try args.append(allocator, user_dup);
+        try args.append(allocator, "/bin/bash");
+        try args.append(allocator, "--noprofile");
+        try args.append(allocator, "--norc");
+        try args.append(allocator, "-c");
+        try args.append(allocator, exec_cmd);
+
+        return .{
+            .owned = try owned.toOwnedSlice(allocator),
+            .args = try args.toOwnedSlice(allocator),
+        };
+    }
+
+    fn deinit(self: *MacosLogin, allocator: std.mem.Allocator) void {
+        for (self.owned) |s| allocator.free(s);
+        allocator.free(self.owned);
+        allocator.free(self.args);
     }
 };
 
@@ -741,18 +819,29 @@ test "EnvStorage explicit env is passed through verbatim (term arg ignored)" {
     try std.testing.expectEqual(@as(?[*:0]const u8, null), envp[2]);
 }
 
-test "ArgvStorage login uses dash-prefixed basename as argv[0] (login shell convention)" {
-    var storage = try ArgvStorage.init(std.testing.allocator, .{ .command = "/bin/zsh", .args = &.{"-i"}, .login = true });
+test "ArgvStorage uses the command path as argv[0] and appends args" {
+    var storage = try ArgvStorage.init(std.testing.allocator, "/bin/zsh", &.{"-i"});
     defer storage.deinit();
-    try std.testing.expectEqualStrings("-zsh", std.mem.span(storage.argv[0].?)); // login: -zsh
+    try std.testing.expectEqualStrings("/bin/zsh", std.mem.span(storage.argv[0].?));
     try std.testing.expectEqualStrings("-i", std.mem.span(storage.argv[1].?));
     try std.testing.expectEqual(@as(?[*:0]const u8, null), storage.argv[2]);
 }
 
-test "ArgvStorage non-login uses the command path as argv[0]" {
-    var storage = try ArgvStorage.init(std.testing.allocator, .{ .command = "/bin/zsh", .args = &.{"-i"} });
-    defer storage.deinit();
-    try std.testing.expectEqualStrings("/bin/zsh", std.mem.span(storage.argv[0].?)); // 경로 그대로
+test "MacosLogin wraps the shell in login(1) -flp <user> bash exec -l" {
+    var lw = try MacosLogin.build(std.testing.allocator, .{ .command = "/bin/zsh", .args = &.{"-i"}, .login = true });
+    defer lw.deinit(std.testing.allocator);
+    // -q(hushlogin)는 환경 의존이라 빼고, 핵심 구조를 확인한다.
+    var saw_flp = false;
+    var saw_bash = false;
+    var saw_exec = false;
+    for (lw.args) |a| {
+        if (std.mem.eql(u8, a, "-flp")) saw_flp = true;
+        if (std.mem.eql(u8, a, "/bin/bash")) saw_bash = true;
+        if (std.mem.eql(u8, a, "exec -l /bin/zsh -i")) saw_exec = true;
+    }
+    try std.testing.expect(saw_flp);
+    try std.testing.expect(saw_bash);
+    try std.testing.expect(saw_exec); // 최종 셸을 login shell로 교체하는 exec 명령
 }
 
 test "EnvStorage empty env uses the supplied TERM (configurable)" {

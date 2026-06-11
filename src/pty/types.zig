@@ -55,10 +55,11 @@ pub const SpawnRequest = struct {
     command: []const u8,
     args: []const []const u8 = &.{},
     cwd: ?[]const u8 = null,
-    // login shell로 띄울지. true면 argv[0]을 `-` + basename(예: `-zsh`)으로 줘서 셸이 login으로
-    // 동작하게 한다(Terminal.app·iTerm2·Ghostty와 같은 관례). login shell은 .zprofile/.zlogin까지
-    // source하므로 PATH·EDITOR·키바인딩(예: `bindkey -e`) 등 사용자 환경이 완전히 잡힌다. non-login
-    // (`-i`만)이면 .zshrc만 읽어 키맵이 달라질 수 있다(예: $EDITOR=nvim → vi-keymap, Ctrl+A self-insert).
+    // login shell로 띄울지. macOS backend는 true면 `login(1)`으로 감싸 전체 로그인 세션(getlogin·
+    // SHELL·utmp·hushlogin)을 셋업한 뒤 셸을 login shell로 exec한다(Terminal.app·Ghostty와 동일).
+    // 그래야 PATH·EDITOR·키바인딩(예: `bindkey -e`)과 $TERM_PROGRAM 의존 셸 설정까지 완전히 잡힌다.
+    // non-login이면 .zshrc만 읽어 키맵이 달라질 수 있다(예: $EDITOR=nvim → vi-keymap → Ctrl+A·E
+    // self-insert → Cmd+←/→가 줄 시작/끝으로 안 감).
     login: bool = false,
     env: []const []const u8 = &.{},
     // env가 빈(부모 상속) 경로에서 셸에 줄 TERM 값. 사용자 config(`term =`)로 바꿀 수 있다 —

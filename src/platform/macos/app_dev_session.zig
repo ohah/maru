@@ -314,6 +314,22 @@ pub const DevSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
+        // PageUp/PageDown는 메인 화면에선 Maru 스크롤백을 한 페이지씩 스크롤한다(Mac 네이티브 —
+        // Terminal.app/iTerm2 동작). 셸의 기본 keymap엔 \e[5~/\e[6~가 unbound라, PTY로 보내면
+        // zsh가 BEL을 울리고 남은 '~'를 입력줄에 그대로 박아 레이아웃이 깨진다(PTY 캡처로 확인:
+        // \e[6~ -> 0x07 '~'). alt 화면(vim/less)에선 앱이 자체 페이징하므로 그대로 \e[5~/\e[6~를
+        // 인코딩한다(아래 frame_loop 경로). 스크롤 키라 '타이핑하면 바닥으로' 로직보다 먼저 처리해
+        // 매 PageUp마다 뷰가 바닥으로 튀지 않게 한다.
+        if (self.surface_initialized) {
+            const page_delta = pageScrollDelta(self.surfaces[0].core.alt_active, event.key);
+            if (page_delta != 0) {
+                self.scrollPage(page_delta);
+                self.total_app_key_events += 1; // 앱(터미널)이 소비 — PTY로 안 보냄
+                self.writeSummaryFromState();
+                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                return self.last_summary;
+            }
+        }
         // 타이핑하면 live(바닥)로 돌아간다 — 과거를 보다가 입력하면 현재 화면으로 점프(표준 터미널).
         // 스크롤 중이었으면 즉시 다시 그리도록 metal_dirty도 세운다(echo 출력 전에라도 뷰 복귀).
         if (self.surface_initialized and self.surfaces[0].core.viewOffset() != 0) {
@@ -795,6 +811,19 @@ pub const DevSession = struct {
     /// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면은 rows-1줄(한 줄 겹침)이고,
     /// rows는 dev session이 권위 있게 알고 있어 Swift가 stale 값으로 계산하지 않게 여기서 구한다.
     /// alt screen에서는 휠과 동일하게 화살표 변환으로 폴백한다(이전엔 완전 무반응이었다).
+    /// 메인 화면에서 PageUp/PageDown를 스크롤백 페이지 스크롤로 돌릴 때의 페이지 델타
+    /// (+1=위/과거, -1=아래/현재). alt 화면이거나 page 키가 아니면 0 — 그땐 일반 인코딩 경로로
+    /// 보내 앱(vim/less)이 \e[5~/\e[6~로 페이징한다. 셸 메인 화면에서 PTY로 보내면 zsh 기본
+    /// keymap이 unbound라 BEL+'~' 삽입으로 입력줄이 깨지므로 여기서 가른다(PTY 캡처 근거).
+    fn pageScrollDelta(alt_active: bool, key: terminal.input.Key) i32 {
+        if (alt_active) return 0;
+        return switch (key) {
+            .page_up => 1,
+            .page_down => -1,
+            else => 0,
+        };
+    }
+
     pub fn scrollPage(self: *DevSession, delta_pages: i32) void {
         if (!self.surface_initialized) return;
         const rows = self.surfaces[0].core.size.rows;
@@ -1523,4 +1552,17 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     const r2 = session.imeCursorRect();
     try std.testing.expectEqual(@as(f64, 16), r2.x); // col 2
     try std.testing.expectEqual(@as(f64, 16), r2.y); // row 1 * 16
+}
+
+test "pageScrollDelta: main screen scrolls, alt screen sends to app" {
+    // 메인 화면: PageUp=위(+1), PageDown=아래(-1) 스크롤.
+    try std.testing.expectEqual(@as(i32, 1), DevSession.pageScrollDelta(false, .page_up));
+    try std.testing.expectEqual(@as(i32, -1), DevSession.pageScrollDelta(false, .page_down));
+    // alt 화면(vim/less): 0 — 일반 인코딩(\e[5~/\e[6~)으로 앱이 페이징.
+    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(true, .page_up));
+    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(true, .page_down));
+    // page 키가 아니면 메인/alt 무관하게 0(일반 키 경로).
+    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(false, .{ .function = 5 }));
+    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(false, .home));
+    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(false, .{ .char = 'a' }));
 }

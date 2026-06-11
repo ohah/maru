@@ -206,6 +206,31 @@ Esc      vim, readline, shell mode 전환에 자주 쓰인다.
 - `PtySession`은 이미 해석된 terminal input bytes만 받는다.
 - macOS global shortcut 구현은 `src/platform/macos/` 아래 platform bridge 책임으로 둔다.
 
+## 셸 통합 (zsh)
+
+빌트인 키바인딩(`Cmd+←`→`\x01` 등)은 *터미널이 보내는 바이트*다. 그걸 줄-시작/끝으로 해석하는 건
+셸의 keymap 책임인데, `$EDITOR`가 vi류(예: nvim)면 zsh가 vi-keymap을 기본 선택해 `Ctrl+A/E`가
+self-insert가 되고, 사용자 설정이 그걸 조건부로만 emacs로 바꾸면 터미널마다 동작이 갈린다.
+
+Maru는 **셸 통합**으로 이를 메운다(Ghostty·iTerm2·kitty가 하는 정식 기능). 대화형 셸이 zsh면 Maru가
+`ZDOTDIR`을 Maru 통합 디렉터리로 설정하고, 그 디렉터리의 `.zshenv`가 ① 사용자 `ZDOTDIR`을 복원해
+사용자 설정을 정상 로드한 뒤 ② `.zshrc` 로드가 끝난 첫 프롬프트(precmd 1회 훅)에서 macOS 편집키를
+표준 라인 위젯에 바인딩한다 — keymap이 vi여도 동작한다. `bindkey -e`(전체 emacs 강제)가 아니라
+**Maru가 보내는 키만** 바인딩해 사용자의 나머지 vi 바인딩을 보존한다:
+
+| 키 | 바이트 | zsh 위젯 |
+|---|---|---|
+| `Cmd+←` | `^A` | `beginning-of-line` |
+| `Cmd+→` | `^E` | `end-of-line` |
+| `Cmd+⌫` | `^U` | `backward-kill-line` |
+| `Option+←` | `^[b` | `backward-word` |
+| `Option+→` | `^[f` | `forward-word` |
+| `Option+⌫` | `^[^?` | `backward-kill-word` |
+
+clean-room: 통합 스크립트는 **zsh 매뉴얼의 ZDOTDIR/스타트업 동작에서 직접 작성**했다. Ghostty·kitty의
+통합 스크립트는 GPLv3라 차용하지 않았다(ZDOTDIR로 가리키는 메커니즘 자체는 zsh 공개 동작). 현재 zsh
+전용이고, bash/fish와 OSC 133 프롬프트 마킹은 후속이다.
+
 ## 기본 제공 macOS 줄 편집 단축키 (빌트인)
 
 macOS Cmd 조합은 보통 앱 단축키 영역이라, 안 묶인 Cmd 조합은 셸로 보내지 않는다(`Cmd+S`가 셸에

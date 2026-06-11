@@ -9,6 +9,7 @@ const terminal = maru.terminal;
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const metal_frame = @import("metal_frame.zig");
+const shell_integration = @import("shell_integration.zig");
 
 // Metal DTO·view·owned 버퍼는 순수 모듈 metal_frame이 소유한다. ABI 표면으로 re-export만 한다.
 pub const MetalCell = metal_frame.NativeMetalCell;
@@ -245,10 +246,20 @@ pub const DevSession = struct {
         self.config_loaded = true;
         self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
 
+        // 셸 통합: 대화형 셸이 zsh면 macOS 편집키(Cmd+←/→ 등) 바인딩을 주입한다(사용자 .zshrc의
+        // keymap 조건과 무관하게 동작하게). ZDOTDIR로 통합 .zshenv를 가리킨다. 실패 시 null(통합
+        // 없이 정상 동작). dir 슬라이스는 spawn(EnvStorage가 dupe)까지만 필요하므로 init 끝에 해제.
+        const integ_dir: ?[]const u8 = if (config.command_kind == .interactive_shell and
+            shell_integration.detect(maru.pty.resolveInteractiveShell()) == .zsh)
+            shell_integration.setupZsh(io, allocator)
+        else
+            null;
+        defer if (integ_dir) |d| allocator.free(d);
+
         // Swift는 opaque handle만 보유하고, 이 구조체는 heap에 고정된다. LivePtySession의
         // reader thread가 `&live_pty.reader`를 잡고 돌기 때문에, 이 값을 만든 뒤에는
         // 절대 by-value로 이동하지 않는 것이 이번 ABI의 핵심 수명 계약이다.
-        try self.live_pty.init(io, allocator, 10, spawnRequest(config, self.loaded_config.config.term), config.queue_capacity);
+        try self.live_pty.init(io, allocator, 10, spawnRequest(config, self.loaded_config.config.term, integ_dir), config.queue_capacity);
         self.live_initialized = true;
 
         self.surfaces[0] = try app.Surface.init(allocator, 1, config.size);
@@ -1120,7 +1131,7 @@ pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
     };
 }
 
-fn spawnRequest(config: NormalizedConfig, term: []const u8) maru.pty.SpawnRequest {
+fn spawnRequest(config: NormalizedConfig, term: []const u8, zdotdir: ?[]const u8) maru.pty.SpawnRequest {
     var request: maru.pty.SpawnRequest = switch (config.command_kind) {
         .controlled_smoke => .{
             .command = "/bin/sh",
@@ -1141,8 +1152,9 @@ fn spawnRequest(config: NormalizedConfig, term: []const u8) maru.pty.SpawnReques
         },
     };
     // 사용자 config의 TERM을 셸에 준다(기본 xterm-256color). env는 빈 채로 둬 부모 상속 +
-    // TERM/COLORTERM override 경로를 타게 한다.
+    // TERM/COLORTERM override 경로를 타게 한다. zdotdir이 있으면 셸 통합용 ZDOTDIR을 주입한다.
     request.term = term;
+    request.zdotdir = zdotdir;
     return request;
 }
 

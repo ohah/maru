@@ -66,6 +66,10 @@ pub const SpawnRequest = struct {
     // 일부 셸 설정/통합이 $TERM에 따라 키바인딩을 다르게 잡기 때문이다(예: Ctrl+A 줄-시작).
     // env를 명시로 넘기면(테스트) 이 값은 무시된다.
     term: []const u8 = "xterm-256color",
+    // 셸 통합 디렉터리(zsh). 설정되면 셸에 ZDOTDIR=<이 값>을 주입하고(기존 ZDOTDIR은 MARU_ZDOTDIR_
+    // PREV로 보존) zsh가 그 디렉터리의 Maru .zshenv를 로드해 macOS 편집키를 바인딩한다. null이면
+    // 통합 없이 띄운다. env를 명시로 넘기면(테스트) 무시된다.
+    zdotdir: ?[]const u8 = null,
     size: terminal.Size = terminal.Size.default,
 };
 

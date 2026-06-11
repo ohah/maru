@@ -125,10 +125,11 @@ test "VS16 attaches to the base as a combining mark (one cell), shaper sees the 
     var core = try @import("core.zig").TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
     defer core.deinit();
     try core.write("\xe2\x9d\xa4\xef\xb8\x8f"); // ❤(U+2764) + VS16(U+FE0F)
-    // base + combining(VS16)이 한 글자이고, VS16이 width 2로 승격해 slot이 2칸이라 안 잘린다.
+    // base + combining(VS16)이 한 글자. 폭은 EAW per-codepoint(❤=1, VS16=0) — zsh와 일치시켜
+    // 붙여넣기 redraw가 안 깨지게(폭 승격하면 zsh의 CSI<N>D recolor가 어긋남).
     try std.testing.expectEqual(@as(u21, 0x2764), core.cells[0].codepoint);
     try std.testing.expectEqual(@as(?u21, 0xFE0F), core.cells[0].combining);
-    try std.testing.expectEqual(@as(u2, 2), core.cells[0].width); // 이모지 표현 = wide
-    try std.testing.expect(core.cells[1].continuation); // 오른쪽 칸은 continuation
-    try std.testing.expectEqual(@as(u16, 2), core.cursor.col); // 커서가 2칸 뒤
+    try std.testing.expectEqual(@as(u2, 1), core.cells[0].width); // EAW Neutral = 1(zsh 일치)
+    try std.testing.expectEqual(@as(u21, ' '), core.cells[1].codepoint); // 다음 칸은 빈칸
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
 }

@@ -204,6 +204,7 @@ pub const TerminalCore = struct {
         self.cursor_visible = true;
         self.bracketed_paste = false;
         self.grapheme_cluster_mode = false;
+        self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
         self.dirty = fullDirty(self.size);
     }
 
@@ -2280,10 +2281,13 @@ pub const TerminalCore = struct {
         return codepoint >= 0x1F1E6 and codepoint <= 0x1F1FF;
     }
 
-    /// 직전 출력 셀이 wide 이모지인지 — 스킨톤 modifier를 거기에 붙이기 위함(mode 2027).
+    /// 직전 출력 셀이 짝 없는(아직 combining 안 붙은) wide 이모지 base인지 — 스킨톤 modifier를
+    /// 거기 붙이기 위함. combining이 이미 있으면(예: 국기의 2번째 RI) 거기에 스킨톤을 또 붙이면
+    /// 그 슬롯(하나뿐)을 덮어써 국기가 깨지므로 제외한다.
     fn lastCellIsWideEmoji(self: *const TerminalCore) bool {
         const last = self.last_print orelse return false;
-        return self.cells[self.index(last.row, last.col)].width == 2;
+        const cell = self.cells[self.index(last.row, last.col)];
+        return cell.width == 2 and cell.combining == null;
     }
 
     /// 직전 출력 셀이 짝 없는(combining 안 붙은) 지역 표시자인지 — 다음 RI와 국기로 묶기 위함.
@@ -2293,23 +2297,50 @@ pub const TerminalCore = struct {
         return isRegionalIndicator(cell.codepoint) and cell.combining == null;
     }
 
+    /// wide glyph의 오른쪽 continuation 칸(0폭). base의 style/link를 물려받는다 — putCell과
+    /// promoteLastToEmojiWidth가 같은 표현을 쓰게 한다.
+    fn wideContinuationCell(style: types.Style, link: u32) types.Cell {
+        return .{ .style = style, .width = 0, .continuation = true, .link = link };
+    }
+
     /// grapheme(VS16/RI 페어 등)이 붙은 직전 base 셀을 width 1 -> 2로 승격한다(이미 2면 무시).
-    /// 오른쪽 칸을 continuation으로 만들고, 커서가 base 바로 뒤면 한 칸 더 전진(범위 넘으면
-    /// pending_wrap). base가 줄 끝이라 오른쪽 칸이 없으면 승격하지 않는다(드문 경계). mode 2027
-    /// 에서만 호출되므로 앱과 너비가 합의된 상태다.
+    /// mode 2027에서만 호출되므로 앱과 너비가 합의된 상태다.
     fn promoteLastToEmojiWidth(self: *TerminalCore) void {
         const last = self.last_print orelse return;
         const base_idx = self.index(last.row, last.col);
         if (self.cells[base_idx].width == 2) return; // 이미 wide
-        if (last.col + 1 >= self.size.cols) return; // 줄 끝 — 오른쪽 칸 없음
+
+        // base가 줄 마지막 칸이면 오른쪽 continuation 칸이 없다. 폭만 키우면 안 되고(다음 칸이
+        // 다음 글자라 침범), wide glyph autowrap처럼 base를 통째로 다음 줄로 옮겨 2칸을 차지하게
+        // 한다 — 안 그러면 mode 2027에서도 줄 끝 이모지가 width 1로 남아 앱과 너비가 어긋난다.
+        if (last.col + 1 >= self.size.cols) {
+            const base = self.cells[base_idx];
+            self.cells[base_idx] = .{}; // 이전 줄 마지막 칸은 빈칸으로
+            self.wrapped[last.row] = true;
+            self.markDirty(last.row);
+            self.cursor.col = 0;
+            self.lineFeed();
+            const row = self.cursor.row;
+            self.wrapped[row] = false;
+            self.cells[self.index(row, 0)] = base;
+            self.cells[self.index(row, 0)].width = 2;
+            self.cells[self.index(row, 1)] = wideContinuationCell(base.style, base.link);
+            self.last_print = .{ .row = row, .col = 0 };
+            self.markDirty(row);
+            if (2 < self.size.cols) {
+                self.cursor.col = 2;
+                self.pending_wrap = false;
+            } else {
+                self.cursor.col = self.size.cols - 1;
+                self.pending_wrap = true;
+            }
+            return;
+        }
+
         self.cells[base_idx].width = 2;
-        self.cells[self.index(last.row, last.col + 1)] = .{
-            .style = self.cells[base_idx].style,
-            .width = 0,
-            .continuation = true,
-            .link = self.cells[base_idx].link,
-        };
+        self.cells[self.index(last.row, last.col + 1)] = wideContinuationCell(self.cells[base_idx].style, self.cells[base_idx].link);
         self.markDirty(last.row);
+        // 커서가 base 바로 뒤(width-1 전진 위치)면 2칸짜리로 한 칸 더 민다.
         if (self.cursor.row == last.row and self.cursor.col == last.col + 1) {
             if (last.col + 2 < self.size.cols) {
                 self.cursor.col = last.col + 2;
@@ -4558,4 +4589,43 @@ test "DECRQM reports mode 2027 state so apps can detect support" {
     // 모르는 모드: 미인식(0).
     try core.write("\x1b[?9999$p");
     try std.testing.expectEqualStrings("\x1b[?9999;0$y", core.pendingResponse());
+}
+
+test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[?2027h");
+    // 국기 🇰🇷 한 셀(combining = 2번째 RI). 이어서 스킨톤 modifier 🏽.
+    try core.write("\xf0\x9f\x87\xb0\xf0\x9f\x87\xb7\xf0\x9f\x8f\xbd");
+    // 국기의 combining은 2번째 RI 그대로 — 스킨톤이 덮어쓰지 않는다.
+    try std.testing.expectEqual(@as(u21, 0x1F1F0), core.cells[0].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0x1F1F7), core.cells[0].combining); // 안 깨짐
+    // 스킨톤은 국기에 못 붙으니 별도 셀(putCell, EAW Wide).
+    try std.testing.expectEqual(@as(u21, 0x1F3FD), core.cells[2].codepoint);
+}
+
+test "mode 2027: emoji promotion at the last column wraps to next line as width 2 (review #9)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[?2027h");
+    try core.write("abcd"); // cols 0-3, 커서 col4(마지막)
+    try core.write("\xe2\x9d\xa4\xef\xb8\x8f"); // ❤(col4, width1) + VS16 -> 마지막 칸 승격 불가 -> wrap
+    // 이전 줄 마지막 칸은 비워지고, ❤️가 다음 줄에 width 2로.
+    try std.testing.expectEqual(@as(u21, ' '), core.cells[4].codepoint); // row0 col4 비움
+    try std.testing.expect(core.wrapped[0]); // soft-wrap 표시
+    try std.testing.expectEqual(@as(u21, 0x2764), core.cells[5].codepoint); // row1 col0
+    try std.testing.expectEqual(@as(?u21, 0xFE0F), core.cells[5].combining);
+    try std.testing.expectEqual(@as(u2, 2), core.cells[5].width);
+    try std.testing.expect(core.cells[6].continuation);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
+}
+
+test "RIS restores alternate_scroll to factory default (review #14)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[?1007l"); // 프로그램이 alternate_scroll 끔
+    try std.testing.expect(!core.alternate_scroll);
+    try core.write("\x1bc"); // RIS
+    try std.testing.expect(core.alternate_scroll); // 공장 기본(켜짐) 복원
 }

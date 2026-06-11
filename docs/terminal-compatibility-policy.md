@@ -1,6 +1,6 @@
 # 터미널 호환성/보안 정책
 
-이 문서는 Maru가 터미널 호환성, clipboard, paste, shell integration, workspace restore, plugin, update/telemetry를 어떤 기본값으로 가져갈지 정한다.
+이 문서는 Maru가 터미널 호환성, clipboard, paste, shell integration, workspace restore, plugin, update/telemetry를 어떤 기본값으로 가져갈지 정한다. 사용자 설정 파일의 위치/형식/키는 [설정(config) 파일](configuration.md)을 본다(현재 appearance: 폰트/테마/커서).
 
 초보자 관점에서 중요한 이유는 간단하다. 터미널은 "글자를 보여주는 앱"처럼 보이지만, 실제로는 shell과 로컬 시스템 권한 사이에 있는 프로그램이다. `TERM`, clipboard, paste, shell hook, 자동 command 실행 정책을 잘못 정하면 앱이 조금 불편한 수준을 넘어 사용자 shell, 원격 서버, 비밀 토큰, destructive command에 영향을 줄 수 있다.
 

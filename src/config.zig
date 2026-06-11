@@ -2,6 +2,7 @@ pub const action = @import("config/action.zig");
 pub const appearance = @import("config/appearance.zig");
 pub const keybinding = @import("config/keybinding.zig");
 pub const theme = @import("config/theme.zig");
+pub const loader = @import("config/loader.zig");
 
 pub const Action = action.Action;
 pub const Config = theme.Config;
@@ -24,6 +25,12 @@ pub const TerminalInputMacro = keybinding.TerminalInputMacro;
 pub const parseAction = action.parseAction;
 pub const parseHexColor = appearance.parseHexColor;
 pub const resolveAppearance = appearance.resolve;
+pub const ParsedConfig = loader.Parsed;
+pub const ConfigDiagnostic = loader.Diagnostic;
+pub const parseConfig = loader.parse;
+pub const loadConfigFile = loader.loadFile;
+pub const loadConfigDefault = loader.loadDefault;
+pub const defaultConfigPath = loader.defaultConfigPath;
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

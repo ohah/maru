@@ -138,6 +138,9 @@ pub const DevSession = struct {
     // 제품 dev shell은 fake font backend가 아니라 실제 CoreText로 glyph frame을 만든다.
     // appearance(폰트/색)는 init에서 한 번 resolve해 매 tick의 CoreTextFrameBuilder에 쓴다.
     appearance: config_mod.ResolvedAppearance = undefined,
+    // 시작 시 로드한 raw config(~/.config/maru/config). arena가 font.family 문자열을 소유하고,
+    // resolve된 appearance.font.family가 그 슬라이스를 빌리므로 세션 동안 살아 있어야 한다.
+    loaded_config: config_mod.ParsedConfig = undefined,
     // 한 cell의 device 픽셀 크기(advance 폭 × line-height). 실제 CoreText 메트릭에서 뽑아
     // shaper(atlas slot 크기)·rasterizer·renderer fixed-cell layout·host resize가 모두 같은 값을
     // 쓰게 한다. 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다.
@@ -244,7 +247,17 @@ pub const DevSession = struct {
         self.pump = self.live_pty.pump(&self.runtime);
         self.renderer_state = renderer.RendererState.init(allocator, .{});
         self.renderer_initialized = true;
-        self.appearance = try config_mod.resolveAppearance(.{});
+        // 사용자 config(~/.config/maru/config 또는 $MARU_CONFIG)를 로드해 appearance를 resolve한다.
+        // 로더가 모든 값을 valid-아니면-default로 걸러주므로 resolve는 사실상 실패하지 않지만,
+        // 방어적으로 실패 시 기본값으로 떨어진다. loaded_config는 세션 동안 보관(family 슬라이스 빌림).
+        self.loaded_config = try config_mod.loadConfigDefault(io, allocator);
+        errdefer self.loaded_config.deinit();
+        self.appearance = config_mod.resolveAppearance(self.loaded_config.config) catch
+            try config_mod.resolveAppearance(.{});
+        // config의 무시된 줄(알 수 없는 key·잘못된 값)을 알린다 — 사용자가 오타를 눈치채게.
+        for (self.loaded_config.diagnostics) |d| {
+            std.log.scoped(.config).warn("config line {d}: {s}", .{ d.line, d.message });
+        }
         // 실제 폰트 메트릭에서 cell 픽셀 크기를 뽑는다. shaper(atlas slot)·rasterizer·renderer가
         // 모두 같은 값을 쓰게 하는 단일 출처다.
         self.refreshCellMetrics();
@@ -995,6 +1008,7 @@ pub const DevSession = struct {
             self.surfaces[0].deinit();
             self.surface_initialized = false;
         }
+        self.loaded_config.deinit(); // appearance가 family를 빌리므로 surface 정리 뒤에 해제.
         self.* = undefined;
     }
 

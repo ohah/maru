@@ -9,3 +9,7 @@
 `keybinding.zig`는 사용자가 적을 key chord 문법과 앱 내부 resolver 계약을 먼저 고정한다. 이 파일은 TOML parser가 아니며, AppKit keyDown event나 global shortcut을 OS에 등록하지도 않는다. 역할은 `Cmd+B` 같은 앱 단축키와 `Ctrl+B` 같은 terminal input이 같은 byte stream으로 섞이지 않게 분류 규칙을 테스트 가능한 순수 Zig 코드로 두는 것이다.
 
 현재는 설정 파일 로딩, 설정 UI, runtime reload를 구현하지 않는다. 이 폴더는 그 기능들이 들어올 때 같은 검증 계약을 재사용하기 위한 초기 경계다.
+
+## loader.zig
+
+`key = value` 설정 파일(`~/.config/maru/config` 또는 `$MARU_CONFIG`)을 `theme.Config`로 파싱한다(순수 `parse` + I/O 래퍼 `loadFile`/`loadDefault`). forgiving: 알 수 없는 key·잘못된 값은 기본값 유지 + diagnostic. 문자열은 `Parsed.arena` 소유(resolve가 family를 빌리므로 호출자가 보관). 형식/키는 `docs/configuration.md`.

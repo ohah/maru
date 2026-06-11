@@ -42,6 +42,7 @@
 - [Trace와 Replay](docs/trace-replay.md)
 - [오라클 비교 테스트 전략](docs/oracle-testing.md)
 - [VT 적합성(conformance) 테스트](docs/conformance-testing.md)
+- [설정(config) 파일](docs/configuration.md)
 - [레퍼런스와 공개 명세](docs/references.md)
 - [Fixture와 Oracle 포맷](docs/fixture-format.md)
 - [Snapshot Versioning](docs/snapshot-versioning.md)

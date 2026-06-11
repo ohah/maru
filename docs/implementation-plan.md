@@ -337,6 +337,15 @@ macOS bridge 언어 선택:
 - 복잡한 tab/split UI.
 - plugin UI hook.
 
+## config 토대(8단계 선행): 설정 파일 로딩
+
+8단계(탭/global shortcut)·테마·동작 토글이 모두 사용자 설정을 읽으므로, 하드코딩 후 재작업을
+막기 위해 config 파일 로더를 먼저 깐다. 1단계로 **appearance(폰트/테마/커서)**를 구현했다 —
+`~/.config/maru/config`(또는 `$MARU_CONFIG`)의 `key = value` 형식을 순수 파서(`config/loader.zig`,
+Linux CI 포함 단위 테스트)로 `theme.Config`에 담고 `resolveAppearance`에 넘긴다. forgiving(알 수
+없는 key·잘못된 값은 기본값 유지 + diagnostic), 문자열 소유권은 arena(세션 동안 보관). 자세한
+형식/키는 [설정(config) 파일](configuration.md). 후속: 키바인딩, 동작 토글, 런타임 reload, 설정 UI.
+
 ## 8단계: 탭, quick terminal, global shortcut
 
 목표:

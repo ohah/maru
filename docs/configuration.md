@@ -4,7 +4,7 @@ Maru는 시작 시 사용자 설정 파일을 읽어 폰트·색·커서를 적�
 검증 동작을 정한다. 설정은 **선언적**이고 **forgiving**하다 — 설정 파일이 없거나 일부 줄이 틀려도
 터미널은 정상 동작한다.
 
-> 이 문서는 config 토대의 1단계(appearance: 폰트/테마/커서)를 다룬다. 키바인딩·동작 토글
+> 이 문서는 config 토대의 appearance(폰트/테마/커서) + 키바인딩 파싱을 다룬다. 동작 토글
 > (스크롤백 크기, 이모지 grapheme 기본값 등)·런타임 reload·설정 UI는 후속 단계다(아래 "범위와
 > 후속" 참조).
 
@@ -49,6 +49,32 @@ cursor.blink = true
 | `theme.selection` | `#RRGGBB` | `#334455` | 선택 하이라이트 배경 |
 | `cursor.shape` | `block`\|`bar`\|`underline` | `block` | 그 외 값은 무시 |
 | `cursor.blink` | `true`\|`false` | `true` | |
+| `keybind` | `<조합> = <action>` | (없음) | 여러 줄 가능. 아래 참조 |
+
+### 키바인딩 (`keybind`)
+
+`keybind = <조합> = <action>` 한 줄에 하나씩, 여러 줄을 둘 수 있다(값 안에 `=`가 한 번 더 있는
+형태다 — config의 첫 `=`는 `keybind` key를, 두 번째 `=`는 조합과 action을 가른다).
+
+```conf
+keybind = Cmd+T = new_tab
+keybind = Cmd+W = close_tab
+keybind = Cmd+Shift+Right = next_tab
+keybind = Cmd+Shift+Left = previous_tab
+keybind = Ctrl+Cmd+1 = select_tab:0
+```
+
+- **조합**: `Cmd`/`Ctrl`/`Alt`/`Shift`(대소문자 무관)를 `+`로 잇고 마지막에 키. 키는 글자 한 자,
+  숫자, `Esc`/`Tab`/`Enter`/`Space`/`Backspace`/`Up`/`Down`/`Left`/`Right`/`F1`~`F24`, 그리고 `+`
+  자체는 `Plus`로 쓴다(예: `Cmd+Plus`).
+- **action**: `new_tab`, `close_tab`, `next_tab`, `previous_tab`, `select_tab:N`(N=0부터).
+- 같은 조합을 두 번 바인딩하면 **첫 줄이 이긴다**(중복은 무시 + diagnostic). 조합/action을 못
+  읽으면 그 줄만 무시(forgiving).
+
+> **현재 범위**: 키바인딩은 파싱·검증되어 `KeyBindingResolver`로 준비된다. 실제 동작 연결(탭 열기
+> 등)은 8단계(탭/quick terminal)에서 이뤄진다 — config가 먼저 와야 8단계가 하드코딩 없이 이
+> resolver를 그대로 쓴다([구현 계획](implementation-plan.md)의 의존성 순서). terminal 입력 remap
+> (`<조합> → 바이트`)과 global shortcut도 후속이다.
 
 ## 검증 동작 (forgiving)
 
@@ -78,12 +104,13 @@ resolve 단계에서 다시 실패하지 않는다.)
 
 ## 범위와 후속
 
-이번 단계(appearance)는 config 토대의 첫 조각이다. 의존성 순서상 config가 먼저 와야 뒤따르는
-설정형 기능(키바인딩·테마·토글)이 하드코딩 후 재작업되지 않는다([구현 계획](implementation-plan.md)
-참조). 후속:
+appearance(폰트/테마/커서)와 키바인딩 **파싱**까지 구현됐다. 의존성 순서상 config가 먼저 와야
+뒤따르는 설정형 기능이 하드코딩 후 재작업되지 않는다([구현 계획](implementation-plan.md) 참조).
+후속:
 
-- **키바인딩**: `KeyBindingResolver`(이미 계약 존재)에 사용자 바인딩을 채운다 — 8단계 탭/global
-  shortcut의 선행.
+- **키바인딩 dispatch**: 파싱된 `KeyBindingResolver`로 실제 app action(탭 열기 등)을 실행한다 —
+  8단계 탭/quick terminal/global shortcut에서.
 - **동작 토글**: 스크롤백 크기, paste 보호, 이모지 grapheme 기본값(DEC mode 2027 강제) 등.
+- **terminal 입력 remap**: `<조합> → 바이트` 매크로(TerminalBinding) config.
 - **런타임 reload**: 파일 변경 감지 후 재-resolve(소유권은 이미 reload를 염두에 둔 arena 구조).
 - **설정 UI**: v1 범위 밖일 수 있음([터미널 호환성/보안 정책](terminal-compatibility-policy.md)).

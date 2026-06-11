@@ -14,6 +14,8 @@
 const std = @import("std");
 const theme = @import("theme.zig");
 const appearance = @import("appearance.zig");
+const keybinding = @import("keybinding.zig");
+const action_mod = @import("action.zig");
 
 pub const LoadError = std.mem.Allocator.Error;
 
@@ -23,15 +25,23 @@ pub const Diagnostic = struct {
     message: []const u8,
 };
 
-/// 파싱 결과. arena가 config의 문자열과 diagnostic 메시지를 소유한다 — config를 쓰는 동안(특히
-/// resolve로 만든 ResolvedAppearance가 family를 빌리는 동안) 살아 있어야 한다. 다 쓰면 deinit.
+/// 파싱 결과. arena가 config의 문자열·키바인딩 slice·diagnostic 메시지를 소유한다 — config를 쓰는
+/// 동안(특히 resolve가 family를, KeyBindingResolver가 keybindings를 빌리는 동안) 살아 있어야 한다.
 pub const Parsed = struct {
     arena: std.heap.ArenaAllocator,
     config: theme.Config,
+    /// 사용자 정의 app 키바인딩(`keybind = <chord> = <action>`). chord 중복은 파싱 단계에서
+    /// 걸러져(첫 줄 우선) 그대로 KeyBindingResolver.app_bindings로 넣어도 validate가 통과한다.
+    keybindings: []const keybinding.AppBinding,
     diagnostics: []const Diagnostic,
 
     pub fn deinit(self: *Parsed) void {
         self.arena.deinit();
+    }
+
+    /// 파싱된 키바인딩으로 resolver를 만든다(app 바인딩만 — terminal 바인딩 config는 후속).
+    pub fn keyBindingResolver(self: Parsed) keybinding.KeyBindingResolver {
+        return .{ .app_bindings = self.keybindings };
     }
 };
 
@@ -47,6 +57,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
 
     var config: theme.Config = .{};
     var diags: std.ArrayList(Diagnostic) = .empty;
+    var binds: std.ArrayList(keybinding.AppBinding) = .empty;
 
     var line_no: usize = 0;
     var it = std.mem.splitScalar(u8, source, '\n');
@@ -62,12 +73,13 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
         const key = std.mem.trim(u8, line[0..eq], &std.ascii.whitespace);
         const value = std.mem.trim(u8, line[eq + 1 ..], &std.ascii.whitespace);
 
-        try applyKey(a, &config, &diags, line_no, key, value);
+        try applyKey(a, &config, &binds, &diags, line_no, key, value);
     }
 
     return .{
         .arena = arena,
         .config = config,
+        .keybindings = try binds.toOwnedSlice(a),
         .diagnostics = try diags.toOwnedSlice(a),
     };
 }
@@ -75,11 +87,15 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
 fn applyKey(
     a: std.mem.Allocator,
     config: *theme.Config,
+    binds: *std.ArrayList(keybinding.AppBinding),
     diags: *std.ArrayList(Diagnostic),
     line_no: usize,
     key: []const u8,
     value: []const u8,
 ) LoadError!void {
+    if (std.mem.eql(u8, key, "keybind")) {
+        return applyKeybind(a, binds, diags, line_no, value);
+    }
     if (std.mem.eql(u8, key, "font.family")) {
         const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
         if (trimmed.len == 0) {
@@ -120,6 +136,40 @@ fn applyKey(
     }
 }
 
+/// `keybind = <chord> = <action>` 한 줄을 AppBinding으로. chord는 KeyChord.parse(사람 표기 —
+/// 예 `Cmd+T`, `Ctrl+Cmd+1`), action은 parseAction. 오류는 diagnostic(forgiving). 같은 chord가 이미
+/// 있으면 첫 줄을 살리고 무시한다 — resolver.validate가 중복으로 실패하지 않게 파싱에서 미리 dedup.
+fn applyKeybind(
+    a: std.mem.Allocator,
+    binds: *std.ArrayList(keybinding.AppBinding),
+    diags: *std.ArrayList(Diagnostic),
+    line_no: usize,
+    value: []const u8,
+) LoadError!void {
+    const eq = std.mem.indexOfScalar(u8, value, '=') orelse {
+        try diags.append(a, .{ .line = line_no, .message = "keybind는 `<조합> = <action>` 형식이어야 한다" });
+        return;
+    };
+    const chord_str = std.mem.trim(u8, value[0..eq], &std.ascii.whitespace);
+    const action_str = std.mem.trim(u8, value[eq + 1 ..], &std.ascii.whitespace);
+
+    const chord = keybinding.KeyChord.parse(chord_str) catch {
+        try diags.append(a, .{ .line = line_no, .message = "키 조합을 못 읽음(예: Cmd+T, Ctrl+Cmd+1) — 무시" });
+        return;
+    };
+    const act = action_mod.parseAction(action_str) orelse {
+        try diags.append(a, .{ .line = line_no, .message = "알 수 없는 action(new_tab/close_tab/next_tab/previous_tab/select_tab:N) — 무시" });
+        return;
+    };
+    for (binds.items) |existing| {
+        if (existing.chord.eql(chord)) {
+            try diags.append(a, .{ .line = line_no, .message = "이미 바인딩된 키 조합 — 무시(첫 줄 우선)" });
+            return;
+        }
+    }
+    try binds.append(a, .{ .chord = chord, .action = act });
+}
+
 /// 색 문자열을 appearance.parseHexColor로 검증(값 의미 단일 출처)한 뒤 arena에 복사해 돌려준다.
 /// 형식이 틀리면 diagnostic + 기존(기본) 값을 유지한다.
 fn dupValidColor(
@@ -153,7 +203,7 @@ fn parseBool(value: []const u8) ?bool {
 
 /// 빈 기본 결과(파일 없음/HOME 없음 등). config 텍스트를 안 읽었으므로 arena도 비어 있다.
 fn emptyDefault(allocator: std.mem.Allocator) Parsed {
-    return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .diagnostics = &.{} };
+    return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .diagnostics = &.{} };
 }
 
 /// 경로에서 config를 읽어 파싱한다. 파일이 없거나 읽기 실패면 기본 Config(빈 arena)를 돌려준다
@@ -257,4 +307,33 @@ test "loadFile: missing path yields default config, not an error" {
     const defaults: theme.Config = .{};
     try std.testing.expectEqualStrings(defaults.font.family, p.config.font.family);
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+}
+
+test "parse: keybind lines become app bindings; bad/duplicate ones are forgiving diagnostics" {
+    var p = try parse(std.testing.allocator,
+        \\keybind = Cmd+T = new_tab
+        \\keybind = Cmd+W = close_tab
+        \\keybind = Ctrl+Cmd+1 = select_tab:0
+        \\keybind = Cmd+T = next_tab
+        \\keybind = Bogus+Z = new_tab
+        \\keybind = Cmd+Q = launch_rockets
+        \\keybind = missing action
+    );
+    defer p.deinit();
+    // 유효한 3개만 바인딩(중복 Cmd+T는 첫 줄 우선, 나머지 3줄은 오류).
+    try std.testing.expectEqual(@as(usize, 3), p.keybindings.len);
+    try std.testing.expectEqual(action_mod.Action.new_tab, p.keybindings[0].action);
+    try std.testing.expectEqual(action_mod.Action.close_tab, p.keybindings[1].action);
+    try std.testing.expectEqual(@as(usize, 0), p.keybindings[2].action.select_tab);
+    // 중복 + 잘못된 chord + 알 수 없는 action + '=' 누락 = 4 diagnostic.
+    try std.testing.expectEqual(@as(usize, 4), p.diagnostics.len);
+    // 중복이 걸러졌으므로 resolver.validate가 통과한다.
+    try p.keyBindingResolver().validate();
+}
+
+test "parse: keybindings empty when none configured; appearance keys unaffected" {
+    var p = try parse(std.testing.allocator, "font.size = 13\n");
+    defer p.deinit();
+    try std.testing.expectEqual(@as(usize, 0), p.keybindings.len);
+    try std.testing.expectEqual(@as(f32, 13), p.config.font.size);
 }

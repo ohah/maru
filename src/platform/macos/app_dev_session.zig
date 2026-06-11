@@ -1133,10 +1133,9 @@ fn spawnRequest(config: NormalizedConfig, term: []const u8) maru.pty.SpawnReques
         .interactive_shell => .{
             .command = maru.pty.resolveInteractiveShell(),
             .args = &.{"-i"},
-            // login shell로 띄운다(Terminal.app·iTerm2·Ghostty와 동일) — .zprofile/.zlogin까지
-            // source해 PATH·EDITOR·키바인딩 등 사용자 환경이 완전히 잡힌다. non-login이면 .zshrc만
-            // 읽어 키맵이 어긋날 수 있다(예: $EDITOR=nvim이면 vi-keymap → Ctrl+A self-insert →
-            // Cmd+Left가 줄-시작으로 안 감). controlled_smoke(/bin/sh -c)는 login이 아니다.
+            // login shell로 띄운다(macOS backend가 login(1)으로 감싼다 — Terminal.app·Ghostty와
+            // 동일하게 전체 로그인 세션 셋업). PATH·EDITOR·키바인딩 등 사용자 환경이 완전히 잡힌다.
+            // controlled_smoke(/bin/sh -c)는 login이 아니다.
             .login = true,
             .size = config.size,
         },

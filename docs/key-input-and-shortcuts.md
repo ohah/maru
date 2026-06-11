@@ -206,6 +206,27 @@ Esc      vim, readline, shell mode 전환에 자주 쓰인다.
 - `PtySession`은 이미 해석된 terminal input bytes만 받는다.
 - macOS global shortcut 구현은 `src/platform/macos/` 아래 platform bridge 책임으로 둔다.
 
+## 기본 제공 macOS 줄 편집 단축키 (빌트인)
+
+macOS Cmd 조합은 보통 앱 단축키 영역이라, 안 묶인 Cmd 조합은 셸로 보내지 않는다(`Cmd+S`가 셸에
+`s`를 타이핑하지 않게 — `KeyBindingResolver.resolve`의 `.ignored`). 하지만 Mac 사용자가 셸 입력줄에서
+기대하는 편집 동작 몇 가지는 **빌트인 기본 terminal 바인딩**(`keybinding.default_terminal_bindings`)으로
+셸 시퀀스에 매핑한다. 흩어진 특수 케이스가 아니라 한 테이블(데이터)로 두고, resolve가
+**사용자 config 바인딩 → 이 빌트인 → (안 묶인 Cmd면) `.ignored` → 아니면 encodeKey** 순으로 본다.
+Ghostty 기본 keybind와 동작이 같다.
+
+| 키 | 바이트 | 동작 |
+|---|---|---|
+| `Cmd+Backspace` | `\x15` (Ctrl+U) | 커서~줄 시작 삭제 |
+| `Cmd+Left` | `\x01` (Ctrl+A) | 줄 시작으로 |
+| `Cmd+Right` | `\x05` (Ctrl+E) | 줄 끝으로 |
+| `Option+Left` | `\eb` (Meta-b) | 단어 왼쪽 |
+| `Option+Right` | `\ef` (Meta-f) | 단어 오른쪽 |
+| `Option+Backspace` | `\e\x7f` (Meta-DEL) | 단어 삭제 (encodeKey meta-ESC가 처리) |
+
+`KeyChord.eql`이 modifier를 정확히 비교하므로 `Cmd+Backspace`만 매칭한다(`Cmd+Shift+Backspace`는
+빌트인이 아니라 `.ignored`). 사용자가 `keybind`로 같은 조합을 다시 묶으면 그게 우선한다.
+
 ## 검증 계획
 
 - key chord parser test: modifier 중복, 알 수 없는 alias, key 누락, key 중복, F-key 범위 오류를 실패로 보고한다.

@@ -139,6 +139,20 @@ pub const ResolvedKey = union(enum) {
     ignored,
 };
 
+/// 빌트인 기본 terminal 바인딩 — macOS 줄 편집 관례를 셸 시퀀스로 매핑한다(Ghostty 기본 keybind와
+/// 동작 일치). 흩어진 특수 케이스(Swift 하드코딩, ad-hoc 분기) 대신 한 테이블(데이터)로 둔다.
+/// resolve 순서: 사용자 config 바인딩(override 가능) → 이 빌트인 → "안 묶인 Cmd → ignored" fallthrough.
+/// 빌트인을 Cmd-무시보다 먼저 봐야 Cmd 편집 조합이 전부 ignored로 새지 않는다. KeyChord.eql이
+/// modifier를 정확히 비교하므로 Cmd+Backspace만 매칭한다(Cmd+Shift+Backspace 등은 안 됨).
+/// Option+Backspace(단어 삭제 `\x1b\x7f`)는 encodeKey의 meta-ESC가 이미 처리해 여기 없다.
+pub const default_terminal_bindings = [_]TerminalBinding{
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .backspace }, .input = .{ .send_text = "\x15" } }, // Cmd+Backspace: 줄 시작까지 삭제(Ctrl+U)
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .arrow_left }, .input = .{ .send_text = "\x01" } }, // Cmd+Left: 줄 시작(Ctrl+A)
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .arrow_right }, .input = .{ .send_text = "\x05" } }, // Cmd+Right: 줄 끝(Ctrl+E)
+    .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_left }, .input = .{ .send_escape_sequence = "\x1bb" } }, // Option+Left: 단어 왼쪽(Meta-b)
+    .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_right }, .input = .{ .send_escape_sequence = "\x1bf" } }, // Option+Right: 단어 오른쪽(Meta-f)
+};
+
 pub const KeyBindingResolver = struct {
     app_bindings: []const AppBinding = &.{},
     terminal_bindings: []const TerminalBinding = &.{},
@@ -194,10 +208,17 @@ pub const KeyBindingResolver = struct {
             }
         }
 
+        // 빌트인 기본 바인딩(macOS 줄 편집). 사용자 바인딩 다음, Cmd-무시 fallthrough 전에 본다 —
+        // 안 그러면 Cmd+Backspace/←/→가 아래 .ignored로 새 나간다.
+        for (default_terminal_bindings) |binding| {
+            if (binding.chord.eql(chord)) {
+                return .{ .terminal_input = try binding.input.bytes(buffer) };
+            }
+        }
+
         if (event.modifiers.command) {
-            // Unbound Cmd combinations are app-level key events on macOS. Sending
-            // the raw character to the shell would make shortcuts like Cmd+S
-            // unexpectedly type "s" into the terminal.
+            // 여기까지 안 묶인 Cmd 조합은 macOS 앱 단축키다(Cmd+S/Q...). 셸로 raw 글자를 보내면
+            // Cmd+S가 's'를 타이핑하므로 무시한다. 편집용 Cmd 조합은 위 빌트인 테이블이 이미 가져간다.
             return .ignored;
         }
 
@@ -491,4 +512,32 @@ test "keybind: function/editing keys parse and match real terminal key events" {
     try std.testing.expectEqual(action_mod.Action.close_tab, r1.app_action);
     const r2 = try resolver.resolve(.{ .key = .{ .function = 5 } }, &buf, .{});
     try std.testing.expectEqual(action_mod.Action.new_tab, r2.app_action);
+}
+
+test "resolve: built-in macOS line-editing bindings (Cmd/Option) override the ignore-Cmd fallthrough" {
+    var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const r = KeyBindingResolver{}; // 사용자 바인딩 없음 — 빌트인만
+    // Cmd 편집 조합 → 셸 시퀀스(예전엔 .ignored로 새던 것).
+    try std.testing.expectEqualStrings("\x15", (try r.resolve(.{ .key = .backspace, .modifiers = .{ .command = true } }, &buf, .{})).terminal_input);
+    try std.testing.expectEqualStrings("\x01", (try r.resolve(.{ .key = .arrow_left, .modifiers = .{ .command = true } }, &buf, .{})).terminal_input);
+    try std.testing.expectEqualStrings("\x05", (try r.resolve(.{ .key = .arrow_right, .modifiers = .{ .command = true } }, &buf, .{})).terminal_input);
+    // Option 단어 이동.
+    try std.testing.expectEqualStrings("\x1bb", (try r.resolve(.{ .key = .arrow_left, .modifiers = .{ .option = true } }, &buf, .{})).terminal_input);
+    try std.testing.expectEqualStrings("\x1bf", (try r.resolve(.{ .key = .arrow_right, .modifiers = .{ .option = true } }, &buf, .{})).terminal_input);
+    // 안 묶인 다른 Cmd 조합은 그대로 .ignored.
+    try std.testing.expectEqual(ResolvedKey.ignored, try r.resolve(.{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } }, &buf, .{}));
+    // 정확한 modifier만 — Cmd+Shift+Backspace는 빌트인 매칭 안 되고 .ignored.
+    try std.testing.expectEqual(ResolvedKey.ignored, try r.resolve(.{ .key = .backspace, .modifiers = .{ .command = true, .shift = true } }, &buf, .{}));
+    // Option+Backspace는 encodeKey의 meta-ESC(\x1b\x7f)로 — 빌트인 아님.
+    try std.testing.expectEqualStrings("\x1b\x7f", (try r.resolve(.{ .key = .backspace, .modifiers = .{ .option = true } }, &buf, .{})).terminal_input);
+}
+
+test "resolve: user terminal binding overrides a built-in default" {
+    var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const user = [_]TerminalBinding{
+        .{ .chord = .{ .modifiers = .{ .command = true }, .key = .backspace }, .input = .{ .send_text = "X" } },
+    };
+    const r = KeyBindingResolver{ .terminal_bindings = &user };
+    // 사용자 바인딩이 빌트인보다 우선.
+    try std.testing.expectEqualStrings("X", (try r.resolve(.{ .key = .backspace, .modifiers = .{ .command = true } }, &buf, .{})).terminal_input);
 }

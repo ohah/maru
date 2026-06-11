@@ -27,6 +27,11 @@ pub const KeyName = union(enum) {
     tab,
     backspace,
     delete,
+    insert,
+    home,
+    end,
+    page_up,
+    page_down,
     arrow_up,
     arrow_down,
     arrow_left,
@@ -41,6 +46,11 @@ pub const KeyName = union(enum) {
             .tab => other == .tab,
             .backspace => other == .backspace,
             .delete => other == .delete,
+            .insert => other == .insert,
+            .home => other == .home,
+            .end => other == .end,
+            .page_up => other == .page_up,
+            .page_down => other == .page_down,
             .arrow_up => other == .arrow_up,
             .arrow_down => other == .arrow_down,
             .arrow_left => other == .arrow_left,
@@ -242,6 +252,11 @@ fn parseKey(raw: []const u8) KeyBindingError!KeyName {
     if (std.ascii.eqlIgnoreCase(raw, "Plus")) return .{ .char = '+' };
     if (std.ascii.eqlIgnoreCase(raw, "Backspace")) return .backspace;
     if (std.ascii.eqlIgnoreCase(raw, "Delete")) return .delete;
+    if (std.ascii.eqlIgnoreCase(raw, "Insert")) return .insert;
+    if (std.ascii.eqlIgnoreCase(raw, "Home")) return .home;
+    if (std.ascii.eqlIgnoreCase(raw, "End")) return .end;
+    if (std.ascii.eqlIgnoreCase(raw, "PageUp")) return .page_up;
+    if (std.ascii.eqlIgnoreCase(raw, "PageDown")) return .page_down;
     if (std.ascii.eqlIgnoreCase(raw, "Up")) return .arrow_up;
     if (std.ascii.eqlIgnoreCase(raw, "Down")) return .arrow_down;
     if (std.ascii.eqlIgnoreCase(raw, "Left")) return .arrow_left;
@@ -256,22 +271,26 @@ fn parseKey(raw: []const u8) KeyBindingError!KeyName {
 }
 
 fn keyNameFromTerminalKey(key: terminal.Key) ?KeyName {
-    // KNOWN LIMITATION: KeyName has .delete and .function (F1-F24) so configs can
-    // parse them, but terminal.Key (the normalized runtime key event) has no such
-    // variants yet, so this function can never produce them. A binding on
-    // `Delete` or `F13` therefore parses and validates but can never match a real
-    // key event — it is dead config until terminal.Key gains those variants and
-    // their byte encodings. Tracked in docs/key-input-and-shortcuts.md.
+    // terminal.Key가 home/end/insert/delete/page_up/page_down/function 변형을 가지면서, 그 키들의
+    // 바인딩이 실제 키 이벤트와 매칭된다(이전엔 죽은 설정이었다). F13~F24는 terminal.Key의 function이
+    // 1~12만 물리 키로 들어오므로 설정으론 적되 매칭되지 않을 수 있다(F13+는 후속).
     return switch (key) {
         .char => |codepoint| .{ .char = normalizeEventChar(codepoint) },
         .enter => .enter,
         .escape => .escape,
         .tab => .tab,
         .backspace => .backspace,
+        .delete => .delete,
+        .insert => .insert,
+        .home => .home,
+        .end => .end,
+        .page_up => .page_up,
+        .page_down => .page_down,
         .arrow_up => .arrow_up,
         .arrow_down => .arrow_down,
         .arrow_left => .arrow_left,
         .arrow_right => .arrow_right,
+        .function => |n| .{ .function = n },
     };
 }
 
@@ -454,4 +473,22 @@ test "resolver leaves ordinary terminal keys alone and ignores unbound command k
             .modifiers = .{ .command = true },
         }, &buffer, .{}),
     );
+}
+
+test "keybind: function/editing keys parse and match real terminal key events" {
+    // 설정 표기 파싱
+    try std.testing.expect((try KeyChord.parse("Delete")).key.eql(.delete));
+    try std.testing.expect((try KeyChord.parse("Home")).key.eql(.home));
+    try std.testing.expect((try KeyChord.parse("PageUp")).key.eql(.page_up));
+    try std.testing.expect((try KeyChord.parse("Cmd+F5")).key.eql(.{ .function = 5 }));
+    // 이제 실제 terminal.Key 이벤트와 매칭된다(이전엔 죽은 설정).
+    var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver = KeyBindingResolver{ .app_bindings = &.{
+        .{ .chord = .{ .key = .delete }, .action = .close_tab },
+        .{ .chord = .{ .key = .{ .function = 5 } }, .action = .new_tab },
+    } };
+    const r1 = try resolver.resolve(.{ .key = .delete }, &buf, .{});
+    try std.testing.expectEqual(action_mod.Action.close_tab, r1.app_action);
+    const r2 = try resolver.resolve(.{ .key = .{ .function = 5 } }, &buf, .{});
+    try std.testing.expectEqual(action_mod.Action.new_tab, r2.app_action);
 }

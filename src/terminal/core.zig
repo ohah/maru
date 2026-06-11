@@ -4629,3 +4629,43 @@ test "RIS restores alternate_scroll to factory default (review #14)" {
     try core.write("\x1bc"); // RIS
     try std.testing.expect(core.alternate_scroll); // 공장 기본(켜짐) 복원
 }
+
+// === 응답 적합성(conformance) — 호스트로 돌려보내는 report를 명세 기대값과 직접 비교한다.
+// esctest(GPL)를 안 쓰는 대신 공개 명세에서 자체 도출한다. docs/conformance-testing.md 참조.
+
+test "conformance: DA2 (CSI > c) answers secondary device attributes" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    // xterm ctlseqs Secondary DA. VT220급(1), 버전 10, ROM 0.
+    try core.write("\x1b[>c");
+    try std.testing.expectEqualStrings("\x1b[>1;10;0c", core.pendingResponse());
+}
+
+test "conformance: DECRQM reports known modes (bracketed paste 2004, DECTCEM 25)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    // DEC STD 070 DECRQM/DECRPM: CSI ? Ps $ p -> CSI ? Ps ; Pm $ y. Pm 1=set, 2=reset.
+    // bracketed paste(2004) 기본 reset.
+    try core.write("\x1b[?2004$p");
+    try std.testing.expectEqualStrings("\x1b[?2004;2$y", core.pendingResponse());
+    core.clearResponse();
+    // 켠 뒤 set.
+    try core.write("\x1b[?2004h\x1b[?2004$p");
+    try std.testing.expectEqualStrings("\x1b[?2004;1$y", core.pendingResponse());
+    core.clearResponse();
+    // DECTCEM(25) 기본 set(커서 표시).
+    try core.write("\x1b[?25$p");
+    try std.testing.expectEqualStrings("\x1b[?25;1$y", core.pendingResponse());
+}
+
+test "conformance: CPR reflects cursor position after CUP and reverts after a move" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 5 });
+    defer core.deinit();
+    // ECMA-48 8.3.20 CUP(CSI row;col H) 1-indexed로 커서 이동, 8.3.14 CPR로 보고.
+    try core.write("\x1b[3;7H\x1b[6n");
+    try std.testing.expectEqualStrings("\x1b[3;7R", core.pendingResponse());
+    core.clearResponse();
+    // CUF(CSI C) 2칸 -> col 9. 응답이 새 위치를 반영.
+    try core.write("\x1b[2C\x1b[6n");
+    try std.testing.expectEqualStrings("\x1b[3;9R", core.pendingResponse());
+}

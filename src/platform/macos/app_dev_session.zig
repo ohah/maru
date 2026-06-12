@@ -879,6 +879,42 @@ pub const DevSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 활성 탭의 활성 panel을 닫는다(Warp/cmux식 — split이 있으면 pane을 하나씩 닫는다). 트리를 형제로
+    /// collapse(removeLeaf)하고 panel을 teardown(destroyPane)한 뒤, active_pane을 보정하고, 대표 surface·
+    /// pump를 새 활성 panel로 재바인딩하고, 남은 panel을 collapse된 트리의 새 leaf rect로 resize한다. panel이
+    /// 1개뿐이면 무동작(그건 closeActivePaneOrTab이 closeTab으로 보낸다). 활성 탭에만 적용한다.
+    fn closeActivePane(self: *DevSession) void {
+        const tab = self.activeTab();
+        if (tab.panes.items.len <= 1) return; // 단일 panel은 탭 close 경로
+        const idx = tab.active_pane;
+        const closing = tab.panes.items[idx];
+        // 1) 트리에서 leaf를 떼고 형제로 collapse(split 노드만 해제 — surface는 아래 destroyPane가 정리).
+        if (!app.split_tree.removeLeaf(self.allocator, &tab.tree, &closing.surface)) return;
+        // 2) panes에서 빼고 panel teardown(closeAndDetach → reader join → surface deinit → free).
+        _ = tab.panes.orderedRemove(idx);
+        self.destroyPane(closing);
+        // 3) active_pane 보정: 닫은 게 마지막이면 이전, 아니면 그 자리로 온 다음 panel(같은 인덱스).
+        tab.active_pane = if (idx >= tab.panes.items.len) tab.panes.items.len - 1 else idx;
+        // 4) 대표 surface(= app_window.active())·pump를 새 활성 panel로 재바인딩(닫은 panel 포인터 dangling 방지).
+        self.surface_ptrs.items[self.app_window.active_tab] = &tab.activePane().surface;
+        self.app_window.tabs = self.surface_ptrs.items;
+        self.frame_loop.pump = &self.activePane().pump;
+        // 5) 남은 panel을 collapse된 트리의 새 leaf rect로 resize + 좌표 origin 재계산.
+        self.resizeActiveTabPanes() catch {};
+        self.recomputeActivePaneRect();
+        self.metal_dirty = true;
+    }
+
+    /// Cmd+W 정책(Warp/cmux식): split이 있으면 활성 panel을 하나 닫고(collapse), 단일 panel이면 탭을 닫는다
+    /// (마지막 탭이면 창). 즉 Cmd+W를 반복하면 pane이 하나씩 닫히다가 마지막 1개에서 탭이 닫힌다.
+    fn closeActivePaneOrTab(self: *DevSession) void {
+        if (self.activeTabHasSplit()) {
+            self.closeActivePane();
+        } else {
+            self.closeTab(self.app_window.active_tab);
+        }
+    }
+
     /// 탭을 from→to로 옮긴다(드래그 재정렬). tabs/surface_ptrs를 같이 회전(무할당 in-place)하고
     /// active_tab을 보정한다. Tab은 heap-pin이라 포인터만 셔플되고 surface/PTY/reader 포인터는 안
     /// 흔들린다. app_window.tabs는 surface_ptrs.items(같은 backing 배열, 내용만 재정렬)라 재바인딩 불요.
@@ -931,7 +967,8 @@ pub const DevSession = struct {
                 _ = self.switchTab((self.app_window.active_tab + self.tabs.items.len - 1) % self.tabs.items.len);
             },
             .select_tab => |index| _ = self.switchTab(index),
-            .close_tab => self.closeTab(self.app_window.active_tab),
+            // Cmd+W: split이 있으면 활성 panel을 하나 닫고(collapse), 단일 panel이면 탭(마지막이면 창)을 닫는다.
+            .close_tab => self.closeActivePaneOrTab(),
             // 분할 실패(셸 spawn/alloc 실패)는 세션을 죽이지 않고 무시한다 — splitActivePane이 errdefer로
             // 트리/탭을 원복하므로 활성 panel 하나가 그대로 남는다.
             .split_horizontal => self.splitActivePane(.horizontal) catch {},
@@ -2864,6 +2901,45 @@ test "Cmd+Option+arrow moves pane focus directionally through the key path" {
     // Cmd+Opt+Up → 좌우 split이라 위 panel 없음 → 포커스 불변.
     _ = try session.handleKeyEvent(.{ .key = .arrow_up, .modifiers = mods });
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
+}
+
+// Cmd+W가 split 탭에서 활성 panel을 먼저 닫고(트리 collapse + 남은 panel이 빈자리 차지), 단일 panel이 되면
+// 그땐 탭을 닫는지(Warp/cmux식) — 실 init + 실제 분할/teardown이라 macOS 게이트. 키 경로(handleKeyEvent)로 돈다.
+test "Cmd+W closes the active pane first and collapses the split, leaving the sibling" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    const left = session.activeSurface(); // 분할 전 surface = 분할 후 왼쪽(기존) panel
+    try session.splitActivePane(.horizontal); // 좌우 — 오른쪽(새) panel 활성, 2 panes
+    try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
+    try std.testing.expect(session.activeTabHasSplit());
+
+    // Cmd+W → 활성(오른쪽) panel 닫힘 → 트리가 형제(왼쪽)로 collapse → 1 panel만 남고 그게 활성.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
+    try std.testing.expectEqual(left, session.activeSurface());
+    try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
+    try std.testing.expect(!session.activeTabHasSplit());
+    try std.testing.expectEqual(@as(usize, 1), app.split_tree.leafCount(session.activeTab().tree));
+    // 남은 panel이 빈자리를 차지해 터미널 영역 전체로 resize됐다(좌표 origin도 사이드바 옆·전체 폭).
+    try std.testing.expectEqual(session.sidebar_width_px, session.active_pane_rect.x);
+    try std.testing.expectEqual(@as(u32, 800), session.active_pane_rect.w);
+
+    // 세션은 아직 살아 있다(panel이 닫혔을 뿐 탭/창은 그대로) — 다음 tick이 크래시 없이 돈다.
+    try std.testing.expect(!session.ended_seen);
+    _ = try session.tick();
 }
 
 // 사이드바 클릭이 슬롯 hit-test로 탭을 전환하고, 호버가 호버 밴드를 더하는지 — 실 init이 사이드바

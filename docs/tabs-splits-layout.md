@@ -101,6 +101,9 @@ Node = leaf(surface)
   iTerm2의 pane navigation 키). 방향은 각 panel rect 중심의 반평면 + 정렬(같은 행/열 우대)로 고른다 — 그 방향에 panel이
   없으면 무동작. `Cmd+화살표`(줄 처음/끝)·`Option+화살표`(단어 이동)와는 모디파이어 조합이 달라(command+option) 안 겹친다.
   포커스된 panel은 서브-rect에 있으므로 마우스/커서/IME 좌표가 그 panel의 origin(`active_pane_rect`) 기준으로 매핑된다.
+- **닫기(PR5a)**: `Cmd+W`는 **Warp/cmux식** — split이 있으면 활성 panel을 하나 닫고(트리를 형제로 collapse,
+  형제가 빈자리를 차지), 단일 panel이면 탭(마지막이면 창)을 닫는다. 즉 Cmd+W를 반복하면 pane이 하나씩
+  닫히다가 마지막 1개에서 탭이 닫힌다. 셸 `exit` 시 자동 collapse는 후속(PR5b).
 - **비율**: 고정 0.5(균등). divider 드래그 리사이즈는 후속(PR6).
 
 quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.

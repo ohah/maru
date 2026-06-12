@@ -243,18 +243,35 @@ const NormalizedConfig = struct {
 /// `LivePtySession`의 reader thread가 `&live_pty.reader`를 잡으므로 이 묶음은 한번 만들면 이동하면
 /// 안 된다 — `ArrayList(*Tab)`로 각 Tab을 heap-pin(`allocator.create`)하므로 리스트가 realloc돼도
 /// 본체는 안 움직인다. pump는 안정 `*queue` 포인터만 들어 이동 제약이 없다.
-const Tab = struct {
+// 한 panel(split leaf)의 per-surface 런타임 상태. 탭이 panel을 1개(지금) 또는 split 후 여러 개 들고,
+// 각 Pane이 자기 셸 PTY·surface·pump를 가진다. heap-pin(`*Pane`)이라 ArrayList realloc·트리 회전에도
+// 본체(`LivePtySession` reader가 `&pane.live_pty.reader`를 잡음, SplitTree leaf가 `&pane.surface`를 잡음)가
+// 안 움직인다.
+const Pane = struct {
     surface: app.Surface = undefined,
     live_pty: app.LivePtySession = undefined,
     pump: app.RuntimeEventPump = undefined,
     live_initialized: bool = false,
-    // 이 탭의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이
-    // 탭별로 한 번만 finish하도록, 그리고 세션 종료(모든 탭 terminated)를 판정하도록 쓴다.
+    // 이 panel의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이
+    // panel별로 한 번만 finish하도록, 그리고 세션 종료(모든 panel terminated)를 판정하도록 쓴다.
     terminated: bool = false,
-    // 이 탭의 SplitTree 루트(split PR1 모델). 지금은 단일 leaf(= &surface)라 panel 1개 = 풀 탭 영역으로
-    // 동작이 기존(단일 surface 풀창)과 같다. split(PR3)이 leaf를 split 노드로 바꿔 여러 panel이 된다. Tab은
-    // heap-pin(createTab의 allocator.create)이라 &surface가 안정 — leaf 포인터가 dangling 안 된다.
+};
+
+const Tab = struct {
+    // 이 탭의 panel들(heap-pin `*Pane`). 지금은 1개; split(PR3 키)이 늘린다. tree의 leaf가 이들의
+    // `&surface`를 가리킨다.
+    panes: std.ArrayList(*Pane) = .empty,
+    // 포커스된 panel 인덱스 — 입력/커서/탭 대표 surface가 이 panel을 본다. 지금은 항상 0(단일 panel);
+    // pane 포커스 이동(PR4)이 바꾼다.
+    active_pane: usize = 0,
+    // 이 탭의 SplitTree 루트(split PR1 모델). 지금은 단일 leaf(= &panes[0].surface)라 panel 1개 = 풀 탭
+    // 영역으로 동작이 기존과 같다. split(PR3)이 leaf를 split 노드로 바꿔 여러 panel이 된다.
     tree: app.SplitNode = undefined,
+
+    /// 포커스된 panel. live_pty/pump/surface 등 panel 내부 접근에 쓴다. 탭은 항상 panel ≥1.
+    fn activePane(self: *Tab) *Pane {
+        return self.panes.items[self.active_pane];
+    }
 };
 
 pub const DevSession = struct {
@@ -263,8 +280,9 @@ pub const DevSession = struct {
     // 탭들. 각 Tab은 heap-pin(`*Tab`)이라 ArrayList가 realloc해도 본체(live_pty reader·surface)는
     // 안 움직인다. 현재는 init이 1개만 만들고, create/switch(후속)에서 늘어난다.
     tabs: std.ArrayList(*Tab) = .empty,
-    // app_window.tabs(`[]*Surface`)가 가리킬 surface 포인터 배열 — tabs와 1:1로, 각 tab.surface의
-    // 안정 주소를 모은다. tabs 변경 때마다 갱신하고 app_window.tabs를 여기로 재바인딩한다.
+    // app_window.tabs(`[]*Surface`)가 가리킬 surface 포인터 배열 — tabs와 1:1로, 각 탭의 대표(활성 panel)
+    // surface 안정 주소를 모은다. tabs 변경(생성/닫기/이동)·활성 panel 변경 때 갱신하고 app_window.tabs를
+    // 여기로 재바인딩한다. 단일 panel(지금)이면 panes[0].surface.
     surface_ptrs: std.ArrayList(*app.Surface) = .empty,
     // surface_id·pty_id 발급(탭마다 유일). runtime이 두 id로 라우팅하므로 재사용하지 않는다.
     next_id: u64 = 1,
@@ -424,10 +442,10 @@ pub const DevSession = struct {
         self.runtime.debug_input = diag_gate.maruDebugEnabled(); // MARU_DEBUG면 zsh redraw 시퀀스 로깅
         self.runtime_initialized = true;
 
-        // 첫 탭을 만든다 — 셸 PTY spawn + surface + runtime attach + pump + tabs/surface_ptrs append +
-        // app_window 갱신을 createTab이 한 묶음으로 한다(create/switch 후속도 같은 경로를 쓴다).
+        // 첫 탭을 만든다 — Tab + 첫 panel(셸 PTY spawn + surface + runtime attach + pump) + tabs/surface_ptrs
+        // append + app_window 갱신을 createTab이 한 묶음으로 한다(create/switch 후속도 같은 경로를 쓴다).
         // Swift는 opaque handle만 보유하고 DevSession은 heap에 고정된다(LivePtySession reader가
-        // `&tab.live_pty.reader`를 잡으므로 Tab도 heap-pin — createTab이 allocator.create로 띄운다).
+        // `&pane.live_pty.reader`를 잡으므로 Pane도 heap-pin — createPane이 allocator.create로 띄운다).
         _ = try self.createTab(
             spawnRequest(config, self.loaded_config.config.term, integ_dir),
             config.size,
@@ -450,7 +468,7 @@ pub const DevSession = struct {
         // 실제 폰트 메트릭에서 cell 픽셀 크기를 뽑는다. shaper(atlas slot)·rasterizer·renderer가
         // 모두 같은 값을 쓰게 하는 단일 출처다.
         self.refreshCellMetrics();
-        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.activeTab().pump, &self.renderer_state);
+        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.activePane().pump, &self.renderer_state);
         self.writeSummaryFromState();
     }
 
@@ -459,6 +477,11 @@ pub const DevSession = struct {
     /// 부른다(surface_initialized·tabs 비어있지 않음).
     fn activeTab(self: *DevSession) *Tab {
         return self.tabs.items[self.app_window.active_tab];
+    }
+
+    /// 활성 탭의 포커스된 panel. live_pty/pump/surface 접근(입력·커서·frame_loop pump)에 쓴다.
+    fn activePane(self: *DevSession) *Pane {
+        return self.activeTab().activePane();
     }
 
     /// 활성 탭의 SplitTree를 터미널 영역 rect 안에서 각 panel(leaf)의 (surface, rect)로 편다(멀티-panel
@@ -473,11 +496,54 @@ pub const DevSession = struct {
         try app.split_tree.layout(allocator, self.activeTab().tree, term_rect, out);
     }
 
-    /// 새 탭을 만든다 — Tab을 heap-pin(`create`)하고, 셸 PTY를 spawn해 surface에 붙이고, pump를 만든 뒤
-    /// `tabs`/`surface_ptrs`에 추가하고 `app_window.tabs`를 갱신하고 새 탭을 활성으로 만든다. 새 Tab
-    /// 포인터 반환. `LivePtySession` reader가 `&tab.live_pty.reader`를 잡으므로 Tab은 heap에 고정한다
-    /// (ArrayList는 `*Tab`만 들어 realloc해도 본체는 안 움직인다 — surface/PTY 포인터 안정). 부분 실패는
-    /// errdefer로 정리한다(create→live_pty→surface→runtime attach→append 역순).
+    /// 한 panel을 heap-pin(`create`)으로 만든다 — 셸 PTY spawn → surface init → runtime attach → pump.
+    /// `LivePtySession` reader가 `&pane.live_pty.reader`를 잡으므로 Pane은 heap 고정(ArrayList는 `*Pane`만
+    /// 들어 realloc·트리 회전에도 본체 안 움직임). surface_id·pty_id 발급(next_id), 부분 실패는 errdefer로
+    /// 정리(create→live_pty→surface 역순). 탭/사이드바에 거는 건 호출자(createTab/split)가 한다.
+    fn createPane(
+        self: *DevSession,
+        request: maru.pty.SpawnRequest,
+        size: terminal.Size,
+        queue_capacity: usize,
+        title: []const u8,
+        command: []const u8,
+    ) !*Pane {
+        const pane = try self.allocator.create(Pane);
+        errdefer self.allocator.destroy(pane);
+        pane.* = .{};
+
+        const id = self.next_id; // surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
+        try pane.live_pty.init(self.io, self.allocator, id, request, queue_capacity);
+        errdefer pane.live_pty.deinit();
+        pane.live_initialized = true;
+
+        pane.surface = try app.Surface.init(self.allocator, id, size);
+        errdefer pane.surface.deinit();
+        pane.surface.title = title;
+        pane.surface.command = command;
+
+        _ = try pane.live_pty.attachSurface(&self.runtime, &pane.surface);
+        pane.pump = pane.live_pty.pump(&self.runtime);
+        self.next_id += 1;
+        return pane;
+    }
+
+    /// 한 panel을 teardown하고 heap 해제한다(closeAndDetach → live_pty.deinit(reader join) → surface.deinit
+    /// → destroy). runtime이 살아 있을 때만 detach. createPane errdefer·closeTab·split 실패 정리에 쓴다.
+    /// (deinit은 runtime.deinit 순서 때문에 이 2-pass를 직접 풀어 쓴다 — 여기 쓰지 않는다.)
+    fn destroyPane(self: *DevSession, pane: *Pane) void {
+        if (pane.live_initialized) {
+            if (self.runtime_initialized) pane.live_pty.closeAndDetach(&self.runtime);
+            pane.live_pty.deinit();
+            pane.live_initialized = false;
+        }
+        pane.surface.deinit();
+        self.allocator.destroy(pane);
+    }
+
+    /// 새 탭을 만든다 — Tab과 첫 panel을 heap-pin하고, panel의 surface로 단일-leaf 트리를 세우고,
+    /// `tabs`/`surface_ptrs`에 추가하고 `app_window.tabs`를 갱신하고 새 탭을 활성으로 만든다. 새 Tab 포인터
+    /// 반환. 부분 실패는 errdefer로 정리한다(create tab→panes 리스트→pane→append 역순).
     fn createTab(
         self: *DevSession,
         request: maru.pty.SpawnRequest,
@@ -489,30 +555,23 @@ pub const DevSession = struct {
         const tab = try self.allocator.create(Tab);
         errdefer self.allocator.destroy(tab);
         tab.* = .{};
+        errdefer tab.panes.deinit(self.allocator); // 실패 시 panes 리스트 backing 해제(pane은 아래 errdefer가)
 
-        const id = self.next_id; // surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
-        try tab.live_pty.init(self.io, self.allocator, id, request, queue_capacity);
-        errdefer tab.live_pty.deinit();
-        tab.live_initialized = true;
+        const pane = try self.createPane(request, size, queue_capacity, title, command);
+        errdefer self.destroyPane(pane);
 
-        tab.surface = try app.Surface.init(self.allocator, id, size);
-        errdefer tab.surface.deinit();
-        tab.surface.title = title;
-        tab.surface.command = command;
-        // SplitTree 루트를 단일 leaf로 — 이 탭은 panel 1개(= 풀 탭 영역). split(PR3)이 이 leaf를 나눈다.
-        // Tab이 heap-pin이라 &tab.surface가 안정이므로 leaf 포인터가 안전하다.
-        tab.tree = .{ .leaf = &tab.surface };
-
-        _ = try tab.live_pty.attachSurface(&self.runtime, &tab.surface);
-        tab.pump = tab.live_pty.pump(&self.runtime);
+        try tab.panes.append(self.allocator, pane);
+        tab.active_pane = 0;
+        // SplitTree 루트를 단일 leaf로 — 이 탭은 panel 1개(= 풀 탭 영역). Pane이 heap-pin이라 &pane.surface가
+        // 안정이므로 leaf 포인터가 안전하다. split(PR3 키)이 이 leaf를 split 노드로 나눈다.
+        tab.tree = .{ .leaf = &pane.surface };
 
         try self.tabs.append(self.allocator, tab);
         errdefer _ = self.tabs.pop();
-        try self.surface_ptrs.append(self.allocator, &tab.surface);
+        try self.surface_ptrs.append(self.allocator, &pane.surface); // 탭 대표 = 활성 panel surface
         // surface_ptrs가 realloc됐을 수 있으니 app_window.tabs를 새 items로 재바인딩(stale 슬라이스 방지).
         self.app_window.tabs = self.surface_ptrs.items;
         self.app_window.active_tab = self.tabs.items.len - 1;
-        self.next_id += 1;
         // 탭 집합/활성이 바뀌었으니 사이드바 셀을 다시 만든다. 실패는 탭 생성을 무르지 않고(탭은 이미
         // 완성·append됨) 빈 사이드바로 degrade한다 — 여기서 try면 errdefer가 멀쩡한 탭을 헐어버린다.
         self.rebuildSidebar() catch {};
@@ -549,18 +608,16 @@ pub const DevSession = struct {
         // 길이가 줄었으니(realloc은 안 해도) app_window.tabs를 새 items로 재바인딩(stale 슬라이스 방지).
         self.app_window.tabs = self.surface_ptrs.items;
 
-        // teardown 역순. runtime은 세션 동안 살아 있으므로 closeAndDetach가 surface link를 안전히 뗀다.
-        if (tab.live_initialized) {
-            if (self.runtime_initialized) tab.live_pty.closeAndDetach(&self.runtime);
-            tab.live_pty.deinit();
-        }
-        tab.surface.deinit();
+        // teardown — 탭의 모든 panel을 destroyPane(closeAndDetach → reader join → surface deinit → free)한 뒤
+        // panes 리스트·Tab을 해제한다. runtime은 세션 동안 살아 있으므로 detach가 안전하다.
+        for (tab.panes.items) |pane| self.destroyPane(pane);
+        tab.panes.deinit(self.allocator);
         self.allocator.destroy(tab);
 
         self.app_window.active_tab = reselectAfterClose(index, self.app_window.active_tab, self.tabs.items.len);
         // frame_loop의 pump를 새 active 탭으로 갱신한다. DevSession tick 경로(tickAfterDrainWithFrameBuilder)는
         // 이 pump를 안 쓰지만, 닫은 게 active 탭이면 옛 pump 포인터가 dangling이 되므로 방어적으로 유지한다.
-        self.frame_loop.pump = &self.activeTab().pump;
+        self.frame_loop.pump = &self.activePane().pump;
 
         self.hovered_slot = null; // 인덱스가 밀렸으니 호버 무효화(다음 마우스 이동이 재설정)
         self.rebuildSidebar() catch {};
@@ -576,7 +633,7 @@ pub const DevSession = struct {
         rotateMove(*Tab, self.tabs.items, from, to);
         rotateMove(*app.Surface, self.surface_ptrs.items, from, to);
         self.app_window.active_tab = adjustActiveForMove(self.app_window.active_tab, from, to);
-        self.frame_loop.pump = &self.activeTab().pump; // 순서가 바뀌었으니 활성 탭 pump 재바인딩(방어적)
+        self.frame_loop.pump = &self.activePane().pump; // 순서가 바뀌었으니 활성 탭 pump 재바인딩(방어적)
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }
@@ -585,7 +642,9 @@ pub const DevSession = struct {
     fn allTabsTerminated(self: *DevSession) bool {
         if (self.tabs.items.len == 0) return false;
         for (self.tabs.items) |tab| {
-            if (tab.live_initialized and !tab.terminated) return false;
+            for (tab.panes.items) |pane| {
+                if (pane.live_initialized and !pane.terminated) return false;
+            }
         }
         return true;
     }
@@ -1427,19 +1486,21 @@ pub const DevSession = struct {
         // (reader join/child reap)을 건너뛰지 않게 한다.
         self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 30Hz로 한 줄씩 스크롤+확장
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
-        // 모든 탭의 PTY를 drain한다 — 백그라운드 탭도 출력을 받게(routing은 surface_id로 각 탭 surface에
-        // 가고, frame은 아래에서 활성 탭만 빌드한다). 누적 summary는 frame builder에 보고용으로 넘긴다.
+        // 모든 탭의 모든 panel PTY를 drain한다 — 백그라운드 탭/panel도 출력을 받게(routing은 surface_id로
+        // 각 surface에 가고, frame은 아래에서 활성 탭만 빌드한다). 누적 summary는 frame builder에 보고용.
         var drain_summary: app.RuntimePumpDrainSummary = .{};
         for (self.tabs.items) |tab| {
-            if (!tab.live_initialized) continue;
-            const ds = try tab.pump.drainAvailable();
-            drain_summary.output_events += ds.output_events;
-            drain_summary.exit_events += ds.exit_events;
-            // 탭별로 종료를 한 번만 finish(reader join + child reap). 세션 종료는 '모든' 탭이 끝났을 때.
-            if (ds.ended != null and !tab.terminated) {
-                tab.live_pty.finishAfterTermination();
-                tab.terminated = true;
-                drain_summary.ended = ds.ended; // 마지막 관측 종료를 frame 보고에 싣는다
+            for (tab.panes.items) |pane| {
+                if (!pane.live_initialized) continue;
+                const ds = try pane.pump.drainAvailable();
+                drain_summary.output_events += ds.output_events;
+                drain_summary.exit_events += ds.exit_events;
+                // panel별로 종료를 한 번만 finish(reader join + child reap). 세션 종료는 '모든' panel이 끝났을 때.
+                if (ds.ended != null and !pane.terminated) {
+                    pane.live_pty.finishAfterTermination();
+                    pane.terminated = true;
+                    drain_summary.ended = ds.ended; // 마지막 관측 종료를 frame 보고에 싣는다
+                }
             }
         }
         self.total_output_events += drain_summary.output_events;
@@ -1527,13 +1588,15 @@ pub const DevSession = struct {
 
     pub fn close(self: *DevSession) FrameSummary {
         self.total_close_events += 1;
-        // 창 close — 모든 탭의 PTY를 정리한다(활성 탭만이 아니라). runtime이 살아 있으면 detach까지,
+        // 창 close — 모든 탭의 모든 panel PTY를 정리한다(활성만이 아니라). runtime이 살아 있으면 detach까지,
         // 아니면 close만.
         for (self.tabs.items) |tab| {
-            if (tab.live_initialized and self.runtime_initialized) {
-                tab.live_pty.closeAndDetach(&self.runtime);
-            } else if (tab.live_initialized) {
-                tab.live_pty.close();
+            for (tab.panes.items) |pane| {
+                if (pane.live_initialized and self.runtime_initialized) {
+                    pane.live_pty.closeAndDetach(&self.runtime);
+                } else if (pane.live_initialized) {
+                    pane.live_pty.close();
+                }
             }
         }
         if (self.surface_initialized) {
@@ -1639,7 +1702,8 @@ pub const DevSession = struct {
             labels.deinit(self.allocator);
         }
         for (self.tabs.items, 0..) |tab, i| {
-            const label = try std.fmt.allocPrint(self.allocator, "{d} {s}", .{ i + 1, tab.surface.title });
+            // 탭 대표 제목 = 활성 panel surface 제목(split 시 포커스 panel의 제목이 사이드바에 보인다).
+            const label = try std.fmt.allocPrint(self.allocator, "{d} {s}", .{ i + 1, tab.activePane().surface.title });
             try labels.append(self.allocator, label);
         }
 
@@ -1679,13 +1743,15 @@ pub const DevSession = struct {
 
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
-        // 1) 각 탭의 live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'. detach 후
-        //    deinit이 reader thread join + fd/queue 해제(이동 금지 계약이라 in-place로 정리).
+        // 1) 각 탭의 각 panel live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'. detach
+        //    후 deinit이 reader thread join + fd/queue 해제(이동 금지 계약이라 in-place로 정리).
         for (self.tabs.items) |tab| {
-            if (tab.live_initialized) {
-                if (self.runtime_initialized) tab.live_pty.closeAndDetach(&self.runtime);
-                tab.live_pty.deinit();
-                tab.live_initialized = false;
+            for (tab.panes.items) |pane| {
+                if (pane.live_initialized) {
+                    if (self.runtime_initialized) pane.live_pty.closeAndDetach(&self.runtime);
+                    pane.live_pty.deinit();
+                    pane.live_initialized = false;
+                }
             }
         }
         if (self.renderer_initialized) {
@@ -1696,10 +1762,15 @@ pub const DevSession = struct {
             self.runtime.deinit();
             self.runtime_initialized = false;
         }
-        // 2) surface 정리 + Tab heap 해제(runtime.deinit 뒤 — surface는 runtime 불요). appearance가 surface
-        //    family를 빌리므로 surface 정리는 아래 config/appearance 해제보다 앞이어야 한다(원래 순서 보존).
+        // 2) 각 panel surface 정리 + Pane/Tab heap 해제(runtime.deinit 뒤 — surface는 runtime 불요).
+        //    appearance가 surface family를 빌리므로 surface 정리는 아래 config/appearance 해제보다 앞이어야
+        //    한다(원래 순서 보존).
         for (self.tabs.items) |tab| {
-            tab.surface.deinit();
+            for (tab.panes.items) |pane| {
+                pane.surface.deinit();
+                self.allocator.destroy(pane);
+            }
+            tab.panes.deinit(self.allocator);
             self.allocator.destroy(tab);
         }
         self.tabs.deinit(self.allocator);
@@ -2222,7 +2293,10 @@ test "active tab is a single-leaf SplitTree laid out to the full terminal rect" 
     });
     defer session.deinit();
 
-    // 활성 탭의 tree는 단일 leaf(= 활성 surface). leafCount 1.
+    // 활성 탭은 panel 1개(split 전), active_pane 0, tree는 단일 leaf(= 활성 panel surface).
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
+    try std.testing.expectEqual(session.activeSurface(), &session.activePane().surface);
     try std.testing.expectEqual(@as(usize, 1), app.split_tree.leafCount(session.activeTab().tree));
 
     var out: std.ArrayList(app.SplitLeafRect) = .empty;
@@ -2354,7 +2428,7 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
         );
     }
     try std.testing.expectEqual(@as(usize, 3), session.tabs.items.len);
-    try std.testing.expectEqualStrings("Maru dev shell", session.tabs.items[0].surface.title);
+    try std.testing.expectEqualStrings("Maru dev shell", session.tabs.items[0].activePane().surface.title);
     try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
 
     const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
@@ -2368,9 +2442,9 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
     session.mouse(3, x, slot_h * 2 + 1);
 
     // 순서 [tab 2, tab 3, Maru], 활성=드래그 탭(Maru)=2, 드래그 종료.
-    try std.testing.expectEqualStrings("tab 2", session.tabs.items[0].surface.title);
-    try std.testing.expectEqualStrings("tab 3", session.tabs.items[1].surface.title);
-    try std.testing.expectEqualStrings("Maru dev shell", session.tabs.items[2].surface.title);
+    try std.testing.expectEqualStrings("tab 2", session.tabs.items[0].activePane().surface.title);
+    try std.testing.expectEqualStrings("tab 3", session.tabs.items[1].activePane().surface.title);
+    try std.testing.expectEqualStrings("Maru dev shell", session.tabs.items[2].activePane().surface.title);
     try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
     try std.testing.expect(!session.sidebar_drag_active);
 }
@@ -2410,7 +2484,7 @@ test "two tabs: createTab spawns a second shell and tick drains both (multi-tab)
     var i: usize = 0;
     while (i < 400 and !saw) : (i += 1) {
         _ = try session.tick();
-        const dump = try session.tabs.items[1].surface.core.dumpUtf8(allocator);
+        const dump = try session.tabs.items[1].activePane().surface.core.dumpUtf8(allocator);
         defer allocator.free(dump);
         if (std.mem.indexOf(u8, dump, "TAB_TWO_MARK") != null) saw = true;
     }
@@ -2418,7 +2492,7 @@ test "two tabs: createTab spawns a second shell and tick drains both (multi-tab)
 
     // switchTab으로 활성 탭을 0으로 — activeSurface가 탭 0 surface를 가리킨다(라우팅 전환).
     try std.testing.expect(session.switchTab(0));
-    try std.testing.expectEqual(session.tabs.items[0].surface.id, session.activeSurface().id);
+    try std.testing.expectEqual(session.tabs.items[0].activePane().surface.id, session.activeSurface().id);
     try std.testing.expect(!session.switchTab(5)); // 범위 밖이면 false, 활성 불변
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
 }

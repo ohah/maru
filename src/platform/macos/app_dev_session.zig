@@ -162,6 +162,31 @@ fn paneTabHighlightCell(bar: app.SplitRect, cell_width_px: u32, tab_index: usize
     };
 }
 
+/// 점(backing px)이 사각형 안인가([x, x+w) × [y, y+h) 반열린). 탭 바 클릭 hit-test에 쓴다. 비유한은 false.
+fn pointInRect(x_px: f64, y_px: f64, rect: app.SplitRect) bool {
+    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
+    const x0: f64 = @floatFromInt(rect.x);
+    const y0: f64 = @floatFromInt(rect.y);
+    return x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(rect.w)) and
+        y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(rect.h));
+}
+
+/// 바 안의 스크린 x → 클릭한 Term 탭 인덱스([0, term_count-1]로 clamp). buildPaneTabBarDrawList·하이라이트와
+/// 같은 등폭 분할(paneTabWidth)을 써서 보이는 탭과 정확히 일치한다. cell/탭 0이면 0. float clamp 후 cast라
+/// 거대 좌표도 trap 없음. 순수 함수.
+fn tabIndexInBar(bar: app.SplitRect, cell_width_px: u32, term_count: usize, x_px: f64) usize {
+    if (cell_width_px == 0 or term_count == 0 or !std.math.isFinite(x_px)) return 0;
+    const cols_u32 = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
+    if (cols_u32 == 0) return 0;
+    const tab_w = coretext_frame_builder.paneTabWidth(@intCast(cols_u32), term_count);
+    if (tab_w == 0) return 0;
+    const cw: f64 = @floatFromInt(cell_width_px);
+    const max_col: f64 = @floatFromInt(cols_u32 - 1);
+    const rel = std.math.clamp((x_px - @as(f64, @floatFromInt(bar.x))) / cw, 0, max_col); // 바 안 col로 clamp
+    const col: u32 = @intFromFloat(rel);
+    return @min(col / tab_w, term_count - 1);
+}
+
 /// 스크린 x(backing px)가 세로 사이드바 영역(x: 0..sidebar_width_px) 안인가. 폭 0(사이드바 꺼짐)이거나
 /// x<0(클리어 sentinel 포함)·origin_x 이상(터미널 영역)이면 false. 순수 함수라 OS 무관 단위 테스트.
 fn xInSidebar(x_px: f64, sidebar_width_px: u32) bool {
@@ -1435,15 +1460,28 @@ pub const DevSession = struct {
             self.mouse_drag_selecting = false;
             return;
         }
-        // split 탭에서 다른 panel을 클릭하면 포커스를 그 panel로 옮긴다(입력/커서/IME가 따라간다). down(1)에서만,
-        // split이 있을 때만(`activeTabHasSplit` 가드 — 단일 panel은 무동작이라 기존 선택 경로 그대로). 활성 panel을
-        // 클릭하면 아래 일반 선택 경로로 흐른다. 클릭이 다른 panel에 떨어지면 포커스만 옮기고 소비한다 — 선택은
-        // 새로 활성이 된 panel에서 다음 클릭/드래그부터 시작한다(엉뚱한 panel에 선택을 긋지 않게). kind!=1이면
-        // 단락 평가로 self.tabs를 건드리지 않는다(최소-셋업 드래그 테스트는 kind 2/3만 보낸다).
-        if (kind == 1 and self.activeTabHasSplit()) {
+        // down(1)에서 pane/탭 바 클릭을 hit-test한다(kind!=1이면 단락 평가로 self.tabs를 안 건드린다 — 최소-셋업
+        // 드래그 테스트는 kind 2/3만 보낸다). 활성 탭 leaf rect를 한 번 펴 ① 탭 바 클릭(어느 pane의 상단 바면 그
+        // pane 포커스 + 클릭한 Term 탭 전환) ② 다른 panel의 터미널 영역 클릭(그 pane 포커스)을 차례로 본다. 둘 다
+        // 클릭을 소비한다 — 터미널 선택은 활성 panel의 '바 아래' 클릭에서만 시작한다. 활성 panel의 활성 탭/터미널
+        // 클릭은 무전환으로 아래 일반 선택 경로로 흐른다.
+        if (kind == 1) {
             var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
             defer leaf_rects.deinit(self.allocator);
             if (self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects)) |_| {
+                // ① 탭 바 클릭 → pane 포커스 + Term 탭 전환(cmux). 단일 panel도 Term이 여럿이면 전환된다.
+                for (leaf_rects.items) |lr| {
+                    const bar = self.paneBarRect(lr.rect) orelse continue;
+                    if (pointInRect(x_px, y_px, bar)) {
+                        const tab = tabIndexInBar(bar, self.cell_width_px, lr.leaf.terms.items.len, x_px);
+                        _ = self.focusPaneByPtr(lr.leaf); // 다른 pane이면 포커스 이동(같으면 무동작)
+                        self.focusTerm(tab); // 그 pane의 클릭한 Term으로(같으면 무동작)
+                        self.drag_autoscroll = 0;
+                        self.mouse_drag_selecting = false;
+                        return;
+                    }
+                }
+                // ② split에서 다른 panel의 터미널 영역 클릭 → 그 pane 포커스(활성 panel이면 아래 선택 경로로).
                 if (paneAtPoint(leaf_rects.items, x_px, y_px)) |pane| {
                     if (pane != self.activePane() and self.focusPaneByPtr(pane)) {
                         self.drag_autoscroll = 0;
@@ -3141,6 +3179,29 @@ test "paneTabHighlightCell highlights the active Term tab segment aligned to pan
     try std.testing.expect(paneTabHighlightCell(bar, 12, 0, 0, 0xFF000000) == null);
 }
 
+// tabIndexInBar가 바 안 x를 클릭한 Term 탭으로 매핑하는지(등폭 paneTabWidth, 끝은 clamp) + pointInRect 경계 —
+// 탭 클릭 hit-test의 코어라 헤드리스 단위로 고정한다(순수 함수).
+test "tabIndexInBar maps x to the clicked tab segment; pointInRect bounds" {
+    // 바 (x=180, w=96), cell 12 → 8칸. 2 탭 → tab_w=4. col [0,4)=탭0, [4,8)=탭1.
+    const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 96, .h = 12 };
+    try std.testing.expectEqual(@as(usize, 0), tabIndexInBar(bar, 12, 2, 180)); // 바 좌단 → 탭 0
+    try std.testing.expectEqual(@as(usize, 0), tabIndexInBar(bar, 12, 2, 180 + 3 * 12)); // col 3 → 탭 0
+    try std.testing.expectEqual(@as(usize, 1), tabIndexInBar(bar, 12, 2, 180 + 4 * 12)); // col 4 → 탭 1
+    try std.testing.expectEqual(@as(usize, 1), tabIndexInBar(bar, 12, 2, 180 + 7 * 12)); // col 7 → 탭 1
+    try std.testing.expectEqual(@as(usize, 1), tabIndexInBar(bar, 12, 2, 180 + 999)); // 바 우측 밖 → 마지막 탭 clamp
+    try std.testing.expectEqual(@as(usize, 0), tabIndexInBar(bar, 12, 2, 100)); // 바 좌측 밖 → 0 clamp
+    try std.testing.expectEqual(@as(usize, 0), tabIndexInBar(bar, 0, 2, 200)); // cell 0
+    try std.testing.expectEqual(@as(usize, 0), tabIndexInBar(bar, 12, 0, 200)); // 탭 0개
+
+    // pointInRect: 반열린 구간. 좌상단 포함, 우/하 경계 제외.
+    try std.testing.expect(pointInRect(180, 0, bar)); // 좌상단 포함
+    try std.testing.expect(pointInRect(275, 11, bar)); // 우하 안쪽
+    try std.testing.expect(!pointInRect(276, 0, bar)); // x = x+w 제외
+    try std.testing.expect(!pointInRect(180, 12, bar)); // y = y+h 제외
+    try std.testing.expect(!pointInRect(179, 0, bar)); // 좌측 밖
+    try std.testing.expect(!pointInRect(std.math.nan(f64), 0, bar)); // 비유한
+}
+
 // paneTermRect/paneBarRect가 leaf rect 상단에서 탭 바(cell 높이 1칸)를 떼는지 — 충분히 크면 바+터미널, 너무
 // 작으면 바 없음(터미널이 전체). 좌표/resize/렌더가 공유하는 '바 아래' 영역의 단일 출처라 헤드리스로 고정.
 test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
@@ -3235,6 +3296,43 @@ test "pane tab bar draws Term-title tabs with an active-Term highlight" {
     try std.testing.expect(c1.width < c0.width); // 세그먼트는 바 전체보다 좁다
 }
 
+// 탭 바의 탭을 클릭하면 그 Term으로 전환하는지(PR-D1) — 실 init/spawn이라 macOS 게이트. ⌘T로 Term 2개(활성
+// =1)를 만들고 탭 0 영역(바 좌단)을 클릭하면 활성 Term이 0으로, 다시 탭 1을 클릭하면 1로 돌아온다.
+test "clicking a tab in the pane bar switches to that Term" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // ⌘T → Term 2개, 활성 = 1.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+
+    // 탭 바는 단일 panel이라 터미널 영역 전체 폭의 상단 strip(y in [0, 바 높이)). 탭 0 = 바 좌단, 탭 1 = 바 우반.
+    const bar_y: f64 = 1; // 바 안(y < 바 높이)
+    const left_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 5); // 탭 0 세그먼트
+    session.mouse(1, left_tab_x, bar_y);
+    try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term); // 탭 0으로 전환
+
+    // 탭 1(바 우반, 2탭이라 폭의 절반 이후) 클릭 → 다시 Term 1.
+    const right_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 600); // 바 폭(800)의 우반
+    session.mouse(1, right_tab_x, bar_y);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+
+    // 탭 바 클릭은 터미널 선택을 시작하지 않는다(소비). 선택 드래그 플래그가 안 켜진다.
+    try std.testing.expect(!session.mouse_drag_selecting);
+}
+
 // split 탭에서 다른 panel을 클릭하면 포커스가 그 panel로 옮겨가고(입력/커서가 따라간다), 활성 panel을
 // 클릭하면 그대로인지 — 실 init이 사이드바 폭/메트릭을 채우고 mouse hit-test가 leaf rect를 펴는 macOS
 // 경로라 게이트한다. 좌표 origin(active_pane_rect)이 새 활성 panel로 갱신되는 것도 함께 본다.
@@ -3260,20 +3358,22 @@ test "clicking another pane in a split focuses it; clicking the active pane keep
     try std.testing.expect(new_surface != old_surface);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
 
+    // 클릭은 탭 바 '아래'(터미널 영역)에서 — 바 클릭은 Term 탭 전환이라 panel 터미널 hit-test와 구분된다.
+    const click_y: f64 = @floatFromInt(session.paneBarHeightPx() + 20);
     // 왼쪽(기존, 비활성) panel 영역 클릭 → 포커스가 기존 panel로. 좌표 origin도 왼쪽 rect(사이드바 옆)로 갱신.
     const left_x: f64 = @floatFromInt(session.sidebar_width_px + 10);
-    session.mouse(1, left_x, 10);
+    session.mouse(1, left_x, click_y);
     try std.testing.expectEqual(old_surface, session.activeSurface());
     try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
     try std.testing.expectEqual(session.sidebar_width_px, session.active_pane_rect.x);
 
     // 활성(왼쪽) panel을 다시 클릭 → 전환 없음(같은 panel 클릭은 선택 경로). active_pane 불변.
-    session.mouse(1, left_x, 10);
+    session.mouse(1, left_x, click_y);
     try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
 
     // 오른쪽(비활성) panel 클릭 → 다시 오른쪽 panel로 포커스.
     const right_x: f64 = @floatFromInt(session.sidebar_width_px + 410);
-    session.mouse(1, right_x, 10);
+    session.mouse(1, right_x, click_y);
     try std.testing.expectEqual(new_surface, session.activeSurface());
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
 }

@@ -501,6 +501,12 @@ pub const MetalFrame = extern struct {
     raster_upload_count: usize = 0,
     raster_pixels: ?[*]const u8 = null,
     raster_pixel_count: usize = 0,
+    // 터미널 surface를 그릴 사각형의 좌측 픽셀 offset(= 세로 사이드바 폭). 렌더러가 각 셀을
+    // origin_x + col*cw에 둔다. 0이면 사이드바 없음(터미널이 창 전체). "surface→rect" 메커니즘의
+    // 첫 적용 — split(panel)도 같은 origin offset 방식을 그대로 확장한다.
+    terminal_origin_x_px: u32 = 0,
+    // 사이드바 영역(x: 0..terminal_origin_x_px, 전체 높이)을 채울 배경색(0xAARRGGBB). 0이면 안 그림.
+    sidebar_bg: u32 = 0,
 };
 
 /// RenderFrame을 투영해 retain하는 owned 버퍼. cells/uploads/pixels 세 배열의 소유권을

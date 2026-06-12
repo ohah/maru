@@ -268,8 +268,8 @@ pub const DevSession = struct {
 
         self.surfaces[0] = try app.Surface.init(allocator, 1, config.size);
         self.surface_initialized = true;
-        self.surfaces[0].title = "Maru dev shell";
-        self.surfaces[0].command = commandName(config.command_kind);
+        self.activeSurface().title = "Maru dev shell";
+        self.activeSurface().command = commandName(config.command_kind);
 
         self.app_window = .{ .tabs = self.surfaces[0..] };
         self.runtime = app.SurfaceRuntime.init(allocator);
@@ -293,6 +293,20 @@ pub const DevSession = struct {
         self.refreshCellMetrics();
         self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.pump, &self.renderer_state);
         self.writeSummaryFromState();
+    }
+
+    /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거치게 해 두면,
+    /// 멀티-탭(후속 PR)에서 여기만 `app_window.active()`로 바꿔 활성 탭으로 라우팅된다. 지금은 단일
+    /// surface라 항상 `surfaces[0]`이고 외부 동작은 불변이다. 호출자는 기존대로 `surface_initialized`로
+    /// 가드한다(활성 surface가 아직 없을 때 부르지 않는다).
+    fn activeSurface(self: *DevSession) *app.Surface {
+        return &self.surfaces[0];
+    }
+
+    /// `activeSurface`의 읽기 전용(`*const self`) 변형 — `pxToCell`/`imeCursorRect`처럼 surface를
+    /// 안 바꾸는 const 메서드가 같은 seam을 거치게 한다(멀티-탭에서 여기만 active로 바꾸면 된다).
+    fn activeSurfaceConst(self: *const DevSession) *const app.Surface {
+        return &self.surfaces[0];
     }
 
     /// 현재 font·scale_milli에 대한 cell 픽셀 크기(advance 폭 × line-height)를 CoreText에서
@@ -341,7 +355,7 @@ pub const DevSession = struct {
         // 인코딩한다(아래 frame_loop 경로). 스크롤 키라 '타이핑하면 바닥으로' 로직보다 먼저 처리해
         // 매 PageUp마다 뷰가 바닥으로 튀지 않게 한다.
         if (self.surface_initialized) {
-            const page_delta = pageScrollDelta(self.page_keys_scroll, self.surfaces[0].core.alt_active, event.key);
+            const page_delta = pageScrollDelta(self.page_keys_scroll, self.activeSurface().core.alt_active, event.key);
             if (page_delta != 0) {
                 self.scrollPage(page_delta);
                 self.total_app_key_events += 1; // 앱(터미널)이 소비 — PTY로 안 보냄
@@ -352,8 +366,8 @@ pub const DevSession = struct {
         }
         // 타이핑하면 live(바닥)로 돌아간다 — 과거를 보다가 입력하면 현재 화면으로 점프(표준 터미널).
         // 스크롤 중이었으면 즉시 다시 그리도록 metal_dirty도 세운다(echo 출력 전에라도 뷰 복귀).
-        if (self.surface_initialized and self.surfaces[0].core.viewOffset() != 0) {
-            self.surfaces[0].core.scrollToBottom();
+        if (self.surface_initialized and self.activeSurface().core.viewOffset() != 0) {
+            self.activeSurface().core.scrollToBottom();
             self.metal_dirty = true;
         }
         const result = try self.frame_loop.handleKeyEvent(config_mod.KeyBindingResolver{}, event);
@@ -376,7 +390,7 @@ pub const DevSession = struct {
     /// 이 함수로 넘기는 얇은 글루다).
     pub fn scroll(self: *DevSession, delta_up: i32) void {
         if (!self.surface_initialized) return;
-        self.surfaces[0].core.scrollViewport(@as(isize, delta_up));
+        self.activeSurface().core.scrollViewport(@as(isize, delta_up));
         self.metal_dirty = true;
     }
 
@@ -399,7 +413,7 @@ pub const DevSession = struct {
     /// Shift+PageUp/Down이 같은 경로를 타 일관되게 동작한다.
     fn scrollLines(self: *DevSession, lines: i32) void {
         if (lines == 0) return;
-        const core = &self.surfaces[0].core;
+        const core = &self.activeSurface().core;
         if (core.alt_active and core.alternate_scroll) {
             const key: terminal.input.Key = if (lines > 0) .arrow_up else .arrow_down;
             var key_buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
@@ -418,7 +432,7 @@ pub const DevSession = struct {
                     len += bytes.len;
                 }
                 // 쓰기 실패(PTY 버퍼 풀 등)는 남은 스크롤 입력 드랍일 뿐이라 중단한다.
-                self.runtime.writeInput(self.surfaces[0].id, .{ .bytes = batch[0..len] }) catch break;
+                self.runtime.writeInput(self.activeSurface().id, .{ .bytes = batch[0..len] }) catch break;
                 remaining -= count;
             }
             return;
@@ -431,7 +445,7 @@ pub const DevSession = struct {
     /// 에서 trap(앱 패닉)하던 것을 막는다(wheelDeltaToLines와 같은 규율). 비유한값은 null.
     fn pxToCell(self: *const DevSession, x_px: f64, y_px: f64) ?struct { row: u16, col: u16 } {
         if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
-        const core = &self.surfaces[0].core;
+        const core = &self.activeSurfaceConst().core;
         const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
         const max_col: f64 = @floatFromInt(core.size.cols - 1);
@@ -457,7 +471,7 @@ pub const DevSession = struct {
         };
         const col = cell.col;
         const row = cell.row;
-        const core = &self.surfaces[0].core;
+        const core = &self.activeSurface().core;
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
         switch (kind) {
             1 => {
@@ -502,7 +516,7 @@ pub const DevSession = struct {
     /// 커서 깜빡임 한 스텝(30Hz tick마다). steady 커서(DECSCUSR 2/4/6)나 ?25l(숨김)이면 위상을
     /// 보이는 상태로 고정한다 — 토글 자체가 없으니 idle 재투영도 없다.
     fn updateCursorBlink(self: *DevSession) void {
-        const core = &self.surfaces[0].core;
+        const core = &self.activeSurface().core;
         // IME 조합 중에는 깜빡이지 않는다 — 커서가 preedit 끝에 고정 표시되어 조합 글자 옆에서
         // 반짝이지 않는다(Terminal.app/Ghostty와 같은 사용감).
         if (!core.cursor_blink or !core.cursor_visible or core.preedit != null) {
@@ -532,7 +546,7 @@ pub const DevSession = struct {
     /// 스크롤하며 선택을 가장자리 행으로 확장한다 — 화면보다 긴 내용을 드래그로 선택하는 표준 UX.
     fn applyDragAutoscroll(self: *DevSession) void {
         if (self.drag_autoscroll == 0) return;
-        const core = &self.surfaces[0].core;
+        const core = &self.activeSurface().core;
         // 게이트는 "확장할 선택이 있는가"다 — mouse_drag_selecting로 걸면 더블/트리플클릭(4/5)으로
         // 시작한 선택을 드래그로 화면 밖까지 늘릴 때 자동 스크롤이 영원히 안 걸린다.
         if (core.selection_anchor == null) return;
@@ -554,8 +568,8 @@ pub const DevSession = struct {
         if (!self.surface_initialized) return;
         // 조합도 타이핑이다 — 과거를 보는 중이면 바닥으로 스냅해 preedit이 보이게 한다
         // (handleKeyEvent의 "입력하면 live 복귀"와 같은 동작; 조합 키는 그 경로를 안 타므로 여기서).
-        if (self.surfaces[0].core.viewOffset() != 0) {
-            self.surfaces[0].core.scrollToBottom();
+        if (self.activeSurface().core.viewOffset() != 0) {
+            self.activeSurface().core.scrollToBottom();
             self.metal_dirty = true;
         }
         self.ime_active = true;
@@ -563,7 +577,7 @@ pub const DevSession = struct {
         self.ime_marked_changed = false;
         self.ime_did_delete = false;
         self.ime_insert_failed = false;
-        self.ime_had_marked = self.surfaces[0].core.preedit != null;
+        self.ime_had_marked = self.activeSurface().core.preedit != null;
     }
 
     /// 입력기가 확정한 텍스트(insertText). 즉시 보내지 않고 누적한다 — 전송 여부·시점은
@@ -583,7 +597,7 @@ pub const DevSession = struct {
     /// 입력기의 조합 중(marked) 텍스트 갱신(빈 입력 = 조합 해제). 표시는 core 합성이 한다.
     pub fn imeMarked(self: *DevSession, bytes: []const u8) void {
         if (!self.surface_initialized) return;
-        self.surfaces[0].core.setPreedit(bytes) catch return;
+        self.activeSurface().core.setPreedit(bytes) catch return;
         self.metal_dirty = true; // 조합 글자는 즉시 보여야 한다
         if (self.ime_active) self.ime_marked_changed = true;
     }
@@ -646,7 +660,7 @@ pub const DevSession = struct {
     /// 막는다(라이브 회귀 클래스).
     pub fn imeEnd(self: *DevSession, event: ?terminal.KeyEvent) void {
         if (!self.surface_initialized) return;
-        const composing = self.surfaces[0].core.preedit != null or self.ime_had_marked;
+        const composing = self.activeSurface().core.preedit != null or self.ime_had_marked;
         defer {
             self.ime_active = false;
             self.ime_inserted.clearRetainingCapacity();
@@ -692,7 +706,7 @@ pub const DevSession = struct {
         const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
         if (!self.surface_initialized) return .{ .x = 0, .y = 0, .w = cw, .h = ch };
-        const cursor = self.surfaces[0].core.cursor;
+        const cursor = self.activeSurfaceConst().core.cursor;
         return .{
             .x = @as(f64, @floatFromInt(cursor.col)) * cw,
             .y = @as(f64, @floatFromInt(cursor.row)) * ch,
@@ -706,7 +720,7 @@ pub const DevSession = struct {
     /// marked text와 core의 preedit·화면이 어긋나지 않게 한다. 조합이 없으면 무동작.
     pub fn commitComposition(self: *DevSession) void {
         if (!self.surface_initialized) return;
-        const core = &self.surfaces[0].core;
+        const core = &self.activeSurface().core;
         if (core.preedit) |pending| {
             // setPreedit가 버퍼를 해제하므로 먼저 사본을 떠서 보낸다.
             const copy = self.allocator.dupe(u8, pending) catch return;
@@ -746,7 +760,7 @@ pub const DevSession = struct {
     /// 하고, 여기선 한 번의 writeInput으로 보낸다(부분 쓰기 실패로 감싸기가 깨지지 않게).
     pub fn pasteText(self: *DevSession, bytes: []const u8) void {
         if (!self.surface_initialized or bytes.len == 0) return;
-        const encoded = self.surfaces[0].core.encodePaste(self.allocator, bytes) catch return;
+        const encoded = self.activeSurface().core.encodePaste(self.allocator, bytes) catch return;
         defer self.allocator.free(encoded);
         // 큐에 쌓고 즉시 flush를 시도한다. 자식이 읽는 중이면 보통 이 자리에서 다 들어가고,
         // 안 읽으면(vim 다이얼로그 등) 잔여가 tick마다 흘러나간다 — blocking 단일 write로 UI가
@@ -759,7 +773,7 @@ pub const DevSession = struct {
     fn flushPendingPaste(self: *DevSession) void {
         while (self.pending_paste_offset < self.pending_paste.items.len) {
             const remaining = self.pending_paste.items[self.pending_paste_offset..];
-            const written = self.runtime.writeInputNonBlocking(self.surfaces[0].id, remaining) catch {
+            const written = self.runtime.writeInputNonBlocking(self.activeSurface().id, remaining) catch {
                 // 세션 종료 등 — 잔여는 버린다(다시 쓸 수 없는 대상).
                 self.pending_paste.clearRetainingCapacity();
                 self.pending_paste_offset = 0;
@@ -779,7 +793,7 @@ pub const DevSession = struct {
         var next: ?terminal.SelectionPoint = null;
         if (cmd_held) {
             if (self.pxToCell(x_px, y_px)) |cell| {
-                const core = &self.surfaces[0].core;
+                const core = &self.activeSurface().core;
                 // URL이면 그 시작 셀의 절대 좌표를 저장한다(뷰포트 좌표가 아님) — 스크롤/출력으로
                 // 내용이 움직여도 밑줄이 내용을 따라가고, 좁아진 폭에서도 매 frame 뷰포트로 다시
                 // 클립(아래 hoverLinkSpan)되므로 stale·OOB가 안 생긴다.
@@ -796,7 +810,7 @@ pub const DevSession = struct {
     /// 스크롤·출력·resize 후에도 항상 현재 폭/위치에 맞는다(stale 좌표 OOB 차단).
     pub fn hoverLinkSpan(self: *DevSession) ?terminal.SelectionSpan {
         const anchor = self.hover_url_anchor orelse return null;
-        return self.surfaces[0].core.urlSpanAtAbs(anchor);
+        return self.activeSurface().core.urlSpanAtAbs(anchor);
     }
 
     fn pointEql(a: ?terminal.SelectionPoint, b: ?terminal.SelectionPoint) bool {
@@ -810,7 +824,7 @@ pub const DevSession = struct {
     pub fn urlAt(self: *DevSession, x_px: f64, y_px: f64) []const u8 {
         if (!self.surface_initialized) return &.{};
         if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return &.{};
-        const core = &self.surfaces[0].core;
+        const core = &self.activeSurface().core;
         const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
         const col: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(x_px, 0) / cw)), 0, @as(i64, core.size.cols) - 1));
@@ -831,7 +845,7 @@ pub const DevSession = struct {
             self.allocator.free(self.copy_buffer);
             self.copy_buffer = &.{};
         }
-        const extracted = self.surfaces[0].core.extractSelection(self.allocator) catch null orelse return &.{};
+        const extracted = self.activeSurface().core.extractSelection(self.allocator) catch null orelse return &.{};
         self.copy_buffer = extracted;
         return self.copy_buffer;
     }
@@ -841,7 +855,7 @@ pub const DevSession = struct {
     /// Swift가 창 제목에 쓴다.
     pub fn currentCwd(self: *DevSession) []const u8 {
         if (!self.surface_initialized) return &.{};
-        return self.surfaces[0].core.currentCwd();
+        return self.activeSurface().core.currentCwd();
     }
 
     /// 창 제목으로 보여줄 문자열(OSC 0/2 제목 우선, 없으면 cwd basename, 둘 다 없으면 빈 슬라이스).
@@ -849,7 +863,7 @@ pub const DevSession = struct {
     /// 반환은 core 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효하다(별도 복사 없음).
     pub fn windowTitle(self: *DevSession) []const u8 {
         if (!self.surface_initialized) return &.{};
-        return self.surfaces[0].core.windowTitle();
+        return self.activeSurface().core.windowTitle();
     }
 
     /// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면은 rows-1줄(한 줄 겹침)이고,
@@ -870,7 +884,7 @@ pub const DevSession = struct {
 
     pub fn scrollPage(self: *DevSession, delta_pages: i32) void {
         if (!self.surface_initialized) return;
-        const rows = self.surfaces[0].core.size.rows;
+        const rows = self.activeSurface().core.size.rows;
         const page: i32 = @max(@as(i32, 1), @as(i32, rows) - 1);
         self.scrollLines(delta_pages *| page);
     }
@@ -880,7 +894,7 @@ pub const DevSession = struct {
     /// 세운다(Swift는 방향만 넘기는 얇은 글루 — scrollPage와 같은 규율).
     pub fn jumpToPrompt(self: *DevSession, dir: i8) void {
         if (!self.surface_initialized) return;
-        if (self.surfaces[0].core.jumpToPrompt(dir)) self.metal_dirty = true;
+        if (self.activeSurface().core.jumpToPrompt(dir)) self.metal_dirty = true;
     }
 
     pub fn resize(self: *DevSession, width_px: u32, height_px: u32, scale_milli: u32) !FrameSummary {
@@ -935,7 +949,7 @@ pub const DevSession = struct {
     /// 같은 row에 겹치는지(개행 안 됨) 다른 row인지 데이터로 구분한다.
     fn logScreenIfDebug(self: *DevSession) void {
         if (!diag_gate.maruDebugEnabled() or !self.surface_initialized) return;
-        const core = &self.surfaces[0].core;
+        const core = &self.activeSurface().core;
         const cols = @min(@as(usize, core.size.cols), 240);
         // 헤더에 OSC 133 마지막 명령 종료코드도 찍는다(셸 통합이 emit하면 채워진다).
         if (core.last_command_exit) |code| {
@@ -988,7 +1002,7 @@ pub const DevSession = struct {
     /// 같은 도메인 데이터를 후속 trace writer도 바로 이 자리에서 drain하면 된다(관측 가능성 원칙).
     fn drainShellEventsForFrame(self: *DevSession) void {
         if (!self.surface_initialized) return;
-        const core = &self.surfaces[0].core;
+        const core = &self.activeSurface().core;
         if (core.shellEvents().len == 0 and !core.shellEventsOverflowed()) return;
         if (diag_gate.maruDebugEnabled()) {
             for (core.shellEvents()) |ev| switch (ev) {
@@ -1061,7 +1075,7 @@ pub const DevSession = struct {
                 .default_fg = self.appearance.theme.foreground,
                 .default_bg = self.appearance.theme.background, // SGR reverse의 default 색 스왑용
                 .selection_bg = self.appearance.theme.selection,
-                .selection = self.surfaces[0].core.selectionViewportSpan(),
+                .selection = self.activeSurface().core.selectionViewportSpan(),
                 .hover_link = self.hoverLinkSpan(),
 
                 // 커서는 반전 블록으로 그린다: 칸 배경=theme.cursor, 그 위 glyph=theme.background.
@@ -1104,7 +1118,7 @@ pub const DevSession = struct {
             // 뜻이다. exit event를 기다리지 않고 close가 child를 정리한 경우에도 summary가
             // running으로 남으면 close lifecycle을 오해하므로 dev session summary에서는
             // 종료 상태로 latch한다.
-            self.surfaces[0].process_state = .exited;
+            self.activeSurface().process_state = .exited;
             self.ended_seen = true;
         }
         self.writeSummaryFromState();
@@ -1139,7 +1153,7 @@ pub const DevSession = struct {
             self.runtime_initialized = false;
         }
         if (self.surface_initialized) {
-            self.surfaces[0].deinit();
+            self.activeSurface().deinit();
             self.surface_initialized = false;
         }
         // appearance가 family를 빌리므로 surface 정리 뒤에 해제. 가드로 init 초반 실패 시 undefined
@@ -1185,10 +1199,10 @@ pub const DevSession = struct {
         self.last_summary.ended = boolCode(self.ended_seen);
         self.last_summary.metal_generation = @truncate(self.metal_buffer.generation);
         if (self.surface_initialized) {
-            self.last_summary.surface_id = self.surfaces[0].id;
-            self.last_summary.cols = self.surfaces[0].core.size.cols;
-            self.last_summary.rows = self.surfaces[0].core.size.rows;
-            self.last_summary.process_state = processStateCode(self.surfaces[0].process_state);
+            self.last_summary.surface_id = self.activeSurface().id;
+            self.last_summary.cols = self.activeSurface().core.size.cols;
+            self.last_summary.rows = self.activeSurface().core.size.rows;
+            self.last_summary.process_state = processStateCode(self.activeSurface().process_state);
         }
     }
 };

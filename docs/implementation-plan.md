@@ -373,6 +373,12 @@ TDD 방식:
 - workspace restore 전체.
 - plugin ABI.
 
+현재 진행 상태:
+
+- app 레이어(`AppWindow`/`host`/`FrameLoop`/`SurfaceRuntime`/`LivePtyRegistry`/`config.Action`/`KeyBindingResolver`)는 **이미 다중 surface**다(`AppWindow.tabs`/`active_tab`/`selectTab`, registry가 surface_id로 라우팅, `new_tab`/`close_tab`/`select_tab`/`next_tab`/`previous_tab` 액션 파싱·테스트 완료). 병목은 macOS dev 앱의 `DevSession`이 `surfaces:[1]`·단일 `LivePtySession`을 하드코딩한 것뿐이다.
+- **PR1a 완료(순수 라우팅 seam)**: `DevSession`의 모든 입력/IME/스크롤/마우스/렌더 경로가 `surfaces[0]` 대신 `activeSurface()`/`activeSurfaceConst()` 헬퍼를 거치게 했다(동작 불변 — 아직 단일 surface). 멀티-탭은 이 seam만 `app_window.active()`로 바꾸면 활성 탭으로 라우팅된다.
+- 후속: PR1b(`[1]`→동적 탭 컨테이너 + create/switch/close + `LivePtySession` heap-pin + 결정적 테스트), PR2(additive ABI: create/select/close_tab + app_action summary), PR3(Swift NSWindow 탭 UI + keybinding 액션 분기, GUI 수동), PR4(탭 close PTY 수명 엣지). quick terminal/global shortcut은 직교라 별도.
+
 이 단계에서 다루지 않고 별도로 확장하는 입력 영역:
 
 - 기본 terminal input 인코더는 `Ctrl+letter` → C0 control, `Alt/Option` → meta-ESC까지 처리한다. 이 계약은 `src/terminal/input.zig`와 `src/config/keybinding.zig`의 단위 테스트가 지킨다.

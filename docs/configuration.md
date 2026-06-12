@@ -49,7 +49,7 @@ cursor.blink = true
 | `theme.selection` | `#RRGGBB` | `#334455` | 선택 하이라이트 배경 |
 | `cursor.shape` | `block`\|`bar`\|`underline` | `block` | 그 외 값은 무시 |
 | `cursor.blink` | `true`\|`false` | `true` | |
-| `input.page-keys` | `passthrough`\|`scroll` | `passthrough` | 메인 화면 PageUp/Down 동작. 아래 참조 |
+| `input.page-keys` | `passthrough`\|`scroll` | `scroll` | 메인 화면 PageUp/Down 동작. 아래 참조 |
 | `term` | 문자열 | `xterm-256color` | 셸에 줄 `$TERM`. 아래 참조 |
 | `keybind` | `<조합> = <action>` | (없음) | 여러 줄 가능. 아래 참조 |
 
@@ -58,11 +58,12 @@ cursor.blink = true
 메인 화면(셸 프롬프트)에서 PageUp/PageDown를 어떻게 다룰지 정한다. **alt 화면(vim·less 등)에선
 어느 값이든 항상 `\e[5~`/`\e[6~`를 앱으로 보내** 앱이 자체 페이징한다.
 
-- `passthrough` (기본): xterm/Ghostty처럼 메인 화면에서도 `\e[5~`/`\e[6~`를 PTY로 보낸다. 예측
-  가능하고 레퍼런스·원격(SSH)과 일치한다. 단, 셸 기본 keymap에 이 키가 바인딩돼 있지 않으면(zsh
-  기본) BEL이 울리고 남은 `~`가 입력줄에 박힌다 — 셸에서 `bindkey`로 바인딩하거나 `scroll`을 쓴다.
-- `scroll`: Terminal.app/iTerm2처럼 메인 화면에서 Maru 스크롤백을 한 페이지씩 스크롤한다(`~`가
-  박히지 않음). 대신 메인 화면 앱(드물게 PageUp을 쓰는 TUI)에는 키가 전달되지 않는다.
+- `scroll` (기본): Terminal.app/iTerm2처럼 메인 화면에서 Maru 스크롤백을 한 페이지씩 스크롤한다.
+  셸로 `\e[5~`를 보내지 않아 **셸 keymap(vi/emacs)·프레임워크와 무관하게 입력줄이 안 깨진다** —
+  Mac 관례이자 가장 견고하다. 메인 화면 앱(드물게 PageUp을 쓰는 TUI)에는 키가 전달되지 않는다.
+- `passthrough` (opt-in): xterm/Ghostty처럼 메인 화면에서도 `\e[5~`/`\e[6~`를 PTY로 보낸다.
+  레퍼런스와 일치하지만 셸 프롬프트에서 깨진다 — emacs keymap은 BEL+`~`를 입력줄에 박고, **vi
+  keymap은 끝 `~`를 vi-swap-case로 해석해 대소문자를 토글한다**(실측 확인). xterm 순정이 필요할 때만.
 
 > `Shift+PageUp`/`Shift+PageDown`은 이 설정과 무관하게 항상 스크롤백을 스크롤한다.
 

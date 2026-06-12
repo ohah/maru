@@ -24,15 +24,18 @@ pub const CursorConfig = struct {
 /// 메인 화면(셸)에서 PageUp/PageDown를 어떻게 다룰지. alt 화면(vim/less)에선 어느 쪽이든 항상
 /// 앱으로 `\e[5~`/`\e[6~`를 보낸다(앱이 자체 페이징).
 pub const PageKeys = enum {
-    /// xterm/Ghostty 기본: 그대로 PTY로 `\e[5~`/`\e[6~`를 보낸다. 예측 가능하고 레퍼런스와 일치.
-    /// 셸 기본 keymap이 unbound면 BEL+'~'가 입력줄에 박힐 수 있다(셸에서 bindkey로 해결).
+    /// xterm/Ghostty식: 그대로 PTY로 `\e[5~`/`\e[6~`를 보낸다. 레퍼런스와 일치하지만, 셸 프롬프트에서
+    /// 깨진다 — emacs keymap은 BEL+'~'를 입력줄에 박고, vi keymap은 끝 '~'를 vi-swap-case로 해석해
+    /// 대소문자를 토글한다(실측 확인). xterm 순정을 원하면 `input.page-keys = passthrough`로 opt-in.
     passthrough,
-    /// Terminal.app/iTerm2식: 메인 화면에선 Maru 스크롤백을 한 페이지씩 스크롤한다.
+    /// Terminal.app/iTerm2식(기본): 메인 화면에선 Maru 스크롤백을 한 페이지씩 스크롤한다 — 셸에
+    /// `\e[5~`를 안 보내 셸 keymap(vi/emacs)·프레임워크와 무관하게 입력줄이 안 깨진다(Mac 관례).
     scroll,
 };
 
 pub const InputConfig = struct {
-    page_keys: PageKeys = .passthrough,
+    // 기본 scroll: Mac 관례(Terminal.app/iTerm2) + 셸 keymap 오해석(case 토글·'~' 삽입) 원천 차단.
+    page_keys: PageKeys = .scroll,
 };
 
 pub const Config = struct {

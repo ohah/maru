@@ -356,21 +356,21 @@ test "parse: keybindings empty when none configured; appearance keys unaffected"
     try std.testing.expectEqual(@as(f32, 13), p.config.font.size);
 }
 
-test "parse: input.page-keys passthrough(default)/scroll + invalid is forgiving" {
+test "parse: input.page-keys scroll(default)/passthrough + invalid is forgiving" {
     {
         var p = try parse(std.testing.allocator, "");
         defer p.deinit();
-        try std.testing.expectEqual(theme.PageKeys.passthrough, p.config.input.page_keys); // 기본
+        try std.testing.expectEqual(theme.PageKeys.scroll, p.config.input.page_keys); // 기본(Mac 관례)
     }
     {
-        var p = try parse(std.testing.allocator, "input.page-keys = scroll\n");
+        var p = try parse(std.testing.allocator, "input.page-keys = passthrough\n");
         defer p.deinit();
-        try std.testing.expectEqual(theme.PageKeys.scroll, p.config.input.page_keys);
+        try std.testing.expectEqual(theme.PageKeys.passthrough, p.config.input.page_keys); // opt-in
     }
     {
         var p = try parse(std.testing.allocator, "input.page-keys = bogus\n");
         defer p.deinit();
-        try std.testing.expectEqual(theme.PageKeys.passthrough, p.config.input.page_keys); // 잘못된 값 → 기본 유지
+        try std.testing.expectEqual(theme.PageKeys.scroll, p.config.input.page_keys); // 잘못된 값 → 기본 유지
         try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
     }
 }

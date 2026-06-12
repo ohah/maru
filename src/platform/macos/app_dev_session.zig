@@ -84,6 +84,21 @@ fn sidebarBandCell(sidebar_width_px: u32, cell_width_px: u32, active_row: u16, a
     };
 }
 
+/// 스크린 x(backing px)가 세로 사이드바 영역(x: 0..sidebar_width_px) 안인가. 폭 0(사이드바 꺼짐)이거나
+/// x<0(클리어 sentinel 포함)·origin_x 이상(터미널 영역)이면 false. 순수 함수라 OS 무관 단위 테스트.
+fn xInSidebar(x_px: f64, sidebar_width_px: u32) bool {
+    return sidebar_width_px > 0 and x_px >= 0 and x_px < @as(f64, @floatFromInt(sidebar_width_px));
+}
+
+/// 사이드바 y(backing px) → 탭 슬롯 인덱스(y / slot_height). 슬롯 높이 0·비유한·음수·탭 범위 밖(슬롯
+/// 아래 빈 영역 포함)이면 null. @intFromFloat 전에 [0, tab_count) 범위를 검사해 OOB cast trap을 막는다.
+fn sidebarSlot(y_px: f64, slot_height_px: u32, tab_count: usize) ?usize {
+    if (slot_height_px == 0 or tab_count == 0 or !std.math.isFinite(y_px) or y_px < 0) return null;
+    const slot_f = y_px / @as(f64, @floatFromInt(slot_height_px));
+    if (slot_f >= @as(f64, @floatFromInt(tab_count))) return null;
+    return @intFromFloat(slot_f);
+}
+
 /// 휠/트랙패드 델타(포인트 또는 줄)를 정수 줄 수로 바꾼다. 정밀(트랙패드) 델타는 실제 cell 높이를
 /// scale로 나눈 한 줄 포인트로 환산하고, 1줄 미만 잔여분은 accum에 누적한다 — round로 버리면
 /// 천천히 굴릴 때 무반응이 된다. NaN/∞는 무시하고 누적은 ±1000줄로 clamp한다(trap 방지).
@@ -263,6 +278,10 @@ pub const DevSession = struct {
     // 탭 하이라이트 밴드만 담고, PR3b-2가 탭 번호·제목 glyph를 더한다. 비싸지 않아(탭 수만큼) 변경
     // 이벤트마다 통째로 다시 만든다.
     sidebar_cells: std.ArrayList(metal_frame.NativeMetalCell) = .empty,
+    // 마우스가 호버 중인 사이드바 탭 슬롯 인덱스(없으면 null). hoverUrl이 사이드바 영역에서 갱신하고,
+    // rebuildSidebar가 이 슬롯에 호버 하이라이트 밴드를 그린다(활성 슬롯과 다를 때만). 후속 호버 X
+    // 닫기 아이콘의 대상 슬롯도 이 값이다.
+    hovered_slot: ?usize = null,
     // 트랙패드 정밀 스크롤의 1줄 미만 잔여 델타(줄 단위). scrollWheel이 누적/소비한다.
     wheel_accum: f64 = 0,
     // copyText()가 돌려준 추출 텍스트의 소유 버퍼(다음 copyText/destroy까지 유효 — ABI 수명 계약).
@@ -659,6 +678,17 @@ pub const DevSession = struct {
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *DevSession, kind: i32, x_px: f64, y_px: f64) void {
         if (!self.surface_initialized) return;
+        // 사이드바 영역 클릭은 Maru UI다(터미널 선택/리포팅 아님). down(1)에서 슬롯을 hit-test해 그 탭으로
+        // 전환하고, 다른 kind(drag/up)와 슬롯 밖(빈 영역)은 무시한다. 진행 중이던 터미널 드래그 선택은
+        // 멈춘다(사이드바로 빠진 드래그가 autoscroll로 남지 않게). 사이드바 클릭은 터미널에 안 닿는다.
+        if (self.inSidebar(x_px)) {
+            if (kind == 1) {
+                if (self.sidebarSlotAt(y_px)) |slot| _ = self.switchTab(slot);
+            }
+            self.drag_autoscroll = 0;
+            self.mouse_drag_selecting = false;
+            return;
+        }
         const cell = self.pxToCell(x_px, y_px) orelse {
             // 비유한(NaN/Inf) 좌표 — 셀로 못 바꾼다. up(3)/down(1)이면 드래그 자동 스크롤을
             // 멈춘다(안 그러면 mouseUp이 좌표 손상으로 와도 autoscroll이 30Hz로 영원히 돈다).
@@ -992,6 +1022,17 @@ pub const DevSession = struct {
     /// 저장하고 true를 돌려준다 — Swift가 이 값으로 마우스 커서(pointingHand)를 정한다.
     pub fn hoverUrl(self: *DevSession, x_px: f64, y_px: f64, cmd_held: bool) bool {
         if (!self.surface_initialized) return false;
+        // 사이드바 영역 호버는 슬롯을 추적한다(터미널 URL 호버 아님). 마우스가 창을 벗어나면 Swift가
+        // 음수 sentinel(-1,-1)을 보내 inSidebar=false라 아래 else로 빠져 호버가 해제된다.
+        if (self.inSidebar(x_px)) {
+            self.setHoveredSlot(self.sidebarSlotAt(y_px));
+            if (self.hover_url_anchor != null) { // 터미널 URL 밑줄이 떠 있었으면 해제
+                self.hover_url_anchor = null;
+                self.metal_dirty = true;
+            }
+            return false; // 사이드바는 URL 아님(커서를 pointingHand로 안 바꿈)
+        }
+        self.setHoveredSlot(null); // 터미널 영역으로 나가면 사이드바 호버 해제
         var next: ?terminal.SelectionPoint = null;
         if (cmd_held) {
             if (self.pxToCell(x_px, y_px)) |cell| {
@@ -1368,18 +1409,65 @@ pub const DevSession = struct {
         return packOpaqueRgb(self.appearance.theme.sidebar_active);
     }
 
-    /// 세로 사이드바 셀(탭 엔트리)을 다시 만든다. PR3b-1은 활성 탭 행에 하이라이트 밴드 1개를 emit한다
-    /// (텍스트 없음 — PR3b-2가 탭 번호·제목 glyph를 더한다). 탭 i는 행 i에 대응한다(한 탭=한 줄). 사이드바
-    /// 가 꺼졌거나(폭 0) cell 폭 미상이면 비운다. 탭 추가(createTab)·전환(switchTab)·메트릭 변경
-    /// (refreshCellMetrics) 때 호출한다. 실패(OOM)는 세션을 죽이지 않고 빈 사이드바로 degrade한다(호출부가
-    /// catch). 알려진 한계: 한 줄 높이 밴드라 탭 수가 행 수를 넘으면 화면 밖 행에 놓인다(다중 탭 슬롯
-    /// 패딩/스크롤은 후속 PR).
+    /// 호버 슬롯 하이라이트 배경색(0xAARRGGBB) — 사이드바 배경(+24)과 활성(+48)의 중간으로 파생한다.
+    /// 별도 테마 필드 없이 두 resolved 색의 채널 평균을 써서, 사용자가 사이드바 색을 커스텀해도 호버가
+    /// 그 사이 톤을 따라간다(활성보다 약하고 배경보다 또렷한 호버 피드백).
+    fn sidebarHoverBg(self: *const DevSession) u32 {
+        const a = self.appearance.theme.sidebar_background;
+        const b = self.appearance.theme.sidebar_active;
+        const r: u32 = (@as(u32, a.r) + b.r) / 2;
+        const g: u32 = (@as(u32, a.g) + b.g) / 2;
+        const bch: u32 = (@as(u32, a.b) + b.b) / 2;
+        return 0xFF00_0000 | (r << 16) | (g << 8) | bch;
+    }
+
+    /// 스크린 x가 세로 사이드바 영역 안인가(순수 `xInSidebar` 래퍼).
+    fn inSidebar(self: *const DevSession, x_px: f64) bool {
+        return xInSidebar(x_px, self.sidebar_width_px);
+    }
+
+    /// 사이드바 y → 탭 슬롯 인덱스(순수 `sidebarSlot` 래퍼 — 슬롯 높이·탭 수로 판정).
+    fn sidebarSlotAt(self: *const DevSession, y_px: f64) ?usize {
+        return sidebarSlot(y_px, self.sidebar_slot_height_px, self.tabs.items.len);
+    }
+
+    /// 호버 중인 사이드바 슬롯을 갱신한다. 바뀌면 호버 밴드를 다시 만들고(rebuildSidebar) 재드로우한다.
+    /// 같은 슬롯이면 무동작 — 한 슬롯 안에서의 마우스 이동이 매번 재드로우를 유발하지 않게 한다.
+    fn setHoveredSlot(self: *DevSession, slot: ?usize) void {
+        if (usizeOptEql(self.hovered_slot, slot)) return;
+        self.hovered_slot = slot;
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
+    fn usizeOptEql(a: ?usize, b: ?usize) bool {
+        if (a == null and b == null) return true;
+        if (a == null or b == null) return false;
+        return a.? == b.?;
+    }
+
+    /// 세로 사이드바 셀(탭 엔트리 밴드)을 다시 만든다 — 활성 탭 행에 하이라이트 밴드, 그리고 호버 슬롯이
+    /// 활성과 다르면 그 행에 (더 약한) 호버 밴드를 emit한다. 탭 i는 행 i에 대응한다(한 탭=한 슬롯). 제목
+    /// glyph는 여기서 안 만든다(tick의 제목 패스가 따로 더해 metal_buffer가 밴드와 머지). 사이드바가
+    /// 꺼졌거나(폭 0) cell 폭 미상이면 비운다. 탭 추가/전환/메트릭/호버 변경 때 호출한다. 실패(OOM)는
+    /// 세션을 죽이지 않고 빈 사이드바로 degrade한다(호출부가 catch).
     fn rebuildSidebar(self: *DevSession) !void {
         self.sidebar_cells.clearRetainingCapacity();
         if (self.tabs.items.len == 0) return;
-        const active_row: u16 = @intCast(@min(self.app_window.active_tab, @as(usize, std.math.maxInt(u16))));
-        const cell = sidebarBandCell(self.sidebar_width_px, self.cell_width_px, active_row, self.sidebarActiveBg()) orelse return;
-        try self.sidebar_cells.append(self.allocator, cell);
+        const active = self.app_window.active_tab;
+        const active_row: u16 = @intCast(@min(active, @as(usize, std.math.maxInt(u16))));
+        if (sidebarBandCell(self.sidebar_width_px, self.cell_width_px, active_row, self.sidebarActiveBg())) |cell| {
+            try self.sidebar_cells.append(self.allocator, cell);
+        }
+        // 호버 밴드는 활성과 다른 슬롯에서만(활성이면 활성 색이 우선). 탭 범위 안일 때만.
+        if (self.hovered_slot) |hs| {
+            if (hs != active and hs < self.tabs.items.len) {
+                const hover_row: u16 = @intCast(@min(hs, @as(usize, std.math.maxInt(u16))));
+                if (sidebarBandCell(self.sidebar_width_px, self.cell_width_px, hover_row, self.sidebarHoverBg())) |cell| {
+                    try self.sidebar_cells.append(self.allocator, cell);
+                }
+            }
+        }
     }
 
     /// 탭 제목들을 "{n} {title}" 라벨로 모아 사이드바 제목 glyph RenderFrame을 만든다(한 줄=한 탭,
@@ -1717,6 +1805,7 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.cell_width_px = 8;
     session.cell_height_px = 16;
     session.scale_milli = 1000;
+    session.sidebar_width_px = 0; // 사이드바 없음 — 마우스가 터미널 선택 경로를 타게(inSidebar=false)
 
     const core = &tab_surface.core;
     try core.write("a\r\nb\r\nc\r\nd"); // 스크롤백 2(a,b) + 화면 c,d
@@ -1849,6 +1938,25 @@ test "sidebarBandCell sizes the active band to the sidebar width and emits a sen
     try std.testing.expect(sidebarBandCell(8, 16, 0, 0xFF000000) == null);
 }
 
+test "sidebar hit-test maps screen x to the sidebar region and y to a tab slot" {
+    // 가로: [0, width)만 사이드바. origin_x(=width)부터는 터미널, x<0(클리어 sentinel)은 밖.
+    try std.testing.expect(xInSidebar(0, 180));
+    try std.testing.expect(xInSidebar(179, 180));
+    try std.testing.expect(!xInSidebar(180, 180));
+    try std.testing.expect(!xInSidebar(-1, 180)); // clearHover sentinel
+    try std.testing.expect(!xInSidebar(50, 0)); // 사이드바 꺼짐(폭 0)
+
+    // 세로: y/slot_h를 탭 수로 제한. slot_h=40, 3 탭 → 슬롯 0/1/2, 그 아래는 null.
+    try std.testing.expectEqual(@as(?usize, 0), sidebarSlot(0, 40, 3));
+    try std.testing.expectEqual(@as(?usize, 0), sidebarSlot(39, 40, 3));
+    try std.testing.expectEqual(@as(?usize, 1), sidebarSlot(40, 40, 3));
+    try std.testing.expectEqual(@as(?usize, 2), sidebarSlot(119, 40, 3));
+    try std.testing.expectEqual(@as(?usize, null), sidebarSlot(120, 40, 3)); // 마지막 슬롯 아래 빈 영역
+    try std.testing.expectEqual(@as(?usize, null), sidebarSlot(-1, 40, 3)); // 음수
+    try std.testing.expectEqual(@as(?usize, null), sidebarSlot(40, 0, 3)); // 슬롯 높이 0
+    try std.testing.expectEqual(@as(?usize, null), sidebarSlot(40, 40, 0)); // 탭 없음
+}
+
 // 사이드바 활성 하이라이트 밴드가 실제 세션에서 채워지고 탭 생성/전환을 따라 행을 옮기는지 — 실 init이
 // CoreText 메트릭과 사이드바 폭을 채우는 macOS 경로라 게이트한다. metalFrame()이 그 밴드를 사이드바
 // 셀로 노출하는 것도 함께 본다(렌더러가 origin 0에 그릴 입력).
@@ -1900,6 +2008,60 @@ test "sidebar gets an active-tab highlight band that follows tab create and swit
     try std.testing.expect(session.switchTab(0));
     try std.testing.expectEqual(@as(u16, 1), session.sidebar_cells.items.len);
     try std.testing.expectEqual(@as(u16, 0), session.sidebar_cells.items[0].row);
+}
+
+// 사이드바 클릭이 슬롯 hit-test로 탭을 전환하고, 호버가 호버 밴드를 더하는지 — 실 init이 사이드바
+// 폭/슬롯 높이를 채우는 macOS 경로라 게이트한다. 마우스 좌표는 backing px, 슬롯 = y / slot_height.
+test "sidebar click switches tabs and hover adds a hover band via hit-test" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    // 2번째 탭 생성 → 활성=1.
+    _ = try session.createTab(
+        .{ .command = "/bin/sh", .args = &.{ "-c", "true" }, .size = .{ .cols = 20, .rows = 5 } },
+        .{ .cols = 20, .rows = 5 },
+        16,
+        "tab 2",
+        "sh",
+    );
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+
+    const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
+    const x_in: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1; // 사이드바 영역 안
+
+    // 슬롯 0(y in [0, slot_h)) 다운클릭 → 탭 0으로 전환.
+    session.mouse(1, x_in, 1);
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
+    // 슬롯 1 클릭 → 탭 1.
+    session.mouse(1, x_in, slot_h + 1);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    // 슬롯 밖(마지막 슬롯 아래 빈 영역) 클릭은 전환 안 함.
+    session.mouse(1, x_in, slot_h * 10);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    // 터미널 영역(x ≥ 사이드바 폭) 클릭은 탭 전환 경로가 아님(활성 불변).
+    session.mouse(1, @floatFromInt(session.sidebar_width_px + 5), 1);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+
+    // 호버: 비활성 슬롯(0, 활성은 1) 위면 호버 밴드가 추가된다(활성 밴드 + 호버 밴드 = 2).
+    _ = session.hoverUrl(x_in, 1, false);
+    try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
+    try std.testing.expectEqual(@as(usize, 2), session.sidebar_cells.items.len);
+    // 호버가 활성 슬롯(1) 위면 별도 호버 밴드 없음(활성 색 우선) → 밴드 1개.
+    _ = session.hoverUrl(x_in, slot_h + 1, false);
+    try std.testing.expectEqual(@as(?usize, 1), session.hovered_slot);
+    try std.testing.expectEqual(@as(usize, 1), session.sidebar_cells.items.len);
+    // 터미널 영역으로 나가면 호버 해제.
+    _ = session.hoverUrl(@floatFromInt(session.sidebar_width_px + 5), 1, false);
+    try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
 }
 
 // 멀티-탭 핵심 계약: 두 번째 탭을 만들면 자기 셸 PTY가 spawn되고, tick이 '모든' 탭을 drain하므로
@@ -1995,6 +2157,7 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.cell_width_px = 8;
     session.cell_height_px = 16;
     session.scale_milli = 1000;
+    session.sidebar_width_px = 0; // 사이드바 없음 — 마우스가 터미널 선택 경로를 타게(inSidebar=false)
 
     const core = &tab_surface.core;
     try core.write("aa\r\nbb\r\ncc"); // 스크롤백 1(aa) + 화면 bb,cc

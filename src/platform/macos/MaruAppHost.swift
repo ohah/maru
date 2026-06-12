@@ -843,7 +843,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func clearHover() {
         guard let session = devSession else { return }
         var isUrl: Int32 = 0
-        _ = maru_macos_app_dev_session_hover(session, 0, 0, 0, &isUrl)
+        // 음수 좌표 sentinel: Zig가 사이드바 영역 밖(x<0)·터미널 셀 밖으로 보고 URL 밑줄과 사이드바 슬롯
+        // 호버를 모두 해제한다((0,0)은 사이드바 슬롯 0으로 오인될 수 있어 못 쓴다).
+        _ = maru_macos_app_dev_session_hover(session, -1, -1, 0, &isUrl)
         NSCursor.arrow.set()
     }
 

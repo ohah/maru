@@ -8,6 +8,11 @@ pub const ThemeConfig = struct {
     foreground: []const u8 = "#e8e8e8",
     cursor: []const u8 = "#ffffff",
     selection: []const u8 = "#334455",
+    // 세로 탭 사이드바 색(선택, #RRGGBB). null이면 background에서 파생한다(resolveTheme의 lighten):
+    // sidebar_background는 배경 +24(코히어런트하게 살짝 밝게), sidebar_active는 +48(활성 탭 하이라이트).
+    // 명시하면 그 색으로 override해 테마가 사이드바를 background와 독립적으로 정할 수 있다(파생은 기본값).
+    sidebar_background: ?[]const u8 = null,
+    sidebar_active: ?[]const u8 = null,
 };
 
 pub const CursorShape = enum {

@@ -100,6 +100,34 @@ fn sidebarBandCell(sidebar_width_px: u32, cell_width_px: u32, active_row: u16, a
     };
 }
 
+/// pane 탭 바 배경 셀 1개(sentinel-UV, 배경만). bar rect 좌상단 origin에서 폭(cols)만큼 채운다 — 터미널 셀
+/// 스트림에 넣으면 maru_fill_cell_quad가 origin_x + col*cw, origin_y + row*ch(row 0)에 그려 바를 칠한다. 폭이
+/// term 폭과 같은 cols(floor)라 아래 터미널과 가로 정렬된다. 셀 폭/바 폭·높이 0이면 null. 순수 함수.
+fn paneBarBgCell(bar: app.SplitRect, cell_width_px: u32, bg: u32) ?metal_frame.NativeMetalCell {
+    if (cell_width_px == 0 or bar.w == 0 or bar.h == 0) return null;
+    const cols_u32 = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
+    if (cols_u32 == 0) return null;
+    return .{
+        .row = 0,
+        .col = 0,
+        .width = @intCast(cols_u32),
+        .codepoint = ' ',
+        .slot_id = 0,
+        .atlas_x_px = 0,
+        .atlas_y_px = 0,
+        .atlas_width_px = 0,
+        .atlas_height_px = 0,
+        .u0 = -1.0,
+        .v0 = -1.0,
+        .u1 = -1.0,
+        .v1 = -1.0,
+        .foreground = 0,
+        .background = bg,
+        .origin_x = bar.x,
+        .origin_y = bar.y,
+    };
+}
+
 /// 스크린 x(backing px)가 세로 사이드바 영역(x: 0..sidebar_width_px) 안인가. 폭 0(사이드바 꺼짐)이거나
 /// x<0(클리어 sentinel 포함)·origin_x 이상(터미널 영역)이면 false. 순수 함수라 OS 무관 단위 테스트.
 fn xInSidebar(x_px: f64, sidebar_width_px: u32) bool {
@@ -615,6 +643,32 @@ pub const DevSession = struct {
         };
     }
 
+    /// per-pane 탭 바(cmux식 가로 탭 바)의 backing 픽셀 높이 = cell 높이 1칸. 각 panel(leaf rect) 상단에 이
+    /// 높이만큼 바를 예약하고 그 아래를 터미널 영역으로 쓴다(PR-C). cell 높이 미상이면 0(바 없음).
+    fn paneBarHeightPx(self: *const DevSession) u32 {
+        return self.cell_width_px; // = cell_height_px(정사각 cell). 0이면 바 없음.
+    }
+
+    /// panel leaf rect의 상단 탭 바를 뺀 '터미널 영역' 사각형. leaf rect가 바보다 충분히 높으면(바 + 최소
+    /// 1칸) 상단 바 높이만큼 내려 잘라낸 rect, 아니면(너무 작음) leaf rect 그대로(바 없음). 좌표 변환·resize·
+    /// 렌더 origin이 이 '바 아래' 영역을 쓴다.
+    fn paneTermRect(self: *const DevSession, rect: app.SplitRect) app.SplitRect {
+        const bar_h = self.paneBarHeightPx();
+        if (bar_h > 0 and rect.h > bar_h) {
+            return .{ .x = rect.x, .y = rect.y + bar_h, .w = rect.w, .h = rect.h - bar_h };
+        }
+        return rect;
+    }
+
+    /// panel leaf rect의 상단 탭 바 rect(못 그리면 null — 바 없을 만큼 작거나 cell 미상). paneTermRect의 보수.
+    fn paneBarRect(self: *const DevSession, rect: app.SplitRect) ?app.SplitRect {
+        const bar_h = self.paneBarHeightPx();
+        if (bar_h > 0 and rect.h > bar_h) {
+            return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = bar_h };
+        }
+        return null;
+    }
+
     /// 활성 탭의 SplitTree를 터미널 영역 rect 안에서 각 panel(leaf)의 (surface, rect)로 편다(멀티-panel
     /// 렌더용 — 각 surface를 자기 rect에 그린다). 단일 leaf면 [{활성 surface, term_rect}] 하나; split 이후
     /// 여러 rect가 된다. term_rect는 사이드바를 뺀 터미널 영역(렌더가 termRect로 계산해 넘김).
@@ -637,7 +691,9 @@ pub const DevSession = struct {
         try self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects);
         const active_pane = self.activePane();
         for (leaf_rects.items) |lr| {
-            const psize = gridFromRectPx(self.cell_width_px, self.cell_height_px, lr.rect.w, lr.rect.h);
+            // 각 panel은 상단 탭 바를 뺀 '터미널 영역'(paneTermRect)에 그려지므로 Term grid도 그 크기로 맞춘다.
+            const trect = self.paneTermRect(lr.rect);
+            const psize = gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
             // panel의 모든 Term(가로 탭)을 같은 rect grid로 맞춘다 — 비활성 Term도 전환 즉시 올바른 크기가 되게.
             // 활성 panel의 활성 Term만 에러를 전파(기존 단일 surface resize의 try 동작 보존), 나머지는 무시.
             for (lr.leaf.terms.items) |term| {
@@ -662,12 +718,12 @@ pub const DevSession = struct {
         if (self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects)) |_| {
             for (leaf_rects.items) |lr| {
                 if (lr.leaf == active_pane) {
-                    self.active_pane_rect = lr.rect;
+                    self.active_pane_rect = self.paneTermRect(lr.rect); // 상단 탭 바를 뺀 영역(좌표 origin)
                     return;
                 }
             }
         } else |_| {}
-        self.active_pane_rect = self.termRect(); // 폴백: 터미널 영역 전체(단일 panel과 동일)
+        self.active_pane_rect = self.paneTermRect(self.termRect()); // 폴백: 터미널 영역(바 아래)
     }
 
     /// 활성 탭이 split(panel 2개 이상)인가. 마우스 클릭으로 panel을 전환할지(단일이면 무동작) 판정에 쓴다.
@@ -779,9 +835,12 @@ pub const DevSession = struct {
         const arect = active_rect orelse return error.ActivePaneNotInTree;
 
         // 2) active rect를 direction·0.5로 a(기존)·b(새)로 나눈 grid.
+        // 두 자식 panel 각자 상단 탭 바를 예약하므로, Term grid는 leaf rect가 아니라 paneTermRect(바 아래)로 잰다.
         const parts = app.splitRect(arect, direction, 0.5);
-        const a_size = gridFromRectPx(self.cell_width_px, self.cell_height_px, parts.a.w, parts.a.h);
-        const b_size = gridFromRectPx(self.cell_width_px, self.cell_height_px, parts.b.w, parts.b.h);
+        const a_term = self.paneTermRect(parts.a);
+        const b_term = self.paneTermRect(parts.b);
+        const a_size = gridFromRectPx(self.cell_width_px, self.cell_height_px, a_term.w, a_term.h);
+        const b_size = gridFromRectPx(self.cell_width_px, self.cell_height_px, b_term.w, b_term.h);
 
         // 3) 새 panel을 b 크기로 spawn(새 셸). 실패하면 트리/탭은 그대로다.
         var cfg = self.new_tab_config;
@@ -2041,13 +2100,28 @@ pub const DevSession = struct {
             self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch {};
             const active_pane = self.activePane();
 
-            // 활성 panel의 origin(leaf rect). 못 구하면(빈 리스트 — OOM) (사이드바 폭, 0)로 폴백.
-            var active_origin_x: u32 = self.sidebar_width_px;
-            var active_origin_y: u32 = 0;
+            // per-pane 상단 탭 바 chrome(배경 밴드). 각 panel rect 상단 바에 배경 셀 1개를 origin 박아 만든다 —
+            // 터미널 셀 스트림에 들어가 렌더된다(PR-C1: 배경만, 제목 glyph·✕·드래그는 PR-C2/D/E). 활성 panel
+            // 바는 강조색(sidebarActiveBg), 비활성은 chrome 색(sidebarBg). 빈 리스트(OOM)면 chrome 없음.
+            var pane_chrome: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
+            defer pane_chrome.deinit(self.allocator);
+            for (leaf_rects.items) |lr| {
+                const bar = self.paneBarRect(lr.rect) orelse continue;
+                const bar_bg = if (lr.leaf == active_pane) self.sidebarActiveBg() else self.sidebarBg();
+                if (paneBarBgCell(bar, self.cell_width_px, bar_bg)) |cell| {
+                    pane_chrome.append(self.allocator, cell) catch {};
+                }
+            }
+
+            // 활성 panel의 origin(터미널 영역 = 바 아래). 못 구하면(빈 리스트 — OOM) 터미널 영역 전체의 바 아래로 폴백.
+            const active_fallback = self.paneTermRect(self.termRect());
+            var active_origin_x: u32 = active_fallback.x;
+            var active_origin_y: u32 = active_fallback.y;
             for (leaf_rects.items) |lr| {
                 if (lr.leaf == active_pane) {
-                    active_origin_x = lr.rect.x;
-                    active_origin_y = lr.rect.y;
+                    const t = self.paneTermRect(lr.rect);
+                    active_origin_x = t.x;
+                    active_origin_y = t.y;
                     break;
                 }
             }
@@ -2084,10 +2158,11 @@ pub const DevSession = struct {
                         f.deinit(self.allocator);
                         continue;
                     };
+                    const t = self.paneTermRect(lr.rect); // 바 아래 영역 origin
                     pane_frames.append(self.allocator, .{
                         .frame = f, // built_frames가 소유(deinit) — 여기는 같은 frame을 가리키는 view
-                        .origin_x = lr.rect.x,
-                        .origin_y = lr.rect.y,
+                        .origin_x = t.x,
+                        .origin_y = t.y,
                         .colors = inactive_colors,
                     }) catch {};
                 }
@@ -2101,7 +2176,7 @@ pub const DevSession = struct {
             }) catch {};
 
             if (pane_frames.items.len > 0) {
-                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors)) |_| {
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items)) |_| {
                     self.metal_dirty = false;
                 } else |_| {}
             }
@@ -2963,6 +3038,80 @@ test "paneInDirection picks the adjacent pane in a direction" {
     try std.testing.expectEqual(&c, paneInDirection(&grid, &a, .down).?); // a→하: c(같은 열)
     try std.testing.expectEqual(&d, paneInDirection(&grid, &b, .down).?); // b→하: d
     try std.testing.expectEqual(&c, paneInDirection(&grid, &d, .left).?); // d→좌: c(같은 행, a 아님)
+}
+
+// paneBarBgCell이 바 rect를 sentinel-UV 배경 셀(origin 박힌, 폭=cols)로 만들고, 너무 작으면 null인지 — pane
+// 탭 바 배경의 코어라 헤드리스 단위로 고정한다(순수 함수, OS 무관).
+test "paneBarBgCell builds a bar-width background cell at the bar origin" {
+    // 바 rect (x=180, y=0, w=96, h=12), cell 12 → 8칸. origin 박히고 sentinel UV(배경만), bg 지정색.
+    const cell = paneBarBgCell(.{ .x = 180, .y = 0, .w = 96, .h = 12 }, 12, 0xFF112233).?;
+    try std.testing.expectEqual(@as(u16, 8), cell.width); // 96/12 = 8칸(아래 터미널과 정렬)
+    try std.testing.expectEqual(@as(u32, 180), cell.origin_x);
+    try std.testing.expectEqual(@as(u32, 0), cell.origin_y);
+    try std.testing.expectEqual(@as(u16, 0), cell.row);
+    try std.testing.expectEqual(@as(u32, 0), cell.slot_id); // 배경 셀(밴드) — glyph 아님
+    try std.testing.expectEqual(@as(f32, -1.0), cell.u0); // sentinel UV = 배경만
+    try std.testing.expectEqual(@as(u32, 0xFF112233), cell.background);
+    // 폭/높이/cell 0이면 null.
+    try std.testing.expect(paneBarBgCell(.{ .x = 0, .y = 0, .w = 0, .h = 12 }, 12, 0xFF000000) == null);
+    try std.testing.expect(paneBarBgCell(.{ .x = 0, .y = 0, .w = 96, .h = 12 }, 0, 0xFF000000) == null);
+    try std.testing.expect(paneBarBgCell(.{ .x = 0, .y = 0, .w = 8, .h = 12 }, 12, 0xFF000000) == null); // 1칸 미만
+}
+
+// paneTermRect/paneBarRect가 leaf rect 상단에서 탭 바(cell 높이 1칸)를 떼는지 — 충분히 크면 바+터미널, 너무
+// 작으면 바 없음(터미널이 전체). 좌표/resize/렌더가 공유하는 '바 아래' 영역의 단일 출처라 헤드리스로 고정.
+test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
+    var session: DevSession = undefined;
+    session.cell_width_px = 12; // paneBarHeightPx = cell_width_px(정사각) = 12
+    session.cell_height_px = 12;
+
+    const rect: app.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
+    const term = session.paneTermRect(rect);
+    try std.testing.expectEqual(app.SplitRect{ .x = 180, .y = 12, .w = 800, .h = 588 }, term); // 바 12 아래
+    const bar = session.paneBarRect(rect).?;
+    try std.testing.expectEqual(app.SplitRect{ .x = 180, .y = 0, .w = 800, .h = 12 }, bar);
+    // 바 + 터미널 = leaf rect(틈 없음).
+    try std.testing.expectEqual(rect.h, bar.h + term.h);
+
+    // 바 높이 이하의 작은 rect는 바 없음 — 터미널이 leaf rect 전체, paneBarRect는 null.
+    const tiny: app.SplitRect = .{ .x = 0, .y = 0, .w = 100, .h = 12 };
+    try std.testing.expectEqual(tiny, session.paneTermRect(tiny));
+    try std.testing.expect(session.paneBarRect(tiny) == null);
+}
+
+// per-pane 탭 바가 실제로 예약·렌더되는지 — 실 init/resize/tick이 도는 macOS 경로라 게이트. 터미널 영역이
+// 바 아래에서 시작하고(active_pane_rect.y = 바 높이), tick이 cells 맨 앞에 바 배경 chrome 셀을 낸다.
+test "pane reserves a top tab-bar strip and renders a bar chrome cell" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 창 크기를 잡는다(resize가 backing 보관 + 모든 panel을 바 아래 grid로 + active_pane_rect 재계산).
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 단일 panel: 터미널 영역(active_pane_rect)은 사이드바 옆·바 아래(y = 바 높이)에서 시작, 높이가 바만큼 줄었다.
+    try std.testing.expectEqual(session.sidebar_width_px, session.active_pane_rect.x);
+    try std.testing.expectEqual(session.paneBarHeightPx(), session.active_pane_rect.y);
+    try std.testing.expect(session.active_pane_rect.h < session.backing_height_px);
+
+    // tick이 바 chrome 셀을 포함해 크래시 없이 돈다. chrome(바 배경)은 cells 맨 앞에 prepend된다 —
+    // 첫 셀은 바 top(origin_y = leaf rect top = 0)·sentinel UV(slot_id 0)·불투명 bg.
+    _ = try session.tick();
+    const frame = session.metalFrame();
+    try std.testing.expect(frame.cell_count >= 1);
+    const first = frame.cells.?[0];
+    try std.testing.expectEqual(@as(u32, 0), first.origin_y);
+    try std.testing.expectEqual(@as(u32, 0), first.slot_id);
+    try std.testing.expectEqual(@as(u32, 0xFF), first.background >> 24); // 불투명 바 배경
 }
 
 // split 탭에서 다른 panel을 클릭하면 포커스가 그 panel로 옮겨가고(입력/커서가 따라간다), 활성 panel을

@@ -56,7 +56,10 @@ bool maru_metal_renderer_draw(
        셀과 같은 표현이지만 origin offset 없이 0 + col*cw에 놓이고, 사이드바 배경 quad 위에 그려진다.
        NULL이거나 origin_x==0이면 그리지 않는다. */
     const MaruAppHostDevMetalCell *sidebar_cells,
-    size_t sidebar_cell_count
+    size_t sidebar_cell_count,
+    /* 사이드바 탭 슬롯 한 칸의 픽셀 높이(≈2.5×cell_height). 사이드바 셀을 cell 높이가 아니라 이 슬롯
+       높이로 세로 배치한다(셀 row → py=row×slot_h, 높이 slot_h). 0이면 cell 높이로 폴백. */
+    uint32_t sidebar_slot_height_px
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

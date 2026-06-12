@@ -160,6 +160,7 @@ pub const default_terminal_bindings = [_]TerminalBinding{
 /// 처리가 필요해 탭바 UI(클릭 전환)와 함께 후속에서 추가한다.
 pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'T' } }, .action = .new_tab }, // Cmd+T: 새 탭
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'W' } }, .action = .close_tab }, // Cmd+W: 활성 탭 닫기(마지막이면 창)
 };
 
 pub const KeyBindingResolver = struct {
@@ -449,6 +450,17 @@ test "built-in app binding resolves Cmd+T to new_tab without user config" {
         .key = .{ .char = 's' },
         .modifiers = .{ .command = true },
     }, &buffer, .{})) == .ignored);
+}
+
+test "built-in app binding resolves Cmd+W to close_tab without user config" {
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{};
+    // 'w'는 normalizeEventChar가 'W'로 fold → default_app_bindings의 'W'와 매칭(Shift 무관).
+    const resolved = try resolver.resolve(.{
+        .key = .{ .char = 'w' },
+        .modifiers = .{ .command = true },
+    }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.close_tab, resolved.app_action);
 }
 
 test "resolver rejects duplicate app and terminal bindings separately" {

@@ -634,7 +634,12 @@ pub const DevSession = struct {
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
         const max_col: f64 = @floatFromInt(core.size.cols - 1);
         const max_row: f64 = @floatFromInt(core.size.rows - 1);
-        const col_f = std.math.clamp(@max(x_px, 0) / cw, 0, max_col);
+        // 터미널은 세로 사이드바 폭(origin_x)만큼 오른쪽에서 시작하므로(metalFrame.terminal_origin_x_px),
+        // 스크린 x에서 사이드바 폭을 빼야 터미널 열이 된다 — 안 빼면 선택/클릭 블록이 사이드바 폭만큼
+        // 오른쪽으로 어긋난다(라이브 제보: "블록 영역이 그만큼 밀린다"). 사이드바 strip 안(x<origin_x)
+        // 클릭은 음수→0 clamp라 col 0(터미널 왼쪽 끝)에 붙는다.
+        const term_x = x_px - @as(f64, @floatFromInt(self.sidebar_width_px));
+        const col_f = std.math.clamp(@max(term_x, 0) / cw, 0, max_col);
         const row_f = std.math.clamp(@max(y_px, 0) / ch, 0, max_row);
         return .{ .row = @intFromFloat(row_f), .col = @intFromFloat(col_f) };
     }
@@ -892,7 +897,10 @@ pub const DevSession = struct {
         if (!self.surface_initialized) return .{ .x = 0, .y = 0, .w = cw, .h = ch };
         const cursor = self.activeSurfaceConst().core.cursor;
         return .{
-            .x = @as(f64, @floatFromInt(cursor.col)) * cw,
+            // 터미널이 사이드바 폭(origin_x)만큼 오른쪽에서 그려지므로 커서의 스크린 x도 사이드바 폭을
+            // 더해야 한다 — 안 더하면 후보창이 실제 커서보다 사이드바 폭만큼 왼쪽에 뜬다(pxToCell의
+            // 역변환: pxToCell은 빼고, 셀→스크린인 여기선 더한다).
+            .x = @as(f64, @floatFromInt(self.sidebar_width_px)) + @as(f64, @floatFromInt(cursor.col)) * cw,
             .y = @as(f64, @floatFromInt(cursor.row)) * ch,
             .w = cw,
             .h = ch,
@@ -1007,17 +1015,15 @@ pub const DevSession = struct {
     /// soft-wrap 이어 붙임, http(s) 검사, 끝 문장부호 다듬기)은 core가 소유한다.
     pub fn urlAt(self: *DevSession, x_px: f64, y_px: f64) []const u8 {
         if (!self.surface_initialized) return &.{};
-        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return &.{};
+        // 스크린→셀 변환은 pxToCell 단일 출처를 쓴다(사이드바 offset 차감 포함) — 별도 변환을 두면
+        // 사이드바 폭만큼 어긋난 셀에서 URL을 찾는다(직접 x/cw로 계산하던 버그를 여기로 일원화해 고침).
+        const cell = self.pxToCell(x_px, y_px) orelse return &.{};
         const core = &self.activeSurface().core;
-        const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
-        const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
-        const col: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(x_px, 0) / cw)), 0, @as(i64, core.size.cols) - 1));
-        const row: u16 = @intCast(std.math.clamp(@as(i64, @intFromFloat(@max(y_px, 0) / ch)), 0, @as(i64, core.size.rows) - 1));
         if (self.url_buffer.len > 0) {
             self.allocator.free(self.url_buffer);
             self.url_buffer = &.{};
         }
-        const url = core.extractUrlAt(self.allocator, row, col) catch null orelse return &.{};
+        const url = core.extractUrlAt(self.allocator, cell.row, cell.col) catch null orelse return &.{};
         self.url_buffer = url;
         return self.url_buffer;
     }
@@ -2085,6 +2091,7 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     session.app_window = .{ .tabs = &st_ptrs };
     session.cell_width_px = 8;
     session.cell_height_px = 16;
+    session.sidebar_width_px = 0; // 사이드바 없음: 커서 x는 col*cw 그대로
 
     const core = &tab_surface.core;
     try core.write("ab"); // 커서가 (0,2)로
@@ -2098,6 +2105,37 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     const r2 = session.imeCursorRect();
     try std.testing.expectEqual(@as(f64, 16), r2.x); // col 2
     try std.testing.expectEqual(@as(f64, 16), r2.y); // row 1 * 16
+
+    // 사이드바가 있으면 커서 스크린 x는 사이드바 폭만큼 오른쪽으로 — 후보창이 실제 커서 아래에 뜬다.
+    session.sidebar_width_px = 24;
+    const r3 = session.imeCursorRect();
+    try std.testing.expectEqual(@as(f64, 24 + 16), r3.x); // origin_x(24) + col 2 * 8
+    try std.testing.expectEqual(@as(f64, 16), r3.y); // y는 사이드바 영향 없음
+}
+
+test "pxToCell subtracts the sidebar offset so clicks map to terminal columns" {
+    // 사이드바가 터미널을 origin_x만큼 오른쪽으로 밀므로, 스크린 픽셀 x는 사이드바 폭을 뺀 뒤에야
+    // 터미널 열이 된다. 안 빼면 선택/클릭 블록이 사이드바 폭만큼 어긋난다(라이브 제보 회귀).
+    var session: DevSession = undefined;
+    session.allocator = std.testing.allocator;
+    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
+    defer tab_surface.deinit();
+    session.surface_initialized = true;
+    var st_ptrs = [_]*app.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
+    session.cell_width_px = 8;
+    session.cell_height_px = 16;
+    session.sidebar_width_px = 24; // 3칸(24/8) 폭 사이드바
+
+    // 터미널 왼쪽 끝(스크린 x=origin_x=24) → col 0.
+    try std.testing.expectEqual(@as(u16, 0), session.pxToCell(24, 0).?.col);
+    // origin_x + 2*cw = 24+16=40 → col 2.
+    try std.testing.expectEqual(@as(u16, 2), session.pxToCell(40, 0).?.col);
+    // 사이드바 strip 안(x=10 < origin_x) → 음수 clamp → col 0(터미널 왼쪽 끝).
+    try std.testing.expectEqual(@as(u16, 0), session.pxToCell(10, 0).?.col);
+    // 사이드바 없으면(0) 스크린 x가 그대로 열: x=16 → col 2(회귀 가드).
+    session.sidebar_width_px = 0;
+    try std.testing.expectEqual(@as(u16, 2), session.pxToCell(16, 0).?.col);
 }
 
 test "pageScrollDelta: scroll mode + main screen scrolls; passthrough/alt sends to app" {

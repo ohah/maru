@@ -60,6 +60,10 @@ fn wheelDeltaToLines(accum: *f64, delta_y: f64, precise: bool, cell_height_px: u
 // 줄별 텍스트/배경)를 찍어, "개행 안 되고 덮어씀" 같은 cursor/scroll 동작을 데이터로 확인한다.
 // MARU_DEBUG 게이트는 diag.zig가 단일 출처로 소유한다.
 const screen_diag = std.log.scoped(.screen);
+// 셸 의미 이벤트(OSC 133/7) 진단 logger. MARU_DEBUG일 때 frame마다 core가 기록한 명령 경계
+// 이벤트를 구조화 한 줄씩 찍는다 — 같은 도메인 데이터를 테스트·후속 trace writer도 이 자리에서
+// drain한다(관측 가능성 원칙). 게이트는 diag.zig 단일 출처.
+const shell_diag = std.log.scoped(.shell);
 const diag_gate = @import("diag.zig");
 
 // app_host_abi.zig가 이 파일을 import하므로 EventKind는 여기서 정의하고 거기서 re-export한다
@@ -979,6 +983,30 @@ pub const DevSession = struct {
         }
     }
 
+    /// 프레임마다 셸 의미 이벤트(OSC 133/7)를 소비한다 — MARU_DEBUG면 명령 경계를 구조화 한 줄씩
+    /// 찍고, 항상 비워 core의 이벤트 버퍼를 bounded하게 유지한다(누구도 drain 안 하면 cap에서 드롭).
+    /// 같은 도메인 데이터를 후속 trace writer도 바로 이 자리에서 drain하면 된다(관측 가능성 원칙).
+    fn drainShellEventsForFrame(self: *DevSession) void {
+        if (!self.surface_initialized) return;
+        const core = &self.surfaces[0].core;
+        if (core.shellEvents().len == 0 and !core.shellEventsOverflowed()) return;
+        if (diag_gate.maruDebugEnabled()) {
+            for (core.shellEvents()) |ev| switch (ev) {
+                .prompt_start => |r| shell_diag.info("shell.prompt-start row={d}", .{r}),
+                .input_start => |r| shell_diag.info("shell.input-start row={d}", .{r}),
+                .command_start => |r| shell_diag.info("shell.command-start row={d}", .{r}),
+                .command_end => |ce| if (ce.exit) |code|
+                    shell_diag.info("shell.command-end row={d} exit={d}", .{ ce.row, code })
+                else
+                    shell_diag.info("shell.command-end row={d} exit=?", .{ce.row}),
+                .cwd_changed => shell_diag.info("shell.cwd-changed cwd={s}", .{core.currentCwd()}),
+            };
+            // 조용한 손실 방지: cap을 넘어 드롭된 이벤트가 있으면 보고한다.
+            if (core.shellEventsOverflowed()) shell_diag.info("shell.events OVERFLOW: cap 초과로 일부 이벤트 드롭", .{});
+        }
+        core.clearShellEvents();
+    }
+
     pub fn tick(self: *DevSession) !FrameSummary {
         // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
         // 아님). 그래야 summary의 glyph/atlas 통계가 실제 rasterized glyph를 반영하고, 이후
@@ -1051,6 +1079,7 @@ pub const DevSession = struct {
             // tick만 아는 per-frame render 통계와 tick index를 summary에 덧씌운다.
             self.writeSummaryFromTick(tick_result);
             self.logScreenIfDebug();
+            self.drainShellEventsForFrame();
         } else {
             // idle: build/project를 건너뛰므로 summary는 마지막 frame render 통계를 그대로 둔다.
             self.writeSummaryFromState();

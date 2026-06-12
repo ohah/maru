@@ -60,6 +60,26 @@ pub const RowPrompt = struct {
     exit: ?i16 = null, // 그 프롬프트의 명령 종료코드(프롬프트 시작 행에만; shell은 음수도 보냄)
 };
 
+/// 셸 통합(OSC 133/7)이 알린 의미 이벤트 — 명령 라이프사이클의 경계를 시간순으로 표시한다.
+/// 같은 도메인 데이터를 디버그 로그·테스트·(후속) trace 직렬화/replay가 공유한다(관측 가능성
+/// 원칙: 임시 포맷을 따로 두지 않는다). core가 OSC를 파싱하며 순서대로 기록하고 소비자가 drain한다.
+///
+/// 설계: POD다(소유 문자열 없음) — 행 인덱스는 이벤트 발생 시점의 활성 화면 커서 행이고, 종료코드는
+/// OSC 133 D의 값이다. `cwd_changed`는 '경계만' 표시하고 cwd 값 자체는 `TerminalCore.currentCwd()`가
+/// 권위다(trace는 순서가 정답이라 절대 좌표/문자열을 이벤트가 들 필요가 없고, 소유권도 단순해진다).
+pub const ShellEvent = union(enum) {
+    prompt_start: u16, // OSC 133 A — 프롬프트 시작(행)
+    input_start: u16, // OSC 133 B — 입력 시작(행)
+    command_start: u16, // OSC 133 C — 출력 시작(행)
+    command_end: CommandEnd, // OSC 133 D — 명령 끝(행 + 종료코드, code 없으면 null)
+    cwd_changed: void, // OSC 7 — cwd 변경(값은 currentCwd()가 권위)
+
+    pub const CommandEnd = struct {
+        row: u16,
+        exit: ?i16,
+    };
+};
+
 /// Iterates the visible codepoints of a single row: each non-continuation
 /// cell yields its base codepoint, immediately followed by its combining mark
 /// when present. Both the plain-text dump (`TerminalCore.dumpUtf8`) and the

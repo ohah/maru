@@ -272,9 +272,11 @@ bool maru_metal_renderer_draw(
         // 맞춰 늘이지 않으므로 glyph가 왜곡되지 않는다.
         const float cw = (float)cell_width_px;
         const float ch = (float)cell_height_px;
-        // 1) 터미널 cells — origin_x(사이드바 폭)만큼 오른쪽, 세로는 row×ch.
+        // 1) 터미널 cells — 각 cell이 자기 panel의 origin을 들고 있다(origin_x + col×cw, origin_y + row×ch).
+        //    단일 panel이면 전부 (사이드바 폭, 0)이라 기존과 같다. split은 panel별로 다른 origin을 준다.
         for (size_t i = 0; i < cell_count; i++) {
-            maru_fill_cell_quad(&vertices[i * vertices_per_cell], cells[i], origin_x, cw, (float)cells[i].row * ch, ch, drawable_w, drawable_h);
+            const MaruAppHostDevMetalCell tc = cells[i];
+            maru_fill_cell_quad(&vertices[i * vertices_per_cell], tc, (float)tc.origin_x, cw, (float)tc.origin_y + (float)tc.row * ch, ch, drawable_w, drawable_h);
         }
         size_t quad_index = cell_count;
         // 2) 사이드바 배경 quad(x:0..origin_x, 전체 높이) — UV(-1) sentinel로 배경만 칠한다(셰이더가

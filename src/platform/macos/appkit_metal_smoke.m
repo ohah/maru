@@ -93,6 +93,10 @@ typedef struct {
     // Zig NativeMetalCell.background와 layout을 맞춘다(0xAARRGGBB). smoke fixture는 기본 배경
     // (a=0)이라 그리기는 기존과 같지만, ABI 크기/오프셋 계약을 위해 필드를 둔다.
     uint32_t background;
+    // Zig NativeMetalCell.origin_x/origin_y(panel 픽셀 origin)와 layout을 맞춘다. smoke는 단일 영역이라
+    // 쓰지 않지만(0), 크기/오프셋 계약(metal_smoke 테스트)을 위해 둔다.
+    uint32_t origin_x;
+    uint32_t origin_y;
 } MaruMetalSmokeCell;
 
 typedef struct {

@@ -108,6 +108,35 @@ fn inSidebarCloseButton(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bo
     return x_px >= width - zone and x_px < width;
 }
 
+/// 드래그 중 사이드바 y → 타겟 슬롯(항상 valid 인덱스로 clamp — sidebarSlot과 달리 슬롯 아래 빈 영역도
+/// 마지막 슬롯으로 본다, 드래그를 끝까지 끌 수 있게). 슬롯 높이/탭 0이면 0. 순수 함수라 OS 무관 단위 테스트.
+fn sidebarDragTargetSlot(y_px: f64, slot_height_px: u32, tab_count: usize) usize {
+    if (slot_height_px == 0 or tab_count == 0 or !std.math.isFinite(y_px) or y_px <= 0) return 0;
+    const last = tab_count - 1;
+    const slot_f = y_px / @as(f64, @floatFromInt(slot_height_px));
+    if (slot_f >= @as(f64, @floatFromInt(last))) return last;
+    return @intFromFloat(slot_f);
+}
+
+/// 탭을 from→to로 옮긴 뒤 active_tab을 보정한다. 드래그한 탭이 active면 to를 따라가고, 사이 인덱스는
+/// 이동 방향대로 한 칸 밀린다(from<to면 그 사이가 -1, to<from이면 +1). 그 밖은 불변. 순수 함수.
+fn adjustActiveForMove(active: usize, from: usize, to: usize) usize {
+    if (active == from) return to;
+    if (from < to and active > from and active <= to) return active - 1;
+    if (to < from and active >= to and active < from) return active + 1;
+    return active;
+}
+
+/// 슬라이스에서 from의 원소를 to로 옮긴다(사이 원소는 회전으로 한 칸 밀림). std.mem.rotate라 무할당
+/// in-place — 실패 불가. from==to면 무동작. 호출자는 from/to가 범위 안임을 보장한다.
+fn rotateMove(comptime T: type, items: []T, from: usize, to: usize) void {
+    if (from < to) {
+        std.mem.rotate(T, items[from .. to + 1], 1); // 좌로 1: from이 끝(to)으로
+    } else if (from > to) {
+        std.mem.rotate(T, items[to .. from + 1], from - to); // from이 앞(to)으로
+    }
+}
+
 /// 탭 하나를 닫은 뒤 새 active_tab 인덱스. 닫은 게 active보다 앞이면 한 칸 당기고(인덱스가 밀림),
 /// 그래도 새 길이를 넘으면 마지막으로 clamp한다(active 자체나 마지막 탭을 닫은 경우). new_len은 닫은
 /// 뒤 길이(≥1 — 마지막 한 개를 닫는 경우는 호출자가 따로 처리). 순수 함수라 OS 무관 단위 테스트.
@@ -301,6 +330,11 @@ pub const DevSession = struct {
     // rebuildSidebar가 이 슬롯에 호버 하이라이트 밴드를 그린다(활성 슬롯과 다를 때만). 후속 호버 X
     // 닫기 아이콘의 대상 슬롯도 이 값이다.
     hovered_slot: ?usize = null,
+    // 사이드바 탭 드래그 재정렬 상태. down이 사이드바 슬롯(✕ 아님)에서 시작하면 active=true가 되고,
+    // 이후 drag(kind 2)는 타겟 슬롯으로 live 재정렬(moveTab), up(kind 3)이 끝낸다. index는 드래그 중인
+    // 탭의 현재 인덱스(이동을 따라간다). 드래그 중엔 다른 down/이벤트가 아니라 drag/up만 캡처한다.
+    sidebar_drag_active: bool = false,
+    sidebar_drag_index: usize = 0,
     // 트랙패드 정밀 스크롤의 1줄 미만 잔여 델타(줄 단위). scrollWheel이 누적/소비한다.
     wheel_accum: f64 = 0,
     // copyText()가 돌려준 추출 텍스트의 소유 버퍼(다음 copyText/destroy까지 유효 — ABI 수명 계약).
@@ -510,6 +544,20 @@ pub const DevSession = struct {
         self.frame_loop.pump = &self.activeTab().pump;
 
         self.hovered_slot = null; // 인덱스가 밀렸으니 호버 무효화(다음 마우스 이동이 재설정)
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
+    /// 탭을 from→to로 옮긴다(드래그 재정렬). tabs/surface_ptrs를 같이 회전(무할당 in-place)하고
+    /// active_tab을 보정한다. Tab은 heap-pin이라 포인터만 셔플되고 surface/PTY/reader 포인터는 안
+    /// 흔들린다. app_window.tabs는 surface_ptrs.items(같은 backing 배열, 내용만 재정렬)라 재바인딩 불요.
+    /// 범위 밖이거나 from==to면 무동작.
+    fn moveTab(self: *DevSession, from: usize, to: usize) void {
+        if (from == to or from >= self.tabs.items.len or to >= self.tabs.items.len) return;
+        rotateMove(*Tab, self.tabs.items, from, to);
+        rotateMove(*app.Surface, self.surface_ptrs.items, from, to);
+        self.app_window.active_tab = adjustActiveForMove(self.app_window.active_tab, from, to);
+        self.frame_loop.pump = &self.activeTab().pump; // 순서가 바뀌었으니 활성 탭 pump 재바인딩(방어적)
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }
@@ -735,16 +783,37 @@ pub const DevSession = struct {
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *DevSession, kind: i32, x_px: f64, y_px: f64) void {
         if (!self.surface_initialized) return;
+        // 사이드바 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(x가 사이드바 밖으로 나가도) — 새
+        // down(1)은 아래 일반 처리로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
+        if (self.sidebar_drag_active and (kind == 2 or kind == 3)) {
+            if (kind == 2) {
+                const target = sidebarDragTargetSlot(y_px, self.sidebar_slot_height_px, self.tabs.items.len);
+                if (target != self.sidebar_drag_index) {
+                    self.moveTab(self.sidebar_drag_index, target);
+                    self.sidebar_drag_index = target; // 드래그 탭은 이제 target에 있다
+                }
+            } else {
+                self.sidebar_drag_active = false; // up: 드래그 종료
+            }
+            return;
+        }
         // 사이드바 영역 클릭은 Maru UI다(터미널 선택/리포팅 아님). down(1)에서 슬롯을 hit-test한다 —
-        // 슬롯 우측 ✕ zone이고 그 슬롯이 호버 중(✕가 보임)이면 그 탭을 닫고, 아니면 그 탭으로 전환한다.
-        // 다른 kind(drag/up)와 슬롯 밖(빈 영역)은 무시. 진행 중이던 터미널 드래그 선택은 멈춘다(사이드바로
-        // 빠진 드래그가 autoscroll로 남지 않게). 사이드바 클릭은 터미널에 안 닿는다.
+        // 슬롯 우측 ✕ zone이고 그 슬롯이 호버 중(✕가 보임)이면 그 탭을 닫고, 아니면 그 탭으로 전환하고
+        // 드래그 재정렬을 시작한다(이어지는 drag가 순서를 바꾼다 — 안 움직이면 그냥 클릭=전환). 슬롯 밖
+        // (빈 영역)은 무시. 진행 중이던 터미널 드래그 선택은 멈춘다. 사이드바 클릭은 터미널에 안 닿는다.
         if (self.inSidebar(x_px)) {
             if (kind == 1) {
                 if (self.sidebarSlotAt(y_px)) |slot| {
                     const on_close = inSidebarCloseButton(x_px, self.sidebar_width_px, self.cell_width_px) and
                         self.hovered_slot != null and self.hovered_slot.? == slot;
-                    if (on_close) self.closeTab(slot) else _ = self.switchTab(slot);
+                    if (on_close) {
+                        self.closeTab(slot);
+                    } else {
+                        self.hovered_slot = null; // 드래그 중엔 stale 호버 밴드/✕를 안 보이게
+                        _ = self.switchTab(slot);
+                        self.sidebar_drag_active = true;
+                        self.sidebar_drag_index = slot;
+                    }
                 }
             }
             self.drag_autoscroll = 0;
@@ -2040,6 +2109,29 @@ test "reselectAfterClose shifts active for earlier closes and clamps for active/
     try std.testing.expectEqual(@as(usize, 0), reselectAfterClose(0, 0, 1));
 }
 
+test "drag reorder helpers: target clamp, active adjust, slice rotate move" {
+    // sidebarDragTargetSlot: 슬롯 아래 빈 영역도 마지막 슬롯으로 clamp(드래그 끝까지). slot_h=40, 3탭.
+    try std.testing.expectEqual(@as(usize, 0), sidebarDragTargetSlot(0, 40, 3));
+    try std.testing.expectEqual(@as(usize, 1), sidebarDragTargetSlot(50, 40, 3));
+    try std.testing.expectEqual(@as(usize, 2), sidebarDragTargetSlot(200, 40, 3)); // 한참 아래 → 마지막
+    try std.testing.expectEqual(@as(usize, 0), sidebarDragTargetSlot(-5, 40, 3)); // 위 → 0
+
+    // adjustActiveForMove: 드래그 탭이 active면 to 따라감, 사이 인덱스는 이동 방향대로 밀림.
+    try std.testing.expectEqual(@as(usize, 2), adjustActiveForMove(0, 0, 2)); // active=드래그 탭 → to
+    try std.testing.expectEqual(@as(usize, 0), adjustActiveForMove(1, 0, 2)); // 사이(from<to) → -1
+    try std.testing.expectEqual(@as(usize, 0), adjustActiveForMove(2, 2, 0)); // active=드래그 탭 → to
+    try std.testing.expectEqual(@as(usize, 1), adjustActiveForMove(0, 2, 0)); // 사이(to<from) → +1
+    try std.testing.expectEqual(@as(usize, 1), adjustActiveForMove(1, 1, 1)); // from==to 무동작
+
+    // rotateMove: from→to로 옮기고 사이는 회전.
+    var fwd = [_]u8{ 'A', 'B', 'C', 'D' };
+    rotateMove(u8, &fwd, 0, 2); // A를 2로 → B,C,A,D
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 'B', 'C', 'A', 'D' }, &fwd);
+    var bwd = [_]u8{ 'A', 'B', 'C', 'D' };
+    rotateMove(u8, &bwd, 3, 1); // D를 1로 → A,D,B,C
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 'A', 'D', 'B', 'C' }, &bwd);
+}
+
 // 사이드바 활성 하이라이트 밴드가 실제 세션에서 채워지고 탭 생성/전환을 따라 행을 옮기는지 — 실 init이
 // CoreText 메트릭과 사이드바 폭을 채우는 macOS 경로라 게이트한다. metalFrame()이 그 밴드를 사이드바
 // 셀로 노출하는 것도 함께 본다(렌더러가 origin 0에 그릴 입력).
@@ -2185,6 +2277,52 @@ test "clicking the hovered slot close zone closes that tab, elsewhere switches" 
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
     session.mouse(1, close_x, 1);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+}
+
+// 사이드바 탭을 드래그하면 tabs 순서가 바뀌고 활성이 드래그한 탭을 따라가는지 — 실 PTY라 macOS
+// 게이트. down(슬롯0)→drag(슬롯2)→up: tabs[0]을 끝으로 옮긴다(live 재정렬).
+test "dragging a sidebar tab reorders the list and active follows the dragged tab" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (.{ "tab 2", "tab 3" }) |title| {
+        _ = try session.createTab(
+            .{ .command = "/bin/sh", .args = &.{ "-c", "cat" }, .size = .{ .cols = 20, .rows = 5 } },
+            .{ .cols = 20, .rows = 5 },
+            16,
+            title,
+            "sh",
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 3), session.tabs.items.len);
+    try std.testing.expectEqualStrings("Maru dev shell", session.tabs.items[0].surface.title);
+    try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
+
+    const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
+    const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
+
+    // 탭 0(Maru)을 슬롯 2로 드래그: down(슬롯0)=전환+드래그 시작 → drag(슬롯2)=moveTab(0,2) → up.
+    session.mouse(1, x, 1);
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
+    try std.testing.expect(session.sidebar_drag_active);
+    session.mouse(2, x, slot_h * 2 + 1);
+    session.mouse(3, x, slot_h * 2 + 1);
+
+    // 순서 [tab 2, tab 3, Maru], 활성=드래그 탭(Maru)=2, 드래그 종료.
+    try std.testing.expectEqualStrings("tab 2", session.tabs.items[0].surface.title);
+    try std.testing.expectEqualStrings("tab 3", session.tabs.items[1].surface.title);
+    try std.testing.expectEqualStrings("Maru dev shell", session.tabs.items[2].surface.title);
+    try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
+    try std.testing.expect(!session.sidebar_drag_active);
 }
 
 // 멀티-탭 핵심 계약: 두 번째 탭을 만들면 자기 셸 PTY가 spawn되고, tick이 '모든' 탭을 drain하므로

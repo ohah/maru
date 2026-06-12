@@ -44,9 +44,9 @@ const zsh_zshenv =
     \\}
     \\if [[ -o 'interactive' ]]; then
     \\  'builtin' 'autoload' '-Uz' 'add-zsh-hook'
-    \\  # OSC 133 semantic prompt 마킹(freedesktop semantic-prompts.md). precmd=직전 명령 끝(D;exit)+
-    \\  # 새 프롬프트 시작(A), preexec=출력 시작(C), PS1 끝=입력 시작(B). 이 precmd를 사용자 .zshrc 훅
-    \\  # '전에' 등록(.zshenv가 먼저 실행)해 precmd_functions 맨 앞에서 직전 $?를 정확히 캡처한다.
+    \\  # OSC 133 semantic prompt 마킹(freedesktop semantic-prompts.md). 두 precmd 훅으로 나눈다 —
+    \\  # 직전 $? 캡처·D·A는 '맨 앞' 훅이(.zshenv가 사용자 .zshrc보다 먼저 실행돼 precmd_functions 선두라
+    \\  # 직전 $?를 정확히 잡음), 입력 시작 B(PS1 끝)는 '맨 뒤' 훅이 처리한다. preexec=출력 시작(C).
     \\  _maru_osc133_precmd() {
     \\    'builtin' 'local' _maru_st=$?
     \\    if [[ -n "${_maru_osc133_started+x}" ]]; then
@@ -54,14 +54,20 @@ const zsh_zshenv =
     \\    fi
     \\    'builtin' 'typeset' '-g' '_maru_osc133_started=1'
     \\    'builtin' 'print' '-rn' -- $'\e]133;A\a'
-    \\    # 입력 시작(B)을 PS1 끝에 둔다. 프레임워크가 매 프롬프트 PS1을 재생성해도 없으면 다시 붙인다.
-    \\    [[ "$PS1" == *$'\e]133;B'* ]] || PS1="$PS1"$'%{\e]133;B\a%}'
     \\  }
     \\  _maru_osc133_preexec() {
     \\    'builtin' 'print' '-rn' -- $'\e]133;C\a'
     \\  }
+    \\  # B는 PS1 끝에 둔다. p10k/starship/oh-my-zsh 등이 '자기 precmd에서 PS1을 통째로 재생성'해도
+    \\  # B가 살아남도록, 매 프롬프트 자신을 precmd_functions '맨 뒤'로 재정렬한 뒤(프레임워크 재생성
+    \\  # '후'에 실행되게) append한다. 안 그러면 B가 매 프롬프트 제거돼 입력 영역이 마킹되지 않는다.
+    \\  _maru_osc133_ps1() {
+    \\    [[ "${precmd_functions[-1]}" = _maru_osc133_ps1 ]] || precmd_functions=( "${(@)precmd_functions:#_maru_osc133_ps1}" _maru_osc133_ps1 )
+    \\    [[ "$PS1" == *$'\e]133;B'* ]] || PS1="$PS1"$'%{\e]133;B\a%}'
+    \\  }
     \\  add-zsh-hook precmd _maru_osc133_precmd
     \\  add-zsh-hook preexec _maru_osc133_preexec
+    \\  add-zsh-hook precmd _maru_osc133_ps1
     \\  _maru_shell_integration() {
     \\    add-zsh-hook -d precmd _maru_shell_integration
     \\    # macOS 편집키가 보내는 C0/meta 시퀀스를 표준 라인 위젯에 바인딩(현재 main keymap에).
@@ -126,14 +132,18 @@ test "zsh integration script binds the macOS editing keys and restores ZDOTDIR" 
 }
 
 test "zsh integration script emits OSC 133 semantic prompt markers" {
-    // precmd가 A(+조건부 D;exit), preexec가 C, PS1 끝이 B를 emit하는지(회귀 — 깨지면 분류가
-    // 조용히 멈춘다). 실제 zsh emit 순서/종료코드는 PTY 캡처로 별도 검증했다(PR 본문).
+    // 두 precmd 훅(D/A 맨 앞, B 맨 뒤) + preexec C를 담는지(회귀 — 깨지면 분류가 조용히 멈춘다).
+    // 실제 zsh emit 순서/종료코드/프레임워크 PS1 생존은 PTY 캡처로 별도 검증했다(PR 본문).
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "add-zsh-hook precmd _maru_osc133_precmd") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "add-zsh-hook preexec _maru_osc133_preexec") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "add-zsh-hook precmd _maru_osc133_ps1") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "133;A") != null); // 프롬프트 시작
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "133;D;") != null); // 명령 끝 + 종료코드
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "133;C") != null); // 출력 시작
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "133;B") != null); // 입력 시작(PS1 끝)
     // 직전 $?를 가장 먼저 캡처해야 정확한 종료코드를 보낸다(precmd 첫 줄).
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "local' _maru_st=$?") != null);
+    // B 훅이 프레임워크 PS1 재생성에도 살아남도록 precmd_functions 맨 뒤로 재정렬하는지(회귀 방지).
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "precmd_functions[-1]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "${(@)precmd_functions:#_maru_osc133_ps1}") != null);
 }

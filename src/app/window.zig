@@ -17,6 +17,14 @@ pub const AppWindow = struct {
         return self.tabs[self.active_tab];
     }
 
+    /// `active`의 읽기 전용(`*const self`) 변형 — surface를 안 바꾸는 const 호출자(예: 렌더 스냅샷)가
+    /// 활성 탭을 같은 규칙으로 얻는다.
+    pub fn activeConst(self: *const AppWindow) ?*const surface.Surface {
+        if (self.tabs.len == 0) return null;
+        if (self.active_tab >= self.tabs.len) return null;
+        return self.tabs[self.active_tab];
+    }
+
     pub fn selectTab(self: *AppWindow, index: usize) bool {
         if (index >= self.tabs.len) return false;
         self.active_tab = index;

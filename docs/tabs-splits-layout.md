@@ -105,9 +105,15 @@ Node = leaf(Pane)
   iTerm2의 pane navigation 키). 방향은 각 panel rect 중심의 반평면 + 정렬(같은 행/열 우대)로 고른다 — 그 방향에 panel이
   없으면 무동작. `Cmd+화살표`(줄 처음/끝)·`Option+화살표`(단어 이동)와는 모디파이어 조합이 달라(command+option) 안 겹친다.
   포커스된 panel은 서브-rect에 있으므로 마우스/커서/IME 좌표가 그 panel의 origin(`active_pane_rect`) 기준으로 매핑된다.
-- **닫기(PR5a)**: `Cmd+W`는 **Warp/cmux식** — split이 있으면 활성 panel을 하나 닫고(트리를 형제로 collapse,
-  형제가 빈자리를 차지), 단일 panel이면 탭(마지막이면 창)을 닫는다. 즉 Cmd+W를 반복하면 pane이 하나씩
-  닫히다가 마지막 1개에서 탭이 닫힌다. 셸 `exit` 시 자동 collapse는 후속(PR5b).
+- **Term(가로 탭) 키(PR-B, cmux 모델)**: 한 pane은 여러 Term(터미널)을 가로 탭으로 든다. `Cmd+T`=활성 pane에
+  **새 Term**, `Cmd+]`/`Cmd+[`=활성 pane 안에서 **다음/이전 Term**(wrap). 워크스페이스(사이드바 탭)는 한 단계
+  위라 `Cmd+Shift+T`=**새 워크스페이스**, `Cmd+Shift+]`/`Cmd+Shift+[`=워크스페이스 전환으로 **shift로 갈린다**
+  (modifier 정확 비교). **베이스**: cmux의 ⌘T(pane 내 새 탭)·⌘[](탭 전환). 워크스페이스 생성은 cmux가 사이드바
+  UI로 하므로 Maru도 후속 사이드바 "+" 버튼으로 옮길 수 있고, 그 전까진 `Cmd+Shift+T`를 임시로 둔다.
+- **닫기(PR5a + PR-B cascade)**: `Cmd+W`는 **cmux식 계층 cascade** — 활성 pane에 Term이 여럿이면 **활성 Term**을
+  닫고, Term이 1개면 **pane**을(split이면 형제로 collapse, 형제가 빈자리 차지) 닫고, pane이 1개면 **워크스페이스**를
+  (마지막이면 창) 닫는다. 즉 Cmd+W를 반복하면 Term → pane → 워크스페이스 순으로 하나씩 닫힌다. 셸 `exit` 시 자동
+  collapse는 후속(PR5b).
 - **비율**: 고정 0.5(균등). divider 드래그 리사이즈는 후속(PR6).
 
 quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.

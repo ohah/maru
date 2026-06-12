@@ -126,8 +126,9 @@ pub const RenderSnapshot = struct {
     // 뷰포트에서도 보이는 행에 맞춰 합성된다. 마킹이 없으면 전부 {.unknown, null}이라 렌더러는
     // 무시해도 된다. 거터(✓/✗)는 prompt 시작 행의 exit로 색을 정한다.
     prompt_marks: []const RowPrompt = &.{},
-    // 가장 최근에 끝난 명령의 종료코드(OSC 133 ; D ; <code>). 없으면 null. 이후 단계가 프롬프트
-    // 거터에 ✓/✗로 투영한다. shell이 음수(-1 등)를 보낼 수 있어 i32.
+    // 가장 최근에 끝난 명령의 종료코드(OSC 133 ; D ; <code>). 없으면 null. shell이 음수(-1 등)를
+    // 보낼 수 있어 i32. **주의: 거터는 이 값이 아니라 `prompt_marks[행].exit`(행별)로 그린다** —
+    // 이건 MARU_DEBUG 덤프 헤더용 편의 값이라 거터/UI를 여기에 연결하지 말 것.
     last_command_exit: ?i32 = null,
     dirty: ?DirtyRegion = null,
 };

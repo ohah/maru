@@ -301,6 +301,8 @@ pub fn buildNativeCellsSplit(
         },
         // OSC 133 거터 마크: 프롬프트 시작 행 col 0의 왼쪽 가장자리에 세로 색 바(커서 bar와 같은
         // kind=3 부분 사각형 재사용 — 셰이더 변경 없음). 명령 성공=초록/실패=빨강.
+        // 알려진 한계: DECSCUSR 5/6(bar 커서)가 같은 프롬프트 행 col 0에 있으면 커서 bar(마지막에
+        // 블렌딩으로 그려짐)가 거터 바를 덮는다 — 드문 엣지(전용 거터 컬럼/오프셋은 후속).
         .gutter => |g| {
             if (g.row >= frame.size.rows) continue;
             const bar_rgb: color.Rgb = if (g.success)

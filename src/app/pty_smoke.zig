@@ -61,7 +61,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, config: AppPtySmokeConfig) 
     surfaces[0].title = "app pty smoke";
     surfaces[0].command = config.command;
 
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -316,7 +317,8 @@ test "app PTY frame artifact records renderer input cells" {
     defer surfaces[0].deinit();
     try surfaces[0].core.write("PTY");
 
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
     var renderer_state = renderer.RendererState.init(std.testing.allocator, .{});
     defer renderer_state.deinit();
 

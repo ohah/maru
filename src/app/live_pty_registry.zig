@@ -144,7 +144,8 @@ test "live pty registry closes the session attached to the active surface" {
 
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 20, .rows = 3 })};
     defer surfaces[0].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var fake_pty = FakePty.init(allocator);
     defer fake_pty.deinit();
@@ -261,7 +262,8 @@ test "live pty registry does not close a non-active surface" {
     };
     defer surfaces[0].deinit();
     defer surfaces[1].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces, .active_tab = 1 };
+    var tab_ptrs = [_]*surface_mod.Surface{ &surfaces[0], &surfaces[1] };
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs, .active_tab = 1 };
 
     var fake_pty = FakePty.init(allocator);
     defer fake_pty.deinit();
@@ -298,7 +300,8 @@ test "live pty registry keeps mapping when the attached session invariant is bro
 
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 20, .rows = 3 })};
     defer surfaces[0].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var fake_pty = FakePty.init(allocator);
     defer fake_pty.deinit();

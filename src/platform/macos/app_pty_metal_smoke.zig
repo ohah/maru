@@ -197,7 +197,8 @@ fn buildLivePtyFixture(
     surfaces[0].title = "app pty metal smoke";
     surfaces[0].command = smoke_config.command;
 
-    var app_window: app.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*app.Surface{&surfaces[0]};
+    var app_window: app.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = app.SurfaceRuntime.init(allocator);
     defer runtime.deinit();

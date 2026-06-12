@@ -135,6 +135,9 @@ pub const DevSession = struct {
     io: std.Io,
     live_pty: app.LivePtySession = undefined,
     surfaces: [1]app.Surface = undefined,
+    // app_window.tabs가 가리킬 안정 포인터 배열(AppWindow는 이제 `[]*Surface`를 든다 — surface 본체는
+    // 고정 surfaces[]에 살고 여기엔 그 주소만 모은다). DevSession 자체가 heap-pin이라 이 필드 주소도 고정.
+    tab_ptrs: [1]*app.Surface = undefined,
     app_window: app.AppWindow = undefined,
     runtime: app.SurfaceRuntime = undefined,
     pump: app.RuntimeEventPump = undefined,
@@ -271,7 +274,8 @@ pub const DevSession = struct {
         self.activeSurface().title = "Maru dev shell";
         self.activeSurface().command = commandName(config.command_kind);
 
-        self.app_window = .{ .tabs = self.surfaces[0..] };
+        self.tab_ptrs = .{&self.surfaces[0]};
+        self.app_window = .{ .tabs = self.tab_ptrs[0..] };
         self.runtime = app.SurfaceRuntime.init(allocator);
         self.runtime.debug_input = diag_gate.maruDebugEnabled(); // MARU_DEBUG면 zsh redraw 시퀀스 로깅
         self.runtime_initialized = true;

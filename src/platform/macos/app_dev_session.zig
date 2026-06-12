@@ -1608,7 +1608,7 @@ test "pageScrollDelta: scroll mode + main screen scrolls; passthrough/alt sends 
     try std.testing.expectEqual(@as(i32, -1), DevSession.pageScrollDelta(true, false, .page_down));
     // scroll 모드라도 alt 화면(vim/less): 0 — 앱이 \e[5~/\e[6~로 페이징.
     try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(true, true, .page_up));
-    // passthrough(기본, xterm/Ghostty): 메인 화면이어도 0 — \e[5~/\e[6~를 그대로 PTY로.
+    // passthrough(opt-in, xterm/Ghostty): 메인 화면이어도 0 — \e[5~/\e[6~를 그대로 PTY로.
     try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(false, false, .page_up));
     try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(false, false, .page_down));
     // page 키가 아니면 무조건 0(일반 키 경로).

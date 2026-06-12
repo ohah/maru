@@ -251,6 +251,10 @@ const Tab = struct {
     // 이 탭의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이
     // 탭별로 한 번만 finish하도록, 그리고 세션 종료(모든 탭 terminated)를 판정하도록 쓴다.
     terminated: bool = false,
+    // 이 탭의 SplitTree 루트(split PR1 모델). 지금은 단일 leaf(= &surface)라 panel 1개 = 풀 탭 영역으로
+    // 동작이 기존(단일 surface 풀창)과 같다. split(PR3)이 leaf를 split 노드로 바꿔 여러 panel이 된다. Tab은
+    // heap-pin(createTab의 allocator.create)이라 &surface가 안정 — leaf 포인터가 dangling 안 된다.
+    tree: app.SplitNode = undefined,
 };
 
 pub const DevSession = struct {
@@ -457,6 +461,18 @@ pub const DevSession = struct {
         return self.tabs.items[self.app_window.active_tab];
     }
 
+    /// 활성 탭의 SplitTree를 터미널 영역 rect 안에서 각 panel(leaf)의 (surface, rect)로 편다(멀티-panel
+    /// 렌더용 — PR2b가 각 surface를 자기 rect에 그린다). 지금은 단일 leaf라 [{활성 surface, term_rect}]
+    /// 하나; split(PR3) 이후 여러 rect가 된다. term_rect는 사이드바를 뺀 터미널 영역(렌더가 계산해 넘김).
+    fn activeTabLeafRects(
+        self: *DevSession,
+        allocator: std.mem.Allocator,
+        term_rect: app.SplitRect,
+        out: *std.ArrayList(app.SplitLeafRect),
+    ) !void {
+        try app.split_tree.layout(allocator, self.activeTab().tree, term_rect, out);
+    }
+
     /// 새 탭을 만든다 — Tab을 heap-pin(`create`)하고, 셸 PTY를 spawn해 surface에 붙이고, pump를 만든 뒤
     /// `tabs`/`surface_ptrs`에 추가하고 `app_window.tabs`를 갱신하고 새 탭을 활성으로 만든다. 새 Tab
     /// 포인터 반환. `LivePtySession` reader가 `&tab.live_pty.reader`를 잡으므로 Tab은 heap에 고정한다
@@ -483,6 +499,9 @@ pub const DevSession = struct {
         errdefer tab.surface.deinit();
         tab.surface.title = title;
         tab.surface.command = command;
+        // SplitTree 루트를 단일 leaf로 — 이 탭은 panel 1개(= 풀 탭 영역). split(PR3)이 이 leaf를 나눈다.
+        // Tab이 heap-pin이라 &tab.surface가 안정이므로 leaf 포인터가 안전하다.
+        tab.tree = .{ .leaf = &tab.surface };
 
         _ = try tab.live_pty.attachSurface(&self.runtime, &tab.surface);
         tab.pump = tab.live_pty.pump(&self.runtime);
@@ -2183,6 +2202,35 @@ test "sidebar gets an active-tab highlight band that follows tab create and swit
     try std.testing.expect(session.switchTab(0));
     try std.testing.expectEqual(@as(u16, 1), session.sidebar_cells.items.len);
     try std.testing.expectEqual(@as(u16, 0), session.sidebar_cells.items[0].row);
+}
+
+// 활성 탭이 단일 leaf SplitTree로 만들어지고, activeTabLeafRects가 그 leaf를 터미널 영역 전체에 펴는지
+// — createTab이 tree를 세팅하는 macOS 경로라 게이트한다. split(PR3) 전엔 panel 1개 = 풀 rect다.
+test "active tab is a single-leaf SplitTree laid out to the full terminal rect" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 활성 탭의 tree는 단일 leaf(= 활성 surface). leafCount 1.
+    try std.testing.expectEqual(@as(usize, 1), app.split_tree.leafCount(session.activeTab().tree));
+
+    var out: std.ArrayList(app.SplitLeafRect) = .empty;
+    defer out.deinit(allocator);
+    const rect: app.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
+    try session.activeTabLeafRects(allocator, rect, &out);
+    // 단일 leaf → rect 1개 = 입력 rect 전체, surface = 활성 surface.
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expectEqual(session.activeSurface(), out.items[0].surface);
+    try std.testing.expectEqual(rect, out.items[0].rect);
 }
 
 // 사이드바 클릭이 슬롯 hit-test로 탭을 전환하고, 호버가 호버 밴드를 더하는지 — 실 init이 사이드바

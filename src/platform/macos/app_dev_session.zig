@@ -901,9 +901,16 @@ pub const DevSession = struct {
         if (!diag_gate.maruDebugEnabled() or !self.surface_initialized) return;
         const core = &self.surfaces[0].core;
         const cols = @min(@as(usize, core.size.cols), 240);
-        screen_diag.info("=== screen {d}x{d} cursor=({d},{d}) ===", .{
-            core.size.cols, core.size.rows, core.cursor.row, core.cursor.col,
-        });
+        // 헤더에 OSC 133 마지막 명령 종료코드도 찍는다(셸 통합이 emit하면 채워진다).
+        if (core.last_command_exit) |code| {
+            screen_diag.info("=== screen {d}x{d} cursor=({d},{d}) last_exit={d} ===", .{
+                core.size.cols, core.size.rows, core.cursor.row, core.cursor.col, code,
+            });
+        } else {
+            screen_diag.info("=== screen {d}x{d} cursor=({d},{d}) ===", .{
+                core.size.cols, core.size.rows, core.cursor.row, core.cursor.col,
+            });
+        }
         var text: [240]u8 = undefined;
         var bg: [240]u8 = undefined;
         const grid_cols: usize = core.size.cols;
@@ -923,9 +930,17 @@ pub const DevSession = struct {
             // soft-wrap 플래그를 함께 찍는다(w=다음 줄로 이어짐, .=hard 줄끝). reflow 피드백 루프
             // 회귀는 hard 줄(프롬프트)이 w로 잘못 찍히는 것으로 드러나므로, wrapped인 빈 줄도 보인다.
             const w_mark: u8 = if (row < core.wrapped.len and core.wrapped[row]) 'w' else '.';
-            if (!any and w_mark != 'w') continue;
-            screen_diag.info("r{d:0>2} {c} t|{s}|", .{ row, w_mark, text[0..cols] });
-            screen_diag.info("r{d:0>2} {c} b|{s}|", .{ row, w_mark, bg[0..cols] });
+            // OSC 133 semantic 분류(P=프롬프트 I=입력 C=명령출력 ·=미분류). 셸 통합이 마커를 emit하면
+            // 채워진다 — 프롬프트/입력/출력이 어떤 행으로 잡히는지 데이터로 본다(거터 PR 전 조기 확인).
+            const p_mark: u8 = if (row < core.prompt_marks.len) switch (core.prompt_marks[row]) {
+                .unknown => '.',
+                .prompt => 'P',
+                .input => 'I',
+                .command => 'C',
+            } else '.';
+            if (!any and w_mark != 'w' and p_mark == '.') continue;
+            screen_diag.info("r{d:0>2} {c}{c} t|{s}|", .{ row, w_mark, p_mark, text[0..cols] });
+            screen_diag.info("r{d:0>2} {c}{c} b|{s}|", .{ row, w_mark, p_mark, bg[0..cols] });
         }
     }
 

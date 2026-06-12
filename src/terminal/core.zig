@@ -5027,6 +5027,23 @@ test "OSC 133: snapshot exposes prompt_marks and last_command_exit (non-scrolled
     try std.testing.expectEqual(@as(?i32, 3), snap.last_command_exit);
 }
 
+test "OSC 133: a realistic zsh prompt+command sequence classifies rows" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    // 실제 Maru zsh 통합이 emit하는 형태(PTY 캡처로 확인): A·프롬프트·B·입력·CR/LF·C·출력·CR/LF·D;0.
+    try core.write("\x1b]133;A\x1b\\"); // 프롬프트 시작 → row0=.prompt
+    try core.write("myprompt$ "); // 프롬프트 텍스트(태그 유지)
+    try core.write("\x1b]133;B\x1b\\"); // 입력 시작(같은 줄) → row0=.input
+    try core.write("echo hi"); // 사용자 입력
+    try core.write("\r\n"); // Enter → row1(.input 전파)
+    try core.write("\x1b]133;C\x1b\\"); // 출력 시작 → row1=.command
+    try core.write("hi\r\n"); // 명령 출력 → row2(.command 전파)
+    try core.write("\x1b]133;D;0\x07"); // 명령 끝, exit 0 → state=unknown
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[0]); // 프롬프트+입력 줄
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.prompt_marks[1]); // 출력 줄
+    try std.testing.expectEqual(@as(?i32, 0), core.last_command_exit);
+}
+
 test "OSC 133: renderSnapshot composes prompt_marks for the scrolled viewport" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
     defer core.deinit();

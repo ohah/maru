@@ -227,9 +227,16 @@ Maru는 **셸 통합**으로 이를 메운다(Ghostty·iTerm2·kitty가 하는 �
 | `Option+→` | `^[f` | `forward-word` |
 | `Option+⌫` | `^[^?` | `backward-kill-word` |
 
-clean-room: 통합 스크립트는 **zsh 매뉴얼의 ZDOTDIR/스타트업 동작에서 직접 작성**했다. Ghostty·kitty의
-통합 스크립트는 GPLv3라 차용하지 않았다(ZDOTDIR로 가리키는 메커니즘 자체는 zsh 공개 동작). 현재 zsh
-전용이고, bash/fish와 OSC 133 프롬프트 마킹은 후속이다.
+같은 통합 `.zshenv`는 **OSC 133(semantic prompt) 마커도 emit**한다 — `precmd`가 직전 명령 끝(`\e]133;D;$?`)과 새 프롬프트 시작(`\e]133;A`)을, `preexec`가 출력 시작(`\e]133;C`)을, PS1 끝이 입력 시작(`\e]133;B`)을 보낸다. 이걸로 `TerminalCore`가 행을 프롬프트/입력/출력으로 분류해(아래 표 참고) 이후 거터 ✓/✗·프롬프트 점프·reflow 정확화·cwd 추적의 토대가 된다. osc133 precmd를 사용자 .zshrc 훅 전에 등록해 직전 `$?`를 정확히 캡처한다(편집키 precmd가 뒤에 와도 종료코드 보존 — PTY 캡처로 검증). 명세: freedesktop semantic-prompts.md.
+
+| OSC 133 | 의미 | 행 분류(`prompt_marks`) |
+|---|---|---|
+| `\e]133;A` (precmd) | 프롬프트 시작 | `prompt` |
+| `\e]133;B` (PS1 끝) | 입력 시작 | `input` |
+| `\e]133;C` (preexec) | 출력 시작 | `command` |
+| `\e]133;D;<code>` (precmd) | 명령 끝(종료코드) | `last_command_exit` 기록 |
+
+clean-room: 통합 스크립트는 **zsh 매뉴얼의 ZDOTDIR/스타트업·precmd/preexec·PS1 `%{%}` 동작과 semantic-prompts.md 명세에서 직접 작성**했다. Ghostty·kitty의 통합 스크립트는 GPLv3라 차용하지 않았다(메커니즘 자체는 zsh 공개 동작/공개 명세). 현재 zsh 전용이고, bash/fish 마커 emit·거터 렌더·프롬프트 점프는 후속이다.
 
 ## 기본 제공 macOS 줄 편집 단축키 (빌트인)
 

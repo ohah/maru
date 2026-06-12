@@ -114,6 +114,11 @@ Node = leaf(Pane)
   닫고, Term이 1개면 **pane**을(split이면 형제로 collapse, 형제가 빈자리 차지) 닫고, pane이 1개면 **워크스페이스**를
   (마지막이면 창) 닫는다. 즉 Cmd+W를 반복하면 Term → pane → 워크스페이스 순으로 하나씩 닫힌다. 셸 `exit` 시 자동
   collapse는 후속(PR5b).
+- **per-pane 탭 바 렌더(PR-C)**: 각 pane(leaf rect) 상단에 가로 탭 바 strip(높이 = cell 1칸)을 예약하고 그
+  아래를 터미널 영역으로 쓴다(`paneTermRect`/`paneBarRect` 단일 출처 — 좌표·resize·split·렌더가 공유). 바는
+  터미널 셀 스트림에 origin 박힌 셀로 그려진다(`metal_frame.replace`의 `pane_chrome_cells`, 렌더러·ABI 무변경).
+  **PR-C1**: 바 배경만(활성 강조색·비활성 chrome 색). **PR-C2**: Term 제목 glyph를 탭으로. **PR-D**: 호버 ✕·활성
+  하이라이트·클릭. **PR-E**: 탭 드래그(pane 내/간). **PR-F**: "+" 버튼.
 - **비율**: 고정 0.5(균등). divider 드래그 리사이즈는 후속(PR6).
 
 quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.

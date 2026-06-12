@@ -645,10 +645,16 @@ pub const MetalFrameBuffer = struct {
         sidebar_frame: ?renderer.RenderFrame,
         sidebar_band_cells: []const NativeMetalCell,
         sidebar_colors: CellColors,
+        // per-pane 탭 바 chrome 셀(배경 밴드 등). 각 셀이 자기 origin_x/origin_y를 들어 터미널 셀과 같은 경로로
+        // 렌더된다(maru_fill_cell_quad). 터미널 셀 '앞'에 두어 활성 panel 커서가 합쳐진 cells의 끝(suffix)에
+        // 남게 한다 — 커서 blink 노출 길이가 그대로 동작한다. glyph가 없으면(sentinel UV) upload 없이 bg만.
+        pane_chrome_cells: []const NativeMetalCell,
     ) !void {
-        // 1) 터미널 셀: 각 panel frame을 투영해 origin 박고 이어 붙인다. 커서 suffix는 맨 뒤(활성) panel만.
+        // 1) 터미널 셀: pane 탭 바 chrome을 먼저(커서 suffix 보존), 그 뒤 각 panel frame을 투영해 origin 박아
+        //    이어 붙인다. 커서 suffix는 맨 뒤(활성) panel만.
         var cells_list: std.ArrayList(NativeMetalCell) = .empty;
         errdefer cells_list.deinit(allocator);
+        try cells_list.appendSlice(allocator, pane_chrome_cells);
         var cursor_cells: usize = 0;
         for (pane_frames, 0..) |pf, i| {
             const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);

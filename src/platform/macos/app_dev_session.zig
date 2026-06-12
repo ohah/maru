@@ -155,6 +155,11 @@ pub const DevSession = struct {
     surface_ptrs: std.ArrayList(*app.Surface) = .empty,
     // surface_id·pty_id 발급(탭마다 유일). runtime이 두 id로 라우팅하므로 재사용하지 않는다.
     next_id: u64 = 1,
+    // 새 탭(Cmd+T)이 첫 탭과 같은 종류의 셸을 띄우도록 spawn 파라미터를 보관한다. zdotdir(ZDOTDIR
+    // 셸 통합 디렉터리)는 새 탭 spawn에도 필요하므로 init 끝에 free하지 않고 여기에 들고 deinit에서 푼다.
+    // term은 loaded_config.config.term(arena 소유)에서 매번 읽는다.
+    new_tab_config: NormalizedConfig = undefined,
+    new_tab_zdotdir: ?[]const u8 = null,
     app_window: app.AppWindow = undefined,
     runtime: app.SurfaceRuntime = undefined,
     renderer_state: renderer.RendererState = undefined,
@@ -276,7 +281,10 @@ pub const DevSession = struct {
             shell_integration.setupZsh(io, allocator)
         else
             null;
-        defer if (integ_dir) |d| allocator.free(d);
+        // init 끝에 free하지 않고 보관한다(새 탭 Cmd+T spawn에도 필요) — deinit에서 푼다. 바로 store해
+        // 이후 init 실패도 errdefer self.deinit()가 정리하게 한다.
+        self.new_tab_zdotdir = integ_dir;
+        self.new_tab_config = config;
 
         // runtime을 먼저 세운다 — createTab의 attachSurface가 surface를 runtime link에 등록한다.
         self.runtime = app.SurfaceRuntime.init(allocator);
@@ -378,6 +386,38 @@ pub const DevSession = struct {
         return true;
     }
 
+    /// 사용자 액션(Cmd+T)으로 새 탭을 연다 — 첫 탭과 같은 종류의 셸을 '현재 창 크기'로 띄운다(보관한
+    /// new_tab_config/zdotdir, term은 loaded_config). createTab이 새 탭을 활성으로 만든다.
+    fn newTab(self: *DevSession) !*Tab {
+        var cfg = self.new_tab_config;
+        cfg.size = self.activeSurface().core.size; // 첫 탭 크기가 아니라 지금 창 크기로
+        return self.createTab(
+            spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir),
+            cfg.size,
+            cfg.queue_capacity,
+            "Maru",
+            commandName(cfg.command_kind),
+        );
+    }
+
+    /// 키바인딩이 만든 app action을 디스패치한다(native 최소 — Swift는 키만 보내고 판정·실행은 Zig).
+    /// 탭 생성 실패(셸 spawn 실패 등)는 세션을 죽이지 않고 무시한다(현재 탭 그대로). 재드로우를 위해
+    /// metal_dirty를 세운다(새 탭/전환으로 활성 surface가 바뀜).
+    fn dispatchAppAction(self: *DevSession, action: config_mod.Action) void {
+        switch (action) {
+            .new_tab => _ = self.newTab() catch return,
+            .next_tab => if (self.tabs.items.len > 0) {
+                _ = self.switchTab((self.app_window.active_tab + 1) % self.tabs.items.len);
+            },
+            .previous_tab => if (self.tabs.items.len > 0) {
+                _ = self.switchTab((self.app_window.active_tab + self.tabs.items.len - 1) % self.tabs.items.len);
+            },
+            .select_tab => |index| _ = self.switchTab(index),
+            else => {}, // close_tab(PR4)·기타 액션은 아직 무동작
+        }
+        self.metal_dirty = true;
+    }
+
     /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거친다 —
     /// `app_window.active_tab`을 따라가므로 멀티-탭(후속 PR)에서 탭을 전환하면 자동으로 활성 탭에
     /// 라우팅된다. 지금은 단일 탭이라 항상 `surfaces[0]`이고 외부 동작은 불변이다. 호출자는 기존대로
@@ -460,7 +500,10 @@ pub const DevSession = struct {
                 self.total_terminal_input_bytes += terminal_input.bytes_len;
                 self.resetCursorBlink(); // 타이핑 중 커서가 사라지지 않게
             },
-            .app_action => self.total_app_key_events += 1,
+            .app_action => |action| {
+                self.total_app_key_events += 1;
+                self.dispatchAppAction(action); // Cmd+T 등 → 탭 생성/전환(native 최소)
+            },
             .ignored => self.total_ignored_key_events += 1,
         }
         self.writeSummaryFromState();
@@ -1270,6 +1313,11 @@ pub const DevSession = struct {
             self.loaded_config.deinit();
             self.config_loaded = false;
         }
+        // 새 탭 spawn용으로 보관했던 ZDOTDIR 셸 통합 디렉터리(init에서 안 풀고 들고 있던 것).
+        if (self.new_tab_zdotdir) |d| {
+            self.allocator.free(d);
+            self.new_tab_zdotdir = null;
+        }
         self.* = undefined;
     }
 
@@ -1663,6 +1711,35 @@ test "two tabs: createTab spawns a second shell and tick drains both (multi-tab)
     try std.testing.expectEqual(session.tabs.items[0].surface.id, session.activeSurface().id);
     try std.testing.expect(!session.switchTab(5)); // 범위 밖이면 false, 활성 불변
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
+}
+
+// Cmd+T가 기존 keyDown 경로(handleKeyEvent → resolver → app_action)를 통해 새 탭을 연다 — native
+// 최소(Swift는 키만 보내고 판정·실행은 Zig). 실 PTY라 macOS 게이트.
+test "Cmd+T opens a new tab through the key path (built-in app binding dispatch)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+
+    // Cmd+T → resolver의 default_app_bindings가 new_tab으로 → dispatchAppAction → newTab → createTab.
+    // 새 탭은 같은 종류(controlled_smoke) 셸을 현재 크기로 띄우고 활성이 된다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    try std.testing.expect(session.total_app_key_events >= 1); // 앱 액션으로 회계(PTY로 안 샘)
+
+    // 안 묶인 Cmd 조합(Cmd+S)은 탭을 안 만들고 무시(ignored).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
 }
 
 test "drag autoscroll works after a double-click word selection and skips redraw when nothing moves" {

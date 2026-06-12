@@ -2178,14 +2178,17 @@ pub const DevSession = struct {
             const active_pane = self.activePane();
 
             // per-pane 상단 탭 바 chrome: 바 배경(전체) + 활성 Term 탭 하이라이트. 각 panel rect 상단 바에 origin
-            // 박은 배경 셀로 만들어 터미널 셀 스트림에 prepend된다(C1). 바 base = chrome 색(sidebarBg), 각 pane의
-            // 활성 Term 탭 세그먼트 = 강조색(sidebarActiveBg)로 도드라진다. 제목 glyph는 아래 pane_frames에(C2).
+            // 박은 배경 셀로 만들어 터미널 셀 스트림에 prepend된다(C1). 바 base = chrome 색(sidebarBg). 활성 Term
+            // 탭 강조색은 **포커스된 pane을 구분**한다: 활성 pane은 밝은 sidebarActiveBg, 비활성 pane은 dim
+            // sidebarHoverBg(중간 톤) — split에서 pane 포커스를 옮기면 어느 bar가 활성인지 시각적으로 갱신된다
+            // (세로 분할 등에서 "활성 탭 UI가 안 바뀐다"는 제보 대응). 제목 glyph는 아래 pane_frames에(C2).
             var pane_chrome: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
             defer pane_chrome.deinit(self.allocator);
             for (leaf_rects.items) |lr| {
                 const bar = self.paneBarRect(lr.rect) orelse continue;
                 if (paneBarBgCell(bar, self.cell_width_px, self.sidebarBg())) |cell| pane_chrome.append(self.allocator, cell) catch {};
-                if (paneTabHighlightCell(bar, self.cell_width_px, lr.leaf.active_term, lr.leaf.terms.items.len, self.sidebarActiveBg())) |cell| {
+                const hl_bg = if (lr.leaf == active_pane) self.sidebarActiveBg() else self.sidebarHoverBg();
+                if (paneTabHighlightCell(bar, self.cell_width_px, lr.leaf.active_term, lr.leaf.terms.items.len, hl_bg)) |cell| {
                     pane_chrome.append(self.allocator, cell) catch {};
                 }
             }
@@ -3294,6 +3297,68 @@ test "pane tab bar draws Term-title tabs with an active-Term highlight" {
     // 하이라이트(c1)는 활성 Term(1) 세그먼트 = col tab_w(2탭이라 cols/2)에서 시작 — 바 배경(col 0)과 다르다.
     try std.testing.expect(c1.col > 0);
     try std.testing.expect(c1.width < c0.width); // 세그먼트는 바 전체보다 좁다
+}
+
+// 세로(상하) 분할에서 '아래' pane의 탭 바가 자기 y(≈ 화면 절반)에 그려지는지 — 사용자 제보(세로 분할 시
+// 탭 활성화 UI가 안 갱신됨) 회귀. 가로 분할은 두 바 모두 y=0(top)이라 안 드러나지만, 세로면 아래 바가
+// origin_y>0에 있어야 한다. tick chrome 셀에 origin_y>0인 바 배경 셀이 있는지로 본다.
+test "vertical split renders the bottom pane tab bar at its own y (not overlapping top at 0)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    try session.splitActivePane(.vertical); // 상/하 — 아래(새) pane 활성
+    try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
+    _ = try session.tick();
+
+    const frame = session.metalFrame();
+    // 위 pane 바(origin_y=0)와 아래 pane 바(origin_y>0, ≈ 화면 절반)가 둘 다 chrome으로 그려져야 한다. 그리고
+    // 활성 pane(아래) 탭은 밝은 sidebarActiveBg, 비활성 pane(위) 탭은 dim sidebarHoverBg로 — 포커스 구분.
+    var found_top_bar = false;
+    var found_bottom_bar = false;
+    var found_active_hl = false; // 활성 pane(아래)의 밝은 강조색
+    var found_inactive_hl = false; // 비활성 pane(위)의 dim 강조색
+    const active_bg = session.sidebarActiveBg();
+    const inactive_bg = session.sidebarHoverBg();
+    var i: usize = 0;
+    while (i < frame.cell_count) : (i += 1) {
+        const c = frame.cells.?[i];
+        // chrome 바 셀: slot_id 0(배경) + row 0 + sentinel UV(u0=-1) + 불투명 bg.
+        if (c.slot_id == 0 and c.row == 0 and c.u0 == -1.0 and (c.background >> 24) == 0xFF) {
+            if (c.origin_y == 0) found_top_bar = true;
+            if (c.origin_y > 0) found_bottom_bar = true;
+            if (c.origin_y > 0 and c.background == active_bg) found_active_hl = true; // 아래(활성) = 밝게
+            if (c.origin_y == 0 and c.background == inactive_bg) found_inactive_hl = true; // 위(비활성) = dim
+        }
+    }
+    try std.testing.expect(found_top_bar);
+    try std.testing.expect(found_bottom_bar); // 아래 pane 바가 자기 y(>0)에 있어야 함 — 0에 안 겹침
+    try std.testing.expect(active_bg != inactive_bg); // 두 색이 달라야 구분된다
+    try std.testing.expect(found_active_hl); // 활성 pane 탭 = 밝은 강조
+    try std.testing.expect(found_inactive_hl); // 비활성 pane 탭 = dim 강조
+
+    // 아래 pane(활성)에 Term 2개를 만들고, 아래 바의 탭 0을 클릭해 전환되는지(세로 분할 hit-test) 본다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+    // 아래 pane 바 y = 위 pane 높이(termRect.h/2 ≈ 300) + 1, 탭 0 = 바 좌단.
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const bottom_rect = lr.items[1].rect; // tree 순서: [0]=위, [1]=아래
+    const bottom_bar_y: f64 = @floatFromInt(bottom_rect.y + 1);
+    session.mouse(1, @floatFromInt(bottom_rect.x + 5), bottom_bar_y);
+    try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term); // 아래 바 탭 0으로 전환
 }
 
 // 탭 바의 탭을 클릭하면 그 Term으로 전환하는지(PR-D1) — 실 init/spawn이라 macOS 게이트. ⌘T로 Term 2개(활성

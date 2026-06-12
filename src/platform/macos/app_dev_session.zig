@@ -697,12 +697,11 @@ pub const DevSession = struct {
         };
     }
 
-    /// 포커스 변화. 잃으면 조합 중 텍스트를 버리지 않고 확정(커밋)한다 — 버리면 글자가
-    /// 사라졌다가 재포커스 후 입력 위치가 어긋나는 사용감(라이브 제보)이 된다.
-    /// Terminal.app/Ghostty와 같은 의미론.
-    pub fn setFocused(self: *DevSession, focused: bool) void {
+    /// 진행 중인 IME 조합(preedit)을 확정(커밋)한다 — 조합 글자를 PTY로 보내고 preedit을 비운다.
+    /// 포커스 상실(setFocused)과, IME를 우회하는 특수키/단축키(PageUp 등) '직전'에 호출해 Swift의
+    /// marked text와 core의 preedit·화면이 어긋나지 않게 한다. 조합이 없으면 무동작.
+    pub fn commitComposition(self: *DevSession) void {
         if (!self.surface_initialized) return;
-        if (focused) return;
         const core = &self.surfaces[0].core;
         if (core.preedit) |pending| {
             // setPreedit가 버퍼를 해제하므로 먼저 사본을 떠서 보낸다.
@@ -712,6 +711,15 @@ pub const DevSession = struct {
             self.metal_dirty = true;
             self.sendCommittedText(copy);
         }
+    }
+
+    /// 포커스 변화. 잃으면 조합 중 텍스트를 버리지 않고 확정(커밋)한다 — 버리면 글자가
+    /// 사라졌다가 재포커스 후 입력 위치가 어긋나는 사용감(라이브 제보)이 된다.
+    /// Terminal.app/Ghostty와 같은 의미론.
+    pub fn setFocused(self: *DevSession, focused: bool) void {
+        if (!self.surface_initialized) return;
+        if (focused) return;
+        self.commitComposition();
     }
 
     /// 확정 텍스트를 코드포인트 단위로 기존 key event 경로에 태운다 — 인코딩 단일 출처
@@ -1264,6 +1272,22 @@ test "wheelDeltaToLines accumulates sub-line trackpad deltas instead of dropping
     // NaN/∞는 무시.
     try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, std.math.nan(f64), true, 34, 2000));
     try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, std.math.inf(f64), false, 34, 2000));
+}
+
+test "commitComposition is a safe no-op when there is no active preedit" {
+    // 조합이 없으면(preedit==null) 아무것도 안 보내고 무해해야 한다 — IME 우회 특수키(PageUp)마다
+    // 호출되므로 일반 타이핑 경로를 망가뜨리면 안 된다. commit 경로(preedit 있을 때)는 frame_loop가
+    // 필요해 헤드리스로 못 돌리고 GUI 수동 검증으로 본다(PR 본문).
+    var session: DevSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.surfaces[0] = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer session.surfaces[0].deinit();
+    session.surface_initialized = true;
+    session.metal_dirty = false;
+    try std.testing.expect(session.surfaces[0].core.preedit == null);
+    session.commitComposition(); // 무동작이어야(no preedit)
+    try std.testing.expect(session.surfaces[0].core.preedit == null);
+    try std.testing.expect(!session.metal_dirty); // 보낼 게 없으니 다시 그릴 것도 없다
 }
 
 test "scrollPage scrolls one screen (rows-1) per page using the core's authoritative rows" {

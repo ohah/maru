@@ -130,6 +130,16 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // 모드에서도 Ctrl+B(tmux prefix)나 Cmd+C가 동작하고(레이아웃 독립 매칭은 Zig가 물리
         // 키코드로 한다), Option+글자는 특수문자 입력이 아니라 기존 meta-ESC 인코딩을 유지한다.
         let chord = event.modifierFlags.intersection([.command, .control, .option])
+        // 이 키가 IME를 우회해(단축키 조합 또는 특수키) handleKeyDown으로 직행하는가.
+        let bypassesIME = !chord.isEmpty || Self.directEncodeKeyCodes.contains(event.keyCode)
+        // 조합(marked text) 중에 우회 키가 오면 '먼저 조합을 확정'한다 — 안 그러면 Swift의 marked
+        // text(hasMarkedText)와 Zig의 preedit가 안 비워진 채 PageUp이 화면을 옮겨, 이후 입력이 stale한
+        // marked range에 박혀 위치가 어긋나거나 안 먹거나 안 지워진다(특수키 우회의 누락된 처리).
+        if bypassesIME, hasMarkedText() {
+            controller?.imeCommit()            // core preedit 커밋(조합 글자 PTY로)
+            inputContext?.discardMarkedText()  // AppKit 입력기의 marked 상태 정리(콜백 없이)
+            markedTextBuffer = ""               // hasMarkedText() = false 로 동기화
+        }
         if !chord.isEmpty {
             controller?.handleKeyDown(event)
             return
@@ -973,6 +983,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func imeFocus(_ focused: Bool) {
         guard let session = devSession else { return }
         _ = maru_macos_app_dev_session_set_focus(session, focused ? 1 : 0)
+    }
+
+    // 진행 중 IME 조합을 확정한다(IME 우회 특수키/단축키 직전). core preedit를 커밋·비운다.
+    func imeCommit() {
+        guard let session = devSession else { return }
+        _ = maru_macos_app_dev_session_commit_composition(session)
     }
 
     // IME 후보창 배치용 커서 셀 사각형(backing px, 좌상단 원점). 화면 좌표 변환은 view가 한다.

@@ -305,6 +305,8 @@ int32_t maru_macos_app_dev_session_ime_cursor_rect(
 int32_t maru_macos_app_dev_session_ime_delete_backward(MaruAppHostDevSession *session);
 /* 포커스 변화. 잃으면(0) 조합 중 텍스트를 확정 커밋한다. */
 int32_t maru_macos_app_dev_session_set_focus(MaruAppHostDevSession *session, int32_t focused);
+/* 진행 중 IME 조합을 확정(커밋)한다. IME 우회 특수키/단축키 직전에 호출. */
+int32_t maru_macos_app_dev_session_commit_composition(MaruAppHostDevSession *session);
 /* Cmd+hover 갱신(backing px). URL 위면 *out_is_url=1(Swift가 pointingHand 커서), Zig는 밑줄
    하이라이트를 다음 frame에 투영한다. cmd_held=0이면 hover 해제. */
 int32_t maru_macos_app_dev_session_hover(

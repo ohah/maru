@@ -112,8 +112,10 @@ Node = leaf(Pane)
   UI로 하므로 Maru도 후속 사이드바 "+" 버튼으로 옮길 수 있고, 그 전까진 `Cmd+Shift+T`를 임시로 둔다.
 - **닫기(PR5a + PR-B cascade)**: `Cmd+W`는 **cmux식 계층 cascade** — 활성 pane에 Term이 여럿이면 **활성 Term**을
   닫고, Term이 1개면 **pane**을(split이면 형제로 collapse, 형제가 빈자리 차지) 닫고, pane이 1개면 **워크스페이스**를
-  (마지막이면 창) 닫는다. 즉 Cmd+W를 반복하면 Term → pane → 워크스페이스 순으로 하나씩 닫힌다. 셸 `exit` 시 자동
-  collapse는 후속(PR5b).
+  (마지막이면 창) 닫는다. 즉 Cmd+W를 반복하면 Term → pane → 워크스페이스 순으로 하나씩 닫힌다.
+- **exit 자동 collapse(PR5b)**: 셸이 `exit`하면 그 Term도 같은 cascade로 자동 정리된다(Cmd+W 닫기와 동일 경로의
+  exit 버전) — 활성/배경 탭·pane 어디서 죽어도 tick의 drain이 종료를 관측한 직후 reap한다. 단 **모든 Term이
+  죽으면** 마지막은 reap하지 않고 세션 종료(창 닫힘) latch가 맡는다(빈 세션을 만들지 않음).
 - **per-pane 탭 바 렌더(PR-C)**: 각 pane(leaf rect) 상단에 가로 탭 바 strip(높이 = cell 1칸)을 예약하고 그
   아래를 터미널 영역으로 쓴다(`paneTermRect`/`paneBarRect` 단일 출처 — 좌표·resize·split·렌더가 공유). 바는
   터미널 셀 스트림에 origin 박힌 셀로 그려진다(`metal_frame.replace`의 `pane_chrome_cells`, 렌더러·ABI 무변경).

@@ -818,6 +818,21 @@ pub const DevSession = struct {
         }
     }
 
+    /// 주어진 탭(활성/배경)의 각 panel을 자기 leaf rect grid로 resize한다 — reap collapse 후 형제가 빈자리
+    /// 확장. best-effort: 임의 탭이라 모든 Term 에러를 무시한다(resizeActiveTabPanes는 활성 Term 에러를 resize()
+    /// try 계약대로 전파하지만, 이 경로는 자동 정리라 한 panel 실패가 다른 재배치를 막지 않게 한다). 레이아웃
+    /// 실패(OOM)는 무시(다음 resize/tick이 다시 맞춘다).
+    fn resizeTabPanes(self: *DevSession, tab: *Tab) void {
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        PaneTree.layout(self.allocator, tab.tree, self.termRect(), &leaf_rects) catch return;
+        for (leaf_rects.items) |lr| {
+            const trect = self.paneTermRect(lr.rect);
+            const psize = gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
+            for (lr.leaf.terms.items) |term| self.runtime.resize(term.surface.id, psize) catch {};
+        }
+    }
+
     /// 활성 panel의 픽셀 rect를 다시 계산해 캐시한다(`active_pane_rect`). 활성 탭 tree를 터미널 영역에서
     /// 펴 활성 surface의 leaf rect를 찾는다. 못 찾거나(OOM) 단일 panel이면 터미널 영역 전체로 폴백 —
     /// 단일 panel은 그게 곧 활성 rect라 결과가 같다. 레이아웃/포커스/리사이즈가 바뀔 때(split·switchTab·
@@ -970,11 +985,16 @@ pub const DevSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 비어 있는 pane(모든 Term이 옮겨 나감)을 트리에서 떼고(removeLeaf, 형제로 collapse) panes에서 빼고 해제한다.
-    /// cross-pane 이동은 split에서만 일어나 항상 형제가 있다(단일 pane이면 무동작). active_pane은 호출자가 dst로
-    /// 다시 잡으므로 여기선 범위 clamp만. pane.terms는 비어 있어 destroyPane이 리스트·Pane만 해제한다.
+    /// 비어 있는 pane(모든 Term이 옮겨 나감/exit)을 활성 탭에서 collapse한다. cross-pane 이동(moveTermToPane)이
+    /// 쓰는 활성 탭 전용 래퍼 — 임의 탭은 collapsePaneIn을 직접 쓴다.
     fn collapsePane(self: *DevSession, pane: *Pane) void {
-        const tab = self.activeTab();
+        self.collapsePaneIn(self.activeTab(), pane);
+    }
+
+    /// 주어진 탭(tab)에서 비어 있는 pane을 트리에서 떼고(removeLeaf, 형제로 collapse) panes에서 빼고 해제한다.
+    /// split에서만(형제가 있을 때) 일어나므로 단일 pane이면 무동작. active_pane은 범위 clamp만(호출자가 필요 시
+    /// 다시 잡는다). pane.terms는 비어 있어 destroyPane이 리스트·Pane만 해제한다. 활성/배경 탭 모두에 쓴다.
+    fn collapsePaneIn(self: *DevSession, tab: *Tab, pane: *Pane) void {
         if (tab.panes.items.len <= 1) return;
         if (!PaneTree.removeLeaf(self.allocator, &tab.tree, pane)) return;
         for (tab.panes.items, 0..) |p, i| {
@@ -985,6 +1005,68 @@ pub const DevSession = struct {
         }
         self.destroyPane(pane);
         if (tab.active_pane >= tab.panes.items.len) tab.active_pane = tab.panes.items.len - 1;
+    }
+
+    const TermLoc = struct { tab_index: usize, pane: *Pane, term_index: usize };
+
+    /// 모든 탭/panel을 훑어 첫 'terminated'(셸 exit 관측 완료) Term의 위치를 찾는다(reap 대상). 없으면 null.
+    fn findTerminatedTerm(self: *DevSession) ?TermLoc {
+        for (self.tabs.items, 0..) |tab, ti| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items, 0..) |term, tj| {
+                    if (term.terminated) return .{ .tab_index = ti, .pane = pane, .term_index = tj };
+                }
+            }
+        }
+        return null;
+    }
+
+    /// 셸이 exit한 개별 Term을 자동으로 닫는다(cmux/Warp식 exit 자동 collapse, PR5b). 살아있는 Term이 하나라도
+    /// 있으면 죽은 Term을 **Term → pane(빈 pane collapse) → 워크스페이스(빈 탭 close)** cascade로 정리한다.
+    /// 전부 죽었으면(단일/마지막 Term) reap하지 않고 세션 종료 latch(allTabsTerminated)에 맡긴다 — 기존 단일 탭
+    /// exit→창 닫힘 동작을 보존. 구조가 매번 바뀌므로 한 번에 하나씩 닫고 다시 스캔한다(stale 인덱스/포인터 방지).
+    /// guard는 폭주 backstop(정상이면 죽은 Term 수만큼만 돈다). tick의 drain이 종료를 관측한 뒤 부른다.
+    fn reapTerminatedTerms(self: *DevSession) void {
+        if (self.termination_finished) return;
+        var guard: usize = 0;
+        while (guard < 4096) : (guard += 1) {
+            if (self.allTabsTerminated()) return; // 전부 죽음 → 세션 종료가 마지막을 닫는다(여기선 reap 안 함)
+            const loc = self.findTerminatedTerm() orelse return; // 더 닫을 죽은 Term 없음
+            self.closeTermAt(loc.tab_index, loc.pane, loc.term_index);
+        }
+    }
+
+    /// 임의 탭(tab_index)의 pane에서 term_index Term을 닫고 cascade한다(exit 자동 정리·일반화). Term을 teardown·
+    /// 제거하고: pane에 Term이 남으면 active_term clamp, 비면 split이면 collapse, 단일 pane이면 워크스페이스(탭)를
+    /// close한다. 활성/배경 탭 모두 대상이라 closeActiveTerm(활성 전용)과 달리 위치를 인자로 받는다.
+    fn closeTermAt(self: *DevSession, tab_index: usize, pane: *Pane, term_index: usize) void {
+        const tab = self.tabs.items[tab_index];
+        const term = pane.terms.orderedRemove(term_index);
+        self.destroyTerm(term);
+        if (pane.terms.items.len > 0) {
+            if (pane.active_term >= pane.terms.items.len) pane.active_term = pane.terms.items.len - 1;
+            self.refreshAfterReap(tab_index);
+        } else if (tab.panes.items.len > 1) {
+            self.collapsePaneIn(tab, pane); // 빈 pane을 형제로 collapse(active_pane clamp 포함)
+            self.refreshAfterReap(tab_index);
+        } else {
+            self.closeTab(tab_index); // 탭의 마지막 pane이 비었다 — 워크스페이스 close(대표 surface·active_tab은 closeTab가 처리)
+        }
+    }
+
+    /// reap으로 구조가 바뀐 탭의 대표 surface를 그 탭의 현재 활성 Term으로 재바인딩하고(닫힌 Term을 가리키던
+    /// stale/dangling 방지) panel을 새 leaf rect로 resize한다(collapse면 형제가 빈자리 확장 — 배경 탭도 전환
+    /// 즉시 올바른 크기). 활성 탭이면 좌표 origin도 재계산하고 redraw를 표시한다(배경 탭 변경은 화면에 안 보임).
+    fn refreshAfterReap(self: *DevSession, tab_index: usize) void {
+        const tab = self.tabs.items[tab_index];
+        self.surface_ptrs.items[tab_index] = &tab.activeTerm().surface;
+        self.app_window.tabs = self.surface_ptrs.items;
+        self.resizeTabPanes(tab);
+        self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
+        if (tab_index == self.app_window.active_tab) {
+            self.recomputeActivePaneRect();
+            self.metal_dirty = true;
+        }
     }
 
     /// 활성 pane에 새 Term(터미널 탭)을 띄우고 그 탭으로 포커스한다(⌘T, cmux식). 활성 pane의 현재 rect grid
@@ -2303,6 +2385,10 @@ pub const DevSession = struct {
         }
         self.total_output_events += drain_summary.output_events;
         self.total_exit_events += drain_summary.exit_events;
+        // 개별 Term이 exit하면(전부는 아닌) 그 Term을 자동으로 닫는다(cmux식 cascade: Term→pane→워크스페이스,
+        // PR5b). 이번 tick에 새 종료가 관측됐을 때만 — 살아있는 Term이 있으면 같은 tick에 reap되고, 전부 죽으면
+        // 아래 세션 종료 latch가 마지막을 맡는다(그래서 reap이 빈 세션을 만들지 않는다).
+        if (drain_summary.ended != null) self.reapTerminatedTerms();
         // 세션(창) 종료: live 탭이 전부 terminated면. 단일 탭이면 그 탭이 끝나는 즉시(기존 동작 보존).
         if (!self.termination_finished and self.allTabsTerminated()) {
             self.ended_seen = true;
@@ -4011,6 +4097,148 @@ test "Cmd+W closes the active pane first and collapses the split, leaving the si
     _ = try session.tick();
 }
 
+// PR5b(exit 자동 collapse): 개별 Term의 셸이 exit하면 그 Term을 자동으로 닫고(Term→pane→워크스페이스 cascade)
+// 살아있는 Term이 남아 있으면 세션을 유지한다. 비동기 PTY exit 폴링은 flaky하므로, drain이 종료를 관측한 상태
+// (term.terminated=true)를 세팅하고 reapTerminatedTerms를 직접 호출해 cascade를 결정적으로 고정한다(구조 연산
+// 단위 테스트 관행 — closeTab/Cmd+W 테스트와 같은 방식). 실 init/spawn이라 macOS 게이트.
+
+// ① pane 안 형제 Term: 한 Term이 exit하면 그 Term만 닫히고 형제가 활성으로 남는다(pane/탭 그대로).
+test "PR5b: a Term whose shell exits is reaped, the sibling Term survives" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+
+    // ⌘T → 활성 pane에 Term 2개([T0, T1], T1 활성).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    const pane = session.activePane();
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pane.active_term);
+    const t1_id = pane.terms.items[1].surface.id; // 살아남을(활성) Term
+
+    // 배경 Term T0의 셸이 exit → reap. T0만 닫히고 T1이 인덱스 0·활성으로 clamp, 대표 surface = T1.
+    pane.terms.items[0].terminated = true;
+    session.reapTerminatedTerms();
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+    try std.testing.expectEqual(t1_id, pane.terms.items[0].surface.id);
+    try std.testing.expectEqual(@as(usize, 0), pane.active_term);
+    try std.testing.expectEqual(t1_id, session.activeSurface().id);
+    try std.testing.expect(!session.ended_seen);
+    _ = try session.tick(); // 다음 tick 크래시 없음
+}
+
+// ② split pane: 한 pane의 유일한 Term이 exit하면 그 pane이 collapse되고 형제 pane이 전체를 차지한다.
+test "PR5b: a split pane whose only Term exits collapses to its sibling" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+
+    const left = session.activeSurface(); // 분할 전 = 분할 후 왼쪽(기존) pane P0
+    try session.splitActivePane(.horizontal); // 오른쪽(새) pane P1 활성, 2 panes
+    try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
+    const right_id = session.activeSurface().id; // P1(활성)
+    try std.testing.expect(left.id != right_id);
+
+    // 왼쪽(배경) pane P0의 유일한 Term 셸이 exit → reap → P0 collapse, P1만 전체 폭으로 남고 활성 유지.
+    const active_pane = session.activePane();
+    for (session.activeTab().panes.items) |p| {
+        if (p != active_pane) p.terms.items[0].terminated = true; // P0
+    }
+    session.reapTerminatedTerms();
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(session.activeTab().tree));
+    try std.testing.expect(!session.activeTabHasSplit());
+    try std.testing.expectEqual(right_id, session.activeSurface().id); // P1 유지·활성
+    try std.testing.expectEqual(@as(u32, 800), session.active_pane_rect.w); // 전체 폭으로 확장
+    try std.testing.expect(!session.ended_seen);
+    _ = try session.tick();
+}
+
+// ③ 배경 워크스페이스: 다른 탭에서 셸이 exit해 그 탭의 마지막 Term이 나가면 그 워크스페이스(탭)가 닫히고
+//    활성 탭이 보정된다(다른 탭은 유지).
+test "PR5b: a background workspace whose last Term exits is closed; the other survives" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+
+    // 탭 1: cat(stdin 대기로 살아 있음), 활성이 된다. 탭 0(controlled_smoke)은 read 대기로 살아 있다.
+    _ = try session.createTab(
+        .{ .command = "/bin/sh", .args = &.{ "-c", "cat" }, .size = .{ .cols = 20, .rows = 5 } },
+        .{ .cols = 20, .rows = 5 },
+        16,
+        "tab 2",
+        "sh",
+    );
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    const survivor_id = session.tabs.items[1].activePane().activeTerm().surface.id;
+
+    // 배경 탭 0의 유일한 Term이 exit → reap → 탭 0 워크스페이스 닫힘, 탭 1만 남고 active 0으로 보정.
+    session.tabs.items[0].activePane().terms.items[0].terminated = true;
+    session.reapTerminatedTerms();
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
+    try std.testing.expectEqual(survivor_id, session.activeSurface().id);
+    try std.testing.expect(!session.ended_seen);
+    _ = try session.tick();
+}
+
+// ④ 마지막 Term: 살아있는 Term이 하나도 없으면(단일/마지막 Term exit) reap하지 않는다 — 기존 세션 종료 latch
+//    (allTabsTerminated → ended_seen)가 마지막을 맡으므로 reap이 빈 세션을 만들지 않게 한다.
+test "PR5b: the last Term exiting is not reaped (session-end latch owns it)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 단일 탭·단일 pane·단일 Term이 exit → reap 무동작(구조 유지). 세션 종료는 reap이 아니라 tick latch가 한다.
+    session.activePane().terms.items[0].terminated = true;
+    session.reapTerminatedTerms();
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expect(!session.ended_seen);
+}
+
 // 사이드바 클릭이 슬롯 hit-test로 탭을 전환하고, 호버가 호버 밴드를 더하는지 — 실 init이 사이드바
 // 폭/슬롯 높이를 채우는 macOS 경로라 게이트한다. 마우스 좌표는 backing px, 슬롯 = y / slot_height.
 test "sidebar click switches tabs and hover adds a hover band via hit-test" {
@@ -4169,10 +4397,11 @@ test "two tabs: createTab spawns a second shell and tick drains both (multi-tab)
     defer session.deinit();
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 
-    // 2번째 탭: 알려진 마커를 출력하는 controlled 셸. createTab이 Tab을 heap-pin하고 같은 runtime에
-    // 별개 surface_id로 attach한다. 새 탭이 활성이 된다.
+    // 2번째 탭: 알려진 마커를 출력하고 cat으로 stdin을 읽으며 살아 있는 controlled 셸. createTab이 Tab을
+    // heap-pin하고 같은 runtime에 별개 surface_id로 attach한다. 새 탭이 활성이 된다. (printf만 쓰면 셸이 즉시
+    // exit해 PR5b reap이 탭을 닫으므로, 멀티-탭 drain을 관측하려면 탭이 살아 있어야 한다 — cat으로 유지.)
     _ = try session.createTab(
-        .{ .command = "/bin/sh", .args = &.{ "-c", "printf 'TAB_TWO_MARK\\n'" }, .size = .{ .cols = 20, .rows = 5 } },
+        .{ .command = "/bin/sh", .args = &.{ "-c", "printf 'TAB_TWO_MARK\\n'; cat" }, .size = .{ .cols = 20, .rows = 5 } },
         .{ .cols = 20, .rows = 5 },
         16,
         "tab 2",

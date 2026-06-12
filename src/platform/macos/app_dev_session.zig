@@ -16,7 +16,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 22;
+pub const abi_version: u32 = 23;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -43,6 +43,35 @@ fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px:
     const raw_cols = @min(term_width / cell_w, std.math.maxInt(u16));
     const raw_rows = @min(backing_height_px / cell_h, std.math.maxInt(u16));
     return terminal.clampGridSize(.{ .cols = @intCast(raw_cols), .rows = @intCast(raw_rows) });
+}
+
+/// 활성 탭 하이라이트 밴드 셀 1개를 만든다(못 만들면 null). 사이드바 폭을 cell 폭으로 floor해 칸 수
+/// (sidebar_cols)를 구하고 — 밴드가 origin_x를 넘어 터미널 영역을 침범하지 않게 floor한다(우측에 한 칸
+/// 미만 여백이 살짝 inset처럼 남는다) — 그 폭만큼 한 칸(col 0, width=sidebar_cols)으로 사이드바를 채우는
+/// sentinel-UV(-1) 배경 셀을 active_row에 둔다. u16 width 상한도 같이 막는다. 순수 함수라 OS와 무관하게
+/// 단위 테스트한다(rebuildSidebar가 호출). 사이드바가 꺼졌거나(폭 0) cell 폭 미상이면 null.
+fn sidebarBandCell(sidebar_width_px: u32, cell_width_px: u32, active_row: u16, active_bg: u32) ?metal_frame.NativeMetalCell {
+    if (sidebar_width_px == 0 or cell_width_px == 0) return null;
+    const cols_u32 = @min(sidebar_width_px / cell_width_px, @as(u32, std.math.maxInt(u16)));
+    const sidebar_cols: u16 = @intCast(cols_u32);
+    if (sidebar_cols == 0) return null;
+    return .{
+        .row = active_row,
+        .col = 0,
+        .width = sidebar_cols,
+        .codepoint = ' ',
+        .slot_id = 0,
+        .atlas_x_px = 0,
+        .atlas_y_px = 0,
+        .atlas_width_px = 0,
+        .atlas_height_px = 0,
+        .u0 = -1.0,
+        .v0 = -1.0,
+        .u1 = -1.0,
+        .v1 = -1.0,
+        .foreground = 0,
+        .background = active_bg,
+    };
 }
 
 /// 휠/트랙패드 델타(포인트 또는 줄)를 정수 줄 수로 바꾼다. 정밀(트랙패드) 델타는 실제 cell 높이를
@@ -216,6 +245,11 @@ pub const DevSession = struct {
     // view를 돌려준다. metal_dirty가 true일 때만(첫 frame, 새 output, resize) 재투영한다.
     metal_buffer: metal_frame.MetalFrameBuffer = .{},
     metal_dirty: bool = true,
+    // 세로 사이드바에 그릴 탭 엔트리 셀(owned). rebuildSidebar가 탭 추가/전환/cell 메트릭 변경 때 다시
+    // 채우고, metalFrame()이 이걸 가리키는 view를 사이드바 셀(origin 0 렌더)로 넘긴다. PR3b-1은 활성
+    // 탭 하이라이트 밴드만 담고, PR3b-2가 탭 번호·제목 glyph를 더한다. 비싸지 않아(탭 수만큼) 변경
+    // 이벤트마다 통째로 다시 만든다.
+    sidebar_cells: std.ArrayList(metal_frame.NativeMetalCell) = .empty,
     // 트랙패드 정밀 스크롤의 1줄 미만 잔여 델타(줄 단위). scrollWheel이 누적/소비한다.
     wheel_accum: f64 = 0,
     // copyText()가 돌려준 추출 텍스트의 소유 버퍼(다음 copyText/destroy까지 유효 — ABI 수명 계약).
@@ -375,6 +409,9 @@ pub const DevSession = struct {
         self.app_window.tabs = self.surface_ptrs.items;
         self.app_window.active_tab = self.tabs.items.len - 1;
         self.next_id += 1;
+        // 탭 집합/활성이 바뀌었으니 사이드바 셀을 다시 만든다. 실패는 탭 생성을 무르지 않고(탭은 이미
+        // 완성·append됨) 빈 사이드바로 degrade한다 — 여기서 try면 errdefer가 멀쩡한 탭을 헐어버린다.
+        self.rebuildSidebar() catch {};
         return tab;
     }
 
@@ -384,6 +421,7 @@ pub const DevSession = struct {
     pub fn switchTab(self: *DevSession, index: usize) bool {
         if (!self.app_window.selectTab(index)) return false;
         self.metal_dirty = true;
+        self.rebuildSidebar() catch {}; // 활성 탭이 바뀌었으니 하이라이트 밴드를 새 행으로 옮긴다
         return true;
     }
 
@@ -468,6 +506,8 @@ pub const DevSession = struct {
         }
         // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처).
         self.sidebar_width_px = sidebar_width_pt * self.scale_milli / 1000;
+        // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
+        self.rebuildSidebar() catch {};
     }
 
     pub fn handleKeyEvent(self: *DevSession, event: terminal.KeyEvent) !FrameSummary {
@@ -1292,12 +1332,40 @@ pub const DevSession = struct {
         return 0xFF00_0000 | (r << 16) | (g << 8) | b;
     }
 
+    /// 활성 탭 하이라이트 밴드 배경색(0xAARRGGBB) — 사이드바 배경(+24)보다 한 단계 더 밝은 +48로,
+    /// 같은 테마 톤을 유지하면서 "이 탭이 활성"임을 드러낸다(cmux/Warp식 미묘한 선택 하이라이트).
+    fn sidebarActiveBg(self: *const DevSession) u32 {
+        const bg = self.appearance.theme.background;
+        const r: u32 = @min(@as(u32, bg.r) + 48, 255);
+        const g: u32 = @min(@as(u32, bg.g) + 48, 255);
+        const b: u32 = @min(@as(u32, bg.b) + 48, 255);
+        return 0xFF00_0000 | (r << 16) | (g << 8) | b;
+    }
+
+    /// 세로 사이드바 셀(탭 엔트리)을 다시 만든다. PR3b-1은 활성 탭 행에 하이라이트 밴드 1개를 emit한다
+    /// (텍스트 없음 — PR3b-2가 탭 번호·제목 glyph를 더한다). 탭 i는 행 i에 대응한다(한 탭=한 줄). 사이드바
+    /// 가 꺼졌거나(폭 0) cell 폭 미상이면 비운다. 탭 추가(createTab)·전환(switchTab)·메트릭 변경
+    /// (refreshCellMetrics) 때 호출한다. 실패(OOM)는 세션을 죽이지 않고 빈 사이드바로 degrade한다(호출부가
+    /// catch). 알려진 한계: 한 줄 높이 밴드라 탭 수가 행 수를 넘으면 화면 밖 행에 놓인다(다중 탭 슬롯
+    /// 패딩/스크롤은 후속 PR).
+    fn rebuildSidebar(self: *DevSession) !void {
+        self.sidebar_cells.clearRetainingCapacity();
+        if (self.tabs.items.len == 0) return;
+        const active_row: u16 = @intCast(@min(self.app_window.active_tab, @as(usize, std.math.maxInt(u16))));
+        const cell = sidebarBandCell(self.sidebar_width_px, self.cell_width_px, active_row, self.sidebarActiveBg()) orelse return;
+        try self.sidebar_cells.append(self.allocator, cell);
+    }
+
     pub fn metalFrame(self: *const DevSession) MetalFrame {
         var frame = self.metal_buffer.view();
         // "surface→rect": 터미널을 사이드바 폭만큼 오른쪽에 그리고, 왼쪽 strip에 사이드바 배경을 칠한다.
         // 렌더러가 origin offset + 배경 quad를 처리한다. split(panel)도 같은 origin 방식을 확장한다.
         frame.terminal_origin_x_px = self.sidebar_width_px;
         frame.sidebar_bg = self.sidebarBg();
+        // 사이드바 탭 엔트리 셀(origin 0 렌더). owned ArrayList를 가리키므로 다음 rebuildSidebar/deinit
+        // 까지 유효하다(cells와 같은 수명 계약). 비어 있으면 null로 둬 렌더러가 사이드바 셀을 건너뛴다.
+        frame.sidebar_cells = if (self.sidebar_cells.items.len > 0) self.sidebar_cells.items.ptr else null;
+        frame.sidebar_cell_count = self.sidebar_cells.items.len;
         return frame;
     }
 
@@ -1308,6 +1376,7 @@ pub const DevSession = struct {
         self.ime_inserted.deinit(self.allocator);
 
         self.metal_buffer.deinit(self.allocator);
+        self.sidebar_cells.deinit(self.allocator);
         // 1) 각 탭의 live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'. detach 후
         //    deinit이 reader thread join + fd/queue 해제(이동 금지 계약이라 in-place로 정리).
         for (self.tabs.items) |tab| {
@@ -1694,6 +1763,75 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
     try std.testing.expect(toggles >= 1);
     // 토글은 rebuild 없이도 재드로우를 유발해야 한다(setCursorVisible의 generation 증가).
     try std.testing.expect(gen_changes >= toggles);
+}
+
+test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {
+    // 순수 함수: 사이드바 폭/cell 폭/활성 행/색만으로 활성 탭 하이라이트 밴드 셀을 만든다(OS 무관).
+    // 사이드바 꺼짐(폭 0)이나 cell 폭 0이면 null.
+    try std.testing.expect(sidebarBandCell(0, 8, 0, 0xFF112233) == null);
+    try std.testing.expect(sidebarBandCell(180, 0, 0, 0xFF112233) == null);
+
+    // 180px 폭, cell 폭 9px → floor(180/9)=20칸. 밴드는 col 0, width 20, 활성 행, sentinel UV, 배경=색.
+    const cell = sidebarBandCell(180, 9, 0, 0xFF112233).?;
+    try std.testing.expectEqual(@as(u16, 0), cell.col);
+    try std.testing.expectEqual(@as(u16, 20), cell.width);
+    try std.testing.expectEqual(@as(u16, 0), cell.row);
+    try std.testing.expectEqual(@as(f32, -1.0), cell.u0); // sentinel UV: 셰이더가 atlas 샘플 없이 배경만
+    try std.testing.expectEqual(@as(u32, 0xFF112233), cell.background);
+    try std.testing.expectEqual(@as(u32, 0), cell.foreground);
+
+    // 밴드 폭은 floor라 origin_x를 넘지 않는다: 17px 폭/8px cell → 2칸(2*8=16<=17). ceil(=3,24px)이면 침범.
+    try std.testing.expectEqual(@as(u16, 2), sidebarBandCell(17, 8, 0, 0xFF000000).?.width);
+    // 활성 행은 인자대로(탭 i = 행 i): 3번째 탭이면 row 2.
+    try std.testing.expectEqual(@as(u16, 2), sidebarBandCell(180, 9, 2, 0xFF000000).?.row);
+    // cell 폭이 사이드바 폭보다 크면 0칸 → null(밴드 없음).
+    try std.testing.expect(sidebarBandCell(8, 16, 0, 0xFF000000) == null);
+}
+
+// 사이드바 활성 하이라이트 밴드가 실제 세션에서 채워지고 탭 생성/전환을 따라 행을 옮기는지 — 실 init이
+// CoreText 메트릭과 사이드바 폭을 채우는 macOS 경로라 게이트한다. metalFrame()이 그 밴드를 사이드바
+// 셀로 노출하는 것도 함께 본다(렌더러가 origin 0에 그릴 입력).
+test "sidebar gets an active-tab highlight band that follows tab create and switch" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // init 후: 사이드바 폭/메트릭이 채워져 활성 탭(0) 하이라이트 밴드 1개가 row 0에 나온다.
+    try std.testing.expect(session.sidebar_width_px > 0);
+    {
+        const frame = session.metalFrame();
+        try std.testing.expectEqual(@as(usize, 1), frame.sidebar_cell_count);
+        try std.testing.expect(frame.sidebar_cells != null);
+        try std.testing.expectEqual(@as(u16, 0), session.sidebar_cells.items[0].row);
+        try std.testing.expect(session.sidebar_cells.items[0].width > 0);
+        // 밴드를 그릴 사이드바 폭은 터미널 origin offset과 같은 단일 출처다.
+        try std.testing.expectEqual(session.sidebar_width_px, frame.terminal_origin_x_px);
+    }
+
+    // 2번째 탭 생성 → 활성=1 → 밴드가 row 1로 이동(여전히 1개).
+    _ = try session.createTab(
+        .{ .command = "/bin/sh", .args = &.{ "-c", "true" }, .size = .{ .cols = 20, .rows = 5 } },
+        .{ .cols = 20, .rows = 5 },
+        16,
+        "tab 2",
+        "sh",
+    );
+    try std.testing.expectEqual(@as(usize, 1), session.sidebar_cells.items.len);
+    try std.testing.expectEqual(@as(u16, 1), session.sidebar_cells.items[0].row);
+
+    // switchTab(0) → 밴드가 다시 row 0.
+    try std.testing.expect(session.switchTab(0));
+    try std.testing.expectEqual(@as(u16, 1), session.sidebar_cells.items.len);
+    try std.testing.expectEqual(@as(u16, 0), session.sidebar_cells.items[0].row);
 }
 
 // 멀티-탭 핵심 계약: 두 번째 탭을 만들면 자기 셸 PTY가 spawn되고, tick이 '모든' 탭을 drain하므로

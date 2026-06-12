@@ -119,6 +119,10 @@ Node = leaf(Pane)
   터미널 셀 스트림에 origin 박힌 셀로 그려진다(`metal_frame.replace`의 `pane_chrome_cells`, 렌더러·ABI 무변경).
   **PR-C1**: 바 배경만(활성 강조색·비활성 chrome 색). **PR-C2**: Term 제목 glyph를 탭으로. **PR-D**: 호버 ✕·활성
   하이라이트·클릭. **PR-E**: 탭 드래그(pane 내/간). **PR-F**: "+" 버튼.
+- **탭 바 "+" 버튼(PR-F)**: 바 우측에 "+"를 그려 클릭하면 그 pane에 새 Term을 띄운다(⌘T의 마우스 버전). 바를
+  `paneTabAreaCols(cols)`(넓으면 `cols - 3`, 좁으면 전체)로 나눠 **탭 영역**과 우측 **"+" 영역**을 분리한다 — 탭
+  렌더·hit-test(`tabIndexInBar`/`xInTabCloseZone`)·"+"(`xInPlusZone`)가 같은 분할을 공유해 "보이는 = 클릭되는"을
+  지킨다. cmux 비교상 "+"는 새 **탭(Term)** 추가이며, split은 ⌘D/⌘⇧D·divider(PR6)로 둔다.
 - **비율**: 고정 0.5(균등). divider 드래그 리사이즈는 후속(PR6).
 
 quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.

@@ -99,6 +99,15 @@ fn sidebarSlot(y_px: f64, slot_height_px: u32, tab_count: usize) ?usize {
     return @intFromFloat(slot_f);
 }
 
+/// 스크린 x가 사이드바 슬롯의 닫기(✕) zone(우측 2칸) 안인가 — 호버 시 ✕를 그 자리(col cols-2)에 그리므로
+/// 그 폭만큼 우측을 닫기 영역으로 본다. 사이드바/cell 폭 0이면 false. 순수 함수라 OS 무관 단위 테스트.
+fn inSidebarCloseButton(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bool {
+    if (sidebar_width_px == 0 or cell_width_px == 0) return false;
+    const width: f64 = @floatFromInt(sidebar_width_px);
+    const zone: f64 = @as(f64, @floatFromInt(cell_width_px)) * 2.0;
+    return x_px >= width - zone and x_px < width;
+}
+
 /// 탭 하나를 닫은 뒤 새 active_tab 인덱스. 닫은 게 active보다 앞이면 한 칸 당기고(인덱스가 밀림),
 /// 그래도 새 길이를 넘으면 마지막으로 clamp한다(active 자체나 마지막 탭을 닫은 경우). new_len은 닫은
 /// 뒤 길이(≥1 — 마지막 한 개를 닫는 경우는 호출자가 따로 처리). 순수 함수라 OS 무관 단위 테스트.
@@ -726,12 +735,17 @@ pub const DevSession = struct {
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *DevSession, kind: i32, x_px: f64, y_px: f64) void {
         if (!self.surface_initialized) return;
-        // 사이드바 영역 클릭은 Maru UI다(터미널 선택/리포팅 아님). down(1)에서 슬롯을 hit-test해 그 탭으로
-        // 전환하고, 다른 kind(drag/up)와 슬롯 밖(빈 영역)은 무시한다. 진행 중이던 터미널 드래그 선택은
-        // 멈춘다(사이드바로 빠진 드래그가 autoscroll로 남지 않게). 사이드바 클릭은 터미널에 안 닿는다.
+        // 사이드바 영역 클릭은 Maru UI다(터미널 선택/리포팅 아님). down(1)에서 슬롯을 hit-test한다 —
+        // 슬롯 우측 ✕ zone이고 그 슬롯이 호버 중(✕가 보임)이면 그 탭을 닫고, 아니면 그 탭으로 전환한다.
+        // 다른 kind(drag/up)와 슬롯 밖(빈 영역)은 무시. 진행 중이던 터미널 드래그 선택은 멈춘다(사이드바로
+        // 빠진 드래그가 autoscroll로 남지 않게). 사이드바 클릭은 터미널에 안 닿는다.
         if (self.inSidebar(x_px)) {
             if (kind == 1) {
-                if (self.sidebarSlotAt(y_px)) |slot| _ = self.switchTab(slot);
+                if (self.sidebarSlotAt(y_px)) |slot| {
+                    const on_close = inSidebarCloseButton(x_px, self.sidebar_width_px, self.cell_width_px) and
+                        self.hovered_slot != null and self.hovered_slot.? == slot;
+                    if (on_close) self.closeTab(slot) else _ = self.switchTab(slot);
+                }
             }
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
@@ -1540,7 +1554,8 @@ pub const DevSession = struct {
         }
 
         const fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
-        const draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, labels.items, sidebar_cols, fg);
+        // 호버 슬롯에는 닫기 ✕ 아이콘을 같이 그린다(없으면 null).
+        const draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, labels.items, sidebar_cols, fg, self.hovered_slot);
         // buildFromDrawList가 draw_list 소유권을 가져간다(실패 시 정리, 성공 시 RenderFrame으로 이동).
         const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
             .appearance = self.appearance,
@@ -2003,6 +2018,13 @@ test "sidebar hit-test maps screen x to the sidebar region and y to a tab slot" 
     try std.testing.expectEqual(@as(?usize, null), sidebarSlot(-1, 40, 3)); // 음수
     try std.testing.expectEqual(@as(?usize, null), sidebarSlot(40, 0, 3)); // 슬롯 높이 0
     try std.testing.expectEqual(@as(?usize, null), sidebarSlot(40, 40, 0)); // 탭 없음
+
+    // 닫기 ✕ zone: 우측 2칸. 폭 180, cell 9 → [180-18, 180) = [162, 180).
+    try std.testing.expect(inSidebarCloseButton(162, 180, 9));
+    try std.testing.expect(inSidebarCloseButton(179, 180, 9));
+    try std.testing.expect(!inSidebarCloseButton(161, 180, 9)); // zone 왼쪽
+    try std.testing.expect(!inSidebarCloseButton(180, 180, 9)); // 폭 밖(터미널)
+    try std.testing.expect(!inSidebarCloseButton(170, 0, 9)); // 사이드바 꺼짐
 }
 
 test "reselectAfterClose shifts active for earlier closes and clamps for active/last closes" {
@@ -2123,6 +2145,46 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     // 터미널 영역으로 나가면 호버 해제.
     _ = session.hoverUrl(@floatFromInt(session.sidebar_width_px + 5), 1, false);
     try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
+}
+
+// 호버 중인 슬롯의 ✕ zone을 클릭하면 그 탭이 닫히고(switchTab 아님), ✕ zone이 아니면 전환만 된다 —
+// 실 PTY teardown이라 macOS 게이트. ✕는 호버 시에만 보이므로 hovered_slot==클릭 슬롯일 때만 닫는다.
+test "clicking the hovered slot close zone closes that tab, elsewhere switches" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.createTab(
+        .{ .command = "/bin/sh", .args = &.{ "-c", "cat" }, .size = .{ .cols = 20, .rows = 5 } },
+        .{ .cols = 20, .rows = 5 },
+        16,
+        "tab 2",
+        "sh",
+    );
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+
+    const w: f64 = @floatFromInt(session.sidebar_width_px);
+    const cw: f64 = @floatFromInt(session.cell_width_px);
+    const close_x = w - cw; // ✕ zone(우측 2칸) 안
+
+    // 슬롯 0 좌측(✕ zone 밖) 클릭 → 닫지 않고 전환(active 0). 닫기 전 전환 동작 가드.
+    session.mouse(1, 2, 1);
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
+
+    // 슬롯 0을 호버(✕ 표시)한 뒤 그 ✕ zone 클릭 → 탭 0 닫힘(switchTab 아님).
+    _ = session.hoverUrl(close_x, 1, false);
+    try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
+    session.mouse(1, close_x, 1);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 }
 
 // 멀티-탭 핵심 계약: 두 번째 탭을 만들면 자기 셸 PTY가 spawn되고, tick이 '모든' 탭을 drain하므로

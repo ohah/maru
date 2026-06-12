@@ -95,16 +95,20 @@ pub const CoreTextFrameBuilder = struct {
     }
 };
 
+/// 닫기(✕) 아이콘 코드포인트(U+2715 MULTIPLICATION X). 호버 슬롯 우측에 그린다.
+pub const sidebar_close_glyph: u21 = 0x2715;
+
 /// 텍스트 줄들을 사이드바 탭-제목 렌더용 DrawList로 합성한다(한 줄=한 탭, row=탭 인덱스). 각 줄을
 /// UTF-8 코드포인트로 디코드해 cell 폭(terminal.width.cellWidth)만큼 열을 전진시키며 DrawCell을 깐다.
 /// `cols`를 넘는 글자는 자른다(사이드바 폭 한도). 전경색은 `fg`(테마 사이드바 글자색). 커서/overlay는
-/// 없다(UI 텍스트). 깨진 UTF-8 바이트는 U+FFFD로 대체해 한 칸 전진한다. 순수 함수라 OS 무관 단위
-/// 테스트한다 — 실제 shape/raster는 buildFromDrawList가 fake/real 백엔드로 처리한다.
+/// 없다(UI 텍스트). 깨진 UTF-8 바이트는 U+FFFD로 대체해 한 칸 전진한다. `close_row`가 주어지면 그 행
+/// (호버 슬롯) 우측 안쪽에 닫기 ✕ glyph 1개를 더한다(null이면 없음). 순수 함수라 OS 무관 단위 테스트한다.
 pub fn buildSidebarDrawList(
     allocator: std.mem.Allocator,
     titles: []const []const u8,
     cols: u16,
     fg: terminal.Color,
+    close_row: ?usize,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
@@ -142,6 +146,20 @@ pub fn buildSidebarDrawList(
                 .style = style,
             });
             col += w;
+        }
+    }
+
+    // 닫기 ✕ 아이콘: 호버 슬롯(close_row) 우측 안쪽 col에 glyph 1개. cols가 2칸 이상일 때만(우측 여백
+    // 확보). 제목이 길어 같은 col에 겹치면 painter 순서로 ✕가 위에 그려진다(긴 제목 자름은 후속).
+    if (close_row) |cr| {
+        if (cr < @as(usize, rows) and cols >= 2) {
+            try cells.append(allocator, .{
+                .row = @intCast(cr),
+                .col = cols - 2, // 우측에서 한 칸 안쪽(여백)
+                .codepoint = sidebar_close_glyph,
+                .width = 1,
+                .style = style,
+            });
         }
     }
 
@@ -365,7 +383,7 @@ test "CoreText frame builder surfaces native shape failures" {
 test "buildSidebarDrawList lays tab titles into per-row draw cells, truncating to cols" {
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{ "zsh", "vim" };
-    var draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default);
+    var draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default, null);
     defer draw_list.deinit(allocator);
 
     // 한 줄=한 탭(row=탭 인덱스), size는 cols=한도·rows=탭 수.
@@ -386,7 +404,7 @@ test "buildSidebarDrawList truncates to cols and advances wide glyphs by two col
     const allocator = std.testing.allocator;
     // cols=5: "abcdefg"는 5칸까지만(자름). 와이드 글자는 2칸 전진.
     const titles = [_][]const u8{ "abcdefg", "한A" };
-    var draw_list = try buildSidebarDrawList(allocator, &titles, 5, .default);
+    var draw_list = try buildSidebarDrawList(allocator, &titles, 5, .default, null);
     defer draw_list.deinit(allocator);
 
     var row0: usize = 0;
@@ -405,12 +423,39 @@ test "buildSidebarDrawList truncates to cols and advances wide glyphs by two col
     try std.testing.expectEqual(@as(u16, 2), row1_cols[1]);
 }
 
+test "buildSidebarDrawList adds a close glyph at the hovered row's right edge only" {
+    const allocator = std.testing.allocator;
+    const titles = [_][]const u8{ "a", "b" };
+    // 호버 행 1 → ✕가 row 1, col cols-2=8에 하나 추가된다.
+    var hovered = try buildSidebarDrawList(allocator, &titles, 10, .default, 1);
+    defer hovered.deinit(allocator);
+    var close_count: usize = 0;
+    for (hovered.cells) |c| {
+        if (c.codepoint == sidebar_close_glyph) {
+            close_count += 1;
+            try std.testing.expectEqual(@as(u16, 1), c.row);
+            try std.testing.expectEqual(@as(u16, 8), c.col); // cols(10) - 2
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), close_count);
+
+    // close_row=null이면 ✕ 없음.
+    var none = try buildSidebarDrawList(allocator, &titles, 10, .default, null);
+    defer none.deinit(allocator);
+    for (none.cells) |c| try std.testing.expect(c.codepoint != sidebar_close_glyph);
+
+    // 범위 밖 close_row(탭 수 이상)는 무시 — ✕ 없음.
+    var oob = try buildSidebarDrawList(allocator, &titles, 10, .default, 5);
+    defer oob.deinit(allocator);
+    for (oob.cells) |c| try std.testing.expect(c.codepoint != sidebar_close_glyph);
+}
+
 test "buildFromDrawList shapes a synthesized sidebar draw list into glyph cells (shared atlas seam)" {
     // 사이드바 제목 패스가 터미널과 같은 seam(shape→raster→RenderFrame)을 탄다. fake bridge로
     // 합성 DrawList가 glyph까지 닿는지 고정한다 — 실제 CoreText 없이 연결 계약만 검증.
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{"ab"};
-    const draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default);
+    const draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default, null);
 
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();

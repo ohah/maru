@@ -586,6 +586,12 @@ pub const DevSession = struct {
     // 탭의 현재 인덱스(이동을 따라간다). 드래그 중엔 다른 down/이벤트가 아니라 drag/up만 캡처한다.
     sidebar_drag_active: bool = false,
     sidebar_drag_index: usize = 0,
+    // per-pane Term 탭 드래그 재정렬 상태(PR-E). down이 탭(✕ 아님)에서 시작하면 active=true가 되고, drag(kind 2)
+    // 가 같은 pane 바 안에서 타겟 탭으로 live 재정렬(pane.terms rotateMove), up(kind 3)이 끝낸다. drag_pane은
+    // 소스 pane(heap-pin이라 드래그 동안 안정), drag_index는 드래그 탭의 현재 인덱스(이동을 따라간다).
+    tab_drag_active: bool = false,
+    tab_drag_pane: ?*Pane = null,
+    tab_drag_index: usize = 0,
     // 트랙패드 정밀 스크롤의 1줄 미만 잔여 델타(줄 단위). scrollWheel이 누적/소비한다.
     wheel_accum: f64 = 0,
     // copyText()가 돌려준 추출 텍스트의 소유 버퍼(다음 copyText/destroy까지 유효 — ABI 수명 계약).
@@ -868,6 +874,30 @@ pub const DevSession = struct {
         const cur: i64 = @intCast(pane.active_term);
         const next = @mod(cur + delta, @as(i64, @intCast(n)));
         self.focusTerm(@intCast(next));
+    }
+
+    /// 드래그 중인 Term 탭을 현재 마우스 x에 따라 소스 pane 바 안에서 재정렬한다(PR-E1: pane 내). 소스 pane의
+    /// 바를 찾아 x→타겟 탭(tabIndexInBar, x clamp)을 잡고, 현재 인덱스와 다르면 pane.terms를 rotateMove하고
+    /// active_term·drag_index를 타겟으로 옮긴다(드래그 탭이 활성으로 따라간다 — 같은 Term이라 대표 surface는
+    /// 안 바뀜). 탭 1개거나 소스 pane을 못 찾으면(레이아웃 실패) 무동작. mouse가 drag(kind 2)에서 호출.
+    fn dragTabTo(self: *DevSession, x_px: f64) void {
+        const pane = self.tab_drag_pane orelse return;
+        if (pane.terms.items.len <= 1) return;
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
+        for (leaf_rects.items) |lr| {
+            if (lr.leaf != pane) continue;
+            const bar = self.paneBarRect(lr.rect) orelse return;
+            const target = tabIndexInBar(bar, self.cell_width_px, pane.terms.items.len, x_px);
+            if (target != self.tab_drag_index) {
+                rotateMove(*Term, pane.terms.items, self.tab_drag_index, target);
+                pane.active_term = target; // 드래그한 탭(활성)이 새 위치로 따라간다
+                self.tab_drag_index = target;
+                self.metal_dirty = true;
+            }
+            return;
+        }
     }
 
     /// 활성 pane에 새 Term(터미널 탭)을 띄우고 그 탭으로 포커스한다(⌘T, cmux식). 활성 pane의 현재 rect grid
@@ -1469,6 +1499,17 @@ pub const DevSession = struct {
             }
             return;
         }
+        // Term 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 소스 pane 바 안에서 x로 타겟 탭을 잡아
+        // live 재정렬(PR-E1: pane 내). up이 끝낸다. 새 down(1)은 아래 일반 처리로 흘려 새 드래그를 시작한다.
+        if (self.tab_drag_active and (kind == 2 or kind == 3)) {
+            if (kind == 2) {
+                self.dragTabTo(x_px);
+            } else {
+                self.tab_drag_active = false;
+                self.tab_drag_pane = null;
+            }
+            return;
+        }
         // 사이드바 영역 클릭은 Maru UI다(터미널 선택/리포팅 아님). down(1)에서 슬롯을 hit-test한다 —
         // 슬롯 우측 ✕ zone이고 그 슬롯이 호버 중(✕가 보임)이면 그 탭을 닫고, 아니면 그 탭으로 전환하고
         // 드래그 재정렬을 시작한다(이어지는 drag가 순서를 바꾼다 — 안 움직이면 그냥 클릭=전환). 슬롯 밖
@@ -1516,6 +1557,11 @@ pub const DevSession = struct {
                         if (on_close) {
                             self.hovered_tab = null; // 닫으면 Pane/Term이 바뀔 수 있으니 stale 호버 비움
                             self.closeActiveTermOrPane();
+                        } else {
+                            // ✕가 아니면 탭 드래그를 arm한다(이어지는 drag(2)가 pane 내 재정렬). 안 끌면 그냥 전환.
+                            self.tab_drag_active = true;
+                            self.tab_drag_pane = lr.leaf;
+                            self.tab_drag_index = tab;
                         }
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false;
@@ -3537,6 +3583,56 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
     try std.testing.expect(session.hovered_tab == null);
     try std.testing.expect(!session.ended_seen); // 아직 Term 남음 — 세션 유지
+}
+
+// 탭을 드래그하면 pane 안에서 순서가 바뀌는지(PR-E1) — 실 init/spawn이라 macOS 게이트. ⌘T로 Term 3개를
+// 만들고, 탭 0을 탭 2 위치로 드래그(down→drag→up)하면 terms 순서가 [T1,T2,T0]로 회전하고 드래그 탭이 활성.
+test "dragging a Term tab reorders it within the pane" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    const pane = session.activePane();
+    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+    const id0 = pane.terms.items[0].surface.id; // 드래그할 탭(T0)
+    const id1 = pane.terms.items[1].surface.id;
+    const id2 = pane.terms.items[2].surface.id;
+
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const cols: u32 = bar.w / session.cell_width_px;
+    const tab_w = coretext_frame_builder.paneTabWidth(@intCast(cols), 3);
+    const tab0_x: f64 = @floatFromInt(bar.x + (0 * tab_w + 1) * session.cell_width_px); // 탭 0 세그먼트(✕ 아님)
+    const tab2_x: f64 = @floatFromInt(bar.x + (2 * tab_w + 1) * session.cell_width_px); // 탭 2 세그먼트
+    const bar_y: f64 = @floatFromInt(bar.y + 1);
+
+    // 탭 0 down → 드래그 arm. drag to 탭 2 → 재정렬. up → 종료.
+    session.mouse(1, tab0_x, bar_y);
+    try std.testing.expect(session.tab_drag_active);
+    session.mouse(2, tab2_x, bar_y);
+    session.mouse(3, tab2_x, bar_y);
+    try std.testing.expect(!session.tab_drag_active);
+
+    // [T0,T1,T2] → T0를 2로 옮기면 [T1,T2,T0]. 드래그 탭(T0)이 새 위치(2)에서 활성.
+    try std.testing.expectEqual(id1, pane.terms.items[0].surface.id);
+    try std.testing.expectEqual(id2, pane.terms.items[1].surface.id);
+    try std.testing.expectEqual(id0, pane.terms.items[2].surface.id);
+    try std.testing.expectEqual(@as(usize, 2), pane.active_term);
+    try std.testing.expectEqual(id0, session.activeTab().activeTerm().surface.id); // 활성 = 드래그한 T0
 }
 
 // split 탭에서 다른 panel을 클릭하면 포커스가 그 panel로 옮겨가고(입력/커서가 따라간다), 활성 panel을

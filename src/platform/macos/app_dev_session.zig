@@ -119,6 +119,23 @@ fn inSidebarCloseButton(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bo
     return x_px >= width - zone and x_px < width;
 }
 
+/// 스크린 점(backing px)을 담는 panel leaf의 surface(없으면 null). split 탭에서 마우스 클릭이 어느 panel에
+/// 떨어졌는지 hit-test한다 — 각 leaf rect는 [x, x+w) × [y, y+h) 반열린 구간으로 본다(경계는 다음 panel에).
+/// 비유한 좌표는 null. 순수 함수라 OS 무관 단위 테스트한다(레이아웃 rect만 입력).
+fn paneAtPoint(leaf_rects: []const app.SplitLeafRect, x_px: f64, y_px: f64) ?*app.Surface {
+    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
+    for (leaf_rects) |lr| {
+        const x0: f64 = @floatFromInt(lr.rect.x);
+        const y0: f64 = @floatFromInt(lr.rect.y);
+        if (x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(lr.rect.w)) and
+            y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(lr.rect.h)))
+        {
+            return lr.surface;
+        }
+    }
+    return null;
+}
+
 /// 드래그 중 사이드바 y → 타겟 슬롯(항상 valid 인덱스로 clamp — sidebarSlot과 달리 슬롯 아래 빈 영역도
 /// 마지막 슬롯으로 본다, 드래그를 끝까지 끌 수 있게). 슬롯 높이/탭 0이면 0. 순수 함수라 OS 무관 단위 테스트.
 fn sidebarDragTargetSlot(y_px: f64, slot_height_px: u32, tab_count: usize) usize {
@@ -331,6 +348,11 @@ pub const DevSession = struct {
     // 무해하다(split은 창이 떠 backing이 잡힌 뒤에야 가능). resize가 갱신한다.
     backing_width_px: u32 = 0,
     backing_height_px: u32 = 0,
+    // 활성 panel의 픽셀 rect(좌표 변환의 origin). 단일 panel이면 터미널 영역 전체(x = 사이드바 폭, y = 0)라
+    // 기존과 동일하지만, split이면 활성 panel이 서브-rect에 있으므로 pxToCell/imeCursorRect가 사이드바 폭이
+    // 아니라 이 rect의 origin을 기준으로 셀↔픽셀을 변환해야 마우스/커서/IME가 활성 panel에 맞는다. 레이아웃·
+    // 포커스·리사이즈가 바뀔 때 recomputeActivePaneRect가 갱신한다. (w/h는 캐시만 — 현재 clamp는 surface grid로.)
+    active_pane_rect: app.SplitRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     // 사이드바 탭 슬롯 한 칸의 backing 픽셀 높이(= cell_height_px × 2.5). refreshCellMetrics가 갱신.
     // metalFrame()이 렌더러에 넘겨 사이드바 셀을 cell 높이가 아니라 이 슬롯 높이로 세로 배치한다.
     sidebar_slot_height_px: u32 = 0,
@@ -485,6 +507,9 @@ pub const DevSession = struct {
         // 모두 같은 값을 쓰게 하는 단일 출처다.
         self.refreshCellMetrics();
         self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.activePane().pump, &self.renderer_state);
+        // 활성 panel rect를 초기화한다 — refreshCellMetrics가 사이드바 폭을 채운 '뒤'라야 단일 panel 기준
+        // (x = 사이드바 폭, y = 0)이 맞다(createTab 시점엔 사이드바 폭이 아직 0이라 여기서 다시 잡는다).
+        self.recomputeActivePaneRect();
         self.writeSummaryFromState();
     }
 
@@ -541,6 +566,58 @@ pub const DevSession = struct {
                 self.runtime.resize(lr.surface.id, psize) catch {};
             }
         }
+    }
+
+    /// 활성 panel의 픽셀 rect를 다시 계산해 캐시한다(`active_pane_rect`). 활성 탭 tree를 터미널 영역에서
+    /// 펴 활성 surface의 leaf rect를 찾는다. 못 찾거나(OOM) 단일 panel이면 터미널 영역 전체로 폴백 —
+    /// 단일 panel은 그게 곧 활성 rect라 결과가 같다. 레이아웃/포커스/리사이즈가 바뀔 때(split·switchTab·
+    /// resize·focusPane·closeTab·init) 호출해, pxToCell/imeCursorRect가 매 마우스 이벤트마다 재레이아웃
+    /// (할당) 없이 캐시된 origin을 읽게 한다.
+    fn recomputeActivePaneRect(self: *DevSession) void {
+        const active_surface = self.activeSurface();
+        var leaf_rects: std.ArrayList(app.SplitLeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        if (self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects)) |_| {
+            for (leaf_rects.items) |lr| {
+                if (lr.surface == active_surface) {
+                    self.active_pane_rect = lr.rect;
+                    return;
+                }
+            }
+        } else |_| {}
+        self.active_pane_rect = self.termRect(); // 폴백: 터미널 영역 전체(단일 panel과 동일)
+    }
+
+    /// 활성 탭이 split(panel 2개 이상)인가. 마우스 클릭으로 panel을 전환할지(단일이면 무동작) 판정에 쓴다.
+    fn activeTabHasSplit(self: *DevSession) bool {
+        return app.split_tree.leafCount(self.activeTab().tree) > 1;
+    }
+
+    /// 활성 탭 안에서 포커스를 panel index로 옮긴다(입력/커서/IME/렌더가 따라간다). 활성 panel surface를
+    /// 탭 대표(`surface_ptrs[active_tab]` = `app_window.active()`)와 `frame_loop.pump`에 재바인딩하고
+    /// 활성 panel rect를 다시 계산한다. 같은 panel이거나 범위 밖이면 무동작. 탭 자체는 안 바꾼다.
+    fn focusPane(self: *DevSession, pane_index: usize) void {
+        const tab = self.activeTab();
+        if (pane_index >= tab.panes.items.len or tab.active_pane == pane_index) return;
+        tab.active_pane = pane_index;
+        self.surface_ptrs.items[self.app_window.active_tab] = &tab.activePane().surface;
+        self.app_window.tabs = self.surface_ptrs.items;
+        self.frame_loop.pump = &self.activePane().pump;
+        self.recomputeActivePaneRect();
+        self.metal_dirty = true;
+    }
+
+    /// 활성 탭에서 surface를 가진 panel을 찾아 포커스한다(찾으면 true). 마우스 hit-test가 고른 surface로
+    /// 포커스를 옮길 때 쓴다(surface→panel index 매핑).
+    fn focusPaneBySurface(self: *DevSession, surface: *app.Surface) bool {
+        const tab = self.activeTab();
+        for (tab.panes.items, 0..) |pane, i| {
+            if (&pane.surface == surface) {
+                self.focusPane(i);
+                return true;
+            }
+        }
+        return false;
     }
 
     /// 활성 panel을 direction으로 둘로 나눈다(cmux/tmux식 split — 동작만 참고, 코드 미참고). 활성 panel의
@@ -600,13 +677,10 @@ pub const DevSession = struct {
         // 5) 기존 panel을 a 크기로 줄인다(PTY winsize 포함). 죽은 PTY 등의 실패는 무시(split 자체는 성공).
         self.runtime.resize(active.surface.id, a_size) catch {};
 
-        // 6) 새 panel로 포커스 이동(cmux/tmux식). 탭 대표 surface(= app_window.active())와 frame_loop pump를
-        //    새 panel로 재바인딩한다. 탭 인덱스는 그대로라 사이드바 갱신은 불요.
-        tab.active_pane = tab.panes.items.len - 1;
-        self.surface_ptrs.items[self.app_window.active_tab] = &new_pane.surface;
-        self.app_window.tabs = self.surface_ptrs.items;
-        self.frame_loop.pump = &self.activePane().pump;
-        self.metal_dirty = true;
+        // 6) 새 panel로 포커스 이동(cmux/tmux식). focusPane이 탭 대표 surface(= app_window.active())·
+        //    frame_loop pump 재바인딩 + 활성 panel rect 재계산 + metal_dirty를 한 곳에서 한다. 탭 인덱스는
+        //    그대로라 사이드바 갱신은 불요.
+        self.focusPane(tab.panes.items.len - 1);
     }
 
     /// 한 panel을 heap-pin(`create`)으로 만든다 — 셸 PTY spawn → surface init → runtime attach → pump.
@@ -685,6 +759,8 @@ pub const DevSession = struct {
         // surface_ptrs가 realloc됐을 수 있으니 app_window.tabs를 새 items로 재바인딩(stale 슬라이스 방지).
         self.app_window.tabs = self.surface_ptrs.items;
         self.app_window.active_tab = self.tabs.items.len - 1;
+        self.recomputeActivePaneRect(); // 새 탭이 활성이 됐으니 좌표 origin 갱신(init 중엔 사이드바 폭이 아직
+        // 0이라 init 끝의 recompute가 다시 잡고, post-init newTab은 여기서 바로 맞는다)
         // 탭 집합/활성이 바뀌었으니 사이드바 셀을 다시 만든다. 실패는 탭 생성을 무르지 않고(탭은 이미
         // 완성·append됨) 빈 사이드바로 degrade한다 — 여기서 try면 errdefer가 멀쩡한 탭을 헐어버린다.
         self.rebuildSidebar() catch {};
@@ -697,6 +773,7 @@ pub const DevSession = struct {
     pub fn switchTab(self: *DevSession, index: usize) bool {
         if (!self.app_window.selectTab(index)) return false;
         self.metal_dirty = true;
+        self.recomputeActivePaneRect(); // 새 탭의 활성 panel rect로 좌표 origin 갱신
         self.rebuildSidebar() catch {}; // 활성 탭이 바뀌었으니 하이라이트 밴드를 새 행으로 옮긴다
         return true;
     }
@@ -732,6 +809,7 @@ pub const DevSession = struct {
         // frame_loop의 pump를 새 active 탭으로 갱신한다. DevSession tick 경로(tickAfterDrainWithFrameBuilder)는
         // 이 pump를 안 쓰지만, 닫은 게 active 탭이면 옛 pump 포인터가 dangling이 되므로 방어적으로 유지한다.
         self.frame_loop.pump = &self.activePane().pump;
+        self.recomputeActivePaneRect(); // 새 활성 탭의 활성 panel rect로 좌표 origin 갱신
 
         self.hovered_slot = null; // 인덱스가 밀렸으니 호버 무효화(다음 마우스 이동이 재설정)
         self.rebuildSidebar() catch {};
@@ -964,13 +1042,14 @@ pub const DevSession = struct {
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
         const max_col: f64 = @floatFromInt(core.size.cols - 1);
         const max_row: f64 = @floatFromInt(core.size.rows - 1);
-        // 터미널은 세로 사이드바 폭(origin_x)만큼 오른쪽에서 시작하므로(metalFrame.terminal_origin_x_px),
-        // 스크린 x에서 사이드바 폭을 빼야 터미널 열이 된다 — 안 빼면 선택/클릭 블록이 사이드바 폭만큼
-        // 오른쪽으로 어긋난다(라이브 제보: "블록 영역이 그만큼 밀린다"). 사이드바 strip 안(x<origin_x)
-        // 클릭은 음수→0 clamp라 col 0(터미널 왼쪽 끝)에 붙는다.
-        const term_x = x_px - @as(f64, @floatFromInt(self.sidebar_width_px));
+        // 활성 panel은 자기 rect의 origin(active_pane_rect.x/y)에서 그려진다 — 단일 panel이면 (사이드바 폭, 0)
+        // 이라 기존과 같고(metalFrame.terminal_origin_x_px), split이면 서브-rect의 origin이다. 스크린 좌표에서
+        // 그 origin을 빼야 활성 panel의 열/행이 된다 — 안 빼면 선택/클릭 블록이 origin만큼 어긋난다(라이브
+        // 제보: "블록 영역이 그만큼 밀린다"). panel 왼쪽/위 바깥(음수) 클릭은 0 clamp라 (0,0) 모서리에 붙는다.
+        const term_x = x_px - @as(f64, @floatFromInt(self.active_pane_rect.x));
+        const term_y = y_px - @as(f64, @floatFromInt(self.active_pane_rect.y));
         const col_f = std.math.clamp(@max(term_x, 0) / cw, 0, max_col);
-        const row_f = std.math.clamp(@max(y_px, 0) / ch, 0, max_row);
+        const row_f = std.math.clamp(@max(term_y, 0) / ch, 0, max_row);
         return .{ .row = @intFromFloat(row_f), .col = @intFromFloat(col_f) };
     }
 
@@ -1016,6 +1095,24 @@ pub const DevSession = struct {
             self.mouse_drag_selecting = false;
             return;
         }
+        // split 탭에서 다른 panel을 클릭하면 포커스를 그 panel로 옮긴다(입력/커서/IME가 따라간다). down(1)에서만,
+        // split이 있을 때만(`activeTabHasSplit` 가드 — 단일 panel은 무동작이라 기존 선택 경로 그대로). 활성 panel을
+        // 클릭하면 아래 일반 선택 경로로 흐른다. 클릭이 다른 panel에 떨어지면 포커스만 옮기고 소비한다 — 선택은
+        // 새로 활성이 된 panel에서 다음 클릭/드래그부터 시작한다(엉뚱한 panel에 선택을 긋지 않게). kind!=1이면
+        // 단락 평가로 self.tabs를 건드리지 않는다(최소-셋업 드래그 테스트는 kind 2/3만 보낸다).
+        if (kind == 1 and self.activeTabHasSplit()) {
+            var leaf_rects: std.ArrayList(app.SplitLeafRect) = .empty;
+            defer leaf_rects.deinit(self.allocator);
+            if (self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects)) |_| {
+                if (paneAtPoint(leaf_rects.items, x_px, y_px)) |surf| {
+                    if (surf != self.activeSurface() and self.focusPaneBySurface(surf)) {
+                        self.drag_autoscroll = 0;
+                        self.mouse_drag_selecting = false;
+                        return;
+                    }
+                }
+            } else |_| {}
+        }
         const cell = self.pxToCell(x_px, y_px) orelse {
             // 비유한(NaN/Inf) 좌표 — 셀로 못 바꾼다. up(3)/down(1)이면 드래그 자동 스크롤을
             // 멈춘다(안 그러면 mouseUp이 좌표 손상으로 와도 autoscroll이 30Hz로 영원히 돈다).
@@ -1036,9 +1133,12 @@ pub const DevSession = struct {
                 core.selectionStart(row, col);
             },
             2 => {
-                // 드래그가 grid 위/아래 밖으로 나가면 자동 스크롤을 건다(tick이 수행).
+                // 드래그가 활성 panel grid 위/아래 밖으로 나가면 자동 스크롤을 건다(tick이 수행). panel은
+                // active_pane_rect.y에서 시작하므로 위 경계는 그 y, 아래 경계는 y + grid 높이다(단일 panel이면
+                // y=0이라 기존과 동일).
+                const pane_top: f64 = @floatFromInt(self.active_pane_rect.y);
                 const grid_height: f64 = @as(f64, @floatFromInt(core.size.rows)) * ch;
-                self.drag_autoscroll = if (y_px < 0) 1 else if (y_px > grid_height) -1 else 0;
+                self.drag_autoscroll = if (y_px < pane_top) 1 else if (y_px > pane_top + grid_height) -1 else 0;
                 self.last_drag_col = col;
                 core.selectionExtend(row, col);
             },
@@ -1264,11 +1364,11 @@ pub const DevSession = struct {
         if (!self.surface_initialized) return .{ .x = 0, .y = 0, .w = cw, .h = ch };
         const cursor = self.activeSurfaceConst().core.cursor;
         return .{
-            // 터미널이 사이드바 폭(origin_x)만큼 오른쪽에서 그려지므로 커서의 스크린 x도 사이드바 폭을
-            // 더해야 한다 — 안 더하면 후보창이 실제 커서보다 사이드바 폭만큼 왼쪽에 뜬다(pxToCell의
-            // 역변환: pxToCell은 빼고, 셀→스크린인 여기선 더한다).
-            .x = @as(f64, @floatFromInt(self.sidebar_width_px)) + @as(f64, @floatFromInt(cursor.col)) * cw,
-            .y = @as(f64, @floatFromInt(cursor.row)) * ch,
+            // 활성 panel은 자기 rect origin(active_pane_rect.x/y)에서 그려지므로 커서의 스크린 좌표도 그 origin을
+            // 더해야 한다 — 안 더하면 후보창이 실제 커서보다 origin만큼 왼쪽/위에 뜬다(pxToCell의 역변환:
+            // pxToCell은 빼고, 셀→스크린인 여기선 더한다). 단일 panel이면 origin = (사이드바 폭, 0)이라 기존과 동일.
+            .x = @as(f64, @floatFromInt(self.active_pane_rect.x)) + @as(f64, @floatFromInt(cursor.col)) * cw,
+            .y = @as(f64, @floatFromInt(self.active_pane_rect.y)) + @as(f64, @floatFromInt(cursor.row)) * ch,
             .w = cw,
             .h = ch,
         };
@@ -1508,6 +1608,7 @@ pub const DevSession = struct {
         self.backing_width_px = width_px;
         self.backing_height_px = height_px;
         try self.resizeActiveTabPanes();
+        self.recomputeActivePaneRect(); // backing/grid가 바뀌었으니 활성 panel rect(좌표 origin)도 갱신
         self.last_resize_size = size;
         // grid가 reflow됐으므로 다음 tick이 Metal frame을 재투영하게 dirty로 표시한다.
         self.metal_dirty = true;
@@ -2221,6 +2322,7 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.cell_height_px = 16;
     session.scale_milli = 1000;
     session.sidebar_width_px = 0; // 사이드바 없음 — 마우스가 터미널 선택 경로를 타게(inSidebar=false)
+    session.active_pane_rect = .{ .x = 0, .y = 0, .w = 32, .h = 32 }; // 단일 panel 좌표 origin(pxToCell이 읽음)
 
     const core = &tab_surface.core;
     try core.write("a\r\nb\r\nc\r\nd"); // 스크롤백 2(a,b) + 화면 c,d
@@ -2555,6 +2657,71 @@ test "splitActivePane splits the active leaf, focuses the new panel, and renders
     _ = try session.tick();
 }
 
+// paneAtPoint가 스크린 점을 담는 leaf rect의 surface를 고르는지(반열린 구간 경계·밖·비유한) — 마우스
+// pane 전환의 hit-test 코어라 헤드리스 단위로 고정한다(레이아웃 rect만 입력, OS 무관).
+test "paneAtPoint hit-tests which leaf rect contains a screen point" {
+    const allocator = std.testing.allocator;
+    var a = try app.Surface.init(allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer a.deinit();
+    var b = try app.Surface.init(allocator, 2, .{ .cols = 4, .rows = 2 });
+    defer b.deinit();
+    // 좌우 2-panel: a=[0,100)×[0,200), b=[100,200)×[0,200).
+    const rects = [_]app.SplitLeafRect{
+        .{ .surface = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 } },
+        .{ .surface = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 200 } },
+    };
+    try std.testing.expectEqual(&a, paneAtPoint(&rects, 50, 100).?);
+    try std.testing.expectEqual(&b, paneAtPoint(&rects, 150, 100).?);
+    try std.testing.expectEqual(&a, paneAtPoint(&rects, 0, 0).?); // 좌상단 경계 포함
+    try std.testing.expectEqual(&b, paneAtPoint(&rects, 100, 0).?); // x=100 경계는 b(반열린 [x, x+w))
+    try std.testing.expect(paneAtPoint(&rects, 200, 0) == null); // 오른쪽 밖
+    try std.testing.expect(paneAtPoint(&rects, 50, 200) == null); // 아래 밖
+    try std.testing.expect(paneAtPoint(&rects, std.math.nan(f64), 5) == null); // 비유한
+}
+
+// split 탭에서 다른 panel을 클릭하면 포커스가 그 panel로 옮겨가고(입력/커서가 따라간다), 활성 panel을
+// 클릭하면 그대로인지 — 실 init이 사이드바 폭/메트릭을 채우고 mouse hit-test가 leaf rect를 펴는 macOS
+// 경로라 게이트한다. 좌표 origin(active_pane_rect)이 새 활성 panel로 갱신되는 것도 함께 본다.
+test "clicking another pane in a split focuses it; clicking the active pane keeps focus" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    const old_surface = session.activeSurface();
+    try session.splitActivePane(.horizontal); // 좌우 분할 — 새 panel(오른쪽)이 활성
+    const new_surface = session.activeSurface();
+    try std.testing.expect(new_surface != old_surface);
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
+
+    // 왼쪽(기존, 비활성) panel 영역 클릭 → 포커스가 기존 panel로. 좌표 origin도 왼쪽 rect(사이드바 옆)로 갱신.
+    const left_x: f64 = @floatFromInt(session.sidebar_width_px + 10);
+    session.mouse(1, left_x, 10);
+    try std.testing.expectEqual(old_surface, session.activeSurface());
+    try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
+    try std.testing.expectEqual(session.sidebar_width_px, session.active_pane_rect.x);
+
+    // 활성(왼쪽) panel을 다시 클릭 → 전환 없음(같은 panel 클릭은 선택 경로). active_pane 불변.
+    session.mouse(1, left_x, 10);
+    try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
+
+    // 오른쪽(비활성) panel 클릭 → 다시 오른쪽 panel로 포커스.
+    const right_x: f64 = @floatFromInt(session.sidebar_width_px + 410);
+    session.mouse(1, right_x, 10);
+    try std.testing.expectEqual(new_surface, session.activeSurface());
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
+}
+
 // 사이드바 클릭이 슬롯 hit-test로 탭을 전환하고, 호버가 호버 밴드를 더하는지 — 실 init이 사이드바
 // 폭/슬롯 높이를 채우는 macOS 경로라 게이트한다. 마우스 좌표는 backing px, 슬롯 = y / slot_height.
 test "sidebar click switches tabs and hover adds a hover band via hit-test" {
@@ -2865,6 +3032,7 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.cell_height_px = 16;
     session.scale_milli = 1000;
     session.sidebar_width_px = 0; // 사이드바 없음 — 마우스가 터미널 선택 경로를 타게(inSidebar=false)
+    session.active_pane_rect = .{ .x = 0, .y = 0, .w = 32, .h = 32 }; // 단일 panel 좌표 origin(pxToCell이 읽음)
 
     const core = &tab_surface.core;
     try core.write("aa\r\nbb\r\ncc"); // 스크롤백 1(aa) + 화면 bb,cc
@@ -3025,7 +3193,7 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     session.app_window = .{ .tabs = &st_ptrs };
     session.cell_width_px = 8;
     session.cell_height_px = 16;
-    session.sidebar_width_px = 0; // 사이드바 없음: 커서 x는 col*cw 그대로
+    session.active_pane_rect = .{ .x = 0, .y = 0, .w = 80, .h = 80 }; // 활성 panel origin (0,0): 커서 좌표는 col*cw/row*ch 그대로
 
     const core = &tab_surface.core;
     try core.write("ab"); // 커서가 (0,2)로
@@ -3040,16 +3208,18 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     try std.testing.expectEqual(@as(f64, 16), r2.x); // col 2
     try std.testing.expectEqual(@as(f64, 16), r2.y); // row 1 * 16
 
-    // 사이드바가 있으면 커서 스크린 x는 사이드바 폭만큼 오른쪽으로 — 후보창이 실제 커서 아래에 뜬다.
-    session.sidebar_width_px = 24;
+    // 활성 panel이 서브-rect에 있으면(split/사이드바) 커서 스크린 좌표가 panel origin만큼 이동한다 — 후보창이
+    // 실제 커서 아래에 뜬다. origin (24, 32): x는 +24, y는 +32(단일 panel일 땐 origin = (사이드바 폭, 0)).
+    session.active_pane_rect = .{ .x = 24, .y = 32, .w = 80, .h = 80 };
     const r3 = session.imeCursorRect();
     try std.testing.expectEqual(@as(f64, 24 + 16), r3.x); // origin_x(24) + col 2 * 8
-    try std.testing.expectEqual(@as(f64, 16), r3.y); // y는 사이드바 영향 없음
+    try std.testing.expectEqual(@as(f64, 32 + 16), r3.y); // origin_y(32) + row 1 * 16
 }
 
-test "pxToCell subtracts the sidebar offset so clicks map to terminal columns" {
-    // 사이드바가 터미널을 origin_x만큼 오른쪽으로 밀므로, 스크린 픽셀 x는 사이드바 폭을 뺀 뒤에야
-    // 터미널 열이 된다. 안 빼면 선택/클릭 블록이 사이드바 폭만큼 어긋난다(라이브 제보 회귀).
+test "pxToCell subtracts the active pane origin so clicks map to that pane's columns and rows" {
+    // 활성 panel은 자기 rect origin에서 그려지므로, 스크린 픽셀에서 origin(x,y)을 뺀 뒤에야 그 panel의
+    // 열/행이 된다(단일 panel이면 origin = (사이드바 폭, 0)이라 기존과 동일). 안 빼면 선택/클릭 블록이
+    // origin만큼 어긋난다(라이브 제보 회귀). split이면 origin은 서브-rect의 좌상단이다.
     var session: DevSession = undefined;
     session.allocator = std.testing.allocator;
     var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
@@ -3059,17 +3229,20 @@ test "pxToCell subtracts the sidebar offset so clicks map to terminal columns" {
     session.app_window = .{ .tabs = &st_ptrs };
     session.cell_width_px = 8;
     session.cell_height_px = 16;
-    session.sidebar_width_px = 24; // 3칸(24/8) 폭 사이드바
+    session.active_pane_rect = .{ .x = 24, .y = 0, .w = 80, .h = 80 }; // origin_x 24(=3칸), origin_y 0
 
-    // 터미널 왼쪽 끝(스크린 x=origin_x=24) → col 0.
+    // panel 왼쪽 끝(스크린 x=origin_x=24) → col 0.
     try std.testing.expectEqual(@as(u16, 0), session.pxToCell(24, 0).?.col);
     // origin_x + 2*cw = 24+16=40 → col 2.
     try std.testing.expectEqual(@as(u16, 2), session.pxToCell(40, 0).?.col);
-    // 사이드바 strip 안(x=10 < origin_x) → 음수 clamp → col 0(터미널 왼쪽 끝).
+    // origin 왼쪽(x=10 < origin_x) → 음수 clamp → col 0(panel 왼쪽 끝).
     try std.testing.expectEqual(@as(u16, 0), session.pxToCell(10, 0).?.col);
-    // 사이드바 없으면(0) 스크린 x가 그대로 열: x=16 → col 2(회귀 가드).
-    session.sidebar_width_px = 0;
-    try std.testing.expectEqual(@as(u16, 2), session.pxToCell(16, 0).?.col);
+
+    // y origin도 뺀다(상하 split의 아래 panel): origin (0, 16) → 스크린 y에서 16을 뺀 뒤 행.
+    session.active_pane_rect = .{ .x = 0, .y = 16, .w = 80, .h = 80 };
+    try std.testing.expectEqual(@as(u16, 2), session.pxToCell(16, 16).?.col); // x=16 → col 2(origin_x 0)
+    try std.testing.expectEqual(@as(u16, 0), session.pxToCell(16, 16).?.row); // y=16 - origin_y 16 = 0 → row 0
+    try std.testing.expectEqual(@as(u16, 1), session.pxToCell(16, 32).?.row); // y=32 - 16 = 16 → row 1
 }
 
 test "pageScrollDelta: scroll mode + main screen scrolls; passthrough/alt sends to app" {

@@ -51,14 +51,18 @@ split이 생기면 터미널 영역을 다시 SplitTree에 따라 sub-사각형�
 split의 핵심은 재귀 트리다(Ghostty의 SplitTree 동작 참고 — MIT, 개념만, Zig로 독립 구현):
 
 ```
-Node = leaf(surface)
+Node = leaf(Pane)
      | split{ direction: horizontal|vertical, ratio: f, left: Node, right: Node }
 ```
 
-- `leaf`는 surface 하나(= panel). `split`은 두 자식을 방향(가로=좌우, 세로=상하)과 비율로 나눈다.
-- 탭 = 이 트리의 루트. 탭 리스트 = 트리들의 리스트(`AppWindow.tabs`가 `[]*Surface`에서 `[]*SplitTree`로
-  일반화된다 — 큰 변경).
-- zoom(한 panel 전체화면), focus 이동, drag-drop zone은 트리 위 연산이다.
+- `leaf`는 **Pane 하나**(= 화면의 한 분할 영역). **cmux 풀 모델(PR-A~)**: 한 Pane은 surface 1개가 아니라
+  **여러 터미널(Term: surface+PTY+pump)을 가로 탭으로** 담는 컨테이너다(⌘T가 활성 Pane에 Term 추가, Pane
+  상단 탭 바가 각 Term을 탭으로 표시, 화면엔 활성 Term의 surface를 그림). `split`은 두 자식을 방향(가로=좌우,
+  세로=상하)과 비율로 나눈다.
+- `SplitTree`는 **leaf 타입에 generic**(`SplitTree(comptime Leaf)`)이라 트리가 leaf를 pointer-identity로만
+  다룬다 — app 레이어(트리)가 platform의 `Pane` 타입을 몰라도 platform이 `SplitTree(*Pane)`로 인스턴스화한다.
+- 워크스페이스(사이드바 탭) = 이 트리의 루트. 워크스페이스 리스트 = 트리들의 리스트.
+- zoom(한 panel 전체화면), focus 이동, drag-drop zone, Term 탭 이동은 트리/Pane 위 연산이다.
 
 현재 Maru는 탭 = surface 1개(플랫)이고 활성 surface 1개를 풀창 렌더한다. split을 하려면 (1) SplitTree
 모델 + (2) **멀티-panel 렌더**(N개 surface를 sub-사각형에 동시 합성 — 렌더러의 큰 확장)가 필요하다.

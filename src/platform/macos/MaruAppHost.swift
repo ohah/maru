@@ -718,6 +718,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 return
             }
         }
+        // Cmd+↑/↓: OSC 133 프롬프트 블록으로 점프(이전/다음 명령의 프롬프트로 뷰포트 이동). 분류·이동은
+        // Zig core가 하고 여기선 방향만 넘긴다. 셸 통합이 없으면 core가 false라 아무 일도 안 일어난다.
+        if chordMods == .command, let session = devSession {
+            if event.keyCode == 126 { // Up -> 이전(과거) 프롬프트
+                _ = maru_macos_app_dev_session_jump_prompt(session, -1)
+                markMetalNeedsRedraw()
+                return
+            }
+            if event.keyCode == 125 { // Down -> 다음(최근) 프롬프트
+                _ = maru_macos_app_dev_session_jump_prompt(session, 1)
+                markMetalNeedsRedraw()
+                return
+            }
+        }
         guard let keyEvent = normalizedKeyEvent(from: event) else {
             return
         }

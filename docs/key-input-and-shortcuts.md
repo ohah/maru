@@ -236,7 +236,9 @@ Maru는 **셸 통합**으로 이를 메운다(Ghostty·iTerm2·kitty가 하는 �
 | `\e]133;C` (preexec) | 출력 시작 | `command` |
 | `\e]133;D;<code>` (precmd) | 명령 끝(종료코드) | `last_command_exit` 기록 |
 
-clean-room: 통합 스크립트는 **zsh 매뉴얼의 ZDOTDIR/스타트업·precmd/preexec·PS1 `%{%}` 동작과 semantic-prompts.md 명세에서 직접 작성**했다. Ghostty·kitty의 통합 스크립트는 GPLv3라 차용하지 않았다(메커니즘 자체는 zsh 공개 동작/공개 명세). 현재 zsh 전용이고, bash/fish 마커 emit·거터 렌더·프롬프트 점프는 후속이다.
+이 분류로 **프롬프트 점프 네비게이션**이 동작한다 — `Cmd+↑`/`Cmd+↓`로 이전/다음 명령의 프롬프트로 뷰포트를 점프한다(iTerm2·VSCode식). `core.jumpToPrompt(dir)`가 "프롬프트 블록 시작"(prompt/input run의 첫 행)을 절대 행 좌표로 찾아 뷰포트 맨 위에 둔다. Swift는 Cmd+↑/↓ keyCode만 감지해 `jump_prompt` ABI로 방향을 넘기고(native 최소, scroll_page와 같은 규율), 분류·이동은 Zig가 한다. 셸 통합이 없으면 분류가 전부 unknown이라 무동작.
+
+clean-room: 통합 스크립트는 **zsh 매뉴얼의 ZDOTDIR/스타트업·precmd/preexec·PS1 `%{%}` 동작과 semantic-prompts.md 명세에서 직접 작성**했다. Ghostty·kitty의 통합 스크립트는 GPLv3라 차용하지 않았다(메커니즘 자체는 zsh 공개 동작/공개 명세). 현재 zsh 전용이고, bash/fish 마커 emit·거터 ✓/✗ 렌더는 후속이다.
 
 ## 기본 제공 macOS 줄 편집 단축키 (빌트인)
 

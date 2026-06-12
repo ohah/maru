@@ -250,6 +250,12 @@ int32_t maru_macos_app_dev_session_scroll_page(
     MaruAppHostDevSession *session,
     int32_t delta_pages
 );
+/* 이전(dir<0)/다음(dir>0) 프롬프트 블록으로 뷰포트 점프(OSC 133 semantic prompt — Cmd+↑/↓).
+   분류·이동은 dev session/core가 하고 Swift는 방향만 넘긴다. */
+int32_t maru_macos_app_dev_session_jump_prompt(
+    MaruAppHostDevSession *session,
+    int32_t dir
+);
 /* 마우스 선택. kind 1=down(시작) 2=drag(확장) 3=up(확정 — 드래그 선택에서 이동 없으면 클릭으로
    보고 해제) 4=더블클릭(단어 선택, soft-wrap 경계 너머까지 확장) 5=트리플클릭(논리 줄 선택).
    좌표는 backing 픽셀(좌상단 원점) — 셀 변환은 Zig가 cell 메트릭으로 한다. */

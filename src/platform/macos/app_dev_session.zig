@@ -847,6 +847,14 @@ pub const DevSession = struct {
         self.scrollLines(delta_pages *| page);
     }
 
+    /// 이전(dir<0)/다음(dir>0) 프롬프트 블록으로 뷰포트를 점프한다(OSC 133 셸 통합 필요 — Cmd+↑/↓).
+    /// 분류·이동 로직은 core가 소유하고, 여기선 스크롤됐으면 다음 tick이 다시 그리도록 metal_dirty만
+    /// 세운다(Swift는 방향만 넘기는 얇은 글루 — scrollPage와 같은 규율).
+    pub fn jumpToPrompt(self: *DevSession, dir: i8) void {
+        if (!self.surface_initialized) return;
+        if (self.surfaces[0].core.jumpToPrompt(dir)) self.metal_dirty = true;
+    }
+
     pub fn resize(self: *DevSession, width_px: u32, height_px: u32, scale_milli: u32) !FrameSummary {
         // resize는 terminal grid와 PTY winsize가 함께 바뀌어야 한다. FrameLoop API를
         // 통해 SurfaceRuntime action으로 내려보내면 Swift가 두 책임을 다시 구현하지 않는다.

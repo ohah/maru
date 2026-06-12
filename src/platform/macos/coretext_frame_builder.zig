@@ -172,6 +172,72 @@ pub fn buildSidebarDrawList(
     };
 }
 
+/// per-pane 가로 탭 바(cmux식)의 제목 glyph DrawList를 합성한다 — 사이드바(세로, 행=탭)와 달리 **모든 탭을
+/// 행 0에 가로로** 등폭 세그먼트로 깐다. 탭 i는 col [i*tab_w, (i+1)*tab_w)를 차지하고, 그 안에 1칸 좌측
+/// 패딩 뒤 제목을 (tab_w-1)칸까지 그린다(넘치면 자름). tab_w = cols/n(최소 1). 깨진 UTF-8은 U+FFFD,
+/// 와이드 글자는 2칸 전진. 전경색은 `fg`(테마 글자색 — 활성 탭 강조는 호출자가 chrome 밴드로). 커서/overlay
+/// 없는 UI 텍스트라 순수 함수로 OS 무관 단위 테스트한다. cols/n 0이면 빈(셀 없는) DrawList.
+pub fn paneTabWidth(cols: u16, tab_count: usize) u16 {
+    if (cols == 0 or tab_count == 0) return 0;
+    const n: u16 = @intCast(@min(tab_count, @as(usize, cols))); // 탭이 cols보다 많으면 1칸씩(넘침은 잘림)
+    return @max(1, cols / n);
+}
+
+pub fn buildPaneTabBarDrawList(
+    allocator: std.mem.Allocator,
+    titles: []const []const u8,
+    cols: u16,
+    fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+
+    const style: terminal.Style = .{ .foreground = fg };
+    const tab_w = paneTabWidth(cols, titles.len);
+    if (tab_w > 0) {
+        for (titles, 0..) |title, tab_index| {
+            const start: u32 = @as(u32, @intCast(tab_index)) * tab_w;
+            if (start >= cols) break; // 탭이 바 폭을 넘으면 나머지는 잘림
+            const seg_end: u32 = @min(start + tab_w, @as(u32, cols)); // 이 탭의 col 한도
+            var col: u32 = start + 1; // 좌측 1칸 패딩
+            var i: usize = 0;
+            while (i < title.len) {
+                var cp: u21 = 0xFFFD;
+                var advance: usize = 1;
+                if (std.unicode.utf8ByteSequenceLength(title[i])) |seq_len| {
+                    const len: usize = seq_len;
+                    if (i + len <= title.len) {
+                        if (std.unicode.utf8Decode(title[i .. i + len])) |decoded| {
+                            cp = decoded;
+                            advance = len;
+                        } else |_| {}
+                    }
+                } else |_| {}
+                i += advance;
+
+                const w: u16 = @max(1, terminal.width.cellWidth(cp)); // 0폭도 최소 1칸 전진
+                if (col + w > seg_end) break; // 이 탭 세그먼트를 넘기면 자른다
+                try cells.append(allocator, .{
+                    .row = 0,
+                    .col = @intCast(col),
+                    .codepoint = cp,
+                    .width = @intCast(@min(w, 2)),
+                    .style = style,
+                });
+                col += w;
+            }
+        }
+    }
+
+    return .{
+        .size = .{ .cols = @max(cols, 1), .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
 fn emptyNativeDrawGlyphRecord() coretext_shaper.NativeDrawGlyphRecord {
     return .{
         .cell_index = 0,
@@ -398,6 +464,44 @@ test "buildSidebarDrawList lays tab titles into per-row draw cells, truncating t
     // UI 텍스트라 커서/overlay 없음.
     try std.testing.expect(!draw_list.cursor.visible);
     try std.testing.expectEqual(@as(usize, 0), draw_list.overlays.len);
+}
+
+test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab segments" {
+    const allocator = std.testing.allocator;
+    // cols=20, 2 탭 → tab_w=10. 탭 0은 col [0,10), 탭 1은 [10,20). 각 탭 1칸 좌패딩 뒤 제목.
+    const titles = [_][]const u8{ "sh", "vim" };
+    var draw_list = try buildPaneTabBarDrawList(allocator, &titles, 20, .default);
+    defer draw_list.deinit(allocator);
+
+    // 모든 탭이 행 0(가로), size cols=한도·rows=1.
+    try std.testing.expectEqual(@as(u16, 20), draw_list.size.cols);
+    try std.testing.expectEqual(@as(u16, 1), draw_list.size.rows);
+    try std.testing.expectEqual(@as(usize, 5), draw_list.cells.len); // "sh"(2) + "vim"(3)
+    for (draw_list.cells) |c| try std.testing.expectEqual(@as(u16, 0), c.row);
+    // 탭 0: col 1('s'), 2('h'). 탭 1: col 11('v'), 12('i'), 13('m') — 세그먼트 start(10) + 1칸 패딩.
+    try std.testing.expectEqual(@as(u16, 1), draw_list.cells[0].col);
+    try std.testing.expectEqual(@as(u21, 's'), draw_list.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u16, 11), draw_list.cells[2].col);
+    try std.testing.expectEqual(@as(u21, 'v'), draw_list.cells[2].codepoint);
+    try std.testing.expect(!draw_list.cursor.visible);
+
+    // 세그먼트보다 긴 제목은 그 탭 한도에서 잘린다. cols=8, 2탭 → tab_w=4, 제목 칸 = [start+1, start+4) = 3칸.
+    const longt = [_][]const u8{ "abcdef", "x" };
+    var dl2 = try buildPaneTabBarDrawList(allocator, &longt, 8, .default);
+    defer dl2.deinit(allocator);
+    var tab0: usize = 0;
+    for (dl2.cells) |c| {
+        if (c.col < 4) tab0 += 1; // 탭 0 세그먼트 [0,4)
+    }
+    try std.testing.expectEqual(@as(usize, 3), tab0); // "abcdef" 중 3칸(col 1,2,3)만
+}
+
+test "paneTabWidth divides cols among tabs (min 1, clamps when tabs exceed cols)" {
+    try std.testing.expectEqual(@as(u16, 10), paneTabWidth(20, 2));
+    try std.testing.expectEqual(@as(u16, 6), paneTabWidth(20, 3)); // 20/3 = 6
+    try std.testing.expectEqual(@as(u16, 1), paneTabWidth(3, 5)); // 탭>cols → 1칸씩(넘침 잘림)
+    try std.testing.expectEqual(@as(u16, 0), paneTabWidth(0, 2));
+    try std.testing.expectEqual(@as(u16, 0), paneTabWidth(20, 0));
 }
 
 test "buildSidebarDrawList truncates to cols and advances wide glyphs by two columns" {

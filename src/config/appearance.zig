@@ -19,6 +19,11 @@ pub const ResolvedTheme = struct {
     foreground: color.Rgb,
     cursor: color.Rgb,
     selection: color.Rgb,
+    // 세로 탭 사이드바 색. 명시 안 하면 background에서 파생(아래 resolveTheme): sidebar_background=+24,
+    // sidebar_active=+48. 플랫폼 렌더(app_dev_session.sidebarBg/sidebarActiveBg)는 이 resolved 값을
+    // 읽기만 한다 — 색 파생의 단일 출처를 여기 둬 렌더 코드가 톤을 중복 정의하지 않게 한다.
+    sidebar_background: color.Rgb,
+    sidebar_active: color.Rgb,
 };
 
 pub const ResolvedCursor = struct {
@@ -63,11 +68,26 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
 }
 
 fn resolveTheme(config: theme.ThemeConfig) ResolveError!ResolvedTheme {
+    const background = try parseHexColor(config.background);
     return .{
-        .background = try parseHexColor(config.background),
+        .background = background,
         .foreground = try parseHexColor(config.foreground),
         .cursor = try parseHexColor(config.cursor),
         .selection = try parseHexColor(config.selection),
+        // 사이드바 색: 명시하면 그 색, null이면 background에서 파생(+24/+48). 파생을 config resolver
+        // 한 곳에 둬 단일 출처로 만든다 — 명시 색도 같은 #RRGGBB 검증을 거친다(깨진 색은 여기서 막힌다).
+        .sidebar_background = if (config.sidebar_background) |s| try parseHexColor(s) else lighten(background, 24),
+        .sidebar_active = if (config.sidebar_active) |s| try parseHexColor(s) else lighten(background, 48),
+    };
+}
+
+/// 각 채널을 delta만큼 더해 255로 saturate한다(테마 배경에서 사이드바 톤을 파생할 때 기본값 계산).
+/// 같은 톤을 유지하며 단계적으로 밝게 — cmux/Warp식 미묘한 사이드바 배경(+24)·활성 하이라이트(+48).
+fn lighten(rgb: color.Rgb, delta: u8) color.Rgb {
+    return .{
+        .r = @intCast(@min(@as(u32, rgb.r) + delta, 255)),
+        .g = @intCast(@min(@as(u32, rgb.g) + delta, 255)),
+        .b = @intCast(@min(@as(u32, rgb.b) + delta, 255)),
     };
 }
 
@@ -109,8 +129,30 @@ test "default appearance resolves to renderer-friendly values" {
     try std.testing.expectEqual(color.Rgb{ .r = 0xe8, .g = 0xe8, .b = 0xe8 }, resolved.theme.foreground);
     try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff }, resolved.theme.cursor);
     try std.testing.expectEqual(color.Rgb{ .r = 0x33, .g = 0x44, .b = 0x55 }, resolved.theme.selection);
+    // 사이드바 색은 명시 안 하면 background(#101010=0x10)에서 파생: +24=0x28, +48=0x40.
+    try std.testing.expectEqual(color.Rgb{ .r = 0x28, .g = 0x28, .b = 0x28 }, resolved.theme.sidebar_background);
+    try std.testing.expectEqual(color.Rgb{ .r = 0x40, .g = 0x40, .b = 0x40 }, resolved.theme.sidebar_active);
     try std.testing.expectEqual(theme.CursorShape.block, resolved.cursor.shape);
     try std.testing.expect(resolved.cursor.blink);
+}
+
+test "appearance resolver derives sidebar colors from background and honors explicit override" {
+    // 기본: background에서 파생(+24/+48), 255 saturate. light 배경(#f0f0f0=0xf0)이면 +48=0x120 → 0xff 클램프.
+    const light = try resolve(.{ .theme = .{ .background = "#f0f0f0" } });
+    try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff }, light.theme.sidebar_active);
+
+    // 명시 override: 사이드바 색을 background와 독립적으로 정한다(파생 대신 그 색).
+    const custom = try resolve(.{ .theme = .{
+        .background = "#101010",
+        .sidebar_background = "#202830",
+        .sidebar_active = "#3a4756",
+    } });
+    try std.testing.expectEqual(color.Rgb{ .r = 0x20, .g = 0x28, .b = 0x30 }, custom.theme.sidebar_background);
+    try std.testing.expectEqual(color.Rgb{ .r = 0x3a, .g = 0x47, .b = 0x56 }, custom.theme.sidebar_active);
+
+    // 명시 사이드바 색도 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 여기서 막힌다).
+    try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .sidebar_background = "bad" } }));
+    try std.testing.expectError(error.InvalidHexColorDigit, resolve(.{ .theme = .{ .sidebar_active = "#11GG33" } }));
 }
 
 test "appearance resolver trims font family and preserves cursor options" {

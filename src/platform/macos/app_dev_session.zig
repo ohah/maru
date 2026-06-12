@@ -45,6 +45,12 @@ fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px:
     return terminal.clampGridSize(.{ .cols = @intCast(raw_cols), .rows = @intCast(raw_rows) });
 }
 
+/// color.Rgb를 불투명(A=0xFF) 0xAARRGGBB로 packing한다(사이드바 strip/활성 밴드 셀 배경 색용). 셀
+/// 배경은 A=0xFF여야 셰이더가 그 색으로 칠한다(A=0이면 "배경 없음").
+fn packOpaqueRgb(rgb: maru.color.Rgb) u32 {
+    return 0xFF00_0000 | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+}
+
 /// 활성 탭 하이라이트 밴드 셀 1개를 만든다(못 만들면 null). 사이드바 폭을 cell 폭으로 floor해 칸 수
 /// (sidebar_cols)를 구하고 — 밴드가 origin_x를 넘어 터미널 영역을 침범하지 않게 floor한다(우측에 한 칸
 /// 미만 여백이 살짝 inset처럼 남는다) — 그 폭만큼 한 칸(col 0, width=sidebar_cols)으로 사이드바를 채우는
@@ -1322,24 +1328,16 @@ pub const DevSession = struct {
         return self.last_summary;
     }
 
-    /// 사이드바 배경색(0xAARRGGBB) — 테마 배경에서 각 채널 +24(255 saturate)로 살짝 밝게. 같은 테마
-    /// 톤이라 코히어런트하면서 터미널 영역과 시각적으로 구분된다(cmux식 미묘한 사이드바).
+    /// 사이드바 strip 배경색(0xAARRGGBB). resolved 테마의 `sidebar_background`를 읽기만 한다 — 색 파생
+    /// (명시 없으면 배경 +24)은 config resolver(resolveTheme)가 단일 출처로 소유한다. 테마가 명시하면 그 색.
     fn sidebarBg(self: *const DevSession) u32 {
-        const bg = self.appearance.theme.background;
-        const r: u32 = @min(@as(u32, bg.r) + 24, 255);
-        const g: u32 = @min(@as(u32, bg.g) + 24, 255);
-        const b: u32 = @min(@as(u32, bg.b) + 24, 255);
-        return 0xFF00_0000 | (r << 16) | (g << 8) | b;
+        return packOpaqueRgb(self.appearance.theme.sidebar_background);
     }
 
-    /// 활성 탭 하이라이트 밴드 배경색(0xAARRGGBB) — 사이드바 배경(+24)보다 한 단계 더 밝은 +48로,
-    /// 같은 테마 톤을 유지하면서 "이 탭이 활성"임을 드러낸다(cmux/Warp식 미묘한 선택 하이라이트).
+    /// 활성 탭 하이라이트 밴드 배경색(0xAARRGGBB). resolved 테마의 `sidebar_active`를 읽기만 한다 — 명시
+    /// 없으면 배경 +48(사이드바 배경보다 한 단계 밝게)로 resolveTheme가 파생한다. 테마가 명시하면 그 색.
     fn sidebarActiveBg(self: *const DevSession) u32 {
-        const bg = self.appearance.theme.background;
-        const r: u32 = @min(@as(u32, bg.r) + 48, 255);
-        const g: u32 = @min(@as(u32, bg.g) + 48, 255);
-        const b: u32 = @min(@as(u32, bg.b) + 48, 255);
-        return 0xFF00_0000 | (r << 16) | (g << 8) | b;
+        return packOpaqueRgb(self.appearance.theme.sidebar_active);
     }
 
     /// 세로 사이드바 셀(탭 엔트리)을 다시 만든다. PR3b-1은 활성 탭 행에 하이라이트 밴드 1개를 emit한다

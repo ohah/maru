@@ -1300,7 +1300,19 @@ pub const DevSession = struct {
                     .text = self.appearance.theme.background,
                 },
             };
-            if (self.metal_buffer.replace(self.allocator, tick_result.frame.render_frame, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, cell_colors)) |_| {
+            // 사이드바 탭 제목 glyph 패스(macOS만 — buildFromDrawList는 실 CoreText 브리지). 터미널과
+            // 같은 frame_builder/renderer_state(atlas)를 써서 제목 glyph도 같은 slot을 재사용한다. 실패는
+            // 무시하고 제목 없이 밴드만 그린다(세션을 죽이지 않음). 짧은 제목이라 매 frame 재-shape해도
+            // 싸고, atlas dedup이 새 glyph만 업로드한다.
+            var sidebar_frame: ?renderer.RenderFrame = null;
+            if (builtin.os.tag == .macos) {
+                sidebar_frame = self.buildSidebarTitleFrame() catch null;
+            }
+            defer if (sidebar_frame) |*sf| sf.deinit(self.allocator);
+            // 제목 glyph 투영용 색(전경=테마 글자색). 밴드는 rebuildSidebar가 이미 색을 박아 넘긴다.
+            const sidebar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
+
+            if (self.metal_buffer.replace(self.allocator, tick_result.frame.render_frame, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, cell_colors, sidebar_frame, self.sidebar_cells.items, sidebar_colors)) |_| {
                 self.metal_dirty = false;
             } else |_| {}
 
@@ -1370,17 +1382,50 @@ pub const DevSession = struct {
         try self.sidebar_cells.append(self.allocator, cell);
     }
 
+    /// 탭 제목들을 "{n} {title}" 라벨로 모아 사이드바 제목 glyph RenderFrame을 만든다(한 줄=한 탭,
+    /// row=탭 인덱스). `build`(터미널)와 같은 CoreTextFrameBuilder/renderer_state(atlas)를 써서 제목
+    /// glyph도 터미널과 같은 slot을 재사용하고 새 glyph만 추가 업로드된다. macOS 전용(실 CoreText
+    /// 브리지) — tick의 `builtin.os.tag == .macos` 가드 안에서만 호출한다. 사이드바가 꺼졌거나(폭 0)
+    /// 탭이 없으면 error.NoSidebar로 빠져 호출부가 제목 없이 밴드만 그린다.
+    fn buildSidebarTitleFrame(self: *DevSession) !renderer.RenderFrame {
+        const sidebar_cols_u32 = if (self.cell_width_px > 0) self.sidebar_width_px / self.cell_width_px else 0;
+        const sidebar_cols: u16 = @intCast(@min(sidebar_cols_u32, @as(u32, std.math.maxInt(u16))));
+        if (sidebar_cols == 0 or self.tabs.items.len == 0) return error.NoSidebar;
+
+        // 탭 라벨 "{n} {title}"을 소유 버퍼로 모은다(buildSidebarDrawList가 코드포인트로 디코드).
+        var labels: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (labels.items) |l| self.allocator.free(l);
+            labels.deinit(self.allocator);
+        }
+        for (self.tabs.items, 0..) |tab, i| {
+            const label = try std.fmt.allocPrint(self.allocator, "{d} {s}", .{ i + 1, tab.surface.title });
+            try labels.append(self.allocator, label);
+        }
+
+        const fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
+        const draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, labels.items, sidebar_cols, fg);
+        // buildFromDrawList가 draw_list 소유권을 가져간다(실패 시 정리, 성공 시 RenderFrame으로 이동).
+        const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
+            .appearance = self.appearance,
+            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+            .scale_milli = self.scale_milli,
+            .cell_width_px = @intCast(self.cell_width_px),
+            .cell_height_px = @intCast(self.cell_height_px),
+        };
+        return frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
+    }
+
     pub fn metalFrame(self: *const DevSession) MetalFrame {
         var frame = self.metal_buffer.view();
         // "surface→rect": 터미널을 사이드바 폭만큼 오른쪽에 그리고, 왼쪽 strip에 사이드바 배경을 칠한다.
         // 렌더러가 origin offset + 배경 quad를 처리한다. split(panel)도 같은 origin 방식을 확장한다.
         frame.terminal_origin_x_px = self.sidebar_width_px;
         frame.sidebar_bg = self.sidebarBg();
-        // 사이드바 탭 엔트리 셀(origin 0 렌더). owned ArrayList를 가리키므로 다음 rebuildSidebar/deinit
-        // 까지 유효하다(cells와 같은 수명 계약). 비어 있으면 null로 둬 렌더러가 사이드바 셀을 건너뛴다.
-        frame.sidebar_cells = if (self.sidebar_cells.items.len > 0) self.sidebar_cells.items.ptr else null;
-        frame.sidebar_cell_count = self.sidebar_cells.items.len;
-        // 사이드바 셀을 cell 높이가 아니라 탭 슬롯 높이(≈2.5×)로 세로 배치하게 렌더러에 넘긴다.
+        // 사이드바 셀(밴드 ++ 제목 glyph)은 metal_buffer가 소유한다 — view()가 frame.sidebar_cells를
+        // 세팅한다(self.sidebar_cells는 밴드 source라 replace에만 넘긴다). 여기선 슬롯 높이만 더한다:
+        // 렌더러가 사이드바 셀을 cell 높이가 아니라 탭 슬롯 높이(≈2.5×)로 세로 배치하게.
         frame.sidebar_slot_height_px = self.sidebar_slot_height_px;
         return frame;
     }
@@ -1821,12 +1866,16 @@ test "sidebar gets an active-tab highlight band that follows tab create and swit
     });
     defer session.deinit();
 
-    // init 후: 사이드바 폭/메트릭이 채워져 활성 탭(0) 하이라이트 밴드 1개가 row 0에 나온다.
+    // init 후: 사이드바 폭/메트릭이 채워진다. metalFrame이 노출하는 사이드바 셀은 metal_buffer가
+    // 소유하므로 첫 tick의 replace가 돌아야 채워진다(밴드 + 제목 glyph). 한 번 tick한다.
     try std.testing.expect(session.sidebar_width_px > 0);
+    _ = try session.tick();
     {
         const frame = session.metalFrame();
-        try std.testing.expectEqual(@as(usize, 1), frame.sidebar_cell_count);
+        // 최소 밴드 1개(활성 탭 하이라이트) — macOS에선 제목 glyph도 더해진다.
+        try std.testing.expect(frame.sidebar_cell_count >= 1);
         try std.testing.expect(frame.sidebar_cells != null);
+        // 밴드 source(self.sidebar_cells)는 활성 행을 추적한다 — metal_buffer로 옮겨도 source는 그대로.
         try std.testing.expectEqual(@as(u16, 0), session.sidebar_cells.items[0].row);
         try std.testing.expect(session.sidebar_cells.items[0].width > 0);
         // 밴드를 그릴 사이드바 폭은 터미널 origin offset과 같은 단일 출처다.

@@ -70,7 +70,8 @@ pub fn run(
     surfaces[0].title = "app pty loop smoke";
     surfaces[0].command = smoke_config.command;
 
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -483,7 +484,8 @@ test "app PTY loop scripted input goes through FrameLoop keybinding boundary" {
     var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
     var frame_loop = frame_loop_mod.FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
 
     const input = "printf smoke\nexit\n";

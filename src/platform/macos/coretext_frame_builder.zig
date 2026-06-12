@@ -216,7 +216,8 @@ test "CoreText frame builder builds AppHostFrame from active surface" {
     surfaces[0].process_state = .running;
     try surfaces[0].core.write("A한");
 
-    var app_window: app.AppWindow = .{ .tabs = surfaces[0..] };
+    var tab_ptrs = [_]*app.Surface{&surfaces[0]};
+    var app_window: app.AppWindow = .{ .tabs = &tab_ptrs };
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
 
@@ -244,8 +245,8 @@ test "CoreText frame builder reports no active surface before shaping" {
     // active surface가 없으면 CoreText bridge를 호출하기 전에 실패해야 한다. 그래야 window/tab
     // lifecycle 버그가 font/raster 실패처럼 보이지 않는다.
     const allocator = std.testing.allocator;
-    var surfaces = [_]app.Surface{};
-    var app_window: app.AppWindow = .{ .tabs = surfaces[0..] };
+    var tab_ptrs = [_]*app.Surface{};
+    var app_window: app.AppWindow = .{ .tabs = &tab_ptrs };
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
     const builder = CoreTextFrameBuilder{
@@ -269,7 +270,8 @@ test "CoreText frame builder surfaces native shape failures" {
     defer surfaces[0].deinit();
     try surfaces[0].core.write("A");
 
-    var app_window: app.AppWindow = .{ .tabs = surfaces[0..] };
+    var tab_ptrs = [_]*app.Surface{&surfaces[0]};
+    var app_window: app.AppWindow = .{ .tabs = &tab_ptrs };
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
     const builder = CoreTextFrameBuilder{

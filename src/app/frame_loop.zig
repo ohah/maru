@@ -202,7 +202,8 @@ pub fn runSmoke(
     surfaces[0].title = "app frame loop smoke";
     surfaces[0].command = "memory-pty";
 
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -432,7 +433,8 @@ test "app frame loop ticks keep building frames while the queue is empty or acti
     defer memory_pty.deinit();
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 16, .rows = 3 })};
     defer surfaces[0].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -479,7 +481,8 @@ test "app frame loop can delegate frame construction after an already applied dr
     defer memory_pty.deinit();
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 16, .rows = 3 })};
     defer surfaces[0].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -514,7 +517,8 @@ test "app frame loop can reuse an injected frame builder across interactive tick
     defer memory_pty.deinit();
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 24, .rows = 4 })};
     defer surfaces[0].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -590,7 +594,8 @@ test "app frame loop routes key events through the same app host policy" {
     defer memory_pty.deinit();
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 16, .rows = 3 })};
     defer surfaces[0].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();

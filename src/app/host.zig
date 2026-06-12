@@ -173,7 +173,8 @@ pub fn runSmoke(io: std.Io, allocator: std.mem.Allocator, config: AppSmokeConfig
     surfaces[0].title = "app smoke";
     surfaces[0].command = "memory-pty";
 
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -454,7 +455,8 @@ test "app host close action detaches active live PTY before closing queue" {
     defer memory_pty.deinit();
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 })};
     defer surfaces[0].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -494,7 +496,9 @@ test "app host close action reports an empty window as no active surface" {
     // focus 문제와 PTY registry 문제를 구분할 수 있다.
     const allocator = std.testing.allocator;
     var surfaces: [0]surface_mod.Surface = .{};
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    _ = &surfaces;
+    var tab_ptrs = [_]*surface_mod.Surface{};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -516,7 +520,8 @@ test "app host close action refuses to close a live PTY attached to another tab"
     };
     defer surfaces[0].deinit();
     defer surfaces[1].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces, .active_tab = 1 };
+    var tab_ptrs = [_]*surface_mod.Surface{ &surfaces[0], &surfaces[1] };
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs, .active_tab = 1 };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -553,7 +558,8 @@ test "app host frame drains runtime events and builds renderer frame for active 
     defer memory_pty.deinit();
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 12, .rows = 2 })};
     defer surfaces[0].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -588,7 +594,8 @@ test "app host routes focused input and resize through SurfaceRuntime" {
     defer memory_pty.deinit();
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 })};
     defer surfaces[0].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -609,7 +616,8 @@ test "app host resolves terminal key events before writing to active PTY" {
     defer memory_pty.deinit();
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 })};
     defer surfaces[0].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -638,7 +646,8 @@ test "app host encodes arrows per the active surface's DECCKM mode" {
     defer memory_pty.deinit();
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 })};
     defer surfaces[0].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -663,7 +672,8 @@ test "app host does not leak app actions or ignored Cmd keys to PTY" {
     defer memory_pty.deinit();
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 })};
     defer surfaces[0].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
@@ -829,7 +839,8 @@ test "app host builds frames from the scrolled viewport, not just the active scr
     defer memory_pty.deinit();
     var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 8, .rows = 2 })};
     defer surfaces[0].deinit();
-    var app_window: window_mod.AppWindow = .{ .tabs = &surfaces };
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();

@@ -132,13 +132,16 @@ const NormalizedConfig = struct {
 
 /// 한 탭의 단위: surface(그리드/스크롤백) + 그 surface에 붙은 live PTY 셸 + 그 PTY를 drain하는 pump.
 /// `LivePtySession`의 reader thread가 `&live_pty.reader`를 잡으므로 이 묶음은 한번 만들면 이동하면
-/// 안 된다 — 지금은 DevSession 인라인 필드라 DevSession이 heap-pin이면 안정적이고, 멀티-탭(후속)에서는
-/// 각 Tab을 heap-pin(`ArrayList(*Tab)`)한다. pump는 안정 `*queue` 포인터만 들어 이동 제약이 없다.
+/// 안 된다 — `ArrayList(*Tab)`로 각 Tab을 heap-pin(`allocator.create`)하므로 리스트가 realloc돼도
+/// 본체는 안 움직인다. pump는 안정 `*queue` 포인터만 들어 이동 제약이 없다.
 const Tab = struct {
     surface: app.Surface = undefined,
     live_pty: app.LivePtySession = undefined,
     pump: app.RuntimeEventPump = undefined,
     live_initialized: bool = false,
+    // 이 탭의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이
+    // 탭별로 한 번만 finish하도록, 그리고 세션 종료(모든 탭 terminated)를 판정하도록 쓴다.
+    terminated: bool = false,
 };
 
 pub const DevSession = struct {
@@ -355,6 +358,24 @@ pub const DevSession = struct {
         self.app_window.active_tab = self.tabs.items.len - 1;
         self.next_id += 1;
         return tab;
+    }
+
+    /// 활성 탭을 바꾼다(`app_window.selectTab`). 성공하면 활성 탭이 바뀌었으니 재드로우를 위해
+    /// metal_dirty를 세우고 true. 범위 밖 index면 false(활성 불변). 입력/렌더는 activeSurface가
+    /// active_tab을 따라가므로 이것만으로 라우팅이 바뀐다.
+    pub fn switchTab(self: *DevSession, index: usize) bool {
+        if (!self.app_window.selectTab(index)) return false;
+        self.metal_dirty = true;
+        return true;
+    }
+
+    /// live 탭이 모두 종료됐는가(세션/창 종료 판정). 탭이 없으면 false(아직 안 만든 상태).
+    fn allTabsTerminated(self: *DevSession) bool {
+        if (self.tabs.items.len == 0) return false;
+        for (self.tabs.items) |tab| {
+            if (tab.live_initialized and !tab.terminated) return false;
+        }
+        return true;
     }
 
     /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거친다 —
@@ -1098,14 +1119,26 @@ pub const DevSession = struct {
         // (reader join/child reap)을 건너뛰지 않게 한다.
         self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 30Hz로 한 줄씩 스크롤+확장
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
-        // 현재는 활성(유일) 탭의 PTY만 drain한다. 멀티-탭(후속)에서는 모든 탭을 순회해 백그라운드
-        // 탭도 출력을 받게 한다(active tab의 frame만 빌드하되 routing은 surface_id로 각 탭에 간다).
-        const drain_summary = try self.activeTab().pump.drainAvailable();
+        // 모든 탭의 PTY를 drain한다 — 백그라운드 탭도 출력을 받게(routing은 surface_id로 각 탭 surface에
+        // 가고, frame은 아래에서 활성 탭만 빌드한다). 누적 summary는 frame builder에 보고용으로 넘긴다.
+        var drain_summary: app.RuntimePumpDrainSummary = .{};
+        for (self.tabs.items) |tab| {
+            if (!tab.live_initialized) continue;
+            const ds = try tab.pump.drainAvailable();
+            drain_summary.output_events += ds.output_events;
+            drain_summary.exit_events += ds.exit_events;
+            // 탭별로 종료를 한 번만 finish(reader join + child reap). 세션 종료는 '모든' 탭이 끝났을 때.
+            if (ds.ended != null and !tab.terminated) {
+                tab.live_pty.finishAfterTermination();
+                tab.terminated = true;
+                drain_summary.ended = ds.ended; // 마지막 관측 종료를 frame 보고에 싣는다
+            }
+        }
         self.total_output_events += drain_summary.output_events;
         self.total_exit_events += drain_summary.exit_events;
-        if (drain_summary.ended != null and !self.termination_finished) {
+        // 세션(창) 종료: live 탭이 전부 terminated면. 단일 탭이면 그 탭이 끝나는 즉시(기존 동작 보존).
+        if (!self.termination_finished and self.allTabsTerminated()) {
             self.ended_seen = true;
-            self.activeTab().live_pty.finishAfterTermination();
             self.termination_finished = true;
         }
 
@@ -1582,6 +1615,54 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
     try std.testing.expect(toggles >= 1);
     // 토글은 rebuild 없이도 재드로우를 유발해야 한다(setCursorVisible의 generation 증가).
     try std.testing.expect(gen_changes >= toggles);
+}
+
+// 멀티-탭 핵심 계약: 두 번째 탭을 만들면 자기 셸 PTY가 spawn되고, tick이 '모든' 탭을 drain하므로
+// 그 탭 surface가 자기 출력을 받는다(백그라운드여도). 실 PTY라 macOS 게이트 — 약속한 "탭 2개 동시
+// 출력" 반-E2E를 결정적으로 고정한다. switchTab이 활성 라우팅을 바꾸는 것도 함께 검증.
+test "two tabs: createTab spawns a second shell and tick drains both (multi-tab)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+
+    // 2번째 탭: 알려진 마커를 출력하는 controlled 셸. createTab이 Tab을 heap-pin하고 같은 runtime에
+    // 별개 surface_id로 attach한다. 새 탭이 활성이 된다.
+    _ = try session.createTab(
+        .{ .command = "/bin/sh", .args = &.{ "-c", "printf 'TAB_TWO_MARK\\n'" }, .size = .{ .cols = 20, .rows = 5 } },
+        .{ .cols = 20, .rows = 5 },
+        16,
+        "tab 2",
+        "sh",
+    );
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+
+    // tick이 모든 탭을 drain → 2번째 탭 surface가 자기 셸 출력을 받는다(멀티-탭 drain).
+    var saw = false;
+    var i: usize = 0;
+    while (i < 400 and !saw) : (i += 1) {
+        _ = try session.tick();
+        const dump = try session.tabs.items[1].surface.core.dumpUtf8(allocator);
+        defer allocator.free(dump);
+        if (std.mem.indexOf(u8, dump, "TAB_TWO_MARK") != null) saw = true;
+    }
+    try std.testing.expect(saw);
+
+    // switchTab으로 활성 탭을 0으로 — activeSurface가 탭 0 surface를 가리킨다(라우팅 전환).
+    try std.testing.expect(session.switchTab(0));
+    try std.testing.expectEqual(session.tabs.items[0].surface.id, session.activeSurface().id);
+    try std.testing.expect(!session.switchTab(5)); // 범위 밖이면 false, 활성 불변
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
 }
 
 test "drag autoscroll works after a double-click word selection and skips redraw when nothing moves" {

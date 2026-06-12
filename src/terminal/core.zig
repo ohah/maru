@@ -334,6 +334,9 @@ pub const TerminalCore = struct {
     /// 방금 끝난 명령(OSC 133 D)의 종료코드를 그 명령의 프롬프트 시작 행에 스탬프한다 — 커서의
     /// 절대 행에서 위로 가장 가까운 isPromptStart를 찾는다. 프롬프트가 이미 스크롤백으로 밀려났어도
     /// 거기까지 스캔해 찾는다. 못 찾으면(분류 없음) 무동작.
+    /// 알려진 엣지(실 zsh에선 도달 안 함): C가 B와 같은 행에서(개행 없이) 와 입력 행이 .command로
+    /// 재분류되면, 그 명령엔 promptish 시작 행이 없어 스캔이 '이전' 블록을 찍을 수 있다. 실제 zsh는
+    /// Enter의 개행이 C를 새 행에 두므로 입력 행이 .input으로 남아 안전하다(합성 스트림 한정 엣지).
     fn stampPromptExit(self: *TerminalCore, exit: i16) void {
         var abs = self.sb_count + self.cursor.row + 1;
         while (abs > 0) {
@@ -353,7 +356,7 @@ pub const TerminalCore = struct {
         self.ensureScrollbackRewrapped(); // sb_count(절대 좌표 범위)가 재-wrap으로 바뀔 수 있다
         const total = self.sb_count + self.size.rows;
         if (total == 0) return false;
-        const top = self.sb_count - self.view_offset; // 현재 뷰포트 맨 위 절대 행
+        const top = self.sb_count - @min(self.view_offset, self.sb_count); // 현재 뷰포트 맨 위 절대 행(underflow 가드)
         var target: ?usize = null;
         if (dir < 0) {
             var r = top;
@@ -402,7 +405,7 @@ pub const TerminalCore = struct {
 
     /// 보이는 행 r의 OSC 133 정보(viewportRow와 같은 [스크롤백 ++ 활성] 윈도 인덱싱).
     pub fn viewportRowPrompt(self: *const TerminalCore, r: u16) types.RowPrompt {
-        const ci = self.sb_count - self.view_offset + r;
+        const ci = self.sb_count - @min(self.view_offset, self.sb_count) + r; // underflow 가드(다른 호출부와 동일)
         if (ci < self.sb_count) return self.scrollbackRowPrompt(ci);
         return self.prompt_marks[ci - self.sb_count];
     }
@@ -915,9 +918,11 @@ pub const TerminalCore = struct {
             // 줄의 마지막 산출 행이 물려받을 wrap 플래그: 논리 줄이 스크롤백의 끝을 넘어 활성
             // 화면으로 이어지면(마지막 행의 sb_wrapped=true) 그 경계 연속성을 보존한다.
             const tail_wrap = self.scrollbackRowWrapped(j);
-            // 논리 줄은 단일 OSC 133 분류다(lineFeed가 같은 영역을 전파). 첫 행의 태그를 이 줄의
-            // 모든 산출 행이 물려받아, 재-wrap 후에도 sb_prompt_marks가 내용과 정렬을 유지한다.
+            // 논리 줄은 단일 OSC 133 분류다(lineFeed가 같은 영역을 전파). 분류(kind)는 이 줄의 모든
+            // 산출 행이 물려받아 재-wrap 후에도 정렬을 유지한다. 단 종료코드(exit)는 leader 한 행에만
+            // 스탬프되므로 줄의 '첫' 산출 행에만 둔다 — 안 그러면 거터 바가 여러 개로 보인다(코드리뷰 #1).
             const line_tag = self.scrollbackRowPrompt(i);
+            var line_exit: ?i16 = line_tag.exit;
 
             var cur: ?[]types.Cell = null;
             errdefer if (cur) |c| self.allocator.free(c);
@@ -940,7 +945,8 @@ pub const TerminalCore = struct {
                             clearTruncatedWideBase(full); // 마지막 칸의 잘린 wide base 정리(new_cols==1 등)
                             rows.appendAssumeCapacity(full);
                             wraps.appendAssumeCapacity(true);
-                            pmarks.appendAssumeCapacity(line_tag);
+                            pmarks.appendAssumeCapacity(.{ .kind = line_tag.kind, .exit = line_exit });
+                            line_exit = null; // exit는 줄의 첫 산출 행에만
                             cur = null;
                         }
                         emitted += 1;
@@ -964,7 +970,8 @@ pub const TerminalCore = struct {
                 clearTruncatedWideBase(last);
                 rows.appendAssumeCapacity(last);
                 wraps.appendAssumeCapacity(tail_wrap);
-                pmarks.appendAssumeCapacity(line_tag);
+                pmarks.appendAssumeCapacity(.{ .kind = line_tag.kind, .exit = line_exit });
+                line_exit = null;
                 cur = null;
             }
             emitted += 1;
@@ -2053,6 +2060,10 @@ pub const TerminalCore = struct {
         while (cur_end + 1 < old_rows and self.wrapped[cur_end]) cur_end += 1;
 
         var old_r: u16 = 0;
+        // 재-wrap되는 논리 줄의 종료코드(OSC 133 D는 leader 한 행에만 스탬프)를 새 줄의 '첫' 산출
+        // 행에만 둔다 — 안 그러면 narrow는 한 명령에 거터 바가 여러 개, widen-merge는 leader exit가
+        // 분실된다(코드리뷰 #1). 분류(kind)는 줄 전체가 같으니 그대로 carry한다.
+        var rewrap_exit: ?i16 = null;
         while (old_r < old_rows) {
             // 커서 줄: reflow 없이 각 옛 행을 그대로(새 폭으로 clip/pad) 출력한다. cur_start는 논리
             // 줄 시작이라 직전 줄이 닫혀 oc==0이다.
@@ -2079,6 +2090,8 @@ pub const TerminalCore = struct {
             }
 
             // 그 외 논리 줄은 새 폭으로 다시 wrap한다(이 줄엔 커서가 없다).
+            // 논리 줄 시작이면 leader의 exit를 잡는다 — 이 줄의 첫 산출 행에만 실린다(아래 finalize).
+            if (old_r == 0 or !self.wrapped[old_r - 1]) rewrap_exit = self.prompt_marks[old_r].exit;
             const soft = self.wrapped[old_r];
             // 기여 길이: soft 행은 꽉 찼으므로 전체, hard 행은 뒤 빈칸을 잘라낸 길이.
             const contrib: u16 = if (soft) old_cols else self.trimmedRowLen(old_r);
@@ -2090,7 +2103,9 @@ pub const TerminalCore = struct {
                 const needs: u16 = if (cell.width == 2) 2 else 1;
                 if (oc + needs > new_cols) {
                     swrap[out_rows] = true;
-                    pmarks[out_rows] = self.prompt_marks[old_r]; // 논리 줄은 단일 분류 — 옛 행 태그 carry
+                    // 분류는 줄 전체 동일, exit는 첫 산출 행에만(아래 rewrap_exit 소비).
+                    pmarks[out_rows] = .{ .kind = self.prompt_marks[old_r].kind, .exit = rewrap_exit };
+                    rewrap_exit = null;
                     out_rows += 1;
                     oc = 0;
                     @memset(scratch[out_rows * new_cols ..][0..new_cols], blank);
@@ -2101,7 +2116,8 @@ pub const TerminalCore = struct {
             if (!soft) {
                 // 논리 줄 끝: 부분 출력 행을 hard(wrapped=false)로 닫는다.
                 swrap[out_rows] = false;
-                pmarks[out_rows] = self.prompt_marks[old_r];
+                pmarks[out_rows] = .{ .kind = self.prompt_marks[old_r].kind, .exit = rewrap_exit };
+                rewrap_exit = null;
                 out_rows += 1;
                 oc = 0;
                 @memset(scratch[out_rows * new_cols ..][0..new_cols], blank);
@@ -2110,7 +2126,7 @@ pub const TerminalCore = struct {
         }
         if (oc > 0) { // soft로 끝났는데 더 옛 행이 없음(방어)
             swrap[out_rows] = false;
-            pmarks[out_rows] = self.prompt_marks[old_rows - 1]; // 마지막 논리 줄의 태그
+            pmarks[out_rows] = .{ .kind = self.prompt_marks[old_rows - 1].kind, .exit = rewrap_exit };
             out_rows += 1;
         }
 
@@ -2775,6 +2791,7 @@ pub const TerminalCore = struct {
                 self.cells[src_start .. src_start + self.size.cols],
             );
             self.wrapped[row] = self.wrapped[row - n];
+            self.prompt_marks[row] = self.prompt_marks[row - n]; // OSC 133 태그도 옮긴 내용과 함께(scrollRangeUp 대칭)
         }
 
         var blank_row: u16 = top;
@@ -2782,6 +2799,7 @@ pub const TerminalCore = struct {
             const blank_start = self.index(blank_row, 0);
             @memset(self.cells[blank_start .. blank_start + self.size.cols], .{});
             self.wrapped[blank_row] = false;
+            self.prompt_marks[blank_row] = .{}; // 삽입된 빈 행은 비분류(잔여 태그 → 헛 거터 방지)
         }
         // 범위 경계의 wrap 정합(scrollRangeUp과 대칭): 새 bottom 행(=old bottom-n 내용)이 범위 밖
         // bottom+1로 이어진다는 플래그는 거짓이고, top-1 행의 "top으로의 연속"도 top이 빈 줄이 돼
@@ -5262,6 +5280,38 @@ test "OSC 133: the stamped exit carries with the row into scrollback" {
     try core.write("\x1b]133;A\x1b\\$\x1b]133;B\x1b\\\r\n\x1b]133;C\x1b\\\r\n\x1b]133;D;7\x07");
     try std.testing.expect(core.scrollbackLen() >= 1);
     try std.testing.expectEqual(@as(?i16, 7), core.scrollbackRowPrompt(0).exit); // exit carry
+}
+
+test "OSC 133: re-wrap keeps the exit on exactly one row (no duplicate gutter) [review #1]" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
+    defer core.deinit();
+    // 긴 입력으로 프롬프트 줄이 soft-wrap되고 exit가 leader(row0)에 스탬프된다.
+    try core.write("\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+    try core.write("0123456789012345678901234"); // 25자 → row0(20)+row1(5) .input
+    try core.write("\r\n\x1b]133;C\x1b\\\r\n\x1b]133;D;0\x07");
+    var before: usize = 0;
+    for (0..core.size.rows) |r| {
+        if (core.prompt_marks[r].exit != null) before += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), before); // leader 한 행에만
+    try core.resize(8, 8); // 좁힘 → 그 줄이 더 쪼개진다. exit는 여전히 한 행에만(중복 거터 방지).
+    var after: usize = 0;
+    for (0..core.size.rows) |r| {
+        if (core.prompt_marks[r].exit != null) after += 1;
+    }
+    for (0..core.scrollbackLen()) |i| {
+        if (core.scrollbackRowPrompt(i).exit != null) after += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), after); // 재-wrap 후에도 거터 바 1개
+}
+
+test "OSC 133: scrollRangeDown (RI/IL) carries the tag down and blanks the inserted row [review #2]" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x1b\\"); // row0 = .prompt, 커서 row0(scroll_top)
+    try core.write("\x1bM"); // RI: scroll region을 아래로 → row0 내용·태그가 row1로, row0은 빈 행
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0].kind); // 삽입된 빈 행 비분류
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[1].kind); // 태그가 내려감
 }
 
 test "OSC 133: renderSnapshot composes prompt_marks for the scrolled viewport" {

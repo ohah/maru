@@ -172,6 +172,12 @@ pub const default_app_bindings = [_]AppBinding{
     // 두 칸의 char는 같고(shift만 다름) 모디파이어 정확 비교로 갈린다. 방향 규칙은 docs/tabs-splits-layout.md.
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'D' } }, .action = .split_horizontal },
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'D' } }, .action = .split_vertical },
+    // Cmd+Option+화살표: split 탭에서 방향으로 pane 포커스 이동(iTerm2식). 모디파이어 정확 비교라
+    // Option+화살표(단어 이동)·Cmd+화살표(줄 처음/끝)와 안 겹친다(둘 다 command+option은 아님).
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_left }, .action = .focus_pane_left },
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_right }, .action = .focus_pane_right },
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_up }, .action = .focus_pane_up },
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_down }, .action = .focus_pane_down },
 };
 
 pub const KeyBindingResolver = struct {
@@ -499,6 +505,24 @@ test "built-in app bindings resolve Cmd+D / Cmd+Shift+D to horizontal / vertical
     try std.testing.expectEqual(action_mod.Action.split_horizontal, h.app_action);
     const v = try resolver.resolve(.{ .key = .{ .char = 'D' }, .modifiers = .{ .command = true, .shift = true } }, &buffer, .{});
     try std.testing.expectEqual(action_mod.Action.split_vertical, v.app_action);
+}
+
+test "built-in app bindings resolve Cmd+Option+arrows to directional pane focus" {
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{};
+    const mods: terminal.ModifierSet = .{ .command = true, .option = true };
+    const l = try resolver.resolve(.{ .key = .arrow_left, .modifiers = mods }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.focus_pane_left, l.app_action);
+    const r = try resolver.resolve(.{ .key = .arrow_right, .modifiers = mods }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.focus_pane_right, r.app_action);
+    const u = try resolver.resolve(.{ .key = .arrow_up, .modifiers = mods }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.focus_pane_up, u.app_action);
+    const d = try resolver.resolve(.{ .key = .arrow_down, .modifiers = mods }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.focus_pane_down, d.app_action);
+    // Cmd만(Option 없음)인 화살표는 app 액션이 아니라 터미널 줄-이동 바인딩(Ctrl+A=줄 시작) — 모디파이어
+    // 정확 비교라 pane 이동(command+option)과 안 겹친다.
+    const cmd_only = try resolver.resolve(.{ .key = .arrow_left, .modifiers = .{ .command = true } }, &buffer, .{});
+    try std.testing.expect(cmd_only == .terminal_input);
 }
 
 test "resolver rejects duplicate app and terminal bindings separately" {

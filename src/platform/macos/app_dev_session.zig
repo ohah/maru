@@ -136,6 +136,56 @@ fn paneAtPoint(leaf_rects: []const app.SplitLeafRect, x_px: f64, y_px: f64) ?*ap
     return null;
 }
 
+/// 키보드 pane 이동 방향(좌/우/상/하). split 탭에서 활성 panel 기준 인접 panel을 고른다.
+const FocusDirection = enum { left, right, up, down };
+
+/// 활성 panel(active_surface)에서 direction 방향으로 가장 가까운 인접 panel의 surface(없으면 null). 각
+/// panel rect의 '중심'을 비교해 — 방향 반평면 안(left면 중심 x가 더 작음 등)인 후보 중, 주축 거리(이동 방향)
+/// + 부축 어긋남×2(정렬 페널티)가 최소인 것을 고른다. 좌우 split이면 상/하는 후보가 없어 null(이동 안 함),
+/// 격자 배치면 같은 행/열의 정렬된 panel을 우선한다. 순수 함수라 OS 무관 단위 테스트한다(레이아웃 rect만 입력).
+fn paneInDirection(leaf_rects: []const app.SplitLeafRect, active_surface: *app.Surface, dir: FocusDirection) ?*app.Surface {
+    var active_rect: ?app.SplitRect = null;
+    for (leaf_rects) |lr| {
+        if (lr.surface == active_surface) {
+            active_rect = lr.rect;
+            break;
+        }
+    }
+    const ar = active_rect orelse return null;
+    const acx = @as(f64, @floatFromInt(ar.x)) + @as(f64, @floatFromInt(ar.w)) / 2.0;
+    const acy = @as(f64, @floatFromInt(ar.y)) + @as(f64, @floatFromInt(ar.h)) / 2.0;
+    var best: ?*app.Surface = null;
+    var best_score: f64 = std.math.inf(f64);
+    for (leaf_rects) |lr| {
+        if (lr.surface == active_surface) continue;
+        const cx = @as(f64, @floatFromInt(lr.rect.x)) + @as(f64, @floatFromInt(lr.rect.w)) / 2.0;
+        const cy = @as(f64, @floatFromInt(lr.rect.y)) + @as(f64, @floatFromInt(lr.rect.h)) / 2.0;
+        const dx = cx - acx;
+        const dy = cy - acy;
+        const in_dir = switch (dir) {
+            .left => dx < 0,
+            .right => dx > 0,
+            .up => dy < 0,
+            .down => dy > 0,
+        };
+        if (!in_dir) continue;
+        const primary: f64 = switch (dir) {
+            .left, .right => @abs(dx),
+            .up, .down => @abs(dy),
+        };
+        const secondary: f64 = switch (dir) {
+            .left, .right => @abs(dy),
+            .up, .down => @abs(dx),
+        };
+        const score = primary + 2.0 * secondary; // 부축 정렬(같은 행/열)을 우대
+        if (score < best_score) {
+            best_score = score;
+            best = lr.surface;
+        }
+    }
+    return best;
+}
+
 /// 드래그 중 사이드바 y → 타겟 슬롯(항상 valid 인덱스로 clamp — sidebarSlot과 달리 슬롯 아래 빈 영역도
 /// 마지막 슬롯으로 본다, 드래그를 끝까지 끌 수 있게). 슬롯 높이/탭 0이면 0. 순수 함수라 OS 무관 단위 테스트.
 fn sidebarDragTargetSlot(y_px: f64, slot_height_px: u32, tab_count: usize) usize {
@@ -620,6 +670,19 @@ pub const DevSession = struct {
         return false;
     }
 
+    /// 키보드 pane 이동 — 활성 panel에서 direction 방향의 인접 panel로 포커스를 옮긴다(있으면). split이 없거나
+    /// 그 방향에 panel이 없으면 무동작(best-effort: leaf rect 레이아웃 OOM도 그냥 이동 안 함). 활성 탭 leaf
+    /// rect를 펴 paneInDirection으로 대상을 고른 뒤 focusPaneBySurface로 옮긴다.
+    fn focusPaneInDirection(self: *DevSession, dir: FocusDirection) void {
+        if (!self.activeTabHasSplit()) return;
+        var leaf_rects: std.ArrayList(app.SplitLeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
+        if (paneInDirection(leaf_rects.items, self.activeSurface(), dir)) |surf| {
+            _ = self.focusPaneBySurface(surf);
+        }
+    }
+
     /// 활성 panel을 direction으로 둘로 나눈다(cmux/tmux식 split — 동작만 참고, 코드 미참고). 활성 panel의
     /// 현재 leaf rect를 splitRect로 a(기존)·b(새)로 나눠, b 크기로 새 셸 panel을 spawn하고, 트리에서 활성
     /// leaf를 split{a: 기존 leaf, b: 새 leaf}로 교체하고, 기존 panel을 a 크기로 줄인 뒤 새 panel로 포커스를
@@ -873,6 +936,11 @@ pub const DevSession = struct {
             // 트리/탭을 원복하므로 활성 panel 하나가 그대로 남는다.
             .split_horizontal => self.splitActivePane(.horizontal) catch {},
             .split_vertical => self.splitActivePane(.vertical) catch {},
+            // 키보드 pane 이동(Cmd+Option+화살표). split이 없거나 그 방향에 panel이 없으면 무동작.
+            .focus_pane_left => self.focusPaneInDirection(.left),
+            .focus_pane_right => self.focusPaneInDirection(.right),
+            .focus_pane_up => self.focusPaneInDirection(.up),
+            .focus_pane_down => self.focusPaneInDirection(.down),
         }
         self.metal_dirty = true;
     }
@@ -2679,6 +2747,43 @@ test "paneAtPoint hit-tests which leaf rect contains a screen point" {
     try std.testing.expect(paneAtPoint(&rects, std.math.nan(f64), 5) == null); // 비유한
 }
 
+// paneInDirection이 활성 panel 기준 방향 인접 panel을 고르는지(반평면 + 정렬, 잘못된 축은 null) — 키보드
+// pane 이동의 기하 코어라 헤드리스 단위로 고정한다. 좌우 split·2×2 격자·미발견을 다 본다.
+test "paneInDirection picks the adjacent pane in a direction" {
+    const allocator = std.testing.allocator;
+    var a = try app.Surface.init(allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer a.deinit();
+    var b = try app.Surface.init(allocator, 2, .{ .cols = 4, .rows = 2 });
+    defer b.deinit();
+    var c = try app.Surface.init(allocator, 3, .{ .cols = 4, .rows = 2 });
+    defer c.deinit();
+    var d = try app.Surface.init(allocator, 4, .{ .cols = 4, .rows = 2 });
+    defer d.deinit();
+
+    // 좌우 2-panel: a 왼쪽, b 오른쪽.
+    const lr = [_]app.SplitLeafRect{
+        .{ .surface = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 } },
+        .{ .surface = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 200 } },
+    };
+    try std.testing.expectEqual(&b, paneInDirection(&lr, &a, .right).?);
+    try std.testing.expectEqual(&a, paneInDirection(&lr, &b, .left).?);
+    try std.testing.expect(paneInDirection(&lr, &a, .up) == null); // 좌우 split이라 위/아래 없음
+    try std.testing.expect(paneInDirection(&lr, &a, .down) == null);
+    try std.testing.expect(paneInDirection(&lr, &c, .left) == null); // 활성 surface가 leaf에 없음
+
+    // 2×2 격자: a=좌상, b=우상, c=좌하, d=우하. 정렬(같은 행/열)을 우대한다.
+    const grid = [_]app.SplitLeafRect{
+        .{ .surface = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 } },
+        .{ .surface = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 100 } },
+        .{ .surface = &c, .rect = .{ .x = 0, .y = 100, .w = 100, .h = 100 } },
+        .{ .surface = &d, .rect = .{ .x = 100, .y = 100, .w = 100, .h = 100 } },
+    };
+    try std.testing.expectEqual(&b, paneInDirection(&grid, &a, .right).?); // a→우: b(같은 행)
+    try std.testing.expectEqual(&c, paneInDirection(&grid, &a, .down).?); // a→하: c(같은 열)
+    try std.testing.expectEqual(&d, paneInDirection(&grid, &b, .down).?); // b→하: d
+    try std.testing.expectEqual(&c, paneInDirection(&grid, &d, .left).?); // d→좌: c(같은 행, a 아님)
+}
+
 // split 탭에서 다른 panel을 클릭하면 포커스가 그 panel로 옮겨가고(입력/커서가 따라간다), 활성 panel을
 // 클릭하면 그대로인지 — 실 init이 사이드바 폭/메트릭을 채우고 mouse hit-test가 leaf rect를 펴는 macOS
 // 경로라 게이트한다. 좌표 origin(active_pane_rect)이 새 활성 panel로 갱신되는 것도 함께 본다.
@@ -2719,6 +2824,45 @@ test "clicking another pane in a split focuses it; clicking the active pane keep
     const right_x: f64 = @floatFromInt(session.sidebar_width_px + 410);
     session.mouse(1, right_x, 10);
     try std.testing.expectEqual(new_surface, session.activeSurface());
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
+}
+
+// Cmd+Option+화살표가 키 경로(handleKeyEvent → resolver → app_action → focusPaneInDirection)로 pane 포커스를
+// 방향 이동하는지 — 실 init + 실제 분할이라 macOS 게이트. 좌우 split에서 좌/우는 전환, 위/아래는 불변.
+test "Cmd+Option+arrow moves pane focus directionally through the key path" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    const old_surface = session.activeSurface();
+    try session.splitActivePane(.horizontal); // 좌우 분할 — 오른쪽(새) panel 활성
+    const new_surface = session.activeSurface();
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
+
+    const mods: terminal.ModifierSet = .{ .command = true, .option = true };
+    // Cmd+Opt+Left → 왼쪽(기존) panel로.
+    _ = try session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = mods });
+    try std.testing.expectEqual(old_surface, session.activeSurface());
+    try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
+
+    // Cmd+Opt+Right → 오른쪽(새) panel로.
+    _ = try session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = mods });
+    try std.testing.expectEqual(new_surface, session.activeSurface());
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
+
+    // Cmd+Opt+Up → 좌우 split이라 위 panel 없음 → 포커스 불변.
+    _ = try session.handleKeyEvent(.{ .key = .arrow_up, .modifiers = mods });
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
 }
 

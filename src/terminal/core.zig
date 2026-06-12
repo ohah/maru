@@ -118,6 +118,13 @@ pub const TerminalCore = struct {
     // 가장 최근에 끝난 명령의 종료코드(OSC 133 ; D ; <code>, 없으면 null). shell이 음수도 보낼 수
     // 있어 i32. 이후 단계가 프롬프트 거터에 ✓/✗로 투영한다.
     last_command_exit: ?i32 = null,
+    // 셸 통합(OSC 133/7) 의미 이벤트 스트림 — 명령 라이프사이클 경계를 시간순으로 기록한다(관측
+    // 가능성: 디버그 로그·테스트·후속 trace가 같은 데이터를 공유). OSC 파싱이 append하고 소비자가
+    // drain/clear한다. 누구도 drain 안 해도 무한정 자라지 않게 cap(shell_events_cap)에서 멈추고
+    // overflow 플래그를 세운다(드롭은 디버그 로그가 보고 — 조용한 손실 방지). 화면 상태가 아니라
+    // 전이 스트림이라 RIS는 건드리지 않는다(프레임마다 drain되어 어차피 짧게 유지).
+    shell_events: std.ArrayListUnmanaged(types.ShellEvent) = .empty,
+    shell_events_overflow: bool = false,
     // 스크롤백: 화면 위로 밀려난(scroll된) 맨 윗줄을 보관한다. ring buffer로, 가장 오래된 행이
     // sb_head, 보관 개수가 sb_count다. 슬롯 버퍼를 재사용해 scroll마다 alloc 없이 memcpy만 하므로
     // 출력 hot path(매 줄 scroll)를 느리게 하지 않는다. 과거를 스크롤해서 보는 뷰포트와 reflow는
@@ -260,6 +267,7 @@ pub const TerminalCore = struct {
         if (self.preedit) |p| self.allocator.free(p);
         if (self.cwd) |c| self.allocator.free(c);
         if (self.title) |t| self.allocator.free(t);
+        self.shell_events.deinit(self.allocator);
         for (self.link_store.items) |uri| self.allocator.free(uri);
         self.link_store.deinit(self.allocator);
         self.link_ids.deinit(self.allocator);
@@ -1228,6 +1236,7 @@ pub const TerminalCore = struct {
         const decoded = self.percentDecodeAlloc(raw_path) catch return; // OOM/실패면 기존 cwd 유지
         if (self.cwd) |old| self.allocator.free(old);
         self.cwd = decoded;
+        self.recordShellEvent(.cwd_changed); // 값은 currentCwd()가 권위 — 이벤트는 경계만 표시
     }
 
     /// `%XX`를 바이트로 디코드한 새 문자열을 돌려준다(호출자 소유). 잘못된 %escape(두 hex가
@@ -1286,6 +1295,39 @@ pub const TerminalCore = struct {
         return std.fs.path.basename(cwd); // "/Users/me/proj" -> "proj", "/" -> ""
     }
 
+    /// drain되지 않아도 메모리가 무한정 자라지 않게 하는 상한. 한 프롬프트 사이클은 A/B/C/D(+cwd)
+    /// ~5개라 프레임마다 drain되면 닿을 일이 없고, 닿으면 새 이벤트를 버리고 overflow 플래그를 세운다.
+    const shell_events_cap = 4096;
+
+    /// 셸 의미 이벤트를 스트림에 기록한다(OSC 133/7 dispatch가 호출). cap을 넘거나 OOM이면 드롭하고
+    /// overflow를 표시한다 — 조용히 잃지 않고 소비자(디버그 로그)가 드롭을 보고할 수 있게.
+    fn recordShellEvent(self: *TerminalCore, event: types.ShellEvent) void {
+        if (self.shell_events.items.len >= shell_events_cap) {
+            self.shell_events_overflow = true;
+            return;
+        }
+        self.shell_events.append(self.allocator, event) catch {
+            self.shell_events_overflow = true;
+        };
+    }
+
+    /// 기록된 셸 의미 이벤트 스트림(소비 후 `clearShellEvents`로 비운다). 테스트·디버그 로그·후속
+    /// trace 직렬화가 같은 슬라이스를 읽는다 — 반환은 core 소유로 다음 clear/append/deinit까지 유효.
+    pub fn shellEvents(self: *const TerminalCore) []const types.ShellEvent {
+        return self.shell_events.items;
+    }
+
+    /// 이벤트 스트림을 비운다(용량은 유지해 재할당 없이 재사용). overflow 플래그도 내린다.
+    pub fn clearShellEvents(self: *TerminalCore) void {
+        self.shell_events.clearRetainingCapacity();
+        self.shell_events_overflow = false;
+    }
+
+    /// 마지막 drain 이후 cap을 넘어 이벤트가 드롭됐는가(소비자가 손실을 보고할 수 있게).
+    pub fn shellEventsOverflowed(self: *const TerminalCore) bool {
+        return self.shell_events_overflow;
+    }
+
     /// OSC 133(semantic prompt): 셸이 프롬프트/입력/출력 경계를 마킹한다. `133 ; <action> [; opts]`.
     /// 명세: freedesktop semantic-prompts.md(FinalTerm 발) + kitty/Ghostty 확장. 동작 비교만 했고
     /// 레퍼런스 코드 표현은 옮기지 않았다(clean-room). 옵션은 liberal하게 파싱 — 모르는 키는 무시한다.
@@ -1298,29 +1340,36 @@ pub const TerminalCore = struct {
         // action 뒤에 내용이 더 있으면 반드시 ';'로 시작해야 한다(아니면 `Pextra`류 — invalid).
         if (rest.len > 1 and rest[1] != ';') return;
         const opts: []const u8 = if (rest.len > 2) rest[2..] else "";
+        const row: u16 = @intCast(@min(self.cursor.row, std.math.maxInt(u16)));
         switch (action) {
             // A(fresh_line_new_prompt)·P(prompt_start) — PR1은 동일 취급(prompt_kind 옵션은 파싱·무시).
             'A', 'P' => {
                 self.semantic_state = .prompt;
                 self.prompt_marks[self.cursor.row] = .{ .kind = .prompt }; // 새 프롬프트 — exit 리셋
+                self.recordShellEvent(.{ .prompt_start = row });
             },
             'B' => {
                 self.semantic_state = .input;
                 self.prompt_marks[self.cursor.row].kind = .input; // exit는 보존(D가 채움)
+                self.recordShellEvent(.{ .input_start = row });
             },
             'C' => {
                 self.semantic_state = .command;
                 self.prompt_marks[self.cursor.row].kind = .command;
+                self.recordShellEvent(.{ .command_start = row });
             },
             'D' => {
                 // 첫 ';' 구분 토큰을 종료코드로(없거나 정수 아니면 이전 값 유지 — 명세상 D는 code 없이도 옴).
                 const first = if (std.mem.indexOfScalar(u8, opts, ';')) |s| opts[0..s] else opts;
+                var exit_clamped: ?i16 = null;
                 if (std.fmt.parseInt(i32, first, 10) catch null) |code| {
                     self.last_command_exit = code;
+                    exit_clamped = @intCast(std.math.clamp(code, std.math.minInt(i16), std.math.maxInt(i16)));
                     // 이 명령의 프롬프트 시작 행(커서에서 위로 가장 가까운 isPromptStart)에 종료코드를
                     // 스탬프한다 — 거터가 그 행 옆에 ✓(0)/✗(≠0)를 그린다. exit는 행과 함께 carry된다.
-                    self.stampPromptExit(@intCast(std.math.clamp(code, std.math.minInt(i16), std.math.maxInt(i16))));
+                    self.stampPromptExit(exit_clamped.?);
                 }
+                self.recordShellEvent(.{ .command_end = .{ .row = row, .exit = exit_clamped } });
                 self.semantic_state = .unknown; // 명령 끝 — 영역을 닫는다(커서 행은 태깅하지 않음)
             },
             // L(fresh_line)·I·N 등은 수용하되 무동작(분류 상태 변화 없음).
@@ -5501,4 +5550,48 @@ test "OSC 133: renderSnapshot composes prompt_marks for the scrolled viewport" {
     core.scrollViewport(1); // 한 줄 위로: 윗줄에 스크롤백(prompt)
     const snap = core.renderSnapshot();
     try std.testing.expectEqual(types.SemanticPrompt.prompt, snap.prompt_marks[0].kind);
+}
+
+// 셸 의미 이벤트 스트림은 관측 가능성의 토대다 — 같은 도메인 데이터를 디버그 로그·테스트·후속
+// trace가 공유한다. 핵심 검증: OSC 133/7 한 명령 사이클이 정확한 '경계 이벤트 순서'를 낸다
+// (E2E가 명령 경계를 상태 스냅샷이 아니라 이벤트로 결정적으로 단언할 수 있어야 한다).
+test "shell events: a full command cycle emits prompt/input/command/end + cwd in order" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+
+    // 프롬프트 시작(A) → 입력 시작(B) → 출력 시작(C) → cwd 보고(OSC 7) → 명령 끝(D;0).
+    try core.write("\x1b]133;A\x1b\\"); // row 0
+    try core.write("\x1b]133;B\x07ls\r\n"); // 입력 시작 후 명령 타이핑 + 개행 → row 1
+    try core.write("\x1b]133;C\x07out\r\n"); // 출력 시작 → row 2
+    try core.write("\x1b]7;file://h/tmp\x07"); // cwd 변경
+    try core.write("\x1b]133;D;0\x07"); // 명령 끝, 종료코드 0
+
+    const events = core.shellEvents();
+    try std.testing.expect(!core.shellEventsOverflowed());
+    try std.testing.expectEqual(@as(usize, 5), events.len);
+    try std.testing.expectEqual(types.ShellEvent{ .prompt_start = 0 }, events[0]);
+    try std.testing.expectEqual(types.ShellEvent{ .input_start = 0 }, events[1]);
+    try std.testing.expectEqual(types.ShellEvent{ .command_start = 1 }, events[2]);
+    try std.testing.expectEqual(types.ShellEvent{ .cwd_changed = {} }, events[3]);
+    try std.testing.expectEqual(types.ShellEvent{ .command_end = .{ .row = 2, .exit = 0 } }, events[4]);
+    // cwd 값 자체는 currentCwd()가 권위(이벤트는 경계만 표시).
+    try std.testing.expectEqualStrings("/tmp", core.currentCwd());
+}
+
+test "shell events: command_end carries the failing exit code; clear empties the stream" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+
+    try core.write("\x1b]133;D;130\x07"); // SIGINT 종료(130) — 음수가 아니어도 실패
+    var events = core.shellEvents();
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqual(types.ShellEvent{ .command_end = .{ .row = 0, .exit = 130 } }, events[0]);
+
+    // D에 code가 없으면 exit=null(명세상 D는 code 없이도 온다).
+    core.clearShellEvents();
+    try std.testing.expectEqual(@as(usize, 0), core.shellEvents().len);
+    try core.write("\x1b]133;D\x07");
+    events = core.shellEvents();
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqual(types.ShellEvent{ .command_end = .{ .row = 0, .exit = null } }, events[0]);
 }

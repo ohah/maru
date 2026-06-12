@@ -161,6 +161,13 @@ pub const default_terminal_bindings = [_]TerminalBinding{
 pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'T' } }, .action = .new_tab }, // Cmd+T: 새 탭
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'W' } }, .action = .close_tab }, // Cmd+W: 활성 탭 닫기(마지막이면 창)
+    // Cmd+Shift+]/[ : 다음/이전 탭(wrap). Swift는 charactersIgnoringModifiers로 char를 보내는데, Cmd
+    // 조합에서 Shift가 적용돼 닫는/여는 중괄호(}/{)로 올 수도, 대괄호(]/[)가 그대로 올 수도 있다(OS/레이아웃
+    // 차이). 두 변형을 모두 묶어 방어한다. 모디파이어는 정확 비교라 shift=true가 필수다.
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = ']' } }, .action = .next_tab },
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '}' } }, .action = .next_tab },
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '[' } }, .action = .previous_tab },
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '{' } }, .action = .previous_tab },
 };
 
 pub const KeyBindingResolver = struct {
@@ -461,6 +468,23 @@ test "built-in app binding resolves Cmd+W to close_tab without user config" {
         .modifiers = .{ .command = true },
     }, &buffer, .{});
     try std.testing.expectEqual(action_mod.Action.close_tab, resolved.app_action);
+}
+
+test "built-in app bindings resolve Cmd+Shift+]/[ to next/previous tab for both bracket variants" {
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{};
+    // ]/} 둘 다 next_tab(OS가 Shift를 적용해 }로 주든 ]로 주든).
+    for ([_]u21{ ']', '}' }) |c| {
+        const r = try resolver.resolve(.{ .key = .{ .char = c }, .modifiers = .{ .command = true, .shift = true } }, &buffer, .{});
+        try std.testing.expectEqual(action_mod.Action.next_tab, r.app_action);
+    }
+    // [/{ 둘 다 previous_tab.
+    for ([_]u21{ '[', '{' }) |c| {
+        const r = try resolver.resolve(.{ .key = .{ .char = c }, .modifiers = .{ .command = true, .shift = true } }, &buffer, .{});
+        try std.testing.expectEqual(action_mod.Action.previous_tab, r.app_action);
+    }
+    // Shift 없는 Cmd+]는 안 묶임(ignored) — 탭 전환은 Cmd+Shift 필수.
+    try std.testing.expect((try resolver.resolve(.{ .key = .{ .char = ']' }, .modifiers = .{ .command = true } }, &buffer, .{})) == .ignored);
 }
 
 test "resolver rejects duplicate app and terminal bindings separately" {

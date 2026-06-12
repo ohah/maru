@@ -3,13 +3,15 @@
 //! 편집키(Cmd+←/→, Option+←/→ 등)가 동작하게 한다.
 //!
 //! 함께, OSC 133(semantic prompt) 마커도 emit해 프롬프트/입력/출력 경계를 터미널(TerminalCore)에
-//! 알린다 — 거터 ✓/✗·프롬프트 점프·reflow 정확화·cwd 추적의 토대다(명세: freedesktop
-//! semantic-prompts.md, FinalTerm 발).
+//! 알린다 — 거터 ✓/✗·프롬프트 점프·reflow 정확화의 토대다(명세: freedesktop semantic-prompts.md,
+//! FinalTerm 발). 또 OSC 7로 매 프롬프트 cwd를 보고한다(창 제목·새 탭 cwd가 읽는다).
 //!
 //! clean-room: Ghostty/kitty의 통합 스크립트는 GPLv3라 차용하지 않는다. 아래 zsh 스크립트는 zsh
 //! 매뉴얼의 ZDOTDIR/스타트업·precmd/preexec/add-zsh-hook·PS1 `%{%}` 동작과 freedesktop
 //! semantic-prompts.md 명세에서 직접 작성했다. 메커니즘(ZDOTDIR로 가리키기, precmd가 A/D·preexec가
-//! C·PS1 끝이 B를 emit)은 공개 동작/명세다(Ghostty의 MIT setup 로직과 같은 아이디어).
+//! C·PS1 끝이 B를 emit)은 공개 동작/명세다(Ghostty의 MIT setup 로직과 같은 아이디어). OSC 7도
+//! VTE가 정의한 공개 형식(file://host/path)에서 직접 작성했다 — VTE의 vte.sh(GPL)는 열람하지
+//! 않고, percent-encoding은 OSC 7 형식 명세대로 zsh에서 바이트 단위로 구현했다.
 
 const std = @import("std");
 
@@ -65,9 +67,27 @@ const zsh_zshenv =
     \\    [[ "${precmd_functions[-1]}" = _maru_osc133_ps1 ]] || precmd_functions=( "${(@)precmd_functions:#_maru_osc133_ps1}" _maru_osc133_ps1 )
     \\    [[ "$PS1" == *$'\e]133;B'* ]] || PS1="$PS1"$'%{\e]133;B\a%}'
     \\  }
+    \\  # OSC 7: 매 프롬프트 cwd 보고(VTE가 정의한 사실상 표준 — file://host/path, ECMA-48 아님).
+    \\  # path를 percent-encode한다(unreserved 외 바이트 → %XX). 'emulate -L zsh'로 옵션을 지역화하고
+    \\  # 'nomultibyte'로 바이트 단위 인덱싱해 UTF-8 path(한글 등)도 바이트별 인코딩 → 터미널 디코더가
+    \\  # 정확히 복원한다. host는 ${HOST}(빈 값이면 file:///path = localhost), 종결자는 ST(ESC \).
+    \\  _maru_osc7() {
+    \\    'builtin' 'emulate' '-L' 'zsh'
+    \\    'builtin' 'setopt' 'nomultibyte'
+    \\    'builtin' 'local' _maru_p="$PWD" _maru_enc="" _maru_hex _maru_i _maru_c
+    \\    for (( _maru_i = 1; _maru_i <= ${#_maru_p}; _maru_i++ )); do
+    \\      _maru_c="$_maru_p[_maru_i]"
+    \\      case "$_maru_c" in
+    \\        ([A-Za-z0-9/._~-]) _maru_enc+="$_maru_c" ;;
+    \\        (*) 'builtin' 'printf' '-v' _maru_hex '%02X' "'$_maru_c"; _maru_enc+="%$_maru_hex" ;;
+    \\      esac
+    \\    done
+    \\    'builtin' 'print' '-rn' -- $'\e]7;file://'"${HOST}${_maru_enc}"$'\e\\'
+    \\  }
     \\  add-zsh-hook precmd _maru_osc133_precmd
     \\  add-zsh-hook preexec _maru_osc133_preexec
     \\  add-zsh-hook precmd _maru_osc133_ps1
+    \\  add-zsh-hook precmd _maru_osc7
     \\  _maru_shell_integration() {
     \\    add-zsh-hook -d precmd _maru_shell_integration
     \\    # macOS 편집키가 보내는 C0/meta 시퀀스를 표준 라인 위젯에 바인딩(현재 main keymap에).
@@ -146,4 +166,15 @@ test "zsh integration script emits OSC 133 semantic prompt markers" {
     // B 훅이 프레임워크 PS1 재생성에도 살아남도록 precmd_functions 맨 뒤로 재정렬하는지(회귀 방지).
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "precmd_functions[-1]") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "${(@)precmd_functions:#_maru_osc133_ps1}") != null);
+}
+
+test "zsh integration script emits OSC 7 cwd reporting" {
+    // 매 프롬프트 cwd를 보고하는 precmd 훅 + file:// 형식 + percent-encoding을 담는지(회귀 방지).
+    // 실제 zsh가 공백/UTF-8 path를 어떻게 인코딩하는지는 PTY 캡처로 별도 검증했다(PR 본문에
+    // `/a b/가` → `file://h/.../a%20b/%EA%B0%80` 캡처 인용).
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "add-zsh-hook precmd _maru_osc7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "]7;file://") != null); // OSC 7 file 스킴
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "nomultibyte") != null); // 바이트 단위 인코딩
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "%02X") != null); // 비-unreserved 바이트 → %XX
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "${HOST}") != null); // host(빈 값이면 localhost)
 }

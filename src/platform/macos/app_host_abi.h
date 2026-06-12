@@ -328,6 +328,13 @@ int32_t maru_macos_app_dev_session_copy_text(
     const uint8_t **out_ptr,
     size_t *out_len
 );
+/* OSC 7로 셸이 보고한 현재 작업 디렉터리(percent-decode된 경로, UTF-8). 버퍼는 Zig(core) 소유로
+   다음 OSC 7/RIS/destroy까지 유효, 없으면 *out_ptr=NULL/*out_len=0. Swift가 창 제목에 쓴다. */
+int32_t maru_macos_app_dev_session_cwd(
+    MaruAppHostDevSession *session,
+    const uint8_t **out_ptr,
+    size_t *out_len
+);
 void maru_macos_app_dev_session_destroy(MaruAppHostDevSession *session);
 int32_t maru_macos_app_dev_session_metal_frame(
     MaruAppHostDevSession *session,

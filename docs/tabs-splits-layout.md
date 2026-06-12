@@ -1,0 +1,95 @@
+# 탭 · split(panel) · 레이아웃 전략
+
+이 문서는 Maru의 탭/split(panel) UI를 어떻게 만들지의 단일 출처다. 목표 UX, 아키텍처 결정(모델 vs
+드라이버 분리), 렌더링 방식, 단계 분해, 레퍼런스 비교(clean-room)를 정한다.
+
+## 목표 UX
+
+cmux 같은 유연한 레이아웃:
+
+- **세로 탭 사이드바**(왼쪽) — 탭마다 제목 + 메타데이터(우리 OSC 7 cwd, OSC 133 ✓/✗ 종료, 셸 이벤트)를 보여준다.
+- **탭마다 split(panel)** — 각 탭은 surface 1개가 아니라 가로/세로로 나눌 수 있는 surface 트리.
+- **드래그 재배치** — panel을 끌어 split을 재배열, 탭을 끌어 순서 변경.
+
+## 핵심 결정: 모델과 드라이버를 분리한다
+
+탭/split UI **모델**과 그걸 채우는 **드라이버(소스)** 를 분리한다. 그래야 같은 UI가 "그냥 탭"과 "tmux 탭"
+양쪽에서 동작한다.
+
+```
+탭/split UI 모델 (SplitTree + 탭 리스트 + 렌더 + 드래그)   ← 하나, 드라이버 무관
+        ↑ populate / 조작
+  ┌─────────────┴──────────────┐
+네이티브 드라이버(기본)          tmux-CC 드라이버(옵션, 후속)
+- 탭 = 새 셸 PTY 1개             - tmux 창 → 탭
+- split = pane에 새 셸 PTY        - tmux pane → split
+- 사용자 액션이 직접 생성/삭제     - 액션을 tmux 제어 명령으로 되보냄
+```
+
+- **기본은 네이티브** — `createTab`이 셸 PTY를 띄운다(tmux 없이 그냥 탭/split). 지금까지 만든 게 이 드라이버다.
+- **tmux는 옵션 드라이버** — `tmux -CC`(control mode) 공개 프로토콜로 tmux 창/pane이 같은 모델을 구동(후속). iTerm2가 원조이나 GPL이라 **프로토콜 명세(tmux `control-mode`)로만** 구현한다.
+- **불변식**: surface/탭/split 모델은 "출력이 어디서 오는지"를 몰라야 한다(네이티브 PTY든 tmux pane이든
+  그냥 surface로 본다). 현재 `SurfaceRuntime`이 `surface_id`로만 라우팅하므로 이미 그렇다 — 이 중립성을 유지한다.
+
+## 렌더링 결정: Maru가 직접 그린다(native 최소)
+
+탭 사이드바와 split 레이아웃을 **Maru의 Metal 프레임에 직접 그린다** — AppKit 위젯(NSView 탭/SwiftUI
+SplitView)을 쓰지 않는다. 이유:
+
+- 터미널이 이미 Metal로 그려지니, 사이드바·divider도 같은 렌더 경로에 두면 룩을 완전히 통제하고(cmux/Warp식
+  커스텀) 우리 메타데이터(cwd/✓✗/이벤트)를 바로 표시할 수 있다.
+- [macOS 앱 호스트 경계](macos-app-host-boundary.md)의 native 최소 원칙과 일치 — 레이아웃·상태·히트 테스트는
+  Zig가 소유하고, Swift는 backing px 클릭/드래그 좌표만 ABI로 넘긴다(스크롤·마우스 선택과 같은 규율).
+- 비-macOS(Linux CI)에서도 레이아웃 로직을 헤드리스 단위로 검증할 수 있다.
+
+레이아웃: 창 drawable을 `[사이드바 strip | 터미널 영역]`으로 나눈다. 터미널 grid의 cols는
+`(drawable_width - sidebar_width) / cell_width`로 계산한다(grid 메트릭은 이미 Zig가 권위 있게 소유).
+split이 생기면 터미널 영역을 다시 SplitTree에 따라 sub-사각형으로 나눠 각 surface를 그린다.
+
+## SplitTree(panel) 모델
+
+split의 핵심은 재귀 트리다(Ghostty의 SplitTree 동작 참고 — MIT, 개념만, Zig로 독립 구현):
+
+```
+Node = leaf(surface)
+     | split{ direction: horizontal|vertical, ratio: f, left: Node, right: Node }
+```
+
+- `leaf`는 surface 하나(= panel). `split`은 두 자식을 방향(가로=좌우, 세로=상하)과 비율로 나눈다.
+- 탭 = 이 트리의 루트. 탭 리스트 = 트리들의 리스트(`AppWindow.tabs`가 `[]*Surface`에서 `[]*SplitTree`로
+  일반화된다 — 큰 변경).
+- zoom(한 panel 전체화면), focus 이동, drag-drop zone은 트리 위 연산이다.
+
+현재 Maru는 탭 = surface 1개(플랫)이고 활성 surface 1개를 풀창 렌더한다. split을 하려면 (1) SplitTree
+모델 + (2) **멀티-panel 렌더**(N개 surface를 sub-사각형에 동시 합성 — 렌더러의 큰 확장)가 필요하다.
+
+## 단계 분해
+
+플랫 탭(PR1~PR2, 머지됨: 라우팅 seam·heap-pin·active·동적 컨테이너·멀티-pump·Cmd+T)을 토대로, 다음 순서로
+간다. 각 단계는 독립 동작·검증.
+
+1. **PR3a — 세로 사이드바 탭바(레이아웃 토대)**: drawable에 사이드바 strip을 예약하고 터미널 grid가 줄어든
+   너비를 쓰게 한다. 사이드바는 우선 단색 strip(탭 엔트리 전). 헤드리스 레이아웃 단위 + macOS smoke(터미널이
+   오른쪽으로 밀리고 cols 감소).
+2. **PR3b — 탭 엔트리 렌더**: 사이드바에 각 탭 제목(+활성 하이라이트)을 그린다. 이후 cwd/✓✗ 메타데이터.
+3. **PR3c — 탭 클릭/전환**: 사이드바 클릭 → Zig가 탭 인덱스로 매핑 → `switchTab`. Cmd+Shift+]/[ 전환 키.
+4. **PR3d — 탭 드래그 재정렬**(사이드바 내 순서 변경).
+5. **PR4 — 탭 close**(active_tab clamp).
+6. **split 단계(별도, 큼)**: SplitTree 모델 → 멀티-panel 렌더 → split 키/드래그 drop-zone.
+7. **tmux-CC 드라이버(별도, 큼)**: control-mode 프로토콜 파서 + tmux 창/pane → 모델 매핑(양방향).
+
+quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.
+
+## clean-room
+
+- **Ghostty**(MIT): SplitTree 개념·드래그 zone·native 탭 동작을 **동작 비교**로 본다(`references/ghostty`).
+  코드 구조(자료구조 레이아웃·함수 분해)는 옮기지 않고 Zig로 독립 재구현한다.
+- **cmux**(GPL-3.0): 세로 사이드바 + 메타데이터·드래그 UX를 **최종 동작 비교로만** 참고하고 소스는 열람하지
+  않는다(LGPL/GPL 레퍼런스 규칙).
+- **tmux control mode**: 공개 프로토콜 명세(tmux `control-mode` man page)에서 직접 구현. iTerm2(GPL) 소스 미열람.
+
+## 검증 경로
+
+- 레이아웃 계산(사이드바 너비·터미널 영역·grid cols, split sub-사각형 분할)은 헤드리스 Zig 단위로 고정한다.
+- 사이드바/split의 시각 렌더와 클릭/드래그 인터랙션은 macOS smoke(스크립트 가능 부분) + `macos-app-dev`
+  수동 검증. 클릭/드래그 좌표→탭/panel 히트 테스트는 Zig라 헤드리스 단위로 검증한다.

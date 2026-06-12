@@ -325,6 +325,14 @@ pub export fn maru_macos_app_dev_session_set_focus(session: ?*DevSession, focuse
     return @intFromEnum(Status.ok);
 }
 
+// 진행 중 IME 조합을 확정(커밋)한다. Swift가 IME를 우회하는 특수키/단축키 직전에 호출해
+// marked text와 core preedit가 어긋나지 않게 한다(조합 없으면 무동작).
+pub export fn maru_macos_app_dev_session_commit_composition(session: ?*DevSession) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    dev_session.commitComposition();
+    return @intFromEnum(Status.ok);
+}
+
 // Cmd+hover 갱신(backing px). URL 위면 *out_is_url=1 — Swift가 마우스 커서(pointingHand)를 정하고,
 // Zig는 밑줄 하이라이트를 다음 frame에 투영한다. cmd_held=0이면 hover 해제.
 pub export fn maru_macos_app_dev_session_hover(

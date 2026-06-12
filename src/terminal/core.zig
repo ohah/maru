@@ -170,6 +170,10 @@ pub const TerminalCore = struct {
     // alloc churn을 없애야 한다(되돌린 구현이 ArrayList realloc으로 예산을 깼다).
     reflow_cells: []types.Cell = &.{},
     reflow_wrapped: []bool = &.{},
+    // reflow가 산출 행별로 OSC 133 태그를 누적하는 스크래치(reflow_wrapped와 병렬, 같은 cap_rows).
+    // 논리 줄 하나의 모든 행은 같은 분류라, 출력 행이 어느 옛 행에서 나왔든 그 옛 행의 태그를 그대로
+    // 옮긴다 — resize 후에도 프롬프트/입력/출력 분류가 보존된다(PR1의 .unknown 한계 제거).
+    reflow_prompt_marks: []types.SemanticPrompt = &.{},
     // 터미널이 호스트로 돌려보낼 응답(CPR 커서 위치 보고, DSR 상태 등). write() 중 query를 만나면
     // 여기에 쌓이고, app 레이어가 매 write 후 drain해 PTY로 되쓴다(프로그램이 입력처럼 읽는다).
     // zsh 등은 SIGWINCH redraw 때 CSI 6n으로 커서를 묻는데, 응답이 없으면 redraw가 어긋난다.
@@ -255,6 +259,7 @@ pub const TerminalCore = struct {
         if (self.viewport_prompt_marks.len > 0) self.allocator.free(self.viewport_prompt_marks);
         if (self.reflow_cells.len > 0) self.allocator.free(self.reflow_cells);
         if (self.reflow_wrapped.len > 0) self.allocator.free(self.reflow_wrapped);
+        if (self.reflow_prompt_marks.len > 0) self.allocator.free(self.reflow_prompt_marks);
         self.response.deinit(self.allocator);
         self.* = undefined;
     }
@@ -806,15 +811,18 @@ pub const TerminalCore = struct {
 
         var rows: std.ArrayList([]types.Cell) = .empty;
         var wraps: std.ArrayList(bool) = .empty;
+        var pmarks: std.ArrayList(types.SemanticPrompt) = .empty; // 산출 행별 OSC 133 태그(rows와 병렬)
         // 성공 경로에선 행 소유권이 ring으로 넘어가므로(items.len = 0으로 비움), 이 defer는
         // 실패 경로에서만 만든 행들을 해제한다.
         defer {
             for (rows.items) |r| self.allocator.free(r);
             rows.deinit(self.allocator);
             wraps.deinit(self.allocator);
+            pmarks.deinit(self.allocator);
         }
         try rows.ensureTotalCapacity(self.allocator, keep);
         try wraps.ensureTotalCapacity(self.allocator, keep);
+        try pmarks.ensureTotalCapacity(self.allocator, keep);
 
         var emitted: usize = 0; // 전체 산출 행 인덱스(skip 비교용)
         var anchor_out: ?usize = null; // anchor_row(옛 행)가 떨어진 새 행 인덱스(skip 반영 전)
@@ -826,6 +834,9 @@ pub const TerminalCore = struct {
             // 줄의 마지막 산출 행이 물려받을 wrap 플래그: 논리 줄이 스크롤백의 끝을 넘어 활성
             // 화면으로 이어지면(마지막 행의 sb_wrapped=true) 그 경계 연속성을 보존한다.
             const tail_wrap = self.scrollbackRowWrapped(j);
+            // 논리 줄은 단일 OSC 133 분류다(lineFeed가 같은 영역을 전파). 첫 행의 태그를 이 줄의
+            // 모든 산출 행이 물려받아, 재-wrap 후에도 sb_prompt_marks가 내용과 정렬을 유지한다.
+            const line_tag = self.scrollbackRowPrompt(i);
 
             var cur: ?[]types.Cell = null;
             errdefer if (cur) |c| self.allocator.free(c);
@@ -848,6 +859,7 @@ pub const TerminalCore = struct {
                             clearTruncatedWideBase(full); // 마지막 칸의 잘린 wide base 정리(new_cols==1 등)
                             rows.appendAssumeCapacity(full);
                             wraps.appendAssumeCapacity(true);
+                            pmarks.appendAssumeCapacity(line_tag);
                             cur = null;
                         }
                         emitted += 1;
@@ -871,6 +883,7 @@ pub const TerminalCore = struct {
                 clearTruncatedWideBase(last);
                 rows.appendAssumeCapacity(last);
                 wraps.appendAssumeCapacity(tail_wrap);
+                pmarks.appendAssumeCapacity(line_tag);
                 cur = null;
             }
             emitted += 1;
@@ -888,6 +901,7 @@ pub const TerminalCore = struct {
         for (rows.items, 0..) |row_cells, k| {
             self.scrollback[k] = row_cells;
             self.sb_wrapped[k] = wraps.items[k];
+            self.sb_prompt_marks[k] = pmarks.items[k]; // 재-wrap된 행과 정렬된 OSC 133 태그
         }
         self.sb_head = 0;
         self.sb_count = rows.items.len;
@@ -1799,6 +1813,10 @@ pub const TerminalCore = struct {
             if (self.reflow_wrapped.len > 0) self.allocator.free(self.reflow_wrapped);
             self.reflow_wrapped = try self.allocator.alloc(bool, cap_rows);
         }
+        if (self.reflow_prompt_marks.len < cap_rows) {
+            if (self.reflow_prompt_marks.len > 0) self.allocator.free(self.reflow_prompt_marks);
+            self.reflow_prompt_marks = try self.allocator.alloc(types.SemanticPrompt, cap_rows);
+        }
     }
 
     /// 그리드를 reflow 없이 새 크기로 clip/pad해 복사한다(왼쪽 위 기준, 넘치는 내용은 버림).
@@ -1930,6 +1948,7 @@ pub const TerminalCore = struct {
         try self.ensureReflowScratch(cap_rows, new_cols);
         const scratch = self.reflow_cells;
         const swrap = self.reflow_wrapped;
+        const pmarks = self.reflow_prompt_marks; // 산출 행별 OSC 133 태그(소스 옛 행에서 carry)
         const blank: types.Cell = .{};
 
         var out_rows: usize = 0;
@@ -1960,6 +1979,7 @@ pub const TerminalCore = struct {
                     @memcpy(scratch[dst0..][0..n], self.cells[self.index(r, 0)..][0..n]);
                     clearTruncatedWideBase(scratch[dst0..][0..new_cols]);
                     swrap[out_rows] = self.wrapped[r];
+                    pmarks[out_rows] = self.prompt_marks[r]; // 커서 줄은 verbatim — 태그도 1:1 보존
                     if (r == self.cursor.row) {
                         cursor_out_row = out_rows;
                         cursor_out_col = @min(self.cursor.col, new_cols - 1);
@@ -1984,6 +2004,7 @@ pub const TerminalCore = struct {
                 const needs: u16 = if (cell.width == 2) 2 else 1;
                 if (oc + needs > new_cols) {
                     swrap[out_rows] = true;
+                    pmarks[out_rows] = self.prompt_marks[old_r]; // 논리 줄은 단일 분류 — 옛 행 태그 carry
                     out_rows += 1;
                     oc = 0;
                     @memset(scratch[out_rows * new_cols ..][0..new_cols], blank);
@@ -1994,6 +2015,7 @@ pub const TerminalCore = struct {
             if (!soft) {
                 // 논리 줄 끝: 부분 출력 행을 hard(wrapped=false)로 닫는다.
                 swrap[out_rows] = false;
+                pmarks[out_rows] = self.prompt_marks[old_r];
                 out_rows += 1;
                 oc = 0;
                 @memset(scratch[out_rows * new_cols ..][0..new_cols], blank);
@@ -2002,6 +2024,7 @@ pub const TerminalCore = struct {
         }
         if (oc > 0) { // soft로 끝났는데 더 옛 행이 없음(방어)
             swrap[out_rows] = false;
+            pmarks[out_rows] = self.prompt_marks[old_rows - 1]; // 마지막 논리 줄의 태그
             out_rows += 1;
         }
 
@@ -2028,18 +2051,17 @@ pub const TerminalCore = struct {
         const next_wrapped = try self.allocator.alloc(bool, new_rows);
         errdefer self.allocator.free(next_wrapped); // 아래 next_prompt_marks alloc 실패 시 누수 방지
         @memset(next_wrapped, false);
-        // OSC 133 태그: reflow 너머로 태그를 옮기는 정밀 carry는 PR3(reflow 정확화)로 미룬다. PR1은
-        // reflow된 행을 .unknown으로 둔다 — 누수/크래시 없이(길이/값 유효) resize 후 태그만 부정확.
-        // 비-resize 스크롤(scrollRangeUp)은 태그를 정상 보존하므로, 분류 손실은 resize 이벤트 한정.
+        // OSC 133 태그를 reflow 산출 행(pmarks)에서 carry한다 — resize 후에도 프롬프트/입력/출력 분류가
+        // 보존된다(논리 줄은 단일 분류라 옛 행 태그를 그대로 옮긴다, PR1의 .unknown 한계 제거).
         const next_prompt_marks = try self.allocator.alloc(types.SemanticPrompt, new_rows);
         @memset(next_prompt_marks, .unknown);
 
-        // 밀려나는 위쪽 콘텐츠 행을 그 wrap 플래그와 함께 스크롤백으로(가장 오래된 것부터). 빈 행은
-        // 스크롤백을 오염시키므로 보관하지 않는다(빈 화면 resize 등). OSC 133 태그는 .unknown(위 참고).
+        // 밀려나는 위쪽 콘텐츠 행을 그 wrap 플래그·OSC 133 태그와 함께 스크롤백으로(가장 오래된 것부터).
+        // 빈 행은 스크롤백을 오염시키므로 보관하지 않는다(빈 화면 resize 등).
         var pr: usize = 0;
         while (pr < push_count) : (pr += 1) {
             if (!outputRowBlank(scratch, pr, new_cols)) {
-                const pushed = self.pushScrollback(scratch[pr * new_cols ..][0..new_cols], swrap[pr], .unknown);
+                const pushed = self.pushScrollback(scratch[pr * new_cols ..][0..new_cols], swrap[pr], pmarks[pr]);
                 // 과거를 보는 중이면 새로 밀려든 행만큼 offset도 올린다(scroll-lock — 보던 내용 유지).
                 if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
             }
@@ -2051,6 +2073,7 @@ pub const TerminalCore = struct {
         while (src < content_len and dst < new_rows) {
             @memcpy(next_cells[dst * new_cols ..][0..new_cols], scratch[src * new_cols ..][0..new_cols]);
             next_wrapped[dst] = swrap[src];
+            next_prompt_marks[dst] = pmarks[src]; // 화면에 남는 행의 태그도 carry
             dst += 1;
             src += 1;
         }
@@ -2062,7 +2085,8 @@ pub const TerminalCore = struct {
         self.cells = next_cells;
         self.wrapped = next_wrapped;
         self.prompt_marks = next_prompt_marks;
-        self.semantic_state = .unknown; // reflow가 영역 경계를 흐리므로 상태 머신도 리셋(다음 프롬프트가 재마킹)
+        // semantic_state(진행 중 영역)는 유지한다 — 커서 줄(보통 활성 프롬프트/입력)이 verbatim으로
+        // 보존되므로, resize 후 첫 lineFeed가 같은 영역을 이어 전파해야 한다(reset하면 분류가 끊긴다).
         // scroll region margin은 화면 크기에 묶이므로 resize 때 전체로 리셋한다(xterm 동작).
         self.scroll_top = 0;
         self.scroll_bottom = new_rows - 1;
@@ -5025,6 +5049,60 @@ test "OSC 133: snapshot exposes prompt_marks and last_command_exit (non-scrolled
     const snap = core.snapshot();
     try std.testing.expectEqual(types.SemanticPrompt.prompt, snap.prompt_marks[0]);
     try std.testing.expectEqual(@as(?i32, 3), snap.last_command_exit);
+}
+
+test "OSC 133: reflow carries the tag of a re-wrapped (non-cursor) line" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 4 });
+    defer core.deinit();
+    try core.write("\x1b]133;C\x1b\\"); // row0 = command(출력 영역)
+    try core.write("abcdef"); // abcd|ef soft-wrap: row0(wrapped)·row1 = command
+    try std.testing.expect(core.wrapped[0]);
+    try core.write("\r\nx"); // row2(.command 전파)로 커서 이동 → 위 wrap 줄은 커서 줄이 아니다
+    try core.resize(8, 4); // 넓힘 → "abcdef"가 한 줄로 합쳐진다(재-wrap)
+    try std.testing.expectEqual(@as(u21, 'a'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'f'), core.cells[core.index(0, 5)].codepoint);
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.prompt_marks[0]); // 재-wrap 후 태그 보존
+}
+
+test "OSC 133: the verbatim cursor line keeps its tag across resize" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x1b\\p$ \x1b]133;B\x1b\\ls"); // row0: 프롬프트+입력 → .input(커서 줄)
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[0]);
+    try core.resize(6, 4); // 좁힘 — 커서 줄은 verbatim(clip), 태그 1:1 보존
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[0]);
+}
+
+test "OSC 133: rows pushed to scrollback during resize carry their tag" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    try core.write("\x1b]133;C\x1b\\"); // command 영역
+    try core.write("out1\r\nout2\r\nout3"); // row0·1·2 = command(전파), 커서 row2
+    try core.write("\x1b]133;D;0\x07");
+    try core.resize(8, 1); // 폭 동일, 행 3→1 → row0·row1이 스크롤백으로(태그 carry)
+    try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.scrollbackRowPrompt(0));
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.scrollbackRowPrompt(1));
+}
+
+test "OSC 133: scrollback re-wrap keeps tags aligned with re-wrapped rows" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b]133;C\x1b\\"); // command 영역
+    try core.write("abcdefgh"); // row0 꽉 채움(.command, pending wrap)
+    try core.write("ij"); // wrap → row1(.command), 커서 row1
+    try std.testing.expect(core.wrapped[0]);
+    try core.write("\r\n\r\n"); // 두 번 scroll → 논리 줄 abcdefghij가 스크롤백으로(.command)
+    try std.testing.expect(core.scrollbackLen() >= 2);
+    core.rewrapScrollback(4); // 폭 4로 재-wrap: abcd|efgh|ij — 모두 .command 유지
+    var i: usize = 0;
+    var saw_command = false;
+    while (i < core.scrollbackLen()) : (i += 1) {
+        // 재-wrap된 모든 행이 .command여야 한다(stale .unknown이면 PR1 misalignment 회귀).
+        try std.testing.expectEqual(types.SemanticPrompt.command, core.scrollbackRowPrompt(i));
+        saw_command = true;
+    }
+    try std.testing.expect(saw_command);
 }
 
 test "OSC 133: a realistic zsh prompt+command sequence classifies rows" {

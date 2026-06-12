@@ -46,9 +46,27 @@ event 4 process-exit surface=1 code=0
 
 event kind는 `SurfaceRuntime`의 runtime event와 1:1로 맞춘다. 정식 대응표는 [Facade 계약](facade-contracts.md)의 `Trace/Event` 절을 단일 출처로 둔다. 요약하면 `process-exit`는 runtime의 `RuntimePtyEvent.exited`와 같은 사건이고, `RuntimePtyEvent.read_error`는 환경 의존적 실패라 trace에 남기지 않는다.
 
-Shell integration event는 아직 `maru.trace.v1` **파일**에 직렬화하지 않는다. 다만 그 토대인 **in-core 이벤트 스트림은 구현됐다**: `TerminalCore`가 OSC 133/7을 파싱하며 `types.ShellEvent`(`prompt_start`·`input_start`·`command_start`·`command_end{row,exit}`·`cwd_changed`)를 시간순으로 기록하고, 소비자가 `shellEvents()`로 읽고 `clearShellEvents()`로 비운다. 같은 도메인 데이터를 디버그 로그(`MARU_DEBUG`의 `shell.*` scoped 로그)·결정적 테스트가 공유한다(관측 가능성 원칙 — 임시 포맷을 따로 두지 않는다). 이벤트 이름은 trace 토큰과 1:1로 맞춘다: `prompt_start`↔`shell.prompt-start`, `input_start`↔`shell.prompt-end`(입력 시작=프롬프트 끝), `command_start`↔`shell.command-start`, `command_end`↔`shell.command-end`, `cwd_changed`↔`shell.cwd-changed`.
+### Shell integration event (semantic prompt 라이프사이클)
 
-이 이벤트를 `maru.trace.v1` 파일에 직렬화하는 PR은 schema를 먼저 갱신하고(위 토큰 추가), replay가 해당 metadata를 어떻게 surface/workspace에 반영하는지 테스트해야 한다. 직렬화 시 `cwd_changed`의 cwd 값은 이벤트가 들지 않으므로(POD 스트림), 그 시점의 `currentCwd()`를 함께 기록한다.
+`TerminalCore`가 OSC 133/7을 파싱하며 `types.ShellEvent`(`prompt_start`·`input_start`·`command_start`·`command_end{row,exit}`·`cwd_changed`)를 시간순으로 기록하고, 소비자가 `shellEvents()`로 읽고 `clearShellEvents()`로 비운다. 같은 도메인 데이터를 디버그 로그(`MARU_DEBUG`의 `shell.*` scoped 로그)·결정적 테스트·trace 직렬화가 공유한다(관측 가능성 원칙 — 임시 포맷을 따로 두지 않는다).
+
+**직렬화는 구현됐다**(writer): `observability/trace.zig`의 `renderShellEvents`/`writeEvent`가 이벤트 스트림을 `maru.trace.v1` 라인으로 굳힌다. 이벤트 이름은 trace 토큰과 1:1이다.
+
+```text
+maru.trace.v1
+event 0 shell.prompt-start surface=1 row=0
+event 1 shell.prompt-end surface=1 row=0
+event 2 shell.command-start surface=1 row=1
+event 3 shell.cwd-changed surface=1 cwd="/Users/me/proj"
+event 4 shell.command-end surface=1 row=2 exit=0
+```
+
+- `prompt_start`↔`shell.prompt-start`, `input_start`↔`shell.prompt-end`(입력 시작=프롬프트 끝), `command_start`↔`shell.command-start`, `command_end`↔`shell.command-end`, `cwd_changed`↔`shell.cwd-changed`.
+- `row=`는 이벤트 발생 시점의 활성 화면 커서 행.
+- `command-end`의 `exit=`는 OSC 133 D의 종료코드, 없으면 `exit=none`.
+- `cwd="..."`는 `currentCwd()` 값(따옴표로 감싸고 `\` `"`·개행/CR/Tab을 escape). `ShellEvent.cwd_changed`는 값을 안 들므로(POD) 직렬화 시점의 `currentCwd()`를 적는다 — 한 batch에 cwd_changed가 둘이면(한 프레임 내 연속 cd) 둘 다 현재 cwd로 적힌다(문서화된 한계).
+
+**아직 없는 것**(후속): (1) live 레코딩 — 실제 세션에서 이 라인을 파일로 append하는 `MARU_TRACE` 게이트, (2) replay용 `output`/`input`/`resize`/`process-exit` 이벤트(위 base kind), (3) reader/ReplayRunner. reader/replay PR은 위 라인을 같은 escape 규칙으로 되읽어 facade로 재생하고, metadata가 surface/workspace에 어떻게 반영되는지 테스트한다.
 
 초기에는 wall-clock timestamp를 replay 의미에 쓰지 않는다. 시간은 디버깅 보조 정보일 수 있지만, replay의 정답은 event 순서다.
 

@@ -900,6 +900,75 @@ pub const DevSession = struct {
         }
     }
 
+    /// 탭 드래그 up(drop) 시 마우스가 '소스가 아닌 다른 pane'의 바 위면 그 pane으로 Term을 옮긴다(cross-pane,
+    /// PR-E2). 같은 pane이거나 바 밖이면 무동작(pane 내 재정렬은 drag(2)가 이미 live로 처리했다). 드롭 위치
+    /// (x)로 dst 안 삽입 인덱스를 잡는다. mouse가 up(kind 3)에서 호출.
+    fn dropTabAt(self: *DevSession, x_px: f64, y_px: f64) void {
+        const src = self.tab_drag_pane orelse return;
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
+        for (leaf_rects.items) |lr| {
+            const bar = self.paneBarRect(lr.rect) orelse continue;
+            if (pointInRect(x_px, y_px, bar)) {
+                if (lr.leaf == src) return; // 같은 pane — 재정렬은 이미 됨
+                const dst_idx = tabIndexInBar(bar, self.cell_width_px, @max(1, lr.leaf.terms.items.len), x_px);
+                self.moveTermToPane(src, self.tab_drag_index, lr.leaf, dst_idx);
+                return;
+            }
+        }
+    }
+
+    /// 드래그한 Term을 src pane의 src_idx에서 빼 dst pane의 dst_idx에 넣는다(cross-pane 이동). dst를 활성 pane으로,
+    /// 옮긴 Term을 dst의 활성 탭으로 만들고, src가 비면 collapse한다. 그 뒤 모든 panel을 새 leaf rect grid로
+    /// resize + 좌표 재계산. insert 실패는 src로 원복한다. src==dst거나 인덱스 밖이면 무동작. Term은 heap-pin
+    /// (`*Term`)이라 pane 사이를 포인터로 옮겨도 surface/reader 주소가 안 움직인다(runtime link도 그대로).
+    fn moveTermToPane(self: *DevSession, src: *Pane, src_idx: usize, dst: *Pane, dst_idx: usize) void {
+        if (src == dst or src_idx >= src.terms.items.len) return;
+        const term = src.terms.orderedRemove(src_idx);
+        const idx = @min(dst_idx, dst.terms.items.len);
+        dst.terms.insert(self.allocator, idx, term) catch {
+            src.terms.insert(self.allocator, @min(src_idx, src.terms.items.len), term) catch {}; // 원복
+            return;
+        };
+        src.active_term = if (src.terms.items.len == 0) 0 else @min(src.active_term, src.terms.items.len - 1);
+        dst.active_term = idx; // 옮긴 Term을 dst의 활성으로
+
+        self.hovered_tab = null; // 트리/탭이 바뀌니 stale 호버 비움
+        if (src.terms.items.len == 0) self.collapsePane(src); // 마지막 Term이 나갔으면 src collapse(형제로)
+
+        // dst를 활성 pane으로(collapse로 인덱스가 밀렸을 수 있어 다시 찾는다) + 대표 surface 재바인딩.
+        const tab = self.activeTab();
+        for (tab.panes.items, 0..) |p, i| {
+            if (p == dst) {
+                tab.active_pane = i;
+                break;
+            }
+        }
+        self.surface_ptrs.items[self.app_window.active_tab] = &dst.activeTerm().surface;
+        self.app_window.tabs = self.surface_ptrs.items;
+        self.resizeActiveTabPanes() catch {}; // 옮긴 Term을 dst term rect grid로(+ src 형제가 빈자리 확장)
+        self.recomputeActivePaneRect();
+        self.metal_dirty = true;
+    }
+
+    /// 비어 있는 pane(모든 Term이 옮겨 나감)을 트리에서 떼고(removeLeaf, 형제로 collapse) panes에서 빼고 해제한다.
+    /// cross-pane 이동은 split에서만 일어나 항상 형제가 있다(단일 pane이면 무동작). active_pane은 호출자가 dst로
+    /// 다시 잡으므로 여기선 범위 clamp만. pane.terms는 비어 있어 destroyPane이 리스트·Pane만 해제한다.
+    fn collapsePane(self: *DevSession, pane: *Pane) void {
+        const tab = self.activeTab();
+        if (tab.panes.items.len <= 1) return;
+        if (!PaneTree.removeLeaf(self.allocator, &tab.tree, pane)) return;
+        for (tab.panes.items, 0..) |p, i| {
+            if (p == pane) {
+                _ = tab.panes.orderedRemove(i);
+                break;
+            }
+        }
+        self.destroyPane(pane);
+        if (tab.active_pane >= tab.panes.items.len) tab.active_pane = tab.panes.items.len - 1;
+    }
+
     /// 활성 pane에 새 Term(터미널 탭)을 띄우고 그 탭으로 포커스한다(⌘T, cmux식). 활성 pane의 현재 rect grid
     /// 크기로 새 셸을 spawn해 pane.terms에 더한다. spawn/alloc 실패는 errdefer로 원복하고 무시(pane 불변).
     fn newTermInActivePane(self: *DevSession) !void {
@@ -1503,8 +1572,9 @@ pub const DevSession = struct {
         // live 재정렬(PR-E1: pane 내). up이 끝낸다. 새 down(1)은 아래 일반 처리로 흘려 새 드래그를 시작한다.
         if (self.tab_drag_active and (kind == 2 or kind == 3)) {
             if (kind == 2) {
-                self.dragTabTo(x_px);
+                self.dragTabTo(x_px); // pane 내 live 재정렬(PR-E1)
             } else {
+                self.dropTabAt(x_px, y_px); // up: 다른 pane 바면 그 pane으로 이동(PR-E2)
                 self.tab_drag_active = false;
                 self.tab_drag_pane = null;
             }
@@ -3633,6 +3703,62 @@ test "dragging a Term tab reorders it within the pane" {
     try std.testing.expectEqual(id0, pane.terms.items[2].surface.id);
     try std.testing.expectEqual(@as(usize, 2), pane.active_term);
     try std.testing.expectEqual(id0, session.activeTab().activeTerm().surface.id); // 활성 = 드래그한 T0
+}
+
+// 탭을 다른 pane으로 드래그하면 그 pane으로 Term이 옮겨가고, 소스 pane의 마지막 Term이 나가면 collapse되는지
+// (PR-E2) — 실 init/split/spawn/teardown이라 macOS 게이트. 좌우 split에서 오른쪽 pane의 탭을 왼쪽 pane 바에
+// drop한다. ① 오른쪽에 Term 2개면 1개만 옮기고 collapse 없음 ② 마지막 1개를 옮기면 오른쪽 collapse.
+test "dragging a tab to another pane moves the Term; emptying the source collapses it" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성)
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // 우 pane Term 2개
+    const right = session.activePane();
+    try std.testing.expectEqual(@as(usize, 2), right.terms.items.len);
+
+    // leaf rect로 좌/우 pane과 바를 잡는다(tree 순서: [0]=좌, [1]=우).
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const left = lr.items[0].leaf;
+    try std.testing.expect(lr.items[1].leaf == right);
+    const left_bar = session.paneBarRect(lr.items[0].rect).?;
+    const right_bar = session.paneBarRect(lr.items[1].rect).?;
+    const moved_id = right.terms.items[0].surface.id; // 옮길 Term(우 탭 0)
+
+    // ① 우 탭 0을 좌 pane 바에 drop → 좌 2개·우 1개, 좌 활성. collapse 없음(우에 1개 남음).
+    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1)); // down on 우 탭 0
+    try std.testing.expect(session.tab_drag_active);
+    session.mouse(3, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1)); // up over 좌 바 → cross-move
+    try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len); // 아직 2 pane
+    try std.testing.expectEqual(@as(usize, 1), right.terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), left.terms.items.len);
+    try std.testing.expectEqual(left, session.activePane()); // 옮긴 곳이 활성
+    var found = false;
+    for (left.terms.items) |t| {
+        if (t.surface.id == moved_id) found = true;
+    }
+    try std.testing.expect(found); // 옮긴 Term이 좌 pane에 있다
+
+    // ② 우 pane의 '마지막' Term을 좌로 drop → 우 비어 collapse → 단일 pane(좌, Term 3개).
+    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1)); // down on 우 탭 0(마지막)
+    session.mouse(3, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1)); // up over 좌 바
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len); // 우 collapse → 1 pane
+    try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(session.activeTab().tree));
+    try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len); // 좌가 3개 다 가짐
+    try std.testing.expect(!session.ended_seen);
 }
 
 // split 탭에서 다른 panel을 클릭하면 포커스가 그 panel로 옮겨가고(입력/커서가 따라간다), 활성 panel을

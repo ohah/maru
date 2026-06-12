@@ -387,7 +387,9 @@ TDD 방식:
 
 - **④ 프롬프트 점프 네비게이션을 구현했다(완료)**: Cmd+↑/↓로 이전/다음 프롬프트 블록으로 뷰포트를 점프한다(iTerm2·VSCode식). `core.jumpToPrompt(dir)`가 OSC 133 분류로 "프롬프트 블록 시작"(`isPromptStart` — prompt/input run의 첫 행, 직전이 비-프롬프트)을 절대 행 좌표로 찾아 그 행을 뷰포트 맨 위에 둔다(활성 행이면 바닥). 셸 통합이 없으면 분류가 전부 unknown이라 false(무동작). Swift는 Cmd+↑/↓ keyCode만 감지해 `maru_macos_app_dev_session_jump_prompt(dir)` ABI로 방향만 넘기고(native 최소, scroll_page와 같은 규율), 분류·이동·뷰포트 계산은 전부 Zig가 한다. unit 검증(isPromptStart 블록 경계·스크롤백 프롬프트로 점프·분류 없으면 false). **거터 마크(✓/✗)는 후속(PR5)** — 렌더러 레이아웃(거터 strip vs margin overlay) 설계가 필요해 분리한다.
 
-이어서 ⑤ 거터 마크(✓/✗ — `last_command_exit`/prompt-start 행을 렌더) ⑥ OSC 7 cwd 보고(8·9단계 토대) ⑦ trace 의미 이벤트. clean-room: freedesktop semantic-prompts.md 명세 + Ghostty 동작 비교(코드 미복사).
+- **⑤ 거터 마크(✓/✗)를 구현했다(완료)**: 프롬프트 시작 행 왼쪽 가장자리에 명령 성공(초록)/실패(빨강) 세로 색 바. 종료코드를 **프롬프트별로** 저장하려고 행 단위 `SemanticPrompt`를 `RowPrompt{kind, exit}`(분류+종료코드)로 묶었다 — 분류와 한 묶음이라 기존 스크롤/reflow carry가 종료코드도 함께 옮긴다(별도 배열 불필요). OSC 133 `D`가 그 명령의 프롬프트 시작 행(커서에서 위로 가장 가까운 isPromptStart, 스크롤백까지 스캔)에 종료코드를 스탬프한다. 렌더는 **native 최소**: `draw_list`가 exit≠null인 행마다 `GutterMark{row,success}` overlay를 내고, `metal_frame`이 **커서 bar(좌측 세로 부분 사각형, kind=3)를 col 0에 재사용**해 초록/빨강 바로 투영(셰이더 변경 0). 레이아웃 A안(overlay, 그리드/PTY 폭 불변). unit 검증(D 스탬프·스크롤백 carry·거터 overlay emit 성공/실패). 거터 strip 예약 없이 첫 칸 가장자리에 그린다.
+
+이어서 ⑥ OSC 7 cwd 보고(8·9단계 토대) ⑦ trace 의미 이벤트. clean-room: freedesktop semantic-prompts.md 명세 + Ghostty 동작 비교(코드 미복사).
 - **IME 1단계를 구현했다(완료)**: `MaruMetalTerminalView`가 `NSTextInputClient`를 채택해 수정자 없는 타이핑을 입력기에 위임한다(한글 조합 동작, 확정 텍스트는 코드포인트 단위로 기존 encodeKey 경로). Ctrl/Cmd 조합은 입력기를 우회하고 **물리 키코드 기준으로 레이아웃 독립 매칭**한다(ABI v18 raw_key_code + Zig keycode.zig — 한글 모드에서도 Ctrl+B=0x02·Cmd+C/V 동작, 라틴 배열 결과는 보존). 자세한 정책은 [키 입력과 단축키 경계](key-input-and-shortcuts.md). preedit(조합 중 글자)는 커서 위치에 반전으로 합성 표시된다(core renderSnapshot 합성, 그리드 비오염, unit 검증). IME 판정 상태 머신은 Zig dev session이 소유한다(ABI v20 ime_begin/insert/marked/end + set_focus — Ghostty keyTextAccumulator식 일괄 판정, 조합 키 무전송·확정 1회 전송·C0 suppress·포커스 커밋 전부 unit 고정; Swift는 전달만). 후보창은 커서 셀 위치에 뜬다(ABI v22 ime_cursor_rect, unit 검증). 아직: function key/keypad/dead key, CSI-u/Kitty 인코딩.
 
 ## 9단계: Workspace restore

@@ -52,6 +52,14 @@ pub const SemanticPrompt = enum(u8) {
     command, // C~D 사이 — 실행 중인 명령의 출력
 };
 
+/// 한 행의 OSC 133 정보(분류 + 그 프롬프트에서 실행된 명령의 종료코드). 종료코드는 프롬프트
+/// 시작 행에만 `D;<code>`로 기록되고 나머지 행은 null이다. 분류와 한 묶음이라, 스크롤/reflow
+/// carry가 둘을 함께 옮긴다(별도 배열을 안 들어도 됨). 거터 ✓/✗ 색(성공=초록/실패=빨강)에 쓴다.
+pub const RowPrompt = struct {
+    kind: SemanticPrompt = .unknown,
+    exit: ?i16 = null, // 그 프롬프트의 명령 종료코드(프롬프트 시작 행에만; shell은 음수도 보냄)
+};
+
 /// Iterates the visible codepoints of a single row: each non-continuation
 /// cell yields its base codepoint, immediately followed by its combining mark
 /// when present. Both the plain-text dump (`TerminalCore.dumpUtf8`) and the
@@ -114,9 +122,10 @@ pub const RenderSnapshot = struct {
     cursor_shape: CursorShape = .block,
     cursor_blink: bool = true,
     cells: []const Cell = &.{},
-    // 행별 OSC 133 semantic 분류(길이=size.rows, cells와 같은 행 인덱싱). 스크롤된 뷰포트에서도
-    // 보이는 행에 맞춰 합성된다. OSC 133 마킹이 없으면 전부 .unknown이라 렌더러는 무시해도 된다.
-    prompt_marks: []const SemanticPrompt = &.{},
+    // 행별 OSC 133 정보(분류 + 종료코드, 길이=size.rows, cells와 같은 행 인덱싱). 스크롤된
+    // 뷰포트에서도 보이는 행에 맞춰 합성된다. 마킹이 없으면 전부 {.unknown, null}이라 렌더러는
+    // 무시해도 된다. 거터(✓/✗)는 prompt 시작 행의 exit로 색을 정한다.
+    prompt_marks: []const RowPrompt = &.{},
     // 가장 최근에 끝난 명령의 종료코드(OSC 133 ; D ; <code>). 없으면 null. 이후 단계가 프롬프트
     // 거터에 ✓/✗로 투영한다. shell이 음수(-1 등)를 보낼 수 있어 i32.
     last_command_exit: ?i32 = null,

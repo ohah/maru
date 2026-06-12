@@ -557,41 +557,54 @@ fn buildMergedSidebarCells(
     return list.toOwnedSlice(allocator);
 }
 
-/// 머지된 raster 업로드 스트림. uploads는 [터미널 ++ 사이드바], pixels도 [터미널 ++ 사이드바]로
-/// 이어 붙이고, 사이드바 upload의 bytes_offset에 터미널 pixels 길이를 더해 합쳐진 pixels의 suffix를
-/// 가리키게 한다(둘 다 같은 atlas라 slot은 안 겹친다 — 각 패스는 자기 새 slot만 업로드).
+/// 한 panel의 RenderFrame과 그릴 픽셀 origin·색. replace가 N개를 합성한다 — 각 panel 셀을 자기 origin에
+/// 박고, uploads/pixels를 모든 panel + 사이드바로 머지한다. 활성 panel은 슬라이스 맨 뒤에 둬야 한다
+/// (커서가 거기만 있음): 커서 cell이 합쳐진 cells의 끝에 와 blink 노출 길이 조정(cursor suffix)이 그대로
+/// 동작한다. 비활성 panel은 colors.cursor=null이라 커서 cell을 안 낸다.
+pub const PaneFrame = struct {
+    frame: renderer.RenderFrame,
+    origin_x: u32,
+    origin_y: u32,
+    colors: CellColors,
+};
+
+/// 머지된 raster 업로드 스트림. pixels는 [panel0 ++ panel1 ++ … ++ 사이드바], uploads도 같은 순서로
+/// 이어 붙이되 각 조각의 upload bytes_offset에 그 조각이 시작하는 누적 pixels 길이를 더해 합쳐진 pixels의
+/// 자기 구간을 가리키게 한다(모두 같은 atlas라 slot은 안 겹친다 — 각 패스는 자기 새 slot만 업로드).
 const MergedUploads = struct { uploads: []NativeMetalRasterUpload, pixels: []u8 };
 
-fn buildMergedUploads(
+/// raster frame 하나의 pixels/uploads를 누적 버퍼에 base offset만큼 시프트해 덧붙인다.
+fn appendRaster(
     allocator: std.mem.Allocator,
-    terminal_raster: renderer.GlyphRasterFrame,
+    pixels: *std.ArrayList(u8),
+    uploads: *std.ArrayList(NativeMetalRasterUpload),
+    raster: renderer.GlyphRasterFrame,
+) !void {
+    const base = pixels.items.len;
+    try pixels.appendSlice(allocator, raster.pixels);
+    const u = try buildNativeRasterUploads(allocator, raster);
+    defer allocator.free(u);
+    for (u) |upl| {
+        var shifted = upl;
+        shifted.bytes_offset += base; // 합쳐진 pixels에서 이 조각의 구간을 가리키게
+        try uploads.append(allocator, shifted);
+    }
+}
+
+fn buildMergedUploadsN(
+    allocator: std.mem.Allocator,
+    pane_frames: []const PaneFrame,
     sidebar_raster: ?renderer.GlyphRasterFrame,
 ) !MergedUploads {
-    const term_pixels = terminal_raster.pixels;
-    const side_pixels = if (sidebar_raster) |sr| sr.pixels else &[_]u8{};
-
-    const pixels = try allocator.alloc(u8, term_pixels.len + side_pixels.len);
-    errdefer allocator.free(pixels);
-    @memcpy(pixels[0..term_pixels.len], term_pixels);
-    @memcpy(pixels[term_pixels.len..], side_pixels);
-
+    var pixels: std.ArrayList(u8) = .empty;
+    errdefer pixels.deinit(allocator);
     var uploads: std.ArrayList(NativeMetalRasterUpload) = .empty;
     errdefer uploads.deinit(allocator);
-    {
-        const tu = try buildNativeRasterUploads(allocator, terminal_raster);
-        defer allocator.free(tu);
-        try uploads.appendSlice(allocator, tu);
-    }
-    if (sidebar_raster) |sr| {
-        const su = try buildNativeRasterUploads(allocator, sr);
-        defer allocator.free(su);
-        for (su) |u| {
-            var shifted = u;
-            shifted.bytes_offset += term_pixels.len; // 합쳐진 pixels의 사이드바 suffix를 가리키게
-            try uploads.append(allocator, shifted);
-        }
-    }
-    return .{ .uploads = try uploads.toOwnedSlice(allocator), .pixels = pixels };
+
+    for (pane_frames) |pf| try appendRaster(allocator, &pixels, &uploads, pf.frame.glyph_raster_frame);
+    if (sidebar_raster) |sr| try appendRaster(allocator, &pixels, &uploads, sr);
+
+    return .{ .uploads = try uploads.toOwnedSlice(allocator), .pixels = try pixels.toOwnedSlice(allocator) };
 }
 
 /// RenderFrame을 투영해 retain하는 owned 버퍼. cells/sidebar_cells/uploads/pixels 배열의 소유권을
@@ -615,40 +628,42 @@ pub const MetalFrameBuffer = struct {
     cursor_cells: usize = 0,
     show_cursor: bool = true,
 
-    /// 새 frame을 투영해 교체한다. 새 배열을 먼저 만들고(실패 시 errdefer로 정리, 기존
-    /// retained 배열은 그대로 유지) 성공하면 기존 것을 해제하고 swap한다. generation은
-    /// 성공했을 때만 증가한다. cell_px는 caller(dev session)가 font 메트릭에서 계산해 넘긴다.
-    /// 터미널 frame(필수)과 사이드바 frame(선택, 탭 제목 glyph)을 함께 투영해 교체한다. 사이드바
-    /// 셀 = `sidebar_band_cells`(밴드) ++ 사이드바 frame의 제목 glyph. uploads/pixels는 두 frame을
-    /// 머지한다(같은 atlas). 새 배열을 모두 먼저 만들고(실패 시 errdefer로 정리, 기존 retained 배열
-    /// 유지) 성공하면 기존 것을 해제하고 swap한다. generation은 성공했을 때만 증가. sidebar_colors는
-    /// 제목 glyph 투영용(전경색 등) — 밴드는 호출자가 이미 색을 박아 넘긴다.
+    /// N개 panel frame(`pane_frames`)과 사이드바 frame(선택)을 함께 투영해 교체한다. 각 panel 셀은 자기
+    /// origin에 박혀(setCellsPaneOrigin) 렌더러가 origin_x+col*cw, origin_y+row*ch에 둔다 — N개 surface가
+    /// 각자 sub-사각형에 그려진다. **활성 panel은 맨 뒤**여야 한다: 커서 cell이 합쳐진 cells의 끝에 와
+    /// blink suffix가 동작한다(비활성 panel은 colors.cursor=null이라 커서 cell 없음). 사이드바 셀 = 밴드 ++
+    /// 사이드바 frame의 제목 glyph. uploads/pixels는 모든 panel + 사이드바를 머지한다(같은 atlas). 새 배열을
+    /// 먼저 만들고(실패 시 errdefer 정리, 기존 retained 유지) 성공하면 기존 것을 해제하고 swap. generation은
+    /// 성공 시만 증가. pane_frames는 비어 있지 않다고 가정한다(호출자가 활성 탭 leaf로 1개 이상 채운다).
     pub fn replace(
         self: *MetalFrameBuffer,
         allocator: std.mem.Allocator,
-        frame: renderer.RenderFrame,
+        pane_frames: []const PaneFrame,
         atlas_config: renderer.GlyphAtlasConfig,
         cell_width_px: u32,
         cell_height_px: u32,
-        colors: CellColors,
-        // 터미널 frame이 그려질 panel(split leaf)의 픽셀 origin. 빌드된 cell들에 박아 렌더러가 origin_x+
-        // col*cw, origin_y+row*ch에 둔다. 단일 panel이면 (사이드바 폭, 0). split(PR3)이 panel별로 다른
-        // origin과 frame을 줘 N개 surface를 합성한다.
-        terminal_origin_x: u32,
-        terminal_origin_y: u32,
         sidebar_frame: ?renderer.RenderFrame,
         sidebar_band_cells: []const NativeMetalCell,
         sidebar_colors: CellColors,
     ) !void {
-        const built = try buildNativeCellsSplit(allocator, frame.glyph_quad_frame, frame.draw_list.cells, colors);
-        const new_cells = built.cells;
+        // 1) 터미널 셀: 각 panel frame을 투영해 origin 박고 이어 붙인다. 커서 suffix는 맨 뒤(활성) panel만.
+        var cells_list: std.ArrayList(NativeMetalCell) = .empty;
+        errdefer cells_list.deinit(allocator);
+        var cursor_cells: usize = 0;
+        for (pane_frames, 0..) |pf, i| {
+            const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
+            defer allocator.free(built.cells);
+            setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
+            try cells_list.appendSlice(allocator, built.cells);
+            if (i == pane_frames.len - 1) cursor_cells = built.cursor_cells; // 활성(마지막) panel의 커서가 끝에
+        }
+        const new_cells = try cells_list.toOwnedSlice(allocator);
         errdefer allocator.free(new_cells);
-        setCellsPaneOrigin(new_cells, terminal_origin_x, terminal_origin_y);
 
         const new_sidebar_cells = try buildMergedSidebarCells(allocator, sidebar_band_cells, sidebar_frame, sidebar_colors);
         errdefer allocator.free(new_sidebar_cells);
 
-        const merged = try buildMergedUploads(allocator, frame.glyph_raster_frame, if (sidebar_frame) |sf| sf.glyph_raster_frame else null);
+        const merged = try buildMergedUploadsN(allocator, pane_frames, if (sidebar_frame) |sf| sf.glyph_raster_frame else null);
         errdefer {
             allocator.free(merged.uploads);
             allocator.free(merged.pixels);
@@ -660,10 +675,12 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.pixels);
         self.cells = new_cells;
         self.sidebar_cells = new_sidebar_cells;
-        self.cursor_cells = built.cursor_cells;
+        self.cursor_cells = cursor_cells;
         self.uploads = merged.uploads;
         self.pixels = merged.pixels;
-        self.size = frame.glyph_frame.size;
+        // cols/rows는 렌더러의 cols==0/rows==0 가드용 — 활성(마지막) panel의 grid를 쓴다(셀은 자기 row/col+
+        // origin으로 그려지므로 이 값은 가드에만 영향).
+        self.size = pane_frames[pane_frames.len - 1].frame.glyph_frame.size;
         self.atlas_width_px = atlas_config.atlas_width_px;
         self.atlas_height_px = atlas_config.atlas_height_px;
         self.cell_width_px = cell_width_px;
@@ -1224,13 +1241,18 @@ test "color emoji glyph cells get the +2.0 UV sentinel; normal glyphs do not" {
     try std.testing.expectApproxEqAbs(@as(f32, 2.1), hc[0].u0, 0.001); // VS16 → +2.0
 }
 
-test "buildMergedUploads concatenates pixels and shifts sidebar upload offsets into the merged suffix" {
-    // 사이드바 제목 glyph 패스의 업로드를 터미널 업로드 스트림에 머지할 때, pixels는 [터미널 ++ 사이드바]로
-    // 이어 붙이고 사이드바 upload의 bytes_offset에 터미널 pixels 길이를 더해 합쳐진 pixels의 suffix를
-    // 가리키게 해야 한다 — 안 그러면 GPU가 사이드바 glyph를 터미널 pixels 영역에서 읽어 깨진다.
+test "appendRaster concatenates pixels and shifts upload offsets into the merged suffix (N-way merge core)" {
+    // N개 panel + 사이드바 raster를 한 스트림에 머지할 때, pixels는 [조각0 ++ 조각1 ++ …]로 이어 붙이고
+    // 각 조각 upload의 bytes_offset에 그 조각이 시작하는 누적 길이를 더해 합쳐진 pixels의 자기 구간을
+    // 가리키게 해야 한다 — 안 그러면 GPU가 한 panel/사이드바 glyph를 다른 조각 pixels에서 읽어 깨진다.
     const allocator = std.testing.allocator;
-    var term_pixels = [_]u8{ 1, 2, 3, 4 }; // 터미널 4바이트
-    var side_pixels = [_]u8{ 9, 8 }; // 사이드바 2바이트
+    var pixels: std.ArrayList(u8) = .empty;
+    defer pixels.deinit(allocator);
+    var uploads: std.ArrayList(NativeMetalRasterUpload) = .empty;
+    defer uploads.deinit(allocator);
+
+    var first_pixels = [_]u8{ 1, 2, 3, 4 }; // 첫 조각 4바이트(upload 없음)
+    var second_pixels = [_]u8{ 9, 8 }; // 둘째 조각 2바이트
     const slot: renderer.AtlasSlot = .{
         .id = 5,
         .key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1 },
@@ -1241,33 +1263,25 @@ test "buildMergedUploads concatenates pixels and shifts sidebar upload offsets i
         .upload_bytes = 0,
         .generation = 0,
     };
-    var side_uploads = [_]renderer.GlyphRasterUpload{.{
+    var second_uploads = [_]renderer.GlyphRasterUpload{.{
         .upload_index = 0,
         .glyph_index = 0,
         .slot = slot,
-        .bytes_offset = 0, // 사이드바 frame 기준 offset 0
+        .bytes_offset = 0, // 자기 frame 기준 offset 0
         .byte_count = 2,
         .bytes_per_row = 2,
         .non_clear_pixels = 1,
     }};
-    const term: renderer.GlyphRasterFrame = .{ .uploads = &.{}, .skips = &.{}, .pixels = &term_pixels, .stats = .{} };
-    const side: renderer.GlyphRasterFrame = .{ .uploads = &side_uploads, .skips = &.{}, .pixels = &side_pixels, .stats = .{} };
+    const first: renderer.GlyphRasterFrame = .{ .uploads = &.{}, .skips = &.{}, .pixels = &first_pixels, .stats = .{} };
+    const second: renderer.GlyphRasterFrame = .{ .uploads = &second_uploads, .skips = &.{}, .pixels = &second_pixels, .stats = .{} };
 
-    const merged = try buildMergedUploads(allocator, term, side);
-    defer allocator.free(merged.uploads);
-    defer allocator.free(merged.pixels);
+    try appendRaster(allocator, &pixels, &uploads, first); // base 0: pixels [1,2,3,4], upload 없음
+    try appendRaster(allocator, &pixels, &uploads, second); // base 4: pixels +[9,8], upload offset 0→4
 
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 9, 8 }, merged.pixels); // term ++ side
-    try std.testing.expectEqual(@as(usize, 1), merged.uploads.len);
-    try std.testing.expectEqual(@as(usize, 4), merged.uploads[0].bytes_offset); // 0 + 터미널 pixels 길이(4)
-    try std.testing.expectEqual(@as(u32, 5), merged.uploads[0].slot_id);
-
-    // 사이드바 frame 없으면 pixels는 터미널 그대로, 사이드바 upload 없음.
-    const only_term = try buildMergedUploads(allocator, term, null);
-    defer allocator.free(only_term.uploads);
-    defer allocator.free(only_term.pixels);
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4 }, only_term.pixels);
-    try std.testing.expectEqual(@as(usize, 0), only_term.uploads.len);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 9, 8 }, pixels.items); // first ++ second
+    try std.testing.expectEqual(@as(usize, 1), uploads.items.len);
+    try std.testing.expectEqual(@as(usize, 4), uploads.items[0].bytes_offset); // 0 + 첫 조각 길이(4)
+    try std.testing.expectEqual(@as(u32, 5), uploads.items[0].slot_id);
 }
 
 test "buildMergedSidebarCells prepends band cells before sidebar title glyph cells" {

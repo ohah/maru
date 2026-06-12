@@ -1564,9 +1564,15 @@ pub const DevSession = struct {
             // 제목 glyph 투영용 색(전경=테마 글자색). 밴드는 rebuildSidebar가 이미 색을 박아 넘긴다.
             const sidebar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
 
-            // 단일 panel(split 전): 터미널 frame이 터미널 영역 전체에 그려진다 — origin = (사이드바 폭, 0).
-            // split(PR3)이 panel별로 frame·origin을 줘 N개 surface를 합성한다.
-            if (self.metal_buffer.replace(self.allocator, tick_result.frame.render_frame, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, cell_colors, self.sidebar_width_px, 0, sidebar_frame, self.sidebar_cells.items, sidebar_colors)) |_| {
+            // 단일 panel(split 전): 활성 panel frame이 터미널 영역 전체에 그려진다 — origin = (사이드바 폭, 0).
+            // split(PR3b-1b)이 leaf별 frame·origin을 채워 N개 panel을 합성한다(활성 panel은 맨 뒤 = 커서 suffix).
+            const pane_frames = [_]metal_frame.PaneFrame{.{
+                .frame = tick_result.frame.render_frame,
+                .origin_x = self.sidebar_width_px,
+                .origin_y = 0,
+                .colors = cell_colors,
+            }};
+            if (self.metal_buffer.replace(self.allocator, &pane_frames, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors)) |_| {
                 self.metal_dirty = false;
             } else |_| {}
 

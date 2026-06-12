@@ -49,6 +49,17 @@ fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px:
     return terminal.clampGridSize(.{ .cols = @intCast(raw_cols), .rows = @intCast(raw_rows) });
 }
 
+/// 사이드바를 이미 뺀 sub-사각형(panel leaf rect)의 픽셀 폭/높이로 grid를 구한다. `gridFromBacking`과
+/// 같은 cell/clamp 규칙이되 사이드바를 빼지 않는다(rect가 이미 터미널 영역 내부) — split된 panel을 자기
+/// leaf rect grid로 resize할 때 쓴다. 단일 leaf(rect.w = backing − sidebar)면 gridFromBacking과 동일.
+fn gridFromRectPx(cell_width_px: u32, cell_height_px: u32, w_px: u32, h_px: u32) terminal.Size {
+    const cell_w = if (cell_width_px > 0) cell_width_px else placeholder_cell_width_px;
+    const cell_h = if (cell_height_px > 0) cell_height_px else placeholder_cell_height_px;
+    const raw_cols = @min(w_px / cell_w, std.math.maxInt(u16));
+    const raw_rows = @min(h_px / cell_h, std.math.maxInt(u16));
+    return terminal.clampGridSize(.{ .cols = @intCast(raw_cols), .rows = @intCast(raw_rows) });
+}
+
 /// color.Rgb를 불투명(A=0xFF) 0xAARRGGBB로 packing한다(사이드바 strip/활성 밴드 셀 배경 색용). 셀
 /// 배경은 A=0xFF여야 셰이더가 그 색으로 칠한다(A=0이면 "배경 없음").
 fn packOpaqueRgb(rgb: maru.color.Rgb) u32 {
@@ -315,6 +326,11 @@ pub const DevSession = struct {
     // 세로 사이드바의 backing 픽셀 폭(= sidebar_width_pt × scale). refreshCellMetrics가 갱신한다.
     // gridFromBacking이 이만큼 터미널 폭에서 빼고, metalFrame()이 렌더러에 origin offset으로 넘긴다.
     sidebar_width_px: u32 = 0,
+    // 마지막 resize의 backing(drawable) 픽셀 크기. split된 panel의 leaf rect 계산(터미널 영역 = backing −
+    // 사이드바)에 쓴다. 첫 resize 전엔 0 — 그땐 단일 leaf라 rect.w/h가 0이어도 활성 frame은 origin에 그려져
+    // 무해하다(split은 창이 떠 backing이 잡힌 뒤에야 가능). resize가 갱신한다.
+    backing_width_px: u32 = 0,
+    backing_height_px: u32 = 0,
     // 사이드바 탭 슬롯 한 칸의 backing 픽셀 높이(= cell_height_px × 2.5). refreshCellMetrics가 갱신.
     // metalFrame()이 렌더러에 넘겨 사이드바 셀을 cell 높이가 아니라 이 슬롯 높이로 세로 배치한다.
     sidebar_slot_height_px: u32 = 0,
@@ -484,9 +500,21 @@ pub const DevSession = struct {
         return self.activeTab().activePane();
     }
 
+    /// 사이드바를 뺀 터미널 영역 사각형(backing px, 좌상단 = (사이드바 폭, 0)). split 레이아웃·resize·렌더가
+    /// 공유하는 단일 출처. backing 크기는 마지막 resize 값이고, 첫 resize 전(0)이면 폭/높이가 0이라 단일
+    /// leaf가 origin에만 그려진다(무해).
+    fn termRect(self: *const DevSession) app.SplitRect {
+        return .{
+            .x = self.sidebar_width_px,
+            .y = 0,
+            .w = self.backing_width_px -| self.sidebar_width_px,
+            .h = self.backing_height_px,
+        };
+    }
+
     /// 활성 탭의 SplitTree를 터미널 영역 rect 안에서 각 panel(leaf)의 (surface, rect)로 편다(멀티-panel
-    /// 렌더용 — PR2b가 각 surface를 자기 rect에 그린다). 지금은 단일 leaf라 [{활성 surface, term_rect}]
-    /// 하나; split(PR3) 이후 여러 rect가 된다. term_rect는 사이드바를 뺀 터미널 영역(렌더가 계산해 넘김).
+    /// 렌더용 — 각 surface를 자기 rect에 그린다). 단일 leaf면 [{활성 surface, term_rect}] 하나; split 이후
+    /// 여러 rect가 된다. term_rect는 사이드바를 뺀 터미널 영역(렌더가 termRect로 계산해 넘김).
     fn activeTabLeafRects(
         self: *DevSession,
         allocator: std.mem.Allocator,
@@ -494,6 +522,91 @@ pub const DevSession = struct {
         out: *std.ArrayList(app.SplitLeafRect),
     ) !void {
         try app.split_tree.layout(allocator, self.activeTab().tree, term_rect, out);
+    }
+
+    /// 활성 탭의 각 panel을 자기 leaf rect grid로 resize한다(window resize·split 후 재배치). 단일 leaf면
+    /// 활성 surface 하나를 full term grid로 — 기존 resizeActiveSurface와 동일 효과. 활성 panel의 resize
+    /// 에러만 전파하고(기존 resize()의 try 동작 보존), 비활성 panel의 죽은 PTY 등은 무시해 한 panel이 다른
+    /// panel 재배치를 막지 않게 한다. leaf rect 계산 실패(OOM)는 전파.
+    fn resizeActiveTabPanes(self: *DevSession) !void {
+        var leaf_rects: std.ArrayList(app.SplitLeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        try self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects);
+        const active_surface = self.activeSurface();
+        for (leaf_rects.items) |lr| {
+            const psize = gridFromRectPx(self.cell_width_px, self.cell_height_px, lr.rect.w, lr.rect.h);
+            if (lr.surface == active_surface) {
+                try self.runtime.resize(lr.surface.id, psize);
+            } else {
+                self.runtime.resize(lr.surface.id, psize) catch {};
+            }
+        }
+    }
+
+    /// 활성 panel을 direction으로 둘로 나눈다(cmux/tmux식 split — 동작만 참고, 코드 미참고). 활성 panel의
+    /// 현재 leaf rect를 splitRect로 a(기존)·b(새)로 나눠, b 크기로 새 셸 panel을 spawn하고, 트리에서 활성
+    /// leaf를 split{a: 기존 leaf, b: 새 leaf}로 교체하고, 기존 panel을 a 크기로 줄인 뒤 새 panel로 포커스를
+    /// 옮긴다. 단일 panel 탭이면 첫 분할(2개), 이미 split이면 활성 panel이 다시 나뉜다(중첩). spawn/alloc
+    /// 실패는 errdefer로 트리/탭을 원복한다(부분 상태를 남기지 않는다).
+    fn splitActivePane(self: *DevSession, direction: app.SplitDirection) !void {
+        const tab = self.activeTab();
+        const active = tab.activePane();
+
+        // 1) 활성 panel의 현재 rect를 레이아웃에서 찾는다(없으면 — 있어선 안 되지만 — 분할 안 함).
+        var leaf_rects: std.ArrayList(app.SplitLeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        try self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects);
+        var active_rect: ?app.SplitRect = null;
+        for (leaf_rects.items) |lr| {
+            if (lr.surface == &active.surface) {
+                active_rect = lr.rect;
+                break;
+            }
+        }
+        const arect = active_rect orelse return error.ActivePaneNotInTree;
+
+        // 2) active rect를 direction·0.5로 a(기존)·b(새)로 나눈 grid.
+        const parts = app.split_tree.splitRect(arect, direction, 0.5);
+        const a_size = gridFromRectPx(self.cell_width_px, self.cell_height_px, parts.a.w, parts.a.h);
+        const b_size = gridFromRectPx(self.cell_width_px, self.cell_height_px, parts.b.w, parts.b.h);
+
+        // 3) 새 panel을 b 크기로 spawn(새 셸). 실패하면 트리/탭은 그대로다.
+        var cfg = self.new_tab_config;
+        cfg.size = b_size;
+        const new_pane = try self.createPane(
+            spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir),
+            b_size,
+            cfg.queue_capacity,
+            "Maru",
+            commandName(cfg.command_kind),
+        );
+        errdefer self.destroyPane(new_pane);
+        try tab.panes.append(self.allocator, new_pane);
+        errdefer _ = tab.panes.pop();
+
+        // 4) split 노드를 heap에 만들고 트리에서 활성 leaf를 split{a: 기존, b: 새}로 교체.
+        const split = try self.allocator.create(app.Split);
+        errdefer self.allocator.destroy(split);
+        split.* = .{
+            .direction = direction,
+            .ratio = 0.5,
+            .a = .{ .leaf = &active.surface },
+            .b = .{ .leaf = &new_pane.surface },
+        };
+        if (!app.split_tree.replaceLeaf(&tab.tree, &active.surface, .{ .split = split })) {
+            return error.ActivePaneNotInTree; // errdefer가 split·pane을 원복(트리는 변형 전이라 무변)
+        }
+
+        // 5) 기존 panel을 a 크기로 줄인다(PTY winsize 포함). 죽은 PTY 등의 실패는 무시(split 자체는 성공).
+        self.runtime.resize(active.surface.id, a_size) catch {};
+
+        // 6) 새 panel로 포커스 이동(cmux/tmux식). 탭 대표 surface(= app_window.active())와 frame_loop pump를
+        //    새 panel로 재바인딩한다. 탭 인덱스는 그대로라 사이드바 갱신은 불요.
+        tab.active_pane = tab.panes.items.len - 1;
+        self.surface_ptrs.items[self.app_window.active_tab] = &new_pane.surface;
+        self.app_window.tabs = self.surface_ptrs.items;
+        self.frame_loop.pump = &self.activePane().pump;
+        self.metal_dirty = true;
     }
 
     /// 한 panel을 heap-pin(`create`)으로 만든다 — 셸 PTY spawn → surface init → runtime attach → pump.
@@ -611,6 +724,7 @@ pub const DevSession = struct {
         // teardown — 탭의 모든 panel을 destroyPane(closeAndDetach → reader join → surface deinit → free)한 뒤
         // panes 리스트·Tab을 해제한다. runtime은 세션 동안 살아 있으므로 detach가 안전하다.
         for (tab.panes.items) |pane| self.destroyPane(pane);
+        app.split_tree.deinit(self.allocator, tab.tree); // heap split 노드 해제(leaf surface는 destroyPane가 이미)
         tab.panes.deinit(self.allocator);
         self.allocator.destroy(tab);
 
@@ -677,6 +791,10 @@ pub const DevSession = struct {
             },
             .select_tab => |index| _ = self.switchTab(index),
             .close_tab => self.closeTab(self.app_window.active_tab),
+            // 분할 실패(셸 spawn/alloc 실패)는 세션을 죽이지 않고 무시한다 — splitActivePane이 errdefer로
+            // 트리/탭을 원복하므로 활성 panel 하나가 그대로 남는다.
+            .split_horizontal => self.splitActivePane(.horizontal) catch {},
+            .split_vertical => self.splitActivePane(.vertical) catch {},
         }
         self.metal_dirty = true;
     }
@@ -1385,7 +1503,11 @@ pub const DevSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.resize);
             return self.last_summary;
         }
-        try self.frame_loop.resizeActiveSurface(size);
+        // backing 크기를 갱신하고(split leaf rect 계산의 입력) 활성 탭의 각 panel을 자기 leaf rect grid로
+        // 재배치한다. 단일 leaf면 활성 surface 하나를 full term grid로 — 기존 resizeActiveSurface와 동일.
+        self.backing_width_px = width_px;
+        self.backing_height_px = height_px;
+        try self.resizeActiveTabPanes();
         self.last_resize_size = size;
         // grid가 reflow됐으므로 다음 tick이 Metal frame을 재투영하게 dirty로 표시한다.
         self.metal_dirty = true;
@@ -1564,17 +1686,79 @@ pub const DevSession = struct {
             // 제목 glyph 투영용 색(전경=테마 글자색). 밴드는 rebuildSidebar가 이미 색을 박아 넘긴다.
             const sidebar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
 
-            // 단일 panel(split 전): 활성 panel frame이 터미널 영역 전체에 그려진다 — origin = (사이드바 폭, 0).
-            // split(PR3b-1b)이 leaf별 frame·origin을 채워 N개 panel을 합성한다(활성 panel은 맨 뒤 = 커서 suffix).
-            const pane_frames = [_]metal_frame.PaneFrame{.{
+            // 활성 탭의 leaf별 frame을 N개 합성한다. 단일 leaf(split 전)면 활성 frame 하나가 터미널 영역
+            // 전체에 그려진다(origin = leaf rect = (사이드바 폭, 0)) — 기존 동작 보존. split이면 비활성 panel은
+            // 각자 surface snapshot으로 frame을 만들어(커서/선택 없는 plain 색) 먼저 넣고, 활성 panel(frame_loop가
+            // 만든 tick_result.frame)을 자기 leaf rect origin으로 '맨 뒤'에 둔다(맨 뒤 = 커서 suffix). 비활성
+            // frame 빌드는 실 CoreText 브리지라 macOS에서만; 실패한 panel은 건너뛴다(세션 안 죽임).
+            var leaf_rects: std.ArrayList(app.SplitLeafRect) = .empty;
+            defer leaf_rects.deinit(self.allocator);
+            self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch {};
+            const active_surface = self.activeSurface();
+
+            // 활성 panel의 origin(leaf rect). 못 구하면(빈 리스트 — OOM) (사이드바 폭, 0)로 폴백.
+            var active_origin_x: u32 = self.sidebar_width_px;
+            var active_origin_y: u32 = 0;
+            for (leaf_rects.items) |lr| {
+                if (lr.surface == active_surface) {
+                    active_origin_x = lr.rect.x;
+                    active_origin_y = lr.rect.y;
+                    break;
+                }
+            }
+
+            var pane_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
+            defer pane_frames.deinit(self.allocator);
+            // 비활성 panel frame은 여기서 소유하고 replace 뒤에 해제한다(pane_frames의 PaneFrame은 같은 frame을
+            // 가리키는 view일 뿐이라 따로 deinit하지 않는다 — 이중 free 방지). 활성 frame은 tick_result가 소유.
+            var built_frames: std.ArrayList(renderer.RenderFrame) = .empty;
+            defer {
+                for (built_frames.items) |*bf| bf.deinit(self.allocator);
+                built_frames.deinit(self.allocator);
+            }
+            // 비활성 panel 색: 포커스 안 된 panel이라 커서/선택/호버 없음(default 전경/배경만).
+            const inactive_colors: metal_frame.CellColors = .{
+                .default_fg = self.appearance.theme.foreground,
+                .default_bg = self.appearance.theme.background,
+            };
+            if (builtin.os.tag == .macos and leaf_rects.items.len > 1) {
+                const pane_frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
+                    .appearance = self.appearance,
+                    .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+                    .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+                    .scale_milli = self.scale_milli,
+                    .cell_width_px = @intCast(self.cell_width_px),
+                    .cell_height_px = @intCast(self.cell_height_px),
+                };
+                for (leaf_rects.items) |lr| {
+                    if (lr.surface == active_surface) continue; // 활성은 맨 뒤에 따로 넣는다
+                    const dl = renderer.buildDrawList(self.allocator, lr.surface.core.renderSnapshot()) catch continue;
+                    var f = pane_frame_builder.buildFromDrawList(self.allocator, dl, &self.renderer_state) catch continue;
+                    built_frames.append(self.allocator, f) catch {
+                        f.deinit(self.allocator);
+                        continue;
+                    };
+                    pane_frames.append(self.allocator, .{
+                        .frame = f, // built_frames가 소유(deinit) — 여기는 같은 frame을 가리키는 view
+                        .origin_x = lr.rect.x,
+                        .origin_y = lr.rect.y,
+                        .colors = inactive_colors,
+                    }) catch {};
+                }
+            }
+            // 활성 panel을 맨 뒤에(커서 suffix). 단일 leaf·비-macOS면 이게 유일한 frame이다(기존 동작).
+            pane_frames.append(self.allocator, .{
                 .frame = tick_result.frame.render_frame,
-                .origin_x = self.sidebar_width_px,
-                .origin_y = 0,
+                .origin_x = active_origin_x,
+                .origin_y = active_origin_y,
                 .colors = cell_colors,
-            }};
-            if (self.metal_buffer.replace(self.allocator, &pane_frames, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors)) |_| {
-                self.metal_dirty = false;
-            } else |_| {}
+            }) catch {};
+
+            if (pane_frames.items.len > 0) {
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors)) |_| {
+                    self.metal_dirty = false;
+                } else |_| {}
+            }
 
             // tick만 아는 per-frame render 통계와 tick index를 summary에 덧씌운다.
             self.writeSummaryFromTick(tick_result);
@@ -1776,6 +1960,7 @@ pub const DevSession = struct {
                 pane.surface.deinit();
                 self.allocator.destroy(pane);
             }
+            app.split_tree.deinit(self.allocator, tab.tree); // heap split 노드 해제(split.deinit은 surface 미접근)
             tab.panes.deinit(self.allocator);
             self.allocator.destroy(tab);
         }
@@ -2313,6 +2498,61 @@ test "active tab is a single-leaf SplitTree laid out to the full terminal rect" 
     try std.testing.expectEqual(@as(usize, 1), out.items.len);
     try std.testing.expectEqual(session.activeSurface(), out.items[0].surface);
     try std.testing.expectEqual(rect, out.items[0].rect);
+}
+
+// splitActivePane이 활성 panel을 둘로 나눠 트리를 split 노드로 바꾸고 새 panel로 포커스를 옮기는지 —
+// createPane(셸 spawn)·트리 변형·resize·포커스 재바인딩이 한데 도는 macOS 경로라 게이트한다. split 후
+// N-panel 렌더(비활성 frame 빌드 + 활성 맨 뒤)가 tick에서 크래시 없이 도는 것도 함께 본다.
+test "splitActivePane splits the active leaf, focuses the new panel, and renders N panels" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 분할은 창이 떠 backing이 잡힌 뒤에야 의미 있으므로, resized 창을 흉내 내 backing을 채운다(termRect의
+    // 입력). 터미널 영역 = backing − 사이드바. 좌우 분할이라 폭이 둘로 갈린다.
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+
+    const old_surface = session.activeSurface();
+    try session.splitActivePane(.horizontal);
+
+    // 트리/포커스: panel 2개, 새 panel(인덱스 1)이 활성, tree는 horizontal split{a: 기존, b: 새}.
+    try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
+    try std.testing.expectEqual(@as(usize, 2), app.split_tree.leafCount(session.activeTab().tree));
+    const new_surface = session.activeSurface();
+    try std.testing.expect(new_surface != old_surface); // 포커스가 새 panel로 이동
+    try std.testing.expectEqual(new_surface, &session.activePane().surface);
+    switch (session.activeTab().tree) {
+        .leaf => return error.TestExpectedSplitNode,
+        .split => |sp| {
+            try std.testing.expectEqual(app.SplitDirection.horizontal, sp.direction);
+            try std.testing.expectEqual(old_surface, sp.a.leaf); // a = 기존 panel(왼쪽)
+            try std.testing.expectEqual(new_surface, sp.b.leaf); // b = 새 panel(오른쪽)
+        },
+    }
+
+    // 레이아웃: 2개 rect, 합이 터미널 폭과 같고(틈 없음) 기존이 왼쪽·새가 오른쪽.
+    var out: std.ArrayList(app.SplitLeafRect) = .empty;
+    defer out.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &out);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqual(old_surface, out.items[0].surface);
+    try std.testing.expectEqual(new_surface, out.items[1].surface);
+    try std.testing.expectEqual(@as(u32, 800), out.items[0].rect.w + out.items[1].rect.w);
+    try std.testing.expectEqual(session.sidebar_width_px, out.items[0].rect.x); // 왼쪽 panel은 사이드바 바로 옆
+
+    // N-panel 렌더 경로(비활성 frame 빌드 + 활성 맨 뒤 합성)가 크래시 없이 돈다.
+    _ = try session.tick();
 }
 
 // 사이드바 클릭이 슬롯 hit-test로 탭을 전환하고, 호버가 호버 밴드를 더하는지 — 실 init이 사이드바

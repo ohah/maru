@@ -85,6 +85,19 @@ Node = leaf(surface)
 6. **split 단계(별도, 큼)**: SplitTree 모델 → 멀티-panel 렌더 → split 키/드래그 drop-zone.
 7. **tmux-CC 드라이버(별도, 큼)**: control-mode 프로토콜 파서 + tmux 창/pane → 모델 매핑(양방향).
 
+### split 키·방향·포커스 (구현됨, PR3b-1b)
+
+- **키**: `Cmd+D` = 좌우 분할(`split_horizontal`), `Cmd+Shift+D` = 상하 분할(`split_vertical`). **베이스**: iTerm2의 기본
+  Split 키(Cmd+D=나란히 좌우, Cmd+Shift+D=위아래)를 그대로 따른다 — macOS 터미널 사용자에게 가장 익숙한 매핑이라
+  채택. tmux는 `prefix %`(좌우)/`prefix "`(상하)로 다르지만 옵션 드라이버일 뿐이라 기본 네이티브 키는 iTerm2 관습을 베이스로 한다.
+- **방향 명명**: `horizontal`=좌우(나란히, 분할선은 세로), `vertical`=상하(분할선은 가로). 이름은 **분할선의 방향이
+  아니라 panel이 나란히 놓이는 축**을 따른다 — tmux `split-window -h`(좌우)/`−v`(상하)와 같은 관습(베이스). iTerm2는
+  반대로 분할선 방향으로 부르므로(좌우를 "Vertical") 충돌하는데, 모델·코드는 tmux식 축-기준으로 단일화하고 키 매핑만
+  iTerm2 관습에 맞춘다(사용자가 누르는 키는 iTerm2, 내부 enum 이름은 tmux). 이 결정은 `config/action.zig` 주석에도 남긴다.
+- **포커스**: 분할 직후 **새 panel로 포커스가 이동**한다(cmux/tmux/iTerm2 공통 동작 — 새로 연 pane에서 바로 입력).
+  활성 panel만 입력·커서를 받고, 분할은 활성 panel을 둘로 나눠 한쪽(기존)을 줄이고 다른 쪽(새 셸)을 띄운다.
+- **비율**: 고정 0.5(균등). divider 드래그 리사이즈는 후속(PR6).
+
 quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.
 
 ## clean-room

@@ -88,6 +88,48 @@ pub fn deinit(allocator: std.mem.Allocator, node: Node) void {
     }
 }
 
+/// rect를 direction·ratio로 둘로 나눈 (a, b). horizontal=좌우(폭 분할), vertical=상하(높이 분할). split을
+/// '생성'할 때 두 panel의 초기 크기를 정하는 용도로, layout()의 분할 규칙(ratioPx clamp)을 그대로 쓴다 —
+/// 같은 트리를 layout()에 넣었을 때 나오는 a/b rect와 일치한다(틈 없음: a.w + b.w == rect.w).
+pub fn splitRect(rect: Rect, direction: SplitDirection, ratio: f32) struct { a: Rect, b: Rect } {
+    switch (direction) {
+        .horizontal => {
+            const a_w = ratioPx(rect.w, ratio);
+            return .{
+                .a = .{ .x = rect.x, .y = rect.y, .w = a_w, .h = rect.h },
+                .b = .{ .x = rect.x + a_w, .y = rect.y, .w = rect.w - a_w, .h = rect.h },
+            };
+        },
+        .vertical => {
+            const a_h = ratioPx(rect.h, ratio);
+            return .{
+                .a = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = a_h },
+                .b = .{ .x = rect.x, .y = rect.y + a_h, .w = rect.w, .h = rect.h - a_h },
+            };
+        },
+    }
+}
+
+/// 트리에서 target surface를 가리키는 leaf를 replacement 노드로 in-place 교체한다(찾으면 true, 없으면
+/// false). split 생성 시 '활성 leaf'를 split{a: 기존 leaf, b: 새 leaf} 노드로 바꾸는 데 쓴다. 노드를
+/// 직접 변형하므로 루트는 &tab.tree로 넘긴다(루트가 leaf면 tab.tree 자체가 split으로 바뀐다). 트리 순서로
+/// 앞선 leaf를 먼저 매치한다 — 같은 surface가 두 번 들어가는 일은 없다(panel은 surface와 1:1).
+pub fn replaceLeaf(node: *Node, target: *Surface, replacement: Node) bool {
+    switch (node.*) {
+        .leaf => |s| {
+            if (s == target) {
+                node.* = replacement;
+                return true;
+            }
+            return false;
+        },
+        .split => |sp| {
+            if (replaceLeaf(&sp.a, target, replacement)) return true;
+            return replaceLeaf(&sp.b, target, replacement);
+        },
+    }
+}
+
 test "layout: single leaf fills the whole rect" {
     const allocator = std.testing.allocator;
     var s = try Surface.init(allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -188,4 +230,54 @@ test "deinit frees split nodes but not leaf surfaces" {
     deinit(allocator, .{ .split = sp });
     // leaf surface는 위 defer가 정리(트리 deinit이 surface를 건드리지 않음을 a/b 사용으로 보장).
     try std.testing.expectEqual(@as(u64, 1), a.id);
+}
+
+test "splitRect matches layout's a/b division (no gap, both non-zero)" {
+    const allocator = std.testing.allocator;
+    var a = try Surface.init(allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer a.deinit();
+    var b = try Surface.init(allocator, 2, .{ .cols = 4, .rows = 2 });
+    defer b.deinit();
+    const rect = Rect{ .x = 10, .y = 20, .w = 200, .h = 100 };
+    // splitRect(생성용)과 layout(렌더용)이 같은 트리에서 동일한 a/b를 내야 한다(생성 크기 == 렌더 크기).
+    inline for (.{ SplitDirection.horizontal, SplitDirection.vertical }) |dir| {
+        const split = splitRect(rect, dir, 0.5);
+        var sp = Split{ .direction = dir, .ratio = 0.5, .a = .{ .leaf = &a }, .b = .{ .leaf = &b } };
+        var out: std.ArrayList(LeafRect) = .empty;
+        defer out.deinit(allocator);
+        try layout(allocator, .{ .split = &sp }, rect, &out);
+        try std.testing.expectEqual(out.items[0].rect, split.a);
+        try std.testing.expectEqual(out.items[1].rect, split.b);
+    }
+}
+
+test "replaceLeaf swaps root leaf into a split and finds a nested leaf" {
+    const allocator = std.testing.allocator;
+    var a = try Surface.init(allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer a.deinit();
+    var b = try Surface.init(allocator, 2, .{ .cols = 4, .rows = 2 });
+    defer b.deinit();
+    var c = try Surface.init(allocator, 3, .{ .cols = 4, .rows = 2 });
+    defer c.deinit();
+
+    // 1) 루트가 leaf(a)면 tree 자체가 split{a, b}로 바뀐다.
+    var tree: Node = .{ .leaf = &a };
+    const sp = try allocator.create(Split);
+    defer allocator.destroy(sp);
+    sp.* = .{ .direction = .horizontal, .a = .{ .leaf = &a }, .b = .{ .leaf = &b } };
+    try std.testing.expect(replaceLeaf(&tree, &a, .{ .split = sp }));
+    try std.testing.expectEqual(@as(usize, 2), leafCount(tree));
+
+    // 2) 중첩된 leaf(b)도 찾아 교체한다(b → split{b, c}). 못 찾는 surface는 false.
+    const sp2 = try allocator.create(Split);
+    defer allocator.destroy(sp2);
+    sp2.* = .{ .direction = .vertical, .a = .{ .leaf = &b }, .b = .{ .leaf = &c } };
+    try std.testing.expect(replaceLeaf(&tree, &b, .{ .split = sp2 }));
+    try std.testing.expectEqual(@as(usize, 3), leafCount(tree));
+
+    // 트리에 없는 surface(d)는 false — 아무 노드도 건드리지 않는다.
+    var d = try Surface.init(allocator, 4, .{ .cols = 4, .rows = 2 });
+    defer d.deinit();
+    try std.testing.expect(!replaceLeaf(&tree, &d, .{ .leaf = &d }));
+    try std.testing.expectEqual(@as(usize, 3), leafCount(tree));
 }

@@ -153,6 +153,15 @@ pub const default_terminal_bindings = [_]TerminalBinding{
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_right }, .input = .{ .send_escape_sequence = "\x1bf" } }, // Option+Right: 단어 오른쪽(Meta-f)
 };
 
+/// 빌트인 기본 app(탭/창) 바인딩 — Mac 관례를 app action으로 매핑한다(Terminal.app/iTerm2/브라우저
+/// 공통: Cmd+T=새 탭). 'T'는 글자라 normalizeEventChar가 대문자로 fold해 Shift 유무와 무관하게
+/// 매칭된다(layout 안전). resolve 순서: 사용자 바인딩 → 빌트인 terminal → '''이 빌트인 app''' →
+/// Cmd-무시 fallthrough. Cmd+Shift+]/[(다음/이전 탭)은 Shift+문자가 layout마다 달라(`]`→`}`) 별도
+/// 처리가 필요해 탭바 UI(클릭 전환)와 함께 후속에서 추가한다.
+pub const default_app_bindings = [_]AppBinding{
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'T' } }, .action = .new_tab }, // Cmd+T: 새 탭
+};
+
 pub const KeyBindingResolver = struct {
     app_bindings: []const AppBinding = &.{},
     terminal_bindings: []const TerminalBinding = &.{},
@@ -214,6 +223,12 @@ pub const KeyBindingResolver = struct {
             if (binding.chord.eql(chord)) {
                 return .{ .terminal_input = try binding.input.bytes(buffer) };
             }
+        }
+
+        // 빌트인 app 바인딩(Cmd+T=새 탭 등). 사용자 바인딩·빌트인 terminal 다음, Cmd-무시 fallthrough
+        // 전에 본다 — 안 그러면 Cmd+T가 아래 .ignored로 새 나가 탭이 안 열린다.
+        for (default_app_bindings) |binding| {
+            if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
         }
 
         if (event.modifiers.command) {
@@ -416,6 +431,24 @@ test "resolver consumes configured app actions before terminal input" {
     }, &buffer, .{});
 
     try std.testing.expectEqual(action_mod.Action.new_tab, resolved.app_action);
+}
+
+test "built-in app binding resolves Cmd+T to new_tab without user config" {
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{}; // 사용자 바인딩 없음 — default_app_bindings가 가져가야
+
+    // 글자 't'는 normalizeEventChar가 'T'로 fold하므로 default_app_bindings의 'T'와 매칭(Shift 무관).
+    const resolved = try resolver.resolve(.{
+        .key = .{ .char = 't' },
+        .modifiers = .{ .command = true },
+    }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.new_tab, resolved.app_action);
+
+    // Cmd+T가 아닌 안 묶인 Cmd 조합은 그대로 ignored(셸로 글자 안 샘).
+    try std.testing.expect((try resolver.resolve(.{
+        .key = .{ .char = 's' },
+        .modifiers = .{ .command = true },
+    }, &buffer, .{})) == .ignored);
 }
 
 test "resolver rejects duplicate app and terminal bindings separately" {

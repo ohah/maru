@@ -146,26 +146,28 @@ bool maru_metal_renderer_set_atlas(
     return true;
 }
 
-/* 한 cell을 origin_x offset에서 6 정점 quad로 채운다(out에 6개 기록). 터미널 셀(origin_x=사이드바 폭)과
-   사이드바 셀(origin_x=0)이 같은 fixed-cell 투영을 공유한다 — 차이는 origin_x 뿐. reserved 부분 사각형
-   (2=underline 하단, 3=bar 좌측)과 색(전경 0x00RRGGBB·배경 0xAARRGGBB) 처리도 동일하다. */
+/* 한 cell을 6 정점 quad로 채운다(out에 6개 기록). 세로 위치/높이(py_top, cell_h)는 caller가 계산해
+   넘긴다 — 터미널 셀(py=row×ch), 사이드바 밴드(py=row×slot_h, 높이 slot_h), 사이드바 제목 glyph
+   (py=슬롯 안 중앙, 높이 ch)가 같은 함수를 공유한다. 가로는 origin_x + col×cw. reserved 부분 사각형
+   (2=underline 하단, 3=bar 좌측)과 색(전경 0x00RRGGBB·배경 0xAARRGGBB) 처리는 동일하다. */
 static void maru_fill_cell_quad(
     MaruRendererVertex *out,
     const MaruAppHostDevMetalCell cell,
     float origin_x,
     float cw,
-    float ch,
+    float py_top,
+    float cell_h,
     float drawable_w,
     float drawable_h
 ) {
     const float span = (float)(cell.width == 0 ? 1 : cell.width);
     float px_left = origin_x + (float)cell.col * cw;
     float px_right = px_left + cw * span;
-    float px_top = (float)cell.row * ch;
-    float px_bottom = px_top + ch;
+    float px_top = py_top;
+    float px_bottom = py_top + cell_h;
     // 커서 모양(DECSCUSR): reserved 2=underline(하단 ~15%), 3=bar(좌측 ~15%, 최소 2px). block(0)은 전체 cell.
     if (cell.reserved == 2) {
-        const float thickness = fmaxf(2.0f, ch * 0.15f);
+        const float thickness = fmaxf(2.0f, cell_h * 0.15f);
         px_top = px_bottom - thickness;
     } else if (cell.reserved == 3) {
         const float thickness = fmaxf(2.0f, cw * 0.15f);
@@ -270,9 +272,9 @@ bool maru_metal_renderer_draw(
         // 맞춰 늘이지 않으므로 glyph가 왜곡되지 않는다.
         const float cw = (float)cell_width_px;
         const float ch = (float)cell_height_px;
-        // 1) 터미널 cells — origin_x(사이드바 폭)만큼 오른쪽에 놓는다.
+        // 1) 터미널 cells — origin_x(사이드바 폭)만큼 오른쪽, 세로는 row×ch.
         for (size_t i = 0; i < cell_count; i++) {
-            maru_fill_cell_quad(&vertices[i * vertices_per_cell], cells[i], origin_x, cw, ch, drawable_w, drawable_h);
+            maru_fill_cell_quad(&vertices[i * vertices_per_cell], cells[i], origin_x, cw, (float)cells[i].row * ch, ch, drawable_w, drawable_h);
         }
         size_t quad_index = cell_count;
         // 2) 사이드바 배경 quad(x:0..origin_x, 전체 높이) — UV(-1) sentinel로 배경만 칠한다(셰이더가
@@ -297,12 +299,26 @@ bool maru_metal_renderer_draw(
             memcpy(&vertices[quad_index * vertices_per_cell], squad, sizeof(squad));
             quad_index += 1;
         }
-        // 3) 사이드바 cells(탭 엔트리 하이라이트/제목) — origin 0, 배경 quad 위에 그린다(painter 순서).
-        //    세로는 cell 높이가 아니라 탭 슬롯 높이(≈2.5×)로 배치한다: maru_fill_cell_quad에 ch 대신
-        //    슬롯 높이를 넘기면 row → py=row×slot_h, 높이 slot_h가 된다(cmux식 큰 슬롯). 0이면 cell 높이 폴백.
-        const float sidebar_ch = (sidebar_slot_height_px > 0u) ? (float)sidebar_slot_height_px : ch;
+        // 3) 사이드바 cells — origin 0, 배경 quad 위에 그린다(painter 순서). 탭 슬롯 높이(≈2.5×)로
+        //    배치하되 셀 종류를 slot_id로 구분한다: 밴드(slot_id==0, sentinel UV)는 슬롯 전체를 채우고
+        //    (py=row×slot_h, 높이 slot_h), 제목 glyph(slot_id≠0)는 슬롯 안 세로 중앙에 ch 높이로
+        //    그린다(py=row×slot_h + (slot_h−ch)/2). 제목 glyph는 약간의 좌측 여백(cw×0.5)을 둔다.
+        const float slot_h = (sidebar_slot_height_px > 0u) ? (float)sidebar_slot_height_px : ch;
+        const float glyph_pad = cw * 0.5f; // 제목 텍스트 좌측 여백(폰트 크기에 비례)
         for (size_t i = 0; i < sidebar_cells_n; i++) {
-            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], sidebar_cells[i], 0.0f, cw, sidebar_ch, drawable_w, drawable_h);
+            const MaruAppHostDevMetalCell sc = sidebar_cells[i];
+            const float slot_top = (float)sc.row * slot_h;
+            float py_top, cell_h, sx_origin;
+            if (sc.slot_id == 0u) { // 밴드/배경 — 슬롯 전체, 여백 없음
+                py_top = slot_top;
+                cell_h = slot_h;
+                sx_origin = 0.0f;
+            } else { // 제목 glyph — 슬롯 안 세로 중앙, ch 높이, 좌측 여백
+                py_top = slot_top + (slot_h - ch) * 0.5f;
+                cell_h = ch;
+                sx_origin = glyph_pad;
+            }
+            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h);
         }
     }
 

@@ -99,6 +99,16 @@ fn sidebarSlot(y_px: f64, slot_height_px: u32, tab_count: usize) ?usize {
     return @intFromFloat(slot_f);
 }
 
+/// 탭 하나를 닫은 뒤 새 active_tab 인덱스. 닫은 게 active보다 앞이면 한 칸 당기고(인덱스가 밀림),
+/// 그래도 새 길이를 넘으면 마지막으로 clamp한다(active 자체나 마지막 탭을 닫은 경우). new_len은 닫은
+/// 뒤 길이(≥1 — 마지막 한 개를 닫는 경우는 호출자가 따로 처리). 순수 함수라 OS 무관 단위 테스트.
+fn reselectAfterClose(closed_index: usize, active: usize, new_len: usize) usize {
+    var a = active;
+    if (closed_index < a) a -= 1;
+    if (a >= new_len) a = new_len - 1;
+    return a;
+}
+
 /// 휠/트랙패드 델타(포인트 또는 줄)를 정수 줄 수로 바꾼다. 정밀(트랙패드) 델타는 실제 cell 높이를
 /// scale로 나눈 한 줄 포인트로 환산하고, 1줄 미만 잔여분은 accum에 누적한다 — round로 버리면
 /// 천천히 굴릴 때 무반응이 된다. NaN/∞는 무시하고 누적은 ±1000줄로 clamp한다(trap 방지).
@@ -457,6 +467,44 @@ pub const DevSession = struct {
         return true;
     }
 
+    /// 탭을 닫는다. 마지막 한 개면 창(세션)을 닫는다 — 탭을 헐지 않고 종료를 latch해 기존 terminate/
+    /// deinit 경로가 정리하게 한다(빈 tabs 리스트로 activeSurface가 패닉하는 걸 피한다). 그 외엔 teardown
+    /// (deinit과 같은 순서: closeAndDetach(runtime) → live_pty.deinit(reader join) → surface.deinit → Tab
+    /// heap 해제) 후 tabs/surface_ptrs에서 빼고 app_window.tabs를 재바인딩하고 active_tab을 clamp한다
+    /// (reselectAfterClose). 범위 밖 index면 무동작.
+    pub fn closeTab(self: *DevSession, index: usize) void {
+        if (index >= self.tabs.items.len) return;
+        if (self.tabs.items.len == 1) {
+            // 마지막 탭 = 창 닫기. close()와 같은 종료 latch — 탭은 deinit이 정리한다.
+            self.ended_seen = true;
+            self.activeSurface().process_state = .exited;
+            self.metal_dirty = true;
+            return;
+        }
+
+        const tab = self.tabs.orderedRemove(index);
+        _ = self.surface_ptrs.orderedRemove(index);
+        // 길이가 줄었으니(realloc은 안 해도) app_window.tabs를 새 items로 재바인딩(stale 슬라이스 방지).
+        self.app_window.tabs = self.surface_ptrs.items;
+
+        // teardown 역순. runtime은 세션 동안 살아 있으므로 closeAndDetach가 surface link를 안전히 뗀다.
+        if (tab.live_initialized) {
+            if (self.runtime_initialized) tab.live_pty.closeAndDetach(&self.runtime);
+            tab.live_pty.deinit();
+        }
+        tab.surface.deinit();
+        self.allocator.destroy(tab);
+
+        self.app_window.active_tab = reselectAfterClose(index, self.app_window.active_tab, self.tabs.items.len);
+        // frame_loop의 pump를 새 active 탭으로 갱신한다. DevSession tick 경로(tickAfterDrainWithFrameBuilder)는
+        // 이 pump를 안 쓰지만, 닫은 게 active 탭이면 옛 pump 포인터가 dangling이 되므로 방어적으로 유지한다.
+        self.frame_loop.pump = &self.activeTab().pump;
+
+        self.hovered_slot = null; // 인덱스가 밀렸으니 호버 무효화(다음 마우스 이동이 재설정)
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
     /// live 탭이 모두 종료됐는가(세션/창 종료 판정). 탭이 없으면 false(아직 안 만든 상태).
     fn allTabsTerminated(self: *DevSession) bool {
         if (self.tabs.items.len == 0) return false;
@@ -493,7 +541,7 @@ pub const DevSession = struct {
                 _ = self.switchTab((self.app_window.active_tab + self.tabs.items.len - 1) % self.tabs.items.len);
             },
             .select_tab => |index| _ = self.switchTab(index),
-            else => {}, // close_tab(PR4)·기타 액션은 아직 무동작
+            .close_tab => self.closeTab(self.app_window.active_tab),
         }
         self.metal_dirty = true;
     }
@@ -1957,6 +2005,19 @@ test "sidebar hit-test maps screen x to the sidebar region and y to a tab slot" 
     try std.testing.expectEqual(@as(?usize, null), sidebarSlot(40, 40, 0)); // 탭 없음
 }
 
+test "reselectAfterClose shifts active for earlier closes and clamps for active/last closes" {
+    // 닫은 게 active보다 앞 → 인덱스가 밀려 active 한 칸 당김.
+    try std.testing.expectEqual(@as(usize, 1), reselectAfterClose(0, 2, 3));
+    // active(=마지막)를 닫음 → 이전 탭으로 clamp.
+    try std.testing.expectEqual(@as(usize, 1), reselectAfterClose(2, 2, 2));
+    // active(중간)를 닫음 → 그 자리로 온 다음 탭이 같은 인덱스(불변).
+    try std.testing.expectEqual(@as(usize, 1), reselectAfterClose(1, 1, 2));
+    // 닫은 게 active보다 뒤 → active 불변.
+    try std.testing.expectEqual(@as(usize, 1), reselectAfterClose(2, 1, 2));
+    // 첫 탭(active 0) 닫고 하나 남음 → 0.
+    try std.testing.expectEqual(@as(usize, 0), reselectAfterClose(0, 0, 1));
+}
+
 // 사이드바 활성 하이라이트 밴드가 실제 세션에서 채워지고 탭 생성/전환을 따라 행을 옮기는지 — 실 init이
 // CoreText 메트릭과 사이드바 폭을 채우는 macOS 경로라 게이트한다. metalFrame()이 그 밴드를 사이드바
 // 셀로 노출하는 것도 함께 본다(렌더러가 origin 0에 그릴 입력).
@@ -2139,6 +2200,52 @@ test "Cmd+T opens a new tab through the key path (built-in app binding dispatch)
     // 안 묶인 Cmd 조합(Cmd+S)은 탭을 안 만들고 무시(ignored).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } });
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+}
+
+// closeTab이 탭을 teardown하고 active_tab을 재선택하며, 마지막 탭은 창(세션) 종료로 latch하는지 — 실
+// PTY teardown(detach + reader join)이라 macOS 게이트. cat는 PTY가 닫힐 때까지 살아 있어 live 탭 teardown을 본다.
+test "closeTab tears down a tab and reselects, last tab closes the session" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 살아있는 탭 2개 더(cat은 PTY 닫힐 때까지 stdin을 읽으며 대기). 활성=2.
+    inline for (.{ "tab 2", "tab 3" }) |title| {
+        _ = try session.createTab(
+            .{ .command = "/bin/sh", .args = &.{ "-c", "cat" }, .size = .{ .cols = 20, .rows = 5 } },
+            .{ .cols = 20, .rows = 5 },
+            16,
+            title,
+            "sh",
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 3), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
+
+    // 백그라운드 탭 0 닫기 → 2탭, 인덱스 밀림으로 active 2→1.
+    session.closeTab(0);
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+
+    // 활성 탭(=마지막 인덱스 1) 닫기 → 1탭, active clamp 0.
+    session.closeTab(1);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
+    try std.testing.expect(!session.ended_seen);
+
+    // 마지막 탭 닫기 → 창 닫힘(종료 latch). 탭은 헐지 않고(빈 리스트 패닉 회피) deinit이 정리한다.
+    session.closeTab(0);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expect(session.ended_seen);
 }
 
 test "drag autoscroll works after a double-click word selection and skips redraw when nothing moves" {

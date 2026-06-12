@@ -271,11 +271,13 @@ pub const DevSession = struct {
 
         self.surfaces[0] = try app.Surface.init(allocator, 1, config.size);
         self.surface_initialized = true;
+        // app_window를 먼저 세워야(activeSurface가 이제 app_window.active()를 읽음) 아래 title/command
+        // 설정이 활성 탭을 가리킨다. tab_ptrs는 surfaces[0]의 안정 주소를 든다(둘 다 heap-pin DevSession 필드).
+        self.tab_ptrs = .{&self.surfaces[0]};
+        self.app_window = .{ .tabs = self.tab_ptrs[0..] };
         self.activeSurface().title = "Maru dev shell";
         self.activeSurface().command = commandName(config.command_kind);
 
-        self.tab_ptrs = .{&self.surfaces[0]};
-        self.app_window = .{ .tabs = self.tab_ptrs[0..] };
         self.runtime = app.SurfaceRuntime.init(allocator);
         self.runtime.debug_input = diag_gate.maruDebugEnabled(); // MARU_DEBUG면 zsh redraw 시퀀스 로깅
         self.runtime_initialized = true;
@@ -299,18 +301,18 @@ pub const DevSession = struct {
         self.writeSummaryFromState();
     }
 
-    /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거치게 해 두면,
-    /// 멀티-탭(후속 PR)에서 여기만 `app_window.active()`로 바꿔 활성 탭으로 라우팅된다. 지금은 단일
-    /// surface라 항상 `surfaces[0]`이고 외부 동작은 불변이다. 호출자는 기존대로 `surface_initialized`로
-    /// 가드한다(활성 surface가 아직 없을 때 부르지 않는다).
+    /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거친다 —
+    /// `app_window.active_tab`을 따라가므로 멀티-탭(후속 PR)에서 탭을 전환하면 자동으로 활성 탭에
+    /// 라우팅된다. 지금은 단일 탭이라 항상 `surfaces[0]`이고 외부 동작은 불변이다. 호출자는 기존대로
+    /// `surface_initialized`로 가드하므로 `active()`는 non-null이 보장된다.
     fn activeSurface(self: *DevSession) *app.Surface {
-        return &self.surfaces[0];
+        return self.app_window.active().?;
     }
 
     /// `activeSurface`의 읽기 전용(`*const self`) 변형 — `pxToCell`/`imeCursorRect`처럼 surface를
-    /// 안 바꾸는 const 메서드가 같은 seam을 거치게 한다(멀티-탭에서 여기만 active로 바꾸면 된다).
+    /// 안 바꾸는 const 메서드가 같은 seam을 거치게 한다.
     fn activeSurfaceConst(self: *const DevSession) *const app.Surface {
-        return &self.surfaces[0];
+        return self.app_window.activeConst().?;
     }
 
     /// 현재 font·scale_milli에 대한 cell 픽셀 크기(advance 폭 × line-height)를 CoreText에서
@@ -1349,6 +1351,8 @@ test "commitComposition is a safe no-op when there is no active preedit" {
     session.surfaces[0] = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer session.surfaces[0].deinit();
     session.surface_initialized = true;
+    session.tab_ptrs = .{&session.surfaces[0]};
+    session.app_window = .{ .tabs = session.tab_ptrs[0..] };
     session.metal_dirty = false;
     try std.testing.expect(session.surfaces[0].core.preedit == null);
     session.commitComposition(); // 무동작이어야(no preedit)
@@ -1361,6 +1365,8 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
     session.surfaces[0] = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
     defer session.surfaces[0].deinit();
     session.surface_initialized = true;
+    session.tab_ptrs = .{&session.surfaces[0]};
+    session.app_window = .{ .tabs = session.tab_ptrs[0..] };
     session.metal_dirty = false;
     // 9줄 출력 -> 5행 화면 위로 4줄이 스크롤백에 쌓인다.
     try session.surfaces[0].core.write("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9");
@@ -1391,6 +1397,8 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.surfaces[0] = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer session.surfaces[0].deinit();
     session.surface_initialized = true;
+    session.tab_ptrs = .{&session.surfaces[0]};
+    session.app_window = .{ .tabs = session.tab_ptrs[0..] };
     session.metal_dirty = false;
     session.mouse_drag_selecting = true;
     session.drag_autoscroll = 0;
@@ -1427,6 +1435,8 @@ test "cursor blink toggles every interval, stays solid for steady cursors, and r
     session.surfaces[0] = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer session.surfaces[0].deinit();
     session.surface_initialized = true;
+    session.tab_ptrs = .{&session.surfaces[0]};
+    session.app_window = .{ .tabs = session.tab_ptrs[0..] };
     session.metal_dirty = false;
     session.metal_buffer = .{};
     session.blink_visible = true;
@@ -1511,6 +1521,8 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.surfaces[0] = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer session.surfaces[0].deinit();
     session.surface_initialized = true;
+    session.tab_ptrs = .{&session.surfaces[0]};
+    session.app_window = .{ .tabs = session.tab_ptrs[0..] };
     session.metal_dirty = false;
     session.metal_buffer = .{};
     session.mouse_drag_selecting = false; // 더블클릭(kind 4) 후 상태
@@ -1675,6 +1687,8 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     session.surfaces[0] = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
     defer session.surfaces[0].deinit();
     session.surface_initialized = true;
+    session.tab_ptrs = .{&session.surfaces[0]};
+    session.app_window = .{ .tabs = session.tab_ptrs[0..] };
     session.cell_width_px = 8;
     session.cell_height_px = 16;
 

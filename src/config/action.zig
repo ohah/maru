@@ -10,6 +10,11 @@ pub const Action = union(enum) {
     // 방향 이름은 분할선(divider)의 방향이 아니라 '나란히 놓이는 축'을 따른다 — 단일 출처: docs/tabs-splits-layout.md.
     split_horizontal,
     split_vertical,
+    // split 탭에서 포커스를 방향으로 옮긴다(키보드 pane 이동). 방향 반평면 + 정렬로 인접 panel을 고른다.
+    focus_pane_left,
+    focus_pane_right,
+    focus_pane_up,
+    focus_pane_down,
 };
 
 pub fn parseAction(value: []const u8) ?Action {
@@ -21,6 +26,10 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "next_tab")) return .next_tab;
     if (std.mem.eql(u8, value, "split_horizontal")) return .split_horizontal;
     if (std.mem.eql(u8, value, "split_vertical")) return .split_vertical;
+    if (std.mem.eql(u8, value, "focus_pane_left")) return .focus_pane_left;
+    if (std.mem.eql(u8, value, "focus_pane_right")) return .focus_pane_right;
+    if (std.mem.eql(u8, value, "focus_pane_up")) return .focus_pane_up;
+    if (std.mem.eql(u8, value, "focus_pane_down")) return .focus_pane_down;
 
     const prefix = "select_tab:";
     if (std.mem.startsWith(u8, value, prefix)) {
@@ -37,6 +46,8 @@ test "parse configured actions" {
 
     try std.testing.expectEqual(Action.split_horizontal, parseAction("split_horizontal").?);
     try std.testing.expectEqual(Action.split_vertical, parseAction("split_vertical").?);
+    try std.testing.expectEqual(Action.focus_pane_left, parseAction("focus_pane_left").?);
+    try std.testing.expectEqual(Action.focus_pane_down, parseAction("focus_pane_down").?);
 
     const action = parseAction("select_tab:3").?;
     try std.testing.expectEqual(@as(usize, 3), action.select_tab);

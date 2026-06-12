@@ -96,6 +96,11 @@ Node = leaf(surface)
   iTerm2 관습에 맞춘다(사용자가 누르는 키는 iTerm2, 내부 enum 이름은 tmux). 이 결정은 `config/action.zig` 주석에도 남긴다.
 - **포커스**: 분할 직후 **새 panel로 포커스가 이동**한다(cmux/tmux/iTerm2 공통 동작 — 새로 연 pane에서 바로 입력).
   활성 panel만 입력·커서를 받고, 분할은 활성 panel을 둘로 나눠 한쪽(기존)을 줄이고 다른 쪽(새 셸)을 띄운다.
+- **포커스 이동(PR3b-2a/2b)**: ① **마우스 클릭** — 다른 panel을 클릭하면 그 panel로 포커스가 옮겨간다(클릭은 포커스에
+  소비, 선택은 새 활성 panel에서 다음부터). ② **키보드** — `Cmd+Option+화살표`로 방향 인접 panel로 이동(**베이스**:
+  iTerm2의 pane navigation 키). 방향은 각 panel rect 중심의 반평면 + 정렬(같은 행/열 우대)로 고른다 — 그 방향에 panel이
+  없으면 무동작. `Cmd+화살표`(줄 처음/끝)·`Option+화살표`(단어 이동)와는 모디파이어 조합이 달라(command+option) 안 겹친다.
+  포커스된 panel은 서브-rect에 있으므로 마우스/커서/IME 좌표가 그 panel의 origin(`active_pane_rect`) 기준으로 매핑된다.
 - **비율**: 고정 0.5(균등). divider 드래그 리사이즈는 후속(PR6).
 
 quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.

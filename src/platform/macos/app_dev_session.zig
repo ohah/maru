@@ -24,16 +24,23 @@ pub const default_queue_capacity: u32 = 16;
 const placeholder_cell_width_px: u32 = 12;
 const placeholder_cell_height_px: u32 = 24;
 
+// 세로 탭 사이드바의 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
+// 터미널 surface는 이 폭만큼 오른쪽으로 그려지고, 왼쪽 strip이 사이드바다("surface→rect" 첫 적용).
+const sidebar_width_pt: u32 = 180;
+
 // 커서 깜빡임 반주기(30Hz tick 단위). 15틱 = 500ms — 일반 터미널 관례(on 500ms / off 500ms).
 const blink_interval_ticks: u32 = 15;
 
 /// backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다. cell 크기가 0이면
 /// placeholder로 대체하고, u16 상한으로 막은 뒤 terminal.clampGridSize로 최소 크기(cols>=2)를
 /// 적용한다 — cols>=2 불변식은 TerminalCore가 단일 소유하므로 여기서 직접 하드코딩하지 않는다.
-fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px: u32, cell_height_px: u32) terminal.Size {
+fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px: u32, cell_height_px: u32, sidebar_width_px: u32) terminal.Size {
     const cell_w = if (cell_width_px > 0) cell_width_px else placeholder_cell_width_px;
     const cell_h = if (cell_height_px > 0) cell_height_px else placeholder_cell_height_px;
-    const raw_cols = @min(backing_width_px / cell_w, std.math.maxInt(u16));
+    // 터미널 영역 = drawable 폭 − 세로 사이드바 폭. 사이드바가 drawable보다 넓은 비정상 상황은
+    // 0으로 saturate해(언더플로 방지) clampGridSize가 최소 grid로 떨어뜨린다.
+    const term_width = backing_width_px -| sidebar_width_px;
+    const raw_cols = @min(term_width / cell_w, std.math.maxInt(u16));
     const raw_rows = @min(backing_height_px / cell_h, std.math.maxInt(u16));
     return terminal.clampGridSize(.{ .cols = @intCast(raw_cols), .rows = @intCast(raw_rows) });
 }
@@ -181,6 +188,9 @@ pub const DevSession = struct {
     // 쓰게 한다. 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다.
     cell_width_px: u32 = 0,
     cell_height_px: u32 = 0,
+    // 세로 사이드바의 backing 픽셀 폭(= sidebar_width_pt × scale). refreshCellMetrics가 갱신한다.
+    // gridFromBacking이 이만큼 터미널 폭에서 빼고, metalFrame()이 렌더러에 origin offset으로 넘긴다.
+    sidebar_width_px: u32 = 0,
     // backing(Retina) scale을 천분율로 보관한다(예: 2000 = 2.0×, 1500 = 1.5×). 정수 배율로
     // 반올림하지 않고 분수 그대로 들고 있어, glyph rasterize 크기와 cell 메트릭을 분수 Retina
     // 해상도에 정확히 맞춘다. resize 이벤트의 scale_milli에서 갱신한다.
@@ -456,6 +466,8 @@ pub const DevSession = struct {
                 self.cell_height_px = metrics.cell_height_px;
             }
         }
+        // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처).
+        self.sidebar_width_px = sidebar_width_pt * self.scale_milli / 1000;
     }
 
     pub fn handleKeyEvent(self: *DevSession, event: terminal.KeyEvent) !FrameSummary {
@@ -1040,7 +1052,7 @@ pub const DevSession = struct {
         // grid(cols/rows)를 Swift가 아니라 dev session이 backing 픽셀 + 자기 cell 메트릭에서 직접
         // 계산한다. init이 메트릭을 미리 뽑으므로 cell 크기는 항상 준비돼 있어, Swift가 첫 resize에서
         // placeholder 크기로 cols/rows를 잘못 잡던(창과 grid가 어긋나던) 문제가 사라진다.
-        const size = gridFromBacking(width_px, height_px, self.cell_width_px, self.cell_height_px);
+        const size = gridFromBacking(width_px, height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px);
         const size_changed = self.last_resize_size == null or
             self.last_resize_size.?.cols != size.cols or self.last_resize_size.?.rows != size.rows;
         // 같은 size+scale이면 비싼 재작업(TerminalCore.resize alloc/memcpy + PTY winsize/SIGWINCH)을
@@ -1270,8 +1282,23 @@ pub const DevSession = struct {
         return self.last_summary;
     }
 
+    /// 사이드바 배경색(0xAARRGGBB) — 테마 배경에서 각 채널 +24(255 saturate)로 살짝 밝게. 같은 테마
+    /// 톤이라 코히어런트하면서 터미널 영역과 시각적으로 구분된다(cmux식 미묘한 사이드바).
+    fn sidebarBg(self: *const DevSession) u32 {
+        const bg = self.appearance.theme.background;
+        const r: u32 = @min(@as(u32, bg.r) + 24, 255);
+        const g: u32 = @min(@as(u32, bg.g) + 24, 255);
+        const b: u32 = @min(@as(u32, bg.b) + 24, 255);
+        return 0xFF00_0000 | (r << 16) | (g << 8) | b;
+    }
+
     pub fn metalFrame(self: *const DevSession) MetalFrame {
-        return self.metal_buffer.view();
+        var frame = self.metal_buffer.view();
+        // "surface→rect": 터미널을 사이드바 폭만큼 오른쪽에 그리고, 왼쪽 strip에 사이드바 배경을 칠한다.
+        // 렌더러가 origin offset + 배경 quad를 처리한다. split(panel)도 같은 origin 방식을 확장한다.
+        frame.terminal_origin_x_px = self.sidebar_width_px;
+        frame.sidebar_bg = self.sidebarBg();
+        return frame;
     }
 
     pub fn deinit(self: *DevSession) void {
@@ -1468,13 +1495,17 @@ test "macOS app dev session config defaults queue capacity without changing comm
 test "gridFromBacking divides backing pixels by cell size with placeholder + clamps" {
     // 960×600 backing at 8×18 cell -> 120×33 (이전엔 Swift가 placeholder 12×24로 80×25를 잡아
     // 창과 grid가 어긋났다). 이제 dev session이 실제 메트릭으로 직접 계산한다.
-    try std.testing.expectEqual(terminal.Size{ .cols = 120, .rows = 33 }, gridFromBacking(960, 600, 8, 18));
+    try std.testing.expectEqual(terminal.Size{ .cols = 120, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 0));
     // cell 크기 0(메트릭 없음, 이론상) -> placeholder 12×24.
-    try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 25 }, gridFromBacking(960, 600, 0, 0));
+    try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 25 }, gridFromBacking(960, 600, 0, 0, 0));
     // floor 동작 + 최소 1×1.
-    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(25, 16, 10, 16));
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(25, 16, 10, 16, 0));
     // cols는 최소 2(TerminalCore가 wide glyph continuation 때문에 요구). 1픽셀/100px cell이라도 2칸.
-    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(1, 1, 100, 100));
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(1, 1, 100, 100, 0));
+    // 세로 사이드바 폭만큼 터미널 cols가 줄어든다: 960px − 160px 사이드바 = 800px / 8 = 100 cols(vs 120).
+    try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 160));
+    // 사이드바가 drawable보다 넓은 비정상도 언더플로 없이 최소 grid로 떨어진다(saturate).
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 2000));
 }
 
 test "wheelDeltaToLines accumulates sub-line trackpad deltas instead of dropping them" {

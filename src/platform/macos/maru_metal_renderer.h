@@ -46,7 +46,12 @@ bool maru_metal_renderer_draw(
     uint32_t cell_width_px,
     uint32_t cell_height_px,
     const MaruAppHostDevMetalCell *cells,
-    size_t cell_count
+    size_t cell_count,
+    /* 터미널 surface를 그릴 사각형의 좌측 픽셀 offset(= 세로 사이드바 폭). 각 셀이 origin_x + col*cw에
+       놓인다. 0이면 사이드바 없음. "surface→rect" 메커니즘 — split도 같은 origin 방식을 확장한다. */
+    uint32_t terminal_origin_x_px,
+    /* 사이드바 영역(x: 0..origin_x, 전체 높이) 배경색(0xAARRGGBB). 0이면 안 그림. */
+    uint32_t sidebar_bg
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

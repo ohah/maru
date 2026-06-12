@@ -569,7 +569,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.cell_width_px,
             frame.cell_height_px,
             frame.cells,
-            frame.cell_count
+            frame.cell_count,
+            frame.terminal_origin_x_px, // 세로 사이드바 폭(터미널 origin offset)
+            frame.sidebar_bg            // 사이드바 배경색(0=안 그림)
         )
         if drew {
             lastDrawnGeneration = frame.generation

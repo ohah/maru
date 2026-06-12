@@ -211,6 +211,12 @@ typedef struct MaruAppHostDevMetalFrame {
     size_t raster_upload_count;
     const uint8_t *raster_pixels;
     size_t raster_pixel_count;
+    /* 터미널 surface를 그릴 사각형의 좌측 픽셀 offset(= 세로 사이드바 폭). renderer가 각 셀을
+       origin_x + col*cw에 둔다. 0이면 사이드바 없음(터미널이 창 전체). "surface→rect" 메커니즘의
+       첫 적용 — split(panel)도 같은 origin offset을 확장한다. */
+    uint32_t terminal_origin_x_px;
+    /* 사이드바 영역(x: 0..terminal_origin_x_px, 전체 높이) 배경색(0xAARRGGBB). 0이면 안 그림. */
+    uint32_t sidebar_bg;
 } MaruAppHostDevMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

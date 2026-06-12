@@ -299,6 +299,33 @@ pub fn buildNativeCellsSplit(
                 .background = 0xFF00_0000 | packRgb(resolveColor(u.color, colors.default_fg)),
             });
         },
+        // OSC 133 거터 마크: 프롬프트 시작 행 col 0의 왼쪽 가장자리에 세로 색 바(커서 bar와 같은
+        // kind=3 부분 사각형 재사용 — 셰이더 변경 없음). 명령 성공=초록/실패=빨강.
+        .gutter => |g| {
+            if (g.row >= frame.size.rows) continue;
+            const bar_rgb: color.Rgb = if (g.success)
+                .{ .r = 0x3F, .g = 0xB9, .b = 0x50 } // 성공 초록
+            else
+                .{ .r = 0xF8, .g = 0x51, .b = 0x49 }; // 실패 빨강
+            cells.appendAssumeCapacity(.{
+                .row = g.row,
+                .col = 0,
+                .width = 1,
+                .reserved = 3, // bar(좌측 세로 부분 사각형) 재사용
+                .codepoint = ' ',
+                .slot_id = 0,
+                .atlas_x_px = 0,
+                .atlas_y_px = 0,
+                .atlas_width_px = 0,
+                .atlas_height_px = 0,
+                .u0 = -1.0,
+                .v0 = -1.0,
+                .u1 = -1.0,
+                .v1 = -1.0,
+                .foreground = 0,
+                .background = 0xFF00_0000 | packRgb(bar_rgb),
+            });
+        },
         .cursor => {},
     };
 
@@ -312,7 +339,7 @@ pub fn buildNativeCellsSplit(
         for (frame.overlays) |overlay| {
             const cur = switch (overlay) {
                 .cursor => |c| c,
-                .underline => continue,
+                .underline, .gutter => continue,
             };
             if (!cur.visible) continue;
 

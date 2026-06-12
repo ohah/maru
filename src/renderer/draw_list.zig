@@ -25,9 +25,17 @@ pub const UnderlineOverlay = struct {
     color: terminal.Color = .default,
 };
 
+// OSC 133 거터 마크 — 프롬프트 시작 행 왼쪽 가장자리의 세로 색 바. 명령 성공(초록)/실패(빨강)을
+// 보여준다. 렌더러는 커서 bar(좌측 세로 부분 사각형)와 같은 kind를 col 0에 재사용한다(셰이더 불변).
+pub const GutterMark = struct {
+    row: u16,
+    success: bool, // 종료코드 0이면 true(초록), 아니면 false(빨강)
+};
+
 pub const DrawOverlay = union(enum) {
     cursor: CursorOverlay,
     underline: UnderlineOverlay,
+    gutter: GutterMark,
 };
 
 pub const DrawList = struct {
@@ -73,10 +81,10 @@ pub fn buildDrawList(
                 // 한 번에 확보해 frame마다 append가 슬라이스를 반복 재할당하지 않게 한다.
                 // continuation cell은 건너뛰므로 실제 개수는 이 상한 이하라 안전하다.
                 try cells.ensureTotalCapacity(allocator, (end_row - start_row + 1) * col_count);
-                // overlay도 같은 상한을 쓴다: cell마다 underline overlay가 최대 1개,
-                // 루프 뒤에 cursor overlay가 최대 1개 더 붙으므로 +1이다. cells와 같은
-                // 이유로 미리 확보해 per-frame 재할당을 없앤다.
-                try overlays.ensureTotalCapacity(allocator, (end_row - start_row + 1) * col_count + 1);
+                // overlay도 같은 상한을 쓴다: cell마다 underline overlay가 최대 1개, 행마다 OSC 133
+                // 거터 마크가 최대 1개, 루프 뒤에 cursor overlay가 최대 1개 더 붙으므로 +행수+1이다.
+                // cells와 같은 이유로 미리 확보해 per-frame 재할당을 없앤다.
+                try overlays.ensureTotalCapacity(allocator, (end_row - start_row + 1) * (col_count + 1) + 1);
 
                 for (start_row..end_row + 1) |row| {
                     for (0..col_count) |col| {
@@ -102,6 +110,17 @@ pub fn buildDrawList(
                                 .col = @intCast(col),
                                 .width = cell.width,
                                 .color = cell.style.foreground,
+                            } });
+                        }
+                    }
+
+                    // OSC 133 거터 마크: 종료코드는 프롬프트 시작 행에만 스탬프되므로, exit가 있으면
+                    // 곧 그 행이 명령 결과를 가진 프롬프트 시작 행이다 — 왼쪽 가장자리에 ✓(초록)/✗(빨강) 바.
+                    if (row < snapshot.prompt_marks.len) {
+                        if (snapshot.prompt_marks[row].exit) |code| {
+                            overlays.appendAssumeCapacity(.{ .gutter = .{
+                                .row = @intCast(row),
+                                .success = code == 0,
                             } });
                         }
                     }
@@ -171,6 +190,59 @@ test "draw list emits drawable cells from dirty rows only" {
     try std.testing.expectEqual(@as(usize, 1), draw_list.overlays.len);
     try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].cursor.row);
     try std.testing.expectEqual(@as(u16, 1), draw_list.overlays[0].cursor.col);
+}
+
+test "draw list emits OSC 133 gutter marks for prompt rows with a recorded exit" {
+    // 종료코드는 프롬프트 시작 행에만 스탬프되므로(exit != null), 그 행마다 거터 마크가 나와야 한다.
+    // 성공(exit 0)=초록(success=true), 실패(≠0)=빨강. exit 없는 행은 거터 없음.
+    var cells = [_]terminal.Cell{.{}} ** 4; // 2 cols × 2 rows
+    const marks = [_]terminal.RowPrompt{
+        .{ .kind = .input, .exit = 0 }, // row0: 성공 명령의 프롬프트 시작
+        .{ .kind = .command, .exit = null }, // row1: 출력 — 거터 없음
+    };
+    const snapshot: terminal.RenderSnapshot = .{
+        .size = .{ .cols = 2, .rows = 2 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .cells = &cells,
+        .prompt_marks = &marks,
+        .dirty = .{ .start_row = 0, .end_row = 1 },
+    };
+    var draw_list = try buildDrawList(std.testing.allocator, snapshot);
+    defer draw_list.deinit(std.testing.allocator);
+
+    var gutters: usize = 0;
+    for (draw_list.overlays) |o| switch (o) {
+        .gutter => |g| {
+            gutters += 1;
+            try std.testing.expectEqual(@as(u16, 0), g.row); // 프롬프트 시작 행
+            try std.testing.expect(g.success); // exit 0 → 초록
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), gutters); // 출력 행(exit null)엔 거터 없음
+}
+
+test "draw list emits a red gutter mark for a failed command" {
+    var cells = [_]terminal.Cell{.{}} ** 2; // 2 cols × 1 row
+    const marks = [_]terminal.RowPrompt{.{ .kind = .input, .exit = 1 }};
+    const snapshot: terminal.RenderSnapshot = .{
+        .size = .{ .cols = 2, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .cells = &cells,
+        .prompt_marks = &marks,
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+    };
+    var draw_list = try buildDrawList(std.testing.allocator, snapshot);
+    defer draw_list.deinit(std.testing.allocator);
+    var found = false;
+    for (draw_list.overlays) |o| switch (o) {
+        .gutter => |g| {
+            found = true;
+            try std.testing.expect(!g.success); // exit 1 → 빨강
+        },
+        else => {},
+    };
+    try std.testing.expect(found);
 }
 
 test "draw list emits no cells when snapshot is clean" {

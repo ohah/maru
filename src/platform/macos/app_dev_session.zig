@@ -940,7 +940,7 @@ pub const DevSession = struct {
             const w_mark: u8 = if (row < core.wrapped.len and core.wrapped[row]) 'w' else '.';
             // OSC 133 semantic 분류(P=프롬프트 I=입력 C=명령출력 ·=미분류). 셸 통합이 마커를 emit하면
             // 채워진다 — 프롬프트/입력/출력이 어떤 행으로 잡히는지 데이터로 본다(거터 PR 전 조기 확인).
-            const p_mark: u8 = if (row < core.prompt_marks.len) switch (core.prompt_marks[row]) {
+            const p_mark: u8 = if (row < core.prompt_marks.len) switch (core.prompt_marks[row].kind) {
                 .unknown => '.',
                 .prompt => 'P',
                 .input => 'I',

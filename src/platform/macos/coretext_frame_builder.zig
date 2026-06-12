@@ -188,6 +188,7 @@ pub fn buildPaneTabBarDrawList(
     titles: []const []const u8,
     cols: u16,
     fg: terminal.Color,
+    close_tab: ?usize,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
@@ -199,6 +200,9 @@ pub fn buildPaneTabBarDrawList(
             const start: u32 = @as(u32, @intCast(tab_index)) * tab_w;
             if (start >= cols) break; // 탭이 바 폭을 넘으면 나머지는 잘림
             const seg_end: u32 = @min(start + tab_w, @as(u32, cols)); // 이 탭의 col 한도
+            // 호버된 탭이면 우측 안쪽(seg_end-2)에 닫기 ✕를 둔다 — 제목은 ✕ 앞(seg_end-2)까지만 그린다.
+            const is_close = close_tab != null and close_tab.? == tab_index and tab_w >= 2 and seg_end >= 2;
+            const title_end: u32 = if (is_close) seg_end - 2 else seg_end;
             var col: u32 = start + 1; // 좌측 1칸 패딩
             var i: usize = 0;
             while (i < title.len) {
@@ -216,7 +220,7 @@ pub fn buildPaneTabBarDrawList(
                 i += advance;
 
                 const w: u16 = @max(1, terminal.width.cellWidth(cp)); // 0폭도 최소 1칸 전진
-                if (col + w > seg_end) break; // 이 탭 세그먼트를 넘기면 자른다
+                if (col + w > title_end) break; // 제목 한도(✕ 앞)를 넘기면 자른다
                 try cells.append(allocator, .{
                     .row = 0,
                     .col = @intCast(col),
@@ -225,6 +229,15 @@ pub fn buildPaneTabBarDrawList(
                     .style = style,
                 });
                 col += w;
+            }
+            if (is_close) { // 호버 탭 우측 안쪽에 ✕ glyph 1개(xInTabCloseZone과 같은 col=seg_end-2).
+                try cells.append(allocator, .{
+                    .row = 0,
+                    .col = @intCast(seg_end - 2),
+                    .codepoint = sidebar_close_glyph,
+                    .width = 1,
+                    .style = style,
+                });
             }
         }
     }
@@ -470,7 +483,7 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
     const allocator = std.testing.allocator;
     // cols=20, 2 탭 → tab_w=10. 탭 0은 col [0,10), 탭 1은 [10,20). 각 탭 1칸 좌패딩 뒤 제목.
     const titles = [_][]const u8{ "sh", "vim" };
-    var draw_list = try buildPaneTabBarDrawList(allocator, &titles, 20, .default);
+    var draw_list = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null);
     defer draw_list.deinit(allocator);
 
     // 모든 탭이 행 0(가로), size cols=한도·rows=1.
@@ -487,13 +500,29 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
 
     // 세그먼트보다 긴 제목은 그 탭 한도에서 잘린다. cols=8, 2탭 → tab_w=4, 제목 칸 = [start+1, start+4) = 3칸.
     const longt = [_][]const u8{ "abcdef", "x" };
-    var dl2 = try buildPaneTabBarDrawList(allocator, &longt, 8, .default);
+    var dl2 = try buildPaneTabBarDrawList(allocator, &longt, 8, .default, null);
     defer dl2.deinit(allocator);
     var tab0: usize = 0;
     for (dl2.cells) |c| {
         if (c.col < 4) tab0 += 1; // 탭 0 세그먼트 [0,4)
     }
     try std.testing.expectEqual(@as(usize, 3), tab0); // "abcdef" 중 3칸(col 1,2,3)만
+
+    // close_tab이 주어지면 그 탭 우측 안쪽(seg_end-2)에 ✕ glyph를 그리고 제목은 그 앞까지만. cols=20, 2탭
+    // → tab_w=10, 탭 1 seg_end=20 → ✕ col 18. 탭 1 호버.
+    const ht = [_][]const u8{ "sh", "vim" };
+    var dl3 = try buildPaneTabBarDrawList(allocator, &ht, 20, .default, 1);
+    defer dl3.deinit(allocator);
+    var found_close = false;
+    for (dl3.cells) |c| {
+        if (c.codepoint == sidebar_close_glyph) {
+            found_close = true;
+            try std.testing.expectEqual(@as(u16, 18), c.col); // seg_end(20) - 2
+        }
+    }
+    try std.testing.expect(found_close);
+    // 호버 안 된 탭(close_tab=null)엔 ✕ 없음.
+    for (draw_list.cells) |c| try std.testing.expect(c.codepoint != sidebar_close_glyph);
 }
 
 test "paneTabWidth divides cols among tabs (min 1, clamps when tabs exceed cols)" {

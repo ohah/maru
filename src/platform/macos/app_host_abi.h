@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 23u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 24u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -223,6 +223,9 @@ typedef struct MaruAppHostDevMetalFrame {
        사이드바 셀 없음("surface→rect"의 두 번째 surface — split도 rect별 cell 배열로 확장). */
     const MaruAppHostDevMetalCell *sidebar_cells;
     size_t sidebar_cell_count;
+    /* 사이드바 탭 슬롯 한 칸의 픽셀 높이(≈2.5×cell_height). renderer가 사이드바 셀을 cell 높이가 아니라
+       이 슬롯 높이로 세로 배치한다(밴드 row i → py=i×slot_h) — cmux식 큰 탭 슬롯. 0이면 cell 높이로 폴백. */
+    uint32_t sidebar_slot_height_px;
 } MaruAppHostDevMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

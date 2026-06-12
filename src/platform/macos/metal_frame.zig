@@ -515,6 +515,10 @@ pub const MetalFrame = extern struct {
     // 계약(소유 버퍼의 다음 갱신/해제까지) — DevSession이 owned ArrayList로 보관한다.
     sidebar_cells: ?[*]const NativeMetalCell = null,
     sidebar_cell_count: usize = 0,
+    // 사이드바 탭 슬롯 한 칸의 픽셀 높이(≈2.5×cell_height). 렌더러가 사이드바 셀을 cell 높이가
+    // 아니라 이 슬롯 높이로 세로 배치한다(밴드 row i → py=i×slot_h, 높이 slot_h) — cmux식 큰 탭
+    // 슬롯. 0이면 cell 높이로 폴백(슬롯=한 줄). 호버/X(후속)의 픽셀 hit-test 기준 높이도 이 값.
+    sidebar_slot_height_px: u32 = 0,
 };
 
 /// RenderFrame을 투영해 retain하는 owned 버퍼. cells/uploads/pixels 세 배열의 소유권을

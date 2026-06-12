@@ -205,7 +205,8 @@ bool maru_metal_renderer_draw(
     uint32_t terminal_origin_x_px,
     uint32_t sidebar_bg,
     const MaruAppHostDevMetalCell *sidebar_cells,
-    size_t sidebar_cell_count
+    size_t sidebar_cell_count,
+    uint32_t sidebar_slot_height_px
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -297,8 +298,11 @@ bool maru_metal_renderer_draw(
             quad_index += 1;
         }
         // 3) 사이드바 cells(탭 엔트리 하이라이트/제목) — origin 0, 배경 quad 위에 그린다(painter 순서).
+        //    세로는 cell 높이가 아니라 탭 슬롯 높이(≈2.5×)로 배치한다: maru_fill_cell_quad에 ch 대신
+        //    슬롯 높이를 넘기면 row → py=row×slot_h, 높이 slot_h가 된다(cmux식 큰 슬롯). 0이면 cell 높이 폴백.
+        const float sidebar_ch = (sidebar_slot_height_px > 0u) ? (float)sidebar_slot_height_px : ch;
         for (size_t i = 0; i < sidebar_cells_n; i++) {
-            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], sidebar_cells[i], 0.0f, cw, ch, drawable_w, drawable_h);
+            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], sidebar_cells[i], 0.0f, cw, sidebar_ch, drawable_w, drawable_h);
         }
     }
 

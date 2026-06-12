@@ -573,7 +573,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.terminal_origin_x_px, // 세로 사이드바 폭(터미널 origin offset)
             frame.sidebar_bg,           // 사이드바 배경색(0=안 그림)
             frame.sidebar_cells,        // 사이드바 셀(탭 엔트리) — origin 0에 그림
-            frame.sidebar_cell_count
+            frame.sidebar_cell_count,
+            frame.sidebar_slot_height_px // 탭 슬롯 높이(≈2.5×cell) — 사이드바 셀 세로 배치
         )
         if drew {
             lastDrawnGeneration = frame.generation

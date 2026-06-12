@@ -16,7 +16,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 23;
+pub const abi_version: u32 = 24;
 pub const default_queue_capacity: u32 = 16;
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -27,6 +27,10 @@ const placeholder_cell_height_px: u32 = 24;
 // 세로 탭 사이드바의 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
 // 터미널 surface는 이 폭만큼 오른쪽으로 그려지고, 왼쪽 strip이 사이드바다("surface→rect" 첫 적용).
 const sidebar_width_pt: u32 = 180;
+
+// 사이드바 탭 슬롯 한 칸의 높이를 cell 높이의 몇 배로 할지(천분율). 2500 = 2.5× — cmux/Warp식 큰
+// 탭 슬롯(라이브 요청). refreshCellMetrics가 cell_height_px × 이 비율로 backing 픽셀 슬롯 높이를 구한다.
+const sidebar_slot_height_ratio_milli: u32 = 2500;
 
 // 커서 깜빡임 반주기(30Hz tick 단위). 15틱 = 500ms — 일반 터미널 관례(on 500ms / off 500ms).
 const blink_interval_ticks: u32 = 15;
@@ -226,6 +230,9 @@ pub const DevSession = struct {
     // 세로 사이드바의 backing 픽셀 폭(= sidebar_width_pt × scale). refreshCellMetrics가 갱신한다.
     // gridFromBacking이 이만큼 터미널 폭에서 빼고, metalFrame()이 렌더러에 origin offset으로 넘긴다.
     sidebar_width_px: u32 = 0,
+    // 사이드바 탭 슬롯 한 칸의 backing 픽셀 높이(= cell_height_px × 2.5). refreshCellMetrics가 갱신.
+    // metalFrame()이 렌더러에 넘겨 사이드바 셀을 cell 높이가 아니라 이 슬롯 높이로 세로 배치한다.
+    sidebar_slot_height_px: u32 = 0,
     // backing(Retina) scale을 천분율로 보관한다(예: 2000 = 2.0×, 1500 = 1.5×). 정수 배율로
     // 반올림하지 않고 분수 그대로 들고 있어, glyph rasterize 크기와 cell 메트릭을 분수 Retina
     // 해상도에 정확히 맞춘다. resize 이벤트의 scale_milli에서 갱신한다.
@@ -512,6 +519,9 @@ pub const DevSession = struct {
         }
         // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처).
         self.sidebar_width_px = sidebar_width_pt * self.scale_milli / 1000;
+        // 탭 슬롯 높이 = cell 높이 × 2.5(cmux식 큰 슬롯). cell_height_px가 이미 위에서 갱신됐으므로
+        // 그걸 쓴다 — 슬롯 높이도 cell 메트릭과 같은 단일 출처에서 파생한다.
+        self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
         // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
         self.rebuildSidebar() catch {};
     }
@@ -1370,6 +1380,8 @@ pub const DevSession = struct {
         // 까지 유효하다(cells와 같은 수명 계약). 비어 있으면 null로 둬 렌더러가 사이드바 셀을 건너뛴다.
         frame.sidebar_cells = if (self.sidebar_cells.items.len > 0) self.sidebar_cells.items.ptr else null;
         frame.sidebar_cell_count = self.sidebar_cells.items.len;
+        // 사이드바 셀을 cell 높이가 아니라 탭 슬롯 높이(≈2.5×)로 세로 배치하게 렌더러에 넘긴다.
+        frame.sidebar_slot_height_px = self.sidebar_slot_height_px;
         return frame;
     }
 
@@ -1819,6 +1831,9 @@ test "sidebar gets an active-tab highlight band that follows tab create and swit
         try std.testing.expect(session.sidebar_cells.items[0].width > 0);
         // 밴드를 그릴 사이드바 폭은 터미널 origin offset과 같은 단일 출처다.
         try std.testing.expectEqual(session.sidebar_width_px, frame.terminal_origin_x_px);
+        // 탭 슬롯 높이는 cell 높이 × 2.5(cmux식 큰 슬롯) — cell 높이보다 크고 메트릭에서 파생.
+        try std.testing.expectEqual(session.cell_height_px * 2500 / 1000, frame.sidebar_slot_height_px);
+        try std.testing.expect(frame.sidebar_slot_height_px > session.cell_height_px);
     }
 
     // 2번째 탭 생성 → 활성=1 → 밴드가 row 1로 이동(여전히 1개).

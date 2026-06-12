@@ -701,6 +701,48 @@ pub const DevSession = struct {
         return false;
     }
 
+    /// 활성 pane 안에서 보이는 Term(가로 탭)을 term_index로 바꾼다(cmux 탭 전환). 활성 Term surface를 탭
+    /// 대표(`surface_ptrs[active_tab]` = `app_window.active()`)에 재바인딩하고 좌표 origin을 다시 계산한다.
+    /// 같은 Term이거나 범위 밖이면 무동작. pane/워크스페이스는 안 바꾼다.
+    fn focusTerm(self: *DevSession, term_index: usize) void {
+        const pane = self.activePane();
+        if (term_index >= pane.terms.items.len or pane.active_term == term_index) return;
+        pane.active_term = term_index;
+        self.surface_ptrs.items[self.app_window.active_tab] = &pane.activeTerm().surface;
+        self.app_window.tabs = self.surface_ptrs.items;
+        self.recomputeActivePaneRect();
+        self.metal_dirty = true;
+    }
+
+    /// 활성 pane의 Term을 delta(+1=다음, -1=이전)만큼 wrap-around로 옮긴다(⌘]/⌘[). Term이 1개면 무동작.
+    fn focusTermRelative(self: *DevSession, delta: i64) void {
+        const pane = self.activePane();
+        const n = pane.terms.items.len;
+        if (n <= 1) return;
+        const cur: i64 = @intCast(pane.active_term);
+        const next = @mod(cur + delta, @as(i64, @intCast(n)));
+        self.focusTerm(@intCast(next));
+    }
+
+    /// 활성 pane에 새 Term(터미널 탭)을 띄우고 그 탭으로 포커스한다(⌘T, cmux식). 활성 pane의 현재 rect grid
+    /// 크기로 새 셸을 spawn해 pane.terms에 더한다. spawn/alloc 실패는 errdefer로 원복하고 무시(pane 불변).
+    fn newTermInActivePane(self: *DevSession) !void {
+        const pane = self.activePane();
+        const size = gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
+        var cfg = self.new_tab_config;
+        cfg.size = size;
+        const term = try self.createTerm(
+            spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir),
+            size,
+            cfg.queue_capacity,
+            "Maru",
+            commandName(cfg.command_kind),
+        );
+        errdefer self.destroyTerm(term);
+        try pane.terms.append(self.allocator, term);
+        self.focusTerm(pane.terms.items.len - 1); // 새 Term으로 포커스(surface 재바인딩·rect·dirty)
+    }
+
     /// 키보드 pane 이동 — 활성 panel에서 direction 방향의 인접 panel로 포커스를 옮긴다(있으면). split이 없거나
     /// 그 방향에 panel이 없으면 무동작(best-effort: leaf rect 레이아웃 OOM도 그냥 이동 안 함). 활성 탭 leaf
     /// rect를 펴 paneInDirection으로 대상을 고른 뒤 focusPaneBySurface로 옮긴다.
@@ -973,6 +1015,35 @@ pub const DevSession = struct {
         }
     }
 
+    /// 활성 pane의 활성 Term(가로 탭)을 닫는다. pane에 Term이 2개 이상일 때만 — teardown(destroyTerm)하고
+    /// terms에서 빼고 active_term을 보정한 뒤 새 활성 Term surface로 재바인딩한다. Term이 1개뿐이면 무동작
+    /// (closeActiveTermOrPane이 pane/워크스페이스 close로 보낸다). tree leaf는 pane이라 Term close엔 안 바뀐다.
+    fn closeActiveTerm(self: *DevSession) void {
+        const pane = self.activePane();
+        if (pane.terms.items.len <= 1) return;
+        const idx = pane.active_term;
+        const closing = pane.terms.items[idx];
+        _ = pane.terms.orderedRemove(idx);
+        self.destroyTerm(closing);
+        // active_term 보정: 닫은 게 마지막이면 이전, 아니면 그 자리로 온 다음 Term(같은 인덱스).
+        pane.active_term = if (idx >= pane.terms.items.len) pane.terms.items.len - 1 else idx;
+        self.surface_ptrs.items[self.app_window.active_tab] = &pane.activeTerm().surface;
+        self.app_window.tabs = self.surface_ptrs.items;
+        self.recomputeActivePaneRect();
+        self.metal_dirty = true;
+    }
+
+    /// Cmd+W 정책(cmux 풀 모델, 계층 cascade): 활성 pane에 Term이 2개 이상이면 활성 Term을 하나 닫고, 1개뿐이면
+    /// pane을(split이면 collapse) 또는 워크스페이스를(단일 pane이면 탭/창) 닫는다. 즉 ⌘W를 반복하면 Term →
+    /// pane → 워크스페이스 순으로 하나씩 닫힌다.
+    fn closeActiveTermOrPane(self: *DevSession) void {
+        if (self.activePane().terms.items.len > 1) {
+            self.closeActiveTerm();
+        } else {
+            self.closeActivePaneOrTab();
+        }
+    }
+
     /// 탭을 from→to로 옮긴다(드래그 재정렬). tabs/surface_ptrs를 같이 회전(무할당 in-place)하고
     /// active_tab을 보정한다. Tab은 heap-pin이라 포인터만 셔플되고 surface/PTY/reader 포인터는 안
     /// 흔들린다. app_window.tabs는 surface_ptrs.items(같은 backing 배열, 내용만 재정렬)라 재바인딩 불요.
@@ -1026,7 +1097,8 @@ pub const DevSession = struct {
                 _ = self.switchTab((self.app_window.active_tab + self.tabs.items.len - 1) % self.tabs.items.len);
             },
             .select_tab => |index| _ = self.switchTab(index),
-            // Cmd+W: split이 있으면 활성 panel을 하나 닫고(collapse), 단일 panel이면 탭(마지막이면 창)을 닫는다.
+            // close_tab(액션)은 워크스페이스 close — 사이드바 ✕는 closeTab을 직접 부르고, 기본 키엔 ⌘W가 아니라
+            // Term cascade(close_term)가 묶인다. config로 직접 close_tab을 묶은 경우를 위해 유지한다.
             .close_tab => self.closeActivePaneOrTab(),
             // 분할 실패(셸 spawn/alloc 실패)는 세션을 죽이지 않고 무시한다 — splitActivePane이 errdefer로
             // 트리/탭을 원복하므로 활성 panel 하나가 그대로 남는다.
@@ -1037,6 +1109,12 @@ pub const DevSession = struct {
             .focus_pane_right => self.focusPaneInDirection(.right),
             .focus_pane_up => self.focusPaneInDirection(.up),
             .focus_pane_down => self.focusPaneInDirection(.down),
+            // Term(가로 탭) 단위(cmux): ⌘T=활성 pane에 새 Term, ⌘W=활성 Term 닫기(Term→pane→워크스페이스
+            // cascade), ⌘]/⌘[=다음/이전 Term. 생성 실패는 무시(newTermInActivePane이 errdefer로 원복).
+            .new_term => self.newTermInActivePane() catch {},
+            .close_term => self.closeActiveTermOrPane(),
+            .next_term => self.focusTermRelative(1),
+            .previous_term => self.focusTermRelative(-1),
         }
         self.metal_dirty = true;
     }
@@ -3196,9 +3274,10 @@ test "two tabs: createTab spawns a second shell and tick drains both (multi-tab)
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
 }
 
-// Cmd+T가 기존 keyDown 경로(handleKeyEvent → resolver → app_action)를 통해 새 탭을 연다 — native
-// 최소(Swift는 키만 보내고 판정·실행은 Zig). 실 PTY라 macOS 게이트.
-test "Cmd+T opens a new tab through the key path (built-in app binding dispatch)" {
+// Cmd+T가 키 경로(handleKeyEvent → resolver → app_action)로 '활성 pane에 새 Term(가로 탭)'을 열고,
+// Cmd+Shift+T가 '새 워크스페이스'를 여는지 — cmux 풀 모델. native 최소(Swift는 키만, 판정·실행은 Zig).
+// 실 PTY라 macOS 게이트.
+test "Cmd+T opens a new Term in the active pane; Cmd+Shift+T opens a workspace" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(DevSession);
@@ -3212,17 +3291,71 @@ test "Cmd+T opens a new tab through the key path (built-in app binding dispatch)
     });
     defer session.deinit();
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
 
-    // Cmd+T → resolver의 default_app_bindings가 new_tab으로 → dispatchAppAction → newTab → createTab.
-    // 새 탭은 같은 종류(controlled_smoke) 셸을 현재 크기로 띄우고 활성이 된다.
+    // Cmd+T → new_term → 활성 pane에 Term 추가(워크스페이스 수 불변), 새 Term이 활성.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
     try std.testing.expect(session.total_app_key_events >= 1); // 앱 액션으로 회계(PTY로 안 샘)
 
-    // 안 묶인 Cmd 조합(Cmd+S)은 탭을 안 만들고 무시(ignored).
+    // Cmd+Shift+T → new_tab → 새 워크스페이스(활성), 그 워크스페이스는 Term 1개로 시작.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'T' }, .modifiers = .{ .command = true, .shift = true } });
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+
+    // 안 묶인 Cmd 조합(Cmd+S)은 아무것도 안 만들고 무시(ignored).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } });
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+}
+
+// cmux Term 생명주기: ⌘T가 활성 pane에 Term을 쌓고, ⌘]/⌘[가 Term을 wrap 순환하고, ⌘W가 Term →(마지막이면)
+// pane →(마지막이면) 워크스페이스 순으로 cascade close하는지 — 실 PTY teardown이라 macOS 게이트. 키 경로 전체.
+test "Term lifecycle: Cmd+T adds, Cmd+]/[ cycle, Cmd+W cascades Term to workspace" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const cmd: terminal.ModifierSet = .{ .command = true };
+
+    // ⌘T 두 번 → 활성 pane Term 3개(0,1,2), 활성 Term 2(마지막). 워크스페이스/ pane 수는 불변.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = cmd });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = cmd });
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
+    try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().active_term);
+
+    // ⌘] → 다음(wrap): 2→0. ⌘[ → 이전(wrap): 0→2.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = ']' }, .modifiers = cmd });
+    try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '[' }, .modifiers = cmd });
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().active_term);
+
+    // ⌘W → 활성 Term(2) 닫힘 → Term 2개, 활성 1(보정). pane/워크스페이스 수 불변.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = cmd });
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
+
+    // ⌘W → Term(1) 닫힘 → Term 1개. 아직 pane/워크스페이스 그대로(세션 유지).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = cmd });
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expect(!session.ended_seen);
+
+    // ⌘W → 이제 Term 1·pane 1·워크스페이스 1 → 마지막 워크스페이스 close = 세션 종료 latch(cascade 끝).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = cmd });
+    try std.testing.expect(session.ended_seen);
 }
 
 // Cmd+Shift+]/[ 가 키 경로(handleKeyEvent → resolver → app_action)로 다음/이전 탭을 순환하는지 — 실
@@ -3240,7 +3373,7 @@ test "Cmd+Shift bracket keys cycle tabs through the key path" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // 2탭, 활성 1
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'T' }, .modifiers = .{ .command = true, .shift = true } }); // ⌘⇧T=새 워크스페이스 → 2탭, 활성 1
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
 

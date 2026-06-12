@@ -832,6 +832,14 @@ pub const DevSession = struct {
         return self.copy_buffer;
     }
 
+    /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
+    /// 반환은 core 소유로 다음 OSC 7/RIS/destroy까지 유효하다(별도 복사 없음 — native 최소).
+    /// Swift가 창 제목에 쓴다.
+    pub fn currentCwd(self: *DevSession) []const u8 {
+        if (!self.surface_initialized) return &.{};
+        return self.surfaces[0].core.currentCwd();
+    }
+
     /// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면은 rows-1줄(한 줄 겹침)이고,
     /// rows는 dev session이 권위 있게 알고 있어 Swift가 stale 값으로 계산하지 않게 여기서 구한다.
     /// alt screen에서는 휠과 동일하게 화살표 변환으로 폴백한다(이전엔 완전 무반응이었다).
@@ -927,6 +935,9 @@ pub const DevSession = struct {
                 core.size.cols, core.size.rows, core.cursor.row, core.cursor.col,
             });
         }
+        // OSC 7로 셸이 보고한 cwd(셸 통합이 emit하면 채워진다). 창 제목이 읽는 값을 데이터로 확인.
+        const cwd = core.currentCwd();
+        if (cwd.len > 0) screen_diag.info("cwd={s}", .{cwd});
         var text: [240]u8 = undefined;
         var bg: [240]u8 = undefined;
         const grid_cols: usize = core.size.cols;

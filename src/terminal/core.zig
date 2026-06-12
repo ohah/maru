@@ -159,6 +159,12 @@ pub const TerminalCore = struct {
     osc_buffer: [2048]u8 = undefined,
     osc_len: usize = 0,
     osc_overflow: bool = false,
+    // OSC 7: 셸이 보고한 현재 작업 디렉터리(cwd). VTE(GNOME)가 정의한 사실상 표준 — 형식은
+    // `OSC 7 ; file://<host>/<percent-encoded path> ST`이고 iTerm2/Terminal.app/kitty/WezTerm이
+    // 채택했다(ECMA-48 아님). 디코드한 path를 core가 소유한다(host는 현재 무시 — 로컬 단일 호스트
+    // 가정, SSH/원격 구분은 후속). 창 제목 등이 읽는다. 셸 상태라 화면 clear엔 안 지우고 RIS에서만
+    // 지운다. 한 번도 안 받았으면 null(빈 cwd).
+    cwd: ?[]u8 = null,
     // 스크롤된(view_offset>0) 상태의 렌더용 합성 버퍼(rows×cols). renderSnapshot이 뷰포트 윈도를
     // 여기에 합성한다. view_offset==0이면 안 쓰므로 lazy 할당한다(스크롤할 때만 메모리 사용).
     viewport_cells: []types.Cell = &.{},
@@ -224,6 +230,10 @@ pub const TerminalCore = struct {
         self.last_command_exit = null;
         self.clearScrollback(); // sb 비우기 + 선택 해제
         self.clearLinkStore();
+        if (self.cwd) |c| { // OSC 7 cwd도 공장 초기화(셸이 다음 프롬프트에 다시 보고)
+            self.allocator.free(c);
+            self.cwd = null;
+        }
         self.cursor = .{};
         self.pen = .{};
         self.pending_wrap = false;
@@ -240,6 +250,7 @@ pub const TerminalCore = struct {
 
     pub fn deinit(self: *TerminalCore) void {
         if (self.preedit) |p| self.allocator.free(p);
+        if (self.cwd) |c| self.allocator.free(c);
         for (self.link_store.items) |uri| self.allocator.free(uri);
         self.link_store.deinit(self.allocator);
         self.link_ids.deinit(self.allocator);
@@ -1169,6 +1180,8 @@ pub const TerminalCore = struct {
             self.dispatchOscHyperlink(body[2..]);
         } else if (std.mem.startsWith(u8, body, "133;")) {
             self.dispatchOscSemanticPrompt(body[4..]);
+        } else if (std.mem.startsWith(u8, body, "7;")) {
+            self.dispatchOscCwd(body[2..]);
         }
     }
 
@@ -1183,6 +1196,59 @@ pub const TerminalCore = struct {
             return;
         }
         self.pen_link = self.internLink(uri) catch 0; // OOM이면 링크 없이 출력(텍스트는 보존)
+    }
+
+    /// OSC 7: `7 ; file://<host>/<percent-encoded path>` — 셸이 cwd를 보고한다. VTE(GNOME)가
+    /// 정의한 사실상 표준으로(공개 형식 문서 기반, VTE는 LGPL이라 소스 미열람), iTerm2/Terminal.app/
+    /// kitty/WezTerm이 채택했다. `file://` 스킴만 받고, host는 무시한 채(로컬 단일 호스트 가정) 첫
+    /// '/'부터의 path를 percent-decode해 저장한다. 형식이 안 맞거나 빈 path, OOM이면 기존 cwd를
+    /// 유지한다 — 부분/깨진 갱신으로 이전 값을 잃지 않게 한다.
+    fn dispatchOscCwd(self: *TerminalCore, body: []const u8) void {
+        const scheme = "file://";
+        if (!std.mem.startsWith(u8, body, scheme)) return; // file 스킴만(다른 스킴은 무시)
+        const authority_and_path = body[scheme.len..];
+        // file://<host>/<path> — host(authority)는 첫 '/'까지, path는 그 '/'부터(절대경로라 '/' 포함).
+        const slash = std.mem.indexOfScalar(u8, authority_and_path, '/') orelse return;
+        const raw_path = authority_and_path[slash..];
+        if (raw_path.len == 0) return;
+        const decoded = self.percentDecodeAlloc(raw_path) catch return; // OOM/실패면 기존 cwd 유지
+        if (self.cwd) |old| self.allocator.free(old);
+        self.cwd = decoded;
+    }
+
+    /// `%XX`를 바이트로 디코드한 새 문자열을 돌려준다(호출자 소유). 잘못된 %escape(두 hex가
+    /// 아니거나 끝에서 잘림)는 관대하게 '%'를 리터럴로 두고 계속한다 — path 한 글자가 깨졌다고
+    /// 전체를 버리지 않는다. UTF-8 바이트는 그대로 통과(셸이 raw로 보내든 %인코드로 보내든 복원).
+    fn percentDecodeAlloc(self: *TerminalCore, s: []const u8) ![]u8 {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        var i: usize = 0;
+        while (i < s.len) {
+            if (s[i] == '%' and i + 2 < s.len) {
+                const hi = std.fmt.charToDigit(s[i + 1], 16) catch {
+                    try out.append(self.allocator, s[i]);
+                    i += 1;
+                    continue;
+                };
+                const lo = std.fmt.charToDigit(s[i + 2], 16) catch {
+                    try out.append(self.allocator, s[i]);
+                    i += 1;
+                    continue;
+                };
+                try out.append(self.allocator, hi * 16 + lo);
+                i += 3;
+            } else {
+                try out.append(self.allocator, s[i]);
+                i += 1;
+            }
+        }
+        return out.toOwnedSlice(self.allocator);
+    }
+
+    /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
+    /// 창 제목 등 platform layer가 읽는다(facade를 통해 노출).
+    pub fn currentCwd(self: *const TerminalCore) []const u8 {
+        return self.cwd orelse "";
     }
 
     /// OSC 133(semantic prompt): 셸이 프롬프트/입력/출력 경계를 마킹한다. `133 ; <action> [; opts]`.
@@ -3290,6 +3356,51 @@ test "OSC sequence is consumed and does not print" {
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("hi      ", dump);
+}
+
+// OSC 7(VTE 사실상 표준)은 셸이 cwd를 보고하는 채널이다 — 터미널은 PTY 너머라 cwd를 모르므로
+// 창 제목/새 탭 cwd가 이걸 읽는다. 셸 통합과 platform layer 사이의 단일 계약이라, 형식 파싱과
+// percent-decoding이 정확해야 한다. ST(ESC \)·BEL 어느 종결자로 와도 같게 처리돼야 한다.
+test "OSC 7 reports cwd: file://host/path is parsed, host ignored, text not printed" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("\x1b]7;file://myhost/Users/me/proj\x1b\\hi");
+
+    try std.testing.expectEqualStrings("/Users/me/proj", core.currentCwd()); // host(myhost) 무시, path만
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("hi      ", dump); // OSC 본문은 그리드에 안 보인다
+}
+
+test "OSC 7 percent-decodes the path (spaces, UTF-8 bytes round-trip)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // BEL 종결자 + %20(공백) + percent-인코딩된 UTF-8('가'=EA B0 80) + raw로 통과하는 ASCII.
+    try core.write("\x1b]7;file://localhost/a%20b/%EA%B0%80\x07");
+    try std.testing.expectEqualStrings("/a b/\xea\xb0\x80", core.currentCwd());
+
+    // 잘린 %escape는 관대하게 '%'를 리터럴로 둔다(한 글자 깨졌다고 전체를 버리지 않음).
+    try core.write("\x1b]7;file://localhost/x%2\x07");
+    try std.testing.expectEqualStrings("/x%2", core.currentCwd());
+}
+
+test "OSC 7 keeps prior cwd on malformed input, clears on RIS" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    try core.write("\x1b]7;file://h/good\x07");
+    try std.testing.expectEqualStrings("/good", core.currentCwd());
+
+    // file 스킴 아님 / path 없음(authority만) → 기존 cwd 유지.
+    try core.write("\x1b]7;http://h/other\x07");
+    try core.write("\x1b]7;file://hostonly\x07");
+    try std.testing.expectEqualStrings("/good", core.currentCwd());
+
+    // RIS(ESC c) 하드 리셋 → cwd도 공장 초기화(빈 값).
+    try core.write("\x1bc");
+    try std.testing.expectEqualStrings("", core.currentCwd());
 }
 
 test "private CSI sequences are consumed without printing" {

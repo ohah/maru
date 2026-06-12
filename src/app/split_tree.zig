@@ -130,6 +130,40 @@ pub fn replaceLeaf(node: *Node, target: *Surface, replacement: Node) bool {
     }
 }
 
+/// node가 target surface leaf를 직접 자식으로 가진 split이면 그 leaf를 떼고 split을 '형제'로 교체한다(찾으면
+/// true). 즉 split{a: target_leaf, b: sibling} → sibling(반대도 대칭). pane close 시 트리를 collapse하는
+/// replaceLeaf의 역연산이다 — collapse된 split 노드만 heap 해제하고, 형제 subtree(leaf든 split이든)는 부모
+/// 슬롯으로 그대로 옮긴다(형제의 *Split은 안 건드림). leaf surface는 트리 소유가 아니라 건드리지 않는다
+/// (호출자가 Pane teardown으로 정리). 루트가 단일 leaf면(형제 없음) false — 그건 탭 close가 처리한다.
+fn isLeafOf(node: Node, target: *Surface) bool {
+    return switch (node) {
+        .leaf => |s| s == target,
+        .split => false,
+    };
+}
+
+pub fn removeLeaf(allocator: std.mem.Allocator, node: *Node, target: *Surface) bool {
+    switch (node.*) {
+        .leaf => return false, // 루트가 leaf면 형제가 없어 트리 레벨에서 못 지운다(탭 close가 처리)
+        .split => |sp| {
+            // 직접 자식이 target leaf면 이 split을 반대 자식(형제)으로 교체하고 split 노드만 해제.
+            if (isLeafOf(sp.a, target)) {
+                node.* = sp.b; // 형제를 부모 슬롯으로(Node 값 복사 — 형제가 split이면 그 *Split 보존)
+                allocator.destroy(sp);
+                return true;
+            }
+            if (isLeafOf(sp.b, target)) {
+                node.* = sp.a;
+                allocator.destroy(sp);
+                return true;
+            }
+            // 직접 자식이 아니면 자식 split으로 재귀(중첩 split 안의 leaf).
+            if (removeLeaf(allocator, &sp.a, target)) return true;
+            return removeLeaf(allocator, &sp.b, target);
+        },
+    }
+}
+
 test "layout: single leaf fills the whole rect" {
     const allocator = std.testing.allocator;
     var s = try Surface.init(allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -280,4 +314,44 @@ test "replaceLeaf swaps root leaf into a split and finds a nested leaf" {
     defer d.deinit();
     try std.testing.expect(!replaceLeaf(&tree, &d, .{ .leaf = &d }));
     try std.testing.expectEqual(@as(usize, 3), leafCount(tree));
+}
+
+test "removeLeaf collapses a split into its sibling and frees the split node" {
+    const allocator = std.testing.allocator;
+    var a = try Surface.init(allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer a.deinit();
+    var b = try Surface.init(allocator, 2, .{ .cols = 4, .rows = 2 });
+    defer b.deinit();
+    var c = try Surface.init(allocator, 3, .{ .cols = 4, .rows = 2 });
+    defer c.deinit();
+    var d = try Surface.init(allocator, 4, .{ .cols = 4, .rows = 2 });
+    defer d.deinit();
+
+    // tree = split{ a, split{ b, c } } — heap split 2개. removeLeaf가 collapse하며 해제하므로 split엔 defer 안 건다
+    // (testing.allocator가 leak/이중 free를 잡는다 — 끝엔 split이 모두 형제로 collapse돼 남는 heap 노드가 없다).
+    const inner = try allocator.create(Split);
+    inner.* = .{ .direction = .vertical, .a = .{ .leaf = &b }, .b = .{ .leaf = &c } };
+    const root = try allocator.create(Split);
+    root.* = .{ .direction = .horizontal, .a = .{ .leaf = &a }, .b = .{ .split = inner } };
+    var tree: Node = .{ .split = root };
+
+    // 트리에 없는 surface는 false(무변).
+    try std.testing.expect(!removeLeaf(allocator, &tree, &d));
+    try std.testing.expectEqual(@as(usize, 3), leafCount(tree));
+
+    // 중첩 split 안의 b를 닫으면 inner split이 형제 c로 collapse → tree = split{ a, c }.
+    try std.testing.expect(removeLeaf(allocator, &tree, &b));
+    try std.testing.expectEqual(@as(usize, 2), leafCount(tree));
+
+    // a를 닫으면 root split이 형제 c로 collapse → tree = leaf c(단일).
+    try std.testing.expect(removeLeaf(allocator, &tree, &a));
+    try std.testing.expectEqual(@as(usize, 1), leafCount(tree));
+    switch (tree) {
+        .leaf => |s| try std.testing.expectEqual(&c, s),
+        .split => return error.TestExpectedLeaf,
+    }
+
+    // 마지막 단일 leaf는 형제가 없어 못 지운다 → false(탭 close가 처리).
+    try std.testing.expect(!removeLeaf(allocator, &tree, &c));
+    try std.testing.expectEqual(@as(usize, 1), leafCount(tree));
 }

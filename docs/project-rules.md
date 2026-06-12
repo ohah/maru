@@ -8,6 +8,7 @@ Maru에서 작업하는 모든 에이전트와 개발자는 이 규칙을 따른
 - 외부 터미널/파서(Ghostty, GNOME vte, Alacritty, libvterm, xterm, kitty, WezTerm 등)는 `references/` 아래 read-only 참고 자료로만 사용한다. `references/`는 git에 커밋하지 않는 로컬 체크아웃이며, 레퍼런스 소스를 읽는 일은 이 경로에서만 한다. 공개 명세와 오라클을 무엇을 어디서 받는지는 [레퍼런스와 공개 명세](references.md)를 단일 출처로 둔다(`sh tools/fetch-references.sh`).
 - 어떤 레퍼런스의 소스코드도 Maru에 복사하지 않는다. 특히 GNOME vte, kitty처럼 copyleft(LGPL/GPL) 라이선스인 레퍼런스는 구현 유도를 위해 소스를 열람하지 말고 최종 화면 동작 비교(오라클)로만 사용한다.
 - Maru 터미널 코어의 "clean-room"은 공개 명세 기반 독립 재구현을 뜻한다. 구현은 ECMA-48, vt100.net DEC ANSI state machine, xterm ctlseqs 같은 공개 명세에서 유도하며, 레퍼런스의 코드 표현(자료구조 레이아웃, 함수/이터레이터 구조)을 그대로 옮기지 않는다. 이 원칙은 VT/parser뿐 아니라 renderer, storage, platform interop에도 적용한다. 레퍼런스별 허용 상호작용은 [오라클 비교 테스트 전략](oracle-testing.md#레퍼런스-라이선스와-허용-상호작용)을 따른다.
+- **터미널 동작은 단일 표준이 없는 경우가 많다.** OSC 7(cwd)·OSC 133(semantic prompt)·OSC 52(clipboard) 등 상당수는 ECMA-48이 아니라 VTE·iTerm2·xterm·kitty가 각자 만든 사실상 표준이고 서로 미묘하게 다르다. 이런 동작을 추가·변경할 때는 **(1) 무엇을 베이스로 했는지**(공식 명세면 조항, 사실상 표준이면 누가 정의했고 어느 터미널이 채택했는지)와 **(2) 레퍼런스 간 동작이 갈릴 때 어느 쪽을 왜 택했는지**를 코드 주석·해당 docs 문서·PR 본문에 **모두** 남긴다. 근거 없이 동작을 고르지 않는다(예: `input.page-keys` 기본 `scroll`은 Terminal.app/iTerm2 관례를 택하고 xterm `passthrough`는 opt-in으로 둔 결정을 문서·PR에 기록). 베이스로 삼는 명세/오라클을 어디서 받는지는 [레퍼런스와 공개 명세](references.md)를 단일 출처로 둔다.
 - 터미널 코어 API는 Maru 내부 facade 뒤에 둔다.
 - `main`에 직접 푸시하지 않는다. 항상 브랜치와 PR을 사용한다.
 - 커밋 메시지는 conventional-commit prefix(`feat`/`fix`/`docs`/`test`/`refactor`/`build`/`ci`/`chore`)를 쓴다.

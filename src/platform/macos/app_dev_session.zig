@@ -100,6 +100,31 @@ fn sidebarBandCell(sidebar_width_px: u32, cell_width_px: u32, active_row: u16, a
     };
 }
 
+/// sentinel-UV(아틀라스 없음 — u/v=-1로 셰이더가 글리프 샘플 대신 배경만 칠함) chrome 셀 1개. pane 탭 바
+/// 배경·활성 탭 하이라이트가 공유하는 보일러플레이트(16개 필드)를 한 곳에 모은다. origin_x + col*cw,
+/// origin_y(row 0)에 width칸을 bg로 채운다. 순수 함수.
+fn sentinelBgCell(col: u16, width: u16, bg: u32, origin_x: u32, origin_y: u32) metal_frame.NativeMetalCell {
+    return .{
+        .row = 0,
+        .col = col,
+        .width = width,
+        .codepoint = ' ',
+        .slot_id = 0,
+        .atlas_x_px = 0,
+        .atlas_y_px = 0,
+        .atlas_width_px = 0,
+        .atlas_height_px = 0,
+        .u0 = -1.0,
+        .v0 = -1.0,
+        .u1 = -1.0,
+        .v1 = -1.0,
+        .foreground = 0,
+        .background = bg,
+        .origin_x = origin_x,
+        .origin_y = origin_y,
+    };
+}
+
 /// pane 탭 바 배경 셀 1개(sentinel-UV, 배경만). bar rect 좌상단 origin에서 폭(cols)만큼 채운다 — 터미널 셀
 /// 스트림에 넣으면 maru_fill_cell_quad가 origin_x + col*cw, origin_y + row*ch(row 0)에 그려 바를 칠한다. 폭이
 /// term 폭과 같은 cols(floor)라 아래 터미널과 가로 정렬된다. 셀 폭/바 폭·높이 0이면 null. 순수 함수.
@@ -107,60 +132,7 @@ fn paneBarBgCell(bar: app.SplitRect, cell_width_px: u32, bg: u32) ?metal_frame.N
     if (cell_width_px == 0 or bar.w == 0 or bar.h == 0) return null;
     const cols_u32 = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
     if (cols_u32 == 0) return null;
-    return .{
-        .row = 0,
-        .col = 0,
-        .width = @intCast(cols_u32),
-        .codepoint = ' ',
-        .slot_id = 0,
-        .atlas_x_px = 0,
-        .atlas_y_px = 0,
-        .atlas_width_px = 0,
-        .atlas_height_px = 0,
-        .u0 = -1.0,
-        .v0 = -1.0,
-        .u1 = -1.0,
-        .v1 = -1.0,
-        .foreground = 0,
-        .background = bg,
-        .origin_x = bar.x,
-        .origin_y = bar.y,
-    };
-}
-
-/// pane 탭 바에서 활성 Term 탭 세그먼트를 강조하는 배경 셀(sentinel-UV). 바를 등폭으로 나눈 tab_index번째
-/// 세그먼트(col [i*tab_w, (i+1)*tab_w), 폭 tab_w)를 강조색으로 칠한다 — buildPaneTabBarDrawList와 같은
-/// paneTabWidth를 써서 제목과 정확히 정렬된다. 바 폭/탭 0이거나 세그먼트가 바 밖이면 null. 바 배경 셀 '뒤'에
-/// 그려져(위에 블렌딩) 활성 탭만 도드라진다. 순수 함수.
-fn paneTabHighlightCell(bar: app.SplitRect, cell_width_px: u32, tab_index: usize, tab_count: usize, bg: u32) ?metal_frame.NativeMetalCell {
-    if (cell_width_px == 0 or bar.w == 0) return null;
-    const cols_u32 = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
-    if (cols_u32 == 0) return null;
-    const tab_cols: u32 = coretext_frame_builder.paneTabAreaCols(@intCast(cols_u32)); // "+" zone 제외
-    const tab_w = coretext_frame_builder.paneTabWidth(@intCast(tab_cols), tab_count);
-    if (tab_w == 0) return null;
-    const start: u32 = @as(u32, @intCast(tab_index)) * tab_w;
-    if (start >= tab_cols) return null; // 탭이 탭 영역을 넘으면 세그먼트 없음
-    const width: u32 = @min(@as(u32, tab_w), tab_cols - start);
-    return .{
-        .row = 0,
-        .col = @intCast(start),
-        .width = @intCast(width),
-        .codepoint = ' ',
-        .slot_id = 0,
-        .atlas_x_px = 0,
-        .atlas_y_px = 0,
-        .atlas_width_px = 0,
-        .atlas_height_px = 0,
-        .u0 = -1.0,
-        .v0 = -1.0,
-        .u1 = -1.0,
-        .v1 = -1.0,
-        .foreground = 0,
-        .background = bg,
-        .origin_x = bar.x,
-        .origin_y = bar.y,
-    };
+    return sentinelBgCell(0, @intCast(cols_u32), bg, bar.x, bar.y);
 }
 
 /// 점(backing px)이 사각형 안인가([x, x+w) × [y, y+h) 반열린). 탭 바 클릭 hit-test에 쓴다. 비유한은 false.
@@ -172,53 +144,80 @@ fn pointInRect(x_px: f64, y_px: f64, rect: app.SplitRect) bool {
         y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(rect.h));
 }
 
-/// 바 안의 스크린 x → 클릭한 Term 탭 인덱스([0, term_count-1]로 clamp). buildPaneTabBarDrawList·하이라이트와
-/// 같은 등폭 분할(paneTabWidth)을 써서 보이는 탭과 정확히 일치한다. cell/탭 0이면 0. float clamp 후 cast라
-/// 거대 좌표도 trap 없음. 순수 함수.
-fn tabIndexInBar(bar: app.SplitRect, cell_width_px: u32, term_count: usize, x_px: f64) usize {
-    if (cell_width_px == 0 or term_count == 0 or !std.math.isFinite(x_px)) return 0;
-    const cols_u32 = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
-    if (cols_u32 == 0) return 0;
-    const tab_cols: u32 = coretext_frame_builder.paneTabAreaCols(@intCast(cols_u32)); // "+" zone 제외
-    const tab_w = coretext_frame_builder.paneTabWidth(@intCast(tab_cols), term_count);
-    if (tab_w == 0) return 0;
-    const cw: f64 = @floatFromInt(cell_width_px);
-    const max_col: f64 = @floatFromInt(tab_cols - 1);
-    const rel = std.math.clamp((x_px - @as(f64, @floatFromInt(bar.x))) / cw, 0, max_col); // 탭 영역 안 col로 clamp(+ zone은 마지막 탭)
-    const col: u32 = @intFromFloat(rel);
-    return @min(col / tab_w, term_count - 1);
-}
+/// pane 탭 바 한 줄의 컬럼 분할을 **한 곳에서** 계산하는 단일 출처. 렌더(buildPaneTabBarDrawList·하이라이트)와
+/// 마우스 hit-test(탭 전환/✕ 닫기/"+"/드래그)가 모두 이 메트릭에서 파생돼 "보이는 탭/✕/+" == "클릭·호버되는 것"을
+/// 보장한다. coretext의 paneTabAreaCols/paneTabWidth(렌더가 쓰는 같은 공식)로 바를 [탭 영역 | "+" zone]으로 나눈다.
+/// `init`이 픽셀→컬럼 변환·"+" zone 분리를 한 번에 끝내고, 이후 모든 판정은 이 값의 순수 메서드다. cell 폭·바 폭·
+/// 탭 폭이 0이면(초소형 바) `init`이 null을 줘 호출자가 탭 처리를 건너뛴다.
+const BarMetrics = struct {
+    bar: app.SplitRect,
+    cell_width_px: u32,
+    cols: u32, // 바 전체 컬럼 수(floor)
+    tab_cols: u32, // "+" zone을 뗀 탭 영역 컬럼 수(좁은 바면 == cols)
+    tab_w: u32, // 탭 하나의 폭(컬럼)
 
-/// 바 안 x가 tab_index 탭의 ✕(닫기) zone인가 — 그 탭 세그먼트 우측 2칸([seg_end-2, seg_end)). buildPaneTabBar
-/// DrawList의 ✕ 위치(세그먼트 우측 안쪽 col=seg_end-2)와 정렬해, 호버 ✕를 정확히 클릭으로 누르게 한다.
-/// 세그먼트가 2칸 미만(tab_w<2)이면 ✕ 없음(false). 순수 함수.
-fn xInTabCloseZone(bar: app.SplitRect, cell_width_px: u32, tab_index: usize, term_count: usize, x_px: f64) bool {
-    if (cell_width_px == 0 or term_count == 0 or !std.math.isFinite(x_px)) return false;
-    const cols_u32 = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
-    const tab_cols: u32 = coretext_frame_builder.paneTabAreaCols(@intCast(cols_u32)); // "+" zone 제외
-    const tab_w = coretext_frame_builder.paneTabWidth(@intCast(tab_cols), term_count);
-    if (tab_w < 2) return false; // 너무 좁아 ✕ 둘 자리 없음
-    const seg_end: u32 = @min((@as(u32, @intCast(tab_index)) + 1) * tab_w, tab_cols);
-    if (seg_end < 2) return false;
-    const cw: f64 = @floatFromInt(cell_width_px);
-    const zone_x0 = @as(f64, @floatFromInt(bar.x)) + @as(f64, @floatFromInt(seg_end - 2)) * cw;
-    const zone_x1 = @as(f64, @floatFromInt(bar.x)) + @as(f64, @floatFromInt(seg_end)) * cw;
-    return x_px >= zone_x0 and x_px < zone_x1;
-}
+    /// bar/cell 폭/탭 개수로 메트릭을 만든다. 분할이 불가능한 극단(셀·바·탭 폭 0)이면 null.
+    fn init(bar: app.SplitRect, cell_width_px: u32, term_count: usize) ?BarMetrics {
+        if (cell_width_px == 0 or bar.w == 0 or term_count == 0) return null;
+        const cols = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
+        if (cols == 0) return null;
+        const tab_cols: u32 = coretext_frame_builder.paneTabAreaCols(@intCast(cols)); // "+" zone 제외
+        const tab_w = coretext_frame_builder.paneTabWidth(@intCast(tab_cols), term_count);
+        if (tab_w == 0) return null;
+        return .{ .bar = bar, .cell_width_px = cell_width_px, .cols = cols, .tab_cols = tab_cols, .tab_w = tab_w };
+    }
 
-/// 바 안 x가 우측 "+"(새 Term) 버튼 zone인가 — 탭 영역 오른쪽([tab_cols, cols)). 바가 좁아 "+" zone이 없으면
-/// (paneTabAreaCols == cols) false. buildPaneTabBarDrawList의 "+" 위치와 같은 영역이라 보이는 +를 클릭으로
-/// 누른다. 순수 함수.
-fn xInPlusZone(bar: app.SplitRect, cell_width_px: u32, x_px: f64) bool {
-    if (cell_width_px == 0 or !std.math.isFinite(x_px)) return false;
-    const cols_u32 = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
-    const tab_cols: u32 = coretext_frame_builder.paneTabAreaCols(@intCast(cols_u32));
-    if (tab_cols >= cols_u32) return false; // "+" zone 없음(좁은 바)
-    const cw: f64 = @floatFromInt(cell_width_px);
-    const x0 = @as(f64, @floatFromInt(bar.x)) + @as(f64, @floatFromInt(tab_cols)) * cw;
-    const x1 = @as(f64, @floatFromInt(bar.x)) + @as(f64, @floatFromInt(cols_u32)) * cw;
-    return x_px >= x0 and x_px < x1;
-}
+    /// 바 좌단 기준 x_px의 컬럼 픽셀 경계. tab_index 탭 세그먼트는 [col*cw, segEnd*cw).
+    fn colPx(self: BarMetrics, col: u32) f64 {
+        return @as(f64, @floatFromInt(self.bar.x)) + @as(f64, @floatFromInt(col)) * @as(f64, @floatFromInt(self.cell_width_px));
+    }
+
+    /// tab_index 탭 세그먼트의 끝 컬럼(우경계, tab_cols로 clamp).
+    fn segEnd(self: BarMetrics, tab_index: usize) u32 {
+        return @min((@as(u32, @intCast(tab_index)) + 1) * self.tab_w, self.tab_cols);
+    }
+
+    /// x_px가 가리키는 Term 탭 인덱스([0, term_count-1]로 clamp). x를 탭 영역으로 clamp한다("+" zone은 마지막 탭로
+    /// 떨어지므로 호출자가 inPlusZone을 **먼저** 검사해야 한다). float clamp 후 cast라 거대 좌표도 trap 없음.
+    fn tabIndex(self: BarMetrics, term_count: usize, x_px: f64) usize {
+        if (term_count == 0 or !std.math.isFinite(x_px)) return 0;
+        const cw: f64 = @floatFromInt(self.cell_width_px);
+        const max_col: f64 = @floatFromInt(self.tab_cols - 1);
+        const rel = std.math.clamp((x_px - @as(f64, @floatFromInt(self.bar.x))) / cw, 0, max_col);
+        const col: u32 = @intFromFloat(rel);
+        return @min(col / self.tab_w, term_count - 1);
+    }
+
+    /// x_px가 tab_index 탭의 ✕(닫기) zone인가 — 세그먼트 우측 2칸([segEnd-2, segEnd)). buildPaneTabBarDrawList의
+    /// ✕ 위치(col=segEnd-2)와 정렬해 보이는 ✕를 정확히 누른다. 세그먼트가 2칸 미만(tab_w<2)이면 ✕ 없음(false).
+    fn inCloseZone(self: BarMetrics, tab_index: usize, x_px: f64) bool {
+        if (self.tab_w < 2 or !std.math.isFinite(x_px)) return false;
+        const seg_end = self.segEnd(tab_index);
+        if (seg_end < 2) return false;
+        return x_px >= self.colPx(seg_end - 2) and x_px < self.colPx(seg_end);
+    }
+
+    /// 우측 "+"(새 Term) zone이 존재하는가 — 바가 넓어 탭 영역에서 칸을 뗐는가(paneTabAreaCols < cols).
+    fn hasPlusZone(self: BarMetrics) bool {
+        return self.tab_cols < self.cols;
+    }
+
+    /// x_px가 "+" zone([tab_cols, cols)) 안인가. "+" zone이 없으면(좁은 바) false. buildPaneTabBarDrawList의
+    /// "+" glyph(col=tab_cols+1)와 같은 영역이라 보이는 +를 누른다.
+    fn inPlusZone(self: BarMetrics, x_px: f64) bool {
+        if (!self.hasPlusZone() or !std.math.isFinite(x_px)) return false;
+        return x_px >= self.colPx(self.tab_cols) and x_px < self.colPx(self.cols);
+    }
+
+    /// tab_index 탭 세그먼트(col [start, start+width))를 강조색 bg로 칠하는 sentinel-UV 셀. 세그먼트가 탭 영역
+    /// 밖이면 null. buildPaneTabBarDrawList와 같은 분할이라 제목과 정확히 정렬된다.
+    fn highlightCell(self: BarMetrics, tab_index: usize, bg: u32) ?metal_frame.NativeMetalCell {
+        const start: u32 = @as(u32, @intCast(tab_index)) * self.tab_w;
+        if (start >= self.tab_cols) return null;
+        const width: u32 = @min(self.tab_w, self.tab_cols - start);
+        return sentinelBgCell(@intCast(start), @intCast(width), bg, self.bar.x, self.bar.y);
+    }
+};
 
 /// 스크린 x(backing px)가 세로 사이드바 영역(x: 0..sidebar_width_px) 안인가. 폭 0(사이드바 꺼짐)이거나
 /// x<0(클리어 sentinel 포함)·origin_x 이상(터미널 영역)이면 false. 순수 함수라 OS 무관 단위 테스트.
@@ -906,7 +905,8 @@ pub const DevSession = struct {
         for (leaf_rects.items) |lr| {
             if (lr.leaf != pane) continue;
             const bar = self.paneBarRect(lr.rect) orelse return;
-            const target = tabIndexInBar(bar, self.cell_width_px, pane.terms.items.len, x_px);
+            const m = BarMetrics.init(bar, self.cell_width_px, pane.terms.items.len) orelse return;
+            const target = m.tabIndex(pane.terms.items.len, x_px);
             if (target != self.tab_drag_index) {
                 rotateMove(*Term, pane.terms.items, self.tab_drag_index, target);
                 pane.active_term = target; // 드래그한 탭(활성)이 새 위치로 따라간다
@@ -929,8 +929,9 @@ pub const DevSession = struct {
             const bar = self.paneBarRect(lr.rect) orelse continue;
             if (pointInRect(x_px, y_px, bar)) {
                 if (lr.leaf == src) return; // 같은 pane — 재정렬은 이미 됨
-                const dst_idx = tabIndexInBar(bar, self.cell_width_px, @max(1, lr.leaf.terms.items.len), x_px);
-                self.moveTermToPane(src, self.tab_drag_index, lr.leaf, dst_idx);
+                const dst_count = lr.leaf.terms.items.len; // dst pane은 항상 Term ≥1(빈 pane은 collapse됨)
+                const m = BarMetrics.init(bar, self.cell_width_px, dst_count) orelse return;
+                self.moveTermToPane(src, self.tab_drag_index, lr.leaf, m.tabIndex(dst_count, x_px));
                 return;
             }
         }
@@ -1635,18 +1636,20 @@ pub const DevSession = struct {
                 for (leaf_rects.items) |lr| {
                     const bar = self.paneBarRect(lr.rect) orelse continue;
                     if (pointInRect(x_px, y_px, bar)) {
-                        // 바 우측 "+" 버튼 클릭 → 그 pane을 포커스하고 새 Term을 띄운다(⌘T의 마우스 버전).
-                        if (xInPlusZone(bar, self.cell_width_px, x_px)) {
+                        const count = lr.leaf.terms.items.len;
+                        const m = BarMetrics.init(bar, self.cell_width_px, count);
+                        // 바 우측 "+" 버튼 클릭 → 그 pane을 포커스하고 새 Term을 띄운다(⌘T의 마우스 버전). 탭/✕보다 먼저.
+                        if (m) |bm| if (bm.inPlusZone(x_px)) {
                             _ = self.focusPaneByPtr(lr.leaf);
                             self.newTermInActivePane() catch {};
                             self.drag_autoscroll = 0;
                             self.mouse_drag_selecting = false;
                             return;
-                        }
-                        const tab = tabIndexInBar(bar, self.cell_width_px, lr.leaf.terms.items.len, x_px);
-                        const on_close = self.hovered_tab != null and self.hovered_tab.?.pane == lr.leaf and
+                        };
+                        const tab = if (m) |bm| bm.tabIndex(count, x_px) else 0;
+                        const on_close = m != null and self.hovered_tab != null and self.hovered_tab.?.pane == lr.leaf and
                             self.hovered_tab.?.tab == tab and
-                            xInTabCloseZone(bar, self.cell_width_px, tab, lr.leaf.terms.items.len, x_px);
+                            m.?.inCloseZone(tab, x_px);
                         _ = self.focusPaneByPtr(lr.leaf); // 다른 pane이면 포커스 이동(같으면 무동작)
                         self.focusTerm(tab); // 그 pane의 클릭한 Term으로(같으면 무동작)
                         if (on_close) {
@@ -2380,8 +2383,8 @@ pub const DevSession = struct {
                 const bar = self.paneBarRect(lr.rect) orelse continue;
                 if (paneBarBgCell(bar, self.cell_width_px, self.sidebarBg())) |cell| pane_chrome.append(self.allocator, cell) catch {};
                 const hl_bg = if (lr.leaf == active_pane) self.sidebarActiveBg() else self.sidebarHoverBg();
-                if (paneTabHighlightCell(bar, self.cell_width_px, lr.leaf.active_term, lr.leaf.terms.items.len, hl_bg)) |cell| {
-                    pane_chrome.append(self.allocator, cell) catch {};
+                if (BarMetrics.init(bar, self.cell_width_px, lr.leaf.terms.items.len)) |m| {
+                    if (m.highlightCell(lr.leaf.active_term, hl_bg)) |cell| pane_chrome.append(self.allocator, cell) catch {};
                 }
             }
 
@@ -2588,7 +2591,10 @@ pub const DevSession = struct {
             for (leaf_rects.items) |lr| {
                 const bar = self.paneBarRect(lr.rect) orelse continue;
                 if (pointInRect(x_px, y_px, bar)) {
-                    next = .{ .pane = lr.leaf, .tab = tabIndexInBar(bar, self.cell_width_px, lr.leaf.terms.items.len, x_px) };
+                    const count = lr.leaf.terms.items.len;
+                    const m = BarMetrics.init(bar, self.cell_width_px, count) orelse break; // 메트릭 불가(초소형 바) → 호버 없음
+                    if (m.inPlusZone(x_px)) break; // "+" 버튼 위 — 탭 호버 아님(마지막 탭에 ✕ 오표시 방지)
+                    next = .{ .pane = lr.leaf, .tab = m.tabIndex(count, x_px) };
                     break;
                 }
             }
@@ -3386,34 +3392,46 @@ test "paneBarBgCell builds a bar-width background cell at the bar origin" {
     try std.testing.expect(paneBarBgCell(.{ .x = 0, .y = 0, .w = 8, .h = 12 }, 12, 0xFF000000) == null); // 1칸 미만
 }
 
-test "paneTabHighlightCell highlights the active Term tab segment aligned to paneTabWidth" {
-    // 바 (x=180, w=240), cell 12 → 20칸. "+" zone 3칸 빼고 탭 영역 17칸. 2탭 → tab_w=8. 탭 1(활성) = col [8,16).
+// BarMetrics가 바 한 줄을 [탭 영역 | "+" zone]으로 나누고 init이 극단(셀·탭 0)에 null을 주는지 — 렌더·hit-test의
+// 단일 출처라 헤드리스 단위로 고정한다. 바 (x=180, w=240), cell 12 → 20칸, "+" zone 3칸 빼고 탭 영역 17, 2탭 → tab_w=8.
+test "BarMetrics.init splits a bar into tab area and plus zone" {
     const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 };
-    const cell = paneTabHighlightCell(bar, 12, 1, 2, 0xFF445566).?;
+    const m = BarMetrics.init(bar, 12, 2).?;
+    try std.testing.expectEqual(@as(u32, 20), m.cols);
+    try std.testing.expectEqual(@as(u32, 17), m.tab_cols); // "+" zone 3 제외
+    try std.testing.expectEqual(@as(u32, 8), m.tab_w); // 17/2
+    try std.testing.expect(m.hasPlusZone());
+    // 분할 불가 극단(셀 0·바 폭 0·탭 0)이면 null.
+    try std.testing.expect(BarMetrics.init(bar, 0, 2) == null);
+    try std.testing.expect(BarMetrics.init(.{ .x = 0, .y = 0, .w = 0, .h = 12 }, 12, 2) == null);
+    try std.testing.expect(BarMetrics.init(bar, 12, 0) == null);
+}
+
+// highlightCell이 활성 Term 탭 세그먼트(col [i*tab_w, +tab_w))를 강조 배경 셀로 칠하는지 — buildPaneTabBarDrawList와
+// 같은 분할이라 제목과 정렬된다.
+test "BarMetrics.highlightCell highlights the active Term tab segment" {
+    const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 };
+    const m = BarMetrics.init(bar, 12, 2).?;
+    const cell = m.highlightCell(1, 0xFF445566).?; // 탭 1 = col [8,16)
     try std.testing.expectEqual(@as(u16, 8), cell.col); // 1*tab_w(8)
     try std.testing.expectEqual(@as(u16, 8), cell.width); // tab_w
     try std.testing.expectEqual(@as(u32, 180), cell.origin_x);
-    try std.testing.expectEqual(@as(u32, 0), cell.slot_id); // 배경 밴드
+    try std.testing.expectEqual(@as(u32, 0), cell.slot_id); // 배경 밴드(sentinel-UV)
     try std.testing.expectEqual(@as(u32, 0xFF445566), cell.background);
-    // 탭 0(활성) = col [0,8). 탭이 탭 영역 밖이거나 폭/탭 0이면 null.
-    try std.testing.expectEqual(@as(u16, 0), paneTabHighlightCell(bar, 12, 0, 2, 0xFF000000).?.col);
-    try std.testing.expect(paneTabHighlightCell(bar, 0, 0, 2, 0xFF000000) == null);
-    try std.testing.expect(paneTabHighlightCell(bar, 12, 0, 0, 0xFF000000) == null);
+    try std.testing.expectEqual(@as(u16, 0), m.highlightCell(0, 0xFF000000).?.col); // 탭 0 = col [0,8)
+    try std.testing.expect(m.highlightCell(3, 0xFF000000) == null); // start(24) ≥ tab_cols(17) → 세그먼트 없음
 }
 
-// tabIndexInBar가 바 안 x를 클릭한 Term 탭으로 매핑하는지(등폭 paneTabWidth, 끝은 clamp) + pointInRect 경계 —
-// 탭 클릭 hit-test의 코어라 헤드리스 단위로 고정한다(순수 함수).
-test "tabIndexInBar maps x to the clicked tab segment; pointInRect bounds" {
-    // 바 (x=180, w=240), cell 12 → 20칸. 탭 영역 17칸("+" zone 3 제외), 2탭 → tab_w=8. col [0,8)=탭0, [8,16)=탭1.
-    const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 };
-    try std.testing.expectEqual(@as(usize, 0), tabIndexInBar(bar, 12, 2, 180)); // 바 좌단 → 탭 0
-    try std.testing.expectEqual(@as(usize, 0), tabIndexInBar(bar, 12, 2, 180 + 7 * 12)); // col 7 → 탭 0
-    try std.testing.expectEqual(@as(usize, 1), tabIndexInBar(bar, 12, 2, 180 + 8 * 12)); // col 8 → 탭 1
-    try std.testing.expectEqual(@as(usize, 1), tabIndexInBar(bar, 12, 2, 180 + 15 * 12)); // col 15 → 탭 1
-    try std.testing.expectEqual(@as(usize, 1), tabIndexInBar(bar, 12, 2, 180 + 999)); // 우측 밖("+" zone 포함) → 마지막 탭 clamp
-    try std.testing.expectEqual(@as(usize, 0), tabIndexInBar(bar, 12, 2, 100)); // 바 좌측 밖 → 0 clamp
-    try std.testing.expectEqual(@as(usize, 0), tabIndexInBar(bar, 0, 2, 200)); // cell 0
-    try std.testing.expectEqual(@as(usize, 0), tabIndexInBar(bar, 12, 0, 200)); // 탭 0개
+// tabIndex가 바 안 x를 클릭한 Term 탭으로 매핑하는지(등폭, 끝은 clamp) + pointInRect 경계 — 탭 hit-test 코어.
+test "BarMetrics.tabIndex maps x to the clicked tab segment; pointInRect bounds" {
+    const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 }; // col [0,8)=탭0, [8,16)=탭1
+    const m = BarMetrics.init(bar, 12, 2).?;
+    try std.testing.expectEqual(@as(usize, 0), m.tabIndex(2, 180)); // 바 좌단 → 탭 0
+    try std.testing.expectEqual(@as(usize, 0), m.tabIndex(2, 180 + 7 * 12)); // col 7 → 탭 0
+    try std.testing.expectEqual(@as(usize, 1), m.tabIndex(2, 180 + 8 * 12)); // col 8 → 탭 1
+    try std.testing.expectEqual(@as(usize, 1), m.tabIndex(2, 180 + 15 * 12)); // col 15 → 탭 1
+    try std.testing.expectEqual(@as(usize, 1), m.tabIndex(2, 180 + 999)); // 우측 밖("+" zone 포함) → 마지막 탭 clamp
+    try std.testing.expectEqual(@as(usize, 0), m.tabIndex(2, 100)); // 바 좌측 밖 → 0 clamp
 
     // pointInRect: 반열린 구간. 좌상단 포함, 우/하 경계 제외(바 우경계 = 180+240 = 420).
     try std.testing.expect(pointInRect(180, 0, bar)); // 좌상단 포함
@@ -3424,37 +3442,33 @@ test "tabIndexInBar maps x to the clicked tab segment; pointInRect bounds" {
     try std.testing.expect(!pointInRect(std.math.nan(f64), 0, bar)); // 비유한
 }
 
-// xInTabCloseZone이 탭 세그먼트 우측 2칸(✕ zone)을 판정하는지 — 호버 ✕ 클릭의 코어라 헤드리스 단위로 고정.
-// buildPaneTabBarDrawList의 ✕ 위치(seg_end-2)와 정렬됨을 같은 paneTabWidth로 보장한다.
-test "xInTabCloseZone detects the right-edge close zone of a tab segment" {
-    // 바 (x=180, w=240), cell 12 → 20칸. 탭 영역 17("+" zone 3 제외), 2탭 → tab_w=8. 탭0 seg_end=8(✕ [6,8)), 탭1 seg_end=16([14,16)).
-    const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 };
-    // 탭 0 ✕ zone = x [180+6*12, 180+8*12) = [252, 276).
-    try std.testing.expect(xInTabCloseZone(bar, 12, 0, 2, 260));
-    try std.testing.expect(!xInTabCloseZone(bar, 12, 0, 2, 200)); // 탭 0 좌측(제목 영역)
-    // 탭 1 ✕ zone = [180+14*12, 180+16*12) = [348, 372).
-    try std.testing.expect(xInTabCloseZone(bar, 12, 1, 2, 360));
-    try std.testing.expect(!xInTabCloseZone(bar, 12, 1, 2, 300)); // 탭 1 제목 영역
-    // tab_w < 2면 ✕ 없음(좁은 바). cols=3, 2탭 → tab_w=1.
-    const narrow: app.SplitRect = .{ .x = 0, .y = 0, .w = 36, .h = 12 };
-    try std.testing.expect(!xInTabCloseZone(narrow, 12, 0, 2, 10));
-    try std.testing.expect(!xInTabCloseZone(bar, 0, 0, 2, 280)); // cell 0
+// inCloseZone이 탭 세그먼트 우측 2칸(✕ zone)을 판정하는지 — buildPaneTabBarDrawList ✕ 위치(seg_end-2)와 정렬.
+test "BarMetrics.inCloseZone detects the right-edge close zone of a tab segment" {
+    const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 }; // 탭0 seg_end=8(✕[6,8)), 탭1 seg_end=16([14,16))
+    const m = BarMetrics.init(bar, 12, 2).?;
+    try std.testing.expect(m.inCloseZone(0, 260)); // 탭 0 ✕ = x [180+6*12, 180+8*12) = [252,276)
+    try std.testing.expect(!m.inCloseZone(0, 200)); // 탭 0 제목 영역
+    try std.testing.expect(m.inCloseZone(1, 360)); // 탭 1 ✕ = [348,372)
+    try std.testing.expect(!m.inCloseZone(1, 300)); // 탭 1 제목 영역
+    // tab_w<2면 ✕ 없음. cols=3, 2탭 → tab_cols=3, tab_w=1.
+    const narrow = BarMetrics.init(.{ .x = 0, .y = 0, .w = 36, .h = 12 }, 12, 2).?;
+    try std.testing.expect(!narrow.inCloseZone(0, 10));
 }
 
-// xInPlusZone이 바 우측 "+"(새 Term) 버튼 영역([탭영역, cols))을 판정하는지 — "+" 클릭 hit-test의 코어라
-// 헤드리스 단위로 고정한다(buildPaneTabBarDrawList "+" 위치·paneTabAreaCols와 같은 영역). 순수 함수.
-test "xInPlusZone detects the right-edge plus-button zone" {
-    // 바 (x=180, w=240), cell 12 → 20칸. 탭 영역 17, "+" zone = col [17, 20) = x [180+17*12, 180+20*12) = [384, 420).
-    const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 };
-    try std.testing.expect(xInPlusZone(bar, 12, 400)); // "+" zone 안(col 18)
-    try std.testing.expect(!xInTabCloseZone(bar, 12, 1, 2, 400)); // 400은 "+" zone — 탭 1 ✕ zone([348,372])과 안 겹침
-    try std.testing.expect(!xInPlusZone(bar, 12, 380)); // 탭 영역(col 16)
-    try std.testing.expect(!xInPlusZone(bar, 12, 420)); // 바 우경계 밖
-    try std.testing.expect(!xInPlusZone(bar, 12, 100)); // 바 좌측 밖
-    // 좁은 바(cols ≤ +zone+1)는 "+" 없음. cols=4 → paneTabAreaCols=4(= cols) → + zone 없음.
-    const narrow: app.SplitRect = .{ .x = 0, .y = 0, .w = 48, .h = 12 };
-    try std.testing.expect(!xInPlusZone(narrow, 12, 40));
-    try std.testing.expect(!xInPlusZone(bar, 0, 400)); // cell 0
+// inPlusZone이 바 우측 "+"(새 Term) zone([탭영역, cols))을 판정하는지 — buildPaneTabBarDrawList "+" 위치와 같은 영역.
+// 이게 hover에서 "+" 위를 탭으로 오인하지 않게 하는 핵심(updateHoveredTab이 inPlusZone 먼저 검사).
+test "BarMetrics.inPlusZone detects the right-edge plus-button zone" {
+    const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 }; // "+" zone = col [17,20) = x [384,420)
+    const m = BarMetrics.init(bar, 12, 2).?;
+    try std.testing.expect(m.inPlusZone(400)); // "+" zone 안(col 18)
+    try std.testing.expect(!m.inCloseZone(1, 400)); // 400은 "+" zone — 탭 1 ✕ zone([348,372])과 안 겹침
+    try std.testing.expect(!m.inPlusZone(380)); // 탭 영역(col 16)
+    try std.testing.expect(!m.inPlusZone(420)); // 바 우경계 밖
+    try std.testing.expect(!m.inPlusZone(100)); // 바 좌측 밖
+    // 좁은 바(cols ≤ +zone+1)는 "+" 없음. cols=4 → paneTabAreaCols=4(= cols).
+    const narrow = BarMetrics.init(.{ .x = 0, .y = 0, .w = 48, .h = 12 }, 12, 2).?;
+    try std.testing.expect(!narrow.hasPlusZone());
+    try std.testing.expect(!narrow.inPlusZone(40));
 }
 
 // paneTermRect/paneBarRect가 leaf rect 상단에서 탭 바(cell 높이 1칸)를 떼는지 — 충분히 크면 바+터미널, 너무
@@ -3677,18 +3691,16 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const bar = session.paneBarRect(lr.items[0].rect).?;
-    const cols: u32 = bar.w / session.cell_width_px;
-    const tab_cols = coretext_frame_builder.paneTabAreaCols(@intCast(cols)); // "+" zone 제외한 탭 영역
-    const tab_w = coretext_frame_builder.paneTabWidth(tab_cols, 3);
+    const m = BarMetrics.init(bar, session.cell_width_px, 3).?;
     // 탭 1 ✕ zone col = (1+1)*tab_w - 1(우측 안쪽). x = bar.x + (2*tab_w - 1)*cw.
-    const close_x: f64 = @floatFromInt(bar.x + (2 * tab_w - 1) * session.cell_width_px);
+    const close_x: f64 = @floatFromInt(bar.x + (2 * m.tab_w - 1) * session.cell_width_px);
     const bar_y: f64 = @floatFromInt(bar.y + 1);
 
     // 호버 → hovered_tab이 (활성 pane, 탭 1)로 설정된다(✕가 그려질 대상).
     _ = session.hoverUrl(close_x, bar_y, false);
     try std.testing.expect(session.hovered_tab != null);
     try std.testing.expectEqual(@as(usize, 1), session.hovered_tab.?.tab);
-    try std.testing.expect(xInTabCloseZone(bar, session.cell_width_px, 1, 3, close_x)); // ✕ zone 안
+    try std.testing.expect(m.inCloseZone(1, close_x)); // ✕ zone 안
 
     // ✕ 클릭 → 탭 1 Term 닫힘 → 2개. 닫은 뒤 호버는 비워진다(stale 방지).
     session.mouse(1, close_x, bar_y);
@@ -3720,18 +3732,55 @@ test "clicking the bar '+' button spawns a new Term in that pane" {
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const bar = session.paneBarRect(lr.items[0].rect).?;
-    const cols: u32 = bar.w / session.cell_width_px;
-    const tab_cols = coretext_frame_builder.paneTabAreaCols(@intCast(cols));
-    try std.testing.expect(tab_cols < cols); // 바가 넓어 "+" zone이 존재
+    const m = BarMetrics.init(bar, session.cell_width_px, 1).?;
+    try std.testing.expect(m.hasPlusZone()); // 바가 넓어 "+" zone이 존재
     // "+" zone = col [tab_cols, cols). 첫 col 중앙을 클릭.
-    const plus_x: f64 = @floatFromInt(bar.x + tab_cols * session.cell_width_px + session.cell_width_px / 2);
+    const plus_x: f64 = @floatFromInt(bar.x + m.tab_cols * session.cell_width_px + session.cell_width_px / 2);
     const bar_y: f64 = @floatFromInt(bar.y + 1);
-    try std.testing.expect(xInPlusZone(bar, session.cell_width_px, plus_x)); // "+" zone 안
+    try std.testing.expect(m.inPlusZone(plus_x)); // "+" zone 안
 
     // "+" 클릭 → 새 Term → 2개.
     session.mouse(1, plus_x, bar_y);
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
     try std.testing.expect(!session.ended_seen); // 세션 유지
+}
+
+// "+" zone 위에 호버하면 마지막 탭에 ✕가 잘못 뜨면 안 된다(updateHoveredTab이 inPlusZone을 먼저 검사). PR-F가
+// tabIndexInBar의 우측 clamp 때문에 "+" 위 호버를 마지막 탭으로 오인해 ✕를 그리던 회귀를 고정한다. 실 init/spawn.
+test "hovering the '+' button does not mark the last tab for close" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개
+
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const m = BarMetrics.init(bar, session.cell_width_px, 2).?;
+    const bar_y: f64 = @floatFromInt(bar.y + 1);
+
+    // 마지막 탭(탭 1) 위 호버 → hovered_tab = 탭 1(정상).
+    const tab1_x: f64 = @floatFromInt(bar.x + (m.tab_cols - 1) * session.cell_width_px); // 탭 영역 우측 끝(탭 1)
+    _ = session.hoverUrl(tab1_x, bar_y, false);
+    try std.testing.expect(session.hovered_tab != null);
+    try std.testing.expectEqual(@as(usize, 1), session.hovered_tab.?.tab);
+
+    // "+" zone 위 호버 → hovered_tab 비워짐(마지막 탭로 clamp되지 않는다 — ✕ 오표시 방지).
+    const plus_x: f64 = @floatFromInt(bar.x + m.tab_cols * session.cell_width_px + session.cell_width_px / 2);
+    try std.testing.expect(m.inPlusZone(plus_x));
+    _ = session.hoverUrl(plus_x, bar_y, false);
+    try std.testing.expect(session.hovered_tab == null);
 }
 
 // 탭을 드래그하면 pane 안에서 순서가 바뀌는지(PR-E1) — 실 init/spawn이라 macOS 게이트. ⌘T로 Term 3개를
@@ -3763,10 +3812,9 @@ test "dragging a Term tab reorders it within the pane" {
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const bar = session.paneBarRect(lr.items[0].rect).?;
-    const cols: u32 = bar.w / session.cell_width_px;
-    const tab_w = coretext_frame_builder.paneTabWidth(@intCast(cols), 3);
-    const tab0_x: f64 = @floatFromInt(bar.x + (0 * tab_w + 1) * session.cell_width_px); // 탭 0 세그먼트(✕ 아님)
-    const tab2_x: f64 = @floatFromInt(bar.x + (2 * tab_w + 1) * session.cell_width_px); // 탭 2 세그먼트
+    const m = BarMetrics.init(bar, session.cell_width_px, 3).?;
+    const tab0_x: f64 = @floatFromInt(bar.x + (0 * m.tab_w + 1) * session.cell_width_px); // 탭 0 세그먼트(✕ 아님)
+    const tab2_x: f64 = @floatFromInt(bar.x + (2 * m.tab_w + 1) * session.cell_width_px); // 탭 2 세그먼트
     const bar_y: f64 = @floatFromInt(bar.y + 1);
 
     // 탭 0 down → 드래그 arm. drag to 탭 2 → 재정렬. up → 종료.

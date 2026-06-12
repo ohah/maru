@@ -649,11 +649,36 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window.title = "Maru  scr:\(scr) win:\(win) cell:\(lastCellWidthPx)x\(lastCellHeightPx) draw:\(drawW)"
     }
 
+    // 마지막으로 설정한 창 제목(매 tick 같은 값을 재설정하지 않으려는 캐시).
+    private var lastWindowTitle = ""
+
+    // 창 제목을 셸/앱 상태에서 갱신한다 — OSC 0/2 제목이 있으면 그것, 없으면 OSC 7 cwd basename,
+    // 둘 다 없으면 앱 이름("Maru"). 우선순위 로직은 Zig(core.windowTitle)가 소유하고 여기선 받아서
+    // 빈값 폴백만 한다. debugEnabled면 진단 제목(updateDiagnosticTitle)이 제목줄을 쓰므로 건너뛴다
+    // (상호 배타). 변했을 때만 window.title을 써서 매 tick 불필요한 setter 호출을 막는다.
+    private func updateWindowTitle() {
+        guard !debugEnabled, let window, let session = devSession else { return }
+        var ptr: UnsafePointer<UInt8>? = nil
+        var len: size_t = 0
+        guard maru_macos_app_dev_session_window_title(session, &ptr, &len) == Self.statusOK else { return }
+        let title: String
+        if let bytes = ptr, len > 0 {
+            title = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
+        } else {
+            title = "Maru" // 제목·cwd 둘 다 없으면 앱 이름
+        }
+        if title != lastWindowTitle {
+            window.title = title
+            lastWindowTitle = title
+        }
+    }
+
     private func tickDevSession() {
         guard let devSession else {
             return
         }
         updateDiagnosticTitle()
+        updateWindowTitle() // 비-debug일 때 OSC 0/2 제목 또는 cwd basename을 제목줄에 반영
 
         // backing scale이 런치 후 늦게 정착/변경되면(콜백이 dev session 생성 전 발화한 경우 등)
         // dev session의 device_scale이 옛 값에 머문다. 변했을 때만 resize를 다시 보낸다(매 tick

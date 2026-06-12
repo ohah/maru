@@ -335,6 +335,14 @@ int32_t maru_macos_app_dev_session_cwd(
     const uint8_t **out_ptr,
     size_t *out_len
 );
+/* 창 제목 문자열(OSC 0/2 제목 우선, 없으면 OSC 7 cwd basename; UTF-8). 우선순위는 core가 정한다.
+   버퍼는 Zig(core) 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효, 없으면 *out_len=0(Swift가 앱 이름
+   폴백). Swift가 window.title에 쓴다. */
+int32_t maru_macos_app_dev_session_window_title(
+    MaruAppHostDevSession *session,
+    const uint8_t **out_ptr,
+    size_t *out_len
+);
 void maru_macos_app_dev_session_destroy(MaruAppHostDevSession *session);
 int32_t maru_macos_app_dev_session_metal_frame(
     MaruAppHostDevSession *session,

@@ -840,6 +840,14 @@ pub const DevSession = struct {
         return self.surfaces[0].core.currentCwd();
     }
 
+    /// 창 제목으로 보여줄 문자열(OSC 0/2 제목 우선, 없으면 cwd basename, 둘 다 없으면 빈 슬라이스).
+    /// 우선순위 로직은 core가 소유한다(native 최소) — Swift는 받아서 빈값이면 앱 이름으로 폴백만.
+    /// 반환은 core 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효하다(별도 복사 없음).
+    pub fn windowTitle(self: *DevSession) []const u8 {
+        if (!self.surface_initialized) return &.{};
+        return self.surfaces[0].core.windowTitle();
+    }
+
     /// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면은 rows-1줄(한 줄 겹침)이고,
     /// rows는 dev session이 권위 있게 알고 있어 Swift가 stale 값으로 계산하지 않게 여기서 구한다.
     /// alt screen에서는 휠과 동일하게 화살표 변환으로 폴백한다(이전엔 완전 무반응이었다).

@@ -165,6 +165,10 @@ pub const TerminalCore = struct {
     // 가정, SSH/원격 구분은 후속). 창 제목 등이 읽는다. 셸 상태라 화면 clear엔 안 지우고 RIS에서만
     // 지운다. 한 번도 안 받았으면 null(빈 cwd).
     cwd: ?[]u8 = null,
+    // OSC 0/2: 프로그램이 지정한 창 제목(xterm ctlseqs — OSC 0=아이콘+제목, OSC 2=제목; OSC 1=아이콘만
+    // 무시). core가 소유한다. 셸/앱이 지정하면 창 제목에 우선 쓰고, 없으면 cwd basename으로 폴백한다
+    // (windowTitle). 빈 제목(OSC 2 ; ST)은 해제(null)로 본다. RIS에서 공장 초기화. 그리드엔 안 보인다.
+    title: ?[]u8 = null,
     // 스크롤된(view_offset>0) 상태의 렌더용 합성 버퍼(rows×cols). renderSnapshot이 뷰포트 윈도를
     // 여기에 합성한다. view_offset==0이면 안 쓰므로 lazy 할당한다(스크롤할 때만 메모리 사용).
     viewport_cells: []types.Cell = &.{},
@@ -234,6 +238,10 @@ pub const TerminalCore = struct {
             self.allocator.free(c);
             self.cwd = null;
         }
+        if (self.title) |t| { // OSC 0/2 창 제목도 공장 초기화(xterm RIS가 제목을 리셋하는 의미론)
+            self.allocator.free(t);
+            self.title = null;
+        }
         self.cursor = .{};
         self.pen = .{};
         self.pending_wrap = false;
@@ -251,6 +259,7 @@ pub const TerminalCore = struct {
     pub fn deinit(self: *TerminalCore) void {
         if (self.preedit) |p| self.allocator.free(p);
         if (self.cwd) |c| self.allocator.free(c);
+        if (self.title) |t| self.allocator.free(t);
         for (self.link_store.items) |uri| self.allocator.free(uri);
         self.link_store.deinit(self.allocator);
         self.link_ids.deinit(self.allocator);
@@ -1182,7 +1191,12 @@ pub const TerminalCore = struct {
             self.dispatchOscSemanticPrompt(body[4..]);
         } else if (std.mem.startsWith(u8, body, "7;")) {
             self.dispatchOscCwd(body[2..]);
+        } else if (std.mem.startsWith(u8, body, "0;")) {
+            self.setWindowTitle(body[2..]); // OSC 0 = 아이콘 이름 + 창 제목(둘 다) — 창 제목으로 받는다
+        } else if (std.mem.startsWith(u8, body, "2;")) {
+            self.setWindowTitle(body[2..]); // OSC 2 = 창 제목만
         }
+        // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
     }
 
     /// OSC 8: `8 ; params ; URI` — URI가 비면 링크 닫기, 있으면 열기(이후 출력 셀에 id가 찍힌다).
@@ -1249,6 +1263,27 @@ pub const TerminalCore = struct {
     /// 창 제목 등 platform layer가 읽는다(facade를 통해 노출).
     pub fn currentCwd(self: *const TerminalCore) []const u8 {
         return self.cwd orelse "";
+    }
+
+    /// OSC 0/2 창 제목을 설정한다(xterm ctlseqs). 빈 텍스트는 해제(null)로 본다 — `OSC 2 ; ST`로
+    /// 앱이 제목을 지우면 cwd basename 폴백으로 돌아간다. OOM이면 제목 없이 둔다(텍스트는 어차피
+    /// 그리드에 안 나오므로 손실 없음).
+    fn setWindowTitle(self: *TerminalCore, text: []const u8) void {
+        if (self.title) |old| self.allocator.free(old);
+        self.title = null;
+        if (text.len == 0) return; // 빈 제목 = 해제
+        self.title = self.allocator.dupe(u8, text) catch null;
+    }
+
+    /// 창 제목으로 보여줄 문자열(native 최소 — 우선순위 로직을 Zig가 소유한다). OSC 0/2로 앱이
+    /// 지정한 제목이 있으면 그것을, 없으면 cwd의 basename(마지막 경로 요소)을 쓴다. 둘 다 없으면
+    /// 빈 슬라이스(platform이 앱 이름 등으로 폴백). 반환은 core 소유 슬라이스(title 또는 cwd의
+    /// 부분슬라이스)로 다음 OSC 0/2/7·RIS·destroy까지 유효하다.
+    pub fn windowTitle(self: *const TerminalCore) []const u8 {
+        if (self.title) |t| return t;
+        const cwd = self.currentCwd();
+        if (cwd.len == 0) return "";
+        return std.fs.path.basename(cwd); // "/Users/me/proj" -> "proj", "/" -> ""
     }
 
     /// OSC 133(semantic prompt): 셸이 프롬프트/입력/출력 경계를 마킹한다. `133 ; <action> [; opts]`.
@@ -3356,6 +3391,38 @@ test "OSC sequence is consumed and does not print" {
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("hi      ", dump);
+    // ...but it IS captured as the window title (consumed != discarded).
+    try std.testing.expectEqualStrings("title", core.windowTitle());
+}
+
+// 창 제목은 xterm OSC 0/2(아이콘+제목 / 제목)로 앱이 지정하거나, 없으면 OSC 7 cwd의 basename으로
+// 폴백한다 — 탭/창 제목줄이 읽는 단일 계약이라 우선순위(제목 > cwd basename > 빈값) 로직이 Zig에
+// 있어야 한다(native 최소). OSC 1(아이콘만)은 창 제목과 무관하므로 무시돼야 한다.
+test "window title: OSC 2 sets it, OSC 1 ignored, empty clears to cwd basename" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    try std.testing.expectEqualStrings("", core.windowTitle()); // 아무것도 없으면 빈값
+
+    // cwd만 있으면 basename으로 폴백.
+    try core.write("\x1b]7;file://h/Users/me/proj\x07");
+    try std.testing.expectEqualStrings("proj", core.windowTitle());
+
+    // OSC 2 제목이 있으면 그게 우선(cwd basename보다).
+    try core.write("\x1b]2;my app\x1b\\");
+    try std.testing.expectEqualStrings("my app", core.windowTitle());
+
+    // OSC 1(아이콘만)은 창 제목을 안 바꾼다.
+    try core.write("\x1b]1;iconname\x07");
+    try std.testing.expectEqualStrings("my app", core.windowTitle());
+
+    // 빈 OSC 2는 제목 해제 → 다시 cwd basename 폴백.
+    try core.write("\x1b]2;\x07");
+    try std.testing.expectEqualStrings("proj", core.windowTitle());
+
+    // RIS는 제목과 cwd를 모두 공장 초기화 → 빈값.
+    try core.write("\x1bc");
+    try std.testing.expectEqualStrings("", core.windowTitle());
 }
 
 // OSC 7(VTE 사실상 표준)은 셸이 cwd를 보고하는 채널이다 — 터미널은 PTY 너머라 cwd를 모르므로

@@ -11,6 +11,11 @@ const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const metal_frame = @import("metal_frame.zig");
 const shell_integration = @import("shell_integration.zig");
 
+// SplitTree를 leaf = `*Pane`으로 인스턴스화한다(트리는 panel 단위). app 레이어는 generic만 노출하고 Pane은
+// 이 platform 모듈이 정의하므로, 트리가 panel을 leaf로 들면서도 app→platform 의존이 생기지 않는다. cmux식
+// 모델: 한 leaf(Pane)가 여러 Term(터미널)을 가로 탭으로 들고, 화면엔 활성 Term의 surface를 그린다.
+const PaneTree = app.SplitTree(*Pane);
+
 // Metal DTO·view·owned 버퍼는 순수 모듈 metal_frame이 소유한다. ABI 표면으로 re-export만 한다.
 pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
@@ -119,10 +124,10 @@ fn inSidebarCloseButton(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bo
     return x_px >= width - zone and x_px < width;
 }
 
-/// 스크린 점(backing px)을 담는 panel leaf의 surface(없으면 null). split 탭에서 마우스 클릭이 어느 panel에
-/// 떨어졌는지 hit-test한다 — 각 leaf rect는 [x, x+w) × [y, y+h) 반열린 구간으로 본다(경계는 다음 panel에).
-/// 비유한 좌표는 null. 순수 함수라 OS 무관 단위 테스트한다(레이아웃 rect만 입력).
-fn paneAtPoint(leaf_rects: []const app.SplitLeafRect, x_px: f64, y_px: f64) ?*app.Surface {
+/// 스크린 점(backing px)을 담는 panel(없으면 null). split 탭에서 마우스 클릭이 어느 panel에 떨어졌는지
+/// hit-test한다 — 각 leaf rect는 [x, x+w) × [y, y+h) 반열린 구간으로 본다(경계는 다음 panel에). 비유한
+/// 좌표는 null. 순수 함수라 OS 무관 단위 테스트한다(레이아웃 rect만 입력).
+fn paneAtPoint(leaf_rects: []const PaneTree.LeafRect, x_px: f64, y_px: f64) ?*Pane {
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
     for (leaf_rects) |lr| {
         const x0: f64 = @floatFromInt(lr.rect.x);
@@ -130,7 +135,7 @@ fn paneAtPoint(leaf_rects: []const app.SplitLeafRect, x_px: f64, y_px: f64) ?*ap
         if (x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(lr.rect.w)) and
             y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(lr.rect.h)))
         {
-            return lr.surface;
+            return lr.leaf;
         }
     }
     return null;
@@ -139,14 +144,14 @@ fn paneAtPoint(leaf_rects: []const app.SplitLeafRect, x_px: f64, y_px: f64) ?*ap
 /// 키보드 pane 이동 방향(좌/우/상/하). split 탭에서 활성 panel 기준 인접 panel을 고른다.
 const FocusDirection = enum { left, right, up, down };
 
-/// 활성 panel(active_surface)에서 direction 방향으로 가장 가까운 인접 panel의 surface(없으면 null). 각
-/// panel rect의 '중심'을 비교해 — 방향 반평면 안(left면 중심 x가 더 작음 등)인 후보 중, 주축 거리(이동 방향)
-/// + 부축 어긋남×2(정렬 페널티)가 최소인 것을 고른다. 좌우 split이면 상/하는 후보가 없어 null(이동 안 함),
-/// 격자 배치면 같은 행/열의 정렬된 panel을 우선한다. 순수 함수라 OS 무관 단위 테스트한다(레이아웃 rect만 입력).
-fn paneInDirection(leaf_rects: []const app.SplitLeafRect, active_surface: *app.Surface, dir: FocusDirection) ?*app.Surface {
+/// 활성 panel(active_pane)에서 direction 방향으로 가장 가까운 인접 panel(없으면 null). 각 panel rect의
+/// '중심'을 비교해 — 방향 반평면 안(left면 중심 x가 더 작음 등)인 후보 중, 주축 거리(이동 방향) + 부축
+/// 어긋남×2(정렬 페널티)가 최소인 것을 고른다. 좌우 split이면 상/하는 후보가 없어 null(이동 안 함), 격자
+/// 배치면 같은 행/열의 정렬된 panel을 우선한다. 순수 함수라 OS 무관 단위 테스트한다(레이아웃 rect만 입력).
+fn paneInDirection(leaf_rects: []const PaneTree.LeafRect, active_pane: *Pane, dir: FocusDirection) ?*Pane {
     var active_rect: ?app.SplitRect = null;
     for (leaf_rects) |lr| {
-        if (lr.surface == active_surface) {
+        if (lr.leaf == active_pane) {
             active_rect = lr.rect;
             break;
         }
@@ -154,10 +159,10 @@ fn paneInDirection(leaf_rects: []const app.SplitLeafRect, active_surface: *app.S
     const ar = active_rect orelse return null;
     const acx = @as(f64, @floatFromInt(ar.x)) + @as(f64, @floatFromInt(ar.w)) / 2.0;
     const acy = @as(f64, @floatFromInt(ar.y)) + @as(f64, @floatFromInt(ar.h)) / 2.0;
-    var best: ?*app.Surface = null;
+    var best: ?*Pane = null;
     var best_score: f64 = std.math.inf(f64);
     for (leaf_rects) |lr| {
-        if (lr.surface == active_surface) continue;
+        if (lr.leaf == active_pane) continue;
         const cx = @as(f64, @floatFromInt(lr.rect.x)) + @as(f64, @floatFromInt(lr.rect.w)) / 2.0;
         const cy = @as(f64, @floatFromInt(lr.rect.y)) + @as(f64, @floatFromInt(lr.rect.h)) / 2.0;
         const dx = cx - acx;
@@ -180,7 +185,7 @@ fn paneInDirection(leaf_rects: []const app.SplitLeafRect, active_surface: *app.S
         const score = primary + 2.0 * secondary; // 부축 정렬(같은 행/열)을 우대
         if (score < best_score) {
             best_score = score;
-            best = lr.surface;
+            best = lr.leaf;
         }
     }
     return best;
@@ -317,38 +322,57 @@ const NormalizedConfig = struct {
     command_kind: CommandKind,
 };
 
-/// 한 탭의 단위: surface(그리드/스크롤백) + 그 surface에 붙은 live PTY 셸 + 그 PTY를 drain하는 pump.
-/// `LivePtySession`의 reader thread가 `&live_pty.reader`를 잡으므로 이 묶음은 한번 만들면 이동하면
-/// 안 된다 — `ArrayList(*Tab)`로 각 Tab을 heap-pin(`allocator.create`)하므로 리스트가 realloc돼도
-/// 본체는 안 움직인다. pump는 안정 `*queue` 포인터만 들어 이동 제약이 없다.
-// 한 panel(split leaf)의 per-surface 런타임 상태. 탭이 panel을 1개(지금) 또는 split 후 여러 개 들고,
-// 각 Pane이 자기 셸 PTY·surface·pump를 가진다. heap-pin(`*Pane`)이라 ArrayList realloc·트리 회전에도
-// 본체(`LivePtySession` reader가 `&pane.live_pty.reader`를 잡음, SplitTree leaf가 `&pane.surface`를 잡음)가
-// 안 움직인다.
-const Pane = struct {
+/// 한 터미널의 런타임 단위: surface(그리드/스크롤백) + 그 surface에 붙은 live PTY 셸 + 그 PTY를 drain하는
+/// pump. `LivePtySession`의 reader thread가 `&live_pty.reader`를 잡으므로 이 묶음은 한번 만들면 이동하면
+/// 안 된다 — heap-pin(`*Term`)이라 ArrayList realloc·트리 회전·탭 재정렬에도 본체(reader가 잡는
+/// `&live_pty.reader`, SplitTree leaf가 잡는 `&surface`)가 안 움직인다. pump는 안정 `*queue`만 들어 이동
+/// 제약이 없다. cmux식 모델에서 한 Pane(split leaf)이 이 Term을 가로 탭으로 여러 개 들 수 있다(⌘T로 추가).
+const Term = struct {
     surface: app.Surface = undefined,
     live_pty: app.LivePtySession = undefined,
     pump: app.RuntimeEventPump = undefined,
     live_initialized: bool = false,
-    // 이 panel의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이
-    // panel별로 한 번만 finish하도록, 그리고 세션 종료(모든 panel terminated)를 판정하도록 쓴다.
+    // 이 Term의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이 Term별로
+    // 한 번만 finish하도록, 세션 종료(모든 Term terminated) 판정에 쓴다.
     terminated: bool = false,
 };
 
-const Tab = struct {
-    // 이 탭의 panel들(heap-pin `*Pane`). 지금은 1개; split(PR3 키)이 늘린다. tree의 leaf가 이들의
-    // `&surface`를 가리킨다.
-    panes: std.ArrayList(*Pane) = .empty,
-    // 포커스된 panel 인덱스 — 입력/커서/탭 대표 surface가 이 panel을 본다. 지금은 항상 0(단일 panel);
-    // pane 포커스 이동(PR4)이 바꾼다.
-    active_pane: usize = 0,
-    // 이 탭의 SplitTree 루트(split PR1 모델). 지금은 단일 leaf(= &panes[0].surface)라 panel 1개 = 풀 탭
-    // 영역으로 동작이 기존과 같다. split(PR3)이 leaf를 split 노드로 바꿔 여러 panel이 된다.
-    tree: app.SplitNode = undefined,
+/// 한 panel(split leaf = 화면의 한 분할 영역). cmux식으로 **여러 Term(터미널)을 가로 탭으로** 담는 컨테이너다
+/// — `⌘T`가 활성 Pane에 Term을 추가하고, Pane 상단 탭 바가 각 Term을 탭으로 보여준다(PR-C+). 지금(PR-A)은
+/// Pane당 Term 1개로 시작해 동작이 기존과 같다. SplitTree leaf는 이 Pane의 '활성 Term의 surface'를 가리킨다
+/// (활성 Term이 바뀌면 leaf surface를 그 Term으로 갱신 — PR-B). heap-pin(`*Pane`)이라 ArrayList realloc·트리
+/// 회전에도 본체가 안 움직인다(Term이 `&surface`/`&reader`를 거는 주소 안정).
+const Pane = struct {
+    // 이 panel의 Term들(가로 탭, heap-pin `*Term`). 항상 ≥1. `⌘T`가 늘리고 `⌘W`/✕가 줄인다(마지막이면 Pane
+    // collapse). tree leaf는 active_term의 surface를 가리킨다.
+    terms: std.ArrayList(*Term) = .empty,
+    // 이 panel에서 포커스된(보이는) Term 인덱스 — surface/PTY/pump 접근과 tree leaf가 이 Term을 본다.
+    active_term: usize = 0,
 
-    /// 포커스된 panel. live_pty/pump/surface 등 panel 내부 접근에 쓴다. 탭은 항상 panel ≥1.
+    /// 활성 Term(보이는 터미널). 입력/커서/렌더가 이 Term의 surface를 쓴다. Pane은 항상 Term ≥1.
+    fn activeTerm(self: *Pane) *Term {
+        return self.terms.items[self.active_term];
+    }
+};
+
+const Tab = struct {
+    // 이 워크스페이스(사이드바 탭)의 panel들(heap-pin `*Pane`). split이 늘린다. tree의 leaf가 각 Pane의
+    // 활성 Term `&surface`를 가리킨다.
+    panes: std.ArrayList(*Pane) = .empty,
+    // 포커스된 panel 인덱스 — 입력/커서/탭 대표 surface가 이 panel(의 활성 Term)을 본다. pane 포커스 이동이 바꾼다.
+    active_pane: usize = 0,
+    // 이 탭의 SplitTree 루트(split 모델). 단일 leaf(= 활성 Pane의 활성 Term surface)면 panel 1개 = 풀 탭 영역.
+    // split이 leaf를 split 노드로 바꿔 여러 panel이 된다.
+    tree: PaneTree.Node = undefined,
+
+    /// 포커스된 panel. pane 내부(Term/surface) 접근에 쓴다. 탭은 항상 panel ≥1.
     fn activePane(self: *Tab) *Pane {
         return self.panes.items[self.active_pane];
+    }
+
+    /// 포커스된 panel의 활성 Term(= 화면에 보이는 터미널). surface/PTY/pump 접근의 최종 단계.
+    fn activeTerm(self: *Tab) *Term {
+        return self.activePane().activeTerm();
     }
 };
 
@@ -556,7 +580,11 @@ pub const DevSession = struct {
         // 실제 폰트 메트릭에서 cell 픽셀 크기를 뽑는다. shaper(atlas slot)·rasterizer·renderer가
         // 모두 같은 값을 쓰게 하는 단일 출처다.
         self.refreshCellMetrics();
-        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.activePane().pump, &self.renderer_state);
+        // FrameLoop.init이 pump 포인터를 요구해 첫 Term의 pump를 넘기지만, DevSession은 tick에서 모든 Term을
+        // 직접 drain하고 `tickAfterDrainWithFrameBuilder`(이미 drain된 summary를 받아 frame만 조립 — frame_loop.pump
+        // 무시)만 쓴다. 즉 frame_loop.pump는 이 경로에서 절대 읽히지 않으므로 포커스/닫기마다 재바인딩하지 않는다
+        // (읽히지 않는 필드를 유지하는 방어 코드 불필요). frame_loop.tick/tickWithFrameBuilder로 바꾸려면 그때 pump를 살려야 한다.
+        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.activePane().activeTerm().pump, &self.renderer_state);
         // 활성 panel rect를 초기화한다 — refreshCellMetrics가 사이드바 폭을 채운 '뒤'라야 단일 panel 기준
         // (x = 사이드바 폭, y = 0)이 맞다(createTab 시점엔 사이드바 폭이 아직 0이라 여기서 다시 잡는다).
         self.recomputeActivePaneRect();
@@ -594,9 +622,9 @@ pub const DevSession = struct {
         self: *DevSession,
         allocator: std.mem.Allocator,
         term_rect: app.SplitRect,
-        out: *std.ArrayList(app.SplitLeafRect),
+        out: *std.ArrayList(PaneTree.LeafRect),
     ) !void {
-        try app.split_tree.layout(allocator, self.activeTab().tree, term_rect, out);
+        try PaneTree.layout(allocator, self.activeTab().tree, term_rect, out);
     }
 
     /// 활성 탭의 각 panel을 자기 leaf rect grid로 resize한다(window resize·split 후 재배치). 단일 leaf면
@@ -604,16 +632,20 @@ pub const DevSession = struct {
     /// 에러만 전파하고(기존 resize()의 try 동작 보존), 비활성 panel의 죽은 PTY 등은 무시해 한 panel이 다른
     /// panel 재배치를 막지 않게 한다. leaf rect 계산 실패(OOM)는 전파.
     fn resizeActiveTabPanes(self: *DevSession) !void {
-        var leaf_rects: std.ArrayList(app.SplitLeafRect) = .empty;
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         try self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects);
-        const active_surface = self.activeSurface();
+        const active_pane = self.activePane();
         for (leaf_rects.items) |lr| {
             const psize = gridFromRectPx(self.cell_width_px, self.cell_height_px, lr.rect.w, lr.rect.h);
-            if (lr.surface == active_surface) {
-                try self.runtime.resize(lr.surface.id, psize);
-            } else {
-                self.runtime.resize(lr.surface.id, psize) catch {};
+            // panel의 모든 Term(가로 탭)을 같은 rect grid로 맞춘다 — 비활성 Term도 전환 즉시 올바른 크기가 되게.
+            // 활성 panel의 활성 Term만 에러를 전파(기존 단일 surface resize의 try 동작 보존), 나머지는 무시.
+            for (lr.leaf.terms.items) |term| {
+                if (lr.leaf == active_pane and term == lr.leaf.activeTerm()) {
+                    try self.runtime.resize(term.surface.id, psize);
+                } else {
+                    self.runtime.resize(term.surface.id, psize) catch {};
+                }
             }
         }
     }
@@ -624,12 +656,12 @@ pub const DevSession = struct {
     /// resize·focusPane·closeTab·init) 호출해, pxToCell/imeCursorRect가 매 마우스 이벤트마다 재레이아웃
     /// (할당) 없이 캐시된 origin을 읽게 한다.
     fn recomputeActivePaneRect(self: *DevSession) void {
-        const active_surface = self.activeSurface();
-        var leaf_rects: std.ArrayList(app.SplitLeafRect) = .empty;
+        const active_pane = self.activePane();
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         if (self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects)) |_| {
             for (leaf_rects.items) |lr| {
-                if (lr.surface == active_surface) {
+                if (lr.leaf == active_pane) {
                     self.active_pane_rect = lr.rect;
                     return;
                 }
@@ -640,7 +672,7 @@ pub const DevSession = struct {
 
     /// 활성 탭이 split(panel 2개 이상)인가. 마우스 클릭으로 panel을 전환할지(단일이면 무동작) 판정에 쓴다.
     fn activeTabHasSplit(self: *DevSession) bool {
-        return app.split_tree.leafCount(self.activeTab().tree) > 1;
+        return PaneTree.leafCount(self.activeTab().tree) > 1;
     }
 
     /// 활성 탭 안에서 포커스를 panel index로 옮긴다(입력/커서/IME/렌더가 따라간다). 활성 panel surface를
@@ -650,19 +682,18 @@ pub const DevSession = struct {
         const tab = self.activeTab();
         if (pane_index >= tab.panes.items.len or tab.active_pane == pane_index) return;
         tab.active_pane = pane_index;
-        self.surface_ptrs.items[self.app_window.active_tab] = &tab.activePane().surface;
+        self.surface_ptrs.items[self.app_window.active_tab] = &tab.activeTerm().surface;
         self.app_window.tabs = self.surface_ptrs.items;
-        self.frame_loop.pump = &self.activePane().pump;
         self.recomputeActivePaneRect();
         self.metal_dirty = true;
     }
 
-    /// 활성 탭에서 surface를 가진 panel을 찾아 포커스한다(찾으면 true). 마우스 hit-test가 고른 surface로
-    /// 포커스를 옮길 때 쓴다(surface→panel index 매핑).
-    fn focusPaneBySurface(self: *DevSession, surface: *app.Surface) bool {
+    /// 활성 탭에서 주어진 panel을 찾아 포커스한다(찾으면 true). 마우스/키보드 hit-test가 고른 `*Pane`으로
+    /// 포커스를 옮길 때 쓴다(panel→index 매핑).
+    fn focusPaneByPtr(self: *DevSession, pane: *Pane) bool {
         const tab = self.activeTab();
-        for (tab.panes.items, 0..) |pane, i| {
-            if (&pane.surface == surface) {
+        for (tab.panes.items, 0..) |p, i| {
+            if (p == pane) {
                 self.focusPane(i);
                 return true;
             }
@@ -675,11 +706,11 @@ pub const DevSession = struct {
     /// rect를 펴 paneInDirection으로 대상을 고른 뒤 focusPaneBySurface로 옮긴다.
     fn focusPaneInDirection(self: *DevSession, dir: FocusDirection) void {
         if (!self.activeTabHasSplit()) return;
-        var leaf_rects: std.ArrayList(app.SplitLeafRect) = .empty;
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
-        if (paneInDirection(leaf_rects.items, self.activeSurface(), dir)) |surf| {
-            _ = self.focusPaneBySurface(surf);
+        if (paneInDirection(leaf_rects.items, self.activePane(), dir)) |pane| {
+            _ = self.focusPaneByPtr(pane);
         }
     }
 
@@ -693,12 +724,12 @@ pub const DevSession = struct {
         const active = tab.activePane();
 
         // 1) 활성 panel의 현재 rect를 레이아웃에서 찾는다(없으면 — 있어선 안 되지만 — 분할 안 함).
-        var leaf_rects: std.ArrayList(app.SplitLeafRect) = .empty;
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         try self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects);
         var active_rect: ?app.SplitRect = null;
         for (leaf_rects.items) |lr| {
-            if (lr.surface == &active.surface) {
+            if (lr.leaf == active) {
                 active_rect = lr.rect;
                 break;
             }
@@ -706,7 +737,7 @@ pub const DevSession = struct {
         const arect = active_rect orelse return error.ActivePaneNotInTree;
 
         // 2) active rect를 direction·0.5로 a(기존)·b(새)로 나눈 grid.
-        const parts = app.split_tree.splitRect(arect, direction, 0.5);
+        const parts = app.splitRect(arect, direction, 0.5);
         const a_size = gridFromRectPx(self.cell_width_px, self.cell_height_px, parts.a.w, parts.a.h);
         const b_size = gridFromRectPx(self.cell_width_px, self.cell_height_px, parts.b.w, parts.b.h);
 
@@ -725,20 +756,20 @@ pub const DevSession = struct {
         errdefer _ = tab.panes.pop();
 
         // 4) split 노드를 heap에 만들고 트리에서 활성 leaf를 split{a: 기존, b: 새}로 교체.
-        const split = try self.allocator.create(app.Split);
+        const split = try self.allocator.create(PaneTree.Split);
         errdefer self.allocator.destroy(split);
         split.* = .{
             .direction = direction,
             .ratio = 0.5,
-            .a = .{ .leaf = &active.surface },
-            .b = .{ .leaf = &new_pane.surface },
+            .a = .{ .leaf = active },
+            .b = .{ .leaf = new_pane },
         };
-        if (!app.split_tree.replaceLeaf(&tab.tree, &active.surface, .{ .split = split })) {
+        if (!PaneTree.replaceLeaf(&tab.tree, active, .{ .split = split })) {
             return error.ActivePaneNotInTree; // errdefer가 split·pane을 원복(트리는 변형 전이라 무변)
         }
 
-        // 5) 기존 panel을 a 크기로 줄인다(PTY winsize 포함). 죽은 PTY 등의 실패는 무시(split 자체는 성공).
-        self.runtime.resize(active.surface.id, a_size) catch {};
+        // 5) 기존 panel의 모든 Term을 a 크기로 줄인다(PTY winsize 포함). 죽은 PTY 등의 실패는 무시(split 자체는 성공).
+        for (active.terms.items) |term| self.runtime.resize(term.surface.id, a_size) catch {};
 
         // 6) 새 panel로 포커스 이동(cmux/tmux식). focusPane이 탭 대표 surface(= app_window.active())·
         //    frame_loop pump 재바인딩 + 활성 panel rect 재계산 + metal_dirty를 한 곳에서 한다. 탭 인덱스는
@@ -746,10 +777,54 @@ pub const DevSession = struct {
         self.focusPane(tab.panes.items.len - 1);
     }
 
-    /// 한 panel을 heap-pin(`create`)으로 만든다 — 셸 PTY spawn → surface init → runtime attach → pump.
-    /// `LivePtySession` reader가 `&pane.live_pty.reader`를 잡으므로 Pane은 heap 고정(ArrayList는 `*Pane`만
-    /// 들어 realloc·트리 회전에도 본체 안 움직임). surface_id·pty_id 발급(next_id), 부분 실패는 errdefer로
-    /// 정리(create→live_pty→surface 역순). 탭/사이드바에 거는 건 호출자(createTab/split)가 한다.
+    /// 한 Term(터미널)을 heap-pin(`create`)으로 만든다 — 셸 PTY spawn → surface init → runtime attach → pump.
+    /// `LivePtySession` reader가 `&term.live_pty.reader`를 잡으므로 Term은 heap 고정(ArrayList는 `*Term`만 들어
+    /// realloc·탭 재정렬에도 본체 안 움직임). surface_id·pty_id 발급(next_id), 부분 실패는 errdefer로 정리
+    /// (create→live_pty→surface 역순). Pane에 거는 건 호출자(createPane/⌘T)가 한다.
+    fn createTerm(
+        self: *DevSession,
+        request: maru.pty.SpawnRequest,
+        size: terminal.Size,
+        queue_capacity: usize,
+        title: []const u8,
+        command: []const u8,
+    ) !*Term {
+        const term = try self.allocator.create(Term);
+        errdefer self.allocator.destroy(term);
+        term.* = .{};
+
+        const id = self.next_id; // surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
+        try term.live_pty.init(self.io, self.allocator, id, request, queue_capacity);
+        errdefer term.live_pty.deinit();
+        term.live_initialized = true;
+
+        term.surface = try app.Surface.init(self.allocator, id, size);
+        errdefer term.surface.deinit();
+        term.surface.title = title;
+        term.surface.command = command;
+
+        _ = try term.live_pty.attachSurface(&self.runtime, &term.surface);
+        term.pump = term.live_pty.pump(&self.runtime);
+        self.next_id += 1;
+        return term;
+    }
+
+    /// 한 Term을 teardown하고 heap 해제한다(closeAndDetach → live_pty.deinit(reader join) → surface.deinit →
+    /// destroy). runtime이 살아 있을 때만 detach. createPane/⌘T errdefer·close·split 실패 정리에 쓴다.
+    /// (deinit은 runtime.deinit 순서 때문에 이 2-pass를 직접 풀어 쓴다 — 여기 쓰지 않는다.)
+    fn destroyTerm(self: *DevSession, term: *Term) void {
+        if (term.live_initialized) {
+            if (self.runtime_initialized) term.live_pty.closeAndDetach(&self.runtime);
+            term.live_pty.deinit();
+            term.live_initialized = false;
+        }
+        term.surface.deinit();
+        self.allocator.destroy(term);
+    }
+
+    /// 한 panel(Pane)을 heap-pin으로 만든다 — Term 1개를 담은 컨테이너. cmux식 모델에서 Pane은 여러 Term을
+    /// 가로 탭으로 들 수 있고(⌘T가 추가), 생성 시엔 1개로 시작한다. heap-pin(`*Pane`)이라 트리 회전·ArrayList
+    /// realloc에도 본체가 안 움직인다(SplitTree leaf가 이 `*Pane`을 가리킴). 부분 실패는 errdefer로 정리.
     fn createPane(
         self: *DevSession,
         request: maru.pty.SpawnRequest,
@@ -761,33 +836,20 @@ pub const DevSession = struct {
         const pane = try self.allocator.create(Pane);
         errdefer self.allocator.destroy(pane);
         pane.* = .{};
+        errdefer pane.terms.deinit(self.allocator);
 
-        const id = self.next_id; // surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
-        try pane.live_pty.init(self.io, self.allocator, id, request, queue_capacity);
-        errdefer pane.live_pty.deinit();
-        pane.live_initialized = true;
-
-        pane.surface = try app.Surface.init(self.allocator, id, size);
-        errdefer pane.surface.deinit();
-        pane.surface.title = title;
-        pane.surface.command = command;
-
-        _ = try pane.live_pty.attachSurface(&self.runtime, &pane.surface);
-        pane.pump = pane.live_pty.pump(&self.runtime);
-        self.next_id += 1;
+        const term = try self.createTerm(request, size, queue_capacity, title, command);
+        errdefer self.destroyTerm(term);
+        try pane.terms.append(self.allocator, term);
+        pane.active_term = 0;
         return pane;
     }
 
-    /// 한 panel을 teardown하고 heap 해제한다(closeAndDetach → live_pty.deinit(reader join) → surface.deinit
-    /// → destroy). runtime이 살아 있을 때만 detach. createPane errdefer·closeTab·split 실패 정리에 쓴다.
-    /// (deinit은 runtime.deinit 순서 때문에 이 2-pass를 직접 풀어 쓴다 — 여기 쓰지 않는다.)
+    /// 한 panel을 teardown하고 heap 해제한다 — 담긴 모든 Term을 destroyTerm한 뒤 terms 리스트·Pane을 해제.
+    /// createPane errdefer·closeTab·closeActivePane·split 실패 정리에 쓴다.
     fn destroyPane(self: *DevSession, pane: *Pane) void {
-        if (pane.live_initialized) {
-            if (self.runtime_initialized) pane.live_pty.closeAndDetach(&self.runtime);
-            pane.live_pty.deinit();
-            pane.live_initialized = false;
-        }
-        pane.surface.deinit();
+        for (pane.terms.items) |term| self.destroyTerm(term);
+        pane.terms.deinit(self.allocator);
         self.allocator.destroy(pane);
     }
 
@@ -812,13 +874,13 @@ pub const DevSession = struct {
 
         try tab.panes.append(self.allocator, pane);
         tab.active_pane = 0;
-        // SplitTree 루트를 단일 leaf로 — 이 탭은 panel 1개(= 풀 탭 영역). Pane이 heap-pin이라 &pane.surface가
-        // 안정이므로 leaf 포인터가 안전하다. split(PR3 키)이 이 leaf를 split 노드로 나눈다.
-        tab.tree = .{ .leaf = &pane.surface };
+        // SplitTree 루트를 단일 leaf로 — 이 탭은 panel 1개(= 풀 탭 영역). leaf는 Pane을 가리킨다(Pane이
+        // heap-pin이라 포인터 안정). split이 이 leaf를 split 노드로 나눈다.
+        tab.tree = .{ .leaf = pane };
 
         try self.tabs.append(self.allocator, tab);
         errdefer _ = self.tabs.pop();
-        try self.surface_ptrs.append(self.allocator, &pane.surface); // 탭 대표 = 활성 panel surface
+        try self.surface_ptrs.append(self.allocator, &pane.activeTerm().surface); // 탭 대표 = 활성 panel의 활성 Term surface
         // surface_ptrs가 realloc됐을 수 있으니 app_window.tabs를 새 items로 재바인딩(stale 슬라이스 방지).
         self.app_window.tabs = self.surface_ptrs.items;
         self.app_window.active_tab = self.tabs.items.len - 1;
@@ -864,14 +926,11 @@ pub const DevSession = struct {
         // teardown — 탭의 모든 panel을 destroyPane(closeAndDetach → reader join → surface deinit → free)한 뒤
         // panes 리스트·Tab을 해제한다. runtime은 세션 동안 살아 있으므로 detach가 안전하다.
         for (tab.panes.items) |pane| self.destroyPane(pane);
-        app.split_tree.deinit(self.allocator, tab.tree); // heap split 노드 해제(leaf surface는 destroyPane가 이미)
+        PaneTree.deinit(self.allocator, tab.tree); // heap split 노드 해제(leaf surface는 destroyPane가 이미)
         tab.panes.deinit(self.allocator);
         self.allocator.destroy(tab);
 
         self.app_window.active_tab = reselectAfterClose(index, self.app_window.active_tab, self.tabs.items.len);
-        // frame_loop의 pump를 새 active 탭으로 갱신한다. DevSession tick 경로(tickAfterDrainWithFrameBuilder)는
-        // 이 pump를 안 쓰지만, 닫은 게 active 탭이면 옛 pump 포인터가 dangling이 되므로 방어적으로 유지한다.
-        self.frame_loop.pump = &self.activePane().pump;
         self.recomputeActivePaneRect(); // 새 활성 탭의 활성 panel rect로 좌표 origin 갱신
 
         self.hovered_slot = null; // 인덱스가 밀렸으니 호버 무효화(다음 마우스 이동이 재설정)
@@ -888,17 +947,16 @@ pub const DevSession = struct {
         if (tab.panes.items.len <= 1) return; // 단일 panel은 탭 close 경로
         const idx = tab.active_pane;
         const closing = tab.panes.items[idx];
-        // 1) 트리에서 leaf를 떼고 형제로 collapse(split 노드만 해제 — surface는 아래 destroyPane가 정리).
-        if (!app.split_tree.removeLeaf(self.allocator, &tab.tree, &closing.surface)) return;
-        // 2) panes에서 빼고 panel teardown(closeAndDetach → reader join → surface deinit → free).
+        // 1) 트리에서 이 panel(leaf)을 떼고 형제로 collapse(split 노드만 해제 — Term/surface는 아래 destroyPane가).
+        if (!PaneTree.removeLeaf(self.allocator, &tab.tree, closing)) return;
+        // 2) panes에서 빼고 panel teardown(모든 Term closeAndDetach → reader join → surface deinit → free).
         _ = tab.panes.orderedRemove(idx);
         self.destroyPane(closing);
         // 3) active_pane 보정: 닫은 게 마지막이면 이전, 아니면 그 자리로 온 다음 panel(같은 인덱스).
         tab.active_pane = if (idx >= tab.panes.items.len) tab.panes.items.len - 1 else idx;
-        // 4) 대표 surface(= app_window.active())·pump를 새 활성 panel로 재바인딩(닫은 panel 포인터 dangling 방지).
-        self.surface_ptrs.items[self.app_window.active_tab] = &tab.activePane().surface;
+        // 4) 대표 surface(= app_window.active())·pump를 새 활성 panel(의 활성 Term)로 재바인딩(닫은 포인터 dangling 방지).
+        self.surface_ptrs.items[self.app_window.active_tab] = &tab.activeTerm().surface;
         self.app_window.tabs = self.surface_ptrs.items;
-        self.frame_loop.pump = &self.activePane().pump;
         // 5) 남은 panel을 collapse된 트리의 새 leaf rect로 resize + 좌표 origin 재계산.
         self.resizeActiveTabPanes() catch {};
         self.recomputeActivePaneRect();
@@ -924,7 +982,6 @@ pub const DevSession = struct {
         rotateMove(*Tab, self.tabs.items, from, to);
         rotateMove(*app.Surface, self.surface_ptrs.items, from, to);
         self.app_window.active_tab = adjustActiveForMove(self.app_window.active_tab, from, to);
-        self.frame_loop.pump = &self.activePane().pump; // 순서가 바뀌었으니 활성 탭 pump 재바인딩(방어적)
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }
@@ -934,7 +991,9 @@ pub const DevSession = struct {
         if (self.tabs.items.len == 0) return false;
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
-                if (pane.live_initialized and !pane.terminated) return false;
+                for (pane.terms.items) |term| {
+                    if (term.live_initialized and !term.terminated) return false;
+                }
             }
         }
         return true;
@@ -1206,11 +1265,11 @@ pub const DevSession = struct {
         // 새로 활성이 된 panel에서 다음 클릭/드래그부터 시작한다(엉뚱한 panel에 선택을 긋지 않게). kind!=1이면
         // 단락 평가로 self.tabs를 건드리지 않는다(최소-셋업 드래그 테스트는 kind 2/3만 보낸다).
         if (kind == 1 and self.activeTabHasSplit()) {
-            var leaf_rects: std.ArrayList(app.SplitLeafRect) = .empty;
+            var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
             defer leaf_rects.deinit(self.allocator);
             if (self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects)) |_| {
-                if (paneAtPoint(leaf_rects.items, x_px, y_px)) |surf| {
-                    if (surf != self.activeSurface() and self.focusPaneBySurface(surf)) {
+                if (paneAtPoint(leaf_rects.items, x_px, y_px)) |pane| {
+                    if (pane != self.activePane() and self.focusPaneByPtr(pane)) {
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false;
                         return;
@@ -1814,20 +1873,22 @@ pub const DevSession = struct {
         // (reader join/child reap)을 건너뛰지 않게 한다.
         self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 30Hz로 한 줄씩 스크롤+확장
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
-        // 모든 탭의 모든 panel PTY를 drain한다 — 백그라운드 탭/panel도 출력을 받게(routing은 surface_id로
-        // 각 surface에 가고, frame은 아래에서 활성 탭만 빌드한다). 누적 summary는 frame builder에 보고용.
+        // 모든 탭의 모든 panel의 모든 Term PTY를 drain한다 — 백그라운드 탭/panel/탭(Term)도 출력을 받게
+        // (routing은 surface_id로 각 surface에 가고, frame은 아래에서 활성 탭만 빌드한다). summary는 보고용.
         var drain_summary: app.RuntimePumpDrainSummary = .{};
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
-                if (!pane.live_initialized) continue;
-                const ds = try pane.pump.drainAvailable();
-                drain_summary.output_events += ds.output_events;
-                drain_summary.exit_events += ds.exit_events;
-                // panel별로 종료를 한 번만 finish(reader join + child reap). 세션 종료는 '모든' panel이 끝났을 때.
-                if (ds.ended != null and !pane.terminated) {
-                    pane.live_pty.finishAfterTermination();
-                    pane.terminated = true;
-                    drain_summary.ended = ds.ended; // 마지막 관측 종료를 frame 보고에 싣는다
+                for (pane.terms.items) |term| {
+                    if (!term.live_initialized) continue;
+                    const ds = try term.pump.drainAvailable();
+                    drain_summary.output_events += ds.output_events;
+                    drain_summary.exit_events += ds.exit_events;
+                    // Term별로 종료를 한 번만 finish(reader join + child reap). 세션 종료는 '모든' Term이 끝났을 때.
+                    if (ds.ended != null and !term.terminated) {
+                        term.live_pty.finishAfterTermination();
+                        term.terminated = true;
+                        drain_summary.ended = ds.ended; // 마지막 관측 종료를 frame 보고에 싣는다
+                    }
                 }
             }
         }
@@ -1897,16 +1958,16 @@ pub const DevSession = struct {
             // 각자 surface snapshot으로 frame을 만들어(커서/선택 없는 plain 색) 먼저 넣고, 활성 panel(frame_loop가
             // 만든 tick_result.frame)을 자기 leaf rect origin으로 '맨 뒤'에 둔다(맨 뒤 = 커서 suffix). 비활성
             // frame 빌드는 실 CoreText 브리지라 macOS에서만; 실패한 panel은 건너뛴다(세션 안 죽임).
-            var leaf_rects: std.ArrayList(app.SplitLeafRect) = .empty;
+            var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
             defer leaf_rects.deinit(self.allocator);
             self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch {};
-            const active_surface = self.activeSurface();
+            const active_pane = self.activePane();
 
             // 활성 panel의 origin(leaf rect). 못 구하면(빈 리스트 — OOM) (사이드바 폭, 0)로 폴백.
             var active_origin_x: u32 = self.sidebar_width_px;
             var active_origin_y: u32 = 0;
             for (leaf_rects.items) |lr| {
-                if (lr.surface == active_surface) {
+                if (lr.leaf == active_pane) {
                     active_origin_x = lr.rect.x;
                     active_origin_y = lr.rect.y;
                     break;
@@ -1937,8 +1998,9 @@ pub const DevSession = struct {
                     .cell_height_px = @intCast(self.cell_height_px),
                 };
                 for (leaf_rects.items) |lr| {
-                    if (lr.surface == active_surface) continue; // 활성은 맨 뒤에 따로 넣는다
-                    const dl = renderer.buildDrawList(self.allocator, lr.surface.core.renderSnapshot()) catch continue;
+                    if (lr.leaf == active_pane) continue; // 활성은 맨 뒤에 따로 넣는다
+                    // 비활성 panel은 자기 활성 Term(보이는 탭)의 surface를 그린다.
+                    const dl = renderer.buildDrawList(self.allocator, lr.leaf.activeTerm().surface.core.renderSnapshot()) catch continue;
                     var f = pane_frame_builder.buildFromDrawList(self.allocator, dl, &self.renderer_state) catch continue;
                     built_frames.append(self.allocator, f) catch {
                         f.deinit(self.allocator);
@@ -1988,10 +2050,12 @@ pub const DevSession = struct {
         // 아니면 close만.
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
-                if (pane.live_initialized and self.runtime_initialized) {
-                    pane.live_pty.closeAndDetach(&self.runtime);
-                } else if (pane.live_initialized) {
-                    pane.live_pty.close();
+                for (pane.terms.items) |term| {
+                    if (term.live_initialized and self.runtime_initialized) {
+                        term.live_pty.closeAndDetach(&self.runtime);
+                    } else if (term.live_initialized) {
+                        term.live_pty.close();
+                    }
                 }
             }
         }
@@ -2099,7 +2163,7 @@ pub const DevSession = struct {
         }
         for (self.tabs.items, 0..) |tab, i| {
             // 탭 대표 제목 = 활성 panel surface 제목(split 시 포커스 panel의 제목이 사이드바에 보인다).
-            const label = try std.fmt.allocPrint(self.allocator, "{d} {s}", .{ i + 1, tab.activePane().surface.title });
+            const label = try std.fmt.allocPrint(self.allocator, "{d} {s}", .{ i + 1, tab.activeTerm().surface.title });
             try labels.append(self.allocator, label);
         }
 
@@ -2139,14 +2203,16 @@ pub const DevSession = struct {
 
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
-        // 1) 각 탭의 각 panel live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'. detach
-        //    후 deinit이 reader thread join + fd/queue 해제(이동 금지 계약이라 in-place로 정리).
+        // 1) 각 탭의 각 panel의 각 Term live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'.
+        //    detach 후 deinit이 reader thread join + fd/queue 해제(이동 금지 계약이라 in-place로 정리).
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
-                if (pane.live_initialized) {
-                    if (self.runtime_initialized) pane.live_pty.closeAndDetach(&self.runtime);
-                    pane.live_pty.deinit();
-                    pane.live_initialized = false;
+                for (pane.terms.items) |term| {
+                    if (term.live_initialized) {
+                        if (self.runtime_initialized) term.live_pty.closeAndDetach(&self.runtime);
+                        term.live_pty.deinit();
+                        term.live_initialized = false;
+                    }
                 }
             }
         }
@@ -2158,15 +2224,19 @@ pub const DevSession = struct {
             self.runtime.deinit();
             self.runtime_initialized = false;
         }
-        // 2) 각 panel surface 정리 + Pane/Tab heap 해제(runtime.deinit 뒤 — surface는 runtime 불요).
+        // 2) 각 panel의 각 Term surface 정리 + Term/Pane/Tab heap 해제(runtime.deinit 뒤 — surface는 runtime 불요).
         //    appearance가 surface family를 빌리므로 surface 정리는 아래 config/appearance 해제보다 앞이어야
         //    한다(원래 순서 보존).
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
-                pane.surface.deinit();
+                for (pane.terms.items) |term| {
+                    term.surface.deinit();
+                    self.allocator.destroy(term);
+                }
+                pane.terms.deinit(self.allocator);
                 self.allocator.destroy(pane);
             }
-            app.split_tree.deinit(self.allocator, tab.tree); // heap split 노드 해제(split.deinit은 surface 미접근)
+            PaneTree.deinit(self.allocator, tab.tree); // heap split 노드 해제(split.deinit은 leaf 미접근)
             tab.panes.deinit(self.allocator);
             self.allocator.destroy(tab);
         }
@@ -2694,16 +2764,16 @@ test "active tab is a single-leaf SplitTree laid out to the full terminal rect" 
     // 활성 탭은 panel 1개(split 전), active_pane 0, tree는 단일 leaf(= 활성 panel surface).
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
     try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
-    try std.testing.expectEqual(session.activeSurface(), &session.activePane().surface);
-    try std.testing.expectEqual(@as(usize, 1), app.split_tree.leafCount(session.activeTab().tree));
+    try std.testing.expectEqual(session.activeSurface(), &session.activePane().activeTerm().surface);
+    try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(session.activeTab().tree));
 
-    var out: std.ArrayList(app.SplitLeafRect) = .empty;
+    var out: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer out.deinit(allocator);
     const rect: app.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
     try session.activeTabLeafRects(allocator, rect, &out);
-    // 단일 leaf → rect 1개 = 입력 rect 전체, surface = 활성 surface.
+    // 단일 leaf → rect 1개 = 입력 rect 전체, leaf = 활성 panel.
     try std.testing.expectEqual(@as(usize, 1), out.items.len);
-    try std.testing.expectEqual(session.activeSurface(), out.items[0].surface);
+    try std.testing.expectEqual(session.activePane(), out.items[0].leaf);
     try std.testing.expectEqual(rect, out.items[0].rect);
 }
 
@@ -2729,32 +2799,35 @@ test "splitActivePane splits the active leaf, focuses the new panel, and renders
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
 
+    const old_pane = session.activePane();
     const old_surface = session.activeSurface();
     try session.splitActivePane(.horizontal);
 
     // 트리/포커스: panel 2개, 새 panel(인덱스 1)이 활성, tree는 horizontal split{a: 기존, b: 새}.
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
-    try std.testing.expectEqual(@as(usize, 2), app.split_tree.leafCount(session.activeTab().tree));
+    try std.testing.expectEqual(@as(usize, 2), PaneTree.leafCount(session.activeTab().tree));
+    const new_pane = session.activePane();
     const new_surface = session.activeSurface();
-    try std.testing.expect(new_surface != old_surface); // 포커스가 새 panel로 이동
-    try std.testing.expectEqual(new_surface, &session.activePane().surface);
+    try std.testing.expect(new_pane != old_pane); // 포커스가 새 panel로 이동
+    try std.testing.expect(new_surface != old_surface);
+    try std.testing.expectEqual(new_surface, &session.activePane().activeTerm().surface);
     switch (session.activeTab().tree) {
         .leaf => return error.TestExpectedSplitNode,
         .split => |sp| {
             try std.testing.expectEqual(app.SplitDirection.horizontal, sp.direction);
-            try std.testing.expectEqual(old_surface, sp.a.leaf); // a = 기존 panel(왼쪽)
-            try std.testing.expectEqual(new_surface, sp.b.leaf); // b = 새 panel(오른쪽)
+            try std.testing.expectEqual(old_pane, sp.a.leaf); // a = 기존 panel(왼쪽)
+            try std.testing.expectEqual(new_pane, sp.b.leaf); // b = 새 panel(오른쪽)
         },
     }
 
     // 레이아웃: 2개 rect, 합이 터미널 폭과 같고(틈 없음) 기존이 왼쪽·새가 오른쪽.
-    var out: std.ArrayList(app.SplitLeafRect) = .empty;
+    var out: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer out.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &out);
     try std.testing.expectEqual(@as(usize, 2), out.items.len);
-    try std.testing.expectEqual(old_surface, out.items[0].surface);
-    try std.testing.expectEqual(new_surface, out.items[1].surface);
+    try std.testing.expectEqual(old_pane, out.items[0].leaf);
+    try std.testing.expectEqual(new_pane, out.items[1].leaf);
     try std.testing.expectEqual(@as(u32, 800), out.items[0].rect.w + out.items[1].rect.w);
     try std.testing.expectEqual(session.sidebar_width_px, out.items[0].rect.x); // 왼쪽 panel은 사이드바 바로 옆
 
@@ -2762,18 +2835,16 @@ test "splitActivePane splits the active leaf, focuses the new panel, and renders
     _ = try session.tick();
 }
 
-// paneAtPoint가 스크린 점을 담는 leaf rect의 surface를 고르는지(반열린 구간 경계·밖·비유한) — 마우스
-// pane 전환의 hit-test 코어라 헤드리스 단위로 고정한다(레이아웃 rect만 입력, OS 무관).
+// paneAtPoint가 스크린 점을 담는 leaf rect의 panel을 고르는지(반열린 구간 경계·밖·비유한) — 마우스
+// pane 전환의 hit-test 코어라 헤드리스 단위로 고정한다(레이아웃 rect만 입력, OS 무관). leaf는 deref되지
+// 않아(pointer-identity만) 빈 Pane 더미로 충분하다.
 test "paneAtPoint hit-tests which leaf rect contains a screen point" {
-    const allocator = std.testing.allocator;
-    var a = try app.Surface.init(allocator, 1, .{ .cols = 4, .rows = 2 });
-    defer a.deinit();
-    var b = try app.Surface.init(allocator, 2, .{ .cols = 4, .rows = 2 });
-    defer b.deinit();
+    var a: Pane = .{};
+    var b: Pane = .{};
     // 좌우 2-panel: a=[0,100)×[0,200), b=[100,200)×[0,200).
-    const rects = [_]app.SplitLeafRect{
-        .{ .surface = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 } },
-        .{ .surface = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 200 } },
+    const rects = [_]PaneTree.LeafRect{
+        .{ .leaf = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 } },
+        .{ .leaf = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 200 } },
     };
     try std.testing.expectEqual(&a, paneAtPoint(&rects, 50, 100).?);
     try std.testing.expectEqual(&b, paneAtPoint(&rects, 150, 100).?);
@@ -2787,33 +2858,28 @@ test "paneAtPoint hit-tests which leaf rect contains a screen point" {
 // paneInDirection이 활성 panel 기준 방향 인접 panel을 고르는지(반평면 + 정렬, 잘못된 축은 null) — 키보드
 // pane 이동의 기하 코어라 헤드리스 단위로 고정한다. 좌우 split·2×2 격자·미발견을 다 본다.
 test "paneInDirection picks the adjacent pane in a direction" {
-    const allocator = std.testing.allocator;
-    var a = try app.Surface.init(allocator, 1, .{ .cols = 4, .rows = 2 });
-    defer a.deinit();
-    var b = try app.Surface.init(allocator, 2, .{ .cols = 4, .rows = 2 });
-    defer b.deinit();
-    var c = try app.Surface.init(allocator, 3, .{ .cols = 4, .rows = 2 });
-    defer c.deinit();
-    var d = try app.Surface.init(allocator, 4, .{ .cols = 4, .rows = 2 });
-    defer d.deinit();
+    var a: Pane = .{};
+    var b: Pane = .{};
+    var c: Pane = .{};
+    var d: Pane = .{};
 
     // 좌우 2-panel: a 왼쪽, b 오른쪽.
-    const lr = [_]app.SplitLeafRect{
-        .{ .surface = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 } },
-        .{ .surface = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 200 } },
+    const lr = [_]PaneTree.LeafRect{
+        .{ .leaf = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 } },
+        .{ .leaf = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 200 } },
     };
     try std.testing.expectEqual(&b, paneInDirection(&lr, &a, .right).?);
     try std.testing.expectEqual(&a, paneInDirection(&lr, &b, .left).?);
     try std.testing.expect(paneInDirection(&lr, &a, .up) == null); // 좌우 split이라 위/아래 없음
     try std.testing.expect(paneInDirection(&lr, &a, .down) == null);
-    try std.testing.expect(paneInDirection(&lr, &c, .left) == null); // 활성 surface가 leaf에 없음
+    try std.testing.expect(paneInDirection(&lr, &c, .left) == null); // 활성 panel이 leaf에 없음
 
     // 2×2 격자: a=좌상, b=우상, c=좌하, d=우하. 정렬(같은 행/열)을 우대한다.
-    const grid = [_]app.SplitLeafRect{
-        .{ .surface = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 } },
-        .{ .surface = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 100 } },
-        .{ .surface = &c, .rect = .{ .x = 0, .y = 100, .w = 100, .h = 100 } },
-        .{ .surface = &d, .rect = .{ .x = 100, .y = 100, .w = 100, .h = 100 } },
+    const grid = [_]PaneTree.LeafRect{
+        .{ .leaf = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 } },
+        .{ .leaf = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 100 } },
+        .{ .leaf = &c, .rect = .{ .x = 0, .y = 100, .w = 100, .h = 100 } },
+        .{ .leaf = &d, .rect = .{ .x = 100, .y = 100, .w = 100, .h = 100 } },
     };
     try std.testing.expectEqual(&b, paneInDirection(&grid, &a, .right).?); // a→우: b(같은 행)
     try std.testing.expectEqual(&c, paneInDirection(&grid, &a, .down).?); // a→하: c(같은 열)
@@ -2932,7 +2998,7 @@ test "Cmd+W closes the active pane first and collapses the split, leaving the si
     try std.testing.expectEqual(left, session.activeSurface());
     try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
     try std.testing.expect(!session.activeTabHasSplit());
-    try std.testing.expectEqual(@as(usize, 1), app.split_tree.leafCount(session.activeTab().tree));
+    try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(session.activeTab().tree));
     // 남은 panel이 빈자리를 차지해 터미널 영역 전체로 resize됐다(좌표 origin도 사이드바 옆·전체 폭).
     try std.testing.expectEqual(session.sidebar_width_px, session.active_pane_rect.x);
     try std.testing.expectEqual(@as(u32, 800), session.active_pane_rect.w);
@@ -3061,7 +3127,7 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
         );
     }
     try std.testing.expectEqual(@as(usize, 3), session.tabs.items.len);
-    try std.testing.expectEqualStrings("Maru dev shell", session.tabs.items[0].activePane().surface.title);
+    try std.testing.expectEqualStrings("Maru dev shell", session.tabs.items[0].activePane().activeTerm().surface.title);
     try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
 
     const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
@@ -3075,9 +3141,9 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
     session.mouse(3, x, slot_h * 2 + 1);
 
     // 순서 [tab 2, tab 3, Maru], 활성=드래그 탭(Maru)=2, 드래그 종료.
-    try std.testing.expectEqualStrings("tab 2", session.tabs.items[0].activePane().surface.title);
-    try std.testing.expectEqualStrings("tab 3", session.tabs.items[1].activePane().surface.title);
-    try std.testing.expectEqualStrings("Maru dev shell", session.tabs.items[2].activePane().surface.title);
+    try std.testing.expectEqualStrings("tab 2", session.tabs.items[0].activePane().activeTerm().surface.title);
+    try std.testing.expectEqualStrings("tab 3", session.tabs.items[1].activePane().activeTerm().surface.title);
+    try std.testing.expectEqualStrings("Maru dev shell", session.tabs.items[2].activePane().activeTerm().surface.title);
     try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
     try std.testing.expect(!session.sidebar_drag_active);
 }
@@ -3117,7 +3183,7 @@ test "two tabs: createTab spawns a second shell and tick drains both (multi-tab)
     var i: usize = 0;
     while (i < 400 and !saw) : (i += 1) {
         _ = try session.tick();
-        const dump = try session.tabs.items[1].activePane().surface.core.dumpUtf8(allocator);
+        const dump = try session.tabs.items[1].activePane().activeTerm().surface.core.dumpUtf8(allocator);
         defer allocator.free(dump);
         if (std.mem.indexOf(u8, dump, "TAB_TWO_MARK") != null) saw = true;
     }
@@ -3125,7 +3191,7 @@ test "two tabs: createTab spawns a second shell and tick drains both (multi-tab)
 
     // switchTab으로 활성 탭을 0으로 — activeSurface가 탭 0 surface를 가리킨다(라우팅 전환).
     try std.testing.expect(session.switchTab(0));
-    try std.testing.expectEqual(session.tabs.items[0].activePane().surface.id, session.activeSurface().id);
+    try std.testing.expectEqual(session.tabs.items[0].activePane().activeTerm().surface.id, session.activeSurface().id);
     try std.testing.expect(!session.switchTab(5)); // 범위 밖이면 false, 활성 불변
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
 }

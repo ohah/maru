@@ -53,11 +53,12 @@ pub const SmokeDrainDeadlineConfig = smoke_drain.DeadlineConfig;
 pub const Surface = surface.Surface;
 pub const SurfaceId = runtime.SurfaceId;
 pub const SurfaceRuntime = runtime.SurfaceRuntime;
-pub const SplitNode = split_tree.Node;
+// SplitTree는 leaf 타입에 대해 generic이다(app이 platform의 Pane 타입에 의존하지 않게) — platform이
+// `app.SplitTree(*Pane)`으로 인스턴스화해 Node/Split/LeafRect를 그 인스턴스에서 얻는다.
+pub const SplitTree = split_tree.SplitTree;
 pub const SplitDirection = split_tree.SplitDirection;
-pub const Split = split_tree.Split;
 pub const SplitRect = split_tree.Rect;
-pub const SplitLeafRect = split_tree.LeafRect;
+pub const splitRect = split_tree.splitRect; // leaf-독립 헬퍼(생성용 a/b rect)
 pub const TerminalInput = runtime.TerminalInput;
 pub const ProcessState = surface.ProcessState;
 

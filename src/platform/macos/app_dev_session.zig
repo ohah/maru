@@ -2264,6 +2264,36 @@ test "Cmd+T opens a new tab through the key path (built-in app binding dispatch)
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
 }
 
+// Cmd+Shift+]/[ 가 키 경로(handleKeyEvent → resolver → app_action)로 다음/이전 탭을 순환하는지 — 실
+// PTY라 macOS 게이트. 2탭에서 ]는 활성을 1→0, [는 0→1(wrap)으로 옮긴다.
+test "Cmd+Shift bracket keys cycle tabs through the key path" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // 2탭, 활성 1
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+
+    // Cmd+Shift+] → next_tab → (1+1)%2 = 0.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = ']' }, .modifiers = .{ .command = true, .shift = true } });
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
+    // Cmd+Shift+[ → previous_tab → (0+2-1)%2 = 1(wrap).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '[' }, .modifiers = .{ .command = true, .shift = true } });
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    // 닫는 중괄호 변형(}/{)도 같은 액션(OS가 Shift를 적용해 줄 수 있음).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '}' }, .modifiers = .{ .command = true, .shift = true } });
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
+}
+
 // closeTab이 탭을 teardown하고 active_tab을 재선택하며, 마지막 탭은 창(세션) 종료로 latch하는지 — 실
 // PTY teardown(detach + reader join)이라 macOS 게이트. cat는 PTY가 닫힐 때까지 살아 있어 live 탭 teardown을 본다.
 test "closeTab tears down a tab and reselects, last tab closes the session" {

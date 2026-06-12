@@ -35,9 +35,33 @@ pub const CoreTextFrameBuilder = struct {
         const active = app_window.active() orelse return error.NoActiveSurface;
         // renderSnapshot: 위로 스크롤한 상태면 뷰포트 윈도(스크롤백+활성)를 합성해 그린다. 바닥이면
         // snapshot()과 동일(합성 없음).
-        var draw_list = try renderer.buildDrawList(allocator, active.core.renderSnapshot());
+        const draw_list = try renderer.buildDrawList(allocator, active.core.renderSnapshot());
+        // buildFromDrawList가 draw_list 소유권을 가져간다(실패 시 정리, 성공 시 RenderFrame으로 이동).
+        const render_frame = try self.buildFromDrawList(allocator, draw_list, renderer_state);
+
+        return .{
+            .surface_id = active.id,
+            .size = active.core.size,
+            .process_state = active.process_state,
+            .drain_summary = drain_summary,
+            .render_frame = render_frame,
+        };
+    }
+
+    /// 이미 만들어진 DrawList(소유권 이전)를 같은 CoreText shaper/rasterizer/renderer_state로
+    /// shape → raster → RenderFrame까지 만든다. `build`(터미널 snapshot)와 사이드바 탭-제목 패스가
+    /// 이 seam을 공유한다 — 둘이 같은 atlas(renderer_state)를 쓰므로 사이드바 제목 glyph도 터미널과
+    /// 같은 slot을 재사용하고, 새 glyph만 추가 업로드된다. 성공하면 반환된 RenderFrame이 draw_list를
+    /// 소유(deinit)하고, 실패하면 여기서 draw_list를 정리한다(호출자는 넘긴 뒤 건드리지 않는다).
+    pub fn buildFromDrawList(
+        self: CoreTextFrameBuilder,
+        allocator: std.mem.Allocator,
+        draw_list: renderer.DrawList,
+        renderer_state: *renderer.RendererState,
+    ) !renderer.RenderFrame {
+        var owned_list = draw_list;
         var draw_list_owned = true;
-        errdefer if (draw_list_owned) draw_list.deinit(allocator);
+        errdefer if (draw_list_owned) owned_list.deinit(allocator);
 
         var font_registry = renderer.FontIdentityRegistry.init(allocator);
         defer font_registry.deinit();
@@ -51,7 +75,7 @@ pub const CoreTextFrameBuilder = struct {
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
         };
-        var shaped = try shaper.shape(allocator, draw_list, &font_registry);
+        var shaped = try shaper.shape(allocator, owned_list, &font_registry);
         defer shaped.deinit(allocator);
 
         const rasterizer = coretext_raster.CoreTextGlyphRasterizer{
@@ -62,21 +86,73 @@ pub const CoreTextFrameBuilder = struct {
         };
         const render_frame = try renderer_state.buildFrameFromGlyphRunListWithRasterizer(
             allocator,
-            draw_list,
+            owned_list,
             shaped.runs,
             rasterizer,
         );
         draw_list_owned = false;
-
-        return .{
-            .surface_id = active.id,
-            .size = active.core.size,
-            .process_state = active.process_state,
-            .drain_summary = drain_summary,
-            .render_frame = render_frame,
-        };
+        return render_frame;
     }
 };
+
+/// 텍스트 줄들을 사이드바 탭-제목 렌더용 DrawList로 합성한다(한 줄=한 탭, row=탭 인덱스). 각 줄을
+/// UTF-8 코드포인트로 디코드해 cell 폭(terminal.width.cellWidth)만큼 열을 전진시키며 DrawCell을 깐다.
+/// `cols`를 넘는 글자는 자른다(사이드바 폭 한도). 전경색은 `fg`(테마 사이드바 글자색). 커서/overlay는
+/// 없다(UI 텍스트). 깨진 UTF-8 바이트는 U+FFFD로 대체해 한 칸 전진한다. 순수 함수라 OS 무관 단위
+/// 테스트한다 — 실제 shape/raster는 buildFromDrawList가 fake/real 백엔드로 처리한다.
+pub fn buildSidebarDrawList(
+    allocator: std.mem.Allocator,
+    titles: []const []const u8,
+    cols: u16,
+    fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+
+    const style: terminal.Style = .{ .foreground = fg };
+    const rows: u16 = @intCast(@min(titles.len, @as(usize, std.math.maxInt(u16))));
+    for (titles, 0..) |title, row_index| {
+        if (row_index > std.math.maxInt(u16)) break;
+        const row: u16 = @intCast(row_index);
+        var col: u16 = 0;
+        // 제목은 OSC 0/2(신뢰 불가 PTY 출력)에서 올 수 있어 잘못된 UTF-8을 패닉 없이 다뤄야 한다.
+        // 바이트 단위로 디코드하고, 불완전/깨진 시퀀스는 U+FFFD로 대체하며 1바이트만 전진한다.
+        var i: usize = 0;
+        while (i < title.len) {
+            var cp: u21 = 0xFFFD;
+            var advance: usize = 1;
+            if (std.unicode.utf8ByteSequenceLength(title[i])) |seq_len| {
+                const len: usize = seq_len;
+                if (i + len <= title.len) {
+                    if (std.unicode.utf8Decode(title[i .. i + len])) |decoded| {
+                        cp = decoded;
+                        advance = len;
+                    } else |_| {}
+                }
+            } else |_| {}
+            i += advance;
+
+            const w: u16 = @max(1, terminal.width.cellWidth(cp)); // 0폭(결합문자 등)도 최소 1칸 전진
+            if (col + w > cols) break; // 사이드바 폭 한도 — 넘치는 제목은 자른다
+            try cells.append(allocator, .{
+                .row = row,
+                .col = col,
+                .codepoint = cp,
+                .width = @intCast(@min(w, 2)),
+                .style = style,
+            });
+            col += w;
+        }
+    }
+
+    return .{
+        .size = .{ .cols = cols, .rows = @max(rows, 1) },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = if (rows == 0) 0 else rows - 1 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
 
 fn emptyNativeDrawGlyphRecord() coretext_shaper.NativeDrawGlyphRecord {
     return .{
@@ -284,4 +360,71 @@ test "CoreText frame builder surfaces native shape failures" {
         error.CoreTextDrawListShapeFailed,
         builder.build(allocator, &app_window, &renderer_state, .{}),
     );
+}
+
+test "buildSidebarDrawList lays tab titles into per-row draw cells, truncating to cols" {
+    const allocator = std.testing.allocator;
+    const titles = [_][]const u8{ "zsh", "vim" };
+    var draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default);
+    defer draw_list.deinit(allocator);
+
+    // 한 줄=한 탭(row=탭 인덱스), size는 cols=한도·rows=탭 수.
+    try std.testing.expectEqual(@as(u16, 10), draw_list.size.cols);
+    try std.testing.expectEqual(@as(u16, 2), draw_list.size.rows);
+    try std.testing.expectEqual(@as(usize, 6), draw_list.cells.len); // "zsh"(3) + "vim"(3)
+    try std.testing.expectEqual(@as(u16, 0), draw_list.cells[0].row);
+    try std.testing.expectEqual(@as(u16, 0), draw_list.cells[0].col);
+    try std.testing.expectEqual(@as(u21, 'z'), draw_list.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u16, 1), draw_list.cells[3].row); // 둘째 탭은 row 1
+    try std.testing.expectEqual(@as(u21, 'v'), draw_list.cells[3].codepoint);
+    // UI 텍스트라 커서/overlay 없음.
+    try std.testing.expect(!draw_list.cursor.visible);
+    try std.testing.expectEqual(@as(usize, 0), draw_list.overlays.len);
+}
+
+test "buildSidebarDrawList truncates to cols and advances wide glyphs by two columns" {
+    const allocator = std.testing.allocator;
+    // cols=5: "abcdefg"는 5칸까지만(자름). 와이드 글자는 2칸 전진.
+    const titles = [_][]const u8{ "abcdefg", "한A" };
+    var draw_list = try buildSidebarDrawList(allocator, &titles, 5, .default);
+    defer draw_list.deinit(allocator);
+
+    var row0: usize = 0;
+    var row1_cols: [2]u16 = .{ 0, 0 };
+    var row1_i: usize = 0;
+    for (draw_list.cells) |c| {
+        if (c.row == 0) row0 += 1;
+        if (c.row == 1 and row1_i < 2) {
+            row1_cols[row1_i] = c.col;
+            row1_i += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 5), row0); // 7글자 중 5칸까지만
+    // "한"(와이드, width 2)이 col 0, 다음 'A'가 col 2(2칸 전진).
+    try std.testing.expectEqual(@as(u16, 0), row1_cols[0]);
+    try std.testing.expectEqual(@as(u16, 2), row1_cols[1]);
+}
+
+test "buildFromDrawList shapes a synthesized sidebar draw list into glyph cells (shared atlas seam)" {
+    // 사이드바 제목 패스가 터미널과 같은 seam(shape→raster→RenderFrame)을 탄다. fake bridge로
+    // 합성 DrawList가 glyph까지 닿는지 고정한다 — 실제 CoreText 없이 연결 계약만 검증.
+    const allocator = std.testing.allocator;
+    const titles = [_][]const u8{"ab"};
+    const draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default);
+
+    var renderer_state = renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
+    const builder = CoreTextFrameBuilder{
+        .appearance = try config.resolveAppearance(.{}),
+        .shape_draw_list = testShapeDrawList,
+        .rasterize_glyph = testRasterizeGlyph,
+    };
+
+    var render_frame = try builder.buildFromDrawList(allocator, draw_list, &renderer_state);
+    defer render_frame.deinit(allocator);
+
+    // 'a','b' 두 glyph(공백 아님)가 shape돼 atlas/quad까지 준비됐다.
+    const stats = renderer.renderFrameStats(render_frame, renderer_state.atlas.entryCount());
+    try std.testing.expect(stats.prepared());
+    try std.testing.expectEqual(@as(usize, 2), stats.glyph_count);
 }

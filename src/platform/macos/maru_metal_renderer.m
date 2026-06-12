@@ -146,6 +146,53 @@ bool maru_metal_renderer_set_atlas(
     return true;
 }
 
+/* 한 cell을 origin_x offset에서 6 정점 quad로 채운다(out에 6개 기록). 터미널 셀(origin_x=사이드바 폭)과
+   사이드바 셀(origin_x=0)이 같은 fixed-cell 투영을 공유한다 — 차이는 origin_x 뿐. reserved 부분 사각형
+   (2=underline 하단, 3=bar 좌측)과 색(전경 0x00RRGGBB·배경 0xAARRGGBB) 처리도 동일하다. */
+static void maru_fill_cell_quad(
+    MaruRendererVertex *out,
+    const MaruAppHostDevMetalCell cell,
+    float origin_x,
+    float cw,
+    float ch,
+    float drawable_w,
+    float drawable_h
+) {
+    const float span = (float)(cell.width == 0 ? 1 : cell.width);
+    float px_left = origin_x + (float)cell.col * cw;
+    float px_right = px_left + cw * span;
+    float px_top = (float)cell.row * ch;
+    float px_bottom = px_top + ch;
+    // 커서 모양(DECSCUSR): reserved 2=underline(하단 ~15%), 3=bar(좌측 ~15%, 최소 2px). block(0)은 전체 cell.
+    if (cell.reserved == 2) {
+        const float thickness = fmaxf(2.0f, ch * 0.15f);
+        px_top = px_bottom - thickness;
+    } else if (cell.reserved == 3) {
+        const float thickness = fmaxf(2.0f, cw * 0.15f);
+        px_right = px_left + thickness;
+    }
+    const float left = (px_left / drawable_w) * 2.0f - 1.0f;
+    const float right = (px_right / drawable_w) * 2.0f - 1.0f;
+    const float top = 1.0f - (px_top / drawable_h) * 2.0f;
+    const float bottom = 1.0f - (px_bottom / drawable_h) * 2.0f;
+    const float fr = (float)((cell.foreground >> 16) & 0xff) / 255.0f;
+    const float fg = (float)((cell.foreground >> 8) & 0xff) / 255.0f;
+    const float fb = (float)(cell.foreground & 0xff) / 255.0f;
+    const float ba = (float)((cell.background >> 24) & 0xff) / 255.0f;
+    const float br = (float)((cell.background >> 16) & 0xff) / 255.0f;
+    const float bg = (float)((cell.background >> 8) & 0xff) / 255.0f;
+    const float bb = (float)(cell.background & 0xff) / 255.0f;
+    const MaruRendererVertex quad[6] = {
+        {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}, {br, bg, bb, ba}},
+        {{left, bottom}, {cell.u0, cell.v1}, {fr, fg, fb}, {br, bg, bb, ba}},
+        {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}, {br, bg, bb, ba}},
+        {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}, {br, bg, bb, ba}},
+        {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}, {br, bg, bb, ba}},
+        {{right, top}, {cell.u1, cell.v0}, {fr, fg, fb}, {br, bg, bb, ba}},
+    };
+    memcpy(out, quad, sizeof(quad));
+}
+
 bool maru_metal_renderer_draw(
     MaruMetalRenderer *renderer,
     CAMetalLayer *layer,
@@ -156,7 +203,9 @@ bool maru_metal_renderer_draw(
     const MaruAppHostDevMetalCell *cells,
     size_t cell_count,
     uint32_t terminal_origin_x_px,
-    uint32_t sidebar_bg
+    uint32_t sidebar_bg,
+    const MaruAppHostDevMetalCell *sidebar_cells,
+    size_t sidebar_cell_count
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -187,7 +236,13 @@ bool maru_metal_renderer_draw(
     // drawable을 present/commit 없이 새게 만들지 않는다(drawable pool starvation 방지).
     id<MTLBuffer> vertex_buffer = nil;
     size_t total_vertices = 0;
-    const size_t quad_count = cell_count + (draw_sidebar ? 1u : 0u);
+    // 사이드바 셀(탭 엔트리)은 사이드바가 켜졌을 때만(origin_x>0) 그린다 — 폭이 없으면 둘 데가 없다.
+    const size_t sidebar_bg_quads = draw_sidebar ? 1u : 0u;
+    const size_t sidebar_cells_n =
+        (terminal_origin_x_px > 0u && sidebar_cells != NULL) ? sidebar_cell_count : 0u;
+    // quad 순서: [터미널 cells][사이드바 배경 quad][사이드바 cells]. 사이드바 cells가 배경 quad
+    // 뒤라 그 위에 블렌딩된다(밴드/제목이 사이드바 배경 위에 보인다).
+    const size_t quad_count = cell_count + sidebar_bg_quads + sidebar_cells_n;
     if (quad_count > 0) {
         const size_t vertices_per_cell = 6;
         // total_vertices와 byte length 곱셈 overflow를 막는다(손상된 cell_count 방어).
@@ -214,47 +269,13 @@ bool maru_metal_renderer_draw(
         // 맞춰 늘이지 않으므로 glyph가 왜곡되지 않는다.
         const float cw = (float)cell_width_px;
         const float ch = (float)cell_height_px;
+        // 1) 터미널 cells — origin_x(사이드바 폭)만큼 오른쪽에 놓는다.
         for (size_t i = 0; i < cell_count; i++) {
-            const MaruAppHostDevMetalCell cell = cells[i];
-            const float span = (float)(cell.width == 0 ? 1 : cell.width);
-            float px_left = origin_x + (float)cell.col * cw; // 사이드바 폭만큼 오른쪽으로
-            float px_right = px_left + cw * span;
-            float px_top = (float)cell.row * ch;
-            float px_bottom = px_top + ch;
-            // 커서 모양(DECSCUSR): reserved 2=underline(하단 ~15%), 3=bar(좌측 ~15%, 최소 2px).
-            // block(0)은 전체 cell. 부분 사각형은 글리프를 가리지 않아 반전이 필요 없다.
-            if (cell.reserved == 2) {
-                const float thickness = fmaxf(2.0f, ch * 0.15f);
-                px_top = px_bottom - thickness;
-            } else if (cell.reserved == 3) {
-                const float thickness = fmaxf(2.0f, cw * 0.15f);
-                px_right = px_left + thickness;
-            }
-            const float left = (px_left / drawable_w) * 2.0f - 1.0f;
-            const float right = (px_right / drawable_w) * 2.0f - 1.0f;
-            const float top = 1.0f - (px_top / drawable_h) * 2.0f;
-            const float bottom = 1.0f - (px_bottom / drawable_h) * 2.0f;
-            // 전경색(0x00RRGGBB)을 0..1 float로 푼다. shader가 흰색 glyph coverage에 곱한다.
-            const float fr = (float)((cell.foreground >> 16) & 0xff) / 255.0f;
-            const float fg = (float)((cell.foreground >> 8) & 0xff) / 255.0f;
-            const float fb = (float)(cell.foreground & 0xff) / 255.0f;
-            // 배경색(0xAARRGGBB). a=1이면 cell을 채우고, a=0이면 배경 없음(shader가 기존처럼 그림).
-            const float ba = (float)((cell.background >> 24) & 0xff) / 255.0f;
-            const float br = (float)((cell.background >> 16) & 0xff) / 255.0f;
-            const float bg = (float)((cell.background >> 8) & 0xff) / 255.0f;
-            const float bb = (float)(cell.background & 0xff) / 255.0f;
-            const MaruRendererVertex quad[6] = {
-                {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}, {br, bg, bb, ba}},
-                {{left, bottom}, {cell.u0, cell.v1}, {fr, fg, fb}, {br, bg, bb, ba}},
-                {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}, {br, bg, bb, ba}},
-                {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}, {br, bg, bb, ba}},
-                {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}, {br, bg, bb, ba}},
-                {{right, top}, {cell.u1, cell.v0}, {fr, fg, fb}, {br, bg, bb, ba}},
-            };
-            memcpy(&vertices[i * vertices_per_cell], quad, sizeof(quad));
+            maru_fill_cell_quad(&vertices[i * vertices_per_cell], cells[i], origin_x, cw, ch, drawable_w, drawable_h);
         }
-        // 사이드바 배경 quad(x:0..origin_x, 전체 높이) — UV(-1) sentinel로 배경만 칠한다(셰이더가
-        // u<0이면 coverage 0 → bg.rgb만). cells 뒤 인덱스 cell_count에 붙인다.
+        size_t quad_index = cell_count;
+        // 2) 사이드바 배경 quad(x:0..origin_x, 전체 높이) — UV(-1) sentinel로 배경만 칠한다(셰이더가
+        //    u<0이면 coverage 0 → bg.rgb만).
         if (draw_sidebar) {
             const float sl = -1.0f;                                  // x=0 → NDC 좌
             const float sr = (origin_x / drawable_w) * 2.0f - 1.0f;  // x=origin_x → NDC
@@ -272,7 +293,12 @@ bool maru_metal_renderer_draw(
                 {{sr, sb}, {-1.0f, -1.0f}, {0.0f, 0.0f, 0.0f}, {sbr, sbg, sbb, sba}},
                 {{sr, st}, {-1.0f, -1.0f}, {0.0f, 0.0f, 0.0f}, {sbr, sbg, sbb, sba}},
             };
-            memcpy(&vertices[cell_count * vertices_per_cell], squad, sizeof(squad));
+            memcpy(&vertices[quad_index * vertices_per_cell], squad, sizeof(squad));
+            quad_index += 1;
+        }
+        // 3) 사이드바 cells(탭 엔트리 하이라이트/제목) — origin 0, 배경 quad 위에 그린다(painter 순서).
+        for (size_t i = 0; i < sidebar_cells_n; i++) {
+            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], sidebar_cells[i], 0.0f, cw, ch, drawable_w, drawable_h);
         }
     }
 

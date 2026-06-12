@@ -51,7 +51,12 @@ bool maru_metal_renderer_draw(
        놓인다. 0이면 사이드바 없음. "surface→rect" 메커니즘 — split도 같은 origin 방식을 확장한다. */
     uint32_t terminal_origin_x_px,
     /* 사이드바 영역(x: 0..origin_x, 전체 높이) 배경색(0xAARRGGBB). 0이면 안 그림. */
-    uint32_t sidebar_bg
+    uint32_t sidebar_bg,
+    /* 사이드바 rect(x: 0..origin_x) 안에 origin 0으로 그릴 셀들 — 탭 엔트리 하이라이트/제목. 터미널
+       셀과 같은 표현이지만 origin offset 없이 0 + col*cw에 놓이고, 사이드바 배경 quad 위에 그려진다.
+       NULL이거나 origin_x==0이면 그리지 않는다. */
+    const MaruAppHostDevMetalCell *sidebar_cells,
+    size_t sidebar_cell_count
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

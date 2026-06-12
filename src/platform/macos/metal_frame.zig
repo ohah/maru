@@ -507,6 +507,14 @@ pub const MetalFrame = extern struct {
     terminal_origin_x_px: u32 = 0,
     // 사이드바 영역(x: 0..terminal_origin_x_px, 전체 높이)을 채울 배경색(0xAARRGGBB). 0이면 안 그림.
     sidebar_bg: u32 = 0,
+    // 사이드바 rect(x: 0..terminal_origin_x_px) 안에 origin 0으로 그릴 셀들 — 탭 엔트리 하이라이트
+    // 밴드(PR3b-1)와 이후 탭 제목 glyph(PR3b-2). 터미널 cells와 같은 NativeMetalCell 표현이지만
+    // 렌더러가 origin offset 없이(0 + col*cw) 사이드바 strip 안에 그리고, 사이드바 배경 quad 위에
+    // 블렌딩한다. "surface→rect"의 두 번째 surface(사이드바) — split(panel)도 rect별 cell 배열로
+    // 같은 방식을 확장한다. null/0이면 사이드바 셀 없음(배경 strip만). 포인터 수명은 cells와 같은
+    // 계약(소유 버퍼의 다음 갱신/해제까지) — DevSession이 owned ArrayList로 보관한다.
+    sidebar_cells: ?[*]const NativeMetalCell = null,
+    sidebar_cell_count: usize = 0,
 };
 
 /// RenderFrame을 투영해 retain하는 owned 버퍼. cells/uploads/pixels 세 배열의 소유권을

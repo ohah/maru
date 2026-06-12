@@ -71,7 +71,14 @@ Node = leaf(surface)
 1. **PR3a — 세로 사이드바 탭바(레이아웃 토대)**: drawable에 사이드바 strip을 예약하고 터미널 grid가 줄어든
    너비를 쓰게 한다. 사이드바는 우선 단색 strip(탭 엔트리 전). 헤드리스 레이아웃 단위 + macOS smoke(터미널이
    오른쪽으로 밀리고 cols 감소).
-2. **PR3b — 탭 엔트리 렌더**: 사이드바에 각 탭 제목(+활성 하이라이트)을 그린다. 이후 cwd/✓✗ 메타데이터.
+2. **PR3b — 탭 엔트리 렌더**(위험도 차이로 둘로 분해):
+   - **PR3b-1 — 렌더 메커니즘 + 활성 하이라이트**: `MetalFrame`/ABI에 `sidebar_cells` 두 번째 셀 배열을 더해
+     사이드바 rect(x:0..origin_x)에 **origin 0으로 그린다**(렌더러는 셀→quad를 `maru_fill_cell_quad`로 추출해
+     터미널·사이드바가 공유; quad 순서 `[터미널][사이드바 배경][사이드바 셀]`). 활성 탭 행에 하이라이트 밴드
+     1개(sentinel-UV 배경 셀, 폭=사이드바 칸 floor)를 emit. 텍스트는 아직 없음. "surface→rect"의 두 번째
+     surface라 split이 rect별 셀 배열로 그대로 확장한다.
+   - **PR3b-2 — 탭 번호·제목 glyph**: 합성 `DrawList`(탭 제목)를 같은 CoreText shaper/rasterizer에 태워(공유
+     atlas 두 번째 패스 + 업로드 머지) 사이드바 셀에 제목 glyph를 채운다. 이후 cwd/✓✗ 메타데이터.
 3. **PR3c — 탭 클릭/전환**: 사이드바 클릭 → Zig가 탭 인덱스로 매핑 → `switchTab`. Cmd+Shift+]/[ 전환 키.
 4. **PR3d — 탭 드래그 재정렬**(사이드바 내 순서 변경).
 5. **PR4 — 탭 close**(active_tab clamp).

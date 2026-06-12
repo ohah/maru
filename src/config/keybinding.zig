@@ -168,6 +168,10 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '}' } }, .action = .next_tab },
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '[' } }, .action = .previous_tab },
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '{' } }, .action = .previous_tab },
+    // Cmd+D: 활성 panel 좌우 분할, Cmd+Shift+D: 상하 분할. normalizeEventChar가 'd'를 'D'로 fold하므로
+    // 두 칸의 char는 같고(shift만 다름) 모디파이어 정확 비교로 갈린다. 방향 규칙은 docs/tabs-splits-layout.md.
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'D' } }, .action = .split_horizontal },
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'D' } }, .action = .split_vertical },
 };
 
 pub const KeyBindingResolver = struct {
@@ -485,6 +489,16 @@ test "built-in app bindings resolve Cmd+Shift+]/[ to next/previous tab for both 
     }
     // Shift 없는 Cmd+]는 안 묶임(ignored) — 탭 전환은 Cmd+Shift 필수.
     try std.testing.expect((try resolver.resolve(.{ .key = .{ .char = ']' }, .modifiers = .{ .command = true } }, &buffer, .{})) == .ignored);
+}
+
+test "built-in app bindings resolve Cmd+D / Cmd+Shift+D to horizontal / vertical split" {
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{};
+    // 'd'는 normalizeEventChar가 'D'로 fold → Cmd+D(shift 없음)는 좌우, Cmd+Shift+D는 상하. shift만으로 갈린다.
+    const h = try resolver.resolve(.{ .key = .{ .char = 'd' }, .modifiers = .{ .command = true } }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.split_horizontal, h.app_action);
+    const v = try resolver.resolve(.{ .key = .{ .char = 'D' }, .modifiers = .{ .command = true, .shift = true } }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.split_vertical, v.app_action);
 }
 
 test "resolver rejects duplicate app and terminal bindings separately" {

@@ -11,6 +11,7 @@ pub const runtime = @import("app/runtime.zig");
 pub const runtime_pump = @import("app/runtime_pump.zig");
 pub const smoke_drain = @import("app/smoke_drain.zig");
 pub const surface = @import("app/surface.zig");
+pub const split_tree = @import("app/split_tree.zig");
 pub const window = @import("app/window.zig");
 
 pub const AppWindow = window.AppWindow;
@@ -52,6 +53,11 @@ pub const SmokeDrainDeadlineConfig = smoke_drain.DeadlineConfig;
 pub const Surface = surface.Surface;
 pub const SurfaceId = runtime.SurfaceId;
 pub const SurfaceRuntime = runtime.SurfaceRuntime;
+pub const SplitNode = split_tree.Node;
+pub const SplitDirection = split_tree.SplitDirection;
+pub const Split = split_tree.Split;
+pub const SplitRect = split_tree.Rect;
+pub const SplitLeafRect = split_tree.LeafRect;
 pub const TerminalInput = runtime.TerminalInput;
 pub const ProcessState = surface.ProcessState;
 

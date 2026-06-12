@@ -144,11 +144,14 @@ const Tab = struct {
 pub const DevSession = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    // 활성(현재 단일) 탭. 멀티-탭에서 `tabs: ArrayList(*Tab)`로 바뀐다(이 PR은 그 단위 추출까지).
-    tab: Tab = .{},
-    // app_window.tabs가 가리킬 안정 포인터 배열(AppWindow는 `[]*Surface`를 든다 — surface 본체는
-    // tab.surface에 살고 여기엔 그 주소만 모은다). DevSession 자체가 heap-pin이라 이 필드 주소도 고정.
-    tab_ptrs: [1]*app.Surface = undefined,
+    // 탭들. 각 Tab은 heap-pin(`*Tab`)이라 ArrayList가 realloc해도 본체(live_pty reader·surface)는
+    // 안 움직인다. 현재는 init이 1개만 만들고, create/switch(후속)에서 늘어난다.
+    tabs: std.ArrayList(*Tab) = .empty,
+    // app_window.tabs(`[]*Surface`)가 가리킬 surface 포인터 배열 — tabs와 1:1로, 각 tab.surface의
+    // 안정 주소를 모은다. tabs 변경 때마다 갱신하고 app_window.tabs를 여기로 재바인딩한다.
+    surface_ptrs: std.ArrayList(*app.Surface) = .empty,
+    // surface_id·pty_id 발급(탭마다 유일). runtime이 두 id로 라우팅하므로 재사용하지 않는다.
+    next_id: u64 = 1,
     app_window: app.AppWindow = undefined,
     runtime: app.SurfaceRuntime = undefined,
     renderer_state: renderer.RendererState = undefined,
@@ -272,27 +275,24 @@ pub const DevSession = struct {
             null;
         defer if (integ_dir) |d| allocator.free(d);
 
-        // Swift는 opaque handle만 보유하고, 이 구조체는 heap에 고정된다. LivePtySession의
-        // reader thread가 `&live_pty.reader`를 잡고 돌기 때문에, 이 값을 만든 뒤에는
-        // 절대 by-value로 이동하지 않는 것이 이번 ABI의 핵심 수명 계약이다.
-        try self.tab.live_pty.init(io, allocator, 10, spawnRequest(config, self.loaded_config.config.term, integ_dir), config.queue_capacity);
-        self.tab.live_initialized = true;
-
-        self.tab.surface = try app.Surface.init(allocator, 1, config.size);
-        self.surface_initialized = true;
-        // app_window를 먼저 세워야(activeSurface가 이제 app_window.active()를 읽음) 아래 title/command
-        // 설정이 활성 탭을 가리킨다. tab_ptrs는 surfaces[0]의 안정 주소를 든다(둘 다 heap-pin DevSession 필드).
-        self.tab_ptrs = .{&self.tab.surface};
-        self.app_window = .{ .tabs = self.tab_ptrs[0..] };
-        self.activeSurface().title = "Maru dev shell";
-        self.activeSurface().command = commandName(config.command_kind);
-
+        // runtime을 먼저 세운다 — createTab의 attachSurface가 surface를 runtime link에 등록한다.
         self.runtime = app.SurfaceRuntime.init(allocator);
         self.runtime.debug_input = diag_gate.maruDebugEnabled(); // MARU_DEBUG면 zsh redraw 시퀀스 로깅
         self.runtime_initialized = true;
-        _ = try self.tab.live_pty.attachSurface(&self.runtime, &self.tab.surface);
 
-        self.tab.pump = self.tab.live_pty.pump(&self.runtime);
+        // 첫 탭을 만든다 — 셸 PTY spawn + surface + runtime attach + pump + tabs/surface_ptrs append +
+        // app_window 갱신을 createTab이 한 묶음으로 한다(create/switch 후속도 같은 경로를 쓴다).
+        // Swift는 opaque handle만 보유하고 DevSession은 heap에 고정된다(LivePtySession reader가
+        // `&tab.live_pty.reader`를 잡으므로 Tab도 heap-pin — createTab이 allocator.create로 띄운다).
+        _ = try self.createTab(
+            spawnRequest(config, self.loaded_config.config.term, integ_dir),
+            config.size,
+            config.queue_capacity,
+            "Maru dev shell",
+            commandName(config.command_kind),
+        );
+        self.surface_initialized = true;
+
         self.renderer_state = renderer.RendererState.init(allocator, .{});
         self.renderer_initialized = true;
         // 로더가 모든 값을 valid-아니면-default로 걸러주므로 resolve는 사실상 실패하지 않지만,
@@ -306,8 +306,55 @@ pub const DevSession = struct {
         // 실제 폰트 메트릭에서 cell 픽셀 크기를 뽑는다. shaper(atlas slot)·rasterizer·renderer가
         // 모두 같은 값을 쓰게 하는 단일 출처다.
         self.refreshCellMetrics();
-        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.tab.pump, &self.renderer_state);
+        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.activeTab().pump, &self.renderer_state);
         self.writeSummaryFromState();
+    }
+
+    /// 현재 활성 탭(`*Tab`). live_pty/pump 등 탭 내부에 접근할 때 쓴다. `app_window.active_tab`을
+    /// 인덱스로 쓰므로 surface 라우팅(activeSurface)과 같은 활성 탭을 본다. 호출자는 탭이 있을 때만
+    /// 부른다(surface_initialized·tabs 비어있지 않음).
+    fn activeTab(self: *DevSession) *Tab {
+        return self.tabs.items[self.app_window.active_tab];
+    }
+
+    /// 새 탭을 만든다 — Tab을 heap-pin(`create`)하고, 셸 PTY를 spawn해 surface에 붙이고, pump를 만든 뒤
+    /// `tabs`/`surface_ptrs`에 추가하고 `app_window.tabs`를 갱신하고 새 탭을 활성으로 만든다. 새 Tab
+    /// 포인터 반환. `LivePtySession` reader가 `&tab.live_pty.reader`를 잡으므로 Tab은 heap에 고정한다
+    /// (ArrayList는 `*Tab`만 들어 realloc해도 본체는 안 움직인다 — surface/PTY 포인터 안정). 부분 실패는
+    /// errdefer로 정리한다(create→live_pty→surface→runtime attach→append 역순).
+    fn createTab(
+        self: *DevSession,
+        request: maru.pty.SpawnRequest,
+        size: terminal.Size,
+        queue_capacity: usize,
+        title: []const u8,
+        command: []const u8,
+    ) !*Tab {
+        const tab = try self.allocator.create(Tab);
+        errdefer self.allocator.destroy(tab);
+        tab.* = .{};
+
+        const id = self.next_id; // surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
+        try tab.live_pty.init(self.io, self.allocator, id, request, queue_capacity);
+        errdefer tab.live_pty.deinit();
+        tab.live_initialized = true;
+
+        tab.surface = try app.Surface.init(self.allocator, id, size);
+        errdefer tab.surface.deinit();
+        tab.surface.title = title;
+        tab.surface.command = command;
+
+        _ = try tab.live_pty.attachSurface(&self.runtime, &tab.surface);
+        tab.pump = tab.live_pty.pump(&self.runtime);
+
+        try self.tabs.append(self.allocator, tab);
+        errdefer _ = self.tabs.pop();
+        try self.surface_ptrs.append(self.allocator, &tab.surface);
+        // surface_ptrs가 realloc됐을 수 있으니 app_window.tabs를 새 items로 재바인딩(stale 슬라이스 방지).
+        self.app_window.tabs = self.surface_ptrs.items;
+        self.app_window.active_tab = self.tabs.items.len - 1;
+        self.next_id += 1;
+        return tab;
     }
 
     /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거친다 —
@@ -1051,12 +1098,14 @@ pub const DevSession = struct {
         // (reader join/child reap)을 건너뛰지 않게 한다.
         self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 30Hz로 한 줄씩 스크롤+확장
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
-        const drain_summary = try self.tab.pump.drainAvailable();
+        // 현재는 활성(유일) 탭의 PTY만 drain한다. 멀티-탭(후속)에서는 모든 탭을 순회해 백그라운드
+        // 탭도 출력을 받게 한다(active tab의 frame만 빌드하되 routing은 surface_id로 각 탭에 간다).
+        const drain_summary = try self.activeTab().pump.drainAvailable();
         self.total_output_events += drain_summary.output_events;
         self.total_exit_events += drain_summary.exit_events;
         if (drain_summary.ended != null and !self.termination_finished) {
             self.ended_seen = true;
-            self.tab.live_pty.finishAfterTermination();
+            self.activeTab().live_pty.finishAfterTermination();
             self.termination_finished = true;
         }
 
@@ -1123,10 +1172,14 @@ pub const DevSession = struct {
 
     pub fn close(self: *DevSession) FrameSummary {
         self.total_close_events += 1;
-        if (self.tab.live_initialized and self.runtime_initialized) {
-            self.tab.live_pty.closeAndDetach(&self.runtime);
-        } else if (self.tab.live_initialized) {
-            self.tab.live_pty.close();
+        // 창 close — 모든 탭의 PTY를 정리한다(활성 탭만이 아니라). runtime이 살아 있으면 detach까지,
+        // 아니면 close만.
+        for (self.tabs.items) |tab| {
+            if (tab.live_initialized and self.runtime_initialized) {
+                tab.live_pty.closeAndDetach(&self.runtime);
+            } else if (tab.live_initialized) {
+                tab.live_pty.close();
+            }
         }
         if (self.surface_initialized) {
             // App/window close는 더 이상 이 surface가 live input/output을 받을 수 없다는
@@ -1152,12 +1205,14 @@ pub const DevSession = struct {
         self.ime_inserted.deinit(self.allocator);
 
         self.metal_buffer.deinit(self.allocator);
-        if (self.tab.live_initialized) {
-            if (self.runtime_initialized) {
-                self.tab.live_pty.closeAndDetach(&self.runtime);
+        // 1) 각 탭의 live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'. detach 후
+        //    deinit이 reader thread join + fd/queue 해제(이동 금지 계약이라 in-place로 정리).
+        for (self.tabs.items) |tab| {
+            if (tab.live_initialized) {
+                if (self.runtime_initialized) tab.live_pty.closeAndDetach(&self.runtime);
+                tab.live_pty.deinit();
+                tab.live_initialized = false;
             }
-            self.tab.live_pty.deinit();
-            self.tab.live_initialized = false;
         }
         if (self.renderer_initialized) {
             self.renderer_state.deinit();
@@ -1167,10 +1222,15 @@ pub const DevSession = struct {
             self.runtime.deinit();
             self.runtime_initialized = false;
         }
-        if (self.surface_initialized) {
-            self.activeSurface().deinit();
-            self.surface_initialized = false;
+        // 2) surface 정리 + Tab heap 해제(runtime.deinit 뒤 — surface는 runtime 불요). appearance가 surface
+        //    family를 빌리므로 surface 정리는 아래 config/appearance 해제보다 앞이어야 한다(원래 순서 보존).
+        for (self.tabs.items) |tab| {
+            tab.surface.deinit();
+            self.allocator.destroy(tab);
         }
+        self.tabs.deinit(self.allocator);
+        self.surface_ptrs.deinit(self.allocator);
+        self.surface_initialized = false;
         // appearance가 family를 빌리므로 surface 정리 뒤에 해제. 가드로 init 초반 실패 시 undefined
         // arena를 free하지 않게(다른 자원과 같은 패턴).
         if (self.config_loaded) {
@@ -1357,36 +1417,36 @@ test "commitComposition is a safe no-op when there is no active preedit" {
     // 필요해 헤드리스로 못 돌리고 GUI 수동 검증으로 본다(PR 본문).
     var session: DevSession = undefined;
     session.allocator = std.testing.allocator;
-    session.tab.surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
-    defer session.tab.surface.deinit();
+    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer tab_surface.deinit();
     session.surface_initialized = true;
-    session.tab_ptrs = .{&session.tab.surface};
-    session.app_window = .{ .tabs = session.tab_ptrs[0..] };
+    var st_ptrs = [_]*app.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
     session.metal_dirty = false;
-    try std.testing.expect(session.tab.surface.core.preedit == null);
+    try std.testing.expect(tab_surface.core.preedit == null);
     session.commitComposition(); // 무동작이어야(no preedit)
-    try std.testing.expect(session.tab.surface.core.preedit == null);
+    try std.testing.expect(tab_surface.core.preedit == null);
     try std.testing.expect(!session.metal_dirty); // 보낼 게 없으니 다시 그릴 것도 없다
 }
 
 test "scrollPage scrolls one screen (rows-1) per page using the core's authoritative rows" {
     var session: DevSession = undefined;
-    session.tab.surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
-    defer session.tab.surface.deinit();
+    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
+    defer tab_surface.deinit();
     session.surface_initialized = true;
-    session.tab_ptrs = .{&session.tab.surface};
-    session.app_window = .{ .tabs = session.tab_ptrs[0..] };
+    var st_ptrs = [_]*app.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
     session.metal_dirty = false;
     // 9줄 출력 -> 5행 화면 위로 4줄이 스크롤백에 쌓인다.
-    try session.tab.surface.core.write("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9");
-    try std.testing.expectEqual(@as(usize, 4), session.tab.surface.core.scrollbackLen());
+    try tab_surface.core.write("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9");
+    try std.testing.expectEqual(@as(usize, 4), tab_surface.core.scrollbackLen());
 
     session.scrollPage(1); // 위로 한 화면 = rows-1 = 4줄
-    try std.testing.expectEqual(@as(usize, 4), session.tab.surface.core.view_offset);
+    try std.testing.expectEqual(@as(usize, 4), tab_surface.core.view_offset);
     try std.testing.expect(session.metal_dirty);
 
     session.scrollPage(-1); // 아래로 한 화면 -> 바닥
-    try std.testing.expectEqual(@as(usize, 0), session.tab.surface.core.view_offset);
+    try std.testing.expectEqual(@as(usize, 0), tab_surface.core.view_offset);
 }
 
 test "wheelDeltaToLines drops sub-line residue when the scroll direction flips" {
@@ -1403,11 +1463,11 @@ test "wheelDeltaToLines drops sub-line residue when the scroll direction flips" 
 test "drag autoscroll scrolls one line per tick and extends the selection to the edge row" {
     var session: DevSession = undefined;
     session.allocator = std.testing.allocator;
-    session.tab.surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
-    defer session.tab.surface.deinit();
+    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer tab_surface.deinit();
     session.surface_initialized = true;
-    session.tab_ptrs = .{&session.tab.surface};
-    session.app_window = .{ .tabs = session.tab_ptrs[0..] };
+    var st_ptrs = [_]*app.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
     session.metal_dirty = false;
     session.mouse_drag_selecting = true;
     session.drag_autoscroll = 0;
@@ -1416,7 +1476,7 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.cell_height_px = 16;
     session.scale_milli = 1000;
 
-    const core = &session.tab.surface.core;
+    const core = &tab_surface.core;
     try core.write("a\r\nb\r\nc\r\nd"); // 스크롤백 2(a,b) + 화면 c,d
     core.selectionStart(1, 0); // 화면 행1(d)에서 드래그 시작
 
@@ -1441,11 +1501,11 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
 test "cursor blink toggles every interval, stays solid for steady cursors, and resets on activity" {
     var session: DevSession = undefined;
     session.allocator = std.testing.allocator;
-    session.tab.surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
-    defer session.tab.surface.deinit();
+    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer tab_surface.deinit();
     session.surface_initialized = true;
-    session.tab_ptrs = .{&session.tab.surface};
-    session.app_window = .{ .tabs = session.tab_ptrs[0..] };
+    var st_ptrs = [_]*app.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
     session.metal_dirty = false;
     session.metal_buffer = .{};
     session.blink_visible = true;
@@ -1470,20 +1530,20 @@ test "cursor blink toggles every interval, stays solid for steady cursors, and r
     try std.testing.expectEqual(@as(u32, 0), session.blink_ticks);
 
     // steady 커서(DECSCUSR 2): 토글하지 않고 보이는 위상 고정.
-    try session.tab.surface.core.write("\x1b[2 q");
+    try tab_surface.core.write("\x1b[2 q");
     session.blink_visible = true;
     i = 0;
     while (i < blink_interval_ticks * 3) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(session.blink_visible);
 
     // IME 조합 중(preedit): 깜빡이지 않고 보이는 위상 고정 — 조합 글자 옆에서 반짝이지 않는다.
-    try session.tab.surface.core.write("\x1b[1 q"); // 다시 blink 커서로
-    try session.tab.surface.core.setPreedit("\xec\x95\x88");
+    try tab_surface.core.write("\x1b[1 q"); // 다시 blink 커서로
+    try tab_surface.core.setPreedit("\xec\x95\x88");
     session.blink_visible = true;
     i = 0;
     while (i < blink_interval_ticks * 3) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(session.blink_visible);
-    try session.tab.surface.core.setPreedit("");
+    try tab_surface.core.setPreedit("");
 }
 
 test "headless ticks toggle the blink phase and bump the metal generation" {
@@ -1527,11 +1587,11 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
 test "drag autoscroll works after a double-click word selection and skips redraw when nothing moves" {
     var session: DevSession = undefined;
     session.allocator = std.testing.allocator;
-    session.tab.surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
-    defer session.tab.surface.deinit();
+    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer tab_surface.deinit();
     session.surface_initialized = true;
-    session.tab_ptrs = .{&session.tab.surface};
-    session.app_window = .{ .tabs = session.tab_ptrs[0..] };
+    var st_ptrs = [_]*app.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
     session.metal_dirty = false;
     session.metal_buffer = .{};
     session.mouse_drag_selecting = false; // 더블클릭(kind 4) 후 상태
@@ -1541,7 +1601,7 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.cell_height_px = 16;
     session.scale_milli = 1000;
 
-    const core = &session.tab.surface.core;
+    const core = &tab_surface.core;
     try core.write("aa\r\nbb\r\ncc"); // 스크롤백 1(aa) + 화면 bb,cc
     core.selectWordAt(1, 0); // 더블클릭 단어 선택(cc)
     try std.testing.expect(core.selection_anchor != null);
@@ -1671,7 +1731,7 @@ test "sendCommittedText normalizes newlines to CR and imeBegin snaps to bottom" 
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    const core = &session.tab.surface.core;
+    const core = &session.activeSurface().core;
 
     // 스크롤백을 만들고 과거를 본 뒤 imeBegin → 바닥으로 스냅(조합이 보이게).
     try core.write("a\r\nb\r\nc\r\nd\r\ne\r\nf");
@@ -1693,15 +1753,15 @@ test "sendCommittedText normalizes newlines to CR and imeBegin snaps to bottom" 
 test "imeCursorRect returns the cursor cell rect in backing px for IME candidate placement" {
     var session: DevSession = undefined;
     session.allocator = std.testing.allocator;
-    session.tab.surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
-    defer session.tab.surface.deinit();
+    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
+    defer tab_surface.deinit();
     session.surface_initialized = true;
-    session.tab_ptrs = .{&session.tab.surface};
-    session.app_window = .{ .tabs = session.tab_ptrs[0..] };
+    var st_ptrs = [_]*app.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
     session.cell_width_px = 8;
     session.cell_height_px = 16;
 
-    const core = &session.tab.surface.core;
+    const core = &tab_surface.core;
     try core.write("ab"); // 커서가 (0,2)로
     const r = session.imeCursorRect();
     try std.testing.expectEqual(@as(f64, 16), r.x); // col 2 * 8

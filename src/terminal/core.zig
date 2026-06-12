@@ -301,6 +301,63 @@ pub const TerminalCore = struct {
         }
     }
 
+    /// 절대 행(스크롤백 0..sb_count-1, 이어서 활성 화면)의 OSC 133 분류. 범위 밖은 .unknown.
+    fn promptAtAbs(self: *const TerminalCore, abs: usize) types.SemanticPrompt {
+        if (abs < self.sb_count) return self.scrollbackRowPrompt(abs);
+        const active = abs - self.sb_count;
+        if (active < self.prompt_marks.len) return self.prompt_marks[active];
+        return .unknown;
+    }
+
+    fn isPromptish(t: types.SemanticPrompt) bool {
+        return t == .prompt or t == .input;
+    }
+
+    /// 절대 행 abs가 "프롬프트 블록의 시작"인지(점프 네비게이션 타깃). 프롬프트/입력 run의 첫 행
+    /// — 직전 행이 프롬프트/입력이 아닌 곳. 명령 출력(.command)·미분류가 블록을 가른다.
+    fn isPromptStart(self: *const TerminalCore, abs: usize) bool {
+        if (!isPromptish(self.promptAtAbs(abs))) return false;
+        if (abs == 0) return true;
+        return !isPromptish(self.promptAtAbs(abs - 1));
+    }
+
+    /// 이전(dir<0, 과거/위)/다음(dir>0, 최근/아래) 프롬프트 블록 시작으로 뷰포트를 스크롤한다.
+    /// OSC 133 분류가 있어야 동작(셸 통합 필요). 타깃을 뷰포트 맨 위에 두고, 타깃이 활성 화면이면
+    /// 바닥으로 간다. 찾으면 true. alt screen·분류 없음·해당 방향에 프롬프트 없음이면 false.
+    pub fn jumpToPrompt(self: *TerminalCore, dir: i8) bool {
+        if (self.alt_active) return false;
+        self.ensureScrollbackRewrapped(); // sb_count(절대 좌표 범위)가 재-wrap으로 바뀔 수 있다
+        const total = self.sb_count + self.size.rows;
+        if (total == 0) return false;
+        const top = self.sb_count - self.view_offset; // 현재 뷰포트 맨 위 절대 행
+        var target: ?usize = null;
+        if (dir < 0) {
+            var r = top;
+            while (r > 0) {
+                r -= 1;
+                if (self.isPromptStart(r)) {
+                    target = r;
+                    break;
+                }
+            }
+        } else {
+            var r = top + 1;
+            while (r < total) : (r += 1) {
+                if (self.isPromptStart(r)) {
+                    target = r;
+                    break;
+                }
+            }
+        }
+        const t = target orelse return false;
+        const new_off: usize = if (t < self.sb_count) self.sb_count - t else 0; // 활성 행이면 바닥
+        if (new_off != self.view_offset) {
+            self.view_offset = new_off;
+            self.dirty = fullDirty(self.size);
+        }
+        return true;
+    }
+
     /// 현재 위로 스크롤한 줄 수(0=바닥).
     pub fn viewOffset(self: *const TerminalCore) usize {
         return self.view_offset;
@@ -5049,6 +5106,39 @@ test "OSC 133: snapshot exposes prompt_marks and last_command_exit (non-scrolled
     const snap = core.snapshot();
     try std.testing.expectEqual(types.SemanticPrompt.prompt, snap.prompt_marks[0]);
     try std.testing.expectEqual(@as(?i32, 3), snap.last_command_exit);
+}
+
+test "OSC 133: isPromptStart marks the first row of each prompt block" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 5 });
+    defer core.deinit();
+    // 2 사이클: A 프롬프트 + B 입력 + \r\n + C 출력 + \r\n + D. row0·row2가 프롬프트 블록 시작.
+    try core.write("\x1b]133;A\x1b\\P$ \x1b]133;B\x1b\\c1\r\n\x1b]133;C\x1b\\o1\r\n\x1b]133;D;0\x07");
+    try core.write("\x1b]133;A\x1b\\P$ \x1b]133;B\x1b\\c2\r\n\x1b]133;C\x1b\\o2\r\n\x1b]133;D;1\x07");
+    try std.testing.expect(core.isPromptStart(0)); // 프롬프트+입력 줄(블록 시작)
+    try std.testing.expect(!core.isPromptStart(1)); // 출력
+    try std.testing.expect(core.isPromptStart(2)); // 다음 블록 시작(직전이 .command)
+    try std.testing.expect(!core.isPromptStart(3)); // 출력
+}
+
+test "OSC 133: jumpToPrompt scrolls the viewport to a scrollback prompt" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x1b\\aaa\r\n"); // row0=.prompt "aaa", \r\n → row1 .prompt
+    try core.write("\x1b]133;C\x1b\\bbb\r\n"); // row1=.command, \r\n scroll → row0(.prompt)이 스크롤백으로
+    try core.write("\x1b]133;D;0\x07");
+    try std.testing.expect(core.scrollbackLen() >= 1);
+    try std.testing.expectEqual(@as(usize, 0), core.viewOffset());
+    try std.testing.expect(core.jumpToPrompt(-1)); // 이전 프롬프트 = 스크롤백의 .prompt
+    try std.testing.expect(core.viewOffset() > 0); // 위로 스크롤됨
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.viewportRowPrompt(0)); // 그 프롬프트가 뷰 맨 위
+}
+
+test "OSC 133: jumpToPrompt returns false with no shell-integration classification" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("plain text\r\nno markers"); // OSC 133 없음 → 점프 타깃 없음
+    try std.testing.expect(!core.jumpToPrompt(-1));
+    try std.testing.expect(!core.jumpToPrompt(1));
 }
 
 test "OSC 133: reflow carries the tag of a re-wrapped (non-cursor) line" {

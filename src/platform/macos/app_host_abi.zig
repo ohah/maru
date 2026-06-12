@@ -383,6 +383,17 @@ pub export fn maru_macos_app_dev_session_scroll_page(
     return @intFromEnum(Status.ok);
 }
 
+// 이전(dir<0)/다음(dir>0) 프롬프트 블록으로 뷰포트 점프(OSC 133 semantic prompt — Cmd+↑/↓).
+// 분류·이동은 dev session/core가 권위 있게 하고 Swift는 방향만 넘긴다(native 최소).
+pub export fn maru_macos_app_dev_session_jump_prompt(
+    session: ?*DevSession,
+    dir: i32,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    dev_session.jumpToPrompt(if (dir < 0) -1 else 1);
+    return @intFromEnum(Status.ok);
+}
+
 pub export fn maru_macos_app_dev_session_destroy(session: ?*DevSession) void {
     // 수명 계약: destroy는 단발성이다. null은 안전하게 무시하지만, 이미 해제된 handle은
     // 감지할 수 없으므로(메모리가 freed) 같은 non-null handle로 두 번 호출하면 use-after-free /

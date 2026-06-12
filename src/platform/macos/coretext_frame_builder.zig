@@ -98,6 +98,16 @@ pub const CoreTextFrameBuilder = struct {
 /// 닫기(✕) 아이콘 코드포인트(U+2715 MULTIPLICATION X). 호버 슬롯 우측에 그린다.
 pub const sidebar_close_glyph: u21 = 0x2715;
 
+/// pane 탭 바 우측 "+"(새 Term) 버튼이 차지하는 칸 수. 바 우측에 이만큼 예약하고 그 왼쪽을 탭 영역으로 쓴다.
+pub const pane_tab_plus_cols: u16 = 3;
+
+/// 바 cols에서 "+" 버튼 zone(pane_tab_plus_cols)을 뺀 탭 영역 cols. 바가 너무 좁으면(+ zone조차 못 둠) "+"
+/// 없이 탭이 전체를 쓴다. 렌더(buildPaneTabBarDrawList)와 hit-test(tabIndexInBar 등)가 같은 값을 써서 보이는
+/// 탭/+ 와 클릭이 일치한다. 순수 함수.
+pub fn paneTabAreaCols(bar_cols: u16) u16 {
+    return if (bar_cols > pane_tab_plus_cols + 1) bar_cols - pane_tab_plus_cols else bar_cols;
+}
+
 /// 텍스트 줄들을 사이드바 탭-제목 렌더용 DrawList로 합성한다(한 줄=한 탭, row=탭 인덱스). 각 줄을
 /// UTF-8 코드포인트로 디코드해 cell 폭(terminal.width.cellWidth)만큼 열을 전진시키며 DrawCell을 깐다.
 /// `cols`를 넘는 글자는 자른다(사이드바 폭 한도). 전경색은 `fg`(테마 사이드바 글자색). 커서/overlay는
@@ -194,12 +204,14 @@ pub fn buildPaneTabBarDrawList(
     errdefer cells.deinit(allocator);
 
     const style: terminal.Style = .{ .foreground = fg };
-    const tab_w = paneTabWidth(cols, titles.len);
+    // 탭은 "+" 버튼 zone을 뺀 영역(tab_cols)에만 깐다. 우측 [tab_cols, cols)는 "+"(새 Term) 버튼.
+    const tab_cols = paneTabAreaCols(cols);
+    const tab_w = paneTabWidth(tab_cols, titles.len);
     if (tab_w > 0) {
         for (titles, 0..) |title, tab_index| {
             const start: u32 = @as(u32, @intCast(tab_index)) * tab_w;
-            if (start >= cols) break; // 탭이 바 폭을 넘으면 나머지는 잘림
-            const seg_end: u32 = @min(start + tab_w, @as(u32, cols)); // 이 탭의 col 한도
+            if (start >= tab_cols) break; // 탭이 탭 영역을 넘으면 나머지는 잘림
+            const seg_end: u32 = @min(start + tab_w, @as(u32, tab_cols)); // 이 탭의 col 한도
             // 호버된 탭이면 우측 안쪽(seg_end-2)에 닫기 ✕를 둔다 — 제목은 ✕ 앞(seg_end-2)까지만 그린다.
             const is_close = close_tab != null and close_tab.? == tab_index and tab_w >= 2 and seg_end >= 2;
             const title_end: u32 = if (is_close) seg_end - 2 else seg_end;
@@ -240,6 +252,17 @@ pub fn buildPaneTabBarDrawList(
                 });
             }
         }
+    }
+
+    // "+"(새 Term) 버튼 — 예약된 우측 zone이 있으면(tab_cols < cols) tab_cols+1 col에 '+' glyph 1개.
+    if (tab_cols < cols and tab_cols + 1 < cols) {
+        try cells.append(allocator, .{
+            .row = 0,
+            .col = tab_cols + 1,
+            .codepoint = '+',
+            .width = 1,
+            .style = style,
+        });
     }
 
     return .{
@@ -481,7 +504,7 @@ test "buildSidebarDrawList lays tab titles into per-row draw cells, truncating t
 
 test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab segments" {
     const allocator = std.testing.allocator;
-    // cols=20, 2 탭 → tab_w=10. 탭 0은 col [0,10), 탭 1은 [10,20). 각 탭 1칸 좌패딩 뒤 제목.
+    // cols=20 → 우측 "+" zone 3칸 떼고 탭 영역 17, 2탭 → tab_w=8. 탭 0은 col [0,8), 탭 1은 [8,16). 각 탭 1칸 좌패딩 뒤 제목.
     const titles = [_][]const u8{ "sh", "vim" };
     var draw_list = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null);
     defer draw_list.deinit(allocator);
@@ -489,18 +512,18 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
     // 모든 탭이 행 0(가로), size cols=한도·rows=1.
     try std.testing.expectEqual(@as(u16, 20), draw_list.size.cols);
     try std.testing.expectEqual(@as(u16, 1), draw_list.size.rows);
-    try std.testing.expectEqual(@as(usize, 5), draw_list.cells.len); // "sh"(2) + "vim"(3)
+    try std.testing.expectEqual(@as(usize, 6), draw_list.cells.len); // "sh"(2) + "vim"(3) + "+"(1)
     for (draw_list.cells) |c| try std.testing.expectEqual(@as(u16, 0), c.row);
-    // 탭 0: col 1('s'), 2('h'). 탭 1: col 11('v'), 12('i'), 13('m') — 세그먼트 start(10) + 1칸 패딩.
+    // 탭 0: col 1('s'), 2('h'). 탭 1: col 9('v'), 10('i'), 11('m') — 세그먼트 start(8) + 1칸 패딩.
     try std.testing.expectEqual(@as(u16, 1), draw_list.cells[0].col);
     try std.testing.expectEqual(@as(u21, 's'), draw_list.cells[0].codepoint);
-    try std.testing.expectEqual(@as(u16, 11), draw_list.cells[2].col);
+    try std.testing.expectEqual(@as(u16, 9), draw_list.cells[2].col);
     try std.testing.expectEqual(@as(u21, 'v'), draw_list.cells[2].codepoint);
     try std.testing.expect(!draw_list.cursor.visible);
 
-    // 세그먼트보다 긴 제목은 그 탭 한도에서 잘린다. cols=8, 2탭 → tab_w=4, 제목 칸 = [start+1, start+4) = 3칸.
+    // 세그먼트보다 긴 제목은 그 탭 한도에서 잘린다. cols=11 → 탭 영역 8, 2탭 → tab_w=4, 제목 칸 = [start+1, start+4) = 3칸.
     const longt = [_][]const u8{ "abcdef", "x" };
-    var dl2 = try buildPaneTabBarDrawList(allocator, &longt, 8, .default, null);
+    var dl2 = try buildPaneTabBarDrawList(allocator, &longt, 11, .default, null);
     defer dl2.deinit(allocator);
     var tab0: usize = 0;
     for (dl2.cells) |c| {
@@ -508,21 +531,44 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
     }
     try std.testing.expectEqual(@as(usize, 3), tab0); // "abcdef" 중 3칸(col 1,2,3)만
 
-    // close_tab이 주어지면 그 탭 우측 안쪽(seg_end-2)에 ✕ glyph를 그리고 제목은 그 앞까지만. cols=20, 2탭
-    // → tab_w=10, 탭 1 seg_end=20 → ✕ col 18. 탭 1 호버.
+    // close_tab이 주어지면 그 탭 우측 안쪽(seg_end-2)에 ✕ glyph를 그리고 제목은 그 앞까지만. cols=20 → "+" zone
+    // 3 빼고 탭 영역 17, 2탭 → tab_w=8, 탭 1 seg_end=min(16,17)=16 → ✕ col 14. 탭 1 호버.
     const ht = [_][]const u8{ "sh", "vim" };
     var dl3 = try buildPaneTabBarDrawList(allocator, &ht, 20, .default, 1);
     defer dl3.deinit(allocator);
     var found_close = false;
+    var found_plus3 = false;
     for (dl3.cells) |c| {
         if (c.codepoint == sidebar_close_glyph) {
             found_close = true;
-            try std.testing.expectEqual(@as(u16, 18), c.col); // seg_end(20) - 2
+            try std.testing.expectEqual(@as(u16, 14), c.col); // seg_end(16) - 2
+        }
+        if (c.codepoint == '+') {
+            found_plus3 = true;
+            try std.testing.expectEqual(@as(u16, 18), c.col); // tab_cols(17) + 1
         }
     }
     try std.testing.expect(found_close);
-    // 호버 안 된 탭(close_tab=null)엔 ✕ 없음.
+    try std.testing.expect(found_plus3); // 우측 "+" 버튼이 항상 그려진다(cols 충분)
+    // 호버 안 된 탭(close_tab=null)엔 ✕ 없음(단, "+"는 있다).
     for (draw_list.cells) |c| try std.testing.expect(c.codepoint != sidebar_close_glyph);
+}
+
+test "buildPaneTabBarDrawList reserves a right '+' zone (no '+' when too narrow)" {
+    const allocator = std.testing.allocator;
+    // cols=20 → 탭 영역 17, "+"는 col 18. 좁은 바(cols=4 ≤ +zone+1)는 "+" 없음.
+    const titles = [_][]const u8{"sh"};
+    var wide = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null);
+    defer wide.deinit(allocator);
+    var wide_plus = false;
+    for (wide.cells) |c| {
+        if (c.codepoint == '+') wide_plus = true;
+    }
+    try std.testing.expect(wide_plus);
+
+    var narrow = try buildPaneTabBarDrawList(allocator, &titles, 4, .default, null);
+    defer narrow.deinit(allocator);
+    for (narrow.cells) |c| try std.testing.expect(c.codepoint != '+'); // 좁아서 "+" 없음
 }
 
 test "paneTabWidth divides cols among tabs (min 1, clamps when tabs exceed cols)" {

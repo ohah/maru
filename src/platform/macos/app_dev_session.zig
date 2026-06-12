@@ -1295,7 +1295,11 @@ pub const DevSession = struct {
             self.activeSurface().core.scrollToBottom();
             self.metal_dirty = true;
         }
-        const result = try self.frame_loop.handleKeyEvent(config_mod.KeyBindingResolver{}, event);
+        // 사용자 config의 keybind(앱 액션)를 적용한다 — resolver가 사용자 바인딩을 먼저 보고 없으면
+        // default_app_bindings로 폴백한다(override/추가 가능). 빈 config(테스트·파일 없음)면 app_bindings가
+        // 비어 곧장 기본값으로 떨어진다. terminal 레벨 키(Cmd+←=줄 시작 등)는 아직 config 대상이 아니라
+        // default_terminal_bindings로만 동작한다(keyBindingResolver가 app_bindings만 채움 — loader 주석).
+        const result = try self.frame_loop.handleKeyEvent(self.loaded_config.keyBindingResolver(), event);
         switch (result) {
             .terminal_input => |terminal_input| {
                 self.total_terminal_input_events += 1;
@@ -3575,6 +3579,39 @@ test "Cmd+T opens a new Term in the active pane; Cmd+Shift+T opens a workspace" 
     // 안 묶인 Cmd 조합(Cmd+S)은 아무것도 안 만들고 무시(ignored).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } });
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+}
+
+// handleKeyEvent가 사용자 config의 keybind를 적용하는지(빈 resolver가 아니라 loaded_config.keyBindingResolver())
+// — 기본엔 없는 조합(Cmd+E)을 사용자 바인딩으로 new_term에 묶어 실제로 디스패치되는지 본다. 실 PTY라 macOS 게이트.
+test "handleKeyEvent applies user config keybindings (resolver wired from loaded_config)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 사용자 keybind 주입: Cmd+E = new_term(기본 바인딩엔 없는 조합). keybindings 슬라이스만 바꾼다(arena·appearance
+    // 빌림은 그대로) — handleKeyEvent가 loaded_config.keyBindingResolver()를 읽으므로 이게 곧 사용자 config 효과다.
+    var user_binds = [_]config_mod.AppBinding{
+        .{ .chord = try config_mod.KeyChord.parse("Cmd+E"), .action = .new_term },
+    };
+    session.loaded_config.keybindings = &user_binds;
+
+    // Cmd+E는 빈 resolver였다면 ignored지만, 사용자 바인딩이 먹어 활성 pane에 Term이 추가된다.
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+
+    // 사용자 바인딩에 없는 기본 조합(Cmd+T)도 여전히 동작한다(resolver가 default_app_bindings로 폴백).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len);
 }
 
 // cmux Term 생명주기: ⌘T가 활성 pane에 Term을 쌓고, ⌘]/⌘[가 Term을 wrap 순환하고, ⌘W가 Term →(마지막이면)

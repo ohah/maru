@@ -32,6 +32,12 @@ pub const NativeMetalCell = extern struct {
     // glyph를 위에 blend한다(out = mix(bg, fg, coverage)). A=0이면 배경 없음 — 셰이더는
     // 기존처럼 glyph coverage만 그려 theme 기본 배경(clear color)이 비친다.
     background: u32 = 0,
+    // 이 cell이 속한 panel(split leaf)의 픽셀 origin(backing px). 렌더러가 cell을 origin_x + col*cw,
+    // origin_y + row*ch에 둔다. 단일 panel이면 모든 터미널 cell이 (사이드바 폭, 0)으로 동작이 기존과
+    // 같다. split(PR3)이 panel별로 다른 origin을 줘 N개 surface가 각자 sub-사각형에 그려진다. 사이드바
+    // cell은 자체 위치 로직(origin 0/슬롯 높이)을 쓰므로 이 필드를 무시한다(0).
+    origin_x: u32 = 0,
+    origin_y: u32 = 0,
 };
 
 /// 반전 블록 커서의 두 색. block은 커서 칸 배경(theme.cursor), text는 그 위 glyph를 그릴 색
@@ -524,6 +530,16 @@ pub const MetalFrame = extern struct {
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).
 /// 제목 glyph는 atlas slot을 가리키므로 slot_id≠0이고, 밴드는 slot_id==0이라 렌더러가 둘을 구분해
 /// (밴드=슬롯 전체, glyph=슬롯 안 중앙) 그린다. 소유 슬라이스 반환(호출자가 free).
+/// 터미널 panel cell들에 그 panel의 픽셀 origin을 박는다 — 렌더러가 cell을 origin_x + col*cw,
+/// origin_y + row*ch에 둔다(per-cell origin이라 cursor suffix 길이 변화에도 각 cell이 자기 위치를
+/// 안다). 단일 panel이면 전체가 같은 origin. 사이드바 cell엔 안 쓴다(자체 위치 로직 origin 0/슬롯 높이).
+fn setCellsPaneOrigin(cells: []NativeMetalCell, origin_x: u32, origin_y: u32) void {
+    for (cells) |*c| {
+        c.origin_x = origin_x;
+        c.origin_y = origin_y;
+    }
+}
+
 fn buildMergedSidebarCells(
     allocator: std.mem.Allocator,
     band: []const NativeMetalCell,
@@ -615,6 +631,11 @@ pub const MetalFrameBuffer = struct {
         cell_width_px: u32,
         cell_height_px: u32,
         colors: CellColors,
+        // 터미널 frame이 그려질 panel(split leaf)의 픽셀 origin. 빌드된 cell들에 박아 렌더러가 origin_x+
+        // col*cw, origin_y+row*ch에 둔다. 단일 panel이면 (사이드바 폭, 0). split(PR3)이 panel별로 다른
+        // origin과 frame을 줘 N개 surface를 합성한다.
+        terminal_origin_x: u32,
+        terminal_origin_y: u32,
         sidebar_frame: ?renderer.RenderFrame,
         sidebar_band_cells: []const NativeMetalCell,
         sidebar_colors: CellColors,
@@ -622,6 +643,7 @@ pub const MetalFrameBuffer = struct {
         const built = try buildNativeCellsSplit(allocator, frame.glyph_quad_frame, frame.draw_list.cells, colors);
         const new_cells = built.cells;
         errdefer allocator.free(new_cells);
+        setCellsPaneOrigin(new_cells, terminal_origin_x, terminal_origin_y);
 
         const new_sidebar_cells = try buildMergedSidebarCells(allocator, sidebar_band_cells, sidebar_frame, sidebar_colors);
         errdefer allocator.free(new_sidebar_cells);
@@ -1273,4 +1295,20 @@ test "buildMergedSidebarCells prepends band cells before sidebar title glyph cel
     try std.testing.expectEqual(@as(usize, 1), merged.len); // 제목 frame 없으면 밴드만
     try std.testing.expectEqual(@as(u32, 0xFF112233), merged[0].background);
     try std.testing.expectEqual(@as(u32, 0), merged[0].slot_id); // 밴드는 slot_id 0(렌더러가 슬롯 전체로 그림)
+}
+
+test "setCellsPaneOrigin stamps the panel pixel origin on every terminal cell" {
+    // 각 cell이 자기 panel의 origin을 들어 렌더러가 origin_x+col*cw, origin_y+row*ch에 둔다(단일 panel이면
+    // 전부 같은 origin; split이 panel별로 다른 origin). 기본 origin은 0이라 안 박으면 (0,0).
+    var cells = [_]NativeMetalCell{
+        .{ .row = 0, .col = 0, .width = 1, .codepoint = ' ', .slot_id = 0, .atlas_x_px = 0, .atlas_y_px = 0, .atlas_width_px = 0, .atlas_height_px = 0, .u0 = 0, .v0 = 0, .u1 = 0, .v1 = 0 },
+        .{ .row = 3, .col = 2, .width = 1, .codepoint = 'A', .slot_id = 5, .atlas_x_px = 0, .atlas_y_px = 0, .atlas_width_px = 0, .atlas_height_px = 0, .u0 = 0, .v0 = 0, .u1 = 0, .v1 = 0 },
+    };
+    // 안 박으면 기본 0.
+    try std.testing.expectEqual(@as(u32, 0), cells[0].origin_x);
+    setCellsPaneOrigin(&cells, 180, 40);
+    for (cells) |c| {
+        try std.testing.expectEqual(@as(u32, 180), c.origin_x);
+        try std.testing.expectEqual(@as(u32, 40), c.origin_y);
+    }
 }

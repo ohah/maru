@@ -128,6 +128,40 @@ fn paneBarBgCell(bar: app.SplitRect, cell_width_px: u32, bg: u32) ?metal_frame.N
     };
 }
 
+/// pane 탭 바에서 활성 Term 탭 세그먼트를 강조하는 배경 셀(sentinel-UV). 바를 등폭으로 나눈 tab_index번째
+/// 세그먼트(col [i*tab_w, (i+1)*tab_w), 폭 tab_w)를 강조색으로 칠한다 — buildPaneTabBarDrawList와 같은
+/// paneTabWidth를 써서 제목과 정확히 정렬된다. 바 폭/탭 0이거나 세그먼트가 바 밖이면 null. 바 배경 셀 '뒤'에
+/// 그려져(위에 블렌딩) 활성 탭만 도드라진다. 순수 함수.
+fn paneTabHighlightCell(bar: app.SplitRect, cell_width_px: u32, tab_index: usize, tab_count: usize, bg: u32) ?metal_frame.NativeMetalCell {
+    if (cell_width_px == 0 or bar.w == 0) return null;
+    const cols_u32 = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
+    if (cols_u32 == 0) return null;
+    const tab_w = coretext_frame_builder.paneTabWidth(@intCast(cols_u32), tab_count);
+    if (tab_w == 0) return null;
+    const start: u32 = @as(u32, @intCast(tab_index)) * tab_w;
+    if (start >= cols_u32) return null; // 탭이 바 폭을 넘으면 세그먼트 없음
+    const width: u32 = @min(@as(u32, tab_w), cols_u32 - start);
+    return .{
+        .row = 0,
+        .col = @intCast(start),
+        .width = @intCast(width),
+        .codepoint = ' ',
+        .slot_id = 0,
+        .atlas_x_px = 0,
+        .atlas_y_px = 0,
+        .atlas_width_px = 0,
+        .atlas_height_px = 0,
+        .u0 = -1.0,
+        .v0 = -1.0,
+        .u1 = -1.0,
+        .v1 = -1.0,
+        .foreground = 0,
+        .background = bg,
+        .origin_x = bar.x,
+        .origin_y = bar.y,
+    };
+}
+
 /// 스크린 x(backing px)가 세로 사이드바 영역(x: 0..sidebar_width_px) 안인가. 폭 0(사이드바 꺼짐)이거나
 /// x<0(클리어 sentinel 포함)·origin_x 이상(터미널 영역)이면 false. 순수 함수라 OS 무관 단위 테스트.
 fn xInSidebar(x_px: f64, sidebar_width_px: u32) bool {
@@ -643,10 +677,11 @@ pub const DevSession = struct {
         };
     }
 
-    /// per-pane 탭 바(cmux식 가로 탭 바)의 backing 픽셀 높이 = cell 높이 1칸. 각 panel(leaf rect) 상단에 이
-    /// 높이만큼 바를 예약하고 그 아래를 터미널 영역으로 쓴다(PR-C). cell 높이 미상이면 0(바 없음).
+    /// per-pane 탭 바(cmux식 가로 탭 바)의 backing 픽셀 높이 = **cell 높이(line height) 1칸**. 렌더러가 바 배경
+    /// 셀을 다른 셀과 똑같이 `ch`(cell_height_px) 높이로 그리므로, 예약 높이도 반드시 cell_height_px여야 바와
+    /// 터미널 첫 줄이 겹치지 않는다(cell_width_px=advance와 다름 — 정사각 아님). cell 높이 미상이면 0(바 없음).
     fn paneBarHeightPx(self: *const DevSession) u32 {
-        return self.cell_width_px; // = cell_height_px(정사각 cell). 0이면 바 없음.
+        return self.cell_height_px;
     }
 
     /// panel leaf rect의 상단 탭 바를 뺀 '터미널 영역' 사각형. leaf rect가 바보다 충분히 높으면(바 + 최소
@@ -2100,15 +2135,15 @@ pub const DevSession = struct {
             self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch {};
             const active_pane = self.activePane();
 
-            // per-pane 상단 탭 바 chrome(배경 밴드). 각 panel rect 상단 바에 배경 셀 1개를 origin 박아 만든다 —
-            // 터미널 셀 스트림에 들어가 렌더된다(PR-C1: 배경만, 제목 glyph·✕·드래그는 PR-C2/D/E). 활성 panel
-            // 바는 강조색(sidebarActiveBg), 비활성은 chrome 색(sidebarBg). 빈 리스트(OOM)면 chrome 없음.
+            // per-pane 상단 탭 바 chrome: 바 배경(전체) + 활성 Term 탭 하이라이트. 각 panel rect 상단 바에 origin
+            // 박은 배경 셀로 만들어 터미널 셀 스트림에 prepend된다(C1). 바 base = chrome 색(sidebarBg), 각 pane의
+            // 활성 Term 탭 세그먼트 = 강조색(sidebarActiveBg)로 도드라진다. 제목 glyph는 아래 pane_frames에(C2).
             var pane_chrome: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
             defer pane_chrome.deinit(self.allocator);
             for (leaf_rects.items) |lr| {
                 const bar = self.paneBarRect(lr.rect) orelse continue;
-                const bar_bg = if (lr.leaf == active_pane) self.sidebarActiveBg() else self.sidebarBg();
-                if (paneBarBgCell(bar, self.cell_width_px, bar_bg)) |cell| {
+                if (paneBarBgCell(bar, self.cell_width_px, self.sidebarBg())) |cell| pane_chrome.append(self.allocator, cell) catch {};
+                if (paneTabHighlightCell(bar, self.cell_width_px, lr.leaf.active_term, lr.leaf.terms.items.len, self.sidebarActiveBg())) |cell| {
                     pane_chrome.append(self.allocator, cell) catch {};
                 }
             }
@@ -2128,8 +2163,8 @@ pub const DevSession = struct {
 
             var pane_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
             defer pane_frames.deinit(self.allocator);
-            // 비활성 panel frame은 여기서 소유하고 replace 뒤에 해제한다(pane_frames의 PaneFrame은 같은 frame을
-            // 가리키는 view일 뿐이라 따로 deinit하지 않는다 — 이중 free 방지). 활성 frame은 tick_result가 소유.
+            // 탭 바 제목·비활성 panel frame은 여기서 소유하고 replace 뒤에 해제한다(pane_frames의 PaneFrame은 같은
+            // frame을 가리키는 view일 뿐이라 따로 deinit하지 않는다 — 이중 free 방지). 활성 frame은 tick_result가 소유.
             var built_frames: std.ArrayList(renderer.RenderFrame) = .empty;
             defer {
                 for (built_frames.items) |*bf| bf.deinit(self.allocator);
@@ -2140,7 +2175,9 @@ pub const DevSession = struct {
                 .default_fg = self.appearance.theme.foreground,
                 .default_bg = self.appearance.theme.background,
             };
-            if (builtin.os.tag == .macos and leaf_rects.items.len > 1) {
+            // 탭 바 제목 색: 전경=테마 글자색, 배경은 chrome이 이미 깔아 둠(투명).
+            const tabbar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
+            if (builtin.os.tag == .macos) {
                 const pane_frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
                     .appearance = self.appearance,
                     .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
@@ -2149,25 +2186,52 @@ pub const DevSession = struct {
                     .cell_width_px = @intCast(self.cell_width_px),
                     .cell_height_px = @intCast(self.cell_height_px),
                 };
+
+                // 1) 각 pane의 탭 바 제목 frame — Term 제목들을 가로 등폭 탭으로(buildPaneTabBarDrawList). 활성 panel
+                //    커서 suffix가 합쳐진 cells의 끝에 남도록 '터미널 frame들 앞'에 둔다. 바 없는 작은 pane은 건너뜀.
                 for (leaf_rects.items) |lr| {
-                    if (lr.leaf == active_pane) continue; // 활성은 맨 뒤에 따로 넣는다
-                    // 비활성 panel은 자기 활성 Term(보이는 탭)의 surface를 그린다.
-                    const dl = renderer.buildDrawList(self.allocator, lr.leaf.activeTerm().surface.core.renderSnapshot()) catch continue;
+                    const bar = self.paneBarRect(lr.rect) orelse continue;
+                    const bar_cols = @min(bar.w / self.cell_width_px, @as(u32, std.math.maxInt(u16)));
+                    if (bar_cols == 0) continue;
+                    var titles: std.ArrayList([]const u8) = .empty;
+                    defer titles.deinit(self.allocator);
+                    for (lr.leaf.terms.items) |term| titles.append(self.allocator, term.surface.title) catch {};
+                    const tab_fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
+                    const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, titles.items, @intCast(bar_cols), tab_fg) catch continue;
                     var f = pane_frame_builder.buildFromDrawList(self.allocator, dl, &self.renderer_state) catch continue;
                     built_frames.append(self.allocator, f) catch {
                         f.deinit(self.allocator);
                         continue;
                     };
-                    const t = self.paneTermRect(lr.rect); // 바 아래 영역 origin
                     pane_frames.append(self.allocator, .{
-                        .frame = f, // built_frames가 소유(deinit) — 여기는 같은 frame을 가리키는 view
-                        .origin_x = t.x,
-                        .origin_y = t.y,
-                        .colors = inactive_colors,
+                        .frame = f,
+                        .origin_x = bar.x,
+                        .origin_y = bar.y,
+                        .colors = tabbar_colors,
                     }) catch {};
                 }
+
+                // 2) 비활성 panel 터미널 frame(자기 활성 Term surface, 바 아래 origin). split일 때만 여럿이다.
+                if (leaf_rects.items.len > 1) {
+                    for (leaf_rects.items) |lr| {
+                        if (lr.leaf == active_pane) continue; // 활성은 맨 뒤에 따로 넣는다
+                        const dl = renderer.buildDrawList(self.allocator, lr.leaf.activeTerm().surface.core.renderSnapshot()) catch continue;
+                        var f = pane_frame_builder.buildFromDrawList(self.allocator, dl, &self.renderer_state) catch continue;
+                        built_frames.append(self.allocator, f) catch {
+                            f.deinit(self.allocator);
+                            continue;
+                        };
+                        const t = self.paneTermRect(lr.rect); // 바 아래 영역 origin
+                        pane_frames.append(self.allocator, .{
+                            .frame = f, // built_frames가 소유(deinit) — 여기는 같은 frame을 가리키는 view
+                            .origin_x = t.x,
+                            .origin_y = t.y,
+                            .colors = inactive_colors,
+                        }) catch {};
+                    }
+                }
             }
-            // 활성 panel을 맨 뒤에(커서 suffix). 단일 leaf·비-macOS면 이게 유일한 frame이다(기존 동작).
+            // 활성 panel 터미널을 맨 뒤에(커서 suffix). 단일 leaf·비-macOS면 이게 유일한 터미널 frame이다(기존 동작).
             pane_frames.append(self.allocator, .{
                 .frame = tick_result.frame.render_frame,
                 .origin_x = active_origin_x,
@@ -3058,6 +3122,21 @@ test "paneBarBgCell builds a bar-width background cell at the bar origin" {
     try std.testing.expect(paneBarBgCell(.{ .x = 0, .y = 0, .w = 8, .h = 12 }, 12, 0xFF000000) == null); // 1칸 미만
 }
 
+test "paneTabHighlightCell highlights the active Term tab segment aligned to paneTabWidth" {
+    // 바 (x=180, w=96), cell 12 → 8칸. 2 탭 → tab_w=4. 탭 1(활성) 세그먼트 = col [4,8), 폭 4.
+    const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 96, .h = 12 };
+    const cell = paneTabHighlightCell(bar, 12, 1, 2, 0xFF445566).?;
+    try std.testing.expectEqual(@as(u16, 4), cell.col); // 1*tab_w(4)
+    try std.testing.expectEqual(@as(u16, 4), cell.width); // tab_w
+    try std.testing.expectEqual(@as(u32, 180), cell.origin_x);
+    try std.testing.expectEqual(@as(u32, 0), cell.slot_id); // 배경 밴드
+    try std.testing.expectEqual(@as(u32, 0xFF445566), cell.background);
+    // 탭 0(활성) = col [0,4). 탭이 바 밖이거나 폭/탭 0이면 null.
+    try std.testing.expectEqual(@as(u16, 0), paneTabHighlightCell(bar, 12, 0, 2, 0xFF000000).?.col);
+    try std.testing.expect(paneTabHighlightCell(bar, 0, 0, 2, 0xFF000000) == null);
+    try std.testing.expect(paneTabHighlightCell(bar, 12, 0, 0, 0xFF000000) == null);
+}
+
 // paneTermRect/paneBarRect가 leaf rect 상단에서 탭 바(cell 높이 1칸)를 떼는지 — 충분히 크면 바+터미널, 너무
 // 작으면 바 없음(터미널이 전체). 좌표/resize/렌더가 공유하는 '바 아래' 영역의 단일 출처라 헤드리스로 고정.
 test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
@@ -3112,6 +3191,44 @@ test "pane reserves a top tab-bar strip and renders a bar chrome cell" {
     try std.testing.expectEqual(@as(u32, 0), first.origin_y);
     try std.testing.expectEqual(@as(u32, 0), first.slot_id);
     try std.testing.expectEqual(@as(u32, 0xFF), first.background >> 24); // 불투명 바 배경
+}
+
+// pane에 Term이 여럿이면 탭 바가 제목 탭들 + 활성 Term 하이라이트를 그리는지(PR-C2) — 실 init/spawn/tick이
+// 도는 macOS 경로라 게이트. ⌘T로 Term 2개를 만들고 tick이 바 배경 + 활성 탭 하이라이트 chrome을 내는지 본다.
+test "pane tab bar draws Term-title tabs with an active-Term highlight" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // ⌘T → 활성 pane에 Term 2개(활성 = 1).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+
+    // tick이 크래시 없이 돈다(탭 바 제목 frame + 비활성 Term은 안 그림 — 활성 Term surface만). chrome은 cells
+    // 맨 앞에 바 배경(전체) + 활성 Term 탭 하이라이트(세그먼트) 두 종류가 prepend된다. 첫 둘은 origin_y 0·slot 0.
+    _ = try session.tick();
+    const frame = session.metalFrame();
+    try std.testing.expect(frame.cell_count >= 2);
+    const c0 = frame.cells.?[0]; // 바 배경(전체 폭)
+    const c1 = frame.cells.?[1]; // 활성 Term 탭 하이라이트(세그먼트)
+    try std.testing.expectEqual(@as(u32, 0), c0.origin_y);
+    try std.testing.expectEqual(@as(u32, 0), c0.slot_id);
+    try std.testing.expectEqual(@as(u32, 0), c1.origin_y);
+    try std.testing.expectEqual(@as(u32, 0), c1.slot_id);
+    // 하이라이트(c1)는 활성 Term(1) 세그먼트 = col tab_w(2탭이라 cols/2)에서 시작 — 바 배경(col 0)과 다르다.
+    try std.testing.expect(c1.col > 0);
+    try std.testing.expect(c1.width < c0.width); // 세그먼트는 바 전체보다 좁다
 }
 
 // split 탭에서 다른 panel을 클릭하면 포커스가 그 panel로 옮겨가고(입력/커서가 따라간다), 활성 panel을

@@ -542,7 +542,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         _ = sender
-        return true
+        // false: 메인 창을 화면에서 내려도(orderOut — 전역 단축키 toggle_window의 "숨김") 앱이 종료되면 안 된다.
+        // true면 마지막 창이 화면에서 사라질 때 AppKit이 앱을 종료시켜, 숨기자마자 quit돼 다시 띄울 수 없다.
+        // 명시적 창 닫기(빨간 버튼 등)에 따른 종료는 windowWillClose가 NSApp.terminate로 담당한다(단일 출처).
+        return false
     }
 
     func windowWillClose(_ notification: Notification) {

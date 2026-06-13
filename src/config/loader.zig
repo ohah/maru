@@ -16,6 +16,7 @@ const theme = @import("theme.zig");
 const appearance = @import("appearance.zig");
 const keybinding = @import("keybinding.zig");
 const action_mod = @import("action.zig");
+const terminal = @import("../terminal.zig");
 
 pub const LoadError = std.mem.Allocator.Error;
 
@@ -36,15 +37,23 @@ pub const Parsed = struct {
     /// 사용자가 끈 빌트인 기본 바인딩의 chord(`keybind = <chord> = unbind`). resolve가 이 chord에서
     /// 빌트인 테이블을 건너뛴다. keybindings와 같은 dedup 풀(chord별 한 줄)이라 둘이 겹치지 않는다.
     unbinds: []const keybinding.KeyChord,
+    /// 사용자 정의 terminal 키바인딩(`keybind = <chord> = text:|esc:|ctrl:<payload>`) — 키에 셸로 보낼
+    /// 바이트(매크로)를 묶는다. app 바인딩·unbind와 같은 dedup 풀이라 chord가 충돌하지 않아 그대로
+    /// KeyBindingResolver.terminal_bindings로 넣어도 validate(app↔terminal 충돌 검사)가 통과한다.
+    terminal_bindings: []const keybinding.TerminalBinding,
     diagnostics: []const Diagnostic,
 
     pub fn deinit(self: *Parsed) void {
         self.arena.deinit();
     }
 
-    /// 파싱된 키바인딩으로 resolver를 만든다(app 바인딩 + unbind. terminal 바인딩 config는 후속).
+    /// 파싱된 키바인딩으로 resolver를 만든다(app 바인딩 + unbind + terminal 매크로).
     pub fn keyBindingResolver(self: Parsed) keybinding.KeyBindingResolver {
-        return .{ .app_bindings = self.keybindings, .unbinds = self.unbinds };
+        return .{
+            .app_bindings = self.keybindings,
+            .terminal_bindings = self.terminal_bindings,
+            .unbinds = self.unbinds,
+        };
     }
 };
 
@@ -62,6 +71,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
     var diags: std.ArrayList(Diagnostic) = .empty;
     var binds: std.ArrayList(keybinding.AppBinding) = .empty;
     var unbinds: std.ArrayList(keybinding.KeyChord) = .empty;
+    var term_binds: std.ArrayList(keybinding.TerminalBinding) = .empty;
 
     var line_no: usize = 0;
     var it = std.mem.splitScalar(u8, source, '\n');
@@ -77,7 +87,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
         const key = std.mem.trim(u8, line[0..eq], &std.ascii.whitespace);
         const value = std.mem.trim(u8, line[eq + 1 ..], &std.ascii.whitespace);
 
-        try applyKey(a, &config, &binds, &unbinds, &diags, line_no, key, value);
+        try applyKey(a, &config, &binds, &unbinds, &term_binds, &diags, line_no, key, value);
     }
 
     return .{
@@ -85,6 +95,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
         .config = config,
         .keybindings = try binds.toOwnedSlice(a),
         .unbinds = try unbinds.toOwnedSlice(a),
+        .terminal_bindings = try term_binds.toOwnedSlice(a),
         .diagnostics = try diags.toOwnedSlice(a),
     };
 }
@@ -94,13 +105,14 @@ fn applyKey(
     config: *theme.Config,
     binds: *std.ArrayList(keybinding.AppBinding),
     unbinds: *std.ArrayList(keybinding.KeyChord),
+    term_binds: *std.ArrayList(keybinding.TerminalBinding),
     diags: *std.ArrayList(Diagnostic),
     line_no: usize,
     key: []const u8,
     value: []const u8,
 ) LoadError!void {
     if (std.mem.eql(u8, key, "keybind")) {
-        return applyKeybind(a, binds, unbinds, diags, line_no, value);
+        return applyKeybind(a, binds, unbinds, term_binds, diags, line_no, value);
     }
     if (std.mem.eql(u8, key, "font.family")) {
         const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
@@ -160,14 +172,18 @@ fn parsePageKeys(value: []const u8) ?theme.PageKeys {
     return null;
 }
 
-/// `keybind = <chord> = <action>` 한 줄을 AppBinding으로(또는 action이 `unbind`면 빌트인 끄기). chord는
-/// KeyChord.parse(사람 표기 — 예 `Cmd+T`, `Ctrl+Cmd+1`), action은 parseAction. 오류는 diagnostic(forgiving).
-/// 같은 chord가 이미 (bind든 unbind든) 있으면 첫 줄을 살리고 무시한다 — chord별 한 줄이라 resolver가 모순 없이
-/// 본다(사용자 바인딩 우선, 그다음 unbind로 빌트인 끄기).
+/// `keybind = <chord> = <rhs>` 한 줄을 처리한다. rhs는 셋 중 하나다:
+///   - `unbind` → 그 chord의 빌트인 기본을 끈다(unbinds).
+///   - `text:`/`esc:`/`ctrl:` 매크로 → 키에 셸로 보낼 바이트를 묶는다(terminal_bindings).
+///   - 그 외 → app action(parseAction → keybindings).
+/// chord는 KeyChord.parse(사람 표기 — 예 `Cmd+T`). 오류는 diagnostic(forgiving). 같은 chord가 이미
+/// (bind/unbind/terminal 어디든) 있으면 첫 줄을 살리고 무시한다 — chord별 한 줄이라 resolver가 모순 없이
+/// 본다(app 우선 → terminal → unbind로 빌트인 끄기). 세 풀을 한 dedup로 묶어 app↔terminal 충돌도 막는다.
 fn applyKeybind(
     a: std.mem.Allocator,
     binds: *std.ArrayList(keybinding.AppBinding),
     unbinds: *std.ArrayList(keybinding.KeyChord),
+    term_binds: *std.ArrayList(keybinding.TerminalBinding),
     diags: *std.ArrayList(Diagnostic),
     line_no: usize,
     value: []const u8,
@@ -177,13 +193,14 @@ fn applyKeybind(
         return;
     };
     const chord_str = std.mem.trim(u8, value[0..eq], &std.ascii.whitespace);
-    const action_str = std.mem.trim(u8, value[eq + 1 ..], &std.ascii.whitespace);
+    const rhs = std.mem.trim(u8, value[eq + 1 ..], &std.ascii.whitespace);
 
     const chord = keybinding.KeyChord.parse(chord_str) catch {
         try diags.append(a, .{ .line = line_no, .message = "키 조합을 못 읽음(예: Cmd+T, Ctrl+Cmd+1) — 무시" });
         return;
     };
-    // chord는 bind/unbind를 통틀어 한 번만(첫 줄 우선). 두 풀을 함께 검사해 같은 chord가 양쪽에 갈라지지 않게 한다.
+    // chord는 bind/unbind/terminal을 통틀어 한 번만(첫 줄 우선). 세 풀을 함께 검사해 같은 chord가
+    // 갈라지지 않게 한다(app↔terminal 충돌도 여기서 막아 resolver.validate가 통과한다).
     for (binds.items) |existing| {
         if (existing.chord.eql(chord)) {
             try diags.append(a, .{ .line = line_no, .message = "이미 바인딩된 키 조합 — 무시(첫 줄 우선)" });
@@ -196,18 +213,96 @@ fn applyKeybind(
             return;
         }
     }
+    for (term_binds.items) |existing| {
+        if (existing.chord.eql(chord)) {
+            try diags.append(a, .{ .line = line_no, .message = "이미 바인딩된 키 조합 — 무시(첫 줄 우선)" });
+            return;
+        }
+    }
 
-    // action이 `unbind`면 그 chord의 빌트인 기본을 끈다(app action 아님 — 별도 목록).
-    if (std.mem.eql(u8, action_str, "unbind")) {
+    // rhs가 `unbind`면 그 chord의 빌트인 기본을 끈다(app action 아님 — 별도 목록).
+    if (std.mem.eql(u8, rhs, "unbind")) {
         try unbinds.append(a, chord);
         return;
     }
 
-    const act = action_mod.parseAction(action_str) orelse {
-        try diags.append(a, .{ .line = line_no, .message = "알 수 없는 action(unbind/new_tab/close_tab/next_tab/previous_tab/select_tab:N 등) — 무시" });
+    // rhs가 터미널 매크로(text:/esc:/ctrl:)면 셸로 보낼 바이트를 묶는다.
+    if (try parseTerminalMacro(a, diags, line_no, rhs)) |macro| {
+        try term_binds.append(a, .{ .chord = chord, .input = macro });
+        return;
+    }
+    // `<prefix>:`로 시작했는데 매크로로 못 읽었으면(잘못된 ctrl 등) parseTerminalMacro가 이미 diagnostic을
+    // 남기고 null을 줬다 — app action으로 다시 시도하지 않고 그 줄을 버린다.
+    if (isTerminalMacroPrefix(rhs)) return;
+
+    const act = action_mod.parseAction(rhs) orelse {
+        try diags.append(a, .{ .line = line_no, .message = "알 수 없는 action(unbind/text:/esc:/ctrl:/new_tab/close_tab/select_tab:N 등) — 무시" });
         return;
     };
     try binds.append(a, .{ .chord = chord, .action = act });
+}
+
+/// rhs가 터미널 매크로 접두사(text:/esc:/ctrl:)로 시작하는가 — 매크로 파싱이 실패했을 때 app action으로
+/// 잘못 재해석하지 않으려는 판정. parseTerminalMacro와 같은 접두사 목록을 본다(단일 출처).
+fn isTerminalMacroPrefix(rhs: []const u8) bool {
+    return std.mem.startsWith(u8, rhs, "text:") or
+        std.mem.startsWith(u8, rhs, "esc:") or
+        std.mem.startsWith(u8, rhs, "ctrl:");
+}
+
+/// 터미널 매크로 rhs를 TerminalInputMacro로 파싱한다(접두사가 아니면 null — app action일 수 있음).
+///   - `text:<문자열>`  → send_text(payload 그대로 셸로).
+///   - `esc:<payload>`  → send_escape_sequence("\x1b" + payload — ESC를 앞에 붙인 시퀀스. 예 `esc:[2J`).
+///   - `ctrl:<글자한자>` → send_control(그 글자의 C0 컨트롤 바이트. 예 `ctrl:[` = ESC).
+/// payload(text/esc)는 arena에 복사해 binding이 소유한다(Parsed가 사는 동안 유효). 빈 payload·여러 글자
+/// ctrl·C0 매핑 없는 ctrl은 diagnostic + null(forgiving). 매크로 접두사인데 null이면 호출자가 그 줄을 버린다.
+fn parseTerminalMacro(
+    a: std.mem.Allocator,
+    diags: *std.ArrayList(Diagnostic),
+    line_no: usize,
+    rhs: []const u8,
+) LoadError!?keybinding.TerminalInputMacro {
+    if (std.mem.startsWith(u8, rhs, "text:")) {
+        const payload = rhs["text:".len..];
+        if (payload.len == 0) {
+            try diags.append(a, .{ .line = line_no, .message = "text: 뒤 내용이 비어 있음 — 무시" });
+            return null;
+        }
+        return .{ .send_text = try a.dupe(u8, payload) };
+    }
+    if (std.mem.startsWith(u8, rhs, "esc:")) {
+        const payload = rhs["esc:".len..];
+        if (payload.len == 0) {
+            try diags.append(a, .{ .line = line_no, .message = "esc: 뒤 내용이 비어 있음 — 무시" });
+            return null;
+        }
+        // ESC(0x1b)를 앞에 붙인 시퀀스. 예 `esc:[2J` → "\x1b[2J"(화면 지우기).
+        const seq = try std.fmt.allocPrint(a, "\x1b{s}", .{payload});
+        return .{ .send_escape_sequence = seq };
+    }
+    if (std.mem.startsWith(u8, rhs, "ctrl:")) {
+        const payload = rhs["ctrl:".len..];
+        // 정확히 한 codepoint여야 한다(Ctrl+<글자>). UTF-8 한 글자 길이와 payload 길이가 같아야 통과.
+        const seq_len = std.unicode.utf8ByteSequenceLength(if (payload.len > 0) payload[0] else 0) catch {
+            try diags.append(a, .{ .line = line_no, .message = "ctrl: 뒤는 글자 한 자여야 함 — 무시" });
+            return null;
+        };
+        if (payload.len != seq_len) {
+            try diags.append(a, .{ .line = line_no, .message = "ctrl: 뒤는 글자 한 자여야 함 — 무시" });
+            return null;
+        }
+        const cp = std.unicode.utf8Decode(payload) catch {
+            try diags.append(a, .{ .line = line_no, .message = "ctrl: 글자를 못 읽음 — 무시" });
+            return null;
+        };
+        // C0 컨트롤로 매핑되는 글자만(@A-Z[\]^_ space ?). 로드 시 걸러야 키 누를 때 resolve가 안 터진다.
+        _ = terminal.input.controlByte(cp) catch {
+            try diags.append(a, .{ .line = line_no, .message = "ctrl: 글자가 컨트롤 문자로 매핑 안 됨(@,A~Z,[,\\,],^,_,Space,? 가능) — 무시" });
+            return null;
+        };
+        return .{ .send_control = cp };
+    }
+    return null;
 }
 
 /// 색 문자열을 appearance.parseHexColor로 검증(값 의미 단일 출처)한 뒤 arena에 복사해 돌려준다.
@@ -243,7 +338,7 @@ fn parseBool(value: []const u8) ?bool {
 
 /// 빈 기본 결과(파일 없음/HOME 없음 등). config 텍스트를 안 읽었으므로 arena도 비어 있다.
 fn emptyDefault(allocator: std.mem.Allocator) Parsed {
-    return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .unbinds = &.{}, .diagnostics = &.{} };
+    return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .unbinds = &.{}, .terminal_bindings = &.{}, .diagnostics = &.{} };
 }
 
 /// 경로에서 config를 읽어 파싱한다. 파일이 없거나 읽기 실패면 기본 Config(빈 arena)를 돌려준다
@@ -392,6 +487,52 @@ test "parse: keybind = <chord> = unbind collects unbinds; dedups across binds an
     const resolver = p.keyBindingResolver();
     try resolver.validate();
     try std.testing.expectEqual(@as(usize, 2), resolver.unbinds.len);
+}
+
+test "parse: text:/esc:/ctrl: become terminal macros; bad payloads are forgiving" {
+    var p = try parse(std.testing.allocator,
+        \\keybind = F2 = text:hello
+        \\keybind = Cmd+K = esc:[2J
+        \\keybind = Cmd+E = ctrl:[
+        \\keybind = Cmd+X = ctrl:1
+        \\keybind = F3 = text:
+        \\keybind = Cmd+Y = ctrl:ab
+    );
+    defer p.deinit();
+    // 유효 3개(text/esc/ctrl). 나머지 3줄은 오류(C0 매핑 없는 ctrl:1, 빈 text:, 여러 글자 ctrl:ab).
+    try std.testing.expectEqual(@as(usize, 3), p.terminal_bindings.len);
+    try std.testing.expectEqual(@as(usize, 0), p.keybindings.len);
+    try std.testing.expectEqual(@as(usize, 3), p.diagnostics.len);
+
+    // text:hello → send_text "hello".
+    try std.testing.expectEqualStrings("hello", p.terminal_bindings[0].input.send_text);
+    // esc:[2J → ESC를 앞에 붙인 send_escape_sequence "\x1b[2J".
+    try std.testing.expectEqualStrings("\x1b[2J", p.terminal_bindings[1].input.send_escape_sequence);
+    // ctrl:[ → send_control '[' (resolve 시 controlByte로 ESC가 된다).
+    try std.testing.expectEqual(@as(u21, '['), p.terminal_bindings[2].input.send_control);
+
+    // resolver가 매크로를 받고 app↔terminal 충돌 없이 validate 통과(세 풀이 같은 dedup).
+    const resolver = p.keyBindingResolver();
+    try resolver.validate();
+    try std.testing.expectEqual(@as(usize, 3), resolver.terminal_bindings.len);
+
+    // 실제 resolve: Cmd+E → ctrl:[ → ESC(0x1b) 한 바이트.
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolved = try resolver.resolve(.{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true } }, &buffer, .{});
+    try std.testing.expectEqualStrings("\x1b", resolved.terminal_input);
+}
+
+test "parse: a chord can't be both an app action and a terminal macro (first line wins)" {
+    var p = try parse(std.testing.allocator,
+        \\keybind = Cmd+T = new_tab
+        \\keybind = Cmd+T = text:oops
+    );
+    defer p.deinit();
+    // 첫 줄(app)만 살고 둘째(terminal)는 중복으로 무시 → app↔terminal 충돌이 안 생긴다.
+    try std.testing.expectEqual(@as(usize, 1), p.keybindings.len);
+    try std.testing.expectEqual(@as(usize, 0), p.terminal_bindings.len);
+    try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    try p.keyBindingResolver().validate(); // 충돌 없음
 }
 
 test "parse: keybindings empty when none configured; appearance keys unaffected" {

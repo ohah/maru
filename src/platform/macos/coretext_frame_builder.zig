@@ -126,6 +126,9 @@ fn titleDisplayWidth(title: []const u8) usize {
 /// title을 [start_col, end_col) 칸에 row행 DrawCell로 깐다(좌→우). 다 안 들어가면 **하드 컷 대신 마지막 칸을
 /// "…"(U+2026)로** 바꿔 잘렸음을 표시한다(말줄임). end_col<=start_col이면 무동작. 깨진 UTF-8 U+FFFD, wide 2칸.
 /// 사이드바 제목·pane 탭 바 제목이 공유하는 단일 출처라 잘림 표시가 일관된다. 순수(out append만).
+/// 제목을 [start_col, end_col) 칸에 깐다 — 안 들어가면 마지막 칸을 "…"(U+2026)로 말줄임한다. 사이드바·pane
+/// 탭 바·floating 탭이 공유하는 잘림 규칙의 단일 출처. **다음 빈 col**(제목/말줄임 뒤)을 돌려줘, 호출자가 그 뒤를
+/// 배경으로 채우는(솔리드 박스) 식으로 이어 그릴 수 있다. 글자만 추가하고 빈 칸은 채우지 않는다(중복 셀 없음).
 fn appendEllipsizedTitle(
     allocator: std.mem.Allocator,
     cells: *std.ArrayList(renderer.DrawCell),
@@ -134,8 +137,8 @@ fn appendEllipsizedTitle(
     start_col: u16,
     end_col: u16,
     style: terminal.Style,
-) !void {
-    if (end_col <= start_col) return;
+) !u16 {
+    if (end_col <= start_col) return start_col;
     const fits = titleDisplayWidth(title) <= @as(usize, end_col - start_col);
     const text_end: u16 = if (fits) end_col else end_col - 1; // 말줄임이면 마지막 1칸을 "…"에 남긴다
     var col: u16 = start_col;
@@ -160,7 +163,9 @@ fn appendEllipsizedTitle(
     }
     if (!fits and col < end_col) {
         try cells.append(allocator, .{ .row = row, .col = col, .codepoint = title_ellipsis_glyph, .width = 1, .style = style });
+        col += 1;
     }
+    return col;
 }
 
 /// pane 탭 바 우측 "+"(새 Term) 버튼이 차지하는 칸 수. 바 우측에 이만큼 예약하고 그 왼쪽을 탭 영역으로 쓴다.
@@ -202,7 +207,7 @@ pub fn buildSidebarDrawList(
         const row_style: terminal.Style = if (active_row != null and active_row.? == row_index) .{ .foreground = active_fg, .bold = true } else style;
         // 제목은 OSC 0/2(신뢰 불가 PTY 출력)이라 깨진 UTF-8을 U+FFFD로 다룬다. cols를 넘으면 하드 컷이 아니라
         // 마지막 칸을 "…"로 말줄임한다(appendEllipsizedTitle 단일 출처 — pane 탭 바 제목과 같은 규칙).
-        try appendEllipsizedTitle(allocator, &cells, title, row, 0, cols, row_style);
+        _ = try appendEllipsizedTitle(allocator, &cells, title, row, 0, cols, row_style);
     }
 
     // 닫기 ✕ 아이콘: 호버 슬롯(close_row) 우측 안쪽 col에 glyph 1개. cols가 2칸 이상일 때만(우측 여백
@@ -284,7 +289,7 @@ pub fn buildPaneTabBarDrawList(
             // bold는 셰이퍼가 bold 폰트 face를 골라 실제 굵은 글리프를 그린다(사이드바 활성 행과 같은 규칙).
             const tab_style: terminal.Style = if (active_tab != null and active_tab.? == tab_index) .{ .foreground = active_fg, .bold = true } else style;
             // 좌측 1칸 패딩 뒤에 제목. title_end(✕ 앞)를 넘으면 하드 컷이 아니라 "…"로 말줄임(사이드바와 같은 규칙).
-            try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), @intCast(title_end), tab_style);
+            _ = try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), @intCast(title_end), tab_style);
             if (is_close) { // 호버 탭 우측 안쪽에 ✕ glyph 1개(xInTabCloseZone과 같은 col=seg_end-2).
                 try cells.append(allocator, .{
                     .row = 0,
@@ -318,8 +323,9 @@ pub fn buildPaneTabBarDrawList(
 }
 
 /// 드래그 중 커서를 따라다니는 'floating 탭' 미리보기의 DrawList(한 행). col마다 셀 하나(중복 없음)를 깔되 전부
-/// `bg`를 줘 솔리드 박스로 보이게 하고, 1칸 좌패딩 뒤에 제목을 그린다(cols 한도로 자름, 깨진 UTF-8은 U+FFFD,
-/// wide glyph는 2칸). 박스 위에 제목이 얹힌 작은 탭처럼 보인다. 커서/overlay 없는 UI 텍스트라 순수 함수.
+/// `bg`를 줘 솔리드 박스로 보이게 하고, 1칸 좌패딩 뒤에 제목을 그린다. 박스 폭(cols)을 넘으면 하드 컷이 아니라
+/// 마지막 칸을 "…"로 말줄임한다(appendEllipsizedTitle 단일 출처 — 사이드바·pane 탭 바와 같은 규칙). 깨진 UTF-8은
+/// U+FFFD, wide glyph는 2칸. 박스 위에 제목이 얹힌 작은 탭처럼 보인다. 커서/overlay 없는 UI 텍스트라 순수 함수.
 pub fn buildFloatingTabDrawList(
     allocator: std.mem.Allocator,
     title: []const u8,
@@ -336,25 +342,8 @@ pub fn buildFloatingTabDrawList(
         try cells.append(allocator, .{ .row = 0, .col = 0, .codepoint = ' ', .width = 1, .style = style });
         col = 1;
     }
-    var i: usize = 0;
-    while (i < title.len and col < cols) {
-        var cp: u21 = 0xFFFD;
-        var advance: usize = 1;
-        if (std.unicode.utf8ByteSequenceLength(title[i])) |seq_len| {
-            const len: usize = seq_len;
-            if (i + len <= title.len) {
-                if (std.unicode.utf8Decode(title[i .. i + len])) |decoded| {
-                    cp = decoded;
-                    advance = len;
-                } else |_| {}
-            }
-        } else |_| {}
-        i += advance;
-        const w: u16 = @max(1, terminal.width.cellWidth(cp));
-        if (col + w > cols) break; // 박스 폭 한도 — 넘치면 자름
-        try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = cp, .width = @intCast(@min(w, 2)), .style = style });
-        col += w;
-    }
+    // 제목을 col 1..cols에 깔고(넘치면 "…"), 다음 빈 col을 받아 그 뒤를 bg로 채운다.
+    col = try appendEllipsizedTitle(allocator, &cells, title, 0, col, cols, style);
     while (col < cols) : (col += 1) { // 남은 col = bg 공백(솔리드 박스 마감)
         try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = ' ', .width = 1, .style = style });
     }
@@ -841,10 +830,20 @@ test "buildFloatingTabDrawList fills a one-row box with the title" {
     try std.testing.expectEqual(@as(u21, 's'), dl.cells[1].codepoint); // 1칸 패딩 뒤
     try std.testing.expectEqual(@as(u21, 'h'), dl.cells[2].codepoint);
     try std.testing.expectEqual(@as(u21, ' '), dl.cells[0].codepoint); // 좌패딩
-    // 폭보다 긴 제목은 박스 한도에서 잘린다.
+    // 폭보다 긴 제목은 하드 컷이 아니라 마지막 칸을 "…"로 말줄임한다(사이드바·pane 탭 바와 같은 규칙).
     var narrow = try buildFloatingTabDrawList(allocator, "abcdefghij", 5, fg, bg);
     defer narrow.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 5), narrow.cells.len); // col 0..4만
+    try std.testing.expectEqual(@as(usize, 5), narrow.cells.len); // col 0..4 (좌패딩 + a,b,c + …)
+    // 마지막 셀(우측 끝 col 4)이 "…"(U+2026)다 — 잘렸음을 표시. 박스 bg는 유지된다.
+    const last = narrow.cells[narrow.cells.len - 1];
+    try std.testing.expectEqual(title_ellipsis_glyph, last.codepoint);
+    try std.testing.expectEqual(@as(u16, 4), last.col);
+    try std.testing.expectEqual(bg, last.style.background);
+    // 딱 맞는 제목은 "…" 없이 박스를 채운다(좌패딩 + 'o','k' + 남은 bg 5칸 = 8).
+    var exact = try buildFloatingTabDrawList(allocator, "ok", 8, fg, bg);
+    defer exact.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 8), exact.cells.len);
+    for (exact.cells) |c| try std.testing.expect(c.codepoint != title_ellipsis_glyph);
 }
 
 test "buildFromDrawList shapes a synthesized sidebar draw list into glyph cells (shared atlas seam)" {

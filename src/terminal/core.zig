@@ -329,6 +329,24 @@ pub const TerminalCore = struct {
         }
     }
 
+    /// 절대 행 abs가 뷰포트 세로 중앙쯤에 오도록 스크롤한다(스크롤백 Find가 현재 매치를 화면에 보일 때).
+    /// 중앙 배치라 상단 Find 오버레이에 매치가 가리지 않는다. alt screen에선 스크롤백이 잠겨 무동작
+    /// (jumpToPrompt와 같은 규율). [0, sb_count]로 clamp.
+    pub fn scrollToAbs(self: *TerminalCore, abs: usize) void {
+        if (self.alt_active) return;
+        self.ensureScrollbackRewrapped(); // sb_count(절대 좌표 범위)가 재-wrap으로 바뀔 수 있다
+        const total = self.sb_count + self.size.rows;
+        if (total == 0) return;
+        // 매치를 뷰포트 세로 중앙(target_top = abs - rows/2, saturating)에 둔다.
+        const half = self.size.rows / 2;
+        const target_top = if (abs > half) abs - half else 0;
+        const new_off: usize = if (target_top < self.sb_count) self.sb_count - target_top else 0; // 활성 행이면 바닥
+        if (new_off != self.view_offset) {
+            self.view_offset = new_off;
+            self.dirty = fullDirty(self.size);
+        }
+    }
+
     /// 절대 행(스크롤백 0..sb_count-1, 이어서 활성 화면)의 OSC 133 정보(분류+종료코드). 범위 밖은 기본값.
     fn promptAtAbs(self: *const TerminalCore, abs: usize) types.RowPrompt {
         if (abs < self.sb_count) return self.scrollbackRowPrompt(abs);
@@ -768,6 +786,74 @@ pub const TerminalCore = struct {
         self.dirty = fullDirty(self.size);
     }
 
+    /// 스크롤백 + 활성 화면 전체에서 needle을 찾아 절대-좌표 Match로 out에 채운다(out은 먼저 비운다).
+    /// 대소문자 무시 ASCII 부분일치(Ghostty 스크롤백 검색의 기본 — 같은 1차 레퍼런스, 우리 팝업 필터와도 일관),
+    /// 논리 줄(soft-wrap 이음) 단위로 스캔해 wrap 경계를 넘는 매치도 잡는다. 같은 줄 안에선 비겹침(매치 뒤로
+    /// needle 길이만큼 건너뜀, 관례). needle이 비면 무동작. 스크롤백 Find의 단일 출처(코어 상태) — UI 상태머신
+    /// (find_overlay)은 이 결과를 받기만 한다. regex/fuzzy/유니코드 케이스폴딩은 후속.
+    pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf8: []const u8, out: *std.ArrayList(types.Match)) !void {
+        out.clearRetainingCapacity();
+        if (needle_utf8.len == 0) return;
+        self.ensureScrollbackRewrapped(); // abs 좌표 쓰기 전 스크롤백 rewrap 확정(selectAll과 같은 이유)
+
+        // needle을 코드포인트 배열로 디코드(셀 codepoint와 같은 단위로 비교 — 멀티바이트 오프셋 매핑 회피).
+        var needle: std.ArrayList(u21) = .empty;
+        defer needle.deinit(allocator);
+        var nv = std.unicode.Utf8View.init(needle_utf8) catch return; // 깨진 needle은 매치 없음
+        var nit = nv.iterator();
+        while (nit.nextCodepoint()) |cp| try needle.append(allocator, cp);
+        if (needle.items.len == 0) return;
+
+        const total = self.sb_count + self.size.rows;
+        // 논리 줄마다 코드포인트 시퀀스(cps)와 각 코드포인트의 절대 좌표(coords)를 만들어 검색하고, 다음 줄에서
+        // 버퍼를 재사용한다(스크롤백 전체를 한 문자열로 들지 않음 — 메모리는 가장 긴 논리 줄 하나).
+        var cps: std.ArrayList(u21) = .empty;
+        defer cps.deinit(allocator);
+        var coords: std.ArrayList(types.SelectionPoint) = .empty;
+        defer coords.deinit(allocator);
+
+        var abs: usize = 0;
+        while (abs < total) {
+            cps.clearRetainingCapacity();
+            coords.clearRetainingCapacity();
+            // 논리 줄 = 현재 abs부터 wrapped=false인 행까지(soft-wrap 이음).
+            var line_abs = abs;
+            while (true) {
+                const row = self.absRow(line_abs) orelse break;
+                const wrapped = self.absRowWrapped(line_abs);
+                // wrapped 행은 전폭이 실제 내용(우측 끝에서 wrap), 마지막(hard) 행은 뒤 빈칸을 자른다(extractSelection과 같은 규칙).
+                const limit: usize = if (wrapped) row.len else trimmedLen(row);
+                var col: usize = 0;
+                while (col < limit) : (col += 1) {
+                    const cell = row[col];
+                    if (cell.continuation) continue; // wide glyph의 둘째 슬롯은 건너뜀(코드포인트 1개)
+                    try cps.append(allocator, cell.codepoint);
+                    try coords.append(allocator, .{ .row = line_abs, .col = @intCast(col) });
+                }
+                if (!wrapped) break;
+                line_abs += 1;
+                if (line_abs >= total) break;
+            }
+            // 이 논리 줄에서 needle 슬라이딩 매치(비겹침).
+            var i: usize = 0;
+            while (i + needle.items.len <= cps.items.len) {
+                if (matchAtIgnoreCase(cps.items[i..], needle.items)) {
+                    try out.append(allocator, .{
+                        .start = coords.items[i],
+                        .end = coords.items[i + needle.items.len - 1],
+                    });
+                    i += needle.items.len; // 비겹침: 매치 뒤로 건너뜀
+                } else i += 1;
+            }
+            abs = line_abs + 1;
+        }
+    }
+
+    /// 검색 매치(절대 좌표)를 현재 뷰포트 좌표로 클립한다(화면 밖이면 null) — 선택 하이라이트와 같은 규칙 공유.
+    pub fn matchViewportSpan(self: *const TerminalCore, m: types.Match) ?types.SelectionSpan {
+        return self.clipAbsSpanToViewport(m.start, m.end);
+    }
+
     /// IME 조합 중 텍스트를 설정한다(빈 입력 = 조합 종료/취소). 렌더 합성 전용 상태라 셀
     /// 그리드·커서는 변하지 않는다. 표시는 renderSnapshot이 한다.
     pub fn setPreedit(self: *TerminalCore, bytes: []const u8) !void {
@@ -1073,6 +1159,20 @@ pub const TerminalCore = struct {
             if (!isBlankCell(row[len - 1])) break;
         }
         return len;
+    }
+
+    /// ASCII 대문자만 소문자로 접는다(A-Z → a-z). 비-ASCII는 그대로 — findMatches의 대소문자 무시 비교용
+    /// (유니코드 전체 케이스폴딩은 후속). 입력 텍스트는 영문이 대부분이라 ASCII fold로 충분.
+    fn foldAscii(cp: u21) u21 {
+        return if (cp >= 'A' and cp <= 'Z') cp + 32 else cp;
+    }
+
+    /// haystack 앞부분이 needle과 ASCII 대소문자 무시로 일치하는지(needle.len ≤ haystack.len 가정 — 호출자가 보장).
+    fn matchAtIgnoreCase(haystack: []const u21, needle: []const u21) bool {
+        for (needle, 0..) |n, k| {
+            if (foldAscii(haystack[k]) != foldAscii(n)) return false;
+        }
+        return true;
     }
 
     /// 행을 스크롤백에 보관한다. OOM 등으로 실제 보관에 실패하면 false — 호출자(scroll-lock)는
@@ -3102,6 +3202,63 @@ test "terminal core writes process-like text into cells" {
     try std.testing.expect(std.mem.indexOf(u8, text, "hello") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "maru") != null);
     try std.testing.expectEqual(@as(u16, 1), core.snapshot().cursor.row);
+}
+
+test "findMatches: 대소문자 무시 부분일치 + 비겹침 + 절대 좌표" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    try core.write("alpha\r\nbeta\r\nalpha gamma");
+
+    var matches: std.ArrayList(types.Match) = .empty;
+    defer matches.deinit(std.testing.allocator);
+
+    // "alpha" 2곳: row0 col0, row2 col0. end.col = 4('alpha'=5칸 0..4).
+    try core.findMatches(std.testing.allocator, "alpha", &matches);
+    try std.testing.expectEqual(@as(usize, 2), matches.items.len);
+    try std.testing.expectEqual(@as(usize, 0), matches.items[0].start.row);
+    try std.testing.expectEqual(@as(u16, 0), matches.items[0].start.col);
+    try std.testing.expectEqual(@as(u16, 4), matches.items[0].end.col);
+    try std.testing.expectEqual(@as(usize, 2), matches.items[1].start.row);
+
+    // 대소문자 무시: 같은 2곳.
+    try core.findMatches(std.testing.allocator, "ALPHA", &matches);
+    try std.testing.expectEqual(@as(usize, 2), matches.items.len);
+
+    // 없는 needle / 빈 needle → 0.
+    try core.findMatches(std.testing.allocator, "zzz", &matches);
+    try std.testing.expectEqual(@as(usize, 0), matches.items.len);
+    try core.findMatches(std.testing.allocator, "", &matches);
+    try std.testing.expectEqual(@as(usize, 0), matches.items.len);
+}
+
+test "findMatches: soft-wrap 경계를 넘는 매치" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer core.deinit();
+    try core.write("abcdefghij"); // 8칸 auto-wrap → row0 "abcdefgh"(wrapped), row1 "ij"
+
+    var matches: std.ArrayList(types.Match) = .empty;
+    defer matches.deinit(std.testing.allocator);
+    try core.findMatches(std.testing.allocator, "ghij", &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+    try std.testing.expectEqual(@as(usize, 0), matches.items[0].start.row); // 'g' = row0 col6
+    try std.testing.expectEqual(@as(u16, 6), matches.items[0].start.col);
+    try std.testing.expectEqual(@as(usize, 1), matches.items[0].end.row); // 'j' = row1 col1
+    try std.testing.expectEqual(@as(u16, 1), matches.items[0].end.col);
+}
+
+test "scrollToAbs: 스크롤백 매치를 뷰포트로 가져온다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 3 });
+    defer core.deinit();
+    var i: usize = 0;
+    while (i < 10) : (i += 1) try core.write("line\r\n"); // 화면(3행)보다 많이 써 스크롤백 생성
+    try std.testing.expect(core.sb_count > 0);
+
+    // 맨 위(abs 0)로 → 과거를 본다(view_offset > 0).
+    core.scrollToAbs(0);
+    try std.testing.expect(core.viewOffset() > 0);
+    // 바닥(활성 화면 마지막 행)으로 → view_offset 0.
+    core.scrollToAbs(core.sb_count + core.size.rows - 1);
+    try std.testing.expectEqual(@as(usize, 0), core.viewOffset());
 }
 
 test "terminal core preserves UTF-8 split across process read boundaries" {

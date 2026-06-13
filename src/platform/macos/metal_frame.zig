@@ -64,6 +64,14 @@ pub const CellColors = struct {
     /// Cmd+hover 중인 URL의 뷰포트 범위(없으면 null). 범위 셀 하단에 전경색 밑줄을 긋는다
     /// (커서 underline과 같은 부분-사각형 kind 재사용 — 셰이더/렌더러 변경 없음).
     hover_link: ?terminal.SelectionSpan = null,
+    /// 스크롤백 Find 매치 하이라이트 배경(theme.search_match). search_matches 안의 셀 배경을 덮는다.
+    search_match_bg: color.Rgb = .{ .r = 0x55, .g = 0x4a, .b = 0x1a },
+    /// 현재 뷰포트에 보이는 검색 매치 span 리스트(없으면 빈 슬라이스). 활성 surface 셀에만 넘겨 칠한다.
+    search_matches: []const terminal.SelectionSpan = &.{},
+    /// 현재(네비게이션) 매치 하이라이트 배경(theme.search_match_current) — 다른 매치보다 밝게 구분.
+    current_match_bg: color.Rgb = .{ .r = 0x99, .g = 0x77, .b = 0x22 },
+    /// 현재 매치의 뷰포트 span(없으면 null). search_matches·selection보다 우선해 칠한다.
+    current_match: ?terminal.SelectionSpan = null,
 };
 
 /// 컬러 글리프(이모지)인지 판정한다. 셰이더는 이 cell의 UV에 +2.0이 더해져 오면 atlas의 컬러
@@ -98,6 +106,24 @@ fn inSelection(span: ?terminal.SelectionSpan, row: u16, col: u16) bool {
     if (row == s.start.row and col < s.start.col) return false;
     if (row == s.end.row and col > s.end.col) return false;
     return true;
+}
+
+/// (row,col)이 span 리스트 중 하나에라도 들었는가(스크롤백 Find 전체 매치 하이라이트). inSelection을 재사용.
+fn inAnySpan(spans: []const terminal.SelectionSpan, row: u16, col: u16) bool {
+    for (spans) |s| {
+        if (inSelection(s, row, col)) return true;
+    }
+    return false;
+}
+
+/// (row,col)의 하이라이트 배경색(없으면 null). 우선순위: 현재 검색 매치 > 다른 검색 매치 > 선택. 셀 자체
+/// 배경(BCE/SGR)은 여기서 안 본다 — 호출자가 null이면 packBackground로 폴백한다. selection·search·cursor
+/// 같은 배경 칠 결정을 한 곳에 모아 glyph/빈-셀 두 경로가 같은 규칙을 쓰게 한다(중복 제거).
+fn highlightBg(colors: CellColors, row: u16, col: u16) ?color.Rgb {
+    if (inSelection(colors.current_match, row, col)) return colors.current_match_bg;
+    if (inAnySpan(colors.search_matches, row, col)) return colors.search_match_bg;
+    if (inSelection(colors.selection, row, col)) return colors.selection_bg;
+    return null;
 }
 
 fn resolveColor(c: terminal.Color, default_rgb: color.Rgb) color.Rgb {
@@ -202,8 +228,8 @@ pub fn buildNativeCellsSplit(
             .u1 = colorUv(glyph.uv.u1, glyph.run.codepoint, glyph.run.combining),
             .v1 = glyph.uv.v1,
             .foreground = packForeground(glyph.run.style, colors),
-            .background = if (inSelection(colors.selection, glyph.run.row, glyph.run.col))
-                0xFF00_0000 | packRgb(colors.selection_bg)
+            .background = if (highlightBg(colors, glyph.run.row, glyph.run.col)) |hl|
+                0xFF00_0000 | packRgb(hl)
             else
                 packBackground(glyph.run.style, colors),
         });
@@ -217,9 +243,8 @@ pub fn buildNativeCellsSplit(
     //    1)이 glyph와 함께 배경을 싣는다).
     for (draw_cells) |cell| {
         if (cell.codepoint != ' ' and cell.codepoint != 0) continue;
-        const selected = inSelection(colors.selection, cell.row, cell.col);
-        const background = if (selected)
-            0xFF00_0000 | packRgb(colors.selection_bg)
+        const background = if (highlightBg(colors, cell.row, cell.col)) |hl|
+            0xFF00_0000 | packRgb(hl)
         else
             packBackground(cell.style, colors);
         if (background == 0) continue;
@@ -655,10 +680,10 @@ pub const MetalFrameBuffer = struct {
         // panel 커서 suffix '앞'에 끼워, 터미널 내용 위에 그리되 커서 blink 노출 길이(cursor suffix)를 깨지
         // 않게 한다. 각 셀은 origin_x/origin_y로 같은 maru_fill_cell_quad 경로(sentinel UV → bg만).
         pane_overlay_cells: []const NativeMetalCell,
-        // 커맨드 팝업 등 **최상위** 오버레이 frame(있으면). pane_overlay(커서 아래)와 달리 커서 suffix '뒤'에
-        // 붙여 터미널·chrome·커서 위 맨 앞에 그린다 — 모달 팝업이 그 아래를 다 덮는다. 각 셀이 자기 bg(불투명)+
-        // glyph를 들어 buildNativeCellsSplit로 투영되고, raster는 uploads에 머지된다. null이면 무동작.
-        palette_frame: ?PaneFrame,
+        // 최상위 모달 오버레이 frame(커맨드 팝업 또는 스크롤백 Find 입력창, 있으면). pane_overlay(커서 아래)와
+        // 달리 커서 suffix '뒤'에 붙여 터미널·chrome·커서 위 맨 앞에 그린다 — 모달이 그 아래를 다 덮는다. 각 셀이
+        // 자기 bg(불투명)+glyph를 들어 buildNativeCellsSplit로 투영되고, raster는 uploads에 머지된다. null이면 무동작.
+        overlay_frame: ?PaneFrame,
     ) !void {
         // 1) 터미널 셀: pane 탭 바 chrome을 먼저(커서 suffix 보존), 그 뒤 각 panel frame을 투영해 origin 박아
         //    이어 붙인다. 커서 suffix는 맨 뒤(활성) panel만.
@@ -678,9 +703,9 @@ pub const MetalFrameBuffer = struct {
         if (pane_overlay_cells.len > 0) {
             try cells_list.insertSlice(allocator, cells_list.items.len - cursor_cells, pane_overlay_cells);
         }
-        // 팝업 frame은 커서 suffix '뒤'(맨 뒤)에 append → 터미널·chrome·커서 위 최상위. 불투명 bg 셀이라
+        // 오버레이 frame은 커서 suffix '뒤'(맨 뒤)에 append → 터미널·chrome·커서 위 최상위. 불투명 bg 셀이라
         // 아래(커서 포함)를 덮는다. cursor_cells(suffix 길이)는 안 바꾼다 — blink는 그 아래에서 그대로 동작.
-        if (palette_frame) |pf| {
+        if (overlay_frame) |pf| {
             const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
             defer allocator.free(built.cells);
             setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
@@ -692,7 +717,7 @@ pub const MetalFrameBuffer = struct {
         const new_sidebar_cells = try buildMergedSidebarCells(allocator, sidebar_band_cells, sidebar_frame, sidebar_colors);
         errdefer allocator.free(new_sidebar_cells);
 
-        const merged = try buildMergedUploadsN(allocator, pane_frames, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, if (palette_frame) |pf| pf.frame.glyph_raster_frame else null);
+        const merged = try buildMergedUploadsN(allocator, pane_frames, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, if (overlay_frame) |pf| pf.frame.glyph_raster_frame else null);
         errdefer {
             allocator.free(merged.uploads);
             allocator.free(merged.pixels);
@@ -704,10 +729,10 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.pixels);
         self.cells = new_cells;
         self.sidebar_cells = new_sidebar_cells;
-        // 팝업(palette_frame)이 있으면 그 셀이 커서 suffix '뒤'(맨 뒤)에 오므로, blink-off의 꼬리 chop
-        // (view: cells.len - cursor_cells)이 커서가 아니라 팝업 꼬리를 잘라낸다. 팝업이 열린 프레임에선
-        // cursor_cells=0으로 둬 chop을 끈다 — 모달 중엔 터미널 커서를 정적(깜빡임 없이)으로 두고 팝업이 위를 덮는다.
-        self.cursor_cells = if (palette_frame != null) 0 else cursor_cells;
+        // 오버레이(overlay_frame)가 있으면 그 셀이 커서 suffix '뒤'(맨 뒤)에 오므로, blink-off의 꼬리 chop
+        // (view: cells.len - cursor_cells)이 커서가 아니라 오버레이 꼬리를 잘라낸다. 오버레이가 열린 프레임에선
+        // cursor_cells=0으로 둬 chop을 끈다 — 모달 중엔 터미널 커서를 정적(깜빡임 없이)으로 두고 오버레이가 위를 덮는다.
+        self.cursor_cells = if (overlay_frame != null) 0 else cursor_cells;
         self.uploads = merged.uploads;
         self.pixels = merged.pixels;
         // cols/rows는 렌더러의 cols==0/rows==0 가드용 — 활성(마지막) panel의 grid를 쓴다(셀은 자기 row/col+

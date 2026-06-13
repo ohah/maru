@@ -9,6 +9,7 @@ pub const Cursor = types.Cursor;
 pub const CursorShape = types.CursorShape;
 pub const SelectionPoint = types.SelectionPoint;
 pub const SelectionSpan = types.SelectionSpan;
+pub const Match = types.Match;
 pub const DirtyRegion = types.DirtyRegion;
 pub const Key = input.Key;
 pub const KeyEvent = input.KeyEvent;

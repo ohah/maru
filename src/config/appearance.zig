@@ -19,6 +19,10 @@ pub const ResolvedTheme = struct {
     foreground: color.Rgb,
     cursor: color.Rgb,
     selection: color.Rgb,
+    // 스크롤백 Find 매치 하이라이트 배경. search_match = 뷰 안 전체 매치, search_match_current = 현재 매치
+    // (네비게이션 대상, 더 밝게). 렌더(metal_frame.CellColors)가 활성 surface 셀에만 칠한다.
+    search_match: color.Rgb,
+    search_match_current: color.Rgb,
     // 세로 탭 사이드바 색. 명시 안 하면 background에서 파생(아래 resolveTheme): sidebar_background=+24,
     // sidebar_active=+48. 플랫폼 렌더(app_dev_session.sidebarBg/sidebarActiveBg)는 이 resolved 값을
     // 읽기만 한다 — 색 파생의 단일 출처를 여기 둬 렌더 코드가 톤을 중복 정의하지 않게 한다.
@@ -78,6 +82,8 @@ fn resolveTheme(config: theme.ThemeConfig) ResolveError!ResolvedTheme {
         .foreground = foreground,
         .cursor = try parseHexColor(config.cursor),
         .selection = try parseHexColor(config.selection),
+        .search_match = try parseHexColor(config.search_match),
+        .search_match_current = try parseHexColor(config.search_match_current),
         // 사이드바 색: 명시하면 그 색, null이면 background에서 파생(+24/+48). 파생을 config resolver
         // 한 곳에 둬 단일 출처로 만든다 — 명시 색도 같은 #RRGGBB 검증을 거친다(깨진 색은 여기서 막힌다).
         .sidebar_background = if (config.sidebar_background) |s| try parseHexColor(s) else lighten(background, 24),
@@ -135,6 +141,9 @@ test "default appearance resolves to renderer-friendly values" {
     try std.testing.expectEqual(color.Rgb{ .r = 0xe8, .g = 0xe8, .b = 0xe8 }, resolved.theme.foreground);
     try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff }, resolved.theme.cursor);
     try std.testing.expectEqual(color.Rgb{ .r = 0x33, .g = 0x44, .b = 0x55 }, resolved.theme.selection);
+    // Find 매치 색 기본값(앰버 계열, 현재 매치가 더 밝다).
+    try std.testing.expectEqual(color.Rgb{ .r = 0x55, .g = 0x4a, .b = 0x1a }, resolved.theme.search_match);
+    try std.testing.expectEqual(color.Rgb{ .r = 0x99, .g = 0x77, .b = 0x22 }, resolved.theme.search_match_current);
     // 사이드바 색은 명시 안 하면 background(#101010=0x10)에서 파생: +24=0x28, +48=0x40.
     try std.testing.expectEqual(color.Rgb{ .r = 0x28, .g = 0x28, .b = 0x28 }, resolved.theme.sidebar_background);
     try std.testing.expectEqual(color.Rgb{ .r = 0x40, .g = 0x40, .b = 0x40 }, resolved.theme.sidebar_active);
@@ -229,6 +238,8 @@ test "appearance resolver rejects an invalid color in any theme field" {
     try std.testing.expectError(error.InvalidHexColorDigit, resolve(.{ .theme = .{ .foreground = "#0011ZZ" } }));
     try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .cursor = "#fff" } }));
     try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .selection = "123456" } }));
+    try std.testing.expectError(error.InvalidHexColorDigit, resolve(.{ .theme = .{ .search_match = "#0011ZZ" } }));
+    try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .search_match_current = "nope" } }));
 }
 
 test "appearance resolver preserves the underline cursor shape" {

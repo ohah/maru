@@ -120,6 +120,14 @@ pub const SelectionSpan = struct {
     end: struct { row: u16, col: u16 },
 };
 
+/// 스크롤백 Find 매치 한 건의 절대-행 [start, end] 포함 범위. SelectionPoint와 같은 절대 좌표계라
+/// 스크롤·eviction과 무관하게 내용을 가리키고, 렌더 시 clipAbsSpanToViewport로 뷰포트 span으로 클립한다.
+/// 한 매치는 soft-wrap 경계를 넘어 여러 행에 걸칠 수 있다(논리 줄 단위 검색).
+pub const Match = struct {
+    start: SelectionPoint,
+    end: SelectionPoint,
+};
+
 /// DECSCUSR(CSI Ps SP q)의 커서 모양. blink 여부는 별도 플래그로 추적한다.
 pub const CursorShape = enum { block, underline, bar };
 

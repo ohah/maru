@@ -13,6 +13,7 @@ const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
 const command_catalog = @import("command_catalog.zig");
 const command_palette = @import("command_palette.zig");
+const find_overlay = @import("find_overlay.zig");
 
 // SplitTree를 leaf = `*Pane`으로 인스턴스화한다(트리는 panel 단위). app 레이어는 generic만 노출하고 Pane은
 // 이 platform 모듈이 정의하므로, 트리가 panel을 leaf로 들면서도 app→platform 의존이 생기지 않는다. cmux식
@@ -720,6 +721,12 @@ pub const DevSession = struct {
     // 커맨드 팝업(Cmd+Shift+P) 상태(열림/필터/선택). 열려 있으면 handleKeyEvent가 키를 팝업으로 라우팅하고,
     // tick이 최상위 오버레이 frame으로 그린다. 상태머신은 command_palette.zig(순수 로직, 카탈로그를 필터).
     palette: command_palette.PaletteState = .{},
+    // 스크롤백 Find(⌘F) 상태(열림/검색어/매치/현재). 열려 있으면 handleKeyEvent가 키를 검색 입력으로 라우팅하고,
+    // tick이 매치를 하이라이트하며 입력창을 최상위 오버레이로 그린다. 검색 자체는 코어(findMatches)가 한다.
+    find: find_overlay.FindState = .{},
+    // tick마다 활성 surface의 매치를 뷰포트 span으로 클립해 담는 재사용 버퍼(cell_colors.search_matches로 넘긴다).
+    // 매 frame 새로 채우되 capacity는 재사용한다 — 스크롤·출력에 따라 뷰 안 매치가 바뀌므로 캐시하지 않는다.
+    find_view_spans: std.ArrayList(terminal.SelectionSpan) = .empty,
     // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
     // 마다 leaf rect/divider seg 레이아웃을 새 ArrayList에 할당·해제하던 churn을 없앤다 — 레이아웃은 매번
     // 다시 계산하므로(작은 트리라 cheap) 결과는 항상 최신이라 stale 캐시 위험이 없고, 버퍼 capacity만 재사용한다.
@@ -2080,6 +2087,8 @@ pub const DevSession = struct {
             .select_all => self.activeSurface().core.selectAll(),
             // 커맨드 팝업 토글(Cmd+Shift+P). 열려 있으면 닫고, 아니면 연다(상태머신은 PaletteState).
             .toggle_command_palette => self.togglePalette(),
+            // 스크롤백 Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState, 검색은 코어).
+            .toggle_find => self.toggleFind(),
         }
         self.metal_dirty = true;
     }
@@ -2117,6 +2126,71 @@ pub const DevSession = struct {
             else => self.palette.hide(),
         }
         self.metal_dirty = true;
+    }
+
+    /// 스크롤백 Find를 토글한다 — 열려 있으면 닫고, 아니면 연다(빈 검색어). 두 모달(팝업·Find)은 배타적이라
+    /// 팝업이 떠 있으면 닫고 Find를 연다. 코어 검색은 검색어가 생길 때 recomputeFind가 한다.
+    fn toggleFind(self: *DevSession) void {
+        if (self.find.open) {
+            self.find.hide();
+        } else {
+            self.palette.hide();
+            self.find.show();
+        }
+    }
+
+    /// Find가 열려 있을 때 키를 검색 입력으로 라우팅한다(handleKeyEvent가 resolver 앞에서 호출). Esc/모디파이어
+    /// 조합=닫기, Enter=다음 매치(Shift+Enter=이전), ↑↓=이전/다음, Backspace=삭제+재검색, 평문 글자=검색어+재검색.
+    fn handleFindKey(self: *DevSession, event: terminal.KeyEvent) void {
+        switch (event.key) {
+            .escape => self.find.hide(),
+            .enter => {
+                if (event.modifiers.shift) self.find.prev() else self.find.next();
+                self.scrollToCurrentMatch();
+            },
+            .arrow_up => {
+                self.find.prev();
+                self.scrollToCurrentMatch();
+            },
+            .arrow_down => {
+                self.find.next();
+                self.scrollToCurrentMatch();
+            },
+            .backspace => {
+                self.find.backspace();
+                self.recomputeFind();
+            },
+            .char => |c| {
+                // 모디파이어 조합(⌘F 등)은 Find를 닫는다(토글-닫기 포함). 평문 글자만 검색어에 쌓고 재검색한다.
+                if (event.modifiers.command or event.modifiers.control or event.modifiers.option) {
+                    self.find.hide();
+                } else {
+                    self.find.appendChar(self.allocator, c) catch {};
+                    self.recomputeFind();
+                }
+            },
+            else => self.find.hide(),
+        }
+        self.metal_dirty = true;
+    }
+
+    /// 현재 검색어로 활성 surface를 다시 검색해 find.matches를 채우고, 현재 인덱스를 첫 매치로 리셋한 뒤 뷰로
+    /// 스크롤한다(증분 검색 — 타이핑·Backspace마다). 검색어가 비면 매치 0. OOM이면 매치를 비워 안전하게 둔다.
+    fn recomputeFind(self: *DevSession) void {
+        if (!self.surface_initialized) return;
+        self.activeSurface().core.findMatches(self.allocator, self.find.query.items, &self.find.matches) catch {
+            self.find.matches.clearRetainingCapacity();
+        };
+        self.find.current = 0;
+        self.scrollToCurrentMatch();
+    }
+
+    /// 현재(네비게이션) 매치를 뷰포트로 스크롤한다 — 없으면 무동작. 검색·네비게이션 후 호출(coreScrollToAbs가
+    /// 매치를 세로 중앙쯤에 둬 상단 Find 오버레이에 안 가린다).
+    fn scrollToCurrentMatch(self: *DevSession) void {
+        if (!self.surface_initialized) return;
+        const m = self.find.currentMatch() orelse return;
+        self.activeSurface().core.scrollToAbs(m.start.row);
     }
 
     /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거친다 —
@@ -2186,6 +2260,15 @@ pub const DevSession = struct {
         if (self.palette.open) {
             self.handlePaletteKey(event);
             self.total_app_key_events += 1; // 팝업(앱)이 소비
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+            return self.last_summary;
+        }
+        // 스크롤백 Find가 열려 있으면 키를 검색 입력으로 라우팅한다(모달, 팝업과 같은 규율) — resolver/PTY/스크롤
+        // 보다 먼저. Enter=다음 매치 등 네비게이션은 소비하고 터미널엔 안 내려간다.
+        if (self.find.open) {
+            self.handleFindKey(event);
+            self.total_app_key_events += 1; // Find(앱)가 소비
             self.writeSummaryFromState();
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
@@ -2988,10 +3071,10 @@ pub const DevSession = struct {
     /// dispatchAppAction으로 넘기고 true, 모르는 키면 무동작 true 반환 없이 false(Swift가 무시). 터미널
     /// Action만 받는다(global/UI 동작은 Swift 소유라 별도).
     pub fn runAction(self: *DevSession, action_key: []const u8) bool {
-        // 팝업이 모달로 열린 동안엔 메뉴바 keyEquivalent(Swift가 OS에서 잡아 이 경로로 보낸다)를 무시한다 —
-        // 모달 중 단축키가 뒤의 터미널을 조작하면 안 된다. 팝업 자신의 Enter 선택은 handlePaletteKey가
-        // dispatchAppAction을 직접 부르므로 이 경로를 거치지 않는다(가드에 막히지 않음).
-        if (self.palette.open) return false;
+        // 모달(커맨드 팝업 또는 스크롤백 Find)이 열린 동안엔 메뉴바 keyEquivalent(Swift가 OS에서 잡아 이 경로로
+        // 보낸다)를 무시한다 — 모달 중 단축키가 뒤의 터미널을 조작하면 안 된다. 모달 자신의 키(팝업 Enter, Find
+        // 네비게이션)는 handlePaletteKey/handleFindKey가 dispatchAppAction을 직접 부르므로 이 경로를 안 거친다.
+        if (self.palette.open or self.find.open) return false;
         const action = config_mod.parseAction(action_key) orelse return false;
         self.dispatchAppAction(action);
         return true;
@@ -3241,6 +3324,27 @@ pub const DevSession = struct {
             } else try self.frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
             defer tick_result.deinit(self.allocator);
 
+            // Find 열린 채 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백 eviction). 재검색해
+            // 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다(사용자가 보던 위치 유지).
+            if (self.find.open and drain_summary.output_events > 0) {
+                self.activeSurface().core.findMatches(self.allocator, self.find.query.items, &self.find.matches) catch self.find.matches.clearRetainingCapacity();
+                if (self.find.current >= self.find.matches.items.len) self.find.current = self.find.matches.items.len -| 1;
+            }
+            // 스크롤백 Find: 활성 surface의 매치를 뷰포트 span으로 클립해 하이라이트로 넘긴다(Find 열림일 때만).
+            // 현재 매치는 search_matches에서 빼 별도 강조색(current_match)으로만 칠한다. 매 frame 다시 클립한다 —
+            // 스크롤/출력으로 뷰 안에 보이는 매치가 바뀐다. find_view_spans는 capacity만 재사용(매 frame 새로 채움).
+            self.find_view_spans.clearRetainingCapacity();
+            var find_current_span: ?terminal.SelectionSpan = null;
+            if (self.find.open) {
+                for (self.find.matches.items, 0..) |m, mi| {
+                    const span = self.activeSurface().core.matchViewportSpan(m) orelse continue;
+                    if (mi == self.find.current) {
+                        find_current_span = span;
+                    } else {
+                        self.find_view_spans.append(self.allocator, span) catch {};
+                    }
+                }
+            }
             // Metal view 데이터 투영 실패(OOM 등)는 터미널 코어 동작과 무관하다. 마지막
             // frame을 유지하고 dirty를 남겨 다음 tick에 재시도한다(세션을 죽이지 않는다).
             const cell_colors: metal_frame.CellColors = .{
@@ -3249,6 +3353,11 @@ pub const DevSession = struct {
                 .selection_bg = self.appearance.theme.selection,
                 .selection = self.activeSurface().core.selectionViewportSpan(),
                 .hover_link = self.hoverLinkSpan(),
+                // 스크롤백 Find 매치 하이라이트(활성 surface에만 적용 — 비활성 pane은 inactive_colors).
+                .search_match_bg = self.appearance.theme.search_match,
+                .search_matches = self.find_view_spans.items,
+                .current_match_bg = self.appearance.theme.search_match_current,
+                .current_match = find_current_span,
 
                 // 커서는 반전 블록으로 그린다: 칸 배경=theme.cursor, 그 위 glyph=theme.background.
                 // blink와 무관하게 항상 투영한다 — off 위상 숨김은 metal_buffer가 커서 suffix 노출
@@ -3267,13 +3376,18 @@ pub const DevSession = struct {
                 sidebar_frame = self.buildSidebarTitleFrame() catch null;
             }
             defer if (sidebar_frame) |*sf| sf.deinit(self.allocator);
-            // 커맨드 팝업 오버레이 frame(열렸을 때만, macOS). 최상위로 그린다(replace의 palette_frame). 실패는
-            // 무시(팝업 없이 정상). PaneFrame.frame을 deinit해야 하므로 defer로 정리한다.
-            var palette_frame: ?metal_frame.PaneFrame = null;
-            if (builtin.os.tag == .macos and self.palette.open) {
-                palette_frame = self.buildPaletteFrame() catch null;
+            // 최상위 모달 오버레이 frame(열렸을 때만, macOS). 커맨드 팝업 또는 스크롤백 Find 입력창 — 두 모달은
+            // 배타적이라 하나만 그린다(replace의 overlay_frame). 실패는 무시(오버레이 없이 정상). PaneFrame.frame을
+            // deinit해야 하므로 defer로 정리한다.
+            var overlay_frame: ?metal_frame.PaneFrame = null;
+            if (builtin.os.tag == .macos) {
+                if (self.palette.open) {
+                    overlay_frame = self.buildPaletteFrame() catch null;
+                } else if (self.find.open) {
+                    overlay_frame = self.buildFindFrame() catch null;
+                }
             }
-            defer if (palette_frame) |*pf| pf.frame.deinit(self.allocator);
+            defer if (overlay_frame) |*pf| pf.frame.deinit(self.allocator);
             // 제목 glyph 투영용 색(전경=테마 글자색). 밴드는 rebuildSidebar가 이미 색을 박아 넘긴다.
             const sidebar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
 
@@ -3430,7 +3544,7 @@ pub const DevSession = struct {
             if (floating_pf) |pf| pane_frames.append(self.allocator, pf) catch {};
 
             if (pane_frames.items.len > 0) {
-                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, palette_frame)) |_| {
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame)) |_| {
                     self.metal_dirty = false;
                 } else |_| {}
             }
@@ -3725,6 +3839,65 @@ pub const DevSession = struct {
         return .{ .frame = frame, .origin_x = origin_x, .origin_y = origin_y, .colors = .{ .default_fg = self.appearance.theme.foreground } };
     }
 
+    /// 스크롤백 Find 오버레이 frame(최상위). 상단-중앙에 한 줄 패널: "Find: <query>" + 우측 정렬 매치 카운터
+    /// ("3/17" = 현재/전체, 매치 없으면 "0/0"). 모든 셀이 불투명 bg(buildPaletteFrame과 같은 규칙)라 아래
+    /// (터미널·커서)를 덮는다. 닫혀 있거나 메트릭 미상이면 에러(호출자가 무시). macOS 전용(buildFromDrawList=CoreText).
+    fn buildFindFrame(self: *DevSession) !metal_frame.PaneFrame {
+        const cw = self.cell_width_px;
+        const ch = self.cell_height_px;
+        if (cw == 0 or ch == 0) return error.NoMetrics;
+        const term_rect = self.termRect();
+        const term_cols = term_rect.w / cw;
+        if (term_cols < 8) return error.TooNarrow;
+
+        const max_cols: u16 = 60;
+        const panel_cols: u16 = @intCast(@min(@as(u32, max_cols), term_cols -| 4));
+
+        const panel_bg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_background };
+        const text_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+
+        var line: [max_cols]u21 = undefined;
+        @memset(line[0..panel_cols], ' ');
+        const prefix = "Find: ";
+        putUtf8(line[0..panel_cols], 0, prefix);
+        putUtf8(line[0..panel_cols], prefix.len, self.find.query.items); // prefix는 ASCII라 칸 수=바이트 수
+
+        // 우측 정렬 매치 카운터 "cur/total"(매치 없으면 "0/0", 1-based 현재). 검색어 꼬리와 겹치면 카운터가
+        // 나중에 쓰여 이긴다(항상 보임 — 팝업의 바인딩 표시와 같은 규칙). ASCII 숫자/슬래시라 칸 수=바이트 수.
+        var counter_buf: [24]u8 = undefined;
+        const total = self.find.matches.items.len;
+        const cur: usize = if (total == 0) 0 else self.find.current + 1;
+        const counter = std.fmt.bufPrint(&counter_buf, "{d}/{d}", .{ cur, total }) catch counter_buf[0..0];
+        if (counter.len > 0 and counter.len + 2 < panel_cols) {
+            putUtf8(line[0..panel_cols], panel_cols - @as(u16, @intCast(counter.len)) - 1, counter);
+        }
+
+        var cells: std.ArrayList(renderer.DrawCell) = .empty;
+        errdefer cells.deinit(self.allocator);
+        try appendPaletteRow(self.allocator, &cells, 0, line[0..panel_cols], panel_bg, text_fg);
+
+        const draw_list: renderer.DrawList = .{
+            .size = .{ .cols = panel_cols, .rows = 1 },
+            .cursor = .{ .row = 0, .col = 0, .visible = false },
+            .dirty = .{ .start_row = 0, .end_row = 0 },
+            .cells = try cells.toOwnedSlice(self.allocator),
+            .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
+        };
+        const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
+            .appearance = self.appearance,
+            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+            .scale_milli = self.scale_milli,
+            .cell_width_px = @intCast(cw),
+            .cell_height_px = @intCast(ch),
+        };
+        const frame = try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
+        const panel_w = @as(u32, panel_cols) * cw;
+        const origin_x = term_rect.x + (term_rect.w -| panel_w) / 2;
+        const origin_y = term_rect.y + 2 * ch; // 위에서 두 줄 내려(팝업과 같은 위치).
+        return .{ .frame = frame, .origin_x = origin_x, .origin_y = origin_y, .colors = .{ .default_fg = self.appearance.theme.foreground } };
+    }
+
     pub fn metalFrame(self: *const DevSession) MetalFrame {
         var frame = self.metal_buffer.view();
         // "surface→rect": 터미널을 사이드바 폭만큼 오른쪽에 그리고, 왼쪽 strip에 사이드바 배경을 칠한다.
@@ -3754,6 +3927,8 @@ pub const DevSession = struct {
         self.command_key_equivalents.deinit(self.allocator);
         self.command_entries.deinit(self.allocator);
         self.palette.deinit(self.allocator);
+        self.find.deinit(self.allocator);
+        self.find_view_spans.deinit(self.allocator);
         self.hover_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
         // 1) 각 탭의 각 panel의 각 Term live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'.
@@ -4495,6 +4670,62 @@ test "command palette: 토글 열림 → 타이핑 필터 → Enter 디스패치
     // view()의 blink-off 꼬리 chop(cells.len - cursor_cells)이 커서가 아니라 팝업 꼬리를 자르는 일이 없다.
     _ = try session.tick();
     try std.testing.expectEqual(@as(usize, 0), session.metal_buffer.cursor_cells);
+}
+
+test "scrollback find: 토글 열림 → 증분 검색 → 매치 네비게이션 → 하이라이트·오버레이 프레임" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildFindFrame=CoreText, 실 PTY
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000); // 메트릭·backing(buildFindFrame이 termRect 폭을 씀)
+
+    // 검색 대상 텍스트를 코어에 직접 쓴다(유니크 토큰 2곳 — 셸 출력과 충돌 없게).
+    try session.activeSurface().core.write("MARUFIND one\r\ntwo MARUFIND three");
+
+    // 토글로 열린다 — 빈 검색어라 매치 0.
+    try std.testing.expect(!session.find.open);
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.find.open);
+    try std.testing.expectEqual(@as(usize, 0), session.find.matches.items.len);
+
+    // "MARUFIND" 타이핑(모달 라우팅) → 증분 검색으로 2곳 매치, 현재는 첫 매치.
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 2), session.find.matches.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.find.current);
+
+    // Enter=다음 매치, Shift+Enter=이전(wrap).
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 1), session.find.current);
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .shift = true } });
+    try std.testing.expectEqual(@as(usize, 0), session.find.current);
+
+    // Backspace로 한 글자 지워도("MARUFIN") 부분일치라 두 곳 다 매치 유지.
+    _ = try session.handleKeyEvent(.{ .key = .backspace, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 2), session.find.matches.items.len);
+
+    // 오버레이 프레임 빌드가 크래시 없이 셀을 낸다(상단-중앙 "Find: …" + 카운터).
+    var ff = try session.buildFindFrame();
+    defer ff.frame.deinit(allocator);
+    try std.testing.expect(ff.frame.draw_list.cells.len > 0);
+
+    // 회귀: Find 열린 동안 메뉴 keyEquivalent(runAction)는 무시된다(모달 뒤 터미널 조작 차단).
+    try std.testing.expect(!session.runAction("new_term"));
+
+    // tick으로 Find 열린 프레임을 빌드하면 오버레이가 커서 suffix 뒤라 cursor_cells=0(blink chop 차단).
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 0), session.metal_buffer.cursor_cells);
+
+    // Esc로 닫힌다.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(!session.find.open);
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {

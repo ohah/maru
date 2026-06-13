@@ -713,6 +713,10 @@ pub const DevSession = struct {
     // 탭 드래그 중 현재 드롭 타겟(④b 하이라이트). zone null = 다른 pane 탭 바(이동), zone set = pane 본문 절반
     // (그 방향 split). drag(2)가 computeDropTarget로 갱신, 렌더가 그 zone을 반투명으로 칠한다. up/취소면 null.
     tab_drop_target: ?DropTarget = null,
+    // 탭 드래그 중 마우스 위치(backing px) — 커서를 따라다니는 floating 탭 미리보기를 그 자리에 그린다.
+    // drag(2)가 갱신한다(tab_drag_active일 때만 유효).
+    tab_drag_x: f64 = 0,
+    tab_drag_y: f64 = 0,
     // panel 사이 divider 드래그 리사이즈 상태(PR6). down이 divider 밴드에서 시작하면 그 split 노드를 잡고,
     // drag(kind 2)가 마우스 위치를 bounds 안 ratio로 매핑해 split.ratio를 바꿔 live 재배치, up(kind 3)이 끝낸다.
     // split은 활성 탭 트리의 heap 노드(`*PaneTree.Split`) — 구조가 바뀌면(collapse/close) stale 방지로 null 비운다.
@@ -1290,6 +1294,42 @@ pub const DevSession = struct {
             while (y < y_end) : (y += ch) out.append(self.allocator, sentinelBgCell(0, @intCast(cols), bg, zone_rect.x, y)) catch return;
             return;
         }
+    }
+
+    /// 탭 드래그 중이면 끌리는 Term의 제목을 담은 'floating 탭'(박스 + 제목) frame을 만들어 PaneFrame으로 돌려준다
+    /// (커서 중심에 배치). built_frames가 소유(deinit)하고, 반환 PaneFrame은 호출자가 pane_frames '맨 뒤'(맨 위)에
+    /// 넣는다. 드래그 중이 아니거나 메트릭/제목을 못 구하면 null. macOS 렌더 패스(CoreText)에서만 부른다.
+    fn buildFloatingTabFrame(
+        self: *DevSession,
+        builder: coretext_frame_builder.CoreTextFrameBuilder,
+        built_frames: *std.ArrayList(renderer.RenderFrame),
+    ) ?metal_frame.PaneFrame {
+        if (!self.tab_drag_active) return null;
+        const cw = self.cell_width_px;
+        const ch = self.cell_height_px;
+        if (cw == 0 or ch == 0) return null;
+        const pane = self.tab_drag_pane orelse return null;
+        if (self.tab_drag_index >= pane.terms.items.len) return null;
+        const title = pane.terms.items[self.tab_drag_index].surface.title;
+        const cols: u16 = @intCast(std.math.clamp(title.len + 2, @as(usize, 8), @as(usize, 24))); // 제목+패딩, [8,24]
+        const fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
+        const bg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_active }; // 솔리드 박스 색(활성 강조색)
+        const dl = coretext_frame_builder.buildFloatingTabDrawList(self.allocator, title, cols, fg, bg) catch return null;
+        var f = builder.buildFromDrawList(self.allocator, dl, &self.renderer_state) catch return null;
+        built_frames.append(self.allocator, f) catch {
+            f.deinit(self.allocator);
+            return null;
+        };
+        // 커서 중심으로 박스 배치(왼쪽 위가 음수면 0으로 clamp).
+        const box_w: f64 = @floatFromInt(@as(u32, cols) * cw);
+        const ox = self.tab_drag_x - box_w / 2;
+        const oy = self.tab_drag_y - @as(f64, @floatFromInt(ch)) / 2;
+        return .{
+            .frame = f,
+            .origin_x = if (ox > 0) @intFromFloat(@min(ox, @as(f64, @floatFromInt(std.math.maxInt(u32))))) else 0,
+            .origin_y = if (oy > 0) @intFromFloat(@min(oy, @as(f64, @floatFromInt(std.math.maxInt(u32))))) else 0,
+            .colors = .{ .default_fg = self.appearance.theme.foreground },
+        };
     }
 
     /// 드래그한 Term을 src pane의 src_idx에서 빼 dst pane의 dst_idx에 넣는다(cross-pane 이동). dst를 활성 pane으로,
@@ -2017,6 +2057,9 @@ pub const DevSession = struct {
             if (kind == 2) {
                 self.dragTabTo(x_px); // pane 내 live 재정렬(PR-E1)
                 self.setDropTarget(self.computeDropTarget(x_px, y_px)); // 드롭 타겟 하이라이트(④b)
+                self.tab_drag_x = x_px; // floating 탭이 커서를 따라가게(매 이동 갱신)
+                self.tab_drag_y = y_px;
+                self.metal_dirty = true;
             } else {
                 self.dropTabAt(x_px, y_px); // up: 다른 pane 바면 그 pane으로 이동(PR-E2)·본문이면 split(④)
                 self.tab_drag_active = false;
@@ -2902,6 +2945,8 @@ pub const DevSession = struct {
 
             var pane_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
             defer pane_frames.deinit(self.allocator);
+            // 드래그 중 floating 탭 미리보기 frame(맨 위에 둘 것). macOS 블록에서 빌드해 활성 터미널 뒤에 넣는다.
+            var floating_pf: ?metal_frame.PaneFrame = null;
             // 탭 바 제목·비활성 panel frame은 여기서 소유하고 replace 뒤에 해제한다(pane_frames의 PaneFrame은 같은
             // frame을 가리키는 view일 뿐이라 따로 deinit하지 않는다 — 이중 free 방지). 활성 frame은 tick_result가 소유.
             var built_frames: std.ArrayList(renderer.RenderFrame) = .empty;
@@ -2971,6 +3016,10 @@ pub const DevSession = struct {
                         }) catch {};
                     }
                 }
+
+                // 3) 드래그 중 floating 탭 미리보기 — 커서 위치에 박스+제목. 활성 터미널 '뒤'(맨 위)에 넣어야 하므로
+                //    여기선 빌드만 하고 아래에서 append한다(built_frames가 소유).
+                floating_pf = self.buildFloatingTabFrame(pane_frame_builder, &built_frames);
             }
             // 활성 panel 터미널을 맨 뒤에(커서 suffix). 단일 leaf·비-macOS면 이게 유일한 터미널 frame이다(기존 동작).
             pane_frames.append(self.allocator, .{
@@ -2979,6 +3028,8 @@ pub const DevSession = struct {
                 .origin_y = active_origin_y,
                 .colors = cell_colors,
             }) catch {};
+            // floating 탭은 활성 터미널·커서보다 위(맨 마지막 frame)에 그린다 — 드래그 ghost가 가장 위에 보이게.
+            if (floating_pf) |pf| pane_frames.append(self.allocator, pf) catch {};
 
             if (pane_frames.items.len > 0) {
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items)) |_| {
@@ -4578,6 +4629,64 @@ test "④b: tab drag tracks the drop target and emits a translucent highlight" {
     defer hl2.deinit(allocator);
     session.appendDropTargetHighlight(&hl2);
     try std.testing.expectEqual(@as(usize, 0), hl2.items.len);
+    _ = try session.tick();
+}
+
+// 탭 드래그 중 마우스를 따라가는 floating 탭 미리보기 frame이 빌드되는지 — drag(2)가 tab_drag_x/y를 갱신하고,
+// buildFloatingTabFrame이 그때만 non-null frame을 준다. 실 init/spawn·CoreText라 macOS 게이트.
+test "floating tab preview frame is built (and positioned) while dragging a tab" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개
+
+    const builder = coretext_frame_builder.CoreTextFrameBuilder{
+        .appearance = session.appearance,
+        .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+        .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+        .scale_milli = session.scale_milli,
+        .cell_width_px = @intCast(session.cell_width_px),
+        .cell_height_px = @intCast(session.cell_height_px),
+    };
+    var built: std.ArrayList(renderer.RenderFrame) = .empty;
+    defer {
+        for (built.items) |*bf| bf.deinit(allocator);
+        built.deinit(allocator);
+    }
+
+    // 드래그 전엔 floating 탭 없음.
+    try std.testing.expect(session.buildFloatingTabFrame(builder, &built) == null);
+
+    // 탭 down(arm) → drag(2)로 마우스 이동 → tab_drag_x/y 갱신.
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const bar = session.paneBarRect(lr.items[0].rect).?;
+    session.mouse(1, @floatFromInt(bar.x + 20), @floatFromInt(bar.y + 1)); // 탭 down → arm
+    try std.testing.expect(session.tab_drag_active);
+    session.mouse(2, 333, 222); // 드래그
+    try std.testing.expectEqual(@as(f64, 333), session.tab_drag_x);
+    try std.testing.expectEqual(@as(f64, 222), session.tab_drag_y);
+
+    // 드래그 중엔 floating 탭 frame이 빌드된다(커서 중심에 박스).
+    const pf = session.buildFloatingTabFrame(builder, &built);
+    try std.testing.expect(pf != null);
+    try std.testing.expect(pf.?.origin_x < 333); // 박스가 커서 좌측으로 센터됨(폭/2 만큼)
+
+    // up → 드래그 끝 → floating 탭 없음.
+    session.mouse(3, 333, 222);
+    try std.testing.expect(!session.tab_drag_active);
+    try std.testing.expect(session.buildFloatingTabFrame(builder, &built) == null);
     _ = try session.tick();
 }
 

@@ -136,7 +136,8 @@ Node = leaf(Pane)
 - **split 재배치 드래그(④)**: Term 탭을 다른 pane **본문**의 상/하/좌/우 절반(`paneDropZone` — X자 4등분)에 드롭하면
   그 방향으로 새 split이 생긴다(`moveTermToNewSplit`: Term을 새 pane에 담아 `replaceLeaf(target → split{...})`, 소스가
   비면 collapse). 탭 바에 드롭하면 그 pane으로 Term 이동(PR-E2), 본문에 드롭하면 split 생성으로 갈린다. 드래그
-  중에는 드롭 타겟 zone을 **반투명 하이라이트**(④b — `premultipliedRgba`로 미리 곱해 터미널이 비침)로 미리 보인다.
+  중에는 드롭 타겟 zone을 **반투명 하이라이트**(④b — `premultipliedRgba`로 미리 곱해 터미널이 비침)로 미리 보이고,
+  끌리는 탭은 **floating 탭 미리보기**(박스+제목)가 커서를 따라간다(`buildFloatingTabFrame`, 맨 위 frame).
   **호버 커서(②)**: divider=↔/↕ resize, 사이드바 경계=↔, "+"=손가락, 터미널=I-beam.
 
 quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.

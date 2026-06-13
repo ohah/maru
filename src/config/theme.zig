@@ -53,15 +53,26 @@ pub const QuickTerminalScreen = enum {
     mouse,
 };
 
-/// quick terminal 표시 옵션. 값 검증/기본값은 loader가 채우고, 플랫폼(Swift)이 ABI로 받아 패널 크기·화면·
-/// 자동 숨김 동작에 쓴다.
+/// quick terminal 패널이 화면 어느 가장자리에서 슬라이드해 나올지. top/bottom은 전폭 + height_fraction 높이,
+/// left/right는 전고 + height_fraction 폭(가장자리에 수직인 '두께'에 비율이 적용된다). 슬라이드/배치는 Swift.
+pub const QuickTerminalPosition = enum {
+    top,
+    bottom,
+    left,
+    right,
+};
+
+/// quick terminal 표시 옵션. 값 검증/기본값은 loader가 채우고, 플랫폼(Swift)이 ABI로 받아 패널 크기·위치·
+/// 화면·자동 숨김 동작에 쓴다.
 pub const QuickTerminalConfig = struct {
-    // 패널 높이(화면 visibleFrame 대비 비율, 0.1~1.0). 기본 0.45(상단 45%).
+    // 가장자리에 수직인 '두께' 비율(화면 visibleFrame 대비, 0.1~1.0). top/bottom이면 높이, left/right면 폭. 기본 0.45.
     height_fraction: f32 = 0.45,
     // 포커스를 잃으면(다른 창/앱 클릭) 자동으로 숨길지. 기본 true(quick terminal 표준 동작). false면 토글로만 숨김.
     auto_hide: bool = true,
     // 어느 화면에 띄울지.
     screen: QuickTerminalScreen = .main,
+    // 화면 어느 가장자리에서 나올지.
+    position: QuickTerminalPosition = .top,
 };
 
 pub const Config = struct {

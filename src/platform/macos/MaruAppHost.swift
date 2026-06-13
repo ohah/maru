@@ -381,6 +381,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var quickAutoHide = true
     private var quickHeightFraction: CGFloat = 0.45
     private var quickScreenMode: UInt32 = UInt32(MaruAppHostQuickTerminalScreenMain.rawValue)
+    private var quickPosition: UInt32 = UInt32(MaruAppHostQuickTerminalPositionTop.rawValue)
     // tick이 특정 surface를 명시적으로 대상 지정할 때 쓴다(이벤트가 아니라 타이머 구동이라 key 창으로 못 고름).
     // nil이면 입력 이벤트는 key 창 기준으로 surface를 고른다(이벤트는 key 창의 first responder로 전달되므로).
     private var explicitSurface: TerminalSurface?
@@ -1464,6 +1465,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             quickHeightFraction = max(0.1, min(1.0, CGFloat(cfg.height_milli) / 1000.0))
             quickAutoHide = cfg.auto_hide != 0
             quickScreenMode = cfg.screen
+            quickPosition = cfg.position
         }
 
         // 포커스 잃음 자동 숨김: 패널이 key를 잃으면 quickTerminalLostKey가 슬라이드로 숨긴다. 패널을 컨트롤러의
@@ -1495,19 +1497,35 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return NSScreen.main
     }
 
-    /// quick 패널의 "보임"(상단 가장자리, 전폭·높이 = config 비율)과 "숨김"(같은 크기로 화면 위로 빠진 위치)
-    /// 사각형. 둘은 y만 다르고 폭·높이가 같다 — 슬라이드 중 콘텐츠 크기가 안 바뀌어 drawable/grid 재계산 불요.
+    /// quick 패널의 "보임"(설정 가장자리에 붙은 위치)과 "숨김"(같은 크기로 그 가장자리 바깥으로 빠진 위치)
+    /// 사각형. top/bottom은 전폭 + height_fraction 높이, left/right는 전고 + height_fraction 폭이다. 보임/숨김은
+    /// **슬라이드 축(top/bottom=y, left/right=x)만 다르고** 폭·높이가 같다 — 슬라이드 중 콘텐츠 크기가 안 바뀌어
+    /// drawable/grid 재계산이 필요 없다.
     private func quickPanelFrames() -> (shown: NSRect, hidden: NSRect)? {
         guard let screen = quickTargetScreen() else { return nil }
         let vf = screen.visibleFrame
-        let height = (vf.height * quickHeightFraction).rounded()
-        let shown = NSRect(x: vf.minX, y: vf.maxY - height, width: vf.width, height: height)
-        let hidden = NSRect(x: vf.minX, y: vf.maxY, width: vf.width, height: height) // 위로 빠져 화면 밖
-        return (shown, hidden)
+        switch quickPosition {
+        case UInt32(MaruAppHostQuickTerminalPositionBottom.rawValue):
+            let h = (vf.height * quickHeightFraction).rounded()
+            return (NSRect(x: vf.minX, y: vf.minY, width: vf.width, height: h),
+                    NSRect(x: vf.minX, y: vf.minY - h, width: vf.width, height: h)) // 아래로 빠짐
+        case UInt32(MaruAppHostQuickTerminalPositionLeft.rawValue):
+            let w = (vf.width * quickHeightFraction).rounded()
+            return (NSRect(x: vf.minX, y: vf.minY, width: w, height: vf.height),
+                    NSRect(x: vf.minX - w, y: vf.minY, width: w, height: vf.height)) // 왼쪽으로 빠짐
+        case UInt32(MaruAppHostQuickTerminalPositionRight.rawValue):
+            let w = (vf.width * quickHeightFraction).rounded()
+            return (NSRect(x: vf.maxX - w, y: vf.minY, width: w, height: vf.height),
+                    NSRect(x: vf.maxX, y: vf.minY, width: w, height: vf.height)) // 오른쪽으로 빠짐
+        default: // top
+            let h = (vf.height * quickHeightFraction).rounded()
+            return (NSRect(x: vf.minX, y: vf.maxY - h, width: vf.width, height: h),
+                    NSRect(x: vf.minX, y: vf.maxY, width: vf.width, height: h)) // 위로 빠짐
+        }
     }
 
-    /// quick 패널을 화면 위(숨김 위치)에서 상단(보임 위치)으로 슬라이드해 내린다. 크기는 처음부터 최종값이라
-    /// (숨김/보임이 y만 다름) makeKey 직후 세션 grid를 한 번 맞추고 y만 애니메이션한다.
+    /// quick 패널을 숨김 위치(가장자리 바깥)에서 보임 위치(가장자리에 붙음)로 슬라이드한다. 크기는 처음부터
+    /// 최종값이라(숨김/보임이 슬라이드 축만 다름) makeKey 직후 세션 grid를 한 번 맞추고 위치만 애니메이션한다.
     private func showQuickTerminalAnimated(_ panel: NSWindow) {
         guard let frames = quickPanelFrames() else {
             // 화면 정보를 못 구하면 애니메이션 없이 그냥 띄운다(폴백).
@@ -1534,7 +1552,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         })
     }
 
-    /// quick 패널을 상단에서 화면 위로 슬라이드해 올린 뒤 orderOut으로 숨긴다(완료 시).
+    /// quick 패널을 보임 위치에서 숨김 위치(가장자리 바깥)로 슬라이드한 뒤 orderOut으로 숨긴다(완료 시).
     private func hideQuickTerminalAnimated(_ panel: NSWindow) {
         guard let frames = quickPanelFrames() else {
             panel.orderOut(nil)

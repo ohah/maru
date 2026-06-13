@@ -22,7 +22,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 30;
+pub const abi_version: u32 = 31;
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -42,6 +42,7 @@ pub const QuickTerminalConfig = extern struct {
     height_milli: u32,
     auto_hide: u32,
     screen: u32,
+    position: u32, // config.QuickTerminalPosition의 @intFromEnum(0=top, 1=bottom, 2=left, 3=right)
 };
 
 /// 마우스 호버 위치에 따라 Swift가 세울 커서 종류(`maru_macos_app_dev_session_hover`의 out 값). Zig가 위치를
@@ -2732,6 +2733,7 @@ pub const DevSession = struct {
             .height_milli = @intFromFloat(@round(qt.height_fraction * 1000.0)),
             .auto_hide = if (qt.auto_hide) 1 else 0,
             .screen = @intFromEnum(qt.screen),
+            .position = @intFromEnum(qt.position),
         };
     }
 

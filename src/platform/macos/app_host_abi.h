@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 30u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 31u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -396,15 +396,23 @@ int32_t maru_macos_app_dev_session_global_hotkeys(
 /* quick terminal(전역 토글 오버레이 패널) 표시 옵션. config에서 파싱되어 세션 동안 불변. Swift가 패널
    크기·화면·자동 숨김에 쓴다. screen: 0=main(주 디스플레이), 1=mouse(마우스가 있는 화면). */
 typedef struct MaruAppHostQuickTerminalConfig {
-    uint32_t height_milli; /* 화면 높이 대비 비율 × 1000 (예: 450 = 45%) */
+    uint32_t height_milli; /* 가장자리에 수직인 '두께' 비율 × 1000 (top/bottom=높이, left/right=폭) */
     uint32_t auto_hide;    /* 0/1 — 포커스 잃으면 자동 숨김 */
     uint32_t screen;       /* MaruAppHostQuickTerminalScreen */
+    uint32_t position;     /* MaruAppHostQuickTerminalPosition */
 } MaruAppHostQuickTerminalConfig;
 
 typedef enum MaruAppHostQuickTerminalScreen {
     MaruAppHostQuickTerminalScreenMain = 0,  /* 주 디스플레이 */
     MaruAppHostQuickTerminalScreenMouse = 1, /* 마우스 포인터가 있는 화면 */
 } MaruAppHostQuickTerminalScreen;
+
+typedef enum MaruAppHostQuickTerminalPosition {
+    MaruAppHostQuickTerminalPositionTop = 0,    /* 상단 가장자리(전폭) */
+    MaruAppHostQuickTerminalPositionBottom = 1, /* 하단 가장자리(전폭) */
+    MaruAppHostQuickTerminalPositionLeft = 2,   /* 좌측 가장자리(전고) */
+    MaruAppHostQuickTerminalPositionRight = 3,  /* 우측 가장자리(전고) */
+} MaruAppHostQuickTerminalPosition;
 
 int32_t maru_macos_app_dev_session_quick_terminal_config(
     MaruAppHostDevSession *session,

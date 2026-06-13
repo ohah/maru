@@ -208,6 +208,12 @@ fn premultipliedRgba(rgb: u32, alpha: u8) u32 {
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
+/// 탭/워크스페이스 라벨 "{n} {title}"(n=1-based 번호). 사이드바 워크스페이스·pane Term 탭이 공유해 번호 prefix
+/// 형식이 일관된다(둘 다 1부터). 호출자가 반환 버퍼를 free한다. allocPrint 래퍼.
+fn tabNumberLabel(allocator: std.mem.Allocator, index: usize, title: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{d} {s}", .{ index + 1, title });
+}
+
 /// 점이 rect 안 어느 drop zone인지 — rect를 중앙에서 X자로 4등분해 가장 가까운 가장자리를 고른다(좌/우/상/하).
 /// rect 밖·0 크기·비유한이면 null. 렌더 drop-zone 하이라이트(후속 ④b)와 공유할 순수 함수라 OS 무관 단위 테스트.
 fn paneDropZone(rect: app.SplitRect, x_px: f64, y_px: f64) ?PaneDropZone {
@@ -3000,9 +3006,17 @@ pub const DevSession = struct {
                     const bar = self.paneBarRect(lr.rect) orelse continue;
                     const bar_cols = @min(bar.w / self.cell_width_px, @as(u32, std.math.maxInt(u16)));
                     if (bar_cols == 0) continue;
+                    // Term 탭 라벨 "{n} {title}"(n=1-based 탭 번호) — 사이드바 워크스페이스 라벨과 같은 형식이라
+                    // 번호로 탭을 빠르게 식별·⌘]/⌘[ 순환 위치를 안다. allocPrint 소유 버퍼라 아래 defer로 해제한다.
                     var titles: std.ArrayList([]const u8) = .empty;
-                    defer titles.deinit(self.allocator);
-                    for (lr.leaf.terms.items) |term| titles.append(self.allocator, term.surface.title) catch {};
+                    defer {
+                        for (titles.items) |l| self.allocator.free(l);
+                        titles.deinit(self.allocator);
+                    }
+                    for (lr.leaf.terms.items, 0..) |term, ti| {
+                        const label = tabNumberLabel(self.allocator, ti, term.surface.title) catch continue;
+                        titles.append(self.allocator, label) catch self.allocator.free(label);
+                    }
                     // 비활성 Term 탭은 흐린 색(muted), 그 pane의 활성 Term 탭은 full sidebar_foreground로 강조한다.
                     const tab_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
                     const active_tab_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
@@ -3236,8 +3250,8 @@ pub const DevSession = struct {
             labels.deinit(self.allocator);
         }
         for (self.tabs.items, 0..) |tab, i| {
-            // 탭 대표 제목 = 활성 panel surface 제목(split 시 포커스 panel의 제목이 사이드바에 보인다).
-            const label = try std.fmt.allocPrint(self.allocator, "{d} {s}", .{ i + 1, tab.activeTerm().surface.title });
+            // 탭 대표 제목 = 활성 panel surface 제목(split 시 포커스 panel의 제목이 사이드바에 보인다). "{n} {title}".
+            const label = try tabNumberLabel(self.allocator, i, tab.activeTerm().surface.title);
             try labels.append(self.allocator, label);
         }
 
@@ -4137,6 +4151,17 @@ test "halfRect splits a rect by zone; premultipliedRgba premultiplies rgb by alp
     // 0xFFFFFFFF를 alpha 0x80(=128)으로 → rgb 각 255*128/255=128, a=0x80. premultiplied.
     try std.testing.expectEqual(@as(u32, 0x80_80_80_80), premultipliedRgba(0x00FF_FFFF, 0x80));
     try std.testing.expectEqual(@as(u32, 0x00_00_00_00), premultipliedRgba(0x00FF_FFFF, 0)); // alpha 0 → 전부 0
+}
+
+// 사이드바·pane 탭 라벨 "{n} {title}"(1-based) 형식 — 번호 prefix가 두 곳에서 일관되게 나오는지 고정.
+test "tabNumberLabel formats {n} {title} with 1-based numbering" {
+    const allocator = std.testing.allocator;
+    const a = try tabNumberLabel(allocator, 0, "sh");
+    defer allocator.free(a);
+    try std.testing.expectEqualStrings("1 sh", a);
+    const b = try tabNumberLabel(allocator, 4, "vim");
+    defer allocator.free(b);
+    try std.testing.expectEqualStrings("5 vim", b);
 }
 
 // paneTermRect/paneBarRect가 leaf rect 상단에서 탭 바(cell 높이 1칸)를 떼는지 — 충분히 크면 바+터미널, 너무

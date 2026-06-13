@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Darwin
 import Foundation
 import Metal
@@ -362,6 +363,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // create 성공 여부를 영구 기록한다. metalRenderer는 shutdown에서 nil이 되므로 summary가
     // 종료 후 쓰일 때 "생성됐었다"를 잃지 않게 별도 플래그로 둔다.
     private var metalRendererCreated = false
+    // 전역(OS) 단축키: Zig가 준 descriptor를 Carbon RegisterEventHotKey로 등록한 ref들과, 각 hot-key
+    // id → action(0=toggle,1=show) 맵. 핸들러(비캡처 C 함수 포인터)가 id로 action을 되찾는다. 종료 시
+    // UnregisterEventHotKey + RemoveEventHandler로 정리한다.
+    private var hotKeyRefs: [EventHotKeyRef] = []
+    private var hotKeyActions: [UInt32: UInt32] = [:]
+    private var hotKeyEventHandler: EventHandlerRef?
 
     static func main() {
         let app = NSApplication.shared
@@ -411,6 +418,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 한 번 맞춘다(80×24 기본에서 실제 창 grid로). smoke는 자체 scripted resize를 쓴다.
         if !smokeMode {
             resizeDevSessionFromWindow()
+            // 전역(OS) 단축키를 OS에 등록한다(앱이 비활성이어도 동작). smoke는 자동 종료라 등록하지 않는다.
+            registerGlobalHotkeys()
         }
 
         startFrameLoopTicks()
@@ -1135,10 +1144,128 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return UInt32(min(value, CGFloat(UInt32.max)))
     }
 
+    // MARK: - 전역(OS) 단축키 (Carbon RegisterEventHotKey)
+
+    /// Carbon hot-key 이벤트 핸들러(비캡처 C 함수 포인터). userData로 받은 controller에서 눌린 hot-key
+    /// id로 action을 되찾아 수행한다. RegisterEventHotKey 이벤트는 메인 run loop(메인 스레드)에서 전달된다.
+    private static let globalHotkeyHandler: EventHandlerUPP = { (_, event, userData) -> OSStatus in
+        guard let event, let userData else { return OSStatus(eventNotHandledErr) }
+        var hotKeyID = EventHotKeyID()
+        let err = GetEventParameter(
+            event,
+            EventParamName(kEventParamDirectObject),
+            EventParamType(typeEventHotKeyID),
+            nil,
+            MemoryLayout<EventHotKeyID>.size,
+            nil,
+            &hotKeyID
+        )
+        guard err == noErr else { return OSStatus(eventNotHandledErr) }
+        let controller = Unmanaged<MaruAppHostController>.fromOpaque(userData).takeUnretainedValue()
+        let id = hotKeyID.id
+        // 핸들러는 메인 스레드에서 호출되므로 @MainActor controller를 바로 부른다(tick 콜백과 동일 패턴).
+        MainActor.assumeIsolated {
+            controller.handleGlobalHotkey(id: id)
+        }
+        return noErr
+    }
+
+    /// Zig가 준 전역 단축키 descriptor를 Carbon에 등록한다. 핸들러를 한 번 설치하고(userData=self), 각
+    /// descriptor를 RegisterEventHotKey로 등록한다. hot-key id = descriptor 배열 인덱스라 핸들러가
+    /// 그 id로 action(hotKeyActions)을 되찾는다. descriptor가 없으면(빈 config) 아무것도 등록하지 않는다.
+    private func registerGlobalHotkeys() {
+        guard let session = devSession else { return }
+        var ptr: UnsafePointer<MaruAppHostGlobalHotkey>?
+        var count = 0
+        let status = maru_macos_app_dev_session_global_hotkeys(session, &ptr, &count)
+        guard status == Self.statusOK, let base = ptr, count > 0 else { return }
+
+        var spec = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        var handlerRef: EventHandlerRef?
+        let installStatus = InstallEventHandler(
+            GetApplicationEventTarget(),
+            Self.globalHotkeyHandler,
+            1,
+            &spec,
+            selfPtr,
+            &handlerRef
+        )
+        guard installStatus == noErr else { return }
+        hotKeyEventHandler = handlerRef
+
+        let signature = OSType(0x4d61_7275) // 'Maru'
+        for index in 0..<count {
+            let descriptor = base[index]
+            var ref: EventHotKeyRef?
+            let hotKeyID = EventHotKeyID(signature: signature, id: UInt32(index))
+            let regStatus = RegisterEventHotKey(
+                descriptor.virtual_key_code,
+                descriptor.carbon_modifiers,
+                hotKeyID,
+                GetApplicationEventTarget(),
+                0,
+                &ref
+            )
+            if regStatus == noErr, let ref {
+                hotKeyRefs.append(ref)
+                hotKeyActions[UInt32(index)] = descriptor.action
+            }
+        }
+    }
+
+    /// 등록한 전역 단축키와 핸들러를 OS에서 해제한다(idempotent — 이미 비었으면 no-op).
+    private func unregisterGlobalHotkeys() {
+        for ref in hotKeyRefs {
+            UnregisterEventHotKey(ref)
+        }
+        hotKeyRefs.removeAll()
+        hotKeyActions.removeAll()
+        if let handler = hotKeyEventHandler {
+            RemoveEventHandler(handler)
+            hotKeyEventHandler = nil
+        }
+    }
+
+    /// 눌린 전역 단축키 id의 action을 수행한다(핸들러가 메인 스레드에서 호출).
+    func handleGlobalHotkey(id: UInt32) {
+        guard let action = hotKeyActions[id] else { return }
+        performGlobalAction(action)
+    }
+
+    /// 전역 action 수행. 토글은 Maru가 앞+창이 보이면 숨기고(orderOut), 아니면 보이고 앞으로(show+activate).
+    private func performGlobalAction(_ action: UInt32) {
+        guard let window else { return }
+        switch action {
+        case UInt32(MaruAppHostGlobalActionToggleWindow.rawValue):
+            if window.isVisible && NSApp.isActive {
+                window.orderOut(nil)
+            } else {
+                showAndActivateWindow(window)
+            }
+        case UInt32(MaruAppHostGlobalActionShowWindow.rawValue):
+            showAndActivateWindow(window)
+        default:
+            break
+        }
+    }
+
+    private func showAndActivateWindow(_ window: NSWindow) {
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(window.contentView)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     private func shutdownDevSession() {
         guard let devSession else {
             return
         }
+
+        // 전역 단축키를 먼저 OS에서 해제한다(세션이 사라져도 stale hot-key가 남지 않게). 이미 비었으면 no-op.
+        unregisterGlobalHotkeys()
 
         var summary = MaruAppHostDevFrameSummary()
         let status = maru_macos_app_dev_session_close(devSession, &summary)

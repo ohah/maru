@@ -350,6 +350,13 @@ final class TerminalSurface {
     }
 }
 
+// quick terminal용 떠 있는 패널. borderless NSWindow/NSPanel은 기본적으로 key가 될 수 없어 타이핑을 못
+// 받는다 — quick terminal은 입력을 받아야 하므로 canBecomeKey/Main을 강제한다.
+final class QuickTerminalPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 @main
 @MainActor
 final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -361,16 +368,28 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private let artifactDirectory = "zig-out/maru-macos-app-dev"
     private let summaryPath = "zig-out/maru-macos-app-dev/app-dev.summary.txt"
     private var capabilities = MaruAppHostCapabilities()
-    // 메인 창의 per-session 상태. quick terminal(후속)이 두 번째 surface가 된다. 아래 계산 프로퍼티들은
-    // 기존 세션별 메서드가 코드 변경 없이 primary의 상태를 읽고 쓰게 하는 forwarder다(동작 불변 — 상태만 분리).
+    // 메인 창의 per-session 상태. quick terminal이 두 번째 surface(quick)다. 아래 계산 프로퍼티들은
+    // 기존 세션별 메서드가 코드 변경 없이 "활성 surface"의 상태를 읽고 쓰게 하는 forwarder다(상태만 분리).
     private var primary: TerminalSurface?
+    // quick terminal(별도 세션 오버레이 패널)의 surface. 첫 토글에서 lazy 생성. 없거나 숨김이면 입력/렌더는 primary.
+    private var quick: TerminalSurface?
+    // tick이 특정 surface를 명시적으로 대상 지정할 때 쓴다(이벤트가 아니라 타이머 구동이라 key 창으로 못 고름).
+    // nil이면 입력 이벤트는 key 창 기준으로 surface를 고른다(이벤트는 key 창의 first responder로 전달되므로).
+    private var explicitSurface: TerminalSurface?
+    // 세션별 forwarder의 대상. tick 중에는 explicitSurface, 그 외(입력/IME/hover)에는 key 창의 surface
+    // (quick 패널이 key면 quick, 아니면 primary). 앱-전역으로 "메인 창"이 필요한 곳은 primary를 직접 쓴다.
+    private var activeSurface: TerminalSurface? {
+        if let explicitSurface { return explicitSurface }
+        if let quick, quick.window?.isKeyWindow == true { return quick }
+        return primary
+    }
     private var window: NSWindow? {
-        get { primary?.window }
-        set { primary?.window = newValue }
+        get { activeSurface?.window }
+        set { activeSurface?.window = newValue }
     }
     private var devSession: OpaquePointer? {
-        get { primary?.devSession }
-        set { primary?.devSession = newValue }
+        get { activeSurface?.devSession }
+        set { activeSurface?.devSession = newValue }
     }
     private var tickTimer: Timer?
     // smoke 자동 종료용 one-shot timer. 창이 먼저 닫혀도 run loop에 남아 teardown 뒤
@@ -379,59 +398,59 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var smokeMode = false
     private var exitCode: Int32 = 0
     private var latestFrameSummary: MaruAppHostDevFrameSummary {
-        get { primary?.latestFrameSummary ?? MaruAppHostDevFrameSummary() }
-        set { primary?.latestFrameSummary = newValue }
+        get { activeSurface?.latestFrameSummary ?? MaruAppHostDevFrameSummary() }
+        set { activeSurface?.latestFrameSummary = newValue }
     }
     private var devSessionStatus: Int32 {
-        get { primary?.devSessionStatus ?? Self.statusOK }
-        set { primary?.devSessionStatus = newValue }
+        get { activeSurface?.devSessionStatus ?? Self.statusOK }
+        set { activeSurface?.devSessionStatus = newValue }
     }
     // 제품 Metal renderer(maru_metal_renderer.h). dev session의 metal-frame DTO를 창의 CAMetalLayer에
     // 그린다. generation이 바뀐 frame에서만 atlas 갱신/draw한다.
     private var metalRenderer: OpaquePointer? {
-        get { primary?.metalRenderer }
-        set { primary?.metalRenderer = newValue }
+        get { activeSurface?.metalRenderer }
+        set { activeSurface?.metalRenderer = newValue }
     }
     private var lastDrawnGeneration: UInt64 {
-        get { primary?.lastDrawnGeneration ?? 0 }
-        set { primary?.lastDrawnGeneration = newValue }
+        get { activeSurface?.lastDrawnGeneration ?? 0 }
+        set { activeSurface?.lastDrawnGeneration = newValue }
     }
     private var metalFramesDrawn: Int {
-        get { primary?.metalFramesDrawn ?? 0 }
-        set { primary?.metalFramesDrawn = newValue }
+        get { activeSurface?.metalFramesDrawn ?? 0 }
+        set { activeSurface?.metalFramesDrawn = newValue }
     }
     // surface(drawableSize/backing-scale) 변경 시 generation이 그대로여도 다시 그려야 한다.
     private var metalNeedsRedraw: Bool {
-        get { primary?.metalNeedsRedraw ?? false }
-        set { primary?.metalNeedsRedraw = newValue }
+        get { activeSurface?.metalNeedsRedraw ?? false }
+        set { activeSurface?.metalNeedsRedraw = newValue }
     }
     // tick summary가 알려주는 metal generation(u32). 이 값이 그대로면 metalFrame() ABI 호출과
     // draw를 idle tick에서 건너뛴다.
     private var lastSeenMetalGeneration: UInt32 {
-        get { primary?.lastSeenMetalGeneration ?? 0 }
-        set { primary?.lastSeenMetalGeneration = newValue }
+        get { activeSurface?.lastSeenMetalGeneration ?? 0 }
+        set { activeSurface?.lastSeenMetalGeneration = newValue }
     }
     // renderer가 알려준 cell 픽셀 크기. resize가 같은 메트릭으로 cols/rows를 계산하도록 캐시한다.
     private var lastCellWidthPx: UInt32 {
-        get { primary?.lastCellWidthPx ?? 0 }
-        set { primary?.lastCellWidthPx = newValue }
+        get { activeSurface?.lastCellWidthPx ?? 0 }
+        set { activeSurface?.lastCellWidthPx = newValue }
     }
     private var lastCellHeightPx: UInt32 {
-        get { primary?.lastCellHeightPx ?? 0 }
-        set { primary?.lastCellHeightPx = newValue }
+        get { activeSurface?.lastCellHeightPx ?? 0 }
+        set { activeSurface?.lastCellHeightPx = newValue }
     }
     // dev session에 마지막으로 보낸 backing scale. 런치 후 backingScaleFactor가 늦게 Retina로
     // 정착하면(콜백이 dev session 생성 전에 발화한 경우) tick이 변화를 감지해 재-resize한다.
     // (같은 size+scale 중복 resize 방지는 Zig dev session이 담당한다.)
     private var lastSentBackingScale: CGFloat {
-        get { primary?.lastSentBackingScale ?? 0 }
-        set { primary?.lastSentBackingScale = newValue }
+        get { activeSurface?.lastSentBackingScale ?? 0 }
+        set { activeSurface?.lastSentBackingScale = newValue }
     }
     // create 성공 여부를 영구 기록한다. metalRenderer는 shutdown에서 nil이 되므로 summary가
     // 종료 후 쓰일 때 "생성됐었다"를 잃지 않게 별도 플래그로 둔다.
     private var metalRendererCreated: Bool {
-        get { primary?.metalRendererCreated ?? false }
-        set { primary?.metalRendererCreated = newValue }
+        get { activeSurface?.metalRendererCreated ?? false }
+        set { activeSurface?.metalRendererCreated = newValue }
     }
     // 전역(OS) 단축키: Zig가 준 descriptor를 Carbon RegisterEventHotKey로 등록한 ref들과, 각 hot-key
     // id → action(0=toggle,1=show) 맵. 핸들러(비캡처 C 함수 포인터)가 id로 action을 되찾는다. 종료 시
@@ -739,8 +758,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // 마지막으로 설정한 창 제목(매 tick 같은 값을 재설정하지 않으려는 캐시). 세션별이라 surface가 든다.
     private var lastWindowTitle: String {
-        get { primary?.lastWindowTitle ?? "" }
-        set { primary?.lastWindowTitle = newValue }
+        get { activeSurface?.lastWindowTitle ?? "" }
+        set { activeSurface?.lastWindowTitle = newValue }
     }
 
     // 창 제목을 셸/앱 상태에서 갱신한다 — OSC 0/2 제목이 있으면 그것, 없으면 OSC 7 cwd basename,
@@ -764,16 +783,58 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    // 타이머가 매 frame 부른다 — primary(메인 창)를 먼저 tick하고(셸 종료/fault는 앱-전역 종료로),
+    // quick terminal이 보이면 그것도 tick한다(quick 셸 종료/fault는 quick만 닫고 앱은 계속). 각 surface를
+    // explicitSurface로 지정해, 세션별 forwarder(window/devSession/메트릭/draw)가 그 surface를 대상으로 돈다.
     private func tickDevSession() {
-        guard let devSession else {
+        guard let primary else { return }
+
+        explicitSurface = primary
+        let status = renderTick()
+        if status == Self.statusOK {
+            // 첫 tick에 summary를 한 번 남긴다(launch 경로 진단). primary 기준.
+            if latestFrameSummary.frame_loop_ticks <= 1 {
+                writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+            }
+            explicitSurface = nil
+        } else if status == Self.statusSessionEnded {
+            // 메인 PTY 셸이 정상 종료 → frame loop 멈추고 우아하게(exitCode 0) 내려간다.
+            tickTimer?.invalidate()
+            tickTimer = nil
+            smokeTimer?.invalidate()
+            smokeTimer = nil
+            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+            explicitSurface = nil
+            NSApp.terminate(nil)
+            return
+        } else {
+            // tick_failed 등 세션 자체 fault만 비정상 종료(exitCode 1).
+            exitCode = 1
+            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+            explicitSurface = nil
+            NSApp.terminate(nil)
             return
         }
+
+        // quick terminal — 보일 때만 tick. 그 셸이 종료/fault면 quick만 정리한다(앱은 계속 산다).
+        if let quick, quick.window?.isVisible == true {
+            explicitSurface = quick
+            let quickStatus = renderTick()
+            explicitSurface = nil
+            if quickStatus != Self.statusOK {
+                tearDownQuickTerminal()
+            }
+        }
+    }
+
+    // 현재 activeSurface(= explicitSurface)를 한 번 tick하고 그린다. 세션별 forwarder만 쓰므로 호출자가
+    // explicitSurface로 대상을 정한다. 앱-전역 정책(SessionEnded 종료·summary)은 호출자(tickDevSession)가 한다.
+    private func renderTick() -> Int32 {
+        guard let devSession else { return Self.statusOK }
         updateDiagnosticTitle()
         updateWindowTitle() // 비-debug일 때 OSC 0/2 제목 또는 cwd basename을 제목줄에 반영
 
-        // backing scale이 런치 후 늦게 정착/변경되면(콜백이 dev session 생성 전 발화한 경우 등)
-        // dev session의 device_scale이 옛 값에 머문다. 변했을 때만 resize를 다시 보낸다(매 tick
-        // float 비교 하나라 싸고, resize는 실제 변화 시에만 일어난다).
+        // backing scale이 런치 후 늦게 정착/변경되면 device_scale이 옛 값에 머문다. 변했을 때만 resize.
         if !smokeMode, let window {
             let scale = window.backingScaleFactor
             if scale != lastSentBackingScale {
@@ -786,31 +847,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         devSessionStatus = status
         if status == Self.statusOK {
             latestFrameSummary = summary
-            // metal frame이 바뀌었거나(generation) surface 재칠이 필요할 때만 그린다. idle tick은
-            // metalFrame() ABI 호출 자체를 건너뛴다(tick이 준 summary의 metal_generation으로 판단).
+            // metal frame이 바뀌었거나(generation) surface 재칠이 필요할 때만 그린다.
             if summary.metal_generation != lastSeenMetalGeneration || metalNeedsRedraw {
                 lastSeenMetalGeneration = summary.metal_generation
                 drawMetalFrame()
             }
-            if summary.frame_loop_ticks <= 1 {
-                writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
-            }
-        } else if status == Self.statusSessionEnded {
-            // PTY 셸이 정상 종료했다. fault가 아니므로 죽은 세션을 무한 tick하지 않고 frame loop를
-            // 멈춘 뒤 마지막 summary를 남기고 우아하게(exitCode 0) 내려간다.
-            latestFrameSummary = summary
-            tickTimer?.invalidate()
-            tickTimer = nil
-            smokeTimer?.invalidate()
-            smokeTimer = nil
-            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
-            NSApp.terminate(nil)
-        } else {
-            // tick_failed 등 세션 자체 fault만 비정상 종료로 처리한다.
-            exitCode = 1
-            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
-            NSApp.terminate(nil)
         }
+        return status
     }
 
     func handleKeyDown(_ event: NSEvent) {
@@ -1313,18 +1356,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         performGlobalAction(action)
     }
 
-    /// 전역 action 수행. 토글은 Maru가 앞+창이 보이면 숨기고(orderOut), 아니면 보이고 앞으로(show+activate).
+    /// 전역 action 수행. window 동작은 앱-전역이라 forwarder가 아니라 메인 창(primary)을 직접 대상으로 한다.
+    /// 토글은 Maru가 앞+창이 보이면 숨기고(orderOut), 아니면 보이고 앞으로(show+activate).
     private func performGlobalAction(_ action: UInt32) {
-        guard let window else { return }
         switch action {
         case UInt32(MaruAppHostGlobalActionToggleWindow.rawValue):
+            guard let window = primary?.window else { return }
             if window.isVisible && NSApp.isActive {
                 window.orderOut(nil)
             } else {
                 showAndActivateWindow(window)
             }
         case UInt32(MaruAppHostGlobalActionShowWindow.rawValue):
+            guard let window = primary?.window else { return }
             showAndActivateWindow(window)
+        case UInt32(MaruAppHostGlobalActionToggleQuickTerminal.rawValue):
+            toggleQuickTerminal()
         default:
             break
         }
@@ -1336,28 +1383,127 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func shutdownDevSession() {
-        guard let devSession else {
+    // MARK: - quick terminal (별도 세션 오버레이 패널)
+
+    /// quick terminal을 토글한다 — 보이면 숨기고(orderOut), 아니면 (없으면 lazy 생성) 화면 상단에 띄워 key로.
+    private func toggleQuickTerminal() {
+        if let quick, quick.window?.isVisible == true {
+            quick.window?.orderOut(nil)
             return
         }
+        ensureQuickTerminal()
+        guard let panel = quick?.window else { return }
+        positionQuickPanel(panel)
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(panel.contentView)
+        NSApp.activate(ignoringOtherApps: true)
+        // 패널 크기에 맞춰 quick 세션 grid를 한 번 맞춘다(보일 때마다 — 화면/크기가 바뀌었을 수 있다).
+        explicitSurface = quick
+        resizeDevSessionFromWindow()
+        explicitSurface = nil
+    }
 
+    /// quick terminal surface를 lazy 생성한다(첫 토글). 두 번째 dev session(대화형 셸) + borderless 패널 +
+    /// Metal 뷰/렌더러를 만든다. 세션 생성 실패면 quick은 nil로 남고 토글은 무동작(앱은 정상).
+    private func ensureQuickTerminal() {
+        guard quick == nil else { return }
+        let surface = TerminalSurface()
+
+        // borderless 떠 있는 패널 — 타이틀바 없이 화면 상단에서 내려오는 드롭다운. QuickTerminalPanel은
+        // borderless여도 key가 될 수 있어 타이핑을 받는다. 화면 전환/전체화면 위에서도 보이게 collectionBehavior.
+        let panel = QuickTerminalPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 300),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        let content = MaruMetalTerminalView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 800, height: 300))
+        content.controller = self
+        content.wantsLayer = true
+        panel.contentView = content
+        surface.window = panel
+
+        // Metal 렌더러: 이 패널 뷰의 CAMetalLayer로(메인과 별도 인스턴스).
+        if let metalLayer = content.metalLayer, let device = metalLayer.device {
+            content.updateDrawableSize()
+            surface.metalRenderer = maru_metal_renderer_create(device, metalLayer.pixelFormat)
+            surface.metalRendererCreated = surface.metalRenderer != nil
+        }
+
+        // 두 번째 dev session(대화형 셸) — 메인과 독립된 PTY.
+        var config = MaruAppHostDevSessionConfig(
+            abi_version: MARU_MACOS_APP_HOST_ABI_VERSION,
+            cols: 80,
+            rows: 24,
+            queue_capacity: 16,
+            command_kind: UInt32(MaruAppHostDevCommandInteractiveShell.rawValue),
+            reserved: 0
+        )
+        var session: OpaquePointer?
+        guard maru_macos_app_dev_session_create(&config, &session) == Self.statusOK, let created = session else {
+            // 세션 생성 실패 — 렌더러를 정리하고 포기한다(quick = nil 유지, 토글은 무동작).
+            if let renderer = surface.metalRenderer { maru_metal_renderer_destroy(renderer) }
+            return
+        }
+        surface.devSession = created
+        self.quick = surface
+    }
+
+    /// quick 패널을 화면 상단 가장자리에 전폭으로(높이 ~45%) 둔다(드롭다운 위치).
+    private func positionQuickPanel(_ panel: NSWindow) {
+        guard let screen = NSScreen.main else { return }
+        let vf = screen.visibleFrame
+        let height = (vf.height * 0.45).rounded()
+        panel.setFrame(NSRect(x: vf.minX, y: vf.maxY - height, width: vf.width, height: height), display: true)
+    }
+
+    /// quick terminal을 닫고 정리한다(셸 종료/fault, 또는 앱 종료 시). 세션·렌더러를 해제하고 패널을 내린다.
+    private func tearDownQuickTerminal() {
+        guard let surface = quick else { return }
+        self.quick = nil
+        surface.window?.orderOut(nil)
+        if let session = surface.devSession {
+            var summary = MaruAppHostDevFrameSummary()
+            _ = maru_macos_app_dev_session_close(session, &summary)
+            maru_macos_app_dev_session_destroy(session)
+            surface.devSession = nil
+        }
+        if let renderer = surface.metalRenderer {
+            maru_metal_renderer_destroy(renderer)
+            surface.metalRenderer = nil
+        }
+    }
+
+    private func shutdownDevSession() {
         // 전역 단축키를 먼저 OS에서 해제한다(세션이 사라져도 stale hot-key가 남지 않게). 이미 비었으면 no-op.
         unregisterGlobalHotkeys()
+        // quick terminal(있으면)도 함께 정리한다.
+        tearDownQuickTerminal()
 
+        // 메인 세션(primary)을 명시적으로 닫고 파괴한다(forwarder 라우팅이 아니라 primary 직접 — 종료 경로라 명확히).
+        guard let surface = primary, let session = surface.devSession else {
+            return
+        }
         var summary = MaruAppHostDevFrameSummary()
-        let status = maru_macos_app_dev_session_close(devSession, &summary)
-        devSessionStatus = status
+        let status = maru_macos_app_dev_session_close(session, &summary)
+        surface.devSessionStatus = status
         if status == Self.statusOK {
-            latestFrameSummary = summary
+            surface.latestFrameSummary = summary
         } else {
             exitCode = 1
         }
-        maru_macos_app_dev_session_destroy(devSession)
-        self.devSession = nil
+        maru_macos_app_dev_session_destroy(session)
+        surface.devSession = nil
 
-        if let renderer = metalRenderer {
+        if let renderer = surface.metalRenderer {
             maru_metal_renderer_destroy(renderer)
-            metalRenderer = nil
+            surface.metalRenderer = nil
         }
     }
 

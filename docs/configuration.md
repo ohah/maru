@@ -96,14 +96,21 @@ keybind = Cmd+W = close_tab
 keybind = Cmd+Shift+Right = next_tab
 keybind = Cmd+Shift+Left = previous_tab
 keybind = Ctrl+Cmd+1 = select_tab:0
+keybind = Cmd+D = unbind
 ```
 
 - **조합**: `Cmd`/`Ctrl`/`Alt`/`Shift`(대소문자 무관)를 `+`로 잇고 마지막에 키. 키는 글자 한 자,
   숫자, `Esc`/`Tab`/`Enter`/`Space`/`Backspace`/`Up`/`Down`/`Left`/`Right`/`F1`~`F24`, 그리고 `+`
   자체는 `Plus`로 쓴다(예: `Cmd+Plus`).
-- **action**: `new_tab`, `close_tab`, `next_tab`, `previous_tab`, `select_tab:N`(N=0부터).
-- 같은 조합을 두 번 바인딩하면 **첫 줄이 이긴다**(중복은 무시 + diagnostic). 조합/action을 못
-  읽으면 그 줄만 무시(forgiving).
+- **action**: 워크스페이스 `new_tab`·`close_tab`·`next_tab`·`previous_tab`·`select_tab:N`(N=0부터),
+  Term `new_term`·`close_term`·`next_term`·`previous_term`, 분할 `split_horizontal`·`split_vertical`,
+  pane 포커스 `focus_pane_left`·`focus_pane_right`·`focus_pane_up`·`focus_pane_down`.
+- **`unbind`**: action 자리에 `unbind`를 적으면 그 조합의 **빌트인 기본 동작을 끈다**(예:
+  `keybind = Cmd+T = unbind` → Cmd+T가 새 Term을 안 연다). 끈 조합은 빌트인 테이블을 건너뛰어
+  `Cmd`+키는 아무 동작도 안 하고, 그 외 조합은 셸로 입력이 전달된다. 다른 action을 지정하면(덮어쓰기)
+  그게 우선이라, `unbind`는 "끄기" 전용이다.
+- 같은 조합을 두 번 바인딩하면 **첫 줄이 이긴다**(`unbind`/action 통틀어 조합당 한 줄 — 중복은
+  무시 + diagnostic). 조합/action을 못 읽으면 그 줄만 무시(forgiving).
 
 > **현재 범위**: 키바인딩은 파싱·검증되어 `KeyBindingResolver`로 준비된다. 실제 동작 연결(탭 열기
 > 등)은 8단계(탭/quick terminal)에서 이뤄진다 — config가 먼저 와야 8단계가 하드코딩 없이 이

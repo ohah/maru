@@ -33,15 +33,18 @@ pub const Parsed = struct {
     /// 사용자 정의 app 키바인딩(`keybind = <chord> = <action>`). chord 중복은 파싱 단계에서
     /// 걸러져(첫 줄 우선) 그대로 KeyBindingResolver.app_bindings로 넣어도 validate가 통과한다.
     keybindings: []const keybinding.AppBinding,
+    /// 사용자가 끈 빌트인 기본 바인딩의 chord(`keybind = <chord> = unbind`). resolve가 이 chord에서
+    /// 빌트인 테이블을 건너뛴다. keybindings와 같은 dedup 풀(chord별 한 줄)이라 둘이 겹치지 않는다.
+    unbinds: []const keybinding.KeyChord,
     diagnostics: []const Diagnostic,
 
     pub fn deinit(self: *Parsed) void {
         self.arena.deinit();
     }
 
-    /// 파싱된 키바인딩으로 resolver를 만든다(app 바인딩만 — terminal 바인딩 config는 후속).
+    /// 파싱된 키바인딩으로 resolver를 만든다(app 바인딩 + unbind. terminal 바인딩 config는 후속).
     pub fn keyBindingResolver(self: Parsed) keybinding.KeyBindingResolver {
-        return .{ .app_bindings = self.keybindings };
+        return .{ .app_bindings = self.keybindings, .unbinds = self.unbinds };
     }
 };
 
@@ -58,6 +61,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
     var config: theme.Config = .{};
     var diags: std.ArrayList(Diagnostic) = .empty;
     var binds: std.ArrayList(keybinding.AppBinding) = .empty;
+    var unbinds: std.ArrayList(keybinding.KeyChord) = .empty;
 
     var line_no: usize = 0;
     var it = std.mem.splitScalar(u8, source, '\n');
@@ -73,13 +77,14 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
         const key = std.mem.trim(u8, line[0..eq], &std.ascii.whitespace);
         const value = std.mem.trim(u8, line[eq + 1 ..], &std.ascii.whitespace);
 
-        try applyKey(a, &config, &binds, &diags, line_no, key, value);
+        try applyKey(a, &config, &binds, &unbinds, &diags, line_no, key, value);
     }
 
     return .{
         .arena = arena,
         .config = config,
         .keybindings = try binds.toOwnedSlice(a),
+        .unbinds = try unbinds.toOwnedSlice(a),
         .diagnostics = try diags.toOwnedSlice(a),
     };
 }
@@ -88,13 +93,14 @@ fn applyKey(
     a: std.mem.Allocator,
     config: *theme.Config,
     binds: *std.ArrayList(keybinding.AppBinding),
+    unbinds: *std.ArrayList(keybinding.KeyChord),
     diags: *std.ArrayList(Diagnostic),
     line_no: usize,
     key: []const u8,
     value: []const u8,
 ) LoadError!void {
     if (std.mem.eql(u8, key, "keybind")) {
-        return applyKeybind(a, binds, diags, line_no, value);
+        return applyKeybind(a, binds, unbinds, diags, line_no, value);
     }
     if (std.mem.eql(u8, key, "font.family")) {
         const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
@@ -154,12 +160,14 @@ fn parsePageKeys(value: []const u8) ?theme.PageKeys {
     return null;
 }
 
-/// `keybind = <chord> = <action>` 한 줄을 AppBinding으로. chord는 KeyChord.parse(사람 표기 —
-/// 예 `Cmd+T`, `Ctrl+Cmd+1`), action은 parseAction. 오류는 diagnostic(forgiving). 같은 chord가 이미
-/// 있으면 첫 줄을 살리고 무시한다 — resolver.validate가 중복으로 실패하지 않게 파싱에서 미리 dedup.
+/// `keybind = <chord> = <action>` 한 줄을 AppBinding으로(또는 action이 `unbind`면 빌트인 끄기). chord는
+/// KeyChord.parse(사람 표기 — 예 `Cmd+T`, `Ctrl+Cmd+1`), action은 parseAction. 오류는 diagnostic(forgiving).
+/// 같은 chord가 이미 (bind든 unbind든) 있으면 첫 줄을 살리고 무시한다 — chord별 한 줄이라 resolver가 모순 없이
+/// 본다(사용자 바인딩 우선, 그다음 unbind로 빌트인 끄기).
 fn applyKeybind(
     a: std.mem.Allocator,
     binds: *std.ArrayList(keybinding.AppBinding),
+    unbinds: *std.ArrayList(keybinding.KeyChord),
     diags: *std.ArrayList(Diagnostic),
     line_no: usize,
     value: []const u8,
@@ -175,16 +183,30 @@ fn applyKeybind(
         try diags.append(a, .{ .line = line_no, .message = "키 조합을 못 읽음(예: Cmd+T, Ctrl+Cmd+1) — 무시" });
         return;
     };
-    const act = action_mod.parseAction(action_str) orelse {
-        try diags.append(a, .{ .line = line_no, .message = "알 수 없는 action(new_tab/close_tab/next_tab/previous_tab/select_tab:N) — 무시" });
-        return;
-    };
+    // chord는 bind/unbind를 통틀어 한 번만(첫 줄 우선). 두 풀을 함께 검사해 같은 chord가 양쪽에 갈라지지 않게 한다.
     for (binds.items) |existing| {
         if (existing.chord.eql(chord)) {
             try diags.append(a, .{ .line = line_no, .message = "이미 바인딩된 키 조합 — 무시(첫 줄 우선)" });
             return;
         }
     }
+    for (unbinds.items) |existing| {
+        if (existing.eql(chord)) {
+            try diags.append(a, .{ .line = line_no, .message = "이미 바인딩된 키 조합 — 무시(첫 줄 우선)" });
+            return;
+        }
+    }
+
+    // action이 `unbind`면 그 chord의 빌트인 기본을 끈다(app action 아님 — 별도 목록).
+    if (std.mem.eql(u8, action_str, "unbind")) {
+        try unbinds.append(a, chord);
+        return;
+    }
+
+    const act = action_mod.parseAction(action_str) orelse {
+        try diags.append(a, .{ .line = line_no, .message = "알 수 없는 action(unbind/new_tab/close_tab/next_tab/previous_tab/select_tab:N 등) — 무시" });
+        return;
+    };
     try binds.append(a, .{ .chord = chord, .action = act });
 }
 
@@ -221,7 +243,7 @@ fn parseBool(value: []const u8) ?bool {
 
 /// 빈 기본 결과(파일 없음/HOME 없음 등). config 텍스트를 안 읽었으므로 arena도 비어 있다.
 fn emptyDefault(allocator: std.mem.Allocator) Parsed {
-    return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .diagnostics = &.{} };
+    return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .unbinds = &.{}, .diagnostics = &.{} };
 }
 
 /// 경로에서 config를 읽어 파싱한다. 파일이 없거나 읽기 실패면 기본 Config(빈 arena)를 돌려준다
@@ -347,6 +369,29 @@ test "parse: keybind lines become app bindings; bad/duplicate ones are forgiving
     try std.testing.expectEqual(@as(usize, 4), p.diagnostics.len);
     // 중복이 걸러졌으므로 resolver.validate가 통과한다.
     try p.keyBindingResolver().validate();
+}
+
+test "parse: keybind = <chord> = unbind collects unbinds; dedups across binds and unbinds" {
+    var p = try parse(std.testing.allocator,
+        \\keybind = Cmd+T = unbind
+        \\keybind = Cmd+D = unbind
+        \\keybind = Cmd+W = close_tab
+        \\keybind = Cmd+T = new_tab
+        \\keybind = Cmd+W = unbind
+    );
+    defer p.deinit();
+    // unbind 2개(Cmd+T, Cmd+D), app 바인딩 1개(Cmd+W=close_tab). 뒤의 Cmd+T(new_tab)·Cmd+W(unbind)는 중복이라 무시.
+    try std.testing.expectEqual(@as(usize, 2), p.unbinds.len);
+    try std.testing.expect(p.unbinds[0].eql(try keybinding.KeyChord.parse("Cmd+T")));
+    try std.testing.expect(p.unbinds[1].eql(try keybinding.KeyChord.parse("Cmd+D")));
+    try std.testing.expectEqual(@as(usize, 1), p.keybindings.len);
+    try std.testing.expectEqual(action_mod.Action.close_tab, p.keybindings[0].action);
+    // 중복 2줄(Cmd+T 재바인딩, Cmd+W 언바인드) = 2 diagnostic.
+    try std.testing.expectEqual(@as(usize, 2), p.diagnostics.len);
+    // resolver가 unbind를 그대로 받는다(validate 통과).
+    const resolver = p.keyBindingResolver();
+    try resolver.validate();
+    try std.testing.expectEqual(@as(usize, 2), resolver.unbinds.len);
 }
 
 test "parse: keybindings empty when none configured; appearance keys unaffected" {

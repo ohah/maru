@@ -3020,7 +3020,11 @@ pub const TerminalCore = struct {
         var blank_row: u16 = bottom + 1 - n;
         while (blank_row <= bottom) : (blank_row += 1) {
             const blank_start = self.index(blank_row, 0);
-            @memset(self.cells[blank_start .. blank_start + self.size.cols], .{});
+            // BCE(배경색 erase): 스크롤로 새로 들어오는 빈 줄은 현재 pen의 배경으로 채운다(EL/ED와 같은 규칙).
+            // 베이스: xterm.js getNullCell이 erase 속성(fg+bg)을 carry — 우리도 full pen을 carry(default pen이면
+            // 기존과 동일한 default blank). Ghostty는 bgCell()로 배경만 좁히는데, 우리는 EL/ED와의 내부 일관성을
+            // 위해 full pen으로 통일한다(bg-only 정제는 후속). 색 배경 화면이 스크롤될 때 빈 줄이 그 색을 잇는다.
+            @memset(self.cells[blank_start .. blank_start + self.size.cols], .{ .style = self.pen });
             self.wrapped[blank_row] = false;
             self.prompt_marks[blank_row] = .{ .kind = if (lf_scroll) self.semantic_state else .unknown };
         }
@@ -3060,7 +3064,8 @@ pub const TerminalCore = struct {
         var blank_row: u16 = top;
         while (blank_row < top + n) : (blank_row += 1) {
             const blank_start = self.index(blank_row, 0);
-            @memset(self.cells[blank_start .. blank_start + self.size.cols], .{});
+            // BCE: 아래로 밀며 생기는 빈 줄(RI/IL)도 현재 pen 배경으로 채운다(scrollRangeUp과 같은 규칙).
+            @memset(self.cells[blank_start .. blank_start + self.size.cols], .{ .style = self.pen });
             self.wrapped[blank_row] = false;
             self.prompt_marks[blank_row] = .{}; // 삽입된 빈 행은 비분류(잔여 태그 → 헛 거터 방지)
         }
@@ -4333,6 +4338,26 @@ test "RI scrolls the region down when the cursor is at the top margin" {
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("  \na \nb \nd ", dump); // 행3(d)는 region 밖이라 그대로
+}
+
+test "BCE: 스크롤로 들어오는 빈 줄·ED가 현재 pen 배경을 잇는다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+
+    try core.write("\x1b[44m"); // 배경 파랑(SGR 44) → pen에 박힘
+    const bg = core.pen.background;
+    try std.testing.expect(std.meta.activeTag(bg) != .default); // SGR 44가 non-default bg를 세웠다
+
+    // 화면을 채우고 LF로 한 번 스크롤 → 새로 들어온 맨 아래 빈 줄이 pen 배경을 이어야 한다(BCE).
+    try core.write("A\r\nB\r\n");
+    const scrolled = core.cells[core.index(1, 0)];
+    try std.testing.expectEqual(@as(u21, ' '), scrolled.codepoint);
+    try std.testing.expectEqual(bg, scrolled.style.background);
+
+    // ED(\e[2J)도 같은 규칙: 전체를 pen 배경으로 지운다(기존 동작 고정).
+    try core.write("\x1b[2J");
+    try std.testing.expectEqual(bg, core.cells[core.index(0, 0)].style.background);
+    try std.testing.expectEqual(bg, core.cells[core.index(1, 3)].style.background);
 }
 
 test "DECSTBM ignores an invalid (top>=bottom) region and keeps the prior one" {

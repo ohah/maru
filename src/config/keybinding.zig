@@ -176,6 +176,18 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '}' } }, .action = .next_tab },
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '[' } }, .action = .previous_tab },
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '{' } }, .action = .previous_tab },
+    // Cmd+1~9: N번째 워크스페이스(사이드바 탭)로 바로 전환(select_tab은 0-based라 N-1). 범위 밖이면 switchTab이
+    // no-op. 브라우저/터미널 공통 관습(베이스: Safari/Terminal.app/iTerm2의 Cmd+숫자 탭 전환). 숫자 키는
+    // normalizeEventChar가 안 fold하고 Swift가 char로 그대로 줘 그대로 매칭된다. 모디파이어 정확 비교.
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '1' } }, .action = .{ .select_tab = 0 } },
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '2' } }, .action = .{ .select_tab = 1 } },
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '3' } }, .action = .{ .select_tab = 2 } },
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '4' } }, .action = .{ .select_tab = 3 } },
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '5' } }, .action = .{ .select_tab = 4 } },
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '6' } }, .action = .{ .select_tab = 5 } },
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '7' } }, .action = .{ .select_tab = 6 } },
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '8' } }, .action = .{ .select_tab = 7 } },
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '9' } }, .action = .{ .select_tab = 8 } },
     // Cmd+D: 활성 panel 좌우 분할, Cmd+Shift+D: 상하 분할. normalizeEventChar가 'd'를 'D'로 fold하므로
     // 두 칸의 char는 같고(shift만 다름) 모디파이어 정확 비교로 갈린다. 방향 규칙은 docs/tabs-splits-layout.md.
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'D' } }, .action = .split_horizontal },
@@ -505,6 +517,16 @@ test "built-in app bindings resolve Cmd+Shift+]/[ to next/previous tab for both 
     try std.testing.expectEqual(action_mod.Action.next_term, nt.app_action);
     const pt = try resolver.resolve(.{ .key = .{ .char = '[' }, .modifiers = .{ .command = true } }, &buffer, .{});
     try std.testing.expectEqual(action_mod.Action.previous_term, pt.app_action);
+}
+
+test "built-in app bindings resolve Cmd+1..9 to select_tab(N-1)" {
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{};
+    // Cmd+1 → 워크스페이스 0, Cmd+2 → 1, … Cmd+9 → 8 (0-based select_tab).
+    for ([_]u21{ '1', '2', '3', '4', '5', '6', '7', '8', '9' }, 0..) |c, i| {
+        const r = try resolver.resolve(.{ .key = .{ .char = c }, .modifiers = .{ .command = true } }, &buffer, .{});
+        try std.testing.expectEqual(action_mod.Action{ .select_tab = i }, r.app_action);
+    }
 }
 
 test "built-in app bindings resolve Cmd+D / Cmd+Shift+D to horizontal / vertical split" {

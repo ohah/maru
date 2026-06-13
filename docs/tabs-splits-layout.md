@@ -125,7 +125,12 @@ Node = leaf(Pane)
   `paneTabAreaCols(cols)`(넓으면 `cols - 3`, 좁으면 전체)로 나눠 **탭 영역**과 우측 **"+" 영역**을 분리한다 — 탭
   렌더·hit-test(`tabIndexInBar`/`xInTabCloseZone`)·"+"(`xInPlusZone`)가 같은 분할을 공유해 "보이는 = 클릭되는"을
   지킨다. cmux 비교상 "+"는 새 **탭(Term)** 추가이며, split은 ⌘D/⌘⇧D·divider(PR6)로 둔다.
-- **비율**: 고정 0.5(균등). divider 드래그 리사이즈는 후속(PR6).
+- **divider 렌더·드래그 리사이즈(PR6)**: 두 panel 사이 경계에 divider 선을 그리고, 끌어서 비율을 조절한다. 선은
+  layout을 안 바꾸고(틈 없이 abut) **seam 중심 overlay 셀**로 터미널 위·커서 아래에 그린다(`metal_frame.replace`의
+  `pane_overlay_cells`, cursor suffix 앞 insert). hit-test는 `layoutDividers`가 주는 seg(split 노드+경계 pos+부모
+  bounds)로 seam 밴드(±cell 절반+여유)를 잡고, 드래그가 `ratio = (mouse - bounds.origin)/bounds.size`(`clampRatio`)
+  로 `split.ratio`를 바꿔 live 재배치한다. **탭 바가 seam에 붙어 있어** divider는 탭 바(①) 다음·pane 선택(②) 앞
+  순서로 잡아 탭 바 클릭을 안 가로챈다. 초기 비율은 0.5(균등).
 
 quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.
 

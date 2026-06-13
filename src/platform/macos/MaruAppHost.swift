@@ -373,6 +373,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var primary: TerminalSurface?
     // quick terminal(별도 세션 오버레이 패널)의 surface. 첫 토글에서 lazy 생성. 없거나 숨김이면 입력/렌더는 primary.
     private var quick: TerminalSurface?
+    // quick 패널의 슬라이드 인/아웃 애니메이션이 진행 중인지. 포커스 잃음 자동 숨김이 애니메이션 도중·직후
+    // (orderOut 시 resignKey)에 재진입해 이중 숨김하지 않게 가드한다.
+    private var quickAnimating = false
     // tick이 특정 surface를 명시적으로 대상 지정할 때 쓴다(이벤트가 아니라 타이머 구동이라 key 창으로 못 고름).
     // nil이면 입력 이벤트는 key 창 기준으로 surface를 고른다(이벤트는 key 창의 first responder로 전달되므로).
     private var explicitSurface: TerminalSurface?
@@ -1388,22 +1391,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // MARK: - quick terminal (별도 세션 오버레이 패널)
 
-    /// quick terminal을 토글한다 — 보이면 숨기고(orderOut), 아니면 (없으면 lazy 생성) 화면 상단에 띄워 key로.
+    /// quick terminal을 토글한다 — 보이면 위로 슬라이드해 숨기고, 아니면 (없으면 lazy 생성) 상단에서 내려와 key로.
     private func toggleQuickTerminal() {
         if let quick, quick.window?.isVisible == true {
-            quick.window?.orderOut(nil)
+            if let panel = quick.window { hideQuickTerminalAnimated(panel) }
             return
         }
         ensureQuickTerminal()
         guard let panel = quick?.window else { return }
-        positionQuickPanel(panel)
-        panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(panel.contentView)
-        NSApp.activate(ignoringOtherApps: true)
-        // 패널 크기에 맞춰 quick 세션 grid를 한 번 맞춘다(보일 때마다 — 화면/크기가 바뀌었을 수 있다).
-        explicitSurface = quick
-        resizeDevSessionFromWindow()
-        explicitSurface = nil
+        showQuickTerminalAnimated(panel)
     }
 
     /// quick terminal surface를 lazy 생성한다(첫 토글). 두 번째 dev session(대화형 셸) + borderless 패널 +
@@ -1456,20 +1452,90 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         surface.devSession = created
         self.quick = surface
+
+        // 포커스 잃음 자동 숨김: 패널이 key를 잃으면 quickTerminalLostKey가 슬라이드로 숨긴다. 패널을 컨트롤러의
+        // window-delegate로 잡으면 windowWillClose/Resize가 primary 경로와 섞이므로, delegate 대신 이 패널만
+        // 겨냥한 알림 관찰을 쓴다(IME가 view에서 쓰는 패턴과 동일). teardown에서 해제한다.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(quickTerminalLostKey(_:)),
+            name: NSWindow.didResignKeyNotification,
+            object: panel
+        )
     }
 
-    /// quick 패널을 화면 상단 가장자리에 전폭으로(높이 ~45%) 둔다(드롭다운 위치).
-    private func positionQuickPanel(_ panel: NSWindow) {
-        guard let screen = NSScreen.main else { return }
+    /// quick 패널의 "보임"(상단 가장자리, 전폭·높이 45%)과 "숨김"(같은 크기로 화면 위로 빠진 위치) 사각형.
+    /// 둘은 y만 다르고 폭·높이가 같다 — 슬라이드 중 콘텐츠 크기가 안 바뀌어 drawable/grid 재계산이 필요 없다.
+    private func quickPanelFrames() -> (shown: NSRect, hidden: NSRect)? {
+        guard let screen = NSScreen.main else { return nil }
         let vf = screen.visibleFrame
         let height = (vf.height * 0.45).rounded()
-        panel.setFrame(NSRect(x: vf.minX, y: vf.maxY - height, width: vf.width, height: height), display: true)
+        let shown = NSRect(x: vf.minX, y: vf.maxY - height, width: vf.width, height: height)
+        let hidden = NSRect(x: vf.minX, y: vf.maxY, width: vf.width, height: height) // 위로 빠져 화면 밖
+        return (shown, hidden)
+    }
+
+    /// quick 패널을 화면 위(숨김 위치)에서 상단(보임 위치)으로 슬라이드해 내린다. 크기는 처음부터 최종값이라
+    /// (숨김/보임이 y만 다름) makeKey 직후 세션 grid를 한 번 맞추고 y만 애니메이션한다.
+    private func showQuickTerminalAnimated(_ panel: NSWindow) {
+        guard let frames = quickPanelFrames() else {
+            // 화면 정보를 못 구하면 애니메이션 없이 그냥 띄운다(폴백).
+            panel.makeKeyAndOrderFront(nil)
+            panel.makeFirstResponder(panel.contentView)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        panel.setFrame(frames.hidden, display: false)
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(panel.contentView)
+        NSApp.activate(ignoringOtherApps: true)
+        // 크기는 최종값(frames.hidden은 보임과 폭·높이 동일)이라 지금 grid를 맞춘다 — 슬라이드 중 재계산 불필요.
+        explicitSurface = quick
+        resizeDevSessionFromWindow()
+        explicitSurface = nil
+
+        quickAnimating = true
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.16
+            panel.animator().setFrame(frames.shown, display: true)
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated { self?.quickAnimating = false }
+        })
+    }
+
+    /// quick 패널을 상단에서 화면 위로 슬라이드해 올린 뒤 orderOut으로 숨긴다(완료 시).
+    private func hideQuickTerminalAnimated(_ panel: NSWindow) {
+        guard let frames = quickPanelFrames() else {
+            panel.orderOut(nil)
+            return
+        }
+        quickAnimating = true
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.12
+            panel.animator().setFrame(frames.hidden, display: true)
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                panel.orderOut(nil)
+                self?.quickAnimating = false
+            }
+        })
+    }
+
+    /// quick 패널이 key를 잃으면(다른 창/앱 클릭) 숨긴다 — quick terminal의 표준 동작(클릭이 빠지면 사라짐).
+    /// 애니메이션 중(특히 숨김 완료 orderOut의 resignKey)에는 재진입을 막고, 보이는 상태일 때만 숨긴다.
+    @objc private func quickTerminalLostKey(_ note: Notification) {
+        guard !quickAnimating, let panel = quick?.window, panel.isVisible else { return }
+        hideQuickTerminalAnimated(panel)
     }
 
     /// quick terminal을 닫고 정리한다(셸 종료/fault, 또는 앱 종료 시). 세션·렌더러를 해제하고 패널을 내린다.
     private func tearDownQuickTerminal() {
         guard let surface = quick else { return }
         self.quick = nil
+        quickAnimating = false
+        if let panel = surface.window {
+            NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: panel)
+        }
         surface.window?.orderOut(nil)
         if let session = surface.devSession {
             var summary = MaruAppHostDevFrameSummary()

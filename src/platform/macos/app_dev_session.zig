@@ -23,7 +23,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 35;
+pub const abi_version: u32 = 36;
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -55,7 +55,9 @@ pub const QuickTerminalConfig = extern struct {
 pub const CommandEntry = extern struct {
     action_key: [*:0]const u8,
     title: [*:0]const u8,
-    key_display: [*:0]const u8,
+    key_display: [*:0]const u8, // 팝업/표시용 사람-읽는 chord("⌘T"), 없으면 ""
+    key_equivalent: [*:0]const u8, // NSMenuItem.keyEquivalent 문자열(소문자 글자/화살표 unichar), 없으면 ""
+    key_modifiers: u32, // command_catalog.mod_* 비트마스크(shift=1,control=2,option=4,command=8). Swift가 NSEvent flags로 매핑.
 };
 
 /// 마우스 호버 위치에 따라 Swift가 세울 커서 종류(`maru_macos_app_dev_session_hover`의 out 값). Zig가 위치를
@@ -687,6 +689,7 @@ pub const DevSession = struct {
     // 표시 문자열(널 종단)을 소유하고, command_entries의 key_display가 그걸 가리킨다(action_key/title은 정적 리터럴).
     command_entries: std.ArrayList(CommandEntry) = .empty,
     command_key_displays: std.ArrayList([:0]u8) = .empty,
+    command_key_equivalents: std.ArrayList([:0]u8) = .empty,
     // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
     // 마다 leaf rect/divider seg 레이아웃을 새 ArrayList에 할당·해제하던 churn을 없앤다 — 레이아웃은 매번
     // 다시 계산하므로(작은 트리라 cheap) 결과는 항상 최신이라 stale 캐시 위험이 없고, 버퍼 capacity만 재사용한다.
@@ -2876,18 +2879,26 @@ pub const DevSession = struct {
     fn buildCommandCatalog(self: *DevSession) !void {
         const resolver = self.loaded_config.keyBindingResolver();
         for (command_catalog.entries) |entry| {
-            var scratch: [command_catalog.max_chord_display_len]u8 = undefined;
-            const display: []const u8 = if (command_catalog.chordForAction(resolver, entry.action)) |chord|
-                command_catalog.formatChord(chord, &scratch)
-            else
-                "";
-            const owned = try self.allocator.dupeZ(u8, display);
-            errdefer self.allocator.free(owned);
-            try self.command_key_displays.append(self.allocator, owned);
+            const chord = command_catalog.chordForAction(resolver, entry.action);
+            // 표시용 chord("⌘T")와 NSMenuItem keyEquivalent("t"+mask)를 둘 다 만든다(안 묶였으면 빈 문자열·mask 0).
+            var disp_scratch: [command_catalog.max_chord_display_len]u8 = undefined;
+            const display: []const u8 = if (chord) |c| command_catalog.formatChord(c, &disp_scratch) else "";
+            var equiv_scratch: [8]u8 = undefined;
+            const equiv: []const u8 = if (chord) |c| command_catalog.keyEquivalent(c, &equiv_scratch) else "";
+            const modifiers: u32 = if (chord) |c| command_catalog.modifierMask(c) else 0;
+
+            const owned_display = try self.allocator.dupeZ(u8, display);
+            errdefer self.allocator.free(owned_display);
+            try self.command_key_displays.append(self.allocator, owned_display);
+            const owned_equiv = try self.allocator.dupeZ(u8, equiv);
+            errdefer self.allocator.free(owned_equiv);
+            try self.command_key_equivalents.append(self.allocator, owned_equiv);
             try self.command_entries.append(self.allocator, .{
                 .action_key = entry.key.ptr,
                 .title = entry.title.ptr,
-                .key_display = owned.ptr,
+                .key_display = owned_display.ptr,
+                .key_equivalent = owned_equiv.ptr,
+                .key_modifiers = modifiers,
             });
         }
     }
@@ -3573,9 +3584,11 @@ pub const DevSession = struct {
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
         self.global_hotkeys.deinit(self.allocator);
-        // 커맨드 카탈로그: key_display owned 문자열들을 먼저 해제하고 두 목록을 deinit(빌드 전이면 empty라 무해).
+        // 커맨드 카탈로그: owned 문자열(key_display·key_equivalent)을 먼저 해제하고 목록들을 deinit(빌드 전이면 empty라 무해).
         for (self.command_key_displays.items) |s| self.allocator.free(s);
         self.command_key_displays.deinit(self.allocator);
+        for (self.command_key_equivalents.items) |s| self.allocator.free(s);
+        self.command_key_equivalents.deinit(self.allocator);
         self.command_entries.deinit(self.allocator);
         self.hover_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
@@ -4243,9 +4256,13 @@ test "command catalog: 엔트리·바인딩 표시 + runAction 디스패치" {
         if (std.mem.eql(u8, key, "new_term")) {
             try std.testing.expectEqualStrings("New Terminal", std.mem.span(e.title));
             try std.testing.expectEqualStrings("⌘T", std.mem.span(e.key_display));
+            try std.testing.expectEqualStrings("t", std.mem.span(e.key_equivalent)); // NSMenuItem keyEquivalent
+            try std.testing.expectEqual(command_catalog.mod_command, e.key_modifiers);
             saw_new_term = true;
         } else if (std.mem.eql(u8, key, "close_tab")) {
             try std.testing.expectEqualStrings("", std.mem.span(e.key_display)); // 기본 바인딩 없음
+            try std.testing.expectEqualStrings("", std.mem.span(e.key_equivalent));
+            try std.testing.expectEqual(@as(u32, 0), e.key_modifiers);
             saw_close_tab = true;
         }
     }

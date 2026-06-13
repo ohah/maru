@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 35u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 36u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -441,7 +441,9 @@ int32_t maru_macos_app_dev_session_quick_terminal_config(
 typedef struct MaruAppHostCommand {
     const char* action_key;
     const char* title;
-    const char* key_display;
+    const char* key_display;    /* 팝업 표시용 사람-읽는 chord("⌘T"), 없으면 "" */
+    const char* key_equivalent; /* NSMenuItem.keyEquivalent 문자열(소문자 글자/화살표 unichar), 없으면 "" */
+    uint32_t key_modifiers;     /* 비트마스크 shift=1, control=2, option=4, command=8 → NSEvent.ModifierFlags */
 } MaruAppHostCommand;
 
 /* 커맨드 카탈로그 목록. config/액션에서 한 번 만들어 세션 동안 불변이라 Swift가 시작 시 한 번 읽는다.

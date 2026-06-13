@@ -538,6 +538,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
 
+        // 표준 메뉴바를 세운다(커맨드 카탈로그에서 액션 항목·단축키를 읽어). smoke에서도 빌드해 구성 경로를
+        // CI가 구동한다(메뉴는 OS-global 부수효과가 없어 hotkey 등록과 달리 게이트 불요).
+        buildMainMenu()
+
         // 첫 tick(startDevSession 안)이 cell 메트릭을 캐시했으니, 창 크기에 맞춰 cols/rows를
         // 한 번 맞춘다(80×24 기본에서 실제 창 grid로). smoke는 자체 scripted resize를 쓴다.
         if !smokeMode {
@@ -1082,6 +1086,159 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+    }
+
+    // MARK: - 메뉴바 (NSMenu)
+
+    /// command_catalog의 modifier 비트마스크(shift=1,control=2,option=4,command=8)를 NSEvent.ModifierFlags로.
+    private static func modifierFlags(_ mask: UInt32) -> NSEvent.ModifierFlags {
+        var flags: NSEvent.ModifierFlags = []
+        if mask & 1 != 0 { flags.insert(.shift) }
+        if mask & 2 != 0 { flags.insert(.control) }
+        if mask & 4 != 0 { flags.insert(.option) }
+        if mask & 8 != 0 { flags.insert(.command) }
+        return flags
+    }
+
+    /// 표준 macOS 메뉴바(maru/File/Edit/View/Window/Help)를 프로그래매틱하게 세운다. Zig 액션 항목은 커맨드
+    /// 카탈로그(command_catalog ABI)에서 제목·단축키(keyEquivalent)를 읽어 만들고 선택 시 run_action으로
+    /// 디스패치한다(네이티브는 NSMenu 구성만, 카탈로그·실행 결정은 Zig — 경계). copy/paste·about/hide/quit/
+    /// minimize/zoom·fullscreen은 OS 동작이라 네이티브 셀렉터. 세션-불변이라 시작 시 한 번 빌드한다.
+    private func buildMainMenu() {
+        // 카탈로그를 [action_key: (제목, keyEquivalent, modifier)]로 읽어 둔다(세션-불변). primary에서 읽는다
+        // (제목·단축키는 모든 세션 동일). 실제 디스패치는 runCatalogAction이 활성 세션(devSession)에 한다.
+        var catalog: [String: (title: String, keyEquiv: String, mods: NSEvent.ModifierFlags)] = [:]
+        if let session = primary?.devSession {
+            var ptr: UnsafePointer<MaruAppHostCommand>?
+            var count = 0
+            if maru_macos_app_dev_session_command_catalog(session, &ptr, &count) == Self.statusOK, let base = ptr {
+                for i in 0..<count {
+                    let c = base[i]
+                    catalog[String(cString: c.action_key)] = (
+                        String(cString: c.title),
+                        String(cString: c.key_equivalent),
+                        Self.modifierFlags(c.key_modifiers)
+                    )
+                }
+            }
+        }
+
+        let mainMenu = NSMenu()
+
+        // maru(App)
+        let app = NSMenu()
+        app.addItem(nativeMenuItem("About maru", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), key: "", mods: []))
+        app.addItem(.separator())
+        app.addItem(nativeMenuItem("Hide maru", #selector(NSApplication.hide(_:)), key: "h"))
+        app.addItem(nativeMenuItem("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), key: "h", mods: [.command, .option]))
+        app.addItem(nativeMenuItem("Show All", #selector(NSApplication.unhideAllApplications(_:)), key: "", mods: []))
+        app.addItem(.separator())
+        app.addItem(nativeMenuItem("Quit maru", #selector(NSApplication.terminate(_:)), key: "q"))
+        attachSubmenu(mainMenu, "maru", app)
+
+        // File
+        let file = NSMenu()
+        file.addItem(catalogMenuItem("new_term", catalog))
+        file.addItem(catalogMenuItem("new_tab", catalog))
+        file.addItem(.separator())
+        file.addItem(catalogMenuItem("close_term", catalog))
+        attachSubmenu(mainMenu, "File", file)
+
+        // Edit — Select All은 Zig 액션(카탈로그), Copy/Paste는 네이티브(NSPasteboard 소유).
+        let edit = NSMenu()
+        edit.addItem(catalogMenuItem("select_all", catalog))
+        edit.addItem(.separator())
+        edit.addItem(nativeMenuItem("Copy", #selector(menuCopy(_:)), key: "c", target: self))
+        edit.addItem(nativeMenuItem("Paste", #selector(menuPaste(_:)), key: "v", target: self))
+        attachSubmenu(mainMenu, "Edit", edit)
+
+        // View
+        let view = NSMenu()
+        view.addItem(catalogMenuItem("split_horizontal", catalog))
+        view.addItem(catalogMenuItem("split_vertical", catalog))
+        view.addItem(.separator())
+        view.addItem(catalogMenuItem("focus_pane_left", catalog))
+        view.addItem(catalogMenuItem("focus_pane_right", catalog))
+        view.addItem(catalogMenuItem("focus_pane_up", catalog))
+        view.addItem(catalogMenuItem("focus_pane_down", catalog))
+        view.addItem(.separator())
+        view.addItem(nativeMenuItem("Toggle Full Screen", #selector(menuToggleFullScreen(_:)), key: "f", mods: [.control, .command], target: self))
+        attachSubmenu(mainMenu, "View", view)
+
+        // Window
+        let window = NSMenu()
+        window.addItem(nativeMenuItem("Minimize", #selector(NSWindow.performMiniaturize(_:)), key: "m"))
+        window.addItem(nativeMenuItem("Zoom", #selector(NSWindow.performZoom(_:)), key: "", mods: []))
+        window.addItem(.separator())
+        window.addItem(catalogMenuItem("next_tab", catalog))
+        window.addItem(catalogMenuItem("previous_tab", catalog))
+        window.addItem(catalogMenuItem("next_term", catalog))
+        window.addItem(catalogMenuItem("previous_term", catalog))
+        let windowItem = attachSubmenu(mainMenu, "Window", window)
+        NSApp.windowsMenu = window
+        _ = windowItem
+
+        // Help
+        let help = NSMenu()
+        help.addItem(nativeMenuItem("maru Help", #selector(NSApplication.showHelp(_:)), key: "?", target: nil))
+        attachSubmenu(mainMenu, "Help", help)
+        NSApp.helpMenu = help
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    /// 커맨드 카탈로그의 한 action_key를 NSMenuItem으로(제목·keyEquivalent·modifier는 카탈로그, 선택 시
+    /// runCatalogAction → run_action). 카탈로그에 없으면(이론상) action_key를 제목으로 단축키 없이 만든다.
+    private func catalogMenuItem(_ key: String, _ catalog: [String: (title: String, keyEquiv: String, mods: NSEvent.ModifierFlags)]) -> NSMenuItem {
+        let info = catalog[key]
+        let item = NSMenuItem(title: info?.title ?? key, action: #selector(runCatalogAction(_:)), keyEquivalent: info?.keyEquiv ?? "")
+        item.keyEquivalentModifierMask = info?.mods ?? []
+        item.representedObject = key
+        item.target = self
+        return item
+    }
+
+    /// 네이티브 셀렉터 메뉴 항목. target=nil이면 responder chain(terminate:/performMiniaturize: 등 표준 동작),
+    /// target=self면 컨트롤러의 @objc 핸들러(copy/paste/fullscreen). 기본 modifier는 ⌘.
+    private func nativeMenuItem(_ title: String, _ action: Selector, key: String, mods: NSEvent.ModifierFlags = .command, target: AnyObject? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.keyEquivalentModifierMask = key.isEmpty ? [] : mods
+        item.target = target
+        return item
+    }
+
+    @discardableResult
+    private func attachSubmenu(_ mainMenu: NSMenu, _ title: String, _ submenu: NSMenu) -> NSMenuItem {
+        submenu.title = title
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        mainMenu.addItem(item)
+        return item
+    }
+
+    /// 메뉴에서 고른 Zig 액션을 활성 세션에 디스패치한다 — action_key(representedObject) 바이트를 run_action으로.
+    /// devSession(활성 surface)에 적용해, quick terminal이 key면 그쪽에 동작한다(메뉴는 포커스된 터미널에 작용).
+    @objc private func runCatalogAction(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String, let session = devSession else { return }
+        let bytes = Array(key.utf8)
+        _ = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_dev_session_run_action(session, buf.baseAddress, buf.count)
+        }
+    }
+
+    @objc private func menuCopy(_ sender: Any?) {
+        _ = sender
+        copySelectionToPasteboard()
+    }
+
+    @objc private func menuPaste(_ sender: Any?) {
+        _ = sender
+        pastePasteboardText()
+    }
+
+    @objc private func menuToggleFullScreen(_ sender: Any?) {
+        _ = sender
+        (NSApp.keyWindow ?? primary?.window)?.toggleFullScreen(nil)
     }
 
     private func sendSmokeDevEvents() {

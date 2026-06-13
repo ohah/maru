@@ -97,6 +97,9 @@ keybind = Cmd+Shift+Right = next_tab
 keybind = Cmd+Shift+Left = previous_tab
 keybind = Ctrl+Cmd+1 = select_tab:0
 keybind = Cmd+D = unbind
+keybind = F2 = text:hello
+keybind = Cmd+E = ctrl:[
+keybind = Cmd+K = esc:[2J
 ```
 
 - **조합**: `Cmd`/`Ctrl`/`Alt`/`Shift`(대소문자 무관)를 `+`로 잇고 마지막에 키. 키는 글자 한 자,
@@ -109,13 +112,19 @@ keybind = Cmd+D = unbind
   `keybind = Cmd+T = unbind` → Cmd+T가 새 Term을 안 연다). 끈 조합은 빌트인 테이블을 건너뛰어
   `Cmd`+키는 아무 동작도 안 하고, 그 외 조합은 셸로 입력이 전달된다. 다른 action을 지정하면(덮어쓰기)
   그게 우선이라, `unbind`는 "끄기" 전용이다.
-- 같은 조합을 두 번 바인딩하면 **첫 줄이 이긴다**(`unbind`/action 통틀어 조합당 한 줄 — 중복은
-  무시 + diagnostic). 조합/action을 못 읽으면 그 줄만 무시(forgiving).
+- **터미널 매크로**: action 자리에 아래 접두사를 쓰면 그 조합이 **셸로 바이트를 보낸다**(앱 동작 대신):
+  - `text:<문자열>` — 문자열을 그대로 입력(예: `text:hello`).
+  - `esc:<payload>` — `ESC`(0x1b)를 앞에 붙인 시퀀스(예: `esc:[2J` → 화면 지우기 `ESC [2J`).
+  - `ctrl:<글자 한 자>` — 그 글자의 컨트롤 바이트(예: `ctrl:[` → `ESC`, `ctrl:c` → `Ctrl+C`).
+    매핑 가능한 글자는 `@`, `A`~`Z`, `[`, `\`, `]`, `^`, `_`, `Space`, `?`다(C0 컨트롤).
+  접두사인데 payload가 비었거나(`text:`) `ctrl:`이 글자 한 자가 아니거나 매핑 안 되면 그 줄만 무시(forgiving).
+- 같은 조합을 두 번 바인딩하면 **첫 줄이 이긴다**(action·`unbind`·매크로 통틀어 조합당 한 줄 — 중복은
+  무시 + diagnostic). 한 조합을 앱 동작과 매크로에 동시에 못 묶는다(첫 줄 우선이라 충돌이 안 생긴다).
+  조합/action을 못 읽으면 그 줄만 무시(forgiving).
 
-> **현재 범위**: 키바인딩은 파싱·검증되어 `KeyBindingResolver`로 준비된다. 실제 동작 연결(탭 열기
-> 등)은 8단계(탭/quick terminal)에서 이뤄진다 — config가 먼저 와야 8단계가 하드코딩 없이 이
-> resolver를 그대로 쓴다([구현 계획](implementation-plan.md)의 의존성 순서). terminal 입력 remap
-> (`<조합> → 바이트`)과 global shortcut도 후속이다.
+> **현재 범위**: 키바인딩은 파싱·검증되어 `KeyBindingResolver`로 동작에 연결된다(앱 액션·`unbind`·터미널
+> 매크로). config가 resolver를 그대로 채우므로 플랫폼 키 경로가 하드코딩 없이 이 결과를 쓴다. global
+> shortcut(OS 전역 단축키 등록)은 아직 후속이다.
 
 ## 검증 동작 (forgiving)
 

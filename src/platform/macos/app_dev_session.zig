@@ -3153,7 +3153,6 @@ pub const DevSession = struct {
             defer pane_overlay.deinit(self.allocator);
             self.appendDropTargetHighlight(&pane_overlay); // ④b 드롭 타겟 반투명 하이라이트(divider보다 먼저 → 아래)
             self.appendActiveTabDividers(&pane_overlay);
-            self.appendMinimalTabIndicator(&pane_overlay); // minimal(탭 보임): 우상단 탭 점(full·단일이면 무동작)
 
             // 활성 panel의 origin(터미널 영역 = 바 아래). 못 구하면(빈 리스트 — OOM) 터미널 영역 전체의 바 아래로 폴백.
             const active_fallback = self.paneTermRect(self.termRect());
@@ -3171,6 +3170,10 @@ pub const DevSession = struct {
             }
             // minimal split: 활성 pane 둘레 얇은 테두리(full·단일 pane이면 무동작). divider 위에 얹어 focus를 보인다.
             self.appendActivePaneBorder(&pane_overlay, active_term_rect, leaf_rects.items.len);
+            // 우상단 탭 점 인디케이터(full·단일이면 무동작) — 테두리 **뒤에** append해 정보 chip이 focus 테두리 위에
+            // 올라온다(활성 pane이 우상단일 때 테두리 상/우 선이 점을 가로지르던 코너 겹침 해소; chrome 프레임=아래,
+            // 정보 chip=위 z-order).
+            self.appendMinimalTabIndicator(&pane_overlay);
 
             var pane_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
             defer pane_frames.deinit(self.allocator);

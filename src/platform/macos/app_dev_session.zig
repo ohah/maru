@@ -680,8 +680,9 @@ pub const DevSession = struct {
     // 쓰게 한다. 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다.
     cell_width_px: u32 = 0,
     cell_height_px: u32 = 0,
-    // chrome 최소화 세션인가(quick terminal minimal). true면 paneBarHeightPx가 0(탭 바 끔)이고 사이드바 폭을
-    // 0으로 강제(setSidebarWidthPx·refreshCellMetrics에서 게이트) — 터미널 그리드만 그린다. normalizeConfig가
+    // chrome 최소화 세션인가(quick terminal minimal). true면 paneBarHeightPx가 0(탭 바 끔)이고 refreshCellMetrics가
+    // 사이드바 폭을 0으로 강제 — 터미널 그리드만 그린다. 사이드바 폭 0이면 사이드바 가장자리 hit-test(xOnSidebarEdge)도
+    // false라 드래그 리사이즈 자체가 시작 못 한다(setSidebarWidthPx 별도 게이트 불요). normalizeConfig가
     // SessionConfig.chrome_minimal에서 채운다. 메인 창은 false(full chrome).
     chrome_minimal: bool = false,
     // 세로 사이드바의 현재 논리 폭(pt). 사용자가 우측 경계를 드래그하면 [sidebar_min_pt, sidebar_max_pt]로
@@ -1116,7 +1117,6 @@ pub const DevSession = struct {
     /// 사이드바 폭이 모든 탭의 터미널 폭을 바꾸므로 전 탭 panel을 새 grid로 resize하고 활성 rect·사이드바를
     /// 갱신한다. 폭이 그대로면(같은 pt) 무동작 — SIGWINCH·재배치 storm 방지.
     fn setSidebarWidthPx(self: *DevSession, x_px: f64) void {
-        if (self.chrome_minimal) return; // minimal 세션엔 사이드바가 없다(폭 0 고정) — 드래그 무동작
         if (self.scale_milli == 0 or !std.math.isFinite(x_px)) return;
         const clamped_x = if (x_px < 0) 0 else @min(x_px, @as(f64, @floatFromInt(std.math.maxInt(u32))));
         const px: u32 = @intFromFloat(clamped_x);
@@ -3854,10 +3854,6 @@ test "chrome_minimal session suppresses the pane tab bar and the sidebar" {
     const term = session.paneTermRect(rect);
     try std.testing.expectEqual(@as(u32, 0), term.y);
     try std.testing.expectEqual(@as(u32, 600), term.h);
-
-    // 드래그로 사이드바 폭을 바꿔도 minimal이면 0 고정(setSidebarWidthPx 게이트).
-    session.setSidebarWidthPx(200);
-    try std.testing.expectEqual(@as(u32, 0), session.sidebar_width_px);
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {
@@ -4329,8 +4325,9 @@ test "tabNumberLabel formats {n} {title} with 1-based numbering" {
 // 작으면 바 없음(터미널이 전체). 좌표/resize/렌더가 공유하는 '바 아래' 영역의 단일 출처라 헤드리스로 고정.
 test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
     var session: DevSession = undefined;
-    session.cell_width_px = 12; // paneBarHeightPx = cell_width_px(정사각) = 12
-    session.cell_height_px = 12;
+    session.chrome_minimal = false; // paneBarHeightPx가 읽는다 — undefined 세션이라 명시 초기화(false=바 있음)
+    session.cell_width_px = 12;
+    session.cell_height_px = 12; // paneBarHeightPx = cell_height_px(line height) = 12
 
     const rect: app.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
     const term = session.paneTermRect(rect);

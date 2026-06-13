@@ -119,12 +119,14 @@ pub fn buildSidebarDrawList(
     cols: u16,
     fg: terminal.Color,
     close_row: ?usize,
+    plus_row: ?usize,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
 
     const style: terminal.Style = .{ .foreground = fg };
-    const rows: u16 = @intCast(@min(titles.len, @as(usize, std.math.maxInt(u16))));
+    const title_rows: u16 = @intCast(@min(titles.len, @as(usize, std.math.maxInt(u16))));
+    const rows: u16 = title_rows;
     for (titles, 0..) |title, row_index| {
         if (row_index > std.math.maxInt(u16)) break;
         const row: u16 = @intCast(row_index);
@@ -173,10 +175,27 @@ pub fn buildSidebarDrawList(
         }
     }
 
+    // 사이드바 하단 "+"(새 워크스페이스) 버튼 — 탭 목록 아래 행(plus_row, 보통 탭 개수)에 '+' glyph 1개를
+    // 가로 중앙에 그린다. 렌더러가 사이드바 셀을 행×슬롯 높이로 배치하므로 마지막 탭 슬롯 아래에 놓인다.
+    var total_rows: u16 = rows;
+    if (plus_row) |pr| {
+        if (pr <= std.math.maxInt(u16)) {
+            const prow: u16 = @intCast(pr);
+            total_rows = @max(total_rows, prow + 1);
+            try cells.append(allocator, .{
+                .row = prow,
+                .col = cols / 2, // 가로 중앙
+                .codepoint = '+',
+                .width = 1,
+                .style = style,
+            });
+        }
+    }
+
     return .{
-        .size = .{ .cols = cols, .rows = @max(rows, 1) },
+        .size = .{ .cols = cols, .rows = @max(total_rows, 1) },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
-        .dirty = .{ .start_row = 0, .end_row = if (rows == 0) 0 else rows - 1 },
+        .dirty = .{ .start_row = 0, .end_row = if (total_rows == 0) 0 else total_rows - 1 },
         .cells = try cells.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
@@ -485,7 +504,7 @@ test "CoreText frame builder surfaces native shape failures" {
 test "buildSidebarDrawList lays tab titles into per-row draw cells, truncating to cols" {
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{ "zsh", "vim" };
-    var draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default, null);
+    var draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default, null, null);
     defer draw_list.deinit(allocator);
 
     // 한 줄=한 탭(row=탭 인덱스), size는 cols=한도·rows=탭 수.
@@ -583,7 +602,7 @@ test "buildSidebarDrawList truncates to cols and advances wide glyphs by two col
     const allocator = std.testing.allocator;
     // cols=5: "abcdefg"는 5칸까지만(자름). 와이드 글자는 2칸 전진.
     const titles = [_][]const u8{ "abcdefg", "한A" };
-    var draw_list = try buildSidebarDrawList(allocator, &titles, 5, .default, null);
+    var draw_list = try buildSidebarDrawList(allocator, &titles, 5, .default, null, null);
     defer draw_list.deinit(allocator);
 
     var row0: usize = 0;
@@ -606,7 +625,7 @@ test "buildSidebarDrawList adds a close glyph at the hovered row's right edge on
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{ "a", "b" };
     // 호버 행 1 → ✕가 row 1, col cols-2=8에 하나 추가된다.
-    var hovered = try buildSidebarDrawList(allocator, &titles, 10, .default, 1);
+    var hovered = try buildSidebarDrawList(allocator, &titles, 10, .default, 1, null);
     defer hovered.deinit(allocator);
     var close_count: usize = 0;
     for (hovered.cells) |c| {
@@ -619,14 +638,37 @@ test "buildSidebarDrawList adds a close glyph at the hovered row's right edge on
     try std.testing.expectEqual(@as(usize, 1), close_count);
 
     // close_row=null이면 ✕ 없음.
-    var none = try buildSidebarDrawList(allocator, &titles, 10, .default, null);
+    var none = try buildSidebarDrawList(allocator, &titles, 10, .default, null, null);
     defer none.deinit(allocator);
     for (none.cells) |c| try std.testing.expect(c.codepoint != sidebar_close_glyph);
 
     // 범위 밖 close_row(탭 수 이상)는 무시 — ✕ 없음.
-    var oob = try buildSidebarDrawList(allocator, &titles, 10, .default, 5);
+    var oob = try buildSidebarDrawList(allocator, &titles, 10, .default, 5, null);
     defer oob.deinit(allocator);
     for (oob.cells) |c| try std.testing.expect(c.codepoint != sidebar_close_glyph);
+}
+
+test "buildSidebarDrawList draws a '+' button row below the tabs when plus_row is set" {
+    const allocator = std.testing.allocator;
+    const titles = [_][]const u8{ "sh", "vim" }; // 탭 2개 → "+"는 행 2
+    var dl = try buildSidebarDrawList(allocator, &titles, 10, .default, null, titles.len);
+    defer dl.deinit(allocator);
+    // rows가 "+" 행(2)을 포함해 3이 된다(탭 0/1 + "+" 2).
+    try std.testing.expectEqual(@as(u16, 3), dl.size.rows);
+    var plus_count: usize = 0;
+    for (dl.cells) |c| {
+        if (c.codepoint == '+') {
+            plus_count += 1;
+            try std.testing.expectEqual(@as(u16, 2), c.row); // 탭 목록 아래 행
+            try std.testing.expectEqual(@as(u16, 10 / 2), c.col); // 가로 중앙
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), plus_count);
+    // plus_row=null이면 "+" 없음, rows=탭 수.
+    var no_plus = try buildSidebarDrawList(allocator, &titles, 10, .default, null, null);
+    defer no_plus.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 2), no_plus.size.rows);
+    for (no_plus.cells) |c| try std.testing.expect(c.codepoint != '+');
 }
 
 test "buildFromDrawList shapes a synthesized sidebar draw list into glyph cells (shared atlas seam)" {
@@ -634,7 +676,7 @@ test "buildFromDrawList shapes a synthesized sidebar draw list into glyph cells 
     // 합성 DrawList가 glyph까지 닿는지 고정한다 — 실제 CoreText 없이 연결 계약만 검증.
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{"ab"};
-    const draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default, null);
+    const draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default, null, null);
 
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();

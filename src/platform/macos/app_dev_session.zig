@@ -280,6 +280,16 @@ fn sidebarSlot(y_px: f64, slot_height_px: u32, tab_count: usize) ?usize {
     return @intFromFloat(slot_f);
 }
 
+/// 사이드바 y(backing px)가 "+"(새 워크스페이스) 버튼 슬롯(탭 목록 바로 아래, 인덱스 tab_count) 안인가 —
+/// y in [tab_count×slot_h, (tab_count+1)×slot_h). buildSidebarDrawList가 그 행에 '+'를 그리는 위치와 정렬.
+/// 슬롯 높이 0·비유한·음수면 false. 순수 함수라 OS 무관 단위 테스트.
+fn sidebarPlusSlot(y_px: f64, slot_height_px: u32, tab_count: usize) bool {
+    if (slot_height_px == 0 or !std.math.isFinite(y_px) or y_px < 0) return false;
+    const slot_f = y_px / @as(f64, @floatFromInt(slot_height_px));
+    const tc: f64 = @floatFromInt(tab_count);
+    return slot_f >= tc and slot_f < tc + 1;
+}
+
 /// 스크린 x가 사이드바 슬롯의 닫기(✕) zone(우측 2칸) 안인가 — 호버 시 ✕를 그 자리(col cols-2)에 그리므로
 /// 그 폭만큼 우측을 닫기 영역으로 본다. 사이드바/cell 폭 0이면 false. 순수 함수라 OS 무관 단위 테스트.
 fn inSidebarCloseButton(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bool {
@@ -1864,7 +1874,10 @@ pub const DevSession = struct {
         // (빈 영역)은 무시. 진행 중이던 터미널 드래그 선택은 멈춘다. 사이드바 클릭은 터미널에 안 닿는다.
         if (self.inSidebar(x_px)) {
             if (kind == 1) {
-                if (self.sidebarSlotAt(y_px)) |slot| {
+                if (sidebarPlusSlot(y_px, self.sidebar_slot_height_px, self.tabs.items.len)) {
+                    // 탭 목록 아래 "+" 슬롯 클릭 → 새 워크스페이스(⌘⇧T의 마우스 버전). createTab이 활성으로 만든다.
+                    _ = self.newTab() catch {};
+                } else if (self.sidebarSlotAt(y_px)) |slot| {
                     const on_close = inSidebarCloseButton(x_px, self.sidebar_width_px, self.cell_width_px) and
                         self.hovered_slot != null and self.hovered_slot.? == slot;
                     if (on_close) {
@@ -2299,7 +2312,9 @@ pub const DevSession = struct {
             self.setHoveredSlot(self.sidebarSlotAt(y_px));
             self.setHoveredTab(null); // 사이드바로 가면 pane 탭 호버 해제(stale ✕ 방지)
             self.clearHoverUrlAnchor();
-            return .default; // 사이드바 = arrow
+            // 하단 "+" 버튼 슬롯은 클릭 가능 — pointingHand로 affordance. 탭 슬롯은 arrow.
+            if (sidebarPlusSlot(y_px, self.sidebar_slot_height_px, self.tabs.items.len)) return .link;
+            return .default; // 사이드바 탭 = arrow
         }
         self.setHoveredSlot(null); // 터미널 영역으로 나가면 사이드바 호버 해제
         // 어느 pane의 탭 바 위면 호버 탭을 갱신(✕ 표시). 바 위면 URL/divider 아니므로 밑줄 해제하고 arrow.
@@ -2959,7 +2974,8 @@ pub const DevSession = struct {
 
         const fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
         // 호버 슬롯에는 닫기 ✕ 아이콘을 같이 그린다(없으면 null).
-        const draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, labels.items, sidebar_cols, fg, self.hovered_slot);
+        // plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼을 그린다.
+        const draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, labels.items, sidebar_cols, fg, self.hovered_slot, self.tabs.items.len);
         // buildFromDrawList가 draw_list 소유권을 가져간다(실패 시 정리, 성공 시 RenderFrame으로 이동).
         const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
             .appearance = self.appearance,
@@ -3788,6 +3804,17 @@ test "xOnSidebarEdge detects the terminal-side resize band at the sidebar bounda
     try std.testing.expect(!xOnSidebarEdge(50, 100, 8)); // 사이드바 안
     try std.testing.expect(!xOnSidebarEdge(105, 0, 8)); // 사이드바 꺼짐(폭 0)
     try std.testing.expect(!xOnSidebarEdge(std.math.nan(f64), 100, 8)); // 비유한
+}
+
+// sidebarPlusSlot이 탭 목록 바로 아래 "+" 슬롯(인덱스 tab_count)을 잡는지 — slot_h=20, 탭 2개면 "+"는 y [40,60).
+test "sidebarPlusSlot detects the new-workspace button slot below the tabs" {
+    try std.testing.expect(sidebarPlusSlot(40, 20, 2)); // "+" 슬롯 시작
+    try std.testing.expect(sidebarPlusSlot(59, 20, 2)); // "+" 슬롯 안
+    try std.testing.expect(!sidebarPlusSlot(60, 20, 2)); // 그 아래 빈 영역(반열림 밖)
+    try std.testing.expect(!sidebarPlusSlot(30, 20, 2)); // 탭 1 슬롯([20,40))
+    try std.testing.expect(!sidebarPlusSlot(40, 0, 2)); // slot_h 0
+    try std.testing.expect(!sidebarPlusSlot(-1, 20, 2)); // 음수
+    try std.testing.expect(sidebarPlusSlot(5, 20, 0)); // 탭 0개면 "+"가 슬롯 0([0,20))
 }
 
 test "dividerHit detects the drag band around a split boundary" {
@@ -4837,6 +4864,41 @@ test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, c
     session.setSidebarWidthPx(0);
     try std.testing.expectEqual(sidebar_min_pt, session.sidebar_width_pt);
     _ = try session.tick(); // 폭 변경 후 다음 tick 크래시 없음
+}
+
+// ③b: 사이드바 하단 "+" 버튼을 클릭하면 새 워크스페이스가 열리는지(⌘⇧T의 마우스 버전) — 호버 시 pointingHand.
+// 실 init/spawn이라 macOS 게이트.
+test "③b: clicking the sidebar '+' button opens a new workspace" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+
+    // "+" 슬롯 y = 탭 목록 바로 아래(인덱스 tab_count=1). 사이드바 안 x.
+    const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
+    const plus_y = @as(f64, @floatFromInt(session.tabs.items.len)) * slot_h + 1;
+    const sidebar_x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+    try std.testing.expect(sidebarPlusSlot(plus_y, session.sidebar_slot_height_px, session.tabs.items.len));
+
+    // "+" 호버 → pointingHand(link) affordance.
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(sidebar_x, plus_y, false));
+
+    // "+" 클릭 → 워크스페이스 2개, 새 탭이 활성.
+    session.mouse(1, sidebar_x, plus_y);
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    try std.testing.expect(!session.ended_seen);
+    _ = try session.tick();
 }
 
 // 멀티-탭 핵심 계약: 두 번째 탭을 만들면 자기 셸 PTY가 spawn되고, tick이 '모든' 탭을 drain하므로

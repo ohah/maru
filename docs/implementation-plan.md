@@ -586,17 +586,17 @@ TDD 방식:
 - **분해 스케치**: C1 SDF rounded-rect(둥근 모서리·테두리) 1개부터 → C2 그림자/그라데이션 → C3 비례 UI 폰트 아틀라스 → C4 아이콘 텍스처. consumer는 단계마다 점진 적용.
 - **의존**: 렌더러/ABI 확장. C3의 2번째 atlas는 New Window의 atlas 소유권과 **같은 축**(아래 소프트 결합).
 
-### 의존성·권장 순서 (권장 — 미확정, 사용자 확인 대상)
+### 의존성·확정 순서 (사용자 결정 2026-06-14: New Window → restore → chrome)
 
 - **하드 제약(반드시 지킴)**: **9단계 Workspace restore는 window-aware여야 한다.** New Window보다 먼저 하면 단일-창 스키마로 짜여, 멀티 창 도입 때 저장 포맷 migration이 강제된다 → **New Window를 먼저** 하거나, restore 스키마를 처음부터 `windows: […]` 차원으로 설계한다.
 - **소프트 결합(규율로 흡수)**: chrome의 2번째 atlas ⨯ New Window의 atlas 소유권. atlas 소유권을 캡슐화(현재 `renderer_state`가 소유)해 두면 어느 순서든 재작업이 거의 없다 — 새 chrome 코드에 "atlas는 싱글턴" 가정을 박지 않는 게 조건.
-- **권장 순서(재작업 최소 = 토대 먼저)**:
-  1. **BCE + 작은 VT 갭** — 결합 0, 순수 코어, 호환성. 아무 때나(워밍업·가성비).
+- **확정 순서(사용자 결정 — 재작업 최소 = 토대 먼저)**:
+  1. **BCE + 작은 VT 갭** — 결합 0, 순수 코어, 호환성. 아무 때나(워밍업·가성비, 위 순서와 독립이라 사이사이 끼움 가능).
   2. **New Window** — 세션·atlas 소유권이라는 가장 큰 가정을 먼저 확정(뒤 항목이 이를 전제).
   3. **9단계 Workspace restore** — 이제 자연히 window-aware.
   4. **chrome 고급화** — 확정된 atlas 소유권 위에서 점진(C1 rounded-rect부터).
   5. **tmux-CC / 10단계 Plugin** — 독립 / 먼 미래(Plugin은 착수 전 별도 논의).
-- **대안(UI 완성도를 먼저, 구조 리스크 뒤로)**: chrome 고급화를 New Window보다 앞에 — atlas 소유권만 캡슐화하고 restore 스키마를 window-aware로 두면 재작업은 낮다. 트레이드오프: 구조 변경을 미루는 대신 나중에 공유 검토할 atlas가 2개가 된다.
+- **검토했으나 미채택한 대안**(UI 완성도 먼저, 구조 리스크 뒤로): chrome 고급화를 New Window보다 앞에 두는 안. atlas 소유권 캡슐화 + restore 스키마 window-aware면 재작업은 낮으나, 큰 구조 변경을 미루는 대신 나중에 공유 검토할 atlas가 2개가 되는 트레이드오프 — 사용자가 "토대 먼저"를 택해 미채택.
 
 ## 개발 순서 단일 출처
 

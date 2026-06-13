@@ -886,10 +886,11 @@ pub const DevSession = struct {
         return self.sidebarActiveBg();
     }
 
-    /// 활성 탭의 divider 선들을 overlay 셀로 out에 append한다(렌더). 각 divider를 seam(경계) 중심에 cell 1칸
-    /// 두께로 깐다: horizontal split=세로선(경계 x에 bounds 높이만큼 한 칸 폭 셀을 행마다), vertical split=
-    /// 가로선(경계 y에 bounds 폭만큼 한 칸 높이 셀 1개). 단일 panel이면 divider가 없어 빈 채로 둔다. 셀 폭/높이
-    /// 0이면 무동작. layout과 같은 좌표계(termRect)라 leaf rect 경계에 정확히 얹힌다.
+    /// 활성 탭의 divider 선들을 overlay 셀로 out에 append한다(렌더). full-cell이 아니라 렌더러의 **부분 사각형**
+    /// (reserved=3 bar=좌측 ~2px, reserved=2 underline=하단 ~2px, 커서 모양과 같은 경로)으로 그려 **얇은 선**으로
+    /// seam에 얹는다(셀 폭/높이만큼 굵게 그려 터미널을 가리던 문제 수정). horizontal split=세로선(reserved=3을
+    /// 행마다, 경계 x에 ~2px 센터), vertical split=가로선(reserved=2 한 칸, 경계 y에 ~2px 센터, bounds 폭). 단일
+    /// panel이면 divider가 없어 빈 채. 셀 폭/높이 0이면 무동작. layout과 같은 좌표계(termRect)라 경계에 정확히 얹힌다.
     fn appendActiveTabDividers(self: *DevSession, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
         const cw = self.cell_width_px;
         const ch = self.cell_height_px;
@@ -900,16 +901,22 @@ pub const DevSession = struct {
         const bg = self.dividerColor();
         for (segs.items) |seg| {
             switch (seg.direction) {
-                .horizontal => { // 세로선: 경계 x 중심, bounds.h 높이를 행마다 한 칸씩
-                    const x0: u32 = if (seg.pos >= cw / 2) seg.pos - cw / 2 else 0;
+                .horizontal => { // 세로선: reserved=3(bar, cell 좌측 ~2px)을 행마다. px_left=origin_x라 경계 x에 센터(−1).
+                    const x0: u32 = if (seg.pos >= 1) seg.pos - 1 else 0;
                     const y_end = seg.bounds.y + seg.bounds.h;
                     var y = seg.bounds.y;
-                    while (y < y_end) : (y += ch) out.append(self.allocator, sentinelBgCell(0, 1, bg, x0, y)) catch return;
+                    while (y < y_end) : (y += ch) {
+                        var c = sentinelBgCell(0, 1, bg, x0, y);
+                        c.reserved = 3; // bar(얇은 세로선)
+                        out.append(self.allocator, c) catch return;
+                    }
                 },
-                .vertical => { // 가로선: 경계 y 중심, bounds.w 폭을 한 칸 높이로
+                .vertical => { // 가로선: reserved=2(underline, cell 하단 ~2px). px_bottom=origin_y+ch를 경계 y+1로(센터).
                     const cols = @min(@max(seg.bounds.w / cw, 1), @as(u32, std.math.maxInt(u16)));
-                    const y0: u32 = if (seg.pos >= ch / 2) seg.pos - ch / 2 else 0;
-                    out.append(self.allocator, sentinelBgCell(0, @intCast(cols), bg, seg.bounds.x, y0)) catch return;
+                    const y0: u32 = if (seg.pos + 1 >= ch) seg.pos + 1 - ch else 0;
+                    var c = sentinelBgCell(0, @intCast(cols), bg, seg.bounds.x, y0);
+                    c.reserved = 2; // underline(얇은 가로선)
+                    out.append(self.allocator, c) catch return;
                 },
             }
         }
@@ -4302,6 +4309,53 @@ test "PR6: dragging a split divider resizes the panes via split.ratio" {
     session.mouse(1, @floatFromInt(seg.bounds.x + 20), div_y);
     try std.testing.expect(session.divider_drag == null);
     _ = try session.tick();
+}
+
+// divider가 full-cell이 아니라 얇은 선(렌더러 부분 사각형 reserved=3 bar / 2 underline)으로 그려지는지 — 너무
+// 굵어 터미널을 가리던 문제 수정. 좌우 split=세로선(reserved=3, 행마다·경계 x 센터), 상하 split=가로선(reserved=2).
+test "split dividers render as thin lines (reserved bar/underline), not full cells" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 좌우 split → 세로 divider. 모든 divider 셀이 reserved=3(bar=얇은 세로선), 경계 x 근처(±cw)에 센터.
+    try session.splitActivePane(.horizontal);
+    var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
+    defer segs.deinit(allocator);
+    try session.layoutActiveTabDividers(&segs);
+    const seam_x = segs.items[0].pos;
+    var cells: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
+    defer cells.deinit(allocator);
+    session.appendActiveTabDividers(&cells);
+    try std.testing.expect(cells.items.len > 1); // 행마다 한 셀 → 여러 개
+    for (cells.items) |c| {
+        try std.testing.expectEqual(@as(u16, 3), c.reserved); // bar
+        try std.testing.expectEqual(@as(u16, 1), c.width); // 한 칸(부분 사각형이 ~2px만 칠함)
+        try std.testing.expect(c.origin_x + 1 >= seam_x and c.origin_x <= seam_x + 1); // 경계 x 센터
+    }
+
+    // 상하 split → 가로 divider는 reserved=2(underline=얇은 가로선) 한 칸(폭=cols).
+    try session.splitActivePane(.vertical);
+    cells.clearRetainingCapacity();
+    session.appendActiveTabDividers(&cells);
+    var saw_underline = false;
+    for (cells.items) |c| {
+        if (c.reserved == 2) {
+            saw_underline = true;
+            try std.testing.expect(c.width > 1); // 가로선은 bounds 폭만큼
+        }
+    }
+    try std.testing.expect(saw_underline);
 }
 
 // PR5b(exit 자동 collapse): 개별 Term의 셸이 exit하면 그 Term을 자동으로 닫고(Term→pane→워크스페이스 cascade)

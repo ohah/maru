@@ -1238,7 +1238,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     @objc private func menuToggleFullScreen(_ sender: Any?) {
         _ = sender
-        (NSApp.keyWindow ?? primary?.window)?.toggleFullScreen(nil)
+        // 메인 터미널 창만 대상으로 한다. keyWindow를 쓰면 퀵터미널 오버레이 패널(borderless,
+        // .fullScreenAuxiliary)이 key일 때 그 패널을 전체화면 토글해버린다 — 패널은 전체화면 대상이 아니다.
+        primary?.window?.toggleFullScreen(nil)
     }
 
     private func sendSmokeDevEvents() {

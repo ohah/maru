@@ -755,6 +755,19 @@ pub const TerminalCore = struct {
         self.dirty = fullDirty(self.size);
     }
 
+    /// 전체 내용(스크롤백 + 화면)을 선택한다 — Select All. 절대 좌표라 현재 스크롤 위치(view_offset)와
+    /// 무관하게 첫 스크롤백 행(abs 0)부터 마지막 화면 행까지 잡는다. extractSelection이 행별 trailing 공백을
+    /// 다듬으므로 빈 마지막 행까지 잡아도 복사 결과는 깔끔하다. 화면 행이 0이면 무동작.
+    pub fn selectAll(self: *TerminalCore) void {
+        self.ensureScrollbackRewrapped(); // selectLineAt와 같은 이유 — abs 좌표 쓰기 전 스크롤백 rewrap 확정
+        if (self.size.rows == 0) return;
+        const last_abs = self.sb_count + self.size.rows - 1;
+        const end_cells = self.absRow(last_abs) orelse return;
+        self.selection_anchor = .{ .row = 0, .col = 0 };
+        self.selection_head = .{ .row = last_abs, .col = @intCast(end_cells.len -| 1) };
+        self.dirty = fullDirty(self.size);
+    }
+
     /// IME 조합 중 텍스트를 설정한다(빈 입력 = 조합 종료/취소). 렌더 합성 전용 상태라 셀
     /// 그리드·커서는 변하지 않는다. 표시는 renderSnapshot이 한다.
     pub fn setPreedit(self: *TerminalCore, bytes: []const u8) !void {
@@ -4872,6 +4885,32 @@ test "selection still follows content through a full-screen scroll (preserved ca
     const text = (try core.extractSelection(std.testing.allocator)).?;
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("aa", text);
+}
+
+test "selectAll selects scrollback + screen regardless of scroll position" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    // "a"가 스크롤백으로, "b"/"c"가 화면에 남게(2행 화면). sb_count=1, 화면 [b, c].
+    try core.write("a\r\nb\r\nc");
+    try std.testing.expect(core.sb_count >= 1);
+
+    core.selectAll();
+    // anchor=첫 스크롤백 행(abs 0, col 0), head=마지막 화면 행(abs sb_count+rows-1).
+    try std.testing.expectEqual(@as(usize, 0), core.selection_anchor.?.row);
+    try std.testing.expectEqual(@as(u16, 0), core.selection_anchor.?.col);
+    try std.testing.expectEqual(core.sb_count + core.size.rows - 1, core.selection_head.?.row);
+
+    // 추출하면 전체 내용(스크롤백 a + 화면 b,c)이 줄바꿈으로 잡힌다(빈 칸 trim).
+    const text = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("a\nb\nc", text);
+
+    // 스크롤 위치와 무관: 위로 스크롤한 뒤에도 같은 절대 범위.
+    core.selectionClear();
+    core.scrollViewport(1); // 위로 1행 스크롤(스크롤백 노출)
+    core.selectAll();
+    try std.testing.expectEqual(@as(usize, 0), core.selection_anchor.?.row);
+    try std.testing.expectEqual(core.sb_count + core.size.rows - 1, core.selection_head.?.row);
 }
 
 test "scrollback re-wrap clears a truncated wide-glyph base at narrow widths" {

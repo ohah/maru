@@ -22,6 +22,10 @@ pub const Action = union(enum) {
     focus_pane_right,
     focus_pane_up,
     focus_pane_down,
+    // 활성 터미널의 전체 내용(스크롤백 + 화면)을 선택한다(Select All, 관례상 ⌘A). 코어 selection 상태라
+    // dispatchAppAction이 core.selectAll로 넘긴다. clipboard 쓰기(copy)는 NSPasteboard(OS) 소유라 Action이
+    // 아니다(경계: Zig는 selection, Swift는 clipboard).
+    select_all,
 };
 
 pub fn parseAction(value: []const u8) ?Action {
@@ -41,6 +45,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "close_term")) return .close_term;
     if (std.mem.eql(u8, value, "previous_term")) return .previous_term;
     if (std.mem.eql(u8, value, "next_term")) return .next_term;
+    if (std.mem.eql(u8, value, "select_all")) return .select_all;
 
     const prefix = "select_tab:";
     if (std.mem.startsWith(u8, value, prefix)) {
@@ -80,6 +85,7 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.close_term, parseAction("close_term").?);
     try std.testing.expectEqual(Action.next_term, parseAction("next_term").?);
     try std.testing.expectEqual(Action.previous_term, parseAction("previous_term").?);
+    try std.testing.expectEqual(Action.select_all, parseAction("select_all").?);
 
     const action = parseAction("select_tab:3").?;
     try std.testing.expectEqual(@as(usize, 3), action.select_tab);

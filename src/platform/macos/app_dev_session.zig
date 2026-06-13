@@ -2043,6 +2043,8 @@ pub const DevSession = struct {
             .close_term => self.closeActiveTermOrPane(),
             .next_term => self.focusTermRelative(1),
             .previous_term => self.focusTermRelative(-1),
+            // 전체 선택(⌘A) — 활성 surface 코어의 selection을 스크롤백+화면 전체로. clipboard 쓰기는 네이티브.
+            .select_all => self.activeSurface().core.selectAll(),
         }
         self.metal_dirty = true;
     }

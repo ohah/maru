@@ -22,7 +22,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 32;
+pub const abi_version: u32 = 33;
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -42,8 +42,9 @@ pub const QuickTerminalConfig = extern struct {
     height_milli: u32,
     auto_hide: u32,
     screen: u32,
-    position: u32, // config.QuickTerminalPosition의 @intFromEnum(0=top, 1=bottom, 2=left, 3=right)
+    position: u32, // config.QuickTerminalPosition의 @intFromEnum(0=top, 1=bottom, 2=left, 3=right, 4=center)
     chrome: u32, // config.QuickTerminalChrome의 @intFromEnum(0=full, 1=minimal). Swift가 quick 세션 생성 시 chrome_minimal로 넘긴다.
+    minimal_tabs: u32, // 0/1 — minimal에서 탭 허용 여부. Swift가 quick 세션 생성 시 SessionConfig.minimal_tabs로 넘긴다.
 };
 
 /// 마우스 호버 위치에 따라 Swift가 세울 커서 종류(`maru_macos_app_dev_session_hover`의 out 값). Zig가 위치를
@@ -524,8 +525,11 @@ pub const SessionConfig = extern struct {
     queue_capacity: u32,
     command_kind: u32,
     // 1이면 chrome 최소화(사이드바·pane 탭 바 없이 터미널만) — quick terminal minimal 모드용. 0=full(메인 창).
-    // 기존 reserved 패딩 자리를 의미화(16→그대로 24바이트). Swift가 세션 생성 시 세션별로 정한다.
+    // Swift가 세션 생성 시 세션별로 정한다.
     chrome_minimal: u32 = 0,
+    // 1이면 chrome_minimal 세션에서도 탭(워크스페이스·Term) 생성을 허용한다. 0이면 minimal은 단일 스크래치
+    // (⌘T/⌘⇧T 무동작). chrome_minimal=0(full)이면 이 값과 무관하게 탭이 항상 동작한다. Swift가 quick 세션에만 정한다.
+    minimal_tabs: u32 = 0,
 };
 
 pub const FrameSummary = extern struct {
@@ -566,6 +570,7 @@ const NormalizedConfig = struct {
     queue_capacity: usize,
     command_kind: CommandKind,
     chrome_minimal: bool,
+    minimal_tabs: bool,
 };
 
 /// 한 터미널의 런타임 단위: surface(그리드/스크롤백) + 그 surface에 붙은 live PTY 셸 + 그 PTY를 drain하는
@@ -685,6 +690,10 @@ pub const DevSession = struct {
     // false라 드래그 리사이즈 자체가 시작 못 한다(setSidebarWidthPx 별도 게이트 불요). normalizeConfig가
     // SessionConfig.chrome_minimal에서 채운다. 메인 창은 false(full chrome).
     chrome_minimal: bool = false,
+    // minimal 세션에서 탭(워크스페이스·Term) 생성을 허용하는가. false(기본)면 chrome_minimal일 때 dispatchAppAction이
+    // new_tab/new_term을 무동작으로 막는다(사이드바·탭 바가 없어 안 보이는 탭 생성 차단). true면 허용(파워유저).
+    // chrome_minimal=false면 tabsBlocked()가 항상 false라 full 모드 탭은 이 값과 무관하게 동작한다.
+    minimal_tabs: bool = false,
     // 세로 사이드바의 현재 논리 폭(pt). 사용자가 우측 경계를 드래그하면 [sidebar_min_pt, sidebar_max_pt]로
     // 갱신된다. backing 픽셀 폭은 scale을 곱해 구하므로 pt로 들면 DPI가 바뀌어도(refreshCellMetrics) 유지된다.
     sidebar_width_pt: u32 = default_sidebar_width_pt,
@@ -828,6 +837,7 @@ pub const DevSession = struct {
             // chrome 최소화 여부는 세션별로 고정(메인 창=full, quick minimal=true). refreshCellMetrics가
             // 사이드바 폭을 게이트하기 전에 세워야 하므로 reset 시점에 박는다.
             .chrome_minimal = config.chrome_minimal,
+            .minimal_tabs = config.minimal_tabs,
         };
         errdefer self.deinit();
 
@@ -1888,9 +1898,18 @@ pub const DevSession = struct {
     /// 키바인딩이 만든 app action을 디스패치한다(native 최소 — Swift는 키만 보내고 판정·실행은 Zig).
     /// 탭 생성 실패(셸 spawn 실패 등)는 세션을 죽이지 않고 무시한다(현재 탭 그대로). 재드로우를 위해
     /// metal_dirty를 세운다(새 탭/전환으로 활성 surface가 바뀜).
+    /// minimal 스크래치 세션에서 탭(워크스페이스·Term) 생성을 막는가. chrome_minimal이면서 minimal_tabs=false일 때만
+    /// true — 사이드바·탭 바가 없어 안 보이는 탭을 만드는 걸 차단한다(split은 divider로 보이므로 막지 않는다).
+    /// full 세션(chrome_minimal=false)은 항상 false라 탭이 정상 동작한다.
+    fn tabsBlocked(self: *const DevSession) bool {
+        return self.chrome_minimal and !self.minimal_tabs;
+    }
+
     fn dispatchAppAction(self: *DevSession, action: config_mod.Action) void {
         switch (action) {
-            .new_tab => _ = self.newTab() catch return,
+            .new_tab => if (!self.tabsBlocked()) {
+                _ = self.newTab() catch return;
+            },
             .next_tab => if (self.tabs.items.len > 0) {
                 _ = self.switchTab((self.app_window.active_tab + 1) % self.tabs.items.len);
             },
@@ -1912,7 +1931,9 @@ pub const DevSession = struct {
             .focus_pane_down => self.focusPaneInDirection(.down),
             // Term(가로 탭) 단위(cmux): ⌘T=활성 pane에 새 Term, ⌘W=활성 Term 닫기(Term→pane→워크스페이스
             // cascade), ⌘]/⌘[=다음/이전 Term. 생성 실패는 무시(newTermInActivePane이 errdefer로 원복).
-            .new_term => self.newTermInActivePane() catch {},
+            .new_term => if (!self.tabsBlocked()) {
+                self.newTermInActivePane() catch {};
+            },
             .close_term => self.closeActiveTermOrPane(),
             .next_term => self.focusTermRelative(1),
             .previous_term => self.focusTermRelative(-1),
@@ -2750,6 +2771,7 @@ pub const DevSession = struct {
             .screen = @intFromEnum(qt.screen),
             .position = @intFromEnum(qt.position),
             .chrome = @intFromEnum(qt.chrome),
+            .minimal_tabs = if (qt.minimal_tabs) 1 else 0,
         };
     }
 
@@ -3511,6 +3533,7 @@ pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
         .queue_capacity = if (config.queue_capacity == 0) default_queue_capacity else config.queue_capacity,
         .command_kind = command_kind,
         .chrome_minimal = config.chrome_minimal != 0,
+        .minimal_tabs = config.minimal_tabs != 0,
     };
 }
 
@@ -3598,9 +3621,10 @@ test "macOS app dev session config defaults queue capacity without changing comm
     try std.testing.expectEqual(@as(usize, default_queue_capacity), normalized.queue_capacity);
     try std.testing.expectEqual(CommandKind.interactive_shell, normalized.command_kind);
     try std.testing.expectEqual(false, normalized.chrome_minimal); // 기본 full(0)
+    try std.testing.expectEqual(false, normalized.minimal_tabs); // 기본 스크래치(0)
 }
 
-test "macOS app dev session normalizeConfig carries chrome_minimal flag" {
+test "macOS app dev session normalizeConfig carries chrome_minimal and minimal_tabs flags" {
     const full = try normalizeConfig(.{
         .abi_version = abi_version,
         .cols = 80,
@@ -3610,6 +3634,7 @@ test "macOS app dev session normalizeConfig carries chrome_minimal flag" {
         .chrome_minimal = 0,
     });
     try std.testing.expectEqual(false, full.chrome_minimal);
+    try std.testing.expectEqual(false, full.minimal_tabs);
 
     const minimal = try normalizeConfig(.{
         .abi_version = abi_version,
@@ -3618,8 +3643,10 @@ test "macOS app dev session normalizeConfig carries chrome_minimal flag" {
         .queue_capacity = 16,
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
         .chrome_minimal = 1,
+        .minimal_tabs = 1,
     });
     try std.testing.expectEqual(true, minimal.chrome_minimal);
+    try std.testing.expectEqual(true, minimal.minimal_tabs);
 }
 
 test "gridFromBacking divides backing pixels by cell size with placeholder + clamps" {
@@ -3854,6 +3881,55 @@ test "chrome_minimal session suppresses the pane tab bar and the sidebar" {
     const term = session.paneTermRect(rect);
     try std.testing.expectEqual(@as(u32, 0), term.y);
     try std.testing.expectEqual(@as(u32, 600), term.h);
+}
+
+test "minimal scratch session blocks new_tab/new_term; minimal_tabs re-enables them" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn(newTab/newTermInActivePane)
+    const allocator = std.testing.allocator;
+
+    // ① chrome_minimal + minimal_tabs=0(기본 스크래치): 탭/Term 생성 액션이 무동작.
+    {
+        const session = try allocator.create(DevSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 20,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .chrome_minimal = 1,
+            .minimal_tabs = 0,
+        });
+        defer session.deinit();
+        try std.testing.expect(session.tabsBlocked());
+        try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+        try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+        session.dispatchAppAction(.new_tab);
+        session.dispatchAppAction(.new_term);
+        try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len); // 새 워크스페이스 안 생김
+        try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len); // 새 Term 안 생김
+    }
+
+    // ② chrome_minimal + minimal_tabs=1: 탭/Term 생성이 다시 동작.
+    {
+        const session = try allocator.create(DevSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 20,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .chrome_minimal = 1,
+            .minimal_tabs = 1,
+        });
+        defer session.deinit();
+        try std.testing.expect(!session.tabsBlocked());
+        session.dispatchAppAction(.new_term); // 활성 pane에 Term 추가
+        try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+        session.dispatchAppAction(.new_tab); // 새 워크스페이스
+        try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    }
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {

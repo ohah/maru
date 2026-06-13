@@ -759,7 +759,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     ? MaruAppHostDevCommandControlledSmoke.rawValue
                     : MaruAppHostDevCommandInteractiveShell.rawValue
             ),
-            chrome_minimal: 0 // 메인 창은 항상 full chrome(사이드바·탭 바)
+            chrome_minimal: 0, // 메인 창은 항상 full chrome(사이드바·탭 바)
+            minimal_tabs: 0 // full이라 무시됨(탭은 항상 동작)
         )
         var session: OpaquePointer?
         let status = maru_macos_app_dev_session_create(&config, &session)
@@ -1483,22 +1484,26 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 모드만 저장하고(mouse면 show마다 현재 마우스 화면으로 해석), 높이는 0.1~1.0으로 클램프(방어적 — Zig도
         // 검증). chrome은 세션 생성 시 chrome_minimal로 넘겨야 하므로 create '전에' 읽는다.
         var chromeMinimal: UInt32 = 0
+        var minimalTabs: UInt32 = 0
         if let cfg = loadQuickTerminalConfig() {
             quickHeightFraction = max(0.1, min(1.0, CGFloat(cfg.height_milli) / 1000.0))
             quickAutoHide = cfg.auto_hide != 0
             quickScreenMode = cfg.screen
             quickPosition = cfg.position
             chromeMinimal = (cfg.chrome == UInt32(MaruAppHostQuickTerminalChromeMinimal.rawValue)) ? 1 : 0
+            minimalTabs = cfg.minimal_tabs // minimal에서 탭 허용 여부(Zig가 dispatch에서 게이트)
         }
 
-        // 두 번째 dev session(대화형 셸) — 메인과 독립된 PTY. minimal이면 chrome_minimal=1로 사이드바·탭 바를 끈다.
+        // 두 번째 dev session(대화형 셸) — 메인과 독립된 PTY. minimal이면 chrome_minimal=1로 사이드바·탭 바를 끄고,
+        // minimal_tabs로 그 minimal 세션의 ⌘T/⌘⇧T 허용 여부를 정한다.
         var config = MaruAppHostDevSessionConfig(
             abi_version: MARU_MACOS_APP_HOST_ABI_VERSION,
             cols: 80,
             rows: 24,
             queue_capacity: 16,
             command_kind: UInt32(MaruAppHostDevCommandInteractiveShell.rawValue),
-            chrome_minimal: chromeMinimal
+            chrome_minimal: chromeMinimal,
+            minimal_tabs: minimalTabs
         )
         var session: OpaquePointer?
         guard maru_macos_app_dev_session_create(&config, &session) == Self.statusOK, let created = session else {

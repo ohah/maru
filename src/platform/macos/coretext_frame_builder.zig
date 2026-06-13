@@ -185,6 +185,8 @@ pub fn buildSidebarDrawList(
     fg: terminal.Color,
     close_row: ?usize,
     plus_row: ?usize,
+    active_row: ?usize,
+    active_fg: terminal.Color,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
@@ -195,9 +197,11 @@ pub fn buildSidebarDrawList(
     for (titles, 0..) |title, row_index| {
         if (row_index > std.math.maxInt(u16)) break;
         const row: u16 = @intCast(row_index);
+        // 활성 행(워크스페이스)은 글자를 강조색(active_fg)으로, 나머지는 fg(흐림)로 — 활성 탭 글자 강조.
+        const row_style: terminal.Style = if (active_row != null and active_row.? == row_index) .{ .foreground = active_fg } else style;
         // 제목은 OSC 0/2(신뢰 불가 PTY 출력)이라 깨진 UTF-8을 U+FFFD로 다룬다. cols를 넘으면 하드 컷이 아니라
         // 마지막 칸을 "…"로 말줄임한다(appendEllipsizedTitle 단일 출처 — pane 탭 바 제목과 같은 규칙).
-        try appendEllipsizedTitle(allocator, &cells, title, row, 0, cols, style);
+        try appendEllipsizedTitle(allocator, &cells, title, row, 0, cols, row_style);
     }
 
     // 닫기 ✕ 아이콘: 호버 슬롯(close_row) 우측 안쪽 col에 glyph 1개. cols가 2칸 이상일 때만(우측 여백
@@ -257,6 +261,8 @@ pub fn buildPaneTabBarDrawList(
     cols: u16,
     fg: terminal.Color,
     close_tab: ?usize,
+    active_tab: ?usize,
+    active_fg: terminal.Color,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
@@ -273,8 +279,10 @@ pub fn buildPaneTabBarDrawList(
             // 호버된 탭이면 우측 안쪽(seg_end-2)에 닫기 ✕를 둔다 — 제목은 ✕ 앞(seg_end-2)까지만 그린다.
             const is_close = close_tab != null and close_tab.? == tab_index and tab_w >= 2 and seg_end >= 2;
             const title_end: u32 = if (is_close) seg_end - 2 else seg_end;
+            // 활성 Term 탭은 글자를 강조색(active_fg)으로, 나머지는 fg(흐림)로 — 활성 탭 글자 강조.
+            const tab_style: terminal.Style = if (active_tab != null and active_tab.? == tab_index) .{ .foreground = active_fg } else style;
             // 좌측 1칸 패딩 뒤에 제목. title_end(✕ 앞)를 넘으면 하드 컷이 아니라 "…"로 말줄임(사이드바와 같은 규칙).
-            try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), @intCast(title_end), style);
+            try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), @intCast(title_end), tab_style);
             if (is_close) { // 호버 탭 우측 안쪽에 ✕ glyph 1개(xInTabCloseZone과 같은 col=seg_end-2).
                 try cells.append(allocator, .{
                     .row = 0,
@@ -569,7 +577,7 @@ test "CoreText frame builder surfaces native shape failures" {
 test "buildSidebarDrawList lays tab titles into per-row draw cells, truncating to cols" {
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{ "zsh", "vim" };
-    var draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default, null, null);
+    var draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default, null, null, null, .default);
     defer draw_list.deinit(allocator);
 
     // 한 줄=한 탭(row=탭 인덱스), size는 cols=한도·rows=탭 수.
@@ -590,7 +598,7 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
     const allocator = std.testing.allocator;
     // cols=20 → 우측 "+" zone 3칸 떼고 탭 영역 17, 2탭 → tab_w=8. 탭 0은 col [0,8), 탭 1은 [8,16). 각 탭 1칸 좌패딩 뒤 제목.
     const titles = [_][]const u8{ "sh", "vim" };
-    var draw_list = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null);
+    var draw_list = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null, null, .default);
     defer draw_list.deinit(allocator);
 
     // 모든 탭이 행 0(가로), size cols=한도·rows=1.
@@ -607,7 +615,7 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
 
     // 세그먼트보다 긴 제목은 그 탭 한도에서 잘린다. cols=11 → 탭 영역 8, 2탭 → tab_w=4, 제목 칸 = [start+1, start+4) = 3칸.
     const longt = [_][]const u8{ "abcdef", "x" };
-    var dl2 = try buildPaneTabBarDrawList(allocator, &longt, 11, .default, null);
+    var dl2 = try buildPaneTabBarDrawList(allocator, &longt, 11, .default, null, null, .default);
     defer dl2.deinit(allocator);
     var tab0: usize = 0;
     for (dl2.cells) |c| {
@@ -618,7 +626,7 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
     // close_tab이 주어지면 그 탭 우측 안쪽(seg_end-2)에 ✕ glyph를 그리고 제목은 그 앞까지만. cols=20 → "+" zone
     // 3 빼고 탭 영역 17, 2탭 → tab_w=8, 탭 1 seg_end=min(16,17)=16 → ✕ col 14. 탭 1 호버.
     const ht = [_][]const u8{ "sh", "vim" };
-    var dl3 = try buildPaneTabBarDrawList(allocator, &ht, 20, .default, 1);
+    var dl3 = try buildPaneTabBarDrawList(allocator, &ht, 20, .default, 1, null, .default);
     defer dl3.deinit(allocator);
     var found_close = false;
     var found_plus3 = false;
@@ -642,7 +650,7 @@ test "buildPaneTabBarDrawList reserves a right '+' zone (no '+' when too narrow)
     const allocator = std.testing.allocator;
     // cols=20 → 탭 영역 17, "+"는 col 18. 좁은 바(cols=4 ≤ +zone+1)는 "+" 없음.
     const titles = [_][]const u8{"sh"};
-    var wide = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null);
+    var wide = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null, null, .default);
     defer wide.deinit(allocator);
     var wide_plus = false;
     for (wide.cells) |c| {
@@ -650,7 +658,7 @@ test "buildPaneTabBarDrawList reserves a right '+' zone (no '+' when too narrow)
     }
     try std.testing.expect(wide_plus);
 
-    var narrow = try buildPaneTabBarDrawList(allocator, &titles, 4, .default, null);
+    var narrow = try buildPaneTabBarDrawList(allocator, &titles, 4, .default, null, null, .default);
     defer narrow.deinit(allocator);
     for (narrow.cells) |c| try std.testing.expect(c.codepoint != '+'); // 좁아서 "+" 없음
 }
@@ -667,7 +675,7 @@ test "buildSidebarDrawList truncates to cols and advances wide glyphs by two col
     const allocator = std.testing.allocator;
     // cols=5: "abcdefg"는 5칸까지만(자름). 와이드 글자는 2칸 전진.
     const titles = [_][]const u8{ "abcdefg", "한A" };
-    var draw_list = try buildSidebarDrawList(allocator, &titles, 5, .default, null, null);
+    var draw_list = try buildSidebarDrawList(allocator, &titles, 5, .default, null, null, null, .default);
     defer draw_list.deinit(allocator);
 
     var row0: usize = 0;
@@ -692,7 +700,7 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
     // 사이드바: "abcdefg"(7) cols=5 → 'a','b','c','d','…'. 마지막 셀 = U+2026.
     {
         const titles = [_][]const u8{"abcdefg"};
-        var dl = try buildSidebarDrawList(allocator, &titles, 5, .default, null, null);
+        var dl = try buildSidebarDrawList(allocator, &titles, 5, .default, null, null, null, .default);
         defer dl.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 5), dl.cells.len);
         try std.testing.expectEqual(title_ellipsis_glyph, dl.cells[4].codepoint); // 마지막 = …
@@ -702,7 +710,7 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
     // 딱 맞으면 말줄임 없음.
     {
         const titles = [_][]const u8{"abcde"}; // 5칸 = cols
-        var dl = try buildSidebarDrawList(allocator, &titles, 5, .default, null, null);
+        var dl = try buildSidebarDrawList(allocator, &titles, 5, .default, null, null, null, .default);
         defer dl.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 5), dl.cells.len);
         for (dl.cells) |c| try std.testing.expect(c.codepoint != title_ellipsis_glyph);
@@ -710,7 +718,7 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
     // pane 탭 바: 긴 제목도 세그먼트 한도에서 … . cols=11 → 탭 영역 8, 2탭 → tab_w=4, 탭 0 제목 칸 [1,4) = 3칸.
     {
         const titles = [_][]const u8{ "abcdef", "x" };
-        var dl = try buildPaneTabBarDrawList(allocator, &titles, 11, .default, null);
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 11, .default, null, null, .default);
         defer dl.deinit(allocator);
         var saw_ellipsis = false;
         for (dl.cells) |c| {
@@ -723,11 +731,47 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
     }
 }
 
+// 활성 탭(행/세그먼트) 제목은 active_fg, 나머지는 fg로 그려지는지 — 활성 탭 글자 강조. 두 색을 구분해 확인.
+test "active tab/row title is drawn with active_fg; others with fg" {
+    const allocator = std.testing.allocator;
+    const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
+    const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
+    // 사이드바: active_row=1 → 행 1 글자만 bright, 행 0은 dim.
+    {
+        const titles = [_][]const u8{ "ab", "cd" };
+        var dl = try buildSidebarDrawList(allocator, &titles, 10, dim, null, null, 1, bright);
+        defer dl.deinit(allocator);
+        for (dl.cells) |c| {
+            const expected = if (c.row == 1) bright else dim;
+            try std.testing.expectEqual(expected, c.style.foreground);
+        }
+    }
+    // pane 탭 바: active_tab=1 → 탭 1(우측 세그먼트) 글자만 bright. cols=20 → tab_w=8, 탭 0 [1,8), 탭 1 [9,16).
+    {
+        const titles = [_][]const u8{ "sh", "vim" };
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 20, dim, null, 1, bright);
+        defer dl.deinit(allocator);
+        var saw_bright = false;
+        var saw_dim = false;
+        for (dl.cells) |c| {
+            if (c.codepoint == '+') continue; // "+" 버튼은 fg
+            if (c.col >= 9) { // 탭 1 세그먼트
+                try std.testing.expectEqual(bright, c.style.foreground);
+                saw_bright = true;
+            } else if (c.col >= 1) { // 탭 0 세그먼트
+                try std.testing.expectEqual(dim, c.style.foreground);
+                saw_dim = true;
+            }
+        }
+        try std.testing.expect(saw_bright and saw_dim);
+    }
+}
+
 test "buildSidebarDrawList adds a close glyph at the hovered row's right edge only" {
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{ "a", "b" };
     // 호버 행 1 → ✕가 row 1, col cols-2=8에 하나 추가된다.
-    var hovered = try buildSidebarDrawList(allocator, &titles, 10, .default, 1, null);
+    var hovered = try buildSidebarDrawList(allocator, &titles, 10, .default, 1, null, null, .default);
     defer hovered.deinit(allocator);
     var close_count: usize = 0;
     for (hovered.cells) |c| {
@@ -740,12 +784,12 @@ test "buildSidebarDrawList adds a close glyph at the hovered row's right edge on
     try std.testing.expectEqual(@as(usize, 1), close_count);
 
     // close_row=null이면 ✕ 없음.
-    var none = try buildSidebarDrawList(allocator, &titles, 10, .default, null, null);
+    var none = try buildSidebarDrawList(allocator, &titles, 10, .default, null, null, null, .default);
     defer none.deinit(allocator);
     for (none.cells) |c| try std.testing.expect(c.codepoint != sidebar_close_glyph);
 
     // 범위 밖 close_row(탭 수 이상)는 무시 — ✕ 없음.
-    var oob = try buildSidebarDrawList(allocator, &titles, 10, .default, 5, null);
+    var oob = try buildSidebarDrawList(allocator, &titles, 10, .default, 5, null, null, .default);
     defer oob.deinit(allocator);
     for (oob.cells) |c| try std.testing.expect(c.codepoint != sidebar_close_glyph);
 }
@@ -753,7 +797,7 @@ test "buildSidebarDrawList adds a close glyph at the hovered row's right edge on
 test "buildSidebarDrawList draws a '+' button row below the tabs when plus_row is set" {
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{ "sh", "vim" }; // 탭 2개 → "+"는 행 2
-    var dl = try buildSidebarDrawList(allocator, &titles, 10, .default, null, titles.len);
+    var dl = try buildSidebarDrawList(allocator, &titles, 10, .default, null, titles.len, null, .default);
     defer dl.deinit(allocator);
     // rows가 "+" 행(2)을 포함해 3이 된다(탭 0/1 + "+" 2).
     try std.testing.expectEqual(@as(u16, 3), dl.size.rows);
@@ -767,7 +811,7 @@ test "buildSidebarDrawList draws a '+' button row below the tabs when plus_row i
     }
     try std.testing.expectEqual(@as(usize, 1), plus_count);
     // plus_row=null이면 "+" 없음, rows=탭 수.
-    var no_plus = try buildSidebarDrawList(allocator, &titles, 10, .default, null, null);
+    var no_plus = try buildSidebarDrawList(allocator, &titles, 10, .default, null, null, null, .default);
     defer no_plus.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 2), no_plus.size.rows);
     for (no_plus.cells) |c| try std.testing.expect(c.codepoint != '+');
@@ -802,7 +846,7 @@ test "buildFromDrawList shapes a synthesized sidebar draw list into glyph cells 
     // 합성 DrawList가 glyph까지 닿는지 고정한다 — 실제 CoreText 없이 연결 계약만 검증.
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{"ab"};
-    const draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default, null, null);
+    const draw_list = try buildSidebarDrawList(allocator, &titles, 10, .default, null, null, null, .default);
 
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();

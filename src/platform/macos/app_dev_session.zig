@@ -2980,10 +2980,12 @@ pub const DevSession = struct {
                     var titles: std.ArrayList([]const u8) = .empty;
                     defer titles.deinit(self.allocator);
                     for (lr.leaf.terms.items) |term| titles.append(self.allocator, term.surface.title) catch {};
-                    const tab_fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
+                    // 비활성 Term 탭은 흐린 색(muted), 그 pane의 활성 Term 탭은 full foreground로 강조한다.
+                    const tab_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
+                    const active_tab_fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
                     // 이 pane의 탭이 호버 중이면 그 탭에 ✕를 그린다(다른 pane이면 null).
                     const close_tab: ?usize = if (self.hovered_tab) |h| (if (h.pane == lr.leaf) h.tab else null) else null;
-                    const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, titles.items, @intCast(bar_cols), tab_fg, close_tab) catch continue;
+                    const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, titles.items, @intCast(bar_cols), tab_fg, close_tab, lr.leaf.active_term, active_tab_fg) catch continue;
                     var f = pane_frame_builder.buildFromDrawList(self.allocator, dl, &self.renderer_state) catch continue;
                     built_frames.append(self.allocator, f) catch {
                         f.deinit(self.allocator);
@@ -3105,6 +3107,18 @@ pub const DevSession = struct {
         return 0xFF00_0000 | (r << 16) | (g << 8) | bch;
     }
 
+    /// 비활성 탭 제목용 흐린 전경색 — theme.foreground를 background 쪽으로 45% 섞어 muted한다. 활성 탭은 full
+    /// foreground를 써서 대비로 글자가 도드라진다(활성 탭 글자 강조). 사이드바·pane 탭 바가 공유한다.
+    fn mutedForeground(self: *const DevSession) maru.color.Rgb {
+        const f = self.appearance.theme.foreground;
+        const b = self.appearance.theme.background;
+        return .{
+            .r = @intCast((@as(u32, f.r) * 55 + @as(u32, b.r) * 45) / 100),
+            .g = @intCast((@as(u32, f.g) * 55 + @as(u32, b.g) * 45) / 100),
+            .b = @intCast((@as(u32, f.b) * 55 + @as(u32, b.b) * 45) / 100),
+        };
+    }
+
     /// 스크린 x가 세로 사이드바 영역 안인가(순수 `xInSidebar` 래퍼).
     fn inSidebar(self: *const DevSession, x_px: f64) bool {
         return xInSidebar(x_px, self.sidebar_width_px);
@@ -3204,10 +3218,11 @@ pub const DevSession = struct {
             try labels.append(self.allocator, label);
         }
 
-        const fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
-        // 호버 슬롯에는 닫기 ✕ 아이콘을 같이 그린다(없으면 null).
-        // plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼을 그린다.
-        const draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, labels.items, sidebar_cols, fg, self.hovered_slot, self.tabs.items.len);
+        // 비활성 워크스페이스 제목은 흐린 색(muted), 활성 워크스페이스(active_tab 행)는 full foreground로 강조한다.
+        const fg: terminal.Color = .{ .rgb = self.mutedForeground() };
+        const active_fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
+        // 호버 슬롯엔 닫기 ✕(없으면 null). plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼.
+        const draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, labels.items, sidebar_cols, fg, self.hovered_slot, self.tabs.items.len, self.app_window.active_tab, active_fg);
         // buildFromDrawList가 draw_list 소유권을 가져간다(실패 시 정리, 성공 시 RenderFrame으로 이동).
         const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
             .appearance = self.appearance,

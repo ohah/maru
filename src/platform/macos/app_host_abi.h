@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 27u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 28u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -367,6 +367,29 @@ int32_t maru_macos_app_dev_session_window_title(
     MaruAppHostDevSession *session,
     const uint8_t **out_ptr,
     size_t *out_len
+);
+
+/* 전역(OS) 단축키 한 개의 등록 기술자. Swift가 Carbon RegisterEventHotKey(carbon_modifiers,
+   virtual_key_code, ...)로 등록하고, 눌리면 action을 수행한다. action: 0=toggle_window(창 토글),
+   1=show_window(항상 앞으로). 가상 키코드로 매핑되는 chord만 목록에 담긴다(나머지는 제외). */
+typedef struct MaruAppHostGlobalHotkey {
+    uint32_t virtual_key_code; /* macOS 가상 키코드(kVK_*) — RegisterEventHotKey inHotKeyCode */
+    uint32_t carbon_modifiers; /* Carbon modifier mask(cmdKey 등) — RegisterEventHotKey inHotKeyModifiers */
+    uint32_t action;           /* MaruAppHostGlobalAction */
+} MaruAppHostGlobalHotkey;
+
+/* 전역 단축키 action 종류(MaruAppHostGlobalHotkey.action). config GlobalAction과 같은 순서. */
+typedef enum MaruAppHostGlobalAction {
+    MaruAppHostGlobalActionToggleWindow = 0, /* 숨김/비활성이면 보이고 앞으로, 활성+보임이면 숨김 */
+    MaruAppHostGlobalActionShowWindow = 1,   /* 항상 보이고 앞으로(숨기지 않음) */
+} MaruAppHostGlobalAction;
+
+/* 전역 단축키 등록 기술자 목록. config에서 한 번 만들어 세션 동안 불변이라 Swift가 시작 시 한 번 읽어
+   등록한다. 배열은 dev session 소유로 destroy까지 유효. 비어 있으면 out_hotkeys=NULL·out_count=0. */
+int32_t maru_macos_app_dev_session_global_hotkeys(
+    MaruAppHostDevSession *session,
+    const MaruAppHostGlobalHotkey **out_hotkeys,
+    size_t *out_count
 );
 void maru_macos_app_dev_session_destroy(MaruAppHostDevSession *session);
 int32_t maru_macos_app_dev_session_metal_frame(

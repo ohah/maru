@@ -10,6 +10,7 @@ const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const metal_frame = @import("metal_frame.zig");
 const shell_integration = @import("shell_integration.zig");
+const global_hotkey = @import("global_hotkey.zig");
 
 // SplitTree를 leaf = `*Pane`으로 인스턴스화한다(트리는 panel 단위). app 레이어는 generic만 노출하고 Pane은
 // 이 platform 모듈이 정의하므로, 트리가 panel을 leaf로 들면서도 app→platform 의존이 생기지 않는다. cmux식
@@ -21,8 +22,18 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 27;
+pub const abi_version: u32 = 28;
 pub const default_queue_capacity: u32 = 16;
+
+/// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
+/// 받아 Carbon `RegisterEventHotKey(carbon_modifiers, virtual_key_code)`로 등록하고, 눌리면 action을
+/// 수행한다. action은 `config.GlobalAction`의 `@intFromEnum`(0=toggle_window, 1=show_window)이다.
+/// 매핑 가능한 chord만 담긴다(global_hotkey.descriptorFor가 null이면 그 바인딩은 제외). 순수 POD.
+pub const GlobalHotkey = extern struct {
+    virtual_key_code: u32,
+    carbon_modifiers: u32,
+    action: u32,
+};
 
 /// 마우스 호버 위치에 따라 Swift가 세울 커서 종류(`maru_macos_app_dev_session_hover`의 out 값). Zig가 위치를
 /// 판정(터미널/divider/사이드바/탭 바/URL)하고 Swift가 NSCursor로 매핑한다 — 전부 I-beam이던 걸 영역별로 바꾼다.
@@ -637,6 +648,10 @@ pub const DevSession = struct {
     // loaded_config가 실제로 초기화됐는지. init 초반(live/surface 생성)이 실패하면 deinit이 아직
     // undefined인 arena를 free하지 않도록, 다른 자원과 같은 *_initialized 가드 패턴을 쓴다.
     config_loaded: bool = false,
+    // config의 전역(OS) 단축키를 OS 등록용 기술자(가상 키코드 + Carbon modifier + action)로 변환해 담는다.
+    // init에서 loaded_config.global_bindings를 global_hotkey.descriptorFor로 매핑(매핑 불가 chord는 제외).
+    // Swift가 `maru_macos_app_dev_session_global_hotkeys`로 읽어 RegisterEventHotKey로 등록한다(a2). owned.
+    global_hotkeys: std.ArrayList(GlobalHotkey) = .empty,
     // input.page-keys=scroll이면 메인 화면에서 PageUp/Down이 Maru 스크롤백을 스크롤한다. 기본
     // (false=passthrough)은 xterm/Ghostty처럼 \e[5~/\e[6~를 PTY로 보낸다.
     page_keys_scroll: bool = false,
@@ -799,6 +814,18 @@ pub const DevSession = struct {
             try config_mod.loadConfigDefault(io, allocator);
         self.config_loaded = true;
         self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
+
+        // 전역 단축키 config를 OS 등록용 기술자로 변환해 둔다(Swift가 global_hotkeys ABI로 읽어 등록).
+        // 가상 키코드로 매핑 안 되는 chord(+/Insert 등)는 descriptorFor가 null → 건너뛴다(등록 불가).
+        for (self.loaded_config.global_bindings) |gb| {
+            if (global_hotkey.descriptorFor(gb)) |d| {
+                try self.global_hotkeys.append(self.allocator, .{
+                    .virtual_key_code = d.virtual_key_code,
+                    .carbon_modifiers = d.carbon_modifiers,
+                    .action = @intFromEnum(d.action),
+                });
+            }
+        }
 
         // 셸 통합: 대화형 셸이 zsh면 macOS 편집키(Cmd+←/→ 등) 바인딩을 주입한다(사용자 .zshrc의
         // keymap 조건과 무관하게 동작하게). ZDOTDIR로 통합 .zshenv를 가리킨다. 실패 시 null(통합
@@ -2676,6 +2703,12 @@ pub const DevSession = struct {
         return self.activeSurface().core.windowTitle();
     }
 
+    /// 전역(OS) 단축키 등록 기술자 목록(가상 키코드 + Carbon modifier + action). config에서 한 번 만들어
+    /// 세션 동안 불변이라 Swift가 시작 시 한 번 읽어 RegisterEventHotKey로 등록한다. 매핑 가능한 chord만.
+    pub fn globalHotkeys(self: *const DevSession) []const GlobalHotkey {
+        return self.global_hotkeys.items;
+    }
+
     /// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면은 rows-1줄(한 줄 겹침)이고,
     /// rows는 dev session이 권위 있게 알고 있어 Swift가 stale 값으로 계산하지 않게 여기서 구한다.
     /// alt screen에서는 휠과 동일하게 화살표 변환으로 폴백한다(이전엔 완전 무반응이었다).
@@ -3319,6 +3352,7 @@ pub const DevSession = struct {
 
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
+        self.global_hotkeys.deinit(self.allocator);
         // 1) 각 탭의 각 panel의 각 Term live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'.
         //    detach 후 deinit이 reader thread join + fd/queue 해제(이동 금지 계약이라 in-place로 정리).
         for (self.tabs.items) |tab| {

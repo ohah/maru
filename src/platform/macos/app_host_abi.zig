@@ -419,6 +419,23 @@ pub export fn maru_macos_app_dev_session_window_title(
     return @intFromEnum(Status.ok);
 }
 
+// 전역(OS) 단축키 등록 기술자 목록. config에서 한 번 만들어 세션 동안 불변이라, Swift가 시작 시 한 번
+// 읽어 Carbon RegisterEventHotKey로 등록한다. 배열은 dev session 소유(destroy까지 유효). 비어 있으면
+// out_ptr=null/out_count=0. 매핑 가능한 chord(가상 키코드 있음)만 담긴다.
+pub export fn maru_macos_app_dev_session_global_hotkeys(
+    session: ?*DevSession,
+    out_ptr: ?*?[*]const app_dev_session.GlobalHotkey,
+    out_count: ?*usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
+    const count_out = out_count orelse return @intFromEnum(Status.null_out);
+    const hotkeys = dev_session.globalHotkeys();
+    ptr_out.* = if (hotkeys.len > 0) hotkeys.ptr else null;
+    count_out.* = hotkeys.len;
+    return @intFromEnum(Status.ok);
+}
+
 // 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면(rows-1) 계산은 dev session이
 // 권위 있는 rows로 한다(Swift가 stale frame summary로 계산하지 않게).
 pub export fn maru_macos_app_dev_session_scroll_page(

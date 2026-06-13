@@ -131,8 +131,9 @@ keybind = Cmd+K = esc:[2J
   충돌이 안 생긴다). 조합/action을 못 읽으면 그 줄만 무시(forgiving).
 
 > **현재 범위**: in-app 키바인딩(앱 액션·`unbind`·터미널 매크로)은 `KeyBindingResolver`로 동작에
-> 연결된다. 전역 단축키(`global:`)는 config 파싱과 OS 등록용 키코드 매핑까지 완료됐고, 실제 OS 등록·창
-> 토글 동작은 macOS 네이티브 단계(a2)에서 연결된다.
+> 연결된다. 전역 단축키(`global:`)는 config 파싱 → OS 등록용 키코드 매핑 → macOS Carbon
+> `RegisterEventHotKey` 등록 → 창 토글/표시까지 동작한다(앱이 비활성이어도 발화). 전역 action은
+> `toggle_window`/`show_window` 2종이며, 다른 전역 동작(quick terminal 토글 등)은 후속이다.
 
 ## 검증 동작 (forgiving)
 

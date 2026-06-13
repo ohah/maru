@@ -49,6 +49,7 @@
 - Swift와 Zig 사이에는 Swift class, Zig slice, Zig allocator-owned buffer를 직접 넘기지 않는다.
 - 포인터를 넘겨야 하는 API는 어느 쪽이 해제하는지 함수 이름과 문서에 함께 적는다.
 - key/resize/close 같은 입력 event는 fixed-width struct로 넘기고, 실제 app action 판정은 Zig `KeyBindingResolver`/`FrameLoop` 쪽에서 한다.
+- 전역(OS) 단축키(`keybind = global:…`)도 같은 원칙이다(ABI v28): Zig가 config를 파싱해 OS 등록용 기술자(`maru_macos_app_dev_session_global_hotkey` — 가상 키코드 + Carbon modifier mask + action)를 만들고, Swift는 `maru_macos_app_dev_session_global_hotkeys`로 받아 Carbon `RegisterEventHotKey`로 등록·창 토글(NSWindow)만 한다. 키→키코드 매핑·중복 제거·action 결정은 전부 Zig다(Swift는 OS 호출만 — 정책 0).
 - status는 "치명적 세션 fault"와 "이 한 event만 거부됨", "정상 종료"를 구분한다. host는 셋을 다르게 처리한다.
   - per-event 거부(`KeyFailed`/`ResizeFailed`): 닫힌 pane의 late input 등. 앱을 죽이지 않고 무시·기록만 한다. Zig dev session도 이미 종료된 세션의 key/resize는 fail이 아니라 ignored로 닫는다.
   - 정상 종료(`SessionEnded`): `tick`이 PTY 셸 종료(exit/read_error)를 관측하면 ok 대신 이 status를 올린다. host는 frame loop tick을 멈추고 우아하게(exitCode 0) 내려간다. 죽은 세션을 계속 tick하지 않는다.

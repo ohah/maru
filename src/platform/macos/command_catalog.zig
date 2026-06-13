@@ -121,6 +121,52 @@ pub fn formatChord(chord: KeyChord, buf: []u8) []const u8 {
     return buf[0..len];
 }
 
+/// modifier 비트마스크(NSMenuItem.keyEquivalentModifierMask로 Swift가 매핑). 안정 인코딩 — .h에 같은 값 문서화.
+pub const mod_shift: u32 = 1;
+pub const mod_control: u32 = 2;
+pub const mod_option: u32 = 4;
+pub const mod_command: u32 = 8;
+
+/// chord의 modifier를 비트마스크로(위 상수). Swift가 NSEvent.ModifierFlags로 옮긴다.
+pub fn modifierMask(chord: KeyChord) u32 {
+    var m: u32 = 0;
+    if (chord.modifiers.shift) m |= mod_shift;
+    if (chord.modifiers.control) m |= mod_control;
+    if (chord.modifiers.option) m |= mod_option;
+    if (chord.modifiers.command) m |= mod_command;
+    return m;
+}
+
+/// NSMenuItem.keyEquivalent 문자열을 buf에 쓴다(그 slice 반환). 글자 키는 **소문자**(AppKit 관례 — shift는
+/// keyEquivalentModifierMask로 표현하지 keyEquivalent 글자를 바꾸지 않는다), 화살표·기능키 등 특수키는 AppKit
+/// function-key unichar(0xF700+, NSUpArrowFunctionKey 등)로 emit한다. 인코딩 실패/버퍼 부족이면 빈 slice.
+/// (platform/macos 모듈이라 AppKit 전용 unichar 상수를 Zig에 두는 게 경계상 허용 — keyEquivalent는 AppKit 개념.)
+pub fn keyEquivalent(chord: KeyChord, buf: []u8) []const u8 {
+    const cp: u21 = switch (chord.key) {
+        .char => |c| if (c >= 'A' and c <= 'Z') c + 32 else c, // 소문자 fold
+        .arrow_up => 0xF700, // NSUpArrowFunctionKey
+        .arrow_down => 0xF701,
+        .arrow_left => 0xF702,
+        .arrow_right => 0xF703,
+        .enter => 0x0D,
+        .tab => 0x09,
+        .escape => 0x1B,
+        .backspace => 0x08,
+        .delete => 0xF728, // NSDeleteFunctionKey(forward delete)
+        .insert => 0xF727, // NSInsertFunctionKey
+        .home => 0xF729,
+        .end => 0xF72B,
+        .page_up => 0xF72C,
+        .page_down => 0xF72D,
+        .function => |n| 0xF704 + @as(u21, n) -| 1, // NSF1FunctionKey=0xF704
+    };
+    var utf8: [4]u8 = undefined;
+    const len = std.unicode.utf8Encode(cp, &utf8) catch return "";
+    if (len > buf.len) return "";
+    @memcpy(buf[0..len], utf8[0..len]);
+    return buf[0..len];
+}
+
 test "catalog action_key가 parseAction으로 round-trip된다(양방향 일치)" {
     for (entries) |entry| {
         const parsed = maru.config.parseAction(entry.key) orelse {
@@ -159,6 +205,27 @@ test "chordForAction: 빌트인·사용자·unbind" {
     // 빌트인 chord를 unbind하면 표시도 사라진다(null).
     const unbind_resolver: KeyBindingResolver = .{ .unbinds = &.{try KeyChord.parse("Cmd+T")} };
     try std.testing.expect(chordForAction(unbind_resolver, .new_term) == null);
+}
+
+test "keyEquivalent/modifierMask: NSMenuItem용 소문자 글자·mask·화살표 unichar" {
+    var buf: [8]u8 = undefined;
+    // Cmd+T → "t" + command.
+    const t = KeyChord{ .modifiers = .{ .command = true }, .key = .{ .char = 'T' } };
+    try std.testing.expectEqualStrings("t", keyEquivalent(t, &buf));
+    try std.testing.expectEqual(mod_command, modifierMask(t));
+    // Cmd+Shift+T → "t"(소문자 유지) + command|shift.
+    const st = KeyChord{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'T' } };
+    try std.testing.expectEqualStrings("t", keyEquivalent(st, &buf));
+    try std.testing.expectEqual(mod_command | mod_shift, modifierMask(st));
+    // Cmd+1 → "1" + command.
+    const one = KeyChord{ .modifiers = .{ .command = true }, .key = .{ .char = '1' } };
+    try std.testing.expectEqualStrings("1", keyEquivalent(one, &buf));
+    // Cmd+Opt+Left → 화살표 unichar 0xF702 + command|option.
+    const left = KeyChord{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_left };
+    var expect: [4]u8 = undefined;
+    const n = try std.unicode.utf8Encode(0xF702, &expect);
+    try std.testing.expectEqualStrings(expect[0..n], keyEquivalent(left, &buf));
+    try std.testing.expectEqual(mod_command | mod_option, modifierMask(left));
 }
 
 test "select_tab은 0..8로 펼쳐지고 ⌘1..9로 표시된다" {

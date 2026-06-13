@@ -376,6 +376,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // quick 패널의 슬라이드 인/아웃 애니메이션이 진행 중인지. 포커스 잃음 자동 숨김이 애니메이션 도중·직후
     // (orderOut 시 resignKey)에 재진입해 이중 숨김하지 않게 가드한다.
     private var quickAnimating = false
+    // quick terminal 표시 옵션(config에서). ensureQuickTerminal이 채운다. screen은 'mouse'면 show마다
+    // 현재 마우스가 있는 화면으로 해석하므로 모드만 저장한다.
+    private var quickAutoHide = true
+    private var quickHeightFraction: CGFloat = 0.45
+    private var quickScreenMode: UInt32 = UInt32(MaruAppHostQuickTerminalScreenMain.rawValue)
     // tick이 특정 surface를 명시적으로 대상 지정할 때 쓴다(이벤트가 아니라 타이머 구동이라 key 창으로 못 고름).
     // nil이면 입력 이벤트는 key 창 기준으로 surface를 고른다(이벤트는 key 창의 first responder로 전달되므로).
     private var explicitSurface: TerminalSurface?
@@ -1453,6 +1458,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         surface.devSession = created
         self.quick = surface
 
+        // config 옵션(높이·자동 숨김·화면)을 읽어 둔다. 세션 동안 불변이라 생성 시 한 번. screen은 모드만
+        // 저장하고(mouse면 show마다 현재 마우스 화면으로 해석), 높이는 0.1~1.0으로 클램프(방어적 — Zig도 검증).
+        if let cfg = loadQuickTerminalConfig() {
+            quickHeightFraction = max(0.1, min(1.0, CGFloat(cfg.height_milli) / 1000.0))
+            quickAutoHide = cfg.auto_hide != 0
+            quickScreenMode = cfg.screen
+        }
+
         // 포커스 잃음 자동 숨김: 패널이 key를 잃으면 quickTerminalLostKey가 슬라이드로 숨긴다. 패널을 컨트롤러의
         // window-delegate로 잡으면 windowWillClose/Resize가 primary 경로와 섞이므로, delegate 대신 이 패널만
         // 겨냥한 알림 관찰을 쓴다(IME가 view에서 쓰는 패턴과 동일). teardown에서 해제한다.
@@ -1464,12 +1477,30 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         )
     }
 
-    /// quick 패널의 "보임"(상단 가장자리, 전폭·높이 45%)과 "숨김"(같은 크기로 화면 위로 빠진 위치) 사각형.
-    /// 둘은 y만 다르고 폭·높이가 같다 — 슬라이드 중 콘텐츠 크기가 안 바뀌어 drawable/grid 재계산이 필요 없다.
+    /// config의 quick terminal 옵션을 읽는다(높이·자동 숨김·화면). config는 모든 dev session이 같은 파일을
+    /// 로드하므로 primary 세션에서 읽는다(primary는 시작 시 항상 존재). 못 읽으면 nil(기본값 유지).
+    private func loadQuickTerminalConfig() -> MaruAppHostQuickTerminalConfig? {
+        guard let session = primary?.devSession else { return nil }
+        var cfg = MaruAppHostQuickTerminalConfig()
+        guard maru_macos_app_dev_session_quick_terminal_config(session, &cfg) == Self.statusOK else { return nil }
+        return cfg
+    }
+
+    /// quick 패널을 띄울 화면. screen=mouse면 현재 마우스 포인터가 있는 화면(없으면 main 폴백), 아니면 주 디스플레이.
+    private func quickTargetScreen() -> NSScreen? {
+        if quickScreenMode == UInt32(MaruAppHostQuickTerminalScreenMouse.rawValue) {
+            let loc = NSEvent.mouseLocation
+            return NSScreen.screens.first { $0.frame.contains(loc) } ?? NSScreen.main
+        }
+        return NSScreen.main
+    }
+
+    /// quick 패널의 "보임"(상단 가장자리, 전폭·높이 = config 비율)과 "숨김"(같은 크기로 화면 위로 빠진 위치)
+    /// 사각형. 둘은 y만 다르고 폭·높이가 같다 — 슬라이드 중 콘텐츠 크기가 안 바뀌어 drawable/grid 재계산 불요.
     private func quickPanelFrames() -> (shown: NSRect, hidden: NSRect)? {
-        guard let screen = NSScreen.main else { return nil }
+        guard let screen = quickTargetScreen() else { return nil }
         let vf = screen.visibleFrame
-        let height = (vf.height * 0.45).rounded()
+        let height = (vf.height * quickHeightFraction).rounded()
         let shown = NSRect(x: vf.minX, y: vf.maxY - height, width: vf.width, height: height)
         let hidden = NSRect(x: vf.minX, y: vf.maxY, width: vf.width, height: height) // 위로 빠져 화면 밖
         return (shown, hidden)
@@ -1522,9 +1553,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     /// quick 패널이 key를 잃으면(다른 창/앱 클릭) 숨긴다 — quick terminal의 표준 동작(클릭이 빠지면 사라짐).
-    /// 애니메이션 중(특히 숨김 완료 orderOut의 resignKey)에는 재진입을 막고, 보이는 상태일 때만 숨긴다.
+    /// config에서 자동 숨김을 끄면(quickAutoHide=false) 토글로만 숨기고 여기선 무동작. 애니메이션 중(특히
+    /// 숨김 완료 orderOut의 resignKey)에는 재진입을 막고, 보이는 상태일 때만 숨긴다.
     @objc private func quickTerminalLostKey(_ note: Notification) {
-        guard !quickAnimating, let panel = quick?.window, panel.isVisible else { return }
+        guard quickAutoHide, !quickAnimating, let panel = quick?.window, panel.isVisible else { return }
         hideQuickTerminalAnimated(panel)
     }
 

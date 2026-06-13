@@ -46,11 +46,30 @@ pub const InputConfig = struct {
     page_keys: PageKeys = .scroll,
 };
 
+/// quick terminal(전역 토글 오버레이 패널)을 어느 화면에 띄울지. main=주 디스플레이, mouse=마우스 포인터가
+/// 있는 화면(멀티 모니터에서 지금 보는 화면). 실제 NSScreen 선택은 플랫폼(Swift)이 한다.
+pub const QuickTerminalScreen = enum {
+    main,
+    mouse,
+};
+
+/// quick terminal 표시 옵션. 값 검증/기본값은 loader가 채우고, 플랫폼(Swift)이 ABI로 받아 패널 크기·화면·
+/// 자동 숨김 동작에 쓴다.
+pub const QuickTerminalConfig = struct {
+    // 패널 높이(화면 visibleFrame 대비 비율, 0.1~1.0). 기본 0.45(상단 45%).
+    height_fraction: f32 = 0.45,
+    // 포커스를 잃으면(다른 창/앱 클릭) 자동으로 숨길지. 기본 true(quick terminal 표준 동작). false면 토글로만 숨김.
+    auto_hide: bool = true,
+    // 어느 화면에 띄울지.
+    screen: QuickTerminalScreen = .main,
+};
+
 pub const Config = struct {
     font: FontConfig = .{},
     theme: ThemeConfig = .{},
     cursor: CursorConfig = .{},
     input: InputConfig = .{},
+    quick_terminal: QuickTerminalConfig = .{},
     /// 셸에 줄 TERM 값. 셸 설정/통합이 $TERM에 따라 키바인딩(예: Ctrl+A 줄-시작)을 다르게 잡는
     /// 경우, 사용자가 자기 환경이 기대하는 값(예: xterm-ghostty)으로 바꿀 수 있다. 빈 값은 무시.
     term: []const u8 = "xterm-256color",

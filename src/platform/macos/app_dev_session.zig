@@ -22,7 +22,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 29;
+pub const abi_version: u32 = 30;
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -33,6 +33,15 @@ pub const GlobalHotkey = extern struct {
     virtual_key_code: u32,
     carbon_modifiers: u32,
     action: u32,
+};
+
+/// quick terminal 표시 옵션(C ABI). Swift가 `maru_macos_app_dev_session_quick_terminal_config`로 받아
+/// 패널 크기·화면·자동 숨김에 쓴다. height_milli = 화면 높이 대비 비율×1000(예: 450=45%). auto_hide
+/// 0/1. screen = `config.QuickTerminalScreen`의 `@intFromEnum`(0=main, 1=mouse). 순수 POD.
+pub const QuickTerminalConfig = extern struct {
+    height_milli: u32,
+    auto_hide: u32,
+    screen: u32,
 };
 
 /// 마우스 호버 위치에 따라 Swift가 세울 커서 종류(`maru_macos_app_dev_session_hover`의 out 값). Zig가 위치를
@@ -2707,6 +2716,16 @@ pub const DevSession = struct {
     /// 세션 동안 불변이라 Swift가 시작 시 한 번 읽어 RegisterEventHotKey로 등록한다. 매핑 가능한 chord만.
     pub fn globalHotkeys(self: *const DevSession) []const GlobalHotkey {
         return self.global_hotkeys.items;
+    }
+
+    /// quick terminal 표시 옵션(config에서 파싱). Swift가 패널 크기·화면·자동 숨김에 쓴다. 세션 동안 불변.
+    pub fn quickTerminalConfig(self: *const DevSession) QuickTerminalConfig {
+        const qt = self.loaded_config.config.quick_terminal;
+        return .{
+            .height_milli = @intFromFloat(@round(qt.height_fraction * 1000.0)),
+            .auto_hide = if (qt.auto_hide) 1 else 0,
+            .screen = @intFromEnum(qt.screen),
+        };
     }
 
     /// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면은 rows-1줄(한 줄 겹침)이고,

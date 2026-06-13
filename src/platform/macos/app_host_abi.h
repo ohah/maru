@@ -416,6 +416,7 @@ typedef enum MaruAppHostQuickTerminalPosition {
     MaruAppHostQuickTerminalPositionBottom = 1, /* 하단 가장자리(전폭) */
     MaruAppHostQuickTerminalPositionLeft = 2,   /* 좌측 가장자리(전고) */
     MaruAppHostQuickTerminalPositionRight = 3,  /* 우측 가장자리(전고) */
+    MaruAppHostQuickTerminalPositionCenter = 4, /* 화면 중앙(width·height 둘 다 비율) — 슬라이드 없이 페이드 */
 } MaruAppHostQuickTerminalPosition;
 
 typedef enum MaruAppHostQuickTerminalChrome {

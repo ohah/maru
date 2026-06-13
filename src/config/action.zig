@@ -51,6 +51,21 @@ pub fn parseAction(value: []const u8) ?Action {
     return null;
 }
 
+/// 전역(OS) 단축키 전용 동작 — 앱이 비활성이어도 OS가 단축키를 잡아 Swift가 수행한다. 창 가시성 같은
+/// NSWindow 동작이라 Zig의 `dispatchAppAction`(터미널/탭 조작)이 할 수 없다. 그래서 in-app `Action`과
+/// 분리한다(별도 enum — `dispatchAppAction`의 exhaustive switch를 오염시키지 않는다. unbind와 같은 결정).
+pub const GlobalAction = enum {
+    toggle_window, // 창이 숨김/비활성이면 보이고 앞으로(show+activate), 활성+보임이면 숨김(orderOut) — 진짜 토글.
+    show_window, // 항상 창을 보이고 앞으로 가져온다(숨기지 않음).
+};
+
+/// 전역 단축키 동작 문자열을 파싱한다(`global:<chord> = <여기>`). 알 수 없으면 null(forgiving).
+pub fn parseGlobalAction(value: []const u8) ?GlobalAction {
+    if (std.mem.eql(u8, value, "toggle_window")) return .toggle_window;
+    if (std.mem.eql(u8, value, "show_window")) return .show_window;
+    return null;
+}
+
 test "parse configured actions" {
     try std.testing.expectEqual(Action.new_tab, parseAction("new_tab").?);
     try std.testing.expectEqual(Action.close_tab, parseAction("close_tab").?);
@@ -67,4 +82,11 @@ test "parse configured actions" {
     const action = parseAction("select_tab:3").?;
     try std.testing.expectEqual(@as(usize, 3), action.select_tab);
     try std.testing.expect(parseAction("unknown") == null);
+}
+
+test "parse global actions" {
+    try std.testing.expectEqual(GlobalAction.toggle_window, parseGlobalAction("toggle_window").?);
+    try std.testing.expectEqual(GlobalAction.show_window, parseGlobalAction("show_window").?);
+    try std.testing.expect(parseGlobalAction("new_tab") == null); // in-app action은 전역 동작이 아님
+    try std.testing.expect(parseGlobalAction("unknown") == null);
 }

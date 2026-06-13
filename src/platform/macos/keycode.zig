@@ -64,6 +64,65 @@ pub fn usAsciiForKeyCode(key_code: u32) ?u21 {
     };
 }
 
+/// US 배열 기준 라틴 글자/기호 -> macOS 물리 키코드(kVK_ANSI_*). `usAsciiForKeyCode`의 역방향이다.
+/// Carbon `RegisterEventHotKey`(전역 단축키)는 가상 키코드를 요구하므로, config의 글자 chord를 OS
+/// 등록용 키코드로 되돌린다. 대문자는 소문자로 fold한다(Shift는 modifier로 따로 전달되므로 글자 자체는
+/// 소문자 키코드). 매핑이 없는 글자는 null(그 글자는 전역 등록 불가 — 호출자가 diagnostic). 명명 키
+/// (Space/Enter/화살표/F1~ 등)는 ANSI 글자 키코드 표 밖이라 여기서 다루지 않는다(global_hotkey가 별도 매핑).
+pub fn macVirtualKeyCodeForAscii(codepoint: u21) ?u16 {
+    const c: u21 = if (codepoint >= 'A' and codepoint <= 'Z') codepoint + 32 else codepoint;
+    return switch (c) {
+        'a' => 0x00,
+        's' => 0x01,
+        'd' => 0x02,
+        'f' => 0x03,
+        'h' => 0x04,
+        'g' => 0x05,
+        'z' => 0x06,
+        'x' => 0x07,
+        'c' => 0x08,
+        'v' => 0x09,
+        'b' => 0x0B,
+        'q' => 0x0C,
+        'w' => 0x0D,
+        'e' => 0x0E,
+        'r' => 0x0F,
+        'y' => 0x10,
+        't' => 0x11,
+        '1' => 0x12,
+        '2' => 0x13,
+        '3' => 0x14,
+        '4' => 0x15,
+        '6' => 0x16,
+        '5' => 0x17,
+        '=' => 0x18,
+        '9' => 0x19,
+        '7' => 0x1A,
+        '-' => 0x1B,
+        '8' => 0x1C,
+        '0' => 0x1D,
+        ']' => 0x1E,
+        'o' => 0x1F,
+        'u' => 0x20,
+        '[' => 0x21,
+        'i' => 0x22,
+        'p' => 0x23,
+        'l' => 0x25,
+        'j' => 0x26,
+        '\'' => 0x27,
+        'k' => 0x28,
+        ';' => 0x29,
+        '\\' => 0x2A,
+        ',' => 0x2B,
+        '/' => 0x2C,
+        'n' => 0x2D,
+        'm' => 0x2E,
+        '.' => 0x2F,
+        '`' => 0x32,
+        else => null,
+    };
+}
+
 const std = @import("std");
 
 test "physical keycodes map to US-layout latin for layout-independent shortcuts" {
@@ -72,4 +131,22 @@ test "physical keycodes map to US-layout latin for layout-independent shortcuts"
     try std.testing.expectEqual(@as(?u21, 'v'), usAsciiForKeyCode(0x09));
     try std.testing.expectEqual(@as(?u21, null), usAsciiForKeyCode(0x24)); // Return은 별도 KeyCode
     try std.testing.expectEqual(@as(?u21, null), usAsciiForKeyCode(0xFFFF));
+}
+
+test "macVirtualKeyCodeForAscii inverts the table and folds uppercase" {
+    // 역방향이 정방향과 왕복해야 한다(전역 단축키 등록이 같은 물리 키를 가리키게).
+    try std.testing.expectEqual(@as(?u16, 0x0B), macVirtualKeyCodeForAscii('b'));
+    try std.testing.expectEqual(@as(?u16, 0x0B), macVirtualKeyCodeForAscii('B')); // 대문자 fold
+    try std.testing.expectEqual(@as(?u16, 0x00), macVirtualKeyCodeForAscii('a'));
+    try std.testing.expectEqual(@as(?u16, 0x12), macVirtualKeyCodeForAscii('1'));
+    try std.testing.expectEqual(@as(?u16, 0x21), macVirtualKeyCodeForAscii('['));
+    try std.testing.expectEqual(@as(?u16, null), macVirtualKeyCodeForAscii(' ')); // Space는 명명 키(별도)
+    try std.testing.expectEqual(@as(?u16, null), macVirtualKeyCodeForAscii('가'));
+    // 표에 있는 모든 글자가 왕복하는지(usAsciiForKeyCode → macVirtualKeyCodeForAscii → 원래 키코드).
+    var kc: u32 = 0;
+    while (kc <= 0x32) : (kc += 1) {
+        if (usAsciiForKeyCode(kc)) |ascii| {
+            try std.testing.expectEqual(@as(?u16, @intCast(kc)), macVirtualKeyCodeForAscii(ascii));
+        }
+    }
 }

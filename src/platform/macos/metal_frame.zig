@@ -649,6 +649,10 @@ pub const MetalFrameBuffer = struct {
         // 렌더된다(maru_fill_cell_quad). 터미널 셀 '앞'에 두어 활성 panel 커서가 합쳐진 cells의 끝(suffix)에
         // 남게 한다 — 커서 blink 노출 길이가 그대로 동작한다. glyph가 없으면(sentinel UV) upload 없이 bg만.
         pane_chrome_cells: []const NativeMetalCell,
+        // panel 사이 divider 등 '터미널 위' overlay 셀. pane_chrome(맨 아래)과 달리 터미널 frame들 '뒤'·활성
+        // panel 커서 suffix '앞'에 끼워, 터미널 내용 위에 그리되 커서 blink 노출 길이(cursor suffix)를 깨지
+        // 않게 한다. 각 셀은 origin_x/origin_y로 같은 maru_fill_cell_quad 경로(sentinel UV → bg만).
+        pane_overlay_cells: []const NativeMetalCell,
     ) !void {
         // 1) 터미널 셀: pane 탭 바 chrome을 먼저(커서 suffix 보존), 그 뒤 각 panel frame을 투영해 origin 박아
         //    이어 붙인다. 커서 suffix는 맨 뒤(활성) panel만.
@@ -662,6 +666,11 @@ pub const MetalFrameBuffer = struct {
             setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
             try cells_list.appendSlice(allocator, built.cells);
             if (i == pane_frames.len - 1) cursor_cells = built.cursor_cells; // 활성(마지막) panel의 커서가 끝에
+        }
+        // divider overlay를 활성 panel 커서 suffix '앞'에 끼운다 — 터미널 내용 위(divider 보임)·커서 아래
+        // (커서가 divider에 안 가림). cursor_cells(suffix 길이)는 그대로라 blink rebuild가 안 깨진다.
+        if (pane_overlay_cells.len > 0) {
+            try cells_list.insertSlice(allocator, cells_list.items.len - cursor_cells, pane_overlay_cells);
         }
         const new_cells = try cells_list.toOwnedSlice(allocator);
         errdefer allocator.free(new_cells);

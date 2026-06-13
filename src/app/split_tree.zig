@@ -18,11 +18,21 @@ pub const SplitDirection = enum { horizontal, vertical };
 /// 픽셀 사각형(좌상단 origin, backing px). 레이아웃 입력(탭 영역)·출력(각 leaf의 영역). leaf 타입과 무관.
 pub const Rect = struct { x: u32, y: u32, w: u32, h: u32 };
 
-/// ratio가 [0.05, 0.95]를 벗어나지 않게 clamp한 비율로 total을 나눈 a쪽 픽셀(반올림). 한 panel이 0이
-/// 되면 grid가 비고 divider 히트가 불가능하므로 막는다. leaf 타입과 무관.
+/// split ratio 하한/상한 — 한 panel이 0폭/0높이(grid 빔·divider 히트 불가)가 되지 않게 막는다. 드래그
+/// 리사이즈도 이 범위로 clamp해 layout과 같은 한도를 쓴다(단일 출처).
+pub const ratio_min: f32 = 0.05;
+pub const ratio_max: f32 = 0.95;
+
+/// ratio를 [ratio_min, ratio_max]로 clamp한다. layout(ratioPx)·divider 드래그가 공유 — 보이는 분할과
+/// 드래그가 같은 한도를 따른다. leaf 타입과 무관.
+pub fn clampRatio(ratio: f32) f32 {
+    return std.math.clamp(ratio, ratio_min, ratio_max);
+}
+
+/// clamp한 비율로 total을 나눈 a쪽 픽셀(반올림). 한 panel이 0이 되면 grid가 비고 divider 히트가 불가능하므로
+/// 막는다. leaf 타입과 무관.
 fn ratioPx(total: u32, ratio: f32) u32 {
-    const clamped = std.math.clamp(ratio, 0.05, 0.95);
-    const v = @as(f32, @floatFromInt(total)) * clamped;
+    const v = @as(f32, @floatFromInt(total)) * clampRatio(ratio);
     return @intFromFloat(@round(v));
 }
 
@@ -88,6 +98,39 @@ pub fn SplitTree(comptime Leaf: type) type {
                         const a_h = ratioPx(rect.h, sp.ratio);
                         try layout(allocator, sp.a, .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = a_h }, out);
                         try layout(allocator, sp.b, .{ .x = rect.x, .y = rect.y + a_h, .w = rect.w, .h = rect.h - a_h }, out);
+                    },
+                },
+            }
+        }
+
+        /// split 경계(divider)와 그것을 조절하는 split 노드. 멀티-panel 렌더가 panel 사이에 divider를 그리고,
+        /// 드래그 리사이즈가 mouse→ratio를 매핑할 때 쓴다. `bounds`는 이 split이 나누는 부모 영역(드래그 시
+        /// `ratio = (mouse - bounds.origin) / bounds.size`), `pos`는 분할 경계 픽셀(horizontal=x, vertical=y).
+        pub const DividerSeg = struct {
+            split: *Split,
+            direction: SplitDirection,
+            bounds: Rect,
+            pos: u32,
+        };
+
+        /// node를 rect 안에서 펴며 각 split 노드의 divider 경계를 out에 채운다(layout과 같은 분할 규칙·순서로
+        /// 재귀). leaf만 있으면(단일 panel) 비어 있다. 렌더(divider 선)·hit-test(드래그)가 leaf rect와 같은
+        /// 좌표계를 공유한다. 순수 — 유일한 할당은 out append.
+        pub fn layoutDividers(allocator: std.mem.Allocator, node: Node, rect: Rect, out: *std.ArrayList(DividerSeg)) !void {
+            switch (node) {
+                .leaf => {},
+                .split => |sp| switch (sp.direction) {
+                    .horizontal => {
+                        const a_w = ratioPx(rect.w, sp.ratio);
+                        try out.append(allocator, .{ .split = sp, .direction = .horizontal, .bounds = rect, .pos = rect.x + a_w });
+                        try layoutDividers(allocator, sp.a, .{ .x = rect.x, .y = rect.y, .w = a_w, .h = rect.h }, out);
+                        try layoutDividers(allocator, sp.b, .{ .x = rect.x + a_w, .y = rect.y, .w = rect.w - a_w, .h = rect.h }, out);
+                    },
+                    .vertical => {
+                        const a_h = ratioPx(rect.h, sp.ratio);
+                        try out.append(allocator, .{ .split = sp, .direction = .vertical, .bounds = rect, .pos = rect.y + a_h });
+                        try layoutDividers(allocator, sp.a, .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = a_h }, out);
+                        try layoutDividers(allocator, sp.b, .{ .x = rect.x, .y = rect.y + a_h, .w = rect.w, .h = rect.h - a_h }, out);
                     },
                 },
             }
@@ -250,6 +293,60 @@ test "layout: nested split recurses into sub-rects in tree order" {
     try std.testing.expectEqual(c, out.items[2].leaf);
     try std.testing.expectEqual(Rect{ .x = 100, .y = 50, .w = 100, .h = 50 }, out.items[2].rect); // c 우하
     try std.testing.expectEqual(@as(usize, 3), TestTree.leafCount(.{ .split = &root }));
+}
+
+test "layoutDividers: emits a divider seg per split with boundary pos and parent bounds" {
+    const allocator = std.testing.allocator;
+    const a = try testLeaf(allocator, 1);
+    defer allocator.destroy(a);
+    const b = try testLeaf(allocator, 2);
+    defer allocator.destroy(b);
+    const c = try testLeaf(allocator, 3);
+    defer allocator.destroy(c);
+
+    // 단일 leaf는 divider 없음.
+    {
+        var out: std.ArrayList(TestTree.DividerSeg) = .empty;
+        defer out.deinit(allocator);
+        try TestTree.layoutDividers(allocator, .{ .leaf = a }, .{ .x = 0, .y = 0, .w = 200, .h = 100 }, &out);
+        try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    }
+    // horizontal 0.5 (w=200) → 경계 x=100, bounds=부모 rect, direction=horizontal.
+    {
+        var hsplit = TestTree.Split{ .direction = .horizontal, .ratio = 0.5, .a = .{ .leaf = a }, .b = .{ .leaf = b } };
+        var out: std.ArrayList(TestTree.DividerSeg) = .empty;
+        defer out.deinit(allocator);
+        try TestTree.layoutDividers(allocator, .{ .split = &hsplit }, .{ .x = 10, .y = 20, .w = 200, .h = 100 }, &out);
+        try std.testing.expectEqual(@as(usize, 1), out.items.len);
+        try std.testing.expectEqual(&hsplit, out.items[0].split);
+        try std.testing.expectEqual(SplitDirection.horizontal, out.items[0].direction);
+        try std.testing.expectEqual(@as(u32, 10 + 100), out.items[0].pos); // x + ratioPx(200,0.5)
+        try std.testing.expectEqual(Rect{ .x = 10, .y = 20, .w = 200, .h = 100 }, out.items[0].bounds);
+    }
+    // nested: 루트 horizontal 0.5 | 우 vertical 0.25 → divider 2개(루트 경계 x, 내부 경계 y), 트리 순서.
+    {
+        var inner = TestTree.Split{ .direction = .vertical, .ratio = 0.25, .a = .{ .leaf = b }, .b = .{ .leaf = c } };
+        var root = TestTree.Split{ .direction = .horizontal, .ratio = 0.5, .a = .{ .leaf = a }, .b = .{ .split = &inner } };
+        var out: std.ArrayList(TestTree.DividerSeg) = .empty;
+        defer out.deinit(allocator);
+        try TestTree.layoutDividers(allocator, .{ .split = &root }, .{ .x = 0, .y = 0, .w = 200, .h = 100 }, &out);
+        try std.testing.expectEqual(@as(usize, 2), out.items.len);
+        // 루트 divider: 세로선 x=100, bounds=전체.
+        try std.testing.expectEqual(&root, out.items[0].split);
+        try std.testing.expectEqual(@as(u32, 100), out.items[0].pos);
+        // 내부 divider: 가로선, bounds=우측 sub-rect(x=100,w=100,h=100), pos=y + ratioPx(100,0.25)=0+25.
+        try std.testing.expectEqual(&inner, out.items[1].split);
+        try std.testing.expectEqual(SplitDirection.vertical, out.items[1].direction);
+        try std.testing.expectEqual(@as(u32, 25), out.items[1].pos);
+        try std.testing.expectEqual(Rect{ .x = 100, .y = 0, .w = 100, .h = 100 }, out.items[1].bounds);
+    }
+}
+
+test "clampRatio bounds the split ratio to [ratio_min, ratio_max]" {
+    try std.testing.expectEqual(ratio_min, clampRatio(0.0));
+    try std.testing.expectEqual(ratio_max, clampRatio(1.0));
+    try std.testing.expectEqual(@as(f32, 0.5), clampRatio(0.5));
+    try std.testing.expectEqual(ratio_min, clampRatio(-3.0));
 }
 
 test "layout: extreme ratio is clamped so neither panel is zero-sized" {

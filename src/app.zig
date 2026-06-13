@@ -59,6 +59,7 @@ pub const SplitTree = split_tree.SplitTree;
 pub const SplitDirection = split_tree.SplitDirection;
 pub const SplitRect = split_tree.Rect;
 pub const splitRect = split_tree.splitRect; // leaf-독립 헬퍼(생성용 a/b rect)
+pub const clampRatio = split_tree.clampRatio; // divider 드래그가 layout과 같은 ratio 한도를 쓰게(단일 출처)
 pub const TerminalInput = runtime.TerminalInput;
 pub const ProcessState = surface.ProcessState;
 

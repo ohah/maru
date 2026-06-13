@@ -201,23 +201,9 @@ fn applyKeybind(
     };
     // chord는 bind/unbind/terminal을 통틀어 한 번만(첫 줄 우선). 세 풀을 함께 검사해 같은 chord가
     // 갈라지지 않게 한다(app↔terminal 충돌도 여기서 막아 resolver.validate가 통과한다).
-    for (binds.items) |existing| {
-        if (existing.chord.eql(chord)) {
-            try diags.append(a, .{ .line = line_no, .message = "이미 바인딩된 키 조합 — 무시(첫 줄 우선)" });
-            return;
-        }
-    }
-    for (unbinds.items) |existing| {
-        if (existing.eql(chord)) {
-            try diags.append(a, .{ .line = line_no, .message = "이미 바인딩된 키 조합 — 무시(첫 줄 우선)" });
-            return;
-        }
-    }
-    for (term_binds.items) |existing| {
-        if (existing.chord.eql(chord)) {
-            try diags.append(a, .{ .line = line_no, .message = "이미 바인딩된 키 조합 — 무시(첫 줄 우선)" });
-            return;
-        }
+    if (chordAlreadyBound(binds.items, unbinds.items, term_binds.items, chord)) {
+        try diags.append(a, .{ .line = line_no, .message = "이미 바인딩된 키 조합 — 무시(첫 줄 우선)" });
+        return;
     }
 
     // rhs가 `unbind`면 그 chord의 빌트인 기본을 끈다(app action 아님 — 별도 목록).
@@ -226,14 +212,16 @@ fn applyKeybind(
         return;
     }
 
-    // rhs가 터미널 매크로(text:/esc:/ctrl:)면 셸로 보낼 바이트를 묶는다.
-    if (try parseTerminalMacro(a, diags, line_no, rhs)) |macro| {
-        try term_binds.append(a, .{ .chord = chord, .input = macro });
-        return;
+    // rhs가 터미널 매크로(text:/esc:/ctrl:)면 셸로 보낼 바이트를 묶는다. `.invalid`(접두사인데 payload
+    // 오류)는 parseTerminalMacro가 이미 diagnostic을 남겼고, app action으로 재해석하지 않고 그 줄을 버린다.
+    switch (try parseTerminalMacro(a, diags, line_no, rhs)) {
+        .macro => |macro| {
+            try term_binds.append(a, .{ .chord = chord, .input = macro });
+            return;
+        },
+        .invalid => return,
+        .not_macro => {}, // 접두사 아님 — 아래 app action으로
     }
-    // `<prefix>:`로 시작했는데 매크로로 못 읽었으면(잘못된 ctrl 등) parseTerminalMacro가 이미 diagnostic을
-    // 남기고 null을 줬다 — app action으로 다시 시도하지 않고 그 줄을 버린다.
-    if (isTerminalMacroPrefix(rhs)) return;
 
     const act = action_mod.parseAction(rhs) orelse {
         try diags.append(a, .{ .line = line_no, .message = "알 수 없는 action(unbind/text:/esc:/ctrl:/new_tab/close_tab/select_tab:N 등) — 무시" });
@@ -242,67 +230,81 @@ fn applyKeybind(
     try binds.append(a, .{ .chord = chord, .action = act });
 }
 
-/// rhs가 터미널 매크로 접두사(text:/esc:/ctrl:)로 시작하는가 — 매크로 파싱이 실패했을 때 app action으로
-/// 잘못 재해석하지 않으려는 판정. parseTerminalMacro와 같은 접두사 목록을 본다(단일 출처).
-fn isTerminalMacroPrefix(rhs: []const u8) bool {
-    return std.mem.startsWith(u8, rhs, "text:") or
-        std.mem.startsWith(u8, rhs, "esc:") or
-        std.mem.startsWith(u8, rhs, "ctrl:");
+/// chord가 이미 묶였는가(bind/unbind/terminal 세 풀 통틀어). keybind dedup의 단일 출처 — 셋 중 한 곳에만
+/// 들어가게 해 app↔terminal 충돌·중복을 파싱 단계에서 막는다(첫 줄 우선). 순수 함수.
+fn chordAlreadyBound(
+    binds: []const keybinding.AppBinding,
+    unbinds: []const keybinding.KeyChord,
+    term_binds: []const keybinding.TerminalBinding,
+    chord: keybinding.KeyChord,
+) bool {
+    for (binds) |b| if (b.chord.eql(chord)) return true;
+    for (unbinds) |c| if (c.eql(chord)) return true;
+    for (term_binds) |b| if (b.chord.eql(chord)) return true;
+    return false;
 }
 
-/// 터미널 매크로 rhs를 TerminalInputMacro로 파싱한다(접두사가 아니면 null — app action일 수 있음).
+/// parseTerminalMacro의 3-상태 결과 — 접두사 여부와 파싱 성공을 한 번에 표현해 호출자가 매크로 접두사
+/// 목록을 다시 안 봐도 되게 한다(접두사 목록은 parseTerminalMacro 한 곳이 단일 출처).
+const MacroParse = union(enum) {
+    not_macro, // text:/esc:/ctrl: 접두사가 아님 — app action으로 시도하라.
+    invalid, // 접두사인데 payload 오류(diagnostic 이미 남김) — 그 줄을 버려라(app action 재해석 금지).
+    macro: keybinding.TerminalInputMacro,
+};
+
+/// 터미널 매크로 rhs를 파싱한다.
 ///   - `text:<문자열>`  → send_text(payload 그대로 셸로).
 ///   - `esc:<payload>`  → send_escape_sequence("\x1b" + payload — ESC를 앞에 붙인 시퀀스. 예 `esc:[2J`).
 ///   - `ctrl:<글자한자>` → send_control(그 글자의 C0 컨트롤 바이트. 예 `ctrl:[` = ESC).
 /// payload(text/esc)는 arena에 복사해 binding이 소유한다(Parsed가 사는 동안 유효). 빈 payload·여러 글자
-/// ctrl·C0 매핑 없는 ctrl은 diagnostic + null(forgiving). 매크로 접두사인데 null이면 호출자가 그 줄을 버린다.
+/// ctrl·C0 매핑 없는 ctrl은 diagnostic + `.invalid`(forgiving). 접두사가 아니면 `.not_macro`.
 fn parseTerminalMacro(
     a: std.mem.Allocator,
     diags: *std.ArrayList(Diagnostic),
     line_no: usize,
     rhs: []const u8,
-) LoadError!?keybinding.TerminalInputMacro {
+) LoadError!MacroParse {
     if (std.mem.startsWith(u8, rhs, "text:")) {
         const payload = rhs["text:".len..];
         if (payload.len == 0) {
             try diags.append(a, .{ .line = line_no, .message = "text: 뒤 내용이 비어 있음 — 무시" });
-            return null;
+            return .invalid;
         }
-        return .{ .send_text = try a.dupe(u8, payload) };
+        return .{ .macro = .{ .send_text = try a.dupe(u8, payload) } };
     }
     if (std.mem.startsWith(u8, rhs, "esc:")) {
         const payload = rhs["esc:".len..];
         if (payload.len == 0) {
             try diags.append(a, .{ .line = line_no, .message = "esc: 뒤 내용이 비어 있음 — 무시" });
-            return null;
+            return .invalid;
         }
         // ESC(0x1b)를 앞에 붙인 시퀀스. 예 `esc:[2J` → "\x1b[2J"(화면 지우기).
         const seq = try std.fmt.allocPrint(a, "\x1b{s}", .{payload});
-        return .{ .send_escape_sequence = seq };
+        return .{ .macro = .{ .send_escape_sequence = seq } };
     }
     if (std.mem.startsWith(u8, rhs, "ctrl:")) {
         const payload = rhs["ctrl:".len..];
         // 정확히 한 codepoint여야 한다(Ctrl+<글자>). UTF-8 한 글자 길이와 payload 길이가 같아야 통과.
         const seq_len = std.unicode.utf8ByteSequenceLength(if (payload.len > 0) payload[0] else 0) catch {
             try diags.append(a, .{ .line = line_no, .message = "ctrl: 뒤는 글자 한 자여야 함 — 무시" });
-            return null;
+            return .invalid;
         };
         if (payload.len != seq_len) {
             try diags.append(a, .{ .line = line_no, .message = "ctrl: 뒤는 글자 한 자여야 함 — 무시" });
-            return null;
+            return .invalid;
         }
         const cp = std.unicode.utf8Decode(payload) catch {
             try diags.append(a, .{ .line = line_no, .message = "ctrl: 글자를 못 읽음 — 무시" });
-            return null;
+            return .invalid;
         };
         // C0 컨트롤로 매핑되는 글자만(@A-Z[\]^_ space ?). 로드 시 걸러야 키 누를 때 resolve가 안 터진다.
         _ = terminal.input.controlByte(cp) catch {
             try diags.append(a, .{ .line = line_no, .message = "ctrl: 글자가 컨트롤 문자로 매핑 안 됨(@,A~Z,[,\\,],^,_,Space,? 가능) — 무시" });
-            return null;
+            return .invalid;
         };
-        return .{ .send_control = cp };
+        return .{ .macro = .{ .send_control = cp } };
     }
-    return null;
+    return .not_macro;
 }
 
 /// 색 문자열을 appearance.parseHexColor로 검증(값 의미 단일 출처)한 뒤 arena에 복사해 돌려준다.

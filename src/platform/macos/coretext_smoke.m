@@ -44,10 +44,16 @@ typedef struct {
     uint16_t row;
     uint16_t col;
     uint16_t width;
-    uint16_t reserved;
+    // 스타일 플래그(비트필드). bit0(MaruDrawCellBoldBit)=bold. Zig NativeDrawCell.style_flags와
+    // 같은 16바이트 레이아웃 — bold cell은 bold 폰트 face로 셰이핑해 굵은 glyph를 만든다.
+    uint16_t style_flags;
     uint32_t codepoint;
     uint32_t combining;
 } MaruCoreTextDrawCell;
+
+enum {
+    MaruDrawCellBoldBit = 1u << 0,
+};
 
 typedef struct {
     uint32_t cell_index;
@@ -705,8 +711,35 @@ void maru_macos_coretext_shape_draw_list(
             return;
         }
 
+        // bold cell용 폰트 변형. CTFontCreateCopyWithSymbolicTraits는 family에 bold variant가
+        // 없으면 NULL을 돌려준다 — 그 경우 bold cell도 primary(regular)로 그린다(없는 굵기를
+        // 합성하지 않는다). 있으면 bold PostScript name(예: "Menlo-Bold")이 record로 흘러
+        // rasterizer가 그 이름으로 굵은 glyph를 그린다. cell마다 새로 만들지 않으려고 한 번만 만든다.
+        CTFontRef bold_font = CTFontCreateCopyWithSymbolicTraits(
+            primary_font, 0.0, NULL, kCTFontTraitBold, kCTFontTraitBold);
+        CFStringRef bold_name = bold_font != NULL ? CTFontCopyPostScriptName(bold_font) : NULL;
+        CFDictionaryRef bold_attributes = NULL;
+        if (bold_font != NULL) {
+            const void *bold_values[] = { bold_font };
+            bold_attributes = CFDictionaryCreate(
+                kCFAllocatorDefault,
+                keys,
+                bold_values,
+                1,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks
+            );
+        }
+
         for (size_t cell_index = 0; cell_index < cell_count; cell_index++) {
             const MaruCoreTextDrawCell cell = cells[cell_index];
+            // 이 cell의 굵기를 정한다. bold variant가 없으면(bold_attributes==NULL) regular로 폴백.
+            const bool use_bold =
+                (cell.style_flags & MaruDrawCellBoldBit) != 0 && bold_attributes != NULL;
+            CFDictionaryRef cell_attributes = use_bold ? bold_attributes : attributes;
+            // run의 폰트가 이 cell이 의도한 face와 다르면(진짜 fallback) 표시한다. bold cell은
+            // bold_name과 비교해야 bold variant를 fallback으로 오탐하지 않는다.
+            CFStringRef expected_name = use_bold ? bold_name : primary_name;
             const uint32_t category = maru_category_for_codepoint(cell.codepoint);
             if (category == MaruGlyphCategorySpace || cell.width == 0) {
                 continue;
@@ -725,7 +758,7 @@ void maru_macos_coretext_shape_draw_list(
             CFAttributedStringRef attributed = CFAttributedStringCreate(
                 kCFAllocatorDefault,
                 string,
-                attributes
+                cell_attributes
             );
             if (attributed == NULL) {
                 CFRelease(string);
@@ -758,14 +791,14 @@ void maru_macos_coretext_shape_draw_list(
                 if (run_font != NULL) {
                     run_name = CTFontCopyPostScriptName(run_font);
                     if (run_name != NULL &&
-                        primary_name != NULL &&
-                        CFStringCompare(run_name, primary_name, 0) != kCFCompareEqualTo)
+                        expected_name != NULL &&
+                        CFStringCompare(run_name, expected_name, 0) != kCFCompareEqualTo)
                     {
                         run_fallback = 1;
                         result->fallback_run_count += 1;
                     }
                 }
-                CFStringRef record_font_name = run_name != NULL ? run_name : primary_name;
+                CFStringRef record_font_name = run_name != NULL ? run_name : expected_name;
 
                 CFIndex glyph_count = CTRunGetGlyphCount(run);
                 if (glyph_count > 16) {
@@ -827,6 +860,15 @@ void maru_macos_coretext_shape_draw_list(
         }
 
         CFRelease(attributes);
+        if (bold_attributes != NULL) {
+            CFRelease(bold_attributes);
+        }
+        if (bold_name != NULL) {
+            CFRelease(bold_name);
+        }
+        if (bold_font != NULL) {
+            CFRelease(bold_font);
+        }
         if (primary_name != NULL) {
             CFRelease(primary_name);
         }

@@ -515,7 +515,7 @@ TDD 방식:
 
 후속(메뉴에 자리만 두고 각자 별도 — 새 기능이라 분리):
 
-- **New Window**(멀티 윈도우 — 큼, 현재 단일 윈도우). ~~**Find**(스크롤백 검색)~~ → 완료(위 "스크롤백 Find(⌘F)"). ~~**Font Size +/−/Reset**~~ → 완료(위 "런타임 폰트 크기"). 후속: Find(⌘G·유니코드 케이스폴딩·regex/fuzzy·팝업에서 Find), 폰트(step 파라미터화·View 메뉴 항목·set_font_size).
+- **New Window**(멀티 윈도우 — 큼, 현재 단일 윈도우 — 상세·의존성·권장 순서는 아래 "백로그: 큰 미착수 항목"). ~~**Find**(스크롤백 검색)~~ → 완료(위 "스크롤백 Find(⌘F)"). ~~**Font Size +/−/Reset**~~ → 완료(위 "런타임 폰트 크기"). 후속: Find(⌘G·유니코드 케이스폴딩·regex/fuzzy·팝업에서 Find), 폰트(step 파라미터화·View 메뉴 항목·set_font_size).
 
 완료 기준:
 
@@ -567,6 +567,36 @@ TDD 방식:
 
 - plugin ABI와 권한 모델은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#plugin--wasm)의 capability 방향을 기준으로 하되, 구현 전에 사용자와 별도 논의한다.
 - plugin 실패가 surface/window 전체를 죽이지 않는다.
+
+## 백로그: 큰 미착수 항목 — 규모·의존성·권장 순서
+
+9·10단계(Workspace restore·Plugin)는 위에 목표/완료기준이 있다. 아래 둘(New Window·chrome 고급화)은 지금까지 **방향만** 적혀 있어, 착수 전 **설계 PR(레퍼런스 조사 → 분해 → ABI/경계 영향 → 사용자 합의)** 이 먼저다 — 메뉴바·split을 그렇게 했다(한 줄 스텁으로 바로 코딩하지 않는다).
+
+### New Window (멀티 윈도우) — 큼, 미착수
+
+- **현재**: 앱이 launch에 **단일 DevSession**을 만들어 NSWindow 1개에 묶는다. "세션 1개" 가정이 코드 곳곳에 깔려 있다.
+- **무엇을 건드리나**: 세션 소유권 다중화(N개 DevSession), 세션 생성/파괴 ABI(현재 없음 — launch 1회 생성뿐), Swift 윈도우 매니저(NSWindow ↔ 세션 매핑), 앱 lifecycle(마지막 창 닫힘 → 종료 정책), **글리프 atlas 소유권**(현재 per-session — memory `multi-window-atlas-ownership` 참고: 공유로 가면 폰트 크기 전체 invalidate가 충돌 → grid-per-size로 수렴).
+- **분해 스케치**: W1 세션 다중화 + create/destroy ABI → W2 `⌘N`=새 창(새 세션) + lifecycle → W3 atlas 소유권 결정(처음 per-session 유지, 프로파일 후 공유 검토) → W4 창별 포커스/메뉴 타게팅(이미 세션 단위라 대체로 자연스러움).
+- **의존**: tab/split 모델 안정(완료). 아래 의존성 절대로 **9단계 restore가 이걸 window-aware로 전제**한다.
+
+### chrome 고급화 (렌더러 프리미티브 확장) — 큼, 미착수
+
+- **무엇**(위 "chrome 고급화" 항목): 둥근 모서리·그라데이션·그림자·비례 UI 폰트(별도 아틀라스)·아이콘 텍스처·격자 무관 sub-pixel.
+- **무엇을 건드리나**: 렌더러 draw-list 프리미티브 + Metal 셰이더 + 셀/프리미티브 ABI, chrome consumer(사이드바·탭·팝업·Find·테두리) 점진 적용, **비례 UI 폰트용 2번째 atlas**(monospace glyph atlas와 별개).
+- **분해 스케치**: C1 SDF rounded-rect(둥근 모서리·테두리) 1개부터 → C2 그림자/그라데이션 → C3 비례 UI 폰트 아틀라스 → C4 아이콘 텍스처. consumer는 단계마다 점진 적용.
+- **의존**: 렌더러/ABI 확장. C3의 2번째 atlas는 New Window의 atlas 소유권과 **같은 축**(아래 소프트 결합).
+
+### 의존성·권장 순서 (권장 — 미확정, 사용자 확인 대상)
+
+- **하드 제약(반드시 지킴)**: **9단계 Workspace restore는 window-aware여야 한다.** New Window보다 먼저 하면 단일-창 스키마로 짜여, 멀티 창 도입 때 저장 포맷 migration이 강제된다 → **New Window를 먼저** 하거나, restore 스키마를 처음부터 `windows: […]` 차원으로 설계한다.
+- **소프트 결합(규율로 흡수)**: chrome의 2번째 atlas ⨯ New Window의 atlas 소유권. atlas 소유권을 캡슐화(현재 `renderer_state`가 소유)해 두면 어느 순서든 재작업이 거의 없다 — 새 chrome 코드에 "atlas는 싱글턴" 가정을 박지 않는 게 조건.
+- **권장 순서(재작업 최소 = 토대 먼저)**:
+  1. **BCE + 작은 VT 갭** — 결합 0, 순수 코어, 호환성. 아무 때나(워밍업·가성비).
+  2. **New Window** — 세션·atlas 소유권이라는 가장 큰 가정을 먼저 확정(뒤 항목이 이를 전제).
+  3. **9단계 Workspace restore** — 이제 자연히 window-aware.
+  4. **chrome 고급화** — 확정된 atlas 소유권 위에서 점진(C1 rounded-rect부터).
+  5. **tmux-CC / 10단계 Plugin** — 독립 / 먼 미래(Plugin은 착수 전 별도 논의).
+- **대안(UI 완성도를 먼저, 구조 리스크 뒤로)**: chrome 고급화를 New Window보다 앞에 — atlas 소유권만 캡슐화하고 restore 스키마를 window-aware로 두면 재작업은 낮다. 트레이드오프: 구조 변경을 미루는 대신 나중에 공유 검토할 atlas가 2개가 된다.
 
 ## 개발 순서 단일 출처
 

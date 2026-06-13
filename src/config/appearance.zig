@@ -24,6 +24,9 @@ pub const ResolvedTheme = struct {
     // 읽기만 한다 — 색 파생의 단일 출처를 여기 둬 렌더 코드가 톤을 중복 정의하지 않게 한다.
     sidebar_background: color.Rgb,
     sidebar_active: color.Rgb,
+    // 사이드바·pane 탭 바 제목 글자색. 명시 안 하면 foreground(터미널 글자색). 활성 탭은 이 색, 비활성 탭은
+    // 렌더가 background 쪽으로 흐리게 한 muted를 쓴다(mutedForeground). 색 출처를 여기 둔다.
+    sidebar_foreground: color.Rgb,
 };
 
 pub const ResolvedCursor = struct {
@@ -69,15 +72,18 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
 
 fn resolveTheme(config: theme.ThemeConfig) ResolveError!ResolvedTheme {
     const background = try parseHexColor(config.background);
+    const foreground = try parseHexColor(config.foreground);
     return .{
         .background = background,
-        .foreground = try parseHexColor(config.foreground),
+        .foreground = foreground,
         .cursor = try parseHexColor(config.cursor),
         .selection = try parseHexColor(config.selection),
         // 사이드바 색: 명시하면 그 색, null이면 background에서 파생(+24/+48). 파생을 config resolver
         // 한 곳에 둬 단일 출처로 만든다 — 명시 색도 같은 #RRGGBB 검증을 거친다(깨진 색은 여기서 막힌다).
         .sidebar_background = if (config.sidebar_background) |s| try parseHexColor(s) else lighten(background, 24),
         .sidebar_active = if (config.sidebar_active) |s| try parseHexColor(s) else lighten(background, 48),
+        // 사이드바 글자색: 명시하면 그 색, null이면 foreground(터미널 글자색)와 같게 — 기본은 기존 동작 보존.
+        .sidebar_foreground = if (config.sidebar_foreground) |s| try parseHexColor(s) else foreground,
     };
 }
 
@@ -132,6 +138,8 @@ test "default appearance resolves to renderer-friendly values" {
     // 사이드바 색은 명시 안 하면 background(#101010=0x10)에서 파생: +24=0x28, +48=0x40.
     try std.testing.expectEqual(color.Rgb{ .r = 0x28, .g = 0x28, .b = 0x28 }, resolved.theme.sidebar_background);
     try std.testing.expectEqual(color.Rgb{ .r = 0x40, .g = 0x40, .b = 0x40 }, resolved.theme.sidebar_active);
+    // 사이드바 글자색은 명시 안 하면 foreground(#e8e8e8)와 같다.
+    try std.testing.expectEqual(color.Rgb{ .r = 0xe8, .g = 0xe8, .b = 0xe8 }, resolved.theme.sidebar_foreground);
     try std.testing.expectEqual(theme.CursorShape.block, resolved.cursor.shape);
     try std.testing.expect(resolved.cursor.blink);
 }
@@ -149,6 +157,11 @@ test "appearance resolver derives sidebar colors from background and honors expl
     } });
     try std.testing.expectEqual(color.Rgb{ .r = 0x20, .g = 0x28, .b = 0x30 }, custom.theme.sidebar_background);
     try std.testing.expectEqual(color.Rgb{ .r = 0x3a, .g = 0x47, .b = 0x56 }, custom.theme.sidebar_active);
+
+    // 사이드바 글자색 명시 override: foreground와 독립적으로 정한다(기본은 foreground와 같음).
+    const fg_custom = try resolve(.{ .theme = .{ .foreground = "#e8e8e8", .sidebar_foreground = "#88aaff" } });
+    try std.testing.expectEqual(color.Rgb{ .r = 0x88, .g = 0xaa, .b = 0xff }, fg_custom.theme.sidebar_foreground);
+    try std.testing.expectError(error.InvalidHexColorDigit, resolve(.{ .theme = .{ .sidebar_foreground = "#zzzzzz" } }));
 
     // 명시 사이드바 색도 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 여기서 막힌다).
     try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .sidebar_background = "bad" } }));

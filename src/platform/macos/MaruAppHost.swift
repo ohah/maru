@@ -322,6 +322,34 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 }
 
+// 한 터미널 세션의 per-session 상태 — 창/PTY(devSession)/Metal 렌더러 + 렌더 캐시 메트릭을 묶는다.
+// 컨트롤러가 메인 창을 `primary`로 들고, quick terminal(후속)이 두 번째 인스턴스가 된다. 세션별 로직은
+// 컨트롤러 메서드가 이 surface의 상태를 읽고 쓰며 수행한다(상태만 여기 — 두 세션이 같은 메서드를 공유).
+@MainActor
+final class TerminalSurface {
+    var window: NSWindow?
+    var devSession: OpaquePointer?
+    var metalRenderer: OpaquePointer?
+
+    // 렌더 캐시(세션별). 의미는 컨트롤러의 drawMetalFrame/tickDevSession 주석 참조.
+    var lastDrawnGeneration: UInt64 = 0
+    var lastSeenMetalGeneration: UInt32 = 0
+    var lastCellWidthPx: UInt32 = 0
+    var lastCellHeightPx: UInt32 = 0
+    var lastSentBackingScale: CGFloat = 0
+    var metalNeedsRedraw = false
+    var metalFramesDrawn = 0
+    var metalRendererCreated = false
+    var latestFrameSummary = MaruAppHostDevFrameSummary()
+    var devSessionStatus: Int32 = 0
+    var lastWindowTitle = ""
+
+    // Metal terminal view = 창의 contentView. window가 살아 있는 동안 유효(window가 강참조).
+    var view: MaruMetalTerminalView? {
+        return window?.contentView as? MaruMetalTerminalView
+    }
+}
+
 @main
 @MainActor
 final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -333,36 +361,78 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private let artifactDirectory = "zig-out/maru-macos-app-dev"
     private let summaryPath = "zig-out/maru-macos-app-dev/app-dev.summary.txt"
     private var capabilities = MaruAppHostCapabilities()
-    private var window: NSWindow?
-    private var devSession: OpaquePointer?
+    // 메인 창의 per-session 상태. quick terminal(후속)이 두 번째 surface가 된다. 아래 계산 프로퍼티들은
+    // 기존 세션별 메서드가 코드 변경 없이 primary의 상태를 읽고 쓰게 하는 forwarder다(동작 불변 — 상태만 분리).
+    private var primary: TerminalSurface?
+    private var window: NSWindow? {
+        get { primary?.window }
+        set { primary?.window = newValue }
+    }
+    private var devSession: OpaquePointer? {
+        get { primary?.devSession }
+        set { primary?.devSession = newValue }
+    }
     private var tickTimer: Timer?
     // smoke 자동 종료용 one-shot timer. 창이 먼저 닫혀도 run loop에 남아 teardown 뒤
     // NSApp.terminate를 다시 부르지 않도록 저장해 두고 종료 시 invalidate한다.
     private var smokeTimer: Timer?
-    private var latestFrameSummary = MaruAppHostDevFrameSummary()
-    private var devSessionStatus = MaruAppHostController.statusOK
     private var smokeMode = false
     private var exitCode: Int32 = 0
-    // 제품 Metal renderer(maru_metal_renderer.h). dev session의 metal-frame DTO를 창의
-    // CAMetalLayer에 그린다. generation이 바뀐 frame에서만 atlas 갱신/draw한다.
-    private var metalRenderer: OpaquePointer?
-    private var lastDrawnGeneration: UInt64 = 0
-    private var metalFramesDrawn = 0
+    private var latestFrameSummary: MaruAppHostDevFrameSummary {
+        get { primary?.latestFrameSummary ?? MaruAppHostDevFrameSummary() }
+        set { primary?.latestFrameSummary = newValue }
+    }
+    private var devSessionStatus: Int32 {
+        get { primary?.devSessionStatus ?? Self.statusOK }
+        set { primary?.devSessionStatus = newValue }
+    }
+    // 제품 Metal renderer(maru_metal_renderer.h). dev session의 metal-frame DTO를 창의 CAMetalLayer에
+    // 그린다. generation이 바뀐 frame에서만 atlas 갱신/draw한다.
+    private var metalRenderer: OpaquePointer? {
+        get { primary?.metalRenderer }
+        set { primary?.metalRenderer = newValue }
+    }
+    private var lastDrawnGeneration: UInt64 {
+        get { primary?.lastDrawnGeneration ?? 0 }
+        set { primary?.lastDrawnGeneration = newValue }
+    }
+    private var metalFramesDrawn: Int {
+        get { primary?.metalFramesDrawn ?? 0 }
+        set { primary?.metalFramesDrawn = newValue }
+    }
     // surface(drawableSize/backing-scale) 변경 시 generation이 그대로여도 다시 그려야 한다.
-    private var metalNeedsRedraw = false
+    private var metalNeedsRedraw: Bool {
+        get { primary?.metalNeedsRedraw ?? false }
+        set { primary?.metalNeedsRedraw = newValue }
+    }
     // tick summary가 알려주는 metal generation(u32). 이 값이 그대로면 metalFrame() ABI 호출과
     // draw를 idle tick에서 건너뛴다.
-    private var lastSeenMetalGeneration: UInt32 = 0
+    private var lastSeenMetalGeneration: UInt32 {
+        get { primary?.lastSeenMetalGeneration ?? 0 }
+        set { primary?.lastSeenMetalGeneration = newValue }
+    }
     // renderer가 알려준 cell 픽셀 크기. resize가 같은 메트릭으로 cols/rows를 계산하도록 캐시한다.
-    private var lastCellWidthPx: UInt32 = 0
-    private var lastCellHeightPx: UInt32 = 0
+    private var lastCellWidthPx: UInt32 {
+        get { primary?.lastCellWidthPx ?? 0 }
+        set { primary?.lastCellWidthPx = newValue }
+    }
+    private var lastCellHeightPx: UInt32 {
+        get { primary?.lastCellHeightPx ?? 0 }
+        set { primary?.lastCellHeightPx = newValue }
+    }
     // dev session에 마지막으로 보낸 backing scale. 런치 후 backingScaleFactor가 늦게 Retina로
     // 정착하면(콜백이 dev session 생성 전에 발화한 경우) tick이 변화를 감지해 재-resize한다.
     // (같은 size+scale 중복 resize 방지는 Zig dev session이 담당한다.)
-    private var lastSentBackingScale: CGFloat = 0
+    private var lastSentBackingScale: CGFloat {
+        get { primary?.lastSentBackingScale ?? 0 }
+        set { primary?.lastSentBackingScale = newValue }
+    }
     // create 성공 여부를 영구 기록한다. metalRenderer는 shutdown에서 nil이 되므로 summary가
     // 종료 후 쓰일 때 "생성됐었다"를 잃지 않게 별도 플래그로 둔다.
-    private var metalRendererCreated = false
+    private var metalRendererCreated: Bool {
+        get { primary?.metalRendererCreated ?? false }
+        set { primary?.metalRendererCreated = newValue }
+    }
     // 전역(OS) 단축키: Zig가 준 descriptor를 Carbon RegisterEventHotKey로 등록한 ref들과, 각 hot-key
     // id → action(0=toggle,1=show) 맵. 핸들러(비캡처 C 함수 포인터)가 id로 action을 되찾는다. 종료 시
     // UnregisterEventHotKey + RemoveEventHandler로 정리한다.
@@ -385,6 +455,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
+
+        // 메인 창의 per-session 상태를 담을 surface를 가장 먼저 만든다 — 아래 window/devSession/렌더러
+        // 대입이 전부 이 primary로 forwarding되므로(forwarder setter), primary가 없으면 그 대입이 사라진다.
+        self.primary = TerminalSurface()
 
         let abiReady = validateZigBoundary()
         let smokeDuration = smokeDurationMs()
@@ -663,8 +737,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window.title = "Maru  scr:\(scr) win:\(win) cell:\(lastCellWidthPx)x\(lastCellHeightPx) draw:\(drawW)"
     }
 
-    // 마지막으로 설정한 창 제목(매 tick 같은 값을 재설정하지 않으려는 캐시).
-    private var lastWindowTitle = ""
+    // 마지막으로 설정한 창 제목(매 tick 같은 값을 재설정하지 않으려는 캐시). 세션별이라 surface가 든다.
+    private var lastWindowTitle: String {
+        get { primary?.lastWindowTitle ?? "" }
+        set { primary?.lastWindowTitle = newValue }
+    }
 
     // 창 제목을 셸/앱 상태에서 갱신한다 — OSC 0/2 제목이 있으면 그것, 없으면 OSC 7 cwd basename,
     // 둘 다 없으면 앱 이름("Maru"). 우선순위 로직은 Zig(core.windowTitle)가 소유하고 여기선 받아서

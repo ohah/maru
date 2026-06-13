@@ -39,6 +39,7 @@ pub const entries = [_]Entry{
     .{ .action = .focus_pane_right, .key = "focus_pane_right", .title = "Focus Pane Right" },
     .{ .action = .focus_pane_up, .key = "focus_pane_up", .title = "Focus Pane Up" },
     .{ .action = .focus_pane_down, .key = "focus_pane_down", .title = "Focus Pane Down" },
+    .{ .action = .select_all, .key = "select_all", .title = "Select All" },
     .{ .action = .{ .select_tab = 0 }, .key = "select_tab:0", .title = "Select Workspace 1" },
     .{ .action = .{ .select_tab = 1 }, .key = "select_tab:1", .title = "Select Workspace 2" },
     .{ .action = .{ .select_tab = 2 }, .key = "select_tab:2", .title = "Select Workspace 3" },

@@ -205,6 +205,9 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_right }, .action = .focus_pane_right },
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_up }, .action = .focus_pane_up },
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_down }, .action = .focus_pane_down },
+    // Cmd+A: 전체 선택(Select All). macOS 앱 보편 단축키 — Terminal.app/iTerm2도 터미널 내용 전체를 선택한다.
+    // 셸 줄-시작은 Ctrl+A(C0)라 안 겹친다. normalizeEventChar가 'a'를 'A'로 fold, 모디파이어 정확 비교.
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'A' } }, .action = .select_all },
 };
 
 pub const KeyBindingResolver = struct {

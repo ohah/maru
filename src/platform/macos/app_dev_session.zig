@@ -21,8 +21,18 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 25;
+pub const abi_version: u32 = 26;
 pub const default_queue_capacity: u32 = 16;
+
+/// 마우스 호버 위치에 따라 Swift가 세울 커서 종류(`maru_macos_app_dev_session_hover`의 out 값). Zig가 위치를
+/// 판정(터미널/divider/사이드바/탭 바/URL)하고 Swift가 NSCursor로 매핑한다 — 전부 I-beam이던 걸 영역별로 바꾼다.
+pub const CursorKind = enum(i32) {
+    default = 0, // arrow — 사이드바·pane 탭 바 등 chrome(텍스트 입력/리사이즈 아님)
+    text = 1, // iBeam — 터미널 영역(pane 안, 바 아래)
+    link = 2, // pointingHand — Cmd+hover URL
+    resize_h = 3, // resizeLeftRight ↔ — 세로 divider(좌우 split, 좌우로 끈다)
+    resize_v = 4, // resizeUpDown ↕ — 가로 divider(상하 split, 위아래로 끈다)
+};
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
 // 실제로는 init이 refreshCellMetrics를 부르므로 resize 시점엔 항상 실제 메트릭이 있다.
@@ -611,11 +621,11 @@ pub const DevSession = struct {
     // 탭 하이라이트 밴드만 담고, PR3b-2가 탭 번호·제목 glyph를 더한다. 비싸지 않아(탭 수만큼) 변경
     // 이벤트마다 통째로 다시 만든다.
     sidebar_cells: std.ArrayList(metal_frame.NativeMetalCell) = .empty,
-    // 마우스가 호버 중인 사이드바 탭 슬롯 인덱스(없으면 null). hoverUrl이 사이드바 영역에서 갱신하고,
+    // 마우스가 호버 중인 사이드바 탭 슬롯 인덱스(없으면 null). hoverCursor이 사이드바 영역에서 갱신하고,
     // rebuildSidebar가 이 슬롯에 호버 하이라이트 밴드를 그린다(활성 슬롯과 다를 때만). 후속 호버 X
     // 닫기 아이콘의 대상 슬롯도 이 값이다.
     hovered_slot: ?usize = null,
-    // 마우스가 호버 중인 per-pane 탭(없으면 null). hoverUrl이 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로
+    // 마우스가 호버 중인 per-pane 탭(없으면 null). hoverCursor이 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로
     // 갱신하고, 탭 바 렌더가 이 탭에 호버 ✕(닫기 아이콘)를 그린다. mouse down이 이 탭의 ✕ zone이면 그 Term을
     // 닫는다(사이드바 hovered_slot의 per-pane Term 버전). pane은 heap-pin이라 frame 사이 포인터가 안정.
     hovered_tab: ?TabRef = null,
@@ -2217,29 +2227,35 @@ pub const DevSession = struct {
 
     /// Cmd+hover 갱신. cmd_held가 아니거나 URL이 아니면 hover를 해제한다. URL 위면 밑줄 범위를
     /// 저장하고 true를 돌려준다 — Swift가 이 값으로 마우스 커서(pointingHand)를 정한다.
-    pub fn hoverUrl(self: *DevSession, x_px: f64, y_px: f64, cmd_held: bool) bool {
-        if (!self.surface_initialized) return false;
-        // 사이드바 영역 호버는 슬롯을 추적한다(터미널 URL 호버 아님). 마우스가 창을 벗어나면 Swift가
-        // 음수 sentinel(-1,-1)을 보내 inSidebar=false라 아래 else로 빠져 호버가 해제된다.
+    /// 마우스 호버 위치의 커서 종류를 판정하고(Swift가 NSCursor로 세움), 부수적으로 사이드바 슬롯·pane 탭 호버·
+    /// Cmd+hover URL 밑줄을 갱신한다. 영역 우선순위는 마우스 클릭(mouse down)과 같다: 사이드바 → 탭 바 → divider
+    /// → 터미널. 사이드바·탭 바=arrow(default), divider=resize(좌우 split=↔, 상하 split=↕), 터미널=iBeam(text),
+    /// Cmd+hover URL=pointingHand(link). 창 밖 sentinel(-1,-1)이면 inSidebar=false→터미널 경로로 호버 해제.
+    pub fn hoverCursor(self: *DevSession, x_px: f64, y_px: f64, cmd_held: bool) CursorKind {
+        if (!self.surface_initialized) return .text;
+        // 사이드바 영역 호버는 슬롯을 추적한다(터미널 URL 호버 아님).
         if (self.inSidebar(x_px)) {
             self.setHoveredSlot(self.sidebarSlotAt(y_px));
             self.setHoveredTab(null); // 사이드바로 가면 pane 탭 호버 해제(stale ✕ 방지)
-            if (self.hover_url_anchor != null) { // 터미널 URL 밑줄이 떠 있었으면 해제
-                self.hover_url_anchor = null;
-                self.metal_dirty = true;
-            }
-            return false; // 사이드바는 URL 아님(커서를 pointingHand로 안 바꿈)
+            self.clearHoverUrlAnchor();
+            return .default; // 사이드바 = arrow
         }
         self.setHoveredSlot(null); // 터미널 영역으로 나가면 사이드바 호버 해제
-        // 어느 pane의 탭 바 위면 호버 탭을 갱신(✕ 표시). 바 위면 URL이 아니므로 밑줄 해제하고 일찍 반환한다.
+        // 어느 pane의 탭 바 위면 호버 탭을 갱신(✕ 표시). 바 위면 URL/divider 아니므로 밑줄 해제하고 arrow.
         self.updateHoveredTab(x_px, y_px);
         if (self.hovered_tab != null) {
-            if (self.hover_url_anchor != null) {
-                self.hover_url_anchor = null;
-                self.metal_dirty = true;
-            }
-            return false;
+            self.clearHoverUrlAnchor();
+            return .default; // 탭 바 = arrow
         }
+        // divider 밴드 위면 리사이즈 커서(클릭과 같은 dividerAtPoint — 탭 바 다음 순서). 단일 panel이면 null.
+        if (self.dividerAtPoint(x_px, y_px)) |seg| {
+            self.clearHoverUrlAnchor();
+            return switch (seg.direction) {
+                .horizontal => .resize_h, // 세로 divider — 좌우로 끈다
+                .vertical => .resize_v, // 가로 divider — 위아래로 끈다
+            };
+        }
+        // 터미널 영역: Cmd+hover URL이면 link(pointingHand), 아니면 text(iBeam).
         var next: ?terminal.SelectionPoint = null;
         if (cmd_held) {
             if (self.pxToCell(x_px, y_px)) |cell| {
@@ -2253,7 +2269,16 @@ pub const DevSession = struct {
         const changed = !pointEql(self.hover_url_anchor, next);
         self.hover_url_anchor = next;
         if (changed) self.metal_dirty = true; // 밑줄이 생기거나 사라지면 다시 그린다
-        return next != null;
+        return if (next != null) .link else .text;
+    }
+
+    /// 떠 있던 Cmd+hover URL 밑줄 anchor를 해제하고 변경 시 redraw 표시. hoverCursor의 여러 분기(사이드바/탭
+    /// 바/divider)가 터미널 URL이 아닌 영역으로 갈 때 공유한다.
+    fn clearHoverUrlAnchor(self: *DevSession) void {
+        if (self.hover_url_anchor != null) {
+            self.hover_url_anchor = null;
+            self.metal_dirty = true;
+        }
     }
 
     /// hover URL의 현재 뷰포트 밑줄 범위. 매 frame 절대 좌표 anchor에서 다시 계산해 클립하므로
@@ -2799,7 +2824,7 @@ pub const DevSession = struct {
     }
 
     /// 마우스가 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로 호버 탭을 갱신하고, 아니면 null로 비운다. 활성
-    /// 탭 leaf rect를 펴 각 pane 바를 hit-test한다(마우스 이동마다 — 작은 트리라 cheap). hoverUrl이 호출한다.
+    /// 탭 leaf rect를 펴 각 pane 바를 hit-test한다(마우스 이동마다 — 작은 트리라 cheap). hoverCursor이 호출한다.
     fn updateHoveredTab(self: *DevSession, x_px: f64, y_px: f64) void {
         var next: ?TabRef = null;
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
@@ -3943,7 +3968,7 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     const bar_y: f64 = @floatFromInt(bar.y + 1);
 
     // 호버 → hovered_tab이 (활성 pane, 탭 1)로 설정된다(✕가 그려질 대상).
-    _ = session.hoverUrl(close_x, bar_y, false);
+    _ = session.hoverCursor(close_x, bar_y, false);
     try std.testing.expect(session.hovered_tab != null);
     try std.testing.expectEqual(@as(usize, 1), session.hovered_tab.?.tab);
     try std.testing.expect(m.inCloseZone(1, close_x)); // ✕ zone 안
@@ -4018,14 +4043,14 @@ test "hovering the '+' button does not mark the last tab for close" {
 
     // 마지막 탭(탭 1) 위 호버 → hovered_tab = 탭 1(정상).
     const tab1_x: f64 = @floatFromInt(bar.x + (m.tab_cols - 1) * session.cell_width_px); // 탭 영역 우측 끝(탭 1)
-    _ = session.hoverUrl(tab1_x, bar_y, false);
+    _ = session.hoverCursor(tab1_x, bar_y, false);
     try std.testing.expect(session.hovered_tab != null);
     try std.testing.expectEqual(@as(usize, 1), session.hovered_tab.?.tab);
 
     // "+" zone 위 호버 → hovered_tab 비워짐(마지막 탭로 clamp되지 않는다 — ✕ 오표시 방지).
     const plus_x: f64 = @floatFromInt(bar.x + m.tab_cols * session.cell_width_px + session.cell_width_px / 2);
     try std.testing.expect(m.inPlusZone(plus_x));
-    _ = session.hoverUrl(plus_x, bar_y, false);
+    _ = session.hoverCursor(plus_x, bar_y, false);
     try std.testing.expect(session.hovered_tab == null);
 }
 
@@ -4358,6 +4383,65 @@ test "split dividers render as thin lines (reserved bar/underline), not full cel
     try std.testing.expect(saw_underline);
 }
 
+// hoverCursor가 위치별 커서 종류를 돌려주는지(터미널=text, divider=resize, 탭 바/사이드바=default) — 전부
+// I-beam이던 걸 영역별로 바꾸는 hit-test의 코어라 결정적으로 고정한다. 실 init/spawn이라 macOS 게이트.
+test "hoverCursor returns region-specific cursor kinds" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 단일 pane: 터미널 영역(바 아래) = text(iBeam).
+    const term_x: f64 = @floatFromInt(session.active_pane_rect.x + 50);
+    const term_y: f64 = @floatFromInt(session.active_pane_rect.y + 50);
+    try std.testing.expectEqual(CursorKind.text, session.hoverCursor(term_x, term_y, false));
+
+    // pane 탭 바 위 = default(arrow).
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const bar = session.paneBarRect(lr.items[0].rect).?;
+    try std.testing.expectEqual(CursorKind.default, session.hoverCursor(@floatFromInt(bar.x + 20), @floatFromInt(bar.y + 1), false));
+
+    // 사이드바 영역(폭 있으면) = default(arrow).
+    if (session.sidebar_width_px > 0) {
+        try std.testing.expectEqual(CursorKind.default, session.hoverCursor(@floatFromInt(session.sidebar_width_px / 2), 100, false));
+    }
+
+    // 좌우 split → 세로 divider 위 = resize_h(↔). 상하 split → 가로 divider 위 = resize_v(↕).
+    try session.splitActivePane(.horizontal);
+    var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
+    defer segs.deinit(allocator);
+    try session.layoutActiveTabDividers(&segs);
+    const hseg = segs.items[0];
+    const hdiv_y: f64 = @floatFromInt(hseg.bounds.y + hseg.bounds.h / 2);
+    try std.testing.expectEqual(CursorKind.resize_h, session.hoverCursor(@floatFromInt(hseg.pos), hdiv_y, false));
+
+    try session.splitActivePane(.vertical);
+    segs.clearRetainingCapacity();
+    try session.layoutActiveTabDividers(&segs);
+    var saw_v = false;
+    for (segs.items) |seg| {
+        if (seg.direction == .vertical) {
+            saw_v = true;
+            const vdiv_x: f64 = @floatFromInt(seg.bounds.x + seg.bounds.w / 2);
+            // seam 바로 위(밴드 안·위쪽 pane 터미널 영역). 정확히 seam y면 아래 pane 탭 바가 잡혀 default다(탭 바 우선).
+            const vdiv_y: f64 = @floatFromInt(seg.pos - 3);
+            try std.testing.expectEqual(CursorKind.resize_v, session.hoverCursor(vdiv_x, vdiv_y, false));
+        }
+    }
+    try std.testing.expect(saw_v);
+}
+
 // PR5b(exit 자동 collapse): 개별 Term의 셸이 exit하면 그 Term을 자동으로 닫고(Term→pane→워크스페이스 cascade)
 // 살아있는 Term이 남아 있으면 세션을 유지한다. 비동기 PTY exit 폴링은 flaky하므로, drain이 종료를 관측한 상태
 // (term.terminated=true)를 세팅하고 reapTerminatedTerms를 직접 호출해 cascade를 결정적으로 고정한다(구조 연산
@@ -4542,15 +4626,15 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
 
     // 호버: 비활성 슬롯(0, 활성은 1) 위면 호버 밴드가 추가된다(활성 밴드 + 호버 밴드 = 2).
-    _ = session.hoverUrl(x_in, 1, false);
+    _ = session.hoverCursor(x_in, 1, false);
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
     try std.testing.expectEqual(@as(usize, 2), session.sidebar_cells.items.len);
     // 호버가 활성 슬롯(1) 위면 별도 호버 밴드 없음(활성 색 우선) → 밴드 1개.
-    _ = session.hoverUrl(x_in, slot_h + 1, false);
+    _ = session.hoverCursor(x_in, slot_h + 1, false);
     try std.testing.expectEqual(@as(?usize, 1), session.hovered_slot);
     try std.testing.expectEqual(@as(usize, 1), session.sidebar_cells.items.len);
     // 터미널 영역으로 나가면 호버 해제.
-    _ = session.hoverUrl(@floatFromInt(session.sidebar_width_px + 5), 1, false);
+    _ = session.hoverCursor(@floatFromInt(session.sidebar_width_px + 5), 1, false);
     try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
 }
 
@@ -4588,7 +4672,7 @@ test "clicking the hovered slot close zone closes that tab, elsewhere switches" 
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
 
     // 슬롯 0을 호버(✕ 표시)한 뒤 그 ✕ zone 클릭 → 탭 0 닫힘(switchTab 아님).
-    _ = session.hoverUrl(close_x, 1, false);
+    _ = session.hoverCursor(close_x, 1, false);
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
     session.mouse(1, close_x, 1);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);

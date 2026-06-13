@@ -1439,6 +1439,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// quick terminal을 토글한다 — 보이면 위로 슬라이드해 숨기고, 아니면 (없으면 lazy 생성) 상단에서 내려와 key로.
     private func toggleQuickTerminal() {
+        // 슬라이드/페이드(0.12~0.16s) 중에는 토글을 무시한다 — 안 그러면 애니메이션이 겹쳐, 먼저 시작한 hide의
+        // 완료 핸들러(orderOut)가 그 사이 새로 show한 패널을 닫아 버리는 race가 생긴다(애니메이션이 끝나
+        // quickAnimating이 풀린 뒤 다시 토글하면 된다). quickTerminalLostKey(자동 숨김)의 가드와 같은 패턴.
+        if quickAnimating { return }
         if let quick, quick.window?.isVisible == true {
             if let panel = quick.window { hideQuickTerminalAnimated(panel) }
             return

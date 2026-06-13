@@ -135,8 +135,9 @@ Node = leaf(Pane)
   터미널 쪽만이라 사이드바 슬롯/✕와 안 겹친다. **사이드바 "+" 버튼(③b)**: 탭 목록 아래 슬롯의 "+"로 새 워크스페이스.
 - **split 재배치 드래그(④)**: Term 탭을 다른 pane **본문**의 상/하/좌/우 절반(`paneDropZone` — X자 4등분)에 드롭하면
   그 방향으로 새 split이 생긴다(`moveTermToNewSplit`: Term을 새 pane에 담아 `replaceLeaf(target → split{...})`, 소스가
-  비면 collapse). 탭 바에 드롭하면 그 pane으로 Term 이동(PR-E2), 본문에 드롭하면 split 생성으로 갈린다. drop-zone
-  시각 하이라이트는 후속(④b). **호버 커서(②)**: divider=↔/↕ resize, 사이드바 경계=↔, "+"=손가락, 터미널=I-beam.
+  비면 collapse). 탭 바에 드롭하면 그 pane으로 Term 이동(PR-E2), 본문에 드롭하면 split 생성으로 갈린다. 드래그
+  중에는 드롭 타겟 zone을 **반투명 하이라이트**(④b — `premultipliedRgba`로 미리 곱해 터미널이 비침)로 미리 보인다.
+  **호버 커서(②)**: divider=↔/↕ resize, 사이드바 경계=↔, "+"=손가락, 터미널=I-beam.
 
 quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.
 

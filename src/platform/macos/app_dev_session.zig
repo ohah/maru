@@ -184,6 +184,30 @@ fn dividerHit(seg: PaneTree.DividerSeg, cell_width_px: u32, cell_height_px: u32,
 /// top/bottom=상하 split.
 const PaneDropZone = enum { left, right, top, bottom };
 
+/// 탭 드래그 중 드롭 타겟(④b 하이라이트·④ 커밋 공유 판정). `pane`은 마우스가 올라간 대상 pane, `zone`이 null이면
+/// 그 pane 탭 바(드롭 시 Term 이동, PR-E2), set이면 본문 절반(그 방향으로 새 split, ④).
+const DropTarget = struct { pane: *Pane, zone: ?PaneDropZone };
+
+/// rect를 zone 방향 절반으로 자른다(④b 하이라이트가 그 절반을 칠한다). left/right=좌우, top/bottom=상하.
+fn halfRect(rect: app.SplitRect, zone: PaneDropZone) app.SplitRect {
+    return switch (zone) {
+        .left => .{ .x = rect.x, .y = rect.y, .w = rect.w / 2, .h = rect.h },
+        .right => .{ .x = rect.x + rect.w / 2, .y = rect.y, .w = rect.w - rect.w / 2, .h = rect.h },
+        .top => .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h / 2 },
+        .bottom => .{ .x = rect.x, .y = rect.y + rect.h / 2, .w = rect.w, .h = rect.h - rect.h / 2 },
+    };
+}
+
+/// 0xAARRGGBB 색을 alpha로 **premultiply**한다(rgb를 alpha/255로 곱하고 alpha를 A로). 렌더러가 premultiplied-
+/// alpha over로 블렌딩하므로(maru_metal_shader), 반투명 하이라이트는 이렇게 미리 곱해 넘겨야 색이 안 뜬다. 순수.
+fn premultipliedRgba(rgb: u32, alpha: u8) u32 {
+    const a: u32 = alpha;
+    const r = (((rgb >> 16) & 0xFF) * a) / 255;
+    const g = (((rgb >> 8) & 0xFF) * a) / 255;
+    const b = ((rgb & 0xFF) * a) / 255;
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
 /// 점이 rect 안 어느 drop zone인지 — rect를 중앙에서 X자로 4등분해 가장 가까운 가장자리를 고른다(좌/우/상/하).
 /// rect 밖·0 크기·비유한이면 null. 렌더 drop-zone 하이라이트(후속 ④b)와 공유할 순수 함수라 OS 무관 단위 테스트.
 fn paneDropZone(rect: app.SplitRect, x_px: f64, y_px: f64) ?PaneDropZone {
@@ -686,6 +710,9 @@ pub const DevSession = struct {
     tab_drag_active: bool = false,
     tab_drag_pane: ?*Pane = null,
     tab_drag_index: usize = 0,
+    // 탭 드래그 중 현재 드롭 타겟(④b 하이라이트). zone null = 다른 pane 탭 바(이동), zone set = pane 본문 절반
+    // (그 방향 split). drag(2)가 computeDropTarget로 갱신, 렌더가 그 zone을 반투명으로 칠한다. up/취소면 null.
+    tab_drop_target: ?DropTarget = null,
     // panel 사이 divider 드래그 리사이즈 상태(PR6). down이 divider 밴드에서 시작하면 그 split 노드를 잡고,
     // drag(kind 2)가 마우스 위치를 bounds 안 ratio로 매핑해 split.ratio를 바꿔 live 재배치, up(kind 3)이 끝낸다.
     // split은 활성 탭 트리의 heap 노드(`*PaneTree.Split`) — 구조가 바뀌면(collapse/close) stale 방지로 null 비운다.
@@ -1200,6 +1227,69 @@ pub const DevSession = struct {
         self.resizeActiveTabPanes() catch {};
         self.recomputeActivePaneRect();
         self.metal_dirty = true;
+    }
+
+    /// 탭 드래그 중 마우스가 올라간 드롭 타겟을 판정한다(④b 하이라이트용 — dropTabAt의 커밋 판정과 같은 우선순위).
+    /// 다른 pane 탭 바 위 → {pane, zone=null}(이동). 자기 바 → null(재정렬, 드롭 아님). pane 본문 → {pane, zone}
+    /// (그 방향 split) — 단, target==src인데 Term 1개뿐이면 무동작이라 null. 레이아웃 실패면 null.
+    fn computeDropTarget(self: *DevSession, x_px: f64, y_px: f64) ?DropTarget {
+        const src = self.tab_drag_pane orelse return null;
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
+        for (leaf_rects.items) |lr| {
+            const bar = self.paneBarRect(lr.rect) orelse continue;
+            if (pointInRect(x_px, y_px, bar)) {
+                if (lr.leaf == src) return null; // 자기 바 — 재정렬(드롭 아님)
+                return .{ .pane = lr.leaf, .zone = null };
+            }
+        }
+        for (leaf_rects.items) |lr| {
+            const body = self.paneTermRect(lr.rect);
+            if (paneDropZone(body, x_px, y_px)) |zone| {
+                if (lr.leaf == src and src.terms.items.len <= 1) return null; // 자기-split 무의미
+                return .{ .pane = lr.leaf, .zone = zone };
+            }
+        }
+        return null;
+    }
+
+    fn dropTargetEql(a: ?DropTarget, b: ?DropTarget) bool {
+        if (a == null and b == null) return true;
+        if (a == null or b == null) return false;
+        return a.?.pane == b.?.pane and a.?.zone == b.?.zone;
+    }
+
+    /// 드롭 타겟을 바꾼다 — 바뀌면 metal_dirty(하이라이트 다시 그림). 같은 타겟이면 무동작(매 drag 이벤트 재투영 방지).
+    fn setDropTarget(self: *DevSession, target: ?DropTarget) void {
+        if (dropTargetEql(self.tab_drop_target, target)) return;
+        self.tab_drop_target = target;
+        self.metal_dirty = true;
+    }
+
+    /// 탭 드래그 중이면 현재 드롭 타겟 zone을 반투명 하이라이트 셀로 out에 append한다(④b). 본문 절반(split)이면
+    /// 그 절반을, 탭 바(이동)면 그 pane 바를 칠한다. 행마다 폭 만큼의 sentinel-bg 셀 1개(premultiplied alpha).
+    /// 드래그 중이 아니거나 타겟이 없으면 무동작. divider처럼 overlay(터미널 위·커서 아래)로 넘긴다.
+    fn appendDropTargetHighlight(self: *DevSession, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
+        if (!self.tab_drag_active) return;
+        const target = self.tab_drop_target orelse return;
+        const cw = self.cell_width_px;
+        const ch = self.cell_height_px;
+        if (cw == 0 or ch == 0) return;
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
+        const bg = premultipliedRgba(self.sidebarActiveBg() & 0x00FF_FFFF, 0x55); // 반투명 강조(≈33%)
+        for (leaf_rects.items) |lr| {
+            if (lr.leaf != target.pane) continue;
+            const zone_rect = if (target.zone) |z| halfRect(self.paneTermRect(lr.rect), z) else (self.paneBarRect(lr.rect) orelse lr.rect);
+            if (zone_rect.w == 0 or zone_rect.h == 0) return;
+            const cols = @min(@max(zone_rect.w / cw, 1), @as(u32, std.math.maxInt(u16)));
+            var y = zone_rect.y;
+            const y_end = zone_rect.y + zone_rect.h;
+            while (y < y_end) : (y += ch) out.append(self.allocator, sentinelBgCell(0, @intCast(cols), bg, zone_rect.x, y)) catch return;
+            return;
+        }
     }
 
     /// 드래그한 Term을 src pane의 src_idx에서 빼 dst pane의 dst_idx에 넣는다(cross-pane 이동). dst를 활성 pane으로,
@@ -1926,10 +2016,12 @@ pub const DevSession = struct {
         if (self.tab_drag_active and (kind == 2 or kind == 3)) {
             if (kind == 2) {
                 self.dragTabTo(x_px); // pane 내 live 재정렬(PR-E1)
+                self.setDropTarget(self.computeDropTarget(x_px, y_px)); // 드롭 타겟 하이라이트(④b)
             } else {
-                self.dropTabAt(x_px, y_px); // up: 다른 pane 바면 그 pane으로 이동(PR-E2)
+                self.dropTabAt(x_px, y_px); // up: 다른 pane 바면 그 pane으로 이동(PR-E2)·본문이면 split(④)
                 self.tab_drag_active = false;
                 self.tab_drag_pane = null;
+                self.setDropTarget(null); // 드롭 끝 — 하이라이트 해제
             }
             return;
         }
@@ -2792,6 +2884,7 @@ pub const DevSession = struct {
             // overlay로 넘겨 터미널 위·커서 아래에 그린다(seam 위라 터미널에 안 가리게). 단일 panel이면 빈 리스트.
             var pane_overlay: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
             defer pane_overlay.deinit(self.allocator);
+            self.appendDropTargetHighlight(&pane_overlay); // ④b 드롭 타겟 반투명 하이라이트(divider보다 먼저 → 아래)
             self.appendActiveTabDividers(&pane_overlay);
 
             // 활성 panel의 origin(터미널 영역 = 바 아래). 못 구하면(빈 리스트 — OOM) 터미널 영역 전체의 바 아래로 폴백.
@@ -3945,6 +4038,18 @@ test "paneDropZone classifies a point into the nearest edge half" {
     try std.testing.expect(paneDropZone(r, std.math.nan(f64), 50) == null);
 }
 
+// halfRect가 rect를 zone 방향 절반으로 자르고, premultipliedRgba가 alpha로 rgb를 미리 곱하는지(④b 하이라이트). 순수.
+test "halfRect splits a rect by zone; premultipliedRgba premultiplies rgb by alpha" {
+    const r: app.SplitRect = .{ .x = 10, .y = 20, .w = 100, .h = 80 };
+    try std.testing.expectEqual(app.SplitRect{ .x = 10, .y = 20, .w = 50, .h = 80 }, halfRect(r, .left));
+    try std.testing.expectEqual(app.SplitRect{ .x = 60, .y = 20, .w = 50, .h = 80 }, halfRect(r, .right));
+    try std.testing.expectEqual(app.SplitRect{ .x = 10, .y = 20, .w = 100, .h = 40 }, halfRect(r, .top));
+    try std.testing.expectEqual(app.SplitRect{ .x = 10, .y = 60, .w = 100, .h = 40 }, halfRect(r, .bottom));
+    // 0xFFFFFFFF를 alpha 0x80(=128)으로 → rgb 각 255*128/255=128, a=0x80. premultiplied.
+    try std.testing.expectEqual(@as(u32, 0x80_80_80_80), premultipliedRgba(0x00FF_FFFF, 0x80));
+    try std.testing.expectEqual(@as(u32, 0x00_00_00_00), premultipliedRgba(0x00FF_FFFF, 0)); // alpha 0 → 전부 0
+}
+
 // paneTermRect/paneBarRect가 leaf rect 상단에서 탭 바(cell 높이 1칸)를 떼는지 — 충분히 크면 바+터미널, 너무
 // 작으면 바 없음(터미널이 전체). 좌표/resize/렌더가 공유하는 '바 아래' 영역의 단일 출처라 헤드리스로 고정.
 test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
@@ -4411,6 +4516,68 @@ test "④: dropping a tab on a pane body edge creates a new split there (rearran
     try std.testing.expect(lr2.items[0].leaf == session.activePane()); // 새 pane이 좌측(left zone)
     try std.testing.expect(lr2.items[0].rect.x < lr2.items[1].rect.x); // 좌우 배치
     try std.testing.expect(!session.ended_seen);
+    _ = try session.tick();
+}
+
+// ④b: 탭 드래그 중 드롭 타겟 zone이 추적되고 반투명 하이라이트 셀이 나오는지 — drag(2)가 computeDropTarget로
+// tab_drop_target을 세팅, up이 비운다. 실 init/split/spawn이라 macOS 게이트.
+test "④b: tab drag tracks the drop target and emits a translucent highlight" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성)
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const left = lr.items[0].leaf;
+    const left_body = session.paneTermRect(lr.items[0].rect);
+    const left_bar = session.paneBarRect(lr.items[0].rect).?;
+    const right_bar = session.paneBarRect(lr.items[1].rect).?;
+
+    // 우 pane 탭 down(드래그 arm). 처음엔 드롭 타겟 없음.
+    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1));
+    try std.testing.expect(session.tab_drag_active);
+    try std.testing.expect(session.tab_drop_target == null);
+
+    // drag(2)로 좌 pane 본문 상단 절반 위 → 드롭 타겟 = {좌, top}.
+    session.mouse(2, @floatFromInt(left_body.x + left_body.w / 2), @floatFromInt(left_body.y + left_body.h / 5));
+    try std.testing.expect(session.tab_drop_target != null);
+    try std.testing.expectEqual(left, session.tab_drop_target.?.pane);
+    try std.testing.expectEqual(PaneDropZone.top, session.tab_drop_target.?.zone.?);
+
+    // 하이라이트 셀이 나온다(반투명: premultiplied alpha 0x55, reserved 0 fill).
+    var hl: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
+    defer hl.deinit(allocator);
+    session.appendDropTargetHighlight(&hl);
+    try std.testing.expect(hl.items.len > 0);
+    for (hl.items) |c| {
+        try std.testing.expectEqual(@as(u8, 0x55), @as(u8, @intCast((c.background >> 24) & 0xFF))); // alpha
+        try std.testing.expectEqual(@as(u16, 0), c.reserved); // 채우기(부분 사각형 아님)
+    }
+
+    // drag(2)로 좌 pane 탭 바 위 → 드롭 타겟 = {좌, null}(이동).
+    session.mouse(2, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1));
+    try std.testing.expect(session.tab_drop_target != null);
+    try std.testing.expect(session.tab_drop_target.?.zone == null);
+
+    // up → 드롭 타겟 비워짐(하이라이트 사라짐).
+    session.mouse(3, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1));
+    try std.testing.expect(session.tab_drop_target == null);
+    var hl2: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
+    defer hl2.deinit(allocator);
+    session.appendDropTargetHighlight(&hl2);
+    try std.testing.expectEqual(@as(usize, 0), hl2.items.len);
     _ = try session.tick();
 }
 

@@ -54,12 +54,14 @@ pub const QuickTerminalScreen = enum {
 };
 
 /// quick terminal 패널이 화면 어느 가장자리에서 슬라이드해 나올지. top/bottom은 전폭 + height_fraction 높이,
-/// left/right는 전고 + height_fraction 폭(가장자리에 수직인 '두께'에 비율이 적용된다). 슬라이드/배치는 Swift.
+/// left/right는 전고 + height_fraction 폭(가장자리에 수직인 '두께'에 비율이 적용된다). center는 가장자리가 없어
+/// 화면 중앙에 width·height 둘 다 height_fraction 비율로 띄우고, 슬라이드 대신 페이드 인 한다. 슬라이드/배치는 Swift.
 pub const QuickTerminalPosition = enum {
     top,
     bottom,
     left,
     right,
+    center,
 };
 
 /// quick terminal 패널의 chrome 수준. full=메인 창처럼 사이드바·탭 바를 다 보임, minimal=사이드바·탭 바 없이

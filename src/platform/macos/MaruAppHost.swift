@@ -382,6 +382,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var quickHeightFraction: CGFloat = 0.45
     private var quickScreenMode: UInt32 = UInt32(MaruAppHostQuickTerminalScreenMain.rawValue)
     private var quickPosition: UInt32 = UInt32(MaruAppHostQuickTerminalPositionTop.rawValue)
+    // center 위치인가 — 가장자리가 없어 슬라이드(setFrame) 대신 알파 페이드로 보임/숨김을 애니메이션한다.
+    private var quickIsCentered: Bool { quickPosition == UInt32(MaruAppHostQuickTerminalPositionCenter.rawValue) }
     // tick이 특정 surface를 명시적으로 대상 지정할 때 쓴다(이벤트가 아니라 타이머 구동이라 key 창으로 못 고름).
     // nil이면 입력 이벤트는 key 창 기준으로 surface를 고른다(이벤트는 key 창의 first responder로 전달되므로).
     private var explicitSurface: TerminalSurface?
@@ -1539,7 +1541,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// quick 패널의 "보임"(설정 가장자리에 붙은 위치)과 "숨김"(같은 크기로 그 가장자리 바깥으로 빠진 위치)
     /// 사각형. top/bottom은 전폭 + height_fraction 높이, left/right는 전고 + height_fraction 폭이다. 보임/숨김은
     /// **슬라이드 축(top/bottom=y, left/right=x)만 다르고** 폭·높이가 같다 — 슬라이드 중 콘텐츠 크기가 안 바뀌어
-    /// drawable/grid 재계산이 필요 없다.
+    /// drawable/grid 재계산이 필요 없다. center는 가장자리가 없어 화면 중앙에 width·height 둘 다 height_fraction
+    /// 비율로 띄우고 **보임=숨김**(같은 사각형) — 슬라이드 대신 알파 페이드를 쓰므로 위치 차이가 없다.
     private func quickPanelFrames() -> (shown: NSRect, hidden: NSRect)? {
         guard let screen = quickTargetScreen() else { return nil }
         let vf = screen.visibleFrame
@@ -1556,6 +1559,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let w = (vf.width * quickHeightFraction).rounded()
             return (NSRect(x: vf.maxX - w, y: vf.minY, width: w, height: vf.height),
                     NSRect(x: vf.maxX, y: vf.minY, width: w, height: vf.height)) // 오른쪽으로 빠짐
+        case UInt32(MaruAppHostQuickTerminalPositionCenter.rawValue):
+            // 중앙: width·height 둘 다 height_fraction 비율. 가장자리가 없어 보임=숨김(페이드로 처리).
+            let w = (vf.width * quickHeightFraction).rounded()
+            let h = (vf.height * quickHeightFraction).rounded()
+            let r = NSRect(x: (vf.midX - w / 2).rounded(), y: (vf.midY - h / 2).rounded(), width: w, height: h)
+            return (r, r)
         default: // top
             let h = (vf.height * quickHeightFraction).rounded()
             return (NSRect(x: vf.minX, y: vf.maxY - h, width: vf.width, height: h),
@@ -1573,11 +1582,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             NSApp.activate(ignoringOtherApps: true)
             return
         }
+        let centered = quickIsCentered
         panel.setFrame(frames.hidden, display: false)
+        if centered { panel.alphaValue = 0 } // 중앙은 투명에서 시작해 페이드 인(가장자리 슬라이드가 없음)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(panel.contentView)
         NSApp.activate(ignoringOtherApps: true)
-        // 크기는 최종값(frames.hidden은 보임과 폭·높이 동일)이라 지금 grid를 맞춘다 — 슬라이드 중 재계산 불필요.
+        // 크기는 최종값(frames.hidden은 보임과 폭·높이 동일)이라 지금 grid를 맞춘다 — 슬라이드/페이드 중 재계산 불필요.
         explicitSurface = quick
         resizeDevSessionFromWindow()
         explicitSurface = nil
@@ -1585,7 +1596,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         quickAnimating = true
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.16
-            panel.animator().setFrame(frames.shown, display: true)
+            // 가장자리(top/bottom/left/right)는 위치 슬라이드, center는 제자리 페이드 인.
+            if centered {
+                panel.animator().alphaValue = 1
+            } else {
+                panel.animator().setFrame(frames.shown, display: true)
+            }
         }, completionHandler: { [weak self] in
             MainActor.assumeIsolated { self?.quickAnimating = false }
         })
@@ -1597,13 +1613,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             panel.orderOut(nil)
             return
         }
+        let centered = quickIsCentered
         quickAnimating = true
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.12
-            panel.animator().setFrame(frames.hidden, display: true)
+            // 가장자리는 위치 슬라이드로 빠지고, center는 제자리 페이드 아웃.
+            if centered {
+                panel.animator().alphaValue = 0
+            } else {
+                panel.animator().setFrame(frames.hidden, display: true)
+            }
         }, completionHandler: { [weak self] in
             MainActor.assumeIsolated {
                 panel.orderOut(nil)
+                if centered { panel.alphaValue = 1 } // 다음 show를 위해 알파 복구(orderOut 후라 안 보임)
                 self?.quickAnimating = false
             }
         })

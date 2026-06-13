@@ -214,6 +214,7 @@ fn parseQuickTerminalPosition(value: []const u8) ?theme.QuickTerminalPosition {
     if (std.mem.eql(u8, value, "bottom")) return .bottom;
     if (std.mem.eql(u8, value, "left")) return .left;
     if (std.mem.eql(u8, value, "right")) return .right;
+    if (std.mem.eql(u8, value, "center")) return .center;
     return null;
 }
 
@@ -738,6 +739,13 @@ test "parse: quick-terminal options (height/auto-hide/screen) with defaults and 
         try std.testing.expectEqual(theme.QuickTerminalPosition.top, p.config.quick_terminal.position);
         try std.testing.expectEqual(theme.QuickTerminalChrome.full, p.config.quick_terminal.chrome);
         try std.testing.expectEqual(@as(usize, 6), p.diagnostics.len);
+    }
+    {
+        // center 위치(가장자리 없이 중앙 페이드).
+        var p = try parse(std.testing.allocator, "quick-terminal.position = center");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.QuickTerminalPosition.center, p.config.quick_terminal.position);
+        try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
     }
 }
 

@@ -13,6 +13,9 @@ pub const ThemeConfig = struct {
     // 명시하면 그 색으로 override해 테마가 사이드바를 background와 독립적으로 정할 수 있다(파생은 기본값).
     sidebar_background: ?[]const u8 = null,
     sidebar_active: ?[]const u8 = null,
+    // 사이드바·pane 탭 바 제목 글자색(선택, #RRGGBB). null이면 foreground(터미널 글자색)를 그대로 쓴다.
+    // 활성 탭은 이 색(full), 비활성 탭은 이 색을 background 쪽으로 흐리게 한 muted(렌더가 파생).
+    sidebar_foreground: ?[]const u8 = null,
 };
 
 pub const CursorShape = enum {

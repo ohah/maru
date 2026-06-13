@@ -131,6 +131,12 @@ Node = leaf(Pane)
   bounds)로 seam 밴드(±cell 절반+여유)를 잡고, 드래그가 `ratio = (mouse - bounds.origin)/bounds.size`(`clampRatio`)
   로 `split.ratio`를 바꿔 live 재배치한다. **탭 바가 seam에 붙어 있어** divider는 탭 바(①) 다음·pane 선택(②) 앞
   순서로 잡아 탭 바 클릭을 안 가로챈다. 초기 비율은 0.5(균등).
+- **사이드바 폭 조절(③a)**: 사이드바 우측 경계를 드래그해 폭을 바꾼다(폭은 pt로 저장 → DPI 생존). 경계 밴드는
+  터미널 쪽만이라 사이드바 슬롯/✕와 안 겹친다. **사이드바 "+" 버튼(③b)**: 탭 목록 아래 슬롯의 "+"로 새 워크스페이스.
+- **split 재배치 드래그(④)**: Term 탭을 다른 pane **본문**의 상/하/좌/우 절반(`paneDropZone` — X자 4등분)에 드롭하면
+  그 방향으로 새 split이 생긴다(`moveTermToNewSplit`: Term을 새 pane에 담아 `replaceLeaf(target → split{...})`, 소스가
+  비면 collapse). 탭 바에 드롭하면 그 pane으로 Term 이동(PR-E2), 본문에 드롭하면 split 생성으로 갈린다. drop-zone
+  시각 하이라이트는 후속(④b). **호버 커서(②)**: divider=↔/↕ resize, 사이드바 경계=↔, "+"=손가락, 터미널=I-beam.
 
 quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.
 

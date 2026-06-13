@@ -180,6 +180,22 @@ fn dividerHit(seg: PaneTree.DividerSeg, cell_width_px: u32, cell_height_px: u32,
     }
 }
 
+/// 드래그한 Term을 다른 pane '본문'에 떨어뜨릴 때의 가장자리 절반(④ split 재배치). left/right=좌우 split,
+/// top/bottom=상하 split.
+const PaneDropZone = enum { left, right, top, bottom };
+
+/// 점이 rect 안 어느 drop zone인지 — rect를 중앙에서 X자로 4등분해 가장 가까운 가장자리를 고른다(좌/우/상/하).
+/// rect 밖·0 크기·비유한이면 null. 렌더 drop-zone 하이라이트(후속 ④b)와 공유할 순수 함수라 OS 무관 단위 테스트.
+fn paneDropZone(rect: app.SplitRect, x_px: f64, y_px: f64) ?PaneDropZone {
+    if (rect.w == 0 or rect.h == 0 or !pointInRect(x_px, y_px, rect)) return null;
+    const fx = (x_px - @as(f64, @floatFromInt(rect.x))) / @as(f64, @floatFromInt(rect.w)); // [0,1)
+    const fy = (y_px - @as(f64, @floatFromInt(rect.y))) / @as(f64, @floatFromInt(rect.h));
+    const dx = @min(fx, 1 - fx); // 좌/우 가장자리까지의 거리(작을수록 가깝다)
+    const dy = @min(fy, 1 - fy); // 상/하 가장자리까지의 거리
+    if (dx <= dy) return if (fx < 0.5) .left else .right;
+    return if (fy < 0.5) .top else .bottom;
+}
+
 /// pane 탭 바 한 줄의 컬럼 분할을 **한 곳에서** 계산하는 단일 출처. 렌더(buildPaneTabBarDrawList·하이라이트)와
 /// 마우스 hit-test(탭 전환/✕ 닫기/"+"/드래그)가 모두 이 메트릭에서 파생돼 "보이는 탭/✕/+" == "클릭·호버되는 것"을
 /// 보장한다. coretext의 paneTabAreaCols/paneTabWidth(렌더가 쓰는 같은 공식)로 바를 [탭 영역 | "+" zone]으로 나눈다.
@@ -1112,6 +1128,78 @@ pub const DevSession = struct {
                 return;
             }
         }
+        // 바가 아니면 어느 pane '본문' drop-zone(상/하/좌/우 절반) 위인지 — 그 방향으로 새 split을 만든다(④:
+        // Term을 다른 pane 본문에 떨어뜨려 재배치). 단일 Term pane을 자기 본문에 떨어뜨리면 무의미라 무동작.
+        for (leaf_rects.items) |lr| {
+            const body = self.paneTermRect(lr.rect);
+            if (paneDropZone(body, x_px, y_px)) |zone| {
+                self.moveTermToNewSplit(src, self.tab_drag_index, lr.leaf, zone);
+                return;
+            }
+        }
+    }
+
+    /// 드래그한 Term을 src에서 빼 '새 pane'에 담고, target pane의 자리(leaf)를 split{...}로 바꿔 zone 방향으로
+    /// 끼운다(④: Term 탭을 다른 pane 본문에 드롭 → 거기 새 split). left/right=좌우(horizontal), top/bottom=
+    /// 상하(vertical); left/top은 새 pane이 앞(a), right/bottom은 뒤(b). 모든 alloc을 먼저 해 실패 시 트리/terms를
+    /// 안 건드린다(Term은 src에 남는다). 성공 후 새 pane으로 포커스, src가 비면 collapse, 전 panel resize.
+    /// target==src인데 src Term이 1개뿐이면(자기를 자기로 split) 무의미 — 무동작.
+    fn moveTermToNewSplit(self: *DevSession, src: *Pane, src_idx: usize, target: *Pane, zone: PaneDropZone) void {
+        if (src_idx >= src.terms.items.len) return;
+        if (target == src and src.terms.items.len <= 1) return;
+        const tab = self.activeTab();
+        const dir: app.SplitDirection = switch (zone) {
+            .left, .right => .horizontal,
+            .top, .bottom => .vertical,
+        };
+        const new_first = switch (zone) {
+            .left, .top => true,
+            .right, .bottom => false,
+        };
+        // 1) 실패 가능한 alloc을 먼저(트리/terms는 아직 안 건드림): 빈 새 pane + terms capacity + panes append + split.
+        const new_pane = self.allocator.create(Pane) catch return;
+        new_pane.* = .{};
+        new_pane.terms.ensureTotalCapacity(self.allocator, 1) catch {
+            self.allocator.destroy(new_pane);
+            return;
+        };
+        tab.panes.append(self.allocator, new_pane) catch {
+            new_pane.terms.deinit(self.allocator);
+            self.allocator.destroy(new_pane);
+            return;
+        };
+        const split = self.allocator.create(PaneTree.Split) catch {
+            _ = tab.panes.pop();
+            new_pane.terms.deinit(self.allocator);
+            self.allocator.destroy(new_pane);
+            return;
+        };
+        split.* = .{
+            .direction = dir,
+            .ratio = 0.5,
+            .a = if (new_first) .{ .leaf = new_pane } else .{ .leaf = target },
+            .b = if (new_first) .{ .leaf = target } else .{ .leaf = new_pane },
+        };
+        // 2) 트리에서 target leaf → split{...} 교체. 미발견이면 전부 원복(트리는 변형 전이라 무변).
+        if (!PaneTree.replaceLeaf(&tab.tree, target, .{ .split = split })) {
+            self.allocator.destroy(split);
+            _ = tab.panes.pop();
+            new_pane.terms.deinit(self.allocator);
+            self.allocator.destroy(new_pane);
+            return;
+        }
+        // 3) 이제 infallible: src에서 Term을 빼 새 pane으로(capacity 확보됨). Term은 heap-pin이라 surface/reader 안 움직임.
+        const term = src.terms.orderedRemove(src_idx);
+        new_pane.terms.appendAssumeCapacity(term);
+        new_pane.active_term = 0;
+        src.active_term = if (src.terms.items.len == 0) 0 else @min(src.active_term, src.terms.items.len - 1);
+        self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
+        if (src.terms.items.len == 0) self.collapsePaneIn(tab, src); // src가 비면 collapse(removeLeaf)
+        // 4) 새 pane으로 포커스 + 대표 surface 재바인딩 + 전 panel을 새 leaf rect grid로 resize + 좌표 재계산.
+        _ = self.focusPaneByPtr(new_pane);
+        self.resizeActiveTabPanes() catch {};
+        self.recomputeActivePaneRect();
+        self.metal_dirty = true;
     }
 
     /// 드래그한 Term을 src pane의 src_idx에서 빼 dst pane의 dst_idx에 넣는다(cross-pane 이동). dst를 활성 pane으로,
@@ -3843,6 +3931,20 @@ test "dividerHit detects the drag band around a split boundary" {
     try std.testing.expect(!dividerHit(h, 8, 16, std.math.nan(f64), 50)); // 비유한
 }
 
+// paneDropZone이 rect를 X자 4등분해 가장 가까운 가장자리를 고르는지(④ split 재배치 drop-zone). 순수 함수.
+test "paneDropZone classifies a point into the nearest edge half" {
+    const r: app.SplitRect = .{ .x = 0, .y = 0, .w = 100, .h = 100 };
+    try std.testing.expectEqual(PaneDropZone.left, paneDropZone(r, 10, 50).?); // 좌측 가장자리 근처
+    try std.testing.expectEqual(PaneDropZone.right, paneDropZone(r, 90, 50).?); // 우측
+    try std.testing.expectEqual(PaneDropZone.top, paneDropZone(r, 50, 10).?); // 상단
+    try std.testing.expectEqual(PaneDropZone.bottom, paneDropZone(r, 50, 90).?); // 하단
+    try std.testing.expectEqual(PaneDropZone.left, paneDropZone(r, 25, 50).?); // 중앙 좌측(dx<dy)
+    // rect 밖·0 크기·비유한이면 null.
+    try std.testing.expect(paneDropZone(r, 150, 50) == null);
+    try std.testing.expect(paneDropZone(.{ .x = 0, .y = 0, .w = 0, .h = 100 }, 0, 50) == null);
+    try std.testing.expect(paneDropZone(r, std.math.nan(f64), 50) == null);
+}
+
 // paneTermRect/paneBarRect가 leaf rect 상단에서 탭 바(cell 높이 1칸)를 떼는지 — 충분히 크면 바+터미널, 너무
 // 작으면 바 없음(터미널이 전체). 좌표/resize/렌더가 공유하는 '바 아래' 영역의 단일 출처라 헤드리스로 고정.
 test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
@@ -4259,6 +4361,57 @@ test "dragging a tab to another pane moves the Term; emptying the source collaps
     try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(session.activeTab().tree));
     try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len); // 좌가 3개 다 가짐
     try std.testing.expect(!session.ended_seen);
+}
+
+// ④: Term 탭을 다른 pane '본문 가장자리'에 드롭하면 거기에 새 split이 생기는지(split 재배치). 좌우 split에서
+// 오른쪽 pane(단일 Term)의 탭을 왼쪽 pane 본문 '좌측 절반'에 drop → 왼쪽 자리에 split{새, 좌}(좌우), 오른쪽은
+// 비어 collapse → 결과적으로 [새(옮긴 Term), 좌] 좌우 배치. 실 init/split/spawn/teardown이라 macOS 게이트.
+test "④: dropping a tab on a pane body edge creates a new split there (rearrange)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성), 각 Term 1개
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const right = session.activePane();
+    try std.testing.expect(lr.items[1].leaf == right);
+    const left_body = session.paneTermRect(lr.items[0].rect); // 좌 pane 본문(바 아래)
+    const right_bar = session.paneBarRect(lr.items[1].rect).?;
+    const moved_id = right.terms.items[0].surface.id; // 옮길 Term(우 pane의 유일 Term)
+
+    // 우 pane 탭 down(드래그 arm) → 좌 pane 본문 '좌측 절반'에 up(drop). 우는 비어 collapse, 새 split 좌우.
+    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1));
+    try std.testing.expect(session.tab_drag_active);
+    const drop_x: f64 = @floatFromInt(left_body.x + left_body.w / 10); // 좌측 가장자리 근처
+    const drop_y: f64 = @floatFromInt(left_body.y + left_body.h / 2);
+    try std.testing.expectEqual(PaneDropZone.left, paneDropZone(left_body, drop_x, drop_y).?);
+    session.mouse(3, drop_x, drop_y);
+
+    // 여전히 2 pane(새 + 좌), leafCount 2. 옮긴 Term은 새(활성) pane에, 그게 가장 왼쪽.
+    try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
+    try std.testing.expectEqual(@as(usize, 2), PaneTree.leafCount(session.activeTab().tree));
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(moved_id, session.activePane().activeTerm().surface.id); // 새 pane이 옮긴 Term·활성
+    var lr2: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr2.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr2);
+    try std.testing.expectEqual(@as(usize, 2), lr2.items.len);
+    try std.testing.expect(lr2.items[0].leaf == session.activePane()); // 새 pane이 좌측(left zone)
+    try std.testing.expect(lr2.items[0].rect.x < lr2.items[1].rect.x); // 좌우 배치
+    try std.testing.expect(!session.ended_seen);
+    _ = try session.tick();
 }
 
 // split 탭에서 다른 panel을 클릭하면 포커스가 그 panel로 옮겨가고(입력/커서가 따라간다), 활성 panel을

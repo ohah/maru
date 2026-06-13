@@ -161,6 +161,26 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "input.page-keys는 passthrough|scroll — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "quick-terminal.height")) {
+        const frac = std.fmt.parseFloat(f32, value) catch {
+            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.height가 숫자가 아님(예: 0.45) — 기본값 유지" });
+            return;
+        };
+        if (!(frac >= 0.1 and frac <= 1.0)) {
+            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.height는 0.1~1.0 — 기본값 유지" });
+            return;
+        }
+        config.quick_terminal.height_fraction = frac;
+    } else if (std.mem.eql(u8, key, "quick-terminal.auto-hide")) {
+        config.quick_terminal.auto_hide = parseBool(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.auto-hide는 true|false — 기본값 유지" });
+            return;
+        };
+    } else if (std.mem.eql(u8, key, "quick-terminal.screen")) {
+        config.quick_terminal.screen = parseQuickTerminalScreen(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.screen은 main|mouse — 기본값 유지" });
+            return;
+        };
     } else if (std.mem.eql(u8, key, "term")) {
         const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
         if (trimmed.len == 0) {
@@ -171,6 +191,12 @@ fn applyKey(
     } else {
         try diags.append(a, .{ .line = line_no, .message = "알 수 없는 key — 무시" });
     }
+}
+
+fn parseQuickTerminalScreen(value: []const u8) ?theme.QuickTerminalScreen {
+    if (std.mem.eql(u8, value, "main")) return .main;
+    if (std.mem.eql(u8, value, "mouse")) return .mouse;
+    return null;
 }
 
 fn parsePageKeys(value: []const u8) ?theme.PageKeys {
@@ -641,6 +667,43 @@ test "parse: input.page-keys scroll(default)/passthrough + invalid is forgiving"
         defer p.deinit();
         try std.testing.expectEqual(theme.PageKeys.scroll, p.config.input.page_keys); // 잘못된 값 → 기본 유지
         try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+}
+
+test "parse: quick-terminal options (height/auto-hide/screen) with defaults and forgiving" {
+    {
+        // 기본값.
+        var p = try parse(std.testing.allocator, "");
+        defer p.deinit();
+        try std.testing.expectEqual(@as(f32, 0.45), p.config.quick_terminal.height_fraction);
+        try std.testing.expectEqual(true, p.config.quick_terminal.auto_hide);
+        try std.testing.expectEqual(theme.QuickTerminalScreen.main, p.config.quick_terminal.screen);
+    }
+    {
+        var p = try parse(std.testing.allocator,
+            \\quick-terminal.height = 0.6
+            \\quick-terminal.auto-hide = false
+            \\quick-terminal.screen = mouse
+        );
+        defer p.deinit();
+        try std.testing.expectEqual(@as(f32, 0.6), p.config.quick_terminal.height_fraction);
+        try std.testing.expectEqual(false, p.config.quick_terminal.auto_hide);
+        try std.testing.expectEqual(theme.QuickTerminalScreen.mouse, p.config.quick_terminal.screen);
+        try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+    }
+    {
+        // 잘못된 값들 → 전부 기본값 유지 + diagnostic.
+        var p = try parse(std.testing.allocator,
+            \\quick-terminal.height = 2.0
+            \\quick-terminal.height = huge
+            \\quick-terminal.auto-hide = maybe
+            \\quick-terminal.screen = projector
+        );
+        defer p.deinit();
+        try std.testing.expectEqual(@as(f32, 0.45), p.config.quick_terminal.height_fraction);
+        try std.testing.expectEqual(true, p.config.quick_terminal.auto_hide);
+        try std.testing.expectEqual(theme.QuickTerminalScreen.main, p.config.quick_terminal.screen);
+        try std.testing.expectEqual(@as(usize, 4), p.diagnostics.len);
     }
 }
 

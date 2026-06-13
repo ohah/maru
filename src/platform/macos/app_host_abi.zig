@@ -436,6 +436,18 @@ pub export fn maru_macos_app_dev_session_global_hotkeys(
     return @intFromEnum(Status.ok);
 }
 
+// quick terminal 표시 옵션(config에서 파싱, 세션 동안 불변). Swift가 시작/토글 시 읽어 패널 크기·화면·
+// 자동 숨김에 쓴다. POD 복사라 소유권 문제 없음.
+pub export fn maru_macos_app_dev_session_quick_terminal_config(
+    session: ?*DevSession,
+    out_config: ?*app_dev_session.QuickTerminalConfig,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const config_out = out_config orelse return @intFromEnum(Status.null_out);
+    config_out.* = dev_session.quickTerminalConfig();
+    return @intFromEnum(Status.ok);
+}
+
 // 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면(rows-1) 계산은 dev session이
 // 권위 있는 rows로 한다(Swift가 stale frame summary로 계산하지 않게).
 pub export fn maru_macos_app_dev_session_scroll_page(

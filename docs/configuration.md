@@ -50,6 +50,9 @@ cursor.blink = true
 | `cursor.shape` | `block`\|`bar`\|`underline` | `block` | 그 외 값은 무시 |
 | `cursor.blink` | `true`\|`false` | `true` | |
 | `input.page-keys` | `passthrough`\|`scroll` | `scroll` | 메인 화면 PageUp/Down 동작. 아래 참조 |
+| `quick-terminal.height` | 숫자(0.1~1.0) | `0.45` | quick terminal 패널 높이(화면 대비 비율). 범위 밖/비숫자는 무시 |
+| `quick-terminal.auto-hide` | `true`\|`false` | `true` | 포커스 잃으면(다른 창/앱 클릭) 자동 숨김. `false`면 토글로만 |
+| `quick-terminal.screen` | `main`\|`mouse` | `main` | 어느 화면에 띄울지(`mouse`=마우스가 있는 화면). 그 외 값은 무시 |
 | `term` | 문자열 | `xterm-256color` | 셸에 줄 `$TERM`. 아래 참조 |
 | `keybind` | `<조합> = <action>` | (없음) | 여러 줄 가능. 아래 참조 |
 

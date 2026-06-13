@@ -215,6 +215,14 @@ pub const default_app_bindings = [_]AppBinding{
     // 모디파이어 정확 비교(셸 Ctrl+F[커서 전진]와 안 겹친다). Find 열림 동안엔 handleKeyEvent가 키를 검색 입력으로
     // 가로채 이 경로 안 탄다(Enter=다음 매치, Shift+Enter=이전, Esc=닫기). ⌘G(닫힌 채 다음 매치)는 후속.
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'F' } }, .action = .toggle_find },
+    // 런타임 폰트 크기(macOS/브라우저/Ghostty 관례). ⌘=(또는 ⌘+)=키우기, ⌘-(또는 ⌘_)=줄이기, ⌘0=리셋.
+    // '=' 키를 Shift와 함께 누르면 '+'가, '-'는 '_'가 오므로 양쪽을 다 묶어 키캡 표기(+/-)와 실제 글자(=/-)를
+    // 모두 잡는다(모디파이어 정확 비교). 숫자/기호라 normalizeEventChar가 그대로 통과시킨다. 셸 입력과 안 겹친다.
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '=' } }, .action = .increase_font_size },
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '+' } }, .action = .increase_font_size },
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '-' } }, .action = .decrease_font_size },
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = '_' } }, .action = .decrease_font_size },
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '0' } }, .action = .reset_font_size },
 };
 
 pub const KeyBindingResolver = struct {

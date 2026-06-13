@@ -573,12 +573,38 @@ TDD 방식:
 
 9·10단계(Workspace restore·Plugin)는 위에 목표/완료기준이 있다. 아래 둘(New Window·chrome 고급화)은 지금까지 **방향만** 적혀 있어, 착수 전 **설계 PR(레퍼런스 조사 → 분해 → ABI/경계 영향 → 사용자 합의)** 이 먼저다 — 메뉴바·split을 그렇게 했다(한 줄 스텁으로 바로 코딩하지 않는다).
 
-### New Window (멀티 윈도우) — 큼, 미착수
+### New Window (멀티 윈도우) — 설계안 (구현 전 합의 대상)
 
-- **현재**: 앱이 launch에 **단일 DevSession**을 만들어 NSWindow 1개에 묶는다. "세션 1개" 가정이 코드 곳곳에 깔려 있다.
-- **무엇을 건드리나**: 세션 소유권 다중화(N개 DevSession), 세션 생성/파괴 ABI(현재 없음 — launch 1회 생성뿐), Swift 윈도우 매니저(NSWindow ↔ 세션 매핑), 앱 lifecycle(마지막 창 닫힘 → 종료 정책), **글리프 atlas 소유권**(현재 per-session — memory `multi-window-atlas-ownership` 참고: 공유로 가면 폰트 크기 전체 invalidate가 충돌 → grid-per-size로 수렴).
-- **분해 스케치**: W1 세션 다중화 + create/destroy ABI → W2 `⌘N`=새 창(새 세션) + lifecycle → W3 atlas 소유권 결정(처음 per-session 유지, 프로파일 후 공유 검토) → W4 창별 포커스/메뉴 타게팅(이미 세션 단위라 대체로 자연스러움).
-- **의존**: tab/split 모델 안정(완료). 아래 의존성 절대로 **9단계 restore가 이걸 window-aware로 전제**한다.
+**베이스**: Ghostty의 App→Surface 소유 모델 — `App`이 `surfaces: ArrayListUnmanaged(*Surface)`를 소유하고, `new_window`가 새 NSWindow(TerminalController) + 새 surface(`ghostty_surface_new`)를 만들며, `SharedGridSet`이 폰트 grid를 ref-count로 창 간 공유, 마지막 창 닫힘은 apprt별 quit 정책(quit-after-last-window-closed), surface별 독립 렌더/IO 스레드.
+
+**현재 구조 (연구 결과 — 토대가 이미 상당)**:
+
+- **Zig/ABI는 이미 멀티 세션 지원**: `maru_macos_app_dev_session_create`(opaque 핸들 반환)·`_destroy` + 모든 ABI 함수(tick/key/resize/close…)가 세션 포인터를 명시. 전역 싱글턴·고정 슬롯 없음.
+- **quick terminal이 이미 "2번째 독립 세션"**: 별도 DevSession(별도 PTY)·별도 NSWindow(borderless panel)·별도 metalRenderer·별도 renderer_state/atlas. `ensureQuickTerminal`이 `session_create`를 2번째로 호출하는 게 정확한 선례.
+- **단일 가정은 Swift 호스트에만**: `MaruAppHost`의 `primary`/`quick` 2개 명시 필드(배열 아님), `activeSurface` forwarder(key 창 기준 2갈래), `tickDevSession`(primary→quick 고정 순서), `windowWillClose`가 무조건 `NSApp.terminate`, 메뉴/`runCatalogAction`이 primary 세션 고정.
+
+→ **결론: New Window는 주로 Swift 호스트 리팩터. Zig/ABI는 대부분 그대로(quick = 살아있는 선례).**
+
+**결정 사항 (합의 대상)**:
+
+- **D1 윈도우↔세션 = 1:1**(권장): NSWindow 1개 = DevSession 1개(탭/split은 DevSession 내부, 이미 구현). quick과 동일 패턴 → `primary`/`quick`를 `windows` 컬렉션으로.
+- **D2 atlas 소유권 = per-session 유지**(권장, memory `multi-window-atlas-ownership`): v1은 창마다 자기 atlas(quick이 이미 그럼). 공유(SharedGridSet식 grid-per-size)는 프로파일 후 후속.
+- **D3 New Window = 네이티브 액션**(권장): NSWindow 생성은 OS 소유라 Zig in-session Action(dispatchAppAction)이 못 만든다 → **File > New Window 메뉴 + ⌘N(NSMenuItem keyEquivalent)** 을 Swift가 처리(quick terminal 토글이 네이티브인 것과 같은 경계). 새 창 config = 기본(interactive shell, chrome full). Zig action.zig/keybinding.zig **무변경**.
+- **D4 lifecycle = 앱 종료**(사용자 결정 2026-06-14): 마지막 일반 창이 닫히면 앱을 종료한다 — 현재 동작(primary 닫힘=`NSApp.terminate`)의 자연스러운 일반화, 단순·기존 lifecycle 재사용. quick 패널은 카운트에서 제외(숨김이라 창이 아님). macOS 표준 "앱 유지(메뉴바만)"는 미채택 — 필요하면 config 토글(`quit-after-last-window-closed`)로 후속.
+
+**분해 (Swift 중심)**:
+
+- **W1 세션 컬렉션**: `primary`/`quick` → `windows: [WindowId: TerminalSurface]`(quick은 borderless·auto-hide를 유지하는 라벨된 특수 멤버). `activeSurface` = key 창 기준 lookup, `tickDevSession`이 모든 윈도우 순회, NSWindow delegate(resize/close)를 모든 창에.
+- **W2 New Window 생성**: `ensureQuickTerminal`의 "새 NSWindow + CAMetalLayer + `session_create` + renderer + observer" 경로를 일반 창 팩토리로 추출·재사용. File>New Window 메뉴 + ⌘N → 팩토리.
+- **W3 lifecycle**: `shutdownDevSession`을 "1개 창 정리"(세션 close+destroy + renderer destroy)로 분해해 `windowWillClose`가 그 창만 정리. D4 정책에 따라 마지막 창 처리(global hotkey 해제는 앱 종료 시 1회).
+- **W4 메뉴/포커스 타게팅**: `runCatalogAction`·global hotkey가 key 창의 세션을 대상으로(현재 primary 고정). NSMenu는 앱 1개 공유 — key 창 추적.
+- **(W5 후속)** atlas 공유(SharedGridSet식) — memory 결정대로 프로파일 후.
+
+**ABI·경계 영향**: ABI **무변경 예상**(create/destroy/tick/key/resize가 이미 세션 명시 — Swift가 opaque 핸들 컬렉션을 들면 Zig는 창 수를 몰라도 됨). 경계: window=OS(Swift 소유), session/terminal=Zig. New Window는 네이티브 액션이라 정책 일관. global_hotkey는 앱-전역 유지.
+
+**검증 전략**: Swift 헤드리스 테스트가 어려우므로 — ① Zig 반-E2E(`session_create` 2회 → 독립 세션 2개가 각자 tick/resize/입력·destroy, quick 테스트 패턴 일반화)로 멀티 세션 격리·leak 없음 고정, ② swift-check 컴파일, ③ dev 앱 수동(⌘N→2번째 창, 각자 입력·resize·닫기, 마지막 창 D4 정책).
+
+**의존**: tab/split 모델 안정(완료). **9단계 restore가 이걸 window-aware로 전제**(확정 순서의 하드 제약). 한계/후속: atlas 공유(W5), 창별 독립 config, 탭 tear-off·창 간 탭 이동.
 
 ### chrome 고급화 (렌더러 프리미티브 확장) — 큼, 미착수
 

@@ -13,8 +13,8 @@ pub const NativeMetalCell = extern struct {
     row: u16,
     col: u16,
     width: u16,
-    // overlay 종류(0=일반 cell, 2=커서 underline, 3=커서 bar — DECSCUSR). renderer가 underline/
-    // bar를 cell의 부분 사각형으로 그린다. block 커서는 일반 cell과 같은 전체 사각형이라 0.
+    // overlay 종류(0=일반 cell, 2=커서 underline, 3=커서 bar — DECSCUSR, 4=상단선, 5=우측선 — active
+    // pane 테두리). renderer가 2~5를 cell의 한 변 ~2px 띠로 그린다. block 커서는 전체 사각형이라 0.
     reserved: u16 = 0,
     codepoint: u32,
     slot_id: u32,

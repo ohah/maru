@@ -1137,6 +1137,41 @@ pub const DevSession = struct {
         }
     }
 
+    /// minimal 세션에서 split이면 **활성 pane 둘레에 얇은 테두리**(focus accent)를 overlay 셀로 그린다 — 사이드바·탭
+    /// 바가 없는 minimal에선 커서 말고는 어느 pane이 입력을 받는지 단서가 없으므로(full은 탭 바 하이라이트가 보여줌).
+    /// 4변을 reserved 부분 사각형(3=좌·5=우·4=상·2=하, 각 ~2px 안쪽 띠)으로 그린다 — 좌/우는 행마다, 상/하는 폭 전체
+    /// 한 칸. 색은 divider와 같은 sidebarActiveBg. chrome_minimal이 아니거나 단일 pane(테두리 불필요)이면 무동작.
+    fn appendActivePaneBorder(self: *DevSession, out: *std.ArrayList(metal_frame.NativeMetalCell), rect: app.SplitRect, pane_count: usize) void {
+        if (!self.chrome_minimal) return; // full은 활성 pane을 탭 바 하이라이트로 구분한다
+        if (pane_count <= 1) return; // split 아니면 전체가 활성 pane이라 테두리 불필요
+        const cw = self.cell_width_px;
+        const ch = self.cell_height_px;
+        if (cw == 0 or ch == 0 or rect.w == 0 or rect.h == 0) return;
+        const color = self.sidebarActiveBg();
+
+        // 좌(3)·우(5) 세로선: 행마다 한 칸. 우측은 cell 우측 ~2px라 origin_x를 rect 우변 한 칸 안쪽에 둔다.
+        const right_origin_x: u32 = rect.x + rect.w -| cw;
+        const y_end = rect.y + rect.h;
+        var y = rect.y;
+        while (y < y_end) : (y += ch) {
+            var l = sentinelBgCell(0, 1, color, rect.x, y);
+            l.reserved = 3; // 좌측 ~2px
+            out.append(self.allocator, l) catch return;
+            var r = sentinelBgCell(0, 1, color, right_origin_x, y);
+            r.reserved = 5; // 우측 ~2px
+            out.append(self.allocator, r) catch return;
+        }
+
+        // 상(4)·하(2) 가로선: rect 폭 전체 한 칸. 하단은 cell 하단 ~2px라 origin_y를 rect 하변 한 칸 안쪽에 둔다.
+        const cols = @min(@max(rect.w / cw, 1), @as(u32, std.math.maxInt(u16)));
+        var t = sentinelBgCell(0, @intCast(cols), color, rect.x, rect.y);
+        t.reserved = 4; // 상단 ~2px
+        out.append(self.allocator, t) catch return;
+        var b = sentinelBgCell(0, @intCast(cols), color, rect.x, y_end -| ch);
+        b.reserved = 2; // 하단 ~2px
+        out.append(self.allocator, b) catch return;
+    }
+
     /// 마우스 (x,y)가 활성 탭 어느 divider의 드래그 밴드 안인가 — 맞으면 그 DividerSeg, 아니면 null. 밴드는 경계
     /// pos ± (cell 절반 + margin), 교차축은 bounds 안. 렌더 divider(같은 layoutDividers)와 정렬돼 "보이는 =
     /// 잡히는". 단일 panel이면 항상 null(divider 없음). 마우스 down(1) divider 드래그 시작 판정에 쓴다.
@@ -3123,14 +3158,18 @@ pub const DevSession = struct {
             const active_fallback = self.paneTermRect(self.termRect());
             var active_origin_x: u32 = active_fallback.x;
             var active_origin_y: u32 = active_fallback.y;
+            var active_term_rect: app.SplitRect = active_fallback;
             for (leaf_rects.items) |lr| {
                 if (lr.leaf == active_pane) {
                     const t = self.paneTermRect(lr.rect);
                     active_origin_x = t.x;
                     active_origin_y = t.y;
+                    active_term_rect = t;
                     break;
                 }
             }
+            // minimal split: 활성 pane 둘레 얇은 테두리(full·단일 pane이면 무동작). divider 위에 얹어 focus를 보인다.
+            self.appendActivePaneBorder(&pane_overlay, active_term_rect, leaf_rects.items.len);
 
             var pane_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
             defer pane_frames.deinit(self.allocator);
@@ -4046,6 +4085,64 @@ test "minimal tab indicator: adaptive dots appear only in minimal with >1 tab" {
         try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
         out.clearRetainingCapacity();
         session.appendMinimalTabIndicator(&out);
+        try std.testing.expectEqual(@as(usize, 0), out.items.len); // full → 무동작
+    }
+}
+
+test "minimal active pane border: 4 edges only in minimal split" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // refreshCellMetrics(cell 메트릭)
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
+    defer out.deinit(allocator);
+    const rect: app.SplitRect = .{ .x = 0, .y = 0, .w = 400, .h = 600 };
+
+    // ① minimal: 단일 pane이면 무동작, split(>1)이면 4변 테두리(reserved 2/3/4/5)·색=sidebarActiveBg.
+    {
+        const session = try allocator.create(DevSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .chrome_minimal = 1,
+        });
+        defer session.deinit();
+        _ = try session.resize(800, 600, 1000);
+
+        out.clearRetainingCapacity();
+        session.appendActivePaneBorder(&out, rect, 1); // 단일 pane
+        try std.testing.expectEqual(@as(usize, 0), out.items.len);
+
+        out.clearRetainingCapacity();
+        session.appendActivePaneBorder(&out, rect, 2); // split
+        try std.testing.expect(out.items.len >= 6); // 좌/우(행마다 2) + 상/하 2
+        // 4변이 모두 그려졌는지(reserved 2=하·3=좌·4=상·5=우 전부 등장) + 색은 focus accent.
+        var seen = [_]bool{false} ** 6;
+        for (out.items) |c| {
+            try std.testing.expectEqual(session.sidebarActiveBg(), c.background);
+            if (c.reserved < seen.len) seen[c.reserved] = true;
+        }
+        try std.testing.expect(seen[2] and seen[3] and seen[4] and seen[5]);
+    }
+
+    // ② full(chrome_minimal=0): split이어도 테두리 없음(탭 바 하이라이트가 활성 pane을 보여줌).
+    {
+        const session = try allocator.create(DevSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .chrome_minimal = 0,
+        });
+        defer session.deinit();
+        _ = try session.resize(800, 600, 1000);
+        out.clearRetainingCapacity();
+        session.appendActivePaneBorder(&out, rect, 2);
         try std.testing.expectEqual(@as(usize, 0), out.items.len); // full → 무동작
     }
 }

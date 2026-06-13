@@ -166,12 +166,19 @@ static void maru_fill_cell_quad(
     float px_top = py_top;
     float px_bottom = py_top + cell_h;
     // 커서 모양(DECSCUSR): reserved 2=underline(하단 ~15%), 3=bar(좌측 ~15%, 최소 2px). block(0)은 전체 cell.
+    // 4=상단선, 5=우측선(active pane 테두리용 — 2/3의 반대 변). 모두 cell의 한 변 ~2px 띠로 그린다.
     if (cell.reserved == 2) {
         const float thickness = fmaxf(2.0f, cell_h * 0.15f);
         px_top = px_bottom - thickness;
     } else if (cell.reserved == 3) {
         const float thickness = fmaxf(2.0f, cw * 0.15f);
         px_right = px_left + thickness;
+    } else if (cell.reserved == 4) {
+        const float thickness = fmaxf(2.0f, cell_h * 0.15f);
+        px_bottom = px_top + thickness;
+    } else if (cell.reserved == 5) {
+        const float thickness = fmaxf(2.0f, cw * 0.15f);
+        px_left = px_right - thickness;
     }
     const float left = (px_left / drawable_w) * 2.0f - 1.0f;
     const float right = (px_right / drawable_w) * 2.0f - 1.0f;

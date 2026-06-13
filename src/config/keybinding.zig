@@ -211,6 +211,10 @@ pub const default_app_bindings = [_]AppBinding{
     // Cmd+Shift+P: 커맨드 팝업 토글(VS Code/Sublime/Zed 관례). 'p'→'P' fold, 모디파이어 정확 비교(Shift 필수라
     // Cmd+P[프린트 관습]와 안 겹친다). 팝업 열림 동안엔 handleKeyEvent가 키를 팝업으로 가로채 이 경로 안 탄다.
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'P' } }, .action = .toggle_command_palette },
+    // Cmd+F: 스크롤백 Find 토글(macOS 보편 Find 단축키 — Terminal.app/iTerm2/브라우저 관례). 'f'→'F' fold,
+    // 모디파이어 정확 비교(셸 Ctrl+F[커서 전진]와 안 겹친다). Find 열림 동안엔 handleKeyEvent가 키를 검색 입력으로
+    // 가로채 이 경로 안 탄다(Enter=다음 매치, Shift+Enter=이전, Esc=닫기). ⌘G(닫힌 채 다음 매치)는 후속.
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'F' } }, .action = .toggle_find },
 };
 
 pub const KeyBindingResolver = struct {

@@ -8,6 +8,10 @@ pub const ThemeConfig = struct {
     foreground: []const u8 = "#e8e8e8",
     cursor: []const u8 = "#ffffff",
     selection: []const u8 = "#334455",
+    // 스크롤백 Find(⌘F) 매치 하이라이트 배경(#RRGGBB). search_match = 뷰 안 모든 매치, search_match_current
+    // = 현재(네비게이션) 매치. selection(파랑 계열)과 구분되게 앰버 계열 기본값을 쓴다 — 현재 매치가 더 밝다.
+    search_match: []const u8 = "#554a1a",
+    search_match_current: []const u8 = "#997722",
     // 세로 탭 사이드바 색(선택, #RRGGBB). null이면 background에서 파생한다(resolveTheme의 lighten):
     // sidebar_background는 배경 +24(코히어런트하게 살짝 밝게), sidebar_active는 +48(활성 탭 하이라이트).
     // 명시하면 그 색으로 override해 테마가 사이드바를 background와 독립적으로 정할 수 있다(파생은 기본값).

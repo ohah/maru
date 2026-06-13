@@ -5431,6 +5431,42 @@ test "Cmd+T opens a new Term in the active pane; Cmd+Shift+T opens a workspace" 
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
 }
 
+// Cmd+1~9가 N번째 워크스페이스(사이드바 탭)로 전환하는지(select_tab) — 사용자 요청. 범위 밖(탭보다 큰 번호)은
+// no-op. 실 init/spawn이라 macOS 게이트.
+test "Cmd+1..9 switches to the Nth workspace (out-of-range is a no-op)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 워크스페이스 3개(⌘⇧T 두 번). 활성 = 마지막(2).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'T' }, .modifiers = .{ .command = true, .shift = true } });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'T' }, .modifiers = .{ .command = true, .shift = true } });
+    try std.testing.expectEqual(@as(usize, 3), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
+
+    // Cmd+1 → 워크스페이스 0.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '1' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
+    // Cmd+3 → 워크스페이스 2.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '3' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
+    // Cmd+2 → 워크스페이스 1.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '2' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    // Cmd+9 → 9번째 없음(3개뿐) → no-op(활성 불변).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '9' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+}
+
 // handleKeyEvent가 사용자 config의 keybind를 적용하는지(빈 resolver가 아니라 loaded_config.keyBindingResolver())
 // — 기본엔 없는 조합(Cmd+E)을 사용자 바인딩으로 new_term에 묶어 실제로 디스패치되는지 본다. 실 PTY라 macOS 게이트.
 test "handleKeyEvent applies user config keybindings (resolver wired from loaded_config)" {

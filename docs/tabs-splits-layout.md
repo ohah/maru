@@ -108,8 +108,9 @@ Node = leaf(Pane)
 - **Term(가로 탭) 키(PR-B, cmux 모델)**: 한 pane은 여러 Term(터미널)을 가로 탭으로 든다. `Cmd+T`=활성 pane에
   **새 Term**, `Cmd+]`/`Cmd+[`=활성 pane 안에서 **다음/이전 Term**(wrap). 워크스페이스(사이드바 탭)는 한 단계
   위라 `Cmd+Shift+T`=**새 워크스페이스**, `Cmd+Shift+]`/`Cmd+Shift+[`=워크스페이스 전환으로 **shift로 갈린다**
-  (modifier 정확 비교). **베이스**: cmux의 ⌘T(pane 내 새 탭)·⌘[](탭 전환). 워크스페이스 생성은 cmux처럼 **사이드바
-  하단 "+" 버튼**(③b)으로도 한다 — 탭 목록 아래 슬롯의 "+"를 클릭하면 새 워크스페이스(`Cmd+Shift+T`와 같은 `newTab`).
+  (modifier 정확 비교). 추가로 **`Cmd+1`~`Cmd+9`=N번째 워크스페이스로 직접 전환**(`select_tab(N-1)`, 범위 밖이면
+  no-op — Safari/Terminal.app/iTerm2식). **베이스**: cmux의 ⌘T(pane 내 새 탭)·⌘[](탭 전환). 워크스페이스 생성은
+  cmux처럼 **사이드바 하단 "+" 버튼**(③b)으로도 한다 — 탭 목록 아래 슬롯의 "+"를 클릭하면 새 워크스페이스(`newTab`).
 - **닫기(PR5a + PR-B cascade)**: `Cmd+W`는 **cmux식 계층 cascade** — 활성 pane에 Term이 여럿이면 **활성 Term**을
   닫고, Term이 1개면 **pane**을(split이면 형제로 collapse, 형제가 빈자리 차지) 닫고, pane이 1개면 **워크스페이스**를
   (마지막이면 창) 닫는다. 즉 Cmd+W를 반복하면 Term → pane → 워크스페이스 순으로 하나씩 닫힌다.

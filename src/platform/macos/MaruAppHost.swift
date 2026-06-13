@@ -67,7 +67,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         updateDrawableSize()
         // backing scale이 바뀌면 dev session에 새 scale로 resize를 다시 보내, glyph가 device
         // 해상도로 rasterize되고 cell 메트릭이 갱신되게 한다(런치 후 Retina 정착 등).
-        controller?.handleBackingScaleChange()
+        controller?.handleBackingScaleChange(in: self)
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -392,6 +392,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if let quick, quick.window?.isKeyWindow == true { return quick }
         return primary
     }
+
+    /// 주어진 surface를 강제 대상으로 클로저를 실행한다(그동안 forwarder가 그 surface를 가리킨다). primary 창의
+    /// delegate 콜백(windowDidResize 등)·앱 요약처럼 "특정 창"이 대상이어야 하는데, 그 순간 quick 패널이 key라
+    /// activeSurface의 key-창 기준이 엉뚱한 surface를 고를 수 있는 경우에 쓴다(tick이 explicitSurface를 쓰는 것과 같은 메커니즘).
+    private func withSurface(_ surface: TerminalSurface?, _ body: () -> Void) {
+        let previous = explicitSurface
+        explicitSurface = surface
+        defer { explicitSurface = previous }
+        body()
+    }
+
+    /// 주어진 뷰가 속한 surface(그 뷰의 창으로 판정). 뷰에서 비롯된 콜백(backing scale 변경 등)이 key 창이 아니라
+    /// '그 뷰의' surface를 대상으로 하게 한다 — quick 뷰가 fire했는데 primary가 key면 quick을 골라야 한다.
+    private func surfaceForView(_ view: NSView) -> TerminalSurface? {
+        if let quick, view.window === quick.window { return quick }
+        return primary
+    }
+
     private var window: NSWindow? {
         get { activeSurface?.window }
         set { activeSurface?.window = newValue }
@@ -546,7 +564,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 부르므로, 여기서 다시 tick하면 재진입 terminate가 된다. 마지막 counter는
         // shutdownDevSession의 close()가 summary에 담는다.
         shutdownDevSession()
-        writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+        // 종료 요약은 메인 세션(primary) 기준 — quick 패널이 key인 채 종료해도 forwarder가 quick으로 새지 않게.
+        withSurface(primary) {
+            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -560,28 +581,38 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func windowWillClose(_ notification: Notification) {
         _ = notification
         shutdownDevSession()
-        writeSummary(visibleUI: true, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+        // 컨트롤러는 primary 창의 delegate라 이 콜백은 항상 primary 것. 요약도 primary 기준으로(그 순간 quick
+        // 패널이 key여도 forwarder가 quick으로 새지 않게).
+        withSurface(primary) {
+            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+        }
         NSApp.terminate(nil)
     }
 
     func windowDidResize(_ notification: Notification) {
         _ = notification
-        // drawableSize를 창에 맞춰 즉시 갱신한다(setFrameSize 경로에만 의존하지 않는다). 이게
-        // 늦으면 CAMetalLayer가 옛 크기 drawable을 새 창에 스케일해 글자가 늘어나 보인다.
-        metalTerminalView?.updateDrawableSize()
-        // 라이브 드래그 중에는 grid resize(+PTY SIGWINCH)를 보류한다. 매 단계 SIGWINCH를 보내면
-        // zsh는 상대 커서 이동(\e[A)으로 redraw하는데 reflow를 한 박자씩 못 따라와, 명령이 여러 줄로
-        // 늘어나는 좁은 폭에서 프롬프트가 중복된다. 드래그가 끝나면(windowDidEndLiveResize) 최종
-        // 크기로 한 번만 resize해 zsh가 한 번 redraw하게 한다(단일 resize는 reflow가 Ghostty와 일치).
-        // 비-라이브(프로그램/스모크) resize는 즉시 적용한다.
-        if metalTerminalView?.inLiveResize == true { return }
-        resizeDevSessionFromWindow()
+        // 컨트롤러는 primary 창의 delegate라(quick 패널은 알림 관찰을 씀) 이 resize는 항상 primary 창 것이다.
+        // primary를 명시 대상으로 한다 — 안 그러면 그 순간 quick 패널이 key일 때 forwarder가 quick을 리사이즈한다.
+        withSurface(primary) {
+            // drawableSize를 창에 맞춰 즉시 갱신한다(setFrameSize 경로에만 의존하지 않는다). 이게
+            // 늦으면 CAMetalLayer가 옛 크기 drawable을 새 창에 스케일해 글자가 늘어나 보인다.
+            metalTerminalView?.updateDrawableSize()
+            // 라이브 드래그 중에는 grid resize(+PTY SIGWINCH)를 보류한다. 매 단계 SIGWINCH를 보내면
+            // zsh는 상대 커서 이동(\e[A)으로 redraw하는데 reflow를 한 박자씩 못 따라와, 명령이 여러 줄로
+            // 늘어나는 좁은 폭에서 프롬프트가 중복된다. 드래그가 끝나면(windowDidEndLiveResize) 최종
+            // 크기로 한 번만 resize해 zsh가 한 번 redraw하게 한다(단일 resize는 reflow가 Ghostty와 일치).
+            // 비-라이브(프로그램/스모크) resize는 즉시 적용한다.
+            if metalTerminalView?.inLiveResize == true { return }
+            resizeDevSessionFromWindow()
+        }
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
         _ = notification
-        metalTerminalView?.updateDrawableSize()
-        resizeDevSessionFromWindow()
+        withSurface(primary) { // primary 창의 delegate 콜백 — primary를 명시 대상으로(위 windowDidResize와 같은 이유).
+            metalTerminalView?.updateDrawableSize()
+            resizeDevSessionFromWindow()
+        }
     }
 
     private func validateZigBoundary() -> Bool {
@@ -706,9 +737,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // backing scale(Retina) 변경 시 dev session에 resize를 다시 보낸다. 그래야 dev session이
     // 새 scale로 glyph를 rasterize하고 cell 메트릭을 device 해상도에 맞춘다. 런치 시점에
     // backingScaleFactor가 아직 1.0이고 창이 Retina로 정착하며 바뀌는 경우를 잡는다.
-    func handleBackingScaleChange() {
+    func handleBackingScaleChange(in view: NSView) {
         guard !smokeMode else { return }
-        resizeDevSessionFromWindow()
+        // backing scale 변경은 그 변경이 일어난 '뷰의' 창(=surface)을 대상으로 resize해야 한다 — quick 뷰가
+        // fire했는데 primary가 key면(또는 반대) activeSurface가 엉뚱한 surface를 고를 수 있으므로 명시한다.
+        withSurface(surfaceForView(view)) {
+            resizeDevSessionFromWindow()
+        }
     }
 
     private func startDevSession(smokeMode: Bool) -> Bool {

@@ -661,6 +661,12 @@ pub const DevSession = struct {
     // init에서 loaded_config.global_bindings를 global_hotkey.descriptorFor로 매핑(매핑 불가 chord는 제외).
     // Swift가 `maru_macos_app_dev_session_global_hotkeys`로 읽어 RegisterEventHotKey로 등록한다(a2). owned.
     global_hotkeys: std.ArrayList(GlobalHotkey) = .empty,
+    // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
+    // 마다 leaf rect/divider seg 레이아웃을 새 ArrayList에 할당·해제하던 churn을 없앤다 — 레이아웃은 매번
+    // 다시 계산하므로(작은 트리라 cheap) 결과는 항상 최신이라 stale 캐시 위험이 없고, 버퍼 capacity만 재사용한다.
+    // hover/divider hit-test는 메인 스레드에서 순차 실행되고 서로 다른 버퍼라 aliasing이 없다(reentrancy 없음).
+    hover_leaf_scratch: std.ArrayList(PaneTree.LeafRect) = .empty,
+    hover_divider_scratch: std.ArrayList(PaneTree.DividerSeg) = .empty,
     // input.page-keys=scroll이면 메인 화면에서 PageUp/Down이 Maru 스크롤백을 스크롤한다. 기본
     // (false=passthrough)은 xterm/Ghostty처럼 \e[5~/\e[6~를 PTY로 보낸다.
     page_keys_scroll: bool = false,
@@ -1060,9 +1066,10 @@ pub const DevSession = struct {
     /// 잡히는". 단일 panel이면 항상 null(divider 없음). 마우스 down(1) divider 드래그 시작 판정에 쓴다.
     fn dividerAtPoint(self: *DevSession, x_px: f64, y_px: f64) ?PaneTree.DividerSeg {
         if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
-        var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
-        defer segs.deinit(self.allocator);
-        self.layoutActiveTabDividers(&segs) catch return null;
+        // 매 이동마다 새 ArrayList를 안 만들고 재사용 scratch에 divider seg를 다시 깐다(할당 churn 제거).
+        const segs = &self.hover_divider_scratch;
+        segs.clearRetainingCapacity();
+        self.layoutActiveTabDividers(segs) catch return null;
         for (segs.items) |seg| {
             if (dividerHit(seg, self.cell_width_px, self.cell_height_px, x_px, y_px)) return seg;
         }
@@ -3256,9 +3263,10 @@ pub const DevSession = struct {
     /// 탭 leaf rect를 펴 각 pane 바를 hit-test한다(마우스 이동마다 — 작은 트리라 cheap). hoverCursor이 호출한다.
     fn updateHoveredTab(self: *DevSession, x_px: f64, y_px: f64) void {
         var next: ?TabRef = null;
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        if (self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects)) |_| {
+        // 매 이동마다 새 ArrayList를 안 만들고 재사용 scratch에 레이아웃을 다시 깐다(할당 churn 제거, 결과는 최신).
+        const leaf_rects = &self.hover_leaf_scratch;
+        leaf_rects.clearRetainingCapacity();
+        if (self.activeTabLeafRects(self.allocator, self.termRect(), leaf_rects)) |_| {
             for (leaf_rects.items) |lr| {
                 const bar = self.paneBarRect(lr.rect) orelse continue;
                 if (pointInRect(x_px, y_px, bar)) {
@@ -3372,6 +3380,8 @@ pub const DevSession = struct {
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
         self.global_hotkeys.deinit(self.allocator);
+        self.hover_leaf_scratch.deinit(self.allocator);
+        self.hover_divider_scratch.deinit(self.allocator);
         // 1) 각 탭의 각 panel의 각 Term live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'.
         //    detach 후 deinit이 reader thread join + fd/queue 해제(이동 금지 계약이라 in-place로 정리).
         for (self.tabs.items) |tab| {

@@ -84,6 +84,11 @@ pub const QuickTerminalConfig = struct {
     position: QuickTerminalPosition = .top,
     // chrome 수준(full=사이드바·탭 바 보임, minimal=터미널만). 기본 full.
     chrome: QuickTerminalChrome = .full,
+    // minimal 모드에서 탭(워크스페이스·pane Term)을 만들 수 있게 할지. 기본 false — minimal은 단일 스크래치
+    // 터미널이라 ⌘T(새 Term)·⌘⇧T(새 워크스페이스)를 무동작으로 막는다(사이드바·탭 바가 없어 안 보이는 탭
+    // 생성을 차단; split은 divider로 보이므로 유지). true면 탭을 허용한다(파워유저용 — ⌘1..9/⌘]로만 전환).
+    // full 모드는 이 값과 무관하게 탭이 항상 동작한다(chrome이 탭을 보여줌). 적용은 그 세션 dispatch(Zig)가 한다.
+    minimal_tabs: bool = false,
 };
 
 pub const Config = struct {

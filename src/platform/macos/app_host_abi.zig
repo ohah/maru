@@ -448,6 +448,37 @@ pub export fn maru_macos_app_dev_session_quick_terminal_config(
     return @intFromEnum(Status.ok);
 }
 
+// 커맨드 카탈로그(메뉴바·커맨드 팝업이 그릴 액션 목록). config/액션에서 한 번 만들어 세션 동안 불변이라
+// Swift가 시작 시 한 번 읽는다. 배열·문자열 전부 dev session 소유(destroy까지 유효). 비어 있으면
+// out_ptr=null/out_count=0. global_hotkeys와 같은 패턴.
+pub export fn maru_macos_app_dev_session_command_catalog(
+    session: ?*DevSession,
+    out_ptr: ?*?[*]const app_dev_session.CommandEntry,
+    out_count: ?*usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
+    const count_out = out_count orelse return @intFromEnum(Status.null_out);
+    const items = dev_session.commandCatalog();
+    ptr_out.* = if (items.len > 0) items.ptr else null;
+    count_out.* = items.len;
+    return @intFromEnum(Status.ok);
+}
+
+// 메뉴/팝업이 고른 액션 한 개를 실행한다 — action_key(카탈로그가 준 식별자) 바이트를 받아 Zig가
+// parseAction → dispatchAppAction. 모르는 키면 invalid_config(무동작). 판정·실행은 Zig가 소유하고
+// Swift는 문자열만 왕복한다(native 최소 — keybind 디스패치와 같은 규율).
+pub export fn maru_macos_app_dev_session_run_action(
+    session: ?*DevSession,
+    bytes: ?[*]const u8,
+    len: usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const ptr = bytes orelse return @intFromEnum(Status.null_out);
+    if (!dev_session.runAction(ptr[0..len])) return @intFromEnum(Status.invalid_config);
+    return @intFromEnum(Status.ok);
+}
+
 // 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면(rows-1) 계산은 dev session이
 // 권위 있는 rows로 한다(Swift가 stale frame summary로 계산하지 않게).
 pub export fn maru_macos_app_dev_session_scroll_page(
@@ -575,6 +606,8 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@alignOf(c.MaruAppHostQuickTerminalConfig), @alignOf(app_dev_session.QuickTerminalConfig));
     try std.testing.expectEqual(@as(u32, c.MaruAppHostQuickTerminalChromeMinimal), @intFromEnum(maru.config.theme.QuickTerminalChrome.minimal));
     try std.testing.expectEqual(@as(u32, c.MaruAppHostQuickTerminalPositionCenter), @intFromEnum(maru.config.theme.QuickTerminalPosition.center));
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostCommand), @sizeOf(app_dev_session.CommandEntry));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostCommand), @alignOf(app_dev_session.CommandEntry));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevFrameSummary), @sizeOf(DevFrameSummary));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostDevFrameSummary), @alignOf(DevFrameSummary));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevMetalCell), @sizeOf(DevMetalCell));
@@ -652,6 +685,8 @@ test {
     std.testing.refAllDecls(app_dev_session);
     // 전역 핫키 descriptor 매핑(a2의 Swift가 ABI로 소비)도 테스트 빌드에 포함한다.
     std.testing.refAllDecls(@import("global_hotkey.zig"));
+    // 커맨드 카탈로그(메뉴바·팝업 공유) round-trip·chord 포맷 테스트도 테스트 빌드에 포함한다.
+    std.testing.refAllDecls(@import("command_catalog.zig"));
 }
 
 test "layout-independent shortcut: Hangul-mode Ctrl+B normalizes to latin b via the physical keycode" {

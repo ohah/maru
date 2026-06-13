@@ -1,0 +1,170 @@
+//! Command 카탈로그 — 메뉴바·커맨드 팝업이 공유하는 "수행 가능한 액션 목록"의 단일 출처(Zig).
+//! 각 엔트리는 `action_key`(= parseAction 문자열, 양방향)·사람이 읽는 `title`·현재 바인딩 표시 chord로
+//! 구성된다. UI(NSMenu/SwiftUI)는 이 목록을 그리고 선택 시 action_key를 되돌려보내 dispatch만 한다
+//! (네이티브 최소 — quick terminal·global hotkey와 같은 경계). Ghostty `ghostty_command_s`와 같은 형태.
+//!
+//! 베이스/의사결정: action 집합은 config/action.zig(단일 출처), title은 UI 표시 문자열이라 여기 둔다.
+//! 바인딩 표시는 keybinding 테이블을 action→chord로 역스캔한다(resolve의 역). select_tab은 ⌘1..9에
+//! 맞춰 0..8을 개별 엔트리로 편다(Ghostty goto_tab과 같은 결).
+
+const std = @import("std");
+const maru = @import("maru");
+
+const Action = maru.config.Action;
+const KeyChord = maru.config.KeyChord;
+const KeyBindingResolver = maru.config.KeyBindingResolver;
+const default_app_bindings = maru.config.keybinding.default_app_bindings;
+
+/// 카탈로그 한 항목(정적). action_key/title은 컴파일타임 문자열 리터럴(널 종단) — ABI에서 그대로 가리킨다.
+pub const Entry = struct {
+    action: Action,
+    key: [:0]const u8,
+    title: [:0]const u8,
+};
+
+/// 메뉴·팝업에 노출할 in-app 액션 목록. action_key는 parseAction이 받는 문자열과 정확히 일치해야 한다
+/// (round-trip 테스트가 고정). 순서 = 표시 순서(파생 정렬은 UI가 한다).
+pub const entries = [_]Entry{
+    .{ .action = .new_term, .key = "new_term", .title = "New Terminal" },
+    .{ .action = .new_tab, .key = "new_tab", .title = "New Workspace" },
+    .{ .action = .close_term, .key = "close_term", .title = "Close Terminal" },
+    .{ .action = .close_tab, .key = "close_tab", .title = "Close Workspace" },
+    .{ .action = .next_term, .key = "next_term", .title = "Next Terminal" },
+    .{ .action = .previous_term, .key = "previous_term", .title = "Previous Terminal" },
+    .{ .action = .next_tab, .key = "next_tab", .title = "Next Workspace" },
+    .{ .action = .previous_tab, .key = "previous_tab", .title = "Previous Workspace" },
+    .{ .action = .split_horizontal, .key = "split_horizontal", .title = "Split Right" },
+    .{ .action = .split_vertical, .key = "split_vertical", .title = "Split Down" },
+    .{ .action = .focus_pane_left, .key = "focus_pane_left", .title = "Focus Pane Left" },
+    .{ .action = .focus_pane_right, .key = "focus_pane_right", .title = "Focus Pane Right" },
+    .{ .action = .focus_pane_up, .key = "focus_pane_up", .title = "Focus Pane Up" },
+    .{ .action = .focus_pane_down, .key = "focus_pane_down", .title = "Focus Pane Down" },
+    .{ .action = .{ .select_tab = 0 }, .key = "select_tab:0", .title = "Select Workspace 1" },
+    .{ .action = .{ .select_tab = 1 }, .key = "select_tab:1", .title = "Select Workspace 2" },
+    .{ .action = .{ .select_tab = 2 }, .key = "select_tab:2", .title = "Select Workspace 3" },
+    .{ .action = .{ .select_tab = 3 }, .key = "select_tab:3", .title = "Select Workspace 4" },
+    .{ .action = .{ .select_tab = 4 }, .key = "select_tab:4", .title = "Select Workspace 5" },
+    .{ .action = .{ .select_tab = 5 }, .key = "select_tab:5", .title = "Select Workspace 6" },
+    .{ .action = .{ .select_tab = 6 }, .key = "select_tab:6", .title = "Select Workspace 7" },
+    .{ .action = .{ .select_tab = 7 }, .key = "select_tab:7", .title = "Select Workspace 8" },
+    .{ .action = .{ .select_tab = 8 }, .key = "select_tab:8", .title = "Select Workspace 9" },
+};
+
+/// chord 표시 문자열의 최대 바이트(modifiers 4개 × 3바이트 + 키 심볼 + 여유). 32면 충분하다.
+pub const max_chord_display_len = 32;
+
+fn appendStr(buf: []u8, len: *usize, s: []const u8) void {
+    if (len.* + s.len > buf.len) return; // 넘치면 잘라낸다(여기 오면 안 됨 — max_chord_display_len 보장).
+    @memcpy(buf[len.*..][0..s.len], s);
+    len.* += s.len;
+}
+
+/// 한 액션에 현재 묶인 chord를 찾는다(표시용). resolve와 같은 우선순위: 사용자 app_bindings 먼저, 없으면
+/// 빌트인 default_app_bindings(단, 사용자가 unbind한 chord는 건너뜀 — resolve의 unbind 처리와 일치).
+/// 안 묶였으면 null. select_tab 같은 payload 액션은 std.meta.eql로 payload까지 비교한다.
+pub fn chordForAction(resolver: KeyBindingResolver, action: Action) ?KeyChord {
+    for (resolver.app_bindings) |binding| {
+        if (std.meta.eql(binding.action, action)) return binding.chord;
+    }
+    for (default_app_bindings) |binding| {
+        if (!std.meta.eql(binding.action, action)) continue;
+        var unbound = false;
+        for (resolver.unbinds) |u| {
+            if (u.eql(binding.chord)) {
+                unbound = true;
+                break;
+            }
+        }
+        if (!unbound) return binding.chord;
+    }
+    return null;
+}
+
+/// chord를 macOS 관례 표시 문자열로 만든다(modifier 순서 ⌃⌥⇧⌘ 뒤에 키 심볼). 메뉴 단축키 표시·팝업
+/// 보조 텍스트용. 글자는 대문자, 특수키는 표준 기호(↩⎋⇥⌫⌦↖↘⇞⇟ ←→↑↓), function은 F{n}. 버퍼에 쓰고
+/// 그 slice를 돌려준다(호출자가 소유 문자열로 복사). 안 묶인 액션은 호출 전에 걸러야 한다(여긴 chord 전제).
+pub fn formatChord(chord: KeyChord, buf: []u8) []const u8 {
+    var len: usize = 0;
+    if (chord.modifiers.control) appendStr(buf, &len, "⌃");
+    if (chord.modifiers.option) appendStr(buf, &len, "⌥");
+    if (chord.modifiers.shift) appendStr(buf, &len, "⇧");
+    if (chord.modifiers.command) appendStr(buf, &len, "⌘");
+    switch (chord.key) {
+        .char => |c| {
+            // 표시용 대문자 fold(영문). 그 외 코드포인트는 그대로.
+            const cp: u21 = if (c >= 'a' and c <= 'z') c - 32 else c;
+            var utf8: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(cp, &utf8) catch 0;
+            appendStr(buf, &len, utf8[0..n]);
+        },
+        .enter => appendStr(buf, &len, "↩"),
+        .escape => appendStr(buf, &len, "⎋"),
+        .tab => appendStr(buf, &len, "⇥"),
+        .backspace => appendStr(buf, &len, "⌫"),
+        .delete => appendStr(buf, &len, "⌦"),
+        .insert => appendStr(buf, &len, "Ins"),
+        .home => appendStr(buf, &len, "↖"),
+        .end => appendStr(buf, &len, "↘"),
+        .page_up => appendStr(buf, &len, "⇞"),
+        .page_down => appendStr(buf, &len, "⇟"),
+        .arrow_up => appendStr(buf, &len, "↑"),
+        .arrow_down => appendStr(buf, &len, "↓"),
+        .arrow_left => appendStr(buf, &len, "←"),
+        .arrow_right => appendStr(buf, &len, "→"),
+        .function => |n| {
+            appendStr(buf, &len, "F");
+            var numbuf: [3]u8 = undefined;
+            appendStr(buf, &len, std.fmt.bufPrint(&numbuf, "{d}", .{n}) catch "");
+        },
+    }
+    return buf[0..len];
+}
+
+test "catalog action_key가 parseAction으로 round-trip된다(양방향 일치)" {
+    for (entries) |entry| {
+        const parsed = maru.config.parseAction(entry.key) orelse {
+            std.debug.print("parseAction failed for key: {s}\n", .{entry.key});
+            return error.UnparsableActionKey;
+        };
+        try std.testing.expect(std.meta.eql(parsed, entry.action));
+    }
+}
+
+test "formatChord: modifier 순서·키 심볼" {
+    var buf: [max_chord_display_len]u8 = undefined;
+    try std.testing.expectEqualStrings("⌘T", formatChord(.{ .modifiers = .{ .command = true }, .key = .{ .char = 'T' } }, &buf));
+    try std.testing.expectEqualStrings("⇧⌘T", formatChord(.{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 't' } }, &buf)); // 소문자→대문자 fold
+    try std.testing.expectEqualStrings("⌥⌘←", formatChord(.{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_left }, &buf));
+    try std.testing.expectEqualStrings("⌘1", formatChord(.{ .modifiers = .{ .command = true }, .key = .{ .char = '1' } }, &buf));
+    try std.testing.expectEqualStrings("⌘]", formatChord(.{ .modifiers = .{ .command = true }, .key = .{ .char = ']' } }, &buf));
+    try std.testing.expectEqualStrings("⌃⌥⇧⌘F5", formatChord(.{ .modifiers = .{ .control = true, .option = true, .shift = true, .command = true }, .key = .{ .function = 5 } }, &buf));
+}
+
+test "chordForAction: 빌트인·사용자·unbind" {
+    // 빌트인: new_term은 Cmd+T(default_app_bindings).
+    const builtin_resolver: KeyBindingResolver = .{};
+    const new_term_chord = chordForAction(builtin_resolver, .new_term).?;
+    try std.testing.expect(new_term_chord.modifiers.command and !new_term_chord.modifiers.shift);
+    try std.testing.expect(new_term_chord.key.eql(.{ .char = 'T' }));
+
+    // 기본 바인딩 없는 액션(close_tab)은 null.
+    try std.testing.expect(chordForAction(builtin_resolver, .close_tab) == null);
+
+    // 사용자 바인딩이 우선: close_tab을 Cmd+K로.
+    const user_chord = try KeyChord.parse("Cmd+K");
+    const user_resolver: KeyBindingResolver = .{ .app_bindings = &.{.{ .chord = user_chord, .action = .close_tab }} };
+    try std.testing.expect(chordForAction(user_resolver, .close_tab).?.key.eql(.{ .char = 'K' }));
+
+    // 빌트인 chord를 unbind하면 표시도 사라진다(null).
+    const unbind_resolver: KeyBindingResolver = .{ .unbinds = &.{try KeyChord.parse("Cmd+T")} };
+    try std.testing.expect(chordForAction(unbind_resolver, .new_term) == null);
+}
+
+test "select_tab은 0..8로 펼쳐지고 ⌘1..9로 표시된다" {
+    var buf: [max_chord_display_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{};
+    // select_tab:0 → Cmd+1.
+    try std.testing.expectEqualStrings("⌘1", formatChord(chordForAction(resolver, .{ .select_tab = 0 }).?, &buf));
+    // select_tab:8 → Cmd+9.
+    try std.testing.expectEqualStrings("⌘9", formatChord(chordForAction(resolver, .{ .select_tab = 8 }).?, &buf));
+}

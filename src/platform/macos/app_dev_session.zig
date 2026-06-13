@@ -1051,6 +1051,30 @@ pub const DevSession = struct {
         return self.sidebarActiveBg();
     }
 
+    /// 얇은 **세로선**을 overlay 셀로 그린다 — [y_start, y_end) 범위에 행마다(cell 높이 step) origin_x에 sentinel
+    /// 셀 1개씩, reserved로 cell의 한 변 ~2px만 칠한다(3=좌측, 5=우측). divider 세로선과 pane 테두리 좌/우가 공유.
+    fn appendVerticalLine(self: *DevSession, out: *std.ArrayList(metal_frame.NativeMetalCell), origin_x: u32, y_start: u32, y_end: u32, reserved: u16, color: u32) void {
+        const ch = self.cell_height_px;
+        if (ch == 0) return;
+        var y = y_start;
+        while (y < y_end) : (y += ch) {
+            var c = sentinelBgCell(0, 1, color, origin_x, y);
+            c.reserved = reserved;
+            out.append(self.allocator, c) catch return;
+        }
+    }
+
+    /// 얇은 **가로선**을 overlay 셀로 그린다 — origin_y에 폭(width_px→floor cols, 최소 1)만큼 sentinel 셀 1개,
+    /// reserved로 cell의 한 변 ~2px만 칠한다(2=하단, 4=상단). divider 가로선과 pane 테두리 상/하가 공유.
+    fn appendHorizontalLine(self: *DevSession, out: *std.ArrayList(metal_frame.NativeMetalCell), origin_x: u32, origin_y: u32, width_px: u32, reserved: u16, color: u32) void {
+        const cw = self.cell_width_px;
+        if (cw == 0) return;
+        const cols = @min(@max(width_px / cw, 1), @as(u32, std.math.maxInt(u16)));
+        var c = sentinelBgCell(0, @intCast(cols), color, origin_x, origin_y);
+        c.reserved = reserved;
+        out.append(self.allocator, c) catch return;
+    }
+
     /// 활성 탭의 divider 선들을 overlay 셀로 out에 append한다(렌더). full-cell이 아니라 렌더러의 **부분 사각형**
     /// (reserved=3 bar=좌측 ~2px, reserved=2 underline=하단 ~2px, 커서 모양과 같은 경로)으로 그려 **얇은 선**으로
     /// seam에 얹는다(셀 폭/높이만큼 굵게 그려 터미널을 가리던 문제 수정). horizontal split=세로선(reserved=3을
@@ -1066,23 +1090,10 @@ pub const DevSession = struct {
         const bg = self.dividerColor();
         for (segs.items) |seg| {
             switch (seg.direction) {
-                .horizontal => { // 세로선: reserved=3(bar, cell 좌측 ~2px)을 행마다. px_left=origin_x라 경계 x에 센터(−1).
-                    const x0: u32 = if (seg.pos >= 1) seg.pos - 1 else 0;
-                    const y_end = seg.bounds.y + seg.bounds.h;
-                    var y = seg.bounds.y;
-                    while (y < y_end) : (y += ch) {
-                        var c = sentinelBgCell(0, 1, bg, x0, y);
-                        c.reserved = 3; // bar(얇은 세로선)
-                        out.append(self.allocator, c) catch return;
-                    }
-                },
-                .vertical => { // 가로선: reserved=2(underline, cell 하단 ~2px). px_bottom=origin_y+ch를 경계 y+1로(센터).
-                    const cols = @min(@max(seg.bounds.w / cw, 1), @as(u32, std.math.maxInt(u16)));
-                    const y0: u32 = if (seg.pos + 1 >= ch) seg.pos + 1 - ch else 0;
-                    var c = sentinelBgCell(0, @intCast(cols), bg, seg.bounds.x, y0);
-                    c.reserved = 2; // underline(얇은 가로선)
-                    out.append(self.allocator, c) catch return;
-                },
+                // 세로선: 경계 x에 ~2px 센터(−1 offset)로 reserved=3(좌측 ~2px)을 행마다.
+                .horizontal => self.appendVerticalLine(out, if (seg.pos >= 1) seg.pos - 1 else 0, seg.bounds.y, seg.bounds.y + seg.bounds.h, 3, bg),
+                // 가로선: 경계 y에 ~2px 센터로 reserved=2(하단 ~2px). px_bottom=origin_y+ch를 경계 y+1로 맞춘다.
+                .vertical => self.appendHorizontalLine(out, seg.bounds.x, if (seg.pos + 1 >= ch) seg.pos + 1 - ch else 0, seg.bounds.w, 2, bg),
             }
         }
     }
@@ -1118,8 +1129,11 @@ pub const DevSession = struct {
         const pad: u32 = 1;
         const band_width: u32 = 2 * count + 1;
         const right_margin: u32 = 1;
-        // 우상단 정렬. band가 화면보다 넓으면 col 0에서 시작(오른쪽 높은-index 점이 화면 밖으로 잘림 — 극단적 탭 수).
-        const band_start: u32 = (cols -| band_width) -| right_margin;
+        // band가 우상단에 안 들어가면(극단적 탭 수 + 좁은 패널) 아예 안 그린다 — 안 그러면 band_start가 0으로
+        // saturate돼 좌상단에 전체 폭으로 그려져(우상단 의도와 반대) 터미널을 덮는다.
+        if (band_width + right_margin > cols) return;
+        // 우상단 정렬(band_width+right_margin <= cols라 saturate 없이 정확히 우측에 붙는다).
+        const band_start: u32 = cols - band_width - right_margin;
 
         const u16_max: u32 = std.math.maxInt(u16);
         // strip 배경(넓은 sentinel 셀 1개) → 그 위에 점들(append 순서 = painter 순서라 점이 strip 위에 그려진다).
@@ -1149,28 +1163,13 @@ pub const DevSession = struct {
         const ch = self.cell_height_px;
         if (cw == 0 or ch == 0 or rect.w == 0 or rect.h == 0) return;
         const color = self.sidebarActiveBg();
-
-        // 좌(3)·우(5) 세로선: 행마다 한 칸. 우측은 cell 우측 ~2px라 origin_x를 rect 우변 한 칸 안쪽에 둔다.
-        const right_origin_x: u32 = rect.x + rect.w -| cw;
         const y_end = rect.y + rect.h;
-        var y = rect.y;
-        while (y < y_end) : (y += ch) {
-            var l = sentinelBgCell(0, 1, color, rect.x, y);
-            l.reserved = 3; // 좌측 ~2px
-            out.append(self.allocator, l) catch return;
-            var r = sentinelBgCell(0, 1, color, right_origin_x, y);
-            r.reserved = 5; // 우측 ~2px
-            out.append(self.allocator, r) catch return;
-        }
-
-        // 상(4)·하(2) 가로선: rect 폭 전체 한 칸. 하단은 cell 하단 ~2px라 origin_y를 rect 하변 한 칸 안쪽에 둔다.
-        const cols = @min(@max(rect.w / cw, 1), @as(u32, std.math.maxInt(u16)));
-        var t = sentinelBgCell(0, @intCast(cols), color, rect.x, rect.y);
-        t.reserved = 4; // 상단 ~2px
-        out.append(self.allocator, t) catch return;
-        var b = sentinelBgCell(0, @intCast(cols), color, rect.x, y_end -| ch);
-        b.reserved = 2; // 하단 ~2px
-        out.append(self.allocator, b) catch return;
+        // 4변 thin 테두리(divider와 같은 reserved 부분-사각형 헬퍼 공유). 우측은 cell 우측 ~2px(reserved=5)라
+        // origin_x를 rect 우변 한 칸 안쪽에, 하단은 cell 하단 ~2px(reserved=2)라 origin_y를 한 칸 안쪽에 둔다.
+        self.appendVerticalLine(out, rect.x, rect.y, y_end, 3, color); // 좌
+        self.appendVerticalLine(out, rect.x + rect.w -| cw, rect.y, y_end, 5, color); // 우
+        self.appendHorizontalLine(out, rect.x, rect.y, rect.w, 4, color); // 상
+        self.appendHorizontalLine(out, rect.x, y_end -| ch, rect.w, 2, color); // 하
     }
 
     /// 마우스 (x,y)가 활성 탭 어느 divider의 드래그 밴드 안인가 — 맞으면 그 DividerSeg, 아니면 null. 밴드는 경계
@@ -4068,6 +4067,12 @@ test "minimal tab indicator: adaptive dots appear only in minimal with >1 tab" {
         session.appendMinimalTabIndicator(&out);
         try std.testing.expectEqual(@as(usize, 3), out.items.len); // 워크스페이스 2개 → strip + 점 2개
         try std.testing.expectEqual(session.sidebarActiveBg(), out.items[2].background); // 활성 워크스페이스(index 1)
+
+        // band가 화면보다 넓으면(아주 좁은 패널) 아예 안 그린다 — 좌상단 relocate 방지(우상단에 안 들어가면 skip).
+        _ = try session.resize(16, 200, 1000); // 폭 16px → cols ≤ 2, band(2 워크스페이스=5)+margin > cols
+        out.clearRetainingCapacity();
+        session.appendMinimalTabIndicator(&out);
+        try std.testing.expectEqual(@as(usize, 0), out.items.len);
     }
 
     // ② full(chrome_minimal=0): 탭이 여러 개여도 인디케이터 없음(사이드바·탭 바가 보여줌).

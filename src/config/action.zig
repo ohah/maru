@@ -33,6 +33,12 @@ pub const Action = union(enum) {
     // 모달이 열린 동안 키는 검색 입력으로 라우팅된다(handleKeyEvent). 카탈로그에는 안 넣는다(팝업 토글과 같은
     // 규율 — 모달 토글은 목록 항목이 아니다. 팝업에서 Find 띄우기는 후속).
     toggle_find,
+    // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). dispatchAppAction이 appearance.font.size를 바꾸고 cell 메트릭·grid를
+    // 다시 잡는다(코어 resize와 같은 reflow). step은 DevSession 상수(1pt 고정 — 파라미터화는 후속). reset은
+    // config 기본값(base_font_size)으로 되돌린다. 콘텐츠 reflow는 없다(셀 크기·grid 차원만 변경, Ghostty 동일).
+    increase_font_size,
+    decrease_font_size,
+    reset_font_size,
 };
 
 pub fn parseAction(value: []const u8) ?Action {
@@ -55,6 +61,9 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "select_all")) return .select_all;
     if (std.mem.eql(u8, value, "toggle_command_palette")) return .toggle_command_palette;
     if (std.mem.eql(u8, value, "toggle_find")) return .toggle_find;
+    if (std.mem.eql(u8, value, "increase_font_size")) return .increase_font_size;
+    if (std.mem.eql(u8, value, "decrease_font_size")) return .decrease_font_size;
+    if (std.mem.eql(u8, value, "reset_font_size")) return .reset_font_size;
 
     const prefix = "select_tab:";
     if (std.mem.startsWith(u8, value, prefix)) {
@@ -97,6 +106,9 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.select_all, parseAction("select_all").?);
     try std.testing.expectEqual(Action.toggle_command_palette, parseAction("toggle_command_palette").?);
     try std.testing.expectEqual(Action.toggle_find, parseAction("toggle_find").?);
+    try std.testing.expectEqual(Action.increase_font_size, parseAction("increase_font_size").?);
+    try std.testing.expectEqual(Action.decrease_font_size, parseAction("decrease_font_size").?);
+    try std.testing.expectEqual(Action.reset_font_size, parseAction("reset_font_size").?);
 
     const action = parseAction("select_tab:3").?;
     try std.testing.expectEqual(@as(usize, 3), action.select_tab);

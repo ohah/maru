@@ -89,6 +89,13 @@ const sidebar_max_pt: u32 = 480; // 너무 넓으면 터미널이 좁아짐
 // 탭 슬롯(라이브 요청). refreshCellMetrics가 cell_height_px × 이 비율로 backing 픽셀 슬롯 높이를 구한다.
 const sidebar_slot_height_ratio_milli: u32 = 2500;
 
+// 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
+// [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
+// 1~2칸으로 무너져 런타임 단축키 UX로는 부적절하다(config 파일로는 그 밖 값도 가능, 단축키만 이 범위).
+const font_size_step: f32 = 1.0;
+const font_size_min: f32 = 6.0;
+const font_size_max: f32 = 72.0;
+
 // 커서 깜빡임 반주기(30Hz tick 단위). 15틱 = 500ms — 일반 터미널 관례(on 500ms / off 500ms).
 const blink_interval_ticks: u32 = 15;
 
@@ -700,8 +707,12 @@ pub const DevSession = struct {
     renderer_state: renderer.RendererState = undefined,
     frame_loop: app.AppFrameLoop = undefined,
     // 제품 dev shell은 fake font backend가 아니라 실제 CoreText로 glyph frame을 만든다.
-    // appearance(폰트/색)는 init에서 한 번 resolve해 매 tick의 CoreTextFrameBuilder에 쓴다.
+    // appearance(폰트/색)는 init에서 한 번 resolve해 매 tick의 CoreTextFrameBuilder에 쓴다. 런타임 폰트
+    // 크기(⌘+/−)는 appearance.font.size를 직접 바꾼다(모든 consumer가 이걸 읽음).
     appearance: config_mod.ResolvedAppearance = undefined,
+    // config가 정한 기본 폰트 크기(pt). ⌘0(reset_font_size)이 여기로 되돌린다 — appearance.font.size는
+    // 런타임에 바뀌므로 원래 값을 따로 보관한다. init에서 resolve된 appearance.font.size로 채운다.
+    base_font_size: f32 = 0,
     // 시작 시 로드한 raw config(~/.config/maru/config). arena가 font.family 문자열을 소유하고,
     // resolve된 appearance.font.family가 그 슬라이스를 빌리므로 세션 동안 살아 있어야 한다.
     loaded_config: config_mod.ParsedConfig = undefined,
@@ -963,6 +974,7 @@ pub const DevSession = struct {
         // 방어적으로 실패 시 기본값으로 떨어진다.(loaded_config는 위에서 PTY spawn 전에 로드했다.)
         self.appearance = config_mod.resolveAppearance(self.loaded_config.config) catch
             try config_mod.resolveAppearance(.{});
+        self.base_font_size = self.appearance.font.size; // ⌘0 리셋 기준(런타임에 appearance.font.size는 바뀜)
         // config의 무시된 줄(알 수 없는 key·잘못된 값)을 알린다 — 사용자가 오타를 눈치채게.
         for (self.loaded_config.diagnostics) |d| {
             std.log.scoped(.config).warn("config line {d}: {s}", .{ d.line, d.message });
@@ -2089,6 +2101,10 @@ pub const DevSession = struct {
             .toggle_command_palette => self.togglePalette(),
             // 스크롤백 Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState, 검색은 코어).
             .toggle_find => self.toggleFind(),
+            // 런타임 폰트 크기(⌘+/⌘-/⌘0) — cell 메트릭·grid 재계산(setFontSize). 콘텐츠 reflow 없음.
+            .increase_font_size => self.adjustFontSize(font_size_step),
+            .decrease_font_size => self.adjustFontSize(-font_size_step),
+            .reset_font_size => self.resetFontSize(),
         }
         self.metal_dirty = true;
     }
@@ -2240,6 +2256,38 @@ pub const DevSession = struct {
         self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
         // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
         self.rebuildSidebar() catch {};
+    }
+
+    /// 폰트 크기를 delta(pt)만큼 조절한다(⌘+/⌘-). setFontSize가 클램프·메트릭·grid를 처리한다.
+    fn adjustFontSize(self: *DevSession, delta: f32) void {
+        self.setFontSize(self.appearance.font.size + delta);
+    }
+
+    /// 폰트 크기를 config 기본값으로 되돌린다(⌘0).
+    fn resetFontSize(self: *DevSession) void {
+        self.setFontSize(self.base_font_size);
+    }
+
+    /// 런타임 폰트 크기를 size(pt)로 바꾼다(클램프 [font_size_min, font_size_max]). 변화가 없으면 무동작.
+    /// 폰트 크기는 cell 메트릭(→ 글리프 cache key)을 바꾸므로: ① appearance.font.size 갱신 → ② refreshCellMetrics로
+    /// cell 픽셀·사이드바 재계산 → ③ atlas 무효화(새 크기로 재래스터·옛 슬롯 회수) → ④ 같은 창(backing px)에서
+    /// 새 cell 크기로 grid 재산출 + 각 pane resize(코어 resize의 reflow 경로 공유 — PTY winsize/SIGWINCH 포함).
+    /// 터미널 콘텐츠 reflow는 없다(셀 크기·grid 차원만, Ghostty 동일).
+    fn setFontSize(self: *DevSession, size: f32) void {
+        const clamped = std.math.clamp(size, font_size_min, font_size_max);
+        if (clamped == self.appearance.font.size) return; // 경계에서 더 눌러도 변화 없으면 재작업 스킵
+        self.appearance.font.size = clamped;
+        self.refreshCellMetrics();
+        _ = self.renderer_state.atlas.invalidate(.font_size_changed);
+        // 같은 backing 픽셀에서 새 cell 크기로 grid를 다시 잡고 각 pane을 resize한다(resize 본문과 동일한 reflow).
+        // 아직 첫 resize 전(backing 0)이면 스킵 — 곧 올 Swift resize가 새 메트릭으로 grid를 잡는다.
+        if (self.backing_width_px > 0 and self.backing_height_px > 0) {
+            const grid = gridFromBacking(self.backing_width_px, self.backing_height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px);
+            self.resizeActiveTabPanes() catch {};
+            self.recomputeActivePaneRect();
+            self.last_resize_size = grid;
+        }
+        self.metal_dirty = true;
     }
 
     pub fn handleKeyEvent(self: *DevSession, event: terminal.KeyEvent) !FrameSummary {
@@ -4726,6 +4774,49 @@ test "scrollback find: 토글 열림 → 증분 검색 → 매치 네비게이�
     // Esc로 닫힌다.
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(!session.find.open);
+}
+
+test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상한 클램프" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 메트릭 + PTY
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000); // backing px 확정 → grid 산출
+
+    const base = session.base_font_size;
+    try std.testing.expectEqual(base, session.appearance.font.size);
+    const cw0 = session.cell_width_px;
+    const cols0 = session.activeSurface().core.snapshot().size.cols;
+
+    // ⌘+ : 폰트 +1pt → cell 픽셀이 커지고(메트릭) grid는 줄거나 같다(같은 backing px).
+    session.dispatchAppAction(.increase_font_size);
+    try std.testing.expectEqual(base + font_size_step, session.appearance.font.size);
+    try std.testing.expect(session.cell_width_px > cw0);
+    const cols1 = session.activeSurface().core.snapshot().size.cols;
+    try std.testing.expect(cols1 <= cols0);
+
+    // ⌘0 : config 기본값 복원 → 폰트·cell 픽셀 원래대로(refreshCellMetrics 재계산은 결정적).
+    session.dispatchAppAction(.reset_font_size);
+    try std.testing.expectEqual(base, session.appearance.font.size);
+    try std.testing.expectEqual(cw0, session.cell_width_px);
+
+    // ⌘- 반복 : 하한(font_size_min) 아래로 안 내려간다(경계에서 무동작).
+    var i: usize = 0;
+    while (i < 100) : (i += 1) session.dispatchAppAction(.decrease_font_size);
+    try std.testing.expectEqual(font_size_min, session.appearance.font.size);
+
+    // ⌘+ 반복 : 상한(font_size_max) 위로 안 올라간다.
+    i = 0;
+    while (i < 200) : (i += 1) session.dispatchAppAction(.increase_font_size);
+    try std.testing.expectEqual(font_size_max, session.appearance.font.size);
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {

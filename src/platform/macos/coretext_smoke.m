@@ -711,31 +711,38 @@ void maru_macos_coretext_shape_draw_list(
             return;
         }
 
-        // bold cell용 폰트 변형. CTFontCreateCopyWithSymbolicTraits는 family에 bold variant가
-        // 없으면 NULL을 돌려준다 — 그 경우 bold cell도 primary(regular)로 그린다(없는 굵기를
-        // 합성하지 않는다). 있으면 bold PostScript name(예: "Menlo-Bold")이 record로 흘러
-        // rasterizer가 그 이름으로 굵은 glyph를 그린다. cell마다 새로 만들지 않으려고 한 번만 만든다.
-        CTFontRef bold_font = CTFontCreateCopyWithSymbolicTraits(
-            primary_font, 0.0, NULL, kCTFontTraitBold, kCTFontTraitBold);
-        CFStringRef bold_name = bold_font != NULL ? CTFontCopyPostScriptName(bold_font) : NULL;
+        // bold cell용 폰트 변형. 처음 만나는 bold cell에서 한 번만(lazy) 만든다 — bold cell이 하나도
+        // 없는 프레임(흔한 경우: 일반 터미널 출력·탭 제목)은 CoreText 변형 호출을 아예 안 한다.
+        // CTFontCreateCopyWithSymbolicTraits는 family에 bold variant가 없으면 NULL을 돌려주며, 그 경우
+        // bold cell도 primary(regular)로 폴백한다(없는 굵기를 합성하지 않음). 있으면 bold PostScript
+        // name(예: "Menlo-Bold")이 record로 흘러 rasterizer가 그 이름으로 굵은 glyph를 그린다.
+        CTFontRef bold_font = NULL;
+        CFStringRef bold_name = NULL;
         CFDictionaryRef bold_attributes = NULL;
-        if (bold_font != NULL) {
-            const void *bold_values[] = { bold_font };
-            bold_attributes = CFDictionaryCreate(
-                kCFAllocatorDefault,
-                keys,
-                bold_values,
-                1,
-                &kCFTypeDictionaryKeyCallBacks,
-                &kCFTypeDictionaryValueCallBacks
-            );
-        }
+        bool bold_attempted = false; // bold variant가 없는 폰트면 매 bold cell마다 재시도하지 않게
 
         for (size_t cell_index = 0; cell_index < cell_count; cell_index++) {
             const MaruCoreTextDrawCell cell = cells[cell_index];
-            // 이 cell의 굵기를 정한다. bold variant가 없으면(bold_attributes==NULL) regular로 폴백.
-            const bool use_bold =
-                (cell.style_flags & MaruDrawCellBoldBit) != 0 && bold_attributes != NULL;
+            // 이 cell의 굵기를 정한다. 첫 bold cell에서 bold variant를 만들고(이후 재사용), 없으면(NULL) regular 폴백.
+            const bool want_bold = (cell.style_flags & MaruDrawCellBoldBit) != 0;
+            if (want_bold && !bold_attempted) {
+                bold_attempted = true;
+                bold_font = CTFontCreateCopyWithSymbolicTraits(
+                    primary_font, 0.0, NULL, kCTFontTraitBold, kCTFontTraitBold);
+                if (bold_font != NULL) {
+                    bold_name = CTFontCopyPostScriptName(bold_font);
+                    const void *bold_values[] = { bold_font };
+                    bold_attributes = CFDictionaryCreate(
+                        kCFAllocatorDefault,
+                        keys,
+                        bold_values,
+                        1,
+                        &kCFTypeDictionaryKeyCallBacks,
+                        &kCFTypeDictionaryValueCallBacks
+                    );
+                }
+            }
+            const bool use_bold = want_bold && bold_attributes != NULL;
             CFDictionaryRef cell_attributes = use_bold ? bold_attributes : attributes;
             // run의 폰트가 이 cell이 의도한 face와 다르면(진짜 fallback) 표시한다. bold cell은
             // bold_name과 비교해야 bold variant를 fallback으로 오탐하지 않는다.

@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 33u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 34u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -409,6 +409,7 @@ typedef struct MaruAppHostQuickTerminalConfig {
     uint32_t position;     /* MaruAppHostQuickTerminalPosition */
     uint32_t chrome;       /* MaruAppHostQuickTerminalChrome — Swift가 quick 세션 생성 시 chrome_minimal로 넘긴다 */
     uint32_t minimal_tabs; /* 0/1 — minimal에서 탭 허용. Swift가 quick 세션 생성 시 minimal_tabs로 넘긴다 */
+    uint32_t width_milli;  /* center 가로 비율 × 1000. 0이면 미설정 → Swift가 height로 폴백(정사각). center 외 무시 */
 } MaruAppHostQuickTerminalConfig;
 
 typedef enum MaruAppHostQuickTerminalScreen {

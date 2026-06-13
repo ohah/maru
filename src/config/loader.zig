@@ -171,6 +171,16 @@ fn applyKey(
             return;
         }
         config.quick_terminal.height_fraction = frac;
+    } else if (std.mem.eql(u8, key, "quick-terminal.width")) {
+        const frac = std.fmt.parseFloat(f32, value) catch {
+            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.width가 숫자가 아님(예: 0.6) — 기본값 유지" });
+            return;
+        };
+        if (!(frac >= 0.1 and frac <= 1.0)) {
+            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.width는 0.1~1.0 — 기본값 유지" });
+            return;
+        }
+        config.quick_terminal.width_fraction = frac;
     } else if (std.mem.eql(u8, key, "quick-terminal.auto-hide")) {
         config.quick_terminal.auto_hide = parseBool(value) orelse {
             try diags.append(a, .{ .line = line_no, .message = "quick-terminal.auto-hide는 true|false — 기본값 유지" });
@@ -711,10 +721,12 @@ test "parse: quick-terminal options (height/auto-hide/screen) with defaults and 
         try std.testing.expectEqual(theme.QuickTerminalPosition.top, p.config.quick_terminal.position);
         try std.testing.expectEqual(theme.QuickTerminalChrome.full, p.config.quick_terminal.chrome);
         try std.testing.expectEqual(false, p.config.quick_terminal.minimal_tabs);
+        try std.testing.expectEqual(@as(f32, 0), p.config.quick_terminal.width_fraction); // 미설정 → 0(height 따라감)
     }
     {
         var p = try parse(std.testing.allocator,
             \\quick-terminal.height = 0.6
+            \\quick-terminal.width = 0.8
             \\quick-terminal.auto-hide = false
             \\quick-terminal.screen = mouse
             \\quick-terminal.position = bottom
@@ -723,6 +735,7 @@ test "parse: quick-terminal options (height/auto-hide/screen) with defaults and 
         );
         defer p.deinit();
         try std.testing.expectEqual(@as(f32, 0.6), p.config.quick_terminal.height_fraction);
+        try std.testing.expectEqual(@as(f32, 0.8), p.config.quick_terminal.width_fraction);
         try std.testing.expectEqual(false, p.config.quick_terminal.auto_hide);
         try std.testing.expectEqual(theme.QuickTerminalScreen.mouse, p.config.quick_terminal.screen);
         try std.testing.expectEqual(theme.QuickTerminalPosition.bottom, p.config.quick_terminal.position);
@@ -735,6 +748,7 @@ test "parse: quick-terminal options (height/auto-hide/screen) with defaults and 
         var p = try parse(std.testing.allocator,
             \\quick-terminal.height = 2.0
             \\quick-terminal.height = huge
+            \\quick-terminal.width = 1.5
             \\quick-terminal.auto-hide = maybe
             \\quick-terminal.screen = projector
             \\quick-terminal.position = diagonal
@@ -743,12 +757,13 @@ test "parse: quick-terminal options (height/auto-hide/screen) with defaults and 
         );
         defer p.deinit();
         try std.testing.expectEqual(@as(f32, 0.45), p.config.quick_terminal.height_fraction);
+        try std.testing.expectEqual(@as(f32, 0), p.config.quick_terminal.width_fraction); // 범위 밖 → 0 유지
         try std.testing.expectEqual(true, p.config.quick_terminal.auto_hide);
         try std.testing.expectEqual(theme.QuickTerminalScreen.main, p.config.quick_terminal.screen);
         try std.testing.expectEqual(theme.QuickTerminalPosition.top, p.config.quick_terminal.position);
         try std.testing.expectEqual(theme.QuickTerminalChrome.full, p.config.quick_terminal.chrome);
         try std.testing.expectEqual(false, p.config.quick_terminal.minimal_tabs);
-        try std.testing.expectEqual(@as(usize, 7), p.diagnostics.len);
+        try std.testing.expectEqual(@as(usize, 8), p.diagnostics.len);
     }
     {
         // center 위치(가장자리 없이 중앙 페이드).

@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 31u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 32u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -112,7 +112,10 @@ typedef struct MaruAppHostDevSessionConfig {
     uint32_t rows;
     uint32_t queue_capacity;
     uint32_t command_kind;
-    uint32_t reserved;
+    /* 1이면 chrome 최소화(사이드바·pane 탭 바 없이 터미널 그리드만) — quick terminal minimal 모드.
+       0이면 full chrome(메인 창). 세션별로 정한다 — Swift가 quick_terminal.chrome config를 읽어 quick
+       세션 생성 시에만 1로 넘긴다(메인 창은 항상 0). */
+    uint32_t chrome_minimal;
 } MaruAppHostDevSessionConfig;
 
 typedef struct MaruAppHostDevFrameSummary {
@@ -400,6 +403,7 @@ typedef struct MaruAppHostQuickTerminalConfig {
     uint32_t auto_hide;    /* 0/1 — 포커스 잃으면 자동 숨김 */
     uint32_t screen;       /* MaruAppHostQuickTerminalScreen */
     uint32_t position;     /* MaruAppHostQuickTerminalPosition */
+    uint32_t chrome;       /* MaruAppHostQuickTerminalChrome — Swift가 quick 세션 생성 시 chrome_minimal로 넘긴다 */
 } MaruAppHostQuickTerminalConfig;
 
 typedef enum MaruAppHostQuickTerminalScreen {
@@ -413,6 +417,11 @@ typedef enum MaruAppHostQuickTerminalPosition {
     MaruAppHostQuickTerminalPositionLeft = 2,   /* 좌측 가장자리(전고) */
     MaruAppHostQuickTerminalPositionRight = 3,  /* 우측 가장자리(전고) */
 } MaruAppHostQuickTerminalPosition;
+
+typedef enum MaruAppHostQuickTerminalChrome {
+    MaruAppHostQuickTerminalChromeFull = 0,    /* 메인 창처럼 사이드바·탭 바를 다 보임 */
+    MaruAppHostQuickTerminalChromeMinimal = 1, /* 사이드바·탭 바 없이 터미널 그리드만 */
+} MaruAppHostQuickTerminalChrome;
 
 int32_t maru_macos_app_dev_session_quick_terminal_config(
     MaruAppHostDevSession *session,

@@ -57,12 +57,14 @@ pub fn parseAction(value: []const u8) ?Action {
 pub const GlobalAction = enum {
     toggle_window, // 창이 숨김/비활성이면 보이고 앞으로(show+activate), 활성+보임이면 숨김(orderOut) — 진짜 토글.
     show_window, // 항상 창을 보이고 앞으로 가져온다(숨기지 않음).
+    toggle_quick_terminal, // quick terminal(별도 세션 오버레이 패널)을 토글한다 — 숨김이면 보이고, 보임이면 숨김.
 };
 
 /// 전역 단축키 동작 문자열을 파싱한다(`global:<chord> = <여기>`). 알 수 없으면 null(forgiving).
 pub fn parseGlobalAction(value: []const u8) ?GlobalAction {
     if (std.mem.eql(u8, value, "toggle_window")) return .toggle_window;
     if (std.mem.eql(u8, value, "show_window")) return .show_window;
+    if (std.mem.eql(u8, value, "toggle_quick_terminal")) return .toggle_quick_terminal;
     return null;
 }
 
@@ -87,6 +89,7 @@ test "parse configured actions" {
 test "parse global actions" {
     try std.testing.expectEqual(GlobalAction.toggle_window, parseGlobalAction("toggle_window").?);
     try std.testing.expectEqual(GlobalAction.show_window, parseGlobalAction("show_window").?);
+    try std.testing.expectEqual(GlobalAction.toggle_quick_terminal, parseGlobalAction("toggle_quick_terminal").?);
     try std.testing.expect(parseGlobalAction("new_tab") == null); // in-app action은 전역 동작이 아님
     try std.testing.expect(parseGlobalAction("unknown") == null);
 }

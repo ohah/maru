@@ -98,6 +98,71 @@ pub const CoreTextFrameBuilder = struct {
 /// 닫기(✕) 아이콘 코드포인트(U+2715 MULTIPLICATION X). 호버 슬롯 우측에 그린다.
 pub const sidebar_close_glyph: u21 = 0x2715;
 
+/// 말줄임 표시 glyph(U+2026 HORIZONTAL ELLIPSIS, 1칸). 제목이 칸을 넘으면 마지막 칸을 이걸로 바꾼다.
+pub const title_ellipsis_glyph: u21 = 0x2026;
+
+/// title의 디스플레이 폭(칸 합) — wide glyph는 2, 나머지 1. 깨진 UTF-8 바이트는 U+FFFD(1칸). 말줄임 필요 판정용.
+fn titleDisplayWidth(title: []const u8) usize {
+    var total: usize = 0;
+    var i: usize = 0;
+    while (i < title.len) {
+        var cp: u21 = 0xFFFD;
+        var advance: usize = 1;
+        if (std.unicode.utf8ByteSequenceLength(title[i])) |seq_len| {
+            const len: usize = seq_len;
+            if (i + len <= title.len) {
+                if (std.unicode.utf8Decode(title[i .. i + len])) |d| {
+                    cp = d;
+                    advance = len;
+                } else |_| {}
+            }
+        } else |_| {}
+        i += advance;
+        total += @max(1, terminal.width.cellWidth(cp));
+    }
+    return total;
+}
+
+/// title을 [start_col, end_col) 칸에 row행 DrawCell로 깐다(좌→우). 다 안 들어가면 **하드 컷 대신 마지막 칸을
+/// "…"(U+2026)로** 바꿔 잘렸음을 표시한다(말줄임). end_col<=start_col이면 무동작. 깨진 UTF-8 U+FFFD, wide 2칸.
+/// 사이드바 제목·pane 탭 바 제목이 공유하는 단일 출처라 잘림 표시가 일관된다. 순수(out append만).
+fn appendEllipsizedTitle(
+    allocator: std.mem.Allocator,
+    cells: *std.ArrayList(renderer.DrawCell),
+    title: []const u8,
+    row: u16,
+    start_col: u16,
+    end_col: u16,
+    style: terminal.Style,
+) !void {
+    if (end_col <= start_col) return;
+    const fits = titleDisplayWidth(title) <= @as(usize, end_col - start_col);
+    const text_end: u16 = if (fits) end_col else end_col - 1; // 말줄임이면 마지막 1칸을 "…"에 남긴다
+    var col: u16 = start_col;
+    var i: usize = 0;
+    while (i < title.len) {
+        var cp: u21 = 0xFFFD;
+        var advance: usize = 1;
+        if (std.unicode.utf8ByteSequenceLength(title[i])) |seq_len| {
+            const len: usize = seq_len;
+            if (i + len <= title.len) {
+                if (std.unicode.utf8Decode(title[i .. i + len])) |d| {
+                    cp = d;
+                    advance = len;
+                } else |_| {}
+            }
+        } else |_| {}
+        const w: u16 = @max(1, terminal.width.cellWidth(cp));
+        if (col + w > text_end) break; // 텍스트 한도를 넘으면(말줄임 자리 직전) 멈춘다
+        try cells.append(allocator, .{ .row = row, .col = col, .codepoint = cp, .width = @intCast(@min(w, 2)), .style = style });
+        col += w;
+        i += advance;
+    }
+    if (!fits and col < end_col) {
+        try cells.append(allocator, .{ .row = row, .col = col, .codepoint = title_ellipsis_glyph, .width = 1, .style = style });
+    }
+}
+
 /// pane 탭 바 우측 "+"(새 Term) 버튼이 차지하는 칸 수. 바 우측에 이만큼 예약하고 그 왼쪽을 탭 영역으로 쓴다.
 pub const pane_tab_plus_cols: u16 = 3;
 
@@ -130,35 +195,9 @@ pub fn buildSidebarDrawList(
     for (titles, 0..) |title, row_index| {
         if (row_index > std.math.maxInt(u16)) break;
         const row: u16 = @intCast(row_index);
-        var col: u16 = 0;
-        // 제목은 OSC 0/2(신뢰 불가 PTY 출력)에서 올 수 있어 잘못된 UTF-8을 패닉 없이 다뤄야 한다.
-        // 바이트 단위로 디코드하고, 불완전/깨진 시퀀스는 U+FFFD로 대체하며 1바이트만 전진한다.
-        var i: usize = 0;
-        while (i < title.len) {
-            var cp: u21 = 0xFFFD;
-            var advance: usize = 1;
-            if (std.unicode.utf8ByteSequenceLength(title[i])) |seq_len| {
-                const len: usize = seq_len;
-                if (i + len <= title.len) {
-                    if (std.unicode.utf8Decode(title[i .. i + len])) |decoded| {
-                        cp = decoded;
-                        advance = len;
-                    } else |_| {}
-                }
-            } else |_| {}
-            i += advance;
-
-            const w: u16 = @max(1, terminal.width.cellWidth(cp)); // 0폭(결합문자 등)도 최소 1칸 전진
-            if (col + w > cols) break; // 사이드바 폭 한도 — 넘치는 제목은 자른다
-            try cells.append(allocator, .{
-                .row = row,
-                .col = col,
-                .codepoint = cp,
-                .width = @intCast(@min(w, 2)),
-                .style = style,
-            });
-            col += w;
-        }
+        // 제목은 OSC 0/2(신뢰 불가 PTY 출력)이라 깨진 UTF-8을 U+FFFD로 다룬다. cols를 넘으면 하드 컷이 아니라
+        // 마지막 칸을 "…"로 말줄임한다(appendEllipsizedTitle 단일 출처 — pane 탭 바 제목과 같은 규칙).
+        try appendEllipsizedTitle(allocator, &cells, title, row, 0, cols, style);
     }
 
     // 닫기 ✕ 아이콘: 호버 슬롯(close_row) 우측 안쪽 col에 glyph 1개. cols가 2칸 이상일 때만(우측 여백
@@ -234,33 +273,8 @@ pub fn buildPaneTabBarDrawList(
             // 호버된 탭이면 우측 안쪽(seg_end-2)에 닫기 ✕를 둔다 — 제목은 ✕ 앞(seg_end-2)까지만 그린다.
             const is_close = close_tab != null and close_tab.? == tab_index and tab_w >= 2 and seg_end >= 2;
             const title_end: u32 = if (is_close) seg_end - 2 else seg_end;
-            var col: u32 = start + 1; // 좌측 1칸 패딩
-            var i: usize = 0;
-            while (i < title.len) {
-                var cp: u21 = 0xFFFD;
-                var advance: usize = 1;
-                if (std.unicode.utf8ByteSequenceLength(title[i])) |seq_len| {
-                    const len: usize = seq_len;
-                    if (i + len <= title.len) {
-                        if (std.unicode.utf8Decode(title[i .. i + len])) |decoded| {
-                            cp = decoded;
-                            advance = len;
-                        } else |_| {}
-                    }
-                } else |_| {}
-                i += advance;
-
-                const w: u16 = @max(1, terminal.width.cellWidth(cp)); // 0폭도 최소 1칸 전진
-                if (col + w > title_end) break; // 제목 한도(✕ 앞)를 넘기면 자른다
-                try cells.append(allocator, .{
-                    .row = 0,
-                    .col = @intCast(col),
-                    .codepoint = cp,
-                    .width = @intCast(@min(w, 2)),
-                    .style = style,
-                });
-                col += w;
-            }
+            // 좌측 1칸 패딩 뒤에 제목. title_end(✕ 앞)를 넘으면 하드 컷이 아니라 "…"로 말줄임(사이드바와 같은 규칙).
+            try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), @intCast(title_end), style);
             if (is_close) { // 호버 탭 우측 안쪽에 ✕ glyph 1개(xInTabCloseZone과 같은 col=seg_end-2).
                 try cells.append(allocator, .{
                     .row = 0,
@@ -666,10 +680,47 @@ test "buildSidebarDrawList truncates to cols and advances wide glyphs by two col
             row1_i += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 5), row0); // 7글자 중 5칸까지만
+    try std.testing.expectEqual(@as(usize, 5), row0); // 7글자 중 5칸까지만(말줄임 …)
     // "한"(와이드, width 2)이 col 0, 다음 'A'가 col 2(2칸 전진).
     try std.testing.expectEqual(@as(u16, 0), row1_cols[0]);
     try std.testing.expectEqual(@as(u16, 2), row1_cols[1]);
+}
+
+// 긴 제목은 하드 컷이 아니라 마지막 칸에 "…"(U+2026)를 둬 말줄임된다(사이드바·pane 탭 바 공유 규칙). 짧으면 없음.
+test "long titles are ellipsized with U+2026 at the last cell; short titles are not" {
+    const allocator = std.testing.allocator;
+    // 사이드바: "abcdefg"(7) cols=5 → 'a','b','c','d','…'. 마지막 셀 = U+2026.
+    {
+        const titles = [_][]const u8{"abcdefg"};
+        var dl = try buildSidebarDrawList(allocator, &titles, 5, .default, null, null);
+        defer dl.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 5), dl.cells.len);
+        try std.testing.expectEqual(title_ellipsis_glyph, dl.cells[4].codepoint); // 마지막 = …
+        try std.testing.expectEqual(@as(u16, 4), dl.cells[4].col);
+        for (dl.cells[0..4]) |c| try std.testing.expect(c.codepoint != title_ellipsis_glyph); // 앞은 글자
+    }
+    // 딱 맞으면 말줄임 없음.
+    {
+        const titles = [_][]const u8{"abcde"}; // 5칸 = cols
+        var dl = try buildSidebarDrawList(allocator, &titles, 5, .default, null, null);
+        defer dl.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 5), dl.cells.len);
+        for (dl.cells) |c| try std.testing.expect(c.codepoint != title_ellipsis_glyph);
+    }
+    // pane 탭 바: 긴 제목도 세그먼트 한도에서 … . cols=11 → 탭 영역 8, 2탭 → tab_w=4, 탭 0 제목 칸 [1,4) = 3칸.
+    {
+        const titles = [_][]const u8{ "abcdef", "x" };
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 11, .default, null);
+        defer dl.deinit(allocator);
+        var saw_ellipsis = false;
+        for (dl.cells) |c| {
+            if (c.codepoint == title_ellipsis_glyph) {
+                saw_ellipsis = true;
+                try std.testing.expectEqual(@as(u16, 3), c.col); // 탭 0 [1,4)의 마지막 칸
+            }
+        }
+        try std.testing.expect(saw_ellipsis);
+    }
 }
 
 test "buildSidebarDrawList adds a close glyph at the hovered row's right edge only" {

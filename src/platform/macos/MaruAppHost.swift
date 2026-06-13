@@ -296,7 +296,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        controller?.handleScroll(event)
+        controller?.handleScroll(event, in: self)
     }
 
     // 마우스 선택: raw 좌표만 backing 픽셀(좌상단 원점)로 바꿔 Zig에 넘긴다 — 셀 변환·선택 모델은
@@ -781,12 +781,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 마우스 휠/트랙패드 스크롤 -> 뷰포트 스크롤. raw NSEvent 값(델타 포인트 + 정밀 델타 여부)만
     // 넘기고, 줄 수 환산(셀 높이·clamp·NaN 가드)은 Zig가 실제 메트릭으로 한다(네이티브 최소화).
     // scrollingDeltaY>0이면 위(과거)로 본다 — 표준 터미널 방향.
-    func handleScroll(_ event: NSEvent) {
+    func handleScroll(_ event: NSEvent, in view: NSView) {
         guard let session = devSession else { return }
+        // 마우스 위치를 backing 픽셀(좌상단 원점)로 — Zig가 커서 아래 panel로 스크롤을 라우팅한다(split).
+        let local = view.convert(event.locationInWindow, from: nil)
+        let scale = window?.backingScaleFactor ?? 1.0
+        let xPx = Double(local.x * scale)
+        let yPx = Double((view.bounds.height - local.y) * scale)
         _ = maru_macos_app_dev_session_scroll_wheel(
             session,
             Double(event.scrollingDeltaY),
-            event.hasPreciseScrollingDeltas ? 1 : 0
+            event.hasPreciseScrollingDeltas ? 1 : 0,
+            xPx,
+            yPx
         )
         markMetalNeedsRedraw()
     }

@@ -203,15 +203,19 @@ pub export fn maru_macos_app_dev_session_close(
     return @intFromEnum(Status.ok);
 }
 
-// 휠 스크롤: Swift는 raw 델타(포인트)와 정밀 델타 여부만 넘기고, 줄 수 환산(매직 상수·clamp·NaN
-// 가드)은 dev session이 실제 cell 메트릭으로 한다. 스크롤 자체는 TerminalCore가 소유한다.
+// 휠 스크롤: Swift는 raw 델타(포인트)·정밀 델타 여부·마우스 위치(backing px)만 넘기고, 줄 수 환산(매직
+// 상수·clamp·NaN 가드)과 어느 panel로 보낼지(커서 아래 pane)는 dev session이 한다. 스크롤 자체는
+// TerminalCore가 소유한다. x/y는 split에서 비활성 panel 위 휠을 그 panel로 라우팅하는 데 쓴다(단일 panel
+// 이면 활성과 같음, 사이드바/밖이면 활성 fallback).
 pub export fn maru_macos_app_dev_session_scroll_wheel(
     session: ?*DevSession,
     delta_y: f64,
     precise: i32,
+    x_px: f64,
+    y_px: f64,
 ) c_int {
     const dev_session = session orelse return @intFromEnum(Status.null_out);
-    dev_session.scrollWheel(delta_y, precise != 0);
+    dev_session.scrollWheel(delta_y, precise != 0, x_px, y_px);
     return @intFromEnum(Status.ok);
 }
 

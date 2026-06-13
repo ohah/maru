@@ -21,7 +21,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 26;
+pub const abi_version: u32 = 27;
 pub const default_queue_capacity: u32 = 16;
 
 /// 마우스 호버 위치에 따라 Swift가 세울 커서 종류(`maru_macos_app_dev_session_hover`의 out 값). Zig가 위치를
@@ -1970,21 +1970,43 @@ pub const DevSession = struct {
     /// 단위라 한 줄 높이(포인트)로 나눠 줄 수로 바꾸고, 줄 단위(마우스 휠) 델타는 그대로 줄 수다.
     /// 한 줄 미만의 정밀 델타는 wheel_accum에 누적해 천천히 스크롤해도 줄이 소실되지 않는다.
     /// NaN/∞·거대값은 무시/clamp한다(@intFromFloat trap 방지).
-    pub fn scrollWheel(self: *DevSession, delta_y: f64, precise: bool) void {
+    pub fn scrollWheel(self: *DevSession, delta_y: f64, precise: bool, x_px: f64, y_px: f64) void {
         if (!self.surface_initialized) return;
         // 방향이 뒤집히면 1줄 미만 잔여를 버린다 — 이전 방향의 residue가 첫 반대 틱을 상쇄해
         // 방향 전환이 굼뜨게 느껴지는 것 방지(iTerm2/xterm.js 동작).
         if (std.math.isFinite(delta_y) and delta_y * self.wheel_accum < 0) self.wheel_accum = 0;
         const lines = wheelDeltaToLines(&self.wheel_accum, delta_y, precise, self.cell_height_px, self.scale_milli);
-        self.scrollLines(lines);
+        // 휠은 '커서 아래' panel로 라우팅한다 — split에서 비활성 panel 위 스크롤이 그 panel을 스크롤한다(포커스는
+        // 안 바꾼다). 단일 panel이면 활성과 같고, 사이드바/밖이면 활성 surface로 fallback.
+        const target = self.surfaceAt(x_px, y_px) orelse self.activeSurface();
+        self.scrollSurfaceLines(target, lines);
+    }
+
+    /// 스크린 점(backing px) 아래 panel의 활성 Term surface(없으면 — 사이드바/밖 — null). 휠 라우팅에 쓴다.
+    /// 활성 탭 leaf rect를 펴 paneAtPoint로 그 점의 pane을 찾는다. 단일 panel이면 그 panel(=활성)을 돌려준다.
+    fn surfaceAt(self: *DevSession, x_px: f64, y_px: f64) ?*app.Surface {
+        if (!self.surface_initialized) return null;
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
+        const pane = paneAtPoint(leaf_rects.items, x_px, y_px) orelse return null;
+        return &pane.activeTerm().surface;
     }
 
     /// 줄 수만큼 스크롤한다. alt screen + alternate scroll(DECSET 1007)이면 화살표 키로 변환해
     /// 프로그램(less/vim)에 보낸다(iTerm2/Terminal.app 동작, DECCKM이면 SS3 형식). 휠과
     /// Shift+PageUp/Down이 같은 경로를 타 일관되게 동작한다.
+    /// 활성 surface를 줄 수만큼 스크롤(키보드 PageUp/Down 경로). 휠은 surfaceAt으로 고른 surface에 직접 쓴다.
     fn scrollLines(self: *DevSession, lines: i32) void {
+        self.scrollSurfaceLines(self.activeSurface(), lines);
+    }
+
+    /// 주어진 surface를 줄 수만큼 스크롤한다 — 휠은 커서 아래 panel(비활성 가능), 키보드는 활성. alt screen +
+    /// alternate scroll(DECSET 1007)이면 그 surface PTY로 화살표 키를 보내고(less/vim 등 프로그램 스크롤),
+    /// 아니면 그 surface의 뷰포트를 스크롤한다(scrollback). 줄 0이면 무동작.
+    fn scrollSurfaceLines(self: *DevSession, surface: *app.Surface, lines: i32) void {
         if (lines == 0) return;
-        const core = &self.activeSurface().core;
+        const core = &surface.core;
         if (core.alt_active and core.alternate_scroll) {
             const key: terminal.input.Key = if (lines > 0) .arrow_up else .arrow_down;
             var key_buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
@@ -2003,12 +2025,13 @@ pub const DevSession = struct {
                     len += bytes.len;
                 }
                 // 쓰기 실패(PTY 버퍼 풀 등)는 남은 스크롤 입력 드랍일 뿐이라 중단한다.
-                self.runtime.writeInput(self.activeSurface().id, .{ .bytes = batch[0..len] }) catch break;
+                self.runtime.writeInput(surface.id, .{ .bytes = batch[0..len] }) catch break;
                 remaining -= count;
             }
             return;
         }
-        self.scroll(lines);
+        core.scrollViewport(@as(isize, lines));
+        self.metal_dirty = true;
     }
 
     /// backing 픽셀 좌표를 (row, col) 셀로 변환한다(grid 안으로 clamp). 핵심: clamp를 float
@@ -4748,6 +4771,48 @@ test "clicking another pane in a split focuses it; clicking the active pane keep
     session.mouse(1, right_x, click_y);
     try std.testing.expectEqual(new_surface, session.activeSurface());
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
+}
+
+// 비활성 panel 위 휠 스크롤이 그 panel(커서 아래)로 라우팅되는지 — 좌우 split에서 오른쪽이 활성이어도 왼쪽
+// (비활성) 위에서 스크롤하면 왼쪽 뷰포트가 움직이고 오른쪽은 그대로다(포커스도 안 바뀐다). 실 init/split이라 macOS 게이트.
+test "wheel over an inactive pane scrolls that pane (not the active one)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성)
+
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const left_surface = &lr.items[0].leaf.activeTerm().surface;
+    const right_surface = &lr.items[1].leaf.activeTerm().surface;
+    // 양쪽에 스크롤백을 만든다(split 후 pane은 창 높이만큼 행이 커서 100줄로 충분히 넘긴다). 비-alt-screen이라 휠=뷰포트.
+    try left_surface.core.write("L\r\n" ** 100);
+    try right_surface.core.write("R\r\n" ** 100);
+    try std.testing.expectEqual(@as(usize, 0), left_surface.core.view_offset);
+    try std.testing.expectEqual(@as(usize, 0), right_surface.core.view_offset);
+
+    const left_body = session.paneTermRect(lr.items[0].rect);
+    const right_body = session.paneTermRect(lr.items[1].rect);
+    // 왼쪽(비활성) 본문 위에서 위로 스크롤 → 왼쪽 뷰포트만 위로(과거), 오른쪽 불변·활성 pane 불변.
+    session.scrollWheel(3, false, @floatFromInt(left_body.x + left_body.w / 2), @floatFromInt(left_body.y + left_body.h / 2));
+    try std.testing.expect(left_surface.core.view_offset > 0);
+    try std.testing.expectEqual(@as(usize, 0), right_surface.core.view_offset);
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane); // 포커스 안 바뀜
+
+    // 오른쪽(활성) 본문 위에서 스크롤 → 오른쪽 뷰포트가 움직인다.
+    session.scrollWheel(3, false, @floatFromInt(right_body.x + right_body.w / 2), @floatFromInt(right_body.y + right_body.h / 2));
+    try std.testing.expect(right_surface.core.view_offset > 0);
 }
 
 // Cmd+Option+화살표가 키 경로(handleKeyEvent → resolver → app_action → focusPaneInDirection)로 pane 포커스를

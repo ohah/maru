@@ -380,6 +380,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 현재 마우스가 있는 화면으로 해석하므로 모드만 저장한다.
     private var quickAutoHide = true
     private var quickHeightFraction: CGFloat = 0.45
+    // center 가로 비율. 0이면 미설정 → quickHeightFraction을 따라간다(정사각). center 외 위치는 안 쓴다.
+    private var quickWidthFraction: CGFloat = 0
     private var quickScreenMode: UInt32 = UInt32(MaruAppHostQuickTerminalScreenMain.rawValue)
     private var quickPosition: UInt32 = UInt32(MaruAppHostQuickTerminalPositionTop.rawValue)
     // center 위치인가 — 가장자리가 없어 슬라이드(setFrame) 대신 알파 페이드로 보임/숨김을 애니메이션한다.
@@ -1487,6 +1489,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var minimalTabs: UInt32 = 0
         if let cfg = loadQuickTerminalConfig() {
             quickHeightFraction = max(0.1, min(1.0, CGFloat(cfg.height_milli) / 1000.0))
+            quickWidthFraction = CGFloat(cfg.width_milli) / 1000.0 // 0이면 미설정(center에서 height로 폴백). Zig가 0.1~1.0 검증.
             quickAutoHide = cfg.auto_hide != 0
             quickScreenMode = cfg.screen
             quickPosition = cfg.position
@@ -1565,8 +1568,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return (NSRect(x: vf.maxX - w, y: vf.minY, width: w, height: vf.height),
                     NSRect(x: vf.maxX, y: vf.minY, width: w, height: vf.height)) // 오른쪽으로 빠짐
         case UInt32(MaruAppHostQuickTerminalPositionCenter.rawValue):
-            // 중앙: width·height 둘 다 height_fraction 비율. 가장자리가 없어 보임=숨김(페이드로 처리).
-            let w = (vf.width * quickHeightFraction).rounded()
+            // 중앙: 세로=height_fraction, 가로=width_fraction(미설정 0이면 height로 폴백 → 정사각). 가장자리가 없어
+            // 보임=숨김(페이드로 처리).
+            let wfrac = quickWidthFraction > 0 ? quickWidthFraction : quickHeightFraction
+            let w = (vf.width * wfrac).rounded()
             let h = (vf.height * quickHeightFraction).rounded()
             let r = NSRect(x: (vf.midX - w / 2).rounded(), y: (vf.midY - h / 2).rounded(), width: w, height: h)
             return (r, r)

@@ -55,7 +55,8 @@ pub const QuickTerminalScreen = enum {
 
 /// quick terminal 패널이 화면 어느 가장자리에서 슬라이드해 나올지. top/bottom은 전폭 + height_fraction 높이,
 /// left/right는 전고 + height_fraction 폭(가장자리에 수직인 '두께'에 비율이 적용된다). center는 가장자리가 없어
-/// 화면 중앙에 width·height 둘 다 height_fraction 비율로 띄우고, 슬라이드 대신 페이드 인 한다. 슬라이드/배치는 Swift.
+/// 화면 중앙에 가로=width_fraction(미설정이면 height_fraction)·세로=height_fraction 비율로 띄우고, 슬라이드
+/// 대신 페이드 인 한다. 슬라이드/배치는 Swift.
 pub const QuickTerminalPosition = enum {
     top,
     bottom,
@@ -75,7 +76,11 @@ pub const QuickTerminalChrome = enum {
 /// 화면·자동 숨김 동작에 쓴다.
 pub const QuickTerminalConfig = struct {
     // 가장자리에 수직인 '두께' 비율(화면 visibleFrame 대비, 0.1~1.0). top/bottom이면 높이, left/right면 폭. 기본 0.45.
+    // center는 세로 비율로도 쓴다(가로는 width_fraction).
     height_fraction: f32 = 0.45,
+    // center 위치의 가로 비율(화면 대비, 0.1~1.0). center가 아니면 무시(top/bottom=전폭, left/right=height로 두께).
+    // 기본 0(미설정) — center 가로를 height_fraction과 같게(정사각 비율, 기존 center 동작 보존). 설정하면 가로/세로 독립.
+    width_fraction: f32 = 0,
     // 포커스를 잃으면(다른 창/앱 클릭) 자동으로 숨길지. 기본 true(quick terminal 표준 동작). false면 토글로만 숨김.
     auto_hide: bool = true,
     // 어느 화면에 띄울지.

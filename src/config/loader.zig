@@ -193,7 +193,7 @@ fn applyKey(
         };
     } else if (std.mem.eql(u8, key, "quick-terminal.position")) {
         config.quick_terminal.position = parseQuickTerminalPosition(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.position은 top|bottom|left|right — 기본값 유지" });
+            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.position은 top|bottom|left|right|center — 기본값 유지" });
             return;
         };
     } else if (std.mem.eql(u8, key, "quick-terminal.chrome")) {

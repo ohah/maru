@@ -1946,9 +1946,9 @@ pub const DevSession = struct {
             self.metal_dirty = true;
         }
         // 사용자 config의 keybind(앱 액션)를 적용한다 — resolver가 사용자 바인딩을 먼저 보고 없으면
-        // default_app_bindings로 폴백한다(override/추가 가능). 빈 config(테스트·파일 없음)면 app_bindings가
-        // 비어 곧장 기본값으로 떨어진다. terminal 레벨 키(Cmd+←=줄 시작 등)는 아직 config 대상이 아니라
-        // default_terminal_bindings로만 동작한다(keyBindingResolver가 app_bindings만 채움 — loader 주석).
+        // default_app_bindings로 폴백한다(override/추가/`=unbind`로 기본 끄기 가능). 빈 config(테스트·파일
+        // 없음)면 app_bindings/unbinds가 비어 곧장 기본값으로 떨어진다. terminal 레벨 키(Cmd+←=줄 시작 등)를
+        // config로 새로 묶는 건 아직 미지원이라 default_terminal_bindings로만 동작한다(단 `=unbind`로 끄는 건 됨).
         const result = try self.frame_loop.handleKeyEvent(self.loaded_config.keyBindingResolver(), event);
         switch (result) {
             .terminal_input => |terminal_input| {

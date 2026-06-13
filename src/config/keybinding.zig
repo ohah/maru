@@ -203,6 +203,11 @@ pub const default_app_bindings = [_]AppBinding{
 pub const KeyBindingResolver = struct {
     app_bindings: []const AppBinding = &.{},
     terminal_bindings: []const TerminalBinding = &.{},
+    /// 사용자가 `keybind = <chord> = unbind`로 끈 빌트인 기본 바인딩의 chord 목록. resolve가 이 chord를
+    /// 만나면 빌트인 terminal/app 테이블을 **건너뛰어**(사용자 바인딩 다음) 기본 동작을 무력화한다 — Cmd 조합은
+    /// fallthrough로 `.ignored`(아무 동작 안 함), 그 외는 encodeKey로 셸 입력이 된다. unbind는 app action이
+    /// 아니라 "기본 끄기"라 Action union에 넣지 않고 별도 chord 목록으로 둔다(dispatchAppAction switch 무관).
+    unbinds: []const KeyChord = &.{},
 
     pub fn validate(self: KeyBindingResolver) KeyBindingError!void {
         // Validation rejects ambiguous config up front. Runtime key handling
@@ -255,18 +260,24 @@ pub const KeyBindingResolver = struct {
             }
         }
 
-        // 빌트인 기본 바인딩(macOS 줄 편집). 사용자 바인딩 다음, Cmd-무시 fallthrough 전에 본다 —
-        // 안 그러면 Cmd+Backspace/←/→가 아래 .ignored로 새 나간다.
-        for (default_terminal_bindings) |binding| {
-            if (binding.chord.eql(chord)) {
-                return .{ .terminal_input = try binding.input.bytes(buffer) };
-            }
-        }
+        // 사용자가 이 chord를 unbind 했으면 빌트인 기본 테이블을 건너뛴다(사용자 바인딩으로도 안 잡힌 경우).
+        // 그러면 Cmd 조합은 아래 .ignored(아무 동작 안 함), 그 외는 encodeKey로 셸 입력이 된다 — "기본 끄기".
+        const unbound = self.isUnbound(chord);
 
-        // 빌트인 app 바인딩(Cmd+T=새 탭 등). 사용자 바인딩·빌트인 terminal 다음, Cmd-무시 fallthrough
-        // 전에 본다 — 안 그러면 Cmd+T가 아래 .ignored로 새 나가 탭이 안 열린다.
-        for (default_app_bindings) |binding| {
-            if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
+        // 빌트인 기본 바인딩(macOS 줄 편집). 사용자 바인딩 다음, Cmd-무시 fallthrough 전에 본다 —
+        // 안 그러면 Cmd+Backspace/←/→가 아래 .ignored로 새 나간다. unbind 된 chord는 건너뛴다.
+        if (!unbound) {
+            for (default_terminal_bindings) |binding| {
+                if (binding.chord.eql(chord)) {
+                    return .{ .terminal_input = try binding.input.bytes(buffer) };
+                }
+            }
+
+            // 빌트인 app 바인딩(Cmd+T=새 탭 등). 사용자 바인딩·빌트인 terminal 다음, Cmd-무시 fallthrough
+            // 전에 본다 — 안 그러면 Cmd+T가 아래 .ignored로 새 나가 탭이 안 열린다. unbind 된 chord는 건너뛴다.
+            for (default_app_bindings) |binding| {
+                if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
+            }
         }
 
         if (event.modifiers.command) {
@@ -276,6 +287,14 @@ pub const KeyBindingResolver = struct {
         }
 
         return .{ .terminal_input = try terminal.input.encodeKey(event, buffer, encode_options) };
+    }
+
+    /// chord가 사용자 unbind 목록에 있는가 — resolve가 빌트인 기본 테이블을 건너뛸지 정하는 데 쓴다.
+    fn isUnbound(self: KeyBindingResolver, chord: KeyChord) bool {
+        for (self.unbinds) |unbound| {
+            if (unbound.eql(chord)) return true;
+        }
+        return false;
     }
 };
 
@@ -497,6 +516,47 @@ test "built-in app binding resolves Cmd+W to close_term without user config" {
         .modifiers = .{ .command = true },
     }, &buffer, .{});
     try std.testing.expectEqual(action_mod.Action.close_term, resolved.app_action);
+}
+
+test "unbind skips the built-in default: Cmd chord becomes ignored, others fall through to the shell" {
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    // Cmd+T(빌트인 new_term)와 Cmd+Left(빌트인 줄 시작 Ctrl+A)를 unbind.
+    const resolver: KeyBindingResolver = .{
+        .unbinds = &.{ try KeyChord.parse("Cmd+T"), try KeyChord.parse("Cmd+Left") },
+    };
+    try resolver.validate();
+
+    // Cmd+T: 빌트인 new_term을 건너뛰고 Cmd-무시로 → ignored(새 Term 안 열림, 's'처럼 글자도 안 샘).
+    try std.testing.expect((try resolver.resolve(.{
+        .key = .{ .char = 't' },
+        .modifiers = .{ .command = true },
+    }, &buffer, .{})) == .ignored);
+
+    // Cmd+Left: 빌트인 terminal 매크로(Ctrl+A)를 건너뛰고 Cmd-무시로 → ignored(줄 시작으로 안 감).
+    try std.testing.expect((try resolver.resolve(.{
+        .key = .arrow_left,
+        .modifiers = .{ .command = true },
+    }, &buffer, .{})) == .ignored);
+
+    // unbind 안 된 Cmd+W는 그대로 빌트인 close_term.
+    try std.testing.expectEqual(action_mod.Action.close_term, (try resolver.resolve(.{
+        .key = .{ .char = 'w' },
+        .modifiers = .{ .command = true },
+    }, &buffer, .{})).app_action);
+}
+
+test "user binding still wins over unbind for the same chord (override, not disable)" {
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    // 같은 chord가 사용자 app 바인딩으로도 있으면 그게 우선(unbind는 빌트인만 끈다 — 사용자 바인딩 다음에 본다).
+    const resolver: KeyBindingResolver = .{
+        .app_bindings = &.{.{ .chord = try KeyChord.parse("Cmd+T"), .action = .new_tab }},
+        .unbinds = &.{try KeyChord.parse("Cmd+T")},
+    };
+    const resolved = try resolver.resolve(.{
+        .key = .{ .char = 't' },
+        .modifiers = .{ .command = true },
+    }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.new_tab, resolved.app_action);
 }
 
 test "built-in app bindings resolve Cmd+Shift+]/[ to next/previous tab for both bracket variants" {

@@ -687,6 +687,8 @@ test {
     std.testing.refAllDecls(@import("global_hotkey.zig"));
     // 커맨드 카탈로그(메뉴바·팝업 공유) round-trip·chord 포맷 테스트도 테스트 빌드에 포함한다.
     std.testing.refAllDecls(@import("command_catalog.zig"));
+    // 커맨드 팝업 상태머신(필터·선택·selectedAction) 테스트도 테스트 빌드에 포함한다.
+    std.testing.refAllDecls(@import("command_palette.zig"));
 }
 
 test "layout-independent shortcut: Hangul-mode Ctrl+B normalizes to latin b via the physical keycode" {

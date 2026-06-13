@@ -39,9 +39,13 @@ pub const CursorKind = enum(i32) {
 const placeholder_cell_width_px: u32 = 12;
 const placeholder_cell_height_px: u32 = 24;
 
-// 세로 탭 사이드바의 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
-// 터미널 surface는 이 폭만큼 오른쪽으로 그려지고, 왼쪽 strip이 사이드바다("surface→rect" 첫 적용).
-const sidebar_width_pt: u32 = 180;
+// 세로 탭 사이드바의 기본 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
+// 터미널 surface는 이 폭만큼 오른쪽으로 그려지고, 왼쪽 strip이 사이드바다("surface→rect" 첫 적용). 사용자가
+// 우측 경계를 드래그해 바꾸면 `DevSession.sidebar_width_pt`(현재 폭, pt)가 [min,max]로 갱신된다 — pt로 들어
+// DPI 변경(refreshCellMetrics)에도 살아남는다.
+const default_sidebar_width_pt: u32 = 180;
+const sidebar_min_pt: u32 = 120; // 너무 좁으면 제목/✕가 안 보임
+const sidebar_max_pt: u32 = 480; // 너무 넓으면 터미널이 좁아짐
 
 // 사이드바 탭 슬롯 한 칸의 높이를 cell 높이의 몇 배로 할지(천분율). 2500 = 2.5× — cmux/Warp식 큰
 // 탭 슬롯(라이브 요청). refreshCellMetrics가 cell_height_px × 이 비율로 backing 픽셀 슬롯 높이를 구한다.
@@ -255,6 +259,16 @@ const BarMetrics = struct {
 /// x<0(클리어 sentinel 포함)·origin_x 이상(터미널 영역)이면 false. 순수 함수라 OS 무관 단위 테스트.
 fn xInSidebar(x_px: f64, sidebar_width_px: u32) bool {
     return sidebar_width_px > 0 and x_px >= 0 and x_px < @as(f64, @floatFromInt(sidebar_width_px));
+}
+
+/// 스크린 x가 사이드바 우측 경계(폭 조절 드래그) 밴드 안인가 — 경계 x=sidebar_width_px에서 **터미널 쪽으로만**
+/// [sidebar_width_px, sidebar_width_px + (cell 절반 + 2px)). 사이드바 안쪽으로 넣지 않아 슬롯/✕(우측) 클릭과 안
+/// 겹친다(✕가 사이드바 우측에 있음). 사이드바가 꺼졌으면(폭 0) false. 순수 함수라 OS 무관 단위 테스트.
+fn xOnSidebarEdge(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bool {
+    if (sidebar_width_px == 0 or !std.math.isFinite(x_px)) return false;
+    const edge: f64 = @floatFromInt(sidebar_width_px);
+    const margin = @as(f64, @floatFromInt(if (cell_width_px > 0) cell_width_px else placeholder_cell_width_px)) / 2 + 2;
+    return x_px >= edge and x_px < edge + margin;
 }
 
 /// 사이드바 y(backing px) → 탭 슬롯 인덱스(y / slot_height). 슬롯 높이 0·비유한·음수·탭 범위 밖(슬롯
@@ -575,9 +589,15 @@ pub const DevSession = struct {
     // 쓰게 한다. 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다.
     cell_width_px: u32 = 0,
     cell_height_px: u32 = 0,
+    // 세로 사이드바의 현재 논리 폭(pt). 사용자가 우측 경계를 드래그하면 [sidebar_min_pt, sidebar_max_pt]로
+    // 갱신된다. backing 픽셀 폭은 scale을 곱해 구하므로 pt로 들면 DPI가 바뀌어도(refreshCellMetrics) 유지된다.
+    sidebar_width_pt: u32 = default_sidebar_width_pt,
     // 세로 사이드바의 backing 픽셀 폭(= sidebar_width_pt × scale). refreshCellMetrics가 갱신한다.
     // gridFromBacking이 이만큼 터미널 폭에서 빼고, metalFrame()이 렌더러에 origin offset으로 넘긴다.
     sidebar_width_px: u32 = 0,
+    // 사이드바 우측 경계 드래그로 폭을 조절하는 중인가. down이 경계 밴드에서 시작하면 true, drag(2)가
+    // setSidebarWidthPx로 live 갱신, up(3)이 끝낸다(divider 드래그와 같은 패턴).
+    sidebar_resize_active: bool = false,
     // 마지막 resize의 backing(drawable) 픽셀 크기. split된 panel의 leaf rect 계산(터미널 영역 = backing −
     // 사이드바)에 쓴다. 첫 resize 전엔 0 — 그땐 단일 leaf라 rect.w/h가 0이어도 활성 frame은 origin에 그려져
     // 무해하다(split은 창이 떠 backing이 잡힌 뒤에야 가능). resize가 갱신한다.
@@ -964,6 +984,24 @@ pub const DevSession = struct {
         sp.ratio = app.clampRatio(@floatCast(raw));
         self.resizeActiveTabPanes() catch {};
         self.recomputeActivePaneRect();
+        self.metal_dirty = true;
+    }
+
+    /// 사이드바 우측 경계 드래그(kind 2) — 폭을 x_px(backing, 경계가 갈 위치)로 잡고 [sidebar_min_pt,
+    /// sidebar_max_pt] pt로 clamp한다. pt를 권위 있게 저장(DPI 변경에도 유지), backing px·grid는 거기서 파생.
+    /// 사이드바 폭이 모든 탭의 터미널 폭을 바꾸므로 전 탭 panel을 새 grid로 resize하고 활성 rect·사이드바를
+    /// 갱신한다. 폭이 그대로면(같은 pt) 무동작 — SIGWINCH·재배치 storm 방지.
+    fn setSidebarWidthPx(self: *DevSession, x_px: f64) void {
+        if (self.scale_milli == 0 or !std.math.isFinite(x_px)) return;
+        const clamped_x = if (x_px < 0) 0 else @min(x_px, @as(f64, @floatFromInt(std.math.maxInt(u32))));
+        const px: u32 = @intFromFloat(clamped_x);
+        const pt: u32 = std.math.clamp(px * 1000 / self.scale_milli, sidebar_min_pt, sidebar_max_pt);
+        if (pt == self.sidebar_width_pt) return;
+        self.sidebar_width_pt = pt;
+        self.sidebar_width_px = pt * self.scale_milli / 1000;
+        for (self.tabs.items) |tab| self.resizeTabPanes(tab); // 모든 탭의 term 폭이 바뀐다(best-effort)
+        self.recomputeActivePaneRect();
+        self.rebuildSidebar() catch {}; // sidebar_cols 환산이 바뀌므로 밴드 재생성
         self.metal_dirty = true;
     }
 
@@ -1623,8 +1661,9 @@ pub const DevSession = struct {
                 self.cell_height_px = metrics.cell_height_px;
             }
         }
-        // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처).
-        self.sidebar_width_px = sidebar_width_pt * self.scale_milli / 1000;
+        // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처). 폭은 현재
+        // 논리 폭(sidebar_width_pt — 사용자 드래그로 바뀔 수 있음)에서 파생하므로 DPI 변경에도 유지된다.
+        self.sidebar_width_px = self.sidebar_width_pt * self.scale_milli / 1000;
         // 탭 슬롯 높이 = cell 높이 × 2.5(cmux식 큰 슬롯). cell_height_px가 이미 위에서 갱신됐으므로
         // 그걸 쓴다 — 슬롯 높이도 cell 메트릭과 같은 단일 출처에서 파생한다.
         self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
@@ -1802,6 +1841,21 @@ pub const DevSession = struct {
             if (kind == 2) self.dragDividerTo(x_px, y_px) else {
                 self.divider_drag = null;
             }
+            return;
+        }
+        // 사이드바 폭 조절 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(③a) — drag는 경계를 x로 잡아 폭을 live
+        // 갱신, up이 끝낸다. 새 down(1)은 아래로 흘려 새 드래그를 시작한다.
+        if (self.sidebar_resize_active and (kind == 2 or kind == 3)) {
+            if (kind == 2) self.setSidebarWidthPx(x_px) else {
+                self.sidebar_resize_active = false;
+            }
+            return;
+        }
+        // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드).
+        if (kind == 1 and xOnSidebarEdge(x_px, self.sidebar_width_px, self.cell_width_px)) {
+            self.sidebar_resize_active = true;
+            self.drag_autoscroll = 0;
+            self.mouse_drag_selecting = false;
             return;
         }
         // 사이드바 영역 클릭은 Maru UI다(터미널 선택/리포팅 아님). down(1)에서 슬롯을 hit-test한다 —
@@ -2233,6 +2287,13 @@ pub const DevSession = struct {
     /// Cmd+hover URL=pointingHand(link). 창 밖 sentinel(-1,-1)이면 inSidebar=false→터미널 경로로 호버 해제.
     pub fn hoverCursor(self: *DevSession, x_px: f64, y_px: f64, cmd_held: bool) CursorKind {
         if (!self.surface_initialized) return .text;
+        // 사이드바 우측 경계(폭 조절) 위면 리사이즈 커서 — 사이드바/터미널보다 먼저(경계는 둘 사이 밴드).
+        if (xOnSidebarEdge(x_px, self.sidebar_width_px, self.cell_width_px)) {
+            self.setHoveredSlot(null);
+            self.setHoveredTab(null);
+            self.clearHoverUrlAnchor();
+            return .resize_h; // 좌우로 끄는 세로 경계 ↔
+        }
         // 사이드바 영역 호버는 슬롯을 추적한다(터미널 URL 호버 아님).
         if (self.inSidebar(x_px)) {
             self.setHoveredSlot(self.sidebarSlotAt(y_px));
@@ -3221,6 +3282,7 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.metal_dirty = false;
     session.mouse_drag_selecting = true;
     session.divider_drag = null; // mouse()의 divider 드래그 캡처가 읽는다(undefined 옵셔널 포인터는 garbage non-null)
+    session.sidebar_resize_active = false; // mouse()의 사이드바 폭 조절 캡처가 읽는다(undefined bool도 garbage)
     session.drag_autoscroll = 0;
     session.last_drag_col = 1;
     session.cell_width_px = 8;
@@ -3716,6 +3778,18 @@ test "BarMetrics.inPlusZone detects the right-edge plus-button zone" {
 
 // dividerHit이 divider 드래그 밴드(경계 pos ± cell 절반 + 2px 여유, 교차축은 bounds 안)를 판정하는지 — divider
 // 드래그 hit-test의 코어라 헤드리스 단위로 고정(렌더 layoutDividers와 같은 seg). 순수 함수.
+// xOnSidebarEdge가 사이드바 우측 경계의 폭-조절 밴드를 '터미널 쪽만'으로 잡는지 — 사이드바 슬롯/✕(경계 안쪽)와
+// 안 겹치게. 순수 함수라 헤드리스로 고정. 경계 100, cell 8 → margin = 8/2+2 = 6, 밴드 [100, 106).
+test "xOnSidebarEdge detects the terminal-side resize band at the sidebar boundary" {
+    try std.testing.expect(xOnSidebarEdge(100, 100, 8)); // 경계 위(밴드 시작)
+    try std.testing.expect(xOnSidebarEdge(105, 100, 8)); // +5 (밴드 안)
+    try std.testing.expect(!xOnSidebarEdge(106, 100, 8)); // +6 (반열림 밖)
+    try std.testing.expect(!xOnSidebarEdge(99, 100, 8)); // 경계 안쪽(사이드바) — 슬롯/✕와 안 겹침
+    try std.testing.expect(!xOnSidebarEdge(50, 100, 8)); // 사이드바 안
+    try std.testing.expect(!xOnSidebarEdge(105, 0, 8)); // 사이드바 꺼짐(폭 0)
+    try std.testing.expect(!xOnSidebarEdge(std.math.nan(f64), 100, 8)); // 비유한
+}
+
 test "dividerHit detects the drag band around a split boundary" {
     // horizontal split divider: 세로선, 경계 x=100, bounds y[0,100). cell 8×16 → x 밴드 = ±(4+2)=±6.
     const h: PaneTree.DividerSeg = .{
@@ -3894,7 +3968,8 @@ test "vertical split renders the bottom pane tab bar at its own y (not overlappi
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const bottom_rect = lr.items[1].rect; // tree 순서: [0]=위, [1]=아래
     const bottom_bar_y: f64 = @floatFromInt(bottom_rect.y + 1);
-    session.mouse(1, @floatFromInt(bottom_rect.x + 5), bottom_bar_y);
+    // 사이드바 우측 리사이즈 밴드보다 안쪽(+30) — 아래 pane은 full-width라 x가 사이드바 경계에서 시작한다.
+    session.mouse(1, @floatFromInt(bottom_rect.x + 30), bottom_bar_y);
     try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term); // 아래 바 탭 0으로 전환
 }
 
@@ -3922,7 +3997,7 @@ test "clicking a tab in the pane bar switches to that Term" {
 
     // 탭 바는 단일 panel이라 터미널 영역 전체 폭의 상단 strip(y in [0, 바 높이)). 탭 0 = 바 좌단, 탭 1 = 바 우반.
     const bar_y: f64 = 1; // 바 안(y < 바 높이)
-    const left_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 5); // 탭 0 세그먼트
+    const left_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 30); // 탭 0 세그먼트(사이드바 우측 리사이즈 밴드보다 안쪽)
     session.mouse(1, left_tab_x, bar_y);
     try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term); // 탭 0으로 전환
 
@@ -4621,8 +4696,8 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     // 슬롯 밖(마지막 슬롯 아래 빈 영역) 클릭은 전환 안 함.
     session.mouse(1, x_in, slot_h * 10);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
-    // 터미널 영역(x ≥ 사이드바 폭) 클릭은 탭 전환 경로가 아님(활성 불변).
-    session.mouse(1, @floatFromInt(session.sidebar_width_px + 5), 1);
+    // 터미널 영역(x ≥ 사이드바 폭, 우측 경계 리사이즈 밴드보다 충분히 안쪽) 클릭은 탭 전환 경로가 아님(활성 불변).
+    session.mouse(1, @floatFromInt(session.sidebar_width_px + 50), 1);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
 
     // 호버: 비활성 슬롯(0, 활성은 1) 위면 호버 밴드가 추가된다(활성 밴드 + 호버 밴드 = 2).
@@ -4633,8 +4708,8 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     _ = session.hoverCursor(x_in, slot_h + 1, false);
     try std.testing.expectEqual(@as(?usize, 1), session.hovered_slot);
     try std.testing.expectEqual(@as(usize, 1), session.sidebar_cells.items.len);
-    // 터미널 영역으로 나가면 호버 해제.
-    _ = session.hoverCursor(@floatFromInt(session.sidebar_width_px + 5), 1, false);
+    // 터미널 영역(리사이즈 밴드보다 안쪽)으로 나가면 호버 해제.
+    _ = session.hoverCursor(@floatFromInt(session.sidebar_width_px + 50), 1, false);
     try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
 }
 
@@ -4722,6 +4797,46 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
     try std.testing.expectEqualStrings("Maru dev shell", session.tabs.items[2].activePane().activeTerm().surface.title);
     try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
     try std.testing.expect(!session.sidebar_drag_active);
+}
+
+// ③a: 사이드바 우측 경계를 드래그하면 폭이 바뀌는지 — 경계 호버=resize_h, down=리사이즈 시작, drag=폭 갱신,
+// up=종료, 극단값은 [min,max] pt로 clamp(pt 저장이라 DPI 생존). 실 init/spawn이라 macOS 게이트.
+test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, clamp)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try std.testing.expect(session.sidebar_width_px > 0);
+
+    const start_px = session.sidebar_width_px;
+    const edge: f64 = @floatFromInt(start_px);
+    // 경계 호버 → resize_h(↔). 경계 안쪽(사이드바)은 default.
+    try std.testing.expectEqual(CursorKind.resize_h, session.hoverCursor(edge, 100, false));
+
+    // 경계 down → 리사이즈 시작. 넓게 드래그(+60) → 폭 증가. up → 종료.
+    session.mouse(1, edge, 100);
+    try std.testing.expect(session.sidebar_resize_active);
+    session.mouse(2, edge + 60, 100);
+    try std.testing.expect(session.sidebar_width_px > start_px);
+    try std.testing.expect(session.sidebar_width_pt > default_sidebar_width_pt);
+    session.mouse(3, edge + 60, 100);
+    try std.testing.expect(!session.sidebar_resize_active);
+
+    // 극단값 clamp(직접 호출): 아주 넓게 → max_pt, 아주 좁게 → min_pt.
+    session.setSidebarWidthPx(1_000_000);
+    try std.testing.expectEqual(sidebar_max_pt, session.sidebar_width_pt);
+    session.setSidebarWidthPx(0);
+    try std.testing.expectEqual(sidebar_min_pt, session.sidebar_width_pt);
+    _ = try session.tick(); // 폭 변경 후 다음 tick 크래시 없음
 }
 
 // 멀티-탭 핵심 계약: 두 번째 탭을 만들면 자기 셸 PTY가 spawn되고, tick이 '모든' 탭을 drain하므로
@@ -4978,6 +5093,7 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.metal_buffer = .{};
     session.mouse_drag_selecting = false; // 더블클릭(kind 4) 후 상태
     session.divider_drag = null; // mouse()의 divider 드래그 캡처가 읽는다(undefined 옵셔널 포인터는 garbage non-null)
+    session.sidebar_resize_active = false; // mouse()의 사이드바 폭 조절 캡처가 읽는다(undefined bool도 garbage)
     session.drag_autoscroll = 0;
     session.last_drag_col = 0;
     session.cell_width_px = 8;

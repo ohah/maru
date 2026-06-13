@@ -595,6 +595,7 @@ fn buildMergedUploadsN(
     allocator: std.mem.Allocator,
     pane_frames: []const PaneFrame,
     sidebar_raster: ?renderer.GlyphRasterFrame,
+    palette_raster: ?renderer.GlyphRasterFrame,
 ) !MergedUploads {
     var pixels: std.ArrayList(u8) = .empty;
     errdefer pixels.deinit(allocator);
@@ -603,6 +604,7 @@ fn buildMergedUploadsN(
 
     for (pane_frames) |pf| try appendRaster(allocator, &pixels, &uploads, pf.frame.glyph_raster_frame);
     if (sidebar_raster) |sr| try appendRaster(allocator, &pixels, &uploads, sr);
+    if (palette_raster) |pr| try appendRaster(allocator, &pixels, &uploads, pr);
 
     return .{ .uploads = try uploads.toOwnedSlice(allocator), .pixels = try pixels.toOwnedSlice(allocator) };
 }
@@ -653,6 +655,10 @@ pub const MetalFrameBuffer = struct {
         // panel 커서 suffix '앞'에 끼워, 터미널 내용 위에 그리되 커서 blink 노출 길이(cursor suffix)를 깨지
         // 않게 한다. 각 셀은 origin_x/origin_y로 같은 maru_fill_cell_quad 경로(sentinel UV → bg만).
         pane_overlay_cells: []const NativeMetalCell,
+        // 커맨드 팝업 등 **최상위** 오버레이 frame(있으면). pane_overlay(커서 아래)와 달리 커서 suffix '뒤'에
+        // 붙여 터미널·chrome·커서 위 맨 앞에 그린다 — 모달 팝업이 그 아래를 다 덮는다. 각 셀이 자기 bg(불투명)+
+        // glyph를 들어 buildNativeCellsSplit로 투영되고, raster는 uploads에 머지된다. null이면 무동작.
+        palette_frame: ?PaneFrame,
     ) !void {
         // 1) 터미널 셀: pane 탭 바 chrome을 먼저(커서 suffix 보존), 그 뒤 각 panel frame을 투영해 origin 박아
         //    이어 붙인다. 커서 suffix는 맨 뒤(활성) panel만.
@@ -672,13 +678,21 @@ pub const MetalFrameBuffer = struct {
         if (pane_overlay_cells.len > 0) {
             try cells_list.insertSlice(allocator, cells_list.items.len - cursor_cells, pane_overlay_cells);
         }
+        // 팝업 frame은 커서 suffix '뒤'(맨 뒤)에 append → 터미널·chrome·커서 위 최상위. 불투명 bg 셀이라
+        // 아래(커서 포함)를 덮는다. cursor_cells(suffix 길이)는 안 바꾼다 — blink는 그 아래에서 그대로 동작.
+        if (palette_frame) |pf| {
+            const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
+            defer allocator.free(built.cells);
+            setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
+            try cells_list.appendSlice(allocator, built.cells);
+        }
         const new_cells = try cells_list.toOwnedSlice(allocator);
         errdefer allocator.free(new_cells);
 
         const new_sidebar_cells = try buildMergedSidebarCells(allocator, sidebar_band_cells, sidebar_frame, sidebar_colors);
         errdefer allocator.free(new_sidebar_cells);
 
-        const merged = try buildMergedUploadsN(allocator, pane_frames, if (sidebar_frame) |sf| sf.glyph_raster_frame else null);
+        const merged = try buildMergedUploadsN(allocator, pane_frames, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, if (palette_frame) |pf| pf.frame.glyph_raster_frame else null);
         errdefer {
             allocator.free(merged.uploads);
             allocator.free(merged.pixels);

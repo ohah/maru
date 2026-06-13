@@ -12,6 +12,7 @@ const metal_frame = @import("metal_frame.zig");
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
 const command_catalog = @import("command_catalog.zig");
+const command_palette = @import("command_palette.zig");
 
 // SplitTree를 leaf = `*Pane`으로 인스턴스화한다(트리는 panel 단위). app 레이어는 generic만 노출하고 Pane은
 // 이 platform 모듈이 정의하므로, 트리가 panel을 leaf로 들면서도 app→platform 의존이 생기지 않는다. cmux식
@@ -183,6 +184,32 @@ fn paneBarBgCell(bar: app.SplitRect, cell_width_px: u32, bg: u32) ?metal_frame.N
     const cols_u32 = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
     if (cols_u32 == 0) return null;
     return sentinelBgCell(0, @intCast(cols_u32), bg, bar.x, bar.y);
+}
+
+/// UTF-8 바이트를 코드포인트로 디코드해 line[start..]에 한 칸씩 채운다(폭 1 가정 — 팝업 텍스트/기호용).
+/// line 끝이나 디코드 실패에서 멈춘다(부분 채움 허용). 깨진 UTF-8은 그 지점에서 중단.
+fn putUtf8(line: []u21, start: usize, bytes: []const u8) void {
+    var col = start;
+    var view = std.unicode.Utf8View.init(bytes) catch return;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (col >= line.len) break;
+        line[col] = cp;
+        col += 1;
+    }
+}
+
+/// 팝업 한 행을 DrawCell로 emit한다 — 각 칸에 codepoint + 불투명 bg + fg. bg가 non-default라 buildFromDrawList가
+/// sentinel bg 셀을 내 패널이 아래(터미널·커서)를 덮는다(공백 칸도 bg가 칠해진다).
+fn appendPaletteRow(allocator: std.mem.Allocator, cells: *std.ArrayList(renderer.DrawCell), row: u16, line: []const u21, bg: terminal.Color, fg: terminal.Color) !void {
+    for (line, 0..) |cp, c| {
+        try cells.append(allocator, .{
+            .row = row,
+            .col = @intCast(c),
+            .codepoint = cp,
+            .style = .{ .foreground = fg, .background = bg },
+        });
+    }
 }
 
 /// 점(backing px)이 사각형 안인가([x, x+w) × [y, y+h) 반열린). 탭 바 클릭 hit-test에 쓴다. 비유한은 false.
@@ -690,6 +717,9 @@ pub const DevSession = struct {
     command_entries: std.ArrayList(CommandEntry) = .empty,
     command_key_displays: std.ArrayList([:0]u8) = .empty,
     command_key_equivalents: std.ArrayList([:0]u8) = .empty,
+    // 커맨드 팝업(Cmd+Shift+P) 상태(열림/필터/선택). 열려 있으면 handleKeyEvent가 키를 팝업으로 라우팅하고,
+    // tick이 최상위 오버레이 frame으로 그린다. 상태머신은 command_palette.zig(순수 로직, 카탈로그를 필터).
+    palette: command_palette.PaletteState = .{},
     // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
     // 마다 leaf rect/divider seg 레이아웃을 새 ArrayList에 할당·해제하던 churn을 없앤다 — 레이아웃은 매번
     // 다시 계산하므로(작은 트리라 cheap) 결과는 항상 최신이라 stale 캐시 위험이 없고, 버퍼 capacity만 재사용한다.
@@ -2048,6 +2078,43 @@ pub const DevSession = struct {
             .previous_term => self.focusTermRelative(-1),
             // 전체 선택(⌘A) — 활성 surface 코어의 selection을 스크롤백+화면 전체로. clipboard 쓰기는 네이티브.
             .select_all => self.activeSurface().core.selectAll(),
+            // 커맨드 팝업 토글(Cmd+Shift+P). 열려 있으면 닫고, 아니면 연다(상태머신은 PaletteState).
+            .toggle_command_palette => self.togglePalette(),
+        }
+        self.metal_dirty = true;
+    }
+
+    /// 커맨드 팝업을 토글한다 — 열려 있으면 닫고, 아니면 카탈로그 전체로 연다. show OOM이면 안 연다(무해).
+    fn togglePalette(self: *DevSession) void {
+        if (self.palette.open) {
+            self.palette.hide();
+        } else {
+            self.palette.show(self.allocator) catch return;
+        }
+    }
+
+    /// 팝업이 열려 있을 때 키를 팝업으로 라우팅한다(handleKeyEvent가 resolver 앞에서 호출). Esc/모디파이어 조합=닫기,
+    /// Enter=선택 실행 후 닫기, ↑↓=선택 이동, Backspace=한 글자 삭제, 평문 글자=필터에 추가, 그 외 특수키=닫기(안전).
+    fn handlePaletteKey(self: *DevSession, event: terminal.KeyEvent) void {
+        switch (event.key) {
+            .escape => self.palette.hide(),
+            .enter => {
+                const action = self.palette.selectedAction();
+                self.palette.hide();
+                if (action) |a| self.dispatchAppAction(a); // 닫은 뒤 실행(실행이 또 metal_dirty 등 세움)
+            },
+            .arrow_up => self.palette.moveSelection(-1),
+            .arrow_down => self.palette.moveSelection(1),
+            .backspace => self.palette.backspace(self.allocator) catch {},
+            .char => |c| {
+                // 모디파이어 조합(⌘⇧P 등)은 팝업을 닫는다(토글-닫기 포함). 평문 글자만 필터에 쌓는다.
+                if (event.modifiers.command or event.modifiers.control or event.modifiers.option) {
+                    self.palette.hide();
+                } else {
+                    self.palette.appendChar(self.allocator, c) catch {};
+                }
+            },
+            else => self.palette.hide(),
         }
         self.metal_dirty = true;
     }
@@ -2110,6 +2177,15 @@ pub const DevSession = struct {
         // 아니라 닫힌 pane의 late input이므로 ignored로 회계만 하고 정상으로 닫는다.
         if (self.ended_seen) {
             self.total_ignored_key_events += 1;
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+            return self.last_summary;
+        }
+        // 커맨드 팝업이 열려 있으면 모든 키를 팝업으로 라우팅한다(모달) — resolver/PTY/스크롤 경로보다 먼저.
+        // 팝업이 키를 소비하므로 터미널엔 안 내려간다(Enter가 액션을 디스패치할 수는 있음).
+        if (self.palette.open) {
+            self.handlePaletteKey(event);
+            self.total_app_key_events += 1; // 팝업(앱)이 소비
             self.writeSummaryFromState();
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
@@ -3187,6 +3263,13 @@ pub const DevSession = struct {
                 sidebar_frame = self.buildSidebarTitleFrame() catch null;
             }
             defer if (sidebar_frame) |*sf| sf.deinit(self.allocator);
+            // 커맨드 팝업 오버레이 frame(열렸을 때만, macOS). 최상위로 그린다(replace의 palette_frame). 실패는
+            // 무시(팝업 없이 정상). PaneFrame.frame을 deinit해야 하므로 defer로 정리한다.
+            var palette_frame: ?metal_frame.PaneFrame = null;
+            if (builtin.os.tag == .macos and self.palette.open) {
+                palette_frame = self.buildPaletteFrame() catch null;
+            }
+            defer if (palette_frame) |*pf| pf.frame.deinit(self.allocator);
             // 제목 glyph 투영용 색(전경=테마 글자색). 밴드는 rebuildSidebar가 이미 색을 박아 넘긴다.
             const sidebar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
 
@@ -3343,7 +3426,7 @@ pub const DevSession = struct {
             if (floating_pf) |pf| pane_frames.append(self.allocator, pf) catch {};
 
             if (pane_frames.items.len > 0) {
-                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items)) |_| {
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, palette_frame)) |_| {
                     self.metal_dirty = false;
                 } else |_| {}
             }
@@ -3562,6 +3645,82 @@ pub const DevSession = struct {
         return frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
     }
 
+    /// 커맨드 팝업 오버레이 frame(최상위). 패널을 화면 상단-중앙에 그린다: row 0 = 쿼리("> …"), 그 아래
+    /// 필터된 결과(제목 + 우측 정렬 바인딩 표시), 선택 행은 강조 bg. 모든 셀이 불투명 bg를 들어(buildFromDrawList가
+    /// non-default bg를 sentinel 셀로 냄) 아래(터미널·커서)를 덮는다. 닫혀 있거나 메트릭 미상이면 에러(호출자가 무시).
+    /// macOS 전용(buildFromDrawList = CoreText). 사이드바 제목 프레임과 같은 빌더.
+    fn buildPaletteFrame(self: *DevSession) !metal_frame.PaneFrame {
+        const cw = self.cell_width_px;
+        const ch = self.cell_height_px;
+        if (cw == 0 or ch == 0) return error.NoMetrics;
+        const term_rect = self.termRect();
+        const term_cols = term_rect.w / cw;
+        if (term_cols < 8) return error.TooNarrow;
+
+        const max_cols: u16 = 60;
+        const panel_cols: u16 = @intCast(@min(@as(u32, max_cols), term_cols -| 4));
+        const max_visible: usize = 10;
+        const result_count = @min(self.palette.filtered.items.len, max_visible);
+        const panel_rows: u16 = @intCast(1 + result_count); // 1 쿼리 줄 + N 결과
+
+        // 선택이 보이도록 결과 윈도우 시작(스크롤): selected가 max_visible 밖이면 끝에 맞춘다.
+        var win_start: usize = 0;
+        if (self.palette.selected >= max_visible) win_start = self.palette.selected - max_visible + 1;
+
+        const panel_bg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_background };
+        const sel_bg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_active };
+        const text_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+
+        var cells: std.ArrayList(renderer.DrawCell) = .empty;
+        errdefer cells.deinit(self.allocator);
+        var line: [max_cols]u21 = undefined;
+
+        // row 0: 쿼리 줄 "> <query>" (패널 bg).
+        @memset(line[0..panel_cols], ' ');
+        line[0] = '>';
+        putUtf8(line[0..panel_cols], 2, self.palette.query.items);
+        try appendPaletteRow(self.allocator, &cells, 0, line[0..panel_cols], panel_bg, text_fg);
+
+        // 결과 행: 제목(col 2부터) + 바인딩 표시(우측 정렬). 선택 행은 강조 bg.
+        var i: usize = 0;
+        while (i < result_count) : (i += 1) {
+            const list_idx = win_start + i;
+            const entry_idx = self.palette.filtered.items[list_idx];
+            const row_bg = if (list_idx == self.palette.selected) sel_bg else panel_bg;
+            @memset(line[0..panel_cols], ' ');
+            putUtf8(line[0..panel_cols], 2, command_catalog.entries[entry_idx].title);
+            // 현재 바인딩 표시(command_key_displays는 command_catalog.entries와 1:1)를 우측에. 길이는 코드포인트 수.
+            if (entry_idx < self.command_key_displays.items.len) {
+                const kd = self.command_key_displays.items[entry_idx];
+                const kd_len = std.unicode.utf8CountCodepoints(kd) catch 0;
+                if (kd_len > 0 and kd_len + 2 < panel_cols) putUtf8(line[0..panel_cols], panel_cols - @as(u16, @intCast(kd_len)) - 1, kd);
+            }
+            try appendPaletteRow(self.allocator, &cells, @intCast(1 + i), line[0..panel_cols], row_bg, text_fg);
+        }
+
+        const draw_list: renderer.DrawList = .{
+            .size = .{ .cols = panel_cols, .rows = panel_rows },
+            .cursor = .{ .row = 0, .col = 0, .visible = false },
+            .dirty = .{ .start_row = 0, .end_row = if (panel_rows == 0) 0 else panel_rows - 1 },
+            .cells = try cells.toOwnedSlice(self.allocator),
+            .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
+        };
+        const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
+            .appearance = self.appearance,
+            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+            .scale_milli = self.scale_milli,
+            .cell_width_px = @intCast(cw),
+            .cell_height_px = @intCast(ch),
+        };
+        const frame = try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
+        // 상단-중앙 배치(backing px). 폭이 패널보다 좁으면 origin 0.
+        const panel_w = @as(u32, panel_cols) * cw;
+        const origin_x = term_rect.x + (term_rect.w -| panel_w) / 2;
+        const origin_y = term_rect.y + 2 * ch; // 위에서 두 줄 내려.
+        return .{ .frame = frame, .origin_x = origin_x, .origin_y = origin_y, .colors = .{ .default_fg = self.appearance.theme.foreground } };
+    }
+
     pub fn metalFrame(self: *const DevSession) MetalFrame {
         var frame = self.metal_buffer.view();
         // "surface→rect": 터미널을 사이드바 폭만큼 오른쪽에 그리고, 왼쪽 strip에 사이드바 배경을 칠한다.
@@ -3590,6 +3749,7 @@ pub const DevSession = struct {
         for (self.command_key_equivalents.items) |s| self.allocator.free(s);
         self.command_key_equivalents.deinit(self.allocator);
         self.command_entries.deinit(self.allocator);
+        self.palette.deinit(self.allocator);
         self.hover_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
         // 1) 각 탭의 각 panel의 각 Term live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'.
@@ -4274,6 +4434,51 @@ test "command catalog: 엔트리·바인딩 표시 + runAction 디스패치" {
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
     try std.testing.expect(!session.runAction("bogus_action"));
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+}
+
+test "command palette: 토글 열림 → 타이핑 필터 → Enter 디스패치+닫힘 → 프레임 빌드" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildPaletteFrame=CoreText, 실 PTY
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000); // 메트릭·backing(buildPaletteFrame이 termRect 폭을 씀)
+
+    // 토글로 열린다 — 빈 쿼리라 전체 카탈로그가 필터에.
+    try std.testing.expect(!session.palette.open);
+    session.dispatchAppAction(.toggle_command_palette);
+    try std.testing.expect(session.palette.open);
+    try std.testing.expectEqual(command_catalog.entries.len, session.palette.filtered.items.len);
+
+    // "new t" 타이핑(모달 라우팅) → "New Terminal"만 남는다.
+    for ("new t") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 1), session.palette.filtered.items.len);
+    try std.testing.expect(session.palette.selectedAction().? == .new_term);
+
+    // Enter → 선택 실행(new_term, full이라 게이트 없음) 후 닫힘. 활성 pane Term +1.
+    const before = session.activePane().terms.items.len;
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(!session.palette.open);
+    try std.testing.expectEqual(before + 1, session.activePane().terms.items.len);
+
+    // 다시 열고 Esc로 닫힌다.
+    session.dispatchAppAction(.toggle_command_palette);
+    try std.testing.expect(session.palette.open);
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(!session.palette.open);
+
+    // 열린 상태에서 오버레이 프레임 빌드가 크래시 없이 셀을 낸다.
+    session.dispatchAppAction(.toggle_command_palette);
+    var pf = try session.buildPaletteFrame();
+    defer pf.frame.deinit(allocator);
+    try std.testing.expect(pf.frame.draw_list.cells.len > 0);
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {

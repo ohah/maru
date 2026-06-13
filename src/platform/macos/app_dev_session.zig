@@ -1086,6 +1086,57 @@ pub const DevSession = struct {
         }
     }
 
+    /// minimal(chrome 없는 quick terminal) 세션에서 탭이 여러 개일 때 **우상단에 작은 "탭 점" 인디케이터**를 overlay
+    /// 셀로 append한다 — 사이드바·pane 탭 바가 숨겨져 안 보이는 탭을 글랜서블하게 보여준다. 적응형: 워크스페이스가
+    /// 여러 개면 워크스페이스(⌘1..9)를, 아니면 활성 pane의 Term(⌘])을 점으로 — 한 줄로 가장 관련 있는 차원만.
+    /// 점 = sentinel-bg 셀: strip(sidebarBg) 위에 활성=sidebarActiveBg(밝게)·나머지=sidebarHoverBg(중간 톤).
+    /// chrome_minimal이 아니거나(full은 사이드바/탭 바가 이미 보여줌) 단일(탭 1개)이면 무동작.
+    fn appendMinimalTabIndicator(self: *DevSession, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
+        if (!self.chrome_minimal) return;
+        const cw = self.cell_width_px;
+        if (cw == 0) return;
+
+        // 적응형 차원: 워크스페이스 우선(여러 개면 그쪽), 아니면 활성 pane의 Term. 둘 다 1개면 표시 안 함.
+        const pane = self.activePane();
+        var count: u32 = undefined;
+        var active: u32 = undefined;
+        if (self.tabs.items.len > 1) {
+            count = @intCast(self.tabs.items.len);
+            active = @intCast(self.app_window.active_tab);
+        } else if (pane.terms.items.len > 1) {
+            count = @intCast(pane.terms.items.len);
+            active = @intCast(pane.active_term);
+        } else return;
+
+        // 화면 폭(셀 칸). minimal이라 termRect.x=0, w=backing 폭. 칸이 0이면 그릴 곳이 없다.
+        const term_rect = self.termRect();
+        const cols = term_rect.w / cw;
+        if (cols == 0) return;
+
+        // 레이아웃(칸): strip 좌우 1칸 패딩 + 점 1칸 + 점 사이 간격 1칸 → band 폭 = 2*count+1, 점은 band-local 1,3,5...
+        const pad: u32 = 1;
+        const band_width: u32 = 2 * count + 1;
+        const right_margin: u32 = 1;
+        // 우상단 정렬. band가 화면보다 넓으면 col 0에서 시작(오른쪽 높은-index 점이 화면 밖으로 잘림 — 극단적 탭 수).
+        const band_start: u32 = (cols -| band_width) -| right_margin;
+
+        const u16_max: u32 = std.math.maxInt(u16);
+        // strip 배경(넓은 sentinel 셀 1개) → 그 위에 점들(append 순서 = painter 순서라 점이 strip 위에 그려진다).
+        out.append(self.allocator, sentinelBgCell(
+            @intCast(@min(band_start, u16_max)),
+            @intCast(@min(band_width, u16_max)),
+            self.sidebarBg(),
+            term_rect.x,
+            0,
+        )) catch return;
+        var i: u32 = 0;
+        while (i < count) : (i += 1) {
+            const col = band_start + pad + i * 2;
+            const color = if (i == active) self.sidebarActiveBg() else self.sidebarHoverBg();
+            out.append(self.allocator, sentinelBgCell(@intCast(@min(col, u16_max)), 1, color, term_rect.x, 0)) catch return;
+        }
+    }
+
     /// 마우스 (x,y)가 활성 탭 어느 divider의 드래그 밴드 안인가 — 맞으면 그 DividerSeg, 아니면 null. 밴드는 경계
     /// pos ± (cell 절반 + margin), 교차축은 bounds 안. 렌더 divider(같은 layoutDividers)와 정렬돼 "보이는 =
     /// 잡히는". 단일 panel이면 항상 null(divider 없음). 마우스 down(1) divider 드래그 시작 판정에 쓴다.
@@ -3066,6 +3117,7 @@ pub const DevSession = struct {
             defer pane_overlay.deinit(self.allocator);
             self.appendDropTargetHighlight(&pane_overlay); // ④b 드롭 타겟 반투명 하이라이트(divider보다 먼저 → 아래)
             self.appendActiveTabDividers(&pane_overlay);
+            self.appendMinimalTabIndicator(&pane_overlay); // minimal(탭 보임): 우상단 탭 점(full·단일이면 무동작)
 
             // 활성 panel의 origin(터미널 영역 = 바 아래). 못 구하면(빈 리스트 — OOM) 터미널 영역 전체의 바 아래로 폴백.
             const active_fallback = self.paneTermRect(self.termRect());
@@ -3929,6 +3981,72 @@ test "minimal scratch session blocks new_tab/new_term; minimal_tabs re-enables t
         try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
         session.dispatchAppAction(.new_tab); // 새 워크스페이스
         try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    }
+}
+
+test "minimal tab indicator: adaptive dots appear only in minimal with >1 tab" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // refreshCellMetrics(cell_width_px) + 실 PTY
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
+    defer out.deinit(allocator);
+
+    // ① minimal + minimal_tabs: 단일이면 무동작, Term 2개면 strip+점2개(활성=마지막에 그려진 셀).
+    {
+        const session = try allocator.create(DevSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .chrome_minimal = 1,
+            .minimal_tabs = 1,
+        });
+        defer session.deinit();
+        _ = try session.resize(800, 600, 1000); // backing 폭을 잡아야 termRect.w>0(인디케이터 폭 계산)
+
+        out.clearRetainingCapacity();
+        session.appendMinimalTabIndicator(&out);
+        try std.testing.expectEqual(@as(usize, 0), out.items.len); // 탭 1개 → 점 없음
+
+        session.dispatchAppAction(.new_term); // Term 2개(새 Term이 활성 = index 1)
+        out.clearRetainingCapacity();
+        session.appendMinimalTabIndicator(&out);
+        try std.testing.expectEqual(@as(usize, 3), out.items.len); // strip + 점 2개
+        try std.testing.expectEqual(session.sidebarBg(), out.items[0].background); // strip
+        try std.testing.expectEqual(session.sidebarHoverBg(), out.items[1].background); // 비활성 점(i=0)
+        try std.testing.expectEqual(session.sidebarActiveBg(), out.items[2].background); // 활성 점(i=1)
+        // 점은 strip 안에서 우상단(row 0), 활성 점이 비활성보다 오른쪽(+2칸).
+        try std.testing.expectEqual(@as(u16, 0), out.items[2].row);
+        try std.testing.expectEqual(out.items[1].col + 2, out.items[2].col);
+
+        // 워크스페이스가 여러 개면 그쪽을 우선 표시(차원 전환). 새 워크스페이스 = 활성 index 1.
+        session.dispatchAppAction(.new_tab);
+        out.clearRetainingCapacity();
+        session.appendMinimalTabIndicator(&out);
+        try std.testing.expectEqual(@as(usize, 3), out.items.len); // 워크스페이스 2개 → strip + 점 2개
+        try std.testing.expectEqual(session.sidebarActiveBg(), out.items[2].background); // 활성 워크스페이스(index 1)
+    }
+
+    // ② full(chrome_minimal=0): 탭이 여러 개여도 인디케이터 없음(사이드바·탭 바가 보여줌).
+    {
+        const session = try allocator.create(DevSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .chrome_minimal = 0,
+        });
+        defer session.deinit();
+        session.dispatchAppAction(.new_term); // Term 2개(full은 게이트 없음)
+        try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+        out.clearRetainingCapacity();
+        session.appendMinimalTabIndicator(&out);
+        try std.testing.expectEqual(@as(usize, 0), out.items.len); // full → 무동작
     }
 }
 

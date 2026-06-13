@@ -2988,6 +2988,10 @@ pub const DevSession = struct {
     /// dispatchAppAction으로 넘기고 true, 모르는 키면 무동작 true 반환 없이 false(Swift가 무시). 터미널
     /// Action만 받는다(global/UI 동작은 Swift 소유라 별도).
     pub fn runAction(self: *DevSession, action_key: []const u8) bool {
+        // 팝업이 모달로 열린 동안엔 메뉴바 keyEquivalent(Swift가 OS에서 잡아 이 경로로 보낸다)를 무시한다 —
+        // 모달 중 단축키가 뒤의 터미널을 조작하면 안 된다. 팝업 자신의 Enter 선택은 handlePaletteKey가
+        // dispatchAppAction을 직접 부르므로 이 경로를 거치지 않는다(가드에 막히지 않음).
+        if (self.palette.open) return false;
         const action = config_mod.parseAction(action_key) orelse return false;
         self.dispatchAppAction(action);
         return true;
@@ -4479,6 +4483,18 @@ test "command palette: 토글 열림 → 타이핑 필터 → Enter 디스패치
     var pf = try session.buildPaletteFrame();
     defer pf.frame.deinit(allocator);
     try std.testing.expect(pf.frame.draw_list.cells.len > 0);
+
+    // 회귀(후속 리뷰: 메뉴 모달 우회): 팝업이 열린 동안 메뉴바 keyEquivalent 경로(runAction)는 무시된다 —
+    // 모달 뒤 터미널이 조작되면 안 된다. (팝업 자신의 Enter는 handlePaletteKey가 dispatchAppAction을 직접 부르므로 별개.)
+    try std.testing.expect(session.palette.open);
+    const terms_before_runaction = session.activePane().terms.items.len;
+    try std.testing.expect(!session.runAction("new_term"));
+    try std.testing.expectEqual(terms_before_runaction, session.activePane().terms.items.len);
+
+    // 회귀(후속 리뷰: blink chop): 팝업이 열린 프레임을 tick으로 빌드하면 metal_buffer.cursor_cells=0이라
+    // view()의 blink-off 꼬리 chop(cells.len - cursor_cells)이 커서가 아니라 팝업 꼬리를 자르는 일이 없다.
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 0), session.metal_buffer.cursor_cells);
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {

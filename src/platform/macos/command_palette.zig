@@ -36,10 +36,12 @@ pub const PaletteState = struct {
     }
 
     /// 팝업을 연다 — 쿼리 비우고 전체를 필터(=전부)로, 선택 맨 위. OOM이면 에러(호출자가 무시하고 안 열어도 됨).
+    /// recompute를 open=true '전에' 한다 — OOM이면 open=false가 유지돼, filtered가 빈(혹은 직전) 상태로
+    /// 열려버리는 일을 막는다(열림은 필터가 성공적으로 채워진 뒤에만 성립).
     pub fn show(self: *PaletteState, allocator: std.mem.Allocator) !void {
         self.query.clearRetainingCapacity();
-        self.open = true;
         try self.recompute(allocator);
+        self.open = true;
     }
 
     pub fn hide(self: *PaletteState) void {

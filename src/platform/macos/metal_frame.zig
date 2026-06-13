@@ -704,7 +704,10 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.pixels);
         self.cells = new_cells;
         self.sidebar_cells = new_sidebar_cells;
-        self.cursor_cells = cursor_cells;
+        // 팝업(palette_frame)이 있으면 그 셀이 커서 suffix '뒤'(맨 뒤)에 오므로, blink-off의 꼬리 chop
+        // (view: cells.len - cursor_cells)이 커서가 아니라 팝업 꼬리를 잘라낸다. 팝업이 열린 프레임에선
+        // cursor_cells=0으로 둬 chop을 끈다 — 모달 중엔 터미널 커서를 정적(깜빡임 없이)으로 두고 팝업이 위를 덮는다.
+        self.cursor_cells = if (palette_frame != null) 0 else cursor_cells;
         self.uploads = merged.uploads;
         self.pixels = merged.pixels;
         // cols/rows는 렌더러의 cols==0/rows==0 가드용 — 활성(마지막) panel의 grid를 쓴다(셀은 자기 row/col+

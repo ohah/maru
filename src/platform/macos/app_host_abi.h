@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 34u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 35u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -433,6 +433,30 @@ typedef enum MaruAppHostQuickTerminalChrome {
 int32_t maru_macos_app_dev_session_quick_terminal_config(
     MaruAppHostDevSession *session,
     MaruAppHostQuickTerminalConfig *out_config
+);
+
+/* 커맨드 카탈로그 한 항목 — 메뉴바·커맨드 팝업이 그릴 액션. 모든 문자열은 dev session 소유(destroy까지
+   유효). action_key는 선택 시 run_action으로 되돌려보내는 식별자, title은 표시명, key_display는 현재
+   바인딩(없으면 ""). 배열은 config/액션에서 한 번 만들어 세션 동안 불변. */
+typedef struct MaruAppHostCommand {
+    const char* action_key;
+    const char* title;
+    const char* key_display;
+} MaruAppHostCommand;
+
+/* 커맨드 카탈로그 목록. config/액션에서 한 번 만들어 세션 동안 불변이라 Swift가 시작 시 한 번 읽는다.
+   배열·문자열 전부 dev session 소유(destroy까지 유효). 비어 있으면 out_commands=NULL/out_count=0. */
+int32_t maru_macos_app_dev_session_command_catalog(
+    MaruAppHostDevSession *session,
+    const MaruAppHostCommand **out_commands,
+    size_t *out_count
+);
+/* 메뉴/팝업이 고른 액션 한 개를 실행한다 — action_key 바이트(카탈로그가 준 식별자)를 받아 Zig가
+   parseAction → dispatch. 모르는 키면 InvalidConfig(무동작). 키→실행 결정은 Zig 소유(Swift는 문자열만 왕복). */
+int32_t maru_macos_app_dev_session_run_action(
+    MaruAppHostDevSession *session,
+    const uint8_t *bytes,
+    size_t len
 );
 void maru_macos_app_dev_session_destroy(MaruAppHostDevSession *session);
 int32_t maru_macos_app_dev_session_metal_frame(

@@ -501,7 +501,7 @@ TDD 방식:
 
 단계(각자 PR):
 
-- **Stage 0 — Action 카탈로그 ABI(토대)**: Zig가 각 Action의 `action_key`(=`parseAction` 문자열, 이미 양방향)·`title`·현재 바인딩 chord 표시를 배열로 노출(`maru_..._command_catalog`). 바인딩은 keybinding 테이블 action→chord 역스캔(없으면 빈 문자열). 재실행은 `maru_..._run_action(action_key)` → `parseAction` → `dispatchAppAction`(Swift는 문자열만 왕복). `@sizeOf` cross-check. 헤드리스 검증(카탈로그가 전 Action을 키·제목·바인딩과 냄, run_action 라운드트립).
+- **Stage 0 — Action 카탈로그 ABI(토대) 완료(ABI 35)**: 새 `command_catalog.zig`가 단일 출처 — `entries`(action+action_key+title 정적 테이블, select_tab은 0..8로 펼침), `chordForAction`(resolver 역스캔: 사용자 우선·unbind 존중), `formatChord`(macOS 표시: ⌃⌥⇧⌘ 순 + 키 심볼). `DevSession.buildCommandCatalog`가 init에서 한 번 빌드해 `CommandEntry{action_key, title, key_display}`(extern, 문자열은 세션 arena 소유) 배열로 보관. ABI 34→35: `maru_macos_app_dev_session_command_catalog`(global_hotkeys 패턴) + `maru_macos_app_dev_session_run_action(bytes,len)`(parseAction → dispatchAppAction, 모르는 키 InvalidConfig). `.h` `MaruAppHostCommand`. Swift는 문자열만 왕복(미연결 — Stage 1/2가 소비). 검증: 헤드리스(catalog round-trip[전 action_key가 parseAction으로 복원]·formatChord[⌘T/⇧⌘T/⌥⌘←/⌘1/F5]·chordForAction[빌트인·사용자·unbind]·select_tab ⌘1..9 + 실 세션 catalog 엔트리/바인딩 표시/runAction 디스패치) + boundaries + swift-check + coretext/metal 스모크 + ABI 35 size cross-check.
 - **Stage 1 — 메뉴바(NSMenu, 네이티브)**: 5메뉴 뼈대 + (가)범위 = 지금 연결 가능 전부(기존 Action·표준 AppKit 항목 Quit/Minimize/Zoom·승격된 copy/paste/select-all) + **싼 신규**(Toggle Fullscreen=`toggleFullScreen:`, Open/Reload Config). 각 항목 제목·키 equivalent는 Stage 0 카탈로그에서, 선택 시 `run_action`. swift-check + 스모크 + 수동.
 - **Stage 2 — 커맨드 팝업(Cmd+Shift+P)**: SwiftUI 오버레이(quick terminal 패널 패턴 재사용), 카탈로그 리스트 + 검색 필터 + 바인딩 표시 + 선택 시 `run_action`. 토글은 앱 UI 동작이라 Swift 소유(quick terminal 토글처럼), first-responder 복귀도 그 패턴 재사용.
 

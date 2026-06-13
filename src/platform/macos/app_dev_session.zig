@@ -11,6 +11,7 @@ const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const metal_frame = @import("metal_frame.zig");
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
+const command_catalog = @import("command_catalog.zig");
 
 // SplitTree를 leaf = `*Pane`으로 인스턴스화한다(트리는 panel 단위). app 레이어는 generic만 노출하고 Pane은
 // 이 platform 모듈이 정의하므로, 트리가 panel을 leaf로 들면서도 app→platform 의존이 생기지 않는다. cmux식
@@ -22,7 +23,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 34;
+pub const abi_version: u32 = 35;
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -46,6 +47,15 @@ pub const QuickTerminalConfig = extern struct {
     chrome: u32, // config.QuickTerminalChrome의 @intFromEnum(0=full, 1=minimal). Swift가 quick 세션 생성 시 chrome_minimal로 넘긴다.
     minimal_tabs: u32, // 0/1 — minimal에서 탭 허용 여부. Swift가 quick 세션 생성 시 SessionConfig.minimal_tabs로 넘긴다.
     width_milli: u32, // center 가로 비율 × 1000. 0이면 미설정 → Swift가 height로 폴백(정사각). center 외 위치는 무시.
+};
+
+/// 커맨드 카탈로그 한 항목(C ABI) — 메뉴바·커맨드 팝업이 그릴 액션. 모든 문자열은 dev session 소유(arena,
+/// destroy까지 유효). `action_key`는 Swift가 선택 시 `run_action`으로 되돌려보내는 식별자(= parseAction 문자열),
+/// `title`은 표시명, `key_display`는 현재 바인딩(없으면 빈 문자열). global_hotkeys처럼 세션 동안 불변·한 번 빌드.
+pub const CommandEntry = extern struct {
+    action_key: [*:0]const u8,
+    title: [*:0]const u8,
+    key_display: [*:0]const u8,
 };
 
 /// 마우스 호버 위치에 따라 Swift가 세울 커서 종류(`maru_macos_app_dev_session_hover`의 out 값). Zig가 위치를
@@ -672,6 +682,11 @@ pub const DevSession = struct {
     // init에서 loaded_config.global_bindings를 global_hotkey.descriptorFor로 매핑(매핑 불가 chord는 제외).
     // Swift가 `maru_macos_app_dev_session_global_hotkeys`로 읽어 RegisterEventHotKey로 등록한다(a2). owned.
     global_hotkeys: std.ArrayList(GlobalHotkey) = .empty,
+    // 커맨드 카탈로그(메뉴바·커맨드 팝업이 그릴 액션 목록). init에서 한 번 빌드(세션 동안 불변). Swift가
+    // `maru_macos_app_dev_session_command_catalog`로 읽는다. owned — command_key_displays가 각 항목의 바인딩
+    // 표시 문자열(널 종단)을 소유하고, command_entries의 key_display가 그걸 가리킨다(action_key/title은 정적 리터럴).
+    command_entries: std.ArrayList(CommandEntry) = .empty,
+    command_key_displays: std.ArrayList([:0]u8) = .empty,
     // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
     // 마다 leaf rect/divider seg 레이아웃을 새 ArrayList에 할당·해제하던 churn을 없앤다 — 레이아웃은 매번
     // 다시 계산하므로(작은 트리라 cheap) 결과는 항상 최신이라 stale 캐시 위험이 없고, 버퍼 capacity만 재사용한다.
@@ -865,6 +880,11 @@ pub const DevSession = struct {
                 });
             }
         }
+
+        // 커맨드 카탈로그를 빌드한다(메뉴바·팝업 공유). 각 정적 엔트리에 현재 바인딩 chord 표시 문자열을 붙여
+        // owned 목록에 담는다 — action_key/title은 정적 리터럴(복사 불요), key_display만 chord에서 만들어 dupeZ한다.
+        // 바인딩은 loaded_config resolver로 역스캔(사용자 우선·unbind 존중). 안 묶인 액션은 빈 문자열.
+        try self.buildCommandCatalog();
 
         // 셸 통합: 대화형 셸이 zsh면 macOS 편집키(Cmd+←/→ 등) 바인딩을 주입한다(사용자 .zshrc의
         // keymap 조건과 무관하게 동작하게). ZDOTDIR로 통합 .zshenv를 가리킨다. 실패 시 null(통합
@@ -2848,6 +2868,42 @@ pub const DevSession = struct {
         return self.global_hotkeys.items;
     }
 
+    /// 커맨드 카탈로그를 빌드한다(init 1회). 각 정적 엔트리에 대해 현재 바인딩 chord를 역스캔해 표시 문자열을
+    /// 만들고(안 묶였으면 빈 문자열), 그걸 owned로 보관한 뒤 CommandEntry(action_key/title=정적 리터럴 포인터,
+    /// key_display=owned 포인터)를 append한다. OOM이면 에러를 올려 init이 정리하게 한다(errdefer deinit).
+    fn buildCommandCatalog(self: *DevSession) !void {
+        const resolver = self.loaded_config.keyBindingResolver();
+        for (command_catalog.entries) |entry| {
+            var scratch: [command_catalog.max_chord_display_len]u8 = undefined;
+            const display: []const u8 = if (command_catalog.chordForAction(resolver, entry.action)) |chord|
+                command_catalog.formatChord(chord, &scratch)
+            else
+                "";
+            const owned = try self.allocator.dupeZ(u8, display);
+            errdefer self.allocator.free(owned);
+            try self.command_key_displays.append(self.allocator, owned);
+            try self.command_entries.append(self.allocator, .{
+                .action_key = entry.key.ptr,
+                .title = entry.title.ptr,
+                .key_display = owned.ptr,
+            });
+        }
+    }
+
+    /// 커맨드 카탈로그(메뉴바·팝업이 그릴 액션 목록). 세션 동안 불변. owned — destroy까지 유효.
+    pub fn commandCatalog(self: *const DevSession) []const CommandEntry {
+        return self.command_entries.items;
+    }
+
+    /// action_key(= parseAction 문자열) 한 개를 실행한다 — 메뉴/팝업 선택의 디스패치 경로. 파싱되면
+    /// dispatchAppAction으로 넘기고 true, 모르는 키면 무동작 true 반환 없이 false(Swift가 무시). 터미널
+    /// Action만 받는다(global/UI 동작은 Swift 소유라 별도).
+    pub fn runAction(self: *DevSession, action_key: []const u8) bool {
+        const action = config_mod.parseAction(action_key) orelse return false;
+        self.dispatchAppAction(action);
+        return true;
+    }
+
     /// quick terminal 표시 옵션(config에서 파싱). Swift가 패널 크기·화면·자동 숨김에 쓴다. 세션 동안 불변.
     pub fn quickTerminalConfig(self: *const DevSession) QuickTerminalConfig {
         const qt = self.loaded_config.config.quick_terminal;
@@ -3515,6 +3571,10 @@ pub const DevSession = struct {
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
         self.global_hotkeys.deinit(self.allocator);
+        // 커맨드 카탈로그: key_display owned 문자열들을 먼저 해제하고 두 목록을 deinit(빌드 전이면 empty라 무해).
+        for (self.command_key_displays.items) |s| self.allocator.free(s);
+        self.command_key_displays.deinit(self.allocator);
+        self.command_entries.deinit(self.allocator);
         self.hover_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
         // 1) 각 탭의 각 panel의 각 Term live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'.
@@ -4155,6 +4215,46 @@ test "minimal active pane border: 4 edges only in minimal split" {
         session.appendActivePaneBorder(&out, rect, 2);
         try std.testing.expectEqual(@as(usize, 0), out.items.len); // full → 무동작
     }
+}
+
+test "command catalog: 엔트리·바인딩 표시 + runAction 디스패치" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 init(loaded_config resolver) + PTY
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const catalog = session.commandCatalog();
+    try std.testing.expectEqual(command_catalog.entries.len, catalog.len);
+    // new_term 엔트리: 제목 + 빌트인 Cmd+T 바인딩 표시. close_tab: 기본 바인딩 없어 빈 표시.
+    var saw_new_term = false;
+    var saw_close_tab = false;
+    for (catalog) |e| {
+        const key = std.mem.span(e.action_key);
+        if (std.mem.eql(u8, key, "new_term")) {
+            try std.testing.expectEqualStrings("New Terminal", std.mem.span(e.title));
+            try std.testing.expectEqualStrings("⌘T", std.mem.span(e.key_display));
+            saw_new_term = true;
+        } else if (std.mem.eql(u8, key, "close_tab")) {
+            try std.testing.expectEqualStrings("", std.mem.span(e.key_display)); // 기본 바인딩 없음
+            saw_close_tab = true;
+        }
+    }
+    try std.testing.expect(saw_new_term and saw_close_tab);
+
+    // runAction: new_term → 활성 pane Term +1(full 세션이라 tabsBlocked=false). 모르는 키는 false·무동작.
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expect(session.runAction("new_term"));
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expect(!session.runAction("bogus_action"));
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {

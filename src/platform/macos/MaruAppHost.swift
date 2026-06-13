@@ -831,21 +831,30 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let scale = window?.backingScaleFactor ?? 1.0
         let xPx = Double(local.x * scale)
         let yPx = Double((view.bounds.height - local.y) * scale)
-        var isUrl: Int32 = 0
-        guard maru_macos_app_dev_session_hover(session, xPx, yPx, cmdHeld ? 1 : 0, &isUrl) == Self.statusOK else { return }
-        if isUrl == 1 {
-            NSCursor.pointingHand.set()
-        } else {
-            NSCursor.iBeam.set()
+        // Zig가 위치별 커서 종류를 판정해 돌려준다(CursorKind). Swift는 그 값을 NSCursor로 매핑만 한다 —
+        // 전부 iBeam이던 걸 영역별로(사이드바·탭 바=arrow, divider=resize, 터미널=iBeam, URL=pointingHand).
+        var cursorKind: Int32 = 1
+        guard maru_macos_app_dev_session_hover(session, xPx, yPx, cmdHeld ? 1 : 0, &cursorKind) == Self.statusOK else { return }
+        Self.cursor(for: cursorKind).set()
+    }
+
+    // CursorKind(app_host_abi.h: 0=arrow, 1=iBeam, 2=pointingHand, 3=resizeLeftRight, 4=resizeUpDown) → NSCursor.
+    private static func cursor(for kind: Int32) -> NSCursor {
+        switch kind {
+        case 0: return .arrow
+        case 2: return .pointingHand
+        case 3: return .resizeLeftRight
+        case 4: return .resizeUpDown
+        default: return .iBeam // 1(text) 및 미지값
         }
     }
 
     func clearHover() {
         guard let session = devSession else { return }
-        var isUrl: Int32 = 0
+        var cursorKind: Int32 = 0
         // 음수 좌표 sentinel: Zig가 사이드바 영역 밖(x<0)·터미널 셀 밖으로 보고 URL 밑줄과 사이드바 슬롯
-        // 호버를 모두 해제한다((0,0)은 사이드바 슬롯 0으로 오인될 수 있어 못 쓴다).
-        _ = maru_macos_app_dev_session_hover(session, -1, -1, 0, &isUrl)
+        // 호버를 모두 해제한다((0,0)은 사이드바 슬롯 0으로 오인될 수 있어 못 쓴다). 커서는 arrow로(뷰 밖).
+        _ = maru_macos_app_dev_session_hover(session, -1, -1, 0, &cursorKind)
         NSCursor.arrow.set()
     }
 

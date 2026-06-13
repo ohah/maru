@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 25u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 26u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -327,14 +327,16 @@ int32_t maru_macos_app_dev_session_ime_delete_backward(MaruAppHostDevSession *se
 int32_t maru_macos_app_dev_session_set_focus(MaruAppHostDevSession *session, int32_t focused);
 /* 진행 중 IME 조합을 확정(커밋)한다. IME 우회 특수키/단축키 직전에 호출. */
 int32_t maru_macos_app_dev_session_commit_composition(MaruAppHostDevSession *session);
-/* Cmd+hover 갱신(backing px). URL 위면 *out_is_url=1(Swift가 pointingHand 커서), Zig는 밑줄
-   하이라이트를 다음 frame에 투영한다. cmd_held=0이면 hover 해제. */
+/* 마우스 호버 갱신(backing px). *out_cursor_kind에 위치별 커서 종류(0=arrow/사이드바·탭 바, 1=iBeam/터미널,
+   2=pointingHand/Cmd+hover URL, 3=resizeLeftRight/세로 divider, 4=resizeUpDown/가로 divider). Swift가 이 값으로
+   NSCursor를 세운다. Zig는 부수적으로 사이드바 슬롯·pane 탭 호버·URL 밑줄을 갱신한다. cmd_held=0이면 URL 호버
+   해제. 창 밖이면 음수 sentinel(-1,-1)로 호버 해제. */
 int32_t maru_macos_app_dev_session_hover(
     MaruAppHostDevSession *session,
     double x_px,
     double y_px,
     int32_t cmd_held,
-    int32_t *out_is_url
+    int32_t *out_cursor_kind
 );
 int32_t maru_macos_app_dev_session_url_at(
     MaruAppHostDevSession *session,

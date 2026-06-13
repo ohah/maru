@@ -333,18 +333,20 @@ pub export fn maru_macos_app_dev_session_commit_composition(session: ?*DevSessio
     return @intFromEnum(Status.ok);
 }
 
-// Cmd+hover 갱신(backing px). URL 위면 *out_is_url=1 — Swift가 마우스 커서(pointingHand)를 정하고,
-// Zig는 밑줄 하이라이트를 다음 frame에 투영한다. cmd_held=0이면 hover 해제.
+// 마우스 호버 갱신(backing px). *out_cursor_kind에 위치별 커서 종류를 돌려준다(CursorKind: 0=arrow/사이드바·탭
+// 바, 1=iBeam/터미널, 2=pointingHand/Cmd+hover URL, 3=resizeLeftRight/세로 divider, 4=resizeUpDown/가로 divider).
+// Swift가 이 값으로 NSCursor를 세운다. Zig는 부수적으로 사이드바 슬롯·pane 탭 호버·URL 밑줄을 갱신한다.
+// cmd_held=0이면 URL 호버 해제. 창 밖이면 Swift가 음수 sentinel(-1,-1)을 보내 호버를 해제한다.
 pub export fn maru_macos_app_dev_session_hover(
     session: ?*DevSession,
     x_px: f64,
     y_px: f64,
     cmd_held: i32,
-    out_is_url: ?*i32,
+    out_cursor_kind: ?*i32,
 ) c_int {
     const dev_session = session orelse return @intFromEnum(Status.null_out);
-    const out = out_is_url orelse return @intFromEnum(Status.null_out);
-    out.* = if (dev_session.hoverUrl(x_px, y_px, cmd_held != 0)) 1 else 0;
+    const out = out_cursor_kind orelse return @intFromEnum(Status.null_out);
+    out.* = @intFromEnum(dev_session.hoverCursor(x_px, y_px, cmd_held != 0));
     return @intFromEnum(Status.ok);
 }
 

@@ -486,6 +486,35 @@ TDD 방식:
 - **⑦-B2 trace 직렬화(writer)를 구현했다(완료)**: B1 이벤트 스트림을 `maru.trace.v1` 텍스트로 굳히는 writer(`observability/trace.zig`의 `renderShellEvents`/`writeEvent`). snapshot 직렬화와 같은 규칙(첫 줄 bare 토큰, `event <i> <kind> surface=<id> [payload]` 라인). 토큰은 ShellEvent와 1:1(`shell.prompt-start`/`shell.prompt-end`/`shell.command-start`/`shell.command-end row=N exit=N|none`/`shell.cwd-changed cwd="..."`). `cwd`는 POD 이벤트가 안 들어 직렬화 시점의 `currentCwd()`를 따옴표·escape(`\` `"`·개행/CR/Tab)해 기록. **검증**: 실제 OSC 133/7을 먹인 core의 이벤트가 정확한 trace 라인으로 직렬화되는지(exit 0/130/none·cwd escape 포함) 결정적 unit. **reader/replay는 두지 않는다** — snapshot.zig처럼 writer만, reader/ReplayRunner는 trace를 재생할 필요(첫 회귀 trace·workspace restore)가 생길 때(⑦-B3). 후속: ⑦-B2b live `MARU_TRACE` 레코딩(실 세션→파일), ⑦-B3 reader/ReplayRunner + replay용 output/input/resize 이벤트.
 - **IME 1단계를 구현했다(완료)**: `MaruMetalTerminalView`가 `NSTextInputClient`를 채택해 수정자 없는 타이핑을 입력기에 위임한다(한글 조합 동작, 확정 텍스트는 코드포인트 단위로 기존 encodeKey 경로). Ctrl/Cmd 조합은 입력기를 우회하고 **물리 키코드 기준으로 레이아웃 독립 매칭**한다(ABI v18 raw_key_code + Zig keycode.zig — 한글 모드에서도 Ctrl+B=0x02·Cmd+C/V 동작, 라틴 배열 결과는 보존). 자세한 정책은 [키 입력과 단축키 경계](key-input-and-shortcuts.md). preedit(조합 중 글자)는 커서 위치에 반전으로 합성 표시된다(core renderSnapshot 합성, 그리드 비오염, unit 검증). IME 판정 상태 머신은 Zig dev session이 소유한다(ABI v20 ime_begin/insert/marked/end + set_focus — Ghostty keyTextAccumulator식 일괄 판정, 조합 키 무전송·확정 1회 전송·C0 suppress·포커스 커밋 전부 unit 고정; Swift는 전달만). 후보창은 커서 셀 위치에 뜬다(ABI v22 ime_cursor_rect, unit 검증). 아직: function key/keypad/dead key, CSI-u/Kitty 인코딩.
 
+## 메뉴바 + 커맨드 팝업 (Action 카탈로그, 8단계 후속 — 사용자 합의 완료·미착수)
+
+목표:
+
+- maru는 현재 `NSMenu`를 아예 세팅하지 않아 표준 macOS 메뉴바(maru/File/Edit/View/Window/Help)가 없다(copy/paste·quit 등은 keybind/`NSApp.terminate`로 동작하지만 메뉴 발견성·접근성이 빠짐). Ghostty식으로 **메뉴바**와 **커맨드 팝업(Cmd+Shift+P)**을 얹되, 둘 다 같은 **Action 카탈로그**의 두 표면으로 만든다. 베이스: Ghostty `toggle_command_palette`(actions + 바인딩 + 검색 + 실행) / 네이티브 NSMenu·xib. UI는 네이티브(SwiftUI/AppKit), 카탈로그·실행은 Zig 코어(경계 일관 — quick terminal·global hotkey와 같은 규율).
+
+설계 결정(사용자 합의):
+
+- **카탈로그 ABI 형태 = 구조체 배열 + `const char*`**(Ghostty `ghostty_command_s` 형). `MaruCommand{action_key, title, key_display}[]` + count, 문자열은 세션 arena 소유(destroy까지 유효). 근거: maru가 이미 쓰는 두 패턴의 합집합 — `global_hotkeys`의 "배열+count"(세션-불변, 한 번 빌드) + `cwd`/`window_title`의 "Zig-소유 문자열 버퍼". packed-blob(offset/len)은 Swift에 슬라이싱 마샬링을 새로 들여 "네이티브 최소"에 어긋나 기각.
+- **copy/paste를 Action으로 승격**: 현재 Swift 직접 처리(`copySelectionToPasteboard`/`pastePasteboardText`)인 걸 `copy_to_clipboard`/`paste_from_clipboard`(+`select_all`, 코어 selection API 신설)로 `Action` enum에 올려 메뉴·팝업·키바인딩이 한 카탈로그를 공유하게 한다(Ghostty도 first-class 액션).
+- **메뉴 범위 = 5메뉴 다 채우기**. 단, 칸을 채우는 데 maru에 없는 기능이 필요한 항목이 있다(아래 단계에서 분리).
+- **순서 = Stage 0(카탈로그 ABI) → 1(메뉴바) → 2(팝업)**.
+
+단계(각자 PR):
+
+- **Stage 0 — Action 카탈로그 ABI(토대)**: Zig가 각 Action의 `action_key`(=`parseAction` 문자열, 이미 양방향)·`title`·현재 바인딩 chord 표시를 배열로 노출(`maru_..._command_catalog`). 바인딩은 keybinding 테이블 action→chord 역스캔(없으면 빈 문자열). 재실행은 `maru_..._run_action(action_key)` → `parseAction` → `dispatchAppAction`(Swift는 문자열만 왕복). `@sizeOf` cross-check. 헤드리스 검증(카탈로그가 전 Action을 키·제목·바인딩과 냄, run_action 라운드트립).
+- **Stage 1 — 메뉴바(NSMenu, 네이티브)**: 5메뉴 뼈대 + (가)범위 = 지금 연결 가능 전부(기존 Action·표준 AppKit 항목 Quit/Minimize/Zoom·승격된 copy/paste/select-all) + **싼 신규**(Toggle Fullscreen=`toggleFullScreen:`, Open/Reload Config). 각 항목 제목·키 equivalent는 Stage 0 카탈로그에서, 선택 시 `run_action`. swift-check + 스모크 + 수동.
+- **Stage 2 — 커맨드 팝업(Cmd+Shift+P)**: SwiftUI 오버레이(quick terminal 패널 패턴 재사용), 카탈로그 리스트 + 검색 필터 + 바인딩 표시 + 선택 시 `run_action`. 토글은 앱 UI 동작이라 Swift 소유(quick terminal 토글처럼), first-responder 복귀도 그 패턴 재사용.
+
+후속(메뉴에 자리만 두고 각자 별도 — 새 기능이라 분리):
+
+- **Font Size +/−/Reset**(중간 — 폰트 크기 변경 → cell 메트릭 재계산·resize), **New Window**(멀티 윈도우 — 큼, 현재 단일 윈도우), **Find**(스크롤백 검색 — 큼).
+
+완료 기준:
+
+- 카탈로그·실행·바인딩 표시는 Zig 단일 출처(메뉴·팝업·키바인딩이 같은 카탈로그를 본다 — 발산 없음).
+- 네이티브는 NSMenu/SwiftUI 그리기 + 액션 문자열 왕복만(정책 0).
+- ABI는 구조체 배열 한 형태로 메뉴·팝업이 공유. 스모크는 메뉴 생성이 smokeMode에서 안전(앱 자동 종료 경로 불변).
+
 ## 9단계: Workspace restore
 
 목표:

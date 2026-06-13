@@ -293,6 +293,57 @@ pub fn buildPaneTabBarDrawList(
     };
 }
 
+/// 드래그 중 커서를 따라다니는 'floating 탭' 미리보기의 DrawList(한 행). col마다 셀 하나(중복 없음)를 깔되 전부
+/// `bg`를 줘 솔리드 박스로 보이게 하고, 1칸 좌패딩 뒤에 제목을 그린다(cols 한도로 자름, 깨진 UTF-8은 U+FFFD,
+/// wide glyph는 2칸). 박스 위에 제목이 얹힌 작은 탭처럼 보인다. 커서/overlay 없는 UI 텍스트라 순수 함수.
+pub fn buildFloatingTabDrawList(
+    allocator: std.mem.Allocator,
+    title: []const u8,
+    cols: u16,
+    fg: terminal.Color,
+    bg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    const style: terminal.Style = .{ .foreground = fg, .background = bg };
+
+    var col: u16 = 0;
+    if (col < cols) { // col 0 = 좌패딩(공백, bg)
+        try cells.append(allocator, .{ .row = 0, .col = 0, .codepoint = ' ', .width = 1, .style = style });
+        col = 1;
+    }
+    var i: usize = 0;
+    while (i < title.len and col < cols) {
+        var cp: u21 = 0xFFFD;
+        var advance: usize = 1;
+        if (std.unicode.utf8ByteSequenceLength(title[i])) |seq_len| {
+            const len: usize = seq_len;
+            if (i + len <= title.len) {
+                if (std.unicode.utf8Decode(title[i .. i + len])) |decoded| {
+                    cp = decoded;
+                    advance = len;
+                } else |_| {}
+            }
+        } else |_| {}
+        i += advance;
+        const w: u16 = @max(1, terminal.width.cellWidth(cp));
+        if (col + w > cols) break; // 박스 폭 한도 — 넘치면 자름
+        try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = cp, .width = @intCast(@min(w, 2)), .style = style });
+        col += w;
+    }
+    while (col < cols) : (col += 1) { // 남은 col = bg 공백(솔리드 박스 마감)
+        try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = ' ', .width = 1, .style = style });
+    }
+
+    return .{
+        .size = .{ .cols = @max(cols, 1), .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
 fn emptyNativeDrawGlyphRecord() coretext_shaper.NativeDrawGlyphRecord {
     return .{
         .cell_index = 0,
@@ -669,6 +720,30 @@ test "buildSidebarDrawList draws a '+' button row below the tabs when plus_row i
     defer no_plus.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 2), no_plus.size.rows);
     for (no_plus.cells) |c| try std.testing.expect(c.codepoint != '+');
+}
+
+// buildFloatingTabDrawList가 한 행 박스(모든 col에 bg 셀) + 제목(1칸 패딩 뒤)을 만드는지 — floating 탭 미리보기.
+test "buildFloatingTabDrawList fills a one-row box with the title" {
+    const allocator = std.testing.allocator;
+    const fg: terminal.Color = .{ .rgb = .{ .r = 0xEE, .g = 0xEE, .b = 0xEE } };
+    const bg: terminal.Color = .{ .rgb = .{ .r = 0x33, .g = 0x44, .b = 0x55 } };
+    var dl = try buildFloatingTabDrawList(allocator, "sh", 8, fg, bg);
+    defer dl.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 8), dl.size.cols);
+    try std.testing.expectEqual(@as(u16, 1), dl.size.rows);
+    // 모든 셀이 row 0·박스 bg, col 0..7을 채운다(중복 없음 — col당 1셀). 제목 's','h'는 col 1,2.
+    try std.testing.expectEqual(@as(usize, 8), dl.cells.len);
+    for (dl.cells) |c| {
+        try std.testing.expectEqual(@as(u16, 0), c.row);
+        try std.testing.expectEqual(bg, c.style.background); // 솔리드 박스
+    }
+    try std.testing.expectEqual(@as(u21, 's'), dl.cells[1].codepoint); // 1칸 패딩 뒤
+    try std.testing.expectEqual(@as(u21, 'h'), dl.cells[2].codepoint);
+    try std.testing.expectEqual(@as(u21, ' '), dl.cells[0].codepoint); // 좌패딩
+    // 폭보다 긴 제목은 박스 한도에서 잘린다.
+    var narrow = try buildFloatingTabDrawList(allocator, "abcdefghij", 5, fg, bg);
+    defer narrow.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 5), narrow.cells.len); // col 0..4만
 }
 
 test "buildFromDrawList shapes a synthesized sidebar draw list into glyph cells (shared atlas seam)" {

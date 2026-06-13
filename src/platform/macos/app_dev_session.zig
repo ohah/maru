@@ -701,6 +701,10 @@ pub const DevSession = struct {
     // rebuildSidebar가 이 슬롯에 호버 하이라이트 밴드를 그린다(활성 슬롯과 다를 때만). 후속 호버 X
     // 닫기 아이콘의 대상 슬롯도 이 값이다.
     hovered_slot: ?usize = null,
+    // 마우스가 사이드바 하단 "+"(새 워크스페이스) 슬롯 위인가. hoverCursor이 갱신하고, rebuildSidebar가
+    // true면 그 슬롯(row=탭 개수)에 호버 하이라이트 밴드를 그린다 — 탭 슬롯과 같은 affordance(글리프+커서뿐
+    // 아니라 밴드로도 클릭 가능함을 보여준다). 탭 슬롯 호버(hovered_slot)와 직교다("+"는 탭 범위 밖).
+    hovered_plus: bool = false,
     // 마우스가 호버 중인 per-pane 탭(없으면 null). hoverCursor이 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로
     // 갱신하고, 탭 바 렌더가 이 탭에 호버 ✕(닫기 아이콘)를 그린다. mouse down이 이 탭의 ✕ zone이면 그 Term을
     // 닫는다(사이드바 hovered_slot의 per-pane Term 버전). pane은 heap-pin이라 frame 사이 포인터가 안정.
@@ -1711,6 +1715,7 @@ pub const DevSession = struct {
         self.recomputeActivePaneRect(); // 새 활성 탭의 활성 panel rect로 좌표 origin 갱신
 
         self.hovered_slot = null; // 인덱스가 밀렸으니 호버 무효화(다음 마우스 이동이 재설정)
+        self.hovered_plus = false; // 탭 수가 줄어 "+" 행이 위로 밀렸으니 호버 밴드도 비운다(다음 이동이 재설정)
         self.hovered_tab = null; // 이 탭의 Pane들이 해제됐으니 호버 탭 포인터도 비운다(stale 방지)
         self.divider_drag = null; // 이 탭의 split 노드들이 해제됐으니 진행 중 divider 드래그 포인터도 비운다(stale 방지)
         self.rebuildSidebar() catch {};
@@ -2128,6 +2133,7 @@ pub const DevSession = struct {
             if (kind == 1) {
                 if (sidebarPlusSlot(y_px, self.sidebar_slot_height_px, self.tabs.items.len)) {
                     // 탭 목록 아래 "+" 슬롯 클릭 → 새 워크스페이스(⌘⇧T의 마우스 버전). createTab이 활성으로 만든다.
+                    self.hovered_plus = false; // 새 탭이 생겨 "+"가 한 행 내려가니 호버 밴드를 비운다(다음 이동이 재계산).
                     _ = self.newTab() catch {};
                 } else if (self.sidebarSlotAt(y_px)) |slot| {
                     const on_close = inSidebarCloseButton(x_px, self.sidebar_width_px, self.cell_width_px) and
@@ -2555,20 +2561,24 @@ pub const DevSession = struct {
         // 사이드바 우측 경계(폭 조절) 위면 리사이즈 커서 — 사이드바/터미널보다 먼저(경계는 둘 사이 밴드).
         if (xOnSidebarEdge(x_px, self.sidebar_width_px, self.cell_width_px)) {
             self.setHoveredSlot(null);
+            self.setHoveredPlus(false);
             self.setHoveredTab(null);
             self.clearHoverUrlAnchor();
             return .resize_h; // 좌우로 끄는 세로 경계 ↔
         }
         // 사이드바 영역 호버는 슬롯을 추적한다(터미널 URL 호버 아님).
         if (self.inSidebar(x_px)) {
+            const on_plus = sidebarPlusSlot(y_px, self.sidebar_slot_height_px, self.tabs.items.len);
             self.setHoveredSlot(self.sidebarSlotAt(y_px));
+            self.setHoveredPlus(on_plus); // "+" 슬롯 위면 호버 밴드(rebuildSidebar)
             self.setHoveredTab(null); // 사이드바로 가면 pane 탭 호버 해제(stale ✕ 방지)
             self.clearHoverUrlAnchor();
             // 하단 "+" 버튼 슬롯은 클릭 가능 — pointingHand로 affordance. 탭 슬롯은 arrow.
-            if (sidebarPlusSlot(y_px, self.sidebar_slot_height_px, self.tabs.items.len)) return .link;
+            if (on_plus) return .link;
             return .default; // 사이드바 탭 = arrow
         }
         self.setHoveredSlot(null); // 터미널 영역으로 나가면 사이드바 호버 해제
+        self.setHoveredPlus(false);
         // 어느 pane의 탭 바 위면 호버 탭을 갱신(✕ 표시). 바 위면 URL/divider 아니므로 밑줄 해제하고 arrow.
         self.updateHoveredTab(x_px, y_px);
         if (self.hovered_tab != null) {
@@ -3175,6 +3185,15 @@ pub const DevSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 사이드바 "+" 슬롯 호버 상태를 갱신한다. 바뀌면 호버 밴드를 다시 만들고(rebuildSidebar) 재드로우한다.
+    /// 같은 상태면 무동작 — "+" 슬롯 안에서의 마우스 이동이 매번 재드로우를 유발하지 않게 한다(setHoveredSlot과 동형).
+    fn setHoveredPlus(self: *DevSession, hovered: bool) void {
+        if (self.hovered_plus == hovered) return;
+        self.hovered_plus = hovered;
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
     /// 호버 중인 per-pane 탭을 갱신한다. 바뀌면 재드로우한다(호버 ✕가 생기거나 사라진다). 같은 탭이면 무동작.
     fn setHoveredTab(self: *DevSession, tab: ?TabRef) void {
         if (tabRefEql(self.hovered_tab, tab)) return;
@@ -3229,6 +3248,14 @@ pub const DevSession = struct {
                 if (sidebarBandCell(self.sidebar_width_px, self.cell_width_px, hover_row, self.sidebarHoverBg())) |cell| {
                     try self.sidebar_cells.append(self.allocator, cell);
                 }
+            }
+        }
+        // "+"(새 워크스페이스) 슬롯 호버 밴드 — 탭 목록 바로 아래 행(row=탭 개수, sidebarPlusSlot/buildSidebarDrawList의
+        // plus_row와 같은 위치). 탭 슬롯과 동형 affordance(글리프+커서뿐 아니라 밴드로도 클릭 가능함을 보여준다).
+        if (self.hovered_plus) {
+            const plus_row: u16 = @intCast(@min(self.tabs.items.len, @as(usize, std.math.maxInt(u16))));
+            if (sidebarBandCell(self.sidebar_width_px, self.cell_width_px, plus_row, self.sidebarHoverBg())) |cell| {
+                try self.sidebar_cells.append(self.allocator, cell);
             }
         }
     }
@@ -5272,6 +5299,50 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     // 터미널 영역(리사이즈 밴드보다 안쪽)으로 나가면 호버 해제.
     _ = session.hoverCursor(@floatFromInt(session.sidebar_width_px + 50), 1, false);
     try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
+}
+
+// "+"(새 워크스페이스) 슬롯 호버 시 그 행(row=탭 개수)에 호버 밴드가 추가되는지 — 탭 슬롯과 동형 affordance
+// (글리프+커서뿐 아니라 밴드로도 클릭 가능함을 보여준다). 실 init이 사이드바 폭/슬롯 높이를 채우는 macOS 경로라 게이트.
+test "hovering the sidebar + slot adds a hover band at the plus row" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    // 2번째 탭 생성 → 탭 2개, 활성=1. "+"는 row 2(y in [2*slot_h, 3*slot_h)).
+    _ = try session.createTab(
+        .{ .command = "/bin/sh", .args = &.{ "-c", "true" }, .size = .{ .cols = 20, .rows = 5 } },
+        .{ .cols = 20, .rows = 5 },
+        16,
+        "tab 2",
+        "sh",
+    );
+    const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
+    const x_in: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1; // 사이드바 영역 안
+
+    // "+" 슬롯 호버 → link 커서 + hovered_plus + 밴드 2개(활성 row1 + "+" 호버 row2). 탭 슬롯은 아니라 hovered_slot=null.
+    const cursor = session.hoverCursor(x_in, slot_h * 2 + 1, false);
+    try std.testing.expectEqual(CursorKind.link, cursor);
+    try std.testing.expect(session.hovered_plus);
+    try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
+    try std.testing.expectEqual(@as(usize, 2), session.sidebar_cells.items.len);
+    // 마지막(추가된) 밴드 셀이 "+"행(row=탭 개수=2)이고 사이드바 폭을 덮는다.
+    const last = session.sidebar_cells.items[session.sidebar_cells.items.len - 1];
+    try std.testing.expectEqual(@as(u16, 2), last.row);
+    try std.testing.expect(last.width > 0);
+
+    // 탭 슬롯(0, 비활성)으로 이동 → "+" 호버 해제, 호버 밴드는 그 탭 행으로(밴드 2개: 활성 row1 + 호버 row0).
+    _ = session.hoverCursor(x_in, 1, false);
+    try std.testing.expect(!session.hovered_plus);
+    try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
+    try std.testing.expectEqual(@as(usize, 2), session.sidebar_cells.items.len);
 }
 
 // 호버 중인 슬롯의 ✕ zone을 클릭하면 그 탭이 닫히고(switchTab 아님), ✕ zone이 아니면 전환만 된다 —

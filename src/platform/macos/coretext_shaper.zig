@@ -6,11 +6,17 @@ const coretext_probe = @import("coretext_probe.zig");
 const renderer = maru.renderer;
 const terminal = maru.terminal;
 
+/// NativeDrawCell.style_flags 비트 — bold cell이면 셰이퍼가 bold 폰트 face를 골라 bold variant의
+/// glyph_id/PostScript name을 만든다(rasterizer가 그 이름으로 다시 그려 실제 굵은 글리프가 나온다).
+pub const draw_cell_bold_bit: u16 = 1 << 0;
+
 pub const NativeDrawCell = extern struct {
     row: u16,
     col: u16,
     width: u16,
-    reserved: u16 = 0,
+    // 스타일 플래그(비트필드). bit0(draw_cell_bold_bit)=bold. 16바이트 레이아웃을 유지하려고
+    // 기존 패딩 자리를 의미 있는 필드로 쓴다 — native MaruCoreTextDrawCell.style_flags와 동일.
+    style_flags: u16 = 0,
     codepoint: u32,
     combining: u32,
 };
@@ -156,6 +162,7 @@ fn nativeDrawCellFromDrawCell(cell: renderer.DrawCell) NativeDrawCell {
         .row = cell.row,
         .col = cell.col,
         .width = cell.width,
+        .style_flags = if (cell.style.bold) draw_cell_bold_bit else 0,
         .codepoint = cell.codepoint,
         .combining = cell.combining orelse 0,
     };
@@ -555,6 +562,16 @@ test "CoreText draw list native ABI sizes stay aligned" {
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(NativeDrawCell));
     try std.testing.expectEqual(@as(usize, 164), @sizeOf(NativeDrawGlyphRecord));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(NativeDrawListShapeResult));
+}
+
+test "nativeDrawCellFromDrawCell carries style.bold into the bold style flag" {
+    // bold cell만 셰이퍼가 bold 폰트 face를 고르므로, DrawCell.style.bold → style_flags bit0
+    // 매핑이 끊기면 활성 탭/ SGR bold가 조용히 regular로 그려진다. 그 회귀를 여기서 잡는다.
+    const bold = nativeDrawCellFromDrawCell(.{ .row = 0, .col = 0, .codepoint = 'A', .style = .{ .bold = true } });
+    try std.testing.expectEqual(draw_cell_bold_bit, bold.style_flags & draw_cell_bold_bit);
+
+    const regular = nativeDrawCellFromDrawCell(.{ .row = 0, .col = 0, .codepoint = 'A', .style = .{} });
+    try std.testing.expectEqual(@as(u16, 0), regular.style_flags & draw_cell_bold_bit);
 }
 
 test "CoreText draw list shaper preserves DrawList metadata and styles" {

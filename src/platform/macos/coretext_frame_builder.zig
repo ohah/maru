@@ -197,8 +197,9 @@ pub fn buildSidebarDrawList(
     for (titles, 0..) |title, row_index| {
         if (row_index > std.math.maxInt(u16)) break;
         const row: u16 = @intCast(row_index);
-        // 활성 행(워크스페이스)은 글자를 강조색(active_fg)으로, 나머지는 fg(흐림)로 — 활성 탭 글자 강조.
-        const row_style: terminal.Style = if (active_row != null and active_row.? == row_index) .{ .foreground = active_fg } else style;
+        // 활성 행(워크스페이스)은 글자를 강조색(active_fg) + bold로, 나머지는 fg(흐림) regular로 — 활성 탭 글자 강조.
+        // bold는 셰이퍼가 bold 폰트 face를 골라 실제 굵은 글리프를 그린다(색만으론 약한 강조를 무게로 보강).
+        const row_style: terminal.Style = if (active_row != null and active_row.? == row_index) .{ .foreground = active_fg, .bold = true } else style;
         // 제목은 OSC 0/2(신뢰 불가 PTY 출력)이라 깨진 UTF-8을 U+FFFD로 다룬다. cols를 넘으면 하드 컷이 아니라
         // 마지막 칸을 "…"로 말줄임한다(appendEllipsizedTitle 단일 출처 — pane 탭 바 제목과 같은 규칙).
         try appendEllipsizedTitle(allocator, &cells, title, row, 0, cols, row_style);
@@ -279,8 +280,9 @@ pub fn buildPaneTabBarDrawList(
             // 호버된 탭이면 우측 안쪽(seg_end-2)에 닫기 ✕를 둔다 — 제목은 ✕ 앞(seg_end-2)까지만 그린다.
             const is_close = close_tab != null and close_tab.? == tab_index and tab_w >= 2 and seg_end >= 2;
             const title_end: u32 = if (is_close) seg_end - 2 else seg_end;
-            // 활성 Term 탭은 글자를 강조색(active_fg)으로, 나머지는 fg(흐림)로 — 활성 탭 글자 강조.
-            const tab_style: terminal.Style = if (active_tab != null and active_tab.? == tab_index) .{ .foreground = active_fg } else style;
+            // 활성 Term 탭은 글자를 강조색(active_fg) + bold로, 나머지는 fg(흐림) regular로 — 활성 탭 글자 강조.
+            // bold는 셰이퍼가 bold 폰트 face를 골라 실제 굵은 글리프를 그린다(사이드바 활성 행과 같은 규칙).
+            const tab_style: terminal.Style = if (active_tab != null and active_tab.? == tab_index) .{ .foreground = active_fg, .bold = true } else style;
             // 좌측 1칸 패딩 뒤에 제목. title_end(✕ 앞)를 넘으면 하드 컷이 아니라 "…"로 말줄임(사이드바와 같은 규칙).
             try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), @intCast(title_end), tab_style);
             if (is_close) { // 호버 탭 우측 안쪽에 ✕ glyph 1개(xInTabCloseZone과 같은 col=seg_end-2).
@@ -731,22 +733,24 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
     }
 }
 
-// 활성 탭(행/세그먼트) 제목은 active_fg, 나머지는 fg로 그려지는지 — 활성 탭 글자 강조. 두 색을 구분해 확인.
-test "active tab/row title is drawn with active_fg; others with fg" {
+// 활성 탭(행/세그먼트) 제목은 active_fg + bold, 나머지는 fg + regular로 그려지는지 — 활성 탭 글자 강조.
+// 색(active_fg)과 무게(bold)를 함께 확인한다. bold는 셰이퍼가 bold 폰트 face를 고르는 신호다.
+test "active tab/row title is drawn with active_fg and bold; others with fg and regular" {
     const allocator = std.testing.allocator;
     const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
     const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
-    // 사이드바: active_row=1 → 행 1 글자만 bright, 행 0은 dim.
+    // 사이드바: active_row=1 → 행 1 글자만 bright + bold, 행 0은 dim + regular.
     {
         const titles = [_][]const u8{ "ab", "cd" };
         var dl = try buildSidebarDrawList(allocator, &titles, 10, dim, null, null, 1, bright);
         defer dl.deinit(allocator);
         for (dl.cells) |c| {
-            const expected = if (c.row == 1) bright else dim;
-            try std.testing.expectEqual(expected, c.style.foreground);
+            const active = c.row == 1;
+            try std.testing.expectEqual(if (active) bright else dim, c.style.foreground);
+            try std.testing.expectEqual(active, c.style.bold);
         }
     }
-    // pane 탭 바: active_tab=1 → 탭 1(우측 세그먼트) 글자만 bright. cols=20 → tab_w=8, 탭 0 [1,8), 탭 1 [9,16).
+    // pane 탭 바: active_tab=1 → 탭 1(우측 세그먼트) 글자만 bright + bold. cols=20 → tab_w=8, 탭 0 [1,8), 탭 1 [9,16).
     {
         const titles = [_][]const u8{ "sh", "vim" };
         var dl = try buildPaneTabBarDrawList(allocator, &titles, 20, dim, null, 1, bright);
@@ -755,11 +759,13 @@ test "active tab/row title is drawn with active_fg; others with fg" {
         var saw_dim = false;
         for (dl.cells) |c| {
             if (c.codepoint == '+') continue; // "+" 버튼은 fg
-            if (c.col >= 9) { // 탭 1 세그먼트
+            if (c.col >= 9) { // 탭 1 세그먼트(활성)
                 try std.testing.expectEqual(bright, c.style.foreground);
+                try std.testing.expect(c.style.bold);
                 saw_bright = true;
-            } else if (c.col >= 1) { // 탭 0 세그먼트
+            } else if (c.col >= 1) { // 탭 0 세그먼트(비활성)
                 try std.testing.expectEqual(dim, c.style.foreground);
+                try std.testing.expect(!c.style.bold);
                 saw_dim = true;
             }
         }

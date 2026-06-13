@@ -5,6 +5,9 @@ pub const theme = @import("config/theme.zig");
 pub const loader = @import("config/loader.zig");
 
 pub const Action = action.Action;
+pub const GlobalAction = action.GlobalAction;
+pub const GlobalBinding = keybinding.GlobalBinding;
+pub const parseGlobalAction = action.parseGlobalAction;
 pub const Config = theme.Config;
 pub const CursorConfig = theme.CursorConfig;
 pub const CursorShape = theme.CursorShape;

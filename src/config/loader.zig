@@ -41,6 +41,10 @@ pub const Parsed = struct {
     /// 바이트(매크로)를 묶는다. app 바인딩·unbind와 같은 dedup 풀이라 chord가 충돌하지 않아 그대로
     /// KeyBindingResolver.terminal_bindings로 넣어도 validate(app↔terminal 충돌 검사)가 통과한다.
     terminal_bindings: []const keybinding.TerminalBinding,
+    /// 전역(OS) 단축키 바인딩(`keybind = global:<chord> = toggle_window|show_window`). OS 레벨에 등록되어
+    /// 앱이 비활성이어도 동작한다 — in-app resolver를 안 거치고 별도 네임스페이스다(자기들끼리만 dedup).
+    /// 플랫폼(Swift)이 이 목록을 읽어 RegisterEventHotKey로 등록한다(a2). chord→가상 키코드 매핑은 platform.
+    global_bindings: []const keybinding.GlobalBinding,
     diagnostics: []const Diagnostic,
 
     pub fn deinit(self: *Parsed) void {
@@ -72,6 +76,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
     var binds: std.ArrayList(keybinding.AppBinding) = .empty;
     var unbinds: std.ArrayList(keybinding.KeyChord) = .empty;
     var term_binds: std.ArrayList(keybinding.TerminalBinding) = .empty;
+    var global_binds: std.ArrayList(keybinding.GlobalBinding) = .empty;
 
     var line_no: usize = 0;
     var it = std.mem.splitScalar(u8, source, '\n');
@@ -87,7 +92,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
         const key = std.mem.trim(u8, line[0..eq], &std.ascii.whitespace);
         const value = std.mem.trim(u8, line[eq + 1 ..], &std.ascii.whitespace);
 
-        try applyKey(a, &config, &binds, &unbinds, &term_binds, &diags, line_no, key, value);
+        try applyKey(a, &config, &binds, &unbinds, &term_binds, &global_binds, &diags, line_no, key, value);
     }
 
     return .{
@@ -96,6 +101,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
         .keybindings = try binds.toOwnedSlice(a),
         .unbinds = try unbinds.toOwnedSlice(a),
         .terminal_bindings = try term_binds.toOwnedSlice(a),
+        .global_bindings = try global_binds.toOwnedSlice(a),
         .diagnostics = try diags.toOwnedSlice(a),
     };
 }
@@ -106,13 +112,14 @@ fn applyKey(
     binds: *std.ArrayList(keybinding.AppBinding),
     unbinds: *std.ArrayList(keybinding.KeyChord),
     term_binds: *std.ArrayList(keybinding.TerminalBinding),
+    global_binds: *std.ArrayList(keybinding.GlobalBinding),
     diags: *std.ArrayList(Diagnostic),
     line_no: usize,
     key: []const u8,
     value: []const u8,
 ) LoadError!void {
     if (std.mem.eql(u8, key, "keybind")) {
-        return applyKeybind(a, binds, unbinds, term_binds, diags, line_no, value);
+        return applyKeybind(a, binds, unbinds, term_binds, global_binds, diags, line_no, value);
     }
     if (std.mem.eql(u8, key, "font.family")) {
         const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
@@ -172,7 +179,9 @@ fn parsePageKeys(value: []const u8) ?theme.PageKeys {
     return null;
 }
 
-/// `keybind = <chord> = <rhs>` 한 줄을 처리한다. rhs는 셋 중 하나다:
+/// `keybind = <chord> = <rhs>` 한 줄을 처리한다. chord에 `global:` 접두사가 있으면 전역(OS) 단축키이고
+/// rhs는 GlobalAction(toggle_window/show_window)이다(별도 네임스페이스 — 자기들끼리만 dedup). 접두사가
+/// 없으면 in-app 바인딩이고 rhs는 셋 중 하나다:
 ///   - `unbind` → 그 chord의 빌트인 기본을 끈다(unbinds).
 ///   - `text:`/`esc:`/`ctrl:` 매크로 → 키에 셸로 보낼 바이트를 묶는다(terminal_bindings).
 ///   - 그 외 → app action(parseAction → keybindings).
@@ -184,6 +193,7 @@ fn applyKeybind(
     binds: *std.ArrayList(keybinding.AppBinding),
     unbinds: *std.ArrayList(keybinding.KeyChord),
     term_binds: *std.ArrayList(keybinding.TerminalBinding),
+    global_binds: *std.ArrayList(keybinding.GlobalBinding),
     diags: *std.ArrayList(Diagnostic),
     line_no: usize,
     value: []const u8,
@@ -194,6 +204,11 @@ fn applyKeybind(
     };
     const chord_str = std.mem.trim(u8, value[0..eq], &std.ascii.whitespace);
     const rhs = std.mem.trim(u8, value[eq + 1 ..], &std.ascii.whitespace);
+
+    // `global:` 접두사 → 전역(OS) 단축키. 접두사를 떼고 chord를 파싱한 뒤 GlobalAction으로 처리한다.
+    if (std.mem.startsWith(u8, chord_str, "global:")) {
+        return applyGlobalKeybind(a, global_binds, diags, line_no, std.mem.trim(u8, chord_str["global:".len..], &std.ascii.whitespace), rhs);
+    }
 
     const chord = keybinding.KeyChord.parse(chord_str) catch {
         try diags.append(a, .{ .line = line_no, .message = "키 조합을 못 읽음(예: Cmd+T, Ctrl+Cmd+1) — 무시" });
@@ -228,6 +243,34 @@ fn applyKeybind(
         return;
     };
     try binds.append(a, .{ .chord = chord, .action = act });
+}
+
+/// `keybind = global:<chord> = <global action>` 한 줄을 GlobalBinding으로. chord_str은 `global:` 접두사를
+/// 이미 뗀 상태다. action은 toggle_window/show_window만. 전역 chord끼리만 dedup한다(in-app과 별도
+/// 네임스페이스 — OS 핫키라 같은 조합이 in-app에도 있을 수 있고 충돌이 아니다). 오류는 diagnostic(forgiving).
+fn applyGlobalKeybind(
+    a: std.mem.Allocator,
+    global_binds: *std.ArrayList(keybinding.GlobalBinding),
+    diags: *std.ArrayList(Diagnostic),
+    line_no: usize,
+    chord_str: []const u8,
+    rhs: []const u8,
+) LoadError!void {
+    const chord = keybinding.KeyChord.parse(chord_str) catch {
+        try diags.append(a, .{ .line = line_no, .message = "전역 키 조합을 못 읽음(예: global:Cmd+Opt+Space) — 무시" });
+        return;
+    };
+    const act = action_mod.parseGlobalAction(rhs) orelse {
+        try diags.append(a, .{ .line = line_no, .message = "알 수 없는 전역 action(toggle_window/show_window) — 무시" });
+        return;
+    };
+    for (global_binds.items) |existing| {
+        if (existing.chord.eql(chord)) {
+            try diags.append(a, .{ .line = line_no, .message = "이미 등록된 전역 키 조합 — 무시(첫 줄 우선)" });
+            return;
+        }
+    }
+    try global_binds.append(a, .{ .chord = chord, .action = act });
 }
 
 /// chord가 이미 묶였는가(bind/unbind/terminal 세 풀 통틀어). keybind dedup의 단일 출처 — 셋 중 한 곳에만
@@ -340,7 +383,7 @@ fn parseBool(value: []const u8) ?bool {
 
 /// 빈 기본 결과(파일 없음/HOME 없음 등). config 텍스트를 안 읽었으므로 arena도 비어 있다.
 fn emptyDefault(allocator: std.mem.Allocator) Parsed {
-    return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .unbinds = &.{}, .terminal_bindings = &.{}, .diagnostics = &.{} };
+    return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .unbinds = &.{}, .terminal_bindings = &.{}, .global_bindings = &.{}, .diagnostics = &.{} };
 }
 
 /// 경로에서 config를 읽어 파싱한다. 파일이 없거나 읽기 실패면 기본 Config(빈 arena)를 돌려준다
@@ -522,6 +565,44 @@ test "parse: text:/esc:/ctrl: become terminal macros; bad payloads are forgiving
     var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
     const resolved = try resolver.resolve(.{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true } }, &buffer, .{});
     try std.testing.expectEqualStrings("\x1b", resolved.terminal_input);
+}
+
+test "parse: global: prefix collects global bindings separate from in-app pools" {
+    var p = try parse(std.testing.allocator,
+        \\keybind = global:Cmd+Alt+Space = toggle_window
+        \\keybind = global:Cmd+Alt+T = show_window
+        \\keybind = Cmd+T = new_tab
+        \\keybind = global:Cmd+Alt+Space = show_window
+        \\keybind = global:Cmd+Alt+X = bogus_action
+    );
+    defer p.deinit();
+    // 유효 전역 2개(Space=toggle, T=show). in-app 1개(Cmd+T=new_tab). 나머지 2줄은 오류(중복 Space, bogus action).
+    try std.testing.expectEqual(@as(usize, 2), p.global_bindings.len);
+    try std.testing.expectEqual(action_mod.GlobalAction.toggle_window, p.global_bindings[0].action);
+    try std.testing.expectEqual(action_mod.GlobalAction.show_window, p.global_bindings[1].action);
+    try std.testing.expect(p.global_bindings[0].chord.eql(try keybinding.KeyChord.parse("Cmd+Alt+Space")));
+    // in-app 풀은 전역과 분리 — Cmd+T(new_tab)는 그대로.
+    try std.testing.expectEqual(@as(usize, 1), p.keybindings.len);
+    try std.testing.expectEqual(action_mod.Action.new_tab, p.keybindings[0].action);
+    // 중복 전역 + 알 수 없는 전역 action = 2 diagnostic.
+    try std.testing.expectEqual(@as(usize, 2), p.diagnostics.len);
+    // 전역은 resolver에 안 들어간다(in-app 전용) — resolver는 keybindings/unbinds/terminal만.
+    const resolver = p.keyBindingResolver();
+    try resolver.validate();
+    try std.testing.expectEqual(@as(usize, 1), resolver.app_bindings.len);
+}
+
+test "parse: same chord can be both global and in-app (separate namespaces, no conflict)" {
+    var p = try parse(std.testing.allocator,
+        \\keybind = global:Cmd+T = toggle_window
+        \\keybind = Cmd+T = new_tab
+    );
+    defer p.deinit();
+    // 전역 Cmd+T와 in-app Cmd+T는 다른 네임스페이스(OS 핫키 vs 앱 키 경로) — 둘 다 살고 충돌 없음.
+    try std.testing.expectEqual(@as(usize, 1), p.global_bindings.len);
+    try std.testing.expectEqual(@as(usize, 1), p.keybindings.len);
+    try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+    try p.keyBindingResolver().validate();
 }
 
 test "parse: a chord can't be both an app action and a terminal macro (first line wins)" {

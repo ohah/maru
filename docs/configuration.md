@@ -118,13 +118,21 @@ keybind = Cmd+K = esc:[2J
   - `ctrl:<글자 한 자>` — 그 글자의 컨트롤 바이트(예: `ctrl:[` → `ESC`, `ctrl:c` → `Ctrl+C`).
     매핑 가능한 글자는 `@`, `A`~`Z`, `[`, `\`, `]`, `^`, `_`, `Space`, `?`다(C0 컨트롤).
   접두사인데 payload가 비었거나(`text:`) `ctrl:`이 글자 한 자가 아니거나 매핑 안 되면 그 줄만 무시(forgiving).
-- 같은 조합을 두 번 바인딩하면 **첫 줄이 이긴다**(action·`unbind`·매크로 통틀어 조합당 한 줄 — 중복은
-  무시 + diagnostic). 한 조합을 앱 동작과 매크로에 동시에 못 묶는다(첫 줄 우선이라 충돌이 안 생긴다).
-  조합/action을 못 읽으면 그 줄만 무시(forgiving).
+- **전역 단축키 (`global:`)**: 조합 앞에 `global:`을 붙이면 그 단축키를 **OS 레벨에 등록**해, Maru가
+  활성 창이 아니어도 동작한다(`keybind = global:<조합> = <전역 action>`). 전역 action은:
+  - `toggle_window` — 창이 숨김/비활성이면 보이고 앞으로(show + 활성화), 이미 활성+보임이면 숨긴다(토글).
+  - `show_window` — 항상 창을 보이고 앞으로 가져온다(숨기지 않음).
 
-> **현재 범위**: 키바인딩은 파싱·검증되어 `KeyBindingResolver`로 동작에 연결된다(앱 액션·`unbind`·터미널
-> 매크로). config가 resolver를 그대로 채우므로 플랫폼 키 경로가 하드코딩 없이 이 결과를 쓴다. global
-> shortcut(OS 전역 단축키 등록)은 아직 후속이다.
+  예: `keybind = global:Cmd+Alt+Space = toggle_window`. 전역 단축키는 **별도 네임스페이스**라 같은 조합을
+  in-app 바인딩으로도 둘 수 있고(충돌 아님), 전역끼리만 중복을 막는다(첫 줄 우선). 매핑 가능한 키는 글자/
+  숫자/`Space`/방향/`F1`~`F20` 등이며, `+`(Plus)·`Insert`처럼 macOS 가상 키코드가 없는 키는 등록에서 제외된다.
+- 같은 조합을 두 번 바인딩하면 **첫 줄이 이긴다**(in-app은 action·`unbind`·매크로 통틀어 조합당 한 줄, 전역은
+  전역끼리 — 중복은 무시 + diagnostic). 한 조합을 in-app 앱 동작과 매크로에 동시에 못 묶는다(첫 줄 우선이라
+  충돌이 안 생긴다). 조합/action을 못 읽으면 그 줄만 무시(forgiving).
+
+> **현재 범위**: in-app 키바인딩(앱 액션·`unbind`·터미널 매크로)은 `KeyBindingResolver`로 동작에
+> 연결된다. 전역 단축키(`global:`)는 config 파싱과 OS 등록용 키코드 매핑까지 완료됐고, 실제 OS 등록·창
+> 토글 동작은 macOS 네이티브 단계(a2)에서 연결된다.
 
 ## 검증 동작 (forgiving)
 

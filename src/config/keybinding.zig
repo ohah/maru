@@ -128,6 +128,13 @@ pub const AppBinding = struct {
     action: action_mod.Action,
 };
 
+/// 전역(OS) 단축키 바인딩 — chord를 OS 레벨에 등록하고(`global:` 접두사), 누르면 GlobalAction을 수행한다.
+/// in-app `KeyBindingResolver`를 안 거친다(OS 핫키 콜백이 dispatch). app 바인딩과 별도 네임스페이스다.
+pub const GlobalBinding = struct {
+    chord: KeyChord,
+    action: action_mod.GlobalAction,
+};
+
 pub const TerminalBinding = struct {
     chord: KeyChord,
     input: TerminalInputMacro,

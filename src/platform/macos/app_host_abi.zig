@@ -617,6 +617,8 @@ test "macOS app dev exported session API reports null outputs as ABI errors" {
 
 test {
     std.testing.refAllDecls(app_dev_session);
+    // 전역 핫키 descriptor 매핑(a2의 Swift가 ABI로 소비)도 테스트 빌드에 포함한다.
+    std.testing.refAllDecls(@import("global_hotkey.zig"));
 }
 
 test "layout-independent shortcut: Hangul-mode Ctrl+B normalizes to latin b via the physical keycode" {

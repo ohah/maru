@@ -26,6 +26,9 @@ pub const Action = union(enum) {
     // dispatchAppAction이 core.selectAll로 넘긴다. clipboard 쓰기(copy)는 NSPasteboard(OS) 소유라 Action이
     // 아니다(경계: Zig는 selection, Swift는 clipboard).
     select_all,
+    // 커맨드 팝업(Cmd+Shift+P)을 토글한다. 앱 UI 상태(PaletteState)라 dispatchAppAction이 열고/닫는다.
+    // 카탈로그(command_catalog.entries)에는 안 넣는다 — 팝업이 자기 토글을 목록에 보이는 재귀를 피한다.
+    toggle_command_palette,
 };
 
 pub fn parseAction(value: []const u8) ?Action {
@@ -46,6 +49,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "previous_term")) return .previous_term;
     if (std.mem.eql(u8, value, "next_term")) return .next_term;
     if (std.mem.eql(u8, value, "select_all")) return .select_all;
+    if (std.mem.eql(u8, value, "toggle_command_palette")) return .toggle_command_palette;
 
     const prefix = "select_tab:";
     if (std.mem.startsWith(u8, value, prefix)) {
@@ -86,6 +90,7 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.next_term, parseAction("next_term").?);
     try std.testing.expectEqual(Action.previous_term, parseAction("previous_term").?);
     try std.testing.expectEqual(Action.select_all, parseAction("select_all").?);
+    try std.testing.expectEqual(Action.toggle_command_palette, parseAction("toggle_command_palette").?);
 
     const action = parseAction("select_tab:3").?;
     try std.testing.expectEqual(@as(usize, 3), action.select_tab);

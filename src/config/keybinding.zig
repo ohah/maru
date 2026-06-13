@@ -208,6 +208,9 @@ pub const default_app_bindings = [_]AppBinding{
     // Cmd+A: 전체 선택(Select All). macOS 앱 보편 단축키 — Terminal.app/iTerm2도 터미널 내용 전체를 선택한다.
     // 셸 줄-시작은 Ctrl+A(C0)라 안 겹친다. normalizeEventChar가 'a'를 'A'로 fold, 모디파이어 정확 비교.
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'A' } }, .action = .select_all },
+    // Cmd+Shift+P: 커맨드 팝업 토글(VS Code/Sublime/Zed 관례). 'p'→'P' fold, 모디파이어 정확 비교(Shift 필수라
+    // Cmd+P[프린트 관습]와 안 겹친다). 팝업 열림 동안엔 handleKeyEvent가 키를 팝업으로 가로채 이 경로 안 탄다.
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'P' } }, .action = .toggle_command_palette },
 };
 
 pub const KeyBindingResolver = struct {

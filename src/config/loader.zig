@@ -186,6 +186,11 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "quick-terminal.position은 top|bottom|left|right — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "quick-terminal.chrome")) {
+        config.quick_terminal.chrome = parseQuickTerminalChrome(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.chrome은 full|minimal — 기본값 유지" });
+            return;
+        };
     } else if (std.mem.eql(u8, key, "term")) {
         const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
         if (trimmed.len == 0) {
@@ -209,6 +214,12 @@ fn parseQuickTerminalPosition(value: []const u8) ?theme.QuickTerminalPosition {
     if (std.mem.eql(u8, value, "bottom")) return .bottom;
     if (std.mem.eql(u8, value, "left")) return .left;
     if (std.mem.eql(u8, value, "right")) return .right;
+    return null;
+}
+
+fn parseQuickTerminalChrome(value: []const u8) ?theme.QuickTerminalChrome {
+    if (std.mem.eql(u8, value, "full")) return .full;
+    if (std.mem.eql(u8, value, "minimal")) return .minimal;
     return null;
 }
 
@@ -692,6 +703,7 @@ test "parse: quick-terminal options (height/auto-hide/screen) with defaults and 
         try std.testing.expectEqual(true, p.config.quick_terminal.auto_hide);
         try std.testing.expectEqual(theme.QuickTerminalScreen.main, p.config.quick_terminal.screen);
         try std.testing.expectEqual(theme.QuickTerminalPosition.top, p.config.quick_terminal.position);
+        try std.testing.expectEqual(theme.QuickTerminalChrome.full, p.config.quick_terminal.chrome);
     }
     {
         var p = try parse(std.testing.allocator,
@@ -699,12 +711,14 @@ test "parse: quick-terminal options (height/auto-hide/screen) with defaults and 
             \\quick-terminal.auto-hide = false
             \\quick-terminal.screen = mouse
             \\quick-terminal.position = bottom
+            \\quick-terminal.chrome = minimal
         );
         defer p.deinit();
         try std.testing.expectEqual(@as(f32, 0.6), p.config.quick_terminal.height_fraction);
         try std.testing.expectEqual(false, p.config.quick_terminal.auto_hide);
         try std.testing.expectEqual(theme.QuickTerminalScreen.mouse, p.config.quick_terminal.screen);
         try std.testing.expectEqual(theme.QuickTerminalPosition.bottom, p.config.quick_terminal.position);
+        try std.testing.expectEqual(theme.QuickTerminalChrome.minimal, p.config.quick_terminal.chrome);
         try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
     }
     {
@@ -715,13 +729,15 @@ test "parse: quick-terminal options (height/auto-hide/screen) with defaults and 
             \\quick-terminal.auto-hide = maybe
             \\quick-terminal.screen = projector
             \\quick-terminal.position = diagonal
+            \\quick-terminal.chrome = fancy
         );
         defer p.deinit();
         try std.testing.expectEqual(@as(f32, 0.45), p.config.quick_terminal.height_fraction);
         try std.testing.expectEqual(true, p.config.quick_terminal.auto_hide);
         try std.testing.expectEqual(theme.QuickTerminalScreen.main, p.config.quick_terminal.screen);
         try std.testing.expectEqual(theme.QuickTerminalPosition.top, p.config.quick_terminal.position);
-        try std.testing.expectEqual(@as(usize, 5), p.diagnostics.len);
+        try std.testing.expectEqual(theme.QuickTerminalChrome.full, p.config.quick_terminal.chrome);
+        try std.testing.expectEqual(@as(usize, 6), p.diagnostics.len);
     }
 }
 

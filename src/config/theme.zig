@@ -62,6 +62,13 @@ pub const QuickTerminalPosition = enum {
     right,
 };
 
+/// quick terminal 패널의 chrome 수준. full=메인 창처럼 사이드바·탭 바를 다 보임, minimal=사이드바·탭 바 없이
+/// 터미널 그리드만(드롭다운 스크래치 터미널의 보편 모습). 실제 chrome 억제는 그 세션 렌더(Zig)가 한다.
+pub const QuickTerminalChrome = enum {
+    full,
+    minimal,
+};
+
 /// quick terminal 표시 옵션. 값 검증/기본값은 loader가 채우고, 플랫폼(Swift)이 ABI로 받아 패널 크기·위치·
 /// 화면·자동 숨김 동작에 쓴다.
 pub const QuickTerminalConfig = struct {
@@ -73,6 +80,8 @@ pub const QuickTerminalConfig = struct {
     screen: QuickTerminalScreen = .main,
     // 화면 어느 가장자리에서 나올지.
     position: QuickTerminalPosition = .top,
+    // chrome 수준(full=사이드바·탭 바 보임, minimal=터미널만). 기본 full.
+    chrome: QuickTerminalChrome = .full,
 };
 
 pub const Config = struct {

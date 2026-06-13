@@ -22,7 +22,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 31;
+pub const abi_version: u32 = 32;
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -43,6 +43,7 @@ pub const QuickTerminalConfig = extern struct {
     auto_hide: u32,
     screen: u32,
     position: u32, // config.QuickTerminalPosition의 @intFromEnum(0=top, 1=bottom, 2=left, 3=right)
+    chrome: u32, // config.QuickTerminalChrome의 @intFromEnum(0=full, 1=minimal). Swift가 quick 세션 생성 시 chrome_minimal로 넘긴다.
 };
 
 /// 마우스 호버 위치에 따라 Swift가 세울 커서 종류(`maru_macos_app_dev_session_hover`의 out 값). Zig가 위치를
@@ -522,7 +523,9 @@ pub const SessionConfig = extern struct {
     rows: u32,
     queue_capacity: u32,
     command_kind: u32,
-    reserved: u32 = 0,
+    // 1이면 chrome 최소화(사이드바·pane 탭 바 없이 터미널만) — quick terminal minimal 모드용. 0=full(메인 창).
+    // 기존 reserved 패딩 자리를 의미화(16→그대로 24바이트). Swift가 세션 생성 시 세션별로 정한다.
+    chrome_minimal: u32 = 0,
 };
 
 pub const FrameSummary = extern struct {
@@ -562,6 +565,7 @@ const NormalizedConfig = struct {
     size: terminal.Size,
     queue_capacity: usize,
     command_kind: CommandKind,
+    chrome_minimal: bool,
 };
 
 /// 한 터미널의 런타임 단위: surface(그리드/스크롤백) + 그 surface에 붙은 live PTY 셸 + 그 PTY를 drain하는
@@ -676,6 +680,10 @@ pub const DevSession = struct {
     // 쓰게 한다. 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다.
     cell_width_px: u32 = 0,
     cell_height_px: u32 = 0,
+    // chrome 최소화 세션인가(quick terminal minimal). true면 paneBarHeightPx가 0(탭 바 끔)이고 사이드바 폭을
+    // 0으로 강제(setSidebarWidthPx·refreshCellMetrics에서 게이트) — 터미널 그리드만 그린다. normalizeConfig가
+    // SessionConfig.chrome_minimal에서 채운다. 메인 창은 false(full chrome).
+    chrome_minimal: bool = false,
     // 세로 사이드바의 현재 논리 폭(pt). 사용자가 우측 경계를 드래그하면 [sidebar_min_pt, sidebar_max_pt]로
     // 갱신된다. backing 픽셀 폭은 scale을 곱해 구하므로 pt로 들면 DPI가 바뀌어도(refreshCellMetrics) 유지된다.
     sidebar_width_pt: u32 = default_sidebar_width_pt,
@@ -816,6 +824,9 @@ pub const DevSession = struct {
         self.* = .{
             .allocator = allocator,
             .io = io,
+            // chrome 최소화 여부는 세션별로 고정(메인 창=full, quick minimal=true). refreshCellMetrics가
+            // 사이드바 폭을 게이트하기 전에 세워야 하므로 reset 시점에 박는다.
+            .chrome_minimal = config.chrome_minimal,
         };
         errdefer self.deinit();
 
@@ -925,7 +936,9 @@ pub const DevSession = struct {
     /// per-pane 탭 바(cmux식 가로 탭 바)의 backing 픽셀 높이 = **cell 높이(line height) 1칸**. 렌더러가 바 배경
     /// 셀을 다른 셀과 똑같이 `ch`(cell_height_px) 높이로 그리므로, 예약 높이도 반드시 cell_height_px여야 바와
     /// 터미널 첫 줄이 겹치지 않는다(cell_width_px=advance와 다름 — 정사각 아님). cell 높이 미상이면 0(바 없음).
+    /// chrome_minimal(quick terminal minimal)이면 0 — 바를 안 예약해 paneTermRect/paneBarRect가 탭 바를 통째로 끈다.
     fn paneBarHeightPx(self: *const DevSession) u32 {
+        if (self.chrome_minimal) return 0;
         return self.cell_height_px;
     }
 
@@ -1103,6 +1116,7 @@ pub const DevSession = struct {
     /// 사이드바 폭이 모든 탭의 터미널 폭을 바꾸므로 전 탭 panel을 새 grid로 resize하고 활성 rect·사이드바를
     /// 갱신한다. 폭이 그대로면(같은 pt) 무동작 — SIGWINCH·재배치 storm 방지.
     fn setSidebarWidthPx(self: *DevSession, x_px: f64) void {
+        if (self.chrome_minimal) return; // minimal 세션엔 사이드바가 없다(폭 0 고정) — 드래그 무동작
         if (self.scale_milli == 0 or !std.math.isFinite(x_px)) return;
         const clamped_x = if (x_px < 0) 0 else @min(x_px, @as(f64, @floatFromInt(std.math.maxInt(u32))));
         const px: u32 = @intFromFloat(clamped_x);
@@ -1946,7 +1960,8 @@ pub const DevSession = struct {
         }
         // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처). 폭은 현재
         // 논리 폭(sidebar_width_pt — 사용자 드래그로 바뀔 수 있음)에서 파생하므로 DPI 변경에도 유지된다.
-        self.sidebar_width_px = self.sidebar_width_pt * self.scale_milli / 1000;
+        // minimal 세션은 사이드바가 없으므로 0 고정(터미널이 전폭을 쓴다).
+        self.sidebar_width_px = if (self.chrome_minimal) 0 else self.sidebar_width_pt * self.scale_milli / 1000;
         // 탭 슬롯 높이 = cell 높이 × 2.5(cmux식 큰 슬롯). cell_height_px가 이미 위에서 갱신됐으므로
         // 그걸 쓴다 — 슬롯 높이도 cell 메트릭과 같은 단일 출처에서 파생한다.
         self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
@@ -2734,6 +2749,7 @@ pub const DevSession = struct {
             .auto_hide = if (qt.auto_hide) 1 else 0,
             .screen = @intFromEnum(qt.screen),
             .position = @intFromEnum(qt.position),
+            .chrome = @intFromEnum(qt.chrome),
         };
     }
 
@@ -3494,6 +3510,7 @@ pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
         .size = terminal.clampGridSize(.{ .cols = @intCast(config.cols), .rows = @intCast(config.rows) }),
         .queue_capacity = if (config.queue_capacity == 0) default_queue_capacity else config.queue_capacity,
         .command_kind = command_kind,
+        .chrome_minimal = config.chrome_minimal != 0,
     };
 }
 
@@ -3580,6 +3597,29 @@ test "macOS app dev session config defaults queue capacity without changing comm
     try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 24 }, normalized.size);
     try std.testing.expectEqual(@as(usize, default_queue_capacity), normalized.queue_capacity);
     try std.testing.expectEqual(CommandKind.interactive_shell, normalized.command_kind);
+    try std.testing.expectEqual(false, normalized.chrome_minimal); // 기본 full(0)
+}
+
+test "macOS app dev session normalizeConfig carries chrome_minimal flag" {
+    const full = try normalizeConfig(.{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .chrome_minimal = 0,
+    });
+    try std.testing.expectEqual(false, full.chrome_minimal);
+
+    const minimal = try normalizeConfig(.{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .chrome_minimal = 1,
+    });
+    try std.testing.expectEqual(true, minimal.chrome_minimal);
 }
 
 test "gridFromBacking divides backing pixels by cell size with placeholder + clamps" {
@@ -3788,6 +3828,36 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
     try std.testing.expect(toggles >= 1);
     // 토글은 rebuild 없이도 재드로우를 유발해야 한다(setCursorVisible의 generation 증가).
     try std.testing.expect(gen_changes >= toggles);
+}
+
+test "chrome_minimal session suppresses the pane tab bar and the sidebar" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // refreshCellMetrics가 CoreText 메트릭 경로
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .chrome_minimal = 1,
+    });
+    defer session.deinit();
+
+    // minimal: 사이드바 폭 0(refreshCellMetrics 게이트), 탭 바 높이 0(paneBarHeightPx 게이트) →
+    // paneBarRect가 null, paneTermRect는 leaf rect 그대로(바를 빼지 않음).
+    try std.testing.expectEqual(@as(u32, 0), session.sidebar_width_px);
+    try std.testing.expectEqual(@as(u32, 0), session.paneBarHeightPx());
+    const rect: app.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
+    try std.testing.expect(session.paneBarRect(rect) == null);
+    const term = session.paneTermRect(rect);
+    try std.testing.expectEqual(@as(u32, 0), term.y);
+    try std.testing.expectEqual(@as(u32, 600), term.h);
+
+    // 드래그로 사이드바 폭을 바꿔도 minimal이면 0 고정(setSidebarWidthPx 게이트).
+    session.setSidebarWidthPx(200);
+    try std.testing.expectEqual(@as(u32, 0), session.sidebar_width_px);
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {

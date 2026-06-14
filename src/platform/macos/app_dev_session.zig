@@ -99,6 +99,15 @@ const font_size_max: f32 = 72.0;
 // 커서 깜빡임 반주기(30Hz tick 단위). 15틱 = 500ms — 일반 터미널 관례(on 500ms / off 500ms).
 const blink_interval_ticks: u32 = 15;
 
+// 복원(R4)에서 모델 surface의 저장된 cols/rows를 spawn 초기 grid로 쓴다(0이면 80×24 기본). 실제 grid는
+// 복원 직후 resize/레이아웃이 창·split에 맞게 보정하므로, 이 초기값은 spawn winsize일 뿐이다.
+fn restoreSurfaceSize(sm: app.workspace.Surface) terminal.Size {
+    return terminal.clampGridSize(.{
+        .cols = if (sm.cols > 0) sm.cols else 80,
+        .rows = if (sm.rows > 0) sm.rows else 24,
+    });
+}
+
 /// backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다. cell 크기가 0이면
 /// placeholder로 대체하고, u16 상한으로 막은 뒤 terminal.clampGridSize로 최소 크기(cols>=2)를
 /// 적용한다 — cols>=2 불변식은 TerminalCore가 단일 소유하므로 여기서 직접 하드코딩하지 않는다.
@@ -3208,6 +3217,133 @@ pub const DevSession = struct {
         return text;
     }
 
+    /// 저장된 workspace 모델(한 창)을 이 세션에 적용해 탭/pane split 트리/Term을 재생성한다(R4 복원). init이 만든
+    /// 기본 탭을 모델대로 교체한다 — 각 Term은 저장된 cwd에서 새 셸을 spawn한다(셸 상태가 아니라 cwd·레이아웃 복원).
+    /// title/command는 정적 기본(셸이 OSC 0/2로 곧 재설정)·size는 모델값(이후 resize가 창에 맞게 보정). 새 탭들을
+    /// 먼저 다 빌드한 뒤 기존 탭을 teardown하고 swap한다 — 빌드 실패면 새 것만 정리하고 기존 세션을 보존한다.
+    /// 빈 모델이면 무동작(기본 유지). 빈 cwd면 기본 cwd로 spawn(저장 안 됐거나 셸 통합 없음).
+    pub fn applyWorkspaceWindow(self: *DevSession, win: app.workspace.Window) !void {
+        if (win.tabs.len == 0) return;
+
+        // 1) 새 탭들을 먼저 다 빌드한다(아직 self.tabs에 안 넣음 — 실패하면 기존 세션 그대로 유지).
+        var new_tabs: std.ArrayList(*Tab) = .empty;
+        defer new_tabs.deinit(self.allocator);
+        errdefer for (new_tabs.items) |t| self.destroyTabStandalone(t);
+        try new_tabs.ensureTotalCapacity(self.allocator, win.tabs.len);
+        for (win.tabs) |tab_model| {
+            new_tabs.appendAssumeCapacity(try self.buildWorkspaceTab(tab_model));
+        }
+
+        // 2) swap이 실패하지 않게 컬렉션 capacity를 미리 잡는다(teardown 뒤 append가 무실패여야 half-state가 없다).
+        try self.tabs.ensureTotalCapacity(self.allocator, new_tabs.items.len);
+        try self.surface_ptrs.ensureTotalCapacity(self.allocator, new_tabs.items.len);
+
+        // 3) 기존 탭 teardown(closeTab의 teardown과 같은 순서 — 마지막-탭 latch는 안 탄다) 후 새 탭 설치.
+        for (self.tabs.items) |tab| self.destroyTabStandalone(tab);
+        self.tabs.clearRetainingCapacity();
+        self.surface_ptrs.clearRetainingCapacity();
+        for (new_tabs.items) |tab| {
+            self.tabs.appendAssumeCapacity(tab);
+            self.surface_ptrs.appendAssumeCapacity(&tab.activePane().activeTerm().surface);
+        }
+        self.app_window.tabs = self.surface_ptrs.items;
+        self.app_window.active_tab = @min(win.active_tab, self.tabs.items.len - 1);
+        // 활성 탭의 활성 panel로 대표 surface·frame_loop pump 재바인딩 + 좌표/사이드바 갱신.
+        self.focusPane(self.activeTab().active_pane);
+        self.recomputeActivePaneRect();
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
+    /// 컬렉션에 안 든 Tab을 teardown·해제한다(closeTab의 teardown 부분 — 단, tabs/surface_ptrs는 호출자가 관리).
+    /// 트리(tab.tree)가 세팅된 '완성된' 탭에만 쓴다(buildWorkspaceTab은 자기 granular errdefer로 미완성을 정리).
+    fn destroyTabStandalone(self: *DevSession, tab: *Tab) void {
+        for (tab.panes.items) |pane| self.destroyPane(pane);
+        PaneTree.deinit(self.allocator, tab.tree); // heap split 노드 해제(leaf surface는 destroyPane가 이미)
+        tab.panes.deinit(self.allocator);
+        self.allocator.destroy(tab);
+    }
+
+    /// 모델 Tab → 완성된 *Tab(panes + split 트리). pane들을 먼저 만들고(각 첫 surface로 spawn + 나머지 Term 추가),
+    /// 트리를 모델 preorder대로 직접 짓는다(leaf 인덱스 → 그 pane, split → 새 PaneTree.Split). 부분 실패는 granular
+    /// errdefer로 정리(트리는 아직 미세팅이라 destroyTabStandalone 안 씀). capacity 예약으로 append를 무실패화.
+    fn buildWorkspaceTab(self: *DevSession, m: app.workspace.Tab) !*Tab {
+        if (m.panes.len == 0) return error.EmptyTab;
+        const tab = try self.allocator.create(Tab);
+        errdefer self.allocator.destroy(tab);
+        tab.* = .{};
+        errdefer tab.panes.deinit(self.allocator);
+        errdefer for (tab.panes.items) |p| self.destroyPane(p);
+
+        try tab.panes.ensureTotalCapacity(self.allocator, m.panes.len);
+        for (m.panes) |pm| tab.panes.appendAssumeCapacity(try self.buildWorkspacePane(pm));
+
+        // 트리 빌드 — 새로 만든 split 노드를 추적해 에러 시 전부 해제(트리 미완성이라 PaneTree.deinit 못 씀).
+        var splits: std.ArrayList(*PaneTree.Split) = .empty;
+        defer splits.deinit(self.allocator);
+        errdefer for (splits.items) |s| self.allocator.destroy(s);
+        var idx: usize = 0;
+        const root = try self.buildWorkspaceTreeNode(tab.panes.items, m.tree, &idx, &splits);
+        if (idx != m.tree.len) return error.MalformedTree; // preorder를 다 안 소비했다(노드 수 불일치)
+        tab.tree = root;
+        tab.active_pane = @min(m.active_pane, tab.panes.items.len - 1);
+        return tab;
+    }
+
+    /// 모델 preorder TreeNode 한 subtree를 소비해 PaneTree.Node를 만든다. leaf는 panes[idx]를, split은 새 Split
+    /// (dir/ratio)을 할당하고 뒤따르는 두 subtree(a,b)를 재귀로 짓는다. 할당한 split은 splits에 추적(에러 해제용).
+    fn buildWorkspaceTreeNode(self: *DevSession, panes: []const *Pane, nodes: []const app.workspace.TreeNode, idx: *usize, splits: *std.ArrayList(*PaneTree.Split)) !PaneTree.Node {
+        if (idx.* >= nodes.len) return error.MalformedTree;
+        const node = nodes[idx.*];
+        idx.* += 1;
+        switch (node) {
+            .leaf => |pane_index| {
+                if (pane_index >= panes.len) return error.MalformedTree;
+                return .{ .leaf = panes[pane_index] };
+            },
+            .split => |s| {
+                const split = try self.allocator.create(PaneTree.Split);
+                try splits.append(self.allocator, split); // 재귀 전에 추적(중간 실패에도 해제됨)
+                split.* = .{
+                    .direction = s.direction,
+                    .ratio = app.split_tree.clampRatio(@as(f32, @floatFromInt(s.ratio_milli)) / 1000.0),
+                    .a = try self.buildWorkspaceTreeNode(panes, nodes, idx, splits),
+                    .b = try self.buildWorkspaceTreeNode(panes, nodes, idx, splits),
+                };
+                return .{ .split = split };
+            },
+        }
+    }
+
+    /// 모델 Pane → 완성된 *Pane. 첫 surface로 createPane(=1 Term)하고 나머지 surface를 Term으로 추가한다.
+    fn buildWorkspacePane(self: *DevSession, m: app.workspace.Pane) !*Pane {
+        if (m.surfaces.len == 0) return error.EmptyPane;
+        const pane = try self.createPaneFromSurface(m.surfaces[0]);
+        errdefer self.destroyPane(pane);
+        try pane.terms.ensureTotalCapacity(self.allocator, m.surfaces.len);
+        for (m.surfaces[1..]) |sm| pane.terms.appendAssumeCapacity(try self.createTermFromSurface(sm));
+        pane.active_term = @min(m.active_term, pane.terms.items.len - 1);
+        return pane;
+    }
+
+    fn createPaneFromSurface(self: *DevSession, sm: app.workspace.Surface) !*Pane {
+        var cfg = self.new_tab_config;
+        const size = restoreSurfaceSize(sm);
+        cfg.size = size;
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir);
+        if (sm.cwd.len > 0) req.cwd = sm.cwd; // 저장된 cwd에서 spawn(빈값이면 기본 cwd)
+        return self.createPane(req, size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
+    }
+
+    fn createTermFromSurface(self: *DevSession, sm: app.workspace.Surface) !*Term {
+        var cfg = self.new_tab_config;
+        const size = restoreSurfaceSize(sm);
+        cfg.size = size;
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir);
+        if (sm.cwd.len > 0) req.cwd = sm.cwd;
+        return self.createTerm(req, size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
+    }
+
     /// quick terminal 표시 옵션(config에서 파싱). Swift가 패널 크기·화면·자동 숨김에 쓴다. 세션 동안 불변.
     pub fn quickTerminalConfig(self: *const DevSession) QuickTerminalConfig {
         const qt = self.loaded_config.config.quick_terminal;
@@ -4975,6 +5111,58 @@ test "serializeWorkspaceWindow: 세션-소유 헤더 없는 블록 + 재호출 �
     // 재호출: 이전 버퍼를 해제하고 새로 만든다(이전 버퍼를 안 free하면 testing.allocator leak).
     const b1 = try session.serializeWorkspaceWindow();
     try std.testing.expect(std.mem.startsWith(u8, b1, "window "));
+}
+
+test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term 구조·active 인덱스)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn(cwd chdir이 실패 안 하게 /tmp 사용)
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // 모델: 창 1, 탭 2. 탭0 = split horizontal { pane0, pane1 }(각 1 Term), 활성 pane 1. 탭1 = 단일 pane 2 Term, 활성 term 1.
+    const sa = [_]app.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
+    const sb = [_]app.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
+    const panes0 = [_]app.workspace.Pane{ .{ .surfaces = &sa }, .{ .surfaces = &sb } };
+    const tree0 = [_]app.workspace.TreeNode{
+        .{ .split = .{ .direction = .horizontal, .ratio_milli = 500 } },
+        .{ .leaf = 0 },
+        .{ .leaf = 1 },
+    };
+    const sc = [_]app.workspace.Surface{ .{ .cwd = "/tmp", .cols = 40, .rows = 24 }, .{ .cwd = "/tmp", .cols = 40, .rows = 24 } };
+    const panes1 = [_]app.workspace.Pane{.{ .active_term = 1, .surfaces = &sc }};
+    const tree1 = [_]app.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]app.workspace.Tab{
+        .{ .active_pane = 1, .tree = &tree0, .panes = &panes0 },
+        .{ .active_pane = 0, .tree = &tree1, .panes = &panes1 },
+    };
+    try session.applyWorkspaceWindow(.{ .active_tab = 1, .tabs = &tabs });
+
+    // 캡처해 구조·active 인덱스가 모델과 일치하는지(cwd는 OSC-side라 round-trip 안 함 — 구조만).
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const cap = try session.captureWorkspaceWindow(arena.allocator());
+    try std.testing.expectEqual(@as(usize, 2), cap.tabs.len);
+    try std.testing.expectEqual(@as(usize, 1), cap.active_tab);
+    // 탭0: split horizontal ratio 500 + pane 2, active_pane 1.
+    try std.testing.expectEqual(@as(usize, 2), cap.tabs[0].panes.len);
+    try std.testing.expectEqual(@as(usize, 3), cap.tabs[0].tree.len);
+    try std.testing.expect(std.meta.activeTag(cap.tabs[0].tree[0]) == .split);
+    try std.testing.expect(cap.tabs[0].tree[0].split.direction == .horizontal);
+    try std.testing.expectEqual(@as(u16, 500), cap.tabs[0].tree[0].split.ratio_milli);
+    try std.testing.expectEqual(@as(usize, 1), cap.tabs[0].active_pane);
+    // 탭1: 단일 pane, Term 2, active_term 1.
+    try std.testing.expectEqual(@as(usize, 1), cap.tabs[1].panes.len);
+    try std.testing.expectEqual(@as(usize, 2), cap.tabs[1].panes[0].surfaces.len);
+    try std.testing.expectEqual(@as(usize, 1), cap.tabs[1].panes[0].active_term);
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {

@@ -4080,14 +4080,21 @@ pub const DevSession = struct {
         cell_h: u32,
         cursor: ?terminal.Cursor,
     ) !metal_frame.PaneFrame {
+        // caret(cursor-role fill에서 lower)이 있으면 **cursor 오버레이**(DrawOverlay.cursor)로 낸다 — buildNativeCellsSplit이
+        // frame.overlays에서 .cursor를 찾아 반전-블록으로 그리고(메인 터미널 커서와 같은 경로) suffix-trim으로 깜빡인다.
+        // draw_list.cursor 필드만으론 안 그려진다(렌더는 overlays를 본다 — 메인 buildDrawList도 cursor를 overlays에 넣는다).
+        const overlays: []renderer.DrawOverlay = if (cursor) |cur| blk: {
+            const o = try self.allocator.alloc(renderer.DrawOverlay, 1);
+            o[0] = .{ .cursor = .{ .row = cur.row, .col = cur.col, .visible = true, .shape = .block } };
+            break :blk o;
+        } else try self.allocator.alloc(renderer.DrawOverlay, 0);
+        errdefer self.allocator.free(overlays);
         const draw_list: renderer.DrawList = .{
             .size = .{ .cols = cols, .rows = rows },
-            // caret(cursor-role fill에서 lower)이 있으면 PaneFrame.cursor로 — 컴포지터가 반전 블록으로 그리고
-            // suffix-trim으로 깜빡인다(터미널 커서와 같은 경로 재활용). 없으면 invisible.
             .cursor = cursor orelse .{ .row = 0, .col = 0, .visible = false },
             .dirty = .{ .start_row = 0, .end_row = if (rows == 0) 0 else rows - 1 },
             .cells = try cells.toOwnedSlice(self.allocator),
-            .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
+            .overlays = overlays,
         };
         // appearance·cell_w/h를 호출자가 준다 — 오버레이는 터미널과 같은 셀·폰트(1×)를 쓴다(buildChromeOverlayFrame가
         // self.cell_width_px·self.appearance를 넘김). 글리프 픽셀(font.size×scale)과 atlas slot(cell)이 같은 메트릭에서
@@ -5142,10 +5149,10 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
     try std.testing.expect(!session.runAction("new_term"));
     try std.testing.expectEqual(terms_before_runaction, session.activePane().terms.items.len);
 
-    // 회귀(blink chop): 팝업이 열린 프레임을 tick으로 빌드하면 metal_buffer.cursor_cells=0이라 view()의 blink-off
-    // 꼬리 chop이 커서가 아니라 팝업 꼬리를 자르는 일이 없다.
+    // caret 깜빡임: 팝업이 열린 프레임을 tick으로 빌드하면 cursor_cells=1(팝업 입력 caret이 맨 끝 suffix) — 이제
+    // caret이 터미널 커서와 같은 suffix-trim 깜빡임을 탄다. (예전엔 0으로 고정해 정적이었음 — caret 깜빡임 추가로 변경.)
     _ = try session.tick();
-    try std.testing.expectEqual(@as(usize, 0), session.metal_buffer.cursor_cells);
+    try std.testing.expectEqual(@as(usize, 1), session.metal_buffer.cursor_cells);
 }
 
 test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비게이션 → 하이라이트·오버레이 프레임" {
@@ -5196,9 +5203,10 @@ test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비
     // 회귀: Find 열린 동안 메뉴 keyEquivalent(runAction)는 무시된다(모달 뒤 터미널 조작 차단).
     try std.testing.expect(!session.runAction("new_term"));
 
-    // tick으로 Find 열린 프레임을 빌드하면 오버레이가 커서 suffix 뒤라 cursor_cells=0(blink chop 차단).
+    // tick으로 Find 열린 프레임을 빌드하면 cursor_cells=1(Find 입력 caret이 맨 끝 suffix) — caret이 터미널 커서와
+    // 같은 suffix-trim 깜빡임을 탄다(예전엔 0 고정으로 정적이었음 — caret 깜빡임 추가로 변경).
     _ = try session.tick();
-    try std.testing.expectEqual(@as(usize, 0), session.metal_buffer.cursor_cells);
+    try std.testing.expectEqual(@as(usize, 1), session.metal_buffer.cursor_cells);
 
     // ⌘+글자는 검색어에 안 쌓고 닫는다(평문만 입력) — 위 흐름에서 find가 아직 열려 있다.
     try std.testing.expect(session.chrome_host.find.open);
@@ -5239,9 +5247,14 @@ test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회�
         var ff = try session.buildChromeOverlayFrame();
         defer ff.frame.deinit(allocator);
 
-        // caret 재활용: cursor-role fill이 오버레이 PaneFrame.cursor(visible)로 lower돼야 한다 — 컴포지터가 터미널
-        // 커서와 같은 반전-블록으로 그리고 setCursorVisible(suffix-trim)으로 깜빡인다(별도 fill·재빌드 아님).
-        try std.testing.expect(ff.frame.draw_list.cursor.visible);
+        // caret 재활용: cursor-role fill이 **cursor 오버레이**(glyph_quad_frame.overlays의 .cursor, visible)로 lower돼야
+        // 한다 — buildNativeCellsSplit이 이걸 반전-블록으로 그리고 suffix-trim으로 깜빡인다. draw_list.cursor 필드만으론
+        // 안 그려진다(렌더는 overlays를 본다). 회귀: caret이 안 보이던 버그(overlays 누락) 고정.
+        var has_caret = false;
+        for (ff.frame.glyph_quad_frame.overlays) |ov| {
+            if (ov == .cursor and ov.cursor.visible) has_caret = true;
+        }
+        try std.testing.expect(has_caret);
 
         // 실측: 결과 글리프에서 '가'와 'A'의 cell_width(span)와 atlas slot 픽셀 폭을 뽑는다.
         var ga_span: ?u2 = null;
@@ -5290,8 +5303,13 @@ test "command palette(chrome): 한글(wide) query는 atlas slot이 2칸 — ㄱ�
         var ff = try session.buildChromeOverlayFrame();
         defer ff.frame.deinit(allocator);
 
-        // caret 재활용: cursor-role fill이 오버레이 PaneFrame.cursor(visible)로 lower돼 터미널 커서와 같은 경로로 깜빡인다.
-        try std.testing.expect(ff.frame.draw_list.cursor.visible);
+        // caret 재활용: cursor-role fill이 cursor 오버레이(glyph_quad_frame.overlays의 .cursor, visible)로 lower돼 터미널
+        // 커서와 같은 반전-블록 경로로 그려지고 깜빡인다(draw_list.cursor 필드만으론 안 그려짐 — 회귀 고정).
+        var has_caret = false;
+        for (ff.frame.glyph_quad_frame.overlays) |ov| {
+            if (ov == .cursor and ov.cursor.visible) has_caret = true;
+        }
+        try std.testing.expect(has_caret);
 
         var ga_span: ?u2 = null;
         var ga_slot_w: u32 = 0;

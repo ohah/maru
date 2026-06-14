@@ -23,11 +23,13 @@ pub const ColorRole = enum {
     cursor,
 };
 
-/// 비-색 레이아웃 토큰(픽셀/비율). 컴포넌트가 실제로 소비하는 것만 둔다 — 사이드바 폭/슬롯 높이는 런타임
-/// 가변(사용자 드래그)이라 토큰에 하드코딩하면 stale 출처가 된다(C2/C3에서 session 실측값을 props/토큰으로
-/// 흘려줄 때 추가). rich는 이 값을 바꾼다.
+/// 비-색 레이아웃 토큰(픽셀/비율, 정적 디자인 값 — rich는 바꾼다). chrome-strategy.md §5.1이 정의한 계획 기반
+/// 토큰이라, 아직 소비처가 없어도(C2/C3 컴포넌트에서 읽음) 계획 링크와 함께 둔다(메모리 no-defensive 예외).
+/// 단 **런타임 가변값(사이드바 폭 — 사용자 드래그)은 토큰이 아니라 props**(metrics.sidebar_width_px, 동적)로 흐른다
+/// — 정적 토큰에 하드코딩하면 stale 출처가 되므로 토큰에 두지 않는다.
 pub const Spacing = struct {
-    modal_margin_cells: u32 = 2, // 모달 박스 좌우 안쪽 여백(셀)
+    modal_margin_cells: u32 = 2, // 모달 박스 좌우 안쪽 여백(셀) — Notice가 소비
+    sidebar_slot_height_ratio_milli: u32 = 2500, // 사이드바 슬롯 높이 = 2.5×cell. C2/C3 사이드바 컴포넌트가 소비(계획)
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.

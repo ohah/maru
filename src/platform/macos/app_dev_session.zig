@@ -4245,17 +4245,145 @@ pub const DevSession = struct {
         });
     }
 
-    /// Notice 모달 frame(최상위 오버레이). chrome_host에서 modal 레이어 ChromeDraw를 수집해(실제 컴포넌트 view
-    /// 계약 경로를 탄다) fill(박스 bg) + text(메시지 glyph)를 lower한다. border op는 DrawCell에 테두리 개념이
-    /// 없어 C0에선 생략한다(reserved-kind 테두리는 cell-stream chrome=C2/C3 작업). 박스 rect는 backing-px 절대
-    /// 좌표(notice.view가 사이드바 offset+중앙으로 계산) → PaneFrame origin = rect 좌상단, 셀은 박스 상대 좌표.
-    /// 닫혀 있거나 메트릭 미상이면 에러(호출자가 무시). macOS 전용(buildFromDrawList=CoreText).
+    /// 일반 오버레이 lowering: chrome 컴포넌트가 낸 ChromeDraw ops(fill/border/text)를 셀 그리드로 rasterize한다
+    /// (painter order). bounding box = 모든 fill/border rect 합집합(패널 외곽), origin = 그 좌상단(backing px 절대).
+    /// 각 셀 bg = 그 셀을 덮는 마지막 fill의 role 색(+켜진 변이면 border 색), codepoint·fg = text op이 origin부터
+    /// 놓은 글리프. notice(박스 1개)·find(1행 다중 텍스트)·palette(N행 리스트)가 같은 lowering을 공유한다 —
+    /// buildNoticeFrame의 "첫 fill+text" 특수형을 일반화(C1). rule op은 컴포넌트가 아직 안 내므로 무시한다.
+    /// **순수**(CoreText 무관) — 셀·격자만 산출해 단위 테스트로 고정한다. 빈 box/0칸이면 에러(호출자가 무시).
+    /// 반환된 cells는 allocator 소유(호출자가 finishOverlayFrame에 넘겨 frame으로 이전하거나 실패 시 deinit).
+    const OverlayRaster = struct {
+        cells: std.ArrayList(renderer.DrawCell),
+        cols: u16,
+        rows: u16,
+        origin_x: u32,
+        origin_y: u32,
+    };
+
+    fn rasterizeOverlayCells(
+        allocator: std.mem.Allocator,
+        draws: []const chrome.ChromeDraw,
+        tk: *const chrome.Tokens,
+        cw: u32,
+        ch: u32,
+    ) !OverlayRaster {
+        if (cw == 0 or ch == 0) return error.NoMetrics;
+        // 1) bounding box = fill/border rect 합집합(backing px). text origin은 box 안이라 박스 산정에 안 쓴다.
+        var min_x: i32 = std.math.maxInt(i32);
+        var min_y: i32 = std.math.maxInt(i32);
+        var max_x: i32 = std.math.minInt(i32);
+        var max_y: i32 = std.math.minInt(i32);
+        var have_box = false;
+        for (draws) |d| for (d.ops) |op| {
+            const rect: ?chrome.draw.Rect = switch (op) {
+                .fill => |f| f.rect,
+                .border => |b| b.rect,
+                else => null,
+            };
+            if (rect) |rr| {
+                have_box = true;
+                min_x = @min(min_x, rr.x);
+                min_y = @min(min_y, rr.y);
+                max_x = @max(max_x, rr.x + @as(i32, @intCast(rr.w)));
+                max_y = @max(max_y, rr.y + @as(i32, @intCast(rr.h)));
+            }
+        };
+        if (!have_box) return error.NoBox;
+        const origin_x: u32 = if (min_x < 0) 0 else @intCast(min_x);
+        const origin_y: u32 = if (min_y < 0) 0 else @intCast(min_y);
+        const cols_u = @as(u32, @intCast(@max(max_x - min_x, 0))) / cw;
+        const rows_u = @as(u32, @intCast(@max(max_y - min_y, 0))) / ch;
+        if (cols_u == 0 or rows_u == 0) return error.TooSmall;
+        const cols: u16 = @intCast(@min(cols_u, @as(u32, std.math.maxInt(u16))));
+        const rows: u16 = @intCast(@min(rows_u, @as(u32, std.math.maxInt(u16))));
+
+        // 2) bg/fg/cp 스크래치 그리드. 기본 bg=surface_bg·fg=surface_fg·cp=공백(패널 fill이 곧 덮는다).
+        const n = @as(usize, cols) * @as(usize, rows);
+        const bg = try allocator.alloc(terminal.Color, n);
+        defer allocator.free(bg);
+        const fg = try allocator.alloc(terminal.Color, n);
+        defer allocator.free(fg);
+        const cp = try allocator.alloc(u21, n);
+        defer allocator.free(cp);
+        @memset(bg, terminal.Color{ .rgb = tk.get(.surface_bg) });
+        @memset(fg, terminal.Color{ .rgb = tk.get(.surface_fg) });
+        @memset(cp, ' ');
+
+        // 3) painter order로 ops 적용. 좌표는 origin 기준 셀로 환산(음수/범위 밖은 clamp/skip).
+        for (draws) |d| for (d.ops) |op| switch (op) {
+            .fill => |f| paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, f.rect, .{ .rgb = tk.get(f.role) }, null),
+            .border => |b| paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides),
+            .text => |t| placeText(cp, fg, cols, rows, origin_x, origin_y, cw, ch, t, .{ .rgb = tk.get(t.role) }),
+            .rule => {}, // 컴포넌트가 아직 안 냄 — 필요해질 때(C2 divider) 셀 라인으로 lower
+        };
+
+        // 4) 그리드를 DrawCell 배열로 평탄화(allocator 소유).
+        var cells: std.ArrayList(renderer.DrawCell) = .empty;
+        errdefer cells.deinit(allocator);
+        try cells.ensureTotalCapacity(allocator, n);
+        var r: u16 = 0;
+        while (r < rows) : (r += 1) {
+            var c: u16 = 0;
+            while (c < cols) : (c += 1) {
+                const idx = @as(usize, r) * @as(usize, cols) + c;
+                cells.appendAssumeCapacity(.{ .row = r, .col = c, .codepoint = cp[idx], .style = .{ .foreground = fg[idx], .background = bg[idx] } });
+            }
+        }
+        return .{ .cells = cells, .cols = cols, .rows = rows, .origin_x = origin_x, .origin_y = origin_y };
+    }
+
+    /// rect(backing px)를 origin 기준 셀 span으로 환산해 bg를 칠한다. sides==null이면 채움(fill), 아니면 켜진 변의
+    /// 가장자리 셀만(border). 범위 밖은 clamp. rasterizeOverlayCells 전용 헬퍼.
+    fn paintRectBg(bg: []terminal.Color, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, rect: chrome.draw.Rect, color: terminal.Color, sides: ?chrome.draw.Sides) void {
+        const ox: i32 = @intCast(origin_x);
+        const oy: i32 = @intCast(origin_y);
+        const c0 = std.math.clamp(@divTrunc(rect.x - ox, @as(i32, @intCast(cw))), 0, @as(i32, cols));
+        const r0 = std.math.clamp(@divTrunc(rect.y - oy, @as(i32, @intCast(ch))), 0, @as(i32, rows));
+        const c1 = std.math.clamp(@divTrunc(rect.x + @as(i32, @intCast(rect.w)) - ox, @as(i32, @intCast(cw))), 0, @as(i32, cols));
+        const r1 = std.math.clamp(@divTrunc(rect.y + @as(i32, @intCast(rect.h)) - oy, @as(i32, @intCast(ch))), 0, @as(i32, rows));
+        var r: i32 = r0;
+        while (r < r1) : (r += 1) {
+            var c: i32 = c0;
+            while (c < c1) : (c += 1) {
+                const on_edge = if (sides) |s|
+                    (s.top and r == r0) or (s.bottom and r == r1 - 1) or (s.left and c == c0) or (s.right and c == c1 - 1)
+                else
+                    true; // fill = 모든 셀
+                if (on_edge) bg[@as(usize, @intCast(r)) * @as(usize, cols) + @as(usize, @intCast(c))] = color;
+            }
+        }
+    }
+
+    /// text op의 runs를 origin 셀부터 가로로 놓는다(코드포인트당 한 칸 전진, 범위 밖 skip). cp·fg 그리드에 쓴다.
+    /// 표시 폭은 코드포인트 근사(wide=2 미보정 — 후속). rasterizeOverlayCells 전용 헬퍼.
+    fn placeText(cp: []u21, fg: []terminal.Color, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, t: chrome.draw.Op.Text, color: terminal.Color) void {
+        const row_i = @divTrunc(t.origin.y - @as(i32, @intCast(origin_y)), @as(i32, @intCast(ch)));
+        if (row_i < 0 or row_i >= rows) return;
+        const row: usize = @intCast(row_i);
+        var col_i = @divTrunc(t.origin.x - @as(i32, @intCast(origin_x)), @as(i32, @intCast(cw)));
+        for (t.runs) |run| {
+            const view = std.unicode.Utf8View.init(run.text) catch continue; // 잘못된 UTF-8 run은 건너뜀
+            var it = view.iterator();
+            while (it.nextCodepoint()) |c| {
+                if (col_i >= 0 and col_i < cols) {
+                    const idx = row * @as(usize, cols) + @as(usize, @intCast(col_i));
+                    cp[idx] = c;
+                    fg[idx] = color;
+                }
+                col_i += 1;
+            }
+        }
+    }
+
+    /// Notice 모달 frame(최상위 오버레이). chrome_host에서 modal ChromeDraw를 수집해(실제 컴포넌트 view 계약을
+    /// 탄다) 일반 rasterizer로 lower한다(fill 박스 + border 가장자리 + text 메시지). 닫혀 있거나 메트릭/박스 미상
+    /// 이면 에러(호출자가 무시). macOS 전용(finishOverlayFrame=CoreText).
     fn buildNoticeFrame(self: *DevSession) !metal_frame.PaneFrame {
         const cw = self.cell_width_px;
         const ch = self.cell_height_px;
         if (cw == 0 or ch == 0) return error.NoMetrics;
 
-        // 컴포넌트 view 경로를 실제로 타서 modal ChromeDraw를 모은다(arena가 ops·runs 소유, frame 빌드까지 유효).
+        // 컴포넌트 view 경로를 실제로 타서 modal ChromeDraw를 모은다(arena가 ops·runs 소유, lower까지 유효).
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -4264,66 +4392,8 @@ pub const DevSession = struct {
         try self.chrome_host.collectDraws(self.buildChromeProps(), &tokens, arena, &draws);
         if (draws.items.len == 0) return error.NotOpen;
 
-        // notice.view 계약: 열렸으면 fill(박스 rect+bg) + border(테두리 sides+role) + text(메시지+fg)를 함께 낸다.
-        // 셋을 잡고, fill·text 중 하나라도 없으면 에러로 닫는다. **방어 기본값을 두지 않는다** — 계약상 항상 함께
-        // 오므로 누락은 loud fail(no-defensive-code). op 순서엔 의존 안 함(마지막 fill/border/text가 이김 — 각 1개).
-        var fill_op: ?chrome.draw.Op.Fill = null;
-        var border_op: ?chrome.draw.Op.Border = null;
-        var text_op: ?chrome.draw.Op.Text = null;
-        for (draws.items) |d| for (d.ops) |op| switch (op) {
-            .fill => |f| fill_op = f,
-            .border => |b| border_op = b,
-            .text => |tx| text_op = tx,
-            else => {},
-        };
-        const fill = fill_op orelse return error.NoBox;
-        const text = text_op orelse return error.NoText;
-        const msg: []const u8 = if (text.runs.len > 0) text.runs[0].text else return error.NoText;
-        const rect = fill.rect;
-        const box_bg: terminal.Color = .{ .rgb = tokens.get(fill.role) };
-        const fg: terminal.Color = .{ .rgb = tokens.get(text.role) };
-        const msg_origin = text.origin;
-
-        const cols_u = rect.w / cw;
-        const rows_u = rect.h / ch;
-        if (cols_u == 0 or rows_u == 0) return error.TooSmall;
-        const cols: u16 = @intCast(@min(cols_u, @as(u32, std.math.maxInt(u16))));
-        const rows: u16 = @intCast(@min(rows_u, @as(u32, std.math.maxInt(u16))));
-
-        // 메시지의 박스-상대 셀 위치. origin은 backing-px 절대 → (origin - rect 좌상단)/cell. 음수면 0으로 clamp.
-        const msg_col: usize = if (msg_origin.x > rect.x) @intCast(@divTrunc(msg_origin.x - rect.x, @as(i32, @intCast(cw)))) else 0;
-        const msg_row_i = if (msg_origin.y > rect.y) @divTrunc(msg_origin.y - rect.y, @as(i32, @intCast(ch))) else 0;
-        const msg_row: u16 = @intCast(@min(msg_row_i, @as(i32, rows - 1)));
-
-        // border op을 박스 가장자리 셀(role 색 bg)로 lower한다 — DrawCell엔 테두리 프리미티브가 없어 가장자리
-        // 셀의 bg를 칠하는 게 tui 표현(C2/C3 reserved-kind로 고급화 예정). sides가 켜진 변만 칠한다. notice는
-        // 4변 모두 focus_accent. 가장자리가 아니면 box_bg. 메시지 행만 글리프, 나머지는 공백.
-        const border_bg: terminal.Color = if (border_op) |b| .{ .rgb = tokens.get(b.role) } else box_bg;
-        const sides = if (border_op) |b| b.sides else chrome.draw.Sides{};
-        // line_buf는 arena에서 cols 크기로 잡는다(고정 256 cap·이중 절단 제거 — 넓은 박스도 안 잘림).
-        const line_buf = try arena.alloc(u21, cols);
-        var cells: std.ArrayList(renderer.DrawCell) = .empty;
-        errdefer cells.deinit(self.allocator);
-        var r: u16 = 0;
-        while (r < rows) : (r += 1) {
-            @memset(line_buf, ' ');
-            if (r == msg_row and msg_col < line_buf.len) putUtf8(line_buf, msg_col, msg);
-            var c: u16 = 0;
-            while (c < cols) : (c += 1) {
-                const on_border = (sides.top and r == 0) or (sides.bottom and r == rows - 1) or
-                    (sides.left and c == 0) or (sides.right and c == cols - 1);
-                try cells.append(self.allocator, .{
-                    .row = r,
-                    .col = c,
-                    .codepoint = line_buf[c],
-                    .style = .{ .foreground = fg, .background = if (on_border) border_bg else box_bg },
-                });
-            }
-        }
-
-        const ox: u32 = if (rect.x < 0) 0 else @intCast(rect.x);
-        const oy: u32 = if (rect.y < 0) 0 else @intCast(rect.y);
-        return self.finishOverlayFrame(&cells, cols, rows, ox, oy);
+        var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch);
+        return self.finishOverlayFrame(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y);
     }
 
     /// chrome Notice 모달(손상 알림 등)을 연다. 메시지는 세션 소유 버퍼로 복사한다 — notice.State.message는 slice라
@@ -5145,6 +5215,52 @@ test "scrollback find: 토글 열림 → 증분 검색 → 매치 네비게이�
     // Esc로 닫힌다.
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(!session.find.open);
+}
+
+test "rasterizeOverlayCells: 다중 fill(painter order) + 다중 행 text → 셀 그리드(헤드리스)" {
+    const allocator = std.testing.allocator;
+    const c = struct {
+        fn rgb(r: u8, g: u8, b: u8) maru.color.Rgb {
+            return .{ .r = r, .g = g, .b = b };
+        }
+    };
+    // 2색이 구분되게 토큰을 만든다: surface_bg=(2,2,2), selection=(7,7,7).
+    const tk = chrome.tokens.Tokens.tui(.{
+        .foreground = c.rgb(1, 1, 1),
+        .sidebar_background = c.rgb(2, 2, 2),
+        .sidebar_foreground = c.rgb(3, 3, 3),
+        .sidebar_active = c.rgb(4, 4, 4),
+        .search_match = c.rgb(5, 5, 5),
+        .search_match_current = c.rgb(6, 6, 6),
+        .selection = c.rgb(7, 7, 7),
+        .cursor = c.rgb(8, 8, 8),
+    });
+    // cw=10, ch=20. 패널 2칸×2행(0,0,20,40). row1만 selection으로 덮고(painter order), 각 행에 텍스트.
+    const run_ab = [_]chrome.draw.Run{.{ .text = "ab" }};
+    const run_cd = [_]chrome.draw.Run{.{ .text = "cd" }};
+    const ops = [_]chrome.draw.Op{
+        .{ .fill = .{ .rect = .{ .x = 0, .y = 0, .w = 20, .h = 40 }, .role = .surface_bg } },
+        .{ .fill = .{ .rect = .{ .x = 0, .y = 20, .w = 20, .h = 20 }, .role = .selection } },
+        .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &run_ab, .role = .surface_fg } },
+        .{ .text = .{ .origin = .{ .x = 0, .y = 20 }, .runs = &run_cd, .role = .surface_fg } },
+    };
+    const draws = [_]chrome.ChromeDraw{.{ .layer = .modal, .ops = &ops }};
+
+    var raster = try DevSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20);
+    defer raster.cells.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u16, 2), raster.cols);
+    try std.testing.expectEqual(@as(u16, 2), raster.rows);
+    try std.testing.expectEqual(@as(u32, 0), raster.origin_x);
+    try std.testing.expectEqual(@as(u32, 0), raster.origin_y);
+    try std.testing.expectEqual(@as(usize, 4), raster.cells.items.len);
+    // 행 0: "ab" + surface_bg, 행 1: "cd" + selection(나중 fill이 이김).
+    try std.testing.expectEqual(@as(u21, 'a'), raster.cells.items[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'b'), raster.cells.items[1].codepoint);
+    try std.testing.expectEqual(@as(u21, 'c'), raster.cells.items[2].codepoint);
+    try std.testing.expectEqual(@as(u21, 'd'), raster.cells.items[3].codepoint);
+    try std.testing.expectEqual(c.rgb(2, 2, 2), raster.cells.items[0].style.background.rgb); // row0 surface_bg
+    try std.testing.expectEqual(c.rgb(7, 7, 7), raster.cells.items[2].style.background.rgb); // row1 selection(painter order)
 }
 
 test "chrome Notice 모달: showNotice → 메시지 소유 복사·오버레이 프레임·입력 라우팅·메뉴 차단·Esc 닫기" {

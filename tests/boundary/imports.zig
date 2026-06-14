@@ -62,6 +62,18 @@ const rules = [_]Rule{
         },
     },
     .{
+        // session(L2 세션 코어)은 OS-중립이어야 한다 — 순수 모델·연산·입력 수학만. platform(L4 OS 어댑터)과
+        // pty(OS 프로세스)를 직접 import하면 이식성이 깨지므로 막는다(docs/layering-and-portability.md §2·§8).
+        // renderer(L1)는 의존 방향이 L2→L1이라 허용한다(금지 안 함). terminal(중립 입력 타입)도 허용.
+        .layer = "session",
+        .barrel = "src/session.zig",
+        .implementation_dir = "src/session",
+        .forbidden = &.{
+            .{ .layer = "pty" },
+            .{ .layer = "platform" },
+        },
+    },
+    .{
         .layer = "plugin",
         .barrel = "src/plugin.zig",
         .implementation_dir = "src/plugin",

@@ -424,6 +424,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return windows.first(where: { $0.window === view.window }) ?? primary
     }
 
+    /// 주어진 NSWindow의 일반-창 surface(notification.object 기준 delegate 콜백용). quick 패널은 컨트롤러를
+    /// window-delegate로 쓰지 않으므로(알림 관찰) windowWillClose/Resize는 일반 창에서만 fire한다 — 컬렉션에서만 찾는다.
+    private func surfaceForWindow(_ window: NSWindow?) -> TerminalSurface? {
+        guard let window else { return nil }
+        return windows.first(where: { $0.window === window })
+    }
+
     private var window: NSWindow? {
         get { activeSurface?.window }
         set { activeSurface?.window = newValue }
@@ -582,10 +589,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 종료 중에는 추가 tick을 돌리지 않는다. tick은 session_ended에서 NSApp.terminate를
         // 부르므로, 여기서 다시 tick하면 재진입 terminate가 된다. 마지막 counter는
         // shutdownDevSession의 close()가 summary에 담는다.
+        // 종료 요약 기준 surface(메인=첫 창)를 shutdown '전에' 잡는다 — shutdownDevSession이 컬렉션을 비우므로
+        // 그 뒤엔 primary(=windows.first)가 nil이 된다. surface 객체는 캡처로 살아 있어 close가 채운 요약을 읽는다.
+        let mainSurface = windows.first
         shutdownDevSession()
-        // 종료 요약은 메인 세션(primary) 기준 — quick 패널이 key인 채 종료해도 forwarder가 quick으로 새지 않게.
-        withSurface(primary) {
-            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+        if let mainSurface {
+            // quick 패널이 key인 채 종료해도 forwarder가 quick으로 새지 않게 메인 창을 명시 대상으로.
+            withSurface(mainSurface) {
+                writeSummary(visibleUI: mainSurface.window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+            }
+        } else {
+            writeSummary(visibleUI: false, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
         }
     }
 
@@ -598,21 +612,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func windowWillClose(_ notification: Notification) {
-        _ = notification
-        shutdownDevSession()
-        // 컨트롤러는 primary 창의 delegate라 이 콜백은 항상 primary 것. 요약도 primary 기준으로(그 순간 quick
-        // 패널이 key여도 forwarder가 quick으로 새지 않게).
-        withSurface(primary) {
-            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+        // 닫히는 창의 일반-창 surface(quick은 delegate를 안 써 여기 안 옴). 마지막 일반 창이면 앱 종료
+        // (정리·요약은 applicationWillTerminate — primary가 살아 있어야 요약이 그 세션 기준. 원래 단일 창 동작
+        // 보존). 마지막이 아니면 그 창 세션만 닫고 앱은 계속한다(window는 AppKit이 이미 닫는 중).
+        guard let surface = surfaceForWindow(notification.object as? NSWindow) else { return }
+        if windows.count <= 1 {
+            NSApp.terminate(nil)
+        } else {
+            teardownWindowSurface(surface)
         }
-        NSApp.terminate(nil)
     }
 
     func windowDidResize(_ notification: Notification) {
-        _ = notification
-        // 컨트롤러는 primary 창의 delegate라(quick 패널은 알림 관찰을 씀) 이 resize는 항상 primary 창 것이다.
-        // primary를 명시 대상으로 한다 — 안 그러면 그 순간 quick 패널이 key일 때 forwarder가 quick을 리사이즈한다.
-        withSurface(primary) {
+        // 그 창(notification.object)의 surface를 명시 대상으로 — 멀티 창에서 다른 창/quick이 key여도 이 창을 리사이즈.
+        guard let surface = surfaceForWindow(notification.object as? NSWindow) else { return }
+        withSurface(surface) {
             // drawableSize를 창에 맞춰 즉시 갱신한다(setFrameSize 경로에만 의존하지 않는다). 이게
             // 늦으면 CAMetalLayer가 옛 크기 drawable을 새 창에 스케일해 글자가 늘어나 보인다.
             metalTerminalView?.updateDrawableSize()
@@ -627,8 +641,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
-        _ = notification
-        withSurface(primary) { // primary 창의 delegate 콜백 — primary를 명시 대상으로(위 windowDidResize와 같은 이유).
+        // 그 창(notification.object)의 surface를 명시 대상으로(위 windowDidResize와 같은 이유).
+        guard let surface = surfaceForWindow(notification.object as? NSWindow) else { return }
+        withSurface(surface) {
             metalTerminalView?.updateDrawableSize()
             resizeDevSessionFromWindow()
         }
@@ -765,7 +780,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
-    private func startDevSession(smokeMode: Bool) -> Bool {
+    /// 활성 surface(forwarder 대상)에 dev session을 만들어 붙인다 — 앱-전역 tick은 안 부른다(호출자가 정한다:
+    /// launch는 startDevSession이 tickDevSession을, New Window 팩토리는 그 창만 renderTick). 일반 창은 full chrome.
+    private func createSessionForActiveSurface(smokeMode: Bool) -> Bool {
         var config = MaruAppHostDevSessionConfig(
             abi_version: MARU_MACOS_APP_HOST_ABI_VERSION,
             cols: 80,
@@ -776,21 +793,99 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     ? MaruAppHostDevCommandControlledSmoke.rawValue
                     : MaruAppHostDevCommandInteractiveShell.rawValue
             ),
-            chrome_minimal: 0, // 메인 창은 항상 full chrome(사이드바·탭 바)
+            chrome_minimal: 0, // 일반 창은 항상 full chrome(사이드바·탭 바)
             minimal_tabs: 0 // full이라 무시됨(탭은 항상 동작)
         )
         var session: OpaquePointer?
         let status = maru_macos_app_dev_session_create(&config, &session)
         devSessionStatus = status
         guard status == Self.statusOK, let created = session else {
-            exitCode = 1
             devSession = nil
             return false
         }
-
         devSession = created
+        return true
+    }
+
+    private func startDevSession(smokeMode: Bool) -> Bool {
+        guard createSessionForActiveSurface(smokeMode: smokeMode) else {
+            exitCode = 1 // launch 경로의 세션 생성 실패는 비정상 종료(New Window 팩토리 실패는 exitCode를 더럽히지 않음)
+            return false
+        }
         tickDevSession()
         return true
+    }
+
+    /// 새 일반 터미널 창(+ 세션 + 렌더러)을 만든다 — File > New Window / ⌘N. quick 생성 경로와 같은 패턴이지만
+    /// 일반 창(titled, full chrome, 컨트롤러가 window-delegate). 컬렉션에 append하고 즉시 한 번 그린다. smoke는
+    /// 단일 창이라 무동작. 세션 생성 실패면 만든 창/렌더러를 정리한다.
+    @objc private func newTerminalWindow(_ sender: Any?) {
+        _ = sender
+        guard !smokeMode else { return }
+        let surface = TerminalSurface()
+        windows.append(surface)
+        var ok = false
+        withSurface(surface) {
+            let window = makePlaceholderWindow()
+            self.window = window // forwarder → surface(명시 대상)
+            window.delegate = self
+            window.center()
+            // 여러 창이 정확히 겹치지 않게 생성 순서대로 살짝 cascade.
+            let offset = CGFloat((windows.count - 1) * 26)
+            window.setFrameOrigin(NSPoint(x: window.frame.minX + offset, y: window.frame.minY - offset))
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(window.contentView)
+            setupMetalRenderer()
+            guard createSessionForActiveSurface(smokeMode: false) else { return }
+            resizeDevSessionFromWindow()
+            _ = renderTick() // 즉시 첫 paint(다음 timer tick을 안 기다림)
+            ok = true
+        }
+        if !ok {
+            // 실패: 세션/렌더러 정리 + 창 닫기 + 컬렉션 제거(delegate를 끊어 windowWillClose 재진입 방지).
+            teardownWindowSurface(surface)
+            surface.window?.delegate = nil
+            surface.window?.close()
+            surface.window = nil
+        }
+    }
+
+    /// 한 일반 창의 세션·렌더러를 닫고(요약은 surface.latestFrameSummary에 남긴다) 컬렉션에서 뺀다. NSWindow는
+    /// 건드리지 않는다 — windowWillClose는 이미 닫히는 중이고, 그 외 경로(tick 셸 종료·팩토리 실패)는 호출자가
+    /// delegate를 끊고 window를 닫는다(재진입 없이). 앱 quit에선 shutdownDevSession이 남은 창마다 순회 호출.
+    private func teardownWindowSurface(_ surface: TerminalSurface) {
+        if let session = surface.devSession {
+            var summary = MaruAppHostDevFrameSummary()
+            let status = maru_macos_app_dev_session_close(session, &summary)
+            surface.devSessionStatus = status
+            if status == Self.statusOK { surface.latestFrameSummary = summary } else { exitCode = 1 }
+            maru_macos_app_dev_session_destroy(session)
+            surface.devSession = nil
+        }
+        if let renderer = surface.metalRenderer {
+            maru_metal_renderer_destroy(renderer)
+            surface.metalRenderer = nil
+        }
+        windows.removeAll { $0 === surface }
+    }
+
+    /// 셸 종료/fault로 한 창을 닫는다(tick 경로). 마지막 일반 창이면 앱 종료(정리·요약은 applicationWillTerminate —
+    /// 원래 단일 창 동작 보존), 아니면 그 창만 정리하고 닫는다(앱은 계속).
+    private func closeWindowOrQuit(_ surface: TerminalSurface) {
+        if windows.count <= 1 {
+            // 마지막 창 → 앱 종료. 추가 tick이 재진입 terminate를 부르지 않게 타이머를 먼저 멈춘다(정리·요약은
+            // applicationWillTerminate가 — primary가 살아 있어야 요약이 그 세션 기준. 원래 SessionEnded 경로의 안전장치).
+            tickTimer?.invalidate()
+            tickTimer = nil
+            smokeTimer?.invalidate()
+            smokeTimer = nil
+            NSApp.terminate(nil)
+        } else {
+            teardownWindowSurface(surface)
+            surface.window?.delegate = nil // close가 windowWillClose를 다시 부르지 않게
+            surface.window?.close()
+            surface.window = nil
+        }
     }
 
     private func startFrameLoopTicks() {
@@ -854,34 +949,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // quick terminal이 보이면 그것도 tick한다(quick 셸 종료/fault는 quick만 닫고 앱은 계속). 각 surface를
     // explicitSurface로 지정해, 세션별 forwarder(window/devSession/메트릭/draw)가 그 surface를 대상으로 돈다.
     private func tickDevSession() {
-        guard let primary else { return }
+        guard !windows.isEmpty else { return }
 
-        explicitSurface = primary
-        let status = renderTick()
-        if status == Self.statusOK {
-            // 첫 tick에 summary를 한 번 남긴다(launch 경로 진단). primary 기준.
-            if latestFrameSummary.frame_loop_ticks <= 1 {
-                writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+        // 일반 창들을 순회 tick(컬렉션 변형은 루프 뒤에서 — closeWindowOrQuit이 windows를 바꾸므로). 셸이 정상
+        // 종료(SessionEnded)/fault면 그 창을 닫되, 마지막 일반 창이면 앱 종료(D4 — closeWindowOrQuit이 판정).
+        let snapshot = windows
+        var toClose: [TerminalSurface] = []
+        for surface in snapshot {
+            explicitSurface = surface
+            let status = renderTick()
+            explicitSurface = nil
+            if status == Self.statusOK {
+                // 첫(메인) 창의 첫 tick에 launch 진단 요약을 한 번 남긴다.
+                if surface === windows.first, surface.latestFrameSummary.frame_loop_ticks <= 1 {
+                    withSurface(surface) {
+                        writeSummary(visibleUI: surface.window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
+                    }
+                }
+                continue
             }
-            explicitSurface = nil
-        } else if status == Self.statusSessionEnded {
-            // 메인 PTY 셸이 정상 종료 → frame loop 멈추고 우아하게(exitCode 0) 내려간다.
-            tickTimer?.invalidate()
-            tickTimer = nil
-            smokeTimer?.invalidate()
-            smokeTimer = nil
-            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
-            explicitSurface = nil
-            NSApp.terminate(nil)
-            return
-        } else {
-            // tick_failed 등 세션 자체 fault만 비정상 종료(exitCode 1).
-            exitCode = 1
-            writeSummary(visibleUI: window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
-            explicitSurface = nil
-            NSApp.terminate(nil)
-            return
+            // SessionEnded는 우아한 종료(exitCode 0 유지), 그 외(tick_failed 등)는 세션 fault라 exitCode 1.
+            if status != Self.statusSessionEnded { exitCode = 1 }
+            toClose.append(surface)
         }
+        // 닫을 창 처리(마지막 창이면 앱 종료 — 그 경우 아래 quick tick은 건너뛴다).
+        for surface in toClose { closeWindowOrQuit(surface) }
+        if windows.isEmpty { return }
 
         // quick terminal — 보일 때만 tick. 그 셸이 종료/fault면 quick만 정리한다(앱은 계속 산다).
         if let quick, quick.window?.isVisible == true {
@@ -1147,8 +1240,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         app.addItem(nativeMenuItem("Quit maru", #selector(NSApplication.terminate(_:)), key: "q"))
         attachSubmenu(mainMenu, "maru", app)
 
-        // File
+        // File — New Window(⌘N)는 네이티브(NSWindow 생성은 OS 소유라 Zig in-session 액션이 아니다). new_term/
+        // new_tab은 Zig 카탈로그 액션(활성 세션 안의 Term/워크스페이스).
         let file = NSMenu()
+        file.addItem(nativeMenuItem("New Window", #selector(newTerminalWindow(_:)), key: "n", target: self))
+        file.addItem(.separator())
         file.addItem(catalogMenuItem("new_term", catalog))
         file.addItem(catalogMenuItem("new_tab", catalog))
         file.addItem(.separator())
@@ -1851,24 +1947,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // quick terminal(있으면)도 함께 정리한다.
         tearDownQuickTerminal()
 
-        // 메인 세션(primary)을 명시적으로 닫고 파괴한다(forwarder 라우팅이 아니라 primary 직접 — 종료 경로라 명확히).
-        guard let surface = primary, let session = surface.devSession else {
-            return
-        }
-        var summary = MaruAppHostDevFrameSummary()
-        let status = maru_macos_app_dev_session_close(session, &summary)
-        surface.devSessionStatus = status
-        if status == Self.statusOK {
-            surface.latestFrameSummary = summary
-        } else {
-            exitCode = 1
-        }
-        maru_macos_app_dev_session_destroy(session)
-        surface.devSession = nil
-
-        if let renderer = surface.metalRenderer {
-            maru_metal_renderer_destroy(renderer)
-            surface.metalRenderer = nil
+        // 남은 모든 일반 창 세션·렌더러를 닫고 파괴한다(앱 종료 경로). 보통 비-마지막 창은 이미 닫혔고 마지막
+        // 창/앱 종료에서 여기로 온다 — 멀티 창이면 한 번에 전부 정리한다(leak 방지). teardownWindowSurface가
+        // 각 close/destroy + 컬렉션에서 제거(요약은 surface.latestFrameSummary에). 변형 중 순회를 피해 snapshot으로.
+        let snapshot = windows
+        for surface in snapshot {
+            teardownWindowSurface(surface)
         }
     }
 

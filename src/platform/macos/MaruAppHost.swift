@@ -893,7 +893,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let count = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_dev_session_workspace_window_count(session, buf.baseAddress, buf.count)
         }
-        guard count > 0 else { return } // -1=손상/헤더불일치, 0=빈 workspace → 기본 단일 창(사용자 알림은 후속 PR)
+        if count < 0 {
+            // -1=손상/헤더 불일치: 저장 파일이 깨졌다. 기본 단일 창으로 시작하되 chrome Notice 모달로 사용자에게
+            // 알린다(저장본은 종료 시 saveWorkspace가 덮어쓸 때까지 보존). 빈 workspace(count==0)는 손상이 아니라
+            // 저장이 없는 정상 상태이므로 알림 없이 조용히 기본 창으로 시작한다.
+            showNotice("저장된 작업 공간을 복원할 수 없습니다 — 파일이 손상되었습니다. 기본 창으로 시작합니다.")
+            return
+        }
+        guard count > 0 else { return } // 0=빈 workspace → 기본 단일 창(알림 없음)
         withSurface(primary) { applyWorkspaceWindow(text, 0) }
         for i in 1..<Int(count) {
             createTerminalWindow(applyingWorkspace: (text, i))
@@ -903,6 +910,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         withSurface(primary) {
             resizeDevSessionFromWindow()
             _ = renderTick()
+        }
+    }
+
+    /// chrome Notice 모달(손상 알림 등)을 primary 세션에 띄운다. 메시지는 UTF-8로 Zig에 넘긴다(세션이 복사 소유라
+    /// 호출 뒤 bytes는 해제돼도 안전). 다음 renderTick이 최상위 오버레이로 그린다. 세션 없으면 무동작.
+    private func showNotice(_ message: String) {
+        guard let session = primary?.devSession else { return }
+        let bytes = Array(message.utf8)
+        _ = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_dev_session_show_notice(session, buf.baseAddress, buf.count)
         }
     }
 

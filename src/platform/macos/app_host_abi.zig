@@ -244,6 +244,20 @@ pub export fn maru_macos_app_dev_session_paste_text(
     return @intFromEnum(Status.ok);
 }
 
+// chrome Notice 모달(손상 알림 등)을 연다. Swift가 워크스페이스 복원 손상(workspace_window_count<0)을 감지하면
+// UTF-8 메시지로 부른다. 세션이 복사 소유하므로 호출 뒤 버퍼는 free해도 된다. len==0이면 무동작. (v40)
+pub export fn maru_macos_app_dev_session_show_notice(
+    session: ?*DevSession,
+    bytes: ?[*]const u8,
+    len: usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    if (len == 0) return @intFromEnum(Status.ok);
+    const ptr = bytes orelse return @intFromEnum(Status.null_out);
+    dev_session.showNotice(ptr[0..len]);
+    return @intFromEnum(Status.ok);
+}
+
 // IME 키 트랜잭션(v20). Swift keyDown은 begin -> interpretKeyEvents -> end 순서로 부르고,
 // 입력기 콜백은 insert/marked로 쌓는다. 판정(전송/무시/인코딩)은 전부 Zig가 한다 — Swift엔
 // IME 분기 로직이 없다(unit 테스트 가능).
@@ -737,6 +751,9 @@ test "macOS app dev exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_ime_delete_backward(null));
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_set_focus(null, 0));
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_ime_cursor_rect(null, null, null, null, null));
+    // v40 chrome Notice: null session은 ABI 오류, null bytes(len>0)도 오류, len==0은 무동작 ok(붙여넣기와 같은 규율).
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_show_notice(null, null, 0));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_dev_session_show_notice(null, "x", 1));
 }
 
 test {

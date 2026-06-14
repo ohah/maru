@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 39u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 40u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -304,6 +304,13 @@ int32_t maru_macos_app_dev_session_mouse(
 /* 클립보드 붙여넣기(UTF-8). 개행 정규화(\n→\r)와 bracketed paste(DECSET 2004) 감싸기는 Zig가
    한다 — Swift는 NSPasteboard에서 읽은 바이트만 넘긴다. */
 int32_t maru_macos_app_dev_session_paste_text(
+    MaruAppHostDevSession *session,
+    const uint8_t *bytes,
+    size_t len
+);
+/* chrome Notice 모달(손상 알림 등)을 연다(UTF-8 메시지). 워크스페이스 복원 손상(window_count<0)을 감지하면
+   Swift가 부른다. 세션이 메시지를 복사 소유하므로 호출 뒤 버퍼는 해제해도 된다. len==0이면 무동작. (v40) */
+int32_t maru_macos_app_dev_session_show_notice(
     MaruAppHostDevSession *session,
     const uint8_t *bytes,
     size_t len

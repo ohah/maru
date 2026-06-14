@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 
 const app = maru.app;
+const chrome = maru.chrome;
 const config_mod = maru.config;
 const renderer = maru.renderer;
 const terminal = maru.terminal;
@@ -25,7 +26,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 39; // 39: apply_workspace→apply_workspace_window(text,index)+workspace_window_count(파싱 권위 Zig 단일화)
+pub const abi_version: u32 = 40; // 40: show_notice(chrome Notice 모달 — 워크스페이스 복원 손상 알림). 39: apply_workspace_window+workspace_window_count
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -763,6 +764,14 @@ pub const DevSession = struct {
     // tick마다 활성 surface의 매치를 뷰포트 span으로 클립해 담는 재사용 버퍼(cell_colors.search_matches로 넘긴다).
     // 매 frame 새로 채우되 capacity는 재사용한다 — 스크롤·출력에 따라 뷰 안 매치가 바뀌므로 캐시하지 않는다.
     find_view_spans: std.ArrayList(terminal.SelectionSpan) = .empty,
+    // chrome 호스트(플랫폼 중립 L3 — src/chrome). 현재 C0/Notice 모달만 소유한다(손상 알림 등). 열려 있으면
+    // handleKeyEvent가 키를 chrome으로 라우팅하고, tick이 buildNoticeFrame을 최상위 오버레이로 그린다. tokens·
+    // props는 매 frame DevSession이 빌드해 넘긴다(chrome은 config/terminal을 모름). 단일 출처: docs/chrome-strategy.md.
+    chrome_host: chrome.ChromeHost = .{},
+    // Notice 메시지의 세션 소유 백킹. notice.State.message는 slice라, ABI 호출자(Swift)의 transient 버퍼를
+    // 그대로 가리키면 dangling이 된다 → showNotice가 여기로 복사하고 State.message가 이걸 가리킨다. 알림 문구라
+    // 512B면 충분(초과분은 잘라 표시).
+    notice_message_buf: [512]u8 = undefined,
     // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
     // 마다 leaf rect/divider seg 레이아웃을 새 ArrayList에 할당·해제하던 churn을 없앤다 — 레이아웃은 매번
     // 다시 계산하므로(작은 트리라 cheap) 결과는 항상 최신이라 stale 캐시 위험이 없고, 버퍼 capacity만 재사용한다.
@@ -2153,6 +2162,26 @@ pub const DevSession = struct {
         }
     }
 
+    /// terminal.KeyEvent → chrome.input.InputEvent. chrome은 terminal 타입을 모르므로(L1/L3 경계) 이 변환을
+    /// 플랫폼 어댑터가 소유한다. Notice 모달은 Enter/Esc만 의미가 있고 나머지는 소비-only지만, 어휘를 온전히
+    /// 매핑해 후속 chrome 컴포넌트(C2/C3)에도 재사용한다. char가 아닌 키의 codepoint는 0.
+    fn chromeInputFromKeyEvent(event: terminal.KeyEvent) chrome.input.InputEvent {
+        const key: chrome.input.Key = switch (event.key) {
+            .enter => .enter,
+            .escape => .escape,
+            .arrow_up => .up,
+            .arrow_down => .down,
+            .backspace => .backspace,
+            .char => .char,
+            else => .other,
+        };
+        const cp: u21 = switch (event.key) {
+            .char => |c| c,
+            else => 0,
+        };
+        return .{ .key = .{ .key = key, .codepoint = cp } };
+    }
+
     /// 팝업이 열려 있을 때 키를 팝업으로 라우팅한다(handleKeyEvent가 resolver 앞에서 호출). Esc/모디파이어 조합=닫기,
     /// Enter=선택 실행 후 닫기, ↑↓=선택 이동, Backspace=한 글자 삭제, 평문 글자=필터에 추가, 그 외 특수키=닫기(안전).
     fn handlePaletteKey(self: *DevSession, event: terminal.KeyEvent) void {
@@ -2334,6 +2363,16 @@ pub const DevSession = struct {
         // 아니라 닫힌 pane의 late input이므로 ignored로 회계만 하고 정상으로 닫는다.
         if (self.ended_seen) {
             self.total_ignored_key_events += 1;
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+            return self.last_summary;
+        }
+        // chrome Notice(손상 알림)가 열려 있으면 모든 키를 chrome으로 라우팅한다 — 최상위 모달이라 팝업/Find보다
+        // 먼저. handleInput이 Enter/Esc면 닫고, 그 외 키도 소비한다(모달이라 터미널엔 안 내려간다 — host가 소비 처리).
+        if (self.chrome_host.notice.open) {
+            _ = self.chrome_host.handleInput(chromeInputFromKeyEvent(event));
+            self.metal_dirty = true;
+            self.total_app_key_events += 1; // Notice(앱)가 소비
             self.writeSummaryFromState();
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
@@ -3154,10 +3193,10 @@ pub const DevSession = struct {
     /// dispatchAppAction으로 넘기고 true, 모르는 키면 무동작 true 반환 없이 false(Swift가 무시). 터미널
     /// Action만 받는다(global/UI 동작은 Swift 소유라 별도).
     pub fn runAction(self: *DevSession, action_key: []const u8) bool {
-        // 모달(커맨드 팝업 또는 스크롤백 Find)이 열린 동안엔 메뉴바 keyEquivalent(Swift가 OS에서 잡아 이 경로로
-        // 보낸다)를 무시한다 — 모달 중 단축키가 뒤의 터미널을 조작하면 안 된다. 모달 자신의 키(팝업 Enter, Find
-        // 네비게이션)는 handlePaletteKey/handleFindKey가 dispatchAppAction을 직접 부르므로 이 경로를 안 거친다.
-        if (self.palette.open or self.find.open) return false;
+        // 모달(chrome Notice·커맨드 팝업·스크롤백 Find)이 열린 동안엔 메뉴바 keyEquivalent(Swift가 OS에서 잡아 이
+        // 경로로 보낸다)를 무시한다 — 모달 중 단축키가 뒤의 터미널을 조작하면 안 된다. 모달 자신의 키(팝업 Enter,
+        // Find 네비게이션)는 handlePaletteKey/handleFindKey가 dispatchAppAction을 직접 부르므로 이 경로를 안 거친다.
+        if (self.chrome_host.notice.open or self.palette.open or self.find.open) return false;
         const action = config_mod.parseAction(action_key) orelse return false;
         self.dispatchAppAction(action);
         return true;
@@ -3699,12 +3738,14 @@ pub const DevSession = struct {
                 sidebar_frame = self.buildSidebarTitleFrame() catch null;
             }
             defer if (sidebar_frame) |*sf| sf.deinit(self.allocator);
-            // 최상위 모달 오버레이 frame(열렸을 때만, macOS). 커맨드 팝업 또는 스크롤백 Find 입력창 — 두 모달은
-            // 배타적이라 하나만 그린다(replace의 overlay_frame). 실패는 무시(오버레이 없이 정상). PaneFrame.frame을
-            // deinit해야 하므로 defer로 정리한다.
+            // 최상위 모달 오버레이 frame(열렸을 때만, macOS). chrome Notice(손상 알림) > 커맨드 팝업 > 스크롤백
+            // Find — 셋은 배타적이라 하나만 그린다(replace의 overlay_frame). Notice가 최우선(가장 위). 실패는 무시
+            // (오버레이 없이 정상). PaneFrame.frame을 deinit해야 하므로 defer로 정리한다.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             if (builtin.os.tag == .macos) {
-                if (self.palette.open) {
+                if (self.chrome_host.notice.open) {
+                    overlay_frame = self.buildNoticeFrame() catch null;
+                } else if (self.palette.open) {
                     overlay_frame = self.buildPaletteFrame() catch null;
                 } else if (self.find.open) {
                     overlay_frame = self.buildFindFrame() catch null;
@@ -4219,6 +4260,136 @@ pub const DevSession = struct {
         const origin_x = term_rect.x + (term_rect.w -| panel_w) / 2;
         const origin_y = term_rect.y + 2 * ch; // 위에서 두 줄 내려(팝업과 같은 위치).
         return .{ .frame = frame, .origin_x = origin_x, .origin_y = origin_y, .colors = .{ .default_fg = self.appearance.theme.foreground } };
+    }
+
+    /// chrome 컴포넌트가 읽는 불변 메트릭(props seam). 매 frame 세션 실측값에서 빌드한다 — chrome은 terminal/
+    /// config 타입을 모르므로 plain u32만 넘긴다. sidebar_width_px는 런타임 가변(드래그)이라 토큰이 아닌 여기로.
+    fn buildChromeProps(self: *const DevSession) chrome.ChromeProps {
+        return .{ .metrics = .{
+            .cell_width_px = self.cell_width_px,
+            .cell_height_px = self.cell_height_px,
+            .sidebar_width_px = self.sidebar_width_px,
+            .backing_width_px = self.backing_width_px,
+            .backing_height_px = self.backing_height_px,
+            .chrome_minimal = self.chrome_minimal,
+        } };
+    }
+
+    /// ResolvedTheme(config) → chrome 토큰(역할→Rgb). chrome은 ResolvedTheme를 import하지 않으므로(경계) 여기서
+    /// 역할 매핑의 단일 출처를 둔다. divider/focus_accent/tab_*/drop_zone은 현재 sidebar_active를 공유한다(렌더의
+    /// sidebarActiveBg와 같은 출처) — rich(C4)에서 토큰셋만 바꿔 분리한다. muted_fg는 C0에선 sidebar_foreground.
+    fn buildChromeTokens(self: *const DevSession) chrome.Tokens {
+        const t = self.appearance.theme;
+        var palette = std.EnumArray(chrome.tokens.ColorRole, maru.color.Rgb).initFill(t.foreground);
+        palette.set(.surface_bg, t.sidebar_background);
+        palette.set(.surface_fg, t.sidebar_foreground);
+        palette.set(.muted_fg, t.sidebar_foreground);
+        palette.set(.tab_active_bg, t.sidebar_active);
+        palette.set(.tab_hover_bg, t.sidebar_active);
+        palette.set(.divider, t.sidebar_active);
+        palette.set(.focus_accent, t.sidebar_active);
+        palette.set(.drop_zone, t.sidebar_active);
+        palette.set(.search_match, t.search_match);
+        palette.set(.search_match_current, t.search_match_current);
+        palette.set(.selection, t.selection);
+        palette.set(.cursor, t.cursor);
+        return .{ .palette = palette };
+    }
+
+    /// Notice 모달 frame(최상위 오버레이). chrome_host에서 modal 레이어 ChromeDraw를 수집해(실제 컴포넌트 view
+    /// 계약 경로를 탄다) fill(박스 bg) + text(메시지 glyph)를 lower한다. border op는 DrawCell에 테두리 개념이
+    /// 없어 C0에선 생략한다(reserved-kind 테두리는 cell-stream chrome=C2/C3 작업). 박스 rect는 backing-px 절대
+    /// 좌표(notice.view가 사이드바 offset+중앙으로 계산) → PaneFrame origin = rect 좌상단, 셀은 박스 상대 좌표.
+    /// 닫혀 있거나 메트릭 미상이면 에러(호출자가 무시). macOS 전용(buildFromDrawList=CoreText).
+    fn buildNoticeFrame(self: *DevSession) !metal_frame.PaneFrame {
+        const cw = self.cell_width_px;
+        const ch = self.cell_height_px;
+        if (cw == 0 or ch == 0) return error.NoMetrics;
+
+        // 컴포넌트 view 경로를 실제로 타서 modal ChromeDraw를 모은다(arena가 ops·runs 소유, frame 빌드까지 유효).
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const tokens = self.buildChromeTokens();
+        var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+        try self.chrome_host.collectDraws(self.buildChromeProps(), &tokens, arena, &draws);
+        if (draws.items.len == 0) return error.NotOpen;
+
+        // fill(박스 rect+bg) + 첫 text(메시지+fg)를 추출한다. border는 lower 대상 아님(위 doc).
+        var box: ?chrome.draw.Rect = null;
+        var box_bg: maru.color.Rgb = self.appearance.theme.sidebar_background;
+        var msg: []const u8 = "";
+        var msg_fg: maru.color.Rgb = self.appearance.theme.sidebar_foreground;
+        var msg_origin: chrome.draw.Px = .{ .x = 0, .y = 0 };
+        for (draws.items) |d| for (d.ops) |op| switch (op) {
+            .fill => |f| {
+                box = f.rect;
+                box_bg = tokens.get(f.role);
+            },
+            .text => |tx| {
+                if (msg.len == 0 and tx.runs.len > 0) {
+                    msg = tx.runs[0].text;
+                    msg_fg = tokens.get(tx.role);
+                    msg_origin = tx.origin;
+                }
+            },
+            else => {},
+        };
+        const rect = box orelse return error.NoBox;
+
+        const cols_u = rect.w / cw;
+        const rows_u = rect.h / ch;
+        if (cols_u == 0 or rows_u == 0) return error.TooSmall;
+        const cols: u16 = @intCast(@min(cols_u, @as(u32, std.math.maxInt(u16))));
+        const rows: u16 = @intCast(@min(rows_u, @as(u32, std.math.maxInt(u16))));
+
+        const bg: terminal.Color = .{ .rgb = box_bg };
+        const fg: terminal.Color = .{ .rgb = msg_fg };
+
+        // 메시지의 박스-상대 셀 위치. origin은 backing-px 절대 → (origin - rect 좌상단)/cell. 음수면 0으로 clamp.
+        const msg_col: usize = if (msg_origin.x > rect.x) @intCast(@divTrunc(msg_origin.x - rect.x, @as(i32, @intCast(cw)))) else 0;
+        const msg_row_i = if (msg_origin.y > rect.y) @divTrunc(msg_origin.y - rect.y, @as(i32, @intCast(ch))) else 0;
+        const msg_row: u16 = @intCast(@min(msg_row_i, @as(i32, rows - 1)));
+
+        var cells: std.ArrayList(renderer.DrawCell) = .empty;
+        errdefer cells.deinit(self.allocator);
+        var line_buf: [256]u21 = undefined;
+        const line_len = @min(@as(usize, cols), line_buf.len);
+        var r: u16 = 0;
+        while (r < rows) : (r += 1) {
+            @memset(line_buf[0..line_len], ' ');
+            if (r == msg_row and msg_col < line_len) putUtf8(line_buf[0..line_len], msg_col, msg);
+            try appendPaletteRow(self.allocator, &cells, r, line_buf[0..line_len], bg, fg);
+        }
+
+        const draw_list: renderer.DrawList = .{
+            .size = .{ .cols = cols, .rows = rows },
+            .cursor = .{ .row = 0, .col = 0, .visible = false },
+            .dirty = .{ .start_row = 0, .end_row = rows - 1 },
+            .cells = try cells.toOwnedSlice(self.allocator),
+            .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
+        };
+        const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
+            .appearance = self.appearance,
+            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+            .scale_milli = self.scale_milli,
+            .cell_width_px = @intCast(cw),
+            .cell_height_px = @intCast(ch),
+        };
+        const frame = try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
+        const ox: u32 = if (rect.x < 0) 0 else @intCast(rect.x);
+        const oy: u32 = if (rect.y < 0) 0 else @intCast(rect.y);
+        return .{ .frame = frame, .origin_x = ox, .origin_y = oy, .colors = .{ .default_fg = self.appearance.theme.foreground } };
+    }
+
+    /// chrome Notice 모달(손상 알림 등)을 연다. 메시지는 세션 소유 버퍼로 복사한다 — notice.State.message는 slice라
+    /// 호출자(ABI/Swift) 버퍼가 transient면 dangling. 512B 초과는 잘라 표시한다. 다음 tick이 오버레이로 그린다.
+    pub fn showNotice(self: *DevSession, message: []const u8) void {
+        const n = @min(message.len, self.notice_message_buf.len);
+        @memcpy(self.notice_message_buf[0..n], message[0..n]);
+        self.chrome_host.notice.show(self.notice_message_buf[0..n]);
+        self.metal_dirty = true;
     }
 
     pub fn metalFrame(self: *const DevSession) MetalFrame {
@@ -5050,6 +5221,51 @@ test "scrollback find: 토글 열림 → 증분 검색 → 매치 네비게이�
     // Esc로 닫힌다.
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(!session.find.open);
+}
+
+test "chrome Notice 모달: showNotice → 메시지 소유 복사·오버레이 프레임·입력 라우팅·메뉴 차단·Esc 닫기" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildNoticeFrame=CoreText, 실 PTY
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000); // 메트릭·backing(buildNoticeFrame이 chrome props로 씀)
+
+    // 닫힘이면 buildNoticeFrame은 NotOpen(오버레이 없음 — 호출자가 무시).
+    try std.testing.expect(!session.chrome_host.notice.open);
+    try std.testing.expectError(error.NotOpen, session.buildNoticeFrame());
+
+    // showNotice는 메시지를 세션 소유 버퍼로 복사하고 연다 — 호출자의 transient 버퍼를 지워도 모달 메시지는 산다.
+    {
+        var transient = [_]u8{ 'c', 'o', 'r', 'r', 'u', 'p', 't' };
+        session.showNotice(&transient);
+        @memset(&transient, 0);
+    }
+    try std.testing.expect(session.chrome_host.notice.open);
+    try std.testing.expectEqualStrings("corrupt", session.chrome_host.notice.message);
+
+    // 오버레이 프레임이 크래시 없이 셀을 낸다(박스 bg + 메시지 glyph — 컴포넌트 view→ChromeDraw→lower 경로).
+    var nf = try session.buildNoticeFrame();
+    defer nf.frame.deinit(allocator);
+    try std.testing.expect(nf.frame.draw_list.cells.len > 0);
+
+    // 회귀: Notice 열린 동안 메뉴 keyEquivalent(runAction)는 무시된다(모달 뒤 터미널 조작 차단).
+    try std.testing.expect(!session.runAction("new_term"));
+
+    // 평문 키는 소비하되 모달이라 안 닫힌다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'a' }, .modifiers = .{} });
+    try std.testing.expect(session.chrome_host.notice.open);
+
+    // Esc로 닫힌다(chrome_host 라우팅이 notice.handle로 디스패치).
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(!session.chrome_host.notice.open);
 }
 
 test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상한 클램프" {

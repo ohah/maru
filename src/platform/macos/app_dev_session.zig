@@ -2810,10 +2810,16 @@ pub const DevSession = struct {
         };
     }
 
-    /// 입력기의 조합 중(marked) 텍스트 갱신(빈 입력 = 조합 해제). 표시는 core 합성이 한다.
+    /// 입력기의 조합 중(marked) 텍스트 갱신(빈 입력 = 조합 해제). find 오버레이가 열려 있으면 그 검색 입력에
+    /// 조합 글자를 보여준다(터미널 core가 아니라 — 조합 상태가 오버레이에 즉시 보이고, 뒤 터미널 입력줄에 새지
+    /// 않는다). 아니면 터미널 core 합성이 표시한다.
     pub fn imeMarked(self: *DevSession, bytes: []const u8) void {
         if (!self.surface_initialized) return;
-        self.activeSurface().core.setPreedit(bytes) catch return;
+        if (self.chrome_host.find.open) {
+            self.chrome_host.find.setPreedit(self.allocator, bytes) catch {};
+        } else {
+            self.activeSurface().core.setPreedit(bytes) catch return;
+        }
         self.metal_dirty = true; // 조합 글자는 즉시 보여야 한다
         if (self.ime_active) self.ime_marked_changed = true;
     }
@@ -2885,6 +2891,13 @@ pub const DevSession = struct {
         const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
         if (!self.surface_initialized) return .{ .x = 0, .y = 0, .w = cw, .h = ch };
+        // find 오버레이가 열려 있으면 후보창을 그 입력 커서 옆에 띄운다(터미널 커서가 아니라). caretRect가 위치
+        // 단일 출처. 닫혔거나 패널 밖이면 아래 터미널 커서로 폴백.
+        if (self.chrome_host.find.open) {
+            if (chrome.components.find.caretRect(&self.chrome_host.find, self.buildChromeProps())) |r| {
+                return .{ .x = @floatFromInt(r.x), .y = @floatFromInt(r.y), .w = @floatFromInt(r.w), .h = @floatFromInt(r.h) };
+            }
+        }
         const cursor = self.activeSurfaceConst().core.cursor;
         return .{
             // 활성 panel은 자기 rect origin(active_pane_rect.x/y)에서 그려지므로 커서의 스크린 좌표도 그 origin을

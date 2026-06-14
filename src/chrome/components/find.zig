@@ -13,21 +13,25 @@ const input = @import("../input.zig");
 /// 이 컴포넌트가 그리는 레이어(최상위 오버레이 — 열려 있으면 키를 잡는다). host가 ops와 짝지어 백엔드에 넘긴다.
 pub const layer = draw.Layer.modal;
 
-/// 순수 UI 상태. query=검색어(UTF-8), current=네비게이션 인덱스, match_count=session이 동기화하는 전체 매치 수
-/// (next/prev wrap·카운터에 필요 — 매치 리스트 자체는 session 소유). query는 ArrayList라 host가 deinit한다.
+/// 순수 UI 상태. query=확정 검색어(UTF-8), preedit=IME 조합 중(marked) 텍스트, current=네비게이션 인덱스,
+/// match_count=session이 동기화하는 전체 매치 수(next/prev wrap·카운터에 필요 — 매치 리스트 자체는 session 소유).
+/// query·preedit는 ArrayList라 host가 deinit한다. 조합 중 글자는 query 뒤에 preedit으로 보여 입력 가시성을 준다.
 pub const State = struct {
     open: bool = false,
     query: std.ArrayList(u8) = .empty,
+    preedit: std.ArrayList(u8) = .empty,
     current: usize = 0,
     match_count: usize = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         self.query.deinit(allocator);
+        self.preedit.deinit(allocator);
     }
 
-    /// 오버레이를 연다 — 검색어·네비·카운트를 비운다(host가 곧 recompute, 빈 쿼리면 매치 0이라 안전).
+    /// 오버레이를 연다 — 검색어·조합·네비·카운트를 비운다(host가 곧 recompute, 빈 쿼리면 매치 0이라 안전).
     pub fn show(self: *State) void {
         self.query.clearRetainingCapacity();
+        self.preedit.clearRetainingCapacity();
         self.current = 0;
         self.match_count = 0;
         self.open = true;
@@ -37,11 +41,19 @@ pub const State = struct {
         self.open = false;
     }
 
-    /// 검색어에 글자 추가(UTF-8 인코딩). 재검색은 host가 query_changed Action을 받아 한다. 인코딩 불가/OOM은 무시.
+    /// 검색어에 확정 글자 추가(UTF-8 인코딩). 확정이 들어오면 조합(preedit)은 끝난 것이라 비운다. 재검색은 host가
+    /// query_changed Action을 받아 한다. 인코딩 불가/OOM은 무시.
     pub fn appendChar(self: *State, allocator: std.mem.Allocator, cp: u21) !void {
+        self.preedit.clearRetainingCapacity();
         var utf8: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(cp, &utf8) catch return;
         try self.query.appendSlice(allocator, utf8[0..n]);
+    }
+
+    /// IME 조합 중(marked) 텍스트를 교체한다(빈 bytes = 조합 해제). session.imeMarked가 find 열림일 때 부른다.
+    pub fn setPreedit(self: *State, allocator: std.mem.Allocator, bytes: []const u8) !void {
+        self.preedit.clearRetainingCapacity();
+        try self.preedit.appendSlice(allocator, bytes);
     }
 
     /// 마지막 코드포인트 1개 삭제(UTF-8 경계 존중). 빈 쿼리면 무동작.
@@ -121,9 +133,32 @@ pub fn handle(allocator: std.mem.Allocator, ev: input.InputEvent, state: *State)
     }
 }
 
-/// 상단-중앙 한 줄 패널을 `out`에 append한다(배경 fill + "Find: <query>" + 우측 정렬 "cur/total"). 안 열렸거나
-/// 터미널 영역이 0칸이면 무동작. 순수: state·props·tokens만 읽는다. ops·runs 슬라이스는 호출자 frame arena 소유.
-/// 색은 surface_bg(패널)·surface_fg(글자) role. 표시 폭은 코드포인트 근사(wide=2 미보정 — 후속 host 실측).
+/// 입력 커서(다음 입력 위치 = "Find: " + query + 조합중 뒤)의 셀 rect(backing px). **레이아웃 단일 출처** —
+/// view가 커서 fill에, host가 IME 후보창 위치(imeCursorRect)에 공유한다. 닫혔거나 터미널 0칸/패널 밖이면 null.
+/// 표시 폭은 코드포인트 근사. 패널 레이아웃은 view와 같은 식(좁은 dup이지만 caret 위치는 여기 한 곳).
+pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
+    if (!state.open) return null;
+    const m = p.metrics;
+    const cw = @max(m.cell_width_px, 1);
+    const ch = @max(m.cell_height_px, 1);
+    const term_w_px = m.backing_width_px -| m.sidebar_width_px;
+    const term_cols = term_w_px / cw;
+    if (term_cols == 0) return null;
+    const panel_cols: u32 = @max(@min(@as(u32, 60), term_cols -| 4), 1);
+    const panel_w = panel_cols * cw;
+    const x = @as(i32, @intCast(m.sidebar_width_px)) + @as(i32, @intCast((term_w_px - panel_w) / 2));
+    const y = 2 * @as(i32, @intCast(ch));
+    const prompt_cols: u32 = 6; // "Find: "(ASCII)
+    const query_cols: u32 = @intCast(std.unicode.utf8CountCodepoints(state.query.items) catch state.query.items.len);
+    const preedit_cols: u32 = @intCast(std.unicode.utf8CountCodepoints(state.preedit.items) catch state.preedit.items.len);
+    const caret_col = prompt_cols + query_cols + preedit_cols;
+    if (caret_col >= panel_cols) return null; // 패널 밖
+    return .{ .x = x + @as(i32, @intCast(caret_col * cw)), .y = y, .w = cw, .h = ch };
+}
+
+/// 상단-중앙 한 줄 패널을 `out`에 append한다(배경 fill + "Find: <query><조합중>" + 우측 정렬 "cur/total" + 커서).
+/// 안 열렸거나 터미널 영역이 0칸이면 무동작. 순수: state·props·tokens만 읽는다. ops·runs 슬라이스는 호출자 frame
+/// arena 소유. 색은 surface_bg(패널)·surface_fg(글자)·cursor(커서) role. 표시 폭은 코드포인트 근사(wide=2 미보정).
 pub fn view(
     state: *const State,
     p: props.ChromeProps,
@@ -150,10 +185,12 @@ pub fn view(
 
     try out.append(arena, .{ .fill = .{ .rect = rect, .role = .surface_bg } });
 
-    // "Find: " + query (한 text op, 2 runs). prefix는 ASCII라 칸 수=바이트 수.
-    const prompt_runs = try arena.alloc(draw.Run, 2);
+    // "Find: " + query + preedit(조합 중) (한 text op, 3 runs). prefix는 ASCII라 칸 수=바이트 수. 조합 글자는
+    // query 뒤에 같은 색으로 붙여 입력 가시성을 준다(IME 조합 상태가 오버레이에 즉시 보인다).
+    const prompt_runs = try arena.alloc(draw.Run, 3);
     prompt_runs[0] = .{ .text = "Find: " };
     prompt_runs[1] = .{ .text = state.query.items };
+    prompt_runs[2] = .{ .text = state.preedit.items };
     try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = y }, .runs = prompt_runs, .role = .surface_fg } });
 
     // 우측 정렬 카운터 "cur/total"(매치 없으면 "0/0", 1-based 현재). 패널에 안 들어가면(좁음) 생략.
@@ -166,6 +203,12 @@ pub fn view(
         counter_runs[0] = .{ .text = counter };
         const cx = x + @as(i32, @intCast((panel_cols - counter_cols - 1) * cw));
         try out.append(arena, .{ .text = .{ .origin = .{ .x = cx, .y = y }, .runs = counter_runs, .role = .surface_fg } });
+    }
+
+    // 입력 커서: 검색어+조합 끝(다음 입력 위치)에 cursor 색 블록 1칸(caretRect 단일 출처). 별도 caret op 없이
+    // fill로 표현한다(블록 커서 = 터미널 관용, rasterizer가 fill을 painter-order로 칠함 — 마지막 append라 항상 보임).
+    if (caretRect(state, p)) |cr| {
+        try out.append(arena, .{ .fill = .{ .rect = cr, .role = .cursor } });
     }
 }
 
@@ -252,7 +295,7 @@ test "find handle: Enter/Shift+Enter 네비·글자=query_changed·Esc/⌘조합
     try std.testing.expect(!s.open);
 }
 
-test "find view: 닫힘이면 ops 0, 열림이면 fill+prompt(+counter)" {
+test "find view: 닫힘이면 ops 0, 열림이면 fill+prompt+counter+caret" {
     const Rgb = @import("../../color.zig").Rgb;
     const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
     const p = props.ChromeProps{ .metrics = .{
@@ -277,14 +320,56 @@ test "find view: 닫힘이면 ops 0, 열림이면 fill+prompt(+counter)" {
     s.current = 2; // "3/17" 카운터
     try s.appendChar(std.testing.allocator, 'a');
     try view(&s, p, &tk, arena, &out);
-    // fill + prompt text + counter text = 3 ops(넓은 패널이라 카운터 들어감).
-    try std.testing.expectEqual(@as(usize, 3), out.items.len);
-    try std.testing.expect(out.items[0] == .fill);
+    // panel fill + prompt text + counter text + caret fill = 4 ops(넓은 패널이라 카운터·caret 다 들어감).
+    try std.testing.expectEqual(@as(usize, 4), out.items.len);
+    try std.testing.expect(out.items[0] == .fill); // 패널 배경
     try std.testing.expect(out.items[1] == .text);
     try std.testing.expectEqualStrings("Find: ", out.items[1].text.runs[0].text);
     try std.testing.expectEqualStrings("a", out.items[1].text.runs[1].text);
     try std.testing.expect(out.items[2] == .text);
     try std.testing.expectEqualStrings("3/17", out.items[2].text.runs[0].text);
+    // 마지막은 입력 커서(cursor 색 fill 블록), "Find: a" 뒤 col 7(=6 prompt + 1 query), 1칸 폭.
+    try std.testing.expect(out.items[3] == .fill);
+    try std.testing.expect(out.items[3].fill.role == .cursor);
+    try std.testing.expectEqual(out.items[0].fill.rect.x + 7 * 8, out.items[3].fill.rect.x);
+    try std.testing.expectEqual(@as(u32, 8), out.items[3].fill.rect.w); // 1칸
     // 패널은 사이드바 오른쪽.
     try std.testing.expect(out.items[0].fill.rect.x >= 40);
+}
+
+test "find view: IME 조합(preedit)이 query 뒤에 보이고 커서가 그 뒤로 이동" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 40,
+        .backing_width_px = 800,
+        .backing_height_px = 600,
+    } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+
+    var s: State = .{};
+    defer s.deinit(std.testing.allocator);
+    s.show();
+    try s.appendChar(std.testing.allocator, 'a'); // 확정 "a"
+    try s.setPreedit(std.testing.allocator, "\xea\xb0\x80"); // 조합 중 "가"(3바이트, 1 코드포인트)
+    try view(&s, p, &tk, arena, &out);
+
+    // prompt text op이 "Find: " + "a" + "가" 3 run.
+    try std.testing.expect(out.items[1] == .text);
+    try std.testing.expectEqualStrings("a", out.items[1].text.runs[1].text);
+    try std.testing.expectEqualStrings("\xea\xb0\x80", out.items[1].text.runs[2].text);
+    // 커서는 query(1) + preedit(1) 뒤 = col 8(=6+1+1).
+    const caret = out.items[out.items.len - 1];
+    try std.testing.expect(caret == .fill and caret.fill.role == .cursor);
+    try std.testing.expectEqual(out.items[0].fill.rect.x + 8 * 8, caret.fill.rect.x);
+
+    // 확정 글자가 들어오면 preedit은 비워진다(조합 종료).
+    try s.appendChar(std.testing.allocator, 'b');
+    try std.testing.expectEqual(@as(usize, 0), s.preedit.items.len);
+    try std.testing.expectEqualStrings("ab", s.query.items);
 }

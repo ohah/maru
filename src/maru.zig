@@ -6,6 +6,7 @@ pub const observability = @import("observability.zig");
 pub const plugin = @import("plugin.zig");
 pub const pty = @import("pty.zig");
 pub const renderer = @import("renderer.zig");
+pub const session = @import("session.zig");
 pub const terminal = @import("terminal.zig");
 
 test {

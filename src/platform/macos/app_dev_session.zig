@@ -7,6 +7,16 @@ const chrome = maru.chrome;
 const config_mod = maru.config;
 const renderer = maru.renderer;
 const terminal = maru.terminal;
+
+// L2 session core(src/session)로 추출한 순수 입력/재정렬 수학. 내부 호출처는 bare 이름을 유지하도록 file-scope
+// alias로 재노출한다(docs/layering-and-portability.md §3 — 2차 추출 슬라이스 1). 정의·테스트는 session/input_math.zig.
+// (maru.session을 별칭으로 잡지 않는다 — 테스트들이 'session'을 지역 변수로 쓴다.)
+const input_math = maru.session.input_math;
+const adjustActiveForMove = input_math.adjustActiveForMove;
+const rotateMove = input_math.rotateMove;
+const reselectAfterClose = input_math.reselectAfterClose;
+const wheelDeltaToLines = input_math.wheelDeltaToLines;
+const pageScrollDelta = input_math.pageScrollDelta;
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const metal_frame = @import("metal_frame.zig");
@@ -76,7 +86,7 @@ pub const CursorKind = enum(i32) {
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
 // 실제로는 init이 refreshCellMetrics를 부르므로 resize 시점엔 항상 실제 메트릭이 있다.
 const placeholder_cell_width_px: u32 = 12;
-const placeholder_cell_height_px: u32 = 24;
+const placeholder_cell_height_px = input_math.placeholder_cell_height_px; // session core 단일 출처(휠 환산과 공유)
 
 // 세로 탭 사이드바의 기본 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
 // 터미널 surface는 이 폭만큼 오른쪽으로 그려지고, 왼쪽 strip이 사이드바다("surface→rect" 첫 적용). 사용자가
@@ -516,52 +526,8 @@ fn sidebarDragTargetSlot(y_px: f64, slot_height_px: u32, tab_count: usize) usize
     return @intFromFloat(slot_f);
 }
 
-/// 탭을 from→to로 옮긴 뒤 active_tab을 보정한다. 드래그한 탭이 active면 to를 따라가고, 사이 인덱스는
-/// 이동 방향대로 한 칸 밀린다(from<to면 그 사이가 -1, to<from이면 +1). 그 밖은 불변. 순수 함수.
-fn adjustActiveForMove(active: usize, from: usize, to: usize) usize {
-    if (active == from) return to;
-    if (from < to and active > from and active <= to) return active - 1;
-    if (to < from and active >= to and active < from) return active + 1;
-    return active;
-}
-
-/// 슬라이스에서 from의 원소를 to로 옮긴다(사이 원소는 회전으로 한 칸 밀림). std.mem.rotate라 무할당
-/// in-place — 실패 불가. from==to면 무동작. 호출자는 from/to가 범위 안임을 보장한다.
-fn rotateMove(comptime T: type, items: []T, from: usize, to: usize) void {
-    if (from < to) {
-        std.mem.rotate(T, items[from .. to + 1], 1); // 좌로 1: from이 끝(to)으로
-    } else if (from > to) {
-        std.mem.rotate(T, items[to .. from + 1], from - to); // from이 앞(to)으로
-    }
-}
-
-/// 탭 하나를 닫은 뒤 새 active_tab 인덱스. 닫은 게 active보다 앞이면 한 칸 당기고(인덱스가 밀림),
-/// 그래도 새 길이를 넘으면 마지막으로 clamp한다(active 자체나 마지막 탭을 닫은 경우). new_len은 닫은
-/// 뒤 길이(≥1 — 마지막 한 개를 닫는 경우는 호출자가 따로 처리). 순수 함수라 OS 무관 단위 테스트.
-fn reselectAfterClose(closed_index: usize, active: usize, new_len: usize) usize {
-    var a = active;
-    if (closed_index < a) a -= 1;
-    if (a >= new_len) a = new_len - 1;
-    return a;
-}
-
-/// 휠/트랙패드 델타(포인트 또는 줄)를 정수 줄 수로 바꾼다. 정밀(트랙패드) 델타는 실제 cell 높이를
-/// scale로 나눈 한 줄 포인트로 환산하고, 1줄 미만 잔여분은 accum에 누적한다 — round로 버리면
-/// 천천히 굴릴 때 무반응이 된다. NaN/∞는 무시하고 누적은 ±1000줄로 clamp한다(trap 방지).
-fn wheelDeltaToLines(accum: *f64, delta_y: f64, precise: bool, cell_height_px: u32, scale_milli: u32) i32 {
-    if (!std.math.isFinite(delta_y)) return 0;
-    var lines_f: f64 = delta_y;
-    if (precise) {
-        const scale: f64 = @as(f64, @floatFromInt(scale_milli)) / 1000.0;
-        const ch_px: f64 = @floatFromInt(if (cell_height_px > 0) cell_height_px else placeholder_cell_height_px);
-        const line_pts: f64 = if (scale > 0) ch_px / scale else ch_px;
-        if (line_pts > 0) lines_f = delta_y / line_pts;
-    }
-    accum.* = std.math.clamp(accum.* + lines_f, -1000.0, 1000.0);
-    const whole: f64 = std.math.trunc(accum.*);
-    accum.* -= whole;
-    return @intFromFloat(whole);
-}
+// adjustActiveForMove·rotateMove·reselectAfterClose·wheelDeltaToLines는 session core로 추출됐다 — 위 file-scope
+// alias(input_math.*)로 bare 이름 그대로 호출한다. 정의·단위 테스트는 src/session/input_math.zig.
 
 // 화면 상태 진단 logger. MARU_DEBUG일 때 frame build마다 TerminalCore의 cell 격자(cursor 위치 +
 // 줄별 텍스트/배경)를 찍어, "개행 안 되고 덮어씀" 같은 cursor/scroll 동작을 데이터로 확인한다.
@@ -3477,19 +3443,8 @@ pub const DevSession = struct {
 
     /// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면은 rows-1줄(한 줄 겹침)이고,
     /// rows는 dev session이 권위 있게 알고 있어 Swift가 stale 값으로 계산하지 않게 여기서 구한다.
-    /// alt screen에서는 휠과 동일하게 화살표 변환으로 폴백한다(이전엔 완전 무반응이었다).
-    /// 메인 화면에서 PageUp/PageDown를 스크롤백 페이지 스크롤로 돌릴 때의 페이지 델타
-    /// (+1=위/과거, -1=아래/현재). scroll_mode(input.page-keys=scroll)가 아니거나 alt 화면이거나
-    /// page 키가 아니면 0 — 그땐 일반 인코딩 경로로 보내 앱(vim/less)이 \e[5~/\e[6~로 페이징하거나,
-    /// 셸이 그대로 받는다. 기본(passthrough)은 xterm/Ghostty와 일치, scroll은 Terminal.app/iTerm2식.
-    fn pageScrollDelta(scroll_mode: bool, alt_active: bool, key: terminal.input.Key) i32 {
-        if (!scroll_mode or alt_active) return 0;
-        return switch (key) {
-            .page_up => 1,
-            .page_down => -1,
-            else => 0,
-        };
-    }
+    // pageScrollDelta는 session core로 추출됐다(위 file-scope alias=input_math.pageScrollDelta로 호출).
+    // 정의·단위 테스트는 src/session/input_math.zig.
 
     pub fn scrollPage(self: *DevSession, delta_pages: i32) void {
         if (!self.surface_initialized) return;
@@ -4688,20 +4643,7 @@ test "gridFromBacking divides backing pixels by cell size with placeholder + cla
     try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 2000));
 }
 
-test "wheelDeltaToLines accumulates sub-line trackpad deltas instead of dropping them" {
-    var accum: f64 = 0;
-    // cell 34px @2.0x -> 한 줄 17pt. 6pt씩 천천히 굴리면 3번째에 1줄이 나와야 한다(이전엔 전부 0).
-    try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, 6, true, 34, 2000));
-    try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, 6, true, 34, 2000));
-    try std.testing.expectEqual(@as(i32, 1), wheelDeltaToLines(&accum, 6, true, 34, 2000));
-    // 비정밀(휠)은 델타가 곧 줄 수.
-    accum = 0;
-    try std.testing.expectEqual(@as(i32, 3), wheelDeltaToLines(&accum, 3, false, 34, 2000));
-    try std.testing.expectEqual(@as(i32, -2), wheelDeltaToLines(&accum, -2, false, 34, 2000));
-    // NaN/∞는 무시.
-    try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, std.math.nan(f64), true, 34, 2000));
-    try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, std.math.inf(f64), false, 34, 2000));
-}
+// wheelDeltaToLines 단위 테스트는 함수와 함께 src/session/input_math.zig로 이동.
 
 test "commitComposition is a safe no-op when there is no active preedit" {
     // 조합이 없으면(preedit==null) 아무것도 안 보내고 무해해야 한다 — IME 우회 특수키(PageUp)마다
@@ -4739,17 +4681,6 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
 
     session.scrollPage(-1); // 아래로 한 화면 -> 바닥
     try std.testing.expectEqual(@as(usize, 0), tab_surface.core.view_offset);
-}
-
-test "wheelDeltaToLines drops sub-line residue when the scroll direction flips" {
-    var accum: f64 = 0;
-    // 위로 0.9줄 잔여를 만든다(6pt×2 @ 17pt/줄 — 아래 scrollWheel의 방향 리셋과 짝).
-    _ = wheelDeltaToLines(&accum, 6, true, 34, 2000);
-    _ = wheelDeltaToLines(&accum, 6, true, 34, 2000);
-    try std.testing.expect(accum > 0.5);
-    // 방향 반전 잔여 리셋은 scrollWheel이 수행한다 — 여기선 그 계약(잔여가 반대 틱을 상쇄하면
-    // 첫 반응이 사라짐)을 수치로 고정한다: 리셋 없이 -6pt를 주면 0줄이 나온다(굼뜬 반전).
-    try std.testing.expectEqual(@as(i32, 0), wheelDeltaToLines(&accum, -6, true, 34, 2000));
 }
 
 test "drag autoscroll scrolls one line per tick and extends the selection to the edge row" {
@@ -5626,40 +5557,15 @@ test "sidebar hit-test maps screen x to the sidebar region and y to a tab slot" 
     try std.testing.expect(!inSidebarCloseButton(170, 0, 9)); // 사이드바 꺼짐
 }
 
-test "reselectAfterClose shifts active for earlier closes and clamps for active/last closes" {
-    // 닫은 게 active보다 앞 → 인덱스가 밀려 active 한 칸 당김.
-    try std.testing.expectEqual(@as(usize, 1), reselectAfterClose(0, 2, 3));
-    // active(=마지막)를 닫음 → 이전 탭으로 clamp.
-    try std.testing.expectEqual(@as(usize, 1), reselectAfterClose(2, 2, 2));
-    // active(중간)를 닫음 → 그 자리로 온 다음 탭이 같은 인덱스(불변).
-    try std.testing.expectEqual(@as(usize, 1), reselectAfterClose(1, 1, 2));
-    // 닫은 게 active보다 뒤 → active 불변.
-    try std.testing.expectEqual(@as(usize, 1), reselectAfterClose(2, 1, 2));
-    // 첫 탭(active 0) 닫고 하나 남음 → 0.
-    try std.testing.expectEqual(@as(usize, 0), reselectAfterClose(0, 0, 1));
-}
+// reselectAfterClose 단위 테스트는 함수와 함께 src/session/input_math.zig로 이동.
+// adjustActiveForMove·rotateMove 테스트도 마찬가지(아래 테스트에선 sidebarDragTargetSlot만 남긴다).
 
-test "drag reorder helpers: target clamp, active adjust, slice rotate move" {
-    // sidebarDragTargetSlot: 슬롯 아래 빈 영역도 마지막 슬롯으로 clamp(드래그 끝까지). slot_h=40, 3탭.
+test "sidebarDragTargetSlot clamps below-last empty area to the last slot" {
+    // 슬롯 아래 빈 영역도 마지막 슬롯으로 clamp(드래그 끝까지). slot_h=40, 3탭.
     try std.testing.expectEqual(@as(usize, 0), sidebarDragTargetSlot(0, 40, 3));
     try std.testing.expectEqual(@as(usize, 1), sidebarDragTargetSlot(50, 40, 3));
     try std.testing.expectEqual(@as(usize, 2), sidebarDragTargetSlot(200, 40, 3)); // 한참 아래 → 마지막
     try std.testing.expectEqual(@as(usize, 0), sidebarDragTargetSlot(-5, 40, 3)); // 위 → 0
-
-    // adjustActiveForMove: 드래그 탭이 active면 to 따라감, 사이 인덱스는 이동 방향대로 밀림.
-    try std.testing.expectEqual(@as(usize, 2), adjustActiveForMove(0, 0, 2)); // active=드래그 탭 → to
-    try std.testing.expectEqual(@as(usize, 0), adjustActiveForMove(1, 0, 2)); // 사이(from<to) → -1
-    try std.testing.expectEqual(@as(usize, 0), adjustActiveForMove(2, 2, 0)); // active=드래그 탭 → to
-    try std.testing.expectEqual(@as(usize, 1), adjustActiveForMove(0, 2, 0)); // 사이(to<from) → +1
-    try std.testing.expectEqual(@as(usize, 1), adjustActiveForMove(1, 1, 1)); // from==to 무동작
-
-    // rotateMove: from→to로 옮기고 사이는 회전.
-    var fwd = [_]u8{ 'A', 'B', 'C', 'D' };
-    rotateMove(u8, &fwd, 0, 2); // A를 2로 → B,C,A,D
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 'B', 'C', 'A', 'D' }, &fwd);
-    var bwd = [_]u8{ 'A', 'B', 'C', 'D' };
-    rotateMove(u8, &bwd, 3, 1); // D를 1로 → A,D,B,C
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 'A', 'D', 'B', 'C' }, &bwd);
 }
 
 // 사이드바 활성 하이라이트 밴드가 실제 세션에서 채워지고 탭 생성/전환을 따라 행을 옮기는지 — 실 init이
@@ -7927,17 +7833,4 @@ test "pxToCell subtracts the active pane origin so clicks map to that pane's col
     try std.testing.expectEqual(@as(u16, 1), session.pxToCell(16, 32).?.row); // y=32 - 16 = 16 → row 1
 }
 
-test "pageScrollDelta: scroll mode + main screen scrolls; passthrough/alt sends to app" {
-    // scroll 모드 + 메인 화면: PageUp=위(+1), PageDown=아래(-1) 스크롤.
-    try std.testing.expectEqual(@as(i32, 1), DevSession.pageScrollDelta(true, false, .page_up));
-    try std.testing.expectEqual(@as(i32, -1), DevSession.pageScrollDelta(true, false, .page_down));
-    // scroll 모드라도 alt 화면(vim/less): 0 — 앱이 \e[5~/\e[6~로 페이징.
-    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(true, true, .page_up));
-    // passthrough(opt-in, xterm/Ghostty): 메인 화면이어도 0 — \e[5~/\e[6~를 그대로 PTY로.
-    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(false, false, .page_up));
-    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(false, false, .page_down));
-    // page 키가 아니면 무조건 0(일반 키 경로).
-    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(true, false, .{ .function = 5 }));
-    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(true, false, .home));
-    try std.testing.expectEqual(@as(i32, 0), DevSession.pageScrollDelta(true, false, .{ .char = 'a' }));
-}
+// pageScrollDelta 단위 테스트는 함수와 함께 src/session/input_math.zig로 이동.

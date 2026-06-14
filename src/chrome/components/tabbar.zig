@@ -35,6 +35,8 @@ pub const Metrics = struct {
     /// x_px가 가리키는 Term 탭 인덱스([0, term_count-1] clamp). x를 탭 영역으로 clamp한다("+" zone은 마지막 탭으로
     /// 떨어지므로 호출자가 inPlusZone을 **먼저** 검사해야 한다). float clamp 후 cast라 거대 좌표도 trap 없음.
     pub fn tabIndex(self: Metrics, term_count: usize, x_px: f64) usize {
+        // tab_cols/tab_w==0 가드: barMetrics가 tab_cols>=1·tab_w>0을 보장하므로 platform 경로엔 dead지만, Metrics가
+        // public이라 테스트·미래 호출자가 직접 빌드할 수 있어 tab_cols-1 underflow·0 나눗셈을 막는다(계약 명시).
         if (term_count == 0 or !std.math.isFinite(x_px) or self.tab_cols == 0 or self.tab_w == 0) return 0;
         const cw: f64 = @floatFromInt(self.cell_width_px);
         const max_col: f64 = @floatFromInt(self.tab_cols - 1);
@@ -79,7 +81,12 @@ test "tabbar hit-test: tabIndex·inCloseZone·hasPlusZone·inPlusZone 경계" {
     try std.testing.expectEqual(@as(usize, 1), m.tabIndex(4, 116));
     try std.testing.expectEqual(@as(usize, 3), m.tabIndex(4, 160));
     try std.testing.expectEqual(@as(usize, 3), m.tabIndex(4, 999)); // 탭 영역 우측 clamp → 마지막
+    try std.testing.expectEqual(@as(usize, 0), m.tabIndex(4, 50)); // x < bar_x(100) → 좌측 clamp 0
     try std.testing.expectEqual(@as(usize, 0), m.tabIndex(4, std.math.nan(f64))); // 비유한 → 0
+    // 거대 Metrics 직접 빌드(public)에서도 0 가드(tab_cols/tab_w 0).
+    var degenerate = m;
+    degenerate.tab_cols = 0;
+    try std.testing.expectEqual(@as(usize, 0), degenerate.tabIndex(4, 130));
     // ✕ zone: 탭0 segEnd=2 → [colPx(0), colPx(2))=[100,116).
     try std.testing.expect(m.inCloseZone(0, 100));
     try std.testing.expect(m.inCloseZone(0, 115));

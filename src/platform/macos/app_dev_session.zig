@@ -25,7 +25,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 38; // 38: maru_macos_app_dev_session_apply_workspace 추가(R4b workspace 복원)
+pub const abi_version: u32 = 39; // 39: apply_workspace→apply_workspace_window(text,index)+workspace_window_count(파싱 권위 Zig 단일화)
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -113,19 +113,12 @@ fn restoreSurfaceSize(sm: app.workspace.Surface) terminal.Size {
 // 않는다. cwd 자식 chdir 실패는 _exit(126)이라(pty/macos childExec), 미리 확인 안 하면 복원된 셸이 즉시 죽어
 // 다음 tick에 reap된다. workspace-restore.md "실패 처리": 한 surface가 어긋나도 나머지(와 그 surface)를 살린다.
 fn usableRestoreCwd(cwd: []const u8) ?[]const u8 {
-    // 후행 '/'를 붙일 1바이트 여유까지 본다(아래 디렉터리 강제 트릭에서 쓴다).
-    if (cwd.len == 0 or cwd.len + 2 > std.fs.max_path_bytes or !std.fs.path.isAbsolute(cwd)) return null;
-    // null 종단 복사가 필요하다(access는 C 문자열). 이 Zig 핀은 std.Io 비동기 모델이라 동기 존재 확인엔 std.c를
-    // 쓴다 — pty/macos.zig와 같은 패턴(std.c.stat은 이 핀의 arm64-darwin에서 미선언, fstatat은 Linux에서 빈 값).
-    // 그래서 stat 대신 POSIX의 후행-슬래시 규칙을 쓴다: 경로 끝에 '/'를 붙이면 마지막 컴포넌트가 디렉터리가 아닐 때
-    // access가 ENOTDIR로 실패한다(실행 파일을 배제 — chdir(file)=ENOTDIR로 자식이 _exit(126)되는 걸 막는다). 이는
-    // 곧 "chdir 가능한가"를 커널 경로 해석으로 직접 묻는 것이고, X_OK는 그 디렉터리 진입(search) 권한까지 확인한다.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    @memcpy(buf[0..cwd.len], cwd);
-    buf[cwd.len] = '/'; // 디렉터리 강제(중복 슬래시는 POSIX상 단일 취급이라 "/"·".../"도 안전)
-    buf[cwd.len + 1] = 0;
-    const cwd_z = buf[0 .. cwd.len + 1 :0];
-    return if (std.c.access(cwd_z.ptr, std.posix.X_OK) == 0) cwd else null;
+    // 잘 형성된 **절대 경로**만 spawn cwd로 넘긴다(빈값·상대경로·과도 길이는 거른다 — 상대경로를 넘기면 자식이
+    // 앱 cwd 기준으로 chdir해 예측 불가). 존재·디렉터리 여부는 더 이상 여기서 추측하지 않는다: childExec가 chdir
+    // 실패 시 $HOME으로 graceful 폴백하므로(없는 cwd·TOCTOU·파일 경로를 단일 권위로 처리), 여기선 형식만 본다.
+    // 이전의 후행-슬래시 access 존재 검사는 검사~spawn 사이 dir이 사라지는 TOCTOU에 취약한 밴드라 제거했다.
+    if (cwd.len == 0 or cwd.len >= std.fs.max_path_bytes or !std.fs.path.isAbsolute(cwd)) return null;
+    return cwd;
 }
 
 /// backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다. cell 크기가 0이면
@@ -1936,10 +1929,26 @@ pub const DevSession = struct {
     /// active_tab을 따라가므로 이것만으로 라우팅이 바뀐다.
     pub fn switchTab(self: *DevSession, index: usize) bool {
         if (!self.app_window.selectTab(index)) return false;
+        // 전환한 탭을 현재 창 grid로 맞춘다. resize()는 활성 탭만 만지고 last_resize_size는 세션-전역이라, 다른
+        // 탭이 활성인 동안 창이 리사이즈됐거나 복원으로 저장 grid로 spawn된 탭은 전환 시점까지 stale grid다 —
+        // 여기서 lazy 보정한다(복원·일반 둘 다). best-effort: 죽은 PTY 등은 무시(resizeTabPanes 계약).
+        self.resizeTabPanes(self.activeTab());
         self.metal_dirty = true;
         self.recomputeActivePaneRect(); // 새 탭의 활성 panel rect로 좌표 origin 갱신
         self.rebuildSidebar() catch {}; // 활성 탭이 바뀌었으니 하이라이트 밴드를 새 행으로 옮긴다
         return true;
+    }
+
+    /// 트리/탭 변형 후 해제된 Pane·split 노드를 가리키던 상호작용 캐시 포인터를 비운다(stale 방지). 트리를 바꾸는
+    /// 모든 op(closeTab·closeActivePane·applyWorkspaceWindow 등)가 공유하는 단일 출처 — 새 호버/divider 캐시 필드를
+    /// 추가하면 여기 한 곳만 고치면 모든 변형 경로가 따라온다(흩어진 null화로 일부 경로를 빠뜨리는 UAF 방지). 이
+    /// 필드들은 캐시라 다음 마우스 이동이 재설정한다. 진행 중 탭 드래그(tab_drag_*)는 건드리지 않는다 — moveTab은
+    /// 드래그 중에 트리를 바꾸므로 여기서 드래그를 끊으면 안 된다. 전 세션 교체(apply)는 호출처가 따로 리셋한다.
+    fn resetHoverState(self: *DevSession) void {
+        self.hovered_slot = null;
+        self.hovered_plus = false;
+        self.hovered_tab = null;
+        self.divider_drag = null;
     }
 
     /// 탭을 닫는다. 마지막 한 개면 창(세션)을 닫는다 — 탭을 헐지 않고 종료를 latch해 기존 terminate/
@@ -1962,20 +1971,14 @@ pub const DevSession = struct {
         // 길이가 줄었으니(realloc은 안 해도) app_window.tabs를 새 items로 재바인딩(stale 슬라이스 방지).
         self.app_window.tabs = self.surface_ptrs.items;
 
-        // teardown — 탭의 모든 panel을 destroyPane(closeAndDetach → reader join → surface deinit → free)한 뒤
-        // panes 리스트·Tab을 해제한다. runtime은 세션 동안 살아 있으므로 detach가 안전하다.
-        for (tab.panes.items) |pane| self.destroyPane(pane);
-        PaneTree.deinit(self.allocator, tab.tree); // heap split 노드 해제(leaf surface는 destroyPane가 이미)
-        tab.panes.deinit(self.allocator);
-        self.allocator.destroy(tab);
+        // teardown — destroyTabStandalone가 모든 panel destroyPane(closeAndDetach → reader join → surface deinit
+        // → free) + tree split 노드 해제 + panes/Tab 해제. tabs/surface_ptrs는 위에서 이미 뺐다(이 헬퍼는 컬렉션을
+        // 안 건드림). applyWorkspaceWindow와 같은 teardown 단일 출처라 순서가 갈라지지 않는다.
+        self.destroyTabStandalone(tab);
 
         self.app_window.active_tab = reselectAfterClose(index, self.app_window.active_tab, self.tabs.items.len);
         self.recomputeActivePaneRect(); // 새 활성 탭의 활성 panel rect로 좌표 origin 갱신
-
-        self.hovered_slot = null; // 인덱스가 밀렸으니 호버 무효화(다음 마우스 이동이 재설정)
-        self.hovered_plus = false; // 탭 수가 줄어 "+" 행이 위로 밀렸으니 호버 밴드도 비운다(다음 이동이 재설정)
-        self.hovered_tab = null; // 이 탭의 Pane들이 해제됐으니 호버 탭 포인터도 비운다(stale 방지)
-        self.divider_drag = null; // 이 탭의 split 노드들이 해제됐으니 진행 중 divider 드래그 포인터도 비운다(stale 방지)
+        self.resetHoverState(); // 이 탭의 Pane/split 노드가 해제됐으니 stale 호버·divider 포인터 비움(다음 이동이 재설정)
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }
@@ -2002,7 +2005,7 @@ pub const DevSession = struct {
         // 5) 남은 panel을 collapse된 트리의 새 leaf rect로 resize + 좌표 origin 재계산.
         self.resizeActiveTabPanes() catch {};
         self.recomputeActivePaneRect();
-        self.hovered_tab = null; // 닫은 Pane을 가리키던 호버 탭 포인터 비움(stale 방지)
+        self.resetHoverState(); // 닫은 Pane·해제된 split 노드를 가리키던 호버·divider 포인터 비움(stale 방지)
         self.metal_dirty = true;
     }
 
@@ -3191,7 +3194,10 @@ pub const DevSession = struct {
         try flattenPaneTree(arena, tab, tab.tree, &tree);
         return .{
             .active_pane = tab.active_pane,
-            .title = "", // 탭 제목은 cosmetic — 복원에 불필요(번호로 식별). 후속에 필요하면 채운다.
+            // tab 제목은 현재 데이터 출처가 없다(워크스페이스는 번호로 식별, tab-rename UI 없음). docs/workspace-restore.md의
+            // title은 pane 레벨이라 tab.title은 reserved placeholder다(Surface.title/command과 달리 계획 근거가 약함).
+            // 포맷 호환을 위해 필드는 두되 항상 빈 값 — tab 제목 기능이 생기면 그때 채운다.
+            .title = "",
             .tree = try tree.toOwnedSlice(arena),
             .panes = try panes.toOwnedSlice(arena),
         };
@@ -3268,15 +3274,16 @@ pub const DevSession = struct {
         }
         self.app_window.tabs = self.surface_ptrs.items;
         self.app_window.active_tab = @min(win.active_tab, self.tabs.items.len - 1);
-        // 트리·탭을 통째로 교체했으니, 해제된 옛 트리를 가리키던 상호작용 포인터를 전부 비운다(closeTab의 stale
-        // 방지 불변식과 동일 — 단 여기선 모든 탭이 바뀌므로 진행 중 탭 드래그 상태까지 리셋한다). 지금은 시작 전용
-        // 호출이라 이 필드들이 이미 null이지만, mid-session 재적용(예: repo별 workspace 후속)에서 UAF를 막는다.
-        self.hovered_slot = null;
-        self.hovered_plus = false;
-        self.hovered_tab = null;
-        self.divider_drag = null;
+        // 트리·탭을 통째로 교체했으니 해제된 옛 트리를 가리키던 상호작용 포인터를 비운다(closeTab과 같은 stale 방지
+        // 불변식 — resetHoverState로 단일화). 진행 중 탭 드래그도 리셋한다(전 세션 교체라 드래그가 살아있을 수 없다).
+        // 지금은 시작 전용 호출이라 이미 null이지만, mid-session 재적용(repo별 workspace 후속)에서 UAF를 막는다.
+        self.resetHoverState();
         self.tab_drag_active = false;
         self.tab_drag_pane = null;
+        // 복원된 모든 탭을 현재 창 grid로 맞춘다. apply는 resize를 안 부르고 각 surface는 저장 grid로 spawn되며,
+        // caller의 resizeDevSessionFromWindow→resize()는 (활성 탭만 + last_resize_size dedup) 배경 탭과 primary
+        // 활성 탭을 빠뜨린다. 여기서 전 탭을 명시적으로 맞춰 dedup·활성탭-한정을 둘 다 우회한다(best-effort).
+        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
         // 활성 탭의 대표 surface는 위 swap 루프가 이미 surface_ptrs[*]에 바인딩했고 active_pane도 빌드 때
         // 세팅됐다(focusPane(active==active)는 early-return no-op이라 호출하지 않는다). 좌표·사이드바만 갱신.
         self.recomputeActivePaneRect();
@@ -3319,9 +3326,16 @@ pub const DevSession = struct {
         defer splits.deinit(self.allocator);
         try splits.ensureTotalCapacity(self.allocator, split_count);
         errdefer for (splits.items) |s| self.allocator.destroy(s);
+        // 트리 leaf↔pane 1:1 검증용(corruption graceful). 손상 파일이 같은 pane을 두 leaf로 참조하면 같은 *Pane이
+        // 트리에 두 번 들어가 close 시 removeLeaf가 첫 매치만 접고 destroyPane이 free → 두 번째 leaf가 dangling(UAF).
+        // 미참조 pane은 보이지 않는 라이브 셸(고아)이 된다. 각 pane이 정확히 1회 참조되는지 확인해 둘 다 막는다.
+        const used = try self.allocator.alloc(bool, tab.panes.items.len);
+        defer self.allocator.free(used);
+        @memset(used, false);
         var idx: usize = 0;
-        const root = try self.buildWorkspaceTreeNode(tab.panes.items, m.tree, &idx, &splits);
+        const root = try self.buildWorkspaceTreeNode(tab.panes.items, m.tree, &idx, &splits, used);
         if (idx != m.tree.len) return error.MalformedTree; // preorder를 다 안 소비했다(노드 수 불일치)
+        for (used) |u| if (!u) return error.MalformedTree; // 트리가 참조 안 한 고아 pane(보이지 않는 라이브 셸) 차단
         tab.tree = root;
         tab.active_pane = @min(m.active_pane, tab.panes.items.len - 1);
         return tab;
@@ -3329,13 +3343,15 @@ pub const DevSession = struct {
 
     /// 모델 preorder TreeNode 한 subtree를 소비해 PaneTree.Node를 만든다. leaf는 panes[idx]를, split은 새 Split
     /// (dir/ratio)을 할당하고 뒤따르는 두 subtree(a,b)를 재귀로 짓는다. 할당한 split은 splits에 추적(에러 해제용).
-    fn buildWorkspaceTreeNode(self: *DevSession, panes: []const *Pane, nodes: []const app.workspace.TreeNode, idx: *usize, splits: *std.ArrayList(*PaneTree.Split)) !PaneTree.Node {
+    fn buildWorkspaceTreeNode(self: *DevSession, panes: []const *Pane, nodes: []const app.workspace.TreeNode, idx: *usize, splits: *std.ArrayList(*PaneTree.Split), used: []bool) !PaneTree.Node {
         if (idx.* >= nodes.len) return error.MalformedTree;
         const node = nodes[idx.*];
         idx.* += 1;
         switch (node) {
             .leaf => |pane_index| {
                 if (pane_index >= panes.len) return error.MalformedTree;
+                if (used[pane_index]) return error.MalformedTree; // 같은 pane을 두 leaf로 참조(중복) — UAF 차단
+                used[pane_index] = true;
                 return .{ .leaf = panes[pane_index] };
             },
             .split => |s| {
@@ -3344,8 +3360,8 @@ pub const DevSession = struct {
                 split.* = .{
                     .direction = s.direction,
                     .ratio = app.split_tree.clampRatio(@as(f32, @floatFromInt(s.ratio_milli)) / 1000.0),
-                    .a = try self.buildWorkspaceTreeNode(panes, nodes, idx, splits),
-                    .b = try self.buildWorkspaceTreeNode(panes, nodes, idx, splits),
+                    .a = try self.buildWorkspaceTreeNode(panes, nodes, idx, splits, used),
+                    .b = try self.buildWorkspaceTreeNode(panes, nodes, idx, splits, used),
                 };
                 return .{ .split = split };
             },
@@ -5250,17 +5266,15 @@ test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)"
     try std.testing.expectEqual(@as(u16, 300), cap.tabs[0].tree[0].split.ratio_milli);
 }
 
-test "usableRestoreCwd: 존재하는 절대 디렉터리만 통과(없는 cwd graceful)" {
-    // 존재하는 디렉터리 → 그 cwd 사용. /tmp는 macOS·Linux 모두 존재.
-    try std.testing.expect(usableRestoreCwd("/tmp") != null);
+test "usableRestoreCwd: 절대경로 형식 필터(존재·디렉터리는 childExec graceful이 담당)" {
+    // 절대 경로면 존재·디렉터리 여부와 무관하게 통과한다 — 없는 경로·파일도. 자식이 chdir 실패 시 $HOME으로
+    // 폴백하므로(pty/macos childExec), 여기선 형식만 거른다(TOCTOU 추측 제거).
     try std.testing.expectEqualStrings("/tmp", usableRestoreCwd("/tmp").?);
-    // 없음·빈값·상대경로면 null → 기본 cwd로 복원(surface 안 잃음).
-    try std.testing.expect(usableRestoreCwd("/no/such/maru-restore-xyz-12345") == null);
+    try std.testing.expectEqualStrings("/no/such/maru-restore-xyz-12345", usableRestoreCwd("/no/such/maru-restore-xyz-12345").?);
+    try std.testing.expectEqualStrings("/bin/sh", usableRestoreCwd("/bin/sh").?); // 파일이어도 형식은 절대경로
+    // 형식 불량(빈값·상대경로)만 거른다 — 상대경로를 cwd로 넘기면 자식이 앱 cwd 기준 chdir해 예측 불가.
     try std.testing.expect(usableRestoreCwd("") == null);
-    try std.testing.expect(usableRestoreCwd("relative/path") == null); // 절대경로 아님
-    // 실행 파일은 access(X_OK)는 통과하지만 디렉터리가 아니므로 null이어야 한다(chdir(file)=ENOTDIR → _exit(126)
-    // 방지). /bin/sh는 macOS·Linux 모두 존재하는 실행 파일.
-    try std.testing.expect(usableRestoreCwd("/bin/sh") == null);
+    try std.testing.expect(usableRestoreCwd("relative/path") == null);
 }
 
 test "applyWorkspaceWindow: 없는 cwd여도 복원 성공(기본 cwd 폴백, surface 안 잃음)" {
@@ -5287,6 +5301,45 @@ test "applyWorkspaceWindow: 없는 cwd여도 복원 성공(기본 cwd 폴백, su
     try session.applyWorkspaceWindow(.{ .tabs = &tabs }); // 실패 안 함
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
+}
+
+test "applyWorkspaceWindow: 손상 트리(중복·고아 leaf)는 MalformedTree로 거부(UAF 차단)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    const s = [_]app.workspace.Surface{
+        .{ .cwd = "/tmp", .cols = 40, .rows = 24 },
+        .{ .cwd = "/tmp", .cols = 40, .rows = 24 },
+    };
+    const panes = [_]app.workspace.Pane{ .{ .surfaces = s[0..1] }, .{ .surfaces = s[1..2] } };
+
+    // 중복 leaf: split{leaf 0, leaf 0}(panes=2). 노드 3개=2*2-1로 구조 불변식은 통과하지만 pane 0을 두 leaf가
+    // 참조(같은 *Pane 두 번 → close 시 UAF)하고 pane 1은 고아다 → MalformedTree로 거부, 기존 세션은 그대로.
+    const dup_tree = [_]app.workspace.TreeNode{
+        .{ .split = .{ .direction = .horizontal, .ratio_milli = 500 } },
+        .{ .leaf = 0 },
+        .{ .leaf = 0 },
+    };
+    const dup_tabs = [_]app.workspace.Tab{.{ .tree = &dup_tree, .panes = &panes }};
+    try std.testing.expectError(error.MalformedTree, session.applyWorkspaceWindow(.{ .tabs = &dup_tabs }));
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len); // swap 전 실패 — 기존 세션 보존
+
+    // 고아 leaf: panes=2인데 트리는 leaf 0 하나만(pane 1 미참조) → 고아 검사로 MalformedTree.
+    const orphan_tree = [_]app.workspace.TreeNode{.{ .leaf = 0 }};
+    const orphan_tabs = [_]app.workspace.Tab{.{ .tree = &orphan_tree, .panes = &panes }};
+    try std.testing.expectError(error.MalformedTree, session.applyWorkspaceWindow(.{ .tabs = &orphan_tabs }));
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {

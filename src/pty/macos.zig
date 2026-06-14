@@ -604,7 +604,13 @@ fn childExec(
     if (std.c.setsid() < 0) std.c._exit(126);
     if (std.c.ioctl(slave_fd, tio_cs_ctty, @as(c_int, 0)) < 0) std.c._exit(126);
     if (cwd) |dir| {
-        if (std.c.chdir(dir.ptr) < 0) std.c._exit(126);
+        // cwd 실패는 setsid/ioctl/dup2와 달리 **복구 가능**하다: 요청한 디렉터리가 사라졌거나(복원/TOCTOU — 검사
+        // 후 spawn 사이 삭제) 접근 불가여도 셸을 잃는 것보다 다른 디렉터리에서라도 여는 게 낫다. 죽지 않고(_exit
+        // 126 제거) $HOME으로 폴백하고, $HOME도 없거나 실패하면 상속 cwd 그대로 둔다. async-signal-safe만 사용
+        // (envp 스캔·chdir, 할당 없음). 이게 cwd 정합성의 단일 권위 — Zig 쪽 usableRestoreCwd는 이른 필터일 뿐이다.
+        if (std.c.chdir(dir.ptr) < 0) {
+            if (homeFromEnv(envp)) |home| _ = std.c.chdir(home);
+        }
     }
     if (std.c.dup2(slave_fd, 0) < 0) std.c._exit(126);
     if (std.c.dup2(slave_fd, 1) < 0) std.c._exit(126);
@@ -615,6 +621,17 @@ fn childExec(
 
     _ = std.c.execve(command.ptr, argv, envp);
     std.c._exit(127);
+}
+
+/// envp("KEY=VALUE" C 문자열들, null 종단 배열)에서 HOME 값을 찾는다(없으면 null). child의 chdir 폴백용 —
+/// async-signal-safe(순수 스캔, 할당·syscall 없음). 반환 포인터는 envp가 가리키는 문자열 내부(복사 없음).
+fn homeFromEnv(envp: [*:null]const ?[*:0]const u8) ?[*:0]const u8 {
+    var i: usize = 0;
+    while (envp[i]) |entry| : (i += 1) {
+        const e = std.mem.span(entry);
+        if (std.mem.startsWith(u8, e, "HOME=") and e.len > "HOME=".len) return entry + "HOME=".len;
+    }
+    return null;
 }
 
 fn setNonBlocking(fd: std.posix.fd_t) !void {

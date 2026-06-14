@@ -441,21 +441,38 @@ pub export fn maru_macos_app_dev_session_serialize_workspace(
     return @intFromEnum(Status.ok);
 }
 
-// 시작 시 저장된 workspace 텍스트(헤더 + 한 창 블록)를 parse해 이 세션에 첫 창을 복원 적용한다(R4b). Swift가
-// 파일을 창 블록으로 나눠 창마다 한 번씩 호출한다(세션마다 windows[0]을 적용). parse 실패=invalid_config,
-// apply 실패=create_failed, 빈 창=ok(무동작). best-effort라 실패해도 그 창은 기본 단일 탭으로 남는다.
-pub export fn maru_macos_app_dev_session_apply_workspace(
+// 시작 시 저장된 workspace 텍스트(헤더 + N개 창 블록)에서 window_index번째 창을 parse해 이 세션에 복원 적용한다
+// (R4b). **포맷 파싱은 전부 Zig가 소유한다** — Swift는 전체 텍스트와 인덱스만 넘기고 'window ' 경계를 직접 안
+// 나눈다(파싱 권위가 Zig·Swift로 갈려 silent divergence 나는 걸 막음). parse 실패=invalid_config, 인덱스 범위
+// 밖=invalid_config, apply 실패=create_failed, ok=적용됨. best-effort라 실패해도 그 창은 기본 단일 탭으로 남는다.
+pub export fn maru_macos_app_dev_session_apply_workspace_window(
     session: ?*DevSession,
     text_ptr: ?[*]const u8,
     text_len: usize,
+    window_index: usize,
 ) c_int {
     const dev_session = session orelse return @intFromEnum(Status.null_out);
     const tp = text_ptr orelse return @intFromEnum(Status.null_out);
     var parsed = maru.app.workspace.parse(dev_session.allocator, tp[0..text_len]) catch return @intFromEnum(Status.invalid_config);
     defer parsed.deinit(); // apply가 cwd 슬라이스를 spawn에 다 쓴 뒤 arena 해제(안전)
-    if (parsed.workspace.windows.len == 0) return @intFromEnum(Status.ok);
-    dev_session.applyWorkspaceWindow(parsed.workspace.windows[0]) catch return @intFromEnum(Status.create_failed);
+    if (window_index >= parsed.workspace.windows.len) return @intFromEnum(Status.invalid_config);
+    dev_session.applyWorkspaceWindow(parsed.workspace.windows[window_index]) catch return @intFromEnum(Status.create_failed);
     return @intFromEnum(Status.ok);
+}
+
+// 저장된 workspace 텍스트의 창 개수를 센다(Swift가 창마다 NSWindow를 만들기 위해). 헤더·포맷 검증도 겸한다:
+// parse 실패(헤더 불일치·손상)면 -1을 돌려 Swift가 복원을 건너뛰게 한다(0이면 빈 workspace). 포맷 파싱은 Zig
+// 단일 권위 — Swift는 'window ' 경계를 직접 안 나눈다. 세션 allocator로 parse(임시 arena, 즉시 해제).
+pub export fn maru_macos_app_dev_session_workspace_window_count(
+    session: ?*DevSession,
+    text_ptr: ?[*]const u8,
+    text_len: usize,
+) i64 {
+    const dev_session = session orelse return -1;
+    const tp = text_ptr orelse return -1;
+    var parsed = maru.app.workspace.parse(dev_session.allocator, tp[0..text_len]) catch return -1;
+    defer parsed.deinit();
+    return @intCast(parsed.workspace.windows.len);
 }
 
 // 전역(OS) 단축키 등록 기술자 목록. config에서 한 번 만들어 세션 동안 불변이라, Swift가 시작 시 한 번

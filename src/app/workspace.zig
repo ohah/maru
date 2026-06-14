@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const split_tree = @import("split_tree.zig");
+const writeEscaped = @import("../text_escape.zig").writeEscaped; // 따옴표 값 escape 단일 출처(trace/snapshot과 공유)
 
 pub const header = "maru.workspace.v1";
 
@@ -36,9 +37,10 @@ pub const TreeNode = union(enum) {
 
 /// 한 터미널(Term)의 복원 가능 선언 상태(app.surface.RestorableSurfaceMetadata의 직렬화 부분집합 — id/
 /// process_state 같은 런타임 값은 복원에 불필요하므로 안 담는다). cwd=OSC 7, title=OSC 0/2, command=spawn argv[0].
-/// v1 복원이 실제로 소비하는 건 cwd·cols·rows뿐이다. title·command는 캡처·저장만 하고 복원 spawn엔 안 쓴다
-/// (기본 셸·"Maru" 제목으로 살린다; 정확한 제목·argv 복원은 후속). command는 argv[0]=셸이라 last_observed_command
-/// 자동 재실행 금지 정책과는 별개지만, 그래도 v1에선 복원에 쓰지 않는다.
+/// v1 복원이 실제로 소비하는 건 cwd·cols·rows뿐이다. title·command는 **목표 포맷의 선행 구현**으로 캡처·저장만
+/// 하고 복원 spawn엔 아직 안 쓴다(기본 셸·"Maru" 제목으로 살림). 헛방어/유령 필드가 아니라 docs/workspace-restore.md에
+/// 설계된 필드다: command=`shell_entry`(pane 재시작 기본 shell argv, round-trip 테스트까지 계획됨), title=pane title.
+/// command는 argv[0]=셸이라 `last_observed_command` 자동 재실행 금지 정책과는 별개다. 정확한 제목·argv 복원은 후속.
 pub const Surface = struct {
     title: []const u8 = "",
     cwd: []const u8 = "",
@@ -124,19 +126,6 @@ fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
     try w.writeAll("\" command=\"");
     try writeEscaped(w, s.command);
     try w.print("\" cols={d} rows={d}\n", .{ s.cols, s.rows });
-}
-
-/// 따옴표 문자열 안의 특수문자 escape(snapshot/trace와 같은 규칙). cwd/title/command에 공백·따옴표·개행이
-/// 섞여도 한 줄·한 토큰으로 안전하게 보관된다. reader(R2)가 같은 규칙으로 unescape한다.
-fn writeEscaped(w: *std.Io.Writer, s: []const u8) !void {
-    for (s) |b| switch (b) {
-        '\\' => try w.writeAll("\\\\"),
-        '"' => try w.writeAll("\\\""),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        else => try w.writeByte(b),
-    };
 }
 
 // ── R2: reader/parser ──────────────────────────────────────────────────────────

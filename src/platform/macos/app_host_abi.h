@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 38u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 39u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -389,13 +389,23 @@ int32_t maru_macos_app_dev_session_serialize_workspace(
     size_t *out_len
 );
 
-/* 시작 시 저장된 workspace 텍스트(헤더 + 한 창 블록; UTF-8)를 parse해 이 세션에 첫 창을 복원 적용한다.
-   Swift가 workspace.v1 파일을 창 블록으로 나눠 창마다 한 번씩 호출한다(세션마다 windows[0] 적용). 0=ok,
-   parse 실패=invalid_config, apply 실패=create_failed. best-effort라 실패해도 그 창은 기본 단일 탭으로 남는다. */
-int32_t maru_macos_app_dev_session_apply_workspace(
+/* 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)의 창 개수를 센다(Swift가 창마다 NSWindow 생성). 헤더·포맷
+   검증도 겸한다: parse 실패(헤더 불일치·손상)면 -1(Swift가 복원 건너뜀), 0이면 빈 workspace. 포맷 파싱은 Zig
+   단일 권위 — Swift는 'window ' 경계를 직접 나누지 않는다. */
+int64_t maru_macos_app_dev_session_workspace_window_count(
     MaruAppHostDevSession *session,
     const uint8_t *text_ptr,
     size_t text_len
+);
+
+/* 시작 시 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)에서 window_index번째 창을 parse해 이 세션에 복원
+   적용한다. Swift는 전체 텍스트와 인덱스만 넘긴다(창 경계 분할은 Zig가 소유 — 파싱 권위 단일화). 0=ok,
+   parse 실패·인덱스 범위 밖=invalid_config, apply 실패=create_failed. best-effort라 실패해도 기본 단일 탭. */
+int32_t maru_macos_app_dev_session_apply_workspace_window(
+    MaruAppHostDevSession *session,
+    const uint8_t *text_ptr,
+    size_t text_len,
+    size_t window_index
 );
 
 /* 전역(OS) 단축키 한 개의 등록 기술자. Swift가 Carbon RegisterEventHotKey(carbon_modifiers,

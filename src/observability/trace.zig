@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const terminal = @import("../terminal.zig");
+const writeEscaped = @import("../text_escape.zig").writeEscaped; // 따옴표 값 escape 단일 출처(workspace/snapshot과 공유)
 
 pub const header = "maru.trace.v1";
 
@@ -59,20 +60,6 @@ pub fn writeEvent(
             try writer.writeAll("\"\n");
         },
     }
-}
-
-/// 따옴표로 감싼 cwd 안의 특수문자를 escape한다(`\` `"`·개행/CR/Tab). path에 공백·따옴표가 섞여도
-/// 한 줄·한 토큰으로 안전하게 보관된다(snapshot의 codepoint escape와 같은 규칙). reader(B3)가
-/// 같은 규칙으로 unescape한다.
-fn writeEscaped(writer: *std.Io.Writer, s: []const u8) !void {
-    for (s) |b| switch (b) {
-        '\\' => try writer.writeAll("\\\\"),
-        '"' => try writer.writeAll("\\\""),
-        '\n' => try writer.writeAll("\\n"),
-        '\r' => try writer.writeAll("\\r"),
-        '\t' => try writer.writeAll("\\t"),
-        else => try writer.writeByte(b),
-    };
 }
 
 // trace는 명령 라이프사이클을 GUI 없이 파일로 굳힌 산출물이다 — 핵심 검증: 실제 OSC 133/7을 먹인

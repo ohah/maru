@@ -38,6 +38,10 @@ pub const GlyphCacheKey = struct {
     // 같은 glyph라도 새 slot이어야 하므로 cache identity의 일부다.
     cell_width_px: u16 = 0,
     cell_height_px: u16 = 0,
+    // 셀 span(EAW 폭: wide=2, 그 외 1). atlas slot 폭 = cell_width_px × cell_width(estimateGlyphBitmapSize)라 **slot
+    // 크기에 영향**을 주므로 cache identity의 일부다. 빠지면 같은 glyph를 span=1로 먼저 캐시한 1칸 slot을 span=2 요청이
+    // 재사용해 wide 글리프 오른쪽이 잘린다(공유 atlas에서 한 경로가 wide 폭을 안 줬을 때 — 한글 ㄱ 잘림 회귀).
+    cell_width: u2 = 1,
     style: RasterStyleFlags = .{},
     color_glyph_kind: ColorGlyphKind = .monochrome,
 };
@@ -160,6 +164,7 @@ pub fn buildGlyphRunList(
                 .device_scale = config.device_scale,
                 .cell_width_px = config.cell_width_px,
                 .cell_height_px = config.cell_height_px,
+                .cell_width = cell.width, // span — slot 폭 = cell_width_px × span이라 키에 포함(span 충돌 방지)
                 .style = flags,
                 .color_glyph_kind = shaped.color_glyph_kind,
             },

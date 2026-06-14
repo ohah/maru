@@ -215,8 +215,9 @@ pub fn view(
         try out.append(arena, .{ .text = .{ .origin = .{ .x = cx, .y = y }, .runs = counter_runs, .role = .surface_fg } });
     }
 
-    // 입력 커서: 검색어+조합 끝(다음 입력 위치)에 cursor 색 블록 1칸(caretRect 단일 출처). 별도 caret op 없이
-    // fill로 표현한다(블록 커서 = 터미널 관용, rasterizer가 fill을 painter-order로 칠함 — 마지막 append라 항상 보임).
+    // 입력 커서: 검색어+조합 끝(다음 입력 위치)에 cursor role fill 1칸(caretRect 단일 출처). platform rasterizer가
+    // 이 cursor-role fill을 PaneFrame.cursor(반전 블록)로 lower해 — 터미널 커서와 **같은 렌더·suffix-trim 깜빡임**을
+    // 재활용한다(컴포넌트는 깜빡임 위상을 모른다 — 늘 caret을 내고, 깜빡임은 platform이 suffix-trim으로 처리).
     if (caretRect(state, p)) |cr| {
         try out.append(arena, .{ .fill = .{ .rect = cr, .role = .cursor } });
     }

@@ -239,8 +239,8 @@ pub fn view(
         }
     }
 
-    // 입력 커서: 검색어+조합 끝(다음 입력 위치)에 cursor 색 블록 1칸(caretRect 단일 출처). fill로 표현(블록 커서 관용,
-    // rasterizer가 painter-order로 칠함 — 마지막 append라 항상 보임). find.view와 동일.
+    // 입력 커서: 검색어+조합 끝(다음 입력 위치)에 cursor role fill 1칸(caretRect 단일 출처). platform rasterizer가
+    // PaneFrame.cursor(반전 블록)로 lower해 터미널 커서와 같은 렌더·suffix-trim 깜빡임을 재활용한다. find.view와 동일.
     if (caretRect(state, p)) |cr| {
         try out.append(arena, .{ .fill = .{ .rect = cr, .role = .cursor } });
     }

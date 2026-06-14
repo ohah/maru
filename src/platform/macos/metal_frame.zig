@@ -704,12 +704,16 @@ pub const MetalFrameBuffer = struct {
             try cells_list.insertSlice(allocator, cells_list.items.len - cursor_cells, pane_overlay_cells);
         }
         // 오버레이 frame은 커서 suffix '뒤'(맨 뒤)에 append → 터미널·chrome·커서 위 최상위. 불투명 bg 셀이라
-        // 아래(커서 포함)를 덮는다. cursor_cells(suffix 길이)는 안 바꾼다 — blink는 그 아래에서 그대로 동작.
+        // 아래(커서 포함)를 덮는다. 오버레이가 자기 caret(PaneFrame.cursor — find·palette 입력 커서)을 내면 그
+        // caret이 **버퍼 맨 끝**(overlay suffix)에 와, 아래 cursor_cells를 그 길이로 잡아 setCursorVisible(suffix-trim)이
+        // 재빌드 없이 caret을 깜빡인다 — 터미널 커서와 같은 메커니즘 재활용. caret이 없으면(notice 등) 0.
+        var overlay_cursor_cells: usize = 0;
         if (overlay_frame) |pf| {
             const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
             defer allocator.free(built.cells);
             setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
             try cells_list.appendSlice(allocator, built.cells);
+            overlay_cursor_cells = built.cursor_cells; // 오버레이 caret이 버퍼 맨 끝 — blink suffix
         }
         const new_cells = try cells_list.toOwnedSlice(allocator);
         errdefer allocator.free(new_cells);
@@ -729,10 +733,10 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.pixels);
         self.cells = new_cells;
         self.sidebar_cells = new_sidebar_cells;
-        // 오버레이(overlay_frame)가 있으면 그 셀이 커서 suffix '뒤'(맨 뒤)에 오므로, blink-off의 꼬리 chop
-        // (view: cells.len - cursor_cells)이 커서가 아니라 오버레이 꼬리를 잘라낸다. 오버레이가 열린 프레임에선
-        // cursor_cells=0으로 둬 chop을 끈다 — 모달 중엔 터미널 커서를 정적(깜빡임 없이)으로 두고 오버레이가 위를 덮는다.
-        self.cursor_cells = if (overlay_frame != null) 0 else cursor_cells;
+        // 커서 suffix(blink chop 길이): 오버레이가 열렸으면 오버레이 자신의 caret(맨 끝 — overlay_cursor_cells)을 쓴다.
+        // 그러면 setCursorVisible chop이 오버레이 caret을 깜빡인다(터미널 커서 메커니즘 재활용). 오버레이가 caret을
+        // 안 내면(notice 등) overlay_cursor_cells=0이라 chop 없음(정적). 오버레이가 없으면 활성 panel의 터미널 커서.
+        self.cursor_cells = if (overlay_frame != null) overlay_cursor_cells else cursor_cells;
         self.uploads = merged.uploads;
         self.pixels = merged.pixels;
         // cols/rows는 렌더러의 cols==0/rows==0 가드용 — 활성(마지막) panel의 grid를 쓴다(셀은 자기 row/col+

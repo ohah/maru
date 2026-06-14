@@ -26,7 +26,8 @@ const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
 const command_catalog = @import("command_catalog.zig");
 const command_palette = @import("command_palette.zig");
-const find_overlay = @import("find_overlay.zig");
+// find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). UI 상태(query/current/count)는
+// chrome_host.find가, 매치 리스트(terminal.Match)는 session(find_matches)이 소유한다 — chrome은 terminal 무참조.
 
 // SplitTree를 leaf = `*Pane`으로 인스턴스화한다(트리는 panel 단위). app 레이어는 generic만 노출하고 Pane은
 // 이 platform 모듈이 정의하므로, 트리가 panel을 leaf로 들면서도 app→platform 의존이 생기지 않는다. cmux식
@@ -726,9 +727,10 @@ pub const DevSession = struct {
     // 커맨드 팝업(Cmd+Shift+P) 상태(열림/필터/선택). 열려 있으면 handleKeyEvent가 키를 팝업으로 라우팅하고,
     // tick이 최상위 오버레이 frame으로 그린다. 상태머신은 command_palette.zig(순수 로직, 카탈로그를 필터).
     palette: command_palette.PaletteState = .{},
-    // 스크롤백 Find(⌘F) 상태(열림/검색어/매치/현재). 열려 있으면 handleKeyEvent가 키를 검색 입력으로 라우팅하고,
-    // tick이 매치를 하이라이트하며 입력창을 최상위 오버레이로 그린다. 검색 자체는 코어(findMatches)가 한다.
-    find: find_overlay.FindState = .{},
+    // 스크롤백 Find(⌘F)의 매치 리스트(절대 좌표). UI 상태(검색어/현재/카운트)는 chrome_host.find가 들고, 매치
+    // 리스트만 session이 소유한다 — terminal.Match라 chrome으로 못 옮긴다(중립 경계). 검색은 코어(findMatches)가
+    // 채우고(recomputeFind), tick이 뷰포트로 클립해 하이라이트한다. 현재 매치 인덱스는 chrome_host.find.current.
+    find_matches: std.ArrayList(terminal.Match) = .empty,
     // tick마다 활성 surface의 매치를 뷰포트 span으로 클립해 담는 재사용 버퍼(cell_colors.search_matches로 넘긴다).
     // 매 frame 새로 채우되 capacity는 재사용한다 — 스크롤·출력에 따라 뷰 안 매치가 바뀌므로 캐시하지 않는다.
     find_view_spans: std.ArrayList(terminal.SelectionSpan) = .empty,
@@ -2162,8 +2164,8 @@ pub const DevSession = struct {
     }
 
     /// terminal.KeyEvent → chrome.input.InputEvent. chrome은 terminal 타입을 모르므로(L1/L3 경계) 이 변환을
-    /// 플랫폼 어댑터가 소유한다. Notice 모달은 Enter/Esc만 의미가 있고 나머지는 소비-only지만, 어휘를 온전히
-    /// 매핑해 후속 chrome 컴포넌트(C2/C3)에도 재사용한다. char가 아닌 키의 codepoint는 0.
+    /// 플랫폼 어댑터가 소유한다. 모디파이어(shift/ctrl/opt/cmd)도 매핑한다 — find의 Shift+Enter(이전 매치)·
+    /// ⌘/⌃/⌥+글자(닫기) 판정에 쓴다. char가 아닌 키의 codepoint는 0.
     fn chromeInputFromKeyEvent(event: terminal.KeyEvent) chrome.input.InputEvent {
         const key: chrome.input.Key = switch (event.key) {
             .enter => .enter,
@@ -2178,7 +2180,16 @@ pub const DevSession = struct {
             .char => |c| c,
             else => 0,
         };
-        return .{ .key = .{ .key = key, .codepoint = cp } };
+        return .{ .key = .{
+            .key = key,
+            .codepoint = cp,
+            .mods = .{
+                .shift = event.modifiers.shift,
+                .control = event.modifiers.control,
+                .option = event.modifiers.option,
+                .command = event.modifiers.command,
+            },
+        } };
     }
 
     /// 팝업이 열려 있을 때 키를 팝업으로 라우팅한다(handleKeyEvent가 resolver 앞에서 호출). Esc/모디파이어 조합=닫기,
@@ -2207,69 +2218,49 @@ pub const DevSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 스크롤백 Find를 토글한다 — 열려 있으면 닫고, 아니면 연다(빈 검색어). 두 모달(팝업·Find)은 배타적이라
-    /// 팝업이 떠 있으면 닫고 Find를 연다. 코어 검색은 검색어가 생길 때 recomputeFind가 한다.
+    /// 스크롤백 Find를 토글한다 — 열려 있으면 닫고(매치 하이라이트 정리), 아니면 연다(빈 검색어). 팝업과 배타적
+    /// 이라 팝업을 닫고 연다. UI 상태는 chrome_host.find, 검색은 검색어가 생길 때 recomputeFind가 한다.
     fn toggleFind(self: *DevSession) void {
-        if (self.find.open) {
-            self.find.hide();
+        if (self.chrome_host.find.open) {
+            self.chrome_host.find.hide();
+            self.find_matches.clearRetainingCapacity(); // 닫힘 — 하이라이트 중단
         } else {
             self.palette.hide();
-            self.find.show();
+            self.chrome_host.find.show();
         }
     }
 
-    /// Find가 열려 있을 때 키를 검색 입력으로 라우팅한다(handleKeyEvent가 resolver 앞에서 호출). Esc/모디파이어
-    /// 조합=닫기, Enter=다음 매치(Shift+Enter=이전), ↑↓=이전/다음, Backspace=삭제+재검색, 평문 글자=검색어+재검색.
-    fn handleFindKey(self: *DevSession, event: terminal.KeyEvent) void {
-        switch (event.key) {
-            .escape => self.find.hide(),
-            .enter => {
-                if (event.modifiers.shift) self.find.prev() else self.find.next();
-                self.scrollToCurrentMatch();
-            },
-            .arrow_up => {
-                self.find.prev();
-                self.scrollToCurrentMatch();
-            },
-            .arrow_down => {
-                self.find.next();
-                self.scrollToCurrentMatch();
-            },
-            .backspace => {
-                self.find.backspace();
-                self.recomputeFind();
-            },
-            .char => |c| {
-                // 모디파이어 조합(⌘F 등)은 Find를 닫는다(토글-닫기 포함). 평문 글자만 검색어에 쌓고 재검색한다.
-                if (event.modifiers.command or event.modifiers.control or event.modifiers.option) {
-                    self.find.hide();
-                } else {
-                    self.find.appendChar(self.allocator, c) catch {};
-                    self.recomputeFind();
-                }
-            },
-            else => self.find.hide(),
+    /// chrome 컴포넌트가 낸 의도(HostAction)를 session 부수효과로 디스패치한다 — chrome은 session을 모르므로(경계)
+    /// 재검색·스크롤·닫기를 여기서 실행한다. handleKeyEvent의 chrome 라우팅이 부른다.
+    fn dispatchChromeAction(self: *DevSession, action: chrome.host.HostAction) void {
+        switch (action) {
+            .none => {}, // notice dismiss 등 — session 부수효과 없음(컴포넌트가 닫음)
+            .find_close => self.find_matches.clearRetainingCapacity(), // find.hide는 컴포넌트가 이미 — 하이라이트만 정리
+            .find_navigated => self.scrollToCurrentMatch(),
+            .find_query_changed => self.recomputeFind(),
         }
-        self.metal_dirty = true;
     }
 
-    /// 현재 검색어로 활성 surface를 다시 검색해 find.matches를 채우고, 현재 인덱스를 첫 매치로 리셋한 뒤 뷰로
+    /// 현재 검색어로 활성 surface를 다시 검색해 find_matches를 채우고, 현재 인덱스를 첫 매치로 리셋한 뒤 뷰로
     /// 스크롤한다(증분 검색 — 타이핑·Backspace마다). 검색어가 비면 매치 0. OOM이면 매치를 비워 안전하게 둔다.
+    /// chrome_host.find.match_count를 동기화해(setMatchCount) 컴포넌트의 카운터·next/prev wrap이 맞게 한다.
     fn recomputeFind(self: *DevSession) void {
         if (!self.surface_initialized) return;
-        self.activeSurface().core.findMatches(self.allocator, self.find.query.items, &self.find.matches) catch {
-            self.find.matches.clearRetainingCapacity();
+        self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.query.items, &self.find_matches) catch {
+            self.find_matches.clearRetainingCapacity();
         };
-        self.find.current = 0;
+        self.chrome_host.find.setMatchCount(self.find_matches.items.len);
+        self.chrome_host.find.current = 0; // 재검색은 첫 매치로 리셋(증분)
         self.scrollToCurrentMatch();
     }
 
-    /// 현재(네비게이션) 매치를 뷰포트로 스크롤한다 — 없으면 무동작. 검색·네비게이션 후 호출(coreScrollToAbs가
-    /// 매치를 세로 중앙쯤에 둬 상단 Find 오버레이에 안 가린다).
+    /// 현재(네비게이션) 매치를 뷰포트로 스크롤한다 — 없으면 무동작. 검색·네비게이션 후 호출(scrollToAbs가
+    /// 매치를 세로 중앙쯤에 둬 상단 Find 오버레이에 안 가린다). 현재 인덱스는 chrome_host.find.current.
     fn scrollToCurrentMatch(self: *DevSession) void {
         if (!self.surface_initialized) return;
-        const m = self.find.currentMatch() orelse return;
-        self.activeSurface().core.scrollToAbs(m.start.row);
+        const cur = self.chrome_host.find.current;
+        if (cur >= self.find_matches.items.len) return;
+        self.activeSurface().core.scrollToAbs(self.find_matches.items[cur].start.row);
     }
 
     /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거친다 —
@@ -2366,30 +2357,24 @@ pub const DevSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
-        // chrome Notice(손상 알림)가 열려 있으면 모든 키를 chrome으로 라우팅한다 — 최상위 모달이라 팝업/Find보다
-        // 먼저. handleInput이 Enter/Esc면 닫고, 그 외 키도 소비한다(모달이라 터미널엔 안 내려간다 — host가 소비 처리).
-        if (self.chrome_host.notice.open) {
-            _ = self.chrome_host.handleInput(chromeInputFromKeyEvent(event));
+        // chrome 모달(Notice·Find)이 열려 있으면 키를 chrome으로 라우팅한다 — 최상위(팝업보다 먼저, 셋은 배타적).
+        // handleInput이 컴포넌트 handle로 보내 의도(HostAction)를 내고, dispatchChromeAction이 session 부수효과
+        // (재검색·스크롤·닫기)를 실행한다. 모든 키를 소비한다(모달이라 터미널엔 안 내려간다).
+        if (self.chrome_host.notice.open or self.chrome_host.find.open) {
+            if (self.chrome_host.handleInput(self.allocator, chromeInputFromKeyEvent(event))) |action| {
+                self.dispatchChromeAction(action);
+            }
             self.metal_dirty = true;
-            self.total_app_key_events += 1; // Notice(앱)가 소비
+            self.total_app_key_events += 1; // chrome(앱)이 소비
             self.writeSummaryFromState();
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
         // 커맨드 팝업이 열려 있으면 모든 키를 팝업으로 라우팅한다(모달) — resolver/PTY/스크롤 경로보다 먼저.
-        // 팝업이 키를 소비하므로 터미널엔 안 내려간다(Enter가 액션을 디스패치할 수는 있음).
+        // 팝업이 키를 소비하므로 터미널엔 안 내려간다(Enter가 액션을 디스패치할 수는 있음). (palette는 C1b에서 chrome 이주.)
         if (self.palette.open) {
             self.handlePaletteKey(event);
             self.total_app_key_events += 1; // 팝업(앱)이 소비
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
-        }
-        // 스크롤백 Find가 열려 있으면 키를 검색 입력으로 라우팅한다(모달, 팝업과 같은 규율) — resolver/PTY/스크롤
-        // 보다 먼저. Enter=다음 매치 등 네비게이션은 소비하고 터미널엔 안 내려간다.
-        if (self.find.open) {
-            self.handleFindKey(event);
-            self.total_app_key_events += 1; // Find(앱)가 소비
             self.writeSummaryFromState();
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
@@ -3158,7 +3143,7 @@ pub const DevSession = struct {
         // 모달(chrome Notice·커맨드 팝업·스크롤백 Find)이 열린 동안엔 메뉴바 keyEquivalent(Swift가 OS에서 잡아 이
         // 경로로 보낸다)를 무시한다 — 모달 중 단축키가 뒤의 터미널을 조작하면 안 된다. 모달 자신의 키(팝업 Enter,
         // Find 네비게이션)는 handlePaletteKey/handleFindKey가 dispatchAppAction을 직접 부르므로 이 경로를 안 거친다.
-        if (self.chrome_host.notice.open or self.palette.open or self.find.open) return false;
+        if (self.chrome_host.notice.open or self.palette.open or self.chrome_host.find.open) return false;
         const action = config_mod.parseAction(action_key) orelse return false;
         self.dispatchAppAction(action);
         return true;
@@ -3642,19 +3627,19 @@ pub const DevSession = struct {
 
             // Find 열린 채 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백 eviction). 재검색해
             // 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다(사용자가 보던 위치 유지).
-            if (self.find.open and drain_summary.output_events > 0) {
-                self.activeSurface().core.findMatches(self.allocator, self.find.query.items, &self.find.matches) catch self.find.matches.clearRetainingCapacity();
-                if (self.find.current >= self.find.matches.items.len) self.find.current = self.find.matches.items.len -| 1;
+            if (self.chrome_host.find.open and drain_summary.output_events > 0) {
+                self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
+                self.chrome_host.find.setMatchCount(self.find_matches.items.len); // 매치 수 동기화 + current clamp(스크롤은 안 함)
             }
             // 스크롤백 Find: 활성 surface의 매치를 뷰포트 span으로 클립해 하이라이트로 넘긴다(Find 열림일 때만).
             // 현재 매치는 search_matches에서 빼 별도 강조색(current_match)으로만 칠한다. 매 frame 다시 클립한다 —
             // 스크롤/출력으로 뷰 안에 보이는 매치가 바뀐다. find_view_spans는 capacity만 재사용(매 frame 새로 채움).
             self.find_view_spans.clearRetainingCapacity();
             var find_current_span: ?terminal.SelectionSpan = null;
-            if (self.find.open) {
-                for (self.find.matches.items, 0..) |m, mi| {
+            if (self.chrome_host.find.open) {
+                for (self.find_matches.items, 0..) |m, mi| {
                     const span = self.activeSurface().core.matchViewportSpan(m) orelse continue;
-                    if (mi == self.find.current) {
+                    if (mi == self.chrome_host.find.current) {
                         find_current_span = span;
                     } else {
                         self.find_view_spans.append(self.allocator, span) catch {};
@@ -3692,17 +3677,16 @@ pub const DevSession = struct {
                 sidebar_frame = self.buildSidebarTitleFrame() catch null;
             }
             defer if (sidebar_frame) |*sf| sf.deinit(self.allocator);
-            // 최상위 모달 오버레이 frame(열렸을 때만, macOS). chrome Notice(손상 알림) > 커맨드 팝업 > 스크롤백
-            // Find — 셋은 배타적이라 하나만 그린다(replace의 overlay_frame). Notice가 최우선(가장 위). 실패는 무시
-            // (오버레이 없이 정상). PaneFrame.frame을 deinit해야 하므로 defer로 정리한다.
+            // 최상위 모달 오버레이 frame(열렸을 때만, macOS). chrome 모달(Notice·Find) > 커맨드 팝업 — 배타적이라
+            // 하나만 그린다(replace의 overlay_frame). chrome 컴포넌트는 buildChromeOverlayFrame(collectDraws→일반
+            // rasterizer)로 한 경로, palette는 아직 legacy(C1b서 이주). 실패는 무시(오버레이 없이 정상). PaneFrame.
+            // frame을 deinit해야 하므로 defer로 정리한다.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             if (builtin.os.tag == .macos) {
-                if (self.chrome_host.notice.open) {
-                    overlay_frame = self.buildNoticeFrame() catch null;
+                if (self.chrome_host.notice.open or self.chrome_host.find.open) {
+                    overlay_frame = self.buildChromeOverlayFrame() catch null;
                 } else if (self.palette.open) {
                     overlay_frame = self.buildPaletteFrame() catch null;
-                } else if (self.find.open) {
-                    overlay_frame = self.buildFindFrame() catch null;
                 }
             }
             defer if (overlay_frame) |*pf| pf.frame.deinit(self.allocator);
@@ -4172,48 +4156,8 @@ pub const DevSession = struct {
         return self.finishOverlayFrame(&cells, panel_cols, panel_rows, origin_x, origin_y);
     }
 
-    /// 스크롤백 Find 오버레이 frame(최상위). 상단-중앙에 한 줄 패널: "Find: <query>" + 우측 정렬 매치 카운터
-    /// ("3/17" = 현재/전체, 매치 없으면 "0/0"). 모든 셀이 불투명 bg(buildPaletteFrame과 같은 규칙)라 아래
-    /// (터미널·커서)를 덮는다. 닫혀 있거나 메트릭 미상이면 에러(호출자가 무시). macOS 전용(buildFromDrawList=CoreText).
-    fn buildFindFrame(self: *DevSession) !metal_frame.PaneFrame {
-        const cw = self.cell_width_px;
-        const ch = self.cell_height_px;
-        if (cw == 0 or ch == 0) return error.NoMetrics;
-        const term_rect = self.termRect();
-        const term_cols = term_rect.w / cw;
-        if (term_cols < 8) return error.TooNarrow;
-
-        const max_cols: u16 = 60;
-        const panel_cols: u16 = @intCast(@min(@as(u32, max_cols), term_cols -| 4));
-
-        const panel_bg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_background };
-        const text_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
-
-        var line: [max_cols]u21 = undefined;
-        @memset(line[0..panel_cols], ' ');
-        const prefix = "Find: ";
-        putUtf8(line[0..panel_cols], 0, prefix);
-        putUtf8(line[0..panel_cols], prefix.len, self.find.query.items); // prefix는 ASCII라 칸 수=바이트 수
-
-        // 우측 정렬 매치 카운터 "cur/total"(매치 없으면 "0/0", 1-based 현재). 검색어 꼬리와 겹치면 카운터가
-        // 나중에 쓰여 이긴다(항상 보임 — 팝업의 바인딩 표시와 같은 규칙). ASCII 숫자/슬래시라 칸 수=바이트 수.
-        var counter_buf: [24]u8 = undefined;
-        const total = self.find.matches.items.len;
-        const cur: usize = if (total == 0) 0 else self.find.current + 1;
-        const counter = std.fmt.bufPrint(&counter_buf, "{d}/{d}", .{ cur, total }) catch counter_buf[0..0];
-        if (counter.len > 0 and counter.len + 2 < panel_cols) {
-            putUtf8(line[0..panel_cols], panel_cols - @as(u16, @intCast(counter.len)) - 1, counter);
-        }
-
-        var cells: std.ArrayList(renderer.DrawCell) = .empty;
-        errdefer cells.deinit(self.allocator);
-        try appendPaletteRow(self.allocator, &cells, 0, line[0..panel_cols], panel_bg, text_fg);
-
-        const panel_w = @as(u32, panel_cols) * cw;
-        const origin_x = term_rect.x + (term_rect.w -| panel_w) / 2;
-        const origin_y = term_rect.y + 2 * ch; // 위에서 두 줄 내려(팝업과 같은 위치).
-        return self.finishOverlayFrame(&cells, panel_cols, 1, origin_x, origin_y);
-    }
+    // 스크롤백 Find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). find.view가 ChromeDraw를
+    // 내고 buildChromeOverlayFrame이 일반 rasterizer로 lower한다 — buildFindFrame은 제거.
 
     /// chrome 컴포넌트가 읽는 불변 메트릭(props seam). 매 frame 세션 실측값에서 빌드한다 — chrome은 terminal/
     /// config 타입을 모르므로 plain u32만 넘긴다. sidebar_width_px는 런타임 가변(드래그)이라 토큰이 아닌 여기로.
@@ -4375,15 +4319,16 @@ pub const DevSession = struct {
         }
     }
 
-    /// Notice 모달 frame(최상위 오버레이). chrome_host에서 modal ChromeDraw를 수집해(실제 컴포넌트 view 계약을
-    /// 탄다) 일반 rasterizer로 lower한다(fill 박스 + border 가장자리 + text 메시지). 닫혀 있거나 메트릭/박스 미상
-    /// 이면 에러(호출자가 무시). macOS 전용(finishOverlayFrame=CoreText).
-    fn buildNoticeFrame(self: *DevSession) !metal_frame.PaneFrame {
+    /// chrome 오버레이 frame(최상위). chrome_host에서 열린 컴포넌트(Notice·Find)의 ChromeDraw를 수집해(실제 view
+    /// 계약을 탄다) 일반 rasterizer로 lower한다(fill·border·text). 오버레이는 라우팅상 배타적이라 collectDraws가
+    /// 최대 1개를 낸다(rasterizer가 단일 오버레이 가정 — bounding box 합집합). 닫혀 있거나 메트릭/박스 미상이면
+    /// 에러(호출자가 무시). macOS 전용(finishOverlayFrame=CoreText).
+    fn buildChromeOverlayFrame(self: *DevSession) !metal_frame.PaneFrame {
         const cw = self.cell_width_px;
         const ch = self.cell_height_px;
         if (cw == 0 or ch == 0) return error.NoMetrics;
 
-        // 컴포넌트 view 경로를 실제로 타서 modal ChromeDraw를 모은다(arena가 ops·runs 소유, lower까지 유효).
+        // 컴포넌트 view 경로를 실제로 타서 열린 오버레이의 ChromeDraw를 모은다(arena가 ops·runs 소유, lower까지 유효).
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -4439,7 +4384,8 @@ pub const DevSession = struct {
         self.command_key_equivalents.deinit(self.allocator);
         self.command_entries.deinit(self.allocator);
         self.palette.deinit(self.allocator);
-        self.find.deinit(self.allocator);
+        self.chrome_host.deinit(self.allocator); // chrome 컴포넌트 heap(find.query) 해제
+        self.find_matches.deinit(self.allocator);
         self.find_view_spans.deinit(self.allocator);
         if (self.workspace_buffer) |b| self.allocator.free(b);
         self.hover_leaf_scratch.deinit(self.allocator);
@@ -5161,8 +5107,8 @@ test "command palette: 토글 열림 → 타이핑 필터 → Enter 디스패치
     try std.testing.expectEqual(@as(usize, 0), session.metal_buffer.cursor_cells);
 }
 
-test "scrollback find: 토글 열림 → 증분 검색 → 매치 네비게이션 → 하이라이트·오버레이 프레임" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildFindFrame=CoreText, 실 PTY
+test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비게이션 → 하이라이트·오버레이 프레임" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayFrame=CoreText, 실 PTY
     const allocator = std.testing.allocator;
     const session = try allocator.create(DevSession);
     defer allocator.destroy(session);
@@ -5174,34 +5120,35 @@ test "scrollback find: 토글 열림 → 증분 검색 → 매치 네비게이�
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    _ = try session.resize(800, 600, 1000); // 메트릭·backing(buildFindFrame이 termRect 폭을 씀)
+    _ = try session.resize(800, 600, 1000); // 메트릭·backing(find.view가 chrome props로 씀)
 
     // 검색 대상 텍스트를 코어에 직접 쓴다(유니크 토큰 2곳 — 셸 출력과 충돌 없게).
     try session.activeSurface().core.write("MARUFIND one\r\ntwo MARUFIND three");
 
-    // 토글로 열린다 — 빈 검색어라 매치 0.
-    try std.testing.expect(!session.find.open);
+    // 토글로 열린다(chrome find 컴포넌트) — 빈 검색어라 매치 0. 매치 리스트는 session(find_matches) 소유.
+    try std.testing.expect(!session.chrome_host.find.open);
     session.dispatchAppAction(.toggle_find);
-    try std.testing.expect(session.find.open);
-    try std.testing.expectEqual(@as(usize, 0), session.find.matches.items.len);
+    try std.testing.expect(session.chrome_host.find.open);
+    try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len);
 
-    // "MARUFIND" 타이핑(모달 라우팅) → 증분 검색으로 2곳 매치, 현재는 첫 매치.
+    // "MARUFIND" 타이핑(chrome 라우팅 → find.handle → query_changed → recomputeFind) → 2곳 매치, 현재는 첫 매치.
     for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
-    try std.testing.expectEqual(@as(usize, 2), session.find.matches.items.len);
-    try std.testing.expectEqual(@as(usize, 0), session.find.current);
+    try std.testing.expectEqual(@as(usize, 2), session.find_matches.items.len);
+    try std.testing.expectEqual(@as(usize, 2), session.chrome_host.find.match_count); // 컴포넌트 카운트 동기화
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.current);
 
-    // Enter=다음 매치, Shift+Enter=이전(wrap).
+    // Enter=다음 매치, Shift+Enter=이전(wrap). 모디파이어가 chrome.input으로 매핑돼 Shift가 prev로 간다.
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
-    try std.testing.expectEqual(@as(usize, 1), session.find.current);
+    try std.testing.expectEqual(@as(usize, 1), session.chrome_host.find.current);
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .shift = true } });
-    try std.testing.expectEqual(@as(usize, 0), session.find.current);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.current);
 
     // Backspace로 한 글자 지워도("MARUFIN") 부분일치라 두 곳 다 매치 유지.
     _ = try session.handleKeyEvent(.{ .key = .backspace, .modifiers = .{} });
-    try std.testing.expectEqual(@as(usize, 2), session.find.matches.items.len);
+    try std.testing.expectEqual(@as(usize, 2), session.find_matches.items.len);
 
-    // 오버레이 프레임 빌드가 크래시 없이 셀을 낸다(상단-중앙 "Find: …" + 카운터).
-    var ff = try session.buildFindFrame();
+    // chrome 오버레이 프레임 빌드가 크래시 없이 셀을 낸다(find.view → 일반 rasterizer: "Find: …" + 카운터).
+    var ff = try session.buildChromeOverlayFrame();
     defer ff.frame.deinit(allocator);
     try std.testing.expect(ff.frame.draw_list.cells.len > 0);
 
@@ -5212,9 +5159,16 @@ test "scrollback find: 토글 열림 → 증분 검색 → 매치 네비게이�
     _ = try session.tick();
     try std.testing.expectEqual(@as(usize, 0), session.metal_buffer.cursor_cells);
 
-    // Esc로 닫힌다.
+    // ⌘+글자는 검색어에 안 쌓고 닫는다(평문만 입력) — 위 흐름에서 find가 아직 열려 있다.
+    try std.testing.expect(session.chrome_host.find.open);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'c' }, .modifiers = .{ .command = true } });
+    try std.testing.expect(!session.chrome_host.find.open);
+
+    // 다시 열고 Esc로 닫힌다.
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open);
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
-    try std.testing.expect(!session.find.open);
+    try std.testing.expect(!session.chrome_host.find.open);
 }
 
 test "rasterizeOverlayCells: 다중 fill(painter order) + 다중 행 text → 셀 그리드(헤드리스)" {
@@ -5280,7 +5234,7 @@ test "chrome Notice 모달: showNotice → 메시지 소유 복사·오버레이
 
     // 닫힘이면 buildNoticeFrame은 NotOpen(오버레이 없음 — 호출자가 무시).
     try std.testing.expect(!session.chrome_host.notice.open);
-    try std.testing.expectError(error.NotOpen, session.buildNoticeFrame());
+    try std.testing.expectError(error.NotOpen, session.buildChromeOverlayFrame());
 
     // showNotice는 메시지를 세션 소유 버퍼로 복사하고 연다 — 호출자의 transient 버퍼를 지워도 모달 메시지는 산다.
     {
@@ -5292,7 +5246,7 @@ test "chrome Notice 모달: showNotice → 메시지 소유 복사·오버레이
     try std.testing.expectEqualStrings("corrupt", session.chrome_host.notice.message);
 
     // 오버레이 프레임이 크래시 없이 셀을 낸다(박스 bg + 메시지 glyph — 컴포넌트 view→ChromeDraw→lower 경로).
-    var nf = try session.buildNoticeFrame();
+    var nf = try session.buildChromeOverlayFrame();
     defer nf.frame.deinit(allocator);
     try std.testing.expect(nf.frame.draw_list.cells.len > 0);
 

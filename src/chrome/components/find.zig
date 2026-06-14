@@ -1,0 +1,290 @@
+//! Find — 스크롤백 검색 오버레이(⌘F). chrome 컴포넌트 계약(State + view + handle). **세션 모델 무결합**:
+//! 검색 자체(매치 리스트)는 session(core.findMatches)이 소유하고, 이 컴포넌트는 UI 상태(검색어 query·네비게이션
+//! 인덱스 current·전체 매치 수 match_count 미러)만 든다 — terminal.Match를 import하지 않는다(chrome 중립).
+//! handle은 의도(Action)를 내고 host가 부수효과(재검색·스크롤·닫기)를 session에 디스패치한다. match_count는
+//! session이 재검색 후 setMatchCount로 동기화한다(next/prev wrap·카운터 표시에 필요). 단일 출처: docs/chrome-strategy.md §5.4.
+
+const std = @import("std");
+const draw = @import("../draw.zig");
+const tokens = @import("../tokens.zig");
+const props = @import("../props.zig");
+const input = @import("../input.zig");
+
+/// 이 컴포넌트가 그리는 레이어(최상위 오버레이 — 열려 있으면 키를 잡는다). host가 ops와 짝지어 백엔드에 넘긴다.
+pub const layer = draw.Layer.modal;
+
+/// 순수 UI 상태. query=검색어(UTF-8), current=네비게이션 인덱스, match_count=session이 동기화하는 전체 매치 수
+/// (next/prev wrap·카운터에 필요 — 매치 리스트 자체는 session 소유). query는 ArrayList라 host가 deinit한다.
+pub const State = struct {
+    open: bool = false,
+    query: std.ArrayList(u8) = .empty,
+    current: usize = 0,
+    match_count: usize = 0,
+
+    pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        self.query.deinit(allocator);
+    }
+
+    /// 오버레이를 연다 — 검색어·네비·카운트를 비운다(host가 곧 recompute, 빈 쿼리면 매치 0이라 안전).
+    pub fn show(self: *State) void {
+        self.query.clearRetainingCapacity();
+        self.current = 0;
+        self.match_count = 0;
+        self.open = true;
+    }
+
+    pub fn hide(self: *State) void {
+        self.open = false;
+    }
+
+    /// 검색어에 글자 추가(UTF-8 인코딩). 재검색은 host가 query_changed Action을 받아 한다. 인코딩 불가/OOM은 무시.
+    pub fn appendChar(self: *State, allocator: std.mem.Allocator, cp: u21) !void {
+        var utf8: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(cp, &utf8) catch return;
+        try self.query.appendSlice(allocator, utf8[0..n]);
+    }
+
+    /// 마지막 코드포인트 1개 삭제(UTF-8 경계 존중). 빈 쿼리면 무동작.
+    pub fn backspace(self: *State) void {
+        if (self.query.items.len == 0) return;
+        var cut = self.query.items.len - 1;
+        while (cut > 0 and (self.query.items[cut] & 0xC0) == 0x80) cut -= 1; // continuation 바이트 건너뜀
+        self.query.shrinkRetainingCapacity(cut);
+    }
+
+    /// 다음 매치로(wrap). 매치 없으면 무동작. wrap은 match_count(session이 setMatchCount로 동기화) 기준.
+    pub fn next(self: *State) void {
+        if (self.match_count == 0) return;
+        self.current = (self.current + 1) % self.match_count;
+    }
+
+    /// 이전 매치로(wrap). 매치 없으면 무동작.
+    pub fn prev(self: *State) void {
+        if (self.match_count == 0) return;
+        self.current = (self.current + self.match_count - 1) % self.match_count;
+    }
+
+    /// session이 재검색 후 전체 매치 수를 동기화한다 — match_count를 갱신하고 current를 범위로 clamp한다(매치가
+    /// 줄어 current가 밖이면 마지막으로). current를 첫 매치로 리셋할지(증분 검색)는 호출자가 따로 정한다.
+    pub fn setMatchCount(self: *State, n: usize) void {
+        self.match_count = n;
+        if (self.current >= n) self.current = if (n == 0) 0 else n - 1;
+    }
+};
+
+/// handle이 돌려주는 intent. host가 받아 session에 부수효과를 디스패치한다.
+pub const Action = enum {
+    close, // Esc / ⌘·⌃·⌥+글자 / 알 수 없는 키 — 닫기(host가 매치 정리)
+    navigated, // Enter/Shift+Enter/↑↓ — current 갱신(host가 현재 매치로 스크롤)
+    query_changed, // 글자/Backspace — 검색어 갱신(host가 재검색)
+};
+
+/// 키 처리(열려 있을 때만 호출 — host가 open 확인 후 디스패치). 모든 키를 소비하고 intent를 낸다(모달이라 뒤
+/// 터미널로 안 흘린다). query 변형(appendChar)에 allocator가 필요해 notice.handle과 달리 allocator를 받는다.
+pub fn handle(allocator: std.mem.Allocator, ev: input.InputEvent, state: *State) Action {
+    switch (ev) {
+        .key => |k| switch (k.key) {
+            .escape => {
+                state.hide();
+                return .close;
+            },
+            .enter => {
+                if (k.mods.shift) state.prev() else state.next();
+                return .navigated;
+            },
+            .up => {
+                state.prev();
+                return .navigated;
+            },
+            .down => {
+                state.next();
+                return .navigated;
+            },
+            .backspace => {
+                state.backspace();
+                return .query_changed;
+            },
+            .char => {
+                // 모디파이어 조합(⌘F 토글-닫기·⌘C 등)은 검색어에 안 쌓고 닫는다(평문 글자만 입력).
+                if (k.mods.command or k.mods.control or k.mods.option) {
+                    state.hide();
+                    return .close;
+                }
+                state.appendChar(allocator, k.codepoint) catch {};
+                return .query_changed;
+            },
+            .other => {
+                state.hide();
+                return .close;
+            },
+        },
+    }
+}
+
+/// 상단-중앙 한 줄 패널을 `out`에 append한다(배경 fill + "Find: <query>" + 우측 정렬 "cur/total"). 안 열렸거나
+/// 터미널 영역이 0칸이면 무동작. 순수: state·props·tokens만 읽는다. ops·runs 슬라이스는 호출자 frame arena 소유.
+/// 색은 surface_bg(패널)·surface_fg(글자) role. 표시 폭은 코드포인트 근사(wide=2 미보정 — 후속 host 실측).
+pub fn view(
+    state: *const State,
+    p: props.ChromeProps,
+    tk: *const tokens.Tokens,
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(draw.Op),
+) !void {
+    _ = tk;
+    if (!state.open) return;
+    const m = p.metrics;
+    const cw = @max(m.cell_width_px, 1);
+    const ch = @max(m.cell_height_px, 1);
+    const term_w_px = m.backing_width_px -| m.sidebar_width_px;
+    const term_cols = term_w_px / cw;
+    if (term_cols == 0) return; // 터미널 영역이 한 칸도 안 됨 — 생략(≥1칸이면 작아도 그려 soft-lock 회피)
+
+    // 패널 폭 = min(60, term_cols−4 여백), 최소 1. clamp로 panel_w ≤ term_w_px라 중앙배치 뺄셈이 안전.
+    const panel_cols: u32 = @max(@min(@as(u32, 60), term_cols -| 4), 1);
+    const panel_w = panel_cols * cw;
+    const sidebar = @as(i32, @intCast(m.sidebar_width_px));
+    const x = sidebar + @as(i32, @intCast((term_w_px - panel_w) / 2));
+    const y = 2 * @as(i32, @intCast(ch)); // 상단에서 두 줄 내려(기존 Find 오버레이와 같은 위치)
+    const rect = draw.Rect{ .x = x, .y = y, .w = panel_w, .h = ch };
+
+    try out.append(arena, .{ .fill = .{ .rect = rect, .role = .surface_bg } });
+
+    // "Find: " + query (한 text op, 2 runs). prefix는 ASCII라 칸 수=바이트 수.
+    const prompt_runs = try arena.alloc(draw.Run, 2);
+    prompt_runs[0] = .{ .text = "Find: " };
+    prompt_runs[1] = .{ .text = state.query.items };
+    try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = y }, .runs = prompt_runs, .role = .surface_fg } });
+
+    // 우측 정렬 카운터 "cur/total"(매치 없으면 "0/0", 1-based 현재). 패널에 안 들어가면(좁음) 생략.
+    const total = state.match_count;
+    const cur: usize = if (total == 0) 0 else state.current + 1;
+    const counter = try std.fmt.allocPrint(arena, "{d}/{d}", .{ cur, total });
+    const counter_cols: u32 = @intCast(counter.len); // ASCII 숫자/슬래시
+    if (counter_cols + 2 < panel_cols) {
+        const counter_runs = try arena.alloc(draw.Run, 1);
+        counter_runs[0] = .{ .text = counter };
+        const cx = x + @as(i32, @intCast((panel_cols - counter_cols - 1) * cw));
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = cx, .y = y }, .runs = counter_runs, .role = .surface_fg } });
+    }
+}
+
+// ── 테스트 ──────────────────────────────────────────────────────────────────────
+// 추출 전 find_overlay.zig의 상태머신 단위를 chrome 컴포넌트 계약으로 옮겼다(순수 — OS·PTY·매치 리스트 무관).
+
+test "find state: show/hide·appendChar·backspace(UTF-8 경계)" {
+    const allocator = std.testing.allocator;
+    var s: State = .{};
+    defer s.deinit(allocator);
+
+    s.show();
+    try std.testing.expect(s.open);
+    try std.testing.expectEqual(@as(usize, 0), s.query.items.len);
+
+    try s.appendChar(allocator, 'a');
+    try s.appendChar(allocator, 'b');
+    try s.appendChar(allocator, '한'); // 3바이트
+    try std.testing.expectEqual(@as(usize, 5), s.query.items.len);
+    s.backspace(); // '한' 한 코드포인트(3바이트) 제거
+    try std.testing.expectEqualStrings("ab", s.query.items);
+    s.backspace();
+    s.backspace();
+    s.backspace(); // 빈 쿼리에서 추가 backspace 무동작
+    try std.testing.expectEqual(@as(usize, 0), s.query.items.len);
+
+    s.hide();
+    try std.testing.expect(!s.open);
+}
+
+test "find state: next/prev wrap on match_count·setMatchCount clamp" {
+    var s: State = .{};
+    // 매치 없을 때 네비게이션은 안전(무동작).
+    s.next();
+    s.prev();
+    try std.testing.expectEqual(@as(usize, 0), s.current);
+
+    s.setMatchCount(3);
+    try std.testing.expectEqual(@as(usize, 0), s.current);
+    s.next();
+    try std.testing.expectEqual(@as(usize, 1), s.current);
+    s.next();
+    s.next(); // 2 → wrap → 0
+    try std.testing.expectEqual(@as(usize, 0), s.current);
+    s.prev(); // 0 → wrap → 2
+    try std.testing.expectEqual(@as(usize, 2), s.current);
+
+    // 매치가 1개로 줄면 current를 clamp(2 → 0).
+    s.setMatchCount(1);
+    try std.testing.expectEqual(@as(usize, 0), s.current);
+    // 0개로 줄면 current=0.
+    s.setMatchCount(0);
+    try std.testing.expectEqual(@as(usize, 0), s.current);
+}
+
+test "find handle: Enter/Shift+Enter 네비·글자=query_changed·Esc/⌘조합=close" {
+    const allocator = std.testing.allocator;
+    var s: State = .{};
+    defer s.deinit(allocator);
+    s.show();
+    s.setMatchCount(3);
+
+    // 평문 글자 → query_changed + 검색어에 쌓임.
+    try std.testing.expectEqual(Action.query_changed, handle(allocator, .{ .key = .{ .key = .char, .codepoint = 'x' } }, &s));
+    try std.testing.expectEqualStrings("x", s.query.items);
+    // Enter → next(navigated).
+    try std.testing.expectEqual(Action.navigated, handle(allocator, .{ .key = .{ .key = .enter } }, &s));
+    try std.testing.expectEqual(@as(usize, 1), s.current);
+    // Shift+Enter → prev(navigated).
+    try std.testing.expectEqual(Action.navigated, handle(allocator, .{ .key = .{ .key = .enter, .mods = .{ .shift = true } } }, &s));
+    try std.testing.expectEqual(@as(usize, 0), s.current);
+    // ↓/↑ → next/prev.
+    try std.testing.expectEqual(Action.navigated, handle(allocator, .{ .key = .{ .key = .down } }, &s));
+    try std.testing.expectEqual(@as(usize, 1), s.current);
+    // Backspace → query_changed + 글자 삭제.
+    try std.testing.expectEqual(Action.query_changed, handle(allocator, .{ .key = .{ .key = .backspace } }, &s));
+    try std.testing.expectEqual(@as(usize, 0), s.query.items.len);
+    // ⌘+글자 → close(검색어에 안 쌓임).
+    try std.testing.expectEqual(Action.close, handle(allocator, .{ .key = .{ .key = .char, .codepoint = 'c', .mods = .{ .command = true } } }, &s));
+    try std.testing.expect(!s.open);
+    // Esc → close.
+    s.show();
+    try std.testing.expectEqual(Action.close, handle(allocator, .{ .key = .{ .key = .escape } }, &s));
+    try std.testing.expect(!s.open);
+}
+
+test "find view: 닫힘이면 ops 0, 열림이면 fill+prompt(+counter)" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 40,
+        .backing_width_px = 800,
+        .backing_height_px = 600,
+    } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+
+    var s: State = .{};
+    defer s.deinit(std.testing.allocator);
+    try view(&s, p, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len); // 닫힘
+
+    s.show();
+    s.setMatchCount(17);
+    s.current = 2; // "3/17" 카운터
+    try s.appendChar(std.testing.allocator, 'a');
+    try view(&s, p, &tk, arena, &out);
+    // fill + prompt text + counter text = 3 ops(넓은 패널이라 카운터 들어감).
+    try std.testing.expectEqual(@as(usize, 3), out.items.len);
+    try std.testing.expect(out.items[0] == .fill);
+    try std.testing.expect(out.items[1] == .text);
+    try std.testing.expectEqualStrings("Find: ", out.items[1].text.runs[0].text);
+    try std.testing.expectEqualStrings("a", out.items[1].text.runs[1].text);
+    try std.testing.expect(out.items[2] == .text);
+    try std.testing.expectEqualStrings("3/17", out.items[2].text.runs[0].text);
+    // 패널은 사이드바 오른쪽.
+    try std.testing.expect(out.items[0].fill.rect.x >= 40);
+}

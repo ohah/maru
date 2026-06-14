@@ -21,6 +21,7 @@ pub const Tokens = tokens.Tokens;
 
 pub const components = struct {
     pub const notice = @import("chrome/components/notice.zig");
+    pub const find = @import("chrome/components/find.zig");
 };
 
 test {

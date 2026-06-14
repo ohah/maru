@@ -764,8 +764,7 @@ test {
     std.testing.refAllDecls(@import("command_catalog.zig"));
     // 커맨드 팝업 상태머신(필터·선택·selectedAction) 테스트도 테스트 빌드에 포함한다.
     std.testing.refAllDecls(@import("command_palette.zig"));
-    // 스크롤백 Find 상태머신(검색어·네비게이션·currentMatch) 테스트도 테스트 빌드에 포함한다.
-    std.testing.refAllDecls(@import("find_overlay.zig"));
+    // 스크롤백 Find는 chrome 컴포넌트(maru.chrome.components.find)로 이주 — 그 테스트는 maru.chrome 집계가 포함.
 }
 
 test "layout-independent shortcut: Hangul-mode Ctrl+B normalizes to latin b via the physical keycode" {

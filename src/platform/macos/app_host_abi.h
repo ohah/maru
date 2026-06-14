@@ -9,6 +9,10 @@
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
 #define MARU_MACOS_APP_HOST_ABI_VERSION 38u
 
+/* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
+   하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
+#define MARU_WORKSPACE_HEADER "maru.workspace.v1"
+
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
    fault와 다르게 처리해야 한다. */

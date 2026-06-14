@@ -561,7 +561,7 @@ TDD 방식:
 ### 분해 (R1~R6)
 
 - **R1 직렬화(writer) — 완료**: `src/app/workspace.zig`에 값-타입 모델(Workspace→Window→Tab→{TreeNode preorder + Pane}→Surface)과 `serialize`(`maru.workspace.v1`). snapshot/trace 규칙(첫 줄 bare 토큰·`<kind> <fields>`·`\"`/`\\`/개행 escape) 따름. split 트리는 preorder TreeNode(split는 뒤 두 subtree 소비, full binary tree라 self-delimiting). 모델에 PTY/process 필드 없음(선언적). 검증: 헤드리스 writer 테스트(단일 창/탭/pane/surface·중첩 split·멀티 창·cwd/title escape) + fmt + boundaries + swift-check + 스모크. **순수 Zig, 라이브 DevSession 미접촉**(R3 캡처가 모델을 채운다).
-- **R2 파서(reader)**: 같은 모델로 텍스트 → Workspace(round-trip). preorder 트리 재구성(split→두 subtree 재귀). 알 수 없는 라인/버전 forgiving.
+- **R2 파서(reader) — 완료**: `workspace.zig`에 `parse`(텍스트 → `ParsedWorkspace`, arena가 모든 슬라이스·escape 해제 문자열 소유 → deinit 한 번). 라인 단위 dispatch + 순차 `FieldReader`(word/key/uint/quoted — 따옴표 값이 다른 key를 흉내내도 sequential read라 안전), split 트리는 writer와 같은 preorder를 재귀로 재구성(split→두 subtree 소비, self-delimiting). 알 수 없는 trailing 라인은 forgiving 종료, 잘못된 헤더는 error. 검증: round-trip(중첩 split·멀티 창·escape를 serialize→parse→serialize 고정점) + parse 단위(구조·ratio·escape 해제·forgiving·BadHeader) + 게이트 전부. **writer↔reader 일치 고정.**
 - **R3 캡처**: 라이브 멀티 창(`windows` 컬렉션)·각 DevSession의 탭/pane 트리/Term을 모델로. cwd=`currentCwd()`, command=`Surface.command`, size=core size. ABI로 Swift가 각 세션의 workspace 조각을 모아 전체 모델 구성(또는 Zig가 한 세션을 직렬화하고 Swift가 창 단위로 합침).
 - **R4 복원(apply)**: 모델 → 창 N개 생성(W2 팩토리 재사용) → 각 창에 탭/split/Term 재생성(cwd로 spawn, shell_entry argv) → surface별 실패는 artifact(cwd 없음 등). 나머지는 최대한 복원.
 - **R5 영속화**: 정상 종료(applicationWillTerminate) 시 저장, 시작 시 로드·자동 복원(토글 ON). 저장 위치(예: Application Support/maru/), 크래시 가드(정상 종료 마커).

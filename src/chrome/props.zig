@@ -8,6 +8,8 @@ pub const CellMetrics = struct {
     cell_width_px: u32,
     cell_height_px: u32,
     sidebar_width_px: u32, // 런타임 가변(사용자 드래그) — session 실측값이 권위
+    sidebar_slot_height_px: u32 = 0, // 사이드바 워크스페이스 한 슬롯의 높이(= cell_height × ratio, cell 높이가 아님).
+    // sidebar 컴포넌트의 밴드 view·hit-test가 슬롯↔px 변환에 쓴다(C3a). 기본 0 = 사이드바 꺼짐/미설정(view 무동작).
     backing_width_px: u32,
     backing_height_px: u32,
     // minimal 세션(사이드바·pane 탭 바 숨김)인지. C2/C3 사이드바·탭바 컴포넌트가 렌더 게이트로 읽는다

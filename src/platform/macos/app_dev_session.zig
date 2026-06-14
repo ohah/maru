@@ -1198,17 +1198,17 @@ pub const DevSession = struct {
     /// 마우스 (x,y)가 활성 탭 어느 divider의 드래그 밴드 안인가 — 맞으면 그 DividerSeg, 아니면 null. 밴드는 경계
     /// pos ± (cell 절반 + margin), 교차축은 bounds 안. 렌더 divider(같은 layoutDividers)와 정렬돼 "보이는 =
     /// 잡히는". 단일 panel이면 항상 null(divider 없음). 마우스 down(1) divider 드래그 시작 판정에 쓴다.
-    fn dividerAtPoint(self: *DevSession, x_px: f64, y_px: f64) ?PaneTree.DividerSeg {
-        // 매 이동마다 새 ArrayList를 안 만들고 재사용 scratch에 divider seg를 다시 깐다(할당 churn 제거). app DividerSeg
-        // (라이브 *Split)는 hover_divider_scratch에, neutral 변환은 divider_seg_scratch에(index 일치) — chrome
-        // `divider.hitTest`가 후자로 판정하고, 그 index의 app DividerSeg(split/direction/bounds)를 돌려준다(보이는==잡히는).
+    /// 마우스 (x,y)가 어느 divider 드래그 밴드 안인가 — 맞으면 {neutral Seg, 라이브 *Split}, 아니면 null. app DividerSeg는
+    /// hover_divider_scratch에, neutral 변환은 divider_seg_scratch에(index 일치) — chrome `divider.hitTest`가 후자로 판정하고,
+    /// 그 index의 **neutral seg**(드래그/커서가 직접 씀 — 재변환 없음)와 split을 돌려준다(보이는==잡히는). split만 app.
+    fn dividerAtPoint(self: *DevSession, x_px: f64, y_px: f64) ?struct { seg: chrome.components.divider.Seg, split: *PaneTree.Split } {
         const segs = &self.hover_divider_scratch;
         segs.clearRetainingCapacity();
         self.layoutActiveTabDividers(segs) catch return null;
         self.divider_seg_scratch.clearRetainingCapacity();
         for (segs.items) |seg| self.divider_seg_scratch.append(self.allocator, appSegToDivider(seg)) catch return null;
         const i = chrome.components.divider.hitTest(self.divider_seg_scratch.items, self.cell_width_px, self.cell_height_px, x_px, y_px) orelse return null;
-        return segs.items[i];
+        return .{ .seg = self.divider_seg_scratch.items[i], .split = segs.items[i].split };
     }
 
     fn layoutActiveTabDividers(self: *DevSession, out: *std.ArrayList(PaneTree.DividerSeg)) !void {
@@ -2514,7 +2514,7 @@ pub const DevSession = struct {
             return;
         }
         // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드).
-        if (kind == 1 and chrome.components.sidebar.onResizeEdge(x_px, self.sidebar_width_px, self.cell_width_px)) {
+        if (kind == 1 and chrome.components.sidebar.onResizeEdge(x_px, self.sidebar_width_px, if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px)) {
             self.sidebar_resize_active = true;
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
@@ -2595,9 +2595,9 @@ pub const DevSession = struct {
                 // ⓐ divider 클릭 → 리사이즈 드래그 시작(PR6). 탭 바(①)보다 뒤·pane 선택(②)보다 앞 — 탭 바는
                 //    seam에 붙어 있어 우선권을 주고, divider는 terminal 영역 seam에서 잡는다. drag(2)/up(3)은 위
                 //    divider 캡처가 받는다. split일 때만(dividerAtPoint가 단일 panel이면 null).
-                if (self.dividerAtPoint(x_px, y_px)) |seg| {
-                    self.divider_drag = seg.split;
-                    self.divider_drag_seg = appSegToDivider(seg); // neutral seg 저장(드래그 중 dragRatio가 쓴다)
+                if (self.dividerAtPoint(x_px, y_px)) |hit| {
+                    self.divider_drag = hit.split;
+                    self.divider_drag_seg = hit.seg; // neutral seg 직접(재변환 없음 — 드래그 중 dragRatio가 쓴다)
                     self.drag_autoscroll = 0;
                     self.mouse_drag_selecting = false;
                     return;
@@ -2982,7 +2982,7 @@ pub const DevSession = struct {
     pub fn hoverCursor(self: *DevSession, x_px: f64, y_px: f64, cmd_held: bool) CursorKind {
         if (!self.surface_initialized) return .text;
         // 사이드바 우측 경계(폭 조절) 위면 리사이즈 커서 — 사이드바/터미널보다 먼저(경계는 둘 사이 밴드).
-        if (chrome.components.sidebar.onResizeEdge(x_px, self.sidebar_width_px, self.cell_width_px)) {
+        if (chrome.components.sidebar.onResizeEdge(x_px, self.sidebar_width_px, if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px)) {
             self.setHoveredSlot(null);
             self.setHoveredPlus(false);
             self.setHoveredTab(null);
@@ -3009,11 +3009,11 @@ pub const DevSession = struct {
             return .default; // 탭 바 = arrow
         }
         // divider 밴드 위면 리사이즈 커서(클릭과 같은 dividerAtPoint — 탭 바 다음 순서). 단일 panel이면 null.
-        if (self.dividerAtPoint(x_px, y_px)) |seg| {
+        if (self.dividerAtPoint(x_px, y_px)) |hit| {
             self.clearHoverUrlAnchor();
-            return switch (seg.direction) {
-                .horizontal => .resize_h, // 세로 divider — 좌우로 끈다
-                .vertical => .resize_v, // 가로 divider — 위아래로 끈다
+            return switch (hit.seg.orientation) {
+                .vertical_line => .resize_h, // 세로 divider — 좌우로 끈다
+                .horizontal_line => .resize_v, // 가로 divider — 위아래로 끈다
             };
         }
         // 터미널 영역: Cmd+hover URL이면 link(pointingHand), 아니면 text(iBeam).
@@ -4013,7 +4013,7 @@ pub const DevSession = struct {
         const arena = arena_state.allocator();
         const tabs = self.sidebarTabs(arena) catch return;
         var ops: std.ArrayList(chrome.draw.Op) = .empty;
-        chrome.components.sidebar.view(tabs, self.hovered_slot, self.hovered_plus, self.sidebar_width_px, self.sidebar_slot_height_px, arena, &ops) catch return;
+        chrome.components.sidebar.view(tabs, self.hovered_slot, self.hovered_plus, self.buildChromeProps(), arena, &ops) catch return;
         self.lowerSidebar(ops.items);
     }
 
@@ -4161,6 +4161,7 @@ pub const DevSession = struct {
                 .cell_width_px = self.cell_width_px,
                 .cell_height_px = self.cell_height_px,
                 .sidebar_width_px = self.sidebar_width_px,
+                .sidebar_slot_height_px = self.sidebar_slot_height_px,
                 .backing_width_px = self.backing_width_px,
                 .backing_height_px = self.backing_height_px,
                 .chrome_minimal = self.chrome_minimal,

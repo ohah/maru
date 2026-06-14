@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const draw = @import("../draw.zig");
+const props = @import("../props.zig");
 const tokens = @import("../tokens.zig");
 
 /// 이 컴포넌트가 그리는 레이어 — 사이드바(가장 아래 Z, 터미널 strip 왼쪽). platform이 밴드 fill을 lower해 sidebar 셀 슬롯에.
@@ -24,7 +25,8 @@ pub fn inSidebar(x_px: f64, sidebar_width_px: u32) bool {
 }
 
 /// x가 사이드바 우측 경계(폭조절 드래그) 밴드 [width, width + cell절반+2px) 안인가 — 터미널 쪽으로만(슬롯/✕와 안 겹침).
-/// 폭 0·cell 0·비유한이면 false(hit-test는 항상 cell>0인 렌더 후에 호출되므로 placeholder 분기 불필요).
+/// 폭 0·cell 0·비유한이면 false. cell==0은 렌더 전 degenerate 상태 — platform 호출처가 sibling(pxToCell·imeCursorRect)과
+/// 일관되게 placeholder 폭을 적용해 넘기므로(chrome은 placeholder 상수를 모른다) 여기선 단순히 false로 둔다.
 pub fn onResizeEdge(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bool {
     if (sidebar_width_px == 0 or cell_width_px == 0 or !std.math.isFinite(x_px)) return false;
     const edge: f64 = @floatFromInt(sidebar_width_px);
@@ -74,8 +76,10 @@ pub fn dragTargetSlot(y_px: f64, slot_height_px: u32, tab_count: usize) usize {
 /// slot_h). **slot_height_px는 cell 높이가 아니다**(= cell_h × ratio, 더 크다) — platform이 `sidebar_slot_height_px`를
 /// 넘긴다. strip 배경·제목 glyph는 platform이 따로(밴드만 chrome). 활성 우선(활성 슬롯은 호버여도 활성 색). tabs
 /// 빈(사이드바 꺼짐)이거나 메트릭 0이면 무동작. 순수: tabs·hover 상태만 읽는다. out·op은 호출자 frame arena 소유.
-pub fn view(tabs: []const Tab, hovered_slot: ?usize, hovered_plus: bool, sidebar_width_px: u32, slot_height_px: u32, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
-    if (sidebar_width_px == 0 or slot_height_px == 0 or tabs.len == 0) return;
+pub fn view(tabs: []const Tab, hovered_slot: ?usize, hovered_plus: bool, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
+    const w = p.metrics.sidebar_width_px;
+    const slot_h = p.metrics.sidebar_slot_height_px;
+    if (w == 0 or slot_h == 0 or tabs.len == 0) return;
 
     // 활성 슬롯 밴드(첫 active=true 탭).
     var active_idx: ?usize = null;
@@ -83,17 +87,17 @@ pub fn view(tabs: []const Tab, hovered_slot: ?usize, hovered_plus: bool, sidebar
         active_idx = i;
         break;
     };
-    if (active_idx) |ai| try out.append(arena, bandFill(ai, sidebar_width_px, slot_height_px, .tab_active_bg));
+    if (active_idx) |ai| try out.append(arena, bandFill(ai, w, slot_h, .tab_active_bg));
 
     // 호버 슬롯 밴드(활성과 다르고 범위 안일 때만 — 활성이면 활성 색 우선).
     if (hovered_slot) |hs| {
         if (hs < tabs.len and (active_idx == null or hs != active_idx.?)) {
-            try out.append(arena, bandFill(hs, sidebar_width_px, slot_height_px, .tab_hover_bg));
+            try out.append(arena, bandFill(hs, w, slot_h, .tab_hover_bg));
         }
     }
 
     // "+"(새 워크스페이스) 호버 밴드 — 탭 목록 바로 아래 행(row=탭 개수).
-    if (hovered_plus) try out.append(arena, bandFill(tabs.len, sidebar_width_px, slot_height_px, .tab_hover_bg));
+    if (hovered_plus) try out.append(arena, bandFill(tabs.len, w, slot_h, .tab_hover_bg));
 }
 
 /// 슬롯 r의 전체-폭 밴드 fill op. row→y는 slot_h 배수(한 탭=한 슬롯). platform lowerSidebar가 sidebarBandCell로 lower.
@@ -115,11 +119,15 @@ test "sidebar hit-test: inSidebar·onResizeEdge·slotAt·inPlus·closeButton·dr
     try std.testing.expect(onResizeEdge(105, 100, 8));
     try std.testing.expect(!onResizeEdge(106, 100, 8)); // 밴드 밖
     try std.testing.expect(!onResizeEdge(99, 100, 8)); // 사이드바 안쪽
+    try std.testing.expect(!onResizeEdge(105, 100, 0)); // cell 0 → false(렌더 전; platform이 placeholder 적용)
+    try std.testing.expect(!onResizeEdge(std.math.nan(f64), 100, 8)); // 비유한
     // slotAt: y/slot_h, 범위 밖 null. slot_h=16, count=3.
     try std.testing.expectEqual(@as(?usize, 0), slotAt(8, 16, 3));
     try std.testing.expectEqual(@as(?usize, 2), slotAt(40, 16, 3)); // 2번 슬롯
     try std.testing.expectEqual(@as(?usize, null), slotAt(48, 16, 3)); // 슬롯 아래 빈 영역
     try std.testing.expectEqual(@as(?usize, null), slotAt(8, 16, 0)); // 탭 없음
+    try std.testing.expectEqual(@as(?usize, null), slotAt(40, 0, 3)); // 슬롯 높이 0
+    try std.testing.expectEqual(@as(?usize, null), slotAt(std.math.nan(f64), 16, 3)); // 비유한
     // inPlus: [count×h, (count+1)×h). count=3, h=16 → [48, 64).
     try std.testing.expect(inPlus(50, 16, 3));
     try std.testing.expect(!inPlus(40, 16, 3)); // 탭 슬롯
@@ -137,8 +145,16 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const w: u32 = 120;
-    const slot_h: u32 = 40; // = cell_h × ratio(예: 16×2.5), cell 높이가 아님
+    const p = props.ChromeProps{
+        .metrics = .{
+            .cell_width_px = 8,
+            .cell_height_px = 16,
+            .sidebar_width_px = 120,
+            .sidebar_slot_height_px = 40, // = cell_h × ratio(예: 16×2.5), cell 높이가 아님
+            .backing_width_px = 800,
+            .backing_height_px = 600,
+        },
+    };
     const tabs = [_]Tab{
         .{ .label = "1 sh", .active = false },
         .{ .label = "2 vim", .active = true },
@@ -147,7 +163,7 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
 
     // 활성(idx 1) + 호버(idx 0) + "+" 호버 → 밴드 3개.
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&tabs, 0, true, w, slot_h, arena, &out);
+    try view(&tabs, 0, true, p, arena, &out);
     try std.testing.expectEqual(@as(usize, 3), out.items.len);
     // 활성: row 1 → y=40, role tab_active_bg, 전체 폭.
     try std.testing.expect(out.items[0] == .fill);
@@ -163,11 +179,17 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
 
     // 호버 슬롯 == 활성이면 호버 밴드 생략(활성 색 우선).
     out.clearRetainingCapacity();
-    try view(&tabs, 1, false, w, slot_h, arena, &out);
+    try view(&tabs, 1, false, p, arena, &out);
     try std.testing.expectEqual(@as(usize, 1), out.items.len); // 활성만
 
-    // 사이드바 꺼짐(폭 0)·탭 없음이면 무동작.
+    // 사이드바 꺼짐(폭 0)·slot_h 0·탭 없음이면 무동작.
     out.clearRetainingCapacity();
-    try view(&tabs, null, false, 0, slot_h, arena, &out);
+    var off = p;
+    off.metrics.sidebar_width_px = 0;
+    try view(&tabs, null, false, off, arena, &out);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    off = p;
+    off.metrics.sidebar_slot_height_px = 0;
+    try view(&tabs, 0, true, off, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 }

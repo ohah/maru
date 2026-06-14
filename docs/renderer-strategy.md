@@ -74,6 +74,15 @@ WebGPU backend를 검토할 조건:
 
 따라서 Maru의 추천 전략은 **Metal-first implementation, backend-neutral DrawList contract**다.
 
+## GPU 백엔드 vs 플랫폼 호스트 (혼동 주의)
+
+위 "WebGPU-first: Windows/Linux/browser까지 같은 API 모델"은 **GPU 백엔드 레이어만**의 이야기다. 실제 이식은 두 층으로 갈린다:
+
+- **GPU 백엔드(공유 가능)**: 중립 frame을 받아 그리는 코드. WebGPU 하나로 Win/Linux/browser의 *그리기*는 공유 가능.
+- **플랫폼 호스트(타깃별 신규, 0% 공유)**: 윈도우·입력·IME·PTY·클립보드. 현재 `MaruAppHost`(macOS)가 하는 일은 Linux=Wayland/X11, Windows=Win32, browser=DOM/canvas로 **각각 새로** 짜야 한다. **browser는 PTY가 없어 아키텍처가 다른 제품**(서버사이드 PTY)이다.
+
+그래서 "WebGPU 백엔드 하나로 다 덮인다"는 환상이고, 작업 대부분은 호스트다. 또한 **"런타임 의존성 0"은 macOS 한정**이다 — Linux/Windows WebGPU는 Dawn/wgpu-native(C++ 의존성)를 끌어오므로 그 타깃에선 이 원칙이 깨진다(사용자 논의 후 추가). 백엔드/호스트 2층 분해와 이식 비용 계량은 [레이어링과 이식성 전략 §4](layering-and-portability.md#4-렌더-백엔드--호스트-이식-검증된-현실)를 단일 출처로 둔다.
+
 ## Ghostty는 어떻게 하는가
 
 Ghostty는 WebGPU를 쓰지 않는다. 로컬 reference 기준으로 renderer facade 아래에 다음 backend를 둔다.
@@ -85,7 +94,7 @@ references/ghostty/src/renderer.zig
   WebGL
 ```
 
-즉 Ghostty의 전략은 "하나의 WebGPU backend로 모든 target을 덮는다"가 아니다. 공통 renderer 로직을 두고, 플랫폼/target별 graphics API backend를 붙인다.
+즉 Ghostty의 전략은 "하나의 WebGPU backend로 모든 target을 덮는다"가 아니다. 공통 renderer 로직을 두고, 플랫폼/target별 graphics API backend를 붙인다. 구체적으로 `renderer.zig`가 **comptime로 백엔드를 하나 고정**(`GenericRenderer(Metal|OpenGL)`)하고 공통 로직(~3300줄)이 그 위에 산다 — 백엔드 래퍼는 각 ~460줄로 얇다. 이게 "중립 계약 + 얇은 OS 백엔드"가 실전에서 성립한다는 직접 증거다(WebGL은 현재 스텁이라 미구현 — browser는 우리와 같은 미완 상태). Maru의 중립 cell/DrawList 계약 + Metal-first는 이 검증된 구조와 같은 칸이다(WezTerm만 wgpu로 통일; Alacritty·kitty·Ghostty는 회피).
 
 ```text
 macOS native

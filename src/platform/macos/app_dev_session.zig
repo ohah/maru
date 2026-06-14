@@ -2755,6 +2755,36 @@ pub const DevSession = struct {
         }
     }
 
+    /// 입력(키·IME)이 지금 어디로 가는가 — **단일 출처**. 모달은 배타적(toggleFind/togglePalette가 서로 닫는다)이라
+    /// 최대 하나만 열린다. notice는 텍스트 입력 대상이 아니라(dismiss만) 여기 안 든다. 모든 IME 연산(preedit set·
+    /// 조합 판정·caret)이 이걸로 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
+    const InputFocus = enum { terminal, find, palette };
+    fn inputFocus(self: *const DevSession) InputFocus {
+        if (self.chrome_host.find.open) return .find;
+        if (self.chrome_host.palette.open) return .palette;
+        return .terminal;
+    }
+
+    /// 활성 입력 대상의 IME 조합(marked) 텍스트를 교체한다(빈 bytes=해제). inputFocus 단일 출처로 분기 — exhaustive
+    /// switch라 입력 대상 추가 시 컴파일러가 누락을 막는다.
+    fn imeSetPreedit(self: *DevSession, bytes: []const u8) void {
+        switch (self.inputFocus()) {
+            .find => self.chrome_host.find.setPreedit(self.allocator, bytes) catch {},
+            .palette => self.chrome_host.palette.setPreedit(self.allocator, bytes) catch {},
+            .terminal => self.activeSurface().core.setPreedit(bytes) catch {},
+        }
+    }
+
+    /// 활성 입력 대상이 조합 중(preedit 있음)인가 — imeBegin/imeEnd가 조합 판정에 쓴다. 예전엔 core.preedit만 봐서
+    /// find/palette 조합을 놓쳤다(단일-출처 위반 → 조합 보호·표시 버그). inputFocus로 통일.
+    fn imeComposingActive(self: *const DevSession) bool {
+        return switch (self.inputFocus()) {
+            .find => self.chrome_host.find.preedit.items.len > 0,
+            .palette => self.chrome_host.palette.preedit.items.len > 0,
+            .terminal => self.activeSurfaceConst().core.preedit != null,
+        };
+    }
+
     /// IME 키 트랜잭션 시작(Swift keyDown 진입 — 수정자 없는 키). 이번 키에서 입력기가 만들
     /// 텍스트/조합 변화를 모으기 시작한다.
     pub fn imeBegin(self: *DevSession) void {
@@ -2770,7 +2800,7 @@ pub const DevSession = struct {
         self.ime_marked_changed = false;
         self.ime_did_delete = false;
         self.ime_insert_failed = false;
-        self.ime_had_marked = self.activeSurface().core.preedit != null;
+        self.ime_had_marked = self.imeComposingActive(); // 단일 출처(터미널/find/palette) — core.preedit만 보던 누락 수정
     }
 
     /// 입력기가 확정한 텍스트(insertText). 즉시 보내지 않고 누적한다 — 전송 여부·시점은
@@ -2787,20 +2817,11 @@ pub const DevSession = struct {
         };
     }
 
-    /// 입력기의 조합 중(marked) 텍스트 갱신(빈 입력 = 조합 해제). find 오버레이가 열려 있으면 그 검색 입력에
-    /// 조합 글자를 보여준다(터미널 core가 아니라 — 조합 상태가 오버레이에 즉시 보이고, 뒤 터미널 입력줄에 새지
-    /// 않는다). 아니면 터미널 core 합성이 표시한다.
+    /// 입력기의 조합 중(marked) 텍스트 갱신(빈 입력 = 조합 해제). 활성 입력 대상(inputFocus 단일 출처)에 보여준다 —
+    /// find/palette 열림이면 그 입력에, 아니면 터미널 core. 조합 상태가 그 자리에 즉시 보이고 뒤로 새지 않는다.
     pub fn imeMarked(self: *DevSession, bytes: []const u8) void {
         if (!self.surface_initialized) return;
-        if (self.chrome_host.find.open) {
-            self.chrome_host.find.setPreedit(self.allocator, bytes) catch {};
-        } else if (self.chrome_host.palette.open) {
-            // 팝업이 열려 있으면 조합 글자를 팝업 입력에 보여준다(터미널 core가 아니라). C1b 전엔 palette가 IME
-            // preedit를 안 받아 한글 조합이 뒤의 숨은 터미널로 샜다 — find와 같은 배선으로 고친다.
-            self.chrome_host.palette.setPreedit(self.allocator, bytes) catch {};
-        } else {
-            self.activeSurface().core.setPreedit(bytes) catch return;
-        }
+        self.imeSetPreedit(bytes);
         self.metal_dirty = true; // 조합 글자는 즉시 보여야 한다
         if (self.ime_active) self.ime_marked_changed = true;
     }
@@ -2826,7 +2847,7 @@ pub const DevSession = struct {
     /// 막는다(라이브 회귀 클래스).
     pub fn imeEnd(self: *DevSession, event: ?terminal.KeyEvent) void {
         if (!self.surface_initialized) return;
-        const composing = self.activeSurface().core.preedit != null or self.ime_had_marked;
+        const composing = self.imeComposingActive() or self.ime_had_marked; // 단일 출처(find/palette도) — core만 보던 누락 수정
         defer {
             self.ime_active = false;
             self.ime_inserted.clearRetainingCapacity();
@@ -2872,18 +2893,16 @@ pub const DevSession = struct {
         const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
         if (!self.surface_initialized) return .{ .x = 0, .y = 0, .w = cw, .h = ch };
-        // find 오버레이가 열려 있으면 후보창을 그 입력 커서 옆에 띄운다(터미널 커서가 아니라). caretRect가 위치
-        // 단일 출처. 닫혔거나 패널 밖이면 아래 터미널 커서로 폴백.
-        if (self.chrome_host.find.open) {
-            if (chrome.components.find.caretRect(&self.chrome_host.find, self.buildChromeProps())) |r| {
-                return .{ .x = @floatFromInt(r.x), .y = @floatFromInt(r.y), .w = @floatFromInt(r.w), .h = @floatFromInt(r.h) };
-            }
-        }
-        // 팝업이 열려 있으면 후보창을 팝업 입력 커서 옆에. find와 같은 단일 출처(caretRect). 닫힘/패널 밖이면 폴백.
-        if (self.chrome_host.palette.open) {
-            if (chrome.components.palette.caretRect(&self.chrome_host.palette, self.buildChromeProps())) |r| {
-                return .{ .x = @floatFromInt(r.x), .y = @floatFromInt(r.y), .w = @floatFromInt(r.w), .h = @floatFromInt(r.h) };
-            }
+        // 활성 입력 대상(inputFocus 단일 출처)의 입력 caret 옆에 후보창을 띄운다 — caretRect가 위치 단일 출처.
+        // null(패널 밖)이거나 터미널이면 아래 터미널 커서로 폴백.
+        const props = self.buildChromeProps();
+        const overlay_caret: ?chrome.draw.Rect = switch (self.inputFocus()) {
+            .find => chrome.components.find.caretRect(&self.chrome_host.find, props),
+            .palette => chrome.components.palette.caretRect(&self.chrome_host.palette, props),
+            .terminal => null,
+        };
+        if (overlay_caret) |r| {
+            return .{ .x = @floatFromInt(r.x), .y = @floatFromInt(r.y), .w = @floatFromInt(r.w), .h = @floatFromInt(r.h) };
         }
         const cursor = self.activeSurfaceConst().core.cursor;
         return .{
@@ -2897,19 +2916,31 @@ pub const DevSession = struct {
         };
     }
 
-    /// 진행 중인 IME 조합(preedit)을 확정(커밋)한다 — 조합 글자를 PTY로 보내고 preedit을 비운다.
-    /// 포커스 상실(setFocused)과, IME를 우회하는 특수키/단축키(PageUp 등) '직전'에 호출해 Swift의
-    /// marked text와 core의 preedit·화면이 어긋나지 않게 한다. 조합이 없으면 무동작.
+    /// 진행 중인 IME 조합(preedit)을 확정(커밋)한다 — 조합 글자를 대상에 보내고 preedit을 비운다. 포커스 상실
+    /// (setFocused)과, IME를 우회하는 특수키/단축키(PageUp 등) '직전'에 호출해 Swift marked text와 화면이 어긋나지
+    /// 않게 한다. 활성 입력 대상(inputFocus 단일 출처)으로 분기 — 터미널은 PTY로, find/palette는 검색어/명령어로 확정.
     pub fn commitComposition(self: *DevSession) void {
         if (!self.surface_initialized) return;
-        const core = &self.activeSurface().core;
-        if (core.preedit) |pending| {
-            // setPreedit가 버퍼를 해제하므로 먼저 사본을 떠서 보낸다.
-            const copy = self.allocator.dupe(u8, pending) catch return;
-            defer self.allocator.free(copy);
-            core.setPreedit("") catch {};
-            self.metal_dirty = true;
-            self.sendCommittedText(copy);
+        switch (self.inputFocus()) {
+            .terminal => {
+                const core = &self.activeSurface().core;
+                if (core.preedit) |pending| {
+                    // setPreedit가 버퍼를 해제하므로 먼저 사본을 떠서 보낸다.
+                    const copy = self.allocator.dupe(u8, pending) catch return;
+                    defer self.allocator.free(copy);
+                    core.setPreedit("") catch {};
+                    self.metal_dirty = true;
+                    self.sendCommittedText(copy);
+                }
+            },
+            .find => if (self.chrome_host.find.commitPreedit(self.allocator)) {
+                self.recomputeFind(); // 검색어가 바뀜
+                self.metal_dirty = true;
+            },
+            .palette => if (self.chrome_host.palette.commitPreedit(self.allocator)) {
+                self.recomputePalette(); // 필터가 바뀜
+                self.metal_dirty = true;
+            },
         }
     }
 
@@ -5223,6 +5254,38 @@ test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비
     try std.testing.expect(session.chrome_host.find.open);
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(!session.chrome_host.find.open);
+}
+
+test "find IME 멀티-문자: 커밋이 다음 조합 preedit를 안 지운다(조합 안 보임 회귀)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // handleKeyEvent → chrome 라우팅, 실 PTY
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open);
+
+    // 실제 IME 흐름(라이브 로그와 동일): setMarkedText "나" → insertText "나"(커밋) → setMarkedText "다"(다음 조합).
+    // 한 keyDown 트랜잭션 안에서 일어난다.
+    session.imeBegin();
+    session.imeMarked("\xeb\x82\x98"); // 조합 "나"
+    session.imeInsert("\xeb\x82\x98"); // "나" 커밋 누적
+    session.imeMarked("\xeb\x8b\xa4"); // 다음 조합 "다"
+    session.imeEnd(null);
+
+    // 커밋 "나"는 검색어로, 조합 "다"는 preedit로 **유지**돼야 한다. 예전엔 imeEnd의 커밋(appendChar)이 방금 set된
+    // "다"를 지워 조합이 화면에서 사라졌다(사용자 제보 "입력중 상태 안 보임"). 단일 출처·core 모델 통일로 수정.
+    try std.testing.expectEqualStrings("\xeb\x82\x98", session.chrome_host.find.query.items); // "나" 확정
+    try std.testing.expectEqualStrings("\xeb\x8b\xa4", session.chrome_host.find.preedit.items); // "다" 조합 유지
 }
 
 test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회귀 실측(실 CoreText)" {

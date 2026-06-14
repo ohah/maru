@@ -49,10 +49,10 @@ pub const State = struct {
         self.open = false;
     }
 
-    /// 검색어에 확정 글자 추가(UTF-8 인코딩). 확정이 들어오면 조합(preedit)은 끝난 것이라 비운다. 재필터는 host가
-    /// query_changed Action을 받아 한다. 인코딩 불가/OOM은 무시.
+    /// 검색어에 확정 글자 추가(UTF-8 인코딩). **preedit는 건드리지 않는다** — 터미널 core·find와 같은 모델(커밋과
+    /// 조합 독립; preedit는 setPreedit만 관리). 여기서 비우면 IME 멀티-문자 흐름에서 다음 조합을 지워 "조합 안 보임"
+    /// 버그가 난다(find와 동일 수정). 재필터는 host가 query_changed Action으로. 인코딩 불가/OOM은 무시.
     pub fn appendChar(self: *State, allocator: std.mem.Allocator, cp: u21) !void {
-        self.preedit.clearRetainingCapacity();
         var utf8: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(cp, &utf8) catch return;
         try self.query.appendSlice(allocator, utf8[0..n]);
@@ -62,6 +62,18 @@ pub const State = struct {
     pub fn setPreedit(self: *State, allocator: std.mem.Allocator, bytes: []const u8) !void {
         self.preedit.clearRetainingCapacity();
         try self.preedit.appendSlice(allocator, bytes);
+    }
+
+    /// 조합 중(preedit) 텍스트를 검색어로 확정한다(query 뒤에 붙이고 preedit 비움) — 포커스 상실 등에서 조합을 잃지
+    /// 않게. 확정한 게 있으면 true(host가 재필터). 빈 조합이면 false. OOM이면 조합 버리고 false. find.commitPreedit와 동일.
+    pub fn commitPreedit(self: *State, allocator: std.mem.Allocator) bool {
+        if (self.preedit.items.len == 0) return false;
+        self.query.appendSlice(allocator, self.preedit.items) catch {
+            self.preedit.clearRetainingCapacity();
+            return false;
+        };
+        self.preedit.clearRetainingCapacity();
+        return true;
     }
 
     /// 마지막 코드포인트 1개 삭제(UTF-8 경계 존중). 빈 쿼리면 무동작.

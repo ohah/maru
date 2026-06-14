@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 36u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 37u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -371,6 +371,15 @@ int32_t maru_macos_app_dev_session_cwd(
    버퍼는 Zig(core) 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효, 없으면 *out_len=0(Swift가 앱 이름
    폴백). Swift가 window.title에 쓴다. */
 int32_t maru_macos_app_dev_session_window_title(
+    MaruAppHostDevSession *session,
+    const uint8_t **out_ptr,
+    size_t *out_len
+);
+
+/* 이 창(세션)의 workspace restore 블록(헤더 없는 "window ..." 라인; UTF-8). Swift가 멀티 창 저장에서
+   maru.workspace.v1 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유로 다음 호출/destroy까지 유효,
+   캡처/직렬화 실패·빈 경우 *out_len=0(Swift가 그 창을 건너뜀). 정상 종료(applicationWillTerminate) 시 저장. */
+int32_t maru_macos_app_dev_session_serialize_workspace(
     MaruAppHostDevSession *session,
     const uint8_t **out_ptr,
     size_t *out_len

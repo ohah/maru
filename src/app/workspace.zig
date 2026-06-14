@@ -73,6 +73,15 @@ pub fn serialize(allocator: std.mem.Allocator, ws: Workspace) ![]u8 {
     return out.toOwnedSlice();
 }
 
+/// 한 창(Window) 블록만 직렬화한다(헤더 없음). 멀티 창 저장(R5)에서 각 DevSession이 자기 창 블록을 내고,
+/// Swift가 `maru.workspace.v1` 헤더 하나 아래로 모아 parse 가능한 전체 텍스트를 만든다.
+pub fn serializeWindow(allocator: std.mem.Allocator, win: Window) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try writeWindow(&out.writer, win);
+    return out.toOwnedSlice();
+}
+
 fn writeWindow(w: *std.Io.Writer, win: Window) !void {
     try w.print("window tabs={d} active-tab={d}\n", .{ win.tabs.len, win.active_tab });
     for (win.tabs) |tab| try writeTab(w, tab);
@@ -467,4 +476,32 @@ test "workspace parse: 구조·escape 해제·forgiving" {
 
 test "workspace parse: 잘못된 헤더는 에러" {
     try std.testing.expectError(error.BadHeader, parse(std.testing.allocator, "not.a.workspace\nwindow tabs=0 active-tab=0\n"));
+}
+
+test "workspace serializeWindow: 헤더 없는 블록을 모아 전체로 parse(R5 집계)" {
+    // 두 창을 각각 serializeWindow(헤더 없음)로 내고 헤더 하나 아래로 모으면, parse가 전체 workspace로 읽는다.
+    const s0 = [_]Surface{.{ .cwd = "/a", .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const p0 = [_]Pane{.{ .surfaces = &s0 }};
+    const t0 = [_]TreeNode{.{ .leaf = 0 }};
+    const win0 = Window{ .tabs = &[_]Tab{.{ .tree = &t0, .panes = &p0 }} };
+
+    const s1 = [_]Surface{.{ .cwd = "/b", .command = "/bin/bash", .cols = 100, .rows = 30 }};
+    const p1 = [_]Pane{.{ .surfaces = &s1 }};
+    const t1 = [_]TreeNode{.{ .leaf = 0 }};
+    const win1 = Window{ .tabs = &[_]Tab{.{ .tree = &t1, .panes = &p1 }} };
+
+    const b0 = try serializeWindow(std.testing.allocator, win0);
+    defer std.testing.allocator.free(b0);
+    const b1 = try serializeWindow(std.testing.allocator, win1);
+    defer std.testing.allocator.free(b1);
+    try std.testing.expect(std.mem.startsWith(u8, b0, "window ")); // 헤더 없음
+
+    const text = try std.fmt.allocPrint(std.testing.allocator, "{s}\n{s}{s}", .{ header, b0, b1 });
+    defer std.testing.allocator.free(text);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.workspace.windows.len);
+    try std.testing.expectEqualStrings("/a", parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0].cwd);
+    try std.testing.expectEqualStrings("/b", parsed.workspace.windows[1].tabs[0].panes[0].surfaces[0].cwd);
 }

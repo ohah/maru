@@ -419,6 +419,28 @@ pub export fn maru_macos_app_dev_session_window_title(
     return @intFromEnum(Status.ok);
 }
 
+// 이 창(세션)의 workspace restore 블록(헤더 없는 `window …` 라인)을 직렬화해 돌려준다. Swift가 멀티 창
+// 저장에서 `maru.workspace.v1` 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유(다음 호출/destroy까지
+// 유효). 캡처/직렬화 실패(OOM 등)면 *out_len=0(Swift가 그 창을 건너뜀) — best-effort 저장이라 한 창 실패가
+// 전체 저장을 막지 않는다.
+pub export fn maru_macos_app_dev_session_serialize_workspace(
+    session: ?*DevSession,
+    out_ptr: ?*?[*]const u8,
+    out_len: ?*usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
+    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const text = dev_session.serializeWorkspaceWindow() catch {
+        ptr_out.* = null;
+        len_out.* = 0;
+        return @intFromEnum(Status.ok);
+    };
+    ptr_out.* = if (text.len > 0) text.ptr else null;
+    len_out.* = text.len;
+    return @intFromEnum(Status.ok);
+}
+
 // 전역(OS) 단축키 등록 기술자 목록. config에서 한 번 만들어 세션 동안 불변이라, Swift가 시작 시 한 번
 // 읽어 Carbon RegisterEventHotKey로 등록한다. 배열은 dev session 소유(destroy까지 유효). 비어 있으면
 // out_ptr=null/out_count=0. 매핑 가능한 chord(가상 키코드 있음)만 담긴다.

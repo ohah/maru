@@ -24,6 +24,7 @@ pub const components = struct {
     pub const notice = @import("chrome/components/notice.zig");
     pub const find = @import("chrome/components/find.zig");
     pub const palette = @import("chrome/components/palette.zig");
+    pub const divider = @import("chrome/components/divider.zig"); // 마우스 hit-test 컴포넌트(State 없는 순수 함수)
 };
 
 test {

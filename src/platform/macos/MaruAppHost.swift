@@ -676,6 +676,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             backing: .buffered,
             defer: false
         )
+        // ARC가 NSWindow를 단독 소유하게 한다(기본 isReleasedWhenClosed=true면 close 시 AppKit이 한 번 더
+        // release해, surface.window 강참조를 ARC가 release할 때 over-release 크래시가 난다). 단일 창은 close가
+        // 곧 앱 종료라 안 드러났지만, 멀티 창에서 한 창만 닫으면(앱 유지) 터진다. quick 패널과 같은 가드.
+        window.isReleasedWhenClosed = false
         window.title = "Maru"
 
         let content = MaruMetalTerminalView(frame: window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 960, height: 600))

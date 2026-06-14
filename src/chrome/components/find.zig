@@ -159,9 +159,10 @@ pub fn handle(allocator: std.mem.Allocator, ev: input.InputEvent, state: *State)
     }
 }
 
-/// 입력 커서(다음 입력 위치 = "Find: " + query + 조합중 뒤)의 셀 rect(backing px). **레이아웃 단일 출처** —
-/// view가 커서 fill에, host가 IME 후보창 위치(imeCursorRect)에 공유한다. 닫혔거나 터미널 0칸/패널 밖이면 null.
-/// 표시 폭은 EAW(displayCols — 한글/CJK 2칸). 패널 레이아웃은 view와 같은 식(좁은 dup이지만 caret 위치는 여기 한 곳).
+/// 입력 커서의 셀 rect(backing px). **레이아웃 단일 출처** — view가 커서(반전 블록)에, host가 IME 후보창 위치
+/// (imeCursorRect)에 공유한다. 닫혔거나 터미널 0칸/패널 밖이면 null. 위치 = "Find: " + query **시작점**(= 조합중
+/// preedit 시작). 조합 중에는 커서가 그 자리에서 조합 글자를 **덮는다**(터미널 IME 커서와 같은 동작 — 반전 블록이
+/// 조합 글자 위에). 조합이 없으면 query 끝(다음 입력 위치)이 곧 그 자리다. 표시 폭은 EAW(displayCols).
 pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     if (!state.open) return null;
     const m = p.metrics;
@@ -175,7 +176,8 @@ pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     const x = @as(i32, @intCast(m.sidebar_width_px)) + @as(i32, @intCast((term_w_px - panel_w) / 2));
     const y = 2 * @as(i32, @intCast(ch));
     const prompt_cols: u32 = 6; // "Find: "(ASCII)
-    const caret_col = prompt_cols + displayCols(state.query.items) + displayCols(state.preedit.items);
+    // preedit은 더하지 않는다 — 커서가 조합 글자를 덮어야 하므로 그 시작점(query 끝)에 둔다(터미널과 동일).
+    const caret_col = prompt_cols + displayCols(state.query.items);
     if (caret_col >= panel_cols) return null; // 패널 밖
     return .{ .x = x + @as(i32, @intCast(caret_col * cw)), .y = y, .w = cw, .h = ch };
 }
@@ -362,7 +364,7 @@ test "find view: 닫힘이면 ops 0, 열림이면 fill+prompt+counter+caret" {
     try std.testing.expect(out.items[0].fill.rect.x >= 40);
 }
 
-test "find view: IME 조합(preedit)이 query 뒤에 보이고 커서가 그 뒤로 이동" {
+test "find view: IME 조합(preedit)이 query 뒤에 보이고 커서가 조합 글자를 덮음" {
     const Rgb = @import("../../color.zig").Rgb;
     const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
     const p = props.ChromeProps{ .metrics = .{
@@ -388,11 +390,11 @@ test "find view: IME 조합(preedit)이 query 뒤에 보이고 커서가 그 뒤
     try std.testing.expect(out.items[1] == .text);
     try std.testing.expectEqualStrings("a", out.items[1].text.runs[1].text);
     try std.testing.expectEqualStrings("\xea\xb0\x80", out.items[1].text.runs[2].text);
-    // 커서는 query "a"(1칸) + preedit "가"(한글=2칸) 뒤 = col 9(=6 prompt + 1 + 2). 한글을 1칸으로 세면(예전 버그)
-    // col 8이 돼 글자 위에 caret이 박혔다 — EAW 폭으로 글자 끝에 정확히 붙는다.
+    // 커서는 query "a"(1칸) 끝 = col 7(=6 prompt + 1)에서 조합 글자 "가"를 **덮는다**(터미널 IME 커서와 동일 —
+    // preedit는 caret 위치에 안 더한다). 조합 글자가 커서 아래에 그려진다.
     const caret = out.items[out.items.len - 1];
     try std.testing.expect(caret == .fill and caret.fill.role == .cursor);
-    try std.testing.expectEqual(out.items[0].fill.rect.x + 9 * 8, caret.fill.rect.x);
+    try std.testing.expectEqual(out.items[0].fill.rect.x + 7 * 8, caret.fill.rect.x);
 
     // appendChar는 preedit를 **안 비운다**(터미널 core 모델 — 커밋과 조합 독립). IME 멀티-문자 흐름에서 imeEnd가
     // 직전 음절을 커밋하며 appendChar를 부를 때, 방금 set된 다음 음절의 조합을 지우면 안 되기 때문(조합 안 보임 버그).

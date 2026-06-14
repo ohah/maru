@@ -13,6 +13,7 @@ const input = @import("input.zig");
 const ChromeState = @import("state.zig").ChromeState;
 const notice = @import("components/notice.zig");
 const find = @import("components/find.zig");
+const palette = @import("components/palette.zig");
 
 /// 컴포넌트 handle이 낸 의도를 session이 디스패치할 형태로 host가 정규화한 것. chrome은 config.Action·session을
 /// 모르므로(중립) 부수효과를 직접 안 하고 이 intent만 돌려준다 — platform이 받아 재검색·스크롤·닫기를 실행한다.
@@ -22,16 +23,22 @@ pub const HostAction = union(enum) {
     find_close,
     find_navigated,
     find_query_changed,
+    palette_close,
+    palette_accept,
+    palette_query_changed,
+    palette_selection_changed,
 };
 
 pub const ChromeHost = struct {
     interaction: ChromeState = .{},
     notice: notice.State = .{},
     find: find.State = .{},
+    palette: palette.State = .{},
 
-    /// 컴포넌트 State 중 heap을 든 것(find.query)을 해제한다. DevSession.deinit가 부른다.
+    /// 컴포넌트 State 중 heap을 든 것(find/palette의 query·preedit)을 해제한다. DevSession.deinit가 부른다.
     pub fn deinit(self: *ChromeHost, allocator: std.mem.Allocator) void {
         self.find.deinit(allocator);
+        self.palette.deinit(allocator);
     }
 
     /// 각 컴포넌트 view를 호출해 (layer, ops) = ChromeDraw를 arena에 빌드한다. 빈(닫힌) 컴포넌트는 건너뛴다.
@@ -56,6 +63,22 @@ pub const ChromeHost = struct {
         }
     }
 
+    /// palette는 필터된 행(Row: title·binding·selected)을 host가 주입해야 그릴 수 있다 — generic collectDraws는 rows가
+    /// 없어 못 부른다. platform(catalog 소유)이 rows를 빌드해 이걸 부른다. palette 닫힘이면 무동작(빈 out). 다른 오버레이와
+    /// 배타적이라 platform이 palette.open일 때만 부른다(단일 오버레이 frame 가정 유지).
+    pub fn collectPaletteDraws(
+        self: *ChromeHost,
+        rows: []const palette.Row,
+        p: props.ChromeProps,
+        tk: *const tokens.Tokens,
+        arena: std.mem.Allocator,
+        out: *std.ArrayList(draw.ChromeDraw),
+    ) !void {
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try palette.view(&self.palette, rows, p, tk, arena, &ops);
+        if (ops.items.len > 0) try out.append(arena, .{ .layer = palette.layer, .ops = ops.items });
+    }
+
     /// 입력을 모달 우선으로 라우팅한다. 열린 컴포넌트가 있으면 소비하고 의도(HostAction)를 돌려준다(session이
     /// 디스패치). 열린 게 없으면 null(소비 안 함 — 뒤 터미널로 흘림). 우선순위: Notice > Find(배타적이라 동시
     /// 열림은 라우팅이 막는다). find는 query 변형에 allocator가 필요해 받는다(notice는 안 씀).
@@ -69,6 +92,14 @@ pub const ChromeHost = struct {
                 .close => .find_close,
                 .navigated => .find_navigated,
                 .query_changed => .find_query_changed,
+            };
+        }
+        if (self.palette.open) {
+            return switch (palette.handle(allocator, ev, &self.palette)) {
+                .close => .palette_close,
+                .accept => .palette_accept,
+                .query_changed => .palette_query_changed,
+                .selection_changed => .palette_selection_changed,
             };
         }
         return null;
@@ -142,4 +173,43 @@ test "host: Find 라우팅 — 글자=query_changed·Enter=navigated·Esc=close,
     // Esc → close.
     try std.testing.expectEqual(HostAction.find_close, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .escape } }).?);
     try std.testing.expect(!host.find.open);
+}
+
+test "host: Palette 라우팅 — 글자=query_changed·Enter=accept·↑↓=selection_changed·Esc=close, collectPaletteDraws가 오버레이 1개" {
+    const Rgb = @import("../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 40,
+        .backing_width_px = 800,
+        .backing_height_px = 600,
+    } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var host = ChromeHost{};
+    defer host.deinit(std.testing.allocator);
+    host.palette.show();
+    host.palette.setResultCount(3);
+
+    // 글자 → query_changed + 검색어 누적.
+    try std.testing.expectEqual(HostAction.palette_query_changed, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .char, .codepoint = 'a' } }).?);
+    try std.testing.expectEqualStrings("a", host.palette.query.items);
+    // ↓ → selection_changed + 이동.
+    try std.testing.expectEqual(HostAction.palette_selection_changed, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .down } }).?);
+    try std.testing.expectEqual(@as(usize, 1), host.palette.selected);
+    // Enter → accept(실행은 platform).
+    try std.testing.expectEqual(HostAction.palette_accept, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .enter } }).?);
+
+    // collectPaletteDraws가 palette 오버레이 1개를 낸다(행 1개 주입).
+    var out: std.ArrayList(draw.ChromeDraw) = .empty;
+    const rows = [_]palette.Row{.{ .title = "New Terminal", .binding = "T", .selected = true }};
+    try host.collectPaletteDraws(&rows, p, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+
+    // Esc → close.
+    try std.testing.expectEqual(HostAction.palette_close, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .escape } }).?);
+    try std.testing.expect(!host.palette.open);
 }

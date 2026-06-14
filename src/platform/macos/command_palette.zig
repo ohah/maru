@@ -1,7 +1,8 @@
-//! 커맨드 팝업(Cmd+Shift+P) 상태머신 — 순수 로직(렌더·OS·PTY 무관). 카탈로그(command_catalog.entries)를
-//! 쿼리로 필터하고 선택을 옮기며, 선택된 항목의 Action을 돌려준다. DevSession이 이 상태를 들고(2b) 모달 키를
-//! 라우팅하고 오버레이로 그린다 — 여기선 상태 전이만 소유한다(단일 출처·헤드리스 테스트). 렌더는 Zig draw-list로
-//! (네이티브 뷰 아님 — UI 렌더 전략). 필터는 title의 대소문자 무시 부분일치(fuzzy는 후속).
+//! 커맨드 팝업 카탈로그 필터 — **platform 전용 순수 로직**. UI 상태(open/query/preedit/selected)는 chrome 컴포넌트
+//! (src/chrome/components/palette.zig)로 이주했다(C1b). 여기엔 chrome이 만질 수 없는 것만 남는다: command_catalog
+//! (forbidden import)를 쿼리로 필터해 인덱스를 내고, 선택 인덱스를 Action으로 해석하는 것. DevSession이 이 두
+//! 함수를 호출해 필터 결과(palette_filtered)를 들고, 컴포넌트엔 필터된 행(Row)만 주입한다(neutral 경계 보존).
+//! 베이스/의사결정: action 집합은 config/action.zig(단일 출처), title은 UI 표시 문자열이라 command_catalog에 둔다.
 
 const std = @import("std");
 const maru = @import("maru");
@@ -24,71 +25,21 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return false;
 }
 
-pub const PaletteState = struct {
-    open: bool = false,
-    query: std.ArrayList(u8) = .empty, // 타이핑한 필터(UTF-8)
-    filtered: std.ArrayList(usize) = .empty, // 통과한 command_catalog.entries 인덱스(표시 순서)
-    selected: usize = 0, // filtered 안에서의 선택 위치
-
-    pub fn deinit(self: *PaletteState, allocator: std.mem.Allocator) void {
-        self.query.deinit(allocator);
-        self.filtered.deinit(allocator);
+/// 쿼리로 command_catalog.entries를 필터해 통과한 인덱스를 `out`에 채운다(title 대소문자 무시 부분일치, 표시 순서).
+/// `out`은 호출자 소유(capacity 재사용 — clearRetainingCapacity 후 채운다). OOM이면 에러(호출자가 비워 안전 처리).
+pub fn filter(allocator: std.mem.Allocator, query: []const u8, out: *std.ArrayList(usize)) !void {
+    out.clearRetainingCapacity();
+    for (command_catalog.entries, 0..) |entry, i| {
+        if (containsIgnoreCase(entry.title, query)) try out.append(allocator, i);
     }
+}
 
-    /// 팝업을 연다 — 쿼리 비우고 전체를 필터(=전부)로, 선택 맨 위. OOM이면 에러(호출자가 무시하고 안 열어도 됨).
-    /// recompute를 open=true '전에' 한다 — OOM이면 open=false가 유지돼, filtered가 빈(혹은 직전) 상태로
-    /// 열려버리는 일을 막는다(열림은 필터가 성공적으로 채워진 뒤에만 성립).
-    pub fn show(self: *PaletteState, allocator: std.mem.Allocator) !void {
-        self.query.clearRetainingCapacity();
-        try self.recompute(allocator);
-        self.open = true;
-    }
-
-    pub fn hide(self: *PaletteState) void {
-        self.open = false;
-    }
-
-    /// 필터에 글자(코드포인트) 추가 → 재필터. 쿼리가 바뀌면 선택은 맨 위로(흔한 팝업 동작).
-    pub fn appendChar(self: *PaletteState, allocator: std.mem.Allocator, cp: u21) !void {
-        var utf8: [4]u8 = undefined;
-        const n = std.unicode.utf8Encode(cp, &utf8) catch return; // 인코딩 불가 코드포인트는 무시
-        try self.query.appendSlice(allocator, utf8[0..n]);
-        try self.recompute(allocator);
-    }
-
-    /// 마지막 코드포인트 1개 삭제(UTF-8 경계 존중) → 재필터. 빈 쿼리면 무동작.
-    pub fn backspace(self: *PaletteState, allocator: std.mem.Allocator) !void {
-        if (self.query.items.len == 0) return;
-        var cut = self.query.items.len - 1;
-        while (cut > 0 and (self.query.items[cut] & 0xC0) == 0x80) cut -= 1; // continuation 바이트 건너뜀
-        self.query.shrinkRetainingCapacity(cut);
-        try self.recompute(allocator);
-    }
-
-    /// 선택을 delta만큼 이동(클램프, wrap 없음). 필터가 비면 무동작.
-    pub fn moveSelection(self: *PaletteState, delta: i32) void {
-        if (self.filtered.items.len == 0) return;
-        const max = self.filtered.items.len - 1;
-        const cur: i64 = @intCast(self.selected);
-        const next = std.math.clamp(cur + delta, 0, @as(i64, @intCast(max)));
-        self.selected = @intCast(next);
-    }
-
-    /// 현재 선택된 항목의 Action(없으면 null). DevSession이 이걸 받아 dispatch + hide 한다.
-    pub fn selectedAction(self: *const PaletteState) ?Action {
-        if (self.filtered.items.len == 0) return null;
-        return command_catalog.entries[self.filtered.items[self.selected]].action;
-    }
-
-    /// 현재 쿼리로 filtered를 다시 만든다(title 대소문자 무시 부분일치). 선택은 맨 위로 리셋.
-    fn recompute(self: *PaletteState, allocator: std.mem.Allocator) !void {
-        self.filtered.clearRetainingCapacity();
-        for (command_catalog.entries, 0..) |entry, i| {
-            if (containsIgnoreCase(entry.title, self.query.items)) try self.filtered.append(allocator, i);
-        }
-        self.selected = 0;
-    }
-};
+/// 필터된 인덱스 목록에서 selected 위치의 Action(없으면 null). DevSession이 받아 dispatch + hide 한다. selected는
+/// filtered 범위 안이라고 가정하지 않는다(범위 밖이면 null) — 컴포넌트 clamp와 platform 필터가 한 frame 어긋나도 안전.
+pub fn actionAt(filtered: []const usize, selected: usize) ?Action {
+    if (selected >= filtered.len) return null;
+    return command_catalog.entries[filtered[selected]].action;
+}
 
 test "containsIgnoreCase: 빈 needle 통과·대소문자 무시·부분일치" {
     try std.testing.expect(containsIgnoreCase("Split Right", ""));
@@ -99,58 +50,24 @@ test "containsIgnoreCase: 빈 needle 통과·대소문자 무시·부분일치" 
     try std.testing.expect(!containsIgnoreCase("ab", "abc")); // needle이 더 길면 false
 }
 
-test "PaletteState: show/필터/선택 이동/selectedAction" {
+test "filter: 빈 쿼리=전부·부분일치·actionAt 해석" {
     const allocator = std.testing.allocator;
-    var p: PaletteState = .{};
-    defer p.deinit(allocator);
+    var out: std.ArrayList(usize) = .empty;
+    defer out.deinit(allocator);
 
-    try p.show(allocator);
-    try std.testing.expect(p.open);
-    try std.testing.expectEqual(command_catalog.entries.len, p.filtered.items.len); // 빈 쿼리=전부
-    try std.testing.expectEqual(@as(usize, 0), p.selected);
+    try filter(allocator, "", &out);
+    try std.testing.expectEqual(command_catalog.entries.len, out.items.len); // 빈 쿼리 = 전부
 
-    // "split" → Split Right / Split Down 2개.
-    for ("split") |c| try p.appendChar(allocator, c);
-    try std.testing.expectEqual(@as(usize, 2), p.filtered.items.len);
-    try std.testing.expect(p.selectedAction().? == .split_horizontal); // 첫 항목 = Split Right
+    // "split" → Split Right / Split Down 2개. 첫 항목 = split_horizontal.
+    try filter(allocator, "split", &out);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expect(actionAt(out.items, 0).? == .split_horizontal);
+    try std.testing.expect(actionAt(out.items, 1).? == .split_vertical);
+    // 선택이 범위 밖이면 null(크래시 없음).
+    try std.testing.expect(actionAt(out.items, 5) == null);
 
-    // 대문자 섞어도(대소문자 무시) 같은 결과.
-    try p.backspace(allocator); // "spli"
-    try std.testing.expect(p.filtered.items.len >= 2);
-
-    // 선택 이동(클램프).
-    p.moveSelection(1);
-    try std.testing.expect(p.selectedAction().? == .split_vertical); // 둘째 = Split Down
-    p.moveSelection(5); // 끝에서 더 가도 클램프
-    try std.testing.expectEqual(p.filtered.items.len - 1, p.selected);
-    p.moveSelection(-100); // 앞으로도 클램프
-    try std.testing.expectEqual(@as(usize, 0), p.selected);
-}
-
-test "PaletteState: 매칭 없으면 selectedAction null·이동 무동작" {
-    const allocator = std.testing.allocator;
-    var p: PaletteState = .{};
-    defer p.deinit(allocator);
-    try p.show(allocator);
-    for ("zzzznope") |c| try p.appendChar(allocator, c);
-    try std.testing.expectEqual(@as(usize, 0), p.filtered.items.len);
-    try std.testing.expect(p.selectedAction() == null);
-    p.moveSelection(1); // 무동작(크래시 없음)
-    try std.testing.expectEqual(@as(usize, 0), p.selected);
-}
-
-test "PaletteState: backspace로 필터 넓어지고 hide로 닫힌다" {
-    const allocator = std.testing.allocator;
-    var p: PaletteState = .{};
-    defer p.deinit(allocator);
-    try p.show(allocator);
-    for ("split") |c| try p.appendChar(allocator, c);
-    const narrowed = p.filtered.items.len;
-    // 전부 지우면 다시 전체.
-    var k: usize = 0;
-    while (k < 5) : (k += 1) try p.backspace(allocator);
-    try std.testing.expect(p.filtered.items.len > narrowed);
-    try std.testing.expectEqual(command_catalog.entries.len, p.filtered.items.len);
-    p.hide();
-    try std.testing.expect(!p.open);
+    // 매칭 없으면 빈 목록·actionAt null.
+    try filter(allocator, "zzzznope", &out);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    try std.testing.expect(actionAt(out.items, 0) == null);
 }

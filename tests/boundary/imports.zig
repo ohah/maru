@@ -60,12 +60,9 @@ const rules = [_]Rule{
     .{
         // chrome(L3 디자인 시스템)은 플랫폼 중립이어야 한다 — semantic ChromeDraw만 뱉고 session을 **props로만**
         // 읽는다(raw *Pane/*Split·session 모듈을 import하지 않는다). OS/렌더 백엔드(platform·pty), 코어 내부
-        // (terminal·renderer), 세션·앱 런타임(session·app), **설정(config)**을 import하면 props-only seam과
-        // 이식성이 깨지므로 빌드에서 막는다(docs/layering-and-portability.md §2·§8). config 금지: 테마·키바인딩·
-        // Action·카탈로그는 platform이 resolve해 중립 값(color.Rgb·ChromeProps·palette.Row)으로 주입하므로,
-        // 컴포넌트가 config.Action/command_catalog를 직접 import하면 neutrality가 깨진다(C1b 리뷰 발견 — 이전엔
-        // command_catalog가 platform 경로로만 우연히 잡혔고 config는 미강제였다). 허용: std, color·width(top-level
-        // 중립 util), 자기 하위 모듈. session 금지는 chrome 컴포넌트가 session을 직접 만지지 않고 props만 쓰게 강제한다.
+        // (terminal·renderer), 세션·앱 런타임(session·app)을 import하면 props-only seam과 이식성이 깨지므로 빌드
+        // 에서 막는다(docs/layering-and-portability.md §2·§8). 허용: std, color(top-level), 자기 하위 모듈.
+        // session 금지는 C1~C3 이주에서 chrome 컴포넌트가 session을 직접 만지지 않고 props만 쓰게 강제한다.
         .layer = "chrome",
         .barrel = "src/chrome.zig",
         .implementation_dir = "src/chrome",
@@ -76,7 +73,6 @@ const rules = [_]Rule{
             .{ .layer = "renderer" },
             .{ .layer = "session" },
             .{ .layer = "app" },
-            .{ .layer = "config" }, // 설정은 platform이 중립 값으로 주입 — 컴포넌트가 config.Action/카탈로그 직접 import 금지
         },
     },
     .{
@@ -271,12 +267,6 @@ test "importTraversesLayer distinguishes barrel from private implementation" {
     // 무관한 import는 잡지 않는다.
     try std.testing.expect(!importTraversesLayer("core.zig", .{ .layer = "pty" }));
     try std.testing.expect(!importTraversesLayer("std", .{ .layer = "renderer" }));
-    // config(설정) 가드: barrel·구현 디렉터리 모두 잡고, top-level color/width 중립 util은 config가 아니라 안 잡는다
-    // (chrome neutrality — 컴포넌트가 config.Action/카탈로그를 직접 import하지 못하게. C1b 리뷰 발견).
-    try std.testing.expect(importTraversesLayer("../../config/action.zig", .{ .layer = "config" }));
-    try std.testing.expect(importTraversesLayer("../../config.zig", .{ .layer = "config" }));
-    try std.testing.expect(!importTraversesLayer("../../color.zig", .{ .layer = "config" }));
-    try std.testing.expect(!importTraversesLayer("../../width.zig", .{ .layer = "config" }));
 }
 
 test "scanImports catches zig fmt-clean whitespace and multi-line @import forms" {

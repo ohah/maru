@@ -441,6 +441,23 @@ pub export fn maru_macos_app_dev_session_serialize_workspace(
     return @intFromEnum(Status.ok);
 }
 
+// 시작 시 저장된 workspace 텍스트(헤더 + 한 창 블록)를 parse해 이 세션에 첫 창을 복원 적용한다(R4b). Swift가
+// 파일을 창 블록으로 나눠 창마다 한 번씩 호출한다(세션마다 windows[0]을 적용). parse 실패=invalid_config,
+// apply 실패=create_failed, 빈 창=ok(무동작). best-effort라 실패해도 그 창은 기본 단일 탭으로 남는다.
+pub export fn maru_macos_app_dev_session_apply_workspace(
+    session: ?*DevSession,
+    text_ptr: ?[*]const u8,
+    text_len: usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const tp = text_ptr orelse return @intFromEnum(Status.null_out);
+    var parsed = maru.app.workspace.parse(dev_session.allocator, tp[0..text_len]) catch return @intFromEnum(Status.invalid_config);
+    defer parsed.deinit(); // apply가 cwd 슬라이스를 spawn에 다 쓴 뒤 arena 해제(안전)
+    if (parsed.workspace.windows.len == 0) return @intFromEnum(Status.ok);
+    dev_session.applyWorkspaceWindow(parsed.workspace.windows[0]) catch return @intFromEnum(Status.create_failed);
+    return @intFromEnum(Status.ok);
+}
+
 // 전역(OS) 단축키 등록 기술자 목록. config에서 한 번 만들어 세션 동안 불변이라, Swift가 시작 시 한 번
 // 읽어 Carbon RegisterEventHotKey로 등록한다. 배열은 dev session 소유(destroy까지 유효). 비어 있으면
 // out_ptr=null/out_count=0. 매핑 가능한 chord(가상 키코드 있음)만 담긴다.

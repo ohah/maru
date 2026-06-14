@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 37u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 38u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -383,6 +383,15 @@ int32_t maru_macos_app_dev_session_serialize_workspace(
     MaruAppHostDevSession *session,
     const uint8_t **out_ptr,
     size_t *out_len
+);
+
+/* 시작 시 저장된 workspace 텍스트(헤더 + 한 창 블록; UTF-8)를 parse해 이 세션에 첫 창을 복원 적용한다.
+   Swift가 workspace.v1 파일을 창 블록으로 나눠 창마다 한 번씩 호출한다(세션마다 windows[0] 적용). 0=ok,
+   parse 실패=invalid_config, apply 실패=create_failed. best-effort라 실패해도 그 창은 기본 단일 탭으로 남는다. */
+int32_t maru_macos_app_dev_session_apply_workspace(
+    MaruAppHostDevSession *session,
+    const uint8_t *text_ptr,
+    size_t text_len
 );
 
 /* 전역(OS) 단축키 한 개의 등록 기술자. Swift가 Carbon RegisterEventHotKey(carbon_modifiers,

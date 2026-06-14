@@ -25,7 +25,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 37; // 37: maru_macos_app_dev_session_serialize_workspace 추가(R5 workspace 저장)
+pub const abi_version: u32 = 38; // 38: maru_macos_app_dev_session_apply_workspace 추가(R4b workspace 복원)
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -5163,6 +5163,48 @@ test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term �
     try std.testing.expectEqual(@as(usize, 1), cap.tabs[1].panes.len);
     try std.testing.expectEqual(@as(usize, 2), cap.tabs[1].panes[0].surfaces.len);
     try std.testing.expectEqual(@as(usize, 1), cap.tabs[1].panes[0].active_term);
+}
+
+test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // 저장 텍스트(한 창: 단일 탭, split vertical 2 pane, cwd /tmp). apply ABI가 받는 것과 같은 형태.
+    const text =
+        "maru.workspace.v1\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=2 active-pane=1 title=\"\"\n" ++
+        "tree-node split vertical ratio=300\n" ++
+        "tree-node leaf pane=0\n" ++
+        "tree-node leaf pane=1\n" ++
+        "pane surfaces=1 active-term=0\n" ++
+        "surface title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12\n" ++
+        "pane surfaces=1 active-term=0\n" ++
+        "surface title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12\n";
+
+    var parsed = try app.workspace.parse(allocator, text);
+    defer parsed.deinit();
+    try session.applyWorkspaceWindow(parsed.workspace.windows[0]);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const cap = try session.captureWorkspaceWindow(arena.allocator());
+    try std.testing.expectEqual(@as(usize, 1), cap.tabs.len);
+    try std.testing.expectEqual(@as(usize, 2), cap.tabs[0].panes.len);
+    try std.testing.expectEqual(@as(usize, 1), cap.tabs[0].active_pane);
+    try std.testing.expect(cap.tabs[0].tree[0].split.direction == .vertical);
+    try std.testing.expectEqual(@as(u16, 300), cap.tabs[0].tree[0].split.ratio_milli);
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {

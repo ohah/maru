@@ -586,6 +586,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         tickTimer = nil
         smokeTimer?.invalidate()
         smokeTimer = nil
+        // workspace를 '정상 종료'에 저장한다 — applicationWillTerminate는 크래시에선 안 불리므로(자동 충족),
+        // 마지막 정상 세션만 디스크에 남는다(다음 실행이 그걸 복원, R4). shutdown '전에'(세션이 아직 살아 있을 때).
+        saveWorkspace()
         // 종료 중에는 추가 tick을 돌리지 않는다. tick은 session_ended에서 NSApp.terminate를
         // 부르므로, 여기서 다시 tick하면 재진입 terminate가 된다. 마지막 counter는
         // shutdownDevSession의 close()가 summary에 담는다.
@@ -1943,6 +1946,34 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             maru_metal_renderer_destroy(renderer)
             surface.metalRenderer = nil
         }
+    }
+
+    /// 저장된 workspace 파일 위치(~/Library/Application Support/maru/workspace.v1). R5 저장·R4 로드가 공유한다.
+    private var workspaceFileURL: URL? {
+        guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        return support.appendingPathComponent("maru/workspace.v1")
+    }
+
+    /// 정상 종료 시 현재 멀티 창 workspace를 디스크에 저장한다(R5). 각 일반 창(세션)의 블록을 ABI로 받아
+    /// `maru.workspace.v1` 헤더 하나 아래로 모은다. quick 패널은 transient라 제외. smoke·빈 창·쓰기 실패는
+    /// best-effort로 건너뛴다(저장 실패가 종료를 막지 않는다). 크래시 가드는 호출처(applicationWillTerminate가
+    /// 정상 종료에만 불림)가 보장 — 깨진 세션이 마지막 저장을 덮어쓰지 않는다.
+    private func saveWorkspace() {
+        guard !smokeMode, !windows.isEmpty else { return }
+        var blocks = ""
+        for surface in windows {
+            guard let session = surface.devSession else { continue }
+            var ptr: UnsafePointer<UInt8>? = nil
+            var len: size_t = 0
+            guard maru_macos_app_dev_session_serialize_workspace(session, &ptr, &len) == Self.statusOK,
+                  let bytes = ptr, len > 0 else { continue } // 캡처 실패한 창은 건너뜀
+            blocks += String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
+        }
+        guard !blocks.isEmpty, let url = workspaceFileURL else { return }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? ("maru.workspace.v1\n" + blocks).data(using: .utf8)?.write(to: url, options: .atomic)
     }
 
     private func shutdownDevSession() {

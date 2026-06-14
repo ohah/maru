@@ -25,7 +25,7 @@ pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 
-pub const abi_version: u32 = 36;
+pub const abi_version: u32 = 37; // 37: maru_macos_app_dev_session_serialize_workspace 추가(R5 workspace 저장)
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -713,6 +713,9 @@ pub const DevSession = struct {
     // config가 정한 기본 폰트 크기(pt). ⌘0(reset_font_size)이 여기로 되돌린다 — appearance.font.size는
     // 런타임에 바뀌므로 원래 값을 따로 보관한다. init에서 resolve된 appearance.font.size로 채운다.
     base_font_size: f32 = 0,
+    // serializeWorkspaceWindow가 돌려주는 workspace 텍스트의 소유 버퍼(다음 호출/deinit까지 유효 — cwd ABI와 같은
+    // 소유 규칙). Swift가 멀티 창 저장에서 세션마다 한 번 읽는다.
+    workspace_buffer: ?[]u8 = null,
     // 시작 시 로드한 raw config(~/.config/maru/config). arena가 font.family 문자열을 소유하고,
     // resolve된 appearance.font.family가 그 슬라이스를 빌리므로 세션 동안 살아 있어야 한다.
     loaded_config: config_mod.ParsedConfig = undefined,
@@ -3189,6 +3192,22 @@ pub const DevSession = struct {
         return null;
     }
 
+    /// 이 창의 workspace 블록(헤더 없는 `window …` 텍스트)을 직렬화해 세션-소유 버퍼로 돌려준다(R5 저장 ABI).
+    /// 캡처는 임시 arena로 하고, 결과 텍스트만 self.allocator로 보관한다(다음 호출/deinit까지 유효 — cwd ABI와
+    /// 같은 소유 규칙). Swift가 멀티 창 저장에서 세션마다 호출해 `maru.workspace.v1` 헤더 아래로 모은다.
+    pub fn serializeWorkspaceWindow(self: *DevSession) ![]const u8 {
+        if (self.workspace_buffer) |b| {
+            self.allocator.free(b);
+            self.workspace_buffer = null;
+        }
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const win = try self.captureWorkspaceWindow(arena.allocator());
+        const text = try app.workspace.serializeWindow(self.allocator, win);
+        self.workspace_buffer = text;
+        return text;
+    }
+
     /// quick terminal 표시 옵션(config에서 파싱). Swift가 패널 크기·화면·자동 숨김에 쓴다. 세션 동안 불변.
     pub fn quickTerminalConfig(self: *const DevSession) QuickTerminalConfig {
         const qt = self.loaded_config.config.quick_terminal;
@@ -4038,6 +4057,7 @@ pub const DevSession = struct {
         self.palette.deinit(self.allocator);
         self.find.deinit(self.allocator);
         self.find_view_spans.deinit(self.allocator);
+        if (self.workspace_buffer) |b| self.allocator.free(b);
         self.hover_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
         // 1) 각 탭의 각 panel의 각 Term live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'.
@@ -4930,6 +4950,31 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
     try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node split horizontal") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "cwd=\"/tmp/proj\"") != null);
+}
+
+test "serializeWorkspaceWindow: 세션-소유 헤더 없는 블록 + 재호출 시 이전 버퍼 해제" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit(); // workspace_buffer 해제 — testing.allocator가 leak을 잡는다
+    _ = try session.resize(800, 600, 1000);
+    try session.activeSurface().core.write("\x1b]7;file://h/srv\x07");
+
+    const b0 = try session.serializeWorkspaceWindow();
+    try std.testing.expect(std.mem.startsWith(u8, b0, "window ")); // 헤더 없는 블록(Swift가 헤더 하나로 모음)
+    try std.testing.expect(std.mem.indexOf(u8, b0, "cwd=\"/srv\"") != null);
+
+    // 재호출: 이전 버퍼를 해제하고 새로 만든다(이전 버퍼를 안 free하면 testing.allocator leak).
+    const b1 = try session.serializeWorkspaceWindow();
+    try std.testing.expect(std.mem.startsWith(u8, b1, "window "));
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {

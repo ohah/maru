@@ -4246,17 +4246,21 @@ pub const DevSession = struct {
             .rule => {}, // 컴포넌트가 아직 안 냄 — 필요해질 때(C2 divider) 셀 라인으로 lower
         };
 
-        // 4) 그리드를 DrawCell 배열로 평탄화(allocator 소유). width는 wide 문자(한글/CJK)면 2 — frame builder가
-        // 그 폭으로 글리프를 그려 겹침/잘림을 막는다(continuation 칸은 빈칸 width 1로 남되 wide 글리프가 덮음).
+        // 4) 그리드를 DrawCell 배열로 평탄화(allocator 소유). wide 문자(한글/CJK)면 width=2 — frame builder가 그 폭으로
+        // 글리프를 그린다. **wide 셀의 continuation 칸(c+1)은 emit하지 않는다** — emit하면 그 칸의 배경 quad가 합성 때
+        // wide 글리프의 오른쪽 절반을 surface_bg로 덮어 잘려 보였다(터미널도 cell.continuation을 같은 이유로 스킵한다).
+        // wide 셀의 2칸 배경이 그 칸을 덮으므로 패널 bg는 유지된다.
         var cells: std.ArrayList(renderer.DrawCell) = .empty;
         errdefer cells.deinit(allocator);
         try cells.ensureTotalCapacity(allocator, n);
         var r: u16 = 0;
         while (r < rows) : (r += 1) {
             var c: u16 = 0;
-            while (c < cols) : (c += 1) {
+            while (c < cols) {
                 const idx = @as(usize, r) * @as(usize, cols) + c;
-                cells.appendAssumeCapacity(.{ .row = r, .col = c, .codepoint = cp[idx], .width = cwid[idx], .style = .{ .foreground = fg[idx], .background = bg[idx] } });
+                const w = cwid[idx];
+                cells.appendAssumeCapacity(.{ .row = r, .col = c, .codepoint = cp[idx], .width = w, .style = .{ .foreground = fg[idx], .background = bg[idx] } });
+                c += if (w == 2) @as(u16, 2) else 1; // wide면 continuation 칸 스킵
             }
         }
         return .{ .cells = cells, .cols = cols, .rows = rows, .origin_x = origin_x, .origin_y = origin_y, .cursor = cursor };
@@ -4288,7 +4292,8 @@ pub const DevSession = struct {
     /// 표시 폭은 EAW(terminal.width.cellWidth)로 — 한글/CJK는 2칸을 전진하며 시작 칸의 DrawCell.width=2로
     /// 표시한다(coretext_frame_builder line 121/158과 같은 `@max(1, cellWidth)` 캐논 패턴). 그래야 wide 글리프가
     /// 2칸 폭으로 그려지고 다음 글자가 겹치지 않는다(한글이 잘려 보이던 회귀의 루트커즈). continuation 칸은 빈칸
-    /// (codepoint ' ')으로 남아 frame builder가 건너뛰고, wide 글리프가 그 위를 덮는다. rasterizeOverlayCells 전용.
+    /// (codepoint ' ')으로 남고, 평탄화(위 4단계)가 그 칸을 emit하지 않는다(배경 quad가 wide 글리프를 덮지 않게).
+    /// rasterizeOverlayCells 전용.
     fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, t: chrome.draw.Op.Text, color: terminal.Color) void {
         const row_i = @divTrunc(t.origin.y - @as(i32, @intCast(origin_y)), @as(i32, @intCast(ch)));
         if (row_i < 0 or row_i >= rows) return;
@@ -5372,6 +5377,46 @@ test "rasterizeOverlayCells: 다중 fill(painter order) + 다중 행 text → �
     try std.testing.expectEqual(@as(u21, 'd'), raster.cells.items[3].codepoint);
     try std.testing.expectEqual(c.rgb(2, 2, 2), raster.cells.items[0].style.background.rgb); // row0 surface_bg
     try std.testing.expectEqual(c.rgb(7, 7, 7), raster.cells.items[2].style.background.rgb); // row1 selection(painter order)
+}
+
+test "rasterizeOverlayCells: wide 글리프 뒤 continuation 칸은 emit 안 함(배경이 글리프 안 덮게 — ㄱ 잘림 회귀)" {
+    const allocator = std.testing.allocator;
+    const cc = struct {
+        fn rgb(r: u8, g: u8, b: u8) maru.color.Rgb {
+            return .{ .r = r, .g = g, .b = b };
+        }
+    };
+    const tk = chrome.tokens.Tokens.tui(.{
+        .foreground = cc.rgb(1, 1, 1),
+        .sidebar_background = cc.rgb(2, 2, 2),
+        .sidebar_foreground = cc.rgb(3, 3, 3),
+        .sidebar_active = cc.rgb(4, 4, 4),
+        .search_match = cc.rgb(5, 5, 5),
+        .search_match_current = cc.rgb(6, 6, 6),
+        .selection = cc.rgb(7, 7, 7),
+        .cursor = cc.rgb(8, 8, 8),
+    });
+    // cw=10, ch=20. 패널 4칸×1행. "가b" — '가'(wide=2칸) col0, 'b' col2. continuation 칸(col1)은 emit 안 돼야 한다.
+    const run = [_]chrome.draw.Run{.{ .text = "가b" }};
+    const ops = [_]chrome.draw.Op{
+        .{ .fill = .{ .rect = .{ .x = 0, .y = 0, .w = 40, .h = 20 }, .role = .surface_bg } },
+        .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &run, .role = .surface_fg } },
+    };
+    const draws = [_]chrome.ChromeDraw{.{ .layer = .modal, .ops = &ops }};
+
+    var raster = try DevSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20);
+    defer raster.cells.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u16, 4), raster.cols);
+    // 셀: 가@col0(w2) + b@col2 + space@col3 = 3개. continuation col1은 스킵(emit하면 그 배경이 '가' 오른쪽 절반을 덮음).
+    try std.testing.expectEqual(@as(usize, 3), raster.cells.items.len);
+    try std.testing.expectEqual(@as(u21, '가'), raster.cells.items[0].codepoint);
+    try std.testing.expectEqual(@as(u16, 0), raster.cells.items[0].col);
+    try std.testing.expectEqual(@as(u2, 2), raster.cells.items[0].width); // wide
+    try std.testing.expectEqual(@as(u21, 'b'), raster.cells.items[1].codepoint);
+    try std.testing.expectEqual(@as(u16, 2), raster.cells.items[1].col); // 가가 2칸 차지 → b는 col2
+    // col1(가의 continuation)을 가진 셀이 없어야 한다.
+    for (raster.cells.items) |cell| try std.testing.expect(cell.col != 1);
 }
 
 test "chrome Notice 모달: showNotice → 메시지 소유 복사·오버레이 프레임·입력 라우팅·메뉴 차단·Esc 닫기" {

@@ -2142,6 +2142,7 @@ pub const DevSession = struct {
         if (self.chrome_host.palette.open) {
             self.chrome_host.palette.hide();
         } else {
+            self.chrome_host.notice.dismiss(); // 배타적 — notice 위에 열지 않는다
             self.chrome_host.find.hide(); // 배타적
             self.find_matches.clearRetainingCapacity();
             self.chrome_host.palette.show();
@@ -2204,6 +2205,7 @@ pub const DevSession = struct {
             self.chrome_host.find.hide();
             self.find_matches.clearRetainingCapacity(); // 닫힘 — 하이라이트 중단
         } else {
+            self.chrome_host.notice.dismiss(); // 배타적 — notice 위에 열지 않는다
             self.chrome_host.palette.hide();
             self.chrome_host.find.show();
         }
@@ -2757,11 +2759,13 @@ pub const DevSession = struct {
         }
     }
 
-    /// 입력(키·IME)이 지금 어디로 가는가 — **단일 출처**. 모달은 배타적(toggleFind/togglePalette가 서로 닫는다)이라
-    /// 최대 하나만 열린다. notice는 텍스트 입력 대상이 아니라(dismiss만) 여기 안 든다. 모든 IME 연산(preedit set·
-    /// 조합 판정·caret)이 이걸로 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    const InputFocus = enum { terminal, find, palette };
+    /// 입력(키·IME)이 지금 어디로 가는가 — **단일 출처**. 모달은 배타적(show가 서로 닫는다 — showNotice/toggleFind/
+    /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
+    /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
+    /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
+    const InputFocus = enum { terminal, notice, find, palette };
     fn inputFocus(self: *const DevSession) InputFocus {
+        if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
         if (self.chrome_host.find.open) return .find;
         if (self.chrome_host.palette.open) return .palette;
         return .terminal;
@@ -2771,6 +2775,7 @@ pub const DevSession = struct {
     /// switch라 입력 대상 추가 시 컴파일러가 누락을 막는다.
     fn imeSetPreedit(self: *DevSession, bytes: []const u8) void {
         switch (self.inputFocus()) {
+            .notice => {}, // notice는 조합을 표시하지 않는다(텍스트 입력 대상 아님)
             .find => self.chrome_host.find.setPreedit(self.allocator, bytes) catch {},
             .palette => self.chrome_host.palette.setPreedit(self.allocator, bytes) catch {},
             .terminal => self.activeSurface().core.setPreedit(bytes) catch {},
@@ -2781,6 +2786,7 @@ pub const DevSession = struct {
     /// find/palette 조합을 놓쳤다(단일-출처 위반 → 조합 보호·표시 버그). inputFocus로 통일.
     fn imeComposingActive(self: *const DevSession) bool {
         return switch (self.inputFocus()) {
+            .notice => false, // notice는 조합 상태가 없다
             .find => self.chrome_host.find.preedit.items.len > 0,
             .palette => self.chrome_host.palette.preedit.items.len > 0,
             .terminal => self.activeSurfaceConst().core.preedit != null,
@@ -2793,7 +2799,9 @@ pub const DevSession = struct {
         if (!self.surface_initialized) return;
         // 조합도 타이핑이다 — 과거를 보는 중이면 바닥으로 스냅해 preedit이 보이게 한다
         // (handleKeyEvent의 "입력하면 live 복귀"와 같은 동작; 조합 키는 그 경로를 안 타므로 여기서).
-        if (self.activeSurface().core.viewOffset() != 0) {
+        // **터미널 입력일 때만** — find/palette에서 조합하면 뒤 터미널 스크롤백을 건드리면 안 된다(조합은
+        // 오버레이 입력칸으로 가지 터미널로 안 간다; inputFocus 단일 출처로 판정).
+        if (self.inputFocus() == .terminal and self.activeSurface().core.viewOffset() != 0) {
             self.activeSurface().core.scrollToBottom();
             self.metal_dirty = true;
         }
@@ -2899,6 +2907,7 @@ pub const DevSession = struct {
         // null(패널 밖)이거나 터미널이면 아래 터미널 커서로 폴백.
         const props = self.buildChromeProps();
         const overlay_caret: ?chrome.draw.Rect = switch (self.inputFocus()) {
+            .notice => null, // 조합을 안 받으므로 후보창 위치 무의미 — 아래 터미널 커서로 폴백(실제론 안 뜸)
             .find => chrome.components.find.caretRect(&self.chrome_host.find, props),
             .palette => chrome.components.palette.caretRect(&self.chrome_host.palette, props),
             .terminal => null,
@@ -2924,6 +2933,7 @@ pub const DevSession = struct {
     pub fn commitComposition(self: *DevSession) void {
         if (!self.surface_initialized) return;
         switch (self.inputFocus()) {
+            .notice => {}, // notice는 확정할 조합이 없다
             .terminal => {
                 const core = &self.activeSurface().core;
                 if (core.preedit) |pending| {
@@ -4121,7 +4131,11 @@ pub const DevSession = struct {
             o[0] = .{ .cursor = .{ .row = cur.row, .col = cur.col, .visible = true, .shape = .block } };
             break :blk o;
         } else try self.allocator.alloc(renderer.DrawOverlay, 0);
-        errdefer self.allocator.free(overlays);
+        // draw_list 완성 전(toOwnedSlice OOM 등)에 실패하면 overlays를 직접 해제한다. 완성되면 draw_list가
+        // overlays·cells를 소유하므로 **disarm**한다 — 안 그러면 buildFromDrawList의 실패 정리(owned_list.deinit가
+        // overlays까지 free)와 겹쳐 **이중 해제**된다(coretext_frame_builder의 draw_list_owned 패턴과 동형).
+        var overlays_owned = true;
+        errdefer if (overlays_owned) self.allocator.free(overlays);
         const draw_list: renderer.DrawList = .{
             .size = .{ .cols = cols, .rows = rows },
             .cursor = cursor orelse .{ .row = 0, .col = 0, .visible = false },
@@ -4129,6 +4143,7 @@ pub const DevSession = struct {
             .cells = try cells.toOwnedSlice(self.allocator),
             .overlays = overlays,
         };
+        overlays_owned = false; // 소유권이 draw_list로 — 이후 실패는 buildFromDrawList가 draw_list.deinit로 정리
         // appearance·cell_w/h를 호출자가 준다 — 오버레이는 터미널과 같은 셀·폰트(1×)를 쓴다(buildChromeOverlayFrame가
         // self.cell_width_px·self.appearance를 넘김). 글리프 픽셀(font.size×scale)과 atlas slot(cell)이 같은 메트릭에서
         // 나와 정확히 맞는다 — 1.3× 확대 시절의 스케일 불일치(글자 약간 잘림)가 없다.
@@ -4406,6 +4421,9 @@ pub const DevSession = struct {
         if (draws.items.len == 0) return error.NotOpen;
 
         var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch);
+        // finishOverlayFrame이 cells 소유권을 toOwnedSlice로 가져가기 **전에** 실패하면(예: overlays alloc OOM)
+        // raster.cells가 미해제로 남는다 — 그 경로만 정리한다(성공/이전 후엔 cells가 비어 no-op).
+        errdefer raster.cells.deinit(self.allocator);
         return self.finishOverlayFrame(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y, appearance, cw, ch, raster.cursor);
     }
 
@@ -4413,6 +4431,11 @@ pub const DevSession = struct {
     /// 호출자(ABI/Swift) 버퍼가 transient면 dangling. 512B 초과는 잘라 표시하되 **UTF-8 코드포인트 경계에서** 자른다
     /// (바이트 경계에서 자르면 한글 등 multibyte가 U+FFFD로 깨진다 — 리뷰 발견). 다음 tick이 오버레이로 그린다.
     pub fn showNotice(self: *DevSession, message: []const u8) void {
+        // 오버레이 배타 — notice가 뜨면 find/palette를 닫는다(한 번에 하나만: collectDraws·inputFocus가 단일
+        // 오버레이를 가정한다 — 안 닫으면 두 박스가 합쳐진 frame으로 깨져 보이고 IME가 뒤 find로 샌다).
+        self.chrome_host.find.hide();
+        self.find_matches.clearRetainingCapacity(); // find 닫힘 — 매치 하이라이트 정리(toggleFind와 동일)
+        self.chrome_host.palette.hide();
         var n = @min(message.len, self.notice_message_buf.len);
         // 잘렸으면 continuation 바이트(0x80~0xBF)에서 멈추지 않게 lead 바이트까지 되돌린다(코드포인트 중간 절단 방지).
         if (n < message.len) {
@@ -5288,6 +5311,84 @@ test "find IME 멀티-문자: 커밋이 다음 조합 preedit를 안 지운다(�
     // "다"를 지워 조합이 화면에서 사라졌다(사용자 제보 "입력중 상태 안 보임"). 단일 출처·core 모델 통일로 수정.
     try std.testing.expectEqualStrings("\xeb\x82\x98", session.chrome_host.find.query.items); // "나" 확정
     try std.testing.expectEqualStrings("\xeb\x8b\xa4", session.chrome_host.find.preedit.items); // "다" 조합 유지
+}
+
+test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫고 notice가 최우선(IME 무시)·toggle이 notice를 닫음" {
+    // 경량 — show/toggle·inputFocus·IME 헬퍼만 탄다(CoreText/PTY 불필요). undefined 세션은 이들이 읽는 필드만 초기화.
+    var session: DevSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.chrome_host = .{}; // inputFocus가 notice/find/palette.open을 읽음([[devsession-undefined-test-field-trap]])
+    session.find_matches = .empty; // toggleFind/showNotice가 clearRetainingCapacity 호출
+    session.palette_filtered = .empty; // togglePalette→recomputePalette가 채운다
+    session.metal_dirty = false;
+    defer {
+        session.chrome_host.deinit(std.testing.allocator);
+        session.find_matches.deinit(std.testing.allocator);
+        session.palette_filtered.deinit(std.testing.allocator);
+    }
+
+    // 오버레이 없음 → terminal
+    try std.testing.expectEqual(DevSession.InputFocus.terminal, session.inputFocus());
+
+    // find 열림 → .find
+    session.toggleFind();
+    try std.testing.expect(session.chrome_host.find.open);
+    try std.testing.expectEqual(DevSession.InputFocus.find, session.inputFocus());
+
+    // showNotice가 find를 닫는다(#2 배타) — notice가 최우선 포커스(#3)
+    session.showNotice("corrupt");
+    try std.testing.expect(session.chrome_host.notice.open);
+    try std.testing.expect(!session.chrome_host.find.open); // #2: 두 박스가 합쳐진 frame으로 안 깨짐
+    try std.testing.expectEqual(DevSession.InputFocus.notice, session.inputFocus()); // #3: 최우선
+    // #3: notice 중 IME 연산은 무시 — 조합이 뒤(find/터미널)로 새지 않는다
+    session.imeSetPreedit("\xea\xb0\x80"); // "가"
+    try std.testing.expect(!session.imeComposingActive());
+
+    // toggleFind가 notice를 닫는다(#2)
+    session.toggleFind();
+    try std.testing.expect(!session.chrome_host.notice.open); // #2
+    try std.testing.expect(session.chrome_host.find.open);
+
+    // togglePalette가 notice·find를 닫는다(#2) → palette 포커스
+    session.showNotice("corrupt2");
+    try std.testing.expect(!session.chrome_host.find.open); // showNotice가 find도 닫음
+    session.togglePalette();
+    try std.testing.expect(!session.chrome_host.notice.open); // #2
+    try std.testing.expect(session.chrome_host.palette.open);
+    try std.testing.expectEqual(DevSession.InputFocus.palette, session.inputFocus());
+}
+
+test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 뒤 터미널 스크롤백을 보존(#4)" {
+    var session: DevSession = undefined;
+    session.allocator = std.testing.allocator;
+    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
+    defer tab_surface.deinit();
+    session.surface_initialized = true;
+    var st_ptrs = [_]*app.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
+    session.metal_dirty = false;
+    session.chrome_host = .{}; // inputFocus가 읽음
+    session.ime_inserted = .empty; // imeBegin이 clearRetainingCapacity 호출
+    defer session.chrome_host.deinit(std.testing.allocator);
+    defer session.ime_inserted.deinit(std.testing.allocator);
+
+    // 9줄 출력 → 5행 화면 위로 4줄 스크롤백
+    try tab_surface.core.write("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9");
+    session.scrollPage(1); // 위로 한 화면
+    try std.testing.expectEqual(@as(usize, 4), tab_surface.core.view_offset);
+
+    // (a) 터미널 포커스: imeBegin이 바닥으로 스냅한다(조합도 타이핑 — preedit이 보이게)
+    session.imeBegin();
+    try std.testing.expectEqual(@as(usize, 0), tab_surface.core.view_offset);
+
+    // 다시 위로 스크롤
+    session.scrollPage(1);
+    try std.testing.expectEqual(@as(usize, 4), tab_surface.core.view_offset);
+
+    // (b) find 포커스: imeBegin은 뒤 터미널을 건드리지 않는다(#4 — 조합은 find 입력칸으로 간다)
+    session.chrome_host.find.open = true;
+    session.imeBegin();
+    try std.testing.expectEqual(@as(usize, 4), tab_surface.core.view_offset); // 보존
 }
 
 test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회귀 실측(실 CoreText)" {

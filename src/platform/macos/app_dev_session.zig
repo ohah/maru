@@ -230,34 +230,8 @@ fn paneBarBgCell(bar: app.SplitRect, cell_width_px: u32, bg: u32) ?metal_frame.N
     return sentinelBgCell(0, @intCast(cols_u32), bg, bar.x, bar.y);
 }
 
-/// UTF-8 바이트를 코드포인트로 디코드해 line[start..]에 한 칸씩 채운다(폭 1 가정 — 팝업 텍스트/기호용).
-/// line 끝이나 디코드 실패에서 멈춘다(부분 채움 허용). 깨진 UTF-8은 그 지점에서 중단.
-fn putUtf8(line: []u21, start: usize, bytes: []const u8) void {
-    var col = start;
-    var view = std.unicode.Utf8View.init(bytes) catch return;
-    var it = view.iterator();
-    while (it.nextCodepoint()) |cp| {
-        if (col >= line.len) break;
-        line[col] = cp;
-        col += @max(1, terminal.width.cellWidth(cp)); // wide(한글/CJK)는 2칸 전진 — 다음 글자가 안 겹친다(placeText와 동일 규약)
-    }
-}
-
-/// 팝업 한 행을 DrawCell로 emit한다 — 각 칸에 codepoint + 불투명 bg + fg. bg가 non-default라 buildFromDrawList가
-/// sentinel bg 셀을 내 패널이 아래(터미널·커서)를 덮는다(공백 칸도 bg가 칠해진다). 폭은 EAW(terminal.width.cellWidth)로
-/// — 한글/CJK는 width=2라 wide 글리프가 2칸으로 그려진다(안 그러면 atlas slot이 1칸이라 오른쪽 절반이 잘려 ㄱㄴㄷ로
-/// 보인다 — coretext_frame_builder의 `@max(1, cellWidth)` 캐논 패턴과 일치). continuation 칸은 빈칸으로 남아 셰이퍼가 건너뛴다.
-fn appendPaletteRow(allocator: std.mem.Allocator, cells: *std.ArrayList(renderer.DrawCell), row: u16, line: []const u21, bg: terminal.Color, fg: terminal.Color) !void {
-    for (line, 0..) |cp, c| {
-        try cells.append(allocator, .{
-            .row = row,
-            .col = @intCast(c),
-            .codepoint = cp,
-            .width = @intCast(@min(@max(1, terminal.width.cellWidth(cp)), 2)),
-            .style = .{ .foreground = fg, .background = bg },
-        });
-    }
-}
+// putUtf8/appendPaletteRow(레거시 팝업 텍스트 레이아웃)는 제거했다 — 팝업이 chrome 컴포넌트로 이주(C1b)해
+// rasterizeOverlayCells의 placeText(EAW-폭)를 find와 공유한다. 코드포인트당 1칸 깔던 putUtf8이 한글을 자르던 원인.
 
 /// 점(backing px)이 사각형 안인가([x, x+w) × [y, y+h) 반열린). 탭 바 클릭 hit-test에 쓴다. 비유한은 false.
 fn pointInRect(x_px: f64, y_px: f64, rect: app.SplitRect) bool {
@@ -727,9 +701,11 @@ pub const DevSession = struct {
     command_entries: std.ArrayList(CommandEntry) = .empty,
     command_key_displays: std.ArrayList([:0]u8) = .empty,
     command_key_equivalents: std.ArrayList([:0]u8) = .empty,
-    // 커맨드 팝업(Cmd+Shift+P) 상태(열림/필터/선택). 열려 있으면 handleKeyEvent가 키를 팝업으로 라우팅하고,
-    // tick이 최상위 오버레이 frame으로 그린다. 상태머신은 command_palette.zig(순수 로직, 카탈로그를 필터).
-    palette: command_palette.PaletteState = .{},
+    // 커맨드 팝업(Cmd+Shift+P)의 필터된 카탈로그 인덱스(표시 순서). UI 상태(open/query/preedit/selected)는 chrome
+    // 컴포넌트(chrome_host.palette)가 든다 — C1b에서 chrome으로 이주했다(find와 같은 경로: placeText·IME·caret 공유).
+    // command_palette.filter가 쿼리로 채우고(recomputePalette), buildChromeOverlayFrame이 이 인덱스로 Row를 만들어
+    // 컴포넌트 view에 주입한다(카탈로그는 platform 소유라 neutral chrome에 못 넘긴다 — 필터된 행만 넘긴다).
+    palette_filtered: std.ArrayList(usize) = .empty,
     // 스크롤백 Find(⌘F)의 매치 리스트(절대 좌표). UI 상태(검색어/현재/카운트)는 chrome_host.find가 들고, 매치
     // 리스트만 session이 소유한다 — terminal.Match라 chrome으로 못 옮긴다(중립 경계). 검색은 코어(findMatches)가
     // 채우고(recomputeFind), tick이 뷰포트로 클립해 하이라이트한다. 현재 매치 인덱스는 chrome_host.find.current.
@@ -2157,13 +2133,36 @@ pub const DevSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 커맨드 팝업을 토글한다 — 열려 있으면 닫고, 아니면 카탈로그 전체로 연다. show OOM이면 안 연다(무해).
+    /// 커맨드 팝업을 토글한다 — 열려 있으면 닫고, 아니면 카탈로그 전체로 연다(빈 쿼리=전부). Find와 배타적이라
+    /// Find를 닫고 연다. UI 상태는 chrome_host.palette, 필터 결과는 platform(palette_filtered).
     fn togglePalette(self: *DevSession) void {
-        if (self.palette.open) {
-            self.palette.hide();
+        if (self.chrome_host.palette.open) {
+            self.chrome_host.palette.hide();
         } else {
-            self.palette.show(self.allocator) catch return;
+            self.chrome_host.find.hide(); // 배타적
+            self.find_matches.clearRetainingCapacity();
+            self.chrome_host.palette.show();
+            self.recomputePalette(); // 초기 필터(전체) + setResultCount
         }
+    }
+
+    /// 현재 쿼리로 카탈로그를 다시 필터해 palette_filtered를 채우고, 컴포넌트의 result_count를 동기화한다(selected는
+    /// 맨 위로 — 증분 검색 관용). 타이핑·Backspace·초기 열기마다. OOM이면 목록을 비워 안전하게 둔다. find의
+    /// recomputeFind에 대응(검색은 platform이, UI 동기화는 컴포넌트가).
+    fn recomputePalette(self: *DevSession) void {
+        command_palette.filter(self.allocator, self.chrome_host.palette.query.items, &self.palette_filtered) catch {
+            self.palette_filtered.clearRetainingCapacity();
+        };
+        self.chrome_host.palette.selected = 0; // 쿼리 변경 시 선택 맨 위(레거시 동작 보존)
+        self.chrome_host.palette.setResultCount(self.palette_filtered.items.len);
+    }
+
+    /// 선택된 명령을 실행한다 — palette_filtered[selected]를 카탈로그 Action으로 해석하고, 팝업을 닫은 뒤 dispatch한다
+    /// (레거시 순서: 닫고 실행 — 실행이 또 metal_dirty 등 세움). 매치 없으면 닫기만. palette_accept Action이 부른다.
+    fn acceptPalette(self: *DevSession) void {
+        const action = command_palette.actionAt(self.palette_filtered.items, self.chrome_host.palette.selected);
+        self.chrome_host.palette.hide();
+        if (action) |a| self.dispatchAppAction(a);
     }
 
     /// terminal.KeyEvent → chrome.input.InputEvent. chrome은 terminal 타입을 모르므로(L1/L3 경계) 이 변환을
@@ -2195,32 +2194,6 @@ pub const DevSession = struct {
         } };
     }
 
-    /// 팝업이 열려 있을 때 키를 팝업으로 라우팅한다(handleKeyEvent가 resolver 앞에서 호출). Esc/모디파이어 조합=닫기,
-    /// Enter=선택 실행 후 닫기, ↑↓=선택 이동, Backspace=한 글자 삭제, 평문 글자=필터에 추가, 그 외 특수키=닫기(안전).
-    fn handlePaletteKey(self: *DevSession, event: terminal.KeyEvent) void {
-        switch (event.key) {
-            .escape => self.palette.hide(),
-            .enter => {
-                const action = self.palette.selectedAction();
-                self.palette.hide();
-                if (action) |a| self.dispatchAppAction(a); // 닫은 뒤 실행(실행이 또 metal_dirty 등 세움)
-            },
-            .arrow_up => self.palette.moveSelection(-1),
-            .arrow_down => self.palette.moveSelection(1),
-            .backspace => self.palette.backspace(self.allocator) catch {},
-            .char => |c| {
-                // 모디파이어 조합(⌘⇧P 등)은 팝업을 닫는다(토글-닫기 포함). 평문 글자만 필터에 쌓는다.
-                if (event.modifiers.command or event.modifiers.control or event.modifiers.option) {
-                    self.palette.hide();
-                } else {
-                    self.palette.appendChar(self.allocator, c) catch {};
-                }
-            },
-            else => self.palette.hide(),
-        }
-        self.metal_dirty = true;
-    }
-
     /// 스크롤백 Find를 토글한다 — 열려 있으면 닫고(매치 하이라이트 정리), 아니면 연다(빈 검색어). 팝업과 배타적
     /// 이라 팝업을 닫고 연다. UI 상태는 chrome_host.find, 검색은 검색어가 생길 때 recomputeFind가 한다.
     fn toggleFind(self: *DevSession) void {
@@ -2228,7 +2201,7 @@ pub const DevSession = struct {
             self.chrome_host.find.hide();
             self.find_matches.clearRetainingCapacity(); // 닫힘 — 하이라이트 중단
         } else {
-            self.palette.hide();
+            self.chrome_host.palette.hide();
             self.chrome_host.find.show();
         }
     }
@@ -2241,6 +2214,10 @@ pub const DevSession = struct {
             .find_close => self.find_matches.clearRetainingCapacity(), // find.hide는 컴포넌트가 이미 — 하이라이트만 정리
             .find_navigated => self.scrollToCurrentMatch(),
             .find_query_changed => self.recomputeFind(),
+            .palette_close => {}, // palette.hide는 컴포넌트가 이미 — platform 부수효과 없음
+            .palette_query_changed => self.recomputePalette(), // 재필터 + result_count 동기화
+            .palette_selection_changed => {}, // 선택만 이동 — 스크롤 윈도우는 buildChromeOverlayFrame이 파생, 부수효과 없음
+            .palette_accept => self.acceptPalette(), // 선택 명령 해석·닫기·dispatch
         }
     }
 
@@ -2360,24 +2337,15 @@ pub const DevSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
-        // chrome 모달(Notice·Find)이 열려 있으면 키를 chrome으로 라우팅한다 — 최상위(팝업보다 먼저, 셋은 배타적).
-        // handleInput이 컴포넌트 handle로 보내 의도(HostAction)를 내고, dispatchChromeAction이 session 부수효과
-        // (재검색·스크롤·닫기)를 실행한다. 모든 키를 소비한다(모달이라 터미널엔 안 내려간다).
-        if (self.chrome_host.notice.open or self.chrome_host.find.open) {
+        // chrome 모달(Notice·Find·Palette)이 열려 있으면 키를 chrome으로 라우팅한다 — 최상위(PTY/스크롤보다 먼저,
+        // 셋은 배타적). handleInput이 컴포넌트 handle로 보내 의도(HostAction)를 내고, dispatchChromeAction이 session
+        // 부수효과(재검색·스크롤·필터·실행·닫기)를 실행한다. 모든 키를 소비한다(모달이라 터미널엔 안 내려간다).
+        if (self.chrome_host.notice.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
             if (self.chrome_host.handleInput(self.allocator, chromeInputFromKeyEvent(event))) |action| {
                 self.dispatchChromeAction(action);
             }
             self.metal_dirty = true;
             self.total_app_key_events += 1; // chrome(앱)이 소비
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
-        }
-        // 커맨드 팝업이 열려 있으면 모든 키를 팝업으로 라우팅한다(모달) — resolver/PTY/스크롤 경로보다 먼저.
-        // 팝업이 키를 소비하므로 터미널엔 안 내려간다(Enter가 액션을 디스패치할 수는 있음). (palette는 C1b에서 chrome 이주.)
-        if (self.palette.open) {
-            self.handlePaletteKey(event);
-            self.total_app_key_events += 1; // 팝업(앱)이 소비
             self.writeSummaryFromState();
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
@@ -2820,6 +2788,10 @@ pub const DevSession = struct {
         if (!self.surface_initialized) return;
         if (self.chrome_host.find.open) {
             self.chrome_host.find.setPreedit(self.allocator, bytes) catch {};
+        } else if (self.chrome_host.palette.open) {
+            // 팝업이 열려 있으면 조합 글자를 팝업 입력에 보여준다(터미널 core가 아니라). C1b 전엔 palette가 IME
+            // preedit를 안 받아 한글 조합이 뒤의 숨은 터미널로 샜다 — find와 같은 배선으로 고친다.
+            self.chrome_host.palette.setPreedit(self.allocator, bytes) catch {};
         } else {
             self.activeSurface().core.setPreedit(bytes) catch return;
         }
@@ -2898,6 +2870,12 @@ pub const DevSession = struct {
         // 단일 출처. 닫혔거나 패널 밖이면 아래 터미널 커서로 폴백.
         if (self.chrome_host.find.open) {
             if (chrome.components.find.caretRect(&self.chrome_host.find, self.buildChromeProps())) |r| {
+                return .{ .x = @floatFromInt(r.x), .y = @floatFromInt(r.y), .w = @floatFromInt(r.w), .h = @floatFromInt(r.h) };
+            }
+        }
+        // 팝업이 열려 있으면 후보창을 팝업 입력 커서 옆에. find와 같은 단일 출처(caretRect). 닫힘/패널 밖이면 폴백.
+        if (self.chrome_host.palette.open) {
+            if (chrome.components.palette.caretRect(&self.chrome_host.palette, self.buildChromeProps())) |r| {
                 return .{ .x = @floatFromInt(r.x), .y = @floatFromInt(r.y), .w = @floatFromInt(r.w), .h = @floatFromInt(r.h) };
             }
         }
@@ -3158,8 +3136,8 @@ pub const DevSession = struct {
     pub fn runAction(self: *DevSession, action_key: []const u8) bool {
         // 모달(chrome Notice·커맨드 팝업·스크롤백 Find)이 열린 동안엔 메뉴바 keyEquivalent(Swift가 OS에서 잡아 이
         // 경로로 보낸다)를 무시한다 — 모달 중 단축키가 뒤의 터미널을 조작하면 안 된다. 모달 자신의 키(팝업 Enter,
-        // Find 네비게이션)는 handlePaletteKey/handleFindKey가 dispatchAppAction을 직접 부르므로 이 경로를 안 거친다.
-        if (self.chrome_host.notice.open or self.palette.open or self.chrome_host.find.open) return false;
+        // Find 네비게이션)는 chrome_host.handleInput → dispatchChromeAction이 처리하므로 이 경로를 안 거친다.
+        if (self.chrome_host.notice.open or self.chrome_host.palette.open or self.chrome_host.find.open) return false;
         const action = config_mod.parseAction(action_key) orelse return false;
         self.dispatchAppAction(action);
         return true;
@@ -3693,16 +3671,14 @@ pub const DevSession = struct {
                 sidebar_frame = self.buildSidebarTitleFrame() catch null;
             }
             defer if (sidebar_frame) |*sf| sf.deinit(self.allocator);
-            // 최상위 모달 오버레이 frame(열렸을 때만, macOS). chrome 모달(Notice·Find) > 커맨드 팝업 — 배타적이라
-            // 하나만 그린다(replace의 overlay_frame). chrome 컴포넌트는 buildChromeOverlayFrame(collectDraws→일반
-            // rasterizer)로 한 경로, palette는 아직 legacy(C1b서 이주). 실패는 무시(오버레이 없이 정상). PaneFrame.
-            // frame을 deinit해야 하므로 defer로 정리한다.
+            // 최상위 모달 오버레이 frame(열렸을 때만, macOS). Notice·Find·Palette는 배타적이라 하나만 그린다(replace의
+            // overlay_frame). 셋 다 chrome 컴포넌트 경로(buildChromeOverlayFrame → collectDraws/collectPaletteDraws →
+            // 일반 rasterizer placeText)로 lower한다 — palette도 C1b에서 이주해 같은 EAW-폭 경로를 탄다. 실패는 무시
+            // (오버레이 없이 정상). PaneFrame.frame을 deinit해야 하므로 defer로 정리한다.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             if (builtin.os.tag == .macos) {
-                if (self.chrome_host.notice.open or self.chrome_host.find.open) {
+                if (self.chrome_host.notice.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
                     overlay_frame = self.buildChromeOverlayFrame() catch null;
-                } else if (self.palette.open) {
-                    overlay_frame = self.buildPaletteFrame() catch null;
                 }
             }
             defer if (overlay_frame) |*pf| pf.frame.deinit(self.allocator);
@@ -4119,69 +4095,9 @@ pub const DevSession = struct {
         return .{ .frame = frame, .origin_x = origin_x, .origin_y = origin_y, .colors = .{ .default_fg = self.appearance.theme.foreground } };
     }
 
-    /// 커맨드 팝업 오버레이 frame(최상위). 패널을 화면 상단-중앙에 그린다: row 0 = 쿼리("> …"), 그 아래
-    /// 필터된 결과(제목 + 우측 정렬 바인딩 표시), 선택 행은 강조 bg. 모든 셀이 불투명 bg를 들어(buildFromDrawList가
-    /// non-default bg를 sentinel 셀로 냄) 아래(터미널·커서)를 덮는다. 닫혀 있거나 메트릭 미상이면 에러(호출자가 무시).
-    /// macOS 전용(buildFromDrawList = CoreText). 사이드바 제목 프레임과 같은 빌더.
-    fn buildPaletteFrame(self: *DevSession) !metal_frame.PaneFrame {
-        const cw = self.cell_width_px;
-        const ch = self.cell_height_px;
-        if (cw == 0 or ch == 0) return error.NoMetrics;
-        const term_rect = self.termRect();
-        const term_cols = term_rect.w / cw;
-        if (term_cols < 8) return error.TooNarrow;
-
-        const max_cols: u16 = 60;
-        const panel_cols: u16 = @intCast(@min(@as(u32, max_cols), term_cols -| 4));
-        const max_visible: usize = 10;
-        const result_count = @min(self.palette.filtered.items.len, max_visible);
-        const panel_rows: u16 = @intCast(1 + result_count); // 1 쿼리 줄 + N 결과
-
-        // 선택이 보이도록 결과 윈도우 시작(스크롤): selected가 max_visible 밖이면 끝에 맞춘다.
-        var win_start: usize = 0;
-        if (self.palette.selected >= max_visible) win_start = self.palette.selected - max_visible + 1;
-
-        const panel_bg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_background };
-        const sel_bg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_active };
-        const text_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
-
-        var cells: std.ArrayList(renderer.DrawCell) = .empty;
-        errdefer cells.deinit(self.allocator);
-        var line: [max_cols]u21 = undefined;
-
-        // row 0: 쿼리 줄 "> <query>" (패널 bg).
-        @memset(line[0..panel_cols], ' ');
-        line[0] = '>';
-        putUtf8(line[0..panel_cols], 2, self.palette.query.items);
-        try appendPaletteRow(self.allocator, &cells, 0, line[0..panel_cols], panel_bg, text_fg);
-
-        // 결과 행: 제목(col 2부터) + 바인딩 표시(우측 정렬). 선택 행은 강조 bg.
-        var i: usize = 0;
-        while (i < result_count) : (i += 1) {
-            const list_idx = win_start + i;
-            const entry_idx = self.palette.filtered.items[list_idx];
-            const row_bg = if (list_idx == self.palette.selected) sel_bg else panel_bg;
-            @memset(line[0..panel_cols], ' ');
-            putUtf8(line[0..panel_cols], 2, command_catalog.entries[entry_idx].title);
-            // 현재 바인딩 표시(command_key_displays는 command_catalog.entries와 1:1)를 우측에. 길이는 코드포인트 수.
-            if (entry_idx < self.command_key_displays.items.len) {
-                const kd = self.command_key_displays.items[entry_idx];
-                const kd_len = std.unicode.utf8CountCodepoints(kd) catch 0;
-                if (kd_len > 0 and kd_len + 2 < panel_cols) putUtf8(line[0..panel_cols], panel_cols - @as(u16, @intCast(kd_len)) - 1, kd);
-            }
-            try appendPaletteRow(self.allocator, &cells, @intCast(1 + i), line[0..panel_cols], row_bg, text_fg);
-        }
-
-        // 상단-중앙 배치(backing px). 폭이 패널보다 좁으면 origin 0. frame 마무리는 공통 헬퍼.
-        // palette는 터미널 셀·appearance 그대로(확대 안 함) — C1b chrome 이주 때 1.3× 적용.
-        const panel_w = @as(u32, panel_cols) * cw;
-        const origin_x = term_rect.x + (term_rect.w -| panel_w) / 2;
-        const origin_y = term_rect.y + 2 * ch; // 위에서 두 줄 내려.
-        return self.finishOverlayFrame(&cells, panel_cols, panel_rows, origin_x, origin_y, self.appearance, cw, ch);
-    }
-
-    // 스크롤백 Find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). find.view가 ChromeDraw를
-    // 내고 buildChromeOverlayFrame이 일반 rasterizer로 lower한다 — buildFindFrame은 제거.
+    // 커맨드 팝업·스크롤백 Find 오버레이는 chrome 컴포넌트로 이주했다(palette=C1b, find=C1a). 각 컴포넌트 view가
+    // ChromeDraw를 내고 buildChromeOverlayFrame이 일반 rasterizer(placeText, EAW-폭)로 lower한다 — buildPaletteFrame/
+    // buildFindFrame은 제거. 팝업은 1.3× 확대·IME 조합 표시·한글 2칸 폭을 find와 같은 경로로 공짜로 얻는다.
 
     /// 오버레이 가독성 확대 배율(터미널 대비). 글리프(font.size)와 셀(advance/slot)을 **함께** 이 배율로 키운다 —
     /// 단일 출처. 1.3× = 13/10.
@@ -4372,10 +4288,41 @@ pub const DevSession = struct {
         }
     }
 
-    /// chrome 오버레이 frame(최상위). chrome_host에서 열린 컴포넌트(Notice·Find)의 ChromeDraw를 수집해(실제 view
-    /// 계약을 탄다) 일반 rasterizer로 lower한다(fill·border·text). 오버레이는 라우팅상 배타적이라 collectDraws가
-    /// 최대 1개를 낸다(rasterizer가 단일 오버레이 가정 — bounding box 합집합). 닫혀 있거나 메트릭/박스 미상이면
-    /// 에러(호출자가 무시). macOS 전용(finishOverlayFrame=CoreText).
+    /// 팝업의 가시 행(필터된·윈도우잉된 Row)을 arena에 빌드한다 — 카탈로그(command_catalog.entries.title)와 바인딩
+    /// 표시(command_key_displays)는 platform 소유라 여기서 Row{title,binding,selected}로 만들어 neutral 컴포넌트에
+    /// 주입한다(컴포넌트는 카탈로그를 안 본다). 선택이 보이도록 max_visible 윈도우로 스크롤한다(레거시 buildPaletteFrame
+    /// 윈도우 로직 보존). 선택 행만 selected=true. palette_filtered가 비면 빈 슬라이스.
+    fn buildPaletteRows(self: *DevSession, arena: std.mem.Allocator) ![]chrome.components.palette.Row {
+        const Row = chrome.components.palette.Row;
+        const max_visible = chrome.components.palette.max_visible;
+        const total = self.palette_filtered.items.len;
+        const selected = self.chrome_host.palette.selected;
+        const visible_count = @min(total, max_visible);
+        var win_start: usize = 0;
+        if (selected >= max_visible) win_start = selected - max_visible + 1; // 선택이 창 아래로 나가면 끝맞춤
+        if (win_start + visible_count > total) win_start = total - visible_count; // total≥visible_count라 안전
+        const rows = try arena.alloc(Row, visible_count);
+        var i: usize = 0;
+        while (i < visible_count) : (i += 1) {
+            const fi = win_start + i; // palette_filtered 안에서의 인덱스
+            const entry_idx = self.palette_filtered.items[fi];
+            const binding: []const u8 = if (entry_idx < self.command_key_displays.items.len)
+                self.command_key_displays.items[entry_idx]
+            else
+                "";
+            rows[i] = .{
+                .title = command_catalog.entries[entry_idx].title,
+                .binding = binding,
+                .selected = (fi == selected),
+            };
+        }
+        return rows;
+    }
+
+    /// chrome 오버레이 frame(최상위). chrome_host에서 열린 컴포넌트(Notice·Find·Palette)의 ChromeDraw를 수집해(실제
+    /// view 계약을 탄다) 일반 rasterizer로 lower한다(fill·border·text, EAW-폭 placeText). 오버레이는 라우팅상 배타적
+    /// 이라 최대 1개만 ops를 낸다(rasterizer가 단일 오버레이 가정). palette는 카탈로그 행을 주입해야 해 collectDraws가
+    /// 아니라 collectPaletteDraws로 따로 모은다. 닫혀 있거나 메트릭/박스 미상이면 에러(호출자가 무시). macOS 전용.
     fn buildChromeOverlayFrame(self: *DevSession) !metal_frame.PaneFrame {
         // 오버레이는 가독성을 위해 1.3× 확대 — 셀(layout/slot/advance)과 폰트(글리프 픽셀)를 **함께** 키운다
         // (한쪽만 키우면 회귀: 작은 글리프가 큰 slot에). buildChromeProps도 같은 확대 셀을 컴포넌트에 준다.
@@ -4389,8 +4336,13 @@ pub const DevSession = struct {
         defer arena_state.deinit();
         const arena = arena_state.allocator();
         const tokens = self.buildChromeTokens();
+        const props = self.buildChromeProps();
         var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
-        try self.chrome_host.collectDraws(self.buildChromeProps(), &tokens, arena, &draws);
+        try self.chrome_host.collectDraws(props, &tokens, arena, &draws); // Notice·Find
+        if (self.chrome_host.palette.open) {
+            const rows = try self.buildPaletteRows(arena); // 카탈로그 행 주입(platform 소유)
+            try self.chrome_host.collectPaletteDraws(rows, props, &tokens, arena, &draws);
+        }
         if (draws.items.len == 0) return error.NotOpen;
 
         var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch);
@@ -4439,7 +4391,7 @@ pub const DevSession = struct {
         for (self.command_key_equivalents.items) |s| self.allocator.free(s);
         self.command_key_equivalents.deinit(self.allocator);
         self.command_entries.deinit(self.allocator);
-        self.palette.deinit(self.allocator);
+        self.palette_filtered.deinit(self.allocator);
         self.chrome_host.deinit(self.allocator); // chrome 컴포넌트 heap(find.query) 해제
         self.find_matches.deinit(self.allocator);
         self.find_view_spans.deinit(self.allocator);
@@ -5106,8 +5058,8 @@ test "command catalog: 엔트리·바인딩 표시 + runAction 디스패치" {
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
 }
 
-test "command palette: 토글 열림 → 타이핑 필터 → Enter 디스패치+닫힘 → 프레임 빌드" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildPaletteFrame=CoreText, 실 PTY
+test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합 표시 → Enter 디스패치+닫힘 → 프레임 빌드" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayFrame=CoreText, 실 PTY
     const allocator = std.testing.allocator;
     const session = try allocator.create(DevSession);
     defer allocator.destroy(session);
@@ -5119,46 +5071,54 @@ test "command palette: 토글 열림 → 타이핑 필터 → Enter 디스패치
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    _ = try session.resize(800, 600, 1000); // 메트릭·backing(buildPaletteFrame이 termRect 폭을 씀)
+    _ = try session.resize(800, 600, 1000); // 메트릭·backing(palette.view가 chrome props로 씀)
 
-    // 토글로 열린다 — 빈 쿼리라 전체 카탈로그가 필터에.
-    try std.testing.expect(!session.palette.open);
+    // 토글로 열린다(chrome palette 컴포넌트) — 빈 쿼리라 전체 카탈로그가 필터에(platform palette_filtered).
+    try std.testing.expect(!session.chrome_host.palette.open);
     session.dispatchAppAction(.toggle_command_palette);
-    try std.testing.expect(session.palette.open);
-    try std.testing.expectEqual(command_catalog.entries.len, session.palette.filtered.items.len);
+    try std.testing.expect(session.chrome_host.palette.open);
+    try std.testing.expectEqual(command_catalog.entries.len, session.palette_filtered.items.len);
+    try std.testing.expectEqual(command_catalog.entries.len, session.chrome_host.palette.result_count); // 컴포넌트 동기화
 
-    // "new t" 타이핑(모달 라우팅) → "New Terminal"만 남는다.
+    // IME 조합 회귀(C1b 버그 수정): 팝업 열린 동안 marked text가 팝업 preedit에 들어간다(뒤의 터미널 core가 아니라).
+    // 레거시 팝업은 IME 조합 배선이 없어 한글 조합이 숨은 터미널로 샜다.
+    session.imeMarked("\xea\xb0\x80"); // 조합 중 "가"
+    try std.testing.expectEqualStrings("\xea\xb0\x80", session.chrome_host.palette.preedit.items);
+    try std.testing.expect(session.activeSurface().core.preedit == null); // 터미널 core로 안 샌다
+    session.imeMarked(""); // 조합 해제(확정 직전)
+
+    // "new t" 타이핑(chrome 라우팅 → palette.handle → query_changed → recomputePalette) → "New Terminal"만 남는다.
     for ("new t") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
-    try std.testing.expectEqual(@as(usize, 1), session.palette.filtered.items.len);
-    try std.testing.expect(session.palette.selectedAction().? == .new_term);
+    try std.testing.expectEqual(@as(usize, 1), session.palette_filtered.items.len);
+    try std.testing.expect(command_palette.actionAt(session.palette_filtered.items, session.chrome_host.palette.selected).? == .new_term);
 
-    // Enter → 선택 실행(new_term, full이라 게이트 없음) 후 닫힘. 활성 pane Term +1.
+    // Enter → accept → acceptPalette가 new_term 실행(full이라 게이트 없음) 후 닫힘. 활성 pane Term +1.
     const before = session.activePane().terms.items.len;
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
-    try std.testing.expect(!session.palette.open);
+    try std.testing.expect(!session.chrome_host.palette.open);
     try std.testing.expectEqual(before + 1, session.activePane().terms.items.len);
 
     // 다시 열고 Esc로 닫힌다.
     session.dispatchAppAction(.toggle_command_palette);
-    try std.testing.expect(session.palette.open);
+    try std.testing.expect(session.chrome_host.palette.open);
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
-    try std.testing.expect(!session.palette.open);
+    try std.testing.expect(!session.chrome_host.palette.open);
 
-    // 열린 상태에서 오버레이 프레임 빌드가 크래시 없이 셀을 낸다.
+    // 열린 상태에서 chrome 오버레이 프레임 빌드가 크래시 없이 셀을 낸다(palette.view → 일반 rasterizer).
     session.dispatchAppAction(.toggle_command_palette);
-    var pf = try session.buildPaletteFrame();
+    var pf = try session.buildChromeOverlayFrame();
     defer pf.frame.deinit(allocator);
     try std.testing.expect(pf.frame.draw_list.cells.len > 0);
 
-    // 회귀(후속 리뷰: 메뉴 모달 우회): 팝업이 열린 동안 메뉴바 keyEquivalent 경로(runAction)는 무시된다 —
-    // 모달 뒤 터미널이 조작되면 안 된다. (팝업 자신의 Enter는 handlePaletteKey가 dispatchAppAction을 직접 부르므로 별개.)
-    try std.testing.expect(session.palette.open);
+    // 회귀(메뉴 모달 우회): 팝업이 열린 동안 메뉴바 keyEquivalent 경로(runAction)는 무시된다 — 모달 뒤 터미널이
+    // 조작되면 안 된다. (팝업 자신의 Enter는 chrome_host.handleInput → dispatchChromeAction이 처리하므로 별개.)
+    try std.testing.expect(session.chrome_host.palette.open);
     const terms_before_runaction = session.activePane().terms.items.len;
     try std.testing.expect(!session.runAction("new_term"));
     try std.testing.expectEqual(terms_before_runaction, session.activePane().terms.items.len);
 
-    // 회귀(후속 리뷰: blink chop): 팝업이 열린 프레임을 tick으로 빌드하면 metal_buffer.cursor_cells=0이라
-    // view()의 blink-off 꼬리 chop(cells.len - cursor_cells)이 커서가 아니라 팝업 꼬리를 자르는 일이 없다.
+    // 회귀(blink chop): 팝업이 열린 프레임을 tick으로 빌드하면 metal_buffer.cursor_cells=0이라 view()의 blink-off
+    // 꼬리 chop이 커서가 아니라 팝업 꼬리를 자르는 일이 없다.
     _ = try session.tick();
     try std.testing.expectEqual(@as(usize, 0), session.metal_buffer.cursor_cells);
 }
@@ -5240,7 +5200,6 @@ test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회�
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    _ = try session.resize(800, 600, 1000);
 
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(session.chrome_host.find.open);
@@ -5248,26 +5207,75 @@ test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회�
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'A' }, .modifiers = .{} });
     _ = try session.handleKeyEvent(.{ .key = .{ .char = '가' }, .modifiers = .{} });
 
-    var ff = try session.buildChromeOverlayFrame();
-    defer ff.frame.deinit(allocator);
+    // scale 1.0과 Retina 2.0 둘 다 검증 — 실제 맥 화면은 2.0이라 1.0만으론 라이브 경로(오버레이 1.3× × scale)를
+    // 못 잡는다. 같은 세션에서 resize를 반복해 공유 atlas가 두 메트릭을 함께 들었을 때도 잘림이 없는지 본다.
+    for ([_]u32{ 1000, 2000 }) |scale_milli| {
+        _ = try session.resize(800, 600, scale_milli);
+        var ff = try session.buildChromeOverlayFrame();
+        defer ff.frame.deinit(allocator);
 
-    // 실측: 결과 글리프에서 '가'와 'A'의 cell_width(span)와 atlas slot 픽셀 폭을 뽑는다.
-    var ga_span: ?u2 = null;
-    var ga_slot_w: u32 = 0;
-    var a_slot_w: u32 = 0;
-    for (ff.frame.glyph_quad_frame.glyphs) |q| {
-        if (q.run.codepoint == '가') {
-            ga_span = q.run.cell_width;
-            ga_slot_w = q.slot.width_px;
-        } else if (q.run.codepoint == 'A') {
-            a_slot_w = q.slot.width_px;
+        // 실측: 결과 글리프에서 '가'와 'A'의 cell_width(span)와 atlas slot 픽셀 폭을 뽑는다.
+        var ga_span: ?u2 = null;
+        var ga_slot_w: u32 = 0;
+        var a_slot_w: u32 = 0;
+        for (ff.frame.glyph_quad_frame.glyphs) |q| {
+            if (q.run.codepoint == '가') {
+                ga_span = q.run.cell_width;
+                ga_slot_w = q.slot.width_px;
+            } else if (q.run.codepoint == 'A') {
+                a_slot_w = q.slot.width_px;
+            }
         }
+        // 핵심: '가'는 span=2여야 하고, atlas slot이 ASCII(span 1)의 2배 폭이어야 wide 글리프가 안 잘린다.
+        // slot이 1칸이면 rasterizer가 글자를 1칸에 가운데정렬+우측 클립해 왼쪽 절반(ㄱ)만 남는다.
+        try std.testing.expectEqual(@as(?u2, 2), ga_span);
+        try std.testing.expect(a_slot_w > 0);
+        try std.testing.expectEqual(a_slot_w * 2, ga_slot_w);
     }
-    // 핵심: '가'는 span=2여야 하고, atlas slot이 ASCII(span 1)의 2배 폭이어야 wide 글리프가 안 잘린다.
-    // slot이 1칸이면 rasterizer가 글자를 1칸에 가운데정렬+우측 클립해 왼쪽 절반(ㄱ)만 남는다.
-    try std.testing.expectEqual(@as(?u2, 2), ga_span);
-    try std.testing.expect(a_slot_w > 0);
-    try std.testing.expectEqual(a_slot_w * 2, ga_slot_w);
+}
+
+test "command palette(chrome): 한글(wide) query는 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회귀 실측(실 CoreText)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayFrame=CoreText, 실 PTY
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.dispatchAppAction(.toggle_command_palette);
+    try std.testing.expect(session.chrome_host.palette.open);
+    // 'A'(ASCII, span 1)와 '가'(U+AC00, span 2)를 팝업 쿼리에 입력 — row0 프롬프트 "> A가"로 그려진다(필터 결과는
+    // 0이어도 쿼리 글리프는 frame에 있다). C1b 전 팝업(putUtf8 span=1)이면 '가'가 1칸 slot에 잘렸다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'A' }, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '가' }, .modifiers = .{} });
+
+    // scale 1.0·Retina 2.0 둘 다(실제 맥은 2.0).
+    for ([_]u32{ 1000, 2000 }) |scale_milli| {
+        _ = try session.resize(800, 600, scale_milli);
+        var ff = try session.buildChromeOverlayFrame();
+        defer ff.frame.deinit(allocator);
+
+        var ga_span: ?u2 = null;
+        var ga_slot_w: u32 = 0;
+        var a_slot_w: u32 = 0;
+        for (ff.frame.glyph_quad_frame.glyphs) |q| {
+            if (q.run.codepoint == '가') {
+                ga_span = q.run.cell_width;
+                ga_slot_w = q.slot.width_px;
+            } else if (q.run.codepoint == 'A') {
+                a_slot_w = q.slot.width_px;
+            }
+        }
+        try std.testing.expectEqual(@as(?u2, 2), ga_span); // 팝업 '가'도 span=2(find와 같은 경로)
+        try std.testing.expect(a_slot_w > 0);
+        try std.testing.expectEqual(a_slot_w * 2, ga_slot_w); // 2칸 slot — 안 잘림
+    }
 }
 
 test "overlayCell: 오버레이 셀 = 터미널 셀 ×1.3(round)·0 보존" {

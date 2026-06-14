@@ -8,6 +8,7 @@ pub const pty = @import("pty.zig");
 pub const renderer = @import("renderer.zig");
 pub const session = @import("session.zig");
 pub const terminal = @import("terminal.zig");
+pub const width = @import("width.zig"); // Unicode 셀 폭(EAW) — 레이어 무관 중립 유틸(terminal·chrome·platform 공용)
 
 test {
     @import("std").testing.refAllDecls(@This());

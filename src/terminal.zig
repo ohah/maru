@@ -1,7 +1,9 @@
 pub const core = @import("terminal/core.zig");
 pub const input = @import("terminal/input.zig");
 pub const types = @import("terminal/types.zig");
-pub const width = @import("terminal/width.zig");
+// Unicode 셀 폭(EAW)은 순수·레이어 무관이라 top-level 중립 유틸(src/width.zig)로 옮겼다 — terminal·platform·
+// chrome이 모두 쓴다(색=color.zig와 같은 선례). 여기선 호환 re-export만 한다(terminal.width/cellWidth 그대로).
+pub const width = @import("width.zig");
 
 pub const Cell = types.Cell;
 pub const Color = types.Color;

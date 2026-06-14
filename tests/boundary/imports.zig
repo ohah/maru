@@ -42,15 +42,27 @@ const rules = [_]Rule{
         },
     },
     .{
+        // renderer(L1 중립 frame 계약)는 위상의 바닥이다 — terminal snapshot을 DrawList·Glyph*Frame으로 바꾸는
+        // 백엔드-무관 도메인. OS 백엔드(platform·pty)도, 위 레이어(session·chrome)도, 앱 런타임(app)도 import하면
+        // 안 된다(아래로만 의존 — terminal·color·std만 허용). WebGPU/다른 OS 백엔드가 같은 frame 계약을 재사용
+        // 하려면 L1이 OS·상위에 안 묶여야 한다(docs/layering-and-portability.md §2·§8, renderer-strategy.md).
         .layer = "renderer",
         .barrel = "src/renderer.zig",
         .implementation_dir = "src/renderer",
-        .forbidden = &.{.{ .layer = "pty" }},
+        .forbidden = &.{
+            .{ .layer = "pty" },
+            .{ .layer = "platform" },
+            .{ .layer = "session" },
+            .{ .layer = "chrome" },
+            .{ .layer = "app" },
+        },
     },
     .{
-        // chrome(L3 디자인 시스템)은 플랫폼 중립이어야 한다 — semantic ChromeDraw만 뱉고 session을 props로만
-        // 읽는다. OS/렌더 백엔드(platform·pty)와 코어 내부(terminal·renderer)를 import하면 이식성이 깨지므로
-        // 빌드에서 막는다(docs/layering-and-portability.md §2·§8). 허용: std, color(top-level), 자기 하위 모듈.
+        // chrome(L3 디자인 시스템)은 플랫폼 중립이어야 한다 — semantic ChromeDraw만 뱉고 session을 **props로만**
+        // 읽는다(raw *Pane/*Split·session 모듈을 import하지 않는다). OS/렌더 백엔드(platform·pty), 코어 내부
+        // (terminal·renderer), 세션·앱 런타임(session·app)을 import하면 props-only seam과 이식성이 깨지므로 빌드
+        // 에서 막는다(docs/layering-and-portability.md §2·§8). 허용: std, color(top-level), 자기 하위 모듈.
+        // session 금지는 C1~C3 이주에서 chrome 컴포넌트가 session을 직접 만지지 않고 props만 쓰게 강제한다.
         .layer = "chrome",
         .barrel = "src/chrome.zig",
         .implementation_dir = "src/chrome",
@@ -59,12 +71,15 @@ const rules = [_]Rule{
             .{ .layer = "platform" },
             .{ .layer = "terminal" },
             .{ .layer = "renderer" },
+            .{ .layer = "session" },
+            .{ .layer = "app" },
         },
     },
     .{
         // session(L2 세션 코어)은 OS-중립이어야 한다 — 순수 모델·연산·입력 수학만. platform(L4 OS 어댑터)과
         // pty(OS 프로세스)를 직접 import하면 이식성이 깨지므로 막는다(docs/layering-and-portability.md §2·§8).
-        // renderer(L1)는 의존 방향이 L2→L1이라 허용한다(금지 안 함). terminal(중립 입력 타입)도 허용.
+        // renderer(L1)는 의존 방향이 L2→L1이라 허용한다(금지 안 함). terminal(중립 입력 타입)도 허용. chrome(L3)은
+        // 위 레이어라 금지한다(L2가 L3를 import하면 위상 역전).
         //
         // ⚠️ 한계(리뷰 발견): 이 체커는 **직접 @import만** 본다(transitive 미추적). `app`은 forbidden에 없어서
         // session 파일이 `../app.zig`를 import하면 통과하는데, app.zig는 pty·platform을 transitive로 끌어온다.
@@ -78,6 +93,7 @@ const rules = [_]Rule{
         .forbidden = &.{
             .{ .layer = "pty" },
             .{ .layer = "platform" },
+            .{ .layer = "chrome" },
         },
     },
     .{
@@ -318,6 +334,152 @@ test "scanImports tokenizes, so comments and string literals neither evade nor f
     {
         var v: usize = 0;
         scanImportsQuiet("const s =\n    \\\\@import(\"../pty/types.zig\")\n;", rule, "test", &v);
+        try std.testing.expectEqual(@as(usize, 0), v);
+    }
+}
+
+// ── 중립성 가드(B): OS-특정 타입명이 중립 레이어(L1~L3) 코드에 식별자로 등장하지 않음을 강제 ──────────────────
+// import 금지(위 rules)는 platform을 못 끌어오게 막지만, 어떤 중립 barrel이 OS 타입을 re-export하면 import 없이도
+// 이름이 샐 수 있다. 이 가드는 그 누수를 직접 막는다 — renderer-strategy.md의 WebGPU 조건 1("L1~L3가 중립 frame만
+// 소비함을 테스트로 증명")의 실제 충족이자 docs/layering-and-portability.md §8의 "Metal-by-name" 규칙이다.
+// std.zig.Tokenizer로 **.identifier 토큰만** 검사하므로, 중립 계약을 설명하는 주석·문자열 안의 "Metal"/"CoreText"
+// 언급은 오탐하지 않는다(주석은 토큰이 아니고 doc 주석·문자열은 별도 태그).
+//
+// 비범위: app은 의도적으로 섞인 레이어(pty/runtime + 중립 모델)라 스캔 안 한다 — 그 중립성은 컨벤션으로 다룬다
+// (위 session 규칙 주석 참고). transitive·app 규칙 강제는 후속.
+
+const NeutralLayer = struct { layer: []const u8, barrel: []const u8, dir: []const u8 };
+
+const neutral_layers = [_]NeutralLayer{
+    .{ .layer = "renderer", .barrel = "src/renderer.zig", .dir = "src/renderer" },
+    .{ .layer = "session", .barrel = "src/session.zig", .dir = "src/session" },
+    .{ .layer = "chrome", .barrel = "src/chrome.zig", .dir = "src/chrome" },
+};
+
+// platform/macos가 정의·노출하는 OS 경계 타입 + 대표 OS(CoreText/CoreGraphics/AppKit/Metal) 타입명. 이 이름이
+// 중립 레이어 코드에 식별자로 나타나면 OS 결합이 샌 것이다. 정확 일치라 오탐 0(전부 명백한 OS 타입명 — 부분
+// 문자열·소문자 변형은 안 잡는다). 누락이 있어도 import 금지가 1차로 막으므로 이건 2차(re-export) 가드다.
+const forbidden_os_type_names = [_][]const u8{
+    // 이 코드베이스의 platform 경계 타입(metal_frame.zig — re-export로 샐 수 있는 진짜 위험).
+    "NativeMetalCell",
+    "NativeMetalRasterUpload",
+    "MetalFrame",
+    "MetalFrameBuffer",
+    "MetalRenderer",
+    // CoreText / CoreGraphics(제품 shaper·raster 경계 — C @cImport는 platform 전용이어야 한다).
+    "CTFont",
+    "CTRun",
+    "CTLine",
+    "CGGlyph",
+    "CGFloat",
+    "CGRect",
+    "CGSize",
+    "CGPoint",
+    "CGContext",
+    // AppKit / Metal(OS host·GPU 백엔드 전용).
+    "NSColor",
+    "NSView",
+    "NSWindow",
+    "NSString",
+    "NSEvent",
+    "MTLDevice",
+    "MTLBuffer",
+    "MTLTexture",
+};
+
+test "neutral layers (renderer·session·chrome) do not name OS-specific types" {
+    const allocator = std.testing.allocator;
+    var violations: usize = 0;
+    for (neutral_layers) |nl| {
+        try checkFileForOsTypes(allocator, nl.layer, nl.barrel, &violations); // barrel(re-export 경로)
+        try checkDirectoryForOsTypes(allocator, nl, &violations); // 구현부
+    }
+    try std.testing.expectEqual(@as(usize, 0), violations);
+}
+
+fn checkDirectoryForOsTypes(allocator: std.mem.Allocator, nl: NeutralLayer, violations: *usize) !void {
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, nl.dir, .{ .iterate = true });
+    defer dir.close(std.testing.io);
+
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ nl.dir, entry.path });
+        defer allocator.free(path);
+
+        try checkFileForOsTypes(allocator, nl.layer, path, violations);
+    }
+}
+
+fn checkFileForOsTypes(allocator: std.mem.Allocator, layer: []const u8, path: []const u8, violations: *usize) !void {
+    const text = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024)) catch |err| {
+        std.debug.print("neutrality check could not read {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
+    defer allocator.free(text);
+
+    const text_z = try allocator.dupeZ(u8, text);
+    defer allocator.free(text_z);
+
+    scanForbiddenIdentifiers(text_z, layer, path, violations, true);
+}
+
+// .identifier 토큰만 보고 forbidden_os_type_names와 정확 일치하면 위반으로 센다. 주석(토큰 아님)·doc 주석/
+// 문자열(별도 태그)은 자연히 건너뛴다 — scanImports와 같은 토크나이저 규율.
+fn scanForbiddenIdentifiers(text: [:0]const u8, layer: []const u8, path: []const u8, violations: *usize, emit_diagnostics: bool) void {
+    var tokenizer = std.zig.Tokenizer.init(text);
+    while (true) {
+        const token = tokenizer.next();
+        if (token.tag == .eof) break;
+        if (token.tag != .identifier) continue;
+        const ident = text[token.loc.start..token.loc.end];
+        for (forbidden_os_type_names) |name| {
+            if (std.mem.eql(u8, ident, name)) {
+                if (emit_diagnostics) {
+                    std.debug.print(
+                        "neutrality violation: {s} ({s} layer) names OS-specific type '{s}' (L1~L3는 중립이어야 한다)\n",
+                        .{ path, layer, name },
+                    );
+                }
+                violations.* += 1;
+            }
+        }
+    }
+}
+
+test "scanForbiddenIdentifiers flags code identifiers but not comments or strings" {
+    // 코드 식별자(qualified access의 끝 식별자 포함)로 등장하면 위반.
+    {
+        var v: usize = 0;
+        scanForbiddenIdentifiers("const c = metal_frame.NativeMetalCell;", "renderer", "test", &v, false);
+        try std.testing.expectEqual(@as(usize, 1), v);
+    }
+    // 줄 주석 안의 언급은 오탐 아님(중립 계약 설명).
+    {
+        var v: usize = 0;
+        scanForbiddenIdentifiers("// Metal backend consumes NativeMetalCell\nconst x = 1;", "renderer", "test", &v, false);
+        try std.testing.expectEqual(@as(usize, 0), v);
+    }
+    // doc 주석 안의 언급도 오탐 아님.
+    {
+        var v: usize = 0;
+        scanForbiddenIdentifiers("/// produces CGFloat-free output\npub const x = 1;", "renderer", "test", &v, false);
+        try std.testing.expectEqual(@as(usize, 0), v);
+    }
+    // 문자열 리터럴 안도 오탐 아님.
+    {
+        var v: usize = 0;
+        scanForbiddenIdentifiers("const s = \"NSView is OS-only\";", "renderer", "test", &v, false);
+        try std.testing.expectEqual(@as(usize, 0), v);
+    }
+    // 무관한/유사하지만 다른 식별자는 통과(정확 일치라 부분문자열 오탐 없음).
+    {
+        var v: usize = 0;
+        scanForbiddenIdentifiers("const cell = grid.cell; const myMetalFrameWrapper = 0;", "renderer", "test", &v, false);
         try std.testing.expectEqual(@as(usize, 0), v);
     }
 }

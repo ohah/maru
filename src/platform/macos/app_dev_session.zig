@@ -735,6 +735,11 @@ pub const DevSession = struct {
     // 쓰게 한다. 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다.
     cell_width_px: u32 = 0,
     cell_height_px: u32 = 0,
+    // 오버레이(1.3× 확대) cell의 device 픽셀 크기. **base_cell × 1.3 곱이 아니라** 오버레이 font size(font.size × 1.3)
+    // 에서 CoreText 메트릭으로 직접 뽑는다 — 곱+이중 반올림은 글리프(font × 1.3 렌더)와 어긋나 한글이 약간 잘렸다.
+    // refreshCellMetrics가 base와 함께 갱신. chrome 오버레이(find·palette)의 props·rasterizer가 이 값을 쓴다.
+    overlay_cell_width_px: u32 = 0,
+    overlay_cell_height_px: u32 = 0,
     // chrome 최소화 세션인가(quick terminal minimal). true면 paneBarHeightPx가 0(탭 바 끔)이고 refreshCellMetrics가
     // 사이드바 폭을 0으로 강제 — 터미널 그리드만 그린다. 사이드바 폭 0이면 사이드바 가장자리 hit-test(xOnSidebarEdge)도
     // false라 드래그 리사이즈 자체가 시작 못 한다(setSidebarWidthPx 별도 게이트 불요). normalizeConfig가
@@ -2281,6 +2286,7 @@ pub const DevSession = struct {
                 self.cell_height_px = metrics.cell_height_px;
             }
         }
+        self.refreshOverlayCellMetrics();
         // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처). 폭은 현재
         // 논리 폭(sidebar_width_pt — 사용자 드래그로 바뀔 수 있음)에서 파생하므로 DPI 변경에도 유지된다.
         // minimal 세션은 사이드바가 없으므로 0 고정(터미널이 전폭을 쓴다).
@@ -2290,6 +2296,29 @@ pub const DevSession = struct {
         self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
         // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
         self.rebuildSidebar() catch {};
+    }
+
+    /// 오버레이(1.3× 확대) cell 메트릭을 **오버레이 font size에서 CoreText로 직접** 갱신한다. base_cell × 1.3 곱은
+    /// 글리프(font × 1.3 렌더)와 픽셀이 어긋나(이중 반올림·CoreText 비선형 메트릭) 한글이 slot보다 약간 커서 잘렸다
+    /// — 터미널이 1×에서 하는 것과 똑같이, 오버레이도 자기 font size의 실제 advance×line-height를 쓴다. 조회 실패/비-
+    /// macOS면 base_cell × 1.3 곱(overlayCell)으로 폴백(기존 동작 — 정사각 fallback도 그 안에서 처리). refreshCellMetrics가 부른다.
+    fn refreshOverlayCellMetrics(self: *DevSession) void {
+        // 폴백: base cell의 1.3× 곱(메트릭 조회 실패·비-macOS 시).
+        self.overlay_cell_width_px = overlayCell(self.cell_width_px);
+        self.overlay_cell_height_px = overlayCell(self.cell_height_px);
+        if (builtin.os.tag != .macos) return;
+        const overlay_font_size = renderer.deviceFontSizeFromMilli(self.overlayAppearance().font.size, self.scale_milli);
+        var metrics: coretext_bridge.CellMetricsResult = .{};
+        coretext_bridge.maru_macos_coretext_font_cell_metrics(
+            self.appearance.font.family.ptr,
+            self.appearance.font.family.len,
+            overlay_font_size,
+            &metrics,
+        );
+        if (metrics.status == 0 and metrics.cell_width_px > 0 and metrics.cell_height_px > 0) {
+            self.overlay_cell_width_px = metrics.cell_width_px;
+            self.overlay_cell_height_px = metrics.cell_height_px;
+        }
     }
 
     /// 폰트 크기를 delta(pt)만큼 조절한다(⌘+/⌘-). setFontSize가 클램프·메트릭·grid를 처리한다.
@@ -4122,14 +4151,16 @@ pub const DevSession = struct {
     /// 레이아웃·rasterizer·프레임 빌더가 같은 확대 셀, 폰트도 overlayAppearance로 같은 배율 — 비례 유지).
     /// sidebar/backing은 실 px 그대로. sidebar_width_px는 런타임 가변(드래그)이라 토큰이 아닌 여기로.
     fn buildChromeProps(self: *const DevSession) chrome.ChromeProps {
-        return .{ .metrics = .{
-            .cell_width_px = overlayCell(self.cell_width_px),
-            .cell_height_px = overlayCell(self.cell_height_px),
-            .sidebar_width_px = self.sidebar_width_px,
-            .backing_width_px = self.backing_width_px,
-            .backing_height_px = self.backing_height_px,
-            .chrome_minimal = self.chrome_minimal,
-        } };
+        return .{
+            .metrics = .{
+                .cell_width_px = self.overlay_cell_width_px, // CoreText 실측(곱 근사 아님) — 컴포넌트 레이아웃·rasterizer 일치
+                .cell_height_px = self.overlay_cell_height_px,
+                .sidebar_width_px = self.sidebar_width_px,
+                .backing_width_px = self.backing_width_px,
+                .backing_height_px = self.backing_height_px,
+                .chrome_minimal = self.chrome_minimal,
+            },
+        };
     }
 
     /// ResolvedTheme(config) → chrome 토큰. chrome은 ResolvedTheme를 import하지 않으므로(경계) 여기서 resolved
@@ -4326,8 +4357,8 @@ pub const DevSession = struct {
     fn buildChromeOverlayFrame(self: *DevSession) !metal_frame.PaneFrame {
         // 오버레이는 가독성을 위해 1.3× 확대 — 셀(layout/slot/advance)과 폰트(글리프 픽셀)를 **함께** 키운다
         // (한쪽만 키우면 회귀: 작은 글리프가 큰 slot에). buildChromeProps도 같은 확대 셀을 컴포넌트에 준다.
-        const cw = overlayCell(self.cell_width_px);
-        const ch = overlayCell(self.cell_height_px);
+        const cw = self.overlay_cell_width_px; // 오버레이 font size의 실제 CoreText 메트릭(곱 근사 아님 — 한글 잘림 수정)
+        const ch = self.overlay_cell_height_px;
         if (cw == 0 or ch == 0) return error.NoMetrics;
         const appearance = self.overlayAppearance();
 
@@ -5278,7 +5309,39 @@ test "command palette(chrome): 한글(wide) query는 atlas slot이 2칸 — ㄱ�
     }
 }
 
-test "overlayCell: 오버레이 셀 = 터미널 셀 ×1.3(round)·0 보존" {
+test "overlay cell metrics: 오버레이 cell은 오버레이 font의 CoreText 실측(곱 근사 아님 — 약간 잘림 회귀)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // CoreText 메트릭
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 2000); // Retina
+
+    // 오버레이 cell은 base_cell × 1.3 곱(이중 반올림)이 아니라, 오버레이 font size(font × 1.3)의 실제 CoreText
+    // advance×line-height여야 한다 — 그래야 글리프(같은 font size로 렌더)가 slot에 정확히 들어가 안 잘린다.
+    const overlay_font = renderer.deviceFontSizeFromMilli(session.overlayAppearance().font.size, session.scale_milli);
+    var m: coretext_bridge.CellMetricsResult = .{};
+    coretext_bridge.maru_macos_coretext_font_cell_metrics(
+        session.appearance.font.family.ptr,
+        session.appearance.font.family.len,
+        overlay_font,
+        &m,
+    );
+    try std.testing.expect(m.status == 0 and m.cell_width_px > 0 and m.cell_height_px > 0);
+    try std.testing.expectEqual(m.cell_width_px, session.overlay_cell_width_px); // 곱 아님 — CoreText 실측
+    try std.testing.expectEqual(m.cell_height_px, session.overlay_cell_height_px);
+    // 오버레이(1.3× 폰트)는 base보다 크다.
+    try std.testing.expect(session.overlay_cell_height_px > session.cell_height_px);
+}
+
+test "overlayCell: 오버레이 셀 = 터미널 셀 ×1.3(round)·0 보존(fallback 폴백 경로)" {
     try std.testing.expectEqual(@as(u32, 13), DevSession.overlayCell(10)); // 10×1.3=13
     try std.testing.expectEqual(@as(u32, 21), DevSession.overlayCell(16)); // 16×1.3=20.8 → 21(round)
     try std.testing.expectEqual(@as(u32, 31), DevSession.overlayCell(24)); // 24×1.3=31.2 → 31

@@ -833,13 +833,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     @objc private func newTerminalWindow(_ sender: Any?) {
         _ = sender
         guard !smokeMode else { return }
-        _ = createTerminalWindow(applyingBlock: nil)
+        _ = createTerminalWindow(applyingWorkspace: nil)
     }
 
-    /// 새 일반 창(+세션+렌더러)을 만든다. `applyingBlock`이 있으면 세션 생성 직후 그 workspace 블록을 적용해
-    /// 탭/split/Term을 복원한다(R4b). 성공하면 true. 실패 시 만든 것을 정리한다.
+    /// 새 일반 창(+세션+렌더러)을 만든다. 성공하면 true. 실패 시 만든 것을 정리한다. 복원할 창이면 (전체 텍스트,
+    /// 창 인덱스)를 받아 세션 생성 직후 그 인덱스의 창을 적용해 탭/split/Term을 복원한다(R4b) — 포맷 파싱은
+    /// Zig ABI가 소유한다(Swift는 'window ' 경계를 분할하지 않음).
     @discardableResult
-    private func createTerminalWindow(applyingBlock block: String?) -> Bool {
+    private func createTerminalWindow(applyingWorkspace ws: (text: String, index: Int)?) -> Bool {
         let surface = TerminalSurface()
         windows.append(surface)
         var ok = false
@@ -855,7 +856,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             window.makeFirstResponder(window.contentView)
             setupMetalRenderer()
             guard createSessionForActiveSurface(smokeMode: false) else { return }
-            if let block { applyWorkspaceBlock(block) } // 복원: 기본 탭을 이 블록의 탭/split/Term으로 교체
+            if let ws { applyWorkspaceWindow(ws.text, ws.index) } // 복원: 기본 탭을 이 창의 탭/split/Term으로 교체
             resizeDevSessionFromWindow()
             _ = renderTick() // 즉시 첫 paint(다음 timer tick을 안 기다림)
             ok = true
@@ -870,54 +871,46 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return ok
     }
 
-    /// 활성 surface(forwarder 대상)의 세션에 workspace 블록(헤더 없는 "window …")을 적용한다 — 헤더를 붙여 ABI
-    /// parse+apply. 실패는 무시(best-effort 복원 — 적용 못 한 창은 기본 단일 탭으로 남는다).
-    private func applyWorkspaceBlock(_ block: String) {
+    /// 활성 surface(forwarder 대상)의 세션에 workspace **전체 텍스트**의 window_index번째 창을 적용한다 — 헤더
+    /// 포함 전체를 그대로 ABI에 넘긴다(창 경계 분할은 Zig가 소유). 실패는 무시(best-effort — 적용 못 한 창은 기본 단일 탭).
+    private func applyWorkspaceWindow(_ text: String, _ index: Int) {
         guard let session = devSession else { return }
-        let bytes = Array((MARU_WORKSPACE_HEADER + "\n" + block).utf8)
+        let bytes = Array(text.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_dev_session_apply_workspace(session, buf.baseAddress, buf.count)
+            maru_macos_app_dev_session_apply_workspace_window(session, buf.baseAddress, buf.count, index)
         }
     }
 
-    /// 시작 시 저장된 workspace를 복원한다(R4b). 첫 블록을 이미 만든 primary에 적용하고, 나머지 블록마다 새 창을
-    /// 만든다. 저장 없음·복원 off·smoke·빈 블록이면 무동작(기본 단일 창 유지). best-effort.
+    /// 시작 시 저장된 workspace를 복원한다(R4b). Zig가 창 개수를 세고(헤더·포맷 검증 겸함), 창 0을 primary에,
+    /// 나머지를 새 창에 인덱스로 적용한다. 저장 없음·복원 off·smoke·손상(count<=0)이면 무동작(기본 단일 창 유지).
     private func restoreWorkspace() {
         guard !smokeMode else { return }
-        // 끄기(임시): config 토글은 후속. 기본은 ON.
+        // 끄기(임시): config 토글은 후속. 기본은 ON. 이 플래그는 saveWorkspace도 막는다 — 복원을 끈 사용자의 저장
+        // 파일을 종료 시 덮어쓰지 않게(persistence 자체 off).
         guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
-        let blocks = loadWorkspaceBlocks()
-        guard !blocks.isEmpty else { return }
-        withSurface(primary) { applyWorkspaceBlock(blocks[0]) }
-        for block in blocks.dropFirst() {
-            createTerminalWindow(applyingBlock: block)
+        guard let session = primary?.devSession, let text = loadWorkspaceText() else { return }
+        let bytes = Array(text.utf8)
+        let count = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_dev_session_workspace_window_count(session, buf.baseAddress, buf.count)
         }
-        withSurface(primary) { resizeDevSessionFromWindow() } // 복원으로 grid가 바뀌었으니 primary를 창에 다시 맞춤
+        guard count > 0 else { return } // -1=손상/헤더불일치, 0=빈 workspace → 기본 단일 창(사용자 알림은 후속 PR)
+        withSurface(primary) { applyWorkspaceWindow(text, 0) }
+        for i in 1..<Int(count) {
+            createTerminalWindow(applyingWorkspace: (text, i))
+        }
+        // 복원으로 grid·레이아웃이 바뀌었으니 primary를 창에 다시 맞추고 즉시 repaint한다 — 추가 창은
+        // createTerminalWindow가 renderTick하지만 primary는 안 그래서, 기본 레이아웃이 한 프레임 깜빡이는 걸 막는다.
+        withSurface(primary) {
+            resizeDevSessionFromWindow()
+            _ = renderTick()
+        }
     }
 
-    /// workspace.v1을 읽어 header 검증 후 "window " 라인 경계로 창 블록들을 나눈다(각 블록 = 헤더 없는 한 창).
-    /// 없거나 헤더 불일치면 빈 배열. surface/pane/tree 라인은 "window "로 시작 안 하므로 분할이 모호하지 않다.
-    private func loadWorkspaceBlocks() -> [String] {
-        guard let url = workspaceFileURL,
-              let data = try? Data(contentsOf: url) else { return [] }
-        // 잘못된 UTF-8 바이트가 복원 전체를 날리지 않게 관대하게 디코드한다(불완전/깨진 시퀀스는 U+FFFD로 치환).
-        // 저장은 항상 valid UTF-8이라 정상 경로엔 무영향, 외부 손상·절단 파일에서도 읽히는 만큼은 복원한다.
-        let text = String(decoding: data, as: UTF8.self)
-        var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        guard let first = lines.first, first == MARU_WORKSPACE_HEADER else { return [] }
-        lines.removeFirst()
-        var blocks: [String] = []
-        var current: [String] = []
-        for line in lines {
-            if line.hasPrefix("window ") {
-                if !current.isEmpty { blocks.append(current.joined(separator: "\n") + "\n") }
-                current = [line]
-            } else if !current.isEmpty, !line.isEmpty {
-                current.append(line)
-            }
-        }
-        if !current.isEmpty { blocks.append(current.joined(separator: "\n") + "\n") }
-        return blocks
+    /// workspace.v1 raw 텍스트를 읽는다(관대 UTF-8 디코드 — 깨진 바이트는 U+FFFD). 없으면 nil. 헤더 검증·창 분할은
+    /// Zig ABI가 한다(파싱 권위 단일화) — 여기선 포맷을 파싱하지 않는다.
+    private func loadWorkspaceText() -> String? {
+        guard let url = workspaceFileURL, let data = try? Data(contentsOf: url) else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
 
     /// 한 일반 창의 세션·렌더러를 닫고(요약은 surface.latestFrameSummary에 남긴다) 컬렉션에서 뺀다. NSWindow는
@@ -2025,6 +2018,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 정상 종료에만 불림)가 보장 — 깨진 세션이 마지막 저장을 덮어쓰지 않는다.
     private func saveWorkspace() {
         guard !smokeMode, !windows.isEmpty else { return }
+        // 복원을 끈 사용자(MARU_NO_WORKSPACE_RESTORE)는 저장도 막는다 — 안 그러면 복원 안 한 기본 단일 창이 종료 시
+        // 저장 파일을 덮어써 사용자가 보존하려던 멀티 창 레이아웃이 사라진다(데이터 손실). 플래그=persistence 자체 off.
+        guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
         var blocks = ""
         for surface in windows {
             guard let session = surface.devSession else { continue }

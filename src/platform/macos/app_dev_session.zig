@@ -4066,6 +4066,37 @@ pub const DevSession = struct {
         return frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
     }
 
+    /// 오버레이(커맨드 팝업·Find·Notice) frame의 공통 마무리. 채워진 cells(소유권 인계) + 격자 크기(cols×rows) +
+    /// backing-px origin을 받아 DrawList → CoreTextFrameBuilder → PaneFrame으로 굳힌다. 세 빌더가 같은 frame 계약
+    /// (DrawList 리터럴·frame_builder 6필드·PaneFrame 반환)을 복제하던 boilerplate를 단일화한다 — frame 계약이
+    /// 바뀌면 여기 한 곳만 고친다. cells는 toOwnedSlice로 가져가고, 실패 시 호출자 errdefer가 정리한다(아직 유효).
+    fn finishOverlayFrame(
+        self: *DevSession,
+        cells: *std.ArrayList(renderer.DrawCell),
+        cols: u16,
+        rows: u16,
+        origin_x: u32,
+        origin_y: u32,
+    ) !metal_frame.PaneFrame {
+        const draw_list: renderer.DrawList = .{
+            .size = .{ .cols = cols, .rows = rows },
+            .cursor = .{ .row = 0, .col = 0, .visible = false },
+            .dirty = .{ .start_row = 0, .end_row = if (rows == 0) 0 else rows - 1 },
+            .cells = try cells.toOwnedSlice(self.allocator),
+            .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
+        };
+        const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
+            .appearance = self.appearance,
+            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+            .scale_milli = self.scale_milli,
+            .cell_width_px = @intCast(self.cell_width_px),
+            .cell_height_px = @intCast(self.cell_height_px),
+        };
+        const frame = try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
+        return .{ .frame = frame, .origin_x = origin_x, .origin_y = origin_y, .colors = .{ .default_fg = self.appearance.theme.foreground } };
+    }
+
     /// 커맨드 팝업 오버레이 frame(최상위). 패널을 화면 상단-중앙에 그린다: row 0 = 쿼리("> …"), 그 아래
     /// 필터된 결과(제목 + 우측 정렬 바인딩 표시), 선택 행은 강조 bg. 모든 셀이 불투명 bg를 들어(buildFromDrawList가
     /// non-default bg를 sentinel 셀로 냄) 아래(터미널·커서)를 덮는다. 닫혀 있거나 메트릭 미상이면 에러(호출자가 무시).
@@ -4119,27 +4150,11 @@ pub const DevSession = struct {
             try appendPaletteRow(self.allocator, &cells, @intCast(1 + i), line[0..panel_cols], row_bg, text_fg);
         }
 
-        const draw_list: renderer.DrawList = .{
-            .size = .{ .cols = panel_cols, .rows = panel_rows },
-            .cursor = .{ .row = 0, .col = 0, .visible = false },
-            .dirty = .{ .start_row = 0, .end_row = if (panel_rows == 0) 0 else panel_rows - 1 },
-            .cells = try cells.toOwnedSlice(self.allocator),
-            .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
-        };
-        const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
-            .appearance = self.appearance,
-            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
-            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
-            .scale_milli = self.scale_milli,
-            .cell_width_px = @intCast(cw),
-            .cell_height_px = @intCast(ch),
-        };
-        const frame = try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
-        // 상단-중앙 배치(backing px). 폭이 패널보다 좁으면 origin 0.
+        // 상단-중앙 배치(backing px). 폭이 패널보다 좁으면 origin 0. frame 마무리는 공통 헬퍼.
         const panel_w = @as(u32, panel_cols) * cw;
         const origin_x = term_rect.x + (term_rect.w -| panel_w) / 2;
         const origin_y = term_rect.y + 2 * ch; // 위에서 두 줄 내려.
-        return .{ .frame = frame, .origin_x = origin_x, .origin_y = origin_y, .colors = .{ .default_fg = self.appearance.theme.foreground } };
+        return self.finishOverlayFrame(&cells, panel_cols, panel_rows, origin_x, origin_y);
     }
 
     /// 스크롤백 Find 오버레이 frame(최상위). 상단-중앙에 한 줄 패널: "Find: <query>" + 우측 정렬 매치 카운터
@@ -4179,26 +4194,10 @@ pub const DevSession = struct {
         errdefer cells.deinit(self.allocator);
         try appendPaletteRow(self.allocator, &cells, 0, line[0..panel_cols], panel_bg, text_fg);
 
-        const draw_list: renderer.DrawList = .{
-            .size = .{ .cols = panel_cols, .rows = 1 },
-            .cursor = .{ .row = 0, .col = 0, .visible = false },
-            .dirty = .{ .start_row = 0, .end_row = 0 },
-            .cells = try cells.toOwnedSlice(self.allocator),
-            .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
-        };
-        const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
-            .appearance = self.appearance,
-            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
-            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
-            .scale_milli = self.scale_milli,
-            .cell_width_px = @intCast(cw),
-            .cell_height_px = @intCast(ch),
-        };
-        const frame = try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
         const panel_w = @as(u32, panel_cols) * cw;
         const origin_x = term_rect.x + (term_rect.w -| panel_w) / 2;
         const origin_y = term_rect.y + 2 * ch; // 위에서 두 줄 내려(팝업과 같은 위치).
-        return .{ .frame = frame, .origin_x = origin_x, .origin_y = origin_y, .colors = .{ .default_fg = self.appearance.theme.foreground } };
+        return self.finishOverlayFrame(&cells, panel_cols, 1, origin_x, origin_y);
     }
 
     /// chrome 컴포넌트가 읽는 불변 메트릭(props seam). 매 frame 세션 실측값에서 빌드한다 — chrome은 terminal/
@@ -4250,14 +4249,15 @@ pub const DevSession = struct {
         try self.chrome_host.collectDraws(self.buildChromeProps(), &tokens, arena, &draws);
         if (draws.items.len == 0) return error.NotOpen;
 
-        // notice.view 계약: 열렸으면 fill(박스 rect+bg) + border + text(메시지+fg)를 함께 낸다. fill·text op를
-        // 잡고(border는 DrawCell에 테두리 개념이 없어 lower 대상 아님 — C2/C3 reserved-kind 작업으로 미룸), 둘 중
-        // 하나라도 없으면 에러로 닫는다. **방어 기본값을 두지 않는다** — 계약상 항상 함께 오므로 누락은 loud fail로
-        // 드러낸다(no-defensive-code). op 순서엔 의존하지 않는다(마지막 fill/text가 이긴다 — notice는 각 1개).
+        // notice.view 계약: 열렸으면 fill(박스 rect+bg) + border(테두리 sides+role) + text(메시지+fg)를 함께 낸다.
+        // 셋을 잡고, fill·text 중 하나라도 없으면 에러로 닫는다. **방어 기본값을 두지 않는다** — 계약상 항상 함께
+        // 오므로 누락은 loud fail(no-defensive-code). op 순서엔 의존 안 함(마지막 fill/border/text가 이김 — 각 1개).
         var fill_op: ?chrome.draw.Op.Fill = null;
+        var border_op: ?chrome.draw.Op.Border = null;
         var text_op: ?chrome.draw.Op.Text = null;
         for (draws.items) |d| for (d.ops) |op| switch (op) {
             .fill => |f| fill_op = f,
+            .border => |b| border_op = b,
             .text => |tx| text_op = tx,
             else => {},
         };
@@ -4265,8 +4265,8 @@ pub const DevSession = struct {
         const text = text_op orelse return error.NoText;
         const msg: []const u8 = if (text.runs.len > 0) text.runs[0].text else return error.NoText;
         const rect = fill.rect;
-        const box_bg = tokens.get(fill.role);
-        const msg_fg = tokens.get(text.role);
+        const box_bg: terminal.Color = .{ .rgb = tokens.get(fill.role) };
+        const fg: terminal.Color = .{ .rgb = tokens.get(text.role) };
         const msg_origin = text.origin;
 
         const cols_u = rect.w / cw;
@@ -4275,44 +4275,40 @@ pub const DevSession = struct {
         const cols: u16 = @intCast(@min(cols_u, @as(u32, std.math.maxInt(u16))));
         const rows: u16 = @intCast(@min(rows_u, @as(u32, std.math.maxInt(u16))));
 
-        const bg: terminal.Color = .{ .rgb = box_bg };
-        const fg: terminal.Color = .{ .rgb = msg_fg };
-
         // 메시지의 박스-상대 셀 위치. origin은 backing-px 절대 → (origin - rect 좌상단)/cell. 음수면 0으로 clamp.
         const msg_col: usize = if (msg_origin.x > rect.x) @intCast(@divTrunc(msg_origin.x - rect.x, @as(i32, @intCast(cw)))) else 0;
         const msg_row_i = if (msg_origin.y > rect.y) @divTrunc(msg_origin.y - rect.y, @as(i32, @intCast(ch))) else 0;
         const msg_row: u16 = @intCast(@min(msg_row_i, @as(i32, rows - 1)));
 
+        // border op을 박스 가장자리 셀(role 색 bg)로 lower한다 — DrawCell엔 테두리 프리미티브가 없어 가장자리
+        // 셀의 bg를 칠하는 게 tui 표현(C2/C3 reserved-kind로 고급화 예정). sides가 켜진 변만 칠한다. notice는
+        // 4변 모두 focus_accent. 가장자리가 아니면 box_bg. 메시지 행만 글리프, 나머지는 공백.
+        const border_bg: terminal.Color = if (border_op) |b| .{ .rgb = tokens.get(b.role) } else box_bg;
+        const sides = if (border_op) |b| b.sides else chrome.draw.Sides{};
+        // line_buf는 arena에서 cols 크기로 잡는다(고정 256 cap·이중 절단 제거 — 넓은 박스도 안 잘림).
+        const line_buf = try arena.alloc(u21, cols);
         var cells: std.ArrayList(renderer.DrawCell) = .empty;
         errdefer cells.deinit(self.allocator);
-        var line_buf: [256]u21 = undefined;
-        const line_len = @min(@as(usize, cols), line_buf.len);
         var r: u16 = 0;
         while (r < rows) : (r += 1) {
-            @memset(line_buf[0..line_len], ' ');
-            if (r == msg_row and msg_col < line_len) putUtf8(line_buf[0..line_len], msg_col, msg);
-            try appendPaletteRow(self.allocator, &cells, r, line_buf[0..line_len], bg, fg);
+            @memset(line_buf, ' ');
+            if (r == msg_row and msg_col < line_buf.len) putUtf8(line_buf, msg_col, msg);
+            var c: u16 = 0;
+            while (c < cols) : (c += 1) {
+                const on_border = (sides.top and r == 0) or (sides.bottom and r == rows - 1) or
+                    (sides.left and c == 0) or (sides.right and c == cols - 1);
+                try cells.append(self.allocator, .{
+                    .row = r,
+                    .col = c,
+                    .codepoint = line_buf[c],
+                    .style = .{ .foreground = fg, .background = if (on_border) border_bg else box_bg },
+                });
+            }
         }
 
-        const draw_list: renderer.DrawList = .{
-            .size = .{ .cols = cols, .rows = rows },
-            .cursor = .{ .row = 0, .col = 0, .visible = false },
-            .dirty = .{ .start_row = 0, .end_row = rows - 1 },
-            .cells = try cells.toOwnedSlice(self.allocator),
-            .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
-        };
-        const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
-            .appearance = self.appearance,
-            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
-            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
-            .scale_milli = self.scale_milli,
-            .cell_width_px = @intCast(cw),
-            .cell_height_px = @intCast(ch),
-        };
-        const frame = try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
         const ox: u32 = if (rect.x < 0) 0 else @intCast(rect.x);
         const oy: u32 = if (rect.y < 0) 0 else @intCast(rect.y);
-        return .{ .frame = frame, .origin_x = ox, .origin_y = oy, .colors = .{ .default_fg = self.appearance.theme.foreground } };
+        return self.finishOverlayFrame(&cells, cols, rows, ox, oy);
     }
 
     /// chrome Notice 모달(손상 알림 등)을 연다. 메시지는 세션 소유 버퍼로 복사한다 — notice.State.message는 slice라

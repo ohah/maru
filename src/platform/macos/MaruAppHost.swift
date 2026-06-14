@@ -874,7 +874,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// parse+apply. 실패는 무시(best-effort 복원 — 적용 못 한 창은 기본 단일 탭으로 남는다).
     private func applyWorkspaceBlock(_ block: String) {
         guard let session = devSession else { return }
-        let bytes = Array(("maru.workspace.v1\n" + block).utf8)
+        let bytes = Array((MARU_WORKSPACE_HEADER + "\n" + block).utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_dev_session_apply_workspace(session, buf.baseAddress, buf.count)
         }
@@ -904,7 +904,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 저장은 항상 valid UTF-8이라 정상 경로엔 무영향, 외부 손상·절단 파일에서도 읽히는 만큼은 복원한다.
         let text = String(decoding: data, as: UTF8.self)
         var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        guard let first = lines.first, first == "maru.workspace.v1" else { return [] }
+        guard let first = lines.first, first == MARU_WORKSPACE_HEADER else { return [] }
         lines.removeFirst()
         var blocks: [String] = []
         var current: [String] = []
@@ -2036,7 +2036,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         guard !blocks.isEmpty, let url = workspaceFileURL else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? ("maru.workspace.v1\n" + blocks).data(using: .utf8)?.write(to: url, options: .atomic)
+        try? (MARU_WORKSPACE_HEADER + "\n" + blocks).data(using: .utf8)?.write(to: url, options: .atomic)
     }
 
     private func shutdownDevSession() {

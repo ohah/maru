@@ -14,6 +14,12 @@ const split_tree = @import("split_tree.zig");
 
 pub const header = "maru.workspace.v1";
 
+/// 한 탭의 pane 수 sanity 상한. 손상·변조된 복원 파일이 pane_count를 부풀려도 split 트리 노드 상한
+/// (2·pane_count−1)이 거대해져 깊은 재귀로 스택 오버플로가 나지 않게, parseTab이 먼저 이 값으로 가둔다.
+/// 실제 레이아웃은 한 자릿수~십수 pane이라 1024는 어떤 현실 레이아웃보다 크다(손상만 거른다). 베이스: 표준이
+/// 없어 sane 상한을 우리가 정함 — Ghostty는 바이너리 아카이버라 이 텍스트-깊은중첩 벡터 자체가 없다.
+pub const max_panes_per_tab = 1024;
+
 pub const SplitDirection = split_tree.SplitDirection;
 
 /// split 트리 한 노드(preorder). leaf는 pane 섹션 인덱스를 가리키고, split은 방향 + a의 비율(천분율 0..1000)을
@@ -191,8 +197,14 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     try r.key("title=");
     const title = try r.quoted(a);
 
+    // 손상/변조 파일 방어(R6 graceful). 0개 탭은 빌드 단계에서 무효이고, 부풀린 pane_count는 아래 트리 노드
+    // 상한을 거대화해 깊은 재귀를 부르므로 sane 상한으로 먼저 가둔다 — 위반 시 BadLine→그 창은 기본 창으로.
+    if (pane_count == 0 or pane_count > max_panes_per_tab) return error.BadLine;
+
     var tree: std.ArrayList(TreeNode) = .empty;
-    try parseTree(a, lines, &tree); // 탭의 트리 하나(self-delimiting preorder)
+    // 구조 불변식: pane P개 탭의 split 트리는 leaf P + split (P−1) = 정확히 2P−1 노드다. 그보다 많이 읽히면
+    // (손상·순환) BadLine으로 멈춰 크래시 대신 graceful 폴백한다. pane_count가 가둬졌으니 재귀 깊이도 ≤2P−1.
+    try parseTree(a, lines, &tree, 2 * pane_count - 1); // 탭의 트리 하나(self-delimiting preorder)
 
     var panes: std.ArrayList(Pane) = .empty;
     var i: usize = 0;
@@ -201,7 +213,9 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
 }
 
 /// 한 subtree를 preorder로 읽어 out에 append(self-delimiting). split는 뒤따르는 두 subtree(a,b)를 재귀로 소비.
-fn parseTree(a: std.mem.Allocator, lines: *LineIter, out: *std.ArrayList(TreeNode)) ParseError!void {
+/// max_nodes = 2·pane_count−1(구조 불변식): 이미 그만큼 읽었으면 더 읽지 않고 BadLine — 노드 수·재귀 깊이를 함께 가둔다.
+fn parseTree(a: std.mem.Allocator, lines: *LineIter, out: *std.ArrayList(TreeNode), max_nodes: usize) ParseError!void {
+    if (out.items.len >= max_nodes) return error.BadLine; // 트리 노드 수 > 2·pane−1 — 손상/순환(스택 오버플로 방지)
     var r = FieldReader{ .line = lines.next() orelse return error.Truncated };
     if (!std.mem.eql(u8, try r.word(), "tree-node")) return error.BadLine;
     const kind = try r.word();
@@ -219,8 +233,8 @@ fn parseTree(a: std.mem.Allocator, lines: *LineIter, out: *std.ArrayList(TreeNod
         try r.key("ratio=");
         const ratio = try r.uint(u16);
         try out.append(a, .{ .split = .{ .direction = dir, .ratio_milli = ratio } });
-        try parseTree(a, lines, out); // a
-        try parseTree(a, lines, out); // b
+        try parseTree(a, lines, out, max_nodes); // a
+        try parseTree(a, lines, out, max_nodes); // b
     } else return error.BadLine;
 }
 
@@ -479,6 +493,29 @@ test "workspace parse: 구조·escape 해제·forgiving" {
 
 test "workspace parse: 잘못된 헤더는 에러" {
     try std.testing.expectError(error.BadHeader, parse(std.testing.allocator, "not.a.workspace\nwindow tabs=0 active-tab=0\n"));
+}
+
+test "workspace parse: 손상 트리는 구조 불변식으로 graceful 차단(크래시 대신 BadLine)" {
+    // 탭은 panes=2(트리 노드 최대 2·2−1=3)인데 split가 과하게 중첩돼 4번째 노드를 요구 → BadLine으로 멈춘다
+    // (깊은 재귀 스택 오버플로 방지). 복원 측은 이 에러로 그 창을 기본 창으로 떨군다.
+    const deep =
+        header ++ "\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=2 active-pane=0 title=\"\"\n" ++
+        "tree-node split horizontal ratio=500\n" ++
+        "tree-node split horizontal ratio=500\n" ++
+        "tree-node leaf pane=0\n" ++
+        "tree-node leaf pane=1\n" ++
+        "tree-node leaf pane=0\n";
+    try std.testing.expectError(error.BadLine, parse(std.testing.allocator, deep));
+
+    // 부풀린 pane_count는 트리 노드 상한(2·pane−1)을 거대화하므로 sane 상한(max_panes_per_tab)에서 먼저 막는다.
+    const huge =
+        header ++ "\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=999999 active-pane=0 title=\"\"\n" ++
+        "tree-node leaf pane=0\n";
+    try std.testing.expectError(error.BadLine, parse(std.testing.allocator, huge));
 }
 
 test "workspace serializeWindow: 헤더 없는 블록을 모아 전체로 parse(R5 집계)" {

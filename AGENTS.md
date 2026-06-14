@@ -26,6 +26,7 @@
 - [터미널 호환성/보안 정책](docs/terminal-compatibility-policy.md)
 - [키 입력과 단축키 경계](docs/key-input-and-shortcuts.md)
 - [탭·split·레이아웃 전략](docs/tabs-splits-layout.md)
+- [Chrome 전략(디자인 시스템 구조)](docs/chrome-strategy.md)
 - [macOS 앱 호스트 경계](docs/macos-app-host-boundary.md)
 
 ## 설계 문서
@@ -49,6 +50,7 @@
 - [Snapshot Versioning](docs/snapshot-versioning.md)
 - [키 입력과 단축키 경계](docs/key-input-and-shortcuts.md)
 - [탭·split·레이아웃 전략](docs/tabs-splits-layout.md)
+- [Chrome 전략(디자인 시스템 구조)](docs/chrome-strategy.md)
 - [macOS 앱 호스트 경계](docs/macos-app-host-boundary.md)
 - [PTY 운영 모델](docs/pty-operating-model.md)
 - [Workspace Restore 전략](docs/workspace-restore.md)

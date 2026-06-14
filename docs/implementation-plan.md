@@ -550,6 +550,23 @@ TDD 방식:
 - 저장 포맷은 선언적 상태만 담는다.
 - 복구 실패 시 어떤 surface가 왜 실패했는지 artifact가 남는다.
 
+### 설계·결정 (window-aware, 사용자 결정 2026-06-14)
+
+확정 순서(New Window → restore → chrome)의 하드 제약대로 **window-aware**다(workspace-restore.md 초안은 cmux 풀 모델·멀티 창 이전이라 surface/tab만 — 현재 모델 windows→tabs→pane split 트리→Term에 맞춰 확장). 토대는 이미 상당: `app.surface.RestorableSurfaceMetadata`(id·title·cwd·command·size), `core.currentCwd()`(OSC 7)·`windowTitle()`(OSC 0/2)·`Surface.command`, `split_tree`(dir/ratio), snapshot/trace 직렬화 컨벤션.
+
+- **D-범위 = 최근 세션 1개**(사용자 결정): 앱을 닫을 때의 전체 상태(모든 창·탭·split·cwd)를 전역 1개로 저장·복원("끄던 그대로 다시 열기"). repo별 workspace는 후속(이 위에 얹는 레이어).
+- **D-트리거 = 자동 복원, 기본 ON + config 토글, 정상 종료분만**(사용자 결정): 앱 시작 시 마지막 세션을 자동으로 다시 연다(layout·cwd·shell 시작까지만 — **명령 자동실행 없음**이라 안전). config로 끌 수 있고, **크래시 후엔 복원 안 함**(정상 종료 때 저장한 것만). 첫 실행·저장 없음·복원 off면 기본 빈 창 1개.
+- **보안(정책 그대로)**: live PTY/process/grid 내용 저장 안 함, `last_observed_command` 자동 재실행 안 함, redaction deny-by-default([project-rules.md] 단일 출처). **env override·startup_recipe 자동실행은 구현 전 재확인 필요(정책)라 v1 제외** — v1은 layout·cwd·shell_entry(command)만.
+
+### 분해 (R1~R6)
+
+- **R1 직렬화(writer) — 완료**: `src/app/workspace.zig`에 값-타입 모델(Workspace→Window→Tab→{TreeNode preorder + Pane}→Surface)과 `serialize`(`maru.workspace.v1`). snapshot/trace 규칙(첫 줄 bare 토큰·`<kind> <fields>`·`\"`/`\\`/개행 escape) 따름. split 트리는 preorder TreeNode(split는 뒤 두 subtree 소비, full binary tree라 self-delimiting). 모델에 PTY/process 필드 없음(선언적). 검증: 헤드리스 writer 테스트(단일 창/탭/pane/surface·중첩 split·멀티 창·cwd/title escape) + fmt + boundaries + swift-check + 스모크. **순수 Zig, 라이브 DevSession 미접촉**(R3 캡처가 모델을 채운다).
+- **R2 파서(reader)**: 같은 모델로 텍스트 → Workspace(round-trip). preorder 트리 재구성(split→두 subtree 재귀). 알 수 없는 라인/버전 forgiving.
+- **R3 캡처**: 라이브 멀티 창(`windows` 컬렉션)·각 DevSession의 탭/pane 트리/Term을 모델로. cwd=`currentCwd()`, command=`Surface.command`, size=core size. ABI로 Swift가 각 세션의 workspace 조각을 모아 전체 모델 구성(또는 Zig가 한 세션을 직렬화하고 Swift가 창 단위로 합침).
+- **R4 복원(apply)**: 모델 → 창 N개 생성(W2 팩토리 재사용) → 각 창에 탭/split/Term 재생성(cwd로 spawn, shell_entry argv) → surface별 실패는 artifact(cwd 없음 등). 나머지는 최대한 복원.
+- **R5 영속화**: 정상 종료(applicationWillTerminate) 시 저장, 시작 시 로드·자동 복원(토글 ON). 저장 위치(예: Application Support/maru/), 크래시 가드(정상 종료 마커).
+- **R6 보안 테스트**: live PTY 미저장·민감 env 미저장(걸리면 실패)·last_observed_command 자동실행 안 함·cwd 없을 때 실패 artifact(workspace-restore.md "초기 테스트" 그대로).
+
 ## 10단계: Plugin/Wasm
 
 목표:

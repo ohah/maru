@@ -505,3 +505,22 @@ test "workspace serializeWindow: 헤더 없는 블록을 모아 전체로 parse(
     try std.testing.expectEqualStrings("/a", parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0].cwd);
     try std.testing.expectEqualStrings("/b", parsed.workspace.windows[1].tabs[0].panes[0].surfaces[0].cwd);
 }
+
+test "workspace serialize: 선언적 — env/fd/pid/last-observed 필드 없음(민감 데이터 미저장 정책)" {
+    // 모델이 PTY 핸들·env·last_observed_command 필드를 안 가져, 저장 텍스트에 그런 라인이 절대 안 샌다
+    // (docs/workspace-restore.md: live process 저장 금지, env는 allowlist 전까지 비움, last command 자동실행 금지).
+    // 이 가드는 누가 나중에 그런 필드를 추가하면 깨져서 정책 위반을 컴파일·테스트 단계에서 잡는다.
+    const s = [_]Surface{.{ .title = "api", .cwd = "/home/user/.secret-proj", .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const p = [_]Pane{.{ .surfaces = &s }};
+    const t = [_]TreeNode{.{ .leaf = 0 }};
+    const w = [_]Window{.{ .tabs = &[_]Tab{.{ .tree = &t, .panes = &p }} }};
+    const text = try serialize(std.testing.allocator, .{ .windows = &w });
+    defer std.testing.allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "env=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "fd=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "pid=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "last-observed") == null);
+    // cwd는 경로라 정상 저장된다(redaction 대상은 env이지 path가 아님 — workspace-restore.md).
+    try std.testing.expect(std.mem.indexOf(u8, text, "cwd=\"/home/user/.secret-proj\"") != null);
+}

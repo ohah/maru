@@ -108,6 +108,21 @@ fn restoreSurfaceSize(sm: app.workspace.Surface) terminal.Size {
     });
 }
 
+// 복원 시 저장된 cwd를 spawn에 쓸지 결정한다(R6 "없는 cwd graceful"). 존재하는 절대-경로 디렉터리일 때만 그
+// cwd를, 아니면(빈값·상대경로·없음·파일·권한 없음) null을 돌려준다 — null이면 기본 cwd로 spawn해 surface를 잃지
+// 않는다. cwd 자식 chdir 실패는 _exit(126)이라(pty/macos childExec), 미리 확인 안 하면 복원된 셸이 즉시 죽어
+// 다음 tick에 reap된다. workspace-restore.md "실패 처리": 한 surface가 어긋나도 나머지(와 그 surface)를 살린다.
+fn usableRestoreCwd(cwd: []const u8) ?[]const u8 {
+    if (cwd.len == 0 or cwd.len >= std.fs.max_path_bytes or !std.fs.path.isAbsolute(cwd)) return null;
+    // libc access로 디렉터리 진입(X) 권한 = chdir 가능 여부를 본다(이 Zig 핀은 std.Io 비동기 모델이라 동기
+    // 존재 확인엔 std.c를 쓴다 — pty/macos.zig와 같은 패턴). null 종단 복사가 필요하다(access는 C 문자열).
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    @memcpy(buf[0..cwd.len], cwd);
+    buf[cwd.len] = 0;
+    const cwd_z = buf[0..cwd.len :0];
+    return if (std.c.access(cwd_z.ptr, std.posix.X_OK) == 0) cwd else null;
+}
+
 /// backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다. cell 크기가 0이면
 /// placeholder로 대체하고, u16 상한으로 막은 뒤 terminal.clampGridSize로 최소 크기(cols>=2)를
 /// 적용한다 — cols>=2 불변식은 TerminalCore가 단일 소유하므로 여기서 직접 하드코딩하지 않는다.
@@ -3331,7 +3346,7 @@ pub const DevSession = struct {
         const size = restoreSurfaceSize(sm);
         cfg.size = size;
         var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir);
-        if (sm.cwd.len > 0) req.cwd = sm.cwd; // 저장된 cwd에서 spawn(빈값이면 기본 cwd)
+        if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c; // 존재하는 cwd면 거기서, 없으면 기본 cwd(surface 안 잃음)
         return self.createPane(req, size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
     }
 
@@ -3340,7 +3355,7 @@ pub const DevSession = struct {
         const size = restoreSurfaceSize(sm);
         cfg.size = size;
         var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir);
-        if (sm.cwd.len > 0) req.cwd = sm.cwd;
+        if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c;
         return self.createTerm(req, size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
     }
 
@@ -5205,6 +5220,42 @@ test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)"
     try std.testing.expectEqual(@as(usize, 1), cap.tabs[0].active_pane);
     try std.testing.expect(cap.tabs[0].tree[0].split.direction == .vertical);
     try std.testing.expectEqual(@as(u16, 300), cap.tabs[0].tree[0].split.ratio_milli);
+}
+
+test "usableRestoreCwd: 존재하는 절대 디렉터리만 통과(없는 cwd graceful)" {
+    // 존재하는 디렉터리 → 그 cwd 사용. /tmp는 macOS·Linux 모두 존재.
+    try std.testing.expect(usableRestoreCwd("/tmp") != null);
+    try std.testing.expectEqualStrings("/tmp", usableRestoreCwd("/tmp").?);
+    // 없음·빈값·상대경로·파일이 아닌 디렉터리가 아니면 null → 기본 cwd로 복원(surface 안 잃음).
+    try std.testing.expect(usableRestoreCwd("/no/such/maru-restore-xyz-12345") == null);
+    try std.testing.expect(usableRestoreCwd("") == null);
+    try std.testing.expect(usableRestoreCwd("relative/path") == null); // 절대경로 아님
+}
+
+test "applyWorkspaceWindow: 없는 cwd여도 복원 성공(기본 cwd 폴백, surface 안 잃음)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // 없는 cwd → usableRestoreCwd가 null → 기본 cwd로 spawn. apply는 성공하고 탭/surface가 복원된다(셸이
+    // 잘못된 cwd로 _exit(126) 나는 일 없이 살아 있음). 미리 확인 안 했으면 복원 셸이 즉시 죽었을 것.
+    const s = [_]app.workspace.Surface{.{ .cwd = "/no/such/maru-restore-xyz", .cols = 40, .rows = 24 }};
+    const panes = [_]app.workspace.Pane{.{ .surfaces = &s }};
+    const tree = [_]app.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]app.workspace.Tab{.{ .tree = &tree, .panes = &panes }};
+    try session.applyWorkspaceWindow(.{ .tabs = &tabs }); // 실패 안 함
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {

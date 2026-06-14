@@ -48,6 +48,20 @@ const rules = [_]Rule{
         .forbidden = &.{.{ .layer = "pty" }},
     },
     .{
+        // chrome(L3 디자인 시스템)은 플랫폼 중립이어야 한다 — semantic ChromeDraw만 뱉고 session을 props로만
+        // 읽는다. OS/렌더 백엔드(platform·pty)와 코어 내부(terminal·renderer)를 import하면 이식성이 깨지므로
+        // 빌드에서 막는다(docs/layering-and-portability.md §2·§8). 허용: std, color(top-level), 자기 하위 모듈.
+        .layer = "chrome",
+        .barrel = "src/chrome.zig",
+        .implementation_dir = "src/chrome",
+        .forbidden = &.{
+            .{ .layer = "pty" },
+            .{ .layer = "platform" },
+            .{ .layer = "terminal" },
+            .{ .layer = "renderer" },
+        },
+    },
+    .{
         .layer = "plugin",
         .barrel = "src/plugin.zig",
         .implementation_dir = "src/plugin",

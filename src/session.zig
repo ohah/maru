@@ -4,6 +4,7 @@
 //! 투영한다. 이 레이어엔 OS 타입(Metal·CoreText·AppKit·PTY)이 새지 않는다 — tests/boundary/imports.zig가 강제.
 
 pub const input_math = @import("session/input_math.zig");
+pub const ime = @import("session/ime.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

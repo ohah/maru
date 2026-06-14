@@ -59,17 +59,22 @@ pub fn view(
     const cw = @max(m.cell_width_px, 1);
     const ch = @max(m.cell_height_px, 1);
 
-    // 박스 폭 = 메시지 표시 폭(코드포인트 근사) + 좌우 여백. 터미널 영역 폭을 넘지 않게 clamp.
+    // 박스 폭 = 메시지 표시 폭 + 좌우 여백, 단 **터미널 영역(사이드바 오른쪽) 칸 수를 넘지 않게 clamp**한다 —
+    // 넘으면 박스가 사이드바를 침범하거나 우측으로 오버플로한다(좁은 창·넓은 사이드바). term 영역이 너무 좁으면
+    // (4칸 미만) 모달을 생략한다. 표시 폭은 코드포인트 근사라 wide(EAW=2) 문자는 과소측정돼 박스 우측서 잘릴 수
+    // 있다 — 정확한 display-width는 모달 wiring 슬라이스에서 host가 터미널 폭으로 측정해 넘길 때 보정한다.
     const term_w_px = m.backing_width_px -| m.sidebar_width_px;
-    const max_cols = @max(term_w_px / cw, 8);
+    const term_cols = term_w_px / cw;
+    if (term_cols < 4) return; // 모달을 담기엔 너무 좁음
     const msg_cols: u32 = @intCast(std.unicode.utf8CountCodepoints(state.message) catch state.message.len);
-    const box_cols = @min(msg_cols + 2 * tk.space.modal_margin_cells, max_cols);
+    const box_cols = @max(@min(msg_cols + 2 * tk.space.modal_margin_cells, term_cols), 1);
     const box_w = box_cols * cw;
     const box_h = 3 * ch; // 위 여백 한 줄 + 메시지 한 줄 + 아래 여백 한 줄
 
-    // 터미널 영역 안에서 중앙 배치(사이드바 폭만큼 오른쪽으로 민 뒤 가운데).
+    // 터미널 영역 안에서 중앙 배치. box_w <= term_w_px(위 clamp)라 (term_w_px - box_w)는 비음수 → x는 항상
+    // 사이드바 오른쪽에 머문다.
     const sidebar = @as(i32, @intCast(m.sidebar_width_px));
-    const x = sidebar + @divTrunc(@as(i32, @intCast(term_w_px)) - @as(i32, @intCast(box_w)), 2);
+    const x = sidebar + @as(i32, @intCast((term_w_px - box_w) / 2));
     const y = @divTrunc(@as(i32, @intCast(m.backing_height_px)) - @as(i32, @intCast(box_h)), 2);
     const rect = draw.Rect{ .x = x, .y = y, .w = box_w, .h = box_h };
 

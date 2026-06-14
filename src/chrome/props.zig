@@ -10,7 +10,7 @@ pub const CellMetrics = struct {
     sidebar_width_px: u32,
     backing_width_px: u32,
     backing_height_px: u32,
-    chrome_minimal: bool = false,
+    // chrome_minimal 등 세션-종속 플래그는 실제 소비하는 컴포넌트(C2/C3)가 추가한다 — 미리 두면 미사용 필드.
 };
 
 pub const ChromeProps = struct {

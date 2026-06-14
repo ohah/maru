@@ -899,7 +899,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 없거나 헤더 불일치면 빈 배열. surface/pane/tree 라인은 "window "로 시작 안 하므로 분할이 모호하지 않다.
     private func loadWorkspaceBlocks() -> [String] {
         guard let url = workspaceFileURL,
-              let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+              let data = try? Data(contentsOf: url) else { return [] }
+        // 잘못된 UTF-8 바이트가 복원 전체를 날리지 않게 관대하게 디코드한다(불완전/깨진 시퀀스는 U+FFFD로 치환).
+        // 저장은 항상 valid UTF-8이라 정상 경로엔 무영향, 외부 손상·절단 파일에서도 읽히는 만큼은 복원한다.
+        let text = String(decoding: data, as: UTF8.self)
         var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard let first = lines.first, first == "maru.workspace.v1" else { return [] }
         lines.removeFirst()

@@ -243,28 +243,6 @@ fn pointInRect(x_px: f64, y_px: f64, rect: app.SplitRect) bool {
         y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(rect.h));
 }
 
-/// 마우스 (x,y)가 divider seg의 드래그 밴드 안인가(PR6) — 분할 normal 축은 경계 pos ± 밴드 절반(cell 절반 +
-/// 2px 여유로 잡기 쉽게), 분할 따라가는 축(교차축)은 bounds 범위 안. 렌더 divider와 같은 seg(layoutDividers)라
-/// "보이는 선 == 잡히는 선". 셀 0·비유한이면 false. 순수 함수라 OS 무관 단위 테스트.
-fn dividerHit(seg: PaneTree.DividerSeg, cell_width_px: u32, cell_height_px: u32, x_px: f64, y_px: f64) bool {
-    if (cell_width_px == 0 or cell_height_px == 0 or !std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
-    const pos: f64 = @floatFromInt(seg.pos);
-    switch (seg.direction) {
-        .horizontal => { // 세로선: x가 경계 근처, y가 bounds.y..y+h
-            const half = @as(f64, @floatFromInt(cell_width_px)) / 2 + 2;
-            const y0: f64 = @floatFromInt(seg.bounds.y);
-            const y1: f64 = @floatFromInt(seg.bounds.y + seg.bounds.h);
-            return @abs(x_px - pos) <= half and y_px >= y0 and y_px < y1;
-        },
-        .vertical => { // 가로선: y가 경계 근처, x가 bounds.x..x+w
-            const half = @as(f64, @floatFromInt(cell_height_px)) / 2 + 2;
-            const x0: f64 = @floatFromInt(seg.bounds.x);
-            const x1: f64 = @floatFromInt(seg.bounds.x + seg.bounds.w);
-            return @abs(y_px - pos) <= half and x_px >= x0 and x_px < x1;
-        },
-    }
-}
-
 /// 드래그한 Term을 다른 pane '본문'에 떨어뜨릴 때의 가장자리 절반(④ split 재배치). left/right=좌우 split,
 /// top/bottom=상하 split.
 const PaneDropZone = enum { left, right, top, bottom };
@@ -728,6 +706,9 @@ pub const DevSession = struct {
     // hover/divider hit-test는 메인 스레드에서 순차 실행되고 서로 다른 버퍼라 aliasing이 없다(reentrancy 없음).
     hover_leaf_scratch: std.ArrayList(PaneTree.LeafRect) = .empty,
     hover_divider_scratch: std.ArrayList(PaneTree.DividerSeg) = .empty,
+    // dividerAtPoint가 app DividerSeg를 neutral chrome `divider.Seg`로 변환해 담는 병렬 scratch(hover_divider_scratch와
+    // index 일치) — `divider.hitTest`가 이걸로 판정한다(C2 마우스 hit-test 컴포넌트).
+    divider_seg_scratch: std.ArrayList(chrome.components.divider.Seg) = .empty,
     // input.page-keys=scroll이면 메인 화면에서 PageUp/Down이 Maru 스크롤백을 스크롤한다. 기본
     // (false=passthrough)은 xterm/Ghostty처럼 \e[5~/\e[6~를 PTY로 보낸다.
     page_keys_scroll: bool = false,
@@ -831,8 +812,9 @@ pub const DevSession = struct {
     // drag(kind 2)가 마우스 위치를 bounds 안 ratio로 매핑해 split.ratio를 바꿔 live 재배치, up(kind 3)이 끝낸다.
     // split은 활성 탭 트리의 heap 노드(`*PaneTree.Split`) — 구조가 바뀌면(collapse/close) stale 방지로 null 비운다.
     divider_drag: ?*PaneTree.Split = null,
-    divider_drag_dir: app.SplitDirection = .horizontal,
-    divider_drag_bounds: app.SplitRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    // 드래그 중 divider의 neutral seg(chrome `divider.dragRatio`용 — orientation·bounds). divider_drag != null일 때만
+    // 유효. 옛 divider_drag_dir/bounds를 대체(dir·bounds가 Seg에 다 들어 있다 — 중립 단일 출처).
+    divider_drag_seg: chrome.components.divider.Seg = .{ .orientation = .vertical_line, .bounds = .{ .x = 0, .y = 0, .w = 0, .h = 0 }, .pos = 0 },
     // 트랙패드 정밀 스크롤의 1줄 미만 잔여 델타(줄 단위). scrollWheel이 누적/소비한다.
     wheel_accum: f64 = 0,
     // copyText()가 돌려준 추출 텍스트의 소유 버퍼(다음 copyText/destroy까지 유효 — ABI 수명 계약).
@@ -1133,27 +1115,64 @@ pub const DevSession = struct {
         out.append(self.allocator, c) catch return;
     }
 
-    /// 활성 탭의 divider 선들을 overlay 셀로 out에 append한다(렌더). full-cell이 아니라 렌더러의 **부분 사각형**
-    /// (reserved=3 bar=좌측 ~2px, reserved=2 underline=하단 ~2px, 커서 모양과 같은 경로)으로 그려 **얇은 선**으로
-    /// seam에 얹는다(셀 폭/높이만큼 굵게 그려 터미널을 가리던 문제 수정). horizontal split=세로선(reserved=3을
-    /// 행마다, 경계 x에 ~2px 센터), vertical split=가로선(reserved=2 한 칸, 경계 y에 ~2px 센터, bounds 폭). 단일
-    /// panel이면 divider가 없어 빈 채. 셀 폭/높이 0이면 무동작. layout과 같은 좌표계(termRect)라 경계에 정확히 얹힌다.
+    /// app DividerSeg(라이브 *Split 결합)를 neutral chrome `divider.Seg`로 변환한다 — chrome은 app 트리를 모르므로
+    /// host가 떼어 준다(palette Row 선례). 좌우 분할(horizontal)=세로선, 상하 분할(vertical)=가로선. bounds는 u32→i32.
+    fn appSegToDivider(seg: PaneTree.DividerSeg) chrome.components.divider.Seg {
+        return .{
+            .orientation = switch (seg.direction) {
+                .horizontal => .vertical_line,
+                .vertical => .horizontal_line,
+            },
+            .bounds = .{ .x = @intCast(seg.bounds.x), .y = @intCast(seg.bounds.y), .w = seg.bounds.w, .h = seg.bounds.h },
+            .pos = seg.pos,
+        };
+    }
+
+    /// 활성 탭의 divider 선들을 overlay 셀로 out에 append한다(렌더). chrome `divider.view`가 seg→Rule op(선)을 내고,
+    /// `lowerDividerRules`가 그 Rule을 렌더러 **부분 사각형**(reserved=3 bar=좌측 ~2px / 2 underline=하단 ~2px, 커서
+    /// 모양과 같은 경로)으로 lower해 **얇은 선**으로 seam에 얹는다. divider 선/hit-test 수학은 chrome 컴포넌트가 단일
+    /// 출처(C2). 단일 panel이면 빈 채. 셀 0이면 무동작. layout과 같은 좌표계(termRect)라 경계에 정확히 얹힌다.
     fn appendActiveTabDividers(self: *DevSession, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
-        const cw = self.cell_width_px;
+        if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
+        var app_segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
+        defer app_segs.deinit(self.allocator);
+        self.layoutActiveTabDividers(&app_segs) catch return;
+        if (app_segs.items.len == 0) return;
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var neutral: std.ArrayList(chrome.components.divider.Seg) = .empty;
+        for (app_segs.items) |seg| neutral.append(arena, appSegToDivider(seg)) catch return;
+        var ops: std.ArrayList(chrome.draw.Op) = .empty;
+        chrome.components.divider.view(neutral.items, arena, &ops) catch return;
+        self.lowerDividerRules(ops.items, out);
+    }
+
+    /// chrome `divider.view`가 낸 Rule op(선)을 렌더러 부분 사각형 NativeMetalCell로 lower한다 — 세로선(from.x==to.x)은
+    /// 경계 x에 ~2px 센터(−1 offset) reserved=3을 행마다, 가로선은 경계 y에 ~2px(하단 reserved=2, y+1−ch offset) bounds
+    /// 폭 한 칸. 색은 `dividerColor()`(tui 토큰 .divider=sidebar_active). divider는 overlay(rasterizeOverlayCells)가
+    /// 아니라 pane chrome 셀이라, full-cell이 아닌 이 얇은-선 lowering을 platform이 따로 가진다(옛 appendActiveTabDividers의 offset 보존).
+    fn lowerDividerRules(self: *DevSession, ops: []const chrome.draw.Op, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
         const ch = self.cell_height_px;
-        if (cw == 0 or ch == 0) return;
-        var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
-        defer segs.deinit(self.allocator);
-        PaneTree.layoutDividers(self.allocator, self.activeTab().tree, self.termRect(), &segs) catch return;
-        const bg = self.dividerColor();
-        for (segs.items) |seg| {
-            switch (seg.direction) {
-                // 세로선: 경계 x에 ~2px 센터(−1 offset)로 reserved=3(좌측 ~2px)을 행마다.
-                .horizontal => self.appendVerticalLine(out, if (seg.pos >= 1) seg.pos - 1 else 0, seg.bounds.y, seg.bounds.y + seg.bounds.h, 3, bg),
-                // 가로선: 경계 y에 ~2px 센터로 reserved=2(하단 ~2px). px_bottom=origin_y+ch를 경계 y+1로 맞춘다.
-                .vertical => self.appendHorizontalLine(out, seg.bounds.x, if (seg.pos + 1 >= ch) seg.pos + 1 - ch else 0, seg.bounds.w, 2, bg),
-            }
-        }
+        const color = self.dividerColor();
+        for (ops) |op| switch (op) {
+            .rule => |r| {
+                if (r.from.x == r.to.x) { // 세로선: 경계 x −1 offset, y0..y1 행마다
+                    const x: u32 = if (r.from.x >= 1) @intCast(r.from.x - 1) else 0;
+                    const y0: u32 = @intCast(@max(@min(r.from.y, r.to.y), 0));
+                    const y1: u32 = @intCast(@max(@max(r.from.y, r.to.y), 0));
+                    self.appendVerticalLine(out, x, y0, y1, 3, color);
+                } else { // 가로선(from.y == to.y): 경계 y+1−ch offset, bounds 폭 한 칸
+                    const y_pos = r.from.y;
+                    const ch_i: i32 = @intCast(ch);
+                    const oy: u32 = if (y_pos + 1 >= ch_i) @intCast(y_pos + 1 - ch_i) else 0;
+                    const x0: u32 = @intCast(@max(@min(r.from.x, r.to.x), 0));
+                    const x1: u32 = @intCast(@max(@max(r.from.x, r.to.x), 0));
+                    self.appendHorizontalLine(out, x0, oy, x1 - x0, 2, color);
+                }
+            },
+            else => {},
+        };
     }
 
     /// minimal(chrome 없는 quick terminal) 세션에서 탭이 여러 개일 때 **우상단에 작은 "탭 점" 인디케이터**를 overlay
@@ -1234,15 +1253,16 @@ pub const DevSession = struct {
     /// pos ± (cell 절반 + margin), 교차축은 bounds 안. 렌더 divider(같은 layoutDividers)와 정렬돼 "보이는 =
     /// 잡히는". 단일 panel이면 항상 null(divider 없음). 마우스 down(1) divider 드래그 시작 판정에 쓴다.
     fn dividerAtPoint(self: *DevSession, x_px: f64, y_px: f64) ?PaneTree.DividerSeg {
-        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
-        // 매 이동마다 새 ArrayList를 안 만들고 재사용 scratch에 divider seg를 다시 깐다(할당 churn 제거).
+        // 매 이동마다 새 ArrayList를 안 만들고 재사용 scratch에 divider seg를 다시 깐다(할당 churn 제거). app DividerSeg
+        // (라이브 *Split)는 hover_divider_scratch에, neutral 변환은 divider_seg_scratch에(index 일치) — chrome
+        // `divider.hitTest`가 후자로 판정하고, 그 index의 app DividerSeg(split/direction/bounds)를 돌려준다(보이는==잡히는).
         const segs = &self.hover_divider_scratch;
         segs.clearRetainingCapacity();
         self.layoutActiveTabDividers(segs) catch return null;
-        for (segs.items) |seg| {
-            if (dividerHit(seg, self.cell_width_px, self.cell_height_px, x_px, y_px)) return seg;
-        }
-        return null;
+        self.divider_seg_scratch.clearRetainingCapacity();
+        for (segs.items) |seg| self.divider_seg_scratch.append(self.allocator, appSegToDivider(seg)) catch return null;
+        const i = chrome.components.divider.hitTest(self.divider_seg_scratch.items, self.cell_width_px, self.cell_height_px, x_px, y_px) orelse return null;
+        return segs.items[i];
     }
 
     fn layoutActiveTabDividers(self: *DevSession, out: *std.ArrayList(PaneTree.DividerSeg)) !void {
@@ -1254,13 +1274,10 @@ pub const DevSession = struct {
     /// 사라졌으면(드래그 중 구조 변경) divider_drag가 null로 비워지므로 여기 안 온다.
     fn dragDividerTo(self: *DevSession, x_px: f64, y_px: f64) void {
         const sp = self.divider_drag orelse return;
-        const b = self.divider_drag_bounds;
-        const raw: f64 = switch (self.divider_drag_dir) {
-            .horizontal => if (b.w == 0) return else (x_px - @as(f64, @floatFromInt(b.x))) / @as(f64, @floatFromInt(b.w)),
-            .vertical => if (b.h == 0) return else (y_px - @as(f64, @floatFromInt(b.y))) / @as(f64, @floatFromInt(b.h)),
-        };
-        if (!std.math.isFinite(raw)) return;
-        sp.ratio = app.clampRatio(@floatCast(raw));
+        // ratio 수학은 chrome `divider.dragRatio`(normal 축 = (mouse − bounds.origin)/bounds.size)가 단일 출처. 클램프는
+        // 여기서(app.clampRatio — layout과 같은 한도, chrome은 app 상수를 모른다). 드래그 시작 시 저장한 neutral seg를 쓴다.
+        const raw = chrome.components.divider.dragRatio(self.divider_drag_seg, x_px, y_px) orelse return;
+        sp.ratio = app.clampRatio(raw);
         self.resizeActiveTabPanes() catch {};
         self.recomputeActivePaneRect();
         self.metal_dirty = true;
@@ -2634,8 +2651,7 @@ pub const DevSession = struct {
                 //    divider 캡처가 받는다. split일 때만(dividerAtPoint가 단일 panel이면 null).
                 if (self.dividerAtPoint(x_px, y_px)) |seg| {
                     self.divider_drag = seg.split;
-                    self.divider_drag_dir = seg.direction;
-                    self.divider_drag_bounds = seg.bounds;
+                    self.divider_drag_seg = appSegToDivider(seg); // neutral seg 저장(드래그 중 dragRatio가 쓴다)
                     self.drag_autoscroll = 0;
                     self.mouse_drag_selecting = false;
                     return;
@@ -4481,6 +4497,7 @@ pub const DevSession = struct {
         if (self.workspace_buffer) |b| self.allocator.free(b);
         self.hover_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
+        self.divider_seg_scratch.deinit(self.allocator);
         // 1) 각 탭의 각 panel의 각 Term live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'.
         //    detach 후 deinit이 reader thread join + fd/queue 해제(이동 금지 계약이라 in-place로 정리).
         for (self.tabs.items) |tab| {
@@ -6392,32 +6409,6 @@ test "sidebarPlusSlot detects the new-workspace button slot below the tabs" {
     try std.testing.expect(!sidebarPlusSlot(40, 0, 2)); // slot_h 0
     try std.testing.expect(!sidebarPlusSlot(-1, 20, 2)); // 음수
     try std.testing.expect(sidebarPlusSlot(5, 20, 0)); // 탭 0개면 "+"가 슬롯 0([0,20))
-}
-
-test "dividerHit detects the drag band around a split boundary" {
-    // horizontal split divider: 세로선, 경계 x=100, bounds y[0,100). cell 8×16 → x 밴드 = ±(4+2)=±6.
-    const h: PaneTree.DividerSeg = .{
-        .split = undefined,
-        .direction = .horizontal,
-        .bounds = .{ .x = 0, .y = 0, .w = 200, .h = 100 },
-        .pos = 100,
-    };
-    try std.testing.expect(dividerHit(h, 8, 16, 100, 50)); // 경계 위
-    try std.testing.expect(dividerHit(h, 8, 16, 105, 10)); // x=105 (±6 안), y in bounds
-    try std.testing.expect(!dividerHit(h, 8, 16, 110, 50)); // x=110 (밴드 밖)
-    try std.testing.expect(!dividerHit(h, 8, 16, 100, 120)); // y가 bounds 밖
-    // vertical split divider: 가로선, 경계 y=50, bounds x[0,200). y 밴드 = ±(8+2)=±10.
-    const v: PaneTree.DividerSeg = .{
-        .split = undefined,
-        .direction = .vertical,
-        .bounds = .{ .x = 0, .y = 0, .w = 200, .h = 100 },
-        .pos = 50,
-    };
-    try std.testing.expect(dividerHit(v, 8, 16, 100, 55)); // 경계 근처(±10 안), x in bounds
-    try std.testing.expect(!dividerHit(v, 8, 16, 100, 70)); // y=70 (밴드 밖)
-    try std.testing.expect(!dividerHit(v, 8, 16, 250, 50)); // x가 bounds 밖
-    try std.testing.expect(!dividerHit(h, 0, 16, 100, 50)); // cell 0
-    try std.testing.expect(!dividerHit(h, 8, 16, std.math.nan(f64), 50)); // 비유한
 }
 
 // paneDropZone이 rect를 X자 4등분해 가장 가까운 가장자리를 고르는지(④ split 재배치 drop-zone). 순수 함수.

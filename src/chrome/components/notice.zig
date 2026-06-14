@@ -60,12 +60,15 @@ pub fn view(
     const ch = @max(m.cell_height_px, 1);
 
     // 박스 폭 = 메시지 표시 폭 + 좌우 여백, 단 **터미널 영역(사이드바 오른쪽) 칸 수를 넘지 않게 clamp**한다 —
-    // 넘으면 박스가 사이드바를 침범하거나 우측으로 오버플로한다(좁은 창·넓은 사이드바). term 영역이 너무 좁으면
-    // (4칸 미만) 모달을 생략한다. 표시 폭은 코드포인트 근사라 wide(EAW=2) 문자는 과소측정돼 박스 우측서 잘릴 수
-    // 있다 — 정확한 display-width는 모달 wiring 슬라이스에서 host가 터미널 폭으로 측정해 넘길 때 보정한다.
+    // 넘으면 박스가 사이드바를 침범하거나 우측으로 오버플로한다(좁은 창·넓은 사이드바). 표시 폭은 코드포인트
+    // 근사라 wide(EAW=2) 문자는 과소측정돼 박스 우측서 잘릴 수 있다 — 정확한 display-width 보정은 후속.
     const term_w_px = m.backing_width_px -| m.sidebar_width_px;
     const term_cols = term_w_px / cw;
-    if (term_cols < 4) return; // 모달을 담기엔 너무 좁음
+    // 0칸(터미널 영역이 한 셀보다 좁은 비정상 창)이면만 생략한다. 1~3칸이어도 작은 박스라도 그린다 —
+    // 모달이 '열림이지만 안 보임'이면 handleKeyEvent가 모든 키를 소비해 터미널이 멈춘 듯 보이는 soft-lock이
+    // 된다(리뷰 발견). box_cols는 아래에서 term_cols로 clamp되므로(≥1) box_w ≤ term_w_px가 유지돼 중앙배치
+    // 뺄셈이 안전하다. (term_cols==0은 box_w=cw > term_w_px라 뺄셈이 언더플로하므로 반드시 생략.)
+    if (term_cols == 0) return;
     const msg_cols: u32 = @intCast(std.unicode.utf8CountCodepoints(state.message) catch state.message.len);
     const box_cols = @max(@min(msg_cols + 2 * tk.space.modal_margin_cells, term_cols), 1);
     const box_w = box_cols * cw;
@@ -151,4 +154,35 @@ test "notice view: 닫힘이면 ops 0, 열림이면 fill+border+text(modal)" {
     // 모달 박스는 터미널 영역(사이드바 오른쪽) 안, 화면 중앙쯤.
     try std.testing.expect(out.items[0].fill.rect.x >= 40);
     try std.testing.expect(out.items[0].fill.rect.w > 0);
+}
+
+test "notice view: 좁은 창(1~3칸)이어도 작은 박스를 그린다 — soft-lock 방지" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    // term 영역 = backing − sidebar = 60 − 40 = 20px, cw=8 → term_cols=2(예전 <4 가드면 생략됐다).
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 40,
+        .backing_width_px = 60,
+        .backing_height_px = 600,
+    } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+
+    var s = State{};
+    s.show("file corrupt"); // 메시지가 2칸보다 길어도 box_cols는 term_cols(2)로 clamp.
+    try view(&s, p, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 3), out.items.len); // 생략 안 함 — 작아도 그린다(보여서 Esc 가능)
+    const box = out.items[0].fill.rect;
+    try std.testing.expect(box.w > 0 and box.w <= 20); // term 영역 안(오버플로/언더플로 없음)
+    try std.testing.expect(box.x >= 40); // 사이드바 오른쪽 유지
+
+    // term_cols==0(터미널 영역이 한 셀보다 좁음)은 여전히 생략(중앙배치 뺄셈 언더플로 방지).
+    out.clearRetainingCapacity();
+    const narrow = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 45, .backing_height_px = 600 } };
+    try view(&s, narrow, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len); // term_w=5px < cw=8 → term_cols=0 → 생략
 }

@@ -37,14 +37,72 @@ pub const Border = struct {
     line_thickness_px: u32 = 2,
 };
 
-/// 한 테마 = 토큰 묶음. `Tokens.tui(resolvedTheme)`가 현재 9색 ResolvedTheme + 파생을 채운다(C0 구현).
+/// `Tokens.tui`가 받는 resolved 테마 색(config.ResolvedTheme의 chrome-중립 투영). chrome은 config를 import하지
+/// 않으므로(경계) 호출자(platform)가 ResolvedTheme에서 이 plain Rgb들만 뽑아 넘긴다. 역할→색 매핑 자체는
+/// tui()가 단일 출처로 소유한다. background는 현재 어떤 역할도 안 써서 제외(필요해지면 추가).
+pub const ThemeColors = struct {
+    foreground: Rgb,
+    sidebar_background: Rgb,
+    sidebar_foreground: Rgb,
+    sidebar_active: Rgb,
+    search_match: Rgb,
+    search_match_current: Rgb,
+    selection: Rgb,
+    cursor: Rgb,
+};
+
+/// 한 테마 = 토큰 묶음. `Tokens.tui(theme)`가 resolved 테마 색에서 12개 ColorRole을 채운다(C0 구현).
 /// `Tokens.rich(...)`는 C4. 컴포넌트는 이 값만 소비한다.
 pub const Tokens = struct {
     palette: std.EnumArray(ColorRole, Rgb),
     space: Spacing = .{},
     border: Border = .{},
 
+    /// tui 토큰셋: resolved 테마(chrome-중립 ThemeColors)에서 12개 ColorRole을 채운다 — **역할→색 매핑의 단일
+    /// 출처**. divider/focus_accent/tab_*/drop_zone은 현재 sidebar_active를 공유한다(렌더 sidebarActiveBg와 같은
+    /// 출처), rich(C4)는 토큰셋만 바꿔 분리한다. muted_fg는 C0에선 sidebar_foreground. initFill 기본값은 12역할을
+    /// 전부 명시 set하므로 실제로 안 쓰이지만(foreground로 채워 둠) EnumArray 초기화에 필요하다.
+    pub fn tui(theme: ThemeColors) Tokens {
+        var palette = std.EnumArray(ColorRole, Rgb).initFill(theme.foreground);
+        palette.set(.surface_bg, theme.sidebar_background);
+        palette.set(.surface_fg, theme.sidebar_foreground);
+        palette.set(.muted_fg, theme.sidebar_foreground);
+        palette.set(.tab_active_bg, theme.sidebar_active);
+        palette.set(.tab_hover_bg, theme.sidebar_active);
+        palette.set(.divider, theme.sidebar_active);
+        palette.set(.focus_accent, theme.sidebar_active);
+        palette.set(.drop_zone, theme.sidebar_active);
+        palette.set(.search_match, theme.search_match);
+        palette.set(.search_match_current, theme.search_match_current);
+        palette.set(.selection, theme.selection);
+        palette.set(.cursor, theme.cursor);
+        return .{ .palette = palette };
+    }
+
     pub fn get(self: *const Tokens, role: ColorRole) Rgb {
         return self.palette.get(role);
     }
 };
+
+test "Tokens.tui maps resolved theme colors to the 12 semantic roles" {
+    const c = struct {
+        fn rgb(r: u8, g: u8, b: u8) Rgb {
+            return .{ .r = r, .g = g, .b = b };
+        }
+    };
+    const tk = Tokens.tui(.{
+        .foreground = c.rgb(1, 1, 1),
+        .sidebar_background = c.rgb(2, 2, 2),
+        .sidebar_foreground = c.rgb(3, 3, 3),
+        .sidebar_active = c.rgb(4, 4, 4),
+        .search_match = c.rgb(5, 5, 5),
+        .search_match_current = c.rgb(6, 6, 6),
+        .selection = c.rgb(7, 7, 7),
+        .cursor = c.rgb(8, 8, 8),
+    });
+    try std.testing.expectEqual(c.rgb(2, 2, 2), tk.get(.surface_bg));
+    try std.testing.expectEqual(c.rgb(3, 3, 3), tk.get(.surface_fg));
+    try std.testing.expectEqual(c.rgb(4, 4, 4), tk.get(.focus_accent)); // sidebar_active 공유
+    try std.testing.expectEqual(c.rgb(4, 4, 4), tk.get(.divider));
+    try std.testing.expectEqual(c.rgb(8, 8, 8), tk.get(.cursor));
+}

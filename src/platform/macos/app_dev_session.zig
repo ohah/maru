@@ -1150,6 +1150,8 @@ pub const DevSession = struct {
     /// 마우스 (x,y)가 어느 divider 드래그 밴드 안인가 — 맞으면 {neutral Seg, 라이브 *Split}, 아니면 null. app DividerSeg는
     /// hover_divider_scratch에, neutral 변환은 divider_seg_scratch에(index 일치) — chrome `divider.hitTest`가 후자로 판정하고,
     /// 그 index의 **neutral seg**(드래그/커서가 직접 씀 — 재변환 없음)와 split을 돌려준다(보이는==잡히는). split만 app.
+    /// ⚠️ 반환값은 두 scratch 버퍼의 **borrow**다 — **다음 dividerAtPoint 호출 전에 소비**하라(scratch를 clear+재기록하므로
+    /// 보관/aliasing 금지). 현 호출처(down=divider_drag_seg로 값 복사, hover=hit.seg.orientation 즉시 읽기)는 안전하다.
     fn dividerAtPoint(self: *DevSession, x_px: f64, y_px: f64) ?struct { seg: chrome.components.divider.Seg, split: *PaneTree.Split } {
         const segs = &self.hover_divider_scratch;
         segs.clearRetainingCapacity();
@@ -6188,6 +6190,30 @@ test "paneBarBgCell builds a bar-width background cell at the bar origin" {
 
 // 탭 바 컬럼 분할 hit-test(tabIndex/inCloseZone/inPlusZone/hasPlusZone)는 chrome `tabbar.Metrics` 메서드로 이주(C3b) —
 // 단위 테스트는 src/chrome/components/tabbar.zig. 여기선 platform이 그 hit-test와 공유하는 pointInRect 경계만 고정한다.
+// barMetrics가 바를 [탭 영역 | "+" zone]으로 나누고 극단(셀·바·탭 0)에 null을 주는지, tabbarHighlightCell이 활성 탭
+// 세그먼트 강조 셀(col=start·width·origin=bar)을 만드는지 — 탭 바 hit-test/렌더의 platform 측(메서드는 chrome tabbar.zig가
+// 테스트). 옛 BarMetrics 단위 테스트의 init-null·highlightCell 케이스를 이리로 보존한다(C3b 리뷰 반영 — 이주로 빠졌던 커버리지).
+test "barMetrics splits bar + tabbarHighlightCell active-tab band" {
+    const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 }; // cell 12 → 20칸, "+" zone 3 제외 탭 영역 17, 2탭 → tab_w=8
+    const m = barMetrics(bar, 12, 2).?;
+    try std.testing.expectEqual(@as(u32, 20), m.cols);
+    try std.testing.expectEqual(@as(u32, 17), m.tab_cols);
+    try std.testing.expectEqual(@as(u32, 8), m.tab_w);
+    try std.testing.expectEqual(@as(u32, 180), m.bar_x);
+    // 극단(셀 0·바 폭 0·탭 0)이면 null — 호출자가 탭 처리를 건너뛴다.
+    try std.testing.expect(barMetrics(bar, 0, 2) == null);
+    try std.testing.expect(barMetrics(.{ .x = 0, .y = 0, .w = 0, .h = 12 }, 12, 2) == null);
+    try std.testing.expect(barMetrics(bar, 12, 0) == null);
+    // tabbarHighlightCell: 탭 1 = col [8,16), origin=bar.x, sentinel-bg(slot_id 0).
+    const cell = tabbarHighlightCell(m, 1, 0xFF445566).?;
+    try std.testing.expectEqual(@as(u16, 8), cell.col); // 1*tab_w
+    try std.testing.expectEqual(@as(u16, 8), cell.width);
+    try std.testing.expectEqual(@as(u32, 180), cell.origin_x);
+    try std.testing.expectEqual(@as(u32, 0xFF445566), cell.background);
+    try std.testing.expectEqual(@as(u32, 0), cell.slot_id);
+    try std.testing.expect(tabbarHighlightCell(m, 3, 0xFF000000) == null); // start(24) >= tab_cols(17) → 세그먼트 없음
+}
+
 test "pointInRect uses half-open bounds (탭 바·divider·pane hit-test 공유)" {
     const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 }; // 우경계 = 180+240 = 420
     try std.testing.expect(pointInRect(180, 0, bar)); // 좌상단 포함

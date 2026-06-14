@@ -53,10 +53,11 @@ pub const State = struct {
         self.open = false;
     }
 
-    /// 검색어에 확정 글자 추가(UTF-8 인코딩). 확정이 들어오면 조합(preedit)은 끝난 것이라 비운다. 재검색은 host가
-    /// query_changed Action을 받아 한다. 인코딩 불가/OOM은 무시.
+    /// 검색어에 확정 글자 추가(UTF-8 인코딩). **preedit는 건드리지 않는다** — 터미널 core와 같은 모델(커밋과 조합은
+    /// 독립; preedit는 setPreedit만 관리). 예전엔 여기서 preedit를 비웠는데, IME 멀티-문자 흐름(커밋 N + 조합 N+1)에서
+    /// imeEnd가 N을 커밋하며 부르면 방금 set된 N+1의 조합을 지워 "조합 안 보임" 버그가 났다. 재검색은 host가
+    /// query_changed Action으로. 인코딩 불가/OOM은 무시.
     pub fn appendChar(self: *State, allocator: std.mem.Allocator, cp: u21) !void {
-        self.preedit.clearRetainingCapacity();
         var utf8: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(cp, &utf8) catch return;
         try self.query.appendSlice(allocator, utf8[0..n]);
@@ -66,6 +67,19 @@ pub const State = struct {
     pub fn setPreedit(self: *State, allocator: std.mem.Allocator, bytes: []const u8) !void {
         self.preedit.clearRetainingCapacity();
         try self.preedit.appendSlice(allocator, bytes);
+    }
+
+    /// 조합 중(preedit) 텍스트를 검색어로 확정한다(query 뒤에 붙이고 preedit 비움) — 포커스 상실 등에서 조합을 잃지
+    /// 않게(터미널이 PTY로 확정하는 것과 같은 의미). 확정한 게 있으면 true(host가 재검색). 빈 조합이면 무동작 false.
+    /// OOM이면 조합을 버리고 false(반쪽 안 남김).
+    pub fn commitPreedit(self: *State, allocator: std.mem.Allocator) bool {
+        if (self.preedit.items.len == 0) return false;
+        self.query.appendSlice(allocator, self.preedit.items) catch {
+            self.preedit.clearRetainingCapacity();
+            return false;
+        };
+        self.preedit.clearRetainingCapacity();
+        return true;
     }
 
     /// 마지막 코드포인트 1개 삭제(UTF-8 경계 존중). 빈 쿼리면 무동작.
@@ -380,10 +394,27 @@ test "find view: IME 조합(preedit)이 query 뒤에 보이고 커서가 그 뒤
     try std.testing.expect(caret == .fill and caret.fill.role == .cursor);
     try std.testing.expectEqual(out.items[0].fill.rect.x + 9 * 8, caret.fill.rect.x);
 
-    // 확정 글자가 들어오면 preedit은 비워진다(조합 종료).
+    // appendChar는 preedit를 **안 비운다**(터미널 core 모델 — 커밋과 조합 독립). IME 멀티-문자 흐름에서 imeEnd가
+    // 직전 음절을 커밋하며 appendChar를 부를 때, 방금 set된 다음 음절의 조합을 지우면 안 되기 때문(조합 안 보임 버그).
     try s.appendChar(std.testing.allocator, 'b');
-    try std.testing.expectEqual(@as(usize, 0), s.preedit.items.len);
+    try std.testing.expectEqualStrings("\xea\xb0\x80", s.preedit.items); // 조합 "가" 유지
     try std.testing.expectEqualStrings("ab", s.query.items);
+    // 조합 해제는 setPreedit("")가 단일 출처로 한다(IME가 조합 끝낼 때 빈 marked text를 보냄).
+    try s.setPreedit(std.testing.allocator, "");
+    try std.testing.expectEqual(@as(usize, 0), s.preedit.items.len);
+}
+
+test "find commitPreedit: 조합을 검색어로 확정(포커스 상실 등)·빈 조합 무동작" {
+    const allocator = std.testing.allocator;
+    var s: State = .{};
+    defer s.deinit(allocator);
+    s.show();
+    try s.appendChar(allocator, 'a'); // query "a"
+    try s.setPreedit(allocator, "\xea\xb0\x80"); // 조합 "가"
+    try std.testing.expect(s.commitPreedit(allocator)); // 확정 → query "a가", preedit 비움
+    try std.testing.expectEqualStrings("a\xea\xb0\x80", s.query.items);
+    try std.testing.expectEqual(@as(usize, 0), s.preedit.items.len);
+    try std.testing.expect(!s.commitPreedit(allocator)); // 빈 조합이면 무동작 false
 }
 
 test "find caret: 한글 query는 EAW 2칸 폭으로 caret 정렬(잘림 회귀 고정)" {

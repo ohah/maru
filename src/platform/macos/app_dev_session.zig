@@ -4089,6 +4089,9 @@ pub const DevSession = struct {
         rows: u16,
         origin_x: u32,
         origin_y: u32,
+        appearance: config_mod.ResolvedAppearance,
+        cell_w: u32,
+        cell_h: u32,
     ) !metal_frame.PaneFrame {
         const draw_list: renderer.DrawList = .{
             .size = .{ .cols = cols, .rows = rows },
@@ -4097,13 +4100,17 @@ pub const DevSession = struct {
             .cells = try cells.toOwnedSlice(self.allocator),
             .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
         };
+        // appearance(폰트 크기)·cell_w/h를 호출자가 준다 — 오버레이 1.3× 확대는 **폰트 크기와 셀을 함께** 키워야
+        // 한다(글리프 픽셀 = font.size×scale, atlas slot = cell). 한쪽만 키우면 작은 글리프가 큰 slot에 들어가
+        // 작아 보이고 어긋난다(이전 회귀 루트커즈). atlas는 (font_size_px, cell_h …) 키잉이라 확대 글리프는 별도
+        // 엔트리로 터미널 글리프와 공존한다. palette는 터미널 셀·appearance 그대로 넘겨 변화 없음.
         const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
-            .appearance = self.appearance,
+            .appearance = appearance,
             .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
             .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
             .scale_milli = self.scale_milli,
-            .cell_width_px = @intCast(self.cell_width_px),
-            .cell_height_px = @intCast(self.cell_height_px),
+            .cell_width_px = @intCast(cell_w),
+            .cell_height_px = @intCast(cell_h),
         };
         const frame = try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
         return .{ .frame = frame, .origin_x = origin_x, .origin_y = origin_y, .colors = .{ .default_fg = self.appearance.theme.foreground } };
@@ -4163,21 +4170,42 @@ pub const DevSession = struct {
         }
 
         // 상단-중앙 배치(backing px). 폭이 패널보다 좁으면 origin 0. frame 마무리는 공통 헬퍼.
+        // palette는 터미널 셀·appearance 그대로(확대 안 함) — C1b chrome 이주 때 1.3× 적용.
         const panel_w = @as(u32, panel_cols) * cw;
         const origin_x = term_rect.x + (term_rect.w -| panel_w) / 2;
         const origin_y = term_rect.y + 2 * ch; // 위에서 두 줄 내려.
-        return self.finishOverlayFrame(&cells, panel_cols, panel_rows, origin_x, origin_y);
+        return self.finishOverlayFrame(&cells, panel_cols, panel_rows, origin_x, origin_y, self.appearance, cw, ch);
     }
 
     // 스크롤백 Find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). find.view가 ChromeDraw를
     // 내고 buildChromeOverlayFrame이 일반 rasterizer로 lower한다 — buildFindFrame은 제거.
 
+    /// 오버레이 가독성 확대 배율(터미널 대비). 글리프(font.size)와 셀(advance/slot)을 **함께** 이 배율로 키운다 —
+    /// 단일 출처. 1.3× = 13/10.
+    const overlay_scale_num: u32 = 13;
+    const overlay_scale_den: u32 = 10;
+
+    /// 터미널 셀 px → 오버레이 셀 px(×배율, round). 0이면 0 보존(호출처가 처리).
+    fn overlayCell(terminal_cell_px: u32) u32 {
+        return (terminal_cell_px * overlay_scale_num + overlay_scale_den / 2) / overlay_scale_den;
+    }
+
+    /// 오버레이용 appearance — 폰트 크기를 셀과 같은 배율로 키운 사본. **셀만 키우면 작은 글리프가 큰 slot에
+    /// 들어가 작아 보이던 회귀**의 짝(둘을 함께 키워 비례 유지). 색·family는 그대로.
+    fn overlayAppearance(self: *const DevSession) config_mod.ResolvedAppearance {
+        var a = self.appearance;
+        a.font.size = self.appearance.font.size * @as(f32, @floatFromInt(overlay_scale_num)) / @as(f32, @floatFromInt(overlay_scale_den));
+        return a;
+    }
+
     /// chrome 컴포넌트가 읽는 불변 메트릭(props seam). 매 frame 세션 실측값에서 빌드한다 — chrome은 terminal/
-    /// config 타입을 모르므로 plain u32만 넘긴다. sidebar_width_px는 런타임 가변(드래그)이라 토큰이 아닌 여기로.
+    /// config 타입을 모르므로 plain u32만 넘긴다. **오버레이는 가독성을 위해 셀을 1.3× 확대**해 넘긴다(컴포넌트
+    /// 레이아웃·rasterizer·프레임 빌더가 같은 확대 셀, 폰트도 overlayAppearance로 같은 배율 — 비례 유지).
+    /// sidebar/backing은 실 px 그대로. sidebar_width_px는 런타임 가변(드래그)이라 토큰이 아닌 여기로.
     fn buildChromeProps(self: *const DevSession) chrome.ChromeProps {
         return .{ .metrics = .{
-            .cell_width_px = self.cell_width_px,
-            .cell_height_px = self.cell_height_px,
+            .cell_width_px = overlayCell(self.cell_width_px),
+            .cell_height_px = overlayCell(self.cell_height_px),
             .sidebar_width_px = self.sidebar_width_px,
             .backing_width_px = self.backing_width_px,
             .backing_height_px = self.backing_height_px,
@@ -4337,9 +4365,12 @@ pub const DevSession = struct {
     /// 최대 1개를 낸다(rasterizer가 단일 오버레이 가정 — bounding box 합집합). 닫혀 있거나 메트릭/박스 미상이면
     /// 에러(호출자가 무시). macOS 전용(finishOverlayFrame=CoreText).
     fn buildChromeOverlayFrame(self: *DevSession) !metal_frame.PaneFrame {
-        const cw = self.cell_width_px;
-        const ch = self.cell_height_px;
+        // 오버레이는 가독성을 위해 1.3× 확대 — 셀(layout/slot/advance)과 폰트(글리프 픽셀)를 **함께** 키운다
+        // (한쪽만 키우면 회귀: 작은 글리프가 큰 slot에). buildChromeProps도 같은 확대 셀을 컴포넌트에 준다.
+        const cw = overlayCell(self.cell_width_px);
+        const ch = overlayCell(self.cell_height_px);
         if (cw == 0 or ch == 0) return error.NoMetrics;
+        const appearance = self.overlayAppearance();
 
         // 컴포넌트 view 경로를 실제로 타서 열린 오버레이의 ChromeDraw를 모은다(arena가 ops·runs 소유, lower까지 유효).
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
@@ -4351,7 +4382,7 @@ pub const DevSession = struct {
         if (draws.items.len == 0) return error.NotOpen;
 
         var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch);
-        return self.finishOverlayFrame(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y);
+        return self.finishOverlayFrame(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y, appearance, cw, ch);
     }
 
     /// chrome Notice 모달(손상 알림 등)을 연다. 메시지는 세션 소유 버퍼로 복사한다 — notice.State.message는 slice라
@@ -5182,6 +5213,13 @@ test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비
     try std.testing.expect(session.chrome_host.find.open);
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(!session.chrome_host.find.open);
+}
+
+test "overlayCell: 오버레이 셀 = 터미널 셀 ×1.3(round)·0 보존" {
+    try std.testing.expectEqual(@as(u32, 13), DevSession.overlayCell(10)); // 10×1.3=13
+    try std.testing.expectEqual(@as(u32, 21), DevSession.overlayCell(16)); // 16×1.3=20.8 → 21(round)
+    try std.testing.expectEqual(@as(u32, 31), DevSession.overlayCell(24)); // 24×1.3=31.2 → 31
+    try std.testing.expectEqual(@as(u32, 0), DevSession.overlayCell(0)); // 셀 미상 보존
 }
 
 test "rasterizeOverlayCells: 다중 fill(painter order) + 다중 행 text → 셀 그리드(헤드리스)" {

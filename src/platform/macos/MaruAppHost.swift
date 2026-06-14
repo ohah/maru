@@ -368,9 +368,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private let artifactDirectory = "zig-out/maru-macos-app-dev"
     private let summaryPath = "zig-out/maru-macos-app-dev/app-dev.summary.txt"
     private var capabilities = MaruAppHostCapabilities()
-    // 메인 창의 per-session 상태. quick terminal이 두 번째 surface(quick)다. 아래 계산 프로퍼티들은
+    // 일반 터미널 창들의 per-session 상태(단일 출처). 현재는 launch에 1개만 만들지만(동작 불변), New Window가
+    // 여기에 append한다 — W1은 `primary` 단일 필드를 컬렉션으로 일반화하는 소유권 seam이다(split PR2a의
+    // "Tab→tree seam, 단일 leaf, 동작 불변"과 같은 결). 창별 라우팅(surfaceForView/activeSurface)은 이
+    // 컬렉션에서 view/key 창으로 고른다. quick terminal이 별도(특수) surface다. 아래 계산 프로퍼티들은
     // 기존 세션별 메서드가 코드 변경 없이 "활성 surface"의 상태를 읽고 쓰게 하는 forwarder다(상태만 분리).
-    private var primary: TerminalSurface?
+    private var windows: [TerminalSurface] = []
+    // 앱-전역 "메인/첫 일반 창" 별칭(= windows.first). 앱 요약·종료처럼 특정 한 창이 기준일 때 쓴다. 창별
+    // 타게팅 세분화(key 창 기준 메뉴/포커스)는 W4. TerminalSurface는 reference라 `primary?.field = x` 변형은
+    // 객체를 통해 그대로 동작한다(컬렉션 재대입이 아님).
+    private var primary: TerminalSurface? { windows.first }
     // quick terminal(별도 세션 오버레이 패널)의 surface. 첫 토글에서 lazy 생성. 없거나 숨김이면 입력/렌더는 primary.
     private var quick: TerminalSurface?
     // quick 패널의 슬라이드 인/아웃 애니메이션이 진행 중인지. 포커스 잃음 자동 숨김이 애니메이션 도중·직후
@@ -394,7 +401,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var activeSurface: TerminalSurface? {
         if let explicitSurface { return explicitSurface }
         if let quick, quick.window?.isKeyWindow == true { return quick }
-        return primary
+        // key인 일반 창을 고르고, 없으면 첫 창(primary). 단일 창에선 둘 다 그 창이라 동작 불변, 멀티 창에선
+        // 입력/draw가 자연히 key 창으로 간다(이벤트는 key 창의 first responder로 오므로).
+        return windows.first(where: { $0.window?.isKeyWindow == true }) ?? windows.first
     }
 
     /// 주어진 surface를 강제 대상으로 클로저를 실행한다(그동안 forwarder가 그 surface를 가리킨다). primary 창의
@@ -411,7 +420,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// '그 뷰의' surface를 대상으로 하게 한다 — quick 뷰가 fire했는데 primary가 key면 quick을 골라야 한다.
     private func surfaceForView(_ view: NSView) -> TerminalSurface? {
         if let quick, view.window === quick.window { return quick }
-        return primary
+        // 그 뷰가 속한 일반 창의 surface(멀티 창이면 정확히 그 창). 단일 창에선 그 창=primary라 동작 불변.
+        return windows.first(where: { $0.window === view.window }) ?? primary
     }
 
     private var window: NSWindow? {
@@ -507,8 +517,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = notification
 
         // 메인 창의 per-session 상태를 담을 surface를 가장 먼저 만든다 — 아래 window/devSession/렌더러
-        // 대입이 전부 이 primary로 forwarding되므로(forwarder setter), primary가 없으면 그 대입이 사라진다.
-        self.primary = TerminalSurface()
+        // 대입이 전부 이 첫 창(primary = windows.first)으로 forwarding되므로(forwarder setter), 창이 없으면
+        // 그 대입이 사라진다. New Window(W2)는 같은 컬렉션에 surface를 추가한다.
+        self.windows.append(TerminalSurface())
 
         let abiReady = validateZigBoundary()
         let smokeDuration = smokeDurationMs()

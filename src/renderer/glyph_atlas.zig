@@ -312,6 +312,38 @@ test "glyph atlas reuses a slot for repeated cache keys" {
     try std.testing.expectEqual(first.upload_bytes, atlas.stats.upload_bytes);
 }
 
+test "glyph atlas: span(cell_width)이 키에 포함돼 1칸/2칸 slot이 안 충돌한다(한글 ㄱ 잘림 회귀)" {
+    var atlas = GlyphAtlas.init(std.testing.allocator, .{});
+    defer atlas.deinit();
+
+    // 같은 glyph·같은 메트릭이지만 span만 다른 두 요청 — 예: 어떤 경로가 한글 '가'를 span=1로(wide 폭 미설정), 다른
+    // 경로(오버레이)가 span=2로 같은 atlas에 그릴 때. slot 폭 = cell_width_px × span이라 span이 키에 없으면 충돌한다.
+    const narrow: glyph_layout.GlyphRun = .{
+        .row = 0,
+        .col = 0,
+        .cell_width = 1,
+        .codepoint = 0xAC00, // '가'
+        .font_id = 1,
+        .glyph_id = 0xAC00,
+        .cache_key = .{ .font_id = 1, .glyph_id = 0xAC00, .font_size_px = 14, .device_scale = 2, .cell_width_px = 8, .cell_height_px = 16, .cell_width = 1 },
+    };
+    var wide = narrow;
+    wide.cell_width = 2;
+    wide.cache_key.cell_width = 2;
+
+    // span=1을 먼저 캐시(1칸 slot), 그 다음 span=2 요청.
+    const s1 = try atlas.ensureGlyph(narrow);
+    const s2 = try atlas.ensureGlyph(wide);
+
+    // 키에 span이 있으니 둘은 **다른 slot**이고, span=2 slot은 2칸 폭(= span=1의 2배)이다. 키에 span이 없었다면 s2가
+    // s1의 1칸 slot을 재사용(cache hit)해 wide 글리프 오른쪽이 잘렸다(한글이 왼쪽 절반 ㄱ으로 — 회귀의 루트커즈).
+    try std.testing.expect(s1.slot.id != s2.slot.id);
+    try std.testing.expect(s2.uploaded); // hit가 아니라 새 slot(miss)
+    try std.testing.expectEqual(@as(u32, 8), s1.slot.width_px); // 1칸
+    try std.testing.expectEqual(@as(u32, 16), s2.slot.width_px); // 2칸(8×2) — 안 잘림
+    try std.testing.expectEqual(@as(u32, 16), s1.slot.height_px);
+}
+
 test "glyph atlas assigns deterministic row-packed slot coordinates" {
     var atlas = GlyphAtlas.init(std.testing.allocator, .{ .atlas_width_px = 28 });
     defer atlas.deinit();

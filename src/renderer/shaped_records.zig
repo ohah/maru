@@ -98,6 +98,7 @@ pub fn buildGlyphRunListFromShapedRecordsWithSurface(
                 .device_scale = config.device_scale,
                 .cell_width_px = config.cell_width_px,
                 .cell_height_px = config.cell_height_px,
+                .cell_width = record.cell_width, // span — slot 폭 = cell_width_px × span이라 키에 포함(span 충돌 방지)
                 .style = flags,
                 .color_glyph_kind = record.color_glyph_kind,
             },

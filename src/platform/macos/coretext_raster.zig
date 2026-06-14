@@ -82,12 +82,16 @@ pub const CoreTextGlyphRasterizer = struct {
         // "m i s e" 간격 버그를 이 비교로 잡았다.
         if (diag_gate.maruDebugEnabled()) {
             diag.info(
-                "cp={d} scale_milli={d} cell={d}x{d} slot={d}x{d} ink_px={d} status={d}",
+                "cp={d} scale_milli={d} span={d} cell={d}x{d} slot={d}x{d} ink_px={d} status={d}",
                 .{
-                    request.run.codepoint,               self.scale_milli,
-                    request.run.cache_key.cell_width_px, request.run.cache_key.cell_height_px,
-                    request.slot.width_px,               request.slot.height_px,
-                    native.non_clear_pixels,             native.status,
+                    request.run.codepoint, self.scale_milli,
+                    request.run.cache_key.cell_width, // span(EAW): wide=2. slot 폭이 cell×span이 아니면 잘림/간격 버그.
+                    request.run.cache_key.cell_width_px,
+                    request.run.cache_key.cell_height_px,
+                    request.slot.width_px,
+                    request.slot.height_px,
+                    native.non_clear_pixels,
+                    native.status,
                 },
             );
         }

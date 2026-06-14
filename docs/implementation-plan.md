@@ -594,7 +594,7 @@ TDD 방식:
 
 **분해 (Swift 중심)**:
 
-- **W1 세션 컬렉션**: `primary`/`quick` → `windows: [WindowId: TerminalSurface]`(quick은 borderless·auto-hide를 유지하는 라벨된 특수 멤버). `activeSurface` = key 창 기준 lookup, `tickDevSession`이 모든 윈도우 순회, NSWindow delegate(resize/close)를 모든 창에.
+- **W1 세션 컬렉션 — 완료(소유권 seam, 동작 불변)**: `MaruAppHost`의 stored `primary`(단일 필드)를 `windows: [TerminalSurface]`(컬렉션, 단일 출처)로 일반화하고 `primary`를 계산 별칭(`windows.first`)으로. 창 생성이 `windows.append`(launch는 여전히 1개), 창별 라우팅을 컬렉션 경유로 — `surfaceForView`는 view의 창으로 매칭, `activeSurface`는 key인 일반 창(없으면 첫 창)을 고른다. 단일 창에선 둘 다 그 창이라 동작 불변(split PR2a "Tab→tree seam"과 같은 결). `TerminalSurface`가 reference라 `primary?.field = x` 변형은 그대로 동작. 자료구조는 dict 대신 array(순서=생성순, primary=first)로 단순화. 검증: swift-check + 실제 앱 호스트 smoke(`macos-app-dev-smoke` — 창 생성·tick·렌더·정상 종료, frame_consistent=true) + ABI 계약 + 전체 Zig 테스트 + boundaries + coretext/metal 스모크. **ABI 무변경**. quick은 별도(특수) surface 유지. **tickDevSession 순회·NSWindow delegate(per-창)·per-window lifecycle은 W2/W3로** — 2번째 창이 생겨 실제로 exercise·테스트되는 시점에 일반화한다(seam은 구조만).
 - **W2 New Window 생성**: `ensureQuickTerminal`의 "새 NSWindow + CAMetalLayer + `session_create` + renderer + observer" 경로를 일반 창 팩토리로 추출·재사용. File>New Window 메뉴 + ⌘N → 팩토리.
 - **W3 lifecycle**: `shutdownDevSession`을 "1개 창 정리"(세션 close+destroy + renderer destroy)로 분해해 `windowWillClose`가 그 창만 정리. D4 정책에 따라 마지막 창 처리(global hotkey 해제는 앱 종료 시 1회).
 - **W4 메뉴/포커스 타게팅**: `runCatalogAction`·global hotkey가 key 창의 세션을 대상으로(현재 primary 고정). NSMenu는 앱 1개 공유 — key 창 추적.

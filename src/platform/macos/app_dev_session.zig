@@ -4214,25 +4214,21 @@ pub const DevSession = struct {
         } };
     }
 
-    /// ResolvedTheme(config) → chrome 토큰(역할→Rgb). chrome은 ResolvedTheme를 import하지 않으므로(경계) 여기서
-    /// 역할 매핑의 단일 출처를 둔다. divider/focus_accent/tab_*/drop_zone은 현재 sidebar_active를 공유한다(렌더의
-    /// sidebarActiveBg와 같은 출처) — rich(C4)에서 토큰셋만 바꿔 분리한다. muted_fg는 C0에선 sidebar_foreground.
+    /// ResolvedTheme(config) → chrome 토큰. chrome은 ResolvedTheme를 import하지 않으므로(경계) 여기서 resolved
+    /// Rgb만 뽑아 넘기고, **역할→색 매핑은 chrome.tokens.Tokens.tui가 단일 출처로 소유**한다(2nd 백엔드·rich도
+    /// 같은 매핑 재사용). 이 함수는 ResolvedTheme→ThemeColors 투영(필드 추림)만 한다.
     fn buildChromeTokens(self: *const DevSession) chrome.Tokens {
         const t = self.appearance.theme;
-        var palette = std.EnumArray(chrome.tokens.ColorRole, maru.color.Rgb).initFill(t.foreground);
-        palette.set(.surface_bg, t.sidebar_background);
-        palette.set(.surface_fg, t.sidebar_foreground);
-        palette.set(.muted_fg, t.sidebar_foreground);
-        palette.set(.tab_active_bg, t.sidebar_active);
-        palette.set(.tab_hover_bg, t.sidebar_active);
-        palette.set(.divider, t.sidebar_active);
-        palette.set(.focus_accent, t.sidebar_active);
-        palette.set(.drop_zone, t.sidebar_active);
-        palette.set(.search_match, t.search_match);
-        palette.set(.search_match_current, t.search_match_current);
-        palette.set(.selection, t.selection);
-        palette.set(.cursor, t.cursor);
-        return .{ .palette = palette };
+        return chrome.tokens.Tokens.tui(.{
+            .foreground = t.foreground,
+            .sidebar_background = t.sidebar_background,
+            .sidebar_foreground = t.sidebar_foreground,
+            .sidebar_active = t.sidebar_active,
+            .search_match = t.search_match,
+            .search_match_current = t.search_match_current,
+            .selection = t.selection,
+            .cursor = t.cursor,
+        });
     }
 
     /// Notice 모달 frame(최상위 오버레이). chrome_host에서 modal 레이어 ChromeDraw를 수집해(실제 컴포넌트 view
@@ -4254,27 +4250,24 @@ pub const DevSession = struct {
         try self.chrome_host.collectDraws(self.buildChromeProps(), &tokens, arena, &draws);
         if (draws.items.len == 0) return error.NotOpen;
 
-        // fill(박스 rect+bg) + 첫 text(메시지+fg)를 추출한다. border는 lower 대상 아님(위 doc).
-        var box: ?chrome.draw.Rect = null;
-        var box_bg: maru.color.Rgb = self.appearance.theme.sidebar_background;
-        var msg: []const u8 = "";
-        var msg_fg: maru.color.Rgb = self.appearance.theme.sidebar_foreground;
-        var msg_origin: chrome.draw.Px = .{ .x = 0, .y = 0 };
+        // notice.view 계약: 열렸으면 fill(박스 rect+bg) + border + text(메시지+fg)를 함께 낸다. fill·text op를
+        // 잡고(border는 DrawCell에 테두리 개념이 없어 lower 대상 아님 — C2/C3 reserved-kind 작업으로 미룸), 둘 중
+        // 하나라도 없으면 에러로 닫는다. **방어 기본값을 두지 않는다** — 계약상 항상 함께 오므로 누락은 loud fail로
+        // 드러낸다(no-defensive-code). op 순서엔 의존하지 않는다(마지막 fill/text가 이긴다 — notice는 각 1개).
+        var fill_op: ?chrome.draw.Op.Fill = null;
+        var text_op: ?chrome.draw.Op.Text = null;
         for (draws.items) |d| for (d.ops) |op| switch (op) {
-            .fill => |f| {
-                box = f.rect;
-                box_bg = tokens.get(f.role);
-            },
-            .text => |tx| {
-                if (msg.len == 0 and tx.runs.len > 0) {
-                    msg = tx.runs[0].text;
-                    msg_fg = tokens.get(tx.role);
-                    msg_origin = tx.origin;
-                }
-            },
+            .fill => |f| fill_op = f,
+            .text => |tx| text_op = tx,
             else => {},
         };
-        const rect = box orelse return error.NoBox;
+        const fill = fill_op orelse return error.NoBox;
+        const text = text_op orelse return error.NoText;
+        const msg: []const u8 = if (text.runs.len > 0) text.runs[0].text else return error.NoText;
+        const rect = fill.rect;
+        const box_bg = tokens.get(fill.role);
+        const msg_fg = tokens.get(text.role);
+        const msg_origin = text.origin;
 
         const cols_u = rect.w / cw;
         const rows_u = rect.h / ch;
@@ -4323,9 +4316,14 @@ pub const DevSession = struct {
     }
 
     /// chrome Notice 모달(손상 알림 등)을 연다. 메시지는 세션 소유 버퍼로 복사한다 — notice.State.message는 slice라
-    /// 호출자(ABI/Swift) 버퍼가 transient면 dangling. 512B 초과는 잘라 표시한다. 다음 tick이 오버레이로 그린다.
+    /// 호출자(ABI/Swift) 버퍼가 transient면 dangling. 512B 초과는 잘라 표시하되 **UTF-8 코드포인트 경계에서** 자른다
+    /// (바이트 경계에서 자르면 한글 등 multibyte가 U+FFFD로 깨진다 — 리뷰 발견). 다음 tick이 오버레이로 그린다.
     pub fn showNotice(self: *DevSession, message: []const u8) void {
-        const n = @min(message.len, self.notice_message_buf.len);
+        var n = @min(message.len, self.notice_message_buf.len);
+        // 잘렸으면 continuation 바이트(0x80~0xBF)에서 멈추지 않게 lead 바이트까지 되돌린다(코드포인트 중간 절단 방지).
+        if (n < message.len) {
+            while (n > 0 and (message[n] & 0xC0) == 0x80) n -= 1;
+        }
         @memcpy(self.notice_message_buf[0..n], message[0..n]);
         self.chrome_host.notice.show(self.notice_message_buf[0..n]);
         self.metal_dirty = true;

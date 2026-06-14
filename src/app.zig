@@ -13,6 +13,7 @@ pub const smoke_drain = @import("app/smoke_drain.zig");
 pub const surface = @import("app/surface.zig");
 pub const split_tree = @import("app/split_tree.zig");
 pub const window = @import("app/window.zig");
+pub const workspace = @import("app/workspace.zig");
 
 pub const AppWindow = window.AppWindow;
 pub const AppHostFrame = host.AppHostFrame;

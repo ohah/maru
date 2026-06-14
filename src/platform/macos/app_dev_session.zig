@@ -99,12 +99,12 @@ const font_size_max: f32 = 72.0;
 // 커서 깜빡임 반주기(30Hz tick 단위). 15틱 = 500ms — 일반 터미널 관례(on 500ms / off 500ms).
 const blink_interval_ticks: u32 = 15;
 
-// 복원(R4)에서 모델 surface의 저장된 cols/rows를 spawn 초기 grid로 쓴다(0이면 80×24 기본). 실제 grid는
-// 복원 직후 resize/레이아웃이 창·split에 맞게 보정하므로, 이 초기값은 spawn winsize일 뿐이다.
+// 복원(R4)에서 모델 surface의 저장된 cols/rows를 spawn 초기 grid로 쓴다(0이면 terminal.Size.default 기본).
+// 실제 grid는 복원 직후 resize/레이아웃이 창·split에 맞게 보정하므로, 이 초기값은 spawn winsize일 뿐이다.
 fn restoreSurfaceSize(sm: app.workspace.Surface) terminal.Size {
     return terminal.clampGridSize(.{
-        .cols = if (sm.cols > 0) sm.cols else 80,
-        .rows = if (sm.rows > 0) sm.rows else 24,
+        .cols = if (sm.cols > 0) sm.cols else terminal.Size.default.cols,
+        .rows = if (sm.rows > 0) sm.rows else terminal.Size.default.rows,
     });
 }
 
@@ -113,13 +113,18 @@ fn restoreSurfaceSize(sm: app.workspace.Surface) terminal.Size {
 // 않는다. cwd 자식 chdir 실패는 _exit(126)이라(pty/macos childExec), 미리 확인 안 하면 복원된 셸이 즉시 죽어
 // 다음 tick에 reap된다. workspace-restore.md "실패 처리": 한 surface가 어긋나도 나머지(와 그 surface)를 살린다.
 fn usableRestoreCwd(cwd: []const u8) ?[]const u8 {
-    if (cwd.len == 0 or cwd.len >= std.fs.max_path_bytes or !std.fs.path.isAbsolute(cwd)) return null;
-    // libc access로 디렉터리 진입(X) 권한 = chdir 가능 여부를 본다(이 Zig 핀은 std.Io 비동기 모델이라 동기
-    // 존재 확인엔 std.c를 쓴다 — pty/macos.zig와 같은 패턴). null 종단 복사가 필요하다(access는 C 문자열).
+    // 후행 '/'를 붙일 1바이트 여유까지 본다(아래 디렉터리 강제 트릭에서 쓴다).
+    if (cwd.len == 0 or cwd.len + 2 > std.fs.max_path_bytes or !std.fs.path.isAbsolute(cwd)) return null;
+    // null 종단 복사가 필요하다(access는 C 문자열). 이 Zig 핀은 std.Io 비동기 모델이라 동기 존재 확인엔 std.c를
+    // 쓴다 — pty/macos.zig와 같은 패턴(std.c.stat은 이 핀의 arm64-darwin에서 미선언, fstatat은 Linux에서 빈 값).
+    // 그래서 stat 대신 POSIX의 후행-슬래시 규칙을 쓴다: 경로 끝에 '/'를 붙이면 마지막 컴포넌트가 디렉터리가 아닐 때
+    // access가 ENOTDIR로 실패한다(실행 파일을 배제 — chdir(file)=ENOTDIR로 자식이 _exit(126)되는 걸 막는다). 이는
+    // 곧 "chdir 가능한가"를 커널 경로 해석으로 직접 묻는 것이고, X_OK는 그 디렉터리 진입(search) 권한까지 확인한다.
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     @memcpy(buf[0..cwd.len], cwd);
-    buf[cwd.len] = 0;
-    const cwd_z = buf[0..cwd.len :0];
+    buf[cwd.len] = '/'; // 디렉터리 강제(중복 슬래시는 POSIX상 단일 취급이라 "/"·".../"도 안전)
+    buf[cwd.len + 1] = 0;
+    const cwd_z = buf[0 .. cwd.len + 1 :0];
     return if (std.c.access(cwd_z.ptr, std.posix.X_OK) == 0) cwd else null;
 }
 
@@ -3263,8 +3268,17 @@ pub const DevSession = struct {
         }
         self.app_window.tabs = self.surface_ptrs.items;
         self.app_window.active_tab = @min(win.active_tab, self.tabs.items.len - 1);
-        // 활성 탭의 활성 panel로 대표 surface·frame_loop pump 재바인딩 + 좌표/사이드바 갱신.
-        self.focusPane(self.activeTab().active_pane);
+        // 트리·탭을 통째로 교체했으니, 해제된 옛 트리를 가리키던 상호작용 포인터를 전부 비운다(closeTab의 stale
+        // 방지 불변식과 동일 — 단 여기선 모든 탭이 바뀌므로 진행 중 탭 드래그 상태까지 리셋한다). 지금은 시작 전용
+        // 호출이라 이 필드들이 이미 null이지만, mid-session 재적용(예: repo별 workspace 후속)에서 UAF를 막는다.
+        self.hovered_slot = null;
+        self.hovered_plus = false;
+        self.hovered_tab = null;
+        self.divider_drag = null;
+        self.tab_drag_active = false;
+        self.tab_drag_pane = null;
+        // 활성 탭의 대표 surface는 위 swap 루프가 이미 surface_ptrs[*]에 바인딩했고 active_pane도 빌드 때
+        // 세팅됐다(focusPane(active==active)는 early-return no-op이라 호출하지 않는다). 좌표·사이드바만 갱신.
         self.recomputeActivePaneRect();
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
@@ -3294,8 +3308,16 @@ pub const DevSession = struct {
         for (m.panes) |pm| tab.panes.appendAssumeCapacity(try self.buildWorkspacePane(pm));
 
         // 트리 빌드 — 새로 만든 split 노드를 추적해 에러 시 전부 해제(트리 미완성이라 PaneTree.deinit 못 씀).
+        // capacity를 split 노드 수만큼 미리 잡아 추적 append를 무실패화한다: create 직후 append가 OOM이면 그
+        // split이 추적되지 않아 누수되므로, 예약된 무실패 append로 create↔추적 사이의 빈틈을 없앤다.
+        var split_count: usize = 0;
+        for (m.tree) |n| switch (n) {
+            .split => split_count += 1,
+            .leaf => {},
+        };
         var splits: std.ArrayList(*PaneTree.Split) = .empty;
         defer splits.deinit(self.allocator);
+        try splits.ensureTotalCapacity(self.allocator, split_count);
         errdefer for (splits.items) |s| self.allocator.destroy(s);
         var idx: usize = 0;
         const root = try self.buildWorkspaceTreeNode(tab.panes.items, m.tree, &idx, &splits);
@@ -3318,7 +3340,7 @@ pub const DevSession = struct {
             },
             .split => |s| {
                 const split = try self.allocator.create(PaneTree.Split);
-                try splits.append(self.allocator, split); // 재귀 전에 추적(중간 실패에도 해제됨)
+                splits.appendAssumeCapacity(split); // capacity 예약됨 — 무실패 추적(create↔추적 사이 누수 없음)
                 split.* = .{
                     .direction = s.direction,
                     .ratio = app.split_tree.clampRatio(@as(f32, @floatFromInt(s.ratio_milli)) / 1000.0),
@@ -3341,22 +3363,28 @@ pub const DevSession = struct {
         return pane;
     }
 
-    fn createPaneFromSurface(self: *DevSession, sm: app.workspace.Surface) !*Pane {
+    /// 복원 surface 하나로 spawn 준비(createPane/createTerm 공통). new_tab_config에 저장 grid를 얹고, 사용 가능한
+    /// (존재하는 디렉터리) cwd면 그걸 쓴다 — 마지막 create 호출만 두 함수가 다르다. 모델의 command(argv[0])·title은
+    /// v1 복원에선 쓰지 않는다(기본 셸·"Maru"로 spawn; 정확한 argv·제목 복원은 후속) — 저장은 향후 복원용으로만.
+    fn restoreSpawn(self: *DevSession, sm: app.workspace.Surface) struct { req: maru.pty.SpawnRequest, size: terminal.Size } {
         var cfg = self.new_tab_config;
         const size = restoreSurfaceSize(sm);
         cfg.size = size;
         var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir);
-        if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c; // 존재하는 cwd면 거기서, 없으면 기본 cwd(surface 안 잃음)
-        return self.createPane(req, size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
+        if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c; // 존재하는 디렉터리면 거기서, 아니면 기본 cwd(surface 안 잃음)
+        return .{ .req = req, .size = size };
+    }
+
+    fn createPaneFromSurface(self: *DevSession, sm: app.workspace.Surface) !*Pane {
+        const rs = self.restoreSpawn(sm);
+        const cfg = self.new_tab_config;
+        return self.createPane(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
     }
 
     fn createTermFromSurface(self: *DevSession, sm: app.workspace.Surface) !*Term {
-        var cfg = self.new_tab_config;
-        const size = restoreSurfaceSize(sm);
-        cfg.size = size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir);
-        if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c;
-        return self.createTerm(req, size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
+        const rs = self.restoreSpawn(sm);
+        const cfg = self.new_tab_config;
+        return self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
     }
 
     /// quick terminal 표시 옵션(config에서 파싱). Swift가 패널 크기·화면·자동 숨김에 쓴다. 세션 동안 불변.
@@ -5226,10 +5254,13 @@ test "usableRestoreCwd: 존재하는 절대 디렉터리만 통과(없는 cwd gr
     // 존재하는 디렉터리 → 그 cwd 사용. /tmp는 macOS·Linux 모두 존재.
     try std.testing.expect(usableRestoreCwd("/tmp") != null);
     try std.testing.expectEqualStrings("/tmp", usableRestoreCwd("/tmp").?);
-    // 없음·빈값·상대경로·파일이 아닌 디렉터리가 아니면 null → 기본 cwd로 복원(surface 안 잃음).
+    // 없음·빈값·상대경로면 null → 기본 cwd로 복원(surface 안 잃음).
     try std.testing.expect(usableRestoreCwd("/no/such/maru-restore-xyz-12345") == null);
     try std.testing.expect(usableRestoreCwd("") == null);
     try std.testing.expect(usableRestoreCwd("relative/path") == null); // 절대경로 아님
+    // 실행 파일은 access(X_OK)는 통과하지만 디렉터리가 아니므로 null이어야 한다(chdir(file)=ENOTDIR → _exit(126)
+    // 방지). /bin/sh는 macOS·Linux 모두 존재하는 실행 파일.
+    try std.testing.expect(usableRestoreCwd("/bin/sh") == null);
 }
 
 test "applyWorkspaceWindow: 없는 cwd여도 복원 성공(기본 cwd 폴백, surface 안 잃음)" {

@@ -30,6 +30,9 @@ pub const TreeNode = union(enum) {
 
 /// 한 터미널(Term)의 복원 가능 선언 상태(app.surface.RestorableSurfaceMetadata의 직렬화 부분집합 — id/
 /// process_state 같은 런타임 값은 복원에 불필요하므로 안 담는다). cwd=OSC 7, title=OSC 0/2, command=spawn argv[0].
+/// v1 복원이 실제로 소비하는 건 cwd·cols·rows뿐이다. title·command는 캡처·저장만 하고 복원 spawn엔 안 쓴다
+/// (기본 셸·"Maru" 제목으로 살린다; 정확한 제목·argv 복원은 후속). command는 argv[0]=셸이라 last_observed_command
+/// 자동 재실행 금지 정책과는 별개지만, 그래도 v1에선 복원에 쓰지 않는다.
 pub const Surface = struct {
     title: []const u8 = "",
     cwd: []const u8 = "",

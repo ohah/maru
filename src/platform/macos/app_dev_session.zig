@@ -239,18 +239,21 @@ fn putUtf8(line: []u21, start: usize, bytes: []const u8) void {
     while (it.nextCodepoint()) |cp| {
         if (col >= line.len) break;
         line[col] = cp;
-        col += 1;
+        col += @max(1, terminal.width.cellWidth(cp)); // wide(한글/CJK)는 2칸 전진 — 다음 글자가 안 겹친다(placeText와 동일 규약)
     }
 }
 
 /// 팝업 한 행을 DrawCell로 emit한다 — 각 칸에 codepoint + 불투명 bg + fg. bg가 non-default라 buildFromDrawList가
-/// sentinel bg 셀을 내 패널이 아래(터미널·커서)를 덮는다(공백 칸도 bg가 칠해진다).
+/// sentinel bg 셀을 내 패널이 아래(터미널·커서)를 덮는다(공백 칸도 bg가 칠해진다). 폭은 EAW(terminal.width.cellWidth)로
+/// — 한글/CJK는 width=2라 wide 글리프가 2칸으로 그려진다(안 그러면 atlas slot이 1칸이라 오른쪽 절반이 잘려 ㄱㄴㄷ로
+/// 보인다 — coretext_frame_builder의 `@max(1, cellWidth)` 캐논 패턴과 일치). continuation 칸은 빈칸으로 남아 셰이퍼가 건너뛴다.
 fn appendPaletteRow(allocator: std.mem.Allocator, cells: *std.ArrayList(renderer.DrawCell), row: u16, line: []const u21, bg: terminal.Color, fg: terminal.Color) !void {
     for (line, 0..) |cp, c| {
         try cells.append(allocator, .{
             .row = row,
             .col = @intCast(c),
             .codepoint = cp,
+            .width = @intCast(@min(@max(1, terminal.width.cellWidth(cp)), 2)),
             .style = .{ .foreground = fg, .background = bg },
         });
     }
@@ -5222,6 +5225,49 @@ test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비
     try std.testing.expect(session.chrome_host.find.open);
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(!session.chrome_host.find.open);
+}
+
+test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회귀 실측(실 CoreText)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayFrame=CoreText, 실 PTY
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open);
+    // 'A'(ASCII, span 1)와 '가'(U+AC00, EAW-Wide span 2)를 같은 오버레이 frame에 그린다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'A' }, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '가' }, .modifiers = .{} });
+
+    var ff = try session.buildChromeOverlayFrame();
+    defer ff.frame.deinit(allocator);
+
+    // 실측: 결과 글리프에서 '가'와 'A'의 cell_width(span)와 atlas slot 픽셀 폭을 뽑는다.
+    var ga_span: ?u2 = null;
+    var ga_slot_w: u32 = 0;
+    var a_slot_w: u32 = 0;
+    for (ff.frame.glyph_quad_frame.glyphs) |q| {
+        if (q.run.codepoint == '가') {
+            ga_span = q.run.cell_width;
+            ga_slot_w = q.slot.width_px;
+        } else if (q.run.codepoint == 'A') {
+            a_slot_w = q.slot.width_px;
+        }
+    }
+    // 핵심: '가'는 span=2여야 하고, atlas slot이 ASCII(span 1)의 2배 폭이어야 wide 글리프가 안 잘린다.
+    // slot이 1칸이면 rasterizer가 글자를 1칸에 가운데정렬+우측 클립해 왼쪽 절반(ㄱ)만 남는다.
+    try std.testing.expectEqual(@as(?u2, 2), ga_span);
+    try std.testing.expect(a_slot_w > 0);
+    try std.testing.expectEqual(a_slot_w * 2, ga_slot_w);
 }
 
 test "overlayCell: 오버레이 셀 = 터미널 셀 ×1.3(round)·0 보존" {

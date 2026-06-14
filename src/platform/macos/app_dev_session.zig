@@ -3128,6 +3128,67 @@ pub const DevSession = struct {
         return true;
     }
 
+    /// 이 창(DevSession)의 라이브 상태를 workspace restore 모델(app.workspace.Window)로 캡처한다(R3). 탭→pane
+    /// split 트리→Term→surface를 걸어 선언적 상태만 모은다 — live PTY/process/grid는 안 담는다. cwd/title은 OSC
+    /// 권위 소스(core.currentCwd/windowTitle), command는 spawn argv[0](surface.command). split 트리는 *Pane leaf를
+    /// pane 인덱스로 환원해 preorder TreeNode로 평탄화(직렬화 모델과 같은 형태). 멀티 창 전체 모델은 호출자(R5)가
+    /// 각 세션의 Window를 모아 만든다. 모든 슬라이스·문자열은 `arena`가 소유한다(호출자가 deinit).
+    pub fn captureWorkspaceWindow(self: *DevSession, arena: std.mem.Allocator) !app.workspace.Window {
+        var tabs: std.ArrayList(app.workspace.Tab) = .empty;
+        for (self.tabs.items) |tab| try tabs.append(arena, try captureWorkspaceTab(arena, tab));
+        return .{ .active_tab = self.app_window.active_tab, .tabs = try tabs.toOwnedSlice(arena) };
+    }
+
+    fn captureWorkspaceTab(arena: std.mem.Allocator, tab: *Tab) !app.workspace.Tab {
+        var panes: std.ArrayList(app.workspace.Pane) = .empty;
+        for (tab.panes.items) |pane| {
+            var surfaces: std.ArrayList(app.workspace.Surface) = .empty;
+            for (pane.terms.items) |term| {
+                const core = &term.surface.core;
+                try surfaces.append(arena, .{
+                    .title = try arena.dupe(u8, core.windowTitle()),
+                    .cwd = try arena.dupe(u8, core.currentCwd()),
+                    .command = try arena.dupe(u8, term.surface.command orelse ""),
+                    .cols = core.size.cols,
+                    .rows = core.size.rows,
+                });
+            }
+            try panes.append(arena, .{ .active_term = pane.active_term, .surfaces = try surfaces.toOwnedSlice(arena) });
+        }
+        var tree: std.ArrayList(app.workspace.TreeNode) = .empty;
+        try flattenPaneTree(arena, tab, tab.tree, &tree);
+        return .{
+            .active_pane = tab.active_pane,
+            .title = "", // 탭 제목은 cosmetic — 복원에 불필요(번호로 식별). 후속에 필요하면 채운다.
+            .tree = try tree.toOwnedSlice(arena),
+            .panes = try panes.toOwnedSlice(arena),
+        };
+    }
+
+    /// PaneTree 노드를 preorder로 평탄화한다 — leaf(*Pane)는 그 Pane의 tab.panes 인덱스로, split은 방향+ratio(천분율)
+    /// 로. 직렬화 모델(self-delimiting preorder)과 같은 순서·형태.
+    fn flattenPaneTree(arena: std.mem.Allocator, tab: *Tab, node: PaneTree.Node, out: *std.ArrayList(app.workspace.TreeNode)) !void {
+        switch (node) {
+            .leaf => |pane_ptr| {
+                const idx = paneIndexOf(tab, pane_ptr) orelse return error.PaneNotFound;
+                try out.append(arena, .{ .leaf = idx });
+            },
+            .split => |s| {
+                const milli: u16 = @intFromFloat(@round(std.math.clamp(s.ratio, 0.0, 1.0) * 1000.0));
+                try out.append(arena, .{ .split = .{ .direction = s.direction, .ratio_milli = milli } });
+                try flattenPaneTree(arena, tab, s.a, out);
+                try flattenPaneTree(arena, tab, s.b, out);
+            },
+        }
+    }
+
+    fn paneIndexOf(tab: *Tab, pane: *Pane) ?usize {
+        for (tab.panes.items, 0..) |p, i| {
+            if (p == pane) return i;
+        }
+        return null;
+    }
+
     /// quick terminal 표시 옵션(config에서 파싱). Swift가 패널 크기·화면·자동 숨김에 쓴다. 세션 동안 불변.
     pub fn quickTerminalConfig(self: *const DevSession) QuickTerminalConfig {
         const qt = self.loaded_config.config.quick_terminal;
@@ -4817,6 +4878,58 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     i = 0;
     while (i < 200) : (i += 1) session.dispatchAppAction(.increase_font_size);
     try std.testing.expectEqual(font_size_max, session.appearance.font.size);
+}
+
+test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 캡처" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY + split/탭 생성
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // 활성 surface에 cwd(OSC 7) 심기 + split으로 pane 2개 + 새 탭(탭 2개).
+    try session.activeSurface().core.write("\x1b]7;file://h/tmp/proj\x07");
+    session.dispatchAppAction(.split_horizontal);
+    session.dispatchAppAction(.new_tab);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const win = try session.captureWorkspaceWindow(arena.allocator());
+
+    // 탭 2개, 활성 탭 = 1(방금 만든 새 탭).
+    try std.testing.expectEqual(@as(usize, 2), win.tabs.len);
+    try std.testing.expectEqual(@as(usize, 1), win.active_tab);
+    // 탭0: split → pane 2개 + tree preorder(split, leaf, leaf).
+    const tab0 = win.tabs[0];
+    try std.testing.expectEqual(@as(usize, 2), tab0.panes.len);
+    try std.testing.expectEqual(@as(usize, 3), tab0.tree.len);
+    try std.testing.expect(std.meta.activeTag(tab0.tree[0]) == .split);
+    try std.testing.expect(std.meta.activeTag(tab0.tree[1]) == .leaf);
+    // cwd /tmp/proj가 어떤 surface에 잡혔고, 모든 surface가 유효 크기를 가진다.
+    var saw_cwd = false;
+    for (tab0.panes) |pane| {
+        for (pane.surfaces) |s| {
+            if (std.mem.eql(u8, s.cwd, "/tmp/proj")) saw_cwd = true;
+            try std.testing.expect(s.cols > 0 and s.rows > 0);
+        }
+    }
+    try std.testing.expect(saw_cwd);
+
+    // capture → serialize가 크래시 없이 기대 라인을 낸다(R1 writer와 결합).
+    const wins = [_]app.workspace.Window{win};
+    const text = try app.workspace.serialize(allocator, .{ .windows = &wins });
+    defer allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "tree-node split horizontal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "cwd=\"/tmp/proj\"") != null);
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {

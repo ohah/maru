@@ -23,10 +23,10 @@ pub const ColorRole = enum {
     cursor,
 };
 
-/// 비-색 레이아웃 토큰(픽셀/비율). 지금 app_dev_session에 흩어진 상수의 단일 출처. rich는 이 값을 바꾼다.
+/// 비-색 레이아웃 토큰(픽셀/비율). 컴포넌트가 실제로 소비하는 것만 둔다 — 사이드바 폭/슬롯 높이는 런타임
+/// 가변(사용자 드래그)이라 토큰에 하드코딩하면 stale 출처가 된다(C2/C3에서 session 실측값을 props/토큰으로
+/// 흘려줄 때 추가). rich는 이 값을 바꾼다.
 pub const Spacing = struct {
-    sidebar_width_px: u32 = 180,
-    sidebar_slot_height_ratio_milli: u32 = 2500, // 슬롯 높이 = 2.5 × cell height
     modal_margin_cells: u32 = 2, // 모달 박스 좌우 안쪽 여백(셀)
 };
 

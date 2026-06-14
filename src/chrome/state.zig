@@ -11,8 +11,11 @@
 pub const ChromeState = struct {
     // C2/C3에서 추가: hovered_slot: ?usize, hovered_tab, divider_drag, tab_drag_*, …
 
-    /// 트리 변형 후 해제될 노드를 가리키던 hover/drag 포인터를 일괄 무효화(단일 출처). 필드가 생기면
-    /// 여기 한 곳만 채운다 — 호출처(트리를 바꾸는 모든 op)는 변경 후 이 한 줄만 부르면 된다.
+    /// 트리 변형 후 해제될 노드를 가리키던 hover/drag 포인터를 일괄 무효화(단일 출처). **이미 배선됨**(S1):
+    /// session의 Pane-해제 chokepoint(`DevSession.invalidateForFreedPane` ← `destroyPane`)가 이 메서드를 부른다.
+    /// 지금은 무동작 — 라이브-트리 포인터를 아직 session이 소유하기 때문이다. C2/C3에서 핸들 기반 드래그 상태가
+    /// ChromeState로 이주하면 그 무효화를 여기서 떠맡는다(호출 지점은 chokepoint라 그대로 유지). 멱등이어야 한다
+    /// (chokepoint가 Pane마다 부르므로) — 핸들 null화는 반복해도 안전.
     pub fn invalidateForStructuralChange(self: *ChromeState) void {
         _ = self;
     }

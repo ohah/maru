@@ -1647,7 +1647,8 @@ pub const DevSession = struct {
     fn collapsePaneIn(self: *DevSession, tab: *Tab, pane: *Pane) void {
         if (tab.panes.items.len <= 1) return;
         if (!PaneTree.removeLeaf(self.allocator, &tab.tree, pane)) return;
-        self.divider_drag = null; // removeLeaf가 split 노드를 해제 — 진행 중 divider 드래그의 stale 포인터 비움
+        // removeLeaf가 split 노드를 해제했지만, 진행 중 divider 드래그의 stale 포인터는 아래 destroyPane이
+        // invalidateForFreedPane(S1 chokepoint)으로 비운다 — 여기서 따로 null화하지 않는다(단일 출처).
         for (tab.panes.items, 0..) |p, i| {
             if (p == pane) {
                 _ = tab.panes.orderedRemove(i);
@@ -1887,8 +1888,10 @@ pub const DevSession = struct {
     }
 
     /// 한 panel을 teardown하고 heap 해제한다 — 담긴 모든 Term을 destroyTerm한 뒤 terms 리스트·Pane을 해제.
-    /// createPane errdefer·closeTab·closeActivePane·split 실패 정리에 쓴다.
+    /// createPane errdefer·closeTab·closeActivePane·split 실패 정리에 쓴다. **모든 Pane 해제의 단일 chokepoint라,
+    /// 해제 직전 구조-무효화 계약(invalidateForFreedPane)을 부른다 — 이 Pane을 가리키던 호버/드래그 포인터를 정리.**
     fn destroyPane(self: *DevSession, pane: *Pane) void {
+        self.invalidateForFreedPane(pane); // S1: 포인터 비교는 해제 전 주소로(deref 없음) — 흩어진 null화 대체
         for (pane.terms.items) |term| self.destroyTerm(term);
         pane.terms.deinit(self.allocator);
         self.allocator.destroy(pane);
@@ -1948,16 +1951,32 @@ pub const DevSession = struct {
         return true;
     }
 
-    /// 트리/탭 변형 후 해제된 Pane·split 노드를 가리키던 상호작용 캐시 포인터를 비운다(stale 방지). 트리를 바꾸는
-    /// 모든 op(closeTab·closeActivePane·applyWorkspaceWindow 등)가 공유하는 단일 출처 — 새 호버/divider 캐시 필드를
-    /// 추가하면 여기 한 곳만 고치면 모든 변형 경로가 따라온다(흩어진 null화로 일부 경로를 빠뜨리는 UAF 방지). 이
-    /// 필드들은 캐시라 다음 마우스 이동이 재설정한다. 진행 중 탭 드래그(tab_drag_*)는 건드리지 않는다 — moveTab은
-    /// 드래그 중에 트리를 바꾸므로 여기서 드래그를 끊으면 안 된다. 전 세션 교체(apply)는 호출처가 따로 리셋한다.
-    fn resetHoverState(self: *DevSession) void {
+    /// **세션-트리 구조-무효화 계약(S1)의 단일 출처.** 한 Pane이 해제되기 직전 destroyPane이 부른다 — 모든
+    /// 트리 변형(closeTab·closeActivePane·collapsePaneIn·applyWorkspaceWindow·reap)이 노드 해제 시 destroyPane을
+    /// 거치므로, 이 한 지점이 흩어진 null화 없이 stale 포인터 UAF를 구조적으로 막는다(스냅샷 가드는 UAF를 못 잡는다
+    /// — docs/layering-and-portability.md §6, [[devsession-undefined-test-field-trap]]).
+    ///
+    /// **표적 무효화**(`*Pane` 포인터): 해제되는 바로 이 Pane을 가리키던 hover/drag 포인터만 비운다 — 다른 Pane을
+    /// 가리키면 유지한다. 이게 핵심: 무관한 Pane 닫힘(또는 reap)이 진행 중 탭 드래그/호버를 끊지 않으면서, 드래그
+    /// 중인 Pane 자체가 reap으로 해제되는 비동기 UAF는 닫는다(tick reap ↔ 마우스 드래그가 메인 스레드에서 교차).
+    ///
+    /// **보수적 무효화**(`divider_drag`=*Split, `hovered_slot`=슬롯 인덱스): split 해제는 항상 pane 해제와 짝이지만
+    /// removeLeaf가 해제한 split 포인터를 안 돌려줘 표적 비교가 불가하고, 슬롯 인덱스는 pane 수에 의존해 stale이
+    /// 되므로 어느 Pane 해제든 비운다(드물게 무관한 divider 드래그를 끊지만 UAF는 0). 캐시라 다음 이동이 재설정.
+    fn invalidateForFreedPane(self: *DevSession, pane: *Pane) void {
+        if (self.hovered_tab) |ht| {
+            if (ht.pane == pane) self.hovered_tab = null;
+        }
+        if (self.tab_drag_pane == pane) {
+            self.tab_drag_pane = null;
+            self.tab_drag_active = false; // 드래그 대상이 사라졌으니 제스처 중단(다음 mouse-up은 no-op)
+        }
+        self.divider_drag = null;
         self.hovered_slot = null;
         self.hovered_plus = false;
-        self.hovered_tab = null;
-        self.divider_drag = null;
+        // chrome ChromeState 훅(현재 무동작). 핸들 기반 드래그 상태가 C2/C3서 ChromeState로 이주하면 여기 한 줄이
+        // 그 무효화를 떠맡는다 — destroyPane 단일 chokepoint라 호출처는 그대로 따라온다(docs/chrome-strategy.md §5.5).
+        self.chrome_host.interaction.invalidateForStructuralChange();
     }
 
     /// 탭을 닫는다. 마지막 한 개면 창(세션)을 닫는다 — 탭을 헐지 않고 종료를 latch해 기존 terminate/
@@ -1987,7 +2006,8 @@ pub const DevSession = struct {
 
         self.app_window.active_tab = reselectAfterClose(index, self.app_window.active_tab, self.tabs.items.len);
         self.recomputeActivePaneRect(); // 새 활성 탭의 활성 panel rect로 좌표 origin 갱신
-        self.resetHoverState(); // 이 탭의 Pane/split 노드가 해제됐으니 stale 호버·divider 포인터 비움(다음 이동이 재설정)
+        // 이 탭의 Pane/split 노드가 해제됐으니 stale 호버·divider 포인터를 비워야 하는데, 위 destroyTabStandalone의
+        // destroyPane 루프가 invalidateForFreedPane(S1 chokepoint)으로 이미 처리했다(다음 이동이 재설정).
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }
@@ -2014,7 +2034,8 @@ pub const DevSession = struct {
         // 5) 남은 panel을 collapse된 트리의 새 leaf rect로 resize + 좌표 origin 재계산.
         self.resizeActiveTabPanes() catch {};
         self.recomputeActivePaneRect();
-        self.resetHoverState(); // 닫은 Pane·해제된 split 노드를 가리키던 호버·divider 포인터 비움(stale 방지)
+        // 닫은 Pane·해제된 split 노드를 가리키던 호버·divider 포인터는 위 destroyPane이 invalidateForFreedPane
+        // (S1 chokepoint)으로 이미 비웠다 — 여기서 따로 리셋하지 않는다.
         self.metal_dirty = true;
     }
 
@@ -3313,12 +3334,10 @@ pub const DevSession = struct {
         }
         self.app_window.tabs = self.surface_ptrs.items;
         self.app_window.active_tab = @min(win.active_tab, self.tabs.items.len - 1);
-        // 트리·탭을 통째로 교체했으니 해제된 옛 트리를 가리키던 상호작용 포인터를 비운다(closeTab과 같은 stale 방지
-        // 불변식 — resetHoverState로 단일화). 진행 중 탭 드래그도 리셋한다(전 세션 교체라 드래그가 살아있을 수 없다).
-        // 지금은 시작 전용 호출이라 이미 null이지만, mid-session 재적용(repo별 workspace 후속)에서 UAF를 막는다.
-        self.resetHoverState();
-        self.tab_drag_active = false;
-        self.tab_drag_pane = null;
+        // 트리·탭을 통째로 교체했으니 해제된 옛 트리를 가리키던 상호작용 포인터를 비워야 하는데, 위 destroyTabStandalone
+        // 루프의 destroyPane이 invalidateForFreedPane(S1 chokepoint)으로 옛 Pane을 가리키던 호버·드래그 포인터를 이미
+        // 비웠다(표적 무효화라 옛 Pane을 가리키던 tab_drag_pane도 포함). 지금은 시작 전용이라 드래그가 없지만,
+        // mid-session 재적용(repo별 workspace 후속)에서도 같은 chokepoint가 UAF를 막는다 — 따로 리셋하지 않는다.
         // 복원된 모든 탭을 현재 창 grid로 맞춘다. apply는 resize를 안 부르고 각 surface는 저장 grid로 spawn되며,
         // caller의 resizeDevSessionFromWindow→resize()는 (활성 탭만 + last_resize_size dedup) 배경 탭과 primary
         // 활성 탭을 빠뜨린다. 여기서 전 탭을 명시적으로 맞춰 dedup·활성탭-한정을 둘 다 우회한다(best-effort).
@@ -5784,6 +5803,65 @@ test "splitActivePane splits the active leaf, focuses the new panel, and renders
 
     // N-panel 렌더 경로(비활성 frame 빌드 + 활성 맨 뒤 합성)가 크래시 없이 돈다.
     _ = try session.tick();
+}
+
+test "S1 구조-무효화 계약: destroyPane이 해제 Pane 포인터를 표적 무효화(무관 드래그 보존)·divider는 보수적" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800; // split이 의미 있으려면 backing 필요
+    session.backing_height_px = 600;
+
+    // 모든 트리 변형(close/collapse/apply/reap)은 노드 해제 시 destroyPane을 거치므로, closeActivePane 한 경로로
+    // chokepoint 동작을 고정한다(나머지 호출처는 같은 chokepoint를 공유).
+
+    // ── 케이스 1: 닫는 Pane을 가리키던 포인터는 표적 null, divider(*Split)·슬롯은 보수적 null ──
+    const pane_a = session.activePane();
+    try session.splitActivePane(.horizontal); // panes [a, b], 활성 b(닫을 대상)
+    const pane_b = session.activePane();
+    try std.testing.expect(pane_b != pane_a);
+    const split_node = switch (session.activeTab().tree) {
+        .split => |sp| sp,
+        .leaf => return error.TestExpectedSplit,
+    };
+    session.tab_drag_pane = pane_b;
+    session.tab_drag_active = true;
+    session.hovered_tab = .{ .pane = pane_b, .tab = 0 };
+    session.divider_drag = split_node;
+    session.hovered_slot = 3;
+    session.hovered_plus = true;
+
+    session.closeActivePane(); // b 해제 → destroyPane(b) → invalidateForFreedPane(b)
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
+    try std.testing.expect(session.tab_drag_pane == null); // 표적: b를 가리켰으니 null
+    try std.testing.expect(!session.tab_drag_active); // 드래그 대상 사라짐 → 제스처 중단
+    try std.testing.expect(session.hovered_tab == null); // 표적: b를 가리켰으니 null
+    try std.testing.expect(session.divider_drag == null); // 보수적: 어느 Pane 해제든 null
+    try std.testing.expect(session.hovered_slot == null);
+    try std.testing.expect(!session.hovered_plus);
+
+    // ── 케이스 2: 무관한 Pane을 닫아도 다른 Pane을 가리키던 드래그/호버는 보존(tab-drag 불변식) ──
+    try session.splitActivePane(.horizontal); // panes [a, c], 활성 c
+    const pane_c = session.activePane();
+    try std.testing.expect(pane_c != pane_a);
+    session.tab_drag_pane = pane_a; // 살아남을 Pane(a)을 가리킨다
+    session.tab_drag_active = true;
+    session.hovered_tab = .{ .pane = pane_a, .tab = 0 };
+
+    session.closeActivePane(); // c 해제(a와 무관) → invalidateForFreedPane(c)
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
+    try std.testing.expect(session.tab_drag_pane == pane_a); // 보존: c≠a라 안 끊김
+    try std.testing.expect(session.tab_drag_active); // 드래그 계속
+    try std.testing.expect(session.hovered_tab != null and session.hovered_tab.?.pane == pane_a); // 보존
 }
 
 // paneAtPoint가 스크린 점을 담는 leaf rect의 panel을 고르는지(반열린 구간 경계·밖·비유한) — 마우스

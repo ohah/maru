@@ -29,7 +29,7 @@ pub const Action = union(enum) {
     // 커맨드 팝업(Cmd+Shift+P)을 토글한다. 앱 UI 상태(PaletteState)라 dispatchAppAction이 열고/닫는다.
     // 카탈로그(command_catalog.entries)에는 안 넣는다 — 팝업이 자기 토글을 목록에 보이는 재귀를 피한다.
     toggle_command_palette,
-    // 스크롤백 Find(⌘F)를 토글한다. 앱 UI 상태(find_overlay.FindState)라 dispatchAppAction이 열고/닫는다.
+    // 스크롤백 Find(⌘F)를 토글한다. 앱 UI 상태(chrome find 컴포넌트)라 dispatchAppAction이 열고/닫는다.
     // 모달이 열린 동안 키는 검색 입력으로 라우팅된다(handleKeyEvent). 카탈로그에는 안 넣는다(팝업 토글과 같은
     // 규율 — 모달 토글은 목록 항목이 아니다. 팝업에서 Find 띄우기는 후속).
     toggle_find,

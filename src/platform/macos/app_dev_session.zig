@@ -2709,11 +2709,13 @@ pub const DevSession = struct {
     /// 하게 caret이 깜빡인다(텍스트 입력 caret 관용). 터미널 커서의 기존 메커니즘(틱-카운터 + suffix-trim)을 그대로 탄다.
     fn updateCursorBlink(self: *DevSession) void {
         const core = &self.activeSurface().core;
-        // 커서 자체가 깜빡이는 조건(DECSCUSR blink·표시·조합 아님). IME 조합 중엔 커서를 고정 표시(조합 글자 옆에서 안 반짝).
+        // 커서 자체가 깜빡이는 조건(DECSCUSR blink·표시·조합 아님).
         const cursor_blinks = core.cursor_blink and core.cursor_visible and core.preedit == null;
         const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open;
-        if (!cursor_blinks and !overlay_open) {
-            self.resetCursorBlink(); // 깜빡일 게 없음 — 보이는 위상 고정(idle 절전)
+        // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
+        // core.preedit로 이미 막지만, 오버레이는 overlay_open=true라 imeComposingActive로 막아야 한다(단일 출처).
+        if ((!cursor_blinks and !overlay_open) or self.imeComposingActive()) {
+            self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
             return;
         }
         self.blink_ticks += 1;

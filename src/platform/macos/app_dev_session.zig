@@ -2154,7 +2154,7 @@ pub const DevSession = struct {
     /// 맨 위로 — 증분 검색 관용). 타이핑·Backspace·초기 열기마다. OOM이면 목록을 비워 안전하게 둔다. find의
     /// recomputeFind에 대응(검색은 platform이, UI 동기화는 컴포넌트가).
     fn recomputePalette(self: *DevSession) void {
-        command_palette.filter(self.allocator, self.chrome_host.palette.query.items, &self.palette_filtered) catch {
+        command_palette.filter(self.allocator, self.chrome_host.palette.input.query.items, &self.palette_filtered) catch {
             self.palette_filtered.clearRetainingCapacity();
         };
         self.chrome_host.palette.selected = 0; // 쿼리 변경 시 선택 맨 위(레거시 동작 보존)
@@ -2231,7 +2231,7 @@ pub const DevSession = struct {
     /// chrome_host.find.match_count를 동기화해(setMatchCount) 컴포넌트의 카운터·next/prev wrap이 맞게 한다.
     fn recomputeFind(self: *DevSession) void {
         if (!self.surface_initialized) return;
-        self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.query.items, &self.find_matches) catch {
+        self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch {
             self.find_matches.clearRetainingCapacity();
         };
         self.chrome_host.find.setMatchCount(self.find_matches.items.len);
@@ -2776,8 +2776,8 @@ pub const DevSession = struct {
     fn imeSetPreedit(self: *DevSession, bytes: []const u8) void {
         switch (self.inputFocus()) {
             .notice => {}, // notice는 조합을 표시하지 않는다(텍스트 입력 대상 아님)
-            .find => self.chrome_host.find.setPreedit(self.allocator, bytes) catch {},
-            .palette => self.chrome_host.palette.setPreedit(self.allocator, bytes) catch {},
+            .find => self.chrome_host.find.input.setPreedit(self.allocator, bytes) catch {},
+            .palette => self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {},
             .terminal => self.activeSurface().core.setPreedit(bytes) catch {},
         }
     }
@@ -2787,8 +2787,8 @@ pub const DevSession = struct {
     fn imeComposingActive(self: *const DevSession) bool {
         return switch (self.inputFocus()) {
             .notice => false, // notice는 조합 상태가 없다
-            .find => self.chrome_host.find.preedit.items.len > 0,
-            .palette => self.chrome_host.palette.preedit.items.len > 0,
+            .find => self.chrome_host.find.input.preedit.items.len > 0,
+            .palette => self.chrome_host.palette.input.preedit.items.len > 0,
             .terminal => self.activeSurfaceConst().core.preedit != null,
         };
     }
@@ -2945,11 +2945,11 @@ pub const DevSession = struct {
                     self.sendCommittedText(copy);
                 }
             },
-            .find => if (self.chrome_host.find.commitPreedit(self.allocator)) {
+            .find => if (self.chrome_host.find.input.commitPreedit(self.allocator)) {
                 self.recomputeFind(); // 검색어가 바뀜
                 self.metal_dirty = true;
             },
-            .palette => if (self.chrome_host.palette.commitPreedit(self.allocator)) {
+            .palette => if (self.chrome_host.palette.input.commitPreedit(self.allocator)) {
                 self.recomputePalette(); // 필터가 바뀜
                 self.metal_dirty = true;
             },
@@ -3672,7 +3672,7 @@ pub const DevSession = struct {
             // Find 열린 채 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백 eviction). 재검색해
             // 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다(사용자가 보던 위치 유지).
             if (self.chrome_host.find.open and drain_summary.output_events > 0) {
-                self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
+                self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
                 self.chrome_host.find.setMatchCount(self.find_matches.items.len); // 매치 수 동기화 + current clamp(스크롤은 안 함)
             }
             // 스크롤백 Find: 활성 surface의 매치를 뷰포트 span으로 클립해 하이라이트로 넘긴다(Find 열림일 때만).
@@ -5176,7 +5176,7 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
     // IME 조합 회귀(C1b 버그 수정): 팝업 열린 동안 marked text가 팝업 preedit에 들어간다(뒤의 터미널 core가 아니라).
     // 레거시 팝업은 IME 조합 배선이 없어 한글 조합이 숨은 터미널로 샜다.
     session.imeMarked("\xea\xb0\x80"); // 조합 중 "가"
-    try std.testing.expectEqualStrings("\xea\xb0\x80", session.chrome_host.palette.preedit.items);
+    try std.testing.expectEqualStrings("\xea\xb0\x80", session.chrome_host.palette.input.preedit.items);
     try std.testing.expect(session.activeSurface().core.preedit == null); // 터미널 core로 안 샌다
     session.imeMarked(""); // 조합 해제(확정 직전)
 
@@ -5309,8 +5309,8 @@ test "find IME 멀티-문자: 커밋이 다음 조합 preedit를 안 지운다(�
 
     // 커밋 "나"는 검색어로, 조합 "다"는 preedit로 **유지**돼야 한다. 예전엔 imeEnd의 커밋(appendChar)이 방금 set된
     // "다"를 지워 조합이 화면에서 사라졌다(사용자 제보 "입력중 상태 안 보임"). 단일 출처·core 모델 통일로 수정.
-    try std.testing.expectEqualStrings("\xeb\x82\x98", session.chrome_host.find.query.items); // "나" 확정
-    try std.testing.expectEqualStrings("\xeb\x8b\xa4", session.chrome_host.find.preedit.items); // "다" 조합 유지
+    try std.testing.expectEqualStrings("\xeb\x82\x98", session.chrome_host.find.input.query.items); // "나" 확정
+    try std.testing.expectEqualStrings("\xeb\x8b\xa4", session.chrome_host.find.input.preedit.items); // "다" 조합 유지
 }
 
 test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫고 notice가 최우선(IME 무시)·toggle이 notice를 닫음" {

@@ -20,6 +20,7 @@ pub const ChromeProps = props.ChromeProps;
 pub const Tokens = tokens.Tokens;
 
 pub const components = struct {
+    pub const overlay_input = @import("chrome/components/overlay_input.zig"); // find·palette 공유 기반(컴포넌트 아님)
     pub const notice = @import("chrome/components/notice.zig");
     pub const find = @import("chrome/components/find.zig");
     pub const palette = @import("chrome/components/palette.zig");

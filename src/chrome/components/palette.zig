@@ -1,16 +1,16 @@
 //! Command palette — 명령 팝업(⌘⇧P). chrome 컴포넌트 계약(State + view + handle). **세션/카탈로그 무결합**:
 //! 명령 카탈로그(command_catalog)와 액션(config.Action)은 platform 소유라 chrome이 import 못 한다 — 이 컴포넌트는
-//! UI 상태(검색어 query·조합 preedit·선택 인덱스 selected·결과 수 미러 result_count)만 들고, host가 필터된 행(Row:
-//! title·binding·selected)을 view에 주입한다. handle은 의도(Action)를 내고 host가 부수효과(재필터·실행·닫기)를
-//! platform에 디스패치한다. find.zig와 같은 계약 — placeText(EAW 폭)·setPreedit(IME)·caret을 공유해 한글 잘림/조합
-//! 미표시가 사라진다. 단일 출처: docs/chrome-strategy.md §5.4, docs/layering-and-portability.md §5(C1b).
+//! UI 상태(검색어·조합 = `overlay_input` 공유 모델, 선택 인덱스 selected·결과 수 미러 result_count)만 들고, host가
+//! 필터된 행(Row: title·binding·selected)을 view에 주입한다. handle은 의도(Action)를 내고 host가 부수효과(재필터·
+//! 실행·닫기)를 platform에 디스패치한다. find.zig와 같은 계약 — 입력 모델·표시 폭·패널 레이아웃·caret을 `overlay_input`
+//! 으로 공유해 한글 잘림/조합 미표시가 없다. 단일 출처: docs/chrome-strategy.md §5.4, docs/layering-and-portability.md §5(C1b).
 
 const std = @import("std");
 const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
 const input = @import("../input.zig");
-const width = @import("../../width.zig"); // Unicode 셀 폭(EAW) — caret 정렬(한글/CJK=2칸). find.zig와 동일.
+const overlay_input = @import("overlay_input.zig"); // 검색어·조합 입력 모델 + 표시 폭(EAW) + 패널 레이아웃(find와 공유)
 
 /// 이 컴포넌트가 그리는 레이어(최상위 오버레이 — 열려 있으면 키를 잡는다). host가 ops와 짝지어 백엔드에 넘긴다.
 pub const layer = draw.Layer.modal;
@@ -21,25 +21,22 @@ const prompt_cols: u32 = 2;
 /// 한 번에 보일 결과 행 수 상한. host가 이 수만큼 윈도우잉해 Row를 만든다(컴포넌트는 받은 만큼만 그린다).
 pub const max_visible: usize = 10;
 
-/// 순수 UI 상태. query=확정 검색어(UTF-8), preedit=IME 조합 중(marked) 텍스트, selected=필터된 전체 목록 기준
-/// 선택 인덱스, result_count=host가 동기화하는 필터 결과 수(selected clamp·스크롤에 필요 — 목록 자체는 platform 소유).
-/// query·preedit는 ArrayList라 host가 deinit한다. 조합 중 글자는 query 뒤 preedit으로 보여 입력 가시성을 준다(IME 수정).
+/// 순수 UI 상태. input=검색어 query·IME 조합 preedit(overlay_input 공유 모델), selected=필터된 전체 목록 기준 선택
+/// 인덱스, result_count=host가 동기화하는 필터 결과 수(selected clamp·스크롤에 필요 — 목록 자체는 platform 소유).
+/// input의 query·preedit는 ArrayList라 host가 deinit한다. 조합 중 글자는 query 뒤 preedit으로 보여 입력 가시성을 준다.
 pub const State = struct {
     open: bool = false,
-    query: std.ArrayList(u8) = .empty,
-    preedit: std.ArrayList(u8) = .empty,
+    input: overlay_input.OverlayInput = .{},
     selected: usize = 0,
     result_count: usize = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
-        self.query.deinit(allocator);
-        self.preedit.deinit(allocator);
+        self.input.deinit(allocator);
     }
 
     /// 팝업을 연다 — 검색어·조합·선택·결과 수를 비운다(host가 곧 초기 필터+setResultCount).
     pub fn show(self: *State) void {
-        self.query.clearRetainingCapacity();
-        self.preedit.clearRetainingCapacity();
+        self.input.clear();
         self.selected = 0;
         self.result_count = 0;
         self.open = true;
@@ -47,41 +44,6 @@ pub const State = struct {
 
     pub fn hide(self: *State) void {
         self.open = false;
-    }
-
-    /// 검색어에 확정 글자 추가(UTF-8 인코딩). **preedit는 건드리지 않는다** — 터미널 core·find와 같은 모델(커밋과
-    /// 조합 독립; preedit는 setPreedit만 관리). 여기서 비우면 IME 멀티-문자 흐름에서 다음 조합을 지워 "조합 안 보임"
-    /// 버그가 난다(find와 동일 수정). 재필터는 host가 query_changed Action으로. 인코딩 불가/OOM은 무시.
-    pub fn appendChar(self: *State, allocator: std.mem.Allocator, cp: u21) !void {
-        var utf8: [4]u8 = undefined;
-        const n = std.unicode.utf8Encode(cp, &utf8) catch return;
-        try self.query.appendSlice(allocator, utf8[0..n]);
-    }
-
-    /// IME 조합 중(marked) 텍스트를 교체한다(빈 bytes = 조합 해제). session.imeMarked가 palette 열림일 때 부른다.
-    pub fn setPreedit(self: *State, allocator: std.mem.Allocator, bytes: []const u8) !void {
-        self.preedit.clearRetainingCapacity();
-        try self.preedit.appendSlice(allocator, bytes);
-    }
-
-    /// 조합 중(preedit) 텍스트를 검색어로 확정한다(query 뒤에 붙이고 preedit 비움) — 포커스 상실 등에서 조합을 잃지
-    /// 않게. 확정한 게 있으면 true(host가 재필터). 빈 조합이면 false. OOM이면 조합 버리고 false. find.commitPreedit와 동일.
-    pub fn commitPreedit(self: *State, allocator: std.mem.Allocator) bool {
-        if (self.preedit.items.len == 0) return false;
-        self.query.appendSlice(allocator, self.preedit.items) catch {
-            self.preedit.clearRetainingCapacity();
-            return false;
-        };
-        self.preedit.clearRetainingCapacity();
-        return true;
-    }
-
-    /// 마지막 코드포인트 1개 삭제(UTF-8 경계 존중). 빈 쿼리면 무동작.
-    pub fn backspace(self: *State) void {
-        if (self.query.items.len == 0) return;
-        var cut = self.query.items.len - 1;
-        while (cut > 0 and (self.query.items[cut] & 0xC0) == 0x80) cut -= 1; // continuation 바이트 건너뜀
-        self.query.shrinkRetainingCapacity(cut);
     }
 
     /// 선택을 delta만큼 이동(clamp, **wrap 없음** — 레거시 command_palette.moveSelection 동작 보존). 결과 없으면 무동작.
@@ -117,7 +79,7 @@ pub const Row = struct {
 };
 
 /// 키 처리(열려 있을 때만 호출 — host가 open 확인 후 디스패치). 모든 키를 소비하고 intent를 낸다(모달). query 변형
-/// (appendChar)에 allocator가 필요해 받는다(find.handle과 같은 형태).
+/// (input.appendChar)에 allocator가 필요해 받는다(find.handle과 같은 형태).
 pub fn handle(allocator: std.mem.Allocator, ev: input.InputEvent, state: *State) Action {
     switch (ev) {
         .key => |k| switch (k.key) {
@@ -135,7 +97,7 @@ pub fn handle(allocator: std.mem.Allocator, ev: input.InputEvent, state: *State)
                 return .selection_changed;
             },
             .backspace => {
-                state.backspace();
+                state.input.backspace();
                 return .query_changed;
             },
             .char => {
@@ -144,7 +106,7 @@ pub fn handle(allocator: std.mem.Allocator, ev: input.InputEvent, state: *State)
                     state.hide();
                     return .close;
                 }
-                state.appendChar(allocator, k.codepoint) catch {};
+                state.input.appendChar(allocator, k.codepoint) catch {};
                 return .query_changed;
             },
             .other => {
@@ -155,41 +117,14 @@ pub fn handle(allocator: std.mem.Allocator, ev: input.InputEvent, state: *State)
     }
 }
 
-/// 패널 가로 레이아웃(사이드바 오른쪽, 상단-중앙). find.view와 같은 식(좁은 dup이지만 좌표 단일 출처는 여기·caretRect).
-/// term_cols==0이면 null(터미널 영역 0칸). x·panel_cols·cw·ch를 돌려준다.
-const PanelLayout = struct { x: i32, panel_cols: u32, cw: u32, ch: u32, y: i32 };
-fn panelLayout(p: props.ChromeProps) ?PanelLayout {
-    const m = p.metrics;
-    const cw = @max(m.cell_width_px, 1);
-    const ch = @max(m.cell_height_px, 1);
-    const term_w_px = m.backing_width_px -| m.sidebar_width_px;
-    const term_cols = term_w_px / cw;
-    if (term_cols == 0) return null;
-    const panel_cols: u32 = @max(@min(@as(u32, 60), term_cols -| 4), 1);
-    const panel_w = panel_cols * cw;
-    const x = @as(i32, @intCast(m.sidebar_width_px)) + @as(i32, @intCast((term_w_px - panel_w) / 2));
-    const y = 2 * @as(i32, @intCast(ch)); // 상단에서 두 줄 내려(기존 팝업과 같은 위치)
-    return .{ .x = x, .panel_cols = panel_cols, .cw = cw, .ch = ch, .y = y };
-}
-
-/// UTF-8 바이트열의 표시 폭(셀 칸 수) = Σ max(1, cellWidth(cp)). 한글/CJK=2칸. find.zig의 displayCols와 같은 규약
-/// (placeText·coretext_frame_builder의 `@max(1, cellWidth)`) — caret/우측정렬이 그려진 글자 끝에 정확히 붙는다.
-fn displayCols(bytes: []const u8) u32 {
-    const view_it = std.unicode.Utf8View.init(bytes) catch return @intCast(bytes.len);
-    var it = view_it.iterator();
-    var cols: u32 = 0;
-    while (it.nextCodepoint()) |cp| cols += @max(1, width.cellWidth(cp));
-    return cols;
-}
-
 /// 입력 커서의 셀 rect(backing px). **레이아웃 단일 출처** — view가 커서(반전 블록)에, host가 IME 후보창 위치
 /// (imeCursorRect)에 공유한다. 닫혔거나 터미널 0칸/패널 밖이면 null. 위치 = "> " + query **시작점**(= 조합중 시작).
 /// 조합 중에는 커서가 그 자리에서 조합 글자를 **덮는다**(터미널 IME 커서와 동일 — find와 같은 규약). 표시 폭은 EAW.
 pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     if (!state.open) return null;
-    const lay = panelLayout(p) orelse return null;
+    const lay = overlay_input.panelLayout(p) orelse return null;
     // preedit은 더하지 않는다 — 커서가 조합 글자를 덮도록 그 시작점(query 끝)에 둔다(터미널과 동일).
-    const caret_col = prompt_cols + displayCols(state.query.items);
+    const caret_col = prompt_cols + state.input.queryCols();
     if (caret_col >= lay.panel_cols) return null; // 패널 밖
     return .{ .x = lay.x + @as(i32, @intCast(caret_col * lay.cw)), .y = lay.y, .w = lay.cw, .h = lay.ch };
 }
@@ -208,7 +143,7 @@ pub fn view(
 ) !void {
     _ = tk;
     if (!state.open) return;
-    const lay = panelLayout(p) orelse return;
+    const lay = overlay_input.panelLayout(p) orelse return;
     const cw = lay.cw;
     const ch = lay.ch;
     const panel_w = lay.panel_cols * cw;
@@ -230,8 +165,8 @@ pub fn view(
     // 뒤에 같은 색으로 붙여 입력 가시성을 준다(IME 조합이 팝업에 즉시 보인다 — 레거시 팝업엔 없던 동작).
     const prompt_runs = try arena.alloc(draw.Run, 3);
     prompt_runs[0] = .{ .text = "> " };
-    prompt_runs[1] = .{ .text = state.query.items };
-    prompt_runs[2] = .{ .text = state.preedit.items };
+    prompt_runs[1] = .{ .text = state.input.query.items };
+    prompt_runs[2] = .{ .text = state.input.preedit.items };
     try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = y }, .runs = prompt_runs, .role = .surface_fg } });
 
     // 결과 행: 제목(col 2부터) + 우측 정렬 바인딩 표시. 폭은 EAW(displayCols)로 — 한글 제목/바인딩도 안 잘린다.
@@ -242,7 +177,7 @@ pub fn view(
         try out.append(arena, .{ .text = .{ .origin = .{ .x = x + @as(i32, @intCast(prompt_cols * cw)), .y = row_y }, .runs = title_runs, .role = .surface_fg } });
 
         if (row.binding.len > 0) {
-            const bind_cols = displayCols(row.binding);
+            const bind_cols = overlay_input.displayCols(row.binding);
             // 패널 우측에서 한 칸 안쪽. 제목과 안 겹치게 패널에 들어갈 때만 그린다.
             if (bind_cols + prompt_cols + 1 < lay.panel_cols) {
                 const bind_runs = try arena.alloc(draw.Run, 1);
@@ -261,28 +196,9 @@ pub fn view(
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
-
-test "palette state: show/hide·appendChar·backspace(UTF-8 경계)" {
-    const allocator = std.testing.allocator;
-    var s: State = .{};
-    defer s.deinit(allocator);
-
-    s.show();
-    try std.testing.expect(s.open);
-    try std.testing.expectEqual(@as(usize, 0), s.query.items.len);
-
-    try s.appendChar(allocator, 'a');
-    try s.appendChar(allocator, '가'); // 3바이트
-    try std.testing.expectEqual(@as(usize, 4), s.query.items.len);
-    s.backspace(); // '가' 한 코드포인트(3바이트) 제거
-    try std.testing.expectEqualStrings("a", s.query.items);
-    s.backspace();
-    s.backspace(); // 빈 쿼리에서 추가 backspace 무동작
-    try std.testing.expectEqual(@as(usize, 0), s.query.items.len);
-
-    s.hide();
-    try std.testing.expect(!s.open);
-}
+// 입력 모델(query/preedit·appendChar/backspace·displayCols)의 단위 테스트는 overlay_input.zig로 이관했다(단일 출처).
+// 여기는 palette **고유** 동작만 테스트한다: 선택 이동(moveSelection·setResultCount), 키 라우팅(handle), 렌더(view·
+// caretRect — 한글 EAW·IME 조합 표시·결과 행).
 
 test "palette state: moveSelection clamp(no wrap)·setResultCount clamp" {
     var s: State = .{};
@@ -318,7 +234,7 @@ test "palette handle: Enter=accept·글자=query_changed·↑↓=selection_chang
 
     // 평문 글자 → query_changed + 검색어에 쌓임.
     try std.testing.expectEqual(Action.query_changed, handle(allocator, .{ .key = .{ .key = .char, .codepoint = 'x' } }, &s));
-    try std.testing.expectEqualStrings("x", s.query.items);
+    try std.testing.expectEqualStrings("x", s.input.query.items);
     // Enter → accept(실행은 host).
     try std.testing.expectEqual(Action.accept, handle(allocator, .{ .key = .{ .key = .enter } }, &s));
     // ↓/↑ → selection_changed + 이동.
@@ -328,7 +244,7 @@ test "palette handle: Enter=accept·글자=query_changed·↑↓=selection_chang
     try std.testing.expectEqual(@as(usize, 0), s.selected);
     // Backspace → query_changed + 글자 삭제.
     try std.testing.expectEqual(Action.query_changed, handle(allocator, .{ .key = .{ .key = .backspace } }, &s));
-    try std.testing.expectEqual(@as(usize, 0), s.query.items.len);
+    try std.testing.expectEqual(@as(usize, 0), s.input.query.items.len);
     // ⌘+글자 → close(검색어에 안 쌓임).
     try std.testing.expectEqual(Action.close, handle(allocator, .{ .key = .{ .key = .char, .codepoint = 'p', .mods = .{ .command = true } } }, &s));
     try std.testing.expect(!s.open);
@@ -359,7 +275,7 @@ test "palette view: 닫힘이면 ops 0, 열림이면 패널+프롬프트+행+car
     try std.testing.expectEqual(@as(usize, 0), out.items.len); // 닫힘
 
     s.show();
-    try s.appendChar(std.testing.allocator, 'a');
+    try s.input.appendChar(std.testing.allocator, 'a');
     s.setResultCount(2);
     const rows = [_]Row{
         .{ .title = "New Terminal", .binding = "T", .selected = true },
@@ -381,7 +297,7 @@ test "palette view: 닫힘이면 ops 0, 열림이면 패널+프롬프트+행+car
     try std.testing.expectEqual(out.items[0].fill.rect.x + 3 * 8, caret.fill.rect.x);
 }
 
-test "palette caret: 한글 query는 EAW 2칸 폭으로 caret 정렬(잘림 회귀 고정)" {
+test "palette caret: 한글(wide) query는 EAW 2칸 폭으로 caret 정렬(잘림 회귀 고정)" {
     const p = props.ChromeProps{ .metrics = .{
         .cell_width_px = 8,
         .cell_height_px = 16,
@@ -394,12 +310,12 @@ test "palette caret: 한글 query는 EAW 2칸 폭으로 caret 정렬(잘림 회�
     var hangul: State = .{};
     defer hangul.deinit(std.testing.allocator);
     hangul.show();
-    for ([_]u21{ '가', '나' }) |c| try hangul.appendChar(std.testing.allocator, c);
+    for ([_]u21{ '가', '나' }) |c| try hangul.input.appendChar(std.testing.allocator, c);
 
     var ascii: State = .{};
     defer ascii.deinit(std.testing.allocator);
     ascii.show();
-    for ("aaaa") |c| try ascii.appendChar(std.testing.allocator, c);
+    for ("aaaa") |c| try ascii.input.appendChar(std.testing.allocator, c);
 
     const cr_h = caretRect(&hangul, p) orelse return error.NoCaret;
     const cr_a = caretRect(&ascii, p) orelse return error.NoCaret;
@@ -425,8 +341,8 @@ test "palette view: IME 조합(preedit)이 query 뒤에 보이고 커서가 조�
     var s: State = .{};
     defer s.deinit(std.testing.allocator);
     s.show();
-    try s.appendChar(std.testing.allocator, 'a'); // 확정 "a"
-    try s.setPreedit(std.testing.allocator, "\xea\xb0\x80"); // 조합 중 "가"(3바이트, 1 코드포인트, 폭 2)
+    try s.input.appendChar(std.testing.allocator, 'a'); // 확정 "a"
+    try s.input.setPreedit(std.testing.allocator, "\xea\xb0\x80"); // 조합 중 "가"(3바이트, 1 코드포인트, 폭 2)
     try view(&s, &.{}, p, &tk, arena, &out);
 
     // 프롬프트 text op이 "> " + "a" + "가" 3 run.

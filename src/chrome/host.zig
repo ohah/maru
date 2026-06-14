@@ -159,7 +159,7 @@ test "host: Find 라우팅 — 글자=query_changed·Enter=navigated·Esc=close,
 
     // 글자 → query_changed + 검색어 누적.
     try std.testing.expectEqual(HostAction.find_query_changed, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .char, .codepoint = 'a' } }).?);
-    try std.testing.expectEqualStrings("a", host.find.query.items);
+    try std.testing.expectEqualStrings("a", host.find.input.query.items);
     // 매치 수 동기화 후 Enter → navigated.
     host.find.setMatchCount(2);
     try std.testing.expectEqual(HostAction.find_navigated, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .enter } }).?);
@@ -196,7 +196,7 @@ test "host: Palette 라우팅 — 글자=query_changed·Enter=accept·↑↓=sel
 
     // 글자 → query_changed + 검색어 누적.
     try std.testing.expectEqual(HostAction.palette_query_changed, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .char, .codepoint = 'a' } }).?);
-    try std.testing.expectEqualStrings("a", host.palette.query.items);
+    try std.testing.expectEqualStrings("a", host.palette.input.query.items);
     // ↓ → selection_changed + 이동.
     try std.testing.expectEqual(HostAction.palette_selection_changed, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .down } }).?);
     try std.testing.expectEqual(@as(usize, 1), host.palette.selected);

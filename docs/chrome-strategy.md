@@ -4,6 +4,8 @@ chrome(탭바·사이드바·divider·focus 테두리·탭점·팝업·모달)�
 
 이 문서는 chrome 레이어(L3)의 **목표 구조와 점진 경로**를 정의한다. chrome이 속한 4층 위상(renderer 계약·session core·chrome·platform 어댑터), 두 번의 추출(chrome + session core), 전체 시퀀싱, 이식성 현실은 상위 단일 출처 [레이어링과 이식성 전략](layering-and-portability.md)을 따른다. 단일 출처: 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules](project-rules.md#문서와-설명)).
 
+> **현황(구현 진행)**: C0(Notice)·S1(구조-무효화)·**C1(palette·find 이주)** 완료. 두 오버레이는 이제 `src/chrome/components/{notice,find,palette}.zig`(neutral State+view+handle, 헤드리스 테스트)이고, `src/chrome/host.zig`(`ChromeHost`)가 입력 라우팅·draw 수집을, platform(`app_dev_session.zig`)이 props/tokens 빌드·카탈로그 행 주입·ChromeDraw→cell lowering(`rasterizeOverlayCells`)을 맡는다. 레거시 `command_palette.zig`/`find_overlay.zig`의 UI 상태·`build*Frame`·`handle*Key`는 **제거**됐고, palette는 카탈로그 결합 필터(`command_palette.filter`/`actionAt`)만 platform에 남는다(neutral chrome이 `command_catalog`를 import 못 함). 입력 caret은 cursor-role fill → 오버레이 `PaneFrame.cursor` → `setCursorVisible` suffix-trim으로 **터미널 커서 깜빡임을 재활용**하고, 한글 2칸 폭·IME 조합 표시도 터미널과 같은 경로를 공유한다. 아래 §3~ 표는 이주 **전** 출발 스냅샷(설계 근거 보존)이다. C2–C3(divider·tabbar·sidebar)·C4(rich)는 후속.
+
 ## 1. 목표
 
 - chrome 컴포넌트는 **플랫폼·세션·렌더 백엔드를 모른다.** 순수 로직(상태) + 순수 렌더(상태+토큰 → semantic draw) + 순수 hit-test로, macOS·PTY 없이 헤드리스 단위 테스트한다.

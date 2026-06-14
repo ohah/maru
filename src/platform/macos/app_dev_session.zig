@@ -110,7 +110,8 @@ const font_size_step: f32 = 1.0;
 const font_size_min: f32 = 6.0;
 const font_size_max: f32 = 72.0;
 
-// 커서 깜빡임 반주기(30Hz tick 단위). 15틱 = 500ms — 일반 터미널 관례(on 500ms / off 500ms).
+// 커서 깜빡임 반주기(30Hz tick 단위). 15틱 = 500ms — 일반 터미널 관례(on 500ms / off 500ms). 틱이 고정 30Hz라
+// 정확히 500ms다. ms 기반 위상·config 노출·deadline 스케줄러는 문서화된 시간-모델 후속(docs/layering §5).
 const blink_interval_ticks: u32 = 15;
 
 // 복원(R4)에서 모델 surface의 저장된 cols/rows를 spawn 초기 grid로 쓴다(0이면 terminal.Size.default 기본).
@@ -873,8 +874,10 @@ pub const DevSession = struct {
     // 이번 트랜잭션에서 imeInsert가 OOM으로 일부를 못 담았는지. 그러면 imeEnd는 잘린 텍스트를
     // 보내지 않고 통째로 버린다(fail-closed — 반쪽 문자열이 PTY에 들어가지 않게).
     ime_insert_failed: bool = false,
-    // 커서 깜빡임 위상(DECSCUSR blink가 켜진 커서만). 30Hz tick 15회(=500ms)마다 토글하고,
-    // 입력/출력이 있으면 보이는 상태로 리셋한다(타이핑 중 커서가 사라지지 않게).
+    // 커서/오버레이 caret 깜빡임 위상. 30Hz tick 15회(=500ms)마다 토글하고, 입력/출력이 있으면 보이는 상태로
+    // 리셋한다(타이핑 중 안 사라짐). 터미널 커서(DECSCUSR blink)와 오버레이 caret(find·palette)이 **같은 위상·같은
+    // 메커니즘**을 공유한다 — 커서는 blink 켜졌을 때만, caret은 열린 동안 늘. 렌더도 공유: caret이 오버레이
+    // PaneFrame.cursor라 setCursorVisible(suffix-trim)이 재빌드 없이 토글한다(터미널 커서와 동일 경로 재활용).
     blink_visible: bool = true,
     blink_ticks: u32 = 0,
 
@@ -2373,6 +2376,7 @@ pub const DevSession = struct {
             if (self.chrome_host.handleInput(self.allocator, chromeInputFromKeyEvent(event))) |action| {
                 self.dispatchChromeAction(action);
             }
+            self.resetCursorBlink(); // 오버레이 타이핑 직후 caret 보이게(활동 reset — 새 주기 시작)
             self.metal_dirty = true;
             self.total_app_key_events += 1; // chrome(앱)이 소비
             self.writeSummaryFromState();
@@ -2729,27 +2733,29 @@ pub const DevSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 커서 깜빡임 한 스텝(30Hz tick마다). steady 커서(DECSCUSR 2/4/6)나 ?25l(숨김)이면 위상을
-    /// 보이는 상태로 고정한다 — 토글 자체가 없으니 idle 재투영도 없다.
+    /// 커서/오버레이 caret 깜빡임 한 스텝(30Hz tick마다). 깜빡일 대상이 없으면(steady 커서 + 오버레이 닫힘) 보이는
+    /// 위상으로 고정한다 — 토글 없으니 idle 재투영도 없다. 오버레이(find·palette)가 열렸으면 커서 blink 설정과 무관
+    /// 하게 caret이 깜빡인다(텍스트 입력 caret 관용). 터미널 커서의 기존 메커니즘(틱-카운터 + suffix-trim)을 그대로 탄다.
     fn updateCursorBlink(self: *DevSession) void {
         const core = &self.activeSurface().core;
-        // IME 조합 중에는 깜빡이지 않는다 — 커서가 preedit 끝에 고정 표시되어 조합 글자 옆에서
-        // 반짝이지 않는다(Terminal.app/Ghostty와 같은 사용감).
-        if (!core.cursor_blink or !core.cursor_visible or core.preedit != null) {
-            self.resetCursorBlink();
+        // 커서 자체가 깜빡이는 조건(DECSCUSR blink·표시·조합 아님). IME 조합 중엔 커서를 고정 표시(조합 글자 옆에서 안 반짝).
+        const cursor_blinks = core.cursor_blink and core.cursor_visible and core.preedit == null;
+        const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open;
+        if (!cursor_blinks and !overlay_open) {
+            self.resetCursorBlink(); // 깜빡일 게 없음 — 보이는 위상 고정(idle 절전)
             return;
         }
         self.blink_ticks += 1;
         if (self.blink_ticks >= blink_interval_ticks) {
             self.blink_ticks = 0;
             self.blink_visible = !self.blink_visible;
-            // frame rebuild 없이 커서 suffix 노출만 토글한다(generation이 올라 Swift가 다시
-            // 그린다). 500ms마다 full-grid reshape를 돌리지 않게 — idle 절전을 깨지 않는다.
+            // suffix-trim 토글(재빌드 없음). 오버레이가 열렸으면 suffix=오버레이 caret이라 caret을, 닫혔으면 suffix=
+            // 터미널 커서라 커서를 깜빡인다 — 같은 코드(generation↑만, idle에 full-grid reshape 안 함).
             self.metal_buffer.setCursorVisible(self.blink_visible);
         }
     }
 
-    /// 깜빡임을 보이는 위상으로 리셋한다(입력/출력 직후 — 커서가 항상 보이며 새 주기를 시작).
+    /// 깜빡임을 보이는 위상으로 리셋한다(입력/출력 직후 — caret이 항상 보이며 새 주기를 시작).
     fn resetCursorBlink(self: *DevSession) void {
         self.blink_ticks = 0;
         if (!self.blink_visible) {
@@ -3631,8 +3637,9 @@ pub const DevSession = struct {
         // 가정: 모든 시각 변화는 PTY output(또는 resize)에서 온다. cursor blink나 주기적 redraw
         // 같은 PTY와 무관한 변화를 넣게 되면, 그 트리거에서도 metal_dirty를 세워야 한다.
         if (drain_summary.output_events > 0) self.metal_dirty = true;
-        // 깜빡임: 출력이 흐르면 보이는 위상으로 리셋(커서가 움직이는 동안 항상 보이게), idle이면
-        // 500ms마다 토글. steady/숨김 커서는 updateCursorBlink가 무토글로 고정한다.
+        // 깜빡임: 출력이 흐르면 보이는 위상으로 리셋(커서가 움직이는 동안 항상 보이게), idle이면 500ms마다 토글.
+        // steady/숨김 커서 + 오버레이 닫힘이면 updateCursorBlink가 무토글로 고정한다. 오버레이 caret도 같은 위상으로
+        // 깜빡이고, suffix-trim(setCursorVisible)이라 재빌드 없이 토글된다(터미널 커서와 같은 메커니즘 재활용).
         if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink();
         if (self.metal_dirty) {
             var tick_result = if (builtin.os.tag == .macos) blk: {
@@ -4100,10 +4107,13 @@ pub const DevSession = struct {
         appearance: config_mod.ResolvedAppearance,
         cell_w: u32,
         cell_h: u32,
+        cursor: ?terminal.Cursor,
     ) !metal_frame.PaneFrame {
         const draw_list: renderer.DrawList = .{
             .size = .{ .cols = cols, .rows = rows },
-            .cursor = .{ .row = 0, .col = 0, .visible = false },
+            // caret(cursor-role fill에서 lower)이 있으면 PaneFrame.cursor로 — 컴포지터가 반전 블록으로 그리고
+            // suffix-trim으로 깜빡인다(터미널 커서와 같은 경로 재활용). 없으면 invisible.
+            .cursor = cursor orelse .{ .row = 0, .col = 0, .visible = false },
             .dirty = .{ .start_row = 0, .end_row = if (rows == 0) 0 else rows - 1 },
             .cells = try cells.toOwnedSlice(self.allocator),
             .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
@@ -4121,7 +4131,13 @@ pub const DevSession = struct {
             .cell_height_px = @intCast(cell_h),
         };
         const frame = try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
-        return .{ .frame = frame, .origin_x = origin_x, .origin_y = origin_y, .colors = .{ .default_fg = self.appearance.theme.foreground } };
+        // caret이 있으면 cursor 색을 싣는다 — 컴포지터(metal_frame)가 colors.cursor가 있을 때만 반전 블록을 그린다.
+        // block=theme.cursor(caret 색), text=패널 bg(caret 아래 글자가 있으면 가독 — 입력 끝 빈칸이라 보통 무관).
+        const cursor_colors: ?metal_frame.CursorColors = if (cursor != null) .{
+            .block = self.appearance.theme.cursor,
+            .text = self.appearance.theme.sidebar_background,
+        } else null;
+        return .{ .frame = frame, .origin_x = origin_x, .origin_y = origin_y, .colors = .{ .default_fg = self.appearance.theme.foreground, .cursor = cursor_colors } };
     }
 
     // 커맨드 팝업·스크롤백 Find 오버레이는 chrome 컴포넌트로 이주했다(palette=C1b, find=C1a). 각 컴포넌트 view가
@@ -4193,6 +4209,9 @@ pub const DevSession = struct {
         rows: u16,
         origin_x: u32,
         origin_y: u32,
+        // cursor-role fill을 PaneFrame.cursor(반전 블록)로 lower한 caret 위치(없으면 null). finishOverlayFrame이
+        // draw_list.cursor·colors.cursor에 싣고, 컴포지터가 터미널 커서와 같은 경로로 그리고 suffix-trim으로 깜빡인다.
+        cursor: ?terminal.Cursor = null,
     };
 
     fn rasterizeOverlayCells(
@@ -4248,8 +4267,21 @@ pub const DevSession = struct {
         @memset(cwid, 1);
 
         // 3) painter order로 ops 적용. 좌표는 origin 기준 셀로 환산(음수/범위 밖은 clamp/skip).
+        // cursor role fill은 bg로 안 칠하고 caret 셀로 기록한다 — finishOverlayFrame이 PaneFrame.cursor로 lower해
+        // 터미널 커서와 같은 반전-블록 렌더·suffix-trim 깜빡임을 재활용한다(컴포넌트는 깜빡임 위상을 모른다).
+        var cursor: ?terminal.Cursor = null;
         for (draws) |d| for (d.ops) |op| switch (op) {
-            .fill => |f| paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, f.rect, .{ .rgb = tk.get(f.role) }, null),
+            .fill => |f| {
+                if (f.role == .cursor) {
+                    const col_i = @divTrunc(f.rect.x - @as(i32, @intCast(origin_x)), @as(i32, @intCast(cw)));
+                    const row_i = @divTrunc(f.rect.y - @as(i32, @intCast(origin_y)), @as(i32, @intCast(ch)));
+                    if (col_i >= 0 and col_i < cols and row_i >= 0 and row_i < rows) {
+                        cursor = .{ .row = @intCast(row_i), .col = @intCast(col_i), .visible = true };
+                    }
+                } else {
+                    paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, f.rect, .{ .rgb = tk.get(f.role) }, null);
+                }
+            },
             .border => |b| paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides),
             .text => |t| placeText(cp, fg, cwid, cols, rows, origin_x, origin_y, cw, ch, t, .{ .rgb = tk.get(t.role) }),
             .rule => {}, // 컴포넌트가 아직 안 냄 — 필요해질 때(C2 divider) 셀 라인으로 lower
@@ -4268,7 +4300,7 @@ pub const DevSession = struct {
                 cells.appendAssumeCapacity(.{ .row = r, .col = c, .codepoint = cp[idx], .width = cwid[idx], .style = .{ .foreground = fg[idx], .background = bg[idx] } });
             }
         }
-        return .{ .cells = cells, .cols = cols, .rows = rows, .origin_x = origin_x, .origin_y = origin_y };
+        return .{ .cells = cells, .cols = cols, .rows = rows, .origin_x = origin_x, .origin_y = origin_y, .cursor = cursor };
     }
 
     /// rect(backing px)를 origin 기준 셀 span으로 환산해 bg를 칠한다. sides==null이면 채움(fill), 아니면 켜진 변의
@@ -4377,7 +4409,7 @@ pub const DevSession = struct {
         if (draws.items.len == 0) return error.NotOpen;
 
         var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch);
-        return self.finishOverlayFrame(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y, appearance, cw, ch);
+        return self.finishOverlayFrame(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y, appearance, cw, ch, raster.cursor);
     }
 
     /// chrome Notice 모달(손상 알림 등)을 연다. 메시지는 세션 소유 버퍼로 복사한다 — notice.State.message는 slice라
@@ -4754,7 +4786,7 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     try std.testing.expectEqual(@as(i8, 0), session.drag_autoscroll);
 }
 
-test "cursor blink toggles every interval, stays solid for steady cursors, and resets on activity" {
+test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오버레이 caret도 깜빡(suffix-trim 재활용)" {
     var session: DevSession = undefined;
     session.allocator = std.testing.allocator;
     var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -4766,9 +4798,9 @@ test "cursor blink toggles every interval, stays solid for steady cursors, and r
     session.metal_buffer = .{};
     session.blink_visible = true;
     session.blink_ticks = 0;
+    session.chrome_host = .{}; // updateCursorBlink이 find/palette.open을 읽음 — undefined면 UB([[devsession-undefined-test-field-trap]])
 
-    // 기본(DECSCUSR 1 = 깜빡 block): interval 틱마다 토글. rebuild(metal_dirty) 없이 metal
-    // generation만 올라야 한다(커서 suffix 노출 토글).
+    // 기본(DECSCUSR 1 = 깜빡 block): interval 틱마다 토글. rebuild(metal_dirty) 없이 generation만(suffix 토글).
     var i: u32 = 0;
     while (i < blink_interval_ticks) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(!session.blink_visible);
@@ -4778,21 +4810,31 @@ test "cursor blink toggles every interval, stays solid for steady cursors, and r
     while (i < blink_interval_ticks * 2) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(session.blink_visible);
 
-    // 입력/출력 리셋: off 위상이어도 즉시 보이게.
+    // 활동(입력/출력) 리셋: off 위상이어도 즉시 보이게.
     session.blink_visible = false;
     session.blink_ticks = 7;
     session.resetCursorBlink();
     try std.testing.expect(session.blink_visible);
     try std.testing.expectEqual(@as(u32, 0), session.blink_ticks);
 
-    // steady 커서(DECSCUSR 2): 토글하지 않고 보이는 위상 고정.
+    // steady 커서(DECSCUSR 2) + 오버레이 닫힘: 토글 안 함(보이는 위상 고정 — idle 절전).
     try tab_surface.core.write("\x1b[2 q");
     session.blink_visible = true;
     i = 0;
     while (i < blink_interval_ticks * 3) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(session.blink_visible);
 
-    // IME 조합 중(preedit): 깜빡이지 않고 보이는 위상 고정 — 조합 글자 옆에서 반짝이지 않는다.
+    // 오버레이(find) 열림: steady 커서여도 caret은 깜빡인다(overlay_open이라 토글 — suffix=오버레이 caret). 회귀:
+    // 사용자 제보 "오버레이 커서가 안 깜빡임" 수정 — 터미널 커서와 같은 틱-카운터+suffix-trim 재활용.
+    session.chrome_host.find.open = true;
+    session.blink_visible = true;
+    session.blink_ticks = 0;
+    i = 0;
+    while (i < blink_interval_ticks) : (i += 1) session.updateCursorBlink();
+    try std.testing.expect(!session.blink_visible); // caret이 off 위상으로 토글됨
+    session.chrome_host.find.open = false;
+
+    // IME 조합 중(preedit) + 오버레이 닫힘: 깜빡이지 않고 고정 — 조합 글자 옆에서 안 반짝.
     try tab_surface.core.write("\x1b[1 q"); // 다시 blink 커서로
     try tab_surface.core.setPreedit("\xec\x95\x88");
     session.blink_visible = true;
@@ -5245,6 +5287,10 @@ test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회�
         var ff = try session.buildChromeOverlayFrame();
         defer ff.frame.deinit(allocator);
 
+        // caret 재활용: cursor-role fill이 오버레이 PaneFrame.cursor(visible)로 lower돼야 한다 — 컴포지터가 터미널
+        // 커서와 같은 반전-블록으로 그리고 setCursorVisible(suffix-trim)으로 깜빡인다(별도 fill·재빌드 아님).
+        try std.testing.expect(ff.frame.draw_list.cursor.visible);
+
         // 실측: 결과 글리프에서 '가'와 'A'의 cell_width(span)와 atlas slot 픽셀 폭을 뽑는다.
         var ga_span: ?u2 = null;
         var ga_slot_w: u32 = 0;
@@ -5291,6 +5337,9 @@ test "command palette(chrome): 한글(wide) query는 atlas slot이 2칸 — ㄱ�
         _ = try session.resize(800, 600, scale_milli);
         var ff = try session.buildChromeOverlayFrame();
         defer ff.frame.deinit(allocator);
+
+        // caret 재활용: cursor-role fill이 오버레이 PaneFrame.cursor(visible)로 lower돼 터미널 커서와 같은 경로로 깜빡인다.
+        try std.testing.expect(ff.frame.draw_list.cursor.visible);
 
         var ga_span: ?u2 = null;
         var ga_slot_w: u32 = 0;

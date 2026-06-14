@@ -63,12 +63,14 @@ flowchart TD
 
 ## 5. 시퀀싱 (의존성 순서, 각 단계 green)
 
-1. **C0 — Notice + chrome 백엔드 골격** (greenfield). 세션 추출에 의존 안 함. 손상 알림(`workspace_window_count < 0`) 연결, ChromeDraw→backend 패턴 증명. 저위험 + 사용자 가치.
-2. **S1 — session-tree 수명 계약 형식화**(§6). chrome 큰 조각의 #1 UAF 위험을 선제거.
-3. **S2 — session core(L2) 물리 추출** → `src/session/`. 이식 토대 + chrome props seam을 깨끗하게.
-4. **C1–C3 — chrome 추출**(palette/find → divider → tabbar/sidebar) on clean session.
+1. **C0 — Notice + chrome 백엔드 골격** (greenfield) ✅ **완료**. 손상 알림(`workspace_window_count < 0`) 연결, ChromeDraw→backend 패턴 증명.
+2. **S1 — session-tree 수명 계약 형식화**(§6) ✅ **완료**(`invalidateForFreedPane` chokepoint).
+3. **S2 — session core(L2) 물리 추출** → `src/session/`. **부분**: `input_math`·`ime`는 추출, 모델(Pane/Tab/Term)은 라이브-결합이라 **보류**(상호 합의). C1은 S2 모델 추출 없이 진행됨 — UI 상태만 chrome로, 모델은 session 소유 유지.
+4. **C1 — palette/find chrome 이주** ✅ **완료**(C1a=find, C1b=palette). 두 오버레이가 `src/chrome/components/{find,palette}.zig`(neutral State+view+handle)로, platform이 props·카탈로그 행 주입·ChromeDraw lowering. **입력 caret은 터미널 커서 메커니즘을 재활용**: cursor-role fill → 오버레이 `PaneFrame.cursor`(반전 블록) → `setCursorVisible`(suffix-trim) 깜빡임(틱-카운터 위상 공유, 재빌드 0). EAW 폭(한글 2칸)·IME 조합 표시도 find/palette/터미널이 같은 경로. **C2–C3 — divider → tabbar/sidebar**는 후속(마우스 hit-test 컴포넌트 선례 필요).
 5. **C4 — rich 백엔드 + 토큰**(컴포넌트 불변, §6 레이아웃 모델 전제).
 6. **B(병행)** — renderer **backend-neutrality 가드 테스트** + `metal_frame`(중립 투영) 재배치(§8).
+
+> **커서/애니메이션 시간-모델(후속)**: 현재 blink는 30Hz 틱-카운터(15틱=500ms) + `setCursorVisible` suffix-trim이며, 터미널 커서·오버레이 caret이 이를 공유한다(고정 30Hz라 정확). 장기적으로 **벽시계 ms 위상**(드리프트 0·틱레이트 무관)·**config 간격**(`cursor_blink_interval_ms`)·**deadline 스케줄러**(30Hz 폴링 대신 blink edge에만 깨어남)로 정제한다 — Ghostty `renderer/Thread.zig`(ms 간격 재무장 타이머·활동 reset·포커스 시 취소) 선례. deadline 모델은 idle·blink 깨어남을 급감시켜 순이득이나, suffix-trim의 "재빌드 회피"는 caret-only 갱신으로 보존해야 한다. (Zig 0.16 std.time엔 timestamp가 없어 ms 시계는 Io/posix 경유 — 그래서 지금은 틱-카운터 재활용.)
 
 ## 6. 핵심 계약 2개 (지금 못박는다 — 검증이 짚은 약한 관절)
 

@@ -2,7 +2,7 @@
 
 chrome(탭바·사이드바·divider·focus 테두리·탭점·팝업·모달)을 **이식 가능한 디자인 시스템**으로 재구성하는 1차 구조 설계다. 터미널 콘텐츠(셀·글리프)는 이 문서의 범위가 아니다 — 코어 렌더러 경로를 그대로 둔다. chrome만 이 디자인 시스템을 따른다.
 
-이 문서는 **목표 구조(이상적 설계)**와 **현재 코드에서 그리로 가는 점진 경로**를 함께 정의한다. 단일 출처: 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules](project-rules.md#문서와-설명)).
+이 문서는 chrome 레이어(L3)의 **목표 구조와 점진 경로**를 정의한다. chrome이 속한 4층 위상(renderer 계약·session core·chrome·platform 어댑터), 두 번의 추출(chrome + session core), 전체 시퀀싱, 이식성 현실은 상위 단일 출처 [레이어링과 이식성 전략](layering-and-portability.md)을 따른다. 단일 출처: 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules](project-rules.md#문서와-설명)).
 
 ## 1. 목표
 
@@ -139,6 +139,7 @@ pub fn handle(ev: InputEvent, state: *State) ?Action;                           
 - 라이프사이클(언제 열고/배타성)은 **host**가 소유(현 `toggle*` 패턴).
 - 동적 데이터(예: Find 매치)는 State에 슬롯으로 노출하고 채우기는 host(코어 단일 출처)에 위임 — State에 I/O·검색 안 넣음.
 - handle은 **intent(`?Action`) 반환** 표준(palette `selectedAction` 선례). 부수효과 필요 시 host가 호출 후 수행(find `scroll`/`recompute` 선례).
+- **레이아웃 단일 모델(view↔hitTest 공유) — 필수.** 마우스 컴포넌트(탭바·divider)는 `view`와 `hitTest`가 **하나의 픽셀-레이아웃 함수**(탭 advance·padding·icon slot·✕ 위치를 토큰에서 산출)를 공유한다. 그려진 위치와 클릭 영역이 같은 출처라야 한다. tui는 그 픽셀 레이아웃을 셀에 스냅하고, rich는 다른 레이아웃 토큰(둥근 탭·패딩·아이콘)만 준다 — 그래서 rich가 색뿐 아니라 *레이아웃*을 바꿔도 컴포넌트 코드는 불변이다. 현재 `BarMetrics`(hit-test)가 `paneTabWidth`(렌더)를 호출해 정렬을 맞추는 셀-열 결합을, 이 픽셀 모델로 일반화한 것. **이 공유가 깨지면 그려진 ✕와 클릭 ✕가 어긋난다(검증이 짚은 rich-layout seam).**
 
 ### 5.5 Props(seam) & ChromeState — `chrome/props.zig`, `chrome/state.zig`
 컴포넌트는 **session을 모른다.** host가 매 프레임 불변 props를 빌드한다.
@@ -196,13 +197,14 @@ pub const ChromeHost = struct {
 
 세션에 남는 것: PTY·frame loop·워크스페이스·resize·ABI·입력 전처리(US 배열 변환 등).
 
-## 7. 마이그레이션 (목표=이상적, 진행=점진, 각 단계 tests green)
+전체 시퀀싱(C0·S1·S2·C1~C4·B)과 의존성 순서는 [레이어링과 이식성 전략 §5](layering-and-portability.md#5-시퀀싱-의존성-순서-각-단계-green)가 단일 출처다. chrome 관점 요약:
 
-- **C0 — 스켈레톤 + Notice (저위험 수직 슬라이스).** `chrome/{tokens,draw,backend,props,state,host}.zig` + `components/notice.zig` + `platform/macos/chrome_tui_backend.zig`. Notice는 키보드 전용(hitTest 불필요)이라 가장 작은 슬라이스로 **전 파이프라인(토큰→view→ChromeDraw→tui 백엔드→replace)을 증명**. 손상 알림(`workspace_window_count < 0`)을 `notice.State.show(...)`로 연결. 토큰화하며 **로더 갭(5 key) 메움**. check-boundaries에 `src/chrome` 경계 추가.
+- **C0 — 스켈레톤 + Notice (저위험 수직 슬라이스).** `chrome/{tokens,draw,backend,props,state,host}.zig` + `components/notice.zig` + `platform/macos/chrome_tui_backend.zig`. Notice는 키보드 전용(hitTest 불필요)이라 가장 작은 슬라이스로 **전 파이프라인(토큰→view→ChromeDraw→tui 백엔드→replace)을 증명**. 손상 알림(`workspace_window_count < 0`)을 `notice.State.show(...)`로 연결. 토큰화하며 **로더 갭(5 key) 메움**. check-boundaries에 `src/chrome` 경계 추가. (C0는 neutral 모델이라 동작 보존이 아닌 **신규 기능** — "동작 보존"으로 적지 않는다.)
+- **S1·S2 (chrome 큰 조각 전에 선결, 상위 문서 소유)** — S1: session-tree **구조-무효화 계약** 형식화(§5.5의 stale 포인터 UAF 선제거). S2: session core(L2) 추출. C2/C3가 이 둘에 의존한다.
 - **C1 — Palette·Find 이주.** 이미 순수 → 이동 + `view`가 ChromeDraw 뱉도록 + 렌더를 tui 백엔드로. 동작·테스트 보존.
-- **C2 — Divider·pane_decor.** hitTest 컴포넌트 첫 도입(`dividerHit` 승계). `divider_drag` 수명 결합을 props 핸들로 줄일지 평가.
-- **C3 — TabBar·Sidebar(최대 추출).** `BarMetrics`/드래그/hit-test. 세션에서 chrome 코드가 떠나며 monolith가 실질적으로 얇아짐. 가장 큰 위험 — 스냅샷 회귀 가드 필수.
-- **C4 — rich 백엔드 + rich 토큰.** `chrome_rich_backend`(렌더러 프리미티브 확장: rounded rect/gradient/icon) + `Tokens.rich()`. **컴포넌트 0줄 변경.** config `chrome.theme = tui|rich` 분기.
+- **C2 — Divider·pane_decor.** hitTest 컴포넌트 첫 도입(`dividerHit` 승계). `divider_drag`/`tab_drag_pane`의 **세션-트리 포인터 수명**은 S1 계약으로 다룬다(props 핸들로 줄이거나, 호스트가 구조-무효화 콜백 소유). **스냅샷 가드는 UAF를 못 잡으니** 명시적 null화 계약 필수.
+- **C3 — TabBar·Sidebar(최대 추출).** `BarMetrics`/드래그/hit-test. 세션에서 chrome 코드가 떠나며 monolith가 얇아짐. **rich 픽셀-레이아웃 모델(§5.4)** 위에서 — view와 hitTest가 단일 레이아웃 소스를 공유해야 셀→픽셀 전환에서 클릭이 안 어긋난다. 가장 큰 위험 — UAF(S1) + 레이아웃 정합 둘 다 가드.
+- **C4 — rich 백엔드 + rich 토큰.** `chrome_rich_backend`(렌더러 프리미티브 확장: rounded rect/gradient/icon) + `Tokens.rich()`. **컴포넌트 0줄 변경**(단 §5.4 레이아웃 모델 전제 — rich가 색뿐 아니라 *레이아웃*을 바꾸면 모델이 그걸 흡수해야 컴포넌트 불변이 성립). config `chrome.theme = tui|rich` 분기.
 
 ## 8. 테스트 전략 (관측 가능성 우선)
 
@@ -221,8 +223,11 @@ pub const ChromeHost = struct {
 
 ## 10. 리스크 & 미해결
 
-- **ChromeState 포인터 수명**: `*Split`/`*Pane` 결합이 세션 트리에 남는다. props를 안정 핸들로 줄 수 있는지 C2/C3에서 확정(불가하면 host가 구조 변경 시 null화 책임을 명시 소유).
-- **텍스트 lowering 비용**: tui 백엔드의 text op이 glyph shaping(CoreText) 경로를 타므로, 컴포넌트별 RenderFrame 생성 빈도를 현재처럼 dirty-gated로 유지.
+- **(높음) ChromeState 포인터 수명 — 경계를 넘는 UAF**: `*Split`/`*Pane`이 라이브 세션 트리를 가리킨다. 15필드를 ChromeState로 **옮겨도 결합은 안 옮겨진다** — S1의 구조-무효화 계약(트리 변형 시 단일 콜백으로 무효화)이 없으면 C3가 use-after-free다. 스냅샷 가드는 시각 회귀만 잡고 UAF는 못 잡으니([[devsession-undefined-test-field-trap]]), 명시적 null화 계약을 C2 전에 형식화.
+- **(높음) chrome 추출은 necessary-not-sufficient**: chrome이 떠나도 `app_dev_session.zig`에 ~2500줄 OS-중립 세션 로직(workspace·split/IME·scroll)이 남아 platform/macos에 갇힌다. 2차 추출([layering-and-portability.md §3](layering-and-portability.md#3-두-번의-추출))이 이를 `src/session`으로 마저 뺀다.
+- **(높음) rich-layout seam**: 현재 탭 분할(`paneTabWidth`)·hit-test(`BarMetrics`)가 셀-열에 고정 결합. rich가 레이아웃(둥근 탭·패딩·아이콘)을 바꾸면 view와 hitTest가 단일 픽셀-레이아웃 모델을 공유해야 한다(§5.4) — 안 그러면 그려진 ✕와 클릭 ✕가 어긋난다. C0 컴포넌트 계약에 이 모델을 처음부터 넣는다.
+- **frame-loop 라벨**: `zig_owns_frame_loop`는 tick **본문** 소유일 뿐, 클럭은 OS(macOS `NSTimer` `.common`)다 — chrome은 무관하나 이식 시 타깃별 클럭 필요(상위 문서 §7).
+- **텍스트 lowering 비용**: tui 백엔드의 text op이 glyph shaping(CoreText) 경로를 타므로, 컴포넌트별 RenderFrame 생성 빈도를 현재처럼 dirty-gated로 유지(여기에 ChromeDraw Op-slice라는 추가 transient tier가 얹히나 chrome 셀 수가 작아 무시 가능).
 - **rich 범위 미정**: 어디까지 고급화(rounded/gradient/icon/shadow)는 C4 착수 전 별도 설계.
 - **atlas 소유권**: 멀티 윈도우 공유는 grid-per-size로 수렴([multi-window-atlas-ownership] 메모리) — chrome glyph도 그 모델 따를지 C3에서.
 - **로더 갭**: theme key 5개 미파싱 — C0 토큰화에서 메운다(안 메우면 rich 토큰도 config 불가).

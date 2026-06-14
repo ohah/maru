@@ -65,6 +65,13 @@ const rules = [_]Rule{
         // session(L2 세션 코어)은 OS-중립이어야 한다 — 순수 모델·연산·입력 수학만. platform(L4 OS 어댑터)과
         // pty(OS 프로세스)를 직접 import하면 이식성이 깨지므로 막는다(docs/layering-and-portability.md §2·§8).
         // renderer(L1)는 의존 방향이 L2→L1이라 허용한다(금지 안 함). terminal(중립 입력 타입)도 허용.
+        //
+        // ⚠️ 한계(리뷰 발견): 이 체커는 **직접 @import만** 본다(transitive 미추적). `app`은 forbidden에 없어서
+        // session 파일이 `../app.zig`를 import하면 통과하는데, app.zig는 pty·platform을 transitive로 끌어온다.
+        // app을 통째 금지하진 못한다 — 후속 슬라이스의 세션 모델(Pane/Tab/Term)이 app의 중립 타입(Surface·
+        // split_tree·workspace)을 정당하게 필요로 하기 때문. 그래서 규칙은 "직접 pty/platform 금지"로 두고,
+        // app 경유 중립 타입만 쓰는 건 컨벤션으로 지킨다(세션 모델 추출 슬라이스에서 어느 app 타입이 중립인지
+        // 명시). transitive 강제는 체커 고도화(import 그래프 추적)가 필요 — 현재는 의도적 비범위.
         .layer = "session",
         .barrel = "src/session.zig",
         .implementation_dir = "src/session",

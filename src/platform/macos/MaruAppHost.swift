@@ -872,13 +872,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     /// 활성 surface(forwarder 대상)의 세션에 workspace **전체 텍스트**의 window_index번째 창을 적용한다 — 헤더
-    /// 포함 전체를 그대로 ABI에 넘긴다(창 경계 분할은 Zig가 소유). 실패는 무시(best-effort — 적용 못 한 창은 기본 단일 탭).
-    private func applyWorkspaceWindow(_ text: String, _ index: Int) {
-        guard let session = devSession else { return }
+    /// 포함 전체를 그대로 ABI에 넘긴다(창 경계 분할은 Zig가 소유). best-effort라 실패해도 세션은 기본 단일 탭을
+    /// 유지하지만, **적용 성공 여부를 반환**해 호출자가 사용자에게 알릴 수 있게 한다(파싱은 됐어도 spawn 실패 등).
+    @discardableResult
+    private func applyWorkspaceWindow(_ text: String, _ index: Int) -> Bool {
+        guard let session = devSession else { return false }
         let bytes = Array(text.utf8)
-        _ = bytes.withUnsafeBufferPointer { buf in
+        let status = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_dev_session_apply_workspace_window(session, buf.baseAddress, buf.count, index)
         }
+        return status == Self.statusOK
     }
 
     /// 시작 시 저장된 workspace를 복원한다(R4b). Zig가 창 개수를 세고(헤더·포맷 검증 겸함), 창 0을 primary에,
@@ -901,12 +904,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
         guard count > 0 else { return } // 0=빈 workspace → 기본 단일 창(알림 없음)
-        withSurface(primary) { applyWorkspaceWindow(text, 0) }
+        // primary(창 0) 적용 성공 여부를 잡는다 — count>0이라 헤더는 파싱됐어도 창 블록이 spawn 실패 등으로 적용
+        // 안 될 수 있다(손상 count<0과 다른 실패 모드). 실패하면 아래에서 Notice로 알린다(예전엔 상태값을 버려 무알림).
+        var primaryApplied = false
+        withSurface(primary) { primaryApplied = applyWorkspaceWindow(text, 0) }
         for i in 1..<Int(count) {
             createTerminalWindow(applyingWorkspace: (text, i))
         }
+        if !primaryApplied {
+            showNotice("저장된 작업 공간을 일부만 복원했습니다 — 기본 창으로 시작합니다.")
+        }
         // 복원으로 grid·레이아웃이 바뀌었으니 primary를 창에 다시 맞추고 즉시 repaint한다 — 추가 창은
         // createTerminalWindow가 renderTick하지만 primary는 안 그래서, 기본 레이아웃이 한 프레임 깜빡이는 걸 막는다.
+        // (showNotice의 metal_dirty도 이 renderTick이 그린다.)
         withSurface(primary) {
             resizeDevSessionFromWindow()
             _ = renderTick()

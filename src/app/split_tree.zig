@@ -144,6 +144,16 @@ pub fn SplitTree(comptime Leaf: type) type {
             };
         }
 
+        /// 트리에 주어진 split 노드가 들어 있는지(포인터 식별). 트리를 통째 해제(deinit)하기 전에 호출자가
+        /// 라이브 split 포인터(divider_drag 등)가 이 트리 소속인지 표적 판정하는 데 쓴다 — 소속이면 그 포인터를
+        /// 비워야 dangling을 막는다. deref 없이 == 비교만 한다.
+        pub fn containsSplit(node: Node, target: *Split) bool {
+            return switch (node) {
+                .leaf => false,
+                .split => |sp| sp == target or containsSplit(sp.a, target) or containsSplit(sp.b, target),
+            };
+        }
+
         /// split 노드를 재귀적으로 해제한다(leaf는 트리 소유가 아니므로 건드리지 않는다 — Tab/session이 정리).
         /// 단일 leaf 트리는 무동작. 트리를 헐 때(탭 close·pane collapse) 호출한다.
         pub fn deinit(allocator: std.mem.Allocator, node: Node) void {
@@ -184,29 +194,30 @@ pub fn SplitTree(comptime Leaf: type) type {
             };
         }
 
-        /// node가 target leaf를 직접 자식으로 가진 split이면 그 leaf를 떼고 split을 '형제'로 교체한다(찾으면
-        /// true). 즉 split{a: target_leaf, b: sibling} → sibling(반대도 대칭). pane close 시 트리를 collapse하는
-        /// replaceLeaf의 역연산이다 — collapse된 split 노드만 heap 해제하고, 형제 subtree(leaf든 split이든)는
-        /// 부모 슬롯으로 그대로 옮긴다(형제의 *Split은 안 건드림). leaf는 트리 소유가 아니라 건드리지 않는다
-        /// (호출자가 panel teardown으로 정리). 루트가 단일 leaf면(형제 없음) false — 그건 탭 close가 처리한다.
-        pub fn removeLeaf(allocator: std.mem.Allocator, node: *Node, target: Leaf) bool {
+        /// node가 target leaf를 직접 자식으로 가진 split이면 그 leaf를 떼고 split을 '형제'로 교체한 뒤, **떼어낸
+        /// split 노드를 호출자에게 돌려준다**(찾으면 그 *Split, 못 찾으면 null). 즉 split{a: target_leaf, b: sibling}
+        /// → sibling(반대도 대칭). pane close 시 트리를 collapse하는 replaceLeaf의 역연산이다 — collapse된 split을
+        /// **여기서 해제하지 않고** 반환만 하므로, 호출자가 그 split으로 stale 포인터(divider_drag)를 표적 무효화한
+        /// 뒤 destroy한다(예전엔 내부 destroy라 freed 포인터를 못 surface해 호출자가 보수적 blanket-null할 수밖에
+        /// 없었다 — 리뷰 발견/altitude). 형제 subtree(leaf든 split이든)는 부모 슬롯으로 그대로 옮긴다(형제의 *Split은
+        /// 안 건드림). leaf는 트리 소유가 아니라 안 건드린다(호출자가 panel teardown으로 정리). 루트가 단일 leaf면
+        /// (형제 없음) null — 그건 탭 close가 처리한다. **반환된 split의 destroy 책임은 호출자에게 있다(안 하면 leak)**.
+        pub fn removeLeaf(node: *Node, target: Leaf) ?*Split {
             switch (node.*) {
-                .leaf => return false, // 루트가 leaf면 형제가 없어 트리 레벨에서 못 지운다(탭 close가 처리)
+                .leaf => return null, // 루트가 leaf면 형제가 없어 트리 레벨에서 못 지운다(탭 close가 처리)
                 .split => |sp| {
-                    // 직접 자식이 target leaf면 이 split을 반대 자식(형제)으로 교체하고 split 노드만 해제.
+                    // 직접 자식이 target leaf면 이 split을 반대 자식(형제)으로 교체하고 split 노드를 호출자에게 반환.
                     if (isLeafOf(sp.a, target)) {
                         node.* = sp.b; // 형제를 부모 슬롯으로(Node 값 복사 — 형제가 split이면 그 *Split 보존)
-                        allocator.destroy(sp);
-                        return true;
+                        return sp;
                     }
                     if (isLeafOf(sp.b, target)) {
                         node.* = sp.a;
-                        allocator.destroy(sp);
-                        return true;
+                        return sp;
                     }
                     // 직접 자식이 아니면 자식 split으로 재귀(중첩 split 안의 leaf).
-                    if (removeLeaf(allocator, &sp.a, target)) return true;
-                    return removeLeaf(allocator, &sp.b, target);
+                    if (removeLeaf(&sp.a, target)) |freed| return freed;
+                    return removeLeaf(&sp.b, target);
                 },
             }
         }
@@ -429,7 +440,7 @@ test "replaceLeaf swaps root leaf into a split and finds a nested leaf" {
     try std.testing.expectEqual(@as(usize, 3), TestTree.leafCount(tree));
 }
 
-test "removeLeaf collapses a split into its sibling and frees the split node" {
+test "removeLeaf collapses a split into its sibling and returns the freed split for the caller to destroy" {
     const allocator = std.testing.allocator;
     const a = try testLeaf(allocator, 1);
     defer allocator.destroy(a);
@@ -440,31 +451,35 @@ test "removeLeaf collapses a split into its sibling and frees the split node" {
     const d = try testLeaf(allocator, 4);
     defer allocator.destroy(d);
 
-    // tree = split{ a, split{ b, c } } — heap split 2개. removeLeaf가 collapse하며 해제하므로 split엔 defer 안 건다
-    // (testing.allocator가 leak/이중 free를 잡는다 — 끝엔 split이 모두 형제로 collapse돼 남는 heap 노드가 없다).
+    // tree = split{ a, split{ b, c } } — heap split 2개. removeLeaf는 떼어낸 split을 **반환만** 하므로 호출자가
+    // destroy한다(testing.allocator가 leak/이중 free를 잡는다 — 끝엔 split이 모두 collapse·destroy돼 남는 노드 없다).
     const inner = try allocator.create(TestTree.Split);
     inner.* = .{ .direction = .vertical, .a = .{ .leaf = b }, .b = .{ .leaf = c } };
     const root = try allocator.create(TestTree.Split);
     root.* = .{ .direction = .horizontal, .a = .{ .leaf = a }, .b = .{ .split = inner } };
     var tree: TestTree.Node = .{ .split = root };
 
-    // 트리에 없는 leaf는 false(무변).
-    try std.testing.expect(!TestTree.removeLeaf(allocator, &tree, d));
+    // 트리에 없는 leaf는 null(무변).
+    try std.testing.expect(TestTree.removeLeaf(&tree, d) == null);
     try std.testing.expectEqual(@as(usize, 3), TestTree.leafCount(tree));
 
-    // 중첩 split 안의 b를 닫으면 inner split이 형제 c로 collapse → tree = split{ a, c }.
-    try std.testing.expect(TestTree.removeLeaf(allocator, &tree, b));
+    // 중첩 split 안의 b를 닫으면 inner split이 형제 c로 collapse → inner를 반환(호출자가 destroy). tree = split{ a, c }.
+    const freed_inner = TestTree.removeLeaf(&tree, b).?;
+    try std.testing.expectEqual(inner, freed_inner); // 떼어낸 바로 그 split을 돌려준다
+    allocator.destroy(freed_inner);
     try std.testing.expectEqual(@as(usize, 2), TestTree.leafCount(tree));
 
-    // a를 닫으면 root split이 형제 c로 collapse → tree = leaf c(단일).
-    try std.testing.expect(TestTree.removeLeaf(allocator, &tree, a));
+    // a를 닫으면 root split이 형제 c로 collapse → root 반환(destroy). tree = leaf c(단일).
+    const freed_root = TestTree.removeLeaf(&tree, a).?;
+    try std.testing.expectEqual(root, freed_root);
+    allocator.destroy(freed_root);
     try std.testing.expectEqual(@as(usize, 1), TestTree.leafCount(tree));
     switch (tree) {
         .leaf => |l| try std.testing.expectEqual(c, l),
         .split => return error.TestExpectedLeaf,
     }
 
-    // 마지막 단일 leaf는 형제가 없어 못 지운다 → false(탭 close가 처리).
-    try std.testing.expect(!TestTree.removeLeaf(allocator, &tree, c));
+    // 마지막 단일 leaf는 형제가 없어 못 지운다 → null(탭 close가 처리).
+    try std.testing.expect(TestTree.removeLeaf(&tree, c) == null);
     try std.testing.expectEqual(@as(usize, 1), TestTree.leafCount(tree));
 }

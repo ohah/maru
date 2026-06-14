@@ -121,6 +121,210 @@ fn writeEscaped(w: *std.Io.Writer, s: []const u8) !void {
     };
 }
 
+// ── R2: reader/parser ──────────────────────────────────────────────────────────
+// maru.workspace.v1 텍스트를 같은 모델로 되읽는다(round-trip). 결과는 arena가 모든 슬라이스·문자열을 소유하므로
+// ParsedWorkspace.deinit() 한 번으로 정리한다. split 트리는 writer와 같은 preorder를 재귀로 재구성한다(split는
+// 뒤따르는 두 subtree를 소비). 알 수 없는 trailing 라인은 forgiving하게 멈춘다(window 루프가 안 맞으면 종료).
+
+pub const ParseError = error{ BadHeader, BadLine, Truncated } || std.mem.Allocator.Error;
+
+/// parse 결과 — arena가 workspace의 모든 할당(슬라이스·escape 해제 문자열)을 소유한다. deinit으로 한 번에 해제.
+pub const ParsedWorkspace = struct {
+    arena: std.heap.ArenaAllocator,
+    workspace: Workspace,
+
+    pub fn deinit(self: *ParsedWorkspace) void {
+        self.arena.deinit();
+    }
+};
+
+pub fn parse(allocator: std.mem.Allocator, text: []const u8) ParseError!ParsedWorkspace {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+
+    var lines = LineIter{ .text = text };
+    const head = lines.next() orelse return error.Truncated;
+    if (!std.mem.eql(u8, head, header)) return error.BadHeader;
+
+    var windows: std.ArrayList(Window) = .empty;
+    while (lines.peek()) |line| {
+        if (!std.mem.startsWith(u8, line, "window ")) break; // 알 수 없는 trailing → forgiving 종료
+        try windows.append(a, try parseWindow(a, &lines));
+    }
+    return .{ .arena = arena, .workspace = .{ .windows = try windows.toOwnedSlice(a) } };
+}
+
+fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
+    var r = FieldReader{ .line = lines.next() orelse return error.Truncated };
+    if (!std.mem.eql(u8, try r.word(), "window")) return error.BadLine;
+    try r.key("tabs=");
+    const tab_count = try r.uint(usize);
+    try r.key("active-tab=");
+    const active_tab = try r.uint(usize);
+
+    var tabs: std.ArrayList(Tab) = .empty;
+    var i: usize = 0;
+    while (i < tab_count) : (i += 1) try tabs.append(a, try parseTab(a, lines));
+    return .{ .active_tab = active_tab, .tabs = try tabs.toOwnedSlice(a) };
+}
+
+fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
+    var r = FieldReader{ .line = lines.next() orelse return error.Truncated };
+    if (!std.mem.eql(u8, try r.word(), "tab")) return error.BadLine;
+    try r.key("panes=");
+    const pane_count = try r.uint(usize);
+    try r.key("active-pane=");
+    const active_pane = try r.uint(usize);
+    try r.key("title=");
+    const title = try r.quoted(a);
+
+    var tree: std.ArrayList(TreeNode) = .empty;
+    try parseTree(a, lines, &tree); // 탭의 트리 하나(self-delimiting preorder)
+
+    var panes: std.ArrayList(Pane) = .empty;
+    var i: usize = 0;
+    while (i < pane_count) : (i += 1) try panes.append(a, try parsePane(a, lines));
+    return .{ .active_pane = active_pane, .title = title, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
+}
+
+/// 한 subtree를 preorder로 읽어 out에 append(self-delimiting). split는 뒤따르는 두 subtree(a,b)를 재귀로 소비.
+fn parseTree(a: std.mem.Allocator, lines: *LineIter, out: *std.ArrayList(TreeNode)) ParseError!void {
+    var r = FieldReader{ .line = lines.next() orelse return error.Truncated };
+    if (!std.mem.eql(u8, try r.word(), "tree-node")) return error.BadLine;
+    const kind = try r.word();
+    if (std.mem.eql(u8, kind, "leaf")) {
+        try r.key("pane=");
+        try out.append(a, .{ .leaf = try r.uint(usize) });
+    } else if (std.mem.eql(u8, kind, "split")) {
+        const dir_word = try r.word();
+        const dir: SplitDirection = if (std.mem.eql(u8, dir_word, "horizontal"))
+            .horizontal
+        else if (std.mem.eql(u8, dir_word, "vertical"))
+            .vertical
+        else
+            return error.BadLine;
+        try r.key("ratio=");
+        const ratio = try r.uint(u16);
+        try out.append(a, .{ .split = .{ .direction = dir, .ratio_milli = ratio } });
+        try parseTree(a, lines, out); // a
+        try parseTree(a, lines, out); // b
+    } else return error.BadLine;
+}
+
+fn parsePane(a: std.mem.Allocator, lines: *LineIter) ParseError!Pane {
+    var r = FieldReader{ .line = lines.next() orelse return error.Truncated };
+    if (!std.mem.eql(u8, try r.word(), "pane")) return error.BadLine;
+    try r.key("surfaces=");
+    const surface_count = try r.uint(usize);
+    try r.key("active-term=");
+    const active_term = try r.uint(usize);
+
+    var surfaces: std.ArrayList(Surface) = .empty;
+    var i: usize = 0;
+    while (i < surface_count) : (i += 1) try surfaces.append(a, try parseSurface(a, lines));
+    return .{ .active_term = active_term, .surfaces = try surfaces.toOwnedSlice(a) };
+}
+
+fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
+    var r = FieldReader{ .line = lines.next() orelse return error.Truncated };
+    if (!std.mem.eql(u8, try r.word(), "surface")) return error.BadLine;
+    try r.key("title=");
+    const title = try r.quoted(a);
+    try r.key("cwd=");
+    const cwd = try r.quoted(a);
+    try r.key("command=");
+    const command = try r.quoted(a);
+    try r.key("cols=");
+    const cols = try r.uint(u16);
+    try r.key("rows=");
+    const rows = try r.uint(u16);
+    return .{ .title = title, .cwd = cwd, .command = command, .cols = cols, .rows = rows };
+}
+
+/// 텍스트를 개행 단위 라인으로 나눈다(마지막 개행 뒤 빈 줄은 내지 않는다). peek은 소비 없이 다음 라인을 본다.
+const LineIter = struct {
+    text: []const u8,
+    i: usize = 0,
+
+    fn next(self: *LineIter) ?[]const u8 {
+        if (self.i >= self.text.len) return null;
+        const start = self.i;
+        const nl = std.mem.indexOfScalarPos(u8, self.text, self.i, '\n') orelse self.text.len;
+        self.i = if (nl < self.text.len) nl + 1 else self.text.len;
+        return self.text[start..nl];
+    }
+
+    fn peek(self: *const LineIter) ?[]const u8 {
+        var copy = self.*;
+        return copy.next();
+    }
+};
+
+/// 한 라인을 `<kind> key=val ...` 토큰으로 순차 파싱한다(앞에서부터 소비 — 따옴표 값이 다른 key 토큰을 흉내내도
+/// 안전하게 sequential read). word=공백까지 한 토큰, key=`name` 정확 매치, uint=숫자, quoted=`"..."` escape 해제.
+const FieldReader = struct {
+    line: []const u8,
+    i: usize = 0,
+
+    fn skipSpaces(self: *FieldReader) void {
+        while (self.i < self.line.len and self.line[self.i] == ' ') self.i += 1;
+    }
+
+    fn word(self: *FieldReader) ParseError![]const u8 {
+        self.skipSpaces();
+        const start = self.i;
+        while (self.i < self.line.len and self.line[self.i] != ' ') self.i += 1;
+        if (self.i == start) return error.BadLine;
+        return self.line[start..self.i];
+    }
+
+    fn key(self: *FieldReader, name: []const u8) ParseError!void {
+        self.skipSpaces();
+        if (!std.mem.startsWith(u8, self.line[self.i..], name)) return error.BadLine;
+        self.i += name.len;
+    }
+
+    fn uint(self: *FieldReader, comptime T: type) ParseError!T {
+        const start = self.i;
+        while (self.i < self.line.len and self.line[self.i] >= '0' and self.line[self.i] <= '9') self.i += 1;
+        if (self.i == start) return error.BadLine;
+        return std.fmt.parseInt(T, self.line[start..self.i], 10) catch error.BadLine;
+    }
+
+    /// `"` 부터 닫는 unescaped `"` 까지를 escape 해제해 arena에 dup(writer.writeEscaped의 역연산).
+    fn quoted(self: *FieldReader, a: std.mem.Allocator) ParseError![]const u8 {
+        if (self.i >= self.line.len or self.line[self.i] != '"') return error.BadLine;
+        self.i += 1;
+        var out: std.ArrayList(u8) = .empty;
+        while (self.i < self.line.len) {
+            const c = self.line[self.i];
+            if (c == '"') {
+                self.i += 1;
+                return out.toOwnedSlice(a);
+            }
+            if (c == '\\') {
+                self.i += 1;
+                if (self.i >= self.line.len) return error.BadLine;
+                const mapped: u8 = switch (self.line[self.i]) {
+                    '\\' => '\\',
+                    '"' => '"',
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    else => return error.BadLine,
+                };
+                try out.append(a, mapped);
+                self.i += 1;
+            } else {
+                try out.append(a, c);
+                self.i += 1;
+            }
+        }
+        return error.BadLine; // 닫는 따옴표 없음
+    }
+};
+
 test "workspace serialize: 단일 창/탭/pane/surface" {
     const surfaces = [_]Surface{
         .{ .title = "dev shell", .cwd = "/home/user/proj", .command = "/bin/zsh", .cols = 80, .rows = 24 },
@@ -191,4 +395,76 @@ test "workspace serialize: 멀티 창 + cwd/title escape" {
     }
     try std.testing.expectEqual(@as(usize, 2), window_lines);
     try std.testing.expect(std.mem.indexOf(u8, text, "surface title=\"a \\\"b\\\"\" cwd=\"/tmp/x y\\n\" command=\"/bin/zsh\" cols=10 rows=5\n") != null);
+}
+
+test "workspace round-trip: serialize → parse → 다시 serialize 동일(중첩 split·멀티 창·escape)" {
+    // 복잡한 모델(멀티 창, 중첩 split, escape 필요한 cwd/title)을 직렬화한 뒤 되읽고 다시 직렬화하면 동일해야 한다.
+    const s0 = [_]Surface{ .{ .title = "a \"b\"", .cwd = "/tmp/x y", .command = "/bin/zsh", .cols = 40, .rows = 24 }, .{ .cwd = "/var\nlog", .command = "/bin/bash", .cols = 40, .rows = 24 } };
+    const s1 = [_]Surface{.{ .command = "/bin/zsh", .cols = 40, .rows = 12 }};
+    const s2 = [_]Surface{.{ .command = "/bin/zsh", .cols = 40, .rows = 12 }};
+    const panes0 = [_]Pane{ .{ .active_term = 1, .surfaces = &s0 }, .{ .surfaces = &s1 }, .{ .surfaces = &s2 } };
+    const tree0 = [_]TreeNode{
+        .{ .split = .{ .direction = .horizontal, .ratio_milli = 500 } },
+        .{ .split = .{ .direction = .vertical, .ratio_milli = 300 } },
+        .{ .leaf = 0 },
+        .{ .leaf = 1 },
+        .{ .leaf = 2 },
+    };
+    const tabs0 = [_]Tab{.{ .active_pane = 2, .title = "split", .tree = &tree0, .panes = &panes0 }};
+
+    const sA = [_]Surface{.{ .title = "w2", .cwd = "/home", .command = "/bin/zsh", .cols = 100, .rows = 30 }};
+    const panes1 = [_]Pane{.{ .surfaces = &sA }};
+    const tree1 = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs1 = [_]Tab{.{ .title = "single", .tree = &tree1, .panes = &panes1 }};
+
+    const windows = [_]Window{ .{ .active_tab = 0, .tabs = &tabs0 }, .{ .active_tab = 0, .tabs = &tabs1 } };
+
+    const text1 = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text1);
+
+    var parsed = try parse(std.testing.allocator, text1);
+    defer parsed.deinit();
+
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+
+    try std.testing.expectEqualStrings(text1, text2); // writer↔reader 고정점
+}
+
+test "workspace parse: 구조·escape 해제·forgiving" {
+    const text =
+        "maru.workspace.v1\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=2 active-pane=1 title=\"my tab\"\n" ++
+        "tree-node split vertical ratio=250\n" ++
+        "tree-node leaf pane=0\n" ++
+        "tree-node leaf pane=1\n" ++
+        "pane surfaces=1 active-term=0\n" ++
+        "surface title=\"top\" cwd=\"/a b\\\"c\" command=\"/bin/zsh\" cols=80 rows=24\n" ++
+        "pane surfaces=1 active-term=0\n" ++
+        "surface title=\"\" cwd=\"\" command=\"/bin/bash\" cols=80 rows=10\n" ++
+        "trailing-garbage that should be ignored\n";
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const ws = parsed.workspace;
+
+    try std.testing.expectEqual(@as(usize, 1), ws.windows.len);
+    const tab = ws.windows[0].tabs[0];
+    try std.testing.expectEqual(@as(usize, 1), tab.active_pane);
+    try std.testing.expectEqualStrings("my tab", tab.title);
+    // 트리: split(vertical, 250) { leaf0, leaf1 } — preorder 3노드.
+    try std.testing.expectEqual(@as(usize, 3), tab.tree.len);
+    try std.testing.expect(tab.tree[0].split.direction == .vertical);
+    try std.testing.expectEqual(@as(u16, 250), tab.tree[0].split.ratio_milli);
+    try std.testing.expectEqual(@as(usize, 1), tab.tree[2].leaf);
+    // surface[0] cwd escape 해제: `/a b"c`.
+    try std.testing.expectEqual(@as(usize, 2), tab.panes.len);
+    try std.testing.expectEqualStrings("/a b\"c", tab.panes[0].surfaces[0].cwd);
+    try std.testing.expectEqual(@as(u16, 80), tab.panes[0].surfaces[0].cols);
+    try std.testing.expectEqualStrings("/bin/bash", tab.panes[1].surfaces[0].command);
+}
+
+test "workspace parse: 잘못된 헤더는 에러" {
+    try std.testing.expectError(error.BadHeader, parse(std.testing.allocator, "not.a.workspace\nwindow tabs=0 active-tab=0\n"));
 }

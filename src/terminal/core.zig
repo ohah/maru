@@ -1,7 +1,7 @@
 const std = @import("std");
 const input = @import("input.zig");
 const types = @import("types.zig");
-const width = @import("width.zig");
+const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
 
 /// DECSC/DECRC(ESC 7/8)·DECSET 1048/1049가 쓰는 저장 커서 상태. 화면(primary/alt)마다 하나씩 둔다.
 pub const SavedCursor = struct {
@@ -5815,4 +5815,17 @@ test "shell events: command_end carries the failing exit code; clear empties the
     events = core.shellEvents();
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqual(types.ShellEvent{ .command_end = .{ .row = 0, .exit = null } }, events[0]);
+}
+
+test "VS16 attaches to the base as a combining mark (one cell), shaper sees the emoji cluster" {
+    // width.zig(중립 Unicode 폭)에서 옮겨온 core 통합 테스트 — base + VS16 결합이 한 글자, 폭은 EAW per-codepoint.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("\xe2\x9d\xa4\xef\xb8\x8f"); // ❤(U+2764) + VS16(U+FE0F)
+    // 폭은 EAW per-codepoint(❤=1, VS16=0) — zsh와 일치시켜 붙여넣기 redraw가 안 깨지게(폭 승격하면 CSI<N>D recolor 어긋남).
+    try std.testing.expectEqual(@as(u21, 0x2764), core.cells[0].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0xFE0F), core.cells[0].combining);
+    try std.testing.expectEqual(@as(u2, 1), core.cells[0].width); // EAW Neutral = 1(zsh 일치)
+    try std.testing.expectEqual(@as(u21, ' '), core.cells[1].codepoint); // 다음 칸은 빈칸
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
 }

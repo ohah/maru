@@ -9,6 +9,18 @@ const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
 const input = @import("../input.zig");
+const width = @import("../../width.zig"); // Unicode 셀 폭(EAW) — 중립 top-level 유틸(한글/CJK=2칸). caret 정렬에 쓴다.
+
+/// UTF-8 바이트열의 **표시 폭**(셀 칸 수) = Σ max(1, cellWidth(cp)). 한글/CJK는 2칸, 결합 문자는 1칸으로 친다
+/// (placeText·coretext_frame_builder의 `@max(1, cellWidth)`와 같은 규약 — 그래야 caret이 그려진 글자 끝에 정확히
+/// 붙는다). 코드포인트 수가 아니다(한글을 1칸으로 세면 caret이 글자 중간에 박혀 잘려 보였다 — 회귀의 루트커즈).
+fn displayCols(bytes: []const u8) u32 {
+    const utf8 = std.unicode.Utf8View.init(bytes) catch return @intCast(bytes.len); // 손상 UTF-8은 바이트 수로 폴백
+    var it = utf8.iterator();
+    var cols: u32 = 0;
+    while (it.nextCodepoint()) |cp| cols += @max(1, width.cellWidth(cp));
+    return cols;
+}
 
 /// 이 컴포넌트가 그리는 레이어(최상위 오버레이 — 열려 있으면 키를 잡는다). host가 ops와 짝지어 백엔드에 넘긴다.
 pub const layer = draw.Layer.modal;
@@ -135,7 +147,7 @@ pub fn handle(allocator: std.mem.Allocator, ev: input.InputEvent, state: *State)
 
 /// 입력 커서(다음 입력 위치 = "Find: " + query + 조합중 뒤)의 셀 rect(backing px). **레이아웃 단일 출처** —
 /// view가 커서 fill에, host가 IME 후보창 위치(imeCursorRect)에 공유한다. 닫혔거나 터미널 0칸/패널 밖이면 null.
-/// 표시 폭은 코드포인트 근사. 패널 레이아웃은 view와 같은 식(좁은 dup이지만 caret 위치는 여기 한 곳).
+/// 표시 폭은 EAW(displayCols — 한글/CJK 2칸). 패널 레이아웃은 view와 같은 식(좁은 dup이지만 caret 위치는 여기 한 곳).
 pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     if (!state.open) return null;
     const m = p.metrics;
@@ -149,16 +161,14 @@ pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     const x = @as(i32, @intCast(m.sidebar_width_px)) + @as(i32, @intCast((term_w_px - panel_w) / 2));
     const y = 2 * @as(i32, @intCast(ch));
     const prompt_cols: u32 = 6; // "Find: "(ASCII)
-    const query_cols: u32 = @intCast(std.unicode.utf8CountCodepoints(state.query.items) catch state.query.items.len);
-    const preedit_cols: u32 = @intCast(std.unicode.utf8CountCodepoints(state.preedit.items) catch state.preedit.items.len);
-    const caret_col = prompt_cols + query_cols + preedit_cols;
+    const caret_col = prompt_cols + displayCols(state.query.items) + displayCols(state.preedit.items);
     if (caret_col >= panel_cols) return null; // 패널 밖
     return .{ .x = x + @as(i32, @intCast(caret_col * cw)), .y = y, .w = cw, .h = ch };
 }
 
 /// 상단-중앙 한 줄 패널을 `out`에 append한다(배경 fill + "Find: <query><조합중>" + 우측 정렬 "cur/total" + 커서).
 /// 안 열렸거나 터미널 영역이 0칸이면 무동작. 순수: state·props·tokens만 읽는다. ops·runs 슬라이스는 호출자 frame
-/// arena 소유. 색은 surface_bg(패널)·surface_fg(글자)·cursor(커서) role. 표시 폭은 코드포인트 근사(wide=2 미보정).
+/// arena 소유. 색은 surface_bg(패널)·surface_fg(글자)·cursor(커서) role. caret 위치는 caretRect가 EAW(한글/CJK 2칸)로 계산.
 pub fn view(
     state: *const State,
     p: props.ChromeProps,
@@ -363,13 +373,48 @@ test "find view: IME 조합(preedit)이 query 뒤에 보이고 커서가 그 뒤
     try std.testing.expect(out.items[1] == .text);
     try std.testing.expectEqualStrings("a", out.items[1].text.runs[1].text);
     try std.testing.expectEqualStrings("\xea\xb0\x80", out.items[1].text.runs[2].text);
-    // 커서는 query(1) + preedit(1) 뒤 = col 8(=6+1+1).
+    // 커서는 query "a"(1칸) + preedit "가"(한글=2칸) 뒤 = col 9(=6 prompt + 1 + 2). 한글을 1칸으로 세면(예전 버그)
+    // col 8이 돼 글자 위에 caret이 박혔다 — EAW 폭으로 글자 끝에 정확히 붙는다.
     const caret = out.items[out.items.len - 1];
     try std.testing.expect(caret == .fill and caret.fill.role == .cursor);
-    try std.testing.expectEqual(out.items[0].fill.rect.x + 8 * 8, caret.fill.rect.x);
+    try std.testing.expectEqual(out.items[0].fill.rect.x + 9 * 8, caret.fill.rect.x);
 
     // 확정 글자가 들어오면 preedit은 비워진다(조합 종료).
     try s.appendChar(std.testing.allocator, 'b');
     try std.testing.expectEqual(@as(usize, 0), s.preedit.items.len);
     try std.testing.expectEqualStrings("ab", s.query.items);
+}
+
+test "find caret: 한글 query는 EAW 2칸 폭으로 caret 정렬(잘림 회귀 고정)" {
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 40,
+        .backing_width_px = 800,
+        .backing_height_px = 600,
+    } };
+    // "가나다라"(각 3바이트, 한글 EAW=2 → 표시폭 8)의 caret은 ASCII 8글자("aaaaaaaa", 폭 8)와 **같은 위치**여야
+    // 한다 — 패널 레이아웃은 동일하니 caret.x는 표시 폭에만 의존한다. 코드포인트 수(4)로 세던 옛 버그면 한글
+    // caret이 ASCII 4글자 위치로 당겨져 글자 중간에 박혀 잘려 보였다(루트커즈). 두 caret 동치로 폭 규약을 고정.
+    var hangul: State = .{};
+    defer hangul.deinit(std.testing.allocator);
+    hangul.show();
+    for ([_]u21{ '가', '나', '다', '라' }) |c| try hangul.appendChar(std.testing.allocator, c);
+
+    var ascii: State = .{};
+    defer ascii.deinit(std.testing.allocator);
+    ascii.show();
+    for ("aaaaaaaa") |c| try ascii.appendChar(std.testing.allocator, c);
+
+    const cr_h = caretRect(&hangul, p) orelse return error.NoCaret;
+    const cr_a = caretRect(&ascii, p) orelse return error.NoCaret;
+    try std.testing.expectEqual(cr_a.x, cr_h.x); // 한글 4글자(8칸) == ASCII 8글자(8칸)
+    try std.testing.expectEqual(@as(u32, 8), cr_h.w); // caret 1칸 폭
+    // 코드포인트 수로 셌다면 한글 caret은 ASCII 4글자 자리였을 것 — 그보다 4칸(=4×8px) 더 오른쪽임을 확인.
+    var ascii4: State = .{};
+    defer ascii4.deinit(std.testing.allocator);
+    ascii4.show();
+    for ("aaaa") |c| try ascii4.appendChar(std.testing.allocator, c);
+    const cr_a4 = caretRect(&ascii4, p) orelse return error.NoCaret;
+    try std.testing.expectEqual(cr_a4.x + 4 * 8, cr_h.x);
 }

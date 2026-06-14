@@ -4290,19 +4290,23 @@ pub const DevSession = struct {
         defer allocator.free(fg);
         const cp = try allocator.alloc(u21, n);
         defer allocator.free(cp);
+        const cwid = try allocator.alloc(u2, n); // 셀별 표시폭(EAW): wide 문자(한글/CJK)=2, 나머지=1
+        defer allocator.free(cwid);
         @memset(bg, terminal.Color{ .rgb = tk.get(.surface_bg) });
         @memset(fg, terminal.Color{ .rgb = tk.get(.surface_fg) });
         @memset(cp, ' ');
+        @memset(cwid, 1);
 
         // 3) painter order로 ops 적용. 좌표는 origin 기준 셀로 환산(음수/범위 밖은 clamp/skip).
         for (draws) |d| for (d.ops) |op| switch (op) {
             .fill => |f| paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, f.rect, .{ .rgb = tk.get(f.role) }, null),
             .border => |b| paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides),
-            .text => |t| placeText(cp, fg, cols, rows, origin_x, origin_y, cw, ch, t, .{ .rgb = tk.get(t.role) }),
+            .text => |t| placeText(cp, fg, cwid, cols, rows, origin_x, origin_y, cw, ch, t, .{ .rgb = tk.get(t.role) }),
             .rule => {}, // 컴포넌트가 아직 안 냄 — 필요해질 때(C2 divider) 셀 라인으로 lower
         };
 
-        // 4) 그리드를 DrawCell 배열로 평탄화(allocator 소유).
+        // 4) 그리드를 DrawCell 배열로 평탄화(allocator 소유). width는 wide 문자(한글/CJK)면 2 — frame builder가
+        // 그 폭으로 글리프를 그려 겹침/잘림을 막는다(continuation 칸은 빈칸 width 1로 남되 wide 글리프가 덮음).
         var cells: std.ArrayList(renderer.DrawCell) = .empty;
         errdefer cells.deinit(allocator);
         try cells.ensureTotalCapacity(allocator, n);
@@ -4311,7 +4315,7 @@ pub const DevSession = struct {
             var c: u16 = 0;
             while (c < cols) : (c += 1) {
                 const idx = @as(usize, r) * @as(usize, cols) + c;
-                cells.appendAssumeCapacity(.{ .row = r, .col = c, .codepoint = cp[idx], .style = .{ .foreground = fg[idx], .background = bg[idx] } });
+                cells.appendAssumeCapacity(.{ .row = r, .col = c, .codepoint = cp[idx], .width = cwid[idx], .style = .{ .foreground = fg[idx], .background = bg[idx] } });
             }
         }
         return .{ .cells = cells, .cols = cols, .rows = rows, .origin_x = origin_x, .origin_y = origin_y };
@@ -4339,9 +4343,12 @@ pub const DevSession = struct {
         }
     }
 
-    /// text op의 runs를 origin 셀부터 가로로 놓는다(코드포인트당 한 칸 전진, 범위 밖 skip). cp·fg 그리드에 쓴다.
-    /// 표시 폭은 코드포인트 근사(wide=2 미보정 — 후속). rasterizeOverlayCells 전용 헬퍼.
-    fn placeText(cp: []u21, fg: []terminal.Color, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, t: chrome.draw.Op.Text, color: terminal.Color) void {
+    /// text op의 runs를 origin 셀부터 가로로 놓는다(EAW 폭만큼 전진, 범위 밖 skip). cp·fg·cwid 그리드에 쓴다.
+    /// 표시 폭은 EAW(terminal.width.cellWidth)로 — 한글/CJK는 2칸을 전진하며 시작 칸의 DrawCell.width=2로
+    /// 표시한다(coretext_frame_builder line 121/158과 같은 `@max(1, cellWidth)` 캐논 패턴). 그래야 wide 글리프가
+    /// 2칸 폭으로 그려지고 다음 글자가 겹치지 않는다(한글이 잘려 보이던 회귀의 루트커즈). continuation 칸은 빈칸
+    /// (codepoint ' ')으로 남아 frame builder가 건너뛰고, wide 글리프가 그 위를 덮는다. rasterizeOverlayCells 전용.
+    fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, t: chrome.draw.Op.Text, color: terminal.Color) void {
         const row_i = @divTrunc(t.origin.y - @as(i32, @intCast(origin_y)), @as(i32, @intCast(ch)));
         if (row_i < 0 or row_i >= rows) return;
         const row: usize = @intCast(row_i);
@@ -4350,12 +4357,14 @@ pub const DevSession = struct {
             const view = std.unicode.Utf8View.init(run.text) catch continue; // 잘못된 UTF-8 run은 건너뜀
             var it = view.iterator();
             while (it.nextCodepoint()) |c| {
+                const w = @max(1, terminal.width.cellWidth(c)); // 결합 문자(0)는 1칸으로 — frame builder와 동일
                 if (col_i >= 0 and col_i < cols) {
                     const idx = row * @as(usize, cols) + @as(usize, @intCast(col_i));
                     cp[idx] = c;
                     fg[idx] = color;
+                    cwid[idx] = @intCast(@min(w, 2));
                 }
-                col_i += 1;
+                col_i += w;
             }
         }
     }

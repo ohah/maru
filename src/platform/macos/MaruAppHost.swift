@@ -556,6 +556,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
 
+        // 저장된 workspace를 복원한다(R4b) — 첫 블록을 primary에 적용하고 나머지 블록마다 새 창. 저장 없음·복원
+        // off·smoke·빈 블록이면 무동작(방금 만든 기본 단일 창 유지). startDevSession이 세션을 세운 '뒤'에.
+        restoreWorkspace()
+
         // 표준 메뉴바를 세운다(커맨드 카탈로그에서 액션 항목·단축키를 읽어). smoke에서도 빌드해 구성 경로를
         // CI가 구동한다(메뉴는 OS-global 부수효과가 없어 hotkey 등록과 달리 게이트 불요).
         buildMainMenu()
@@ -829,6 +833,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     @objc private func newTerminalWindow(_ sender: Any?) {
         _ = sender
         guard !smokeMode else { return }
+        _ = createTerminalWindow(applyingBlock: nil)
+    }
+
+    /// 새 일반 창(+세션+렌더러)을 만든다. `applyingBlock`이 있으면 세션 생성 직후 그 workspace 블록을 적용해
+    /// 탭/split/Term을 복원한다(R4b). 성공하면 true. 실패 시 만든 것을 정리한다.
+    @discardableResult
+    private func createTerminalWindow(applyingBlock block: String?) -> Bool {
         let surface = TerminalSurface()
         windows.append(surface)
         var ok = false
@@ -844,6 +855,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             window.makeFirstResponder(window.contentView)
             setupMetalRenderer()
             guard createSessionForActiveSurface(smokeMode: false) else { return }
+            if let block { applyWorkspaceBlock(block) } // 복원: 기본 탭을 이 블록의 탭/split/Term으로 교체
             resizeDevSessionFromWindow()
             _ = renderTick() // 즉시 첫 paint(다음 timer tick을 안 기다림)
             ok = true
@@ -855,6 +867,54 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             surface.window?.close()
             surface.window = nil
         }
+        return ok
+    }
+
+    /// 활성 surface(forwarder 대상)의 세션에 workspace 블록(헤더 없는 "window …")을 적용한다 — 헤더를 붙여 ABI
+    /// parse+apply. 실패는 무시(best-effort 복원 — 적용 못 한 창은 기본 단일 탭으로 남는다).
+    private func applyWorkspaceBlock(_ block: String) {
+        guard let session = devSession else { return }
+        let bytes = Array(("maru.workspace.v1\n" + block).utf8)
+        _ = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_dev_session_apply_workspace(session, buf.baseAddress, buf.count)
+        }
+    }
+
+    /// 시작 시 저장된 workspace를 복원한다(R4b). 첫 블록을 이미 만든 primary에 적용하고, 나머지 블록마다 새 창을
+    /// 만든다. 저장 없음·복원 off·smoke·빈 블록이면 무동작(기본 단일 창 유지). best-effort.
+    private func restoreWorkspace() {
+        guard !smokeMode else { return }
+        // 끄기(임시): config 토글은 후속. 기본은 ON.
+        guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
+        let blocks = loadWorkspaceBlocks()
+        guard !blocks.isEmpty else { return }
+        withSurface(primary) { applyWorkspaceBlock(blocks[0]) }
+        for block in blocks.dropFirst() {
+            createTerminalWindow(applyingBlock: block)
+        }
+        withSurface(primary) { resizeDevSessionFromWindow() } // 복원으로 grid가 바뀌었으니 primary를 창에 다시 맞춤
+    }
+
+    /// workspace.v1을 읽어 header 검증 후 "window " 라인 경계로 창 블록들을 나눈다(각 블록 = 헤더 없는 한 창).
+    /// 없거나 헤더 불일치면 빈 배열. surface/pane/tree 라인은 "window "로 시작 안 하므로 분할이 모호하지 않다.
+    private func loadWorkspaceBlocks() -> [String] {
+        guard let url = workspaceFileURL,
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard let first = lines.first, first == "maru.workspace.v1" else { return [] }
+        lines.removeFirst()
+        var blocks: [String] = []
+        var current: [String] = []
+        for line in lines {
+            if line.hasPrefix("window ") {
+                if !current.isEmpty { blocks.append(current.joined(separator: "\n") + "\n") }
+                current = [line]
+            } else if !current.isEmpty, !line.isEmpty {
+                current.append(line)
+            }
+        }
+        if !current.isEmpty { blocks.append(current.joined(separator: "\n") + "\n") }
+        return blocks
     }
 
     /// 한 일반 창의 세션·렌더러를 닫고(요약은 surface.latestFrameSummary에 남긴다) 컬렉션에서 뺀다. NSWindow는

@@ -7,10 +7,12 @@
 pub const CellMetrics = struct {
     cell_width_px: u32,
     cell_height_px: u32,
-    sidebar_width_px: u32,
+    sidebar_width_px: u32, // 런타임 가변(사용자 드래그) — session 실측값이 권위
     backing_width_px: u32,
     backing_height_px: u32,
-    // chrome_minimal 등 세션-종속 플래그는 실제 소비하는 컴포넌트(C2/C3)가 추가한다 — 미리 두면 미사용 필드.
+    // minimal 세션(사이드바·pane 탭 바 숨김)인지. C2/C3 사이드바·탭바 컴포넌트가 렌더 게이트로 읽는다
+    // (chrome-strategy.md §5.5 계획). sidebar_width_px==0으로 완전 파생되진 않는다(탭 바도 숨기므로) — 별도 신호.
+    chrome_minimal: bool = false,
 };
 
 pub const ChromeProps = struct {

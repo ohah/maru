@@ -28,6 +28,8 @@ pub const ShapeTokens = struct {
     // U1: 사이드바 활성 워크스페이스 좌측 maru-accent 막대 폭(px). view가 활성 슬롯 좌측에 이 폭의 막대 op을 emit하고,
     // lowering이 (얇아서 셀 floor 불가하므로) 항상 GpuQuad로 그린다. tui=0(막대 없음).
     accent_bar_width_px: u16 = 0,
+    // U2: 사이드바 카드 사이 여백(px). bandFill/막대가 슬롯 안쪽 사방으로 이만큼 줄여 카드처럼 그린다. tui=0(슬롯 꽉).
+    card_gap_px: u16 = 0,
 };
 
 pub const ChromeProps = struct {

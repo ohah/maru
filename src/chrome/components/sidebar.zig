@@ -90,9 +90,12 @@ pub fn view(tabs: []const Tab, hovered_slot: ?usize, hovered_plus: bool, p: prop
     if (active_idx) |ai| {
         try out.append(arena, bandFill(ai, w, slot_h, .tab_active_bg, p.shape)); // 카드 배경 밴드
         // U1: 활성 슬롯 좌측 maru-accent 막대(accent_bar_width>0 — rich). 밴드 뒤에 append → 카드 배경 위에 그려진다.
+        // U2: 막대도 카드 패딩 안(좌단 x=gap, 카드 높이 slot_h-2gap)에 맞춰 카드 왼쪽 가장자리에 붙인다.
         if (p.shape.accent_bar_width_px > 0) {
-            const y: i32 = @intCast(ai * @as(usize, slot_h));
-            try out.append(arena, .{ .quad = .{ .rect = .{ .x = 0, .y = y, .w = p.shape.accent_bar_width_px, .h = slot_h }, .fill_role = .accent_bar, .corner_radii = .{ 0, 0, 0, 0 } } });
+            const gap: u32 = p.shape.card_gap_px;
+            const y: i32 = @intCast(ai * @as(usize, slot_h) + gap);
+            const ch = slot_h -| 2 * gap;
+            try out.append(arena, .{ .quad = .{ .rect = .{ .x = @intCast(gap), .y = y, .w = p.shape.accent_bar_width_px, .h = ch }, .fill_role = .accent_bar, .corner_radii = .{ 0, 0, 0, 0 } } });
         }
     }
 
@@ -109,10 +112,14 @@ pub fn view(tabs: []const Tab, hovered_slot: ?usize, hovered_plus: bool, p: prop
 
 /// 슬롯 r의 전체-폭 밴드 fill op. row→y는 slot_h 배수(한 탭=한 슬롯). platform lowerSidebar가 sidebarBandCell로 lower.
 fn bandFill(row: usize, w: u32, slot_h: u32, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
-    const y: i32 = @intCast(row * @as(usize, slot_h));
+    // U2: 카드 레이아웃 — 슬롯 안쪽 사방 card_gap 패딩으로 카드 사이 여백을 둔다. tui(gap=0)면 슬롯 꽉(기존과 동일).
+    const gap: u32 = shape.card_gap_px;
+    const y: i32 = @intCast(row * @as(usize, slot_h) + gap);
+    const cw = w -| 2 * gap;
+    const ch = slot_h -| 2 * gap;
     const r = shape.corner_radius_px;
     // tui(r=0)면 lowerSidebar가 셀 밴드로, rich(r>0)면 GPU quad(둥근)로 lower한다 — 같은 op, 토큰만 다름.
-    return .{ .quad = .{ .rect = .{ .x = 0, .y = y, .w = w, .h = slot_h }, .fill_role = role, .corner_radii = .{ r, r, r, r } } };
+    return .{ .quad = .{ .rect = .{ .x = @intCast(gap), .y = y, .w = cw, .h = ch }, .fill_role = role, .corner_radii = .{ r, r, r, r } } };
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -222,4 +229,19 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     try std.testing.expectEqual(@as(u32, 3), out.items[1].quad.rect.w); // 막대 폭 3px
     try std.testing.expectEqual(@as(i32, 0), out.items[1].quad.rect.x); // 좌측 가장자리
     try std.testing.expectEqual(@as(i32, 40), out.items[1].quad.rect.y); // 활성 슬롯(idx 1) y = 1×slot_h(40)
+
+    // U2: card_gap>0이면 카드(밴드)·막대가 슬롯 안쪽 사방 패딩으로 — 카드 사이 여백. slot_h=40, gap=4.
+    out.clearRetainingCapacity();
+    var card_p = p;
+    card_p.shape = .{ .corner_radius_px = 8, .accent_bar_width_px = 3, .card_gap_px = 4 };
+    try view(&tabs, null, false, card_p, arena, &out);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len); // 활성 카드 밴드 + 좌측 막대
+    const card = out.items[0].quad.rect;
+    try std.testing.expectEqual(@as(i32, 4), card.x); // 좌 패딩(gap)
+    try std.testing.expectEqual(@as(u32, 120 - 8), card.w); // w - 2×gap
+    try std.testing.expectEqual(@as(i32, 40 + 4), card.y); // 슬롯1 y(40) + gap
+    try std.testing.expectEqual(@as(u32, 40 - 8), card.h); // slot_h - 2×gap
+    const bar = out.items[1].quad.rect;
+    try std.testing.expectEqual(@as(i32, 4), bar.x); // 막대도 카드 좌단(gap)
+    try std.testing.expectEqual(@as(u32, 40 - 8), bar.h); // 카드 높이
 }

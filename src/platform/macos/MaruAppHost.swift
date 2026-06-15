@@ -1202,7 +1202,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let scale = window?.backingScaleFactor ?? 1.0
         let xPx = Double(local.x * scale)
         let yPx = Double((view.bounds.height - local.y) * scale) // NSView는 좌하단 원점 — 위가 0이 되게 뒤집는다
-        _ = maru_macos_app_dev_session_mouse(session, kind, xPx, yPx)
+        _ = maru_macos_app_dev_session_mouse(session, kind, xPx, yPx, 0, 0) // button/mods는 8b-2에서 event.buttonNumber/modifierFlags 변환
         markMetalNeedsRedraw()
     }
 

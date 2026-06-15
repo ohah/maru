@@ -1426,7 +1426,52 @@ pub const TerminalCore = struct {
     /// 막는다. 베이스: kitty graphics protocol(APC payload), OSC dispatch와 동형.
     fn dispatchApc(self: *TerminalCore) void {
         if (self.apc_overflow or self.apc_len == 0) return;
-        // kitty graphics command 파싱(apc_buffer[0] == 'G')은 다음 단계에서 연결한다.
+        // kitty graphics(ESC _ G ...)만 처리. control 파싱·검증까지가 토대 — 이미지 디코드·저장·렌더는
+        // 후속(audit 5/5 단계적). payload(base64)도 토대에선 디코드하지 않고 control만 본다.
+        if (self.apc_buffer[0] != 'G') return;
+        _ = parseKittyGraphicsCommand(self.apc_buffer[1..self.apc_len]);
+    }
+
+    /// kitty graphics APC control의 파싱 결과(주요 key). 토대 단계라 여기까지 — 저장·렌더는 후속이다.
+    const KittyGraphicsCommand = struct {
+        action: u8 = 't', // a: t=transmit / T=transmit+display / q=query / p=display / d=delete
+        format: u16 = 32, // f: 24=RGB / 32=RGBA / 100=PNG
+        width: u32 = 0, // s: 픽셀 폭
+        height: u32 = 0, // v: 픽셀 높이
+        image_id: u32 = 0, // i
+        more: bool = false, // m: 1이면 chunk가 이어짐
+        compression: u8 = 0, // o: 'z'=zlib
+    };
+
+    /// kitty graphics APC의 control 섹션(`G` 다음 ~ ';' 전)을 파싱한다. `k=v,k=v` 형식 — 주요 key만
+    /// 추출하고 나머지는 후속 확장으로 무시한다. value는 단일 비숫자 문자면 그 문자(a/o), 아니면 정수
+    /// (f/s/v/i/m)로 — Ghostty graphics_command.zig finishValue와 동형. payload(base64)는 토대에선
+    /// 보지 않는다(디코드·저장은 후속). 베이스: kitty graphics protocol control data.
+    fn parseKittyGraphicsCommand(body: []const u8) KittyGraphicsCommand {
+        var cmd: KittyGraphicsCommand = .{};
+        const control = if (std.mem.indexOfScalar(u8, body, ';')) |i| body[0..i] else body;
+        var it = std.mem.splitScalar(u8, control, ',');
+        while (it.next()) |pair| {
+            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+            const key = pair[0..eq];
+            const val = pair[eq + 1 ..];
+            if (key.len != 1 or val.len == 0) continue; // kitty control key는 모두 1글자
+            switch (key[0]) {
+                'a' => if (val.len == 1) {
+                    cmd.action = val[0];
+                },
+                'f' => cmd.format = std.fmt.parseInt(u16, val, 10) catch cmd.format,
+                's' => cmd.width = std.fmt.parseInt(u32, val, 10) catch 0,
+                'v' => cmd.height = std.fmt.parseInt(u32, val, 10) catch 0,
+                'i' => cmd.image_id = std.fmt.parseInt(u32, val, 10) catch 0,
+                'm' => cmd.more = (val.len == 1 and val[0] == '1'),
+                'o' => if (val.len == 1) {
+                    cmd.compression = val[0];
+                },
+                else => {}, // 나머지 control key는 토대에선 무시(후속 확장)
+            }
+        }
+        return cmd;
     }
 
     /// OSC 8: `8 ; params ; URI` — URI가 비면 링크 닫기, 있으면 열기(이후 출력 셀에 id가 찍힌다).
@@ -5702,6 +5747,26 @@ test "APC (ESC _ ... ESC \\): kitty graphics payload가 화면에 텍스트로 �
     try core.write("hi");
     try std.testing.expectEqual(@as(u21, 'h'), core.cells[0].codepoint);
     try std.testing.expectEqual(@as(u21, 'i'), core.cells[1].codepoint);
+}
+
+test "kitty graphics command 파싱: control k=v 주요 key (audit 5/5b)" {
+    // a=T(transmit+display), f=32(RGBA), s/v 픽셀 크기, i image id, m=1 chunked, o=z compression.
+    const cmd = TerminalCore.parseKittyGraphicsCommand("a=T,f=32,s=100,v=50,i=3,m=1,o=z");
+    try std.testing.expectEqual(@as(u8, 'T'), cmd.action);
+    try std.testing.expectEqual(@as(u16, 32), cmd.format);
+    try std.testing.expectEqual(@as(u32, 100), cmd.width);
+    try std.testing.expectEqual(@as(u32, 50), cmd.height);
+    try std.testing.expectEqual(@as(u32, 3), cmd.image_id);
+    try std.testing.expect(cmd.more);
+    try std.testing.expectEqual(@as(u8, 'z'), cmd.compression);
+}
+
+test "kitty graphics command 파싱: 기본값 + payload(';' 다음)는 control에서 제외" {
+    const q = TerminalCore.parseKittyGraphicsCommand("a=q;AAAAdata");
+    try std.testing.expectEqual(@as(u8, 'q'), q.action); // query
+    try std.testing.expectEqual(@as(u16, 32), q.format); // 기본 RGBA — payload는 파싱 안 함
+    const empty = TerminalCore.parseKittyGraphicsCommand("");
+    try std.testing.expectEqual(@as(u8, 't'), empty.action); // 기본 transmit(견고성)
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

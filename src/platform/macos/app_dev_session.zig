@@ -4148,7 +4148,10 @@ pub const DevSession = struct {
         const text_area = row.inset(.{ .left = sp.card_gap_px + sp.accent_bar_width_px, .right = sp.card_gap_px });
         const indent_px: u32 = @intCast(text_area.x);
         const indent_cols: u16 = if (indent_px > 0) @intCast(@min((indent_px + cw - 1) / cw, @as(u32, std.math.maxInt(u16)))) else 0;
-        const sidebar_cols: u16 = @intCast(@min(text_area.w / cw, @as(u32, std.math.maxInt(u16))));
+        // B2 리뷰(e): indent_cols=ceil(left/cw)와 text_area.w/cw=floor의 합이 full_cols를 1 넘어 제목 우단이 터미널 영역을
+        // 침범할 수 있어, sidebar_cols를 full_cols-indent_cols로도 clamp한다 → indent_cols+sidebar_cols <= full_cols 보장.
+        const full_cols: u32 = self.sidebar_width_px / cw;
+        const sidebar_cols: u16 = @intCast(@min(@min(text_area.w / cw, full_cols -| indent_cols), @as(u32, std.math.maxInt(u16))));
         if (sidebar_cols == 0) return error.NoSidebar;
 
         // 탭 라벨 "{n} {title}"을 소유 버퍼로 모은다(buildSidebarDrawList가 코드포인트로 디코드).

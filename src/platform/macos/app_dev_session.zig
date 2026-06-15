@@ -4268,7 +4268,8 @@ pub const DevSession = struct {
         defer allocator.free(cp);
         const cwid = try allocator.alloc(u2, n); // 셀별 표시폭(EAW): wide 문자(한글/CJK)=2, 나머지=1
         defer allocator.free(cwid);
-        @memset(bg, terminal.Color{ .rgb = tk.get(.surface_bg) });
+        const surface_bg_col = terminal.Color{ .rgb = tk.get(.surface_bg) };
+        @memset(bg, surface_bg_col);
         @memset(fg, terminal.Color{ .rgb = tk.get(.surface_fg) });
         @memset(cp, ' ');
         @memset(cwid, 1);
@@ -4353,7 +4354,9 @@ pub const DevSession = struct {
                 const w = cwid[idx];
                 // C4b 모달: rich 모달은 배경이 GPU quad(layer=1)라, 빈 셀(공백)의 불투명 surface_bg가 둥근
                 // quad를 사각으로 덮는다(리뷰 #1) — 빈 셀은 skip해 quad가 비치게 한다(글자 칸만 emit).
-                if (modal_bg_quad and cp[idx] == ' ') {
+                // C4b 모달: 빈 셀 skip은 **기본 배경(surface_bg)인 빈 칸만** — 선택 행 강조(tab_active_bg) 등
+                // 다른 배경의 빈 칸은 emit해야 그 칸도 하이라이트된다(빈 칸까지 skip하면 글자만 강조돼 보였던 버그).
+                if (modal_bg_quad and cp[idx] == ' ' and std.meta.eql(bg[idx], surface_bg_col)) {
                     c += if (w == 2) @as(u16, 2) else 1;
                     continue;
                 }

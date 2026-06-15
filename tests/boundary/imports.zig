@@ -351,6 +351,7 @@ test "scanImports tokenizes, so comments and string literals neither evade nor f
 const NeutralLayer = struct { layer: []const u8, barrel: []const u8, dir: []const u8 };
 
 const neutral_layers = [_]NeutralLayer{
+    .{ .layer = "terminal", .barrel = "src/terminal.zig", .dir = "src/terminal" }, // L1 VT 코어 — 가장 순수한 중립
     .{ .layer = "renderer", .barrel = "src/renderer.zig", .dir = "src/renderer" },
     .{ .layer = "session", .barrel = "src/session.zig", .dir = "src/session" },
     .{ .layer = "chrome", .barrel = "src/chrome.zig", .dir = "src/chrome" },
@@ -387,7 +388,7 @@ const forbidden_os_type_names = [_][]const u8{
     "MTLTexture",
 };
 
-test "neutral layers (renderer·session·chrome) do not name OS-specific types" {
+test "neutral layers (terminal·renderer·session·chrome) do not name OS-specific types" {
     const allocator = std.testing.allocator;
     var violations: usize = 0;
     for (neutral_layers) |nl| {

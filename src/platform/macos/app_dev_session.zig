@@ -4250,7 +4250,7 @@ pub const DevSession = struct {
                 .chrome_minimal = self.chrome_minimal,
             },
             // C4b: 박스 모양 토큰을 tokens.space에서(단일 출처). tui=0(직각·셀 밴드), rich>0(둥근 GPU quad).
-            .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px, .accent_bar_width_px = tk.space.accent_bar_width_px },
+            .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px, .accent_bar_width_px = tk.space.accent_bar_width_px, .card_gap_px = tk.space.card_gap_px },
         };
     }
 

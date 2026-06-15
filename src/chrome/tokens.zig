@@ -60,6 +60,9 @@ pub const Spacing = struct {
     tab_gradient_delta: u8 = 0,
     // U1: 사이드바 활성 워크스페이스 좌측 maru-accent 막대 폭(px). tui=0(막대 없음), rich>0(앰버 막대).
     accent_bar_width_px: u16 = 0,
+    // U2: 사이드바 카드 사이 여백(px). 밴드/막대를 슬롯 안쪽 사방으로 이만큼 줄여 워크스페이스가 카드처럼 떨어져 보인다.
+    // tui=0(슬롯 꽉 — 기존과 동일), rich>0.
+    card_gap_px: u16 = 0,
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
@@ -134,6 +137,8 @@ pub const Tokens = struct {
         tk.space.tab_gradient_delta = 12;
         // U1: 사이드바 활성 워크스페이스 좌측 maru-accent 막대 3px(앰버). tui=0(막대 없음).
         tk.space.accent_bar_width_px = 3;
+        // U2: 카드 사이 여백 4px(슬롯 안쪽 사방 패딩) — 워크스페이스가 카드처럼 떨어져 보임.
+        tk.space.card_gap_px = 4;
         return tk;
     }
 

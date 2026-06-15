@@ -30,7 +30,7 @@ const command_palette = @import("command_palette.zig");
 // chrome_host.find가, 매치 리스트(terminal.Match)는 session(find_matches)이 소유한다 — chrome은 terminal 무참조.
 
 // SplitTree를 leaf = `*Pane`으로 인스턴스화한다(트리는 panel 단위). app 레이어는 generic만 노출하고 Pane은
-// 이 platform 모듈이 정의하므로, 트리가 panel을 leaf로 들면서도 app→platform 의존이 생기지 않는다. cmux식
+// 이 platform 모듈이 정의하므로, 트리가 panel을 leaf로 들면서도 app→platform 의존이 생기지 않는다. 탭→pane
 // 모델: 한 leaf(Pane)가 여러 Term(터미널)을 가로 탭으로 들고, 화면엔 활성 Term의 surface를 그린다.
 const PaneTree = app.SplitTree(*Pane);
 
@@ -101,7 +101,7 @@ const default_sidebar_width_pt: u32 = 180;
 const sidebar_min_pt: u32 = 120; // 너무 좁으면 제목/✕가 안 보임
 const sidebar_max_pt: u32 = 480; // 너무 넓으면 터미널이 좁아짐
 
-// 사이드바 탭 슬롯 한 칸의 높이를 cell 높이의 몇 배로 할지(천분율). 2500 = 2.5× — cmux/Warp식 큰
+// 사이드바 탭 슬롯 한 칸의 높이를 cell 높이의 몇 배로 할지(천분율). 2500 = 2.5× — 큰
 // 탭 슬롯(라이브 요청). refreshCellMetrics가 cell_height_px × 이 비율로 backing 픽셀 슬롯 높이를 구한다.
 const sidebar_slot_height_ratio_milli: u32 = 2500;
 
@@ -471,7 +471,7 @@ const NormalizedConfig = struct {
 /// pump. `LivePtySession`의 reader thread가 `&live_pty.reader`를 잡으므로 이 묶음은 한번 만들면 이동하면
 /// 안 된다 — heap-pin(`*Term`)이라 ArrayList realloc·트리 회전·탭 재정렬에도 본체(reader가 잡는
 /// `&live_pty.reader`, SplitTree leaf가 잡는 `&surface`)가 안 움직인다. pump는 안정 `*queue`만 들어 이동
-/// 제약이 없다. cmux식 모델에서 한 Pane(split leaf)이 이 Term을 가로 탭으로 여러 개 들 수 있다(⌘T로 추가).
+/// 제약이 없다. 탭→pane 모델에서 한 Pane(split leaf)이 이 Term을 가로 탭으로 여러 개 들 수 있다(⌘T로 추가).
 const Term = struct {
     surface: app.Surface = undefined,
     live_pty: app.LivePtySession = undefined,
@@ -482,7 +482,7 @@ const Term = struct {
     terminated: bool = false,
 };
 
-/// 한 panel(split leaf = 화면의 한 분할 영역). cmux식으로 **여러 Term(터미널)을 가로 탭으로** 담는 컨테이너다
+/// 한 panel(split leaf = 화면의 한 분할 영역). 탭 모델로 **여러 Term(터미널)을 가로 탭으로** 담는 컨테이너다
 /// — `⌘T`가 활성 Pane에 Term을 추가하고, Pane 상단 탭 바가 각 Term을 탭으로 보여준다(PR-C+). 지금(PR-A)은
 /// Pane당 Term 1개로 시작해 동작이 기존과 같다. SplitTree leaf는 이 Pane의 '활성 Term의 surface'를 가리킨다
 /// (활성 Term이 바뀌면 leaf surface를 그 Term으로 갱신 — PR-B). heap-pin(`*Pane`)이라 ArrayList realloc·트리
@@ -1237,7 +1237,7 @@ pub const DevSession = struct {
         return false;
     }
 
-    /// 활성 pane 안에서 보이는 Term(가로 탭)을 term_index로 바꾼다(cmux 탭 전환). 활성 Term surface를 탭
+    /// 활성 pane 안에서 보이는 Term(가로 탭)을 term_index로 바꾼다(탭 전환). 활성 Term surface를 탭
     /// 대표(`surface_ptrs[active_tab]` = `app_window.active()`)에 재바인딩하고 좌표 origin을 다시 계산한다.
     /// 같은 Term이거나 범위 밖이면 무동작. pane/워크스페이스는 안 바꾼다.
     fn focusTerm(self: *DevSession, term_index: usize) void {
@@ -1547,7 +1547,7 @@ pub const DevSession = struct {
         return null;
     }
 
-    /// 셸이 exit한 개별 Term을 자동으로 닫는다(cmux/Warp식 exit 자동 collapse, PR5b). 살아있는 Term이 하나라도
+    /// 셸이 exit한 개별 Term을 자동으로 닫는다(exit 자동 collapse, PR5b). 살아있는 Term이 하나라도
     /// 있으면 죽은 Term을 **Term → pane(빈 pane collapse) → 워크스페이스(빈 탭 close)** cascade로 정리한다.
     /// 전부 죽었으면(단일/마지막 Term) reap하지 않고 세션 종료 latch(allTabsTerminated)에 맡긴다 — 기존 단일 탭
     /// exit→창 닫힘 동작을 보존. 구조가 매번 바뀌므로 한 번에 하나씩 닫고 다시 스캔한다(stale 인덱스/포인터 방지).
@@ -1595,7 +1595,7 @@ pub const DevSession = struct {
         }
     }
 
-    /// 활성 pane에 새 Term(터미널 탭)을 띄우고 그 탭으로 포커스한다(⌘T, cmux식). 활성 pane의 현재 rect grid
+    /// 활성 pane에 새 Term(터미널 탭)을 띄우고 그 탭으로 포커스한다(⌘T). 활성 pane의 현재 rect grid
     /// 크기로 새 셸을 spawn해 pane.terms에 더한다. spawn/alloc 실패는 errdefer로 원복하고 무시(pane 불변).
     fn newTermInActivePane(self: *DevSession) !void {
         const pane = self.activePane();
@@ -1627,7 +1627,7 @@ pub const DevSession = struct {
         }
     }
 
-    /// 활성 panel을 direction으로 둘로 나눈다(cmux/tmux식 split — 동작만 참고, 코드 미참고). 활성 panel의
+    /// 활성 panel을 direction으로 둘로 나눈다(사실상 표준 멀티플렉서 split 동작 참고 — 코드 미참고). 활성 panel의
     /// 현재 leaf rect를 splitRect로 a(기존)·b(새)로 나눠, b 크기로 새 셸 panel을 spawn하고, 트리에서 활성
     /// leaf를 split{a: 기존 leaf, b: 새 leaf}로 교체하고, 기존 panel을 a 크기로 줄인 뒤 새 panel로 포커스를
     /// 옮긴다. 단일 panel 탭이면 첫 분할(2개), 이미 split이면 활성 panel이 다시 나뉜다(중첩). spawn/alloc
@@ -1687,7 +1687,7 @@ pub const DevSession = struct {
         // 5) 기존 panel의 모든 Term을 a 크기로 줄인다(PTY winsize 포함). 죽은 PTY 등의 실패는 무시(split 자체는 성공).
         for (active.terms.items) |term| self.runtime.resize(term.surface.id, a_size) catch {};
 
-        // 6) 새 panel로 포커스 이동(cmux/tmux식). focusPane이 탭 대표 surface(= app_window.active())·
+        // 6) 새 panel로 포커스 이동(멀티플렉서 split 관행). focusPane이 탭 대표 surface(= app_window.active())·
         //    frame_loop pump 재바인딩 + 활성 panel rect 재계산 + metal_dirty를 한 곳에서 한다. 탭 인덱스는
         //    그대로라 사이드바 갱신은 불요.
         self.focusPane(tab.panes.items.len - 1);
@@ -1738,7 +1738,7 @@ pub const DevSession = struct {
         self.allocator.destroy(term);
     }
 
-    /// 한 panel(Pane)을 heap-pin으로 만든다 — Term 1개를 담은 컨테이너. cmux식 모델에서 Pane은 여러 Term을
+    /// 한 panel(Pane)을 heap-pin으로 만든다 — Term 1개를 담은 컨테이너. 탭→pane 모델에서 Pane은 여러 Term을
     /// 가로 탭으로 들 수 있고(⌘T가 추가), 생성 시엔 1개로 시작한다. heap-pin(`*Pane`)이라 트리 회전·ArrayList
     /// realloc에도 본체가 안 움직인다(SplitTree leaf가 이 `*Pane`을 가리킴). 부분 실패는 errdefer로 정리.
     fn createPane(
@@ -1893,7 +1893,7 @@ pub const DevSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 활성 탭의 활성 panel을 닫는다(Warp/cmux식 — split이 있으면 pane을 하나씩 닫는다). 트리를 형제로
+    /// 활성 탭의 활성 panel을 닫는다(split이 있으면 pane을 하나씩 닫는다). 트리를 형제로
     /// collapse(removeLeaf)하고 panel을 teardown(destroyPane)한 뒤, active_pane을 보정하고, 대표 surface·
     /// pump를 새 활성 panel로 재바인딩하고, 남은 panel을 collapse된 트리의 새 leaf rect로 resize한다. panel이
     /// 1개뿐이면 무동작(그건 closeActivePaneOrTab이 closeTab으로 보낸다). 활성 탭에만 적용한다.
@@ -1923,7 +1923,7 @@ pub const DevSession = struct {
         self.metal_dirty = true;
     }
 
-    /// Cmd+W 정책(Warp/cmux식): split이 있으면 활성 panel을 하나 닫고(collapse), 단일 panel이면 탭을 닫는다
+    /// Cmd+W 정책: split이 있으면 활성 panel을 하나 닫고(collapse), 단일 panel이면 탭을 닫는다
     /// (마지막 탭이면 창). 즉 Cmd+W를 반복하면 pane이 하나씩 닫히다가 마지막 1개에서 탭이 닫힌다.
     fn closeActivePaneOrTab(self: *DevSession) void {
         if (self.activeTabHasSplit()) {
@@ -1951,7 +1951,7 @@ pub const DevSession = struct {
         self.metal_dirty = true;
     }
 
-    /// Cmd+W 정책(cmux 풀 모델, 계층 cascade): 활성 pane에 Term이 2개 이상이면 활성 Term을 하나 닫고, 1개뿐이면
+    /// Cmd+W 정책(계층 cascade): 활성 pane에 Term이 2개 이상이면 활성 Term을 하나 닫고, 1개뿐이면
     /// pane을(split이면 collapse) 또는 워크스페이스를(단일 pane이면 탭/창) 닫는다. 즉 ⌘W를 반복하면 Term →
     /// pane → 워크스페이스 순으로 하나씩 닫힌다.
     fn closeActiveTermOrPane(self: *DevSession) void {
@@ -2036,7 +2036,7 @@ pub const DevSession = struct {
             .focus_pane_right => self.focusPaneInDirection(.right),
             .focus_pane_up => self.focusPaneInDirection(.up),
             .focus_pane_down => self.focusPaneInDirection(.down),
-            // Term(가로 탭) 단위(cmux): ⌘T=활성 pane에 새 Term, ⌘W=활성 Term 닫기(Term→pane→워크스페이스
+            // Term(가로 탭) 단위: ⌘T=활성 pane에 새 Term, ⌘W=활성 Term 닫기(Term→pane→워크스페이스
             // cascade), ⌘]/⌘[=다음/이전 Term. 생성 실패는 무시(newTermInActivePane이 errdefer로 원복).
             .new_term => if (!self.tabsBlocked()) {
                 self.newTermInActivePane() catch {};
@@ -2212,7 +2212,7 @@ pub const DevSession = struct {
         // 논리 폭(sidebar_width_pt — 사용자 드래그로 바뀔 수 있음)에서 파생하므로 DPI 변경에도 유지된다.
         // minimal 세션은 사이드바가 없으므로 0 고정(터미널이 전폭을 쓴다).
         self.sidebar_width_px = if (self.chrome_minimal) 0 else self.sidebar_width_pt * self.scale_milli / 1000;
-        // 탭 슬롯 높이 = cell 높이 × 2.5(cmux식 큰 슬롯). cell_height_px가 이미 위에서 갱신됐으므로
+        // 탭 슬롯 높이 = cell 높이 × 2.5(큰 슬롯). cell_height_px가 이미 위에서 갱신됐으므로
         // 그걸 쓴다 — 슬롯 높이도 cell 메트릭과 같은 단일 출처에서 파생한다.
         self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
         // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
@@ -2515,7 +2515,7 @@ pub const DevSession = struct {
             var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
             defer leaf_rects.deinit(self.allocator);
             if (self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects)) |_| {
-                // ① 탭 바 클릭 → pane 포커스 + Term 탭 전환(cmux). 클릭이 호버된 탭의 ✕ zone이면 그 Term을 닫는다
+                // ① 탭 바 클릭 → pane 포커스 + Term 탭 전환. 클릭이 호버된 탭의 ✕ zone이면 그 Term을 닫는다
                 //    (focusPaneByPtr+focusTerm로 그 탭을 활성으로 만든 뒤 closeActiveTermOrPane cascade). 단일 panel도
                 //    Term이 여럿이면 전환/닫기 된다. ✕는 호버 중일 때만 보이므로 hovered_tab과 일치할 때만 닫는다.
                 for (leaf_rects.items) |lr| {
@@ -3555,7 +3555,7 @@ pub const DevSession = struct {
         }
         self.total_output_events += drain_summary.output_events;
         self.total_exit_events += drain_summary.exit_events;
-        // 개별 Term이 exit하면(전부는 아닌) 그 Term을 자동으로 닫는다(cmux식 cascade: Term→pane→워크스페이스,
+        // 개별 Term이 exit하면(전부는 아닌) 그 Term을 자동으로 닫는다(계층 cascade: Term→pane→워크스페이스,
         // PR5b). 이번 tick에 새 종료가 관측됐을 때만 — 살아있는 Term이 있으면 같은 tick에 reap되고, 전부 죽으면
         // 아래 세션 종료 latch가 마지막을 맡는다(그래서 reap이 빈 세션을 만들지 않는다).
         if (drain_summary.ended != null) self.reapTerminatedTerms();
@@ -6158,7 +6158,7 @@ test "sidebar gets an active-tab highlight band that follows tab create and swit
         try std.testing.expect(session.sidebar_cells.items[0].width > 0);
         // 밴드를 그릴 사이드바 폭은 터미널 origin offset과 같은 단일 출처다.
         try std.testing.expectEqual(session.sidebar_width_px, frame.terminal_origin_x_px);
-        // 탭 슬롯 높이는 cell 높이 × 2.5(cmux식 큰 슬롯) — cell 높이보다 크고 메트릭에서 파생.
+        // 탭 슬롯 높이는 cell 높이 × 2.5(큰 슬롯) — cell 높이보다 크고 메트릭에서 파생.
         try std.testing.expectEqual(session.cell_height_px * 2500 / 1000, frame.sidebar_slot_height_px);
         try std.testing.expect(frame.sidebar_slot_height_px > session.cell_height_px);
     }
@@ -7227,7 +7227,7 @@ test "Cmd+Option+arrow moves pane focus directionally through the key path" {
 }
 
 // Cmd+W가 split 탭에서 활성 panel을 먼저 닫고(트리 collapse + 남은 panel이 빈자리 차지), 단일 panel이 되면
-// 그땐 탭을 닫는지(Warp/cmux식) — 실 init + 실제 분할/teardown이라 macOS 게이트. 키 경로(handleKeyEvent)로 돈다.
+// 그땐 탭을 닫는지(계층 cascade 정책) — 실 init + 실제 분할/teardown이라 macOS 게이트. 키 경로(handleKeyEvent)로 돈다.
 test "Cmd+W closes the active pane first and collapses the split, leaving the sibling" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -7876,7 +7876,7 @@ test "two tabs: createTab spawns a second shell and tick drains both (multi-tab)
 }
 
 // Cmd+T가 키 경로(handleKeyEvent → resolver → app_action)로 '활성 pane에 새 Term(가로 탭)'을 열고,
-// Cmd+Shift+T가 '새 워크스페이스'를 여는지 — cmux 풀 모델. native 최소(Swift는 키만, 판정·실행은 Zig).
+// Cmd+Shift+T가 '새 워크스페이스'를 여는지 — 탭 풀 모델. native 최소(Swift는 키만, 판정·실행은 Zig).
 // 실 PTY라 macOS 게이트.
 test "Cmd+T opens a new Term in the active pane; Cmd+Shift+T opens a workspace" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -7981,7 +7981,7 @@ test "handleKeyEvent applies user config keybindings (resolver wired from loaded
     try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len);
 }
 
-// cmux Term 생명주기: ⌘T가 활성 pane에 Term을 쌓고, ⌘]/⌘[가 Term을 wrap 순환하고, ⌘W가 Term →(마지막이면)
+// Term 생명주기: ⌘T가 활성 pane에 Term을 쌓고, ⌘]/⌘[가 Term을 wrap 순환하고, ⌘W가 Term →(마지막이면)
 // pane →(마지막이면) 워크스페이스 순으로 cascade close하는지 — 실 PTY teardown이라 macOS 게이트. 키 경로 전체.
 test "Term lifecycle: Cmd+T adds, Cmd+]/[ cycle, Cmd+W cascades Term to workspace" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;

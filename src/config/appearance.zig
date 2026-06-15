@@ -96,7 +96,7 @@ fn resolveTheme(config: theme.ThemeConfig) ResolveError!ResolvedTheme {
 }
 
 /// 각 채널을 delta만큼 더해 255로 saturate한다(테마 배경에서 사이드바 톤을 파생할 때 기본값 계산).
-/// 같은 톤을 유지하며 단계적으로 밝게 — cmux/Warp식 미묘한 사이드바 배경(+24)·활성 하이라이트(+48).
+/// 같은 톤을 유지하며 단계적으로 밝게 — 미묘한 사이드바 배경(+24)·활성 하이라이트(+48).
 fn lighten(rgb: color.Rgb, delta: u8) color.Rgb {
     return .{
         .r = @intCast(@min(@as(u32, rgb.r) + delta, 255)),

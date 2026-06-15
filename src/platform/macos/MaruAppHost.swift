@@ -764,7 +764,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.sidebar_bg,           // 사이드바 배경색(0=안 그림)
             frame.sidebar_cells,        // 사이드바 셀(탭 엔트리) — origin 0에 그림
             frame.sidebar_cell_count,
-            frame.sidebar_slot_height_px // 탭 슬롯 높이(≈2.5×cell) — 사이드바 셀 세로 배치
+            frame.sidebar_slot_height_px, // 탭 슬롯 높이(≈2.5×cell) — 사이드바 셀 세로 배치
+            frame.gpu_quads,              // C4b: chrome rich 둥근 사각형(tui면 NULL — Swift는 패스스루만)
+            frame.gpu_quad_count
         )
         if drew {
             lastDrawnGeneration = frame.generation

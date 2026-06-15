@@ -41,4 +41,55 @@ static NSString *const MARU_METAL_CELL_SHADER_SOURCE =
      "  return float4(rgb, a);\n"
      "}\n";
 
+/* C4b: chrome rich GPU 프리미티브 — 둥근 사각형(per-corner radius + 변별 border + solid/gradient
+   fill)을 SDF anti-aliasing으로 그린다. 셀 셰이더와 별개 파이프라인이지만 같은 premultiplied-over
+   블렌딩에 합성된다. 색 blend는 linear 색공간에서 한다(sRGB→linear→blend→sRGB) — AA·gradient
+   경계가 sRGB 직접 blend보다 정확하다. 정점은 host가 quad당 6개 생성하며 각 정점에 사각형
+   파라미터(local 픽셀 좌표·half size·radii·border·색)를 복제해 싣는다(chrome quad 수가 적어
+   instanced 없이 충분 — 후속 대량화 시 instanced로 전환). SDF 공식은 표준 rounded-box(iq). */
+static NSString *const MARU_METAL_QUAD_SHADER_SOURCE =
+    @"#include <metal_stdlib>\n"
+     "using namespace metal;\n"
+     "struct QuadIn { packed_float2 position; packed_float2 local; packed_float2 half_size; packed_float4 corner; packed_float4 border; packed_float4 fill0; packed_float4 fill1; packed_float4 border_color; float gradient_kind; };\n"
+     "struct QuadOut { float4 position [[position]]; float2 local; float2 half_size; float4 corner; float4 border; float4 fill0; float4 fill1; float4 border_color; float gradient_kind; };\n"
+     "static inline float3 srgb_to_linear(float3 c) { return select(c/12.92, pow((c+0.055)/1.055, 3.0), c > 0.04045); }\n"
+     "static inline float3 linear_to_srgb(float3 c) { return select(c*12.92, 1.055*pow(c, 1.0/2.4)-0.055, c > 0.0031308); }\n"
+     "vertex QuadOut maru_quad_vertex(uint vid [[vertex_id]], const device QuadIn *v [[buffer(0)]]) {\n"
+     "  QuadOut o;\n"
+     "  o.position = float4(float2(v[vid].position), 0.0, 1.0);\n"
+     "  o.local = float2(v[vid].local);\n"
+     "  o.half_size = float2(v[vid].half_size);\n"
+     "  o.corner = float4(v[vid].corner);\n"
+     "  o.border = float4(v[vid].border);\n"
+     "  o.fill0 = float4(v[vid].fill0);\n"
+     "  o.fill1 = float4(v[vid].fill1);\n"
+     "  o.border_color = float4(v[vid].border_color);\n"
+     "  o.gradient_kind = v[vid].gradient_kind;\n"
+     "  return o;\n"
+     "}\n"
+     "fragment float4 maru_quad_fragment(QuadOut in [[stage_in]]) {\n"
+     // 중심 원점 좌표. 모서리별 radius 선택: p.x<0=좌, p.y<0=상 → tl/tr/br/bl = corner.x/y/z/w.
+     "  float2 p = in.local - in.half_size;\n"
+     "  float r = (p.x < 0.0) ? ((p.y < 0.0) ? in.corner.x : in.corner.w) : ((p.y < 0.0) ? in.corner.y : in.corner.z);\n"
+     // signed distance to rounded box(표준): q = |p| - half + r, d = min(max(q.x,q.y),0) + length(max(q,0)) - r.
+     "  float2 q = abs(p) - in.half_size + r;\n"
+     "  float d = min(max(q.x, q.y), 0.0) + length(max(q, float2(0.0))) - r;\n"
+     "  float aa = max(fwidth(d), 1e-4);\n"
+     "  float cov = 1.0 - smoothstep(-aa, aa, d);\n"
+     "  if (cov <= 0.0) { discard_fragment(); }\n"
+     // 변별 border: 안쪽 깊이(-d)에서 가장 가까운 변의 폭으로 경계를 잡는다(토대 근사 — 모서리
+     // 변별 정밀화는 C4b 후속). top/right/bottom/left = border.x/y/z/w.
+     "  float bw = max((p.y < 0.0) ? in.border.x : in.border.z, (p.x < 0.0) ? in.border.w : in.border.y);\n"
+     "  float dist_in = -d;\n"
+     "  float border_mix = (bw > 0.0) ? (1.0 - smoothstep(bw - aa, bw + aa, dist_in)) : 0.0;\n"
+     // fill gradient: 1=수직(local.y/h), 2=수평(local.x/w), 0=solid.
+     "  float t = (in.gradient_kind > 1.5) ? (in.local.x / (in.half_size.x * 2.0)) : (in.local.y / (in.half_size.y * 2.0));\n"
+     "  float4 fill = (in.gradient_kind < 0.5) ? in.fill0 : mix(in.fill0, in.fill1, clamp(t, 0.0, 1.0));\n"
+     // linear에서 fill↔border 섞고 coverage 적용, premultiplied 출력(셀과 같은 over 블렌딩).
+     "  float3 rgb_lin = mix(srgb_to_linear(fill.rgb), srgb_to_linear(in.border_color.rgb), border_mix);\n"
+     "  float a = mix(fill.a, in.border_color.a, border_mix) * cov;\n"
+     "  float3 rgb = linear_to_srgb(rgb_lin) * a;\n"
+     "  return float4(rgb, a);\n"
+     "}\n";
+
 #endif

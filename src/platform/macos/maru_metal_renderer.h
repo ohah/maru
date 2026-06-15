@@ -59,7 +59,11 @@ bool maru_metal_renderer_draw(
     size_t sidebar_cell_count,
     /* 사이드바 탭 슬롯 한 칸의 픽셀 높이(≈2.5×cell_height). 사이드바 셀을 cell 높이가 아니라 이 슬롯
        높이로 세로 배치한다(셀 row → py=row×slot_h, 높이 slot_h). 0이면 cell 높이로 폴백. */
-    uint32_t sidebar_slot_height_px
+    uint32_t sidebar_slot_height_px,
+    /* chrome rich GPU quad 프리미티브(C4b — 둥근 사각형: per-corner radius+border+gradient, SDF AA).
+       NULL/0이면 안 그림(tui 테마는 셀 fill 유지). 셀 패스 아래(배경 레이어)에 별개 파이프라인으로 그린다. */
+    const MaruAppHostDevGpuQuad *gpu_quads,
+    size_t gpu_quad_count
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

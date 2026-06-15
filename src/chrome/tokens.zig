@@ -47,6 +47,10 @@ pub const Spacing = struct {
     // 컴포넌트 view가 이 값을 Op.quad.corner_radii/border_widths에 실어, 같은 코드가 두 룩을 만든다(C4a 색 분리와 동형).
     corner_radius_px: u16 = 0,
     border_width_px: u16 = 0,
+    // C4b 모달: 그림자(GpuShadow). tui=0(그림자 없음 — 모달이 rich quad 안 내므로 무관), rich>0(떠 보임).
+    shadow_blur_px: u16 = 0,
+    shadow_offset_y_px: u16 = 0,
+    shadow_alpha: u8 = 0, // 0xAARRGGBB의 A(RGB는 검정 0). 0이면 그림자 안 보임.
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
@@ -111,6 +115,9 @@ pub const Tokens = struct {
         // 이 값을 Op.quad에 실어 GPU quad 프리미티브로 lowering된다(같은 코드, 토큰만 다름).
         tk.space.corner_radius_px = 8;
         tk.space.border_width_px = 1;
+        tk.space.shadow_blur_px = 14;
+        tk.space.shadow_offset_y_px = 6;
+        tk.space.shadow_alpha = 0x70;
         return tk;
     }
 

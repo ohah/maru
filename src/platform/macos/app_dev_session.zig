@@ -4327,12 +4327,12 @@ pub const DevSession = struct {
                     // C4b 모달: 배경 quad에 그림자 동반(gpu_shadows 별 배열, quad·셀보다 아래). 약간 아래 offset + blur.
                     gpu_shadows.append(allocator, .{
                         .x = @floatFromInt(q.rect.x),
-                        .y = @as(f32, @floatFromInt(q.rect.y)) + 6.0,
+                        .y = @as(f32, @floatFromInt(q.rect.y)) + @as(f32, @floatFromInt(tk.space.shadow_offset_y_px)),
                         .w = @floatFromInt(q.rect.w),
                         .h = @floatFromInt(q.rect.h),
                         .corner_radii = .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) },
-                        .blur_radius = 14.0,
-                        .color = 0x70000000, // 반투명 검정(A=0x70)
+                        .blur_radius = @floatFromInt(tk.space.shadow_blur_px),
+                        .color = @as(u32, tk.space.shadow_alpha) << 24, // 토큰 alpha + RGB 0(검정). tui=0이면 무관(append 안 됨)
                     }) catch {};
                 }
             },

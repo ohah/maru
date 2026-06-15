@@ -117,7 +117,7 @@ pub const Metrics = struct {
     /// 우측 스크롤 버튼 zone 시작 컬럼 — has_scroll이면 [tab_cols, tab_cols+2)에 ‹›, 그 뒤 [+2, cols)가 "+".
     /// has_scroll 아니면 "+"가 tab_cols부터(‹› 없음). 렌더(‹›/+ glyph)·hit-test 단일 소스.
     pub fn plusZoneStart(self: Metrics) u32 {
-        return self.tab_cols + (if (self.has_scroll) @as(u32, 2) else 0);
+        return self.tab_cols + (if (self.has_scroll) @as(u32, 3) else 0); // ‹·gap·› 3칸(버튼 사이 공백)
     }
 
     /// x_px가 "+" zone([plusZoneStart, cols)) 안인가. ‹›가 있으면 그 오른쪽. "+" glyph(col=plusZoneStart+1)와 같은 영역.
@@ -136,7 +136,7 @@ pub const Metrics = struct {
     /// x_px가 ›(오른쪽 스크롤) 버튼([tab_cols+1, tab_cols+2)) 안인가 — has_scroll일 때만. › glyph(col=tab_cols+1)와 같은 영역.
     pub fn inScrollRightZone(self: Metrics, x_px: f64) bool {
         if (!self.has_scroll or !std.math.isFinite(x_px)) return false;
-        return x_px >= self.colPx(self.tab_cols + 1) and x_px < self.colPx(self.tab_cols + 2);
+        return x_px >= self.colPx(self.tab_cols + 2) and x_px < self.colPx(self.tab_cols + 3); // › at tab_cols+2(gap tab_cols+1 건너뜀)
     }
 };
 
@@ -218,15 +218,15 @@ test "tabbar tabIndex: overflow(term>탭칸) — 안 보이는 탭을 hit하지 
     try std.testing.expectEqual(@as(usize, 3), m.tabIndex(4, 999));
 }
 
-test "tabbar Step 2a-2: has_scroll ‹› zone·plus 위치·스크롤 hit-test" {
+test "tabbar Step 2a-2: has_scroll ‹·gap·› zone(3칸)·plus 위치·스크롤 hit-test" {
     var m = testMetrics();
     m.has_scroll = true;
-    m.tab_cols = 6; // ‹›(2칸): [6,7)=‹, [7,8)=›, plus_start=8 → [8,10)=+. colPx(6)=148,7=156,8=164,10=180.
+    m.tab_cols = 6; // ‹[6,7) gap[7,8) ›[8,9) plus_start=9 →[9,10)=+. colPx: 6=148,7=156,8=164,9=172,10=180.
     try std.testing.expect(m.inScrollLeftZone(150)); // ‹ [148,156)
-    try std.testing.expect(!m.inScrollLeftZone(160));
-    try std.testing.expect(m.inScrollRightZone(160)); // › [156,164)
-    try std.testing.expect(!m.inScrollRightZone(150));
-    try std.testing.expect(m.inPlusZone(170)); // + [164,180) — ‹› 오른쪽
+    try std.testing.expect(!m.inScrollLeftZone(160)); // gap [156,164)
+    try std.testing.expect(m.inScrollRightZone(168)); // › [164,172)
+    try std.testing.expect(!m.inScrollRightZone(160)); // gap — 버튼 아님
+    try std.testing.expect(m.inPlusZone(175)); // + [172,180) — ‹·gap·› 오른쪽
     try std.testing.expect(!m.inPlusZone(150)); // ‹ 위치는 plus 아님
     // has_scroll=false면 ‹› 없음(scroll zone false), plus는 tab_cols(8)부터.
     const no = testMetrics();

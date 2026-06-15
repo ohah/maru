@@ -272,8 +272,8 @@ pub fn tabLayout(bar_cols: u16, term_count: usize, tab_width_fixed: u16, scroll_
     const total = @as(u32, @intCast(term_count)) * @as(u32, tab_w);
     // #4(리뷰): rich 고정폭(tab_width_fixed>0)만 스크롤한다 — tui 균등은 tab_w=1 collapse로 넘쳐도 ‹›를 안 띄움("tui 무변화" 유지).
     // ‹›(2칸) 둘 여유(base>2)도 필요.
-    const has_scroll = tab_width_fixed > 0 and total > base and base > 2;
-    const tab_cols: u16 = if (has_scroll) base - 2 else base;
+    const has_scroll = tab_width_fixed > 0 and total > base and base > 3; // #5a: ‹(tab_cols)·gap(tab_cols+1)·›(tab_cols+2) 3칸(버튼 사이 공백) 여유
+    const tab_cols: u16 = if (has_scroll) base - 3 else base;
     // #1(리뷰): scroll를 [0, total-tab_cols]로 clamp + has_scroll 아니면 0 → 탭 닫기/리사이즈로 넘침이 사라지면 stale scroll가
     // 자동으로 0이 돼 빈 탭 바에 갇히지 않는다. 렌더·hit-test·클릭이 이 eff_scroll을 공유(§6).
     const eff_scroll: u32 = if (has_scroll) @min(scroll_cols, total - tab_cols) else 0;
@@ -333,7 +333,7 @@ pub fn buildPaneTabBarDrawList(
     // 우측 컨트롤: 넘치면(has_scroll) ‹›(왼/오 스크롤) 2칸을 tab_cols·tab_cols+1에, 그 오른쪽에 "+". 안 넘치면 "+"만.
     if (layout.has_scroll) {
         try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols), .codepoint = '<', .width = 1, .style = style }); // 왼쪽 스크롤
-        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols + 1), .codepoint = '>', .width = 1, .style = style }); // 오른쪽 스크롤
+        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols + 2), .codepoint = '>', .width = 1, .style = style }); // 오른쪽 스크롤(gap tab_cols+1 건너뜀)
     }
     // "+"(새 Term) 버튼 — ‹› 오른쪽(has_scroll) 또는 tab_cols(아니면). plus_start+1 col에 '+'.
     const plus_start: u16 = tab_cols + (if (layout.has_scroll) @as(u16, 2) else 0);
@@ -708,11 +708,11 @@ test "tabLayout: rich 넘침 ‹›·tab_cols 축소·scroll clamp; tui·안넘�
     // cols=40, "+"zone 3 → base=paneTabAreaCols(40)=37. 고정폭 16, 3탭 → total=48 > 37 → has_scroll, tab_cols=35.
     const ovf = tabLayout(40, 3, 16, 0);
     try std.testing.expect(ovf.has_scroll);
-    try std.testing.expectEqual(@as(u16, 35), ovf.tab_cols); // 37 - 2(‹›)
+    try std.testing.expectEqual(@as(u16, 34), ovf.tab_cols); // 37 - 3(‹·gap·›)
     try std.testing.expectEqual(@as(u16, 16), ovf.tab_w);
     try std.testing.expectEqual(@as(u32, 0), ovf.eff_scroll); // scroll 0
-    // #1: 큰 scroll(stale 등)은 max(=total-tab_cols=13)로 clamp.
-    try std.testing.expectEqual(@as(u32, 13), tabLayout(40, 3, 16, 100).eff_scroll);
+    // #1: 큰 scroll(stale 등)은 max(=total 48-tab_cols 34=14)로 clamp.
+    try std.testing.expectEqual(@as(u32, 14), tabLayout(40, 3, 16, 100).eff_scroll);
     // 2탭 → total=32 <= 37 → no scroll, tab_cols=37(그대로), eff 0(stale 무시).
     const fit = tabLayout(40, 2, 16, 50);
     try std.testing.expect(!fit.has_scroll);

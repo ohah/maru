@@ -3729,6 +3729,10 @@ pub const DevSession = struct {
                     self.appendBarBgQuad(bar, self.sidebarBg());
                     self.appendTabBarUnderline(bar, tk.border.line_thickness_px); // 탭바 하단 구분선(터미널 콘텐츠와 경계)
                     if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, hl_bg, tab_accent, tk.border.line_thickness_px);
+                    if (m_opt) |m| if (m.has_scroll) { // #5a: 넘치면 우측 ‹·› 사각형 버튼 배경(약한 배경 — hover 색은 #5b)
+                        self.appendScrollButtonQuad(m, m.tab_cols, self.sidebarHoverBg());
+                        self.appendScrollButtonQuad(m, m.tab_cols + 2, self.sidebarHoverBg());
+                    };
                 } else {
                     // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위).
                     if (paneBarBgCell(bar, self.cell_width_px, self.sidebarBg())) |cell| pane_chrome.append(self.allocator, cell) catch {};
@@ -4067,6 +4071,13 @@ pub const DevSession = struct {
         const uw: f32 = @min(@as(f32, @floatFromInt(underline_px)), bh); // 바보다 두꺼우면 바 높이로 clamp — by+bh-uw≥by라 언더바가 바 위로 안 샌다(형제 appendTabBarUnderline의 -| 가드와 동형, #496 리뷰)
         self.appendSolidQuad(x, by, w, bh, bg, 2); // 평평한 약한 배경(VSCode 탭 — 둥근·gradient 없음)
         self.appendSolidQuad(x, by + bh - uw, w, uw, accent, 2); // 하단 maru 앰버 언더바(active indicator, 탭 폭)
+    }
+
+    /// #5a: 우측 가로 스크롤 ‹/› 버튼의 사각형 배경(GpuQuad layer 2) — col 셀(‹=tab_cols, ›=tab_cols+2) 영역을 약한
+    /// 배경으로 채워 "클릭 가능한 버튼"으로 보이게 한다. glyph는 coretext가 같은 col에 그린다(배경 위). hover 색은 #5b, 커서는 #5c.
+    fn appendScrollButtonQuad(self: *DevSession, m: chrome.components.tabbar.Metrics, col: u32, bg: u32) void {
+        const x: f32 = @floatFromInt(m.bar_x + col * m.cell_width_px);
+        self.appendSolidQuad(x, @floatFromInt(m.bar_y), @floatFromInt(m.cell_width_px), @floatFromInt(m.bar_h), bg, 2);
     }
 
     /// solid 직각 GpuQuad(곡률·테두리·gradient 없음)를 지정 layer에 append하는 공통 헬퍼 — appendBarBgQuad·

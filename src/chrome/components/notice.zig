@@ -70,8 +70,10 @@ pub fn view(
     // 뺄셈이 안전하다. (term_cols==0은 box_w=cw > term_w_px라 뺄셈이 언더플로하므로 반드시 생략.)
     if (term_cols == 0) return;
     // C4b 패딩: 폭 상한을 2*pad만큼 줄인 가용 칸으로 box_cols를 clamp한다 — platform lowering이 배경 quad를
-    // ±pad 확장한 뒤에도 박스가 터미널 영역 안에 들도록 텍스트 폭을 양보한다(overlay_input.panelLayout과 동형).
-    // pad=0(tui)이면 avail_cols == term_cols라 무변화.
+    // ±pad 확장한 뒤에도 박스가 터미널 영역에 들도록 텍스트 폭을 양보한다(avail_cols>=1이면 안; overlay_input.
+    // panelLayout과 동형). pad=0(tui)이면 avail_cols == term_cols라 무변화. 단 avail_cols==0(term_w_px < 2*pad,
+    // 터미널 영역 1~3칸의 비정상적으로 좁은 창)이면 soft-lock 방지로 box_cols=1을 강제하므로 ±pad 확장이 최대
+    // pad만큼 침범할 수 있다 — bounded이고, '안 보이는 열린 모달'보다 작은 박스가 낫다는 절충.
     const pad: u32 = p.shape.modal_padding_px;
     const avail_cols = (term_w_px -| 2 * pad) / cw;
     const msg_cols: u32 = @intCast(std.unicode.utf8CountCodepoints(state.message) catch state.message.len);

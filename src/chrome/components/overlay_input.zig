@@ -90,8 +90,10 @@ pub fn panelLayout(p: props.ChromeProps) ?PanelLayout {
     const term_cols = term_w_px / cw;
     if (term_cols == 0) return null;
     // C4b 패딩: 폭 상한을 2*pad만큼 줄인 가용 칸으로 panel_cols를 산출한다 — platform lowering이 배경 quad를
-    // ±pad 확장한 뒤에도 박스가 터미널 영역 [sidebar, sidebar+term_w_px] 안에 들도록 텍스트 폭을 양보한다.
-    // pad=0(tui)이면 avail_cols == term_cols라 무변화.
+    // ±pad 확장한 뒤에도 박스가 터미널 영역에 들도록 텍스트 폭을 양보한다(avail_cols>=1이면 [sidebar,
+    // sidebar+term_w_px] 안). pad=0(tui)이면 avail_cols == term_cols라 무변화. 단 avail_cols==0(term_w_px < 2*pad,
+    // 터미널 영역 1~3칸의 비정상적으로 좁은 창)이면 soft-lock 방지로 panel_cols=1을 강제하므로 ±pad 확장이 최대
+    // pad만큼 사이드바/우측을 침범할 수 있다 — bounded이고, '안 보이는 열린 모달'보다 작은 박스가 낫다는 절충.
     const pad: u32 = p.shape.modal_padding_px;
     const avail_cols = (term_w_px -| 2 * pad) / cw;
     const panel_cols: u32 = @max(@min(@as(u32, 60), avail_cols -| 4), 1);

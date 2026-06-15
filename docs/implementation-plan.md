@@ -145,7 +145,7 @@ TDD 방식:
 아직 하지 않는다:
 
 - xterm 전체 호환성.
-- Kitty graphics protocol의 이미지 디코드·저장·렌더(APC 파서 + command 파싱 토대는 #528로 완료 — 아래 "미구현 프로토콜 audit" 참조; sixel은 별개 후속).
+- Kitty graphics protocol의 placement·렌더(APC 파서+command 토대 #528, 이미지 디코드+저장 #530/#531 완료 — 아래 "미구현 프로토콜 audit" 참조; PNG/zlib·sixel은 별개 후속).
 - OSC/clipboard/advanced mouse mode 전체.
 - UAX#11 전체/ambiguous width 설정/ZWJ emoji/box drawing 정렬. 현재는 최소 width table과 continuation/combining cell 모델까지만 구현한다.
 - Ghostty/libghostty-vt 코드 복사.
@@ -495,7 +495,7 @@ TDD 방식:
   - **mouse reporting(DECSET 1000/1002/1003 트래킹 + 1006 SGR/1016 pixels/x10 인코딩)**: 클릭/드래그/휠을 `CSI < Cb;Px;Py M/m`(SGR) 또는 `CSI M`(x10)으로 PTY 리포트. Swift `buttonNumber`→xterm 0/1/2·`modifierFlags`→mods 비트 변환, shift+click은 셀렉션 override, 휠=버튼 64/65.
   - **synchronized output(DECSET 2026)**: sync 중 metal frame 투영을 hold하고 ESU에 누적 출력을 한 frame으로 그려 tearing/깜빡임을 막는다. DECRQM `?2026$p`로 지원 감지(Ghostty render-skip 동형).
   - **kitty keyboard protocol(CSI u, #526/#527)**: 위 키 인코딩 문단 참조 — FlagStack(push `>`/pop `<`/set `=`/query `?`) + disambiguate 인코딩, Shift+Tab backtab fix(code review 발견).
-  - **kitty graphics protocol(APC, #528)**: 파서+command 토대(`ESC _ G ...` 수집 + control `k=v` 파싱)까지. 이미지 디코드·저장·렌더는 후속(가장 큰 단계 — GpuImage 프리미티브 + 이미지 atlas + Metal 파이프라인 + ABI bump). sixel(DCS 기반)은 별개이고 Ghostty도 미지원이라 후순위.
+  - **kitty graphics protocol(APC, #528/#530/#531)**: ① 파서+command 토대(`ESC _ G ...` 수집 + control `k=v` 파싱, #528) ② 이미지 디코드+저장(transmit RGBA/RGB base64→`KittyImageStorage`, 같은 id 교체·320MB 총량 한계·`a=d` delete·RIS 비움, #530; 치수 곱 오버플로 crash fix #531)까지 완료. 남은 후속: ③ placement(커서/셀 좌표 + `RenderSnapshot` 노출) ④ 렌더(가장 큰 단계 — GpuImage 프리미티브 + 이미지 atlas + Metal 파이프라인 + ABI bump). PNG(`f=100`)·zlib(`o=z`)·chunked(`m=1`)·LRU evict도 후속. sixel(DCS 기반)은 별개이고 Ghostty도 미지원이라 후순위.
 
 ## 메뉴바 + 커맨드 팝업 (Action 카탈로그, 8단계 후속 — 사용자 합의 완료·미착수)
 

@@ -1756,7 +1756,7 @@ pub const TerminalCore = struct {
     /// 1049의 커서 저장은 이미 alt여도 수행한다(xterm: "unconditionally saves the cursor").
     fn enterAltScreen(self: *TerminalCore, save_cursor: bool) void {
         if (self.alt_active) {
-            // 화면은 이미 alt지만 1049h의 커서 저장 의미는 유지한다(중첩 tmux/SIGCONT 재초기화).
+            // 화면은 이미 alt지만 1049h의 커서 저장 의미는 유지한다(중첩 멀티플렉서/SIGCONT 재초기화).
             if (save_cursor) self.saveCursorState();
             return;
         }

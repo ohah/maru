@@ -465,7 +465,7 @@ const EnvStorage = struct {
     fn init(allocator: std.mem.Allocator, env: []const []const u8, term: []const u8, zdotdir: ?[]const u8) !EnvStorage {
         if (env.len == 0) {
             // 부모 환경을 물려주되 TERM/COLORTERM은 Maru 값으로 덮어쓴다. 부모 TERM을 그대로 주면
-            // (예: tmux/screen TERM, 또는 Maru 동작과 안 맞는 terminfo) zsh의 SIGWINCH redraw가
+            // (예: 멀티플렉서 TERM, 또는 Maru 동작과 안 맞는 terminfo) zsh의 SIGWINCH redraw가
             // wrap 행 수를 잘못 계산해(상대 커서 이동 \e[A 횟수가 어긋남) 프롬프트가 중복된다.
             // 기본 xterm-256color는 Maru의 xterm식(auto-wrap + deferred wrap) 동작과 맞는다. 단
             // 사용자 config(`term =`)로 바꿀 수 있다. zdotdir이 있으면 셸 통합용 ZDOTDIR을 주입한다.

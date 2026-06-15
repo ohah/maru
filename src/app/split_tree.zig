@@ -2,7 +2,7 @@ const std = @import("std");
 
 // SplitTree(panel) 모델. 한 워크스페이스(사이드바 탭)는 leaf 1개(flat)가 아니라 가로/세로로 나눌 수 있는
 // leaf 트리다(단일 출처: docs/tabs-splits-layout.md). 동작은 Ghostty의 SplitTree를 **개념만** 참고하고
-// (MIT, 코드 표현 미참고) Zig로 독립 구현한다. 드라이버(네이티브 PTY / tmux pane)와 무관한 순수 모델이다.
+// (MIT, 코드 표현 미참고) Zig로 독립 구현한다. 드라이버(네이티브 PTY / 멀티플렉서 pane)와 무관한 순수 모델이다.
 //
 //   Node = leaf(Leaf) | split{ direction, ratio, a, b }
 //

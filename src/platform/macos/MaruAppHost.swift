@@ -128,7 +128,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
             return
         }
         // Ctrl/Cmd/Option 조합은 입력기에 보내지 않고 바로 단축키/인코딩 경로로 — 한글 입력
-        // 모드에서도 Ctrl+B(tmux prefix)나 Cmd+C가 동작하고(레이아웃 독립 매칭은 Zig가 물리
+        // 모드에서도 Ctrl+B(멀티플렉서 prefix)나 Cmd+C가 동작하고(레이아웃 독립 매칭은 Zig가 물리
         // 키코드로 한다), Option+글자는 특수문자 입력이 아니라 기존 meta-ESC 인코딩을 유지한다.
         let chord = event.modifierFlags.intersection([.command, .control, .option])
         // 이 키가 IME를 우회해(단축키 조합 또는 특수키) handleKeyDown으로 직행하는가.

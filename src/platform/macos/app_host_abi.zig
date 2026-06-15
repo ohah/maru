@@ -599,7 +599,7 @@ pub export fn maru_macos_app_dev_session_metal_frame(
 fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
     // 레이아웃 독립 단축키: Ctrl/Cmd 조합인데 현재 입력 소스의 글자가 라틴이 아니면(한글 'ㅂ'
     // 등 >= 0x80) 물리 키코드를 US 배열 라틴으로 되돌린다 — 한글 모드에서도 Ctrl+B가 0x02로
-    // 인코딩된다(tmux prefix 등). 라틴 레이아웃(영어/Dvorak)의 결과는 존중해 건드리지 않는다.
+    // 인코딩된다(멀티플렉서 prefix 등). 라틴 레이아웃(영어/Dvorak)의 결과는 존중해 건드리지 않는다.
     var codepoint = event.codepoint;
     if ((event.modifier_control != 0 or event.modifier_command != 0) and codepoint >= 0x80) {
         if (keycode.usAsciiForKeyCode(event.raw_key_code)) |latin| codepoint = latin;
@@ -802,7 +802,7 @@ test "layout-independent shortcut: Hangul-mode Ctrl+B normalizes to latin b via 
     const key_event = try keyEventFromAbi(event);
     try std.testing.expectEqual(terminal.Key{ .char = 'b' }, key_event.key);
     try std.testing.expect(key_event.modifiers.control);
-    // 인코딩까지: Ctrl+b -> 0x02 (tmux prefix가 한글 모드에서도 동작).
+    // 인코딩까지: Ctrl+b -> 0x02 (멀티플렉서 prefix가 한글 모드에서도 동작).
     var buffer: [8]u8 = undefined;
     const encoded = try terminal.input.encodeKey(key_event, &buffer, .{});
     try std.testing.expectEqualSlices(u8, &.{0x02}, encoded);

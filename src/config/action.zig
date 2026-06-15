@@ -1,13 +1,13 @@
 const std = @import("std");
 
 pub const Action = union(enum) {
-    // 워크스페이스(사이드바 탭) 단위. cmux 풀 모델에선 ⌘⇧T/⌘⇧[]가 워크스페이스, ⌘T/⌘[]는 아래 Term이다.
+    // 워크스페이스(사이드바 탭) 단위. 탭 풀 모델에선 ⌘⇧T/⌘⇧[]가 워크스페이스, ⌘T/⌘[]는 아래 Term이다.
     new_tab,
     close_tab,
     select_tab: usize,
     previous_tab,
     next_tab,
-    // 활성 pane 안의 Term(가로 탭 = 터미널) 단위(cmux식). ⌘T=새 Term, ⌘W=활성 Term 닫기(마지막이면 pane→워크
+    // 활성 pane 안의 Term(가로 탭 = 터미널) 단위(탭 모델). ⌘T=새 Term, ⌘W=활성 Term 닫기(마지막이면 pane→워크
     // 스페이스로 cascade), ⌘]/⌘[=다음/이전 Term. 워크스페이스(위)와 modifier(shift 유무)로 갈린다.
     new_term,
     close_term,

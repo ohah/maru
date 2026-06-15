@@ -268,7 +268,7 @@ typedef struct MaruAppHostDevMetalFrame {
     const MaruAppHostDevMetalCell *sidebar_cells;
     size_t sidebar_cell_count;
     /* 사이드바 탭 슬롯 한 칸의 픽셀 높이(≈2.5×cell_height). renderer가 사이드바 셀을 cell 높이가 아니라
-       이 슬롯 높이로 세로 배치한다(밴드 row i → py=i×slot_h) — cmux식 큰 탭 슬롯. 0이면 cell 높이로 폴백. */
+       이 슬롯 높이로 세로 배치한다(밴드 row i → py=i×slot_h) — 큰 탭 슬롯. 0이면 cell 높이로 폴백. */
     uint32_t sidebar_slot_height_px;
     /* chrome rich GPU 프리미티브(C4b). tui 테마는 빈 배열(NULL/0)이라 렌더 무동작(셀 그리드 유지),
        rich 테마만 lowering이 채운다(C4b-2~). NativeMetalCell과 별개 파이프라인으로 SDF AA로 그린다. */

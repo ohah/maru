@@ -265,14 +265,19 @@ pub fn paneTabWidth(cols: u16, tab_count: usize) u16 {
 /// 탭 바 레이아웃 단일 소스(§6) — barMetrics(hit-test)·buildPaneTabBarDrawList(렌더)가 공유해 보이는 탭/‹›/+ 와
 /// 클릭이 일치한다. base=paneTabAreaCols("+" zone 뺀 탭 영역). 전체 탭 폭(term*tab_w)이 base를 넘으면 우측에
 /// ‹›(왼/오 스크롤) 2칸을 예약해 tab_cols를 그만큼 줄인다(has_scroll). tab_w: rich 고정 or tui 균등. tab_w=0=분할 불가.
-pub fn tabLayout(bar_cols: u16, term_count: usize, tab_width_fixed: u16) struct { tab_cols: u16, tab_w: u16, has_scroll: bool } {
+pub fn tabLayout(bar_cols: u16, term_count: usize, tab_width_fixed: u16, scroll_cols: u32) struct { tab_cols: u16, tab_w: u16, has_scroll: bool, eff_scroll: u32 } {
     const base = paneTabAreaCols(bar_cols);
     const tab_w = if (tab_width_fixed > 0) tab_width_fixed else paneTabWidth(base, term_count);
-    if (tab_w == 0) return .{ .tab_cols = base, .tab_w = 0, .has_scroll = false };
+    if (tab_w == 0) return .{ .tab_cols = base, .tab_w = 0, .has_scroll = false, .eff_scroll = 0 };
     const total = @as(u32, @intCast(term_count)) * @as(u32, tab_w);
-    const has_scroll = total > base and base > 2; // 넘치고 ‹›(2칸) 둘 여유가 있을 때만
+    // #4(리뷰): rich 고정폭(tab_width_fixed>0)만 스크롤한다 — tui 균등은 tab_w=1 collapse로 넘쳐도 ‹›를 안 띄움("tui 무변화" 유지).
+    // ‹›(2칸) 둘 여유(base>2)도 필요.
+    const has_scroll = tab_width_fixed > 0 and total > base and base > 2;
     const tab_cols: u16 = if (has_scroll) base - 2 else base;
-    return .{ .tab_cols = tab_cols, .tab_w = tab_w, .has_scroll = has_scroll };
+    // #1(리뷰): scroll를 [0, total-tab_cols]로 clamp + has_scroll 아니면 0 → 탭 닫기/리사이즈로 넘침이 사라지면 stale scroll가
+    // 자동으로 0이 돼 빈 탭 바에 갇히지 않는다. 렌더·hit-test·클릭이 이 eff_scroll을 공유(§6).
+    const eff_scroll: u32 = if (has_scroll) @min(scroll_cols, total - tab_cols) else 0;
+    return .{ .tab_cols = tab_cols, .tab_w = tab_w, .has_scroll = has_scroll, .eff_scroll = eff_scroll };
 }
 
 pub fn buildPaneTabBarDrawList(
@@ -292,13 +297,13 @@ pub fn buildPaneTabBarDrawList(
     const style: terminal.Style = .{ .foreground = fg };
     // 탭은 "+" 버튼 zone을 뺀 영역(tab_cols)에만 깐다. 우측 [tab_cols, cols)는 "+"(새 Term) 버튼.
     // 탭 레이아웃 단일 소스(§6) — barMetrics(hit-test)와 같은 tabLayout이라 보이는 탭/‹›/+ == 클릭. 넘치면 우측 ‹›(2칸) 예약·탭 영역 축소.
-    const layout = tabLayout(cols, titles.len, tab_width_fixed);
+    const layout = tabLayout(cols, titles.len, tab_width_fixed, scroll_cols);
     const tab_cols = layout.tab_cols;
     const tab_w = layout.tab_w;
     if (tab_w > 0) {
         for (titles, 0..) |title, tab_index| {
             // C4b-4: 셀 경계를 chrome tabbar.segCols 단일 소스로 — hit-test(segOf)·활성 밴드와 같은 분할이라 제목·✕가 정합.
-            const sc = tabbar.segCols(tab_index, tab_w, tab_cols, scroll_cols);
+            const sc = tabbar.segCols(tab_index, tab_w, tab_cols, layout.eff_scroll); // #1: clamp된 eff_scroll(stale 방지)
             const start: u32 = sc.start;
             if (sc.end <= start) {
                 if (start >= tab_cols) break; // 우측 넘침 — 이후 탭도 다 넘침(중단)
@@ -699,18 +704,22 @@ test "paneTabWidth divides cols among tabs (min 1, clamps when tabs exceed cols)
     try std.testing.expectEqual(@as(u16, 0), paneTabWidth(20, 0));
 }
 
-test "tabLayout: 넘치면 ‹›(2칸) 예약·tab_cols 축소·has_scroll (안 넘치면 그대로)" {
+test "tabLayout: rich 넘침 ‹›·tab_cols 축소·scroll clamp; tui·안넘침 무스크롤" {
     // cols=40, "+"zone 3 → base=paneTabAreaCols(40)=37. 고정폭 16, 3탭 → total=48 > 37 → has_scroll, tab_cols=35.
-    const ovf = tabLayout(40, 3, 16);
+    const ovf = tabLayout(40, 3, 16, 0);
     try std.testing.expect(ovf.has_scroll);
     try std.testing.expectEqual(@as(u16, 35), ovf.tab_cols); // 37 - 2(‹›)
     try std.testing.expectEqual(@as(u16, 16), ovf.tab_w);
-    // 2탭 → total=32 <= 37 → no scroll, tab_cols=37(그대로).
-    const fit = tabLayout(40, 2, 16);
+    try std.testing.expectEqual(@as(u32, 0), ovf.eff_scroll); // scroll 0
+    // #1: 큰 scroll(stale 등)은 max(=total-tab_cols=13)로 clamp.
+    try std.testing.expectEqual(@as(u32, 13), tabLayout(40, 3, 16, 100).eff_scroll);
+    // 2탭 → total=32 <= 37 → no scroll, tab_cols=37(그대로), eff 0(stale 무시).
+    const fit = tabLayout(40, 2, 16, 50);
     try std.testing.expect(!fit.has_scroll);
     try std.testing.expectEqual(@as(u16, 37), fit.tab_cols);
-    // tui 균등(fixed 0) → cols/n으로 항상 들어가 안 넘침.
-    try std.testing.expect(!tabLayout(40, 4, 0).has_scroll);
+    try std.testing.expectEqual(@as(u32, 0), fit.eff_scroll);
+    // #4: tui(fixed 0)는 탭 많아 tab_w=1 collapse여도 has_scroll=false(균등, 스크롤 안 함 — tui 무변화).
+    try std.testing.expect(!tabLayout(40, 12, 0, 0).has_scroll);
 }
 
 test "buildSidebarDrawList truncates to cols and advances wide glyphs by two columns" {

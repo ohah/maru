@@ -301,9 +301,10 @@ fn barMetrics(bar: app.SplitRect, cell_width_px: u32, term_count: usize, tab_wid
     const cols = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
     if (cols == 0) return null;
     // 탭 레이아웃 단일 소스(§6) — buildPaneTabBarDrawList(렌더)와 같은 tabLayout이라 보이는 탭/‹›/+ == 클릭.
-    const layout = coretext_frame_builder.tabLayout(@intCast(cols), term_count, tab_width_fixed);
+    // scroll_cols는 tabLayout이 [0,max] clamp한 eff_scroll로 정규화(#1: stale 방지). hit-test·렌더가 같은 eff를 쓴다.
+    const layout = coretext_frame_builder.tabLayout(@intCast(cols), term_count, tab_width_fixed, scroll_cols);
     if (layout.tab_w == 0) return null;
-    return .{ .bar_x = bar.x, .bar_y = bar.y, .bar_w = bar.w, .bar_h = bar.h, .cell_width_px = cell_width_px, .cols = cols, .tab_cols = layout.tab_cols, .tab_w = layout.tab_w, .scroll_cols = scroll_cols, .has_scroll = layout.has_scroll };
+    return .{ .bar_x = bar.x, .bar_y = bar.y, .bar_w = bar.w, .bar_h = bar.h, .cell_width_px = cell_width_px, .cols = cols, .tab_cols = layout.tab_cols, .tab_w = layout.tab_w, .scroll_cols = layout.eff_scroll, .has_scroll = layout.has_scroll };
 }
 
 /// 활성 Term 탭 세그먼트를 강조 배경 셀로 칠한다(옛 BarMetrics.highlightCell). chrome tabbar hit-test와 **같은
@@ -2528,14 +2529,13 @@ pub const DevSession = struct {
                         // 바 우측 ‹›(가로 스크롤) 버튼 클릭 → 그 pane의 tab_scroll_cols를 ±tab_w(한 탭). 넘침 범위로 clamp. "+"·탭보다 먼저.
                         if (m) |bm| if (bm.inScrollLeftZone(x_px)) {
                             _ = self.focusPaneByPtr(lr.leaf);
-                            lr.leaf.tab_scroll_cols -|= bm.tab_w; // ‹ 왼쪽(이전 탭) — saturating 0
+                            lr.leaf.tab_scroll_cols = bm.scroll_cols -| bm.tab_w; // ‹ 이전 탭 — bm.scroll_cols(=clamp된 eff) 기준이라 stale 자동 정정
                             self.metal_dirty = true;
                             return;
                         };
                         if (m) |bm| if (bm.inScrollRightZone(x_px)) {
                             _ = self.focusPaneByPtr(lr.leaf);
-                            const max_scroll = @as(u32, @intCast(count)) * bm.tab_w -| bm.tab_cols; // 전체 탭 폭 - 보이는 영역(넘친 만큼)
-                            lr.leaf.tab_scroll_cols = @min(lr.leaf.tab_scroll_cols + bm.tab_w, max_scroll); // › 오른쪽(다음 탭)
+                            lr.leaf.tab_scroll_cols = bm.scroll_cols + bm.tab_w; // › 다음 탭 — 다음 렌더의 tabLayout이 [0,max]로 clamp
                             self.metal_dirty = true;
                             return;
                         };

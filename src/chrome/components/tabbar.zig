@@ -9,6 +9,14 @@
 
 const std = @import("std");
 
+/// 탭 tab_index의 **셀 경계** [start, end) — Metrics(픽셀 메트릭) 없이 순수 컬럼 분할만 계산하는 단일 소스.
+/// hit-test(segOf)와 platform view 그리기(buildPaneTabBarDrawList의 제목·✕)가 이 한 함수를 공유해 "보이는 탭/✕ ==
+/// 클릭되는 것"을 보장한다(§6). end = min((tab_index+1)*tab_w, tab_cols), end<=start면 overflow(탭 영역 밖, 안 보임).
+pub fn segCols(tab_index: usize, tab_w: u32, tab_cols: u32) struct { start: u32, end: u32 } {
+    const start = @as(u32, @intCast(tab_index)) * tab_w;
+    return .{ .start = start, .end = @min(start + tab_w, tab_cols) };
+}
+
 /// 탭 바 한 줄의 컬럼 분할 메트릭(중립 — host가 platform에서 변환해 주입; bar rect는 plain u32). 바를
 /// [탭 영역(tab_cols) | "+" zone(cols-tab_cols)]으로 나눈다. tab_w=탭 하나의 폭(컬럼). 분할 불가(셀·바·탭 0)면 host가
 /// null을 줘 이 메트릭이 안 만들어진다(호출자가 탭 처리 건너뜀). platform이 활성 밴드·제목 glyph를 같은 분할로 그린다.
@@ -29,7 +37,7 @@ pub const Metrics = struct {
 
     /// tab_index 세그먼트의 끝 컬럼(우경계, tab_cols로 clamp). platform 활성 밴드(start [i*tab_w, +tab_w))와 같은 분할.
     pub fn segEnd(self: Metrics, tab_index: usize) u32 {
-        return @min((@as(u32, @intCast(tab_index)) + 1) * self.tab_w, self.tab_cols);
+        return segCols(tab_index, self.tab_w, self.tab_cols).end;
     }
 
     /// 탭 하나의 **경계 단일 소스**(§6) — hit-test(tabIndex·inCloseZone)와 platform 활성 밴드(tabbarHighlightCell)가
@@ -50,8 +58,9 @@ pub const Metrics = struct {
     /// 패딩 0이라 시각/동작이 기존 셀-열 hit-test와 동일하다. 둥근 탭(C4b-5)에서 탭 패딩을 더하면 **여기 한 곳만**
     /// 바뀌어 view·hit-test가 동시에 움직인다(§6 seam 해소의 토대). colPx/segEnd를 재사용한다.
     pub fn segOf(self: Metrics, tab_index: usize) TabSeg {
-        const start_col = @as(u32, @intCast(tab_index)) * self.tab_w;
-        const end_col = self.segEnd(tab_index);
+        const sc = segCols(tab_index, self.tab_w, self.tab_cols);
+        const start_col = sc.start;
+        const end_col = sc.end;
         const has_close = self.tab_w >= 2 and end_col >= 2;
         return .{
             .start_col = start_col,

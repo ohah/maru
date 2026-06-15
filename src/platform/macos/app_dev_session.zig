@@ -4283,7 +4283,11 @@ pub const DevSession = struct {
                     paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, f.rect, .{ .rgb = tk.get(f.role) }, null);
                 }
             },
-            .border => |b| paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides),
+            .border => |b| {
+                // C4b 모달: rich(quad 배경 — modal_bg_quad)면 테두리는 quad의 border_widths가 둥글게 그린다.
+                // 셀 직각 테두리를 skip해 둥근 quad에 직각 테두리가 겹치지 않게 한다(리뷰 — notice 테두리 정합).
+                if (!modal_bg_quad) paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides);
+            },
             .text => |t| placeText(cp, fg, cwid, cols, rows, origin_x, origin_y, cw, ch, t, .{ .rgb = tk.get(t.role) }),
             .rule => {}, // 컴포넌트가 아직 안 냄 — 필요해질 때(C2 divider) 셀 라인으로 lower
             .quad => |q| {

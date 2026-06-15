@@ -144,8 +144,9 @@ pub fn view(
     const rect = draw.Rect{ .x = x, .y = y, .w = panel_w, .h = lay.ch };
 
     const bg_r = p.shape.corner_radius_px;
-    // C4b 모달: 배경을 quad로 — tui(r=0)면 셀 배경(무변화), rich(r>0)면 둥근 GPU quad.
-    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r } } });
+    const bw = p.shape.border_width_px;
+    // C4b 모달: 배경을 quad로(둥근+테두리) — tui(0)면 셀 배경(무변화), rich(>0)면 둥근 quad + 테두리(focus_accent).
+    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
 
     // "Find: " + query + preedit(조합 중) (한 text op, 3 runs). prefix는 ASCII라 칸 수=바이트 수. 조합 글자는
     // query 뒤에 같은 색으로 붙여 입력 가시성을 준다(IME 조합 상태가 오버레이에 즉시 보인다).

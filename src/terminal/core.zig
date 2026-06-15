@@ -1557,7 +1557,11 @@ pub const TerminalCore = struct {
         if (cmd.width == 0 or cmd.height == 0 or cmd.image_id == 0) return; // 필수 control 누락
         const dec = std.base64.standard.Decoder;
         const decoded_len = dec.calcSizeForSlice(payload) catch return; // 잘못된 base64
-        const expected = @as(usize, cmd.width) * @as(usize, cmd.height) * bpp;
+        // 치수(s/v)는 APC에서 상한 없이 오는 u32라 곱이 usize를 넘을 수 있다(악의적 대형 값) — 오버플로면
+        // 거부한다(기존 크기 검증과 같은 graceful 경로). 안 그러면 Debug/ReleaseSafe에서 panic(abort)이고
+        // ReleaseFast에선 wrap돼 엉뚱한 크기로 통과할 수 있다(code review 발견).
+        const wh = std.math.mul(usize, cmd.width, cmd.height) catch return;
+        const expected = std.math.mul(usize, wh, bpp) catch return;
         if (decoded_len != expected) return; // 선언 크기 ≠ 디코드 크기
         const data = self.allocator.alloc(u8, decoded_len) catch return;
         dec.decode(data, payload) catch {
@@ -5908,6 +5912,9 @@ test "kitty graphics transmit: 크기 불일치·PNG·zlib는 저장 안 함, RI
     var sb: [16]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&sb, &small)}));
     try std.testing.expect(!core.kitty_images.map.contains(1));
+    // 과대 치수(s/v=u32max)는 곱이 usize를 넘어 — panic 없이 거부한다(code review 발견).
+    try core.write("\x1b_Ga=t,f=32,s=4294967295,v=4294967295,i=8;AAAA\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(8));
     // PNG(f=100)·zlib(o=z)은 후속이라 저장 안 함.
     try core.write("\x1b_Ga=t,f=100,s=2,v=2,i=2;AAAA\x1b\\");
     try std.testing.expect(!core.kitty_images.map.contains(2));

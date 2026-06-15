@@ -499,6 +499,7 @@ test "parse: full config sets every field" {
         \\theme.foreground = #ffeedd
         \\cursor.shape = bar
         \\cursor.blink = false
+        \\chrome.theme = rich
     );
     defer p.deinit();
     try std.testing.expectEqualStrings("JetBrains Mono", p.config.font.family);
@@ -507,6 +508,7 @@ test "parse: full config sets every field" {
     try std.testing.expectEqualStrings("#ffeedd", p.config.theme.foreground);
     try std.testing.expectEqual(theme.CursorShape.bar, p.config.cursor.shape);
     try std.testing.expectEqual(false, p.config.cursor.blink);
+    try std.testing.expectEqual(theme.ChromeTheme.rich, p.config.chrome_theme); // C4a chrome.theme 파싱
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
 }
 
@@ -530,6 +532,7 @@ test "parse: forgiving — unknown key and bad values keep defaults with diagnos
         \\cursor.blink = maybe
         \\theme.background = not-a-color
         \\nonsense.key = 1
+        \\chrome.theme = neon
         \\missing equals
     );
     defer p.deinit();
@@ -538,18 +541,21 @@ test "parse: forgiving — unknown key and bad values keep defaults with diagnos
     try std.testing.expectEqual(defaults.cursor.shape, p.config.cursor.shape);
     try std.testing.expectEqual(defaults.cursor.blink, p.config.cursor.blink);
     try std.testing.expectEqualStrings(defaults.theme.background, p.config.theme.background);
-    // 6개 문제 줄 각각 diagnostic(누락 '=' 포함).
-    try std.testing.expectEqual(@as(usize, 6), p.diagnostics.len);
+    try std.testing.expectEqual(defaults.chrome_theme, p.config.chrome_theme); // 미지값(neon) → tui 폴백(C4a)
+    // 7개 문제 줄 각각 diagnostic(chrome.theme=neon·누락 '=' 포함).
+    try std.testing.expectEqual(@as(usize, 7), p.diagnostics.len);
 }
 
 test "parse: resolved appearance never fails on parsed config (values pre-validated)" {
     var p = try parse(std.testing.allocator,
         \\font.size = 999
         \\theme.cursor = #zzzzzz
+        \\chrome.theme = rich
     );
     defer p.deinit();
     // 잘못된 값은 default로 걸러졌으므로 resolve가 성공해야 한다.
-    _ = try appearance.resolve(p.config);
+    const ra = try appearance.resolve(p.config);
+    try std.testing.expectEqual(theme.ChromeTheme.rich, ra.chrome_theme); // config→ResolvedAppearance 전파(C4a)
 }
 
 test "loadFile: missing path yields default config, not an error" {

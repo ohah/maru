@@ -3699,6 +3699,7 @@ pub const DevSession = struct {
                     // rich: 바 배경(직각)·활성 탭 밴드(둥근+gradient) 모두 layer 2 quad. 바 배경을 먼저 append해 아래,
                     // 활성 탭이 위, 제목 셀(part1)은 그 위 — 불투명 바 배경 셀이 밴드 quad를 가리던 z-order 버그 해소(리뷰 #1).
                     self.appendBarBgQuad(bar, self.sidebarBg());
+                    self.appendTabBarUnderline(bar); // 탭바 하단 구분선(터미널 콘텐츠와 경계) — 바 배경 위·활성 밴드 아래(append 순서)
                     if (m_opt) |m| self.appendTabBandQuad(m, lr.leaf.active_term, hl_bg, tab_corner, tab_grad);
                 } else {
                     // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위).
@@ -4085,6 +4086,25 @@ pub const DevSession = struct {
             .border_widths = .{ 0, 0, 0, 0 },
             .fill_color0 = bg,
             .fill_color1 = bg,
+            .border_color = 0,
+            .gradient_kind = 0,
+            .layer = 2,
+        }) catch {};
+    }
+
+    /// 탭바 하단 1px 구분선(divider 색)을 layer 2 GpuQuad로 — 탭바를 터미널 콘텐츠와 시각 분리(rich). 활성 탭 영역은
+    /// 활성 밴드(나중 append)가 위에 덮어 자연히 밴드 색이 되고, 비활성 영역엔 divider 구분선이 보인다.
+    fn appendTabBarUnderline(self: *DevSession, bar: app.SplitRect) void {
+        const dc = self.dividerColor();
+        self.gpu_quads.append(self.allocator, .{
+            .x = @floatFromInt(bar.x),
+            .y = @floatFromInt(bar.y + bar.h -| 1),
+            .w = @floatFromInt(bar.w),
+            .h = 1,
+            .corner_radii = .{ 0, 0, 0, 0 },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = dc,
+            .fill_color1 = dc,
             .border_color = 0,
             .gradient_kind = 0,
             .layer = 2,

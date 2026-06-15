@@ -697,6 +697,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuQuad, "border_widths"), @offsetOf(DevGpuQuad, "border_widths"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuQuad, "fill_color0"), @offsetOf(DevGpuQuad, "fill_color0"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuQuad, "gradient_kind"), @offsetOf(DevGpuQuad, "gradient_kind"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuQuad, "layer"), @offsetOf(DevGpuQuad, "layer"));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevGpuShadow), @sizeOf(DevGpuShadow));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostDevGpuShadow), @alignOf(DevGpuShadow));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuShadow, "corner_radii"), @offsetOf(DevGpuShadow, "corner_radii"));

@@ -433,6 +433,7 @@ bool maru_metal_renderer_draw(
     // NULL/0(tui 테마)이면 생성 안 함. modal(팝업) 위 레이어 분리는 C4b-3에서.
     id<MTLBuffer> quad_vertex_buffer = nil;
     size_t quad_vertex_total = 0;
+    size_t under_quad_n = 0; // C4b 모달: layer 0(under — 사이드바 밴드) quad 수. draw가 under/over를 가르는 경계.
     const size_t gpu_quad_n = (gpu_quads != NULL) ? gpu_quad_count : 0;
     if (gpu_quad_n > 0) {
         if (gpu_quad_n > SIZE_MAX / 6) {
@@ -449,8 +450,15 @@ bool maru_metal_renderer_draw(
             return false;
         }
         MaruRendererQuadVertex *qv = (MaruRendererQuadVertex *)quad_vertex_buffer.contents;
+        // C4b 모달: layer 0(under — 사이드바 밴드)을 정점 버퍼 앞, layer 1(over — 모달)을 뒤에 배치한다.
+        // draw가 under_quad_n 경계로 두 패스를 그려 z를 맞춘다(under는 part1 위·part2 아래, over는 최상위).
         for (size_t i = 0; i < gpu_quad_n; i++) {
-            maru_fill_quad_instance(&qv[i * 6], gpu_quads[i], drawable_w, drawable_h);
+            if (gpu_quads[i].layer == 0) under_quad_n += 1;
+        }
+        size_t ui = 0, oi = under_quad_n;
+        for (size_t i = 0; i < gpu_quad_n; i++) {
+            const size_t dst = (gpu_quads[i].layer == 0) ? ui++ : oi++;
+            maru_fill_quad_instance(&qv[dst * 6], gpu_quads[i], drawable_w, drawable_h);
         }
     }
 
@@ -481,6 +489,7 @@ bool maru_metal_renderer_draw(
     // 배경 strip이 그 위에 덮어 밴드가 안 보인다(z-order). 그래서 셀 패스를 '사이드바 cells 시작'에서 둘로
     // 쪼개, 밴드 quad를 배경 strip '뒤'·제목 glyph '앞'에 끼운다. (모달/divider quad의 위 레이어 분리는 후속.)
     const size_t pre_sidebar_vertices = (cell_count + sidebar_bg_quads) * 6;
+    const size_t under_vertex_count = under_quad_n * 6;
     if (vertex_buffer != nil && pre_sidebar_vertices > 0) {
         [encoder setRenderPipelineState:impl.pipeline];
         [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
@@ -489,12 +498,13 @@ bool maru_metal_renderer_draw(
                     vertexStart:0
                     vertexCount:pre_sidebar_vertices];
     }
-    if (quad_vertex_buffer != nil) {
+    // under quad(layer 0 — 사이드바 밴드): 사이드바 배경 위·제목 아래.
+    if (quad_vertex_buffer != nil && under_vertex_count > 0) {
         [encoder setRenderPipelineState:impl.quadPipeline];
         [encoder setVertexBuffer:quad_vertex_buffer offset:0 atIndex:0];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                     vertexStart:0
-                    vertexCount:quad_vertex_total];
+                    vertexCount:under_vertex_count];
     }
     if (vertex_buffer != nil && total_vertices > pre_sidebar_vertices) {
         [encoder setRenderPipelineState:impl.pipeline];
@@ -503,6 +513,15 @@ bool maru_metal_renderer_draw(
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                     vertexStart:pre_sidebar_vertices
                     vertexCount:(total_vertices - pre_sidebar_vertices)];
+    }
+    // over quad(layer 1 — 모달): 셀 전체 위 최상위. (모달 텍스트 셀 '아래'로 끼우는 경계 분할은 모달-1c.
+    // 현재 모달이 quad를 안 내 over는 비어 무동작 — under=전체라 위 패스가 모든 quad를 그린다.)
+    if (quad_vertex_buffer != nil && quad_vertex_total > under_vertex_count) {
+        [encoder setRenderPipelineState:impl.quadPipeline];
+        [encoder setVertexBuffer:quad_vertex_buffer offset:0 atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                    vertexStart:under_vertex_count
+                    vertexCount:(quad_vertex_total - under_vertex_count)];
     }
     [encoder endEncoding];
 

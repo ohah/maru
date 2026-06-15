@@ -69,8 +69,13 @@ pub fn view(
     // 된다(리뷰 발견). box_cols는 아래에서 term_cols로 clamp되므로(≥1) box_w ≤ term_w_px가 유지돼 중앙배치
     // 뺄셈이 안전하다. (term_cols==0은 box_w=cw > term_w_px라 뺄셈이 언더플로하므로 반드시 생략.)
     if (term_cols == 0) return;
+    // C4b 패딩: 폭 상한을 2*pad만큼 줄인 가용 칸으로 box_cols를 clamp한다 — platform lowering이 배경 quad를
+    // ±pad 확장한 뒤에도 박스가 터미널 영역 안에 들도록 텍스트 폭을 양보한다(overlay_input.panelLayout과 동형).
+    // pad=0(tui)이면 avail_cols == term_cols라 무변화.
+    const pad: u32 = p.shape.modal_padding_px;
+    const avail_cols = (term_w_px -| 2 * pad) / cw;
     const msg_cols: u32 = @intCast(std.unicode.utf8CountCodepoints(state.message) catch state.message.len);
-    const box_cols = @max(@min(msg_cols + 2 * tk.space.modal_margin_cells, term_cols), 1);
+    const box_cols = @max(@min(msg_cols + 2 * tk.space.modal_margin_cells, avail_cols), 1);
     const box_w = box_cols * cw;
     const box_h = 3 * ch; // 위 여백 한 줄 + 메시지 한 줄 + 아래 여백 한 줄
 
@@ -189,4 +194,33 @@ test "notice view: 좁은 창(1~3칸)이어도 작은 박스를 그린다 — so
     const narrow = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 45, .backing_height_px = 600 } };
     try view(&s, narrow, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len); // term_w=5px < cw=8 → term_cols=0 → 생략
+}
+
+test "notice view: rich 패딩이면 확장 박스(box_w + 2*pad)가 터미널 영역 안 — 사이드바 침범 방지" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const pad: u32 = 12;
+    const sidebar: u32 = 40;
+    const backing: u32 = 200; // 좁은 창 — 폭 clamp가 걸리는 경계
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = sidebar,
+        .backing_width_px = backing,
+        .backing_height_px = 600,
+    }, .shape = .{ .modal_padding_px = @intCast(pad) } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+
+    var s = State{};
+    s.show("this is a fairly long corruption message to force the width clamp"); // 길어 box_cols가 avail_cols로 clamp
+    try view(&s, p, &tk, arena, &out);
+    const box = out.items[0].quad.rect;
+    const term_w_px = backing - sidebar;
+    // lowering이 ±pad 확장해도 박스가 [sidebar, sidebar+term_w_px] 안: 좌단 quad.x>=sidebar, 우단<=sidebar+term_w_px.
+    try std.testing.expect(box.w + 2 * pad <= term_w_px);
+    try std.testing.expect(box.x - @as(i32, @intCast(pad)) >= @as(i32, @intCast(sidebar)));
+    try std.testing.expect(box.x + @as(i32, @intCast(box.w + pad)) <= @as(i32, @intCast(sidebar + term_w_px)));
 }

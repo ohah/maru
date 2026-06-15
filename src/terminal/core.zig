@@ -11,7 +11,8 @@ pub const MouseFormat = enum { x10, sgr, sgr_pixels };
 
 /// kitty keyboard protocol(progressive enhancement) flag(packed u5). disambiguate=모호한 키만 CSI u로 명확히,
 /// report_events=key up/repeat, report_alternates=대체 키, report_all=모든 키 escape, report_associated=텍스트.
-/// 베이스: kitty keyboard protocol spec / Ghostty kitty/key.zig Flags. 기본 disabled(legacy 인코딩).
+/// 비트 위치(disambiguate=1·report_events=2·report_alternates=4·report_all=8·report_associated=16)는 kitty
+/// keyboard protocol 명세가 정한 progressive-enhancement 플래그 값이다. 기본 disabled(legacy 인코딩).
 pub const KittyFlags = packed struct(u5) {
     disambiguate: bool = false,
     report_events: bool = false,
@@ -26,35 +27,49 @@ pub const KittyFlags = packed struct(u5) {
 };
 /// kitty flags의 set 연산 모드(CSI = flags ; mode u). 1=set(치환)·2=or(합집합)·3=not(차집합) — 베이스: kitty spec.
 pub const KittySetMode = enum { set, @"or", not };
-/// kitty flags 스택(CSI > flags u = push, CSI < n u = pop). 고정 크기 8(heap 회피), idx는 wrap. 베이스: Ghostty FlagStack.
+/// kitty flags 스택(CSI > flags u = push, CSI < n u = pop, CSI = flags;mode u = set). 활성 flags 하나와
+/// 복원용 스택을 따로 둔다 — push는 현재 flags를 스택에 저장하고 새 flags로 진입하고, pop n은 n단을
+/// 복원한다. kitty keyboard protocol은 스택 깊이/오버플로 동작을 규정하지 않으므로 maru가 한도를 정한다:
+/// 한도(16) 초과 push는 가장 오래된 복원 지점을 버리고, 스택 높이를 넘는 pop은 비활성으로 떨군다(빈 스택은
+/// disabled). 터미널 모드 스택은 보통 1~2단이라 한도 초과는 비현실적. 베이스: kitty keyboard protocol의
+/// flag 스택(push/pop/set 의미만 명세; 자료구조는 maru 설계).
 pub const KittyFlagStack = struct {
-    const stack_len = 8;
-    flags: [stack_len]KittyFlags = @splat(.disabled),
-    idx: u3 = 0,
+    const max_depth = 16;
+    active: KittyFlags = .{},
+    saved: [max_depth]KittyFlags = @splat(.{}),
+    depth: usize = 0,
 
     pub fn current(self: KittyFlagStack) KittyFlags {
-        return self.flags[self.idx];
+        return self.active;
     }
     pub fn set(self: *KittyFlagStack, mode: KittySetMode, v: KittyFlags) void {
-        switch (mode) {
-            .set => self.flags[self.idx] = v,
-            .@"or" => self.flags[self.idx] = @bitCast(self.flags[self.idx].int() | v.int()),
-            .not => self.flags[self.idx] = @bitCast(self.flags[self.idx].int() & ~v.int()),
-        }
+        const cur = self.active.int();
+        self.active = @bitCast(switch (mode) {
+            .set => v.int(),
+            .@"or" => cur | v.int(),
+            .not => cur & ~v.int(),
+        });
     }
     pub fn push(self: *KittyFlagStack, flags: KittyFlags) void {
-        self.idx +%= 1; // 가득 차면 wrap(가장 오래된 항목 축출) — Ghostty 동일
-        self.flags[self.idx] = flags;
+        if (self.depth == max_depth) {
+            // 한도 초과: 가장 오래된 복원 지점을 버리고 한 칸 당긴다.
+            std.mem.copyForwards(KittyFlags, self.saved[0 .. max_depth - 1], self.saved[1..]);
+            self.depth -= 1;
+        }
+        self.saved[self.depth] = self.active;
+        self.depth += 1;
+        self.active = flags;
     }
     pub fn pop(self: *KittyFlagStack, n: usize) void {
-        if (n >= self.flags.len) { // 과도한 pop(DoS 회피)은 전체 리셋
-            self.idx = 0;
-            self.flags = @splat(.disabled);
+        if (n >= self.depth) {
+            // 스택 높이 이상으로 pop하면 전부 비우고 비활성(빈 스택 pop은 disabled).
+            self.depth = 0;
+            self.active = .{};
             return;
         }
         for (0..n) |_| {
-            self.flags[self.idx] = .disabled;
-            self.idx -%= 1;
+            self.depth -= 1;
+            self.active = self.saved[self.depth];
         }
     }
 };
@@ -1496,7 +1511,9 @@ pub const TerminalCore = struct {
     const KittyImageStorage = struct {
         map: std.AutoHashMapUnmanaged(u32, KittyImage) = .{},
         total_bytes: usize = 0,
-        /// 한 세션이 잡을 수 있는 이미지 메모리 상한(Ghostty의 320MB와 동일).
+        /// 한 세션이 kitty graphics 이미지로 잡을 수 있는 메모리 상한 — maru가 정한 실용 값이다(kitty
+        /// 명세는 상한을 규정하지 않으므로 과대/악의적 전송 폭주를 막는 방어선으로 둔다). 대형 이미지
+        /// 수십~수백 장을 담되 무한 누적을 차단하는 선에서 320MB로 잡았다.
         const limit: usize = 320 * 1000 * 1000;
 
         fn deinit(self: *KittyImageStorage, alloc: std.mem.Allocator) void {

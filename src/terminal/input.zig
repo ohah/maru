@@ -129,7 +129,7 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: 
 }
 
 /// kitty keyboard 인코딩(progressive enhancement). encodeKey가 kitty_flags!=0일 때 분기한다.
-/// 베이스: kitty keyboard protocol spec + Ghostty input/key_encode.zig kitty(). 현재 disambiguate
+/// 베이스: kitty keyboard protocol spec(disambiguate 인코딩 규칙). 현재 disambiguate
 /// 수준만 — report_events/alternates/associated(release/대체키/연관텍스트)는 후속이다(Maru는 press만
 /// 전달하고, base codepoint는 Swift charactersIgnoringModifiers라 Ctrl+Shift+printable의 alternate는
 /// 한계가 있다). escape·functional·modifier 조합은 CSI 시퀀스로, modifier 없는 텍스트/enter/tab/
@@ -142,8 +142,7 @@ fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: En
     switch (event.key) {
         // kitty spec: Enter/Tab/Backspace는 modifier가 "전혀" 없을 때만 legacy 바이트(\r/\t/\x7f)를
         // 보낸다(모드가 안 꺼진 채 죽어도 shell에서 reset 입력 가능). shift 포함 어떤 modifier든 있으면
-        // CSI u로 — Shift+Tab=CSI 9;2u(backtab) 등. Ghostty binding_mods.empty()가 shift까지 포함해
-        // 거르는 것(key_mods.zig binding())과 동형.
+        // CSI u로 — Shift+Tab=CSI 9;2u(backtab) 등. 즉 legacy 예외는 modifier가 하나도 없을 때로 한정한다.
         .enter => if (!has_any_mod) return "\r",
         .tab => if (!has_any_mod) return "\t",
         .backspace => if (!has_any_mod) return "\x7f",
@@ -163,9 +162,9 @@ fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: En
 
 const KittyEntry = struct { code: u21, final: u8 };
 
-/// Maru Key → kitty (code, final). 베이스: kitty keyboard protocol functional-key 정의 + Ghostty
-/// input/kitty.zig 테이블. final 'u'/'~'는 CSI code[;mods]final, letter(A/B/C/D/H/F/P/Q/S)는 legacy
-/// 호환 CSI[1;mods]final 형식이다.
+/// Maru Key → kitty (code, final). 베이스: kitty keyboard protocol의 functional-key 정의(spec이 정한
+/// 키별 unicode 코드·final 문자). final 'u'/'~'는 CSI code[;mods]final, letter(A/B/C/D/H/F/P/Q/S)는
+/// legacy 호환 CSI[1;mods]final 형식이다.
 fn kittyEntry(key: Key) KittyEntry {
     return switch (key) {
         .char => |cp| .{ .code = cp, .final = 'u' },
@@ -211,7 +210,7 @@ fn kittyModsSeqInt(mods: ModifierSet) u16 {
     return v + 1;
 }
 
-/// KittySequence.encode(Ghostty) 동형: final 'u'/'~'는 CSI code[;mods]final, letter는 CSI[1;mods]final
+/// kitty 명세 인코딩 형식: final 'u'/'~'는 CSI code[;mods]final, letter(legacy 호환 키)는 CSI[1;mods]final
 /// (code=1 생략). mods<=1이면 modifier param을 생략한다(legacy CSI A/B/C/D/H/F와 호환).
 fn encodeKittySeq(buffer: *[encoded_key_buffer_len]u8, code: u21, final: u8, mods: u16) ![]const u8 {
     if (final == 'u' or final == '~') {

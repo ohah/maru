@@ -82,8 +82,10 @@ pub fn view(
     const rect = draw.Rect{ .x = x, .y = y, .w = box_w, .h = box_h };
 
     const bg_r = p.shape.corner_radius_px;
-    // C4b 모달: 배경을 quad로 — tui(r=0)면 rasterizeOverlayCells가 셀 배경(무변화), rich(r>0)면 둥근 GPU quad.
-    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r } } });
+    const bw = p.shape.border_width_px;
+    // C4b 모달: 배경을 quad로(둥근+테두리) — tui(0)면 셀 배경 + 아래 Op.border 셀(무변화), rich(>0)면 둥근
+    // quad + quad 테두리(focus_accent). rich에선 아래 Op.border 셀을 rasterize가 skip(직각 중복 방지).
+    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
     try out.append(arena, .{ .border = .{
         .rect = rect,
         .sides = .{ .top = true, .right = true, .bottom = true, .left = true },

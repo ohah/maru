@@ -153,8 +153,9 @@ pub fn view(
     // 패널 배경: row0(프롬프트) + 결과 행 N개를 덮는 단일 fill.
     const panel_h = (1 + @as(u32, @intCast(rows.len))) * ch;
     const bg_r = p.shape.corner_radius_px;
-    // C4b 모달: 배경을 quad로 — tui(r=0)면 셀 배경(무변화), rich(r>0)면 둥근 GPU quad.
-    try out.append(arena, .{ .quad = .{ .rect = .{ .x = x, .y = y, .w = panel_w, .h = panel_h }, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r } } });
+    const bw = p.shape.border_width_px;
+    // C4b 모달: 배경을 quad로(둥근+테두리) — tui(0)면 셀 배경(무변화), rich(>0)면 둥근 quad + 테두리(focus_accent).
+    try out.append(arena, .{ .quad = .{ .rect = .{ .x = x, .y = y, .w = panel_w, .h = panel_h }, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
 
     // 선택 행 강조: 선택된 결과 행의 bg를 tab_active_bg로(레거시 sidebar_active와 같은 색). 텍스트가 그 위에 그려진다.
     for (rows, 0..) |row, i| {

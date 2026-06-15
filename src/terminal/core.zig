@@ -142,6 +142,9 @@ pub const TerminalCore = struct {
     // synchronized output(DECSET 2026): 켜지면 frame 투영을 멈춰(hold) ESU(2026 reset)까지 출력을 한 frame으로
     // 묶는다 — nvim 화면 갱신 tearing/깜빡임 방지. 베이스: Ghostty(synchronized_output이면 render skip)·DEC 2026.
     sync_output: bool = false,
+    /// kitty keyboard protocol flag 스택(CSI > flags u=push / < n u=pop / = flags;mode u=set로 앱이 제어).
+    /// 기본 비어 있음(current=disabled) → encodeKey가 legacy 인코딩. 베이스: kitty keyboard protocol spec.
+    kitty_flags: KittyFlagStack = .{},
     // grapheme cluster mode(DECSET 2027, terminal-unicode-core): 앱이 "나도 grapheme 단위 너비를
     // 쓴다"고 합의하면 켠다. 켜지면 VS16(이모지 표현)·스킨톤·국기 같은 grapheme을 한 셀로 묶고
     // 너비를 EAW 대신 cluster 기준(❤️=2칸 등)으로 잰다 — 앱과 너비가 일치하므로 붙여넣기 redraw가
@@ -328,6 +331,7 @@ pub const TerminalCore = struct {
         self.mouse_tracking = .none;
         self.mouse_format = .x10;
         self.sync_output = false;
+        self.kitty_flags = .{};
         self.grapheme_cluster_mode = false;
         self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
         self.dirty = fullDirty(self.size);
@@ -1730,12 +1734,31 @@ pub const TerminalCore = struct {
                 '?' => switch (final) {
                     'h' => self.setPrivateModes(true),
                     'l' => self.setPrivateModes(false),
+                    // kitty keyboard(CSI ? u): 현재 flag 스택 최상단을 CSI ? flags u로 보고. 앱이 지원
+                    // 여부·현재 모드를 감지한다(flags=0이면 비활성). 베이스: kitty keyboard protocol query.
+                    'u' => self.reportKittyFlags(),
                     else => {},
                 },
                 '>' => switch (final) {
                     // DA2(CSI > c): 단말 버전 식별. DA1만 답하고 침묵하면 vim 등이 DA2 응답을
                     // 타임아웃까지 기다린다. VT220급(1), 버전 10, ROM 0으로 답한다.
                     'c' => if (self.csiRawParam(0) == 0) self.appendResponse("\x1b[>1;10;0c"),
+                    // kitty keyboard(CSI > flags u): flag 스택에 push(enable). flags는 u5로 truncate.
+                    'u' => self.kitty_flags.push(kittyFlagsFromParam(self.csiRawParam(0))),
+                    else => {},
+                },
+                '<' => switch (final) {
+                    // kitty keyboard(CSI < n u): 스택에서 n개(기본 1) pop — 이전 모드 복원/비활성.
+                    'u' => self.kitty_flags.pop(self.csiParam(0, 1)),
+                    else => {},
+                },
+                '=' => switch (final) {
+                    // kitty keyboard(CSI = flags ; mode u): 최상단 flags set — mode 1=치환·2=or·3=not(기본 1).
+                    'u' => self.kitty_flags.set(switch (self.csiParam(1, 1)) {
+                        2 => .@"or",
+                        3 => .not,
+                        else => .set,
+                    }, kittyFlagsFromParam(self.csiRawParam(0))),
                     else => {},
                 },
                 else => {},
@@ -2003,6 +2026,18 @@ pub const TerminalCore = struct {
         };
         var buf: [32]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "\x1b[?{d};{d}$y", .{ mode, state }) catch return;
+        self.appendResponse(s);
+    }
+
+    /// CSI 파라미터(u16)를 kitty flags(u5)로 — 상위 비트는 truncate(kitty flags는 5비트라 미정의 비트 무시).
+    fn kittyFlagsFromParam(v: u16) KittyFlags {
+        return @bitCast(@as(u5, @truncate(v)));
+    }
+
+    /// kitty keyboard query(CSI ? u) 응답: 현재 스택 최상단 flags를 CSI ? flags u로 보고한다.
+    fn reportKittyFlags(self: *TerminalCore) void {
+        var buf: [16]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "\x1b[?{d}u", .{self.kitty_flags.current().int()}) catch return;
         self.appendResponse(s);
     }
 
@@ -5591,6 +5626,27 @@ test "kitty Flags: packed bit order matches kitty spec (LSB=disambiguate)" {
     try std.testing.expectEqual(@as(u5, 0b00100), (KittyFlags{ .report_alternates = true }).int());
     try std.testing.expectEqual(@as(u5, 0b01000), (KittyFlags{ .report_all = true }).int());
     try std.testing.expectEqual(@as(u5, 0b10000), (KittyFlags{ .report_associated = true }).int());
+}
+
+test "kitty keyboard CSI u dispatch: push(>)/set(=)/query(?)/pop(<)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    try std.testing.expectEqual(KittyFlags{}, core.kitty_flags.current()); // 기본 disabled
+
+    try core.write("\x1b[>1u"); // push disambiguate
+    try std.testing.expect(core.kitty_flags.current().disambiguate);
+    try core.write("\x1b[?u"); // query → CSI ? 1 u
+    try std.testing.expectEqualStrings("\x1b[?1u", core.pendingResponse());
+    core.clearResponse();
+
+    try core.write("\x1b[=2;2u"); // set or report_events(flags=2, mode=2)
+    try std.testing.expect(core.kitty_flags.current().disambiguate and core.kitty_flags.current().report_events);
+
+    try core.write("\x1b[<1u"); // pop → 이전 레벨(disabled)
+    try std.testing.expectEqual(KittyFlags{}, core.kitty_flags.current());
+    // RIS는 스택을 비활성으로 리셋한다.
+    try core.write("\x1b[>9u\x1bc");
+    try std.testing.expectEqual(KittyFlags{}, core.kitty_flags.current());
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

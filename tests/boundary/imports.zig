@@ -361,11 +361,9 @@ const neutral_layers = [_]NeutralLayer{
 // 중립 레이어 코드에 식별자로 나타나면 OS 결합이 샌 것이다. 정확 일치라 오탐 0(전부 명백한 OS 타입명 — 부분
 // 문자열·소문자 변형은 안 잡는다). 누락이 있어도 import 금지가 1차로 막으므로 이건 2차(re-export) 가드다.
 const forbidden_os_type_names = [_][]const u8{
-    // 이 코드베이스의 platform 경계 타입(metal_frame.zig — re-export로 샐 수 있는 진짜 위험).
-    "NativeMetalCell",
-    "NativeMetalRasterUpload",
-    "MetalFrame",
-    "MetalFrameBuffer",
+    // GPU 백엔드 런타임 타입(maru_metal_renderer — 실제 Metal API). metal_frame DTO(NativeMetalCell·MetalFrame·
+    // MetalFrameBuffer·NativeMetalRasterUpload)는 §8 이주로 renderer(중립 frame 계약)가 소유하므로 더는 OS 타입
+    // 가드 대상이 아니다 — 이름만 "Metal"이고 OS 의존 없는 ABI 표현이다. chrome은 import 가드(chrome→renderer 금지)로 여전히 차단.
     "MetalRenderer",
     // CoreText / CoreGraphics(제품 shaper·raster 경계 — C @cImport는 platform 전용이어야 한다).
     "CTFont",
@@ -456,13 +454,13 @@ test "scanForbiddenIdentifiers flags code identifiers but not comments or string
     // 코드 식별자(qualified access의 끝 식별자 포함)로 등장하면 위반.
     {
         var v: usize = 0;
-        scanForbiddenIdentifiers("const c = metal_frame.NativeMetalCell;", "renderer", "test", &v, false);
+        scanForbiddenIdentifiers("const c = shaper.CTFont;", "renderer", "test", &v, false);
         try std.testing.expectEqual(@as(usize, 1), v);
     }
     // 줄 주석 안의 언급은 오탐 아님(중립 계약 설명).
     {
         var v: usize = 0;
-        scanForbiddenIdentifiers("// Metal backend consumes NativeMetalCell\nconst x = 1;", "renderer", "test", &v, false);
+        scanForbiddenIdentifiers("// CoreText shaper consumes CTFont\nconst x = 1;", "renderer", "test", &v, false);
         try std.testing.expectEqual(@as(usize, 0), v);
     }
     // doc 주석 안의 언급도 오탐 아님.
@@ -480,7 +478,7 @@ test "scanForbiddenIdentifiers flags code identifiers but not comments or string
     // 무관한/유사하지만 다른 식별자는 통과(정확 일치라 부분문자열 오탐 없음).
     {
         var v: usize = 0;
-        scanForbiddenIdentifiers("const cell = grid.cell; const myMetalFrameWrapper = 0;", "renderer", "test", &v, false);
+        scanForbiddenIdentifiers("const cell = grid.cell; const myCTFontWrapper = 0;", "renderer", "test", &v, false);
         try std.testing.expectEqual(@as(usize, 0), v);
     }
 }

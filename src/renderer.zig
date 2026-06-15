@@ -6,6 +6,7 @@ pub const glyph_frame = @import("renderer/glyph_frame.zig");
 pub const glyph_layout = @import("renderer/glyph_layout.zig");
 pub const glyph_quads = @import("renderer/glyph_quads.zig");
 pub const glyph_raster = @import("renderer/glyph_raster.zig");
+pub const metal_frame = @import("renderer/metal_frame.zig"); // 중립 frame DTO 투영(platform/macos→renderer 이주, §8). 이름만 "Metal" — OS 의존 없음(NativeMetalCell·MetalFrame extern). 백엔드(Metal/WebGPU)가 공유.
 pub const shaped_records = @import("renderer/shaped_records.zig");
 pub const state = @import("renderer/state.zig");
 pub const types = @import("renderer/types.zig");

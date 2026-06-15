@@ -7,7 +7,7 @@ const coretext_probe = @import("coretext_probe.zig");
 const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
-const metal_frame = @import("metal_frame.zig");
+const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 // shape/raster native bridge 시그니처는 coretext_smoke_bridge.zig가 단일 출처로 소유한다.
 // CoreText smoke와 같은 선언을 공유해, 한쪽만 파라미터를 바꿔 ABI가 어긋나는 것을 막는다.
 const maru_macos_coretext_shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list;

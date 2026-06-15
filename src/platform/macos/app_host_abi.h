@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 45u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 46u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -335,14 +335,17 @@ int32_t maru_macos_app_dev_session_jump_prompt(
     MaruAppHostDevSession *session,
     int32_t dir
 );
-/* 마우스 선택. kind 1=down(시작) 2=drag(확장) 3=up(확정 — 드래그 선택에서 이동 없으면 클릭으로
-   보고 해제) 4=더블클릭(단어 선택, soft-wrap 경계 너머까지 확장) 5=트리플클릭(논리 줄 선택).
-   좌표는 backing 픽셀(좌상단 원점) — 셀 변환은 Zig가 cell 메트릭으로 한다. */
+/* 마우스 선택(셀렉션) 또는 mouse reporting. kind 1=down 2=drag 3=up 4=더블클릭(단어) 5=트리플클릭(논리 줄).
+   button 0=left 1=middle 2=right(셀렉션은 left만 의미). mods 비트(xterm): 4=shift 8=meta/alt 16=ctrl.
+   mouse tracking(DECSET 1000~1003)이 켜졌고 shift 미포함이면 셀렉션 대신 앱에 SGR/x10 리포트한다 —
+   shift+click은 xterm 관례대로 셀렉션 override. 좌표는 backing 픽셀(좌상단 원점), 셀 변환은 Zig가 한다. */
 int32_t maru_macos_app_dev_session_mouse(
     MaruAppHostDevSession *session,
     int32_t kind,
     double x_px,
-    double y_px
+    double y_px,
+    int32_t button,
+    int32_t mods
 );
 /* 선택 텍스트 추출(UTF-8). 반환 버퍼는 Zig 소유로 다음 copy_text 또는 destroy까지 유효하다.
    선택이 없으면 *out_ptr=NULL, *out_len=0. Swift가 NSPasteboard에 쓴다(클립보드는 OS 소유). */

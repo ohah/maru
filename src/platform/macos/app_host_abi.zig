@@ -228,9 +228,11 @@ pub export fn maru_macos_app_dev_session_mouse(
     kind: i32,
     x_px: f64,
     y_px: f64,
+    button: i32,
+    mods: i32,
 ) c_int {
     const dev_session = session orelse return @intFromEnum(Status.null_out);
-    dev_session.mouse(kind, x_px, y_px);
+    dev_session.mouse(kind, x_px, y_px, button, mods);
     return @intFromEnum(Status.ok);
 }
 

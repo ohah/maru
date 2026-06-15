@@ -41,7 +41,7 @@ pub const MetalFrame = metal_frame.MetalFrame;
 pub const MetalGpuQuad = metal_frame.GpuQuad;
 pub const MetalGpuShadow = metal_frame.GpuShadow;
 
-pub const abi_version: u32 = 45; // 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 46; // 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -2494,8 +2494,10 @@ pub const DevSession = struct {
     /// 마우스 선택. kind 1=down(선택 시작), 2=drag(확장), 3=up(확정 — 드래그 선택인데 이동이
     /// 없었으면 클릭으로 보고 해제), 4=더블클릭(단어 선택), 5=트리플클릭(논리 줄 선택). 좌표는
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
-    pub fn mouse(self: *DevSession, kind: i32, x_px: f64, y_px: f64) void {
+    pub fn mouse(self: *DevSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (!self.surface_initialized) return;
+        _ = button; // 8b-2 reporting 분기에서 사용 — 현재(8b-1)는 셀렉션 경로라 무관(동작 무변화)
+        _ = mods;
         // 사이드바 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(x가 사이드바 밖으로 나가도) — 새
         // down(1)은 아래 일반 처리로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
         if (self.sidebar_drag_active and (kind == 2 or kind == 3)) {
@@ -5087,7 +5089,7 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     core.selectionStart(1, 0); // 화면 행1(d)에서 드래그 시작
 
     // 드래그가 grid 위 밖으로(y<0) — kind 2가 자동 스크롤 방향을 세운다.
-    session.mouse(2, 0.0, -5.0); // col 0, grid 위 밖
+    session.mouse(2, 0.0, -5.0, 0, 0); // col 0, grid 위 밖
     try std.testing.expectEqual(@as(i8, 1), session.drag_autoscroll);
 
     session.applyDragAutoscroll(); // tick 1: 한 줄 위로 + 선택이 뷰 최상단으로 확장
@@ -5100,7 +5102,7 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     try std.testing.expectEqualStrings("a\nb\nc\nd", text);
 
     // up(3)이 자동 스크롤을 멈춘다.
-    session.mouse(3, 8.0, 8.0);
+    session.mouse(3, 8.0, 8.0, 0, 0);
     try std.testing.expectEqual(@as(i8, 0), session.drag_autoscroll);
 }
 
@@ -6785,7 +6787,7 @@ test "vertical split renders the bottom pane tab bar at its own y (not overlappi
     const bottom_rect = lr.items[1].rect; // tree 순서: [0]=위, [1]=아래
     const bottom_bar_y: f64 = @floatFromInt(bottom_rect.y + 1);
     // 사이드바 우측 리사이즈 밴드보다 안쪽(+30) — 아래 pane은 full-width라 x가 사이드바 경계에서 시작한다.
-    session.mouse(1, @floatFromInt(bottom_rect.x + 30), bottom_bar_y);
+    session.mouse(1, @floatFromInt(bottom_rect.x + 30), bottom_bar_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term); // 아래 바 탭 0으로 전환
 }
 
@@ -6814,12 +6816,12 @@ test "clicking a tab in the pane bar switches to that Term" {
     // 탭 바는 단일 panel이라 터미널 영역 전체 폭의 상단 strip(y in [0, 바 높이)). 탭 0 = 바 좌단, 탭 1 = 바 우반.
     const bar_y: f64 = 1; // 바 안(y < 바 높이)
     const left_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 30); // 탭 0 세그먼트(사이드바 우측 리사이즈 밴드보다 안쪽)
-    session.mouse(1, left_tab_x, bar_y);
+    session.mouse(1, left_tab_x, bar_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term); // 탭 0으로 전환
 
     // 탭 1(바 우반, 2탭이라 폭의 절반 이후) 클릭 → 다시 Term 1.
     const right_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 600); // 바 폭(800)의 우반
-    session.mouse(1, right_tab_x, bar_y);
+    session.mouse(1, right_tab_x, bar_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
 
     // 탭 바 클릭은 터미널 선택을 시작하지 않는다(소비). 선택 드래그 플래그가 안 켜진다.
@@ -6865,7 +6867,7 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     try std.testing.expect(m.inCloseZone(1, close_x)); // ✕ zone 안
 
     // ✕ 클릭 → 탭 1 Term 닫힘 → 2개. 닫은 뒤 호버는 비워진다(stale 방지).
-    session.mouse(1, close_x, bar_y);
+    session.mouse(1, close_x, bar_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
     try std.testing.expect(session.hovered_tab == null);
     try std.testing.expect(!session.ended_seen); // 아직 Term 남음 — 세션 유지
@@ -6902,7 +6904,7 @@ test "clicking the bar '+' button spawns a new Term in that pane" {
     try std.testing.expect(m.inPlusZone(plus_x)); // "+" zone 안
 
     // "+" 클릭 → 새 Term → 2개.
-    session.mouse(1, plus_x, bar_y);
+    session.mouse(1, plus_x, bar_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
     try std.testing.expect(!session.ended_seen); // 세션 유지
 }
@@ -6980,10 +6982,10 @@ test "dragging a Term tab reorders it within the pane" {
     const bar_y: f64 = @floatFromInt(bar.y + 1);
 
     // 탭 0 down → 드래그 arm. drag to 탭 2 → 재정렬. up → 종료.
-    session.mouse(1, tab0_x, bar_y);
+    session.mouse(1, tab0_x, bar_y, 0, 0);
     try std.testing.expect(session.tab_drag_active);
-    session.mouse(2, tab2_x, bar_y);
-    session.mouse(3, tab2_x, bar_y);
+    session.mouse(2, tab2_x, bar_y, 0, 0);
+    session.mouse(3, tab2_x, bar_y, 0, 0);
     try std.testing.expect(!session.tab_drag_active);
 
     // [T0,T1,T2] → T0를 2로 옮기면 [T1,T2,T0]. 드래그 탭(T0)이 새 위치(2)에서 활성.
@@ -7028,9 +7030,9 @@ test "dragging a tab to another pane moves the Term; emptying the source collaps
     const moved_id = right.terms.items[0].surface.id; // 옮길 Term(우 탭 0)
 
     // ① 우 탭 0을 좌 pane 바에 drop → 좌 2개·우 1개, 좌 활성. collapse 없음(우에 1개 남음).
-    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1)); // down on 우 탭 0
+    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1), 0, 0); // down on 우 탭 0
     try std.testing.expect(session.tab_drag_active);
-    session.mouse(3, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1)); // up over 좌 바 → cross-move
+    session.mouse(3, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1), 0, 0); // up over 좌 바 → cross-move
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len); // 아직 2 pane
     try std.testing.expectEqual(@as(usize, 1), right.terms.items.len);
     try std.testing.expectEqual(@as(usize, 2), left.terms.items.len);
@@ -7042,8 +7044,8 @@ test "dragging a tab to another pane moves the Term; emptying the source collaps
     try std.testing.expect(found); // 옮긴 Term이 좌 pane에 있다
 
     // ② 우 pane의 '마지막' Term을 좌로 drop → 우 비어 collapse → 단일 pane(좌, Term 3개).
-    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1)); // down on 우 탭 0(마지막)
-    session.mouse(3, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1)); // up over 좌 바
+    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1), 0, 0); // down on 우 탭 0(마지막)
+    session.mouse(3, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1), 0, 0); // up over 좌 바
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len); // 우 collapse → 1 pane
     try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(session.activeTab().tree));
     try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len); // 좌가 3개 다 가짐
@@ -7079,12 +7081,12 @@ test "④: dropping a tab on a pane body edge creates a new split there (rearran
     const moved_id = right.terms.items[0].surface.id; // 옮길 Term(우 pane의 유일 Term)
 
     // 우 pane 탭 down(드래그 arm) → 좌 pane 본문 '좌측 절반'에 up(drop). 우는 비어 collapse, 새 split 좌우.
-    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1));
+    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1), 0, 0);
     try std.testing.expect(session.tab_drag_active);
     const drop_x: f64 = @floatFromInt(left_body.x + left_body.w / 10); // 좌측 가장자리 근처
     const drop_y: f64 = @floatFromInt(left_body.y + left_body.h / 2);
     try std.testing.expectEqual(PaneDropZone.left, paneDropZone(left_body, drop_x, drop_y).?);
-    session.mouse(3, drop_x, drop_y);
+    session.mouse(3, drop_x, drop_y, 0, 0);
 
     // 여전히 2 pane(새 + 좌), leafCount 2. 옮긴 Term은 새(활성) pane에, 그게 가장 왼쪽.
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
@@ -7128,12 +7130,12 @@ test "④b: tab drag tracks the drop target and emits a translucent highlight" {
     const right_bar = session.paneBarRect(lr.items[1].rect).?;
 
     // 우 pane 탭 down(드래그 arm). 처음엔 드롭 타겟 없음.
-    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1));
+    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1), 0, 0);
     try std.testing.expect(session.tab_drag_active);
     try std.testing.expect(session.tab_drop_target == null);
 
     // drag(2)로 좌 pane 본문 상단 절반 위 → 드롭 타겟 = {좌, top}.
-    session.mouse(2, @floatFromInt(left_body.x + left_body.w / 2), @floatFromInt(left_body.y + left_body.h / 5));
+    session.mouse(2, @floatFromInt(left_body.x + left_body.w / 2), @floatFromInt(left_body.y + left_body.h / 5), 0, 0);
     try std.testing.expect(session.tab_drop_target != null);
     try std.testing.expectEqual(left, session.tab_drop_target.?.pane);
     try std.testing.expectEqual(PaneDropZone.top, session.tab_drop_target.?.zone.?);
@@ -7149,12 +7151,12 @@ test "④b: tab drag tracks the drop target and emits a translucent highlight" {
     }
 
     // drag(2)로 좌 pane 탭 바 위 → 드롭 타겟 = {좌, null}(이동).
-    session.mouse(2, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1));
+    session.mouse(2, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1), 0, 0);
     try std.testing.expect(session.tab_drop_target != null);
     try std.testing.expect(session.tab_drop_target.?.zone == null);
 
     // up → 드롭 타겟 비워짐(하이라이트 사라짐).
-    session.mouse(3, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1));
+    session.mouse(3, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1), 0, 0);
     try std.testing.expect(session.tab_drop_target == null);
     var hl2: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
     defer hl2.deinit(allocator);
@@ -7203,9 +7205,9 @@ test "floating tab preview frame is built (and positioned) while dragging a tab"
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const bar = session.paneBarRect(lr.items[0].rect).?;
-    session.mouse(1, @floatFromInt(bar.x + 20), @floatFromInt(bar.y + 1)); // 탭 down → arm
+    session.mouse(1, @floatFromInt(bar.x + 20), @floatFromInt(bar.y + 1), 0, 0); // 탭 down → arm
     try std.testing.expect(session.tab_drag_active);
-    session.mouse(2, 333, 222); // 드래그
+    session.mouse(2, 333, 222, 0, 0); // 드래그
     try std.testing.expectEqual(@as(f64, 333), session.tab_drag_x);
     try std.testing.expectEqual(@as(f64, 222), session.tab_drag_y);
 
@@ -7215,7 +7217,7 @@ test "floating tab preview frame is built (and positioned) while dragging a tab"
     try std.testing.expect(pf.?.origin_x < 333); // 박스가 커서 좌측으로 센터됨(폭/2 만큼)
 
     // up → 드래그 끝 → floating 탭 없음.
-    session.mouse(3, 333, 222);
+    session.mouse(3, 333, 222, 0, 0);
     try std.testing.expect(!session.tab_drag_active);
     try std.testing.expect(session.buildFloatingTabFrame(builder, &built) == null);
     _ = try session.tick();
@@ -7250,18 +7252,18 @@ test "clicking another pane in a split focuses it; clicking the active pane keep
     const click_y: f64 = @floatFromInt(session.paneBarHeightPx() + 20);
     // 왼쪽(기존, 비활성) panel 영역 클릭 → 포커스가 기존 panel로. 좌표 origin도 왼쪽 rect(사이드바 옆)로 갱신.
     const left_x: f64 = @floatFromInt(session.sidebar_width_px + 10);
-    session.mouse(1, left_x, click_y);
+    session.mouse(1, left_x, click_y, 0, 0);
     try std.testing.expectEqual(old_surface, session.activeSurface());
     try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
     try std.testing.expectEqual(session.sidebar_width_px, session.active_pane_rect.x);
 
     // 활성(왼쪽) panel을 다시 클릭 → 전환 없음(같은 panel 클릭은 선택 경로). active_pane 불변.
-    session.mouse(1, left_x, click_y);
+    session.mouse(1, left_x, click_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
 
     // 오른쪽(비활성) panel 클릭 → 다시 오른쪽 panel로 포커스.
     const right_x: f64 = @floatFromInt(session.sidebar_width_px + 410);
-    session.mouse(1, right_x, click_y);
+    session.mouse(1, right_x, click_y, 0, 0);
     try std.testing.expectEqual(new_surface, session.activeSurface());
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
 }
@@ -7464,20 +7466,20 @@ test "PR6: dragging a split divider resizes the panes via split.ratio" {
     try std.testing.expect(split.ratio > 0.45 and split.ratio < 0.55);
 
     // down on divider → 드래그 시작.
-    session.mouse(1, div_x, div_y);
+    session.mouse(1, div_x, div_y, 0, 0);
     try std.testing.expect(session.divider_drag != null);
 
     // 왼쪽으로 200px 드래그 → ratio = 200/800 = 0.25(왼쪽 작아지고 오른쪽=활성 커진다).
-    session.mouse(2, div_x - 200, div_y);
+    session.mouse(2, div_x - 200, div_y, 0, 0);
     try std.testing.expect(split.ratio < 0.3); // 왼쪽 비율 감소
     try std.testing.expect(session.active_pane_rect.w > right_w_before); // 오른쪽 pane 넓어짐
 
     // up → 드래그 종료.
-    session.mouse(3, div_x - 200, div_y);
+    session.mouse(3, div_x - 200, div_y, 0, 0);
     try std.testing.expect(session.divider_drag == null);
 
     // divider가 아닌 곳(왼쪽 pane 터미널 중앙) down은 divider 드래그를 시작하지 않는다.
-    session.mouse(1, @floatFromInt(seg.bounds.x + 20), div_y);
+    session.mouse(1, @floatFromInt(seg.bounds.x + 20), div_y, 0, 0);
     try std.testing.expect(session.divider_drag == null);
     _ = try session.tick();
 }
@@ -7763,16 +7765,16 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     const x_in: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1; // 사이드바 영역 안
 
     // 슬롯 0(y in [0, slot_h)) 다운클릭 → 탭 0으로 전환.
-    session.mouse(1, x_in, 1);
+    session.mouse(1, x_in, 1, 0, 0);
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
     // 슬롯 1 클릭 → 탭 1.
-    session.mouse(1, x_in, slot_h + 1);
+    session.mouse(1, x_in, slot_h + 1, 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     // 슬롯 밖(마지막 슬롯 아래 빈 영역) 클릭은 전환 안 함.
-    session.mouse(1, x_in, slot_h * 10);
+    session.mouse(1, x_in, slot_h * 10, 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     // 터미널 영역(x ≥ 사이드바 폭, 우측 경계 리사이즈 밴드보다 충분히 안쪽) 클릭은 탭 전환 경로가 아님(활성 불변).
-    session.mouse(1, @floatFromInt(session.sidebar_width_px + 50), 1);
+    session.mouse(1, @floatFromInt(session.sidebar_width_px + 50), 1, 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
 
     // 호버: 비활성 슬롯(0, 활성은 1) 위면 호버 밴드가 추가된다(활성 밴드 + 호버 밴드 = 2).
@@ -7861,14 +7863,14 @@ test "clicking the hovered slot close zone closes that tab, elsewhere switches" 
     const close_x = w - cw; // ✕ zone(우측 2칸) 안
 
     // 슬롯 0 좌측(✕ zone 밖) 클릭 → 닫지 않고 전환(active 0). 닫기 전 전환 동작 가드.
-    session.mouse(1, 2, 1);
+    session.mouse(1, 2, 1, 0, 0);
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
 
     // 슬롯 0을 호버(✕ 표시)한 뒤 그 ✕ zone 클릭 → 탭 0 닫힘(switchTab 아님).
     _ = session.hoverCursor(close_x, 1, false);
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
-    session.mouse(1, close_x, 1);
+    session.mouse(1, close_x, 1, 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 }
 
@@ -7904,11 +7906,11 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
     const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
 
     // 탭 0(Maru)을 슬롯 2로 드래그: down(슬롯0)=전환+드래그 시작 → drag(슬롯2)=moveTab(0,2) → up.
-    session.mouse(1, x, 1);
+    session.mouse(1, x, 1, 0, 0);
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
     try std.testing.expect(session.sidebar_drag_active);
-    session.mouse(2, x, slot_h * 2 + 1);
-    session.mouse(3, x, slot_h * 2 + 1);
+    session.mouse(2, x, slot_h * 2 + 1, 0, 0);
+    session.mouse(3, x, slot_h * 2 + 1, 0, 0);
 
     // 순서 [tab 2, tab 3, Maru], 활성=드래그 탭(Maru)=2, 드래그 종료.
     try std.testing.expectEqualStrings("tab 2", session.tabs.items[0].activePane().activeTerm().surface.title);
@@ -7942,12 +7944,12 @@ test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, c
     try std.testing.expectEqual(CursorKind.resize_h, session.hoverCursor(edge, 100, false));
 
     // 경계 down → 리사이즈 시작. 넓게 드래그(+60) → 폭 증가. up → 종료.
-    session.mouse(1, edge, 100);
+    session.mouse(1, edge, 100, 0, 0);
     try std.testing.expect(session.sidebar_resize_active);
-    session.mouse(2, edge + 60, 100);
+    session.mouse(2, edge + 60, 100, 0, 0);
     try std.testing.expect(session.sidebar_width_px > start_px);
     try std.testing.expect(session.sidebar_width_pt > default_sidebar_width_pt);
-    session.mouse(3, edge + 60, 100);
+    session.mouse(3, edge + 60, 100, 0, 0);
     try std.testing.expect(!session.sidebar_resize_active);
 
     // 극단값 clamp(직접 호출): 아주 넓게 → max_pt, 아주 좁게 → min_pt.
@@ -7986,7 +7988,7 @@ test "③b: clicking the sidebar '+' button opens a new workspace" {
     try std.testing.expectEqual(CursorKind.link, session.hoverCursor(sidebar_x, plus_y, false));
 
     // "+" 클릭 → 워크스페이스 2개, 새 탭이 활성.
-    session.mouse(1, sidebar_x, plus_y);
+    session.mouse(1, sidebar_x, plus_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     try std.testing.expect(!session.ended_seen);
@@ -8298,7 +8300,7 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     try std.testing.expect(core.selection_anchor != null);
 
     // 더블클릭 직후 드래그가 grid 위 밖으로 — mouse_drag_selecting=false여도 autoscroll이 돈다.
-    session.mouse(2, 0.0, -5.0);
+    session.mouse(2, 0.0, -5.0, 0, 0);
     try std.testing.expectEqual(@as(i8, 1), session.drag_autoscroll);
     session.applyDragAutoscroll();
     try std.testing.expectEqual(@as(usize, 1), core.view_offset);

@@ -76,6 +76,14 @@ pub const QuickTerminalChrome = enum {
     minimal,
 };
 
+/// chrome(탭바·사이드바·divider·focus 테두리) 디자인 테마. tui=cell-grid 룩(현행), rich=분리 색 팔레트(C4a — tui가
+/// sidebar_active로 공유하던 role을 파생색으로 분리; 둥근 모서리·그라데이션은 C4b 후속). 컴포넌트는 토큰셋만 바꿔
+/// 소비(코드 불변 — 같은 ColorRole 읽음). platform buildChromeTokens가 tui()/rich()로 분기한다.
+pub const ChromeTheme = enum {
+    tui,
+    rich,
+};
+
 /// quick terminal 표시 옵션. 값 검증/기본값은 loader가 채우고, 플랫폼(Swift)이 ABI로 받아 패널 크기·위치·
 /// 화면·자동 숨김 동작에 쓴다.
 pub const QuickTerminalConfig = struct {
@@ -106,6 +114,8 @@ pub const Config = struct {
     cursor: CursorConfig = .{},
     input: InputConfig = .{},
     quick_terminal: QuickTerminalConfig = .{},
+    /// chrome(탭바·사이드바·divider·테두리) 디자인 테마(tui|rich). 기본 tui(현행 cell-grid 룩). loader가 `chrome.theme` 키로 파싱.
+    chrome_theme: ChromeTheme = .tui,
     /// 셸에 줄 TERM 값. 셸 설정/통합이 $TERM에 따라 키바인딩(예: Ctrl+A 줄-시작)을 다르게 잡는
     /// 경우, 사용자가 자기 환경이 기대하는 값(예: xterm-ghostty)으로 바꿀 수 있다. 빈 값은 무시.
     term: []const u8 = "xterm-256color",

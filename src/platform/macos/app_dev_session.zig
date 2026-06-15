@@ -4125,7 +4125,7 @@ pub const DevSession = struct {
     /// 같은 매핑 재사용). 이 함수는 ResolvedTheme→ThemeColors 투영(필드 추림)만 한다.
     fn buildChromeTokens(self: *const DevSession) chrome.Tokens {
         const t = self.appearance.theme;
-        return chrome.tokens.Tokens.tui(.{
+        const tc = chrome.tokens.ThemeColors{
             .foreground = t.foreground,
             .sidebar_background = t.sidebar_background,
             .sidebar_foreground = t.sidebar_foreground,
@@ -4134,7 +4134,12 @@ pub const DevSession = struct {
             .search_match_current = t.search_match_current,
             .selection = t.selection,
             .cursor = t.cursor,
-        });
+        };
+        // chrome theme = 토큰셋 교체(컴포넌트 불변). rich는 sidebar_active-공유 role(divider/focus_accent 등)을 분리 색으로(C4a).
+        return switch (self.appearance.chrome_theme) {
+            .tui => chrome.tokens.Tokens.tui(tc),
+            .rich => chrome.tokens.Tokens.rich(tc),
+        };
     }
 
     /// 일반 오버레이 lowering: chrome 컴포넌트가 낸 ChromeDraw ops(fill/border/text)를 셀 그리드로 rasterize한다

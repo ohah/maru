@@ -17,6 +17,15 @@ pub const CellMetrics = struct {
     chrome_minimal: bool = false,
 };
 
+/// C4b 박스 모양 토큰(seam) — host가 tokens.space에서 빌드해 넘긴다. tui=0(직각 → lowering이 셀 fill),
+/// rich>0(둥근 → GPU quad). 컴포넌트는 이 값을 Op.quad에 실어 같은 코드로 두 룩을 만든다(C4a 색 분리와 동형).
+pub const ShapeTokens = struct {
+    corner_radius_px: u16 = 0,
+    border_width_px: u16 = 0,
+};
+
 pub const ChromeProps = struct {
     metrics: CellMetrics,
+    /// C4b: 박스 모양(둥근 모서리·테두리). tui=0(직각·셀 fill), rich>0(둥근·GPU quad).
+    shape: ShapeTokens = .{},
 };

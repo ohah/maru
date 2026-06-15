@@ -4,10 +4,13 @@
 //! 모듈에 결합되지 않도록 투영 책임만 여기에 둔다.
 
 const std = @import("std");
-const maru = @import("maru");
-const renderer = maru.renderer;
-const terminal = maru.terminal;
-const color = maru.color;
+// metal_frame은 renderer(L1) 중립 frame 계약의 일부다 — 이름만 "Metal"이고 실제 OS(Metal/CoreText) 의존은 없는
+// 투영 DTO(NativeMetalCell·MetalFrame extern struct). 같은 renderer 모듈의 형제는 barrel로 참조한다(파일 순환이지만
+// Zig는 decl-lazy라 타입 참조 시점에 해결된다). terminal·color는 상대 경로 — renderer 파일은 maru import를 쓰지
+// 않는다(maru는 모든 레이어를 노출해 경계 가드를 우회하므로 상대 import만 쓴다).
+const renderer = @import("../renderer.zig");
+const terminal = @import("../terminal.zig");
+const color = @import("../color.zig");
 
 pub const NativeMetalCell = extern struct {
     row: u16,

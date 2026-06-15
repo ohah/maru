@@ -3645,7 +3645,8 @@ pub const DevSession = struct {
             // overlay_frame). 셋 다 chrome 컴포넌트 경로(buildChromeOverlayFrame → collectDraws/collectPaletteDraws →
             // 일반 rasterizer placeText)로 lower한다 — palette도 C1b에서 이주해 같은 EAW-폭 경로를 탄다. 실패는 무시
             // (오버레이 없이 정상). PaneFrame.frame을 deinit해야 하므로 defer로 정리한다.
-            self.dropModalQuads(); // C4b 모달: 이전 프레임 모달 quad(layer1)를 비운다 — 닫혀도 잔존 안 함(아래서 재채움).
+            self.dropQuadsByLayer(1); // C4b 모달: 이전 프레임 모달 quad(layer1)를 비운다 — 닫혀도 잔존 안 함(아래서 재채움).
+            self.dropQuadsByLayer(2); // C4b-5: 탭 밴드 quad(layer2)도 per-frame — 매 프레임 비우고 탭 바 build가 재채운다(미연결 시 no-op).
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             if (builtin.os.tag == .macos) {
@@ -3982,10 +3983,12 @@ pub const DevSession = struct {
     /// (rebuildSidebar 관리)라 남기고, 모달 quad는 per-frame이라 renderFrame이 매 프레임 비운 뒤 build
     /// ChromeOverlayFrame이 다시 채운다 — 모달이 닫힌 프레임엔 안 채워져 유령 모달이 안 남는다(swapRemove,
     /// 순서 무관 — 렌더러가 layer로 재정렬). 리뷰가 지적한 sidebar/모달 clear-타이밍 충돌 해소.
-    fn dropModalQuads(self: *DevSession) void {
+    /// gpu_quads에서 주어진 layer의 quad를 모두 제거한다(per-frame 레이어 청소). 모달(layer 1)·탭 밴드(layer 2)는
+    /// 매 프레임 재채워지므로 그 전에 비운다. 사이드바(layer 0)는 retained(rebuildSidebar 관리)라 대상이 아니다.
+    fn dropQuadsByLayer(self: *DevSession, layer: u32) void {
         var i: usize = 0;
         while (i < self.gpu_quads.items.len) {
-            if (self.gpu_quads.items[i].layer == 1) {
+            if (self.gpu_quads.items[i].layer == layer) {
                 _ = self.gpu_quads.swapRemove(i);
             } else {
                 i += 1;

@@ -22,6 +22,9 @@ pub const CellMetrics = struct {
 pub const ShapeTokens = struct {
     corner_radius_px: u16 = 0,
     border_width_px: u16 = 0,
+    // C4b 모달: 배경 박스가 텍스트보다 큰 안쪽 여백(px). view가 폭 상한을 이 값의 2배만큼 줄여(텍스트 폭 양보)
+    // platform lowering의 ±pad 확장 후에도 박스가 터미널 영역 안에 들도록 한다(box geometry 단일 출처=view).
+    modal_padding_px: u16 = 0,
 };
 
 pub const ChromeProps = struct {

@@ -89,6 +89,9 @@ pub const TerminalCore = struct {
     // 기본 none — 앱이 켠다. nvim/tmux/htop/lazygit 등이 쓴다. shift 누르면 셀렉션 override(8b platform 처리).
     mouse_tracking: MouseTracking = .none,
     mouse_format: MouseFormat = .x10,
+    // synchronized output(DECSET 2026): 켜지면 frame 투영을 멈춰(hold) ESU(2026 reset)까지 출력을 한 frame으로
+    // 묶는다 — nvim 화면 갱신 tearing/깜빡임 방지. 베이스: Ghostty(synchronized_output이면 render skip)·DEC 2026.
+    sync_output: bool = false,
     // grapheme cluster mode(DECSET 2027, terminal-unicode-core): 앱이 "나도 grapheme 단위 너비를
     // 쓴다"고 합의하면 켠다. 켜지면 VS16(이모지 표현)·스킨톤·국기 같은 grapheme을 한 셀로 묶고
     // 너비를 EAW 대신 cluster 기준(❤️=2칸 등)으로 잰다 — 앱과 너비가 일치하므로 붙여넣기 redraw가
@@ -274,6 +277,7 @@ pub const TerminalCore = struct {
         self.focus_events = false;
         self.mouse_tracking = .none;
         self.mouse_format = .x10;
+        self.sync_output = false;
         self.grapheme_cluster_mode = false;
         self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
         self.dirty = fullDirty(self.size);
@@ -1735,6 +1739,7 @@ pub const TerminalCore = struct {
                 1006 => self.mouse_format = if (set) .sgr else .x10, // SGR 인코딩(좌표 무제한)
                 1016 => self.mouse_format = if (set) .sgr_pixels else .x10, // SGR-pixels 인코딩
                 2027 => self.grapheme_cluster_mode = set, // grapheme cluster 너비(이모지 풀사이즈 합의)
+                2026 => self.sync_output = set, // synchronized output(set=BSU hold 시작, reset=ESU flush)
                 47, 1047 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
                 1048 => if (set) self.saveCursorState() else self.restoreCursorState(),
                 1049 => if (set) self.enterAltScreen(true) else self.leaveAltScreen(true),
@@ -1940,6 +1945,7 @@ pub const TerminalCore = struct {
     fn reportPrivateMode(self: *TerminalCore, mode: u16) void {
         const state: u8 = switch (mode) {
             2027 => if (self.grapheme_cluster_mode) 1 else 2,
+            2026 => if (self.sync_output) 1 else 2,
             2004 => if (self.bracketed_paste) 1 else 2,
             25 => if (self.cursor_visible) 1 else 2,
             1 => if (self.application_cursor_keys) 1 else 2,
@@ -5489,6 +5495,22 @@ test "DECRQM reports mode 2027 state so apps can detect support" {
     // 모르는 모드: 미인식(0).
     try core.write("\x1b[?9999$p");
     try std.testing.expectEqualStrings("\x1b[?9999;0$y", core.pendingResponse());
+}
+
+test "synchronized output (DECSET 2026): set/reset + DECRQM 지원 감지" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    try std.testing.expect(!core.sync_output); // 기본 off
+    try core.write("\x1b[?2026h"); // BSU
+    try std.testing.expect(core.sync_output);
+    try core.write("\x1b[?2026l"); // ESU
+    try std.testing.expect(!core.sync_output);
+    // DECRQM: 미설정=reset(2, 인식 — 앱이 지원 감지), 켜면 set(1).
+    try core.write("\x1b[?2026$p");
+    try std.testing.expectEqualStrings("\x1b[?2026;2$y", core.pendingResponse());
+    core.clearResponse();
+    try core.write("\x1b[?2026h\x1b[?2026$p");
+    try std.testing.expectEqualStrings("\x1b[?2026;1$y", core.pendingResponse());
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

@@ -3692,7 +3692,9 @@ pub const DevSession = struct {
         // steady/숨김 커서 + 오버레이 닫힘이면 updateCursorBlink가 무토글로 고정한다. 오버레이 caret도 같은 위상으로
         // 깜빡이고, suffix-trim(setCursorVisible)이라 재빌드 없이 토글된다(터미널 커서와 같은 메커니즘 재활용).
         if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink();
-        if (self.metal_dirty) {
+        // synchronized output(DECSET 2026): sync 중이면 frame 투영을 멈춘다(metal_dirty는 쌓인 채 유지) — ESU(2026
+        // reset)로 sync가 꺼지면 다음 tick에 누적 출력을 한 frame으로 투영한다(Ghostty의 synchronized 시 render skip과 동형).
+        if (self.metal_dirty and !self.activeSurface().core.sync_output) {
             var tick_result = if (builtin.os.tag == .macos) blk: {
                 const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
                     .appearance = self.appearance,

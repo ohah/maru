@@ -3690,7 +3690,8 @@ pub const DevSession = struct {
             // C4b-5: rich(corner>0)면 활성 탭 밴드를 둥근 layer 2 GpuQuad(제목 셀 아래)로, tui(0)면 직각 셀 밴드로.
             const tk = self.buildChromeTokens();
             const tk_space = tk.space;
-            const tab_corner = tk_space.corner_radius_px;
+            const tab_corner = tk_space.corner_radius_px; // rich 판별 게이트(>0이면 quad 밴드, 0이면 tui 셀)
+            const tab_band_corner = tk_space.tab_corner_radius_px; // U3: 밴드 곡률(탭 전용·납작) — 게이트와 분리
             const tab_grad = tk_space.tab_gradient_delta;
             for (leaf_rects.items) |lr| {
                 const bar = self.paneBarRect(lr.rect) orelse continue;
@@ -3701,7 +3702,7 @@ pub const DevSession = struct {
                     // 활성 탭이 위, 제목 셀(part1)은 그 위 — 불투명 바 배경 셀이 밴드 quad를 가리던 z-order 버그 해소(리뷰 #1).
                     self.appendBarBgQuad(bar, self.sidebarBg());
                     self.appendTabBarUnderline(bar, tk.border.line_thickness_px); // 탭바 하단 구분선(터미널 콘텐츠와 경계) — 바 배경 위·활성 밴드 아래(append 순서)
-                    if (m_opt) |m| self.appendTabBandQuad(m, lr.leaf.active_term, hl_bg, tab_corner, tab_grad);
+                    if (m_opt) |m| self.appendTabBandQuad(m, lr.leaf.active_term, hl_bg, tab_band_corner, tab_grad);
                 } else {
                     // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위).
                     if (paneBarBgCell(bar, self.cell_width_px, self.sidebarBg())) |cell| pane_chrome.append(self.allocator, cell) catch {};

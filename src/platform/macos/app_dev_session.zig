@@ -3643,6 +3643,7 @@ pub const DevSession = struct {
             // overlay_frame). 셋 다 chrome 컴포넌트 경로(buildChromeOverlayFrame → collectDraws/collectPaletteDraws →
             // 일반 rasterizer placeText)로 lower한다 — palette도 C1b에서 이주해 같은 EAW-폭 경로를 탄다. 실패는 무시
             // (오버레이 없이 정상). PaneFrame.frame을 deinit해야 하므로 defer로 정리한다.
+            self.dropModalQuads(); // C4b 모달: 이전 프레임 모달 quad(layer1)를 비운다 — 닫혀도 잔존 안 함(아래서 재채움).
             var overlay_frame: ?metal_frame.PaneFrame = null;
             if (builtin.os.tag == .macos) {
                 if (self.chrome_host.notice.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
@@ -3972,6 +3973,21 @@ pub const DevSession = struct {
         var ops: std.ArrayList(chrome.draw.Op) = .empty;
         chrome.components.sidebar.view(tabs, self.hovered_slot, self.hovered_plus, self.buildChromeProps(), arena, &ops) catch return;
         self.lowerSidebar(ops.items);
+    }
+
+    /// C4b 모달: self.gpu_quads에서 모달 배경 quad(layer==1)를 제거한다. sidebar 밴드(layer 0)는 retained
+    /// (rebuildSidebar 관리)라 남기고, 모달 quad는 per-frame이라 renderFrame이 매 프레임 비운 뒤 build
+    /// ChromeOverlayFrame이 다시 채운다 — 모달이 닫힌 프레임엔 안 채워져 유령 모달이 안 남는다(swapRemove,
+    /// 순서 무관 — 렌더러가 layer로 재정렬). 리뷰가 지적한 sidebar/모달 clear-타이밍 충돌 해소.
+    fn dropModalQuads(self: *DevSession) void {
+        var i: usize = 0;
+        while (i < self.gpu_quads.items.len) {
+            if (self.gpu_quads.items[i].layer == 1) {
+                _ = self.gpu_quads.swapRemove(i);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// app `*Tab`에서 chrome 중립 `sidebar.Tab`(라벨·활성)을 빌드한다 — chrome은 app 트리를 모르므로 host가 떼어 준다
@@ -4425,8 +4441,9 @@ pub const DevSession = struct {
         if (draws.items.len == 0) return error.NotOpen;
 
         var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch);
-        // C4b 모달-2a: rasterize가 모은 모달 배경 quad는 수집만 — self.gpu_quads(layer=1 over) 머지 + 생명주기
-        // (sidebar=retained vs 모달=per-frame clear 충돌, 리뷰 지적)는 모달-2b. 지금은 즉시 해제(view가 아직 fill이라 빈).
+        // C4b 모달-2b: 모달 배경 quad(layer=1)를 self.gpu_quads(over 패스)에 머지. renderFrame이 매 프레임
+        // dropModalQuads로 layer1을 비운 직후라 누적되지 않는다. cells 소유권은 finishOverlayFrame이.
+        self.gpu_quads.appendSlice(self.allocator, raster.gpu_quads.items) catch {};
         raster.gpu_quads.deinit(self.allocator);
         // finishOverlayFrame이 cells 소유권을 toOwnedSlice로 가져가기 **전에** 실패하면(예: overlays alloc OOM)
         // raster.cells가 미해제로 남는다 — 그 경로만 정리한다(성공/이전 후엔 cells가 비어 no-op).

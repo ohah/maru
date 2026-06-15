@@ -9,6 +9,56 @@ pub const MouseTracking = enum { none, x10, normal, button, any };
 /// mouse 이벤트 인코딩(DECSET 1006 SGR / 1016 SGR-pixels / 기본 x10). 베이스: xterm. SGR은 좌표 무제한(>223 OK).
 pub const MouseFormat = enum { x10, sgr, sgr_pixels };
 
+/// kitty keyboard protocol(progressive enhancement) flag(packed u5). disambiguate=모호한 키만 CSI u로 명확히,
+/// report_events=key up/repeat, report_alternates=대체 키, report_all=모든 키 escape, report_associated=텍스트.
+/// 베이스: kitty keyboard protocol spec / Ghostty kitty/key.zig Flags. 기본 disabled(legacy 인코딩).
+pub const KittyFlags = packed struct(u5) {
+    disambiguate: bool = false,
+    report_events: bool = false,
+    report_alternates: bool = false,
+    report_all: bool = false,
+    report_associated: bool = false,
+
+    pub const disabled: KittyFlags = .{};
+    pub fn int(self: KittyFlags) u5 {
+        return @bitCast(self);
+    }
+};
+/// kitty flags의 set 연산 모드(CSI = flags ; mode u). 1=set(치환)·2=or(합집합)·3=not(차집합) — 베이스: kitty spec.
+pub const KittySetMode = enum { set, @"or", not };
+/// kitty flags 스택(CSI > flags u = push, CSI < n u = pop). 고정 크기 8(heap 회피), idx는 wrap. 베이스: Ghostty FlagStack.
+pub const KittyFlagStack = struct {
+    const stack_len = 8;
+    flags: [stack_len]KittyFlags = @splat(.disabled),
+    idx: u3 = 0,
+
+    pub fn current(self: KittyFlagStack) KittyFlags {
+        return self.flags[self.idx];
+    }
+    pub fn set(self: *KittyFlagStack, mode: KittySetMode, v: KittyFlags) void {
+        switch (mode) {
+            .set => self.flags[self.idx] = v,
+            .@"or" => self.flags[self.idx] = @bitCast(self.flags[self.idx].int() | v.int()),
+            .not => self.flags[self.idx] = @bitCast(self.flags[self.idx].int() & ~v.int()),
+        }
+    }
+    pub fn push(self: *KittyFlagStack, flags: KittyFlags) void {
+        self.idx +%= 1; // 가득 차면 wrap(가장 오래된 항목 축출) — Ghostty 동일
+        self.flags[self.idx] = flags;
+    }
+    pub fn pop(self: *KittyFlagStack, n: usize) void {
+        if (n >= self.flags.len) { // 과도한 pop(DoS 회피)은 전체 리셋
+            self.idx = 0;
+            self.flags = @splat(.disabled);
+            return;
+        }
+        for (0..n) |_| {
+            self.flags[self.idx] = .disabled;
+            self.idx -%= 1;
+        }
+    }
+};
+
 /// DECSC/DECRC(ESC 7/8)·DECSET 1048/1049가 쓰는 저장 커서 상태. 화면(primary/alt)마다 하나씩 둔다.
 pub const SavedCursor = struct {
     cursor: types.Cursor = .{},
@@ -5511,6 +5561,36 @@ test "synchronized output (DECSET 2026): set/reset + DECRQM 지원 감지" {
     core.clearResponse();
     try core.write("\x1b[?2026h\x1b[?2026$p");
     try std.testing.expectEqualStrings("\x1b[?2026;1$y", core.pendingResponse());
+}
+
+test "kitty FlagStack: push/pop/set/overflow (audit 4/5)" {
+    var stack: KittyFlagStack = .{};
+    try std.testing.expectEqual(KittyFlags{}, stack.current()); // 기본 disabled
+
+    stack.push(.{ .disambiguate = true }); // CSI > 1 u
+    try std.testing.expectEqual(KittyFlags{ .disambiguate = true }, stack.current());
+    stack.push(.{ .report_events = true }); // 새 레벨 push
+    try std.testing.expectEqual(KittyFlags{ .report_events = true }, stack.current());
+    stack.pop(1); // CSI < 1 u → 이전 레벨 복원
+    try std.testing.expectEqual(KittyFlags{ .disambiguate = true }, stack.current());
+
+    stack.set(.@"or", .{ .report_events = true }); // CSI = ; 2 u 합집합
+    try std.testing.expect(stack.current().disambiguate and stack.current().report_events);
+    stack.set(.not, .{ .report_events = true }); // CSI = ; 3 u 차집합
+    try std.testing.expect(stack.current().disambiguate and !stack.current().report_events);
+    stack.set(.set, .{ .report_all = true }); // CSI = ; 1 u 치환
+    try std.testing.expectEqual(KittyFlags{ .report_all = true }, stack.current());
+
+    stack.pop(100); // 과도한 pop = 전체 리셋(DoS 회피)
+    try std.testing.expectEqual(KittyFlags{}, stack.current());
+}
+
+test "kitty Flags: packed bit order matches kitty spec (LSB=disambiguate)" {
+    try std.testing.expectEqual(@as(u5, 0b00001), (KittyFlags{ .disambiguate = true }).int());
+    try std.testing.expectEqual(@as(u5, 0b00010), (KittyFlags{ .report_events = true }).int());
+    try std.testing.expectEqual(@as(u5, 0b00100), (KittyFlags{ .report_alternates = true }).int());
+    try std.testing.expectEqual(@as(u5, 0b01000), (KittyFlags{ .report_all = true }).int());
+    try std.testing.expectEqual(@as(u5, 0b10000), (KittyFlags{ .report_associated = true }).int());
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

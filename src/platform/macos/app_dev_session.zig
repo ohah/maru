@@ -3707,6 +3707,11 @@ pub const DevSession = struct {
                         if (tabbarHighlightCell(m, lr.leaf.active_term, hl_bg)) |cell| pane_chrome.append(self.allocator, cell) catch {};
                     }
                 }
+                // U/#1: full rich split에서 활성 pane을 maru 앰버 테두리(ring)로 강조 — pane rect 둘레 border quad(터미널
+                // 위·모달 아래, layer 1). chrome_minimal은 위 appendActivePaneBorder(셀 테두리)가 따로 담당(탭 바 없으므로).
+                if (leaf_rects.items.len > 1 and lr.leaf == active_pane and tk_space.pane_border_width_px > 0) {
+                    self.appendActivePaneRingQuad(lr.rect, tk_space.pane_border_width_px);
+                }
             }
 
             // panel 사이 divider 선(PR6) — split이면 각 경계에 seam 중심 셀 strip을 깐다. chrome(맨 아래)이 아니라
@@ -4041,6 +4046,27 @@ pub const DevSession = struct {
             .border_color = 0,
             .gradient_kind = 1, // vertical(셰이더: local.y/h로 fill0→fill1 보간). grad=0이면 fill0==fill1=solid.
             .layer = 2,
+        }) catch {};
+    }
+
+    /// U/#1: split에서 활성 pane rect 둘레에 maru 앰버 테두리(ring)를 GpuQuad(border만, fill 투명)로 그린다 — 포커스
+    /// pane 강조. layer 1(over: 터미널 셀 위·모달 아래, append 순서). per-frame(dropQuadsByLayer(1)가 매 프레임 비움).
+    /// rich(pane_border_width>0)·split에서만 호출. fill_color 0이라 안은 터미널이 비치고 가장자리만 앰버 테두리.
+    fn appendActivePaneRingQuad(self: *DevSession, rect: app.SplitRect, bw: u16) void {
+        const ac = packOpaqueRgb(self.buildChromeTokens().palette.get(.accent_bar));
+        const bwf: f32 = @floatFromInt(bw);
+        self.gpu_quads.append(self.allocator, .{
+            .x = @floatFromInt(rect.x),
+            .y = @floatFromInt(rect.y),
+            .w = @floatFromInt(rect.w),
+            .h = @floatFromInt(rect.h),
+            .corner_radii = .{ 0, 0, 0, 0 },
+            .border_widths = .{ bwf, bwf, bwf, bwf },
+            .fill_color0 = 0, // 투명(안은 터미널 셀 비침 — 테두리만)
+            .fill_color1 = 0,
+            .border_color = ac, // maru 앰버
+            .gradient_kind = 0,
+            .layer = 1,
         }) catch {};
     }
 

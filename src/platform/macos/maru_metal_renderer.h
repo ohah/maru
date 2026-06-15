@@ -66,7 +66,10 @@ bool maru_metal_renderer_draw(
     size_t gpu_quad_count,
     /* C4b 모달: 모달(overlay) 셀이 cells에서 시작하는 인덱스(0=모달 없음). over quad(모달 배경)를 모달
        텍스트 셀 '앞'에 끼우는 분할점. */
-    size_t modal_cells_start
+    size_t modal_cells_start,
+    /* C4b: chrome 그림자(GpuShadow). NULL/0이면 안 그림. quad·셀보다 아래(맨 처음) 그린다. */
+    const MaruAppHostDevGpuShadow *gpu_shadows,
+    size_t gpu_shadow_count
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

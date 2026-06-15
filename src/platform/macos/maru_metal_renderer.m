@@ -333,6 +333,47 @@ static void maru_fill_quad_instance(
     }
 }
 
+/* C4b: 한 GpuShadow를 6정점으로 채운다(blur만큼 확장된 rect). local은 원본 박스 기준(-blur..w+blur)이라
+   셰이더 SDF d가 원본 모서리에서 0이 되고 blur 영역으로 부드럽게 번진다. 색 0xAARRGGBB 언팩(셰이더 linear/
+   premultiplied). 순수 산술 — 모양은 셰이더가. */
+static void maru_fill_shadow_instance(
+    MaruRendererShadowVertex *out,
+    const MaruAppHostDevGpuShadow sh,
+    float drawable_w,
+    float drawable_h
+) {
+    const float blur = sh.blur_radius;
+    const float ex0 = sh.x - blur, ey0 = sh.y - blur;
+    const float ex1 = sh.x + sh.w + blur, ey1 = sh.y + sh.h + blur;
+    const float left = (ex0 / drawable_w) * 2.0f - 1.0f;
+    const float right = (ex1 / drawable_w) * 2.0f - 1.0f;
+    const float top = 1.0f - (ey0 / drawable_h) * 2.0f;
+    const float bottom = 1.0f - (ey1 / drawable_h) * 2.0f;
+    MaruRendererShadowVertex base;
+    base.half_size[0] = sh.w * 0.5f;
+    base.half_size[1] = sh.h * 0.5f;
+    memcpy(base.corner, sh.corner_radii, sizeof(float) * 4);
+    base.blur = blur;
+    base.color[0] = (float)((sh.color >> 16) & 0xff) / 255.0f;
+    base.color[1] = (float)((sh.color >> 8) & 0xff) / 255.0f;
+    base.color[2] = (float)(sh.color & 0xff) / 255.0f;
+    base.color[3] = (float)((sh.color >> 24) & 0xff) / 255.0f;
+    // 확장 rect 4모서리의 (NDC, local 원본기준): tl, tr, br, bl.
+    const float cx[4] = {left, right, right, left};
+    const float cy[4] = {top, top, bottom, bottom};
+    const float lx[4] = {-blur, sh.w + blur, sh.w + blur, -blur};
+    const float ly[4] = {-blur, -blur, sh.h + blur, sh.h + blur};
+    const int order[6] = {0, 3, 2, 0, 2, 1};
+    for (int i = 0; i < 6; i++) {
+        MaruRendererShadowVertex v = base;
+        v.position[0] = cx[order[i]];
+        v.position[1] = cy[order[i]];
+        v.local[0] = lx[order[i]];
+        v.local[1] = ly[order[i]];
+        out[i] = v;
+    }
+}
+
 bool maru_metal_renderer_draw(
     MaruMetalRenderer *renderer,
     CAMetalLayer *layer,
@@ -351,7 +392,10 @@ bool maru_metal_renderer_draw(
        (배경 레이어)에 별개 파이프라인으로 그린다. */
     const MaruAppHostDevGpuQuad *gpu_quads,
     size_t gpu_quad_count,
-    size_t modal_cells_start
+    size_t modal_cells_start,
+    /* C4b: chrome 그림자(GpuShadow). NULL/0이면 안 그림. quad·셀보다 아래(맨 처음) 그린다. */
+    const MaruAppHostDevGpuShadow *gpu_shadows,
+    size_t gpu_shadow_count
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -500,6 +544,30 @@ bool maru_metal_renderer_draw(
         }
     }
 
+    // C4b: shadow 정점 버퍼(gpu_shadows) — quad·셀보다 아래(맨 처음) 그린다. NULL/0이면 생성 안 함.
+    id<MTLBuffer> shadow_vertex_buffer = nil;
+    size_t shadow_vertex_total = 0;
+    const size_t gpu_shadow_n = (gpu_shadows != NULL) ? gpu_shadow_count : 0;
+    if (gpu_shadow_n > 0) {
+        if (gpu_shadow_n > SIZE_MAX / 6) {
+            return false;
+        }
+        shadow_vertex_total = gpu_shadow_n * 6;
+        if (shadow_vertex_total > SIZE_MAX / sizeof(MaruRendererShadowVertex)) {
+            return false;
+        }
+        shadow_vertex_buffer = [impl.device
+            newBufferWithLength:shadow_vertex_total * sizeof(MaruRendererShadowVertex)
+                        options:MTLResourceStorageModeShared];
+        if (shadow_vertex_buffer == nil) {
+            return false;
+        }
+        MaruRendererShadowVertex *sv = (MaruRendererShadowVertex *)shadow_vertex_buffer.contents;
+        for (size_t i = 0; i < gpu_shadow_n; i++) {
+            maru_fill_shadow_instance(&sv[i * 6], gpu_shadows[i], drawable_w, drawable_h);
+        }
+    }
+
     id<CAMetalDrawable> drawable = [layer nextDrawable];
     if (drawable == nil) {
         return false;
@@ -551,6 +619,12 @@ bool maru_metal_renderer_draw(
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(sv) vertexCount:(cv)]; \
         }                                                            \
     } while (0)
+    // C4b: shadow 패스 — quad·셀보다 아래(맨 처음). 모달 배경의 떠 보이는 그림자.
+    if (shadow_vertex_buffer != nil) {
+        [encoder setRenderPipelineState:impl.shadowPipeline];
+        [encoder setVertexBuffer:shadow_vertex_buffer offset:0 atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:shadow_vertex_total];
+    }
     if (vertex_buffer != nil) {
         MARU_DRAW_CELLS(0, terminal_end_v);                                  // 1. 터미널(모달 제외)
         MARU_DRAW_CELLS(cell_count_v, pre_sidebar_vertices - cell_count_v);  // 2. 사이드바 배경 strip

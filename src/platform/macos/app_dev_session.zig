@@ -4219,6 +4219,9 @@ pub const DevSession = struct {
         // self.gpu_quads(layer=1 over)에 머지한다. tui(radius=0)면 비어 셀 fill 경로(무변화).
         var gpu_quads: std.ArrayList(metal_frame.GpuQuad) = .empty;
         errdefer gpu_quads.deinit(allocator);
+        // C4b 모달: rich 배경 quad(아래 painter .quad)가 있으면 true. 그땐 빈 셀(공백)을 평탄화에서 skip해
+        // 불투명 surface_bg 셀이 둥근 quad를 사각으로 덮지 않게 한다(리뷰 #1 — quad가 비치게).
+        var modal_bg_quad = false;
         // 1) bounding box = fill/border rect 합집합(backing px). text origin은 box 안이라 박스 산정에 안 쓴다.
         var min_x: i32 = std.math.maxInt(i32);
         var min_y: i32 = std.math.maxInt(i32);
@@ -4310,6 +4313,7 @@ pub const DevSession = struct {
                         .gradient_kind = 0,
                         .layer = 1,
                     }) catch {};
+                    modal_bg_quad = true;
                 }
             },
         };
@@ -4327,6 +4331,12 @@ pub const DevSession = struct {
             while (c < cols) {
                 const idx = @as(usize, r) * @as(usize, cols) + c;
                 const w = cwid[idx];
+                // C4b 모달: rich 모달은 배경이 GPU quad(layer=1)라, 빈 셀(공백)의 불투명 surface_bg가 둥근
+                // quad를 사각으로 덮는다(리뷰 #1) — 빈 셀은 skip해 quad가 비치게 한다(글자 칸만 emit).
+                if (modal_bg_quad and cp[idx] == ' ') {
+                    c += if (w == 2) @as(u16, 2) else 1;
+                    continue;
+                }
                 cells.appendAssumeCapacity(.{ .row = r, .col = c, .codepoint = cp[idx], .width = w, .style = .{ .foreground = fg[idx], .background = bg[idx] } });
                 c += if (w == 2) @as(u16, 2) else 1; // wide면 continuation 칸 스킵
             }

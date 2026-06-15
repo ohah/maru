@@ -34,6 +34,7 @@ pub const ColorRole = enum {
     search_match_current,
     selection,
     cursor,
+    accent_bar, // U1(C4b 이후): maru 고유 accent — palette가 maru 앰버로 고정(theme 무관). 사이드바 활성 좌측 막대 등이 소비(U2).
 };
 
 /// 비-색 레이아웃 토큰(픽셀/비율, 정적 디자인 값 — rich는 바꾼다). chrome-strategy.md §5.1이 정의한 계획 기반
@@ -103,6 +104,7 @@ pub const Tokens = struct {
         palette.set(.search_match_current, theme.search_match_current);
         palette.set(.selection, theme.selection);
         palette.set(.cursor, theme.cursor);
+        palette.set(.accent_bar, .{ .r = 0xDD, .g = 0xA1, .b = 0x5E }); // maru 앰버(마루=전통 나무 마루) — theme 무관 고정 브랜드 accent. rich가 상속.
         return .{ .palette = palette };
     }
 

@@ -2997,15 +2997,14 @@ pub const DevSession = struct {
             self.clearHoverUrlAnchor();
             // 하단 "+" 버튼 슬롯은 클릭 가능 — pointingHand로 affordance. 탭 슬롯은 arrow.
             if (on_plus) return .link;
-            return .default; // 사이드바 탭 = arrow
+            return if (self.sidebarSlotAt(y_px) != null) .link else .default; // #5c: 워크스페이스 슬롯도 클릭(전환) → pointingHand, 빈 영역은 arrow
         }
         self.setHoveredSlot(null); // 터미널 영역으로 나가면 사이드바 호버 해제
         self.setHoveredPlus(false);
         // 어느 pane의 탭 바 위면 호버 탭을 갱신(✕ 표시). 바 위면 URL/divider 아니므로 밑줄 해제하고 arrow.
-        self.updateHoveredTab(x_px, y_px);
-        if (self.hovered_tab != null) {
+        if (self.updateHoveredTab(x_px, y_px)) {
             self.clearHoverUrlAnchor();
-            return .default; // 탭 바 = arrow
+            return .link; // #5c: 탭 바 위(탭·‹/›·+·pane 포커스 — 클릭 가능) → pointingHand
         }
         // divider 밴드 위면 리사이즈 커서(클릭과 같은 dividerAtPoint — 탭 바 다음 순서). 단일 panel이면 null.
         if (self.dividerAtPoint(x_px, y_px)) |hit| {
@@ -4007,9 +4006,10 @@ pub const DevSession = struct {
 
     /// 마우스가 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로 호버 탭을 갱신하고, 아니면 null로 비운다. 활성
     /// 탭 leaf rect를 펴 각 pane 바를 hit-test한다(마우스 이동마다 — 작은 트리라 cheap). hoverCursor이 호출한다.
-    fn updateHoveredTab(self: *DevSession, x_px: f64, y_px: f64) void {
+    fn updateHoveredTab(self: *DevSession, x_px: f64, y_px: f64) bool {
         var next: ?TabRef = null;
         var next_scroll: ?ScrollRef = null;
+        var on_bar = false; // #5c: 탭 바 위 여부 — hoverCursor가 pointingHand(클릭 가능) 판정에 쓴다
         // 매 이동마다 새 ArrayList를 안 만들고 재사용 scratch에 레이아웃을 다시 깐다(할당 churn 제거, 결과는 최신).
         const leaf_rects = &self.hover_leaf_scratch;
         leaf_rects.clearRetainingCapacity();
@@ -4017,6 +4017,7 @@ pub const DevSession = struct {
             for (leaf_rects.items) |lr| {
                 const bar = self.paneBarRect(lr.rect) orelse continue;
                 if (pointInRect(x_px, y_px, bar)) {
+                    on_bar = true; // 탭 바 위 — 탭·‹/›·+·pane 포커스 모두 클릭 가능 영역
                     const count = lr.leaf.terms.items.len;
                     const m = barMetrics(bar, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse break; // 메트릭 불가(초소형 바) → 호버 없음
                     if (m.inScrollLeftZone(x_px)) { // #5b: ‹ 버튼 호버 — 탭 호버 아님
@@ -4035,6 +4036,7 @@ pub const DevSession = struct {
         } else |_| {}
         self.setHoveredTab(next);
         self.setHoveredScroll(next_scroll);
+        return on_bar;
     }
 
     fn usizeOptEql(a: ?usize, b: ?usize) bool {
@@ -7463,16 +7465,20 @@ test "hoverCursor returns region-specific cursor kinds" {
     const term_y: f64 = @floatFromInt(session.active_pane_rect.y + 50);
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(term_x, term_y, false));
 
-    // pane 탭 바 위 = default(arrow).
+    // pane 탭 바 위 = link(pointingHand) — #5c: 탭·‹/›·+·pane 포커스 모두 클릭 가능.
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const bar = session.paneBarRect(lr.items[0].rect).?;
-    try std.testing.expectEqual(CursorKind.default, session.hoverCursor(@floatFromInt(bar.x + 20), @floatFromInt(bar.y + 1), false));
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(@floatFromInt(bar.x + 20), @floatFromInt(bar.y + 1), false));
 
-    // 사이드바 영역(폭 있으면) = default(arrow).
-    if (session.sidebar_width_px > 0) {
-        try std.testing.expectEqual(CursorKind.default, session.hoverCursor(@floatFromInt(session.sidebar_width_px / 2), 100, false));
+    // 사이드바 워크스페이스 슬롯 위 = link(클릭=전환), "+" 슬롯 아래 빈 영역 = default(arrow) — #5c.
+    if (session.sidebar_width_px > 0 and session.sidebar_slot_height_px > 0) {
+        const sb_x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+        const slot0_y: f64 = @floatFromInt(session.sidebar_slot_height_px / 2); // 슬롯 0 중앙 — 확실히 슬롯 안
+        try std.testing.expectEqual(CursorKind.link, session.hoverCursor(sb_x, slot0_y, false));
+        const empty_y: f64 = @floatFromInt((session.tabs.items.len + 2) * session.sidebar_slot_height_px); // "+" 슬롯 아래(빈)
+        try std.testing.expectEqual(CursorKind.default, session.hoverCursor(sb_x, empty_y, false));
     }
 
     // 좌우 split → 세로 divider 위 = resize_h(↔). 상하 split → 가로 divider 위 = resize_v(↕).

@@ -332,8 +332,14 @@ pub fn buildPaneTabBarDrawList(
 
     // 우측 컨트롤: 넘치면(has_scroll) ‹›(왼/오 스크롤) 2칸을 tab_cols·tab_cols+1에, 그 오른쪽에 "+". 안 넘치면 "+"만.
     if (layout.has_scroll) {
-        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols), .codepoint = '<', .width = 1, .style = style }); // 왼쪽 스크롤
-        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols + 2), .codepoint = '>', .width = 1, .style = style }); // 오른쪽 스크롤(gap tab_cols+1 건너뜀)
+        // #3: ‹/›를 스크롤 여지가 있는 방향만 강조색(active_fg)·없는 방향은 muted(style=fg)로 그려, ‹가 진하면 "왼쪽에 잘린 탭 더 있음"을
+        // 알리는 단서로 쓴다(부분 탭 좌측 잘림 cue). eff_scroll은 [0, total-tab_cols]로 clamp돼 있어 경계 판정이 정확하다.
+        const total: u32 = @intCast(titles.len * tab_w);
+        const max_scroll: u32 = total - tab_cols; // has_scroll이면 total > tab_cols 보장(total > base ≥ tab_cols+3)
+        const left_style: terminal.Style = if (layout.eff_scroll > 0) .{ .foreground = active_fg } else style; // 왼쪽 더 있으면 강조, scroll=0이면 흐림
+        const right_style: terminal.Style = if (layout.eff_scroll < max_scroll) .{ .foreground = active_fg } else style; // 오른쪽 더 있으면 강조, 끝이면 흐림
+        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols), .codepoint = '<', .width = 1, .style = left_style });
+        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols + 2), .codepoint = '>', .width = 1, .style = right_style }); // gap tab_cols+1 건너뜀
     }
     // "+"(새 Term) 버튼 — ‹› 오른쪽(has_scroll) 또는 tab_cols(아니면). plus_start+1 col에 '+'.
     const plus_start: u16 = tab_cols + (if (layout.has_scroll) @as(u16, 2) else 0);
@@ -819,6 +825,59 @@ test "active tab/row title is drawn with active_fg and bold; others with fg and 
             }
         }
         try std.testing.expect(saw_bright and saw_dim);
+    }
+}
+
+// #3: 넘침 스크롤 시 ‹/›를 스크롤 여지 있는 방향만 active_fg(강조)·없는 방향(경계)은 fg(muted)로 그린다 —
+// ‹가 진하면 "왼쪽에 잘린 탭 더 있음"을 알리는 단서(부분 탭 좌측 잘림 cue). cols=40·고정폭16·3탭 → total=48, tab_cols=34, max_scroll=14.
+test "scroll ‹/› highlight only the scrollable direction (boundary uses muted fg)" {
+    const allocator = std.testing.allocator;
+    const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } }; // fg(muted)
+    const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } }; // active_fg(강조)
+    const titles = [_][]const u8{ "a", "b", "c" };
+    // scroll=0(맨 왼쪽): ‹ 흐림(왼쪽 끝), › 강조(오른쪽 더 있음).
+    {
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, dim, null, null, bright, 16, 0);
+        defer dl.deinit(allocator);
+        var saw_l = false;
+        var saw_r = false;
+        for (dl.cells) |c| {
+            if (c.codepoint == '<') {
+                try std.testing.expectEqual(dim, c.style.foreground);
+                saw_l = true;
+            }
+            if (c.codepoint == '>') {
+                try std.testing.expectEqual(bright, c.style.foreground);
+                saw_r = true;
+            }
+        }
+        try std.testing.expect(saw_l and saw_r);
+    }
+    // scroll=14(맨 오른쪽=max_scroll): ‹ 강조(왼쪽 더 있음), › 흐림(오른쪽 끝).
+    {
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, dim, null, null, bright, 16, 14);
+        defer dl.deinit(allocator);
+        var saw_l = false;
+        var saw_r = false;
+        for (dl.cells) |c| {
+            if (c.codepoint == '<') {
+                try std.testing.expectEqual(bright, c.style.foreground);
+                saw_l = true;
+            }
+            if (c.codepoint == '>') {
+                try std.testing.expectEqual(dim, c.style.foreground);
+                saw_r = true;
+            }
+        }
+        try std.testing.expect(saw_l and saw_r);
+    }
+    // scroll=7(중간): 양방향 더 있음 → ‹·› 둘 다 강조.
+    {
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, dim, null, null, bright, 16, 7);
+        defer dl.deinit(allocator);
+        for (dl.cells) |c| {
+            if (c.codepoint == '<' or c.codepoint == '>') try std.testing.expectEqual(bright, c.style.foreground);
+        }
     }
 }
 

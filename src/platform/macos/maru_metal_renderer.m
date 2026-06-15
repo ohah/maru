@@ -34,6 +34,18 @@ typedef struct {
 // 엉뚱한 offset을 읽어 조용히 깨지므로(컴파일·테스트 무경고) 크기를 정적 단언으로 못박는다(GpuQuad ABI와 동형 가드).
 _Static_assert(sizeof(MaruRendererQuadVertex) == 108, "MaruRendererQuadVertex must match MSL QuadIn (108B tight-pack)");
 
+// C4b: shadow 정점. 셰이더 ShadowIn(packed_float2×3 + packed_float4 + float + packed_float4 = 15 float,
+// 60B tight-pack)과 1:1. host가 GpuShadow를 blur만큼 확장된 rect로 quad당 6정점 생성한다(fill은 모달-3b-1b).
+typedef struct {
+    float position[2];     // NDC (확장 rect 모서리)
+    float local[2];        // 원본 박스 픽셀 좌표(-blur..w+blur)
+    float half_size[2];    // 원본 박스 (w/2, h/2)
+    float corner[4];       // tl, tr, br, bl radii(px)
+    float blur;            // 흐림 반경(px)
+    float color[4];        // rgba(0..1)
+} MaruRendererShadowVertex;
+_Static_assert(sizeof(MaruRendererShadowVertex) == 60, "MaruRendererShadowVertex must match MSL ShadowIn (60B tight-pack)");
+
 @interface MaruMetalRendererImpl : NSObject
 @property (nonatomic, strong) id<MTLDevice> device;
 @property (nonatomic, strong) id<MTLCommandQueue> queue;

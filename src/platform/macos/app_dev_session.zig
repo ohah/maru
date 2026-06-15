@@ -2373,18 +2373,20 @@ pub const DevSession = struct {
         // 휠은 '커서 아래' panel로 라우팅한다 — split에서 비활성 panel 위 스크롤이 그 panel을 스크롤한다(포커스는
         // 안 바꾼다). 단일 panel이면 활성과 같고, 사이드바/밖이면 활성 surface로 fallback.
         const target = self.surfaceAt(x_px, y_px) orelse self.activeSurface();
-        // mouse tracking이면 휠을 mouse report(버튼 64=up/65=down)로 보낸다 — 앱(less/vim/tmux)이 휠을 소비하므로
-        // 스크롤백/가로 스크롤은 건너뛴다(alt screen alternate scroll보다 우선). lines>0=위(과거)=64, <0=아래=65.
-        if (target.core.mouse_tracking != .none) {
+        // mouse reporting은 활성 pane(포커스 앱) 기준으로 보낸다 — 좌표(pxToCell)도 활성이라 일관(클릭 reporting과
+        // 같은 기준). 커서 아래 비활성 pane이 tracking이어도 활성에 보낸다(pane↔좌표 불일치 방지). non-tracking이면
+        // 아래에서 커서 아래 pane(target)을 스크롤백한다. lines>0=위(과거)=64, <0=아래=65, 앱이 휠을 소비한다.
+        const active = self.activeSurface();
+        if (active.core.mouse_tracking != .none) {
             if (lines != 0) {
                 if (self.pxToCell(x_px, y_px)) |cell| {
                     const wb: u8 = if (lines > 0) 64 else 65;
                     var n: i32 = if (lines > 0) lines else -lines;
-                    while (n > 0) : (n -= 1) target.core.reportMouse(wb, cell.col, cell.row, true, false, 0);
-                    const reply = target.core.pendingResponse();
+                    while (n > 0) : (n -= 1) active.core.reportMouse(wb, cell.col, cell.row, true, false, 0);
+                    const reply = active.core.pendingResponse();
                     if (reply.len > 0) {
-                        self.runtime.writeInput(target.id, .{ .bytes = reply }) catch {};
-                        target.core.clearResponse();
+                        self.runtime.writeInput(active.id, .{ .bytes = reply }) catch {};
+                        active.core.clearResponse();
                     }
                 }
             }

@@ -3697,14 +3697,8 @@ pub const DevSession = struct {
                         if (tabbarHighlightCell(m, lr.leaf.active_term, hl_bg)) |cell| pane_chrome.append(self.allocator, cell) catch {};
                     }
                 }
-                // U/#1: full rich split에서 활성 pane을 maru 앰버 테두리(ring)로 강조 — pane rect 둘레 border quad(터미널
-                // 위·모달 아래, layer 1). chrome_minimal은 위 appendActivePaneBorder(셀 테두리)가 따로 담당(탭 바 없으므로).
-                // 모달(notice/find/palette) 열림 시엔 skip — ring(layer 1)이 모달 배경(layer 1, 먼저 append)보다 위로 그려져
-                // 가장자리가 모달 배경을 가로지를 수 있어(리뷰 z-order), 오버레이 중엔 pane 강조를 생략한다.
-                const overlay_open = self.chrome_host.notice.open or self.chrome_host.find.open or self.chrome_host.palette.open;
-                if (leaf_rects.items.len > 1 and lr.leaf == active_pane and tk_space.pane_border_width_px > 0 and !overlay_open) {
-                    self.appendActivePaneRingQuad(lr.rect, tk_space.pane_border_width_px);
-                }
+                // 활성 pane 강조는 활성 탭 하단 앰버 언더바(appendActiveTabHighlight)로 일원화한다(사용자 요청) — 옛
+                // 앰버 사각 ring(pane rect 둘레 border quad)은 제거. chrome_minimal은 아래 appendActivePaneBorder(셀 테두리)가 따로 담당.
             }
 
             // panel 사이 divider 선(PR6) — split이면 각 경계에 seam 중심 셀 strip을 깐다. chrome(맨 아래)이 아니라
@@ -4035,31 +4029,10 @@ pub const DevSession = struct {
         self.appendSolidQuad(x, by + bh - uw, w, uw, accent, 2); // 하단 maru 앰버 언더바(active indicator, 탭 폭)
     }
 
-    /// U/#1: split에서 활성 pane rect 둘레에 maru 앰버 테두리(ring)를 GpuQuad(border만, fill 투명)로 그린다 — 포커스
-    /// pane 강조. layer 1(over: 터미널 셀 위·모달 아래, append 순서). per-frame(dropQuadsByLayer(1)가 매 프레임 비움).
-    /// rich(pane_border_width>0)·split에서만 호출. fill_color 0이라 안은 터미널이 비치고 가장자리만 앰버 테두리.
-    fn appendActivePaneRingQuad(self: *DevSession, rect: app.SplitRect, bw: u16) void {
-        const ac = packOpaqueRgb(self.buildChromeTokens().palette.get(.accent_bar));
-        const bwf: f32 = @floatFromInt(bw);
-        self.gpu_quads.append(self.allocator, .{
-            .x = @floatFromInt(rect.x),
-            .y = @floatFromInt(rect.y),
-            .w = @floatFromInt(rect.w),
-            .h = @floatFromInt(rect.h),
-            .corner_radii = .{ 0, 0, 0, 0 },
-            .border_widths = .{ bwf, bwf, bwf, bwf },
-            .fill_color0 = 0, // 투명(안은 터미널 셀 비침 — 테두리만)
-            .fill_color1 = 0,
-            .border_color = ac, // maru 앰버
-            .gradient_kind = 0,
-            .layer = 1,
-        }) catch {};
-    }
-
     /// solid 직각 GpuQuad(곡률·테두리·gradient 없음)를 지정 layer에 append하는 공통 헬퍼 — appendBarBgQuad·
     /// appendTabBarUnderline이 공유해 같은 11필드 보일러플레이트 반복을 없앤다(GpuQuad는 extern struct라 필드
     /// default가 없어 필드 추가 시 모든 리터럴을 손봐야 하는데, solid 직각 quad는 이 헬퍼 한 곳으로 모은다). 둥근/
-    /// 테두리/gradient quad는 appendTabBandQuad·appendActivePaneRingQuad가 따로(각자 모양 파라미터를 받아 일반화 안 함).
+    /// 테두리/gradient quad는 따로 — 각자 모양 파라미터를 받아 일반화하지 않는다.
     fn appendSolidQuad(self: *DevSession, x: f32, y: f32, w: f32, h: f32, color: u32, layer: u32) void {
         self.gpu_quads.append(self.allocator, .{
             .x = x,

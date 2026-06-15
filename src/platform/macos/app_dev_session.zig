@@ -4179,6 +4179,9 @@ pub const DevSession = struct {
     /// 반환된 cells는 allocator 소유(호출자가 finishOverlayFrame에 넘겨 frame으로 이전하거나 실패 시 deinit).
     const OverlayRaster = struct {
         cells: std.ArrayList(renderer.DrawCell),
+        // C4b 모달: rich 모달 배경 quad(둥근+테두리). buildChromeOverlayFrame이 self.gpu_quads(layer=1 over)에
+        // 머지한다. tui(radius=0)면 빈 — 배경은 셀 fill(paintRectBg)로 기존 경로.
+        gpu_quads: std.ArrayList(metal_frame.GpuQuad),
         cols: u16,
         rows: u16,
         origin_x: u32,
@@ -4196,6 +4199,10 @@ pub const DevSession = struct {
         ch: u32,
     ) !OverlayRaster {
         if (cw == 0 or ch == 0) return error.NoMetrics;
+        // C4b 모달: rich 모달 배경 quad 수집(painter의 .quad가 radius>0면 append). buildChromeOverlayFrame이
+        // self.gpu_quads(layer=1 over)에 머지한다. tui(radius=0)면 비어 셀 fill 경로(무변화).
+        var gpu_quads: std.ArrayList(metal_frame.GpuQuad) = .empty;
+        errdefer gpu_quads.deinit(allocator);
         // 1) bounding box = fill/border rect 합집합(backing px). text origin은 box 안이라 박스 산정에 안 쓴다.
         var min_x: i32 = std.math.maxInt(i32);
         var min_y: i32 = std.math.maxInt(i32);
@@ -4206,6 +4213,7 @@ pub const DevSession = struct {
             const rect: ?chrome.draw.Rect = switch (op) {
                 .fill => |f| f.rect,
                 .border => |b| b.rect,
+                .quad => |q| q.rect, // C4b 모달: 박스가 모달 배경 quad를 포함해야 셀 그리드가 그 위 텍스트를 담는다
                 else => null,
             };
             if (rect) |rr| {
@@ -4259,7 +4267,35 @@ pub const DevSession = struct {
             .border => |b| paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides),
             .text => |t| placeText(cp, fg, cwid, cols, rows, origin_x, origin_y, cw, ch, t, .{ .rgb = tk.get(t.role) }),
             .rule => {}, // 컴포넌트가 아직 안 냄 — 필요해질 때(C2 divider) 셀 라인으로 lower
-            .quad => {}, // C4b-2: 모달이 아직 quad를 안 냄 — C4b-3에서 rich 박스(GPU quad)/tui 셀 fill로 lower
+            .quad => |q| {
+                const has_radius = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;
+                if (!has_radius) {
+                    // tui: 직각 → 셀 배경(기존 fill 경로와 동일).
+                    paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, q.rect, .{ .rgb = tk.get(q.fill_role) }, null);
+                } else {
+                    // rich: GPU quad(layer=1 over — 모달 배경, 둥근+테두리). 색 0xAARRGGBB 불투명.
+                    const fr = tk.get(q.fill_role);
+                    const fill: u32 = 0xFF000000 | (@as(u32, fr.r) << 16) | (@as(u32, fr.g) << 8) | @as(u32, fr.b);
+                    var border: u32 = 0;
+                    if (q.border_role) |brole| {
+                        const bc = tk.get(brole);
+                        border = 0xFF000000 | (@as(u32, bc.r) << 16) | (@as(u32, bc.g) << 8) | @as(u32, bc.b);
+                    }
+                    gpu_quads.append(allocator, .{
+                        .x = @floatFromInt(q.rect.x),
+                        .y = @floatFromInt(q.rect.y),
+                        .w = @floatFromInt(q.rect.w),
+                        .h = @floatFromInt(q.rect.h),
+                        .corner_radii = .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) },
+                        .border_widths = .{ @floatFromInt(q.border_widths[0]), @floatFromInt(q.border_widths[1]), @floatFromInt(q.border_widths[2]), @floatFromInt(q.border_widths[3]) },
+                        .fill_color0 = fill,
+                        .fill_color1 = fill,
+                        .border_color = border,
+                        .gradient_kind = 0,
+                        .layer = 1,
+                    }) catch {};
+                }
+            },
         };
 
         // 4) 그리드를 DrawCell 배열로 평탄화(allocator 소유). wide 문자(한글/CJK)면 width=2 — frame builder가 그 폭으로
@@ -4279,7 +4315,7 @@ pub const DevSession = struct {
                 c += if (w == 2) @as(u16, 2) else 1; // wide면 continuation 칸 스킵
             }
         }
-        return .{ .cells = cells, .cols = cols, .rows = rows, .origin_x = origin_x, .origin_y = origin_y, .cursor = cursor };
+        return .{ .cells = cells, .cols = cols, .rows = rows, .origin_x = origin_x, .origin_y = origin_y, .cursor = cursor, .gpu_quads = gpu_quads };
     }
 
     /// rect(backing px)를 origin 기준 셀 span으로 환산해 bg를 칠한다. sides==null이면 채움(fill), 아니면 켜진 변의
@@ -4389,6 +4425,9 @@ pub const DevSession = struct {
         if (draws.items.len == 0) return error.NotOpen;
 
         var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch);
+        // C4b 모달-2a: rasterize가 모은 모달 배경 quad는 수집만 — self.gpu_quads(layer=1 over) 머지 + 생명주기
+        // (sidebar=retained vs 모달=per-frame clear 충돌, 리뷰 지적)는 모달-2b. 지금은 즉시 해제(view가 아직 fill이라 빈).
+        raster.gpu_quads.deinit(self.allocator);
         // finishOverlayFrame이 cells 소유권을 toOwnedSlice로 가져가기 **전에** 실패하면(예: overlays alloc OOM)
         // raster.cells가 미해제로 남는다 — 그 경로만 정리한다(성공/이전 후엔 cells가 비어 no-op).
         errdefer raster.cells.deinit(self.allocator);
@@ -5500,6 +5539,7 @@ test "rasterizeOverlayCells: 다중 fill(painter order) + 다중 행 text → �
 
     var raster = try DevSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20);
     defer raster.cells.deinit(allocator);
+    defer raster.gpu_quads.deinit(allocator);
 
     try std.testing.expectEqual(@as(u16, 2), raster.cols);
     try std.testing.expectEqual(@as(u16, 2), raster.rows);
@@ -5542,6 +5582,7 @@ test "rasterizeOverlayCells: wide 글리프 뒤 continuation 칸은 emit 안 함
 
     var raster = try DevSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20);
     defer raster.cells.deinit(allocator);
+    defer raster.gpu_quads.deinit(allocator);
 
     try std.testing.expectEqual(@as(u16, 4), raster.cols);
     // 셀: 가@col0(w2) + b@col2 + space@col3 = 3개. continuation col1은 스킵(emit하면 그 배경이 '가' 오른쪽 절반을 덮음).

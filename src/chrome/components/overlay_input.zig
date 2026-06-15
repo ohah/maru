@@ -89,7 +89,12 @@ pub fn panelLayout(p: props.ChromeProps) ?PanelLayout {
     const term_w_px = m.backing_width_px -| m.sidebar_width_px;
     const term_cols = term_w_px / cw;
     if (term_cols == 0) return null;
-    const panel_cols: u32 = @max(@min(@as(u32, 60), term_cols -| 4), 1);
+    // C4b 패딩: 폭 상한을 2*pad만큼 줄인 가용 칸으로 panel_cols를 산출한다 — platform lowering이 배경 quad를
+    // ±pad 확장한 뒤에도 박스가 터미널 영역 [sidebar, sidebar+term_w_px] 안에 들도록 텍스트 폭을 양보한다.
+    // pad=0(tui)이면 avail_cols == term_cols라 무변화.
+    const pad: u32 = p.shape.modal_padding_px;
+    const avail_cols = (term_w_px -| 2 * pad) / cw;
+    const panel_cols: u32 = @max(@min(@as(u32, 60), avail_cols -| 4), 1);
     const panel_w = panel_cols * cw;
     const x = @as(i32, @intCast(m.sidebar_width_px)) + @as(i32, @intCast((term_w_px - panel_w) / 2));
     const y = 2 * @as(i32, @intCast(ch)); // 상단에서 두 줄 내려(기존 오버레이와 같은 위치)
@@ -169,4 +174,20 @@ test "panelLayout: term_cols 0이면 null, 아니면 사이드바 오른쪽 상�
     try std.testing.expectEqual(@as(u32, 8), lay.cw);
     try std.testing.expectEqual(@as(u32, 16), lay.ch);
     try std.testing.expect(lay.panel_cols >= 1 and lay.panel_cols <= 60);
+}
+
+test "panelLayout: rich 패딩이면 확장 박스(panel_w + 2*pad)가 터미널 영역 안 — 사이드바 침범·화면밖 방지" {
+    const pad: u32 = 12;
+    const sidebar: u32 = 40;
+    const backing: u32 = 200; // 좁은 창 — clamp가 걸리는 경계
+    const lay = panelLayout(.{
+        .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = sidebar, .backing_width_px = backing, .backing_height_px = 600 },
+        .shape = .{ .modal_padding_px = @intCast(pad) },
+    }) orelse return error.NoLayout;
+    const term_w_px = backing - sidebar;
+    const panel_w = lay.panel_cols * lay.cw;
+    // lowering이 ±pad 확장해도 박스가 [sidebar, sidebar+term_w_px] 안: 좌단 quad.x>=sidebar, 우단<=sidebar+term_w_px.
+    try std.testing.expect(panel_w + 2 * pad <= term_w_px);
+    try std.testing.expect(lay.x - @as(i32, @intCast(pad)) >= @as(i32, @intCast(sidebar)));
+    try std.testing.expect(lay.x + @as(i32, @intCast(panel_w + pad)) <= @as(i32, @intCast(sidebar + term_w_px)));
 }

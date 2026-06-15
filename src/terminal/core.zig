@@ -1467,8 +1467,8 @@ pub const TerminalCore = struct {
 
     /// kitty graphics APC의 control 섹션(`G` 다음 ~ ';' 전)을 파싱한다. `k=v,k=v` 형식 — 주요 key만
     /// 추출하고 나머지는 후속 확장으로 무시한다. value는 단일 비숫자 문자면 그 문자(a/o), 아니면 정수
-    /// (f/s/v/i/m)로 — Ghostty graphics_command.zig finishValue와 동형. payload(base64)는 토대에선
-    /// 보지 않는다(디코드·저장은 후속). 베이스: kitty graphics protocol control data.
+    /// (f/s/v/i/m) — 어느 key가 문자/정수인지는 kitty 명세 control data가 정한다. payload(base64)는
+    /// 토대에선 보지 않는다(디코드·저장은 후속). 베이스: kitty graphics protocol control data.
     fn parseKittyGraphicsCommand(body: []const u8) KittyGraphicsCommand {
         var cmd: KittyGraphicsCommand = .{};
         const control = if (std.mem.indexOfScalar(u8, body, ';')) |i| body[0..i] else body;
@@ -1507,7 +1507,8 @@ pub const TerminalCore = struct {
 
     /// kitty graphics 이미지 저장소(image_id → KittyImage). 총량 한계로 악의적/대량 전송을 막는다.
     /// 토대(1단계): 같은 id 교체 + 한계 초과 거부 — LRU evict(transmit_time 기준)는 후속이다.
-    /// 베이스: kitty graphics protocol image storage + Ghostty graphics_storage.zig ImageStorage.
+    /// 베이스: kitty graphics protocol image storage. 자료구조(map + total_bytes)는 placement/LRU/
+    /// 애니메이션 프레임 없이 image_id→픽셀만 담는 maru 단순 설계다(그 확장은 후속 단계).
     const KittyImageStorage = struct {
         map: std.AutoHashMapUnmanaged(u32, KittyImage) = .{},
         total_bytes: usize = 0,
@@ -1563,7 +1564,7 @@ pub const TerminalCore = struct {
 
     /// kitty graphics transmit: base64 payload를 디코드해 RGBA(f=32)/RGB(f=24) 이미지를 저장한다.
     /// PNG(f=100)·zlib(o=z)·chunked(m=1)는 후속이라 토대에선 무시(graceful). 베이스: kitty graphics
-    /// protocol transmit + Ghostty graphics_image.zig(RGBA/RGB 직접은 외부 디코더 의존 없음).
+    /// protocol transmit — RGBA/RGB 직접 픽셀은 base64만 풀면 되어 외부 이미지 디코더가 필요 없다.
     fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
         if (cmd.compression != 0) return; // zlib(o=z)는 후속
         const bpp: u8 = switch (cmd.format) {

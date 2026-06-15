@@ -8,8 +8,26 @@ const tokens = @import("tokens.zig");
 /// 픽셀 좌표 한 점.
 pub const Px = struct { x: i32, y: i32 };
 
+/// 사방 패딩(px). content rect를 선언적으로 계산하는 EdgeInsets(CSS box model·Flutter EdgeInsets 개념 — chrome 한정,
+/// 터미널 셀 grid와 무관). 컴포넌트가 x+gap·w-2gap 같은 좌표 산술 대신 rect.inset(insets)으로 패딩을 둔다.
+pub const EdgeInsets = struct { left: u16 = 0, right: u16 = 0, top: u16 = 0, bottom: u16 = 0 };
+
 /// 픽셀 사각형(x,y는 좌상단, w/h는 크기).
-pub const Rect = struct { x: i32, y: i32, w: u32, h: u32 };
+pub const Rect = struct {
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    /// 사방 insets만큼 안쪽으로 줄인 content rect(패딩). w/h는 saturating(insets 합이 크면 0).
+    pub fn inset(self: Rect, e: EdgeInsets) Rect {
+        return .{
+            .x = self.x + @as(i32, e.left),
+            .y = self.y + @as(i32, e.top),
+            .w = self.w -| @as(u32, e.left) -| @as(u32, e.right),
+            .h = self.h -| @as(u32, e.top) -| @as(u32, e.bottom),
+        };
+    }
+};
 
 /// 어느 변을 그릴지(focus 테두리·부분 선). 전부 false면 무동작.
 pub const Sides = struct {

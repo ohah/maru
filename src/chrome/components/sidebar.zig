@@ -87,23 +87,25 @@ pub fn view(tabs: []const Tab, hovered_slot: ?usize, hovered_plus: bool, p: prop
         active_idx = i;
         break;
     };
-    if (active_idx) |ai| try out.append(arena, bandFill(ai, w, slot_h, .tab_active_bg));
+    if (active_idx) |ai| try out.append(arena, bandFill(ai, w, slot_h, .tab_active_bg, p.shape));
 
     // 호버 슬롯 밴드(활성과 다르고 범위 안일 때만 — 활성이면 활성 색 우선).
     if (hovered_slot) |hs| {
         if (hs < tabs.len and (active_idx == null or hs != active_idx.?)) {
-            try out.append(arena, bandFill(hs, w, slot_h, .tab_hover_bg));
+            try out.append(arena, bandFill(hs, w, slot_h, .tab_hover_bg, p.shape));
         }
     }
 
     // "+"(새 워크스페이스) 호버 밴드 — 탭 목록 바로 아래 행(row=탭 개수).
-    if (hovered_plus) try out.append(arena, bandFill(tabs.len, w, slot_h, .tab_hover_bg));
+    if (hovered_plus) try out.append(arena, bandFill(tabs.len, w, slot_h, .tab_hover_bg, p.shape));
 }
 
 /// 슬롯 r의 전체-폭 밴드 fill op. row→y는 slot_h 배수(한 탭=한 슬롯). platform lowerSidebar가 sidebarBandCell로 lower.
-fn bandFill(row: usize, w: u32, slot_h: u32, role: tokens.ColorRole) draw.Op {
+fn bandFill(row: usize, w: u32, slot_h: u32, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
     const y: i32 = @intCast(row * @as(usize, slot_h));
-    return .{ .fill = .{ .rect = .{ .x = 0, .y = y, .w = w, .h = slot_h }, .role = role } };
+    const r = shape.corner_radius_px;
+    // tui(r=0)면 lowerSidebar가 셀 밴드로, rich(r>0)면 GPU quad(둥근)로 lower한다 — 같은 op, 토큰만 다름.
+    return .{ .quad = .{ .rect = .{ .x = 0, .y = y, .w = w, .h = slot_h }, .fill_role = role, .corner_radii = .{ r, r, r, r } } };
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -166,16 +168,18 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     try view(&tabs, 0, true, p, arena, &out);
     try std.testing.expectEqual(@as(usize, 3), out.items.len);
     // 활성: row 1 → y=40, role tab_active_bg, 전체 폭.
-    try std.testing.expect(out.items[0] == .fill);
-    try std.testing.expect(out.items[0].fill.role == .tab_active_bg);
-    try std.testing.expectEqual(@as(i32, 40), out.items[0].fill.rect.y);
-    try std.testing.expectEqual(@as(u32, 120), out.items[0].fill.rect.w);
-    try std.testing.expectEqual(@as(u32, 40), out.items[0].fill.rect.h);
+    try std.testing.expect(out.items[0] == .quad);
+    try std.testing.expect(out.items[0].quad.fill_role == .tab_active_bg);
+    try std.testing.expectEqual(@as(i32, 40), out.items[0].quad.rect.y);
+    try std.testing.expectEqual(@as(u32, 120), out.items[0].quad.rect.w);
+    try std.testing.expectEqual(@as(u32, 40), out.items[0].quad.rect.h);
+    // p.shape 기본(tui) → corner_radii 0(직각 → lowering이 셀 밴드로).
+    try std.testing.expectEqual(@as(u16, 0), out.items[0].quad.corner_radii[0]);
     // 호버: row 0 → y=0, tab_hover_bg.
-    try std.testing.expect(out.items[1].fill.role == .tab_hover_bg);
-    try std.testing.expectEqual(@as(i32, 0), out.items[1].fill.rect.y);
+    try std.testing.expect(out.items[1].quad.fill_role == .tab_hover_bg);
+    try std.testing.expectEqual(@as(i32, 0), out.items[1].quad.rect.y);
     // "+": row 3(탭 개수) → y=120.
-    try std.testing.expectEqual(@as(i32, 120), out.items[2].fill.rect.y);
+    try std.testing.expectEqual(@as(i32, 120), out.items[2].quad.rect.y);
 
     // 호버 슬롯 == 활성이면 호버 밴드 생략(활성 색 우선).
     out.clearRetainingCapacity();
@@ -192,4 +196,12 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     off.metrics.sidebar_slot_height_px = 0;
     try view(&tabs, 0, true, off, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
+
+    // rich shape(corner_radius>0): 같은 밴드가 둥근 quad로(radii 실림 → lowering이 GPU quad). tui와 같은 view 코드.
+    out.clearRetainingCapacity();
+    var rich_p = p;
+    rich_p.shape = .{ .corner_radius_px = 8, .border_width_px = 1 };
+    try view(&tabs, null, false, rich_p, arena, &out);
+    try std.testing.expect(out.items[0] == .quad);
+    try std.testing.expectEqual(@as(u16, 8), out.items[0].quad.corner_radii[0]);
 }

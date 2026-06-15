@@ -689,6 +689,9 @@ pub const MetalFrameBuffer = struct {
     // 사이드바 셀(밴드 ++ 탭 제목 glyph) — replace가 밴드 cells와 사이드바 RenderFrame을 합쳐 만든다.
     // 제목 glyph는 터미널과 같은 atlas를 쓰므로 uploads/pixels도 cells와 같은 머지 스트림에 들어간다.
     sidebar_cells: []NativeMetalCell = &.{},
+    // C4b: chrome rich GPU quad 프리미티브(둥근 박스). replace가 DevSession이 chrome lowering으로 모은 것을
+    // dupe 소유한다. tui 테마/빈이면 길이 0(렌더 무동작). 사이드바/모달/divider가 공유하는 통합 배열.
+    gpu_quads: []GpuQuad = &.{},
     uploads: []NativeMetalRasterUpload = &.{},
     pixels: []u8 = &.{},
     size: terminal.Size = .{ .cols = 0, .rows = 0 },
@@ -731,6 +734,9 @@ pub const MetalFrameBuffer = struct {
         // 달리 커서 suffix '뒤'에 붙여 터미널·chrome·커서 위 맨 앞에 그린다 — 모달이 그 아래를 다 덮는다. 각 셀이
         // 자기 bg(불투명)+glyph를 들어 buildNativeCellsSplit로 투영되고, raster는 uploads에 머지된다. null이면 무동작.
         overlay_frame: ?PaneFrame,
+        // C4b: chrome rich GPU quad 프리미티브(DevSession이 chrome lowering으로 모은 것). buffer가 dupe 소유한다.
+        // 셀 그리드와 별개 파이프라인으로 렌더된다(둥근 박스). 빈이면 0(tui — 무동작).
+        gpu_quads: []const GpuQuad,
     ) !void {
         // 1) 터미널 셀: pane 탭 바 chrome을 먼저(커서 suffix 보존), 그 뒤 각 panel frame을 투영해 origin 박아
         //    이어 붙인다. 커서 suffix는 맨 뒤(활성) panel만.
@@ -768,6 +774,9 @@ pub const MetalFrameBuffer = struct {
         const new_sidebar_cells = try buildMergedSidebarCells(allocator, sidebar_band_cells, sidebar_frame, sidebar_colors);
         errdefer allocator.free(new_sidebar_cells);
 
+        const new_gpu_quads = try allocator.dupe(GpuQuad, gpu_quads);
+        errdefer allocator.free(new_gpu_quads);
+
         const merged = try buildMergedUploadsN(allocator, pane_frames, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, if (overlay_frame) |pf| pf.frame.glyph_raster_frame else null);
         errdefer {
             allocator.free(merged.uploads);
@@ -776,10 +785,12 @@ pub const MetalFrameBuffer = struct {
 
         allocator.free(self.cells);
         allocator.free(self.sidebar_cells);
+        allocator.free(self.gpu_quads);
         allocator.free(self.uploads);
         allocator.free(self.pixels);
         self.cells = new_cells;
         self.sidebar_cells = new_sidebar_cells;
+        self.gpu_quads = new_gpu_quads;
         // 커서 suffix(blink chop 길이): 오버레이가 열렸으면 오버레이 자신의 caret(맨 끝 — overlay_cursor_cells)을 쓴다.
         // 그러면 setCursorVisible chop이 오버레이 caret을 깜빡인다(터미널 커서 메커니즘 재활용). 오버레이가 caret을
         // 안 내면(notice 등) overlay_cursor_cells=0이라 chop 없음(정적). 오버레이가 없으면 활성 panel의 터미널 커서.
@@ -823,12 +834,16 @@ pub const MetalFrameBuffer = struct {
             // 사이드바 셀(밴드 ++ 제목 glyph). 비면 null로 둬 렌더러가 사이드바 셀을 건너뛴다.
             .sidebar_cells = if (self.sidebar_cells.len > 0) self.sidebar_cells.ptr else null,
             .sidebar_cell_count = self.sidebar_cells.len,
+            // C4b: chrome rich GPU quad 프리미티브. 비면 null로 둬 렌더러가 quad 패스를 건너뛴다(tui).
+            .gpu_quads = if (self.gpu_quads.len > 0) self.gpu_quads.ptr else null,
+            .gpu_quad_count = self.gpu_quads.len,
         };
     }
 
     pub fn deinit(self: *MetalFrameBuffer, allocator: std.mem.Allocator) void {
         allocator.free(self.cells);
         allocator.free(self.sidebar_cells);
+        allocator.free(self.gpu_quads);
         allocator.free(self.uploads);
         allocator.free(self.pixels);
         self.* = .{};

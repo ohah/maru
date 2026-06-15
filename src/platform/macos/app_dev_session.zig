@@ -675,6 +675,9 @@ pub const DevSession = struct {
     // 탭 하이라이트 밴드만 담고, PR3b-2가 탭 번호·제목 glyph를 더한다. 비싸지 않아(탭 수만큼) 변경
     // 이벤트마다 통째로 다시 만든다.
     sidebar_cells: std.ArrayList(metal_frame.NativeMetalCell) = .empty,
+    // C4b: chrome rich GPU quad 프리미티브(둥근 박스) — sidebar/모달/divider lowering이 모은다. tui/빈이면
+    // 길이 0(렌더 무동작). renderFrame이 replace로 metal_buffer에 넘겨 dupe 소유시킨다(self는 ArrayList 재사용).
+    gpu_quads: std.ArrayList(metal_frame.GpuQuad) = .empty,
     // 마우스가 호버 중인 사이드바 탭 슬롯 인덱스(없으면 null). hoverCursor이 사이드바 영역에서 갱신하고,
     // rebuildSidebar가 이 슬롯에 호버 하이라이트 밴드를 그린다(활성 슬롯과 다를 때만). 후속 호버 X
     // 닫기 아이콘의 대상 슬롯도 이 값이다.
@@ -3803,7 +3806,7 @@ pub const DevSession = struct {
             if (floating_pf) |pf| pane_frames.append(self.allocator, pf) catch {};
 
             if (pane_frames.items.len > 0) {
-                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame)) |_| {
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items)) |_| {
                     self.metal_dirty = false;
                 } else |_| {}
             }
@@ -3958,6 +3961,7 @@ pub const DevSession = struct {
     /// 세션을 죽이지 않고 빈 사이드바로 degrade한다(호출부가 catch).
     fn rebuildSidebar(self: *DevSession) !void {
         self.sidebar_cells.clearRetainingCapacity();
+        self.gpu_quads.clearRetainingCapacity();
         if (self.tabs.items.len == 0) return;
         // 밴드(활성/호버 슬롯·"+" 호버)는 chrome `sidebar.view`가 fill op으로 단일 출처. `lowerSidebar`가 그 fill을
         // sidebarBandCell(행=슬롯)로 lower한다(색·NativeMetalCell은 platform). host가 중립 Tab(활성)을 주입(palette Row 선례).
@@ -3987,16 +3991,34 @@ pub const DevSession = struct {
         const slot_h = self.sidebar_slot_height_px;
         if (slot_h == 0) return;
         for (ops) |op| switch (op) {
-            .fill => |f| {
-                const row_i = @divTrunc(f.rect.y, @as(i32, @intCast(slot_h)));
-                if (row_i < 0) continue;
-                const row: u16 = @intCast(@min(@as(usize, @intCast(row_i)), @as(usize, std.math.maxInt(u16))));
-                const color = switch (f.role) {
+            .quad => |q| {
+                const color = switch (q.fill_role) {
                     .tab_active_bg => self.sidebarActiveBg(),
                     else => self.sidebarHoverBg(),
                 };
-                if (sidebarBandCell(self.sidebar_width_px, self.cell_width_px, row, color)) |cell| {
-                    self.sidebar_cells.append(self.allocator, cell) catch {};
+                const has_radius = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;
+                if (!has_radius) {
+                    // tui: 직각 → 셀 밴드(기존 경로). rect.y/slot_h = 슬롯 행.
+                    const row_i = @divTrunc(q.rect.y, @as(i32, @intCast(slot_h)));
+                    if (row_i < 0) continue;
+                    const row: u16 = @intCast(@min(@as(usize, @intCast(row_i)), @as(usize, std.math.maxInt(u16))));
+                    if (sidebarBandCell(self.sidebar_width_px, self.cell_width_px, row, color)) |cell| {
+                        self.sidebar_cells.append(self.allocator, cell) catch {};
+                    }
+                } else {
+                    // rich: GPU quad 프리미티브(둥근 밴드) — 셀 그리드와 별개 파이프라인으로 렌더된다.
+                    self.gpu_quads.append(self.allocator, .{
+                        .x = @floatFromInt(q.rect.x),
+                        .y = @floatFromInt(q.rect.y),
+                        .w = @floatFromInt(q.rect.w),
+                        .h = @floatFromInt(q.rect.h),
+                        .corner_radii = .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) },
+                        .border_widths = .{ 0, 0, 0, 0 },
+                        .fill_color0 = color,
+                        .fill_color1 = color,
+                        .border_color = 0,
+                        .gradient_kind = 0,
+                    }) catch {};
                 }
             },
             else => {},
@@ -4109,6 +4131,7 @@ pub const DevSession = struct {
     /// config 타입을 모르므로 plain u32만 넘긴다. 오버레이는 터미널과 같은 셀(self.cell_width_px — CoreText 실측)을
     /// 쓴다. sidebar/backing은 실 px 그대로. sidebar_width_px는 런타임 가변(드래그)이라 토큰이 아닌 여기로.
     fn buildChromeProps(self: *const DevSession) chrome.ChromeProps {
+        const tk = self.buildChromeTokens();
         return .{
             .metrics = .{
                 .cell_width_px = self.cell_width_px,
@@ -4119,6 +4142,8 @@ pub const DevSession = struct {
                 .backing_height_px = self.backing_height_px,
                 .chrome_minimal = self.chrome_minimal,
             },
+            // C4b: 박스 모양 토큰을 tokens.space에서(단일 출처). tui=0(직각·셀 밴드), rich>0(둥근 GPU quad).
+            .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px },
         };
     }
 
@@ -4409,6 +4434,7 @@ pub const DevSession = struct {
 
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
+        self.gpu_quads.deinit(self.allocator);
         self.global_hotkeys.deinit(self.allocator);
         // 커맨드 카탈로그: owned 문자열(key_display·key_equivalent)을 먼저 해제하고 목록들을 deinit(빌드 전이면 empty라 무해).
         for (self.command_key_displays.items) |s| self.allocator.free(s);

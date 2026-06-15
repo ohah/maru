@@ -32,12 +32,14 @@ pub const Metrics = struct {
         return @min((@as(u32, @intCast(tab_index)) + 1) * self.tab_w, self.tab_cols);
     }
 
-    /// 탭 하나의 **픽셀 경계 단일 소스**(§6) — 현재는 hit-test(tabIndex·inCloseZone)가 이 한 함수를 공유한다.
-    /// platform view 그리기(밴드·제목·✕: tabbarHighlightCell·buildPaneTabBarDrawList)는 아직 셀-열을 직접 계산하며,
-    /// 다음 단계에서 이 함수를 소비하도록 옮겨 "보이는 탭/✕ == 클릭되는 것"을 완성한다(그 전까진 둘 다 셀-열이라
-    /// 우연히 일치). [start_px, end_px)가 탭의 영역(반열림), close_*는 ✕(닫기) zone(우측 2칸 [end-2cell, end)).
-    /// tab_w<2면 ✕ 없음(has_close=false). 전부 bar_x 기준 절대 backing px.
+    /// 탭 하나의 **경계 단일 소스**(§6) — hit-test(tabIndex·inCloseZone)와 platform 활성 밴드(tabbarHighlightCell)가
+    /// 이 한 함수를 공유한다. 제목·✕·+ glyph(buildPaneTabBarDrawList)는 아직 셀-열을 직접 계산하며 다음 단계에서
+    /// segOf로 옮겨 "보이는 탭/✕ == 클릭되는 것"을 완성한다(그 전까진 둘 다 셀-열이라 우연히 일치). 셀 경계
+    /// (start_col/end_col, 반열림)는 셀 밴드·제목 그리기용, 픽셀([start_px, end_px))는 hit-test용. close_*는 ✕(닫기)
+    /// zone(우측 2칸). tab_w<2면 ✕ 없음(has_close=false), end_col<=start_col이면 overflow(안 보이는) 탭. bar_x 기준 절대 px.
     pub const TabSeg = struct {
+        start_col: u32, // 탭 좌단 컬럼(셀 밴드·제목 그리기용)
+        end_col: u32, // 탭 우단 컬럼(반열림, tab_cols clamp). end_col<=start_col이면 overflow(안 보이는) 탭
         start_px: f64,
         end_px: f64,
         close_start_px: f64,
@@ -52,6 +54,8 @@ pub const Metrics = struct {
         const end_col = self.segEnd(tab_index);
         const has_close = self.tab_w >= 2 and end_col >= 2;
         return .{
+            .start_col = start_col,
+            .end_col = end_col,
             .start_px = self.colPx(start_col),
             .end_px = self.colPx(end_col),
             .close_start_px = if (has_close) self.colPx(end_col - 2) else 0,
@@ -148,6 +152,8 @@ test "tabbar segOf: 탭 픽셀 경계 단일 소스 — hit-test와 정합(셀-�
     const m = testMetrics();
     // 탭0=[100,116) 탭3=[148,164). 2칸 탭이라 ✕는 [end-2cell, end)=세그먼트 전체.
     const s0 = m.segOf(0);
+    try std.testing.expectEqual(@as(u32, 0), s0.start_col); // 셀 경계(view 밴드·제목용)
+    try std.testing.expectEqual(@as(u32, 2), s0.end_col);
     try std.testing.expectEqual(@as(f64, 100), s0.start_px);
     try std.testing.expectEqual(@as(f64, 116), s0.end_px);
     try std.testing.expect(s0.has_close);

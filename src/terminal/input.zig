@@ -1,6 +1,8 @@
 const std = @import("std");
 
-pub const encoded_key_buffer_len = 8;
+// legacy 최대는 "\x1b[24~"(5B)지만 kitty CSI u는 functional code(최대 5자리)+modifier로 더 길다
+// (예: "\x1b[57427;16u" = 11B). 가장 긴 kitty 시퀀스도 담기게 여유를 둔다.
+pub const encoded_key_buffer_len = 32;
 
 pub const ModifierSet = packed struct {
     shift: bool = false,
@@ -57,12 +59,20 @@ pub const EncodeOptions = struct {
     /// DECCKM(application cursor keys). vim/less가 켜면 화살표가 CSI(`\x1b[A`) 대신 SS3(`\x1bOA`)로
     /// 인코딩된다. 끄면(normal) CSI 형식.
     application_cursor_keys: bool = false,
+    /// kitty keyboard protocol flag(스택 최상단의 5비트, core.KittyFlags.int()). 0이면 legacy 인코딩,
+    /// 0이 아니면 encodeKey가 kitty CSI u 인코딩으로 분기한다. 순환 import를 피해 u5(int)로 받는다.
+    kitty_flags: u5 = 0,
 };
 
 pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: EncodeOptions) ![]const u8 {
     // Key encoding is separate from TerminalCore because input policy changes
     // for modifiers, application cursor mode, and platform shortcuts should not
     // force storage or parser files to change.
+
+    // kitty keyboard protocol이 켜져 있으면(flag 스택 최상단 != 0) CSI u 인코딩으로 분기한다. 앱이
+    // CSI > flags u로 켰을 때만 — 안 켜면 아래 legacy 그대로라 progressive enhancement(legacy 공존).
+    if (options.kitty_flags != 0) return encodeKitty(event, buffer, options);
+
     var len: usize = 0;
     if (event.modifiers.option and !keyBaseStartsWithEscape(event.key)) {
         // macOS Option/Alt is the traditional terminal "Meta" modifier. The
@@ -116,6 +126,98 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: 
         .page_down => appendBytes(buffer, &len, "\x1b[6~"),
         .function => |n| appendBytes(buffer, &len, try functionKeySequence(n)),
     };
+}
+
+/// kitty keyboard 인코딩(progressive enhancement). encodeKey가 kitty_flags!=0일 때 분기한다.
+/// 베이스: kitty keyboard protocol spec + Ghostty input/key_encode.zig kitty(). 현재 disambiguate
+/// 수준만 — report_events/alternates/associated(release/대체키/연관텍스트)는 후속이다(Maru는 press만
+/// 전달하고, base codepoint는 Swift charactersIgnoringModifiers라 Ctrl+Shift+printable의 alternate는
+/// 한계가 있다). escape·functional·modifier 조합은 CSI 시퀀스로, modifier 없는 텍스트/enter/tab/
+/// backspace는 legacy 바이트를 그대로 둔다(kitty spec의 명시 예외 — 모드가 안 꺼져도 shell 복구 가능).
+fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: EncodeOptions) ![]const u8 {
+    _ = options; // 현재 분기는 flags!=0(켜짐)만 보고 disambiguate로 인코딩 — 세부 flag는 후속
+    const has_ctrl_alt = event.modifiers.control or event.modifiers.option or event.modifiers.command;
+
+    // kitty spec: Enter/Tab/Backspace는 modifier가 없으면 legacy 바이트(\r/\t/\x7f)를 그대로 보낸다
+    // (프로그램이 모드를 안 끄고 죽어도 shell에서 reset을 칠 수 있게). 텍스트 char도 modifier가 없으면
+    // 그대로 — shift는 이미 codepoint(Swift charactersIgnoringModifiers)에 반영돼 있다.
+    if (!has_ctrl_alt) {
+        switch (event.key) {
+            .enter => return "\r",
+            .tab => return "\t",
+            .backspace => return "\x7f",
+            .char => |cp| {
+                const n = try std.unicode.utf8Encode(cp, buffer[0..4]);
+                return buffer[0..n];
+            },
+            else => {}, // escape·functional은 아래 CSI 시퀀스로(disambiguate)
+        }
+    }
+
+    const ent = kittyEntry(event.key);
+    const mods = kittyModsSeqInt(event.modifiers);
+    return encodeKittySeq(buffer, ent.code, ent.final, mods);
+}
+
+const KittyEntry = struct { code: u21, final: u8 };
+
+/// Maru Key → kitty (code, final). 베이스: kitty keyboard protocol functional-key 정의 + Ghostty
+/// input/kitty.zig 테이블. final 'u'/'~'는 CSI code[;mods]final, letter(A/B/C/D/H/F/P/Q/S)는 legacy
+/// 호환 CSI[1;mods]final 형식이다.
+fn kittyEntry(key: Key) KittyEntry {
+    return switch (key) {
+        .char => |cp| .{ .code = cp, .final = 'u' },
+        .escape => .{ .code = 27, .final = 'u' },
+        .enter => .{ .code = 13, .final = 'u' },
+        .tab => .{ .code = 9, .final = 'u' },
+        .backspace => .{ .code = 127, .final = 'u' },
+        .insert => .{ .code = 2, .final = '~' },
+        .delete => .{ .code = 3, .final = '~' },
+        .arrow_left => .{ .code = 1, .final = 'D' },
+        .arrow_right => .{ .code = 1, .final = 'C' },
+        .arrow_up => .{ .code = 1, .final = 'A' },
+        .arrow_down => .{ .code = 1, .final = 'B' },
+        .home => .{ .code = 1, .final = 'H' },
+        .end => .{ .code = 1, .final = 'F' },
+        .page_up => .{ .code = 5, .final = '~' },
+        .page_down => .{ .code = 6, .final = '~' },
+        .function => |n| switch (n) {
+            1 => .{ .code = 1, .final = 'P' },
+            2 => .{ .code = 1, .final = 'Q' },
+            3 => .{ .code = 13, .final = '~' },
+            4 => .{ .code = 1, .final = 'S' },
+            5 => .{ .code = 15, .final = '~' },
+            6 => .{ .code = 17, .final = '~' },
+            7 => .{ .code = 18, .final = '~' },
+            8 => .{ .code = 19, .final = '~' },
+            9 => .{ .code = 20, .final = '~' },
+            10 => .{ .code = 21, .final = '~' },
+            11 => .{ .code = 23, .final = '~' },
+            else => .{ .code = 24, .final = '~' }, // F12(범위 밖은 encodeKey 진입 전 functionKeySequence가 거름)
+        },
+    };
+}
+
+/// kitty modifier 인코딩값 = 1 + bitmask(shift=1, alt=2, ctrl=4, super=8). 베이스: kitty keyboard
+/// protocol modifier 표. modifier가 없으면 1(시퀀스에서 생략된다).
+fn kittyModsSeqInt(mods: ModifierSet) u16 {
+    var v: u16 = 0;
+    if (mods.shift) v |= 1;
+    if (mods.option) v |= 2;
+    if (mods.control) v |= 4;
+    if (mods.command) v |= 8;
+    return v + 1;
+}
+
+/// KittySequence.encode(Ghostty) 동형: final 'u'/'~'는 CSI code[;mods]final, letter는 CSI[1;mods]final
+/// (code=1 생략). mods<=1이면 modifier param을 생략한다(legacy CSI A/B/C/D/H/F와 호환).
+fn encodeKittySeq(buffer: *[encoded_key_buffer_len]u8, code: u21, final: u8, mods: u16) ![]const u8 {
+    if (final == 'u' or final == '~') {
+        if (mods > 1) return std.fmt.bufPrint(buffer, "\x1b[{d};{d}{c}", .{ code, mods, final });
+        return std.fmt.bufPrint(buffer, "\x1b[{d}{c}", .{ code, final });
+    }
+    if (mods > 1) return std.fmt.bufPrint(buffer, "\x1b[1;{d}{c}", .{ mods, final });
+    return std.fmt.bufPrint(buffer, "\x1b[{c}", .{final});
 }
 
 /// F1~F12의 xterm legacy 시퀀스. F1~F4는 SS3(`ESC O P..S`), F5~F12는 CSI ~ 형식(15/17~21/23/24 —
@@ -321,4 +423,28 @@ test "encodeKey: Option does not double-ESC function keys" {
     // base가 ESC로 시작하므로 Option(Meta)이 눌려도 ESC를 또 안 붙인다.
     try std.testing.expectEqualStrings("\x1b[3~", try encodeKey(.{ .key = .delete, .modifiers = .{ .option = true } }, &buf, .{}));
     try std.testing.expectEqualStrings("\x1bOP", try encodeKey(.{ .key = .{ .function = 1 }, .modifiers = .{ .option = true } }, &buf, .{}));
+}
+
+test "encodeKey kitty: disambiguate text/ctrl/escape/functional (audit 4/5b-2)" {
+    var buf: [encoded_key_buffer_len]u8 = undefined;
+    const o: EncodeOptions = .{ .kitty_flags = 0b00001 }; // disambiguate on
+
+    // 텍스트(modifier 없음) → UTF-8 그대로(shift는 codepoint에 이미 반영됨).
+    try std.testing.expectEqualStrings("a", try encodeKey(.{ .key = .{ .char = 'a' } }, &buf, o));
+    // Enter/Backspace(modifier 없음) → legacy 바이트(kitty 명시 예외 — shell 복구 가능).
+    try std.testing.expectEqualStrings("\r", try encodeKey(.{ .key = .enter }, &buf, o));
+    try std.testing.expectEqualStrings("\x7f", try encodeKey(.{ .key = .backspace }, &buf, o));
+    // Ctrl+a → CSI 97 ; 5 u (base 'a'=97, mods=1+ctrl4=5).
+    try std.testing.expectEqualStrings("\x1b[97;5u", try encodeKey(.{ .key = .{ .char = 'a' }, .modifiers = .{ .control = true } }, &buf, o));
+    // escape(modifier 없음) → CSI 27 u (disambiguate: legacy ESC와 구분되는 핵심).
+    try std.testing.expectEqualStrings("\x1b[27u", try encodeKey(.{ .key = .escape }, &buf, o));
+    // arrow_up(modifier 없음) → CSI A (letter final, mods<=1이라 param 생략 — legacy 호환).
+    try std.testing.expectEqualStrings("\x1b[A", try encodeKey(.{ .key = .arrow_up }, &buf, o));
+    // Shift+arrow_up → CSI 1 ; 2 A (mods=1+shift1=2).
+    try std.testing.expectEqualStrings("\x1b[1;2A", try encodeKey(.{ .key = .arrow_up, .modifiers = .{ .shift = true } }, &buf, o));
+    // F1 → CSI P (letter), F5 → CSI 15 ~ (tilde final).
+    try std.testing.expectEqualStrings("\x1b[P", try encodeKey(.{ .key = .{ .function = 1 } }, &buf, o));
+    try std.testing.expectEqualStrings("\x1b[15~", try encodeKey(.{ .key = .{ .function = 5 } }, &buf, o));
+    // flags=0(미활성)이면 legacy 그대로 — escape는 \x1b(progressive enhancement 검증).
+    try std.testing.expectEqualStrings("\x1b", try encodeKey(.{ .key = .escape }, &buf, .{}));
 }

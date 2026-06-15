@@ -7,7 +7,7 @@
 //! 계층: workspace → windows → tabs → (pane split 트리 + panes) → panes → surfaces(Term). 멀티 창은 windows가
 //! N개(각 창 = 한 DevSession). split 트리는 preorder TreeNode 리스트로 — full binary tree라 self-delimiting
 //! (split은 뒤따르는 두 subtree를 소비, leaf는 종단). 베이스: docs/workspace-restore.md 저장 모델 + 현재
-//! cmux 풀 모델(탭→pane→Term)·멀티 창에 맞춰 window-aware로 확장.
+//! 탭→pane→Term 풀 모델·멀티 창에 맞춰 window-aware로 확장.
 
 const std = @import("std");
 const split_tree = @import("split_tree.zig");
@@ -49,7 +49,7 @@ pub const Surface = struct {
     rows: u16 = 0,
 };
 
-/// split leaf 한 칸(panel) — 가로 탭으로 여러 Term을 들 수 있다(cmux). active-term = 보이는 Term.
+/// split leaf 한 칸(panel) — 가로 탭으로 여러 Term을 들 수 있다(탭→pane 모델). active-term = 보이는 Term.
 pub const Pane = struct {
     active_term: usize = 0,
     surfaces: []const Surface,

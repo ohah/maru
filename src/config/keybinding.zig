@@ -166,13 +166,13 @@ pub const default_terminal_bindings = [_]TerminalBinding{
 /// Cmd-무시 fallthrough. Cmd+Shift+]/[(다음/이전 탭)은 Shift+문자가 layout마다 달라(`]`→`}`) 별도
 /// 처리가 필요해 탭바 UI(클릭 전환)와 함께 후속에서 추가한다.
 pub const default_app_bindings = [_]AppBinding{
-    // cmux 풀 모델: ⌘T=활성 pane에 새 Term(탭), ⌘⇧T=새 워크스페이스(사이드바 탭). normalizeEventChar가 't'를
+    // 탭 풀 모델: ⌘T=활성 pane에 새 Term(탭), ⌘⇧T=새 워크스페이스(사이드바 탭). normalizeEventChar가 't'를
     // 'T'로 fold하므로 char는 같고 shift 유무(modifier 정확 비교)로 갈린다. 워크스페이스 생성은 사이드바 "+"가
     // 생기기 전 ⌘⇧T를 임시로 둔다(단일 출처: docs/tabs-splits-layout.md).
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'T' } }, .action = .new_term }, // Cmd+T: 활성 pane에 새 Term
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'T' } }, .action = .new_tab }, // Cmd+Shift+T: 새 워크스페이스
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'W' } }, .action = .close_term }, // Cmd+W: 활성 Term 닫기(마지막이면 pane→워크스페이스 cascade)
-    // Term 탭 전환(cmux): ⌘]=다음, ⌘[=이전(활성 pane 안에서 wrap). shift 없는 대괄호라 char는 ]/[ 그대로다
+    // Term 탭 전환: ⌘]=다음, ⌘[=이전(활성 pane 안에서 wrap). shift 없는 대괄호라 char는 ]/[ 그대로다
     // (브레이스 }/{ 는 shift일 때만 나오므로 변형 불요). 워크스페이스 전환 ⌘⇧]/⌘⇧[ 와 modifier로 갈린다.
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = ']' } }, .action = .next_term },
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '[' } }, .action = .previous_term },
@@ -515,11 +515,11 @@ test "resolver consumes configured app actions before terminal input" {
     try std.testing.expectEqual(action_mod.Action.new_tab, resolved.app_action);
 }
 
-test "built-in app bindings: Cmd+T new_term, Cmd+Shift+T new_tab (cmux 모델)" {
+test "built-in app bindings: Cmd+T new_term, Cmd+Shift+T new_tab (tab model)" {
     var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
     const resolver: KeyBindingResolver = .{}; // 사용자 바인딩 없음 — default_app_bindings가 가져가야
 
-    // 글자 't'는 normalizeEventChar가 'T'로 fold. ⌘T → 활성 pane에 새 Term(cmux), ⌘⇧T → 새 워크스페이스.
+    // 글자 't'는 normalizeEventChar가 'T'로 fold. ⌘T → 활성 pane에 새 Term, ⌘⇧T → 새 워크스페이스.
     const t = try resolver.resolve(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }, &buffer, .{});
     try std.testing.expectEqual(action_mod.Action.new_term, t.app_action);
     const st = try resolver.resolve(.{ .key = .{ .char = 'T' }, .modifiers = .{ .command = true, .shift = true } }, &buffer, .{});
@@ -535,7 +535,7 @@ test "built-in app bindings: Cmd+T new_term, Cmd+Shift+T new_tab (cmux 모델)" 
 test "built-in app binding resolves Cmd+W to close_term without user config" {
     var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
     const resolver: KeyBindingResolver = .{};
-    // 'w'는 normalizeEventChar가 'W'로 fold → default_app_bindings의 'W'와 매칭(Shift 무관). cmux: 활성 Term 닫기.
+    // 'w'는 normalizeEventChar가 'W'로 fold → default_app_bindings의 'W'와 매칭(Shift 무관). 활성 Term 닫기.
     const resolved = try resolver.resolve(.{
         .key = .{ .char = 'w' },
         .modifiers = .{ .command = true },

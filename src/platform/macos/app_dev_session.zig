@@ -4304,6 +4304,9 @@ pub const DevSession = struct {
                     paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, q.rect, .{ .rgb = tk.get(q.fill_role) }, null);
                 } else {
                     // rich: GPU quad(layer=1 over — 모달 배경, 둥근+테두리). 색 0xAARRGGBB 불투명.
+                    // C4b 모달 패딩: 배경 quad/shadow를 텍스트 영역(q.rect)보다 사방 pad만큼 확장한다 — 텍스트 셀은
+                    // q.rect 그대로라 텍스트가 박스 안쪽으로 들어가 여백이 생긴다(tui=0이면 확장 0 = 기존과 동일).
+                    const pad: f32 = @floatFromInt(tk.space.modal_padding_px);
                     const fr = tk.get(q.fill_role);
                     const fill: u32 = 0xFF000000 | (@as(u32, fr.r) << 16) | (@as(u32, fr.g) << 8) | @as(u32, fr.b);
                     var border: u32 = 0;
@@ -4312,10 +4315,10 @@ pub const DevSession = struct {
                         border = 0xFF000000 | (@as(u32, bc.r) << 16) | (@as(u32, bc.g) << 8) | @as(u32, bc.b);
                     }
                     gpu_quads.append(allocator, .{
-                        .x = @floatFromInt(q.rect.x),
-                        .y = @floatFromInt(q.rect.y),
-                        .w = @floatFromInt(q.rect.w),
-                        .h = @floatFromInt(q.rect.h),
+                        .x = @as(f32, @floatFromInt(q.rect.x)) - pad,
+                        .y = @as(f32, @floatFromInt(q.rect.y)) - pad,
+                        .w = @as(f32, @floatFromInt(q.rect.w)) + 2 * pad,
+                        .h = @as(f32, @floatFromInt(q.rect.h)) + 2 * pad,
                         .corner_radii = .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) },
                         .border_widths = .{ @floatFromInt(q.border_widths[0]), @floatFromInt(q.border_widths[1]), @floatFromInt(q.border_widths[2]), @floatFromInt(q.border_widths[3]) },
                         .fill_color0 = fill,
@@ -4327,10 +4330,10 @@ pub const DevSession = struct {
                     modal_bg_quad = true;
                     // C4b 모달: 배경 quad에 그림자 동반(gpu_shadows 별 배열, quad·셀보다 아래). 약간 아래 offset + blur.
                     gpu_shadows.append(allocator, .{
-                        .x = @floatFromInt(q.rect.x),
-                        .y = @as(f32, @floatFromInt(q.rect.y)) + @as(f32, @floatFromInt(tk.space.shadow_offset_y_px)),
-                        .w = @floatFromInt(q.rect.w),
-                        .h = @floatFromInt(q.rect.h),
+                        .x = @as(f32, @floatFromInt(q.rect.x)) - pad,
+                        .y = @as(f32, @floatFromInt(q.rect.y)) - pad + @as(f32, @floatFromInt(tk.space.shadow_offset_y_px)),
+                        .w = @as(f32, @floatFromInt(q.rect.w)) + 2 * pad,
+                        .h = @as(f32, @floatFromInt(q.rect.h)) + 2 * pad,
                         .corner_radii = .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) },
                         .blur_radius = @floatFromInt(tk.space.shadow_blur_px),
                         .color = @as(u32, tk.space.shadow_alpha) << 24, // 토큰 alpha + RGB 0(검정). tui=0이면 무관(append 안 됨)

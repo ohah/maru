@@ -51,6 +51,9 @@ pub const Spacing = struct {
     shadow_blur_px: u16 = 0,
     shadow_offset_y_px: u16 = 0,
     shadow_alpha: u8 = 0, // 0xAARRGGBB의 A(RGB는 검정 0). 0이면 그림자 안 보임.
+    // C4b 모달: 배경 quad가 텍스트 영역보다 큰 안쪽 여백(px). tui=0(딱 맞는 셀 배경), rich>0(텍스트 주변 여백).
+    // platform lowering이 모달 quad/shadow rect를 이 값만큼 사방 확장(텍스트 셀은 그대로) — 텍스트가 박스 안쪽에 든다.
+    modal_padding_px: u16 = 0,
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
@@ -118,6 +121,8 @@ pub const Tokens = struct {
         tk.space.shadow_blur_px = 14;
         tk.space.shadow_offset_y_px = 6;
         tk.space.shadow_alpha = 0x70;
+        // C4b 모달 패딩: 배경 박스를 텍스트보다 사방 12px 크게 — 팝업 텍스트 주변에 여백(사용자 피드백 "여유").
+        tk.space.modal_padding_px = 12;
         return tk;
     }
 

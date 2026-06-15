@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 42u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 43u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -276,6 +276,9 @@ typedef struct MaruAppHostDevMetalFrame {
     size_t gpu_quad_count;
     const MaruAppHostDevGpuShadow *gpu_shadows;
     size_t gpu_shadow_count;
+    /* C4b 모달: 모달 셀이 cells에서 시작하는 인덱스(0=모달 없음). 렌더러가 over quad(모달 배경)를 모달
+       텍스트 셀 '앞'에 끼우는 분할점. */
+    size_t modal_cells_start;
 } MaruAppHostDevMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

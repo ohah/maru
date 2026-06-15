@@ -63,7 +63,10 @@ bool maru_metal_renderer_draw(
     /* chrome rich GPU quad 프리미티브(C4b — 둥근 사각형: per-corner radius+border+gradient, SDF AA).
        NULL/0이면 안 그림(tui 테마는 셀 fill 유지). 셀 패스 아래(배경 레이어)에 별개 파이프라인으로 그린다. */
     const MaruAppHostDevGpuQuad *gpu_quads,
-    size_t gpu_quad_count
+    size_t gpu_quad_count,
+    /* C4b 모달: 모달(overlay) 셀이 cells에서 시작하는 인덱스(0=모달 없음). over quad(모달 배경)를 모달
+       텍스트 셀 '앞'에 끼우는 분할점. */
+    size_t modal_cells_start
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

@@ -32,6 +32,7 @@ pub const Op = union(enum) {
     border: Border,
     rule: Rule,
     text: Text,
+    quad: Quad,
 
     /// 사각 영역 채우기(밴드·탭 배경·hover·drop-zone). alpha<0xFF면 반투명 합성.
     pub const Fill = struct { rect: Rect, role: tokens.ColorRole, alpha: u8 = 0xFF };
@@ -41,6 +42,22 @@ pub const Op = union(enum) {
     pub const Rule = struct { from: Px, to: Px, role: tokens.ColorRole };
     /// 텍스트(탭 제목·팝업·Notice). origin = 베이스라인이 아니라 좌상단 픽셀.
     pub const Text = struct { origin: Px, runs: []const Run, role: tokens.ColorRole };
+
+    /// C4b rich 박스 — 둥근 모서리·변별 테두리·solid/gradient 채움. tui 백엔드는 corner/border가 0이면
+    /// Fill처럼 셀로 lowering하고, rich 백엔드는 GPU quad 프리미티브로 lowering한다. 모양 파라미터는
+    /// 컴포넌트가 tokens.space에서 읽어 채운다(tui=0 → 직각, rich>0 → 둥근) — 컴포넌트 코드는 tui/rich
+    /// 분기 없이 같다(C4a 색 분리와 동형). corner_radii=[tl,tr,br,bl], border_widths=[top,right,bottom,left](px).
+    pub const Quad = struct {
+        rect: Rect,
+        fill_role: tokens.ColorRole,
+        corner_radii: [4]u16 = .{ 0, 0, 0, 0 },
+        border_widths: [4]u16 = .{ 0, 0, 0, 0 },
+        border_role: ?tokens.ColorRole = null,
+        fill_role_end: ?tokens.ColorRole = null, // gradient 끝 색(null=solid)
+        gradient: GradientKind = .solid,
+        alpha: u8 = 0xFF,
+    };
+    pub const GradientKind = enum(u8) { solid = 0, vertical = 1, horizontal = 2 };
 };
 
 /// 한 컴포넌트가 한 프레임에 내는 출력 = (레이어, 그 레이어에 그릴 ops). ops 슬라이스 수명은 호출자

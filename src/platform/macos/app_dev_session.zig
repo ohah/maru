@@ -4233,6 +4233,7 @@ pub const DevSession = struct {
             .border => |b| paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides),
             .text => |t| placeText(cp, fg, cwid, cols, rows, origin_x, origin_y, cw, ch, t, .{ .rgb = tk.get(t.role) }),
             .rule => {}, // 컴포넌트가 아직 안 냄 — 필요해질 때(C2 divider) 셀 라인으로 lower
+            .quad => {}, // C4b-2: 모달이 아직 quad를 안 냄 — C4b-3에서 rich 박스(GPU quad)/tui 셀 fill로 lower
         };
 
         // 4) 그리드를 DrawCell 배열로 평탄화(allocator 소유). wide 문자(한글/CJK)면 width=2 — frame builder가 그 폭으로

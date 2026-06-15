@@ -513,6 +513,46 @@ pub fn nativeCellsHaveAtlasPlacement(cells: []const NativeMetalCell) bool {
 /// 가장 최근 frame의 Metal view. extern struct이므로 C ABI(app_host_abi.h의
 /// MaruAppHostDevMetalFrame)와 layout이 1:1이다. 모든 포인터는 MetalFrameBuffer가 소유한
 /// 배열을 가리키며, 그 버퍼의 다음 replace() 또는 deinit()까지만 유효하다.
+/// chrome rich 백엔드(C4b)의 GPU 렌더 프리미티브 — 둥근 사각형(모서리별 radius + 변별 테두리 + solid/
+/// gradient 채움). 셀 그리드(NativeMetalCell)와 **별개 파이프라인**으로 SDF anti-aliasing으로 그린다.
+/// tui 테마는 이 배열을 비워 두므로(셀 fill 유지) 시각이 안 바뀐다 — rich 테마만 lowering이 채운다(C4b-2~).
+/// 좌표는 backing 픽셀(좌상단 기준). 설계 근거: docs/layering-and-portability.md §5(C4b).
+pub const GpuQuad = extern struct {
+    // 사각형 bounds(backing px).
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    // 모서리별 반지름(px): [top-left, top-right, bottom-right, bottom-left]. 0이면 직각.
+    corner_radii: [4]f32,
+    // 변별 테두리 폭(px): [top, right, bottom, left]. 0이면 그 변에 테두리 없음.
+    border_widths: [4]f32,
+    // 채움 색 0(0xAARRGGBB). gradient_kind≠0이면 시작색.
+    fill_color0: u32,
+    // 채움 색 1(0xAARRGGBB) — gradient 끝색. solid(gradient_kind=0)면 무시.
+    fill_color1: u32,
+    // 테두리 색(0xAARRGGBB). border_widths가 모두 0이면 무시.
+    border_color: u32,
+    // 0=solid(fill_color0만), 1=수직 gradient(top→bottom), 2=수평(left→right).
+    gradient_kind: u32,
+};
+
+/// C4b의 그림자 프리미티브 — quad 아래에 깔리는 둥근 drop shadow(blur). quad와 같은 별개 파이프라인이고
+/// rich 테마만 채운다(C4b 후속 적용). 좌표는 backing 픽셀. 설계 근거: docs/layering-and-portability.md §5.
+pub const GpuShadow = extern struct {
+    // 그림자를 드리울 사각형 bounds(backing px) — lowering이 offset/spread를 미리 반영해 받는다.
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    // 모서리별 반지름(px): [tl, tr, br, bl] — quad와 같은 모서리로 둥근 그림자.
+    corner_radii: [4]f32,
+    // 흐림 반경(px). 0이면 선명한(블러 없는) 그림자.
+    blur_radius: f32,
+    // 그림자 색(0xAARRGGBB) — 보통 반투명 검정.
+    color: u32,
+};
+
 pub const MetalFrame = extern struct {
     cols: u32 = 0,
     rows: u32 = 0,
@@ -550,6 +590,13 @@ pub const MetalFrame = extern struct {
     // 아니라 이 슬롯 높이로 세로 배치한다(밴드 row i → py=i×slot_h, 높이 slot_h) — cmux식 큰 탭
     // 슬롯. 0이면 cell 높이로 폴백(슬롯=한 줄). 호버/X(후속)의 픽셀 hit-test 기준 높이도 이 값.
     sidebar_slot_height_px: u32 = 0,
+    // chrome rich GPU 프리미티브(C4b). tui 테마는 빈 배열(null/0)이라 렌더가 무동작 — 셀 그리드 유지.
+    // rich 테마만 lowering이 채운다(C4b-2~). NativeMetalCell과 별개 파이프라인으로 SDF AA로 그린다.
+    // 설계: docs/layering-and-portability.md §5(C4b). 포인터 수명은 cells와 같은 계약(다음 갱신/해제까지).
+    gpu_quads: ?[*]const GpuQuad = null,
+    gpu_quad_count: usize = 0,
+    gpu_shadows: ?[*]const GpuShadow = null,
+    gpu_shadow_count: usize = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).

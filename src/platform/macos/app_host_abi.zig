@@ -101,6 +101,8 @@ pub const DevFrameSummary = app_dev_session.FrameSummary;
 pub const DevMetalCell = app_dev_session.MetalCell;
 pub const DevMetalRasterUpload = app_dev_session.MetalRasterUpload;
 pub const DevMetalFrame = app_dev_session.MetalFrame;
+pub const DevGpuQuad = app_dev_session.MetalGpuQuad;
+pub const DevGpuShadow = app_dev_session.MetalGpuShadow;
 
 pub fn defaultCapabilities() Capabilities {
     // Swift host는 macOS 앱 생명주기와 focus/input만 소유한다. PTY와 frame loop는
@@ -688,6 +690,10 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@alignOf(c.MaruAppHostDevMetalRasterUpload), @alignOf(DevMetalRasterUpload));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevMetalFrame), @sizeOf(DevMetalFrame));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostDevMetalFrame), @alignOf(DevMetalFrame));
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevGpuQuad), @sizeOf(DevGpuQuad));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostDevGpuQuad), @alignOf(DevGpuQuad));
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevGpuShadow), @sizeOf(DevGpuShadow));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostDevGpuShadow), @alignOf(DevGpuShadow));
 }
 
 test "macOS app host capabilities describe ownership before runtime exists" {

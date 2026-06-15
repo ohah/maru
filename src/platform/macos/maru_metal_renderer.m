@@ -39,6 +39,7 @@ _Static_assert(sizeof(MaruRendererQuadVertex) == 108, "MaruRendererQuadVertex mu
 @property (nonatomic, strong) id<MTLCommandQueue> queue;
 @property (nonatomic, strong) id<MTLRenderPipelineState> pipeline;
 @property (nonatomic, strong) id<MTLRenderPipelineState> quadPipeline;
+@property (nonatomic, strong) id<MTLRenderPipelineState> shadowPipeline;
 @property (nonatomic, strong) id<MTLTexture> atlas;
 @property (nonatomic) uint32_t atlasWidth;
 @property (nonatomic) uint32_t atlasHeight;
@@ -102,6 +103,29 @@ MaruMetalRenderer *maru_metal_renderer_create(id<MTLDevice> device, MTLPixelForm
     if (quad_pipeline == nil) {
         return NULL;
     }
+    // C4b: chrome 그림자 파이프라인(gaussian-approx blur SDF). quad와 별개, quad·셀보다 아래(먼저) 그린다.
+    id<MTLLibrary> shadow_library = [device newLibraryWithSource:MARU_METAL_SHADOW_SHADER_SOURCE
+                                                         options:nil
+                                                           error:NULL];
+    if (shadow_library == nil) {
+        return NULL;
+    }
+    MTLRenderPipelineDescriptor *shadow_descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    shadow_descriptor.vertexFunction = [shadow_library newFunctionWithName:@"maru_shadow_vertex"];
+    shadow_descriptor.fragmentFunction = [shadow_library newFunctionWithName:@"maru_shadow_fragment"];
+    shadow_descriptor.colorAttachments[0].pixelFormat = pixel_format;
+    shadow_descriptor.colorAttachments[0].blendingEnabled = YES;
+    shadow_descriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+    shadow_descriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+    shadow_descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+    shadow_descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    shadow_descriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    shadow_descriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    id<MTLRenderPipelineState> shadow_pipeline =
+        [device newRenderPipelineStateWithDescriptor:shadow_descriptor error:NULL];
+    if (shadow_pipeline == nil) {
+        return NULL;
+    }
     id<MTLCommandQueue> queue = [device newCommandQueue];
     if (queue == nil) {
         return NULL;
@@ -112,6 +136,7 @@ MaruMetalRenderer *maru_metal_renderer_create(id<MTLDevice> device, MTLPixelForm
     impl.queue = queue;
     impl.pipeline = pipeline;
     impl.quadPipeline = quad_pipeline;
+    impl.shadowPipeline = shadow_pipeline;
     // C handle이 ObjC 객체 수명을 소유한다. destroy에서 __bridge_transfer로 해제한다.
     return (__bridge_retained MaruMetalRenderer *)impl;
 }
@@ -541,6 +566,7 @@ void maru_metal_renderer_destroy(MaruMetalRenderer *renderer) {
     impl.atlas = nil;
     impl.pipeline = nil;
     impl.quadPipeline = nil;
+    impl.shadowPipeline = nil;
     impl.queue = nil;
     impl.device = nil;
 }

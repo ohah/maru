@@ -38,8 +38,10 @@ const PaneTree = app.SplitTree(*Pane);
 pub const MetalCell = metal_frame.NativeMetalCell;
 pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
+pub const MetalGpuQuad = metal_frame.GpuQuad;
+pub const MetalGpuShadow = metal_frame.GpuShadow;
 
-pub const abi_version: u32 = 40; // 40: show_notice(chrome Notice 모달 — 워크스페이스 복원 손상 알림). 39: apply_workspace_window+workspace_window_count
+pub const abi_version: u32 = 41; // 41: gpu_quads/gpu_shadows(chrome rich GPU 프리미티브 토대 — C4b). 40: show_notice(chrome Notice 모달). 39: apply_workspace_window+workspace_window_count
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로

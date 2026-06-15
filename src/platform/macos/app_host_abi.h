@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 40u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 41u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -205,6 +205,33 @@ typedef struct MaruAppHostDevMetalRasterUpload {
     size_t non_clear_pixels;
 } MaruAppHostDevMetalRasterUpload;
 
+/* chrome rich 백엔드(C4b)의 GPU 둥근 사각형 프리미티브. Zig metal_frame.GpuQuad와 1:1. 셀 그리드와
+   별개 파이프라인으로 SDF anti-aliasing. tui 테마는 빈 배열(NULL/0)이라 렌더 무동작(셀 fill 유지), rich만
+   채운다(C4b-2~). 좌표 backing px. */
+typedef struct MaruAppHostDevGpuQuad {
+    float x;
+    float y;
+    float w;
+    float h;
+    float corner_radii[4];   /* [top-left, top-right, bottom-right, bottom-left], px */
+    float border_widths[4];  /* [top, right, bottom, left], px */
+    uint32_t fill_color0;    /* 0xAARRGGBB — gradient 시작색 */
+    uint32_t fill_color1;    /* gradient 끝색(solid면 무시) */
+    uint32_t border_color;   /* 0xAARRGGBB */
+    uint32_t gradient_kind;  /* 0=solid, 1=vertical(top→bottom), 2=horizontal(left→right) */
+} MaruAppHostDevGpuQuad;
+
+/* C4b의 둥근 drop shadow 프리미티브(blur). quad와 같은 별개 파이프라인, rich만 채운다. Zig GpuShadow와 1:1. */
+typedef struct MaruAppHostDevGpuShadow {
+    float x;
+    float y;
+    float w;
+    float h;
+    float corner_radii[4];   /* [tl, tr, br, bl], px */
+    float blur_radius;       /* px (0=블러 없음) */
+    uint32_t color;          /* 0xAARRGGBB */
+} MaruAppHostDevGpuShadow;
+
 /* 가장 최근 frame의 Metal view. 모든 포인터는 dev session이 소유한 retained 배열을 가리키며,
    "다음으로 재투영하는 tick"(새 output 또는 resize가 있는 tick) 또는 destroy까지 유효하다.
    idle tick은 재투영하지 않으므로 포인터가 유지되고 generation도 그대로다. close는 이 배열을
@@ -242,6 +269,12 @@ typedef struct MaruAppHostDevMetalFrame {
     /* 사이드바 탭 슬롯 한 칸의 픽셀 높이(≈2.5×cell_height). renderer가 사이드바 셀을 cell 높이가 아니라
        이 슬롯 높이로 세로 배치한다(밴드 row i → py=i×slot_h) — cmux식 큰 탭 슬롯. 0이면 cell 높이로 폴백. */
     uint32_t sidebar_slot_height_px;
+    /* chrome rich GPU 프리미티브(C4b). tui 테마는 빈 배열(NULL/0)이라 렌더 무동작(셀 그리드 유지),
+       rich 테마만 lowering이 채운다(C4b-2~). NativeMetalCell과 별개 파이프라인으로 SDF AA로 그린다. */
+    const MaruAppHostDevGpuQuad *gpu_quads;
+    size_t gpu_quad_count;
+    const MaruAppHostDevGpuShadow *gpu_shadows;
+    size_t gpu_shadow_count;
 } MaruAppHostDevMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

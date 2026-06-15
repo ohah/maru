@@ -212,12 +212,13 @@ pub export fn maru_macos_app_dev_session_close(
 pub export fn maru_macos_app_dev_session_scroll_wheel(
     session: ?*DevSession,
     delta_y: f64,
+    delta_x: f64,
     precise: i32,
     x_px: f64,
     y_px: f64,
 ) c_int {
     const dev_session = session orelse return @intFromEnum(Status.null_out);
-    dev_session.scrollWheel(delta_y, precise != 0, x_px, y_px);
+    dev_session.scrollWheel(delta_y, delta_x, precise != 0, x_px, y_px);
     return @intFromEnum(Status.ok);
 }
 

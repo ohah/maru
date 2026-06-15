@@ -2788,7 +2788,7 @@ pub const TerminalCore = struct {
     /// 이 surface의 현재 입력 인코딩 모드. 키를 인코딩하는 쪽(keybinding resolver 경유 포함)이
     /// 매 키마다 읽어 전달한다 — DECCKM은 프로그램이 수시로 켜고 끈다(vim 진입/이탈).
     pub fn encodeOptions(self: *const TerminalCore) input.EncodeOptions {
-        return .{ .application_cursor_keys = self.application_cursor_keys };
+        return .{ .application_cursor_keys = self.application_cursor_keys, .kitty_flags = self.kitty_flags.current().int() };
     }
 
     pub fn dumpUtf8(self: *const TerminalCore, allocator: std.mem.Allocator) ![]u8 {

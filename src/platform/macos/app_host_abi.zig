@@ -815,7 +815,7 @@ test "layout-independent shortcut: Hangul-mode Ctrl+B normalizes to latin b via 
     try std.testing.expectEqual(terminal.Key{ .char = 'b' }, key_event.key);
     try std.testing.expect(key_event.modifiers.control);
     // 인코딩까지: Ctrl+b -> 0x02 (멀티플렉서 prefix가 한글 모드에서도 동작).
-    var buffer: [8]u8 = undefined;
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
     const encoded = try terminal.input.encodeKey(key_event, &buffer, .{});
     try std.testing.expectEqualSlices(u8, &.{0x02}, encoded);
 }

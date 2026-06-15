@@ -115,6 +115,11 @@ const font_size_max: f32 = 72.0;
 // 커서 깜빡임 반주기(30Hz tick 단위). 15틱 = 500ms — 일반 터미널 관례(on 500ms / off 500ms). 틱이 고정 30Hz라
 // 정확히 500ms다. ms 기반 위상·config 노출·deadline 스케줄러는 문서화된 시간-모델 후속(docs/layering §5).
 const blink_interval_ticks: u32 = 15;
+// synchronized output(DECSET 2026) ESU-유실 복구 deadline. 30틱 = 1초(고정 30Hz). BSU(2026h) 후 ESU(2026l)가
+// 영영 안 오면(앱 크래시·SSH 끊김·버그) frame 투영이 무한정 막혀 화면이 freeze되므로, 이 한도를 넘는 hold는
+// sync를 강제 해제하고 투영한다. 베이스: ESU-유실 안전장치(Ghostty termio sync_reset_ms=1000·xterm.js
+// SYNCHRONIZED_OUTPUT_TIMEOUT_MS=1000과 같은 1초 timeout) — 정상 ESU 흐름엔 영향 없다.
+const sync_timeout_ticks: u32 = 30;
 
 // 복원(R4)에서 모델 surface의 저장된 cols/rows를 spawn 초기 grid로 쓴다(0이면 terminal.Size.default 기본).
 // 실제 grid는 복원 직후 resize/레이아웃이 창·split에 맞게 보정하므로, 이 초기값은 spawn winsize일 뿐이다.
@@ -767,6 +772,9 @@ pub const DevSession = struct {
     // PaneFrame.cursor라 setCursorVisible(suffix-trim)이 재빌드 없이 토글한다(터미널 커서와 동일 경로 재활용).
     blink_visible: bool = true,
     blink_ticks: u32 = 0,
+    // synchronized output(2026) hold가 이어진 tick 수(활성 surface 기준). sync_timeout_ticks를 넘으면 ESU
+    // 유실로 보고 강제 투영해 freeze를 푼다. sync가 꺼지면 0으로 리셋한다.
+    sync_hold_ticks: u32 = 0,
 
     pub fn init(
         self: *DevSession,
@@ -3693,8 +3701,18 @@ pub const DevSession = struct {
         // 깜빡이고, suffix-trim(setCursorVisible)이라 재빌드 없이 토글된다(터미널 커서와 같은 메커니즘 재활용).
         if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink();
         // synchronized output(DECSET 2026): sync 중이면 frame 투영을 멈춘다(metal_dirty는 쌓인 채 유지) — ESU(2026
-        // reset)로 sync가 꺼지면 다음 tick에 누적 출력을 한 frame으로 투영한다(Ghostty의 synchronized 시 render skip과 동형).
-        if (self.metal_dirty and !self.activeSurface().core.sync_output) {
+        // reset)로 sync가 꺼지면 다음 tick에 누적 출력을 한 frame으로 투영한다(render skip과 동형). 단 ESU가
+        // 영영 안 오면 freeze되므로 hold가 sync_timeout_ticks를 넘으면 강제 해제한다(아래 sync_blocks).
+        const sync_active = self.activeSurface().core.sync_output;
+        if (sync_active) {
+            self.sync_hold_ticks +|= 1;
+        } else {
+            self.sync_hold_ticks = 0;
+        }
+        // sync가 켜져 있고 아직 timeout 전이면 투영을 막는다(ESU가 누적 출력을 한 frame으로 풀 때까지). timeout을
+        // 넘기면 sync_active여도 막지 않아 freeze가 풀린다.
+        const sync_blocks = sync_active and self.sync_hold_ticks < sync_timeout_ticks;
+        if (self.metal_dirty and !sync_blocks) {
             var tick_result = if (builtin.os.tag == .macos) blk: {
                 const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
                     .appearance = self.appearance,
@@ -5233,6 +5251,45 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
     try std.testing.expect(toggles >= 1);
     // 토글은 rebuild 없이도 재드로우를 유발해야 한다(setCursorVisible의 generation 증가).
     try std.testing.expect(gen_changes >= toggles);
+}
+
+test "synchronized output(2026) hold: ESU 누락 시 sync_timeout_ticks를 넘으면 강제 투영(freeze 복구)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 CoreText frame builder 경로
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // controlled 출력이 멎을 때까지 tick한다 — 이후 output_events=0이라 우리가 세팅한 metal_dirty가 유지된다.
+    var i: usize = 0;
+    while (i < 150) : (i += 1) _ = try session.tick();
+
+    // BSU 상황 모사: 활성 surface가 sync로 진입하고 누적 출력(metal_dirty)이 한 프레임 대기 중.
+    session.activeSurface().core.sync_output = true;
+    session.metal_dirty = true;
+    session.sync_hold_ticks = 0;
+    // timeout 직전(29틱)까지는 sync가 투영을 막아 metal_dirty가 false로 안 풀리고 누적된다(투영 판정엔
+    // metal_dirty를 본다 — generation은 blink 토글로 따로 올라 투영 여부의 지표가 못 된다).
+    var k: usize = 0;
+    while (k + 1 < sync_timeout_ticks) : (k += 1) _ = try session.tick();
+    try std.testing.expect(session.metal_dirty); // 아직 hold(투영 skip)
+    try std.testing.expectEqual(sync_timeout_ticks - 1, session.sync_hold_ticks);
+
+    // timeout 도달 tick에서 sync_active여도 강제 투영 → metal_dirty가 풀린다(ESU 없이 freeze 해제).
+    _ = try session.tick();
+    try std.testing.expect(!session.metal_dirty);
+
+    // ESU 모사: sync가 꺼지면 다음 tick에 hold 카운터가 0으로 리셋된다.
+    session.activeSurface().core.sync_output = false;
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(u32, 0), session.sync_hold_ticks);
 }
 
 test "chrome_minimal session suppresses the pane tab bar and the sidebar" {

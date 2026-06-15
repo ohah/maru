@@ -219,7 +219,7 @@ typedef struct MaruAppHostDevGpuQuad {
     uint32_t fill_color1;    /* gradient 끝색(solid면 무시) */
     uint32_t border_color;   /* 0xAARRGGBB */
     uint32_t gradient_kind;  /* 0=solid, 1=vertical(top→bottom), 2=horizontal(left→right) */
-    uint32_t layer;          /* C4b 모달: 0=under(사이드바 밴드), 1=over(모달 최상위) — draw가 layer로 패스 분리 */
+    uint32_t layer;          /* C4b: 0=under(사이드바 밴드), 1=over(모달 최상위), 2=bottom(탭 밴드 — part1 앞·아래) — draw가 layer로 3패스 분리 */
 } MaruAppHostDevGpuQuad;
 
 /* C4b의 둥근 drop shadow 프리미티브(blur). quad와 같은 별개 파이프라인, rich만 채운다. Zig GpuShadow와 1:1. */

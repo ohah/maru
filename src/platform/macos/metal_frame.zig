@@ -535,8 +535,9 @@ pub const GpuQuad = extern struct {
     border_color: u32,
     // 0=solid(fill_color0만), 1=수직 gradient(top→bottom), 2=수평(left→right).
     gradient_kind: u32,
-    // C4b 모달: 합성 레이어. 0=under(사이드바 밴드 — 셀 part1 위·사이드바 제목 아래), 1=over(모달 — 셀
-    // 전체 위·모달 텍스트 아래, 최상위). draw가 layer로 quad 패스를 둘로 갈라 z를 맞춘다(모달-1).
+    // C4b: 합성 레이어. 0=under(사이드바 밴드 — 셀 part1 위·사이드바 제목 아래), 1=over(모달 — 셀 전체
+    // 위·모달 텍스트 아래, 최상위), 2=bottom(탭 밴드 — part1 터미널·탭 제목 '앞'·아래, C4b-5). draw가 layer로
+    // quad 패스를 셋(bottom→under→over)으로 갈라 z를 맞춘다(모달-1 + C4b-5).
     layer: u32,
 };
 

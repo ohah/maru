@@ -3679,13 +3679,18 @@ pub const DevSession = struct {
             const tab_corner = self.buildChromeTokens().space.corner_radius_px;
             for (leaf_rects.items) |lr| {
                 const bar = self.paneBarRect(lr.rect) orelse continue;
-                if (paneBarBgCell(bar, self.cell_width_px, self.sidebarBg())) |cell| pane_chrome.append(self.allocator, cell) catch {};
                 const hl_bg = if (lr.leaf == active_pane) self.sidebarActiveBg() else self.sidebarHoverBg();
-                if (barMetrics(bar, self.cell_width_px, lr.leaf.terms.items.len)) |m| {
-                    if (tab_corner > 0) {
-                        self.appendTabBandQuad(m, lr.leaf.active_term, hl_bg, tab_corner); // rich: 둥근 layer 2 quad
-                    } else if (tabbarHighlightCell(m, lr.leaf.active_term, hl_bg)) |cell| {
-                        pane_chrome.append(self.allocator, cell) catch {}; // tui: 직각 셀 밴드
+                const m_opt = barMetrics(bar, self.cell_width_px, lr.leaf.terms.items.len);
+                if (tab_corner > 0) {
+                    // rich: 바 배경(직각)·활성 탭 밴드(둥근) 모두 layer 2 quad. 바 배경을 먼저 append해 아래, 활성 탭이 위,
+                    // 제목 셀(part1)은 그 위 — 불투명 바 배경 셀이 밴드 quad를 가리던 z-order 버그 해소(리뷰 #1).
+                    self.appendBarBgQuad(bar, self.sidebarBg());
+                    if (m_opt) |m| self.appendTabBandQuad(m, lr.leaf.active_term, hl_bg, tab_corner);
+                } else {
+                    // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위).
+                    if (paneBarBgCell(bar, self.cell_width_px, self.sidebarBg())) |cell| pane_chrome.append(self.allocator, cell) catch {};
+                    if (m_opt) |m| {
+                        if (tabbarHighlightCell(m, lr.leaf.active_term, hl_bg)) |cell| pane_chrome.append(self.allocator, cell) catch {};
                     }
                 }
             }
@@ -4015,6 +4020,24 @@ pub const DevSession = struct {
             .w = @floatCast(seg.end_px - seg.start_px),
             .h = @floatFromInt(m.bar_h),
             .corner_radii = .{ cr, cr, cr, cr },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = bg,
+            .fill_color1 = bg,
+            .border_color = 0,
+            .gradient_kind = 0,
+            .layer = 2,
+        }) catch {};
+    }
+
+    /// C4b-5: rich 탭 바 배경(직각)을 layer 2 GpuQuad로 그린다 — 활성 탭 밴드 quad(같은 layer, 뒤에 append되어 위로)가
+    /// 불투명 셀 배경(paneBarBgCell)에 가리지 않게(리뷰 z-order #1, #451과 동형). tui는 셀. 둘 다 part1 제목 셀 아래(layer 2).
+    fn appendBarBgQuad(self: *DevSession, bar: app.SplitRect, bg: u32) void {
+        self.gpu_quads.append(self.allocator, .{
+            .x = @floatFromInt(bar.x),
+            .y = @floatFromInt(bar.y),
+            .w = @floatFromInt(bar.w),
+            .h = @floatFromInt(bar.h),
+            .corner_radii = .{ 0, 0, 0, 0 }, // 직각(바 전체 배경 — 활성 탭만 둥글다)
             .border_widths = .{ 0, 0, 0, 0 },
             .fill_color0 = bg,
             .fill_color1 = bg,

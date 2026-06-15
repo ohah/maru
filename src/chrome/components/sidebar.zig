@@ -90,12 +90,12 @@ pub fn view(tabs: []const Tab, hovered_slot: ?usize, hovered_plus: bool, p: prop
     if (active_idx) |ai| {
         try out.append(arena, bandFill(ai, w, slot_h, .tab_active_bg, p.shape)); // 카드 배경 밴드
         // U1: 활성 슬롯 좌측 maru-accent 막대(accent_bar_width>0 — rich). 밴드 뒤에 append → 카드 배경 위에 그려진다.
-        // U2: 막대도 카드 패딩 안(좌단 x=gap, 카드 높이 slot_h-2gap)에 맞춰 카드 왼쪽 가장자리에 붙인다.
+        // U2: 막대도 카드 content rect(슬롯에서 card_gap inset) 좌단 가장자리에 카드 높이로 붙인다.
         if (p.shape.accent_bar_width_px > 0) {
-            const gap: u32 = p.shape.card_gap_px;
-            const y: i32 = @intCast(ai * @as(usize, slot_h) + gap);
-            const ch = slot_h -| 2 * gap;
-            try out.append(arena, .{ .quad = .{ .rect = .{ .x = @intCast(gap), .y = y, .w = p.shape.accent_bar_width_px, .h = ch }, .fill_role = .accent_bar, .corner_radii = .{ 0, 0, 0, 0 } } });
+            const g = p.shape.card_gap_px;
+            const slot = draw.Rect{ .x = 0, .y = @intCast(ai * @as(usize, slot_h)), .w = w, .h = slot_h };
+            const card = slot.inset(.{ .left = g, .right = g, .top = g, .bottom = g });
+            try out.append(arena, .{ .quad = .{ .rect = .{ .x = card.x, .y = card.y, .w = p.shape.accent_bar_width_px, .h = card.h }, .fill_role = .accent_bar, .corner_radii = .{ 0, 0, 0, 0 } } });
         }
     }
 
@@ -112,14 +112,14 @@ pub fn view(tabs: []const Tab, hovered_slot: ?usize, hovered_plus: bool, p: prop
 
 /// 슬롯 r의 전체-폭 밴드 fill op. row→y는 slot_h 배수(한 탭=한 슬롯). platform lowerSidebar가 sidebarBandCell로 lower.
 fn bandFill(row: usize, w: u32, slot_h: u32, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
-    // U2: 카드 레이아웃 — 슬롯 안쪽 사방 card_gap 패딩으로 카드 사이 여백을 둔다. tui(gap=0)면 슬롯 꽉(기존과 동일).
-    const gap: u32 = shape.card_gap_px;
-    const y: i32 = @intCast(row * @as(usize, slot_h) + gap);
-    const cw = w -| 2 * gap;
-    const ch = slot_h -| 2 * gap;
+    // U2: 슬롯 rect에서 사방 card_gap을 inset(content rect)으로 빼 카드 사이 여백을 둔다(선언적 패딩 — 좌표 산술 대신).
+    // tui(gap=0)면 inset 0이라 슬롯 꽉(기존과 동일).
+    const slot = draw.Rect{ .x = 0, .y = @intCast(row * @as(usize, slot_h)), .w = w, .h = slot_h };
+    const g = shape.card_gap_px;
+    const card = slot.inset(.{ .left = g, .right = g, .top = g, .bottom = g });
     const r = shape.corner_radius_px;
     // tui(r=0)면 lowerSidebar가 셀 밴드로, rich(r>0)면 GPU quad(둥근)로 lower한다 — 같은 op, 토큰만 다름.
-    return .{ .quad = .{ .rect = .{ .x = @intCast(gap), .y = y, .w = cw, .h = ch }, .fill_role = role, .corner_radii = .{ r, r, r, r } } };
+    return .{ .quad = .{ .rect = card, .fill_role = role, .corner_radii = .{ r, r, r, r } } };
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────

@@ -169,18 +169,6 @@ fn packOpaqueRgb(rgb: maru.color.Rgb) u32 {
     return 0xFF00_0000 | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
 }
 
-/// C4b-5 gradient: u32 색(0xAARRGGBB)의 RGB 각 채널을 delta만큼 가감(0~255 clamp, alpha 보존). 활성 탭 vertical
-/// gradient의 위(밝게 +δ)·아래(어둡게 -δ) 색을 bg에서 파생한다. delta=0이면 입력 그대로(solid).
-fn shiftBrightnessU32(c: u32, delta: i16) u32 {
-    const r: i16 = @intCast((c >> 16) & 0xFF);
-    const g: i16 = @intCast((c >> 8) & 0xFF);
-    const b: i16 = @intCast(c & 0xFF);
-    const rc: u32 = @intCast(std.math.clamp(r + delta, 0, 255));
-    const gc: u32 = @intCast(std.math.clamp(g + delta, 0, 255));
-    const bc: u32 = @intCast(std.math.clamp(b + delta, 0, 255));
-    return (c & 0xFF00_0000) | (rc << 16) | (gc << 8) | bc;
-}
-
 /// 활성 탭 하이라이트 밴드 셀 1개를 만든다(못 만들면 null). 사이드바 폭을 cell 폭으로 floor해 칸 수
 /// (sidebar_cols)를 구하고 — 밴드가 origin_x를 넘어 터미널 영역을 침범하지 않게 floor한다(우측에 한 칸
 /// 미만 여백이 살짝 inset처럼 남는다) — 그 폭만큼 한 칸(col 0, width=sidebar_cols)으로 사이드바를 채우는
@@ -3687,22 +3675,21 @@ pub const DevSession = struct {
             // (세로 분할 등에서 "활성 탭 UI가 안 바뀐다"는 제보 대응). 제목 glyph는 아래 pane_frames에(C2).
             var pane_chrome: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
             defer pane_chrome.deinit(self.allocator);
-            // C4b-5: rich(corner>0)면 활성 탭 밴드를 둥근 layer 2 GpuQuad(제목 셀 아래)로, tui(0)면 직각 셀 밴드로.
+            // rich(corner>0)면 활성 탭을 VSCode식(평평 약한 배경 + 하단 maru 앰버 언더바) layer 2 quad로, tui(0)면 셀 밴드로.
             const tk = self.buildChromeTokens();
             const tk_space = tk.space;
-            const tab_corner = tk_space.corner_radius_px; // rich 판별 게이트(>0이면 quad 밴드, 0이면 tui 셀)
-            const tab_band_corner = tk_space.tab_corner_radius_px; // U3: 밴드 곡률(탭 전용·납작) — 게이트와 분리
-            const tab_grad = tk_space.tab_gradient_delta;
+            const tab_corner = tk_space.corner_radius_px; // rich 판별 게이트(>0이면 quad, 0이면 tui 셀)
+            const tab_accent = packOpaqueRgb(tk.palette.get(.accent_bar)); // 활성 탭 하단 언더바(maru 앰버 — 포커스 surface 표시)
             for (leaf_rects.items) |lr| {
                 const bar = self.paneBarRect(lr.rect) orelse continue;
                 const hl_bg = if (lr.leaf == active_pane) self.sidebarActiveBg() else self.sidebarHoverBg();
                 const m_opt = barMetrics(bar, self.cell_width_px, lr.leaf.terms.items.len);
                 if (tab_corner > 0) {
-                    // rich: 바 배경(직각)·활성 탭 밴드(둥근+gradient) 모두 layer 2 quad. 바 배경을 먼저 append해 아래,
-                    // 활성 탭이 위, 제목 셀(part1)은 그 위 — 불투명 바 배경 셀이 밴드 quad를 가리던 z-order 버그 해소(리뷰 #1).
+                    // rich: 바 배경(직각)·활성 탭(평평 배경 + 하단 앰버 언더바) 모두 layer 2 quad. 바 배경 먼저(아래),
+                    // 활성 탭이 위, 제목 셀(part1)은 그 위 — 불투명 바 배경 셀이 quad를 가리던 z-order 버그 해소(리뷰 #1).
                     self.appendBarBgQuad(bar, self.sidebarBg());
-                    self.appendTabBarUnderline(bar, tk.border.line_thickness_px); // 탭바 하단 구분선(터미널 콘텐츠와 경계) — 바 배경 위·활성 밴드 아래(append 순서)
-                    if (m_opt) |m| self.appendTabBandQuad(m, lr.leaf.active_term, hl_bg, tab_band_corner, tab_grad);
+                    self.appendTabBarUnderline(bar, tk.border.line_thickness_px); // 탭바 하단 구분선(터미널 콘텐츠와 경계)
+                    if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, hl_bg, tab_accent, tk.border.line_thickness_px);
                 } else {
                     // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위).
                     if (paneBarBgCell(bar, self.cell_width_px, self.sidebarBg())) |cell| pane_chrome.append(self.allocator, cell) catch {};
@@ -4032,30 +4019,20 @@ pub const DevSession = struct {
         }
     }
 
-    /// C4b-5: 활성 탭 밴드를 둥근 GpuQuad(layer 2 — part1 탭 제목 셀 '아래')로 gpu_quads에 append한다. segOf의 픽셀
-    /// 경계(start_px/end_px)를 써 hit-test·제목 glyph와 정확히 정합한다(§6 단일 소스). overflow(안 보이는) 탭이면 무동작.
-    /// rich(corner>0)에서만 호출 — tui는 tabbarHighlightCell 셀 밴드. per-frame(dropQuadsByLayer(2)가 매 프레임 비움).
-    fn appendTabBandQuad(self: *DevSession, m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32, corner: u16, grad: u8) void {
+    /// 활성 탭 강조(rich) — VSCode식: 평평한 약한 배경(직각·gradient 없음) + 하단 maru 앰버 언더바(active indicator,
+    /// 탭 seg 폭). 사용자 요청으로 둥근 밴드·vertical gradient(C4b-5/U3)를 평평 VSCode 탭으로 대체. 배경·언더바 둘 다
+    /// layer 2(셀 part1 제목 아래). segOf 픽셀 경계로 hit-test·제목 glyph와 정합(§6 단일 소스). overflow 탭이면 무동작.
+    /// per-frame(dropQuadsByLayer(2)가 매 프레임 비움). tui는 tabbarHighlightCell 셀 밴드.
+    fn appendActiveTabHighlight(self: *DevSession, m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32, accent: u32, underline_px: u32) void {
         const seg = m.segOf(tab_index);
         if (seg.end_col <= seg.start_col) return; // overflow(탭 영역 밖, 안 보이는) 탭
-        const cr: f32 = @floatFromInt(corner);
-        const gd: i16 = @intCast(grad);
-        self.gpu_quads.append(self.allocator, .{
-            .x = @floatCast(seg.start_px),
-            .y = @floatFromInt(m.bar_y),
-            .w = @floatCast(seg.end_px - seg.start_px),
-            .h = @floatFromInt(m.bar_h),
-            // 상단만(tl,tr) 둥글게, 하단(br,bl)은 직각 — 하단이 직각이라 그 아래 직각 underline·바 배경과 매끈히
-            // 맞물려, 4면 균일 둥근일 때 하단 코너로 divider가 비치던 문제 제거(#492 리뷰). 가로 탭이 바닥에
-            // 붙는 flat(브라우저식 탭) 룩. 셰이더 corner 순서 = [tl, tr, br, bl].
-            .corner_radii = .{ cr, cr, 0, 0 },
-            .border_widths = .{ 0, 0, 0, 0 },
-            .fill_color0 = shiftBrightnessU32(bg, gd), // 위(local.y=0) 약간 밝게
-            .fill_color1 = shiftBrightnessU32(bg, -gd), // 아래(local.y=h) 약간 어둡게
-            .border_color = 0,
-            .gradient_kind = 1, // vertical(셰이더: local.y/h로 fill0→fill1 보간). grad=0이면 fill0==fill1=solid.
-            .layer = 2,
-        }) catch {};
+        const x: f32 = @floatCast(seg.start_px);
+        const w: f32 = @floatCast(seg.end_px - seg.start_px);
+        const by: f32 = @floatFromInt(m.bar_y);
+        const bh: f32 = @floatFromInt(m.bar_h);
+        const uw: f32 = @floatFromInt(underline_px);
+        self.appendSolidQuad(x, by, w, bh, bg, 2); // 평평한 약한 배경(VSCode 탭 — 둥근·gradient 없음)
+        self.appendSolidQuad(x, by + bh - uw, w, uw, accent, 2); // 하단 maru 앰버 언더바(active indicator, 탭 폭)
     }
 
     /// U/#1: split에서 활성 pane rect 둘레에 maru 앰버 테두리(ring)를 GpuQuad(border만, fill 투명)로 그린다 — 포커스

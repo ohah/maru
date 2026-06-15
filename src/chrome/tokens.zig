@@ -55,13 +55,6 @@ pub const Spacing = struct {
     // C4b 모달: 배경 quad가 텍스트 영역보다 큰 안쪽 여백(px). tui=0(딱 맞는 셀 배경), rich>0(텍스트 주변 여백).
     // platform lowering이 모달 quad/shadow rect를 이 값만큼 사방 확장(텍스트 셀은 그대로) — 텍스트가 박스 안쪽에 든다.
     modal_padding_px: u16 = 0,
-    // C4b-5: rich 활성 탭 밴드의 vertical gradient 밝기 변화량(위 +δ 밝게 → 아래 -δ 어둡게, 채널당). tui=0(solid).
-    // platform이 활성 탭 GpuQuad의 fill_color0/1을 bg±δ로 채워 은은한 입체감을 준다(gradient_kind=1=vertical).
-    tab_gradient_delta: u8 = 0,
-    // U3: rich 활성 탭 밴드 곡률(px). 공용 corner_radius_px(모달·카드)와 분리해 가로 탭만 납작하게(평평할수록 자연).
-    // rich 판별 게이트는 corner_radius_px가 맡고 밴드 곡률만 이 토큰으로 — tab_corner_radius_px=0이면 직각 flat 밴드도
-    // 가능(공용 곡률과 결합돼 있을 땐 못 하던 것). tui=0(셀 밴드). rich는 공용보다 작게(납작).
-    tab_corner_radius_px: u16 = 0,
     // U1: 사이드바 활성 워크스페이스 좌측 maru-accent 막대 폭(px). tui=0(막대 없음), rich>0(앰버 막대).
     accent_bar_width_px: u16 = 0,
     // U2: 사이드바 카드 사이 여백(px). 밴드/막대를 슬롯 안쪽 사방으로 이만큼 줄여 워크스페이스가 카드처럼 떨어져 보인다.
@@ -139,10 +132,6 @@ pub const Tokens = struct {
         tk.space.shadow_alpha = 0x70;
         // C4b 모달 패딩: 배경 박스를 텍스트보다 사방 12px 크게 — 팝업 텍스트 주변에 여백(사용자 피드백 "여유").
         tk.space.modal_padding_px = 12;
-        // C4b-5: 활성 탭 밴드 은은한 vertical gradient(위 +12 밝게 → 아래 -12 어둡게, 사용자 선택 "은은한 gradient").
-        tk.space.tab_gradient_delta = 12;
-        // U3: 활성 탭 밴드 곡률 4px — 공용 8(모달·카드)보다 작게 해 가로 탭을 납작하게(flat 지향). gradient는 유지.
-        tk.space.tab_corner_radius_px = 4;
         // U1: 사이드바 활성 워크스페이스 좌측 maru-accent 막대 3px(앰버). tui=0(막대 없음).
         tk.space.accent_bar_width_px = 3;
         // U2: 카드 사이 여백 4px(슬롯 안쪽 사방 패딩) — 워크스페이스가 카드처럼 떨어져 보임.
@@ -232,10 +221,6 @@ test "Tokens.rich sets box-shape tokens (radius/border) while tui keeps 0" {
     try std.testing.expectEqual(@as(u16, 0), t.space.border_width_px);
     try std.testing.expect(r.space.corner_radius_px > 0);
     try std.testing.expect(r.space.border_width_px > 0);
-    // U3: 탭 밴드 곡률은 탭 전용 토큰 — tui=0(셀), rich는 공용 곡률보다 작다(가로 탭 납작).
-    try std.testing.expectEqual(@as(u16, 0), t.space.tab_corner_radius_px);
-    try std.testing.expect(r.space.tab_corner_radius_px > 0);
-    try std.testing.expect(r.space.tab_corner_radius_px < r.space.corner_radius_px);
     // 비-모양 space(슬롯 높이 비율)는 tui·rich 동일 — 모양만 분리한다.
     try std.testing.expectEqual(t.space.sidebar_slot_height_ratio_milli, r.space.sidebar_slot_height_ratio_milli);
 }

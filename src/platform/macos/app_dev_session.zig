@@ -678,6 +678,8 @@ pub const DevSession = struct {
     // C4b: chrome rich GPU quad 프리미티브(둥근 박스) — sidebar/모달/divider lowering이 모은다. tui/빈이면
     // 길이 0(렌더 무동작). renderFrame이 replace로 metal_buffer에 넘겨 dupe 소유시킨다(self는 ArrayList 재사용).
     gpu_quads: std.ArrayList(metal_frame.GpuQuad) = .empty,
+    // C4b 모달: chrome 그림자(GpuShadow) — 모달 배경 blur. per-frame(모달만, renderFrame이 매 프레임 clear).
+    gpu_shadows: std.ArrayList(metal_frame.GpuShadow) = .empty,
     // 마우스가 호버 중인 사이드바 탭 슬롯 인덱스(없으면 null). hoverCursor이 사이드바 영역에서 갱신하고,
     // rebuildSidebar가 이 슬롯에 호버 하이라이트 밴드를 그린다(활성 슬롯과 다를 때만). 후속 호버 X
     // 닫기 아이콘의 대상 슬롯도 이 값이다.
@@ -3644,6 +3646,7 @@ pub const DevSession = struct {
             // 일반 rasterizer placeText)로 lower한다 — palette도 C1b에서 이주해 같은 EAW-폭 경로를 탄다. 실패는 무시
             // (오버레이 없이 정상). PaneFrame.frame을 deinit해야 하므로 defer로 정리한다.
             self.dropModalQuads(); // C4b 모달: 이전 프레임 모달 quad(layer1)를 비운다 — 닫혀도 잔존 안 함(아래서 재채움).
+            self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             if (builtin.os.tag == .macos) {
                 if (self.chrome_host.notice.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
@@ -3807,7 +3810,7 @@ pub const DevSession = struct {
             if (floating_pf) |pf| pane_frames.append(self.allocator, pf) catch {};
 
             if (pane_frames.items.len > 0) {
-                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items)) |_| {
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items, self.gpu_shadows.items)) |_| {
                     self.metal_dirty = false;
                 } else |_| {}
             }
@@ -4506,6 +4509,7 @@ pub const DevSession = struct {
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
+        self.gpu_shadows.deinit(self.allocator);
         self.global_hotkeys.deinit(self.allocator);
         // 커맨드 카탈로그: owned 문자열(key_display·key_equivalent)을 먼저 해제하고 목록들을 deinit(빌드 전이면 empty라 무해).
         for (self.command_key_displays.items) |s| self.allocator.free(s);

@@ -698,6 +698,8 @@ pub const MetalFrameBuffer = struct {
     // C4b: chrome rich GPU quad 프리미티브(둥근 박스). replace가 DevSession이 chrome lowering으로 모은 것을
     // dupe 소유한다. tui 테마/빈이면 길이 0(렌더 무동작). 사이드바/모달/divider가 공유하는 통합 배열.
     gpu_quads: []GpuQuad = &.{},
+    // C4b 모달: chrome 그림자(GpuShadow) — 모달 배경의 떠 보이는 blur. per-frame(모달만), gpu_quads와 동형 소유.
+    gpu_shadows: []GpuShadow = &.{},
     uploads: []NativeMetalRasterUpload = &.{},
     pixels: []u8 = &.{},
     size: terminal.Size = .{ .cols = 0, .rows = 0 },
@@ -746,6 +748,8 @@ pub const MetalFrameBuffer = struct {
         // C4b: chrome rich GPU quad 프리미티브(DevSession이 chrome lowering으로 모은 것). buffer가 dupe 소유한다.
         // 셀 그리드와 별개 파이프라인으로 렌더된다(둥근 박스). 빈이면 0(tui — 무동작).
         gpu_quads: []const GpuQuad,
+        // C4b 모달: chrome 그림자(DevSession이 lowering으로 모은 것). buffer가 dupe 소유. 빈이면 0(무동작).
+        gpu_shadows: []const GpuShadow,
     ) !void {
         // 1) 터미널 셀: pane 탭 바 chrome을 먼저(커서 suffix 보존), 그 뒤 각 panel frame을 투영해 origin 박아
         //    이어 붙인다. 커서 suffix는 맨 뒤(활성) panel만.
@@ -790,6 +794,9 @@ pub const MetalFrameBuffer = struct {
         const new_gpu_quads = try allocator.dupe(GpuQuad, gpu_quads);
         errdefer allocator.free(new_gpu_quads);
 
+        const new_gpu_shadows = try allocator.dupe(GpuShadow, gpu_shadows);
+        errdefer allocator.free(new_gpu_shadows);
+
         const merged = try buildMergedUploadsN(allocator, pane_frames, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, if (overlay_frame) |pf| pf.frame.glyph_raster_frame else null);
         errdefer {
             allocator.free(merged.uploads);
@@ -799,11 +806,13 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.cells);
         allocator.free(self.sidebar_cells);
         allocator.free(self.gpu_quads);
+        allocator.free(self.gpu_shadows);
         allocator.free(self.uploads);
         allocator.free(self.pixels);
         self.cells = new_cells;
         self.sidebar_cells = new_sidebar_cells;
         self.gpu_quads = new_gpu_quads;
+        self.gpu_shadows = new_gpu_shadows;
         // 커서 suffix(blink chop 길이): 오버레이가 열렸으면 오버레이 자신의 caret(맨 끝 — overlay_cursor_cells)을 쓴다.
         // 그러면 setCursorVisible chop이 오버레이 caret을 깜빡인다(터미널 커서 메커니즘 재활용). 오버레이가 caret을
         // 안 내면(notice 등) overlay_cursor_cells=0이라 chop 없음(정적). 오버레이가 없으면 활성 panel의 터미널 커서.
@@ -855,6 +864,9 @@ pub const MetalFrameBuffer = struct {
             // C4b: chrome rich GPU quad 프리미티브. 비면 null로 둬 렌더러가 quad 패스를 건너뛴다(tui).
             .gpu_quads = if (self.gpu_quads.len > 0) self.gpu_quads.ptr else null,
             .gpu_quad_count = self.gpu_quads.len,
+            // C4b 모달: chrome 그림자. 비면 null로 둬 렌더러가 shadow 패스를 건너뛴다.
+            .gpu_shadows = if (self.gpu_shadows.len > 0) self.gpu_shadows.ptr else null,
+            .gpu_shadow_count = self.gpu_shadows.len,
             // C4b 모달: show_cursor로 잘려도 modal_cells_start는 그대로(커서 suffix는 모달 텍스트 '뒤'라
             // 모달 셀 시작에 영향 없음). exposed가 modal_cells_start보다 작으면 모달 텍스트가 안 보이는
             // 경우인데, 그땐 draw가 over quad를 모달 없음과 같게 다룬다(렌더러 가드).
@@ -866,6 +878,7 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.cells);
         allocator.free(self.sidebar_cells);
         allocator.free(self.gpu_quads);
+        allocator.free(self.gpu_shadows);
         allocator.free(self.uploads);
         allocator.free(self.pixels);
         self.* = .{};

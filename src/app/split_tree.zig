@@ -6,7 +6,7 @@ const std = @import("std");
 //
 //   Node = leaf(Leaf) | split{ direction, ratio, a, b }
 //
-// leaf는 panel 1개를 가리키는 **불투명 포인터**(`Leaf` 타입 파라미터). cmux식 모델에서 한 panel(Pane)이
+// leaf는 panel 1개를 가리키는 **불투명 포인터**(`Leaf` 타입 파라미터). 탭→pane 모델에서 한 panel(Pane)이
 // 여러 터미널을 가로 탭으로 들 수 있으므로, 트리는 그 Pane을 leaf로 들고 화면의 어느 surface를 그릴지는
 // Pane이 정한다. 트리는 leaf를 소유하지 않고(Tab/session이 heap-pin 소유) split 노드만 heap 소유한다.
 // `Leaf`로 일반화해(app 레이어가 platform의 Pane 타입에 의존하지 않게) 사용처(platform)가 `SplitTree(*Pane)`

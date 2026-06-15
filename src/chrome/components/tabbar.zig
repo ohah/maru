@@ -34,6 +34,7 @@ pub const Metrics = struct {
     tab_cols: u32, // "+" zone을 뗀 탭 영역 컬럼 수(좁은 바면 == cols)
     tab_w: u32, // 탭 하나의 폭(컬럼)
     scroll_cols: u32 = 0, // Step 2: 가로 스크롤 offset(컬럼). segCols/segOf가 화면 좌표를 이만큼 왼쪽으로 민다. 0=기본(barMetrics가 Pane.tab_scroll_cols로 채움).
+    has_scroll: bool = false, // Step 2a-2: 탭이 넘쳐 우측 "+" 왼쪽에 ‹›(2칸) 스크롤 버튼 zone이 예약됐는가. barMetrics가 판정(tab_cols는 이미 2칸 축소됨).
 
     /// 바 좌단 기준 col의 픽셀 경계. tab_index 세그먼트는 [col*cw, segEnd*cw).
     fn colPx(self: Metrics, col: u32) f64 {
@@ -113,10 +114,29 @@ pub const Metrics = struct {
         return self.tab_cols < self.cols;
     }
 
-    /// x_px가 "+" zone([tab_cols, cols)) 안인가. "+" zone이 없으면(좁은 바) false. "+" glyph(col=tab_cols+1)와 같은 영역.
+    /// 우측 스크롤 버튼 zone 시작 컬럼 — has_scroll이면 [tab_cols, tab_cols+2)에 ‹›, 그 뒤 [+2, cols)가 "+".
+    /// has_scroll 아니면 "+"가 tab_cols부터(‹› 없음). 렌더(‹›/+ glyph)·hit-test 단일 소스.
+    pub fn plusZoneStart(self: Metrics) u32 {
+        return self.tab_cols + (if (self.has_scroll) @as(u32, 2) else 0);
+    }
+
+    /// x_px가 "+" zone([plusZoneStart, cols)) 안인가. ‹›가 있으면 그 오른쪽. "+" glyph(col=plusZoneStart+1)와 같은 영역.
     pub fn inPlusZone(self: Metrics, x_px: f64) bool {
         if (!self.hasPlusZone() or !std.math.isFinite(x_px)) return false;
-        return x_px >= self.colPx(self.tab_cols) and x_px < self.colPx(self.cols);
+        const ps = self.plusZoneStart();
+        return x_px >= self.colPx(ps) and x_px < self.colPx(self.cols);
+    }
+
+    /// x_px가 ‹(왼쪽 스크롤) 버튼([tab_cols, tab_cols+1)) 안인가 — has_scroll일 때만. ‹ glyph(col=tab_cols)와 같은 영역.
+    pub fn inScrollLeftZone(self: Metrics, x_px: f64) bool {
+        if (!self.has_scroll or !std.math.isFinite(x_px)) return false;
+        return x_px >= self.colPx(self.tab_cols) and x_px < self.colPx(self.tab_cols + 1);
+    }
+
+    /// x_px가 ›(오른쪽 스크롤) 버튼([tab_cols+1, tab_cols+2)) 안인가 — has_scroll일 때만. › glyph(col=tab_cols+1)와 같은 영역.
+    pub fn inScrollRightZone(self: Metrics, x_px: f64) bool {
+        if (!self.has_scroll or !std.math.isFinite(x_px)) return false;
+        return x_px >= self.colPx(self.tab_cols + 1) and x_px < self.colPx(self.tab_cols + 2);
     }
 };
 
@@ -196,4 +216,20 @@ test "tabbar tabIndex: overflow(term>탭칸) — 안 보이는 탭을 hit하지 
     try std.testing.expectEqual(@as(usize, 5), m.tabIndex(10, 145)); // 탭5=[140,148)
     // overflow가 없으면(term=4 <= 보이는 탭 수) 기존대로 마지막 보이는 탭(3)으로 clamp.
     try std.testing.expectEqual(@as(usize, 3), m.tabIndex(4, 999));
+}
+
+test "tabbar Step 2a-2: has_scroll ‹› zone·plus 위치·스크롤 hit-test" {
+    var m = testMetrics();
+    m.has_scroll = true;
+    m.tab_cols = 6; // ‹›(2칸): [6,7)=‹, [7,8)=›, plus_start=8 → [8,10)=+. colPx(6)=148,7=156,8=164,10=180.
+    try std.testing.expect(m.inScrollLeftZone(150)); // ‹ [148,156)
+    try std.testing.expect(!m.inScrollLeftZone(160));
+    try std.testing.expect(m.inScrollRightZone(160)); // › [156,164)
+    try std.testing.expect(!m.inScrollRightZone(150));
+    try std.testing.expect(m.inPlusZone(170)); // + [164,180) — ‹› 오른쪽
+    try std.testing.expect(!m.inPlusZone(150)); // ‹ 위치는 plus 아님
+    // has_scroll=false면 ‹› 없음(scroll zone false), plus는 tab_cols(8)부터.
+    const no = testMetrics();
+    try std.testing.expect(!no.inScrollLeftZone(150));
+    try std.testing.expect(no.inPlusZone(165)); // plus_start=8 → [colPx(8),colPx(10))=[164,180)
 }

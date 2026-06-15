@@ -29,6 +29,11 @@ typedef struct {
     float gradient_kind;   // 0=solid, 1=vertical, 2=horizontal
 } MaruRendererQuadVertex;
 
+// 셰이더 QuadIn(maru_metal_shader.h)이 이 정점을 buffer(0)로 raw 재해석하므로 레이아웃이 1:1이어야 한다.
+// packed_float2×3(24) + packed_float4×5(80) + float(4) = 108B tight-pack. 한쪽만 필드를 바꾸면 GPU가
+// 엉뚱한 offset을 읽어 조용히 깨지므로(컴파일·테스트 무경고) 크기를 정적 단언으로 못박는다(GpuQuad ABI와 동형 가드).
+_Static_assert(sizeof(MaruRendererQuadVertex) == 108, "MaruRendererQuadVertex must match MSL QuadIn (108B tight-pack)");
+
 @interface MaruMetalRendererImpl : NSObject
 @property (nonatomic, strong) id<MTLDevice> device;
 @property (nonatomic, strong) id<MTLCommandQueue> queue;
@@ -471,7 +476,19 @@ bool maru_metal_renderer_draw(
 
     // vertex_buffer가 nil이면(cell 없음) clear만 한 빈 frame이다. 어떤 경우든 encoder는 반드시
     // endEncoding하고 present/commit한다.
-    // C4b: quad 패스(셀 아래) — chrome rich 둥근 사각형. 셀보다 먼저 그려 셀(글자·밴드 제목)이 위에 온다.
+    // C4b: 레이어 순서 = [터미널 + 사이드바 배경 strip] → quad(둥근 밴드) → [사이드바 cells(제목)].
+    // 사이드바 배경 strip은 셀 패스의 불투명 셀(squad)이라, rich 밴드 quad를 셀 패스 '전체' 앞에 두면
+    // 배경 strip이 그 위에 덮어 밴드가 안 보인다(z-order). 그래서 셀 패스를 '사이드바 cells 시작'에서 둘로
+    // 쪼개, 밴드 quad를 배경 strip '뒤'·제목 glyph '앞'에 끼운다. (모달/divider quad의 위 레이어 분리는 후속.)
+    const size_t pre_sidebar_vertices = (cell_count + sidebar_bg_quads) * 6;
+    if (vertex_buffer != nil && pre_sidebar_vertices > 0) {
+        [encoder setRenderPipelineState:impl.pipeline];
+        [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+        [encoder setFragmentTexture:impl.atlas atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                    vertexStart:0
+                    vertexCount:pre_sidebar_vertices];
+    }
     if (quad_vertex_buffer != nil) {
         [encoder setRenderPipelineState:impl.quadPipeline];
         [encoder setVertexBuffer:quad_vertex_buffer offset:0 atIndex:0];
@@ -479,13 +496,13 @@ bool maru_metal_renderer_draw(
                     vertexStart:0
                     vertexCount:quad_vertex_total];
     }
-    if (vertex_buffer != nil) {
+    if (vertex_buffer != nil && total_vertices > pre_sidebar_vertices) {
         [encoder setRenderPipelineState:impl.pipeline];
         [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
         [encoder setFragmentTexture:impl.atlas atIndex:0];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                    vertexStart:0
-                    vertexCount:total_vertices];
+                    vertexStart:pre_sidebar_vertices
+                    vertexCount:(total_vertices - pre_sidebar_vertices)];
     }
     [encoder endEncoding];
 

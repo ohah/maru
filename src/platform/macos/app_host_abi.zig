@@ -692,8 +692,16 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@alignOf(c.MaruAppHostDevMetalFrame), @alignOf(DevMetalFrame));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevGpuQuad), @sizeOf(DevGpuQuad));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostDevGpuQuad), @alignOf(DevGpuQuad));
+    // 모든 필드가 4B라 @sizeOf만으론 필드 reorder(예: corner_radii↔border_widths)를 못 잡는다 — offset도 대조한다.
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuQuad, "corner_radii"), @offsetOf(DevGpuQuad, "corner_radii"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuQuad, "border_widths"), @offsetOf(DevGpuQuad, "border_widths"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuQuad, "fill_color0"), @offsetOf(DevGpuQuad, "fill_color0"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuQuad, "gradient_kind"), @offsetOf(DevGpuQuad, "gradient_kind"));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevGpuShadow), @sizeOf(DevGpuShadow));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostDevGpuShadow), @alignOf(DevGpuShadow));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuShadow, "corner_radii"), @offsetOf(DevGpuShadow, "corner_radii"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuShadow, "blur_radius"), @offsetOf(DevGpuShadow, "blur_radius"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuShadow, "color"), @offsetOf(DevGpuShadow, "color"));
 }
 
 test "macOS app host capabilities describe ownership before runtime exists" {

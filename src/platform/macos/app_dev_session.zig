@@ -3709,7 +3709,10 @@ pub const DevSession = struct {
                 }
                 // U/#1: full rich split에서 활성 pane을 maru 앰버 테두리(ring)로 강조 — pane rect 둘레 border quad(터미널
                 // 위·모달 아래, layer 1). chrome_minimal은 위 appendActivePaneBorder(셀 테두리)가 따로 담당(탭 바 없으므로).
-                if (leaf_rects.items.len > 1 and lr.leaf == active_pane and tk_space.pane_border_width_px > 0) {
+                // 모달(notice/find/palette) 열림 시엔 skip — ring(layer 1)이 모달 배경(layer 1, 먼저 append)보다 위로 그려져
+                // 가장자리가 모달 배경을 가로지를 수 있어(리뷰 z-order), 오버레이 중엔 pane 강조를 생략한다.
+                const overlay_open = self.chrome_host.notice.open or self.chrome_host.find.open or self.chrome_host.palette.open;
+                if (leaf_rects.items.len > 1 and lr.leaf == active_pane and tk_space.pane_border_width_px > 0 and !overlay_open) {
                     self.appendActivePaneRingQuad(lr.rect, tk_space.pane_border_width_px);
                 }
             }

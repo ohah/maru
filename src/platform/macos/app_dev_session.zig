@@ -41,7 +41,7 @@ pub const MetalFrame = metal_frame.MetalFrame;
 pub const MetalGpuQuad = metal_frame.GpuQuad;
 pub const MetalGpuShadow = metal_frame.GpuShadow;
 
-pub const abi_version: u32 = 43; // 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 44; // 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -725,6 +725,8 @@ pub const DevSession = struct {
     divider_drag_seg: chrome.components.divider.Seg = .{ .orientation = .vertical_line, .bounds = .{ .x = 0, .y = 0, .w = 0, .h = 0 }, .pos = 0 },
     // 트랙패드 정밀 스크롤의 1줄 미만 잔여 델타(줄 단위). scrollWheel이 누적/소비한다.
     wheel_accum: f64 = 0,
+    // 트랙패드 가로 스와이프의 1셀 미만 잔여 델타(열 단위) — 탭 바 가로 스크롤용(#2b). wheel_accum의 가로 짝.
+    tab_wheel_accum: f64 = 0,
     // copyText()가 돌려준 추출 텍스트의 소유 버퍼(다음 copyText/destroy까지 유효 — ABI 수명 계약).
     copy_buffer: []u8 = &.{},
     // urlAt()이 돌려준 URL의 소유 버퍼(다음 urlAt/destroy까지 유효).
@@ -2362,7 +2364,7 @@ pub const DevSession = struct {
     /// 단위라 한 줄 높이(포인트)로 나눠 줄 수로 바꾸고, 줄 단위(마우스 휠) 델타는 그대로 줄 수다.
     /// 한 줄 미만의 정밀 델타는 wheel_accum에 누적해 천천히 스크롤해도 줄이 소실되지 않는다.
     /// NaN/∞·거대값은 무시/clamp한다(@intFromFloat trap 방지).
-    pub fn scrollWheel(self: *DevSession, delta_y: f64, precise: bool, x_px: f64, y_px: f64) void {
+    pub fn scrollWheel(self: *DevSession, delta_y: f64, delta_x: f64, precise: bool, x_px: f64, y_px: f64) void {
         if (!self.surface_initialized) return;
         // 방향이 뒤집히면 1줄 미만 잔여를 버린다 — 이전 방향의 residue가 첫 반대 틱을 상쇄해
         // 방향 전환이 굼뜨게 느껴지는 것 방지(iTerm2/xterm.js 동작).
@@ -2372,6 +2374,13 @@ pub const DevSession = struct {
         // 안 바꾼다). 단일 panel이면 활성과 같고, 사이드바/밖이면 활성 surface로 fallback.
         const target = self.surfaceAt(x_px, y_px) orelse self.activeSurface();
         self.scrollSurfaceLines(target, lines);
+        // 가로 델타(트랙패드 2-finger 가로 스와이프) → 커서 아래 pane 탭 바 가로 스크롤(#2b). 세로(터미널 스크롤백)와
+        // 독립 축이라 한 이벤트(대각선 스와이프)에서 둘 다 처리될 수 있다. 탭이 안 넘치면 scrollTabBarAt이 무동작.
+        if (std.math.isFinite(delta_x) and delta_x != 0) {
+            if (delta_x * self.tab_wheel_accum < 0) self.tab_wheel_accum = 0; // 방향 전환 시 잔여 버림(세로와 같은 규율)
+            const cols = wheelDeltaToLines(&self.tab_wheel_accum, delta_x, precise, self.cell_width_px, self.scale_milli); // 셀 환산 범용 — 가로는 cell_width
+            if (cols != 0) self.scrollTabBarAt(x_px, y_px, cols);
+        }
     }
 
     /// 스크린 점(backing px) 아래 panel의 활성 Term surface(없으면 — 사이드바/밖 — null). 휠 라우팅에 쓴다.
@@ -2383,6 +2392,27 @@ pub const DevSession = struct {
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
         const pane = paneAtPoint(leaf_rects.items, x_px, y_px) orelse return null;
         return &pane.activeTerm().surface;
+    }
+
+    /// 가로 스와이프(delta_x→cols)를 커서 아래 pane의 탭 바 가로 스크롤로 바꾼다(#2b). 그 pane이 탭 넘침(has_scroll)이
+    /// 아니면 무동작. 클릭 ‹›와 같이 eff(=bm.scroll_cols, [0,max] clamp된 값) 기준이라 stale tab_scroll_cols가 자동
+    /// 정정된다(다음 렌더 tabLayout이 다시 clamp). natural 방향: 오른쪽 스와이프(cols>0)면 왼쪽 탭으로(scroll 감소).
+    fn scrollTabBarAt(self: *DevSession, x_px: f64, y_px: f64, cols: i32) void {
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
+        for (leaf_rects.items) |lr| {
+            if (!pointInRect(x_px, y_px, lr.rect)) continue; // 커서가 이 pane(탭 바+터미널) 영역일 때만
+            const bar = self.paneBarRect(lr.rect) orelse return;
+            const count = lr.leaf.terms.items.len;
+            const m = barMetrics(bar, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse return;
+            if (!m.has_scroll) return; // 탭이 안 넘침 — 가로 스크롤할 것 없음
+            const eff = m.scroll_cols; // clamp된 현재 스크롤(stale 정정 기준 — 클릭 ‹›와 동일)
+            const mag: u32 = @intCast(@abs(cols));
+            lr.leaf.tab_scroll_cols = if (cols > 0) eff -| mag else eff + mag; // cols>0(오른쪽 스와이프)→왼쪽 탭(감소), cols<0→오른쪽(증가, 렌더서 [0,max] clamp)
+            self.metal_dirty = true;
+            return;
+        }
     }
 
     /// 줄 수만큼 스크롤한다. alt screen + alternate scroll(DECSET 1007)이면 화살표 키로 변환해
@@ -7254,14 +7284,56 @@ test "wheel over an inactive pane scrolls that pane (not the active one)" {
     const left_body = session.paneTermRect(lr.items[0].rect);
     const right_body = session.paneTermRect(lr.items[1].rect);
     // 왼쪽(비활성) 본문 위에서 위로 스크롤 → 왼쪽 뷰포트만 위로(과거), 오른쪽 불변·활성 pane 불변.
-    session.scrollWheel(3, false, @floatFromInt(left_body.x + left_body.w / 2), @floatFromInt(left_body.y + left_body.h / 2));
+    session.scrollWheel(3, 0, false, @floatFromInt(left_body.x + left_body.w / 2), @floatFromInt(left_body.y + left_body.h / 2));
     try std.testing.expect(left_surface.core.view_offset > 0);
     try std.testing.expectEqual(@as(usize, 0), right_surface.core.view_offset);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane); // 포커스 안 바뀜
 
     // 오른쪽(활성) 본문 위에서 스크롤 → 오른쪽 뷰포트가 움직인다.
-    session.scrollWheel(3, false, @floatFromInt(right_body.x + right_body.w / 2), @floatFromInt(right_body.y + right_body.h / 2));
+    session.scrollWheel(3, 0, false, @floatFromInt(right_body.x + right_body.w / 2), @floatFromInt(right_body.y + right_body.h / 2));
     try std.testing.expect(right_surface.core.view_offset > 0);
+}
+
+// #2b: 트랙패드 가로 스와이프(scroll_wheel delta_x)가 커서 아래 pane 탭 바를 가로 스크롤하는지 — rich 고정폭에서
+// 탭이 넘칠 때만(has_scroll). natural 방향: 왼쪽 스와이프(delta_x<0)→오른쪽 탭(scroll 증가), 오른쪽(delta_x>0)→감소.
+// delta_y=0이라 터미널 뷰포트는 안 움직인다(독립 축). 실 init/탭이라 macOS 게이트.
+test "horizontal trackpad swipe scrolls the overflowing tab bar of the pane under the cursor" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.appearance.chrome_theme = .rich; // 고정폭 탭(tab_width_cols>0) — 넘쳐야 ‹›/has_scroll
+    _ = try session.resize(session.sidebar_width_px + 400, 300, session.scale_milli);
+    for (0..6) |_| session.newTermInActivePane() catch {}; // 탭 여러 개 → 고정폭×N이 바를 넘침
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const leaf = lr.items[0].leaf;
+    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const bx: f64 = @floatFromInt(bar.x + bar.w / 2);
+    const by: f64 = @floatFromInt(bar.y + 1);
+    // 넘침 전제(has_scroll) 확인 — 아니면 가로 스크롤 자체가 무의미.
+    const m = barMetrics(bar, session.cell_width_px, leaf.terms.items.len, session.buildChromeTokens().space.tab_width_cols, leaf.tab_scroll_cols).?;
+    try std.testing.expect(m.has_scroll);
+    // newTerm가 마지막 탭을 활성화하며 자동 스크롤-인(#508)하므로 시작 tab_scroll_cols는 끝 쪽(>0)이다 — 가로 스와이프가
+    // 클릭/⌘[]와 같은 tab_scroll_cols 상태를 공유한다는 방증.
+    const start = leaf.tab_scroll_cols;
+    try std.testing.expect(start > 0);
+    // 오른쪽 스와이프(delta_x>0) → 왼쪽 탭(scroll 감소).
+    session.scrollWheel(0, 100, false, bx, by);
+    try std.testing.expect(leaf.tab_scroll_cols < start);
+    // 왼쪽 스와이프(delta_x<0) → 오른쪽 탭(scroll 증가, 되돌아감).
+    const mid = leaf.tab_scroll_cols;
+    session.scrollWheel(0, -100, false, bx, by);
+    try std.testing.expect(leaf.tab_scroll_cols > mid);
 }
 
 // Cmd+Option+화살표가 키 경로(handleKeyEvent → resolver → app_action → focusPaneInDirection)로 pane 포커스를

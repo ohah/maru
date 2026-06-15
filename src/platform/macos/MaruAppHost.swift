@@ -1164,7 +1164,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // 마우스 휠/트랙패드 스크롤 -> 뷰포트 스크롤. raw NSEvent 값(델타 포인트 + 정밀 델타 여부)만
     // 넘기고, 줄 수 환산(셀 높이·clamp·NaN 가드)은 Zig가 실제 메트릭으로 한다(네이티브 최소화).
-    // scrollingDeltaY>0이면 위(과거)로 본다 — 표준 터미널 방향.
+    // scrollingDeltaY>0이면 위(과거)로 본다 — 표준 터미널 방향. scrollingDeltaX는 그 pane 탭 바 가로 스크롤(Zig가 셀 환산·라우팅).
     func handleScroll(_ event: NSEvent, in view: NSView) {
         guard let session = devSession else { return }
         // 마우스 위치를 backing 픽셀(좌상단 원점)로 — Zig가 커서 아래 panel로 스크롤을 라우팅한다(split).
@@ -1175,6 +1175,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = maru_macos_app_dev_session_scroll_wheel(
             session,
             Double(event.scrollingDeltaY),
+            Double(event.scrollingDeltaX),
             event.hasPreciseScrollingDeltas ? 1 : 0,
             xPx,
             yPx

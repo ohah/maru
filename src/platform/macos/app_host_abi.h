@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 43u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 44u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -305,12 +305,14 @@ int32_t maru_macos_app_dev_session_close(
     MaruAppHostDevSession *session,
     MaruAppHostDevFrameSummary *out_summary
 );
-/* 휠 스크롤. Swift는 raw 델타(포인트)·정밀 델타 여부(0/1)·마우스 위치(backing px)만 넘기고, 줄 수 환산과
-   어느 panel로 보낼지(커서 아래 pane — split의 비활성 panel 위 휠을 그 panel로 라우팅)는 Zig가 한다. 단일
+/* 휠 스크롤. Swift는 raw 델타(포인트, 세로 delta_y·가로 delta_x)·정밀 델타 여부(0/1)·마우스 위치(backing px)만
+   넘기고, 줄/열 환산과 어느 panel로 보낼지(커서 아래 pane — split의 비활성 panel 위 휠도 그 panel로 라우팅)는
+   Zig가 한다. delta_y는 그 panel 터미널 스크롤백, delta_x는 그 pane 탭 바 가로 스크롤(탭이 넘칠 때만). 단일
    panel이면 활성과 같고, 사이드바/밖이면 활성 panel로 fallback. */
 int32_t maru_macos_app_dev_session_scroll_wheel(
     MaruAppHostDevSession *session,
     double delta_y,
+    double delta_x,
     int32_t precise,
     double x_px,
     double y_px

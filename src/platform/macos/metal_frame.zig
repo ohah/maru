@@ -535,6 +535,9 @@ pub const GpuQuad = extern struct {
     border_color: u32,
     // 0=solid(fill_color0만), 1=수직 gradient(top→bottom), 2=수평(left→right).
     gradient_kind: u32,
+    // C4b 모달: 합성 레이어. 0=under(사이드바 밴드 — 셀 part1 위·사이드바 제목 아래), 1=over(모달 — 셀
+    // 전체 위·모달 텍스트 아래, 최상위). draw가 layer로 quad 패스를 둘로 갈라 z를 맞춘다(모달-1).
+    layer: u32,
 };
 
 /// C4b의 그림자 프리미티브 — quad 아래에 깔리는 둥근 drop shadow(blur). quad와 같은 별개 파이프라인이고

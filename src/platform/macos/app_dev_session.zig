@@ -41,7 +41,7 @@ pub const MetalFrame = metal_frame.MetalFrame;
 pub const MetalGpuQuad = metal_frame.GpuQuad;
 pub const MetalGpuShadow = metal_frame.GpuShadow;
 
-pub const abi_version: u32 = 41; // 41: gpu_quads/gpu_shadows(chrome rich GPU 프리미티브 토대 — C4b). 40: show_notice(chrome Notice 모달). 39: apply_workspace_window+workspace_window_count
+pub const abi_version: u32 = 42; // 42: GpuQuad.layer(chrome 모달 합성 레이어 — C4b 모달). 41: gpu_quads/gpu_shadows(C4b 토대). 40: show_notice. 39: apply_workspace_window
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -4018,6 +4018,7 @@ pub const DevSession = struct {
                         .fill_color1 = color,
                         .border_color = 0,
                         .gradient_kind = 0,
+                        .layer = 0, // under — 사이드바 밴드(셀 위·제목 아래)
                     }) catch {};
                 }
             },

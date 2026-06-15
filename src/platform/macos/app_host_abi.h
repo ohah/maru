@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 41u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 42u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -219,6 +219,7 @@ typedef struct MaruAppHostDevGpuQuad {
     uint32_t fill_color1;    /* gradient 끝색(solid면 무시) */
     uint32_t border_color;   /* 0xAARRGGBB */
     uint32_t gradient_kind;  /* 0=solid, 1=vertical(top→bottom), 2=horizontal(left→right) */
+    uint32_t layer;          /* C4b 모달: 0=under(사이드바 밴드), 1=over(모달 최상위) — draw가 layer로 패스 분리 */
 } MaruAppHostDevGpuQuad;
 
 /* C4b의 둥근 drop shadow 프리미티브(blur). quad와 같은 별개 파이프라인, rich만 채운다. Zig GpuShadow와 1:1. */

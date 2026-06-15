@@ -619,18 +619,19 @@ bool maru_metal_renderer_draw(
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(sv) vertexCount:(cv)]; \
         }                                                            \
     } while (0)
-    // C4b: shadow 패스 — quad·셀보다 아래(맨 처음). 모달 배경의 떠 보이는 그림자.
-    if (shadow_vertex_buffer != nil) {
-        [encoder setRenderPipelineState:impl.shadowPipeline];
-        [encoder setVertexBuffer:shadow_vertex_buffer offset:0 atIndex:0];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:shadow_vertex_total];
-    }
     if (vertex_buffer != nil) {
         MARU_DRAW_CELLS(0, terminal_end_v);                                  // 1. 터미널(모달 제외)
         MARU_DRAW_CELLS(cell_count_v, pre_sidebar_vertices - cell_count_v);  // 2. 사이드바 배경 strip
     }
     if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(0, under_vertex_count);    // 3. under quad(사이드바 밴드)
     if (vertex_buffer != nil) MARU_DRAW_CELLS(pre_sidebar_vertices, total_vertices - pre_sidebar_vertices); // 4. 사이드바 cells(제목)
+    // C4b: shadow 패스 — 터미널·사이드바 위, 모달 배경(over quad) 아래. 모달이 떠 보이게(리뷰 #1 — 맨 처음이면
+    // 터미널 셀이 halo를 덮어 그림자가 깜빡/사라졌다). 모달 over quad·텍스트가 이 위에 그려진다.
+    if (shadow_vertex_buffer != nil) {
+        [encoder setRenderPipelineState:impl.shadowPipeline];
+        [encoder setVertexBuffer:shadow_vertex_buffer offset:0 atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:shadow_vertex_total];
+    }
     if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(under_vertex_count, quad_vertex_total - under_vertex_count); // 5. over quad(모달 배경)
     if (vertex_buffer != nil && has_modal) MARU_DRAW_CELLS(modal_cells_start * 6, cell_count_v - modal_cells_start * 6); // 6. 모달 텍스트
 #undef MARU_DRAW_CELLS

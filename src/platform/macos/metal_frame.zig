@@ -831,6 +831,10 @@ pub const MetalFrameBuffer = struct {
 
     pub fn view(self: *const MetalFrameBuffer) MetalFrame {
         const exposed = if (self.show_cursor) self.cells.len else self.cells.len - self.cursor_cells;
+        // C4b 모달 over quad 분할의 안전 불변(리뷰가 짚은 latent trap 가드): 모달 셀 시작은 노출 길이 안.
+        // cursor_cells(blink chop)는 모달 caret(맨 끝 suffix)이라 modal_cells_start보다 항상 뒤다 — 이게 깨지면
+        // 렌더러의 6-세그먼트 분할(modal_start*6..cell_count_v)이 underflow하므로 여기서 일찍 잡는다.
+        std.debug.assert(self.modal_cells_start <= exposed);
         return .{
             .cols = @intCast(self.size.cols),
             .rows = @intCast(self.size.rows),

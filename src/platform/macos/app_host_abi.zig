@@ -690,6 +690,11 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@alignOf(c.MaruAppHostDevMetalRasterUpload), @alignOf(DevMetalRasterUpload));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevMetalFrame), @sizeOf(DevMetalFrame));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostDevMetalFrame), @alignOf(DevMetalFrame));
+    // append-only면 @sizeOf가 필드 존재를 강제하지만, 같은 폭(포인터/usize) 필드 reorder는 못 잡는다 — C4b가
+    // 추가한 포인터/인덱스 필드는 @offsetOf로 C↔Zig 위치를 대조한다(GpuQuad 선례와 동형).
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevMetalFrame, "gpu_quads"), @offsetOf(DevMetalFrame, "gpu_quads"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevMetalFrame, "gpu_shadows"), @offsetOf(DevMetalFrame, "gpu_shadows"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevMetalFrame, "modal_cells_start"), @offsetOf(DevMetalFrame, "modal_cells_start"));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevGpuQuad), @sizeOf(DevGpuQuad));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostDevGpuQuad), @alignOf(DevGpuQuad));
     // 모든 필드가 4B라 @sizeOf만으론 필드 reorder(예: corner_radii↔border_widths)를 못 잡는다 — offset도 대조한다.

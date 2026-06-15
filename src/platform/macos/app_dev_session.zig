@@ -2997,7 +2997,7 @@ pub const DevSession = struct {
             self.clearHoverUrlAnchor();
             // 하단 "+" 버튼 슬롯은 클릭 가능 — pointingHand로 affordance. 탭 슬롯은 arrow.
             if (on_plus) return .link;
-            return if (self.sidebarSlotAt(y_px) != null) .link else .default; // #5c: 워크스페이스 슬롯도 클릭(전환) → pointingHand, 빈 영역은 arrow
+            return if (self.hovered_slot != null) .link else .default; // #5c: 워크스페이스 슬롯도 클릭(전환) → pointingHand, 빈 영역은 arrow(hovered_slot은 위 setHoveredSlot이 sidebarSlotAt로 방금 설정 — 재계산 안 함)
         }
         self.setHoveredSlot(null); // 터미널 영역으로 나가면 사이드바 호버 해제
         self.setHoveredPlus(false);

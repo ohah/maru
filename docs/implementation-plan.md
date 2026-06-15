@@ -589,11 +589,13 @@ TDD 방식:
 - plugin ABI와 권한 모델은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#plugin--wasm)의 capability 방향을 기준으로 하되, 구현 전에 사용자와 별도 논의한다.
 - plugin 실패가 surface/window 전체를 죽이지 않는다.
 
-## 백로그: 큰 미착수 항목 — 규모·의존성·권장 순서
+## 백로그: 큰 항목 — New Window·chrome 고급화 (둘 다 ✅ 구현 완료; 아래는 설계 근거 보존)
 
-9·10단계(Workspace restore·Plugin)는 위에 목표/완료기준이 있다. 아래 둘(New Window·chrome 고급화)은 지금까지 **방향만** 적혀 있어, 착수 전 **설계 PR(레퍼런스 조사 → 분해 → ABI/경계 영향 → 사용자 합의)** 이 먼저다 — 메뉴바·split을 그렇게 했다(한 줄 스텁으로 바로 코딩하지 않는다).
+9·10단계(Workspace restore·Plugin)는 위에 목표/완료기준이 있다. 아래 둘(New Window·chrome 고급화)은 **설계 PR(레퍼런스 조사 → 분해 → ABI/경계 영향 → 사용자 합의) 원칙대로(메뉴바·split처럼) 구현 완료**됐다 — New Window는 W1/W2(⌘N·per-window 세션/렌더러·R4b 복원, 아래 상세), chrome 고급화는 C4b(GPU SDF quad/shadow)+U(VSCode 탭·고정폭·가로 스크롤·affordance — `layering-and-portability.md` §5·`chrome-strategy.md` 참조). 아래 설계안은 합의·구현 근거로 보존한다(한 줄 스텁으로 바로 코딩하지 않는 원칙을 그대로 따랐다).
 
-### New Window (멀티 윈도우) — 설계안 (구현 전 합의 대상)
+### New Window (멀티 윈도우) — ✅ 구현 완료 (W1·W2·⌘N·R4b 동작; W3/W4 잔여·atlas 공유는 후속)
+
+> **현황(2026-06)**: ⌘N(File > New Window) → `createTerminalWindow`(새 NSWindow + per-window DevSession + Metal 렌더러 + 첫 paint), `tickDevSession`이 `windows` 컬렉션을 매 tick 순회해 **전 창 렌더**, 마지막 일반 창 닫힘 시 앱 종료(D4), 워크스페이스 다중 창 복원(R4b)까지 동작 — dev 앱에서 확인됨. 아래 설계안(D1~D4·W1·W2)이 그대로 구현됐다. 남은 건 W3/W4 잔여(global hotkey 창 타게팅·창별 config·탭 tear-off)와 atlas 공유(grid-per-size, D2 후속) — 전부 선택적 후속.
 
 **베이스**: Ghostty의 App→Surface 소유 모델 — `App`이 `surfaces: ArrayListUnmanaged(*Surface)`를 소유하고, `new_window`가 새 NSWindow(TerminalController) + 새 surface(`ghostty_surface_new`)를 만들며, `SharedGridSet`이 폰트 grid를 ref-count로 창 간 공유, 마지막 창 닫힘은 apprt별 quit 정책(quit-after-last-window-closed), surface별 독립 렌더/IO 스레드.
 
@@ -625,7 +627,9 @@ TDD 방식:
 
 **의존**: tab/split 모델 안정(완료). **9단계 restore가 이걸 window-aware로 전제**(확정 순서의 하드 제약). 한계/후속: atlas 공유(W5), 창별 독립 config, 탭 tear-off·창 간 탭 이동.
 
-### chrome 고급화 (렌더러 프리미티브 확장) — 큼, 미착수
+### chrome 고급화 (렌더러 프리미티브 확장) — ✅ 구현 완료 (C4b + U)
+
+> **현황(2026-06)**: `layering-and-portability.md` §5의 **C4b**(metal SDF quad/shadow 파이프라인·`ChromeDraw.quad`+모양 토큰·둥근 사이드바 밴드/모달·tabbar 픽셀 retrofit·둥근 탭)와 **U**(사이드바 세로 카드·VSCode식 평평 탭+앰버 언더바·고정폭·가로 스크롤·‹› 사각 버튼/hover/커서/스크롤 방향 강조·트랙패드 가로)로 구현 완료. 아래는 착수 전 설계 근거(atlas 소유권·권장 순서·미채택 대안)로 보존한다.
 
 - **무엇**(위 "chrome 고급화" 항목): 둥근 모서리·그라데이션·그림자·비례 UI 폰트(별도 아틀라스)·아이콘 텍스처·격자 무관 sub-pixel.
 - **무엇을 건드리나**: 렌더러 draw-list 프리미티브 + Metal 셰이더 + 셀/프리미티브 ABI, chrome consumer(사이드바·탭·팝업·Find·테두리) 점진 적용, **비례 UI 폰트용 2번째 atlas**(monospace glyph atlas와 별개).

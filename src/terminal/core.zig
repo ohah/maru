@@ -1683,6 +1683,7 @@ pub const TerminalCore = struct {
             'd' => self.cursorToRow(self.csiParam(0, 1)),
             'J' => self.eraseInDisplay(self.csiRawParam(0)),
             'K' => self.eraseInLine(self.csiRawParam(0)),
+            'X' => self.eraseCharacters(self.csiParam(0, 1)), // ECH: 커서부터 N개(기본 1) cell blank, 커서 유지 — nvim이 모드 라벨(-- INSERT --) clear에 이걸 쓴다
             'n' => self.deviceStatusReport(),
             'r' => self.setScrollRegion(),
             'L' => self.insertLines(self.csiParam(0, 1)),
@@ -2080,6 +2081,27 @@ pub const TerminalCore = struct {
         self.pending_wrap = false;
         // 다른 cursor/erase op과 같이 grapheme run을 끝낸다. 안 하면 CSI K 뒤 combining mark가
         // 방금 지운 셀에 붙는다.
+        self.last_print = null;
+    }
+
+    /// ECH(CSI Ps X): 커서 위치부터 Ps개(기본 1) cell을 현재 pen 배경의 blank로 지운다. EL과 달리 줄 끝까지가
+    /// 아니라 N개만, DCH(CSI P)와 달리 뒤 cell을 당기지도 않는다(제자리 blank). **커서는 안 움직인다**.
+    /// 베이스: xterm `ECH`("Erase Ps Character(s)") — nvim이 모드 라벨(`-- INSERT --`)을 이 시퀀스로 지운다(EL 아님).
+    fn eraseCharacters(self: *TerminalCore, count: u16) void {
+        const row = self.cursor.row;
+        if (self.size.cols == 0 or row >= self.size.rows) return;
+        const start = self.cursor.col;
+        const end: u16 = @min(start +| @max(count, 1), self.size.cols);
+        var col = start;
+        while (col < end) : (col += 1) {
+            // erase는 현재 pen의 배경색으로 채운다(blank cell + style만) — eraseInLine과 동일 규칙(bce).
+            self.cells[self.index(row, col)] = .{ .style = self.pen };
+        }
+        self.repairWideGlyphEdges(row, start, end);
+        self.markDirty(row);
+        // ECH는 부분 erase라 soft-wrap flag를 끄지 않는다(EL mode 1과 같은 결 — 줄 끝이 남아 다음 행으로
+        // 이어질 수 있다). deferred autowrap만 무효화(다른 erase op과 동일).
+        self.pending_wrap = false;
         self.last_print = null;
     }
 
@@ -4285,6 +4307,32 @@ test "eraseInLine mode 1 (erase to cursor) keeps the row's soft-wrap flag" {
     try std.testing.expect(core.wrapped[0]);
     try core.write("\x1b[1;2H\x1b[1K"); // CUP (0,1) 후 CSI 1K(시작~커서 지움) — 오른쪽 끝은 멀쩡
     try std.testing.expect(core.wrapped[0]); // mode 1은 wrap 연속성을 안 끊는다
+}
+
+test "ECH (CSI Ps X) blanks N cells from the cursor in place, cursor unmoved (nvim mode-label clear)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 2 });
+    defer core.deinit();
+    try core.write("-- INSERT --"); // 12자(col 0~11), 커서 (0,12)
+    try core.write("\x1b[1;1H"); // 커서 home(0,0)
+    try core.write("\x1b[12X"); // ECH 12 — nvim이 모드 라벨을 지우는 바로 그 시퀀스
+    var c: u16 = 0;
+    while (c < 12) : (c += 1) {
+        const cp = core.cells[core.index(0, c)].codepoint;
+        try std.testing.expect(cp == ' ' or cp == 0); // 12칸 전부 blank
+    }
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.col); // 커서는 제자리(EL과 달리 이동 없음)
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
+}
+
+test "ECH default param is 1 and does not pull following cells (not DCH)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 1 });
+    defer core.deinit();
+    try core.write("ABCDE");
+    try core.write("\x1b[1;2H"); // 커서 (0,1)=B
+    try core.write("\x1b[X"); // ECH 기본 1 — B만 blank
+    const b = core.cells[core.index(0, 1)].codepoint;
+    try std.testing.expect(b == ' ' or b == 0);
+    try std.testing.expectEqual(@as(u21, 'C'), core.cells[core.index(0, 2)].codepoint); // C는 그대로 — 뒤를 당기지 않는다
 }
 
 test "renderSnapshot clears a wide-glyph base truncated by narrowing in a scrollback row" {

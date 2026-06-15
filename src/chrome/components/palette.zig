@@ -152,7 +152,9 @@ pub fn view(
 
     // 패널 배경: row0(프롬프트) + 결과 행 N개를 덮는 단일 fill.
     const panel_h = (1 + @as(u32, @intCast(rows.len))) * ch;
-    try out.append(arena, .{ .fill = .{ .rect = .{ .x = x, .y = y, .w = panel_w, .h = panel_h }, .role = .surface_bg } });
+    const bg_r = p.shape.corner_radius_px;
+    // C4b 모달: 배경을 quad로 — tui(r=0)면 셀 배경(무변화), rich(r>0)면 둥근 GPU quad.
+    try out.append(arena, .{ .quad = .{ .rect = .{ .x = x, .y = y, .w = panel_w, .h = panel_h }, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r } } });
 
     // 선택 행 강조: 선택된 결과 행의 bg를 tab_active_bg로(레거시 sidebar_active와 같은 색). 텍스트가 그 위에 그려진다.
     for (rows, 0..) |row, i| {
@@ -284,8 +286,8 @@ test "palette view: 닫힘이면 ops 0, 열림이면 패널+프롬프트+행+car
     try view(&s, &rows, p, &tk, arena, &out);
     // panel fill + 선택행 강조 fill + 프롬프트 text + 행0 제목 text + 행0 바인딩 text + 행1 제목 text + caret fill = 7 ops.
     try std.testing.expectEqual(@as(usize, 7), out.items.len);
-    try std.testing.expect(out.items[0] == .fill); // 패널 배경
-    try std.testing.expect(out.items[0].fill.role == .surface_bg);
+    try std.testing.expect(out.items[0] == .quad); // 패널 배경
+    try std.testing.expect(out.items[0].quad.fill_role == .surface_bg);
     try std.testing.expect(out.items[1] == .fill); // 선택행 강조
     try std.testing.expect(out.items[1].fill.role == .tab_active_bg);
     try std.testing.expect(out.items[2] == .text);
@@ -294,7 +296,7 @@ test "palette view: 닫힘이면 ops 0, 열림이면 패널+프롬프트+행+car
     // 마지막은 입력 커서(cursor 색 fill), "> a" 뒤 col 3(=2 prompt + 1 query).
     const caret = out.items[out.items.len - 1];
     try std.testing.expect(caret == .fill and caret.fill.role == .cursor);
-    try std.testing.expectEqual(out.items[0].fill.rect.x + 3 * 8, caret.fill.rect.x);
+    try std.testing.expectEqual(out.items[0].quad.rect.x + 3 * 8, caret.fill.rect.x);
 }
 
 test "palette caret: 한글(wide) query는 EAW 2칸 폭으로 caret 정렬(잘림 회귀 고정)" {
@@ -353,5 +355,5 @@ test "palette view: IME 조합(preedit)이 query 뒤에 보이고 커서가 조�
     // preedit는 caret 위치에 안 더한다). find와 같은 규약.
     const caret = out.items[out.items.len - 1];
     try std.testing.expect(caret == .fill and caret.fill.role == .cursor);
-    try std.testing.expectEqual(out.items[0].fill.rect.x + 3 * 8, caret.fill.rect.x);
+    try std.testing.expectEqual(out.items[0].quad.rect.x + 3 * 8, caret.fill.rect.x);
 }

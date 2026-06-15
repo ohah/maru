@@ -143,7 +143,9 @@ pub fn view(
     const y = lay.y;
     const rect = draw.Rect{ .x = x, .y = y, .w = panel_w, .h = lay.ch };
 
-    try out.append(arena, .{ .fill = .{ .rect = rect, .role = .surface_bg } });
+    const bg_r = p.shape.corner_radius_px;
+    // C4b 모달: 배경을 quad로 — tui(r=0)면 셀 배경(무변화), rich(r>0)면 둥근 GPU quad.
+    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r } } });
 
     // "Find: " + query + preedit(조합 중) (한 text op, 3 runs). prefix는 ASCII라 칸 수=바이트 수. 조합 글자는
     // query 뒤에 같은 색으로 붙여 입력 가시성을 준다(IME 조합 상태가 오버레이에 즉시 보인다).
@@ -261,7 +263,7 @@ test "find view: 닫힘이면 ops 0, 열림이면 fill+prompt+counter+caret" {
     try view(&s, p, &tk, arena, &out);
     // panel fill + prompt text + counter text + caret fill = 4 ops(넓은 패널이라 카운터·caret 다 들어감).
     try std.testing.expectEqual(@as(usize, 4), out.items.len);
-    try std.testing.expect(out.items[0] == .fill); // 패널 배경
+    try std.testing.expect(out.items[0] == .quad); // 패널 배경
     try std.testing.expect(out.items[1] == .text);
     try std.testing.expectEqualStrings("Find: ", out.items[1].text.runs[0].text);
     try std.testing.expectEqualStrings("a", out.items[1].text.runs[1].text);
@@ -270,10 +272,10 @@ test "find view: 닫힘이면 ops 0, 열림이면 fill+prompt+counter+caret" {
     // 마지막은 입력 커서(cursor 색 fill 블록), "Find: a" 뒤 col 7(=6 prompt + 1 query), 1칸 폭.
     try std.testing.expect(out.items[3] == .fill);
     try std.testing.expect(out.items[3].fill.role == .cursor);
-    try std.testing.expectEqual(out.items[0].fill.rect.x + 7 * 8, out.items[3].fill.rect.x);
+    try std.testing.expectEqual(out.items[0].quad.rect.x + 7 * 8, out.items[3].fill.rect.x);
     try std.testing.expectEqual(@as(u32, 8), out.items[3].fill.rect.w); // 1칸
     // 패널은 사이드바 오른쪽.
-    try std.testing.expect(out.items[0].fill.rect.x >= 40);
+    try std.testing.expect(out.items[0].quad.rect.x >= 40);
 }
 
 test "find view: IME 조합(preedit)이 query 뒤에 보이고 커서가 조합 글자를 덮음" {
@@ -306,7 +308,7 @@ test "find view: IME 조합(preedit)이 query 뒤에 보이고 커서가 조합 
     // preedit는 caret 위치에 안 더한다). 조합 글자가 커서 아래에 그려진다.
     const caret = out.items[out.items.len - 1];
     try std.testing.expect(caret == .fill and caret.fill.role == .cursor);
-    try std.testing.expectEqual(out.items[0].fill.rect.x + 7 * 8, caret.fill.rect.x);
+    try std.testing.expectEqual(out.items[0].quad.rect.x + 7 * 8, caret.fill.rect.x);
 }
 
 test "find caret: 한글(wide) query는 EAW 2칸 폭으로 caret 정렬(잘림 회귀 고정)" {

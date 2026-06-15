@@ -81,7 +81,9 @@ pub fn view(
     const y = @divTrunc(@as(i32, @intCast(m.backing_height_px)) - @as(i32, @intCast(box_h)), 2);
     const rect = draw.Rect{ .x = x, .y = y, .w = box_w, .h = box_h };
 
-    try out.append(arena, .{ .fill = .{ .rect = rect, .role = .surface_bg } });
+    const bg_r = p.shape.corner_radius_px;
+    // C4b 모달: 배경을 quad로 — tui(r=0)면 rasterizeOverlayCells가 셀 배경(무변화), rich(r>0)면 둥근 GPU quad.
+    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r } } });
     try out.append(arena, .{ .border = .{
         .rect = rect,
         .sides = .{ .top = true, .right = true, .bottom = true, .left = true },
@@ -147,13 +149,13 @@ test "notice view: 닫힘이면 ops 0, 열림이면 fill+border+text(modal)" {
     s.show("file corrupt");
     try view(&s, p, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 3), out.items.len);
-    try std.testing.expect(out.items[0] == .fill);
+    try std.testing.expect(out.items[0] == .quad);
     try std.testing.expect(out.items[1] == .border);
     try std.testing.expect(out.items[2] == .text);
     try std.testing.expectEqualStrings("file corrupt", out.items[2].text.runs[0].text);
     // 모달 박스는 터미널 영역(사이드바 오른쪽) 안, 화면 중앙쯤.
-    try std.testing.expect(out.items[0].fill.rect.x >= 40);
-    try std.testing.expect(out.items[0].fill.rect.w > 0);
+    try std.testing.expect(out.items[0].quad.rect.x >= 40);
+    try std.testing.expect(out.items[0].quad.rect.w > 0);
 }
 
 test "notice view: 좁은 창(1~3칸)이어도 작은 박스를 그린다 — soft-lock 방지" {
@@ -176,7 +178,7 @@ test "notice view: 좁은 창(1~3칸)이어도 작은 박스를 그린다 — so
     s.show("file corrupt"); // 메시지가 2칸보다 길어도 box_cols는 term_cols(2)로 clamp.
     try view(&s, p, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 3), out.items.len); // 생략 안 함 — 작아도 그린다(보여서 Esc 가능)
-    const box = out.items[0].fill.rect;
+    const box = out.items[0].quad.rect;
     try std.testing.expect(box.w > 0 and box.w <= 20); // term 영역 안(오버플로/언더플로 없음)
     try std.testing.expect(box.x >= 40); // 사이드바 오른쪽 유지
 

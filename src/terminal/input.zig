@@ -137,21 +137,23 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: 
 fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: EncodeOptions) ![]const u8 {
     _ = options; // 현재 분기는 flags!=0(켜짐)만 보고 disambiguate로 인코딩 — 세부 flag는 후속
     const has_ctrl_alt = event.modifiers.control or event.modifiers.option or event.modifiers.command;
+    const has_any_mod = has_ctrl_alt or event.modifiers.shift;
 
-    // kitty spec: Enter/Tab/Backspace는 modifier가 없으면 legacy 바이트(\r/\t/\x7f)를 그대로 보낸다
-    // (프로그램이 모드를 안 끄고 죽어도 shell에서 reset을 칠 수 있게). 텍스트 char도 modifier가 없으면
-    // 그대로 — shift는 이미 codepoint(Swift charactersIgnoringModifiers)에 반영돼 있다.
-    if (!has_ctrl_alt) {
-        switch (event.key) {
-            .enter => return "\r",
-            .tab => return "\t",
-            .backspace => return "\x7f",
-            .char => |cp| {
-                const n = try std.unicode.utf8Encode(cp, buffer[0..4]);
-                return buffer[0..n];
-            },
-            else => {}, // escape·functional은 아래 CSI 시퀀스로(disambiguate)
-        }
+    switch (event.key) {
+        // kitty spec: Enter/Tab/Backspace는 modifier가 "전혀" 없을 때만 legacy 바이트(\r/\t/\x7f)를
+        // 보낸다(모드가 안 꺼진 채 죽어도 shell에서 reset 입력 가능). shift 포함 어떤 modifier든 있으면
+        // CSI u로 — Shift+Tab=CSI 9;2u(backtab) 등. Ghostty binding_mods.empty()가 shift까지 포함해
+        // 거르는 것(key_mods.zig binding())과 동형.
+        .enter => if (!has_any_mod) return "\r",
+        .tab => if (!has_any_mod) return "\t",
+        .backspace => if (!has_any_mod) return "\x7f",
+        // char는 shift가 codepoint(Swift charactersIgnoringModifiers)에 이미 반영되므로 ctrl/alt/cmd만
+        // 본다 — Shift+A는 'A' 텍스트 그대로, Ctrl+a만 CSI 97;5u로.
+        .char => |cp| if (!has_ctrl_alt) {
+            const n = try std.unicode.utf8Encode(cp, buffer[0..4]);
+            return buffer[0..n];
+        },
+        else => {}, // escape·functional은 아래 CSI 시퀀스로(disambiguate)
     }
 
     const ent = kittyEntry(event.key);
@@ -445,6 +447,12 @@ test "encodeKey kitty: disambiguate text/ctrl/escape/functional (audit 4/5b-2)" 
     // F1 → CSI P (letter), F5 → CSI 15 ~ (tilde final).
     try std.testing.expectEqualStrings("\x1b[P", try encodeKey(.{ .key = .{ .function = 1 } }, &buf, o));
     try std.testing.expectEqualStrings("\x1b[15~", try encodeKey(.{ .key = .{ .function = 5 } }, &buf, o));
+    // Shift/Ctrl+Tab·Enter·Backspace는 modifier가 있으니 legacy 바이트가 아니라 CSI u로(backtab 등 —
+    // legacy 바이트로 보내면 Shift+Tab backtab이 깨진다, code review 발견).
+    try std.testing.expectEqualStrings("\x1b[9;2u", try encodeKey(.{ .key = .tab, .modifiers = .{ .shift = true } }, &buf, o));
+    try std.testing.expectEqualStrings("\x1b[13;2u", try encodeKey(.{ .key = .enter, .modifiers = .{ .shift = true } }, &buf, o));
+    try std.testing.expectEqualStrings("\x1b[127;2u", try encodeKey(.{ .key = .backspace, .modifiers = .{ .shift = true } }, &buf, o));
+    try std.testing.expectEqualStrings("\x1b[9;5u", try encodeKey(.{ .key = .tab, .modifiers = .{ .control = true } }, &buf, o));
     // flags=0(미활성)이면 legacy 그대로 — escape는 \x1b(progressive enhancement 검증).
     try std.testing.expectEqualStrings("\x1b", try encodeKey(.{ .key = .escape }, &buf, .{}));
 }

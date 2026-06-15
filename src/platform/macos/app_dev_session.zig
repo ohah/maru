@@ -296,7 +296,7 @@ fn paneDropZone(rect: app.SplitRect, x_px: f64, y_px: f64) ?PaneDropZone {
 /// 것". coretext의 paneTabAreaCols/paneTabWidth(렌더가 쓰는 같은 공식)로 바를 [탭 영역 | "+" zone]으로 나눈다. cell·바·
 /// 탭 폭이 0이면(초소형 바) null을 줘 호출자가 탭 처리를 건너뛴다. hit-test 수학은 chrome tabbar로 이전(C3b) — platform은
 /// 메트릭 빌드 + 활성 밴드 단일 셀(tabbarHighlightCell)만(밴드가 한 칸이라 chrome view→cell round-trip이 무의미; 리뷰 §3).
-fn barMetrics(bar: app.SplitRect, cell_width_px: u32, term_count: usize, tab_width_fixed: u16) ?chrome.components.tabbar.Metrics {
+fn barMetrics(bar: app.SplitRect, cell_width_px: u32, term_count: usize, tab_width_fixed: u16, scroll_cols: u32) ?chrome.components.tabbar.Metrics {
     if (cell_width_px == 0 or bar.w == 0 or term_count == 0) return null;
     const cols = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
     if (cols == 0) return null;
@@ -304,7 +304,7 @@ fn barMetrics(bar: app.SplitRect, cell_width_px: u32, term_count: usize, tab_wid
     // rich: 고정폭(tab_width_fixed), tui: 균등분할. buildPaneTabBarDrawList와 같은 분기라 보이는 탭=클릭 탭 정합(§6).
     const tab_w: u32 = if (tab_width_fixed > 0) tab_width_fixed else coretext_frame_builder.paneTabWidth(@intCast(tab_cols), term_count);
     if (tab_w == 0) return null;
-    return .{ .bar_x = bar.x, .bar_y = bar.y, .bar_w = bar.w, .bar_h = bar.h, .cell_width_px = cell_width_px, .cols = cols, .tab_cols = tab_cols, .tab_w = tab_w };
+    return .{ .bar_x = bar.x, .bar_y = bar.y, .bar_w = bar.w, .bar_h = bar.h, .cell_width_px = cell_width_px, .cols = cols, .tab_cols = tab_cols, .tab_w = tab_w, .scroll_cols = scroll_cols };
 }
 
 /// 활성 Term 탭 세그먼트를 강조 배경 셀로 칠한다(옛 BarMetrics.highlightCell). chrome tabbar hit-test와 **같은
@@ -493,6 +493,9 @@ const Pane = struct {
     terms: std.ArrayList(*Term) = .empty,
     // 이 panel에서 포커스된(보이는) Term 인덱스 — surface/PTY/pump 접근과 tree leaf가 이 Term을 본다.
     active_term: usize = 0,
+    // Step 2: 가로 탭 스크롤 offset(컬럼). 탭이 바 폭을 넘으면 ‹›버튼/트랙패드가 이 값을 움직여 보이는 탭 창을
+    // 좌우로 민다(per-pane 독립). 0=맨 왼쪽(기본). barMetrics→Metrics.scroll_cols로 전달돼 segOf가 화면 좌표를 민다.
+    tab_scroll_cols: u32 = 0,
 
     /// 활성 Term(보이는 터미널). 입력/커서/렌더가 이 Term의 surface를 쓴다. Pane은 항상 Term ≥1.
     fn activeTerm(self: *Pane) *Term {
@@ -1273,7 +1276,7 @@ pub const DevSession = struct {
         for (leaf_rects.items) |lr| {
             if (lr.leaf != pane) continue;
             const bar = self.paneBarRect(lr.rect) orelse return;
-            const m = barMetrics(bar, self.cell_width_px, pane.terms.items.len, self.buildChromeTokens().space.tab_width_cols) orelse return;
+            const m = barMetrics(bar, self.cell_width_px, pane.terms.items.len, self.buildChromeTokens().space.tab_width_cols, pane.tab_scroll_cols) orelse return;
             const target = m.tabIndex(pane.terms.items.len, x_px);
             if (target != self.tab_drag_index) {
                 rotateMove(*Term, pane.terms.items, self.tab_drag_index, target);
@@ -1298,7 +1301,7 @@ pub const DevSession = struct {
             if (pointInRect(x_px, y_px, bar)) {
                 if (lr.leaf == src) return; // 같은 pane — 재정렬은 이미 됨
                 const dst_count = lr.leaf.terms.items.len; // dst pane은 항상 Term ≥1(빈 pane은 collapse됨)
-                const m = barMetrics(bar, self.cell_width_px, dst_count, self.buildChromeTokens().space.tab_width_cols) orelse return;
+                const m = barMetrics(bar, self.cell_width_px, dst_count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse return;
                 self.moveTermToPane(src, self.tab_drag_index, lr.leaf, m.tabIndex(dst_count, x_px));
                 return;
             }
@@ -2522,7 +2525,7 @@ pub const DevSession = struct {
                     const bar = self.paneBarRect(lr.rect) orelse continue;
                     if (pointInRect(x_px, y_px, bar)) {
                         const count = lr.leaf.terms.items.len;
-                        const m = barMetrics(bar, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols);
+                        const m = barMetrics(bar, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols);
                         // 바 우측 "+" 버튼 클릭 → 그 pane을 포커스하고 새 Term을 띄운다(⌘T의 마우스 버전). 탭/✕보다 먼저.
                         if (m) |bm| if (bm.inPlusZone(x_px)) {
                             _ = self.focusPaneByPtr(lr.leaf);
@@ -3684,7 +3687,7 @@ pub const DevSession = struct {
             for (leaf_rects.items) |lr| {
                 const bar = self.paneBarRect(lr.rect) orelse continue;
                 const hl_bg = if (lr.leaf == active_pane) self.sidebarActiveBg() else self.sidebarHoverBg();
-                const m_opt = barMetrics(bar, self.cell_width_px, lr.leaf.terms.items.len, tk_space.tab_width_cols);
+                const m_opt = barMetrics(bar, self.cell_width_px, lr.leaf.terms.items.len, tk_space.tab_width_cols, lr.leaf.tab_scroll_cols);
                 if (tab_corner > 0) {
                     // rich: 바 배경(직각)·활성 탭(평평 배경 + 하단 앰버 언더바) 모두 layer 2 quad. 바 배경 먼저(아래),
                     // 활성 탭이 위, 제목 셀(part1)은 그 위 — 불투명 바 배경 셀이 quad를 가리던 z-order 버그 해소(리뷰 #1).
@@ -3780,7 +3783,7 @@ pub const DevSession = struct {
                     const active_tab_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                     // 이 pane의 탭이 호버 중이면 그 탭에 ✕를 그린다(다른 pane이면 null).
                     const close_tab: ?usize = if (self.hovered_tab) |h| (if (h.pane == lr.leaf) h.tab else null) else null;
-                    const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, titles.items, @intCast(bar_cols), tab_fg, close_tab, lr.leaf.active_term, active_tab_fg, self.buildChromeTokens().space.tab_width_cols) catch continue;
+                    const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, titles.items, @intCast(bar_cols), tab_fg, close_tab, lr.leaf.active_term, active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) catch continue;
                     var f = pane_frame_builder.buildFromDrawList(self.allocator, dl, &self.renderer_state) catch continue;
                     built_frames.append(self.allocator, f) catch {
                         f.deinit(self.allocator);
@@ -3962,7 +3965,7 @@ pub const DevSession = struct {
                 const bar = self.paneBarRect(lr.rect) orelse continue;
                 if (pointInRect(x_px, y_px, bar)) {
                     const count = lr.leaf.terms.items.len;
-                    const m = barMetrics(bar, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols) orelse break; // 메트릭 불가(초소형 바) → 호버 없음
+                    const m = barMetrics(bar, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse break; // 메트릭 불가(초소형 바) → 호버 없음
                     if (m.inPlusZone(x_px)) break; // "+" 버튼 위 — 탭 호버 아님(마지막 탭에 ✕ 오표시 방지)
                     next = .{ .pane = lr.leaf, .tab = m.tabIndex(count, x_px) };
                     break;
@@ -6444,15 +6447,15 @@ test "paneBarBgCell builds a bar-width background cell at the bar origin" {
 // 테스트). 옛 BarMetrics 단위 테스트의 init-null·highlightCell 케이스를 이리로 보존한다(C3b 리뷰 반영 — 이주로 빠졌던 커버리지).
 test "barMetrics splits bar + tabbarHighlightCell active-tab band" {
     const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 }; // cell 12 → 20칸, "+" zone 3 제외 탭 영역 17, 2탭 → tab_w=8
-    const m = barMetrics(bar, 12, 2, 0).?;
+    const m = barMetrics(bar, 12, 2, 0, 0).?;
     try std.testing.expectEqual(@as(u32, 20), m.cols);
     try std.testing.expectEqual(@as(u32, 17), m.tab_cols);
     try std.testing.expectEqual(@as(u32, 8), m.tab_w);
     try std.testing.expectEqual(@as(u32, 180), m.bar_x);
     // 극단(셀 0·바 폭 0·탭 0)이면 null — 호출자가 탭 처리를 건너뛴다.
-    try std.testing.expect(barMetrics(bar, 0, 2, 0) == null);
-    try std.testing.expect(barMetrics(.{ .x = 0, .y = 0, .w = 0, .h = 12 }, 12, 2, 0) == null);
-    try std.testing.expect(barMetrics(bar, 12, 0, 0) == null);
+    try std.testing.expect(barMetrics(bar, 0, 2, 0, 0) == null);
+    try std.testing.expect(barMetrics(.{ .x = 0, .y = 0, .w = 0, .h = 12 }, 12, 2, 0, 0) == null);
+    try std.testing.expect(barMetrics(bar, 12, 0, 0, 0) == null);
     // tabbarHighlightCell: 탭 1 = col [8,16), origin=bar.x, sentinel-bg(slot_id 0).
     const cell = tabbarHighlightCell(m, 1, 0xFF445566).?;
     try std.testing.expectEqual(@as(u16, 8), cell.col); // 1*tab_w
@@ -6735,7 +6738,7 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const bar = session.paneBarRect(lr.items[0].rect).?;
-    const m = barMetrics(bar, session.cell_width_px, 3, 0).?;
+    const m = barMetrics(bar, session.cell_width_px, 3, 0, 0).?;
     // 탭 1 ✕ zone col = (1+1)*tab_w - 1(우측 안쪽). x = bar.x + (2*tab_w - 1)*cw.
     const close_x: f64 = @floatFromInt(bar.x + (2 * m.tab_w - 1) * session.cell_width_px);
     const bar_y: f64 = @floatFromInt(bar.y + 1);
@@ -6776,7 +6779,7 @@ test "clicking the bar '+' button spawns a new Term in that pane" {
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const bar = session.paneBarRect(lr.items[0].rect).?;
-    const m = barMetrics(bar, session.cell_width_px, 1, 0).?;
+    const m = barMetrics(bar, session.cell_width_px, 1, 0, 0).?;
     try std.testing.expect(m.hasPlusZone()); // 바가 넓어 "+" zone이 존재
     // "+" zone = col [tab_cols, cols). 첫 col 중앙을 클릭.
     const plus_x: f64 = @floatFromInt(bar.x + m.tab_cols * session.cell_width_px + session.cell_width_px / 2);
@@ -6811,7 +6814,7 @@ test "hovering the '+' button does not mark the last tab for close" {
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const bar = session.paneBarRect(lr.items[0].rect).?;
-    const m = barMetrics(bar, session.cell_width_px, 2, 0).?;
+    const m = barMetrics(bar, session.cell_width_px, 2, 0, 0).?;
     const bar_y: f64 = @floatFromInt(bar.y + 1);
 
     // 마지막 탭(탭 1) 위 호버 → hovered_tab = 탭 1(정상).
@@ -6856,7 +6859,7 @@ test "dragging a Term tab reorders it within the pane" {
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const bar = session.paneBarRect(lr.items[0].rect).?;
-    const m = barMetrics(bar, session.cell_width_px, 3, 0).?;
+    const m = barMetrics(bar, session.cell_width_px, 3, 0, 0).?;
     const tab0_x: f64 = @floatFromInt(bar.x + (0 * m.tab_w + 1) * session.cell_width_px); // 탭 0 세그먼트(✕ 아님)
     const tab2_x: f64 = @floatFromInt(bar.x + (2 * m.tab_w + 1) * session.cell_width_px); // 탭 2 세그먼트
     const bar_y: f64 = @floatFromInt(bar.y + 1);

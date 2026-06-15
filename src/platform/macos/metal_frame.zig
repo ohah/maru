@@ -600,6 +600,9 @@ pub const MetalFrame = extern struct {
     gpu_quad_count: usize = 0,
     gpu_shadows: ?[*]const GpuShadow = null,
     gpu_shadow_count: usize = 0,
+    // C4b 모달: 모달 셀이 cells 배열에서 시작하는 인덱스(0=모달 없음). draw가 over quad(모달 배경)를 이
+    // 경계 앞(모달 텍스트 셀 아래·터미널 위)에 끼운다.
+    modal_cells_start: usize = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).
@@ -707,6 +710,9 @@ pub const MetalFrameBuffer = struct {
     // 꺼지면 view()가 이 길이만큼 잘라 노출한다 — 커서 blink가 frame rebuild 없이 동작한다.
     cursor_cells: usize = 0,
     show_cursor: bool = true,
+    // C4b 모달: 모달(overlay) 셀이 cells 배열에서 시작하는 인덱스. draw가 over quad(모달 배경)를 이 경계
+    // '앞'에 끼워 모달 텍스트 셀 아래·터미널 위에 둔다. 0 = 모달 없음(분할 안 함).
+    modal_cells_start: usize = 0,
 
     /// N개 panel frame(`pane_frames`)과 사이드바 frame(선택)을 함께 투영해 교체한다. 각 panel 셀은 자기
     /// origin에 박혀(setCellsPaneOrigin) 렌더러가 origin_x+col*cw, origin_y+row*ch에 둔다 — N개 surface가
@@ -764,10 +770,14 @@ pub const MetalFrameBuffer = struct {
         // caret이 **버퍼 맨 끝**(overlay suffix)에 와, 아래 cursor_cells를 그 길이로 잡아 setCursorVisible(suffix-trim)이
         // 재빌드 없이 caret을 깜빡인다 — 터미널 커서와 같은 메커니즘 재활용. caret이 없으면(notice 등) 0.
         var overlay_cursor_cells: usize = 0;
+        // C4b 모달: 모달(overlay) 셀 시작 인덱스. draw가 over quad(모달 배경)를 이 경계 '앞'(모달 텍스트 셀
+        // 아래·터미널 위)에 끼운다. 0 = 모달 없음(draw가 분할 안 함).
+        var modal_cells_start: usize = 0;
         if (overlay_frame) |pf| {
             const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
             defer allocator.free(built.cells);
             setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
+            modal_cells_start = cells_list.items.len; // 모달 셀 시작(append 전)
             try cells_list.appendSlice(allocator, built.cells);
             overlay_cursor_cells = built.cursor_cells; // 오버레이 caret이 버퍼 맨 끝 — blink suffix
         }
@@ -798,6 +808,7 @@ pub const MetalFrameBuffer = struct {
         // 그러면 setCursorVisible chop이 오버레이 caret을 깜빡인다(터미널 커서 메커니즘 재활용). 오버레이가 caret을
         // 안 내면(notice 등) overlay_cursor_cells=0이라 chop 없음(정적). 오버레이가 없으면 활성 panel의 터미널 커서.
         self.cursor_cells = if (overlay_frame != null) overlay_cursor_cells else cursor_cells;
+        self.modal_cells_start = modal_cells_start;
         self.uploads = merged.uploads;
         self.pixels = merged.pixels;
         // cols/rows는 렌더러의 cols==0/rows==0 가드용 — 활성(마지막) panel의 grid를 쓴다(셀은 자기 row/col+
@@ -840,6 +851,10 @@ pub const MetalFrameBuffer = struct {
             // C4b: chrome rich GPU quad 프리미티브. 비면 null로 둬 렌더러가 quad 패스를 건너뛴다(tui).
             .gpu_quads = if (self.gpu_quads.len > 0) self.gpu_quads.ptr else null,
             .gpu_quad_count = self.gpu_quads.len,
+            // C4b 모달: show_cursor로 잘려도 modal_cells_start는 그대로(커서 suffix는 모달 텍스트 '뒤'라
+            // 모달 셀 시작에 영향 없음). exposed가 modal_cells_start보다 작으면 모달 텍스트가 안 보이는
+            // 경우인데, 그땐 draw가 over quad를 모달 없음과 같게 다룬다(렌더러 가드).
+            .modal_cells_start = self.modal_cells_start,
         };
     }
 

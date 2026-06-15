@@ -313,7 +313,8 @@ bool maru_metal_renderer_draw(
     /* C4b: chrome rich GPU quad 프리미티브(둥근 사각형). NULL/0이면 안 그림(tui 테마). 셀 패스 아래
        (배경 레이어)에 별개 파이프라인으로 그린다. */
     const MaruAppHostDevGpuQuad *gpu_quads,
-    size_t gpu_quad_count
+    size_t gpu_quad_count,
+    size_t modal_cells_start
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -488,41 +489,41 @@ bool maru_metal_renderer_draw(
     // 사이드바 배경 strip은 셀 패스의 불투명 셀(squad)이라, rich 밴드 quad를 셀 패스 '전체' 앞에 두면
     // 배경 strip이 그 위에 덮어 밴드가 안 보인다(z-order). 그래서 셀 패스를 '사이드바 cells 시작'에서 둘로
     // 쪼개, 밴드 quad를 배경 strip '뒤'·제목 glyph '앞'에 끼운다. (모달/divider quad의 위 레이어 분리는 후속.)
+    const size_t cell_count_v = cell_count * 6;
     const size_t pre_sidebar_vertices = (cell_count + sidebar_bg_quads) * 6;
     const size_t under_vertex_count = under_quad_n * 6;
-    if (vertex_buffer != nil && pre_sidebar_vertices > 0) {
-        [encoder setRenderPipelineState:impl.pipeline];
-        [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
-        [encoder setFragmentTexture:impl.atlas atIndex:0];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                    vertexStart:0
-                    vertexCount:pre_sidebar_vertices];
+    // C4b 모달: 모달(overlay) 셀이 cells[modal_cells_start..cell_count]에 있으면, over quad(모달 배경)를 모달
+    // 텍스트 '앞'에 끼운다 → 터미널(모달 제외) → 배경 → under quad(사이드바 밴드) → 사이드바 → over quad
+    // (모달 배경) → 모달 텍스트. 모달 없으면(0) terminal_end=cell_count라 1·6이 합쳐져 기존과 같다.
+    const bool has_modal = (modal_cells_start > 0 && modal_cells_start < cell_count);
+    const size_t terminal_end_v = (has_modal ? modal_cells_start : cell_count) * 6;
+#define MARU_DRAW_CELLS(sv, cv)                                       \
+    do {                                                             \
+        if ((cv) > 0) {                                              \
+            [encoder setRenderPipelineState:impl.pipeline];          \
+            [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0]; \
+            [encoder setFragmentTexture:impl.atlas atIndex:0];       \
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(sv) vertexCount:(cv)]; \
+        }                                                            \
+    } while (0)
+#define MARU_DRAW_QUADS(sv, cv)                                       \
+    do {                                                             \
+        if ((cv) > 0) {                                              \
+            [encoder setRenderPipelineState:impl.quadPipeline];      \
+            [encoder setVertexBuffer:quad_vertex_buffer offset:0 atIndex:0]; \
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(sv) vertexCount:(cv)]; \
+        }                                                            \
+    } while (0)
+    if (vertex_buffer != nil) {
+        MARU_DRAW_CELLS(0, terminal_end_v);                                  // 1. 터미널(모달 제외)
+        MARU_DRAW_CELLS(cell_count_v, pre_sidebar_vertices - cell_count_v);  // 2. 사이드바 배경 strip
     }
-    // under quad(layer 0 — 사이드바 밴드): 사이드바 배경 위·제목 아래.
-    if (quad_vertex_buffer != nil && under_vertex_count > 0) {
-        [encoder setRenderPipelineState:impl.quadPipeline];
-        [encoder setVertexBuffer:quad_vertex_buffer offset:0 atIndex:0];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                    vertexStart:0
-                    vertexCount:under_vertex_count];
-    }
-    if (vertex_buffer != nil && total_vertices > pre_sidebar_vertices) {
-        [encoder setRenderPipelineState:impl.pipeline];
-        [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
-        [encoder setFragmentTexture:impl.atlas atIndex:0];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                    vertexStart:pre_sidebar_vertices
-                    vertexCount:(total_vertices - pre_sidebar_vertices)];
-    }
-    // over quad(layer 1 — 모달): 셀 전체 위 최상위. (모달 텍스트 셀 '아래'로 끼우는 경계 분할은 모달-1c.
-    // 현재 모달이 quad를 안 내 over는 비어 무동작 — under=전체라 위 패스가 모든 quad를 그린다.)
-    if (quad_vertex_buffer != nil && quad_vertex_total > under_vertex_count) {
-        [encoder setRenderPipelineState:impl.quadPipeline];
-        [encoder setVertexBuffer:quad_vertex_buffer offset:0 atIndex:0];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                    vertexStart:under_vertex_count
-                    vertexCount:(quad_vertex_total - under_vertex_count)];
-    }
+    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(0, under_vertex_count);    // 3. under quad(사이드바 밴드)
+    if (vertex_buffer != nil) MARU_DRAW_CELLS(pre_sidebar_vertices, total_vertices - pre_sidebar_vertices); // 4. 사이드바 cells(제목)
+    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(under_vertex_count, quad_vertex_total - under_vertex_count); // 5. over quad(모달 배경)
+    if (vertex_buffer != nil && has_modal) MARU_DRAW_CELLS(modal_cells_start * 6, cell_count_v - modal_cells_start * 6); // 6. 모달 텍스트
+#undef MARU_DRAW_CELLS
+#undef MARU_DRAW_QUADS
     [encoder endEncoding];
 
     [command_buffer presentDrawable:drawable];

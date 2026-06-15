@@ -4079,22 +4079,30 @@ pub const DevSession = struct {
         }) catch {};
     }
 
+    /// solid 직각 GpuQuad(곡률·테두리·gradient 없음)를 지정 layer에 append하는 공통 헬퍼 — appendBarBgQuad·
+    /// appendTabBarUnderline이 공유해 같은 11필드 보일러플레이트 반복을 없앤다(GpuQuad는 extern struct라 필드
+    /// default가 없어 필드 추가 시 모든 리터럴을 손봐야 하는데, solid 직각 quad는 이 헬퍼 한 곳으로 모은다). 둥근/
+    /// 테두리/gradient quad는 appendTabBandQuad·appendActivePaneRingQuad가 따로(각자 모양 파라미터를 받아 일반화 안 함).
+    fn appendSolidQuad(self: *DevSession, x: f32, y: f32, w: f32, h: f32, color: u32, layer: u32) void {
+        self.gpu_quads.append(self.allocator, .{
+            .x = x,
+            .y = y,
+            .w = w,
+            .h = h,
+            .corner_radii = .{ 0, 0, 0, 0 },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = color,
+            .fill_color1 = color,
+            .border_color = 0,
+            .gradient_kind = 0,
+            .layer = layer,
+        }) catch {};
+    }
+
     /// C4b-5: rich 탭 바 배경(직각)을 layer 2 GpuQuad로 그린다 — 활성 탭 밴드 quad(같은 layer, 뒤에 append되어 위로)가
     /// 불투명 셀 배경(paneBarBgCell)에 가리지 않게(리뷰 z-order #1, #451과 동형). tui는 셀. 둘 다 part1 제목 셀 아래(layer 2).
     fn appendBarBgQuad(self: *DevSession, bar: app.SplitRect, bg: u32) void {
-        self.gpu_quads.append(self.allocator, .{
-            .x = @floatFromInt(bar.x),
-            .y = @floatFromInt(bar.y),
-            .w = @floatFromInt(bar.w),
-            .h = @floatFromInt(bar.h),
-            .corner_radii = .{ 0, 0, 0, 0 }, // 직각(바 전체 배경 — 활성 탭만 둥글다)
-            .border_widths = .{ 0, 0, 0, 0 },
-            .fill_color0 = bg,
-            .fill_color1 = bg,
-            .border_color = 0,
-            .gradient_kind = 0,
-            .layer = 2,
-        }) catch {};
+        self.appendSolidQuad(@floatFromInt(bar.x), @floatFromInt(bar.y), @floatFromInt(bar.w), @floatFromInt(bar.h), bg, 2);
     }
 
     /// 탭바 하단 구분선(divider 색)을 layer 2 GpuQuad로 — 탭바를 터미널 콘텐츠와 시각 분리(rich). 활성 탭 영역은
@@ -4104,20 +4112,7 @@ pub const DevSession = struct {
     /// HiDPI 분수 스케일에서 떨린다. 형제 선 헬퍼(appendHorizontalLine)가 셀+reserved ~2px를 쓰는 것과 같은
     /// 이유로 토큰 두께(≥2px)면 중심 행이 cov≈1로 선명하다. 두께만큼 바 하단 안쪽에 둔다(바 위로 안 새게).
     fn appendTabBarUnderline(self: *DevSession, bar: app.SplitRect, thickness: u32) void {
-        const dc = self.dividerColor();
-        self.gpu_quads.append(self.allocator, .{
-            .x = @floatFromInt(bar.x),
-            .y = @floatFromInt(bar.y + bar.h -| thickness),
-            .w = @floatFromInt(bar.w),
-            .h = @floatFromInt(thickness),
-            .corner_radii = .{ 0, 0, 0, 0 },
-            .border_widths = .{ 0, 0, 0, 0 },
-            .fill_color0 = dc,
-            .fill_color1 = dc,
-            .border_color = 0,
-            .gradient_kind = 0,
-            .layer = 2,
-        }) catch {};
+        self.appendSolidQuad(@floatFromInt(bar.x), @floatFromInt(bar.y + bar.h -| thickness), @floatFromInt(bar.w), @floatFromInt(thickness), self.dividerColor(), 2);
     }
 
     /// app `*Tab`에서 chrome 중립 `sidebar.Tab`(라벨·활성)을 빌드한다 — chrome은 app 트리를 모르므로 host가 떼어 준다

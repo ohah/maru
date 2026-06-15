@@ -4138,9 +4138,18 @@ pub const DevSession = struct {
     /// 브리지) — tick의 `builtin.os.tag == .macos` 가드 안에서만 호출한다. 사이드바가 꺼졌거나(폭 0)
     /// 탭이 없으면 error.NoSidebar로 빠져 호출부가 제목 없이 밴드만 그린다.
     fn buildSidebarTitleFrame(self: *DevSession) !renderer.RenderFrame {
-        const sidebar_cols_u32 = if (self.cell_width_px > 0) self.sidebar_width_px / self.cell_width_px else 0;
-        const sidebar_cols: u16 = @intCast(@min(sidebar_cols_u32, @as(u32, std.math.maxInt(u16))));
-        if (sidebar_cols == 0 or self.tabs.items.len == 0) return error.NoSidebar;
+        const cw = self.cell_width_px;
+        if (cw == 0 or self.tabs.items.len == 0) return error.NoSidebar;
+        // U2/B2: 제목 영역 = 슬롯 폭에서 좌측(카드 패딩 + accent 막대)·우측(카드 패딩)을 inset한 content rect(선언적
+        // 패딩, Rect.inset). 그 좌단을 셀 col로 ceil 환산(indent_cols)해 제목을 좌측 막대 우측·카드 안에 둔다(rich).
+        // tui(0)면 left=right=0이라 전체 폭·indent 0(기존과 동일).
+        const sp = self.buildChromeTokens().space;
+        const row = chrome.draw.Rect{ .x = 0, .y = 0, .w = self.sidebar_width_px, .h = cw }; // h는 가로 환산에 무관
+        const text_area = row.inset(.{ .left = sp.card_gap_px + sp.accent_bar_width_px, .right = sp.card_gap_px });
+        const indent_px: u32 = @intCast(text_area.x);
+        const indent_cols: u16 = if (indent_px > 0) @intCast(@min((indent_px + cw - 1) / cw, @as(u32, std.math.maxInt(u16)))) else 0;
+        const sidebar_cols: u16 = @intCast(@min(text_area.w / cw, @as(u32, std.math.maxInt(u16))));
+        if (sidebar_cols == 0) return error.NoSidebar;
 
         // 탭 라벨 "{n} {title}"을 소유 버퍼로 모은다(buildSidebarDrawList가 코드포인트로 디코드).
         var labels: std.ArrayList([]const u8) = .empty;
@@ -4159,6 +4168,10 @@ pub const DevSession = struct {
         const active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
         // 호버 슬롯엔 닫기 ✕(없으면 null). plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼.
         const draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, labels.items, sidebar_cols, fg, self.hovered_slot, self.tabs.items.len, self.app_window.active_tab, active_fg);
+        // U2/B2: 제목·✕·+ 셀을 content rect 좌단(indent_cols)만큼 우측으로 민다 — 좌측 maru-accent 막대 + 카드 패딩 안 가리게(rich만; tui indent=0 no-op).
+        if (indent_cols > 0) for (draw_list.cells) |*c| {
+            c.col += indent_cols;
+        };
         // buildFromDrawList가 draw_list 소유권을 가져간다(실패 시 정리, 성공 시 RenderFrame으로 이동).
         const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
             .appearance = self.appearance,

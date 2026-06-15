@@ -515,6 +515,7 @@ bool maru_metal_renderer_draw(
     // NULL/0(tui 테마)이면 생성 안 함. modal(팝업) 위 레이어 분리는 C4b-3에서.
     id<MTLBuffer> quad_vertex_buffer = nil;
     size_t quad_vertex_total = 0;
+    size_t bottom_quad_n = 0; // C4b-5: layer 2(bottom — 탭 밴드) quad 수. part1(터미널·탭 제목) '앞'에 그려 제목 아래로.
     size_t under_quad_n = 0; // C4b 모달: layer 0(under — 사이드바 밴드) quad 수. draw가 under/over를 가르는 경계.
     const size_t gpu_quad_n = (gpu_quads != NULL) ? gpu_quad_count : 0;
     if (gpu_quad_n > 0) {
@@ -532,14 +533,18 @@ bool maru_metal_renderer_draw(
             return false;
         }
         MaruRendererQuadVertex *qv = (MaruRendererQuadVertex *)quad_vertex_buffer.contents;
-        // C4b 모달: layer 0(under — 사이드바 밴드)을 정점 버퍼 앞, layer 1(over — 모달)을 뒤에 배치한다.
-        // draw가 under_quad_n 경계로 두 패스를 그려 z를 맞춘다(under는 part1 위·part2 아래, over는 최상위).
+        // C4b: layer로 z를 가른다 — 2(bottom 탭 밴드, part1 앞)·0(under 사이드바, part1 뒤·part2 앞)·1(over 모달, 최상위).
+        // 정점 버퍼에 bottom→under→over 순서로 배치해 draw가 세 패스로 그린다(탭 밴드만 layer 2 신설, 사이드바·모달 불변).
         for (size_t i = 0; i < gpu_quad_n; i++) {
-            if (gpu_quads[i].layer == 0) under_quad_n += 1;
+            if (gpu_quads[i].layer == 2) bottom_quad_n += 1;
+            else if (gpu_quads[i].layer == 0) under_quad_n += 1;
         }
-        size_t ui = 0, oi = under_quad_n;
+        size_t bi = 0, ui = bottom_quad_n, oi = bottom_quad_n + under_quad_n;
         for (size_t i = 0; i < gpu_quad_n; i++) {
-            const size_t dst = (gpu_quads[i].layer == 0) ? ui++ : oi++;
+            size_t dst;
+            if (gpu_quads[i].layer == 2) dst = bi++;
+            else if (gpu_quads[i].layer == 0) dst = ui++;
+            else dst = oi++;
             maru_fill_quad_instance(&qv[dst * 6], gpu_quads[i], drawable_w, drawable_h);
         }
     }
@@ -596,6 +601,7 @@ bool maru_metal_renderer_draw(
     // 쪼개, 밴드 quad를 배경 strip '뒤'·제목 glyph '앞'에 끼운다. (모달/divider quad의 위 레이어 분리는 후속.)
     const size_t cell_count_v = cell_count * 6;
     const size_t pre_sidebar_vertices = (cell_count + sidebar_bg_quads) * 6;
+    const size_t bottom_vertex_count = bottom_quad_n * 6; // C4b-5: 탭 밴드(part1 앞 패스)
     const size_t under_vertex_count = under_quad_n * 6;
     // C4b 모달: 모달(overlay) 셀이 cells[modal_cells_start..cell_count]에 있으면, over quad(모달 배경)를 모달
     // 텍스트 '앞'에 끼운다 → 터미널(모달 제외) → 배경 → under quad(사이드바 밴드) → 사이드바 → over quad
@@ -619,11 +625,12 @@ bool maru_metal_renderer_draw(
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(sv) vertexCount:(cv)]; \
         }                                                            \
     } while (0)
+    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(0, bottom_vertex_count);   // 0. bottom quad(탭 밴드 — 터미널·제목 앞, 제목 아래로)
     if (vertex_buffer != nil) {
-        MARU_DRAW_CELLS(0, terminal_end_v);                                  // 1. 터미널(모달 제외)
+        MARU_DRAW_CELLS(0, terminal_end_v);                                  // 1. 터미널(모달 제외, 탭 제목 포함)
         MARU_DRAW_CELLS(cell_count_v, pre_sidebar_vertices - cell_count_v);  // 2. 사이드바 배경 strip
     }
-    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(0, under_vertex_count);    // 3. under quad(사이드바 밴드)
+    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count, under_vertex_count); // 3. under quad(사이드바 밴드)
     if (vertex_buffer != nil) MARU_DRAW_CELLS(pre_sidebar_vertices, total_vertices - pre_sidebar_vertices); // 4. 사이드바 cells(제목)
     // C4b: shadow 패스 — 터미널·사이드바 위, 모달 배경(over quad) 아래. 모달이 떠 보이게(리뷰 #1 — 맨 처음이면
     // 터미널 셀이 halo를 덮어 그림자가 깜빡/사라졌다). 모달 over quad·텍스트가 이 위에 그려진다.
@@ -632,7 +639,7 @@ bool maru_metal_renderer_draw(
         [encoder setVertexBuffer:shadow_vertex_buffer offset:0 atIndex:0];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:shadow_vertex_total];
     }
-    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(under_vertex_count, quad_vertex_total - under_vertex_count); // 5. over quad(모달 배경)
+    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count + under_vertex_count, quad_vertex_total - bottom_vertex_count - under_vertex_count); // 5. over quad(모달 배경)
     if (vertex_buffer != nil && has_modal) MARU_DRAW_CELLS(modal_cells_start * 6, cell_count_v - modal_cells_start * 6); // 6. 모달 텍스트
 #undef MARU_DRAW_CELLS
 #undef MARU_DRAW_QUADS

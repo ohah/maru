@@ -3675,12 +3675,18 @@ pub const DevSession = struct {
             // (세로 분할 등에서 "활성 탭 UI가 안 바뀐다"는 제보 대응). 제목 glyph는 아래 pane_frames에(C2).
             var pane_chrome: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
             defer pane_chrome.deinit(self.allocator);
+            // C4b-5: rich(corner>0)면 활성 탭 밴드를 둥근 layer 2 GpuQuad(제목 셀 아래)로, tui(0)면 직각 셀 밴드로.
+            const tab_corner = self.buildChromeTokens().space.corner_radius_px;
             for (leaf_rects.items) |lr| {
                 const bar = self.paneBarRect(lr.rect) orelse continue;
                 if (paneBarBgCell(bar, self.cell_width_px, self.sidebarBg())) |cell| pane_chrome.append(self.allocator, cell) catch {};
                 const hl_bg = if (lr.leaf == active_pane) self.sidebarActiveBg() else self.sidebarHoverBg();
                 if (barMetrics(bar, self.cell_width_px, lr.leaf.terms.items.len)) |m| {
-                    if (tabbarHighlightCell(m, lr.leaf.active_term, hl_bg)) |cell| pane_chrome.append(self.allocator, cell) catch {};
+                    if (tab_corner > 0) {
+                        self.appendTabBandQuad(m, lr.leaf.active_term, hl_bg, tab_corner); // rich: 둥근 layer 2 quad
+                    } else if (tabbarHighlightCell(m, lr.leaf.active_term, hl_bg)) |cell| {
+                        pane_chrome.append(self.allocator, cell) catch {}; // tui: 직각 셀 밴드
+                    }
                 }
             }
 
@@ -3994,6 +4000,28 @@ pub const DevSession = struct {
                 i += 1;
             }
         }
+    }
+
+    /// C4b-5: 활성 탭 밴드를 둥근 GpuQuad(layer 2 — part1 탭 제목 셀 '아래')로 gpu_quads에 append한다. segOf의 픽셀
+    /// 경계(start_px/end_px)를 써 hit-test·제목 glyph와 정확히 정합한다(§6 단일 소스). overflow(안 보이는) 탭이면 무동작.
+    /// rich(corner>0)에서만 호출 — tui는 tabbarHighlightCell 셀 밴드. per-frame(dropQuadsByLayer(2)가 매 프레임 비움).
+    fn appendTabBandQuad(self: *DevSession, m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32, corner: u16) void {
+        const seg = m.segOf(tab_index);
+        if (seg.end_col <= seg.start_col) return; // overflow(탭 영역 밖, 안 보이는) 탭
+        const cr: f32 = @floatFromInt(corner);
+        self.gpu_quads.append(self.allocator, .{
+            .x = @floatCast(seg.start_px),
+            .y = @floatFromInt(m.bar_y),
+            .w = @floatCast(seg.end_px - seg.start_px),
+            .h = @floatFromInt(m.bar_h),
+            .corner_radii = .{ cr, cr, cr, cr },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = bg,
+            .fill_color1 = bg,
+            .border_color = 0,
+            .gradient_kind = 0,
+            .layer = 2,
+        }) catch {};
     }
 
     /// app `*Tab`에서 chrome 중립 `sidebar.Tab`(라벨·활성)을 빌드한다 — chrome은 app 트리를 모르므로 host가 떼어 준다
@@ -4481,7 +4509,7 @@ pub const DevSession = struct {
 
         var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch);
         // C4b 모달-2b: 모달 배경 quad(layer=1)를 self.gpu_quads(over 패스)에 머지. renderFrame이 매 프레임
-        // dropModalQuads로 layer1을 비운 직후라 누적되지 않는다. cells 소유권은 finishOverlayFrame이.
+        // dropQuadsByLayer(1)로 layer1을 비운 직후라 누적되지 않는다. cells 소유권은 finishOverlayFrame이.
         self.gpu_quads.appendSlice(self.allocator, raster.gpu_quads.items) catch {};
         raster.gpu_quads.deinit(self.allocator);
         self.gpu_shadows.appendSlice(self.allocator, raster.gpu_shadows.items) catch {};

@@ -527,6 +527,7 @@ const Tab = struct {
 /// 호버 중인 per-pane 탭 참조(어느 Pane의 몇 번째 Term 탭). 호버 ✕ 닫기 대상·렌더에 쓴다. Pane은 heap-pin
 /// 이라 포인터가 안정이고, 닫기 등으로 Pane이 사라지면 호출자가 hovered_tab을 null로 비운다.
 const TabRef = struct { pane: *Pane, tab: usize };
+const ScrollRef = struct { pane: *Pane, right: bool }; // #5b: 호버 중인 가로 스크롤 버튼(어느 pane의 ‹=false/›=true)
 
 fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
     if (a == null and b == null) return true;
@@ -696,6 +697,7 @@ pub const DevSession = struct {
     // 갱신하고, 탭 바 렌더가 이 탭에 호버 ✕(닫기 아이콘)를 그린다. mouse down이 이 탭의 ✕ zone이면 그 Term을
     // 닫는다(사이드바 hovered_slot의 per-pane Term 버전). pane은 heap-pin이라 frame 사이 포인터가 안정.
     hovered_tab: ?TabRef = null,
+    hovered_scroll: ?ScrollRef = null, // #5b: 호버 중인 ‹/› 스크롤 버튼 — 렌더가 밝게 칠해 클릭 가능 표시
     // 사이드바 탭 드래그 재정렬 상태. down이 사이드바 슬롯(✕ 아님)에서 시작하면 active=true가 되고,
     // 이후 drag(kind 2)는 타겟 슬롯으로 live 재정렬(moveTab), up(kind 3)이 끝낸다. index는 드래그 중인
     // 탭의 현재 인덱스(이동을 따라간다). 드래그 중엔 다른 down/이벤트가 아니라 drag/up만 캡처한다.
@@ -3729,9 +3731,11 @@ pub const DevSession = struct {
                     self.appendBarBgQuad(bar, self.sidebarBg());
                     self.appendTabBarUnderline(bar, tk.border.line_thickness_px); // 탭바 하단 구분선(터미널 콘텐츠와 경계)
                     if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, hl_bg, tab_accent, tk.border.line_thickness_px);
-                    if (m_opt) |m| if (m.has_scroll) { // #5a: 넘치면 우측 ‹·› 사각형 버튼 배경(약한 배경 — hover 색은 #5b)
-                        self.appendScrollButtonQuad(m, m.tab_cols, self.sidebarHoverBg());
-                        self.appendScrollButtonQuad(m, m.tab_cols + 2, self.sidebarHoverBg());
+                    if (m_opt) |m| if (m.has_scroll) { // #5a/#5b: 우측 ‹·› 사각형 버튼 — hover면 밝게(sidebarActiveBg)로 클릭 가능 표시
+                        const lh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and !hs.right) else false;
+                        const rh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and hs.right) else false;
+                        self.appendScrollButtonQuad(m, m.tab_cols, if (lh) self.sidebarActiveBg() else self.sidebarHoverBg());
+                        self.appendScrollButtonQuad(m, m.tab_cols + 2, if (rh) self.sidebarActiveBg() else self.sidebarHoverBg());
                     };
                 } else {
                     // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위).
@@ -3992,10 +3996,20 @@ pub const DevSession = struct {
         self.metal_dirty = true;
     }
 
+    /// #5b: 호버 중인 ‹/› 스크롤 버튼을 갱신한다. 바뀌면 재드로우(버튼이 밝아져 클릭 가능 표시). 같으면 무동작.
+    fn setHoveredScroll(self: *DevSession, s: ?ScrollRef) void {
+        const same = (self.hovered_scroll == null and s == null) or
+            (self.hovered_scroll != null and s != null and self.hovered_scroll.?.pane == s.?.pane and self.hovered_scroll.?.right == s.?.right);
+        if (same) return;
+        self.hovered_scroll = s;
+        self.metal_dirty = true;
+    }
+
     /// 마우스가 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로 호버 탭을 갱신하고, 아니면 null로 비운다. 활성
     /// 탭 leaf rect를 펴 각 pane 바를 hit-test한다(마우스 이동마다 — 작은 트리라 cheap). hoverCursor이 호출한다.
     fn updateHoveredTab(self: *DevSession, x_px: f64, y_px: f64) void {
         var next: ?TabRef = null;
+        var next_scroll: ?ScrollRef = null;
         // 매 이동마다 새 ArrayList를 안 만들고 재사용 scratch에 레이아웃을 다시 깐다(할당 churn 제거, 결과는 최신).
         const leaf_rects = &self.hover_leaf_scratch;
         leaf_rects.clearRetainingCapacity();
@@ -4005,6 +4019,14 @@ pub const DevSession = struct {
                 if (pointInRect(x_px, y_px, bar)) {
                     const count = lr.leaf.terms.items.len;
                     const m = barMetrics(bar, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse break; // 메트릭 불가(초소형 바) → 호버 없음
+                    if (m.inScrollLeftZone(x_px)) { // #5b: ‹ 버튼 호버 — 탭 호버 아님
+                        next_scroll = .{ .pane = lr.leaf, .right = false };
+                        break;
+                    }
+                    if (m.inScrollRightZone(x_px)) { // #5b: › 버튼 호버
+                        next_scroll = .{ .pane = lr.leaf, .right = true };
+                        break;
+                    }
                     if (m.inPlusZone(x_px)) break; // "+" 버튼 위 — 탭 호버 아님(마지막 탭에 ✕ 오표시 방지)
                     next = .{ .pane = lr.leaf, .tab = m.tabIndex(count, x_px) };
                     break;
@@ -4012,6 +4034,7 @@ pub const DevSession = struct {
             }
         } else |_| {}
         self.setHoveredTab(next);
+        self.setHoveredScroll(next_scroll);
     }
 
     fn usizeOptEql(a: ?usize, b: ?usize) bool {

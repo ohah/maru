@@ -241,6 +241,8 @@ pub const TerminalCore = struct {
     apc_buffer: [4096]u8 = undefined,
     apc_len: usize = 0,
     apc_overflow: bool = false,
+    /// kitty graphics 이미지 저장소(transmit된 이미지, image_id→픽셀 버퍼). placement·렌더는 후속.
+    kitty_images: KittyImageStorage = .{},
     // OSC 7: 셸이 보고한 현재 작업 디렉터리(cwd). VTE(GNOME)가 정의한 사실상 표준 — 형식은
     // `OSC 7 ; file://<host>/<percent-encoded path> ST`이고 iTerm2/Terminal.app/kitty/WezTerm이
     // 채택했다(ECMA-48 아님). 디코드한 path를 core가 소유한다(host는 현재 무시 — 로컬 단일 호스트
@@ -338,6 +340,7 @@ pub const TerminalCore = struct {
         self.mouse_format = .x10;
         self.sync_output = false;
         self.kitty_flags = .{};
+        self.kitty_images.clear(self.allocator); // RIS는 전송된 kitty graphics 이미지를 전부 비운다
         self.grapheme_cluster_mode = false;
         self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
         self.dirty = fullDirty(self.size);
@@ -369,6 +372,7 @@ pub const TerminalCore = struct {
         if (self.reflow_wrapped.len > 0) self.allocator.free(self.reflow_wrapped);
         if (self.reflow_prompt_marks.len > 0) self.allocator.free(self.reflow_prompt_marks);
         self.response.deinit(self.allocator);
+        self.kitty_images.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -1426,10 +1430,13 @@ pub const TerminalCore = struct {
     /// 막는다. 베이스: kitty graphics protocol(APC payload), OSC dispatch와 동형.
     fn dispatchApc(self: *TerminalCore) void {
         if (self.apc_overflow or self.apc_len == 0) return;
-        // kitty graphics(ESC _ G ...)만 처리. control 파싱·검증까지가 토대 — 이미지 디코드·저장·렌더는
-        // 후속(audit 5/5 단계적). payload(base64)도 토대에선 디코드하지 않고 control만 본다.
+        // kitty graphics(ESC _ G ...)만 처리한다. control(k=v)을 파싱하고, transmit이면 payload(base64)를
+        // 디코드해 이미지를 저장한다(placement·렌더는 후속). payload는 control 다음(';' 이후)이다.
         if (self.apc_buffer[0] != 'G') return;
-        _ = parseKittyGraphicsCommand(self.apc_buffer[1..self.apc_len]);
+        const body = self.apc_buffer[1..self.apc_len];
+        const cmd = parseKittyGraphicsCommand(body);
+        const payload = if (std.mem.indexOfScalar(u8, body, ';')) |i| body[i + 1 ..] else body[0..0];
+        self.execKittyGraphics(cmd, payload);
     }
 
     /// kitty graphics APC control의 파싱 결과(주요 key). 토대 단계라 여기까지 — 저장·렌더는 후속이다.
@@ -1472,6 +1479,98 @@ pub const TerminalCore = struct {
             }
         }
         return cmd;
+    }
+
+    /// 디코드된 kitty graphics 이미지(픽셀 버퍼를 소유). bpp=3(RGB)/4(RGBA).
+    const KittyImage = struct {
+        id: u32,
+        width: u32,
+        height: u32,
+        bpp: u8,
+        data: []u8,
+    };
+
+    /// kitty graphics 이미지 저장소(image_id → KittyImage). 총량 한계로 악의적/대량 전송을 막는다.
+    /// 토대(1단계): 같은 id 교체 + 한계 초과 거부 — LRU evict(transmit_time 기준)는 후속이다.
+    /// 베이스: kitty graphics protocol image storage + Ghostty graphics_storage.zig ImageStorage.
+    const KittyImageStorage = struct {
+        map: std.AutoHashMapUnmanaged(u32, KittyImage) = .{},
+        total_bytes: usize = 0,
+        /// 한 세션이 잡을 수 있는 이미지 메모리 상한(Ghostty의 320MB와 동일).
+        const limit: usize = 320 * 1000 * 1000;
+
+        fn deinit(self: *KittyImageStorage, alloc: std.mem.Allocator) void {
+            var it = self.map.valueIterator();
+            while (it.next()) |img| alloc.free(img.data);
+            self.map.deinit(alloc);
+        }
+        fn clear(self: *KittyImageStorage, alloc: std.mem.Allocator) void {
+            var it = self.map.valueIterator();
+            while (it.next()) |img| alloc.free(img.data);
+            self.map.clearRetainingCapacity();
+            self.total_bytes = 0;
+        }
+        /// 이미지를 저장한다 — img.data의 소유권을 가져간다(성공=map 보관, 거부/실패=즉시 free).
+        fn add(self: *KittyImageStorage, alloc: std.mem.Allocator, img: KittyImage) void {
+            if (self.map.fetchRemove(img.id)) |old| { // 같은 id는 교체(기존 free)
+                self.total_bytes -= old.value.data.len;
+                alloc.free(old.value.data);
+            }
+            if (self.total_bytes + img.data.len > limit) { // 한계 초과면 거부
+                alloc.free(img.data);
+                return;
+            }
+            self.map.put(alloc, img.id, img) catch {
+                alloc.free(img.data);
+                return;
+            };
+            self.total_bytes += img.data.len;
+        }
+        fn remove(self: *KittyImageStorage, alloc: std.mem.Allocator, id: u32) void {
+            if (self.map.fetchRemove(id)) |old| {
+                self.total_bytes -= old.value.data.len;
+                alloc.free(old.value.data);
+            }
+        }
+    };
+
+    /// 파싱된 kitty graphics command를 실행한다. 토대(1단계)는 transmit(디코드+저장)과 delete만 —
+    /// query 응답·display(placement)·애니메이션은 후속. payload는 control(';' 전) 다음 base64다.
+    fn execKittyGraphics(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
+        switch (cmd.action) {
+            't', 'T' => self.kittyTransmit(cmd, payload), // T는 transmit+display지만 display(placement)는 후속
+            'd' => self.kitty_images.remove(self.allocator, cmd.image_id),
+            else => {}, // q(query)·p(display)·f/a/c(애니메이션)는 후속
+        }
+    }
+
+    /// kitty graphics transmit: base64 payload를 디코드해 RGBA(f=32)/RGB(f=24) 이미지를 저장한다.
+    /// PNG(f=100)·zlib(o=z)·chunked(m=1)는 후속이라 토대에선 무시(graceful). 베이스: kitty graphics
+    /// protocol transmit + Ghostty graphics_image.zig(RGBA/RGB 직접은 외부 디코더 의존 없음).
+    fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
+        if (cmd.compression != 0) return; // zlib(o=z)는 후속
+        const bpp: u8 = switch (cmd.format) {
+            24 => 3,
+            32 => 4,
+            else => return, // PNG(100) 등은 후속
+        };
+        if (cmd.width == 0 or cmd.height == 0 or cmd.image_id == 0) return; // 필수 control 누락
+        const dec = std.base64.standard.Decoder;
+        const decoded_len = dec.calcSizeForSlice(payload) catch return; // 잘못된 base64
+        const expected = @as(usize, cmd.width) * @as(usize, cmd.height) * bpp;
+        if (decoded_len != expected) return; // 선언 크기 ≠ 디코드 크기
+        const data = self.allocator.alloc(u8, decoded_len) catch return;
+        dec.decode(data, payload) catch {
+            self.allocator.free(data);
+            return;
+        };
+        self.kitty_images.add(self.allocator, .{
+            .id = cmd.image_id,
+            .width = cmd.width,
+            .height = cmd.height,
+            .bpp = bpp,
+            .data = data,
+        });
     }
 
     /// OSC 8: `8 ; params ; URI` — URI가 비면 링크 닫기, 있으면 열기(이후 출력 셀에 id가 찍힌다).
@@ -5767,6 +5866,62 @@ test "kitty graphics command 파싱: 기본값 + payload(';' 다음)는 control�
     try std.testing.expectEqual(@as(u16, 32), q.format); // 기본 RGBA — payload는 파싱 안 함
     const empty = TerminalCore.parseKittyGraphicsCommand("");
     try std.testing.expectEqual(@as(u8, 't'), empty.action); // 기본 transmit(견고성)
+}
+
+test "kitty graphics transmit: RGBA 저장 + 같은 id 교체 + delete (audit 5/5-1단계)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+
+    // 2x2 RGBA = 16바이트(0xAB)를 base64로 인코딩해 transmit(a=t, f=32, s=2, v=2, i=7).
+    const raw = [_]u8{0xAB} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [80]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
+
+    try std.testing.expect(core.kitty_images.map.contains(7));
+    const img = core.kitty_images.map.get(7).?;
+    try std.testing.expectEqual(@as(u32, 2), img.width);
+    try std.testing.expectEqual(@as(u32, 2), img.height);
+    try std.testing.expectEqual(@as(u8, 4), img.bpp);
+    try std.testing.expectEqual(@as(usize, 16), img.data.len);
+    try std.testing.expectEqual(@as(u8, 0xAB), img.data[0]); // base64 디코드 정확
+    try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
+
+    // 같은 id(7)로 다시 transmit → 교체(total_bytes 누적 안 됨).
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
+    try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
+
+    // delete(a=d, i=7) → 제거.
+    try core.write("\x1b_Ga=d,i=7\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(7));
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_images.total_bytes);
+}
+
+test "kitty graphics transmit: 크기 불일치·PNG·zlib는 저장 안 함, RIS는 비운다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var seq: [80]u8 = undefined;
+
+    // 크기 불일치(s=2,v=2,f=32 → 16바이트 기대인데 4바이트만) → 거부.
+    const small = [_]u8{1} ** 4;
+    var sb: [16]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&sb, &small)}));
+    try std.testing.expect(!core.kitty_images.map.contains(1));
+    // PNG(f=100)·zlib(o=z)은 후속이라 저장 안 함.
+    try core.write("\x1b_Ga=t,f=100,s=2,v=2,i=2;AAAA\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(2));
+    try core.write("\x1b_Ga=t,f=32,s=2,v=2,i=3,o=z;AAAA\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(3));
+
+    // 정상 저장 후 RIS(ESC c)는 전부 비운다.
+    const raw = [_]u8{2} ** 16;
+    var b64: [32]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=9;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &raw)}));
+    try std.testing.expect(core.kitty_images.map.contains(9));
+    try core.write("\x1bc");
+    try std.testing.expect(!core.kitty_images.map.contains(9));
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_images.total_bytes);
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

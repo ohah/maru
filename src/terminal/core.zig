@@ -235,6 +235,12 @@ pub const TerminalCore = struct {
     osc_buffer: [2048]u8 = undefined,
     osc_len: usize = 0,
     osc_overflow: bool = false,
+    // APC(ESC _ ... ESC \) 축적 버퍼. kitty graphics(`ESC _ G ...payload... ESC \`)용 — 첫 바이트
+    // 'G'면 kitty command로 파싱한다. 단일 청크 한도(큰 이미지의 m=1 chunked 누적·이미지 저장은 후속);
+    // 넘치면 그 APC는 통째로 무시한다. 베이스: kitty graphics protocol(APC payload), OSC 버퍼와 동형.
+    apc_buffer: [4096]u8 = undefined,
+    apc_len: usize = 0,
+    apc_overflow: bool = false,
     // OSC 7: 셸이 보고한 현재 작업 디렉터리(cwd). VTE(GNOME)가 정의한 사실상 표준 — 형식은
     // `OSC 7 ; file://<host>/<percent-encoded path> ST`이고 iTerm2/Terminal.app/kitty/WezTerm이
     // 채택했다(ECMA-48 아님). 디코드한 path를 core가 소유한다(host는 현재 무시 — 로컬 단일 호스트
@@ -265,7 +271,7 @@ pub const TerminalCore = struct {
     // zsh 등은 SIGWINCH redraw 때 CSI 6n으로 커서를 묻는데, 응답이 없으면 redraw가 어긋난다.
     response: std.ArrayList(u8) = .empty,
 
-    pub const ParserState = enum { ground, escape, escape_intermediate, csi, osc, osc_escape };
+    pub const ParserState = enum { ground, escape, escape_intermediate, csi, osc, osc_escape, apc, apc_escape };
 
     const max_csi_params = 16;
     const default_max_scrollback = 1000;
@@ -1372,6 +1378,26 @@ pub const TerminalCore = struct {
                     self.parser = .ground;
                     index_ += 1;
                 },
+                .apc => {
+                    const byte = bytes[index_];
+                    // APC는 ST(ESC \)로 끝난다. ESC면 apc_escape로, 아니면 버퍼에 모은다(넘치면 overflow
+                    // 표시 후 무시 — 거대/악의적 시퀀스 방어). OSC 수집과 동형.
+                    if (byte == 0x1b) {
+                        self.parser = .apc_escape;
+                    } else if (self.apc_len < self.apc_buffer.len) {
+                        self.apc_buffer[self.apc_len] = byte;
+                        self.apc_len += 1;
+                    } else {
+                        self.apc_overflow = true;
+                    }
+                    index_ += 1;
+                },
+                .apc_escape => {
+                    // APC 안에서 ESC 다음 바이트. ST(ESC \)면 dispatch, 그 외도 APC를 끝낸다(관대 처리).
+                    if (bytes[index_] == '\\') self.dispatchApc();
+                    self.parser = .ground;
+                    index_ += 1;
+                },
             }
         }
     }
@@ -1392,6 +1418,15 @@ pub const TerminalCore = struct {
             self.setWindowTitle(body[2..]); // OSC 2 = 창 제목만
         }
         // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
+    }
+
+    /// 종료된 APC(ESC _ ... ESC \) 내용을 처리한다. kitty graphics(`ESC _ G ...`)가 유일한 소비자다.
+    /// 토대 단계라 현재는 수집만 — command 파싱·이미지 저장·렌더는 후속(audit 5/5 단계적). APC를 안
+    /// 받으면 payload가 화면에 텍스트로 새므로(과거 ESC_ 미처리), 수집해서 무시하는 것만으로도 그 누수를
+    /// 막는다. 베이스: kitty graphics protocol(APC payload), OSC dispatch와 동형.
+    fn dispatchApc(self: *TerminalCore) void {
+        if (self.apc_overflow or self.apc_len == 0) return;
+        // kitty graphics command 파싱(apc_buffer[0] == 'G')은 다음 단계에서 연결한다.
     }
 
     /// OSC 8: `8 ; params ; URI` — URI가 비면 링크 닫기, 있으면 열기(이후 출력 셀에 id가 찍힌다).
@@ -1593,6 +1628,13 @@ pub const TerminalCore = struct {
                 self.osc_len = 0;
                 self.osc_overflow = false;
                 self.parser = .osc;
+            },
+            // APC(ESC _): application program command. kitty graphics(`ESC _ G ...`)가 쓴다. OSC와
+            // 동형으로 버퍼에 모아 ESC \(ST)에서 dispatch한다 — 안 받으면 payload가 화면에 텍스트로 샌다.
+            '_' => {
+                self.apc_len = 0;
+                self.apc_overflow = false;
+                self.parser = .apc;
             },
             // IND(ESC D): index. CR 없이 한 줄 내림 + 하단 margin이면 scroll region을 위로 민다(LF와 동일).
             'D' => {
@@ -5647,6 +5689,19 @@ test "kitty keyboard CSI u dispatch: push(>)/set(=)/query(?)/pop(<)" {
     // RIS는 스택을 비활성으로 리셋한다.
     try core.write("\x1b[>9u\x1bc");
     try std.testing.expectEqual(KittyFlags{}, core.kitty_flags.current());
+}
+
+test "APC (ESC _ ... ESC \\): kitty graphics payload가 화면에 텍스트로 새지 않는다 (graphics 토대)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 2 });
+    defer core.deinit();
+    // kitty graphics APC — control+payload가 셀에 안 찍히고 소비된다(과거 ESC_ 미처리면 누수).
+    try core.write("\x1b_Ga=T,f=32;AAAA\x1b\\");
+    try std.testing.expectEqual(@as(u21, ' '), core.cells[0].codepoint); // 텍스트 누수 없음
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.col); // 커서 안 움직임
+    // APC 종료(ESC \) 후 일반 텍스트는 정상 — ground 복귀 확인.
+    try core.write("hi");
+    try std.testing.expectEqual(@as(u21, 'h'), core.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'i'), core.cells[1].codepoint);
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

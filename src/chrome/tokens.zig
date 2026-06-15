@@ -63,6 +63,9 @@ pub const Spacing = struct {
     // U-tab: rich 탭 하나의 고정 폭(컬럼). 0이면 균등분할(tui — 바를 탭 수로 나눠 stretch). >0이면 고정폭 — 탭이
     // 내용과 무관히 이 폭, 적으면 왼쪽정렬+빈 영역, 많으면 넘쳐(가로 스크롤 대상) 잘린다. 제목 ~N자 + ✕ 2칸 기준.
     tab_width_cols: u16 = 0,
+    // U-tab: rich 탭 바 텍스트 위아래 세로 패딩(px). 바 높이 = cell_height + 2*이값, 제목은 가운데(탭 세로 여유).
+    // tui=0이면 바 = cell 1칸(기존).
+    tab_bar_pad_y_px: u16 = 0,
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
@@ -139,6 +142,8 @@ pub const Tokens = struct {
         tk.space.card_gap_px = 4;
         // U-tab: rich 탭 고정 폭 16칸(제목 ~14 + ✕ 2) — 균등 stretch 대신(적으면 빈 영역, 넘치면 가로 스크롤 대상).
         tk.space.tab_width_cols = 16;
+        // U-tab: 탭 바 세로 패딩 6px(텍스트 위아래) — 바 높이 = cell + 12, 제목 가운데. 탭에 세로 여유.
+        tk.space.tab_bar_pad_y_px = 6;
         return tk;
     }
 

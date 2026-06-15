@@ -3,6 +3,12 @@ const input = @import("input.zig");
 const types = @import("types.zig");
 const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
 
+/// mouse tracking 모드(DECSET 9/1000/1002/1003) — 어떤 마우스 이벤트를 앱에 리포트할지(상호 배타). 베이스: xterm
+/// mouse tracking. none=꺼짐, x10=press만, normal=press+release, button=+버튼 눌린 채 drag, any=+모든 motion.
+pub const MouseTracking = enum { none, x10, normal, button, any };
+/// mouse 이벤트 인코딩(DECSET 1006 SGR / 1016 SGR-pixels / 기본 x10). 베이스: xterm. SGR은 좌표 무제한(>223 OK).
+pub const MouseFormat = enum { x10, sgr, sgr_pixels };
+
 /// DECSC/DECRC(ESC 7/8)·DECSET 1048/1049가 쓰는 저장 커서 상태. 화면(primary/alt)마다 하나씩 둔다.
 pub const SavedCursor = struct {
     cursor: types.Cursor = .{},
@@ -79,6 +85,10 @@ pub const TerminalCore = struct {
     // focus reporting(DECSET 1004): 켜지면 창 포커스 in/out을 CSI I / CSI O로 PTY에 리포트한다.
     // vim FocusGained/Lost·자동저장 등이 쓴다. 기본 off — 앱이 켠다(progressive; 끄면 무리포트).
     focus_events: bool = false,
+    // mouse reporting(DECSET 9/1000/1002/1003): 켜지면 클릭/드래그/휠을 좌표와 함께 PTY로 리포트(셀렉션 대신).
+    // 기본 none — 앱이 켠다. nvim/tmux/htop/lazygit 등이 쓴다. shift 누르면 셀렉션 override(8b platform 처리).
+    mouse_tracking: MouseTracking = .none,
+    mouse_format: MouseFormat = .x10,
     // grapheme cluster mode(DECSET 2027, terminal-unicode-core): 앱이 "나도 grapheme 단위 너비를
     // 쓴다"고 합의하면 켠다. 켜지면 VS16(이모지 표현)·스킨톤·국기 같은 grapheme을 한 셀로 묶고
     // 너비를 EAW 대신 cluster 기준(❤️=2칸 등)으로 잰다 — 앱과 너비가 일치하므로 붙여넣기 redraw가
@@ -262,6 +272,8 @@ pub const TerminalCore = struct {
         self.cursor_visible = true;
         self.bracketed_paste = false;
         self.focus_events = false;
+        self.mouse_tracking = .none;
+        self.mouse_format = .x10;
         self.grapheme_cluster_mode = false;
         self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
         self.dirty = fullDirty(self.size);
@@ -1716,6 +1728,12 @@ pub const TerminalCore = struct {
                 1007 => self.alternate_scroll = set, // alt screen 휠 -> 화살표 변환 on/off
                 2004 => self.bracketed_paste = set, // bracketed paste(붙여넣기 감싸기)
                 1004 => self.focus_events = set, // focus reporting(창 포커스 in/out → CSI I/O)
+                9 => self.mouse_tracking = if (set) .x10 else .none, // X10 mouse(press만)
+                1000 => self.mouse_tracking = if (set) .normal else .none, // normal(press+release)
+                1002 => self.mouse_tracking = if (set) .button else .none, // button(+버튼 눌린 채 drag)
+                1003 => self.mouse_tracking = if (set) .any else .none, // any(+모든 motion)
+                1006 => self.mouse_format = if (set) .sgr else .x10, // SGR 인코딩(좌표 무제한)
+                1016 => self.mouse_format = if (set) .sgr_pixels else .x10, // SGR-pixels 인코딩
                 2027 => self.grapheme_cluster_mode = set, // grapheme cluster 너비(이모지 풀사이즈 합의)
                 47, 1047 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
                 1048 => if (set) self.saveCursorState() else self.restoreCursorState(),
@@ -1730,6 +1748,35 @@ pub const TerminalCore = struct {
     pub fn reportFocus(self: *TerminalCore, gained: bool) void {
         if (!self.focus_events) return;
         self.appendResponse(if (gained) "\x1b[I" else "\x1b[O");
+    }
+
+    /// mouse 이벤트를 앱에 리포트한다(mouse_tracking이 .none이 아닐 때). col/row는 0-based(인코딩은 1-based로 +1).
+    /// button: 0=left,1=middle,2=right, 64=wheel-up,65=wheel-down. mods 비트: 4=shift,8=meta(alt),16=ctrl. motion이면
+    /// drag/move(button·any 모드만, Cb에 +32). 베이스: xterm — SGR(1006/1016) `CSI < Cb;Px;Py M`(press)/`m`(release);
+    /// x10 `CSI M` + (32+Cb)(32+Px)(32+Py) 바이트(좌표 223 초과는 깨져 SGR 권장, release는 버튼 미상이라 Cb=3).
+    pub fn reportMouse(self: *TerminalCore, button: u8, col: u16, row: u16, pressed: bool, motion: bool, mods: u8) void {
+        if (self.mouse_tracking == .none) return;
+        // motion(drag/move)은 button·any 모드만 리포트한다(x10/normal은 press·release만).
+        if (motion and self.mouse_tracking != .button and self.mouse_tracking != .any) return;
+        // x10은 press만 리포트(release를 안 보낸다).
+        if (!pressed and self.mouse_tracking == .x10) return;
+        const cb: u32 = @as(u32, button) + @as(u32, mods) + (if (motion) @as(u32, 32) else 0);
+        var buf: [32]u8 = undefined;
+        const out = switch (self.mouse_format) {
+            .sgr, .sgr_pixels => std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{
+                cb, @as(u32, col) + 1, @as(u32, row) + 1, @as(u8, if (pressed) 'M' else 'm'),
+            }) catch return,
+            .x10 => blk: {
+                // x10은 release 시 버튼 미상이라 Cb=3(sentinel). 각 바이트 32 offset, 255 saturate(>223 깨짐).
+                const eb: u32 = if (pressed) cb else 3;
+                break :blk std.fmt.bufPrint(&buf, "\x1b[M{c}{c}{c}", .{
+                    @as(u8, @intCast(@min(32 + eb, 255))),
+                    @as(u8, @intCast(@min(32 + @as(u32, col) + 1, 255))),
+                    @as(u8, @intCast(@min(32 + @as(u32, row) + 1, 255))),
+                }) catch return;
+            },
+        };
+        self.appendResponse(out);
     }
 
     /// 현재 활성 화면의 DECSC 저장 슬롯. ESC 7/8과 1048은 항상 "지금 보이는 화면"의 슬롯을 쓴다
@@ -4366,6 +4413,41 @@ test "focus reporting (DECSET 1004): off=무리포트, on=CSI I / CSI O" {
     core.clearResponse();
     core.reportFocus(true);
     try std.testing.expectEqualStrings("", core.pendingResponse());
+}
+
+test "mouse reporting (DECSET 1000 + SGR 1006): off=무리포트, press/release/wheel, mode off" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer core.deinit();
+    // off — 무리포트.
+    core.reportMouse(0, 5, 3, true, false, 0);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    // 1000(normal) + 1006(SGR). left press col5,row3(0-based) → CSI < 0 ; 6 ; 4 M.
+    try core.write("\x1b[?1000h\x1b[?1006h");
+    core.clearResponse();
+    core.reportMouse(0, 5, 3, true, false, 0);
+    try std.testing.expectEqualStrings("\x1b[<0;6;4M", core.pendingResponse());
+    // release → 소문자 m.
+    core.clearResponse();
+    core.reportMouse(0, 5, 3, false, false, 0);
+    try std.testing.expectEqualStrings("\x1b[<0;6;4m", core.pendingResponse());
+    // wheel-up(64) → CSI < 64 ; 1 ; 1 M.
+    core.clearResponse();
+    core.reportMouse(64, 0, 0, true, false, 0);
+    try std.testing.expectEqualStrings("\x1b[<64;1;1M", core.pendingResponse());
+    // 1000 off → 무리포트.
+    try core.write("\x1b[?1000l");
+    core.clearResponse();
+    core.reportMouse(0, 5, 3, true, false, 0);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+}
+
+test "mouse reporting x10 format (기본): CSI M + 32-offset bytes, press만" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer core.deinit();
+    try core.write("\x1b[?1000h"); // normal tracking, x10 인코딩(기본 format)
+    core.clearResponse();
+    core.reportMouse(0, 5, 3, true, false, 0); // Cb=0→32(0x20), col6→38(0x26), row4→36(0x24)
+    try std.testing.expectEqualStrings("\x1b[M\x20\x26\x24", core.pendingResponse());
 }
 
 test "renderSnapshot clears a wide-glyph base truncated by narrowing in a scrollback row" {

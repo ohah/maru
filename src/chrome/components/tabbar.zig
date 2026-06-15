@@ -32,9 +32,11 @@ pub const Metrics = struct {
         return @min((@as(u32, @intCast(tab_index)) + 1) * self.tab_w, self.tab_cols);
     }
 
-    /// 탭 하나의 **픽셀 경계 단일 소스**(§6) — view 그리기(밴드·제목·✕)와 hit-test(tabIndex·inCloseZone)가 이
-    /// 한 함수를 공유해 "보이는 탭/✕ == 클릭되는 것"을 보장한다. [start_px, end_px)가 탭의 영역(반열림), close_*는
-    /// ✕(닫기) zone(우측 2칸 [end-2cell, end)). tab_w<2면 ✕ 없음(has_close=false). 전부 bar_x 기준 절대 backing px.
+    /// 탭 하나의 **픽셀 경계 단일 소스**(§6) — 현재는 hit-test(tabIndex·inCloseZone)가 이 한 함수를 공유한다.
+    /// platform view 그리기(밴드·제목·✕: tabbarHighlightCell·buildPaneTabBarDrawList)는 아직 셀-열을 직접 계산하며,
+    /// 다음 단계에서 이 함수를 소비하도록 옮겨 "보이는 탭/✕ == 클릭되는 것"을 완성한다(그 전까진 둘 다 셀-열이라
+    /// 우연히 일치). [start_px, end_px)가 탭의 영역(반열림), close_*는 ✕(닫기) zone(우측 2칸 [end-2cell, end)).
+    /// tab_w<2면 ✕ 없음(has_close=false). 전부 bar_x 기준 절대 backing px.
     pub const TabSeg = struct {
         start_px: f64,
         end_px: f64,
@@ -64,11 +66,19 @@ pub const Metrics = struct {
         // tab_cols/tab_w==0 가드: barMetrics가 tab_cols>=1·tab_w>0을 보장하므로 platform 경로엔 dead지만, Metrics가
         // public이라 테스트·미래 호출자가 직접 빌드할 수 있어 segOf의 underflow·0 분할을 막는다(계약 명시).
         if (term_count == 0 or !std.math.isFinite(x_px) or self.tab_cols == 0 or self.tab_w == 0) return 0;
+        // **보이는 탭만** 대상(셀-열 정렬 OLD와 동일). term_count가 탭 영역 칸수보다 많으면(좁은 바에서 tab_w가 1로
+        // collapse) 탭 영역을 넘는 overflow 탭은 segOf가 0/음수 폭(end_px<=start_px)이 되고 그려지지도 않는다 —
+        // 이런 탭을 클릭/드래그 타겟으로 잡지 않도록 순회를 멈추고, x가 모든 보이는 탭 우경계 이상이면 마지막
+        // 보이는 탭으로 clamp한다(안 보이는 term_count-1을 반환하지 않게 — 리뷰 #1: dragTabTo 가드 부재 회귀 방지).
+        var last_visible: usize = 0;
         var i: usize = 0;
-        while (i + 1 < term_count) : (i += 1) {
-            if (x_px < self.segOf(i).end_px) return i; // 이 탭의 우경계 안 → 첫 매칭(좌측 clamp는 탭0.end가 흡수)
+        while (i < term_count) : (i += 1) {
+            const seg = self.segOf(i);
+            if (seg.end_px <= seg.start_px) break; // overflow(안 보이는) 탭 — 탭 영역 초과, 더 볼 것 없음
+            if (x_px < seg.end_px) return i; // 이 탭 우경계 안(좌측 clamp는 탭0.end가 흡수)
+            last_visible = i;
         }
-        return term_count - 1; // 마지막 탭 우경계 이상 → 마지막으로 clamp
+        return last_visible; // 모든 보이는 탭 우경계 이상 → 마지막 보이는 탭으로 clamp
     }
 
     /// x_px가 tab_index 탭의 ✕(닫기) zone인가 — **segOf의 close zone**([close_start_px, end_px), 우측 2칸). 제목
@@ -153,4 +163,17 @@ test "tabbar segOf: 탭 픽셀 경계 단일 소스 — hit-test와 정합(셀-�
     try std.testing.expectEqual(@as(usize, 1), m.tabIndex(4, s0.end_px)); // end_px(반열림)는 다음 탭
     try std.testing.expect(m.inCloseZone(3, s3.close_start_px));
     try std.testing.expect(!m.inCloseZone(3, s3.end_px)); // end는 반열림 밖
+}
+
+test "tabbar tabIndex: overflow(term>탭칸) — 안 보이는 탭을 hit하지 않고 마지막 보이는 탭으로 clamp" {
+    // tab_w=1, tab_cols=8, term=10 → 탭0~7만 보임(영역 [100, colPx(8)=164)), 탭8·9는 영역 초과(안 보임).
+    // 좁은 바에서 paneTabWidth가 tab_w를 1로 collapse하는 실제 상황. 각 탭i=[100+i*8, 100+(i+1)*8).
+    var m = testMetrics();
+    m.tab_w = 1;
+    try std.testing.expectEqual(@as(usize, 7), m.tabIndex(10, 999)); // 우측 밖 → 마지막 보이는(7), term-1(9) 아님
+    try std.testing.expectEqual(@as(usize, 7), m.tabIndex(10, 164)); // 탭 영역 우경계(+ zone 시작) → 7, 안 보이는 8/9 아님
+    try std.testing.expectEqual(@as(usize, 0), m.tabIndex(10, 100)); // 탭0 좌단
+    try std.testing.expectEqual(@as(usize, 5), m.tabIndex(10, 145)); // 탭5=[140,148)
+    // overflow가 없으면(term=4 <= 보이는 탭 수) 기존대로 마지막 보이는 탭(3)으로 clamp.
+    try std.testing.expectEqual(@as(usize, 3), m.tabIndex(4, 999));
 }

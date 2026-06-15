@@ -6,6 +6,19 @@
 const std = @import("std");
 const Rgb = @import("../color.zig").Rgb;
 
+/// rich 토큰 색 파생(neutral — config의 appearance.lighten을 chrome이 import 못 하므로 여기 둔다). 채널별 ±delta를
+/// [0,255]로 clamp. rich가 tui의 sidebar_active-공유 role을 분리할 때만 쓴다(tui는 안 씀 — 원본 테마 색 그대로).
+fn clampChannel(c: u8, delta: i16) u8 {
+    return @intCast(std.math.clamp(@as(i16, c) + delta, 0, 255));
+}
+fn lightenRgb(rgb: Rgb, delta: u8) Rgb {
+    return .{ .r = clampChannel(rgb.r, delta), .g = clampChannel(rgb.g, delta), .b = clampChannel(rgb.b, delta) };
+}
+fn darkenRgb(rgb: Rgb, delta: u8) Rgb {
+    const d: i16 = -@as(i16, delta);
+    return .{ .r = clampChannel(rgb.r, d), .g = clampChannel(rgb.g, d), .b = clampChannel(rgb.b, d) };
+}
+
 /// 색 역할(semantic). 컴포넌트는 역할만 알고, 실제 Rgb는 토큰이 준다. divider/focus_accent/drop_zone은
 /// 현재 sidebar_active를 공유하지만 rich에서 분리할 수 있게 별도 role로 둔다.
 pub const ColorRole = enum {
@@ -79,6 +92,20 @@ pub const Tokens = struct {
         return .{ .palette = palette };
     }
 
+    /// rich 토큰셋(C4a): tui 색에서 출발해 tui가 sidebar_active로 **공유**하던 role(divider/focus_accent/drop_zone/
+    /// tab_hover_bg)을 분리된 파생색으로 채운다 — divider 약간 어둡게, focus_accent 밝게, drop_zone 밝게, tab_hover 어둡게,
+    /// muted_fg 더 흐리게. 컴포넌트는 같은 role을 읽으므로 코드 불변(테마=토큰셋 교체). 둥근 모서리·그라데이션(C4b)은
+    /// 후속이라 Border/Spacing은 tui와 동일. 색 파생은 lightenRgb/darkenRgb(neutral, config import 없이).
+    pub fn rich(theme: ThemeColors) Tokens {
+        var tk = tui(theme);
+        tk.palette.set(.divider, darkenRgb(theme.sidebar_active, 24));
+        tk.palette.set(.focus_accent, lightenRgb(theme.sidebar_active, 40));
+        tk.palette.set(.drop_zone, lightenRgb(theme.sidebar_active, 16));
+        tk.palette.set(.tab_hover_bg, darkenRgb(theme.sidebar_active, 12));
+        tk.palette.set(.muted_fg, darkenRgb(theme.sidebar_foreground, 48));
+        return tk;
+    }
+
     pub fn get(self: *const Tokens, role: ColorRole) Rgb {
         return self.palette.get(role);
     }
@@ -105,4 +132,38 @@ test "Tokens.tui maps resolved theme colors to the 12 semantic roles" {
     try std.testing.expectEqual(c.rgb(4, 4, 4), tk.get(.focus_accent)); // sidebar_active 공유
     try std.testing.expectEqual(c.rgb(4, 4, 4), tk.get(.divider));
     try std.testing.expectEqual(c.rgb(8, 8, 8), tk.get(.cursor));
+}
+
+test "Tokens.rich separates the sidebar_active-shared roles into derived colors (tui 불변)" {
+    const c = struct {
+        fn rgb(r: u8, g: u8, b: u8) Rgb {
+            return .{ .r = r, .g = g, .b = b };
+        }
+    };
+    const theme = ThemeColors{
+        .foreground = c.rgb(200, 200, 200),
+        .sidebar_background = c.rgb(20, 20, 20),
+        .sidebar_foreground = c.rgb(180, 180, 180),
+        .sidebar_active = c.rgb(100, 100, 100),
+        .search_match = c.rgb(5, 5, 5),
+        .search_match_current = c.rgb(6, 6, 6),
+        .selection = c.rgb(7, 7, 7),
+        .cursor = c.rgb(8, 8, 8),
+    };
+    const t = Tokens.tui(theme);
+    const r = Tokens.rich(theme);
+    // tui: divider/focus_accent/drop_zone/tab_hover_bg = sidebar_active(공유). rich: 분리 파생.
+    try std.testing.expectEqual(c.rgb(100, 100, 100), t.get(.divider));
+    try std.testing.expectEqual(c.rgb(76, 76, 76), r.get(.divider)); // darken 24
+    try std.testing.expectEqual(c.rgb(140, 140, 140), r.get(.focus_accent)); // lighten 40
+    try std.testing.expectEqual(c.rgb(116, 116, 116), r.get(.drop_zone)); // lighten 16
+    try std.testing.expectEqual(c.rgb(88, 88, 88), r.get(.tab_hover_bg)); // darken 12
+    try std.testing.expectEqual(c.rgb(132, 132, 132), r.get(.muted_fg)); // sidebar_fg(180) darken 48
+    // 분리됨: divider != focus_accent != tab_active_bg(=sidebar_active 그대로).
+    try std.testing.expectEqual(c.rgb(100, 100, 100), r.get(.tab_active_bg)); // 활성은 원색 유지
+    try std.testing.expect(!std.meta.eql(r.get(.divider), r.get(.focus_accent)));
+    // rich가 안 건드리는 role은 tui와 동일.
+    try std.testing.expectEqual(t.get(.surface_bg), r.get(.surface_bg));
+    try std.testing.expectEqual(t.get(.cursor), r.get(.cursor));
+    try std.testing.expectEqual(t.get(.search_match), r.get(.search_match));
 }

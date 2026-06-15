@@ -42,6 +42,7 @@ pub const ResolvedAppearance = struct {
     font: ResolvedFontRequest,
     theme: ResolvedTheme,
     cursor: ResolvedCursor,
+    chrome_theme: theme.ChromeTheme = .tui, // tui|rich — platform buildChromeTokens가 tui()/rich() 분기에 읽는다(C4a)
 };
 
 pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
@@ -55,6 +56,7 @@ pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
             .shape = config.cursor.shape,
             .blink = config.cursor.blink,
         },
+        .chrome_theme = config.chrome_theme,
     };
 }
 

@@ -206,6 +206,11 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "quick-terminal.minimal-tabs는 true|false — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "chrome.theme")) {
+        config.chrome_theme = if (std.mem.eql(u8, value, "rich")) .rich else if (std.mem.eql(u8, value, "tui")) .tui else {
+            try diags.append(a, .{ .line = line_no, .message = "chrome.theme은 tui|rich — 기본값 유지" });
+            return;
+        };
     } else if (std.mem.eql(u8, key, "term")) {
         const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
         if (trimmed.len == 0) {

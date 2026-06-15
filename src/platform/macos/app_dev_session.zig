@@ -888,13 +888,13 @@ pub const DevSession = struct {
         };
     }
 
-    /// per-pane 탭 바(cmux식 가로 탭 바)의 backing 픽셀 높이 = **cell 높이(line height) 1칸**. 렌더러가 바 배경
-    /// 셀을 다른 셀과 똑같이 `ch`(cell_height_px) 높이로 그리므로, 예약 높이도 반드시 cell_height_px여야 바와
-    /// 터미널 첫 줄이 겹치지 않는다(cell_width_px=advance와 다름 — 정사각 아님). cell 높이 미상이면 0(바 없음).
+    /// per-pane 가로 탭 바의 backing 픽셀 높이 = cell 높이 + 위아래 tab_bar_pad_y_px 패딩(rich — 텍스트 세로 여유).
+    /// tui(pad=0)면 cell 1칸(기존). 제목은 origin_y를 pad_y만큼 내려 바 가운데에 둔다. paneTermRect가 이 높이만큼
+    /// 내려 터미널 영역을 잘라 바와 터미널 첫 줄이 안 겹친다. cell 높이 미상이면 0(바 없음).
     /// chrome_minimal(quick terminal minimal)이면 0 — 바를 안 예약해 paneTermRect/paneBarRect가 탭 바를 통째로 끈다.
     fn paneBarHeightPx(self: *const DevSession) u32 {
         if (self.chrome_minimal) return 0;
-        return self.cell_height_px;
+        return self.cell_height_px + 2 * @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px);
     }
 
     /// panel leaf rect의 상단 탭 바를 뺀 '터미널 영역' 사각형. leaf rect가 바보다 충분히 높으면(바 + 최소
@@ -3789,7 +3789,8 @@ pub const DevSession = struct {
                     pane_frames.append(self.allocator, .{
                         .frame = f,
                         .origin_x = bar.x,
-                        .origin_y = bar.y,
+                        // 제목을 위 패딩만큼 내려 바 가운데에(바 높이 = cell + 2*pad_y → 위 pad_y·아래 pad_y). tui(pad=0)면 bar.y.
+                        .origin_y = bar.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px),
                         .colors = tabbar_colors,
                     }) catch {};
                 }

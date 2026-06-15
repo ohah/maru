@@ -306,13 +306,13 @@ fn barMetrics(bar: app.SplitRect, cell_width_px: u32, term_count: usize) ?chrome
     return .{ .bar_x = bar.x, .bar_y = bar.y, .bar_w = bar.w, .bar_h = bar.h, .cell_width_px = cell_width_px, .cols = cols, .tab_cols = tab_cols, .tab_w = tab_w };
 }
 
-/// 활성 Term 탭 세그먼트(col [start, start+width))를 강조 배경 셀로 칠한다(옛 BarMetrics.highlightCell). chrome tabbar
-/// hit-test와 같은 Metrics 분할(start=tab_index×tab_w)이라 제목 glyph와 정확히 정렬된다. 세그먼트가 탭 영역 밖이면 null.
+/// 활성 Term 탭 세그먼트를 강조 배경 셀로 칠한다(옛 BarMetrics.highlightCell). chrome tabbar hit-test와 **같은
+/// tabbar.segOf 셀 경계**(start_col/end_col)라 활성 밴드가 제목 glyph·클릭·✕와 정확히 정렬된다(§6 단일 소스).
+/// overflow(탭 영역 밖, end_col<=start_col)면 null.
 fn tabbarHighlightCell(m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32) ?metal_frame.NativeMetalCell {
-    const start: u32 = @as(u32, @intCast(tab_index)) * m.tab_w;
-    if (start >= m.tab_cols) return null;
-    const width: u32 = @min(m.tab_w, m.tab_cols - start);
-    return sentinelBgCell(@intCast(start), @intCast(width), bg, m.bar_x, m.bar_y);
+    const seg = m.segOf(tab_index);
+    if (seg.end_col <= seg.start_col) return null; // overflow(탭 영역 밖, 안 보이는) 탭
+    return sentinelBgCell(@intCast(seg.start_col), @intCast(seg.end_col - seg.start_col), bg, m.bar_x, m.bar_y);
 }
 
 /// 스크린 점(backing px)을 담는 panel(없으면 null). split 탭에서 마우스 클릭이 어느 panel에 떨어졌는지

@@ -893,7 +893,7 @@ pub const DevSession = struct {
     /// 내려 터미널 영역을 잘라 바와 터미널 첫 줄이 안 겹친다. cell 높이 미상이면 0(바 없음).
     /// chrome_minimal(quick terminal minimal)이면 0 — 바를 안 예약해 paneTermRect/paneBarRect가 탭 바를 통째로 끈다.
     fn paneBarHeightPx(self: *const DevSession) u32 {
-        if (self.chrome_minimal) return 0;
+        if (self.chrome_minimal or self.cell_height_px == 0) return 0; // cell 미상이면 0(바 없음, doc) — buildChromeTokens 읽기 전 가드
         return self.cell_height_px + 2 * @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px);
     }
 
@@ -6514,9 +6514,12 @@ test "tabNumberLabel formats {n} {title} with 1-based numbering" {
 // 작으면 바 없음(터미널이 전체). 좌표/resize/렌더가 공유하는 '바 아래' 영역의 단일 출처라 헤드리스로 고정.
 test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
     var session: DevSession = undefined;
-    session.chrome_minimal = false; // paneBarHeightPx가 읽는다 — undefined 세션이라 명시 초기화(false=바 있음)
+    // paneBarHeightPx → buildChromeTokens가 appearance(theme·chrome_theme)를 읽으므로 undefined 세션에 명시 초기화한다
+    // (chrome_theme=.tui → tab_bar_pad_y_px=0 → 바=cell 1칸). undefined 필드 읽기 UB(0xaa 우연 green) 회피.
+    session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
+    session.chrome_minimal = false; // paneBarHeightPx가 읽는다(false=바 있음)
     session.cell_width_px = 12;
-    session.cell_height_px = 12; // paneBarHeightPx = cell_height_px(line height) = 12
+    session.cell_height_px = 12; // paneBarHeightPx = cell_height + 2*pad_y(tui 0) = 12
 
     const rect: app.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
     const term = session.paneTermRect(rect);

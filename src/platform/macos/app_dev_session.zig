@@ -4045,7 +4045,10 @@ pub const DevSession = struct {
             .y = @floatFromInt(m.bar_y),
             .w = @floatCast(seg.end_px - seg.start_px),
             .h = @floatFromInt(m.bar_h),
-            .corner_radii = .{ cr, cr, cr, cr },
+            // 상단만(tl,tr) 둥글게, 하단(br,bl)은 직각 — 하단이 직각이라 그 아래 직각 underline·바 배경과 매끈히
+            // 맞물려, 4면 균일 둥근일 때 하단 코너로 divider가 비치던 문제 제거(#492 리뷰). 가로 탭이 바닥에
+            // 붙는 flat(브라우저식 탭) 룩. 셰이더 corner 순서 = [tl, tr, br, bl].
+            .corner_radii = .{ cr, cr, 0, 0 },
             .border_widths = .{ 0, 0, 0, 0 },
             .fill_color0 = shiftBrightnessU32(bg, gd), // 위(local.y=0) 약간 밝게
             .fill_color1 = shiftBrightnessU32(bg, -gd), // 아래(local.y=h) 약간 어둡게

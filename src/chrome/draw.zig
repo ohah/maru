@@ -27,6 +27,16 @@ pub const Rect = struct {
             .h = self.h -| @as(u32, e.top) -| @as(u32, e.bottom),
         };
     }
+    /// inset의 대칭 — 사방 insets만큼 바깥으로 키운 rect(배경 박스를 콘텐츠보다 크게: 모달 패딩 등 '역패딩').
+    /// x/y는 빼고 w/h는 더한다. x/y는 i32라 콘텐츠가 화면 가장자리 근처면 음수가 될 수 있다(호출자가 배치 보장).
+    pub fn outset(self: Rect, e: EdgeInsets) Rect {
+        return .{
+            .x = self.x - @as(i32, e.left),
+            .y = self.y - @as(i32, e.top),
+            .w = self.w + @as(u32, e.left) + @as(u32, e.right),
+            .h = self.h + @as(u32, e.top) + @as(u32, e.bottom),
+        };
+    }
 };
 
 /// 어느 변을 그릴지(focus 테두리·부분 선). 전부 false면 무동작.

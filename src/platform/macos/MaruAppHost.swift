@@ -647,6 +647,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        // 창 포커스 획득 → 그 창 surface에 focus reporting(DECSET 1004 켜졌으면 CSI I). 멀티 창에서 그 창만(notification.object).
+        guard let surface = surfaceForWindow(notification.object as? NSWindow), let session = surface.devSession else { return }
+        _ = maru_macos_app_dev_session_focus_changed(session, 1)
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        // 창 포커스 상실 → CSI O(focus reporting 켜졌으면). 뷰의 windowLostKey(IME 조합 커밋)와는 별개 경로/목적.
+        guard let surface = surfaceForWindow(notification.object as? NSWindow), let session = surface.devSession else { return }
+        _ = maru_macos_app_dev_session_focus_changed(session, 0)
+    }
+
     func windowDidEndLiveResize(_ notification: Notification) {
         // 그 창(notification.object)의 surface를 명시 대상으로(위 windowDidResize와 같은 이유).
         guard let surface = surfaceForWindow(notification.object as? NSWindow) else { return }

@@ -563,6 +563,15 @@ pub export fn maru_macos_app_dev_session_scroll_page(
     return @intFromEnum(Status.ok);
 }
 
+pub export fn maru_macos_app_dev_session_focus_changed(
+    session: ?*DevSession,
+    gained: i32,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    dev_session.focusChanged(gained != 0);
+    return @intFromEnum(Status.ok);
+}
+
 // 이전(dir<0)/다음(dir>0) 프롬프트 블록으로 뷰포트 점프(OSC 133 semantic prompt — Cmd+↑/↓).
 // 분류·이동은 dev session/core가 권위 있게 하고 Swift는 방향만 넘긴다(native 최소).
 pub export fn maru_macos_app_dev_session_jump_prompt(

@@ -76,6 +76,9 @@ pub const TerminalCore = struct {
     // bracketed paste(DECSET 2004): 켜져 있으면 붙여넣기를 ESC[200~ ... ESC[201~로 감싸 보낸다.
     // zsh/vim/claude가 켜며, 붙여넣은 텍스트를 타이핑과 구분해(자동 들여쓰기·즉시 실행 방지) 처리한다.
     bracketed_paste: bool = false,
+    // focus reporting(DECSET 1004): 켜지면 창 포커스 in/out을 CSI I / CSI O로 PTY에 리포트한다.
+    // vim FocusGained/Lost·자동저장 등이 쓴다. 기본 off — 앱이 켠다(progressive; 끄면 무리포트).
+    focus_events: bool = false,
     // grapheme cluster mode(DECSET 2027, terminal-unicode-core): 앱이 "나도 grapheme 단위 너비를
     // 쓴다"고 합의하면 켠다. 켜지면 VS16(이모지 표현)·스킨톤·국기 같은 grapheme을 한 셀로 묶고
     // 너비를 EAW 대신 cluster 기준(❤️=2칸 등)으로 잰다 — 앱과 너비가 일치하므로 붙여넣기 redraw가
@@ -258,6 +261,7 @@ pub const TerminalCore = struct {
         self.application_cursor_keys = false;
         self.cursor_visible = true;
         self.bracketed_paste = false;
+        self.focus_events = false;
         self.grapheme_cluster_mode = false;
         self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
         self.dirty = fullDirty(self.size);
@@ -1711,6 +1715,7 @@ pub const TerminalCore = struct {
                 },
                 1007 => self.alternate_scroll = set, // alt screen 휠 -> 화살표 변환 on/off
                 2004 => self.bracketed_paste = set, // bracketed paste(붙여넣기 감싸기)
+                1004 => self.focus_events = set, // focus reporting(창 포커스 in/out → CSI I/O)
                 2027 => self.grapheme_cluster_mode = set, // grapheme cluster 너비(이모지 풀사이즈 합의)
                 47, 1047 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
                 1048 => if (set) self.saveCursorState() else self.restoreCursorState(),
@@ -1718,6 +1723,13 @@ pub const TerminalCore = struct {
                 else => {}, // 그 외 private 모드(25 커서 표시 등)는 아직 소비만 한다.
             }
         }
+    }
+
+    /// focus reporting(DECSET 1004)이 켜져 있으면 창 포커스 변화를 CSI I(gained)/CSI O(lost)로 PTY에 리포트한다.
+    /// 베이스: xterm focus event(mode 1004) — 인코딩은 Ghostty `focus.zig`와 동일(`\x1b[I`/`\x1b[O`). off면 무동작.
+    pub fn reportFocus(self: *TerminalCore, gained: bool) void {
+        if (!self.focus_events) return;
+        self.appendResponse(if (gained) "\x1b[I" else "\x1b[O");
     }
 
     /// 현재 활성 화면의 DECSC 저장 슬롯. ESC 7/8과 1048은 항상 "지금 보이는 화면"의 슬롯을 쓴다
@@ -4333,6 +4345,27 @@ test "ECH default param is 1 and does not pull following cells (not DCH)" {
     const b = core.cells[core.index(0, 1)].codepoint;
     try std.testing.expect(b == ' ' or b == 0);
     try std.testing.expectEqual(@as(u21, 'C'), core.cells[core.index(0, 2)].codepoint); // C는 그대로 — 뒤를 당기지 않는다
+}
+
+test "focus reporting (DECSET 1004): off=무리포트, on=CSI I / CSI O" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    // 기본 off — 포커스 변화를 리포트하지 않는다.
+    core.reportFocus(true);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    // DECSET 1004 on — gained=CSI I, lost=CSI O.
+    try core.write("\x1b[?1004h");
+    core.clearResponse();
+    core.reportFocus(true);
+    try std.testing.expectEqualStrings("\x1b[I", core.pendingResponse());
+    core.clearResponse();
+    core.reportFocus(false);
+    try std.testing.expectEqualStrings("\x1b[O", core.pendingResponse());
+    // DECSET 1004 off(RST) — 다시 무리포트.
+    try core.write("\x1b[?1004l");
+    core.clearResponse();
+    core.reportFocus(true);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
 }
 
 test "renderSnapshot clears a wide-glyph base truncated by narrowing in a scrollback row" {

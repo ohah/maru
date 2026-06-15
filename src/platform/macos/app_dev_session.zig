@@ -1243,12 +1243,34 @@ pub const DevSession = struct {
     /// 활성 pane 안에서 보이는 Term(가로 탭)을 term_index로 바꾼다(탭 전환). 활성 Term surface를 탭
     /// 대표(`surface_ptrs[active_tab]` = `app_window.active()`)에 재바인딩하고 좌표 origin을 다시 계산한다.
     /// 같은 Term이거나 범위 밖이면 무동작. pane/워크스페이스는 안 바꾼다.
+    /// #2(#505 리뷰): 활성 Term이 가로 스크롤 창 밖이면 보이도록 tab_scroll_cols를 조정한다(focusTerm·⌘[]·클릭 후).
+    /// 안 넘침(has_scroll=false)이면 무동작. 활성 탭 좌단이 창보다 왼쪽이면 좌단으로, 우단이 창보다 오른쪽이면 우단이 보이게.
+    fn ensureActiveTermVisible(self: *DevSession, pane: *Pane) void {
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
+        for (leaf_rects.items) |lr| {
+            if (lr.leaf != pane) continue;
+            const bar = self.paneBarRect(lr.rect) orelse return;
+            const m = barMetrics(bar, self.cell_width_px, pane.terms.items.len, self.buildChromeTokens().space.tab_width_cols, pane.tab_scroll_cols) orelse return;
+            if (!m.has_scroll) return; // 안 넘침 — 다 보임
+            const abs_start = @as(u32, @intCast(pane.active_term)) * m.tab_w;
+            if (abs_start < m.scroll_cols) {
+                pane.tab_scroll_cols = abs_start; // 좌단 잘림 → 좌단이 보이게
+            } else if (abs_start + m.tab_w > m.scroll_cols + m.tab_cols) {
+                pane.tab_scroll_cols = abs_start + m.tab_w - m.tab_cols; // 우단 잘림 → 우단이 보이게
+            }
+            return;
+        }
+    }
+
     fn focusTerm(self: *DevSession, term_index: usize) void {
         const pane = self.activePane();
         if (term_index >= pane.terms.items.len or pane.active_term == term_index) return;
         pane.active_term = term_index;
         self.surface_ptrs.items[self.app_window.active_tab] = &pane.activeTerm().surface;
         self.app_window.tabs = self.surface_ptrs.items;
+        self.ensureActiveTermVisible(pane); // #2(리뷰): 스크롤 밖 탭 선택 시 보이게 tab_scroll_cols 조정
         self.recomputeActivePaneRect();
         self.metal_dirty = true;
     }

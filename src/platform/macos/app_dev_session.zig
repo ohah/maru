@@ -300,11 +300,10 @@ fn barMetrics(bar: app.SplitRect, cell_width_px: u32, term_count: usize, tab_wid
     if (cell_width_px == 0 or bar.w == 0 or term_count == 0) return null;
     const cols = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
     if (cols == 0) return null;
-    const tab_cols: u32 = coretext_frame_builder.paneTabAreaCols(@intCast(cols)); // "+" zone 제외
-    // rich: 고정폭(tab_width_fixed), tui: 균등분할. buildPaneTabBarDrawList와 같은 분기라 보이는 탭=클릭 탭 정합(§6).
-    const tab_w: u32 = if (tab_width_fixed > 0) tab_width_fixed else coretext_frame_builder.paneTabWidth(@intCast(tab_cols), term_count);
-    if (tab_w == 0) return null;
-    return .{ .bar_x = bar.x, .bar_y = bar.y, .bar_w = bar.w, .bar_h = bar.h, .cell_width_px = cell_width_px, .cols = cols, .tab_cols = tab_cols, .tab_w = tab_w, .scroll_cols = scroll_cols };
+    // 탭 레이아웃 단일 소스(§6) — buildPaneTabBarDrawList(렌더)와 같은 tabLayout이라 보이는 탭/‹›/+ == 클릭.
+    const layout = coretext_frame_builder.tabLayout(@intCast(cols), term_count, tab_width_fixed);
+    if (layout.tab_w == 0) return null;
+    return .{ .bar_x = bar.x, .bar_y = bar.y, .bar_w = bar.w, .bar_h = bar.h, .cell_width_px = cell_width_px, .cols = cols, .tab_cols = layout.tab_cols, .tab_w = layout.tab_w, .scroll_cols = scroll_cols, .has_scroll = layout.has_scroll };
 }
 
 /// 활성 Term 탭 세그먼트를 강조 배경 셀로 칠한다(옛 BarMetrics.highlightCell). chrome tabbar hit-test와 **같은
@@ -2526,6 +2525,20 @@ pub const DevSession = struct {
                     if (pointInRect(x_px, y_px, bar)) {
                         const count = lr.leaf.terms.items.len;
                         const m = barMetrics(bar, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols);
+                        // 바 우측 ‹›(가로 스크롤) 버튼 클릭 → 그 pane의 tab_scroll_cols를 ±tab_w(한 탭). 넘침 범위로 clamp. "+"·탭보다 먼저.
+                        if (m) |bm| if (bm.inScrollLeftZone(x_px)) {
+                            _ = self.focusPaneByPtr(lr.leaf);
+                            lr.leaf.tab_scroll_cols -|= bm.tab_w; // ‹ 왼쪽(이전 탭) — saturating 0
+                            self.metal_dirty = true;
+                            return;
+                        };
+                        if (m) |bm| if (bm.inScrollRightZone(x_px)) {
+                            _ = self.focusPaneByPtr(lr.leaf);
+                            const max_scroll = @as(u32, @intCast(count)) * bm.tab_w -| bm.tab_cols; // 전체 탭 폭 - 보이는 영역(넘친 만큼)
+                            lr.leaf.tab_scroll_cols = @min(lr.leaf.tab_scroll_cols + bm.tab_w, max_scroll); // › 오른쪽(다음 탭)
+                            self.metal_dirty = true;
+                            return;
+                        };
                         // 바 우측 "+" 버튼 클릭 → 그 pane을 포커스하고 새 Term을 띄운다(⌘T의 마우스 버전). 탭/✕보다 먼저.
                         if (m) |bm| if (bm.inPlusZone(x_px)) {
                             _ = self.focusPaneByPtr(lr.leaf);

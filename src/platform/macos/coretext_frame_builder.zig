@@ -262,6 +262,19 @@ pub fn paneTabWidth(cols: u16, tab_count: usize) u16 {
     return @max(1, cols / n);
 }
 
+/// 탭 바 레이아웃 단일 소스(§6) — barMetrics(hit-test)·buildPaneTabBarDrawList(렌더)가 공유해 보이는 탭/‹›/+ 와
+/// 클릭이 일치한다. base=paneTabAreaCols("+" zone 뺀 탭 영역). 전체 탭 폭(term*tab_w)이 base를 넘으면 우측에
+/// ‹›(왼/오 스크롤) 2칸을 예약해 tab_cols를 그만큼 줄인다(has_scroll). tab_w: rich 고정 or tui 균등. tab_w=0=분할 불가.
+pub fn tabLayout(bar_cols: u16, term_count: usize, tab_width_fixed: u16) struct { tab_cols: u16, tab_w: u16, has_scroll: bool } {
+    const base = paneTabAreaCols(bar_cols);
+    const tab_w = if (tab_width_fixed > 0) tab_width_fixed else paneTabWidth(base, term_count);
+    if (tab_w == 0) return .{ .tab_cols = base, .tab_w = 0, .has_scroll = false };
+    const total = @as(u32, @intCast(term_count)) * @as(u32, tab_w);
+    const has_scroll = total > base and base > 2; // 넘치고 ‹›(2칸) 둘 여유가 있을 때만
+    const tab_cols: u16 = if (has_scroll) base - 2 else base;
+    return .{ .tab_cols = tab_cols, .tab_w = tab_w, .has_scroll = has_scroll };
+}
+
 pub fn buildPaneTabBarDrawList(
     allocator: std.mem.Allocator,
     titles: []const []const u8,
@@ -278,16 +291,19 @@ pub fn buildPaneTabBarDrawList(
 
     const style: terminal.Style = .{ .foreground = fg };
     // 탭은 "+" 버튼 zone을 뺀 영역(tab_cols)에만 깐다. 우측 [tab_cols, cols)는 "+"(새 Term) 버튼.
-    const tab_cols = paneTabAreaCols(cols);
-    // rich: 탭 고정 폭(적으면 왼쪽정렬+빈 영역, 넘치면 segCols가 tab_cols로 clamp해 잘림 — 가로 스크롤은 Step 2).
-    // tui: 균등분할(기존). 둘 다 segCols가 start=i*tab_w로 왼쪽부터 깐다.
-    const tab_w = if (tab_width_fixed > 0) tab_width_fixed else paneTabWidth(tab_cols, titles.len);
+    // 탭 레이아웃 단일 소스(§6) — barMetrics(hit-test)와 같은 tabLayout이라 보이는 탭/‹›/+ == 클릭. 넘치면 우측 ‹›(2칸) 예약·탭 영역 축소.
+    const layout = tabLayout(cols, titles.len, tab_width_fixed);
+    const tab_cols = layout.tab_cols;
+    const tab_w = layout.tab_w;
     if (tab_w > 0) {
         for (titles, 0..) |title, tab_index| {
             // C4b-4: 셀 경계를 chrome tabbar.segCols 단일 소스로 — hit-test(segOf)·활성 밴드와 같은 분할이라 제목·✕가 정합.
             const sc = tabbar.segCols(tab_index, tab_w, tab_cols, scroll_cols);
             const start: u32 = sc.start;
-            if (start >= tab_cols) break; // 탭이 탭 영역을 넘으면 나머지는 잘림(sc.end<=start와 동치)
+            if (sc.end <= start) {
+                if (start >= tab_cols) break; // 우측 넘침 — 이후 탭도 다 넘침(중단)
+                continue; // 왼쪽 스크롤아웃(scroll로 화면 밖) — 안 그리고 다음 탭으로
+            }
             const seg_end: u32 = sc.end; // 이 탭의 col 한도
             // 호버된 탭이면 우측 안쪽(seg_end-2)에 닫기 ✕를 둔다 — 제목은 ✕ 앞(seg_end-2)까지만 그린다.
             const is_close = close_tab != null and close_tab.? == tab_index and tab_w >= 2 and seg_end >= 2;
@@ -309,15 +325,15 @@ pub fn buildPaneTabBarDrawList(
         }
     }
 
-    // "+"(새 Term) 버튼 — 예약된 우측 zone이 있으면(tab_cols < cols) tab_cols+1 col에 '+' glyph 1개.
-    if (tab_cols < cols and tab_cols + 1 < cols) {
-        try cells.append(allocator, .{
-            .row = 0,
-            .col = tab_cols + 1,
-            .codepoint = '+',
-            .width = 1,
-            .style = style,
-        });
+    // 우측 컨트롤: 넘치면(has_scroll) ‹›(왼/오 스크롤) 2칸을 tab_cols·tab_cols+1에, 그 오른쪽에 "+". 안 넘치면 "+"만.
+    if (layout.has_scroll) {
+        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols), .codepoint = '<', .width = 1, .style = style }); // 왼쪽 스크롤
+        try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols + 1), .codepoint = '>', .width = 1, .style = style }); // 오른쪽 스크롤
+    }
+    // "+"(새 Term) 버튼 — ‹› 오른쪽(has_scroll) 또는 tab_cols(아니면). plus_start+1 col에 '+'.
+    const plus_start: u16 = tab_cols + (if (layout.has_scroll) @as(u16, 2) else 0);
+    if (plus_start < cols and plus_start + 1 < cols) {
+        try cells.append(allocator, .{ .row = 0, .col = plus_start + 1, .codepoint = '+', .width = 1, .style = style });
     }
 
     return .{
@@ -681,6 +697,20 @@ test "paneTabWidth divides cols among tabs (min 1, clamps when tabs exceed cols)
     try std.testing.expectEqual(@as(u16, 1), paneTabWidth(3, 5)); // 탭>cols → 1칸씩(넘침 잘림)
     try std.testing.expectEqual(@as(u16, 0), paneTabWidth(0, 2));
     try std.testing.expectEqual(@as(u16, 0), paneTabWidth(20, 0));
+}
+
+test "tabLayout: 넘치면 ‹›(2칸) 예약·tab_cols 축소·has_scroll (안 넘치면 그대로)" {
+    // cols=40, "+"zone 3 → base=paneTabAreaCols(40)=37. 고정폭 16, 3탭 → total=48 > 37 → has_scroll, tab_cols=35.
+    const ovf = tabLayout(40, 3, 16);
+    try std.testing.expect(ovf.has_scroll);
+    try std.testing.expectEqual(@as(u16, 35), ovf.tab_cols); // 37 - 2(‹›)
+    try std.testing.expectEqual(@as(u16, 16), ovf.tab_w);
+    // 2탭 → total=32 <= 37 → no scroll, tab_cols=37(그대로).
+    const fit = tabLayout(40, 2, 16);
+    try std.testing.expect(!fit.has_scroll);
+    try std.testing.expectEqual(@as(u16, 37), fit.tab_cols);
+    // tui 균등(fixed 0) → cols/n으로 항상 들어가 안 넘침.
+    try std.testing.expect(!tabLayout(40, 4, 0).has_scroll);
 }
 
 test "buildSidebarDrawList truncates to cols and advances wide glyphs by two columns" {

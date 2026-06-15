@@ -54,6 +54,9 @@ pub const Spacing = struct {
     // C4b 모달: 배경 quad가 텍스트 영역보다 큰 안쪽 여백(px). tui=0(딱 맞는 셀 배경), rich>0(텍스트 주변 여백).
     // platform lowering이 모달 quad/shadow rect를 이 값만큼 사방 확장(텍스트 셀은 그대로) — 텍스트가 박스 안쪽에 든다.
     modal_padding_px: u16 = 0,
+    // C4b-5: rich 활성 탭 밴드의 vertical gradient 밝기 변화량(위 +δ 밝게 → 아래 -δ 어둡게, 채널당). tui=0(solid).
+    // platform이 활성 탭 GpuQuad의 fill_color0/1을 bg±δ로 채워 은은한 입체감을 준다(gradient_kind=1=vertical).
+    tab_gradient_delta: u8 = 0,
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
@@ -123,6 +126,8 @@ pub const Tokens = struct {
         tk.space.shadow_alpha = 0x70;
         // C4b 모달 패딩: 배경 박스를 텍스트보다 사방 12px 크게 — 팝업 텍스트 주변에 여백(사용자 피드백 "여유").
         tk.space.modal_padding_px = 12;
+        // C4b-5: 활성 탭 밴드 은은한 vertical gradient(위 +12 밝게 → 아래 -12 어둡게, 사용자 선택 "은은한 gradient").
+        tk.space.tab_gradient_delta = 12;
         return tk;
     }
 

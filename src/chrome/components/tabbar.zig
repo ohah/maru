@@ -32,26 +32,52 @@ pub const Metrics = struct {
         return @min((@as(u32, @intCast(tab_index)) + 1) * self.tab_w, self.tab_cols);
     }
 
-    /// x_px가 가리키는 Term 탭 인덱스([0, term_count-1] clamp). x를 탭 영역으로 clamp한다("+" zone은 마지막 탭으로
-    /// 떨어지므로 호출자가 inPlusZone을 **먼저** 검사해야 한다). float clamp 후 cast라 거대 좌표도 trap 없음.
-    pub fn tabIndex(self: Metrics, term_count: usize, x_px: f64) usize {
-        // tab_cols/tab_w==0 가드: barMetrics가 tab_cols>=1·tab_w>0을 보장하므로 platform 경로엔 dead지만, Metrics가
-        // public이라 테스트·미래 호출자가 직접 빌드할 수 있어 tab_cols-1 underflow·0 나눗셈을 막는다(계약 명시).
-        if (term_count == 0 or !std.math.isFinite(x_px) or self.tab_cols == 0 or self.tab_w == 0) return 0;
-        const cw: f64 = @floatFromInt(self.cell_width_px);
-        const max_col: f64 = @floatFromInt(self.tab_cols - 1);
-        const rel = std.math.clamp((x_px - @as(f64, @floatFromInt(self.bar_x))) / cw, 0, max_col);
-        const col: u32 = @intFromFloat(rel);
-        return @min(col / self.tab_w, term_count - 1);
+    /// 탭 하나의 **픽셀 경계 단일 소스**(§6) — view 그리기(밴드·제목·✕)와 hit-test(tabIndex·inCloseZone)가 이
+    /// 한 함수를 공유해 "보이는 탭/✕ == 클릭되는 것"을 보장한다. [start_px, end_px)가 탭의 영역(반열림), close_*는
+    /// ✕(닫기) zone(우측 2칸 [end-2cell, end)). tab_w<2면 ✕ 없음(has_close=false). 전부 bar_x 기준 절대 backing px.
+    pub const TabSeg = struct {
+        start_px: f64,
+        end_px: f64,
+        close_start_px: f64,
+        has_close: bool,
+    };
+
+    /// 탭 tab_index의 픽셀 세그먼트. 현재는 **셀-열 정렬**(start=tab_index*tab_w 컬럼, end=segEnd 컬럼의 px) —
+    /// 패딩 0이라 시각/동작이 기존 셀-열 hit-test와 동일하다. 둥근 탭(C4b-5)에서 탭 패딩을 더하면 **여기 한 곳만**
+    /// 바뀌어 view·hit-test가 동시에 움직인다(§6 seam 해소의 토대). colPx/segEnd를 재사용한다.
+    pub fn segOf(self: Metrics, tab_index: usize) TabSeg {
+        const start_col = @as(u32, @intCast(tab_index)) * self.tab_w;
+        const end_col = self.segEnd(tab_index);
+        const has_close = self.tab_w >= 2 and end_col >= 2;
+        return .{
+            .start_px = self.colPx(start_col),
+            .end_px = self.colPx(end_col),
+            .close_start_px = if (has_close) self.colPx(end_col - 2) else 0,
+            .has_close = has_close,
+        };
     }
 
-    /// x_px가 tab_index 탭의 ✕(닫기) zone인가 — 세그먼트 우측 2칸([segEnd-2, segEnd)). 제목 glyph의 ✕ 위치(col=segEnd-2)와
-    /// 정렬해 보이는 ✕를 정확히 누른다. 세그먼트가 2칸 미만(tab_w<2)이면 ✕ 없음(false).
+    /// x_px가 가리키는 Term 탭 인덱스([0, term_count-1] clamp). **segOf 픽셀 경계 단일 소스**로 판정 — x가 어느 탭
+    /// 세그먼트 [start,end)에 드는지 순회한다(좌측 clamp: x<탭0.start면 0, 우측 clamp: x>=마지막.end면 마지막).
+    /// "+" zone은 마지막 탭으로 떨어지므로 호출자가 inPlusZone을 **먼저** 검사해야 한다. 셀-열 정렬이라 기존 동작과 동일.
+    pub fn tabIndex(self: Metrics, term_count: usize, x_px: f64) usize {
+        // tab_cols/tab_w==0 가드: barMetrics가 tab_cols>=1·tab_w>0을 보장하므로 platform 경로엔 dead지만, Metrics가
+        // public이라 테스트·미래 호출자가 직접 빌드할 수 있어 segOf의 underflow·0 분할을 막는다(계약 명시).
+        if (term_count == 0 or !std.math.isFinite(x_px) or self.tab_cols == 0 or self.tab_w == 0) return 0;
+        var i: usize = 0;
+        while (i + 1 < term_count) : (i += 1) {
+            if (x_px < self.segOf(i).end_px) return i; // 이 탭의 우경계 안 → 첫 매칭(좌측 clamp는 탭0.end가 흡수)
+        }
+        return term_count - 1; // 마지막 탭 우경계 이상 → 마지막으로 clamp
+    }
+
+    /// x_px가 tab_index 탭의 ✕(닫기) zone인가 — **segOf의 close zone**([close_start_px, end_px), 우측 2칸). 제목
+    /// glyph의 ✕ 위치와 같은 단일 소스라 보이는 ✕를 정확히 누른다. 세그먼트가 2칸 미만(tab_w<2)이면 ✕ 없음(false).
     pub fn inCloseZone(self: Metrics, tab_index: usize, x_px: f64) bool {
-        if (self.tab_w < 2 or !std.math.isFinite(x_px)) return false;
-        const seg_end = self.segEnd(tab_index);
-        if (seg_end < 2) return false;
-        return x_px >= self.colPx(seg_end - 2) and x_px < self.colPx(seg_end);
+        if (!std.math.isFinite(x_px)) return false;
+        const seg = self.segOf(tab_index);
+        if (!seg.has_close) return false;
+        return x_px >= seg.close_start_px and x_px < seg.end_px;
     }
 
     /// 우측 "+"(새 Term) zone이 존재하는가 — 바가 넓어 탭 영역에서 칸을 뗐는가(tab_cols < cols).
@@ -106,4 +132,25 @@ test "tabbar hit-test: tabIndex·inCloseZone·hasPlusZone·inPlusZone 경계" {
     var thin = m;
     thin.tab_w = 1;
     try std.testing.expect(!thin.inCloseZone(0, 100));
+}
+
+test "tabbar segOf: 탭 픽셀 경계 단일 소스 — hit-test와 정합(셀-열 정렬, 패딩 0)" {
+    const m = testMetrics();
+    // 탭0=[100,116) 탭3=[148,164). 2칸 탭이라 ✕는 [end-2cell, end)=세그먼트 전체.
+    const s0 = m.segOf(0);
+    try std.testing.expectEqual(@as(f64, 100), s0.start_px);
+    try std.testing.expectEqual(@as(f64, 116), s0.end_px);
+    try std.testing.expect(s0.has_close);
+    try std.testing.expectEqual(@as(f64, 100), s0.close_start_px);
+    const s3 = m.segOf(3);
+    try std.testing.expectEqual(@as(f64, 148), s3.start_px);
+    try std.testing.expectEqual(@as(f64, 164), s3.end_px);
+    // tab_w<2면 ✕ 없음(segOf 단일 소스 — inCloseZone과 같은 조건).
+    var thin = m;
+    thin.tab_w = 1;
+    try std.testing.expect(!thin.segOf(0).has_close);
+    // hit-test가 segOf 경계와 정합: 탭0 우경계 = 탭1 시작, ✕ zone이 segOf.close와 일치.
+    try std.testing.expectEqual(@as(usize, 1), m.tabIndex(4, s0.end_px)); // end_px(반열림)는 다음 탭
+    try std.testing.expect(m.inCloseZone(3, s3.close_start_px));
+    try std.testing.expect(!m.inCloseZone(3, s3.end_px)); // end는 반열림 밖
 }

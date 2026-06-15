@@ -60,6 +60,9 @@ pub const Spacing = struct {
     // U2: 사이드바 카드 사이 여백(px). 밴드/막대를 슬롯 안쪽 사방으로 이만큼 줄여 워크스페이스가 카드처럼 떨어져 보인다.
     // tui=0(슬롯 꽉 — 기존과 동일), rich>0.
     card_gap_px: u16 = 0,
+    // U-tab: rich 탭 하나의 고정 폭(컬럼). 0이면 균등분할(tui — 바를 탭 수로 나눠 stretch). >0이면 고정폭 — 탭이
+    // 내용과 무관히 이 폭, 적으면 왼쪽정렬+빈 영역, 많으면 넘쳐(가로 스크롤 대상) 잘린다. 제목 ~N자 + ✕ 2칸 기준.
+    tab_width_cols: u16 = 0,
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
@@ -134,6 +137,8 @@ pub const Tokens = struct {
         tk.space.accent_bar_width_px = 3;
         // U2: 카드 사이 여백 4px(슬롯 안쪽 사방 패딩) — 워크스페이스가 카드처럼 떨어져 보임.
         tk.space.card_gap_px = 4;
+        // U-tab: rich 탭 고정 폭 16칸(제목 ~14 + ✕ 2) — 균등 stretch 대신(적으면 빈 영역, 넘치면 가로 스크롤 대상).
+        tk.space.tab_width_cols = 16;
         return tk;
     }
 

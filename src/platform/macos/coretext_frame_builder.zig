@@ -270,6 +270,7 @@ pub fn buildPaneTabBarDrawList(
     close_tab: ?usize,
     active_tab: ?usize,
     active_fg: terminal.Color,
+    tab_width_fixed: u16, // 0=균등분할(tui — 바를 탭 수로 나눔), >0=탭 고정 폭(rich). barMetrics와 같은 값이라 보이는 탭=클릭 탭 정합(§6)
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
@@ -277,7 +278,9 @@ pub fn buildPaneTabBarDrawList(
     const style: terminal.Style = .{ .foreground = fg };
     // 탭은 "+" 버튼 zone을 뺀 영역(tab_cols)에만 깐다. 우측 [tab_cols, cols)는 "+"(새 Term) 버튼.
     const tab_cols = paneTabAreaCols(cols);
-    const tab_w = paneTabWidth(tab_cols, titles.len);
+    // rich: 탭 고정 폭(적으면 왼쪽정렬+빈 영역, 넘치면 segCols가 tab_cols로 clamp해 잘림 — 가로 스크롤은 Step 2).
+    // tui: 균등분할(기존). 둘 다 segCols가 start=i*tab_w로 왼쪽부터 깐다.
+    const tab_w = if (tab_width_fixed > 0) tab_width_fixed else paneTabWidth(tab_cols, titles.len);
     if (tab_w > 0) {
         for (titles, 0..) |title, tab_index| {
             // C4b-4: 셀 경계를 chrome tabbar.segCols 단일 소스로 — hit-test(segOf)·활성 밴드와 같은 분할이라 제목·✕가 정합.
@@ -592,7 +595,7 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
     const allocator = std.testing.allocator;
     // cols=20 → 우측 "+" zone 3칸 떼고 탭 영역 17, 2탭 → tab_w=8. 탭 0은 col [0,8), 탭 1은 [8,16). 각 탭 1칸 좌패딩 뒤 제목.
     const titles = [_][]const u8{ "sh", "vim" };
-    var draw_list = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null, null, .default);
+    var draw_list = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null, null, .default, 0);
     defer draw_list.deinit(allocator);
 
     // 모든 탭이 행 0(가로), size cols=한도·rows=1.
@@ -609,7 +612,7 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
 
     // 세그먼트보다 긴 제목은 그 탭 한도에서 잘린다. cols=11 → 탭 영역 8, 2탭 → tab_w=4, 제목 칸 = [start+1, start+4) = 3칸.
     const longt = [_][]const u8{ "abcdef", "x" };
-    var dl2 = try buildPaneTabBarDrawList(allocator, &longt, 11, .default, null, null, .default);
+    var dl2 = try buildPaneTabBarDrawList(allocator, &longt, 11, .default, null, null, .default, 0);
     defer dl2.deinit(allocator);
     var tab0: usize = 0;
     for (dl2.cells) |c| {
@@ -620,7 +623,7 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
     // close_tab이 주어지면 그 탭 우측 안쪽(seg_end-2)에 ✕ glyph를 그리고 제목은 그 앞까지만. cols=20 → "+" zone
     // 3 빼고 탭 영역 17, 2탭 → tab_w=8, 탭 1 seg_end=min(16,17)=16 → ✕ col 14. 탭 1 호버.
     const ht = [_][]const u8{ "sh", "vim" };
-    var dl3 = try buildPaneTabBarDrawList(allocator, &ht, 20, .default, 1, null, .default);
+    var dl3 = try buildPaneTabBarDrawList(allocator, &ht, 20, .default, 1, null, .default, 0);
     defer dl3.deinit(allocator);
     var found_close = false;
     var found_plus3 = false;
@@ -644,7 +647,7 @@ test "buildPaneTabBarDrawList reserves a right '+' zone (no '+' when too narrow)
     const allocator = std.testing.allocator;
     // cols=20 → 탭 영역 17, "+"는 col 18. 좁은 바(cols=4 ≤ +zone+1)는 "+" 없음.
     const titles = [_][]const u8{"sh"};
-    var wide = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null, null, .default);
+    var wide = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null, null, .default, 0);
     defer wide.deinit(allocator);
     var wide_plus = false;
     for (wide.cells) |c| {
@@ -652,9 +655,23 @@ test "buildPaneTabBarDrawList reserves a right '+' zone (no '+' when too narrow)
     }
     try std.testing.expect(wide_plus);
 
-    var narrow = try buildPaneTabBarDrawList(allocator, &titles, 4, .default, null, null, .default);
+    var narrow = try buildPaneTabBarDrawList(allocator, &titles, 4, .default, null, null, .default, 0);
     defer narrow.deinit(allocator);
     for (narrow.cells) |c| try std.testing.expect(c.codepoint != '+'); // 좁아서 "+" 없음
+}
+
+test "buildPaneTabBarDrawList: fixed tab width (rich) — left-aligned, leaves empty area" {
+    const allocator = std.testing.allocator;
+    // cols=40, "+"zone 3 → tab_cols=37. fixed_w=16: 탭0 [0,16), 탭1 [16,32), 나머지 [32,37) 빈(균등이면 ~18씩 stretch).
+    const titles = [_][]const u8{ "sh", "vim" };
+    var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, .default, null, null, .default, 16);
+    defer dl.deinit(allocator);
+    // 탭1 'v'는 seg start(16) + 1칸 좌패딩 = col 17(고정폭이라 균등분할과 다른 위치 — stretch 안 함).
+    var v_col: ?u16 = null;
+    for (dl.cells) |c| {
+        if (c.codepoint == 'v') v_col = c.col;
+    }
+    try std.testing.expectEqual(@as(?u16, 17), v_col);
 }
 
 test "paneTabWidth divides cols among tabs (min 1, clamps when tabs exceed cols)" {
@@ -712,7 +729,7 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
     // pane 탭 바: 긴 제목도 세그먼트 한도에서 … . cols=11 → 탭 영역 8, 2탭 → tab_w=4, 탭 0 제목 칸 [1,4) = 3칸.
     {
         const titles = [_][]const u8{ "abcdef", "x" };
-        var dl = try buildPaneTabBarDrawList(allocator, &titles, 11, .default, null, null, .default);
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 11, .default, null, null, .default, 0);
         defer dl.deinit(allocator);
         var saw_ellipsis = false;
         for (dl.cells) |c| {
@@ -745,7 +762,7 @@ test "active tab/row title is drawn with active_fg and bold; others with fg and 
     // pane 탭 바: active_tab=1 → 탭 1(우측 세그먼트) 글자만 bright + bold. cols=20 → tab_w=8, 탭 0 [1,8), 탭 1 [9,16).
     {
         const titles = [_][]const u8{ "sh", "vim" };
-        var dl = try buildPaneTabBarDrawList(allocator, &titles, 20, dim, null, 1, bright);
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 20, dim, null, 1, bright, 0);
         defer dl.deinit(allocator);
         var saw_bright = false;
         var saw_dim = false;

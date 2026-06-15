@@ -43,6 +43,10 @@ pub const ColorRole = enum {
 pub const Spacing = struct {
     modal_margin_cells: u32 = 2, // 모달 박스 좌우 안쪽 여백(셀) — Notice가 소비
     sidebar_slot_height_ratio_milli: u32 = 2500, // 사이드바 슬롯 높이 = 2.5×cell. C2/C3 사이드바 컴포넌트가 소비(계획)
+    // C4b: chrome 박스 모양(rich GPU quad). tui=0(직각·테두리 없음 → lowering이 셀 fill 유지), rich>0(둥근·테두리).
+    // 컴포넌트 view가 이 값을 Op.quad.corner_radii/border_widths에 실어, 같은 코드가 두 룩을 만든다(C4a 색 분리와 동형).
+    corner_radius_px: u16 = 0,
+    border_width_px: u16 = 0,
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
@@ -94,8 +98,8 @@ pub const Tokens = struct {
 
     /// rich 토큰셋(C4a): tui 색에서 출발해 tui가 sidebar_active로 **공유**하던 role(divider/focus_accent/drop_zone/
     /// tab_hover_bg)을 분리된 파생색으로 채운다 — divider 약간 어둡게, focus_accent 밝게, drop_zone 밝게, tab_hover 어둡게,
-    /// muted_fg 더 흐리게. 컴포넌트는 같은 role을 읽으므로 코드 불변(테마=토큰셋 교체). 둥근 모서리·그라데이션(C4b)은
-    /// 후속이라 Border/Spacing은 tui와 동일. 색 파생은 lightenRgb/darkenRgb(neutral, config import 없이).
+    /// muted_fg 더 흐리게. 컴포넌트는 같은 role을 읽으므로 코드 불변(테마=토큰셋 교체). 둥근 모서리(C4b)는 space.corner_radius_px/border_width_px로 분리(tui=0 → 직각·셀 fill).
+    /// 그라데이션·shadow는 후속. 색 파생은 lightenRgb/darkenRgb(neutral, config import 없이).
     pub fn rich(theme: ThemeColors) Tokens {
         var tk = tui(theme);
         tk.palette.set(.divider, darkenRgb(theme.sidebar_active, 24));
@@ -103,6 +107,10 @@ pub const Tokens = struct {
         tk.palette.set(.drop_zone, lightenRgb(theme.sidebar_active, 16));
         tk.palette.set(.tab_hover_bg, darkenRgb(theme.sidebar_active, 12));
         tk.palette.set(.muted_fg, darkenRgb(theme.sidebar_foreground, 48));
+        // C4b: rich 박스 모양 — 둥근 모서리 + 얇은 테두리(tui는 0=직각·셀 fill 유지). 컴포넌트 view가
+        // 이 값을 Op.quad에 실어 GPU quad 프리미티브로 lowering된다(같은 코드, 토큰만 다름).
+        tk.space.corner_radius_px = 8;
+        tk.space.border_width_px = 1;
         return tk;
     }
 
@@ -166,4 +174,26 @@ test "Tokens.rich separates the sidebar_active-shared roles into derived colors 
     try std.testing.expectEqual(t.get(.surface_bg), r.get(.surface_bg));
     try std.testing.expectEqual(t.get(.cursor), r.get(.cursor));
     try std.testing.expectEqual(t.get(.search_match), r.get(.search_match));
+}
+
+test "Tokens.rich sets box-shape tokens (radius/border) while tui keeps 0" {
+    const theme = ThemeColors{
+        .foreground = .{ .r = 200, .g = 200, .b = 200 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 180, .g = 180, .b = 180 },
+        .sidebar_active = .{ .r = 100, .g = 100, .b = 100 },
+        .search_match = .{ .r = 5, .g = 5, .b = 5 },
+        .search_match_current = .{ .r = 6, .g = 6, .b = 6 },
+        .selection = .{ .r = 7, .g = 7, .b = 7 },
+        .cursor = .{ .r = 8, .g = 8, .b = 8 },
+    };
+    const t = Tokens.tui(theme);
+    const r = Tokens.rich(theme);
+    // tui: 모양 토큰 0(직각·테두리 없음 → lowering이 셀 fill 유지). rich: >0(둥근·테두리 → GPU quad).
+    try std.testing.expectEqual(@as(u16, 0), t.space.corner_radius_px);
+    try std.testing.expectEqual(@as(u16, 0), t.space.border_width_px);
+    try std.testing.expect(r.space.corner_radius_px > 0);
+    try std.testing.expect(r.space.border_width_px > 0);
+    // 비-모양 space(슬롯 높이 비율)는 tui·rich 동일 — 모양만 분리한다.
+    try std.testing.expectEqual(t.space.sidebar_slot_height_ratio_milli, r.space.sidebar_slot_height_ratio_milli);
 }

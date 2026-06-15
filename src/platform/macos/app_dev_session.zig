@@ -3688,7 +3688,8 @@ pub const DevSession = struct {
             var pane_chrome: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
             defer pane_chrome.deinit(self.allocator);
             // C4b-5: rich(corner>0)면 활성 탭 밴드를 둥근 layer 2 GpuQuad(제목 셀 아래)로, tui(0)면 직각 셀 밴드로.
-            const tk_space = self.buildChromeTokens().space;
+            const tk = self.buildChromeTokens();
+            const tk_space = tk.space;
             const tab_corner = tk_space.corner_radius_px;
             const tab_grad = tk_space.tab_gradient_delta;
             for (leaf_rects.items) |lr| {
@@ -3699,7 +3700,7 @@ pub const DevSession = struct {
                     // rich: 바 배경(직각)·활성 탭 밴드(둥근+gradient) 모두 layer 2 quad. 바 배경을 먼저 append해 아래,
                     // 활성 탭이 위, 제목 셀(part1)은 그 위 — 불투명 바 배경 셀이 밴드 quad를 가리던 z-order 버그 해소(리뷰 #1).
                     self.appendBarBgQuad(bar, self.sidebarBg());
-                    self.appendTabBarUnderline(bar); // 탭바 하단 구분선(터미널 콘텐츠와 경계) — 바 배경 위·활성 밴드 아래(append 순서)
+                    self.appendTabBarUnderline(bar, tk.border.line_thickness_px); // 탭바 하단 구분선(터미널 콘텐츠와 경계) — 바 배경 위·활성 밴드 아래(append 순서)
                     if (m_opt) |m| self.appendTabBandQuad(m, lr.leaf.active_term, hl_bg, tab_corner, tab_grad);
                 } else {
                     // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위).
@@ -4092,15 +4093,19 @@ pub const DevSession = struct {
         }) catch {};
     }
 
-    /// 탭바 하단 1px 구분선(divider 색)을 layer 2 GpuQuad로 — 탭바를 터미널 콘텐츠와 시각 분리(rich). 활성 탭 영역은
+    /// 탭바 하단 구분선(divider 색)을 layer 2 GpuQuad로 — 탭바를 터미널 콘텐츠와 시각 분리(rich). 활성 탭 영역은
     /// 활성 밴드(나중 append)가 위에 덮어 자연히 밴드 색이 되고, 비활성 영역엔 divider 구분선이 보인다.
-    fn appendTabBarUnderline(self: *DevSession, bar: app.SplitRect) void {
+    /// 두께는 `border.line_thickness_px` 토큰(rich 2px)을 받는다 — 1px GpuQuad는 SDF AA(maru_quad_fragment
+    /// 78행 `cov=1-smoothstep(-aa,aa,d)`)가 1px-tall(half_size.y=0.5)에서 cov≈0.84로 옅게 그려 선이 흐리고
+    /// HiDPI 분수 스케일에서 떨린다. 형제 선 헬퍼(appendHorizontalLine)가 셀+reserved ~2px를 쓰는 것과 같은
+    /// 이유로 토큰 두께(≥2px)면 중심 행이 cov≈1로 선명하다. 두께만큼 바 하단 안쪽에 둔다(바 위로 안 새게).
+    fn appendTabBarUnderline(self: *DevSession, bar: app.SplitRect, thickness: u32) void {
         const dc = self.dividerColor();
         self.gpu_quads.append(self.allocator, .{
             .x = @floatFromInt(bar.x),
-            .y = @floatFromInt(bar.y + bar.h -| 1),
+            .y = @floatFromInt(bar.y + bar.h -| thickness),
             .w = @floatFromInt(bar.w),
-            .h = 1,
+            .h = @floatFromInt(thickness),
             .corner_radii = .{ 0, 0, 0, 0 },
             .border_widths = .{ 0, 0, 0, 0 },
             .fill_color0 = dc,

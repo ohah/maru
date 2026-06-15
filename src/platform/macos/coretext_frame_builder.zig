@@ -4,6 +4,7 @@ const app = maru.app;
 const config = maru.config;
 const renderer = maru.renderer;
 const terminal = maru.terminal;
+const tabbar = maru.chrome.components.tabbar; // C4b-4: 탭 셀 경계 단일 소스(제목·✕가 hit-test·밴드와 같은 분할)
 const coretext_probe = @import("coretext_probe.zig");
 const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
@@ -279,9 +280,11 @@ pub fn buildPaneTabBarDrawList(
     const tab_w = paneTabWidth(tab_cols, titles.len);
     if (tab_w > 0) {
         for (titles, 0..) |title, tab_index| {
-            const start: u32 = @as(u32, @intCast(tab_index)) * tab_w;
-            if (start >= tab_cols) break; // 탭이 탭 영역을 넘으면 나머지는 잘림
-            const seg_end: u32 = @min(start + tab_w, @as(u32, tab_cols)); // 이 탭의 col 한도
+            // C4b-4: 셀 경계를 chrome tabbar.segCols 단일 소스로 — hit-test(segOf)·활성 밴드와 같은 분할이라 제목·✕가 정합.
+            const sc = tabbar.segCols(tab_index, tab_w, tab_cols);
+            const start: u32 = sc.start;
+            if (start >= tab_cols) break; // 탭이 탭 영역을 넘으면 나머지는 잘림(sc.end<=start와 동치)
+            const seg_end: u32 = sc.end; // 이 탭의 col 한도
             // 호버된 탭이면 우측 안쪽(seg_end-2)에 닫기 ✕를 둔다 — 제목은 ✕ 앞(seg_end-2)까지만 그린다.
             const is_close = close_tab != null and close_tab.? == tab_index and tab_w >= 2 and seg_end >= 2;
             const title_end: u32 = if (is_close) seg_end - 2 else seg_end;

@@ -92,4 +92,34 @@ static NSString *const MARU_METAL_QUAD_SHADER_SOURCE =
      "  return float4(rgb, a);\n"
      "}\n";
 
+/* C4b: chrome 그림자 — 둥근 사각형 아래 gaussian-approx blur drop shadow. quad와 별개 파이프라인,
+   quad·셀보다 먼저(아래) 그린다. SDF rounded box 거리 d로 부드러운 감쇠(d<0 안=color.a, d>blur 바깥=0).
+   정점은 host가 blur만큼 확장된 rect로 만들고(그림자가 박스 밖으로 번지게) local/half_size는 원본 박스
+   기준이라 d가 원본 모서리에서 0이 된다. premultiplied 출력(셀·quad와 같은 over 블렌딩). */
+static NSString *const MARU_METAL_SHADOW_SHADER_SOURCE =
+    @"#include <metal_stdlib>\n"
+     "using namespace metal;\n"
+     "struct ShadowIn { packed_float2 position; packed_float2 local; packed_float2 half_size; packed_float4 corner; float blur; packed_float4 color; };\n"
+     "struct ShadowOut { float4 position [[position]]; float2 local; float2 half_size; float4 corner; float blur; float4 color; };\n"
+     "vertex ShadowOut maru_shadow_vertex(uint vid [[vertex_id]], const device ShadowIn *v [[buffer(0)]]) {\n"
+     "  ShadowOut o;\n"
+     "  o.position = float4(float2(v[vid].position), 0.0, 1.0);\n"
+     "  o.local = float2(v[vid].local);\n"
+     "  o.half_size = float2(v[vid].half_size);\n"
+     "  o.corner = float4(v[vid].corner);\n"
+     "  o.blur = v[vid].blur;\n"
+     "  o.color = float4(v[vid].color);\n"
+     "  return o;\n"
+     "}\n"
+     "fragment float4 maru_shadow_fragment(ShadowOut in [[stage_in]]) {\n"
+     "  float2 p = in.local - in.half_size;\n"
+     "  float r = (p.x < 0.0) ? ((p.y < 0.0) ? in.corner.x : in.corner.w) : ((p.y < 0.0) ? in.corner.y : in.corner.z);\n"
+     "  float2 q = abs(p) - in.half_size + r;\n"
+     "  float d = min(max(q.x, q.y), 0.0) + length(max(q, float2(0.0))) - r;\n"
+     "  float blur = max(in.blur, 0.5);\n"
+     "  float a = (1.0 - smoothstep(0.0, blur, d)) * in.color.a;\n"
+     "  if (a <= 0.0) { discard_fragment(); }\n"
+     "  return float4(in.color.rgb * a, a);\n"
+     "}\n";
+
 #endif

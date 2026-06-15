@@ -4024,7 +4024,7 @@ pub const DevSession = struct {
         const w: f32 = @floatCast(seg.end_px - seg.start_px);
         const by: f32 = @floatFromInt(m.bar_y);
         const bh: f32 = @floatFromInt(m.bar_h);
-        const uw: f32 = @floatFromInt(underline_px);
+        const uw: f32 = @min(@as(f32, @floatFromInt(underline_px)), bh); // 바보다 두꺼우면 바 높이로 clamp — by+bh-uw≥by라 언더바가 바 위로 안 샌다(형제 appendTabBarUnderline의 -| 가드와 동형, #496 리뷰)
         self.appendSolidQuad(x, by, w, bh, bg, 2); // 평평한 약한 배경(VSCode 탭 — 둥근·gradient 없음)
         self.appendSolidQuad(x, by + bh - uw, w, uw, accent, 2); // 하단 maru 앰버 언더바(active indicator, 탭 폭)
     }

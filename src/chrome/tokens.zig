@@ -58,6 +58,8 @@ pub const Spacing = struct {
     // C4b-5: rich 활성 탭 밴드의 vertical gradient 밝기 변화량(위 +δ 밝게 → 아래 -δ 어둡게, 채널당). tui=0(solid).
     // platform이 활성 탭 GpuQuad의 fill_color0/1을 bg±δ로 채워 은은한 입체감을 준다(gradient_kind=1=vertical).
     tab_gradient_delta: u8 = 0,
+    // U1: 사이드바 활성 워크스페이스 좌측 maru-accent 막대 폭(px). tui=0(막대 없음), rich>0(앰버 막대).
+    accent_bar_width_px: u16 = 0,
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
@@ -130,6 +132,8 @@ pub const Tokens = struct {
         tk.space.modal_padding_px = 12;
         // C4b-5: 활성 탭 밴드 은은한 vertical gradient(위 +12 밝게 → 아래 -12 어둡게, 사용자 선택 "은은한 gradient").
         tk.space.tab_gradient_delta = 12;
+        // U1: 사이드바 활성 워크스페이스 좌측 maru-accent 막대 3px(앰버). tui=0(막대 없음).
+        tk.space.accent_bar_width_px = 3;
         return tk;
     }
 

@@ -87,7 +87,14 @@ pub fn view(tabs: []const Tab, hovered_slot: ?usize, hovered_plus: bool, p: prop
         active_idx = i;
         break;
     };
-    if (active_idx) |ai| try out.append(arena, bandFill(ai, w, slot_h, .tab_active_bg, p.shape));
+    if (active_idx) |ai| {
+        try out.append(arena, bandFill(ai, w, slot_h, .tab_active_bg, p.shape)); // 카드 배경 밴드
+        // U1: 활성 슬롯 좌측 maru-accent 막대(accent_bar_width>0 — rich). 밴드 뒤에 append → 카드 배경 위에 그려진다.
+        if (p.shape.accent_bar_width_px > 0) {
+            const y: i32 = @intCast(ai * @as(usize, slot_h));
+            try out.append(arena, .{ .quad = .{ .rect = .{ .x = 0, .y = y, .w = p.shape.accent_bar_width_px, .h = slot_h }, .fill_role = .accent_bar, .corner_radii = .{ 0, 0, 0, 0 } } });
+        }
+    }
 
     // 호버 슬롯 밴드(활성과 다르고 범위 안일 때만 — 활성이면 활성 색 우선).
     if (hovered_slot) |hs| {
@@ -204,4 +211,15 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     try view(&tabs, null, false, rich_p, arena, &out);
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expectEqual(@as(u16, 8), out.items[0].quad.corner_radii[0]);
+
+    // U1: accent_bar_width>0이면 활성 슬롯 밴드 뒤에 좌측 막대 op(폭=accent_bar_width, role accent_bar, x=0).
+    out.clearRetainingCapacity();
+    var bar_p = p;
+    bar_p.shape = .{ .accent_bar_width_px = 3 };
+    try view(&tabs, null, false, bar_p, arena, &out);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len); // 활성 밴드(idx 1) + 좌측 막대
+    try std.testing.expect(out.items[1].quad.fill_role == .accent_bar);
+    try std.testing.expectEqual(@as(u32, 3), out.items[1].quad.rect.w); // 막대 폭 3px
+    try std.testing.expectEqual(@as(i32, 0), out.items[1].quad.rect.x); // 좌측 가장자리
+    try std.testing.expectEqual(@as(i32, 40), out.items[1].quad.rect.y); // 활성 슬롯(idx 1) y = 1×slot_h(40)
 }

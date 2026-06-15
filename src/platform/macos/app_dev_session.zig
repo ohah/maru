@@ -4080,6 +4080,24 @@ pub const DevSession = struct {
         if (slot_h == 0) return;
         for (ops) |op| switch (op) {
             .quad => |q| {
+                if (q.fill_role == .accent_bar) {
+                    // U1: 얇은 좌측 maru-accent 막대 — 셀 폭 floor를 피해 항상 GpuQuad(직각, layer 0=under). 색은 palette.accent_bar(앰버).
+                    const ac = packOpaqueRgb(self.buildChromeTokens().palette.get(.accent_bar));
+                    self.gpu_quads.append(self.allocator, .{
+                        .x = @floatFromInt(q.rect.x),
+                        .y = @floatFromInt(q.rect.y),
+                        .w = @floatFromInt(q.rect.w),
+                        .h = @floatFromInt(q.rect.h),
+                        .corner_radii = .{ 0, 0, 0, 0 },
+                        .border_widths = .{ 0, 0, 0, 0 },
+                        .fill_color0 = ac,
+                        .fill_color1 = ac,
+                        .border_color = 0,
+                        .gradient_kind = 0,
+                        .layer = 0,
+                    }) catch {};
+                    continue;
+                }
                 const color = switch (q.fill_role) {
                     .tab_active_bg => self.sidebarActiveBg(),
                     else => self.sidebarHoverBg(),
@@ -4232,7 +4250,7 @@ pub const DevSession = struct {
                 .chrome_minimal = self.chrome_minimal,
             },
             // C4b: 박스 모양 토큰을 tokens.space에서(단일 출처). tui=0(직각·셀 밴드), rich>0(둥근 GPU quad).
-            .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px },
+            .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px, .accent_bar_width_px = tk.space.accent_bar_width_px },
         };
     }
 

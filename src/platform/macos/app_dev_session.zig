@@ -2373,6 +2373,23 @@ pub const DevSession = struct {
         // 휠은 '커서 아래' panel로 라우팅한다 — split에서 비활성 panel 위 스크롤이 그 panel을 스크롤한다(포커스는
         // 안 바꾼다). 단일 panel이면 활성과 같고, 사이드바/밖이면 활성 surface로 fallback.
         const target = self.surfaceAt(x_px, y_px) orelse self.activeSurface();
+        // mouse tracking이면 휠을 mouse report(버튼 64=up/65=down)로 보낸다 — 앱(less/vim/tmux)이 휠을 소비하므로
+        // 스크롤백/가로 스크롤은 건너뛴다(alt screen alternate scroll보다 우선). lines>0=위(과거)=64, <0=아래=65.
+        if (target.core.mouse_tracking != .none) {
+            if (lines != 0) {
+                if (self.pxToCell(x_px, y_px)) |cell| {
+                    const wb: u8 = if (lines > 0) 64 else 65;
+                    var n: i32 = if (lines > 0) lines else -lines;
+                    while (n > 0) : (n -= 1) target.core.reportMouse(wb, cell.col, cell.row, true, false, 0);
+                    const reply = target.core.pendingResponse();
+                    if (reply.len > 0) {
+                        self.runtime.writeInput(target.id, .{ .bytes = reply }) catch {};
+                        target.core.clearResponse();
+                    }
+                }
+            }
+            return; // 휠을 앱이 소비 — 스크롤백/가로 스크롤 안 함
+        }
         self.scrollSurfaceLines(target, lines);
         // 가로 델타(트랙패드 2-finger 가로 스와이프) → 커서 아래 pane 탭 바 가로 스크롤(#2b). 세로(터미널 스크롤백)와
         // 독립 축이라 한 이벤트(대각선 스와이프)에서 둘 다 처리될 수 있다. 탭이 안 넘치면 scrollTabBarAt이 무동작.
@@ -2496,8 +2513,6 @@ pub const DevSession = struct {
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *DevSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (!self.surface_initialized) return;
-        _ = button; // 8b-2 reporting 분기에서 사용 — 현재(8b-1)는 셀렉션 경로라 무관(동작 무변화)
-        _ = mods;
         // 사이드바 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(x가 사이드바 밖으로 나가도) — 새
         // down(1)은 아래 일반 처리로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
         if (self.sidebar_drag_active and (kind == 2 or kind == 3)) {
@@ -2669,6 +2684,20 @@ pub const DevSession = struct {
         const col = cell.col;
         const row = cell.row;
         const core = &self.activeSurface().core;
+        // mouse reporting: 트래킹 모드(DECSET 1000~1003)고 shift 미포함이면 셀렉션 대신 앱에 리포트한다 — 여기까지
+        // 왔으면 활성 pane 터미널 영역 클릭(사이드바/탭바/divider/다른 pane은 위에서 처리). shift+click은 xterm
+        // 관례대로 셀렉션 override(아래 switch로 흘린다). 8b-2: button/mods는 Swift가 변환해 ABI로 넘긴다.
+        if (core.mouse_tracking != .none and (mods & 4) == 0) {
+            core.reportMouse(@intCast(button), col, row, kind != 3, kind == 2, @intCast(mods));
+            const reply = core.pendingResponse();
+            if (reply.len > 0) {
+                self.runtime.writeInput(self.activeSurface().id, .{ .bytes = reply }) catch {};
+                core.clearResponse();
+            }
+            return;
+        }
+        // 셀렉션은 left 버튼(0)만 시작한다 — tracking 아닌 상태의 right/middle 클릭은 무시(셀렉션·context 메뉴 없음).
+        if (button != 0) return;
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
         switch (kind) {
             1 => {

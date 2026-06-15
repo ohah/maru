@@ -12,9 +12,13 @@ const std = @import("std");
 /// 탭 tab_index의 **셀 경계** [start, end) — Metrics(픽셀 메트릭) 없이 순수 컬럼 분할만 계산하는 단일 소스.
 /// hit-test(segOf)와 platform view 그리기(buildPaneTabBarDrawList의 제목·✕)가 이 한 함수를 공유해 "보이는 탭/✕ ==
 /// 클릭되는 것"을 보장한다(§6). end = min((tab_index+1)*tab_w, tab_cols), end<=start면 overflow(탭 영역 밖, 안 보임).
-pub fn segCols(tab_index: usize, tab_w: u32, tab_cols: u32) struct { start: u32, end: u32 } {
-    const start = @as(u32, @intCast(tab_index)) * tab_w;
-    return .{ .start = start, .end = @min(start + tab_w, tab_cols) };
+pub fn segCols(tab_index: usize, tab_w: u32, tab_cols: u32, scroll_cols: u32) struct { start: u32, end: u32 } {
+    const abs_start = @as(u32, @intCast(tab_index)) * tab_w;
+    // 화면 좌표 = 절대 컬럼 - scroll(보이는 창을 왼쪽으로 민다). 왼쪽 스크롤아웃(abs<scroll)은 0으로 saturate,
+    // 우측은 tab_cols clamp. scroll_cols=0이면 기존과 동일(start=abs_start, end=min(abs+tab_w, tab_cols)).
+    const start = abs_start -| scroll_cols;
+    const end = (abs_start + tab_w) -| scroll_cols;
+    return .{ .start = @min(start, tab_cols), .end = @min(end, tab_cols) };
 }
 
 /// 탭 바 한 줄의 컬럼 분할 메트릭(중립 — host가 platform에서 변환해 주입; bar rect는 plain u32). 바를
@@ -29,6 +33,7 @@ pub const Metrics = struct {
     cols: u32, // 바 전체 컬럼 수
     tab_cols: u32, // "+" zone을 뗀 탭 영역 컬럼 수(좁은 바면 == cols)
     tab_w: u32, // 탭 하나의 폭(컬럼)
+    scroll_cols: u32 = 0, // Step 2: 가로 스크롤 offset(컬럼). segCols/segOf가 화면 좌표를 이만큼 왼쪽으로 민다. 0=기본(barMetrics가 Pane.tab_scroll_cols로 채움).
 
     /// 바 좌단 기준 col의 픽셀 경계. tab_index 세그먼트는 [col*cw, segEnd*cw).
     fn colPx(self: Metrics, col: u32) f64 {
@@ -37,7 +42,7 @@ pub const Metrics = struct {
 
     /// tab_index 세그먼트의 끝 컬럼(우경계, tab_cols로 clamp). platform 활성 밴드(start [i*tab_w, +tab_w))와 같은 분할.
     pub fn segEnd(self: Metrics, tab_index: usize) u32 {
-        return segCols(tab_index, self.tab_w, self.tab_cols).end;
+        return segCols(tab_index, self.tab_w, self.tab_cols, self.scroll_cols).end;
     }
 
     /// 탭 하나의 **경계 단일 소스**(§6) — hit-test(tabIndex·inCloseZone)와 platform 활성 밴드(tabbarHighlightCell)가
@@ -58,7 +63,7 @@ pub const Metrics = struct {
     /// 패딩 0이라 시각/동작이 기존 셀-열 hit-test와 동일하다. 둥근 탭(C4b-5)에서 탭 패딩을 더하면 **여기 한 곳만**
     /// 바뀌어 view·hit-test가 동시에 움직인다(§6 seam 해소의 토대). colPx/segEnd를 재사용한다.
     pub fn segOf(self: Metrics, tab_index: usize) TabSeg {
-        const sc = segCols(tab_index, self.tab_w, self.tab_cols);
+        const sc = segCols(tab_index, self.tab_w, self.tab_cols, self.scroll_cols);
         const start_col = sc.start;
         const end_col = sc.end;
         const has_close = self.tab_w >= 2 and end_col >= 2;

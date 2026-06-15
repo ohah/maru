@@ -14,10 +14,26 @@ typedef struct {
     float bg[4];
 } MaruRendererVertex;
 
+// C4b: chrome rich GPU quad 프리미티브 정점. 셰이더 QuadIn(packed_float2×3 + packed_float4×5 +
+// float = 27 float, 108바이트 tight-packed)과 같은 레이아웃. quad당 6정점(삼각형 2개)을 host가
+// 만들며 사각형 파라미터(local 픽셀 좌표·half size·radii·border·색·gradient)를 각 정점에 복제한다.
+typedef struct {
+    float position[2];     // NDC
+    float local[2];        // 사각형 내 픽셀 좌표(0..w, 0..h)
+    float half_size[2];    // (w/2, h/2)
+    float corner[4];       // tl, tr, br, bl radii(px)
+    float border[4];       // top, right, bottom, left width(px)
+    float fill0[4];        // rgba(0..1) — gradient 시작색
+    float fill1[4];        // rgba — gradient 끝색
+    float border_color[4]; // rgba
+    float gradient_kind;   // 0=solid, 1=vertical, 2=horizontal
+} MaruRendererQuadVertex;
+
 @interface MaruMetalRendererImpl : NSObject
 @property (nonatomic, strong) id<MTLDevice> device;
 @property (nonatomic, strong) id<MTLCommandQueue> queue;
 @property (nonatomic, strong) id<MTLRenderPipelineState> pipeline;
+@property (nonatomic, strong) id<MTLRenderPipelineState> quadPipeline;
 @property (nonatomic, strong) id<MTLTexture> atlas;
 @property (nonatomic) uint32_t atlasWidth;
 @property (nonatomic) uint32_t atlasHeight;
@@ -57,6 +73,30 @@ MaruMetalRenderer *maru_metal_renderer_create(id<MTLDevice> device, MTLPixelForm
     if (pipeline == nil) {
         return NULL;
     }
+    // C4b: chrome rich quad 프리미티브 파이프라인(SDF rounded box). 셀과 별개 셰이더/정점 레이아웃이지만
+    // 같은 premultiplied-over 블렌딩에 합성한다. 셰이더 컴파일 실패 시 create가 NULL이라 게이트가 잡는다.
+    id<MTLLibrary> quad_library = [device newLibraryWithSource:MARU_METAL_QUAD_SHADER_SOURCE
+                                                       options:nil
+                                                         error:NULL];
+    if (quad_library == nil) {
+        return NULL;
+    }
+    MTLRenderPipelineDescriptor *quad_descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    quad_descriptor.vertexFunction = [quad_library newFunctionWithName:@"maru_quad_vertex"];
+    quad_descriptor.fragmentFunction = [quad_library newFunctionWithName:@"maru_quad_fragment"];
+    quad_descriptor.colorAttachments[0].pixelFormat = pixel_format;
+    quad_descriptor.colorAttachments[0].blendingEnabled = YES;
+    quad_descriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+    quad_descriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+    quad_descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+    quad_descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    quad_descriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    quad_descriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    id<MTLRenderPipelineState> quad_pipeline =
+        [device newRenderPipelineStateWithDescriptor:quad_descriptor error:NULL];
+    if (quad_pipeline == nil) {
+        return NULL;
+    }
     id<MTLCommandQueue> queue = [device newCommandQueue];
     if (queue == nil) {
         return NULL;
@@ -66,6 +106,7 @@ MaruMetalRenderer *maru_metal_renderer_create(id<MTLDevice> device, MTLPixelForm
     impl.device = device;
     impl.queue = queue;
     impl.pipeline = pipeline;
+    impl.quadPipeline = quad_pipeline;
     // C handle이 ObjC 객체 수명을 소유한다. destroy에서 __bridge_transfer로 해제한다.
     return (__bridge_retained MaruMetalRenderer *)impl;
 }
@@ -202,6 +243,54 @@ static void maru_fill_cell_quad(
     memcpy(out, quad, sizeof(quad));
 }
 
+/* C4b: 한 GpuQuad를 6정점 quad로 채운다(out에 6개). 픽셀 bounds를 NDC로 투영하고(셀과 같은 좌상단
+   원점 방식) local 픽셀 좌표·half size·radii·border·색을 각 정점에 싣는다. 색 0xAARRGGBB를 rgba(0..1)로
+   언팩한다(셰이더가 sRGB로 받아 linear blend). 모양/SDF는 셰이더가 — 여기선 순수 산술뿐(렌더 백엔드
+   책임, Zig 데이터는 불변). */
+static void maru_fill_quad_instance(
+    MaruRendererQuadVertex *out,
+    const MaruAppHostDevGpuQuad quad,
+    float drawable_w,
+    float drawable_h
+) {
+    const float left = (quad.x / drawable_w) * 2.0f - 1.0f;
+    const float right = ((quad.x + quad.w) / drawable_w) * 2.0f - 1.0f;
+    const float top = 1.0f - (quad.y / drawable_h) * 2.0f;
+    const float bottom = 1.0f - ((quad.y + quad.h) / drawable_h) * 2.0f;
+    MaruRendererQuadVertex base;
+    base.half_size[0] = quad.w * 0.5f;
+    base.half_size[1] = quad.h * 0.5f;
+    memcpy(base.corner, quad.corner_radii, sizeof(float) * 4);
+    memcpy(base.border, quad.border_widths, sizeof(float) * 4);
+    base.fill0[0] = (float)((quad.fill_color0 >> 16) & 0xff) / 255.0f;
+    base.fill0[1] = (float)((quad.fill_color0 >> 8) & 0xff) / 255.0f;
+    base.fill0[2] = (float)(quad.fill_color0 & 0xff) / 255.0f;
+    base.fill0[3] = (float)((quad.fill_color0 >> 24) & 0xff) / 255.0f;
+    base.fill1[0] = (float)((quad.fill_color1 >> 16) & 0xff) / 255.0f;
+    base.fill1[1] = (float)((quad.fill_color1 >> 8) & 0xff) / 255.0f;
+    base.fill1[2] = (float)(quad.fill_color1 & 0xff) / 255.0f;
+    base.fill1[3] = (float)((quad.fill_color1 >> 24) & 0xff) / 255.0f;
+    base.border_color[0] = (float)((quad.border_color >> 16) & 0xff) / 255.0f;
+    base.border_color[1] = (float)((quad.border_color >> 8) & 0xff) / 255.0f;
+    base.border_color[2] = (float)(quad.border_color & 0xff) / 255.0f;
+    base.border_color[3] = (float)((quad.border_color >> 24) & 0xff) / 255.0f;
+    base.gradient_kind = (float)quad.gradient_kind;
+    // 모서리 4개의 (NDC pos, local px): tl, tr, br, bl.
+    const float cx[4] = {left, right, right, left};
+    const float cy[4] = {top, top, bottom, bottom};
+    const float lx[4] = {0.0f, quad.w, quad.w, 0.0f};
+    const float ly[4] = {0.0f, 0.0f, quad.h, quad.h};
+    const int order[6] = {0, 3, 2, 0, 2, 1}; // tl,bl,br + tl,br,tr
+    for (int i = 0; i < 6; i++) {
+        MaruRendererQuadVertex v = base;
+        v.position[0] = cx[order[i]];
+        v.position[1] = cy[order[i]];
+        v.local[0] = lx[order[i]];
+        v.local[1] = ly[order[i]];
+        out[i] = v;
+    }
+}
+
 bool maru_metal_renderer_draw(
     MaruMetalRenderer *renderer,
     CAMetalLayer *layer,
@@ -215,7 +304,11 @@ bool maru_metal_renderer_draw(
     uint32_t sidebar_bg,
     const MaruAppHostDevMetalCell *sidebar_cells,
     size_t sidebar_cell_count,
-    uint32_t sidebar_slot_height_px
+    uint32_t sidebar_slot_height_px,
+    /* C4b: chrome rich GPU quad 프리미티브(둥근 사각형). NULL/0이면 안 그림(tui 테마). 셀 패스 아래
+       (배경 레이어)에 별개 파이프라인으로 그린다. */
+    const MaruAppHostDevGpuQuad *gpu_quads,
+    size_t gpu_quad_count
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -331,6 +424,31 @@ bool maru_metal_renderer_draw(
         }
     }
 
+    // C4b: chrome rich quad 정점 버퍼(gpu_quads) — 셀 패스 아래(배경 레이어)에 별개 파이프라인으로 그린다.
+    // NULL/0(tui 테마)이면 생성 안 함. modal(팝업) 위 레이어 분리는 C4b-3에서.
+    id<MTLBuffer> quad_vertex_buffer = nil;
+    size_t quad_vertex_total = 0;
+    const size_t gpu_quad_n = (gpu_quads != NULL) ? gpu_quad_count : 0;
+    if (gpu_quad_n > 0) {
+        if (gpu_quad_n > SIZE_MAX / 6) {
+            return false;
+        }
+        quad_vertex_total = gpu_quad_n * 6;
+        if (quad_vertex_total > SIZE_MAX / sizeof(MaruRendererQuadVertex)) {
+            return false;
+        }
+        quad_vertex_buffer = [impl.device
+            newBufferWithLength:quad_vertex_total * sizeof(MaruRendererQuadVertex)
+                        options:MTLResourceStorageModeShared];
+        if (quad_vertex_buffer == nil) {
+            return false;
+        }
+        MaruRendererQuadVertex *qv = (MaruRendererQuadVertex *)quad_vertex_buffer.contents;
+        for (size_t i = 0; i < gpu_quad_n; i++) {
+            maru_fill_quad_instance(&qv[i * 6], gpu_quads[i], drawable_w, drawable_h);
+        }
+    }
+
     id<CAMetalDrawable> drawable = [layer nextDrawable];
     if (drawable == nil) {
         return false;
@@ -353,6 +471,14 @@ bool maru_metal_renderer_draw(
 
     // vertex_buffer가 nil이면(cell 없음) clear만 한 빈 frame이다. 어떤 경우든 encoder는 반드시
     // endEncoding하고 present/commit한다.
+    // C4b: quad 패스(셀 아래) — chrome rich 둥근 사각형. 셀보다 먼저 그려 셀(글자·밴드 제목)이 위에 온다.
+    if (quad_vertex_buffer != nil) {
+        [encoder setRenderPipelineState:impl.quadPipeline];
+        [encoder setVertexBuffer:quad_vertex_buffer offset:0 atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                    vertexStart:0
+                    vertexCount:quad_vertex_total];
+    }
     if (vertex_buffer != nil) {
         [encoder setRenderPipelineState:impl.pipeline];
         [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
@@ -377,6 +503,7 @@ void maru_metal_renderer_destroy(MaruMetalRenderer *renderer) {
     MaruMetalRendererImpl *impl = (__bridge_transfer MaruMetalRendererImpl *)renderer;
     impl.atlas = nil;
     impl.pipeline = nil;
+    impl.quadPipeline = nil;
     impl.queue = nil;
     impl.device = nil;
 }

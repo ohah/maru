@@ -63,6 +63,8 @@ pub const Spacing = struct {
     // U2: 사이드바 카드 사이 여백(px). 밴드/막대를 슬롯 안쪽 사방으로 이만큼 줄여 워크스페이스가 카드처럼 떨어져 보인다.
     // tui=0(슬롯 꽉 — 기존과 동일), rich>0.
     card_gap_px: u16 = 0,
+    // U/#1: split에서 활성 pane 강조 테두리(ring) 폭(px). tui=0(테두리 없음), rich>0(maru 앰버 ring — 포커스 pane 구분).
+    pane_border_width_px: u16 = 0,
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
@@ -139,6 +141,8 @@ pub const Tokens = struct {
         tk.space.accent_bar_width_px = 3;
         // U2: 카드 사이 여백 4px(슬롯 안쪽 사방 패딩) — 워크스페이스가 카드처럼 떨어져 보임.
         tk.space.card_gap_px = 4;
+        // U/#1: split 활성 pane 앰버 테두리(ring) 2px — 포커스된 pane 강조.
+        tk.space.pane_border_width_px = 2;
         return tk;
     }
 

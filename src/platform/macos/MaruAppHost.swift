@@ -320,6 +320,15 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     override func mouseUp(with event: NSEvent) {
         controller?.handleMouse(event, kind: 3, in: self)
     }
+
+    // right/middle 버튼도 reporting용으로 라우팅(handleMouse가 buttonNumber→xterm 변환). tracking이 꺼졌으면
+    // Zig가 button!=0을 무시한다(셀렉션은 left만, context 메뉴 없음). down/drag/up = kind 1/2/3.
+    override func rightMouseDown(with event: NSEvent) { controller?.handleMouse(event, kind: 1, in: self) }
+    override func rightMouseDragged(with event: NSEvent) { controller?.handleMouse(event, kind: 2, in: self) }
+    override func rightMouseUp(with event: NSEvent) { controller?.handleMouse(event, kind: 3, in: self) }
+    override func otherMouseDown(with event: NSEvent) { controller?.handleMouse(event, kind: 1, in: self) }
+    override func otherMouseDragged(with event: NSEvent) { controller?.handleMouse(event, kind: 2, in: self) }
+    override func otherMouseUp(with event: NSEvent) { controller?.handleMouse(event, kind: 3, in: self) }
 }
 
 // 한 터미널 세션의 per-session 상태 — 창/PTY(devSession)/Metal 렌더러 + 렌더 캐시 메트릭을 묶는다.
@@ -1202,7 +1211,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let scale = window?.backingScaleFactor ?? 1.0
         let xPx = Double(local.x * scale)
         let yPx = Double((view.bounds.height - local.y) * scale) // NSView는 좌하단 원점 — 위가 0이 되게 뒤집는다
-        _ = maru_macos_app_dev_session_mouse(session, kind, xPx, yPx, 0, 0) // button/mods는 8b-2에서 event.buttonNumber/modifierFlags 변환
+        // macOS buttonNumber(0=L,1=R,2=M) → xterm(0=L,1=M,2=R). modifierFlags → xterm mods 비트(4=shift,8=opt/meta,16=ctrl).
+        let button: Int32 = event.buttonNumber == 1 ? 2 : (event.buttonNumber == 2 ? 1 : 0)
+        var mods: Int32 = 0
+        if event.modifierFlags.contains(.shift) { mods |= 4 }
+        if event.modifierFlags.contains(.option) { mods |= 8 }
+        if event.modifierFlags.contains(.control) { mods |= 16 }
+        _ = maru_macos_app_dev_session_mouse(session, kind, xPx, yPx, button, mods)
         markMetalNeedsRedraw()
     }
 

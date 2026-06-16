@@ -11,6 +11,11 @@ pub const Size = struct {
 // 단일 출처를 src/color.zig에 두고 여기서는 재노출만 한다. `terminal.Rgb`와 아래
 // `Color` union은 그대로 동작한다.
 pub const Rgb = color.Rgb;
+// 같은 결로 색 해석 유틸도 재노출한다 — 코어가 OSC 4 팔레트 질의에서 기본 xterm256 색을 회신하고
+// (xterm256), OSC 4/10/11 색 명세를 파싱한다(parseSpec). core.zig는 이미 `color`를 지역 변수명으로
+// 써서 파일 레벨 import가 충돌하므로, `types.` 게이트웨이로 노출한다(Rgb와 동일).
+pub const xterm256 = color.xterm256;
+pub const parseSpec = color.parseSpec;
 
 pub const Color = union(enum) {
     default,

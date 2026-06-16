@@ -296,6 +296,14 @@ pub const TerminalCore = struct {
     notification_pending: bool = false,
     notification_title: std.ArrayListUnmanaged(u8) = .empty,
     notification_body: std.ArrayListUnmanaged(u8) = .empty,
+    // G3 charset: G0/G1 G-set 지정과 GL 호출. `ESC ( <f>`→G0, `ESC ) <f>`→G1(f='0'=dec_special·'B'=ascii).
+    // SI(0x0f)→GL=G0, SO(0x0e)→GL=G1. print 시 GL의 charset으로 codepoint를 변환한다. RIS에서 전부 초기화.
+    charset_g0: Charset = .ascii,
+    charset_g1: Charset = .ascii,
+    charset_gl: u1 = 0, // 0=G0(SI), 1=G1(SO)
+    // ESC <intermediate>(0x20..0x2f)의 intermediate 바이트. escape_intermediate 상태가 final과 함께 해석한다
+    // (예: `ESC ( 0`이면 intermediate='(' final='0'). 0이면 진행 중 아님.
+    escape_intermediate_byte: u8 = 0,
     /// kitty graphics 이미지 저장소(transmit된 이미지, image_id→픽셀 버퍼). 렌더는 후속.
     kitty_images: KittyImageStorage = .{},
     /// kitty graphics placement(표시 중인 이미지 인스턴스) 목록. (image_id, placement_id)로 식별 —
@@ -342,6 +350,11 @@ pub const TerminalCore = struct {
     response: std.ArrayList(u8) = .empty,
 
     pub const ParserState = enum { ground, escape, escape_intermediate, csi, osc, osc_escape, apc, apc_escape };
+
+    /// G3 charset 지정(94-char G-set). 구형 TUI가 `ESC ( 0`(G0=DEC special graphics)으로 지정하고 SO/SI로
+    /// 호출해 box-drawing(┌─┐ 등)을 ASCII 코드포인트(lqk 등)로 보낸다. `.ascii`는 무변환, `.dec_special`은
+    /// 0x60..0x7e를 box 문자로 변환. 베이스: VT100 special graphics·xterm ctlseqs(Ghostty `charsets.zig` 동작 비교).
+    pub const Charset = enum { ascii, dec_special };
 
     const max_csi_params = 16;
     const default_max_scrollback = 1000;
@@ -423,6 +436,9 @@ pub const TerminalCore = struct {
         self.kitty_placements.clearRetainingCapacity(); // placement도 함께 비운다
         self.abortKittyChunk(); // 진행 중이던 chunked 전송도 폐기
         self.grapheme_cluster_mode = false;
+        self.charset_g0 = .ascii; // G3 charset도 공장 초기화(G0/G1 ascii, GL=G0).
+        self.charset_g1 = .ascii;
+        self.charset_gl = 0;
         @memset(&self.palette_override, null); // OSC 4 팔레트 재정의도 공장 초기화(xterm RIS가 팔레트를 리셋).
         self.default_fg_override = null; // OSC 10/11 전경/배경 색 설정도 공장 초기화(theme 기본 복귀).
         self.default_bg_override = null;
@@ -1443,8 +1459,9 @@ pub const TerminalCore = struct {
                     index_ += 1;
                 },
                 .escape_intermediate => {
-                    // ESC <intermediate> <final>: charset designators 등. final 1바이트를
-                    // 소비하고 ground로 돌아간다(A1은 적용하지 않고 소비만 한다).
+                    // ESC <intermediate> <final>: charset 지정. intermediate('('=G0·')'=G1)와 final
+                    // ('0'=dec_special·'B'=ascii)로 G-set을 정한다. 미지원 조합은 ascii로 소비.
+                    self.designateCharset(self.escape_intermediate_byte, bytes[index_]);
                     self.parser = .ground;
                     index_ += 1;
                 },
@@ -2545,8 +2562,12 @@ pub const TerminalCore = struct {
                 self.fullReset();
                 self.parser = .ground;
             },
-            // ESC <intermediate>(0x20..0x2f) <final>: charset designation 등 2바이트 시퀀스.
-            0x20...0x2f => self.parser = .escape_intermediate,
+            // ESC <intermediate>(0x20..0x2f) <final>: charset designation 등 2바이트 시퀀스. intermediate를
+            // 기억해 escape_intermediate가 final과 함께 해석한다(G0 `(` vs G1 `)` 구분).
+            0x20...0x2f => {
+                self.escape_intermediate_byte = byte;
+                self.parser = .escape_intermediate;
+            },
             // 그 밖의 ESC <final>(NEL 등)은 A1에서 소비만 한다.
             else => self.parser = .ground,
         }
@@ -3882,6 +3903,8 @@ pub const TerminalCore = struct {
                 self.last_print = null;
             },
             '\t' => self.writeTab(),
+            0x0e => self.charset_gl = 1, // SO(shift out): G1을 GL로 호출(ESC ) 0 후 box 문자 시작)
+            0x0f => self.charset_gl = 0, // SI(shift in): G0을 GL로 호출(box 문자 끝, ASCII 복귀)
             0x08 => {
                 // BS는 정확히 1칸 왼쪽이다(ECMA-48; xterm.js InputHandler.backspace와 동일).
                 // 예전엔 wide continuation 위에 서면 base로 한 칸 더 당겼는데, 셸은 BS를 항상
@@ -3896,34 +3919,99 @@ pub const TerminalCore = struct {
             },
             else => {
                 if (codepoint < 0x20) return;
-                if (width.cellWidth(codepoint) == 0) {
+                // G3: GL에 호출된 G-set(G0/G1)의 charset으로 변환한다(dec_special이면 0x60..0x7e→box 문자,
+                // ascii면 무변환). box 문자는 width 1·non-combining이라 아래 grapheme/combining 로직과 호환.
+                const cp = self.translateCharset(codepoint);
+                if (width.cellWidth(cp) == 0) {
                     // VS16(U+FE0F) 등 변형 선택자/결합 문자는 0폭 combining으로 앞 글자에 붙인다.
                     // 기본(mode 2027 off)은 폭을 EAW 그대로 둔다 — zsh의 ZLE는 ❤+VS16을 EAW 1칸으로
                     // 보므로, 폭을 키우면 zsh의 redraw(CSI <N> D 재출력)가 어긋나 붙여넣기가 깨진다.
-                    self.attachCombiningMark(codepoint);
+                    self.attachCombiningMark(cp);
                     // mode 2027(grapheme cluster)에서는 앱과 너비를 합의한 상태라, VS16이 앞 글자를
                     // 이모지 표현(width 2)으로 승격해 풀사이즈로 그려도 안전하다(❤+VS16 = ❤️ 2칸).
-                    if (self.grapheme_cluster_mode and codepoint == 0xFE0F) self.promoteLastToEmojiWidth();
+                    if (self.grapheme_cluster_mode and cp == 0xFE0F) self.promoteLastToEmojiWidth();
                     return;
                 }
                 // mode 2027: grapheme을 한 셀로 묶는다(앱과 너비 합의 상태라 안전).
                 if (self.grapheme_cluster_mode) {
                     // 스킨톤 modifier(👍 + 🏽): 앞 이모지에 combining으로 붙여 한 글자. base는 이미
                     // width 2(EAW Wide)라 폭 승격 불필요.
-                    if (isSkinToneModifier(codepoint) and self.lastCellIsWideEmoji()) {
-                        self.attachCombiningMark(codepoint);
+                    if (isSkinToneModifier(cp) and self.lastCellIsWideEmoji()) {
+                        self.attachCombiningMark(cp);
                         return;
                     }
                     // 국기: 지역 표시자(RI) 2개를 한 셀(width 2)로. 직전이 짝 없는 RI면 combining + 승격.
-                    if (isRegionalIndicator(codepoint) and self.lastCellIsLoneRegionalIndicator()) {
-                        self.attachCombiningMark(codepoint);
+                    if (isRegionalIndicator(cp) and self.lastCellIsLoneRegionalIndicator()) {
+                        self.attachCombiningMark(cp);
                         self.promoteLastToEmojiWidth();
                         return;
                     }
                 }
-                self.putCell(codepoint);
+                self.putCell(cp);
             },
         }
+    }
+
+    /// `ESC <intermediate> <final>`로 G-set을 지정한다. intermediate '('=G0·')'=G1, final '0'=dec_special·
+    /// 'B'=ascii(그 외 charset은 미지원이라 ascii로). G2/G3('*'/'+')는 maru가 호출(SS2/SS3)을 안 해 무시.
+    fn designateCharset(self: *TerminalCore, intermediate: u8, final: u8) void {
+        const set: Charset = switch (final) {
+            '0' => .dec_special, // DEC special graphics(box drawing)
+            else => .ascii, // 'B'(ASCII)·기타 미지원 → ascii
+        };
+        switch (intermediate) {
+            '(' => self.charset_g0 = set, // ESC ( = G0 지정
+            ')' => self.charset_g1 = set, // ESC ) = G1 지정
+            else => {}, // G2/G3·기타 intermediate는 소비(미지원)
+        }
+    }
+
+    /// GL에 호출된 G-set(charset_gl)의 charset으로 codepoint를 변환한다.
+    fn translateCharset(self: *const TerminalCore, codepoint: u21) u21 {
+        const set = if (self.charset_gl == 0) self.charset_g0 else self.charset_g1;
+        return switch (set) {
+            .ascii => codepoint,
+            .dec_special => decSpecial(codepoint),
+        };
+    }
+
+    /// DEC special graphics: 0x60..0x7e를 box-drawing/기호 Unicode로. 그 밖은 그대로. 베이스: VT100 special
+    /// graphics(Ghostty `charsets.zig` dec_special 표와 동작 비교 — 코드 표현 미복사).
+    fn decSpecial(codepoint: u21) u21 {
+        return switch (codepoint) {
+            0x60 => 0x25C6, // ◆
+            0x61 => 0x2592, // ▒
+            0x62 => 0x2409, // ␉ HT
+            0x63 => 0x240C, // ␌ FF
+            0x64 => 0x240D, // ␍ CR
+            0x65 => 0x240A, // ␊ LF
+            0x66 => 0x00B0, // °
+            0x67 => 0x00B1, // ±
+            0x68 => 0x2424, // ␤ NL
+            0x69 => 0x240B, // ␋ VT
+            0x6a => 0x2518, // ┘
+            0x6b => 0x2510, // ┐
+            0x6c => 0x250C, // ┌
+            0x6d => 0x2514, // └
+            0x6e => 0x253C, // ┼
+            0x6f => 0x23BA, // ⎺
+            0x70 => 0x23BB, // ⎻
+            0x71 => 0x2500, // ─
+            0x72 => 0x23BC, // ⎼
+            0x73 => 0x23BD, // ⎽
+            0x74 => 0x251C, // ├
+            0x75 => 0x2524, // ┤
+            0x76 => 0x2534, // ┴
+            0x77 => 0x252C, // ┬
+            0x78 => 0x2502, // │
+            0x79 => 0x2264, // ≤
+            0x7a => 0x2265, // ≥
+            0x7b => 0x03C0, // π
+            0x7c => 0x2260, // ≠
+            0x7d => 0x00A3, // £
+            0x7e => 0x00B7, // ·
+            else => codepoint,
+        };
     }
 
     fn completePendingUtf8(self: *TerminalCore, bytes: []const u8, index_: usize) !usize {
@@ -6331,6 +6419,29 @@ test "OSC 9/777 desktop notification: parse iTerm2/rxvt, ConEmu sub-commands ign
     // OSC 777의 notify 외 서브타입은 무시.
     try core.write("\x1b]777;precmd\x1b\\");
     try std.testing.expect(core.pendingNotification() == null);
+}
+
+test "G3 charset: ESC ( 0 dec_special (G0), SO/SI invoke G1/G0, ESC ( B restores, RIS resets" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+
+    // ESC ( 0 → G0=dec_special. GL=G0(기본)이라 'q'→─, 'x'→│. 그 뒤 ESC ( B → G0=ascii 복귀, 'q'는 그대로.
+    try core.write("\x1b(0qx\x1b(Bq");
+    // 둘째 줄: ESC ) 0 → G1=dec_special. SO(0x0e)로 G1 호출 → 'l'→┌, 'q'→─. SI(0x0f)로 G0(ascii) 복귀 → 'l'.
+    try core.write("\r\n\x1b)0\x0elq\x0fl");
+    {
+        const dump = try core.dumpUtf8(std.testing.allocator);
+        defer std.testing.allocator.free(dump);
+        try std.testing.expectEqualStrings("─│q     \n┌─l     ", dump);
+    }
+
+    // RIS는 charset도 공장 초기화: dec_special 지정 후 RIS → 'q'는 다시 ascii(변환 안 됨).
+    try core.write("\x1b(0\x1bcq");
+    {
+        const dump = try core.dumpUtf8(std.testing.allocator);
+        defer std.testing.allocator.free(dump);
+        try std.testing.expectEqualStrings("q       \n        ", dump);
+    }
 }
 
 test "DECSC inside the alt screen does not clobber the cursor saved by 1049 (per-screen slots)" {

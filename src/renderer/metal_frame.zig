@@ -83,6 +83,9 @@ pub const CellColors = struct {
     /// DECSCNM(CSI ?5h, G9) 화면 반전. true면 모든 셀의 전경/배경을 전역 스왑한다(packForeground/packBackground가
     /// style.reverse와 XOR). app이 그 surface core의 reverseScreen()을 wiring한다.
     screen_reverse: bool = false,
+    /// blink(SGR 5) 점멸 위상. false(off 위상)면 blink 셀의 전경을 배경색으로 풀어 글자를 숨긴다(conceal과 같은
+    /// 결). app이 blink_visible(커서 점멸과 같은 500ms 위상)을 wiring하고, 위상이 바뀔 때 frame을 재빌드한다.
+    blink_on: bool = true,
 };
 
 /// 컬러 글리프(이모지)인지 판정한다. 셰이더는 이 cell의 UV에 +2.0이 더해져 오면 atlas의 컬러
@@ -166,8 +169,9 @@ fn lerpHalf(a: color.Rgb, b: color.Rgb) color.Rgb {
 fn packForeground(style: terminal.Style, colors: CellColors) u32 {
     // DECSCNM(화면 반전, G9)과 SGR reverse(7)를 XOR한다 — 둘 다 켜지면 상쇄(정상), 하나만 켜지면 스왑.
     const reverse = style.reverse != colors.screen_reverse;
-    // SGR 8 conceal(G1): 글자를 그 셀의 배경색으로 그려 안 보이게 한다(invisible). reverse면 스왑된 배경.
-    if (style.conceal) {
+    // SGR 8 conceal(G1) 또는 blink(SGR 5) off 위상: 글자를 그 셀 배경색으로 그려 안 보이게 한다(invisible/점멸).
+    // reverse면 스왑된 배경.
+    if (style.conceal or (style.blink and !colors.blink_on)) {
         return packRgb(if (reverse)
             resolveColor(style.foreground, colors.default_fg, colors.palette)
         else
@@ -1592,6 +1596,16 @@ test "packRgb, packForeground, and packBackground pack channels in 0xRRGGBB orde
     try std.testing.expectEqual(@as(u32, 0), packBackground(.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
     try std.testing.expectEqual(@as(u32, 0xFF0A141E), packBackground(.{ .background = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } } }, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
     try std.testing.expectEqual(@as(u32, 0xFF00_0000) | packRgb(color.xterm256(5)), packBackground(.{ .background = .{ .indexed = 5 } }, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
+}
+
+test "blink off-phase hides glyph (blink_on=false), shown on-phase" {
+    const fg = color.Rgb{ .r = 0xFF, .g = 0xFF, .b = 0xFF };
+    const bg = color.Rgb{ .r = 0x10, .g = 0x20, .b = 0x30 };
+    // blink_on=false(off 위상): blink 셀의 전경을 배경색으로 → 숨김. 비-blink 셀은 영향 없음.
+    try std.testing.expectEqual(packRgb(bg), packForeground(.{ .blink = true }, .{ .default_fg = fg, .default_bg = bg, .blink_on = false }));
+    try std.testing.expectEqual(packRgb(fg), packForeground(.{}, .{ .default_fg = fg, .default_bg = bg, .blink_on = false }));
+    // blink_on=true(on 위상, 기본): blink 셀도 정상 전경.
+    try std.testing.expectEqual(packRgb(fg), packForeground(.{ .blink = true }, .{ .default_fg = fg, .default_bg = bg, .blink_on = true }));
 }
 
 test "G1 conceal hides glyph by drawing foreground in the cell background color" {

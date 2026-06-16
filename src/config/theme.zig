@@ -116,6 +116,9 @@ pub const Config = struct {
     quick_terminal: QuickTerminalConfig = .{},
     /// chrome(탭바·사이드바·divider·테두리) 디자인 테마(tui|rich). 기본 tui(현행 cell-grid 룩). loader가 `chrome.theme` 키로 파싱.
     chrome_theme: ChromeTheme = .tui,
+    /// SGR 5(blink) 글자를 실제로 깜빡일지(true)·정적으로 둘지(false). **기본 false** — 깜빡이는 콘텐츠는 접근성
+    /// (WCAG 발작 위험) 우려라 다수 터미널이 기본으로 끈다. loader가 `text.blink` 키로 파싱.
+    blink_text: bool = false,
     /// 셸에 줄 TERM 값. 셸 설정/통합이 $TERM에 따라 키바인딩(예: Ctrl+A 줄-시작)을 다르게 잡는
     /// 경우, 사용자가 자기 환경이 기대하는 값(예: xterm-ghostty)으로 바꿀 수 있다. 빈 값은 무시.
     term: []const u8 = "xterm-256color",

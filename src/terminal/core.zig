@@ -316,6 +316,9 @@ pub const TerminalCore = struct {
     insert_mode: bool = false,
     // G8 DECAWM(CSI ?7 h/l): autowrap. 기본 on(마지막 칸 넘침 시 다음 줄로 wrap). off면 마지막 칸에서 덮어쓴다. RIS on.
     autowrap: bool = true,
+    // G9 DECSCNM(CSI ?5 h/l): 화면 반전. 켜지면 렌더러가 모든 셀의 전경/배경을 전역 스왑한다(app이 reverseScreen()을
+    // CellColors.screen_reverse로 wiring, clear color도 전경색으로). 코어는 셀 색을 안 바꾸고 플래그만 — K1 경계. RIS off.
+    reverse_screen: bool = false,
     /// kitty graphics 이미지 저장소(transmit된 이미지, image_id→픽셀 버퍼). 렌더는 후속.
     kitty_images: KittyImageStorage = .{},
     /// kitty graphics placement(표시 중인 이미지 인스턴스) 목록. (image_id, placement_id)로 식별 —
@@ -458,6 +461,7 @@ pub const TerminalCore = struct {
         self.insert_mode = false; // G6 IRM도 off로 복원.
         self.autowrap = true; // G8 DECAWM도 on(기본)으로 복원.
         self.last_printed_cp = 0; // G5 REP 직전 글자도 비운다.
+        self.reverse_screen = false; // G9 DECSCNM도 off(정상)로 복원.
         @memset(&self.palette_override, null); // OSC 4 팔레트 재정의도 공장 초기화(xterm RIS가 팔레트를 리셋).
         self.default_fg_override = null; // OSC 10/11 전경/배경 색 설정도 공장 초기화(theme 기본 복귀).
         self.default_bg_override = null;
@@ -1663,6 +1667,11 @@ pub const TerminalCore = struct {
         return &self.palette_override;
     }
 
+    /// DECSCNM(G9) 화면 반전 상태. app이 CellColors.screen_reverse·clear color에 반영한다(코어는 셀 색을 안 바꾼다).
+    pub fn reverseScreen(self: *const TerminalCore) bool {
+        return self.reverse_screen;
+    }
+
     /// OSC 52(클립보드) — `52;<targets>;<base64>`로 system clipboard 쓰기를 요청한다(tmux/nvim이 SSH 너머
     /// `"+y`로 씀). **코어는 파싱+base64 디코드만** 하고 결과를 clipboard_write pending에 둔다 — 실제 clipboard
     /// 쓰기와 정책(osc52.write ask/allow/deny)은 app/platform 책임이다(클립보드는 OS 리소스라 native 소유 —
@@ -2806,6 +2815,10 @@ pub const TerminalCore = struct {
         while (i < self.csi_param_count) : (i += 1) {
             switch (self.csiRawParam(i)) {
                 1 => self.application_cursor_keys = set, // DECCKM: 화살표 SS3/CSI 인코딩 전환
+                5 => if (self.reverse_screen != set) { // DECSCNM(G9): 화면 전역 반전 — 바뀌면 전체 재칠
+                    self.reverse_screen = set;
+                    self.dirty = fullDirty(self.size);
+                },
                 6 => self.setOriginMode(set), // DECOM: CUP/HVP origin을 scroll region 상단으로 + 커서 home
                 25 => { // DECTCEM: 커서 표시/숨김. 커서 행만 다시 그리면 된다.
                     self.cursor_visible = set;
@@ -6715,6 +6728,18 @@ test "G5/6/7/8/11/13 small gaps: REP, DECALN, IRM, DECAWM off, SU, urxvt mouse" 
     try std.testing.expectEqual(MouseFormat.urxvt, core.mouse_format);
     try core.write("\x1b[?1015l");
     try std.testing.expectEqual(MouseFormat.x10, core.mouse_format);
+}
+
+test "G9 DECSCNM: CSI ?5 h/l toggles reverse_screen, RIS resets" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    try std.testing.expect(!core.reverseScreen());
+    try core.write("\x1b[?5h");
+    try std.testing.expect(core.reverseScreen());
+    try core.write("\x1b[?5l");
+    try std.testing.expect(!core.reverseScreen());
+    try core.write("\x1b[?5h\x1bc"); // set + RIS
+    try std.testing.expect(!core.reverseScreen());
 }
 
 test "DECSC inside the alt screen does not clobber the cursor saved by 1049 (per-screen slots)" {

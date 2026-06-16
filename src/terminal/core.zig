@@ -2977,7 +2977,10 @@ pub const TerminalCore = struct {
         if (self.last_printed_cp == 0) return;
         const cp = self.last_printed_cp;
         var n = @max(count, 1);
-        while (n > 0) : (n -= 1) self.writeCodepoint(cp);
+        // putCell을 직접 호출한다(writeCodepoint가 아니라) — last_printed_cp는 이미 charset 변환을 거친 최종
+        // 글리프라, writeCodepoint로 다시 보내면 translateCharset이 두 번 적용된다(현 charset이 dec_special이면
+        // 오변환). putCell이 wrap·IRM·DECAWM·wide를 그대로 처리하고 charset만 건너뛴다.
+        while (n > 0) : (n -= 1) self.putCell(cp);
     }
 
     /// DECALN(ESC # 8): 화면 전체를 'E'(기본 attr)로 채우고 커서를 home으로 보낸다. VT 정렬 진단(vttest) 전용.
@@ -6808,6 +6811,15 @@ test "G5/6/7/8/11/13 small gaps: REP, DECALN, IRM, DECAWM off, SU, urxvt mouse" 
         const dump = try core.dumpUtf8(std.testing.allocator);
         defer std.testing.allocator.free(dump);
         try std.testing.expect(std.mem.startsWith(u8, dump, "aaaa"));
+    }
+
+    // 회귀: REP는 '표시된 글리프'를 반복한다 — 출력 후 charset이 바뀌어도 재변환하지 않는다. ASCII에서 'q'
+    // 출력 → dec_special(ESC ( 0) 전환 → REP는 'q'를 반복(box `─`로 재변환 아님). putCell 직접 호출로 보장.
+    try core.write("\x1bcq\x1b(0\x1b[2b");
+    {
+        const dump = try core.dumpUtf8(std.testing.allocator);
+        defer std.testing.allocator.free(dump);
+        try std.testing.expect(std.mem.startsWith(u8, dump, "qqq"));
     }
 
     // G11 DECALN(ESC # 8): 화면 전체 'E', 커서 home.

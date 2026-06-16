@@ -1989,6 +1989,9 @@ pub const TerminalCore = struct {
             'r' => self.setScrollRegion(),
             'L' => self.insertLines(self.csiParam(0, 1)),
             'M' => self.deleteLines(self.csiParam(0, 1)),
+            '@' => self.insertChars(self.csiParam(0, 1)), // ICH: 커서에 N개(기본 1) blank 삽입, 오른쪽으로 민다
+            'P' => self.deleteChars(self.csiParam(0, 1)), // DCH: 커서에서 N개(기본 1) 삭제, 왼쪽으로 당긴다
+
             // DA1(CSI c / CSI 0 c): 터미널 식별 질의. 프로그램(claude CLI 등)이 시작 시 기능 협상
             // 으로 보내며, 응답이 없으면 타임아웃을 기다리거나 기능을 보수적으로 끈다. VT102로
             // 식별한다(CSI ?6c) — 현재 구현 수준(커서/erase/scroll region/IL/DL)과 부합.
@@ -2484,6 +2487,61 @@ pub const TerminalCore = struct {
         self.markDirty(row);
         // ECH는 부분 erase라 soft-wrap flag를 끄지 않는다(EL mode 1과 같은 결 — 줄 끝이 남아 다음 행으로
         // 이어질 수 있다). deferred autowrap만 무효화(다른 erase op과 동일).
+        self.pending_wrap = false;
+        self.last_print = null;
+    }
+
+    /// ICH (CSI Ps @): 커서 위치에 Ps개(기본 1) 빈 칸을 삽입한다. 커서부터 줄 끝까지의 셀을 오른쪽으로
+    /// 밀고, 줄 끝을 넘는 셀은 버린다. 빈 칸은 현재 pen 배경(BCE — eraseCharacters와 동일 규칙). 커서
+    /// 위치는 불변. 베이스: ECMA-48 ICH / xterm ctlseqs `CSI Ps @`. 좌우 margin(DECSLRM) 미구현이라
+    /// 줄 전체에서 작동한다.
+    fn insertChars(self: *TerminalCore, count: u16) void {
+        const row = self.cursor.row;
+        if (self.size.cols == 0 or row >= self.size.rows) return;
+        const start = self.cursor.col;
+        if (start >= self.size.cols) return;
+        const cols = self.size.cols;
+        const n: u16 = @min(@max(count, 1), cols - start);
+        const blank: types.Cell = .{ .style = self.pen };
+        // 커서부터 오른쪽 셀을 n칸 오른쪽으로(역순 복사라 영역이 겹쳐도 안전). 줄 끝을 넘는 셀은 버린다.
+        var col: u16 = cols;
+        while (col > start + n) {
+            col -= 1;
+            self.cells[self.index(row, col)] = self.cells[self.index(row, col - n)];
+        }
+        // 삽입된 빈 칸.
+        col = start;
+        while (col < start + n) : (col += 1) self.cells[self.index(row, col)] = blank;
+        // 왼쪽 경계에서 쪼개진 wide(start-1 base의 continuation이 밀려남)를 복구하고, 줄 끝으로 밀려
+        // continuation이 줄 밖으로 나간 wide base를 비운다.
+        self.repairWideGlyphEdges(row, start, cols);
+        if (self.cells[self.index(row, cols - 1)].width == 2) self.cells[self.index(row, cols - 1)] = blank;
+        self.markDirty(row);
+        self.pending_wrap = false;
+        self.last_print = null;
+    }
+
+    /// DCH (CSI Ps P): 커서 위치에서 Ps개(기본 1) 문자를 삭제한다. 커서 오른쪽 셀을 왼쪽으로 당기고,
+    /// 줄 끝의 빈 자리는 현재 pen 배경(BCE). 커서 위치는 불변. 베이스: ECMA-48 DCH / xterm `CSI Ps P`.
+    fn deleteChars(self: *TerminalCore, count: u16) void {
+        const row = self.cursor.row;
+        if (self.size.cols == 0 or row >= self.size.rows) return;
+        const start = self.cursor.col;
+        if (start >= self.size.cols) return;
+        const cols = self.size.cols;
+        const n: u16 = @min(@max(count, 1), cols - start);
+        const blank: types.Cell = .{ .style = self.pen };
+        // 커서 오른쪽 셀을 n칸 왼쪽으로 당긴다.
+        var col = start;
+        while (col + n < cols) : (col += 1) {
+            self.cells[self.index(row, col)] = self.cells[self.index(row, col + n)];
+        }
+        // 줄 끝 n칸은 빈 칸.
+        while (col < cols) : (col += 1) self.cells[self.index(row, col)] = blank;
+        // 왼쪽 경계에서 쪼개진 wide(start-1 base)를 복구하고, 당겨와서 base를 잃은 continuation을 비운다.
+        self.repairWideGlyphEdges(row, start, cols);
+        if (self.cells[self.index(row, start)].continuation) self.cells[self.index(row, start)] = blank;
+        self.markDirty(row);
         self.pending_wrap = false;
         self.last_print = null;
     }
@@ -4762,6 +4820,58 @@ test "ECH default param is 1 and does not pull following cells (not DCH)" {
     const b = core.cells[core.index(0, 1)].codepoint;
     try std.testing.expect(b == ' ' or b == 0);
     try std.testing.expectEqual(@as(u21, 'C'), core.cells[core.index(0, 2)].codepoint); // C는 그대로 — 뒤를 당기지 않는다
+}
+
+test "ICH (CSI Ps @) inserts N blanks at the cursor, pushing the rest right and dropping past the edge" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 1 });
+    defer core.deinit();
+    try core.write("abcde");
+    try core.write("\x1b[1;2H"); // 커서 (0,1)=b
+    try core.write("\x1b[2@"); // ICH 2: b 자리에 빈 칸 2개, bc를 오른쪽으로(de는 edge 넘어 버림)
+    try std.testing.expectEqual(@as(u21, 'a'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expect(core.cells[core.index(0, 1)].codepoint == ' ' or core.cells[core.index(0, 1)].codepoint == 0);
+    try std.testing.expect(core.cells[core.index(0, 2)].codepoint == ' ' or core.cells[core.index(0, 2)].codepoint == 0);
+    try std.testing.expectEqual(@as(u21, 'b'), core.cells[core.index(0, 3)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'c'), core.cells[core.index(0, 4)].codepoint);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.col); // 커서는 제자리(ICH는 이동 없음)
+}
+
+test "DCH (CSI Ps P) deletes N chars, pulling the rest left with blanks at the end; default 1" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 1 });
+    defer core.deinit();
+    try core.write("abcde");
+    try core.write("\x1b[1;2H"); // 커서 (0,1)=b
+    try core.write("\x1b[2P"); // DCH 2: b,c 삭제, de를 왼쪽으로 당김
+    try std.testing.expectEqual(@as(u21, 'a'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'd'), core.cells[core.index(0, 1)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'e'), core.cells[core.index(0, 2)].codepoint);
+    try std.testing.expect(core.cells[core.index(0, 3)].codepoint == ' ' or core.cells[core.index(0, 3)].codepoint == 0);
+    try std.testing.expect(core.cells[core.index(0, 4)].codepoint == ' ' or core.cells[core.index(0, 4)].codepoint == 0);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.col); // 커서 불변
+    try core.write("\x1b[1;1H\x1b[P"); // 커서 home, DCH 기본 1 — a 삭제, d 당김
+    try std.testing.expectEqual(@as(u21, 'd'), core.cells[core.index(0, 0)].codepoint);
+}
+
+test "DCH pulls a double-width glyph intact when deleting a preceding cell" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
+    defer core.deinit();
+    try core.write("a한bc"); // a(0) 한(1-2, wide) b(3) c(4)
+    try core.write("\x1b[1;1H"); // 커서 home (0,0)=a
+    try core.write("\x1b[P"); // DCH 1 — a 삭제, 한이 col0-1로 통째 당겨짐
+    try std.testing.expectEqual(@as(u21, '한'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expect(core.cells[core.index(0, 1)].continuation); // 한 base+continuation 정합 유지
+    try std.testing.expectEqual(@as(u21, 'b'), core.cells[core.index(0, 2)].codepoint);
+}
+
+test "ICH clears a wide glyph base pushed half off the line edge" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 1 });
+    defer core.deinit();
+    try core.write("abc한"); // a(0) b(1) c(2) 한(3-4, wide)
+    try core.write("\x1b[1;1H"); // 커서 home
+    try core.write("\x1b[@"); // ICH 1 — 한이 줄 끝으로 밀려 continuation이 줄 밖으로
+    try std.testing.expectEqual(@as(u21, 'c'), core.cells[core.index(0, 3)].codepoint);
+    const last = core.cells[core.index(0, 4)];
+    try std.testing.expect(last.codepoint != '한' and last.width != 2); // 고아 base 없이 비워짐
 }
 
 test "focus reporting (DECSET 1004): off=무리포트, on=CSI I / CSI O" {

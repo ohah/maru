@@ -1480,6 +1480,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         resizeDevSession(widthPx: 1_200, heightPx: 720)
         let keyEvent = MaruAppHostKeyEvent(
             codepoint: UInt32(UnicodeScalar("a").value),
+            base_codepoint: UInt32(UnicodeScalar("a").value),
             key_code: UInt32(MaruAppHostKeyCodeUnknown.rawValue),
             modifier_shift: 0,
             modifier_control: 0,
@@ -1491,6 +1492,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         sendKeyEvent(keyEvent)
         let enterEvent = MaruAppHostKeyEvent(
             codepoint: 0,
+            base_codepoint: 0,
             key_code: UInt32(MaruAppHostKeyCodeEnter.rawValue),
             modifier_shift: 0,
             modifier_control: 0,
@@ -1619,6 +1621,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private func normalizedKeyEvent(from event: NSEvent) -> MaruAppHostKeyEvent? {
         var codepoint: UInt32 = 0
+        var baseCodepoint: UInt32 = 0
         var keyCode = UInt32(MaruAppHostKeyCodeUnknown.rawValue)
 
         switch event.keyCode {
@@ -1683,11 +1686,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 return nil
             }
             codepoint = scalar.value
+            // kitty CSI u의 key code용 base-layout codepoint(shift 미반영). characters(byApplyingModifiers:[])는
+            // 어떤 modifier도 안 누른 base 문자라, Ctrl+Shift+A에서 'A'가 아닌 'a'를 준다. dead key/조합 등
+            // 다중 scalar는 0으로 둬 Zig가 codepoint로 폴백하게 한다.
+            if let baseChars = event.characters(byApplyingModifiers: []),
+               baseChars.unicodeScalars.count == 1,
+               let baseScalar = baseChars.unicodeScalars.first {
+                baseCodepoint = baseScalar.value
+            }
         }
 
         let flags = event.modifierFlags
         return MaruAppHostKeyEvent(
             codepoint: codepoint,
+            base_codepoint: baseCodepoint,
             key_code: keyCode,
             modifier_shift: flags.contains(.shift) ? 1 : 0,
             modifier_control: flags.contains(.control) ? 1 : 0,

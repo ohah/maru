@@ -74,6 +74,10 @@ pub const Capabilities = extern struct {
 
 pub const KeyEvent = extern struct {
     codepoint: u32,
+    // codepoint의 unshifted base-layout 값(shift 미반영). kitty CSI u의 key code가 base-layout
+    // key여야 해서 Swift가 characters(byApplyingModifiers:[])로 따로 싣는다. char가 아니거나
+    // 단일 codepoint가 아니면 0(keyEventFromAbi가 codepoint로 폴백).
+    base_codepoint: u32,
     key_code: u32,
     modifier_shift: u32,
     modifier_control: u32,
@@ -617,6 +621,14 @@ fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
         if (keycode.usAsciiForKeyCode(event.raw_key_code)) |latin| codepoint = latin;
     }
 
+    // base codepoint(kitty CSI u의 key code용 — shift 미반영 base-layout)도 codepoint와 같은
+    // 레이아웃 독립 처리를 받는다(한글 모드 Ctrl+Shift도 US 라틴 base로 매칭). 유효 Unicode scalar가
+    // 아니면 null로 두어 encodeKitty가 Key.char codepoint로 폴백한다.
+    var base_codepoint = event.base_codepoint;
+    if ((event.modifier_control != 0 or event.modifier_command != 0) and base_codepoint >= 0x80) {
+        if (keycode.usAsciiForKeyCode(event.raw_key_code)) |latin| base_codepoint = latin;
+    }
+
     // codepoint -> char 변환과 surrogate/범위 거부는 terminal.input이 단일 출처로 소유한다.
     // native keyDown smoke(keyEventFromNativeKeyDown)와 같은 변환을 공유해, 한쪽만 고치면
     // 두 입력 경계가 키 의미를 다르게 해석하는 일을 막는다. 잘못된 codepoint/key_code는 ABI
@@ -661,6 +673,10 @@ fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
             .option = event.modifier_option != 0,
             .command = event.modifier_command != 0,
         },
+        .base_codepoint = if (base_codepoint != 0 and base_codepoint <= 0x10ffff and (base_codepoint < 0xd800 or base_codepoint > 0xdfff))
+            @intCast(base_codepoint)
+        else
+            null,
     };
 }
 test "macOS app host ABI header and Zig declarations stay aligned" {
@@ -748,7 +764,7 @@ test "macOS app host capabilities describe ownership before runtime exists" {
 test "macOS app host event DTOs are explicit fixed-width C ABI records" {
     // Swift struct layout을 추측해서 포인터로 넘기면 위험하다. C header와 같은 fixed-width
     // record만 ABI에 둬야 key input, resize, close event가 platform 별로 흔들리지 않는다.
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(KeyEvent));
+    try std.testing.expectEqual(@as(usize, 36), @sizeOf(KeyEvent));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ResizeEvent));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(KeyEvent));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(ResizeEvent));
@@ -813,6 +829,7 @@ test "layout-independent shortcut: Hangul-mode Ctrl+B normalizes to latin b via 
     // 한글 입력 모드에서 Ctrl+B: AppKit 글자는 'ㅂ'(0x3142)이지만 물리 키코드는 B(0x0B).
     const event = KeyEvent{
         .codepoint = 0x3142, // 'ㅂ'
+        .base_codepoint = 0x3142, // shift 없음 → base도 'ㅂ'; keyEventFromAbi가 US 'b'로 정규화
         .key_code = 0, // unknown
         .modifier_shift = 0,
         .modifier_control = 1,
@@ -834,6 +851,7 @@ test "latin layouts are preserved: Ctrl+B with an ascii codepoint does not consu
     // Dvorak 등 라틴 배열: 현재 레이아웃 결과(ASCII)를 존중한다 — 물리 키코드로 덮지 않는다.
     const event = KeyEvent{
         .codepoint = 'x', // Dvorak에서 다른 물리 키가 'x'를 낼 수 있다
+        .base_codepoint = 'x',
         .key_code = 0,
         .modifier_shift = 0,
         .modifier_control = 1,
@@ -849,7 +867,7 @@ test "latin layouts are preserved: Ctrl+B with an ascii codepoint does not consu
 test "keyEventFromAbi maps function keys to terminal.Key" {
     const mk = struct {
         fn f(code: KeyCode) KeyEvent {
-            return .{ .codepoint = 0, .key_code = @intFromEnum(code), .modifier_shift = 0, .modifier_control = 0, .modifier_option = 0, .modifier_command = 0, .is_repeat = 0, .raw_key_code = 0 };
+            return .{ .codepoint = 0, .base_codepoint = 0, .key_code = @intFromEnum(code), .modifier_shift = 0, .modifier_control = 0, .modifier_option = 0, .modifier_command = 0, .is_repeat = 0, .raw_key_code = 0 };
         }
     }.f;
     try std.testing.expectEqual(terminal.input.Key.delete, (try keyEventFromAbi(mk(.delete))).key);
@@ -862,6 +880,7 @@ test "keyEventFromAbi maps function keys to terminal.Key" {
 test "Option+Backspace chains through ABI to meta-DEL (\\e\\x7f, word delete)" {
     const abi_event = KeyEvent{
         .codepoint = 0,
+        .base_codepoint = 0,
         .key_code = @intFromEnum(KeyCode.backspace),
         .modifier_shift = 0,
         .modifier_control = 0,

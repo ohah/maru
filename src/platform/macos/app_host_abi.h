@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 46u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 47u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -83,6 +83,10 @@ typedef struct MaruAppHostCapabilities {
 
 typedef struct MaruAppHostKeyEvent {
     uint32_t codepoint;
+    /* codepoint의 unshifted base-layout 값(shift 미반영). kitty keyboard CSI u의 key code는
+       명세상 base-layout key여야 하므로, Swift가 characters(byApplyingModifiers:[])로 따로 싣는다.
+       char가 아니거나 단일 codepoint가 아니면 0(Zig가 codepoint로 폴백). */
+    uint32_t base_codepoint;
     uint32_t key_code;
     uint32_t modifier_shift;
     uint32_t modifier_control;

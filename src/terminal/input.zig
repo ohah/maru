@@ -35,6 +35,9 @@ pub const Key = union(enum) {
 pub const KeyEvent = struct {
     key: Key,
     modifiers: ModifierSet = .{},
+    /// char 키의 unshifted base-layout codepoint(shift 미반영). kitty CSI u의 key code가 명세상
+    /// base-layout key여야 해서 platform(ABI)이 채운다. null이면 Key.char codepoint를 그대로 쓴다.
+    base_codepoint: ?u21 = null,
 };
 
 pub const CodepointError = error{
@@ -155,7 +158,16 @@ fn encodeKitty(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: En
         else => {}, // escape·functional은 아래 CSI 시퀀스로(disambiguate)
     }
 
-    const ent = kittyEntry(event.key);
+    var ent = kittyEntry(event.key);
+    // kitty CSI u의 key code는 base-layout key다(명세: unicode-key-code는 shift 미반영). char 키에
+    // base codepoint가 있으면 shifted('A') 대신 base('a')를 써서 Ctrl+Shift+A가 97;6u가 되게 한다 —
+    // shift는 mods에만 반영하고 key code에는 이중 적용하지 않는다.
+    switch (event.key) {
+        .char => if (event.base_codepoint) |base| {
+            ent.code = base;
+        },
+        else => {},
+    }
     const mods = kittyModsSeqInt(event.modifiers);
     return encodeKittySeq(buffer, ent.code, ent.final, mods);
 }
@@ -435,8 +447,12 @@ test "encodeKey kitty: disambiguate text/ctrl/escape/functional (audit 4/5b-2)" 
     // Enter/Backspace(modifier 없음) → legacy 바이트(kitty 명시 예외 — shell 복구 가능).
     try std.testing.expectEqualStrings("\r", try encodeKey(.{ .key = .enter }, &buf, o));
     try std.testing.expectEqualStrings("\x7f", try encodeKey(.{ .key = .backspace }, &buf, o));
-    // Ctrl+a → CSI 97 ; 5 u (base 'a'=97, mods=1+ctrl4=5).
+    // Ctrl+a → CSI 97 ; 5 u (base 'a'=97, mods=1+ctrl4=5). base_codepoint=null이라 Key.char로 폴백.
     try std.testing.expectEqualStrings("\x1b[97;5u", try encodeKey(.{ .key = .{ .char = 'a' }, .modifiers = .{ .control = true } }, &buf, o));
+    // Ctrl+Shift+A: platform이 base_codepoint='a'(shift 미반영)를 채우면 shifted 'A'(65)가 아니라 base
+    // 'a'(97);6u(mods=1+shift1+ctrl4)로 인코딩 — 명세 unicode-key-code는 base-layout key이고 shift는
+    // mods에만 반영(key code에 이중 적용 금지). base가 없던 종전엔 65;6u로 잘못 보냈다(이 버그의 핵심).
+    try std.testing.expectEqualStrings("\x1b[97;6u", try encodeKey(.{ .key = .{ .char = 'A' }, .base_codepoint = 'a', .modifiers = .{ .control = true, .shift = true } }, &buf, o));
     // escape(modifier 없음) → CSI 27 u (disambiguate: legacy ESC와 구분되는 핵심).
     try std.testing.expectEqualStrings("\x1b[27u", try encodeKey(.{ .key = .escape }, &buf, o));
     // arrow_up(modifier 없음) → CSI A (letter final, mods<=1이라 param 생략 — legacy 호환).

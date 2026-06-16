@@ -69,7 +69,18 @@ bool maru_metal_renderer_draw(
     size_t modal_cells_start,
     /* C4b: chrome 그림자(GpuShadow). NULL/0이면 안 그림. quad·셀보다 아래(맨 처음) 그린다. */
     const MaruAppHostDevGpuShadow *gpu_shadows,
-    size_t gpu_shadow_count
+    size_t gpu_shadow_count,
+    /* kitty graphics(K2): 이미지 placement 드로우 프리미티브(textured quad). NULL/0이면 안 그림. pass<2
+       (텍스트 뒤)는 셀 패스 전에, pass==2(텍스트 앞)는 셀 패스 후에 그린다. 각 이미지를 자기 텍스처로 그린다. */
+    const MaruAppHostDevGpuImage *gpu_images,
+    size_t gpu_image_count,
+    /* kitty graphics(K2): 이번 frame에 (재)업로드할 이미지 텍스처 디스크립터(generation 바뀐 것만). renderer가
+       image_id별 텍스처를 만들어 캐시한다. NULL/0이면 업로드 없음(기존 캐시 재사용). */
+    const MaruAppHostDevGpuImageUpload *image_uploads,
+    size_t image_upload_count,
+    /* 위 image_uploads가 가리키는 픽셀 연속 버퍼(RGBA bpp=4 / RGB bpp=3 — RGB는 RGBA로 확장 업로드). */
+    const uint8_t *image_pixels,
+    size_t image_pixel_count
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

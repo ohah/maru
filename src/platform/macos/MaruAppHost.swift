@@ -790,7 +790,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.gpu_quad_count,
             frame.modal_cells_start,      // C4b 모달: over quad를 모달 텍스트 앞에 끼우는 분할점(패스스루)
             frame.gpu_shadows,            // C4b: chrome 그림자(tui/모달 닫힘이면 NULL — 패스스루만)
-            frame.gpu_shadow_count
+            frame.gpu_shadow_count,
+            frame.gpu_images,             // kitty graphics(K2): 이미지 placement(없으면 NULL — 패스스루만)
+            frame.gpu_image_count,
+            frame.image_uploads,          // kitty graphics(K2): 텍스처 업로드(generation 바뀐 것만)
+            frame.image_upload_count,
+            frame.image_pixels,           // kitty graphics(K2): 업로드 픽셀 연속 버퍼
+            frame.image_pixel_count
         )
         if drew {
             lastDrawnGeneration = frame.generation

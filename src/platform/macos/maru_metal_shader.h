@@ -122,4 +122,26 @@ static NSString *const MARU_METAL_SHADOW_SHADER_SOURCE =
      "  return float4(in.color.rgb * a, a);\n"
      "}\n";
 
+/* kitty graphics(K2): 이미지 placement를 textured quad로 그린다. 셀/quad/shadow와 별개 파이프라인이지만
+   같은 premultiplied-over 블렌딩에 합성한다. 정점은 host가 placement당 6개 생성하며 dest 사각형 NDC와
+   source UV([0,1] crop)를 싣는다. fragment는 image_id별 텍스처를 샘플해 premultiply(rgb*=a)한다 —
+   투명 PNG·반투명 이미지가 셀(투명 배경)·텍스트와 자연스럽게 합성된다. ImageIn은 host MaruRendererImageVertex
+   (position 2 + uv 2 = 16바이트 tight-pack)과 1:1. 샘플러는 linear(스케일 부드럽게)·clamp_to_edge. */
+static NSString *const MARU_METAL_IMAGE_SHADER_SOURCE =
+    @"#include <metal_stdlib>\n"
+     "using namespace metal;\n"
+     "struct ImageIn { packed_float2 position; packed_float2 uv; };\n"
+     "struct ImageOut { float4 position [[position]]; float2 uv; };\n"
+     "vertex ImageOut maru_image_vertex(uint vid [[vertex_id]], const device ImageIn *v [[buffer(0)]]) {\n"
+     "  ImageOut o;\n"
+     "  o.position = float4(float2(v[vid].position), 0.0, 1.0);\n"
+     "  o.uv = float2(v[vid].uv);\n"
+     "  return o;\n"
+     "}\n"
+     "fragment float4 maru_image_fragment(ImageOut in [[stage_in]], texture2d<float> img [[texture(0)]]) {\n"
+     "  constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);\n"
+     "  float4 c = img.sample(s, in.uv);\n"
+     "  return float4(c.rgb * c.a, c.a);\n" // premultiplied over(셀·quad와 같은 블렌딩)
+     "}\n";
+
 #endif

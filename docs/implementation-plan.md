@@ -145,7 +145,7 @@ TDD 방식:
 아직 하지 않는다:
 
 - xterm 전체 호환성.
-- Kitty graphics protocol의 렌더(APC 파서+command 토대 #528, 이미지 디코드+저장 #530/#531, placement 코어 K1 완료 — 아래 "미구현 프로토콜 audit" 참조; 화면 렌더 K2·PNG/zlib·sixel은 별개 후속).
+- Kitty graphics protocol(APC 파서+command #528, 이미지 디코드+저장 #530/#531, placement 코어 K1, GpuImage 환산·ABI·Metal 렌더 K2 완료 — 아래 "미구현 프로토콜 audit"·"kitty graphics K2 렌더" 참조; PNG/zlib·sixel·텍스처 eviction은 별개 후속).
 - OSC/clipboard/advanced mouse mode 전체.
 - UAX#11 전체/ambiguous width 설정/ZWJ emoji/box drawing 정렬. 현재는 최소 width table과 continuation/combining cell 모델까지만 구현한다.
 - Ghostty/libghostty-vt 코드 복사.
@@ -495,11 +495,11 @@ TDD 방식:
   - **mouse reporting(DECSET 1000/1002/1003 트래킹 + 1006 SGR/1016 pixels/x10 인코딩)**: 클릭/드래그/휠을 `CSI < Cb;Px;Py M/m`(SGR) 또는 `CSI M`(x10)으로 PTY 리포트. Swift `buttonNumber`→xterm 0/1/2·`modifierFlags`→mods 비트 변환, shift+click은 셀렉션 override, 휠=버튼 64/65.
   - **synchronized output(DECSET 2026)**: sync 중 metal frame 투영을 hold하고 ESU에 누적 출력을 한 frame으로 그려 tearing/깜빡임을 막는다. DECRQM `?2026$p`로 지원 감지(Ghostty render-skip 동형).
   - **kitty keyboard protocol(CSI u, #526/#527)**: 위 키 인코딩 문단 참조 — FlagStack(push `>`/pop `<`/set `=`/query `?`) + disambiguate 인코딩, Shift+Tab backtab fix(code review 발견).
-  - **kitty graphics protocol(APC, #528/#530/#531 + K1)**: ① 파서+command 토대(`ESC _ G ...` 수집 + control `k=v` 파싱, #528) ② 이미지 디코드+저장(transmit RGBA/RGB base64→`KittyImageStorage`, 같은 id 교체·320MB 총량 한계·`a=d` delete·RIS 비움, #530; 치수 곱 오버플로 crash fix #531) ③ **K1 placement(코어)**: display(`a=p`/`a=T`)를 현재 커서 셀에 placement로 걸어 `(image_id, placement_id)`로 저장(같은 키 교체)하고 `RenderSnapshot.placements`로 노출까지 완료. **베이스**: kitty graphics protocol display data(`p`/`x`/`y`/`w`/`h`/`X`/`Y`/`c`/`r`/`z`/`C` 키). **의사결정**: (1) anchor는 **절대 행**(스크롤백 0..sb_count-1, 이어서 활성 화면)이라 selection/find와 같은 좌표계로 스크롤·eviction과 함께 움직인다(`shiftPlacementsForEviction`이 eviction마다 보정, 화면 밖이면 제거 — `shiftSelectionForEviction`과 동형). (2) **셀 단위 크기(span)는 코어가 계산하지 않는다** — 코어는 셀 픽셀 크기를 모르므로(`Size`는 rows/cols, 마우스 1016도 platform이 픽셀을 주입) source rect(픽셀)와 명시 `c`/`r`만 담고, 픽셀→셀 환산·클립은 셀 메트릭을 가진 **렌더러(K2) 책임**이다(마우스 1016 경계와 정합). `RenderSnapshot.placements`의 `row`는 뷰포트 상대 i32(화면 위로 벗어난 앵커는 음수 — 렌더러가 span으로 가시성/클립 판정). (3) 커서 이동 정책(`C`): 기본은 이미지 아래로 내리되 행 수(`r`)가 명시됐을 때만(자동 크기는 span 미상이라 미이동 — K1 한계), 화면 끝 초과는 스크롤 없이 마지막 행 clamp. (4) placement 상한(`max_kitty_placements`=1024)으로 placement_id 폭주 차단(이미지 320MB·APC 버퍼 한계와 같은 결의 방어선). **검증**: 생성·모든 display 키 파싱·뷰포트 매핑·`a=T` 합성·없는 이미지/`i=0` graceful·같은 키 교체·다른 p 별개·커서 이동(C/r/clamp)·delete가 이미지+placement 동시 제거·RIS 비움·eviction anchor 보정/제거·위 스크롤 시 뷰포트 row 환산을 결정적 unit으로 단언. **렌더는 아직 안 한다(화면에 픽셀 없음)** — 노출까지가 K1. 남은 후속: **K2 렌더(가장 큰 단계 — GpuImage 프리미티브 + per-image 텍스처 + Metal 파이프라인 + ABI bump; 아래 "kitty graphics K2 렌더 설계" 절)**, K3 디코드 확장(PNG `f=100`·zlib `o=z`·chunked `m=1`), K4 저장 관리(LRU evict + 세분화된 `d` 타깃). sixel(DCS 기반)은 별개이고 Ghostty도 미지원이라 후순위.
+  - **kitty graphics protocol(APC, #528/#530/#531 + K1)**: ① 파서+command 토대(`ESC _ G ...` 수집 + control `k=v` 파싱, #528) ② 이미지 디코드+저장(transmit RGBA/RGB base64→`KittyImageStorage`, 같은 id 교체·320MB 총량 한계·`a=d` delete·RIS 비움, #530; 치수 곱 오버플로 crash fix #531) ③ **K1 placement(코어)**: display(`a=p`/`a=T`)를 현재 커서 셀에 placement로 걸어 `(image_id, placement_id)`로 저장(같은 키 교체)하고 `RenderSnapshot.placements`로 노출까지 완료. **베이스**: kitty graphics protocol display data(`p`/`x`/`y`/`w`/`h`/`X`/`Y`/`c`/`r`/`z`/`C` 키). **의사결정**: (1) anchor는 **절대 행**(스크롤백 0..sb_count-1, 이어서 활성 화면)이라 selection/find와 같은 좌표계로 스크롤·eviction과 함께 움직인다(`shiftPlacementsForEviction`이 eviction마다 보정, 화면 밖이면 제거 — `shiftSelectionForEviction`과 동형). (2) **셀 단위 크기(span)는 코어가 계산하지 않는다** — 코어는 셀 픽셀 크기를 모르므로(`Size`는 rows/cols, 마우스 1016도 platform이 픽셀을 주입) source rect(픽셀)와 명시 `c`/`r`만 담고, 픽셀→셀 환산·클립은 셀 메트릭을 가진 **렌더러(K2) 책임**이다(마우스 1016 경계와 정합). `RenderSnapshot.placements`의 `row`는 뷰포트 상대 i32(화면 위로 벗어난 앵커는 음수 — 렌더러가 span으로 가시성/클립 판정). (3) 커서 이동 정책(`C`): 기본은 이미지 아래로 내리되 행 수(`r`)가 명시됐을 때만(자동 크기는 span 미상이라 미이동 — K1 한계), 화면 끝 초과는 스크롤 없이 마지막 행 clamp. (4) placement 상한(`max_kitty_placements`=1024)으로 placement_id 폭주 차단(이미지 320MB·APC 버퍼 한계와 같은 결의 방어선). **검증**: 생성·모든 display 키 파싱·뷰포트 매핑·`a=T` 합성·없는 이미지/`i=0` graceful·같은 키 교체·다른 p 별개·커서 이동(C/r/clamp)·delete가 이미지+placement 동시 제거·RIS 비움·eviction anchor 보정/제거·위 스크롤 시 뷰포트 row 환산을 결정적 unit으로 단언. K1은 화면 렌더 없이 노출까지다. ④ **K2 렌더(완료)**: GpuImage 환산 + per-image 텍스처 + Metal 파이프라인 + ABI v48 — 아래 "kitty graphics K2 렌더" 절. 남은 후속: K3 디코드 확장(PNG `f=100`·zlib `o=z`·chunked `m=1`), K4 저장 관리(LRU evict·텍스처 eviction·세분화된 `d` 타깃). sixel(DCS 기반)은 별개이고 Ghostty도 미지원이라 후순위.
 
-## kitty graphics K2 렌더 설계 (사용자 합의 완료·미착수)
+## kitty graphics K2 렌더 (완료 — 화면 육안 확인은 GUI 수동)
 
-K1(placement 코어)에 이어 **실제로 이미지 픽셀을 화면에 그리는** 단계다. kitty graphics의 가장 큰 단계로, 코어 노출 → 렌더러 환산 → ABI → Swift Metal 4층을 모두 건드린다. 작은 PR로 쪼개 각 층을 TDD로 검증한다.
+K1(placement 코어)에 이어 **실제로 이미지 픽셀을 화면에 그리는** 단계다. kitty graphics의 가장 큰 단계로, 코어 노출 → 렌더러 환산 → ABI → Swift Metal 4층을 모두 건드렸다. 작은 PR(K2a~K2d)로 쪼개 각 층을 TDD로 검증했다(화면 픽셀 출력은 GUI라 육안 수동 검증).
 
 **베이스**: kitty graphics protocol(display data·z-index 의미). **레퍼런스 동작 비교**: Ghostty(`src/renderer/image.zig`)가 같은 프로토콜을 어떻게 렌더하는지 **동작만** 확인했고(이미지당 개별 텍스처·3-pass z·CPU 뷰포트 클립·premultiplied alpha), 자료구조 레이아웃·함수 분해는 옮기지 않는다(clean-room). 렌더 프리미티브 추가는 maru의 chrome **GPU quad(C4b)** 선례(draw_list→metal_frame→ABI→Swift + DevSession ArrayList 수집 + dupe 소유 + `layer`로 패스 분리)를 그대로 따른다.
 
@@ -510,12 +510,14 @@ K1(placement 코어)에 이어 **실제로 이미지 픽셀을 화면에 그리�
 - **placement→픽셀 환산은 렌더러 소유**(K1 결정의 귀결). 셀 메트릭(`cell_width_px`/`cell_height_px`, 이미 `MetalFrame`에 있음)으로 dest rect = `grid_pos*cell_size + cell_offset`, dest 크기 = `columns/rows*cell_size`(0이면 source/이미지 크기), source rect는 텍스처 크기로 [0,1] 정규화. 뷰포트 밖(row 음수 등)은 CPU에서 클립/제외.
 - **블렌딩 = premultiplied alpha over composite**(컬러 이모지 atlas 경로와 동일 합성 규율, 셰이더만 textured-quad로 분리).
 
-단계(각자 PR):
+단계(각자 PR, 전부 완료):
 
-- **K2a — 이미지 픽셀 노출 + upload generation(코어, 순수 Zig)**: `KittyImageStorage`의 이미지(image_id·width·height·bpp·픽셀)를 렌더러로 노출(`RenderSnapshot.images` 또는 전용 accessor)하고, transmit/delete/clear마다 per-image generation(또는 storage epoch)을 bump해 "업로드 필요" 신호를 만든다. GPU 없음 — 노출/generation 단조 증가/RIS·delete 반영을 unit으로 단언.
-- **K2b — placement→GpuImage 환산(렌더러, Zig)**: `DrawList`가 placements+images를 운반하고, `metal_frame`이 셀 메트릭으로 `GpuImage`(extern struct — dest rect·source rect·z-pass 분류·텍스처 업로드 참조)를 만든다. dest/source 기하·3-pass 경계 분류·뷰포트 클립을 unit으로 단언(GPU 없이 수치 검증).
-- **K2c — ABI bump 48**: `MaruAppHostDevMetalFrame`에 `gpu_images` 배열 + 이미지 업로드 채널(image_id·치수·픽셀 offset/len·generation) 추가, C 헤더·`MARU_MACOS_APP_HOST_ABI_VERSION`·`abi_version` 동기, `@sizeOf/@offsetOf` 가드 테스트.
-- **K2d — Swift Metal 렌더**: image_id→`MTLTexture` 캐시(신규/generation 변경 시 업로드, 삭제 시 해제), textured-quad 파이프라인(premultiplied alpha), z-pass로 셀배경/텍스트 전후에 그리기. live PTY Metal screenshot smoke로 실제 출력 확인.
+- **K2a — 이미지 픽셀 노출 + upload generation(코어, 순수 Zig, 완료)**: `KittyImageStorage`의 이미지(image_id·width·height·bpp·픽셀)를 `RenderSnapshot.images`로 노출하고, transmit/delete마다 per-image generation을 bump해 "업로드 필요" 신호를 만든다(clear/RIS는 카운터 비리셋). 노출/generation 단조/RIS·delete 반영 unit 검증.
+- **K2b — placement→GpuImage 환산(렌더러, Zig, 완료)**: `metal_frame.buildGpuImages`가 셀 메트릭으로 `GpuImage`(dest rect·source UV·z-pass)를 만든다. dest/source 기하·3-pass 분류·뷰포트 cull·종횡비를 unit 검증(GPU 없이).
+- **K2c — ABI bump 48(완료)**: `MaruAppHostDevMetalFrame`에 `gpu_images`/`image_uploads`/`image_pixels` 채널 추가, `GpuImageUpload` + `planImageUploads`(generation dedup), C 헤더·버전 동기, `@sizeOf/@offsetOf` 가드 + macOS ABI 계약 테스트.
+- **K2d — Swift/ObjC Metal 렌더(완료)**: `maru_metal_renderer.m`가 image_id→`MTLTexture` 캐시(generation 바뀐 것만 업로드, RGB→RGBA 확장), `maru_image_*` 셰이더로 textured-quad, z-pass(maru는 기본 셀 배경 alpha=0이라 셀 패스 전=텍스트 뒤·후=텍스트 앞)로 그린다. DevSession이 매 frame 활성 surface placement를 수집해 ABI로 전달. 컴파일/계약/단위 전부 green, 화면 픽셀은 GUI 육안 수동.
+
+후속(K2 밖): 텍스처 eviction(삭제 이미지 GPU 메모리 해제, 현재 안 그려질 뿐)·비활성 panel 이미지·reflow 정밀 재배치는 K4/별도. K3 디코드 확장(PNG/zlib/chunked).
 
 한계(설계 시점에 알려진): 자동 크기(`r` 미지정) 커서 advance는 K1대로 미이동; reflow 후 정밀 재배치·세분화된 `d` 타깃·query 응답·애니메이션은 K3/K4 또는 별도. 멀티 윈도우에서 이미지 텍스처 캐시 소유권은 glyph atlas의 per-session 소유권 재검토와 함께 본다(현재 단일 윈도우 기준).
 

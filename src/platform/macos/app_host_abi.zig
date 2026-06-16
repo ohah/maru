@@ -694,6 +694,16 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u32, c.MaruAppHostQuickTerminalPositionCenter), @intFromEnum(maru.config.theme.QuickTerminalPosition.center));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostCommand), @sizeOf(app_dev_session.CommandEntry));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostCommand), @alignOf(app_dev_session.CommandEntry));
+    // CommandEntry는 동일-폭 포인터 4개라 @sizeOf가 필드 reorder를 못 잡는다 — @offsetOf로 C↔Zig 위치를
+    // 대조한다(DevMetalFrame 포인터 필드 선례와 동형). title↔action_key 등이 뒤바뀌면 Swift가 잘못된 문자열을 읽는다.
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostCommand, "action_key"), @offsetOf(app_dev_session.CommandEntry, "action_key"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostCommand, "title"), @offsetOf(app_dev_session.CommandEntry, "title"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostCommand, "key_display"), @offsetOf(app_dev_session.CommandEntry, "key_display"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostCommand, "key_equivalent"), @offsetOf(app_dev_session.CommandEntry, "key_equivalent"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostCommand, "key_modifiers"), @offsetOf(app_dev_session.CommandEntry, "key_modifiers"));
+    // GlobalHotkey ABI 정합(전역 단축키 enumerate가 out_ptr로 노출) — 이전엔 대조가 통째로 빠져 있었다.
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostGlobalHotkey), @sizeOf(app_dev_session.GlobalHotkey));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostGlobalHotkey), @alignOf(app_dev_session.GlobalHotkey));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevFrameSummary), @sizeOf(DevFrameSummary));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostDevFrameSummary), @alignOf(DevFrameSummary));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevMetalCell), @sizeOf(DevMetalCell));

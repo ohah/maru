@@ -290,6 +290,12 @@ pub const TerminalCore = struct {
     palette_override: [256]?types.Rgb = .{null} ** 256,
     // OSC 52 클립보드 쓰기 요청(디코드된 바이트, pending). platform이 정책(allow) 확인 후 drain → system clipboard.
     clipboard_write: std.ArrayListUnmanaged(u8) = .empty,
+    // OSC 9(iTerm2)·OSC 777(rxvt) 데스크톱 알림 pending. 코어는 title/body 파싱만 하고, platform이 매 tick drain해
+    // 네이티브 알림(UNUserNotificationCenter)으로 띄운다(후속 PR). 한 tick에 여럿 오면 마지막만 남는다(드묾, 허용).
+    // 알림은 transient 이벤트라 RIS 대상 아님(pending은 다음 tick에 drain되어 곧 사라진다). osc_overflow가 크기 방어.
+    notification_pending: bool = false,
+    notification_title: std.ArrayListUnmanaged(u8) = .empty,
+    notification_body: std.ArrayListUnmanaged(u8) = .empty,
     /// kitty graphics 이미지 저장소(transmit된 이미지, image_id→픽셀 버퍼). 렌더는 후속.
     kitty_images: KittyImageStorage = .{},
     /// kitty graphics placement(표시 중인 이미지 인스턴스) 목록. (image_id, placement_id)로 식별 —
@@ -456,6 +462,8 @@ pub const TerminalCore = struct {
         self.kitty_chunk.deinit(self.allocator);
         self.apc_buffer.deinit(self.allocator);
         self.clipboard_write.deinit(self.allocator);
+        self.notification_title.deinit(self.allocator);
+        self.notification_body.deinit(self.allocator);
         if (self.placement_views.len > 0) self.allocator.free(self.placement_views);
         if (self.image_views.len > 0) self.allocator.free(self.image_views);
         self.* = undefined;
@@ -1522,6 +1530,10 @@ pub const TerminalCore = struct {
         } else if (std.mem.eql(u8, body, "104") or std.mem.startsWith(u8, body, "104;")) {
             // OSC 104 = 팔레트 리셋. 인덱스 없으면(정확히 "104") 전부, "104;1;2"면 그 인덱스만.
             self.dispatchOscPaletteReset(if (body.len > 4) body[4..] else "");
+        } else if (std.mem.startsWith(u8, body, "777;")) {
+            self.dispatchOscNotify777(body[4..]); // OSC 777 = rxvt 데스크톱 알림(notify;title;body)
+        } else if (std.mem.startsWith(u8, body, "9;")) {
+            self.dispatchOscNotify9(body[2..]); // OSC 9 = iTerm2 알림(ConEmu 서브커맨드와 충돌 — 가드)
         }
         // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
     }
@@ -1637,6 +1649,64 @@ pub const TerminalCore = struct {
 
     pub fn clearClipboardWrite(self: *TerminalCore) void {
         self.clipboard_write.clearRetainingCapacity();
+    }
+
+    /// OSC 777(rxvt/urxvt) 데스크톱 알림 — `OSC 777 ; notify ; <title> ; <body>`. `notify;` 접두만 처리하고
+    /// 나머지를 첫 `;`로 title/body로 가른다(body는 `;` 포함 가능). body가 없으면 빈 문자열. 다른 777 서브타입
+    /// (notify 외)은 무시. 베이스: urxvt OSC 777 notify.
+    fn dispatchOscNotify777(self: *TerminalCore, body: []const u8) void {
+        if (!std.mem.startsWith(u8, body, "notify;")) return; // notify 외 777 서브타입은 미지원(소비만)
+        const rest = body["notify;".len..];
+        const sep = std.mem.indexOfScalar(u8, rest, ';');
+        if (sep) |i| {
+            self.setNotification(rest[0..i], rest[i + 1 ..]);
+        } else {
+            self.setNotification(rest, ""); // body 없는 형태: title만
+        }
+    }
+
+    /// OSC 9(iTerm2) 데스크톱 알림 — `OSC 9 ; <message>`(title 없음, body=message). **ConEmu 충돌**: OSC 9는
+    /// ConEmu가 `9;1`(sleep)·`9;2`(msgbox)·`9;4`(progress)·`9;9`(cwd) 등으로도 쓴다. 이들을 알림으로 오발사하면
+    /// (특히 `9;4` progress가 진행바마다 알림 폭탄) 곤란하므로, `<숫자>;...` 형태는 ConEmu 서브커맨드로 보고
+    /// 소비만 한다(알림 안 함). **베이스/결정**: iTerm2 OSC 9(body=전체) 기준. ConEmu 분기는 Ghostty osc9가
+    /// 유효 서브커맨드만 소비하고 미완성은 알림으로 폴백하는데(예: `9;4`→알림 "4"), maru는 `<숫자>;` 패턴 전체를
+    /// 보수적으로 소비해 progress 등 완성 서브커맨드의 오발사를 확실히 막는다(순수 텍스트·단일 숫자 알림만 발사).
+    fn dispatchOscNotify9(self: *TerminalCore, body: []const u8) void {
+        if (body.len == 0) return;
+        if (looksLikeConemu9(body)) return; // `<숫자>;...` → ConEmu 서브커맨드(소비, 알림 안 함)
+        self.setNotification("", body); // iTerm2: title 없음, body=메시지 전체
+    }
+
+    /// OSC 9 body가 ConEmu 서브커맨드(`<숫자>;...`)처럼 보이는가. 선두 숫자 뒤에 `;`가 오면 true.
+    fn looksLikeConemu9(s: []const u8) bool {
+        var i: usize = 0;
+        while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) {}
+        return i > 0 and i < s.len and s[i] == ';';
+    }
+
+    /// 알림 title/body를 pending에 둔다(소유 버퍼에 복사). 할당 실패면 조용히 폐기(알림은 best-effort).
+    fn setNotification(self: *TerminalCore, title: []const u8, notify_body: []const u8) void {
+        self.notification_title.clearRetainingCapacity();
+        self.notification_body.clearRetainingCapacity();
+        self.notification_title.appendSlice(self.allocator, title) catch return;
+        self.notification_body.appendSlice(self.allocator, notify_body) catch {
+            self.notification_title.clearRetainingCapacity();
+            return;
+        };
+        self.notification_pending = true;
+    }
+
+    /// OSC 9/777로 들어온 데스크톱 알림(title, body). 없으면 null. platform이 매 tick drain해 네이티브 알림으로
+    /// 띄우고 clearNotification한다 — 코어는 OS 알림을 직접 만지지 않는다(경계, OSC 52와 같은 결).
+    pub fn pendingNotification(self: *const TerminalCore) ?struct { title: []const u8, body: []const u8 } {
+        if (!self.notification_pending) return null;
+        return .{ .title = self.notification_title.items, .body = self.notification_body.items };
+    }
+
+    pub fn clearNotification(self: *TerminalCore) void {
+        self.notification_pending = false;
+        self.notification_title.clearRetainingCapacity();
+        self.notification_body.clearRetainingCapacity();
     }
 
     /// 종료된 APC(ESC _ ... ESC \) 내용을 처리한다. kitty graphics(`ESC _ G ...`)가 유일한 소비자다.
@@ -6209,6 +6279,58 @@ test "OSC 10/11 (default fg/bg) set/query/reset; query reflects override; RIS cl
     try std.testing.expect(core.defaultFgOverride() != null);
     try core.write("\x1bc"); // RIS
     try std.testing.expectEqual(@as(?types.Rgb, null), core.defaultFgOverride());
+}
+
+test "OSC 9/777 desktop notification: parse iTerm2/rxvt, ConEmu sub-commands ignored" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    try std.testing.expect(core.pendingNotification() == null);
+
+    // OSC 9 ; <message> → iTerm2 알림(title 없음, body=메시지).
+    try core.write("\x1b]9;Build finished\x1b\\");
+    {
+        const n = core.pendingNotification().?;
+        try std.testing.expectEqualStrings("", n.title);
+        try std.testing.expectEqualStrings("Build finished", n.body);
+    }
+    core.clearNotification();
+    try std.testing.expect(core.pendingNotification() == null);
+
+    // OSC 777 ; notify ; <title> ; <body> → rxvt 알림.
+    try core.write("\x1b]777;notify;Deploy;done in 3s\x1b\\");
+    {
+        const n = core.pendingNotification().?;
+        try std.testing.expectEqualStrings("Deploy", n.title);
+        try std.testing.expectEqualStrings("done in 3s", n.body);
+    }
+    core.clearNotification();
+
+    // body에 ';'가 더 있어도 첫 ';'만 title/body 경계(body는 ';' 포함 가능).
+    try core.write("\x1b]777;notify;T;a;b;c\x1b\\");
+    {
+        const n = core.pendingNotification().?;
+        try std.testing.expectEqualStrings("T", n.title);
+        try std.testing.expectEqualStrings("a;b;c", n.body);
+    }
+    core.clearNotification();
+
+    // ConEmu 서브커맨드는 알림으로 오발사 안 함: 9;4 progress(진행바 폭탄 방지)·9;1 sleep.
+    try core.write("\x1b]9;4;1;50\x1b\\");
+    try std.testing.expect(core.pendingNotification() == null);
+    try core.write("\x1b]9;1;420\x1b\\");
+    try std.testing.expect(core.pendingNotification() == null);
+
+    // 선두 숫자라도 다음이 ';'가 아니면(숫자+공백/글자) iTerm2 알림으로 발사.
+    try core.write("\x1b]9;42 builds done\x1b\\");
+    {
+        const n = core.pendingNotification().?;
+        try std.testing.expectEqualStrings("42 builds done", n.body);
+    }
+    core.clearNotification();
+
+    // OSC 777의 notify 외 서브타입은 무시.
+    try core.write("\x1b]777;precmd\x1b\\");
+    try std.testing.expect(core.pendingNotification() == null);
 }
 
 test "DECSC inside the alt screen does not clobber the cursor saved by 1049 (per-screen slots)" {

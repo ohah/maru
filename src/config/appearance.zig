@@ -43,6 +43,7 @@ pub const ResolvedAppearance = struct {
     theme: ResolvedTheme,
     cursor: ResolvedCursor,
     chrome_theme: theme.ChromeTheme = .tui, // tui|rich — platform buildChromeTokens가 tui()/rich() 분기에 읽는다(C4a)
+    blink_text: bool = false, // SGR 5 blink 글자 점멸 여부(기본 정적 — 접근성). app이 blink 위상 wiring 게이트로 쓴다.
 };
 
 pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
@@ -57,6 +58,7 @@ pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
             .blink = config.cursor.blink,
         },
         .chrome_theme = config.chrome_theme,
+        .blink_text = config.blink_text,
     };
 }
 

@@ -2806,9 +2806,12 @@ pub const DevSession = struct {
         // 커서 자체가 깜빡이는 조건(DECSCUSR blink·표시·조합 아님).
         const cursor_blinks = core.cursor_blink and core.cursor_visible and core.preedit == null;
         const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open;
+        // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상을 진행한다
+        // (없으면 idle 재투영 없음). blink 글자는 커서/caret과 달리 suffix-trim으로 못 숨겨 full rebuild가 필요하다.
+        const text_blinks = self.appearance.blink_text and core.viewportHasBlink();
         // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
         // core.preedit로 이미 막지만, 오버레이는 overlay_open=true라 imeComposingActive로 막아야 한다(단일 출처).
-        if ((!cursor_blinks and !overlay_open) or self.imeComposingActive()) {
+        if ((!cursor_blinks and !overlay_open and !text_blinks) or self.imeComposingActive()) {
             self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
             return;
         }
@@ -2819,6 +2822,8 @@ pub const DevSession = struct {
             // suffix-trim 토글(재빌드 없음). 오버레이가 열렸으면 suffix=오버레이 caret이라 caret을, 닫혔으면 suffix=
             // 터미널 커서라 커서를 깜빡인다 — 같은 코드(generation↑만, idle에 full-grid reshape 안 함).
             self.metal_buffer.setCursorVisible(self.blink_visible);
+            // 텍스트 blink는 셀 전경을 위상으로 숨기므로(packForeground) full rebuild가 필요하다 — dirty 표시.
+            if (text_blinks) self.metal_dirty = true;
         }
     }
 
@@ -3856,6 +3861,9 @@ pub const DevSession = struct {
                 .default_bg = self.activeSurface().core.defaultBgOverride() orelse self.appearance.theme.background,
                 .palette = self.activeSurface().core.paletteOverride(), // OSC 4 팔레트 재정의(.indexed 색 풀이)
                 .screen_reverse = self.activeSurface().core.reverseScreen(), // DECSCNM(?5) 화면 전역 반전(G9)
+                // blink(SGR 5): config text.blink가 켜졌을 때만 위상(blink_visible)을 반영해 off 위상에 숨긴다.
+                // 꺼져 있으면(기본) 항상 on → 정적(안 깜빡임). 접근성 기본값.
+                .blink_on = !self.appearance.blink_text or self.blink_visible,
                 .selection_bg = self.appearance.theme.selection,
                 .selection = self.activeSurface().core.selectionViewportSpan(),
                 .hover_link = self.hoverLinkSpan(),
@@ -4058,6 +4066,7 @@ pub const DevSession = struct {
                         var pane_colors = inactive_colors;
                         pane_colors.palette = pane_core.paletteOverride();
                         pane_colors.screen_reverse = pane_core.reverseScreen(); // DECSCNM(G9) per-pane
+                        pane_colors.blink_on = !self.appearance.blink_text or self.blink_visible; // blink 위상(전역, config 게이트)
                         if (pane_core.defaultFgOverride()) |fg| pane_colors.default_fg = fg;
                         if (pane_core.defaultBgOverride()) |bg| pane_colors.default_bg = bg;
                         const t = self.paneTermRect(lr.rect); // 바 아래 영역 origin

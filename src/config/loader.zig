@@ -211,6 +211,11 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "chrome.theme은 tui|rich — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "text.blink")) {
+        config.blink_text = parseBool(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "text.blink은 true|false — 기본값 유지" });
+            return;
+        };
     } else if (std.mem.eql(u8, key, "term")) {
         const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
         if (trimmed.len == 0) {
@@ -500,6 +505,7 @@ test "parse: full config sets every field" {
         \\cursor.shape = bar
         \\cursor.blink = false
         \\chrome.theme = rich
+        \\text.blink = true
     );
     defer p.deinit();
     try std.testing.expectEqualStrings("JetBrains Mono", p.config.font.family);
@@ -509,6 +515,7 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(theme.CursorShape.bar, p.config.cursor.shape);
     try std.testing.expectEqual(false, p.config.cursor.blink);
     try std.testing.expectEqual(theme.ChromeTheme.rich, p.config.chrome_theme); // C4a chrome.theme 파싱
+    try std.testing.expectEqual(true, p.config.blink_text); // text.blink 파싱(기본 false)
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
 }
 

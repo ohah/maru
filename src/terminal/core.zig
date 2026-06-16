@@ -676,6 +676,18 @@ pub const TerminalCore = struct {
         return self.cells[start .. start + self.size.cols];
     }
 
+    /// 보이는 뷰포트에 blink(SGR 5) 셀이 하나라도 있는가. app이 blink 위상을 진행/재빌드할지 게이트로 쓴다
+    /// (blink 글자가 없으면 idle 재투영을 안 한다). view_offset==0(미스크롤)이면 활성 셀만 보는 싸다.
+    pub fn viewportHasBlink(self: *const TerminalCore) bool {
+        var r: u16 = 0;
+        while (r < self.size.rows) : (r += 1) {
+            for (self.viewportRow(r)) |cell| {
+                if (cell.style.blink) return true;
+            }
+        }
+        return false;
+    }
+
     /// 보이는 행 r의 OSC 133 정보(viewportRow와 같은 [스크롤백 ++ 활성] 윈도 인덱싱).
     pub fn viewportRowPrompt(self: *const TerminalCore, r: u16) types.RowPrompt {
         const ci = self.sb_count - @min(self.view_offset, self.sb_count) + r; // underflow 가드(다른 호출부와 동일)

@@ -2439,6 +2439,14 @@ pub const TerminalCore = struct {
             'M' => self.deleteLines(self.csiParam(0, 1)),
             '@' => self.insertChars(self.csiParam(0, 1)), // ICH: 커서에 N개(기본 1) blank 삽입, 오른쪽으로 민다
             'P' => self.deleteChars(self.csiParam(0, 1)), // DCH: 커서에서 N개(기본 1) 삭제, 왼쪽으로 당긴다
+            // SCOSC/SCORC(CSI s / CSI u): ANSI(SCO) 커서 저장/복원. DECSC/DECRC(ESC 7/8)와 같은 슬롯을
+            // 쓴다(위치+pen+pending_wrap). xterm은 좌우 margin 모드(DECLRMM ?69)일 때만 CSI s를 DECSLRM으로
+            // 보지만, maru는 좌우 margin 미구현이라 항상 save로 처리한다. multi-line progress(brew 등)가
+            // 커서 저장→여러 줄 그리기→복원으로 제자리 갱신하는 표준 수단이다 — 복원을 무시하면 진행바가
+            // 줄줄이 쌓인다. 베이스: xterm ctlseqs SCOSC/SCORC(Ghostty 동등). bare 's'/'u'만 — kitty CSI u
+            // (`> < = ?` prefix)는 위 private 분기에서 처리하므로 여기 안 온다.
+            's' => self.saveCursorState(),
+            'u' => self.restoreCursorState(),
 
             // DA1(CSI c / CSI 0 c): 터미널 식별 질의. 프로그램(claude CLI 등)이 시작 시 기능 협상
             // 으로 보내며, 응답이 없으면 타임아웃을 기다리거나 기능을 보수적으로 끈다. VT102로
@@ -5849,6 +5857,19 @@ test "DECRC restores the pen and clamps a cursor saved on a larger screen" {
     try core.resize(4, 2); // 저장 좌표보다 작은 화면으로
     try core.write("\x1b8"); // clamp돼 grid 안
     try std.testing.expect(core.cursor.row < 2 and core.cursor.col < 4);
+}
+
+test "CSI s/u (SCOSC/SCORC) save and restore the cursor like DECSC/DECRC" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    // brew 등 multi-line progress가 쓰는 ANSI 커서 저장/복원. (1,4)로 옮겨 CSI s로 저장하고, 다른
+    // 데로 옮긴 뒤 CSI u로 복원하면 (1,4)로 돌아와야 한다 — 안 그러면 진행바가 줄줄이 쌓인다.
+    try core.write("\x1b[2;5H"); // CUP (1-indexed 2;5) → row1, col4
+    try core.write("\x1b[s"); // SCOSC: 저장
+    try core.write("\x1b[3;9H"); // row2, col8로 이동
+    try core.write("\x1b[u"); // SCORC: 복원 → row1, col4
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 4), core.cursor.col);
 }
 
 test "DA1 (CSI c) answers with a VT102 identification over the response path" {

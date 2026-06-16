@@ -495,7 +495,43 @@ TDD 방식:
   - **mouse reporting(DECSET 1000/1002/1003 트래킹 + 1006 SGR/1016 pixels/x10 인코딩)**: 클릭/드래그/휠을 `CSI < Cb;Px;Py M/m`(SGR) 또는 `CSI M`(x10)으로 PTY 리포트. Swift `buttonNumber`→xterm 0/1/2·`modifierFlags`→mods 비트 변환, shift+click은 셀렉션 override, 휠=버튼 64/65.
   - **synchronized output(DECSET 2026)**: sync 중 metal frame 투영을 hold하고 ESU에 누적 출력을 한 frame으로 그려 tearing/깜빡임을 막는다. DECRQM `?2026$p`로 지원 감지(Ghostty render-skip 동형).
   - **kitty keyboard protocol(CSI u, #526/#527)**: 위 키 인코딩 문단 참조 — FlagStack(push `>`/pop `<`/set `=`/query `?`) + disambiguate 인코딩, Shift+Tab backtab fix(code review 발견).
-  - **kitty graphics protocol(APC, #528/#530/#531 + K1)**: ① 파서+command 토대(`ESC _ G ...` 수집 + control `k=v` 파싱, #528) ② 이미지 디코드+저장(transmit RGBA/RGB base64→`KittyImageStorage`, 같은 id 교체·320MB 총량 한계·`a=d` delete·RIS 비움, #530; 치수 곱 오버플로 crash fix #531) ③ **K1 placement(코어)**: display(`a=p`/`a=T`)를 현재 커서 셀에 placement로 걸어 `(image_id, placement_id)`로 저장(같은 키 교체)하고 `RenderSnapshot.placements`로 노출까지 완료. **베이스**: kitty graphics protocol display data(`p`/`x`/`y`/`w`/`h`/`X`/`Y`/`c`/`r`/`z`/`C` 키). **의사결정**: (1) anchor는 **절대 행**(스크롤백 0..sb_count-1, 이어서 활성 화면)이라 selection/find와 같은 좌표계로 스크롤·eviction과 함께 움직인다(`shiftPlacementsForEviction`이 eviction마다 보정, 화면 밖이면 제거 — `shiftSelectionForEviction`과 동형). (2) **셀 단위 크기(span)는 코어가 계산하지 않는다** — 코어는 셀 픽셀 크기를 모르므로(`Size`는 rows/cols, 마우스 1016도 platform이 픽셀을 주입) source rect(픽셀)와 명시 `c`/`r`만 담고, 픽셀→셀 환산·클립은 셀 메트릭을 가진 **렌더러(K2) 책임**이다(마우스 1016 경계와 정합). `RenderSnapshot.placements`의 `row`는 뷰포트 상대 i32(화면 위로 벗어난 앵커는 음수 — 렌더러가 span으로 가시성/클립 판정). (3) 커서 이동 정책(`C`): 기본은 이미지 아래로 내리되 행 수(`r`)가 명시됐을 때만(자동 크기는 span 미상이라 미이동 — K1 한계), 화면 끝 초과는 스크롤 없이 마지막 행 clamp. (4) placement 상한(`max_kitty_placements`=1024)으로 placement_id 폭주 차단(이미지 320MB·APC 버퍼 한계와 같은 결의 방어선). **검증**: 생성·모든 display 키 파싱·뷰포트 매핑·`a=T` 합성·없는 이미지/`i=0` graceful·같은 키 교체·다른 p 별개·커서 이동(C/r/clamp)·delete가 이미지+placement 동시 제거·RIS 비움·eviction anchor 보정/제거·위 스크롤 시 뷰포트 row 환산을 결정적 unit으로 단언. K1은 화면 렌더 없이 노출까지다. ④ **K2 렌더(완료)**: GpuImage 환산 + per-image 텍스처 + Metal 파이프라인 + ABI v48 — 아래 "kitty graphics K2 렌더" 절. ⑤ **K3 디코드 확장(완료)**: K3a chunked(`m=1`)(여러 APC 누적·480MB 상한·RIS 폐기), K3b zlib(`o=z`)(`std.compress.flate(.zlib)` inflate, zlib bomb 바운드), K3c PNG(`f=100`) — `src/terminal/png.zig` clean-room 디코더로 **8-bit truecolor(color type 2 RGB·6 RGBA, non-interlaced)** 만 디코드(청크 파싱·IDAT zlib inflate·스캔라인 필터 None/Sub/Up/Average/Paeth), grayscale(0/4)·palette(3)·16-bit·Adam7은 graceful 거부. **풀 PNG(전 color type·16-bit)는 라이브러리 벤더링 백로그** — 아래 "kitty graphics PNG 백로그" 절. ⑥ **K4 저장 관리**: K4a 세분화된 delete(`a=d` + `d=` 타깃) **완료** — 기본 `d='a'`(전체), 소문자=placement만/대문자=이미지 데이터까지 free, `a/A`(전체)·`i/I`(image_id[+placement_id])·`z/Z`(z-index) 지원, 나머지(c 커서·n 이미지번호·p/q/x/y/r 위치·f 애니메이션)는 셀 span/이미지번호 필요라 graceful 무시. K4b LRU evict **완료** — 320MB 한도(이제 settable 필드) 초과 시 거부가 아니라 **placement 없는 것·오래된(generation 작은) 것 우선**으로 evict해 자리를 만든다(kitty 명세 권장; Ghostty `evictImage` 동작 비교). 한 장이 한도보다 크면 거부. K4c 텍스처 eviction **완료**(ABI v49) — 코어가 매 frame **살아있는 image_id 집합**(활성 surface 저장소 키)을 `MetalFrame.live_image_ids`로 노출하고, Swift/Metal이 그 집합에 없는 캐시 `MTLTexture`를 evict해 GPU 메모리를 회수한다(delete/evict/RIS 반영). DevSession이 `kitty_uploaded` dedup 상태도 같은 집합으로 prune해 재진입 시 재업로드를 보장(Swift 캐시와 동기). **K4 완료 → kitty graphics 전 단계(K1~K4) 완성.** sixel(DCS 기반)은 별개이고 Ghostty도 미지원이라 후순위.
+  - **kitty graphics protocol(APC, #528/#530/#531 + K1)**: ① 파서+command 토대(`ESC _ G ...` 수집 + control `k=v` 파싱, #528) ② 이미지 디코드+저장(transmit RGBA/RGB base64→`KittyImageStorage`, 같은 id 교체·320MB 총량 한계·`a=d` delete·RIS 비움, #530; 치수 곱 오버플로 crash fix #531) ③ **K1 placement(코어)**: display(`a=p`/`a=T`)를 현재 커서 셀에 placement로 걸어 `(image_id, placement_id)`로 저장(같은 키 교체)하고 `RenderSnapshot.placements`로 노출까지 완료. **베이스**: kitty graphics protocol display data(`p`/`x`/`y`/`w`/`h`/`X`/`Y`/`c`/`r`/`z`/`C` 키). **의사결정**: (1) anchor는 **절대 행**(스크롤백 0..sb_count-1, 이어서 활성 화면)이라 selection/find와 같은 좌표계로 스크롤·eviction과 함께 움직인다(`shiftPlacementsForEviction`이 eviction마다 보정, 화면 밖이면 제거 — `shiftSelectionForEviction`과 동형). (2) **셀 단위 크기(span)는 코어가 계산하지 않는다** — 코어는 셀 픽셀 크기를 모르므로(`Size`는 rows/cols, 마우스 1016도 platform이 픽셀을 주입) source rect(픽셀)와 명시 `c`/`r`만 담고, 픽셀→셀 환산·클립은 셀 메트릭을 가진 **렌더러(K2) 책임**이다(마우스 1016 경계와 정합). `RenderSnapshot.placements`의 `row`는 뷰포트 상대 i32(화면 위로 벗어난 앵커는 음수 — 렌더러가 span으로 가시성/클립 판정). (3) 커서 이동 정책(`C`): 기본은 이미지 아래로 내리되 행 수(`r`)가 명시됐을 때만(자동 크기는 span 미상이라 미이동 — K1 한계), 화면 끝 초과는 스크롤 없이 마지막 행 clamp. (4) placement 상한(`max_kitty_placements`=1024)으로 placement_id 폭주 차단(이미지 320MB·APC 버퍼 한계와 같은 결의 방어선). **검증**: 생성·모든 display 키 파싱·뷰포트 매핑·`a=T` 합성·없는 이미지/`i=0` graceful·같은 키 교체·다른 p 별개·커서 이동(C/r/clamp)·delete가 이미지+placement 동시 제거·RIS 비움·eviction anchor 보정/제거·위 스크롤 시 뷰포트 row 환산을 결정적 unit으로 단언. K1은 화면 렌더 없이 노출까지다. ④ **K2 렌더(완료)**: GpuImage 환산 + per-image 텍스처 + Metal 파이프라인 + ABI v48 — 아래 "kitty graphics K2 렌더" 절. ⑤ **K3 디코드 확장(완료)**: K3a chunked(`m=1`)(여러 APC 누적·480MB 상한·RIS 폐기), K3b zlib(`o=z`)(`std.compress.flate(.zlib)` inflate, zlib bomb 바운드), K3c PNG(`f=100`) — `src/terminal/png.zig` clean-room 디코더로 **8-bit truecolor(color type 2 RGB·6 RGBA, non-interlaced)** 만 디코드(청크 파싱·IDAT zlib inflate·스캔라인 필터 None/Sub/Up/Average/Paeth), grayscale(0/4)·palette(3)·16-bit·Adam7은 graceful 거부. **풀 PNG(전 color type·16-bit)는 라이브러리 벤더링 백로그** — 아래 "kitty graphics PNG 백로그" 절. ⑥ **K4 저장 관리**: K4a 세분화된 delete(`a=d` + `d=` 타깃) **완료** — 기본 `d='a'`(전체), 소문자=placement만/대문자=이미지 데이터까지 free, `a/A`(전체)·`i/I`(image_id[+placement_id])·`z/Z`(z-index) 지원, 나머지(c 커서·n 이미지번호·p/q/x/y/r 위치·f 애니메이션)는 셀 span/이미지번호 필요라 graceful 무시. K4b LRU evict **완료** — 320MB 한도(이제 settable 필드) 초과 시 거부가 아니라 **placement 없는 것·오래된(generation 작은) 것 우선**으로 evict해 자리를 만든다(kitty 명세 권장; Ghostty `evictImage` 동작 비교). 한 장이 한도보다 크면 거부. K4c 텍스처 eviction **완료**(ABI v49) — 코어가 매 frame **살아있는 image_id 집합**(활성 surface 저장소 키)을 `MetalFrame.live_image_ids`로 노출하고, Swift/Metal이 그 집합에 없는 캐시 `MTLTexture`를 evict해 GPU 메모리를 회수한다(delete/evict/RIS 반영). DevSession이 `kitty_uploaded` dedup 상태도 같은 집합으로 prune해 재진입 시 재업로드를 보장(Swift 캐시와 동기). **K4 완료 → kitty graphics 전 단계(K1~K4) 완성.** sixel(DCS 기반)은 별개이고 Ghostty도 미지원이라 후순위. ⑦ **K5 query(`a=q`) 응답 + 자기능력 보고(후속, 미착수)**: 현재 `execKittyGraphics`가 `q`(query)를 `else => {}`로 무시해, kitty graphics 지원 여부·transmit 결과를 묻는 앱(`timg`·`chafa --format=kitty`·kitty `icat`)에 APC 응답을 주지 않는다 → 앱이 미지원으로 판단해 폴백하거나 transmit 후 멈출 수 있다. 베이스: Ghostty `graphics_exec.zig`(query는 load를 시도해 검증한 뒤 `OK`/에러를 APC로 회신하되 실제 저장은 안 함). 동작: `a=q`면 픽셀을 저장하지 않고 control 파싱·검증만 해 `ESC _ G i=<id>;OK ESC \` (또는 에러코드)로 회신. 난이도: 중(transmit 경로에서 "저장"과 "응답"을 분리). 애니메이션(`a=a/c/f`)은 Ghostty도 미구현이라 계속 보류(위 VT 갭 절 "갭 아님" 노트와 동일 결).
+
+## VT 호환성 갭 (G1~G14 — Ghostty는 되는데 Maru는 안 되는 시퀀스)
+
+확정 순서(아래 "의존성·확정 순서")의 1번 "BCE + 작은 VT 갭" 중 **BCE는 완료**(EL/ED/ECH/DCH/스크롤이 pen 배경을 carry — `core.zig`의 eraseInLine/eraseInDisplay/eraseCharacters/scrollRange)이고, 여기 모은 것이 남은 "작은 VT 갭"이다.
+
+**방법론**: 2026-06-16 `references/ghostty/src/terminal/`(sgr.zig·stream.zig·modes.zig·osc.zig·Tabstops.zig·charsets.zig·dcs.zig)와 `src/terminal/core.zig`를 1:1 대조해 추출했다. 아래 G1~G14는 **Ghostty가 구현하고 Maru가 미구현**인 진짜 갭이다(레퍼런스도 미구현인 항목은 맨 아래 "갭 아님" 노트로 분리). **베이스 = Ghostty 동작 비교(clean-room — 자료구조·코드 미복사, 동작/의미만)** + 각 시퀀스의 1차 명세(ECMA-48·xterm ctlseqs). 진행은 우선순위 순으로 각자 작은 PR(progressive enhancement, legacy 공존), 위 "미구현 프로토콜 audit"과 같은 규율로 "지원 응답 + 실제 동작"을 한 PR로 묶어 거짓 지원을 피한다. G 번호는 우선순위 순(재조정되면 라벨이 단일 출처).
+
+### 높음 (실사용 타격 큼)
+
+- **G1 — SGR 확장 속성**: `strikethrough(9/29)`·`blink(5/6/25)`·`dim/faint(2)`·`conceal(8/28)`·`double underline(21)`·`underline color(58/59)`·`overline(53/55)`. 현재 `applySgr`가 (strikethrough 외) 나머지를 `else => {}`로 버리고, 근본 원인은 `types.Style`에 필드 자체가 없다(파싱해도 저장할 곳이 없음). 베이스: Ghostty `sgr.zig`(전부 구현 — underline 4:2 colon·58 direct/256색 포함). 영향: nvim/helix LSP 진단 컬러 밑줄(`58;2`), git diff/delta strikethrough, btop 점멸 강조. 난이도: 중(`Style` 비트필드+underline 색 채널 확장 → SGR case → Metal 투영/ABI까지. underline-color는 별도 색이라 더 큼).
+  - **G1a strikethrough(9/29) — 완료**: `Style.strikethrough` 비트 + `applySgr` 9/29(SGR 0 리셋 포함) + `draw_list.StrikethroughOverlay`(underline과 독립 비트라 같은 셀이 둘 다 방출, 전경색 캐리) + `metal_frame` 2.7 pass `reserved=6`(셀 세로 중앙 가로선 — underline/커서 부분-사각형 경로 재사용, **ABI 무변경**) + Metal `maru_fill_cell_quad`의 `reserved==6`(중앙 ~15% 띠). 베이스: ECMA-48 SGR 9(crossed-out)·xterm ctlseqs. 검증: 코어(SGR 9/29/0 리셋)·draw_list(overlay 방출, underline과 동시)·metal_frame(reserved=6 투영) 단위 + 전체 `check` + swift-check + ABI 계약 + app-dev-build(.m 컴파일). 화면 육안은 GUI 수동. 나머지(blink·dim·conceal·double-underline·underline-color·overline)는 각자 후속 PR(같은 수직 슬라이스 패턴: Style 비트 → applySgr → overlay → reserved kind → Metal). overline(53/55)이 가장 가까움(같은 가로선, reserved=4 상단선 재사용 가능).
+- **G2 — OSC 색/클립보드/알림**: `OSC 10/11`(fg/bg 색 질의·설정)·`OSC 4`+`104`(팔레트 설정/reset)·`OSC 52`(클립보드)·`OSC 9`/`777`(데스크톱 알림)·`OSC 110/111`(색 reset). 현재 `dispatchOsc`는 0/1/2/7/8/133만. 베이스: Ghostty `osc.zig`(전부 디스패치). 영향: **OSC 10/11 무응답이 가장 실질적** — nvim 등이 배경 밝기를 못 읽어 light/dark 오판; OSC 52는 SSH에서 tmux/nvim 클립보드 복사 결손. 난이도: 10/11 질의응답 하, 4/104 중, 52 중(base64+`clipboard-write` 권한 — 호환성/보안 정책 참조), 9/777 중(platform 알림 연동).
+- **G3 — charset 지정 (DEC 라인드로잉)**: `ESC ( 0`(G0=DEC special graphics)·`ESC ( B`·SI/SO(0x0e/0x0f)·SS2/SS3. 현재 `escape_intermediate`가 final 1바이트를 소비만 하고, SI/SO는 C0 폐기. 베이스: Ghostty `charsets.zig`(dec_special)+`stream.zig`(SI/SO/SS2/SS3). 영향: `ESC ( 0`으로 박스를 그리는 구형 TUI(일부 `dialog`·`mc`·ncurses 보더)가 `qx lk` 같은 ASCII로 깨짐(현대 앱은 UTF-8 박스문자 직송이라 영향 제한). 난이도: 중(G0/G1 슬롯+SI/SO+SS2/SS3+변환표).
+- **G4 — 동적 탭스톱**: `CBT`(`CSI Z` backtab)·`HTS`(`ESC H`)·`TBC`(`CSI g`). 현재 탭폭 8칸 하드코딩이고 탭스톱 배열이 없다. 베이스: Ghostty `Tabstops.zig`(동적 bitset set/unset/reset). 영향: **Shift+Tab backtab**이 TUI 폼 역방향 이동에서 안 먹는다(가장 흔함), `tput`·비표준 탭폭 정렬 깨짐. 난이도: 중(`[]bool` 탭스톱+resize carry).
+
+### 중간
+
+- **G5 — REP 글자 반복 (`CSI Ps b`)**: 마지막 출력 글자를 N회 반복. 현재 미처리+마지막 글자 추적 없음. 베이스: Ghostty `Terminal.printRepeat`. 영향: 가로줄(`─`)을 REP로 줄여 보내는 프로그램에서 한 글자만 찍힘. 난이도: 하-중.
+- **G6 — IRM insert mode (`CSI 4h/l`) + 비-private ANSI 모드**: `dispatchCsi`에 `?` 없는 `h`/`l`이 전무. 베이스: Ghostty `modes.zig`(insert=4, ansi=true). 영향: IRM을 쓰는 라인 에디터에서 삽입이 덮어쓰기로(대부분 ICH 사용이라 빈도는 낮음). 난이도: 하.
+- **G7 — SU/SD 스크롤 (`CSI S`/`CSI T`)**: scroll region 내 위/아래 팬. 현재 미처리. 베이스: Ghostty `scrollUp`/`scrollDown`. 영향: tmux·일부 pager 화면 패닝. 난이도: 하(기존 scrollRange 재사용).
+- **G8 — DECAWM autowrap off (`?7l`)**: 현재 autowrap이 항상 켜짐(`pending_wrap` 기반 하드코딩)이라 `?7l`로 끌 수 없다. 베이스: Ghostty `modes.zig`(wraparound=7). 영향: 줄 끝 자동 줄바꿈을 끄는 앱에서 끝 글자 동작 어긋남. 난이도: 하(setPrivateModes에 7 추가+putCell 분기).
+- **G9 — DECSCNM 화면 반전 (`?5`)**: 전경/배경 전역 스왑. 현재 미처리. 베이스: Ghostty `modes.zig`(reverse_colors=5)+`render.zig`. 영향: 드묾(반전 테마 토글). 난이도: 하(렌더러 전역 플래그).
+
+### 낮음
+
+- **G10 — DECKPAM/DECKPNM (`ESC =`/`ESC >`)**: application keypad 모드. 현재 소비만 하고 상태 없음. 베이스: Ghostty `modes.zig`(keypad_keys). 영향: vim/emacs에서 numpad app 시퀀스(SS3) — Mac에서 numpad 드묾. 난이도: 하(상태)~중(input.zig 인코딩 연동).
+- **G11 — DECALN (`ESC # 8`)**: 화면을 'E'로 채움. 현재 `#`를 소비만. 베이스: Ghostty `Terminal.decaln`. 영향: `vttest` 정렬 진단 전용, 실사용 거의 없음. 난이도: 하.
+- **G12 — BEL·NEL·VT/FF**: BEL(0x07)→벨/알림, NEL(`ESC E`)→CR+LF, VT(0x0b)/FF(0x0c)→LF. 현재 BEL/VT/FF는 `<0x20 return`으로 폐기, NEL은 ESC else 소비. 베이스: Ghostty `stream.zig`(bell/next_line/linefeed). 영향: 벨 알림 없음(품질), `printf '\f'` 줄바꿈 안 됨(드묾). 난이도: 하(BEL→알림은 platform 연동).
+- **G13 — 마우스 1015 (urxvt 인코딩)**: 현재 1006/1016만. 베이스: Ghostty `modes.zig`(mouse_format_urxvt). 영향: 거의 없음(1006으로 대체됨). 난이도: 하.
+- **G14 — DECRQSS + DCS 상태기계**: `DECRQSS`(`DCS $ q ... ST` SGR/모드 질의) 등. 현재 **파서에 DCS 상태 자체가 없다**(ground/escape/csi/osc/apc만). 베이스: Ghostty `dcs.zig`(hook/put/unhook + DECRQSS). 영향: SGR 상태를 질의하는 일부 앱·tmux 능력 협상. 난이도: 중(파서에 DCS 상태 신설 — Sixel·DECDLD의 토대도 됨).
+
+### 갭 아님 (레퍼런스도 미구현 — 보류)
+
+- **DECSTR soft reset (`CSI ! p`)**: **Ghostty도 미구현**(repo 0건, `CSI p`는 DECRQM만 처리). vim/tmux가 종료 시 보내지만 Ghostty가 무시하고도 동작 → 우선순위 낮음. 한다면 베이스는 ECMA-48/xterm ctlseqs 직접(1차 레퍼런스 없음).
+- **Sixel 그래픽 (DCS 기반)**: Ghostty 미구현, kitty graphics(K1~K4 완료)로 대체되는 흐름. G14의 DCS 상태기계가 생기면 토대만 공유. 보류.
+- **kitty graphics 애니메이션 (`a=a/c/f`)**: Ghostty도 파싱만 하고 실행은 "unimplemented" 에러 반환. 보류(아래 kitty 절 K5 참조).
 
 ## kitty graphics PNG 백로그 (고민 거리 — 미결정)
 
@@ -629,6 +665,19 @@ TDD 방식:
 - plugin ABI와 권한 모델은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#plugin--wasm)의 capability 방향을 기준으로 하되, 구현 전에 사용자와 별도 논의한다.
 - plugin 실패가 surface/window 전체를 죽이지 않는다.
 
+## 완료 기능 잔여 후속 (자투리 모음 — 각 완료 기능의 미착수 후속)
+
+아래는 이미 **완료**된 기능들에 문서 곳곳 "한계/후속"으로 적힌 작은 잔여 항목을 한 곳에 모은 것이다(단일 출처는 여전히 각 기능 절). 새 기능이 아니라 다듬기라 우선순위는 낮고, 필요할 때 각자 작은 PR로 집어간다.
+
+- **스크롤백 Find(⌘F)**: ⌘G(오버레이 닫힌 채 다음 매치)·유니코드 케이스폴딩(현재 ASCII fold)·regex/fuzzy(현재 부분일치)·팝업에서 Find 띄우기·alt screen 검색 스크롤.
+- **런타임 폰트 크기(⌘+/⌘-/⌘0)**: step 파라미터화(현재 1pt 고정)·View 메뉴 항목(Bigger/Smaller/Actual Size)·`set_font_size` 절대 지정.
+- **메뉴바(NSMenu)**: Edit의 Cut/Undo·Services·Open/Reload Config·Find 메뉴 항목(현재 copy/paste만 연결).
+- **커맨드 팝업(⌘⇧P)**: fuzzy 필터(현재 부분일치)·한글 IME 필터(현재 ASCII).
+- **선택/클립보드**: 블록(직사각형) 선택.
+- **New Window(멀티 윈도우)**: W3/W4 잔여 — global hotkey(toggle_window/quick)의 멀티 창 타게팅·창별 독립 config·탭 tear-off(창 간 탭 이동); W5 — atlas 공유(SharedGridSet식 grid-per-size, memory `multi-window-atlas-ownership` — 프로파일 후).
+- **Workspace restore**: config 토글(현재 `MARU_NO_WORKSPACE_RESTORE` env-var)·부분 복구 artifact(한 surface 실패 시 이유 기록)·startup_recipe/env allowlist(정책 재확인 후)·repo별 workspace.
+- **kitty graphics**: 비활성 panel 이미지 렌더·reflow 후 정밀 재배치·멀티 윈도우 텍스처 캐시 소유권(atlas 소유권 재검토와 함께). query/애니메이션은 위 kitty 절 K5 참조.
+
 ## 백로그: 큰 항목 — New Window·chrome 고급화 (둘 다 ✅ 구현 완료; 아래는 설계 근거 보존)
 
 9·10단계(Workspace restore·Plugin)는 위에 목표/완료기준이 있다. 아래 둘(New Window·chrome 고급화)은 **설계 PR(레퍼런스 조사 → 분해 → ABI/경계 영향 → 사용자 합의) 원칙대로(메뉴바·split처럼) 구현 완료**됐다 — New Window는 W1/W2(⌘N·per-window 세션/렌더러·R4b 복원, 아래 상세), chrome 고급화는 C4b(GPU SDF quad/shadow)+U(VSCode 탭·고정폭·가로 스크롤·affordance — `layering-and-portability.md` §5·`chrome-strategy.md` 참조). 아래 설계안은 합의·구현 근거로 보존한다(한 줄 스텁으로 바로 코딩하지 않는 원칙을 그대로 따랐다).
@@ -681,7 +730,7 @@ TDD 방식:
 - **하드 제약(반드시 지킴)**: **9단계 Workspace restore는 window-aware여야 한다.** New Window보다 먼저 하면 단일-창 스키마로 짜여, 멀티 창 도입 때 저장 포맷 migration이 강제된다 → **New Window를 먼저** 하거나, restore 스키마를 처음부터 `windows: […]` 차원으로 설계한다.
 - **소프트 결합(규율로 흡수)**: chrome의 2번째 atlas ⨯ New Window의 atlas 소유권. atlas 소유권을 캡슐화(현재 `renderer_state`가 소유)해 두면 어느 순서든 재작업이 거의 없다 — 새 chrome 코드에 "atlas는 싱글턴" 가정을 박지 않는 게 조건.
 - **확정 순서(사용자 결정 — 재작업 최소 = 토대 먼저)**:
-  1. **BCE + 작은 VT 갭** — 결합 0, 순수 코어, 호환성. 아무 때나(워밍업·가성비, 위 순서와 독립이라 사이사이 끼움 가능).
+  1. **BCE(완료) + 작은 VT 갭(G1~G14 — 위 "VT 호환성 갭" 절)** — 결합 0, 순수 코어, 호환성. 아무 때나(워밍업·가성비, 위 순서와 독립이라 사이사이 끼움 가능). 우선순위 순(G1 SGR 속성·G2 OSC 색/클립보드부터)으로 각자 작은 PR.
   2. **New Window** — 세션·atlas 소유권이라는 가장 큰 가정을 먼저 확정(뒤 항목이 이를 전제).
   3. **9단계 Workspace restore** — 이제 자연히 window-aware.
   4. **chrome 고급화** — 확정된 atlas 소유권 위에서 점진(C1 rounded-rect부터).

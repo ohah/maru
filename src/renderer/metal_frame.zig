@@ -17,7 +17,8 @@ pub const NativeMetalCell = extern struct {
     col: u16,
     width: u16,
     // overlay 종류(0=일반 cell, 2=커서 underline, 3=커서 bar — DECSCUSR, 4=상단선, 5=우측선 — active
-    // pane 테두리). renderer가 2~5를 cell의 한 변 ~2px 띠로 그린다. block 커서는 전체 사각형이라 0.
+    // pane 테두리, 6=strikethrough — SGR 9 중앙 가로선). renderer가 2~6을 cell의 한 변/중앙 ~2px 띠로
+    // 그린다. block 커서는 전체 사각형이라 0.
     reserved: u16 = 0,
     codepoint: u32,
     slot_id: u32,
@@ -333,6 +334,29 @@ pub fn buildNativeCellsSplit(
                 .background = 0xFF00_0000 | packRgb(resolveColor(u.color, colors.default_fg)),
             });
         },
+        // 2.7) SGR 9(취소선): 셀 세로 중앙에 전경색 가로선(reserved=6 — underline/커서와 같은 부분-사각형
+        //      경로, 셰이더 변경 없음). underline과 독립 비트라 같은 셀이 둘 다 낼 수 있다.
+        .strikethrough => |s| {
+            if (s.row >= frame.size.rows or s.col >= frame.size.cols) continue;
+            cells.appendAssumeCapacity(.{
+                .row = s.row,
+                .col = s.col,
+                .width = s.width,
+                .reserved = 6, // strikethrough 중앙 가로선
+                .codepoint = ' ',
+                .slot_id = 0,
+                .atlas_x_px = 0,
+                .atlas_y_px = 0,
+                .atlas_width_px = 0,
+                .atlas_height_px = 0,
+                .u0 = -1.0,
+                .v0 = -1.0,
+                .u1 = -1.0,
+                .v1 = -1.0,
+                .foreground = 0,
+                .background = 0xFF00_0000 | packRgb(resolveColor(s.color, colors.default_fg)),
+            });
+        },
         // OSC 133 거터 마크: 프롬프트 시작 행 col 0의 왼쪽 가장자리에 세로 색 바(커서 bar와 같은
         // kind=3 부분 사각형 재사용 — 셰이더 변경 없음). 명령 성공=초록/실패=빨강.
         // 알려진 한계: DECSCUSR 5/6(bar 커서)가 같은 프롬프트 행 col 0에 있으면 커서 bar(마지막에
@@ -375,7 +399,7 @@ pub fn buildNativeCellsSplit(
         for (frame.overlays) |overlay| {
             const cur = switch (overlay) {
                 .cursor => |c| c,
-                .underline, .gutter => continue,
+                .underline, .strikethrough, .gutter => continue,
             };
             if (!cur.visible) continue;
 
@@ -1399,6 +1423,33 @@ test "an underline overlay and a cursor overlay both project (underline rendered
     try std.testing.expectEqual(@as(u16, 1), cells[1].col); // 커서
 }
 
+test "a strikethrough overlay projects a reserved=6 center-line cell, independent of underline" {
+    const allocator = std.testing.allocator;
+    // SGR 9 취소선은 reserved=6(세로 중앙 가로선)으로 투영된다 — underline(reserved=2, 하단)과 독립
+    // 비트라, 같은 셀이 둘 다 오면 두 cell이 나온다(2.6 밑줄 pass가 2.7 취소선 pass보다 먼저).
+    var overlays = [_]renderer.DrawOverlay{
+        .{ .underline = .{ .row = 0, .col = 0, .width = 1, .color = .default } },
+        .{ .strikethrough = .{ .row = 0, .col = 0, .width = 1, .color = .default } },
+    };
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 3, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .cursor = null,
+    });
+    defer allocator.free(cells);
+    try std.testing.expectEqual(@as(usize, 2), cells.len); // underline(reserved=2) + strikethrough(reserved=6)
+    try std.testing.expectEqual(@as(u16, 2), cells[0].reserved); // 2.6 underline pass 먼저
+    try std.testing.expectEqual(@as(u16, 6), cells[1].reserved); // 2.7 strikethrough pass
+    try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), cells[1].background); // 전경색(흰색)
+}
+
 test "cursor over a space-codepoint glyph projects a solid block, not an inverted glyph" {
     const allocator = std.testing.allocator;
     // space glyph는 그릴 ink가 없으므로 커서는 반전 glyph가 아니라 솔리드 블록(sentinel UV)이어야 한다.
@@ -1758,10 +1809,19 @@ test "buildGpuImages: 셀 메트릭으로 dest 사각형 + source 전체 UV + ab
 test "buildGpuImages: 셀 내 오프셋(X/Y) + source rect crop UV 정규화" {
     const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 100, .height = 50, .bpp = 4, .generation = 1, .pixels = &.{} }};
     const placements = [_]terminal.KittyPlacement{.{
-        .image_id = 1, .placement_id = 0, .row = 0, .col = 0,
-        .cell_x_offset = 4, .cell_y_offset = 5,
-        .src_x = 10, .src_y = 20, .src_width = 40, .src_height = 30,
-        .columns = 2, .rows = 1, .z = 0,
+        .image_id = 1,
+        .placement_id = 0,
+        .row = 0,
+        .col = 0,
+        .cell_x_offset = 4,
+        .cell_y_offset = 5,
+        .src_x = 10,
+        .src_y = 20,
+        .src_width = 40,
+        .src_height = 30,
+        .columns = 2,
+        .rows = 1,
+        .z = 0,
     }};
     const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 10, .rows = 6 }, 10, 20);
     defer std.testing.allocator.free(out);

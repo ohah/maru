@@ -133,6 +133,9 @@ pub const TerminalCore = struct {
     // 등이 상태줄을 고정하고 본문만 스크롤하는 데 쓴다.
     scroll_top: u16 = 0,
     scroll_bottom: u16 = 0,
+    /// DECOM(origin mode, DECSET ?6). 켜지면 CUP/HVP의 row가 scroll region 상단 기준(1=region top)이고
+    /// 커서가 region 안에 갇힌다. RIS·기본은 off(화면 절대 좌표). 좌우 margin이 없어 col은 영향 없다.
+    origin_mode: bool = false,
     // alternate screen(DECSET 1049/47/1047). vim·less 같은 TUI가 전체 화면을 쓰고 종료 시 원래
     // 셸 화면을 복원하는 보조 버퍼다. 활성이면 saved_*에 primary 그리드가 보관돼 있고, alt 출력은
     // 스크롤백에 쌓이지 않으며 스크롤백 뷰포트도 잠긴다(표준 xterm 동작).
@@ -358,6 +361,7 @@ pub const TerminalCore = struct {
         self.kitty_images.clear(self.allocator); // RIS는 전송된 kitty graphics 이미지를 전부 비운다
         self.grapheme_cluster_mode = false;
         self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
+        self.origin_mode = false; // DECOM도 공장 기본(off — 화면 절대 좌표)으로 복원.
         self.dirty = fullDirty(self.size);
     }
 
@@ -2009,6 +2013,7 @@ pub const TerminalCore = struct {
         while (i < self.csi_param_count) : (i += 1) {
             switch (self.csiRawParam(i)) {
                 1 => self.application_cursor_keys = set, // DECCKM: 화살표 SS3/CSI 인코딩 전환
+                6 => self.setOriginMode(set), // DECOM: CUP/HVP origin을 scroll region 상단으로 + 커서 home
                 25 => { // DECTCEM: 커서 표시/숨김. 커서 행만 다시 그리면 된다.
                     self.cursor_visible = set;
                     self.markDirty(self.cursor.row);
@@ -2243,6 +2248,7 @@ pub const TerminalCore = struct {
             2004 => if (self.bracketed_paste) 1 else 2,
             25 => if (self.cursor_visible) 1 else 2,
             1 => if (self.application_cursor_keys) 1 else 2,
+            6 => if (self.origin_mode) 1 else 2, // DECOM(origin mode)
             else => 0, // 미인식 — 앱이 보수적으로 폴백
         };
         var buf: [32]u8 = undefined;
@@ -2377,10 +2383,31 @@ pub const TerminalCore = struct {
         const old = self.cursor;
         const row = self.csiParam(0, 1);
         const col = self.csiParam(1, 1);
-        self.cursor.row = @intCast(@min(@as(u32, row) - 1, @as(u32, self.size.rows) - 1));
+        self.cursor.row = self.resolveRow(row); // DECOM이면 scroll region 상단 기준 + region 안 clamp
         self.cursor.col = @intCast(@min(@as(u32, col) - 1, @as(u32, self.size.cols) - 1));
         self.markCursorMoveDirty(old, self.cursor);
         self.last_print = null;
+    }
+
+    /// DECOM(DECSET/DECRST ?6) 적용. origin mode를 토글하고 커서를 origin home으로 옮긴다(xterm 동작 —
+    /// DECOM 변경 시 커서가 home으로). origin이면 scroll region 좌상단, 아니면 화면 좌상단.
+    fn setOriginMode(self: *TerminalCore, on: bool) void {
+        self.origin_mode = on;
+        const old = self.cursor;
+        self.cursor = .{ .row = if (on) self.scroll_top else 0, .col = 0 };
+        self.pending_wrap = false;
+        self.markCursorMoveDirty(old, self.cursor);
+        self.last_print = null;
+    }
+
+    /// CUP/HVP/VPA의 1-based row 파라미터를 0-based 셀 행으로 변환한다. DECOM(origin mode)이면 scroll
+    /// region 상단 기준(1=region top)으로 옮기고 region 안에 clamp, 아니면 화면 절대로 clamp. 베이스:
+    /// xterm/Ghostty 공통 — CUP·HVP·VPA가 모두 같은 origin 변환을 거친다(Ghostty는 setCursorPos 단일 경로).
+    fn resolveRow(self: *const TerminalCore, row_param: u16) u16 {
+        if (self.origin_mode) {
+            return @intCast(@min(@as(u32, self.scroll_top) + @as(u32, row_param) - 1, @as(u32, self.scroll_bottom)));
+        }
+        return @intCast(@min(@as(u32, row_param) - 1, @as(u32, self.size.rows) - 1));
     }
 
     fn cursorVertical(self: *TerminalCore, amount: u16, up: bool) void {
@@ -2420,7 +2447,8 @@ pub const TerminalCore = struct {
     fn cursorToRow(self: *TerminalCore, row: u16) void {
         if (self.size.rows == 0) return;
         const old = self.cursor;
-        self.cursor.row = @intCast(@min(@as(u32, row) - 1, @as(u32, self.size.rows) - 1));
+        // VPA(CSI Ps d)도 CUP/HVP처럼 DECOM origin 영향을 받는다(xterm/Ghostty 공통 — setCursorPos 단일 경로).
+        self.cursor.row = self.resolveRow(row);
         self.markCursorMoveDirty(old, self.cursor);
         self.last_print = null;
     }
@@ -3573,7 +3601,8 @@ pub const TerminalCore = struct {
         self.scroll_top = top;
         self.scroll_bottom = bottom;
         const old_cursor = self.cursor;
-        self.cursor = .{ .row = 0, .col = 0 };
+        // DECSTBM 후 커서를 origin home으로 — DECOM이면 region 상단, 아니면 화면 좌상단(xterm 동작).
+        self.cursor = .{ .row = if (self.origin_mode) self.scroll_top else 0, .col = 0 };
         self.pending_wrap = false;
         self.markCursorMoveDirty(old_cursor, self.cursor);
     }
@@ -5030,6 +5059,51 @@ test "DECSTBM ignores an invalid (top>=bottom) region and keeps the prior one" {
     try core.write("\x1b[4;2r"); // top(3)>=bottom(1) -> 무시
     try std.testing.expectEqual(@as(u16, 1), core.scroll_top);
     try std.testing.expectEqual(@as(u16, 2), core.scroll_bottom);
+}
+
+test "DECOM (DECSET ?6): CUP/HVP/VPA rows are relative to the scroll region and clamped within it" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 10 });
+    defer core.deinit();
+    try core.write("\x1b[4;6r"); // DECSTBM: region rows 4~6 (0-based top=3, bottom=5)
+    try core.write("\x1b[?6h"); // DECOM on → 커서가 region home(top=3)으로
+    try std.testing.expectEqual(@as(u16, 3), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.col);
+    try core.write("\x1b[1;3H"); // CUP 1;3 → region top, col 2
+    try std.testing.expectEqual(@as(u16, 3), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
+    try core.write("\x1b[2;1H"); // CUP 2;1 → region top+1 (row 4)
+    try std.testing.expectEqual(@as(u16, 4), core.cursor.row);
+    try core.write("\x1b[99;1H"); // CUP 큰 값 → region bottom으로 clamp (row 5)
+    try std.testing.expectEqual(@as(u16, 5), core.cursor.row);
+    try core.write("\x1b[1d"); // VPA 1 → DECOM origin이라 region top(row 3) — 절대였으면 row 0
+    try std.testing.expectEqual(@as(u16, 3), core.cursor.row);
+}
+
+test "DECOM off (default): CUP/VPA rows are absolute, ignoring the scroll region" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 10 });
+    defer core.deinit();
+    try core.write("\x1b[4;6r"); // region 4~6을 설정해도
+    try core.write("\x1b[1;1H"); // DECOM off(기본) → CUP 1;1 = 화면 절대 (row 0)
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
+    try core.write("\x1b[8d"); // VPA 8 → row 7 (region 밖이어도 절대)
+    try std.testing.expectEqual(@as(u16, 7), core.cursor.row);
+}
+
+test "DECOM reset by RIS, reported by DECRQM (?6$p), and DECSTBM homes to region top under DECOM" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 10 });
+    defer core.deinit();
+    try core.write("\x1b[?6h"); // DECOM on
+    try std.testing.expect(core.origin_mode);
+    core.clearResponse();
+    try core.write("\x1b[?6$p"); // DECRQM 질의 → set(1)
+    try std.testing.expectEqualStrings("\x1b[?6;1$y", core.pendingResponse());
+    try core.write("\x1b[3;7r"); // DECOM on에서 DECSTBM → 커서를 region 상단(top=2)으로 home
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
+    try core.write("\x1bc"); // RIS → DECOM off
+    try std.testing.expect(!core.origin_mode);
+    core.clearResponse();
+    try core.write("\x1b[?6$p"); // DECRQM → reset(2)
+    try std.testing.expectEqualStrings("\x1b[?6;2$y", core.pendingResponse());
 }
 
 test "resize resets the scroll region to full screen" {

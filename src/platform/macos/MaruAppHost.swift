@@ -1136,6 +1136,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 lastSeenMetalGeneration = summary.metal_generation
                 drawMetalFrame()
             }
+            drainOsc52Clipboard() // OSC 52: 이번 tick에 셸이 보낸 클립보드 쓰기를 NSPasteboard에 반영(정책 gate는 Zig).
         }
         return status
     }
@@ -1316,6 +1317,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var ptr: UnsafePointer<UInt8>? = nil
         var len: size_t = 0
         guard maru_macos_app_dev_session_copy_text(session, &ptr, &len) == Self.statusOK,
+              let bytes = ptr, len > 0 else { return }
+        let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
+    // OSC 52: 코어가 디코드한 클립보드 쓰기 데이터를 활성 세션에서 drain해 NSPasteboard에 쓴다(매 tick).
+    // 정책(env opt-in MARU_OSC52_WRITE) deny이거나 데이터 없으면 Zig가 len 0을 줘 아무 것도 안 한다.
+    // Cmd+C 복사(copySelectionToPasteboard)와 같은 NSPasteboard 경로.
+    private func drainOsc52Clipboard() {
+        guard let session = devSession else { return }
+        var ptr: UnsafePointer<UInt8>? = nil
+        var len: size_t = 0
+        guard maru_macos_app_dev_session_pending_clipboard(session, &ptr, &len) == Self.statusOK,
               let bytes = ptr, len > 0 else { return }
         let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
         let pasteboard = NSPasteboard.general

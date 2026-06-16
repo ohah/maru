@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 49u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 50u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -466,6 +466,14 @@ int32_t maru_macos_app_dev_session_url_at(
     size_t *out_len
 );
 int32_t maru_macos_app_dev_session_copy_text(
+    MaruAppHostDevSession *session,
+    const uint8_t **out_ptr,
+    size_t *out_len
+);
+/* OSC 52 클립보드 쓰기 데이터(디코드된 UTF-8). 버퍼는 Zig 소유로 다음 pending_clipboard/destroy까지 유효,
+   정책(env opt-in MARU_OSC52_WRITE) deny이거나 없으면 *out_ptr=NULL, *out_len=0. Swift가 tick마다 호출해
+   NSPasteboard에 쓴다. */
+int32_t maru_macos_app_dev_session_pending_clipboard(
     MaruAppHostDevSession *session,
     const uint8_t **out_ptr,
     size_t *out_len

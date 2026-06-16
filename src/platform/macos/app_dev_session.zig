@@ -43,7 +43,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 49; // 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 50; // 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -740,6 +740,8 @@ pub const DevSession = struct {
     tab_wheel_accum: f64 = 0,
     // copyText()가 돌려준 추출 텍스트의 소유 버퍼(다음 copyText/destroy까지 유효 — ABI 수명 계약).
     copy_buffer: []u8 = &.{},
+    // pendingClipboard()가 돌려준 OSC 52 클립보드 데이터의 소유 버퍼(다음 pendingClipboard/destroy까지 유효).
+    clipboard_out_buffer: []u8 = &.{},
     // urlAt()이 돌려준 URL의 소유 버퍼(다음 urlAt/destroy까지 유효).
     url_buffer: []u8 = &.{},
     // Cmd+hover 중인 URL 시작 셀의 절대 좌표(밑줄 렌더용). 뷰포트가 아니라 절대 좌표라 스크롤/출력
@@ -3208,6 +3210,24 @@ pub const DevSession = struct {
         return self.copy_buffer;
     }
 
+    /// OSC 52 클립보드 쓰기 요청을 내부 버퍼로 돌려준다(정책 deny이거나 없으면 빈 슬라이스). Swift가 NSPasteboard에
+    /// 쓴다. **정책**: 보안 정책(terminal-compatibility-policy.md §OSC52)상 기본 deny — ask UI 구현 전 `allow`
+    /// shortcut 금지. 사용자가 env `MARU_OSC52_WRITE`로 명시 opt-in해야 allow한다(정식 config 키는 후속).
+    /// 코어 pending을 비워(한 번 쓰고 소비) 같은 데이터가 다음 tick에 또 쓰이지 않게 한다.
+    pub fn pendingClipboard(self: *DevSession) []const u8 {
+        if (!self.surface_initialized) return &.{};
+        if (std.c.getenv("MARU_OSC52_WRITE") == null) return &.{}; // 정책 deny(기본) — opt-in 없으면 무시
+        const pending = self.activeSurface().core.pendingClipboardWrite();
+        if (pending.len == 0) return &.{};
+        if (self.clipboard_out_buffer.len > 0) {
+            self.allocator.free(self.clipboard_out_buffer);
+            self.clipboard_out_buffer = &.{};
+        }
+        self.clipboard_out_buffer = self.allocator.dupe(u8, pending) catch return &.{};
+        self.activeSurface().core.clearClipboardWrite();
+        return self.clipboard_out_buffer;
+    }
+
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
     /// 반환은 core 소유로 다음 OSC 7/RIS/destroy까지 유효하다(별도 복사 없음 — native 최소).
     /// Swift가 창 제목에 쓴다.
@@ -4889,6 +4909,7 @@ pub const DevSession = struct {
 
     pub fn deinit(self: *DevSession) void {
         if (self.copy_buffer.len > 0) self.allocator.free(self.copy_buffer);
+        if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
         self.pending_paste.deinit(self.allocator);
         self.ime_inserted.deinit(self.allocator);

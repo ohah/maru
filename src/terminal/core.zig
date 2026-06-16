@@ -278,6 +278,8 @@ pub const TerminalCore = struct {
     // 결) — 코어는 Color.default 추상만 알아 실제 RGB를 받는다. 주입 전 기본값은 어두운 테마 근사.
     default_fg_rgb: types.Rgb = .{ .r = 0xcc, .g = 0xcc, .b = 0xcc },
     default_bg_rgb: types.Rgb = .{ .r = 0x10, .g = 0x10, .b = 0x10 },
+    // OSC 52 클립보드 쓰기 요청(디코드된 바이트, pending). platform이 정책(allow) 확인 후 drain → system clipboard.
+    clipboard_write: std.ArrayListUnmanaged(u8) = .empty,
     /// kitty graphics 이미지 저장소(transmit된 이미지, image_id→픽셀 버퍼). 렌더는 후속.
     kitty_images: KittyImageStorage = .{},
     /// kitty graphics placement(표시 중인 이미지 인스턴스) 목록. (image_id, placement_id)로 식별 —
@@ -336,6 +338,8 @@ pub const TerminalCore = struct {
     /// 막는 방어선(이미지 320MB·APC 4096·placement 1024 한계와 같은 결). 디코드된 이미지는 320MB로 따로
     /// 제한되므로, base64 오버헤드(~4/3)를 감안해 480MB로 둔다. 초과하면 그 chunked 전송을 폐기한다.
     const max_kitty_chunk_bytes: usize = 480 * 1000 * 1000;
+    // OSC 52 클립보드 쓰기 상한(디코드 후 바이트). 클립보드는 보통 작아 과대 페이로드는 거부한다(폭주 방어선).
+    const max_clipboard_bytes: usize = 16 * 1000 * 1000;
 
     pub fn init(allocator: std.mem.Allocator, size: types.Size) !TerminalCore {
         const grid = clampGridSize(size);
@@ -438,6 +442,7 @@ pub const TerminalCore = struct {
         self.kitty_placements.deinit(self.allocator);
         self.kitty_chunk.deinit(self.allocator);
         self.apc_buffer.deinit(self.allocator);
+        self.clipboard_write.deinit(self.allocator);
         if (self.placement_views.len > 0) self.allocator.free(self.placement_views);
         if (self.image_views.len > 0) self.allocator.free(self.image_views);
         self.* = undefined;
@@ -1493,6 +1498,8 @@ pub const TerminalCore = struct {
             self.dispatchOscColorQuery(body[3..], 10); // OSC 10 = 전경색
         } else if (std.mem.startsWith(u8, body, "11;")) {
             self.dispatchOscColorQuery(body[3..], 11); // OSC 11 = 배경색
+        } else if (std.mem.startsWith(u8, body, "52;")) {
+            self.dispatchOscClipboard(body[3..]); // OSC 52 = 클립보드(파싱+디코드만; 실제 쓰기·정책은 platform)
         }
         // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
     }
@@ -1510,6 +1517,36 @@ pub const TerminalCore = struct {
             code, rgb.r, rgb.r, rgb.g, rgb.g, rgb.b, rgb.b,
         }) catch return;
         self.appendResponse(resp);
+    }
+
+    /// OSC 52(클립보드) — `52;<targets>;<base64>`로 system clipboard 쓰기를 요청한다(tmux/nvim이 SSH 너머
+    /// `"+y`로 씀). **코어는 파싱+base64 디코드만** 하고 결과를 clipboard_write pending에 둔다 — 실제 clipboard
+    /// 쓰기와 정책(osc52.write ask/allow/deny)은 app/platform 책임이다(클립보드는 OS 리소스라 native 소유 —
+    /// terminal-compatibility-policy.md "TerminalCore parses OSC52, app/platform layer만 실제 read/write"). 읽기
+    /// (data가 `?`)는 보안 표면이 커 코어가 무시한다(원격 세션의 clipboard 탈취 방지 — platform ask UI는 후속).
+    /// 베이스: xterm/iTerm2 OSC 52(사실상 표준), 보안 정책은 호환성/보안 정책 문서.
+    fn dispatchOscClipboard(self: *TerminalCore, body: []const u8) void {
+        const semi = std.mem.indexOfScalar(u8, body, ';') orelse return; // <targets>;<data>
+        const data = body[semi + 1 ..];
+        if (data.len == 0 or std.mem.eql(u8, data, "?")) return; // 빈 데이터·읽기(?)는 무시(읽기는 후속·정책)
+        const dec = std.base64.standard.Decoder;
+        const decoded_len = dec.calcSizeForSlice(data) catch return; // 잘못된 base64
+        if (decoded_len == 0 or decoded_len > max_clipboard_bytes) return; // 빈/과대 거부(폭주 방어선)
+        self.clipboard_write.resize(self.allocator, decoded_len) catch return;
+        dec.decode(self.clipboard_write.items, data) catch {
+            self.clipboard_write.clearRetainingCapacity();
+            return;
+        };
+    }
+
+    /// OSC 52로 들어온 clipboard 쓰기 요청(디코드된 바이트). 없으면 빈 슬라이스. platform이 정책(allow)을 확인한
+    /// 뒤 system clipboard에 쓰고 clearClipboardWrite한다 — 코어는 OS clipboard를 직접 만지지 않는다(경계).
+    pub fn pendingClipboardWrite(self: *const TerminalCore) []const u8 {
+        return self.clipboard_write.items;
+    }
+
+    pub fn clearClipboardWrite(self: *TerminalCore) void {
+        self.clipboard_write.clearRetainingCapacity();
     }
 
     /// 종료된 APC(ESC _ ... ESC \) 내용을 처리한다. kitty graphics(`ESC _ G ...`)가 유일한 소비자다.
@@ -5986,6 +6023,19 @@ test "OSC 10 (foreground color) query answers; color-set spec is consumed silent
     // 질의(?)가 아닌 색 설정(spec)은 후속이라 응답 없이 소비만 한다.
     core.clearResponse();
     try core.write("\x1b]10;#ffffff\x1b\\");
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+}
+
+test "OSC 52 (clipboard) write decodes base64 into pending; read(?) is ignored (코어는 파싱만)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    // "hi" = base64 "aGk=". OSC 52 ; c ; aGk= ST → 디코드된 "hi"가 clipboard_write pending에.
+    try core.write("\x1b]52;c;aGk=\x1b\\");
+    try std.testing.expectEqualStrings("hi", core.pendingClipboardWrite());
+    // 읽기(data가 ?)는 보안상 코어가 무시한다(pending 안 채우고 응답도 안 함 — 원격 clipboard 탈취 방지).
+    core.clearClipboardWrite();
+    try core.write("\x1b]52;c;?\x1b\\");
+    try std.testing.expectEqualStrings("", core.pendingClipboardWrite());
     try std.testing.expectEqualStrings("", core.pendingResponse());
 }
 

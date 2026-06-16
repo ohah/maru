@@ -3281,19 +3281,32 @@ pub const TerminalCore = struct {
                 2 => self.pen.dim = true, // SGR 2: faint/decreased intensity (ECMA-48)
                 3 => self.pen.italic = true,
                 4 => {
-                    // underline. colon 형식 4:x(ITU T.416 — x는 underline 스타일)는 x=0이면 underline off,
-                    // x>0이면 on이다(스타일 종류[curly/dotted 등]는 미지원이라 single underline on으로). 세미콜론
-                    // plain 4는 on. sub-param은 아래 루프 끝에서 소비한다.
+                    // underline. colon 형식 4:x(ITU T.416 — x는 underline 스타일)는 x=0이면 off, x=2면 double,
+                    // 그 외 x>0은 single on(curly/dotted 등 스타일 종류는 single로 근사). 세미콜론 plain 4는 single on.
+                    // sub-param은 아래 루프 끝에서 소비한다.
                     const styled = i + 1 < count and self.csi_subparam[i + 1];
-                    self.pen.underline = if (styled) self.csi_params[i + 1] != 0 else true;
+                    if (styled) {
+                        const sub = self.csi_params[i + 1];
+                        self.pen.underline = sub != 0;
+                        self.pen.underline_double = sub == 2; // 4:2 = double underline
+                    } else {
+                        self.pen.underline = true;
+                        self.pen.underline_double = false;
+                    }
                 },
                 22 => { // SGR 22: normal intensity — bold·faint 둘 다 off (ECMA-48)
                     self.pen.bold = false;
                     self.pen.dim = false;
                 },
                 23 => self.pen.italic = false,
-                24 => self.pen.underline = false,
-                21 => self.pen.underline = true, // SGR 21: doubly underlined — single underline로 근사(2중선 렌더 후속)
+                24 => { // SGR 24: underline off — single·double 둘 다 끈다
+                    self.pen.underline = false;
+                    self.pen.underline_double = false;
+                },
+                21 => { // SGR 21: doubly underlined — 하단 2중선
+                    self.pen.underline = true;
+                    self.pen.underline_double = true;
+                },
                 9 => self.pen.strikethrough = true, // SGR 9: crossed-out (ECMA-48)
                 29 => self.pen.strikethrough = false, // SGR 29: not crossed-out
                 53 => self.pen.overline = true, // SGR 53: overlined (ECMA-48)

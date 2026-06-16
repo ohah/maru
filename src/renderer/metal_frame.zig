@@ -379,6 +379,7 @@ pub fn buildNativeCellsSplit(
                 .width = l.width,
                 .reserved = switch (l.kind) {
                     .underline => 2, // 하단
+                    .double_underline => 7, // 하단 2중선(SGR 21)
                     .strikethrough => 6, // 중앙
                     .overline => 4, // 상단(active pane 테두리와 같은 모양)
                 },

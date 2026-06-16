@@ -33,6 +33,9 @@ pub const Style = struct {
     dim: bool = false,
     italic: bool = false,
     underline: bool = false,
+    // SGR 21(또는 4:2)=double underline. underline=true와 함께 켜지며, 렌더가 하단에 2중선(reserved=7)을 긋는다.
+    // SGR 4(plain)·24가 false로 끈다. 베이스 ECMA-48 SGR 21(doubly underlined)·ITU T.416 4:2.
+    underline_double: bool = false,
     // SGR 9/29(crossed-out/strikethrough): 셀 중앙을 가로지르는 선. 베이스 ECMA-48 SGR 9(crossed-out
     // characters)·xterm ctlseqs 동일. 렌더는 underline과 같은 부분-사각형(중앙 띠)을 재사용한다.
     strikethrough: bool = false,

@@ -148,6 +148,18 @@ pub const DirtyRegion = struct {
 /// 코어가 셀 픽셀 크기를 모르므로 계산하지 않는다: source rect(픽셀)와 명시 columns/rows만 담고, 픽셀→셀
 /// 환산·클립은 셀 메트릭을 가진 렌더러가 한다. 키 의미의 단일 출처는 core.zig의 KittyGraphicsCommand
 /// 주석이다. 베이스: kitty graphics protocol(placement/display).
+/// kitty graphics 이미지 한 장의 렌더용 뷰(픽셀 버퍼를 빌려 노출 — zero-copy). 렌더러(K2d)가
+/// image_id로 GPU 텍스처를 캐시하고 `generation`이 바뀔 때만 업로드한다(매 frame 픽셀 전송 X).
+/// `bpp`=3(RGB)/4(RGBA). 베이스: kitty graphics protocol image storage.
+pub const KittyImageView = struct {
+    image_id: u32,
+    width: u32,
+    height: u32,
+    bpp: u8,
+    generation: u64, // (재)transmit마다 단조 증가 — 렌더러 업로드 캐시 무효화 키(세션 내 단조)
+    pixels: []const u8,
+};
+
 pub const KittyPlacement = struct {
     image_id: u32,
     placement_id: u32, // p: 0이면 default placement
@@ -185,5 +197,10 @@ pub const RenderSnapshot = struct {
     // 픽셀→셀 환산·클립은 렌더러 책임(코어는 셀 픽셀 크기를 모름). 좌표는 뷰포트 상대(row는 i32라 화면
     // 위로 벗어난 앵커도 노출 — 셀 span을 아는 렌더러가 가시성/클립을 정한다). 렌더는 후속 K-단계.
     placements: []const KittyPlacement = &.{},
+    // kitty graphics 이미지(transmit된 픽셀)의 렌더용 뷰. 비어 있으면 이미지 없음(일반 경로 — 할당
+    // 없음). 렌더러가 `placements`의 image_id로 여기서 픽셀을 찾아 GPU 텍스처를 캐시하고, `generation`이
+    // 바뀔 때만 업로드한다(이미지당 개별 텍스처·upload-once). 매 frame 픽셀 복사 없이 storage 버퍼를
+    // zero-copy로 빌려준다.
+    images: []const KittyImageView = &.{},
     dirty: ?DirtyRegion = null,
 };

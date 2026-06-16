@@ -94,13 +94,20 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!Image {
 }
 
 /// zlib 스트림을 정확히 expected 바이트로 inflate한다(더/덜이면 malformed). 메모리는 expected로 바운드.
-fn inflateExact(allocator: std.mem.Allocator, compressed: []const u8, expected: usize) Error![]u8 {
+/// kitty graphics의 zlib(o=z) 픽셀 경로(core.zig)와 PNG의 IDAT 경로가 같은 exact-inflate를 공유한다 —
+/// 둘 다 정확히 expected로 풀려야 하고, 부족하면(short)·더 풀리면(over-long) malformed로 거부해 zlib
+/// bomb를 expected 바이트로 바운드한다.
+pub fn inflateExact(allocator: std.mem.Allocator, compressed: []const u8, expected: usize) Error![]u8 {
     var in: std.Io.Reader = .fixed(compressed);
     var window: [std.compress.flate.max_window_len]u8 = undefined;
     var decomp = std.compress.flate.Decompress.init(&in, .zlib, &window);
     const out = try allocator.alloc(u8, expected);
     errdefer allocator.free(out);
     decomp.reader.readSliceAll(out) catch return error.Malformed; // 부족하면 malformed
+    // 더 풀리면(over-long) 불일치 — 거부(한 바이트만 더 시도해 메모리 바운드 유지).
+    var extra: [1]u8 = undefined;
+    const n = decomp.reader.readSliceShort(&extra) catch 0;
+    if (n != 0) return error.Malformed;
     return out;
 }
 

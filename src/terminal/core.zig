@@ -1989,7 +1989,8 @@ pub const TerminalCore = struct {
             0 => raw,
             'z' => blk: {
                 defer self.allocator.free(raw); // 압축 입력은 inflate 후 불필요
-                break :blk self.inflateZlib(raw, expected) catch return;
+                // PNG IDAT 경로와 같은 exact-inflate 공유(중복 제거) — expected로 바운드하고 over-long 거부.
+                break :blk png.inflateExact(self.allocator, raw, expected) catch return;
             },
             else => {
                 self.allocator.free(raw); // 알 수 없는 압축
@@ -2007,23 +2008,6 @@ pub const TerminalCore = struct {
             .bpp = bpp,
             .data = data,
         });
-    }
-
-    /// zlib(o=z) 압축 픽셀을 정확히 expected 바이트로 inflate한다. expected만큼만 읽어 메모리를 바운드하고
-    /// (zlib bomb 방어), 그보다 더 풀리면 선언 크기 불일치로 거부한다. 성공 시 expected 크기 소유 슬라이스.
-    /// 베이스: kitty graphics protocol(o=z=zlib) + std.compress.flate(.zlib).
-    fn inflateZlib(self: *TerminalCore, compressed: []const u8, expected: usize) ![]u8 {
-        var in: std.Io.Reader = .fixed(compressed);
-        var window: [std.compress.flate.max_window_len]u8 = undefined;
-        var decomp = std.compress.flate.Decompress.init(&in, .zlib, &window);
-        const out = try self.allocator.alloc(u8, expected);
-        errdefer self.allocator.free(out);
-        decomp.reader.readSliceAll(out) catch return error.InflateFailed; // 부족하면 실패
-        // 선언 크기보다 더 풀리면(초과) 불일치 — 거부(한 바이트만 더 시도해 메모리 바운드 유지).
-        var extra: [1]u8 = undefined;
-        const n = decomp.reader.readSliceShort(&extra) catch 0;
-        if (n != 0) return error.InflateFailed;
-        return out;
     }
 
     /// kitty graphics transmit PNG(f=100): base64 디코드 후 PNG 디코더로 RGB/RGBA 픽셀을 푼다. 치수·bpp는

@@ -107,6 +107,8 @@ pub const DevMetalRasterUpload = app_dev_session.MetalRasterUpload;
 pub const DevMetalFrame = app_dev_session.MetalFrame;
 pub const DevGpuQuad = app_dev_session.MetalGpuQuad;
 pub const DevGpuShadow = app_dev_session.MetalGpuShadow;
+pub const DevGpuImage = app_dev_session.MetalGpuImage;
+pub const DevGpuImageUpload = app_dev_session.MetalGpuImageUpload;
 
 pub fn defaultCapabilities() Capabilities {
     // Swift host는 macOS 앱 생명주기와 focus/input만 소유한다. PTY와 frame loop는
@@ -746,6 +748,24 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuShadow, "corner_radii"), @offsetOf(DevGpuShadow, "corner_radii"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuShadow, "blur_radius"), @offsetOf(DevGpuShadow, "blur_radius"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuShadow, "color"), @offsetOf(DevGpuShadow, "color"));
+    // kitty graphics(K2c): 이미지 드로우/업로드 프리미티브 + frame 채널. append-only라 @sizeOf가 필드 존재를
+    // 강제하지만, 같은 폭 필드(GpuImage는 전부 4B, frame은 포인터/usize)는 reorder를 못 잡으므로 offset도 대조한다.
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevGpuImage), @sizeOf(DevGpuImage));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostDevGpuImage), @alignOf(DevGpuImage));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuImage, "dest_x"), @offsetOf(DevGpuImage, "dest_x"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuImage, "origin_x"), @offsetOf(DevGpuImage, "origin_x"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuImage, "src_u0"), @offsetOf(DevGpuImage, "src_u0"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuImage, "z"), @offsetOf(DevGpuImage, "z"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuImage, "pass"), @offsetOf(DevGpuImage, "pass"));
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostDevGpuImageUpload), @sizeOf(DevGpuImageUpload));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostDevGpuImageUpload), @alignOf(DevGpuImageUpload));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuImageUpload, "generation"), @offsetOf(DevGpuImageUpload, "generation"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuImageUpload, "pixels_offset"), @offsetOf(DevGpuImageUpload, "pixels_offset"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevGpuImageUpload, "pixels_len"), @offsetOf(DevGpuImageUpload, "pixels_len"));
+    // frame에 추가된 kitty graphics 채널 필드(append-only) — 위치 대조로 C↔Zig 정합 보장.
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevMetalFrame, "gpu_images"), @offsetOf(DevMetalFrame, "gpu_images"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevMetalFrame, "image_uploads"), @offsetOf(DevMetalFrame, "image_uploads"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevMetalFrame, "image_pixels"), @offsetOf(DevMetalFrame, "image_pixels"));
 }
 
 test "macOS app host capabilities describe ownership before runtime exists" {

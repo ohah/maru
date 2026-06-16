@@ -20,6 +20,11 @@ const budgets = struct {
     // 회당 ~30ms(행당 free+alloc+복사) — 60fps 두 프레임으로 사용자 체감이 없는 수준이고, 50회
     // 예산 2s는 회당 40ms를 상한으로 고정한다(행 버퍼 풀링 등 구조 변경으로 더 줄이는 건 후속).
     const scrollback_rewrap_ns = 2 * std.time.ns_per_s;
+    // kitty 이미지 파이프라인(buildGpuImages + planImageUploads)은 이미지가 있는 동안 매 frame 돈다.
+    // 측정(2026-06): 최악(200 placement × 50 image)에서도 회당 ~0.87ms = 30Hz(33ms) 예산의 ~2.6%라
+    // 캐시화(#10)가 불필요하다고 결론. 이 게이트는 그 비용이 조용히 회귀하지 않게 1000회 2s(회당 2ms
+    // 상한 — findImage O(placements×images)가 더 나빠지거나 sort/alloc 구조가 퇴화하면 잡는다)로 고정.
+    const kitty_image_pipeline_ns = 2 * std.time.ns_per_s;
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -37,6 +42,7 @@ pub fn main(init: std.process.Init) !void {
         try measureResizeLoop(allocator, io),
         try measureSnapshotSerialization(allocator, io),
         try measureScrollbackRewrap(allocator, io),
+        try measureKittyImagePipeline(allocator, io),
     };
 
     const report = try renderReport(allocator, &results);
@@ -178,6 +184,45 @@ fn measureSnapshotSerialization(allocator: std.mem.Allocator, io: std.Io) !Budge
         .name = "snapshot_serialize",
         .elapsed_ns = elapsed,
         .budget_ns = budgets.snapshot_serialize_ns,
+        .units = iterations,
+    };
+}
+
+fn measureKittyImagePipeline(allocator: std.mem.Allocator, io: std.Io) !Budget {
+    // kitty 이미지 렌더 파이프라인이 매 frame 도는 비용(buildGpuImages가 GpuImage 슬라이스+pdq sort,
+    // planImageUploads가 dedup+픽셀 수집). 캐시화(#10) 전, 이게 30Hz(33ms/frame) 예산 대비 얼마인지
+    // 본다. 많은 placement·image(findImage가 O(placements×images))의 최악에 가까운 시나리오로 상한.
+    const n_images = 50;
+    const n_placements = 200; // cap(1024) 미만, dashboard식 다중 이미지 가정
+    var dummy_pixels: [16]u8 = .{0} ** 16; // 2x2 RGBA 더미(픽셀 복사는 dedup으로 frame당 1회만)
+    var images: [n_images]maru.terminal.KittyImageView = undefined;
+    for (&images, 0..) |*img, i| {
+        img.* = .{ .image_id = @intCast(i + 1), .width = 2, .height = 2, .bpp = 4, .generation = 1, .pixels = &dummy_pixels };
+    }
+    var placements: [n_placements]maru.terminal.KittyPlacement = undefined;
+    for (&placements, 0..) |*p, i| {
+        p.* = .{ .image_id = @intCast((i % n_images) + 1), .placement_id = 0, .row = @intCast(i % 50), .col = @intCast(i % 200) };
+    }
+    const size: maru.terminal.Size = .{ .cols = 200, .rows = 50 };
+    var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .empty;
+    defer uploaded.deinit(allocator);
+
+    const iterations = 1_000;
+    const start = now(io);
+    for (0..iterations) |_| {
+        const gpu = try maru.renderer.metal_frame.buildGpuImages(allocator, &placements, &images, size, 8, 16);
+        defer allocator.free(gpu);
+        const plan = try maru.renderer.metal_frame.planImageUploads(allocator, gpu, &images, &uploaded);
+        allocator.free(plan.uploads);
+        allocator.free(plan.pixels);
+        uploaded.clearRetainingCapacity(); // frame당 첫 업로드(dedup 미스)까지 포함해 상한을 본다
+    }
+    const elapsed = now(io) - start;
+
+    return .{
+        .name = "kitty_image_pipeline",
+        .elapsed_ns = elapsed,
+        .budget_ns = budgets.kitty_image_pipeline_ns,
         .units = iterations,
     };
 }

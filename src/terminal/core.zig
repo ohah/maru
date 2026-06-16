@@ -307,6 +307,9 @@ pub const TerminalCore = struct {
     // G4 동적 탭스톱(col별 true=탭스톱). 기본은 8칸마다(col%8==0). HTS(ESC H)가 set, TBC(CSI g)가 clear,
     // CBT(CSI Z)가 역방향 이동. 길이는 cols와 맞춘다(resize가 재구성, OOM이면 isTabstop이 8칸 기본으로 폴백).
     tabstops: []bool = &.{},
+    // G12 BEL(0x07) pending. platform이 매 tick takeBell로 drain해 시스템 벨(NSSound.beep)을 울린다.
+    // bool로 합쳐 한 tick에 BEL이 쏟아져도 beep는 최대 1회(벨 폭주 방지). transient라 RIS 대상 아님.
+    bell_pending: bool = false,
     /// kitty graphics 이미지 저장소(transmit된 이미지, image_id→픽셀 버퍼). 렌더는 후속.
     kitty_images: KittyImageStorage = .{},
     /// kitty graphics placement(표시 중인 이미지 인스턴스) 목록. (image_id, placement_id)로 식별 —
@@ -1734,6 +1737,14 @@ pub const TerminalCore = struct {
         self.notification_body.clearRetainingCapacity();
     }
 
+    /// G12 BEL: pending 벨이 있으면 true를 돌려주고 플래그를 비운다(한 번 울리고 소비). platform이 매 tick
+    /// 호출해 시스템 벨(NSSound.beep)을 울린다 — 코어는 OS 소리를 직접 내지 않는다(OSC 52/9·777과 같은 경계).
+    pub fn takeBell(self: *TerminalCore) bool {
+        const had = self.bell_pending;
+        self.bell_pending = false;
+        return had;
+    }
+
     /// 종료된 APC(ESC _ ... ESC \) 내용을 처리한다. kitty graphics(`ESC _ G ...`)가 유일한 소비자다.
     /// 토대 단계라 현재는 수집만 — command 파싱·이미지 저장·렌더는 후속(audit 5/5 단계적). APC를 안
     /// 받으면 payload가 화면에 텍스트로 새므로(과거 ESC_ 미처리), 수집해서 무시하는 것만으로도 그 누수를
@@ -2555,6 +2566,14 @@ pub const TerminalCore = struct {
             // HTS(ESC H): 현재 커서 열에 탭스톱을 설정한다(G4 동적 탭스톱).
             'H' => {
                 if (self.cursor.col < self.tabstops.len) self.tabstops[self.cursor.col] = true;
+                self.parser = .ground;
+            },
+            // NEL(ESC E): next line = CR + LF. 커서를 다음 줄 0열로 옮긴다(하단 margin이면 스크롤). G12.
+            'E' => {
+                const old_cursor = self.cursor;
+                self.cursor.col = 0;
+                self.markCursorMoveDirty(old_cursor, self.cursor);
+                self.lineFeed();
                 self.parser = .ground;
             },
             // DECSC(ESC 7)/DECRC(ESC 8): 커서(위치+pen+pending_wrap) 저장/복원. claude CLI 등이
@@ -3920,6 +3939,8 @@ pub const TerminalCore = struct {
                 self.last_print = null;
             },
             '\t' => self.writeTab(),
+            0x07 => self.bell_pending = true, // BEL: 시스템 벨 요청(platform이 drain — NSSound.beep)
+            0x0b, 0x0c => self.lineFeed(), // VT(0x0b)/FF(0x0c): LF처럼 한 줄 내림(col 유지) — printf '\f'/'\v'
             0x0e => self.charset_gl = 1, // SO(shift out): G1을 GL로 호출(ESC ) 0 후 box 문자 시작)
             0x0f => self.charset_gl = 0, // SI(shift in): G0을 GL로 호출(box 문자 끝, ASCII 복귀)
             0x08 => {
@@ -6547,6 +6568,33 @@ test "G4 tabstops: default 8, HTS sets, CBT back, TBC clears, RIS/resize default
     try core.resize(40, 2);
     try core.write("\r\t\t\t\t");
     try std.testing.expectEqual(@as(u16, 32), core.cursor.col);
+}
+
+test "G12 BEL/NEL/VT/FF: bell pending(once), NEL=CR+LF, VT/FF=LF(col 유지)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+
+    // BEL(0x07): bell_pending set, takeBell이 한 번 true 후 소비(false).
+    try std.testing.expect(!core.takeBell());
+    try core.write("\x07");
+    try std.testing.expect(core.takeBell());
+    try std.testing.expect(!core.takeBell());
+
+    // NEL(ESC E): CR+LF — col 5에서 → 다음 줄 0열.
+    try core.write("abcde");
+    try std.testing.expectEqual(@as(u16, 5), core.cursor.col);
+    try core.write("\x1bE");
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.col);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
+
+    // VT(0x0b)/FF(0x0c): LF처럼 한 줄 내림(col 유지). col 3에서 VT→row2·col3, FF→row3·col3.
+    try core.write("xyz");
+    try core.write("\x0b");
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 3), core.cursor.col);
+    try core.write("\x0c");
+    try std.testing.expectEqual(@as(u16, 3), core.cursor.row);
+    try std.testing.expectEqual(@as(u16, 3), core.cursor.col);
 }
 
 test "DECSC inside the alt screen does not clobber the cursor saved by 1049 (per-screen slots)" {

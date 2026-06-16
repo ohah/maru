@@ -1140,6 +1140,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             drainOsc52Clipboard() // OSC 52: 이번 tick에 셸이 보낸 클립보드 쓰기를 NSPasteboard에 반영(정책 gate는 Zig).
             drainNotification() // OSC 9/777: 이번 tick에 셸이 보낸 데스크톱 알림을 네이티브 알림으로 띄운다.
+            drainBell() // G12 BEL: 이번 tick에 셸이 보낸 벨(0x07)을 시스템 벨로 울린다.
         }
         return status
     }
@@ -1372,6 +1373,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         content.body = body
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+
+    // G12 BEL: 코어가 모은 벨(0x07)을 활성 세션에서 drain해 시스템 벨을 울린다(매 tick, 한 tick 1회로 합쳐짐).
+    // 벨이 없으면 Zig가 0을 줘 아무 것도 안 한다.
+    private func drainBell() {
+        guard let session = devSession else { return }
+        if maru_macos_app_dev_session_take_bell(session) != 0 {
+            NSSound.beep()
+        }
     }
 
     // MARK: - 메뉴바 (NSMenu)

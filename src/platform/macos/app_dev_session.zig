@@ -4029,6 +4029,9 @@ pub const DevSession = struct {
                     // 최신). 메트릭은 전역(폰트·DPI)이라 활성 surface가 PTY 출력을 처리할 때 최신값을 갖는다 —
                     // multi-surface 전체 주입은 후속(#5~7과 함께). 그 외 픽셀↔셀 환산은 여전히 렌더러 책임(K1).
                     self.activeSurface().core.setCellMetrics(self.cell_width_px, self.cell_height_px);
+                    // OSC 10/11 색 질의 응답용 theme 전경/배경 RGB도 같이 주입(셀 메트릭과 같은 결 — 코어는
+                    // Color.default 추상만 알아 실제 theme 색을 받아야 질의에 답한다).
+                    self.activeSurface().core.setDefaultColors(self.appearance.theme.foreground, self.appearance.theme.background);
                     const snap = self.activeSurface().core.renderSnapshot();
                     // K4c: 살아있는 이미지 id 집합(활성 surface 저장소). Swift가 이 집합에 없는 텍스처를 evict.
                     for (snap.images) |img| kg_live_ids.append(self.allocator, img.image_id) catch {};

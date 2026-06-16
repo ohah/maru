@@ -3888,6 +3888,8 @@ pub const DevSession = struct {
             // (오버레이 없이 정상). PaneFrame.frame을 deinit해야 하므로 defer로 정리한다.
             self.dropQuadsByLayer(1); // C4b 모달: 이전 프레임 모달 quad(layer1)를 비운다 — 닫혀도 잔존 안 함(아래서 재채움).
             self.dropQuadsByLayer(2); // C4b-5: 탭 밴드 quad(layer2)도 per-frame — 매 프레임 비우고 탭 바 build가 재채운다(미연결 시 no-op).
+            self.dropQuadsByLayer(3); // 스크롤바(layer3 over)도 per-frame — drop과 append를 짝지어 깜빡임/누적 방지.
+            self.appendScrollbar(self.active_pane_rect, &self.activeSurface().core); // 활성 pane 우측 thumb(스크롤백 있을 때만)
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             if (builtin.os.tag == .macos) {
@@ -4369,6 +4371,50 @@ pub const DevSession = struct {
             .border_color = 0,
             .gradient_kind = 0,
             .layer = layer,
+        }) catch {};
+    }
+
+    /// 스크롤바 thumb 기하(보이는 영역 내 y offset·높이, backing px) — 순수 함수라 단위 테스트 가능. sb_count==0
+    /// (스크롤백 없음)·메트릭 0이면 null(안 그림). thumb 높이=보이는 비율(view/(sb+view)), 최소 높이로 clamp.
+    /// y: view_offset 0(바닥)이면 view_h-thumb_h(아래), sb_count(꼭대기)면 0(위) — 위로 스크롤할수록 thumb가 올라간다.
+    fn scrollbarThumbGeom(sb_count: usize, view_offset: usize, cell_height_px: u32, view_h_px: u32) ?struct { y: f32, h: f32 } {
+        if (sb_count == 0 or cell_height_px == 0 or view_h_px == 0) return null;
+        const ch: f32 = @floatFromInt(cell_height_px);
+        const sb_px: f32 = @as(f32, @floatFromInt(sb_count)) * ch; // 스크롤백 총 높이(px)
+        const view_px: f32 = @floatFromInt(view_h_px); // 보이는 높이
+        const min_thumb: f32 = @max(view_px * 0.04, 18.0);
+        var thumb_h: f32 = view_px * view_px / (sb_px + view_px);
+        if (thumb_h < min_thumb) thumb_h = min_thumb;
+        if (thumb_h > view_px) thumb_h = view_px;
+        const t: f32 = if (sb_px > 0) @as(f32, @floatFromInt(view_offset)) * ch / sb_px else 0; // 0..1
+        return .{ .y = (view_px - thumb_h) * (1.0 - t), .h = thumb_h };
+    }
+
+    /// 터미널 영역 우측에 스크롤바 thumb(둥근 GpuQuad)를 그린다 — 스크롤백이 있을 때만(sb_count>0). thumb 높이는
+    /// 보이는 비율, 위치는 view_offset(0=바닥, sb_count=꼭대기)을 반영한다. 셀 위(layer 0)에 떠 텍스트를 가린다.
+    /// 메모리 'UI는 Zig+GPU 렌더러로' — 네이티브 NSScroller가 아니라 chrome GpuQuad 프리미티브. 마우스 드래그·
+    /// 자동 숨김(fade)은 후속. 좌표는 backing 픽셀(rect·cell 메트릭과 동일).
+    fn appendScrollbar(self: *DevSession, rect: app.SplitRect, core: *const terminal.TerminalCore) void {
+        if (rect.w == 0) return;
+        const geom = scrollbarThumbGeom(core.scrollbackLen(), core.viewOffset(), self.cell_height_px, rect.h) orelse return;
+        const thumb_y: f32 = @as(f32, @floatFromInt(rect.y)) + geom.y;
+        const thumb_h: f32 = geom.h;
+        const bar_w: f32 = @max(@as(f32, @floatFromInt(self.cell_width_px)) * 0.32, 5.0);
+        const x: f32 = @as(f32, @floatFromInt(rect.x + rect.w)) - bar_w - 2.0; // 우측 가장자리에서 2px 안쪽
+        const color = packOpaqueRgb(self.mutedForeground()); // muted 전경(사이드바 비활성 탭과 같은 톤)
+        const r = bar_w * 0.5; // pill 모양(반지름 = 폭 절반)
+        self.gpu_quads.append(self.allocator, .{
+            .x = x,
+            .y = thumb_y,
+            .w = bar_w,
+            .h = thumb_h,
+            .corner_radii = .{ r, r, r, r },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = color,
+            .fill_color1 = color,
+            .border_color = 0,
+            .gradient_kind = 0,
+            .layer = 3, // over 패스(셀·사이드바 위) per-frame. layer 1(모달)이 gpu_quads에서 뒤에 append돼 위로 — 모달이 스크롤바를 가린다.
         }) catch {};
     }
 
@@ -8706,6 +8752,26 @@ test "sendCommittedText normalizes newlines to CR and imeBegin snaps to bottom" 
     session.imeInsert("a\nb");
     session.imeEnd(null);
     try std.testing.expectEqual(before + 3, session.total_terminal_input_bytes);
+}
+
+test "scrollbarThumbGeom: null without scrollback, thumb size/position track view_offset" {
+    // 스크롤백 없으면 안 그림(null).
+    try std.testing.expect(DevSession.scrollbarThumbGeom(0, 0, 16, 320) == null);
+    try std.testing.expect(DevSession.scrollbarThumbGeom(20, 0, 0, 320) == null); // cell_height 0
+    try std.testing.expect(DevSession.scrollbarThumbGeom(20, 0, 16, 0) == null); // view 0
+
+    // sb_count=20(=20행 @16px=320px), view 320px. total 640px → thumb_h = 320*320/640 = 160.
+    const bottom = DevSession.scrollbarThumbGeom(20, 0, 16, 320).?; // view_offset 0 = 바닥
+    try std.testing.expectApproxEqAbs(@as(f32, 160), bottom.h, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 160), bottom.y, 0.5); // 바닥: y = view-thumb = 320-160
+    const top = DevSession.scrollbarThumbGeom(20, 20, 16, 320).?; // view_offset 20 = 꼭대기
+    try std.testing.expectApproxEqAbs(@as(f32, 0), top.y, 0.5); // 꼭대기: y = 0
+    const mid = DevSession.scrollbarThumbGeom(20, 10, 16, 320).?; // 중간(t=0.5)
+    try std.testing.expectApproxEqAbs(@as(f32, 80), mid.y, 0.5); // (320-160)*(1-0.5)
+
+    // 스크롤백이 많으면 thumb는 최소 높이(18px)로 clamp.
+    const tiny = DevSession.scrollbarThumbGeom(10000, 0, 16, 320).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 18), tiny.h, 0.5);
 }
 
 test "imeCursorRect returns the cursor cell rect in backing px for IME candidate placement" {

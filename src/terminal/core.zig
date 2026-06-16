@@ -2561,8 +2561,11 @@ pub const TerminalCore = struct {
             .col = @min(slot.cursor.col, self.size.cols - 1),
         };
         self.pen = slot.pen;
-        self.pending_wrap = slot.pending_wrap;
         self.markCursorMoveDirty(old_cursor, self.cursor);
+        // markCursorMoveDirty가 deferred autowrap을 무효화(pending_wrap=false)하므로, 저장된 pending_wrap은
+        // 그 '뒤'에 복원한다 — 줄 끝 deferred-wrap 상태에서 저장→복원하면 복원이 즉시 덮어써지던 버그
+        // (DECSC/DECRC·CSI s/u가 공유하는 restoreFromSlot, code review).
+        self.pending_wrap = slot.pending_wrap;
         self.last_print = null;
     }
 
@@ -5870,6 +5873,19 @@ test "CSI s/u (SCOSC/SCORC) save and restore the cursor like DECSC/DECRC" {
     try core.write("\x1b[u"); // SCORC: 복원 → row1, col4
     try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
     try std.testing.expectEqual(@as(u16, 4), core.cursor.col);
+}
+
+test "restoreFromSlot (CSI u / DECRC) preserves pending_wrap saved at line end" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("ABCD"); // 마지막 칸을 채워 deferred autowrap(pending_wrap=true), 커서는 col3에 머묾
+    try core.write("\x1b[s"); // SCOSC: pending_wrap=true 상태로 저장
+    try core.write("\x1b[2;1H"); // 다른 줄로 이동 — pending_wrap 해제
+    try core.write("\x1b[u"); // SCORC: 복원 → pending_wrap도 true로 돌아와야 한다
+    try core.write("E"); // pending_wrap이면 'E'가 먼저 다음 줄로 넘어가 그려진다
+    // 복원이 무효화됐으면(버그) 'E'가 row0 col3(D 자리)를 덮는다. 복원되면 D 유지 + E는 다음 줄.
+    try std.testing.expectEqual(@as(u21, 'D'), core.cells[core.index(0, 3)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'E'), core.cells[core.index(1, 0)].codepoint);
 }
 
 test "DA1 (CSI c) answers with a VT102 identification over the response path" {

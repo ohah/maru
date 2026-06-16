@@ -832,12 +832,15 @@ bool maru_metal_renderer_draw(
     // (Zig는 업로드했다고 보지만 캐시에 없으면 — 렌더러 재생성 등 — 안 그릴 뿐, crash 없음).
 #define MARU_DRAW_IMAGES(si, ei)                                      \
     do {                                                             \
-        if (image_vertex_buffer != nil) {                            \
+        if (image_vertex_buffer != nil && (ei) > (si)) {             \
+            /* pipeline·vertex buffer는 범위당 1회만 바인딩한다 — 이미지마다 바뀌는 건 fragment   \
+               texture뿐이라, 매 이미지 재바인딩(pipeline/vertex state 변경은 인코더에서 가장 비싼 \
+               연산)을 루프 밖으로 끌어낸다. draw 순서·결과는 불변. */                            \
+            [encoder setRenderPipelineState:impl.imagePipeline];     \
+            [encoder setVertexBuffer:image_vertex_buffer offset:0 atIndex:0]; \
             for (size_t ii = (si); ii < (ei); ii++) {                \
                 id<MTLTexture> tex = impl.imageTextures[@(gpu_images[ii].image_id)]; \
                 if (tex == nil) continue;                            \
-                [encoder setRenderPipelineState:impl.imagePipeline]; \
-                [encoder setVertexBuffer:image_vertex_buffer offset:0 atIndex:0]; \
                 [encoder setFragmentTexture:tex atIndex:0];          \
                 [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(ii * 6) vertexCount:6]; \
             }                                                        \

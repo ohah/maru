@@ -41,6 +41,15 @@ pub const Style = struct {
     overline: bool = false,
     // SGR 7/27(reverse video): 렌더 시 전경/배경을 맞바꾼다(default 색은 theme 값으로 풀어 스왑).
     reverse: bool = false,
+    // SGR 5/6/25(blink): 점멸 속성. 파싱·저장만 하고 렌더는 정적(애니메이션 미구현 — 프레임 루프 연동 후속).
+    // DECRQSS 등 상태 round-trip·미래 애니메이션을 위해 비트는 보존한다. 베이스 ECMA-48 SGR 5(slow blink).
+    blink: bool = false,
+    // SGR 8/28(conceal/reveal): 숨김. 렌더 시 전경을 그 셀 배경색으로 풀어 글자를 안 보이게 한다(invisible).
+    // 베이스 ECMA-48 SGR 8(concealed characters)·xterm ctlseqs. 비밀번호 프롬프트 등이 쓴다.
+    conceal: bool = false,
+    // SGR 58/59(underline color): 밑줄 색을 전경과 별개로 정한다(58;2;r;g;b·58;5;n, 59=default). nvim/helix가
+    // LSP 진단을 색 밑줄로 표시. default면 전경색을 쓴다. 렌더는 underline overlay의 색으로 이 값을 푼다.
+    underline_color: Color = .default,
 };
 
 pub const Cell = struct {

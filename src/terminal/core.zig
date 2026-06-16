@@ -3161,10 +3161,16 @@ pub const TerminalCore = struct {
                 },
                 23 => self.pen.italic = false,
                 24 => self.pen.underline = false,
+                21 => self.pen.underline = true, // SGR 21: doubly underlined — single underline로 근사(2중선 렌더 후속)
                 9 => self.pen.strikethrough = true, // SGR 9: crossed-out (ECMA-48)
                 29 => self.pen.strikethrough = false, // SGR 29: not crossed-out
                 53 => self.pen.overline = true, // SGR 53: overlined (ECMA-48)
                 55 => self.pen.overline = false, // SGR 55: not overlined
+                5, 6 => self.pen.blink = true, // SGR 5(slow)/6(rapid) blink — 파싱·저장만(렌더 정적)
+                25 => self.pen.blink = false, // SGR 25: blink off
+                8 => self.pen.conceal = true, // SGR 8: concealed(invisible)
+                28 => self.pen.conceal = false, // SGR 28: reveal
+                59 => self.pen.underline_color = .default, // SGR 59: underline color를 default(전경색)로
                 30...37 => self.pen.foreground = .{ .indexed = @intCast(p - 30) },
                 39 => self.pen.foreground = .default,
                 40...47 => self.pen.background = .{ .indexed = @intCast(p - 40) },
@@ -3172,11 +3178,15 @@ pub const TerminalCore = struct {
                 90...97 => self.pen.foreground = .{ .indexed = @intCast(p - 90 + 8) },
                 100...107 => self.pen.background = .{ .indexed = @intCast(p - 100 + 8) },
                 38 => {
-                    i = self.applyExtendedColor(i, true);
+                    i = self.applyExtendedColor(i, &self.pen.foreground);
                     continue;
                 },
                 48 => {
-                    i = self.applyExtendedColor(i, false);
+                    i = self.applyExtendedColor(i, &self.pen.background);
+                    continue;
+                },
+                58 => { // SGR 58: underline color(58;2;r;g;b·58;5;n) — 전경과 별개 밑줄 색(nvim/helix LSP)
+                    i = self.applyExtendedColor(i, &self.pen.underline_color);
                     continue;
                 },
                 else => {},
@@ -3192,15 +3202,14 @@ pub const TerminalCore = struct {
 
     /// 38/48 (확장 색)을 처리하고 다음으로 읽을 파라미터 인덱스를 돌려준다. 세미콜론
     /// (38;2;r;g;b, 38;5;n)과 colon sub-parameter(38:2:colorspace:r:g:b, 38:5:n)를 모두 지원한다.
-    fn applyExtendedColor(self: *TerminalCore, start: usize, foreground: bool) usize {
+    fn applyExtendedColor(self: *TerminalCore, start: usize, target: *types.Color) usize {
         const count = @min(self.csi_param_count, max_csi_params);
         const mode = if (start + 1 < count) self.csi_params[start + 1] else 0;
         // mode가 ':'로 들어왔으면 colon 형식이다. colon mode 2는 r,g,b 앞에 colorspace
         // 컴포넌트가 하나 더 있다(빈 경우 '::'). mode 5는 두 형식 모두 n 위치가 같다.
         const colon_form = start + 1 < count and self.csi_subparam[start + 1];
         if (mode == 5 and start + 2 < count) {
-            const color: types.Color = .{ .indexed = @intCast(@min(self.csi_params[start + 2], 255)) };
-            if (foreground) self.pen.foreground = color else self.pen.background = color;
+            target.* = .{ .indexed = @intCast(@min(self.csi_params[start + 2], 255)) };
             return start + 3;
         }
         if (mode == 2) {
@@ -3214,22 +3223,20 @@ pub const TerminalCore = struct {
                 while (start + 2 + n < count and self.csi_subparam[start + 2 + n]) : (n += 1) {}
                 if (n >= 3) {
                     const rgb_start = start + 2 + (n - 3);
-                    const color: types.Color = .{ .rgb = .{
+                    target.* = .{ .rgb = .{
                         .r = @intCast(@min(self.csi_params[rgb_start], 255)),
                         .g = @intCast(@min(self.csi_params[rgb_start + 1], 255)),
                         .b = @intCast(@min(self.csi_params[rgb_start + 2], 255)),
                     } };
-                    if (foreground) self.pen.foreground = color else self.pen.background = color;
                     return start + 2 + n;
                 }
             } else if (start + 4 < count) {
                 // 세미콜론 형식 38;2;r;g;b — r,g,b가 mode 바로 뒤.
-                const color: types.Color = .{ .rgb = .{
+                target.* = .{ .rgb = .{
                     .r = @intCast(@min(self.csi_params[start + 2], 255)),
                     .g = @intCast(@min(self.csi_params[start + 3], 255)),
                     .b = @intCast(@min(self.csi_params[start + 4], 255)),
                 } };
-                if (foreground) self.pen.foreground = color else self.pen.background = color;
                 return start + 5;
             }
         }
@@ -6740,6 +6747,30 @@ test "G9 DECSCNM: CSI ?5 h/l toggles reverse_screen, RIS resets" {
     try std.testing.expect(!core.reverseScreen());
     try core.write("\x1b[?5h\x1bc"); // set + RIS
     try std.testing.expect(!core.reverseScreen());
+}
+
+test "G1 SGR ext: blink(5/25), conceal(8/28), double-underline(21), underline color(58/59)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    // SGR 5(blink)·8(conceal)·21(double→underline)·58;2;10;20;30(underline color) → pen에 반영.
+    try core.write("\x1b[5;8;21;58;2;10;20;30mA");
+    const c0 = core.cells[core.index(0, 0)];
+    try std.testing.expect(c0.style.blink);
+    try std.testing.expect(c0.style.conceal);
+    try std.testing.expect(c0.style.underline);
+    try std.testing.expectEqual(types.Color{ .rgb = .{ .r = 10, .g = 20, .b = 30 } }, c0.style.underline_color);
+
+    // SGR 25(blink off)·28(reveal)·24(underline off)·59(underline color default) → 끄기.
+    try core.write("\x1b[25;28;24;59mB");
+    const c1 = core.cells[core.index(0, 1)];
+    try std.testing.expect(!c1.style.blink);
+    try std.testing.expect(!c1.style.conceal);
+    try std.testing.expect(!c1.style.underline);
+    try std.testing.expectEqual(types.Color.default, c1.style.underline_color);
+
+    // 58;5;n(indexed) underline color.
+    try core.write("\x1b[58;5;42mC");
+    try std.testing.expectEqual(types.Color{ .indexed = 42 }, core.cells[core.index(0, 2)].style.underline_color);
 }
 
 test "DECSC inside the alt screen does not clobber the cursor saved by 1049 (per-screen slots)" {

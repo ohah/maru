@@ -665,10 +665,14 @@ fn writeFd(fd: std.posix.fd_t, bytes: []const u8) !usize {
 
 // Closing a session whose child is still alive escalates SIGHUP -> SIGTERM ->
 // SIGKILL, giving the child a bounded grace window to exit (and run shell close
-// traps) at each step before forcing the next. SIGKILL cannot be caught, so the
-// final blocking reap is guaranteed to make progress and the child can never be
-// left as a zombie. This is intentionally synchronous in deinit; the reader
-// thread step can move it off the close path later.
+// traps) at each step before forcing the next. SIGKILL cannot be caught so the
+// child is guaranteed to terminate — but the reap is a BOUNDED poll
+// (reapBoundedAfterKill), NOT a blocking wait4: it gives up after ~3s rather than
+// risk close()/deinit hanging forever (observed wait4(pid, 0) never returning under
+// reader-thread reap races; 22-minute hang). On give-up the dead child is left for
+// launchd/init to harvest as an orphan — a zombie bounded to process lifetime,
+// which is preferred over an unbounded hang (so a zombie CAN briefly remain, only
+// until the parent process exits). This is intentionally synchronous in deinit.
 const shutdown_grace_attempts = 6;
 const shutdown_grace_interval_ms = 10;
 

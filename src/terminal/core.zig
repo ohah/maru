@@ -271,6 +271,9 @@ pub const TerminalCore = struct {
     /// 있을 때만 lazy 할당, viewport_cells와 같은 규율). 없으면 비어 있어 일반(placement 없는) 경로는
     /// 추가 비용이 없다.
     placement_views: []types.KittyPlacement = &.{},
+    /// renderSnapshot이 저장된 이미지를 KittyImageView로 빌려 담는 재사용 버퍼(이미지가 있을 때만 lazy
+    /// 할당). 픽셀은 복사하지 않고 storage 버퍼를 가리키는 zero-copy다(id/치수/generation/픽셀 포인터만).
+    image_views: []types.KittyImageView = &.{},
     // OSC 7: 셸이 보고한 현재 작업 디렉터리(cwd). VTE(GNOME)가 정의한 사실상 표준 — 형식은
     // `OSC 7 ; file://<host>/<percent-encoded path> ST`이고 iTerm2/Terminal.app/kitty/WezTerm이
     // 채택했다(ECMA-48 아님). 디코드한 path를 core가 소유한다(host는 현재 무시 — 로컬 단일 호스트
@@ -410,6 +413,7 @@ pub const TerminalCore = struct {
         self.kitty_images.deinit(self.allocator);
         self.kitty_placements.deinit(self.allocator);
         if (self.placement_views.len > 0) self.allocator.free(self.placement_views);
+        if (self.image_views.len > 0) self.allocator.free(self.image_views);
         self.* = undefined;
     }
 
@@ -1564,13 +1568,16 @@ pub const TerminalCore = struct {
         return cmd;
     }
 
-    /// 디코드된 kitty graphics 이미지(픽셀 버퍼를 소유). bpp=3(RGB)/4(RGBA).
+    /// 디코드된 kitty graphics 이미지(픽셀 버퍼를 소유). bpp=3(RGB)/4(RGBA). generation은 storage가
+    /// (재)transmit마다 단조 증가로 찍어 주는 업로드 캐시 무효화 키다(렌더러가 image_id별 텍스처를
+    /// 이 값이 바뀔 때만 다시 업로드 — K2d).
     const KittyImage = struct {
         id: u32,
         width: u32,
         height: u32,
         bpp: u8,
         data: []u8,
+        generation: u64 = 0, // KittyImageStorage.add가 채운다
     };
 
     /// kitty graphics 이미지 저장소(image_id → KittyImage). 총량 한계로 악의적/대량 전송을 막는다.
@@ -1580,6 +1587,10 @@ pub const TerminalCore = struct {
     const KittyImageStorage = struct {
         map: std.AutoHashMapUnmanaged(u32, KittyImage) = .{},
         total_bytes: usize = 0,
+        /// 세션 내 단조 증가 카운터 — add마다 다음 generation을 찍는다. clear/RIS에서 **리셋하지
+        /// 않는다**(같은 image_id가 비운 뒤 재전송돼도 새 generation을 받아 렌더러 캐시가 stale을
+        /// 재사용하지 않게). u64라 현실적으로 wrap 없음.
+        gen_counter: u64 = 0,
         /// 한 세션이 kitty graphics 이미지로 잡을 수 있는 메모리 상한 — maru가 정한 실용 값이다(kitty
         /// 명세는 상한을 규정하지 않으므로 과대/악의적 전송 폭주를 막는 방어선으로 둔다). 대형 이미지
         /// 수십~수백 장을 담되 무한 누적을 차단하는 선에서 320MB로 잡았다.
@@ -1597,6 +1608,7 @@ pub const TerminalCore = struct {
             self.total_bytes = 0;
         }
         /// 이미지를 저장한다 — img.data의 소유권을 가져간다(성공=map 보관, 거부/실패=즉시 free).
+        /// 성공 시 새 generation을 찍어(같은 id 교체도 새 값) 렌더러 업로드 캐시를 무효화한다.
         fn add(self: *KittyImageStorage, alloc: std.mem.Allocator, img: KittyImage) void {
             if (self.map.fetchRemove(img.id)) |old| { // 같은 id는 교체(기존 free)
                 self.total_bytes -= old.value.data.len;
@@ -1606,11 +1618,14 @@ pub const TerminalCore = struct {
                 alloc.free(img.data);
                 return;
             }
-            self.map.put(alloc, img.id, img) catch {
-                alloc.free(img.data);
+            var stored = img;
+            self.gen_counter += 1;
+            stored.generation = self.gen_counter;
+            self.map.put(alloc, stored.id, stored) catch {
+                alloc.free(stored.data);
                 return;
             };
-            self.total_bytes += img.data.len;
+            self.total_bytes += stored.data.len;
         }
         fn remove(self: *KittyImageStorage, alloc: std.mem.Allocator, id: u32) void {
             if (self.map.fetchRemove(id)) |old| {
@@ -1742,6 +1757,34 @@ pub const TerminalCore = struct {
             };
         }
         return self.placement_views;
+    }
+
+    /// 저장된 kitty graphics 이미지를 KittyImageView로 빌려 재사용 버퍼에 담아 돌려준다. 이미지가
+    /// 없으면 빈 슬라이스(할당 없음). 픽셀은 복사하지 않고 storage 버퍼를 가리킨다(zero-copy). map
+    /// 순회 순서는 비결정적이지만 렌더러는 image_id로 찾으므로 무관하다.
+    fn buildImageViews(self: *TerminalCore) []const types.KittyImageView {
+        const n = self.kitty_images.map.count();
+        if (n == 0) return &.{};
+        if (self.image_views.len != n) {
+            if (self.image_views.len > 0) self.allocator.free(self.image_views);
+            self.image_views = self.allocator.alloc(types.KittyImageView, n) catch {
+                self.image_views = &.{};
+                return &.{}; // OOM이면 이미지 노출만 포기(렌더는 후속이라 영향 없음)
+            };
+        }
+        var i: usize = 0;
+        var it = self.kitty_images.map.valueIterator();
+        while (it.next()) |img| : (i += 1) {
+            self.image_views[i] = .{
+                .image_id = img.id,
+                .width = img.width,
+                .height = img.height,
+                .bpp = img.bpp,
+                .generation = img.generation,
+                .pixels = img.data,
+            };
+        }
+        return self.image_views[0..i];
     }
 
     /// kitty graphics transmit: base64 payload를 디코드해 RGBA(f=32)/RGB(f=24) 이미지를 저장한다.
@@ -3171,6 +3214,7 @@ pub const TerminalCore = struct {
             // 바닥(스크롤 안 함)에서는 활성 화면이 최상단 — top_abs = sb_count(활성 행의 절대 시작).
             var snap = if (self.preedit) |preedit_bytes| self.snapshotWithPreedit(preedit_bytes) else self.snapshot();
             snap.placements = self.buildPlacementViews(self.sb_count);
+            snap.images = self.buildImageViews();
             return snap;
         }
         self.ensureScrollbackRewrapped(); // 과거가 보이는 합성 직전, 행들을 현재 폭으로
@@ -3216,6 +3260,7 @@ pub const TerminalCore = struct {
             .prompt_marks = self.viewport_prompt_marks,
             .last_command_exit = self.last_command_exit,
             .placements = self.buildPlacementViews(top_abs),
+            .images = self.buildImageViews(),
             .dirty = self.dirty,
         };
     }
@@ -6609,6 +6654,71 @@ test "kitty graphics placement: 위로 스크롤하면 뷰포트 상대 row로 �
     try std.testing.expectEqual(@as(usize, 1), snap.placements.len);
     try std.testing.expectEqual(@as(i32, 0), snap.placements[0].row);
     try std.testing.expectEqual(@as(u16, 0), snap.placements[0].col);
+}
+
+// --- kitty graphics K2a: 이미지 픽셀 노출 + upload generation(코어) ---
+
+test "kitty graphics images: transmit이 RenderSnapshot.images로 픽셀·치수·generation 노출 (K2a)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    const raw = [_]u8{0x9A} ** 16; // 2x2 RGBA
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [80]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
+
+    const snap = core.renderSnapshot();
+    try std.testing.expectEqual(@as(usize, 1), snap.images.len);
+    const v = snap.images[0];
+    try std.testing.expectEqual(@as(u32, 7), v.image_id);
+    try std.testing.expectEqual(@as(u32, 2), v.width);
+    try std.testing.expectEqual(@as(u32, 2), v.height);
+    try std.testing.expectEqual(@as(u8, 4), v.bpp);
+    try std.testing.expectEqual(@as(usize, 16), v.pixels.len);
+    try std.testing.expectEqual(@as(u8, 0x9A), v.pixels[0]); // zero-copy로 storage 픽셀
+    try std.testing.expect(v.generation > 0);
+}
+
+test "kitty graphics images: 같은 id 재transmit은 generation을 올린다(렌더러 재업로드 신호) (K2a)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    const raw = [_]u8{1} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [80]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
+    const gen1 = core.renderSnapshot().images[0].generation;
+    // 같은 id로 다시 transmit → generation 증가(같은 id 교체여도 새 값).
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
+    const gen2 = core.renderSnapshot().images[0].generation;
+    try std.testing.expect(gen2 > gen1);
+}
+
+test "kitty graphics images: 여러 이미지 노출 + delete/RIS 반영, generation은 RIS에도 단조 (K2a)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    const raw = [_]u8{2} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [80]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{b64s}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=2;{s}\x1b\\", .{b64s}));
+    try std.testing.expectEqual(@as(usize, 2), core.renderSnapshot().images.len);
+
+    // 가장 큰 generation 기록(RIS가 카운터를 리셋하지 않는지 확인용).
+    var max_gen: u64 = 0;
+    for (core.renderSnapshot().images) |v| max_gen = @max(max_gen, v.generation);
+
+    // delete(i=1) → 하나만 남는다.
+    try core.write("\x1b_Ga=d,i=1\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.renderSnapshot().images.len);
+    // RIS → 전부 비운다.
+    try core.write("\x1bc");
+    try std.testing.expectEqual(@as(usize, 0), core.renderSnapshot().images.len);
+
+    // RIS 후 재transmit은 이전 max보다 큰 generation을 받는다(카운터 비리셋 — stale 재사용 방지).
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{b64s}));
+    try std.testing.expect(core.renderSnapshot().images[0].generation > max_gen);
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

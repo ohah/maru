@@ -254,11 +254,17 @@ pub const TerminalCore = struct {
     osc_len: usize = 0,
     osc_overflow: bool = false,
     // APC(ESC _ ... ESC \) 축적 버퍼. kitty graphics(`ESC _ G ...payload... ESC \`)용 — 첫 바이트
-    // 'G'면 kitty command로 파싱한다. 단일 청크 한도(큰 이미지의 m=1 chunked 누적·이미지 저장은 후속);
-    // 넘치면 그 APC는 통째로 무시한다. 베이스: kitty graphics protocol(APC payload), OSC 버퍼와 동형.
+    // 'G'면 kitty command로 파싱한다. 단일 APC(한 청크) 한도; 넘치면 그 APC는 통째로 무시한다(chunked면
+    // 진행 중 전송도 폐기). 베이스: kitty graphics protocol(APC payload), OSC 버퍼와 동형.
     apc_buffer: [4096]u8 = undefined,
     apc_len: usize = 0,
     apc_overflow: bool = false,
+    // kitty graphics chunked 전송(m=1) 누적 버퍼 — 여러 APC로 쪼개 온 base64 payload를 모은다. 첫 청크가
+    // control(a/f/s/v/i/o)을 갖고(kitty_chunk_cmd), 이후 청크는 payload만 이어 붙인다. m=0에서 누적 base64를
+    // 한 번에 디코드한다(각 청크 base64는 4의 배수라 이어 붙여 디코드해도 유효 — kitty 규약). 비어 있으면
+    // chunking 비활성. 베이스: kitty graphics protocol(chunked transmission).
+    kitty_chunk: std.ArrayListUnmanaged(u8) = .empty,
+    kitty_chunk_cmd: ?KittyGraphicsCommand = null,
     /// kitty graphics 이미지 저장소(transmit된 이미지, image_id→픽셀 버퍼). 렌더는 후속.
     kitty_images: KittyImageStorage = .{},
     /// kitty graphics placement(표시 중인 이미지 인스턴스) 목록. (image_id, placement_id)로 식별 —
@@ -313,6 +319,10 @@ pub const TerminalCore = struct {
     /// 이미지에 placement_id를 무한히 바꿔 보내는 폭주를 막는 방어선이다(이미지 320MB·APC 버퍼 한계와
     /// 같은 결). 보통 화면에 떠 있는 이미지는 한 자릿수~수십이라 1024는 충분히 여유롭다.
     const max_kitty_placements = 1024;
+    /// chunked(m=1) 전송에서 누적할 수 있는 base64 payload 상한 — 악의적 m=1 무한 전송의 메모리 폭주를
+    /// 막는 방어선(이미지 320MB·APC 4096·placement 1024 한계와 같은 결). 디코드된 이미지는 320MB로 따로
+    /// 제한되므로, base64 오버헤드(~4/3)를 감안해 480MB로 둔다. 초과하면 그 chunked 전송을 폐기한다.
+    const max_kitty_chunk_bytes: usize = 480 * 1000 * 1000;
 
     pub fn init(allocator: std.mem.Allocator, size: types.Size) !TerminalCore {
         const grid = clampGridSize(size);
@@ -378,6 +388,7 @@ pub const TerminalCore = struct {
         self.kitty_flags = .{};
         self.kitty_images.clear(self.allocator); // RIS는 전송된 kitty graphics 이미지를 전부 비운다
         self.kitty_placements.clearRetainingCapacity(); // placement도 함께 비운다
+        self.abortKittyChunk(); // 진행 중이던 chunked 전송도 폐기
         self.grapheme_cluster_mode = false;
         self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
         self.origin_mode = false; // DECOM도 공장 기본(off — 화면 절대 좌표)으로 복원.
@@ -412,6 +423,7 @@ pub const TerminalCore = struct {
         self.response.deinit(self.allocator);
         self.kitty_images.deinit(self.allocator);
         self.kitty_placements.deinit(self.allocator);
+        self.kitty_chunk.deinit(self.allocator);
         if (self.placement_views.len > 0) self.allocator.free(self.placement_views);
         if (self.image_views.len > 0) self.allocator.free(self.image_views);
         self.* = undefined;
@@ -1471,14 +1483,44 @@ pub const TerminalCore = struct {
     /// 받으면 payload가 화면에 텍스트로 새므로(과거 ESC_ 미처리), 수집해서 무시하는 것만으로도 그 누수를
     /// 막는다. 베이스: kitty graphics protocol(APC payload), OSC dispatch와 동형.
     fn dispatchApc(self: *TerminalCore) void {
-        if (self.apc_overflow or self.apc_len == 0) return;
+        if (self.apc_overflow or self.apc_len == 0) {
+            // 한 청크가 4096을 넘쳤다(overflow) — chunked 진행 중이면 그 전송 전체가 손상이라 폐기한다.
+            if (self.apc_overflow) self.abortKittyChunk();
+            return;
+        }
         // kitty graphics(ESC _ G ...)만 처리한다. control(k=v)을 파싱하고, transmit이면 payload(base64)를
-        // 디코드해 이미지를 저장한다(placement·렌더는 후속). payload는 control 다음(';' 이후)이다.
+        // 디코드해 이미지를 저장한다. payload는 control 다음(';' 이후)이다.
         if (self.apc_buffer[0] != 'G') return;
         const body = self.apc_buffer[1..self.apc_len];
         const cmd = parseKittyGraphicsCommand(body);
         const payload = if (std.mem.indexOfScalar(u8, body, ';')) |i| body[i + 1 ..] else body[0..0];
-        self.execKittyGraphics(cmd, payload);
+
+        // chunked(m=1): 첫 청크가 control을 갖고, 이후 청크는 payload만 이어 붙인다. m=0에서 누적분을
+        // 한 번에 실행한다. 진행 중이 아니고(첫 등장) m=0이면 단일 전송이라 즉시 실행(기존 경로).
+        if (self.kitty_chunk_cmd == null and !cmd.more) {
+            self.execKittyGraphics(cmd, payload);
+            return;
+        }
+        if (self.kitty_chunk_cmd == null) self.kitty_chunk_cmd = cmd; // 첫 청크의 control 보존
+        if (self.kitty_chunk.items.len + payload.len > max_kitty_chunk_bytes) {
+            self.abortKittyChunk(); // 폭주 방어선 초과 — 전송 폐기
+            return;
+        }
+        self.kitty_chunk.appendSlice(self.allocator, payload) catch {
+            self.abortKittyChunk(); // OOM도 폐기(graceful)
+            return;
+        };
+        if (!cmd.more) { // 마지막 청크 — 첫 청크 control + 누적 payload로 실행
+            const first = self.kitty_chunk_cmd.?;
+            self.execKittyGraphics(first, self.kitty_chunk.items);
+            self.abortKittyChunk();
+        }
+    }
+
+    /// 진행 중인 chunked 전송을 폐기한다(누적 버퍼 비우고 control 해제). 완료·overflow·OOM·RIS 공용.
+    fn abortKittyChunk(self: *TerminalCore) void {
+        self.kitty_chunk.clearRetainingCapacity();
+        self.kitty_chunk_cmd = null;
     }
 
     /// kitty graphics APC control의 파싱 결과(주요 key). transmit(s/v/f/o)와 display(나머지) 양쪽 키를
@@ -6719,6 +6761,54 @@ test "kitty graphics images: 여러 이미지 노출 + delete/RIS 반영, genera
     // RIS 후 재transmit은 이전 max보다 큰 generation을 받는다(카운터 비리셋 — stale 재사용 방지).
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{b64s}));
     try std.testing.expect(core.renderSnapshot().images[0].generation > max_gen);
+}
+
+// --- kitty graphics K3a: chunked 전송(m=1) ---
+
+test "kitty graphics chunked(m=1): 여러 APC로 쪼갠 전송을 누적해 한 이미지로 저장 (K3a)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    // 12바이트 RGB(f=24, 2x2). base64 16자(4의 배수·패딩 없음)를 8+8로 쪼갠다.
+    const raw = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+    var b64: [16]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    try std.testing.expectEqual(@as(usize, 16), b64s.len);
+    var seq: [64]u8 = undefined;
+    // 첫 청크: control + 앞 8자, m=1 → 아직 미완성이라 저장 안 됨.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=24,s=2,v=2,i=5,m=1;{s}\x1b\\", .{b64s[0..8]}));
+    try std.testing.expect(!core.kitty_images.map.contains(5));
+    // 마지막 청크: 뒤 8자, m=0 → 누적분을 한 번에 디코드해 저장.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Gm=0;{s}\x1b\\", .{b64s[8..16]}));
+    try std.testing.expect(core.kitty_images.map.contains(5));
+    const img = core.kitty_images.map.get(5).?;
+    try std.testing.expectEqual(@as(u32, 2), img.width);
+    try std.testing.expectEqual(@as(u8, 3), img.bpp);
+    try std.testing.expectEqual(@as(usize, 12), img.data.len);
+    try std.testing.expectEqual(@as(u8, 1), img.data[0]);
+    try std.testing.expectEqual(@as(u8, 12), img.data[11]);
+    try std.testing.expect(core.kitty_chunk_cmd == null); // 완료 후 chunking 비활성
+}
+
+test "kitty graphics chunked: 3청크 완성 + RIS가 진행 중 전송을 폐기 (K3a)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    const raw = [_]u8{0xAA} ** 12;
+    var b64: [16]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [64]u8 = undefined;
+    // 3청크(4+4+8, 각 4의 배수): m=1, m=1, m=0.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=24,s=2,v=2,i=9,m=1;{s}\x1b\\", .{b64s[0..4]}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Gm=1;{s}\x1b\\", .{b64s[4..8]}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Gm=0;{s}\x1b\\", .{b64s[8..16]}));
+    try std.testing.expect(core.kitty_images.map.contains(9));
+    try std.testing.expectEqual(@as(usize, 12), core.kitty_images.map.get(9).?.data.len);
+
+    // 진행 중(m=1) 상태에서 RIS → 폐기되어 저장 안 됨.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=24,s=2,v=2,i=10,m=1;{s}\x1b\\", .{b64s[0..8]}));
+    try std.testing.expect(core.kitty_chunk_cmd != null); // chunking 진행 중
+    try core.write("\x1bc"); // RIS
+    try std.testing.expect(!core.kitty_images.map.contains(10));
+    try std.testing.expect(core.kitty_chunk_cmd == null); // 폐기됨
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

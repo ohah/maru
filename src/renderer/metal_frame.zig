@@ -560,6 +560,133 @@ pub const GpuShadow = extern struct {
     color: u32,
 };
 
+/// kitty graphics 이미지 한 placement의 GPU 드로우 프리미티브(K2). chrome GpuQuad와 같은 결의 별개
+/// 파이프라인(textured quad)이고, 셀 그리드와 무관하게 backing 픽셀 사각형으로 그린다. 좌표·UV는
+/// `buildGpuImages`가 placement(뷰포트 상대 셀 좌표) + 이미지 픽셀 크기 + 셀 메트릭으로 환산한다 —
+/// **픽셀→셀 환산은 렌더러 책임**(K1 결정). 텍스처는 image_id로 K2d Swift가 캐시한다. 설계:
+/// docs/implementation-plan.md "kitty graphics K2 렌더 설계". 베이스: kitty graphics protocol display.
+pub const GpuImage = extern struct {
+    // 그릴 이미지(K2d가 image_id로 MTLTexture를 찾는다).
+    image_id: u32,
+    // 목적지 사각형(터미널-로컬 backing px — col/row × 셀크기 + 셀내 오프셋). 화면 위로 벗어난 앵커는
+    // dest_y가 음수일 수 있다(렌더러가 클립). origin_x/y는 split panel 픽셀 오프셋(K2c 배선에서 채움).
+    dest_x: f32,
+    dest_y: f32,
+    dest_w: f32,
+    dest_h: f32,
+    origin_x: u32 = 0,
+    origin_y: u32 = 0,
+    // source 사각형을 텍스처 크기로 [0,1] 정규화한 UV(crop). 전체면 0,0,1,1.
+    src_u0: f32,
+    src_v0: f32,
+    src_u1: f32,
+    src_v1: f32,
+    // z-index와 합성 패스. pass: 0=below_bg(셀 배경보다 뒤), 1=below_text(셀배경·텍스트 사이),
+    // 2=above_text(텍스트 앞) — Ghostty 3-pass 동등. 같은 pass 안에선 z 오름차순으로 그린다.
+    z: i32,
+    pass: u32,
+};
+
+/// `GpuImage.pass`에서 z<bg_limit이면 셀 배경보다 뒤(0). 베이스: kitty graphics protocol z-index 의미를
+/// Ghostty가 세 구간으로 나눈 경계(동작 비교) — minInt(i32)/2.
+const kitty_z_bg_limit: i32 = @divTrunc(std.math.minInt(i32), 2);
+
+/// kitty graphics placement(뷰포트 상대 셀 좌표) 목록을 GPU 드로우 프리미티브 GpuImage로 환산한다.
+/// 셀 메트릭(cell_width_px/height_px)으로 목적지 픽셀 사각형을, 이미지 픽셀 크기로 source UV를 정한다.
+/// 화면(뷰포트 cols×rows 픽셀) 밖으로 완전히 벗어난 placement는 CPU에서 제외한다(Ghostty CPU cull 동등).
+/// 출력은 (pass, z) 오름차순 정렬 — 호출자가 셀배경/텍스트 전후에 패스별로 그릴 수 있다. 소유 슬라이스 반환.
+/// 베이스: kitty graphics protocol display(source rect·columns/rows·cell offset·z). 결정 근거는 K1(렌더러가
+/// 픽셀→셀 환산 소유) + docs "kitty graphics K2 렌더 설계".
+pub fn buildGpuImages(
+    allocator: std.mem.Allocator,
+    placements: []const terminal.KittyPlacement,
+    images: []const terminal.KittyImageView,
+    size: terminal.Size,
+    cell_width_px: u32,
+    cell_height_px: u32,
+) ![]GpuImage {
+    if (placements.len == 0 or cell_width_px == 0 or cell_height_px == 0) return &.{};
+    var out: std.ArrayList(GpuImage) = .empty;
+    errdefer out.deinit(allocator);
+
+    const cw: f32 = @floatFromInt(cell_width_px);
+    const ch: f32 = @floatFromInt(cell_height_px);
+    const view_w: f32 = @as(f32, @floatFromInt(size.cols)) * cw;
+    const view_h: f32 = @as(f32, @floatFromInt(size.rows)) * ch;
+
+    for (placements) |p| {
+        // 이미지를 image_id로 찾는다(텍스처 크기·존재 확인). 없으면 그릴 게 없다.
+        const img = findImage(images, p.image_id) orelse continue;
+        if (img.width == 0 or img.height == 0) continue;
+        const tex_w: f32 = @floatFromInt(img.width);
+        const tex_h: f32 = @floatFromInt(img.height);
+
+        // source 사각형(픽셀): x/y는 좌상단, w/h=0이면 거기서부터 끝까지. 텍스처 안으로 clamp.
+        const sx = @min(p.src_x, img.width);
+        const sy = @min(p.src_y, img.height);
+        const max_sw = img.width - sx;
+        const max_sh = img.height - sy;
+        const sw = if (p.src_width == 0) max_sw else @min(p.src_width, max_sw);
+        const sh = if (p.src_height == 0) max_sh else @min(p.src_height, max_sh);
+        if (sw == 0 or sh == 0) continue; // 잘린 영역이 비면 그릴 게 없다
+        const sw_f: f32 = @floatFromInt(sw);
+        const sh_f: f32 = @floatFromInt(sh);
+
+        // 목적지 크기(px): c/r이 있으면 셀 수×셀크기, 한쪽만 있으면 종횡비 유지, 둘 다 없으면 source 픽셀.
+        var dest_w: f32 = sw_f;
+        var dest_h: f32 = sh_f;
+        if (p.columns > 0 and p.rows > 0) {
+            dest_w = @as(f32, @floatFromInt(p.columns)) * cw;
+            dest_h = @as(f32, @floatFromInt(p.rows)) * ch;
+        } else if (p.columns > 0) {
+            dest_w = @as(f32, @floatFromInt(p.columns)) * cw;
+            dest_h = if (sw_f > 0) sh_f * (dest_w / sw_f) else sh_f;
+        } else if (p.rows > 0) {
+            dest_h = @as(f32, @floatFromInt(p.rows)) * ch;
+            dest_w = if (sh_f > 0) sw_f * (dest_h / sh_f) else sw_f;
+        }
+
+        // 목적지 위치(터미널-로컬 px): 앵커 셀 좌상단 + 셀 내 픽셀 오프셋. row는 i32(음수=화면 위).
+        const dest_x = @as(f32, @floatFromInt(p.col)) * cw + @as(f32, @floatFromInt(p.cell_x_offset));
+        const dest_y = @as(f32, @floatFromInt(p.row)) * ch + @as(f32, @floatFromInt(p.cell_y_offset));
+
+        // 뷰포트(0,0)~(view_w,view_h) 밖으로 완전히 벗어나면 제외(CPU cull).
+        if (dest_x + dest_w <= 0 or dest_y + dest_h <= 0 or dest_x >= view_w or dest_y >= view_h) continue;
+
+        const pass: u32 = if (p.z < kitty_z_bg_limit) 0 else if (p.z < 0) 1 else 2;
+        try out.append(allocator, .{
+            .image_id = p.image_id,
+            .dest_x = dest_x,
+            .dest_y = dest_y,
+            .dest_w = dest_w,
+            .dest_h = dest_h,
+            .src_u0 = @as(f32, @floatFromInt(sx)) / tex_w,
+            .src_v0 = @as(f32, @floatFromInt(sy)) / tex_h,
+            .src_u1 = @as(f32, @floatFromInt(sx + sw)) / tex_w,
+            .src_v1 = @as(f32, @floatFromInt(sy + sh)) / tex_h,
+            .z = p.z,
+            .pass = pass,
+        });
+    }
+
+    const result = try out.toOwnedSlice(allocator);
+    // (pass, z) 오름차순 — 호출자가 패스별 구간으로 그린다(같은 pass 안 z 순서로 겹침 처리).
+    std.sort.pdq(GpuImage, result, {}, lessGpuImage);
+    return result;
+}
+
+fn findImage(images: []const terminal.KittyImageView, image_id: u32) ?terminal.KittyImageView {
+    for (images) |img| {
+        if (img.image_id == image_id) return img;
+    }
+    return null;
+}
+
+fn lessGpuImage(_: void, a: GpuImage, b: GpuImage) bool {
+    if (a.pass != b.pass) return a.pass < b.pass;
+    return a.z < b.z;
+}
+
 pub const MetalFrame = extern struct {
     cols: u32 = 0,
     rows: u32 = 0,
@@ -1487,4 +1614,91 @@ test "setCellsPaneOrigin stamps the panel pixel origin on every terminal cell" {
         try std.testing.expectEqual(@as(u32, 180), c.origin_x);
         try std.testing.expectEqual(@as(u32, 40), c.origin_y);
     }
+}
+
+// --- kitty graphics K2b: placement → GpuImage 환산 ---
+
+test "buildGpuImages: 셀 메트릭으로 dest 사각형 + source 전체 UV + above_text 패스" {
+    const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 100, .height = 50, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    const placements = [_]terminal.KittyPlacement{.{ .image_id = 7, .placement_id = 0, .row = 1, .col = 2, .columns = 3, .rows = 2, .z = 0 }};
+    const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 10, .rows = 6 }, 10, 20);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(@as(usize, 1), out.len);
+    const g = out[0];
+    try std.testing.expectEqual(@as(u32, 7), g.image_id);
+    try std.testing.expectEqual(@as(f32, 20), g.dest_x); // col2 × 10
+    try std.testing.expectEqual(@as(f32, 20), g.dest_y); // row1 × 20
+    try std.testing.expectEqual(@as(f32, 30), g.dest_w); // columns3 × 10
+    try std.testing.expectEqual(@as(f32, 40), g.dest_h); // rows2 × 20
+    try std.testing.expectEqual(@as(f32, 0), g.src_u0);
+    try std.testing.expectEqual(@as(f32, 1), g.src_u1); // 전체 폭
+    try std.testing.expectEqual(@as(f32, 1), g.src_v1);
+    try std.testing.expectEqual(@as(u32, 2), g.pass); // z=0 → above_text
+}
+
+test "buildGpuImages: 셀 내 오프셋(X/Y) + source rect crop UV 정규화" {
+    const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 100, .height = 50, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    const placements = [_]terminal.KittyPlacement{.{
+        .image_id = 1, .placement_id = 0, .row = 0, .col = 0,
+        .cell_x_offset = 4, .cell_y_offset = 5,
+        .src_x = 10, .src_y = 20, .src_width = 40, .src_height = 30,
+        .columns = 2, .rows = 1, .z = 0,
+    }};
+    const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 10, .rows = 6 }, 10, 20);
+    defer std.testing.allocator.free(out);
+    const g = out[0];
+    try std.testing.expectEqual(@as(f32, 4), g.dest_x); // col0 + X4
+    try std.testing.expectEqual(@as(f32, 5), g.dest_y); // row0 + Y5
+    try std.testing.expectEqual(@as(f32, 0.1), g.src_u0); // 10/100
+    try std.testing.expectEqual(@as(f32, 0.4), g.src_v0); // 20/50
+    try std.testing.expectEqual(@as(f32, 0.5), g.src_u1); // (10+40)/100
+    try std.testing.expectEqual(@as(f32, 1.0), g.src_v1); // (20+30)/50
+}
+
+test "buildGpuImages: c/r 미지정이면 source 픽셀 크기, w/h=0이면 전체" {
+    const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 64, .height = 48, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    const placements = [_]terminal.KittyPlacement{.{ .image_id = 1, .placement_id = 0, .row = 0, .col = 0, .z = 0 }};
+    const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 20, .rows = 20 }, 10, 20);
+    defer std.testing.allocator.free(out);
+    const g = out[0];
+    try std.testing.expectEqual(@as(f32, 64), g.dest_w); // 이미지 폭 픽셀
+    try std.testing.expectEqual(@as(f32, 48), g.dest_h);
+}
+
+test "buildGpuImages: z-pass 분류와 (pass,z) 정렬" {
+    const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 10, .height = 10, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    const big_neg: i32 = @divTrunc(std.math.minInt(i32), 2) - 1; // < bg_limit
+    const placements = [_]terminal.KittyPlacement{
+        .{ .image_id = 1, .placement_id = 1, .row = 0, .col = 0, .z = 5 }, // above_text
+        .{ .image_id = 1, .placement_id = 2, .row = 0, .col = 0, .z = -1 }, // below_text
+        .{ .image_id = 1, .placement_id = 3, .row = 0, .col = 0, .z = big_neg }, // below_bg
+    };
+    const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 10, .rows = 10 }, 10, 20);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(@as(usize, 3), out.len);
+    try std.testing.expectEqual(@as(u32, 0), out[0].pass); // below_bg 먼저
+    try std.testing.expectEqual(@as(u32, 1), out[1].pass); // below_text
+    try std.testing.expectEqual(@as(u32, 2), out[2].pass); // above_text 마지막
+}
+
+test "buildGpuImages: 화면 밖은 cull, 위로 걸친 건 음수 dest_y로 유지, 없는 이미지는 skip" {
+    const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 10, .height = 10, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    // (a) 완전히 화면 위(row=-10, 높이 10셀? 여기선 자동크기 10px라 dest_y=-200, +10 <= 0) → cull
+    const above = [_]terminal.KittyPlacement{.{ .image_id = 1, .placement_id = 1, .row = -10, .col = 0, .z = 0 }};
+    const out_a = try buildGpuImages(std.testing.allocator, &above, &images, .{ .cols = 10, .rows = 6 }, 10, 20);
+    defer std.testing.allocator.free(out_a);
+    try std.testing.expectEqual(@as(usize, 0), out_a.len);
+
+    // (b) 위로 일부만 걸침(row=-1, rows=3 → dest_y=-20, dest_h=60 → 화면과 겹침) → 유지(dest_y 음수)
+    const partial = [_]terminal.KittyPlacement{.{ .image_id = 1, .placement_id = 1, .row = -1, .col = 0, .rows = 3, .columns = 2, .z = 0 }};
+    const out_b = try buildGpuImages(std.testing.allocator, &partial, &images, .{ .cols = 10, .rows = 6 }, 10, 20);
+    defer std.testing.allocator.free(out_b);
+    try std.testing.expectEqual(@as(usize, 1), out_b.len);
+    try std.testing.expectEqual(@as(f32, -20), out_b[0].dest_y);
+
+    // (c) 없는 image_id → skip
+    const missing = [_]terminal.KittyPlacement{.{ .image_id = 99, .placement_id = 1, .row = 0, .col = 0, .z = 0 }};
+    const out_c = try buildGpuImages(std.testing.allocator, &missing, &images, .{ .cols = 10, .rows = 6 }, 10, 20);
+    defer std.testing.allocator.free(out_c);
+    try std.testing.expectEqual(@as(usize, 0), out_c.len);
 }

@@ -522,18 +522,18 @@ TDD 방식:
 
 ### 중간
 
-- **G5 — REP 글자 반복 (`CSI Ps b`)**: 마지막 출력 글자를 N회 반복. 현재 미처리+마지막 글자 추적 없음. 베이스: Ghostty `Terminal.printRepeat`. 영향: 가로줄(`─`)을 REP로 줄여 보내는 프로그램에서 한 글자만 찍힘. 난이도: 하-중.
-- **G6 — IRM insert mode (`CSI 4h/l`) + 비-private ANSI 모드**: `dispatchCsi`에 `?` 없는 `h`/`l`이 전무. 베이스: Ghostty `modes.zig`(insert=4, ansi=true). 영향: IRM을 쓰는 라인 에디터에서 삽입이 덮어쓰기로(대부분 ICH 사용이라 빈도는 낮음). 난이도: 하.
-- **G7 — SU/SD 스크롤 (`CSI S`/`CSI T`)**: scroll region 내 위/아래 팬. 현재 미처리. 베이스: Ghostty `scrollUp`/`scrollDown`. 영향: tmux·일부 pager 화면 패닝. 난이도: 하(기존 scrollRange 재사용).
-- **G8 — DECAWM autowrap off (`?7l`)**: 현재 autowrap이 항상 켜짐(`pending_wrap` 기반 하드코딩)이라 `?7l`로 끌 수 없다. 베이스: Ghostty `modes.zig`(wraparound=7). 영향: 줄 끝 자동 줄바꿈을 끄는 앱에서 끝 글자 동작 어긋남. 난이도: 하(setPrivateModes에 7 추가+putCell 분기).
+- **G5 — REP 글자 반복 (`CSI Ps b`) — 완료**: `last_printed_cp`(putCell이 추적)를 N회(기본 1) `writeCodepoint`로 반복(wrap·IRM·DECAWM·charset 적용). 출력 없으면 무동작, RIS에서 0. 베이스: ECMA-48 REP(Ghostty `printRepeat` 동작 비교). 검증: `a` + `CSI 3 b` → `aaaa`.
+- **G6 — IRM insert mode (`CSI 4h/l`) + 비-private ANSI 모드 — 완료**: 비-private `h`/`l`을 `setAnsiModes`로 디스패치(현재 IRM=4만, 그 외 소비). IRM on이면 putCell이 쓰기 전 `insertChars(cell_width)`로 삽입(오른쪽 밀기). RIS off. 베이스: ECMA-48 IRM(Ghostty `modes.zig` insert=4). 검증: `Xb` home `CSI 4h` `A` → `AXb`.
+- **G7 — SU/SD 스크롤 (`CSI S`/`CSI T`) — 완료**: `CSI Ps S`=scroll region N줄 위로(`scrollRangeUp`, history 미보관 — 명시 스크롤이라 IL/DL처럼 편집 취급), `CSI Ps T`=아래로(`scrollRangeDown`). 기존 `scrollRange` 재사용. 베이스: ECMA-48 SU/SD(Ghostty `scrollUp`/`scrollDown`). 검증: 3줄 채우고 `CSI S` → 위로 팬.
+- **G8 — DECAWM autowrap off (`?7l`) — 완료**: `autowrap: bool`(기본 on) 필드 + `setPrivateModes`에 7. putCell이 마지막 칸을 채울 때 autowrap on이면 `pending_wrap`(deferred wrap), off면 wrap 없이 마지막 칸에 머물러 덮어쓴다. RIS on. 베이스: DEC DECAWM(Ghostty `modes.zig` wraparound=7). 검증: `?7l` 후 6칸 채우고 7번째 글자가 마지막 칸 덮어씀.
 - **G9 — DECSCNM 화면 반전 (`?5`)**: 전경/배경 전역 스왑. 현재 미처리. 베이스: Ghostty `modes.zig`(reverse_colors=5)+`render.zig`. 영향: 드묾(반전 테마 토글). 난이도: 하(렌더러 전역 플래그).
 
 ### 낮음
 
 - **G10 — DECKPAM/DECKPNM (`ESC =`/`ESC >`)**: application keypad 모드. 현재 소비만 하고 상태 없음. 베이스: Ghostty `modes.zig`(keypad_keys). 영향: vim/emacs에서 numpad app 시퀀스(SS3) — Mac에서 numpad 드묾. 난이도: 하(상태)~중(input.zig 인코딩 연동).
-- **G11 — DECALN (`ESC # 8`)**: 화면을 'E'로 채움. 현재 `#`를 소비만. 베이스: Ghostty `Terminal.decaln`. 영향: `vttest` 정렬 진단 전용, 실사용 거의 없음. 난이도: 하.
+- **G11 — DECALN (`ESC # 8`) — 완료**: `escape_intermediate`가 `#`+`8`을 `decAlign`으로(화면 전체 'E' 기본 attr + 커서 home). 그 외 intermediate는 기존 charset 경로. 베이스: DEC DECALN(Ghostty `decaln`). 검증: `ESC # 8` → 화면 전체 'E', 커서 (0,0).
 - **G12 — BEL·NEL·VT/FF — 완료(ABI v53)**: BEL(0x07)→시스템 벨, NEL(`ESC E`)→CR+LF(다음 줄 0열), VT(0x0b)/FF(0x0c)→LF(col 유지). 전엔 BEL/VT/FF는 `<0x20 return`으로 폐기·NEL은 ESC else 소비. **BEL platform**: 코어 `bell_pending`(bool — 한 tick 1회로 합쳐 벨 폭주 방지) + `takeBell()` getter, ABI v53 `take_bell`(1/0 반환), Swift `drainBell()`이 `renderTick`마다 `NSSound.beep()`(벨은 OS 소유 — OSC 52/9·777과 같은 경계). NEL은 `markCursorMoveDirty`+`lineFeed`로 CR+LF, VT/FF는 `lineFeed`로 col 유지 줄내림. 베이스: ECMA-48 BEL/NEL·VT100(Ghostty `stream.zig` bell/next_line/linefeed 동작 비교). 검증: 코어(BEL pending 1회 소비·NEL=CR+LF·VT/FF=LF col 유지) + ABI 계약(v53) + swift-check + app-dev-build + 전체 게이트. 영향: ctrl-G·셸 에러 벨이 울리고, `printf '\f'`/`\v`/`ESC E`가 줄을 내린다.
-- **G13 — 마우스 1015 (urxvt 인코딩)**: 현재 1006/1016만. 베이스: Ghostty `modes.zig`(mouse_format_urxvt). 영향: 거의 없음(1006으로 대체됨). 난이도: 하.
+- **G13 — 마우스 1015 (urxvt 인코딩) — 완료**: `MouseFormat.urxvt` + `setPrivateModes` 1015. 인코딩은 x10 Cb(32 offset)·1-based 셀 좌표를 바이트 대신 십진 `CSI Cb;Px;Py M`(release Cb=3)로 — 좌표 무제한. 베이스: urxvt 1015(Ghostty `mouse_format_urxvt`). 검증: `?1015h` → mouse_format=urxvt.
 - **G14 — DECRQSS + DCS 상태기계**: `DECRQSS`(`DCS $ q ... ST` SGR/모드 질의) 등. 현재 **파서에 DCS 상태 자체가 없다**(ground/escape/csi/osc/apc만). 베이스: Ghostty `dcs.zig`(hook/put/unhook + DECRQSS). 영향: SGR 상태를 질의하는 일부 앱·tmux 능력 협상. 난이도: 중(파서에 DCS 상태 신설 — Sixel·DECDLD의 토대도 됨).
 
 ### 갭 아님 (레퍼런스도 미구현 — 보류)

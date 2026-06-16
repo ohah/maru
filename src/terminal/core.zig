@@ -8,7 +8,7 @@ const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level �
 /// mouse tracking. none=꺼짐, x10=press만, normal=press+release, button=+버튼 눌린 채 drag, any=+모든 motion.
 pub const MouseTracking = enum { none, x10, normal, button, any };
 /// mouse 이벤트 인코딩(DECSET 1006 SGR / 1016 SGR-pixels / 기본 x10). 베이스: xterm. SGR은 좌표 무제한(>223 OK).
-pub const MouseFormat = enum { x10, sgr, sgr_pixels };
+pub const MouseFormat = enum { x10, sgr, sgr_pixels, urxvt };
 
 /// kitty keyboard protocol(progressive enhancement) flag(packed u5). disambiguate=모호한 키만 CSI u로 명확히,
 /// report_events=key up/repeat, report_alternates=대체 키, report_all=모든 키 escape, report_associated=텍스트.
@@ -310,6 +310,12 @@ pub const TerminalCore = struct {
     // G12 BEL(0x07) pending. platform이 매 tick takeBell로 drain해 시스템 벨(NSSound.beep)을 울린다.
     // bool로 합쳐 한 tick에 BEL이 쏟아져도 beep는 최대 1회(벨 폭주 방지). transient라 RIS 대상 아님.
     bell_pending: bool = false,
+    // G5 REP(CSI Ps b): 직전에 출력한 graphic codepoint. REP가 이걸 N회 반복한다(없으면 0 → 무동작).
+    last_printed_cp: u21 = 0,
+    // G6 IRM(CSI 4 h/l): insert mode. 켜지면 출력 글자가 커서 위치에 삽입(오른쪽 밀기)된다(덮어쓰기 아님). RIS off.
+    insert_mode: bool = false,
+    // G8 DECAWM(CSI ?7 h/l): autowrap. 기본 on(마지막 칸 넘침 시 다음 줄로 wrap). off면 마지막 칸에서 덮어쓴다. RIS on.
+    autowrap: bool = true,
     /// kitty graphics 이미지 저장소(transmit된 이미지, image_id→픽셀 버퍼). 렌더는 후속.
     kitty_images: KittyImageStorage = .{},
     /// kitty graphics placement(표시 중인 이미지 인스턴스) 목록. (image_id, placement_id)로 식별 —
@@ -449,6 +455,9 @@ pub const TerminalCore = struct {
         self.charset_g1 = .ascii;
         self.charset_gl = 0;
         self.resetTabstops(); // G4 탭스톱도 8칸 기본으로 공장 초기화(xterm RIS).
+        self.insert_mode = false; // G6 IRM도 off로 복원.
+        self.autowrap = true; // G8 DECAWM도 on(기본)으로 복원.
+        self.last_printed_cp = 0; // G5 REP 직전 글자도 비운다.
         @memset(&self.palette_override, null); // OSC 4 팔레트 재정의도 공장 초기화(xterm RIS가 팔레트를 리셋).
         self.default_fg_override = null; // OSC 10/11 전경/배경 색 설정도 공장 초기화(theme 기본 복귀).
         self.default_bg_override = null;
@@ -1470,9 +1479,14 @@ pub const TerminalCore = struct {
                     index_ += 1;
                 },
                 .escape_intermediate => {
-                    // ESC <intermediate> <final>: charset 지정. intermediate('('=G0·')'=G1)와 final
-                    // ('0'=dec_special·'B'=ascii)로 G-set을 정한다. 미지원 조합은 ascii로 소비.
-                    self.designateCharset(self.escape_intermediate_byte, bytes[index_]);
+                    // ESC <intermediate> <final>: DECALN(ESC # 8)이면 화면을 'E'로 채우고, 아니면 charset 지정
+                    // (intermediate '('=G0·')'=G1, final '0'=dec_special·'B'=ascii). 미지원 조합은 ascii로 소비.
+                    const final = bytes[index_];
+                    if (self.escape_intermediate_byte == '#' and final == '8') {
+                        self.decAlign(); // DECALN(G11)
+                    } else {
+                        self.designateCharset(self.escape_intermediate_byte, final);
+                    }
                     self.parser = .ground;
                     index_ += 1;
                 },
@@ -2761,6 +2775,11 @@ pub const TerminalCore = struct {
             'P' => self.deleteChars(self.csiParam(0, 1)), // DCH: 커서에서 N개(기본 1) 삭제, 왼쪽으로 당긴다
             'Z' => self.cursorBackTab(self.csiParam(0, 1)), // CBT: 역방향 N개(기본 1) 탭스톱 — Shift+Tab 폼 역이동
             'g' => self.clearTabstop(self.csiRawParam(0)), // TBC: 0(기본)=커서 열 탭스톱 제거, 3=전체 제거
+            'b' => self.repeatLastChar(self.csiParam(0, 1)), // REP(G5): 직전 graphic 글자를 N회 반복
+            'S' => self.scrollRangeUp(self.scroll_top, self.scroll_bottom, self.csiParam(0, 1), false), // SU(G7): scroll region N줄 위로 팬(history 미보관)
+            'T' => self.scrollRangeDown(self.scroll_top, self.scroll_bottom, self.csiParam(0, 1)), // SD(G7): scroll region N줄 아래로 팬
+            'h' => self.setAnsiModes(true), // SM(G6): 비-private ANSI 모드 set(IRM=4 등)
+            'l' => self.setAnsiModes(false), // RM(G6): 비-private ANSI 모드 reset
             // SCOSC/SCORC(CSI s / CSI u): ANSI(SCO) 커서 저장/복원. DECSC/DECRC(ESC 7/8)와 같은 슬롯을
             // 쓴다(위치+pen+pending_wrap). xterm은 좌우 margin 모드(DECLRMM ?69)일 때만 CSI s를 DECSLRM으로
             // 보지만, maru는 좌우 margin 미구현이라 항상 save로 처리한다. multi-line progress(brew 등)가
@@ -2801,6 +2820,8 @@ pub const TerminalCore = struct {
                 1003 => self.mouse_tracking = if (set) .any else .none, // any(+모든 motion)
                 1006 => self.mouse_format = if (set) .sgr else .x10, // SGR 인코딩(좌표 무제한)
                 1016 => self.mouse_format = if (set) .sgr_pixels else .x10, // SGR-pixels 인코딩
+                1015 => self.mouse_format = if (set) .urxvt else .x10, // urxvt 인코딩(G13 — 거의 1006으로 대체)
+                7 => self.autowrap = set, // DECAWM(G8): autowrap on/off — off면 마지막 칸에서 덮어쓴다
                 2027 => self.grapheme_cluster_mode = set, // grapheme cluster 너비(이모지 풀사이즈 합의)
                 2026 => self.sync_output = set, // synchronized output(set=BSU hold 시작, reset=ESU flush)
                 47, 1047 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
@@ -2809,6 +2830,38 @@ pub const TerminalCore = struct {
                 else => {}, // 그 외 private 모드(25 커서 표시 등)는 아직 소비만 한다.
             }
         }
+    }
+
+    /// SM/RM(CSI Ps h/l, private marker 없음): 비-private ANSI 모드. 현재 IRM(4)=insert mode만 지원(그 외 소비).
+    fn setAnsiModes(self: *TerminalCore, set: bool) void {
+        var i: usize = 0;
+        while (i < self.csi_param_count) : (i += 1) {
+            switch (self.csiRawParam(i)) {
+                4 => self.insert_mode = set, // IRM(G6): insert/replace
+                else => {},
+            }
+        }
+    }
+
+    /// REP(CSI Ps b): 직전에 출력한 graphic 글자(last_printed_cp)를 N회(기본 1) 더 반복한다. 아직 출력이
+    /// 없으면(0) 무동작. 각 반복은 writeCodepoint 경로(wrap·IRM·DECAWM·charset 적용)를 그대로 탄다.
+    fn repeatLastChar(self: *TerminalCore, count: u16) void {
+        if (self.last_printed_cp == 0) return;
+        const cp = self.last_printed_cp;
+        var n = @max(count, 1);
+        while (n > 0) : (n -= 1) self.writeCodepoint(cp);
+    }
+
+    /// DECALN(ESC # 8): 화면 전체를 'E'(기본 attr)로 채우고 커서를 home으로 보낸다. VT 정렬 진단(vttest) 전용.
+    fn decAlign(self: *TerminalCore) void {
+        for (self.cells) |*c| c.* = .{ .codepoint = 'E', .width = 1 };
+        @memset(self.wrapped, false);
+        const old_cursor = self.cursor;
+        self.cursor = .{};
+        self.pending_wrap = false;
+        self.last_print = null;
+        self.markCursorMoveDirty(old_cursor, self.cursor);
+        self.dirty = fullDirty(self.size);
     }
 
     /// focus reporting(DECSET 1004)이 켜져 있으면 창 포커스 변화를 CSI I(gained)/CSI O(lost)로 PTY에 리포트한다.
@@ -2844,6 +2897,14 @@ pub const TerminalCore = struct {
             .sgr_pixels => std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{
                 cb, @as(u32, x_px) + 1, @as(u32, y_px) + 1, @as(u8, if (pressed) 'M' else 'm'),
             }) catch return,
+            // urxvt(1015): x10과 같은 Cb(32 offset)·1-based 셀 좌표를 바이트가 아니라 십진수 `CSI Cb;Px;Py M`로
+            // 보낸다(release는 x10처럼 Cb=3). 좌표 무제한이라 x10의 >223 깨짐이 없다. 베이스: urxvt 1015.
+            .urxvt => blk: {
+                const eb: u32 = if (pressed) cb else 3;
+                break :blk std.fmt.bufPrint(&buf, "\x1b[{d};{d};{d}M", .{
+                    32 + eb, @as(u32, col) + 1, @as(u32, row) + 1,
+                }) catch return;
+            },
             .x10 => blk: {
                 // x10은 release 시 버튼 미상이라 Cb=3(sentinel). 각 바이트 32 offset, 255 saturate(>223 깨짐).
                 const eb: u32 = if (pressed) cb else 3;
@@ -4180,6 +4241,9 @@ pub const TerminalCore = struct {
 
         const row = self.cursor.row;
         const col = self.cursor.col;
+        // G6 IRM(insert mode): 켜져 있으면 쓰기 전에 커서 위치에 cell_width칸을 삽입(오른쪽 밀기) — 덮어쓰기 대신
+        // 삽입이 된다. insertChars가 커서는 안 옮기고 줄만 민다.
+        if (self.insert_mode) self.insertChars(cell_width);
         // 이 행에 새로 쓰므로 wrap 상태를 리셋한다. 다시 채워 마지막 칸을 넘기면 위 autowrap 분기가
         // true로 재설정한다. 덕분에 셸이 한 줄을 다시 그리면(redraw) wrap 플래그가 스스로 교정된다.
         self.wrapped[row] = false;
@@ -4202,15 +4266,17 @@ pub const TerminalCore = struct {
             };
         }
         self.last_print = .{ .row = row, .col = col };
+        self.last_printed_cp = codepoint; // G5 REP: 직전 출력 글자 추적
         self.markDirty(self.cursor.row);
 
         if (self.cursor.col + cell_width < self.size.cols) {
             self.cursor.col += cell_width;
         } else {
-            // 마지막 칸을 채웠다. 커서는 마지막 칸에 두되 pending_wrap을 세워, 다음 printable
-            // 글자가 먼저 다음 줄로 넘어가게 한다(deferred autowrap).
+            // 마지막 칸을 채웠다. autowrap(DECAWM)이 켜져 있으면 커서를 마지막 칸에 두고 pending_wrap을 세워
+            // 다음 printable 글자가 먼저 다음 줄로 넘어가게 한다(deferred autowrap). off(?7l)면 wrap 없이
+            // 마지막 칸에 머물러 다음 글자가 그 칸을 덮어쓴다(G8).
             self.cursor.col = self.size.cols - 1;
-            self.pending_wrap = true;
+            if (self.autowrap) self.pending_wrap = true;
         }
     }
 
@@ -6595,6 +6661,60 @@ test "G12 BEL/NEL/VT/FF: bell pending(once), NEL=CR+LF, VT/FF=LF(col 유지)" {
     try core.write("\x0c");
     try std.testing.expectEqual(@as(u16, 3), core.cursor.row);
     try std.testing.expectEqual(@as(u16, 3), core.cursor.col);
+}
+
+test "G5/6/7/8/11/13 small gaps: REP, DECALN, IRM, DECAWM off, SU, urxvt mouse" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 4 });
+    defer core.deinit();
+
+    // G5 REP(CSI Ps b): 'a' 출력 후 CSI 3 b → 'a' 3개 더 반복 → "aaaa".
+    try core.write("a\x1b[3b");
+    {
+        const dump = try core.dumpUtf8(std.testing.allocator);
+        defer std.testing.allocator.free(dump);
+        try std.testing.expect(std.mem.startsWith(u8, dump, "aaaa"));
+    }
+
+    // G11 DECALN(ESC # 8): 화면 전체 'E', 커서 home.
+    try core.write("\x1b#8");
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.col);
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
+    {
+        const dump = try core.dumpUtf8(std.testing.allocator);
+        defer std.testing.allocator.free(dump);
+        try std.testing.expectEqualStrings("EEEEEE\nEEEEEE\nEEEEEE\nEEEEEE", dump);
+    }
+
+    // G6 IRM(CSI 4h): insert mode. "Xb" 위 home에서 IRM on + "A" → "AXb"(X가 오른쪽으로 밀림).
+    try core.write("\x1bcXb\x1b[H\x1b[4hA");
+    {
+        const dump = try core.dumpUtf8(std.testing.allocator);
+        defer std.testing.allocator.free(dump);
+        try std.testing.expect(std.mem.startsWith(u8, dump, "AXb"));
+    }
+
+    // G8 DECAWM off(?7l): 마지막 칸에서 wrap 안 함(덮어쓰기). cols=6: "wxyz12" 채우고 '3'은 마지막 칸 덮어씀.
+    try core.write("\x1bc\x1b[?7lwxyz123");
+    {
+        const dump = try core.dumpUtf8(std.testing.allocator);
+        defer std.testing.allocator.free(dump);
+        try std.testing.expect(std.mem.startsWith(u8, dump, "wxyz13"));
+    }
+
+    // G7 SU(CSI S): scroll region 위로 1줄 팬. row0=11/row1=22/row2=33 → SU → row0=22, row1=33.
+    try core.write("\x1bc11\r\n22\r\n33\x1b[S");
+    {
+        const dump = try core.dumpUtf8(std.testing.allocator);
+        defer std.testing.allocator.free(dump);
+        try std.testing.expect(std.mem.startsWith(u8, dump, "22"));
+        try std.testing.expect(std.mem.indexOf(u8, dump, "33") != null);
+    }
+
+    // G13 mouse urxvt(?1015h): mouse_format이 urxvt로 전환(인코딩은 x10 Cb를 십진 CSI Cb;Px;Py M로).
+    try core.write("\x1b[?1015h");
+    try std.testing.expectEqual(MouseFormat.urxvt, core.mouse_format);
+    try core.write("\x1b[?1015l");
+    try std.testing.expectEqual(MouseFormat.x10, core.mouse_format);
 }
 
 test "DECSC inside the alt screen does not clobber the cursor saved by 1049 (per-screen slots)" {

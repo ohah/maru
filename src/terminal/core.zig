@@ -257,8 +257,11 @@ pub const TerminalCore = struct {
     // APC(ESC _ ... ESC \) 축적 버퍼. kitty graphics(`ESC _ G ...payload... ESC \`)용 — 첫 바이트
     // 'G'면 kitty command로 파싱한다. 단일 APC(한 청크) 한도; 넘치면 그 APC는 통째로 무시한다(chunked면
     // 진행 중 전송도 폐기). 베이스: kitty graphics protocol(APC payload), OSC 버퍼와 동형.
-    apc_buffer: [4096]u8 = undefined,
-    apc_len: usize = 0,
+    // kitty graphics APC payload 누적 버퍼(동적). 베이스: Ghostty가 APC를 ArrayList+max_bytes로 받는 것
+    // (graphics_command.zig)과 동형 — 단일 APC로 오는 큰 transmit(과거 고정 4096 초과 시 silent drop)을
+    // 받기 위해 고정 배열 대신 동적으로. 상한은 chunked와 같은 max_kitty_chunk_bytes(폭주 방어). 초과/OOM이면
+    // apc_overflow로 표시해 dispatch에서 폐기한다. RIS/destroy에서 비운다.
+    apc_buffer: std.ArrayListUnmanaged(u8) = .empty,
     apc_overflow: bool = false,
     // kitty graphics chunked 전송(m=1) 누적 버퍼 — 여러 APC로 쪼개 온 base64 payload를 모은다. 첫 청크가
     // control(a/f/s/v/i/o)을 갖고(kitty_chunk_cmd), 이후 청크는 payload만 이어 붙인다. m=0에서 누적 base64를
@@ -425,6 +428,7 @@ pub const TerminalCore = struct {
         self.kitty_images.deinit(self.allocator);
         self.kitty_placements.deinit(self.allocator);
         self.kitty_chunk.deinit(self.allocator);
+        self.apc_buffer.deinit(self.allocator);
         if (self.placement_views.len > 0) self.allocator.free(self.placement_views);
         if (self.image_views.len > 0) self.allocator.free(self.image_views);
         self.* = undefined;
@@ -1443,11 +1447,12 @@ pub const TerminalCore = struct {
                     // 표시 후 무시 — 거대/악의적 시퀀스 방어). OSC 수집과 동형.
                     if (byte == 0x1b) {
                         self.parser = .apc_escape;
-                    } else if (self.apc_len < self.apc_buffer.len) {
-                        self.apc_buffer[self.apc_len] = byte;
-                        self.apc_len += 1;
+                    } else if (self.apc_buffer.items.len < max_kitty_chunk_bytes) {
+                        self.apc_buffer.append(self.allocator, byte) catch {
+                            self.apc_overflow = true; // OOM도 폐기(graceful)
+                        };
                     } else {
-                        self.apc_overflow = true;
+                        self.apc_overflow = true; // 상한 초과 — 거대/악의적 시퀀스 방어
                     }
                     index_ += 1;
                 },
@@ -1484,15 +1489,15 @@ pub const TerminalCore = struct {
     /// 받으면 payload가 화면에 텍스트로 새므로(과거 ESC_ 미처리), 수집해서 무시하는 것만으로도 그 누수를
     /// 막는다. 베이스: kitty graphics protocol(APC payload), OSC dispatch와 동형.
     fn dispatchApc(self: *TerminalCore) void {
-        if (self.apc_overflow or self.apc_len == 0) {
+        if (self.apc_overflow or self.apc_buffer.items.len == 0) {
             // 한 청크가 4096을 넘쳤다(overflow) — chunked 진행 중이면 그 전송 전체가 손상이라 폐기한다.
             if (self.apc_overflow) self.abortKittyChunk();
             return;
         }
         // kitty graphics(ESC _ G ...)만 처리한다. control(k=v)을 파싱하고, transmit이면 payload(base64)를
         // 디코드해 이미지를 저장한다. payload는 control 다음(';' 이후)이다.
-        if (self.apc_buffer[0] != 'G') return;
-        const body = self.apc_buffer[1..self.apc_len];
+        if (self.apc_buffer.items[0] != 'G') return;
+        const body = self.apc_buffer.items[1..];
         const cmd = parseKittyGraphicsCommand(body);
         const payload = if (std.mem.indexOfScalar(u8, body, ';')) |i| body[i + 1 ..] else body[0..0];
 
@@ -2241,7 +2246,7 @@ pub const TerminalCore = struct {
             // APC(ESC _): application program command. kitty graphics(`ESC _ G ...`)가 쓴다. OSC와
             // 동형으로 버퍼에 모아 ESC \(ST)에서 dispatch한다 — 안 받으면 payload가 화면에 텍스트로 샌다.
             '_' => {
-                self.apc_len = 0;
+                self.apc_buffer.clearRetainingCapacity();
                 self.apc_overflow = false;
                 self.parser = .apc;
             },
@@ -7326,6 +7331,25 @@ test "kitty graphics: chunked 전송 중 독립 명령(delete)이 오면 chunk�
     try std.testing.expect(core.kitty_chunk_cmd == null); // 진행 중 chunk 폐기
     try std.testing.expect(!core.kitty_images.map.contains(1)); // delete가 실제로 실행됨
     try std.testing.expect(!core.kitty_images.map.contains(2)); // 버려진 chunked i=2는 저장 안 됨
+}
+
+test "kitty graphics: 단일 APC가 4096B를 넘는 큰 transmit도 받는다 (동적 버퍼, code review #4)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    // 40x40 RGBA = 6400B 픽셀 → base64 ~8534자, APC body가 옛 고정 4096 버퍼를 훌쩍 넘는다.
+    const px: usize = 40 * 40 * 4;
+    const raw = try std.testing.allocator.alloc(u8, px);
+    defer std.testing.allocator.free(raw);
+    @memset(raw, 7);
+    const b64 = try std.testing.allocator.alloc(u8, std.base64.standard.Encoder.calcSize(px));
+    defer std.testing.allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, raw);
+    const seq = try std.fmt.allocPrint(std.testing.allocator, "\x1b_Ga=t,f=32,s=40,v=40,i=1;{s}\x1b\\", .{b64});
+    defer std.testing.allocator.free(seq);
+    try core.write(seq);
+    // 과거엔 4096 초과 → apc_overflow로 silent drop. 이제 동적 버퍼라 정상 저장된다.
+    try std.testing.expect(core.kitty_images.map.contains(1));
+    try std.testing.expectEqual(@as(u32, 40), core.kitty_images.map.get(1).?.width);
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

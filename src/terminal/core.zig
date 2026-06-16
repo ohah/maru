@@ -2237,9 +2237,13 @@ pub const TerminalCore = struct {
         self.appendResponse(s);
     }
 
-    /// CSI 파라미터(u16)를 kitty flags(u5)로 — 상위 비트는 truncate(kitty flags는 5비트라 미정의 비트 무시).
+    /// CSI 파라미터(u16)를 kitty flags로 — Maru가 실제 인코딩하는 disambiguate(bit 0)만 통과시킨다.
+    /// report_events/report_alternates/report_all/report_associated는 미구현이므로 스택에 저장하지
+    /// 않는다: 저장하면 query(CSI ? u)가 미구현 능력을 활성으로 거짓 보고하고(앱이 켜진 줄 알고 key
+    /// release·대체키·연관텍스트를 기대), 인코딩은 disambiguate 수준만 나가 광고와 동작이 어긋난다.
+    /// 지원 flag가 늘면 이 마스크를 넓힌다.
     fn kittyFlagsFromParam(v: u16) KittyFlags {
-        return @bitCast(@as(u5, @truncate(v)));
+        return .{ .disambiguate = (v & 1) != 0 };
     }
 
     /// kitty keyboard query(CSI ? u) 응답: 현재 스택 최상단 flags를 CSI ? flags u로 보고한다.
@@ -5895,14 +5899,30 @@ test "kitty keyboard CSI u dispatch: push(>)/set(=)/query(?)/pop(<)" {
     try std.testing.expectEqualStrings("\x1b[?1u", core.pendingResponse());
     core.clearResponse();
 
-    try core.write("\x1b[=2;2u"); // set or report_events(flags=2, mode=2)
-    try std.testing.expect(core.kitty_flags.current().disambiguate and core.kitty_flags.current().report_events);
+    // 미구현 flag는 마스킹된다(거짓 광고 방지): =2;2u(or report_events)는 report_events를 안 켜고
+    // disambiguate만 유지한다 — Maru는 disambiguate 수준만 인코딩하기 때문.
+    try core.write("\x1b[=2;2u");
+    try std.testing.expect(core.kitty_flags.current().disambiguate);
+    try std.testing.expect(!core.kitty_flags.current().report_events);
 
     try core.write("\x1b[<1u"); // pop → 이전 레벨(disabled)
     try std.testing.expectEqual(KittyFlags{}, core.kitty_flags.current());
     // RIS는 스택을 비활성으로 리셋한다.
     try core.write("\x1b[>9u\x1bc");
     try std.testing.expectEqual(KittyFlags{}, core.kitty_flags.current());
+}
+
+test "kitty keyboard query는 미구현 flag를 활성으로 거짓 보고하지 않는다 (audit HIGH)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    // 앱이 report_events(>2u)만 켜려 하면 — Maru는 미구현이라 스택에 저장하지 않고, query는 0(비활성)을
+    // 보고한다. 예전엔 2를 그대로 저장·보고해 "report_events 활성"이라 거짓 광고했다(인코딩은 disambiguate만).
+    try core.write("\x1b[>2u\x1b[?u");
+    try std.testing.expectEqualStrings("\x1b[?0u", core.pendingResponse());
+    core.clearResponse();
+    // disambiguate는 지원하므로 보고된다 — 9(=disambiguate 1 + report_all 8)를 켜도 미구현 비트는 떨구고 1만.
+    try core.write("\x1b[>9u\x1b[?u");
+    try std.testing.expectEqualStrings("\x1b[?1u", core.pendingResponse());
 }
 
 test "APC (ESC _ ... ESC \\): kitty graphics payload가 화면에 텍스트로 새지 않는다 (graphics 토대)" {

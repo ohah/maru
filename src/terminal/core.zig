@@ -278,6 +278,12 @@ pub const TerminalCore = struct {
     // 결) — 코어는 Color.default 추상만 알아 실제 RGB를 받는다. 주입 전 기본값은 어두운 테마 근사.
     default_fg_rgb: types.Rgb = .{ .r = 0xcc, .g = 0xcc, .b = 0xcc },
     default_bg_rgb: types.Rgb = .{ .r = 0x10, .g = 0x10, .b = 0x10 },
+    // OSC 10/11 색 설정 override(null = theme 기본 사용). OSC 10이 전경, 11이 배경을 덮고 OSC 110/111이 리셋한다.
+    // setDefaultColors(theme를 매 tick 주입)와 별개 필드라 주입이 set 값을 지우지 않는다. 렌더러 default 색은
+    // app이 `override orelse theme`로 wiring하고(OSC 4 팔레트와 같은 결 — 코어가 override 보관, app이 소비),
+    // OSC 10/11 질의도 override를 우선 회신한다. RIS에서 null.
+    default_fg_override: ?types.Rgb = null,
+    default_bg_override: ?types.Rgb = null,
     // OSC 4 팔레트 override: 256색 각 인덱스의 앱 재정의(null = 기본 xterm256 팔레트). OSC 4로 설정/질의,
     // OSC 104로 리셋(인덱스 없으면 전부). 렌더러가 `.indexed` 색을 풀 때 이 표를 먼저 본다(app이
     // paletteOverride()를 CellColors.palette로 wiring — 코어는 셀 픽셀/렌더를 모르는 K1 경계 유지). RIS에서 전부 null.
@@ -412,6 +418,8 @@ pub const TerminalCore = struct {
         self.abortKittyChunk(); // 진행 중이던 chunked 전송도 폐기
         self.grapheme_cluster_mode = false;
         @memset(&self.palette_override, null); // OSC 4 팔레트 재정의도 공장 초기화(xterm RIS가 팔레트를 리셋).
+        self.default_fg_override = null; // OSC 10/11 전경/배경 색 설정도 공장 초기화(theme 기본 복귀).
+        self.default_bg_override = null;
         self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
         self.origin_mode = false; // DECOM도 공장 기본(off — 화면 절대 좌표)으로 복원.
         self.dirty = fullDirty(self.size);
@@ -1500,9 +1508,13 @@ pub const TerminalCore = struct {
         } else if (std.mem.startsWith(u8, body, "2;")) {
             self.setWindowTitle(body[2..]); // OSC 2 = 창 제목만
         } else if (std.mem.startsWith(u8, body, "10;")) {
-            self.dispatchOscColorQuery(body[3..], 10); // OSC 10 = 전경색
+            self.dispatchOscDefaultColor(body[3..], 10); // OSC 10 = 전경색 설정/질의
         } else if (std.mem.startsWith(u8, body, "11;")) {
-            self.dispatchOscColorQuery(body[3..], 11); // OSC 11 = 배경색
+            self.dispatchOscDefaultColor(body[3..], 11); // OSC 11 = 배경색 설정/질의
+        } else if (std.mem.eql(u8, body, "110")) {
+            self.default_fg_override = null; // OSC 110 = 전경색 리셋(theme 기본 복귀)
+        } else if (std.mem.eql(u8, body, "111")) {
+            self.default_bg_override = null; // OSC 111 = 배경색 리셋
         } else if (std.mem.startsWith(u8, body, "52;")) {
             self.dispatchOscClipboard(body[3..]); // OSC 52 = 클립보드(파싱+디코드만; 실제 쓰기·정책은 platform)
         } else if (std.mem.startsWith(u8, body, "4;")) {
@@ -1514,19 +1526,44 @@ pub const TerminalCore = struct {
         // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
     }
 
-    /// OSC 10/11(전경/배경 색) 질의. spec이 `?`면 현재 색을 xterm 형식 `OSC <code> ; rgb:rrrr/gggg/bbbb ST`로
-    /// 회신한다 — nvim 등이 배경색 밝기로 light/dark 테마를 감지하는데, 응답이 없으면 테마를 오판한다. 색은
-    /// platform이 setDefaultColors로 주입한 theme 값이다(코어는 Color.default 추상만 알아 실제 RGB는 받는다 —
-    /// 셀 메트릭 주입과 같은 결). 색 설정(spec이 color)은 후속이라 지금은 질의만. 베이스: xterm ctlseqs OSC 10/11.
-    fn dispatchOscColorQuery(self: *TerminalCore, spec: []const u8, code: u16) void {
-        if (!std.mem.eql(u8, spec, "?")) return; // color spec 설정은 후속 — 질의(?)만 처리
-        const rgb = if (code == 10) self.default_fg_rgb else self.default_bg_rgb;
-        var buf: [40]u8 = undefined;
-        // 8-bit 채널을 16-bit로 복제(0xAB → 0xABAB) — xterm 4-hex-per-channel 표준 형식.
-        const resp = std.fmt.bufPrint(&buf, "\x1b]{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}\x1b\\", .{
-            code, rgb.r, rgb.r, rgb.g, rgb.g, rgb.b, rgb.b,
-        }) catch return;
-        self.appendResponse(resp);
+    /// OSC 10/11(전경/배경 색) 설정·질의. spec이 `?`면 현재 색(override 또는 주입된 theme)을 xterm 형식
+    /// `OSC <code> ; rgb:rrrr/gggg/bbbb ST`로 회신한다(nvim 등이 배경 밝기로 light/dark 테마를 감지). color
+    /// spec이면 그 색을 `default_fg/bg_override`에 둔다 — 렌더러 default 색과 화면 clear color를 app이 그
+    /// override로 바꾼다(OSC 4 팔레트와 같은 결: 코어가 override 보관, app이 CellColors/clear로 wiring).
+    /// theme 기본 RGB는 platform이 setDefaultColors로 주입(코어는 Color.default 추상만 알아 실제 RGB는 받는다).
+    /// OSC 110/111이 리셋. 베이스: xterm ctlseqs OSC 10/11.
+    fn dispatchOscDefaultColor(self: *TerminalCore, body: []const u8, code: u16) void {
+        // 여러 `;` 필드 중 첫 필드만 본다(xterm 연속 설정 `OSC 10 ; fg ; bg`는 후속).
+        var it = std.mem.splitScalar(u8, body, ';');
+        const spec = it.next() orelse return;
+        if (std.mem.eql(u8, spec, "?")) {
+            // 질의: override가 있으면 그 색, 없으면 주입된 theme 색을 회신(설정 직후 질의가 set 값을 본다).
+            const base = if (code == 10) self.default_fg_rgb else self.default_bg_rgb;
+            const ovr = if (code == 10) self.default_fg_override else self.default_bg_override;
+            const rgb = ovr orelse base;
+            var buf: [40]u8 = undefined;
+            // 8-bit 채널을 16-bit로 복제(0xAB → 0xABAB) — xterm 4-hex-per-channel 표준 형식.
+            const resp = std.fmt.bufPrint(&buf, "\x1b]{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}\x1b\\", .{
+                code, rgb.r, rgb.r, rgb.g, rgb.g, rgb.b, rgb.b,
+            }) catch return;
+            self.appendResponse(resp);
+        } else if (types.parseSpec(spec)) |rgb| {
+            // 설정: default 전경/배경 override를 둔다 — 렌더러 default 색을 app이 override로 바꾼다.
+            if (code == 10) {
+                self.default_fg_override = rgb;
+            } else {
+                self.default_bg_override = rgb;
+            }
+        }
+    }
+
+    /// OSC 10/11로 설정된 전경/배경 색 override(없으면 null = theme 기본). app이 렌더러 default 색과 화면
+    /// clear color를 `override orelse theme`로 정할 때 쓴다(OSC 4 paletteOverride와 같은 결).
+    pub fn defaultFgOverride(self: *const TerminalCore) ?types.Rgb {
+        return self.default_fg_override;
+    }
+    pub fn defaultBgOverride(self: *const TerminalCore) ?types.Rgb {
+        return self.default_bg_override;
     }
 
     /// OSC 4 — 256색 팔레트 설정/질의. `<index>;<spec>` 쌍을 반복 파싱한다. spec이 `?`면 현재 색(override 또는
@@ -6132,6 +6169,46 @@ test "OSC 4 (palette) set/query, multi-pair, OSC 104 reset(one/all), RIS clears 
     try std.testing.expect(core.palette_override[5] != null);
     try core.write("\x1bc"); // RIS
     try std.testing.expectEqual(@as(?types.Rgb, null), core.palette_override[5]);
+}
+
+test "OSC 10/11 (default fg/bg) set/query/reset; query reflects override; RIS clears" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    core.setDefaultColors(.{ .r = 0xcc, .g = 0xcc, .b = 0xcc }, .{ .r = 0x10, .g = 0x20, .b = 0x30 }); // theme 주입
+
+    // 설정 전 질의: 주입된 theme 배경색.
+    try core.write("\x1b]11;?\x1b\\");
+    try std.testing.expectEqualStrings("\x1b]11;rgb:1010/2020/3030\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // OSC 11 배경 설정 → override.
+    try core.write("\x1b]11;rgb:00/80/ff\x1b\\");
+    try std.testing.expectEqual(types.Rgb{ .r = 0x00, .g = 0x80, .b = 0xff }, core.defaultBgOverride().?);
+    // 설정 직후 질의는 set 값을 회신(override 우선).
+    try core.write("\x1b]11;?\x1b\\");
+    try std.testing.expectEqualStrings("\x1b]11;rgb:0000/8080/ffff\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // OSC 10 전경 설정(#form).
+    try core.write("\x1b]10;#ff0000\x1b\\");
+    try std.testing.expectEqual(types.Rgb{ .r = 0xff, .g = 0x00, .b = 0x00 }, core.defaultFgOverride().?);
+
+    // OSC 111 = 배경 리셋(전경 override는 유지).
+    try core.write("\x1b]111\x1b\\");
+    try std.testing.expectEqual(@as(?types.Rgb, null), core.defaultBgOverride());
+    try std.testing.expect(core.defaultFgOverride() != null);
+    // 리셋 후 질의는 다시 주입 theme 배경.
+    try core.write("\x1b]11;?\x1b\\");
+    try std.testing.expectEqualStrings("\x1b]11;rgb:1010/2020/3030\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // OSC 110 = 전경 리셋, RIS도 색 설정 공장 초기화.
+    try core.write("\x1b]110\x1b\\");
+    try std.testing.expectEqual(@as(?types.Rgb, null), core.defaultFgOverride());
+    try core.write("\x1b]10;rgb:11/22/33\x1b\\");
+    try std.testing.expect(core.defaultFgOverride() != null);
+    try core.write("\x1bc"); // RIS
+    try std.testing.expectEqual(@as(?types.Rgb, null), core.defaultFgOverride());
 }
 
 test "DECSC inside the alt screen does not clobber the cursor saved by 1049 (per-screen slots)" {

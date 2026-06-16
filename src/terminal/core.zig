@@ -1,6 +1,7 @@
 const std = @import("std");
 const input = @import("input.zig");
 const types = @import("types.zig");
+const png = @import("png.zig"); // kitty graphics f=100 PNG 디코드(K3c)
 const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
 
 /// mouse tracking 모드(DECSET 9/1000/1002/1003) — 어떤 마우스 이벤트를 앱에 리포트할지(상호 배타). 베이스: xterm
@@ -1833,12 +1834,14 @@ pub const TerminalCore = struct {
     /// zlib(o=z) 압축이면 base64 디코드 후 inflate한다(K3b). PNG(f=100)는 후속(K3c). 베이스: kitty
     /// graphics protocol transmit — RGBA/RGB 직접 픽셀은 base64만 풀면 되고, zlib은 std.compress로 푼다.
     fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
+        if (cmd.image_id == 0) return; // 필수 control 누락(저장 키)
+        if (cmd.format == 100) return self.kittyTransmitPng(cmd, payload); // PNG는 별도 경로(s/v는 PNG가 자기기술)
         const bpp: u8 = switch (cmd.format) {
             24 => 3,
             32 => 4,
-            else => return, // PNG(100) 등은 후속(K3c)
+            else => return, // 알 수 없는 format
         };
-        if (cmd.width == 0 or cmd.height == 0 or cmd.image_id == 0) return; // 필수 control 누락
+        if (cmd.width == 0 or cmd.height == 0) return; // raw 픽셀은 치수가 필수
         // 치수(s/v)는 APC에서 상한 없이 오는 u32라 곱이 usize를 넘을 수 있다(악의적 대형 값) — 오버플로면
         // 거부한다(graceful). 안 그러면 Debug/ReleaseSafe에서 panic, ReleaseFast에선 wrap된다(code review).
         const wh = std.math.mul(usize, cmd.width, cmd.height) catch return;
@@ -1895,6 +1898,28 @@ pub const TerminalCore = struct {
         const n = decomp.reader.readSliceShort(&extra) catch 0;
         if (n != 0) return error.InflateFailed;
         return out;
+    }
+
+    /// kitty graphics transmit PNG(f=100): base64 디코드 후 PNG 디코더로 RGB/RGBA 픽셀을 푼다. 치수·bpp는
+    /// PNG가 자기기술하므로 s/v control은 안 본다. 8-bit truecolor만 지원(미지원 변종·malformed는 graceful
+    /// 거부 — png.zig). PNG에 추가 압축(o=z)은 미지원(PNG는 이미 압축됨, 실사용 없음). 베이스: kitty graphics
+    /// protocol(f=100) + PNG 명세.
+    fn kittyTransmitPng(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
+        if (cmd.compression != 0) return; // PNG + 추가 압축은 미지원(rare)
+        const dec = std.base64.standard.Decoder;
+        const decoded_len = dec.calcSizeForSlice(payload) catch return;
+        if (decoded_len == 0) return;
+        const png_bytes = self.allocator.alloc(u8, decoded_len) catch return;
+        defer self.allocator.free(png_bytes); // PNG 파일 바이트는 디코드 후 불필요
+        dec.decode(png_bytes, payload) catch return;
+        const img = png.decode(self.allocator, png_bytes) catch return; // 미지원/malformed는 graceful 거부
+        self.kitty_images.add(self.allocator, .{
+            .id = cmd.image_id,
+            .width = img.width,
+            .height = img.height,
+            .bpp = img.bpp,
+            .data = img.data, // add가 소유권 가져감
+        });
     }
 
     /// OSC 8: `8 ; params ; URI` — URI가 비면 링크 닫기, 있으면 열기(이후 출력 셀에 id가 찍힌다).
@@ -6878,6 +6903,53 @@ test "kitty graphics zlib: 큰 이미지(back-reference 포함) inflate (K3b)" {
     try std.testing.expectEqual(@as(usize, 256), img.data.len);
     try std.testing.expectEqual(@as(u8, 0), img.data[0]);
     try std.testing.expectEqual(@as(u8, 249), img.data[255]); // 마지막 바이트까지 정확
+}
+
+// --- kitty graphics K3c: PNG 디코드(f=100, 8-bit truecolor) ---
+
+test "kitty graphics PNG(f=100): RGBA/RGB 디코드 저장(s/v 없이) (K3c)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    // 2x2 RGBA PNG(PIL 생성). f=100, s/v 없음 — PNG가 치수를 자기기술.
+    try core.write("\x1b_Ga=t,f=100,i=1;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAF0lEQVR4nGP4z8Dwn+E/QwMTI5hmOAAAOrcGP3V8arYAAAAASUVORK5CYII=\x1b\\");
+    try std.testing.expect(core.kitty_images.map.contains(1));
+    const a = core.kitty_images.map.get(1).?;
+    try std.testing.expectEqual(@as(u32, 2), a.width);
+    try std.testing.expectEqual(@as(u32, 2), a.height);
+    try std.testing.expectEqual(@as(u8, 4), a.bpp);
+    try std.testing.expectEqual(@as(usize, 16), a.data.len);
+    try std.testing.expectEqual(@as(u8, 255), a.data[0]); // 첫 픽셀 R
+    try std.testing.expectEqual(@as(u8, 64), a.data[15]); // 마지막 픽셀 A
+
+    // 3x2 RGB PNG(color type 2).
+    try core.write("\x1b_Ga=t,f=100,i=2;iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAE0lEQVR4nGPkEpGDAJaoqCgICwAY2AK4OdDUoAAAAABJRU5ErkJggg==\x1b\\");
+    const b = core.kitty_images.map.get(2).?;
+    try std.testing.expectEqual(@as(u32, 3), b.width);
+    try std.testing.expectEqual(@as(u8, 3), b.bpp);
+    try std.testing.expectEqual(@as(usize, 18), b.data.len);
+    try std.testing.expectEqual(@as(u8, 10), b.data[0]);
+    try std.testing.expectEqual(@as(u8, 180), b.data[17]);
+}
+
+test "kitty graphics PNG: 필터 다양한 그라데이션 디코드 + 미지원/깨진 PNG graceful 거부 (K3c)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer core.deinit();
+    // 16x16 RGBA 그라데이션 — PIL 적응 필터(Sub/Up/Average/Paeth)를 거쳐 unfilter 전 경로를 실증.
+    try core.write("\x1b_Ga=t,f=100,i=3;iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAXUlEQVR4nKXMRw6AMBAEwTEMOf7/syD5ALKcdteH6mM7AM8NwIq+cGb8B50Jw0GvxnhAFaYHgxjzg1GE5cFUxfpgLqJssGRRPliTqBtsEeoHe8A4OD4Ng9NrHFx4ARfXB/WGjsh8AAAAAElFTkSuQmCC\x1b\\");
+    try std.testing.expect(core.kitty_images.map.contains(3));
+    const g = core.kitty_images.map.get(3).?;
+    try std.testing.expectEqual(@as(u32, 16), g.width);
+    try std.testing.expectEqual(@as(u32, 16), g.height);
+    try std.testing.expectEqual(@as(usize, 1024), g.data.len);
+    try std.testing.expectEqual(@as(u8, 0), g.data[0]);
+    try std.testing.expectEqual(@as(u8, 255), g.data[1023]); // 마지막 바이트까지 정확
+
+    // grayscale(color type 0)은 미지원 변종 → graceful 거부(저장 안 됨, panic 없음).
+    try core.write("\x1b_Ga=t,f=100,i=4;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAAAAABX3VL4AAAADklEQVR4nGNgcGBo+A8AAwUBwE4zW+kAAAAASUVORK5CYII=\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(4));
+    // 깨진 PNG(서명 틀림)도 graceful 거부.
+    try core.write("\x1b_Ga=t,f=100,i=5;AAAAAAAAAAAA\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(5));
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

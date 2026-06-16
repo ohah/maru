@@ -3813,6 +3813,7 @@ pub const DevSession = struct {
             const cell_colors: metal_frame.CellColors = .{
                 .default_fg = self.appearance.theme.foreground,
                 .default_bg = self.appearance.theme.background, // SGR reverse의 default 색 스왑용
+                .palette = self.activeSurface().core.paletteOverride(), // OSC 4 팔레트 재정의(.indexed 색 풀이)
                 .selection_bg = self.appearance.theme.selection,
                 .selection = self.activeSurface().core.selectionViewportSpan(),
                 .hover_link = self.hoverLinkSpan(),
@@ -4002,18 +4003,22 @@ pub const DevSession = struct {
                 if (leaf_rects.items.len > 1) {
                     for (leaf_rects.items) |lr| {
                         if (lr.leaf == active_pane) continue; // 활성은 맨 뒤에 따로 넣는다
-                        const dl = renderer.buildDrawList(self.allocator, lr.leaf.activeTerm().surface.core.renderSnapshot()) catch continue;
+                        const pane_core = &lr.leaf.activeTerm().surface.core;
+                        const dl = renderer.buildDrawList(self.allocator, pane_core.renderSnapshot()) catch continue;
                         var f = pane_frame_builder.buildFromDrawList(self.allocator, dl, &self.renderer_state) catch continue;
                         built_frames.append(self.allocator, f) catch {
                             f.deinit(self.allocator);
                             continue;
                         };
+                        // 비활성 pane도 자기 core의 OSC 4 팔레트로 .indexed를 푼다(팔레트는 per-터미널 상태).
+                        var pane_colors = inactive_colors;
+                        pane_colors.palette = pane_core.paletteOverride();
                         const t = self.paneTermRect(lr.rect); // 바 아래 영역 origin
                         pane_frames.append(self.allocator, .{
                             .frame = f, // built_frames가 소유(deinit) — 여기는 같은 frame을 가리키는 view
                             .origin_x = t.x,
                             .origin_y = t.y,
-                            .colors = inactive_colors,
+                            .colors = pane_colors,
                         }) catch {};
                     }
                 }

@@ -278,6 +278,10 @@ pub const TerminalCore = struct {
     // 결) — 코어는 Color.default 추상만 알아 실제 RGB를 받는다. 주입 전 기본값은 어두운 테마 근사.
     default_fg_rgb: types.Rgb = .{ .r = 0xcc, .g = 0xcc, .b = 0xcc },
     default_bg_rgb: types.Rgb = .{ .r = 0x10, .g = 0x10, .b = 0x10 },
+    // OSC 4 팔레트 override: 256색 각 인덱스의 앱 재정의(null = 기본 xterm256 팔레트). OSC 4로 설정/질의,
+    // OSC 104로 리셋(인덱스 없으면 전부). 렌더러가 `.indexed` 색을 풀 때 이 표를 먼저 본다(app이
+    // paletteOverride()를 CellColors.palette로 wiring — 코어는 셀 픽셀/렌더를 모르는 K1 경계 유지). RIS에서 전부 null.
+    palette_override: [256]?types.Rgb = .{null} ** 256,
     // OSC 52 클립보드 쓰기 요청(디코드된 바이트, pending). platform이 정책(allow) 확인 후 drain → system clipboard.
     clipboard_write: std.ArrayListUnmanaged(u8) = .empty,
     /// kitty graphics 이미지 저장소(transmit된 이미지, image_id→픽셀 버퍼). 렌더는 후속.
@@ -407,6 +411,7 @@ pub const TerminalCore = struct {
         self.kitty_placements.clearRetainingCapacity(); // placement도 함께 비운다
         self.abortKittyChunk(); // 진행 중이던 chunked 전송도 폐기
         self.grapheme_cluster_mode = false;
+        @memset(&self.palette_override, null); // OSC 4 팔레트 재정의도 공장 초기화(xterm RIS가 팔레트를 리셋).
         self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
         self.origin_mode = false; // DECOM도 공장 기본(off — 화면 절대 좌표)으로 복원.
         self.dirty = fullDirty(self.size);
@@ -1500,6 +1505,11 @@ pub const TerminalCore = struct {
             self.dispatchOscColorQuery(body[3..], 11); // OSC 11 = 배경색
         } else if (std.mem.startsWith(u8, body, "52;")) {
             self.dispatchOscClipboard(body[3..]); // OSC 52 = 클립보드(파싱+디코드만; 실제 쓰기·정책은 platform)
+        } else if (std.mem.startsWith(u8, body, "4;")) {
+            self.dispatchOscPalette(body[2..]); // OSC 4 = 256색 팔레트 설정/질의(`<index>;<spec>` 쌍 반복)
+        } else if (std.mem.eql(u8, body, "104") or std.mem.startsWith(u8, body, "104;")) {
+            // OSC 104 = 팔레트 리셋. 인덱스 없으면(정확히 "104") 전부, "104;1;2"면 그 인덱스만.
+            self.dispatchOscPaletteReset(if (body.len > 4) body[4..] else "");
         }
         // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
     }
@@ -1517,6 +1527,49 @@ pub const TerminalCore = struct {
             code, rgb.r, rgb.r, rgb.g, rgb.g, rgb.b, rgb.b,
         }) catch return;
         self.appendResponse(resp);
+    }
+
+    /// OSC 4 — 256색 팔레트 설정/질의. `<index>;<spec>` 쌍을 반복 파싱한다. spec이 `?`면 현재 색(override 또는
+    /// 기본 xterm256)을 `OSC 4 ; <index> ; rgb:rrrr/gggg/bbbb ST`로 회신, color spec이면 그 인덱스를 덮어쓴다.
+    /// 인덱스는 0..255(parseInt u8 — 256+ 자동 실패→skip). 짝이 안 맞는 끝 토큰은 버린다. 베이스: xterm ctlseqs
+    /// OSC 4(`rgb:`/`#` 색 명세). 색 적용은 렌더러가 palette_override를 소비(코어는 표만 보관 — K1 경계).
+    fn dispatchOscPalette(self: *TerminalCore, body: []const u8) void {
+        var it = std.mem.splitScalar(u8, body, ';');
+        while (it.next()) |idx_str| {
+            const spec = it.next() orelse break; // 쌍이 안 맞는 마지막 index는 무시
+            const idx = std.fmt.parseInt(u8, idx_str, 10) catch continue; // 0..255 밖 → skip
+            if (std.mem.eql(u8, spec, "?")) {
+                const rgb = self.palette_override[idx] orelse types.xterm256(idx);
+                var buf: [48]u8 = undefined;
+                // 8-bit 채널을 16-bit로 복제(0xAB → 0xABAB) — xterm 4-hex-per-channel 표준 응답 형식.
+                const resp = std.fmt.bufPrint(&buf, "\x1b]4;{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}\x1b\\", .{
+                    idx, rgb.r, rgb.r, rgb.g, rgb.g, rgb.b, rgb.b,
+                }) catch continue;
+                self.appendResponse(resp);
+            } else if (types.parseSpec(spec)) |rgb| {
+                self.palette_override[idx] = rgb;
+            }
+        }
+    }
+
+    /// OSC 104 — 팔레트 리셋. body가 비면 전부 기본 xterm256으로(override 제거), 아니면 `;`로 나눈 인덱스만.
+    /// 베이스: xterm ctlseqs OSC 104.
+    fn dispatchOscPaletteReset(self: *TerminalCore, body: []const u8) void {
+        if (body.len == 0) {
+            @memset(&self.palette_override, null);
+            return;
+        }
+        var it = std.mem.splitScalar(u8, body, ';');
+        while (it.next()) |s| {
+            const idx = std.fmt.parseInt(u8, s, 10) catch continue;
+            self.palette_override[idx] = null;
+        }
+    }
+
+    /// 렌더러가 `.indexed` 색을 풀 때 참조하는 OSC 4 팔레트 override 표(null = 기본 xterm256). app이
+    /// CellColors.palette로 wiring한다 — 코어는 셀 픽셀을 모르고 표만 들고 있다(K1 경계).
+    pub fn paletteOverride(self: *const TerminalCore) *const [256]?types.Rgb {
+        return &self.palette_override;
     }
 
     /// OSC 52(클립보드) — `52;<targets>;<base64>`로 system clipboard 쓰기를 요청한다(tmux/nvim이 SSH 너머
@@ -6037,6 +6090,48 @@ test "OSC 52 (clipboard) write decodes base64 into pending; read(?) is ignored (
     try core.write("\x1b]52;c;?\x1b\\");
     try std.testing.expectEqualStrings("", core.pendingClipboardWrite());
     try std.testing.expectEqualStrings("", core.pendingResponse());
+}
+
+test "OSC 4 (palette) set/query, multi-pair, OSC 104 reset(one/all), RIS clears overrides" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // 설정: OSC 4 ; 1 ; rgb:ff/00/80 ST → 인덱스 1 override.
+    try core.write("\x1b]4;1;rgb:ff/00/80\x1b\\");
+    try std.testing.expectEqual(types.Rgb{ .r = 0xff, .g = 0x00, .b = 0x80 }, core.palette_override[1].?);
+
+    // 질의(override 있음): 8-bit→16-bit 복제(0xff→ffff, 0x80→8080)로 회신.
+    try core.write("\x1b]4;1;?\x1b\\");
+    try std.testing.expectEqualStrings("\x1b]4;1;rgb:ffff/0000/8080\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // 질의(override 없는 인덱스 9 = 기본 xterm256 bright red {255,0,0}).
+    try core.write("\x1b]4;9;?\x1b\\");
+    try std.testing.expectEqualStrings("\x1b]4;9;rgb:ffff/0000/0000\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // 여러 쌍 한 번에(#form·rgb:form 혼용): 인덱스 2·3 동시 설정.
+    try core.write("\x1b]4;2;#00ff00;3;rgb:00/00/ff\x1b\\");
+    try std.testing.expectEqual(types.Rgb{ .r = 0x00, .g = 0xff, .b = 0x00 }, core.palette_override[2].?);
+    try std.testing.expectEqual(types.Rgb{ .r = 0x00, .g = 0x00, .b = 0xff }, core.palette_override[3].?);
+
+    // OSC 104 ; 1 — 인덱스 1만 리셋(2·3은 유지).
+    try core.write("\x1b]104;1\x1b\\");
+    try std.testing.expectEqual(@as(?types.Rgb, null), core.palette_override[1]);
+    try std.testing.expect(core.palette_override[2] != null);
+
+    // OSC 104(인덱스 없음) — 전부 리셋.
+    try core.write("\x1b]104\x1b\\");
+    try std.testing.expectEqual(@as(?types.Rgb, null), core.palette_override[2]);
+    try std.testing.expectEqual(@as(?types.Rgb, null), core.palette_override[3]);
+
+    // 잘못된 spec은 무시(인덱스 4 미설정 유지), RIS(ESC c)는 팔레트 override를 공장 초기화.
+    try core.write("\x1b]4;4;bogus\x1b\\");
+    try std.testing.expectEqual(@as(?types.Rgb, null), core.palette_override[4]);
+    try core.write("\x1b]4;5;rgb:11/22/33\x1b\\");
+    try std.testing.expect(core.palette_override[5] != null);
+    try core.write("\x1bc"); // RIS
+    try std.testing.expectEqual(@as(?types.Rgb, null), core.palette_override[5]);
 }
 
 test "DECSC inside the alt screen does not clobber the cursor saved by 1049 (per-screen slots)" {

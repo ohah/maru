@@ -21,6 +21,7 @@ pub const CursorOverlay = struct {
 // 텍스트 장식선의 종류 — 셀 안에서 선이 그려지는 위치를 정한다(렌더러가 reserved kind로 환산).
 pub const LineKind = enum {
     underline, // SGR 4 — 셀 하단
+    double_underline, // SGR 21 — 셀 하단 2중선
     strikethrough, // SGR 9 — 셀 중앙
     overline, // SGR 53 — 셀 상단
 };
@@ -97,7 +98,7 @@ pub fn buildDrawList(
                 // overlay도 같은 상한을 쓴다: cell마다 underline+strikethrough+overline overlay가 최대
                 // 3개, 행마다 OSC 133 거터 마크가 최대 1개, 루프 뒤에 cursor overlay가 최대 1개 더 붙으므로
                 // (3*cols+1)*행수+1이다. cells와 같은 이유로 미리 확보해 per-frame 재할당을 없앤다.
-                try overlays.ensureTotalCapacity(allocator, (end_row - start_row + 1) * (3 * col_count + 1) + 1);
+                try overlays.ensureTotalCapacity(allocator, (end_row - start_row + 1) * (4 * col_count + 1) + 1); // 셀당 최대 4 line overlay(underline+double+strike+overline) + cursor
 
                 for (start_row..end_row + 1) |row| {
                     for (0..col_count) |col| {
@@ -116,7 +117,12 @@ pub fn buildDrawList(
                         // 텍스트 장식선(underline/strikethrough/overline)은 draw-time overlay다 —
                         // glyph cell 밖에 둬 atlas가 "A"와 "밑줄 A"를 따로 캐시하지 않게 한다. 셋은
                         // 독립 비트라 한 셀이 셋을 다 낼 수 있고, kind만 다른 같은 모양이라 한 헬퍼로 낸다.
-                        if (cell.style.underline) overlays.appendAssumeCapacity(.{ .line = lineOverlay(row, col, cell, .underline) });
+                        if (cell.style.underline) {
+                            // double underline은 하단 선(reserved 2) + 둘째 선(reserved 7, 위)으로 2개 방출 —
+                            // .m이 셀당 한 띠만 그려서 두 줄을 두 overlay로 낸다. single은 하단 선만.
+                            overlays.appendAssumeCapacity(.{ .line = lineOverlay(row, col, cell, .underline) });
+                            if (cell.style.underline_double) overlays.appendAssumeCapacity(.{ .line = lineOverlay(row, col, cell, .double_underline) });
+                        }
                         if (cell.style.strikethrough) overlays.appendAssumeCapacity(.{ .line = lineOverlay(row, col, cell, .strikethrough) });
                         if (cell.style.overline) overlays.appendAssumeCapacity(.{ .line = lineOverlay(row, col, cell, .overline) });
                     }
@@ -162,7 +168,7 @@ pub fn buildDrawList(
 fn lineOverlay(row: usize, col: usize, cell: terminal.Cell, kind: LineKind) LineOverlay {
     // underline은 SGR 58 underline_color가 있으면 그 색으로(없으면 전경색). strikethrough/overline은 전경색.
     // nvim/helix가 LSP 진단을 전경과 다른 색의 밑줄로 표시한다(G1 underline color).
-    const line_color: terminal.Color = if (kind == .underline) switch (cell.style.underline_color) {
+    const line_color: terminal.Color = if (kind == .underline or kind == .double_underline) switch (cell.style.underline_color) {
         .default => cell.style.foreground,
         else => cell.style.underline_color,
     } else cell.style.foreground;
@@ -421,7 +427,7 @@ test "draw list emits a strikethrough overlay for SGR 9 cells, independent of un
                 try std.testing.expectEqual(@as(u16, 0), l.col);
                 try std.testing.expectEqual(@as(u2, 1), l.width);
             },
-            .overline => {},
+            .overline, .double_underline => {},
         },
         else => {},
     };
@@ -452,10 +458,40 @@ test "draw list emits an overline overlay for SGR 53 cells, independent of strik
                 try std.testing.expectEqual(@as(u16, 0), l.col);
                 try std.testing.expectEqual(@as(u2, 1), l.width);
             },
+            .double_underline => {},
         },
         else => {},
     };
     try std.testing.expectEqual(@as(usize, 1), underlines);
     try std.testing.expectEqual(@as(usize, 1), strikes);
     try std.testing.expectEqual(@as(usize, 1), overlines);
+}
+
+test "G1 double underline: SGR 21 sets underline_double and emits underline + double_underline overlays" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 1 });
+    defer core.deinit();
+    try core.write("\x1b[21mA"); // SGR 21 = double underline
+    try std.testing.expect(core.cells[0].style.underline);
+    try std.testing.expect(core.cells[0].style.underline_double);
+
+    var dl = try buildDrawList(std.testing.allocator, core.snapshot());
+    defer dl.deinit(std.testing.allocator);
+    var has_underline = false;
+    var has_double = false;
+    for (dl.overlays) |o| switch (o) {
+        .line => |l| switch (l.kind) {
+            .underline => has_underline = true,
+            .double_underline => has_double = true,
+            else => {},
+        },
+        else => {},
+    };
+    // double underline은 하단 선(.underline)과 둘째 선(.double_underline) 2개를 낸다.
+    try std.testing.expect(has_underline);
+    try std.testing.expect(has_double);
+
+    // SGR 24는 둘 다 끈다.
+    try core.write("\x1b[24mB");
+    try std.testing.expect(!core.cells[1].style.underline);
+    try std.testing.expect(!core.cells[1].style.underline_double);
 }

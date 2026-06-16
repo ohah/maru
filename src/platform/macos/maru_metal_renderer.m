@@ -306,6 +306,12 @@ static void maru_fill_cell_quad(
         const float center = py_top + cell_h * 0.5f;
         px_top = center - thickness * 0.5f;
         px_bottom = center + thickness * 0.5f;
+    } else if (cell.reserved == 7) {
+        // double underline(SGR 21) 둘째 선: 하단 선(reserved 2) 위로 gap만큼 띄운 얇은 띠. 둘이 합쳐 2중선.
+        const float t2 = fmaxf(2.0f, cell_h * 0.15f); // 하단 선 두께(reserved 2와 동일)
+        const float gap = fmaxf(2.0f, cell_h * 0.10f); // 두 선 사이 간격
+        px_bottom = px_bottom - t2 - gap; // 하단 선 + gap 만큼 위로
+        px_top = px_bottom - fmaxf(1.5f, cell_h * 0.10f); // 둘째 선(약간 얇게)
     }
     const float left = (px_left / drawable_w) * 2.0f - 1.0f;
     const float right = (px_right / drawable_w) * 2.0f - 1.0f;

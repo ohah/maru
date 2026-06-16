@@ -2275,6 +2275,9 @@ pub const DevSession = struct {
         self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
         // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
         self.rebuildSidebar() catch {};
+        // 폰트/DPI 변경을 활성 surface 코어에 즉시 반영(kitty 자동 크기 advance용 — renderFrame 안전망보다
+        // 먼저, 변경 직후 첫 PTY 출력에서 정확하도록). surface 생성 전(init 순서)이면 surface_initialized로 가드.
+        if (self.surface_initialized) self.activeSurface().core.setCellMetrics(self.cell_width_px, self.cell_height_px);
     }
 
     /// 폰트 크기를 delta(pt)만큼 조절한다(⌘+/⌘-). setFontSize가 클램프·메트릭·grid를 처리한다.
@@ -4022,6 +4025,10 @@ pub const DevSession = struct {
                 defer self.allocator.free(kg_pixels);
                 defer kg_live_ids.deinit(self.allocator);
                 if (self.surface_initialized) {
+                    // kitty 자동 크기 이미지의 커서 advance용 셀 메트릭을 활성 surface 코어에 주입한다(매 tick
+                    // 최신). 메트릭은 전역(폰트·DPI)이라 활성 surface가 PTY 출력을 처리할 때 최신값을 갖는다 —
+                    // multi-surface 전체 주입은 후속(#5~7과 함께). 그 외 픽셀↔셀 환산은 여전히 렌더러 책임(K1).
+                    self.activeSurface().core.setCellMetrics(self.cell_width_px, self.cell_height_px);
                     const snap = self.activeSurface().core.renderSnapshot();
                     // K4c: 살아있는 이미지 id 집합(활성 surface 저장소). Swift가 이 집합에 없는 텍스처를 evict.
                     for (snap.images) |img| kg_live_ids.append(self.allocator, img.image_id) catch {};

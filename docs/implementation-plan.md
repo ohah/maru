@@ -566,7 +566,7 @@ K1(placement 코어)에 이어 **실제로 이미지 픽셀을 화면에 그리�
 
 후속(K2 밖): 텍스처 eviction(삭제 이미지 GPU 메모리 해제, 현재 안 그려질 뿐)·비활성 panel 이미지·reflow 정밀 재배치는 K4/별도. K3 디코드 확장(PNG/zlib/chunked).
 
-한계(설계 시점에 알려진): 자동 크기(`r` 미지정) 커서 advance는 K1대로 미이동; reflow 후 정밀 재배치·세분화된 `d` 타깃·query 응답·애니메이션은 K3/K4 또는 별도. 멀티 윈도우에서 이미지 텍스처 캐시 소유권은 glyph atlas의 per-session 소유권 재검토와 함께 본다(현재 단일 윈도우 기준).
+한계(설계 시점에 알려진): 자동 크기(`r` 미지정) 커서 advance는 **셀 메트릭 주입(접근 B, `setCellMetrics`)으로 구현 완료**(code review #2) — 코어가 셀 픽셀 1쌍을 보관해 이미지 픽셀 높이를 행 span으로 환산하고(렌더러 `buildGpuImages`와 `PlacementGeometry` 공유 — 화면 행 수와 일치), 메트릭 없는 헤드리스만 미이동(K1 fallback). platform→core 메트릭 주입은 마우스 1016 선례와 같은 결이고, 그 외 픽셀↔셀 환산은 여전히 렌더러 책임이다. reflow 후 정밀 재배치·세분화된 `d` 타깃·query 응답·애니메이션은 K3/K4 또는 별도. 멀티 윈도우에서 이미지 텍스처 캐시 소유권은 glyph atlas의 per-session 소유권 재검토와 함께 본다(현재 단일 윈도우 기준).
 
 ## 메뉴바 + 커맨드 팝업 (Action 카탈로그, 8단계 후속 — 사용자 합의 완료·미착수)
 

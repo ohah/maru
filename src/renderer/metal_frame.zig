@@ -660,30 +660,16 @@ pub fn buildGpuImages(
         const tex_w: f32 = @floatFromInt(img.width);
         const tex_h: f32 = @floatFromInt(img.height);
 
-        // source 사각형(픽셀): x/y는 좌상단, w/h=0이면 거기서부터 끝까지. 텍스처 안으로 clamp.
-        const sx = @min(p.src_x, img.width);
-        const sy = @min(p.src_y, img.height);
-        const max_sw = img.width - sx;
-        const max_sh = img.height - sy;
-        const sw = if (p.src_width == 0) max_sw else @min(p.src_width, max_sw);
-        const sh = if (p.src_height == 0) max_sh else @min(p.src_height, max_sh);
-        if (sw == 0 or sh == 0) continue; // 잘린 영역이 비면 그릴 게 없다
-        const sw_f: f32 = @floatFromInt(sw);
-        const sh_f: f32 = @floatFromInt(sh);
-
-        // 목적지 크기(px): c/r이 있으면 셀 수×셀크기, 한쪽만 있으면 종횡비 유지, 둘 다 없으면 source 픽셀.
-        var dest_w: f32 = sw_f;
-        var dest_h: f32 = sh_f;
-        if (p.columns > 0 and p.rows > 0) {
-            dest_w = @as(f32, @floatFromInt(p.columns)) * cw;
-            dest_h = @as(f32, @floatFromInt(p.rows)) * ch;
-        } else if (p.columns > 0) {
-            dest_w = @as(f32, @floatFromInt(p.columns)) * cw;
-            dest_h = if (sw_f > 0) sh_f * (dest_w / sw_f) else sh_f;
-        } else if (p.rows > 0) {
-            dest_h = @as(f32, @floatFromInt(p.rows)) * ch;
-            dest_w = if (sh_f > 0) sw_f * (dest_h / sh_f) else sw_f;
-        }
+        // source crop(UV)과 목적지 픽셀 크기(quad)는 코어 커서 advance와 공유하는 단일 출처 헬퍼로
+        // 계산한다 — 어긋나면 화면에 그려진 이미지 행 수와 커서가 내려간 행 수가 달라진다. c/r이 둘 다면
+        // 셀수×셀크기, 한쪽만이면 종횡비 유지, 둘 다 없으면 source 픽셀(자동 크기). crop이 비면 skip.
+        const geom = terminal.PlacementGeometry.compute(img.width, img.height, p.src_x, p.src_y, p.src_width, p.src_height, p.columns, p.rows, cell_width_px, cell_height_px) orelse continue;
+        const sx = geom.src_x;
+        const sy = geom.src_y;
+        const sw = geom.src_w;
+        const sh = geom.src_h;
+        const dest_w = geom.dest_w;
+        const dest_h = geom.dest_h;
 
         // 목적지 위치(터미널-로컬 px): 앵커 셀 좌상단 + 셀 내 픽셀 오프셋. row는 i32(음수=화면 위).
         const dest_x = @as(f32, @floatFromInt(p.col)) * cw + @as(f32, @floatFromInt(p.cell_x_offset));

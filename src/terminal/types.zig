@@ -152,12 +152,6 @@ pub const DirtyRegion = struct {
     end_row: u16,
 };
 
-/// kitty graphics placement — 화면에 표시 중인 이미지 인스턴스 하나(렌더용 뷰). 한 이미지(image_id)에
-/// placement_id로 구분되는 여러 placement가 있을 수 있다. 좌표는 뷰포트 상대 — row는 placement가 앵커된
-/// 셀의 뷰포트 행(top 기준 오프셋, i32라 위로 스크롤돼 화면 위로 벗어난 앵커는 음수). 셀 단위 크기(span)는
-/// 코어가 셀 픽셀 크기를 모르므로 계산하지 않는다: source rect(픽셀)와 명시 columns/rows만 담고, 픽셀→셀
-/// 환산·클립은 셀 메트릭을 가진 렌더러가 한다. 키 의미의 단일 출처는 core.zig의 KittyGraphicsCommand
-/// 주석이다. 베이스: kitty graphics protocol(placement/display).
 /// kitty graphics 이미지 한 장의 렌더용 뷰(픽셀 버퍼를 빌려 노출 — zero-copy). 렌더러(K2d)가
 /// image_id로 GPU 텍스처를 캐시하고 `generation`이 바뀔 때만 업로드한다(매 frame 픽셀 전송 X).
 /// `bpp`=3(RGB)/4(RGBA). 베이스: kitty graphics protocol image storage.
@@ -170,6 +164,12 @@ pub const KittyImageView = struct {
     pixels: []const u8,
 };
 
+/// kitty graphics placement — 화면에 표시 중인 이미지 인스턴스 하나(렌더용 뷰). 한 이미지(image_id)에
+/// placement_id로 구분되는 여러 placement가 있을 수 있다. 좌표는 뷰포트 상대 — row는 placement가 앵커된
+/// 셀의 뷰포트 행(top 기준 오프셋, i32라 위로 스크롤돼 화면 위로 벗어난 앵커는 음수). 셀 단위 크기(span)는
+/// 코어가 셀 픽셀 크기를 모르므로 계산하지 않는다: source rect(픽셀)와 명시 columns/rows만 담고, 픽셀→셀
+/// 환산·클립은 셀 메트릭을 가진 렌더러가 한다. 키 의미의 단일 출처는 core.zig의 KittyGraphicsCommand
+/// 주석이다. 베이스: kitty graphics protocol(placement/display).
 pub const KittyPlacement = struct {
     image_id: u32,
     placement_id: u32, // p: 0이면 default placement

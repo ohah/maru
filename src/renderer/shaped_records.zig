@@ -193,7 +193,7 @@ test "shaped records preserve product surface metadata when provided" {
     // 사라져 resize와 overlay redraw가 실제 앱에서 틀어진다.
     const overlays = [_]draw_list.DrawOverlay{
         .{ .cursor = .{ .row = 5, .col = 6 } },
-        .{ .underline = .{ .row = 4, .col = 2, .width = 1 } },
+        .{ .line = .{ .row = 4, .col = 2, .width = 1, .kind = .underline } },
     };
     const records = [_]ShapedGlyphRecord{
         .{ .row = 4, .col = 2, .codepoint = 'A', .font_id = 1, .glyph_id = 10 },

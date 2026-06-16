@@ -205,8 +205,9 @@ test "glyph frame preserves overlays for draw-time effects" {
     defer frame.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 2), frame.overlays.len);
-    try std.testing.expectEqual(@as(u16, 0), frame.overlays[0].underline.row);
-    try std.testing.expectEqual(@as(u16, 0), frame.overlays[0].underline.col);
+    try std.testing.expectEqual(draw_list.LineKind.underline, frame.overlays[0].line.kind);
+    try std.testing.expectEqual(@as(u16, 0), frame.overlays[0].line.row);
+    try std.testing.expectEqual(@as(u16, 0), frame.overlays[0].line.col);
     try std.testing.expectEqual(@as(u16, 0), frame.overlays[1].cursor.row);
     try std.testing.expectEqual(@as(u16, 1), frame.overlays[1].cursor.col);
 }

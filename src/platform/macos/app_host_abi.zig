@@ -735,6 +735,8 @@ fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
             @intCast(base_codepoint)
         else
             null,
+        // G10: numpad 키 판정은 macOS 물리 키코드로(platform). application keypad 모드면 encodeKey가 SS3로.
+        .keypad = keycode.isKeypad(event.raw_key_code),
     };
 }
 test "macOS app host ABI header and Zig declarations stay aligned" {

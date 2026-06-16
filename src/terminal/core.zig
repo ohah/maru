@@ -3145,11 +3145,14 @@ pub const TerminalCore = struct {
         // 전에 다음 줄 첫 칸으로 넘긴다(바닥이면 scroll). 이렇게 다음 글자 시점에 wrap해야 줄을
         // 정확히 채운 마지막 글자마다 빈 줄이 끼지 않는다(표준 VT 동작, zsh prompt 등이 의존).
         if (self.pending_wrap) {
-            // 다음 줄로 넘긴다. lineFeed가 pending_wrap을 끄므로 여기서 따로 끄지 않는다.
-            // 이 행은 autowrap으로 다음 줄로 이어지는 soft-wrap이다(reflow가 이 플래그로 잇는다).
-            self.wrapped[self.cursor.row] = true;
+            // 다음 줄로 넘긴다. lineFeed가 pending_wrap을 끈다. 이 행은 autowrap으로 다음 줄로 이어지는
+            // soft-wrap이다(reflow가 이 플래그로 잇는다). soft-wrap 플래그는 lineFeed '후'에 세운다 — 커서가
+            // scroll_bottom이라 lineFeed가 scroll이면 scrollRangeUp의 경계 fixup이 lineFeed 전에 세운
+            // wrapped를 지우기 때문이다(promoteLastToEmojiWidth와 같은 이유). scroll 여부와 무관하게 "직전
+            // 줄(row-1)이 이 줄로 이어진다"를 정확히 남긴다.
             self.cursor.col = 0;
             self.lineFeed();
+            if (self.cursor.row > 0) self.wrapped[self.cursor.row - 1] = true;
         }
         if (self.cursor.col >= self.size.cols) self.cursor.col = self.size.cols - 1;
         if (self.cursor.row >= self.size.rows) self.cursor.row = self.size.rows - 1;
@@ -3159,10 +3162,11 @@ pub const TerminalCore = struct {
         // (이전 줄 마지막 칸은 빈칸으로 남는다). grid는 항상 cols>=2라(clampGridSize) 넘긴 뒤엔
         // 반드시 들어가므로, 칸을 줄이는 degrade 없이 그대로 width 2로 쓴다.
         if (cell_width == 2 and self.cursor.col + 1 >= self.size.cols) {
-            // wide glyph를 통째로 다음 줄로 넘긴다 — 이 행은 soft-wrap으로 이어진다.
-            self.wrapped[self.cursor.row] = true;
+            // wide glyph를 통째로 다음 줄로 넘긴다 — 직전 줄이 이 줄로 이어지는 soft-wrap이다. 플래그는 위
+            // pending_wrap과 같은 이유로 lineFeed '후'에 세운다(scroll 시 scrollRangeUp fixup이 지우지 않게).
             self.cursor.col = 0;
             self.lineFeed();
+            if (self.cursor.row > 0) self.wrapped[self.cursor.row - 1] = true;
         }
 
         const row = self.cursor.row;
@@ -4351,6 +4355,21 @@ test "a bottom-row line feed clears pending wrap so the next char does not doubl
     try std.testing.expectEqual(@as(u21, 'A'), core.cells[core.index(0, 0)].codepoint);
     try std.testing.expectEqual(@as(u21, 'D'), core.cells[core.index(0, 3)].codepoint);
     try std.testing.expectEqual(@as(u21, 'X'), core.cells[core.index(1, 3)].codepoint);
+}
+
+test "autowrap at the scroll-bottom keeps the soft-wrap flag (reflow가 논리 줄을 안 쪼갠다)" {
+    // putCell이 soft-wrap 플래그를 lineFeed '전'에 세우면, 바닥에서 wrap+scroll할 때 scrollRangeUp의
+    // 경계 fixup이 그 플래그를 지운다 → resize reflow가 autowrap된 한 논리 줄을 둘로 쪼갠다. 플래그를
+    // lineFeed '후'에 세워(promoteLastToEmojiWidth와 같은 패턴) scroll에도 살아남게 한다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("abcd"); // row0 가득 -> pending_wrap
+    try core.write("efgh"); // 'e'가 row1로 wrap, row1 가득 -> pending_wrap at scroll_bottom
+    try core.write("i"); // autowrap + scroll: efgh -> row0, i -> row1 col0
+    // efgh(row0)는 i 줄(row1)로 이어지는 soft-wrap이다 — 플래그가 scroll fixup에 안 지워져야 한다.
+    try std.testing.expect(core.wrapped[0]);
+    // i 하나만 있는 마지막 줄은 아직 어디로도 안 이어진다(회귀: 새로 쓴 행은 wrap 리셋).
+    try std.testing.expect(!core.wrapped[1]);
 }
 
 test "SGR colon direct color without a colorspace component (38:2:r:g:b) sets RGB" {

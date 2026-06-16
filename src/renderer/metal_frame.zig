@@ -166,6 +166,13 @@ fn lerpHalf(a: color.Rgb, b: color.Rgb) color.Rgb {
 fn packForeground(style: terminal.Style, colors: CellColors) u32 {
     // DECSCNM(화면 반전, G9)과 SGR reverse(7)를 XOR한다 — 둘 다 켜지면 상쇄(정상), 하나만 켜지면 스왑.
     const reverse = style.reverse != colors.screen_reverse;
+    // SGR 8 conceal(G1): 글자를 그 셀의 배경색으로 그려 안 보이게 한다(invisible). reverse면 스왑된 배경.
+    if (style.conceal) {
+        return packRgb(if (reverse)
+            resolveColor(style.foreground, colors.default_fg, colors.palette)
+        else
+            resolveColor(style.background, colors.default_bg, colors.palette));
+    }
     const fg = if (reverse)
         resolveColor(style.background, colors.default_bg, colors.palette)
     else
@@ -1584,6 +1591,14 @@ test "packRgb, packForeground, and packBackground pack channels in 0xRRGGBB orde
     try std.testing.expectEqual(@as(u32, 0), packBackground(.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
     try std.testing.expectEqual(@as(u32, 0xFF0A141E), packBackground(.{ .background = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } } }, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
     try std.testing.expectEqual(@as(u32, 0xFF00_0000) | packRgb(color.xterm256(5)), packBackground(.{ .background = .{ .indexed = 5 } }, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
+}
+
+test "G1 conceal hides glyph by drawing foreground in the cell background color" {
+    const colors: CellColors = .{ .default_fg = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF }, .default_bg = .{ .r = 0x10, .g = 0x20, .b = 0x30 } };
+    // conceal: 전경을 default 배경색으로 → 안 보임.
+    try std.testing.expectEqual(packRgb(.{ .r = 0x10, .g = 0x20, .b = 0x30 }), packForeground(.{ .conceal = true }, colors));
+    // conceal + 명시 배경: 그 배경색으로.
+    try std.testing.expectEqual(packRgb(.{ .r = 1, .g = 2, .b = 3 }), packForeground(.{ .conceal = true, .background = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } } }, colors));
 }
 
 test "G9 DECSCNM screen_reverse swaps fg/bg globally (XOR with SGR reverse)" {

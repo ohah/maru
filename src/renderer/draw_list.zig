@@ -160,11 +160,17 @@ pub fn buildDrawList(
 }
 
 fn lineOverlay(row: usize, col: usize, cell: terminal.Cell, kind: LineKind) LineOverlay {
+    // underline은 SGR 58 underline_color가 있으면 그 색으로(없으면 전경색). strikethrough/overline은 전경색.
+    // nvim/helix가 LSP 진단을 전경과 다른 색의 밑줄로 표시한다(G1 underline color).
+    const line_color: terminal.Color = if (kind == .underline) switch (cell.style.underline_color) {
+        .default => cell.style.foreground,
+        else => cell.style.underline_color,
+    } else cell.style.foreground;
     return .{
         .row = @intCast(row),
         .col = @intCast(col),
         .width = cell.width,
-        .color = cell.style.foreground,
+        .color = line_color,
         .dim = cell.style.dim,
         .kind = kind,
     };
@@ -330,6 +336,26 @@ test "draw list carries style and combining mark for font layout" {
     // misplaces it (e.g. a second underline instead of the cursor) fails here.
     try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[1].cursor.row);
     try std.testing.expectEqual(@as(u16, 1), draw_list.overlays[1].cursor.col);
+}
+
+test "G1 underline color: underline overlay uses underline_color, strikethrough keeps fg" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 1 });
+    defer core.deinit();
+    try core.write("a");
+    // 전경 indexed 2, underline_color rgb(9,8,7), underline+strikethrough 켜짐.
+    core.cells[0].style = .{
+        .foreground = .{ .indexed = 2 },
+        .underline = true,
+        .strikethrough = true,
+        .underline_color = .{ .rgb = .{ .r = 9, .g = 8, .b = 7 } },
+    };
+    var draw_list = try buildDrawList(std.testing.allocator, core.snapshot());
+    defer draw_list.deinit(std.testing.allocator);
+    // overlay 순서: underline, strikethrough(, cursor). underline은 underline_color, strikethrough는 전경색.
+    try std.testing.expectEqual(LineKind.underline, draw_list.overlays[0].line.kind);
+    try std.testing.expectEqual(terminal.Color{ .rgb = .{ .r = 9, .g = 8, .b = 7 } }, draw_list.overlays[0].line.color);
+    try std.testing.expectEqual(LineKind.strikethrough, draw_list.overlays[1].line.kind);
+    try std.testing.expectEqual(terminal.Color{ .indexed = 2 }, draw_list.overlays[1].line.color);
 }
 
 test "draw list suppresses cursor overlay when its row is outside the dirty range" {

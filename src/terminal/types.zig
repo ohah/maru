@@ -22,6 +22,10 @@ pub const Style = struct {
     foreground: Color = .default,
     background: Color = .default,
     bold: bool = false,
+    // SGR 2/22(faint/normal-intensity): 전경 intensity를 낮춘다. 베이스 ECMA-48 SGR 2(faint).
+    // 렌더는 packForeground가 전경을 배경 쪽으로 0.5 보간한다(Ghostty faint-opacity 0.5 동작 비교 —
+    // maru 전경색엔 alpha가 없어 alpha 0.5 over bg와 같은 효과를 RGB 보간으로 낸다). SGR 22가 함께 끈다.
+    dim: bool = false,
     italic: bool = false,
     underline: bool = false,
     // SGR 9/29(crossed-out/strikethrough): 셀 중앙을 가로지르는 선. 베이스 ECMA-48 SGR 9(crossed-out

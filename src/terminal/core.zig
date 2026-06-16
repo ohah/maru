@@ -2744,6 +2744,7 @@ pub const TerminalCore = struct {
                 7 => self.pen.reverse = true,
                 27 => self.pen.reverse = false,
                 1 => self.pen.bold = true,
+                2 => self.pen.dim = true, // SGR 2: faint/decreased intensity (ECMA-48)
                 3 => self.pen.italic = true,
                 4 => {
                     // underline. colon 형식 4:x(ITU T.416 — x는 underline 스타일)는 x=0이면 underline off,
@@ -2752,7 +2753,10 @@ pub const TerminalCore = struct {
                     const styled = i + 1 < count and self.csi_subparam[i + 1];
                     self.pen.underline = if (styled) self.csi_params[i + 1] != 0 else true;
                 },
-                22 => self.pen.bold = false,
+                22 => { // SGR 22: normal intensity — bold·faint 둘 다 off (ECMA-48)
+                    self.pen.bold = false;
+                    self.pen.dim = false;
+                },
                 23 => self.pen.italic = false,
                 24 => self.pen.underline = false,
                 9 => self.pen.strikethrough = true, // SGR 9: crossed-out (ECMA-48)
@@ -4512,6 +4516,26 @@ test "SGR 53/55 toggle overline on the pen stamped onto cells" {
     try core.write("\x1b[53mC\x1b[0mD");
     try std.testing.expect(core.cells[core.index(0, 2)].style.overline);
     try std.testing.expect(!core.cells[core.index(0, 3)].style.overline);
+}
+
+test "SGR 2/22 toggle dim, and 22 also clears bold (ECMA-48 normal intensity)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // SGR 2(faint) → A는 dim. 같은 셀에 bold(1)도 켜 두고, SGR 22(normal intensity)가 bold와 dim을
+    // 둘 다 끄는지(ECMA-48) B에서 확인한다.
+    try core.write("\x1b[1;2mA\x1b[22mB");
+    const a = core.cells[core.index(0, 0)];
+    const b = core.cells[core.index(0, 1)];
+    try std.testing.expect(a.style.dim);
+    try std.testing.expect(a.style.bold);
+    try std.testing.expect(!b.style.dim);
+    try std.testing.expect(!b.style.bold);
+
+    // SGR 0(reset)도 dim을 끈다.
+    try core.write("\x1b[2mC\x1b[0mD");
+    try std.testing.expect(core.cells[core.index(0, 2)].style.dim);
+    try std.testing.expect(!core.cells[core.index(0, 3)].style.dim);
 }
 
 test "SGR reset returns the pen to default for following cells" {

@@ -8656,6 +8656,12 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     session.cell_width_px = 8;
     session.cell_height_px = 16;
     session.active_pane_rect = .{ .x = 0, .y = 0, .w = 80, .h = 80 }; // 활성 panel origin (0,0): 커서 좌표는 col*cw/row*ch 그대로
+    // imeCursorRect는 inputFocus()(chrome_host.*.open)와 buildChromeProps→buildChromeTokens(appearance.chrome_theme
+    // enum switch)를 읽는다. `var session = undefined`라 이 둘을 안 채우면 0xaa 쓰레기 → enum switch가 corrupt로
+    // 패닉한다(타깃·struct 레이아웃에 따라 우연히 통과 또는 크래시 — devsession-undefined-test-field-trap). 명시
+    // 초기화로 결정적 `.terminal`(오버레이 caret 없음) 경로를 타게 한다.
+    session.chrome_host = .{};
+    session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
 
     const core = &tab_surface.core;
     try core.write("ab"); // 커서가 (0,2)로

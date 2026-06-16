@@ -559,6 +559,14 @@ fn writeSummary(io: std.Io, summary: []const u8) !void {
     });
 }
 
+test {
+    // coretext_smoke는 bridge에서 extern fn만 개별 alias(maru_macos_coretext_*)해 bridge 컨테이너가
+    // 분석되지 않는다 — 그러면 CellMetricsResult ABI 가드 등 bridge가 소유한 native 계약 test가 이
+    // coretext 계약 묶음(test-macos-coretext-smoke)에서 조용히 누락된다(coretext_raster는 타입을 직접
+    // 써서 이미 수집된다). 컨테이너를 명시 참조해 bridge의 test를 함께 끌어온다.
+    _ = coretext_bridge;
+}
+
 test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     // native CoreText를 호출하지 않는 테스트에서도 summary 계약은 고정한다.
     // 그래야 폰트 스택 실패와 artifact 포맷 변경을 서로 다른 문제로 다룰 수 있다.

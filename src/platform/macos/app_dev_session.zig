@@ -43,7 +43,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 51; // 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 52; // 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -742,6 +742,9 @@ pub const DevSession = struct {
     copy_buffer: []u8 = &.{},
     // pendingClipboard()가 돌려준 OSC 52 클립보드 데이터의 소유 버퍼(다음 pendingClipboard/destroy까지 유효).
     clipboard_out_buffer: []u8 = &.{},
+    // pendingNotification()이 돌려준 OSC 9/777 알림 title/body의 소유 버퍼(다음 pendingNotification/destroy까지 유효).
+    notification_title_out: []u8 = &.{},
+    notification_body_out: []u8 = &.{},
     // urlAt()이 돌려준 URL의 소유 버퍼(다음 urlAt/destroy까지 유효).
     url_buffer: []u8 = &.{},
     // Cmd+hover 중인 URL 시작 셀의 절대 좌표(밑줄 렌더용). 뷰포트가 아니라 절대 좌표라 스크롤/출력
@@ -3228,6 +3231,36 @@ pub const DevSession = struct {
         return self.clipboard_out_buffer;
     }
 
+    /// OSC 9/777 데스크톱 알림 pending(title, body)을 내부 버퍼로 돌려준다(없으면 null). Swift가
+    /// UNUserNotificationCenter로 띄운다. 코어 pending을 비워(한 번 쓰고 소비) 다음 tick에 같은 알림이 또
+    /// 뜨지 않게 한다. 알림은 OS 리소스라 native(Swift)만 띄우고 코어/여기는 데이터만 넘긴다(경계). 클립보드와
+    /// 달리 env 게이트 없음 — 알림은 OS authorization이 게이트하는 저위험 표면(iTerm2/Ghostty도 기본 허용).
+    pub fn pendingNotification(self: *DevSession) ?struct { title: []const u8, body: []const u8 } {
+        if (!self.surface_initialized) return null;
+        const pending = self.activeSurface().core.pendingNotification() orelse return null;
+        if (self.notification_title_out.len > 0) {
+            self.allocator.free(self.notification_title_out);
+            self.notification_title_out = &.{};
+        }
+        if (self.notification_body_out.len > 0) {
+            self.allocator.free(self.notification_body_out);
+            self.notification_body_out = &.{};
+        }
+        // title은 빈 문자열일 수 있다(OSC 9). dupe가 실패하면 그 알림은 버린다(best-effort, 코어 pending은 비운다).
+        self.notification_title_out = self.allocator.dupe(u8, pending.title) catch {
+            self.activeSurface().core.clearNotification();
+            return null;
+        };
+        self.notification_body_out = self.allocator.dupe(u8, pending.body) catch {
+            self.allocator.free(self.notification_title_out);
+            self.notification_title_out = &.{};
+            self.activeSurface().core.clearNotification();
+            return null;
+        };
+        self.activeSurface().core.clearNotification();
+        return .{ .title = self.notification_title_out, .body = self.notification_body_out };
+    }
+
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
     /// 반환은 core 소유로 다음 OSC 7/RIS/destroy까지 유효하다(별도 복사 없음 — native 최소).
     /// Swift가 창 제목에 쓴다.
@@ -4921,6 +4954,8 @@ pub const DevSession = struct {
     pub fn deinit(self: *DevSession) void {
         if (self.copy_buffer.len > 0) self.allocator.free(self.copy_buffer);
         if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
+        if (self.notification_title_out.len > 0) self.allocator.free(self.notification_title_out);
+        if (self.notification_body_out.len > 0) self.allocator.free(self.notification_body_out);
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
         self.pending_paste.deinit(self.allocator);
         self.ime_inserted.deinit(self.allocator);

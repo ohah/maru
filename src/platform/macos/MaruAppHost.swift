@@ -4,6 +4,7 @@ import Darwin
 import Foundation
 import Metal
 import QuartzCore
+import UserNotifications
 
 @MainActor
 final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
@@ -1138,6 +1139,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 drawMetalFrame()
             }
             drainOsc52Clipboard() // OSC 52: 이번 tick에 셸이 보낸 클립보드 쓰기를 NSPasteboard에 반영(정책 gate는 Zig).
+            drainNotification() // OSC 9/777: 이번 tick에 셸이 보낸 데스크톱 알림을 네이티브 알림으로 띄운다.
         }
         return status
     }
@@ -1338,6 +1340,38 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+    }
+
+    // OSC 9/777: 알림 권한을 한 번만 요청한다(번들 ID가 있을 때만 — bare 실행 파일은 UNUserNotificationCenter가
+    // 못 떠서 graceful skip). 권한이 거부돼도 add는 무해히 무시되므로 결과는 안 본다.
+    private var notificationAuthRequested = false
+    private func ensureNotificationAuthorization() {
+        guard !notificationAuthRequested, Bundle.main.bundleIdentifier != nil else { return }
+        notificationAuthRequested = true
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    // OSC 9/777: 코어가 파싱한 데스크톱 알림(title/body)을 활성 세션에서 drain해 네이티브 알림으로 띄운다(매 tick).
+    // 알림이 없으면 Zig가 has=0을 줘 아무 것도 안 한다. OSC 9는 title이 없어(빈 문자열) 앱 이름으로 폴백한다.
+    // 번들 ID가 없으면(dev shell 일부) UNUserNotificationCenter를 못 써 조용히 건너뛴다(GUI 수동 검증은 제품 앱).
+    private func drainNotification() {
+        guard let session = devSession else { return }
+        var has: UInt32 = 0
+        var titlePtr: UnsafePointer<UInt8>? = nil
+        var titleLen: size_t = 0
+        var bodyPtr: UnsafePointer<UInt8>? = nil
+        var bodyLen: size_t = 0
+        guard maru_macos_app_dev_session_pending_notification(session, &has, &titlePtr, &titleLen, &bodyPtr, &bodyLen) == Self.statusOK,
+              has != 0 else { return }
+        guard Bundle.main.bundleIdentifier != nil else { return } // 번들 없으면 알림 API 사용 불가 — skip
+        let title = titleLen > 0 ? String(decoding: UnsafeBufferPointer(start: titlePtr!, count: titleLen), as: UTF8.self) : ""
+        let body = bodyLen > 0 ? String(decoding: UnsafeBufferPointer(start: bodyPtr!, count: bodyLen), as: UTF8.self) : ""
+        ensureNotificationAuthorization()
+        let content = UNMutableNotificationContent()
+        content.title = title.isEmpty ? "maru" : title // OSC 9는 title 없음 → 앱 이름
+        content.body = body
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
     }
 
     // MARK: - 메뉴바 (NSMenu)

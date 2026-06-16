@@ -254,6 +254,11 @@ pub const TerminalCore = struct {
     osc_buffer: [2048]u8 = undefined,
     osc_len: usize = 0,
     osc_overflow: bool = false,
+    // G14 DCS(ESC P ... ST) 수집 버퍼. 현재 DECRQSS(`DCS $ q <req> ST`)만 처리하고 요청은 짧아 64B면 충분
+    // (넘으면 overflow로 폐기). Sixel/DECDLD 등 큰 DCS는 미지원이라 소비만 한다(이 상태기계가 그 토대).
+    dcs_buffer: [64]u8 = undefined,
+    dcs_len: usize = 0,
+    dcs_overflow: bool = false,
     // APC(ESC _ ... ESC \) 축적 버퍼. kitty graphics(`ESC _ G ...payload... ESC \`)용 — 첫 바이트
     // 'G'면 kitty command로 파싱한다. 단일 APC(한 청크) 한도; 넘치면 그 APC는 통째로 무시한다(chunked면
     // 진행 중 전송도 폐기). 베이스: kitty graphics protocol(APC payload), OSC 버퍼와 동형.
@@ -364,7 +369,7 @@ pub const TerminalCore = struct {
     // zsh 등은 SIGWINCH redraw 때 CSI 6n으로 커서를 묻는데, 응답이 없으면 redraw가 어긋난다.
     response: std.ArrayList(u8) = .empty,
 
-    pub const ParserState = enum { ground, escape, escape_intermediate, csi, osc, osc_escape, apc, apc_escape };
+    pub const ParserState = enum { ground, escape, escape_intermediate, csi, osc, osc_escape, apc, apc_escape, dcs, dcs_escape };
 
     /// G3 charset 지정(94-char G-set). 구형 TUI가 `ESC ( 0`(G0=DEC special graphics)으로 지정하고 SO/SI로
     /// 호출해 box-drawing(┌─┐ 등)을 ASCII 코드포인트(lqk 등)로 보낸다. `.ascii`는 무변환, `.dec_special`은
@@ -1543,6 +1548,25 @@ pub const TerminalCore = struct {
                     self.parser = .ground;
                     index_ += 1;
                 },
+                .dcs => {
+                    const byte = bytes[index_];
+                    // DCS는 ST(ESC \)로만 끝난다(OSC와 달리 BEL 종료 없음). 내용을 모아 종료 시 dispatch.
+                    if (byte == 0x1b) {
+                        self.parser = .dcs_escape;
+                    } else if (self.dcs_len < self.dcs_buffer.len) {
+                        self.dcs_buffer[self.dcs_len] = byte;
+                        self.dcs_len += 1;
+                    } else {
+                        self.dcs_overflow = true; // 너무 긴 DCS(Sixel 등 미지원) — 폐기
+                    }
+                    index_ += 1;
+                },
+                .dcs_escape => {
+                    // DCS 안에서 ESC 다음 바이트. ST(ESC \)면 dispatch, 그 외도 DCS를 끝낸다(관대 처리).
+                    if (bytes[index_] == '\\') self.dispatchDcs();
+                    self.parser = .ground;
+                    index_ += 1;
+                },
             }
         }
     }
@@ -1772,6 +1796,90 @@ pub const TerminalCore = struct {
     /// 토대 단계라 현재는 수집만 — command 파싱·이미지 저장·렌더는 후속(audit 5/5 단계적). APC를 안
     /// 받으면 payload가 화면에 텍스트로 새므로(과거 ESC_ 미처리), 수집해서 무시하는 것만으로도 그 누수를
     /// 막는다. 베이스: kitty graphics protocol(APC payload), OSC dispatch와 동형.
+    /// 종료된 DCS(ESC P ... ST) 내용을 처리한다. 현재 DECRQSS(`DCS $ q <req> ST`)만 — 그 외 DCS(Sixel 등)는
+    /// 미지원이라 소비만 한다(이 상태기계가 그 토대). overflow면 폐기.
+    fn dispatchDcs(self: *TerminalCore) void {
+        if (self.dcs_overflow) return;
+        const body = self.dcs_buffer[0..self.dcs_len];
+        if (std.mem.startsWith(u8, body, "$q")) {
+            self.dispatchDecrqss(body[2..]);
+        }
+    }
+
+    /// DECRQSS(`DCS $ q <req> ST`): 현재 설정을 회신한다. 유효하면 `DCS 1 $ r <설정> ST`, 미지원이면
+    /// `DCS 0 $ r ST`. req는 질의 설정의 final(`m`=SGR·`r`=DECSTBM·` q`=DECSCUSR). 베이스: xterm/VT420 DECRQSS.
+    fn dispatchDecrqss(self: *TerminalCore, req: []const u8) void {
+        if (std.mem.eql(u8, req, "m")) {
+            self.appendDecrqssSgr();
+        } else if (std.mem.eql(u8, req, "r")) {
+            // DECSTBM(scroll region) — top;bottom(1-based).
+            var buf: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "\x1bP1$r{d};{d}r\x1b\\", .{ self.scroll_top + 1, self.scroll_bottom + 1 }) catch return;
+            self.appendResponse(s);
+        } else if (std.mem.eql(u8, req, " q")) {
+            // DECSCUSR(커서 스타일) — shape+blink를 DECSCUSR param 1..6으로 역매핑.
+            const param: u8 = switch (self.cursor_shape) {
+                .block => if (self.cursor_blink) 1 else 2,
+                .underline => if (self.cursor_blink) 3 else 4,
+                .bar => if (self.cursor_blink) 5 else 6,
+            };
+            var buf: [16]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "\x1bP1$r{d} q\x1b\\", .{param}) catch return;
+            self.appendResponse(s);
+        } else {
+            self.appendResponse("\x1bP0$r\x1b\\"); // 미지원 설정 질의 → invalid
+        }
+    }
+
+    /// DECRQSS SGR 응답: 현재 pen을 SGR 파라미터로 재구성해 `DCS 1 $ r 0;… m ST`로 회신(default 색은 0 reset에
+    /// 포함되므로 생략). appendResponse로 조각조각 누적한다.
+    fn appendDecrqssSgr(self: *TerminalCore) void {
+        self.appendResponse("\x1bP1$r0");
+        const s = self.pen;
+        if (s.bold) self.appendResponse(";1");
+        if (s.dim) self.appendResponse(";2");
+        if (s.italic) self.appendResponse(";3");
+        if (s.underline) self.appendResponse(";4");
+        if (s.blink) self.appendResponse(";5");
+        if (s.reverse) self.appendResponse(";7");
+        if (s.conceal) self.appendResponse(";8");
+        if (s.strikethrough) self.appendResponse(";9");
+        if (s.overline) self.appendResponse(";53");
+        self.appendSgrColor(s.foreground, true);
+        self.appendSgrColor(s.background, false);
+        self.appendSgrUnderlineColor(s.underline_color);
+        self.appendResponse("m\x1b\\");
+    }
+
+    fn appendSgrColor(self: *TerminalCore, c: types.Color, foreground: bool) void {
+        var buf: [24]u8 = undefined;
+        switch (c) {
+            .default => {}, // default(39/49)는 0 reset에 포함 — 생략
+            .indexed => |n| {
+                const s = if (n < 8)
+                    std.fmt.bufPrint(&buf, ";{d}", .{@as(u16, if (foreground) 30 else 40) + @as(u16, n)})
+                else if (n < 16)
+                    std.fmt.bufPrint(&buf, ";{d}", .{@as(u16, if (foreground) 90 else 100) + @as(u16, n - 8)})
+                else
+                    std.fmt.bufPrint(&buf, ";{d};5;{d}", .{ @as(u16, if (foreground) 38 else 48), n });
+                self.appendResponse(s catch return);
+            },
+            .rgb => |v| {
+                const s = std.fmt.bufPrint(&buf, ";{d};2;{d};{d};{d}", .{ @as(u16, if (foreground) 38 else 48), v.r, v.g, v.b }) catch return;
+                self.appendResponse(s);
+            },
+        }
+    }
+
+    fn appendSgrUnderlineColor(self: *TerminalCore, c: types.Color) void {
+        var buf: [24]u8 = undefined;
+        switch (c) {
+            .default => {},
+            .indexed => |n| self.appendResponse(std.fmt.bufPrint(&buf, ";58;5;{d}", .{n}) catch return),
+            .rgb => |v| self.appendResponse(std.fmt.bufPrint(&buf, ";58;2;{d};{d};{d}", .{ v.r, v.g, v.b }) catch return),
+        }
+    }
+
     fn dispatchApc(self: *TerminalCore) void {
         if (self.apc_overflow or self.apc_buffer.items.len == 0) {
             // 한 청크가 4096을 넘쳤다(overflow) — chunked 진행 중이면 그 전송 전체가 손상이라 폐기한다.
@@ -2575,6 +2683,13 @@ pub const TerminalCore = struct {
                 self.apc_buffer.clearRetainingCapacity();
                 self.apc_overflow = false;
                 self.parser = .apc;
+            },
+            // DCS(ESC P ... ST): device control string. 현재 DECRQSS(`DCS $ q`)만 처리하고 ST에서 dispatch한다.
+            // 안 받으면 payload(예: tmux의 `$q`)가 화면에 텍스트로 샌다. G14 — Sixel/DECDLD의 토대 상태기계.
+            'P' => {
+                self.dcs_len = 0;
+                self.dcs_overflow = false;
+                self.parser = .dcs;
             },
             // IND(ESC D): index. CR 없이 한 줄 내림 + 하단 margin이면 scroll region을 위로 민다(LF와 동일).
             'D' => {
@@ -6771,6 +6886,40 @@ test "G1 SGR ext: blink(5/25), conceal(8/28), double-underline(21), underline co
     // 58;5;n(indexed) underline color.
     try core.write("\x1b[58;5;42mC");
     try std.testing.expectEqual(types.Color{ .indexed = 42 }, core.cells[core.index(0, 2)].style.underline_color);
+}
+
+test "G14 DCS/DECRQSS: SGR(m), DECSTBM(r), cursor style( q), invalid → DCS 0 \\$r" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 5 });
+    defer core.deinit();
+
+    // 기본 pen에서 SGR 질의: DCS $ q m ST → DCS 1 $ r 0 m ST.
+    try core.write("\x1bP$qm\x1b\\");
+    try std.testing.expectEqualStrings("\x1bP1$r0m\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // bold+underline+fg red(31) 설정 후 SGR 질의 → 0;1;4;31.
+    try core.write("\x1b[1;4;31m\x1bP$qm\x1b\\");
+    try std.testing.expectEqualStrings("\x1bP1$r0;1;4;31m\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // fg 256색(38;5;200) + underline color rgb(58;2;1;2;3) → 그대로 재구성.
+    try core.write("\x1b[0;38;5;200;58;2;1;2;3m\x1bP$qm\x1b\\");
+    try std.testing.expectEqualStrings("\x1bP1$r0;38;5;200;58;2;1;2;3m\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // DECSTBM 질의: scroll region 2..4 설정 후 DCS $ q r → DCS 1 $ r 2;4 r ST.
+    try core.write("\x1b[2;4r\x1bP$qr\x1b\\");
+    try std.testing.expectEqualStrings("\x1bP1$r2;4r\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // 커서 스타일 질의: DECSCUSR 2(고정 block) → DCS $ q SP q → 1 $ r 2 SP q.
+    try core.write("\x1b[2 q\x1bP$q q\x1b\\");
+    try std.testing.expectEqualStrings("\x1bP1$r2 q\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // 미지원 설정 질의 → DCS 0 $ r ST(invalid).
+    try core.write("\x1bP$qZ\x1b\\");
+    try std.testing.expectEqualStrings("\x1bP0$r\x1b\\", core.pendingResponse());
 }
 
 test "DECSC inside the alt screen does not clobber the cursor saved by 1049 (per-screen slots)" {

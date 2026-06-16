@@ -1640,8 +1640,9 @@ pub const TerminalCore = struct {
         gen_counter: u64 = 0,
         /// 한 세션이 kitty graphics 이미지로 잡을 수 있는 메모리 상한 — maru가 정한 실용 값이다(kitty
         /// 명세는 상한을 규정하지 않으므로 과대/악의적 전송 폭주를 막는 방어선으로 둔다). 대형 이미지
-        /// 수십~수백 장을 담되 무한 누적을 차단하는 선에서 320MB로 잡았다.
-        const limit: usize = 320 * 1000 * 1000;
+        /// 수십~수백 장을 담되 무한 누적을 차단하는 선에서 320MB로 잡았다. 한도 초과 시 evict(K4b)로
+        /// 자리를 만든다. 필드라 테스트가 작게 설정할 수 있다(Ghostty total_limit과 동형).
+        limit: usize = 320 * 1000 * 1000,
 
         fn deinit(self: *KittyImageStorage, alloc: std.mem.Allocator) void {
             var it = self.map.valueIterator();
@@ -1661,7 +1662,7 @@ pub const TerminalCore = struct {
                 self.total_bytes -= old.value.data.len;
                 alloc.free(old.value.data);
             }
-            if (self.total_bytes + img.data.len > limit) { // 한계 초과면 거부
+            if (self.total_bytes + img.data.len > self.limit) { // 한계 초과면 거부
                 alloc.free(img.data);
                 return;
             }
@@ -1889,6 +1890,72 @@ pub const TerminalCore = struct {
         return self.image_views[0..i];
     }
 
+    /// 이미지를 저장하되, 320MB 한도를 넘기면 먼저 evict해 자리를 만든다(K4b). 한 장이 한도보다 크면 거부.
+    /// 같은 id 교체분은 회수되니 계산에서 뺀다. evict 정책은 evictKittyImagesFor — placement 없는 것·오래된
+    /// 것 우선(kitty 명세 권장). evict 후에도 못 들어가면 add가 한도 체크로 거부한다(graceful, img.data free).
+    fn storeKittyImage(self: *TerminalCore, img: KittyImage) void {
+        if (img.data.len > self.kitty_images.limit) { // 한 장이 전체 한도 초과 — 불가
+            self.allocator.free(img.data);
+            return;
+        }
+        const existing: usize = if (self.kitty_images.map.get(img.id)) |old| old.data.len else 0;
+        const after = self.kitty_images.total_bytes - existing + img.data.len;
+        if (after > self.kitty_images.limit) {
+            self.evictKittyImagesFor(after - self.kitty_images.limit, img.id); // 부족분만큼 자리 확보
+        }
+        self.kitty_images.add(self.allocator, img); // 같은-id 교체 + 최종 한도 체크(evict 후 통과)
+    }
+
+    /// 한도 초과 시 부족분(needed 바이트) 이상을 비우도록 이미지를 evict한다(exclude_id·그 이미지는 제외 —
+    /// 지금 넣으려는 새 이미지). 한 번에 한 장씩, **placement 없는(안 쓰이는) 것 → 오래된(generation 작은) 것**
+    /// 우선으로 고른다(kitty 명세 권장; Ghostty 동작 비교). evict 시 그 이미지의 placement도 함께 제거한다.
+    /// 더 evict할 후보가 없으면 멈춘다(이후 add가 거부). placement/이미지 수가 작아 비용은 무시할 만하다.
+    fn evictKittyImagesFor(self: *TerminalCore, needed: usize, exclude_id: u32) void {
+        var freed: usize = 0;
+        while (freed < needed) {
+            const victim = self.pickKittyEvictionVictim(exclude_id) orelse break;
+            const sz = if (self.kitty_images.map.get(victim)) |im| im.data.len else 0;
+            self.removePlacementsForImage(victim); // 그 이미지의 placement도 제거
+            self.kitty_images.remove(self.allocator, victim);
+            freed += sz;
+        }
+    }
+
+    /// evict 후보를 고른다 — placement 없는 것 우선, 같으면 generation 작은(오래된) 것. exclude_id 제외.
+    /// 없으면 null. 베이스: kitty 명세 "unused first, then oldest"(Ghostty graphics_storage evictImage 동작).
+    fn pickKittyEvictionVictim(self: *TerminalCore, exclude_id: u32) ?u32 {
+        var best: ?u32 = null;
+        var best_used = true;
+        var best_gen: u64 = std.math.maxInt(u64);
+        var it = self.kitty_images.map.iterator();
+        while (it.next()) |kv| {
+            const id = kv.key_ptr.*;
+            if (id == exclude_id) continue;
+            const used = self.kittyImageHasPlacement(id);
+            const gen = kv.value_ptr.generation;
+            const better = if (best == null)
+                true
+            else if (used != best_used)
+                (!used and best_used) // unused가 used보다 나은 후보
+            else
+                gen < best_gen; // 같은 used면 오래된 것
+            if (better) {
+                best = id;
+                best_used = used;
+                best_gen = gen;
+            }
+        }
+        return best;
+    }
+
+    /// 이미지에 살아있는 placement가 있는지(evict 우선순위 판정용).
+    fn kittyImageHasPlacement(self: *const TerminalCore, image_id: u32) bool {
+        for (self.kitty_placements.items) |p| {
+            if (p.image_id == image_id) return true;
+        }
+        return false;
+    }
+
     /// kitty graphics transmit: base64 payload를 디코드해 RGBA(f=32)/RGB(f=24) 이미지를 저장한다.
     /// zlib(o=z) 압축이면 base64 디코드 후 inflate한다(K3b). PNG(f=100)는 후속(K3c). 베이스: kitty
     /// graphics protocol transmit — RGBA/RGB 직접 픽셀은 base64만 풀면 되고, zlib은 std.compress로 푼다.
@@ -1933,7 +2000,7 @@ pub const TerminalCore = struct {
             self.allocator.free(data);
             return;
         }
-        self.kitty_images.add(self.allocator, .{
+        self.storeKittyImage(.{
             .id = cmd.image_id,
             .width = cmd.width,
             .height = cmd.height,
@@ -1972,12 +2039,12 @@ pub const TerminalCore = struct {
         defer self.allocator.free(png_bytes); // PNG 파일 바이트는 디코드 후 불필요
         dec.decode(png_bytes, payload) catch return;
         const img = png.decode(self.allocator, png_bytes) catch return; // 미지원/malformed는 graceful 거부
-        self.kitty_images.add(self.allocator, .{
+        self.storeKittyImage(.{
             .id = cmd.image_id,
             .width = img.width,
             .height = img.height,
             .bpp = img.bpp,
-            .data = img.data, // add가 소유권 가져감
+            .data = img.data, // storeKittyImage→add가 소유권 가져감
         });
     }
 
@@ -7087,6 +7154,58 @@ test "kitty graphics delete: d=z(z-index)·d=Z(이미지까지) (K4a)" {
     try core.write("\x1b_Ga=d,d=Z,z=-1\x1b\\");
     try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
     try std.testing.expect(!core.kitty_images.map.contains(2));
+}
+
+// --- kitty graphics K4b: 한도 초과 시 LRU evict(placement 없는 것·오래된 것 우선) ---
+
+test "kitty graphics evict: 한도 초과 시 오래된(generation 작은) 이미지부터 밀어낸다 (K4b)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_images.limit = 32; // 16바이트 이미지 2장까지만
+    const raw = [_]u8{1} ** 16; // 2x2 RGBA = 16바이트
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [80]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{b64s})); // gen1
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=2;{s}\x1b\\", .{b64s})); // gen2 (total=32)
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_images.map.count());
+    // 세 번째 → 한도 초과, 안 쓰이는 것 중 오래된 i=1 evict.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=3;{s}\x1b\\", .{b64s})); // gen3
+    try std.testing.expect(!core.kitty_images.map.contains(1)); // 오래된 것 밀려남
+    try std.testing.expect(core.kitty_images.map.contains(2));
+    try std.testing.expect(core.kitty_images.map.contains(3));
+    try std.testing.expectEqual(@as(usize, 32), core.kitty_images.total_bytes);
+}
+
+test "kitty graphics evict: placement 있는 이미지는 보호(안 쓰이는 것 먼저) (K4b)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_images.limit = 32;
+    const raw = [_]u8{1} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [80]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{b64s})); // gen1
+    try core.write("\x1b_Ga=p,i=1\x1b\\"); // i=1에 placement(=used, 오래됐지만 보호)
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=2;{s}\x1b\\", .{b64s})); // gen2 unused
+    // 세 번째 → evict 필요. i=1(used·오래됨) 대신 i=2(unused·최신)를 밀어낸다(unused 우선).
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=3;{s}\x1b\\", .{b64s})); // gen3
+    try std.testing.expect(core.kitty_images.map.contains(1)); // used라 보호
+    try std.testing.expect(!core.kitty_images.map.contains(2)); // unused라 밀려남
+    try std.testing.expect(core.kitty_images.map.contains(3));
+}
+
+test "kitty graphics evict: 한 장이 한도보다 크면 거부(저장 안 함) (K4b)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_images.limit = 10; // 16바이트 이미지보다 작음
+    const raw = [_]u8{1} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [80]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{b64s}));
+    try std.testing.expect(!core.kitty_images.map.contains(1)); // 한 장이 한도 초과 — 거부
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_images.total_bytes);
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

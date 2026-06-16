@@ -138,11 +138,34 @@ fn resolveColor(c: terminal.Color, default_rgb: color.Rgb) color.Rgb {
     };
 }
 
+/// 두 RGB의 중점(각 채널 정수 평균). SGR 2 faint가 전경을 배경 쪽으로 0.5 보간하는 데 쓴다.
+fn lerpHalf(a: color.Rgb, b: color.Rgb) color.Rgb {
+    return .{
+        .r = @intCast((@as(u16, a.r) + b.r) / 2),
+        .g = @intCast((@as(u16, a.g) + b.g) / 2),
+        .b = @intCast((@as(u16, a.b) + b.b) / 2),
+    };
+}
+
 /// terminal cell의 전경 Color를 화면 RGB로 풀어 0x00RRGGBB로 packing한다. default는 theme
 /// 기본 전경, indexed는 xterm-256 팔레트, rgb는 그대로. SGR reverse(7)면 배경색을 전경으로 쓴다.
+/// SGR 2(faint)면 전경을 그 셀의 배경 쪽으로 0.5 보간해 intensity를 낮춘다.
 fn packForeground(style: terminal.Style, colors: CellColors) u32 {
-    if (style.reverse) return packRgb(resolveColor(style.background, colors.default_bg));
-    return packRgb(resolveColor(style.foreground, colors.default_fg));
+    const fg = if (style.reverse)
+        resolveColor(style.background, colors.default_bg)
+    else
+        resolveColor(style.foreground, colors.default_fg);
+    if (style.dim) {
+        // SGR 2 faint: 전경을 그 셀의 배경 쪽으로 0.5 보간(intensity 감소). 베이스: Ghostty
+        // faint-opacity 기본 0.5(glyph alpha)인데, maru 전경색엔 alpha가 없어 같은 시각 효과를
+        // RGB 보간으로 낸다(alpha 0.5 over bg = (fg+bg)/2). reverse면 보간 대상 배경도 스왑된 값.
+        const bg = if (style.reverse)
+            resolveColor(style.foreground, colors.default_fg)
+        else
+            resolveColor(style.background, colors.default_bg);
+        return packRgb(lerpHalf(fg, bg));
+    }
+    return packRgb(fg);
 }
 
 /// terminal cell의 배경 Color를 0xAARRGGBB로 packing한다. default 배경은 theme 기본 배경
@@ -1496,6 +1519,17 @@ test "an overline overlay projects a reserved=4 top-line cell" {
     try std.testing.expectEqual(@as(usize, 1), cells.len);
     try std.testing.expectEqual(@as(u16, 4), cells[0].reserved); // 상단선(overline)
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), cells[0].background); // 전경색(흰색)
+}
+
+test "packForeground halves a faint foreground toward the background (SGR 2)" {
+    // SGR 2 faint: 전경을 배경 쪽으로 0.5 보간(Ghostty faint-opacity 0.5 동작 비교 — maru는 alpha
+    // 대신 RGB 보간). 흰 전경(255) + 어두운 기본 배경(16) → 회색 (255+16)/2 = 135 = 0x87.
+    const colors: CellColors = .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .default_bg = .{ .r = 16, .g = 16, .b = 16 },
+    };
+    try std.testing.expectEqual(@as(u32, 0xFFFFFF), packForeground(.{ .foreground = .default }, colors));
+    try std.testing.expectEqual(@as(u32, 0x878787), packForeground(.{ .foreground = .default, .dim = true }, colors));
 }
 
 test "cursor over a space-codepoint glyph projects a solid block, not an inverted glyph" {

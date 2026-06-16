@@ -25,6 +25,15 @@ pub const UnderlineOverlay = struct {
     color: terminal.Color = .default,
 };
 
+// SGR 9(crossed-out) strikethrough — 셀 중앙을 가로지르는 전경색 선. underline과 같은 draw-time
+// overlay라 glyph atlas가 "A"와 "취소선 A"를 따로 캐시하지 않는다(밑줄과 같은 근거).
+pub const StrikethroughOverlay = struct {
+    row: u16,
+    col: u16,
+    width: u2 = 1,
+    color: terminal.Color = .default,
+};
+
 // OSC 133 거터 마크 — 프롬프트 시작 행 왼쪽 가장자리의 세로 색 바. 명령 성공(초록)/실패(빨강)을
 // 보여준다. 렌더러는 커서 bar(좌측 세로 부분 사각형)와 같은 kind를 col 0에 재사용한다(셰이더 불변).
 pub const GutterMark = struct {
@@ -35,6 +44,7 @@ pub const GutterMark = struct {
 pub const DrawOverlay = union(enum) {
     cursor: CursorOverlay,
     underline: UnderlineOverlay,
+    strikethrough: StrikethroughOverlay,
     gutter: GutterMark,
 };
 
@@ -81,10 +91,10 @@ pub fn buildDrawList(
                 // 한 번에 확보해 frame마다 append가 슬라이스를 반복 재할당하지 않게 한다.
                 // continuation cell은 건너뛰므로 실제 개수는 이 상한 이하라 안전하다.
                 try cells.ensureTotalCapacity(allocator, (end_row - start_row + 1) * col_count);
-                // overlay도 같은 상한을 쓴다: cell마다 underline overlay가 최대 1개, 행마다 OSC 133
-                // 거터 마크가 최대 1개, 루프 뒤에 cursor overlay가 최대 1개 더 붙으므로 +행수+1이다.
-                // cells와 같은 이유로 미리 확보해 per-frame 재할당을 없앤다.
-                try overlays.ensureTotalCapacity(allocator, (end_row - start_row + 1) * (col_count + 1) + 1);
+                // overlay도 같은 상한을 쓴다: cell마다 underline+strikethrough overlay가 최대 2개,
+                // 행마다 OSC 133 거터 마크가 최대 1개, 루프 뒤에 cursor overlay가 최대 1개 더 붙으므로
+                // (2*cols+1)*행수+1이다. cells와 같은 이유로 미리 확보해 per-frame 재할당을 없앤다.
+                try overlays.ensureTotalCapacity(allocator, (end_row - start_row + 1) * (2 * col_count + 1) + 1);
 
                 for (start_row..end_row + 1) |row| {
                     for (0..col_count) |col| {
@@ -106,6 +116,18 @@ pub fn buildDrawList(
                             // atlas from caching separate bitmaps for "A" and
                             // "underlined A".
                             overlays.appendAssumeCapacity(.{ .underline = .{
+                                .row = @intCast(row),
+                                .col = @intCast(col),
+                                .width = cell.width,
+                                .color = cell.style.foreground,
+                            } });
+                        }
+
+                        if (cell.style.strikethrough) {
+                            // Strikethrough is a draw-time overlay for the same
+                            // reason as underline. It is an independent bit, so a
+                            // cell can emit both a strikethrough and an underline.
+                            overlays.appendAssumeCapacity(.{ .strikethrough = .{
                                 .row = @intCast(row),
                                 .col = @intCast(col),
                                 .width = cell.width,
@@ -350,4 +372,33 @@ test "draw list emits cursor overlay for cursor-only dirty movement" {
     try std.testing.expectEqual(@as(usize, 1), draw_list.overlays.len);
     try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].cursor.row);
     try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].cursor.col);
+}
+
+test "draw list emits a strikethrough overlay for SGR 9 cells, independent of underline" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 3, .rows = 1 });
+    defer core.deinit();
+
+    // SGR 9 strikethrough는 underline과 같은 draw-time overlay지만 독립 비트다 — 둘 다(9;4) 켜면
+    // 셀 하나가 underline overlay와 strikethrough overlay를 각각 낸다(전경색을 색으로 캐리).
+    try core.write("\x1b[9;4mA");
+
+    var draw_list = try buildDrawList(std.testing.allocator, core.snapshot());
+    defer draw_list.deinit(std.testing.allocator);
+
+    var underlines: usize = 0;
+    var strikes: usize = 0;
+    for (draw_list.overlays) |o| switch (o) {
+        .underline => |u| {
+            underlines += 1;
+            try std.testing.expectEqual(@as(u16, 0), u.col);
+        },
+        .strikethrough => |s| {
+            strikes += 1;
+            try std.testing.expectEqual(@as(u16, 0), s.col);
+            try std.testing.expectEqual(@as(u2, 1), s.width);
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), underlines);
+    try std.testing.expectEqual(@as(usize, 1), strikes);
 }

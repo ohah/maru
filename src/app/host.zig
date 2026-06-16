@@ -399,6 +399,10 @@ fn renderDrawList(allocator: std.mem.Allocator, draw_list: renderer.DrawList) ![
                 "overlay underline row={d} col={d} width={d}\n",
                 .{ underline.row, underline.col, underline.width },
             ),
+            .strikethrough => |strikethrough| try writer.print(
+                "overlay strikethrough row={d} col={d} width={d}\n",
+                .{ strikethrough.row, strikethrough.col, strikethrough.width },
+            ),
             .gutter => |gutter| try writer.print(
                 "overlay gutter row={d} success={}\n",
                 .{ gutter.row, gutter.success },

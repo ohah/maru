@@ -2755,6 +2755,8 @@ pub const TerminalCore = struct {
                 22 => self.pen.bold = false,
                 23 => self.pen.italic = false,
                 24 => self.pen.underline = false,
+                9 => self.pen.strikethrough = true, // SGR 9: crossed-out (ECMA-48)
+                29 => self.pen.strikethrough = false, // SGR 29: not crossed-out
                 30...37 => self.pen.foreground = .{ .indexed = @intCast(p - 30) },
                 39 => self.pen.foreground = .default,
                 40...47 => self.pen.background = .{ .indexed = @intCast(p - 40) },
@@ -4474,6 +4476,24 @@ test "SGR sets the pen style stamped onto written cells" {
     try std.testing.expect(cell.style.bold);
     try std.testing.expect(cell.style.underline);
     try std.testing.expectEqual(types.Color{ .indexed = 1 }, cell.style.foreground);
+}
+
+test "SGR 9/29 toggle strikethrough on the pen stamped onto cells" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // SGR 9(crossed-out) → A는 strikethrough, SGR 29(not crossed-out) → B는 아님.
+    // 베이스: ECMA-48 SGR 9/29, xterm ctlseqs 동일. underline(4)과 독립 비트라 같이 켤 수 있다.
+    try core.write("\x1b[9mA\x1b[29mB");
+    const a = core.cells[core.index(0, 0)];
+    const b = core.cells[core.index(0, 1)];
+    try std.testing.expect(a.style.strikethrough);
+    try std.testing.expect(!b.style.strikethrough);
+
+    // SGR 0(reset)은 strikethrough도 끈다(전체 리셋이 pen을 기본값으로).
+    try core.write("\x1b[9mC\x1b[0mD");
+    try std.testing.expect(core.cells[core.index(0, 2)].style.strikethrough);
+    try std.testing.expect(!core.cells[core.index(0, 3)].style.strikethrough);
 }
 
 test "SGR reset returns the pen to default for following cells" {

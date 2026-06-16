@@ -24,6 +24,9 @@ pub const Style = struct {
     bold: bool = false,
     italic: bool = false,
     underline: bool = false,
+    // SGR 9/29(crossed-out/strikethrough): 셀 중앙을 가로지르는 선. 베이스 ECMA-48 SGR 9(crossed-out
+    // characters)·xterm ctlseqs 동일. 렌더는 underline과 같은 부분-사각형(중앙 띠)을 재사용한다.
+    strikethrough: bool = false,
     // SGR 7/27(reverse video): 렌더 시 전경/배경을 맞바꾼다(default 색은 theme 값으로 풀어 스왑).
     reverse: bool = false,
 };

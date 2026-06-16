@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 48u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 49u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -324,6 +324,11 @@ typedef struct MaruAppHostDevMetalFrame {
     /* 위 image_uploads가 가리키는 픽셀 연속 버퍼(RGBA/RGB). NULL/0이면 업로드 없음. */
     const uint8_t *image_pixels;
     size_t image_pixel_count;
+    /* kitty graphics(K4c): 현재 살아있는 이미지 id 집합(활성 surface 저장소 키). renderer가 이 집합에
+       없는 캐시 텍스처를 evict해 GPU 메모리를 회수한다(delete/evict/RIS 반영). count==0이면 살아있는
+       이미지 없음 → 전부 evict. */
+    const uint32_t *live_image_ids;
+    size_t live_image_id_count;
 } MaruAppHostDevMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

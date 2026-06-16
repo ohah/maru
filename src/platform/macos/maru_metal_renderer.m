@@ -506,6 +506,28 @@ static void maru_upload_image_textures(
     }
 }
 
+/* kitty graphics(K4c): live image id 집합에 없는 캐시 텍스처를 evict해 GPU 메모리를 회수한다(delete/evict/
+   RIS 반영). live_count==0이면 살아있는 이미지 없음 → 전부 evict. ARC가 제거된 텍스처를 해제한다. */
+static void maru_evict_image_textures(
+    MaruMetalRendererImpl *impl,
+    const uint32_t *live_ids,
+    size_t live_count
+) {
+    if (impl.imageTextures.count == 0) return;
+    if (live_count > 0 && live_ids == NULL) return; // 방어: count>0인데 포인터 없음 — evict 안 함
+    NSMutableSet<NSNumber *> *live = [NSMutableSet setWithCapacity:live_count];
+    for (size_t i = 0; i < live_count; i++) {
+        [live addObject:@(live_ids[i])];
+    }
+    NSMutableArray<NSNumber *> *dead = [NSMutableArray array];
+    for (NSNumber *key in impl.imageTextures) {
+        if (![live containsObject:key]) [dead addObject:key];
+    }
+    for (NSNumber *key in dead) {
+        [impl.imageTextures removeObjectForKey:key];
+    }
+}
+
 bool maru_metal_renderer_draw(
     MaruMetalRenderer *renderer,
     CAMetalLayer *layer,
@@ -534,7 +556,9 @@ bool maru_metal_renderer_draw(
     const MaruAppHostDevGpuImageUpload *image_uploads,
     size_t image_upload_count,
     const uint8_t *image_pixels,
-    size_t image_pixel_count
+    size_t image_pixel_count,
+    const uint32_t *live_image_ids,
+    size_t live_image_id_count
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -714,6 +738,9 @@ bool maru_metal_renderer_draw(
 
     // kitty graphics(K2): generation이 바뀐 이미지 텍스처를 (재)업로드한다(캐시 갱신, drawable 무관).
     maru_upload_image_textures(impl, image_uploads, image_upload_count, image_pixels, image_pixel_count);
+    // kitty graphics(K4c): live 집합에 없는 텍스처를 evict(GPU 메모리 회수). 업로드 후 — 이번 frame에 올린
+    // 텍스처는 live에 포함되므로 살아남는다.
+    maru_evict_image_textures(impl, live_image_ids, live_image_id_count);
 
     // kitty graphics(K2): 이미지 placement 정점 버퍼. gpu_images는 (pass,z) 정렬돼 오므로 pass>=2 시작
     // 인덱스로 둘로 가른다 — [0,above_start)=텍스트 뒤(셀 패스 전), [above_start,n)=텍스트 앞(셀 패스 후).

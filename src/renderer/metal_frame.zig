@@ -799,6 +799,12 @@ pub const MetalFrame = extern struct {
     // 위 image_uploads의 픽셀 연속 버퍼(각 upload의 pixels_offset/len이 자기 구간). 비면 업로드 없음.
     image_pixels: ?[*]const u8 = null,
     image_pixel_count: usize = 0,
+    // kitty graphics(K4c): 현재 살아있는 이미지 id 집합(활성 surface 저장소 키). 렌더러가 이 집합에 없는
+    // 캐시 텍스처를 evict해 GPU 메모리를 회수한다(delete/evict/RIS 반영). 비면(null) evict 안 함 — 단,
+    // count==0이고 image_id 채널이 활성이면 "전부 evict"로 해석되지 않도록 호출자가 보장(이미지 없는 frame은
+    // 그냥 비워 보낸다). DevSession이 kitty_uploaded도 같은 집합으로 prune해 재업로드 동기화.
+    live_image_ids: ?[*]const u32 = null,
+    live_image_id_count: usize = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).
@@ -902,6 +908,8 @@ pub const MetalFrameBuffer = struct {
     gpu_images: []GpuImage = &.{},
     image_uploads: []GpuImageUpload = &.{},
     image_pixels: []u8 = &.{},
+    // kitty graphics(K4c): 현재 살아있는 이미지 id 집합(텍스처 eviction용). replace가 dupe 소유한다.
+    live_image_ids: []u32 = &.{},
     uploads: []NativeMetalRasterUpload = &.{},
     pixels: []u8 = &.{},
     size: terminal.Size = .{ .cols = 0, .rows = 0 },
@@ -958,6 +966,9 @@ pub const MetalFrameBuffer = struct {
         gpu_images: []const GpuImage,
         image_uploads: []const GpuImageUpload,
         image_pixels: []const u8,
+        // kitty graphics(K4c): 살아있는 이미지 id 집합. buffer가 dupe 소유. 렌더러가 이 집합에 없는
+        // 텍스처를 evict한다(빈 집합 = 살아있는 이미지 없음 → 전부 evict).
+        live_image_ids: []const u32,
     ) !void {
         // 1) 터미널 셀: pane 탭 바 chrome을 먼저(커서 suffix 보존), 그 뒤 각 panel frame을 투영해 origin 박아
         //    이어 붙인다. 커서 suffix는 맨 뒤(활성) panel만.
@@ -1011,6 +1022,8 @@ pub const MetalFrameBuffer = struct {
         errdefer allocator.free(new_image_uploads);
         const new_image_pixels = try allocator.dupe(u8, image_pixels);
         errdefer allocator.free(new_image_pixels);
+        const new_live_image_ids = try allocator.dupe(u32, live_image_ids);
+        errdefer allocator.free(new_live_image_ids);
 
         const merged = try buildMergedUploadsN(allocator, pane_frames, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, if (overlay_frame) |pf| pf.frame.glyph_raster_frame else null);
         errdefer {
@@ -1025,6 +1038,7 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.gpu_images);
         allocator.free(self.image_uploads);
         allocator.free(self.image_pixels);
+        allocator.free(self.live_image_ids);
         allocator.free(self.uploads);
         allocator.free(self.pixels);
         self.cells = new_cells;
@@ -1034,6 +1048,7 @@ pub const MetalFrameBuffer = struct {
         self.gpu_images = new_gpu_images;
         self.image_uploads = new_image_uploads;
         self.image_pixels = new_image_pixels;
+        self.live_image_ids = new_live_image_ids;
         // 커서 suffix(blink chop 길이): 오버레이가 열렸으면 오버레이 자신의 caret(맨 끝 — overlay_cursor_cells)을 쓴다.
         // 그러면 setCursorVisible chop이 오버레이 caret을 깜빡인다(터미널 커서 메커니즘 재활용). 오버레이가 caret을
         // 안 내면(notice 등) overlay_cursor_cells=0이라 chop 없음(정적). 오버레이가 없으면 활성 panel의 터미널 커서.
@@ -1099,6 +1114,9 @@ pub const MetalFrameBuffer = struct {
             .image_upload_count = self.image_uploads.len,
             .image_pixels = if (self.image_pixels.len > 0) self.image_pixels.ptr else null,
             .image_pixel_count = self.image_pixels.len,
+            // kitty graphics(K4c): 살아있는 이미지 id 집합. 렌더러가 이 집합에 없는 텍스처를 evict.
+            .live_image_ids = if (self.live_image_ids.len > 0) self.live_image_ids.ptr else null,
+            .live_image_id_count = self.live_image_ids.len,
         };
     }
 
@@ -1110,6 +1128,7 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.gpu_images);
         allocator.free(self.image_uploads);
         allocator.free(self.image_pixels);
+        allocator.free(self.live_image_ids);
         allocator.free(self.uploads);
         allocator.free(self.pixels);
         self.* = .{};

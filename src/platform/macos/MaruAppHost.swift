@@ -796,7 +796,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.image_uploads,          // kitty graphics(K2): 텍스처 업로드(generation 바뀐 것만)
             frame.image_upload_count,
             frame.image_pixels,           // kitty graphics(K2): 업로드 픽셀 연속 버퍼
-            frame.image_pixel_count
+            frame.image_pixel_count,
+            frame.live_image_ids,         // kitty graphics(K4c): 살아있는 이미지 id 집합(없는 텍스처 evict)
+            frame.live_image_id_count
         )
         if drew {
             lastDrawnGeneration = frame.generation

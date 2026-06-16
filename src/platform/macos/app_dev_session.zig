@@ -43,7 +43,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 48; // 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 49; // 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -2221,6 +2221,21 @@ pub const DevSession = struct {
         return self.app_window.active().?;
     }
 
+    /// kitty graphics(K4c): kitty_uploaded(렌더러 업로드 generation 미러)를 live id 집합으로 prune한다 —
+    /// live가 아닌(저장소에서 빠진/Swift가 텍스처를 evict할) image_id를 dedup 상태에서도 제거해, 다시
+    /// 활성화되면 planImageUploads가 재업로드하게 한다. id 수가 작아 선형 검색으로 충분하다.
+    fn pruneKittyUploaded(self: *DevSession, live_ids: []const u32) void {
+        var to_remove: std.ArrayList(u32) = .empty;
+        defer to_remove.deinit(self.allocator);
+        var it = self.kitty_uploaded.iterator();
+        while (it.next()) |kv| {
+            if (std.mem.indexOfScalar(u32, live_ids, kv.key_ptr.*) == null) {
+                to_remove.append(self.allocator, kv.key_ptr.*) catch {};
+            }
+        }
+        for (to_remove.items) |id| _ = self.kitty_uploaded.remove(id);
+    }
+
     /// `activeSurface`의 읽기 전용(`*const self`) 변형 — `pxToCell`/`imeCursorRect`처럼 surface를
     /// 안 바꾸는 const 메서드가 같은 seam을 거치게 한다.
     fn activeSurfaceConst(self: *const DevSession) *const app.Surface {
@@ -4001,11 +4016,18 @@ pub const DevSession = struct {
                 var kg_images: []metal_frame.GpuImage = &.{};
                 var kg_uploads: []metal_frame.GpuImageUpload = &.{};
                 var kg_pixels: []u8 = &.{};
+                var kg_live_ids: std.ArrayList(u32) = .empty;
                 defer self.allocator.free(kg_images);
                 defer self.allocator.free(kg_uploads);
                 defer self.allocator.free(kg_pixels);
+                defer kg_live_ids.deinit(self.allocator);
                 if (self.surface_initialized) {
                     const snap = self.activeSurface().core.renderSnapshot();
+                    // K4c: 살아있는 이미지 id 집합(활성 surface 저장소). Swift가 이 집합에 없는 텍스처를 evict.
+                    for (snap.images) |img| kg_live_ids.append(self.allocator, img.image_id) catch {};
+                    // kitty_uploaded를 같은 집합으로 prune — 텍스처가 evict된(=live 아님) 이미지는 dedup 상태에서도
+                    // 빼, 다시 활성화되면 재업로드되게(Swift 캐시와 동기). 멀티 surface 전환 시 정합.
+                    self.pruneKittyUploaded(kg_live_ids.items);
                     if (snap.placements.len > 0) {
                         kg_images = metal_frame.buildGpuImages(self.allocator, snap.placements, snap.images, snap.size, self.cell_width_px, self.cell_height_px) catch &.{};
                         for (kg_images) |*gi| {
@@ -4020,7 +4042,7 @@ pub const DevSession = struct {
                         }
                     }
                 }
-                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items, self.gpu_shadows.items, kg_images, kg_uploads, kg_pixels)) |_| {
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items, self.gpu_shadows.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     self.metal_dirty = false;
                 } else |_| {}
             }

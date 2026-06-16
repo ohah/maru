@@ -274,6 +274,10 @@ pub const TerminalCore = struct {
     // 0이면 미보유(헤드리스 등) — 자동 크기 advance를 건너뛴다. 마우스 1016이 픽셀을 주입하는 것과 같은 결.
     cell_width_px: u32 = 0,
     cell_height_px: u32 = 0,
+    // OSC 10/11 색 질의 응답용 기본 전경/배경 색(theme). platform이 setDefaultColors로 주입(셀 메트릭과 같은
+    // 결) — 코어는 Color.default 추상만 알아 실제 RGB를 받는다. 주입 전 기본값은 어두운 테마 근사.
+    default_fg_rgb: types.Rgb = .{ .r = 0xcc, .g = 0xcc, .b = 0xcc },
+    default_bg_rgb: types.Rgb = .{ .r = 0x10, .g = 0x10, .b = 0x10 },
     /// kitty graphics 이미지 저장소(transmit된 이미지, image_id→픽셀 버퍼). 렌더는 후속.
     kitty_images: KittyImageStorage = .{},
     /// kitty graphics placement(표시 중인 이미지 인스턴스) 목록. (image_id, placement_id)로 식별 —
@@ -1485,8 +1489,27 @@ pub const TerminalCore = struct {
             self.setWindowTitle(body[2..]); // OSC 0 = 아이콘 이름 + 창 제목(둘 다) — 창 제목으로 받는다
         } else if (std.mem.startsWith(u8, body, "2;")) {
             self.setWindowTitle(body[2..]); // OSC 2 = 창 제목만
+        } else if (std.mem.startsWith(u8, body, "10;")) {
+            self.dispatchOscColorQuery(body[3..], 10); // OSC 10 = 전경색
+        } else if (std.mem.startsWith(u8, body, "11;")) {
+            self.dispatchOscColorQuery(body[3..], 11); // OSC 11 = 배경색
         }
         // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
+    }
+
+    /// OSC 10/11(전경/배경 색) 질의. spec이 `?`면 현재 색을 xterm 형식 `OSC <code> ; rgb:rrrr/gggg/bbbb ST`로
+    /// 회신한다 — nvim 등이 배경색 밝기로 light/dark 테마를 감지하는데, 응답이 없으면 테마를 오판한다. 색은
+    /// platform이 setDefaultColors로 주입한 theme 값이다(코어는 Color.default 추상만 알아 실제 RGB는 받는다 —
+    /// 셀 메트릭 주입과 같은 결). 색 설정(spec이 color)은 후속이라 지금은 질의만. 베이스: xterm ctlseqs OSC 10/11.
+    fn dispatchOscColorQuery(self: *TerminalCore, spec: []const u8, code: u16) void {
+        if (!std.mem.eql(u8, spec, "?")) return; // color spec 설정은 후속 — 질의(?)만 처리
+        const rgb = if (code == 10) self.default_fg_rgb else self.default_bg_rgb;
+        var buf: [40]u8 = undefined;
+        // 8-bit 채널을 16-bit로 복제(0xAB → 0xABAB) — xterm 4-hex-per-channel 표준 형식.
+        const resp = std.fmt.bufPrint(&buf, "\x1b]{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}\x1b\\", .{
+            code, rgb.r, rgb.r, rgb.g, rgb.g, rgb.b, rgb.b,
+        }) catch return;
+        self.appendResponse(resp);
     }
 
     /// 종료된 APC(ESC _ ... ESC \) 내용을 처리한다. kitty graphics(`ESC _ G ...`)가 유일한 소비자다.
@@ -1755,6 +1778,13 @@ pub const TerminalCore = struct {
     pub fn setCellMetrics(self: *TerminalCore, cell_width_px: u32, cell_height_px: u32) void {
         self.cell_width_px = cell_width_px;
         self.cell_height_px = cell_height_px;
+    }
+
+    /// 기본 전경/배경 색(theme RGB)을 platform이 주입한다(셀 메트릭과 같은 결). OSC 10/11 색 질의 응답에
+    /// 쓴다 — 코어는 Color.default 추상만 알아 실제 theme RGB를 받아야 질의에 답할 수 있다.
+    pub fn setDefaultColors(self: *TerminalCore, fg: types.Rgb, bg: types.Rgb) void {
+        self.default_fg_rgb = fg;
+        self.default_bg_rgb = bg;
     }
 
     /// kitty display가 커서를 내릴 행 수. rows(r)가 명시되면 그 값, 자동 크기(r 미지정)면 셀 메트릭이 있을 때
@@ -5936,6 +5966,27 @@ test "DA1 (CSI c) answers with a VT102 identification over the response path" {
     core.clearResponse();
     try core.write("\x1b[0c"); // 명시적 0도 동일
     try std.testing.expectEqualStrings("\x1b[?6c", core.pendingResponse());
+}
+
+test "OSC 11 (background color) query answers with theme color in xterm rgb format" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    core.setDefaultColors(.{ .r = 0xcc, .g = 0xcc, .b = 0xcc }, .{ .r = 0x10, .g = 0x20, .b = 0x30 });
+    try core.write("\x1b]11;?\x1b\\"); // OSC 11 ; ? ST — 배경색 질의(nvim 등이 light/dark 테마 감지에 씀)
+    // 8-bit 채널을 16-bit로 복제: 0x10→1010, 0x20→2020, 0x30→3030.
+    try std.testing.expectEqualStrings("\x1b]11;rgb:1010/2020/3030\x1b\\", core.pendingResponse());
+}
+
+test "OSC 10 (foreground color) query answers; color-set spec is consumed silently (후속)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    core.setDefaultColors(.{ .r = 0xab, .g = 0xcd, .b = 0xef }, .{ .r = 0, .g = 0, .b = 0 });
+    try core.write("\x1b]10;?\x1b\\"); // 전경색 질의
+    try std.testing.expectEqualStrings("\x1b]10;rgb:abab/cdcd/efef\x1b\\", core.pendingResponse());
+    // 질의(?)가 아닌 색 설정(spec)은 후속이라 응답 없이 소비만 한다.
+    core.clearResponse();
+    try core.write("\x1b]10;#ffffff\x1b\\");
+    try std.testing.expectEqualStrings("", core.pendingResponse());
 }
 
 test "DECSC inside the alt screen does not clobber the cursor saved by 1049 (per-screen slots)" {

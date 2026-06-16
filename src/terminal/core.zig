@@ -3128,19 +3128,16 @@ pub const TerminalCore = struct {
     }
 
     fn writeTab(self: *TerminalCore) void {
-        // 탭은 수평 이동이라 다음 줄로 wrap하지 않는다(끝 칸에 멈춘다). pending_wrap이 이미
-        // 서 있어도 소비하지 않도록 먼저 끄고, putCell이 채우다 마지막 칸에서 다시 세운
-        // pending_wrap도 끝나고 끈다(탭이 wrap을 남기지 않게).
+        // 탭은 수평 이동이다 — 다음 8-탭스톱으로 커서만 옮기고(끝 칸에 멈춤), 지나는 셀의 내용은
+        // 건드리지 않는다. xterm.js(InputHandler.tab)·Ghostty(horizontalTab)도 커서만 이동한다 —
+        // putCell(' ')로 공백을 찍으면 프로그램이 CR 후 탭으로 넘어가는 redraw에서 기존 글자가 지워지고
+        // pen 배경색이 칠해진다. 탭은 wrap하지 않으므로 pending_wrap도 끈다.
         self.pending_wrap = false;
-        // 다음 8-탭스톱. 포화 곱셈(*|)으로, cols가 maxInt(u16)까지 커도(거대 창) 마지막 탭에서
-        // (col/8+1)*8이 u16을 넘겨 패닉하지 않게 한다. @min은 곱셈 뒤라 포화로 막아야 한다.
-        const next_tab = @min(self.size.cols, ((self.cursor.col / 8) + 1) *| 8);
-        while (self.cursor.col < next_tab and !self.pending_wrap) {
-            const before = self.cursor.col;
-            self.putCell(' ');
-            if (self.cursor.col == before) break;
-        }
-        self.pending_wrap = false;
+        if (self.size.cols == 0) return;
+        // 포화 곱셈(*|)으로 cols가 maxInt(u16)까지 커도(거대 창) (col/8+1)*8이 u16을 넘겨 패닉하지 않게 한다.
+        const stop = ((self.cursor.col / 8) + 1) *| 8;
+        // 다음 탭스톱이 마지막 칸을 넘으면 마지막 칸에 멈춘다(탭은 다음 줄로 넘어가지 않는다).
+        self.cursor.col = if (stop >= self.size.cols) self.size.cols - 1 else stop;
     }
 
     fn putCell(self: *TerminalCore, codepoint: u21) void {
@@ -4402,6 +4399,18 @@ test "a tab near the last column does not overflow the tab-stop arithmetic" {
     try core.write("\x1b[65535G"); // CHA -> 마지막 칸(65534)으로 clamp
     try core.write("\t"); // 패닉하면 안 됨
     try std.testing.expectEqual(@as(u16, 65534), core.cursor.col);
+}
+
+test "HT(tab)는 지나는 셀을 덮지 않고 커서만 옮긴다 (xterm/Ghostty)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 1 });
+    defer core.deinit();
+    try core.write("ABCDEF"); // col0~5
+    try core.write("\r\t"); // CR(col0) → HT → 다음 8-탭스톱(col8)
+    // ABCDEF가 보존된다 — 예전엔 putCell(' ')로 col0~7을 덮어 글자가 사라졌다.
+    try std.testing.expectEqual(@as(u21, 'A'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'C'), core.cells[core.index(0, 2)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'F'), core.cells[core.index(0, 5)].codepoint);
+    try std.testing.expectEqual(@as(u16, 8), core.cursor.col); // 커서만 탭스톱으로 이동
 }
 
 test "backspace cancels a pending wrap so the next char does not wrap" {

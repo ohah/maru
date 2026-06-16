@@ -4952,11 +4952,15 @@ pub const DevSession = struct {
         frame.sidebar_bg = self.sidebarBg();
         // 화면 clear color(빈 영역/기본 배경 셀이 비치는 색): OSC 11(배경 set)이 있으면 그 색, 없으면
         // theme.background. DECSCNM(?5, G9) 화면 반전이면 전경색으로 스왑한다(빈 영역도 반전돼야 함). 활성
-        // surface 기준(렌더 pass clearColor — 셀이 default 배경=A0일 때 드러남).
-        const active_core = &self.activeSurfaceConst().core;
-        const eff_bg = active_core.defaultBgOverride() orelse self.appearance.theme.background;
-        const eff_fg = active_core.defaultFgOverride() orelse self.appearance.theme.foreground;
-        frame.terminal_bg = packOpaqueRgb(if (active_core.reverseScreen()) eff_fg else eff_bg);
+        // surface 기준(렌더 pass clearColor — 셀이 default 배경=A0일 때 드러남). surface_initialized 가드는
+        // 다른 surface-touch 메서드와 동일 — activeSurfaceConst()의 .? unwrap이 탭이 빈 시점(teardown 등)에
+        // 패닉하지 않게 한다(그땐 theme 기본 배경으로 폴백).
+        frame.terminal_bg = if (self.surface_initialized) blk: {
+            const active_core = &self.activeSurfaceConst().core;
+            const eff_bg = active_core.defaultBgOverride() orelse self.appearance.theme.background;
+            const eff_fg = active_core.defaultFgOverride() orelse self.appearance.theme.foreground;
+            break :blk packOpaqueRgb(if (active_core.reverseScreen()) eff_fg else eff_bg);
+        } else packOpaqueRgb(self.appearance.theme.background);
         // 사이드바 셀(밴드 ++ 제목 glyph)은 metal_buffer가 소유한다 — view()가 frame.sidebar_cells를
         // 세팅한다(self.sidebar_cells는 밴드 source라 replace에만 넘긴다). 여기선 슬롯 높이만 더한다:
         // 렌더러가 사이드바 셀을 cell 높이가 아니라 탭 슬롯 높이(≈2.5×)로 세로 배치하게.

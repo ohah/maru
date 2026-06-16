@@ -84,7 +84,10 @@ bool maru_metal_renderer_draw(
     /* kitty graphics(K4c): 현재 살아있는 이미지 id 집합. 이 집합에 없는 캐시 텍스처를 evict한다(GPU 메모리
        회수 — delete/evict/RIS 반영). count==0이면 살아있는 이미지 없음 → 전부 evict. */
     const uint32_t *live_image_ids,
-    size_t live_image_id_count
+    size_t live_image_id_count,
+    /* 화면 clear color(0xAARRGGBB) — render pass clearColor. OSC 11(배경 set) 있으면 그 색, 없으면
+       theme.background. 0이면 기존 기본 clear(어두운 남색)로 폴백. 빈 영역/기본 배경(A0) 셀이 비치는 색. */
+    uint32_t terminal_bg
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

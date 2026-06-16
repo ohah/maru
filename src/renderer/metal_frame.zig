@@ -840,6 +840,10 @@ pub const MetalFrame = extern struct {
     // 그냥 비워 보낸다). DevSession이 kitty_uploaded도 같은 집합으로 prune해 재업로드 동기화.
     live_image_ids: ?[*]const u32 = null,
     live_image_id_count: usize = 0,
+    // 화면 clear color(빈 영역/기본 배경이 비치는 색, 0xAARRGGBB). OSC 11(배경 set)이 있으면 그 색, 없으면
+    // theme.background. 렌더 pass의 clearColor로 쓴다 — 셀이 default 배경(A=0)일 때 드러나는 색. app이 활성
+    // surface 기준으로 채운다(0이면 렌더러가 기존 기본 clear로 폴백). 끝에 추가해 기존 필드 offset 불변(ABI v51).
+    terminal_bg: u32 = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).

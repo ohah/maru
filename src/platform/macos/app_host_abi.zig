@@ -785,6 +785,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     // K4c: 텍스처 eviction용 live image id 집합 채널.
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevMetalFrame, "live_image_ids"), @offsetOf(DevMetalFrame, "live_image_ids"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevMetalFrame, "live_image_id_count"), @offsetOf(DevMetalFrame, "live_image_id_count"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostDevMetalFrame, "terminal_bg"), @offsetOf(DevMetalFrame, "terminal_bg"));
 }
 
 test "macOS app host capabilities describe ownership before runtime exists" {

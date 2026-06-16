@@ -798,7 +798,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.image_pixels,           // kitty graphics(K2): 업로드 픽셀 연속 버퍼
             frame.image_pixel_count,
             frame.live_image_ids,         // kitty graphics(K4c): 살아있는 이미지 id 집합(없는 텍스처 evict)
-            frame.live_image_id_count
+            frame.live_image_id_count,
+            frame.terminal_bg             // 화면 clear color(OSC 11 배경 set 또는 theme.background; 0=기본 clear)
         )
         if drew {
             lastDrawnGeneration = frame.generation

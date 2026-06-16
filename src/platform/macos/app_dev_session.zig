@@ -43,7 +43,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 50; // 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 51; // 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -3811,8 +3811,9 @@ pub const DevSession = struct {
             // Metal view 데이터 투영 실패(OOM 등)는 터미널 코어 동작과 무관하다. 마지막
             // frame을 유지하고 dirty를 남겨 다음 tick에 재시도한다(세션을 죽이지 않는다).
             const cell_colors: metal_frame.CellColors = .{
-                .default_fg = self.appearance.theme.foreground,
-                .default_bg = self.appearance.theme.background, // SGR reverse의 default 색 스왑용
+                // OSC 10/11 색 설정이 있으면 그 색, 없으면 theme 기본. SGR reverse의 default 색 스왑·OSC 11 배경에도 반영.
+                .default_fg = self.activeSurface().core.defaultFgOverride() orelse self.appearance.theme.foreground,
+                .default_bg = self.activeSurface().core.defaultBgOverride() orelse self.appearance.theme.background,
                 .palette = self.activeSurface().core.paletteOverride(), // OSC 4 팔레트 재정의(.indexed 색 풀이)
                 .selection_bg = self.appearance.theme.selection,
                 .selection = self.activeSurface().core.selectionViewportSpan(),
@@ -4010,9 +4011,11 @@ pub const DevSession = struct {
                             f.deinit(self.allocator);
                             continue;
                         };
-                        // 비활성 pane도 자기 core의 OSC 4 팔레트로 .indexed를 푼다(팔레트는 per-터미널 상태).
+                        // 비활성 pane도 자기 core의 OSC 4 팔레트·OSC 10/11 색 설정을 쓴다(둘 다 per-터미널 상태).
                         var pane_colors = inactive_colors;
                         pane_colors.palette = pane_core.paletteOverride();
+                        if (pane_core.defaultFgOverride()) |fg| pane_colors.default_fg = fg;
+                        if (pane_core.defaultBgOverride()) |bg| pane_colors.default_bg = bg;
                         const t = self.paneTermRect(lr.rect); // 바 아래 영역 origin
                         pane_frames.append(self.allocator, .{
                             .frame = f, // built_frames가 소유(deinit) — 여기는 같은 frame을 가리키는 view
@@ -4905,6 +4908,9 @@ pub const DevSession = struct {
         // 렌더러가 origin offset + 배경 quad를 처리한다. split(panel)도 같은 origin 방식을 확장한다.
         frame.terminal_origin_x_px = self.sidebar_width_px;
         frame.sidebar_bg = self.sidebarBg();
+        // 화면 clear color(빈 영역/기본 배경 셀이 비치는 색): OSC 11(배경 set)이 있으면 그 색, 없으면
+        // theme.background. 활성 surface 기준으로 정한다(렌더 pass clearColor — 셀이 default 배경=A0일 때 드러남).
+        frame.terminal_bg = packOpaqueRgb(self.activeSurfaceConst().core.defaultBgOverride() orelse self.appearance.theme.background);
         // 사이드바 셀(밴드 ++ 제목 glyph)은 metal_buffer가 소유한다 — view()가 frame.sidebar_cells를
         // 세팅한다(self.sidebar_cells는 밴드 source라 replace에만 넘긴다). 여기선 슬롯 높이만 더한다:
         // 렌더러가 사이드바 셀을 cell 높이가 아니라 탭 슬롯 높이(≈2.5×)로 세로 배치하게.

@@ -564,7 +564,8 @@ bool maru_metal_renderer_draw(
     const uint8_t *image_pixels,
     size_t image_pixel_count,
     const uint32_t *live_image_ids,
-    size_t live_image_id_count
+    size_t live_image_id_count,
+    uint32_t terminal_bg
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -785,7 +786,17 @@ bool maru_metal_renderer_draw(
     pass.colorAttachments[0].texture = drawable.texture;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    pass.colorAttachments[0].clearColor = MTLClearColorMake(0.06, 0.08, 0.12, 1.0);
+    // 화면 clear color: terminal_bg(0xAARRGGBB — OSC 11 배경 set 또는 theme.background)가 비-0이면 그 색,
+    // 0이면 기존 기본(어두운 남색)으로 폴백. 빈 영역/기본 배경(A0) 셀이 비치는 색.
+    if (terminal_bg != 0) {
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(
+            (double)((terminal_bg >> 16) & 0xff) / 255.0,
+            (double)((terminal_bg >> 8) & 0xff) / 255.0,
+            (double)(terminal_bg & 0xff) / 255.0,
+            1.0);
+    } else {
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0.06, 0.08, 0.12, 1.0);
+    }
 
     id<MTLCommandBuffer> command_buffer = [impl.queue commandBuffer];
     if (command_buffer == nil) {

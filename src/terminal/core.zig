@@ -2273,7 +2273,13 @@ pub const TerminalCore = struct {
                 27 => self.pen.reverse = false,
                 1 => self.pen.bold = true,
                 3 => self.pen.italic = true,
-                4 => self.pen.underline = true,
+                4 => {
+                    // underline. colon 형식 4:x(ITU T.416 — x는 underline 스타일)는 x=0이면 underline off,
+                    // x>0이면 on이다(스타일 종류[curly/dotted 등]는 미지원이라 single underline on으로). 세미콜론
+                    // plain 4는 on. sub-param은 아래 루프 끝에서 소비한다.
+                    const styled = i + 1 < count and self.csi_subparam[i + 1];
+                    self.pen.underline = if (styled) self.csi_params[i + 1] != 0 else true;
+                },
                 22 => self.pen.bold = false,
                 23 => self.pen.italic = false,
                 24 => self.pen.underline = false,
@@ -2294,6 +2300,11 @@ pub const TerminalCore = struct {
                 else => {},
             }
             i += 1;
+            // 직전 주 파라미터에 딸린 colon sub-parameter는 그 파라미터에 종속이라 별도 SGR로 처리하지
+            // 않는다(ITU T.416). 4:3은 underline 스타일이지 italic(SGR 3)이 아니고, 4:0은 underline off지
+            // SGR 0(전체 리셋)이 아니다 — 4 case에서 이미 소비했으니 여기선 건너뛰기만 한다. 38/48은 위에서
+            // continue로 i를 직접 점프하므로 여기 오지 않는다.
+            while (i < count and self.csi_subparam[i]) i += 1;
         }
     }
 
@@ -4389,6 +4400,24 @@ test "SGR colon background direct color (48:2:r:g:b) sets the cell background" {
         types.Color{ .rgb = .{ .r = 10, .g = 20, .b = 30 } },
         core.cells[core.index(0, 0)].style.background,
     );
+}
+
+test "SGR colon sub-parameter는 직전 주 파라미터에 종속 — 별도 SGR로 새지 않는다 (4:3/4:0)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    // 4:3 (curly underline) — underline만 켜지고 italic(SGR 3)은 안 켜진다(예전엔 :3을 italic으로 오인).
+    try core.write("\x1b[4:3m");
+    try std.testing.expect(core.pen.underline);
+    try std.testing.expect(!core.pen.italic);
+    // bold 후 4:0 (underline off) — bold는 유지된다(예전엔 :0을 SGR 0=전체 리셋으로 오인해 bold까지 날렸다).
+    try core.write("\x1b[0m\x1b[1m\x1b[4:0m");
+    try std.testing.expect(core.pen.bold);
+    try std.testing.expect(!core.pen.underline);
+    // 회귀: sub-param 스킵이 38/48 확장색을 망가뜨리지 않는다(세미콜론·콜론 형식 모두).
+    try core.write("\x1b[0m\x1b[38;2;10;20;30m");
+    try std.testing.expectEqual(types.Color{ .rgb = .{ .r = 10, .g = 20, .b = 30 } }, core.pen.foreground);
+    try core.write("\x1b[38:2:40:50:60m");
+    try std.testing.expectEqual(types.Color{ .rgb = .{ .r = 40, .g = 50, .b = 60 } }, core.pen.foreground);
 }
 
 test "printable text wraps across multiple rows filling each line" {

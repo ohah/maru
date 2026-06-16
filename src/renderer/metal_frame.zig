@@ -687,6 +687,60 @@ fn lessGpuImage(_: void, a: GpuImage, b: GpuImage) bool {
     return a.z < b.z;
 }
 
+/// kitty graphics 이미지 텍스처 업로드 디스크립터(K2c). 렌더러(K2d)가 image_id로 MTLTexture를 캐시하고,
+/// generation이 바뀐(신규/재transmit) 이미지만 업로드한다. pixels_offset/len은 같은 frame의 image_pixels
+/// 연속 버퍼 안 이 이미지 RGBA(또는 RGB) 구간을 가리킨다. Zig metal_frame.GpuImageUpload ↔ C 1:1.
+pub const GpuImageUpload = extern struct {
+    image_id: u32,
+    width: u32,
+    height: u32,
+    bpp: u32, // 3(RGB)/4(RGBA)
+    generation: u64,
+    pixels_offset: usize,
+    pixels_len: usize,
+};
+
+/// planImageUploads의 결과 — 이번 frame에 업로드할 디스크립터와 그 픽셀 연속 버퍼(둘 다 호출자 소유).
+pub const ImageUploadPlan = struct { uploads: []GpuImageUpload, pixels: []u8 };
+
+/// 이번 frame에 그릴 GpuImage가 참조하는 이미지 중 **아직 업로드 안 했거나 generation이 바뀐** 것만
+/// 골라 업로드 채널(디스크립터 + 픽셀 연속 버퍼)을 만든다. `uploaded`는 image_id→마지막 업로드
+/// generation 상태(호출자가 frame 간 보관) — 여기서 갱신해 같은 frame 중복·다음 frame 재전송을 막는다.
+/// generation이 같으면 렌더러 텍스처 캐시가 최신이라 픽셀을 다시 보내지 않는다(이미지당 개별 텍스처·
+/// upload-once). 베이스: docs "kitty graphics K2 렌더 설계"(K2a generation). 소유 슬라이스 반환.
+pub fn planImageUploads(
+    allocator: std.mem.Allocator,
+    gpu_images: []const GpuImage,
+    images: []const terminal.KittyImageView,
+    uploaded: *std.AutoHashMapUnmanaged(u32, u64),
+) !ImageUploadPlan {
+    var uploads: std.ArrayList(GpuImageUpload) = .empty;
+    errdefer uploads.deinit(allocator);
+    var pixels: std.ArrayList(u8) = .empty;
+    errdefer pixels.deinit(allocator);
+
+    for (gpu_images) |gi| {
+        const img = findImage(images, gi.image_id) orelse continue; // 픽셀 없는 placement는 건너뜀
+        if (uploaded.get(gi.image_id)) |g| {
+            if (g == img.generation) continue; // 캐시가 이미 최신 generation
+        }
+        const offset = pixels.items.len;
+        try pixels.appendSlice(allocator, img.pixels);
+        try uploads.append(allocator, .{
+            .image_id = img.image_id,
+            .width = img.width,
+            .height = img.height,
+            .bpp = img.bpp,
+            .generation = img.generation,
+            .pixels_offset = offset,
+            .pixels_len = img.pixels.len,
+        });
+        // 상태 갱신 — 같은 frame에서 같은 id를 다시 만나면 위 generation 체크로 dedup된다.
+        try uploaded.put(allocator, gi.image_id, img.generation);
+    }
+    return .{ .uploads = try uploads.toOwnedSlice(allocator), .pixels = try pixels.toOwnedSlice(allocator) };
+}
+
 pub const MetalFrame = extern struct {
     cols: u32 = 0,
     rows: u32 = 0,
@@ -734,6 +788,17 @@ pub const MetalFrame = extern struct {
     // C4b 모달: 모달 셀이 cells 배열에서 시작하는 인덱스(0=모달 없음). draw가 over quad(모달 배경)를 이
     // 경계 앞(모달 텍스트 셀 아래·터미널 위)에 끼운다.
     modal_cells_start: usize = 0,
+    // kitty graphics(K2): 이미지 placement의 GPU 드로우 프리미티브(textured quad). 비면 null로 둬 렌더러가
+    // 이미지 패스를 건너뛴다(이미지 없음 = 일반 경로). pass(0/1/2)로 셀배경/텍스트 전후에 그린다.
+    gpu_images: ?[*]const GpuImage = null,
+    gpu_image_count: usize = 0,
+    // kitty graphics(K2): 이번 frame에 업로드할 이미지 텍스처 디스크립터 — generation이 바뀐 것만. 렌더러가
+    // image_id로 텍스처를 캐시하고 여기 있는 것만 (재)업로드한다(이미지당 개별 텍스처·upload-once).
+    image_uploads: ?[*]const GpuImageUpload = null,
+    image_upload_count: usize = 0,
+    // 위 image_uploads의 픽셀 연속 버퍼(각 upload의 pixels_offset/len이 자기 구간). 비면 업로드 없음.
+    image_pixels: ?[*]const u8 = null,
+    image_pixel_count: usize = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).
@@ -831,6 +896,12 @@ pub const MetalFrameBuffer = struct {
     gpu_quads: []GpuQuad = &.{},
     // C4b 모달: chrome 그림자(GpuShadow) — 모달 배경의 떠 보이는 blur. per-frame(모달만), gpu_quads와 동형 소유.
     gpu_shadows: []GpuShadow = &.{},
+    // kitty graphics(K2): 이미지 placement 드로우 프리미티브 + 텍스처 업로드 채널. replace가 DevSession이
+    // 모은 것을 dupe 소유한다(gpu_quads와 동형). 이미지 없으면 길이 0(렌더 무동작). image_pixels는 이
+    // frame에 (재)업로드할 이미지들의 RGBA 연속 버퍼다.
+    gpu_images: []GpuImage = &.{},
+    image_uploads: []GpuImageUpload = &.{},
+    image_pixels: []u8 = &.{},
     uploads: []NativeMetalRasterUpload = &.{},
     pixels: []u8 = &.{},
     size: terminal.Size = .{ .cols = 0, .rows = 0 },
@@ -881,6 +952,12 @@ pub const MetalFrameBuffer = struct {
         gpu_quads: []const GpuQuad,
         // C4b 모달: chrome 그림자(DevSession이 lowering으로 모은 것). buffer가 dupe 소유. 빈이면 0(무동작).
         gpu_shadows: []const GpuShadow,
+        // kitty graphics(K2): 이미지 placement 드로우 프리미티브 + 텍스처 업로드 채널(DevSession이 모은 것).
+        // buffer가 dupe 소유. 이미지 없으면 모두 빈 슬라이스(렌더 무동작). image_pixels는 image_uploads가
+        // 가리키는 RGBA 연속 버퍼다(없으면 빈).
+        gpu_images: []const GpuImage,
+        image_uploads: []const GpuImageUpload,
+        image_pixels: []const u8,
     ) !void {
         // 1) 터미널 셀: pane 탭 바 chrome을 먼저(커서 suffix 보존), 그 뒤 각 panel frame을 투영해 origin 박아
         //    이어 붙인다. 커서 suffix는 맨 뒤(활성) panel만.
@@ -928,6 +1005,13 @@ pub const MetalFrameBuffer = struct {
         const new_gpu_shadows = try allocator.dupe(GpuShadow, gpu_shadows);
         errdefer allocator.free(new_gpu_shadows);
 
+        const new_gpu_images = try allocator.dupe(GpuImage, gpu_images);
+        errdefer allocator.free(new_gpu_images);
+        const new_image_uploads = try allocator.dupe(GpuImageUpload, image_uploads);
+        errdefer allocator.free(new_image_uploads);
+        const new_image_pixels = try allocator.dupe(u8, image_pixels);
+        errdefer allocator.free(new_image_pixels);
+
         const merged = try buildMergedUploadsN(allocator, pane_frames, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, if (overlay_frame) |pf| pf.frame.glyph_raster_frame else null);
         errdefer {
             allocator.free(merged.uploads);
@@ -938,12 +1022,18 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.sidebar_cells);
         allocator.free(self.gpu_quads);
         allocator.free(self.gpu_shadows);
+        allocator.free(self.gpu_images);
+        allocator.free(self.image_uploads);
+        allocator.free(self.image_pixels);
         allocator.free(self.uploads);
         allocator.free(self.pixels);
         self.cells = new_cells;
         self.sidebar_cells = new_sidebar_cells;
         self.gpu_quads = new_gpu_quads;
         self.gpu_shadows = new_gpu_shadows;
+        self.gpu_images = new_gpu_images;
+        self.image_uploads = new_image_uploads;
+        self.image_pixels = new_image_pixels;
         // 커서 suffix(blink chop 길이): 오버레이가 열렸으면 오버레이 자신의 caret(맨 끝 — overlay_cursor_cells)을 쓴다.
         // 그러면 setCursorVisible chop이 오버레이 caret을 깜빡인다(터미널 커서 메커니즘 재활용). 오버레이가 caret을
         // 안 내면(notice 등) overlay_cursor_cells=0이라 chop 없음(정적). 오버레이가 없으면 활성 panel의 터미널 커서.
@@ -1002,6 +1092,13 @@ pub const MetalFrameBuffer = struct {
             // 모달 셀 시작에 영향 없음). exposed가 modal_cells_start보다 작으면 모달 텍스트가 안 보이는
             // 경우인데, 그땐 draw가 over quad를 모달 없음과 같게 다룬다(렌더러 가드).
             .modal_cells_start = self.modal_cells_start,
+            // kitty graphics(K2): 이미지 드로우 프리미티브 + 업로드 채널. 비면 null로 둬 렌더러가 건너뛴다.
+            .gpu_images = if (self.gpu_images.len > 0) self.gpu_images.ptr else null,
+            .gpu_image_count = self.gpu_images.len,
+            .image_uploads = if (self.image_uploads.len > 0) self.image_uploads.ptr else null,
+            .image_upload_count = self.image_uploads.len,
+            .image_pixels = if (self.image_pixels.len > 0) self.image_pixels.ptr else null,
+            .image_pixel_count = self.image_pixels.len,
         };
     }
 
@@ -1010,6 +1107,9 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.sidebar_cells);
         allocator.free(self.gpu_quads);
         allocator.free(self.gpu_shadows);
+        allocator.free(self.gpu_images);
+        allocator.free(self.image_uploads);
+        allocator.free(self.image_pixels);
         allocator.free(self.uploads);
         allocator.free(self.pixels);
         self.* = .{};
@@ -1701,4 +1801,86 @@ test "buildGpuImages: 화면 밖은 cull, 위로 걸친 건 음수 dest_y로 유
     const out_c = try buildGpuImages(std.testing.allocator, &missing, &images, .{ .cols = 10, .rows = 6 }, 10, 20);
     defer std.testing.allocator.free(out_c);
     try std.testing.expectEqual(@as(usize, 0), out_c.len);
+}
+
+// --- kitty graphics K2c: 이미지 업로드 플래너(generation 기반 dedup) ---
+
+test "planImageUploads: 신규는 업로드+상태 기록, 같은 generation은 skip" {
+    const alloc = std.testing.allocator;
+    var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{};
+    defer uploaded.deinit(alloc);
+    const px = [_]u8{0xAB} ** 16;
+    const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 2, .height = 2, .bpp = 4, .generation = 5, .pixels = &px }};
+    const gpu = [_]GpuImage{.{ .image_id = 7, .dest_x = 0, .dest_y = 0, .dest_w = 10, .dest_h = 10, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 }};
+
+    const plan1 = try planImageUploads(alloc, &gpu, &images, &uploaded);
+    defer {
+        alloc.free(plan1.uploads);
+        alloc.free(plan1.pixels);
+    }
+    try std.testing.expectEqual(@as(usize, 1), plan1.uploads.len);
+    try std.testing.expectEqual(@as(u32, 7), plan1.uploads[0].image_id);
+    try std.testing.expectEqual(@as(u64, 5), plan1.uploads[0].generation);
+    try std.testing.expectEqual(@as(u32, 4), plan1.uploads[0].bpp);
+    try std.testing.expectEqual(@as(usize, 16), plan1.pixels.len);
+    try std.testing.expectEqual(@as(u8, 0xAB), plan1.pixels[0]);
+    try std.testing.expectEqual(@as(u64, 5), uploaded.get(7).?);
+
+    // 같은 generation → 캐시 최신이라 업로드 없음.
+    const plan2 = try planImageUploads(alloc, &gpu, &images, &uploaded);
+    defer {
+        alloc.free(plan2.uploads);
+        alloc.free(plan2.pixels);
+    }
+    try std.testing.expectEqual(@as(usize, 0), plan2.uploads.len);
+    try std.testing.expectEqual(@as(usize, 0), plan2.pixels.len);
+}
+
+test "planImageUploads: generation 바뀌면 재업로드, 같은 frame 중복 id는 한 번만" {
+    const alloc = std.testing.allocator;
+    var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{};
+    defer uploaded.deinit(alloc);
+    try uploaded.put(alloc, 7, 5); // gen 5를 이미 업로드한 상태
+    const px = [_]u8{1} ** 16;
+    const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 2, .height = 2, .bpp = 4, .generation = 6, .pixels = &px }};
+    const gpu = [_]GpuImage{
+        .{ .image_id = 7, .dest_x = 0, .dest_y = 0, .dest_w = 10, .dest_h = 10, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 },
+        .{ .image_id = 7, .dest_x = 20, .dest_y = 0, .dest_w = 10, .dest_h = 10, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 1, .pass = 2 },
+    };
+    const plan = try planImageUploads(alloc, &gpu, &images, &uploaded);
+    defer {
+        alloc.free(plan.uploads);
+        alloc.free(plan.pixels);
+    }
+    try std.testing.expectEqual(@as(usize, 1), plan.uploads.len); // 중복 id는 한 번만
+    try std.testing.expectEqual(@as(u64, 6), plan.uploads[0].generation);
+    try std.testing.expectEqual(@as(u64, 6), uploaded.get(7).?);
+}
+
+test "planImageUploads: 두 이미지의 pixels_offset/len이 각 구간을 가리킨다" {
+    const alloc = std.testing.allocator;
+    var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{};
+    defer uploaded.deinit(alloc);
+    const a = [_]u8{0xA} ** 12; // 3x1 RGBA
+    const b = [_]u8{0xB} ** 16; // 2x2 RGBA
+    const images = [_]terminal.KittyImageView{
+        .{ .image_id = 1, .width = 3, .height = 1, .bpp = 4, .generation = 1, .pixels = &a },
+        .{ .image_id = 2, .width = 2, .height = 2, .bpp = 4, .generation = 1, .pixels = &b },
+    };
+    const gpu = [_]GpuImage{
+        .{ .image_id = 1, .dest_x = 0, .dest_y = 0, .dest_w = 1, .dest_h = 1, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 },
+        .{ .image_id = 2, .dest_x = 0, .dest_y = 0, .dest_w = 1, .dest_h = 1, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 },
+    };
+    const plan = try planImageUploads(alloc, &gpu, &images, &uploaded);
+    defer {
+        alloc.free(plan.uploads);
+        alloc.free(plan.pixels);
+    }
+    try std.testing.expectEqual(@as(usize, 2), plan.uploads.len);
+    try std.testing.expectEqual(@as(usize, 28), plan.pixels.len); // 12 + 16
+    try std.testing.expectEqual(@as(usize, 0), plan.uploads[0].pixels_offset);
+    try std.testing.expectEqual(@as(usize, 12), plan.uploads[0].pixels_len);
+    try std.testing.expectEqual(@as(usize, 12), plan.uploads[1].pixels_offset);
+    try std.testing.expectEqual(@as(usize, 16), plan.uploads[1].pixels_len);
+    try std.testing.expectEqual(@as(u8, 0xB), plan.pixels[12]);
 }

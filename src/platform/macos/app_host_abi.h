@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 47u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 48u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -237,6 +237,38 @@ typedef struct MaruAppHostDevGpuShadow {
     uint32_t color;          /* 0xAARRGGBB */
 } MaruAppHostDevGpuShadow;
 
+/* kitty graphics 이미지 placement의 GPU 드로우 프리미티브(K2). Zig metal_frame.GpuImage와 1:1. 셀 그리드와
+   별개 파이프라인(textured quad)으로, image_id로 캐시된 텍스처를 dest 사각형에 source UV로 그린다. pass(0/1/2)로
+   셀배경/텍스트 전후에 그린다. 좌표는 터미널-로컬 backing px(origin_x/y는 split panel 오프셋). */
+typedef struct MaruAppHostDevGpuImage {
+    uint32_t image_id;
+    float dest_x;
+    float dest_y;
+    float dest_w;
+    float dest_h;
+    uint32_t origin_x;
+    uint32_t origin_y;
+    float src_u0;
+    float src_v0;
+    float src_u1;
+    float src_v1;
+    int32_t z;
+    uint32_t pass;           /* 0=below_bg, 1=below_text, 2=above_text(같은 pass 안 z 오름차순) */
+} MaruAppHostDevGpuImage;
+
+/* kitty graphics 이미지 텍스처 업로드 디스크립터(K2). Zig metal_frame.GpuImageUpload와 1:1. generation이 바뀐
+   (신규/재transmit) 이미지만 들어온다 — renderer가 image_id로 텍스처를 캐시하고 여기 있는 것만 (재)업로드한다.
+   pixels_offset/len은 frame의 image_pixels 연속 버퍼 안 이 이미지 구간(RGBA/RGB)을 가리킨다. */
+typedef struct MaruAppHostDevGpuImageUpload {
+    uint32_t image_id;
+    uint32_t width;
+    uint32_t height;
+    uint32_t bpp;            /* 3(RGB)/4(RGBA) */
+    uint64_t generation;
+    size_t pixels_offset;
+    size_t pixels_len;
+} MaruAppHostDevGpuImageUpload;
+
 /* 가장 최근 frame의 Metal view. 모든 포인터는 dev session이 소유한 retained 배열을 가리키며,
    "다음으로 재투영하는 tick"(새 output 또는 resize가 있는 tick) 또는 destroy까지 유효하다.
    idle tick은 재투영하지 않으므로 포인터가 유지되고 generation도 그대로다. close는 이 배열을
@@ -283,6 +315,15 @@ typedef struct MaruAppHostDevMetalFrame {
     /* C4b 모달: 모달 셀이 cells에서 시작하는 인덱스(0=모달 없음). 렌더러가 over quad(모달 배경)를 모달
        텍스트 셀 '앞'에 끼우는 분할점. */
     size_t modal_cells_start;
+    /* kitty graphics(K2): 이미지 placement 드로우 프리미티브. NULL/0이면 이미지 없음(렌더 무동작). */
+    const MaruAppHostDevGpuImage *gpu_images;
+    size_t gpu_image_count;
+    /* kitty graphics(K2): 이번 frame에 (재)업로드할 이미지 텍스처 디스크립터(generation 바뀐 것만). */
+    const MaruAppHostDevGpuImageUpload *image_uploads;
+    size_t image_upload_count;
+    /* 위 image_uploads가 가리키는 픽셀 연속 버퍼(RGBA/RGB). NULL/0이면 업로드 없음. */
+    const uint8_t *image_pixels;
+    size_t image_pixel_count;
 } MaruAppHostDevMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

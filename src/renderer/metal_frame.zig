@@ -80,6 +80,9 @@ pub const CellColors = struct {
     /// 가리키게 wiring한다 — `.indexed` 색을 풀 때 이 표를 먼저 본다. 포인터로 들어 CellColors 복사가 가볍다
     /// (표 1KB를 매 복사하지 않음); 가리키는 core는 frame 렌더 동안 살아 있다.
     palette: ?*const [256]?color.Rgb = null,
+    /// DECSCNM(CSI ?5h, G9) 화면 반전. true면 모든 셀의 전경/배경을 전역 스왑한다(packForeground/packBackground가
+    /// style.reverse와 XOR). app이 그 surface core의 reverseScreen()을 wiring한다.
+    screen_reverse: bool = false,
 };
 
 /// 컬러 글리프(이모지)인지 판정한다. 셰이더는 이 cell의 UV에 +2.0이 더해져 오면 atlas의 컬러
@@ -161,7 +164,9 @@ fn lerpHalf(a: color.Rgb, b: color.Rgb) color.Rgb {
 /// 기본 전경, indexed는 xterm-256 팔레트, rgb는 그대로. SGR reverse(7)면 배경색을 전경으로 쓴다.
 /// SGR 2(faint)면 전경을 그 셀의 배경 쪽으로 0.5 보간해 intensity를 낮춘다.
 fn packForeground(style: terminal.Style, colors: CellColors) u32 {
-    const fg = if (style.reverse)
+    // DECSCNM(화면 반전, G9)과 SGR reverse(7)를 XOR한다 — 둘 다 켜지면 상쇄(정상), 하나만 켜지면 스왑.
+    const reverse = style.reverse != colors.screen_reverse;
+    const fg = if (reverse)
         resolveColor(style.background, colors.default_bg, colors.palette)
     else
         resolveColor(style.foreground, colors.default_fg, colors.palette);
@@ -169,7 +174,7 @@ fn packForeground(style: terminal.Style, colors: CellColors) u32 {
         // SGR 2 faint: 전경을 그 셀의 배경 쪽으로 0.5 보간(intensity 감소). 베이스: Ghostty
         // faint-opacity 기본 0.5(glyph alpha)인데, maru 전경색엔 alpha가 없어 같은 시각 효과를
         // RGB 보간으로 낸다(alpha 0.5 over bg = (fg+bg)/2). reverse면 보간 대상 배경도 스왑된 값.
-        const bg = if (style.reverse)
+        const bg = if (reverse)
             resolveColor(style.foreground, colors.default_fg, colors.palette)
         else
             resolveColor(style.background, colors.default_bg, colors.palette);
@@ -193,7 +198,9 @@ fn effectiveLineColor(l: renderer.LineOverlay, colors: CellColors) color.Rgb {
 /// A=0xFF를 세워 셰이더가 cell을 그 색으로 채우게 한다. SGR reverse(7)면 전경색으로 칠한다
 /// (default 전경도 theme 값으로 풀어 실제로 칠한다 — 안 하면 반전이 안 보인다).
 fn packBackground(style: terminal.Style, colors: CellColors) u32 {
-    if (style.reverse) return 0xFF00_0000 | packRgb(resolveColor(style.foreground, colors.default_fg, colors.palette));
+    // DECSCNM(G9) XOR SGR reverse: 반전이면 전경색으로 칠한다(default 전경도 풀어 실제로 칠해야 반전이 보인다).
+    const reverse = style.reverse != colors.screen_reverse;
+    if (reverse) return 0xFF00_0000 | packRgb(resolveColor(style.foreground, colors.default_fg, colors.palette));
     const rgb = switch (style.background) {
         .default => return 0,
         .indexed => |index| paletteColor(index, colors.palette),
@@ -1577,6 +1584,20 @@ test "packRgb, packForeground, and packBackground pack channels in 0xRRGGBB orde
     try std.testing.expectEqual(@as(u32, 0), packBackground(.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
     try std.testing.expectEqual(@as(u32, 0xFF0A141E), packBackground(.{ .background = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } } }, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
     try std.testing.expectEqual(@as(u32, 0xFF00_0000) | packRgb(color.xterm256(5)), packBackground(.{ .background = .{ .indexed = 5 } }, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
+}
+
+test "G9 DECSCNM screen_reverse swaps fg/bg globally (XOR with SGR reverse)" {
+    const colors: CellColors = .{
+        .default_fg = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
+        .default_bg = .{ .r = 0x10, .g = 0x20, .b = 0x30 },
+        .screen_reverse = true,
+    };
+    // 화면 반전 + default cell: 전경=배경색(0x102030), 배경=전경색(0xFFFFFF)으로 칠한다.
+    try std.testing.expectEqual(packRgb(.{ .r = 0x10, .g = 0x20, .b = 0x30 }), packForeground(.{}, colors));
+    try std.testing.expectEqual(@as(u32, 0xFF00_0000) | packRgb(.{ .r = 0xFF, .g = 0xFF, .b = 0xFF }), packBackground(.{}, colors));
+    // SGR reverse + 화면 반전 = XOR 상쇄(정상으로 복귀): 전경=전경색, 배경=0(없음).
+    try std.testing.expectEqual(packRgb(.{ .r = 0xFF, .g = 0xFF, .b = 0xFF }), packForeground(.{ .reverse = true }, colors));
+    try std.testing.expectEqual(@as(u32, 0), packBackground(.{ .reverse = true }, colors));
 }
 
 test "OSC 4 palette override: indexed colors resolve to override before xterm256" {

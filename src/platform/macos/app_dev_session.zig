@@ -3855,6 +3855,7 @@ pub const DevSession = struct {
                 .default_fg = self.activeSurface().core.defaultFgOverride() orelse self.appearance.theme.foreground,
                 .default_bg = self.activeSurface().core.defaultBgOverride() orelse self.appearance.theme.background,
                 .palette = self.activeSurface().core.paletteOverride(), // OSC 4 팔레트 재정의(.indexed 색 풀이)
+                .screen_reverse = self.activeSurface().core.reverseScreen(), // DECSCNM(?5) 화면 전역 반전(G9)
                 .selection_bg = self.appearance.theme.selection,
                 .selection = self.activeSurface().core.selectionViewportSpan(),
                 .hover_link = self.hoverLinkSpan(),
@@ -4054,6 +4055,7 @@ pub const DevSession = struct {
                         // 비활성 pane도 자기 core의 OSC 4 팔레트·OSC 10/11 색 설정을 쓴다(둘 다 per-터미널 상태).
                         var pane_colors = inactive_colors;
                         pane_colors.palette = pane_core.paletteOverride();
+                        pane_colors.screen_reverse = pane_core.reverseScreen(); // DECSCNM(G9) per-pane
                         if (pane_core.defaultFgOverride()) |fg| pane_colors.default_fg = fg;
                         if (pane_core.defaultBgOverride()) |bg| pane_colors.default_bg = bg;
                         const t = self.paneTermRect(lr.rect); // 바 아래 영역 origin
@@ -4949,8 +4951,12 @@ pub const DevSession = struct {
         frame.terminal_origin_x_px = self.sidebar_width_px;
         frame.sidebar_bg = self.sidebarBg();
         // 화면 clear color(빈 영역/기본 배경 셀이 비치는 색): OSC 11(배경 set)이 있으면 그 색, 없으면
-        // theme.background. 활성 surface 기준으로 정한다(렌더 pass clearColor — 셀이 default 배경=A0일 때 드러남).
-        frame.terminal_bg = packOpaqueRgb(self.activeSurfaceConst().core.defaultBgOverride() orelse self.appearance.theme.background);
+        // theme.background. DECSCNM(?5, G9) 화면 반전이면 전경색으로 스왑한다(빈 영역도 반전돼야 함). 활성
+        // surface 기준(렌더 pass clearColor — 셀이 default 배경=A0일 때 드러남).
+        const active_core = &self.activeSurfaceConst().core;
+        const eff_bg = active_core.defaultBgOverride() orelse self.appearance.theme.background;
+        const eff_fg = active_core.defaultFgOverride() orelse self.appearance.theme.foreground;
+        frame.terminal_bg = packOpaqueRgb(if (active_core.reverseScreen()) eff_fg else eff_bg);
         // 사이드바 셀(밴드 ++ 제목 glyph)은 metal_buffer가 소유한다 — view()가 frame.sidebar_cells를
         // 세팅한다(self.sidebar_cells는 밴드 source라 replace에만 넘긴다). 여기선 슬롯 높이만 더한다:
         // 렌더러가 사이드바 셀을 cell 높이가 아니라 탭 슬롯 높이(≈2.5×)로 세로 배치하게.

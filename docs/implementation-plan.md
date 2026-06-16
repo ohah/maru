@@ -526,7 +526,7 @@ TDD 방식:
 - **G6 — IRM insert mode (`CSI 4h/l`) + 비-private ANSI 모드 — 완료**: 비-private `h`/`l`을 `setAnsiModes`로 디스패치(현재 IRM=4만, 그 외 소비). IRM on이면 putCell이 쓰기 전 `insertChars(cell_width)`로 삽입(오른쪽 밀기). RIS off. 베이스: ECMA-48 IRM(Ghostty `modes.zig` insert=4). 검증: `Xb` home `CSI 4h` `A` → `AXb`.
 - **G7 — SU/SD 스크롤 (`CSI S`/`CSI T`) — 완료**: `CSI Ps S`=scroll region N줄 위로(`scrollRangeUp`, history 미보관 — 명시 스크롤이라 IL/DL처럼 편집 취급), `CSI Ps T`=아래로(`scrollRangeDown`). 기존 `scrollRange` 재사용. 베이스: ECMA-48 SU/SD(Ghostty `scrollUp`/`scrollDown`). 검증: 3줄 채우고 `CSI S` → 위로 팬.
 - **G8 — DECAWM autowrap off (`?7l`) — 완료**: `autowrap: bool`(기본 on) 필드 + `setPrivateModes`에 7. putCell이 마지막 칸을 채울 때 autowrap on이면 `pending_wrap`(deferred wrap), off면 wrap 없이 마지막 칸에 머물러 덮어쓴다. RIS on. 베이스: DEC DECAWM(Ghostty `modes.zig` wraparound=7). 검증: `?7l` 후 6칸 채우고 7번째 글자가 마지막 칸 덮어씀.
-- **G9 — DECSCNM 화면 반전 (`?5`)**: 전경/배경 전역 스왑. 현재 미처리. 베이스: Ghostty `modes.zig`(reverse_colors=5)+`render.zig`. 영향: 드묾(반전 테마 토글). 난이도: 하(렌더러 전역 플래그).
+- **G9 — DECSCNM 화면 반전 (`?5`) — 완료**: 코어 `reverse_screen` 플래그(`setPrivateModes` 5, 바뀌면 fullDirty) + getter `reverseScreen()`, RIS off. **렌더러**: `CellColors.screen_reverse`를 app이 wiring, `packForeground`/`packBackground`가 `style.reverse != screen_reverse`(XOR)로 전경/배경을 전역 스왑(SGR reverse와 XOR라 둘 다 켜지면 상쇄). 화면 clear color도 반전 시 전경색으로(빈 영역도 반전). app이 활성·비활성 pane 각자 wiring. 코어는 셀 색을 안 바꾸고 플래그만(K1 경계). ABI 무변경(기존 terminal_bg 재사용). 베이스: DEC DECSCNM(Ghostty `modes.zig` reverse_colors=5 + render 동작 비교). 검증: 코어(?5 h/l·RIS) + 렌더러(screen_reverse가 fg/bg 스왑·SGR reverse와 XOR 상쇄) + swift-check + app-dev-build + 전체 게이트.
 
 ### 낮음
 

@@ -460,6 +460,13 @@ pub export fn maru_macos_app_dev_session_pending_notification(
     return @intFromEnum(Status.ok);
 }
 
+// G12 BEL: 활성 세션에 pending 벨이 있으면 1(코어 플래그 비움), 없으면 0. Swift가 tick마다 호출해 시스템 벨
+// (NSSound.beep)을 울린다(벨은 OS 소유). session이 null이면 0.
+pub export fn maru_macos_app_dev_session_take_bell(session: ?*DevSession) u32 {
+    const dev_session = session orelse return 0;
+    return if (dev_session.takeBell()) 1 else 0;
+}
+
 // OSC 7로 셸이 보고한 현재 작업 디렉터리(percent-decode된 경로). 반환 버퍼는 Zig(core) 소유로
 // 다음 OSC 7/RIS/destroy까지 유효하다. 한 번도 안 받았으면 len 0. Swift가 창 제목에 쓴다.
 pub export fn maru_macos_app_dev_session_cwd(

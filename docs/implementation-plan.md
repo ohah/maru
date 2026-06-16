@@ -532,7 +532,7 @@ TDD 방식:
 
 - **G10 — DECKPAM/DECKPNM (`ESC =`/`ESC >`)**: application keypad 모드. 현재 소비만 하고 상태 없음. 베이스: Ghostty `modes.zig`(keypad_keys). 영향: vim/emacs에서 numpad app 시퀀스(SS3) — Mac에서 numpad 드묾. 난이도: 하(상태)~중(input.zig 인코딩 연동).
 - **G11 — DECALN (`ESC # 8`)**: 화면을 'E'로 채움. 현재 `#`를 소비만. 베이스: Ghostty `Terminal.decaln`. 영향: `vttest` 정렬 진단 전용, 실사용 거의 없음. 난이도: 하.
-- **G12 — BEL·NEL·VT/FF**: BEL(0x07)→벨/알림, NEL(`ESC E`)→CR+LF, VT(0x0b)/FF(0x0c)→LF. 현재 BEL/VT/FF는 `<0x20 return`으로 폐기, NEL은 ESC else 소비. 베이스: Ghostty `stream.zig`(bell/next_line/linefeed). 영향: 벨 알림 없음(품질), `printf '\f'` 줄바꿈 안 됨(드묾). 난이도: 하(BEL→알림은 platform 연동).
+- **G12 — BEL·NEL·VT/FF — 완료(ABI v53)**: BEL(0x07)→시스템 벨, NEL(`ESC E`)→CR+LF(다음 줄 0열), VT(0x0b)/FF(0x0c)→LF(col 유지). 전엔 BEL/VT/FF는 `<0x20 return`으로 폐기·NEL은 ESC else 소비. **BEL platform**: 코어 `bell_pending`(bool — 한 tick 1회로 합쳐 벨 폭주 방지) + `takeBell()` getter, ABI v53 `take_bell`(1/0 반환), Swift `drainBell()`이 `renderTick`마다 `NSSound.beep()`(벨은 OS 소유 — OSC 52/9·777과 같은 경계). NEL은 `markCursorMoveDirty`+`lineFeed`로 CR+LF, VT/FF는 `lineFeed`로 col 유지 줄내림. 베이스: ECMA-48 BEL/NEL·VT100(Ghostty `stream.zig` bell/next_line/linefeed 동작 비교). 검증: 코어(BEL pending 1회 소비·NEL=CR+LF·VT/FF=LF col 유지) + ABI 계약(v53) + swift-check + app-dev-build + 전체 게이트. 영향: ctrl-G·셸 에러 벨이 울리고, `printf '\f'`/`\v`/`ESC E`가 줄을 내린다.
 - **G13 — 마우스 1015 (urxvt 인코딩)**: 현재 1006/1016만. 베이스: Ghostty `modes.zig`(mouse_format_urxvt). 영향: 거의 없음(1006으로 대체됨). 난이도: 하.
 - **G14 — DECRQSS + DCS 상태기계**: `DECRQSS`(`DCS $ q ... ST` SGR/모드 질의) 등. 현재 **파서에 DCS 상태 자체가 없다**(ground/escape/csi/osc/apc만). 베이스: Ghostty `dcs.zig`(hook/put/unhook + DECRQSS). 영향: SGR 상태를 질의하는 일부 앱·tmux 능력 협상. 난이도: 중(파서에 DCS 상태 신설 — Sixel·DECDLD의 토대도 됨).
 

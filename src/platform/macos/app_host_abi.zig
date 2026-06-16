@@ -427,6 +427,39 @@ pub export fn maru_macos_app_dev_session_pending_clipboard(
     return @intFromEnum(Status.ok);
 }
 
+// OSC 9/777 데스크톱 알림 데이터(title, body). has_out=1이면 알림 있음(title/body 채움 — title은 빈 문자열일 수
+// 있어 len으로 판단), 0이면 없음. 반환 버퍼는 Zig 소유로 다음 pending_notification/destroy까지 유효. Swift가
+// tick마다 호출해 UNUserNotificationCenter로 띄운다(알림은 OS 소유 — 코어/Zig는 데이터만 넘긴다).
+pub export fn maru_macos_app_dev_session_pending_notification(
+    session: ?*DevSession,
+    has_out: ?*u32,
+    title_ptr: ?*?[*]const u8,
+    title_len: ?*usize,
+    body_ptr: ?*?[*]const u8,
+    body_len: ?*usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const has = has_out orelse return @intFromEnum(Status.null_out);
+    const tp = title_ptr orelse return @intFromEnum(Status.null_out);
+    const tl = title_len orelse return @intFromEnum(Status.null_out);
+    const bp = body_ptr orelse return @intFromEnum(Status.null_out);
+    const bl = body_len orelse return @intFromEnum(Status.null_out);
+    const n = dev_session.pendingNotification() orelse {
+        has.* = 0;
+        tp.* = null;
+        tl.* = 0;
+        bp.* = null;
+        bl.* = 0;
+        return @intFromEnum(Status.ok);
+    };
+    has.* = 1;
+    tp.* = if (n.title.len > 0) n.title.ptr else null;
+    tl.* = n.title.len;
+    bp.* = if (n.body.len > 0) n.body.ptr else null;
+    bl.* = n.body.len;
+    return @intFromEnum(Status.ok);
+}
+
 // OSC 7로 셸이 보고한 현재 작업 디렉터리(percent-decode된 경로). 반환 버퍼는 Zig(core) 소유로
 // 다음 OSC 7/RIS/destroy까지 유효하다. 한 번도 안 받았으면 len 0. Swift가 창 제목에 쓴다.
 pub export fn maru_macos_app_dev_session_cwd(

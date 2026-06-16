@@ -1546,6 +1546,7 @@ pub const TerminalCore = struct {
         rows: u32 = 0, // r: 표시할 행 수(0=auto)
         z: i32 = 0, // z: z-index(부호 있음)
         no_cursor_move: bool = false, // C=1이면 표시 후 커서를 옮기지 않음
+        delete_what: u8 = 'a', // d: 삭제 타깃(a=d일 때). 기본 'a'(전체). 대문자=이미지 데이터도 free, 소문자=placement만
     };
 
     /// 저장된 kitty graphics placement(표시 중인 이미지 인스턴스). anchor_row는 절대 행(스크롤백
@@ -1605,6 +1606,9 @@ pub const TerminalCore = struct {
                 'r' => cmd.rows = std.fmt.parseInt(u32, val, 10) catch 0,
                 'z' => cmd.z = std.fmt.parseInt(i32, val, 10) catch 0, // 부호 있음(텍스트 앞/뒤)
                 'C' => cmd.no_cursor_move = (val.len == 1 and val[0] == '1'),
+                'd' => if (val.len == 1) {
+                    cmd.delete_what = val[0]; // 삭제 타깃 문자(a/A/i/I/z/Z/…)
+                },
                 else => {}, // 나머지 control key는 토대에선 무시(후속 확장)
             }
         }
@@ -1688,10 +1692,7 @@ pub const TerminalCore = struct {
                 self.kittyDisplay(cmd);
             },
             'p' => self.kittyDisplay(cmd), // 기존 이미지를 placement로 표시
-            'd' => { // delete: 이미지와 그 placement를 함께 비운다(세분화된 d 타깃은 후속 K-단계)
-                self.removePlacementsForImage(cmd.image_id);
-                self.kitty_images.remove(self.allocator, cmd.image_id);
-            },
+            'd' => self.kittyDelete(cmd), // delete: d= 타깃에 따라 placement(소문자)/이미지까지(대문자) 제거
             else => {}, // q(query)·f/a/c(애니메이션)는 후속
         }
     }
@@ -1746,6 +1747,64 @@ pub const TerminalCore = struct {
         while (i < self.kitty_placements.items.len) {
             if (self.kitty_placements.items[i].image_id == image_id) {
                 _ = self.kitty_placements.orderedRemove(i);
+            } else i += 1;
+        }
+    }
+
+    /// (image_id, placement_id) 한 placement만 제거한다(delete d=i + p 지정).
+    fn removeOnePlacement(self: *TerminalCore, image_id: u32, placement_id: u32) void {
+        for (self.kitty_placements.items, 0..) |p, i| {
+            if (p.image_id == image_id and p.placement_id == placement_id) {
+                _ = self.kitty_placements.orderedRemove(i);
+                return;
+            }
+        }
+    }
+
+    /// kitty graphics delete(a=d). d= 타깃 문자로 무엇을 지울지 정한다. **소문자=placement만 제거**(이미지
+    /// 데이터는 남겨 재표시 가능), **대문자=placement + 이미지 데이터까지 free**. 베이스: kitty graphics
+    /// protocol(deletion). 핵심 부분집합만 지원: a/A(전체)·i/I(image_id[+placement_id])·z/Z(z-index).
+    /// 나머지(c 커서·n 이미지번호·p/q/x/y/r 위치·f 애니메이션)는 셀 span/이미지번호가 필요해 graceful 무시.
+    fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
+        const c = cmd.delete_what;
+        const free_image = (c >= 'A' and c <= 'Z'); // 대문자면 이미지 데이터도 free
+        const target = if (free_image) c - 'A' + 'a' else c; // 소문자로 정규화
+        switch (target) {
+            'a' => { // 전체
+                self.kitty_placements.clearRetainingCapacity();
+                if (free_image) self.kitty_images.clear(self.allocator);
+            },
+            'i' => { // image_id로(+ 선택적 placement_id)
+                if (cmd.image_id == 0) return;
+                if (free_image) { // 이미지 + 그 이미지의 모든 placement 제거
+                    self.removePlacementsForImage(cmd.image_id);
+                    self.kitty_images.remove(self.allocator, cmd.image_id);
+                } else if (cmd.placement_id != 0) {
+                    self.removeOnePlacement(cmd.image_id, cmd.placement_id);
+                } else {
+                    self.removePlacementsForImage(cmd.image_id);
+                }
+            },
+            'z' => self.deleteByZ(cmd.z, free_image), // z-index로
+            else => {}, // c/n/p/q/x/y/r/f는 미지원(graceful) — 셀 span·이미지번호 필요
+        }
+    }
+
+    /// z-index가 target과 같은 placement를 제거한다. free_images면 그 placement가 가리키던 이미지도 free하고
+    /// (그 이미지의 다른 placement까지 제거해 orphan을 막는다). placement 수가 작아 재시작 비용은 무시할 만하다.
+    fn deleteByZ(self: *TerminalCore, target_z: i32, free_images: bool) void {
+        var i: usize = 0;
+        while (i < self.kitty_placements.items.len) {
+            const p = self.kitty_placements.items[i];
+            if (p.z == target_z) {
+                if (free_images) {
+                    const id = p.image_id;
+                    self.kitty_images.remove(self.allocator, id);
+                    self.removePlacementsForImage(id); // 그 이미지의 모든 placement 제거(배열 변형)
+                    i = 0; // 배열이 바뀌었으니 처음부터 다시 스캔
+                } else {
+                    _ = self.kitty_placements.orderedRemove(i);
+                }
             } else i += 1;
         }
     }
@@ -6535,8 +6594,8 @@ test "kitty graphics transmit: RGBA 저장 + 같은 id 교체 + delete (audit 5/
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
     try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
 
-    // delete(a=d, i=7) → 제거.
-    try core.write("\x1b_Ga=d,i=7\x1b\\");
+    // delete(a=d, d=I, i=7) → 이미지 데이터까지 제거(대문자 I). d 기본값은 'a'(전체)라 image_id 지정 삭제는 d=I.
+    try core.write("\x1b_Ga=d,d=I,i=7\x1b\\");
     try std.testing.expect(!core.kitty_images.map.contains(7));
     try std.testing.expectEqual(@as(usize, 0), core.kitty_images.total_bytes);
 }
@@ -6689,7 +6748,7 @@ test "kitty graphics delete: 이미지와 그 placement를 함께 제거 (K1)" {
     try core.write("\x1b_Ga=p,i=7,p=2\x1b\\");
     try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len);
 
-    try core.write("\x1b_Ga=d,i=7\x1b\\");
+    try core.write("\x1b_Ga=d,d=I,i=7\x1b\\"); // 대문자 I = 이미지 7 + 그 모든 placement 제거
     try std.testing.expect(!core.kitty_images.map.contains(7));
     try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
 }
@@ -6811,8 +6870,8 @@ test "kitty graphics images: 여러 이미지 노출 + delete/RIS 반영, genera
     var max_gen: u64 = 0;
     for (core.renderSnapshot().images) |v| max_gen = @max(max_gen, v.generation);
 
-    // delete(i=1) → 하나만 남는다.
-    try core.write("\x1b_Ga=d,i=1\x1b\\");
+    // delete(d=I, i=1) → 이미지 1만 free, 하나(2) 남는다.
+    try core.write("\x1b_Ga=d,d=I,i=1\x1b\\");
     try std.testing.expectEqual(@as(usize, 1), core.renderSnapshot().images.len);
     // RIS → 전부 비운다.
     try core.write("\x1bc");
@@ -6950,6 +7009,84 @@ test "kitty graphics PNG: 필터 다양한 그라데이션 디코드 + 미지원
     // 깨진 PNG(서명 틀림)도 graceful 거부.
     try core.write("\x1b_Ga=t,f=100,i=5;AAAAAAAAAAAA\x1b\\");
     try std.testing.expect(!core.kitty_images.map.contains(5));
+}
+
+// --- kitty graphics K4a: 세분화된 delete(a=d, d= 타깃) ---
+
+test "kitty graphics delete: d=a(전체 placement만)·d=A(이미지까지) (K4a)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    const raw = [_]u8{1} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [80]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{b64s}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=2;{s}\x1b\\", .{b64s}));
+    try core.write("\x1b_Ga=p,i=1\x1b\\");
+    try core.write("\x1b_Ga=p,i=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len);
+
+    // d 기본값 'a'(소문자) — placement만 전부 제거, 이미지는 남는다.
+    try core.write("\x1b_Ga=d\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_images.map.count()); // 이미지 유지
+
+    // d=A(대문자) — placement + 이미지 데이터까지 전부 free.
+    try core.write("\x1b_Ga=p,i=1\x1b\\");
+    try core.write("\x1b_Ga=d,d=A\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_images.map.count());
+}
+
+test "kitty graphics delete: d=i(placement만)·d=I(이미지까지)·placement_id 지정 (K4a)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    const raw = [_]u8{1} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [80]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
+    try core.write("\x1b_Ga=p,i=7,p=1\x1b\\");
+    try core.write("\x1b_Ga=p,i=7,p=2\x1b\\");
+
+    // d=i,p=1 — 그 placement만 제거(이미지·다른 placement 유지).
+    try core.write("\x1b_Ga=d,d=i,i=7,p=1\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expect(core.kitty_images.map.contains(7));
+    try std.testing.expectEqual(@as(u32, 2), core.kitty_placements.items[0].placement_id);
+
+    // d=i(소문자, p 없음) — image 7의 남은 placement 제거, 이미지는 유지.
+    try core.write("\x1b_Ga=d,d=i,i=7\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    try std.testing.expect(core.kitty_images.map.contains(7));
+
+    // d=I(대문자) — 이미지 데이터까지 free.
+    try core.write("\x1b_Ga=d,d=I,i=7\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(7));
+}
+
+test "kitty graphics delete: d=z(z-index)·d=Z(이미지까지) (K4a)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    const raw = [_]u8{1} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [80]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{b64s}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=2;{s}\x1b\\", .{b64s}));
+    try core.write("\x1b_Ga=p,i=1,p=1,z=5\x1b\\"); // z=5
+    try core.write("\x1b_Ga=p,i=2,p=1,z=-1\x1b\\"); // z=-1
+
+    // d=z,z=5(소문자) — z=5 placement만 제거, 이미지 유지.
+    try core.write("\x1b_Ga=d,d=z,z=5\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(i32, -1), core.kitty_placements.items[0].z);
+    try std.testing.expect(core.kitty_images.map.contains(1)); // 이미지 1 유지
+
+    // d=Z,z=-1(대문자) — z=-1 placement + 그 이미지(2)까지 free.
+    try core.write("\x1b_Ga=d,d=Z,z=-1\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    try std.testing.expect(!core.kitty_images.map.contains(2));
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

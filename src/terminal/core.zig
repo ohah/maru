@@ -1502,6 +1502,14 @@ pub const TerminalCore = struct {
             self.execKittyGraphics(cmd, payload);
             return;
         }
+        // chunked 진행 중 도착한 명령이 transmit continuation(a=t/T)이 아니라 독립 명령(delete 등)이면,
+        // kitty 명세상 정의되지 않은 interleave다 — 진행 중 chunk를 버리고 새 명령을 즉시 실행한다(code
+        // review #3, 사용자 결정). continuation은 a= 생략(기본 t) 또는 t/T라 누적 경로로 떨어진다.
+        if (self.kitty_chunk_cmd != null and cmd.action != 't' and cmd.action != 'T') {
+            self.abortKittyChunk();
+            self.execKittyGraphics(cmd, payload);
+            return;
+        }
         if (self.kitty_chunk_cmd == null) self.kitty_chunk_cmd = cmd; // 첫 청크의 control 보존
         if (self.kitty_chunk.items.len + payload.len > max_kitty_chunk_bytes) {
             self.abortKittyChunk(); // 폭주 방어선 초과 — 전송 폐기
@@ -7298,6 +7306,26 @@ test "kitty graphics: 재transmit이 한도로 거부되면 그 image_id placeme
     try std.testing.expect(!core.kittyImageHasPlacement(1)); // placement도 정리 — orphan 없음
     try std.testing.expect(core.kitty_images.map.contains(2)); // i=2 보존
     try std.testing.expect(core.kittyImageHasPlacement(2));
+}
+
+test "kitty graphics: chunked 전송 중 독립 명령(delete)이 오면 chunk를 버리고 새 명령을 실행 (code review #3)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    const raw = [_]u8{1} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [80]u8 = undefined;
+    // i=1 저장(delete 대상).
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{b64s}));
+    try std.testing.expect(core.kitty_images.map.contains(1));
+    // i=2 chunked transmit 시작(m=1) — 진행 중.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=2,m=1;{s}\x1b\\", .{b64s}));
+    try std.testing.expect(core.kitty_chunk_cmd != null); // chunk 진행 중
+    // 진행 중에 독립 명령 a=d(delete) 도착 → chunk를 버리고 delete를 즉시 실행한다(transmit이 아니라서).
+    try core.write("\x1b_Ga=d,d=I,i=1\x1b\\");
+    try std.testing.expect(core.kitty_chunk_cmd == null); // 진행 중 chunk 폐기
+    try std.testing.expect(!core.kitty_images.map.contains(1)); // delete가 실제로 실행됨
+    try std.testing.expect(!core.kitty_images.map.contains(2)); // 버려진 chunked i=2는 저장 안 됨
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

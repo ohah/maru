@@ -1830,29 +1830,47 @@ pub const TerminalCore = struct {
     }
 
     /// kitty graphics transmit: base64 payload를 디코드해 RGBA(f=32)/RGB(f=24) 이미지를 저장한다.
-    /// PNG(f=100)·zlib(o=z)·chunked(m=1)는 후속이라 토대에선 무시(graceful). 베이스: kitty graphics
-    /// protocol transmit — RGBA/RGB 직접 픽셀은 base64만 풀면 되어 외부 이미지 디코더가 필요 없다.
+    /// zlib(o=z) 압축이면 base64 디코드 후 inflate한다(K3b). PNG(f=100)는 후속(K3c). 베이스: kitty
+    /// graphics protocol transmit — RGBA/RGB 직접 픽셀은 base64만 풀면 되고, zlib은 std.compress로 푼다.
     fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
-        if (cmd.compression != 0) return; // zlib(o=z)는 후속
         const bpp: u8 = switch (cmd.format) {
             24 => 3,
             32 => 4,
-            else => return, // PNG(100) 등은 후속
+            else => return, // PNG(100) 등은 후속(K3c)
         };
         if (cmd.width == 0 or cmd.height == 0 or cmd.image_id == 0) return; // 필수 control 누락
-        const dec = std.base64.standard.Decoder;
-        const decoded_len = dec.calcSizeForSlice(payload) catch return; // 잘못된 base64
         // 치수(s/v)는 APC에서 상한 없이 오는 u32라 곱이 usize를 넘을 수 있다(악의적 대형 값) — 오버플로면
-        // 거부한다(기존 크기 검증과 같은 graceful 경로). 안 그러면 Debug/ReleaseSafe에서 panic(abort)이고
-        // ReleaseFast에선 wrap돼 엉뚱한 크기로 통과할 수 있다(code review 발견).
+        // 거부한다(graceful). 안 그러면 Debug/ReleaseSafe에서 panic, ReleaseFast에선 wrap된다(code review).
         const wh = std.math.mul(usize, cmd.width, cmd.height) catch return;
         const expected = std.math.mul(usize, wh, bpp) catch return;
-        if (decoded_len != expected) return; // 선언 크기 ≠ 디코드 크기
-        const data = self.allocator.alloc(u8, decoded_len) catch return;
-        dec.decode(data, payload) catch {
-            self.allocator.free(data);
+
+        // base64 디코드 → raw 바이트(압축이면 압축 데이터, 아니면 곧 픽셀).
+        const dec = std.base64.standard.Decoder;
+        const decoded_len = dec.calcSizeForSlice(payload) catch return; // 잘못된 base64
+        if (decoded_len == 0) return;
+        if (cmd.compression == 0 and decoded_len != expected) return; // 비압축은 디코드 크기 = 선언 크기여야(early reject)
+        const raw = self.allocator.alloc(u8, decoded_len) catch return;
+        dec.decode(raw, payload) catch {
+            self.allocator.free(raw);
             return;
         };
+
+        // 압축 해제. o=z(zlib)만 지원, 그 외 압축은 거부. 없으면 raw가 곧 픽셀.
+        const data: []u8 = switch (cmd.compression) {
+            0 => raw,
+            'z' => blk: {
+                defer self.allocator.free(raw); // 압축 입력은 inflate 후 불필요
+                break :blk self.inflateZlib(raw, expected) catch return;
+            },
+            else => {
+                self.allocator.free(raw); // 알 수 없는 압축
+                return;
+            },
+        };
+        if (data.len != expected) { // 선언 크기 ≠ 실제 픽셀(inflate가 보장하지만 비압축 경로 가드)
+            self.allocator.free(data);
+            return;
+        }
         self.kitty_images.add(self.allocator, .{
             .id = cmd.image_id,
             .width = cmd.width,
@@ -1860,6 +1878,23 @@ pub const TerminalCore = struct {
             .bpp = bpp,
             .data = data,
         });
+    }
+
+    /// zlib(o=z) 압축 픽셀을 정확히 expected 바이트로 inflate한다. expected만큼만 읽어 메모리를 바운드하고
+    /// (zlib bomb 방어), 그보다 더 풀리면 선언 크기 불일치로 거부한다. 성공 시 expected 크기 소유 슬라이스.
+    /// 베이스: kitty graphics protocol(o=z=zlib) + std.compress.flate(.zlib).
+    fn inflateZlib(self: *TerminalCore, compressed: []const u8, expected: usize) ![]u8 {
+        var in: std.Io.Reader = .fixed(compressed);
+        var window: [std.compress.flate.max_window_len]u8 = undefined;
+        var decomp = std.compress.flate.Decompress.init(&in, .zlib, &window);
+        const out = try self.allocator.alloc(u8, expected);
+        errdefer self.allocator.free(out);
+        decomp.reader.readSliceAll(out) catch return error.InflateFailed; // 부족하면 실패
+        // 선언 크기보다 더 풀리면(초과) 불일치 — 거부(한 바이트만 더 시도해 메모리 바운드 유지).
+        var extra: [1]u8 = undefined;
+        const n = decomp.reader.readSliceShort(&extra) catch 0;
+        if (n != 0) return error.InflateFailed;
+        return out;
     }
 
     /// OSC 8: `8 ; params ; URI` — URI가 비면 링크 닫기, 있으면 열기(이후 출력 셀에 id가 찍힌다).
@@ -6809,6 +6844,40 @@ test "kitty graphics chunked: 3청크 완성 + RIS가 진행 중 전송을 폐�
     try core.write("\x1bc"); // RIS
     try std.testing.expect(!core.kitty_images.map.contains(10));
     try std.testing.expect(core.kitty_chunk_cmd == null); // 폐기됨
+}
+
+// --- kitty graphics K3b: zlib 압축(o=z) ---
+
+test "kitty graphics zlib(o=z): 압축 픽셀 inflate 저장 + 크기 불일치/깨진 zlib 거부 (K3b)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    // 2x2 RGB(12바이트 [1..12])를 zlib 압축한 base64(python zlib.compress).
+    try core.write("\x1b_Ga=t,f=24,s=2,v=2,i=5,o=z;eJxjZGJmYWVj5+Dk4uYBAAF4AE8=\x1b\\");
+    try std.testing.expect(core.kitty_images.map.contains(5));
+    const img = core.kitty_images.map.get(5).?;
+    try std.testing.expectEqual(@as(usize, 12), img.data.len);
+    try std.testing.expectEqual(@as(u8, 3), img.bpp);
+    try std.testing.expectEqual(@as(u8, 1), img.data[0]);
+    try std.testing.expectEqual(@as(u8, 12), img.data[11]); // inflate 정확
+
+    // 같은 압축인데 선언 치수가 틀리면(s=3,v=3 → expected 36 ≠ inflate 12) 거부.
+    try core.write("\x1b_Ga=t,f=24,s=3,v=3,i=6,o=z;eJxjZGJmYWVj5+Dk4uYBAAF4AE8=\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(6));
+    // 깨진 zlib(헤더 0x78 아님)도 graceful 거부(panic 없음).
+    try core.write("\x1b_Ga=t,f=24,s=2,v=2,i=7,o=z;AAAAAAAA\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(7));
+}
+
+test "kitty graphics zlib: 큰 이미지(back-reference 포함) inflate (K3b)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer core.deinit();
+    // 8x8 RGBA(256바이트) zlib 압축 — LZ77 back-reference가 든 스트림(작은 것만으론 검증 부족).
+    try core.write("\x1b_Ga=t,f=32,s=8,v=8,i=8,o=z;eJwBAAH//gAHDhUcIyoxOD9GTVRbYmlwd36FjJOaoaivtr3Ey9LZ4Ofu9fwDChEYHyYtNDtCSVBXXmVsc3qBiI+WnaSrsrnAx87V3OPq8fj/Bg0UGyIpMDc+RUxTWmFob3Z9hIuSmaCnrrW8w8rR2N/m7fT7AgkQFx4lLDM6QUhPVl1ka3J5gIeOlZyjqrG4v8bN1Nvi6fD3/gUMExohKC82PURLUllgZ251fIOKkZifpq20u8LJ0Nfe5ezz+gEIDxYdJCsyOUBHTlVcY2pxeH+GjZSboqmwt77FzNPa4ejv9v0ECxIZICcuNTxDSlFYX2ZtdHuCiZCXnqWss7rByM/W3eTr8vkKE3+B\x1b\\");
+    try std.testing.expect(core.kitty_images.map.contains(8));
+    const img = core.kitty_images.map.get(8).?;
+    try std.testing.expectEqual(@as(usize, 256), img.data.len);
+    try std.testing.expectEqual(@as(u8, 0), img.data[0]);
+    try std.testing.expectEqual(@as(u8, 249), img.data[255]); // 마지막 바이트까지 정확
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

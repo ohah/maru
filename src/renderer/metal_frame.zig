@@ -16,9 +16,9 @@ pub const NativeMetalCell = extern struct {
     row: u16,
     col: u16,
     width: u16,
-    // overlay 종류(0=일반 cell, 2=커서 underline, 3=커서 bar — DECSCUSR, 4=상단선, 5=우측선 — active
-    // pane 테두리, 6=strikethrough — SGR 9 중앙 가로선). renderer가 2~6을 cell의 한 변/중앙 ~2px 띠로
-    // 그린다. block 커서는 전체 사각형이라 0.
+    // overlay 종류(0=일반 cell, 2=커서 underline, 3=커서 bar — DECSCUSR, 4=상단선/overline(SGR 53),
+    // 5=우측선 — active pane 테두리, 6=strikethrough — SGR 9 중앙 가로선). renderer가 2~6을 cell의
+    // 한 변/중앙 ~2px 띠로 그린다. block 커서는 전체 사각형이라 0.
     reserved: u16 = 0,
     codepoint: u32,
     slot_id: u32,
@@ -357,6 +357,29 @@ pub fn buildNativeCellsSplit(
                 .background = 0xFF00_0000 | packRgb(resolveColor(s.color, colors.default_fg)),
             });
         },
+        // 2.8) SGR 53(overline): 셀 상단에 전경색 가로선(reserved=4 — active pane 상단 테두리와 같은 모양
+        //      재사용, 셰이더·렌더러 변경 없음). underline/strikethrough와 독립이라 한 셀이 셋을 다 낼 수 있다.
+        .overline => |o| {
+            if (o.row >= frame.size.rows or o.col >= frame.size.cols) continue;
+            cells.appendAssumeCapacity(.{
+                .row = o.row,
+                .col = o.col,
+                .width = o.width,
+                .reserved = 4, // 상단선(overline) — active pane 테두리와 같은 부분 사각형
+                .codepoint = ' ',
+                .slot_id = 0,
+                .atlas_x_px = 0,
+                .atlas_y_px = 0,
+                .atlas_width_px = 0,
+                .atlas_height_px = 0,
+                .u0 = -1.0,
+                .v0 = -1.0,
+                .u1 = -1.0,
+                .v1 = -1.0,
+                .foreground = 0,
+                .background = 0xFF00_0000 | packRgb(resolveColor(o.color, colors.default_fg)),
+            });
+        },
         // OSC 133 거터 마크: 프롬프트 시작 행 col 0의 왼쪽 가장자리에 세로 색 바(커서 bar와 같은
         // kind=3 부분 사각형 재사용 — 셰이더 변경 없음). 명령 성공=초록/실패=빨강.
         // 알려진 한계: DECSCUSR 5/6(bar 커서)가 같은 프롬프트 행 col 0에 있으면 커서 bar(마지막에
@@ -399,7 +422,7 @@ pub fn buildNativeCellsSplit(
         for (frame.overlays) |overlay| {
             const cur = switch (overlay) {
                 .cursor => |c| c,
-                .underline, .strikethrough, .gutter => continue,
+                .underline, .strikethrough, .overline, .gutter => continue,
             };
             if (!cur.visible) continue;
 
@@ -1448,6 +1471,31 @@ test "a strikethrough overlay projects a reserved=6 center-line cell, independen
     try std.testing.expectEqual(@as(u16, 2), cells[0].reserved); // 2.6 underline pass 먼저
     try std.testing.expectEqual(@as(u16, 6), cells[1].reserved); // 2.7 strikethrough pass
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), cells[1].background); // 전경색(흰색)
+}
+
+test "an overline overlay projects a reserved=4 top-line cell" {
+    const allocator = std.testing.allocator;
+    // SGR 53 overline은 reserved=4(셀 상단선 — active pane 상단 테두리와 같은 모양)로 투영된다.
+    // strikethrough(reserved=6, 중앙)·underline(reserved=2, 하단)과 독립이라 같은 모양을 안 다툰다.
+    var overlays = [_]renderer.DrawOverlay{
+        .{ .overline = .{ .row = 0, .col = 0, .width = 1, .color = .default } },
+    };
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 3, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .cursor = null,
+    });
+    defer allocator.free(cells);
+    try std.testing.expectEqual(@as(usize, 1), cells.len);
+    try std.testing.expectEqual(@as(u16, 4), cells[0].reserved); // 상단선(overline)
+    try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), cells[0].background); // 전경색(흰색)
 }
 
 test "cursor over a space-codepoint glyph projects a solid block, not an inverted glyph" {

@@ -171,7 +171,7 @@ typedef struct MaruAppHostDevMetalCell {
     uint16_t col;
     uint16_t width;
     /* overlay 종류: 0=일반 cell, 2=커서 underline(하단 바), 3=커서 bar(좌측 세로 바) — DECSCUSR.
-       4=상단선, 5=우측선(active pane 테두리), 6=strikethrough(SGR 9 — 셀 중앙 가로선).
+       4=상단선/overline(SGR 53), 5=우측선(active pane 테두리), 6=strikethrough(SGR 9 — 셀 중앙 가로선).
        renderer는 2~6에서 cell의 한 변/중앙 ~2px 띠만 칠한다(글리프를 안 가림). */
     uint16_t reserved;
     uint32_t codepoint;

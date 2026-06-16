@@ -403,6 +403,10 @@ fn renderDrawList(allocator: std.mem.Allocator, draw_list: renderer.DrawList) ![
                 "overlay strikethrough row={d} col={d} width={d}\n",
                 .{ strikethrough.row, strikethrough.col, strikethrough.width },
             ),
+            .overline => |overline| try writer.print(
+                "overlay overline row={d} col={d} width={d}\n",
+                .{ overline.row, overline.col, overline.width },
+            ),
             .gutter => |gutter| try writer.print(
                 "overlay gutter row={d} success={}\n",
                 .{ gutter.row, gutter.success },

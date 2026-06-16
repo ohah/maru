@@ -287,7 +287,7 @@ static void maru_fill_cell_quad(
     float px_top = py_top;
     float px_bottom = py_top + cell_h;
     // 커서 모양(DECSCUSR): reserved 2=underline(하단 ~15%), 3=bar(좌측 ~15%, 최소 2px). block(0)은 전체 cell.
-    // 4=상단선, 5=우측선(active pane 테두리용 — 2/3의 반대 변), 6=strikethrough(세로 중앙 띠). 모두 cell의 한 변/중앙 ~2px 띠로 그린다.
+    // 4=상단선/overline(SGR 53), 5=우측선(active pane 테두리용 — 2/3의 반대 변), 6=strikethrough(세로 중앙 띠). 모두 cell의 한 변/중앙 ~2px 띠로 그린다.
     if (cell.reserved == 2) {
         const float thickness = fmaxf(2.0f, cell_h * 0.15f);
         px_top = px_bottom - thickness;

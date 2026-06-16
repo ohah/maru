@@ -46,15 +46,27 @@ typedef struct {
 } MaruRendererShadowVertex;
 _Static_assert(sizeof(MaruRendererShadowVertex) == 60, "MaruRendererShadowVertex must match MSL ShadowIn (60B tight-pack)");
 
+// kitty graphics(K2): 이미지 placement 정점. 셰이더 ImageIn(packed_float2×2 = 16B tight-pack)과 1:1.
+// placement당 6정점(삼각형 2개). dest 사각형 NDC + source UV([0,1] crop)만 — 텍스처는 setFragmentTexture로.
+typedef struct {
+    float position[2]; // NDC
+    float uv[2];       // source UV [0,1]
+} MaruRendererImageVertex;
+_Static_assert(sizeof(MaruRendererImageVertex) == 16, "MaruRendererImageVertex must match MSL ImageIn (16B tight-pack)");
+
 @interface MaruMetalRendererImpl : NSObject
 @property (nonatomic, strong) id<MTLDevice> device;
 @property (nonatomic, strong) id<MTLCommandQueue> queue;
 @property (nonatomic, strong) id<MTLRenderPipelineState> pipeline;
 @property (nonatomic, strong) id<MTLRenderPipelineState> quadPipeline;
 @property (nonatomic, strong) id<MTLRenderPipelineState> shadowPipeline;
+@property (nonatomic, strong) id<MTLRenderPipelineState> imagePipeline;
 @property (nonatomic, strong) id<MTLTexture> atlas;
 @property (nonatomic) uint32_t atlasWidth;
 @property (nonatomic) uint32_t atlasHeight;
+// kitty graphics(K2): image_id → MTLTexture 캐시. image_uploads로 (재)생성하고, gpu_images가 image_id로
+// 찾아 그린다. 삭제된 이미지 텍스처의 명시적 eviction은 후속(K4) — 참조 안 되면 안 그려질 뿐이다.
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, id<MTLTexture>> *imageTextures;
 @end
 
 @implementation MaruMetalRendererImpl
@@ -138,6 +150,30 @@ MaruMetalRenderer *maru_metal_renderer_create(id<MTLDevice> device, MTLPixelForm
     if (shadow_pipeline == nil) {
         return NULL;
     }
+    // kitty graphics(K2): 이미지 textured-quad 파이프라인. 셀/quad/shadow와 별개 셰이더지만 같은
+    // premultiplied-over 블렌딩. 셰이더 컴파일 실패 시 create가 NULL이라 게이트가 잡는다.
+    id<MTLLibrary> image_library = [device newLibraryWithSource:MARU_METAL_IMAGE_SHADER_SOURCE
+                                                        options:nil
+                                                          error:NULL];
+    if (image_library == nil) {
+        return NULL;
+    }
+    MTLRenderPipelineDescriptor *image_descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    image_descriptor.vertexFunction = [image_library newFunctionWithName:@"maru_image_vertex"];
+    image_descriptor.fragmentFunction = [image_library newFunctionWithName:@"maru_image_fragment"];
+    image_descriptor.colorAttachments[0].pixelFormat = pixel_format;
+    image_descriptor.colorAttachments[0].blendingEnabled = YES;
+    image_descriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+    image_descriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+    image_descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+    image_descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    image_descriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    image_descriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    id<MTLRenderPipelineState> image_pipeline =
+        [device newRenderPipelineStateWithDescriptor:image_descriptor error:NULL];
+    if (image_pipeline == nil) {
+        return NULL;
+    }
     id<MTLCommandQueue> queue = [device newCommandQueue];
     if (queue == nil) {
         return NULL;
@@ -149,6 +185,8 @@ MaruMetalRenderer *maru_metal_renderer_create(id<MTLDevice> device, MTLPixelForm
     impl.pipeline = pipeline;
     impl.quadPipeline = quad_pipeline;
     impl.shadowPipeline = shadow_pipeline;
+    impl.imagePipeline = image_pipeline;
+    impl.imageTextures = [NSMutableDictionary dictionary];
     // C handle이 ObjC 객체 수명을 소유한다. destroy에서 __bridge_transfer로 해제한다.
     return (__bridge_retained MaruMetalRenderer *)impl;
 }
@@ -374,6 +412,100 @@ static void maru_fill_shadow_instance(
     }
 }
 
+/* kitty graphics(K2): 한 GpuImage를 6정점 textured quad로 채운다(out에 6개). dest 사각형(origin + dest_x/y,
+   크기 dest_w/h)을 셀과 같은 좌상단 원점 방식으로 NDC에 투영하고, source UV(crop)를 싣는다. 순수 산술 —
+   샘플/블렌딩은 셰이더. */
+static void maru_fill_image_quad(
+    MaruRendererImageVertex *out,
+    const MaruAppHostDevGpuImage img,
+    float drawable_w,
+    float drawable_h
+) {
+    const float x0 = (float)img.origin_x + img.dest_x;
+    const float y0 = (float)img.origin_y + img.dest_y;
+    const float x1 = x0 + img.dest_w;
+    const float y1 = y0 + img.dest_h;
+    const float left = (x0 / drawable_w) * 2.0f - 1.0f;
+    const float right = (x1 / drawable_w) * 2.0f - 1.0f;
+    const float top = 1.0f - (y0 / drawable_h) * 2.0f;
+    const float bottom = 1.0f - (y1 / drawable_h) * 2.0f;
+    const float u0 = img.src_u0, v0 = img.src_v0, u1 = img.src_u1, v1 = img.src_v1;
+    const MaruRendererImageVertex quad[6] = {
+        {{left, top}, {u0, v0}},
+        {{left, bottom}, {u0, v1}},
+        {{right, bottom}, {u1, v1}},
+        {{left, top}, {u0, v0}},
+        {{right, bottom}, {u1, v1}},
+        {{right, top}, {u1, v0}},
+    };
+    memcpy(out, quad, sizeof(quad));
+}
+
+/* kitty graphics(K2): image_uploads를 image_id별 MTLTexture로 (재)생성해 캐시에 넣는다. RGBA(bpp=4)는
+   바로, RGB(bpp=3)는 alpha=255로 확장해 올린다. 손상/범위 밖 디스크립터는 건너뛴다(frame 방어). */
+static void maru_upload_image_textures(
+    MaruMetalRendererImpl *impl,
+    const MaruAppHostDevGpuImageUpload *uploads,
+    size_t upload_count,
+    const uint8_t *pixels,
+    size_t pixel_count
+) {
+    if (uploads == NULL || pixels == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < upload_count; i++) {
+        const MaruAppHostDevGpuImageUpload up = uploads[i];
+        if (up.width == 0 || up.height == 0 || (up.bpp != 3 && up.bpp != 4)) {
+            continue;
+        }
+        // 픽셀 범위 검증(곱셈 overflow 포함): len == width*height*bpp, 버퍼 안.
+        if (up.width > SIZE_MAX / up.height) continue;
+        const size_t px = (size_t)up.width * (size_t)up.height;
+        if (px > SIZE_MAX / up.bpp) continue;
+        const size_t need = px * (size_t)up.bpp;
+        if (up.pixels_len != need) continue;
+        if (up.pixels_offset > pixel_count || up.pixels_len > pixel_count - up.pixels_offset) continue;
+        const uint8_t *src = pixels + up.pixels_offset;
+
+        MTLTextureDescriptor *descriptor = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                         width:(NSUInteger)up.width
+                                        height:(NSUInteger)up.height
+                                     mipmapped:NO];
+        descriptor.storageMode = MTLStorageModeShared;
+        descriptor.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> texture = [impl.device newTextureWithDescriptor:descriptor];
+        if (texture == nil) {
+            continue;
+        }
+        const NSUInteger bytes_per_row = (NSUInteger)up.width * 4u; // 텍스처는 항상 RGBA8
+        if (up.bpp == 4) {
+            [texture replaceRegion:MTLRegionMake2D(0, 0, up.width, up.height)
+                       mipmapLevel:0
+                         withBytes:src
+                       bytesPerRow:bytes_per_row];
+        } else {
+            // RGB → RGBA 확장(alpha=255). 임시 버퍼에 풀어 한 번에 업로드한다.
+            uint8_t *rgba = (uint8_t *)malloc(px * 4u);
+            if (rgba == NULL) {
+                continue;
+            }
+            for (size_t p = 0; p < px; p++) {
+                rgba[p * 4 + 0] = src[p * 3 + 0];
+                rgba[p * 4 + 1] = src[p * 3 + 1];
+                rgba[p * 4 + 2] = src[p * 3 + 2];
+                rgba[p * 4 + 3] = 0xff;
+            }
+            [texture replaceRegion:MTLRegionMake2D(0, 0, up.width, up.height)
+                       mipmapLevel:0
+                         withBytes:rgba
+                       bytesPerRow:bytes_per_row];
+            free(rgba);
+        }
+        impl.imageTextures[@(up.image_id)] = texture; // 같은 id는 교체(새 generation)
+    }
+}
+
 bool maru_metal_renderer_draw(
     MaruMetalRenderer *renderer,
     CAMetalLayer *layer,
@@ -395,7 +527,14 @@ bool maru_metal_renderer_draw(
     size_t modal_cells_start,
     /* C4b: chrome 그림자(GpuShadow). NULL/0이면 안 그림. quad·셀보다 아래(맨 처음) 그린다. */
     const MaruAppHostDevGpuShadow *gpu_shadows,
-    size_t gpu_shadow_count
+    size_t gpu_shadow_count,
+    /* kitty graphics(K2): 이미지 placement + 텍스처 업로드 채널. */
+    const MaruAppHostDevGpuImage *gpu_images,
+    size_t gpu_image_count,
+    const MaruAppHostDevGpuImageUpload *image_uploads,
+    size_t image_upload_count,
+    const uint8_t *image_pixels,
+    size_t image_pixel_count
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -573,6 +712,37 @@ bool maru_metal_renderer_draw(
         }
     }
 
+    // kitty graphics(K2): generation이 바뀐 이미지 텍스처를 (재)업로드한다(캐시 갱신, drawable 무관).
+    maru_upload_image_textures(impl, image_uploads, image_upload_count, image_pixels, image_pixel_count);
+
+    // kitty graphics(K2): 이미지 placement 정점 버퍼. gpu_images는 (pass,z) 정렬돼 오므로 pass>=2 시작
+    // 인덱스로 둘로 가른다 — [0,above_start)=텍스트 뒤(셀 패스 전), [above_start,n)=텍스트 앞(셀 패스 후).
+    id<MTLBuffer> image_vertex_buffer = nil;
+    const size_t gpu_image_n = (gpu_images != NULL) ? gpu_image_count : 0;
+    size_t image_above_start = gpu_image_n; // pass>=2 시작(전부 below면 n)
+    if (gpu_image_n > 0) {
+        if (gpu_image_n > SIZE_MAX / 6) {
+            return false;
+        }
+        const size_t image_vertex_total = gpu_image_n * 6;
+        if (image_vertex_total > SIZE_MAX / sizeof(MaruRendererImageVertex)) {
+            return false;
+        }
+        image_vertex_buffer = [impl.device
+            newBufferWithLength:image_vertex_total * sizeof(MaruRendererImageVertex)
+                        options:MTLResourceStorageModeShared];
+        if (image_vertex_buffer == nil) {
+            return false;
+        }
+        MaruRendererImageVertex *iv = (MaruRendererImageVertex *)image_vertex_buffer.contents;
+        for (size_t i = 0; i < gpu_image_n; i++) {
+            maru_fill_image_quad(&iv[i * 6], gpu_images[i], drawable_w, drawable_h);
+            if (image_above_start == gpu_image_n && gpu_images[i].pass >= 2) {
+                image_above_start = i;
+            }
+        }
+    }
+
     id<CAMetalDrawable> drawable = [layer nextDrawable];
     if (drawable == nil) {
         return false;
@@ -625,11 +795,26 @@ bool maru_metal_renderer_draw(
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(sv) vertexCount:(cv)]; \
         }                                                            \
     } while (0)
+    // kitty graphics(K2): 이미지를 image_id별 텍스처로 한 장씩 그린다([si,ei) 구간). 텍스처 없는 건 skip
+    // (Zig는 업로드했다고 보지만 캐시에 없으면 — 렌더러 재생성 등 — 안 그릴 뿐, crash 없음).
+#define MARU_DRAW_IMAGES(si, ei)                                      \
+    do {                                                             \
+        if (image_vertex_buffer != nil) {                            \
+            for (size_t ii = (si); ii < (ei); ii++) {                \
+                id<MTLTexture> tex = impl.imageTextures[@(gpu_images[ii].image_id)]; \
+                if (tex == nil) continue;                            \
+                [encoder setRenderPipelineState:impl.imagePipeline]; \
+                [encoder setVertexBuffer:image_vertex_buffer offset:0 atIndex:0]; \
+                [encoder setFragmentTexture:tex atIndex:0];          \
+                [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(ii * 6) vertexCount:6]; \
+            }                                                        \
+        }                                                            \
+    } while (0)
     if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(0, bottom_vertex_count);   // 0. bottom quad(탭 밴드 — 터미널·제목 앞, 제목 아래로)
-    if (vertex_buffer != nil) {
-        MARU_DRAW_CELLS(0, terminal_end_v);                                  // 1. 터미널(모달 제외, 탭 제목 포함)
-        MARU_DRAW_CELLS(cell_count_v, pre_sidebar_vertices - cell_count_v);  // 2. 사이드바 배경 strip
-    }
+    MARU_DRAW_IMAGES(0, image_above_start);                                   // 0.5 kitty 이미지(텍스트 뒤 — 투명 셀로 비침)
+    if (vertex_buffer != nil) MARU_DRAW_CELLS(0, terminal_end_v);             // 1. 터미널(모달 제외, 탭 제목 포함)
+    MARU_DRAW_IMAGES(image_above_start, gpu_image_n);                         // 1.5 kitty 이미지(텍스트 앞)
+    if (vertex_buffer != nil) MARU_DRAW_CELLS(cell_count_v, pre_sidebar_vertices - cell_count_v); // 2. 사이드바 배경 strip
     if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count, under_vertex_count); // 3. under quad(사이드바 밴드)
     if (vertex_buffer != nil) MARU_DRAW_CELLS(pre_sidebar_vertices, total_vertices - pre_sidebar_vertices); // 4. 사이드바 cells(제목)
     // C4b: shadow 패스 — 터미널·사이드바 위, 모달 배경(over quad) 아래. 모달이 떠 보이게(리뷰 #1 — 맨 처음이면
@@ -643,6 +828,7 @@ bool maru_metal_renderer_draw(
     if (vertex_buffer != nil && has_modal) MARU_DRAW_CELLS(modal_cells_start * 6, cell_count_v - modal_cells_start * 6); // 6. 모달 텍스트
 #undef MARU_DRAW_CELLS
 #undef MARU_DRAW_QUADS
+#undef MARU_DRAW_IMAGES
     [encoder endEncoding];
 
     [command_buffer presentDrawable:drawable];
@@ -661,6 +847,9 @@ void maru_metal_renderer_destroy(MaruMetalRenderer *renderer) {
     impl.pipeline = nil;
     impl.quadPipeline = nil;
     impl.shadowPipeline = nil;
+    impl.imagePipeline = nil;
+    [impl.imageTextures removeAllObjects];
+    impl.imageTextures = nil;
     impl.queue = nil;
     impl.device = nil;
 }

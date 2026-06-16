@@ -692,6 +692,10 @@ pub const DevSession = struct {
     gpu_quads: std.ArrayList(metal_frame.GpuQuad) = .empty,
     // C4b 모달: chrome 그림자(GpuShadow) — 모달 배경 blur. per-frame(모달만, renderFrame이 매 프레임 clear).
     gpu_shadows: std.ArrayList(metal_frame.GpuShadow) = .empty,
+    // kitty graphics(K2d): image_id → 렌더러가 마지막으로 업로드한 generation. planImageUploads가 매 frame
+    // 비교해 바뀐 것만 업로드 채널에 싣는다(이미지당 개별 텍스처·upload-once). Swift 렌더러 텍스처 캐시의
+    // Zig측 미러 — 둘이 desync하면(렌더러 재생성 등) 그 이미지는 다음 transmit까지 안 그려질 뿐이다.
+    kitty_uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{},
     // 마우스가 호버 중인 사이드바 탭 슬롯 인덱스(없으면 null). hoverCursor이 사이드바 영역에서 갱신하고,
     // rebuildSidebar가 이 슬롯에 호버 하이라이트 밴드를 그린다(활성 슬롯과 다를 때만). 후속 호버 X
     // 닫기 아이콘의 대상 슬롯도 이 값이다.
@@ -3991,9 +3995,32 @@ pub const DevSession = struct {
             if (floating_pf) |pf| pane_frames.append(self.allocator, pf) catch {};
 
             if (pane_frames.items.len > 0) {
-                // kitty graphics(K2): 이미지 드로우/업로드 채널. K2c는 ABI·배관까지만 — 활성 surface placement를
-                // 실제로 수집해 채우는 건 K2d(Swift 텍스처 소비와 함께 end-to-end 검증). 여기선 빈 배열을 넘긴다.
-                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items, self.gpu_shadows.items, &.{}, &.{}, &.{})) |_| {
+                // kitty graphics(K2d): 활성 surface(이 frame을 만든 surface)의 placement를 GpuImage로 환산하고,
+                // generation이 바뀐 이미지만 업로드 채널로 만든다. dest origin은 활성 panel의 픽셀 origin(사이드바
+                // 폭·탭 바 아래)으로 박아 터미널 sub-rect에 그려지게 한다. 비활성 panel 이미지는 후속(단일 활성 기준).
+                var kg_images: []metal_frame.GpuImage = &.{};
+                var kg_uploads: []metal_frame.GpuImageUpload = &.{};
+                var kg_pixels: []u8 = &.{};
+                defer self.allocator.free(kg_images);
+                defer self.allocator.free(kg_uploads);
+                defer self.allocator.free(kg_pixels);
+                if (self.surface_initialized) {
+                    const snap = self.activeSurface().core.renderSnapshot();
+                    if (snap.placements.len > 0) {
+                        kg_images = metal_frame.buildGpuImages(self.allocator, snap.placements, snap.images, snap.size, self.cell_width_px, self.cell_height_px) catch &.{};
+                        for (kg_images) |*gi| {
+                            gi.origin_x = active_origin_x;
+                            gi.origin_y = active_origin_y;
+                        }
+                        if (kg_images.len > 0) {
+                            if (metal_frame.planImageUploads(self.allocator, kg_images, snap.images, &self.kitty_uploaded)) |plan| {
+                                kg_uploads = plan.uploads;
+                                kg_pixels = plan.pixels;
+                            } else |_| {}
+                        }
+                    }
+                }
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items, self.gpu_shadows.items, kg_images, kg_uploads, kg_pixels)) |_| {
                     self.metal_dirty = false;
                 } else |_| {}
             }
@@ -4838,6 +4865,7 @@ pub const DevSession = struct {
         self.sidebar_cells.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
         self.gpu_shadows.deinit(self.allocator);
+        self.kitty_uploaded.deinit(self.allocator);
         self.global_hotkeys.deinit(self.allocator);
         // 커맨드 카탈로그: owned 문자열(key_display·key_equivalent)을 먼저 해제하고 목록들을 deinit(빌드 전이면 empty라 무해).
         for (self.command_key_displays.items) |s| self.allocator.free(s);

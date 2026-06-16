@@ -14,7 +14,10 @@ const Budget = struct {
 
 const budgets = struct {
     const core_large_output_ns = 2 * std.time.ns_per_s;
-    const core_resize_loop_ns = 1 * std.time.ns_per_s;
+    // CI runner(ubuntu-latest)는 로컬보다 느리고 부하 변동이 커 1s budget을 간헐 초과했다(5000회 → budget
+    // 1s면 회당 0.2ms 상한이라 여유가 없음). 다른 벤치와 같은 2s(회당 0.4ms 상한)로 둬 CI 변동을 흡수하되
+    // 구조 회귀(2배+)는 잡는다 — perf는 머신 의존이라 budget 여유가 원칙(opt-in/required 양쪽).
+    const core_resize_loop_ns = 2 * std.time.ns_per_s;
     const snapshot_serialize_ns = 1 * std.time.ns_per_s;
     // 재-wrap은 "resize 후 처음 과거를 보는 순간" 1회 비용이다(지연 마크). cap(1000행) 기준
     // 회당 ~30ms(행당 free+alloc+복사) — 60fps 두 프레임으로 사용자 체감이 없는 수준이고, 50회

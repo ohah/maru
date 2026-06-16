@@ -2390,7 +2390,7 @@ pub const DevSession = struct {
                 if (self.pxToCell(x_px, y_px)) |cell| {
                     const wb: u8 = if (lines > 0) 64 else 65;
                     var n: i32 = if (lines > 0) lines else -lines;
-                    while (n > 0) : (n -= 1) active.core.reportMouse(wb, cell.col, cell.row, true, false, 0);
+                    while (n > 0) : (n -= 1) active.core.reportMouse(wb, cell.col, cell.row, cell.term_x_px, cell.term_y_px, true, false, 0);
                     const reply = active.core.pendingResponse();
                     if (reply.len > 0) {
                         self.runtime.writeInput(active.id, .{ .bytes = reply }) catch {};
@@ -2500,7 +2500,7 @@ pub const DevSession = struct {
     /// backing 픽셀 좌표를 (row, col) 셀로 변환한다(grid 안으로 clamp). 핵심: clamp를 float
     /// 도메인에서 먼저 한 뒤 @intFromFloat 한다 — 거대한 finite 좌표(손상/악성 입력)가 i64 변환
     /// 에서 trap(앱 패닉)하던 것을 막는다(wheelDeltaToLines와 같은 규율). 비유한값은 null.
-    fn pxToCell(self: *const DevSession, x_px: f64, y_px: f64) ?struct { row: u16, col: u16 } {
+    fn pxToCell(self: *const DevSession, x_px: f64, y_px: f64) ?struct { row: u16, col: u16, term_x_px: u16, term_y_px: u16 } {
         if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
         const core = &self.activeSurfaceConst().core;
         const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
@@ -2515,7 +2515,19 @@ pub const DevSession = struct {
         const term_y = y_px - @as(f64, @floatFromInt(self.active_pane_rect.y));
         const col_f = std.math.clamp(@max(term_x, 0) / cw, 0, max_col);
         const row_f = std.math.clamp(@max(term_y, 0) / ch, 0, max_row);
-        return .{ .row = @intFromFloat(row_f), .col = @intFromFloat(col_f) };
+        // SGR-Pixels(1016) mouse 리포트용 픽셀: 셀과 같은 origin(활성 pane 좌상단)·음수 0 clamp 정책으로
+        // 터미널 영역 backing px를 구해 셀 리포트와 같은 지점을 가리키게 한다. 영역 폭/높이-1로 clamp하고
+        // u16 상한(65535)으로 saturate해 @intFromFloat가 안전하다.
+        const max_x: f64 = @min(@max(@as(f64, @floatFromInt(core.size.cols)) * cw - 1, 0), 65535);
+        const max_y: f64 = @min(@max(@as(f64, @floatFromInt(core.size.rows)) * ch - 1, 0), 65535);
+        const px_x = std.math.clamp(@max(term_x, 0), 0, max_x);
+        const px_y = std.math.clamp(@max(term_y, 0), 0, max_y);
+        return .{
+            .row = @intFromFloat(row_f),
+            .col = @intFromFloat(col_f),
+            .term_x_px = @intFromFloat(px_x),
+            .term_y_px = @intFromFloat(px_y),
+        };
     }
 
     /// 마우스 선택. kind 1=down(선택 시작), 2=drag(확장), 3=up(확정 — 드래그 선택인데 이동이
@@ -2703,7 +2715,7 @@ pub const DevSession = struct {
             // 30Hz tick으로 영원히 돈다(reporting 모드는 셀렉션을 하지 않으므로 autoscroll이 무의미).
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
-            core.reportMouse(@intCast(button), col, row, kind != 3, kind == 2, @intCast(mods));
+            core.reportMouse(@intCast(button), col, row, cell.term_x_px, cell.term_y_px, kind != 3, kind == 2, @intCast(mods));
             const reply = core.pendingResponse();
             if (reply.len > 0) {
                 self.runtime.writeInput(self.activeSurface().id, .{ .bytes = reply }) catch {};

@@ -2040,7 +2040,11 @@ pub const TerminalCore = struct {
     /// button: 0=left,1=middle,2=right, 64=wheel-up,65=wheel-down. mods 비트: 4=shift,8=meta(alt),16=ctrl. motion이면
     /// drag/move(button·any 모드만, Cb에 +32). 베이스: xterm — SGR(1006/1016) `CSI < Cb;Px;Py M`(press)/`m`(release);
     /// x10 `CSI M` + (32+Cb)(32+Px)(32+Py) 바이트(좌표 223 초과는 깨져 SGR 권장, release는 버튼 미상이라 Cb=3).
-    pub fn reportMouse(self: *TerminalCore, button: u8, col: u16, row: u16, pressed: bool, motion: bool, mods: u8) void {
+    /// 마우스 이벤트를 활성 tracking 모드/format으로 PTY에 리포트한다. col/row는 0-based 셀,
+    /// x_px/y_px는 0-based 픽셀이며 SGR-Pixels(1016) format에서만 쓴다 — platform이 활성 pane
+    /// 영역 좌상단 기준 backing(device) 픽셀로 보정해 전달한다. SGR/x10 format은 픽셀을 무시하고
+    /// 셀 좌표를 인코딩한다.
+    pub fn reportMouse(self: *TerminalCore, button: u8, col: u16, row: u16, x_px: u16, y_px: u16, pressed: bool, motion: bool, mods: u8) void {
         if (self.mouse_tracking == .none) return;
         // motion(drag/move)은 button·any 모드만 리포트한다(x10/normal은 press·release만).
         if (motion and self.mouse_tracking != .button and self.mouse_tracking != .any) return;
@@ -2049,8 +2053,14 @@ pub const TerminalCore = struct {
         const cb: u32 = @as(u32, button) + @as(u32, mods) + (if (motion) @as(u32, 32) else 0);
         var buf: [32]u8 = undefined;
         const out = switch (self.mouse_format) {
-            .sgr, .sgr_pixels => std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{
+            .sgr => std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{
                 cb, @as(u32, col) + 1, @as(u32, row) + 1, @as(u8, if (pressed) 'M' else 'm'),
+            }) catch return,
+            // SGR-Pixels(1016): 1006과 같은 형식이되 셀이 아니라 픽셀 좌표를 1-based로 리포트한다.
+            // 베이스: xterm ctlseqs "report position in pixels rather than character cells". 단위는
+            // maru가 마우스·렌더 전반에 쓰는 backing(device) 픽셀로, xterm X11 device-pixel 관례와 정합한다.
+            .sgr_pixels => std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{
+                cb, @as(u32, x_px) + 1, @as(u32, y_px) + 1, @as(u8, if (pressed) 'M' else 'm'),
             }) catch return,
             .x10 => blk: {
                 // x10은 release 시 버튼 미상이라 Cb=3(sentinel). 각 바이트 32 offset, 255 saturate(>223 깨짐).
@@ -4779,26 +4789,46 @@ test "mouse reporting (DECSET 1000 + SGR 1006): off=무리포트, press/release/
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
     defer core.deinit();
     // off — 무리포트.
-    core.reportMouse(0, 5, 3, true, false, 0);
+    core.reportMouse(0, 5, 3, 0, 0, true, false, 0);
     try std.testing.expectEqualStrings("", core.pendingResponse());
-    // 1000(normal) + 1006(SGR). left press col5,row3(0-based) → CSI < 0 ; 6 ; 4 M.
+    // 1000(normal) + 1006(SGR). left press col5,row3(0-based) → CSI < 0 ; 6 ; 4 M. SGR은 픽셀 무시(셀).
     try core.write("\x1b[?1000h\x1b[?1006h");
     core.clearResponse();
-    core.reportMouse(0, 5, 3, true, false, 0);
+    core.reportMouse(0, 5, 3, 120, 72, true, false, 0);
     try std.testing.expectEqualStrings("\x1b[<0;6;4M", core.pendingResponse());
     // release → 소문자 m.
     core.clearResponse();
-    core.reportMouse(0, 5, 3, false, false, 0);
+    core.reportMouse(0, 5, 3, 120, 72, false, false, 0);
     try std.testing.expectEqualStrings("\x1b[<0;6;4m", core.pendingResponse());
     // wheel-up(64) → CSI < 64 ; 1 ; 1 M.
     core.clearResponse();
-    core.reportMouse(64, 0, 0, true, false, 0);
+    core.reportMouse(64, 0, 0, 0, 0, true, false, 0);
     try std.testing.expectEqualStrings("\x1b[<64;1;1M", core.pendingResponse());
     // 1000 off → 무리포트.
     try core.write("\x1b[?1000l");
     core.clearResponse();
-    core.reportMouse(0, 5, 3, true, false, 0);
+    core.reportMouse(0, 5, 3, 0, 0, true, false, 0);
     try std.testing.expectEqualStrings("", core.pendingResponse());
+}
+
+test "mouse reporting SGR-Pixels format (DECSET 1016): 셀이 아니라 픽셀 좌표 리포트" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer core.deinit();
+    // 1000(normal) + 1016(SGR-Pixels). 셀(5,3)이어도 픽셀(120,72)을 1-based로 리포트한다 —
+    // 같은 입력이 1006이면 셀 6;4였을 자리에 픽셀 121;73이 나와야 한다(이게 1016과 1006의 차이).
+    try core.write("\x1b[?1000h\x1b[?1016h");
+    core.clearResponse();
+    core.reportMouse(0, 5, 3, 120, 72, true, false, 0);
+    try std.testing.expectEqualStrings("\x1b[<0;121;73M", core.pendingResponse());
+    // release → 소문자 m, 픽셀 좌표 유지.
+    core.clearResponse();
+    core.reportMouse(0, 5, 3, 120, 72, false, false, 0);
+    try std.testing.expectEqualStrings("\x1b[<0;121;73m", core.pendingResponse());
+    // 1016 off → format이 x10로 복귀(setPrivateModes 2021: else x10). 픽셀 무시, 셀 32-offset.
+    try core.write("\x1b[?1016l");
+    core.clearResponse();
+    core.reportMouse(0, 5, 3, 120, 72, true, false, 0);
+    try std.testing.expectEqualStrings("\x1b[M\x20\x26\x24", core.pendingResponse());
 }
 
 test "mouse reporting x10 format (기본): CSI M + 32-offset bytes, press만" {
@@ -4806,7 +4836,7 @@ test "mouse reporting x10 format (기본): CSI M + 32-offset bytes, press만" {
     defer core.deinit();
     try core.write("\x1b[?1000h"); // normal tracking, x10 인코딩(기본 format)
     core.clearResponse();
-    core.reportMouse(0, 5, 3, true, false, 0); // Cb=0→32(0x20), col6→38(0x26), row4→36(0x24)
+    core.reportMouse(0, 5, 3, 0, 0, true, false, 0); // Cb=0→32(0x20), col6→38(0x26), row4→36(0x24)
     try std.testing.expectEqualStrings("\x1b[M\x20\x26\x24", core.pendingResponse());
 }
 

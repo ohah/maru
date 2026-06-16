@@ -2698,6 +2698,11 @@ pub const DevSession = struct {
         // 왔으면 활성 pane 터미널 영역 클릭(사이드바/탭바/divider/다른 pane은 위에서 처리). shift+click은 xterm
         // 관례대로 셀렉션 override(아래 switch로 흘린다). 8b-2: button/mods는 Swift가 변환해 ABI로 넘긴다.
         if (core.mouse_tracking != .none and (mods & 4) == 0) {
+            // reporting 모드로 들어가면 진행 중이던 셀렉션 드래그 autoscroll을 멈춘다 — 안 그러면 셀렉션
+            // 도중 앱이 mouse tracking을 켤 때 이 분기가 매 이벤트 조기 return하면서, 이미 걸린 autoscroll이
+            // 30Hz tick으로 영원히 돈다(reporting 모드는 셀렉션을 하지 않으므로 autoscroll이 무의미).
+            self.drag_autoscroll = 0;
+            self.mouse_drag_selecting = false;
             core.reportMouse(@intCast(button), col, row, kind != 3, kind == 2, @intCast(mods));
             const reply = core.pendingResponse();
             if (reply.len > 0) {
@@ -5113,6 +5118,36 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
 
     session.scrollPage(-1); // 아래로 한 화면 -> 바닥
     try std.testing.expectEqual(@as(usize, 0), tab_surface.core.view_offset);
+}
+
+test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘다 (audit MEDIUM)" {
+    var session: DevSession = undefined;
+    session.allocator = std.testing.allocator;
+    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer tab_surface.deinit();
+    session.surface_initialized = true;
+    var st_ptrs = [_]*app.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
+    session.metal_dirty = false;
+    session.divider_drag = null;
+    session.sidebar_resize_active = false;
+    session.cell_width_px = 8;
+    session.cell_height_px = 16;
+    session.scale_milli = 1000;
+    session.sidebar_width_px = 0;
+    session.active_pane_rect = .{ .x = 0, .y = 0, .w = 32, .h = 32 };
+    session.last_drag_col = 1;
+
+    // 셀렉션 드래그 autoscroll이 걸린 상태에서 앱이 mouse tracking(.normal)을 켰다.
+    session.drag_autoscroll = 1;
+    session.mouse_drag_selecting = true;
+    tab_surface.core.mouse_tracking = .normal;
+
+    // 다음 drag(kind 2) 이벤트가 reporting 분기로 간다 — autoscroll/selecting을 멈춰야 한다(예전엔 조기
+    // return하며 안 꺼서 30Hz로 stuck). .normal은 motion을 리포트하지 않아 PTY write-back은 없다.
+    session.mouse(2, 8.0, 8.0, 0, 0);
+    try std.testing.expectEqual(@as(i8, 0), session.drag_autoscroll);
+    try std.testing.expect(!session.mouse_drag_selecting);
 }
 
 test "drag autoscroll scrolls one line per tick and extends the selection to the edge row" {

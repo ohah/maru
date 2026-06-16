@@ -144,6 +144,10 @@ pub const TerminalCore = struct {
     // DECCKM(CSI ?1 h/l, application cursor keys). vim/less가 켜면 화살표 입력이 SS3(`ESC O A`)로
     // 인코딩돼야 한다. core는 모드만 추적하고, 인코딩은 input.encodeKey가 EncodeOptions로 받는다.
     application_cursor_keys: bool = false,
+    // DECKPAM/DECKPNM(ESC =/ESC >, G10): application/numeric keypad 모드. 켜지면 numpad 키가 SS3(`ESC O p`..)로
+    // 인코딩돼야 한다(DECCKM 화살표와 같은 결). core는 모드만 추적 — 실제 numpad 인코딩은 input 모델에 keypad 키
+    // 변종 + Swift numpad keycode 감지가 전제라 후속(macOS는 numpad 드묾). RIS에서 off(numeric).
+    application_keypad: bool = false,
     // alternate scroll(xterm DECSET 1007): alt screen에서 휠/트랙패드 스크롤을 화살표 키로 변환해
     // 프로그램에 보낸다(less/vim이 자체 스크롤). 스크롤백이 잠긴 alt에서 스크롤이 무반응이 되지
     // 않게 하는 표준 장치로, iTerm2/Terminal.app처럼 기본 켠다(프로그램이 ?1007l로 끌 수 있음).
@@ -448,6 +452,7 @@ pub const TerminalCore = struct {
         self.scroll_top = 0;
         self.scroll_bottom = self.size.rows - 1;
         self.application_cursor_keys = false;
+        self.application_keypad = false; // DECKPAM도 numeric(off)으로 공장 초기화(G10).
         self.cursor_visible = true;
         self.bracketed_paste = false;
         self.focus_events = false;
@@ -2730,6 +2735,15 @@ pub const TerminalCore = struct {
             // 초기화한다. 안 하면 열린 OSC 8 링크(pen_link)·intern된 URI가 리셋을 넘어 살아남는다.
             'c' => {
                 self.fullReset();
+                self.parser = .ground;
+            },
+            // DECKPAM(ESC =)/DECKPNM(ESC >): application/numeric keypad 모드(G10). 모드만 추적(numpad 인코딩은 후속).
+            '=' => {
+                self.application_keypad = true;
+                self.parser = .ground;
+            },
+            '>' => {
+                self.application_keypad = false;
                 self.parser = .ground;
             },
             // ESC <intermediate>(0x20..0x2f) <final>: charset designation 등 2바이트 시퀀스. intermediate를
@@ -6932,6 +6946,22 @@ test "G14 DCS/DECRQSS: SGR(m), DECSTBM(r), cursor style( q), invalid → DCS 0 \
     // 미지원 설정 질의 → DCS 0 $ r ST(invalid).
     try core.write("\x1bP$qZ\x1b\\");
     try std.testing.expectEqualStrings("\x1bP0$r\x1b\\", core.pendingResponse());
+}
+
+test "G10 DECKPAM/DECKPNM (ESC =/ESC >): keypad mode toggles, RIS resets, no screen leak" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    try std.testing.expect(!core.application_keypad);
+    try core.write("\x1b="); // DECKPAM → application
+    try std.testing.expect(core.application_keypad);
+    try core.write("\x1b>"); // DECKPNM → numeric
+    try std.testing.expect(!core.application_keypad);
+    try core.write("\x1b=\x1bc"); // set + RIS → numeric 복원
+    try std.testing.expect(!core.application_keypad);
+    // ESC =/> 는 화면에 텍스트로 새지 않는다(상태만).
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("    ", dump);
 }
 
 test "DECSC inside the alt screen does not clobber the cursor saved by 1049 (per-screen slots)" {

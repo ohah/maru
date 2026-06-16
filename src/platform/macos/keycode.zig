@@ -64,6 +64,19 @@ pub fn usAsciiForKeyCode(key_code: u32) ?u21 {
     };
 }
 
+/// 물리 키코드가 숫자 키패드(numpad) 키인가(G10 DECKPAM). macOS kVK_ANSI_Keypad* 상수 집합.
+/// application keypad 모드일 때 이 키들이 SS3(`ESC O p`..)로 인코딩되도록 platform이 input.KeyEvent.keypad에
+/// 채운다 — 키패드의 macOS keycode 지식은 platform에 두고, SS3 인코딩은 core(input.zig)가 한다.
+pub fn isKeypad(key_code: u32) bool {
+    return switch (key_code) {
+        // 0..9
+        0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5B, 0x5C => true,
+        // . * + clear / enter - =
+        0x41, 0x43, 0x45, 0x47, 0x4B, 0x4C, 0x4E, 0x51 => true,
+        else => false,
+    };
+}
+
 /// US 배열 기준 라틴 글자/기호 -> macOS 물리 키코드(kVK_ANSI_*). `usAsciiForKeyCode`의 역방향이다.
 /// Carbon `RegisterEventHotKey`(전역 단축키)는 가상 키코드를 요구하므로, config의 글자 chord를 OS
 /// 등록용 키코드로 되돌린다. 대문자는 소문자로 fold한다(Shift는 modifier로 따로 전달되므로 글자 자체는

@@ -38,6 +38,10 @@ pub const KeyEvent = struct {
     /// char 키의 unshifted base-layout codepoint(shift 미반영). kitty CSI u의 key code가 명세상
     /// base-layout key여야 해서 platform(ABI)이 채운다. null이면 Key.char codepoint를 그대로 쓴다.
     base_codepoint: ?u21 = null,
+    /// 이 키가 숫자 키패드(numpad)에서 왔는가(G10). platform(ABI)이 raw key code로 판정해 채운다 —
+    /// 키패드 키의 macOS keycode 지식은 platform에 둔다. application keypad 모드(DECKPAM)면 encodeKey가
+    /// SS3(`ESC O p`..)로 인코딩한다(numeric 모드면 일반 char/CR — 키패드 여부 무관).
+    keypad: bool = false,
 };
 
 pub const CodepointError = error{
@@ -65,6 +69,9 @@ pub const EncodeOptions = struct {
     /// kitty keyboard protocol flag(스택 최상단의 5비트, core.KittyFlags.int()). 0이면 legacy 인코딩,
     /// 0이 아니면 encodeKey가 kitty CSI u 인코딩으로 분기한다. 순환 import를 피해 u5(int)로 받는다.
     kitty_flags: u5 = 0,
+    /// DECKPAM/DECKPNM(ESC =/ESC >, application keypad). 켜지면 numpad 키(KeyEvent.keypad)가 SS3(`ESC O p`..)로
+    /// 인코딩된다(DECCKM 화살표와 같은 결). 끄면(numeric) 일반 char/CR. core가 application_keypad로 추적·전달.
+    application_keypad: bool = false,
 };
 
 pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: EncodeOptions) ![]const u8 {
@@ -75,6 +82,16 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: 
     // kitty keyboard protocol이 켜져 있으면(flag 스택 최상단 != 0) CSI u 인코딩으로 분기한다. 앱이
     // CSI > flags u로 켰을 때만 — 안 켜면 아래 legacy 그대로라 progressive enhancement(legacy 공존).
     if (options.kitty_flags != 0) return encodeKitty(event, buffer, options);
+
+    // G10 키패드(numpad) application 모드: SS3로 인코딩한다(`ESC O p`..). numeric 모드(또는 비-keypad)면
+    // 아래 일반 경로로 떨어져 char/CR이 된다. Meta/Ctrl 조합은 numpad app에선 드물어 무시(단독 SS3).
+    if (event.keypad and options.application_keypad) {
+        switch (event.key) {
+            .char => |cp| if (keypadSs3(cp)) |seq| return seq,
+            .enter => return "\x1bOM", // 키패드 Enter
+            else => {},
+        }
+    }
 
     var len: usize = 0;
     if (event.modifiers.option and !keyBaseStartsWithEscape(event.key)) {
@@ -128,6 +145,31 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: 
         .page_up => appendBytes(buffer, &len, "\x1b[5~"),
         .page_down => appendBytes(buffer, &len, "\x1b[6~"),
         .function => |n| appendBytes(buffer, &len, try functionKeySequence(n)),
+    };
+}
+
+/// 키패드(numpad) 문자를 application keypad SS3 시퀀스로 — `ESC O p`..`y`(0..9), 연산자/소수점/콤마/equal.
+/// numpad가 아닌 문자나 미지원 문자는 null(일반 char로 폴백). 베이스: VT220 application keypad(`ESC O <final>`).
+fn keypadSs3(codepoint: u21) ?[]const u8 {
+    return switch (codepoint) {
+        '0' => "\x1bOp",
+        '1' => "\x1bOq",
+        '2' => "\x1bOr",
+        '3' => "\x1bOs",
+        '4' => "\x1bOt",
+        '5' => "\x1bOu",
+        '6' => "\x1bOv",
+        '7' => "\x1bOw",
+        '8' => "\x1bOx",
+        '9' => "\x1bOy",
+        '.' => "\x1bOn",
+        ',' => "\x1bOl",
+        '+' => "\x1bOk",
+        '-' => "\x1bOm",
+        '*' => "\x1bOj",
+        '/' => "\x1bOo",
+        '=' => "\x1bOX",
+        else => null,
     };
 }
 
@@ -407,6 +449,24 @@ test "DECCKM (application cursor keys) switches arrows from CSI to SS3" {
     try std.testing.expectEqualStrings("\x1bOD", try encodeKey(.{ .key = .arrow_left }, &buffer, app));
     // 비-화살표 키는 모드와 무관하다.
     try std.testing.expectEqualStrings("\r", try encodeKey(.{ .key = .enter }, &buffer, app));
+}
+
+test "G10 DECKPAM: numpad keys encode as SS3 in application keypad mode, char/CR in numeric" {
+    var buffer: [encoded_key_buffer_len]u8 = undefined;
+    const app: EncodeOptions = .{ .application_keypad = true };
+    const num: EncodeOptions = .{}; // numeric(기본)
+
+    // numpad '5'(keypad=true): app → ESC O u, numeric → '5'.
+    try std.testing.expectEqualStrings("\x1bOu", try encodeKey(.{ .key = .{ .char = '5' }, .keypad = true }, &buffer, app));
+    try std.testing.expectEqualStrings("5", try encodeKey(.{ .key = .{ .char = '5' }, .keypad = true }, &buffer, num));
+    // 연산자/소수점: '+' → ESC O k, '.' → ESC O n.
+    try std.testing.expectEqualStrings("\x1bOk", try encodeKey(.{ .key = .{ .char = '+' }, .keypad = true }, &buffer, app));
+    try std.testing.expectEqualStrings("\x1bOn", try encodeKey(.{ .key = .{ .char = '.' }, .keypad = true }, &buffer, app));
+    // numpad Enter: app → ESC O M, numeric → CR.
+    try std.testing.expectEqualStrings("\x1bOM", try encodeKey(.{ .key = .enter, .keypad = true }, &buffer, app));
+    try std.testing.expectEqualStrings("\r", try encodeKey(.{ .key = .enter, .keypad = true }, &buffer, num));
+    // 비-keypad '5'는 app 모드여도 그냥 '5'(메인 행 숫자는 영향 없음).
+    try std.testing.expectEqualStrings("5", try encodeKey(.{ .key = .{ .char = '5' } }, &buffer, app));
 }
 
 test "encodeKey: PC-style function keys (legacy xterm sequences)" {

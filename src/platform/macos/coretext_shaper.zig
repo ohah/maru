@@ -330,7 +330,7 @@ test "CoreText shaper preserves explicit product surface metadata" {
 
     const overlays = [_]renderer.DrawOverlay{
         .{ .cursor = .{ .row = 5, .col = 6 } },
-        .{ .underline = .{ .row = 4, .col = 2, .width = 1 } },
+        .{ .line = .{ .row = 4, .col = 2, .width = 1, .kind = .underline } },
     };
     const records = [_]coretext_font.CoreTextGlyphRecord{
         .{
@@ -592,7 +592,7 @@ test "CoreText draw list shaper preserves DrawList metadata and styles" {
     };
     var overlays = [_]renderer.DrawOverlay{
         .{ .cursor = .{ .row = 1, .col = 4, .visible = true } },
-        .{ .underline = .{ .row = 1, .col = 0, .width = 1 } },
+        .{ .line = .{ .row = 1, .col = 0, .width = 1, .kind = .underline } },
     };
     const list: renderer.DrawList = .{
         .size = .{ .cols = 12, .rows = 4 },

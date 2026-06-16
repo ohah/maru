@@ -168,6 +168,16 @@ fn packForeground(style: terminal.Style, colors: CellColors) u32 {
     return packRgb(fg);
 }
 
+/// 텍스트 장식선(line overlay)의 화면 RGB. 전경색을 풀고, dim(SGR 2)이면 packForeground와 같은 규칙으로
+/// 배경 쪽으로 0.5 보간한다 — dim 텍스트의 밑줄/취소선/윗줄도 글리프처럼 흐려지게(일관). 보간 대상은
+/// default 배경이다: overlay는 셀 배경을 캐리하지 않으므로 컬러 배경 셀의 장식선 dim은 packForeground와
+/// 미세하게 다를 수 있으나(셀 배경 vs theme 배경), dim+컬러배경+장식선이 겹치는 드문 조합이라 허용한다.
+fn effectiveLineColor(l: renderer.LineOverlay, colors: CellColors) color.Rgb {
+    const fg = resolveColor(l.color, colors.default_fg);
+    if (!l.dim) return fg;
+    return lerpHalf(fg, colors.default_bg);
+}
+
 /// terminal cell의 배경 Color를 0xAARRGGBB로 packing한다. default 배경은 theme 기본 배경
 /// (=clear color)과 같아 따로 칠할 필요가 없으므로 0(A=0, "배경 없음")을 돌려준다. indexed/rgb는
 /// A=0xFF를 세워 셰이더가 cell을 그 색으로 채우게 한다. SGR reverse(7)면 전경색으로 칠한다
@@ -331,18 +341,23 @@ pub fn buildNativeCellsSplit(
         }
     }
 
-    // 2.6) SGR 4(밑줄) 텍스트: draw_list가 만든 underline overlay마다 셀 하단에 전경색 밑줄을
-    //      긋는다(hover/커서 underline과 같은 부분-사각형 kind=2 재사용 — 셰이더 변경 없음).
-    //      커서와 무관하게 그려야 하므로(colors.cursor null인 smoke 포함) 별도 pass다. wide
-    //      글자는 base 칸에만 — 셰이더가 width로 두 칸 폭의 선을 그린다.
+    // 2.6) 텍스트 장식선(SGR 4 밑줄/9 취소선/53 윗줄): draw_list의 line overlay마다 셀의 한 띠를
+    //      전경색으로 긋는다 — kind로 위치(하단 reserved=2/중앙 6/상단 4 — hover·커서·테두리와 같은
+    //      부분-사각형 재사용, 셰이더 변경 없음). 커서와 무관하게 그려야 하므로(colors.cursor null인 smoke
+    //      포함) 별도 pass다. wide 글자는 base 칸에만 — 셰이더가 width로 두 칸 폭의 선을 그린다. dim(SGR 2)
+    //      이면 effectiveLineColor가 전경처럼 배경 쪽으로 흐린다(packForeground와 같은 규칙).
     for (frame.overlays) |overlay| switch (overlay) {
-        .underline => |u| {
-            if (u.row >= frame.size.rows or u.col >= frame.size.cols) continue;
+        .line => |l| {
+            if (l.row >= frame.size.rows or l.col >= frame.size.cols) continue;
             cells.appendAssumeCapacity(.{
-                .row = u.row,
-                .col = u.col,
-                .width = u.width,
-                .reserved = 2, // underline 부분 사각형
+                .row = l.row,
+                .col = l.col,
+                .width = l.width,
+                .reserved = switch (l.kind) {
+                    .underline => 2, // 하단
+                    .strikethrough => 6, // 중앙
+                    .overline => 4, // 상단(active pane 테두리와 같은 모양)
+                },
                 .codepoint = ' ',
                 .slot_id = 0,
                 .atlas_x_px = 0,
@@ -354,53 +369,7 @@ pub fn buildNativeCellsSplit(
                 .u1 = -1.0,
                 .v1 = -1.0,
                 .foreground = 0,
-                .background = 0xFF00_0000 | packRgb(resolveColor(u.color, colors.default_fg)),
-            });
-        },
-        // 2.7) SGR 9(취소선): 셀 세로 중앙에 전경색 가로선(reserved=6 — underline/커서와 같은 부분-사각형
-        //      경로, 셰이더 변경 없음). underline과 독립 비트라 같은 셀이 둘 다 낼 수 있다.
-        .strikethrough => |s| {
-            if (s.row >= frame.size.rows or s.col >= frame.size.cols) continue;
-            cells.appendAssumeCapacity(.{
-                .row = s.row,
-                .col = s.col,
-                .width = s.width,
-                .reserved = 6, // strikethrough 중앙 가로선
-                .codepoint = ' ',
-                .slot_id = 0,
-                .atlas_x_px = 0,
-                .atlas_y_px = 0,
-                .atlas_width_px = 0,
-                .atlas_height_px = 0,
-                .u0 = -1.0,
-                .v0 = -1.0,
-                .u1 = -1.0,
-                .v1 = -1.0,
-                .foreground = 0,
-                .background = 0xFF00_0000 | packRgb(resolveColor(s.color, colors.default_fg)),
-            });
-        },
-        // 2.8) SGR 53(overline): 셀 상단에 전경색 가로선(reserved=4 — active pane 상단 테두리와 같은 모양
-        //      재사용, 셰이더·렌더러 변경 없음). underline/strikethrough와 독립이라 한 셀이 셋을 다 낼 수 있다.
-        .overline => |o| {
-            if (o.row >= frame.size.rows or o.col >= frame.size.cols) continue;
-            cells.appendAssumeCapacity(.{
-                .row = o.row,
-                .col = o.col,
-                .width = o.width,
-                .reserved = 4, // 상단선(overline) — active pane 테두리와 같은 부분 사각형
-                .codepoint = ' ',
-                .slot_id = 0,
-                .atlas_x_px = 0,
-                .atlas_y_px = 0,
-                .atlas_width_px = 0,
-                .atlas_height_px = 0,
-                .u0 = -1.0,
-                .v0 = -1.0,
-                .u1 = -1.0,
-                .v1 = -1.0,
-                .foreground = 0,
-                .background = 0xFF00_0000 | packRgb(resolveColor(o.color, colors.default_fg)),
+                .background = 0xFF00_0000 | packRgb(effectiveLineColor(l, colors)),
             });
         },
         // OSC 133 거터 마크: 프롬프트 시작 행 col 0의 왼쪽 가장자리에 세로 색 바(커서 bar와 같은
@@ -445,7 +414,7 @@ pub fn buildNativeCellsSplit(
         for (frame.overlays) |overlay| {
             const cur = switch (overlay) {
                 .cursor => |c| c,
-                .underline, .strikethrough, .overline, .gutter => continue,
+                .line, .gutter => continue,
             };
             if (!cur.visible) continue;
 
@@ -1446,7 +1415,7 @@ test "an underline overlay and a cursor overlay both project (underline rendered
     // SGR 4 밑줄은 이제 투영된다(pass 2.6). underline + cursor가 함께 오면 두 cell: col0에 밑줄
     // (reserved=2, 전경색), col1에 커서. 밑줄 pass(2.6)가 커서 pass(3)보다 먼저라 cells[0]이 밑줄.
     var overlays = [_]renderer.DrawOverlay{
-        .{ .underline = .{ .row = 0, .col = 0, .width = 1, .color = .default } },
+        .{ .line = .{ .row = 0, .col = 0, .width = 1, .color = .default, .kind = .underline } },
         .{ .cursor = .{ .row = 0, .col = 1, .visible = true } },
     };
     const frame = renderer.GlyphQuadFrame{
@@ -1474,8 +1443,8 @@ test "a strikethrough overlay projects a reserved=6 center-line cell, independen
     // SGR 9 취소선은 reserved=6(세로 중앙 가로선)으로 투영된다 — underline(reserved=2, 하단)과 독립
     // 비트라, 같은 셀이 둘 다 오면 두 cell이 나온다(2.6 밑줄 pass가 2.7 취소선 pass보다 먼저).
     var overlays = [_]renderer.DrawOverlay{
-        .{ .underline = .{ .row = 0, .col = 0, .width = 1, .color = .default } },
-        .{ .strikethrough = .{ .row = 0, .col = 0, .width = 1, .color = .default } },
+        .{ .line = .{ .row = 0, .col = 0, .width = 1, .color = .default, .kind = .underline } },
+        .{ .line = .{ .row = 0, .col = 0, .width = 1, .color = .default, .kind = .strikethrough } },
     };
     const frame = renderer.GlyphQuadFrame{
         .size = .{ .cols = 3, .rows = 1 },
@@ -1501,7 +1470,7 @@ test "an overline overlay projects a reserved=4 top-line cell" {
     // SGR 53 overline은 reserved=4(셀 상단선 — active pane 상단 테두리와 같은 모양)로 투영된다.
     // strikethrough(reserved=6, 중앙)·underline(reserved=2, 하단)과 독립이라 같은 모양을 안 다툰다.
     var overlays = [_]renderer.DrawOverlay{
-        .{ .overline = .{ .row = 0, .col = 0, .width = 1, .color = .default } },
+        .{ .line = .{ .row = 0, .col = 0, .width = 1, .color = .default, .kind = .overline } },
     };
     const frame = renderer.GlyphQuadFrame{
         .size = .{ .cols = 3, .rows = 1 },
@@ -1519,6 +1488,33 @@ test "an overline overlay projects a reserved=4 top-line cell" {
     try std.testing.expectEqual(@as(usize, 1), cells.len);
     try std.testing.expectEqual(@as(u16, 4), cells[0].reserved); // 상단선(overline)
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), cells[0].background); // 전경색(흰색)
+}
+
+test "a dim line overlay interpolates its color toward the background (SGR 2 consistency)" {
+    const allocator = std.testing.allocator;
+    // dim(SGR 2) 텍스트의 장식선(밑줄/취소선/윗줄)도 글리프처럼 흐려져야 한다 — effectiveLineColor가
+    // 전경을 배경 쪽으로 0.5 보간(packForeground와 같은 규칙). 흰 전경(255) + 어두운 기본 배경(16) →
+    // (255+16)/2 = 135 = 0x87. dim 비트가 없으면 풀 밝기였던 회귀를 이 테스트가 막는다.
+    var overlays = [_]renderer.DrawOverlay{
+        .{ .line = .{ .row = 0, .col = 0, .width = 1, .color = .default, .dim = true, .kind = .underline } },
+    };
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 3, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .default_bg = .{ .r = 16, .g = 16, .b = 16 },
+        .cursor = null,
+    });
+    defer allocator.free(cells);
+    try std.testing.expectEqual(@as(usize, 1), cells.len);
+    try std.testing.expectEqual(@as(u16, 2), cells[0].reserved); // underline(하단)
+    try std.testing.expectEqual(@as(u32, 0xFF878787), cells[0].background); // dim 보간된 전경
 }
 
 test "packForeground halves a faint foreground toward the background (SGR 2)" {
@@ -1689,7 +1685,7 @@ test "cursor cells are a suffix and setCursorVisible toggles exposure without re
 test "SGR underline overlays project a foreground-colored underline cell (kind 2), cursor-independent" {
     const allocator = std.testing.allocator;
     var overlays = [_]renderer.DrawOverlay{
-        .{ .underline = .{ .row = 1, .col = 2, .width = 1, .color = .default } },
+        .{ .line = .{ .row = 1, .col = 2, .width = 1, .color = .default, .kind = .underline } },
     };
     const frame = renderer.GlyphQuadFrame{
         .size = .{ .cols = 6, .rows = 3 },

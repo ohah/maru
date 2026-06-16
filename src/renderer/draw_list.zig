@@ -18,29 +18,24 @@ pub const CursorOverlay = struct {
     shape: terminal.CursorShape = .block,
 };
 
-pub const UnderlineOverlay = struct {
-    row: u16,
-    col: u16,
-    width: u2 = 1,
-    color: terminal.Color = .default,
+// 텍스트 장식선의 종류 — 셀 안에서 선이 그려지는 위치를 정한다(렌더러가 reserved kind로 환산).
+pub const LineKind = enum {
+    underline, // SGR 4 — 셀 하단
+    strikethrough, // SGR 9 — 셀 중앙
+    overline, // SGR 53 — 셀 상단
 };
 
-// SGR 9(crossed-out) strikethrough — 셀 중앙을 가로지르는 전경색 선. underline과 같은 draw-time
-// overlay라 glyph atlas가 "A"와 "취소선 A"를 따로 캐시하지 않는다(밑줄과 같은 근거).
-pub const StrikethroughOverlay = struct {
+// 텍스트 장식선(underline/strikethrough/overline) overlay. 셋은 같은 draw-time overlay라 glyph
+// atlas가 "A"와 "밑줄 A"를 따로 캐시하지 않고, 독립 비트라 한 셀이 셋을 다 방출할 수 있다. kind가
+// 셀 내 위치를, dim(SGR 2)이 렌더러의 faint 보간 여부를 정한다 — dim 텍스트의 장식선도 전경처럼
+// 흐려지게(packForeground와 같은 규칙).
+pub const LineOverlay = struct {
     row: u16,
     col: u16,
     width: u2 = 1,
     color: terminal.Color = .default,
-};
-
-// SGR 53(overlined) overline — 셀 상단을 가로지르는 전경색 선. strikethrough/underline과 같은
-// draw-time overlay·독립 비트라, 한 셀이 셋을 다 방출할 수 있다.
-pub const OverlineOverlay = struct {
-    row: u16,
-    col: u16,
-    width: u2 = 1,
-    color: terminal.Color = .default,
+    dim: bool = false,
+    kind: LineKind,
 };
 
 // OSC 133 거터 마크 — 프롬프트 시작 행 왼쪽 가장자리의 세로 색 바. 명령 성공(초록)/실패(빨강)을
@@ -52,9 +47,7 @@ pub const GutterMark = struct {
 
 pub const DrawOverlay = union(enum) {
     cursor: CursorOverlay,
-    underline: UnderlineOverlay,
-    strikethrough: StrikethroughOverlay,
-    overline: OverlineOverlay,
+    line: LineOverlay,
     gutter: GutterMark,
 };
 
@@ -120,42 +113,12 @@ pub fn buildDrawList(
                             .style = cell.style,
                         });
 
-                        if (cell.style.underline) {
-                            // Underline is a draw-time overlay. Keeping it
-                            // outside the glyph cell command prevents the
-                            // atlas from caching separate bitmaps for "A" and
-                            // "underlined A".
-                            overlays.appendAssumeCapacity(.{ .underline = .{
-                                .row = @intCast(row),
-                                .col = @intCast(col),
-                                .width = cell.width,
-                                .color = cell.style.foreground,
-                            } });
-                        }
-
-                        if (cell.style.strikethrough) {
-                            // Strikethrough is a draw-time overlay for the same
-                            // reason as underline. It is an independent bit, so a
-                            // cell can emit both a strikethrough and an underline.
-                            overlays.appendAssumeCapacity(.{ .strikethrough = .{
-                                .row = @intCast(row),
-                                .col = @intCast(col),
-                                .width = cell.width,
-                                .color = cell.style.foreground,
-                            } });
-                        }
-
-                        if (cell.style.overline) {
-                            // Overline is a draw-time overlay too, also an
-                            // independent bit (a cell may carry overline,
-                            // strikethrough, and underline at once).
-                            overlays.appendAssumeCapacity(.{ .overline = .{
-                                .row = @intCast(row),
-                                .col = @intCast(col),
-                                .width = cell.width,
-                                .color = cell.style.foreground,
-                            } });
-                        }
+                        // 텍스트 장식선(underline/strikethrough/overline)은 draw-time overlay다 —
+                        // glyph cell 밖에 둬 atlas가 "A"와 "밑줄 A"를 따로 캐시하지 않게 한다. 셋은
+                        // 독립 비트라 한 셀이 셋을 다 낼 수 있고, kind만 다른 같은 모양이라 한 헬퍼로 낸다.
+                        if (cell.style.underline) overlays.appendAssumeCapacity(.{ .line = lineOverlay(row, col, cell, .underline) });
+                        if (cell.style.strikethrough) overlays.appendAssumeCapacity(.{ .line = lineOverlay(row, col, cell, .strikethrough) });
+                        if (cell.style.overline) overlays.appendAssumeCapacity(.{ .line = lineOverlay(row, col, cell, .overline) });
                     }
 
                     // OSC 133 거터 마크: 종료코드는 프롬프트 시작 행에만 스탬프되므로, exit가 있으면
@@ -193,6 +156,17 @@ pub fn buildDrawList(
         .dirty = snapshot.dirty,
         .cells = try cells.toOwnedSlice(allocator),
         .overlays = try overlays.toOwnedSlice(allocator),
+    };
+}
+
+fn lineOverlay(row: usize, col: usize, cell: terminal.Cell, kind: LineKind) LineOverlay {
+    return .{
+        .row = @intCast(row),
+        .col = @intCast(col),
+        .width = cell.width,
+        .color = cell.style.foreground,
+        .dim = cell.style.dim,
+        .kind = kind,
     };
 }
 
@@ -346,10 +320,11 @@ test "draw list carries style and combining mark for font layout" {
     try std.testing.expectEqual(terminal.Color{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, draw_list.cells[0].style.background);
     try std.testing.expect(draw_list.cells[0].style.underline);
     try std.testing.expectEqual(@as(usize, 2), draw_list.overlays.len);
-    try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].underline.row);
-    try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].underline.col);
-    try std.testing.expectEqual(@as(u2, 1), draw_list.overlays[0].underline.width);
-    try std.testing.expectEqual(terminal.Color{ .indexed = 2 }, draw_list.overlays[0].underline.color);
+    try std.testing.expectEqual(LineKind.underline, draw_list.overlays[0].line.kind);
+    try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].line.row);
+    try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].line.col);
+    try std.testing.expectEqual(@as(u2, 1), draw_list.overlays[0].line.width);
+    try std.testing.expectEqual(terminal.Color{ .indexed = 2 }, draw_list.overlays[0].line.color);
     // The cursor overlay is appended after the cell loop, so it trails the
     // underline. Pin its tag and position so a regression that drops or
     // misplaces it (e.g. a second underline instead of the cursor) fails here.
@@ -410,14 +385,17 @@ test "draw list emits a strikethrough overlay for SGR 9 cells, independent of un
     var underlines: usize = 0;
     var strikes: usize = 0;
     for (draw_list.overlays) |o| switch (o) {
-        .underline => |u| {
-            underlines += 1;
-            try std.testing.expectEqual(@as(u16, 0), u.col);
-        },
-        .strikethrough => |s| {
-            strikes += 1;
-            try std.testing.expectEqual(@as(u16, 0), s.col);
-            try std.testing.expectEqual(@as(u2, 1), s.width);
+        .line => |l| switch (l.kind) {
+            .underline => {
+                underlines += 1;
+                try std.testing.expectEqual(@as(u16, 0), l.col);
+            },
+            .strikethrough => {
+                strikes += 1;
+                try std.testing.expectEqual(@as(u16, 0), l.col);
+                try std.testing.expectEqual(@as(u2, 1), l.width);
+            },
+            .overline => {},
         },
         else => {},
     };
@@ -440,12 +418,14 @@ test "draw list emits an overline overlay for SGR 53 cells, independent of strik
     var strikes: usize = 0;
     var overlines: usize = 0;
     for (draw_list.overlays) |o| switch (o) {
-        .underline => underlines += 1,
-        .strikethrough => strikes += 1,
-        .overline => |ov| {
-            overlines += 1;
-            try std.testing.expectEqual(@as(u16, 0), ov.col);
-            try std.testing.expectEqual(@as(u2, 1), ov.width);
+        .line => |l| switch (l.kind) {
+            .underline => underlines += 1,
+            .strikethrough => strikes += 1,
+            .overline => {
+                overlines += 1;
+                try std.testing.expectEqual(@as(u16, 0), l.col);
+                try std.testing.expectEqual(@as(u2, 1), l.width);
+            },
         },
         else => {},
     };

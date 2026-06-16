@@ -80,7 +80,11 @@ bool maru_metal_renderer_draw(
     size_t image_upload_count,
     /* 위 image_uploads가 가리키는 픽셀 연속 버퍼(RGBA bpp=4 / RGB bpp=3 — RGB는 RGBA로 확장 업로드). */
     const uint8_t *image_pixels,
-    size_t image_pixel_count
+    size_t image_pixel_count,
+    /* kitty graphics(K4c): 현재 살아있는 이미지 id 집합. 이 집합에 없는 캐시 텍스처를 evict한다(GPU 메모리
+       회수 — delete/evict/RIS 반영). count==0이면 살아있는 이미지 없음 → 전부 evict. */
+    const uint32_t *live_image_ids,
+    size_t live_image_id_count
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

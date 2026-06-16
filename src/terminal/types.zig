@@ -142,6 +142,28 @@ pub const DirtyRegion = struct {
     end_row: u16,
 };
 
+/// kitty graphics placement — 화면에 표시 중인 이미지 인스턴스 하나(렌더용 뷰). 한 이미지(image_id)에
+/// placement_id로 구분되는 여러 placement가 있을 수 있다. 좌표는 뷰포트 상대 — row는 placement가 앵커된
+/// 셀의 뷰포트 행(top 기준 오프셋, i32라 위로 스크롤돼 화면 위로 벗어난 앵커는 음수). 셀 단위 크기(span)는
+/// 코어가 셀 픽셀 크기를 모르므로 계산하지 않는다: source rect(픽셀)와 명시 columns/rows만 담고, 픽셀→셀
+/// 환산·클립은 셀 메트릭을 가진 렌더러가 한다. 키 의미의 단일 출처는 core.zig의 KittyGraphicsCommand
+/// 주석이다. 베이스: kitty graphics protocol(placement/display).
+pub const KittyPlacement = struct {
+    image_id: u32,
+    placement_id: u32, // p: 0이면 default placement
+    row: i32, // 앵커 셀의 뷰포트 행(top 기준 오프셋). 음수면 앵커가 화면 위로 벗어남.
+    col: u16, // 앵커 셀의 열.
+    cell_x_offset: u32 = 0, // X: 첫 셀 안에서 이미지를 그리기 시작할 픽셀 오프셋.
+    cell_y_offset: u32 = 0, // Y
+    src_x: u32 = 0, // x: 표시할 source 사각형의 좌상단(이미지 픽셀 좌표).
+    src_y: u32 = 0, // y
+    src_width: u32 = 0, // w: source 사각형 폭(픽셀, 0=전체).
+    src_height: u32 = 0, // h: source 사각형 높이(픽셀, 0=전체).
+    columns: u32 = 0, // c: 표시할 열 수(0=렌더러가 환산).
+    rows: u32 = 0, // r: 표시할 행 수(0=렌더러가 환산).
+    z: i32 = 0, // z-index(<0 텍스트 뒤, >=0 텍스트 앞).
+};
+
 pub const RenderSnapshot = struct {
     size: Size,
     cursor: Cursor = .{},
@@ -158,5 +180,10 @@ pub const RenderSnapshot = struct {
     // 보낼 수 있어 i32. **주의: 거터는 이 값이 아니라 `prompt_marks[행].exit`(행별)로 그린다** —
     // 이건 MARU_DEBUG 덤프 헤더용 편의 값이라 거터/UI를 여기에 연결하지 말 것.
     last_command_exit: ?i32 = null,
+    // kitty graphics placement(표시 중인 이미지 인스턴스)의 뷰포트 뷰. 비어 있으면 표시할 이미지가
+    // 없다(일반 경로 — 할당 없음). 렌더러가 image_id로 픽셀을 찾아 source rect/오프셋/span으로 그린다 —
+    // 픽셀→셀 환산·클립은 렌더러 책임(코어는 셀 픽셀 크기를 모름). 좌표는 뷰포트 상대(row는 i32라 화면
+    // 위로 벗어난 앵커도 노출 — 셀 span을 아는 렌더러가 가시성/클립을 정한다). 렌더는 후속 K-단계.
+    placements: []const KittyPlacement = &.{},
     dirty: ?DirtyRegion = null,
 };

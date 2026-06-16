@@ -259,8 +259,18 @@ pub const TerminalCore = struct {
     apc_buffer: [4096]u8 = undefined,
     apc_len: usize = 0,
     apc_overflow: bool = false,
-    /// kitty graphics 이미지 저장소(transmit된 이미지, image_id→픽셀 버퍼). placement·렌더는 후속.
+    /// kitty graphics 이미지 저장소(transmit된 이미지, image_id→픽셀 버퍼). 렌더는 후속.
     kitty_images: KittyImageStorage = .{},
+    /// kitty graphics placement(표시 중인 이미지 인스턴스) 목록. (image_id, placement_id)로 식별 —
+    /// 같은 키 재요청은 교체한다. anchor는 절대 행(스크롤백 0..sb_count-1, 이어서 활성 화면)이라 selection/
+    /// find와 같은 좌표계로 스크롤·eviction에 따라 보정된다(shiftPlacementsForEviction). 상한
+    /// (max_kitty_placements)으로 악의적 대량 placement를 막는다 — 이미지 320MB 한계·APC 버퍼 한계와 같은
+    /// 결의 방어선이다. K1(현재)은 저장/노출/생애주기(코어)까지 — 화면 렌더는 후속 K-단계.
+    kitty_placements: std.ArrayListUnmanaged(StoredPlacement) = .empty,
+    /// renderSnapshot이 placement를 뷰포트 상대 KittyPlacement로 환산해 담는 재사용 버퍼(placement가
+    /// 있을 때만 lazy 할당, viewport_cells와 같은 규율). 없으면 비어 있어 일반(placement 없는) 경로는
+    /// 추가 비용이 없다.
+    placement_views: []types.KittyPlacement = &.{},
     // OSC 7: 셸이 보고한 현재 작업 디렉터리(cwd). VTE(GNOME)가 정의한 사실상 표준 — 형식은
     // `OSC 7 ; file://<host>/<percent-encoded path> ST`이고 iTerm2/Terminal.app/kitty/WezTerm이
     // 채택했다(ECMA-48 아님). 디코드한 path를 core가 소유한다(host는 현재 무시 — 로컬 단일 호스트
@@ -295,6 +305,11 @@ pub const TerminalCore = struct {
 
     const max_csi_params = 16;
     const default_max_scrollback = 1000;
+    /// 한 세션이 동시에 가질 수 있는 kitty graphics placement 상한 — maru가 정한 실용 값이다(kitty
+    /// 명세는 상한을 규정하지 않는다). (image_id, placement_id) 키 교체로 대부분 자연히 묶이지만, 한
+    /// 이미지에 placement_id를 무한히 바꿔 보내는 폭주를 막는 방어선이다(이미지 320MB·APC 버퍼 한계와
+    /// 같은 결). 보통 화면에 떠 있는 이미지는 한 자릿수~수십이라 1024는 충분히 여유롭다.
+    const max_kitty_placements = 1024;
 
     pub fn init(allocator: std.mem.Allocator, size: types.Size) !TerminalCore {
         const grid = clampGridSize(size);
@@ -359,6 +374,7 @@ pub const TerminalCore = struct {
         self.sync_output = false;
         self.kitty_flags = .{};
         self.kitty_images.clear(self.allocator); // RIS는 전송된 kitty graphics 이미지를 전부 비운다
+        self.kitty_placements.clearRetainingCapacity(); // placement도 함께 비운다
         self.grapheme_cluster_mode = false;
         self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
         self.origin_mode = false; // DECOM도 공장 기본(off — 화면 절대 좌표)으로 복원.
@@ -392,6 +408,8 @@ pub const TerminalCore = struct {
         if (self.reflow_prompt_marks.len > 0) self.allocator.free(self.reflow_prompt_marks);
         self.response.deinit(self.allocator);
         self.kitty_images.deinit(self.allocator);
+        self.kitty_placements.deinit(self.allocator);
+        if (self.placement_views.len > 0) self.allocator.free(self.placement_views);
         self.* = undefined;
     }
 
@@ -1321,8 +1339,9 @@ pub const TerminalCore = struct {
         if (self.sb_count == cap) {
             self.sb_head = (self.sb_head + 1) % cap;
             // ring이 가득 차 가장 오래된 행이 밀려나면 절대 행 좌표가 한 칸 당겨진다 — 선택도
-            // 따라 보정하고, 선택이 밀려난 행을 포함했으면 해제한다.
+            // 따라 보정하고, 선택이 밀려난 행을 포함했으면 해제한다. placement anchor도 같은 보정.
             self.shiftSelectionForEviction();
+            self.shiftPlacementsForEviction();
         } else {
             self.sb_count += 1;
         }
@@ -1458,15 +1477,48 @@ pub const TerminalCore = struct {
         self.execKittyGraphics(cmd, payload);
     }
 
-    /// kitty graphics APC control의 파싱 결과(주요 key). 토대 단계라 여기까지 — 저장·렌더는 후속이다.
+    /// kitty graphics APC control의 파싱 결과(주요 key). transmit(s/v/f/o)와 display(나머지) 양쪽 키를
+    /// 한 구조체에 담는다 — a 값(t/T/p/d)이 어느 필드를 쓰는지 정한다. 렌더는 후속이다.
     const KittyGraphicsCommand = struct {
         action: u8 = 't', // a: t=transmit / T=transmit+display / q=query / p=display / d=delete
         format: u16 = 32, // f: 24=RGB / 32=RGBA / 100=PNG
-        width: u32 = 0, // s: 픽셀 폭
-        height: u32 = 0, // v: 픽셀 높이
+        width: u32 = 0, // s: 이미지 픽셀 폭
+        height: u32 = 0, // v: 이미지 픽셀 높이
         image_id: u32 = 0, // i
         more: bool = false, // m: 1이면 chunk가 이어짐
         compression: u8 = 0, // o: 'z'=zlib
+        // --- display(placement) 키 — a=p/T에서 쓴다. 베이스: kitty graphics protocol display data. ---
+        placement_id: u32 = 0, // p: placement 식별자(0=default)
+        src_x: u32 = 0, // x: source 사각형 좌상단 x(이미지 픽셀)
+        src_y: u32 = 0, // y: source 사각형 좌상단 y
+        src_width: u32 = 0, // w: source 사각형 폭(0=전체)
+        src_height: u32 = 0, // h: source 사각형 높이(0=전체)
+        cell_x_offset: u32 = 0, // X: 첫 셀 내 픽셀 x 오프셋
+        cell_y_offset: u32 = 0, // Y: 첫 셀 내 픽셀 y 오프셋
+        columns: u32 = 0, // c: 표시할 열 수(0=auto)
+        rows: u32 = 0, // r: 표시할 행 수(0=auto)
+        z: i32 = 0, // z: z-index(부호 있음)
+        no_cursor_move: bool = false, // C=1이면 표시 후 커서를 옮기지 않음
+    };
+
+    /// 저장된 kitty graphics placement(표시 중인 이미지 인스턴스). anchor_row는 절대 행(스크롤백
+    /// 0..sb_count-1, 이어서 활성 화면)이라 selection/find와 같은 좌표계로 스크롤·eviction에 따라
+    /// 보정돼 내용과 함께 움직인다. 렌더 시 renderSnapshot이 뷰포트 상대 types.KittyPlacement로 환산한다.
+    /// 셀 단위 크기는 담지 않는다(코어는 셀 픽셀 크기를 모름 — 렌더러가 환산).
+    const StoredPlacement = struct {
+        image_id: u32,
+        placement_id: u32,
+        anchor_row: usize, // 절대 행
+        anchor_col: u16,
+        cell_x_offset: u32,
+        cell_y_offset: u32,
+        src_x: u32,
+        src_y: u32,
+        src_width: u32,
+        src_height: u32,
+        columns: u32,
+        rows: u32,
+        z: i32,
     };
 
     /// kitty graphics APC의 control 섹션(`G` 다음 ~ ';' 전)을 파싱한다. `k=v,k=v` 형식 — 주요 key만
@@ -1494,6 +1546,18 @@ pub const TerminalCore = struct {
                 'o' => if (val.len == 1) {
                     cmd.compression = val[0];
                 },
+                // display(placement) 키. 대/소문자가 다른 키(x/X, y/Y)는 별개 의미라 그대로 구분한다.
+                'p' => cmd.placement_id = std.fmt.parseInt(u32, val, 10) catch 0,
+                'x' => cmd.src_x = std.fmt.parseInt(u32, val, 10) catch 0,
+                'y' => cmd.src_y = std.fmt.parseInt(u32, val, 10) catch 0,
+                'w' => cmd.src_width = std.fmt.parseInt(u32, val, 10) catch 0,
+                'h' => cmd.src_height = std.fmt.parseInt(u32, val, 10) catch 0,
+                'X' => cmd.cell_x_offset = std.fmt.parseInt(u32, val, 10) catch 0,
+                'Y' => cmd.cell_y_offset = std.fmt.parseInt(u32, val, 10) catch 0,
+                'c' => cmd.columns = std.fmt.parseInt(u32, val, 10) catch 0,
+                'r' => cmd.rows = std.fmt.parseInt(u32, val, 10) catch 0,
+                'z' => cmd.z = std.fmt.parseInt(i32, val, 10) catch 0, // 부호 있음(텍스트 앞/뒤)
+                'C' => cmd.no_cursor_move = (val.len == 1 and val[0] == '1'),
                 else => {}, // 나머지 control key는 토대에선 무시(후속 확장)
             }
         }
@@ -1556,14 +1620,128 @@ pub const TerminalCore = struct {
         }
     };
 
-    /// 파싱된 kitty graphics command를 실행한다. 토대(1단계)는 transmit(디코드+저장)과 delete만 —
-    /// query 응답·display(placement)·애니메이션은 후속. payload는 control(';' 전) 다음 base64다.
+    /// 파싱된 kitty graphics command를 실행한다. transmit(디코드+저장)·display(placement)·delete까지 —
+    /// query 응답·애니메이션은 후속. payload는 control(';' 전) 다음 base64다.
     fn execKittyGraphics(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
         switch (cmd.action) {
-            't', 'T' => self.kittyTransmit(cmd, payload), // T는 transmit+display지만 display(placement)는 후속
-            'd' => self.kitty_images.remove(self.allocator, cmd.image_id),
-            else => {}, // q(query)·p(display)·f/a/c(애니메이션)는 후속
+            't' => self.kittyTransmit(cmd, payload),
+            'T' => { // transmit + display(한 command로 저장 후 placement까지)
+                self.kittyTransmit(cmd, payload);
+                self.kittyDisplay(cmd);
+            },
+            'p' => self.kittyDisplay(cmd), // 기존 이미지를 placement로 표시
+            'd' => { // delete: 이미지와 그 placement를 함께 비운다(세분화된 d 타깃은 후속 K-단계)
+                self.removePlacementsForImage(cmd.image_id);
+                self.kitty_images.remove(self.allocator, cmd.image_id);
+            },
+            else => {}, // q(query)·f/a/c(애니메이션)는 후속
         }
+    }
+
+    /// kitty graphics display(a=p/T): 저장된 이미지를 현재 커서 셀에 placement로 건다. 이미지가 없으면
+    /// 무시한다(graceful — transmit 실패/미전송 이미지). (image_id, placement_id) 같은 키는 교체한다.
+    /// 커서 이동 정책(C): 기본(C≠1)은 이미지 아래로 커서를 내린다 — 단 행 수(r)가 명시됐을 때만이다.
+    /// 자동 크기(r 미지정)는 코어가 행 span을 모르므로(셀 픽셀 크기 비보유 — 렌더러 책임) 커서를 옮기지
+    /// 않는다(K1 한계, 문서화). 화면 끝을 넘기는 이동은 스크롤 없이 마지막 행으로 clamp한다(이미지 표시가
+    /// 스크롤을 유발하지 않게). 베이스: kitty graphics protocol display.
+    fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
+        if (cmd.image_id == 0) return;
+        if (!self.kitty_images.map.contains(cmd.image_id)) return; // 없는 이미지는 표시 안 함
+        self.addOrReplacePlacement(.{
+            .image_id = cmd.image_id,
+            .placement_id = cmd.placement_id,
+            .anchor_row = self.sb_count + self.cursor.row, // 커서의 절대 행
+            .anchor_col = self.cursor.col,
+            .cell_x_offset = cmd.cell_x_offset,
+            .cell_y_offset = cmd.cell_y_offset,
+            .src_x = cmd.src_x,
+            .src_y = cmd.src_y,
+            .src_width = cmd.src_width,
+            .src_height = cmd.src_height,
+            .columns = cmd.columns,
+            .rows = cmd.rows,
+            .z = cmd.z,
+        });
+        if (!cmd.no_cursor_move and cmd.rows > 0) {
+            const target = @as(usize, self.cursor.row) + cmd.rows;
+            self.cursor.row = @intCast(@min(target, self.size.rows - 1));
+        }
+    }
+
+    /// placement를 추가하거나 같은 (image_id, placement_id)면 교체한다. 상한 초과면 거부(graceful),
+    /// OOM이면 표시를 포기한다(절대 panic 없음 — 출력 경로 견고성).
+    fn addOrReplacePlacement(self: *TerminalCore, p: StoredPlacement) void {
+        for (self.kitty_placements.items) |*existing| {
+            if (existing.image_id == p.image_id and existing.placement_id == p.placement_id) {
+                existing.* = p;
+                return;
+            }
+        }
+        if (self.kitty_placements.items.len >= max_kitty_placements) return; // 폭주 방어선
+        self.kitty_placements.append(self.allocator, p) catch {};
+    }
+
+    /// 특정 image_id의 placement를 모두 제거한다(delete 시 이미지와 함께). 순서를 보존해(orderedRemove)
+    /// 노출 순서를 결정적으로 둔다 — placement 수는 작아 비용이 무시할 만하다.
+    fn removePlacementsForImage(self: *TerminalCore, image_id: u32) void {
+        var i: usize = 0;
+        while (i < self.kitty_placements.items.len) {
+            if (self.kitty_placements.items[i].image_id == image_id) {
+                _ = self.kitty_placements.orderedRemove(i);
+            } else i += 1;
+        }
+    }
+
+    /// scrollback ring이 가득 차 가장 오래된 행이 밀려나면 절대 행 좌표가 한 칸 당겨진다 — placement
+    /// anchor도 따라 보정하고, 0행(밀려난 행)에 앵커된 placement는 화면 밖이라 제거한다. selection의
+    /// shiftSelectionForEviction과 같은 규율. 베이스: maru 절대-행 좌표계.
+    fn shiftPlacementsForEviction(self: *TerminalCore) void {
+        var i: usize = 0;
+        while (i < self.kitty_placements.items.len) {
+            const p = &self.kitty_placements.items[i];
+            if (p.anchor_row == 0) {
+                _ = self.kitty_placements.orderedRemove(i);
+            } else {
+                p.anchor_row -= 1;
+                i += 1;
+            }
+        }
+    }
+
+    /// 저장된 placement(절대 행)를 뷰포트 상대 types.KittyPlacement로 환산해 재사용 버퍼에 담아
+    /// 돌려준다. placement가 없으면 빈 슬라이스(할당 없음). 화면 위/아래로 완전히 벗어났는지의 판단은
+    /// 셀 span을 아는 렌더러 몫이라, 코어는 모든 placement를 그대로 환산해 노출한다(row는 i32 — 음수
+    /// 가능). top_abs는 뷰포트 최상단의 절대 행이다.
+    fn buildPlacementViews(self: *TerminalCore, top_abs: usize) []const types.KittyPlacement {
+        const n = self.kitty_placements.items.len;
+        if (n == 0) return &.{};
+        if (self.placement_views.len != n) {
+            if (self.placement_views.len > 0) self.allocator.free(self.placement_views);
+            self.placement_views = self.allocator.alloc(types.KittyPlacement, n) catch {
+                self.placement_views = &.{};
+                return &.{}; // OOM이면 placement 노출만 포기(렌더는 후속이라 영향 없음)
+            };
+        }
+        for (self.kitty_placements.items, 0..) |p, i| {
+            const row_i64 = @as(i64, @intCast(p.anchor_row)) - @as(i64, @intCast(top_abs));
+            self.placement_views[i] = .{
+                .image_id = p.image_id,
+                .placement_id = p.placement_id,
+                // 행 오프셋은 작은 값이라 i32에 들지만, 극단값은 포화시켜 안전하게 둔다.
+                .row = std.math.cast(i32, row_i64) orelse (if (row_i64 < 0) std.math.minInt(i32) else std.math.maxInt(i32)),
+                .col = p.anchor_col,
+                .cell_x_offset = p.cell_x_offset,
+                .cell_y_offset = p.cell_y_offset,
+                .src_x = p.src_x,
+                .src_y = p.src_y,
+                .src_width = p.src_width,
+                .src_height = p.src_height,
+                .columns = p.columns,
+                .rows = p.rows,
+                .z = p.z,
+            };
+        }
+        return self.placement_views;
     }
 
     /// kitty graphics transmit: base64 payload를 디코드해 RGBA(f=32)/RGB(f=24) 이미지를 저장한다.
@@ -2990,8 +3168,10 @@ pub const TerminalCore = struct {
     /// 합성 버퍼는 스크롤 중에만 lazy 할당하므로 일반(바닥) 렌더 경로는 추가 비용이 없다.
     pub fn renderSnapshot(self: *TerminalCore) types.RenderSnapshot {
         if (self.view_offset == 0) {
-            if (self.preedit) |preedit_bytes| return self.snapshotWithPreedit(preedit_bytes);
-            return self.snapshot();
+            // 바닥(스크롤 안 함)에서는 활성 화면이 최상단 — top_abs = sb_count(활성 행의 절대 시작).
+            var snap = if (self.preedit) |preedit_bytes| self.snapshotWithPreedit(preedit_bytes) else self.snapshot();
+            snap.placements = self.buildPlacementViews(self.sb_count);
+            return snap;
         }
         self.ensureScrollbackRewrapped(); // 과거가 보이는 합성 직전, 행들을 현재 폭으로
 
@@ -3026,6 +3206,8 @@ pub const TerminalCore = struct {
             self.viewport_prompt_marks[r] = self.viewportRowPrompt(r);
         }
 
+        // 위로 스크롤한 뷰포트의 최상단 절대 행 — clipAbsSpanToViewport와 같은 식.
+        const top_abs = self.sb_count - @min(self.view_offset, self.sb_count);
         return .{
             .size = self.size,
             // 과거를 보는 중엔 활성 커서가 화면 밖(아래)에 가려져 있으므로 커서를 숨긴다.
@@ -3033,6 +3215,7 @@ pub const TerminalCore = struct {
             .cells = self.viewport_cells,
             .prompt_marks = self.viewport_prompt_marks,
             .last_command_exit = self.last_command_exit,
+            .placements = self.buildPlacementViews(top_abs),
             .dirty = self.dirty,
         };
     }
@@ -6238,6 +6421,194 @@ test "kitty graphics transmit: 크기 불일치·PNG·zlib는 저장 안 함, RI
     try core.write("\x1bc");
     try std.testing.expect(!core.kitty_images.map.contains(9));
     try std.testing.expectEqual(@as(usize, 0), core.kitty_images.total_bytes);
+}
+
+// --- kitty graphics K1: placement(코어) — 저장/노출/생애주기 ---
+
+test "kitty graphics display(a=p): 커서 셀에 placement 생성 + 모든 display 키 파싱 + 뷰포트 매핑 (K1)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+
+    // 2x2 RGBA 이미지(i=7) 전송(표시 안 함) — transmit만으론 placement가 안 생긴다.
+    const raw = [_]u8{0xCD} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+
+    // 커서를 (행1,열2)로 옮기고(CUP 2;3) display(a=p)로 표시 — 모든 display 키를 함께 검증.
+    try core.write("\x1b[2;3H");
+    try core.write("\x1b_Ga=p,i=7,p=5,c=3,r=2,z=-1,X=4,Y=6,x=1,y=2,w=8,h=9,C=1\x1b\\");
+
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    const p = core.kitty_placements.items[0];
+    try std.testing.expectEqual(@as(u32, 7), p.image_id);
+    try std.testing.expectEqual(@as(u32, 5), p.placement_id);
+    try std.testing.expectEqual(@as(usize, 1), p.anchor_row); // sb_count(0)+cursor.row(1)
+    try std.testing.expectEqual(@as(u16, 2), p.anchor_col);
+    try std.testing.expectEqual(@as(u32, 3), p.columns);
+    try std.testing.expectEqual(@as(u32, 2), p.rows);
+    try std.testing.expectEqual(@as(i32, -1), p.z);
+    try std.testing.expectEqual(@as(u32, 4), p.cell_x_offset);
+    try std.testing.expectEqual(@as(u32, 6), p.cell_y_offset);
+    try std.testing.expectEqual(@as(u32, 1), p.src_x);
+    try std.testing.expectEqual(@as(u32, 2), p.src_y);
+    try std.testing.expectEqual(@as(u32, 8), p.src_width);
+    try std.testing.expectEqual(@as(u32, 9), p.src_height);
+    try std.testing.expectEqual(@as(u16, 1), core.cursor.row); // C=1 → 커서 안 움직임
+
+    // renderSnapshot(바닥)은 뷰포트 상대 placement를 노출(top_abs=sb_count=0 → row=anchor=1).
+    const snap = core.renderSnapshot();
+    try std.testing.expectEqual(@as(usize, 1), snap.placements.len);
+    try std.testing.expectEqual(@as(i32, 1), snap.placements[0].row);
+    try std.testing.expectEqual(@as(u16, 2), snap.placements[0].col);
+    try std.testing.expectEqual(@as(u32, 7), snap.placements[0].image_id);
+    try std.testing.expectEqual(@as(i32, -1), snap.placements[0].z);
+}
+
+test "kitty graphics display(a=T): transmit+display 한 command로 이미지+placement (K1)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    const raw = [_]u8{0x10} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=4,c=2,r=1;{s}\x1b\\", .{b64s}));
+    try std.testing.expect(core.kitty_images.map.contains(4)); // 저장
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // 표시
+    try std.testing.expectEqual(@as(u32, 4), core.kitty_placements.items[0].image_id);
+}
+
+test "kitty graphics display: 없는 이미지/ i=0은 placement를 만들지 않는다 (K1)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    try core.write("\x1b_Ga=p,i=99\x1b\\"); // 전송된 적 없는 이미지
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    try core.write("\x1b_Ga=p\x1b\\"); // i 없음(0)
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+}
+
+test "kitty graphics placement: (image_id,placement_id) 같으면 교체, 다르면 별개 (K1)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    const raw = [_]u8{0x22} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
+
+    try core.write("\x1b_Ga=p,i=7,p=1,z=1\x1b\\");
+    try core.write("\x1b_Ga=p,i=7,p=1,z=2\x1b\\"); // 같은 키 → 교체
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(i32, 2), core.kitty_placements.items[0].z); // 갱신
+
+    try core.write("\x1b_Ga=p,i=7,p=2\x1b\\"); // 다른 placement_id → 별개
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len);
+}
+
+test "kitty graphics display: 커서 이동 정책(C, r) (K1)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 6 });
+    defer core.deinit();
+    const raw = [_]u8{0x33} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{b64s}));
+
+    // 기본(C 없음) + r=2 → 커서가 r만큼 아래로(행0 → 행2).
+    try core.write("\x1b[1;1H\x1b_Ga=p,i=1,r=2\x1b\\");
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
+    // r 미지정 → 코어가 span을 몰라 이동 안 함(행 유지).
+    try core.write("\x1b[1;1H\x1b_Ga=p,i=1\x1b\\");
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
+    // C=1 → r이 있어도 이동 안 함.
+    try core.write("\x1b[1;1H\x1b_Ga=p,i=1,r=3,C=1\x1b\\");
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
+    // 화면 끝을 넘기는 이동은 스크롤 없이 마지막 행(rows-1=5)으로 clamp.
+    try core.write("\x1b[5;1H\x1b_Ga=p,i=1,r=10\x1b\\"); // 행4 +10 → clamp 5
+    try std.testing.expectEqual(@as(u16, 5), core.cursor.row);
+}
+
+test "kitty graphics delete: 이미지와 그 placement를 함께 제거 (K1)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    const raw = [_]u8{0x44} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
+    try core.write("\x1b_Ga=p,i=7,p=1\x1b\\");
+    try core.write("\x1b_Ga=p,i=7,p=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len);
+
+    try core.write("\x1b_Ga=d,i=7\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(7));
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+}
+
+test "kitty graphics placement: RIS는 placement를 비운다 (K1)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    const raw = [_]u8{0x55} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
+    try core.write("\x1b_Ga=p,i=7\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try core.write("\x1bc"); // RIS
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+}
+
+test "kitty graphics placement: 스크롤백 eviction에 따라 anchor 보정·제거 (K1)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    core.max_scrollback = 2; // 작은 스크롤백으로 eviction을 빨리 유발
+    const raw = [_]u8{0x66} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
+
+    // 활성 행0에 표시 → anchor 절대 행 0.
+    try core.write("\x1b[1;1H\x1b_Ga=p,i=7,p=1\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items[0].anchor_row);
+
+    // 개행 3번 → 스크롤백이 가득(sb_count=2)차지만 eviction 전이라 anchor(절대 0) 유지.
+    try core.write("\n\n\n");
+    try std.testing.expectEqual(@as(usize, 2), core.sb_count);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items[0].anchor_row);
+
+    // 한 번 더 → 가장 오래된 행 eviction → 화면 밖이 된 anchor 0 placement 제거.
+    try core.write("\n");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+}
+
+test "kitty graphics placement: 위로 스크롤하면 뷰포트 상대 row로 환산 (K1)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    const raw = [_]u8{0x77} ** 16;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [128]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{b64s}));
+
+    // 행0에 표시(anchor abs 0). 개행으로 스크롤백 2줄 쌓아 placement가 활성 화면 위로 올라가게.
+    try core.write("\x1b[1;1H\x1b_Ga=p,i=7\x1b\\");
+    try core.write("\n\n\n"); // sb_count=2, anchor 0 유지(default max_scrollback이라 eviction 없음)
+    try std.testing.expectEqual(@as(usize, 2), core.sb_count);
+
+    // 바닥에서는 anchor abs0가 top_abs(=sb_count=2) 위라 row=-2(화면 밖, 렌더러가 클립).
+    try std.testing.expectEqual(@as(i32, -2), core.renderSnapshot().placements[0].row);
+
+    // 맨 위까지 스크롤(view_offset=2) → top_abs=0 → row=0(보임).
+    core.scrollViewport(2);
+    const snap = core.renderSnapshot();
+    try std.testing.expectEqual(@as(usize, 1), snap.placements.len);
+    try std.testing.expectEqual(@as(i32, 0), snap.placements[0].row);
+    try std.testing.expectEqual(@as(u16, 0), snap.placements[0].col);
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

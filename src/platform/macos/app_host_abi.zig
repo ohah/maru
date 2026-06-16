@@ -411,6 +411,22 @@ pub export fn maru_macos_app_dev_session_copy_text(
     return @intFromEnum(Status.ok);
 }
 
+// OSC 52 클립보드 쓰기 데이터. 반환 버퍼는 Zig 소유로 다음 pending_clipboard/destroy까지 유효하다. 정책
+// (env opt-in `MARU_OSC52_WRITE`)이 deny이거나 데이터 없으면 len 0. Swift가 tick마다 호출해 NSPasteboard에 쓴다.
+pub export fn maru_macos_app_dev_session_pending_clipboard(
+    session: ?*DevSession,
+    out_ptr: ?*?[*]const u8,
+    out_len: ?*usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
+    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const data = dev_session.pendingClipboard();
+    ptr_out.* = if (data.len > 0) data.ptr else null;
+    len_out.* = data.len;
+    return @intFromEnum(Status.ok);
+}
+
 // OSC 7로 셸이 보고한 현재 작업 디렉터리(percent-decode된 경로). 반환 버퍼는 Zig(core) 소유로
 // 다음 OSC 7/RIS/destroy까지 유효하다. 한 번도 안 받았으면 len 0. Swift가 창 제목에 쓴다.
 pub export fn maru_macos_app_dev_session_cwd(

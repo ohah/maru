@@ -186,6 +186,60 @@ pub const KittyPlacement = struct {
     z: i32 = 0, // z-index(<0 텍스트 뒤, >=0 텍스트 앞).
 };
 
+/// kitty 이미지 placement의 source crop(UV용)과 목적지 픽셀 크기(quad/커서 advance용). buildGpuImages
+/// (렌더러)와 kittyDisplay의 자동 크기 커서 advance(코어)가 **같은 환산식**을 쓰도록 단일 출처로 둔다 —
+/// 어긋나면 화면에 그려진 이미지 행 수와 커서가 내려간 행 수가 달라진다.
+pub const PlacementGeometry = struct {
+    src_x: u32,
+    src_y: u32,
+    src_w: u32,
+    src_h: u32,
+    dest_w: f32,
+    dest_h: f32,
+
+    /// 이미지 픽셀 크기·placement의 src crop/columns/rows·셀 메트릭으로 source 사각형과 목적지 픽셀 크기를
+    /// 정한다. columns/rows가 둘 다면 셀수×셀크기, 한쪽만이면 종횡비 유지, 둘 다 0이면 source 픽셀(자동 크기).
+    /// crop이 비거나(잘린 영역 0) src 원점이 이미지 밖이면 null(그릴 게 없음). 베이스: kitty graphics protocol
+    /// display data(c/r/x/y/w/h). 단일 출처: 코어 커서 advance와 렌더러 dest가 이 함수를 공유한다.
+    pub fn compute(
+        img_width: u32,
+        img_height: u32,
+        src_x: u32,
+        src_y: u32,
+        src_width: u32,
+        src_height: u32,
+        columns: u32,
+        rows: u32,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) ?PlacementGeometry {
+        if (src_x >= img_width or src_y >= img_height) return null;
+        const max_sw = img_width - src_x;
+        const max_sh = img_height - src_y;
+        const sw = if (src_width == 0) max_sw else @min(src_width, max_sw);
+        const sh = if (src_height == 0) max_sh else @min(src_height, max_sh);
+        if (sw == 0 or sh == 0) return null;
+
+        const cw: f32 = @floatFromInt(cell_width_px);
+        const ch: f32 = @floatFromInt(cell_height_px);
+        const sw_f: f32 = @floatFromInt(sw);
+        const sh_f: f32 = @floatFromInt(sh);
+        var dest_w = sw_f;
+        var dest_h = sh_f;
+        if (columns > 0 and rows > 0) {
+            dest_w = @as(f32, @floatFromInt(columns)) * cw;
+            dest_h = @as(f32, @floatFromInt(rows)) * ch;
+        } else if (columns > 0) {
+            dest_w = @as(f32, @floatFromInt(columns)) * cw;
+            dest_h = if (sw_f > 0) sh_f * (dest_w / sw_f) else sh_f;
+        } else if (rows > 0) {
+            dest_h = @as(f32, @floatFromInt(rows)) * ch;
+            dest_w = if (sh_f > 0) sw_f * (dest_h / sh_f) else sw_f;
+        }
+        return .{ .src_x = src_x, .src_y = src_y, .src_w = sw, .src_h = sh, .dest_w = dest_w, .dest_h = dest_h };
+    }
+};
+
 pub const RenderSnapshot = struct {
     size: Size,
     cursor: Cursor = .{},

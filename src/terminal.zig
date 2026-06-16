@@ -19,6 +19,7 @@ pub const ModifierSet = input.ModifierSet;
 pub const RenderSnapshot = types.RenderSnapshot;
 pub const KittyPlacement = types.KittyPlacement;
 pub const KittyImageView = types.KittyImageView;
+pub const PlacementGeometry = types.PlacementGeometry;
 pub const RowCodepoints = types.RowCodepoints;
 pub const SemanticPrompt = types.SemanticPrompt;
 pub const RowPrompt = types.RowPrompt;

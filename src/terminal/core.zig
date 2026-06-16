@@ -269,6 +269,11 @@ pub const TerminalCore = struct {
     // chunking 비활성. 베이스: kitty graphics protocol(chunked transmission).
     kitty_chunk: std.ArrayListUnmanaged(u8) = .empty,
     kitty_chunk_cmd: ?KittyGraphicsCommand = null,
+    // 셀 픽셀 크기(platform이 setCellMetrics로 주입, 폰트·DPI·resize 시 갱신). **kitty 자동 크기 이미지의
+    // 커서 advance에만** 쓴다 — 그 외 픽셀↔셀 환산은 여전히 렌더러 책임(K1을 셀 픽셀 1쌍 보관으로만 완화).
+    // 0이면 미보유(헤드리스 등) — 자동 크기 advance를 건너뛴다. 마우스 1016이 픽셀을 주입하는 것과 같은 결.
+    cell_width_px: u32 = 0,
+    cell_height_px: u32 = 0,
     /// kitty graphics 이미지 저장소(transmit된 이미지, image_id→픽셀 버퍼). 렌더는 후속.
     kitty_images: KittyImageStorage = .{},
     /// kitty graphics placement(표시 중인 이미지 인스턴스) 목록. (image_id, placement_id)로 식별 —
@@ -1714,8 +1719,9 @@ pub const TerminalCore = struct {
     /// kitty graphics display(a=p/T): 저장된 이미지를 현재 커서 셀에 placement로 건다. 이미지가 없으면
     /// 무시한다(graceful — transmit 실패/미전송 이미지). (image_id, placement_id) 같은 키는 교체한다.
     /// 커서 이동 정책(C): 기본(C≠1)은 이미지 아래로 커서를 내린다 — 단 행 수(r)가 명시됐을 때만이다.
-    /// 자동 크기(r 미지정)는 코어가 행 span을 모르므로(셀 픽셀 크기 비보유 — 렌더러 책임) 커서를 옮기지
-    /// 않는다(K1 한계, 문서화). 화면 끝을 넘기는 이동은 스크롤 없이 마지막 행으로 clamp한다(이미지 표시가
+    /// 자동 크기(r 미지정)는 setCellMetrics로 주입된 셀 메트릭이 있으면 이미지 픽셀 높이를 행 span으로 환산해
+    /// 내리고(kittyAdvanceRows — 렌더러 buildGpuImages와 같은 `PlacementGeometry` 공유), 메트릭이 없으면
+    /// (헤드리스) 옮기지 않는다(K1 fallback). 화면 끝을 넘기는 이동은 스크롤 없이 마지막 행으로 clamp한다(이미지 표시가
     /// 스크롤을 유발하지 않게). 베이스: kitty graphics protocol display.
     fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
         if (cmd.image_id == 0) return;
@@ -1735,10 +1741,44 @@ pub const TerminalCore = struct {
             .rows = cmd.rows,
             .z = cmd.z,
         });
-        if (!cmd.no_cursor_move and cmd.rows > 0) {
-            const target = @as(usize, self.cursor.row) + cmd.rows;
-            self.cursor.row = @intCast(@min(target, self.size.rows - 1));
+        if (!cmd.no_cursor_move) {
+            const rows_span = self.kittyAdvanceRows(cmd);
+            if (rows_span > 0) {
+                const target = @as(usize, self.cursor.row) + rows_span;
+                self.cursor.row = @intCast(@min(target, self.size.rows - 1));
+            }
         }
+    }
+
+    /// 셀 픽셀 크기를 platform이 주입한다(폰트·DPI·resize 시 갱신). kitty 자동 크기 이미지의 커서 advance에
+    /// 쓴다(마우스 1016이 픽셀을 주입하는 것과 같은 결). 그 외 픽셀↔셀 환산은 렌더러 책임(K1).
+    pub fn setCellMetrics(self: *TerminalCore, cell_width_px: u32, cell_height_px: u32) void {
+        self.cell_width_px = cell_width_px;
+        self.cell_height_px = cell_height_px;
+    }
+
+    /// kitty display가 커서를 내릴 행 수. rows(r)가 명시되면 그 값, 자동 크기(r 미지정)면 셀 메트릭이 있을 때
+    /// 이미지 dest 픽셀 높이를 셀 높이로 올림해 환산한다 — 렌더러 buildGpuImages와 같은 PlacementGeometry를
+    /// 써 화면에 그려진 행 수와 어긋나지 않는다. 셀 메트릭 미보유(cell_height_px==0, 헤드리스)면 자동 크기는
+    /// 0(K1대로 미이동). 베이스: kitty graphics protocol display(cursor advance), Ghostty gridSize 동작 비교.
+    fn kittyAdvanceRows(self: *const TerminalCore, cmd: KittyGraphicsCommand) u16 {
+        if (cmd.rows > 0) return @intCast(@min(cmd.rows, @as(u32, std.math.maxInt(u16))));
+        if (self.cell_height_px == 0) return 0; // 셀 메트릭 미보유 — 자동 크기 환산 불가
+        const img = self.kitty_images.map.get(cmd.image_id) orelse return 0;
+        const geom = types.PlacementGeometry.compute(
+            img.width,
+            img.height,
+            cmd.src_x,
+            cmd.src_y,
+            cmd.src_width,
+            cmd.src_height,
+            cmd.columns,
+            cmd.rows,
+            self.cell_width_px,
+            self.cell_height_px,
+        ) orelse return 0;
+        const span = @ceil(geom.dest_h / @as(f32, @floatFromInt(self.cell_height_px)));
+        return @intFromFloat(@min(span, 65535.0));
     }
 
     /// placement를 추가하거나 같은 (image_id, placement_id)면 교체한다. 상한 초과면 거부(graceful),
@@ -6886,7 +6926,7 @@ test "kitty graphics display: 커서 이동 정책(C, r) (K1)" {
     // 기본(C 없음) + r=2 → 커서가 r만큼 아래로(행0 → 행2).
     try core.write("\x1b[1;1H\x1b_Ga=p,i=1,r=2\x1b\\");
     try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
-    // r 미지정 → 코어가 span을 몰라 이동 안 함(행 유지).
+    // r 미지정 + 셀 메트릭 미주입(이 테스트는 setCellMetrics를 안 부른다) → 환산 불가로 이동 안 함(K1 fallback).
     try core.write("\x1b[1;1H\x1b_Ga=p,i=1\x1b\\");
     try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
     // C=1 → r이 있어도 이동 안 함.
@@ -7387,6 +7427,41 @@ test "kitty graphics: 단일 APC가 4096B를 넘는 큰 transmit도 받는다 (�
     // 과거엔 4096 초과 → apc_overflow로 silent drop. 이제 동적 버퍼라 정상 저장된다.
     try std.testing.expect(core.kitty_images.map.contains(1));
     try std.testing.expectEqual(@as(u32, 40), core.kitty_images.map.get(1).?.width);
+}
+
+test "kitty graphics: 자동 크기 이미지가 셀 메트릭으로 커서를 advance한다 (code review #2)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer core.deinit();
+    core.setCellMetrics(8, 16); // 셀 8×16 px (platform 주입 모사)
+    // 16×48 px RGBA 이미지: 높이 48 / 셀 16 = 정확히 3행. c/r 미지정(자동 크기)이라 코어가 메트릭으로 환산.
+    const px: usize = 16 * 48 * 4;
+    const raw = try std.testing.allocator.alloc(u8, px);
+    defer std.testing.allocator.free(raw);
+    @memset(raw, 9);
+    const b64 = try std.testing.allocator.alloc(u8, std.base64.standard.Encoder.calcSize(px));
+    defer std.testing.allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, raw);
+    const seq = try std.fmt.allocPrint(std.testing.allocator, "\x1b_Ga=T,f=32,s=16,v=48,i=1;{s}\x1b\\", .{b64});
+    defer std.testing.allocator.free(seq);
+    try core.write(seq); // a=T: transmit + display(커서 위치에 placement + advance)
+    try std.testing.expectEqual(@as(u16, 3), core.cursor.row); // 48px / 16px = 3행 내려감
+}
+
+test "kitty graphics: 셀 메트릭이 없으면 자동 크기는 커서를 안 옮긴다 (K1 fallback)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer core.deinit();
+    // setCellMetrics 호출 안 함 → cell_height_px==0 (헤드리스). 자동 크기는 환산 불가라 미advance.
+    const px: usize = 16 * 48 * 4;
+    const raw = try std.testing.allocator.alloc(u8, px);
+    defer std.testing.allocator.free(raw);
+    @memset(raw, 9);
+    const b64 = try std.testing.allocator.alloc(u8, std.base64.standard.Encoder.calcSize(px));
+    defer std.testing.allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, raw);
+    const seq = try std.fmt.allocPrint(std.testing.allocator, "\x1b_Ga=T,f=32,s=16,v=48,i=1;{s}\x1b\\", .{b64});
+    defer std.testing.allocator.free(seq);
+    try core.write(seq);
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row); // 메트릭 없음 → 미이동(K1대로)
 }
 
 test "mode 2027: skin tone after a flag does not clobber the flag's combining (review #15)" {

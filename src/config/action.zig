@@ -30,8 +30,9 @@ pub const Action = union(enum) {
     // 카탈로그(command_catalog.entries)에는 안 넣는다 — 팝업이 자기 토글을 목록에 보이는 재귀를 피한다.
     toggle_command_palette,
     // 스크롤백 Find(⌘F)를 토글한다. 앱 UI 상태(chrome find 컴포넌트)라 dispatchAppAction이 열고/닫는다.
-    // 모달이 열린 동안 키는 검색 입력으로 라우팅된다(handleKeyEvent). 카탈로그에는 안 넣는다(팝업 토글과 같은
-    // 규율 — 모달 토글은 목록 항목이 아니다. 팝업에서 Find 띄우기는 후속).
+    // 모달이 열린 동안 키는 검색 입력으로 라우팅된다(handleKeyEvent). **카탈로그에 넣어 커맨드 팝업에 노출한다**
+    // (선택 시 acceptPalette가 팝업을 닫고 Find를 연다) — 자기 토글이라 재귀인 toggle_command_palette와 달리 Find는
+    // 별개 모달이라 띄워도 된다. 단 메뉴 Find 서브메뉴는 keyEquivalent 없이 따로(키바인딩 가림 방지).
     toggle_find,
     // 스크롤백 Find의 다음/이전 매치로 이동(⌘G/⌘⇧G) — **오버레이가 닫혀 있어도** 동작한다(보존된 검색어로
     // 재검색해 네비게이션, macOS Find Next 관례). dispatchAppAction이 findNavigate로 넘긴다. 오버레이가 열린

@@ -78,6 +78,18 @@ pub const CoreTextGlyphRasterizer = struct {
             );
             return .{ .non_clear_pixels = non_clear };
         }
+        // Powerline(U+E0B0~E0BF): 삼각형·반원 separator도 폰트(powerline-symbols) 대신 직접 합성 — 셀에 꽉 차
+        // 다음 세그먼트와 이음매 없이. 폰트가 PUA 글리프를 안 가지면(glyph_id==0) 더더욱 합성이 필요하다.
+        if (renderer.powerline_glyph.isPowerline(request.run.codepoint)) {
+            const non_clear = renderer.powerline_glyph.fillCoverage(
+                request.run.codepoint,
+                request.slot.width_px,
+                request.slot.height_px,
+                request.bytes_per_row,
+                request.pixels,
+            );
+            return .{ .non_clear_pixels = non_clear };
+        }
         const font_identity = self.font_registry.get(request.run.font_id) orelse
             return error.RasterizerFailed;
 

@@ -391,8 +391,9 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
     if (cp >= 0x2500 && cp <= 0x257F) {
         return true;
     }
-    // powerline_glyph: Powerline separator(U+E0B0~E0BF — 삼각형·반원·thin). renderer/powerline_glyph.zig와 동기.
-    if (cp >= 0xE0B0 && cp <= 0xE0BF) {
+    // powerline_glyph: Powerline separator(U+E0B0~E0BF — 삼각형·반원·thin) + Powerline-extra 사다리꼴(E0D2·E0D4).
+    // renderer/powerline_glyph.zig와 동기.
+    if ((cp >= 0xE0B0 && cp <= 0xE0BF) || cp == 0xE0D2 || cp == 0xE0D4) {
         return true;
     }
     // braille_glyph: Braille 점 패턴(U+2800~28FF — 2열×4행 8점 비트마스크). renderer/braille_glyph.zig와 동기.

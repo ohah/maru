@@ -14,6 +14,7 @@ const ChromeState = @import("state.zig").ChromeState;
 const notice = @import("components/notice.zig");
 const find = @import("components/find.zig");
 const palette = @import("components/palette.zig");
+const context_menu = @import("components/context_menu.zig");
 
 /// 컴포넌트 handle이 낸 의도를 session이 디스패치할 형태로 host가 정규화한 것. chrome은 config.Action·session을
 /// 모르므로(중립) 부수효과를 직접 안 하고 이 intent만 돌려준다 — platform이 받아 재검색·스크롤·닫기를 실행한다.
@@ -27,6 +28,9 @@ pub const HostAction = union(enum) {
     palette_accept,
     palette_query_changed,
     palette_selection_changed,
+    context_menu_accept, // 우클릭 메뉴 항목 선택 — platform이 selected→대상 액션(rename) 해석·실행
+    context_menu_close,
+    context_menu_selection_changed,
 };
 
 pub const ChromeHost = struct {
@@ -34,6 +38,7 @@ pub const ChromeHost = struct {
     notice: notice.State = .{},
     find: find.State = .{},
     palette: palette.State = .{},
+    context_menu: context_menu.State = .{},
 
     /// 컴포넌트 State 중 heap을 든 것(find/palette의 query·preedit)을 해제한다. DevSession.deinit가 부른다.
     pub fn deinit(self: *ChromeHost, allocator: std.mem.Allocator) void {
@@ -79,6 +84,21 @@ pub const ChromeHost = struct {
         if (ops.items.len > 0) try out.append(arena, .{ .layer = palette.layer, .ops = ops.items });
     }
 
+    /// context_menu도 항목 라벨을 platform이 주입해야 그릴 수 있다(palette와 동형 — generic collectDraws는 항목이
+    /// 없어 못 부른다). platform(대상별 항목 소유)이 items를 빌드해 이걸 부른다. 닫힘이면 무동작(빈 out).
+    pub fn collectContextMenuDraws(
+        self: *ChromeHost,
+        items: []const []const u8,
+        p: props.ChromeProps,
+        tk: *const tokens.Tokens,
+        arena: std.mem.Allocator,
+        out: *std.ArrayList(draw.ChromeDraw),
+    ) !void {
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try context_menu.view(&self.context_menu, items, p, tk, arena, &ops);
+        if (ops.items.len > 0) try out.append(arena, .{ .layer = context_menu.layer, .ops = ops.items });
+    }
+
     /// 입력을 모달 우선으로 라우팅한다. 열린 컴포넌트가 있으면 소비하고 의도(HostAction)를 돌려준다(session이
     /// 디스패치). 열린 게 없으면 null(소비 안 함 — 뒤 터미널로 흘림). 우선순위: Notice > Find(배타적이라 동시
     /// 열림은 라우팅이 막는다). find는 query 변형에 allocator가 필요해 받는다(notice는 안 씀).
@@ -86,6 +106,13 @@ pub const ChromeHost = struct {
         if (self.notice.open) {
             _ = notice.handle(ev, &self.notice); // Enter/Esc면 닫음. session 부수효과 없음.
             return .none;
+        }
+        if (self.context_menu.open) {
+            return switch (context_menu.handle(ev, &self.context_menu)) {
+                .accept => .context_menu_accept,
+                .close => .context_menu_close,
+                .selection_changed => .context_menu_selection_changed,
+            };
         }
         if (self.find.open) {
             return switch (find.handle(allocator, ev, &self.find)) {

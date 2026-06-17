@@ -59,7 +59,7 @@ pub const CellColors = struct {
     /// 필요해 받는다(기본 0x101010 — 명시 안 한 smoke도 안전).
     default_bg: color.Rgb = .{ .r = 0x10, .g = 0x10, .b = 0x10 },
     /// 커서 overlay 투영 색. null이면 커서를 투영하지 않는다 — glyph-atlas 픽셀을 그대로 검증하는
-    /// visible smoke는 커서 블록이 readback을 바꾸지 않게 null로 둔다(제품 dev session만 켠다).
+    /// visible smoke는 커서 블록이 readback을 바꾸지 않게 null로 둔다(제품 app session만 켠다).
     cursor: ?CursorColors = null,
     /// 선택 하이라이트 배경(theme.selection). selection span 안의 cell 배경을 이 색으로 덮는다.
     selection_bg: color.Rgb = .{ .r = 0x33, .g = 0x44, .b = 0x55 },
@@ -584,7 +584,7 @@ pub fn nativeCellsHaveAtlasPlacement(cells: []const NativeMetalCell) bool {
 }
 
 /// 가장 최근 frame의 Metal view. extern struct이므로 C ABI(app_host_abi.h의
-/// MaruAppHostDevMetalFrame)와 layout이 1:1이다. 모든 포인터는 MetalFrameBuffer가 소유한
+/// MaruAppHostMetalFrame)와 layout이 1:1이다. 모든 포인터는 MetalFrameBuffer가 소유한
 /// 배열을 가리키며, 그 버퍼의 다음 replace() 또는 deinit()까지만 유효하다.
 /// chrome rich 백엔드(C4b)의 GPU 렌더 프리미티브 — 둥근 사각형(모서리별 radius + 변별 테두리 + solid/
 /// gradient 채움). 셀 그리드(NativeMetalCell)와 **별개 파이프라인**으로 SDF anti-aliasing으로 그린다.
@@ -827,7 +827,7 @@ pub const MetalFrame = extern struct {
     // 렌더러가 origin offset 없이(0 + col*cw) 사이드바 strip 안에 그리고, 사이드바 배경 quad 위에
     // 블렌딩한다. "surface→rect"의 두 번째 surface(사이드바) — split(panel)도 rect별 cell 배열로
     // 같은 방식을 확장한다. null/0이면 사이드바 셀 없음(배경 strip만). 포인터 수명은 cells와 같은
-    // 계약(소유 버퍼의 다음 갱신/해제까지) — DevSession이 owned ArrayList로 보관한다.
+    // 계약(소유 버퍼의 다음 갱신/해제까지) — AppSession이 owned ArrayList로 보관한다.
     sidebar_cells: ?[*]const NativeMetalCell = null,
     sidebar_cell_count: usize = 0,
     // 사이드바 탭 슬롯 한 칸의 픽셀 높이(≈2.5×cell_height). 렌더러가 사이드바 셀을 cell 높이가
@@ -858,7 +858,7 @@ pub const MetalFrame = extern struct {
     // kitty graphics(K4c): 현재 살아있는 이미지 id 집합(활성 surface 저장소 키). 렌더러가 이 집합에 없는
     // 캐시 텍스처를 evict해 GPU 메모리를 회수한다(delete/evict/RIS 반영). 비면(null) evict 안 함 — 단,
     // count==0이고 image_id 채널이 활성이면 "전부 evict"로 해석되지 않도록 호출자가 보장(이미지 없는 frame은
-    // 그냥 비워 보낸다). DevSession이 kitty_uploaded도 같은 집합으로 prune해 재업로드 동기화.
+    // 그냥 비워 보낸다). AppSession이 kitty_uploaded도 같은 집합으로 prune해 재업로드 동기화.
     live_image_ids: ?[*]const u32 = null,
     live_image_id_count: usize = 0,
     // 화면 clear color(빈 영역/기본 배경이 비치는 색, 0xAARRGGBB). OSC 11(배경 set)이 있으면 그 색, 없으면
@@ -957,12 +957,12 @@ pub const MetalFrameBuffer = struct {
     // 사이드바 셀(밴드 ++ 탭 제목 glyph) — replace가 밴드 cells와 사이드바 RenderFrame을 합쳐 만든다.
     // 제목 glyph는 터미널과 같은 atlas를 쓰므로 uploads/pixels도 cells와 같은 머지 스트림에 들어간다.
     sidebar_cells: []NativeMetalCell = &.{},
-    // C4b: chrome rich GPU quad 프리미티브(둥근 박스). replace가 DevSession이 chrome lowering으로 모은 것을
+    // C4b: chrome rich GPU quad 프리미티브(둥근 박스). replace가 AppSession이 chrome lowering으로 모은 것을
     // dupe 소유한다. tui 테마/빈이면 길이 0(렌더 무동작). 사이드바/모달/divider가 공유하는 통합 배열.
     gpu_quads: []GpuQuad = &.{},
     // C4b 모달: chrome 그림자(GpuShadow) — 모달 배경의 떠 보이는 blur. per-frame(모달만), gpu_quads와 동형 소유.
     gpu_shadows: []GpuShadow = &.{},
-    // kitty graphics(K2): 이미지 placement 드로우 프리미티브 + 텍스처 업로드 채널. replace가 DevSession이
+    // kitty graphics(K2): 이미지 placement 드로우 프리미티브 + 텍스처 업로드 채널. replace가 AppSession이
     // 모은 것을 dupe 소유한다(gpu_quads와 동형). 이미지 없으면 길이 0(렌더 무동작). image_pixels는 이
     // frame에 (재)업로드할 이미지들의 RGBA 연속 버퍼다.
     gpu_images: []GpuImage = &.{},
@@ -1015,12 +1015,12 @@ pub const MetalFrameBuffer = struct {
         // 달리 커서 suffix '뒤'에 붙여 터미널·chrome·커서 위 맨 앞에 그린다 — 모달이 그 아래를 다 덮는다. 각 셀이
         // 자기 bg(불투명)+glyph를 들어 buildNativeCellsSplit로 투영되고, raster는 uploads에 머지된다. null이면 무동작.
         overlay_frame: ?PaneFrame,
-        // C4b: chrome rich GPU quad 프리미티브(DevSession이 chrome lowering으로 모은 것). buffer가 dupe 소유한다.
+        // C4b: chrome rich GPU quad 프리미티브(AppSession이 chrome lowering으로 모은 것). buffer가 dupe 소유한다.
         // 셀 그리드와 별개 파이프라인으로 렌더된다(둥근 박스). 빈이면 0(tui — 무동작).
         gpu_quads: []const GpuQuad,
-        // C4b 모달: chrome 그림자(DevSession이 lowering으로 모은 것). buffer가 dupe 소유. 빈이면 0(무동작).
+        // C4b 모달: chrome 그림자(AppSession이 lowering으로 모은 것). buffer가 dupe 소유. 빈이면 0(무동작).
         gpu_shadows: []const GpuShadow,
-        // kitty graphics(K2): 이미지 placement 드로우 프리미티브 + 텍스처 업로드 채널(DevSession이 모은 것).
+        // kitty graphics(K2): 이미지 placement 드로우 프리미티브 + 텍스처 업로드 채널(AppSession이 모은 것).
         // buffer가 dupe 소유. 이미지 없으면 모두 빈 슬라이스(렌더 무동작). image_pixels는 image_uploads가
         // 가리키는 RGBA 연속 버퍼다(없으면 빈).
         gpu_images: []const GpuImage,

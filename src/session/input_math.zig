@@ -1,5 +1,5 @@
 //! L2 session core — 순수 입력/재정렬 수학(OS·platform 무관). 휠/트랙패드·페이지 스크롤 환산과 탭 재정렬
-//! 인덱스 수학을 모은다. platform/macos/app_dev_session에서 추출했다(docs/layering-and-portability.md §3 — 2차
+//! 인덱스 수학을 모은다. platform/macos/app_session에서 추출했다(docs/layering-and-portability.md §3 — 2차
 //! 추출, "입력 수학(순수)" 그룹). 중립 입력 타입(terminal.input.Key)만 의존하고 platform/pty를 모른다 —
 //! tests/boundary/imports.zig가 강제. 순수 함수라 OS·렌더 없이 단위 테스트로 동작을 고정한다.
 
@@ -71,7 +71,7 @@ pub fn pageScrollDelta(scroll_mode: bool, alt_active: bool, key: terminal.input.
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
-// 추출 전 app_dev_session.zig에 있던 단위 테스트를 코드와 함께 옮겼다(순수 함수라 OS 무관).
+// 추출 전 app_session.zig에 있던 단위 테스트를 코드와 함께 옮겼다(순수 함수라 OS 무관).
 
 test "wheelDeltaToLines accumulates sub-line trackpad deltas instead of dropping them" {
     var accum: f64 = 0;

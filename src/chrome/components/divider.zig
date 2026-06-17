@@ -27,7 +27,7 @@ pub const Seg = struct {
 
 /// 마우스 (x,y)가 어느 seg의 드래그 밴드 안인가 — 맞으면 그 index, 아니면 null. 밴드: normal 축은 경계 pos ± (cell
 /// 절반 + 2px 여유, 잡기 쉽게), 교차 축은 bounds 범위. 렌더 선(view)과 같은 seg라 "보이는 선 == 잡히는 선".
-/// 셀 0·비유한이면 매치 없음. 단일 panel(segs 빈)이면 항상 null. (옛 app_dev_session.dividerHit 수학 이전.)
+/// 셀 0·비유한이면 매치 없음. 단일 panel(segs 빈)이면 항상 null. (옛 app_session.dividerHit 수학 이전.)
 pub fn hitTest(segs: []const Seg, cell_width_px: u32, cell_height_px: u32, x_px: f64, y_px: f64) ?usize {
     if (cell_width_px == 0 or cell_height_px == 0 or !std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
     for (segs, 0..) |seg, i| {

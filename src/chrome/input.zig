@@ -6,7 +6,7 @@
 pub const Key = enum { enter, escape, up, down, backspace, char, other };
 
 /// 모디파이어 상태. find의 Shift+Enter(이전 매치)·⌘/⌃/⌥+글자(닫기) 같은 조합 판정에 쓴다. platform 어댑터가
-/// OS 모디파이어를 이걸로 매핑한다(예: app_dev_session.chromeInputFromKeyEvent).
+/// OS 모디파이어를 이걸로 매핑한다(예: app_session.chromeInputFromKeyEvent).
 pub const Mods = struct {
     shift: bool = false,
     control: bool = false,

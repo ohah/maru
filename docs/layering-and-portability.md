@@ -32,7 +32,7 @@ flowchart TD
 
 ## 3. 두 번의 추출
 
-현재 `platform/macos/app_dev_session.zig`(7649줄)는 L3+L2+L4를 뒤섞고 있다. 두 번 빼낸다:
+현재 `platform/macos/app_session.zig`(7649줄)는 L3+L2+L4를 뒤섞고 있다. 두 번 빼낸다:
 
 **1차 — chrome(L3) → `src/chrome/`** ([chrome-strategy.md] 상세)
 - 손조립 `NativeMetalCell`(`sentinelBgCell`·`appendVerticalLine`·`BarMetrics` 등 ~18곳) → `ChromeDraw`(semantic) → 백엔드 lowering.

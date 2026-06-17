@@ -38,7 +38,7 @@ CI에는 넣지 않는다(사람이 화면을 봐야 하는 대화형 메뉴). �
 
 ```sh
 brew install vttest        # 또는 https://invisible-island.net/vttest/ 소스 빌드
-mise run macos-app-dev     # Maru dev 앱을 띄운다(인터랙티브 셸)
+mise run macos-app     # Maru 앱을 띄운다(인터랙티브 셸)
 # 떠 있는 Maru 터미널 안에서:
 vttest
 ```

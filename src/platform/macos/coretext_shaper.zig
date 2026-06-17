@@ -67,7 +67,7 @@ pub const CoreTextDrawListShaper = struct {
     // 2면 slot이 2배가 되어 Retina에서 또렷하게 그릴 수 있다.
     device_scale: u16 = 1,
     // 실제 폰트 메트릭에서 온 cell 픽셀 크기(advance 폭 × line-height, device px). 0이면
-    // 메트릭이 없어 atlas가 정사각으로 대체한다. dev session이 CoreText에서 뽑아 넘긴다.
+    // 메트릭이 없어 atlas가 정사각으로 대체한다. app session이 CoreText에서 뽑아 넘긴다.
     cell_width_px: u16 = 0,
     cell_height_px: u16 = 0,
 

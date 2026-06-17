@@ -2,7 +2,7 @@
 //! State 없는 순수 함수). 드래그 재정렬이 인덱스 기반(`sidebar_drag_index: usize`)이라 라이브 포인터 부담이
 //! divider(`*Split`)보다 적다(§6). host가 중립 `Tab`(라벨·활성)을 주입하고, platform이 라이브 상태(폭·드래그
 //! 인덱스·hover)·제목 glyph 렌더(`buildSidebarTitleFrame` — CoreText는 platform 책임)·밴드 fill lowering을 맡는다.
-//! 이 컴포넌트는 (1) hit-test 순수 함수(옛 app_dev_session의 xInSidebar 등 이전)와 (2) 밴드 view(활성/호버 fill)를
+//! 이 컴포넌트는 (1) hit-test 순수 함수(옛 app_session의 xInSidebar 등 이전)와 (2) 밴드 view(활성/호버 fill)를
 //! 단일 출처로 든다. 단일 출처: docs/chrome-strategy.md §5.4, docs/layering-and-portability.md §5(C3a).
 
 const std = @import("std");
@@ -17,7 +17,7 @@ pub const layer = draw.Layer.sidebar;
 /// (CoreText 경계), chrome은 밴드(fill)·hit-test만 — label은 제목 glyph 완전 이주(후속) 시 view가 text op으로 쓸 자리다.
 pub const Tab = struct { label: []const u8, active: bool };
 
-// ── hit-test (옛 app_dev_session 순수 함수 이전, 같은 수학) ────────────────────────
+// ── hit-test (옛 app_session 순수 함수 이전, 같은 수학) ────────────────────────
 
 /// x(backing px)가 세로 사이드바 영역(0..width) 안인가. 폭 0·x<0·width 이상이면 false.
 pub fn inSidebar(x_px: f64, sidebar_width_px: u32) bool {

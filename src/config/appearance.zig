@@ -26,7 +26,7 @@ pub const ResolvedTheme = struct {
     search_match: color.Rgb,
     search_match_current: color.Rgb,
     // 세로 탭 사이드바 색. 명시 안 하면 background에서 파생(아래 resolveTheme): sidebar_background=+24,
-    // sidebar_active=+48. 플랫폼 렌더(app_dev_session.sidebarBg/sidebarActiveBg)는 이 resolved 값을
+    // sidebar_active=+48. 플랫폼 렌더(app_session.sidebarBg/sidebarActiveBg)는 이 resolved 값을
     // 읽기만 한다 — 색 파생의 단일 출처를 여기 둬 렌더 코드가 톤을 중복 정의하지 않게 한다.
     sidebar_background: color.Rgb,
     sidebar_active: color.Rgb,

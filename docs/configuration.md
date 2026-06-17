@@ -172,9 +172,9 @@ resolve 단계에서 다시 실패하지 않는다.)
   `theme.Config`로 파싱한다(단위 테스트로 고정, Linux CI 포함). I/O 래퍼 `config.loadConfigDefault`
   /`loadConfigFile`이 경로 해석과 파일 읽기를 감싼다.
 - **소유권**: 파싱된 문자열(`font.family`)은 `Parsed.arena`가 소유한다. `appearance.resolve`가 그
-  family 슬라이스를 빌리므로(복사 안 함), 호출자(dev session)는 `Parsed`를 세션 동안 보관하고
+  family 슬라이스를 빌리므로(복사 안 함), 호출자(app session)는 `Parsed`를 세션 동안 보관하고
   종료 시 `deinit`한다. 색은 resolve가 `Rgb` 값으로 변환하므로 수명 의존이 없다.
-- dev session은 시작 시 `config.loadConfigDefault(io, allocator)`로 로드해 `resolveAppearance`에
+- app session은 시작 시 `config.loadConfigDefault(io, allocator)`로 로드해 `resolveAppearance`에
   넘긴다. resolve가 (방어적으로) 실패하면 기본 appearance로 떨어진다.
 
 ## 범위와 후속

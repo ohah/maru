@@ -188,7 +188,7 @@ pub const SurfaceRuntime = struct {
 `RuntimeEventPump.drainBlockingUntilTermination`:
 
 - window loop가 붙기 전 headless integration을 위해 설계한 helper다.
-- `headless_demo`(`maru-dev demo` / `zig build demo`)가 이 helper의 첫 실소비자다. 다만 현재 macOS PTY integration test는 raw artifact용 output bytes를 따로 모아야 해서 이 helper 대신 `applyQueuedEvent`로 자체 루프를 돈다.
+- `headless_demo`(`maru demo` / `zig build demo`)가 이 helper의 첫 실소비자다. 다만 현재 macOS PTY integration test는 raw artifact용 output bytes를 따로 모아야 해서 이 helper 대신 `applyQueuedEvent`로 자체 루프를 돈다.
 - `app-pty-smoke`와 app PTY smoke harness들은 raw PTY bytes artifact를 남겨야 하므로 `applyQueuedEvent`와 `DrainSummary.recordPumpedEvent`를 조합해 직접 drain한다. 이 방식은 output bytes 관찰만 smoke가 하고, event 적용/해제 ownership은 여전히 pump가 소유하게 만든다. smoke harness는 제품 helper인 `drainBlockingUntilTermination`을 직접 쓰지 않고 smoke 전용 deadline wrapper를 사용한다. 그래야 shell/read thread hang은 `SmokeDrainTimedOut`으로 실패하고, queue 조기 close는 기존 lifecycle 실패(`ReaderQueueClosedBeforeTermination`)로 남는다.
 - exit 또는 read_error termination을 볼 때까지 기다린다.
 - queue가 먼저 닫히면 `ReaderQueueClosedBeforeTermination`으로 실패한다.

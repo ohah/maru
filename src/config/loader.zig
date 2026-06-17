@@ -499,7 +499,7 @@ pub fn defaultConfigPath(allocator: std.mem.Allocator) LoadError!?[]const u8 {
     return try std.fmt.allocPrint(allocator, "{s}/.config/maru/config", .{home});
 }
 
-/// 기본 경로에서 config를 로드한다(경로 해석 + 파일 읽기 + 파싱). dev session이 시작 시 호출하는
+/// 기본 경로에서 config를 로드한다(경로 해석 + 파일 읽기 + 파싱). app session이 시작 시 호출하는
 /// 단일 진입점. 경로/파일이 없으면 기본 Config. 호출자는 Parsed(arena)를 세션 동안 보관해야 한다
 /// (resolve가 font.family 슬라이스를 빌린다).
 pub fn loadDefault(io: std.Io, allocator: std.mem.Allocator) LoadError!Parsed {

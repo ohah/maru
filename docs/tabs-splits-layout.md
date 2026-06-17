@@ -176,5 +176,5 @@ quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.
 ## 검증 경로
 
 - 레이아웃 계산(사이드바 너비·터미널 영역·grid cols, split sub-사각형 분할)은 헤드리스 Zig 단위로 고정한다.
-- 사이드바/split의 시각 렌더와 클릭/드래그 인터랙션은 macOS smoke(스크립트 가능 부분) + `macos-app-dev`
+- 사이드바/split의 시각 렌더와 클릭/드래그 인터랙션은 macOS smoke(스크립트 가능 부분) + `macos-app`
   수동 검증. 클릭/드래그 좌표→탭/panel 히트 테스트는 Zig라 헤드리스 단위로 검증한다.

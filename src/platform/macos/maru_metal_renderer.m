@@ -195,7 +195,7 @@ bool maru_metal_renderer_set_atlas(
     MaruMetalRenderer *renderer,
     uint32_t atlas_width_px,
     uint32_t atlas_height_px,
-    const MaruAppHostDevMetalRasterUpload *uploads,
+    const MaruAppHostMetalRasterUpload *uploads,
     size_t upload_count,
     const uint8_t *raster_pixels,
     size_t raster_pixel_count
@@ -226,7 +226,7 @@ bool maru_metal_renderer_set_atlas(
         return true;
     }
     for (size_t i = 0; i < upload_count; i++) {
-        const MaruAppHostDevMetalRasterUpload upload = uploads[i];
+        const MaruAppHostMetalRasterUpload upload = uploads[i];
         // atlas 범위와 source 범위를 벗어나는 upload는 건너뛴다(손상된 frame 방어). 검증된
         // smoke의 maru_upload_fits_atlas와 같은 invariant를 모두 확인한다 — replaceRegion은
         // bytes_per_row*atlas_height_px 바이트를 읽으므로, byte_count만 봐선 OOB read를 막지
@@ -273,7 +273,7 @@ bool maru_metal_renderer_set_atlas(
    (2=underline 하단, 3=bar 좌측)과 색(전경 0x00RRGGBB·배경 0xAARRGGBB) 처리는 동일하다. */
 static void maru_fill_cell_quad(
     MaruRendererVertex *out,
-    const MaruAppHostDevMetalCell cell,
+    const MaruAppHostMetalCell cell,
     float origin_x,
     float cw,
     float py_top,
@@ -341,7 +341,7 @@ static void maru_fill_cell_quad(
    책임, Zig 데이터는 불변). */
 static void maru_fill_quad_instance(
     MaruRendererQuadVertex *out,
-    const MaruAppHostDevGpuQuad quad,
+    const MaruAppHostGpuQuad quad,
     float drawable_w,
     float drawable_h
 ) {
@@ -388,7 +388,7 @@ static void maru_fill_quad_instance(
    premultiplied). 순수 산술 — 모양은 셰이더가. */
 static void maru_fill_shadow_instance(
     MaruRendererShadowVertex *out,
-    const MaruAppHostDevGpuShadow sh,
+    const MaruAppHostGpuShadow sh,
     float drawable_w,
     float drawable_h
 ) {
@@ -429,7 +429,7 @@ static void maru_fill_shadow_instance(
    샘플/블렌딩은 셰이더. */
 static void maru_fill_image_quad(
     MaruRendererImageVertex *out,
-    const MaruAppHostDevGpuImage img,
+    const MaruAppHostGpuImage img,
     float drawable_w,
     float drawable_h
 ) {
@@ -457,7 +457,7 @@ static void maru_fill_image_quad(
    바로, RGB(bpp=3)는 alpha=255로 확장해 올린다. 손상/범위 밖 디스크립터는 건너뛴다(frame 방어). */
 static void maru_upload_image_textures(
     MaruMetalRendererImpl *impl,
-    const MaruAppHostDevGpuImageUpload *uploads,
+    const MaruAppHostGpuImageUpload *uploads,
     size_t upload_count,
     const uint8_t *pixels,
     size_t pixel_count
@@ -466,7 +466,7 @@ static void maru_upload_image_textures(
         return;
     }
     for (size_t i = 0; i < upload_count; i++) {
-        const MaruAppHostDevGpuImageUpload up = uploads[i];
+        const MaruAppHostGpuImageUpload up = uploads[i];
         if (up.width == 0 || up.height == 0 || (up.bpp != 3 && up.bpp != 4)) {
             continue;
         }
@@ -547,25 +547,25 @@ bool maru_metal_renderer_draw(
     uint16_t rows,
     uint32_t cell_width_px,
     uint32_t cell_height_px,
-    const MaruAppHostDevMetalCell *cells,
+    const MaruAppHostMetalCell *cells,
     size_t cell_count,
     uint32_t terminal_origin_x_px,
     uint32_t sidebar_bg,
-    const MaruAppHostDevMetalCell *sidebar_cells,
+    const MaruAppHostMetalCell *sidebar_cells,
     size_t sidebar_cell_count,
     uint32_t sidebar_slot_height_px,
     /* C4b: chrome rich GPU quad 프리미티브(둥근 사각형). NULL/0이면 안 그림(tui 테마). 셀 패스 아래
        (배경 레이어)에 별개 파이프라인으로 그린다. */
-    const MaruAppHostDevGpuQuad *gpu_quads,
+    const MaruAppHostGpuQuad *gpu_quads,
     size_t gpu_quad_count,
     size_t modal_cells_start,
     /* C4b: chrome 그림자(GpuShadow). NULL/0이면 안 그림. quad·셀보다 아래(맨 처음) 그린다. */
-    const MaruAppHostDevGpuShadow *gpu_shadows,
+    const MaruAppHostGpuShadow *gpu_shadows,
     size_t gpu_shadow_count,
     /* kitty graphics(K2): 이미지 placement + 텍스처 업로드 채널. */
-    const MaruAppHostDevGpuImage *gpu_images,
+    const MaruAppHostGpuImage *gpu_images,
     size_t gpu_image_count,
-    const MaruAppHostDevGpuImageUpload *image_uploads,
+    const MaruAppHostGpuImageUpload *image_uploads,
     size_t image_upload_count,
     const uint8_t *image_pixels,
     size_t image_pixel_count,
@@ -638,7 +638,7 @@ bool maru_metal_renderer_draw(
         // 1) 터미널 cells — 각 cell이 자기 panel의 origin을 들고 있다(origin_x + col×cw, origin_y + row×ch).
         //    단일 panel이면 전부 (사이드바 폭, 0)이라 기존과 같다. split은 panel별로 다른 origin을 준다.
         for (size_t i = 0; i < cell_count; i++) {
-            const MaruAppHostDevMetalCell tc = cells[i];
+            const MaruAppHostMetalCell tc = cells[i];
             maru_fill_cell_quad(&vertices[i * vertices_per_cell], tc, (float)tc.origin_x, cw, (float)tc.origin_y + (float)tc.row * ch, ch, drawable_w, drawable_h);
         }
         size_t quad_index = cell_count;
@@ -671,7 +671,7 @@ bool maru_metal_renderer_draw(
         const float slot_h = (sidebar_slot_height_px > 0u) ? (float)sidebar_slot_height_px : ch;
         const float glyph_pad = cw * 0.5f; // 제목 텍스트 좌측 여백(폰트 크기에 비례)
         for (size_t i = 0; i < sidebar_cells_n; i++) {
-            const MaruAppHostDevMetalCell sc = sidebar_cells[i];
+            const MaruAppHostMetalCell sc = sidebar_cells[i];
             const float slot_top = (float)sc.row * slot_h;
             float py_top, cell_h, sx_origin;
             if (sc.slot_id == 0u) { // 밴드/배경 — 슬롯 전체, 여백 없음

@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const exe = b.addExecutable(.{
-        .name = "maru-dev",
+        .name = "maru",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -478,7 +478,7 @@ pub fn build(b: *std.Build) void {
     });
     macos_app_host_abi_tests.root_module.addIncludePath(b.path("src/platform/macos"));
     if (target.result.os.tag == .macos) {
-        // macOS에서는 dev session이 실제 CoreText로 frame을 만들므로 계약 테스트도 그
+        // macOS에서는 app session이 실제 CoreText로 frame을 만들므로 계약 테스트도 그
         // ObjC 브리지와 framework를 링크해야 한다. Linux 빌드는 tick의 macOS 분기가
         // comptime으로 제외되어 이 심볼을 참조하지 않으므로 추가가 필요 없다.
         macos_app_host_abi_tests.root_module.addCSourceFile(.{
@@ -508,7 +508,7 @@ pub fn build(b: *std.Build) void {
     macos_app_host_abi_lib.root_module.addIncludePath(b.path("src/platform/macos"));
     if (target.result.os.tag == .macos) {
         // CoreText 브리지 object를 정적 라이브러리에 함께 담아, Swift 최종 링크가 .a 하나로
-        // dev session의 glyph rasterize 심볼을 모두 얻게 한다. CoreText/CoreGraphics
+        // app session의 glyph rasterize 심볼을 모두 얻게 한다. CoreText/CoreGraphics
         // framework는 Swift 링크 단계에서 제공한다.
         macos_app_host_abi_lib.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
@@ -538,10 +538,10 @@ pub fn build(b: *std.Build) void {
         // Swift 제품 host는 Zig compiler가 직접 만들 수 없으므로 xcrun swiftc를 build graph의
         // system command로 둔다. 대신 입력은 C header와 Zig static library로 제한해서
         // Swift가 Zig 내부 타입이나 allocator-owned storage에 묶이지 않게 한다.
-        const macos_app_dev_mkdir = b.addSystemCommand(&.{ "mkdir", "-p", "zig-out/bin" });
-        macos_app_dev_mkdir.setCwd(b.path("."));
+        const macos_app_mkdir = b.addSystemCommand(&.{ "mkdir", "-p", "zig-out/bin" });
+        macos_app_mkdir.setCwd(b.path("."));
 
-        const macos_app_dev_compile = b.addSystemCommand(&.{
+        const macos_app_compile = b.addSystemCommand(&.{
             "xcrun",
             "swiftc",
             "-parse-as-library",
@@ -549,13 +549,13 @@ pub fn build(b: *std.Build) void {
             macos_swift_target,
             "-import-objc-header",
         });
-        macos_app_dev_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
-        macos_app_dev_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
-        macos_app_dev_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
-        macos_app_dev_compile.addArgs(&.{
+        macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
+        macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
+        macos_app_compile.addArgs(&.{
             "-framework",
             "AppKit",
-            // dev session이 정적 라이브러리에 담긴 CoreText 브리지로 glyph를 rasterize하므로
+            // app session이 정적 라이브러리에 담긴 CoreText 브리지로 glyph를 rasterize하므로
             // 최종 링크에서 CoreText/CoreGraphics framework를 제공한다. Metal/QuartzCore는
             // 정적 라이브러리에 담긴 제품 Metal renderer가 쓴다.
             "-framework",
@@ -577,23 +577,23 @@ pub fn build(b: *std.Build) void {
             "__info_plist",
             "-Xlinker",
         });
-        macos_app_dev_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Info.plist"));
-        macos_app_dev_compile.addArgs(&.{
+        macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Info.plist"));
+        macos_app_compile.addArgs(&.{
             "-o",
-            "zig-out/bin/maru-macos-app-dev",
+            "zig-out/bin/maru-macos-app",
         });
-        macos_app_dev_compile.setCwd(b.path("."));
-        macos_app_dev_compile.step.dependOn(&macos_app_dev_mkdir.step);
-        macos_app_dev_compile.step.dependOn(&install_macos_app_host_abi_lib.step);
+        macos_app_compile.setCwd(b.path("."));
+        macos_app_compile.step.dependOn(&macos_app_mkdir.step);
+        macos_app_compile.step.dependOn(&install_macos_app_host_abi_lib.step);
 
-        const macos_app_dev_build_step = b.step("macos-app-dev-build", "Build the runnable macOS Swift app host dev shell");
-        macos_app_dev_build_step.dependOn(&macos_app_dev_compile.step);
+        const macos_app_build_step = b.step("macos-app-build", "Build the runnable macOS Swift app host app shell");
+        macos_app_build_step.dependOn(&macos_app_compile.step);
 
         // bare 터미널 실행파일은 HiDPI(NSHighResolutionCapable)를 신뢰성 있게 못 켠다. 정식
         // .app 번들을 만들고 그 안의 바이너리를 직접 실행하면, AppKit이 실행파일 경로에서
         // Contents/Info.plist를 찾아 HiDPI를 켜고(Retina에서 또렷), open과 달리 CWD가 유지돼
         // summary 상대 경로 기록도 정상 동작한다.
-        const macos_app_dev_bundle = b.addSystemCommand(&.{
+        const macos_app_bundle = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
             // set -e로 어느 단계든 실패하면 즉시 멈춘다. 폰트가 없는 clean checkout에서 glob이
             // 빈 채 cp가 조용히 실패하지 않도록, 번들 전에 .ttf 존재를 명시적으로 확인하고 명확한
@@ -602,29 +602,29 @@ pub fn build(b: *std.Build) void {
                 "[ -n \"$ttfs\" ] || { echo 'error: no .ttf in assets/fonts/JetBrainsMono (font assets missing)' >&2; exit 1; }; " ++
                 "rm -rf zig-out/Maru.app; " ++
                 "mkdir -p zig-out/Maru.app/Contents/MacOS zig-out/Maru.app/Contents/Resources/Fonts; " ++
-                "cp zig-out/bin/maru-macos-app-dev zig-out/Maru.app/Contents/MacOS/maru-macos-app-dev; " ++
+                "cp zig-out/bin/maru-macos-app zig-out/Maru.app/Contents/MacOS/maru-macos-app; " ++
                 "cp src/platform/macos/MaruAppHost-Info.plist zig-out/Maru.app/Contents/Info.plist; " ++
                 "cp assets/fonts/JetBrainsMono/*.ttf assets/fonts/JetBrainsMono/OFL.txt zig-out/Maru.app/Contents/Resources/Fonts/; " ++
                 "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo",
         });
-        macos_app_dev_bundle.setCwd(b.path("."));
-        macos_app_dev_bundle.step.dependOn(&macos_app_dev_compile.step);
+        macos_app_bundle.setCwd(b.path("."));
+        macos_app_bundle.step.dependOn(&macos_app_compile.step);
 
-        const macos_app_dev_bundle_step = b.step("macos-app-dev-bundle", "Package the macOS dev shell as a HiDPI .app bundle");
-        macos_app_dev_bundle_step.dependOn(&macos_app_dev_bundle.step);
+        const macos_app_bundle_step = b.step("macos-app-bundle", "Package the macOS app shell as a HiDPI .app bundle");
+        macos_app_bundle_step.dependOn(&macos_app_bundle.step);
 
-        const macos_app_dev_step = b.step("macos-app-dev", "Run the macOS Swift app host dev shell");
-        const macos_app_dev_run = b.addSystemCommand(&.{"./zig-out/Maru.app/Contents/MacOS/maru-macos-app-dev"});
-        macos_app_dev_run.setCwd(b.path("."));
-        macos_app_dev_run.step.dependOn(&macos_app_dev_bundle.step);
-        macos_app_dev_step.dependOn(&macos_app_dev_run.step);
+        const macos_app_step = b.step("macos-app", "Run the macOS Swift app host app shell");
+        const macos_app_run = b.addSystemCommand(&.{"./zig-out/Maru.app/Contents/MacOS/maru-macos-app"});
+        macos_app_run.setCwd(b.path("."));
+        macos_app_run.step.dependOn(&macos_app_bundle.step);
+        macos_app_step.dependOn(&macos_app_run.step);
 
-        const macos_app_dev_smoke_step = b.step("macos-app-dev-smoke", "Run the macOS Swift app host dev shell smoke");
-        const macos_app_dev_smoke = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-app-dev"});
-        macos_app_dev_smoke.setCwd(b.path("."));
-        macos_app_dev_smoke.setEnvironmentVariable("MARU_MACOS_APP_DEV_SMOKE_MS", "1500");
-        macos_app_dev_smoke.step.dependOn(&macos_app_dev_compile.step);
-        macos_app_dev_smoke_step.dependOn(&macos_app_dev_smoke.step);
+        const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
+        const macos_app_smoke = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-app"});
+        macos_app_smoke.setCwd(b.path("."));
+        macos_app_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "1500");
+        macos_app_smoke.step.dependOn(&macos_app_compile.step);
+        macos_app_smoke_step.dependOn(&macos_app_smoke.step);
     }
 
     const test_step = b.step("test", "Run all Zig tests");

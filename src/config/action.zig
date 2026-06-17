@@ -47,7 +47,7 @@ pub const Action = union(enum) {
     find_next,
     find_previous,
     // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). dispatchAppAction이 appearance.font.size를 바꾸고 cell 메트릭·grid를
-    // 다시 잡는다(코어 resize와 같은 reflow). step은 DevSession 상수(1pt 고정 — 파라미터화는 후속). reset은
+    // 다시 잡는다(코어 resize와 같은 reflow). step은 AppSession 상수(1pt 고정 — 파라미터화는 후속). reset은
     // config 기본값(base_font_size)으로 되돌린다. 콘텐츠 reflow는 없다(셀 크기·grid 차원만 변경, Ghostty 동일).
     increase_font_size,
     decrease_font_size,

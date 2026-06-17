@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    try stderr.print("unknown maru-dev command: {s}\n\n", .{command});
+    try stderr.print("unknown maru command: {s}\n\n", .{command});
     try printUsage(stderr);
     return error.UnknownCommand;
 }
@@ -66,16 +66,16 @@ fn printSmoke(stdout: *std.Io.Writer) !void {
     // 기본 CLI는 의도적으로 작게 둔다. macOS 앱 host가 붙기 전에도
     // `zig build run` 하나로 모듈 그래프가 컴파일되는지 확인하기 위해서다.
     const size = maru.terminal.Size.default;
-    try stdout.print("maru-dev: clean-room terminal core scaffold ({d}x{d})\n", .{
+    try stdout.print("maru: clean-room terminal core scaffold ({d}x{d})\n", .{
         size.cols,
         size.rows,
     });
-    try stdout.writeAll("run `maru-dev demo` or `zig build demo` for the first runnable PTY slice\n");
-    try stdout.writeAll("run `maru-dev app-smoke` or `zig build app-smoke` for the first app-host frame slice\n");
-    try stdout.writeAll("run `maru-dev app-loop-smoke` or `zig build app-loop-smoke` for the headless app frame-loop slice\n");
-    try stdout.writeAll("run `maru-dev app-pty-loop-smoke` or `zig build app-pty-loop-smoke` for the live PTY frame-loop slice\n");
-    try stdout.writeAll("run `maru-dev app-pty-interactive-loop-smoke` or `zig build app-pty-interactive-loop-smoke` for the interactive shell frame-loop slice\n");
-    try stdout.writeAll("run `maru-dev app-pty-smoke` or `zig build app-pty-smoke` for the live PTY app-host frame slice\n");
+    try stdout.writeAll("run `maru demo` or `zig build demo` for the first runnable PTY slice\n");
+    try stdout.writeAll("run `maru app-smoke` or `zig build app-smoke` for the first app-host frame slice\n");
+    try stdout.writeAll("run `maru app-loop-smoke` or `zig build app-loop-smoke` for the headless app frame-loop slice\n");
+    try stdout.writeAll("run `maru app-pty-loop-smoke` or `zig build app-pty-loop-smoke` for the live PTY frame-loop slice\n");
+    try stdout.writeAll("run `maru app-pty-interactive-loop-smoke` or `zig build app-pty-interactive-loop-smoke` for the interactive shell frame-loop slice\n");
+    try stdout.writeAll("run `maru app-pty-smoke` or `zig build app-pty-smoke` for the live PTY app-host frame slice\n");
     try stdout.flush();
 }
 
@@ -191,13 +191,13 @@ fn runAppPtySmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
 fn printUsage(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\usage:
-        \\  maru-dev
-        \\  maru-dev demo
-        \\  maru-dev app-smoke
-        \\  maru-dev app-loop-smoke
-        \\  maru-dev app-pty-loop-smoke
-        \\  maru-dev app-pty-interactive-loop-smoke
-        \\  maru-dev app-pty-smoke
+        \\  maru
+        \\  maru demo
+        \\  maru app-smoke
+        \\  maru app-loop-smoke
+        \\  maru app-pty-loop-smoke
+        \\  maru app-pty-interactive-loop-smoke
+        \\  maru app-pty-smoke
         \\
         \\commands:
         \\  demo       run the headless PTY -> SurfaceRuntime -> snapshot demo

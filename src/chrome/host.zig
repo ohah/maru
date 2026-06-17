@@ -40,7 +40,7 @@ pub const ChromeHost = struct {
     palette: palette.State = .{},
     context_menu: context_menu.State = .{},
 
-    /// 컴포넌트 State 중 heap을 든 것(find/palette의 query·preedit)을 해제한다. DevSession.deinit가 부른다.
+    /// 컴포넌트 State 중 heap을 든 것(find/palette의 query·preedit)을 해제한다. AppSession.deinit가 부른다.
     pub fn deinit(self: *ChromeHost, allocator: std.mem.Allocator) void {
         self.find.deinit(allocator);
         self.palette.deinit(allocator);

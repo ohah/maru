@@ -703,6 +703,47 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "first_fallback_font_name=AppleColorEmoji\n") != null);
 }
 
+test "CoreText draw-list shaper normalizes synthesized box glyph to codepoint cache key" {
+    // 회귀 고정(#1·#2·#6): box-drawing(U+2500)은 폰트(JetBrains Mono)가 실제 글리프를 줘도(glyph!=0)
+    // rasterizer가 코드포인트로 합성하므로, 네이티브 셰이퍼가 glyph_id=0으로 정규화해야 한다. 그래야
+    // cache_key가 codepoint로 키잉돼 primary/fallback이 한 슬롯에 모이고(중복 슬롯 방지), 폰트 glyph_id로
+    // 키잉돼 다른 글자와 겹치는 aliasing이 사라진다. 옛 `synth=(glyph==0)&&…` 조건은 폰트 보유 시 일반
+    // 경로로 새서 cache_key.glyph_id가 폰트 glyph_id가 됐다 → 이 테스트가 그 회귀를 잡는다.
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+    core.clearDirty();
+    try core.write("──"); // U+2500 BOX DRAWINGS LIGHT HORIZONTAL ×2
+
+    var draw_list = try renderer.buildDrawList(allocator, core.snapshot());
+    defer draw_list.deinit(allocator);
+
+    var font_registry = renderer.FontIdentityRegistry.init(allocator);
+    defer font_registry.deinit();
+
+    const shaper = coretext_shaper.CoreTextDrawListShaper{
+        .appearance = appearance,
+        .shape_draw_list = maru_macos_coretext_shape_draw_list,
+    };
+    var shaped = try shaper.shape(allocator, draw_list, &font_registry);
+    defer shaped.deinit(allocator);
+
+    var box_seen: usize = 0;
+    for (shaped.runs.glyphs) |glyph| {
+        if (glyph.codepoint != 0x2500) continue;
+        box_seen += 1;
+        // glyph_id는 폰트 보유와 무관하게 0으로 정규화(합성은 codepoint로 그림 → 폰트 glyph 무의미).
+        try std.testing.expectEqual(@as(renderer.GlyphId, 0), glyph.glyph_id);
+        // cache_key는 codepoint로 키잉(font_id=0 합성 전용 공간, 폰트 glyph_id와 안 겹침).
+        try std.testing.expectEqual(@as(renderer.GlyphId, 0x2500), glyph.cache_key.glyph_id);
+        try std.testing.expectEqual(@as(renderer.FontId, 0), glyph.cache_key.font_id);
+    }
+    // drawable한 box glyph가 run에 들어왔어야 한다(글리프가 필터에서 죽었다면 box_seen==0 → 보더 안 보임).
+    try std.testing.expect(box_seen >= 1);
+}
+
 test "CoreText smoke does not treat fallback as required for shaping" {
     // fallback 관측은 유용한 진단 신호지만, OS와 설치 폰트에 따라 run 분리가 달라질 수
     // 있다. smoke의 pass/fail은 "글자를 glyph run으로 만들 수 있는가"에 둔다.

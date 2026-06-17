@@ -97,10 +97,11 @@ pub fn buildGlyphRunListFromShapedRecordsWithSurface(
             .style = record.style,
             .cache_key = .{
                 .font_id = record.font_id,
-                // 합성 glyph(box/block)은 폰트 글리프가 없어 glyph_id=0·font_id=0(intern 제외, needsFontIdentity)을
-                // 공유한다. 그대로 두면 모든 합성 글자가 같은 cache_key로 atlas 한 슬롯에 충돌해 ─│╭╮ 가 전부 같은
-                // 모양이 된다. codepoint로 키잉해 코드포인트마다 고유 슬롯을 받게 한다(font_id=0 공간은 합성 전용이라
-                // 일반 glyph와 안 겹친다). run.glyph_id는 0 그대로라 rasterizer는 codepoint로 합성 분기한다.
+                // 합성 glyph(box/block/Powerline)은 네이티브 셰이퍼(coretext_smoke.m)가 폰트 글리프 유무와 무관하게
+                // glyph_id=0으로 정규화해 보낸다(폰트가 글리프를 줘도 rasterizer는 codepoint로 합성하니 무의미).
+                // 그래서 여기 합성 글자는 항상 glyph_id=0·font_id=0(intern 제외, needsFontIdentity)이다. 그대로 두면
+                // 모든 합성 글자가 같은 cache_key로 atlas 한 슬롯에 충돌해 ─│╭╮ 가 전부 같은 모양이 된다. codepoint로
+                // 키잉해 코드포인트마다 고유 슬롯을 받게 한다(font_id=0 공간은 합성 전용이라 일반 glyph와 안 겹친다).
                 .glyph_id = if (record.glyph_id == 0) @as(glyph_layout.GlyphId, record.codepoint) else record.glyph_id,
                 .font_size_px = config.font_size_px,
                 .device_scale = config.device_scale,

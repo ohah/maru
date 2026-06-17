@@ -1482,6 +1482,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         view.addItem(catalogMenuItem("focus_pane_up", catalog))
         view.addItem(catalogMenuItem("focus_pane_down", catalog))
         view.addItem(.separator())
+        // 런타임 폰트 크기 — Bigger(⌘+)/Smaller(⌘-)/Actual Size(⌘0). 카탈로그 항목이라 keyEquivalent는
+        // 바인딩 chord를 그대로 표시한다(select_all과 같은 결 — runAction으로 dispatch).
+        view.addItem(catalogMenuItem("increase_font_size", catalog))
+        view.addItem(catalogMenuItem("decrease_font_size", catalog))
+        view.addItem(catalogMenuItem("reset_font_size", catalog))
+        view.addItem(.separator())
         view.addItem(nativeMenuItem("Toggle Full Screen", #selector(menuToggleFullScreen(_:)), key: "f", mods: [.control, .command], target: self))
         attachSubmenu(mainMenu, "View", view)
 

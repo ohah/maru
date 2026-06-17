@@ -1,6 +1,9 @@
 pub const FontConfig = struct {
     family: []const u8 = "JetBrains Mono",
     size: f32 = 14,
+    /// ⌘+/⌘-(increase/decrease_font_size)가 한 번에 바꾸는 폰트 크기 증분(pt). 기본 1.0. loader가 `font.size-step`
+    /// 키로 파싱하고, 런타임 폰트 조절이 이 값을 쓴다(⌘0 reset은 size로 복귀 — step과 무관). [0.1, 32] 범위.
+    size_step: f32 = 1.0,
 };
 
 pub const ThemeConfig = struct {

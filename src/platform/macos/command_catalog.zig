@@ -40,6 +40,11 @@ pub const entries = [_]Entry{
     .{ .action = .focus_pane_up, .key = "focus_pane_up", .title = "Focus Pane Up" },
     .{ .action = .focus_pane_down, .key = "focus_pane_down", .title = "Focus Pane Down" },
     .{ .action = .select_all, .key = "select_all", .title = "Select All" },
+    // 런타임 폰트 크기(⌘+/⌘-/⌘0). 모달 토글(toggle_find 등)과 달리 일반 액션이라 팝업/메뉴에 노출한다 —
+    // 메뉴는 catalogMenuItem이 바인딩 chord(⌘+/⌘-/⌘0)를 그대로 표시한다(select_all과 같은 결).
+    .{ .action = .increase_font_size, .key = "increase_font_size", .title = "Bigger" },
+    .{ .action = .decrease_font_size, .key = "decrease_font_size", .title = "Smaller" },
+    .{ .action = .reset_font_size, .key = "reset_font_size", .title = "Actual Size" },
     .{ .action = .{ .select_tab = 0 }, .key = "select_tab:0", .title = "Select Workspace 1" },
     .{ .action = .{ .select_tab = 1 }, .key = "select_tab:1", .title = "Select Workspace 2" },
     .{ .action = .{ .select_tab = 2 }, .key = "select_tab:2", .title = "Select Workspace 3" },

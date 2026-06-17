@@ -12,6 +12,8 @@ pub const ResolveError = error{
 pub const ResolvedFontRequest = struct {
     family: []const u8,
     size: f32,
+    /// ⌘+/⌘- 폰트 조절 증분(pt). resolveFont가 [0.1, 32]로 검증(범위 밖은 InvalidFontSize).
+    size_step: f32,
 };
 
 pub const ResolvedTheme = struct {
@@ -69,12 +71,15 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
     const family = std.mem.trim(u8, config.family, &std.ascii.whitespace);
     if (family.len == 0) return error.EmptyFontFamily;
     if (!(config.size >= 1.0 and config.size <= 512.0)) return error.InvalidFontSize;
+    // step은 1 클릭당 증분(pt). 0이나 음수면 ⌘+/⌘-가 무동작/역방향이 되고, 너무 크면 한 번에 범위를 튄다.
+    if (!(config.size_step >= 0.1 and config.size_step <= 32.0)) return error.InvalidFontSize;
 
     return .{
         // 이 slice는 raw config 문자열을 빌린다. 아직 config 파일 parser가 없으므로
         // 별도 allocator를 들이지 않고, 소유권을 늘려야 하는 시점은 설정 reload 구현 때로 둔다.
         .family = family,
         .size = config.size,
+        .size_step = config.size_step,
     };
 }
 
@@ -183,7 +188,7 @@ test "appearance resolver derives sidebar colors from background and honors expl
 
 test "appearance resolver trims font family and preserves cursor options" {
     const resolved = try resolve(.{
-        .font = .{ .family = "  Menlo  ", .size = 16 },
+        .font = .{ .family = "  Menlo  ", .size = 16, .size_step = 3 },
         .theme = .{
             .background = "#000000",
             .foreground = "#FFFFFF",
@@ -195,6 +200,7 @@ test "appearance resolver trims font family and preserves cursor options" {
 
     try std.testing.expectEqualStrings("Menlo", resolved.font.family);
     try std.testing.expectEqual(@as(f32, 16), resolved.font.size);
+    try std.testing.expectEqual(@as(f32, 3), resolved.font.size_step); // size_step 통과(기본 1)
     try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff }, resolved.theme.foreground);
     try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0x00, .b = 0xaa }, resolved.theme.cursor);
     try std.testing.expectEqual(theme.CursorShape.bar, resolved.cursor.shape);
@@ -206,6 +212,10 @@ test "appearance resolver rejects invalid font values" {
     try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 0 } }));
     try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = -1 } }));
     try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 600 } }));
+    // size_step도 [0.1, 32] 밖이면 거부(0=무동작·음수=역방향·과대 방지).
+    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .size_step = 0 } }));
+    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .size_step = -2 } }));
+    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .size_step = 64 } }));
 }
 
 test "hex color parser accepts only full rgb hex colors" {

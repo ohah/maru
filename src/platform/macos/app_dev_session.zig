@@ -110,7 +110,7 @@ const sidebar_slot_height_ratio_milli: u32 = 2500;
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
 // 1~2칸으로 무너져 런타임 단축키 UX로는 부적절하다(config 파일로는 그 밖 값도 가능, 단축키만 이 범위).
-const font_size_step: f32 = 1.0;
+// ⌘+/⌘- 증분(step)은 config `font.size-step`(appearance.font.size_step, 기본 1pt)이 정한다.
 const font_size_min: f32 = 6.0;
 const font_size_max: f32 = 72.0;
 
@@ -2113,8 +2113,9 @@ pub const DevSession = struct {
             .find_next => self.findNavigate(true),
             .find_previous => self.findNavigate(false),
             // 런타임 폰트 크기(⌘+/⌘-/⌘0) — cell 메트릭·grid 재계산(setFontSize). 콘텐츠 reflow 없음.
-            .increase_font_size => self.adjustFontSize(font_size_step),
-            .decrease_font_size => self.adjustFontSize(-font_size_step),
+            // 증분은 config `font.size-step`(기본 1pt). ⌘0 reset은 step과 무관하게 base_font_size로 복귀.
+            .increase_font_size => self.adjustFontSize(self.appearance.font.size_step),
+            .decrease_font_size => self.adjustFontSize(-self.appearance.font.size_step),
             .reset_font_size => self.resetFontSize(),
         }
         self.metal_dirty = true;
@@ -6492,9 +6493,9 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     const cw0 = session.cell_width_px;
     const cols0 = session.activeSurface().core.snapshot().size.cols;
 
-    // ⌘+ : 폰트 +1pt → cell 픽셀이 커지고(메트릭) grid는 줄거나 같다(같은 backing px).
+    // ⌘+ : 폰트 +step(config font.size-step, 기본 1pt) → cell 픽셀이 커지고(메트릭) grid는 줄거나 같다(같은 backing px).
     session.dispatchAppAction(.increase_font_size);
-    try std.testing.expectEqual(base + font_size_step, session.appearance.font.size);
+    try std.testing.expectEqual(base + session.appearance.font.size_step, session.appearance.font.size);
     try std.testing.expect(session.cell_width_px > cw0);
     const cols1 = session.activeSurface().core.snapshot().size.cols;
     try std.testing.expect(cols1 <= cols0);
@@ -6503,6 +6504,13 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     session.dispatchAppAction(.reset_font_size);
     try std.testing.expectEqual(base, session.appearance.font.size);
     try std.testing.expectEqual(cw0, session.cell_width_px);
+
+    // config font.size-step을 반영: step을 4로 바꾸면 ⌘+가 한 번에 +4pt(증분이 상수 1이 아니라 config 값).
+    session.appearance.font.size_step = 4;
+    session.dispatchAppAction(.increase_font_size);
+    try std.testing.expectEqual(base + 4, session.appearance.font.size);
+    session.dispatchAppAction(.reset_font_size); // 다시 base로(아래 경계 테스트 기준 복원)
+    session.appearance.font.size_step = 1; // 기본 step으로 되돌려 경계 반복이 1pt씩 움직이게
 
     // ⌘- 반복 : 하한(font_size_min) 아래로 안 내려간다(경계에서 무동작).
     var i: usize = 0;

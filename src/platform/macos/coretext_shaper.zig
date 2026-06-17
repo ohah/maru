@@ -205,7 +205,14 @@ fn coreTextGlyphRecordFromDrawRecord(
         .fallback = record.fallback != 0,
         .style = source_cell.style,
         .color_glyph_kind = if (record.color_glyph_kind != 0) .color else .monochrome,
-        .drawable = record.drawable != 0 and record.glyph_id != 0,
+        // 폰트가 글리프를 주면(glyph_id!=0) drawable. **단 box-drawing(U+2500~257F)·block(U+2580~259F)은
+        // rasterizer가 코드포인트로 직접 합성하므로 폰트 글리프가 없어도(glyph_id==0) drawable이어야 한다** —
+        // 안 그러면 폰트에 box 글리프가 없거나 CoreText가 notdef를 줄 때 셀이 스킵돼 합성에 도달조차 못 한다
+        // (보더가 안 보이던 원인). 합성은 폰트 커버리지와 무관하다.
+        .drawable = record.drawable != 0 and
+            (record.glyph_id != 0 or
+                renderer.block_glyph.isBlockElement(record.codepoint) or
+                renderer.box_glyph.isBoxDrawing(record.codepoint)),
     };
 }
 
@@ -319,6 +326,39 @@ fn ensureRecordFitsSurface(
     const end_col = std.math.add(u16, record.col, @as(u16, record.cell_width)) catch
         return error.CoreTextRecordOutsideSurface;
     if (end_col > size.cols) return error.CoreTextRecordOutsideSurface;
+}
+
+test "shaper: box-drawing·block은 glyph_id==0(폰트 미보유)이어도 drawable(합성 대상)" {
+    var cells = [_]renderer.DrawCell{.{ .row = 0, .col = 0, .codepoint = 0x2500, .width = 1 }};
+
+    // ─(U+2500): 폰트가 글리프를 못 줘도(glyph_id=0) drawable이어야 rasterizer 합성에 도달한다(보더 안 보이던 버그).
+    var box = emptyNativeDrawGlyphRecord();
+    box.cell_index = 0;
+    box.cell_width = 1;
+    box.codepoint = 0x2500;
+    box.glyph_id = 0; // notdef
+    box.drawable = 1;
+    try std.testing.expect((try coreTextGlyphRecordFromDrawRecord(&box, &cells)).drawable);
+
+    // █(U+2588) block도 동일.
+    cells[0].codepoint = 0x2588;
+    var blk = emptyNativeDrawGlyphRecord();
+    blk.cell_index = 0;
+    blk.cell_width = 1;
+    blk.codepoint = 0x2588;
+    blk.glyph_id = 0;
+    blk.drawable = 1;
+    try std.testing.expect((try coreTextGlyphRecordFromDrawRecord(&blk, &cells)).drawable);
+
+    // 대조: 일반 글자 'A'가 notdef(glyph_id=0)면 안 그린다(합성 대상 아님 — 기존 동작 보존).
+    cells[0].codepoint = 'A';
+    var a = emptyNativeDrawGlyphRecord();
+    a.cell_index = 0;
+    a.cell_width = 1;
+    a.codepoint = 'A';
+    a.glyph_id = 0;
+    a.drawable = 1;
+    try std.testing.expect(!(try coreTextGlyphRecordFromDrawRecord(&a, &cells)).drawable);
 }
 
 test "CoreText shaper preserves explicit product surface metadata" {

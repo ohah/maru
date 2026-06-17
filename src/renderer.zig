@@ -3,6 +3,7 @@ pub const block_glyph = @import("renderer/block_glyph.zig"); // Block Elements(U
 pub const box_glyph = @import("renderer/box_glyph.zig"); // Box-drawing(U+2500~257F 전체) 합성 — 폰트 대신 셀에 선/면(이음매 없는 연결). 중립.
 pub const powerline_glyph = @import("renderer/powerline_glyph.zig"); // Powerline(U+E0B0~E0BF) 합성 — 삼각형·반원 separator를 셀에 꽉 차게. 중립.
 pub const braille_glyph = @import("renderer/braille_glyph.zig"); // Braille(U+2800~28FF) 합성 — 2열×4행 8점 비트마스크를 셀 격자에 스냅. 중립.
+pub const legacy_mosaic_glyph = @import("renderer/legacy_mosaic_glyph.zig"); // Legacy Computing 블록 모자이크(sextant U+1FB00~·octant U+1CD00~) 합성. 중립.
 pub const draw_list = @import("renderer/draw_list.zig");
 pub const frame_probe = @import("renderer/frame_probe.zig");
 pub const font_identity = @import("renderer/font_identity.zig");

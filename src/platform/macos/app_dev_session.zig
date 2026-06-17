@@ -1070,16 +1070,110 @@ pub const DevSession = struct {
         };
     }
 
-    /// rename 편집 표시 텍스트 "query+조합중preedit"+caret marker('|'). 호출자(allocator) 소유 — 라벨 버퍼로 쓰고
-    /// 해제한다. caret은 별도 blink 없이 '|' 1칸으로 표시(인라인 편집기 v1 — 정밀 caret/blink는 후속).
+    /// rename 편집 표시 텍스트 "query+조합중preedit" + caret 1칸. caret은 `blink_visible`이면 '|', 아니면 공백 —
+    /// **폭은 항상 +1로 고정**(renameDisplayWidth와 일치)이라 깜빡여도 텍스트/세그먼트 폭이 안 흔들린다. 토글은
+    /// updateCursorBlink가 rename 중 metal_dirty로 rebuild를 일으켜 보인다(터미널 커서 suffix-trim과 달리 인라인
+    /// caret은 셀 스트림의 글자라 full rebuild 필요 — text-blink와 같은 경로). 호출자(allocator) 소유.
     fn renameEditText(self: *DevSession, allocator: std.mem.Allocator) ![]const u8 {
-        return std.fmt.allocPrint(allocator, "{s}{s}|", .{ self.rename_input.query.items, self.rename_input.preedit.items });
+        const caret: []const u8 = if (self.blink_visible) "|" else " ";
+        return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ self.rename_input.query.items, self.rename_input.preedit.items, caret });
     }
 
     /// rename 편집 텍스트의 표시폭(칸) = query(EAW) + preedit(EAW) + caret 1칸. paneBar가 편집 중 라벨 폭을 이걸로
     /// 잡아, 이름이 비어도(편집 시작) 세그먼트가 떠 caret이 보인다.
     fn renameDisplayWidth(self: *const DevSession) usize {
         return self.rename_input.queryCols() + chrome.components.overlay_input.displayCols(self.rename_input.preedit.items) + 1;
+    }
+
+    /// 활성 탭의 leaf 중 pane==찾는 pane인 것의 PaneBar(rename caret 위치 계산용). 못 찾으면 null.
+    fn paneBarForLeaf(self: *DevSession, pane: *Pane) ?PaneBar {
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
+        for (leaf_rects.items) |lr| {
+            if (lr.leaf == pane) return self.paneBar(lr.rect, lr.leaf);
+        }
+        return null;
+    }
+
+    const TermBarLoc = struct { pb: PaneBar, tab_index: usize, count: usize, scroll: u32 };
+    /// term이 속한 pane의 바·그 탭 인덱스(rename caret 위치 계산용). 못 찾으면 null.
+    fn termBarLocation(self: *DevSession, term: *Term) ?TermBarLoc {
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
+        for (leaf_rects.items) |lr| {
+            for (lr.leaf.terms.items, 0..) |t, ti| {
+                if (t == term) {
+                    const pb = self.paneBar(lr.rect, lr.leaf) orelse return null;
+                    return .{ .pb = pb, .tab_index = ti, .count = lr.leaf.terms.items.len, .scroll = lr.leaf.tab_scroll_cols };
+                }
+            }
+        }
+        return null;
+    }
+
+    /// "{n} " 번호 prefix(tabNumberLabel) 칸수 — 1-based n의 자릿수 + 공백 1칸. caret 컬럼 계산에 쓴다.
+    fn numberPrefixCols(index: usize) u32 {
+        var n = index + 1;
+        var digits: u32 = 1;
+        while (n >= 10) : (n /= 10) digits += 1;
+        return digits + 1; // 숫자 + 공백
+    }
+
+    /// rename 편집 caret의 셀 rect(backing px, 좌상단 원점) — IME 후보창 위치(imeCursorRect)에 쓴다. 대상별 편집기
+    /// 텍스트 origin + caret 컬럼(prefix + query 폭)을 잡는다. preedit는 안 더한다(커서가 조합 글자를 덮는 터미널 IME
+    /// 규약 — find.caretRect와 동일). 사이드바 슬롯 y는 slot_height 기준 세로 중앙 근사(후보창은 근처면 충분). 못
+    /// 구하면 null(터미널 커서로 폴백). 렌더 geometry(paneBar·barMetrics·segOf, 사이드바 indent/slot)와 같은 셈법.
+    fn renameCaretRect(self: *DevSession) ?chrome.draw.Rect {
+        const target = self.rename orelse return null;
+        const cw = self.cell_width_px;
+        const ch = self.cell_height_px;
+        if (cw == 0 or ch == 0) return null;
+        const qcols: u32 = self.rename_input.queryCols();
+        switch (target) {
+            .workspace => |tab| {
+                const idx = for (self.tabs.items, 0..) |t, i| {
+                    if (t == tab) break i;
+                } else return null;
+                // 사이드바 제목 좌단 indent(buildSidebarTitleFrame와 같은 ceil(card_gap+accent_bar)/cw) + "{n} " prefix.
+                const sp = self.buildChromeTokens().space;
+                const indent_cols: u32 = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
+                const caret_col = indent_cols + numberPrefixCols(idx) + qcols;
+                const slot_h = self.sidebar_slot_height_px;
+                return .{
+                    .x = @intCast(caret_col * cw),
+                    .y = @intCast(@as(u32, @intCast(idx)) * slot_h + (slot_h -| ch) / 2), // 슬롯 세로 중앙 근사
+                    .w = @intCast(cw),
+                    .h = @intCast(ch),
+                };
+            },
+            .pane => |pane| {
+                const pb = self.paneBarForLeaf(pane) orelse return null;
+                const caret_col = 1 + qcols; // buildPaneLabelDrawList: 이름이 col 1부터(좌패딩 1)
+                const pad_y = self.buildChromeTokens().space.tab_bar_pad_y_px;
+                return .{
+                    .x = @intCast(pb.full.x + caret_col * cw),
+                    .y = @intCast(pb.full.y + pad_y),
+                    .w = @intCast(cw),
+                    .h = @intCast(ch),
+                };
+            },
+            .term => |term| {
+                const loc = self.termBarLocation(term) orelse return null;
+                const m = barMetrics(loc.pb.tabs, cw, loc.count, self.buildChromeTokens().space.tab_width_cols, loc.scroll) orelse return null;
+                const seg = m.segOf(loc.tab_index);
+                // 탭 텍스트: 세그먼트 start_col + 1(좌패딩) + "{n} " prefix 뒤. 탭 영역(m.cols)으로 clamp.
+                const caret_col = @min(seg.start_col + 1 + numberPrefixCols(loc.tab_index) + qcols, m.cols);
+                const pad_y = self.buildChromeTokens().space.tab_bar_pad_y_px;
+                return .{
+                    .x = @intCast(loc.pb.tabs.x + caret_col * cw),
+                    .y = @intCast(loc.pb.tabs.y + pad_y),
+                    .w = @intCast(cw),
+                    .h = @intCast(ch),
+                };
+            },
+        }
     }
 
     /// 탭 영역 sub-rect — 전체 바에서 좌측 라벨(label_cols)을 뗀 나머지. 탭 hit-test(barMetrics)·탭 제목 렌더가
@@ -3249,9 +3343,12 @@ pub const DevSession = struct {
         // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상을 진행한다
         // (없으면 idle 재투영 없음). blink 글자는 커서/caret과 달리 suffix-trim으로 못 숨겨 full rebuild가 필요하다.
         const text_blinks = self.appearance.blink_text and core.viewportHasBlink();
+        // 인라인 rename 편집 caret도 깜빡인다 — 사이드바/탭/라벨 셀 스트림의 '|' 글자라(터미널 커서처럼 suffix-trim
+        // 으로 못 숨김) text-blink와 같이 full rebuild가 필요하다(renameEditText가 blink_visible로 '|'↔공백 토글).
+        const rename_active = self.rename != null;
         // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
-        // core.preedit로 이미 막지만, 오버레이는 overlay_open=true라 imeComposingActive로 막아야 한다(단일 출처).
-        if ((!cursor_blinks and !overlay_open and !text_blinks) or self.imeComposingActive()) {
+        // core.preedit로 이미 막지만, 오버레이/rename은 imeComposingActive로 막아야 한다(단일 출처).
+        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active) or self.imeComposingActive()) {
             self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
             return;
         }
@@ -3262,8 +3359,8 @@ pub const DevSession = struct {
             // suffix-trim 토글(재빌드 없음). 오버레이가 열렸으면 suffix=오버레이 caret이라 caret을, 닫혔으면 suffix=
             // 터미널 커서라 커서를 깜빡인다 — 같은 코드(generation↑만, idle에 full-grid reshape 안 함).
             self.metal_buffer.setCursorVisible(self.blink_visible);
-            // 텍스트 blink는 셀 전경을 위상으로 숨기므로(packForeground) full rebuild가 필요하다 — dirty 표시.
-            if (text_blinks) self.metal_dirty = true;
+            // 텍스트 blink·rename caret은 셀 글자라 full rebuild가 필요하다(suffix-trim으로 못 숨김) — dirty 표시.
+            if (text_blinks or rename_active) self.metal_dirty = true;
         }
     }
 
@@ -3439,7 +3536,9 @@ pub const DevSession = struct {
     /// 입력기가 firstRect로 물어보면 Swift가 이 값을 화면 좌표로 바꿔 후보창을 커서 위치에
     /// 띄운다. 조합 중에는 커서가 preedit 시작(core.cursor)에 있어 후보창이 조합 글자 옆에 뜬다.
     /// 반환: row*cell_h, col*cell_w, cell_w, cell_h.
-    pub fn imeCursorRect(self: *const DevSession) struct { x: f64, y: f64, w: f64, h: f64 } {
+    // self는 *DevSession(비-const) — rename caret 위치(renameCaretRect)가 leaf-rects 레이아웃을 펴는 *DevSession
+    // 헬퍼를 거치기 때문(읽기 전용 계산이지만 activeTabLeafRects 체인이 비-const). ABI·테스트 호출자는 모두 mutable.
+    pub fn imeCursorRect(self: *DevSession) struct { x: f64, y: f64, w: f64, h: f64 } {
         const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
         if (!self.surface_initialized) return .{ .x = 0, .y = 0, .w = cw, .h = ch };
@@ -3448,9 +3547,9 @@ pub const DevSession = struct {
         const props = self.buildChromeProps();
         const overlay_caret: ?chrome.draw.Rect = switch (self.inputFocus()) {
             .notice => null, // 조합을 안 받으므로 후보창 위치 무의미 — 아래 터미널 커서로 폴백(실제론 안 뜸)
-            // rename 인라인 편집기는 사이드바 슬롯/탭/라벨 안에 있어 caret 픽셀 위치 계산이 복잡하다 — v1은 null로
-            // 폴백(IME 후보창이 기본 위치에 뜬다; 조합 자체는 정상). 정확한 inline caretRect는 후속.
-            .rename => null,
+            // rename 인라인 편집기의 caret(사이드바 슬롯/탭/라벨)에 후보창을 띄운다 — renameCaretRect가 대상별 위치를
+            // 잡는다(사이드바 y는 slot 기준 근사). null이면 아래 터미널 커서로 폴백.
+            .rename => self.renameCaretRect(),
             .find => chrome.components.find.caretRect(&self.chrome_host.find, props),
             .palette => chrome.components.palette.caretRect(&self.chrome_host.palette, props),
             .terminal => null,
@@ -6352,6 +6451,53 @@ test "right-click opens context menu on a rename target; clicking Rename starts 
     // ③ 터미널 본문(바 아래) 우클릭 → 대상 없음 → 메뉴 안 열림.
     session.mouse(1, @floatFromInt(bar.x + 4), @floatFromInt(bar.y + bar.h + 5), 2, 0);
     try std.testing.expect(!session.chrome_host.context_menu.open);
+}
+
+// rename caret 깜빡임(blink_visible로 '|'↔공백, 폭 고정)과 IME 후보창 caret rect(편집기 위치 추적)를 고정한다.
+test "rename caret blinks (width-stable) and IME caret rect tracks the editor, not the terminal cursor" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const term0 = session.activePane().activeTerm();
+    session.startRename(.{ .term = term0 });
+    session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'h' } });
+    session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'i' } });
+
+    // 깜빡임: blink_visible면 '|', 아니면 공백으로 끝난다 — 두 표시폭이 같아야(폭 흔들림 없음).
+    session.blink_visible = true;
+    const on = try session.renameEditText(allocator);
+    defer allocator.free(on);
+    session.blink_visible = false;
+    const off = try session.renameEditText(allocator);
+    defer allocator.free(off);
+    try std.testing.expect(std.mem.endsWith(u8, on, "hi|"));
+    try std.testing.expect(std.mem.endsWith(u8, off, "hi ")); // 공백 caret
+    try std.testing.expectEqual(on.len, off.len); // 폭 고정
+
+    // IME caret rect: rename 활성이면 imeCursorRect가 편집기 caret(탭 바 영역, 화면 상단)에서 난다 — 터미널 본문
+    // (바 아래)이 아니다. renameCaretRect와 일치.
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const term_body = session.paneTermRect(lr.items[0].rect);
+    const cr = session.renameCaretRect() orelse return error.NoCaret;
+    try std.testing.expectEqual(@as(u32, session.cell_width_px), cr.w);
+    try std.testing.expect(@as(u32, @intCast(cr.y)) >= bar.y and @as(u32, @intCast(cr.y)) < term_body.y); // 탭 바 안(본문 위)
+    const ime = session.imeCursorRect();
+    try std.testing.expectEqual(@as(f64, @floatFromInt(cr.y)), ime.y); // imeCursorRect가 rename caret을 씀
+    session.closeRename();
 }
 
 test "synchronized output(2026) hold: ESU 누락 시 sync_timeout_ticks를 넘으면 강제 투영(freeze 복구)" {

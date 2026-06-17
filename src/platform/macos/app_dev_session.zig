@@ -43,7 +43,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 53; // 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 54; // 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -751,6 +751,10 @@ pub const DevSession = struct {
     notification_body_out: []u8 = &.{},
     // urlAt()이 돌려준 URL의 소유 버퍼(다음 urlAt/destroy까지 유효).
     url_buffer: []u8 = &.{},
+    // configPath()가 한 번 계산해 캐시하는 config 파일 경로(소유, destroy까지 유효). 경로 규칙(MARU_CONFIG
+    // override·$HOME/.config/maru/config)은 Zig loader(defaultConfigPath)가 단일 출처 — Swift는 Open Config
+    // 메뉴에서 이 경로를 받아 파일을 열기만 한다(파일 열기는 OS 동작이라 platform 소유).
+    config_path_buffer: ?[]const u8 = null,
     // Cmd+hover 중인 URL 시작 셀의 절대 좌표(밑줄 렌더용). 뷰포트가 아니라 절대 좌표라 스크롤/출력
     // 으로 내용이 움직여도 따라간다(매 frame hoverLinkSpan이 현재 뷰포트로 클립).
     hover_url_anchor: ?terminal.SelectionPoint = null,
@@ -3339,6 +3343,16 @@ pub const DevSession = struct {
         return self.activeSurface().core.currentCwd();
     }
 
+    /// config 파일 경로(Open Config 메뉴용). loader.defaultConfigPath(MARU_CONFIG override·$HOME/.config/maru/
+    /// config)가 단일 출처 — 한 번 계산해 세션 소유 버퍼에 캐시한다(다음 호출은 캐시, destroy까지 유효).
+    /// HOME 없음·OOM이면 빈 슬라이스(Swift가 무동작). 경로 계산만 — 파일 생성/열기는 platform(Swift) OS 동작.
+    pub fn configPath(self: *DevSession) []const u8 {
+        if (self.config_path_buffer) |b| return b;
+        const path = (config_mod.defaultConfigPath(self.allocator) catch null) orelse return &.{};
+        self.config_path_buffer = path; // owned 슬라이스 — 세션이 소유(deinit이 해제)
+        return path;
+    }
+
     /// 창 제목으로 보여줄 문자열(OSC 0/2 제목 우선, 없으면 cwd basename, 둘 다 없으면 빈 슬라이스).
     /// 우선순위 로직은 core가 소유한다(native 최소) — Swift는 받아서 빈값이면 앱 이름으로 폴백만.
     /// 반환은 core 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효하다(별도 복사 없음).
@@ -5149,6 +5163,7 @@ pub const DevSession = struct {
         if (self.notification_title_out.len > 0) self.allocator.free(self.notification_title_out);
         if (self.notification_body_out.len > 0) self.allocator.free(self.notification_body_out);
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
+        if (self.config_path_buffer) |b| self.allocator.free(b);
         self.pending_paste.deinit(self.allocator);
         self.ime_inserted.deinit(self.allocator);
 
@@ -8989,6 +9004,18 @@ test "scrollbarTargetOffset: clamp + round, and round-trips scrollbarThumbGeom" 
         const t: f64 = 1.0 - @as(f64, g.y) / track;
         try std.testing.expectEqual(@as(usize, V), DevSession.scrollbarTargetOffset(t, sb));
     }
+}
+
+test "configPath caches the resolved config path (single alloc, freed in deinit)" {
+    var session: DevSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.config_path_buffer = null;
+    defer if (session.config_path_buffer) |b| std.testing.allocator.free(b);
+    const p1 = session.configPath();
+    const p2 = session.configPath();
+    // 두 번째 호출은 캐시 — 같은 포인터/길이(재할당 없음, 안 그러면 testing.allocator가 leak 잡음).
+    try std.testing.expectEqual(p1.ptr, p2.ptr);
+    try std.testing.expectEqual(p1.len, p2.len);
 }
 
 test "imeCursorRect returns the cursor cell rect in backing px for IME candidate placement" {

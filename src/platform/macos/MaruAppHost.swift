@@ -1425,6 +1425,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let app = NSMenu()
         app.addItem(nativeMenuItem("About maru", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), key: "", mods: []))
         app.addItem(.separator())
+        // Open Config(⌘,) — macOS Settings 관례 자리. config 파일을 기본 편집기로 연다(경로는 Zig가 소유).
+        app.addItem(nativeMenuItem("Open Config…", #selector(menuOpenConfig(_:)), key: ",", target: self))
+        app.addItem(.separator())
         app.addItem(nativeMenuItem("Hide maru", #selector(NSApplication.hide(_:)), key: "h"))
         app.addItem(nativeMenuItem("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), key: "h", mods: [.command, .option]))
         app.addItem(nativeMenuItem("Show All", #selector(NSApplication.unhideAllApplications(_:)), key: "", mods: []))
@@ -1449,6 +1452,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         edit.addItem(.separator())
         edit.addItem(nativeMenuItem("Copy", #selector(menuCopy(_:)), key: "c", target: self))
         edit.addItem(nativeMenuItem("Paste", #selector(menuPaste(_:)), key: "v", target: self))
+        edit.addItem(.separator())
+        // Find 서브메뉴 — 발견성용(클릭 동작). 단축키 ⌘F/⌘G/⌘⇧G는 Zig 키바인딩(default_app_bindings)이 소유하므로
+        // 메뉴엔 keyEquivalent를 안 단다(달면 macOS가 그 키를 가로채 키바인딩을 가린다 — 모달 토글은 ⌘⇧P처럼
+        // 키바인딩 전용이 maru 관례). 클릭은 runAction으로 — Find 닫힘일 때 동작(열림 중엔 모달이 키를 가짐).
+        let find = NSMenu()
+        find.addItem(actionMenuItem("Find…", "toggle_find"))
+        find.addItem(actionMenuItem("Find Next", "find_next"))
+        find.addItem(actionMenuItem("Find Previous", "find_previous"))
+        let findItem = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
+        findItem.submenu = find
+        edit.addItem(findItem)
+        edit.addItem(.separator())
+        // Services — 표준 macOS(선택 텍스트를 시스템 Services로). NSApp.servicesMenu가 항목을 채운다.
+        let services = NSMenu(title: "Services")
+        let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
+        servicesItem.submenu = services
+        edit.addItem(servicesItem)
+        NSApp.servicesMenu = services
         attachSubmenu(mainMenu, "Edit", edit)
 
         // View
@@ -1506,6 +1527,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return item
     }
 
+    /// 단축키 없이 Zig 액션(action_key)을 호출하는 메뉴 항목 — 발견성용(Find 등). 클릭 시 runCatalogAction →
+    /// run_action. keyEquivalent를 비워 macOS가 키를 가로채지 않게 한다(단축키는 Zig 키바인딩이 소유).
+    private func actionMenuItem(_ title: String, _ actionKey: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: #selector(runCatalogAction(_:)), keyEquivalent: "")
+        item.representedObject = actionKey
+        item.target = self
+        return item
+    }
+
     @discardableResult
     private func attachSubmenu(_ mainMenu: NSMenu, _ title: String, _ submenu: NSMenu) -> NSMenuItem {
         submenu.title = title
@@ -1533,6 +1563,28 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     @objc private func menuPaste(_ sender: Any?) {
         _ = sender
         pastePasteboardText()
+    }
+
+    /// Open Config — config 파일 경로(Zig 소유, MARU_CONFIG·$HOME/.config/maru/config)를 받아 기본 편집기로 연다.
+    /// 파일이 없으면 부모 디렉터리 + 빈 파일을 만들어(파일 I/O는 OS 동작) 편집기가 새 config를 열게 한다. 연결
+    /// 앱이 없으면 Finder에 표시(fallback). 경로 규칙은 Zig loader가 단일 출처라 여기선 경로 계산을 안 한다.
+    @objc private func menuOpenConfig(_ sender: Any?) {
+        _ = sender
+        guard let session = devSession else { return }
+        var ptr: UnsafePointer<UInt8>? = nil
+        var len: size_t = 0
+        guard maru_macos_app_dev_session_config_path(session, &ptr, &len) == Self.statusOK,
+              let bytes = ptr, len > 0 else { return }
+        let path = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
+        let url = URL(fileURLWithPath: path)
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: path) {
+            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data().write(to: url)
+        }
+        if !NSWorkspace.shared.open(url) {
+            NSWorkspace.shared.activateFileViewerSelecting([url]) // 연결 앱 없음 → Finder에 표시
+        }
     }
 
     @objc private func menuToggleFullScreen(_ sender: Any?) {

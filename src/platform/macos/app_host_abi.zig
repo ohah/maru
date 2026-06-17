@@ -483,6 +483,22 @@ pub export fn maru_macos_app_dev_session_cwd(
     return @intFromEnum(Status.ok);
 }
 
+// config 파일 경로(Open Config 메뉴 — MARU_CONFIG override·$HOME/.config/maru/config, 규칙은 Zig loader가
+// 단일 출처). 버퍼는 Zig 소유로 destroy까지 유효, HOME 없음/OOM이면 *out_ptr=NULL/*out_len=0(Swift 무동작).
+pub export fn maru_macos_app_dev_session_config_path(
+    session: ?*DevSession,
+    out_ptr: ?*?[*]const u8,
+    out_len: ?*usize,
+) c_int {
+    const dev_session = session orelse return @intFromEnum(Status.null_out);
+    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
+    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const text = dev_session.configPath();
+    ptr_out.* = if (text.len > 0) text.ptr else null;
+    len_out.* = text.len;
+    return @intFromEnum(Status.ok);
+}
+
 // 창 제목으로 보여줄 문자열(OSC 0/2 제목 우선, 없으면 OSC 7 cwd basename). 우선순위는 core가
 // 정한다(native 최소). 반환 버퍼는 Zig(core) 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효, 없으면
 // len 0(Swift가 앱 이름으로 폴백). Swift가 window.title에 쓴다.

@@ -42,6 +42,10 @@ pub const TreeNode = union(enum) {
 /// 설계된 필드다: command=`shell_entry`(pane 재시작 기본 shell argv, round-trip 테스트까지 계획됨), title=pane title.
 /// command는 argv[0]=셸이라 `last_observed_command` 자동 재실행 금지 정책과는 별개다. 정확한 제목·argv 복원은 후속.
 pub const Surface = struct {
+    // custom_name = 사용자 지정 이름(rename), title = 자동 제목(OSC 0/2). 둘은 별도 필드다 — 표시 우선순위는
+    // custom_name(비면 안 씀) → title → 기본값(app.label.pick). ""=없음. 단일 출처: docs/workspace-restore.md
+    // "사용자 지정 이름(custom_name)과 자동 제목".
+    custom_name: []const u8 = "",
     title: []const u8 = "",
     cwd: []const u8 = "",
     command: []const u8 = "",
@@ -52,13 +56,17 @@ pub const Surface = struct {
 /// split leaf 한 칸(panel) — 가로 탭으로 여러 Term을 들 수 있다(탭→pane 모델). active-term = 보이는 Term.
 pub const Pane = struct {
     active_term: usize = 0,
+    // 사용자 지정 이름(rename). Pane은 자동 제목 출처가 없어 custom_name 하나뿐(""=없음). 탭바 좌측 라벨 세그먼트로 표시.
+    custom_name: []const u8 = "",
     surfaces: []const Surface,
 };
 
 /// 한 워크스페이스(사이드바 탭) — pane split 트리 + 그 leaf들이 가리키는 pane 섹션들. active-pane = 포커스 panel.
 pub const Tab = struct {
     active_pane: usize = 0,
-    title: []const u8 = "",
+    // 사용자 지정 이름(rename). 워크스페이스는 자동 제목 출처가 없어 custom_name 하나뿐(""=없음). 없으면 사이드바
+    // 라벨은 활성 Term 라벨로 폴백한다(표시 해석은 platform이 app.label.pick으로). 예전 placeholder `title`을 대체.
+    custom_name: []const u8 = "",
     tree: []const TreeNode, // preorder; leaf의 pane 인덱스가 panes를 가리킨다
     panes: []const Pane,
 };
@@ -99,8 +107,8 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
 }
 
 fn writeTab(w: *std.Io.Writer, tab: Tab) !void {
-    try w.print("tab panes={d} active-pane={d} title=\"", .{ tab.panes.len, tab.active_pane });
-    try writeEscaped(w, tab.title);
+    try w.print("tab panes={d} active-pane={d} custom-name=\"", .{ tab.panes.len, tab.active_pane });
+    try writeEscaped(w, tab.custom_name);
     try w.writeAll("\"\n");
     for (tab.tree) |node| try writeTreeNode(w, node);
     for (tab.panes) |pane| try writePane(w, pane);
@@ -114,12 +122,18 @@ fn writeTreeNode(w: *std.Io.Writer, node: TreeNode) !void {
 }
 
 fn writePane(w: *std.Io.Writer, pane: Pane) !void {
-    try w.print("pane surfaces={d} active-term={d}\n", .{ pane.surfaces.len, pane.active_term });
+    try w.print("pane surfaces={d} active-term={d} custom-name=\"", .{ pane.surfaces.len, pane.active_term });
+    try writeEscaped(w, pane.custom_name);
+    try w.writeAll("\"\n");
     for (pane.surfaces) |s| try writeSurface(w, s);
 }
 
 fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
-    try w.writeAll("surface title=\"");
+    // custom-name(사용자 지정 이름)을 auto title 앞에 둔다 — 둘을 인접 배치해 사람이 읽기 쉽게(parser는 positional이라
+    // 이 키 순서·개수가 parseSurface와 정확히 맞아야 한다).
+    try w.writeAll("surface custom-name=\"");
+    try writeEscaped(w, s.custom_name);
+    try w.writeAll("\" title=\"");
     try writeEscaped(w, s.title);
     try w.writeAll("\" cwd=\"");
     try writeEscaped(w, s.cwd);
@@ -183,8 +197,8 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     const pane_count = try r.uint(usize);
     try r.key("active-pane=");
     const active_pane = try r.uint(usize);
-    try r.key("title=");
-    const title = try r.quoted(a);
+    try r.key("custom-name=");
+    const custom_name = try r.quoted(a);
 
     // 손상/변조 파일 방어(R6 graceful). 0개 탭은 빌드 단계에서 무효이고, 부풀린 pane_count는 아래 트리 노드
     // 상한을 거대화해 깊은 재귀를 부르므로 sane 상한으로 먼저 가둔다 — 위반 시 BadLine→그 창은 기본 창으로.
@@ -198,7 +212,7 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     var panes: std.ArrayList(Pane) = .empty;
     var i: usize = 0;
     while (i < pane_count) : (i += 1) try panes.append(a, try parsePane(a, lines));
-    return .{ .active_pane = active_pane, .title = title, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
+    return .{ .active_pane = active_pane, .custom_name = custom_name, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
 }
 
 /// 한 subtree를 preorder로 읽어 out에 append(self-delimiting). split는 뒤따르는 두 subtree(a,b)를 재귀로 소비.
@@ -234,16 +248,20 @@ fn parsePane(a: std.mem.Allocator, lines: *LineIter) ParseError!Pane {
     const surface_count = try r.uint(usize);
     try r.key("active-term=");
     const active_term = try r.uint(usize);
+    try r.key("custom-name=");
+    const custom_name = try r.quoted(a);
 
     var surfaces: std.ArrayList(Surface) = .empty;
     var i: usize = 0;
     while (i < surface_count) : (i += 1) try surfaces.append(a, try parseSurface(a, lines));
-    return .{ .active_term = active_term, .surfaces = try surfaces.toOwnedSlice(a) };
+    return .{ .active_term = active_term, .custom_name = custom_name, .surfaces = try surfaces.toOwnedSlice(a) };
 }
 
 fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
     var r = FieldReader{ .line = lines.next() orelse return error.Truncated };
     if (!std.mem.eql(u8, try r.word(), "surface")) return error.BadLine;
+    try r.key("custom-name=");
+    const custom_name = try r.quoted(a);
     try r.key("title=");
     const title = try r.quoted(a);
     try r.key("cwd=");
@@ -254,7 +272,7 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
     const cols = try r.uint(u16);
     try r.key("rows=");
     const rows = try r.uint(u16);
-    return .{ .title = title, .cwd = cwd, .command = command, .cols = cols, .rows = rows };
+    return .{ .custom_name = custom_name, .title = title, .cwd = cwd, .command = command, .cols = cols, .rows = rows };
 }
 
 /// 텍스트를 개행 단위 라인으로 나눈다(마지막 개행 뒤 빈 줄은 내지 않는다). peek은 소비 없이 다음 라인을 본다.
@@ -346,7 +364,7 @@ test "workspace serialize: 단일 창/탭/pane/surface" {
     };
     const panes = [_]Pane{.{ .active_term = 0, .surfaces = &surfaces }};
     const tree = [_]TreeNode{.{ .leaf = 0 }};
-    const tabs = [_]Tab{.{ .active_pane = 0, .title = "work", .tree = &tree, .panes = &panes }};
+    const tabs = [_]Tab{.{ .active_pane = 0, .custom_name = "work", .tree = &tree, .panes = &panes }};
     const windows = [_]Window{.{ .active_tab = 0, .tabs = &tabs }};
 
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
@@ -354,10 +372,10 @@ test "workspace serialize: 단일 창/탭/pane/surface" {
 
     try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "window tabs=1 active-tab=0\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=1 active-pane=0 title=\"work\"\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=1 active-pane=0 custom-name=\"work\"\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node leaf pane=0\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "pane surfaces=1 active-term=0\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "surface title=\"dev shell\" cwd=\"/home/user/proj\" command=\"/bin/zsh\" cols=80 rows=24\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "pane surfaces=1 active-term=0 custom-name=\"\"\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"dev shell\" cwd=\"/home/user/proj\" command=\"/bin/zsh\" cols=80 rows=24\n") != null);
 }
 
 test "workspace serialize: split 트리(중첩) + 멀티 pane" {
@@ -377,13 +395,13 @@ test "workspace serialize: split 트리(중첩) + 멀티 pane" {
         .{ .leaf = 1 },
         .{ .leaf = 2 },
     };
-    const tabs = [_]Tab{.{ .active_pane = 2, .title = "split", .tree = &tree, .panes = &panes }};
+    const tabs = [_]Tab{.{ .active_pane = 2, .custom_name = "split", .tree = &tree, .panes = &panes }};
     const windows = [_]Window{.{ .tabs = &tabs }};
 
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(text);
 
-    try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=3 active-pane=2 title=\"split\"\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=3 active-pane=2 custom-name=\"split\"\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node split horizontal ratio=500\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node split vertical ratio=300\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node leaf pane=2\n") != null);
@@ -409,7 +427,7 @@ test "workspace serialize: 멀티 창 + cwd/title escape" {
         if (std.mem.startsWith(u8, line, "window ")) window_lines += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), window_lines);
-    try std.testing.expect(std.mem.indexOf(u8, text, "surface title=\"a \\\"b\\\"\" cwd=\"/tmp/x y\\n\" command=\"/bin/zsh\" cols=10 rows=5\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"a \\\"b\\\"\" cwd=\"/tmp/x y\\n\" command=\"/bin/zsh\" cols=10 rows=5\n") != null);
 }
 
 test "workspace round-trip: serialize → parse → 다시 serialize 동일(중첩 split·멀티 창·escape)" {
@@ -425,12 +443,12 @@ test "workspace round-trip: serialize → parse → 다시 serialize 동일(중�
         .{ .leaf = 1 },
         .{ .leaf = 2 },
     };
-    const tabs0 = [_]Tab{.{ .active_pane = 2, .title = "split", .tree = &tree0, .panes = &panes0 }};
+    const tabs0 = [_]Tab{.{ .active_pane = 2, .custom_name = "split", .tree = &tree0, .panes = &panes0 }};
 
     const sA = [_]Surface{.{ .title = "w2", .cwd = "/home", .command = "/bin/zsh", .cols = 100, .rows = 30 }};
     const panes1 = [_]Pane{.{ .surfaces = &sA }};
     const tree1 = [_]TreeNode{.{ .leaf = 0 }};
-    const tabs1 = [_]Tab{.{ .title = "single", .tree = &tree1, .panes = &panes1 }};
+    const tabs1 = [_]Tab{.{ .custom_name = "single", .tree = &tree1, .panes = &panes1 }};
 
     const windows = [_]Window{ .{ .active_tab = 0, .tabs = &tabs0 }, .{ .active_tab = 0, .tabs = &tabs1 } };
 
@@ -450,14 +468,14 @@ test "workspace parse: 구조·escape 해제·forgiving" {
     const text =
         "maru.workspace.v1\n" ++
         "window tabs=1 active-tab=0\n" ++
-        "tab panes=2 active-pane=1 title=\"my tab\"\n" ++
+        "tab panes=2 active-pane=1 custom-name=\"my tab\"\n" ++
         "tree-node split vertical ratio=250\n" ++
         "tree-node leaf pane=0\n" ++
         "tree-node leaf pane=1\n" ++
-        "pane surfaces=1 active-term=0\n" ++
-        "surface title=\"top\" cwd=\"/a b\\\"c\" command=\"/bin/zsh\" cols=80 rows=24\n" ++
-        "pane surfaces=1 active-term=0\n" ++
-        "surface title=\"\" cwd=\"\" command=\"/bin/bash\" cols=80 rows=10\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"left pane\"\n" ++
+        "surface custom-name=\"editor\" title=\"top\" cwd=\"/a b\\\"c\" command=\"/bin/zsh\" cols=80 rows=24\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"/bin/bash\" cols=80 rows=10\n" ++
         "trailing-garbage that should be ignored\n";
 
     var parsed = try parse(std.testing.allocator, text);
@@ -467,16 +485,20 @@ test "workspace parse: 구조·escape 해제·forgiving" {
     try std.testing.expectEqual(@as(usize, 1), ws.windows.len);
     const tab = ws.windows[0].tabs[0];
     try std.testing.expectEqual(@as(usize, 1), tab.active_pane);
-    try std.testing.expectEqualStrings("my tab", tab.title);
+    try std.testing.expectEqualStrings("my tab", tab.custom_name); // 워크스페이스 사용자 지정 이름
     // 트리: split(vertical, 250) { leaf0, leaf1 } — preorder 3노드.
     try std.testing.expectEqual(@as(usize, 3), tab.tree.len);
     try std.testing.expect(tab.tree[0].split.direction == .vertical);
     try std.testing.expectEqual(@as(u16, 250), tab.tree[0].split.ratio_milli);
     try std.testing.expectEqual(@as(usize, 1), tab.tree[2].leaf);
-    // surface[0] cwd escape 해제: `/a b"c`.
+    // surface[0] cwd escape 해제: `/a b"c`. custom_name(사용자)과 title(자동)은 별도 필드로 round-trip.
     try std.testing.expectEqual(@as(usize, 2), tab.panes.len);
+    try std.testing.expectEqualStrings("left pane", tab.panes[0].custom_name); // pane 사용자 지정 이름
+    try std.testing.expectEqualStrings("editor", tab.panes[0].surfaces[0].custom_name); // Term 사용자 지정 이름
+    try std.testing.expectEqualStrings("top", tab.panes[0].surfaces[0].title); // Term 자동 제목(별도)
     try std.testing.expectEqualStrings("/a b\"c", tab.panes[0].surfaces[0].cwd);
     try std.testing.expectEqual(@as(u16, 80), tab.panes[0].surfaces[0].cols);
+    try std.testing.expectEqualStrings("", tab.panes[1].custom_name); // 빈 custom_name = 이름 없음
     try std.testing.expectEqualStrings("/bin/bash", tab.panes[1].surfaces[0].command);
 }
 
@@ -490,7 +512,7 @@ test "workspace parse: 손상 트리는 구조 불변식으로 graceful 차단(�
     const deep =
         header ++ "\n" ++
         "window tabs=1 active-tab=0\n" ++
-        "tab panes=2 active-pane=0 title=\"\"\n" ++
+        "tab panes=2 active-pane=0 custom-name=\"\"\n" ++
         "tree-node split horizontal ratio=500\n" ++
         "tree-node split horizontal ratio=500\n" ++
         "tree-node leaf pane=0\n" ++
@@ -502,7 +524,7 @@ test "workspace parse: 손상 트리는 구조 불변식으로 graceful 차단(�
     const huge =
         header ++ "\n" ++
         "window tabs=1 active-tab=0\n" ++
-        "tab panes=999999 active-pane=0 title=\"\"\n" ++
+        "tab panes=999999 active-pane=0 custom-name=\"\"\n" ++
         "tree-node leaf pane=0\n";
     try std.testing.expectError(error.BadLine, parse(std.testing.allocator, huge));
 }

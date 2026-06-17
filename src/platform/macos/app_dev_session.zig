@@ -2958,10 +2958,52 @@ pub const DevSession = struct {
                         self.sidebar_drag_index = slot;
                     }
                 }
+            } else if (kind == 4) {
+                // 더블클릭 → 그 워크스페이스 rename(첫 클릭 kind 1이 이미 그 탭으로 전환·드래그 arm; 여기서 편집 시작).
+                // "+" 슬롯 더블클릭은 대상이 아니다(sidebarSlotAt이 null이면 무동작).
+                if (self.sidebarSlotAt(y_px)) |slot| {
+                    self.sidebar_drag_active = false; // 더블클릭은 드래그가 아니다 — 첫 클릭이 arm한 걸 해제
+                    self.startRename(.{ .workspace = self.tabs.items[slot] });
+                }
             }
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
             return;
+        }
+        // 더블클릭(kind 4)으로 Term 탭 / pane 라벨을 rename한다(사이드바 워크스페이스는 위 블록에서 처리). 탭 바가
+        // 아니면 return하지 않고 아래로 흘러 kind 4 = 터미널 단어 선택으로 폴백한다. 첫 클릭(kind 1)이 이미 그
+        // pane/Term을 포커스했고, 그 사이 up(3)이 tab_drag_active를 풀었다(더블클릭은 드래그 아님).
+        if (kind == 4) {
+            var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+            defer leaf_rects.deinit(self.allocator);
+            if (self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects)) |_| {
+                for (leaf_rects.items) |lr| {
+                    const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+                    if (!pointInRect(x_px, y_px, pb.full)) continue;
+                    // 좌측 라벨 세그먼트 더블클릭 → 그 pane rename.
+                    if (pb.label_cols > 0 and x_px < @as(f64, @floatFromInt(pb.tabs.x))) {
+                        self.tab_drag_active = false;
+                        self.startRename(.{ .pane = lr.leaf });
+                        return;
+                    }
+                    const count = lr.leaf.terms.items.len;
+                    const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols);
+                    if (m) |bm| {
+                        // ‹›/+ zone 더블클릭은 rename 아님 — 소비하고 무동작(단어 선택 폴백도 막는다).
+                        if (bm.inScrollLeftZone(x_px) or bm.inScrollRightZone(x_px) or bm.inPlusZone(x_px)) {
+                            self.mouse_drag_selecting = false;
+                            return;
+                        }
+                        const tab = bm.tabIndex(count, x_px);
+                        if (tab < lr.leaf.terms.items.len) {
+                            self.tab_drag_active = false;
+                            self.startRename(.{ .term = lr.leaf.terms.items[tab] });
+                            return;
+                        }
+                    }
+                }
+            } else |_| {}
+            // 탭 바가 아니면 아래로 흘러 터미널 단어 선택(kind 4)으로 폴백한다.
         }
         // down(1)에서 pane/탭 바 클릭을 hit-test한다(kind!=1이면 단락 평가로 self.tabs를 안 건드린다 — 최소-셋업
         // 드래그 테스트는 kind 2/3만 보낸다). 활성 탭 leaf rect를 한 번 펴 ① 탭 바 클릭(어느 pane의 상단 바면 그
@@ -6167,6 +6209,42 @@ test "rename: commit writes custom_name, cancel keeps old, empty clears, teardow
     try std.testing.expect(session.rename != null);
     session.closeActiveTermOrPane(); // 활성(term0) 닫힘 → destroyTerm(term0) → rename null
     try std.testing.expect(session.rename == null);
+}
+
+// 더블클릭(kind 4) 트리거(PR4): Term 탭·사이드바 슬롯을 더블클릭하면 그 대상 rename이 시작되는지 — 실 init/
+// resize/좌표 hit-test라 macOS 게이트. (kind 1=단일 클릭은 전환·포커스만, 단어 선택은 터미널 영역 kind 4로 폴백.)
+test "double-click on a Term tab or sidebar slot starts rename" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // ① Term 탭 더블클릭 → 그 Term rename(단일 pane, custom_name 없어 라벨 세그먼트 없음 → 탭이 바 좌단부터).
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const term0 = session.activePane().activeTerm();
+    session.mouse(4, @floatFromInt(bar.x + 4), @floatFromInt(bar.y + 1), 0, 0);
+    try std.testing.expect(session.renamingTerm(term0));
+    session.closeRename();
+
+    // ② 사이드바 슬롯 더블클릭 → 그 워크스페이스 rename.
+    const tab = session.activeTab();
+    const sx = @as(f64, @floatFromInt(session.sidebar_width_px)) * 0.5;
+    const sy = @as(f64, @floatFromInt(session.sidebar_slot_height_px)) * 0.5;
+    session.mouse(4, sx, sy, 0, 0);
+    try std.testing.expect(session.renamingWorkspace(tab));
+    session.closeRename();
 }
 
 test "synchronized output(2026) hold: ESU 누락 시 sync_timeout_ticks를 넘으면 강제 투영(freeze 복구)" {

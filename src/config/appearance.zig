@@ -71,8 +71,8 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
     const family = std.mem.trim(u8, config.family, &std.ascii.whitespace);
     if (family.len == 0) return error.EmptyFontFamily;
     if (!(config.size >= 1.0 and config.size <= 512.0)) return error.InvalidFontSize;
-    // step은 1 클릭당 증분(pt). 0이나 음수면 ⌘+/⌘-가 무동작/역방향이 되고, 너무 크면 한 번에 범위를 튄다.
-    if (!(config.size_step >= 0.1 and config.size_step <= 32.0)) return error.InvalidFontSize;
+    // step은 1 클릭당 증분(pt). 범위는 theme가 단일 출처(loader 파싱 검증과 같은 const — drift 없음).
+    if (!(config.size_step >= theme.font_size_step_min and config.size_step <= theme.font_size_step_max)) return error.InvalidFontSize;
 
     return .{
         // 이 slice는 raw config 문자열을 빌린다. 아직 config 파일 parser가 없으므로

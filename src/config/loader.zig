@@ -63,9 +63,9 @@ pub const Parsed = struct {
 
 const max_font_size: f32 = 512.0;
 const min_font_size: f32 = 1.0;
-// font.size-step(⌘+/⌘- 증분) 허용 범위 — resolveFont의 검증과 같은 경계(0이면 무동작·음수면 역방향 방지).
-const max_font_step: f32 = 32.0;
-const min_font_step: f32 = 0.1;
+// font.size-step 허용 범위 — theme.zig가 단일 출처(resolveFont도 같은 const를 써 drift 없음).
+const max_font_step: f32 = theme.font_size_step_max;
+const min_font_step: f32 = theme.font_size_step_min;
 
 /// config 텍스트를 raw Config로 파싱한다(파일시스템 무관, 순수). 알 수 없는 key/잘못된 값은
 /// 기본값 유지 + diagnostic. OOM만 에러.

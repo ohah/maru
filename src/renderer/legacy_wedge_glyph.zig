@@ -1,10 +1,10 @@
-//! Symbols for Legacy Computing — **edge wedge 삼각형** 합성: U+1FB68~1FB6F(한 변을 밑변, 셀 중앙을 꼭짓점으로
-//! 하는 삼각형 — solid 4 + 반전 4)와 bowtie U+1FB9A/1FB9B(두 wedge가 중앙에서 맞닿은 모래시계). 정점이 셀
-//! 모서리·중앙이라 셀 격자에 칼같이 스냅된다(point-in-triangle 채움, 공유 `glyph_pixels.fillTriangle`).
+//! **edge wedge·corner 삼각형** 합성: edge wedge U+1FB68~1FB6F(한 변을 밑변, 셀 중앙을 꼭짓점으로 하는 삼각형
+//! — solid 4 + 반전 4)·bowtie U+1FB9A/1FB9B(두 wedge가 중앙에서 맞닿은 모래시계)·corner 삼각형(셀을 대각으로
+//! 가른 반쪽 — solid ◢◣◤◥ U+25E2~25E5 + 50% 음영 🮜🮝🮞🮟 U+1FB9C~1FB9F). 정점이 셀 모서리·중앙이라 격자에
+//! 칼같이 스냅된다(point-in-triangle 채움, 공유 `glyph_pixels.fillTriangle`/`fillTriangleAlpha`).
 //!
-//! 베이스 = Unicode "Symbols for Legacy Computing"의 edge-triangle/bowtie 도형 정의(밑변=한 변, 꼭짓점=중앙).
-//! Ghostty font/sprite 동작만 비교(코드 미복사 — clean-room). smooth-mosaic(U+1FB3C~1FB67 대각 폴리곤)은 후속.
-//! 중립 모듈.
+//! 베이스 = Unicode "Symbols for Legacy Computing"(wedge·corner-shade)·"Geometric Shapes"(◢◣◤◥) 도형 정의.
+//! Ghostty font/sprite 동작만 비교(코드 미복사 — clean-room). 중립 모듈.
 
 const std = @import("std");
 const gp = @import("glyph_pixels.zig");
@@ -12,13 +12,21 @@ const gp = @import("glyph_pixels.zig");
 /// wedge 방향 — 밑변이 되는 셀 변. 꼭짓점은 항상 셀 중앙이고 반대편을 가리킨다.
 const Edge = enum { left, top, right, bottom };
 
-/// cp가 이 모듈이 합성하는 wedge/bowtie인지(U+1FB68~1FB6F·U+1FB9A~1FB9B). 그 밖이면 폰트 폴백.
+/// 대각으로 가른 반쪽 삼각형의 채워진 모서리(◤=ul·◥=ur·◢=lr·◣=ll).
+const Corner = enum { ul, ur, lr, ll };
+
+/// cp가 edge wedge/bowtie인지(U+1FB68~1FB6F·U+1FB9A~1FB9B). 그 밖이면 폰트 폴백.
 pub fn isLegacyWedge(cp: u32) bool {
     return (cp >= 0x1FB68 and cp <= 0x1FB6F) or (cp >= 0x1FB9A and cp <= 0x1FB9B);
 }
 
-/// cp wedge/bowtie를 width×height RGBA8 슬롯에 coverage로 채운다(흰색 불투명). 채운 픽셀 수 반환.
-/// isLegacyWedge(cp) 가정. 버퍼 계약 위반 시 빈 글리프로 degrade.
+/// cp가 대각 반쪽 corner 삼각형인지 — ◢◣◤◥(U+25E2~25E5, solid)·🮜🮝🮞🮟(U+1FB9C~1FB9F, 50% 음영).
+pub fn isCornerTriangle(cp: u32) bool {
+    return (cp >= 0x25E2 and cp <= 0x25E5) or (cp >= 0x1FB9C and cp <= 0x1FB9F);
+}
+
+/// cp wedge/bowtie/corner 삼각형을 width×height RGBA8 슬롯에 coverage로 채운다. 채운 픽셀 수 반환.
+/// isLegacyWedge(cp) 또는 isCornerTriangle(cp) 가정. 버퍼 계약 위반 시 빈 글리프로 degrade.
 pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize, pixels: []u8) u32 {
     const w = width_px;
     const h = height_px;
@@ -41,8 +49,55 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
             fillWedge(pixels, bytes_per_row, w, h, .bottom, false), // 🮚 세로 모래시계
         0x1FB9B => fillWedge(pixels, bytes_per_row, w, h, .left, false) +
             fillWedge(pixels, bytes_per_row, w, h, .right, false), // 🮛 가로 모래시계
+        // solid corner 삼각형 ◢◣◤◥(U+25E2~25E5): 셀을 대각으로 가른 반쪽(alpha=0xFF).
+        0x25E2 => fillCorner(pixels, bytes_per_row, w, h, .lr, 0xFF), // ◢ 우하
+        0x25E3 => fillCorner(pixels, bytes_per_row, w, h, .ll, 0xFF), // ◣ 좌하
+        0x25E4 => fillCorner(pixels, bytes_per_row, w, h, .ul, 0xFF), // ◤ 좌상
+        0x25E5 => fillCorner(pixels, bytes_per_row, w, h, .ur, 0xFF), // ◥ 우상
+        // 음영 corner 삼각형 🮜🮝🮞🮟(U+1FB9C~1FB9F): 같은 반쪽을 50% alpha(0x80)로.
+        0x1FB9C => fillCorner(pixels, bytes_per_row, w, h, .ul, 0x80), // 🮜 좌상 음영
+        0x1FB9D => fillCorner(pixels, bytes_per_row, w, h, .ur, 0x80), // 🮝 우상 음영
+        0x1FB9E => fillCorner(pixels, bytes_per_row, w, h, .lr, 0x80), // 🮞 우하 음영
+        0x1FB9F => fillCorner(pixels, bytes_per_row, w, h, .ll, 0x80), // 🮟 좌하 음영
         else => 0,
     };
+}
+
+/// 대각 반쪽 corner 삼각형을 alpha로 채운다 — ◤=ul·◥=ur·◢=lr·◣=ll. 빗변은 셀 대각선이라 격자에 스냅된다.
+fn fillCorner(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, corner: Corner, alpha: u8) u32 {
+    const fw = @as(f32, @floatFromInt(w));
+    const fh = @as(f32, @floatFromInt(h));
+    // 셀 네 모서리: 좌상(0,0)·우상(fw,0)·좌하(0,fh)·우하(fw,fh). corner마다 세 모서리로 반쪽 삼각형.
+    // 첫 꼭짓점 y(ay)는 네 경우 모두 0(좌상 또는 우상 시작)이라 불변.
+    const ay: f32 = 0;
+    var ax: f32 = 0;
+    var bx: f32 = 0;
+    var by: f32 = 0;
+    var ccx: f32 = 0;
+    var ccy: f32 = 0;
+    switch (corner) {
+        .ul => { // ◤ 좌상: 좌상·우상·좌하
+            bx = fw;
+            ccy = fh;
+        },
+        .ur => { // ◥ 우상: 좌상·우상·우하
+            bx = fw;
+            ccx = fw;
+            ccy = fh;
+        },
+        .lr => { // ◢ 우하: 우상·좌하·우하
+            ax = fw;
+            by = fh;
+            ccx = fw;
+            ccy = fh;
+        },
+        .ll => { // ◣ 좌하: 좌상·좌하·우하
+            by = fh;
+            ccx = fw;
+            ccy = fh;
+        },
+    }
+    return gp.fillTriangleAlpha(pixels, bytes_per_row, w, h, ax, ay, bx, by, ccx, ccy, false, alpha);
 }
 
 /// edge wedge를 채운다 — 밑변 = edge가 가리키는 셀 변(두 꼭짓점), 세 번째 꼭짓점 = 셀 중앙. invert면 바깥.
@@ -79,15 +134,24 @@ fn fillWedge(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, edge: Edge, inv
     return gp.fillTriangle(pixels, bytes_per_row, w, h, cx, cy, ax, ay, bx, by, invert);
 }
 
-test "isLegacyWedge 범위" {
+test "isLegacyWedge·isCornerTriangle 범위" {
     try std.testing.expect(isLegacyWedge(0x1FB68));
     try std.testing.expect(isLegacyWedge(0x1FB6F));
     try std.testing.expect(isLegacyWedge(0x1FB9A));
     try std.testing.expect(isLegacyWedge(0x1FB9B));
-    try std.testing.expect(!isLegacyWedge(0x1FB67)); // smooth mosaic(후속)
+    try std.testing.expect(!isLegacyWedge(0x1FB67)); // smooth mosaic(별도 모듈)
     try std.testing.expect(!isLegacyWedge(0x1FB70));
     try std.testing.expect(!isLegacyWedge(0x1FB99));
-    try std.testing.expect(!isLegacyWedge(0x1FB9C)); // corner-shade(후속)
+    try std.testing.expect(!isLegacyWedge(0x1FB9C)); // corner-shade는 isCornerTriangle
+    // corner 삼각형: ◢◣◤◥(25E2~25E5)·🮜🮝🮞🮟(1FB9C~1FB9F).
+    try std.testing.expect(isCornerTriangle(0x25E2));
+    try std.testing.expect(isCornerTriangle(0x25E5));
+    try std.testing.expect(isCornerTriangle(0x1FB9C));
+    try std.testing.expect(isCornerTriangle(0x1FB9F));
+    try std.testing.expect(!isCornerTriangle(0x25E1));
+    try std.testing.expect(!isCornerTriangle(0x25E6));
+    try std.testing.expect(!isCornerTriangle(0x1FB9B)); // bowtie는 isLegacyWedge
+    try std.testing.expect(!isCornerTriangle(0x1FBA0));
 }
 
 test "fillCoverage: solid/반전 wedge·bowtie가 올바른 영역을 채운다" {
@@ -119,4 +183,31 @@ test "fillCoverage: solid/반전 wedge·bowtie가 올바른 영역을 채운다"
     try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 4, 14)); // 하-중앙
     try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 1, 8)); // 좌-중앙 빔
     try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 7, 8)); // 우-중앙 빔
+}
+
+test "fillCoverage: corner 삼각형 ◢◣◤◥(solid)·🮜🮝🮞🮟(50% alpha)" {
+    const w: u32 = 8;
+    const h: u32 = 8; // 정사각이라 대각선이 모서리↔모서리
+    const bpr: usize = w * 4;
+    var pixels: [8 * 8 * 4]u8 = undefined;
+    const a = struct {
+        fn at(p: []const u8, bpr_: usize, x: u32, y: u32) u8 {
+            return p[@as(usize, y) * bpr_ + @as(usize, x) * 4 + 3];
+        }
+    }.at;
+
+    // ◤ U+25E4 좌상 solid: 좌상 모서리 채움(alpha 0xFF), 우하 모서리 빔.
+    _ = fillCoverage(0x25E4, w, h, bpr, &pixels);
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 0, 0)); // 좌상
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 7, 7)); // 우하 빔
+
+    // ◢ U+25E2 우하 solid: 우하 채움, 좌상 빔.
+    _ = fillCoverage(0x25E2, w, h, bpr, &pixels);
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 7, 7)); // 우하
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 0, 0)); // 좌상 빔
+
+    // 🮜 U+1FB9C 좌상 50% 음영: 좌상 모서리가 alpha=0x80, 우하 빔.
+    _ = fillCoverage(0x1FB9C, w, h, bpr, &pixels);
+    try std.testing.expectEqual(@as(u8, 0x80), a(&pixels, bpr, 0, 0)); // 좌상 음영
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 7, 7)); // 우하 빔
 }

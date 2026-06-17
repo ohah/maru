@@ -1150,7 +1150,9 @@ pub const DevSession = struct {
             },
             .pane => |pane| {
                 const pb = self.paneBarForLeaf(pane) orelse return null;
-                const caret_col = 1 + qcols; // buildPaneLabelDrawList: 이름이 col 1부터(좌패딩 1)
+                // buildPaneLabelDrawList: 이름이 col 1부터(좌패딩 1). 긴 이름은 말줄임되므로 caret을 라벨 세그먼트
+                // 우경계(label_cols-1, 마지막 칸은 탭과의 간격)로 clamp해 후보창이 라벨 밖(탭 위)으로 새지 않게.
+                const caret_col = @min(1 + qcols, if (pb.label_cols > 1) pb.label_cols - 1 else 1);
                 const pad_y = self.buildChromeTokens().space.tab_bar_pad_y_px;
                 return .{
                     .x = @intCast(pb.full.x + caret_col * cw),
@@ -1163,8 +1165,10 @@ pub const DevSession = struct {
                 const loc = self.termBarLocation(term) orelse return null;
                 const m = barMetrics(loc.pb.tabs, cw, loc.count, self.buildChromeTokens().space.tab_width_cols, loc.scroll) orelse return null;
                 const seg = m.segOf(loc.tab_index);
-                // 탭 텍스트: 세그먼트 start_col + 1(좌패딩) + "{n} " prefix 뒤. 탭 영역(m.cols)으로 clamp.
-                const caret_col = @min(seg.start_col + 1 + numberPrefixCols(loc.tab_index) + qcols, m.cols);
+                // 탭 텍스트: 세그먼트 start_col + 1(좌패딩) + "{n} " prefix 뒤. **그 탭 세그먼트 우경계(seg.end_col)**로
+                // clamp해 caret/후보창이 인접 탭 위로 새지 않게 한다(end_col<=start_col인 overflow 탭이면 m.cols 폴백).
+                const seg_end = if (seg.end_col > seg.start_col) seg.end_col else m.cols;
+                const caret_col = @min(seg.start_col + 1 + numberPrefixCols(loc.tab_index) + qcols, seg_end);
                 const pad_y = self.buildChromeTokens().space.tab_bar_pad_y_px;
                 return .{
                     .x = @intCast(loc.pb.tabs.x + caret_col * cw),
@@ -2511,7 +2515,12 @@ pub const DevSession = struct {
         const target = self.rename orelse return;
         _ = self.rename_input.commitPreedit(self.allocator); // 조합 잔여를 query로
         const text = self.rename_input.query.items;
-        const new_name: ?[]const u8 = if (text.len == 0) null else (self.allocator.dupe(u8, text) catch null);
+        // 빈 텍스트(의도적 삭제) → null. 비어있지 않은데 dupe가 OOM이면 **기존 이름을 보존**하고 편집기만 닫는다 —
+        // catch null로 흡수하면 OOM과 '빈 이름'을 구분 못 해 입력한 이름이 통째로 사라진다(기존 이름까지 free).
+        const new_name: ?[]const u8 = if (text.len == 0) null else (self.allocator.dupe(u8, text) catch {
+            self.closeRename();
+            return;
+        });
         switch (target) {
             .workspace => |t| {
                 if (t.custom_name) |old| self.allocator.free(old);
@@ -2568,8 +2577,12 @@ pub const DevSession = struct {
     /// 친다(단일 출처). hit-test는 paneBar(full/tabs/label_cols)·barMetrics를 재사용.
     fn renameTargetAt(self: *DevSession, x_px: f64, y_px: f64) ?RenameTarget {
         if (self.inSidebar(x_px)) {
-            // 사이드바: 슬롯이면 그 워크스페이스, "+" 슬롯/빈 영역이면 없음.
-            if (self.sidebarSlotAt(y_px)) |slot| return .{ .workspace = self.tabs.items[slot] };
+            // 사이드바: 슬롯이면 그 워크스페이스. 단 우측 ✕(close) zone은 rename 대상 아님(닫기 자리에서 rename 방지).
+            // "+" 슬롯/빈 영역은 sidebarSlotAt이 null이라 자연히 제외.
+            if (self.sidebarSlotAt(y_px)) |slot| {
+                if (chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px)) return null;
+                return .{ .workspace = self.tabs.items[slot] };
+            }
             return null;
         }
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
@@ -2584,10 +2597,27 @@ pub const DevSession = struct {
             const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse return null;
             if (m.inScrollLeftZone(x_px) or m.inScrollRightZone(x_px) or m.inPlusZone(x_px)) return null; // ‹›/+ 은 대상 아님
             const tab = m.tabIndex(count, x_px);
+            if (m.inCloseZone(tab, x_px)) return null; // 탭 우측 ✕(close) zone은 rename 대상 아님
             if (tab < count) return .{ .term = lr.leaf.terms.items[tab] };
             return null;
         }
         return null;
+    }
+
+    /// 점이 chrome(사이드바 또는 어떤 pane의 탭 바) 위인가 — 우클릭이 chrome이면 consume하고 터미널 본문이면
+    /// mouse-reporting으로 흘리는 판정에 쓴다. renameTargetAt가 null인 chrome 영역(사이드바 +/빈칸·바 ‹›/+)과
+    /// 터미널 본문을 구분한다(renameTargetAt는 둘 다 null이라 구분 불가).
+    fn pointOnChrome(self: *DevSession, x_px: f64, y_px: f64) bool {
+        if (self.inSidebar(x_px)) return true;
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return false;
+        for (leaf_rects.items) |lr| {
+            if (self.paneBar(lr.rect, lr.leaf)) |pb| {
+                if (pointInRect(x_px, y_px, pb.full)) return true;
+            }
+        }
+        return false;
     }
 
     /// 컨텍스트 메뉴의 선택 항목을 실행한다 — 현재 메뉴는 "Rename" 1항목이라 대상 rename을 연다. 메뉴를 먼저 닫고
@@ -3043,15 +3073,19 @@ pub const DevSession = struct {
             }
             return;
         }
-        // 우클릭(button==2, down) → 그 자리의 rename 대상에 컨텍스트 메뉴(현재 "Rename")를 띄운다. 대상이 없으면
-        // (터미널 본문 등) 메뉴 없이 소비(우클릭이 좌클릭처럼 탭 전환·선택하지 않게 — Zig가 button을 무시하던 것 정정).
+        // 우클릭(button==2, down) → rename 대상이면 컨텍스트 메뉴("Rename")를 띄운다. 대상이 없을 때:
+        //  - chrome(사이드바·탭 바) 위면 consume(우클릭이 좌클릭처럼 탭 전환·newTab 하지 않게).
+        //  - 터미널 본문이면 **fall through** — 아래 mouse-reporting 경로(DECSET 1000~1003)가 우버튼을 트래킹 앱에
+        //    리포트한다. 무조건 return하면 우-down은 안 가고 우-drag/up(kind 2/3)만 리포트돼 비대칭이 된다(회귀).
         if (kind == 1 and button == 2) {
             if (self.renameTargetAt(x_px, y_px)) |target| {
                 self.context_menu_target = target;
                 self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), context_menu_items.len);
                 self.metal_dirty = true;
+                return;
             }
-            return;
+            if (self.pointOnChrome(x_px, y_px)) return; // chrome 위: consume
+            // 터미널 본문: 아래 reporting 경로로 흘린다(트래킹 앱 우클릭 보존).
         }
         // 더블클릭(kind 4) → 그 자리의 rename 대상(사이드바 슬롯·pane 라벨·Term 탭)을 인라인 편집한다. 대상이 없으면
         // return 안 하고 아래로 흘러 kind 4 = 터미널 단어 선택으로 폴백한다. 첫 클릭(kind 1)이 이미 포커스했고 그
@@ -3607,6 +3641,13 @@ pub const DevSession = struct {
     pub fn setFocused(self: *DevSession, focused: bool) void {
         if (!self.surface_initialized) return;
         if (focused) return;
+        // 인라인 rename 중 포커스 상실 = 확정(docs/tabs-splits-layout.md "포커스 상실=확정"). 앱-내 클릭은 mouse()
+        // down이 이미 commit하지만, 앱-간 전환(window resign)은 이 경로뿐이라 여기서 확정한다. commitRename이 조합
+        // preedit도 먼저 query로 확정하므로 commitComposition을 따로 부를 필요 없다(rename은 find/palette와 배타적).
+        if (self.rename != null) {
+            self.commitRename();
+            return;
+        }
         self.commitComposition();
     }
 
@@ -6162,6 +6203,8 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
     var st_ptrs = [_]*app.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
     session.metal_dirty = false;
+    session.chrome_host = .{}; // mouse()가 context_menu.open을 kind 무관하게 읽음([[devsession-undefined-test-field-trap]])
+    session.rename = null;
     session.divider_drag = null;
     session.sidebar_resize_active = false;
     session.scrollbar_drag_grab = null; // mouse()의 스크롤바 드래그 캡처가 읽는다(undefined ?f32도 garbage non-null)
@@ -6193,6 +6236,8 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     var st_ptrs = [_]*app.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
     session.metal_dirty = false;
+    session.chrome_host = .{}; // mouse()가 context_menu.open을 kind 무관하게 읽음([[devsession-undefined-test-field-trap]])
+    session.rename = null;
     session.mouse_drag_selecting = true;
     session.divider_drag = null; // mouse()의 divider 드래그 캡처가 읽는다(undefined 옵셔널 포인터는 garbage non-null)
     session.sidebar_resize_active = false; // mouse()의 사이드바 폭 조절 캡처가 읽는다(undefined bool도 garbage)
@@ -6498,6 +6543,52 @@ test "rename caret blinks (width-stable) and IME caret rect tracks the editor, n
     const ime = session.imeCursorRect();
     try std.testing.expectEqual(@as(f64, @floatFromInt(cr.y)), ime.y); // imeCursorRect가 rename caret을 씀
     session.closeRename();
+}
+
+// 코드리뷰 수정 고정: (#7) 포커스 상실 시 rename 확정, (#2) 터미널 본문 우클릭은 consume 안 하고 mouse-reporting으로
+// 흘림(트래킹 앱 보존), (#8) 사이드바 ✕(close) zone은 rename 대상 아님.
+test "review fixes: focus-loss commits rename, body right-click reports, close-zone excluded" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    const term0 = session.activePane().activeTerm();
+
+    // (#7) rename 중 setFocused(false) → 확정(custom_name 기록, 편집기 닫힘).
+    session.startRename(.{ .term = term0 });
+    session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'z' } });
+    session.setFocused(false);
+    try std.testing.expect(session.rename == null);
+    try std.testing.expectEqualStrings("z", term0.surface.custom_name.?);
+
+    // (#8) 사이드바 슬롯 ✕(close) zone은 renameTargetAt가 null(닫기 자리에서 rename 방지), 좌측은 워크스페이스.
+    const slot_y = @as(f64, @floatFromInt(session.sidebar_slot_height_px)) * 0.5;
+    const close_x = @as(f64, @floatFromInt(session.sidebar_width_px - session.cell_width_px)); // 우측 ✕ 영역
+    try std.testing.expect(session.renameTargetAt(close_x, slot_y) == null);
+    try std.testing.expect(session.renameTargetAt(@floatFromInt(session.cell_width_px), slot_y) != null); // 좌측=워크스페이스
+
+    // (#2) mouse_tracking 켠 상태에서 터미널 본문 우클릭(button==2) → 메뉴 안 열림 + reporting 경로 도달
+    //      (drag_autoscroll/selecting 리셋이 그 증거). 가드가 본문을 consume하면(회귀) 리셋 안 됨.
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const body = session.paneTermRect(lr.items[0].rect);
+    session.activeSurface().core.mouse_tracking = .normal;
+    session.drag_autoscroll = 1;
+    session.mouse_drag_selecting = true;
+    session.mouse(1, @floatFromInt(body.x + 10), @floatFromInt(body.y + 10), 2, 0); // 본문 우클릭
+    try std.testing.expect(!session.chrome_host.context_menu.open); // 메뉴 안 열림(본문엔 대상 없음)
+    try std.testing.expectEqual(@as(i8, 0), session.drag_autoscroll); // reporting 경로 도달(=consume 안 함)
+    try std.testing.expect(!session.mouse_drag_selecting);
 }
 
 test "synchronized output(2026) hold: ESU 누락 시 sync_timeout_ticks를 넘으면 강제 투영(freeze 복구)" {
@@ -9779,6 +9870,8 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.app_window = .{ .tabs = &st_ptrs };
     session.metal_dirty = false;
     session.metal_buffer = .{};
+    session.chrome_host = .{}; // mouse()가 context_menu.open을 kind 무관하게 읽음([[devsession-undefined-test-field-trap]])
+    session.rename = null;
     session.mouse_drag_selecting = false; // 더블클릭(kind 4) 후 상태
     session.divider_drag = null; // mouse()의 divider 드래그 캡처가 읽는다(undefined 옵셔널 포인터는 garbage non-null)
     session.sidebar_resize_active = false; // mouse()의 사이드바 폭 조절 캡처가 읽는다(undefined bool도 garbage)

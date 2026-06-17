@@ -7,39 +7,76 @@
 //! 세로 팔은 가로 중앙의 t-두께 띠로 그리고, 각 팔을 **셀 경계까지** 뻗어(left→x=0, right→x=w, up→y=0, down→y=h)
 //! 이웃 셀의 선과 정확히 맞닿게 한다. 중앙에서 팔들이 교차해 모서리(┌)·삼거리(├)·사거리(┼)가 된다.
 //!
-//! 범위: **light single 선만** — ─│ 직선, ┌┐└┘ 모서리, ├┤┬┴┼ 교차, 둥근 ╭╮╰╯(**실제 quarter-arc** —
-//! fillRoundedCorner). heavy(━┃)·double(═║)·dashed·혼합 굵기는 후속(폰트 글리프로 폴백). 베이스 = Unicode
-//! Box Drawing 기하. Ghostty font/sprite/draw/box.zig 동작만 비교(코드 미복사 — clean-room). 중립 모듈.
+//! 범위: **light single**(─│ 직선, ┌┐└┘ 모서리, ├┤┬┴┼ 교차, 둥근 ╭╮╰╯ — 실제 quarter-arc) + **heavy**
+//! (━┃ 직선·┏┓┗┛ 모서리·┣┫┳┻ 교차·╋ 사거리 — 두께 2배) + **dashed**(┄┅┆┇┈┉┊┋ 2·3·4점선 + ╌╍╎╏ —
+//! 직선 전용, light·heavy 굵기). **double**(═║ 등 두 평행선)·혼합 굵기는 후속(폰트 폴백). 베이스 = Unicode
+//! Box Drawing 기하(굵기·점선 분류는 Unicode 문자명 그대로). Ghostty font/sprite/draw/box.zig 동작만 비교
+//! (코드 미복사 — clean-room). 중립 모듈.
 
 const std = @import("std");
 
-/// 셀 중앙에서 뻗는 팔(전부 light). 가로(left/right)·세로(up/down) 조합으로 모든 light box 문자를 표현한다.
+/// 셀 중앙에서 뻗는 팔. 가로(left/right)·세로(up/down) 조합으로 직선·모서리·교차를 표현한다.
 const Arms = struct { up: bool = false, down: bool = false, left: bool = false, right: bool = false };
 
-/// cp가 합성 대상 light box-drawing 문자인지(이 PR이 덮는 집합). 그 외(heavy/double/dashed/혼합)는 false →
-/// 기존 폰트 글리프 경로로 폴백한다.
+/// box 문자 한 글자의 합성 명세: 팔 조합 + 굵기(heavy) + 점선 개수(dash) + 둥근 모서리(rounded).
+const Spec = struct {
+    arms: Arms = .{},
+    heavy: bool = false, // ━┃ 등 굵은 선(light 두께의 2배)
+    dash: u8 = 0, // 0=실선, 2/3/4=점선 개수(직선 전용 — Unicode double/triple/quadruple dash)
+    rounded: bool = false, // ╭╮╰╯ quarter-arc(light 전용)
+};
+
+/// cp가 합성 대상 box-drawing 문자인지(이 모듈이 덮는 집합: light·heavy·dashed). 그 외(double·혼합 굵기)는
+/// false → 기존 폰트 글리프 경로로 폴백한다.
 pub fn isBoxDrawing(cp: u32) bool {
-    return armsFor(cp) != null;
+    return specFor(cp) != null;
 }
 
-/// cp → 팔 조합. 덮지 않는 문자면 null. 둥근 모서리(╭╮╰╯)는 직각과 같은 팔(arc 근사는 후속).
-fn armsFor(cp: u32) ?Arms {
+/// cp → 합성 명세. 덮지 않는 문자면 null. 굵기·점선 분류는 Unicode 문자명(LIGHT/HEAVY/DASH) 그대로.
+fn specFor(cp: u32) ?Spec {
     return switch (cp) {
-        0x2500 => .{ .left = true, .right = true }, // ─ horizontal
-        0x2502 => .{ .up = true, .down = true }, // │ vertical
-        0x250C => .{ .down = true, .right = true }, // ┌ down+right
-        0x2510 => .{ .down = true, .left = true }, // ┐ down+left
-        0x2514 => .{ .up = true, .right = true }, // └ up+right
-        0x2518 => .{ .up = true, .left = true }, // ┘ up+left
-        0x251C => .{ .up = true, .down = true, .right = true }, // ├
-        0x2524 => .{ .up = true, .down = true, .left = true }, // ┤
-        0x252C => .{ .down = true, .left = true, .right = true }, // ┬
-        0x2534 => .{ .up = true, .left = true, .right = true }, // ┴
-        0x253C => .{ .up = true, .down = true, .left = true, .right = true }, // ┼
-        0x256D => .{ .down = true, .right = true }, // ╭ arc down+right (직각 근사)
-        0x256E => .{ .down = true, .left = true }, // ╮
-        0x256F => .{ .up = true, .left = true }, // ╯
-        0x2570 => .{ .up = true, .right = true }, // ╰
+        // ── light single(실선) ──
+        0x2500 => .{ .arms = .{ .left = true, .right = true } }, // ─
+        0x2502 => .{ .arms = .{ .up = true, .down = true } }, // │
+        0x250C => .{ .arms = .{ .down = true, .right = true } }, // ┌
+        0x2510 => .{ .arms = .{ .down = true, .left = true } }, // ┐
+        0x2514 => .{ .arms = .{ .up = true, .right = true } }, // └
+        0x2518 => .{ .arms = .{ .up = true, .left = true } }, // ┘
+        0x251C => .{ .arms = .{ .up = true, .down = true, .right = true } }, // ├
+        0x2524 => .{ .arms = .{ .up = true, .down = true, .left = true } }, // ┤
+        0x252C => .{ .arms = .{ .down = true, .left = true, .right = true } }, // ┬
+        0x2534 => .{ .arms = .{ .up = true, .left = true, .right = true } }, // ┴
+        0x253C => .{ .arms = .{ .up = true, .down = true, .left = true, .right = true } }, // ┼
+        // 둥근 모서리(light)
+        0x256D => .{ .arms = .{ .down = true, .right = true }, .rounded = true }, // ╭
+        0x256E => .{ .arms = .{ .down = true, .left = true }, .rounded = true }, // ╮
+        0x256F => .{ .arms = .{ .up = true, .left = true }, .rounded = true }, // ╯
+        0x2570 => .{ .arms = .{ .up = true, .right = true }, .rounded = true }, // ╰
+        // ── heavy(굵은 선) ──
+        0x2501 => .{ .arms = .{ .left = true, .right = true }, .heavy = true }, // ━
+        0x2503 => .{ .arms = .{ .up = true, .down = true }, .heavy = true }, // ┃
+        0x250F => .{ .arms = .{ .down = true, .right = true }, .heavy = true }, // ┏
+        0x2513 => .{ .arms = .{ .down = true, .left = true }, .heavy = true }, // ┓
+        0x2517 => .{ .arms = .{ .up = true, .right = true }, .heavy = true }, // ┗
+        0x251B => .{ .arms = .{ .up = true, .left = true }, .heavy = true }, // ┛
+        0x2523 => .{ .arms = .{ .up = true, .down = true, .right = true }, .heavy = true }, // ┣
+        0x252B => .{ .arms = .{ .up = true, .down = true, .left = true }, .heavy = true }, // ┫
+        0x2533 => .{ .arms = .{ .down = true, .left = true, .right = true }, .heavy = true }, // ┳
+        0x253B => .{ .arms = .{ .up = true, .left = true, .right = true }, .heavy = true }, // ┻
+        0x254B => .{ .arms = .{ .up = true, .down = true, .left = true, .right = true }, .heavy = true }, // ╋
+        // ── dashed(점선, 직선 전용) — light·heavy 굵기 ──
+        0x2504 => .{ .arms = .{ .left = true, .right = true }, .dash = 3 }, // ┄ triple H
+        0x2505 => .{ .arms = .{ .left = true, .right = true }, .dash = 3, .heavy = true }, // ┅
+        0x2506 => .{ .arms = .{ .up = true, .down = true }, .dash = 3 }, // ┆ triple V
+        0x2507 => .{ .arms = .{ .up = true, .down = true }, .dash = 3, .heavy = true }, // ┇
+        0x2508 => .{ .arms = .{ .left = true, .right = true }, .dash = 4 }, // ┈ quad H
+        0x2509 => .{ .arms = .{ .left = true, .right = true }, .dash = 4, .heavy = true }, // ┉
+        0x250A => .{ .arms = .{ .up = true, .down = true }, .dash = 4 }, // ┊ quad V
+        0x250B => .{ .arms = .{ .up = true, .down = true }, .dash = 4, .heavy = true }, // ┋
+        0x254C => .{ .arms = .{ .left = true, .right = true }, .dash = 2 }, // ╌ double H
+        0x254D => .{ .arms = .{ .left = true, .right = true }, .dash = 2, .heavy = true }, // ╍
+        0x254E => .{ .arms = .{ .up = true, .down = true }, .dash = 2 }, // ╎ double V
+        0x254F => .{ .arms = .{ .up = true, .down = true }, .dash = 2, .heavy = true }, // ╏
         else => null,
     };
 }
@@ -52,12 +89,13 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
     const h = height_px;
     if (w == 0 or h == 0) return 0;
     if (bytes_per_row < @as(usize, w) * 4 or pixels.len < @as(usize, h) * bytes_per_row) return 0;
-    const arms = armsFor(cp) orelse return 0;
+    const spec = specFor(cp) orelse return 0;
     @memset(pixels[0 .. @as(usize, h) * bytes_per_row], 0);
 
-    // light 선 두께(device px) — cell 높이 비례, 최소 1, cell보다 두껍지 않게(언더플로 방지).
-    var t: u32 = (h + 8) / 16;
-    if (t < 1) t = 1;
+    // 선 두께(device px) — light는 cell 높이 비례(최소 1), heavy는 그 2배(굵게). cell보다 두껍지 않게(언더플로 방지).
+    var lt: u32 = (h + 8) / 16;
+    if (lt < 1) lt = 1;
+    var t: u32 = if (spec.heavy) lt * 2 else lt;
     t = @min(t, @min(w, h));
     // 중앙 정렬 띠: 가로 팔은 [yb0,yb1) 높이, 세로 팔은 [xb0,xb1) 폭.
     const yb0 = (h - t) / 2;
@@ -66,12 +104,24 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
     const xb1 = xb0 + t;
 
     // 둥근 모서리(╭╮╰╯)는 직각 대신 quarter-arc로 — 두 팔 방향(h_dir·v_dir)으로 아크 코너를 그린다.
-    switch (cp) {
-        0x256D => return fillRoundedCorner(pixels, bytes_per_row, w, h, t, yb0, yb1, xb0, xb1, 1, 1), // ╭ right+down
-        0x256E => return fillRoundedCorner(pixels, bytes_per_row, w, h, t, yb0, yb1, xb0, xb1, -1, 1), // ╮ left+down
-        0x256F => return fillRoundedCorner(pixels, bytes_per_row, w, h, t, yb0, yb1, xb0, xb1, -1, -1), // ╯ left+up
-        0x2570 => return fillRoundedCorner(pixels, bytes_per_row, w, h, t, yb0, yb1, xb0, xb1, 1, -1), // ╰ right+up
-        else => {},
+    if (spec.rounded) {
+        return switch (cp) {
+            0x256D => fillRoundedCorner(pixels, bytes_per_row, w, h, t, yb0, yb1, xb0, xb1, 1, 1), // ╭ right+down
+            0x256E => fillRoundedCorner(pixels, bytes_per_row, w, h, t, yb0, yb1, xb0, xb1, -1, 1), // ╮ left+down
+            0x256F => fillRoundedCorner(pixels, bytes_per_row, w, h, t, yb0, yb1, xb0, xb1, -1, -1), // ╯ left+up
+            0x2570 => fillRoundedCorner(pixels, bytes_per_row, w, h, t, yb0, yb1, xb0, xb1, 1, -1), // ╰ right+up
+            else => 0,
+        };
+    }
+
+    const arms = spec.arms;
+    // 점선(직선 전용): 셀 폭/높이를 dash개의 주기로 나눠 각 주기의 앞 2/3만 칠한다(뒤 1/3은 gap). 셀마다 같은
+    // 주기라 이웃 셀과 패턴이 이어진다. dashed는 모서리/교차가 없어(Unicode 점선은 직선뿐) 팔 방향만 본다.
+    if (spec.dash > 0) {
+        var count: u32 = 0;
+        if (arms.left or arms.right) count += fillDashedH(pixels, bytes_per_row, w, yb0, yb1, spec.dash);
+        if (arms.up or arms.down) count += fillDashedV(pixels, bytes_per_row, h, xb0, xb1, spec.dash);
+        return count;
     }
 
     var count: u32 = 0;
@@ -80,6 +130,35 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
     if (arms.right) count += fillRect(pixels, bytes_per_row, xb0, yb0, w, yb1); // 중앙~우단
     if (arms.up) count += fillRect(pixels, bytes_per_row, xb0, 0, xb1, yb1); // 상단~중앙
     if (arms.down) count += fillRect(pixels, bytes_per_row, xb0, yb0, xb1, h); // 중앙~하단
+    return count;
+}
+
+/// 가로 점선: 폭 w를 n개 주기(period=w/n)로 나눠 각 주기의 앞 dash_len(=period의 2/3)만 [yb0,yb1) 높이로 칠한다.
+/// period가 0이면(셀이 점선보다 좁음) 실선으로 안전 degrade. 셀마다 동일 패턴이라 점선이 셀 경계 너머로 이어진다.
+fn fillDashedH(pixels: []u8, bytes_per_row: usize, w: u32, yb0: u32, yb1: u32, n: u8) u32 {
+    const period = w / n;
+    if (period == 0) return fillRect(pixels, bytes_per_row, 0, yb0, w, yb1);
+    const dash_len = @max(@as(u32, 1), period * 2 / 3);
+    var count: u32 = 0;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const x0 = i * period;
+        count += fillRect(pixels, bytes_per_row, x0, yb0, @min(w, x0 + dash_len), yb1);
+    }
+    return count;
+}
+
+/// 세로 점선(fillDashedH의 세로판): 높이 h를 n주기로 나눠 각 주기 앞 2/3만 [xb0,xb1) 폭으로 칠한다.
+fn fillDashedV(pixels: []u8, bytes_per_row: usize, h: u32, xb0: u32, xb1: u32, n: u8) u32 {
+    const period = h / n;
+    if (period == 0) return fillRect(pixels, bytes_per_row, xb0, 0, xb1, h);
+    const dash_len = @max(@as(u32, 1), period * 2 / 3);
+    var count: u32 = 0;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const y0 = i * period;
+        count += fillRect(pixels, bytes_per_row, xb0, y0, xb1, @min(h, y0 + dash_len));
+    }
     return count;
 }
 
@@ -162,17 +241,86 @@ fn fillRect(pixels: []u8, bytes_per_row: usize, x0: u32, y0: u32, x1: u32, y1: u
     return count;
 }
 
-test "isBoxDrawing: 덮는 light 집합만" {
+test "isBoxDrawing: light·heavy·dashed 집합(double·혼합은 폴백)" {
+    // light
     try std.testing.expect(isBoxDrawing(0x2500)); // ─
     try std.testing.expect(isBoxDrawing(0x2502)); // │
-    try std.testing.expect(isBoxDrawing(0x250C)); // ┌
     try std.testing.expect(isBoxDrawing(0x253C)); // ┼
     try std.testing.expect(isBoxDrawing(0x256D)); // ╭ (보더 둥근 모서리)
-    try std.testing.expect(isBoxDrawing(0x2570)); // ╰
-    try std.testing.expect(!isBoxDrawing(0x2501)); // ━ heavy(후속)
+    // heavy
+    try std.testing.expect(isBoxDrawing(0x2501)); // ━
+    try std.testing.expect(isBoxDrawing(0x2503)); // ┃
+    try std.testing.expect(isBoxDrawing(0x250F)); // ┏
+    try std.testing.expect(isBoxDrawing(0x254B)); // ╋
+    // dashed
+    try std.testing.expect(isBoxDrawing(0x2504)); // ┄ triple H
+    try std.testing.expect(isBoxDrawing(0x250B)); // ┋ quad V heavy
+    try std.testing.expect(isBoxDrawing(0x254C)); // ╌ double H
+    // 폴백(이 모듈 밖)
     try std.testing.expect(!isBoxDrawing(0x2550)); // ═ double(후속)
+    try std.testing.expect(!isBoxDrawing(0x250D)); // ┍ 혼합(light/heavy) (후속)
     try std.testing.expect(!isBoxDrawing(0x2588)); // █ block(block_glyph)
     try std.testing.expect(!isBoxDrawing('A'));
+}
+
+test "fillCoverage: heavy 선이 light보다 굵다(┃ vs │ 중앙 열 두께)" {
+    const w: u32 = 16;
+    const h: u32 = 32; // light t=(40)/16=2, heavy t=4
+    const bpr: usize = w * 4;
+    var pixels: [32 * 16 * 4]u8 = undefined;
+    const a = struct {
+        fn at(p: []const u8, bpr_: usize, x: u32, y: u32) u8 {
+            return p[@as(usize, y) * bpr_ + @as(usize, x) * 4 + 3];
+        }
+    }.at;
+    const cy = h / 2;
+
+    // │ light: 중앙 열 한 행에서 t=2칸 폭.
+    _ = fillCoverage(0x2502, w, h, bpr, &pixels);
+    var light_w: u32 = 0;
+    for (0..w) |x| {
+        if (a(&pixels, bpr, @intCast(x), cy) == 0xFF) light_w += 1;
+    }
+    // ┃ heavy: 같은 행에서 더 넓다(t=4).
+    _ = fillCoverage(0x2503, w, h, bpr, &pixels);
+    var heavy_w: u32 = 0;
+    for (0..w) |x| {
+        if (a(&pixels, bpr, @intCast(x), cy) == 0xFF) heavy_w += 1;
+    }
+    try std.testing.expect(heavy_w > light_w); // heavy가 더 굵다
+    try std.testing.expectEqual(@as(u32, 2), light_w);
+    try std.testing.expectEqual(@as(u32, 4), heavy_w);
+    // heavy도 상·하단에 닿아 이웃과 연결.
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w / 2, 0));
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w / 2, h - 1));
+}
+
+test "fillCoverage: dashed ┄는 가로로 칠함·빈칸이 번갈아(3 dash)" {
+    const w: u32 = 24; // period=8, dash_len=5 → dash 3개, 각 사이 gap
+    const h: u32 = 32;
+    const bpr: usize = w * 4;
+    var pixels: [32 * 24 * 4]u8 = undefined;
+    const a = struct {
+        fn at(p: []const u8, bpr_: usize, x: u32, y: u32) u8 {
+            return p[@as(usize, y) * bpr_ + @as(usize, x) * 4 + 3];
+        }
+    }.at;
+    const cy = h / 2;
+
+    _ = fillCoverage(0x2504, w, h, bpr, &pixels); // ┄ triple dash H
+    // 중앙 행에 칠한 칸과 빈 칸이 둘 다 있어야 한다(실선이 아니라 점선).
+    var filled: u32 = 0;
+    var empty: u32 = 0;
+    for (0..w) |x| {
+        if (a(&pixels, bpr, @intCast(x), cy) == 0xFF) filled += 1 else empty += 1;
+    }
+    try std.testing.expect(filled > 0); // 칠한 칸 있음
+    try std.testing.expect(empty > 0); // 빈 칸(gap)도 있음 — 점선
+    // gap 위치(period 끝 직전, x=7)는 비고, dash 시작(x=0)은 칠해진다.
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 0, cy)); // 첫 dash 시작
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 7, cy)); // 첫 period 끝 gap
+    // 점선이라 세로 중앙선 위/아래(선 밖)는 빈다.
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 0, 0));
 }
 
 test "fillCoverage: 직선·모서리·교차가 셀 경계까지 닿고 중앙에서 교차한다" {

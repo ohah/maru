@@ -680,7 +680,7 @@ TDD 방식:
 
 - **스크롤백 Find(⌘F)**: **⌘G/⌘⇧G(오버레이 닫힌 채 다음/이전 매치) — 완료**(`find_next`/`find_previous` 액션 + ⌘G/⌘⇧G 바인딩. `findNavigate`가 보존된 검색어로 재검색해 네비, `find_nav` 플래그로 닫힌 채도 현재 매치 하이라이트·출력 시 재검색 유지, 셸 타이핑이 종료. macOS Find Next 관례). 잔여: 유니코드 케이스폴딩(현재 ASCII fold)·regex/fuzzy(현재 부분일치)·팝업에서 Find 띄우기·alt screen 검색 스크롤.
 - **런타임 폰트 크기(⌘+/⌘-/⌘0)**: step 파라미터화(현재 1pt 고정)·View 메뉴 항목(Bigger/Smaller/Actual Size)·`set_font_size` 절대 지정.
-- **메뉴바(NSMenu)**: Edit의 Cut/Undo·Services·Open/Reload Config·Find 메뉴 항목(현재 copy/paste만 연결).
+- **메뉴바(NSMenu)**: **Services·Open Config·Find 메뉴 항목 — 완료**. Services(Edit 서브메뉴 `NSApp.servicesMenu`), Open Config(App 메뉴 ⌘, — ABI v54 `config_path`로 경로[Zig loader `defaultConfigPath` 단일 출처]를 받아 Swift가 없으면 생성 후 기본 편집기로 열기), Find 서브메뉴(Find…/Find Next/Find Previous — keyEquivalent 없이 runAction, 단축키 ⌘F/⌘G/⌘⇧G는 Zig 키바인딩 소유라 안 가림). 잔여: **Cut/Undo**(터미널은 cut/undo 의미가 없어 보류 — 입력 필드 편집은 chrome 오버레이가 자체 처리), **Reload Config**(런타임 재적용=폰트 reflow·테마·키바인딩 재해석이라 자투리가 아닌 기능 — 별도).
 - **커맨드 팝업(⌘⇧P)**: fuzzy 필터(현재 부분일치)·한글 IME 필터(현재 ASCII).
 - **선택/클립보드**: 블록(직사각형) 선택 — **완료**(Option+드래그 = 직사각형 — iTerm2/Terminal.app 관례). `selection_block` 플래그 + `SelectionSpan.block`로 `extractSelection`(각 행 [lo,hi]·행마다 개행·뒤 빈칸 trim)·`inSelection`(모든 행 동일 열 범위)·`selectionViewportSpan`(col min/max 정렬)이 분기. platform mouse가 Option(mods&8)이면 `setSelectionBlock`하고 mouse-reporting override에 option 포함. `selectionStart` 시그니처는 불변(기존 호출처 보존).
 - **New Window(멀티 윈도우)**: W3/W4 잔여 — global hotkey(toggle_window/quick)의 멀티 창 타게팅·창별 독립 config·탭 tear-off(창 간 탭 이동); W5 — atlas 공유(SharedGridSet식 grid-per-size, memory `multi-window-atlas-ownership` — 프로파일 후).

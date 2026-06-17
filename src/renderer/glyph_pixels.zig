@@ -1,0 +1,124 @@
+//! 합성 글리프(block·box·Powerline)가 공유하는 RGBA8 슬롯 픽셀 프리미티브 — 슬롯 계약 검증·클리어·흰색
+//! coverage 쓰기·코너 대각선을 **단일 출처**로 둔다. 셀 셰이더가 alpha를 coverage로 읽어 전경색으로 칠하므로
+//! "채움"은 흰색 불투명(0xFFFFFFFF). 세 합성 모듈이 같은 슬롯 계약(bytes_per_row≥w*4, len≥h*bpr)·같은 픽셀
+//! 쓰기를 쓰도록 통일해, 한쪽만 고쳐 셋이 갈라지는 drift를 막는다. 중립 모듈(platform 무관).
+
+const std = @import("std");
+
+/// 슬롯이 w×h×4를 담는지(bytes_per_row≥w*4, len≥h*bpr). 어긋나면 OOB 쓰기(메모리 손상)이므로 호출부는
+/// false를 받으면 빈 글리프(0px)로 안전 degrade한다.
+pub fn slotFits(width_px: u32, height_px: u32, bytes_per_row: usize, pixels: []const u8) bool {
+    if (width_px == 0 or height_px == 0) return false;
+    if (bytes_per_row < @as(usize, width_px) * 4) return false;
+    if (pixels.len < @as(usize, height_px) * bytes_per_row) return false;
+    return true;
+}
+
+/// 슬롯 h*bpr 바이트를 0으로(투명). slotFits 통과 가정.
+pub fn clear(pixels: []u8, height_px: u32, bytes_per_row: usize) void {
+    @memset(pixels[0 .. @as(usize, height_px) * bytes_per_row], 0);
+}
+
+/// off 위치 픽셀을 흰색 불투명(0xFFFFFFFF). 경계는 호출부가 slotFits로 검증했으므로 per-pixel 가드 없이 쓴다.
+pub fn setPixel(pixels: []u8, off: usize) void {
+    pixels[off] = 0xFF;
+    pixels[off + 1] = 0xFF;
+    pixels[off + 2] = 0xFF;
+    pixels[off + 3] = 0xFF;
+}
+
+/// [x0,x1)×[y0,y1) 픽셀을 흰색 불투명으로. **새로 칠한** 픽셀 수 반환(이미 칠해진 건 안 셈 → 겹치는 띠가
+/// 교차해도 non_clear_pixels 회계가 정확). 서로 안 겹치는 사각형(block)에도 동일 결과. RGBA8 + bytes_per_row.
+/// slotFits 통과 가정.
+pub fn fillRect(pixels: []u8, bytes_per_row: usize, x0: u32, y0: u32, x1: u32, y1: u32) u32 {
+    if (x1 <= x0 or y1 <= y0) return 0;
+    var count: u32 = 0;
+    var y = y0;
+    while (y < y1) : (y += 1) {
+        const row_off = @as(usize, y) * bytes_per_row;
+        var x = x0;
+        while (x < x1) : (x += 1) {
+            const off = row_off + @as(usize, x) * 4;
+            if (pixels[off + 3] == 0) count += 1; // 교차에서 겹친 픽셀은 한 번만 센다
+            setPixel(pixels, off);
+        }
+    }
+    return count;
+}
+
+/// 코너↔코너 대각선을 두께 t로 그린다. do_back=╲(좌상→우하), do_fwd=╱(좌하→우상), 둘 다면 ╳. 점-직선 수직거리
+/// |px·fh − py·fw|/norm ≤ max(0.5, t/2)로 칠한다(셀 전체를 가로지르는 대각이라 선분 클립과 동치 — box ╱╲╳와
+/// Powerline 모서리 thin 대각선이 같은 식). 새로 칠한 픽셀 수 반환. slotFits 통과 가정.
+pub fn fillDiagonal(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, t: u32, do_back: bool, do_fwd: bool) u32 {
+    const fw = @as(f32, @floatFromInt(w));
+    const fh = @as(f32, @floatFromInt(h));
+    const norm = @sqrt(fw * fw + fh * fh);
+    if (norm == 0) return 0;
+    const half = @max(0.5, @as(f32, @floatFromInt(t)) / 2.0);
+    var count: u32 = 0;
+    var y: u32 = 0;
+    while (y < h) : (y += 1) {
+        const py = @as(f32, @floatFromInt(y)) + 0.5;
+        const row_off = @as(usize, y) * bytes_per_row;
+        var x: u32 = 0;
+        while (x < w) : (x += 1) {
+            const px = @as(f32, @floatFromInt(x)) + 0.5;
+            // ╲: px·fh − py·fw = 0. ╱: px·fh + py·fw − fw·fh = 0. (정규화 분모 norm 공유)
+            const hit = (do_back and @abs(px * fh - py * fw) / norm <= half) or
+                (do_fwd and @abs(px * fh + py * fw - fw * fh) / norm <= half);
+            if (hit) {
+                const off = row_off + @as(usize, x) * 4;
+                if (pixels[off + 3] == 0) count += 1;
+                setPixel(pixels, off);
+            }
+        }
+    }
+    return count;
+}
+
+test "slotFits: 계약(bpr≥w*4·len≥h*bpr) 검증" {
+    var buf: [16 * 8 * 4]u8 = undefined; // 512 = 정확히 w=8·h=16·bpr=32
+    try std.testing.expect(slotFits(8, 16, 8 * 4, &buf)); // 딱 맞음
+    try std.testing.expect(!slotFits(0, 16, 32, &buf)); // w=0
+    try std.testing.expect(!slotFits(8, 0, 32, &buf)); // h=0
+    try std.testing.expect(!slotFits(8, 16, 8 * 4 - 4, &buf)); // bpr 부족(28<32)
+    try std.testing.expect(!slotFits(8, 17, 8 * 4, &buf)); // len 부족(h=17 → 544 > 512)
+    // 패딩된 bpr(스트라이드 > w*4)도 len이 충분하면 통과.
+    var padded: [16 * 40]u8 = undefined; // 640 = h=16·bpr=40
+    try std.testing.expect(slotFits(8, 16, 40, &padded));
+}
+
+test "fillRect: 겹친 픽셀은 한 번만 센다(교차 회계)" {
+    const w: u32 = 8;
+    const h: u32 = 8;
+    const bpr: usize = w * 4;
+    var pixels: [8 * 8 * 4]u8 = undefined;
+    clear(&pixels, h, bpr);
+    // 가로띠 [0,8)×[3,5) = 16px, 세로띠 [3,5)×[0,8) = 16px, 교차 [3,5)×[3,5) = 4px 중복.
+    const c1 = fillRect(&pixels, bpr, 0, 3, w, 5);
+    const c2 = fillRect(&pixels, bpr, 3, 0, 5, h);
+    try std.testing.expectEqual(@as(u32, 16), c1);
+    try std.testing.expectEqual(@as(u32, 12), c2); // 16 − 교차 4(이미 칠해짐)
+}
+
+test "fillDiagonal: ╲는 좌상·우하 코너, ╱는 좌하·우상 코너를 지난다" {
+    const w: u32 = 16;
+    const h: u32 = 16;
+    const bpr: usize = w * 4;
+    var pixels: [16 * 16 * 4]u8 = undefined;
+    const a = struct {
+        fn at(p: []const u8, bpr_: usize, x: u32, y: u32) u8 {
+            return p[@as(usize, y) * bpr_ + @as(usize, x) * 4 + 3];
+        }
+    }.at;
+    clear(&pixels, h, bpr);
+    _ = fillDiagonal(&pixels, bpr, w, h, 2, true, false); // ╲
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 0, 0));
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w - 1, h - 1));
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, w - 1, 0));
+    clear(&pixels, h, bpr);
+    _ = fillDiagonal(&pixels, bpr, w, h, 2, false, true); // ╱
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 0, h - 1));
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w - 1, 0));
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 0, 0));
+}

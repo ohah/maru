@@ -11,6 +11,7 @@
 //! 중립 모듈(platform 무관) — 어느 rasterizer 백엔드든 codepoint→coverage로 재사용한다.
 
 const std = @import("std");
+const gp = @import("glyph_pixels.zig"); // 슬롯 검증·clear·fillRect 공유 프리미티브(block·box·Powerline 단일 출처).
 
 /// cp가 합성 대상 solid block element인지. 이 범위면 fillCoverage가 폰트 대신 직접 그린다(shade 제외).
 pub fn isBlockElement(cp: u32) bool {
@@ -24,60 +25,38 @@ pub fn isBlockElement(cp: u32) bool {
 pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize, pixels: []u8) u32 {
     const w = width_px;
     const h = height_px;
-    if (w == 0 or h == 0) return 0;
-    // 슬롯이 w×h×4를 담는지 한 번 확인 — 어긋나면 OOB 쓰기(메모리 손상)이므로 비운 채 반환(빈 글리프).
-    if (bytes_per_row < @as(usize, w) * 4 or pixels.len < @as(usize, h) * bytes_per_row) return 0;
-    @memset(pixels[0 .. @as(usize, h) * bytes_per_row], 0);
+    // 슬롯이 w×h×4를 담는지 확인 — 어긋나면 OOB 쓰기(메모리 손상)이므로 빈 글리프로 안전 degrade.
+    if (!gp.slotFits(w, h, bytes_per_row, pixels)) return 0;
+    gp.clear(pixels, h, bytes_per_row);
 
     switch (cp) {
-        0x2580 => return fillRect(pixels, bytes_per_row, 0, 0, w, h / 2), // ▀ upper half
+        0x2580 => return gp.fillRect(pixels, bytes_per_row, 0, 0, w, h / 2), // ▀ upper half
         0x2581...0x2587 => { // ▁▂▃▄▅▆▇ lower k/8 (k=1..7)
             const k = cp - 0x2580;
-            return fillRect(pixels, bytes_per_row, 0, h - h * k / 8, w, h);
+            return gp.fillRect(pixels, bytes_per_row, 0, h - h * k / 8, w, h);
         },
-        0x2588 => return fillRect(pixels, bytes_per_row, 0, 0, w, h), // █ full
+        0x2588 => return gp.fillRect(pixels, bytes_per_row, 0, 0, w, h), // █ full
         0x2589...0x258F => { // ▉▊▋▌▍▎▏ left k/8 (2589=7/8 … 258F=1/8)
             const k = 8 - (cp - 0x2588);
-            return fillRect(pixels, bytes_per_row, 0, 0, w * k / 8, h);
+            return gp.fillRect(pixels, bytes_per_row, 0, 0, w * k / 8, h);
         },
-        0x2590 => return fillRect(pixels, bytes_per_row, w / 2, 0, w, h), // ▐ right half
-        0x2594 => return fillRect(pixels, bytes_per_row, 0, 0, w, h / 8), // ▔ upper 1/8
-        0x2595 => return fillRect(pixels, bytes_per_row, w - w / 8, 0, w, h), // ▕ right 1/8
+        0x2590 => return gp.fillRect(pixels, bytes_per_row, w / 2, 0, w, h), // ▐ right half
+        0x2594 => return gp.fillRect(pixels, bytes_per_row, 0, 0, w, h / 8), // ▔ upper 1/8
+        0x2595 => return gp.fillRect(pixels, bytes_per_row, w - w / 8, 0, w, h), // ▕ right 1/8
         0x2596...0x259F => { // quadrants ▖▗▘▙▚▛▜▝▞▟ — 4분면 마스크(UL=1·UR=2·LL=4·LR=8)
             const masks = [_]u4{ 4, 8, 1, 13, 9, 7, 11, 2, 6, 14 };
             const m = masks[cp - 0x2596];
             const mx = w / 2;
             const my = h / 2;
             var count: u32 = 0;
-            if (m & 1 != 0) count += fillRect(pixels, bytes_per_row, 0, 0, mx, my); // UL
-            if (m & 2 != 0) count += fillRect(pixels, bytes_per_row, mx, 0, w, my); // UR
-            if (m & 4 != 0) count += fillRect(pixels, bytes_per_row, 0, my, mx, h); // LL
-            if (m & 8 != 0) count += fillRect(pixels, bytes_per_row, mx, my, w, h); // LR
+            if (m & 1 != 0) count += gp.fillRect(pixels, bytes_per_row, 0, 0, mx, my); // UL
+            if (m & 2 != 0) count += gp.fillRect(pixels, bytes_per_row, mx, 0, w, my); // UR
+            if (m & 4 != 0) count += gp.fillRect(pixels, bytes_per_row, 0, my, mx, h); // LL
+            if (m & 8 != 0) count += gp.fillRect(pixels, bytes_per_row, mx, my, w, h); // LR
             return count;
         },
         else => return 0, // isBlockElement 밖 — 호출 안 됨
     }
-}
-
-/// [x0,x1)×[y0,y1) 픽셀을 흰색 불투명(0xFFFFFFFF)으로 채운다. 채운 픽셀 수 반환. RGBA8 + bytes_per_row 스트라이드.
-/// 경계는 fillCoverage가 위에서 검증했으므로(off+4 ≤ h*bpr ≤ pixels.len) per-pixel 가드 없이 쓴다.
-fn fillRect(pixels: []u8, bytes_per_row: usize, x0: u32, y0: u32, x1: u32, y1: u32) u32 {
-    if (x1 <= x0 or y1 <= y0) return 0;
-    var count: u32 = 0;
-    var y = y0;
-    while (y < y1) : (y += 1) {
-        const row_off = @as(usize, y) * bytes_per_row;
-        var x = x0;
-        while (x < x1) : (x += 1) {
-            const off = row_off + @as(usize, x) * 4;
-            pixels[off] = 0xFF;
-            pixels[off + 1] = 0xFF;
-            pixels[off + 2] = 0xFF;
-            pixels[off + 3] = 0xFF;
-            count += 1;
-        }
-    }
-    return count;
 }
 
 test "isBlockElement: solid block 범위만(shade 제외)" {

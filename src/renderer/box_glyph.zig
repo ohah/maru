@@ -15,6 +15,7 @@
 //! Unicode 문자명 그대로). Ghostty font/sprite/draw/box.zig 동작만 비교(코드 미복사 — clean-room). 중립 모듈.
 
 const std = @import("std");
+const gp = @import("glyph_pixels.zig"); // 슬롯 검증·clear·fillRect·setPixel·대각선 공유 프리미티브(단일 출처).
 
 /// 팔 굵기. light·heavy 혼합(┍┞ 등)을 한 모델로 다루려고 팔마다 굵기를 든다. double은 두 평행선(fillDouble).
 const Weight = enum { light, heavy, double };
@@ -215,13 +216,23 @@ fn armsAllDouble(a: Arms) bool {
     return ok(a.up) and ok(a.down) and ok(a.left) and ok(a.right);
 }
 
-/// 팔 굵기 → device px 두께. double은 fillDouble/fillMixed가 따로 처리하므로 여기선 light로(미사용 경로).
+/// 팔 굵기 → device px 두께(light/heavy 전용). double 팔은 fillCoverage가 fillDouble/fillMixed로 먼저 분기하므로
+/// weightT까지 오지 않는다(dashed·fillLines는 light/heavy만). 그 불변식을 어기면 잡으려고 .double은 unreachable.
 fn weightT(wt: Weight, lt: u32, ht: u32) u32 {
     return switch (wt) {
         .light => lt,
         .heavy => ht,
-        .double => lt,
+        .double => unreachable, // double 팔은 여기 도달 불가(fillDouble/fillMixed가 처리)
     };
+}
+
+/// 이중선 두 평행선 + gap = 3t가 셀에 들어가게 두께를 제한한다(최소 1). fillDouble·fillMixed가 **같은 선 위치**를
+/// 쓰도록 cap/t/half/d 계산을 단일 출처로 둔다(따로 계산하면 둘이 어긋나 ═↔╤ 이음매가 깨진다). d=gap=t.
+const DoubleBand = struct { t: u32, half: u32, d: u32 };
+fn doubleBandParams(w: u32, h: u32, t_in: u32) DoubleBand {
+    const cap = @max(@as(u32, 1), @min(if (h >= 3) h / 3 else 1, if (w >= 3) w / 3 else 1));
+    const t = @max(@as(u32, 1), @min(t_in, cap));
+    return .{ .t = t, .half = t / 2, .d = t };
 }
 
 /// cp box 문자를 width×height RGBA8 슬롯에 coverage로 채운다 — 선은 흰색 불투명(0xFFFFFFFF, 셰이더가 alpha를
@@ -230,10 +241,9 @@ fn weightT(wt: Weight, lt: u32, ht: u32) u32 {
 pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize, pixels: []u8) u32 {
     const w = width_px;
     const h = height_px;
-    if (w == 0 or h == 0) return 0;
-    if (bytes_per_row < @as(usize, w) * 4 or pixels.len < @as(usize, h) * bytes_per_row) return 0;
+    if (!gp.slotFits(w, h, bytes_per_row, pixels)) return 0;
     const spec = specFor(cp) orelse return 0;
-    @memset(pixels[0 .. @as(usize, h) * bytes_per_row], 0);
+    gp.clear(pixels, h, bytes_per_row);
 
     // 선 두께(device px) — light는 cell 높이 비례(최소 1), heavy는 그 2배. cell보다 두껍지 않게(언더플로 방지).
     var lt: u32 = (h + 8) / 16;
@@ -242,8 +252,13 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
     const ht: u32 = @min(lt * 2, @min(w, h));
     const arms = spec.arms;
 
-    // 대각선(╱╲╳): 코너↔코너 선이라 arm 모델 밖 — 거리 기반으로 light 두께만큼 칠한다.
-    if (spec.diagonal != .none) return fillDiagonal(pixels, bytes_per_row, w, h, lt, spec.diagonal);
+    // 대각선(╱╲╳): 코너↔코너 선이라 arm 모델 밖 — 공유 대각선 프리미티브로 light 두께만큼 칠한다(Powerline
+    // 모서리 thin 대각선과 같은 식). backward=╲, forward=╱, cross=둘 다.
+    if (spec.diagonal != .none) {
+        const do_back = spec.diagonal == .backward or spec.diagonal == .cross;
+        const do_fwd = spec.diagonal == .forward or spec.diagonal == .cross;
+        return gp.fillDiagonal(pixels, bytes_per_row, w, h, lt, do_back, do_fwd);
+    }
 
     // 둥근 모서리(╭╮╰╯)는 직각 대신 quarter-arc로 — 두 팔 방향(h_dir·v_dir)으로 아크 코너를 그린다(light).
     if (spec.rounded) {
@@ -309,19 +324,19 @@ fn fillLines(arms: Arms, w: u32, h: u32, bytes_per_row: usize, pixels: []u8, lt:
     var count: u32 = 0;
     if (tl > 0) {
         const y0 = cy -| tl / 2;
-        count += fillRect(pixels, bytes_per_row, 0, y0, cbx1, @min(h, y0 + tl)); // 좌단~중앙 교차 우변
+        count += gp.fillRect(pixels, bytes_per_row, 0, y0, cbx1, @min(h, y0 + tl)); // 좌단~중앙 교차 우변
     }
     if (tr > 0) {
         const y0 = cy -| tr / 2;
-        count += fillRect(pixels, bytes_per_row, cbx0, y0, w, @min(h, y0 + tr)); // 중앙 교차 좌변~우단
+        count += gp.fillRect(pixels, bytes_per_row, cbx0, y0, w, @min(h, y0 + tr)); // 중앙 교차 좌변~우단
     }
     if (tu > 0) {
         const x0 = cx -| tu / 2;
-        count += fillRect(pixels, bytes_per_row, x0, 0, @min(w, x0 + tu), cby1); // 상단~중앙 교차 하변
+        count += gp.fillRect(pixels, bytes_per_row, x0, 0, @min(w, x0 + tu), cby1); // 상단~중앙 교차 하변
     }
     if (td > 0) {
         const x0 = cx -| td / 2;
-        count += fillRect(pixels, bytes_per_row, x0, cby0, @min(w, x0 + td), h); // 중앙 교차 상변~하단
+        count += gp.fillRect(pixels, bytes_per_row, x0, cby0, @min(w, x0 + td), h); // 중앙 교차 상변~하단
     }
     return count;
 }
@@ -329,49 +344,17 @@ fn fillLines(arms: Arms, w: u32, h: u32, bytes_per_row: usize, pixels: []u8, lt:
 /// 대각선(╱╲╳)을 코너↔코너 선으로 합성한다. 픽셀 중심(+0.5)에서 선까지 수직거리가 t/2 이하면 칠한다 — ╲는
 /// (0,0)→(w,h), ╱는 (0,h)→(w,0). 셀 코너를 지나므로 대각으로 이웃한 셀의 같은 대각선과 코너에서 이어진다.
 /// 거리 정규화로 w≠h(비정사각 셀)에서도 두께가 일정. cross(╳)는 둘 다.
-fn fillDiagonal(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, t: u32, kind: Diagonal) u32 {
-    const fw = @as(f32, @floatFromInt(w));
-    const fh = @as(f32, @floatFromInt(h));
-    const norm = @sqrt(fw * fw + fh * fh);
-    if (norm == 0) return 0;
-    const half = @max(0.5, @as(f32, @floatFromInt(t)) / 2.0);
-    const do_back = kind == .backward or kind == .cross; // ╲
-    const do_fwd = kind == .forward or kind == .cross; // ╱
-    var count: u32 = 0;
-    var y: u32 = 0;
-    while (y < h) : (y += 1) {
-        const py = @as(f32, @floatFromInt(y)) + 0.5;
-        const row_off = @as(usize, y) * bytes_per_row;
-        var x: u32 = 0;
-        while (x < w) : (x += 1) {
-            const px = @as(f32, @floatFromInt(x)) + 0.5;
-            // ╲: px·fh − py·fw = 0. ╱: px·fh + py·fw − fw·fh = 0. (정규화 분모 norm 공유)
-            const hit = (do_back and @abs(px * fh - py * fw) / norm <= half) or
-                (do_fwd and @abs(px * fh + py * fw - fw * fh) / norm <= half);
-            if (hit) {
-                const off = row_off + @as(usize, x) * 4;
-                pixels[off] = 0xFF;
-                pixels[off + 1] = 0xFF;
-                pixels[off + 2] = 0xFF;
-                pixels[off + 3] = 0xFF;
-                count += 1;
-            }
-        }
-    }
-    return count;
-}
-
 /// 가로 점선: 폭 w를 n개 주기(period=w/n)로 나눠 각 주기의 앞 dash_len(=period의 2/3)만 [yb0,yb1) 높이로 칠한다.
 /// period가 0이면(셀이 점선보다 좁음) 실선으로 안전 degrade. 셀마다 동일 패턴이라 점선이 셀 경계 너머로 이어진다.
 fn fillDashedH(pixels: []u8, bytes_per_row: usize, w: u32, yb0: u32, yb1: u32, n: u8) u32 {
     const period = w / n;
-    if (period == 0) return fillRect(pixels, bytes_per_row, 0, yb0, w, yb1);
+    if (period == 0) return gp.fillRect(pixels, bytes_per_row, 0, yb0, w, yb1);
     const dash_len = @max(@as(u32, 1), period * 2 / 3);
     var count: u32 = 0;
     var i: u32 = 0;
     while (i < n) : (i += 1) {
         const x0 = i * period;
-        count += fillRect(pixels, bytes_per_row, x0, yb0, @min(w, x0 + dash_len), yb1);
+        count += gp.fillRect(pixels, bytes_per_row, x0, yb0, @min(w, x0 + dash_len), yb1);
     }
     return count;
 }
@@ -379,13 +362,13 @@ fn fillDashedH(pixels: []u8, bytes_per_row: usize, w: u32, yb0: u32, yb1: u32, n
 /// 세로 점선(fillDashedH의 세로판): 높이 h를 n주기로 나눠 각 주기 앞 2/3만 [xb0,xb1) 폭으로 칠한다.
 fn fillDashedV(pixels: []u8, bytes_per_row: usize, h: u32, xb0: u32, xb1: u32, n: u8) u32 {
     const period = h / n;
-    if (period == 0) return fillRect(pixels, bytes_per_row, xb0, 0, xb1, h);
+    if (period == 0) return gp.fillRect(pixels, bytes_per_row, xb0, 0, xb1, h);
     const dash_len = @max(@as(u32, 1), period * 2 / 3);
     var count: u32 = 0;
     var i: u32 = 0;
     while (i < n) : (i += 1) {
         const y0 = i * period;
-        count += fillRect(pixels, bytes_per_row, xb0, y0, xb1, @min(h, y0 + dash_len));
+        count += gp.fillRect(pixels, bytes_per_row, xb0, y0, xb1, @min(h, y0 + dash_len));
     }
     return count;
 }
@@ -435,11 +418,7 @@ fn fillRoundedCorner(
             // 세로 직선 팔: x 띠 + 접점 바깥 → 셀 세로 경계까지.
             const in_v = (x >= xb0 and x < xb1) and dy * vd >= 0.0;
             if (in_arc or in_h or in_v) {
-                const off = @as(usize, y) * bytes_per_row + @as(usize, x) * 4;
-                pixels[off] = 0xFF;
-                pixels[off + 1] = 0xFF;
-                pixels[off + 2] = 0xFF;
-                pixels[off + 3] = 0xFF;
+                gp.setPixel(pixels, @as(usize, y) * bytes_per_row + @as(usize, x) * 4);
                 count += 1;
             }
         }
@@ -455,10 +434,10 @@ fn fillRoundedCorner(
 fn fillDouble(cp: u32, w: u32, h: u32, bytes_per_row: usize, pixels: []u8, t_in: u32) u32 {
     const cx = w / 2;
     const cy = h / 2;
-    // 두 선 + gap = 3t가 셀에 들어가게 두께 제한(최소 1). 너무 작은 셀이면 선이 겹쳐도 fillRect가 안전 처리.
-    const cap = @max(@as(u32, 1), @min(if (h >= 3) h / 3 else 1, if (w >= 3) w / 3 else 1));
-    const t = @max(@as(u32, 1), @min(t_in, cap));
-    const half = t / 2;
+    // 두 선 위치는 fillMixed와 같은 단일 출처(doubleBandParams)에서. 너무 작은 셀이면 선이 겹쳐도 fillRect가 안전 처리.
+    const band = doubleBandParams(w, h, t_in);
+    const t = band.t;
+    const half = band.half;
     // 가로 두 선 밴드 [yU0,yU1)·[yL0,yL1), 세로 두 선 밴드 [xL0,xL1)·[xR0,xR1). 중앙 기준 ±(t+half) 시작 → gap=t.
     const yU0 = cy -| (t + half);
     const yU1 = @min(h, yU0 + t);
@@ -472,66 +451,66 @@ fn fillDouble(cp: u32, w: u32, h: u32, bytes_per_row: usize, pixels: []u8, t_in:
     var c: u32 = 0;
     switch (cp) {
         0x2550 => { // ═ 두 가로선 full
-            c += fillRect(pixels, bpr, 0, yU0, w, yU1);
-            c += fillRect(pixels, bpr, 0, yL0, w, yL1);
+            c += gp.fillRect(pixels, bpr, 0, yU0, w, yU1);
+            c += gp.fillRect(pixels, bpr, 0, yL0, w, yL1);
         },
         0x2551 => { // ║ 두 세로선 full
-            c += fillRect(pixels, bpr, xL0, 0, xL1, h);
-            c += fillRect(pixels, bpr, xR0, 0, xR1, h);
+            c += gp.fillRect(pixels, bpr, xL0, 0, xL1, h);
+            c += gp.fillRect(pixels, bpr, xR0, 0, xR1, h);
         },
         0x2554 => { // ╔ down+right (outer 코너 좌상)
-            c += fillRect(pixels, bpr, xL0, yU0, w, yU1); // 위 가로(outer): 좌단 outer-세로~우단
-            c += fillRect(pixels, bpr, xR0, yL0, w, yL1); // 아래 가로(inner): inner-세로~우단
-            c += fillRect(pixels, bpr, xL0, yU0, xL1, h); // 좌 세로(outer): 상단 코너~하단
-            c += fillRect(pixels, bpr, xR0, yL0, xR1, h); // 우 세로(inner)
+            c += gp.fillRect(pixels, bpr, xL0, yU0, w, yU1); // 위 가로(outer): 좌단 outer-세로~우단
+            c += gp.fillRect(pixels, bpr, xR0, yL0, w, yL1); // 아래 가로(inner): inner-세로~우단
+            c += gp.fillRect(pixels, bpr, xL0, yU0, xL1, h); // 좌 세로(outer): 상단 코너~하단
+            c += gp.fillRect(pixels, bpr, xR0, yL0, xR1, h); // 우 세로(inner)
         },
         0x2557 => { // ╗ down+left (outer 코너 우상)
-            c += fillRect(pixels, bpr, 0, yU0, xR1, yU1); // 위 가로(outer): 좌단~우단 outer-세로
-            c += fillRect(pixels, bpr, 0, yL0, xL1, yL1); // 아래 가로(inner): 좌단~inner-세로
-            c += fillRect(pixels, bpr, xL0, yL0, xL1, h); // 좌 세로(inner)
-            c += fillRect(pixels, bpr, xR0, yU0, xR1, h); // 우 세로(outer)
+            c += gp.fillRect(pixels, bpr, 0, yU0, xR1, yU1); // 위 가로(outer): 좌단~우단 outer-세로
+            c += gp.fillRect(pixels, bpr, 0, yL0, xL1, yL1); // 아래 가로(inner): 좌단~inner-세로
+            c += gp.fillRect(pixels, bpr, xL0, yL0, xL1, h); // 좌 세로(inner)
+            c += gp.fillRect(pixels, bpr, xR0, yU0, xR1, h); // 우 세로(outer)
         },
         0x255A => { // ╚ up+right (outer 코너 좌하)
-            c += fillRect(pixels, bpr, xR0, yU0, w, yU1); // 위 가로(inner)
-            c += fillRect(pixels, bpr, xL0, yL0, w, yL1); // 아래 가로(outer)
-            c += fillRect(pixels, bpr, xL0, 0, xL1, yL1); // 좌 세로(outer): 상단~하단 코너
-            c += fillRect(pixels, bpr, xR0, 0, xR1, yU1); // 우 세로(inner)
+            c += gp.fillRect(pixels, bpr, xR0, yU0, w, yU1); // 위 가로(inner)
+            c += gp.fillRect(pixels, bpr, xL0, yL0, w, yL1); // 아래 가로(outer)
+            c += gp.fillRect(pixels, bpr, xL0, 0, xL1, yL1); // 좌 세로(outer): 상단~하단 코너
+            c += gp.fillRect(pixels, bpr, xR0, 0, xR1, yU1); // 우 세로(inner)
         },
         0x255D => { // ╝ up+left (outer 코너 우하)
-            c += fillRect(pixels, bpr, 0, yU0, xL1, yU1); // 위 가로(inner)
-            c += fillRect(pixels, bpr, 0, yL0, xR1, yL1); // 아래 가로(outer)
-            c += fillRect(pixels, bpr, xL0, 0, xL1, yU1); // 좌 세로(inner)
-            c += fillRect(pixels, bpr, xR0, 0, xR1, yL1); // 우 세로(outer)
+            c += gp.fillRect(pixels, bpr, 0, yU0, xL1, yU1); // 위 가로(inner)
+            c += gp.fillRect(pixels, bpr, 0, yL0, xR1, yL1); // 아래 가로(outer)
+            c += gp.fillRect(pixels, bpr, xL0, 0, xL1, yU1); // 좌 세로(inner)
+            c += gp.fillRect(pixels, bpr, xR0, 0, xR1, yL1); // 우 세로(outer)
         },
         0x2560 => { // ╠ up+down+right: 세로 두 선 full + 오른쪽 가로 분기
-            c += fillRect(pixels, bpr, xL0, 0, xL1, h);
-            c += fillRect(pixels, bpr, xR0, 0, xR1, h);
-            c += fillRect(pixels, bpr, xL0, yU0, w, yU1);
-            c += fillRect(pixels, bpr, xL0, yL0, w, yL1);
+            c += gp.fillRect(pixels, bpr, xL0, 0, xL1, h);
+            c += gp.fillRect(pixels, bpr, xR0, 0, xR1, h);
+            c += gp.fillRect(pixels, bpr, xL0, yU0, w, yU1);
+            c += gp.fillRect(pixels, bpr, xL0, yL0, w, yL1);
         },
         0x2563 => { // ╣ up+down+left
-            c += fillRect(pixels, bpr, xL0, 0, xL1, h);
-            c += fillRect(pixels, bpr, xR0, 0, xR1, h);
-            c += fillRect(pixels, bpr, 0, yU0, xR1, yU1);
-            c += fillRect(pixels, bpr, 0, yL0, xR1, yL1);
+            c += gp.fillRect(pixels, bpr, xL0, 0, xL1, h);
+            c += gp.fillRect(pixels, bpr, xR0, 0, xR1, h);
+            c += gp.fillRect(pixels, bpr, 0, yU0, xR1, yU1);
+            c += gp.fillRect(pixels, bpr, 0, yL0, xR1, yL1);
         },
         0x2566 => { // ╦ down+left+right: 가로 두 선 full + 아래 세로 분기
-            c += fillRect(pixels, bpr, 0, yU0, w, yU1);
-            c += fillRect(pixels, bpr, 0, yL0, w, yL1);
-            c += fillRect(pixels, bpr, xL0, yU0, xL1, h);
-            c += fillRect(pixels, bpr, xR0, yU0, xR1, h);
+            c += gp.fillRect(pixels, bpr, 0, yU0, w, yU1);
+            c += gp.fillRect(pixels, bpr, 0, yL0, w, yL1);
+            c += gp.fillRect(pixels, bpr, xL0, yU0, xL1, h);
+            c += gp.fillRect(pixels, bpr, xR0, yU0, xR1, h);
         },
         0x2569 => { // ╩ up+left+right
-            c += fillRect(pixels, bpr, 0, yU0, w, yU1);
-            c += fillRect(pixels, bpr, 0, yL0, w, yL1);
-            c += fillRect(pixels, bpr, xL0, 0, xL1, yL1);
-            c += fillRect(pixels, bpr, xR0, 0, xR1, yL1);
+            c += gp.fillRect(pixels, bpr, 0, yU0, w, yU1);
+            c += gp.fillRect(pixels, bpr, 0, yL0, w, yL1);
+            c += gp.fillRect(pixels, bpr, xL0, 0, xL1, yL1);
+            c += gp.fillRect(pixels, bpr, xR0, 0, xR1, yL1);
         },
         0x256C => { // ╬ all: 네 선 full(중앙 사각은 자연히 빈다)
-            c += fillRect(pixels, bpr, 0, yU0, w, yU1);
-            c += fillRect(pixels, bpr, 0, yL0, w, yL1);
-            c += fillRect(pixels, bpr, xL0, 0, xL1, h);
-            c += fillRect(pixels, bpr, xR0, 0, xR1, h);
+            c += gp.fillRect(pixels, bpr, 0, yU0, w, yU1);
+            c += gp.fillRect(pixels, bpr, 0, yL0, w, yL1);
+            c += gp.fillRect(pixels, bpr, xL0, 0, xL1, h);
+            c += gp.fillRect(pixels, bpr, xR0, 0, xR1, h);
         },
         else => {},
     }
@@ -544,11 +523,11 @@ fn fillDouble(cp: u32, w: u32, h: u32, bytes_per_row: usize, pixels: []u8, t_in:
 fn fillMixed(arms: Arms, w: u32, h: u32, bytes_per_row: usize, pixels: []u8, t_in: u32) u32 {
     const cx = w / 2;
     const cy = h / 2;
-    // 두 선 + gap = 3t가 셀에 들어가게 두께 제한(fillDouble과 같은 규칙 → 선 위치 일치).
-    const cap = @max(@as(u32, 1), @min(if (h >= 3) h / 3 else 1, if (w >= 3) w / 3 else 1));
-    const t = @max(@as(u32, 1), @min(t_in, cap));
-    const half = t / 2;
-    const d = t; // double 선 중앙 오프셋(gap=t)
+    // 두 선 위치는 fillDouble과 같은 단일 출처(doubleBandParams) → 선 위치 일치해 이음매 없이 연결.
+    const band = doubleBandParams(w, h, t_in);
+    const t = band.t;
+    const half = band.half;
+    const d = band.d; // double 선 중앙 오프셋(gap=t)
 
     // 가로 선 y-중앙들(없으면 0개), 세로 선 x-중앙들. left/right는 같은 굵기, up/down도 같은 굵기(혼합 집합 규약).
     const hw: ?Weight = arms.left orelse arms.right;
@@ -598,7 +577,7 @@ fn fillMixed(arms: Arms, w: u32, h: u32, bytes_per_row: usize, pixels: []u8, t_i
         // left 있으면 좌단(0). 없으면 stub: 벽이 통과 이중벽이면 안쪽(우측) 세로선 vx[last]에 붙고, 코너면 바깥(cxmin).
         const x0 = if (arms.left != null) 0 else if (v_full and vxn > 0) vx[vxn - 1] -| half else cxmin;
         const x1 = if (arms.right != null) w else if (v_full and vxn > 0) @min(w, (vx[0] -| half) + t) else cxmax;
-        count += fillRect(pixels, bytes_per_row, x0, y0, x1, y1);
+        count += gp.fillRect(pixels, bytes_per_row, x0, y0, x1, y1);
     }
     i = 0;
     while (i < vxn) : (i += 1) {
@@ -607,29 +586,7 @@ fn fillMixed(arms: Arms, w: u32, h: u32, bytes_per_row: usize, pixels: []u8, t_i
         // up 있으면 상단(0). 없으면 stub: 벽이 통과 이중벽이면 안쪽(아래) 가로선 hy[last]에 붙고, 코너면 바깥(cymin).
         const y0 = if (arms.up != null) 0 else if (h_full and hyn > 0) hy[hyn - 1] -| half else cymin;
         const y1 = if (arms.down != null) h else if (h_full and hyn > 0) @min(h, (hy[0] -| half) + t) else cymax;
-        count += fillRect(pixels, bytes_per_row, x0, y0, x1, y1);
-    }
-    return count;
-}
-
-/// [x0,x1)×[y0,y1) 픽셀을 흰색 불투명(0xFFFFFFFF)으로. 채운 픽셀 수 반환. RGBA8 + bytes_per_row. 겹쳐도(교차)
-/// 멱등이라 안전. 경계는 fillCoverage가 검증(off+4 ≤ h*bpr ≤ len)했으므로 per-pixel 가드 없이 쓴다.
-fn fillRect(pixels: []u8, bytes_per_row: usize, x0: u32, y0: u32, x1: u32, y1: u32) u32 {
-    if (x1 <= x0 or y1 <= y0) return 0;
-    var count: u32 = 0;
-    var y = y0;
-    while (y < y1) : (y += 1) {
-        const row_off = @as(usize, y) * bytes_per_row;
-        var x = x0;
-        while (x < x1) : (x += 1) {
-            const off = row_off + @as(usize, x) * 4;
-            const was_set = pixels[off + 3] != 0;
-            pixels[off] = 0xFF;
-            pixels[off + 1] = 0xFF;
-            pixels[off + 2] = 0xFF;
-            pixels[off + 3] = 0xFF;
-            if (!was_set) count += 1; // 교차에서 겹친 픽셀은 한 번만 센다
-        }
+        count += gp.fillRect(pixels, bytes_per_row, x0, y0, x1, y1);
     }
     return count;
 }

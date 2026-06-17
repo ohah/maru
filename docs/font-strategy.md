@@ -86,7 +86,7 @@ v1에서 약속하지 않는 것:
 - 폰트에 해당 face가 없을 때의 합성 bold/italic(faux) 품질.
 - 글리프 합성(cell-snapping, 폰트 대신 셀에 직접 — nearest 샘플 + alpha coverage라 1:1 픽셀-퍼펙트):
   - **Block Elements(U+2580~259F solid) 완료**(`renderer/block_glyph.zig` — eighth/half/full/quadrant 사각형. shade ░▒▓ 후속).
-  - **Box-drawing(U+2500~257F: light·heavy·dashed·double) 완료**(`renderer/box_glyph.zig` — arm 모델). light single ─│┌┐└┘├┤┬┴┼ + 둥근 ╭╮╰╯는 **실제 quarter-arc**(중심 C=(cx+dir·r,cy+dir·r)·반지름 r=min(cx,cy)·띠 [r-t/2,r+t/2] + 접점 너머 직선 팔). **heavy** ━┃·┏┓┗┛·┣┫┳┻·╋(두께 2배). **dashed** ┄┅┆┇┈┉┊┋(3·4점선)·╌╍╎╏(2점선) — 직선 전용, 각 주기 앞 2/3만 칠해 셀 너머로 패턴 연결. **double** ═║·╔╗╚╝·╠╣╦╩·╬ — 두 평행 light 선(gap=t), 모서리는 **outer/inner 코너**(중앙서 먼 선=outer끼리·가까운 선=inner끼리 연결)·T는 통과방향 full+분기 spine·╬는 네 선 full(중앙 사각 빔). 셀 경계까지 뻗어 이음매 없이 연결. 혼합 굵기(┍┎…)·single↔double 혼합(╒╓…)·Powerline은 후속(폰트 폴백).
+  - **Box-drawing(U+2500~257F: light·heavy·혼합·dashed·double·반선) 완료**(`renderer/box_glyph.zig` — **per-arm 굵기** arm 모델, Ghostty linesChar식). U+2500~254B 직선·모서리·T·사거리를 팔마다 굵기(light/heavy)로 그려 **혼합 굵기**(┍=down light+right heavy·┞=up heavy·╀ 등)까지 한 함수(fillLines)로 — 각 팔이 자기 두께로 셀 경계까지 뻗고 중앙 교차(가장 굵은 세로폭×가로높이)를 모두 덮어 이어진다. 둥근 ╭╮╰╯는 **실제 quarter-arc**. **dashed** ┄…┋·╌╍╎╏(2·3·4점선, light·heavy) — 각 주기 앞 2/3만 칠해 셀 너머로 연결. **double** ═║·╔╗╚╝·╠╣╦╩·╬ — 두 평행선(gap=t), 모서리 **outer/inner 코너**·T 통과방향 full+분기 spine·╬ 네 선 full. **반선·두께전이** ╴╵╶╷╸╹╺╻╼╽╾╿(단일 팔 또는 좌우 다른 굵기). single↔double 혼합(╒╓…)·대각선(╱╲╳)·Powerline은 후속(폰트 폴백).
 - pixel-perfect golden을 기본 CI에서 강제.
 - HarfBuzz, FreeType, fontconfig, DirectWrite 같은 외부/타 플랫폼 폰트 스택 추가.
 

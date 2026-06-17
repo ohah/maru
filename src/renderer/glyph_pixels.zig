@@ -215,18 +215,18 @@ pub fn fillPolygon(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, verts: []
             xs[k] = key;
         }
         const row_off = @as(usize, y) * bytes_per_row;
+        const fw = @as(f32, @floatFromInt(w));
         var p: usize = 0;
         while (p + 1 < nx) : (p += 2) {
-            const xl = xs[p];
-            const xr = xs[p + 1];
-            var x: u32 = 0;
-            while (x < w) : (x += 1) {
-                const px = @as(f32, @floatFromInt(x)) + 0.5;
-                if (px >= xl and px < xr) {
-                    const off = row_off + @as(usize, x) * 4;
-                    if (pixels[off + 3] == 0) count += 1;
-                    setPixel(pixels, off);
-                }
+            // 픽셀 중심 px=x+0.5가 [xl,xr)인 x 범위만 돈다(전폭 스캔 없이): x∈[ceil(xl−0.5), ceil(xr−0.5)). 셀 밖 클램프.
+            const xl = std.math.clamp(xs[p], 0.0, fw);
+            const xr = std.math.clamp(xs[p + 1], 0.0, fw);
+            var x: u32 = @intFromFloat(@ceil(xl - 0.5));
+            const xend: u32 = @intFromFloat(@ceil(xr - 0.5));
+            while (x < xend) : (x += 1) {
+                const off = row_off + @as(usize, x) * 4;
+                if (pixels[off + 3] == 0) count += 1;
+                setPixel(pixels, off);
             }
         }
     }

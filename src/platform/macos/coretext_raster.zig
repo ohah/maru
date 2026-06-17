@@ -54,102 +54,16 @@ pub const CoreTextGlyphRasterizer = struct {
         // FontId -> PostScript name 조회와 C ABI 호출을 맡아, 이후 제품 renderer도 같은
         // GlyphRasterRequest 계약만 소비하게 만든다.
         if (request.pixels.len == 0) return error.RasterizerFailed;
-        // Block Elements(U+2580~259F)는 폰트 글리프 대신 직접 합성한다 — 슬롯이 cell 크기라 셀에 꽉 차 이음매
-        // 없이 타일링(폰트 글리프는 셀에 안 맞아 gap·흐림). CoreText·font 조회를 건너뛰고 coverage만 채운다.
-        if (renderer.block_glyph.isBlockElement(request.run.codepoint)) {
-            const non_clear = renderer.block_glyph.fillCoverage(
-                request.run.codepoint,
-                request.slot.width_px,
-                request.slot.height_px,
-                request.bytes_per_row,
-                request.pixels,
-            );
-            return .{ .non_clear_pixels = non_clear };
-        }
-        // Box-drawing(U+2500~257F light: ─│┌┐└┘├┤┬┴┼·둥근 ╭╮╰╯)도 직접 합성 — 셀 경계에서 이음매 없이 연결
-        // (폰트 글리프는 안 맞아 보더가 끊기거나 안 보인다). heavy/double/dashed는 폰트 폴백(isBoxDrawing=false).
-        if (renderer.box_glyph.isBoxDrawing(request.run.codepoint)) {
-            const non_clear = renderer.box_glyph.fillCoverage(
-                request.run.codepoint,
-                request.slot.width_px,
-                request.slot.height_px,
-                request.bytes_per_row,
-                request.pixels,
-            );
-            return .{ .non_clear_pixels = non_clear };
-        }
-        // Powerline(U+E0B0~E0BF): 삼각형·반원 separator도 폰트(powerline-symbols) 대신 직접 합성 — 셀에 꽉 차
-        // 다음 세그먼트와 이음매 없이. 폰트가 PUA 글리프를 안 가지면(glyph_id==0) 더더욱 합성이 필요하다.
-        if (renderer.powerline_glyph.isPowerline(request.run.codepoint)) {
-            const non_clear = renderer.powerline_glyph.fillCoverage(
-                request.run.codepoint,
-                request.slot.width_px,
-                request.slot.height_px,
-                request.bytes_per_row,
-                request.pixels,
-            );
-            return .{ .non_clear_pixels = non_clear };
-        }
-        // Braille(U+2800~28FF): 2열×4행 점 패턴(하위 8비트 마스크)도 직접 합성 — 셀 격자에 스냅된 점이라 btop·
-        // plotille 류 TUI 그래프가 흐려지지 않고 정렬된다. 폰트 글리프는 셀에 안 맞아 점 간격이 흔들린다.
-        if (renderer.braille_glyph.isBraille(request.run.codepoint)) {
-            const non_clear = renderer.braille_glyph.fillCoverage(
-                request.run.codepoint,
-                request.slot.width_px,
-                request.slot.height_px,
-                request.bytes_per_row,
-                request.pixels,
-            );
-            return .{ .non_clear_pixels = non_clear };
-        }
-        // Legacy Computing 블록 모자이크(sextant U+1FB00~1FB3B 2×3·octant U+1CD00~1CDE5 2×4): 하위 칸 패턴을
-        // 셀 격자에 스냅해 채운다(Teletext·PETSCII식 터미널 그래픽). block_glyph quadrant를 더 잘게 쪼갠 격.
-        if (renderer.legacy_mosaic_glyph.isLegacyMosaic(request.run.codepoint)) {
-            const non_clear = renderer.legacy_mosaic_glyph.fillCoverage(
-                request.run.codepoint,
-                request.slot.width_px,
-                request.slot.height_px,
-                request.bytes_per_row,
-                request.pixels,
-            );
-            return .{ .non_clear_pixels = non_clear };
-        }
-        // Legacy Computing edge wedge·bowtie(U+1FB68~1FB6F·1FB9A/9B)와 대각 corner 삼각형(◢◣◤◥ U+25E2~25E5·
-        // 음영 🮜🮝🮞🮟 U+1FB9C~9F): 정점이 셀 모서리·중앙이라 격자에 칼같이 스냅된다.
-        if (renderer.legacy_wedge_glyph.isLegacyWedge(request.run.codepoint) or
-            renderer.legacy_wedge_glyph.isCornerTriangle(request.run.codepoint))
-        {
-            const non_clear = renderer.legacy_wedge_glyph.fillCoverage(
-                request.run.codepoint,
-                request.slot.width_px,
-                request.slot.height_px,
-                request.bytes_per_row,
-                request.pixels,
-            );
-            return .{ .non_clear_pixels = non_clear };
-        }
-        // Legacy Computing smooth mosaic(U+1FB3C~1FB67): 셀 둘레 정점을 이은 대각 폴리곤도 직접 합성 — 빗변이
-        // 셀 격자에 스냅돼 이웃 셀과 매끈히 잇는다(block 모자이크의 대각 버전).
-        if (renderer.legacy_smooth_glyph.isSmoothMosaic(request.run.codepoint)) {
-            const non_clear = renderer.legacy_smooth_glyph.fillCoverage(
-                request.run.codepoint,
-                request.slot.width_px,
-                request.slot.height_px,
-                request.bytes_per_row,
-                request.pixels,
-            );
-            return .{ .non_clear_pixels = non_clear };
-        }
-        // Legacy Computing 대각선 stroke(U+1FBA0~1FBAE 코너 다이아몬드·U+1FBD0~1FBDF cell 대각): light 두께
-        // 선분도 직접 합성 — 끝점이 셀 모서리·모서리중점·중앙이라 격자에 스냅돼 이웃 셀과 이어진다.
-        if (renderer.legacy_diagonal_glyph.isLegacyDiagonal(request.run.codepoint)) {
-            const non_clear = renderer.legacy_diagonal_glyph.fillCoverage(
-                request.run.codepoint,
-                request.slot.width_px,
-                request.slot.height_px,
-                request.bytes_per_row,
-                request.pixels,
-            );
+        // 합성 대상(box·block·Powerline·Braille·Legacy Computing 모자이크/wedge/삼각형/대각선)은 폰트 글리프
+        // 대신 코드포인트로 직접 그린다 — 슬롯이 cell 크기라 셀에 꽉 차 이음매 없이 타일링/연결(폰트 글리프는
+        // 셀에 안 맞아 gap·흐림·끊김). 합성 dispatch 단일 출처 renderer.synthesizeGlyph를 폰트 경로 전에 호출.
+        if (renderer.synthesizeGlyph(
+            request.run.codepoint,
+            request.slot.width_px,
+            request.slot.height_px,
+            request.bytes_per_row,
+            request.pixels,
+        )) |non_clear| {
             return .{ .non_clear_pixels = non_clear };
         }
         const font_identity = self.font_registry.get(request.run.font_id) orelse

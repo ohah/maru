@@ -678,7 +678,7 @@ TDD 방식:
 
 아래는 이미 **완료**된 기능들에 문서 곳곳 "한계/후속"으로 적힌 작은 잔여 항목을 한 곳에 모은 것이다(단일 출처는 여전히 각 기능 절). 새 기능이 아니라 다듬기라 우선순위는 낮고, 필요할 때 각자 작은 PR로 집어간다.
 
-- **스크롤백 Find(⌘F)**: ⌘G(오버레이 닫힌 채 다음 매치)·유니코드 케이스폴딩(현재 ASCII fold)·regex/fuzzy(현재 부분일치)·팝업에서 Find 띄우기·alt screen 검색 스크롤.
+- **스크롤백 Find(⌘F)**: **⌘G/⌘⇧G(오버레이 닫힌 채 다음/이전 매치) — 완료**(`find_next`/`find_previous` 액션 + ⌘G/⌘⇧G 바인딩. `findNavigate`가 보존된 검색어로 재검색해 네비, `find_nav` 플래그로 닫힌 채도 현재 매치 하이라이트·출력 시 재검색 유지, 셸 타이핑이 종료. macOS Find Next 관례). 잔여: 유니코드 케이스폴딩(현재 ASCII fold)·regex/fuzzy(현재 부분일치)·팝업에서 Find 띄우기·alt screen 검색 스크롤.
 - **런타임 폰트 크기(⌘+/⌘-/⌘0)**: step 파라미터화(현재 1pt 고정)·View 메뉴 항목(Bigger/Smaller/Actual Size)·`set_font_size` 절대 지정.
 - **메뉴바(NSMenu)**: Edit의 Cut/Undo·Services·Open/Reload Config·Find 메뉴 항목(현재 copy/paste만 연결).
 - **커맨드 팝업(⌘⇧P)**: fuzzy 필터(현재 부분일치)·한글 IME 필터(현재 ASCII).

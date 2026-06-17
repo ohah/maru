@@ -601,6 +601,10 @@ pub const DevSession = struct {
     // tick마다 활성 surface의 매치를 뷰포트 span으로 클립해 담는 재사용 버퍼(cell_colors.search_matches로 넘긴다).
     // 매 frame 새로 채우되 capacity는 재사용한다 — 스크롤·출력에 따라 뷰 안 매치가 바뀌므로 캐시하지 않는다.
     find_view_spans: std.ArrayList(terminal.SelectionSpan) = .empty,
+    // ⌘G/⌘⇧G로 Find 오버레이가 **닫힌 채** 매치를 네비게이션 중인지. true면 오버레이가 닫혀 있어도 매치
+    // 하이라이트(현재 매치만)와 출력 시 재검색을 유지한다(findNavigate가 켠다). 오버레이 열기(toggleFind)나
+    // 터미널 타이핑(.terminal_input)이 끄면 하이라이트가 사라진다(검색 종료 신호).
+    find_nav: bool = false,
     // chrome 호스트(플랫폼 중립 L3 — src/chrome). 현재 C0/Notice 모달만 소유한다(손상 알림 등). 열려 있으면
     // handleKeyEvent가 키를 chrome으로 라우팅하고, tick이 buildNoticeFrame을 최상위 오버레이로 그린다. tokens·
     // props는 매 frame DevSession이 빌드해 넘긴다(chrome은 config/terminal을 모름). 단일 출처: docs/chrome-strategy.md.
@@ -2101,6 +2105,9 @@ pub const DevSession = struct {
             .toggle_command_palette => self.togglePalette(),
             // 스크롤백 Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState, 검색은 코어).
             .toggle_find => self.toggleFind(),
+            // Find 다음/이전 매치(⌘G/⌘⇧G) — 오버레이 닫힌 채도 동작(보존된 검색어로 네비).
+            .find_next => self.findNavigate(true),
+            .find_previous => self.findNavigate(false),
             // 런타임 폰트 크기(⌘+/⌘-/⌘0) — cell 메트릭·grid 재계산(setFontSize). 콘텐츠 reflow 없음.
             .increase_font_size => self.adjustFontSize(font_size_step),
             .decrease_font_size => self.adjustFontSize(-font_size_step),
@@ -2177,11 +2184,32 @@ pub const DevSession = struct {
         if (self.chrome_host.find.open) {
             self.chrome_host.find.hide();
             self.find_matches.clearRetainingCapacity(); // 닫힘 — 하이라이트 중단
+            self.find_nav = false; // ⌘G 닫힘-네비 세션도 종료
         } else {
             self.chrome_host.notice.dismiss(); // 배타적 — notice 위에 열지 않는다
             self.chrome_host.palette.hide();
-            self.chrome_host.find.show();
+            self.chrome_host.find.show(); // show가 검색어/현재/카운트를 비운다(새 검색)
+            self.find_nav = false; // 오버레이가 주도 — 닫힘-네비 플래그 해제
         }
+    }
+
+    /// Find 다음/이전 매치로(⌘G/⌘⇧G). 오버레이가 닫혀 있어도 동작한다 — show가 비우기 전까지 검색어는
+    /// chrome_host.find가 보존하므로, 닫은 뒤에도 그 검색어로 재검색해 네비게이션한다(macOS Find Next 관례).
+    /// 검색 이력(검색어)이 없으면 무동작. 닫을 때 매치를 비웠으니 비어 있으면 보존 검색어로 다시 채우고(현재
+    /// 인덱스는 닫기 전 위치 유지 — setMatchCount가 범위 clamp), find_nav를 세워 하이라이트(현재 매치)·출력
+    /// 시 재검색을 닫힌 채로도 유지한다. 오버레이가 열려 있으면 모달 라우팅이 키를 가로채 이 경로는 안 탄다.
+    fn findNavigate(self: *DevSession, forward: bool) void {
+        if (!self.surface_initialized) return;
+        if (self.chrome_host.find.input.query.items.len == 0) return; // 검색 이력 없음 — 무동작
+        if (self.find_matches.items.len == 0) {
+            self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
+            self.chrome_host.find.setMatchCount(self.find_matches.items.len); // current를 범위로 clamp(닫기 전 위치 보존)
+        }
+        if (self.find_matches.items.len == 0) return; // 매치 없음
+        self.find_nav = true;
+        if (forward) self.chrome_host.find.next() else self.chrome_host.find.prev();
+        self.scrollToCurrentMatch();
+        self.metal_dirty = true;
     }
 
     /// chrome 컴포넌트가 낸 의도(HostAction)를 session 부수효과로 디스패치한다 — chrome은 session을 모르므로(경계)
@@ -2378,6 +2406,10 @@ pub const DevSession = struct {
                 self.total_terminal_input_events += 1;
                 self.total_terminal_input_bytes += terminal_input.bytes_len;
                 self.resetCursorBlink(); // 타이핑 중 커서가 사라지지 않게
+                if (self.find_nav) { // 셸에 타이핑 재개 = 검색 종료 — 닫힘-네비 하이라이트 해제
+                    self.find_nav = false;
+                    self.find_matches.clearRetainingCapacity();
+                }
             },
             .app_action => |action| {
                 self.total_app_key_events += 1;
@@ -3858,23 +3890,26 @@ pub const DevSession = struct {
             } else try self.frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
             defer tick_result.deinit(self.allocator);
 
-            // Find 열린 채 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백 eviction). 재검색해
-            // 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다(사용자가 보던 위치 유지).
-            if (self.chrome_host.find.open and drain_summary.output_events > 0) {
+            // Find 열린 채(또는 ⌘G 닫힘-네비 중) 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백
+            // eviction). 재검색해 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다.
+            const find_active = self.chrome_host.find.open or self.find_nav;
+            if (find_active and drain_summary.output_events > 0) {
                 self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
                 self.chrome_host.find.setMatchCount(self.find_matches.items.len); // 매치 수 동기화 + current clamp(스크롤은 안 함)
             }
-            // 스크롤백 Find: 활성 surface의 매치를 뷰포트 span으로 클립해 하이라이트로 넘긴다(Find 열림일 때만).
+            // 스크롤백 Find: 활성 surface의 매치를 뷰포트 span으로 클립해 하이라이트로 넘긴다(Find 활성일 때만).
             // 현재 매치는 search_matches에서 빼 별도 강조색(current_match)으로만 칠한다. 매 frame 다시 클립한다 —
             // 스크롤/출력으로 뷰 안에 보이는 매치가 바뀐다. find_view_spans는 capacity만 재사용(매 frame 새로 채움).
+            // 닫힌 채 ⌘G 네비(find_nav, !open)면 **현재 매치만** 강조한다(전체 하이라이트는 오버레이 열림 전용 —
+            // 바 없이 화면 전체가 칠해지는 노이즈를 피한다).
             self.find_view_spans.clearRetainingCapacity();
             var find_current_span: ?terminal.SelectionSpan = null;
-            if (self.chrome_host.find.open) {
+            if (find_active) {
                 for (self.find_matches.items, 0..) |m, mi| {
                     const span = self.activeSurface().core.matchViewportSpan(m) orelse continue;
                     if (mi == self.chrome_host.find.current) {
                         find_current_span = span;
-                    } else {
+                    } else if (self.chrome_host.find.open) {
                         self.find_view_spans.append(self.allocator, span) catch {};
                     }
                 }
@@ -6006,6 +6041,67 @@ test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비
     try std.testing.expect(session.chrome_host.find.open);
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(!session.chrome_host.find.open);
+}
+
+test "find ⌘G/⌘⇧G: 오버레이 닫힌 채 다음/이전 매치 네비(보존 검색어 재검색·타이핑이 종료)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY(controlled_smoke)
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+    try session.activeSurface().core.write("MARUFIND one\r\ntwo MARUFIND three\r\nMARUFIND four"); // 3곳 매치
+
+    // 검색: 열고 타이핑 → 3곳 매치, 현재 0.
+    session.dispatchAppAction(.toggle_find);
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 3), session.find_matches.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.current);
+
+    // Esc로 닫기 — 매치 정리, 검색어 보존, find_nav false.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(!session.chrome_host.find.open);
+    try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len);
+    try std.testing.expect(!session.find_nav);
+    try std.testing.expect(session.chrome_host.find.input.query.items.len > 0); // 검색어 보존(hide는 안 비움)
+
+    // ⌘G(닫힌 채): 보존 검색어로 재검색 + 다음 매치(0→1) + find_nav 세움.
+    session.dispatchAppAction(.find_next);
+    try std.testing.expect(session.find_nav);
+    try std.testing.expectEqual(@as(usize, 3), session.find_matches.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.chrome_host.find.current);
+    try std.testing.expect(!session.chrome_host.find.open); // 오버레이는 여전히 닫힘
+
+    // ⌘G 두 번 더 → 2 → 0(wrap).
+    session.dispatchAppAction(.find_next);
+    try std.testing.expectEqual(@as(usize, 2), session.chrome_host.find.current);
+    session.dispatchAppAction(.find_next);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.current);
+
+    // ⌘⇧G(이전) → 2(뒤로 wrap).
+    session.dispatchAppAction(.find_previous);
+    try std.testing.expectEqual(@as(usize, 2), session.chrome_host.find.current);
+
+    // 닫힌 채 네비 중 tick 프레임 빌드가 크래시 없이 동작(현재 매치만 하이라이트 — cell_colors 경로).
+    _ = try session.tick();
+
+    // 셸에 타이핑 재개 = 검색 종료 → find_nav 해제 + 매치 정리.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'x' }, .modifiers = .{} });
+    try std.testing.expect(!session.find_nav);
+    try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len);
+
+    // 빈 검색어면 ⌘G 무동작(새로 열어 show가 검색어를 비우고, 닫은 뒤 find_next).
+    session.dispatchAppAction(.toggle_find); // show → query clear
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    session.dispatchAppAction(.find_next);
+    try std.testing.expect(!session.find_nav); // 검색어 없음 — 무동작
 }
 
 test "find IME 멀티-문자: 커밋이 다음 조합 preedit를 안 지운다(조합 안 보임 회귀)" {

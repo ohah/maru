@@ -583,21 +583,30 @@ fn fillMixed(arms: Arms, w: u32, h: u32, bytes_per_row: usize, pixels: []u8, t_i
     const cymin = if (hyn > 0) hy[0] -| half else cy;
     const cymax = if (hyn > 0) @min(h, hy[hyn - 1] -| half + t) else cy;
 
+    // 한쪽만 있는 single 가지가 **꽉 찬 이중 벽**(양방향 존재)을 만나면 안쪽 선에 부착한다(바깥 선까지
+    // 뻗어 gap을 가로지르지 않음). ╟╢(이중 세로벽+single 가로 stub)·╤╧(이중 가로벽+single 세로 stub)이 해당.
+    // 코너(한 방향만, 예 ╓╒)는 양 선을 이어야 하므로 기존대로 바깥 span(cxmin/cymin)까지 뻗는다. 벽이 단일선이면
+    // 안쪽==바깥이라 변화 없음(╞╡ 등). 베이스 = 정설 이중-T 모양(안쪽 부착), Ghostty linesChar와 동작 비교.
+    const v_full = arms.up != null and arms.down != null; // 세로가 위·아래 모두 = 통과 벽
+    const h_full = arms.left != null and arms.right != null; // 가로가 좌·우 모두 = 통과 벽
+
     var count: u32 = 0;
     var i: usize = 0;
     while (i < hyn) : (i += 1) {
         const y0 = hy[i] -| half;
         const y1 = @min(h, y0 + t);
-        const x0 = if (arms.left != null) 0 else cxmin; // left 있으면 좌단, 아니면 세로선까지(코너)
-        const x1 = if (arms.right != null) w else cxmax;
+        // left 있으면 좌단(0). 없으면 stub: 벽이 통과 이중벽이면 안쪽(우측) 세로선 vx[last]에 붙고, 코너면 바깥(cxmin).
+        const x0 = if (arms.left != null) 0 else if (v_full and vxn > 0) vx[vxn - 1] -| half else cxmin;
+        const x1 = if (arms.right != null) w else if (v_full and vxn > 0) @min(w, (vx[0] -| half) + t) else cxmax;
         count += fillRect(pixels, bytes_per_row, x0, y0, x1, y1);
     }
     i = 0;
     while (i < vxn) : (i += 1) {
         const x0 = vx[i] -| half;
         const x1 = @min(w, x0 + t);
-        const y0 = if (arms.up != null) 0 else cymin;
-        const y1 = if (arms.down != null) h else cymax;
+        // up 있으면 상단(0). 없으면 stub: 벽이 통과 이중벽이면 안쪽(아래) 가로선 hy[last]에 붙고, 코너면 바깥(cymin).
+        const y0 = if (arms.up != null) 0 else if (h_full and hyn > 0) hy[hyn - 1] -| half else cymin;
+        const y1 = if (arms.down != null) h else if (h_full and hyn > 0) @min(h, (hy[0] -| half) + t) else cymax;
         count += fillRect(pixels, bytes_per_row, x0, y0, x1, y1);
     }
     return count;
@@ -687,6 +696,36 @@ test "fillCoverage: single↔double 혼합 ╞(single 세로 full + double 가�
     try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w - 1, cy + 2)); // 아래 가로선 우단
     try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, cx, h - 1)); // 세로 하단(down)
     try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, cx, 0)); // 세로 상단 안 닿음(up 없음)
+}
+
+test "fillCoverage: 이중 세로벽+single 가로 stub ╟╢는 안쪽 선에 붙고 gap을 안 메운다" {
+    // 회귀 고정(#4): ╟(up.D down.D right.L)·╢(up.D down.D left.L)은 꽉 찬 이중 세로벽에 single 가로 stub이
+    // 붙는다. stub은 **안쪽** 세로선에 붙어야 하고, 두 세로선 사이 gap을 가로질러선 안 된다(예전엔 바깥 선부터
+    // 뻗어 gap을 메웠다). w=16,h=32 → t=2,half=1,d=2, 세로선 x=6·10, gap=x{7,8}.
+    const w: u32 = 16;
+    const h: u32 = 32;
+    const bpr: usize = w * 4;
+    var pixels: [32 * 16 * 4]u8 = undefined;
+    const a = struct {
+        fn at(p: []const u8, bpr_: usize, x: u32, y: u32) u8 {
+            return p[@as(usize, y) * bpr_ + @as(usize, x) * 4 + 3];
+        }
+    }.at;
+    const cy = h / 2;
+
+    // ╟ (right stub): 안쪽=우측 세로선(x=10)에서 우단으로. gap{7,8}은 row cy에서 비어야 한다.
+    _ = fillCoverage(0x255F, w, h, bpr, &pixels);
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 6, 0)); // 좌 세로선 상단(up)
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 10, h - 1)); // 우 세로선 하단(down)
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w - 1, cy)); // 우 stub 우단 닿음
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 7, cy)); // gap 안 메움(예전엔 0xFF)
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 8, cy)); // gap 안 메움
+
+    // ╢ (left stub): 안쪽=좌측 세로선(x=6)에서 좌단으로. gap{7,8}은 row cy에서 비어야 한다.
+    _ = fillCoverage(0x2562, w, h, bpr, &pixels);
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 0, cy)); // 좌 stub 좌단 닿음
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 7, cy)); // gap 안 메움
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 8, cy)); // gap 안 메움
 }
 
 test "fillCoverage: 대각선 ╲는 좌상→우하, ╱는 좌하→우상 코너를 지난다" {

@@ -67,6 +67,10 @@ pub const Tab = struct {
     // 사용자 지정 이름(rename). 워크스페이스는 자동 제목 출처가 없어 custom_name 하나뿐(""=없음). 없으면 사이드바
     // 라벨은 활성 Term 라벨로 폴백한다(표시 해석은 platform이 app.label.pick으로). 예전 placeholder `title`을 대체.
     custom_name: []const u8 = "",
+    // 위치 고정(우클릭 메뉴) — true면 드래그 재정렬에서 안 움직이고 사이드바에 고정 표시가 뜬다. 기본 false.
+    pinned: bool = false,
+    // 사이드바 카드 배경 tint(0xRRGGBB, 0=없음/기본 테마색). 우클릭 메뉴 프리셋으로 설정. 기본 0.
+    background_color: u32 = 0,
     tree: []const TreeNode, // preorder; leaf의 pane 인덱스가 panes를 가리킨다
     panes: []const Pane,
 };
@@ -109,7 +113,7 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
 fn writeTab(w: *std.Io.Writer, tab: Tab) !void {
     try w.print("tab panes={d} active-pane={d} custom-name=\"", .{ tab.panes.len, tab.active_pane });
     try writeEscaped(w, tab.custom_name);
-    try w.writeAll("\"\n");
+    try w.print("\" pinned={d} background-color={d}\n", .{ @intFromBool(tab.pinned), tab.background_color });
     for (tab.tree) |node| try writeTreeNode(w, node);
     for (tab.panes) |pane| try writePane(w, pane);
 }
@@ -199,6 +203,10 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     const active_pane = try r.uint(usize);
     try r.key("custom-name=");
     const custom_name = try r.quoted(a);
+    try r.key("pinned=");
+    const pinned = (try r.uint(u8)) != 0;
+    try r.key("background-color=");
+    const background_color = try r.uint(u32);
 
     // 손상/변조 파일 방어(R6 graceful). 0개 탭은 빌드 단계에서 무효이고, 부풀린 pane_count는 아래 트리 노드
     // 상한을 거대화해 깊은 재귀를 부르므로 sane 상한으로 먼저 가둔다 — 위반 시 BadLine→그 창은 기본 창으로.
@@ -212,7 +220,7 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     var panes: std.ArrayList(Pane) = .empty;
     var i: usize = 0;
     while (i < pane_count) : (i += 1) try panes.append(a, try parsePane(a, lines));
-    return .{ .active_pane = active_pane, .custom_name = custom_name, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
+    return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
 }
 
 /// 한 subtree를 preorder로 읽어 out에 append(self-delimiting). split는 뒤따르는 두 subtree(a,b)를 재귀로 소비.
@@ -372,7 +380,7 @@ test "workspace serialize: 단일 창/탭/pane/surface" {
 
     try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "window tabs=1 active-tab=0\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=1 active-pane=0 custom-name=\"work\"\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=1 active-pane=0 custom-name=\"work\" pinned=0 background-color=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node leaf pane=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "pane surfaces=1 active-term=0 custom-name=\"\"\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"app shell\" cwd=\"/home/user/proj\" command=\"/bin/zsh\" cols=80 rows=24\n") != null);
@@ -401,7 +409,7 @@ test "workspace serialize: split 트리(중첩) + 멀티 pane" {
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(text);
 
-    try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=3 active-pane=2 custom-name=\"split\"\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=3 active-pane=2 custom-name=\"split\" pinned=0 background-color=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node split horizontal ratio=500\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node split vertical ratio=300\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node leaf pane=2\n") != null);
@@ -464,11 +472,29 @@ test "workspace round-trip: serialize → parse → 다시 serialize 동일(중�
     try std.testing.expectEqualStrings(text1, text2); // writer↔reader 고정점
 }
 
+test "workspace round-trip: tab pinned·background_color 보존" {
+    const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{.{ .custom_name = "work", .pinned = true, .background_color = 0xDDA15E, .tree = &tree, .panes = &panes }};
+    const windows = [_]Window{.{ .tabs = &tabs }};
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "pinned=1 background-color=14524766\n") != null); // 0xDDA15E=14524766
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const tab = parsed.workspace.windows[0].tabs[0];
+    try std.testing.expectEqual(true, tab.pinned);
+    try std.testing.expectEqual(@as(u32, 0xDDA15E), tab.background_color);
+}
+
 test "workspace parse: 구조·escape 해제·forgiving" {
     const text =
         "maru.workspace.v1\n" ++
         "window tabs=1 active-tab=0\n" ++
-        "tab panes=2 active-pane=1 custom-name=\"my tab\"\n" ++
+        "tab panes=2 active-pane=1 custom-name=\"my tab\" pinned=0 background-color=0\n" ++
         "tree-node split vertical ratio=250\n" ++
         "tree-node leaf pane=0\n" ++
         "tree-node leaf pane=1\n" ++
@@ -512,7 +538,7 @@ test "workspace parse: 손상 트리는 구조 불변식으로 graceful 차단(�
     const deep =
         header ++ "\n" ++
         "window tabs=1 active-tab=0\n" ++
-        "tab panes=2 active-pane=0 custom-name=\"\"\n" ++
+        "tab panes=2 active-pane=0 custom-name=\"\" pinned=0 background-color=0\n" ++
         "tree-node split horizontal ratio=500\n" ++
         "tree-node split horizontal ratio=500\n" ++
         "tree-node leaf pane=0\n" ++
@@ -524,7 +550,7 @@ test "workspace parse: 손상 트리는 구조 불변식으로 graceful 차단(�
     const huge =
         header ++ "\n" ++
         "window tabs=1 active-tab=0\n" ++
-        "tab panes=999999 active-pane=0 custom-name=\"\"\n" ++
+        "tab panes=999999 active-pane=0 custom-name=\"\" pinned=0 background-color=0\n" ++
         "tree-node leaf pane=0\n";
     try std.testing.expectError(error.BadLine, parse(std.testing.allocator, huge));
 }

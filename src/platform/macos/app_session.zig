@@ -338,6 +338,17 @@ fn premultipliedRgba(rgb: u32, alpha: u8) u32 {
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
+/// base(0xAARRGGBB)의 RGB를 tint_rgb(0xRRGGBB) 쪽으로 alpha/255만큼 lerp한다(base의 알파 보존). 사이드바 밴드에
+/// per-tab 배경 tint를 섞어, tui 기본 테마의 불투명 활성/호버 밴드가 tint quad를 덮어도 활성 슬롯에서 색이 보이게 한다.
+fn blendRgb(base: u32, tint_rgb: u32, alpha: u8) u32 {
+    const a: u32 = alpha;
+    const inv: u32 = 255 - a;
+    const r = ((((base >> 16) & 0xFF) * inv) + (((tint_rgb >> 16) & 0xFF) * a)) / 255;
+    const g = ((((base >> 8) & 0xFF) * inv) + (((tint_rgb >> 8) & 0xFF) * a)) / 255;
+    const b = (((base & 0xFF) * inv) + ((tint_rgb & 0xFF) * a)) / 255;
+    return (base & 0xFF00_0000) | (r << 16) | (g << 8) | b;
+}
+
 /// 탭/워크스페이스 라벨 "{n} {title}"(n=1-based 번호). 사이드바 워크스페이스·pane Term 탭이 공유해 번호 prefix
 /// 형식이 일관된다(둘 다 1부터). 호출자가 반환 버퍼를 free한다. allocPrint 래퍼.
 fn tabNumberLabel(allocator: std.mem.Allocator, index: usize, title: []const u8) ![]u8 {
@@ -617,6 +628,10 @@ const Tab = struct {
     // 없으면 사이드바 라벨은 활성 Term 라벨로 폴백한다(app.pickLabel). owned 문자열이라 destroyTabStandalone/deinit
     // teardown에서 해제한다.
     custom_name: ?[]const u8 = null,
+    // 위치 고정(우클릭 메뉴 Pin) — true면 드래그 재정렬에서 안 움직이고(moveTab no-op), 사이드바에 고정 표시. workspace.v1 영속.
+    pinned: bool = false,
+    // 사이드바 카드 배경 tint(0xRRGGBB, 0=없음/기본 테마색). 우클릭 메뉴 프리셋. workspace.v1 영속.
+    background_color: u32 = 0,
 
     /// 포커스된 panel. pane 내부(Term/surface) 접근에 쓴다. 탭은 항상 panel ≥1.
     fn activePane(self: *Tab) *Pane {
@@ -643,9 +658,14 @@ const RenameTarget = union(enum) {
     term: *Term,
 };
 
-/// 우클릭 컨텍스트 메뉴 항목 라벨(현재 "Rename" 하나 — docs/tabs-splits-layout.md). render·itemAt·item_count가 같은
-/// 배열을 공유한다(보이는 항목 == 클릭/실행되는 항목). 향후 항목(Close 등)은 여기에 추가하고 acceptContextMenu가 분기.
-const context_menu_items = [_][]const u8{"Rename"};
+/// 워크스페이스 배경 tint 프리셋(0=없음, 그 외 0xRRGGBB) — 컨텍스트 메뉴 "배경: …" 항목 순서·tab_bg_labels와 1:1.
+/// 베이스/결정: 색 팔레트는 단일 표준이 없어 maru가 택한 기본 셋이다 — 앰버(#DDA15E)는 maru accent(마루=나무 마루),
+/// 나머지는 서로·앰버와 명확히 구분되는 중간 채도 색조(파랑/초록/빨강/보라)로 골라 여러 워크스페이스를 한눈에 가르게 했다.
+/// 0(없음)에 순수 검정 프리셋이 없으므로 "0=tint 없음"과 충돌하지 않는다. 적용 알파(≈40%, 0x66)는 카드 위 글자 가독성 기준.
+const tab_bg_presets = [_]u32{ 0, 0xDDA15E, 0x4A7BC4, 0x5BA85B, 0xC4544A, 0x9B6BC4 };
+const tab_bg_labels = [_][]const u8{ "배경: 없음", "배경: 앰버", "배경: 파랑", "배경: 초록", "배경: 빨강", "배경: 보라" };
+const ctx_menu_pin: usize = 1; // 메뉴 항목 인덱스: 0=Rename, 1=Pin/Unpin, ctx_menu_bg_first..=배경(buildContextMenuItems 순서와 단일 출처).
+const ctx_menu_bg_first: usize = 2;
 
 fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
     if (a == null and b == null) return true;
@@ -841,6 +861,11 @@ pub const AppSession = struct {
     // chrome_host.context_menu(중립)에, 라이브 포인터 대상은 여기에 둔다(rename과 같은 분리). 메뉴 "Rename" 선택
     // 시 이 대상으로 startRename. 대상 teardown 시 null로 비운다(stale 포인터 방지, rename과 같은 funnel).
     context_menu_target: ?RenameTarget = null,
+    // 컨텍스트 메뉴 항목(동적, 대상 타입·pin 상태에 따라). show가 buildContextMenuItems로 채우고 itemAt/draws/accept가
+    // contextMenuItems로 같은 리스트를 본다(보이는 항목 == 클릭/실행되는 항목). 라벨은 정적 리터럴이라 소유 불요.
+    // 크기 = 최대 항목 수(Rename + Pin + 배경 프리셋)로 정확히 잡아 buf 오버플로를 컴파일 타임에 막는다.
+    context_menu_items_buf: [ctx_menu_bg_first + tab_bg_labels.len][]const u8 = undefined,
+    context_menu_items_len: usize = 0,
     // 사이드바 탭 드래그 재정렬 상태. down이 사이드바 슬롯(✕ 아님)에서 시작하면 active=true가 되고,
     // 이후 drag(kind 2)는 타겟 슬롯으로 live 재정렬(moveTab), up(kind 3)이 끝낸다. index는 드래그 중인
     // 탭의 현재 인덱스(이동을 따라간다). 드래그 중엔 다른 down/이벤트가 아니라 drag/up만 캡처한다.
@@ -2391,6 +2416,8 @@ pub const AppSession = struct {
     /// 범위 밖이거나 from==to면 무동작.
     fn moveTab(self: *AppSession, from: usize, to: usize) void {
         if (from == to or from >= self.tabs.items.len or to >= self.tabs.items.len) return;
+        if (self.tabs.items[from].pinned) return; // 위치 고정(우클릭 Pin) — 드래그로 안 움직인다. v1 한계: 다른 탭 재정렬이
+        // 고정 탭의 인덱스를 밀 수는 있다(rotateMove span 포함 시) — 완전 anchor 고정은 후속(드래그 타겟 clamp).
         rotateMove(*Tab, self.tabs.items, from, to);
         rotateMove(*app.Surface, self.surface_ptrs.items, from, to);
         self.app_window.active_tab = adjustActiveForMove(self.app_window.active_tab, from, to);
@@ -2709,14 +2736,49 @@ pub const AppSession = struct {
         return false;
     }
 
-    /// 컨텍스트 메뉴의 선택 항목을 실행한다 — 현재 메뉴는 "Rename" 1항목이라 대상 rename을 연다. 메뉴를 먼저 닫고
-    /// 대상이 살아 있으면 startRename(대상 teardown 시 context_menu_target은 이미 null화됨).
+    /// 현재 컨텍스트 메뉴 대상에 맞는 항목 라벨을 buf에 채우고 슬라이스 반환. workspace = Rename + Pin/Unpin + 배경
+    /// 프리셋, pane/term = Rename만. show가 호출해 len을 박고, itemAt/draws/accept가 contextMenuItems로 같은 리스트를 본다.
+    fn buildContextMenuItems(self: *AppSession) []const []const u8 {
+        var n: usize = 0;
+        self.context_menu_items_buf[n] = "Rename";
+        n += 1;
+        if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .workspace) {
+            self.context_menu_items_buf[n] = if (t.workspace.pinned) "고정 해제" else "위치 고정";
+            n += 1;
+            for (tab_bg_labels) |lbl| {
+                self.context_menu_items_buf[n] = lbl;
+                n += 1;
+            }
+        };
+        self.context_menu_items_len = n;
+        return self.context_menu_items_buf[0..n];
+    }
+
+    fn contextMenuItems(self: *const AppSession) []const []const u8 {
+        return self.context_menu_items_buf[0..self.context_menu_items_len];
+    }
+
+    /// 컨텍스트 메뉴의 선택 항목을 실행한다. 0=Rename(모든 대상), workspace는 1=위치 고정 토글·2..=배경 tint 프리셋.
+    /// 메뉴를 먼저 닫고(대상 teardown 시 context_menu_target은 이미 null화됨) selected로 분기한다.
     fn acceptContextMenu(self: *AppSession) void {
         const target = self.context_menu_target;
+        const sel = self.chrome_host.context_menu.selected;
         self.context_menu_target = null;
         self.chrome_host.context_menu.hide();
         self.metal_dirty = true;
-        if (target) |t| self.startRename(t); // "Rename" 항목(selected 0) — 항목이 늘면 selected로 분기
+        const t = target orelse return;
+        if (sel == 0) {
+            self.startRename(t); // "Rename"(모든 대상)
+            return;
+        }
+        if (std.meta.activeTag(t) == .workspace) {
+            const tab = t.workspace;
+            if (sel == ctx_menu_pin) {
+                tab.pinned = !tab.pinned; // 위치 고정 토글
+            } else if (sel >= ctx_menu_bg_first and sel < ctx_menu_bg_first + tab_bg_presets.len) {
+                tab.background_color = tab_bg_presets[sel - ctx_menu_bg_first]; // 배경 tint 프리셋
+            }
+        }
     }
 
     /// Find 다음/이전 매치로(⌘G/⌘⇧G). 오버레이가 닫혀 있어도 동작한다 — show가 비우기 전까지 검색어는
@@ -3157,7 +3219,7 @@ pub const AppSession = struct {
         // 마우스 이벤트도 메뉴 중엔 소비). 메뉴는 최상위 모달이라 뒤(터미널/탭)로 안 흘린다.
         if (self.chrome_host.context_menu.open) {
             if (kind == 1) {
-                if (chrome.components.context_menu.itemAt(&self.chrome_host.context_menu, &context_menu_items, self.buildChromeProps(), x_px, y_px)) |idx| {
+                if (chrome.components.context_menu.itemAt(&self.chrome_host.context_menu, self.contextMenuItems(), self.buildChromeProps(), x_px, y_px)) |idx| {
                     self.chrome_host.context_menu.selected = idx;
                     self.acceptContextMenu();
                 } else {
@@ -3175,7 +3237,8 @@ pub const AppSession = struct {
         if (kind == 1 and button == 2) {
             if (self.renameTargetAt(x_px, y_px)) |target| {
                 self.context_menu_target = target;
-                self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), context_menu_items.len);
+                const items = self.buildContextMenuItems(); // 대상 타입에 맞는 항목(workspace=Rename+Pin+배경, pane/term=Rename)
+                self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), items.len);
                 self.metal_dirty = true;
                 return;
             }
@@ -3275,8 +3338,12 @@ pub const AppSession = struct {
                     } else {
                         self.hovered_slot = null; // 드래그 중엔 stale 호버 밴드/✕를 안 보이게
                         _ = self.switchTab(slot);
-                        self.sidebar_drag_active = true;
-                        self.sidebar_drag_index = slot;
+                        // 위치 고정(pinned) 탭은 드래그 재정렬 arm 자체를 막는다 — arm하면 drag(2)가 moveTab(no-op)을
+                        // 부르고도 sidebar_drag_index를 target으로 갱신해, 이후 delta가 *다른* 탭을 재정렬하는 비동기화가 난다.
+                        if (slot >= self.tabs.items.len or !self.tabs.items[slot].pinned) {
+                            self.sidebar_drag_active = true;
+                            self.sidebar_drag_index = slot;
+                        }
                     }
                 }
             }
@@ -4098,6 +4165,8 @@ pub const AppSession = struct {
             // 워크스페이스(탭)의 사용자 rename(없으면 ""). 예전엔 데이터 출처가 없어 reserved placeholder였으나, 이제
             // tab.custom_name이 출처다(docs/workspace-restore.md "사용자 지정 이름과 자동 제목").
             .custom_name = try arena.dupe(u8, tab.custom_name orelse ""),
+            .pinned = tab.pinned,
+            .background_color = tab.background_color,
             .tree = try tree.toOwnedSlice(arena),
             .panes = try panes.toOwnedSlice(arena),
         };
@@ -4257,6 +4326,8 @@ pub const AppSession = struct {
         // 워크스페이스 사용자 rename 복원 — 마지막 fallible 단계로 둬, OOM 시 위 errdefer(panes·tab)가 정리하고
         // custom_name은 아직 미할당이라 누수가 없다.
         tab.custom_name = try self.dupeCustomName(m.custom_name);
+        tab.pinned = m.pinned; // 위치 고정 복원
+        tab.background_color = m.background_color; // 카드 배경 tint 복원
         return tab;
     }
 
@@ -5127,6 +5198,28 @@ pub const AppSession = struct {
         var ops: std.ArrayList(chrome.draw.Op) = .empty;
         chrome.components.sidebar.view(tabs, self.hovered_slot, self.hovered_plus, self.buildChromeProps(), arena, &ops) catch return;
         self.lowerSidebar(ops.items);
+        // per-tab 배경 tint(우클릭 메뉴 "배경: …") — background_color 설정된 워크스페이스 슬롯(밴드 없는 idle 슬롯)에
+        // 반투명(≈40%) 색 quad를 텍스트 셀 아래(layer 0)에 얹는다. 활성/호버 슬롯은 위 lowerSidebar가 밴드 색에
+        // tint를 블렌딩해 보이게 한다(tui 불투명 밴드가 이 quad를 덮으므로). chrome draw op은 role 기반이라 임의 RGB를
+        // 못 실어, platform이 명시 색 GpuQuad로 직접 lower(사이드바 명시-색 경로). y는 f32 도메인으로 곱해 i32 overflow 회피.
+        const slot_h = self.sidebar_slot_height_px;
+        if (slot_h > 0 and self.sidebar_width_px > 0) for (self.tabs.items, 0..) |tab, i| {
+            if (tab.background_color == 0) continue;
+            const c = premultipliedRgba(tab.background_color & 0x00FF_FFFF, 0x66);
+            self.gpu_quads.append(self.allocator, .{
+                .x = 0,
+                .y = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(slot_h)),
+                .w = @floatFromInt(self.sidebar_width_px),
+                .h = @floatFromInt(slot_h),
+                .corner_radii = .{ 0, 0, 0, 0 },
+                .border_widths = .{ 0, 0, 0, 0 },
+                .fill_color0 = c,
+                .fill_color1 = c,
+                .border_color = 0,
+                .gradient_kind = 0,
+                .layer = 0,
+            }) catch {};
+        };
     }
 
     /// C4b 모달: self.gpu_quads에서 모달 배경 quad(layer==1)를 제거한다. sidebar 밴드(layer 0)는 retained
@@ -5432,10 +5525,18 @@ pub const AppSession = struct {
                     }) catch {};
                     continue;
                 }
-                const color = switch (q.fill_role) {
+                var color = switch (q.fill_role) {
                     .tab_active_bg => self.sidebarActiveBg(),
                     else => self.sidebarHoverBg(),
                 };
+                // 이 슬롯 탭에 배경 tint가 있으면 밴드 색에 섞는다 — tui 활성/호버 슬롯은 불투명 밴드(셀)가 tint quad를
+                // 덮으므로, 밴드 색 자체를 tint로 당겨 활성/호버 슬롯에서도 색이 보이게 한다(idle 슬롯은 밴드가 없어 quad가 그대로).
+                const band_row_i = @divTrunc(q.rect.y, @as(i32, @intCast(slot_h)));
+                if (band_row_i >= 0) {
+                    const ri: usize = @intCast(band_row_i);
+                    if (ri < self.tabs.items.len and self.tabs.items[ri].background_color != 0)
+                        color = blendRgb(color, self.tabs.items[ri].background_color & 0x00FF_FFFF, 0x66);
+                }
                 const has_radius = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;
                 if (!has_radius) {
                     // tui: 직각 → 셀 밴드(기존 경로). rect.y/slot_h = 슬롯 행.
@@ -5502,16 +5603,16 @@ pub const AppSession = struct {
                 defer self.allocator.free(edit);
                 try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, edit));
             } else {
-                // 워크스페이스 라벨 뒤에 git 브랜치를 "⎇ {branch}"로 붙인다(cwd가 repo 안일 때만; 좁으면 라벨 빌더가
-                // ellipsize). 브랜치는 termGitBranch가 cwd 변경 시에만 .git/HEAD를 읽어 캐시.
+                // 라벨 = [📌 ](위치 고정 시) + 워크스페이스 이름 + "  ⎇ {branch}"(cwd가 repo 안일 때). 좁으면 라벨 빌더가
+                // ellipsize. 브랜치는 termGitBranch가 cwd 변경 시에만 .git/HEAD를 읽어 캐시. pin 표시는 \u{1F4CC}(📌).
                 const base = workspaceLabel(tab);
-                if (self.termGitBranch(tab.activePane().activeTerm())) |branch| {
-                    const with_branch = try std.fmt.allocPrint(self.allocator, "{s}  \u{2387} {s}", .{ base, branch });
-                    defer self.allocator.free(with_branch);
-                    try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, with_branch));
-                } else {
-                    try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, base));
-                }
+                const pin: []const u8 = if (tab.pinned) "\u{1F4CC} " else "";
+                const body = if (self.termGitBranch(tab.activePane().activeTerm())) |branch|
+                    try std.fmt.allocPrint(self.allocator, "{s}{s}  \u{2387} {s}", .{ pin, base, branch })
+                else
+                    try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ pin, base });
+                defer self.allocator.free(body);
+                try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, body));
             }
         }
 
@@ -5934,7 +6035,7 @@ pub const AppSession = struct {
             try self.chrome_host.collectPaletteDraws(rows, props, &tokens, arena, &draws);
         }
         if (self.chrome_host.context_menu.open) {
-            try self.chrome_host.collectContextMenuDraws(&context_menu_items, props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유)
+            try self.chrome_host.collectContextMenuDraws(self.contextMenuItems(), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
         }
         if (draws.items.len == 0) return error.NotOpen;
 
@@ -6612,6 +6713,81 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
 
 // 인라인 rename 동작(PR3): start→입력→commit이 custom_name을 쓰고, cancel은 원래 이름 유지, 빈 텍스트 commit은
 // 이름을 지우고, 대상 Term teardown이 rename을 자동 취소(stale 포인터 방지)하는지를 풀-세션 경로로 고정한다.
+test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·배경색 설정; pane/term=Rename만" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const tab = session.activeTab();
+
+    // workspace 대상: Rename + Pin + 배경 프리셋(없음·앰버·파랑·초록·빨강·보라).
+    session.context_menu_target = .{ .workspace = tab };
+    const items = session.buildContextMenuItems();
+    try std.testing.expectEqual(@as(usize, 2 + tab_bg_presets.len), items.len);
+    try std.testing.expectEqualStrings("Rename", items[0]);
+    try std.testing.expectEqualStrings("위치 고정", items[1]); // 미고정 → "위치 고정"
+
+    // accept selected=1 → pin 토글(true). acceptContextMenu가 target을 null화하므로 매번 재설정.
+    session.context_menu_target = .{ .workspace = tab };
+    session.chrome_host.context_menu.selected = 1;
+    session.acceptContextMenu();
+    try std.testing.expect(tab.pinned);
+
+    // 다시 열면 "고정 해제"가 뜬다(토글 상태 반영).
+    session.context_menu_target = .{ .workspace = tab };
+    try std.testing.expectEqualStrings("고정 해제", session.buildContextMenuItems()[1]);
+
+    // accept selected=3(배경: 앰버, idx 0=Rename·1=Pin·2=없음·3=앰버) → background_color = 0xDDA15E.
+    session.context_menu_target = .{ .workspace = tab };
+    session.chrome_host.context_menu.selected = ctx_menu_bg_first + 1;
+    session.acceptContextMenu();
+    try std.testing.expectEqual(@as(u32, 0xDDA15E), tab.background_color);
+
+    // 배경: 없음(selected=2) → 0으로 해제.
+    session.context_menu_target = .{ .workspace = tab };
+    session.chrome_host.context_menu.selected = ctx_menu_bg_first;
+    session.acceptContextMenu();
+    try std.testing.expectEqual(@as(u32, 0), tab.background_color);
+
+    // pane/term 대상은 Rename만(색·고정 없음).
+    session.context_menu_target = .{ .pane = session.activePane() };
+    try std.testing.expectEqual(@as(usize, 1), session.buildContextMenuItems().len);
+    session.context_menu_target = null;
+}
+
+test "moveTab: 위치 고정된 탭은 드래그 재정렬에서 안 움직인다(no-op)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    // 둘째 워크스페이스를 만들어 2탭으로(newTab은 끝에 추가·활성).
+    _ = try session.newTab();
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    const tab0 = session.tabs.items[0];
+    tab0.pinned = true; // 0번 고정
+    session.moveTab(0, 1); // 고정 탭 이동 시도 → no-op
+    try std.testing.expectEqual(tab0, session.tabs.items[0]); // 그대로
+    tab0.pinned = false;
+    session.moveTab(0, 1); // 고정 해제 후엔 이동됨
+    try std.testing.expectEqual(tab0, session.tabs.items[1]);
+}
+
 test "rename: commit writes custom_name, cancel keeps old, empty clears, teardown clears target" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 풀 세션(실 PTY/CoreText) 경로
     const allocator = std.testing.allocator;
@@ -7924,7 +8100,7 @@ test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)"
     const text =
         "maru.workspace.v1\n" ++
         "window tabs=1 active-tab=0\n" ++
-        "tab panes=2 active-pane=1 custom-name=\"my work\"\n" ++
+        "tab panes=2 active-pane=1 custom-name=\"my work\" pinned=0 background-color=0\n" ++
         "tree-node split vertical ratio=300\n" ++
         "tree-node leaf pane=0\n" ++
         "tree-node leaf pane=1\n" ++

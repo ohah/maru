@@ -8,6 +8,8 @@
 cmux 같은 유연한 레이아웃:
 
 - **세로 탭 사이드바**(왼쪽) — 탭마다 제목 + 메타데이터(우리 OSC 7 cwd, OSC 133 ✓/✗ 종료, 셸 이벤트)를 보여준다.
+  워크스페이스 라벨 뒤엔 **git 브랜치**를 `⎇ {branch}`로 붙인다 — OSC 7 cwd에서 부모로 `.git/HEAD`를 walk-up해
+  도출하며(cwd 변경 시에만 읽어 per-Term 캐시; 파생값이라 영속 안 함), repo 밖이면 생략(`readGitBranch`/`termGitBranch`).
 - **탭마다 split(panel)** — 각 탭은 surface 1개가 아니라 가로/세로로 나눌 수 있는 surface 트리.
 - **드래그 재배치** — panel을 끌어 split을 재배열, 탭을 끌어 순서 변경.
 

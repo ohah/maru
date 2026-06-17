@@ -66,6 +66,18 @@ pub const CoreTextGlyphRasterizer = struct {
             );
             return .{ .non_clear_pixels = non_clear };
         }
+        // Box-drawing(U+2500~257F light: ─│┌┐└┘├┤┬┴┼·둥근 ╭╮╰╯)도 직접 합성 — 셀 경계에서 이음매 없이 연결
+        // (폰트 글리프는 안 맞아 보더가 끊기거나 안 보인다). heavy/double/dashed는 폰트 폴백(isBoxDrawing=false).
+        if (renderer.box_glyph.isBoxDrawing(request.run.codepoint)) {
+            const non_clear = renderer.box_glyph.fillCoverage(
+                request.run.codepoint,
+                request.slot.width_px,
+                request.slot.height_px,
+                request.bytes_per_row,
+                request.pixels,
+            );
+            return .{ .non_clear_pixels = non_clear };
+        }
         const font_identity = self.font_registry.get(request.run.font_id) orelse
             return error.RasterizerFailed;
 

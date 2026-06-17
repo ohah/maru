@@ -1002,6 +1002,40 @@ pub const DevSession = struct {
         return null;
     }
 
+    /// pane 라벨 세그먼트(탭 바 좌측)가 차지할 컬럼 수. custom_name(사용자 rename)이 없으면 0(세그먼트 없음 —
+    /// 탭이 바 전체 사용, 기존 동작). 있으면 좌패딩+이름폭+간격을 [3, max]로, 단 탭 영역 최소(min_tab_cols)는
+    /// 남게 상한을 둔다 — 라벨이 바를 다 먹어 탭이 사라지지 않게. 폭은 렌더 ellipsize와 같은 titleDisplayWidth로
+    /// 잰다(예약 칸 == 실제 글리프). 단일 출처: docs/tabs-splits-layout.md "Pane 이름 표시 자리".
+    fn paneLabelCols(pane: *const Pane, bar_cols: u32) u32 {
+        const name = app.pickLabel(pane.custom_name, "");
+        if (name.len == 0) return 0;
+        const min_tab_cols: u32 = 6; // 라벨 뒤 탭 영역 최소 보장(좁은 바면 라벨 생략)
+        const max_label: u32 = 20; // 긴 이름이 바를 지배하지 않게 상한
+        if (bar_cols <= min_tab_cols) return 0;
+        const want = @min(@as(u32, @intCast(coretext_frame_builder.titleDisplayWidth(name))) + 2, max_label); // 좌패딩+이름+간격
+        const cols = @min(want, bar_cols - min_tab_cols);
+        return if (cols < 3) 0 else cols; // 3칸 미만이면 패딩+글자+간격 불가 → 생략
+    }
+
+    /// 탭 영역 sub-rect — 전체 바에서 좌측 라벨(label_cols)을 뗀 나머지. 탭 hit-test(barMetrics)·탭 제목 렌더가
+    /// 이 sub-rect를 공유해 라벨만큼 우측으로 밀린다(label_cols=0이면 전체 바 == 기존 동작).
+    fn paneTabBarRect(bar: app.SplitRect, label_cols: u32, cw: u32) app.SplitRect {
+        const off = label_cols * cw;
+        return .{ .x = bar.x + off, .y = bar.y, .w = bar.w -| off, .h = bar.h };
+    }
+
+    /// 한 pane 탭 바의 레이아웃 단일 출처 — `full`(전체 바: 배경·클릭 판정·라벨), `tabs`(라벨 뗀 탭 영역:
+    /// barMetrics·탭 제목·활성 밴드), `label_cols`(라벨 폭). 모든 hit-test/렌더가 이 한 함수를 거쳐 "보이는 == 클릭되는"
+    /// 을 유지한다(label_cols가 render·hit-test에서 동일). 바가 없거나 cell 미상이면 null.
+    const PaneBar = struct { full: app.SplitRect, tabs: app.SplitRect, label_cols: u32 };
+    fn paneBar(self: *const DevSession, rect: app.SplitRect, pane: *const Pane) ?PaneBar {
+        const full = self.paneBarRect(rect) orelse return null;
+        const cw = self.cell_width_px;
+        if (cw == 0) return null;
+        const label_cols = paneLabelCols(pane, full.w / cw);
+        return .{ .full = full, .tabs = paneTabBarRect(full, label_cols, cw), .label_cols = label_cols };
+    }
+
     /// 활성 탭의 SplitTree를 터미널 영역 rect 안에서 각 panel(leaf)의 (surface, rect)로 편다(멀티-panel
     /// 렌더용 — 각 surface를 자기 rect에 그린다). 단일 leaf면 [{활성 surface, term_rect}] 하나; split 이후
     /// 여러 rect가 된다. term_rect는 사이드바를 뺀 터미널 영역(렌더가 termRect로 계산해 넘김).
@@ -1333,8 +1367,8 @@ pub const DevSession = struct {
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
         for (leaf_rects.items) |lr| {
             if (lr.leaf != pane) continue;
-            const bar = self.paneBarRect(lr.rect) orelse return;
-            const m = barMetrics(bar, self.cell_width_px, pane.terms.items.len, self.buildChromeTokens().space.tab_width_cols, pane.tab_scroll_cols) orelse return;
+            const pb = self.paneBar(lr.rect, pane) orelse return;
+            const m = barMetrics(pb.tabs, self.cell_width_px, pane.terms.items.len, self.buildChromeTokens().space.tab_width_cols, pane.tab_scroll_cols) orelse return;
             if (!m.has_scroll) return; // 안 넘침 — 다 보임
             const abs_start = @as(u32, @intCast(pane.active_term)) * m.tab_w;
             if (abs_start < m.scroll_cols) {
@@ -1379,8 +1413,8 @@ pub const DevSession = struct {
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
         for (leaf_rects.items) |lr| {
             if (lr.leaf != pane) continue;
-            const bar = self.paneBarRect(lr.rect) orelse return;
-            const m = barMetrics(bar, self.cell_width_px, pane.terms.items.len, self.buildChromeTokens().space.tab_width_cols, pane.tab_scroll_cols) orelse return;
+            const pb = self.paneBar(lr.rect, pane) orelse return;
+            const m = barMetrics(pb.tabs, self.cell_width_px, pane.terms.items.len, self.buildChromeTokens().space.tab_width_cols, pane.tab_scroll_cols) orelse return;
             const target = m.tabIndex(pane.terms.items.len, x_px);
             if (target != self.tab_drag_index) {
                 rotateMove(*Term, pane.terms.items, self.tab_drag_index, target);
@@ -1401,11 +1435,11 @@ pub const DevSession = struct {
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
         for (leaf_rects.items) |lr| {
-            const bar = self.paneBarRect(lr.rect) orelse continue;
-            if (pointInRect(x_px, y_px, bar)) {
+            const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+            if (pointInRect(x_px, y_px, pb.full)) { // 클릭 판정은 전체 바(라벨 포함)
                 if (lr.leaf == src) return; // 같은 pane — 재정렬은 이미 됨
                 const dst_count = lr.leaf.terms.items.len; // dst pane은 항상 Term ≥1(빈 pane은 collapse됨)
-                const m = barMetrics(bar, self.cell_width_px, dst_count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse return;
+                const m = barMetrics(pb.tabs, self.cell_width_px, dst_count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse return;
                 self.moveTermToPane(src, self.tab_drag_index, lr.leaf, m.tabIndex(dst_count, x_px));
                 return;
             }
@@ -2578,9 +2612,9 @@ pub const DevSession = struct {
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
         for (leaf_rects.items) |lr| {
             if (!pointInRect(x_px, y_px, lr.rect)) continue; // 커서가 이 pane(탭 바+터미널) 영역일 때만
-            const bar = self.paneBarRect(lr.rect) orelse return;
+            const pb = self.paneBar(lr.rect, lr.leaf) orelse return;
             const count = lr.leaf.terms.items.len;
-            const m = barMetrics(bar, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse return;
+            const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse return;
             if (!m.has_scroll) return; // 탭이 안 넘침 — 가로 스크롤할 것 없음
             const eff = m.scroll_cols; // clamp된 현재 스크롤(stale 정정 기준 — 클릭 ‹›와 동일)
             const mag: u32 = @intCast(@abs(cols));
@@ -2772,10 +2806,19 @@ pub const DevSession = struct {
                 //    (focusPaneByPtr+focusTerm로 그 탭을 활성으로 만든 뒤 closeActiveTermOrPane cascade). 단일 panel도
                 //    Term이 여럿이면 전환/닫기 된다. ✕는 호버 중일 때만 보이므로 hovered_tab과 일치할 때만 닫는다.
                 for (leaf_rects.items) |lr| {
-                    const bar = self.paneBarRect(lr.rect) orelse continue;
-                    if (pointInRect(x_px, y_px, bar)) {
+                    const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+                    if (pointInRect(x_px, y_px, pb.full)) {
+                        // 좌측 pane 라벨 세그먼트 클릭 → 그 pane만 포커스(탭 전환/드래그 arm 안 함). 탭 hit-test는 라벨 뒤
+                        // 영역(pb.tabs)만 대상이라, 라벨 영역 x가 tabIndex의 좌측 clamp로 탭0을 잘못 잡는 걸 막는다.
+                        // (PR4/PR5에서 더블클릭·우클릭 rename 트리거가 이 라벨 영역에 붙는다.)
+                        if (pb.label_cols > 0 and x_px < @as(f64, @floatFromInt(pb.tabs.x))) {
+                            _ = self.focusPaneByPtr(lr.leaf);
+                            self.drag_autoscroll = 0;
+                            self.mouse_drag_selecting = false;
+                            return;
+                        }
                         const count = lr.leaf.terms.items.len;
-                        const m = barMetrics(bar, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols);
+                        const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols);
                         // 바 우측 ‹›(가로 스크롤) 버튼 클릭 → 그 pane의 tab_scroll_cols를 ±tab_w(한 탭). 넘침 범위로 clamp. "+"·탭보다 먼저.
                         if (m) |bm| if (bm.inScrollLeftZone(x_px)) {
                             _ = self.focusPaneByPtr(lr.leaf);
@@ -4109,9 +4152,10 @@ pub const DevSession = struct {
             const tab_corner = tk_space.corner_radius_px; // rich 판별 게이트(>0이면 quad, 0이면 tui 셀)
             const tab_accent = packOpaqueRgb(tk.palette.get(.accent_bar)); // 활성 탭 하단 언더바(maru 앰버 — 포커스 surface 표시)
             for (leaf_rects.items) |lr| {
-                const bar = self.paneBarRect(lr.rect) orelse continue;
+                const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+                const bar = pb.full; // 바 배경·언더바는 전체 바(라벨 영역도 같은 chrome 배경)
                 const hl_bg = if (lr.leaf == active_pane) self.sidebarActiveBg() else self.sidebarHoverBg();
-                const m_opt = barMetrics(bar, self.cell_width_px, lr.leaf.terms.items.len, tk_space.tab_width_cols, lr.leaf.tab_scroll_cols);
+                const m_opt = barMetrics(pb.tabs, self.cell_width_px, lr.leaf.terms.items.len, tk_space.tab_width_cols, lr.leaf.tab_scroll_cols); // 활성 밴드·‹›는 라벨 뺀 탭 영역
                 if (tab_corner > 0) {
                     // rich: 바 배경(직각)·활성 탭(평평 배경 + 하단 앰버 언더바) 모두 layer 2 quad. 바 배경 먼저(아래),
                     // 활성 탭이 위, 제목 셀(part1)은 그 위 — 불투명 바 배경 셀이 quad를 가리던 z-order 버그 해소(리뷰 #1).
@@ -4194,8 +4238,32 @@ pub const DevSession = struct {
                 // 1) 각 pane의 탭 바 제목 frame — Term 제목들을 가로 등폭 탭으로(buildPaneTabBarDrawList). 활성 panel
                 //    커서 suffix가 합쳐진 cells의 끝에 남도록 '터미널 frame들 앞'에 둔다. 바 없는 작은 pane은 건너뜀.
                 for (leaf_rects.items) |lr| {
-                    const bar = self.paneBarRect(lr.rect) orelse continue;
-                    const bar_cols = @min(bar.w / self.cell_width_px, @as(u32, std.math.maxInt(u16)));
+                    const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+                    // 제목/라벨을 위 패딩만큼 내려 바 가운데에. tui(pad=0)면 바 상단(full.y).
+                    const text_origin_y = pb.full.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px);
+
+                    // 1a) pane 라벨 세그먼트(좌측) — custom_name이 있으면 [full.x, full.x+label_cols*cw)에 이름 glyph.
+                    //     탭 영역(pb.tabs)이 라벨만큼 우측으로 밀려 겹치지 않는다(label_cols=0이면 이 블록 생략 = 기존 동작).
+                    if (pb.label_cols > 0) {
+                        const name = app.pickLabel(lr.leaf.custom_name, "");
+                        const label_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground }; // 밝은 전경(muted 비활성 탭과 구분)
+                        if (coretext_frame_builder.buildPaneLabelDrawList(self.allocator, name, @intCast(pb.label_cols), label_fg)) |ldl| {
+                            if (pane_frame_builder.buildFromDrawList(self.allocator, ldl, &self.renderer_state)) |lf| {
+                                var label_frame = lf;
+                                if (built_frames.append(self.allocator, label_frame)) |_| {
+                                    pane_frames.append(self.allocator, .{
+                                        .frame = label_frame,
+                                        .origin_x = pb.full.x,
+                                        .origin_y = text_origin_y,
+                                        .colors = tabbar_colors,
+                                    }) catch {};
+                                } else |_| label_frame.deinit(self.allocator); // 추적 실패 시만 해제(라벨 생략, 탭은 계속)
+                            } else |_| {}
+                        } else |_| {}
+                    }
+
+                    // 1b) Term 탭 제목 — 라벨 뒤 탭 영역(pb.tabs)에. 바 없을 만큼 좁으면 건너뜀.
+                    const bar_cols = @min(pb.tabs.w / self.cell_width_px, @as(u32, std.math.maxInt(u16)));
                     if (bar_cols == 0) continue;
                     // Term 탭 라벨 "{n} {title}"(n=1-based 탭 번호) — 사이드바 워크스페이스 라벨과 같은 형식이라
                     // 번호로 탭을 빠르게 식별·⌘]/⌘[ 순환 위치를 안다. allocPrint 소유 버퍼라 아래 defer로 해제한다.
@@ -4222,9 +4290,8 @@ pub const DevSession = struct {
                     };
                     pane_frames.append(self.allocator, .{
                         .frame = f,
-                        .origin_x = bar.x,
-                        // 제목을 위 패딩만큼 내려 바 가운데에(바 높이 = cell + 2*pad_y → 위 pad_y·아래 pad_y). tui(pad=0)면 bar.y.
-                        .origin_y = bar.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px),
+                        .origin_x = pb.tabs.x, // 라벨 뒤 탭 영역 origin(라벨만큼 우측)
+                        .origin_y = text_origin_y,
                         .colors = tabbar_colors,
                     }) catch {};
                 }
@@ -4451,11 +4518,13 @@ pub const DevSession = struct {
         leaf_rects.clearRetainingCapacity();
         if (self.activeTabLeafRects(self.allocator, self.termRect(), leaf_rects)) |_| {
             for (leaf_rects.items) |lr| {
-                const bar = self.paneBarRect(lr.rect) orelse continue;
-                if (pointInRect(x_px, y_px, bar)) {
+                const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+                if (pointInRect(x_px, y_px, pb.full)) {
                     on_bar = true; // 탭 바 위 — 탭·‹/›·+·pane 포커스 모두 클릭 가능 영역
+                    // 좌측 pane 라벨 영역은 탭 호버 아님(탭0 ✕ 오표시 방지) — 라벨 뒤 탭 영역(pb.tabs)만 hit-test.
+                    if (pb.label_cols > 0 and x_px < @as(f64, @floatFromInt(pb.tabs.x))) break;
                     const count = lr.leaf.terms.items.len;
-                    const m = barMetrics(bar, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse break; // 메트릭 불가(초소형 바) → 호버 없음
+                    const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse break; // 메트릭 불가(초소형 바) → 호버 없음
                     if (m.inScrollLeftZone(x_px)) { // #5b: ‹ 버튼 호버 — 탭 호버 아님
                         next_scroll = .{ .pane = lr.leaf, .right = false };
                         break;
@@ -7380,6 +7449,38 @@ test "barMetrics splits bar + tabbarHighlightCell active-tab band" {
     try std.testing.expectEqual(@as(u32, 0xFF445566), cell.background);
     try std.testing.expectEqual(@as(u32, 0), cell.slot_id);
     try std.testing.expect(tabbarHighlightCell(m, 3, 0xFF000000) == null); // start(24) >= tab_cols(17) → 세그먼트 없음
+}
+
+// pane 라벨 세그먼트(PR2)의 폭 산출·탭 영역 offset 단일 출처 — custom_name 유무·좁은 바·max cap을 헤드리스로 고정한다.
+// 이 두 함수가 render(라벨/탭 origin)와 hit-test(barMetrics 입력)에서 같은 결과를 줘 "보이는 == 클릭되는"을 유지한다.
+test "paneLabelCols/paneTabBarRect: 라벨 없으면 0(전체 바), 있으면 폭 예약·탭 우측 offset" {
+    const full: app.SplitRect = .{ .x = 100, .y = 0, .w = 320, .h = 24 }; // cell 8 → 40칸
+
+    // custom_name 없음 → label_cols 0, 탭 sub-rect == 전체 바(기존 동작).
+    var bare: Pane = .{ .custom_name = null };
+    try std.testing.expectEqual(@as(u32, 0), DevSession.paneLabelCols(&bare, 40));
+    const t0 = DevSession.paneTabBarRect(full, 0, 8);
+    try std.testing.expectEqual(@as(u32, 100), t0.x);
+    try std.testing.expectEqual(@as(u32, 320), t0.w);
+
+    // "build"(5칸) → want = 5 + 2(좌패딩·간격) = 7. bar_cols 40이라 cap 충분 → 7칸 예약, 탭이 그만큼 우측으로.
+    var named: Pane = .{ .custom_name = "build" };
+    const lc = DevSession.paneLabelCols(&named, 40);
+    try std.testing.expectEqual(@as(u32, 7), lc);
+    const t1 = DevSession.paneTabBarRect(full, lc, 8);
+    try std.testing.expectEqual(@as(u32, 100 + 7 * 8), t1.x); // 라벨만큼 우측 offset
+    try std.testing.expectEqual(@as(u32, 320 - 7 * 8), t1.w);
+
+    // 좁은 바(bar_cols ≤ min_tab_cols=6)면 라벨 생략(탭 우선).
+    try std.testing.expectEqual(@as(u32, 0), DevSession.paneLabelCols(&named, 6));
+
+    // 긴 이름은 max_label(20)로 cap.
+    var long: Pane = .{ .custom_name = "this-is-a-very-long-pane-name-indeed" };
+    try std.testing.expectEqual(@as(u32, 20), DevSession.paneLabelCols(&long, 100));
+
+    // 빈 custom_name("")도 없음으로 본다(app.pickLabel 규칙).
+    var empty: Pane = .{ .custom_name = "" };
+    try std.testing.expectEqual(@as(u32, 0), DevSession.paneLabelCols(&empty, 40));
 }
 
 test "pointInRect uses half-open bounds (탭 바·divider·pane hit-test 공유)" {

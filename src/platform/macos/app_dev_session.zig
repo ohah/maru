@@ -514,6 +514,11 @@ const Pane = struct {
     // Step 2: 가로 탭 스크롤 offset(컬럼). 탭이 바 폭을 넘으면 ‹›버튼/트랙패드가 이 값을 움직여 보이는 탭 창을
     // 좌우로 민다(per-pane 독립). 0=맨 왼쪽(기본). barMetrics→Metrics.scroll_cols로 전달돼 segOf가 화면 좌표를 민다.
     tab_scroll_cols: u32 = 0,
+    // 스크롤바 fade 타이머(per-pane — 각 pane이 독립적으로 흐려진다). updateScrollbarFade가 이 pane 활성 Term의
+    // view_offset 변화(스크롤)를 감지해 0(full)으로 리셋하고, idle하면 늘려 appendScrollbar가 alpha를 흐린다.
+    // 활성 pane은 hover/드래그면 0으로 핀(세션 상태). last_view_offset은 변화 감지용 직전 값.
+    scrollbar_idle_ticks: u32 = 0,
+    scrollbar_last_view_offset: usize = 0,
 
     /// 활성 Term(보이는 터미널). 입력/커서/렌더가 이 Term의 surface를 쓴다. Pane은 항상 Term ≥1.
     fn activeTerm(self: *Pane) *Term {
@@ -782,13 +787,8 @@ pub const DevSession = struct {
     // down(1)이 스크롤바 영역을 hit하면 세워지고, drag(2)가 마우스 y를 view_offset으로 매핑, up(3)이 푼다.
     scrollbar_drag_grab: ?f32 = null,
     // 마우스가 스크롤바 영역 위에 있는지(hover 강조 — full alpha·살짝 굵게). hoverCursor가 매 이동 갱신한다.
+    // hover/드래그는 활성 pane 한정이라 세션 상태로 둔다(fade 타이머는 per-pane — Pane.scrollbar_idle_ticks).
     scrollbar_hovered: bool = false,
-    // fade 타이머(tick 수). 스크롤(view_offset 변화)·hover·드래그면 0(full)로 리셋되고, idle하면 매 tick 늘어
-    // visible_ticks 후 fade_ticks 동안 faint로 흐려진다. updateScrollbarFade가 갱신.
-    scrollbar_idle_ticks: u32 = 0,
-    // 직전 tick의 활성 surface view_offset — updateScrollbarFade가 변화(=스크롤)를 감지해 fade를 리셋한다
-    // (scroll/wheel/drag/page-key 각 호출처에 흩지 않고 한 곳에서). 활성 surface가 바뀌어도 변화로 잡힌다.
-    scrollbar_last_view_offset: usize = 0,
     // 자동 스크롤 중 선택 확장에 쓸 마지막 드래그 열.
     last_drag_col: u16 = 0,
     // 큰 붙여넣기의 미전송 잔여(인코딩 완료분). 자식이 stdin을 읽는 속도에 맞춰 tick마다
@@ -4542,30 +4542,35 @@ pub const DevSession = struct {
     /// 핀, 그 외엔 매 tick 늘려 fade 창에서 alpha가 바뀔 때만 metal_dirty를 세운다(idle 정착 후엔 정적 — 비용 0).
     fn updateScrollbarFade(self: *DevSession) void {
         if (!self.surface_initialized) return;
-        const core = &self.activeSurface().core;
-        if (core.scrollbackLen() == 0) {
-            // 스크롤바 없음 — 다음 등장이 full로 시작하게 타이머를 리셋해 둔다(0→nonzero 전환 처리).
-            self.scrollbar_idle_ticks = 0;
-            self.scrollbar_last_view_offset = 0;
-            return;
-        }
-        const vo = core.viewOffset();
-        if (vo != self.scrollbar_last_view_offset) { // 스크롤 활동 → full로 복귀
-            self.scrollbar_last_view_offset = vo;
-            if (self.scrollbar_idle_ticks != 0) self.metal_dirty = true; // faint였다면 다시 그린다
-            self.scrollbar_idle_ticks = 0;
-            return;
-        }
-        if (self.scrollbar_hovered or self.scrollbar_drag_grab != null) { // 상호작용 중 — full로 핀
-            if (self.scrollbar_idle_ticks != 0) {
-                self.scrollbar_idle_ticks = 0;
-                self.metal_dirty = true;
+        // 활성 탭의 모든 pane을 순회해 각자 fade를 갱신한다(per-pane — pane 목록만 보면 되고 rect/layout 불요라
+        // 매 tick 싸다). 활성 pane은 hover/드래그면 full로 핀. 한 pane이라도 alpha가 바뀌면 metal_dirty.
+        const active_pane = self.activePane();
+        for (self.activeTab().panes.items) |pane| {
+            const core = &pane.activeTerm().surface.core;
+            if (core.scrollbackLen() == 0) {
+                // 스크롤바 없음 — 다음 등장이 full로 시작하게 타이머 리셋(0→nonzero 전환).
+                pane.scrollbar_idle_ticks = 0;
+                pane.scrollbar_last_view_offset = 0;
+                continue;
             }
-            return;
+            const vo = core.viewOffset();
+            if (vo != pane.scrollbar_last_view_offset) { // 이 pane 스크롤 활동 → full로 복귀
+                pane.scrollbar_last_view_offset = vo;
+                if (pane.scrollbar_idle_ticks != 0) self.metal_dirty = true;
+                pane.scrollbar_idle_ticks = 0;
+                continue;
+            }
+            if (pane == active_pane and (self.scrollbar_hovered or self.scrollbar_drag_grab != null)) { // 활성 pane 상호작용 — full 핀
+                if (pane.scrollbar_idle_ticks != 0) {
+                    pane.scrollbar_idle_ticks = 0;
+                    self.metal_dirty = true;
+                }
+                continue;
+            }
+            if (pane.scrollbar_idle_ticks >= scrollbar_visible_ticks + scrollbar_fade_ticks) continue; // faint 정착 — 정적
+            pane.scrollbar_idle_ticks += 1;
+            if (pane.scrollbar_idle_ticks > scrollbar_visible_ticks) self.metal_dirty = true; // fade 창 — alpha 변함
         }
-        if (self.scrollbar_idle_ticks >= scrollbar_visible_ticks + scrollbar_fade_ticks) return; // 이미 faint 정착 — 정적
-        self.scrollbar_idle_ticks += 1;
-        if (self.scrollbar_idle_ticks > scrollbar_visible_ticks) self.metal_dirty = true; // fade 창 — alpha 변함
     }
 
     /// down 좌표가 활성 pane 스크롤바(thumb 또는 트랙)에 있으면 잡은 grab offset(y_px - thumb_top, px)을 돌려준다.
@@ -4618,9 +4623,9 @@ pub const DevSession = struct {
         }
     }
 
-    /// 활성 탭의 모든 pane 우측에 스크롤바를 그린다 — 활성 pane은 fade/hover/드래그(세션 상태), 비활성 pane은
-    /// faint 위치 표시(상호작용·fade 없음, 각 pane 자기 core의 view_offset을 반영). leaf rect는 재사용 scratch로
-    /// 계산(per-frame 할당 churn 없음), 실패(OOM)면 활성 pane만(기존 동작 폴백). per-frame(layer3) 호출처에서 부른다.
+    /// 활성 탭의 모든 pane 우측에 스크롤바를 그린다 — **각 pane이 자기 idle_ticks로 독립 fade**(per-pane), 활성
+    /// pane만 추가로 hover/드래그 강조(세션 상태). 각 pane은 자기 core의 view_offset/scrollback을 반영. leaf rect는
+    /// 재사용 scratch로 계산(per-frame 할당 churn 없음), 실패(OOM)면 활성 pane만(폴백). per-frame(layer3)에서 부른다.
     fn appendPaneScrollbars(self: *DevSession) void {
         if (!self.surface_initialized) return;
         self.scrollbar_leaf_scratch.clearRetainingCapacity();
@@ -4628,33 +4633,30 @@ pub const DevSession = struct {
             const active_pane = self.activePane();
             for (self.scrollbar_leaf_scratch.items) |lr| {
                 const trect = self.paneTermRect(lr.rect); // 상단 탭 바를 뺀 터미널 영역(active_pane_rect와 같은 식)
-                const core = &lr.leaf.activeTerm().surface.core;
-                self.appendScrollbar(trect, core, lr.leaf == active_pane);
+                self.appendScrollbar(trect, lr.leaf, lr.leaf == active_pane);
             }
         } else |_| {
-            self.appendScrollbar(self.active_pane_rect, &self.activeSurface().core, true);
+            self.appendScrollbar(self.active_pane_rect, self.activePane(), true);
         }
     }
 
     /// 한 pane 우측에 스크롤바 thumb(둥근 GpuQuad)를 그린다 — 스크롤백이 있을 때만(sb_count>0). thumb 높이는
     /// 보이는 비율, 위치는 view_offset(0=바닥, sb_count=꼭대기)을 반영한다. 셀 위(layer 3 over)에 뜬다.
-    /// `is_active`=활성 pane이면 fade/hover/드래그(세션 상태), 아니면 faint 정적(위치 표시만 — 상호작용은 활성 pane).
+    /// alpha는 pane.scrollbar_idle_ticks로 fade(활성·비활성 모두 per-pane 독립). `is_active`면 추가로 hover/드래그
+    /// 강조(굵게+full, 세션 상태) — 상호작용(hover/드래그)은 활성 pane만이라 비활성 pane은 fade만(emphasize 없음).
     /// 메모리 'UI는 Zig+GPU 렌더러로' — 네이티브 NSScroller가 아니라 chrome GpuQuad 프리미티브. 좌표는 backing 픽셀.
-    fn appendScrollbar(self: *DevSession, rect: app.SplitRect, core: *const terminal.TerminalCore, is_active: bool) void {
+    fn appendScrollbar(self: *DevSession, rect: app.SplitRect, pane: *Pane, is_active: bool) void {
         if (rect.w == 0) return;
+        const core = &pane.activeTerm().surface.core;
         const geom = scrollbarThumbGeom(core.scrollbackLen(), core.viewOffset(), self.cell_height_px, rect.h) orelse return;
         const thumb_y: f32 = @as(f32, @floatFromInt(rect.y)) + geom.y;
         const thumb_h: f32 = geom.h;
-        // 활성 pane만 hover/드래그로 굵게+full, idle엔 fade. 비활성 pane은 base 폭 + faint(상호작용 상태 무시).
+        // 활성 pane만 hover/드래그로 굵게+full(세션 상태). alpha는 **per-pane fade**(각 pane scrollbar_idle_ticks) —
+        // 활성·비활성 모두 자기 스크롤 활동으로 독립적으로 흐려진다(비활성 pane을 휠로 스크롤하면 그 pane만 full→fade).
         const emphasized = is_active and (self.scrollbar_hovered or self.scrollbar_drag_grab != null);
         const bar_w: f32 = scrollbarBarWidthPx(self.cell_width_px, emphasized);
         const x: f32 = @as(f32, @floatFromInt(rect.x + rect.w)) - bar_w - 2.0; // 우측 가장자리에서 2px 안쪽
-        const alpha: u8 = if (emphasized)
-            scrollbar_alpha_full
-        else if (is_active)
-            computeScrollbarAlpha(self.scrollbar_idle_ticks)
-        else
-            scrollbar_alpha_idle; // 비활성 pane — 항상 faint 위치 표시
+        const alpha: u8 = if (emphasized) scrollbar_alpha_full else computeScrollbarAlpha(pane.scrollbar_idle_ticks);
         const rgb = self.mutedForeground(); // muted 전경(사이드바 비활성 탭과 같은 톤)
         const color: u32 = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b; // 셰이더가 rgb*=a premultiply
         const r = bar_w * 0.5; // pill 모양(반지름 = 폭 절반)
@@ -9162,7 +9164,7 @@ test "computeScrollbarAlpha: full→idle 감쇠(visible 유지·fade 후 faint·
     }
 }
 
-test "appendPaneScrollbars: split의 모든 pane에 스크롤바(활성=full alpha, 비활성=faint)" {
+test "appendPaneScrollbars: split 각 pane이 자기 idle_ticks로 독립 fade (per-pane)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY + split 생성
     const allocator = std.testing.allocator;
     const session = try allocator.create(DevSession);
@@ -9187,14 +9189,17 @@ test "appendPaneScrollbars: split의 모든 pane에 스크롤바(활성=full alp
         try std.testing.expect(core.scrollbackLen() > 0);
     }
 
-    // 스크롤바 quad를 새로 그린다(활성=idle_ticks 0이라 full, hover/드래그 없음).
+    // per-pane fade: 한 pane은 full(idle 0), 다른 pane은 faint(fade 정착)로 둔다 — alpha가 각 pane 자기
+    // idle_ticks를 따른다(세션 단일 값이 아님을 증명). hover/드래그 없음.
     session.dropQuadsByLayer(3);
-    session.scrollbar_idle_ticks = 0;
     session.scrollbar_hovered = false;
     session.scrollbar_drag_grab = null;
+    const panes = session.activeTab().panes.items;
+    panes[0].scrollbar_idle_ticks = 0; // full
+    panes[1].scrollbar_idle_ticks = scrollbar_visible_ticks + scrollbar_fade_ticks; // faint 정착
     session.appendPaneScrollbars();
 
-    // pane 2개 → layer3 thumb 2개. 활성 1개=full alpha, 비활성 1개=faint alpha.
+    // pane 2개 → layer3 thumb 2개. 각 pane 자기 idle_ticks 반영 — 하나 full, 하나 faint.
     var count: usize = 0;
     var saw_full = false;
     var saw_faint = false;
@@ -9206,8 +9211,8 @@ test "appendPaneScrollbars: split의 모든 pane에 스크롤바(활성=full alp
         if (a == scrollbar_alpha_idle) saw_faint = true;
     }
     try std.testing.expectEqual(@as(usize, 2), count);
-    try std.testing.expect(saw_full); // 활성 pane
-    try std.testing.expect(saw_faint); // 비활성 pane(위치 표시 faint)
+    try std.testing.expect(saw_full); // idle_ticks 0 pane
+    try std.testing.expect(saw_faint); // fade 정착 pane
 }
 
 test "configPath caches the resolved config path (single alloc, freed in deinit)" {

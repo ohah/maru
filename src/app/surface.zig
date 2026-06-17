@@ -25,7 +25,13 @@ pub const RestorableSurfaceMetadata = struct {
 // 이 타입은 자신이 tab인지 split인지 window인지 모른다. 그 결정은 상위 app/platform layer가 한다.
 pub const Surface = struct {
     id: u64,
+    // 자동 제목 — 셸/프로그램이 정하는 값(정적 기본 또는 장차 OSC 0/2). custom_name이 없을 때 표시 폴백.
     title: []const u8 = "shell",
+    // 사용자 지정 이름(rename) — 사용자가 직접 붙인 이름. 표시 라벨은 custom_name이 비어있지 않으면 title보다
+    // 우선한다(app.label.pick 단일 해석). null=없음. 사용자 입력/복원에서 온 owned 문자열이라 소유자(여기선
+    // platform DevSession)가 teardown에서 해제한다(title은 정적/borrowed라 해제 안 함). 단일 출처:
+    // docs/workspace-restore.md "사용자 지정 이름(custom_name)과 자동 제목".
+    custom_name: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
     command: ?[]const u8 = null,
     process_state: ProcessState = .starting,

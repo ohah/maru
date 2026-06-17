@@ -2,6 +2,7 @@ pub const artifact_io = @import("app/artifact_io.zig");
 pub const headless_demo = @import("app/headless_demo.zig");
 pub const frame_loop = @import("app/frame_loop.zig");
 pub const host = @import("app/host.zig");
+pub const label = @import("app/label.zig");
 pub const live_pty = @import("app/live_pty.zig");
 pub const live_pty_registry = @import("app/live_pty_registry.zig");
 pub const pty_loop_smoke = @import("app/pty_loop_smoke.zig");
@@ -75,6 +76,8 @@ pub const runAppPtySmoke = pty_smoke.run;
 pub const runAppSmoke = host.runSmoke;
 pub const sendInputToActiveSurface = host.sendInputToActiveSurface;
 pub const runHeadlessDemo = headless_demo.run;
+// 라벨 해석 단일 출처(사용자 지정 이름 우선·없으면 자동/폴백) — 사이드바·pane 탭바·workspace label이 공유한다.
+pub const pickLabel = label.pick;
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

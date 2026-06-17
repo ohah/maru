@@ -302,6 +302,19 @@ fn tabNumberLabel(allocator: std.mem.Allocator, index: usize, title: []const u8)
     return std.fmt.allocPrint(allocator, "{d} {s}", .{ index + 1, title });
 }
 
+/// Term(가로 탭) 표시 라벨 — 사용자 rename(surface.custom_name)이 있으면 그것, 없으면 자동 제목(surface.title).
+/// 사이드바 워크스페이스 라벨·pane 탭바가 공유하는 단일 해석(app.pickLabel). 반환은 borrowed(custom_name은 세션
+/// 소유, title은 정적) — 호출자가 즉시 라벨 버퍼로 복사해 쓰므로 수명 안전.
+fn termLabel(term: *const Term) []const u8 {
+    return app.pickLabel(term.surface.custom_name, term.surface.title);
+}
+
+/// 워크스페이스(사이드바 탭) 표시 라벨 — 탭 custom_name 우선, 없으면 활성 Term 라벨로 폴백(워크스페이스는 자동
+/// 제목 출처가 없어 활성 Term을 대표로 빌린다 — 기존 동작과 동일하되 사용자 rename이 우선한다).
+fn workspaceLabel(tab: *Tab) []const u8 {
+    return app.pickLabel(tab.custom_name, termLabel(tab.activeTerm()));
+}
+
 /// 점이 rect 안 어느 drop zone인지 — rect를 중앙에서 X자로 4등분해 가장 가까운 가장자리를 고른다(좌/우/상/하).
 /// rect 밖·0 크기·비유한이면 null. 렌더 drop-zone 하이라이트(후속 ④b)와 공유할 순수 함수라 OS 무관 단위 테스트.
 fn paneDropZone(rect: app.SplitRect, x_px: f64, y_px: f64) ?PaneDropZone {
@@ -524,6 +537,10 @@ const Pane = struct {
     // 활성 pane은 hover/드래그면 0으로 핀(세션 상태). last_view_offset은 변화 감지용 직전 값.
     scrollbar_idle_ticks: u32 = 0,
     scrollbar_last_view_offset: usize = 0,
+    // 사용자 지정 이름(rename). Pane은 자동 제목 출처가 없어 custom_name 하나뿐(null=없음). 탭바 좌측 라벨
+    // 세그먼트로 표시(PR2). owned 문자열이라 destroyPane/deinit teardown에서 해제한다. 단일 출처:
+    // docs/workspace-restore.md "사용자 지정 이름(custom_name)과 자동 제목".
+    custom_name: ?[]const u8 = null,
 
     /// 활성 Term(보이는 터미널). 입력/커서/렌더가 이 Term의 surface를 쓴다. Pane은 항상 Term ≥1.
     fn activeTerm(self: *Pane) *Term {
@@ -540,6 +557,10 @@ const Tab = struct {
     // 이 탭의 SplitTree 루트(split 모델). 단일 leaf(= 활성 Pane의 활성 Term surface)면 panel 1개 = 풀 탭 영역.
     // split이 leaf를 split 노드로 바꿔 여러 panel이 된다.
     tree: PaneTree.Node = undefined,
+    // 워크스페이스(사이드바 탭)의 사용자 지정 이름(rename). 자동 제목 출처가 없어 custom_name 하나뿐(null=없음).
+    // 없으면 사이드바 라벨은 활성 Term 라벨로 폴백한다(app.pickLabel). owned 문자열이라 destroyTabStandalone/deinit
+    // teardown에서 해제한다.
+    custom_name: ?[]const u8 = null,
 
     /// 포커스된 panel. pane 내부(Term/surface) 접근에 쓴다. 탭은 항상 panel ≥1.
     fn activePane(self: *Tab) *Pane {
@@ -1540,7 +1561,8 @@ pub const DevSession = struct {
         if (cw == 0 or ch == 0) return null;
         const pane = self.tab_drag_pane orelse return null;
         if (self.tab_drag_index >= pane.terms.items.len) return null;
-        const title = pane.terms.items[self.tab_drag_index].surface.title;
+        // 드래그 미리보기 라벨도 탭과 같은 해석(rename custom_name 우선). 탭바와 floating 미리보기가 어긋나지 않게.
+        const title = termLabel(pane.terms.items[self.tab_drag_index]);
         const cols: u16 = @intCast(std.math.clamp(title.len + 2, @as(usize, 8), @as(usize, 24))); // 제목+패딩, [8,24]
         const fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
         const bg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_active }; // 솔리드 박스 색(활성 강조색)
@@ -1820,6 +1842,9 @@ pub const DevSession = struct {
             term.live_pty.deinit();
             term.live_initialized = false;
         }
+        // custom_name(사용자 rename, owned)만 해제 — surface.title은 정적/borrowed라 해제 안 함. Surface.deinit에
+        // allocator가 없어 owned 문자열 해제는 세션 allocator를 가진 이 funnel에서 한다.
+        if (term.surface.custom_name) |n| self.allocator.free(n);
         term.surface.deinit();
         self.allocator.destroy(term);
     }
@@ -1853,6 +1878,7 @@ pub const DevSession = struct {
     fn destroyPane(self: *DevSession, pane: *Pane) void {
         self.invalidateForFreedPane(pane); // S1: 포인터 비교는 해제 전 주소로(deref 없음) — 흩어진 null화 대체
         for (pane.terms.items) |term| self.destroyTerm(term);
+        if (pane.custom_name) |n| self.allocator.free(n); // 사용자 rename(owned) 해제
         pane.terms.deinit(self.allocator);
         self.allocator.destroy(pane);
     }
@@ -3476,6 +3502,8 @@ pub const DevSession = struct {
             for (pane.terms.items) |term| {
                 const core = &term.surface.core;
                 try surfaces.append(arena, .{
+                    // custom_name = 사용자 rename(owned, 없으면 ""), title = 자동 제목(OSC). 둘은 별도 필드로 저장한다.
+                    .custom_name = try arena.dupe(u8, term.surface.custom_name orelse ""),
                     .title = try arena.dupe(u8, core.windowTitle()),
                     .cwd = try arena.dupe(u8, core.currentCwd()),
                     .command = try arena.dupe(u8, term.surface.command orelse ""),
@@ -3483,16 +3511,19 @@ pub const DevSession = struct {
                     .rows = core.size.rows,
                 });
             }
-            try panes.append(arena, .{ .active_term = pane.active_term, .surfaces = try surfaces.toOwnedSlice(arena) });
+            try panes.append(arena, .{
+                .active_term = pane.active_term,
+                .custom_name = try arena.dupe(u8, pane.custom_name orelse ""), // pane 사용자 rename(없으면 "")
+                .surfaces = try surfaces.toOwnedSlice(arena),
+            });
         }
         var tree: std.ArrayList(app.workspace.TreeNode) = .empty;
         try flattenPaneTree(arena, tab, tab.tree, &tree);
         return .{
             .active_pane = tab.active_pane,
-            // tab 제목은 현재 데이터 출처가 없다(워크스페이스는 번호로 식별, tab-rename UI 없음). docs/workspace-restore.md의
-            // title은 pane 레벨이라 tab.title은 reserved placeholder다(Surface.title/command과 달리 계획 근거가 약함).
-            // 포맷 호환을 위해 필드는 두되 항상 빈 값 — tab 제목 기능이 생기면 그때 채운다.
-            .title = "",
+            // 워크스페이스(탭)의 사용자 rename(없으면 ""). 예전엔 데이터 출처가 없어 reserved placeholder였으나, 이제
+            // tab.custom_name이 출처다(docs/workspace-restore.md "사용자 지정 이름과 자동 제목").
+            .custom_name = try arena.dupe(u8, tab.custom_name orelse ""),
             .tree = try tree.toOwnedSlice(arena),
             .panes = try panes.toOwnedSlice(arena),
         };
@@ -3593,6 +3624,7 @@ pub const DevSession = struct {
         if (self.divider_drag) |dd| {
             if (PaneTree.containsSplit(tab.tree, dd)) self.divider_drag = null;
         }
+        if (tab.custom_name) |n| self.allocator.free(n); // 워크스페이스 사용자 rename(owned) 해제
         PaneTree.deinit(self.allocator, tab.tree); // heap split 노드 해제(leaf surface는 destroyPane가 이미)
         tab.panes.deinit(self.allocator);
         self.allocator.destroy(tab);
@@ -3636,6 +3668,9 @@ pub const DevSession = struct {
         for (used) |u| if (!u) return error.MalformedTree; // 트리가 참조 안 한 고아 pane(보이지 않는 라이브 셸) 차단
         tab.tree = root;
         tab.active_pane = @min(m.active_pane, tab.panes.items.len - 1);
+        // 워크스페이스 사용자 rename 복원 — 마지막 fallible 단계로 둬, OOM 시 위 errdefer(panes·tab)가 정리하고
+        // custom_name은 아직 미할당이라 누수가 없다.
+        tab.custom_name = try self.dupeCustomName(m.custom_name);
         return tab;
     }
 
@@ -3671,6 +3706,7 @@ pub const DevSession = struct {
         if (m.surfaces.len == 0) return error.EmptyPane;
         const pane = try self.createPaneFromSurface(m.surfaces[0]);
         errdefer self.destroyPane(pane);
+        pane.custom_name = try self.dupeCustomName(m.custom_name); // pane 사용자 rename 복원(errdefer destroyPane이 정리)
         try pane.terms.ensureTotalCapacity(self.allocator, m.surfaces.len);
         for (m.surfaces[1..]) |sm| pane.terms.appendAssumeCapacity(try self.createTermFromSurface(sm));
         pane.active_term = @min(m.active_term, pane.terms.items.len - 1);
@@ -3689,16 +3725,30 @@ pub const DevSession = struct {
         return .{ .req = req, .size = size };
     }
 
+    /// 직렬화 모델의 custom_name(""=없음)을 라이브 owned `?[]const u8`(null=없음)로 변환한다 — 비면 null,
+    /// 아니면 세션 allocator로 dupe. 복원과 rename commit(PR3)이 공유하는 ""→null 단일 변환점이라 규칙이 한 곳뿐이다.
+    fn dupeCustomName(self: *DevSession, name: []const u8) !?[]const u8 {
+        if (name.len == 0) return null;
+        return try self.allocator.dupe(u8, name);
+    }
+
     fn createPaneFromSurface(self: *DevSession, sm: app.workspace.Surface) !*Pane {
         const rs = self.restoreSpawn(sm);
         const cfg = self.new_tab_config;
-        return self.createPane(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
+        const pane = try self.createPane(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
+        errdefer self.destroyPane(pane);
+        // 첫 Term(=이 surface)의 사용자 rename 복원. 실패 시 errdefer destroyPane이 정리한다.
+        pane.activeTerm().surface.custom_name = try self.dupeCustomName(sm.custom_name);
+        return pane;
     }
 
     fn createTermFromSurface(self: *DevSession, sm: app.workspace.Surface) !*Term {
         const rs = self.restoreSpawn(sm);
         const cfg = self.new_tab_config;
-        return self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
+        const term = try self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
+        errdefer self.destroyTerm(term);
+        term.surface.custom_name = try self.dupeCustomName(sm.custom_name);
+        return term;
     }
 
     /// quick terminal 표시 옵션(config에서 파싱). Swift가 패널 크기·화면·자동 숨김에 쓴다. 세션 동안 불변.
@@ -4155,7 +4205,8 @@ pub const DevSession = struct {
                         titles.deinit(self.allocator);
                     }
                     for (lr.leaf.terms.items, 0..) |term, ti| {
-                        const label = tabNumberLabel(self.allocator, ti, term.surface.title) catch continue;
+                        // Term 탭 라벨 = surface.custom_name(rename) 우선, 없으면 자동 제목. "{n} {label}".
+                        const label = tabNumberLabel(self.allocator, ti, termLabel(term)) catch continue;
                         titles.append(self.allocator, label) catch self.allocator.free(label);
                     }
                     // 비활성 Term 탭은 흐린 색(muted), 그 pane의 활성 Term 탭은 full sidebar_foreground로 강조한다.
@@ -4722,7 +4773,7 @@ pub const DevSession = struct {
     fn sidebarTabs(self: *DevSession, arena: std.mem.Allocator) ![]chrome.components.sidebar.Tab {
         const out = try arena.alloc(chrome.components.sidebar.Tab, self.tabs.items.len);
         for (self.tabs.items, 0..) |tab, i| {
-            out[i] = .{ .label = tab.activeTerm().surface.title, .active = (i == self.app_window.active_tab) };
+            out[i] = .{ .label = workspaceLabel(tab), .active = (i == self.app_window.active_tab) };
         }
         return out;
     }
@@ -4816,8 +4867,8 @@ pub const DevSession = struct {
             labels.deinit(self.allocator);
         }
         for (self.tabs.items, 0..) |tab, i| {
-            // 탭 대표 제목 = 활성 panel surface 제목(split 시 포커스 panel의 제목이 사이드바에 보인다). "{n} {title}".
-            const label = try tabNumberLabel(self.allocator, i, tab.activeTerm().surface.title);
+            // 탭 대표 라벨 = 워크스페이스 custom_name(rename) 우선, 없으면 활성 panel 활성 Term 라벨. "{n} {label}".
+            const label = try tabNumberLabel(self.allocator, i, workspaceLabel(tab));
             try labels.append(self.allocator, label);
         }
 
@@ -5355,12 +5406,17 @@ pub const DevSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
+                    // custom_name(사용자 rename, owned) 해제 — destroyTerm과 같은 규율(deinit은 runtime.deinit 순서
+                    // 때문에 teardown을 직접 풀어 써서 destroyTerm을 못 부르므로 여기서도 해제한다).
+                    if (term.surface.custom_name) |n| self.allocator.free(n);
                     term.surface.deinit();
                     self.allocator.destroy(term);
                 }
+                if (pane.custom_name) |n| self.allocator.free(n);
                 pane.terms.deinit(self.allocator);
                 self.allocator.destroy(pane);
             }
+            if (tab.custom_name) |n| self.allocator.free(n);
             PaneTree.deinit(self.allocator, tab.tree); // heap split 노드 해제(split.deinit은 leaf 미접근)
             tab.panes.deinit(self.allocator);
             self.allocator.destroy(tab);
@@ -6859,17 +6915,18 @@ test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)"
     _ = try session.resize(800, 600, 1000);
 
     // 저장 텍스트(한 창: 단일 탭, split vertical 2 pane, cwd /tmp). apply ABI가 받는 것과 같은 형태.
+    // custom_name(사용자 rename)을 세 계층에 심어 parse→apply(라이브 구조체 복원)→capture 라운드트립을 증명한다.
     const text =
         "maru.workspace.v1\n" ++
         "window tabs=1 active-tab=0\n" ++
-        "tab panes=2 active-pane=1 title=\"\"\n" ++
+        "tab panes=2 active-pane=1 custom-name=\"my work\"\n" ++
         "tree-node split vertical ratio=300\n" ++
         "tree-node leaf pane=0\n" ++
         "tree-node leaf pane=1\n" ++
-        "pane surfaces=1 active-term=0\n" ++
-        "surface title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12\n" ++
-        "pane surfaces=1 active-term=0\n" ++
-        "surface title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12\n";
+        "pane surfaces=1 active-term=0 custom-name=\"left\"\n" ++
+        "surface custom-name=\"editor\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12\n";
 
     var parsed = try app.workspace.parse(allocator, text);
     defer parsed.deinit();
@@ -6883,6 +6940,11 @@ test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)"
     try std.testing.expectEqual(@as(usize, 1), cap.tabs[0].active_pane);
     try std.testing.expect(cap.tabs[0].tree[0].split.direction == .vertical);
     try std.testing.expectEqual(@as(u16, 300), cap.tabs[0].tree[0].split.ratio_milli);
+    // custom_name 라운드트립(parse→applyWorkspaceWindow 라이브 복원→captureWorkspaceWindow): 세 계층 모두 유지.
+    try std.testing.expectEqualStrings("my work", cap.tabs[0].custom_name); // 워크스페이스
+    try std.testing.expectEqualStrings("left", cap.tabs[0].panes[0].custom_name); // Pane
+    try std.testing.expectEqualStrings("editor", cap.tabs[0].panes[0].surfaces[0].custom_name); // Term
+    try std.testing.expectEqualStrings("", cap.tabs[0].panes[1].custom_name); // 빈 custom_name = 이름 없음
 }
 
 test "usableRestoreCwd: 절대경로 형식 필터(존재·디렉터리는 childExec graceful이 담당)" {

@@ -56,7 +56,8 @@ pub const CoreTextGlyphRasterizer = struct {
         if (request.pixels.len == 0) return error.RasterizerFailed;
         // Block Elements(U+2580~259F)는 폰트 글리프 대신 직접 합성한다 — 슬롯이 cell 크기라 셀에 꽉 차 이음매
         // 없이 타일링(폰트 글리프는 셀에 안 맞아 gap·흐림). CoreText·font 조회를 건너뛰고 coverage만 채운다.
-        if (renderer.block_glyph.isBlockElement(request.run.codepoint)) {
+        const synth_off = diag_gate.maruNoSynthEnabled();
+        if (!synth_off and renderer.block_glyph.isBlockElement(request.run.codepoint)) {
             const non_clear = renderer.block_glyph.fillCoverage(
                 request.run.codepoint,
                 request.slot.width_px,
@@ -72,7 +73,7 @@ pub const CoreTextGlyphRasterizer = struct {
         }
         // Box-drawing(U+2500~257F light: ─│┌┐└┘├┤┬┴┼·둥근 ╭╮╰╯)도 직접 합성 — 셀 경계에서 이음매 없이 연결
         // (폰트 글리프는 안 맞아 보더가 끊기거나 안 보인다). heavy/double/dashed는 폰트 폴백(isBoxDrawing=false).
-        if (renderer.box_glyph.isBoxDrawing(request.run.codepoint)) {
+        if (!synth_off and renderer.box_glyph.isBoxDrawing(request.run.codepoint)) {
             const non_clear = renderer.box_glyph.fillCoverage(
                 request.run.codepoint,
                 request.slot.width_px,

@@ -12,3 +12,15 @@ pub fn maruDebugEnabled() bool {
     }
     return enabled_cache.?;
 }
+
+var no_synth_cache: ?bool = null;
+
+/// MARU_NO_SYNTH가 설정돼 있으면 true 1 — box/block 글리프 합성을 끄고 폰트 글리프 경로로 되돌린다.
+/// 클로드 로고(block elements) 색이 합성 후 흰색으로 바뀐 회귀를 같은 빌드에서 A/B로 격리하기 위한
+/// 런타임 토글(머지해야 테스트 가능한 사용자 환경에서 폰트 경로 vs 합성 경로를 한 번에 비교).
+pub fn maruNoSynthEnabled() bool {
+    if (no_synth_cache == null) {
+        no_synth_cache = std.c.getenv("MARU_NO_SYNTH") != null;
+    }
+    return no_synth_cache.?;
+}

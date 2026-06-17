@@ -5,6 +5,7 @@ pub const powerline_glyph = @import("renderer/powerline_glyph.zig"); // Powerlin
 pub const braille_glyph = @import("renderer/braille_glyph.zig"); // Braille(U+2800~28FF) 합성 — 2열×4행 8점 비트마스크를 셀 격자에 스냅. 중립.
 pub const legacy_mosaic_glyph = @import("renderer/legacy_mosaic_glyph.zig"); // Legacy Computing 블록 모자이크(sextant U+1FB00~·octant U+1CD00~) 합성. 중립.
 pub const legacy_wedge_glyph = @import("renderer/legacy_wedge_glyph.zig"); // Legacy Computing edge wedge 삼각형(U+1FB68~1FB6F·bowtie 1FB9A/9B) 합성. 중립.
+pub const legacy_smooth_glyph = @import("renderer/legacy_smooth_glyph.zig"); // Legacy Computing smooth mosaic(U+1FB3C~1FB67 대각 폴리곤 44개) 합성. 중립.
 pub const draw_list = @import("renderer/draw_list.zig");
 pub const frame_probe = @import("renderer/frame_probe.zig");
 pub const font_identity = @import("renderer/font_identity.zig");

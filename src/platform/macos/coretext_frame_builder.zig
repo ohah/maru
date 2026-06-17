@@ -103,7 +103,9 @@ pub const sidebar_close_glyph: u21 = 0x2715;
 pub const title_ellipsis_glyph: u21 = 0x2026;
 
 /// title의 디스플레이 폭(칸 합) — wide glyph는 2, 나머지 1. 깨진 UTF-8 바이트는 U+FFFD(1칸). 말줄임 필요 판정용.
-fn titleDisplayWidth(title: []const u8) usize {
+/// pub: pane 라벨 세그먼트 폭(paneLabelCols)도 이 단일 출처로 폭을 잰다(렌더 ellipsize와 같은 셈법이라 라벨
+/// 칸 예약과 실제 글리프가 어긋나지 않는다).
+pub fn titleDisplayWidth(title: []const u8) usize {
     var total: usize = 0;
     var i: usize = 0;
     while (i < title.len) {
@@ -278,6 +280,31 @@ pub fn tabLayout(bar_cols: u16, term_count: usize, tab_width_fixed: u16, scroll_
     // 자동으로 0이 돼 빈 탭 바에 갇히지 않는다. 렌더·hit-test·클릭이 이 eff_scroll을 공유(§6).
     const eff_scroll: u32 = if (has_scroll) @min(scroll_cols, total - tab_cols) else 0;
     return .{ .tab_cols = tab_cols, .tab_w = tab_w, .has_scroll = has_scroll, .eff_scroll = eff_scroll };
+}
+
+/// pane 라벨 세그먼트(탭 바 좌측)의 glyph DrawList — 한 줄(row 0)에 사용자 지정 이름을 [1, cols-1) 칸에 깐다
+/// (col 0 좌측 패딩, 마지막 칸은 탭과의 시각 간격). 넘치면 탭 제목과 같은 말줄임(appendEllipsizedTitle 단일
+/// 출처). 색은 `fg`(호출자가 accent로 줘 탭 제목과 구분). cols<3이면(패딩+글자+간격 불가) 빈 DrawList — 호출자는
+/// label_cols를 그 미만으로 예약하지 않는다. 커서/overlay 없는 UI 텍스트라 OS 무관 단위 테스트.
+pub fn buildPaneLabelDrawList(
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    cols: u16,
+    fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    if (cols >= 3) {
+        // [1, cols-1): col 0 = 좌측 패딩, 마지막 칸 = 탭과의 간격. 그 사이에 이름(말줄임).
+        _ = try appendEllipsizedTitle(allocator, &cells, label, 0, 1, cols - 1, .{ .foreground = fg });
+    }
+    return .{
+        .size = .{ .cols = cols, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
 }
 
 pub fn buildPaneTabBarDrawList(
@@ -669,6 +696,38 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
     try std.testing.expect(found_plus3); // 우측 "+" 버튼이 항상 그려진다(cols 충분)
     // 호버 안 된 탭(close_tab=null)엔 ✕ 없음(단, "+"는 있다).
     for (draw_list.cells) |c| try std.testing.expect(c.codepoint != sidebar_close_glyph);
+}
+
+test "buildPaneLabelDrawList: 이름을 [1,cols-1)에 깔고 좌패딩·우간격을 남긴다(넘치면 말줄임)" {
+    const allocator = std.testing.allocator;
+    // cols=8 → [1,7)에 "build"(5칸) 들어감. col 0=패딩, col 7=탭과의 간격(빈 칸).
+    var dl = try buildPaneLabelDrawList(allocator, "build", 8, .default);
+    defer dl.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 8), dl.size.cols);
+    try std.testing.expectEqual(@as(u16, 1), dl.size.rows);
+    // 첫 글자 'b'는 col 1(좌패딩 뒤), 마지막 글자 'd'는 col 5 — col 0·6·7엔 글자 없음.
+    var min_col: u16 = 999;
+    var max_col: u16 = 0;
+    for (dl.cells) |c| {
+        if (c.col < min_col) min_col = c.col;
+        if (c.col > max_col) max_col = c.col;
+    }
+    try std.testing.expectEqual(@as(u16, 1), min_col); // 좌패딩(col 0 비움)
+    try std.testing.expect(max_col <= 5); // col 6·7은 간격(빈 칸)
+
+    // 좁으면(cols<3) 빈 DrawList(패딩+글자+간격 불가).
+    var tiny = try buildPaneLabelDrawList(allocator, "build", 2, .default);
+    defer tiny.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), tiny.cells.len);
+
+    // 긴 이름은 말줄임(U+2026)으로 끝난다.
+    var ell = try buildPaneLabelDrawList(allocator, "very-long-pane-name", 6, .default);
+    defer ell.deinit(allocator);
+    var has_ellipsis = false;
+    for (ell.cells) |c| {
+        if (c.codepoint == title_ellipsis_glyph) has_ellipsis = true;
+    }
+    try std.testing.expect(has_ellipsis);
 }
 
 test "buildPaneTabBarDrawList reserves a right '+' zone (no '+' when too narrow)" {

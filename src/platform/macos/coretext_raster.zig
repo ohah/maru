@@ -126,6 +126,18 @@ pub const CoreTextGlyphRasterizer = struct {
             );
             return .{ .non_clear_pixels = non_clear };
         }
+        // Legacy Computing smooth mosaic(U+1FB3C~1FB67): 셀 둘레 정점을 이은 대각 폴리곤도 직접 합성 — 빗변이
+        // 셀 격자에 스냅돼 이웃 셀과 매끈히 잇는다(block 모자이크의 대각 버전).
+        if (renderer.legacy_smooth_glyph.isSmoothMosaic(request.run.codepoint)) {
+            const non_clear = renderer.legacy_smooth_glyph.fillCoverage(
+                request.run.codepoint,
+                request.slot.width_px,
+                request.slot.height_px,
+                request.bytes_per_row,
+                request.pixels,
+            );
+            return .{ .non_clear_pixels = non_clear };
+        }
         const font_identity = self.font_registry.get(request.run.font_id) orelse
             return error.RasterizerFailed;
 

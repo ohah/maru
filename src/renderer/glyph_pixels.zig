@@ -129,6 +129,60 @@ pub fn fillTriangle(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, ax: f32,
     return count;
 }
 
+/// 단순 다각형(정점을 둘레 순으로 받음)을 흰색 불투명으로 채운다 — scanline even-odd. 정점이 셀 모서리·
+/// 모서리중점·중앙이면 셀 격자에 스냅된다. 정점 ≤ 16개 가정(스택 교차 버퍼). 새로 칠한 픽셀 수 반환.
+/// slotFits 통과 가정.
+pub fn fillPolygon(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, verts: []const [2]f32) u32 {
+    if (verts.len < 3) return 0;
+    var count: u32 = 0;
+    var y: u32 = 0;
+    while (y < h) : (y += 1) {
+        const py = @as(f32, @floatFromInt(y)) + 0.5;
+        // 이 scanline과 교차하는 변의 x들(half-open [min,max)로 꼭짓점 이중 카운트 방지).
+        var xs: [16]f32 = undefined;
+        var nx: usize = 0;
+        var i: usize = 0;
+        while (i < verts.len) : (i += 1) {
+            const a = verts[i];
+            const b = verts[(i + 1) % verts.len];
+            const ay = a[1];
+            const by = b[1];
+            if ((ay <= py and py < by) or (by <= py and py < ay)) {
+                if (nx < xs.len) {
+                    const t = (py - ay) / (by - ay);
+                    xs[nx] = a[0] + t * (b[0] - a[0]);
+                    nx += 1;
+                }
+            }
+        }
+        if (nx < 2) continue;
+        // 교차 x 오름차순 정렬(삽입정렬, nx 작음).
+        var j: usize = 1;
+        while (j < nx) : (j += 1) {
+            const key = xs[j];
+            var k: usize = j;
+            while (k > 0 and xs[k - 1] > key) : (k -= 1) xs[k] = xs[k - 1];
+            xs[k] = key;
+        }
+        const row_off = @as(usize, y) * bytes_per_row;
+        var p: usize = 0;
+        while (p + 1 < nx) : (p += 2) {
+            const xl = xs[p];
+            const xr = xs[p + 1];
+            var x: u32 = 0;
+            while (x < w) : (x += 1) {
+                const px = @as(f32, @floatFromInt(x)) + 0.5;
+                if (px >= xl and px < xr) {
+                    const off = row_off + @as(usize, x) * 4;
+                    if (pixels[off + 3] == 0) count += 1;
+                    setPixel(pixels, off);
+                }
+            }
+        }
+    }
+    return count;
+}
+
 test "slotFits: 계약(bpr≥w*4·len≥h*bpr) 검증" {
     var buf: [16 * 8 * 4]u8 = undefined; // 512 = 정확히 w=8·h=16·bpr=32
     try std.testing.expect(slotFits(8, 16, 8 * 4, &buf)); // 딱 맞음

@@ -84,7 +84,9 @@ v1에서 약속하지 않는 것:
 - 모든 complex script의 완전한 shaping.
 - ZWJ 이모지 시퀀스·국기·skin-tone 같은 다중 코드포인트 grapheme의 완전한 폭/표시 정확도.
 - 폰트에 해당 face가 없을 때의 합성 bold/italic(faux) 품질.
-- box-drawing(U+2500 블록)/Powerline glyph를 cell에 정확히 맞추는 cell-snapping/stretching.
+- box-drawing(U+2500~257F)·Powerline glyph 합성(cell-snapping). **Block Elements(U+2580~259F solid)는 합성 완료**
+  (`renderer/block_glyph.zig` — 슬롯 alpha에 정수 픽셀 사각형을 채워 nearest 샘플로 셀에 1:1 픽셀-퍼펙트·이음매
+  없이 타일링. eighth/half/full/quadrant. shade ░▒▓는 패턴이라 후속). box-drawing·Powerline은 같은 방식으로 후속.
 - pixel-perfect golden을 기본 CI에서 강제.
 - HarfBuzz, FreeType, fontconfig, DirectWrite 같은 외부/타 플랫폼 폰트 스택 추가.
 

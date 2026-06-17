@@ -1,3 +1,4 @@
+pub const block_glyph = @import("renderer/block_glyph.zig"); // Block Elements(U+2580~259F) 합성 — 폰트 대신 셀에 사각형 coverage(이음매 없는 타일링). 중립.
 pub const draw_list = @import("renderer/draw_list.zig");
 pub const frame_probe = @import("renderer/frame_probe.zig");
 pub const font_identity = @import("renderer/font_identity.zig");

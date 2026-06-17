@@ -54,6 +54,18 @@ pub const CoreTextGlyphRasterizer = struct {
         // FontId -> PostScript name 조회와 C ABI 호출을 맡아, 이후 제품 renderer도 같은
         // GlyphRasterRequest 계약만 소비하게 만든다.
         if (request.pixels.len == 0) return error.RasterizerFailed;
+        // Block Elements(U+2580~259F)는 폰트 글리프 대신 직접 합성한다 — 슬롯이 cell 크기라 셀에 꽉 차 이음매
+        // 없이 타일링(폰트 글리프는 셀에 안 맞아 gap·흐림). CoreText·font 조회를 건너뛰고 coverage만 채운다.
+        if (renderer.block_glyph.isBlockElement(request.run.codepoint)) {
+            const non_clear = renderer.block_glyph.fillCoverage(
+                request.run.codepoint,
+                request.slot.width_px,
+                request.slot.height_px,
+                request.bytes_per_row,
+                request.pixels,
+            );
+            return .{ .non_clear_pixels = non_clear };
+        }
         const font_identity = self.font_registry.get(request.run.font_id) orelse
             return error.RasterizerFailed;
 

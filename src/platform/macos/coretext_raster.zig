@@ -64,6 +64,10 @@ pub const CoreTextGlyphRasterizer = struct {
                 request.bytes_per_row,
                 request.pixels,
             );
+            if (diag_gate.maruDebugEnabled()) diag.info(
+                "synth-block cp=0x{x} slot={d}x{d} bpr={d} non_clear={d}",
+                .{ request.run.codepoint, request.slot.width_px, request.slot.height_px, request.bytes_per_row, non_clear },
+            );
             return .{ .non_clear_pixels = non_clear };
         }
         // Box-drawing(U+2500~257F light: ─│┌┐└┘├┤┬┴┼·둥근 ╭╮╰╯)도 직접 합성 — 셀 경계에서 이음매 없이 연결
@@ -75,6 +79,10 @@ pub const CoreTextGlyphRasterizer = struct {
                 request.slot.height_px,
                 request.bytes_per_row,
                 request.pixels,
+            );
+            if (diag_gate.maruDebugEnabled()) diag.info(
+                "synth-box cp=0x{x} slot={d}x{d} bpr={d} non_clear={d}",
+                .{ request.run.codepoint, request.slot.width_px, request.slot.height_px, request.bytes_per_row, non_clear },
             );
             return .{ .non_clear_pixels = non_clear };
         }

@@ -2759,10 +2759,11 @@ pub const DevSession = struct {
         const col = cell.col;
         const row = cell.row;
         const core = &self.activeSurface().core;
-        // mouse reporting: 트래킹 모드(DECSET 1000~1003)고 shift 미포함이면 셀렉션 대신 앱에 리포트한다 — 여기까지
-        // 왔으면 활성 pane 터미널 영역 클릭(사이드바/탭바/divider/다른 pane은 위에서 처리). shift+click은 xterm
-        // 관례대로 셀렉션 override(아래 switch로 흘린다). 8b-2: button/mods는 Swift가 변환해 ABI로 넘긴다.
-        if (core.mouse_tracking != .none and (mods & 4) == 0) {
+        // mouse reporting: 트래킹 모드(DECSET 1000~1003)고 shift·option 미포함이면 셀렉션 대신 앱에 리포트한다 —
+        // 여기까지 왔으면 활성 pane 터미널 영역 클릭(사이드바/탭바/divider/다른 pane은 위에서 처리). shift+click은
+        // xterm 관례대로 선형 셀렉션 override, option+click은 블록(직사각형) 셀렉션 override(둘 다 아래 switch로
+        // 흘린다 — iTerm2 관례). mods 비트(xterm Cb): shift=4·option=8. 8b-2: button/mods는 Swift가 변환해 넘긴다.
+        if (core.mouse_tracking != .none and (mods & 4) == 0 and (mods & 8) == 0) {
             // reporting 모드로 들어가면 진행 중이던 셀렉션 드래그 autoscroll을 멈춘다 — 안 그러면 셀렉션
             // 도중 앱이 mouse tracking을 켤 때 이 분기가 매 이벤트 조기 return하면서, 이미 걸린 autoscroll이
             // 30Hz tick으로 영원히 돈다(reporting 모드는 셀렉션을 하지 않으므로 autoscroll이 무의미).
@@ -2784,6 +2785,7 @@ pub const DevSession = struct {
                 self.mouse_drag_selecting = true;
                 self.drag_autoscroll = 0;
                 core.selectionStart(row, col);
+                if ((mods & 8) != 0) core.setSelectionBlock(true); // Option+드래그 = 블록(직사각형) 선택
             },
             2 => {
                 // 드래그가 활성 panel grid 위/아래 밖으로 나가면 자동 스크롤을 건다(tick이 수행). panel은

@@ -141,10 +141,13 @@ pub const SelectionPoint = struct {
     col: u16,
 };
 
-/// 뷰포트 좌표로 클립된 선택 범위(렌더용). [start, end]는 선형(행 단위 이어짐) 포함 범위다.
+/// 뷰포트 좌표로 클립된 선택 범위(렌더용). [start, end]는 포함 범위다. block=false면 선형(행 단위
+/// 이어짐 — 첫/끝 행만 col 제한, 중간 행은 전폭), block=true면 직사각형([start.col,end.col]을 모든 행에
+/// 적용 — Option+드래그). search_match·hover_link 등은 항상 선형(block=false 기본).
 pub const SelectionSpan = struct {
     start: struct { row: u16, col: u16 },
     end: struct { row: u16, col: u16 },
+    block: bool = false,
 };
 
 /// 스크롤백 Find 매치 한 건의 절대-행 [start, end] 포함 범위. SelectionPoint와 같은 절대 좌표계라

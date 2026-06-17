@@ -244,6 +244,10 @@ pub const TerminalCore = struct {
     // 스크롤백 eviction(가득 찬 ring)·재-wrap·clear 때 보정/해제된다.
     selection_anchor: ?types.SelectionPoint = null,
     selection_head: ?types.SelectionPoint = null,
+    // 블록(직사각형) 선택 모드. true면 anchor~head를 행 흐름이 아니라 [min_col,max_col]×[min_row,max_row]
+    // 사각형으로 해석한다(Option+드래그 — iTerm2/Terminal.app 관례). selectionStart가 false로 리셋하고
+    // setSelectionBlock(start 직후)이 켠다. selectionClear/RIS에서 해제.
+    selection_block: bool = false,
     // OSC 8 하이퍼링크. URI는 link_store에 intern(중복 제거)하고 셀에는 id(인덱스+1)만 둔다.
     // pen_link는 현재 열린 링크 id — 링크가 열린 동안 출력되는 셀에 찍힌다. store는 세션 수명
     // 동안 유지된다(셀이 스크롤백에 남아 있는 한 URI도 살아 있어야 하므로 GC하지 않는다).
@@ -746,6 +750,15 @@ pub const TerminalCore = struct {
         const abs = self.absRowFromViewport(viewport_row);
         self.selection_anchor = .{ .row = abs, .col = @min(col, self.size.cols -| 1) };
         self.selection_head = self.selection_anchor;
+        self.selection_block = false; // 기본 선형 — 블록은 setSelectionBlock으로 켠다(start 직후, Option+드래그)
+        self.dirty = fullDirty(self.size);
+    }
+
+    /// 블록(직사각형) 선택 모드를 켜고 끈다. platform이 selectionStart 직후 Option+드래그면 켠다(시그니처를
+    /// 안 바꿔 기존 selectionStart 호출처 보존). 진행 중 anchor가 없으면(선택 없음) 무시.
+    pub fn setSelectionBlock(self: *TerminalCore, on: bool) void {
+        if (self.selection_anchor == null or self.selection_block == on) return;
+        self.selection_block = on;
         self.dirty = fullDirty(self.size);
     }
 
@@ -818,15 +831,17 @@ pub const TerminalCore = struct {
     /// 용도라 충분).
     /// 절대-행 [start, end] 선형 범위를 현재 뷰포트 좌표로 클립한다(화면 밖이면 null). 선택
     /// 하이라이트와 URL 밑줄이 같은 규칙을 쓰게 공유한다.
-    fn clipAbsSpanToViewport(self: *const TerminalCore, start: types.SelectionPoint, end: types.SelectionPoint) ?types.SelectionSpan {
+    fn clipAbsSpanToViewport(self: *const TerminalCore, start: types.SelectionPoint, end: types.SelectionPoint, block: bool) ?types.SelectionSpan {
         const top_abs = self.sb_count - @min(self.view_offset, self.sb_count);
         const bottom_abs = top_abs + self.size.rows - 1;
         if (end.row < top_abs or start.row > bottom_abs) return null;
         const start_row: u16 = if (start.row < top_abs) 0 else @intCast(start.row - top_abs);
-        const start_col: u16 = if (start.row < top_abs) 0 else start.col;
+        // 선형은 첫 행이 위로 잘리면 col 0부터(행 흐름), 블록은 col이 모든 행에서 [start.col,end.col] 고정이라
+        // 행이 잘려도 그대로 둔다(잘린 위 부분도 같은 col 사각형).
+        const start_col: u16 = if (block) start.col else (if (start.row < top_abs) 0 else start.col);
         const end_row: u16 = if (end.row > bottom_abs) self.size.rows - 1 else @intCast(end.row - top_abs);
-        const end_col: u16 = if (end.row > bottom_abs) self.size.cols - 1 else end.col;
-        return .{ .start = .{ .row = start_row, .col = start_col }, .end = .{ .row = end_row, .col = end_col } };
+        const end_col: u16 = if (block) end.col else (if (end.row > bottom_abs) self.size.cols - 1 else end.col);
+        return .{ .start = .{ .row = start_row, .col = start_col }, .end = .{ .row = end_row, .col = end_col }, .block = block };
     }
 
     /// 클릭 셀의 OSC 8 링크 id(0=없음).
@@ -891,11 +906,11 @@ pub const TerminalCore = struct {
         const id = self.cellLinkAt(anchor.row, anchor.col);
         if (id != 0) {
             const bounds = self.linkBoundsAt(anchor.row, anchor.col, id);
-            return self.clipAbsSpanToViewport(bounds.start, bounds.end);
+            return self.clipAbsSpanToViewport(bounds.start, bounds.end, false);
         }
         const vp_row: u16 = @intCast(anchor.row - top_abs);
         const bounds = self.wordBoundsAt(vp_row, anchor.col) orelse return null;
-        return self.clipAbsSpanToViewport(bounds.start, bounds.end);
+        return self.clipAbsSpanToViewport(bounds.start, bounds.end, false);
     }
 
     /// Cmd+클릭 위치의 URL을 추출한다(없으면 null). 클릭 셀이 속한 비공백 run(soft-wrap 포함)
@@ -1090,7 +1105,7 @@ pub const TerminalCore = struct {
 
     /// 검색 매치(절대 좌표)를 현재 뷰포트 좌표로 클립한다(화면 밖이면 null) — 선택 하이라이트와 같은 규칙 공유.
     pub fn matchViewportSpan(self: *const TerminalCore, m: types.Match) ?types.SelectionSpan {
-        return self.clipAbsSpanToViewport(m.start, m.end);
+        return self.clipAbsSpanToViewport(m.start, m.end, false);
     }
 
     /// IME 조합 중 텍스트를 설정한다(빈 입력 = 조합 종료/취소). 렌더 합성 전용 상태라 셀
@@ -1108,6 +1123,7 @@ pub const TerminalCore = struct {
         if (self.selection_anchor == null) return;
         self.selection_anchor = null;
         self.selection_head = null;
+        self.selection_block = false;
         self.dirty = fullDirty(self.size);
     }
 
@@ -1145,16 +1161,28 @@ pub const TerminalCore = struct {
         return .{ .start = h, .end = a };
     }
 
-    /// 현재 뷰포트에 보이는 선택 범위(렌더용). 화면 밖이면 null.
+    /// 현재 뷰포트에 보이는 선택 범위(렌더용). 화면 밖이면 null. 블록 모드면 col을 행과 무관하게 min/max로
+    /// 정렬해 직사각형 span([lo,hi]×[start.row,end.row])으로 낸다(normalizedSelection은 row만 정규화).
     pub fn selectionViewportSpan(self: *const TerminalCore) ?types.SelectionSpan {
         const sel = self.normalizedSelection() orelse return null;
-        return self.clipAbsSpanToViewport(sel.start, sel.end);
+        if (self.selection_block) {
+            const lo = @min(sel.start.col, sel.end.col);
+            const hi = @max(sel.start.col, sel.end.col);
+            return self.clipAbsSpanToViewport(
+                .{ .row = sel.start.row, .col = lo },
+                .{ .row = sel.end.row, .col = hi },
+                true,
+            );
+        }
+        return self.clipAbsSpanToViewport(sel.start, sel.end, false);
     }
 
     /// 선택된 텍스트를 추출한다(클립보드 복사용). 행 단위 선형 선택 — soft-wrap으로 이어진 행은
     /// 줄바꿈 없이 잇고, hard 줄끝에서만 \n을 넣는다. 각 행은 뒤 빈칸을 trim한다(soft 행 제외).
+    /// 블록 모드면 직사각형 추출로 분기한다(각 행 [lo,hi], 항상 행마다 개행).
     pub fn extractSelection(self: *const TerminalCore, allocator: std.mem.Allocator) !?[]u8 {
         const sel = self.normalizedSelection() orelse return null;
+        if (self.selection_block) return self.extractBlockSelection(allocator, sel.start, sel.end);
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
 
@@ -1168,6 +1196,27 @@ pub const TerminalCore = struct {
             const to: usize = if (wrapped_flag and abs != sel.end.row) full_to else @max(from, @min(full_to, trimmedLen(row_cells)));
             try appendRowUtf8(&out, allocator, row_cells, from, to);
             if (abs != sel.end.row and !wrapped_flag) try out.append(allocator, '\n');
+        }
+        return try out.toOwnedSlice(allocator);
+    }
+
+    /// 블록(직사각형) 선택 추출 — 각 행에서 [lo,hi] 열만(col은 행과 무관, soft-wrap 무시), 행마다 개행.
+    /// hi 칸 뒤 빈칸은 trim해 패딩이 텍스트로 안 들어간다(선형 추출과 같은 trimmedLen 규칙). 행이 hi보다
+    /// 짧으면 그 행 몫만(빈 줄도 개행은 유지 — 사각형 모양 보존). start/end는 row만 정규화돼 col은 여기서 min/max.
+    fn extractBlockSelection(self: *const TerminalCore, allocator: std.mem.Allocator, start: types.SelectionPoint, end: types.SelectionPoint) !?[]u8 {
+        const lo: usize = @min(start.col, end.col);
+        const hi: usize = @max(start.col, end.col);
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        var abs = start.row;
+        while (abs <= end.row) : (abs += 1) {
+            if (self.absRow(abs)) |row_cells| {
+                const from: usize = @min(lo, row_cells.len);
+                const full_to: usize = @min(hi + 1, row_cells.len);
+                const to: usize = @max(from, @min(full_to, trimmedLen(row_cells)));
+                try appendRowUtf8(&out, allocator, row_cells, from, to);
+            }
+            if (abs != end.row) try out.append(allocator, '\n'); // 블록은 행마다 개행(사각형 — soft-wrap 무관)
         }
         return try out.toOwnedSlice(allocator);
     }
@@ -7267,6 +7316,63 @@ test "selection span clips to the viewport and follows scrolling" {
     try std.testing.expectEqual(@as(u16, 1), span2.start.row);
     try std.testing.expectEqual(@as(u16, 1), span2.end.row); // d는 아래로 클립
     try std.testing.expectEqual(@as(u16, 3), span2.end.col);
+}
+
+test "block selection extracts a rectangle column-slice per row (Option+drag)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    try core.write("abcdef\r\nghijkl\r\nmnopqr"); // 3행, 각 6글자(cols=8라 wrap 없음)
+
+    // 블록 선택 cols 1..3 × rows 0..2 → 각 행의 [1,3] 열만, 행마다 개행(소프트랩 무관).
+    core.selectionStart(0, 1);
+    core.setSelectionBlock(true);
+    core.selectionExtend(2, 3);
+    const text = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("bcd\nhij\nnop", text);
+
+    // anchor col > head col이어도 min/max로 같은 사각형.
+    core.selectionStart(0, 3);
+    core.setSelectionBlock(true);
+    core.selectionExtend(2, 1);
+    const text2 = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings("bcd\nhij\nnop", text2);
+
+    // hi가 내용보다 넓으면 각 행 뒤 빈칸을 trim(패딩 제외 — 선형 추출과 같은 규칙).
+    core.selectionStart(0, 1);
+    core.setSelectionBlock(true);
+    core.selectionExtend(2, 7);
+    const text3 = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text3);
+    try std.testing.expectEqualStrings("bcdef\nhijkl\nnopqr", text3);
+}
+
+test "block selection span carries block flag + lo/hi; selectionStart resets to linear" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    try core.write("abcdef\r\nghijkl\r\nmnopqr");
+
+    core.selectionStart(0, 3);
+    core.setSelectionBlock(true);
+    core.selectionExtend(2, 1);
+    const span = core.selectionViewportSpan().?;
+    try std.testing.expect(span.block);
+    try std.testing.expectEqual(@as(u16, 0), span.start.row);
+    try std.testing.expectEqual(@as(u16, 2), span.end.row);
+    try std.testing.expectEqual(@as(u16, 1), span.start.col); // lo
+    try std.testing.expectEqual(@as(u16, 3), span.end.col); // hi
+
+    // 새 selectionStart는 선형으로 리셋(이전 블록 모드가 새 선택에 안 샌다).
+    core.selectionStart(0, 0);
+    core.selectionExtend(0, 2);
+    const span2 = core.selectionViewportSpan().?;
+    try std.testing.expect(!span2.block);
+
+    // setSelectionBlock은 anchor 없으면 무시(선택 없는데 블록 토글은 무효).
+    core.selectionClear();
+    core.setSelectionBlock(true);
+    try std.testing.expect(!core.selection_block);
 }
 
 test "selection survives new output until eviction shifts it off the ring" {

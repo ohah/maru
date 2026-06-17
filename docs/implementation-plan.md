@@ -682,7 +682,7 @@ TDD 방식:
 - **런타임 폰트 크기(⌘+/⌘-/⌘0)**: step 파라미터화(현재 1pt 고정)·View 메뉴 항목(Bigger/Smaller/Actual Size)·`set_font_size` 절대 지정.
 - **메뉴바(NSMenu)**: Edit의 Cut/Undo·Services·Open/Reload Config·Find 메뉴 항목(현재 copy/paste만 연결).
 - **커맨드 팝업(⌘⇧P)**: fuzzy 필터(현재 부분일치)·한글 IME 필터(현재 ASCII).
-- **선택/클립보드**: 블록(직사각형) 선택.
+- **선택/클립보드**: 블록(직사각형) 선택 — **완료**(Option+드래그 = 직사각형 — iTerm2/Terminal.app 관례). `selection_block` 플래그 + `SelectionSpan.block`로 `extractSelection`(각 행 [lo,hi]·행마다 개행·뒤 빈칸 trim)·`inSelection`(모든 행 동일 열 범위)·`selectionViewportSpan`(col min/max 정렬)이 분기. platform mouse가 Option(mods&8)이면 `setSelectionBlock`하고 mouse-reporting override에 option 포함. `selectionStart` 시그니처는 불변(기존 호출처 보존).
 - **New Window(멀티 윈도우)**: W3/W4 잔여 — global hotkey(toggle_window/quick)의 멀티 창 타게팅·창별 독립 config·탭 tear-off(창 간 탭 이동); W5 — atlas 공유(SharedGridSet식 grid-per-size, memory `multi-window-atlas-ownership` — 프로파일 후).
 - **Workspace restore**: config 토글(현재 `MARU_NO_WORKSPACE_RESTORE` env-var)·부분 복구 artifact(한 surface 실패 시 이유 기록)·startup_recipe/env allowlist(정책 재확인 후)·repo별 workspace.
 - **kitty graphics**: 비활성 panel 이미지 렌더·reflow 후 정밀 재배치·멀티 윈도우 텍스처 캐시 소유권(atlas 소유권 재검토와 함께). query/애니메이션은 위 kitty 절 K5 참조.

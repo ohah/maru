@@ -27,6 +27,14 @@ pub fn setPixel(pixels: []u8, off: usize) void {
     pixels[off + 3] = 0xFF;
 }
 
+/// off 위치 픽셀을 RGB=흰색·A=alpha로(부분 coverage = 셰이더가 fg를 alpha/255 비율로 blend). 음영 삼각형 등.
+pub fn setPixelAlpha(pixels: []u8, off: usize, alpha: u8) void {
+    pixels[off] = 0xFF;
+    pixels[off + 1] = 0xFF;
+    pixels[off + 2] = 0xFF;
+    pixels[off + 3] = alpha;
+}
+
 /// 셀 전체를 균일 alpha(RGB=흰색·A=alpha)로 채운다 — 음영 ░▒▓처럼 부분 coverage. 셰이더가 alpha를 coverage로
 /// 읽어 `mix(bg, fg, alpha/255)`라, alpha=0x40/0x80/0xC0이면 fg를 25%/50%/75% blend한다. 채운 픽셀 수(=w*h)
 /// 반환. slotFits 통과 가정. alpha=0이면 빈 셀(0px).
@@ -111,6 +119,12 @@ pub fn pointInTriangle(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32, cx:
 /// 삼각형 (a,b,c)를 흰색 불투명으로 채운다(픽셀 중심 +0.5 기준). invert면 셀 안에서 삼각형 **바깥**을 채운다
 /// (반전 wedge). 정점이 셀 모서리/중앙이면 셀 격자에 칼같이 스냅된다. 새로 칠한 픽셀 수 반환. slotFits 통과 가정.
 pub fn fillTriangle(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32, invert: bool) u32 {
+    return fillTriangleAlpha(pixels, bytes_per_row, w, h, ax, ay, bx, by, cx, cy, invert, 0xFF);
+}
+
+/// fillTriangle과 같되 채움 alpha를 지정한다 — 음영 corner 삼각형(◢◣◤◥ solid=0xFF·🮜🮝🮞🮟 50%=0x80) 등. 새로
+/// 칠한 픽셀 수 반환(alpha>0 가정). slotFits 통과 가정.
+pub fn fillTriangleAlpha(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32, invert: bool, alpha: u8) u32 {
     var count: u32 = 0;
     var y: u32 = 0;
     while (y < h) : (y += 1) {
@@ -122,7 +136,7 @@ pub fn fillTriangle(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, ax: f32,
             if (pointInTriangle(px, py, ax, ay, bx, by, cx, cy) != invert) {
                 const off = row_off + @as(usize, x) * 4;
                 if (pixels[off + 3] == 0) count += 1;
-                setPixel(pixels, off);
+                setPixelAlpha(pixels, off, alpha);
             }
         }
     }

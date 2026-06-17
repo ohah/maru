@@ -409,7 +409,11 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
         return true;
     }
     // legacy_smooth_glyph: smooth mosaic(U+1FB3C~1FB67 — 대각 폴리곤 44개). renderer/legacy_smooth_glyph.zig와 동기.
-    return (cp >= 0x1FB3C && cp <= 0x1FB67);
+    if (cp >= 0x1FB3C && cp <= 0x1FB67) {
+        return true;
+    }
+    // legacy_wedge_glyph corner 삼각형: ◢◣◤◥(U+25E2~25E5, solid)·🮜🮝🮞🮟(U+1FB9C~1FB9F, 50% 음영). 동기.
+    return (cp >= 0x25E2 && cp <= 0x25E5) || (cp >= 0x1FB9C && cp <= 0x1FB9F);
 }
 
 static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFIndex *len, CFIndex capacity) {

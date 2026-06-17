@@ -1,6 +1,7 @@
 //! 대각선 **stroke** 글리프: 코너 대각선 U+1FBA0~1FBAE(다이아몬드 변 — 중앙선과 모서리중점을 잇는 선분 조합
-//! 15개)와 cell 대각선 U+1FBD0~1FBDF(셀 정렬점 사이 대각 선분 16개). 채움이 아니라 **light 두께 선분 stroke**
-//! (공유 `glyph_pixels.fillSegment`). 끝점이 셀 모서리·모서리중점·중앙이라 격자에 스냅돼 이웃 셀과 이어진다.
+//! 15개)·cell 대각선 U+1FBD0~1FBDF(셀 정렬점 사이 대각 선분 16개)·대각 hatch U+1FB98/99(평행 대각선으로 셀을
+//! 채우는 stripe — 🮘 ╲방향·🮙 ╱방향). 모두 채움이 아니라 **light 두께 선분 stroke**(공유 `glyph_pixels.fillSegment`).
+//! 끝점이 셀 모서리·모서리중점·중앙이라 격자에 스냅돼 이웃 셀과 이어진다.
 //!
 //! 모든 끝점은 3×3 정렬 격자(0=UL,1=UC,2=UR,3=ML,4=MC,5=MR,6=LL,7=LC,8=LR; col=p%3·row=p/3 → x=col·½w·
 //! y=row·½h)의 한 점이라 코너·cell 둘 다 점-쌍 선분으로 통일된다.
@@ -11,9 +12,11 @@
 const std = @import("std");
 const gp = @import("glyph_pixels.zig");
 
-/// cp가 대각선 stroke 글리프인지(U+1FBA0~1FBAE·U+1FBD0~1FBDF). 그 밖이면 폰트 폴백.
+/// cp가 대각선 stroke/hatch 글리프인지(U+1FB98~1FB99·U+1FBA0~1FBAE·U+1FBD0~1FBDF). 그 밖이면 폰트 폴백.
 pub fn isLegacyDiagonal(cp: u32) bool {
-    return (cp >= 0x1FBA0 and cp <= 0x1FBAE) or (cp >= 0x1FBD0 and cp <= 0x1FBDF);
+    return (cp >= 0x1FB98 and cp <= 0x1FB99) or
+        (cp >= 0x1FBA0 and cp <= 0x1FBAE) or
+        (cp >= 0x1FBD0 and cp <= 0x1FBDF);
 }
 
 const Seg = struct { a: u8, b: u8 };
@@ -70,6 +73,32 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
         for (cell_diag[cp - 0x1FBD0]) |s| {
             count += drawSeg(pixels, bytes_per_row, w, h, s, t);
         }
+    } else if (cp == 0x1FB98 or cp == 0x1FB99) {
+        count += fillHatch(pixels, bytes_per_row, w, h, t, cp == 0x1FB98); // 🮘=╲(back)·🮙=╱
+    }
+    return count;
+}
+
+/// 대각 hatch — 평행한 전셀 대각선을 stride(≈2t) 간격으로 긋는다(두께 t). back=true면 ╲(좌상→우하), false면
+/// ╱(우상→좌하). 선이 셀 밖으로 뻗고 fillSegment가 셀 안만 칠하므로 이웃 셀과 stripe가 이어진다.
+fn fillHatch(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, t: u32, back: bool) u32 {
+    const fw = @as(f32, @floatFromInt(w));
+    const fh = @as(f32, @floatFromInt(h));
+    var line_count: u32 = w / (2 * t);
+    if (line_count < 1) line_count = 1;
+    const stride = @round(fw / @as(f32, @floatFromInt(line_count)));
+    const lc: i32 = @intCast(line_count);
+    var count: u32 = 0;
+    var i: i32 = -lc;
+    while (i <= lc) : (i += 1) {
+        const off = @as(f32, @floatFromInt(i)) * stride;
+        if (back) {
+            // ╲: (off,0) → (fw+off, fh)
+            count += gp.fillSegment(pixels, bytes_per_row, w, h, off, 0, fw + off, fh, t);
+        } else {
+            // ╱: (fw+off,0) → (off, fh)
+            count += gp.fillSegment(pixels, bytes_per_row, w, h, fw + off, 0, off, fh, t);
+        }
     }
     return count;
 }
@@ -86,16 +115,44 @@ fn drawSeg(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, s: Seg, t: u32) u
 }
 
 test "isLegacyDiagonal 범위·표 크기" {
+    try std.testing.expect(isLegacyDiagonal(0x1FB98)); // hatch ╲
+    try std.testing.expect(isLegacyDiagonal(0x1FB99)); // hatch ╱
     try std.testing.expect(isLegacyDiagonal(0x1FBA0));
     try std.testing.expect(isLegacyDiagonal(0x1FBAE));
     try std.testing.expect(isLegacyDiagonal(0x1FBD0));
     try std.testing.expect(isLegacyDiagonal(0x1FBDF));
+    try std.testing.expect(!isLegacyDiagonal(0x1FB97));
+    try std.testing.expect(!isLegacyDiagonal(0x1FB9A)); // bowtie(별도)
     try std.testing.expect(!isLegacyDiagonal(0x1FB9F)); // corner-shade(별도)
     try std.testing.expect(!isLegacyDiagonal(0x1FBAF));
     try std.testing.expect(!isLegacyDiagonal(0x1FBCF));
     try std.testing.expect(!isLegacyDiagonal(0x1FBE0));
     try std.testing.expectEqual(@as(usize, 15), corner_mask.len);
     try std.testing.expectEqual(@as(usize, 16), cell_diag.len);
+}
+
+test "fillCoverage: hatch 🮘╲·🮙╱는 평행 대각 stripe로 셀을 채우고 방향이 다르다" {
+    const w: u32 = 32;
+    const h: u32 = 32; // t=2, stride=4, half=1.0 → (px∓py) mod 4 ∈ {0,1,3} 채움
+    const bpr: usize = w * 4;
+    var pixels: [32 * 32 * 4]u8 = undefined;
+    const a = struct {
+        fn at(p: []const u8, bpr_: usize, x: u32, y: u32) u8 {
+            return p[@as(usize, y) * bpr_ + @as(usize, x) * 4 + 3];
+        }
+    }.at;
+
+    // 🮘 U+1FB98 ╲: (px-py) 기준 stripe(픽셀 중심에서 −py 오프셋 상쇄). (1,0)[x-y=1] 채움·(2,0)[x-y=2] 빔.
+    const c98 = fillCoverage(0x1FB98, w, h, bpr, &pixels);
+    try std.testing.expect(c98 > 0 and c98 < w * h); // solid가 아니라 stripe
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 1, 0)); // 선 위
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 2, 0)); // stripe 사이 빔
+
+    // 🮙 U+1FB99 ╱: (px+py) 기준 stripe — 같은 점들에서 ╲와 반대(방향이 다름을 고정).
+    const c99 = fillCoverage(0x1FB99, w, h, bpr, &pixels);
+    try std.testing.expect(c99 > 0 and c99 < w * h);
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 1, 0)); // ╲와 반대(빔)
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 2, 0)); // ╲와 반대(채움)
 }
 
 test "fillCoverage: 코너·cell 대각선이 올바른 선분을 긋는다" {

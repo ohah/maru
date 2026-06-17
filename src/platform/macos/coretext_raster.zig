@@ -90,6 +90,18 @@ pub const CoreTextGlyphRasterizer = struct {
             );
             return .{ .non_clear_pixels = non_clear };
         }
+        // Braille(U+2800~28FF): 2열×4행 점 패턴(하위 8비트 마스크)도 직접 합성 — 셀 격자에 스냅된 점이라 btop·
+        // plotille 류 TUI 그래프가 흐려지지 않고 정렬된다. 폰트 글리프는 셀에 안 맞아 점 간격이 흔들린다.
+        if (renderer.braille_glyph.isBraille(request.run.codepoint)) {
+            const non_clear = renderer.braille_glyph.fillCoverage(
+                request.run.codepoint,
+                request.slot.width_px,
+                request.slot.height_px,
+                request.bytes_per_row,
+                request.pixels,
+            );
+            return .{ .non_clear_pixels = non_clear };
+        }
         const font_identity = self.font_registry.get(request.run.font_id) orelse
             return error.RasterizerFailed;
 

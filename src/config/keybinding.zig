@@ -213,8 +213,13 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'P' } }, .action = .toggle_command_palette },
     // Cmd+F: 스크롤백 Find 토글(macOS 보편 Find 단축키 — Terminal.app/iTerm2/브라우저 관례). 'f'→'F' fold,
     // 모디파이어 정확 비교(셸 Ctrl+F[커서 전진]와 안 겹친다). Find 열림 동안엔 handleKeyEvent가 키를 검색 입력으로
-    // 가로채 이 경로 안 탄다(Enter=다음 매치, Shift+Enter=이전, Esc=닫기). ⌘G(닫힌 채 다음 매치)는 후속.
+    // 가로채 이 경로 안 탄다(Enter=다음 매치, Shift+Enter=이전, Esc=닫기).
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'F' } }, .action = .toggle_find },
+    // Cmd+G/Cmd+Shift+G: Find 오버레이가 **닫혀 있어도** 보존된 검색어로 다음/이전 매치로 점프(macOS Find Next/
+    // Previous 관례 — Safari/TextEdit 등). 'g'→'G' fold, 모디파이어 정확 비교(Shift 유무로 방향). Find가 열린
+    // 동안엔 모달 라우팅이 ⌘+글자를 가로채 닫으므로(Enter로 네비) 이 바인딩은 닫힌 경우를 위한 것이다.
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'G' } }, .action = .find_next },
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'G' } }, .action = .find_previous },
     // 런타임 폰트 크기(macOS/브라우저/Ghostty 관례). ⌘=(또는 ⌘+)=키우기, ⌘-(또는 ⌘_)=줄이기, ⌘0=리셋.
     // '=' 키를 Shift와 함께 누르면 '+'가, '-'는 '_'가 오므로 양쪽을 다 묶어 키캡 표기(+/-)와 실제 글자(=/-)를
     // 모두 잡는다(모디파이어 정확 비교). 숫자/기호라 normalizeEventChar가 그대로 통과시킨다. 셸 입력과 안 겹친다.

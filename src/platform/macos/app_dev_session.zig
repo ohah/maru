@@ -2215,6 +2215,10 @@ pub const DevSession = struct {
             self.find_matches.clearRetainingCapacity(); // 닫힘 — 하이라이트 중단
             self.find_nav = false; // ⌘G 닫힘-네비 세션도 종료
         } else {
+            // alt screen(vim/less/htop 등)에선 maru 스크롤백 Find를 끈다 — 그 화면은 앱이 소유하고 스크롤백
+            // 뷰포트가 잠겨(scrollToAbs 무동작) 매치로 갈 수 없으니, 앱 자체 검색(`/`)에 맡긴다(iTerm2 관례).
+            // ⌘F는 alt에선 오버레이를 안 연다(무동작). surface 미초기화(narrow 테스트)면 alt 판정 생략.
+            if (self.surface_initialized and self.activeSurface().core.alt_active) return;
             self.chrome_host.notice.dismiss(); // 배타적 — notice 위에 열지 않는다
             self.chrome_host.palette.hide();
             self.chrome_host.find.show(); // show가 검색어/현재/카운트를 비운다(새 검색)
@@ -2229,6 +2233,7 @@ pub const DevSession = struct {
     /// 시 재검색을 닫힌 채로도 유지한다. 오버레이가 열려 있으면 모달 라우팅이 키를 가로채 이 경로는 안 탄다.
     fn findNavigate(self: *DevSession, forward: bool) void {
         if (!self.surface_initialized) return;
+        if (self.activeSurface().core.alt_active) return; // alt screen — maru Find 끔(toggleFind와 같은 정책)
         if (self.chrome_host.find.input.query.items.len == 0) return; // 검색 이력 없음 — 무동작
         if (self.find_matches.items.len == 0) {
             self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
@@ -3933,6 +3938,14 @@ pub const DevSession = struct {
             } else try self.frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
             defer tick_result.deinit(self.allocator);
 
+            // Find가 열린(또는 ⌘G 닫힘-네비) 채 앱이 출력으로 alt screen에 들어가면 Find를 닫는다 — alt에선
+            // maru Find를 끄는 정책(toggleFind/findNavigate와 일관). 매치도 비워 하이라이트를 정리한다.
+            if ((self.chrome_host.find.open or self.find_nav) and self.activeSurface().core.alt_active) {
+                self.chrome_host.find.hide();
+                self.find_matches.clearRetainingCapacity();
+                self.find_nav = false;
+                self.metal_dirty = true;
+            }
             // Find 열린 채(또는 ⌘G 닫힘-네비 중) 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백
             // eviction). 재검색해 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다.
             const find_active = self.chrome_host.find.open or self.find_nav;
@@ -6232,6 +6245,48 @@ test "find ⌘G/⌘⇧G: 오버레이 닫힌 채 다음/이전 매치 네비(보
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     session.dispatchAppAction(.find_next);
     try std.testing.expect(!session.find_nav); // 검색어 없음 — 무동작
+}
+
+test "alt screen에선 maru Find를 끈다(⌘F 무동작·⌘G 무동작·열린 채 진입 시 tick이 닫음)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // 메인 화면: ⌘F가 Find를 연다(정상).
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open);
+    session.dispatchAppAction(.toggle_find); // 닫기
+    try std.testing.expect(!session.chrome_host.find.open);
+
+    // alt screen 진입(DECSET 1049 — vim/less).
+    try session.activeSurface().core.write("\x1b[?1049h");
+    try std.testing.expect(session.activeSurface().core.alt_active);
+
+    // alt에선 ⌘F가 Find를 안 연다(앱 자체 검색에 맡김 — iTerm2 관례).
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(!session.chrome_host.find.open);
+    // alt에선 ⌘G(findNavigate)도 무동작(find_nav 안 켜짐).
+    session.dispatchAppAction(.find_next);
+    try std.testing.expect(!session.find_nav);
+
+    // 엣지: 메인에서 Find를 연 뒤 앱이 출력으로 alt에 들어가면 tick이 Find를 닫는다.
+    try session.activeSurface().core.write("\x1b[?1049l"); // 메인 복귀
+    try std.testing.expect(!session.activeSurface().core.alt_active);
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open); // 메인에선 열림
+    try session.activeSurface().core.write("\x1b[?1049h"); // 앱이 alt 진입
+    _ = try session.tick();
+    try std.testing.expect(!session.chrome_host.find.open); // tick이 닫음
 }
 
 test "find IME 멀티-문자: 커밋이 다음 조합 preedit를 안 지운다(조합 안 보임 회귀)" {

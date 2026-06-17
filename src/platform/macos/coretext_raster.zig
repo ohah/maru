@@ -140,6 +140,18 @@ pub const CoreTextGlyphRasterizer = struct {
             );
             return .{ .non_clear_pixels = non_clear };
         }
+        // Legacy Computing 대각선 stroke(U+1FBA0~1FBAE 코너 다이아몬드·U+1FBD0~1FBDF cell 대각): light 두께
+        // 선분도 직접 합성 — 끝점이 셀 모서리·모서리중점·중앙이라 격자에 스냅돼 이웃 셀과 이어진다.
+        if (renderer.legacy_diagonal_glyph.isLegacyDiagonal(request.run.codepoint)) {
+            const non_clear = renderer.legacy_diagonal_glyph.fillCoverage(
+                request.run.codepoint,
+                request.slot.width_px,
+                request.slot.height_px,
+                request.bytes_per_row,
+                request.pixels,
+            );
+            return .{ .non_clear_pixels = non_clear };
+        }
         const font_identity = self.font_registry.get(request.run.font_id) orelse
             return error.RasterizerFailed;
 

@@ -413,7 +413,11 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
         return true;
     }
     // legacy_wedge_glyph corner 삼각형: ◢◣◤◥(U+25E2~25E5, solid)·🮜🮝🮞🮟(U+1FB9C~1FB9F, 50% 음영). 동기.
-    return (cp >= 0x25E2 && cp <= 0x25E5) || (cp >= 0x1FB9C && cp <= 0x1FB9F);
+    if ((cp >= 0x25E2 && cp <= 0x25E5) || (cp >= 0x1FB9C && cp <= 0x1FB9F)) {
+        return true;
+    }
+    // legacy_diagonal_glyph: 대각선 stroke — 코너 다이아몬드(U+1FBA0~1FBAE)·cell 대각(U+1FBD0~1FBDF). 동기.
+    return (cp >= 0x1FBA0 && cp <= 0x1FBAE) || (cp >= 0x1FBD0 && cp <= 0x1FBDF);
 }
 
 static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFIndex *len, CFIndex capacity) {

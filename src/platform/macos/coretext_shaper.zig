@@ -218,7 +218,8 @@ fn coreTextGlyphRecordFromDrawRecord(
                 renderer.legacy_mosaic_glyph.isLegacyMosaic(record.codepoint) or
                 renderer.legacy_wedge_glyph.isLegacyWedge(record.codepoint) or
                 renderer.legacy_wedge_glyph.isCornerTriangle(record.codepoint) or
-                renderer.legacy_smooth_glyph.isSmoothMosaic(record.codepoint)),
+                renderer.legacy_smooth_glyph.isSmoothMosaic(record.codepoint) or
+                renderer.legacy_diagonal_glyph.isLegacyDiagonal(record.codepoint)),
     };
 }
 

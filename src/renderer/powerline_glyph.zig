@@ -71,8 +71,8 @@ fn fillChevron(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, t: f32, right
         var x: u32 = 0;
         while (x < w) : (x += 1) {
             const px = @as(f32, @floatFromInt(x)) + 0.5;
-            const near = distSeg(px, py, base_x, 0, apex_x, fh / 2) <= t / 2 or
-                distSeg(px, py, base_x, fh, apex_x, fh / 2) <= t / 2;
+            const near = gp.distSeg(px, py, base_x, 0, apex_x, fh / 2) <= t / 2 or
+                gp.distSeg(px, py, base_x, fh, apex_x, fh / 2) <= t / 2;
             if (near) {
                 gp.setPixel(pixels, row_off + @as(usize, x) * 4);
                 count += 1;
@@ -80,19 +80,6 @@ fn fillChevron(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, t: f32, right
         }
     }
     return count;
-}
-
-/// 점 (px,py)에서 선분 (ax,ay)-(bx,by)까지 최단거리.
-fn distSeg(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) f32 {
-    const dx = bx - ax;
-    const dy = by - ay;
-    const len2 = dx * dx + dy * dy;
-    if (len2 == 0) return @sqrt((px - ax) * (px - ax) + (py - ay) * (py - ay));
-    var tparam = ((px - ax) * dx + (py - ay) * dy) / len2;
-    tparam = std.math.clamp(tparam, 0.0, 1.0);
-    const qx = ax + tparam * dx;
-    const qy = ay + tparam * dy;
-    return @sqrt((px - qx) * (px - qx) + (py - qy) * (py - qy));
 }
 
 /// 반원(D-shape). right=true면 평평한 변이 좌측(x=0), 우측으로 불룩. solid면 내부 채움, thin이면 곡선 둘레만

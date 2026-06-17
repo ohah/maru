@@ -63,6 +63,9 @@ pub const Parsed = struct {
 
 const max_font_size: f32 = 512.0;
 const min_font_size: f32 = 1.0;
+// font.size-step(⌘+/⌘- 증분) 허용 범위 — resolveFont의 검증과 같은 경계(0이면 무동작·음수면 역방향 방지).
+const max_font_step: f32 = 32.0;
+const min_font_step: f32 = 0.1;
 
 /// config 텍스트를 raw Config로 파싱한다(파일시스템 무관, 순수). 알 수 없는 key/잘못된 값은
 /// 기본값 유지 + diagnostic. OOM만 에러.
@@ -138,6 +141,16 @@ fn applyKey(
             return;
         }
         config.font.size = size;
+    } else if (std.mem.eql(u8, key, "font.size-step")) {
+        const step = std.fmt.parseFloat(f32, value) catch {
+            try diags.append(a, .{ .line = line_no, .message = "font.size-step이 숫자가 아님 — 기본값 유지" });
+            return;
+        };
+        if (!(step >= min_font_step and step <= max_font_step)) {
+            try diags.append(a, .{ .line = line_no, .message = "font.size-step이 0.1~32 범위 밖 — 기본값 유지" });
+            return;
+        }
+        config.font.size_step = step;
     } else if (std.mem.eql(u8, key, "theme.background")) {
         config.theme.background = try dupValidColor(a, diags, line_no, key, value, config.theme.background);
     } else if (std.mem.eql(u8, key, "theme.foreground")) {
@@ -500,6 +513,7 @@ test "parse: full config sets every field" {
         \\# Maru config
         \\font.family = JetBrains Mono
         \\font.size = 16
+        \\font.size-step = 2
         \\theme.background = #001122
         \\theme.foreground = #ffeedd
         \\cursor.shape = bar
@@ -510,6 +524,7 @@ test "parse: full config sets every field" {
     defer p.deinit();
     try std.testing.expectEqualStrings("JetBrains Mono", p.config.font.family);
     try std.testing.expectEqual(@as(f32, 16), p.config.font.size);
+    try std.testing.expectEqual(@as(f32, 2), p.config.font.size_step); // font.size-step 파싱(기본 1)
     try std.testing.expectEqualStrings("#001122", p.config.theme.background);
     try std.testing.expectEqualStrings("#ffeedd", p.config.theme.foreground);
     try std.testing.expectEqual(theme.CursorShape.bar, p.config.cursor.shape);
@@ -517,6 +532,28 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(theme.ChromeTheme.rich, p.config.chrome_theme); // C4a chrome.theme 파싱
     try std.testing.expectEqual(true, p.config.blink_text); // text.blink 파싱(기본 false)
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+}
+
+test "parse: font.size-step out-of-range/non-numeric is forgiving (keeps default 1)" {
+    const defaults = theme.Config{};
+    {
+        var p = try parse(std.testing.allocator, "font.size-step = 0\n"); // 0(무동작)·음수는 거부
+        defer p.deinit();
+        try std.testing.expectEqual(defaults.font.size_step, p.config.font.size_step);
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+    {
+        var p = try parse(std.testing.allocator, "font.size-step = abc\n");
+        defer p.deinit();
+        try std.testing.expectEqual(defaults.font.size_step, p.config.font.size_step);
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+    {
+        var p = try parse(std.testing.allocator, "font.size-step = 4.5\n"); // 유효(소수)
+        defer p.deinit();
+        try std.testing.expectEqual(@as(f32, 4.5), p.config.font.size_step);
+        try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+    }
 }
 
 test "parse: comments and blank lines are ignored; family keeps internal spaces" {

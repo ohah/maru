@@ -27,6 +27,7 @@ Maru는 시작 시 사용자 설정 파일을 읽어 폰트·색·커서를 적�
 # ~/.config/maru/config — 예시
 font.family = JetBrains Mono
 font.size = 14
+font.size-step = 1
 
 theme.background = #101010
 theme.foreground = #e8e8e8
@@ -43,6 +44,7 @@ cursor.blink = true
 |---|---|---|---|
 | `font.family` | 문자열 | `JetBrains Mono` | 내부 공백 보존. 비어 있으면 무시(기본 유지) |
 | `font.size` | 숫자 | `14` | 1~512 범위. 범위 밖/비숫자는 무시 |
+| `font.size-step` | 숫자 | `1` | ⌘+/⌘-(Bigger/Smaller)가 한 번에 바꾸는 증분(pt). 0.1~32 범위. ⌘0(Actual Size)은 step과 무관하게 `font.size`로 복귀 |
 | `theme.background` | `#RRGGBB` | `#101010` | 16진 색. 형식 오류는 무시 |
 | `theme.foreground` | `#RRGGBB` | `#e8e8e8` | |
 | `theme.cursor` | `#RRGGBB` | `#ffffff` | |
@@ -153,6 +155,7 @@ keybind = Cmd+K = esc:[2J
 - 알 수 없는 key → 무시.
 - `=` 없는 줄 → 무시.
 - `font.size`가 숫자가 아니거나 1~512 밖 → 기본 14 유지.
+- `font.size-step`이 숫자가 아니거나 0.1~32 밖 → 기본 1 유지.
 - `cursor.shape`/`cursor.blink`가 허용 값이 아님 → 기본 유지.
 - 색이 `#RRGGBB` 형식이 아님 → 기본 색 유지.
 

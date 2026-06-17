@@ -830,6 +830,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 활성 surface(forwarder 대상)에 dev session을 만들어 붙인다 — 앱-전역 tick은 안 부른다(호출자가 정한다:
     /// launch는 startDevSession이 tickDevSession을, New Window 팩토리는 그 창만 renderTick). 일반 창은 full chrome.
     private func createSessionForActiveSurface(smokeMode: Bool) -> Bool {
+        // 셸 PTY를 처음부터 실제 창 크기로 띄우도록 backing px+scale을 넘긴다(80×24 기본 spawn→resize 핸드셰이크
+        // 제거 → zsh 첫 프롬프트 PROMPT_EOL_MARK % 잔상 방지). 창이 아직 레이아웃 전이면 (0,0,0)이라 Zig가 cols/rows로
+        // 폴백한다(smoke는 자체 scripted resize라 0으로 두고 80×24 유지). cols/rows는 0 폴백 시 winsize·grid 단일 출처.
+        let m = smokeMode ? (widthPx: UInt32(0), heightPx: UInt32(0), scaleMilli: UInt32(0)) : spawnMetricsForCurrentWindow()
         var config = MaruAppHostDevSessionConfig(
             abi_version: MARU_MACOS_APP_HOST_ABI_VERSION,
             cols: 80,
@@ -841,7 +845,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     : MaruAppHostDevCommandInteractiveShell.rawValue
             ),
             chrome_minimal: 0, // 일반 창은 항상 full chrome(사이드바·탭 바)
-            minimal_tabs: 0 // full이라 무시됨(탭은 항상 동작)
+            minimal_tabs: 0, // full이라 무시됨(탭은 항상 동작)
+            width_px: m.widthPx,
+            height_px: m.heightPx,
+            scale_milli: m.scaleMilli
         )
         var session: OpaquePointer?
         let status = maru_macos_app_dev_session_create(&config, &session)
@@ -1649,6 +1656,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    /// 현재 창의 backing 픽셀 + scale(천분율) — 세션 생성 시 셸을 처음부터 실제 크기로 spawn하는 데 쓴다
+    /// (resizeDevSessionFromWindow와 같은 contentView×backingScale 계산). 창이 없거나 아직 레이아웃 전(0)이면
+    /// (0,0,0)을 줘 Zig가 cols/rows로 폴백하게 한다(잘못된 0칸 grid 방지).
+    private func spawnMetricsForCurrentWindow() -> (widthPx: UInt32, heightPx: UInt32, scaleMilli: UInt32) {
+        guard let window, let contentView = window.contentView else { return (0, 0, 0) }
+        let bounds = contentView.bounds
+        let scale = window.backingScaleFactor
+        let w = clampedUInt32(bounds.width * scale)
+        let h = clampedUInt32(bounds.height * scale)
+        if w == 0 || h == 0 { return (0, 0, 0) } // 레이아웃 전 — 폴백(cols/rows)
+        return (w, h, clampedUInt32(scale * 1_000))
+    }
+
     private func resizeDevSessionFromWindow() {
         guard let window, let contentView = window.contentView else {
             return
@@ -2040,7 +2060,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             queue_capacity: 16,
             command_kind: UInt32(MaruAppHostDevCommandInteractiveShell.rawValue),
             chrome_minimal: chromeMinimal,
-            minimal_tabs: minimalTabs
+            minimal_tabs: minimalTabs,
+            // quick 패널은 크기·배치가 특수(슬라이드 패널)라 0으로 두고 생성 직후 resize에 맡긴다(80×24→실제). 메인 창
+            // 첫 프롬프트 % 잔상이 보고된 케이스라 거기만 spawn-크기를 채운다(quick은 회귀 없이 기존 동작 유지).
+            width_px: 0,
+            height_px: 0,
+            scale_milli: 0
         )
         var session: OpaquePointer?
         guard maru_macos_app_dev_session_create(&config, &session) == Self.statusOK, let created = session else {

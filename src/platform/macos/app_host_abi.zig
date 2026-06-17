@@ -866,7 +866,7 @@ test "macOS app host event DTOs are explicit fixed-width C ABI records" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ResizeEvent));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(KeyEvent));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(ResizeEvent));
-    try std.testing.expectEqual(@as(usize, 28), @sizeOf(DevSessionConfig));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(DevSessionConfig)); // 10 u32(abi/cols/rows/queue/cmd/chrome_minimal/minimal_tabs + width_px/height_px/scale_milli)
     try std.testing.expectEqual(@as(usize, 168), @sizeOf(DevFrameSummary));
     try std.testing.expectEqual(@as(usize, 8), @alignOf(DevFrameSummary));
 }

@@ -43,7 +43,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 54; // 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 55; // 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
@@ -460,6 +460,12 @@ pub const SessionConfig = extern struct {
     // 1이면 chrome_minimal 세션에서도 탭(워크스페이스·Term) 생성을 허용한다. 0이면 minimal은 단일 스크래치
     // (⌘T/⌘⇧T 무동작). chrome_minimal=0(full)이면 이 값과 무관하게 탭이 항상 동작한다. Swift가 quick 세션에만 정한다.
     minimal_tabs: u32 = 0,
+    // 첫 셸 spawn 크기 결정용 창 backing 픽셀 + scale(둘 다 >0이면 init이 cell 메트릭으로 grid를 계산해 PTY를
+    // **처음부터 실제 창 크기로** 띄운다 — 80×24 기본 spawn 후 resize하는 핸드셰이크/레이스를 없애 zsh의 첫 프롬프트
+    // PROMPT_EOL_MARK(%) 잔상을 막는다). 0이면(헤드리스 테스트 등) cols/rows로 폴백. Swift가 창에서 채운다.
+    width_px: u32 = 0,
+    height_px: u32 = 0,
+    scale_milli: u32 = 0,
 };
 
 pub const FrameSummary = extern struct {
@@ -501,6 +507,10 @@ const NormalizedConfig = struct {
     command_kind: CommandKind,
     chrome_minimal: bool,
     minimal_tabs: bool,
+    // 첫 spawn 크기 결정용 창 backing 픽셀 + scale(0이면 size로 폴백). init이 cell 메트릭으로 grid 계산.
+    width_px: u32,
+    height_px: u32,
+    scale_milli: u32,
 };
 
 /// 한 터미널의 런타임 단위: surface(그리드/스크롤백) + 그 surface에 붙은 live PTY 셸 + 그 PTY를 drain하는
@@ -933,13 +943,35 @@ pub const DevSession = struct {
         self.runtime.debug_input = diag_gate.maruDebugEnabled(); // MARU_DEBUG면 zsh redraw 시퀀스 로깅
         self.runtime_initialized = true;
 
+        // appearance·cell 메트릭을 **spawn 전에** 잡는다 — 셸 PTY를 처음부터 실제 창 grid로 띄워 80×24 기본 spawn
+        // 후 resize하는 핸드셰이크/레이스(zsh 첫 프롬프트의 PROMPT_EOL_MARK `%` 잔상)를 없앤다. 로더가 valid-아니면-
+        // default라 resolve는 사실상 실패 안 하지만 방어적으로 기본값 폴백(loaded_config는 위에서 PTY spawn 전에 로드).
+        // scale_milli는 Swift가 창 backingScale로 준 값(없으면 1000=1x). refreshCellMetrics가 cell_width/height_px·
+        // sidebar_width_px를 채운다(coretext + scale + sidebar_pt). renderer_state는 메트릭에 무관해 spawn 뒤에 둔다.
+        self.scale_milli = if (config.scale_milli > 0) config.scale_milli else 1000;
+        self.appearance = config_mod.resolveAppearance(self.loaded_config.config) catch
+            try config_mod.resolveAppearance(.{});
+        self.base_font_size = self.appearance.font.size; // ⌘0 리셋 기준(런타임에 appearance.font.size는 바뀜)
+        // config의 무시된 줄(알 수 없는 key·잘못된 값)을 알린다 — 사용자가 오타를 눈치채게.
+        for (self.loaded_config.diagnostics) |d| {
+            std.log.scoped(.config).warn("config line {d}: {s}", .{ d.line, d.message });
+        }
+        self.refreshCellMetrics();
+
+        // 첫 spawn 크기 = 창 backing px가 오면 cell 메트릭으로 grid 계산(실제 창 크기), 아니면 cols/rows(헤드리스
+        // 테스트·창 미상) 폴백. gridFromBacking은 resize 경로와 같은 단일 출처라 첫 grid와 이후 resize가 일치한다.
+        var spawn_config = config;
+        if (config.width_px > 0 and config.height_px > 0) {
+            spawn_config.size = gridFromBacking(config.width_px, config.height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px);
+        }
+
         // 첫 탭을 만든다 — Tab + 첫 panel(셸 PTY spawn + surface + runtime attach + pump) + tabs/surface_ptrs
         // append + app_window 갱신을 createTab이 한 묶음으로 한다(create/switch 후속도 같은 경로를 쓴다).
         // Swift는 opaque handle만 보유하고 DevSession은 heap에 고정된다(LivePtySession reader가
         // `&pane.live_pty.reader`를 잡으므로 Pane도 heap-pin — createPane이 allocator.create로 띄운다).
         _ = try self.createTab(
-            spawnRequest(config, self.loaded_config.config.term, integ_dir),
-            config.size,
+            spawnRequest(spawn_config, self.loaded_config.config.term, integ_dir),
+            spawn_config.size,
             config.queue_capacity,
             "Maru dev shell",
             commandName(config.command_kind),
@@ -948,18 +980,6 @@ pub const DevSession = struct {
 
         self.renderer_state = renderer.RendererState.init(allocator, .{});
         self.renderer_initialized = true;
-        // 로더가 모든 값을 valid-아니면-default로 걸러주므로 resolve는 사실상 실패하지 않지만,
-        // 방어적으로 실패 시 기본값으로 떨어진다.(loaded_config는 위에서 PTY spawn 전에 로드했다.)
-        self.appearance = config_mod.resolveAppearance(self.loaded_config.config) catch
-            try config_mod.resolveAppearance(.{});
-        self.base_font_size = self.appearance.font.size; // ⌘0 리셋 기준(런타임에 appearance.font.size는 바뀜)
-        // config의 무시된 줄(알 수 없는 key·잘못된 값)을 알린다 — 사용자가 오타를 눈치채게.
-        for (self.loaded_config.diagnostics) |d| {
-            std.log.scoped(.config).warn("config line {d}: {s}", .{ d.line, d.message });
-        }
-        // 실제 폰트 메트릭에서 cell 픽셀 크기를 뽑는다. shaper(atlas slot)·rasterizer·renderer가
-        // 모두 같은 값을 쓰게 하는 단일 출처다.
-        self.refreshCellMetrics();
         // FrameLoop.init이 pump 포인터를 요구해 첫 Term의 pump를 넘기지만, DevSession은 tick에서 모든 Term을
         // 직접 drain하고 `tickAfterDrainWithFrameBuilder`(이미 drain된 summary를 받아 frame만 조립 — frame_loop.pump
         // 무시)만 쓴다. 즉 frame_loop.pump는 이 경로에서 절대 읽히지 않으므로 포커스/닫기마다 재바인딩하지 않는다
@@ -6021,6 +6041,9 @@ pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
         .command_kind = command_kind,
         .chrome_minimal = config.chrome_minimal != 0,
         .minimal_tabs = config.minimal_tabs != 0,
+        .width_px = config.width_px,
+        .height_px = config.height_px,
+        .scale_milli = config.scale_milli,
     };
 }
 
@@ -6329,6 +6352,51 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     while (i < blink_interval_ticks * 3) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(session.blink_visible);
     try tab_surface.core.setPreedit("");
+}
+
+// 셸을 처음부터 실제 창 크기로 spawn하는 핸드셰이크 제거(zsh 첫 프롬프트 % 잔상 방지)를 고정한다. backing px가
+// 주어지면 init이 cell 메트릭으로 grid를 계산해 그 크기로 spawn하고(80×24 아님), 없으면 cols/rows로 폴백한다.
+test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸드셰이크 없음), 없으면 cols/rows 폴백" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // refreshCellMetrics가 실제 CoreText 메트릭을 읽음
+    const allocator = std.testing.allocator;
+    // backing px(1600×900, 1x) 주어진 경우 — cols/rows(80×24)는 폴백값일 뿐, 실제 spawn은 창 grid여야 한다.
+    {
+        const session = try allocator.create(DevSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 80,
+            .rows = 24,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .width_px = 1600,
+            .height_px = 900,
+            .scale_milli = 1000,
+        });
+        defer session.deinit();
+        // spawn 크기 = gridFromBacking(창 px, 세션 자신의 cell·사이드바 메트릭) — resize 경로와 같은 단일 출처.
+        const expected = gridFromBacking(1600, 900, session.cell_width_px, session.cell_height_px, session.sidebar_width_px);
+        const got = session.activePane().activeTerm().surface.core.size;
+        try std.testing.expectEqual(expected, got);
+        try std.testing.expect(got.cols != 80 or got.rows != 24); // 80×24 폴백이 아니다(창이 더 넓어 grid가 다름)
+    }
+    // backing px 0(헤드리스·창 미상) — cols/rows로 폴백 spawn.
+    {
+        const session = try allocator.create(DevSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 100,
+            .rows = 30,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .width_px = 0,
+            .height_px = 0,
+            .scale_milli = 0,
+        });
+        defer session.deinit();
+        try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 30 }, session.activePane().activeTerm().surface.core.size);
+    }
 }
 
 test "headless ticks toggle the blink phase and bump the metal generation" {

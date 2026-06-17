@@ -629,6 +629,9 @@ pub const DevSession = struct {
     // 다시 계산하므로(작은 트리라 cheap) 결과는 항상 최신이라 stale 캐시 위험이 없고, 버퍼 capacity만 재사용한다.
     // hover/divider hit-test는 메인 스레드에서 순차 실행되고 서로 다른 버퍼라 aliasing이 없다(reentrancy 없음).
     hover_leaf_scratch: std.ArrayList(PaneTree.LeafRect) = .empty,
+    // appendPaneScrollbars가 매 프레임 모든 pane 우측에 스크롤바를 그릴 때 쓰는 leaf rect 재사용 버퍼
+    // (hover_leaf_scratch와 별개 — frame build와 hover hit-test가 서로 안 클로버하게). capacity만 재사용.
+    scrollbar_leaf_scratch: std.ArrayList(PaneTree.LeafRect) = .empty,
     hover_divider_scratch: std.ArrayList(PaneTree.DividerSeg) = .empty,
     // dividerAtPoint가 app DividerSeg를 neutral chrome `divider.Seg`로 변환해 담는 병렬 scratch(hover_divider_scratch와
     // index 일치) — `divider.hitTest`가 이걸로 판정한다(C2 마우스 hit-test 컴포넌트).
@@ -3998,7 +4001,7 @@ pub const DevSession = struct {
             self.dropQuadsByLayer(1); // C4b 모달: 이전 프레임 모달 quad(layer1)를 비운다 — 닫혀도 잔존 안 함(아래서 재채움).
             self.dropQuadsByLayer(2); // C4b-5: 탭 밴드 quad(layer2)도 per-frame — 매 프레임 비우고 탭 바 build가 재채운다(미연결 시 no-op).
             self.dropQuadsByLayer(3); // 스크롤바(layer3 over)도 per-frame — drop과 append를 짝지어 깜빡임/누적 방지.
-            self.appendScrollbar(self.active_pane_rect, &self.activeSurface().core); // 활성 pane 우측 thumb(스크롤백 있을 때만)
+            self.appendPaneScrollbars(); // 모든 pane 우측 thumb(스크롤백 있을 때만) — 활성=fade/hover, 비활성=faint
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             if (builtin.os.tag == .macos) {
@@ -4615,21 +4618,43 @@ pub const DevSession = struct {
         }
     }
 
-    /// 터미널 영역 우측에 스크롤바 thumb(둥근 GpuQuad)를 그린다 — 스크롤백이 있을 때만(sb_count>0). thumb 높이는
-    /// 보이는 비율, 위치는 view_offset(0=바닥, sb_count=꼭대기)을 반영한다. 셀 위(layer 0)에 떠 텍스트를 가린다.
-    /// 메모리 'UI는 Zig+GPU 렌더러로' — 네이티브 NSScroller가 아니라 chrome GpuQuad 프리미티브. 마우스 드래그는
-    /// mouse()의 scrollbarGrabAt/dragScrollbarTo가 처리한다(thumb 잡고 끌어 스크롤). hover면 굵게+full alpha,
-    /// idle하면 faint로 fade(updateScrollbarFade의 idle_ticks). 좌표는 backing 픽셀(rect·cell 메트릭과 동일).
-    fn appendScrollbar(self: *DevSession, rect: app.SplitRect, core: *const terminal.TerminalCore) void {
+    /// 활성 탭의 모든 pane 우측에 스크롤바를 그린다 — 활성 pane은 fade/hover/드래그(세션 상태), 비활성 pane은
+    /// faint 위치 표시(상호작용·fade 없음, 각 pane 자기 core의 view_offset을 반영). leaf rect는 재사용 scratch로
+    /// 계산(per-frame 할당 churn 없음), 실패(OOM)면 활성 pane만(기존 동작 폴백). per-frame(layer3) 호출처에서 부른다.
+    fn appendPaneScrollbars(self: *DevSession) void {
+        if (!self.surface_initialized) return;
+        self.scrollbar_leaf_scratch.clearRetainingCapacity();
+        if (self.activeTabLeafRects(self.allocator, self.termRect(), &self.scrollbar_leaf_scratch)) |_| {
+            const active_pane = self.activePane();
+            for (self.scrollbar_leaf_scratch.items) |lr| {
+                const trect = self.paneTermRect(lr.rect); // 상단 탭 바를 뺀 터미널 영역(active_pane_rect와 같은 식)
+                const core = &lr.leaf.activeTerm().surface.core;
+                self.appendScrollbar(trect, core, lr.leaf == active_pane);
+            }
+        } else |_| {
+            self.appendScrollbar(self.active_pane_rect, &self.activeSurface().core, true);
+        }
+    }
+
+    /// 한 pane 우측에 스크롤바 thumb(둥근 GpuQuad)를 그린다 — 스크롤백이 있을 때만(sb_count>0). thumb 높이는
+    /// 보이는 비율, 위치는 view_offset(0=바닥, sb_count=꼭대기)을 반영한다. 셀 위(layer 3 over)에 뜬다.
+    /// `is_active`=활성 pane이면 fade/hover/드래그(세션 상태), 아니면 faint 정적(위치 표시만 — 상호작용은 활성 pane).
+    /// 메모리 'UI는 Zig+GPU 렌더러로' — 네이티브 NSScroller가 아니라 chrome GpuQuad 프리미티브. 좌표는 backing 픽셀.
+    fn appendScrollbar(self: *DevSession, rect: app.SplitRect, core: *const terminal.TerminalCore, is_active: bool) void {
         if (rect.w == 0) return;
         const geom = scrollbarThumbGeom(core.scrollbackLen(), core.viewOffset(), self.cell_height_px, rect.h) orelse return;
         const thumb_y: f32 = @as(f32, @floatFromInt(rect.y)) + geom.y;
         const thumb_h: f32 = geom.h;
-        // hover/드래그면 굵게(affordance) + full alpha, 아니면 base 폭 + fade alpha(idle_ticks).
-        const emphasized = self.scrollbar_hovered or self.scrollbar_drag_grab != null;
+        // 활성 pane만 hover/드래그로 굵게+full, idle엔 fade. 비활성 pane은 base 폭 + faint(상호작용 상태 무시).
+        const emphasized = is_active and (self.scrollbar_hovered or self.scrollbar_drag_grab != null);
         const bar_w: f32 = scrollbarBarWidthPx(self.cell_width_px, emphasized);
         const x: f32 = @as(f32, @floatFromInt(rect.x + rect.w)) - bar_w - 2.0; // 우측 가장자리에서 2px 안쪽
-        const alpha: u8 = if (emphasized) scrollbar_alpha_full else computeScrollbarAlpha(self.scrollbar_idle_ticks);
+        const alpha: u8 = if (emphasized)
+            scrollbar_alpha_full
+        else if (is_active)
+            computeScrollbarAlpha(self.scrollbar_idle_ticks)
+        else
+            scrollbar_alpha_idle; // 비활성 pane — 항상 faint 위치 표시
         const rgb = self.mutedForeground(); // muted 전경(사이드바 비활성 탭과 같은 톤)
         const color: u32 = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b; // 셰이더가 rgb*=a premultiply
         const r = bar_w * 0.5; // pill 모양(반지름 = 폭 절반)
@@ -5272,6 +5297,7 @@ pub const DevSession = struct {
         self.find_view_spans.deinit(self.allocator);
         if (self.workspace_buffer) |b| self.allocator.free(b);
         self.hover_leaf_scratch.deinit(self.allocator);
+        self.scrollbar_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
         self.divider_seg_scratch.deinit(self.allocator);
         // 1) 각 탭의 각 panel의 각 Term live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'.
@@ -9134,6 +9160,54 @@ test "computeScrollbarAlpha: full→idle 감쇠(visible 유지·fade 후 faint·
         try std.testing.expect(a >= scrollbar_alpha_idle);
         prev = a;
     }
+}
+
+test "appendPaneScrollbars: split의 모든 pane에 스크롤바(활성=full alpha, 비활성=faint)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY + split 생성
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    session.dispatchAppAction(.split_horizontal); // pane 2개(좌우)
+    // 두 pane 모두 스크롤백을 만든다 — resize(800x600)가 grid를 backing px로 재계산해 rows가 init값(6)이
+    // 아니라 ~33이므로, 그보다 충분히 많은 줄(200)을 각 core에 직접 써서 어느 rows든 스크롤백을 보장한다.
+    for (session.activeTab().panes.items) |pane| {
+        const core = &pane.activeTerm().surface.core;
+        var n: usize = 0;
+        while (n < 200) : (n += 1) try core.write("line\r\n");
+        try std.testing.expect(core.scrollbackLen() > 0);
+    }
+
+    // 스크롤바 quad를 새로 그린다(활성=idle_ticks 0이라 full, hover/드래그 없음).
+    session.dropQuadsByLayer(3);
+    session.scrollbar_idle_ticks = 0;
+    session.scrollbar_hovered = false;
+    session.scrollbar_drag_grab = null;
+    session.appendPaneScrollbars();
+
+    // pane 2개 → layer3 thumb 2개. 활성 1개=full alpha, 비활성 1개=faint alpha.
+    var count: usize = 0;
+    var saw_full = false;
+    var saw_faint = false;
+    for (session.gpu_quads.items) |q| {
+        if (q.layer != 3) continue;
+        count += 1;
+        const a: u8 = @intCast((q.fill_color0 >> 24) & 0xff);
+        if (a == scrollbar_alpha_full) saw_full = true;
+        if (a == scrollbar_alpha_idle) saw_faint = true;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expect(saw_full); // 활성 pane
+    try std.testing.expect(saw_faint); // 비활성 pane(위치 표시 faint)
 }
 
 test "configPath caches the resolved config path (single alloc, freed in deinit)" {

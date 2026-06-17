@@ -382,8 +382,8 @@ static uint32_t maru_category_for_codepoint(uint32_t codepoint) {
    box_glyph.zig의 집합과 동기 유지**(거기 추가하면 여기도). CoreText가 글리프를 못 줘도(glyph==0) 이
    코드포인트는 record를 남겨야 rasterizer 합성에 도달한다(안 그러면 셰이퍼가 드롭 → 보더가 안 보임). */
 static bool maru_is_synthesized_glyph(uint32_t cp) {
-    // block_glyph: solid block(eighth/half/full/quadrant), shade ░▒▓(2591~2593)는 제외.
-    if ((cp >= 0x2580 && cp <= 0x2590) || (cp >= 0x2594 && cp <= 0x259F)) {
+    // block_glyph: **U+2580~259F 전체**(eighth/half/full·shade ░▒▓ 균일 alpha·quadrant). renderer/block_glyph.zig와 동기.
+    if (cp >= 0x2580 && cp <= 0x259F) {
         return true;
     }
     // box_glyph: **U+2500~257F 전체** 합성(직선·모서리·T·사거리·dashed·둥근·이중선·single↔double 혼합·대각선·

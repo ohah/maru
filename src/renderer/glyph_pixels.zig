@@ -27,6 +27,28 @@ pub fn setPixel(pixels: []u8, off: usize) void {
     pixels[off + 3] = 0xFF;
 }
 
+/// 셀 전체를 균일 alpha(RGB=흰색·A=alpha)로 채운다 — 음영 ░▒▓처럼 부분 coverage. 셰이더가 alpha를 coverage로
+/// 읽어 `mix(bg, fg, alpha/255)`라, alpha=0x40/0x80/0xC0이면 fg를 25%/50%/75% blend한다. 채운 픽셀 수(=w*h)
+/// 반환. slotFits 통과 가정. alpha=0이면 빈 셀(0px).
+pub fn fillUniformAlpha(pixels: []u8, width_px: u32, height_px: u32, bytes_per_row: usize, alpha: u8) u32 {
+    if (alpha == 0) return 0;
+    var count: u32 = 0;
+    var y: u32 = 0;
+    while (y < height_px) : (y += 1) {
+        const row_off = @as(usize, y) * bytes_per_row;
+        var x: u32 = 0;
+        while (x < width_px) : (x += 1) {
+            const off = row_off + @as(usize, x) * 4;
+            pixels[off] = 0xFF;
+            pixels[off + 1] = 0xFF;
+            pixels[off + 2] = 0xFF;
+            pixels[off + 3] = alpha;
+            count += 1;
+        }
+    }
+    return count;
+}
+
 /// [x0,x1)×[y0,y1) 픽셀을 흰색 불투명으로. **새로 칠한** 픽셀 수 반환(이미 칠해진 건 안 셈 → 겹치는 띠가
 /// 교차해도 non_clear_pixels 회계가 정확). 서로 안 겹치는 사각형(block)에도 동일 결과. RGBA8 + bytes_per_row.
 /// slotFits 통과 가정.
@@ -86,6 +108,20 @@ test "slotFits: 계약(bpr≥w*4·len≥h*bpr) 검증" {
     // 패딩된 bpr(스트라이드 > w*4)도 len이 충분하면 통과.
     var padded: [16 * 40]u8 = undefined; // 640 = h=16·bpr=40
     try std.testing.expect(slotFits(8, 16, 40, &padded));
+}
+
+test "fillUniformAlpha: 전 픽셀 균일 alpha, alpha=0이면 0px" {
+    const w: u32 = 4;
+    const h: u32 = 4;
+    const bpr: usize = w * 4;
+    var pixels: [4 * 4 * 4]u8 = undefined;
+    clear(&pixels, h, bpr);
+    try std.testing.expectEqual(@as(u32, 16), fillUniformAlpha(&pixels, w, h, bpr, 0x80));
+    try std.testing.expectEqual(@as(u8, 0xFF), pixels[0]); // RGB=흰색
+    try std.testing.expectEqual(@as(u8, 0x80), pixels[3]); // alpha
+    try std.testing.expectEqual(@as(u8, 0x80), pixels[(15 * 4) + 3]); // 마지막 픽셀
+    clear(&pixels, h, bpr);
+    try std.testing.expectEqual(@as(u32, 0), fillUniformAlpha(&pixels, w, h, bpr, 0)); // 빈 셀
 }
 
 test "fillRect: 겹친 픽셀은 한 번만 센다(교차 회계)" {

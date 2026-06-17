@@ -1,7 +1,7 @@
 //! L2 session core — IME(입력기) 키 트랜잭션의 순수 판정. macOS keyDown이 interpretKeyEvents로 모은 확정
 //! 텍스트·조합 변화·삭제 신호를 받아 "확정 텍스트 전송 / 무시 / 일반 키 인코딩"을 결정한다 — 부작용(PTY 전송)
 //! 에서 분리해 라이브 PTY 없이 단위 테스트한다(Ghostty의 shouldSuppressComposingControlInput 순수 판정과 같은
-//! 방식). platform/macos/app_dev_session에서 추출(docs/layering-and-portability.md §3 — 2차 추출, "입력 수학" 그룹).
+//! 방식). platform/macos/app_session에서 추출(docs/layering-and-portability.md §3 — 2차 추출, "입력 수학" 그룹).
 //! OS·렌더 무관 — std만 의존.
 
 const std = @import("std");
@@ -45,7 +45,7 @@ fn dropLastCodepoint(s: []const u8) []const u8 {
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
-// 추출 전 app_dev_session.zig에 있던 단위 테스트를 코드와 함께 옮겼다(순수 판정이라 OS·PTY 무관).
+// 추출 전 app_session.zig에 있던 단위 테스트를 코드와 함께 옮겼다(순수 판정이라 OS·PTY 무관).
 
 test "decide routes IME keys: commit text once, ignore composition edits, encode plain keys" {
     // 1) 확정 텍스트가 있으면 그것만 보낸다(키는 입력기 소비 — 조합 확정 Enter는 개행 없음).

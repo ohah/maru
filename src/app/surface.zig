@@ -29,7 +29,7 @@ pub const Surface = struct {
     title: []const u8 = "shell",
     // 사용자 지정 이름(rename) — 사용자가 직접 붙인 이름. 표시 라벨은 custom_name이 비어있지 않으면 title보다
     // 우선한다(app.label.pick 단일 해석). null=없음. 사용자 입력/복원에서 온 owned 문자열이라 소유자(여기선
-    // platform DevSession)가 teardown에서 해제한다(title은 정적/borrowed라 해제 안 함). 단일 출처:
+    // platform AppSession)가 teardown에서 해제한다(title은 정적/borrowed라 해제 안 함). 단일 출처:
     // docs/workspace-restore.md "사용자 지정 이름(custom_name)과 자동 제목".
     custom_name: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
@@ -66,14 +66,14 @@ pub const Surface = struct {
 test "surface metadata excludes live process handles and environment by default" {
     var surface = try Surface.init(std.testing.allocator, 7, .{ .cols = 100, .rows = 30 });
     defer surface.deinit();
-    surface.title = "dev shell";
+    surface.title = "app shell";
     surface.cwd = "/tmp/maru";
     surface.command = "/bin/zsh";
     surface.process_state = .running;
 
     const metadata = surface.restorableMetadata();
     try std.testing.expectEqual(@as(u64, 7), metadata.id);
-    try std.testing.expectEqualStrings("dev shell", metadata.title);
+    try std.testing.expectEqualStrings("app shell", metadata.title);
     try std.testing.expectEqualStrings("/tmp/maru", metadata.cwd.?);
     try std.testing.expectEqualStrings("/bin/zsh", metadata.command.?);
     try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 30 }, metadata.size);

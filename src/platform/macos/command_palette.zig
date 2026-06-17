@@ -1,6 +1,6 @@
 //! 커맨드 팝업 카탈로그 필터 — **platform 전용 순수 로직**. UI 상태(open/query/preedit/selected)는 chrome 컴포넌트
 //! (src/chrome/components/palette.zig)로 이주했다(C1b). 여기엔 chrome이 만질 수 없는 것만 남는다: command_catalog
-//! (forbidden import)를 쿼리로 필터해 인덱스를 내고, 선택 인덱스를 Action으로 해석하는 것. DevSession이 이 두
+//! (forbidden import)를 쿼리로 필터해 인덱스를 내고, 선택 인덱스를 Action으로 해석하는 것. AppSession이 이 두
 //! 함수를 호출해 필터 결과(palette_filtered)를 들고, 컴포넌트엔 필터된 행(Row)만 주입한다(neutral 경계 보존).
 //! 베이스/의사결정: action 집합은 config/action.zig(단일 출처), title은 UI 표시 문자열이라 command_catalog에 둔다.
 
@@ -34,7 +34,7 @@ pub fn filter(allocator: std.mem.Allocator, query: []const u8, out: *std.ArrayLi
     }
 }
 
-/// 필터된 인덱스 목록에서 selected 위치의 Action(없으면 null). DevSession이 받아 dispatch + hide 한다. selected는
+/// 필터된 인덱스 목록에서 selected 위치의 Action(없으면 null). AppSession이 받아 dispatch + hide 한다. selected는
 /// filtered 범위 안이라고 가정하지 않는다(범위 밖이면 null) — 컴포넌트 clamp와 platform 필터가 한 frame 어긋나도 안전.
 pub fn actionAt(filtered: []const usize, selected: usize) ?Action {
     if (selected >= filtered.len) return null;

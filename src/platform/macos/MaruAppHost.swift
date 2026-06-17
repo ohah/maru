@@ -14,7 +14,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         return true
     }
 
-    // CAMetalLayer를 backing layer로 쓴다. Zig dev session이 만든 RenderFrame을 제품 Metal
+    // CAMetalLayer를 backing layer로 쓴다. Zig app session이 만든 RenderFrame을 제품 Metal
     // renderer가 이 layer의 drawable에 그린다.
     override func makeBackingLayer() -> CALayer {
         let metalLayer = CAMetalLayer()
@@ -66,7 +66,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         updateDrawableSize()
-        // backing scale이 바뀌면 dev session에 새 scale로 resize를 다시 보내, glyph가 device
+        // backing scale이 바뀌면 app session에 새 scale로 resize를 다시 보내, glyph가 device
         // 해상도로 rasterize되고 cell 메트릭이 갱신되게 한다(런치 후 Retina 정착 등).
         controller?.handleBackingScaleChange(in: self)
     }
@@ -332,16 +332,16 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     override func otherMouseUp(with event: NSEvent) { controller?.handleMouse(event, kind: 3, in: self) }
 }
 
-// 한 터미널 세션의 per-session 상태 — 창/PTY(devSession)/Metal 렌더러 + 렌더 캐시 메트릭을 묶는다.
+// 한 터미널 세션의 per-session 상태 — 창/PTY(appSession)/Metal 렌더러 + 렌더 캐시 메트릭을 묶는다.
 // 컨트롤러가 메인 창을 `primary`로 들고, quick terminal(후속)이 두 번째 인스턴스가 된다. 세션별 로직은
 // 컨트롤러 메서드가 이 surface의 상태를 읽고 쓰며 수행한다(상태만 여기 — 두 세션이 같은 메서드를 공유).
 @MainActor
 final class TerminalSurface {
     var window: NSWindow?
-    var devSession: OpaquePointer?
+    var appSession: OpaquePointer?
     var metalRenderer: OpaquePointer?
 
-    // 렌더 캐시(세션별). 의미는 컨트롤러의 drawMetalFrame/tickDevSession 주석 참조.
+    // 렌더 캐시(세션별). 의미는 컨트롤러의 drawMetalFrame/tickAppSession 주석 참조.
     var lastDrawnGeneration: UInt64 = 0
     var lastSeenMetalGeneration: UInt32 = 0
     var lastCellWidthPx: UInt32 = 0
@@ -350,8 +350,8 @@ final class TerminalSurface {
     var metalNeedsRedraw = false
     var metalFramesDrawn = 0
     var metalRendererCreated = false
-    var latestFrameSummary = MaruAppHostDevFrameSummary()
-    var devSessionStatus: Int32 = 0
+    var latestFrameSummary = MaruAppHostFrameSummary()
+    var appSessionStatus: Int32 = 0
     var lastWindowTitle = ""
 
     // Metal terminal view = 창의 contentView. window가 살아 있는 동안 유효(window가 강참조).
@@ -375,8 +375,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // PTY 셸이 정상 종료했다는 신호. fault가 아니라 우아한 종료 대상이다.
     private static let statusSessionEnded = Int32(MaruAppHostStatusSessionEnded.rawValue)
 
-    private let artifactDirectory = "zig-out/maru-macos-app-dev"
-    private let summaryPath = "zig-out/maru-macos-app-dev/app-dev.summary.txt"
+    private let artifactDirectory = "zig-out/maru-macos-app"
+    private let summaryPath = "zig-out/maru-macos-app/app.summary.txt"
     private var capabilities = MaruAppHostCapabilities()
     // 일반 터미널 창들의 per-session 상태(단일 출처). 현재는 launch에 1개만 만들지만(동작 불변), New Window가
     // 여기에 append한다 — W1은 `primary` 단일 필드를 컬렉션으로 일반화하는 소유권 seam이다(split PR2a의
@@ -445,9 +445,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         get { activeSurface?.window }
         set { activeSurface?.window = newValue }
     }
-    private var devSession: OpaquePointer? {
-        get { activeSurface?.devSession }
-        set { activeSurface?.devSession = newValue }
+    private var appSession: OpaquePointer? {
+        get { activeSurface?.appSession }
+        set { activeSurface?.appSession = newValue }
     }
     private var tickTimer: Timer?
     // smoke 자동 종료용 one-shot timer. 창이 먼저 닫혀도 run loop에 남아 teardown 뒤
@@ -455,15 +455,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var smokeTimer: Timer?
     private var smokeMode = false
     private var exitCode: Int32 = 0
-    private var latestFrameSummary: MaruAppHostDevFrameSummary {
-        get { activeSurface?.latestFrameSummary ?? MaruAppHostDevFrameSummary() }
+    private var latestFrameSummary: MaruAppHostFrameSummary {
+        get { activeSurface?.latestFrameSummary ?? MaruAppHostFrameSummary() }
         set { activeSurface?.latestFrameSummary = newValue }
     }
-    private var devSessionStatus: Int32 {
-        get { activeSurface?.devSessionStatus ?? Self.statusOK }
-        set { activeSurface?.devSessionStatus = newValue }
+    private var appSessionStatus: Int32 {
+        get { activeSurface?.appSessionStatus ?? Self.statusOK }
+        set { activeSurface?.appSessionStatus = newValue }
     }
-    // 제품 Metal renderer(maru_metal_renderer.h). dev session의 metal-frame DTO를 창의 CAMetalLayer에
+    // 제품 Metal renderer(maru_metal_renderer.h). app session의 metal-frame DTO를 창의 CAMetalLayer에
     // 그린다. generation이 바뀐 frame에서만 atlas 갱신/draw한다.
     private var metalRenderer: OpaquePointer? {
         get { activeSurface?.metalRenderer }
@@ -497,9 +497,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         get { activeSurface?.lastCellHeightPx ?? 0 }
         set { activeSurface?.lastCellHeightPx = newValue }
     }
-    // dev session에 마지막으로 보낸 backing scale. 런치 후 backingScaleFactor가 늦게 Retina로
-    // 정착하면(콜백이 dev session 생성 전에 발화한 경우) tick이 변화를 감지해 재-resize한다.
-    // (같은 size+scale 중복 resize 방지는 Zig dev session이 담당한다.)
+    // app session에 마지막으로 보낸 backing scale. 런치 후 backingScaleFactor가 늦게 Retina로
+    // 정착하면(콜백이 app session 생성 전에 발화한 경우) tick이 변화를 감지해 재-resize한다.
+    // (같은 size+scale 중복 resize 방지는 Zig app session이 담당한다.)
     private var lastSentBackingScale: CGFloat {
         get { activeSurface?.lastSentBackingScale ?? 0 }
         set { activeSurface?.lastSentBackingScale = newValue }
@@ -533,7 +533,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
 
-        // 메인 창의 per-session 상태를 담을 surface를 가장 먼저 만든다 — 아래 window/devSession/렌더러
+        // 메인 창의 per-session 상태를 담을 surface를 가장 먼저 만든다 — 아래 window/appSession/렌더러
         // 대입이 전부 이 첫 창(primary = windows.first)으로 forwarding되므로(forwarder setter), 창이 없으면
         // 그 대입이 사라진다. New Window(W2)는 같은 컬렉션에 surface를 추가한다.
         self.windows.append(TerminalSurface())
@@ -557,27 +557,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window.makeFirstResponder(window.contentView)
         NSApp.activate(ignoringOtherApps: true)
 
-        // dev session의 첫 tick(startDevSession 안)이 바로 그릴 수 있도록 renderer를 먼저 만든다.
+        // app session의 첫 tick(startAppSession 안)이 바로 그릴 수 있도록 renderer를 먼저 만든다.
         setupMetalRenderer()
 
-        if !startDevSession(smokeMode: smokeMode) {
+        if !startAppSession(smokeMode: smokeMode) {
             writeSummary(visibleUI: true, abiReady: true, smokeDurationMs: smokeDuration)
             NSApp.terminate(nil)
             return
         }
 
         // 저장된 workspace를 복원한다(R4b) — 첫 블록을 primary에 적용하고 나머지 블록마다 새 창. 저장 없음·복원
-        // off·smoke·빈 블록이면 무동작(방금 만든 기본 단일 창 유지). startDevSession이 세션을 세운 '뒤'에.
+        // off·smoke·빈 블록이면 무동작(방금 만든 기본 단일 창 유지). startAppSession이 세션을 세운 '뒤'에.
         restoreWorkspace()
 
         // 표준 메뉴바를 세운다(커맨드 카탈로그에서 액션 항목·단축키를 읽어). smoke에서도 빌드해 구성 경로를
         // CI가 구동한다(메뉴는 OS-global 부수효과가 없어 hotkey 등록과 달리 게이트 불요).
         buildMainMenu()
 
-        // 첫 tick(startDevSession 안)이 cell 메트릭을 캐시했으니, 창 크기에 맞춰 cols/rows를
+        // 첫 tick(startAppSession 안)이 cell 메트릭을 캐시했으니, 창 크기에 맞춰 cols/rows를
         // 한 번 맞춘다(80×24 기본에서 실제 창 grid로). smoke는 자체 scripted resize를 쓴다.
         if !smokeMode {
-            resizeDevSessionFromWindow()
+            resizeAppSessionFromWindow()
             // 전역(OS) 단축키를 OS에 등록한다(앱이 비활성이어도 동작). smoke는 자동 종료라 등록하지 않는다.
             registerGlobalHotkeys()
         }
@@ -605,11 +605,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         saveWorkspace()
         // 종료 중에는 추가 tick을 돌리지 않는다. tick은 session_ended에서 NSApp.terminate를
         // 부르므로, 여기서 다시 tick하면 재진입 terminate가 된다. 마지막 counter는
-        // shutdownDevSession의 close()가 summary에 담는다.
-        // 종료 요약 기준 surface(메인=첫 창)를 shutdown '전에' 잡는다 — shutdownDevSession이 컬렉션을 비우므로
+        // shutdownAppSession의 close()가 summary에 담는다.
+        // 종료 요약 기준 surface(메인=첫 창)를 shutdown '전에' 잡는다 — shutdownAppSession이 컬렉션을 비우므로
         // 그 뒤엔 primary(=windows.first)가 nil이 된다. surface 객체는 캡처로 살아 있어 close가 채운 요약을 읽는다.
         let mainSurface = windows.first
-        shutdownDevSession()
+        shutdownAppSession()
         if let mainSurface {
             // quick 패널이 key인 채 종료해도 forwarder가 quick으로 새지 않게 메인 창을 명시 대상으로.
             withSurface(mainSurface) {
@@ -653,20 +653,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 크기로 한 번만 resize해 zsh가 한 번 redraw하게 한다(단일 resize는 reflow가 Ghostty와 일치).
             // 비-라이브(프로그램/스모크) resize는 즉시 적용한다.
             if metalTerminalView?.inLiveResize == true { return }
-            resizeDevSessionFromWindow()
+            resizeAppSessionFromWindow()
         }
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
         // 창 포커스 획득 → 그 창 surface에 focus reporting(DECSET 1004 켜졌으면 CSI I). 멀티 창에서 그 창만(notification.object).
-        guard let surface = surfaceForWindow(notification.object as? NSWindow), let session = surface.devSession else { return }
-        _ = maru_macos_app_dev_session_focus_changed(session, 1)
+        guard let surface = surfaceForWindow(notification.object as? NSWindow), let session = surface.appSession else { return }
+        _ = maru_macos_app_session_focus_changed(session, 1)
     }
 
     func windowDidResignKey(_ notification: Notification) {
         // 창 포커스 상실 → CSI O(focus reporting 켜졌으면). 뷰의 windowLostKey(IME 조합 커밋)와는 별개 경로/목적.
-        guard let surface = surfaceForWindow(notification.object as? NSWindow), let session = surface.devSession else { return }
-        _ = maru_macos_app_dev_session_focus_changed(session, 0)
+        guard let surface = surfaceForWindow(notification.object as? NSWindow), let session = surface.appSession else { return }
+        _ = maru_macos_app_session_focus_changed(session, 0)
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
@@ -674,7 +674,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let surface = surfaceForWindow(notification.object as? NSWindow) else { return }
         withSurface(surface) {
             metalTerminalView?.updateDrawableSize()
-            resizeDevSessionFromWindow()
+            resizeAppSessionFromWindow()
         }
     }
 
@@ -733,16 +733,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         metalRendererCreated = metalRenderer != nil
     }
 
-    // dev session이 노출한 최신 Metal frame을 창의 CAMetalLayer에 그린다. generation이 바뀐
+    // app session이 노출한 최신 Metal frame을 창의 CAMetalLayer에 그린다. generation이 바뀐
     // frame(새 output/resize)에서만 atlas를 갱신하고 다시 그린다. idle tick은 마지막으로
     // present한 frame을 그대로 둔다.
     private func drawMetalFrame() {
-        guard let devSession, let renderer = metalRenderer,
+        guard let appSession, let renderer = metalRenderer,
               let view = metalTerminalView, let metalLayer = view.metalLayer else {
             return
         }
-        var frame = MaruAppHostDevMetalFrame()
-        guard maru_macos_app_dev_session_metal_frame(devSession, &frame) == Self.statusOK else {
+        var frame = MaruAppHostMetalFrame()
+        guard maru_macos_app_session_metal_frame(appSession, &frame) == Self.statusOK else {
             return
         }
         // 새 frame(generation 변경)일 때뿐 아니라, drawableSize/backing-scale 변경 등 surface가
@@ -769,7 +769,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // truncate-wrap(0이 되면 draw가 거부됨) 대신 u16 상한으로 클램프한다.
         let cols = UInt16(min(frame.cols, UInt32(UInt16.max)))
         let rows = UInt16(min(frame.rows, UInt32(UInt16.max)))
-        // 제목줄 진단(MARU_DEBUG)에 쓰도록 cell 픽셀 크기를 기록한다. grid 계산은 Zig dev
+        // 제목줄 진단(MARU_DEBUG)에 쓰도록 cell 픽셀 크기를 기록한다. grid 계산은 Zig app
         // session이 하므로 Swift는 이 값을 resize에 쓰지 않는다(진단 표시 전용).
         if frame.cell_width_px > 0 { lastCellWidthPx = frame.cell_width_px }
         if frame.cell_height_px > 0 { lastCellHeightPx = frame.cell_height_px }
@@ -815,7 +815,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         metalNeedsRedraw = true
     }
 
-    // backing scale(Retina) 변경 시 dev session에 resize를 다시 보낸다. 그래야 dev session이
+    // backing scale(Retina) 변경 시 app session에 resize를 다시 보낸다. 그래야 app session이
     // 새 scale로 glyph를 rasterize하고 cell 메트릭을 device 해상도에 맞춘다. 런치 시점에
     // backingScaleFactor가 아직 1.0이고 창이 Retina로 정착하며 바뀌는 경우를 잡는다.
     func handleBackingScaleChange(in view: NSView) {
@@ -823,26 +823,26 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // backing scale 변경은 그 변경이 일어난 '뷰의' 창(=surface)을 대상으로 resize해야 한다 — quick 뷰가
         // fire했는데 primary가 key면(또는 반대) activeSurface가 엉뚱한 surface를 고를 수 있으므로 명시한다.
         withSurface(surfaceForView(view)) {
-            resizeDevSessionFromWindow()
+            resizeAppSessionFromWindow()
         }
     }
 
-    /// 활성 surface(forwarder 대상)에 dev session을 만들어 붙인다 — 앱-전역 tick은 안 부른다(호출자가 정한다:
-    /// launch는 startDevSession이 tickDevSession을, New Window 팩토리는 그 창만 renderTick). 일반 창은 full chrome.
+    /// 활성 surface(forwarder 대상)에 app session을 만들어 붙인다 — 앱-전역 tick은 안 부른다(호출자가 정한다:
+    /// launch는 startAppSession이 tickAppSession을, New Window 팩토리는 그 창만 renderTick). 일반 창은 full chrome.
     private func createSessionForActiveSurface(smokeMode: Bool) -> Bool {
         // 셸 PTY를 처음부터 실제 창 크기로 띄우도록 backing px+scale을 넘긴다(80×24 기본 spawn→resize 핸드셰이크
         // 제거 → zsh 첫 프롬프트 PROMPT_EOL_MARK % 잔상 방지). 창이 아직 레이아웃 전이면 (0,0,0)이라 Zig가 cols/rows로
         // 폴백한다(smoke는 자체 scripted resize라 0으로 두고 80×24 유지). cols/rows는 0 폴백 시 winsize·grid 단일 출처.
         let m = smokeMode ? (widthPx: UInt32(0), heightPx: UInt32(0), scaleMilli: UInt32(0)) : spawnMetricsForCurrentWindow()
-        var config = MaruAppHostDevSessionConfig(
+        var config = MaruAppHostSessionConfig(
             abi_version: MARU_MACOS_APP_HOST_ABI_VERSION,
             cols: 80,
             rows: 24,
             queue_capacity: 16,
             command_kind: UInt32(
                 smokeMode
-                    ? MaruAppHostDevCommandControlledSmoke.rawValue
-                    : MaruAppHostDevCommandInteractiveShell.rawValue
+                    ? MaruAppHostCommandControlledSmoke.rawValue
+                    : MaruAppHostCommandInteractiveShell.rawValue
             ),
             chrome_minimal: 0, // 일반 창은 항상 full chrome(사이드바·탭 바)
             minimal_tabs: 0, // full이라 무시됨(탭은 항상 동작)
@@ -851,22 +851,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             scale_milli: m.scaleMilli
         )
         var session: OpaquePointer?
-        let status = maru_macos_app_dev_session_create(&config, &session)
-        devSessionStatus = status
+        let status = maru_macos_app_session_create(&config, &session)
+        appSessionStatus = status
         guard status == Self.statusOK, let created = session else {
-            devSession = nil
+            appSession = nil
             return false
         }
-        devSession = created
+        appSession = created
         return true
     }
 
-    private func startDevSession(smokeMode: Bool) -> Bool {
+    private func startAppSession(smokeMode: Bool) -> Bool {
         guard createSessionForActiveSurface(smokeMode: smokeMode) else {
             exitCode = 1 // launch 경로의 세션 생성 실패는 비정상 종료(New Window 팩토리 실패는 exitCode를 더럽히지 않음)
             return false
         }
-        tickDevSession()
+        tickAppSession()
         return true
     }
 
@@ -900,7 +900,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             setupMetalRenderer()
             guard createSessionForActiveSurface(smokeMode: false) else { return }
             if let ws { applyWorkspaceWindow(ws.text, ws.index) } // 복원: 기본 탭을 이 창의 탭/split/Term으로 교체
-            resizeDevSessionFromWindow()
+            resizeAppSessionFromWindow()
             _ = renderTick() // 즉시 첫 paint(다음 timer tick을 안 기다림)
             ok = true
         }
@@ -919,10 +919,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 유지하지만, **적용 성공 여부를 반환**해 호출자가 사용자에게 알릴 수 있게 한다(파싱은 됐어도 spawn 실패 등).
     @discardableResult
     private func applyWorkspaceWindow(_ text: String, _ index: Int) -> Bool {
-        guard let session = devSession else { return false }
+        guard let session = appSession else { return false }
         let bytes = Array(text.utf8)
         let status = bytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_dev_session_apply_workspace_window(session, buf.baseAddress, buf.count, index)
+            maru_macos_app_session_apply_workspace_window(session, buf.baseAddress, buf.count, index)
         }
         return status == Self.statusOK
     }
@@ -934,10 +934,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 끄기(임시): config 토글은 후속. 기본은 ON. 이 플래그는 saveWorkspace도 막는다 — 복원을 끈 사용자의 저장
         // 파일을 종료 시 덮어쓰지 않게(persistence 자체 off).
         guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
-        guard let session = primary?.devSession, let text = loadWorkspaceText() else { return }
+        guard let session = primary?.appSession, let text = loadWorkspaceText() else { return }
         let bytes = Array(text.utf8)
         let count = bytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_dev_session_workspace_window_count(session, buf.baseAddress, buf.count)
+            maru_macos_app_session_workspace_window_count(session, buf.baseAddress, buf.count)
         }
         if count < 0 {
             // -1=파싱 실패(헤더 불일치·직렬화 포맷 변경·손상). 저장 파일을 복원할 수 없으니 **조용히 기본 단일 창으로
@@ -962,7 +962,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // createTerminalWindow가 renderTick하지만 primary는 안 그래서, 기본 레이아웃이 한 프레임 깜빡이는 걸 막는다.
         // (showNotice의 metal_dirty도 이 renderTick이 그린다.)
         withSurface(primary) {
-            resizeDevSessionFromWindow()
+            resizeAppSessionFromWindow()
             _ = renderTick()
         }
     }
@@ -970,10 +970,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// chrome Notice 모달(손상 알림 등)을 primary 세션에 띄운다. 메시지는 UTF-8로 Zig에 넘긴다(세션이 복사 소유라
     /// 호출 뒤 bytes는 해제돼도 안전). 다음 renderTick이 최상위 오버레이로 그린다. 세션 없으면 무동작.
     private func showNotice(_ message: String) {
-        guard let session = primary?.devSession else { return }
+        guard let session = primary?.appSession else { return }
         let bytes = Array(message.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_dev_session_show_notice(session, buf.baseAddress, buf.count)
+            maru_macos_app_session_show_notice(session, buf.baseAddress, buf.count)
         }
     }
 
@@ -986,15 +986,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// 한 일반 창의 세션·렌더러를 닫고(요약은 surface.latestFrameSummary에 남긴다) 컬렉션에서 뺀다. NSWindow는
     /// 건드리지 않는다 — windowWillClose는 이미 닫히는 중이고, 그 외 경로(tick 셸 종료·팩토리 실패)는 호출자가
-    /// delegate를 끊고 window를 닫는다(재진입 없이). 앱 quit에선 shutdownDevSession이 남은 창마다 순회 호출.
+    /// delegate를 끊고 window를 닫는다(재진입 없이). 앱 quit에선 shutdownAppSession이 남은 창마다 순회 호출.
     private func teardownWindowSurface(_ surface: TerminalSurface) {
-        if let session = surface.devSession {
-            var summary = MaruAppHostDevFrameSummary()
-            let status = maru_macos_app_dev_session_close(session, &summary)
-            surface.devSessionStatus = status
+        if let session = surface.appSession {
+            var summary = MaruAppHostFrameSummary()
+            let status = maru_macos_app_session_close(session, &summary)
+            surface.appSessionStatus = status
             if status == Self.statusOK { surface.latestFrameSummary = summary } else { exitCode = 1 }
-            maru_macos_app_dev_session_destroy(session)
-            surface.devSession = nil
+            maru_macos_app_session_destroy(session)
+            surface.appSession = nil
         }
         if let renderer = surface.metalRenderer {
             maru_metal_renderer_destroy(renderer)
@@ -1030,7 +1030,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // Timer 콜백은 main run loop(main thread)에서 실행되고 이 controller는 @MainActor다.
             // Task로 감싸면 매 tick(30/sec)마다 async hop과 할당이 생기므로 main에서 바로 호출한다.
             MainActor.assumeIsolated {
-                self?.tickDevSession()
+                self?.tickAppSession()
             }
         }
         // .common 모드로 등록해야 창 live-resize(.eventTracking) 중에도 tick이 멈추지 않는다.
@@ -1063,10 +1063,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 빈값 폴백만 한다. debugEnabled면 진단 제목(updateDiagnosticTitle)이 제목줄을 쓰므로 건너뛴다
     // (상호 배타). 변했을 때만 window.title을 써서 매 tick 불필요한 setter 호출을 막는다.
     private func updateWindowTitle() {
-        guard !debugEnabled, let window, let session = devSession else { return }
+        guard !debugEnabled, let window, let session = appSession else { return }
         var ptr: UnsafePointer<UInt8>? = nil
         var len: size_t = 0
-        guard maru_macos_app_dev_session_window_title(session, &ptr, &len) == Self.statusOK else { return }
+        guard maru_macos_app_session_window_title(session, &ptr, &len) == Self.statusOK else { return }
         let title: String
         if let bytes = ptr, len > 0 {
             title = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
@@ -1081,8 +1081,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // 타이머가 매 frame 부른다 — primary(메인 창)를 먼저 tick하고(셸 종료/fault는 앱-전역 종료로),
     // quick terminal이 보이면 그것도 tick한다(quick 셸 종료/fault는 quick만 닫고 앱은 계속). 각 surface를
-    // explicitSurface로 지정해, 세션별 forwarder(window/devSession/메트릭/draw)가 그 surface를 대상으로 돈다.
-    private func tickDevSession() {
+    // explicitSurface로 지정해, 세션별 forwarder(window/appSession/메트릭/draw)가 그 surface를 대상으로 돈다.
+    private func tickAppSession() {
         guard !windows.isEmpty else { return }
 
         // 일반 창들을 순회 tick(컬렉션 변형은 루프 뒤에서 — closeWindowOrQuit이 windows를 바꾸므로). 셸이 정상
@@ -1122,9 +1122,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     // 현재 activeSurface(= explicitSurface)를 한 번 tick하고 그린다. 세션별 forwarder만 쓰므로 호출자가
-    // explicitSurface로 대상을 정한다. 앱-전역 정책(SessionEnded 종료·summary)은 호출자(tickDevSession)가 한다.
+    // explicitSurface로 대상을 정한다. 앱-전역 정책(SessionEnded 종료·summary)은 호출자(tickAppSession)가 한다.
     private func renderTick() -> Int32 {
-        guard let devSession else { return Self.statusOK }
+        guard let appSession else { return Self.statusOK }
         updateDiagnosticTitle()
         updateWindowTitle() // 비-debug일 때 OSC 0/2 제목 또는 cwd basename을 제목줄에 반영
 
@@ -1132,13 +1132,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if !smokeMode, let window {
             let scale = window.backingScaleFactor
             if scale != lastSentBackingScale {
-                resizeDevSessionFromWindow()
+                resizeAppSessionFromWindow()
             }
         }
 
-        var summary = MaruAppHostDevFrameSummary()
-        let status = maru_macos_app_dev_session_tick(devSession, &summary)
-        devSessionStatus = status
+        var summary = MaruAppHostFrameSummary()
+        let status = maru_macos_app_session_tick(appSession, &summary)
+        appSessionStatus = status
         if status == Self.statusOK {
             latestFrameSummary = summary
             // metal frame이 바뀌었거나(generation) surface 재칠이 필요할 때만 그린다.
@@ -1172,28 +1172,28 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         // Shift+PageUp/Down는 PTY로 보내지 않고 스크롤백 뷰포트를 한 화면씩 스크롤한다. page 크기
         // (rows-1) 계산은 권위 있는 rows를 가진 Zig가 하고, 여기선 방향(위 +1 / 아래 -1)만 넘긴다.
-        if event.modifierFlags.contains(.shift), let session = devSession {
+        if event.modifierFlags.contains(.shift), let session = appSession {
             if event.keyCode == 116 { // PageUp -> 과거(위)
-                _ = maru_macos_app_dev_session_scroll_page(session, 1)
+                _ = maru_macos_app_session_scroll_page(session, 1)
                 markMetalNeedsRedraw()
                 return
             }
             if event.keyCode == 121 { // PageDown -> 현재(아래)
-                _ = maru_macos_app_dev_session_scroll_page(session, -1)
+                _ = maru_macos_app_session_scroll_page(session, -1)
                 markMetalNeedsRedraw()
                 return
             }
         }
         // Cmd+↑/↓: OSC 133 프롬프트 블록으로 점프(이전/다음 명령의 프롬프트로 뷰포트 이동). 분류·이동은
         // Zig core가 하고 여기선 방향만 넘긴다. 셸 통합이 없으면 core가 false라 아무 일도 안 일어난다.
-        if chordMods == .command, let session = devSession {
+        if chordMods == .command, let session = appSession {
             if event.keyCode == 126 { // Up -> 이전(과거) 프롬프트
-                _ = maru_macos_app_dev_session_jump_prompt(session, -1)
+                _ = maru_macos_app_session_jump_prompt(session, -1)
                 markMetalNeedsRedraw()
                 return
             }
             if event.keyCode == 125 { // Down -> 다음(최근) 프롬프트
-                _ = maru_macos_app_dev_session_jump_prompt(session, 1)
+                _ = maru_macos_app_session_jump_prompt(session, 1)
                 markMetalNeedsRedraw()
                 return
             }
@@ -1208,13 +1208,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 넘기고, 줄 수 환산(셀 높이·clamp·NaN 가드)은 Zig가 실제 메트릭으로 한다(네이티브 최소화).
     // scrollingDeltaY>0이면 위(과거)로 본다 — 표준 터미널 방향. scrollingDeltaX는 그 pane 탭 바 가로 스크롤(Zig가 셀 환산·라우팅).
     func handleScroll(_ event: NSEvent, in view: NSView) {
-        guard let session = devSession else { return }
+        guard let session = appSession else { return }
         // 마우스 위치를 backing 픽셀(좌상단 원점)로 — Zig가 커서 아래 panel로 스크롤을 라우팅한다(split).
         let local = view.convert(event.locationInWindow, from: nil)
         let scale = window?.backingScaleFactor ?? 1.0
         let xPx = Double(local.x * scale)
         let yPx = Double((view.bounds.height - local.y) * scale)
-        _ = maru_macos_app_dev_session_scroll_wheel(
+        _ = maru_macos_app_session_scroll_wheel(
             session,
             Double(event.scrollingDeltaY),
             Double(event.scrollingDeltaX),
@@ -1227,7 +1227,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // 마우스 좌표를 backing 픽셀(좌상단 원점)로 환산해 Zig 선택 모델에 넘긴다(kind 1=down/2=drag/3=up).
     func handleMouse(_ event: NSEvent, kind: Int32, in view: NSView) {
-        guard let session = devSession else { return }
+        guard let session = appSession else { return }
         let local = view.convert(event.locationInWindow, from: nil)
         let scale = window?.backingScaleFactor ?? 1.0
         let xPx = Double(local.x * scale)
@@ -1238,7 +1238,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if event.modifierFlags.contains(.shift) { mods |= 4 }
         if event.modifierFlags.contains(.option) { mods |= 8 }
         if event.modifierFlags.contains(.control) { mods |= 16 }
-        _ = maru_macos_app_dev_session_mouse(session, kind, xPx, yPx, button, mods)
+        _ = maru_macos_app_session_mouse(session, kind, xPx, yPx, button, mods)
         markMetalNeedsRedraw()
     }
 
@@ -1260,7 +1260,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func updateHover(atWindowPoint windowPoint: NSPoint, cmdHeld: Bool, in view: NSView) {
-        guard let session = devSession else { return }
+        guard let session = appSession else { return }
         let local = view.convert(windowPoint, from: nil)
         // 포인터가 view 밖(타이틀바·다른 뷰 위)이면 hover를 강제하지 않는다 — 시스템/이웃 커서를
         // iBeam으로 덮어쓰지 않게. 밑줄도 해제한다.
@@ -1274,7 +1274,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // Zig가 위치별 커서 종류를 판정해 돌려준다(CursorKind). Swift는 그 값을 NSCursor로 매핑만 한다 —
         // 전부 iBeam이던 걸 영역별로(사이드바·탭 바=arrow, divider=resize, 터미널=iBeam, URL=pointingHand).
         var cursorKind: Int32 = 1
-        guard maru_macos_app_dev_session_hover(session, xPx, yPx, cmdHeld ? 1 : 0, &cursorKind) == Self.statusOK else { return }
+        guard maru_macos_app_session_hover(session, xPx, yPx, cmdHeld ? 1 : 0, &cursorKind) == Self.statusOK else { return }
         Self.cursor(for: cursorKind).set()
     }
 
@@ -1290,24 +1290,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func clearHover() {
-        guard let session = devSession else { return }
+        guard let session = appSession else { return }
         var cursorKind: Int32 = 0
         // 음수 좌표 sentinel: Zig가 사이드바 영역 밖(x<0)·터미널 셀 밖으로 보고 URL 밑줄과 사이드바 슬롯
         // 호버를 모두 해제한다((0,0)은 사이드바 슬롯 0으로 오인될 수 있어 못 쓴다). 커서는 arrow로(뷰 밖).
-        _ = maru_macos_app_dev_session_hover(session, -1, -1, 0, &cursorKind)
+        _ = maru_macos_app_session_hover(session, -1, -1, 0, &cursorKind)
         NSCursor.arrow.set()
     }
 
     // Cmd+클릭: Zig가 인식한 URL을 기본 브라우저로 연다(NSWorkspace는 OS 소유 경계).
     func handleCommandClick(_ event: NSEvent, in view: NSView) {
-        guard let session = devSession else { return }
+        guard let session = appSession else { return }
         let local = view.convert(event.locationInWindow, from: nil)
         let scale = window?.backingScaleFactor ?? 1.0
         let xPx = Double(local.x * scale)
         let yPx = Double((view.bounds.height - local.y) * scale)
         var ptr: UnsafePointer<UInt8>? = nil
         var len: size_t = 0
-        guard maru_macos_app_dev_session_url_at(session, xPx, yPx, &ptr, &len) == Self.statusOK,
+        guard maru_macos_app_session_url_at(session, xPx, yPx, &ptr, &len) == Self.statusOK,
               let bytes = ptr, len > 0 else { return }
         let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
         guard let url = URL(string: text) else { return }
@@ -1315,20 +1315,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func pastePasteboardText() {
-        guard let session = devSession,
+        guard let session = appSession,
               let text = NSPasteboard.general.string(forType: .string),
               !text.isEmpty else { return }
         let bytes = Array(text.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_dev_session_paste_text(session, buf.baseAddress, buf.count)
+            maru_macos_app_session_paste_text(session, buf.baseAddress, buf.count)
         }
     }
 
     private func copySelectionToPasteboard() {
-        guard let session = devSession else { return }
+        guard let session = appSession else { return }
         var ptr: UnsafePointer<UInt8>? = nil
         var len: size_t = 0
-        guard maru_macos_app_dev_session_copy_text(session, &ptr, &len) == Self.statusOK,
+        guard maru_macos_app_session_copy_text(session, &ptr, &len) == Self.statusOK,
               let bytes = ptr, len > 0 else { return }
         let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
         let pasteboard = NSPasteboard.general
@@ -1340,10 +1340,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 정책(env opt-in MARU_OSC52_WRITE) deny이거나 데이터 없으면 Zig가 len 0을 줘 아무 것도 안 한다.
     // Cmd+C 복사(copySelectionToPasteboard)와 같은 NSPasteboard 경로.
     private func drainOsc52Clipboard() {
-        guard let session = devSession else { return }
+        guard let session = appSession else { return }
         var ptr: UnsafePointer<UInt8>? = nil
         var len: size_t = 0
-        guard maru_macos_app_dev_session_pending_clipboard(session, &ptr, &len) == Self.statusOK,
+        guard maru_macos_app_session_pending_clipboard(session, &ptr, &len) == Self.statusOK,
               let bytes = ptr, len > 0 else { return }
         let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
         let pasteboard = NSPasteboard.general
@@ -1362,15 +1362,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // OSC 9/777: 코어가 파싱한 데스크톱 알림(title/body)을 활성 세션에서 drain해 네이티브 알림으로 띄운다(매 tick).
     // 알림이 없으면 Zig가 has=0을 줘 아무 것도 안 한다. OSC 9는 title이 없어(빈 문자열) 앱 이름으로 폴백한다.
-    // 번들 ID가 없으면(dev shell 일부) UNUserNotificationCenter를 못 써 조용히 건너뛴다(GUI 수동 검증은 제품 앱).
+    // 번들 ID가 없으면(app shell 일부) UNUserNotificationCenter를 못 써 조용히 건너뛴다(GUI 수동 검증은 제품 앱).
     private func drainNotification() {
-        guard let session = devSession else { return }
+        guard let session = appSession else { return }
         var has: UInt32 = 0
         var titlePtr: UnsafePointer<UInt8>? = nil
         var titleLen: size_t = 0
         var bodyPtr: UnsafePointer<UInt8>? = nil
         var bodyLen: size_t = 0
-        guard maru_macos_app_dev_session_pending_notification(session, &has, &titlePtr, &titleLen, &bodyPtr, &bodyLen) == Self.statusOK,
+        guard maru_macos_app_session_pending_notification(session, &has, &titlePtr, &titleLen, &bodyPtr, &bodyLen) == Self.statusOK,
               has != 0 else { return }
         guard Bundle.main.bundleIdentifier != nil else { return } // 번들 없으면 알림 API 사용 불가 — skip
         let title = titleLen > 0 ? String(decoding: UnsafeBufferPointer(start: titlePtr!, count: titleLen), as: UTF8.self) : ""
@@ -1386,8 +1386,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // G12 BEL: 코어가 모은 벨(0x07)을 활성 세션에서 drain해 시스템 벨을 울린다(매 tick, 한 tick 1회로 합쳐짐).
     // 벨이 없으면 Zig가 0을 줘 아무 것도 안 한다.
     private func drainBell() {
-        guard let session = devSession else { return }
-        if maru_macos_app_dev_session_take_bell(session) != 0 {
+        guard let session = appSession else { return }
+        if maru_macos_app_session_take_bell(session) != 0 {
             NSSound.beep()
         }
     }
@@ -1410,12 +1410,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// minimize/zoom·fullscreen은 OS 동작이라 네이티브 셀렉터. 세션-불변이라 시작 시 한 번 빌드한다.
     private func buildMainMenu() {
         // 카탈로그를 [action_key: (제목, keyEquivalent, modifier)]로 읽어 둔다(세션-불변). primary에서 읽는다
-        // (제목·단축키는 모든 세션 동일). 실제 디스패치는 runCatalogAction이 활성 세션(devSession)에 한다.
+        // (제목·단축키는 모든 세션 동일). 실제 디스패치는 runCatalogAction이 활성 세션(appSession)에 한다.
         var catalog: [String: (title: String, keyEquiv: String, mods: NSEvent.ModifierFlags)] = [:]
-        if let session = primary?.devSession {
+        if let session = primary?.appSession {
             var ptr: UnsafePointer<MaruAppHostCommand>?
             var count = 0
-            if maru_macos_app_dev_session_command_catalog(session, &ptr, &count) == Self.statusOK, let base = ptr {
+            if maru_macos_app_session_command_catalog(session, &ptr, &count) == Self.statusOK, let base = ptr {
                 for i in 0..<count {
                     let c = base[i]
                     catalog[String(cString: c.action_key)] = (
@@ -1561,12 +1561,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     /// 메뉴에서 고른 Zig 액션을 활성 세션에 디스패치한다 — action_key(representedObject) 바이트를 run_action으로.
-    /// devSession(활성 surface)에 적용해, quick terminal이 key면 그쪽에 동작한다(메뉴는 포커스된 터미널에 작용).
+    /// appSession(활성 surface)에 적용해, quick terminal이 key면 그쪽에 동작한다(메뉴는 포커스된 터미널에 작용).
     @objc private func runCatalogAction(_ sender: NSMenuItem) {
-        guard let key = sender.representedObject as? String, let session = devSession else { return }
+        guard let key = sender.representedObject as? String, let session = appSession else { return }
         let bytes = Array(key.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_dev_session_run_action(session, buf.baseAddress, buf.count)
+            maru_macos_app_session_run_action(session, buf.baseAddress, buf.count)
         }
     }
 
@@ -1585,10 +1585,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 앱이 없으면 Finder에 표시(fallback). 경로 규칙은 Zig loader가 단일 출처라 여기선 경로 계산을 안 한다.
     @objc private func menuOpenConfig(_ sender: Any?) {
         _ = sender
-        guard let session = devSession else { return }
+        guard let session = appSession else { return }
         var ptr: UnsafePointer<UInt8>? = nil
         var len: size_t = 0
-        guard maru_macos_app_dev_session_config_path(session, &ptr, &len) == Self.statusOK,
+        guard maru_macos_app_session_config_path(session, &ptr, &len) == Self.statusOK,
               let bytes = ptr, len > 0 else { return }
         let path = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
         let url = URL(fileURLWithPath: path)
@@ -1611,9 +1611,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private func sendSmokeDevEvents() {
         // 자동 smoke는 물리 키보드나 사용자의 resize 동작을 기다릴 수 없다. 대신 같은 C ABI를
-        // 직접 호출해 key/resize event가 Zig dev session까지 내려가는 최소 E2E 신호를 남긴다.
-        // grid는 dev session이 backing 픽셀에서 계산하므로 픽셀 크기만 보낸다.
-        resizeDevSession(widthPx: 1_200, heightPx: 720)
+        // 직접 호출해 key/resize event가 Zig app session까지 내려가는 최소 E2E 신호를 남긴다.
+        // grid는 app session이 backing 픽셀에서 계산하므로 픽셀 크기만 보낸다.
+        resizeAppSession(widthPx: 1_200, heightPx: 720)
         let keyEvent = MaruAppHostKeyEvent(
             codepoint: UInt32(UnicodeScalar("a").value),
             base_codepoint: UInt32(UnicodeScalar("a").value),
@@ -1641,14 +1641,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func sendKeyEvent(_ event: MaruAppHostKeyEvent) {
-        guard let devSession else {
+        guard let appSession else {
             return
         }
 
         var keyEvent = event
-        var summary = MaruAppHostDevFrameSummary()
-        let status = maru_macos_app_dev_session_key_down(devSession, &keyEvent, &summary)
-        devSessionStatus = status
+        var summary = MaruAppHostFrameSummary()
+        let status = maru_macos_app_session_key_down(appSession, &keyEvent, &summary)
+        appSessionStatus = status
         // 한 key event의 실패(닫힌 pane의 late input, 변환 거부 등)는 세션 fault가 아니다.
         // 앱을 죽이지 않고 status만 기록한다. 종료 자체는 tick 경로의 session_ended가 처리한다.
         if status == Self.statusOK {
@@ -1657,7 +1657,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     /// 현재 창의 backing 픽셀 + scale(천분율) — 세션 생성 시 셸을 처음부터 실제 크기로 spawn하는 데 쓴다
-    /// (resizeDevSessionFromWindow와 같은 contentView×backingScale 계산). 창이 없거나 아직 레이아웃 전(0)이면
+    /// (resizeAppSessionFromWindow와 같은 contentView×backingScale 계산). 창이 없거나 아직 레이아웃 전(0)이면
     /// (0,0,0)을 줘 Zig가 cols/rows로 폴백하게 한다(잘못된 0칸 grid 방지).
     private func spawnMetricsForCurrentWindow() -> (widthPx: UInt32, heightPx: UInt32, scaleMilli: UInt32) {
         guard let window, let contentView = window.contentView else { return (0, 0, 0) }
@@ -1669,33 +1669,33 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return (w, h, clampedUInt32(scale * 1_000))
     }
 
-    private func resizeDevSessionFromWindow() {
+    private func resizeAppSessionFromWindow() {
         guard let window, let contentView = window.contentView else {
             return
         }
 
         let bounds = contentView.bounds
         let scale = window.backingScaleFactor
-        // grid(cols/rows)는 Zig dev session이 backing 픽셀 + 자기 cell 메트릭으로 직접 계산한다.
+        // grid(cols/rows)는 Zig app session이 backing 픽셀 + 자기 cell 메트릭으로 직접 계산한다.
         // Swift는 창의 backing 픽셀만 모아 넘긴다(cell 크기·floor·placeholder 계산을 들고 있지
         // 않으므로, 메트릭이 준비되기 전 placeholder로 grid를 잘못 잡는 일이 없다).
         let widthPx = clampedUInt32(bounds.width * scale)
         let heightPx = clampedUInt32(bounds.height * scale)
-        resizeDevSession(widthPx: widthPx, heightPx: heightPx)
+        resizeAppSession(widthPx: widthPx, heightPx: heightPx)
     }
 
-    private func resizeDevSession(widthPx: UInt32, heightPx: UInt32) {
-        guard let devSession else {
+    private func resizeAppSession(widthPx: UInt32, heightPx: UInt32) {
+        guard let appSession else {
             return
         }
 
         let scaleMilli = clampedUInt32((window?.backingScaleFactor ?? 1.0) * 1_000)
-        // 같은 size+scale 중복 resize 방지(SIGWINCH storm)와 grid 계산 모두 Zig dev session이
-        // 한 곳에서 처리한다. Swift는 매번 backing 픽셀+scale만 보내고, dev session이 변화 없으면
+        // 같은 size+scale 중복 resize 방지(SIGWINCH storm)와 grid 계산 모두 Zig app session이
+        // 한 곳에서 처리한다. Swift는 매번 backing 픽셀+scale만 보내고, app session이 변화 없으면
         // 비싼 재작업을 건너뛴다. tick의 scale-변화 감지용으로 보낸 backing scale만 기록한다.
         lastSentBackingScale = window?.backingScaleFactor ?? 1.0
 
-        // cols/rows는 dev session이 무시하고 backing 픽셀에서 계산하므로 0으로 둔다.
+        // cols/rows는 app session이 무시하고 backing 픽셀에서 계산하므로 0으로 둔다.
         var event = MaruAppHostResizeEvent(
             width_px: widthPx,
             height_px: heightPx,
@@ -1704,9 +1704,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             rows: 0,
             reserved: 0
         )
-        var summary = MaruAppHostDevFrameSummary()
-        let status = maru_macos_app_dev_session_resize(devSession, &event, &summary)
-        devSessionStatus = status
+        var summary = MaruAppHostFrameSummary()
+        let status = maru_macos_app_session_resize(appSession, &event, &summary)
+        appSessionStatus = status
         // 한 resize event의 실패(닫히는 창의 late resize 등)도 세션 fault가 아니므로 앱을
         // 죽이지 않고 status만 기록한다.
         if status == Self.statusOK {
@@ -1716,55 +1716,55 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // IME 키 트랜잭션: begin -> 입력기 해석(클로저) -> end. 판정은 전부 Zig가 한다.
     func imeKeyTransaction(_ event: NSEvent, interpret: () -> Void) {
-        guard let session = devSession else { return }
-        _ = maru_macos_app_dev_session_ime_begin(session)
+        guard let session = appSession else { return }
+        _ = maru_macos_app_session_ime_begin(session)
         interpret()
         // ime_end는 정규화 실패(codepoint/keyCode 없음)에도 반드시 호출한다 — 안 그러면 ime_begin
         // 후 트랜잭션이 안 닫혀 누적 텍스트가 유실되고 ime_active가 박힌다. 키가 없으면 nil 전달.
         if var keyEvent = normalizedKeyEvent(from: event) {
-            _ = maru_macos_app_dev_session_ime_end(session, &keyEvent)
+            _ = maru_macos_app_session_ime_end(session, &keyEvent)
         } else {
-            _ = maru_macos_app_dev_session_ime_end(session, nil)
+            _ = maru_macos_app_session_ime_end(session, nil)
         }
     }
 
     func imeInsert(_ text: String) {
-        guard let session = devSession else { return }
+        guard let session = appSession else { return }
         let bytes = Array(text.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_dev_session_ime_insert(session, buf.baseAddress, buf.count)
+            maru_macos_app_session_ime_insert(session, buf.baseAddress, buf.count)
         }
     }
 
     func imeMarked(_ text: String) {
-        guard let session = devSession else { return }
+        guard let session = appSession else { return }
         let bytes = Array(text.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_dev_session_ime_marked(session, buf.baseAddress, buf.count)
+            maru_macos_app_session_ime_marked(session, buf.baseAddress, buf.count)
         }
     }
 
     func imeDeleteBackward() {
-        guard let session = devSession else { return }
-        _ = maru_macos_app_dev_session_ime_delete_backward(session)
+        guard let session = appSession else { return }
+        _ = maru_macos_app_session_ime_delete_backward(session)
     }
 
     func imeFocus(_ focused: Bool) {
-        guard let session = devSession else { return }
-        _ = maru_macos_app_dev_session_set_focus(session, focused ? 1 : 0)
+        guard let session = appSession else { return }
+        _ = maru_macos_app_session_set_focus(session, focused ? 1 : 0)
     }
 
     // 진행 중 IME 조합을 확정한다(IME 우회 특수키/단축키 직전). core preedit를 커밋·비운다.
     func imeCommit() {
-        guard let session = devSession else { return }
-        _ = maru_macos_app_dev_session_commit_composition(session)
+        guard let session = appSession else { return }
+        _ = maru_macos_app_session_commit_composition(session)
     }
 
     // IME 후보창 배치용 커서 셀 사각형(backing px, 좌상단 원점). 화면 좌표 변환은 view가 한다.
     func imeCursorRectPx() -> (Double, Double, Double, Double)? {
-        guard let session = devSession else { return nil }
+        guard let session = appSession else { return nil }
         var x = 0.0, y = 0.0, w = 0.0, h = 0.0
-        guard maru_macos_app_dev_session_ime_cursor_rect(session, &x, &y, &w, &h) == Self.statusOK else { return nil }
+        guard maru_macos_app_session_ime_cursor_rect(session, &x, &y, &w, &h) == Self.statusOK else { return nil }
         return (x, y, w, h)
     }
 
@@ -1896,10 +1896,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// descriptor를 RegisterEventHotKey로 등록한다. hot-key id = descriptor 배열 인덱스라 핸들러가
     /// 그 id로 action(hotKeyActions)을 되찾는다. descriptor가 없으면(빈 config) 아무것도 등록하지 않는다.
     private func registerGlobalHotkeys() {
-        guard let session = devSession else { return }
+        guard let session = appSession else { return }
         var ptr: UnsafePointer<MaruAppHostGlobalHotkey>?
         var count = 0
-        let status = maru_macos_app_dev_session_global_hotkeys(session, &ptr, &count)
+        let status = maru_macos_app_session_global_hotkeys(session, &ptr, &count)
         guard status == Self.statusOK, let base = ptr, count > 0 else { return }
 
         var spec = EventTypeSpec(
@@ -2002,7 +2002,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         showQuickTerminalAnimated(panel)
     }
 
-    /// quick terminal surface를 lazy 생성한다(첫 토글). 두 번째 dev session(대화형 셸) + borderless 패널 +
+    /// quick terminal surface를 lazy 생성한다(첫 토글). 두 번째 app session(대화형 셸) + borderless 패널 +
     /// Metal 뷰/렌더러를 만든다. 세션 생성 실패면 quick은 nil로 남고 토글은 무동작(앱은 정상).
     private func ensureQuickTerminal() {
         guard quick == nil else { return }
@@ -2051,14 +2051,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             minimalTabs = cfg.minimal_tabs // minimal에서 탭 허용 여부(Zig가 dispatch에서 게이트)
         }
 
-        // 두 번째 dev session(대화형 셸) — 메인과 독립된 PTY. minimal이면 chrome_minimal=1로 사이드바·탭 바를 끄고,
+        // 두 번째 app session(대화형 셸) — 메인과 독립된 PTY. minimal이면 chrome_minimal=1로 사이드바·탭 바를 끄고,
         // minimal_tabs로 그 minimal 세션의 ⌘T/⌘⇧T 허용 여부를 정한다.
-        var config = MaruAppHostDevSessionConfig(
+        var config = MaruAppHostSessionConfig(
             abi_version: MARU_MACOS_APP_HOST_ABI_VERSION,
             cols: 80,
             rows: 24,
             queue_capacity: 16,
-            command_kind: UInt32(MaruAppHostDevCommandInteractiveShell.rawValue),
+            command_kind: UInt32(MaruAppHostCommandInteractiveShell.rawValue),
             chrome_minimal: chromeMinimal,
             minimal_tabs: minimalTabs,
             // quick 패널은 크기·배치가 특수(슬라이드 패널)라 0으로 두고 생성 직후 resize에 맡긴다(80×24→실제). 메인 창
@@ -2068,12 +2068,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             scale_milli: 0
         )
         var session: OpaquePointer?
-        guard maru_macos_app_dev_session_create(&config, &session) == Self.statusOK, let created = session else {
+        guard maru_macos_app_session_create(&config, &session) == Self.statusOK, let created = session else {
             // 세션 생성 실패 — 렌더러를 정리하고 포기한다(quick = nil 유지, 토글은 무동작).
             if let renderer = surface.metalRenderer { maru_metal_renderer_destroy(renderer) }
             return
         }
-        surface.devSession = created
+        surface.appSession = created
         self.quick = surface
 
         // 포커스 잃음 자동 숨김: 패널이 key를 잃으면 quickTerminalLostKey가 슬라이드로 숨긴다. 패널을 컨트롤러의
@@ -2087,12 +2087,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         )
     }
 
-    /// config의 quick terminal 옵션을 읽는다(높이·자동 숨김·화면). config는 모든 dev session이 같은 파일을
+    /// config의 quick terminal 옵션을 읽는다(높이·자동 숨김·화면). config는 모든 app session이 같은 파일을
     /// 로드하므로 primary 세션에서 읽는다(primary는 시작 시 항상 존재). 못 읽으면 nil(기본값 유지).
     private func loadQuickTerminalConfig() -> MaruAppHostQuickTerminalConfig? {
-        guard let session = primary?.devSession else { return nil }
+        guard let session = primary?.appSession else { return nil }
         var cfg = MaruAppHostQuickTerminalConfig()
-        guard maru_macos_app_dev_session_quick_terminal_config(session, &cfg) == Self.statusOK else { return nil }
+        guard maru_macos_app_session_quick_terminal_config(session, &cfg) == Self.statusOK else { return nil }
         return cfg
     }
 
@@ -2159,7 +2159,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         NSApp.activate(ignoringOtherApps: true)
         // 크기는 최종값(frames.hidden은 보임과 폭·높이 동일)이라 지금 grid를 맞춘다 — 슬라이드/페이드 중 재계산 불필요.
         explicitSurface = quick
-        resizeDevSessionFromWindow()
+        resizeAppSessionFromWindow()
         explicitSurface = nil
 
         quickAnimating = true
@@ -2218,11 +2218,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: panel)
         }
         surface.window?.orderOut(nil)
-        if let session = surface.devSession {
-            var summary = MaruAppHostDevFrameSummary()
-            _ = maru_macos_app_dev_session_close(session, &summary)
-            maru_macos_app_dev_session_destroy(session)
-            surface.devSession = nil
+        if let session = surface.appSession {
+            var summary = MaruAppHostFrameSummary()
+            _ = maru_macos_app_session_close(session, &summary)
+            maru_macos_app_session_destroy(session)
+            surface.appSession = nil
         }
         if let renderer = surface.metalRenderer {
             maru_metal_renderer_destroy(renderer)
@@ -2249,10 +2249,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
         var blocks = ""
         for surface in windows {
-            guard let session = surface.devSession else { continue }
+            guard let session = surface.appSession else { continue }
             var ptr: UnsafePointer<UInt8>? = nil
             var len: size_t = 0
-            guard maru_macos_app_dev_session_serialize_workspace(session, &ptr, &len) == Self.statusOK,
+            guard maru_macos_app_session_serialize_workspace(session, &ptr, &len) == Self.statusOK,
                   let bytes = ptr, len > 0 else { continue } // 캡처 실패한 창은 건너뜀
             blocks += String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
         }
@@ -2261,7 +2261,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         try? (MARU_WORKSPACE_HEADER + "\n" + blocks).data(using: .utf8)?.write(to: url, options: .atomic)
     }
 
-    private func shutdownDevSession() {
+    private func shutdownAppSession() {
         // 전역 단축키를 먼저 OS에서 해제한다(세션이 사라져도 stale hot-key가 남지 않게). 이미 비었으면 no-op.
         unregisterGlobalHotkeys()
         // quick terminal(있으면)도 함께 정리한다.
@@ -2277,7 +2277,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func smokeDurationMs() -> UInt32? {
-        guard let raw = ProcessInfo.processInfo.environment["MARU_MACOS_APP_DEV_SMOKE_MS"] else {
+        guard let raw = ProcessInfo.processInfo.environment["MARU_MACOS_APP_SMOKE_MS"] else {
             return nil
         }
 
@@ -2300,7 +2300,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let glyphRasterReady = latestFrameSummary.glyph_raster_ready != 0
         let frameEnded = latestFrameSummary.ended != 0
         var summary = """
-        maru.macos-app-dev.v1
+        maru.macos-app.v1
         visible_ui=\(visibleUI)
         swift_host=true
         abi_ready=\(abiReady)
@@ -2309,7 +2309,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         terminal_surface_note=zig_runtime_rendered_to_swift_cametal_layer
         metal_renderer_created=\(metalRendererCreated)
         metal_frames_drawn=\(metalFramesDrawn)
-        dev_session_status=\(devSessionStatus)
+        app_session_status=\(appSessionStatus)
         frame_loop_ticks=\(latestFrameSummary.frame_loop_ticks)
         frame_loop_last_tick_index=\(latestFrameSummary.last_tick_index)
         output_events=\(latestFrameSummary.output_events)

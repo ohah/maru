@@ -46,7 +46,7 @@ pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 pub const abi_version: u32 = 55; // 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
-/// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_dev_session_global_hotkeys`로
+/// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
 /// 받아 Carbon `RegisterEventHotKey(carbon_modifiers, virtual_key_code)`로 등록하고, 눌리면 action을
 /// 수행한다. action은 `config.GlobalAction`의 `@intFromEnum`(0=toggle_window, 1=show_window)이다.
 /// 매핑 가능한 chord만 담긴다(global_hotkey.descriptorFor가 null이면 그 바인딩은 제외). 순수 POD.
@@ -56,7 +56,7 @@ pub const GlobalHotkey = extern struct {
     action: u32,
 };
 
-/// quick terminal 표시 옵션(C ABI). Swift가 `maru_macos_app_dev_session_quick_terminal_config`로 받아
+/// quick terminal 표시 옵션(C ABI). Swift가 `maru_macos_app_session_quick_terminal_config`로 받아
 /// 패널 크기·화면·자동 숨김에 쓴다. height_milli = 화면 높이 대비 비율×1000(예: 450=45%). auto_hide
 /// 0/1. screen = `config.QuickTerminalScreen`의 `@intFromEnum`(0=main, 1=mouse). 순수 POD.
 pub const QuickTerminalConfig = extern struct {
@@ -69,7 +69,7 @@ pub const QuickTerminalConfig = extern struct {
     width_milli: u32, // center 가로 비율 × 1000. 0이면 미설정 → Swift가 height로 폴백(정사각). center 외 위치는 무시.
 };
 
-/// 커맨드 카탈로그 한 항목(C ABI) — 메뉴바·커맨드 팝업이 그릴 액션. 모든 문자열은 dev session 소유(arena,
+/// 커맨드 카탈로그 한 항목(C ABI) — 메뉴바·커맨드 팝업이 그릴 액션. 모든 문자열은 app session 소유(arena,
 /// destroy까지 유효). `action_key`는 Swift가 선택 시 `run_action`으로 되돌려보내는 식별자(= parseAction 문자열),
 /// `title`은 표시명, `key_display`는 현재 바인딩(없으면 빈 문자열). global_hotkeys처럼 세션 동안 불변·한 번 빌드.
 pub const CommandEntry = extern struct {
@@ -80,7 +80,7 @@ pub const CommandEntry = extern struct {
     key_modifiers: u32, // command_catalog.mod_* 비트마스크(shift=1,control=2,option=4,command=8). Swift가 NSEvent flags로 매핑.
 };
 
-/// 마우스 호버 위치에 따라 Swift가 세울 커서 종류(`maru_macos_app_dev_session_hover`의 out 값). Zig가 위치를
+/// 마우스 호버 위치에 따라 Swift가 세울 커서 종류(`maru_macos_app_session_hover`의 out 값). Zig가 위치를
 /// 판정(터미널/divider/사이드바/탭 바/URL)하고 Swift가 NSCursor로 매핑한다 — 전부 I-beam이던 걸 영역별로 바꾼다.
 pub const CursorKind = enum(i32) {
     default = 0, // arrow — 사이드바·pane 탭 바 등 chrome(텍스트 입력/리사이즈 아님)
@@ -97,7 +97,7 @@ const placeholder_cell_height_px = input_math.placeholder_cell_height_px; // ses
 
 // 세로 탭 사이드바의 기본 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
 // 터미널 surface는 이 폭만큼 오른쪽으로 그려지고, 왼쪽 strip이 사이드바다("surface→rect" 첫 적용). 사용자가
-// 우측 경계를 드래그해 바꾸면 `DevSession.sidebar_width_pt`(현재 폭, pt)가 [min,max]로 갱신된다 — pt로 들어
+// 우측 경계를 드래그해 바꾸면 `AppSession.sidebar_width_pt`(현재 폭, pt)가 [min,max]로 갱신된다 — pt로 들어
 // DPI 변경(refreshCellMetrics)에도 살아남는다.
 const default_sidebar_width_pt: u32 = 180;
 const sidebar_min_pt: u32 = 120; // 너무 좁으면 제목/✕가 안 보임
@@ -607,7 +607,7 @@ fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
     return a.?.pane == b.?.pane and a.?.tab == b.?.tab;
 }
 
-pub const DevSession = struct {
+pub const AppSession = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     // 탭들. 각 Tab은 heap-pin(`*Tab`)이라 ArrayList가 realloc해도 본체(live_pty reader·surface)는
@@ -628,7 +628,7 @@ pub const DevSession = struct {
     runtime: app.SurfaceRuntime = undefined,
     renderer_state: renderer.RendererState = undefined,
     frame_loop: app.AppFrameLoop = undefined,
-    // 제품 dev shell은 fake font backend가 아니라 실제 CoreText로 glyph frame을 만든다.
+    // 제품 app shell은 fake font backend가 아니라 실제 CoreText로 glyph frame을 만든다.
     // appearance(폰트/색)는 init에서 한 번 resolve해 매 tick의 CoreTextFrameBuilder에 쓴다. 런타임 폰트
     // 크기(⌘+/−)는 appearance.font.size를 직접 바꾼다(모든 consumer가 이걸 읽음).
     appearance: config_mod.ResolvedAppearance = undefined,
@@ -646,10 +646,10 @@ pub const DevSession = struct {
     config_loaded: bool = false,
     // config의 전역(OS) 단축키를 OS 등록용 기술자(가상 키코드 + Carbon modifier + action)로 변환해 담는다.
     // init에서 loaded_config.global_bindings를 global_hotkey.descriptorFor로 매핑(매핑 불가 chord는 제외).
-    // Swift가 `maru_macos_app_dev_session_global_hotkeys`로 읽어 RegisterEventHotKey로 등록한다(a2). owned.
+    // Swift가 `maru_macos_app_session_global_hotkeys`로 읽어 RegisterEventHotKey로 등록한다(a2). owned.
     global_hotkeys: std.ArrayList(GlobalHotkey) = .empty,
     // 커맨드 카탈로그(메뉴바·커맨드 팝업이 그릴 액션 목록). init에서 한 번 빌드(세션 동안 불변). Swift가
-    // `maru_macos_app_dev_session_command_catalog`로 읽는다. owned — command_key_displays가 각 항목의 바인딩
+    // `maru_macos_app_session_command_catalog`로 읽는다. owned — command_key_displays가 각 항목의 바인딩
     // 표시 문자열(널 종단)을 소유하고, command_entries의 key_display가 그걸 가리킨다(action_key/title은 정적 리터럴).
     command_entries: std.ArrayList(CommandEntry) = .empty,
     command_key_displays: std.ArrayList([:0]u8) = .empty,
@@ -672,7 +672,7 @@ pub const DevSession = struct {
     find_nav: bool = false,
     // chrome 호스트(플랫폼 중립 L3 — src/chrome). 현재 C0/Notice 모달만 소유한다(손상 알림 등). 열려 있으면
     // handleKeyEvent가 키를 chrome으로 라우팅하고, tick이 buildNoticeFrame을 최상위 오버레이로 그린다. tokens·
-    // props는 매 frame DevSession이 빌드해 넘긴다(chrome은 config/terminal을 모름). 단일 출처: docs/chrome-strategy.md.
+    // props는 매 frame AppSession이 빌드해 넘긴다(chrome은 config/terminal을 모름). 단일 출처: docs/chrome-strategy.md.
     chrome_host: chrome.ChromeHost = .{},
     // Notice 메시지의 세션 소유 백킹. notice.State.message는 slice라, ABI 호출자(Swift)의 transient 버퍼를
     // 그대로 가리키면 dangling이 된다 → showNotice가 여기로 복사하고 State.message가 이걸 가리킨다. 알림 문구라
@@ -879,7 +879,7 @@ pub const DevSession = struct {
     sync_hold_ticks: u32 = 0,
 
     pub fn init(
-        self: *DevSession,
+        self: *AppSession,
         io: std.Io,
         allocator: std.mem.Allocator,
         raw_config: SessionConfig,
@@ -977,20 +977,20 @@ pub const DevSession = struct {
 
         // 첫 탭을 만든다 — Tab + 첫 panel(셸 PTY spawn + surface + runtime attach + pump) + tabs/surface_ptrs
         // append + app_window 갱신을 createTab이 한 묶음으로 한다(create/switch 후속도 같은 경로를 쓴다).
-        // Swift는 opaque handle만 보유하고 DevSession은 heap에 고정된다(LivePtySession reader가
+        // Swift는 opaque handle만 보유하고 AppSession은 heap에 고정된다(LivePtySession reader가
         // `&pane.live_pty.reader`를 잡으므로 Pane도 heap-pin — createPane이 allocator.create로 띄운다).
         _ = try self.createTab(
             spawnRequest(spawn_config, self.loaded_config.config.term, integ_dir),
             spawn_config.size,
             config.queue_capacity,
-            "Maru dev shell",
+            "Maru shell",
             commandName(config.command_kind),
         );
         self.surface_initialized = true;
 
         self.renderer_state = renderer.RendererState.init(allocator, .{});
         self.renderer_initialized = true;
-        // FrameLoop.init이 pump 포인터를 요구해 첫 Term의 pump를 넘기지만, DevSession은 tick에서 모든 Term을
+        // FrameLoop.init이 pump 포인터를 요구해 첫 Term의 pump를 넘기지만, AppSession은 tick에서 모든 Term을
         // 직접 drain하고 `tickAfterDrainWithFrameBuilder`(이미 drain된 summary를 받아 frame만 조립 — frame_loop.pump
         // 무시)만 쓴다. 즉 frame_loop.pump는 이 경로에서 절대 읽히지 않으므로 포커스/닫기마다 재바인딩하지 않는다
         // (읽히지 않는 필드를 유지하는 방어 코드 불필요). frame_loop.tick/tickWithFrameBuilder로 바꾸려면 그때 pump를 살려야 한다.
@@ -1004,19 +1004,19 @@ pub const DevSession = struct {
     /// 현재 활성 탭(`*Tab`). live_pty/pump 등 탭 내부에 접근할 때 쓴다. `app_window.active_tab`을
     /// 인덱스로 쓰므로 surface 라우팅(activeSurface)과 같은 활성 탭을 본다. 호출자는 탭이 있을 때만
     /// 부른다(surface_initialized·tabs 비어있지 않음).
-    fn activeTab(self: *DevSession) *Tab {
+    fn activeTab(self: *AppSession) *Tab {
         return self.tabs.items[self.app_window.active_tab];
     }
 
     /// 활성 탭의 포커스된 panel. live_pty/pump/surface 접근(입력·커서·frame_loop pump)에 쓴다.
-    fn activePane(self: *DevSession) *Pane {
+    fn activePane(self: *AppSession) *Pane {
         return self.activeTab().activePane();
     }
 
     /// 사이드바를 뺀 터미널 영역 사각형(backing px, 좌상단 = (사이드바 폭, 0)). split 레이아웃·resize·렌더가
     /// 공유하는 단일 출처. backing 크기는 마지막 resize 값이고, 첫 resize 전(0)이면 폭/높이가 0이라 단일
     /// leaf가 origin에만 그려진다(무해).
-    fn termRect(self: *const DevSession) app.SplitRect {
+    fn termRect(self: *const AppSession) app.SplitRect {
         return .{
             .x = self.sidebar_width_px,
             .y = 0,
@@ -1029,7 +1029,7 @@ pub const DevSession = struct {
     /// tui(pad=0)면 cell 1칸(기존). 제목은 origin_y를 pad_y만큼 내려 바 가운데에 둔다. paneTermRect가 이 높이만큼
     /// 내려 터미널 영역을 잘라 바와 터미널 첫 줄이 안 겹친다. cell 높이 미상이면 0(바 없음).
     /// chrome_minimal(quick terminal minimal)이면 0 — 바를 안 예약해 paneTermRect/paneBarRect가 탭 바를 통째로 끈다.
-    fn paneBarHeightPx(self: *const DevSession) u32 {
+    fn paneBarHeightPx(self: *const AppSession) u32 {
         if (self.chrome_minimal or self.cell_height_px == 0) return 0; // cell 미상이면 0(바 없음, doc) — buildChromeTokens 읽기 전 가드
         return self.cell_height_px + 2 * @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px);
     }
@@ -1037,7 +1037,7 @@ pub const DevSession = struct {
     /// panel leaf rect의 상단 탭 바를 뺀 '터미널 영역' 사각형. leaf rect가 바보다 충분히 높으면(바 + 최소
     /// 1칸) 상단 바 높이만큼 내려 잘라낸 rect, 아니면(너무 작음) leaf rect 그대로(바 없음). 좌표 변환·resize·
     /// 렌더 origin이 이 '바 아래' 영역을 쓴다.
-    fn paneTermRect(self: *const DevSession, rect: app.SplitRect) app.SplitRect {
+    fn paneTermRect(self: *const AppSession, rect: app.SplitRect) app.SplitRect {
         const bar_h = self.paneBarHeightPx();
         if (bar_h > 0 and rect.h > bar_h) {
             return .{ .x = rect.x, .y = rect.y + bar_h, .w = rect.w, .h = rect.h - bar_h };
@@ -1046,7 +1046,7 @@ pub const DevSession = struct {
     }
 
     /// panel leaf rect의 상단 탭 바 rect(못 그리면 null — 바 없을 만큼 작거나 cell 미상). paneTermRect의 보수.
-    fn paneBarRect(self: *const DevSession, rect: app.SplitRect) ?app.SplitRect {
+    fn paneBarRect(self: *const AppSession, rect: app.SplitRect) ?app.SplitRect {
         const bar_h = self.paneBarHeightPx();
         if (bar_h > 0 and rect.h > bar_h) {
             return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = bar_h };
@@ -1078,21 +1078,21 @@ pub const DevSession = struct {
     }
 
     /// rename 중인 대상 판정(렌더가 편집 텍스트로 라벨을 대체할 때 쓴다). 라이브 포인터 동일성 비교.
-    fn renamingWorkspace(self: *const DevSession, tab: *Tab) bool {
+    fn renamingWorkspace(self: *const AppSession, tab: *Tab) bool {
         const r = self.rename orelse return false;
         return switch (r) {
             .workspace => |t| t == tab,
             else => false,
         };
     }
-    fn renamingPane(self: *const DevSession, pane: *Pane) bool {
+    fn renamingPane(self: *const AppSession, pane: *Pane) bool {
         const r = self.rename orelse return false;
         return switch (r) {
             .pane => |p| p == pane,
             else => false,
         };
     }
-    fn renamingTerm(self: *const DevSession, term: *Term) bool {
+    fn renamingTerm(self: *const AppSession, term: *Term) bool {
         const r = self.rename orelse return false;
         return switch (r) {
             .term => |t| t == term,
@@ -1104,19 +1104,19 @@ pub const DevSession = struct {
     /// **폭은 항상 +1로 고정**(renameDisplayWidth와 일치)이라 깜빡여도 텍스트/세그먼트 폭이 안 흔들린다. 토글은
     /// updateCursorBlink가 rename 중 metal_dirty로 rebuild를 일으켜 보인다(터미널 커서 suffix-trim과 달리 인라인
     /// caret은 셀 스트림의 글자라 full rebuild 필요 — text-blink와 같은 경로). 호출자(allocator) 소유.
-    fn renameEditText(self: *DevSession, allocator: std.mem.Allocator) ![]const u8 {
+    fn renameEditText(self: *AppSession, allocator: std.mem.Allocator) ![]const u8 {
         const caret: []const u8 = if (self.blink_visible) "|" else " ";
         return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ self.rename_input.query.items, self.rename_input.preedit.items, caret });
     }
 
     /// rename 편집 텍스트의 표시폭(칸) = query(EAW) + preedit(EAW) + caret 1칸. paneBar가 편집 중 라벨 폭을 이걸로
     /// 잡아, 이름이 비어도(편집 시작) 세그먼트가 떠 caret이 보인다.
-    fn renameDisplayWidth(self: *const DevSession) usize {
+    fn renameDisplayWidth(self: *const AppSession) usize {
         return self.rename_input.queryCols() + chrome.components.overlay_input.displayCols(self.rename_input.preedit.items) + 1;
     }
 
     /// 활성 탭의 leaf 중 pane==찾는 pane인 것의 PaneBar(rename caret 위치 계산용). 못 찾으면 null.
-    fn paneBarForLeaf(self: *DevSession, pane: *Pane) ?PaneBar {
+    fn paneBarForLeaf(self: *AppSession, pane: *Pane) ?PaneBar {
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
@@ -1128,7 +1128,7 @@ pub const DevSession = struct {
 
     const TermBarLoc = struct { pb: PaneBar, tab_index: usize, count: usize, scroll: u32 };
     /// term이 속한 pane의 바·그 탭 인덱스(rename caret 위치 계산용). 못 찾으면 null.
-    fn termBarLocation(self: *DevSession, term: *Term) ?TermBarLoc {
+    fn termBarLocation(self: *AppSession, term: *Term) ?TermBarLoc {
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
@@ -1155,7 +1155,7 @@ pub const DevSession = struct {
     /// 텍스트 origin + caret 컬럼(prefix + query 폭)을 잡는다. preedit는 안 더한다(커서가 조합 글자를 덮는 터미널 IME
     /// 규약 — find.caretRect와 동일). 사이드바 슬롯 y는 slot_height 기준 세로 중앙 근사(후보창은 근처면 충분). 못
     /// 구하면 null(터미널 커서로 폴백). 렌더 geometry(paneBar·barMetrics·segOf, 사이드바 indent/slot)와 같은 셈법.
-    fn renameCaretRect(self: *DevSession) ?chrome.draw.Rect {
+    fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
         const target = self.rename orelse return null;
         const cw = self.cell_width_px;
         const ch = self.cell_height_px;
@@ -1221,7 +1221,7 @@ pub const DevSession = struct {
     /// barMetrics·탭 제목·활성 밴드), `label_cols`(라벨 폭). 모든 hit-test/렌더가 이 한 함수를 거쳐 "보이는 == 클릭되는"
     /// 을 유지한다(label_cols가 render·hit-test에서 동일). 바가 없거나 cell 미상이면 null.
     const PaneBar = struct { full: app.SplitRect, tabs: app.SplitRect, label_cols: u32 };
-    fn paneBar(self: *const DevSession, rect: app.SplitRect, pane: *Pane) ?PaneBar {
+    fn paneBar(self: *const AppSession, rect: app.SplitRect, pane: *Pane) ?PaneBar {
         const full = self.paneBarRect(rect) orelse return null;
         const cw = self.cell_width_px;
         if (cw == 0) return null;
@@ -1238,7 +1238,7 @@ pub const DevSession = struct {
     /// 렌더용 — 각 surface를 자기 rect에 그린다). 단일 leaf면 [{활성 surface, term_rect}] 하나; split 이후
     /// 여러 rect가 된다. term_rect는 사이드바를 뺀 터미널 영역(렌더가 termRect로 계산해 넘김).
     fn activeTabLeafRects(
-        self: *DevSession,
+        self: *AppSession,
         allocator: std.mem.Allocator,
         term_rect: app.SplitRect,
         out: *std.ArrayList(PaneTree.LeafRect),
@@ -1250,7 +1250,7 @@ pub const DevSession = struct {
     /// 활성 surface 하나를 full term grid로 — 기존 resizeActiveSurface와 동일 효과. 활성 panel의 resize
     /// 에러만 전파하고(기존 resize()의 try 동작 보존), 비활성 panel의 죽은 PTY 등은 무시해 한 panel이 다른
     /// panel 재배치를 막지 않게 한다. leaf rect 계산 실패(OOM)는 전파.
-    fn resizeActiveTabPanes(self: *DevSession) !void {
+    fn resizeActiveTabPanes(self: *AppSession) !void {
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         try self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects);
@@ -1275,7 +1275,7 @@ pub const DevSession = struct {
     /// 확장. best-effort: 임의 탭이라 모든 Term 에러를 무시한다(resizeActiveTabPanes는 활성 Term 에러를 resize()
     /// try 계약대로 전파하지만, 이 경로는 자동 정리라 한 panel 실패가 다른 재배치를 막지 않게 한다). 레이아웃
     /// 실패(OOM)는 무시(다음 resize/tick이 다시 맞춘다).
-    fn resizeTabPanes(self: *DevSession, tab: *Tab) void {
+    fn resizeTabPanes(self: *AppSession, tab: *Tab) void {
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         PaneTree.layout(self.allocator, tab.tree, self.termRect(), &leaf_rects) catch return;
@@ -1291,7 +1291,7 @@ pub const DevSession = struct {
     /// 단일 panel은 그게 곧 활성 rect라 결과가 같다. 레이아웃/포커스/리사이즈가 바뀔 때(split·switchTab·
     /// resize·focusPane·closeTab·init) 호출해, pxToCell/imeCursorRect가 매 마우스 이벤트마다 재레이아웃
     /// (할당) 없이 캐시된 origin을 읽게 한다.
-    fn recomputeActivePaneRect(self: *DevSession) void {
+    fn recomputeActivePaneRect(self: *AppSession) void {
         const active_pane = self.activePane();
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
@@ -1307,13 +1307,13 @@ pub const DevSession = struct {
     }
 
     /// panel 사이 divider 선 색(0xAARRGGBB) — 활성 하이라이트 색을 써서 두 panel 사이 경계가 또렷하게 보이게.
-    fn dividerColor(self: *const DevSession) u32 {
+    fn dividerColor(self: *const AppSession) u32 {
         return self.sidebarActiveBg();
     }
 
     /// 얇은 **세로선**을 overlay 셀로 그린다 — [y_start, y_end) 범위에 행마다(cell 높이 step) origin_x에 sentinel
     /// 셀 1개씩, reserved로 cell의 한 변 ~2px만 칠한다(3=좌측, 5=우측). divider 세로선과 pane 테두리 좌/우가 공유.
-    fn appendVerticalLine(self: *DevSession, out: *std.ArrayList(metal_frame.NativeMetalCell), origin_x: u32, y_start: u32, y_end: u32, reserved: u16, color: u32) void {
+    fn appendVerticalLine(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), origin_x: u32, y_start: u32, y_end: u32, reserved: u16, color: u32) void {
         const ch = self.cell_height_px;
         if (ch == 0) return;
         var y = y_start;
@@ -1326,7 +1326,7 @@ pub const DevSession = struct {
 
     /// 얇은 **가로선**을 overlay 셀로 그린다 — origin_y에 폭(width_px→floor cols, 최소 1)만큼 sentinel 셀 1개,
     /// reserved로 cell의 한 변 ~2px만 칠한다(2=하단, 4=상단). divider 가로선과 pane 테두리 상/하가 공유.
-    fn appendHorizontalLine(self: *DevSession, out: *std.ArrayList(metal_frame.NativeMetalCell), origin_x: u32, origin_y: u32, width_px: u32, reserved: u16, color: u32) void {
+    fn appendHorizontalLine(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), origin_x: u32, origin_y: u32, width_px: u32, reserved: u16, color: u32) void {
         const cw = self.cell_width_px;
         if (cw == 0) return;
         const cols = @min(@max(width_px / cw, 1), @as(u32, std.math.maxInt(u16)));
@@ -1352,7 +1352,7 @@ pub const DevSession = struct {
     /// `lowerDividerRules`가 그 Rule을 렌더러 **부분 사각형**(reserved=3 bar=좌측 ~2px / 2 underline=하단 ~2px, 커서
     /// 모양과 같은 경로)으로 lower해 **얇은 선**으로 seam에 얹는다. divider 선/hit-test 수학은 chrome 컴포넌트가 단일
     /// 출처(C2). 단일 panel이면 빈 채. 셀 0이면 무동작. layout과 같은 좌표계(termRect)라 경계에 정확히 얹힌다.
-    fn appendActiveTabDividers(self: *DevSession, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
+    fn appendActiveTabDividers(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
         if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
         var app_segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
         defer app_segs.deinit(self.allocator);
@@ -1372,7 +1372,7 @@ pub const DevSession = struct {
     /// 경계 x에 ~2px 센터(−1 offset) reserved=3을 행마다, 가로선은 경계 y에 ~2px(하단 reserved=2, y+1−ch offset) bounds
     /// 폭 한 칸. 색은 `dividerColor()`(tui 토큰 .divider=sidebar_active). divider는 overlay(rasterizeOverlayCells)가
     /// 아니라 pane chrome 셀이라, full-cell이 아닌 이 얇은-선 lowering을 platform이 따로 가진다(옛 appendActiveTabDividers의 offset 보존).
-    fn lowerDividerRules(self: *DevSession, ops: []const chrome.draw.Op, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
+    fn lowerDividerRules(self: *AppSession, ops: []const chrome.draw.Op, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
         const ch = self.cell_height_px;
         const color = self.dividerColor();
         for (ops) |op| switch (op) {
@@ -1400,7 +1400,7 @@ pub const DevSession = struct {
     /// 여러 개면 워크스페이스(⌘1..9)를, 아니면 활성 pane의 Term(⌘])을 점으로 — 한 줄로 가장 관련 있는 차원만.
     /// 점 = sentinel-bg 셀: strip(sidebarBg) 위에 활성=sidebarActiveBg(밝게)·나머지=sidebarHoverBg(중간 톤).
     /// chrome_minimal이 아니거나(full은 사이드바/탭 바가 이미 보여줌) 단일(탭 1개)이면 무동작.
-    fn appendMinimalTabIndicator(self: *DevSession, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
+    fn appendMinimalTabIndicator(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
         if (!self.chrome_minimal) return;
         const cw = self.cell_width_px;
         if (cw == 0) return;
@@ -1453,7 +1453,7 @@ pub const DevSession = struct {
     /// 바가 없는 minimal에선 커서 말고는 어느 pane이 입력을 받는지 단서가 없으므로(full은 탭 바 하이라이트가 보여줌).
     /// 4변을 reserved 부분 사각형(3=좌·5=우·4=상·2=하, 각 ~2px 안쪽 띠)으로 그린다 — 좌/우는 행마다, 상/하는 폭 전체
     /// 한 칸. 색은 divider와 같은 sidebarActiveBg. chrome_minimal이 아니거나 단일 pane(테두리 불필요)이면 무동작.
-    fn appendActivePaneBorder(self: *DevSession, out: *std.ArrayList(metal_frame.NativeMetalCell), rect: app.SplitRect, pane_count: usize) void {
+    fn appendActivePaneBorder(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), rect: app.SplitRect, pane_count: usize) void {
         if (!self.chrome_minimal) return; // full은 활성 pane을 탭 바 하이라이트로 구분한다
         if (pane_count <= 1) return; // split 아니면 전체가 활성 pane이라 테두리 불필요
         const cw = self.cell_width_px;
@@ -1477,7 +1477,7 @@ pub const DevSession = struct {
     /// 그 index의 **neutral seg**(드래그/커서가 직접 씀 — 재변환 없음)와 split을 돌려준다(보이는==잡히는). split만 app.
     /// ⚠️ 반환값은 두 scratch 버퍼의 **borrow**다 — **다음 dividerAtPoint 호출 전에 소비**하라(scratch를 clear+재기록하므로
     /// 보관/aliasing 금지). 현 호출처(down=divider_drag_seg로 값 복사, hover=hit.seg.orientation 즉시 읽기)는 안전하다.
-    fn dividerAtPoint(self: *DevSession, x_px: f64, y_px: f64) ?struct { seg: chrome.components.divider.Seg, split: *PaneTree.Split } {
+    fn dividerAtPoint(self: *AppSession, x_px: f64, y_px: f64) ?struct { seg: chrome.components.divider.Seg, split: *PaneTree.Split } {
         const segs = &self.hover_divider_scratch;
         segs.clearRetainingCapacity();
         self.layoutActiveTabDividers(segs) catch return null;
@@ -1487,14 +1487,14 @@ pub const DevSession = struct {
         return .{ .seg = self.divider_seg_scratch.items[i], .split = segs.items[i].split };
     }
 
-    fn layoutActiveTabDividers(self: *DevSession, out: *std.ArrayList(PaneTree.DividerSeg)) !void {
+    fn layoutActiveTabDividers(self: *AppSession, out: *std.ArrayList(PaneTree.DividerSeg)) !void {
         try PaneTree.layoutDividers(self.allocator, self.activeTab().tree, self.termRect(), out);
     }
 
     /// divider 드래그 중(kind 2) 마우스 위치를 bounds 안 ratio로 매핑해 split.ratio를 바꾸고 panel을 재배치한다.
     /// ratio = (mouse - bounds.origin) / bounds.size를 app.clampRatio(layout과 같은 한도)로 막는다. split이
     /// 사라졌으면(드래그 중 구조 변경) divider_drag가 null로 비워지므로 여기 안 온다.
-    fn dragDividerTo(self: *DevSession, x_px: f64, y_px: f64) void {
+    fn dragDividerTo(self: *AppSession, x_px: f64, y_px: f64) void {
         const sp = self.divider_drag orelse return;
         // ratio 수학은 chrome `divider.dragRatio`(normal 축 = (mouse − bounds.origin)/bounds.size)가 단일 출처. 클램프는
         // 여기서(app.clampRatio — layout과 같은 한도, chrome은 app 상수를 모른다). 드래그 시작 시 저장한 neutral seg를 쓴다.
@@ -1509,7 +1509,7 @@ pub const DevSession = struct {
     /// sidebar_max_pt] pt로 clamp한다. pt를 권위 있게 저장(DPI 변경에도 유지), backing px·grid는 거기서 파생.
     /// 사이드바 폭이 모든 탭의 터미널 폭을 바꾸므로 전 탭 panel을 새 grid로 resize하고 활성 rect·사이드바를
     /// 갱신한다. 폭이 그대로면(같은 pt) 무동작 — SIGWINCH·재배치 storm 방지.
-    fn setSidebarWidthPx(self: *DevSession, x_px: f64) void {
+    fn setSidebarWidthPx(self: *AppSession, x_px: f64) void {
         if (self.scale_milli == 0 or !std.math.isFinite(x_px)) return;
         const clamped_x = if (x_px < 0) 0 else @min(x_px, @as(f64, @floatFromInt(std.math.maxInt(u32))));
         const px: u32 = @intFromFloat(clamped_x);
@@ -1524,14 +1524,14 @@ pub const DevSession = struct {
     }
 
     /// 활성 탭이 split(panel 2개 이상)인가. 마우스 클릭으로 panel을 전환할지(단일이면 무동작) 판정에 쓴다.
-    fn activeTabHasSplit(self: *DevSession) bool {
+    fn activeTabHasSplit(self: *AppSession) bool {
         return PaneTree.leafCount(self.activeTab().tree) > 1;
     }
 
     /// 활성 탭 안에서 포커스를 panel index로 옮긴다(입력/커서/IME/렌더가 따라간다). 활성 panel surface를
     /// 탭 대표(`surface_ptrs[active_tab]` = `app_window.active()`)와 `frame_loop.pump`에 재바인딩하고
     /// 활성 panel rect를 다시 계산한다. 같은 panel이거나 범위 밖이면 무동작. 탭 자체는 안 바꾼다.
-    fn focusPane(self: *DevSession, pane_index: usize) void {
+    fn focusPane(self: *AppSession, pane_index: usize) void {
         const tab = self.activeTab();
         if (pane_index >= tab.panes.items.len or tab.active_pane == pane_index) return;
         tab.active_pane = pane_index;
@@ -1543,7 +1543,7 @@ pub const DevSession = struct {
 
     /// 활성 탭에서 주어진 panel을 찾아 포커스한다(찾으면 true). 마우스/키보드 hit-test가 고른 `*Pane`으로
     /// 포커스를 옮길 때 쓴다(panel→index 매핑).
-    fn focusPaneByPtr(self: *DevSession, pane: *Pane) bool {
+    fn focusPaneByPtr(self: *AppSession, pane: *Pane) bool {
         const tab = self.activeTab();
         for (tab.panes.items, 0..) |p, i| {
             if (p == pane) {
@@ -1559,7 +1559,7 @@ pub const DevSession = struct {
     /// 같은 Term이거나 범위 밖이면 무동작. pane/워크스페이스는 안 바꾼다.
     /// #2(#505 리뷰): 활성 Term이 가로 스크롤 창 밖이면 보이도록 tab_scroll_cols를 조정한다(focusTerm·⌘[]·클릭 후).
     /// 안 넘침(has_scroll=false)이면 무동작. 활성 탭 좌단이 창보다 왼쪽이면 좌단으로, 우단이 창보다 오른쪽이면 우단이 보이게.
-    fn ensureActiveTermVisible(self: *DevSession, pane: *Pane) void {
+    fn ensureActiveTermVisible(self: *AppSession, pane: *Pane) void {
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
@@ -1578,7 +1578,7 @@ pub const DevSession = struct {
         }
     }
 
-    fn focusTerm(self: *DevSession, term_index: usize) void {
+    fn focusTerm(self: *AppSession, term_index: usize) void {
         const pane = self.activePane();
         if (term_index >= pane.terms.items.len or pane.active_term == term_index) return;
         pane.active_term = term_index;
@@ -1590,7 +1590,7 @@ pub const DevSession = struct {
     }
 
     /// 활성 pane의 Term을 delta(+1=다음, -1=이전)만큼 wrap-around로 옮긴다(⌘]/⌘[). Term이 1개면 무동작.
-    fn focusTermRelative(self: *DevSession, delta: i64) void {
+    fn focusTermRelative(self: *AppSession, delta: i64) void {
         const pane = self.activePane();
         const n = pane.terms.items.len;
         if (n <= 1) return;
@@ -1603,7 +1603,7 @@ pub const DevSession = struct {
     /// 바를 찾아 x→타겟 탭(tabIndexInBar, x clamp)을 잡고, 현재 인덱스와 다르면 pane.terms를 rotateMove하고
     /// active_term·drag_index를 타겟으로 옮긴다(드래그 탭이 활성으로 따라간다 — 같은 Term이라 대표 surface는
     /// 안 바뀜). 탭 1개거나 소스 pane을 못 찾으면(레이아웃 실패) 무동작. mouse가 drag(kind 2)에서 호출.
-    fn dragTabTo(self: *DevSession, x_px: f64) void {
+    fn dragTabTo(self: *AppSession, x_px: f64) void {
         const pane = self.tab_drag_pane orelse return;
         if (pane.terms.items.len <= 1) return;
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
@@ -1627,7 +1627,7 @@ pub const DevSession = struct {
     /// 탭 드래그 up(drop) 시 마우스가 '소스가 아닌 다른 pane'의 바 위면 그 pane으로 Term을 옮긴다(cross-pane,
     /// PR-E2). 같은 pane이거나 바 밖이면 무동작(pane 내 재정렬은 drag(2)가 이미 live로 처리했다). 드롭 위치
     /// (x)로 dst 안 삽입 인덱스를 잡는다. mouse가 up(kind 3)에서 호출.
-    fn dropTabAt(self: *DevSession, x_px: f64, y_px: f64) void {
+    fn dropTabAt(self: *AppSession, x_px: f64, y_px: f64) void {
         const src = self.tab_drag_pane orelse return;
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
@@ -1658,7 +1658,7 @@ pub const DevSession = struct {
     /// 상하(vertical); left/top은 새 pane이 앞(a), right/bottom은 뒤(b). 모든 alloc을 먼저 해 실패 시 트리/terms를
     /// 안 건드린다(Term은 src에 남는다). 성공 후 새 pane으로 포커스, src가 비면 collapse, 전 panel resize.
     /// target==src인데 src Term이 1개뿐이면(자기를 자기로 split) 무의미 — 무동작.
-    fn moveTermToNewSplit(self: *DevSession, src: *Pane, src_idx: usize, target: *Pane, zone: PaneDropZone) void {
+    fn moveTermToNewSplit(self: *AppSession, src: *Pane, src_idx: usize, target: *Pane, zone: PaneDropZone) void {
         if (src_idx >= src.terms.items.len) return;
         if (target == src and src.terms.items.len <= 1) return;
         const tab = self.activeTab();
@@ -1719,7 +1719,7 @@ pub const DevSession = struct {
     /// 탭 드래그 중 마우스가 올라간 드롭 타겟을 판정한다(④b 하이라이트용 — dropTabAt의 커밋 판정과 같은 우선순위).
     /// 다른 pane 탭 바 위 → {pane, zone=null}(이동). 자기 바 → null(재정렬, 드롭 아님). pane 본문 → {pane, zone}
     /// (그 방향 split) — 단, target==src인데 Term 1개뿐이면 무동작이라 null. 레이아웃 실패면 null.
-    fn computeDropTarget(self: *DevSession, x_px: f64, y_px: f64) ?DropTarget {
+    fn computeDropTarget(self: *AppSession, x_px: f64, y_px: f64) ?DropTarget {
         const src = self.tab_drag_pane orelse return null;
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
@@ -1748,7 +1748,7 @@ pub const DevSession = struct {
     }
 
     /// 드롭 타겟을 바꾼다 — 바뀌면 metal_dirty(하이라이트 다시 그림). 같은 타겟이면 무동작(매 drag 이벤트 재투영 방지).
-    fn setDropTarget(self: *DevSession, target: ?DropTarget) void {
+    fn setDropTarget(self: *AppSession, target: ?DropTarget) void {
         if (dropTargetEql(self.tab_drop_target, target)) return;
         self.tab_drop_target = target;
         self.metal_dirty = true;
@@ -1757,7 +1757,7 @@ pub const DevSession = struct {
     /// 탭 드래그 중이면 현재 드롭 타겟 zone을 반투명 하이라이트 셀로 out에 append한다(④b). 본문 절반(split)이면
     /// 그 절반을, 탭 바(이동)면 그 pane 바를 칠한다. 행마다 폭 만큼의 sentinel-bg 셀 1개(premultiplied alpha).
     /// 드래그 중이 아니거나 타겟이 없으면 무동작. divider처럼 overlay(터미널 위·커서 아래)로 넘긴다.
-    fn appendDropTargetHighlight(self: *DevSession, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
+    fn appendDropTargetHighlight(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
         if (!self.tab_drag_active) return;
         const target = self.tab_drop_target orelse return;
         const cw = self.cell_width_px;
@@ -1783,7 +1783,7 @@ pub const DevSession = struct {
     /// (커서 중심에 배치). built_frames가 소유(deinit)하고, 반환 PaneFrame은 호출자가 pane_frames '맨 뒤'(맨 위)에
     /// 넣는다. 드래그 중이 아니거나 메트릭/제목을 못 구하면 null. macOS 렌더 패스(CoreText)에서만 부른다.
     fn buildFloatingTabFrame(
-        self: *DevSession,
+        self: *AppSession,
         builder: coretext_frame_builder.CoreTextFrameBuilder,
         built_frames: *std.ArrayList(renderer.RenderFrame),
     ) ?metal_frame.PaneFrame {
@@ -1820,7 +1820,7 @@ pub const DevSession = struct {
     /// 옮긴 Term을 dst의 활성 탭으로 만들고, src가 비면 collapse한다. 그 뒤 모든 panel을 새 leaf rect grid로
     /// resize + 좌표 재계산. insert 실패는 src로 원복한다. src==dst거나 인덱스 밖이면 무동작. Term은 heap-pin
     /// (`*Term`)이라 pane 사이를 포인터로 옮겨도 surface/reader 주소가 안 움직인다(runtime link도 그대로).
-    fn moveTermToPane(self: *DevSession, src: *Pane, src_idx: usize, dst: *Pane, dst_idx: usize) void {
+    fn moveTermToPane(self: *AppSession, src: *Pane, src_idx: usize, dst: *Pane, dst_idx: usize) void {
         if (src == dst or src_idx >= src.terms.items.len) return;
         const term = src.terms.orderedRemove(src_idx);
         const idx = @min(dst_idx, dst.terms.items.len);
@@ -1851,14 +1851,14 @@ pub const DevSession = struct {
 
     /// 비어 있는 pane(모든 Term이 옮겨 나감/exit)을 활성 탭에서 collapse한다. cross-pane 이동(moveTermToPane)이
     /// 쓰는 활성 탭 전용 래퍼 — 임의 탭은 collapsePaneIn을 직접 쓴다.
-    fn collapsePane(self: *DevSession, pane: *Pane) void {
+    fn collapsePane(self: *AppSession, pane: *Pane) void {
         self.collapsePaneIn(self.activeTab(), pane);
     }
 
     /// 주어진 탭(tab)에서 비어 있는 pane을 트리에서 떼고(removeLeaf, 형제로 collapse) panes에서 빼고 해제한다.
     /// split에서만(형제가 있을 때) 일어나므로 단일 pane이면 무동작. active_pane은 범위 clamp만(호출자가 필요 시
     /// 다시 잡는다). pane.terms는 비어 있어 destroyPane이 리스트·Pane만 해제한다. 활성/배경 탭 모두에 쓴다.
-    fn collapsePaneIn(self: *DevSession, tab: *Tab, pane: *Pane) void {
+    fn collapsePaneIn(self: *AppSession, tab: *Tab, pane: *Pane) void {
         if (tab.panes.items.len <= 1) return;
         const freed_split = PaneTree.removeLeaf(&tab.tree, pane) orelse return;
         self.invalidateForFreedSplit(freed_split); // divider_drag가 이 split이면 표적 null(destroy 전, 무관 드래그는 보존)
@@ -1876,7 +1876,7 @@ pub const DevSession = struct {
     const TermLoc = struct { tab_index: usize, pane: *Pane, term_index: usize };
 
     /// 모든 탭/panel을 훑어 첫 'terminated'(셸 exit 관측 완료) Term의 위치를 찾는다(reap 대상). 없으면 null.
-    fn findTerminatedTerm(self: *DevSession) ?TermLoc {
+    fn findTerminatedTerm(self: *AppSession) ?TermLoc {
         for (self.tabs.items, 0..) |tab, ti| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items, 0..) |term, tj| {
@@ -1892,7 +1892,7 @@ pub const DevSession = struct {
     /// 전부 죽었으면(단일/마지막 Term) reap하지 않고 세션 종료 latch(allTabsTerminated)에 맡긴다 — 기존 단일 탭
     /// exit→창 닫힘 동작을 보존. 구조가 매번 바뀌므로 한 번에 하나씩 닫고 다시 스캔한다(stale 인덱스/포인터 방지).
     /// guard는 폭주 backstop(정상이면 죽은 Term 수만큼만 돈다). tick의 drain이 종료를 관측한 뒤 부른다.
-    fn reapTerminatedTerms(self: *DevSession) void {
+    fn reapTerminatedTerms(self: *AppSession) void {
         if (self.termination_finished) return;
         var guard: usize = 0;
         while (guard < 4096) : (guard += 1) {
@@ -1905,7 +1905,7 @@ pub const DevSession = struct {
     /// 임의 탭(tab_index)의 pane에서 term_index Term을 닫고 cascade한다(exit 자동 정리·일반화). Term을 teardown·
     /// 제거하고: pane에 Term이 남으면 active_term clamp, 비면 split이면 collapse, 단일 pane이면 워크스페이스(탭)를
     /// close한다. 활성/배경 탭 모두 대상이라 closeActiveTerm(활성 전용)과 달리 위치를 인자로 받는다.
-    fn closeTermAt(self: *DevSession, tab_index: usize, pane: *Pane, term_index: usize) void {
+    fn closeTermAt(self: *AppSession, tab_index: usize, pane: *Pane, term_index: usize) void {
         const tab = self.tabs.items[tab_index];
         const term = pane.terms.orderedRemove(term_index);
         self.destroyTerm(term);
@@ -1923,7 +1923,7 @@ pub const DevSession = struct {
     /// reap으로 구조가 바뀐 탭의 대표 surface를 그 탭의 현재 활성 Term으로 재바인딩하고(닫힌 Term을 가리키던
     /// stale/dangling 방지) panel을 새 leaf rect로 resize한다(collapse면 형제가 빈자리 확장 — 배경 탭도 전환
     /// 즉시 올바른 크기). 활성 탭이면 좌표 origin도 재계산하고 redraw를 표시한다(배경 탭 변경은 화면에 안 보임).
-    fn refreshAfterReap(self: *DevSession, tab_index: usize) void {
+    fn refreshAfterReap(self: *AppSession, tab_index: usize) void {
         const tab = self.tabs.items[tab_index];
         self.surface_ptrs.items[tab_index] = &tab.activeTerm().surface;
         self.app_window.tabs = self.surface_ptrs.items;
@@ -1937,7 +1937,7 @@ pub const DevSession = struct {
 
     /// 활성 pane에 새 Term(터미널 탭)을 띄우고 그 탭으로 포커스한다(⌘T). 활성 pane의 현재 rect grid
     /// 크기로 새 셸을 spawn해 pane.terms에 더한다. spawn/alloc 실패는 errdefer로 원복하고 무시(pane 불변).
-    fn newTermInActivePane(self: *DevSession) !void {
+    fn newTermInActivePane(self: *AppSession) !void {
         const pane = self.activePane();
         const size = gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
         var cfg = self.new_tab_config;
@@ -1957,7 +1957,7 @@ pub const DevSession = struct {
     /// 키보드 pane 이동 — 활성 panel에서 direction 방향의 인접 panel로 포커스를 옮긴다(있으면). split이 없거나
     /// 그 방향에 panel이 없으면 무동작(best-effort: leaf rect 레이아웃 OOM도 그냥 이동 안 함). 활성 탭 leaf
     /// rect를 펴 paneInDirection으로 대상을 고른 뒤 focusPaneBySurface로 옮긴다.
-    fn focusPaneInDirection(self: *DevSession, dir: FocusDirection) void {
+    fn focusPaneInDirection(self: *AppSession, dir: FocusDirection) void {
         if (!self.activeTabHasSplit()) return;
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
@@ -1972,7 +1972,7 @@ pub const DevSession = struct {
     /// leaf를 split{a: 기존 leaf, b: 새 leaf}로 교체하고, 기존 panel을 a 크기로 줄인 뒤 새 panel로 포커스를
     /// 옮긴다. 단일 panel 탭이면 첫 분할(2개), 이미 split이면 활성 panel이 다시 나뉜다(중첩). spawn/alloc
     /// 실패는 errdefer로 트리/탭을 원복한다(부분 상태를 남기지 않는다).
-    fn splitActivePane(self: *DevSession, direction: app.SplitDirection) !void {
+    fn splitActivePane(self: *AppSession, direction: app.SplitDirection) !void {
         const tab = self.activeTab();
         const active = tab.activePane();
 
@@ -2038,7 +2038,7 @@ pub const DevSession = struct {
     /// realloc·탭 재정렬에도 본체 안 움직임). surface_id·pty_id 발급(next_id), 부분 실패는 errdefer로 정리
     /// (create→live_pty→surface 역순). Pane에 거는 건 호출자(createPane/⌘T)가 한다.
     fn createTerm(
-        self: *DevSession,
+        self: *AppSession,
         request: maru.pty.SpawnRequest,
         size: terminal.Size,
         queue_capacity: usize,
@@ -2068,7 +2068,7 @@ pub const DevSession = struct {
     /// 한 Term을 teardown하고 heap 해제한다(closeAndDetach → live_pty.deinit(reader join) → surface.deinit →
     /// destroy). runtime이 살아 있을 때만 detach. createPane/⌘T errdefer·close·split 실패 정리에 쓴다.
     /// (deinit은 runtime.deinit 순서 때문에 이 2-pass를 직접 풀어 쓴다 — 여기 쓰지 않는다.)
-    fn destroyTerm(self: *DevSession, term: *Term) void {
+    fn destroyTerm(self: *AppSession, term: *Term) void {
         // rename 대상이 이 Term이면 stale 포인터 방지로 비운다(teardown 중 — 직접 null, closeRename 부수효과 없이).
         if (self.renamingTerm(term)) {
             self.rename = null;
@@ -2095,7 +2095,7 @@ pub const DevSession = struct {
     /// 가로 탭으로 들 수 있고(⌘T가 추가), 생성 시엔 1개로 시작한다. heap-pin(`*Pane`)이라 트리 회전·ArrayList
     /// realloc에도 본체가 안 움직인다(SplitTree leaf가 이 `*Pane`을 가리킴). 부분 실패는 errdefer로 정리.
     fn createPane(
-        self: *DevSession,
+        self: *AppSession,
         request: maru.pty.SpawnRequest,
         size: terminal.Size,
         queue_capacity: usize,
@@ -2117,7 +2117,7 @@ pub const DevSession = struct {
     /// 한 panel을 teardown하고 heap 해제한다 — 담긴 모든 Term을 destroyTerm한 뒤 terms 리스트·Pane을 해제.
     /// createPane errdefer·closeTab·closeActivePane·split 실패 정리에 쓴다. **모든 Pane 해제의 단일 chokepoint라,
     /// 해제 직전 구조-무효화 계약(invalidateForFreedPane)을 부른다 — 이 Pane을 가리키던 호버/드래그 포인터를 정리.**
-    fn destroyPane(self: *DevSession, pane: *Pane) void {
+    fn destroyPane(self: *AppSession, pane: *Pane) void {
         self.invalidateForFreedPane(pane); // S1: 포인터 비교는 해제 전 주소로(deref 없음) — 흩어진 null화 대체
         for (pane.terms.items) |term| self.destroyTerm(term);
         if (pane.custom_name) |n| self.allocator.free(n); // 사용자 rename(owned) 해제
@@ -2129,7 +2129,7 @@ pub const DevSession = struct {
     /// `tabs`/`surface_ptrs`에 추가하고 `app_window.tabs`를 갱신하고 새 탭을 활성으로 만든다. 새 Tab 포인터
     /// 반환. 부분 실패는 errdefer로 정리한다(create tab→panes 리스트→pane→append 역순).
     fn createTab(
-        self: *DevSession,
+        self: *AppSession,
         request: maru.pty.SpawnRequest,
         size: terminal.Size,
         queue_capacity: usize,
@@ -2167,7 +2167,7 @@ pub const DevSession = struct {
     /// 활성 탭을 바꾼다(`app_window.selectTab`). 성공하면 활성 탭이 바뀌었으니 재드로우를 위해
     /// metal_dirty를 세우고 true. 범위 밖 index면 false(활성 불변). 입력/렌더는 activeSurface가
     /// active_tab을 따라가므로 이것만으로 라우팅이 바뀐다.
-    pub fn switchTab(self: *DevSession, index: usize) bool {
+    pub fn switchTab(self: *AppSession, index: usize) bool {
         if (!self.app_window.selectTab(index)) return false;
         // 전환한 탭을 현재 창 grid로 맞춘다. resize()는 활성 탭만 만지고 last_resize_size는 세션-전역이라, 다른
         // 탭이 활성인 동안 창이 리사이즈됐거나 복원으로 저장 grid로 spawn된 탭은 전환 시점까지 stale grid다 —
@@ -2192,7 +2192,7 @@ pub const DevSession = struct {
     /// 해제든 stale이 되므로 비운다(캐시라 다음 이동이 재설정). `divider_drag`(*Split)는 여기서 안 건드린다 —
     /// removeLeaf가 떼어낸 split을 돌려주므로 그 호출처(collapsePaneIn·closeActivePane)가 invalidateForFreedSplit으로
     /// **표적** 무효화하고, 트리 통째 해제(destroyTabStandalone)는 거기서 따로 비운다.
-    fn invalidateForFreedPane(self: *DevSession, pane: *Pane) void {
+    fn invalidateForFreedPane(self: *AppSession, pane: *Pane) void {
         if (self.hovered_tab) |ht| {
             if (ht.pane == pane) self.hovered_tab = null;
         }
@@ -2220,7 +2220,7 @@ pub const DevSession = struct {
     /// split 노드가 해제되기 직전(removeLeaf 반환 → destroy 사이) 부른다 — divider_drag가 **바로 이 split**을
     /// 가리키면 표적 null한다(다른 split이면 유지 → 무관한 reap-collapse가 진행 중 divider 드래그를 안 끊는다).
     /// removeLeaf가 freed split을 surface하게 바뀌어 가능해진 표적 무효화(예전 보수적 blanket-null 대체).
-    fn invalidateForFreedSplit(self: *DevSession, split: *PaneTree.Split) void {
+    fn invalidateForFreedSplit(self: *AppSession, split: *PaneTree.Split) void {
         if (self.divider_drag == split) self.divider_drag = null;
     }
 
@@ -2229,7 +2229,7 @@ pub const DevSession = struct {
     /// (deinit과 같은 순서: closeAndDetach(runtime) → live_pty.deinit(reader join) → surface.deinit → Tab
     /// heap 해제) 후 tabs/surface_ptrs에서 빼고 app_window.tabs를 재바인딩하고 active_tab을 clamp한다
     /// (reselectAfterClose). 범위 밖 index면 무동작.
-    pub fn closeTab(self: *DevSession, index: usize) void {
+    pub fn closeTab(self: *AppSession, index: usize) void {
         if (index >= self.tabs.items.len) return;
         if (self.tabs.items.len == 1) {
             // 마지막 탭 = 창 닫기. close()와 같은 종료 latch — 탭은 deinit이 정리한다.
@@ -2261,7 +2261,7 @@ pub const DevSession = struct {
     /// collapse(removeLeaf)하고 panel을 teardown(destroyPane)한 뒤, active_pane을 보정하고, 대표 surface·
     /// pump를 새 활성 panel로 재바인딩하고, 남은 panel을 collapse된 트리의 새 leaf rect로 resize한다. panel이
     /// 1개뿐이면 무동작(그건 closeActivePaneOrTab이 closeTab으로 보낸다). 활성 탭에만 적용한다.
-    fn closeActivePane(self: *DevSession) void {
+    fn closeActivePane(self: *AppSession) void {
         const tab = self.activeTab();
         if (tab.panes.items.len <= 1) return; // 단일 panel은 탭 close 경로
         const idx = tab.active_pane;
@@ -2289,7 +2289,7 @@ pub const DevSession = struct {
 
     /// Cmd+W 정책: split이 있으면 활성 panel을 하나 닫고(collapse), 단일 panel이면 탭을 닫는다
     /// (마지막 탭이면 창). 즉 Cmd+W를 반복하면 pane이 하나씩 닫히다가 마지막 1개에서 탭이 닫힌다.
-    fn closeActivePaneOrTab(self: *DevSession) void {
+    fn closeActivePaneOrTab(self: *AppSession) void {
         if (self.activeTabHasSplit()) {
             self.closeActivePane();
         } else {
@@ -2300,7 +2300,7 @@ pub const DevSession = struct {
     /// 활성 pane의 활성 Term(가로 탭)을 닫는다. pane에 Term이 2개 이상일 때만 — teardown(destroyTerm)하고
     /// terms에서 빼고 active_term을 보정한 뒤 새 활성 Term surface로 재바인딩한다. Term이 1개뿐이면 무동작
     /// (closeActiveTermOrPane이 pane/워크스페이스 close로 보낸다). tree leaf는 pane이라 Term close엔 안 바뀐다.
-    fn closeActiveTerm(self: *DevSession) void {
+    fn closeActiveTerm(self: *AppSession) void {
         const pane = self.activePane();
         if (pane.terms.items.len <= 1) return;
         const idx = pane.active_term;
@@ -2318,7 +2318,7 @@ pub const DevSession = struct {
     /// Cmd+W 정책(계층 cascade): 활성 pane에 Term이 2개 이상이면 활성 Term을 하나 닫고, 1개뿐이면
     /// pane을(split이면 collapse) 또는 워크스페이스를(단일 pane이면 탭/창) 닫는다. 즉 ⌘W를 반복하면 Term →
     /// pane → 워크스페이스 순으로 하나씩 닫힌다.
-    fn closeActiveTermOrPane(self: *DevSession) void {
+    fn closeActiveTermOrPane(self: *AppSession) void {
         if (self.activePane().terms.items.len > 1) {
             self.closeActiveTerm();
         } else {
@@ -2330,7 +2330,7 @@ pub const DevSession = struct {
     /// active_tab을 보정한다. Tab은 heap-pin이라 포인터만 셔플되고 surface/PTY/reader 포인터는 안
     /// 흔들린다. app_window.tabs는 surface_ptrs.items(같은 backing 배열, 내용만 재정렬)라 재바인딩 불요.
     /// 범위 밖이거나 from==to면 무동작.
-    fn moveTab(self: *DevSession, from: usize, to: usize) void {
+    fn moveTab(self: *AppSession, from: usize, to: usize) void {
         if (from == to or from >= self.tabs.items.len or to >= self.tabs.items.len) return;
         rotateMove(*Tab, self.tabs.items, from, to);
         rotateMove(*app.Surface, self.surface_ptrs.items, from, to);
@@ -2340,7 +2340,7 @@ pub const DevSession = struct {
     }
 
     /// live 탭이 모두 종료됐는가(세션/창 종료 판정). 탭이 없으면 false(아직 안 만든 상태).
-    fn allTabsTerminated(self: *DevSession) bool {
+    fn allTabsTerminated(self: *AppSession) bool {
         if (self.tabs.items.len == 0) return false;
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
@@ -2354,7 +2354,7 @@ pub const DevSession = struct {
 
     /// 사용자 액션(Cmd+T)으로 새 탭을 연다 — 첫 탭과 같은 종류의 셸을 '현재 창 크기'로 띄운다(보관한
     /// new_tab_config/zdotdir, term은 loaded_config). createTab이 새 탭을 활성으로 만든다.
-    fn newTab(self: *DevSession) !*Tab {
+    fn newTab(self: *AppSession) !*Tab {
         var cfg = self.new_tab_config;
         cfg.size = self.activeSurface().core.size; // 첫 탭 크기가 아니라 지금 창 크기로
         return self.createTab(
@@ -2372,11 +2372,11 @@ pub const DevSession = struct {
     /// minimal 스크래치 세션에서 탭(워크스페이스·Term) 생성을 막는가. chrome_minimal이면서 minimal_tabs=false일 때만
     /// true — 사이드바·탭 바가 없어 안 보이는 탭을 만드는 걸 차단한다(split은 divider로 보이므로 막지 않는다).
     /// full 세션(chrome_minimal=false)은 항상 false라 탭이 정상 동작한다.
-    fn tabsBlocked(self: *const DevSession) bool {
+    fn tabsBlocked(self: *const AppSession) bool {
         return self.chrome_minimal and !self.minimal_tabs;
     }
 
-    fn dispatchAppAction(self: *DevSession, action: config_mod.Action) void {
+    fn dispatchAppAction(self: *AppSession, action: config_mod.Action) void {
         switch (action) {
             .new_tab => if (!self.tabsBlocked()) {
                 _ = self.newTab() catch return;
@@ -2435,7 +2435,7 @@ pub const DevSession = struct {
 
     /// 커맨드 팝업을 토글한다 — 열려 있으면 닫고, 아니면 카탈로그 전체로 연다(빈 쿼리=전부). Find와 배타적이라
     /// Find를 닫고 연다. UI 상태는 chrome_host.palette, 필터 결과는 platform(palette_filtered).
-    fn togglePalette(self: *DevSession) void {
+    fn togglePalette(self: *AppSession) void {
         if (self.chrome_host.palette.open) {
             self.chrome_host.palette.hide();
         } else {
@@ -2450,7 +2450,7 @@ pub const DevSession = struct {
     /// 현재 쿼리로 카탈로그를 다시 필터해 palette_filtered를 채우고, 컴포넌트의 result_count를 동기화한다(selected는
     /// 맨 위로 — 증분 검색 관용). 타이핑·Backspace·초기 열기마다. OOM이면 목록을 비워 안전하게 둔다. find의
     /// recomputeFind에 대응(검색은 platform이, UI 동기화는 컴포넌트가).
-    fn recomputePalette(self: *DevSession) void {
+    fn recomputePalette(self: *AppSession) void {
         command_palette.filter(self.allocator, self.chrome_host.palette.input.query.items, &self.palette_filtered) catch {
             self.palette_filtered.clearRetainingCapacity();
         };
@@ -2460,7 +2460,7 @@ pub const DevSession = struct {
 
     /// 선택된 명령을 실행한다 — palette_filtered[selected]를 카탈로그 Action으로 해석하고, 팝업을 닫은 뒤 dispatch한다
     /// (레거시 순서: 닫고 실행 — 실행이 또 metal_dirty 등 세움). 매치 없으면 닫기만. palette_accept Action이 부른다.
-    fn acceptPalette(self: *DevSession) void {
+    fn acceptPalette(self: *AppSession) void {
         const action = command_palette.actionAt(self.palette_filtered.items, self.chrome_host.palette.selected);
         self.chrome_host.palette.hide();
         if (action) |a| self.dispatchAppAction(a);
@@ -2498,13 +2498,13 @@ pub const DevSession = struct {
     /// maru 스크롤백 Find를 지금 끌지 — **단일 정책 출처**(toggleFind/findNavigate/tick-close가 공유). alt screen
     /// (vim/less/htop)에선 그 화면을 앱이 소유하고 스크롤백 뷰포트가 잠겨(scrollToAbs 무동작) 매치로 갈 수 없으니
     /// 앱 자체 검색(`/`)에 맡긴다(iTerm2 관례). surface 미초기화(narrow 테스트)면 false(activeSurfaceConst 보호).
-    fn findSuppressed(self: *const DevSession) bool {
+    fn findSuppressed(self: *const AppSession) bool {
         return self.surface_initialized and self.activeSurfaceConst().core.alt_active;
     }
 
     /// 스크롤백 Find를 토글한다 — 열려 있으면 닫고(매치 하이라이트 정리), 아니면 연다(빈 검색어). 팝업과 배타적
     /// 이라 팝업을 닫고 연다. UI 상태는 chrome_host.find, 검색은 검색어가 생길 때 recomputeFind가 한다.
-    fn toggleFind(self: *DevSession) void {
+    fn toggleFind(self: *AppSession) void {
         if (self.chrome_host.find.open) {
             self.chrome_host.find.hide();
             self.find_matches.clearRetainingCapacity(); // 닫힘 — 하이라이트 중단
@@ -2521,7 +2521,7 @@ pub const DevSession = struct {
     /// 인라인 rename을 시작한다 — 대상의 현재 custom_name으로 편집기를 시드(없으면 빈 편집기 = 새 이름)하고 다른
     /// 모달은 닫는다(배타적). 이후 키/IME는 모달 가드가 rename_input으로 라우팅한다. 대상은 dispatchAppAction이
     /// 활성 워크스페이스/pane/Term으로 고른다(또는 PR4/PR5 클릭 대상).
-    fn startRename(self: *DevSession, target: RenameTarget) void {
+    fn startRename(self: *AppSession, target: RenameTarget) void {
         self.chrome_host.find.hide(); // rename은 별도 모달 — 열려 있던 오버레이를 닫는다(배타적)
         self.chrome_host.palette.hide();
         self.rename_input.clear();
@@ -2541,7 +2541,7 @@ pub const DevSession = struct {
     /// rename 편집 텍스트(query)를 대상 custom_name으로 확정한다 — 비면 custom_name을 지운다(이름 없음). 조합 중
     /// preedit가 남아 있으면 먼저 query로 확정(IME 글자 손실 방지 — find와 같은 규율). 옛 owned custom_name을 free
     /// 하고 새 owned 문자열로 교체. 그 뒤 편집기를 닫는다.
-    fn commitRename(self: *DevSession) void {
+    fn commitRename(self: *AppSession) void {
         const target = self.rename orelse return;
         _ = self.rename_input.commitPreedit(self.allocator); // 조합 잔여를 query로
         const text = self.rename_input.query.items;
@@ -2570,7 +2570,7 @@ pub const DevSession = struct {
 
     /// rename 편집기를 닫는다(취소·커밋 공통 종료) — 입력을 비우고 rename을 null로. custom_name은 안 건드린다
     /// (취소면 원래 이름 유지, 커밋이면 위에서 이미 갱신). 대상 teardown 시 invalidate도 이 상태만 비우면 된다.
-    fn closeRename(self: *DevSession) void {
+    fn closeRename(self: *AppSession) void {
         if (self.rename == null) return;
         self.rename = null;
         self.rename_input.clear();
@@ -2581,7 +2581,7 @@ pub const DevSession = struct {
     /// rename 활성 중 키 처리(모달 가드가 호출). Enter=확정·Esc=취소·Backspace=삭제·평문 글자=추가. 모디파이어
     /// 글자·기타 키(↑↓ 등)는 무시해 편집기를 유지한다(텍스트 필드라 단축키를 뒤로 안 흘린다). IME 조합은
     /// imeSetPreedit/imeEnd가 rename_input에 직접 넣는다(find/palette와 같은 경로).
-    fn handleRenameKey(self: *DevSession, ev: chrome.input.InputEvent) void {
+    fn handleRenameKey(self: *AppSession, ev: chrome.input.InputEvent) void {
         switch (ev) {
             .key => |k| switch (k.key) {
                 .escape => self.closeRename(),
@@ -2605,7 +2605,7 @@ pub const DevSession = struct {
     /// 점(x,y px)에 있는 rename 대상 — 사이드바 슬롯=워크스페이스, pane 라벨 세그먼트=pane, Term 탭=term. 없으면
     /// null(터미널 본문·‹›/+·"+" 슬롯·바 밖). 더블클릭(kind 4)과 우클릭 메뉴가 공유해 **같은 자리를 같은 대상으로**
     /// 친다(단일 출처). hit-test는 paneBar(full/tabs/label_cols)·barMetrics를 재사용.
-    fn renameTargetAt(self: *DevSession, x_px: f64, y_px: f64) ?RenameTarget {
+    fn renameTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?RenameTarget {
         if (self.inSidebar(x_px)) {
             // 사이드바: 슬롯이면 그 워크스페이스. 단 우측 ✕(close) zone은 rename 대상 아님(닫기 자리에서 rename 방지).
             // "+" 슬롯/빈 영역은 sidebarSlotAt이 null이라 자연히 제외.
@@ -2637,7 +2637,7 @@ pub const DevSession = struct {
     /// 점이 chrome(사이드바 또는 어떤 pane의 탭 바) 위인가 — 우클릭이 chrome이면 consume하고 터미널 본문이면
     /// mouse-reporting으로 흘리는 판정에 쓴다. renameTargetAt가 null인 chrome 영역(사이드바 +/빈칸·바 ‹›/+)과
     /// 터미널 본문을 구분한다(renameTargetAt는 둘 다 null이라 구분 불가).
-    fn pointOnChrome(self: *DevSession, x_px: f64, y_px: f64) bool {
+    fn pointOnChrome(self: *AppSession, x_px: f64, y_px: f64) bool {
         if (self.inSidebar(x_px)) return true;
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
@@ -2652,7 +2652,7 @@ pub const DevSession = struct {
 
     /// 컨텍스트 메뉴의 선택 항목을 실행한다 — 현재 메뉴는 "Rename" 1항목이라 대상 rename을 연다. 메뉴를 먼저 닫고
     /// 대상이 살아 있으면 startRename(대상 teardown 시 context_menu_target은 이미 null화됨).
-    fn acceptContextMenu(self: *DevSession) void {
+    fn acceptContextMenu(self: *AppSession) void {
         const target = self.context_menu_target;
         self.context_menu_target = null;
         self.chrome_host.context_menu.hide();
@@ -2665,7 +2665,7 @@ pub const DevSession = struct {
     /// 검색 이력(검색어)이 없으면 무동작. 닫을 때 매치를 비웠으니 비어 있으면 보존 검색어로 다시 채우고(현재
     /// 인덱스는 닫기 전 위치 유지 — setMatchCount가 범위 clamp), find_nav를 세워 하이라이트(현재 매치)·출력
     /// 시 재검색을 닫힌 채로도 유지한다. 오버레이가 열려 있으면 모달 라우팅이 키를 가로채 이 경로는 안 탄다.
-    fn findNavigate(self: *DevSession, forward: bool) void {
+    fn findNavigate(self: *AppSession, forward: bool) void {
         if (!self.surface_initialized) return;
         if (self.findSuppressed()) return; // alt screen — maru Find 끔(toggleFind와 같은 정책)
         if (self.chrome_host.find.input.query.items.len == 0) return; // 검색 이력 없음 — 무동작
@@ -2682,7 +2682,7 @@ pub const DevSession = struct {
 
     /// chrome 컴포넌트가 낸 의도(HostAction)를 session 부수효과로 디스패치한다 — chrome은 session을 모르므로(경계)
     /// 재검색·스크롤·닫기를 여기서 실행한다. handleKeyEvent의 chrome 라우팅이 부른다.
-    fn dispatchChromeAction(self: *DevSession, action: chrome.host.HostAction) void {
+    fn dispatchChromeAction(self: *AppSession, action: chrome.host.HostAction) void {
         switch (action) {
             .none => {}, // notice dismiss 등 — session 부수효과 없음(컴포넌트가 닫음)
             .find_close => self.find_matches.clearRetainingCapacity(), // find.hide는 컴포넌트가 이미 — 하이라이트만 정리
@@ -2704,7 +2704,7 @@ pub const DevSession = struct {
     /// 현재 검색어로 활성 surface를 다시 검색해 find_matches를 채우고, 현재 인덱스를 첫 매치로 리셋한 뒤 뷰로
     /// 스크롤한다(증분 검색 — 타이핑·Backspace마다). 검색어가 비면 매치 0. OOM이면 매치를 비워 안전하게 둔다.
     /// chrome_host.find.match_count를 동기화해(setMatchCount) 컴포넌트의 카운터·next/prev wrap이 맞게 한다.
-    fn recomputeFind(self: *DevSession) void {
+    fn recomputeFind(self: *AppSession) void {
         if (!self.surface_initialized) return;
         self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch {
             self.find_matches.clearRetainingCapacity();
@@ -2716,7 +2716,7 @@ pub const DevSession = struct {
 
     /// 현재(네비게이션) 매치를 뷰포트로 스크롤한다 — 없으면 무동작. 검색·네비게이션 후 호출(scrollToAbs가
     /// 매치를 세로 중앙쯤에 둬 상단 Find 오버레이에 안 가린다). 현재 인덱스는 chrome_host.find.current.
-    fn scrollToCurrentMatch(self: *DevSession) void {
+    fn scrollToCurrentMatch(self: *AppSession) void {
         if (!self.surface_initialized) return;
         const cur = self.chrome_host.find.current;
         if (cur >= self.find_matches.items.len) return;
@@ -2727,14 +2727,14 @@ pub const DevSession = struct {
     /// `app_window.active_tab`을 따라가므로 멀티-탭(후속 PR)에서 탭을 전환하면 자동으로 활성 탭에
     /// 라우팅된다. 지금은 단일 탭이라 항상 `surfaces[0]`이고 외부 동작은 불변이다. 호출자는 기존대로
     /// `surface_initialized`로 가드하므로 `active()`는 non-null이 보장된다.
-    fn activeSurface(self: *DevSession) *app.Surface {
+    fn activeSurface(self: *AppSession) *app.Surface {
         return self.app_window.active().?;
     }
 
     /// kitty graphics(K4c): kitty_uploaded(렌더러 업로드 generation 미러)를 live id 집합으로 prune한다 —
     /// live가 아닌(저장소에서 빠진/Swift가 텍스처를 evict할) image_id를 dedup 상태에서도 제거해, 다시
     /// 활성화되면 planImageUploads가 재업로드하게 한다. id 수가 작아 선형 검색으로 충분하다.
-    fn pruneKittyUploaded(self: *DevSession, live_ids: []const u32) void {
+    fn pruneKittyUploaded(self: *AppSession, live_ids: []const u32) void {
         var to_remove: std.ArrayList(u32) = .empty;
         defer to_remove.deinit(self.allocator);
         var it = self.kitty_uploaded.iterator();
@@ -2748,7 +2748,7 @@ pub const DevSession = struct {
 
     /// `activeSurface`의 읽기 전용(`*const self`) 변형 — `pxToCell`/`imeCursorRect`처럼 surface를
     /// 안 바꾸는 const 메서드가 같은 seam을 거치게 한다.
-    fn activeSurfaceConst(self: *const DevSession) *const app.Surface {
+    fn activeSurfaceConst(self: *const AppSession) *const app.Surface {
         return self.app_window.activeConst().?;
     }
 
@@ -2756,7 +2756,7 @@ pub const DevSession = struct {
     /// 뽑아 갱신한다. 분수 scale을 그대로 곱한 device 픽셀 font size로 조회한다. macOS가
     /// 아니거나(테스트/CI) 조회 실패면 같은 device 픽셀 font size의 정사각으로 대체한다.
     /// scale_milli가 바뀌는 resize에서도 호출한다.
-    fn refreshCellMetrics(self: *DevSession) void {
+    fn refreshCellMetrics(self: *AppSession) void {
         const device_font_size = renderer.deviceFontSizeFromMilli(self.appearance.font.size, self.scale_milli);
         const square: u32 = @intFromFloat(@round(device_font_size));
         self.cell_width_px = square;
@@ -2791,12 +2791,12 @@ pub const DevSession = struct {
     }
 
     /// 폰트 크기를 delta(pt)만큼 조절한다(⌘+/⌘-). setFontSize가 클램프·메트릭·grid를 처리한다.
-    fn adjustFontSize(self: *DevSession, delta: f32) void {
+    fn adjustFontSize(self: *AppSession, delta: f32) void {
         self.setFontSize(self.appearance.font.size + delta);
     }
 
     /// 폰트 크기를 config 기본값으로 되돌린다(⌘0).
-    fn resetFontSize(self: *DevSession) void {
+    fn resetFontSize(self: *AppSession) void {
         self.setFontSize(self.base_font_size);
     }
 
@@ -2805,7 +2805,7 @@ pub const DevSession = struct {
     /// cell 픽셀·사이드바 재계산 → ③ atlas 무효화(새 크기로 재래스터·옛 슬롯 회수) → ④ 같은 창(backing px)에서
     /// 새 cell 크기로 grid 재산출 + 각 pane resize(코어 resize의 reflow 경로 공유 — PTY winsize/SIGWINCH 포함).
     /// 터미널 콘텐츠 reflow는 없다(셀 크기·grid 차원만, Ghostty 동일).
-    fn setFontSize(self: *DevSession, size: f32) void {
+    fn setFontSize(self: *AppSession, size: f32) void {
         const clamped = std.math.clamp(size, font_size_min, font_size_max);
         if (clamped == self.appearance.font.size) return; // 경계에서 더 눌러도 변화 없으면 재작업 스킵
         self.appearance.font.size = clamped;
@@ -2822,7 +2822,7 @@ pub const DevSession = struct {
         self.metal_dirty = true;
     }
 
-    pub fn handleKeyEvent(self: *DevSession, event: terminal.KeyEvent) !FrameSummary {
+    pub fn handleKeyEvent(self: *AppSession, event: terminal.KeyEvent) !FrameSummary {
         // Swift/AppKit는 normalized key event만 전달한다. app-vs-terminal 판정과 PTY
         // write는 기존 FrameLoop 경계를 통과해야 smoke와 제품 app이 같은 shortcut 정책을 쓴다.
         self.total_key_events += 1;
@@ -2911,7 +2911,7 @@ pub const DevSession = struct {
     /// 뷰포트를 delta_up줄만큼 스크롤한다(+위=과거, -아래=현재). 스크롤 로직은 TerminalCore가
     /// 소유하고, 여기선 다음 tick이 새 뷰를 그리도록 metal_dirty만 세운다(Swift는 휠/키 이벤트를
     /// 이 함수로 넘기는 얇은 글루다).
-    pub fn scroll(self: *DevSession, delta_up: i32) void {
+    pub fn scroll(self: *AppSession, delta_up: i32) void {
         if (!self.surface_initialized) return;
         self.activeSurface().core.scrollViewport(@as(isize, delta_up));
         self.metal_dirty = true;
@@ -2922,7 +2922,7 @@ pub const DevSession = struct {
     /// 단위라 한 줄 높이(포인트)로 나눠 줄 수로 바꾸고, 줄 단위(마우스 휠) 델타는 그대로 줄 수다.
     /// 한 줄 미만의 정밀 델타는 wheel_accum에 누적해 천천히 스크롤해도 줄이 소실되지 않는다.
     /// NaN/∞·거대값은 무시/clamp한다(@intFromFloat trap 방지).
-    pub fn scrollWheel(self: *DevSession, delta_y: f64, delta_x: f64, precise: bool, x_px: f64, y_px: f64) void {
+    pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool, x_px: f64, y_px: f64) void {
         if (!self.surface_initialized) return;
         // 방향이 뒤집히면 1줄 미만 잔여를 버린다 — 이전 방향의 residue가 첫 반대 틱을 상쇄해
         // 방향 전환이 굼뜨게 느껴지는 것 방지(iTerm2/xterm.js 동작).
@@ -2962,7 +2962,7 @@ pub const DevSession = struct {
 
     /// 창 포커스 변화(OS window key/resign)를 활성 surface 코어에 알린다 — focus reporting(DECSET 1004)이 켜져
     /// 있으면 CSI I(gained)/CSI O(lost)가 PTY로 흐른다(vim FocusGained/Lost). off면 reportFocus가 무동작이라 무전송.
-    pub fn focusChanged(self: *DevSession, gained: bool) void {
+    pub fn focusChanged(self: *AppSession, gained: bool) void {
         if (!self.surface_initialized) return;
         const surface = self.activeSurface();
         surface.core.reportFocus(gained);
@@ -2976,7 +2976,7 @@ pub const DevSession = struct {
 
     /// 스크린 점(backing px) 아래 panel의 활성 Term surface(없으면 — 사이드바/밖 — null). 휠 라우팅에 쓴다.
     /// 활성 탭 leaf rect를 펴 paneAtPoint로 그 점의 pane을 찾는다. 단일 panel이면 그 panel(=활성)을 돌려준다.
-    fn surfaceAt(self: *DevSession, x_px: f64, y_px: f64) ?*app.Surface {
+    fn surfaceAt(self: *AppSession, x_px: f64, y_px: f64) ?*app.Surface {
         if (!self.surface_initialized) return null;
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
@@ -2988,7 +2988,7 @@ pub const DevSession = struct {
     /// 가로 스와이프(delta_x→cols)를 커서 아래 pane의 탭 바 가로 스크롤로 바꾼다(#2b). 그 pane이 탭 넘침(has_scroll)이
     /// 아니면 무동작. 클릭 ‹›와 같이 eff(=bm.scroll_cols, [0,max] clamp된 값) 기준이라 stale tab_scroll_cols가 자동
     /// 정정된다(다음 렌더 tabLayout이 다시 clamp). natural 방향: 오른쪽 스와이프(cols>0)면 왼쪽 탭으로(scroll 감소).
-    fn scrollTabBarAt(self: *DevSession, x_px: f64, y_px: f64, cols: i32) void {
+    fn scrollTabBarAt(self: *AppSession, x_px: f64, y_px: f64, cols: i32) void {
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
@@ -3010,14 +3010,14 @@ pub const DevSession = struct {
     /// 프로그램(less/vim)에 보낸다(iTerm2/Terminal.app 동작, DECCKM이면 SS3 형식). 휠과
     /// Shift+PageUp/Down이 같은 경로를 타 일관되게 동작한다.
     /// 활성 surface를 줄 수만큼 스크롤(키보드 PageUp/Down 경로). 휠은 surfaceAt으로 고른 surface에 직접 쓴다.
-    fn scrollLines(self: *DevSession, lines: i32) void {
+    fn scrollLines(self: *AppSession, lines: i32) void {
         self.scrollSurfaceLines(self.activeSurface(), lines);
     }
 
     /// 주어진 surface를 줄 수만큼 스크롤한다 — 휠은 커서 아래 panel(비활성 가능), 키보드는 활성. alt screen +
     /// alternate scroll(DECSET 1007)이면 그 surface PTY로 화살표 키를 보내고(less/vim 등 프로그램 스크롤),
     /// 아니면 그 surface의 뷰포트를 스크롤한다(scrollback). 줄 0이면 무동작.
-    fn scrollSurfaceLines(self: *DevSession, surface: *app.Surface, lines: i32) void {
+    fn scrollSurfaceLines(self: *AppSession, surface: *app.Surface, lines: i32) void {
         if (lines == 0) return;
         const core = &surface.core;
         if (core.alt_active and core.alternate_scroll) {
@@ -3050,7 +3050,7 @@ pub const DevSession = struct {
     /// backing 픽셀 좌표를 (row, col) 셀로 변환한다(grid 안으로 clamp). 핵심: clamp를 float
     /// 도메인에서 먼저 한 뒤 @intFromFloat 한다 — 거대한 finite 좌표(손상/악성 입력)가 i64 변환
     /// 에서 trap(앱 패닉)하던 것을 막는다(wheelDeltaToLines와 같은 규율). 비유한값은 null.
-    fn pxToCell(self: *const DevSession, x_px: f64, y_px: f64) ?struct { row: u16, col: u16, term_x_px: u16, term_y_px: u16 } {
+    fn pxToCell(self: *const AppSession, x_px: f64, y_px: f64) ?struct { row: u16, col: u16, term_x_px: u16, term_y_px: u16 } {
         if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
         const core = &self.activeSurfaceConst().core;
         const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
@@ -3083,7 +3083,7 @@ pub const DevSession = struct {
     /// 마우스 선택. kind 1=down(선택 시작), 2=drag(확장), 3=up(확정 — 드래그 선택인데 이동이
     /// 없었으면 클릭으로 보고 해제), 4=더블클릭(단어 선택), 5=트리플클릭(논리 줄 선택). 좌표는
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
-    pub fn mouse(self: *DevSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
+    pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (!self.surface_initialized) return;
         // 인라인 rename 중 마우스 down(어디든)이면 편집을 확정한다(포커스 상실 = 확정 — docs/tabs-splits-layout.md).
         // 그 뒤 클릭은 정상 처리된다(탭 전환·pane 포커스 등). drag/up(2/3)은 down이 선행하므로 여기서 안 걸린다.
@@ -3399,7 +3399,7 @@ pub const DevSession = struct {
     /// 커서/오버레이 caret 깜빡임 한 스텝(30Hz tick마다). 깜빡일 대상이 없으면(steady 커서 + 오버레이 닫힘) 보이는
     /// 위상으로 고정한다 — 토글 없으니 idle 재투영도 없다. 오버레이(find·palette)가 열렸으면 커서 blink 설정과 무관
     /// 하게 caret이 깜빡인다(텍스트 입력 caret 관용). 터미널 커서의 기존 메커니즘(틱-카운터 + suffix-trim)을 그대로 탄다.
-    fn updateCursorBlink(self: *DevSession) void {
+    fn updateCursorBlink(self: *AppSession) void {
         const core = &self.activeSurface().core;
         // 커서 자체가 깜빡이는 조건(DECSCUSR blink·표시·조합 아님).
         const cursor_blinks = core.cursor_blink and core.cursor_visible and core.preedit == null;
@@ -3429,7 +3429,7 @@ pub const DevSession = struct {
     }
 
     /// 깜빡임을 보이는 위상으로 리셋한다(입력/출력 직후 — caret이 항상 보이며 새 주기를 시작).
-    fn resetCursorBlink(self: *DevSession) void {
+    fn resetCursorBlink(self: *AppSession) void {
         self.blink_ticks = 0;
         if (!self.blink_visible) {
             self.blink_visible = true;
@@ -3439,7 +3439,7 @@ pub const DevSession = struct {
 
     /// 드래그 자동 스크롤 한 스텝(30Hz tick마다). 드래그가 grid 밖에 머무는 동안 한 줄씩
     /// 스크롤하며 선택을 가장자리 행으로 확장한다 — 화면보다 긴 내용을 드래그로 선택하는 표준 UX.
-    fn applyDragAutoscroll(self: *DevSession) void {
+    fn applyDragAutoscroll(self: *AppSession) void {
         if (self.drag_autoscroll == 0) return;
         const core = &self.activeSurface().core;
         // 게이트는 "확장할 선택이 있는가"다 — mouse_drag_selecting로 걸면 더블/트리플클릭(4/5)으로
@@ -3462,7 +3462,7 @@ pub const DevSession = struct {
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
     const InputFocus = enum { terminal, notice, rename, find, palette };
-    fn inputFocus(self: *const DevSession) InputFocus {
+    fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
         if (self.rename != null) return .rename; // 인라인 rename(find/palette와 배타적 — startRename이 닫음)
         if (self.chrome_host.find.open) return .find;
@@ -3472,7 +3472,7 @@ pub const DevSession = struct {
 
     /// 활성 입력 대상의 IME 조합(marked) 텍스트를 교체한다(빈 bytes=해제). inputFocus 단일 출처로 분기 — exhaustive
     /// switch라 입력 대상 추가 시 컴파일러가 누락을 막는다.
-    fn imeSetPreedit(self: *DevSession, bytes: []const u8) void {
+    fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
         switch (self.inputFocus()) {
             .notice => {}, // notice는 조합을 표시하지 않는다(텍스트 입력 대상 아님)
             .rename => self.rename_input.setPreedit(self.allocator, bytes) catch {},
@@ -3484,7 +3484,7 @@ pub const DevSession = struct {
 
     /// 활성 입력 대상이 조합 중(preedit 있음)인가 — imeBegin/imeEnd가 조합 판정에 쓴다. 예전엔 core.preedit만 봐서
     /// find/palette 조합을 놓쳤다(단일-출처 위반 → 조합 보호·표시 버그). inputFocus로 통일.
-    fn imeComposingActive(self: *const DevSession) bool {
+    fn imeComposingActive(self: *const AppSession) bool {
         return switch (self.inputFocus()) {
             .notice => false, // notice는 조합 상태가 없다
             .rename => self.rename_input.preedit.items.len > 0,
@@ -3496,7 +3496,7 @@ pub const DevSession = struct {
 
     /// IME 키 트랜잭션 시작(Swift keyDown 진입 — 수정자 없는 키). 이번 키에서 입력기가 만들
     /// 텍스트/조합 변화를 모으기 시작한다.
-    pub fn imeBegin(self: *DevSession) void {
+    pub fn imeBegin(self: *AppSession) void {
         if (!self.surface_initialized) return;
         // 조합도 타이핑이다 — 과거를 보는 중이면 바닥으로 스냅해 preedit이 보이게 한다
         // (handleKeyEvent의 "입력하면 live 복귀"와 같은 동작; 조합 키는 그 경로를 안 타므로 여기서).
@@ -3517,7 +3517,7 @@ pub const DevSession = struct {
     /// 입력기가 확정한 텍스트(insertText). 즉시 보내지 않고 누적한다 — 전송 여부·시점은
     /// imeEnd가 일괄 판정한다(이중 전송 차단). 트랜잭션 밖(드물게 입력기가 keyDown 없이 직접
     /// 커밋 — 포커스 전환 등)이면 그대로 확정 전송한다.
-    pub fn imeInsert(self: *DevSession, bytes: []const u8) void {
+    pub fn imeInsert(self: *AppSession, bytes: []const u8) void {
         if (!self.surface_initialized) return;
         if (!self.ime_active) {
             self.sendCommittedText(bytes);
@@ -3530,7 +3530,7 @@ pub const DevSession = struct {
 
     /// 입력기의 조합 중(marked) 텍스트 갱신(빈 입력 = 조합 해제). 활성 입력 대상(inputFocus 단일 출처)에 보여준다 —
     /// find/palette 열림이면 그 입력에, 아니면 터미널 core. 조합 상태가 그 자리에 즉시 보이고 뒤로 새지 않는다.
-    pub fn imeMarked(self: *DevSession, bytes: []const u8) void {
+    pub fn imeMarked(self: *AppSession, bytes: []const u8) void {
         if (!self.surface_initialized) return;
         self.imeSetPreedit(bytes);
         self.metal_dirty = true; // 조합 글자는 즉시 보여야 한다
@@ -3538,7 +3538,7 @@ pub const DevSession = struct {
     }
 
     /// 입력기의 deleteBackward 편집 명령(doCommand). 트랜잭션에 기록만 하고 판정은 imeEnd가 한다.
-    pub fn imeDeleteBackward(self: *DevSession) void {
+    pub fn imeDeleteBackward(self: *AppSession) void {
         if (self.ime_active) self.ime_did_delete = true;
     }
 
@@ -3556,7 +3556,7 @@ pub const DevSession = struct {
     /// 트랜잭션은 그래도 닫고(누적 텍스트 커밋/조합 무시 판정), 일반 키 인코딩만 건너뛴다 —
     /// ime_begin 후 ime_end를 영영 안 닫아 ime_active가 박히고 누적 텍스트가 유실되던 누수를
     /// 막는다(라이브 회귀 클래스).
-    pub fn imeEnd(self: *DevSession, event: ?terminal.KeyEvent) void {
+    pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
         if (!self.surface_initialized) return;
         const composing = self.imeComposingActive() or self.ime_had_marked; // 단일 출처(find/palette도) — core만 보던 누락 수정
         defer {
@@ -3600,9 +3600,9 @@ pub const DevSession = struct {
     /// 입력기가 firstRect로 물어보면 Swift가 이 값을 화면 좌표로 바꿔 후보창을 커서 위치에
     /// 띄운다. 조합 중에는 커서가 preedit 시작(core.cursor)에 있어 후보창이 조합 글자 옆에 뜬다.
     /// 반환: row*cell_h, col*cell_w, cell_w, cell_h.
-    // self는 *DevSession(비-const) — rename caret 위치(renameCaretRect)가 leaf-rects 레이아웃을 펴는 *DevSession
+    // self는 *AppSession(비-const) — rename caret 위치(renameCaretRect)가 leaf-rects 레이아웃을 펴는 *AppSession
     // 헬퍼를 거치기 때문(읽기 전용 계산이지만 activeTabLeafRects 체인이 비-const). ABI·테스트 호출자는 모두 mutable.
-    pub fn imeCursorRect(self: *DevSession) struct { x: f64, y: f64, w: f64, h: f64 } {
+    pub fn imeCursorRect(self: *AppSession) struct { x: f64, y: f64, w: f64, h: f64 } {
         const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
         if (!self.surface_initialized) return .{ .x = 0, .y = 0, .w = cw, .h = ch };
@@ -3636,7 +3636,7 @@ pub const DevSession = struct {
     /// 진행 중인 IME 조합(preedit)을 확정(커밋)한다 — 조합 글자를 대상에 보내고 preedit을 비운다. 포커스 상실
     /// (setFocused)과, IME를 우회하는 특수키/단축키(PageUp 등) '직전'에 호출해 Swift marked text와 화면이 어긋나지
     /// 않게 한다. 활성 입력 대상(inputFocus 단일 출처)으로 분기 — 터미널은 PTY로, find/palette는 검색어/명령어로 확정.
-    pub fn commitComposition(self: *DevSession) void {
+    pub fn commitComposition(self: *AppSession) void {
         if (!self.surface_initialized) return;
         switch (self.inputFocus()) {
             .notice => {}, // notice는 확정할 조합이 없다
@@ -3668,7 +3668,7 @@ pub const DevSession = struct {
     /// 포커스 변화. 잃으면 조합 중 텍스트를 버리지 않고 확정(커밋)한다 — 버리면 글자가
     /// 사라졌다가 재포커스 후 입력 위치가 어긋나는 사용감(라이브 제보)이 된다.
     /// Terminal.app/Ghostty와 같은 의미론.
-    pub fn setFocused(self: *DevSession, focused: bool) void {
+    pub fn setFocused(self: *AppSession, focused: bool) void {
         if (!self.surface_initialized) return;
         if (focused) return;
         // 인라인 rename 중 포커스 상실 = 확정(docs/tabs-splits-layout.md "포커스 상실=확정"). 앱-내 클릭은 mouse()
@@ -3683,7 +3683,7 @@ pub const DevSession = struct {
 
     /// 확정 텍스트를 코드포인트 단위로 기존 key event 경로에 태운다 — 인코딩 단일 출처
     /// (encodeKey)와 입력 회계(terminal_input 카운터)를 유지한다.
-    fn sendCommittedText(self: *DevSession, bytes: []const u8) void {
+    fn sendCommittedText(self: *AppSession, bytes: []const u8) void {
         const view = std.unicode.Utf8View.init(bytes) catch return;
         var it = view.iterator();
         while (it.nextCodepoint()) |cp| {
@@ -3699,7 +3699,7 @@ pub const DevSession = struct {
 
     /// 클립보드 텍스트 붙여넣기(Cmd+V). 인코딩(개행 정규화 + bracketed paste 감싸기)은 core가
     /// 하고, 여기선 한 번의 writeInput으로 보낸다(부분 쓰기 실패로 감싸기가 깨지지 않게).
-    pub fn pasteText(self: *DevSession, bytes: []const u8) void {
+    pub fn pasteText(self: *AppSession, bytes: []const u8) void {
         if (!self.surface_initialized or bytes.len == 0) return;
         const encoded = self.activeSurface().core.encodePaste(self.allocator, bytes) catch return;
         defer self.allocator.free(encoded);
@@ -3711,7 +3711,7 @@ pub const DevSession = struct {
     }
 
     /// pending paste를 지금 쓸 수 있는 만큼 non-blocking으로 흘려보낸다(0이 나오면 다음 tick).
-    fn flushPendingPaste(self: *DevSession) void {
+    fn flushPendingPaste(self: *AppSession) void {
         while (self.pending_paste_offset < self.pending_paste.items.len) {
             const remaining = self.pending_paste.items[self.pending_paste_offset..];
             const written = self.runtime.writeInputNonBlocking(self.activeSurface().id, remaining) catch {
@@ -3733,7 +3733,7 @@ pub const DevSession = struct {
     /// Cmd+hover URL 밑줄을 갱신한다. 영역 우선순위는 마우스 클릭(mouse down)과 같다: 사이드바 → 탭 바 → divider
     /// → 터미널. 사이드바·탭 바=arrow(default), divider=resize(좌우 split=↔, 상하 split=↕), 터미널=iBeam(text),
     /// Cmd+hover URL=pointingHand(link). 창 밖 sentinel(-1,-1)이면 inSidebar=false→터미널 경로로 호버 해제.
-    pub fn hoverCursor(self: *DevSession, x_px: f64, y_px: f64, cmd_held: bool) CursorKind {
+    pub fn hoverCursor(self: *AppSession, x_px: f64, y_px: f64, cmd_held: bool) CursorKind {
         if (!self.surface_initialized) return .text;
         // 스크롤바 hover 강조를 매 이동 갱신한다(어느 zone이든 — 아래 early return 전에 항상). scrollbarGrabAt이
         // 영역+스크롤백 유무를 본다(우측 얇은 띠). 커서 종류는 안 바꾼다(얇은 띠라 iBeam 깜빡임 방지) — 강조만.
@@ -3791,7 +3791,7 @@ pub const DevSession = struct {
 
     /// 떠 있던 Cmd+hover URL 밑줄 anchor를 해제하고 변경 시 redraw 표시. hoverCursor의 여러 분기(사이드바/탭
     /// 바/divider)가 터미널 URL이 아닌 영역으로 갈 때 공유한다.
-    fn clearHoverUrlAnchor(self: *DevSession) void {
+    fn clearHoverUrlAnchor(self: *AppSession) void {
         if (self.hover_url_anchor != null) {
             self.hover_url_anchor = null;
             self.metal_dirty = true;
@@ -3800,7 +3800,7 @@ pub const DevSession = struct {
 
     /// hover URL의 현재 뷰포트 밑줄 범위. 매 frame 절대 좌표 anchor에서 다시 계산해 클립하므로
     /// 스크롤·출력·resize 후에도 항상 현재 폭/위치에 맞는다(stale 좌표 OOB 차단).
-    pub fn hoverLinkSpan(self: *DevSession) ?terminal.SelectionSpan {
+    pub fn hoverLinkSpan(self: *AppSession) ?terminal.SelectionSpan {
         const anchor = self.hover_url_anchor orelse return null;
         return self.activeSurface().core.urlSpanAtAbs(anchor);
     }
@@ -3813,7 +3813,7 @@ pub const DevSession = struct {
 
     /// Cmd+클릭 위치의 URL(없으면 빈 슬라이스). Swift가 NSWorkspace로 연다 — URL 인식(단어 경계,
     /// soft-wrap 이어 붙임, http(s) 검사, 끝 문장부호 다듬기)은 core가 소유한다.
-    pub fn urlAt(self: *DevSession, x_px: f64, y_px: f64) []const u8 {
+    pub fn urlAt(self: *AppSession, x_px: f64, y_px: f64) []const u8 {
         if (!self.surface_initialized) return &.{};
         // 스크린→셀 변환은 pxToCell 단일 출처를 쓴다(사이드바 offset 차감 포함) — 별도 변환을 두면
         // 사이드바 폭만큼 어긋난 셀에서 URL을 찾는다(직접 x/cw로 계산하던 버그를 여기로 일원화해 고침).
@@ -3829,7 +3829,7 @@ pub const DevSession = struct {
     }
 
     /// 선택 텍스트를 추출해 내부 버퍼로 돌려준다(없으면 빈 슬라이스). Swift가 NSPasteboard에 쓴다.
-    pub fn copyText(self: *DevSession) []const u8 {
+    pub fn copyText(self: *AppSession) []const u8 {
         if (!self.surface_initialized) return &.{};
         if (self.copy_buffer.len > 0) {
             self.allocator.free(self.copy_buffer);
@@ -3844,7 +3844,7 @@ pub const DevSession = struct {
     /// 쓴다. **정책**: 보안 정책(terminal-compatibility-policy.md §OSC52)상 기본 deny — ask UI 구현 전 `allow`
     /// shortcut 금지. 사용자가 env `MARU_OSC52_WRITE`로 명시 opt-in해야 allow한다(정식 config 키는 후속).
     /// 코어 pending을 비워(한 번 쓰고 소비) 같은 데이터가 다음 tick에 또 쓰이지 않게 한다.
-    pub fn pendingClipboard(self: *DevSession) []const u8 {
+    pub fn pendingClipboard(self: *AppSession) []const u8 {
         if (!self.surface_initialized) return &.{};
         if (std.c.getenv("MARU_OSC52_WRITE") == null) return &.{}; // 정책 deny(기본) — opt-in 없으면 무시
         const pending = self.activeSurface().core.pendingClipboardWrite();
@@ -3862,7 +3862,7 @@ pub const DevSession = struct {
     /// UNUserNotificationCenter로 띄운다. 코어 pending을 비워(한 번 쓰고 소비) 다음 tick에 같은 알림이 또
     /// 뜨지 않게 한다. 알림은 OS 리소스라 native(Swift)만 띄우고 코어/여기는 데이터만 넘긴다(경계). 클립보드와
     /// 달리 env 게이트 없음 — 알림은 OS authorization이 게이트하는 저위험 표면(iTerm2/Ghostty도 기본 허용).
-    pub fn pendingNotification(self: *DevSession) ?struct { title: []const u8, body: []const u8 } {
+    pub fn pendingNotification(self: *AppSession) ?struct { title: []const u8, body: []const u8 } {
         if (!self.surface_initialized) return null;
         const pending = self.activeSurface().core.pendingNotification() orelse return null;
         if (self.notification_title_out.len > 0) {
@@ -3890,7 +3890,7 @@ pub const DevSession = struct {
 
     /// G12 BEL: 활성 surface에 pending 벨이 있으면 true(코어 플래그를 비운다). Swift가 시스템 벨(NSSound.beep)을
     /// 울린다 — 코어는 OS 소리를 직접 내지 않는다(OSC 52/9·777과 같은 경계). 한 tick 1회로 합쳐져 벨 폭주 방지.
-    pub fn takeBell(self: *DevSession) bool {
+    pub fn takeBell(self: *AppSession) bool {
         if (!self.surface_initialized) return false;
         return self.activeSurface().core.takeBell();
     }
@@ -3898,7 +3898,7 @@ pub const DevSession = struct {
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
     /// 반환은 core 소유로 다음 OSC 7/RIS/destroy까지 유효하다(별도 복사 없음 — native 최소).
     /// Swift가 창 제목에 쓴다.
-    pub fn currentCwd(self: *DevSession) []const u8 {
+    pub fn currentCwd(self: *AppSession) []const u8 {
         if (!self.surface_initialized) return &.{};
         return self.activeSurface().core.currentCwd();
     }
@@ -3906,7 +3906,7 @@ pub const DevSession = struct {
     /// config 파일 경로(Open Config 메뉴용). loader.defaultConfigPath(MARU_CONFIG override·$HOME/.config/maru/
     /// config)가 단일 출처 — 한 번 계산해 세션 소유 버퍼에 캐시한다(다음 호출은 캐시, destroy까지 유효).
     /// HOME 없음·OOM이면 빈 슬라이스(Swift가 무동작). 경로 계산만 — 파일 생성/열기는 platform(Swift) OS 동작.
-    pub fn configPath(self: *DevSession) []const u8 {
+    pub fn configPath(self: *AppSession) []const u8 {
         if (self.config_path_buffer) |b| return b;
         const path = (config_mod.defaultConfigPath(self.allocator) catch null) orelse return &.{};
         self.config_path_buffer = path; // owned 슬라이스 — 세션이 소유(deinit이 해제)
@@ -3916,21 +3916,21 @@ pub const DevSession = struct {
     /// 창 제목으로 보여줄 문자열(OSC 0/2 제목 우선, 없으면 cwd basename, 둘 다 없으면 빈 슬라이스).
     /// 우선순위 로직은 core가 소유한다(native 최소) — Swift는 받아서 빈값이면 앱 이름으로 폴백만.
     /// 반환은 core 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효하다(별도 복사 없음).
-    pub fn windowTitle(self: *DevSession) []const u8 {
+    pub fn windowTitle(self: *AppSession) []const u8 {
         if (!self.surface_initialized) return &.{};
         return self.activeSurface().core.windowTitle();
     }
 
     /// 전역(OS) 단축키 등록 기술자 목록(가상 키코드 + Carbon modifier + action). config에서 한 번 만들어
     /// 세션 동안 불변이라 Swift가 시작 시 한 번 읽어 RegisterEventHotKey로 등록한다. 매핑 가능한 chord만.
-    pub fn globalHotkeys(self: *const DevSession) []const GlobalHotkey {
+    pub fn globalHotkeys(self: *const AppSession) []const GlobalHotkey {
         return self.global_hotkeys.items;
     }
 
     /// 커맨드 카탈로그를 빌드한다(init 1회). 각 정적 엔트리에 대해 현재 바인딩 chord를 역스캔해 표시 문자열을
     /// 만들고(안 묶였으면 빈 문자열), 그걸 owned로 보관한 뒤 CommandEntry(action_key/title=정적 리터럴 포인터,
     /// key_display=owned 포인터)를 append한다. OOM이면 에러를 올려 init이 정리하게 한다(errdefer deinit).
-    fn buildCommandCatalog(self: *DevSession) !void {
+    fn buildCommandCatalog(self: *AppSession) !void {
         const resolver = self.loaded_config.keyBindingResolver();
         for (command_catalog.entries) |entry| {
             const chord = command_catalog.chordForAction(resolver, entry.action);
@@ -3958,14 +3958,14 @@ pub const DevSession = struct {
     }
 
     /// 커맨드 카탈로그(메뉴바·팝업이 그릴 액션 목록). 세션 동안 불변. owned — destroy까지 유효.
-    pub fn commandCatalog(self: *const DevSession) []const CommandEntry {
+    pub fn commandCatalog(self: *const AppSession) []const CommandEntry {
         return self.command_entries.items;
     }
 
     /// action_key(= parseAction 문자열) 한 개를 실행한다 — 메뉴/팝업 선택의 디스패치 경로. 파싱되면
     /// dispatchAppAction으로 넘기고 true, 모르는 키면 무동작 true 반환 없이 false(Swift가 무시). 터미널
     /// Action만 받는다(global/UI 동작은 Swift 소유라 별도).
-    pub fn runAction(self: *DevSession, action_key: []const u8) bool {
+    pub fn runAction(self: *AppSession, action_key: []const u8) bool {
         // 모달(chrome Notice·커맨드 팝업·스크롤백 Find)이 열린 동안엔 메뉴바 keyEquivalent(Swift가 OS에서 잡아 이
         // 경로로 보낸다)를 무시한다 — 모달 중 단축키가 뒤의 터미널을 조작하면 안 된다. 모달 자신의 키(팝업 Enter,
         // Find 네비게이션)는 chrome_host.handleInput → dispatchChromeAction이 처리하므로 이 경로를 안 거친다.
@@ -3975,12 +3975,12 @@ pub const DevSession = struct {
         return true;
     }
 
-    /// 이 창(DevSession)의 라이브 상태를 workspace restore 모델(app.workspace.Window)로 캡처한다(R3). 탭→pane
+    /// 이 창(AppSession)의 라이브 상태를 workspace restore 모델(app.workspace.Window)로 캡처한다(R3). 탭→pane
     /// split 트리→Term→surface를 걸어 선언적 상태만 모은다 — live PTY/process/grid는 안 담는다. cwd/title은 OSC
     /// 권위 소스(core.currentCwd/windowTitle), command는 spawn argv[0](surface.command). split 트리는 *Pane leaf를
     /// pane 인덱스로 환원해 preorder TreeNode로 평탄화(직렬화 모델과 같은 형태). 멀티 창 전체 모델은 호출자(R5)가
     /// 각 세션의 Window를 모아 만든다. 모든 슬라이스·문자열은 `arena`가 소유한다(호출자가 deinit).
-    pub fn captureWorkspaceWindow(self: *DevSession, arena: std.mem.Allocator) !app.workspace.Window {
+    pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator) !app.workspace.Window {
         var tabs: std.ArrayList(app.workspace.Tab) = .empty;
         for (self.tabs.items) |tab| try tabs.append(arena, try captureWorkspaceTab(arena, tab));
         return .{ .active_tab = self.app_window.active_tab, .tabs = try tabs.toOwnedSlice(arena) };
@@ -4047,7 +4047,7 @@ pub const DevSession = struct {
     /// 이 창의 workspace 블록(헤더 없는 `window …` 텍스트)을 직렬화해 세션-소유 버퍼로 돌려준다(R5 저장 ABI).
     /// 캡처는 임시 arena로 하고, 결과 텍스트만 self.allocator로 보관한다(다음 호출/deinit까지 유효 — cwd ABI와
     /// 같은 소유 규칙). Swift가 멀티 창 저장에서 세션마다 호출해 `maru.workspace.v1` 헤더 아래로 모은다.
-    pub fn serializeWorkspaceWindow(self: *DevSession) ![]const u8 {
+    pub fn serializeWorkspaceWindow(self: *AppSession) ![]const u8 {
         if (self.workspace_buffer) |b| {
             self.allocator.free(b);
             self.workspace_buffer = null;
@@ -4065,7 +4065,7 @@ pub const DevSession = struct {
     /// title/command는 정적 기본(셸이 OSC 0/2로 곧 재설정)·size는 모델값(이후 resize가 창에 맞게 보정). 새 탭들을
     /// 먼저 다 빌드한 뒤 기존 탭을 teardown하고 swap한다 — 빌드 실패면 새 것만 정리하고 기존 세션을 보존한다.
     /// 빈 모델이면 무동작(기본 유지). 빈 cwd면 기본 cwd로 spawn(저장 안 됐거나 셸 통합 없음).
-    pub fn applyWorkspaceWindow(self: *DevSession, win: app.workspace.Window) !void {
+    pub fn applyWorkspaceWindow(self: *AppSession, win: app.workspace.Window) !void {
         if (win.tabs.len == 0) return;
 
         // 1) 새 탭들을 먼저 다 빌드한다(아직 self.tabs에 안 넣음 — 실패하면 기존 세션 그대로 유지).
@@ -4096,7 +4096,7 @@ pub const DevSession = struct {
         // 비웠다(표적 무효화라 옛 Pane을 가리키던 tab_drag_pane도 포함). 지금은 시작 전용이라 드래그가 없지만,
         // mid-session 재적용(repo별 workspace 후속)에서도 같은 chokepoint가 UAF를 막는다 — 따로 리셋하지 않는다.
         // 복원된 모든 탭을 현재 창 grid로 맞춘다. apply는 resize를 안 부르고 각 surface는 저장 grid로 spawn되며,
-        // caller의 resizeDevSessionFromWindow→resize()는 (활성 탭만 + last_resize_size dedup) 배경 탭과 primary
+        // caller의 resizeAppSessionFromWindow→resize()는 (활성 탭만 + last_resize_size dedup) 배경 탭과 primary
         // 활성 탭을 빠뜨린다. 여기서 전 탭을 명시적으로 맞춰 dedup·활성탭-한정을 둘 다 우회한다(best-effort).
         for (self.tabs.items) |tab| self.resizeTabPanes(tab);
         // 활성 탭의 대표 surface는 위 swap 루프가 이미 surface_ptrs[*]에 바인딩했고 active_pane도 빌드 때
@@ -4108,7 +4108,7 @@ pub const DevSession = struct {
 
     /// 컬렉션에 안 든 Tab을 teardown·해제한다(closeTab의 teardown 부분 — 단, tabs/surface_ptrs는 호출자가 관리).
     /// 트리(tab.tree)가 세팅된 '완성된' 탭에만 쓴다(buildWorkspaceTab은 자기 granular errdefer로 미완성을 정리).
-    fn destroyTabStandalone(self: *DevSession, tab: *Tab) void {
+    fn destroyTabStandalone(self: *AppSession, tab: *Tab) void {
         // rename 대상이 이 워크스페이스(또는 그 안 pane/Term)면 비운다 — pane/Term은 아래 destroyPane/destroyTerm
         // 가드가 처리하지만, 워크스페이스 자체 rename은 여기서. teardown 중이라 직접 null(부수효과 없이).
         if (self.renamingWorkspace(tab)) {
@@ -4136,7 +4136,7 @@ pub const DevSession = struct {
     /// 모델 Tab → 완성된 *Tab(panes + split 트리). pane들을 먼저 만들고(각 첫 surface로 spawn + 나머지 Term 추가),
     /// 트리를 모델 preorder대로 직접 짓는다(leaf 인덱스 → 그 pane, split → 새 PaneTree.Split). 부분 실패는 granular
     /// errdefer로 정리(트리는 아직 미세팅이라 destroyTabStandalone 안 씀). capacity 예약으로 append를 무실패화.
-    fn buildWorkspaceTab(self: *DevSession, m: app.workspace.Tab) !*Tab {
+    fn buildWorkspaceTab(self: *AppSession, m: app.workspace.Tab) !*Tab {
         if (m.panes.len == 0) return error.EmptyTab;
         const tab = try self.allocator.create(Tab);
         errdefer self.allocator.destroy(tab);
@@ -4179,7 +4179,7 @@ pub const DevSession = struct {
 
     /// 모델 preorder TreeNode 한 subtree를 소비해 PaneTree.Node를 만든다. leaf는 panes[idx]를, split은 새 Split
     /// (dir/ratio)을 할당하고 뒤따르는 두 subtree(a,b)를 재귀로 짓는다. 할당한 split은 splits에 추적(에러 해제용).
-    fn buildWorkspaceTreeNode(self: *DevSession, panes: []const *Pane, nodes: []const app.workspace.TreeNode, idx: *usize, splits: *std.ArrayList(*PaneTree.Split), used: []bool) !PaneTree.Node {
+    fn buildWorkspaceTreeNode(self: *AppSession, panes: []const *Pane, nodes: []const app.workspace.TreeNode, idx: *usize, splits: *std.ArrayList(*PaneTree.Split), used: []bool) !PaneTree.Node {
         if (idx.* >= nodes.len) return error.MalformedTree;
         const node = nodes[idx.*];
         idx.* += 1;
@@ -4205,7 +4205,7 @@ pub const DevSession = struct {
     }
 
     /// 모델 Pane → 완성된 *Pane. 첫 surface로 createPane(=1 Term)하고 나머지 surface를 Term으로 추가한다.
-    fn buildWorkspacePane(self: *DevSession, m: app.workspace.Pane) !*Pane {
+    fn buildWorkspacePane(self: *AppSession, m: app.workspace.Pane) !*Pane {
         if (m.surfaces.len == 0) return error.EmptyPane;
         const pane = try self.createPaneFromSurface(m.surfaces[0]);
         errdefer self.destroyPane(pane);
@@ -4219,7 +4219,7 @@ pub const DevSession = struct {
     /// 복원 surface 하나로 spawn 준비(createPane/createTerm 공통). new_tab_config에 저장 grid를 얹고, 사용 가능한
     /// (존재하는 디렉터리) cwd면 그걸 쓴다 — 마지막 create 호출만 두 함수가 다르다. 모델의 command(argv[0])·title은
     /// v1 복원에선 쓰지 않는다(기본 셸·"Maru"로 spawn; 정확한 argv·제목 복원은 후속) — 저장은 향후 복원용으로만.
-    fn restoreSpawn(self: *DevSession, sm: app.workspace.Surface) struct { req: maru.pty.SpawnRequest, size: terminal.Size } {
+    fn restoreSpawn(self: *AppSession, sm: app.workspace.Surface) struct { req: maru.pty.SpawnRequest, size: terminal.Size } {
         var cfg = self.new_tab_config;
         const size = restoreSurfaceSize(sm);
         cfg.size = size;
@@ -4230,12 +4230,12 @@ pub const DevSession = struct {
 
     /// 직렬화 모델의 custom_name(""=없음)을 라이브 owned `?[]const u8`(null=없음)로 변환한다 — 비면 null,
     /// 아니면 세션 allocator로 dupe. 복원과 rename commit(PR3)이 공유하는 ""→null 단일 변환점이라 규칙이 한 곳뿐이다.
-    fn dupeCustomName(self: *DevSession, name: []const u8) !?[]const u8 {
+    fn dupeCustomName(self: *AppSession, name: []const u8) !?[]const u8 {
         if (name.len == 0) return null;
         return try self.allocator.dupe(u8, name);
     }
 
-    fn createPaneFromSurface(self: *DevSession, sm: app.workspace.Surface) !*Pane {
+    fn createPaneFromSurface(self: *AppSession, sm: app.workspace.Surface) !*Pane {
         const rs = self.restoreSpawn(sm);
         const cfg = self.new_tab_config;
         const pane = try self.createPane(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
@@ -4245,7 +4245,7 @@ pub const DevSession = struct {
         return pane;
     }
 
-    fn createTermFromSurface(self: *DevSession, sm: app.workspace.Surface) !*Term {
+    fn createTermFromSurface(self: *AppSession, sm: app.workspace.Surface) !*Term {
         const rs = self.restoreSpawn(sm);
         const cfg = self.new_tab_config;
         const term = try self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
@@ -4255,7 +4255,7 @@ pub const DevSession = struct {
     }
 
     /// quick terminal 표시 옵션(config에서 파싱). Swift가 패널 크기·화면·자동 숨김에 쓴다. 세션 동안 불변.
-    pub fn quickTerminalConfig(self: *const DevSession) QuickTerminalConfig {
+    pub fn quickTerminalConfig(self: *const AppSession) QuickTerminalConfig {
         const qt = self.loaded_config.config.quick_terminal;
         return .{
             .height_milli = @intFromFloat(@round(qt.height_fraction * 1000.0)),
@@ -4269,11 +4269,11 @@ pub const DevSession = struct {
     }
 
     /// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면은 rows-1줄(한 줄 겹침)이고,
-    /// rows는 dev session이 권위 있게 알고 있어 Swift가 stale 값으로 계산하지 않게 여기서 구한다.
+    /// rows는 app session이 권위 있게 알고 있어 Swift가 stale 값으로 계산하지 않게 여기서 구한다.
     // pageScrollDelta는 session core로 추출됐다(위 file-scope alias=input_math.pageScrollDelta로 호출).
     // 정의·단위 테스트는 src/session/input_math.zig.
 
-    pub fn scrollPage(self: *DevSession, delta_pages: i32) void {
+    pub fn scrollPage(self: *AppSession, delta_pages: i32) void {
         if (!self.surface_initialized) return;
         const rows = self.activeSurface().core.size.rows;
         const page: i32 = @max(@as(i32, 1), @as(i32, rows) - 1);
@@ -4283,12 +4283,12 @@ pub const DevSession = struct {
     /// 이전(dir<0)/다음(dir>0) 프롬프트 블록으로 뷰포트를 점프한다(OSC 133 셸 통합 필요 — Cmd+↑/↓).
     /// 분류·이동 로직은 core가 소유하고, 여기선 스크롤됐으면 다음 tick이 다시 그리도록 metal_dirty만
     /// 세운다(Swift는 방향만 넘기는 얇은 글루 — scrollPage와 같은 규율).
-    pub fn jumpToPrompt(self: *DevSession, dir: i8) void {
+    pub fn jumpToPrompt(self: *AppSession, dir: i8) void {
         if (!self.surface_initialized) return;
         if (self.activeSurface().core.jumpToPrompt(dir)) self.metal_dirty = true;
     }
 
-    pub fn resize(self: *DevSession, width_px: u32, height_px: u32, scale_milli: u32) !FrameSummary {
+    pub fn resize(self: *AppSession, width_px: u32, height_px: u32, scale_milli: u32) !FrameSummary {
         // resize는 terminal grid와 PTY winsize가 함께 바뀌어야 한다. FrameLoop API를
         // 통해 SurfaceRuntime action으로 내려보내면 Swift가 두 책임을 다시 구현하지 않는다.
         // total_resize_events는 아래 dedup early-return 뒤(실제 변화가 있는 resize)에서만 센다.
@@ -4302,7 +4302,7 @@ pub const DevSession = struct {
             self.scale_milli = next_scale;
             self.refreshCellMetrics();
         }
-        // grid(cols/rows)를 Swift가 아니라 dev session이 backing 픽셀 + 자기 cell 메트릭에서 직접
+        // grid(cols/rows)를 Swift가 아니라 app session이 backing 픽셀 + 자기 cell 메트릭에서 직접
         // 계산한다. init이 메트릭을 미리 뽑으므로 cell 크기는 항상 준비돼 있어, Swift가 첫 resize에서
         // placeholder 크기로 cols/rows를 잘못 잡던(창과 grid가 어긋나던) 문제가 사라진다.
         const size = gridFromBacking(width_px, height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px);
@@ -4343,7 +4343,7 @@ pub const DevSession = struct {
     /// MARU_DEBUG일 때 활성 surface의 cell 격자를 찍는다. CJK 등 비-ASCII는 텍스트 줄에서
     /// 공백으로 보이지만 배경 줄(b...)의 'B'로 영역을 알 수 있어, 파란 배경 줄과 프롬프트 줄이
     /// 같은 row에 겹치는지(개행 안 됨) 다른 row인지 데이터로 구분한다.
-    fn logScreenIfDebug(self: *DevSession) void {
+    fn logScreenIfDebug(self: *AppSession) void {
         if (!diag_gate.maruDebugEnabled() or !self.surface_initialized) return;
         const core = &self.activeSurface().core;
         const cols = @min(@as(usize, core.size.cols), 240);
@@ -4396,7 +4396,7 @@ pub const DevSession = struct {
     /// 프레임마다 셸 의미 이벤트(OSC 133/7)를 소비한다 — MARU_DEBUG면 명령 경계를 구조화 한 줄씩
     /// 찍고, 항상 비워 core의 이벤트 버퍼를 bounded하게 유지한다(누구도 drain 안 하면 cap에서 드롭).
     /// 같은 도메인 데이터를 후속 trace writer도 바로 이 자리에서 drain하면 된다(관측 가능성 원칙).
-    fn drainShellEventsForFrame(self: *DevSession) void {
+    fn drainShellEventsForFrame(self: *AppSession) void {
         if (!self.surface_initialized) return;
         const core = &self.activeSurface().core;
         if (core.shellEvents().len == 0 and !core.shellEventsOverflowed()) return;
@@ -4417,7 +4417,7 @@ pub const DevSession = struct {
         core.clearShellEvents();
     }
 
-    pub fn tick(self: *DevSession) !FrameSummary {
+    pub fn tick(self: *AppSession) !FrameSummary {
         // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
         // 아님). 그래야 summary의 glyph/atlas 통계가 실제 rasterized glyph를 반영하고, 이후
         // 제품 Metal view가 같은 RenderFrame을 그대로 그릴 수 있다. CoreText는 platform
@@ -4875,7 +4875,7 @@ pub const DevSession = struct {
         return self.last_summary;
     }
 
-    pub fn close(self: *DevSession) FrameSummary {
+    pub fn close(self: *AppSession) FrameSummary {
         self.total_close_events += 1;
         // 창 close — 모든 탭의 모든 panel PTY를 정리한다(활성만이 아니라). runtime이 살아 있으면 detach까지,
         // 아니면 close만.
@@ -4893,7 +4893,7 @@ pub const DevSession = struct {
         if (self.surface_initialized) {
             // App/window close는 더 이상 이 surface가 live input/output을 받을 수 없다는
             // 뜻이다. exit event를 기다리지 않고 close가 child를 정리한 경우에도 summary가
-            // running으로 남으면 close lifecycle을 오해하므로 dev session summary에서는
+            // running으로 남으면 close lifecycle을 오해하므로 app session summary에서는
             // 종료 상태로 latch한다.
             self.activeSurface().process_state = .exited;
             self.ended_seen = true;
@@ -4905,20 +4905,20 @@ pub const DevSession = struct {
 
     /// 사이드바 strip 배경색(0xAARRGGBB). resolved 테마의 `sidebar_background`를 읽기만 한다 — 색 파생
     /// (명시 없으면 배경 +24)은 config resolver(resolveTheme)가 단일 출처로 소유한다. 테마가 명시하면 그 색.
-    fn sidebarBg(self: *const DevSession) u32 {
+    fn sidebarBg(self: *const AppSession) u32 {
         return packOpaqueRgb(self.appearance.theme.sidebar_background);
     }
 
     /// 활성 탭 하이라이트 밴드 배경색(0xAARRGGBB). resolved 테마의 `sidebar_active`를 읽기만 한다 — 명시
     /// 없으면 배경 +48(사이드바 배경보다 한 단계 밝게)로 resolveTheme가 파생한다. 테마가 명시하면 그 색.
-    fn sidebarActiveBg(self: *const DevSession) u32 {
+    fn sidebarActiveBg(self: *const AppSession) u32 {
         return packOpaqueRgb(self.appearance.theme.sidebar_active);
     }
 
     /// 호버 슬롯 하이라이트 배경색(0xAARRGGBB) — 사이드바 배경(+24)과 활성(+48)의 중간으로 파생한다.
     /// 별도 테마 필드 없이 두 resolved 색의 채널 평균을 써서, 사용자가 사이드바 색을 커스텀해도 호버가
     /// 그 사이 톤을 따라간다(활성보다 약하고 배경보다 또렷한 호버 피드백).
-    fn sidebarHoverBg(self: *const DevSession) u32 {
+    fn sidebarHoverBg(self: *const AppSession) u32 {
         const a = self.appearance.theme.sidebar_background;
         const b = self.appearance.theme.sidebar_active;
         const r: u32 = (@as(u32, a.r) + b.r) / 2;
@@ -4929,7 +4929,7 @@ pub const DevSession = struct {
 
     /// 비활성 탭 제목용 흐린 전경색 — sidebar_foreground(테마화된 사이드바 글자색, 기본=foreground)를 background
     /// 쪽으로 45% 섞어 muted한다. 활성 탭은 full sidebar_foreground라 대비로 글자가 도드라진다. 사이드바·pane 탭 바 공유.
-    fn mutedForeground(self: *const DevSession) maru.color.Rgb {
+    fn mutedForeground(self: *const AppSession) maru.color.Rgb {
         const f = self.appearance.theme.sidebar_foreground;
         const b = self.appearance.theme.background;
         return .{
@@ -4940,18 +4940,18 @@ pub const DevSession = struct {
     }
 
     /// 스크린 x가 세로 사이드바 영역 안인가(순수 `xInSidebar` 래퍼).
-    fn inSidebar(self: *const DevSession, x_px: f64) bool {
+    fn inSidebar(self: *const AppSession, x_px: f64) bool {
         return chrome.components.sidebar.inSidebar(x_px, self.sidebar_width_px);
     }
 
     /// 사이드바 y → 탭 슬롯 인덱스(순수 `sidebarSlot` 래퍼 — 슬롯 높이·탭 수로 판정).
-    fn sidebarSlotAt(self: *const DevSession, y_px: f64) ?usize {
+    fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
         return chrome.components.sidebar.slotAt(y_px, self.sidebar_slot_height_px, self.tabs.items.len);
     }
 
     /// 호버 중인 사이드바 슬롯을 갱신한다. 바뀌면 호버 밴드를 다시 만들고(rebuildSidebar) 재드로우한다.
     /// 같은 슬롯이면 무동작 — 한 슬롯 안에서의 마우스 이동이 매번 재드로우를 유발하지 않게 한다.
-    fn setHoveredSlot(self: *DevSession, slot: ?usize) void {
+    fn setHoveredSlot(self: *AppSession, slot: ?usize) void {
         if (usizeOptEql(self.hovered_slot, slot)) return;
         self.hovered_slot = slot;
         self.rebuildSidebar() catch {};
@@ -4960,7 +4960,7 @@ pub const DevSession = struct {
 
     /// 사이드바 "+" 슬롯 호버 상태를 갱신한다. 바뀌면 호버 밴드를 다시 만들고(rebuildSidebar) 재드로우한다.
     /// 같은 상태면 무동작 — "+" 슬롯 안에서의 마우스 이동이 매번 재드로우를 유발하지 않게 한다(setHoveredSlot과 동형).
-    fn setHoveredPlus(self: *DevSession, hovered: bool) void {
+    fn setHoveredPlus(self: *AppSession, hovered: bool) void {
         if (self.hovered_plus == hovered) return;
         self.hovered_plus = hovered;
         self.rebuildSidebar() catch {};
@@ -4968,14 +4968,14 @@ pub const DevSession = struct {
     }
 
     /// 호버 중인 per-pane 탭을 갱신한다. 바뀌면 재드로우한다(호버 ✕가 생기거나 사라진다). 같은 탭이면 무동작.
-    fn setHoveredTab(self: *DevSession, tab: ?TabRef) void {
+    fn setHoveredTab(self: *AppSession, tab: ?TabRef) void {
         if (tabRefEql(self.hovered_tab, tab)) return;
         self.hovered_tab = tab;
         self.metal_dirty = true;
     }
 
     /// #5b: 호버 중인 ‹/› 스크롤 버튼을 갱신한다. 바뀌면 재드로우(버튼이 밝아져 클릭 가능 표시). 같으면 무동작.
-    fn setHoveredScroll(self: *DevSession, s: ?ScrollRef) void {
+    fn setHoveredScroll(self: *AppSession, s: ?ScrollRef) void {
         const same = (self.hovered_scroll == null and s == null) or
             (self.hovered_scroll != null and s != null and self.hovered_scroll.?.pane == s.?.pane and self.hovered_scroll.?.right == s.?.right);
         if (same) return;
@@ -4985,7 +4985,7 @@ pub const DevSession = struct {
 
     /// 마우스가 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로 호버 탭을 갱신하고, 아니면 null로 비운다. 활성
     /// 탭 leaf rect를 펴 각 pane 바를 hit-test한다(마우스 이동마다 — 작은 트리라 cheap). hoverCursor이 호출한다.
-    fn updateHoveredTab(self: *DevSession, x_px: f64, y_px: f64) bool {
+    fn updateHoveredTab(self: *AppSession, x_px: f64, y_px: f64) bool {
         var next: ?TabRef = null;
         var next_scroll: ?ScrollRef = null;
         var on_bar = false; // #5c: 탭 바 위 여부 — hoverCursor가 pointingHand(클릭 가능) 판정에 쓴다
@@ -5031,7 +5031,7 @@ pub const DevSession = struct {
     /// glyph는 여기서 안 만든다(tick의 제목 패스가 따로 더해 metal_buffer가 밴드와 머지). 사이드바가
     /// 꺼졌거나(폭 0) cell 폭 미상이면 비운다. 탭 추가/전환/메트릭/호버 변경 때 호출한다. 실패(OOM)는
     /// 세션을 죽이지 않고 빈 사이드바로 degrade한다(호출부가 catch).
-    fn rebuildSidebar(self: *DevSession) !void {
+    fn rebuildSidebar(self: *AppSession) !void {
         self.sidebar_cells.clearRetainingCapacity();
         self.gpu_quads.clearRetainingCapacity();
         if (self.tabs.items.len == 0) return;
@@ -5052,7 +5052,7 @@ pub const DevSession = struct {
     /// 순서 무관 — 렌더러가 layer로 재정렬). 리뷰가 지적한 sidebar/모달 clear-타이밍 충돌 해소.
     /// gpu_quads에서 주어진 layer의 quad를 모두 제거한다(per-frame 레이어 청소). 모달(layer 1)·탭 밴드(layer 2)는
     /// 매 프레임 재채워지므로 그 전에 비운다. 사이드바(layer 0)는 retained(rebuildSidebar 관리)라 대상이 아니다.
-    fn dropQuadsByLayer(self: *DevSession, layer: u32) void {
+    fn dropQuadsByLayer(self: *AppSession, layer: u32) void {
         var i: usize = 0;
         while (i < self.gpu_quads.items.len) {
             if (self.gpu_quads.items[i].layer == layer) {
@@ -5067,7 +5067,7 @@ pub const DevSession = struct {
     /// 탭 seg 폭). 사용자 요청으로 둥근 밴드·vertical gradient(C4b-5/U3)를 평평 VSCode 탭으로 대체. 배경·언더바 둘 다
     /// layer 2(셀 part1 제목 아래). segOf 픽셀 경계로 hit-test·제목 glyph와 정합(§6 단일 소스). overflow 탭이면 무동작.
     /// per-frame(dropQuadsByLayer(2)가 매 프레임 비움). tui는 tabbarHighlightCell 셀 밴드.
-    fn appendActiveTabHighlight(self: *DevSession, m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32, accent: u32, underline_px: u32) void {
+    fn appendActiveTabHighlight(self: *AppSession, m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32, accent: u32, underline_px: u32) void {
         const seg = m.segOf(tab_index);
         if (seg.end_col <= seg.start_col) return; // overflow(탭 영역 밖, 안 보이는) 탭
         const x: f32 = @floatCast(seg.start_px);
@@ -5081,7 +5081,7 @@ pub const DevSession = struct {
 
     /// #5a: 우측 가로 스크롤 ‹/› 버튼의 사각형 배경(GpuQuad layer 2) — col 셀(‹=tab_cols, ›=tab_cols+2) 영역을 약한
     /// 배경으로 채워 "클릭 가능한 버튼"으로 보이게 한다. glyph는 coretext가 같은 col에 그린다(배경 위). hover 색은 #5b, 커서는 #5c.
-    fn appendScrollButtonQuad(self: *DevSession, m: chrome.components.tabbar.Metrics, col: u32, bg: u32) void {
+    fn appendScrollButtonQuad(self: *AppSession, m: chrome.components.tabbar.Metrics, col: u32, bg: u32) void {
         const x: f32 = @floatFromInt(m.bar_x + col * m.cell_width_px);
         self.appendSolidQuad(x, @floatFromInt(m.bar_y), @floatFromInt(m.cell_width_px), @floatFromInt(m.bar_h), bg, 2);
     }
@@ -5090,7 +5090,7 @@ pub const DevSession = struct {
     /// appendTabBarUnderline이 공유해 같은 11필드 보일러플레이트 반복을 없앤다(GpuQuad는 extern struct라 필드
     /// default가 없어 필드 추가 시 모든 리터럴을 손봐야 하는데, solid 직각 quad는 이 헬퍼 한 곳으로 모은다). 둥근/
     /// 테두리/gradient quad는 따로 — 각자 모양 파라미터를 받아 일반화하지 않는다.
-    fn appendSolidQuad(self: *DevSession, x: f32, y: f32, w: f32, h: f32, color: u32, layer: u32) void {
+    fn appendSolidQuad(self: *AppSession, x: f32, y: f32, w: f32, h: f32, color: u32, layer: u32) void {
         self.gpu_quads.append(self.allocator, .{
             .x = x,
             .y = y,
@@ -5150,7 +5150,7 @@ pub const DevSession = struct {
 
     /// 마우스가 스크롤바 영역에 있는지 갱신(hoverCursor가 매 이동 호출). 바뀌면 redraw 표시 — hover 강조가
     /// 곧바로 나타나거나 사라지게. fade 리셋(idle_ticks=0)은 updateScrollbarFade가 hover를 보고 한다.
-    fn setScrollbarHovered(self: *DevSession, on: bool) void {
+    fn setScrollbarHovered(self: *AppSession, on: bool) void {
         if (self.scrollbar_hovered == on) return;
         self.scrollbar_hovered = on;
         self.metal_dirty = true;
@@ -5159,7 +5159,7 @@ pub const DevSession = struct {
     /// 매 tick 스크롤바 fade를 갱신한다(updateCursorBlink와 같은 30Hz tick). 한 곳에서 활성 surface의 view_offset
     /// 변화를 감지해(스크롤·드래그·page-key·surface 전환) idle_ticks를 0(full)으로 리셋하고, hover/드래그면 full로
     /// 핀, 그 외엔 매 tick 늘려 fade 창에서 alpha가 바뀔 때만 metal_dirty를 세운다(idle 정착 후엔 정적 — 비용 0).
-    fn updateScrollbarFade(self: *DevSession) void {
+    fn updateScrollbarFade(self: *AppSession) void {
         if (!self.surface_initialized) return;
         // 활성 탭의 모든 pane을 순회해 각자 fade를 갱신한다(per-pane — pane 목록만 보면 되고 rect/layout 불요라
         // 매 tick 싸다). 활성 pane은 hover/드래그면 full로 핀. 한 pane이라도 alpha가 바뀌면 metal_dirty.
@@ -5196,7 +5196,7 @@ pub const DevSession = struct {
     /// thumb 위면 그 offset(드래그가 thumb 내 상대 위치를 유지), thumb 밖 트랙이면 thumb_h/2(클릭 지점에 thumb
     /// 중앙을 맞춰 점프). 스크롤백 없음·메트릭 0·영역 밖이면 null. x 영역은 thumb 폭 + 좌측 4px 여유(잡기 쉽게),
     /// y는 트랙(pane) 전체. appendScrollbar와 같은 bar_w(cell_width*0.32, 최소 5)·우측 2px 안쪽 배치를 쓴다.
-    fn scrollbarGrabAt(self: *const DevSession, x_px: f64, y_px: f64) ?f32 {
+    fn scrollbarGrabAt(self: *const AppSession, x_px: f64, y_px: f64) ?f32 {
         const rect = self.active_pane_rect;
         if (rect.w == 0 or self.cell_width_px == 0) return null;
         const core = &self.activeSurfaceConst().core;
@@ -5221,7 +5221,7 @@ pub const DevSession = struct {
     /// 드래그/트랙-점프 중 마우스 y로 view_offset을 절대 설정한다. new_thumb_top(view 내) = (y_px - rect.y) - grab을
     /// [0, track]로 clamp(track = view_h - thumb_h), t = 1 - thumb_top/track(0=바닥, 1=꼭대기), target =
     /// scrollbarTargetOffset(t, sb_count). 현재 viewOffset과의 차이만큼 scrollViewport(절대 위치 → 상대 delta).
-    fn dragScrollbarTo(self: *DevSession, y_px: f64) void {
+    fn dragScrollbarTo(self: *AppSession, y_px: f64) void {
         const grab: f64 = self.scrollbar_drag_grab orelse return;
         const rect = self.active_pane_rect;
         if (rect.h == 0 or self.cell_height_px == 0) return;
@@ -5248,7 +5248,7 @@ pub const DevSession = struct {
     /// 활성 탭의 모든 pane 우측에 스크롤바를 그린다 — **각 pane이 자기 idle_ticks로 독립 fade**(per-pane), 활성
     /// pane만 추가로 hover/드래그 강조(세션 상태). 각 pane은 자기 core의 view_offset/scrollback을 반영. leaf rect는
     /// 재사용 scratch로 계산(per-frame 할당 churn 없음), 실패(OOM)면 활성 pane만(폴백). per-frame(layer3)에서 부른다.
-    fn appendPaneScrollbars(self: *DevSession) void {
+    fn appendPaneScrollbars(self: *AppSession) void {
         if (!self.surface_initialized) return;
         self.scrollbar_leaf_scratch.clearRetainingCapacity();
         if (self.activeTabLeafRects(self.allocator, self.termRect(), &self.scrollbar_leaf_scratch)) |_| {
@@ -5267,7 +5267,7 @@ pub const DevSession = struct {
     /// alpha는 pane.scrollbar_idle_ticks로 fade(활성·비활성 모두 per-pane 독립). `is_active`면 추가로 hover/드래그
     /// 강조(굵게+full, 세션 상태) — 상호작용(hover/드래그)은 활성 pane만이라 비활성 pane은 fade만(emphasize 없음).
     /// 메모리 'UI는 Zig+GPU 렌더러로' — 네이티브 NSScroller가 아니라 chrome GpuQuad 프리미티브. 좌표는 backing 픽셀.
-    fn appendScrollbar(self: *DevSession, rect: app.SplitRect, pane: *Pane, is_active: bool) void {
+    fn appendScrollbar(self: *AppSession, rect: app.SplitRect, pane: *Pane, is_active: bool) void {
         if (rect.w == 0) return;
         const core = &pane.activeTerm().surface.core;
         const geom = scrollbarThumbGeom(core.scrollbackLen(), core.viewOffset(), self.cell_height_px, rect.h) orelse return;
@@ -5299,7 +5299,7 @@ pub const DevSession = struct {
 
     /// C4b-5: rich 탭 바 배경(직각)을 layer 2 GpuQuad로 그린다 — 활성 탭 밴드 quad(같은 layer, 뒤에 append되어 위로)가
     /// 불투명 셀 배경(paneBarBgCell)에 가리지 않게(리뷰 z-order #1, #451과 동형). tui는 셀. 둘 다 part1 제목 셀 아래(layer 2).
-    fn appendBarBgQuad(self: *DevSession, bar: app.SplitRect, bg: u32) void {
+    fn appendBarBgQuad(self: *AppSession, bar: app.SplitRect, bg: u32) void {
         self.appendSolidQuad(@floatFromInt(bar.x), @floatFromInt(bar.y), @floatFromInt(bar.w), @floatFromInt(bar.h), bg, 2);
     }
 
@@ -5309,13 +5309,13 @@ pub const DevSession = struct {
     /// 78행 `cov=1-smoothstep(-aa,aa,d)`)가 1px-tall(half_size.y=0.5)에서 cov≈0.84로 옅게 그려 선이 흐리고
     /// HiDPI 분수 스케일에서 떨린다. 형제 선 헬퍼(appendHorizontalLine)가 셀+reserved ~2px를 쓰는 것과 같은
     /// 이유로 토큰 두께(≥2px)면 중심 행이 cov≈1로 선명하다. 두께만큼 바 하단 안쪽에 둔다(바 위로 안 새게).
-    fn appendTabBarUnderline(self: *DevSession, bar: app.SplitRect, thickness: u32) void {
+    fn appendTabBarUnderline(self: *AppSession, bar: app.SplitRect, thickness: u32) void {
         self.appendSolidQuad(@floatFromInt(bar.x), @floatFromInt(bar.y + bar.h -| thickness), @floatFromInt(bar.w), @floatFromInt(thickness), self.dividerColor(), 2);
     }
 
     /// app `*Tab`에서 chrome 중립 `sidebar.Tab`(라벨·활성)을 빌드한다 — chrome은 app 트리를 모르므로 host가 떼어 준다
     /// (palette Row 선례). 라벨 = 활성 panel surface 제목(제목 glyph는 buildSidebarTitleFrame이 이 라벨로 그린다).
-    fn sidebarTabs(self: *DevSession, arena: std.mem.Allocator) ![]chrome.components.sidebar.Tab {
+    fn sidebarTabs(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.sidebar.Tab {
         const out = try arena.alloc(chrome.components.sidebar.Tab, self.tabs.items.len);
         for (self.tabs.items, 0..) |tab, i| {
             out[i] = .{ .label = workspaceLabel(tab), .active = (i == self.app_window.active_tab) };
@@ -5326,7 +5326,7 @@ pub const DevSession = struct {
     /// chrome `sidebar.view`가 낸 밴드 fill op을 sidebar 셀(NativeMetalCell)로 lower한다 — fill rect.y / slot_h = 슬롯 행,
     /// role(tab_active_bg/tab_hover_bg) → sidebarActiveBg/HoverBg. sidebarBandCell이 폭을 cell로 floor해 한 칸 밴드로.
     /// (옛 rebuildSidebar의 밴드 emit을 view 경로로 — 색 해석·NativeMetalCell은 platform 책임, divider lowerDividerRules와 동형.)
-    fn lowerSidebar(self: *DevSession, ops: []const chrome.draw.Op) void {
+    fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
         const slot_h = self.sidebar_slot_height_px;
         if (slot_h == 0) return;
         for (ops) |op| switch (op) {
@@ -5388,7 +5388,7 @@ pub const DevSession = struct {
     /// glyph도 터미널과 같은 slot을 재사용하고 새 glyph만 추가 업로드된다. macOS 전용(실 CoreText
     /// 브리지) — tick의 `builtin.os.tag == .macos` 가드 안에서만 호출한다. 사이드바가 꺼졌거나(폭 0)
     /// 탭이 없으면 error.NoSidebar로 빠져 호출부가 제목 없이 밴드만 그린다.
-    fn buildSidebarTitleFrame(self: *DevSession) !renderer.RenderFrame {
+    fn buildSidebarTitleFrame(self: *AppSession) !renderer.RenderFrame {
         const cw = self.cell_width_px;
         if (cw == 0 or self.tabs.items.len == 0) return error.NoSidebar;
         // U2/B2: 제목 영역 = 슬롯 폭에서 좌측(카드 패딩 + accent 막대)·우측(카드 패딩)을 inset한 content rect(선언적
@@ -5449,7 +5449,7 @@ pub const DevSession = struct {
     /// (DrawList 리터럴·frame_builder 6필드·PaneFrame 반환)을 복제하던 boilerplate를 단일화한다 — frame 계약이
     /// 바뀌면 여기 한 곳만 고친다. cells는 toOwnedSlice로 가져가고, 실패 시 호출자 errdefer가 정리한다(아직 유효).
     fn finishOverlayFrame(
-        self: *DevSession,
+        self: *AppSession,
         cells: *std.ArrayList(renderer.DrawCell),
         cols: u16,
         rows: u16,
@@ -5510,7 +5510,7 @@ pub const DevSession = struct {
     /// chrome 컴포넌트가 읽는 불변 메트릭(props seam). 매 frame 세션 실측값에서 빌드한다 — chrome은 terminal/
     /// config 타입을 모르므로 plain u32만 넘긴다. 오버레이는 터미널과 같은 셀(self.cell_width_px — CoreText 실측)을
     /// 쓴다. sidebar/backing은 실 px 그대로. sidebar_width_px는 런타임 가변(드래그)이라 토큰이 아닌 여기로.
-    fn buildChromeProps(self: *const DevSession) chrome.ChromeProps {
+    fn buildChromeProps(self: *const AppSession) chrome.ChromeProps {
         const tk = self.buildChromeTokens();
         return .{
             .metrics = .{
@@ -5530,7 +5530,7 @@ pub const DevSession = struct {
     /// ResolvedTheme(config) → chrome 토큰. chrome은 ResolvedTheme를 import하지 않으므로(경계) 여기서 resolved
     /// Rgb만 뽑아 넘기고, **역할→색 매핑은 chrome.tokens.Tokens.tui가 단일 출처로 소유**한다(2nd 백엔드·rich도
     /// 같은 매핑 재사용). 이 함수는 ResolvedTheme→ThemeColors 투영(필드 추림)만 한다.
-    fn buildChromeTokens(self: *const DevSession) chrome.Tokens {
+    fn buildChromeTokens(self: *const AppSession) chrome.Tokens {
         const t = self.appearance.theme;
         const tc = chrome.tokens.ThemeColors{
             .foreground = t.foreground,
@@ -5790,7 +5790,7 @@ pub const DevSession = struct {
     /// 표시(command_key_displays)는 platform 소유라 여기서 Row{title,binding,selected}로 만들어 neutral 컴포넌트에
     /// 주입한다(컴포넌트는 카탈로그를 안 본다). 선택이 보이도록 max_visible 윈도우로 스크롤한다(레거시 buildPaletteFrame
     /// 윈도우 로직 보존). 선택 행만 selected=true. palette_filtered가 비면 빈 슬라이스.
-    fn buildPaletteRows(self: *DevSession, arena: std.mem.Allocator) ![]chrome.components.palette.Row {
+    fn buildPaletteRows(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.palette.Row {
         const Row = chrome.components.palette.Row;
         const max_visible = chrome.components.palette.max_visible;
         const total = self.palette_filtered.items.len;
@@ -5821,7 +5821,7 @@ pub const DevSession = struct {
     /// view 계약을 탄다) 일반 rasterizer로 lower한다(fill·border·text, EAW-폭 placeText). 오버레이는 라우팅상 배타적
     /// 이라 최대 1개만 ops를 낸다(rasterizer가 단일 오버레이 가정). palette는 카탈로그 행을 주입해야 해 collectDraws가
     /// 아니라 collectPaletteDraws로 따로 모은다. 닫혀 있거나 메트릭/박스 미상이면 에러(호출자가 무시). macOS 전용.
-    fn buildChromeOverlayFrame(self: *DevSession) !metal_frame.PaneFrame {
+    fn buildChromeOverlayFrame(self: *AppSession) !metal_frame.PaneFrame {
         // 오버레이는 터미널과 같은 셀·폰트(1×)로 그린다 — buildChromeProps도 같은 셀을 컴포넌트에 준다. 1.3× 확대는
         // 사용자 요청으로 제거(스케일 불일치로 한글이 약간 잘리던 문제도 함께 사라짐 — 셀=글리프 font size 일치).
         const cw = self.cell_width_px;
@@ -5862,7 +5862,7 @@ pub const DevSession = struct {
     /// chrome Notice 모달(손상 알림 등)을 연다. 메시지는 세션 소유 버퍼로 복사한다 — notice.State.message는 slice라
     /// 호출자(ABI/Swift) 버퍼가 transient면 dangling. 512B 초과는 잘라 표시하되 **UTF-8 코드포인트 경계에서** 자른다
     /// (바이트 경계에서 자르면 한글 등 multibyte가 U+FFFD로 깨진다 — 리뷰 발견). 다음 tick이 오버레이로 그린다.
-    pub fn showNotice(self: *DevSession, message: []const u8) void {
+    pub fn showNotice(self: *AppSession, message: []const u8) void {
         // 오버레이 배타 — notice가 뜨면 find/palette를 닫는다(한 번에 하나만: collectDraws·inputFocus가 단일
         // 오버레이를 가정한다 — 안 닫으면 두 박스가 합쳐진 frame으로 깨져 보이고 IME가 뒤 find로 샌다).
         self.chrome_host.find.hide();
@@ -5878,7 +5878,7 @@ pub const DevSession = struct {
         self.metal_dirty = true;
     }
 
-    pub fn metalFrame(self: *const DevSession) MetalFrame {
+    pub fn metalFrame(self: *const AppSession) MetalFrame {
         var frame = self.metal_buffer.view();
         // "surface→rect": 터미널을 사이드바 폭만큼 오른쪽에 그리고, 왼쪽 strip에 사이드바 배경을 칠한다.
         // 렌더러가 origin offset + 배경 quad를 처리한다. split(panel)도 같은 origin 방식을 확장한다.
@@ -5902,7 +5902,7 @@ pub const DevSession = struct {
         return frame;
     }
 
-    pub fn deinit(self: *DevSession) void {
+    pub fn deinit(self: *AppSession) void {
         if (self.copy_buffer.len > 0) self.allocator.free(self.copy_buffer);
         if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
         if (self.notification_title_out.len > 0) self.allocator.free(self.notification_title_out);
@@ -5993,7 +5993,7 @@ pub const DevSession = struct {
         self.* = undefined;
     }
 
-    fn writeSummaryFromTick(self: *DevSession, tick_result: app.AppFrameLoopTick) void {
+    fn writeSummaryFromTick(self: *AppSession, tick_result: app.AppFrameLoopTick) void {
         // 공유 counter/size/state는 writeSummaryFromState가 단일 출처로 채운다. tick만 아는
         // per-frame render 통계와 tick index만 여기서 덧씌운다. 이렇게 해야 두 writer가
         // 필드별로 어긋나지 않고, 새 counter가 추가돼도 한 곳만 고치면 된다. key/resize/close
@@ -6011,7 +6011,7 @@ pub const DevSession = struct {
         self.last_summary.glyph_raster_ready = boolCode(stats.glyph_raster_ready);
     }
 
-    fn writeSummaryFromState(self: *DevSession) void {
+    fn writeSummaryFromState(self: *AppSession) void {
         self.last_summary.abi_version = abi_version;
         self.last_summary.terminal_surface = boolCode(self.surface_initialized);
         self.last_summary.frame_loop_ticks = if (self.renderer_initialized) @intCast(self.frame_loop.frame_index) else 0;
@@ -6063,7 +6063,7 @@ fn spawnRequest(config: NormalizedConfig, term: []const u8, zdotdir: ?[]const u8
             .command = "/bin/sh",
             .args = &.{
                 "-c",
-                "printf 'Maru app dev shell\\r\\n'; IFS= read -r line; printf 'Maru app dev input:%s\\r\\n' \"$line\"; printf 'Maru app dev frame loop\\r\\n'",
+                "printf 'Maru app shell\\r\\n'; IFS= read -r line; printf 'Maru app input:%s\\r\\n' \"$line\"; printf 'Maru app frame loop\\r\\n'",
             },
             .size = config.size,
         },
@@ -6086,7 +6086,7 @@ fn spawnRequest(config: NormalizedConfig, term: []const u8, zdotdir: ?[]const u8
 
 fn commandName(kind: CommandKind) []const u8 {
     return switch (kind) {
-        .controlled_smoke => "/bin/sh -c maru-app-dev-smoke",
+        .controlled_smoke => "/bin/sh -c maru-app-smoke",
         .interactive_shell => maru.pty.resolveInteractiveShell(),
     };
 }
@@ -6103,7 +6103,7 @@ fn boolCode(value: bool) u32 {
     return if (value) 1 else 0;
 }
 
-test "macOS app dev session config rejects unsafe fixed-width ABI input" {
+test "macOS app session config rejects unsafe fixed-width ABI input" {
     // Swift가 넘긴 config는 Zig allocator나 slice를 포함하지 않는 fixed-width record다.
     // 이 검증이 있어야 잘못된 window size나 오래된 ABI가 PTY spawn까지 내려가지 않는다.
     try std.testing.expectError(error.UnsupportedAbi, normalizeConfig(.{
@@ -6129,7 +6129,7 @@ test "macOS app dev session config rejects unsafe fixed-width ABI input" {
     }));
 }
 
-test "macOS app dev session config defaults queue capacity without changing command intent" {
+test "macOS app session config defaults queue capacity without changing command intent" {
     const normalized = try normalizeConfig(.{
         .abi_version = abi_version,
         .cols = 80,
@@ -6144,7 +6144,7 @@ test "macOS app dev session config defaults queue capacity without changing comm
     try std.testing.expectEqual(false, normalized.minimal_tabs); // 기본 스크래치(0)
 }
 
-test "macOS app dev session normalizeConfig carries chrome_minimal and minimal_tabs flags" {
+test "macOS app session normalizeConfig carries chrome_minimal and minimal_tabs flags" {
     const full = try normalizeConfig(.{
         .abi_version = abi_version,
         .cols = 80,
@@ -6171,7 +6171,7 @@ test "macOS app dev session normalizeConfig carries chrome_minimal and minimal_t
 
 test "gridFromBacking divides backing pixels by cell size with placeholder + clamps" {
     // 960×600 backing at 8×18 cell -> 120×33 (이전엔 Swift가 placeholder 12×24로 80×25를 잡아
-    // 창과 grid가 어긋났다). 이제 dev session이 실제 메트릭으로 직접 계산한다.
+    // 창과 grid가 어긋났다). 이제 app session이 실제 메트릭으로 직접 계산한다.
     try std.testing.expectEqual(terminal.Size{ .cols = 120, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 0));
     // cell 크기 0(메트릭 없음, 이론상) -> placeholder 12×24.
     try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 25 }, gridFromBacking(960, 600, 0, 0, 0));
@@ -6191,7 +6191,7 @@ test "commitComposition is a safe no-op when there is no active preedit" {
     // 조합이 없으면(preedit==null) 아무것도 안 보내고 무해해야 한다 — IME 우회 특수키(PageUp)마다
     // 호출되므로 일반 타이핑 경로를 망가뜨리면 안 된다. commit 경로(preedit 있을 때)는 frame_loop가
     // 필요해 헤드리스로 못 돌리고 GUI 수동 검증으로 본다(PR 본문).
-    var session: DevSession = undefined;
+    var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
     session.chrome_host = .{}; // inputFocus가 notice/find/palette.open을 읽음([[devsession-undefined-test-field-trap]])
     session.rename = null; // inputFocus가 rename을 읽음(undefined면 garbage가 .rename 분기 → rename_input crash)
@@ -6208,7 +6208,7 @@ test "commitComposition is a safe no-op when there is no active preedit" {
 }
 
 test "scrollPage scrolls one screen (rows-1) per page using the core's authoritative rows" {
-    var session: DevSession = undefined;
+    var session: AppSession = undefined;
     var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
@@ -6228,7 +6228,7 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
 }
 
 test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘다 (audit MEDIUM)" {
-    var session: DevSession = undefined;
+    var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
     var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
@@ -6261,7 +6261,7 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
 }
 
 test "drag autoscroll scrolls one line per tick and extends the selection to the edge row" {
-    var session: DevSession = undefined;
+    var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
     var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
@@ -6306,7 +6306,7 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
 }
 
 test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오버레이 caret도 깜빡(suffix-trim 재활용)" {
-    var session: DevSession = undefined;
+    var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
     var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
@@ -6371,7 +6371,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
     const allocator = std.testing.allocator;
     // backing px(1600×900, 1x) 주어진 경우 — cols/rows(80×24)는 폴백값일 뿐, 실제 spawn은 창 grid여야 한다.
     {
-        const session = try allocator.create(DevSession);
+        const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
             .abi_version = abi_version,
@@ -6392,7 +6392,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
     }
     // 2x(retina) — 진단: width_px=1920·scale_milli=2000일 때 cell·sidebar·grid 실측(MARU_DEBUG 로그).
     {
-        const session = try allocator.create(DevSession);
+        const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
             .abi_version = abi_version,
@@ -6411,7 +6411,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
     }
     // backing px 0(헤드리스·창 미상) — cols/rows로 폴백 spawn.
     {
-        const session = try allocator.create(DevSession);
+        const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
             .abi_version = abi_version,
@@ -6431,7 +6431,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
 test "headless ticks toggle the blink phase and bump the metal generation" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 CoreText frame builder 경로
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -6471,7 +6471,7 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
 test "rename: commit writes custom_name, cancel keeps old, empty clears, teardown clears target" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 풀 세션(실 PTY/CoreText) 경로
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -6523,7 +6523,7 @@ test "rename: commit writes custom_name, cancel keeps old, empty clears, teardow
 test "double-click on a Term tab or sidebar slot starts rename" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -6559,7 +6559,7 @@ test "double-click on a Term tab or sidebar slot starts rename" {
 test "right-click opens context menu on a rename target; clicking Rename starts rename" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -6599,7 +6599,7 @@ test "right-click opens context menu on a rename target; clicking Rename starts 
 test "rename caret blinks (width-stable) and IME caret rect tracks the editor, not the terminal cursor" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -6647,7 +6647,7 @@ test "rename caret blinks (width-stable) and IME caret rect tracks the editor, n
 test "review fixes: focus-loss commits rename, body right-click reports, close-zone excluded" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -6691,7 +6691,7 @@ test "review fixes: focus-loss commits rename, body right-click reports, close-z
 test "synchronized output(2026) hold: ESU 누락 시 sync_timeout_ticks를 넘으면 강제 투영(freeze 복구)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 CoreText frame builder 경로
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -6730,7 +6730,7 @@ test "synchronized output(2026) hold: ESU 누락 시 sync_timeout_ticks를 넘�
 test "chrome_minimal session suppresses the pane tab bar and the sidebar" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // refreshCellMetrics가 CoreText 메트릭 경로
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -6759,7 +6759,7 @@ test "minimal scratch session blocks new_tab/new_term; minimal_tabs re-enables t
 
     // ① chrome_minimal + minimal_tabs=0(기본 스크래치): 탭/Term 생성 액션이 무동작.
     {
-        const session = try allocator.create(DevSession);
+        const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
             .abi_version = abi_version,
@@ -6782,7 +6782,7 @@ test "minimal scratch session blocks new_tab/new_term; minimal_tabs re-enables t
 
     // ② chrome_minimal + minimal_tabs=1: 탭/Term 생성이 다시 동작.
     {
-        const session = try allocator.create(DevSession);
+        const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
             .abi_version = abi_version,
@@ -6810,7 +6810,7 @@ test "minimal tab indicator: adaptive dots appear only in minimal with >1 tab" {
 
     // ① minimal + minimal_tabs: 단일이면 무동작, Term 2개면 strip+점2개(활성=마지막에 그려진 셀).
     {
-        const session = try allocator.create(DevSession);
+        const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
             .abi_version = abi_version,
@@ -6855,7 +6855,7 @@ test "minimal tab indicator: adaptive dots appear only in minimal with >1 tab" {
 
     // ② full(chrome_minimal=0): 탭이 여러 개여도 인디케이터 없음(사이드바·탭 바가 보여줌).
     {
-        const session = try allocator.create(DevSession);
+        const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
             .abi_version = abi_version,
@@ -6883,7 +6883,7 @@ test "minimal active pane border: 4 edges only in minimal split" {
 
     // ① minimal: 단일 pane이면 무동작, split(>1)이면 4변 테두리(reserved 2/3/4/5)·색=sidebarActiveBg.
     {
-        const session = try allocator.create(DevSession);
+        const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
             .abi_version = abi_version,
@@ -6914,7 +6914,7 @@ test "minimal active pane border: 4 edges only in minimal split" {
 
     // ② full(chrome_minimal=0): split이어도 테두리 없음(탭 바 하이라이트가 활성 pane을 보여줌).
     {
-        const session = try allocator.create(DevSession);
+        const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
             .abi_version = abi_version,
@@ -6935,7 +6935,7 @@ test "minimal active pane border: 4 edges only in minimal split" {
 test "command catalog: 엔트리·바인딩 표시 + runAction 디스패치" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 init(loaded_config resolver) + PTY
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -6979,7 +6979,7 @@ test "command catalog: 엔트리·바인딩 표시 + runAction 디스패치" {
 test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합 표시 → Enter 디스패치+닫힘 → 프레임 빌드" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayFrame=CoreText, 실 PTY
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7044,7 +7044,7 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
 test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비게이션 → 하이라이트·오버레이 프레임" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayFrame=CoreText, 실 PTY
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7109,7 +7109,7 @@ test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비
 test "find ⌘G/⌘⇧G: 오버레이 닫힌 채 다음/이전 매치 네비(보존 검색어 재검색·타이핑이 종료)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY(controlled_smoke)
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7170,7 +7170,7 @@ test "find ⌘G/⌘⇧G: 오버레이 닫힌 채 다음/이전 매치 네비(보
 test "alt screen에선 maru Find를 끈다(⌘F 무동작·⌘G 무동작·열린 채 진입 시 tick이 닫음)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7212,7 +7212,7 @@ test "alt screen에선 maru Find를 끈다(⌘F 무동작·⌘G 무동작·열�
 test "find IME 멀티-문자: 커밋이 다음 조합 preedit를 안 지운다(조합 안 보임 회귀)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // handleKeyEvent → chrome 라우팅, 실 PTY
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7243,7 +7243,7 @@ test "find IME 멀티-문자: 커밋이 다음 조합 preedit를 안 지운다(�
 
 test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫고 notice가 최우선(IME 무시)·toggle이 notice를 닫음" {
     // 경량 — show/toggle·inputFocus·IME 헬퍼만 탄다(CoreText/PTY 불필요). undefined 세션은 이들이 읽는 필드만 초기화.
-    var session: DevSession = undefined;
+    var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
     session.chrome_host = .{}; // inputFocus가 notice/find/palette.open을 읽음([[devsession-undefined-test-field-trap]])
     session.rename = null; // inputFocus가 rename을 읽음([[devsession-undefined-test-field-trap]])
@@ -7257,18 +7257,18 @@ test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫
     }
 
     // 오버레이 없음 → terminal
-    try std.testing.expectEqual(DevSession.InputFocus.terminal, session.inputFocus());
+    try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 
     // find 열림 → .find
     session.toggleFind();
     try std.testing.expect(session.chrome_host.find.open);
-    try std.testing.expectEqual(DevSession.InputFocus.find, session.inputFocus());
+    try std.testing.expectEqual(AppSession.InputFocus.find, session.inputFocus());
 
     // showNotice가 find를 닫는다(#2 배타) — notice가 최우선 포커스(#3)
     session.showNotice("corrupt");
     try std.testing.expect(session.chrome_host.notice.open);
     try std.testing.expect(!session.chrome_host.find.open); // #2: 두 박스가 합쳐진 frame으로 안 깨짐
-    try std.testing.expectEqual(DevSession.InputFocus.notice, session.inputFocus()); // #3: 최우선
+    try std.testing.expectEqual(AppSession.InputFocus.notice, session.inputFocus()); // #3: 최우선
     // #3: notice 중 IME 연산은 무시 — 조합이 뒤(find/터미널)로 새지 않는다
     session.imeSetPreedit("\xea\xb0\x80"); // "가"
     try std.testing.expect(!session.imeComposingActive());
@@ -7284,11 +7284,11 @@ test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫
     session.togglePalette();
     try std.testing.expect(!session.chrome_host.notice.open); // #2
     try std.testing.expect(session.chrome_host.palette.open);
-    try std.testing.expectEqual(DevSession.InputFocus.palette, session.inputFocus());
+    try std.testing.expectEqual(AppSession.InputFocus.palette, session.inputFocus());
 }
 
 test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 뒤 터미널 스크롤백을 보존(#4)" {
-    var session: DevSession = undefined;
+    var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
     var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
     defer tab_surface.deinit();
@@ -7324,7 +7324,7 @@ test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 �
 test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회귀 실측(실 CoreText)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayFrame=CoreText, 실 PTY
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7380,7 +7380,7 @@ test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회�
 test "command palette(chrome): 한글(wide) query는 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회귀 실측(실 CoreText)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayFrame=CoreText, 실 PTY
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7458,7 +7458,7 @@ test "rasterizeOverlayCells: 다중 fill(painter order) + 다중 행 text → �
     };
     const draws = [_]chrome.ChromeDraw{.{ .layer = .modal, .ops = &ops }};
 
-    var raster = try DevSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20);
+    var raster = try AppSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20);
     defer raster.cells.deinit(allocator);
     defer raster.gpu_quads.deinit(allocator);
     defer raster.gpu_shadows.deinit(allocator);
@@ -7502,7 +7502,7 @@ test "rasterizeOverlayCells: wide 글리프 뒤 continuation 칸은 emit 안 함
     };
     const draws = [_]chrome.ChromeDraw{.{ .layer = .modal, .ops = &ops }};
 
-    var raster = try DevSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20);
+    var raster = try AppSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20);
     defer raster.cells.deinit(allocator);
     defer raster.gpu_quads.deinit(allocator);
     defer raster.gpu_shadows.deinit(allocator);
@@ -7522,7 +7522,7 @@ test "rasterizeOverlayCells: wide 글리프 뒤 continuation 칸은 emit 안 함
 test "chrome Notice 모달: showNotice → 메시지 소유 복사·오버레이 프레임·입력 라우팅·메뉴 차단·Esc 닫기" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // buildNoticeFrame=CoreText, 실 PTY
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7567,7 +7567,7 @@ test "chrome Notice 모달: showNotice → 메시지 소유 복사·오버레이
 test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상한 클램프" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 메트릭 + PTY
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7626,7 +7626,7 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
 test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 캡처" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY + split/탭 생성
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7678,7 +7678,7 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
 test "serializeWorkspaceWindow: 세션-소유 헤더 없는 블록 + 재호출 시 이전 버퍼 해제" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7703,7 +7703,7 @@ test "serializeWorkspaceWindow: 세션-소유 헤더 없는 블록 + 재호출 �
 test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term 구조·active 인덱스)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn(cwd chdir이 실패 안 하게 /tmp 사용)
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7755,7 +7755,7 @@ test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term �
 test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7814,7 +7814,7 @@ test "usableRestoreCwd: 절대경로 형식 필터(존재·디렉터리는 child
 test "applyWorkspaceWindow: 없는 cwd여도 복원 성공(기본 cwd 폴백, surface 안 잃음)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7840,7 +7840,7 @@ test "applyWorkspaceWindow: 없는 cwd여도 복원 성공(기본 cwd 폴백, su
 test "applyWorkspaceWindow: 손상 트리(중복·고아 leaf)는 MalformedTree로 거부(UAF 차단)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7905,7 +7905,7 @@ test "sidebarBandCell sizes the active band to the sidebar width and emits a sen
 test "sidebar gets an active-tab highlight band that follows tab create and switch" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7957,7 +7957,7 @@ test "sidebar gets an active-tab highlight band that follows tab create and swit
 test "active tab is a single-leaf SplitTree laid out to the full terminal rect" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -7990,7 +7990,7 @@ test "active tab is a single-leaf SplitTree laid out to the full terminal rect" 
 test "splitActivePane splits the active leaf, focuses the new panel, and renders N panels" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8045,7 +8045,7 @@ test "splitActivePane splits the active leaf, focuses the new panel, and renders
 test "S1 구조-무효화 계약: destroyPane이 해제 Pane 포인터를 표적 무효화(무관 드래그 보존)·divider도 표적" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane = 실 PTY/CoreText
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8104,7 +8104,7 @@ test "S1 구조-무효화 계약: destroyPane이 해제 Pane 포인터를 표적
 test "S1 표적 divider: 무관한 split의 pane이 collapse돼도 divider_drag 보존(removeLeaf가 freed split surface)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane = 실 PTY/CoreText
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8242,29 +8242,29 @@ test "paneLabelCols/paneTabBarRect: 라벨 없으면 0(전체 바), 있으면 �
 
     // custom_name 없음 → label_cols 0, 탭 sub-rect == 전체 바(기존 동작).
     var bare: Pane = .{ .custom_name = null };
-    try std.testing.expectEqual(@as(u32, 0), DevSession.paneLabelCols(&bare, 40));
-    const t0 = DevSession.paneTabBarRect(full, 0, 8);
+    try std.testing.expectEqual(@as(u32, 0), AppSession.paneLabelCols(&bare, 40));
+    const t0 = AppSession.paneTabBarRect(full, 0, 8);
     try std.testing.expectEqual(@as(u32, 100), t0.x);
     try std.testing.expectEqual(@as(u32, 320), t0.w);
 
     // "build"(5칸) → want = 5 + 2(좌패딩·간격) = 7. bar_cols 40이라 cap 충분 → 7칸 예약, 탭이 그만큼 우측으로.
     var named: Pane = .{ .custom_name = "build" };
-    const lc = DevSession.paneLabelCols(&named, 40);
+    const lc = AppSession.paneLabelCols(&named, 40);
     try std.testing.expectEqual(@as(u32, 7), lc);
-    const t1 = DevSession.paneTabBarRect(full, lc, 8);
+    const t1 = AppSession.paneTabBarRect(full, lc, 8);
     try std.testing.expectEqual(@as(u32, 100 + 7 * 8), t1.x); // 라벨만큼 우측 offset
     try std.testing.expectEqual(@as(u32, 320 - 7 * 8), t1.w);
 
     // 좁은 바(bar_cols ≤ min_tab_cols=6)면 라벨 생략(탭 우선).
-    try std.testing.expectEqual(@as(u32, 0), DevSession.paneLabelCols(&named, 6));
+    try std.testing.expectEqual(@as(u32, 0), AppSession.paneLabelCols(&named, 6));
 
     // 긴 이름은 max_label(20)로 cap.
     var long: Pane = .{ .custom_name = "this-is-a-very-long-pane-name-indeed" };
-    try std.testing.expectEqual(@as(u32, 20), DevSession.paneLabelCols(&long, 100));
+    try std.testing.expectEqual(@as(u32, 20), AppSession.paneLabelCols(&long, 100));
 
     // 빈 custom_name("")도 없음으로 본다(app.pickLabel 규칙).
     var empty: Pane = .{ .custom_name = "" };
-    try std.testing.expectEqual(@as(u32, 0), DevSession.paneLabelCols(&empty, 40));
+    try std.testing.expectEqual(@as(u32, 0), AppSession.paneLabelCols(&empty, 40));
 }
 
 test "pointInRect uses half-open bounds (탭 바·divider·pane hit-test 공유)" {
@@ -8317,7 +8317,7 @@ test "tabNumberLabel formats {n} {title} with 1-based numbering" {
 // paneTermRect/paneBarRect가 leaf rect 상단에서 탭 바(cell 높이 1칸)를 떼는지 — 충분히 크면 바+터미널, 너무
 // 작으면 바 없음(터미널이 전체). 좌표/resize/렌더가 공유하는 '바 아래' 영역의 단일 출처라 헤드리스로 고정.
 test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
-    var session: DevSession = undefined;
+    var session: AppSession = undefined;
     // paneBarHeightPx → buildChromeTokens가 appearance(theme·chrome_theme)를 읽으므로 undefined 세션에 명시 초기화한다
     // (chrome_theme=.tui → tab_bar_pad_y_px=0 → 바=cell 1칸). undefined 필드 읽기 UB(0xaa 우연 green) 회피.
     session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
@@ -8344,7 +8344,7 @@ test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
 test "pane reserves a top tab-bar strip and renders a bar chrome cell" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8379,7 +8379,7 @@ test "pane reserves a top tab-bar strip and renders a bar chrome cell" {
 test "pane tab bar draws Term-title tabs with an active-Term highlight" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8418,7 +8418,7 @@ test "pane tab bar draws Term-title tabs with an active-Term highlight" {
 test "vertical split renders the bottom pane tab bar at its own y (not overlapping top at 0)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8480,7 +8480,7 @@ test "vertical split renders the bottom pane tab bar at its own y (not overlappi
 test "clicking a tab in the pane bar switches to that Term" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8517,7 +8517,7 @@ test "clicking a tab in the pane bar switches to that Term" {
 test "hovering a tab shows a close X; clicking it closes that Term" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8562,7 +8562,7 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
 test "clicking the bar '+' button spawns a new Term in that pane" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8598,7 +8598,7 @@ test "clicking the bar '+' button spawns a new Term in that pane" {
 test "hovering the '+' button does not mark the last tab for close" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8636,7 +8636,7 @@ test "hovering the '+' button does not mark the last tab for close" {
 test "dragging a Term tab reorders it within the pane" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8686,7 +8686,7 @@ test "dragging a Term tab reorders it within the pane" {
 test "dragging a tab to another pane moves the Term; emptying the source collapses it" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8742,7 +8742,7 @@ test "dragging a tab to another pane moves the Term; emptying the source collaps
 test "④: dropping a tab on a pane body edge creates a new split there (rearrange)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8792,7 +8792,7 @@ test "④: dropping a tab on a pane body edge creates a new split there (rearran
 test "④b: tab drag tracks the drop target and emits a translucent highlight" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8854,7 +8854,7 @@ test "④b: tab drag tracks the drop target and emits a translucent highlight" {
 test "floating tab preview frame is built (and positioned) while dragging a tab" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8913,7 +8913,7 @@ test "floating tab preview frame is built (and positioned) while dragging a tab"
 test "clicking another pane in a split focuses it; clicking the active pane keeps focus" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -8957,7 +8957,7 @@ test "clicking another pane in a split focuses it; clicking the active pane keep
 test "wheel over an inactive pane scrolls that pane (not the active one)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9000,7 +9000,7 @@ test "wheel over an inactive pane scrolls that pane (not the active one)" {
 test "horizontal trackpad swipe scrolls the overflowing tab bar of the pane under the cursor" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9041,7 +9041,7 @@ test "horizontal trackpad swipe scrolls the overflowing tab bar of the pane unde
 test "Cmd+Option+arrow moves pane focus directionally through the key path" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9080,7 +9080,7 @@ test "Cmd+Option+arrow moves pane focus directionally through the key path" {
 test "Cmd+W closes the active pane first and collapses the split, leaving the sibling" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9119,7 +9119,7 @@ test "Cmd+W closes the active pane first and collapses the split, leaving the si
 test "PR6: dragging a split divider resizes the panes via split.ratio" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9173,7 +9173,7 @@ test "PR6: dragging a split divider resizes the panes via split.ratio" {
 test "split dividers render as thin lines (reserved bar/underline), not full cells" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9220,7 +9220,7 @@ test "split dividers render as thin lines (reserved bar/underline), not full cel
 test "hoverCursor returns region-specific cursor kinds" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9287,7 +9287,7 @@ test "hoverCursor returns region-specific cursor kinds" {
 test "PR5b: a Term whose shell exits is reaped, the sibling Term survives" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9322,7 +9322,7 @@ test "PR5b: a Term whose shell exits is reaped, the sibling Term survives" {
 test "PR5b: a split pane whose only Term exits collapses to its sibling" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9361,7 +9361,7 @@ test "PR5b: a split pane whose only Term exits collapses to its sibling" {
 test "PR5b: a background workspace whose last Term exits is closed; the other survives" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9401,7 +9401,7 @@ test "PR5b: a background workspace whose last Term exits is closed; the other su
 test "PR5b: the last Term exiting is not reaped (session-end latch owns it)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9425,7 +9425,7 @@ test "PR5b: the last Term exiting is not reaped (session-end latch owns it)" {
 test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9479,7 +9479,7 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
 test "hovering the sidebar + slot adds a hover band at the plus row" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9523,7 +9523,7 @@ test "hovering the sidebar + slot adds a hover band at the plus row" {
 test "clicking the hovered slot close zone closes that tab, elsewhere switches" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9563,7 +9563,7 @@ test "clicking the hovered slot close zone closes that tab, elsewhere switches" 
 test "dragging a sidebar tab reorders the list and active follows the dragged tab" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9583,7 +9583,7 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
         );
     }
     try std.testing.expectEqual(@as(usize, 3), session.tabs.items.len);
-    try std.testing.expectEqualStrings("Maru dev shell", session.tabs.items[0].activePane().activeTerm().surface.title);
+    try std.testing.expectEqualStrings("Maru shell", session.tabs.items[0].activePane().activeTerm().surface.title);
     try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
 
     const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
@@ -9599,7 +9599,7 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
     // 순서 [tab 2, tab 3, Maru], 활성=드래그 탭(Maru)=2, 드래그 종료.
     try std.testing.expectEqualStrings("tab 2", session.tabs.items[0].activePane().activeTerm().surface.title);
     try std.testing.expectEqualStrings("tab 3", session.tabs.items[1].activePane().activeTerm().surface.title);
-    try std.testing.expectEqualStrings("Maru dev shell", session.tabs.items[2].activePane().activeTerm().surface.title);
+    try std.testing.expectEqualStrings("Maru shell", session.tabs.items[2].activePane().activeTerm().surface.title);
     try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
     try std.testing.expect(!session.sidebar_drag_active);
 }
@@ -9609,7 +9609,7 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
 test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, clamp)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9649,7 +9649,7 @@ test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, c
 test "③b: clicking the sidebar '+' button opens a new workspace" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9685,7 +9685,7 @@ test "③b: clicking the sidebar '+' button opens a new workspace" {
 test "two tabs: createTab spawns a second shell and tick drains both (multi-tab)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9734,7 +9734,7 @@ test "two tabs: createTab spawns a second shell and tick drains both (multi-tab)
 test "Cmd+T opens a new Term in the active pane; Cmd+Shift+T opens a workspace" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9770,7 +9770,7 @@ test "Cmd+T opens a new Term in the active pane; Cmd+Shift+T opens a workspace" 
 test "Cmd+1..9 switches to the Nth workspace (out-of-range is a no-op)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9806,7 +9806,7 @@ test "Cmd+1..9 switches to the Nth workspace (out-of-range is a no-op)" {
 test "handleKeyEvent applies user config keybindings (resolver wired from loaded_config)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9839,7 +9839,7 @@ test "handleKeyEvent applies user config keybindings (resolver wired from loaded
 test "Term lifecycle: Cmd+T adds, Cmd+]/[ cycle, Cmd+W cascades Term to workspace" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9886,7 +9886,7 @@ test "Term lifecycle: Cmd+T adds, Cmd+]/[ cycle, Cmd+W cascades Term to workspac
 test "Cmd+Shift bracket keys cycle tabs through the key path" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9916,7 +9916,7 @@ test "Cmd+Shift bracket keys cycle tabs through the key path" {
 test "closeTab tears down a tab and reselects, last tab closes the session" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -9958,7 +9958,7 @@ test "closeTab tears down a tab and reselects, last tab closes the session" {
 }
 
 test "drag autoscroll works after a double-click word selection and skips redraw when nothing moves" {
-    var session: DevSession = undefined;
+    var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
     var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
@@ -10003,7 +10003,7 @@ test "drag autoscroll works after a double-click word selection and skips redraw
 test "large paste drains through the non-blocking queue without freezing ticks" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 PTY 경로
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -10040,7 +10040,7 @@ test "large paste drains through the non-blocking queue without freezing ticks" 
 test "imeEnd always closes the transaction even with a null key (no leak) and fails closed on OOM" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -10070,18 +10070,18 @@ test "imeEnd always closes the transaction even with a null key (no leak) and fa
 }
 
 test "shouldReplayAfterCommit: arrows replay after candidate commit (left only when modified)" {
-    try std.testing.expect(DevSession.shouldReplayAfterCommit(.{ .key = .arrow_right, .modifiers = .{} }));
-    try std.testing.expect(DevSession.shouldReplayAfterCommit(.{ .key = .arrow_down, .modifiers = .{} }));
-    try std.testing.expect(DevSession.shouldReplayAfterCommit(.{ .key = .arrow_up, .modifiers = .{} }));
-    try std.testing.expect(!DevSession.shouldReplayAfterCommit(.{ .key = .arrow_left, .modifiers = .{} }));
-    try std.testing.expect(DevSession.shouldReplayAfterCommit(.{ .key = .arrow_left, .modifiers = .{ .shift = true } }));
-    try std.testing.expect(!DevSession.shouldReplayAfterCommit(.{ .key = .enter, .modifiers = .{} }));
+    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .arrow_right, .modifiers = .{} }));
+    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .arrow_down, .modifiers = .{} }));
+    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .arrow_up, .modifiers = .{} }));
+    try std.testing.expect(!AppSession.shouldReplayAfterCommit(.{ .key = .arrow_left, .modifiers = .{} }));
+    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .arrow_left, .modifiers = .{ .shift = true } }));
+    try std.testing.expect(!AppSession.shouldReplayAfterCommit(.{ .key = .enter, .modifiers = .{} }));
 }
 
 test "sendCommittedText normalizes newlines to CR and imeBegin snaps to bottom" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -10112,34 +10112,34 @@ test "sendCommittedText normalizes newlines to CR and imeBegin snaps to bottom" 
 
 test "scrollbarThumbGeom: null without scrollback, thumb size/position track view_offset" {
     // 스크롤백 없으면 안 그림(null).
-    try std.testing.expect(DevSession.scrollbarThumbGeom(0, 0, 16, 320) == null);
-    try std.testing.expect(DevSession.scrollbarThumbGeom(20, 0, 0, 320) == null); // cell_height 0
-    try std.testing.expect(DevSession.scrollbarThumbGeom(20, 0, 16, 0) == null); // view 0
+    try std.testing.expect(AppSession.scrollbarThumbGeom(0, 0, 16, 320) == null);
+    try std.testing.expect(AppSession.scrollbarThumbGeom(20, 0, 0, 320) == null); // cell_height 0
+    try std.testing.expect(AppSession.scrollbarThumbGeom(20, 0, 16, 0) == null); // view 0
 
     // sb_count=20(=20행 @16px=320px), view 320px. total 640px → thumb_h = 320*320/640 = 160.
-    const bottom = DevSession.scrollbarThumbGeom(20, 0, 16, 320).?; // view_offset 0 = 바닥
+    const bottom = AppSession.scrollbarThumbGeom(20, 0, 16, 320).?; // view_offset 0 = 바닥
     try std.testing.expectApproxEqAbs(@as(f32, 160), bottom.h, 0.5);
     try std.testing.expectApproxEqAbs(@as(f32, 160), bottom.y, 0.5); // 바닥: y = view-thumb = 320-160
-    const top = DevSession.scrollbarThumbGeom(20, 20, 16, 320).?; // view_offset 20 = 꼭대기
+    const top = AppSession.scrollbarThumbGeom(20, 20, 16, 320).?; // view_offset 20 = 꼭대기
     try std.testing.expectApproxEqAbs(@as(f32, 0), top.y, 0.5); // 꼭대기: y = 0
-    const mid = DevSession.scrollbarThumbGeom(20, 10, 16, 320).?; // 중간(t=0.5)
+    const mid = AppSession.scrollbarThumbGeom(20, 10, 16, 320).?; // 중간(t=0.5)
     try std.testing.expectApproxEqAbs(@as(f32, 80), mid.y, 0.5); // (320-160)*(1-0.5)
 
     // 스크롤백이 많으면 thumb는 최소 높이(18px)로 clamp.
-    const tiny = DevSession.scrollbarThumbGeom(10000, 0, 16, 320).?;
+    const tiny = AppSession.scrollbarThumbGeom(10000, 0, 16, 320).?;
     try std.testing.expectApproxEqAbs(@as(f32, 18), tiny.h, 0.5);
 }
 
 test "scrollbarTargetOffset: clamp + round, and round-trips scrollbarThumbGeom" {
     // t(0=바닥, 1=꼭대기)를 view_offset으로. 경계·중간.
-    try std.testing.expectEqual(@as(usize, 0), DevSession.scrollbarTargetOffset(0.0, 20)); // 바닥
-    try std.testing.expectEqual(@as(usize, 20), DevSession.scrollbarTargetOffset(1.0, 20)); // 꼭대기
-    try std.testing.expectEqual(@as(usize, 10), DevSession.scrollbarTargetOffset(0.5, 20)); // 중간
+    try std.testing.expectEqual(@as(usize, 0), AppSession.scrollbarTargetOffset(0.0, 20)); // 바닥
+    try std.testing.expectEqual(@as(usize, 20), AppSession.scrollbarTargetOffset(1.0, 20)); // 꼭대기
+    try std.testing.expectEqual(@as(usize, 10), AppSession.scrollbarTargetOffset(0.5, 20)); // 중간
     // [0,1] 밖은 clamp.
-    try std.testing.expectEqual(@as(usize, 0), DevSession.scrollbarTargetOffset(-0.3, 20));
-    try std.testing.expectEqual(@as(usize, 20), DevSession.scrollbarTargetOffset(1.5, 20));
+    try std.testing.expectEqual(@as(usize, 0), AppSession.scrollbarTargetOffset(-0.3, 20));
+    try std.testing.expectEqual(@as(usize, 20), AppSession.scrollbarTargetOffset(1.5, 20));
     // round(0.5*20=10 정수경계 위 1.54→2).
-    try std.testing.expectEqual(@as(usize, 2), DevSession.scrollbarTargetOffset(0.077, 20));
+    try std.testing.expectEqual(@as(usize, 2), AppSession.scrollbarTargetOffset(0.077, 20));
 
     // 역매핑은 scrollbarThumbGeom의 정확한 역이어야 한다 — 각 view_offset에서 thumb_top(geom.y)을 뽑아
     // t로 되돌리면 같은 offset이 나온다(드래그 위치 ↔ scroll 위치가 1:1, drift 없음).
@@ -10147,34 +10147,34 @@ test "scrollbarTargetOffset: clamp + round, and round-trips scrollbarThumbGeom" 
     const ch: u32 = 16;
     const view: u32 = 320;
     inline for (.{ 0, 3, 7, 13, 20 }) |V| {
-        const g = DevSession.scrollbarThumbGeom(sb, V, ch, view).?;
+        const g = AppSession.scrollbarThumbGeom(sb, V, ch, view).?;
         const track: f64 = @as(f64, @floatFromInt(view)) - @as(f64, g.h);
         const t: f64 = 1.0 - @as(f64, g.y) / track;
-        try std.testing.expectEqual(@as(usize, V), DevSession.scrollbarTargetOffset(t, sb));
+        try std.testing.expectEqual(@as(usize, V), AppSession.scrollbarTargetOffset(t, sb));
     }
 }
 
 test "scrollbarBarWidthPx: cell 비율·최소 px·emphasize 가산" {
     // cell_width 큰 경우 비율(0.5)이 최소(7)를 넘는다.
-    try std.testing.expectApproxEqAbs(@as(f32, 10), DevSession.scrollbarBarWidthPx(20, false), 0.01); // 20*0.5
-    try std.testing.expectApproxEqAbs(@as(f32, 12), DevSession.scrollbarBarWidthPx(20, true), 0.01); // +2 emphasize
+    try std.testing.expectApproxEqAbs(@as(f32, 10), AppSession.scrollbarBarWidthPx(20, false), 0.01); // 20*0.5
+    try std.testing.expectApproxEqAbs(@as(f32, 12), AppSession.scrollbarBarWidthPx(20, true), 0.01); // +2 emphasize
     // 작은 cell이면 최소 px로 clamp.
-    try std.testing.expectApproxEqAbs(@as(f32, 7), DevSession.scrollbarBarWidthPx(8, false), 0.01); // 8*0.5=4 < 7
-    try std.testing.expectApproxEqAbs(@as(f32, 9), DevSession.scrollbarBarWidthPx(8, true), 0.01); // 7+2
+    try std.testing.expectApproxEqAbs(@as(f32, 7), AppSession.scrollbarBarWidthPx(8, false), 0.01); // 8*0.5=4 < 7
+    try std.testing.expectApproxEqAbs(@as(f32, 9), AppSession.scrollbarBarWidthPx(8, true), 0.01); // 7+2
 }
 
 test "computeScrollbarAlpha: full→idle 감쇠(visible 유지·fade 후 faint·단조 감소)" {
     // visible_ticks까지 full.
-    try std.testing.expectEqual(scrollbar_alpha_full, DevSession.computeScrollbarAlpha(0));
-    try std.testing.expectEqual(scrollbar_alpha_full, DevSession.computeScrollbarAlpha(scrollbar_visible_ticks));
+    try std.testing.expectEqual(scrollbar_alpha_full, AppSession.computeScrollbarAlpha(0));
+    try std.testing.expectEqual(scrollbar_alpha_full, AppSession.computeScrollbarAlpha(scrollbar_visible_ticks));
     // fade 완료 후(visible+fade 이상) faint 정착.
-    try std.testing.expectEqual(scrollbar_alpha_idle, DevSession.computeScrollbarAlpha(scrollbar_visible_ticks + scrollbar_fade_ticks));
-    try std.testing.expectEqual(scrollbar_alpha_idle, DevSession.computeScrollbarAlpha(scrollbar_visible_ticks + scrollbar_fade_ticks + 100));
+    try std.testing.expectEqual(scrollbar_alpha_idle, AppSession.computeScrollbarAlpha(scrollbar_visible_ticks + scrollbar_fade_ticks));
+    try std.testing.expectEqual(scrollbar_alpha_idle, AppSession.computeScrollbarAlpha(scrollbar_visible_ticks + scrollbar_fade_ticks + 100));
     // fade 창 안은 full~idle 사이에서 단조 감소(틱이 늘수록 alpha가 줄거나 같다).
     var prev: u8 = scrollbar_alpha_full;
     var k: u32 = scrollbar_visible_ticks;
     while (k <= scrollbar_visible_ticks + scrollbar_fade_ticks) : (k += 1) {
-        const a = DevSession.computeScrollbarAlpha(k);
+        const a = AppSession.computeScrollbarAlpha(k);
         try std.testing.expect(a <= prev);
         try std.testing.expect(a >= scrollbar_alpha_idle);
         prev = a;
@@ -10184,7 +10184,7 @@ test "computeScrollbarAlpha: full→idle 감쇠(visible 유지·fade 후 faint·
 test "appendPaneScrollbars: split 각 pane이 자기 idle_ticks로 독립 fade (per-pane)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY + split 생성
     const allocator = std.testing.allocator;
-    const session = try allocator.create(DevSession);
+    const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
@@ -10233,7 +10233,7 @@ test "appendPaneScrollbars: split 각 pane이 자기 idle_ticks로 독립 fade (
 }
 
 test "configPath caches the resolved config path (single alloc, freed in deinit)" {
-    var session: DevSession = undefined;
+    var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
     session.config_path_buffer = null;
     defer if (session.config_path_buffer) |b| std.testing.allocator.free(b);
@@ -10245,7 +10245,7 @@ test "configPath caches the resolved config path (single alloc, freed in deinit)
 }
 
 test "imeCursorRect returns the cursor cell rect in backing px for IME candidate placement" {
-    var session: DevSession = undefined;
+    var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
     var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
     defer tab_surface.deinit();
@@ -10288,7 +10288,7 @@ test "pxToCell subtracts the active pane origin so clicks map to that pane's col
     // 활성 panel은 자기 rect origin에서 그려지므로, 스크린 픽셀에서 origin(x,y)을 뺀 뒤에야 그 panel의
     // 열/행이 된다(단일 panel이면 origin = (사이드바 폭, 0)이라 기존과 동일). 안 빼면 선택/클릭 블록이
     // origin만큼 어긋난다(라이브 제보 회귀). split이면 origin은 서브-rect의 좌상단이다.
-    var session: DevSession = undefined;
+    var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
     var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
     defer tab_surface.deinit();

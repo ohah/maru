@@ -107,14 +107,14 @@ typedef struct MaruAppHostResizeEvent {
     uint32_t reserved;
 } MaruAppHostResizeEvent;
 
-typedef enum MaruAppHostDevCommandKind {
-    MaruAppHostDevCommandControlledSmoke = 0,
-    MaruAppHostDevCommandInteractiveShell = 1,
-} MaruAppHostDevCommandKind;
+typedef enum MaruAppHostCommandKind {
+    MaruAppHostCommandControlledSmoke = 0,
+    MaruAppHostCommandInteractiveShell = 1,
+} MaruAppHostCommandKind;
 
-typedef struct MaruAppHostDevSession MaruAppHostDevSession;
+typedef struct MaruAppHostSession MaruAppHostSession;
 
-typedef struct MaruAppHostDevSessionConfig {
+typedef struct MaruAppHostSessionConfig {
     uint32_t abi_version;
     uint32_t cols;
     uint32_t rows;
@@ -128,15 +128,15 @@ typedef struct MaruAppHostDevSessionConfig {
        스크래치(⌘T/⌘⇧T 무동작). chrome_minimal=0(full)이면 이 값과 무관하게 탭이 항상 동작한다.
        Swift가 quick_terminal.minimal-tabs config를 읽어 quick 세션에만 넘긴다(메인 창은 0). */
     uint32_t minimal_tabs;
-    /* 첫 셸 spawn 크기 결정용 창 backing 픽셀 + scale(천분율). 셋이 다 >0이면 dev session이 cell 메트릭으로
+    /* 첫 셸 spawn 크기 결정용 창 backing 픽셀 + scale(천분율). 셋이 다 >0이면 app session이 cell 메트릭으로
        grid를 계산해 PTY를 처음부터 실제 창 크기로 띄운다(80×24 기본 spawn→resize 핸드셰이크/zsh 첫 프롬프트
        PROMPT_EOL_MARK(%) 잔상 제거). 모르면 0 — cols/rows로 폴백. Swift가 창 contentView×backingScale로 채운다. */
     uint32_t width_px;
     uint32_t height_px;
     uint32_t scale_milli;
-} MaruAppHostDevSessionConfig;
+} MaruAppHostSessionConfig;
 
-typedef struct MaruAppHostDevFrameSummary {
+typedef struct MaruAppHostFrameSummary {
     uint32_t abi_version;
     uint32_t terminal_surface;
     uint64_t frame_loop_ticks;
@@ -166,13 +166,13 @@ typedef struct MaruAppHostDevFrameSummary {
        resize / close_requested, 그리고 tick이 종료를 본 경우 app_should_terminate. */
     uint32_t last_event_kind;
     /* 현재 retain된 Metal frame의 generation(u32 truncate). host는 이 값이 그대로면
-       maru_macos_app_dev_session_metal_frame 호출을 건너뛰어 idle tick 비용을 줄일 수 있다. */
+       maru_macos_app_session_metal_frame 호출을 건너뛰어 idle tick 비용을 줄일 수 있다. */
     uint32_t metal_generation;
-} MaruAppHostDevFrameSummary;
+} MaruAppHostFrameSummary;
 
 /* 가장 최근 tick의 RenderFrame을 Metal로 그리기 위한 DTO. cell 하나가 atlas slot 1개와 그
    UV 사각형을 가리킨다. layout은 Zig metal_frame.NativeMetalCell과 1:1로 맞춘다. */
-typedef struct MaruAppHostDevMetalCell {
+typedef struct MaruAppHostMetalCell {
     uint16_t row;
     uint16_t col;
     uint16_t width;
@@ -200,11 +200,11 @@ typedef struct MaruAppHostDevMetalCell {
        사이드바 cell은 자체 위치 로직을 써 이 필드를 무시한다(0). */
     uint32_t origin_x;
     uint32_t origin_y;
-} MaruAppHostDevMetalCell;
+} MaruAppHostMetalCell;
 
 /* 한 glyph slot의 raster bytes를 atlas texture에 올리기 위한 업로드 기술자. bytes_offset/
-   byte_count는 MaruAppHostDevMetalFrame.raster_pixels 버퍼 안의 범위다. */
-typedef struct MaruAppHostDevMetalRasterUpload {
+   byte_count는 MaruAppHostMetalFrame.raster_pixels 버퍼 안의 범위다. */
+typedef struct MaruAppHostMetalRasterUpload {
     uint32_t slot_id;
     uint32_t atlas_x_px;
     uint32_t atlas_y_px;
@@ -214,12 +214,12 @@ typedef struct MaruAppHostDevMetalRasterUpload {
     size_t byte_count;
     size_t bytes_per_row;
     size_t non_clear_pixels;
-} MaruAppHostDevMetalRasterUpload;
+} MaruAppHostMetalRasterUpload;
 
 /* chrome rich 백엔드(C4b)의 GPU 둥근 사각형 프리미티브. Zig metal_frame.GpuQuad와 1:1. 셀 그리드와
    별개 파이프라인으로 SDF anti-aliasing. tui 테마는 빈 배열(NULL/0)이라 렌더 무동작(셀 fill 유지), rich만
    채운다(C4b-2~). 좌표 backing px. */
-typedef struct MaruAppHostDevGpuQuad {
+typedef struct MaruAppHostGpuQuad {
     float x;
     float y;
     float w;
@@ -231,10 +231,10 @@ typedef struct MaruAppHostDevGpuQuad {
     uint32_t border_color;   /* 0xAARRGGBB */
     uint32_t gradient_kind;  /* 0=solid, 1=vertical(top→bottom), 2=horizontal(left→right) */
     uint32_t layer;          /* C4b: 0=under(사이드바 밴드), 1=over(모달 최상위), 2=bottom(탭 밴드 — part1 앞·아래) — draw가 layer로 3패스 분리 */
-} MaruAppHostDevGpuQuad;
+} MaruAppHostGpuQuad;
 
 /* C4b의 둥근 drop shadow 프리미티브(blur). quad와 같은 별개 파이프라인, rich만 채운다. Zig GpuShadow와 1:1. */
-typedef struct MaruAppHostDevGpuShadow {
+typedef struct MaruAppHostGpuShadow {
     float x;
     float y;
     float w;
@@ -242,12 +242,12 @@ typedef struct MaruAppHostDevGpuShadow {
     float corner_radii[4];   /* [tl, tr, br, bl], px */
     float blur_radius;       /* px (0=블러 없음) */
     uint32_t color;          /* 0xAARRGGBB */
-} MaruAppHostDevGpuShadow;
+} MaruAppHostGpuShadow;
 
 /* kitty graphics 이미지 placement의 GPU 드로우 프리미티브(K2). Zig metal_frame.GpuImage와 1:1. 셀 그리드와
    별개 파이프라인(textured quad)으로, image_id로 캐시된 텍스처를 dest 사각형에 source UV로 그린다. pass(0/1/2)로
    셀배경/텍스트 전후에 그린다. 좌표는 터미널-로컬 backing px(origin_x/y는 split panel 오프셋). */
-typedef struct MaruAppHostDevGpuImage {
+typedef struct MaruAppHostGpuImage {
     uint32_t image_id;
     float dest_x;
     float dest_y;
@@ -261,12 +261,12 @@ typedef struct MaruAppHostDevGpuImage {
     float src_v1;
     int32_t z;
     uint32_t pass;           /* 0=below_bg, 1=below_text, 2=above_text(같은 pass 안 z 오름차순) */
-} MaruAppHostDevGpuImage;
+} MaruAppHostGpuImage;
 
 /* kitty graphics 이미지 텍스처 업로드 디스크립터(K2). Zig metal_frame.GpuImageUpload와 1:1. generation이 바뀐
    (신규/재transmit) 이미지만 들어온다 — renderer가 image_id로 텍스처를 캐시하고 여기 있는 것만 (재)업로드한다.
    pixels_offset/len은 frame의 image_pixels 연속 버퍼 안 이 이미지 구간(RGBA/RGB)을 가리킨다. */
-typedef struct MaruAppHostDevGpuImageUpload {
+typedef struct MaruAppHostGpuImageUpload {
     uint32_t image_id;
     uint32_t width;
     uint32_t height;
@@ -274,15 +274,15 @@ typedef struct MaruAppHostDevGpuImageUpload {
     uint64_t generation;
     size_t pixels_offset;
     size_t pixels_len;
-} MaruAppHostDevGpuImageUpload;
+} MaruAppHostGpuImageUpload;
 
-/* 가장 최근 frame의 Metal view. 모든 포인터는 dev session이 소유한 retained 배열을 가리키며,
+/* 가장 최근 frame의 Metal view. 모든 포인터는 app session이 소유한 retained 배열을 가리키며,
    "다음으로 재투영하는 tick"(새 output 또는 resize가 있는 tick) 또는 destroy까지 유효하다.
    idle tick은 재투영하지 않으므로 포인터가 유지되고 generation도 그대로다. close는 이 배열을
    해제하지 않는다(destroy에서만 해제). caller는 같은 main thread에서 동기적으로 소비해야
    한다. generation은 실제 재투영이 일어난 frame에서만 증가하므로, 값이 바뀌었을 때만 atlas
    재업로드/재드로우하면 된다. */
-typedef struct MaruAppHostDevMetalFrame {
+typedef struct MaruAppHostMetalFrame {
     uint32_t cols;
     uint32_t rows;
     uint32_t atlas_width_px;
@@ -292,9 +292,9 @@ typedef struct MaruAppHostDevMetalFrame {
     uint32_t cell_width_px;
     uint32_t cell_height_px;
     uint64_t generation;
-    const MaruAppHostDevMetalCell *cells;
+    const MaruAppHostMetalCell *cells;
     size_t cell_count;
-    const MaruAppHostDevMetalRasterUpload *raster_uploads;
+    const MaruAppHostMetalRasterUpload *raster_uploads;
     size_t raster_upload_count;
     const uint8_t *raster_pixels;
     size_t raster_pixel_count;
@@ -308,25 +308,25 @@ typedef struct MaruAppHostDevMetalFrame {
        밴드와 이후 탭 제목 glyph. terminal cells와 같은 표현이지만 renderer가 origin offset 없이
        (0 + col*cw) 사이드바 strip 안에 그리고, 사이드바 배경 quad 위에 블렌딩한다. NULL/0이면
        사이드바 셀 없음("surface→rect"의 두 번째 surface — split도 rect별 cell 배열로 확장). */
-    const MaruAppHostDevMetalCell *sidebar_cells;
+    const MaruAppHostMetalCell *sidebar_cells;
     size_t sidebar_cell_count;
     /* 사이드바 탭 슬롯 한 칸의 픽셀 높이(≈2.5×cell_height). renderer가 사이드바 셀을 cell 높이가 아니라
        이 슬롯 높이로 세로 배치한다(밴드 row i → py=i×slot_h) — 큰 탭 슬롯. 0이면 cell 높이로 폴백. */
     uint32_t sidebar_slot_height_px;
     /* chrome rich GPU 프리미티브(C4b). tui 테마는 빈 배열(NULL/0)이라 렌더 무동작(셀 그리드 유지),
        rich 테마만 lowering이 채운다(C4b-2~). NativeMetalCell과 별개 파이프라인으로 SDF AA로 그린다. */
-    const MaruAppHostDevGpuQuad *gpu_quads;
+    const MaruAppHostGpuQuad *gpu_quads;
     size_t gpu_quad_count;
-    const MaruAppHostDevGpuShadow *gpu_shadows;
+    const MaruAppHostGpuShadow *gpu_shadows;
     size_t gpu_shadow_count;
     /* C4b 모달: 모달 셀이 cells에서 시작하는 인덱스(0=모달 없음). 렌더러가 over quad(모달 배경)를 모달
        텍스트 셀 '앞'에 끼우는 분할점. */
     size_t modal_cells_start;
     /* kitty graphics(K2): 이미지 placement 드로우 프리미티브. NULL/0이면 이미지 없음(렌더 무동작). */
-    const MaruAppHostDevGpuImage *gpu_images;
+    const MaruAppHostGpuImage *gpu_images;
     size_t gpu_image_count;
     /* kitty graphics(K2): 이번 frame에 (재)업로드할 이미지 텍스처 디스크립터(generation 바뀐 것만). */
-    const MaruAppHostDevGpuImageUpload *image_uploads;
+    const MaruAppHostGpuImageUpload *image_uploads;
     size_t image_upload_count;
     /* 위 image_uploads가 가리키는 픽셀 연속 버퍼(RGBA/RGB). NULL/0이면 업로드 없음. */
     const uint8_t *image_pixels;
@@ -340,68 +340,68 @@ typedef struct MaruAppHostDevMetalFrame {
        theme.background. host가 render pass clearColor로 쓴다(셀이 default 배경=A0일 때 드러나는 색). 0이면
        renderer 기본 clear로 폴백. 끝에 추가해 기존 필드 offset 불변(ABI v51). */
     uint32_t terminal_bg;
-} MaruAppHostDevMetalFrame;
+} MaruAppHostMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);
 int32_t maru_macos_app_host_capabilities(MaruAppHostCapabilities *out_capabilities);
-int32_t maru_macos_app_dev_session_create(
-    const MaruAppHostDevSessionConfig *config,
-    MaruAppHostDevSession **out_session
+int32_t maru_macos_app_session_create(
+    const MaruAppHostSessionConfig *config,
+    MaruAppHostSession **out_session
 );
-int32_t maru_macos_app_dev_session_tick(
-    MaruAppHostDevSession *session,
-    MaruAppHostDevFrameSummary *out_summary
+int32_t maru_macos_app_session_tick(
+    MaruAppHostSession *session,
+    MaruAppHostFrameSummary *out_summary
 );
-int32_t maru_macos_app_dev_session_key_down(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_key_down(
+    MaruAppHostSession *session,
     const MaruAppHostKeyEvent *event,
-    MaruAppHostDevFrameSummary *out_summary
+    MaruAppHostFrameSummary *out_summary
 );
-int32_t maru_macos_app_dev_session_resize(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_resize(
+    MaruAppHostSession *session,
     const MaruAppHostResizeEvent *event,
-    MaruAppHostDevFrameSummary *out_summary
+    MaruAppHostFrameSummary *out_summary
 );
-int32_t maru_macos_app_dev_session_close(
-    MaruAppHostDevSession *session,
-    MaruAppHostDevFrameSummary *out_summary
+int32_t maru_macos_app_session_close(
+    MaruAppHostSession *session,
+    MaruAppHostFrameSummary *out_summary
 );
 /* 휠 스크롤. Swift는 raw 델타(포인트, 세로 delta_y·가로 delta_x)·정밀 델타 여부(0/1)·마우스 위치(backing px)만
    넘기고, 줄/열 환산과 어느 panel로 보낼지(커서 아래 pane — split의 비활성 panel 위 휠도 그 panel로 라우팅)는
    Zig가 한다. delta_y는 그 panel 터미널 스크롤백, delta_x는 그 pane 탭 바 가로 스크롤(탭이 넘칠 때만). 단일
    panel이면 활성과 같고, 사이드바/밖이면 활성 panel로 fallback. */
-int32_t maru_macos_app_dev_session_scroll_wheel(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_scroll_wheel(
+    MaruAppHostSession *session,
     double delta_y,
     double delta_x,
     int32_t precise,
     double x_px,
     double y_px
 );
-/* 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면(rows-1) 계산은 dev session이
+/* 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면(rows-1) 계산은 app session이
    권위 있는 rows로 한다. */
-int32_t maru_macos_app_dev_session_scroll_page(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_scroll_page(
+    MaruAppHostSession *session,
     int32_t delta_pages
 );
 /* 창 포커스 변화(OS window key/resign). gained!=0=포커스 얻음. focus reporting(DECSET 1004)이 켜진 surface면
    CSI I(gained)/CSI O(lost)를 PTY로 흘린다(vim FocusGained/Lost). Swift가 windowDidBecomeKey/windowDidResignKey에서 호출. */
-int32_t maru_macos_app_dev_session_focus_changed(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_focus_changed(
+    MaruAppHostSession *session,
     int32_t gained
 );
 /* 이전(dir<0)/다음(dir>0) 프롬프트 블록으로 뷰포트 점프(OSC 133 semantic prompt — Cmd+↑/↓).
-   분류·이동은 dev session/core가 하고 Swift는 방향만 넘긴다. */
-int32_t maru_macos_app_dev_session_jump_prompt(
-    MaruAppHostDevSession *session,
+   분류·이동은 app session/core가 하고 Swift는 방향만 넘긴다. */
+int32_t maru_macos_app_session_jump_prompt(
+    MaruAppHostSession *session,
     int32_t dir
 );
 /* 마우스 선택(셀렉션) 또는 mouse reporting. kind 1=down 2=drag 3=up 4=더블클릭(단어) 5=트리플클릭(논리 줄).
    button 0=left 1=middle 2=right(셀렉션은 left만 의미). mods 비트(xterm): 4=shift 8=meta/alt 16=ctrl.
    mouse tracking(DECSET 1000~1003)이 켜졌고 shift 미포함이면 셀렉션 대신 앱에 SGR/x10 리포트한다 —
    shift+click은 xterm 관례대로 셀렉션 override. 좌표는 backing 픽셀(좌상단 원점), 셀 변환은 Zig가 한다. */
-int32_t maru_macos_app_dev_session_mouse(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_mouse(
+    MaruAppHostSession *session,
     int32_t kind,
     double x_px,
     double y_px,
@@ -412,15 +412,15 @@ int32_t maru_macos_app_dev_session_mouse(
    선택이 없으면 *out_ptr=NULL, *out_len=0. Swift가 NSPasteboard에 쓴다(클립보드는 OS 소유). */
 /* 클립보드 붙여넣기(UTF-8). 개행 정규화(\n→\r)와 bracketed paste(DECSET 2004) 감싸기는 Zig가
    한다 — Swift는 NSPasteboard에서 읽은 바이트만 넘긴다. */
-int32_t maru_macos_app_dev_session_paste_text(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_paste_text(
+    MaruAppHostSession *session,
     const uint8_t *bytes,
     size_t len
 );
 /* chrome Notice 모달(손상 알림 등)을 연다(UTF-8 메시지). 워크스페이스 복원 손상(window_count<0)을 감지하면
    Swift가 부른다. 세션이 메시지를 복사 소유하므로 호출 뒤 버퍼는 해제해도 된다. len==0이면 무동작. (v40) */
-int32_t maru_macos_app_dev_session_show_notice(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_show_notice(
+    MaruAppHostSession *session,
     const uint8_t *bytes,
     size_t len
 );
@@ -428,71 +428,71 @@ int32_t maru_macos_app_dev_session_show_notice(
    다듬은 결과. 버퍼는 Zig 소유(다음 url_at/destroy까지 유효), 없으면 *out_len=0. */
 /* IME 키 트랜잭션(v20): keyDown은 begin -> interpretKeyEvents -> end 순서. 입력기 콜백은
    insert(확정 누적)/marked(조합 표시)로 쌓고, 판정(전송/무시/인코딩)은 전부 Zig가 한다. */
-int32_t maru_macos_app_dev_session_ime_begin(MaruAppHostDevSession *session);
-int32_t maru_macos_app_dev_session_ime_insert(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_ime_begin(MaruAppHostSession *session);
+int32_t maru_macos_app_session_ime_insert(
+    MaruAppHostSession *session,
     const uint8_t *bytes,
     size_t len
 );
-int32_t maru_macos_app_dev_session_ime_marked(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_ime_marked(
+    MaruAppHostSession *session,
     const uint8_t *bytes,
     size_t len
 );
-int32_t maru_macos_app_dev_session_ime_end(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_ime_end(
+    MaruAppHostSession *session,
     const MaruAppHostKeyEvent *event
 );
 /* IME 후보창 배치용 커서 셀 사각형(backing px, 좌상단 원점). Swift가 화면 좌표로 변환한다. */
-int32_t maru_macos_app_dev_session_ime_cursor_rect(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_ime_cursor_rect(
+    MaruAppHostSession *session,
     double *out_x,
     double *out_y,
     double *out_w,
     double *out_h
 );
 /* IME deleteBackward 편집 명령. 한글 마지막 자모 백스페이스(insertText+deleteBackward 상쇄)에 쓴다. */
-int32_t maru_macos_app_dev_session_ime_delete_backward(MaruAppHostDevSession *session);
+int32_t maru_macos_app_session_ime_delete_backward(MaruAppHostSession *session);
 /* 포커스 변화. 잃으면(0) 조합 중 텍스트를 확정 커밋한다. */
-int32_t maru_macos_app_dev_session_set_focus(MaruAppHostDevSession *session, int32_t focused);
+int32_t maru_macos_app_session_set_focus(MaruAppHostSession *session, int32_t focused);
 /* 진행 중 IME 조합을 확정(커밋)한다. IME 우회 특수키/단축키 직전에 호출. */
-int32_t maru_macos_app_dev_session_commit_composition(MaruAppHostDevSession *session);
+int32_t maru_macos_app_session_commit_composition(MaruAppHostSession *session);
 /* 마우스 호버 갱신(backing px). *out_cursor_kind에 위치별 커서 종류(0=arrow/사이드바·탭 바, 1=iBeam/터미널,
    2=pointingHand/Cmd+hover URL, 3=resizeLeftRight/세로 divider, 4=resizeUpDown/가로 divider). Swift가 이 값으로
    NSCursor를 세운다. Zig는 부수적으로 사이드바 슬롯·pane 탭 호버·URL 밑줄을 갱신한다. cmd_held=0이면 URL 호버
    해제. 창 밖이면 음수 sentinel(-1,-1)로 호버 해제. */
-int32_t maru_macos_app_dev_session_hover(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_hover(
+    MaruAppHostSession *session,
     double x_px,
     double y_px,
     int32_t cmd_held,
     int32_t *out_cursor_kind
 );
-int32_t maru_macos_app_dev_session_url_at(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_url_at(
+    MaruAppHostSession *session,
     double x_px,
     double y_px,
     const uint8_t **out_ptr,
     size_t *out_len
 );
-int32_t maru_macos_app_dev_session_copy_text(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_copy_text(
+    MaruAppHostSession *session,
     const uint8_t **out_ptr,
     size_t *out_len
 );
 /* OSC 52 클립보드 쓰기 데이터(디코드된 UTF-8). 버퍼는 Zig 소유로 다음 pending_clipboard/destroy까지 유효,
    정책(env opt-in MARU_OSC52_WRITE) deny이거나 없으면 *out_ptr=NULL, *out_len=0. Swift가 tick마다 호출해
    NSPasteboard에 쓴다. */
-int32_t maru_macos_app_dev_session_pending_clipboard(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_pending_clipboard(
+    MaruAppHostSession *session,
     const uint8_t **out_ptr,
     size_t *out_len
 );
 /* OSC 9/777 데스크톱 알림 데이터(title, body, UTF-8). *has=1이면 알림 있음(title은 빈 문자열일 수 있어 len으로
    판단), 0이면 없음. 버퍼는 Zig 소유로 다음 pending_notification/destroy까지 유효. Swift가 tick마다 호출해
    UNUserNotificationCenter로 띄운다(알림은 OS 소유). */
-int32_t maru_macos_app_dev_session_pending_notification(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_pending_notification(
+    MaruAppHostSession *session,
     uint32_t *has,
     const uint8_t **title_ptr,
     size_t *title_len,
@@ -501,27 +501,27 @@ int32_t maru_macos_app_dev_session_pending_notification(
 );
 /* G12 BEL: 활성 세션에 pending 벨이 있으면 1(코어 플래그 비움), 없으면 0. Swift가 tick마다 호출해 시스템 벨
    (NSSound.beep)을 울린다(벨은 OS 소유). */
-uint32_t maru_macos_app_dev_session_take_bell(MaruAppHostDevSession *session);
+uint32_t maru_macos_app_session_take_bell(MaruAppHostSession *session);
 /* OSC 7로 셸이 보고한 현재 작업 디렉터리(percent-decode된 경로, UTF-8). 버퍼는 Zig(core) 소유로
    다음 OSC 7/RIS/destroy까지 유효, 없으면 *out_ptr=NULL/*out_len=0. Swift가 창 제목에 쓴다. */
-int32_t maru_macos_app_dev_session_cwd(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_cwd(
+    MaruAppHostSession *session,
     const uint8_t **out_ptr,
     size_t *out_len
 );
 /* config 파일 경로(Open Config 메뉴). MARU_CONFIG override 또는 $HOME/.config/maru/config — 규칙은 Zig
    loader가 단일 출처. 버퍼는 Zig 소유로 destroy까지 유효, 없으면 *out_ptr=NULL/*out_len=0. Swift가 파일을
    (없으면 생성) 기본 편집기로 연다(파일 열기는 OS 동작). */
-int32_t maru_macos_app_dev_session_config_path(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_config_path(
+    MaruAppHostSession *session,
     const uint8_t **out_ptr,
     size_t *out_len
 );
 /* 창 제목 문자열(OSC 0/2 제목 우선, 없으면 OSC 7 cwd basename; UTF-8). 우선순위는 core가 정한다.
    버퍼는 Zig(core) 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효, 없으면 *out_len=0(Swift가 앱 이름
    폴백). Swift가 window.title에 쓴다. */
-int32_t maru_macos_app_dev_session_window_title(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_window_title(
+    MaruAppHostSession *session,
     const uint8_t **out_ptr,
     size_t *out_len
 );
@@ -529,8 +529,8 @@ int32_t maru_macos_app_dev_session_window_title(
 /* 이 창(세션)의 workspace restore 블록(헤더 없는 "window ..." 라인; UTF-8). Swift가 멀티 창 저장에서
    maru.workspace.v1 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유로 다음 호출/destroy까지 유효,
    캡처/직렬화 실패·빈 경우 *out_len=0(Swift가 그 창을 건너뜀). 정상 종료(applicationWillTerminate) 시 저장. */
-int32_t maru_macos_app_dev_session_serialize_workspace(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_serialize_workspace(
+    MaruAppHostSession *session,
     const uint8_t **out_ptr,
     size_t *out_len
 );
@@ -538,8 +538,8 @@ int32_t maru_macos_app_dev_session_serialize_workspace(
 /* 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)의 창 개수를 센다(Swift가 창마다 NSWindow 생성). 헤더·포맷
    검증도 겸한다: parse 실패(헤더 불일치·손상)면 -1(Swift가 복원 건너뜀), 0이면 빈 workspace. 포맷 파싱은 Zig
    단일 권위 — Swift는 'window ' 경계를 직접 나누지 않는다. */
-int64_t maru_macos_app_dev_session_workspace_window_count(
-    MaruAppHostDevSession *session,
+int64_t maru_macos_app_session_workspace_window_count(
+    MaruAppHostSession *session,
     const uint8_t *text_ptr,
     size_t text_len
 );
@@ -547,8 +547,8 @@ int64_t maru_macos_app_dev_session_workspace_window_count(
 /* 시작 시 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)에서 window_index번째 창을 parse해 이 세션에 복원
    적용한다. Swift는 전체 텍스트와 인덱스만 넘긴다(창 경계 분할은 Zig가 소유 — 파싱 권위 단일화). 0=ok,
    parse 실패·인덱스 범위 밖=invalid_config, apply 실패=create_failed. best-effort라 실패해도 기본 단일 탭. */
-int32_t maru_macos_app_dev_session_apply_workspace_window(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_apply_workspace_window(
+    MaruAppHostSession *session,
     const uint8_t *text_ptr,
     size_t text_len,
     size_t window_index
@@ -571,9 +571,9 @@ typedef enum MaruAppHostGlobalAction {
 } MaruAppHostGlobalAction;
 
 /* 전역 단축키 등록 기술자 목록. config에서 한 번 만들어 세션 동안 불변이라 Swift가 시작 시 한 번 읽어
-   등록한다. 배열은 dev session 소유로 destroy까지 유효. 비어 있으면 out_hotkeys=NULL·out_count=0. */
-int32_t maru_macos_app_dev_session_global_hotkeys(
-    MaruAppHostDevSession *session,
+   등록한다. 배열은 app session 소유로 destroy까지 유효. 비어 있으면 out_hotkeys=NULL·out_count=0. */
+int32_t maru_macos_app_session_global_hotkeys(
+    MaruAppHostSession *session,
     const MaruAppHostGlobalHotkey **out_hotkeys,
     size_t *out_count
 );
@@ -608,12 +608,12 @@ typedef enum MaruAppHostQuickTerminalChrome {
     MaruAppHostQuickTerminalChromeMinimal = 1, /* 사이드바·탭 바 없이 터미널 그리드만 */
 } MaruAppHostQuickTerminalChrome;
 
-int32_t maru_macos_app_dev_session_quick_terminal_config(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_quick_terminal_config(
+    MaruAppHostSession *session,
     MaruAppHostQuickTerminalConfig *out_config
 );
 
-/* 커맨드 카탈로그 한 항목 — 메뉴바·커맨드 팝업이 그릴 액션. 모든 문자열은 dev session 소유(destroy까지
+/* 커맨드 카탈로그 한 항목 — 메뉴바·커맨드 팝업이 그릴 액션. 모든 문자열은 app session 소유(destroy까지
    유효). action_key는 선택 시 run_action으로 되돌려보내는 식별자, title은 표시명, key_display는 현재
    바인딩(없으면 ""). 배열은 config/액션에서 한 번 만들어 세션 동안 불변. */
 typedef struct MaruAppHostCommand {
@@ -625,23 +625,23 @@ typedef struct MaruAppHostCommand {
 } MaruAppHostCommand;
 
 /* 커맨드 카탈로그 목록. config/액션에서 한 번 만들어 세션 동안 불변이라 Swift가 시작 시 한 번 읽는다.
-   배열·문자열 전부 dev session 소유(destroy까지 유효). 비어 있으면 out_commands=NULL/out_count=0. */
-int32_t maru_macos_app_dev_session_command_catalog(
-    MaruAppHostDevSession *session,
+   배열·문자열 전부 app session 소유(destroy까지 유효). 비어 있으면 out_commands=NULL/out_count=0. */
+int32_t maru_macos_app_session_command_catalog(
+    MaruAppHostSession *session,
     const MaruAppHostCommand **out_commands,
     size_t *out_count
 );
 /* 메뉴/팝업이 고른 액션 한 개를 실행한다 — action_key 바이트(카탈로그가 준 식별자)를 받아 Zig가
    parseAction → dispatch. 모르는 키면 InvalidConfig(무동작). 키→실행 결정은 Zig 소유(Swift는 문자열만 왕복). */
-int32_t maru_macos_app_dev_session_run_action(
-    MaruAppHostDevSession *session,
+int32_t maru_macos_app_session_run_action(
+    MaruAppHostSession *session,
     const uint8_t *bytes,
     size_t len
 );
-void maru_macos_app_dev_session_destroy(MaruAppHostDevSession *session);
-int32_t maru_macos_app_dev_session_metal_frame(
-    MaruAppHostDevSession *session,
-    MaruAppHostDevMetalFrame *out_frame
+void maru_macos_app_session_destroy(MaruAppHostSession *session);
+int32_t maru_macos_app_session_metal_frame(
+    MaruAppHostSession *session,
+    MaruAppHostMetalFrame *out_frame
 );
 
 #endif

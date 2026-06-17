@@ -5,7 +5,7 @@
 //! reader(R2)·라이브 캡처(R3)·복원(R4)은 후속이 같은 모델을 소비/생산한다(snapshot.zig writer-only 선례).
 //!
 //! 계층: workspace → windows → tabs → (pane split 트리 + panes) → panes → surfaces(Term). 멀티 창은 windows가
-//! N개(각 창 = 한 DevSession). split 트리는 preorder TreeNode 리스트로 — full binary tree라 self-delimiting
+//! N개(각 창 = 한 AppSession). split 트리는 preorder TreeNode 리스트로 — full binary tree라 self-delimiting
 //! (split은 뒤따르는 두 subtree를 소비, leaf는 종단). 베이스: docs/workspace-restore.md 저장 모델 + 현재
 //! 탭→pane→Term 풀 모델·멀티 창에 맞춰 window-aware로 확장.
 
@@ -71,7 +71,7 @@ pub const Tab = struct {
     panes: []const Pane,
 };
 
-/// 한 OS 창 = 한 DevSession. 탭들 + 활성 탭.
+/// 한 OS 창 = 한 AppSession. 탭들 + 활성 탭.
 pub const Window = struct {
     active_tab: usize = 0,
     tabs: []const Tab,
@@ -92,7 +92,7 @@ pub fn serialize(allocator: std.mem.Allocator, ws: Workspace) ![]u8 {
     return out.toOwnedSlice();
 }
 
-/// 한 창(Window) 블록만 직렬화한다(헤더 없음). 멀티 창 저장(R5)에서 각 DevSession이 자기 창 블록을 내고,
+/// 한 창(Window) 블록만 직렬화한다(헤더 없음). 멀티 창 저장(R5)에서 각 AppSession이 자기 창 블록을 내고,
 /// Swift가 `maru.workspace.v1` 헤더 하나 아래로 모아 parse 가능한 전체 텍스트를 만든다.
 pub fn serializeWindow(allocator: std.mem.Allocator, win: Window) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
@@ -360,7 +360,7 @@ const FieldReader = struct {
 
 test "workspace serialize: 단일 창/탭/pane/surface" {
     const surfaces = [_]Surface{
-        .{ .title = "dev shell", .cwd = "/home/user/proj", .command = "/bin/zsh", .cols = 80, .rows = 24 },
+        .{ .title = "app shell", .cwd = "/home/user/proj", .command = "/bin/zsh", .cols = 80, .rows = 24 },
     };
     const panes = [_]Pane{.{ .active_term = 0, .surfaces = &surfaces }};
     const tree = [_]TreeNode{.{ .leaf = 0 }};
@@ -375,7 +375,7 @@ test "workspace serialize: 단일 창/탭/pane/surface" {
     try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=1 active-pane=0 custom-name=\"work\"\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node leaf pane=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "pane surfaces=1 active-term=0 custom-name=\"\"\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"dev shell\" cwd=\"/home/user/proj\" command=\"/bin/zsh\" cols=80 rows=24\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"app shell\" cwd=\"/home/user/proj\" command=\"/bin/zsh\" cols=80 rows=24\n") != null);
 }
 
 test "workspace serialize: split 트리(중첩) + 멀티 pane" {

@@ -1,6 +1,6 @@
 //! Tabbar — pane 탭 바의 컬럼 분할 hit-test. chrome **마우스 hit-test 컴포넌트**(divider/sidebar 동형 — State 없는
 //! 순수 함수). 바를 [탭 영역(tab_cols) | "+" zone]으로 나눠 탭 인덱스·✕(닫기)·"+"(새 Term) zone을 판정한다(옛
-//! app_dev_session BarMetrics 수학 이전 — 호출처가 `m.tabIndex(...)`를 그대로 쓰도록 Metrics **메서드**로 둔다). 탭
+//! app_session BarMetrics 수학 이전 — 호출처가 `m.tabIndex(...)`를 그대로 쓰도록 Metrics **메서드**로 둔다). 탭
 //! 전환/닫기/새 Term/드래그·드롭·제목 glyph·라이브 `*Pane`은 platform이 든다(§6). 활성 탭 강조 **밴드는 platform이
 //! 단일 셀로 직접** 그린다(`tabbarHighlightCell`) — 밴드가 한 칸이라 chrome ChromeDraw→cell round-trip이 무의미하기
 //! 때문(C3a 리뷰 §3 반영; divider/sidebar의 다중 op view와 달리 tabbar는 hit-test만 chrome). host가 `Metrics`를

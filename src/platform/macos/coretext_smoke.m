@@ -274,7 +274,7 @@ typedef struct {
 } MaruCoreTextCellMetrics;
 
 // 모노스페이스 cell 메트릭(advance 폭 × line-height)을 device 픽셀로 돌려준다. font_size_px는
-// 이미 device_scale이 곱해진(예: 14pt × 2 = 28) device 크기다. dev session이 atlas slot 크기와
+// 이미 device_scale이 곱해진(예: 14pt × 2 = 28) device 크기다. app session이 atlas slot 크기와
 // 화면 cell 크기를 모두 이 값으로 맞춰, glyph가 정확한 모노스페이스 격자로 그려진다.
 void maru_macos_coretext_font_cell_metrics(
     const char *requested_font_family,

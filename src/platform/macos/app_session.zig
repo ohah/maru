@@ -159,14 +159,16 @@ fn usableRestoreCwd(cwd: []const u8) ?[]const u8 {
 /// backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다. cell 크기가 0이면
 /// placeholder로 대체하고, u16 상한으로 막은 뒤 terminal.clampGridSize로 최소 크기(cols>=2)를
 /// 적용한다 — cols>=2 불변식은 TerminalCore가 단일 소유하므로 여기서 직접 하드코딩하지 않는다.
-fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px: u32, cell_height_px: u32, sidebar_width_px: u32) terminal.Size {
+fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px: u32, cell_height_px: u32, sidebar_width_px: u32, padding_x_px: u32, padding_y_px: u32) terminal.Size {
     const cell_w = if (cell_width_px > 0) cell_width_px else placeholder_cell_width_px;
     const cell_h = if (cell_height_px > 0) cell_height_px else placeholder_cell_height_px;
-    // 터미널 영역 = drawable 폭 − 세로 사이드바 폭. 사이드바가 drawable보다 넓은 비정상 상황은
-    // 0으로 saturate해(언더플로 방지) clampGridSize가 최소 grid로 떨어뜨린다.
-    const term_width = backing_width_px -| sidebar_width_px;
+    // 터미널 영역 = drawable − 세로 사이드바 폭 − 좌우 padding(각 padding_x) − 상하 padding(각 padding_y).
+    // 사이드바/패딩이 drawable보다 큰 비정상 상황은 0으로 saturate(언더플로 방지)해 clampGridSize가 최소 grid로
+    // 떨어뜨린다. termRect도 같은 양을 들이므로 spawn grid와 실제 pane grid가 정합한다(PR8 spawn-크기 레이스 회피).
+    const term_width = backing_width_px -| sidebar_width_px -| (2 *| padding_x_px);
+    const term_height = backing_height_px -| (2 *| padding_y_px);
     const raw_cols = @min(term_width / cell_w, std.math.maxInt(u16));
-    const raw_rows = @min(backing_height_px / cell_h, std.math.maxInt(u16));
+    const raw_rows = @min(term_height / cell_h, std.math.maxInt(u16));
     return terminal.clampGridSize(.{ .cols = @intCast(raw_cols), .rows = @intCast(raw_rows) });
 }
 
@@ -713,6 +715,11 @@ pub const AppSession = struct {
     // 세로 사이드바의 backing 픽셀 폭(= sidebar_width_pt × scale). refreshCellMetrics가 갱신한다.
     // gridFromBacking이 이만큼 터미널 폭에서 빼고, metalFrame()이 렌더러에 origin offset으로 넘긴다.
     sidebar_width_px: u32 = 0,
+    // 터미널 셀↔컨테이너 가장자리 inset(backing px, = appearance.window_padding_{x,y} × scale). refreshCellMetrics가
+    // 갱신한다. termRect가 좌우 각 padding_x_px·상하 각 padding_y_px만큼 안으로 들이고, gridFromBacking이 grid에서
+    // 2×만큼 뺀다 — 렌더 origin·마우스 hit-test·IME가 termRect 단일 출처를 공유하므로 자동으로 정합한다.
+    window_padding_x_px: u32 = 0,
+    window_padding_y_px: u32 = 0,
     // 사이드바 우측 경계 드래그로 폭을 조절하는 중인가. down이 경계 밴드에서 시작하면 true, drag(2)가
     // setSidebarWidthPx로 live 갱신, up(3)이 끝낸다(divider 드래그와 같은 패턴).
     sidebar_resize_active: bool = false,
@@ -962,7 +969,7 @@ pub const AppSession = struct {
         // 테스트·창 미상) 폴백. gridFromBacking은 resize 경로와 같은 단일 출처라 첫 grid와 이후 resize가 일치한다.
         var spawn_config = config;
         if (config.width_px > 0 and config.height_px > 0) {
-            spawn_config.size = gridFromBacking(config.width_px, config.height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px);
+            spawn_config.size = gridFromBacking(config.width_px, config.height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px, self.window_padding_x_px, self.window_padding_y_px);
         }
         // MARU_DEBUG 관측: 첫 셸 spawn grid가 무슨 입력(창 backing px·scale·cell·사이드바)에서 어떻게 나왔는지
         // 한 줄로 남긴다. PTY winsize=surface grid=이 값이라, 셸 COLUMNS(첫 프롬프트 PROMPT_EOL_MARK % 폭)와
@@ -1017,11 +1024,15 @@ pub const AppSession = struct {
     /// 공유하는 단일 출처. backing 크기는 마지막 resize 값이고, 첫 resize 전(0)이면 폭/높이가 0이라 단일
     /// leaf가 origin에만 그려진다(무해).
     fn termRect(self: *const AppSession) app.SplitRect {
+        // 사이드바 폭 + window padding(좌상 inset)만큼 origin을 들이고, 폭/높이는 좌우·상하 padding 2배만큼 줄인다.
+        // gridFromBacking이 같은 양을 빼므로 grid와 rect가 정합. saturate(-|)로 비정상 큰 padding에도 언더플로 없음.
+        const pad_x = self.window_padding_x_px;
+        const pad_y = self.window_padding_y_px;
         return .{
-            .x = self.sidebar_width_px,
-            .y = 0,
-            .w = self.backing_width_px -| self.sidebar_width_px,
-            .h = self.backing_height_px,
+            .x = self.sidebar_width_px +| pad_x,
+            .y = pad_y,
+            .w = self.backing_width_px -| self.sidebar_width_px -| (2 *| pad_x),
+            .h = self.backing_height_px -| (2 *| pad_y),
         };
     }
 
@@ -1417,7 +1428,8 @@ pub const AppSession = struct {
             active = @intCast(pane.active_term);
         } else return;
 
-        // 화면 폭(셀 칸). minimal이라 termRect.x=0, w=backing 폭. 칸이 0이면 그릴 곳이 없다.
+        // 화면 폭(셀 칸). minimal이라 사이드바 없음 — termRect.x=window_padding_x_px, w=backing−2·padding_x,
+        // 상단 origin은 termRect.y=window_padding_y_px(점 인디케이터도 셀과 같은 padding 안쪽에 정렬). 칸 0이면 안 그림.
         const term_rect = self.termRect();
         const cols = term_rect.w / cw;
         if (cols == 0) return;
@@ -1439,13 +1451,13 @@ pub const AppSession = struct {
             @intCast(@min(band_width, u16_max)),
             self.sidebarBg(),
             term_rect.x,
-            0,
+            term_rect.y,
         )) catch return;
         var i: u32 = 0;
         while (i < count) : (i += 1) {
             const col = band_start + pad + i * 2;
             const color = if (i == active) self.sidebarActiveBg() else self.sidebarHoverBg();
-            out.append(self.allocator, sentinelBgCell(@intCast(@min(col, u16_max)), 1, color, term_rect.x, 0)) catch return;
+            out.append(self.allocator, sentinelBgCell(@intCast(@min(col, u16_max)), 1, color, term_rect.x, term_rect.y)) catch return;
         }
     }
 
@@ -2780,6 +2792,11 @@ pub const AppSession = struct {
         // 논리 폭(sidebar_width_pt — 사용자 드래그로 바뀔 수 있음)에서 파생하므로 DPI 변경에도 유지된다.
         // minimal 세션은 사이드바가 없으므로 0 고정(터미널이 전폭을 쓴다).
         self.sidebar_width_px = if (self.chrome_minimal) 0 else self.sidebar_width_pt * self.scale_milli / 1000;
+        // window padding도 같은 단일 출처(논리 pt × 분수 scale)로 backing px 환산 — DPI 변경에도 유지된다.
+        // termRect/gridFromBacking이 이 px를 inset으로 쓴다(렌더 origin·hit-test·IME 자동 정합). minimal 세션도
+        // 동일 적용(터미널 콘텐츠 inset이라 chrome 유무와 무관).
+        self.window_padding_x_px = self.appearance.window_padding_x * self.scale_milli / 1000;
+        self.window_padding_y_px = self.appearance.window_padding_y * self.scale_milli / 1000;
         // 탭 슬롯 높이 = cell 높이 × 2.5(큰 슬롯). cell_height_px가 이미 위에서 갱신됐으므로
         // 그걸 쓴다 — 슬롯 높이도 cell 메트릭과 같은 단일 출처에서 파생한다.
         self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
@@ -2814,7 +2831,7 @@ pub const AppSession = struct {
         // 같은 backing 픽셀에서 새 cell 크기로 grid를 다시 잡고 각 pane을 resize한다(resize 본문과 동일한 reflow).
         // 아직 첫 resize 전(backing 0)이면 스킵 — 곧 올 Swift resize가 새 메트릭으로 grid를 잡는다.
         if (self.backing_width_px > 0 and self.backing_height_px > 0) {
-            const grid = gridFromBacking(self.backing_width_px, self.backing_height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px);
+            const grid = gridFromBacking(self.backing_width_px, self.backing_height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px, self.window_padding_x_px, self.window_padding_y_px);
             self.resizeActiveTabPanes() catch {};
             self.recomputeActivePaneRect();
             self.last_resize_size = grid;
@@ -3057,10 +3074,11 @@ pub const AppSession = struct {
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
         const max_col: f64 = @floatFromInt(core.size.cols - 1);
         const max_row: f64 = @floatFromInt(core.size.rows - 1);
-        // 활성 panel은 자기 rect의 origin(active_pane_rect.x/y)에서 그려진다 — 단일 panel이면 (사이드바 폭, 0)
-        // 이라 기존과 같고(metalFrame.terminal_origin_x_px), split이면 서브-rect의 origin이다. 스크린 좌표에서
-        // 그 origin을 빼야 활성 panel의 열/행이 된다 — 안 빼면 선택/클릭 블록이 origin만큼 어긋난다(라이브
-        // 제보: "블록 영역이 그만큼 밀린다"). panel 왼쪽/위 바깥(음수) 클릭은 0 clamp라 (0,0) 모서리에 붙는다.
+        // 활성 panel은 자기 rect의 origin(active_pane_rect.x/y = paneTermRect 단일 출처, window padding·사이드바
+        // 포함)에서 그려진다 — 단일 panel이면 (사이드바 폭+padding_x, padding_y), split이면 서브-rect의 origin.
+        // 셀 렌더 origin과 같은 출처라 정합한다(metalFrame.terminal_origin_x_px는 사이드바 bg strip 폭 전용 — 셀
+        // 위치엔 안 쓰임). 스크린 좌표에서 그 origin을 빼야 활성 panel의 열/행이 된다 — 안 빼면 선택/클릭 블록이
+        // origin만큼 어긋난다(라이브 제보). panel 왼쪽/위 바깥(음수) 클릭은 0 clamp라 (0,0) 모서리에 붙는다.
         const term_x = x_px - @as(f64, @floatFromInt(self.active_pane_rect.x));
         const term_y = y_px - @as(f64, @floatFromInt(self.active_pane_rect.y));
         const col_f = std.math.clamp(@max(term_x, 0) / cw, 0, max_col);
@@ -3362,7 +3380,7 @@ pub const AppSession = struct {
             2 => {
                 // 드래그가 활성 panel grid 위/아래 밖으로 나가면 자동 스크롤을 건다(tick이 수행). panel은
                 // active_pane_rect.y에서 시작하므로 위 경계는 그 y, 아래 경계는 y + grid 높이다(단일 panel이면
-                // y=0이라 기존과 동일).
+                // window padding_y + 탭 바 높이 — 셀 렌더와 같은 출처라 경계가 정확히 맞는다).
                 const pane_top: f64 = @floatFromInt(self.active_pane_rect.y);
                 const grid_height: f64 = @as(f64, @floatFromInt(core.size.rows)) * ch;
                 self.drag_autoscroll = if (y_px < pane_top) 1 else if (y_px > pane_top + grid_height) -1 else 0;
@@ -3625,7 +3643,7 @@ pub const AppSession = struct {
         return .{
             // 활성 panel은 자기 rect origin(active_pane_rect.x/y)에서 그려지므로 커서의 스크린 좌표도 그 origin을
             // 더해야 한다 — 안 더하면 후보창이 실제 커서보다 origin만큼 왼쪽/위에 뜬다(pxToCell의 역변환:
-            // pxToCell은 빼고, 셀→스크린인 여기선 더한다). 단일 panel이면 origin = (사이드바 폭, 0)이라 기존과 동일.
+            // pxToCell은 빼고, 셀→스크린인 여기선 더한다). 단일 panel이면 origin = (사이드바 폭+padding_x, padding_y).
             .x = @as(f64, @floatFromInt(self.active_pane_rect.x)) + @as(f64, @floatFromInt(cursor.col)) * cw,
             .y = @as(f64, @floatFromInt(self.active_pane_rect.y)) + @as(f64, @floatFromInt(cursor.row)) * ch,
             .w = cw,
@@ -4305,7 +4323,7 @@ pub const AppSession = struct {
         // grid(cols/rows)를 Swift가 아니라 app session이 backing 픽셀 + 자기 cell 메트릭에서 직접
         // 계산한다. init이 메트릭을 미리 뽑으므로 cell 크기는 항상 준비돼 있어, Swift가 첫 resize에서
         // placeholder 크기로 cols/rows를 잘못 잡던(창과 grid가 어긋나던) 문제가 사라진다.
-        const size = gridFromBacking(width_px, height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px);
+        const size = gridFromBacking(width_px, height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px, self.window_padding_x_px, self.window_padding_y_px);
         const size_changed = self.last_resize_size == null or
             self.last_resize_size.?.cols != size.cols or self.last_resize_size.?.rows != size.rows;
         // 같은 size+scale이면 비싼 재작업(TerminalCore.resize alloc/memcpy + PTY winsize/SIGWINCH)을
@@ -6172,17 +6190,58 @@ test "macOS app session normalizeConfig carries chrome_minimal and minimal_tabs 
 test "gridFromBacking divides backing pixels by cell size with placeholder + clamps" {
     // 960×600 backing at 8×18 cell -> 120×33 (이전엔 Swift가 placeholder 12×24로 80×25를 잡아
     // 창과 grid가 어긋났다). 이제 app session이 실제 메트릭으로 직접 계산한다.
-    try std.testing.expectEqual(terminal.Size{ .cols = 120, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 0));
+    try std.testing.expectEqual(terminal.Size{ .cols = 120, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 0, 0, 0));
     // cell 크기 0(메트릭 없음, 이론상) -> placeholder 12×24.
-    try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 25 }, gridFromBacking(960, 600, 0, 0, 0));
+    try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 25 }, gridFromBacking(960, 600, 0, 0, 0, 0, 0));
     // floor 동작 + 최소 1×1.
-    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(25, 16, 10, 16, 0));
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(25, 16, 10, 16, 0, 0, 0));
     // cols는 최소 2(TerminalCore가 wide glyph continuation 때문에 요구). 1픽셀/100px cell이라도 2칸.
-    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(1, 1, 100, 100, 0));
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(1, 1, 100, 100, 0, 0, 0));
     // 세로 사이드바 폭만큼 터미널 cols가 줄어든다: 960px − 160px 사이드바 = 800px / 8 = 100 cols(vs 120).
-    try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 160));
+    try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 160, 0, 0));
     // 사이드바가 drawable보다 넓은 비정상도 언더플로 없이 최소 grid로 떨어진다(saturate).
-    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 2000));
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 2000, 0, 0));
+    // window padding: 좌우 각 8px·상하 각 4px를 grid에서 뺀다. cols: (960−16)/8=118, rows: (600−8)/18=32.
+    try std.testing.expectEqual(terminal.Size{ .cols = 118, .rows = 32 }, gridFromBacking(960, 600, 8, 18, 0, 8, 4));
+    // 사이드바 + padding 동시: cols (960−160−16)/8=98, rows (600−8)/18=32.
+    try std.testing.expectEqual(terminal.Size{ .cols = 98, .rows = 32 }, gridFromBacking(960, 600, 8, 18, 160, 8, 4));
+    // 비정상 큰 padding도 언더플로 없이 최소 grid로 saturate.
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(960, 600, 8, 18, 0, 10000, 10000));
+}
+
+// window padding이 터미널 영역 rect(termRect)를 좌상으로 들이고 폭/높이를 2배만큼 줄이는지 고정한다 — 이 rect가
+// 렌더 origin·마우스 hit-test(pxToCell)·IME·split leaf의 단일 출처라, 여기서 inset이 맞으면 그 전부가 정합한다.
+test "termRect insets the terminal area by window padding (sidebar + pad origin, 2×pad shrink)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    // 결정적 padding(scale 1000 기본이라 appearance 8/4가 그대로 8/4px이지만 명시 고정).
+    session.window_padding_x_px = 8;
+    session.window_padding_y_px = 4;
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    const r = session.termRect();
+    try std.testing.expectEqual(session.sidebar_width_px + 8, r.x); // 좌 origin = 사이드바 + padding_x
+    try std.testing.expectEqual(@as(u32, 4), r.y); // 상 origin = padding_y
+    try std.testing.expectEqual(@as(u32, 800 - 16), r.w); // 폭 = backing − 사이드바 − 2·padding_x
+    try std.testing.expectEqual(@as(u32, 600 - 8), r.h); // 높이 = backing − 2·padding_y
+    // padding 0이면 inset 없음(기존 동작): origin=(사이드바,0), 폭=backing−사이드바, 높이=backing.
+    session.window_padding_x_px = 0;
+    session.window_padding_y_px = 0;
+    const r0 = session.termRect();
+    try std.testing.expectEqual(session.sidebar_width_px, r0.x);
+    try std.testing.expectEqual(@as(u32, 0), r0.y);
+    try std.testing.expectEqual(@as(u32, 800), r0.w);
+    try std.testing.expectEqual(@as(u32, 600), r0.h);
 }
 
 // wheelDeltaToLines 단위 테스트는 함수와 함께 src/session/input_math.zig로 이동.
@@ -6385,7 +6444,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
         });
         defer session.deinit();
         // spawn 크기 = gridFromBacking(창 px, 세션 자신의 cell·사이드바 메트릭) — resize 경로와 같은 단일 출처.
-        const expected = gridFromBacking(1600, 900, session.cell_width_px, session.cell_height_px, session.sidebar_width_px);
+        const expected = gridFromBacking(1600, 900, session.cell_width_px, session.cell_height_px, session.sidebar_width_px, session.window_padding_x_px, session.window_padding_y_px);
         const got = session.activePane().activeTerm().surface.core.size;
         try std.testing.expectEqual(expected, got);
         try std.testing.expect(got.cols != 80 or got.rows != 24); // 80×24 폴백이 아니다(창이 더 넓어 grid가 다름)
@@ -6406,7 +6465,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
         });
         defer session.deinit();
         // 진단으로 확인됨: 2x에서 cell=17×37·sidebar_px=360·grid 91×32. init의 spawn 그리드는 정확하다(불일치 없음).
-        const expected = gridFromBacking(1920, 1200, session.cell_width_px, session.cell_height_px, session.sidebar_width_px);
+        const expected = gridFromBacking(1920, 1200, session.cell_width_px, session.cell_height_px, session.sidebar_width_px, session.window_padding_x_px, session.window_padding_y_px);
         try std.testing.expectEqual(expected, session.activePane().activeTerm().surface.core.size);
     }
     // backing px 0(헤드리스·창 미상) — cols/rows로 폴백 spawn.
@@ -6533,6 +6592,8 @@ test "double-click on a Term tab or sidebar slot starts rename" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // ① Term 탭 더블클릭 → 그 Term rename(단일 pane, custom_name 없어 라벨 세그먼트 없음 → 탭이 바 좌단부터).
@@ -6569,6 +6630,8 @@ test "right-click opens context menu on a rename target; clicking Rename starts 
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
@@ -6609,6 +6672,8 @@ test "rename caret blinks (width-stable) and IME caret rect tracks the editor, n
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     const term0 = session.activePane().activeTerm();
@@ -6657,6 +6722,8 @@ test "review fixes: focus-loss commits rename, body right-click reports, close-z
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     const term0 = session.activePane().activeTerm();
 
@@ -8005,6 +8072,8 @@ test "splitActivePane splits the active leaf, focuses the new panel, and renders
     // 입력). 터미널 영역 = backing − 사이드바. 좌우 분할이라 폭이 둘로 갈린다.
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
+    session.window_padding_x_px = 0; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
+    session.window_padding_y_px = 0;
 
     const old_pane = session.activePane();
     const old_surface = session.activeSurface();
@@ -8057,6 +8126,8 @@ test "S1 구조-무효화 계약: destroyPane이 해제 Pane 포인터를 표적
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800; // split이 의미 있으려면 backing 필요
     session.backing_height_px = 600;
+    session.window_padding_x_px = 0; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
+    session.window_padding_y_px = 0;
 
     // 모든 트리 변형(close/collapse/apply/reap)은 노드 해제 시 destroyPane을 거치므로, closeActivePane 한 경로로
     // chokepoint 동작을 고정한다(나머지 호출처는 같은 chokepoint를 공유).
@@ -8116,6 +8187,8 @@ test "S1 표적 divider: 무관한 split의 pane이 collapse돼도 divider_drag 
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
+    session.window_padding_x_px = 0; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
+    session.window_padding_y_px = 0;
 
     // 3 pane: tree = split{P0, split{P1, P2}}(루트 split + 중첩 inner split). 두 번 분할로 만든다.
     try session.splitActivePane(.horizontal); // [P0, P1], 활성 P1, tree=split{P0,P1}
@@ -8356,6 +8429,8 @@ test "pane reserves a top tab-bar strip and renders a bar chrome cell" {
     defer session.deinit();
 
     // 창 크기를 잡는다(resize가 backing 보관 + 모든 panel을 바 아래 grid로 + active_pane_rect 재계산).
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // 단일 panel: 터미널 영역(active_pane_rect)은 사이드바 옆·바 아래(y = 바 높이)에서 시작, 높이가 바만큼 줄었다.
@@ -8389,6 +8464,8 @@ test "pane tab bar draws Term-title tabs with an active-Term highlight" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // ⌘T → 활성 pane에 Term 2개(활성 = 1).
@@ -8428,6 +8505,8 @@ test "vertical split renders the bottom pane tab bar at its own y (not overlappi
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     try session.splitActivePane(.vertical); // 상/하 — 아래(새) pane 활성
@@ -8490,6 +8569,8 @@ test "clicking a tab in the pane bar switches to that Term" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // ⌘T → Term 2개, 활성 = 1.
@@ -8527,6 +8608,8 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // ⌘T 두 번 → Term 3개. 단일 panel이라 바 폭 = 터미널 폭(800/cw cols), 3탭 등폭.
@@ -8572,6 +8655,8 @@ test "clicking the bar '+' button spawns a new Term in that pane" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
 
@@ -8608,6 +8693,8 @@ test "hovering the '+' button does not mark the last tab for close" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개
 
@@ -8646,6 +8733,8 @@ test "dragging a Term tab reorders it within the pane" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
@@ -8696,6 +8785,8 @@ test "dragging a tab to another pane moves the Term; emptying the source collaps
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성)
@@ -8752,6 +8843,8 @@ test "④: dropping a tab on a pane body edge creates a new split there (rearran
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성), 각 Term 1개
@@ -8802,6 +8895,8 @@ test "④b: tab drag tracks the drop target and emits a translucent highlight" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성)
@@ -8864,6 +8959,8 @@ test "floating tab preview frame is built (and positioned) while dragging a tab"
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개
 
@@ -8926,6 +9023,8 @@ test "clicking another pane in a split focuses it; clicking the active pane keep
 
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
+    session.window_padding_x_px = 0; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
+    session.window_padding_y_px = 0;
     const old_surface = session.activeSurface();
     try session.splitActivePane(.horizontal); // 좌우 분할 — 새 panel(오른쪽)이 활성
     const new_surface = session.activeSurface();
@@ -8967,6 +9066,8 @@ test "wheel over an inactive pane scrolls that pane (not the active one)" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성)
 
@@ -9054,6 +9155,8 @@ test "Cmd+Option+arrow moves pane focus directionally through the key path" {
 
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
+    session.window_padding_x_px = 0; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
+    session.window_padding_y_px = 0;
     const old_surface = session.activeSurface();
     try session.splitActivePane(.horizontal); // 좌우 분할 — 오른쪽(새) panel 활성
     const new_surface = session.activeSurface();
@@ -9093,6 +9196,8 @@ test "Cmd+W closes the active pane first and collapses the split, leaving the si
 
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
+    session.window_padding_x_px = 0; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
+    session.window_padding_y_px = 0;
     const left = session.activeSurface(); // 분할 전 surface = 분할 후 왼쪽(기존) panel
     try session.splitActivePane(.horizontal); // 좌우 — 오른쪽(새) panel 활성, 2 panes
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
@@ -9129,6 +9234,8 @@ test "PR6: dragging a split divider resizes the panes via split.ratio" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     try session.splitActivePane(.horizontal); // 좌우 — 오른쪽(새) pane 활성, ratio 0.5
@@ -9183,6 +9290,8 @@ test "split dividers render as thin lines (reserved bar/underline), not full cel
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // 좌우 split → 세로 divider. 모든 divider 셀이 reserved=3(bar=얇은 세로선), 경계 x 근처(±cw)에 센터.
@@ -9230,6 +9339,8 @@ test "hoverCursor returns region-specific cursor kinds" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // 단일 pane: 터미널 영역(바 아래) = text(iBeam).
@@ -9299,6 +9410,8 @@ test "PR5b: a Term whose shell exits is reaped, the sibling Term survives" {
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
+    session.window_padding_x_px = 0; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
+    session.window_padding_y_px = 0;
 
     // ⌘T → 활성 pane에 Term 2개([T0, T1], T1 활성).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
@@ -9334,6 +9447,8 @@ test "PR5b: a split pane whose only Term exits collapses to its sibling" {
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
+    session.window_padding_x_px = 0; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
+    session.window_padding_y_px = 0;
 
     const left = session.activeSurface(); // 분할 전 = 분할 후 왼쪽(기존) pane P0
     try session.splitActivePane(.horizontal); // 오른쪽(새) pane P1 활성, 2 panes
@@ -9373,6 +9488,8 @@ test "PR5b: a background workspace whose last Term exits is closed; the other su
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
+    session.window_padding_x_px = 0; // split 기하만 검증 — window padding(기본 8/4) inset은 gridFromBacking·loader 테스트가 커버
+    session.window_padding_y_px = 0;
 
     // 탭 1: cat(stdin 대기로 살아 있음), 활성이 된다. 탭 0(controlled_smoke)은 read 대기로 살아 있다.
     _ = try session.createTab(
@@ -9619,6 +9736,8 @@ test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, c
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     try std.testing.expect(session.sidebar_width_px > 0);
 
@@ -9659,6 +9778,8 @@ test "③b: clicking the sidebar '+' button opens a new workspace" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.window_padding_x_px = 0; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
+    session.window_padding_y_px = 0;
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 

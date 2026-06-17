@@ -42,9 +42,13 @@ SplitView)을 쓰지 않는다. 이유:
   Zig가 소유하고, Swift는 backing px 클릭/드래그 좌표만 ABI로 넘긴다(스크롤·마우스 선택과 같은 규율).
 - 비-macOS(Linux CI)에서도 레이아웃 로직을 헤드리스 단위로 검증할 수 있다.
 
-레이아웃: 창 drawable을 `[사이드바 strip | 터미널 영역]`으로 나눈다. 터미널 grid의 cols는
-`(drawable_width - sidebar_width) / cell_width`로 계산한다(grid 메트릭은 이미 Zig가 권위 있게 소유).
-split이 생기면 터미널 영역을 다시 SplitTree에 따라 sub-사각형으로 나눠 각 surface를 그린다.
+레이아웃: 창 drawable을 `[사이드바 strip | 터미널 영역]`으로 나눈 뒤, 터미널 영역을 다시 **window padding**만큼
+안으로 들인다(좌우 각 `padding_x`, 상하 각 `padding_y` — 셀과 가장자리 사이 inset, config `window.padding-x/y`,
+기본 8/4 pt). 따라서 터미널 영역 origin = `(sidebar_width + padding_x, padding_y)`, grid cols =
+`(drawable_width - sidebar_width - 2·padding_x) / cell_width`, rows = `(drawable_height - 2·padding_y) / cell_height`
+(grid 메트릭은 이미 Zig가 권위 있게 소유; `gridFromBacking`·`termRect`가 같은 inset을 쓰는 단일 출처라 렌더
+origin·마우스 hit-test·IME가 자동 정합한다). split이 생기면 이 **padding 적용된** 터미널 영역을 SplitTree에 따라
+sub-사각형으로 나눠 각 surface를 그린다(padding은 바깥 영역에 한 번만, split 사이엔 divider만).
 
 ## SplitTree(panel) 모델
 

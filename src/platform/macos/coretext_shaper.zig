@@ -215,7 +215,8 @@ fn coreTextGlyphRecordFromDrawRecord(
                 renderer.box_glyph.isBoxDrawing(record.codepoint) or
                 renderer.powerline_glyph.isPowerline(record.codepoint) or
                 renderer.braille_glyph.isBraille(record.codepoint) or
-                renderer.legacy_mosaic_glyph.isLegacyMosaic(record.codepoint)),
+                renderer.legacy_mosaic_glyph.isLegacyMosaic(record.codepoint) or
+                renderer.legacy_wedge_glyph.isLegacyWedge(record.codepoint)),
     };
 }
 

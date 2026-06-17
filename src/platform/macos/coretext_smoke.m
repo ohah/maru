@@ -401,7 +401,11 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
     }
     // legacy_mosaic_glyph: Legacy Computing 블록 모자이크 — sextant(U+1FB00~1FB3B 2×3)·octant(U+1CD00~1CDE5
     // 2×4). renderer/legacy_mosaic_glyph.zig와 동기.
-    return (cp >= 0x1FB00 && cp <= 0x1FB3B) || (cp >= 0x1CD00 && cp <= 0x1CDE5);
+    if ((cp >= 0x1FB00 && cp <= 0x1FB3B) || (cp >= 0x1CD00 && cp <= 0x1CDE5)) {
+        return true;
+    }
+    // legacy_wedge_glyph: edge wedge 삼각형(U+1FB68~1FB6F)·bowtie(U+1FB9A~1FB9B). renderer/legacy_wedge_glyph.zig와 동기.
+    return (cp >= 0x1FB68 && cp <= 0x1FB6F) || (cp >= 0x1FB9A && cp <= 0x1FB9B);
 }
 
 static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFIndex *len, CFIndex capacity) {

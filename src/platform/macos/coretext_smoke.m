@@ -392,7 +392,11 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
         return true;
     }
     // powerline_glyph: Powerline separator(U+E0B0~E0BF — 삼각형·반원·thin). renderer/powerline_glyph.zig와 동기.
-    return (cp >= 0xE0B0 && cp <= 0xE0BF);
+    if (cp >= 0xE0B0 && cp <= 0xE0BF) {
+        return true;
+    }
+    // braille_glyph: Braille 점 패턴(U+2800~28FF — 2열×4행 8점 비트마스크). renderer/braille_glyph.zig와 동기.
+    return (cp >= 0x2800 && cp <= 0x28FF);
 }
 
 static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFIndex *len, CFIndex capacity) {

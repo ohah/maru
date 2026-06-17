@@ -36,8 +36,9 @@ pub fn setPixelAlpha(pixels: []u8, off: usize, alpha: u8) void {
 }
 
 /// 셀 전체를 균일 alpha(RGB=흰색·A=alpha)로 채운다 — 음영 ░▒▓처럼 부분 coverage. 셰이더가 alpha를 coverage로
-/// 읽어 `mix(bg, fg, alpha/255)`라, alpha=0x40/0x80/0xC0이면 fg를 25%/50%/75% blend한다. 채운 픽셀 수(=w*h)
-/// 반환. slotFits 통과 가정. alpha=0이면 빈 셀(0px).
+/// 읽어 `mix(bg, fg, alpha/255)`라, alpha=0x40/0x80/0xC0이면 fg를 25%/50%/75% blend한다. **새로 칠한** 픽셀 수
+/// 반환(이미 칠해진 건 안 셈 — 다른 프리미티브와 같은 dedup 회계; 빈 슬롯이면 =w*h). slotFits 통과 가정.
+/// alpha=0이면 빈 셀(0px).
 pub fn fillUniformAlpha(pixels: []u8, width_px: u32, height_px: u32, bytes_per_row: usize, alpha: u8) u32 {
     if (alpha == 0) return 0;
     var count: u32 = 0;
@@ -47,11 +48,11 @@ pub fn fillUniformAlpha(pixels: []u8, width_px: u32, height_px: u32, bytes_per_r
         var x: u32 = 0;
         while (x < width_px) : (x += 1) {
             const off = row_off + @as(usize, x) * 4;
+            if (pixels[off + 3] == 0) count += 1; // 교차 dedup 회계(다른 프리미티브와 일관)
             pixels[off] = 0xFF;
             pixels[off + 1] = 0xFF;
             pixels[off + 2] = 0xFF;
             pixels[off + 3] = alpha;
-            count += 1;
         }
     }
     return count;

@@ -9,6 +9,7 @@
 //! 비교(코드 미복사 — clean-room: 삼각형 정점·반원 D-shape·thin=edge stroke). 중립 모듈.
 
 const std = @import("std");
+const gp = @import("glyph_pixels.zig"); // 슬롯 검증·clear·setPixel·대각선 공유 프리미티브(단일 출처).
 
 /// cp가 합성 대상 Powerline 글리프인지(E0B0~E0BF). 그 밖이면 false → 폰트 글리프 폴백.
 pub fn isPowerline(cp: u32) bool {
@@ -20,10 +21,9 @@ pub fn isPowerline(cp: u32) bool {
 pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize, pixels: []u8) u32 {
     const w = width_px;
     const h = height_px;
-    if (w == 0 or h == 0) return 0;
-    if (bytes_per_row < @as(usize, w) * 4 or pixels.len < @as(usize, h) * bytes_per_row) return 0;
+    if (!gp.slotFits(w, h, bytes_per_row, pixels)) return 0;
     if (!isPowerline(cp)) return 0;
-    @memset(pixels[0 .. @as(usize, h) * bytes_per_row], 0);
+    gp.clear(pixels, h, bytes_per_row);
 
     const fw = @as(f32, @floatFromInt(w));
     const fh = @as(f32, @floatFromInt(h));
@@ -43,11 +43,11 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
         0xE0BA => fillTriangle(pixels, bytes_per_row, w, h, fw, 0, fw, fh, 0, fh), // 우하 ◢
         0xE0BC => fillTriangle(pixels, bytes_per_row, w, h, 0, 0, fw, 0, 0, fh), // 좌상 ◤
         0xE0BE => fillTriangle(pixels, bytes_per_row, w, h, 0, 0, fw, 0, fw, fh), // 우상 ◥
-        // ── 모서리 thin 대각선(solid 모서리의 빗변) ──
-        0xE0B9 => fillDiagonalLine(pixels, bytes_per_row, w, h, ft, true), // 좌하 빗변 = ╲
-        0xE0BF => fillDiagonalLine(pixels, bytes_per_row, w, h, ft, true), // 우상 빗변 = ╲
-        0xE0BB => fillDiagonalLine(pixels, bytes_per_row, w, h, ft, false), // 우하 빗변 = ╱
-        0xE0BD => fillDiagonalLine(pixels, bytes_per_row, w, h, ft, false), // 좌상 빗변 = ╱
+        // ── 모서리 thin 대각선(solid 모서리의 빗변) — box ╱╲와 같은 공유 대각선 프리미티브. ╲=do_back, ╱=do_fwd.
+        0xE0B9 => gp.fillDiagonal(pixels, bytes_per_row, w, h, t, true, false), // 좌하 빗변 = ╲
+        0xE0BF => gp.fillDiagonal(pixels, bytes_per_row, w, h, t, true, false), // 우상 빗변 = ╲
+        0xE0BB => gp.fillDiagonal(pixels, bytes_per_row, w, h, t, false, true), // 우하 빗변 = ╱
+        0xE0BD => gp.fillDiagonal(pixels, bytes_per_row, w, h, t, false, true), // 좌상 빗변 = ╱
         // ── 반원(D-shape) ──
         0xE0B4 => fillHalfCircle(pixels, bytes_per_row, w, h, 0, true, true), // 우 solid
         0xE0B6 => fillHalfCircle(pixels, bytes_per_row, w, h, 0, false, true), // 좌 solid
@@ -74,7 +74,7 @@ fn fillTriangle(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, ax: f32, ay:
             const has_neg = d1 < 0 or d2 < 0 or d3 < 0;
             const has_pos = d1 > 0 or d2 > 0 or d3 > 0;
             if (!(has_neg and has_pos)) {
-                setPixel(pixels, row_off + @as(usize, x) * 4);
+                gp.setPixel(pixels, row_off + @as(usize, x) * 4);
                 count += 1;
             }
         }
@@ -104,29 +104,7 @@ fn fillChevron(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, t: f32, right
             const near = distSeg(px, py, base_x, 0, apex_x, fh / 2) <= t / 2 or
                 distSeg(px, py, base_x, fh, apex_x, fh / 2) <= t / 2;
             if (near) {
-                setPixel(pixels, row_off + @as(usize, x) * 4);
-                count += 1;
-            }
-        }
-    }
-    return count;
-}
-
-/// thin 모서리 대각선(코너↔코너). back=true면 ╲ (0,0)->(w,h), false면 ╱ (0,h)->(w,0). 두께 t.
-fn fillDiagonalLine(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, t: f32, back: bool) u32 {
-    const fw = @as(f32, @floatFromInt(w));
-    const fh = @as(f32, @floatFromInt(h));
-    var count: u32 = 0;
-    var y: u32 = 0;
-    while (y < h) : (y += 1) {
-        const py = @as(f32, @floatFromInt(y)) + 0.5;
-        const row_off = @as(usize, y) * bytes_per_row;
-        var x: u32 = 0;
-        while (x < w) : (x += 1) {
-            const px = @as(f32, @floatFromInt(x)) + 0.5;
-            const d = if (back) distSeg(px, py, 0, 0, fw, fh) else distSeg(px, py, 0, fh, fw, 0);
-            if (d <= t / 2) {
-                setPixel(pixels, row_off + @as(usize, x) * 4);
+                gp.setPixel(pixels, row_off + @as(usize, x) * 4);
                 count += 1;
             }
         }
@@ -179,19 +157,12 @@ fn fillHalfCircle(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, t: u32, ri
                 depth - r; // 가운데 직선(경계 x=r)
             const inside = if (solid) bd <= 0 else (bd <= 0 and bd >= -ft);
             if (inside) {
-                setPixel(pixels, row_off + @as(usize, x) * 4);
+                gp.setPixel(pixels, row_off + @as(usize, x) * 4);
                 count += 1;
             }
         }
     }
     return count;
-}
-
-fn setPixel(pixels: []u8, off: usize) void {
-    pixels[off] = 0xFF;
-    pixels[off + 1] = 0xFF;
-    pixels[off + 2] = 0xFF;
-    pixels[off + 3] = 0xFF;
 }
 
 test "isPowerline: E0B0~E0BF만" {

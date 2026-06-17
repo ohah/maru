@@ -39,6 +39,11 @@ pub const entries = [_]Entry{
     .{ .action = .focus_pane_right, .key = "focus_pane_right", .title = "Focus Pane Right" },
     .{ .action = .focus_pane_up, .key = "focus_pane_up", .title = "Focus Pane Up" },
     .{ .action = .focus_pane_down, .key = "focus_pane_down", .title = "Focus Pane Down" },
+    // 사용자 지정 이름(rename) — 활성 대상을 인라인 편집기로 연다(custom_name). 기본 키바인딩이 없어 팔릿이 주
+    // 발견 경로다(+ 더블클릭·우클릭). select_all과 같은 일반 액션.
+    .{ .action = .rename_workspace, .key = "rename_workspace", .title = "Rename Workspace" },
+    .{ .action = .rename_pane, .key = "rename_pane", .title = "Rename Pane" },
+    .{ .action = .rename_term, .key = "rename_term", .title = "Rename Terminal" },
     .{ .action = .select_all, .key = "select_all", .title = "Select All" },
     // 런타임 폰트 크기(⌘+/⌘-/⌘0). 모달 토글(toggle_find 등)과 달리 일반 액션이라 팝업/메뉴에 노출한다 —
     // 메뉴는 catalogMenuItem이 바인딩 chord(⌘+/⌘-/⌘0)를 그대로 표시한다(select_all과 같은 결).

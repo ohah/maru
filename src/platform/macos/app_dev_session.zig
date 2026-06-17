@@ -578,6 +578,15 @@ const Tab = struct {
 const TabRef = struct { pane: *Pane, tab: usize };
 const ScrollRef = struct { pane: *Pane, right: bool }; // #5b: 호버 중인 가로 스크롤 버튼(어느 pane의 ‹=false/›=true)
 
+/// 인라인 rename 중인 대상(어느 계층의 어느 라이브 객체). 커밋 시 그 객체의 custom_name을 쓴다. 모두 heap-pin
+/// 포인터(*Tab/*Pane/*Term)라 ArrayList realloc·트리 회전에도 안정 — 단 그 객체가 teardown(close/exit/reap)으로
+/// 사라지면 호출자가 rename을 취소(null)해야 한다(stale 포인터 방지, invalidateForFreedPane·destroyTerm 경로).
+const RenameTarget = union(enum) {
+    workspace: *Tab,
+    pane: *Pane,
+    term: *Term,
+};
+
 fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
     if (a == null and b == null) return true;
     if (a == null or b == null) return false;
@@ -758,6 +767,11 @@ pub const DevSession = struct {
     // 닫는다(사이드바 hovered_slot의 per-pane Term 버전). pane은 heap-pin이라 frame 사이 포인터가 안정.
     hovered_tab: ?TabRef = null,
     hovered_scroll: ?ScrollRef = null, // #5b: 호버 중인 ‹/› 스크롤 버튼 — 렌더가 밝게 칠해 클릭 가능 표시
+    // 인라인 rename 상태(없으면 null=비활성). 활성이면 키/IME가 rename_input으로 라우팅되고(모달), 렌더가 대상
+    // 슬롯/탭/라벨에 편집 텍스트+caret을 그린다. rename_input은 find/palette와 같은 OverlayInput(IME preedit·EAW·
+    // UTF-8 경계 공유). 대상 객체가 teardown되면 invalidate가 null로 비운다(stale 포인터 방지).
+    rename: ?RenameTarget = null,
+    rename_input: chrome.components.overlay_input.OverlayInput = .{},
     // 사이드바 탭 드래그 재정렬 상태. down이 사이드바 슬롯(✕ 아님)에서 시작하면 active=true가 되고,
     // 이후 drag(kind 2)는 타겟 슬롯으로 live 재정렬(moveTab), up(kind 3)이 끝낸다. index는 드래그 중인
     // 탭의 현재 인덱스(이동을 따라간다). 드래그 중엔 다른 down/이벤트가 아니라 drag/up만 캡처한다.
@@ -1006,15 +1020,58 @@ pub const DevSession = struct {
     /// 탭이 바 전체 사용, 기존 동작). 있으면 좌패딩+이름폭+간격을 [3, max]로, 단 탭 영역 최소(min_tab_cols)는
     /// 남게 상한을 둔다 — 라벨이 바를 다 먹어 탭이 사라지지 않게. 폭은 렌더 ellipsize와 같은 titleDisplayWidth로
     /// 잰다(예약 칸 == 실제 글리프). 단일 출처: docs/tabs-splits-layout.md "Pane 이름 표시 자리".
-    fn paneLabelCols(pane: *const Pane, bar_cols: u32) u32 {
-        const name = app.pickLabel(pane.custom_name, "");
-        if (name.len == 0) return 0;
+    /// 이름 표시폭(name_width 칸)으로부터 라벨 세그먼트 컬럼 수를 산출하는 코어 — 좌패딩+이름+간격을 [3, max]로,
+    /// 탭 영역 최소(min_tab_cols)는 남기고 좁은 바면 0(라벨 생략). custom_name(paneLabelCols)·rename 편집 텍스트
+    /// (paneBar)가 공유한다(폭 셈법 단일 출처).
+    fn paneLabelColsForWidth(name_width: usize, bar_cols: u32) u32 {
+        if (name_width == 0) return 0;
         const min_tab_cols: u32 = 6; // 라벨 뒤 탭 영역 최소 보장(좁은 바면 라벨 생략)
         const max_label: u32 = 20; // 긴 이름이 바를 지배하지 않게 상한
         if (bar_cols <= min_tab_cols) return 0;
-        const want = @min(@as(u32, @intCast(coretext_frame_builder.titleDisplayWidth(name))) + 2, max_label); // 좌패딩+이름+간격
+        const want = @min(@as(u32, @intCast(name_width)) + 2, max_label); // 좌패딩+이름+간격
         const cols = @min(want, bar_cols - min_tab_cols);
         return if (cols < 3) 0 else cols; // 3칸 미만이면 패딩+글자+간격 불가 → 생략
+    }
+
+    fn paneLabelCols(pane: *const Pane, bar_cols: u32) u32 {
+        const name = app.pickLabel(pane.custom_name, "");
+        if (name.len == 0) return 0;
+        return paneLabelColsForWidth(coretext_frame_builder.titleDisplayWidth(name), bar_cols);
+    }
+
+    /// rename 중인 대상 판정(렌더가 편집 텍스트로 라벨을 대체할 때 쓴다). 라이브 포인터 동일성 비교.
+    fn renamingWorkspace(self: *const DevSession, tab: *Tab) bool {
+        const r = self.rename orelse return false;
+        return switch (r) {
+            .workspace => |t| t == tab,
+            else => false,
+        };
+    }
+    fn renamingPane(self: *const DevSession, pane: *Pane) bool {
+        const r = self.rename orelse return false;
+        return switch (r) {
+            .pane => |p| p == pane,
+            else => false,
+        };
+    }
+    fn renamingTerm(self: *const DevSession, term: *Term) bool {
+        const r = self.rename orelse return false;
+        return switch (r) {
+            .term => |t| t == term,
+            else => false,
+        };
+    }
+
+    /// rename 편집 표시 텍스트 "query+조합중preedit"+caret marker('|'). 호출자(allocator) 소유 — 라벨 버퍼로 쓰고
+    /// 해제한다. caret은 별도 blink 없이 '|' 1칸으로 표시(인라인 편집기 v1 — 정밀 caret/blink는 후속).
+    fn renameEditText(self: *DevSession, allocator: std.mem.Allocator) ![]const u8 {
+        return std.fmt.allocPrint(allocator, "{s}{s}|", .{ self.rename_input.query.items, self.rename_input.preedit.items });
+    }
+
+    /// rename 편집 텍스트의 표시폭(칸) = query(EAW) + preedit(EAW) + caret 1칸. paneBar가 편집 중 라벨 폭을 이걸로
+    /// 잡아, 이름이 비어도(편집 시작) 세그먼트가 떠 caret이 보인다.
+    fn renameDisplayWidth(self: *const DevSession) usize {
+        return self.rename_input.queryCols() + chrome.components.overlay_input.displayCols(self.rename_input.preedit.items) + 1;
     }
 
     /// 탭 영역 sub-rect — 전체 바에서 좌측 라벨(label_cols)을 뗀 나머지. 탭 hit-test(barMetrics)·탭 제목 렌더가
@@ -1028,11 +1085,16 @@ pub const DevSession = struct {
     /// barMetrics·탭 제목·활성 밴드), `label_cols`(라벨 폭). 모든 hit-test/렌더가 이 한 함수를 거쳐 "보이는 == 클릭되는"
     /// 을 유지한다(label_cols가 render·hit-test에서 동일). 바가 없거나 cell 미상이면 null.
     const PaneBar = struct { full: app.SplitRect, tabs: app.SplitRect, label_cols: u32 };
-    fn paneBar(self: *const DevSession, rect: app.SplitRect, pane: *const Pane) ?PaneBar {
+    fn paneBar(self: *const DevSession, rect: app.SplitRect, pane: *Pane) ?PaneBar {
         const full = self.paneBarRect(rect) orelse return null;
         const cw = self.cell_width_px;
         if (cw == 0) return null;
-        const label_cols = paneLabelCols(pane, full.w / cw);
+        const bar_cols = full.w / cw;
+        // rename 편집 중인 pane이면 custom_name이 비어도 편집 텍스트 폭으로 세그먼트를 띄운다(caret이 보이게).
+        const label_cols = if (self.renamingPane(pane))
+            paneLabelColsForWidth(self.renameDisplayWidth(), bar_cols)
+        else
+            paneLabelCols(pane, bar_cols);
         return .{ .full = full, .tabs = paneTabBarRect(full, label_cols, cw), .label_cols = label_cols };
     }
 
@@ -1871,6 +1933,11 @@ pub const DevSession = struct {
     /// destroy). runtime이 살아 있을 때만 detach. createPane/⌘T errdefer·close·split 실패 정리에 쓴다.
     /// (deinit은 runtime.deinit 순서 때문에 이 2-pass를 직접 풀어 쓴다 — 여기 쓰지 않는다.)
     fn destroyTerm(self: *DevSession, term: *Term) void {
+        // rename 대상이 이 Term이면 stale 포인터 방지로 비운다(teardown 중 — 직접 null, closeRename 부수효과 없이).
+        if (self.renamingTerm(term)) {
+            self.rename = null;
+            self.rename_input.clear();
+        }
         if (term.live_initialized) {
             if (self.runtime_initialized) term.live_pty.closeAndDetach(&self.runtime);
             term.live_pty.deinit();
@@ -1991,6 +2058,11 @@ pub const DevSession = struct {
         if (self.tab_drag_pane == pane) {
             self.tab_drag_pane = null;
             self.tab_drag_active = false; // 드래그 대상이 사라졌으니 제스처 중단(다음 mouse-up은 no-op)
+        }
+        // rename 대상이 이 pane이면 stale 포인터가 안 되게 비운다(teardown 중이라 closeRename의 부수효과 없이 직접).
+        if (self.renamingPane(pane)) {
+            self.rename = null;
+            self.rename_input.clear();
         }
         self.hovered_slot = null;
         self.hovered_plus = false;
@@ -2182,6 +2254,11 @@ pub const DevSession = struct {
             .focus_pane_right => self.focusPaneInDirection(.right),
             .focus_pane_up => self.focusPaneInDirection(.up),
             .focus_pane_down => self.focusPaneInDirection(.down),
+            // 인라인 rename 시작 — 활성 워크스페이스/pane/Term의 custom_name을 편집한다. 활성 대상은 항상 ≥1이라
+            // 안전. 키보드/팔릿 경로(클릭 대상은 PR4/PR5가 startRename을 직접 부른다).
+            .rename_workspace => self.startRename(.{ .workspace = self.activeTab() }),
+            .rename_pane => self.startRename(.{ .pane = self.activePane() }),
+            .rename_term => self.startRename(.{ .term = self.activePane().activeTerm() }),
             // Term(가로 탭) 단위: ⌘T=활성 pane에 새 Term, ⌘W=활성 Term 닫기(Term→pane→워크스페이스
             // cascade), ⌘]/⌘[=다음/이전 Term. 생성 실패는 무시(newTermInActivePane이 errdefer로 원복).
             .new_term => if (!self.tabsBlocked()) {
@@ -2292,6 +2369,85 @@ pub const DevSession = struct {
             self.chrome_host.palette.hide();
             self.chrome_host.find.show(); // show가 검색어/현재/카운트를 비운다(새 검색)
             self.find_nav = false; // 오버레이가 주도 — 닫힘-네비 플래그 해제
+        }
+    }
+
+    /// 인라인 rename을 시작한다 — 대상의 현재 custom_name으로 편집기를 시드(없으면 빈 편집기 = 새 이름)하고 다른
+    /// 모달은 닫는다(배타적). 이후 키/IME는 모달 가드가 rename_input으로 라우팅한다. 대상은 dispatchAppAction이
+    /// 활성 워크스페이스/pane/Term으로 고른다(또는 PR4/PR5 클릭 대상).
+    fn startRename(self: *DevSession, target: RenameTarget) void {
+        self.chrome_host.find.hide(); // rename은 별도 모달 — 열려 있던 오버레이를 닫는다(배타적)
+        self.chrome_host.palette.hide();
+        self.rename_input.clear();
+        // 현재 custom_name으로 시드(owned 문자열을 query에 복사) — 없으면 빈 편집기. auto title은 시드하지 않는다
+        // (custom_name만 편집 대상). 사용자는 편집기에서 그대로 바꾸거나 지운다.
+        const seed: ?[]const u8 = switch (target) {
+            .workspace => |t| t.custom_name,
+            .pane => |p| p.custom_name,
+            .term => |t| t.surface.custom_name,
+        };
+        if (seed) |s| self.rename_input.query.appendSlice(self.allocator, s) catch {};
+        self.rename = target;
+        self.resetCursorBlink();
+        self.metal_dirty = true;
+    }
+
+    /// rename 편집 텍스트(query)를 대상 custom_name으로 확정한다 — 비면 custom_name을 지운다(이름 없음). 조합 중
+    /// preedit가 남아 있으면 먼저 query로 확정(IME 글자 손실 방지 — find와 같은 규율). 옛 owned custom_name을 free
+    /// 하고 새 owned 문자열로 교체. 그 뒤 편집기를 닫는다.
+    fn commitRename(self: *DevSession) void {
+        const target = self.rename orelse return;
+        _ = self.rename_input.commitPreedit(self.allocator); // 조합 잔여를 query로
+        const text = self.rename_input.query.items;
+        const new_name: ?[]const u8 = if (text.len == 0) null else (self.allocator.dupe(u8, text) catch null);
+        switch (target) {
+            .workspace => |t| {
+                if (t.custom_name) |old| self.allocator.free(old);
+                t.custom_name = new_name;
+            },
+            .pane => |p| {
+                if (p.custom_name) |old| self.allocator.free(old);
+                p.custom_name = new_name;
+            },
+            .term => |t| {
+                if (t.surface.custom_name) |old| self.allocator.free(old);
+                t.surface.custom_name = new_name;
+            },
+        }
+        self.closeRename();
+    }
+
+    /// rename 편집기를 닫는다(취소·커밋 공통 종료) — 입력을 비우고 rename을 null로. custom_name은 안 건드린다
+    /// (취소면 원래 이름 유지, 커밋이면 위에서 이미 갱신). 대상 teardown 시 invalidate도 이 상태만 비우면 된다.
+    fn closeRename(self: *DevSession) void {
+        if (self.rename == null) return;
+        self.rename = null;
+        self.rename_input.clear();
+        self.resetCursorBlink();
+        self.metal_dirty = true;
+    }
+
+    /// rename 활성 중 키 처리(모달 가드가 호출). Enter=확정·Esc=취소·Backspace=삭제·평문 글자=추가. 모디파이어
+    /// 글자·기타 키(↑↓ 등)는 무시해 편집기를 유지한다(텍스트 필드라 단축키를 뒤로 안 흘린다). IME 조합은
+    /// imeSetPreedit/imeEnd가 rename_input에 직접 넣는다(find/palette와 같은 경로).
+    fn handleRenameKey(self: *DevSession, ev: chrome.input.InputEvent) void {
+        switch (ev) {
+            .key => |k| switch (k.key) {
+                .escape => self.closeRename(),
+                .enter => self.commitRename(),
+                .backspace => {
+                    self.rename_input.backspace();
+                    self.resetCursorBlink();
+                    self.metal_dirty = true;
+                },
+                .char => {
+                    if (k.mods.command or k.mods.control or k.mods.option) return; // 단축키 조합은 편집기에 안 쌓음
+                    self.rename_input.appendChar(self.allocator, k.codepoint) catch {};
+                    self.resetCursorBlink();
+                    self.metal_dirty = true;
+                },
+                else => {}, // up/down/other — 무시(편집기 유지)
+            },
         }
     }
 
@@ -2460,6 +2616,17 @@ pub const DevSession = struct {
         // 아니라 닫힌 pane의 late input이므로 ignored로 회계만 하고 정상으로 닫는다.
         if (self.ended_seen) {
             self.total_ignored_key_events += 1;
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+            return self.last_summary;
+        }
+        // 인라인 rename이 활성이면 키를 rename 편집기로 라우팅한다 — chrome 모달과 같은 최상위 규율(배타적: startRename이
+        // find/palette를 닫음). Enter=확정·Esc=취소·Backspace·평문 글자를 handleRenameKey가 처리하고 모든 키를 소비한다
+        // (텍스트 필드라 터미널/단축키로 안 흘린다). IME 조합은 imeSetPreedit/imeEnd가 rename_input에 직접 넣는다.
+        if (self.rename != null) {
+            self.handleRenameKey(chromeInputFromKeyEvent(event));
+            self.metal_dirty = true;
+            self.total_app_key_events += 1; // rename(앱)이 소비
             self.writeSummaryFromState();
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
@@ -2703,6 +2870,9 @@ pub const DevSession = struct {
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *DevSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (!self.surface_initialized) return;
+        // 인라인 rename 중 마우스 down(어디든)이면 편집을 확정한다(포커스 상실 = 확정 — docs/tabs-splits-layout.md).
+        // 그 뒤 클릭은 정상 처리된다(탭 전환·pane 포커스 등). drag/up(2/3)은 down이 선행하므로 여기서 안 걸린다.
+        if (kind == 1 and self.rename != null) self.commitRename();
         // 사이드바 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(x가 사이드바 밖으로 나가도) — 새
         // down(1)은 아래 일반 처리로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
         if (self.sidebar_drag_active and (kind == 2 or kind == 3)) {
@@ -3031,9 +3201,10 @@ pub const DevSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    const InputFocus = enum { terminal, notice, find, palette };
+    const InputFocus = enum { terminal, notice, rename, find, palette };
     fn inputFocus(self: *const DevSession) InputFocus {
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
+        if (self.rename != null) return .rename; // 인라인 rename(find/palette와 배타적 — startRename이 닫음)
         if (self.chrome_host.find.open) return .find;
         if (self.chrome_host.palette.open) return .palette;
         return .terminal;
@@ -3044,6 +3215,7 @@ pub const DevSession = struct {
     fn imeSetPreedit(self: *DevSession, bytes: []const u8) void {
         switch (self.inputFocus()) {
             .notice => {}, // notice는 조합을 표시하지 않는다(텍스트 입력 대상 아님)
+            .rename => self.rename_input.setPreedit(self.allocator, bytes) catch {},
             .find => self.chrome_host.find.input.setPreedit(self.allocator, bytes) catch {},
             .palette => self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {},
             .terminal => self.activeSurface().core.setPreedit(bytes) catch {},
@@ -3055,6 +3227,7 @@ pub const DevSession = struct {
     fn imeComposingActive(self: *const DevSession) bool {
         return switch (self.inputFocus()) {
             .notice => false, // notice는 조합 상태가 없다
+            .rename => self.rename_input.preedit.items.len > 0,
             .find => self.chrome_host.find.input.preedit.items.len > 0,
             .palette => self.chrome_host.palette.input.preedit.items.len > 0,
             .terminal => self.activeSurfaceConst().core.preedit != null,
@@ -3176,6 +3349,9 @@ pub const DevSession = struct {
         const props = self.buildChromeProps();
         const overlay_caret: ?chrome.draw.Rect = switch (self.inputFocus()) {
             .notice => null, // 조합을 안 받으므로 후보창 위치 무의미 — 아래 터미널 커서로 폴백(실제론 안 뜸)
+            // rename 인라인 편집기는 사이드바 슬롯/탭/라벨 안에 있어 caret 픽셀 위치 계산이 복잡하다 — v1은 null로
+            // 폴백(IME 후보창이 기본 위치에 뜬다; 조합 자체는 정상). 정확한 inline caretRect는 후속.
+            .rename => null,
             .find => chrome.components.find.caretRect(&self.chrome_host.find, props),
             .palette => chrome.components.palette.caretRect(&self.chrome_host.palette, props),
             .terminal => null,
@@ -3202,6 +3378,9 @@ pub const DevSession = struct {
         if (!self.surface_initialized) return;
         switch (self.inputFocus()) {
             .notice => {}, // notice는 확정할 조합이 없다
+            .rename => if (self.rename_input.commitPreedit(self.allocator)) {
+                self.metal_dirty = true; // 조합 글자가 편집 텍스트로 확정됨(렌더 갱신)
+            },
             .terminal => {
                 const core = &self.activeSurface().core;
                 if (core.preedit) |pending| {
@@ -3661,6 +3840,12 @@ pub const DevSession = struct {
     /// 컬렉션에 안 든 Tab을 teardown·해제한다(closeTab의 teardown 부분 — 단, tabs/surface_ptrs는 호출자가 관리).
     /// 트리(tab.tree)가 세팅된 '완성된' 탭에만 쓴다(buildWorkspaceTab은 자기 granular errdefer로 미완성을 정리).
     fn destroyTabStandalone(self: *DevSession, tab: *Tab) void {
+        // rename 대상이 이 워크스페이스(또는 그 안 pane/Term)면 비운다 — pane/Term은 아래 destroyPane/destroyTerm
+        // 가드가 처리하지만, 워크스페이스 자체 rename은 여기서. teardown 중이라 직접 null(부수효과 없이).
+        if (self.renamingWorkspace(tab)) {
+            self.rename = null;
+            self.rename_input.clear();
+        }
         for (tab.panes.items) |pane| self.destroyPane(pane);
         // 트리를 통째 해제하기 전에, divider_drag가 이 트리 소속 split이면 표적 null(다른 탭 트리를 가리키면 유지 —
         // 무관한 탭 close가 진행 중 divider 드래그를 안 끊는다). collapse 경로의 invalidateForFreedSplit과 같은 규율.
@@ -4245,7 +4430,15 @@ pub const DevSession = struct {
                     // 1a) pane 라벨 세그먼트(좌측) — custom_name이 있으면 [full.x, full.x+label_cols*cw)에 이름 glyph.
                     //     탭 영역(pb.tabs)이 라벨만큼 우측으로 밀려 겹치지 않는다(label_cols=0이면 이 블록 생략 = 기존 동작).
                     if (pb.label_cols > 0) {
-                        const name = app.pickLabel(lr.leaf.custom_name, "");
+                        // 이 pane을 rename 중이면 편집 텍스트(+caret), 아니면 custom_name. 편집 중엔 paneBar가 빈
+                        // 이름이어도 세그먼트를 띄워(renameDisplayWidth) caret이 보인다. 편집 텍스트는 owned라 해제.
+                        var name_buf: ?[]const u8 = null;
+                        defer if (name_buf) |b| self.allocator.free(b);
+                        const name = if (self.renamingPane(lr.leaf)) blk: {
+                            const e = self.renameEditText(self.allocator) catch break :blk app.pickLabel(lr.leaf.custom_name, "");
+                            name_buf = e;
+                            break :blk e;
+                        } else app.pickLabel(lr.leaf.custom_name, "");
                         const label_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground }; // 밝은 전경(muted 비활성 탭과 구분)
                         if (coretext_frame_builder.buildPaneLabelDrawList(self.allocator, name, @intCast(pb.label_cols), label_fg)) |ldl| {
                             if (pane_frame_builder.buildFromDrawList(self.allocator, ldl, &self.renderer_state)) |lf| {
@@ -4274,8 +4467,16 @@ pub const DevSession = struct {
                     }
                     for (lr.leaf.terms.items, 0..) |term, ti| {
                         // Term 탭 라벨 = surface.custom_name(rename) 우선, 없으면 자동 제목. "{n} {label}".
-                        const label = tabNumberLabel(self.allocator, ti, termLabel(term)) catch continue;
-                        titles.append(self.allocator, label) catch self.allocator.free(label);
+                        // 이 Term을 rename 중이면 그 탭에 편집 텍스트(+caret)를 그려 탭에서 바로 편집되게 한다.
+                        if (self.renamingTerm(term)) {
+                            const edit = self.renameEditText(self.allocator) catch continue;
+                            defer self.allocator.free(edit);
+                            const label = tabNumberLabel(self.allocator, ti, edit) catch continue;
+                            titles.append(self.allocator, label) catch self.allocator.free(label);
+                        } else {
+                            const label = tabNumberLabel(self.allocator, ti, termLabel(term)) catch continue;
+                            titles.append(self.allocator, label) catch self.allocator.free(label);
+                        }
                     }
                     // 비활성 Term 탭은 흐린 색(muted), 그 pane의 활성 Term 탭은 full sidebar_foreground로 강조한다.
                     const tab_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
@@ -4937,8 +5138,14 @@ pub const DevSession = struct {
         }
         for (self.tabs.items, 0..) |tab, i| {
             // 탭 대표 라벨 = 워크스페이스 custom_name(rename) 우선, 없으면 활성 panel 활성 Term 라벨. "{n} {label}".
-            const label = try tabNumberLabel(self.allocator, i, workspaceLabel(tab));
-            try labels.append(self.allocator, label);
+            // 이 워크스페이스를 rename 중이면 편집 텍스트(+caret)로 대체해 사이드바 슬롯에서 바로 편집되게 한다.
+            if (self.renamingWorkspace(tab)) {
+                const edit = try self.renameEditText(self.allocator);
+                defer self.allocator.free(edit);
+                try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, edit));
+            } else {
+                try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, workspaceLabel(tab)));
+            }
         }
 
         // 비활성 워크스페이스 제목은 흐린 색(muted), 활성 워크스페이스(active_tab 행)는 full sidebar_foreground로 강조한다.
@@ -5441,6 +5648,7 @@ pub const DevSession = struct {
         self.command_entries.deinit(self.allocator);
         self.palette_filtered.deinit(self.allocator);
         self.chrome_host.deinit(self.allocator); // chrome 컴포넌트 heap(find.query) 해제
+        self.rename_input.deinit(self.allocator); // 인라인 rename 입력(query/preedit) heap 해제
         self.find_matches.deinit(self.allocator);
         self.find_view_spans.deinit(self.allocator);
         if (self.workspace_buffer) |b| self.allocator.free(b);
@@ -5704,6 +5912,8 @@ test "commitComposition is a safe no-op when there is no active preedit" {
     // 필요해 헤드리스로 못 돌리고 GUI 수동 검증으로 본다(PR 본문).
     var session: DevSession = undefined;
     session.allocator = std.testing.allocator;
+    session.chrome_host = .{}; // inputFocus가 notice/find/palette.open을 읽음([[devsession-undefined-test-field-trap]])
+    session.rename = null; // inputFocus가 rename을 읽음(undefined면 garbage가 .rename 분기 → rename_input crash)
     var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
@@ -5823,6 +6033,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     session.blink_visible = true;
     session.blink_ticks = 0;
     session.chrome_host = .{}; // updateCursorBlink이 find/palette.open을 읽음 — undefined면 UB([[devsession-undefined-test-field-trap]])
+    session.rename = null; // inputFocus/updateCursorBlink가 rename을 읽음(undefined면 garbage가 .rename 분기)
 
     // 기본(DECSCUSR 1 = 깜빡 block): interval 틱마다 토글. rebuild(metal_dirty) 없이 generation만(suffix 토글).
     var i: u32 = 0;
@@ -5904,6 +6115,58 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
     try std.testing.expect(toggles >= 1);
     // 토글은 rebuild 없이도 재드로우를 유발해야 한다(setCursorVisible의 generation 증가).
     try std.testing.expect(gen_changes >= toggles);
+}
+
+// 인라인 rename 동작(PR3): start→입력→commit이 custom_name을 쓰고, cancel은 원래 이름 유지, 빈 텍스트 commit은
+// 이름을 지우고, 대상 Term teardown이 rename을 자동 취소(stale 포인터 방지)하는지를 풀-세션 경로로 고정한다.
+test "rename: commit writes custom_name, cancel keeps old, empty clears, teardown clears target" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 풀 세션(실 PTY/CoreText) 경로
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const tab = session.activeTab();
+    // 1) 워크스페이스 rename: 시작 → 'h','i' → Enter 확정 → custom_name == "hi", 편집기 닫힘.
+    session.startRename(.{ .workspace = tab });
+    try std.testing.expect(session.rename != null);
+    session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'h' } });
+    session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'i' } });
+    session.handleRenameKey(.{ .key = .{ .key = .enter } });
+    try std.testing.expect(session.rename == null);
+    try std.testing.expectEqualStrings("hi", tab.custom_name.?);
+
+    // 2) 취소: 시작 시 현재 이름으로 시드 → 'x' 추가 → Esc → custom_name 그대로("hi").
+    session.startRename(.{ .workspace = tab });
+    try std.testing.expectEqualStrings("hi", session.rename_input.query.items);
+    session.handleRenameKey(.{ .key = .{ .key = .char, .codepoint = 'x' } });
+    session.handleRenameKey(.{ .key = .{ .key = .escape } });
+    try std.testing.expect(session.rename == null);
+    try std.testing.expectEqualStrings("hi", tab.custom_name.?);
+
+    // 3) 빈 텍스트 확정 → custom_name 지워짐(null = 이름 없음).
+    session.startRename(.{ .workspace = tab });
+    session.handleRenameKey(.{ .key = .{ .key = .backspace } });
+    session.handleRenameKey(.{ .key = .{ .key = .backspace } });
+    session.handleRenameKey(.{ .key = .{ .key = .enter } });
+    try std.testing.expect(tab.custom_name == null);
+
+    // 4) Term rename 중 그 Term을 닫으면 rename이 자동 취소된다(destroyTerm 무효화 — stale 포인터/UAF 방지).
+    //    pane에 Term을 하나 더 만들어 닫기가 Term 단위로 끝나게(cascade로 세션 종료 latch를 안 치게) 한다.
+    session.newTermInActivePane() catch {};
+    session.focusTerm(0); // 첫 Term을 활성으로
+    const term0 = session.activePane().activeTerm();
+    session.startRename(.{ .term = term0 });
+    try std.testing.expect(session.rename != null);
+    session.closeActiveTermOrPane(); // 활성(term0) 닫힘 → destroyTerm(term0) → rename null
+    try std.testing.expect(session.rename == null);
 }
 
 test "synchronized output(2026) hold: ESU 누락 시 sync_timeout_ticks를 넘으면 강제 투영(freeze 복구)" {
@@ -6464,6 +6727,7 @@ test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫
     var session: DevSession = undefined;
     session.allocator = std.testing.allocator;
     session.chrome_host = .{}; // inputFocus가 notice/find/palette.open을 읽음([[devsession-undefined-test-field-trap]])
+    session.rename = null; // inputFocus가 rename을 읽음([[devsession-undefined-test-field-trap]])
     session.find_matches = .empty; // toggleFind/showNotice가 clearRetainingCapacity 호출
     session.palette_filtered = .empty; // togglePalette→recomputePalette가 채운다
     session.metal_dirty = false;
@@ -6514,6 +6778,7 @@ test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 �
     session.app_window = .{ .tabs = &st_ptrs };
     session.metal_dirty = false;
     session.chrome_host = .{}; // inputFocus가 읽음
+    session.rename = null; // inputFocus가 rename을 읽음([[devsession-undefined-test-field-trap]])
     session.ime_inserted = .empty; // imeBegin이 clearRetainingCapacity 호출
     defer session.chrome_host.deinit(std.testing.allocator);
     defer session.ime_inserted.deinit(std.testing.allocator);
@@ -9474,6 +9739,7 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     // 패닉한다(타깃·struct 레이아웃에 따라 우연히 통과 또는 크래시 — devsession-undefined-test-field-trap). 명시
     // 초기화로 결정적 `.terminal`(오버레이 caret 없음) 경로를 타게 한다.
     session.chrome_host = .{};
+    session.rename = null; // inputFocus(imeCursorRect)가 rename을 읽음([[devsession-undefined-test-field-trap]])
     session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
 
     const core = &tab_surface.core;

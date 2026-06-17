@@ -22,6 +22,13 @@ pub const Action = union(enum) {
     focus_pane_right,
     focus_pane_up,
     focus_pane_down,
+    // 사용자 지정 이름(rename) 시작 — 활성 대상의 이름을 인라인으로 편집한다. workspace=활성 사이드바 탭,
+    // pane=활성 분할 영역, term=활성 가로 탭. dispatchAppAction이 인라인 편집기를 연다(custom_name을 쓴다).
+    // 기본 키바인딩은 없다(macOS 단일 관례 부재 — 발견성은 커맨드 팔릿·더블클릭·우클릭). 단일 출처:
+    // docs/tabs-splits-layout.md "사용자 지정 이름(rename)".
+    rename_workspace,
+    rename_pane,
+    rename_term,
     // 활성 터미널의 전체 내용(스크롤백 + 화면)을 선택한다(Select All, 관례상 ⌘A). 코어 selection 상태라
     // dispatchAppAction이 core.selectAll로 넘긴다. clipboard 쓰기(copy)는 NSPasteboard(OS) 소유라 Action이
     // 아니다(경계: Zig는 selection, Swift는 clipboard).
@@ -64,6 +71,9 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "focus_pane_right")) return .focus_pane_right;
     if (std.mem.eql(u8, value, "focus_pane_up")) return .focus_pane_up;
     if (std.mem.eql(u8, value, "focus_pane_down")) return .focus_pane_down;
+    if (std.mem.eql(u8, value, "rename_workspace")) return .rename_workspace;
+    if (std.mem.eql(u8, value, "rename_pane")) return .rename_pane;
+    if (std.mem.eql(u8, value, "rename_term")) return .rename_term;
     if (std.mem.eql(u8, value, "new_term")) return .new_term;
     if (std.mem.eql(u8, value, "close_term")) return .close_term;
     if (std.mem.eql(u8, value, "previous_term")) return .previous_term;
@@ -118,6 +128,9 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.split_vertical, parseAction("split_vertical").?);
     try std.testing.expectEqual(Action.focus_pane_left, parseAction("focus_pane_left").?);
     try std.testing.expectEqual(Action.focus_pane_down, parseAction("focus_pane_down").?);
+    try std.testing.expectEqual(Action.rename_workspace, parseAction("rename_workspace").?);
+    try std.testing.expectEqual(Action.rename_pane, parseAction("rename_pane").?);
+    try std.testing.expectEqual(Action.rename_term, parseAction("rename_term").?);
     try std.testing.expectEqual(Action.new_term, parseAction("new_term").?);
     try std.testing.expectEqual(Action.close_term, parseAction("close_term").?);
     try std.testing.expectEqual(Action.next_term, parseAction("next_term").?);

@@ -98,6 +98,37 @@ pub fn fillDiagonal(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, t: u32, 
     return count;
 }
 
+/// 점 (px,py)가 삼각형 (ax,ay)-(bx,by)-(cx,cy) 안인지 — 세 변 외적 부호가 모두 같은(또는 0인) 쪽. 경계 포함.
+pub fn pointInTriangle(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) bool {
+    const d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by);
+    const d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy);
+    const d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay);
+    const has_neg = d1 < 0 or d2 < 0 or d3 < 0;
+    const has_pos = d1 > 0 or d2 > 0 or d3 > 0;
+    return !(has_neg and has_pos);
+}
+
+/// 삼각형 (a,b,c)를 흰색 불투명으로 채운다(픽셀 중심 +0.5 기준). invert면 셀 안에서 삼각형 **바깥**을 채운다
+/// (반전 wedge). 정점이 셀 모서리/중앙이면 셀 격자에 칼같이 스냅된다. 새로 칠한 픽셀 수 반환. slotFits 통과 가정.
+pub fn fillTriangle(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32, invert: bool) u32 {
+    var count: u32 = 0;
+    var y: u32 = 0;
+    while (y < h) : (y += 1) {
+        const py = @as(f32, @floatFromInt(y)) + 0.5;
+        const row_off = @as(usize, y) * bytes_per_row;
+        var x: u32 = 0;
+        while (x < w) : (x += 1) {
+            const px = @as(f32, @floatFromInt(x)) + 0.5;
+            if (pointInTriangle(px, py, ax, ay, bx, by, cx, cy) != invert) {
+                const off = row_off + @as(usize, x) * 4;
+                if (pixels[off + 3] == 0) count += 1;
+                setPixel(pixels, off);
+            }
+        }
+    }
+    return count;
+}
+
 test "slotFits: 계약(bpr≥w*4·len≥h*bpr) 검증" {
     var buf: [16 * 8 * 4]u8 = undefined; // 512 = 정확히 w=8·h=16·bpr=32
     try std.testing.expect(slotFits(8, 16, 8 * 4, &buf)); // 딱 맞음

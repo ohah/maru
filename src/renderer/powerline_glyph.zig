@@ -33,16 +33,16 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
     const ft = @as(f32, @floatFromInt(t));
 
     return switch (cp) {
-        // ── 삼각형 separator ──
-        0xE0B0 => fillTriangle(pixels, bytes_per_row, w, h, 0, 0, fw, fh / 2, 0, fh), // 우 solid ▶
-        0xE0B2 => fillTriangle(pixels, bytes_per_row, w, h, fw, 0, 0, fh / 2, fw, fh), // 좌 solid ◀
+        // ── 삼각형 separator ── 공유 삼각형 프리미티브(gp.fillTriangle, invert=false).
+        0xE0B0 => gp.fillTriangle(pixels, bytes_per_row, w, h, 0, 0, fw, fh / 2, 0, fh, false), // 우 solid ▶
+        0xE0B2 => gp.fillTriangle(pixels, bytes_per_row, w, h, fw, 0, 0, fh / 2, fw, fh, false), // 좌 solid ◀
         0xE0B1 => fillChevron(pixels, bytes_per_row, w, h, ft, true), // 우 thin >
         0xE0B3 => fillChevron(pixels, bytes_per_row, w, h, ft, false), // 좌 thin <
         // ── 모서리 삼각형(solid) ──
-        0xE0B8 => fillTriangle(pixels, bytes_per_row, w, h, 0, 0, fw, fh, 0, fh), // 좌하 ◣
-        0xE0BA => fillTriangle(pixels, bytes_per_row, w, h, fw, 0, fw, fh, 0, fh), // 우하 ◢
-        0xE0BC => fillTriangle(pixels, bytes_per_row, w, h, 0, 0, fw, 0, 0, fh), // 좌상 ◤
-        0xE0BE => fillTriangle(pixels, bytes_per_row, w, h, 0, 0, fw, 0, fw, fh), // 우상 ◥
+        0xE0B8 => gp.fillTriangle(pixels, bytes_per_row, w, h, 0, 0, fw, fh, 0, fh, false), // 좌하 ◣
+        0xE0BA => gp.fillTriangle(pixels, bytes_per_row, w, h, fw, 0, fw, fh, 0, fh, false), // 우하 ◢
+        0xE0BC => gp.fillTriangle(pixels, bytes_per_row, w, h, 0, 0, fw, 0, 0, fh, false), // 좌상 ◤
+        0xE0BE => gp.fillTriangle(pixels, bytes_per_row, w, h, 0, 0, fw, 0, fw, fh, false), // 우상 ◥
         // ── 모서리 thin 대각선(solid 모서리의 빗변) — box ╱╲와 같은 공유 대각선 프리미티브. ╲=do_back, ╱=do_fwd.
         0xE0B9 => gp.fillDiagonal(pixels, bytes_per_row, w, h, t, true, false), // 좌하 빗변 = ╲
         0xE0BF => gp.fillDiagonal(pixels, bytes_per_row, w, h, t, true, false), // 우상 빗변 = ╲
@@ -55,36 +55,6 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
         0xE0B7 => fillHalfCircle(pixels, bytes_per_row, w, h, t, false, false), // 좌 thin
         else => 0,
     };
-}
-
-/// 픽셀 중심(+0.5)이 삼각형 (ax,ay)-(bx,by)-(cx,cy) 안이면 칠한다(세 변 외적 부호가 모두 같은 쪽). 코너 정점이
-/// 셀 모서리(0·w·h)라 셀을 칼같이 채워 이웃 separator 배경과 맞물린다.
-fn fillTriangle(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) u32 {
-    var count: u32 = 0;
-    var y: u32 = 0;
-    while (y < h) : (y += 1) {
-        const py = @as(f32, @floatFromInt(y)) + 0.5;
-        const row_off = @as(usize, y) * bytes_per_row;
-        var x: u32 = 0;
-        while (x < w) : (x += 1) {
-            const px = @as(f32, @floatFromInt(x)) + 0.5;
-            const d1 = edge(px, py, ax, ay, bx, by);
-            const d2 = edge(px, py, bx, by, cx, cy);
-            const d3 = edge(px, py, cx, cy, ax, ay);
-            const has_neg = d1 < 0 or d2 < 0 or d3 < 0;
-            const has_pos = d1 > 0 or d2 > 0 or d3 > 0;
-            if (!(has_neg and has_pos)) {
-                gp.setPixel(pixels, row_off + @as(usize, x) * 4);
-                count += 1;
-            }
-        }
-    }
-    return count;
-}
-
-/// 점 (px,py)가 변 (ax,ay)->(bx,by)의 어느 쪽인지(외적 부호).
-fn edge(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) f32 {
-    return (px - bx) * (ay - by) - (ax - bx) * (py - by);
 }
 
 /// thin chevron(삼각형 separator의 빗변 두 선만). right=true면 (0,0)->(w,h/2)·(0,h)->(w,h/2), false면 좌우 반전.

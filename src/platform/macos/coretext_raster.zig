@@ -114,6 +114,18 @@ pub const CoreTextGlyphRasterizer = struct {
             );
             return .{ .non_clear_pixels = non_clear };
         }
+        // Legacy Computing edge wedge 삼각형(U+1FB68~1FB6F·bowtie 1FB9A/9B): 한 변 밑변·중앙 꼭짓점 삼각형도
+        // 직접 합성 — 정점이 셀 모서리·중앙이라 격자에 칼같이 스냅된다.
+        if (renderer.legacy_wedge_glyph.isLegacyWedge(request.run.codepoint)) {
+            const non_clear = renderer.legacy_wedge_glyph.fillCoverage(
+                request.run.codepoint,
+                request.slot.width_px,
+                request.slot.height_px,
+                request.bytes_per_row,
+                request.pixels,
+            );
+            return .{ .non_clear_pixels = non_clear };
+        }
         const font_identity = self.font_registry.get(request.run.font_id) orelse
             return error.RasterizerFailed;
 

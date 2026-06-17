@@ -8,11 +8,11 @@
 //! t-두께 띠로 그리고, 각 팔을 **셀 경계까지** 뻗어(left→x=0…down→y=h) 이웃 셀과 맞닿게 한다. 중앙 교차(가장 굵은
 //! 세로 팔 폭 × 가장 굵은 가로 팔 높이)를 모두가 덮어 모서리(┌)·T(├)·사거리(┼)·**혼합 굵기**(┞=up heavy)가 자연히 된다.
 //!
-//! 범위: U+2500~254B(직선 ─━│┃ · 모서리 ┌┍┎┏ … · T ├┝┞ … · 사거리 ┼┽ … — **light·heavy·혼합 전부**) +
-//! dashed(┄…┋ 2·3·4점선, ╌╍╎╏ — light·heavy) + 둥근 ╭╮╰╯(**실제 quarter-arc**) + double(═║·╔╗╚╝·╠╣╦╩·╬ —
-//! 두 평행선, 모서리 outer/inner) + 반선·두께전이(╴╵╶╷╸╹╺╻╼╽╾╿). single↔double 혼합(╒╓ …)·대각선(╱╲╳)은 후속
-//! (폰트 폴백). 베이스 = Unicode Box Drawing 기하(굵기·점선·이중 분류는 Unicode 문자명 그대로). Ghostty
-//! font/sprite/draw/box.zig 동작만 비교(코드 미복사 — clean-room). 중립 모듈.
+//! 범위: **U+2500~257F 전체**. 직선 ─━│┃ · 모서리 ┌┍┎┏ … · T ├┝┞ … · 사거리 ┼┽ …(light·heavy·**혼합**) +
+//! dashed(┄…┋ 2·3·4점선, ╌╍╎╏) + 둥근 ╭╮╰╯(**실제 quarter-arc**) + double(═║·╔╗╚╝·╠╣╦╩·╬ — 모서리 outer/inner)
+//! + single↔double 혼합(╒╓ ╞╟ ╤╥ ╪╫ … — 일반 band 모델 fillMixed, double과 선 위치 일치해 연결) + 대각선
+//! (╱╲╳ — 거리 기반) + 반선·두께전이(╴╵╶╷╸╹╺╻╼╽╾╿). 베이스 = Unicode Box Drawing 기하(굵기·점선·이중 분류는
+//! Unicode 문자명 그대로). Ghostty font/sprite/draw/box.zig 동작만 비교(코드 미복사 — clean-room). 중립 모듈.
 
 const std = @import("std");
 
@@ -34,8 +34,8 @@ const Spec = struct {
     diagonal: Diagonal = .none, // ╱╲╳ — arm 모델 밖, fillDiagonal
 };
 
-/// cp가 합성 대상 box-drawing 문자인지(light·heavy·혼합·반선·dashed·double·대각선). single↔double 혼합(╒╓…)은
-/// 미지원 → false면 폰트 글리프로 폴백.
+/// cp가 합성 대상 box-drawing 문자인지 — **U+2500~257F 전체**(직선·모서리·T·사거리·dashed·둥근·이중선·
+/// single↔double 혼합·대각선·반선, light·heavy·혼합 굵기 전부). 그 밖이면 false(폰트 폴백).
 pub fn isBoxDrawing(cp: u32) bool {
     return specFor(cp) != null;
 }
@@ -151,6 +151,25 @@ fn specFor(cp: u32) ?Spec {
         0x2566 => .{ .arms = .{ .down = D, .left = D, .right = D } }, // ╦
         0x2569 => .{ .arms = .{ .up = D, .left = D, .right = D } }, // ╩
         0x256C => .{ .arms = .{ .up = D, .down = D, .left = D, .right = D } }, // ╬
+        // ── single↔double 혼합(한 축 light, 다른 축 double) — fillMixed(일반 band 모델) ──
+        0x2552 => .{ .arms = .{ .down = L, .right = D } }, // ╒
+        0x2553 => .{ .arms = .{ .down = D, .right = L } }, // ╓
+        0x2555 => .{ .arms = .{ .down = L, .left = D } }, // ╕
+        0x2556 => .{ .arms = .{ .down = D, .left = L } }, // ╖
+        0x2558 => .{ .arms = .{ .up = L, .right = D } }, // ╘
+        0x2559 => .{ .arms = .{ .up = D, .right = L } }, // ╙
+        0x255B => .{ .arms = .{ .up = L, .left = D } }, // ╛
+        0x255C => .{ .arms = .{ .up = D, .left = L } }, // ╜
+        0x255E => .{ .arms = .{ .up = L, .down = L, .right = D } }, // ╞
+        0x255F => .{ .arms = .{ .up = D, .down = D, .right = L } }, // ╟
+        0x2561 => .{ .arms = .{ .up = L, .down = L, .left = D } }, // ╡
+        0x2562 => .{ .arms = .{ .up = D, .down = D, .left = L } }, // ╢
+        0x2564 => .{ .arms = .{ .down = L, .left = D, .right = D } }, // ╤
+        0x2565 => .{ .arms = .{ .down = D, .left = L, .right = L } }, // ╥
+        0x2567 => .{ .arms = .{ .up = L, .left = D, .right = D } }, // ╧
+        0x2568 => .{ .arms = .{ .up = D, .left = L, .right = L } }, // ╨
+        0x256A => .{ .arms = .{ .up = L, .down = L, .left = D, .right = D } }, // ╪
+        0x256B => .{ .arms = .{ .up = D, .down = D, .left = L, .right = L } }, // ╫
         // ── 둥근 모서리(light arc) ╭╮╯╰ ──
         0x256D => .{ .arms = .{ .down = L, .right = L }, .rounded = true }, // ╭
         0x256E => .{ .arms = .{ .down = L, .left = L }, .rounded = true }, // ╮
@@ -185,7 +204,18 @@ fn armsHaveDouble(a: Arms) bool {
     return isDoubleArm(a.up) or isDoubleArm(a.down) or isDoubleArm(a.left) or isDoubleArm(a.right);
 }
 
-/// 팔 굵기 → device px 두께. double은 fillDouble가 따로 처리하므로 여기선 light로(미사용 경로).
+/// present 팔이 전부 double인지(pure double ═║╔ → fillDouble의 outer/inner notch). 하나라도 light면 false
+/// → single↔double 혼합(╒╞ 등)은 fillMixed.
+fn armsAllDouble(a: Arms) bool {
+    const ok = struct {
+        fn f(arm: ?Weight) bool {
+            return if (arm) |wt| wt == .double else true; // 없는 팔은 무시(true)
+        }
+    }.f;
+    return ok(a.up) and ok(a.down) and ok(a.left) and ok(a.right);
+}
+
+/// 팔 굵기 → device px 두께. double은 fillDouble/fillMixed가 따로 처리하므로 여기선 light로(미사용 경로).
 fn weightT(wt: Weight, lt: u32, ht: u32) u32 {
     return switch (wt) {
         .light => lt,
@@ -248,8 +278,12 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
         return count;
     }
 
-    // 이중선(═║ 등): 두 평행 light 선 + 모서리 outer/inner. cp별 band를 fillDouble가 직접 그린다.
-    if (armsHaveDouble(arms)) return fillDouble(cp, w, h, bytes_per_row, pixels, lt);
+    if (armsHaveDouble(arms)) {
+        // pure double(전 팔 double)은 모서리 outer/inner notch를 위해 cp별 fillDouble. single↔double 혼합
+        // (한 축 light, 다른 축 double)은 일반 band 모델 fillMixed — fillDouble과 같은 선 위치라 이음매 없이 연결.
+        if (armsAllDouble(arms)) return fillDouble(cp, w, h, bytes_per_row, pixels, lt);
+        return fillMixed(arms, w, h, bytes_per_row, pixels, lt);
+    }
 
     // light/heavy(혼합 포함) 선·모서리·교차·반선: 각 팔을 자기 굵기로 그리고 중앙 교차에서 합친다.
     return fillLines(arms, w, h, bytes_per_row, pixels, lt, ht);
@@ -504,6 +538,71 @@ fn fillDouble(cp: u32, w: u32, h: u32, bytes_per_row: usize, pixels: []u8, t_in:
     return c;
 }
 
+/// single↔double 혼합(╒╓ ╞╟ ╤╥ ╪╫ …)을 일반 band 모델로 합성한다. 한 축은 light(한 선, 중앙), 다른 축은
+/// double(두 선, 중앙±d). 각 선의 along-축 범위 = present 방향이면 셀 경계, 아니면 수직선들이 차지하는 중앙
+/// span까지(코너/T 연결). double 선 위치(중앙±t, gap=t)는 fillDouble과 동일해 이중 박스와 이음매 없이 잇는다.
+fn fillMixed(arms: Arms, w: u32, h: u32, bytes_per_row: usize, pixels: []u8, t_in: u32) u32 {
+    const cx = w / 2;
+    const cy = h / 2;
+    // 두 선 + gap = 3t가 셀에 들어가게 두께 제한(fillDouble과 같은 규칙 → 선 위치 일치).
+    const cap = @max(@as(u32, 1), @min(if (h >= 3) h / 3 else 1, if (w >= 3) w / 3 else 1));
+    const t = @max(@as(u32, 1), @min(t_in, cap));
+    const half = t / 2;
+    const d = t; // double 선 중앙 오프셋(gap=t)
+
+    // 가로 선 y-중앙들(없으면 0개), 세로 선 x-중앙들. left/right는 같은 굵기, up/down도 같은 굵기(혼합 집합 규약).
+    const hw: ?Weight = arms.left orelse arms.right;
+    const vw: ?Weight = arms.up orelse arms.down;
+    var hy: [2]u32 = undefined;
+    var hyn: usize = 0;
+    if (hw) |wt| {
+        if (wt == .double) {
+            hy[0] = cy -| d;
+            hy[1] = cy + d;
+            hyn = 2;
+        } else {
+            hy[0] = cy;
+            hyn = 1;
+        }
+    }
+    var vx: [2]u32 = undefined;
+    var vxn: usize = 0;
+    if (vw) |wt| {
+        if (wt == .double) {
+            vx[0] = cx -| d;
+            vx[1] = cx + d;
+            vxn = 2;
+        } else {
+            vx[0] = cx;
+            vxn = 1;
+        }
+    }
+    // band [c-half, c-half+t). 중앙 span = 모든 세로선이 차지하는 x범위 / 모든 가로선의 y범위(코너/T 연결점).
+    const cxmin = if (vxn > 0) vx[0] -| half else cx;
+    const cxmax = if (vxn > 0) @min(w, vx[vxn - 1] -| half + t) else cx;
+    const cymin = if (hyn > 0) hy[0] -| half else cy;
+    const cymax = if (hyn > 0) @min(h, hy[hyn - 1] -| half + t) else cy;
+
+    var count: u32 = 0;
+    var i: usize = 0;
+    while (i < hyn) : (i += 1) {
+        const y0 = hy[i] -| half;
+        const y1 = @min(h, y0 + t);
+        const x0 = if (arms.left != null) 0 else cxmin; // left 있으면 좌단, 아니면 세로선까지(코너)
+        const x1 = if (arms.right != null) w else cxmax;
+        count += fillRect(pixels, bytes_per_row, x0, y0, x1, y1);
+    }
+    i = 0;
+    while (i < vxn) : (i += 1) {
+        const x0 = vx[i] -| half;
+        const x1 = @min(w, x0 + t);
+        const y0 = if (arms.up != null) 0 else cymin;
+        const y1 = if (arms.down != null) h else cymax;
+        count += fillRect(pixels, bytes_per_row, x0, y0, x1, y1);
+    }
+    return count;
+}
+
 /// [x0,x1)×[y0,y1) 픽셀을 흰색 불투명(0xFFFFFFFF)으로. 채운 픽셀 수 반환. RGBA8 + bytes_per_row. 겹쳐도(교차)
 /// 멱등이라 안전. 경계는 fillCoverage가 검증(off+4 ≤ h*bpr ≤ len)했으므로 per-pixel 가드 없이 쓴다.
 fn fillRect(pixels: []u8, bytes_per_row: usize, x0: u32, y0: u32, x1: u32, y1: u32) u32 {
@@ -540,10 +639,54 @@ test "isBoxDrawing: light·heavy·혼합·dashed·double·반선 (single↔doubl
     try std.testing.expect(isBoxDrawing(0x256C)); // ╬ double cross
     try std.testing.expect(isBoxDrawing(0x2571)); // ╱ 대각선
     try std.testing.expect(isBoxDrawing(0x2573)); // ╳ 대각 십자
-    // 폴백(이 모듈 밖)
-    try std.testing.expect(!isBoxDrawing(0x2552)); // ╒ single↔double 혼합 (후속)
+    try std.testing.expect(isBoxDrawing(0x2552)); // ╒ single↔double 혼합 (이제 커버)
+    try std.testing.expect(isBoxDrawing(0x256B)); // ╫ single↔double 혼합 cross
+    // U+2500~257F 전체 커버 — 그 밖만 폴백
     try std.testing.expect(!isBoxDrawing(0x2588)); // █ block(block_glyph)
+    try std.testing.expect(!isBoxDrawing(0x257F + 1)); // 0x2580 = block 시작
     try std.testing.expect(!isBoxDrawing('A'));
+}
+
+test "isBoxDrawing: U+2500~257F 전 코드포인트 커버(빈틈 없음)" {
+    var cp: u32 = 0x2500;
+    while (cp <= 0x257F) : (cp += 1) {
+        try std.testing.expect(isBoxDrawing(cp));
+    }
+}
+
+test "fillCoverage: single↔double 혼합 ╞(single 세로 full + double 가로 우)·╤(single 세로 down + double 가로)" {
+    const w: u32 = 16;
+    const h: u32 = 32; // light t=2, double 선 cy±2
+    const bpr: usize = w * 4;
+    var pixels: [32 * 16 * 4]u8 = undefined;
+    const a = struct {
+        fn at(p: []const u8, bpr_: usize, x: u32, y: u32) u8 {
+            return p[@as(usize, y) * bpr_ + @as(usize, x) * 4 + 3];
+        }
+    }.at;
+    const cx = w / 2;
+    const cy = h / 2;
+
+    // ╞ (up.L down.L right.D): single 세로선 full + 두 가로선 우측. 세로 중앙선 상·하단 닿음, 우단에 두 가로선.
+    _ = fillCoverage(0x255E, w, h, bpr, &pixels);
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, cx, 0)); // 세로 상단
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, cx, h - 1)); // 세로 하단
+    var h_runs: u32 = 0; // 우단 열의 세로 스캔 → 두 가로선 = run 2
+    var prev: u8 = 0;
+    for (0..h) |y| {
+        const v = a(&pixels, bpr, w - 1, @intCast(y));
+        if (v == 0xFF and prev == 0x00) h_runs += 1;
+        prev = v;
+    }
+    try std.testing.expectEqual(@as(u32, 2), h_runs); // 우단에 두 가로선(double)
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 0, cy)); // 좌단 안 닿음(right만)
+
+    // ╤ (down.L left.D right.D): 두 가로선 full + single 세로선 아래로. 상단 세로 안 닿고 하단 닿음.
+    _ = fillCoverage(0x2564, w, h, bpr, &pixels);
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 0, cy -| 2)); // 위 가로선 좌단
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w - 1, cy + 2)); // 아래 가로선 우단
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, cx, h - 1)); // 세로 하단(down)
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, cx, 0)); // 세로 상단 안 닿음(up 없음)
 }
 
 test "fillCoverage: 대각선 ╲는 좌상→우하, ╱는 좌하→우상 코너를 지난다" {

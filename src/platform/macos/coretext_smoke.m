@@ -386,21 +386,9 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
     if ((cp >= 0x2580 && cp <= 0x2590) || (cp >= 0x2594 && cp <= 0x259F)) {
         return true;
     }
-    // box_glyph: U+2500~254F(직선·모서리·T·사거리·dashed — light·heavy·혼합 전부) + 둥근 ╭╮╰╯·대각선 ╱╲╳·
-    // 반선·두께전이(256D~257F 연속) + 이중선(pure double 11자). single↔double 혼합(╒╓ 2552…)은 box_glyph가
-    // 아직 안 덮어 폴백. **renderer/box_glyph.zig specFor와 동기 유지**.
-    if ((cp >= 0x2500 && cp <= 0x254F) || // 직선·모서리·T·사거리·dashed(전 굵기·혼합)
-        (cp >= 0x256D && cp <= 0x257F)) { // 둥근·대각선·반선·두께전이
-        return true;
-    }
-    switch (cp) { // 이중선(pure double)만 — single↔double 혼합은 제외
-        case 0x2550: case 0x2551: case 0x2554: case 0x2557:
-        case 0x255A: case 0x255D: case 0x2560: case 0x2563:
-        case 0x2566: case 0x2569: case 0x256C:
-            return true;
-        default:
-            return false;
-    }
+    // box_glyph: **U+2500~257F 전체** 합성(직선·모서리·T·사거리·dashed·둥근·이중선·single↔double 혼합·대각선·
+    // 반선 — light·heavy·혼합 전부). **renderer/box_glyph.zig specFor가 이 범위를 빠짐없이 덮음**(동기 유지).
+    return (cp >= 0x2500 && cp <= 0x257F);
 }
 
 static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFIndex *len, CFIndex capacity) {

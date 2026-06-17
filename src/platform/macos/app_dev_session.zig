@@ -964,6 +964,16 @@ pub const DevSession = struct {
         if (config.width_px > 0 and config.height_px > 0) {
             spawn_config.size = gridFromBacking(config.width_px, config.height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px);
         }
+        // MARU_DEBUG 관측: 첫 셸 spawn grid가 무슨 입력(창 backing px·scale·cell·사이드바)에서 어떻게 나왔는지
+        // 한 줄로 남긴다. PTY winsize=surface grid=이 값이라, 셸 COLUMNS(첫 프롬프트 PROMPT_EOL_MARK % 폭)와
+        // 어긋나는지 데이터로 본다 — DPI별 spawn 크기 회귀를 추측 없이 진단하게 한다(이번 % 잔상 추적의 단일 출처).
+        if (diag_gate.maruDebugEnabled()) {
+            std.log.scoped(.spawn).info("spawn-size: in width_px={d} height_px={d} scale_milli={d} -> cell={d}x{d} sidebar_px={d} grid {d}x{d} (px_path={})", .{
+                config.width_px,        config.height_px,       config.scale_milli,
+                self.cell_width_px,     self.cell_height_px,    self.sidebar_width_px,
+                spawn_config.size.cols, spawn_config.size.rows, config.width_px > 0 and config.height_px > 0,
+            });
+        }
 
         // 첫 탭을 만든다 — Tab + 첫 panel(셸 PTY spawn + surface + runtime attach + pump) + tabs/surface_ptrs
         // append + app_window 갱신을 createTab이 한 묶음으로 한다(create/switch 후속도 같은 경로를 쓴다).
@@ -6379,6 +6389,25 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
         const got = session.activePane().activeTerm().surface.core.size;
         try std.testing.expectEqual(expected, got);
         try std.testing.expect(got.cols != 80 or got.rows != 24); // 80×24 폴백이 아니다(창이 더 넓어 grid가 다름)
+    }
+    // 2x(retina) — 진단: width_px=1920·scale_milli=2000일 때 cell·sidebar·grid 실측(MARU_DEBUG 로그).
+    {
+        const session = try allocator.create(DevSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 80,
+            .rows = 24,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .width_px = 1920,
+            .height_px = 1200,
+            .scale_milli = 2000,
+        });
+        defer session.deinit();
+        // 진단으로 확인됨: 2x에서 cell=17×37·sidebar_px=360·grid 91×32. init의 spawn 그리드는 정확하다(불일치 없음).
+        const expected = gridFromBacking(1920, 1200, session.cell_width_px, session.cell_height_px, session.sidebar_width_px);
+        try std.testing.expectEqual(expected, session.activePane().activeTerm().surface.core.size);
     }
     // backing px 0(헤드리스·창 미상) — cols/rows로 폴백 spawn.
     {

@@ -90,6 +90,55 @@ pub const deviceScaleFromMilli = state.deviceScaleFromMilli;
 pub const deviceFontSizeFromMilli = state.deviceFontSizeFromMilli;
 pub const uvRectForSlot = glyph_quads.uvRectForSlot;
 
+/// cp가 합성 글리프(폰트 대신 rasterizer가 코드포인트로 직접 그리는)인지 — 모든 합성 모듈 술어의 합집합.
+/// **합성 여부의 단일 Zig 출처**: 네이티브 셰이퍼의 drawable 판정과 cache_key glyph_id=0 정규화가 이걸 쓴다.
+/// platform/macos/coretext_smoke.m의 `maru_is_synthesized_glyph`(C 게이트)는 이 집합을 미러해야 한다(언어가
+/// 달라 컴파일 차원 공유는 못 하므로 범위를 같게 유지 — 어긋나면 그 코드포인트가 blank로 빠진다).
+pub fn isSynthesizedCodepoint(cp: u32) bool {
+    return block_glyph.isBlockElement(cp) or
+        box_glyph.isBoxDrawing(cp) or
+        powerline_glyph.isPowerline(cp) or
+        braille_glyph.isBraille(cp) or
+        legacy_mosaic_glyph.isLegacyMosaic(cp) or
+        legacy_wedge_glyph.isLegacyWedge(cp) or
+        legacy_wedge_glyph.isCornerTriangle(cp) or
+        legacy_smooth_glyph.isSmoothMosaic(cp) or
+        legacy_diagonal_glyph.isLegacyDiagonal(cp);
+}
+
+test "isSynthesizedCodepoint: 각 합성 범위 대표 + 비합성 대조" {
+    const std = @import("std");
+    // 각 모듈 범위에서 하나씩(C 게이트 maru_is_synthesized_glyph와 같은 집합이어야 한다).
+    for ([_]u32{
+        0x2588, // block █
+        0x2592, // shade ▒
+        0x2500, // box ─
+        0xE0B0, // powerline
+        0x2800, 0x28FF, // braille
+        0x1FB00, 0x1FB3B, // sextant
+        0x1CD00, 0x1CDE5, // octant
+        0x1FB3C, 0x1FB67, // smooth mosaic
+        0x1FB68, 0x1FB6F, 0x1FB9A, 0x1FB9B, // wedge·bowtie
+        0x25E2, 0x1FB9C, // corner 삼각형·음영
+        0x1FB98, 0x1FBA0, 0x1FBAE, 0x1FBD0, 0x1FBDF, // 대각 hatch·stroke
+    }) |cp| {
+        try std.testing.expect(isSynthesizedCodepoint(cp));
+    }
+    // 비합성 대조(폰트 폴백): 일반 글자·범위 사이 갭. (0x257F=box·0x1FBA0=diagonal은 합성이라 제외)
+    for ([_]u32{
+        'A',
+        0x24FF, // box 직전
+        0x25A0, // block(…259F) 직후 ■
+        0x27FF, // braille 직전
+        0x2A00, // braille 직후
+        0x1CCFF, // octant 직전
+        0x1FB96, // wedge(…6F)와 hatch(98) 사이 갭
+        0x1FBE0, // diagonal cell(…DF) 직후
+    }) |cp| {
+        try std.testing.expect(!isSynthesizedCodepoint(cp));
+    }
+}
+
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is
     // shallow and does not recurse through the maru barrel, so without this

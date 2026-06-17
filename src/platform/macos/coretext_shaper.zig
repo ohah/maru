@@ -205,21 +205,13 @@ fn coreTextGlyphRecordFromDrawRecord(
         .fallback = record.fallback != 0,
         .style = source_cell.style,
         .color_glyph_kind = if (record.color_glyph_kind != 0) .color else .monochrome,
-        // 폰트가 글리프를 주면(glyph_id!=0) drawable. **단 box-drawing(U+2500~257F)·block(U+2580~259F)·
-        // Powerline(U+E0B0~E0BF)·Braille(U+2800~28FF)은 rasterizer가 코드포인트로 직접 합성하므로 폰트 글리프가
+        // 폰트가 글리프를 주면(glyph_id!=0) drawable. **단 합성 대상(box·block·Powerline·Braille·Legacy
+        // Computing 모자이크/wedge/삼각형/대각선 등)은 rasterizer가 코드포인트로 직접 합성하므로 폰트 글리프가
         // 없어도(glyph_id==0) drawable이어야 한다** — 안 그러면 폰트에 그 글리프가 없거나 CoreText가 notdef를 줄
-        // 때 셀이 스킵돼 합성에 도달조차 못 한다(보더가 안 보이던 원인). 합성은 폰트 커버리지와 무관하다.
+        // 때 셀이 스킵돼 합성에 도달조차 못 한다(보더가 안 보이던 원인). 합성 여부는 renderer의 단일 출처
+        // `isSynthesizedCodepoint`로 판정한다(C 게이트 maru_is_synthesized_glyph가 같은 집합을 미러).
         .drawable = record.drawable != 0 and
-            (record.glyph_id != 0 or
-                renderer.block_glyph.isBlockElement(record.codepoint) or
-                renderer.box_glyph.isBoxDrawing(record.codepoint) or
-                renderer.powerline_glyph.isPowerline(record.codepoint) or
-                renderer.braille_glyph.isBraille(record.codepoint) or
-                renderer.legacy_mosaic_glyph.isLegacyMosaic(record.codepoint) or
-                renderer.legacy_wedge_glyph.isLegacyWedge(record.codepoint) or
-                renderer.legacy_wedge_glyph.isCornerTriangle(record.codepoint) or
-                renderer.legacy_smooth_glyph.isSmoothMosaic(record.codepoint) or
-                renderer.legacy_diagonal_glyph.isLegacyDiagonal(record.codepoint)),
+            (record.glyph_id != 0 or renderer.isSynthesizedCodepoint(record.codepoint)),
     };
 }
 

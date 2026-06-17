@@ -1041,10 +1041,11 @@ pub const TerminalCore = struct {
     }
 
     /// 스크롤백 + 활성 화면 전체에서 needle을 찾아 절대-좌표 Match로 out에 채운다(out은 먼저 비운다).
-    /// 대소문자 무시 ASCII 부분일치(Ghostty 스크롤백 검색의 기본 — 같은 1차 레퍼런스, 우리 팝업 필터와도 일관),
+    /// 대소문자 무시 부분일치(Ghostty 스크롤백 검색의 기본 — 같은 1차 레퍼런스, 우리 팝업 필터와도 일관),
     /// 논리 줄(soft-wrap 이음) 단위로 스캔해 wrap 경계를 넘는 매치도 잡는다. 같은 줄 안에선 비겹침(매치 뒤로
-    /// needle 길이만큼 건너뜀, 관례). needle이 비면 무동작. 스크롤백 Find의 단일 출처(코어 상태) — UI 상태머신
-    /// (find_overlay)은 이 결과를 받기만 한다. regex/fuzzy/유니코드 케이스폴딩은 후속.
+    /// needle 길이만큼 건너뜀, 관례). needle이 비면 무동작. 대소문자 무시는 `foldCase`(ASCII + Latin-1·Greek·
+    /// Cyrillic 깔끔한 오프셋 블록 — Latin Ext-A 등은 후속). 스크롤백 Find의 단일 출처(코어 상태) — UI 상태머신
+    /// (find_overlay)은 이 결과를 받기만 한다. regex/fuzzy는 후속.
     pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf8: []const u8, out: *std.ArrayList(types.Match)) !void {
         out.clearRetainingCapacity();
         if (needle_utf8.len == 0) return;
@@ -1449,16 +1450,30 @@ pub const TerminalCore = struct {
         return len;
     }
 
-    /// ASCII 대문자만 소문자로 접는다(A-Z → a-z). 비-ASCII는 그대로 — findMatches의 대소문자 무시 비교용
-    /// (유니코드 전체 케이스폴딩은 후속). 입력 텍스트는 영문이 대부분이라 ASCII fold로 충분.
-    fn foldAscii(cp: u21) u21 {
-        return if (cp >= 'A' and cp <= 'Z') cp + 32 else cp;
+    /// 대문자를 소문자로 접는다(findMatches 대소문자 무시 비교용). **베이스 = Unicode simple case folding**,
+    /// 단 width.zig와 같은 정책(small first table — 깔끔한 오프셋 블록만, 나머지는 후속)으로 **오프셋이 일정한
+    /// 블록만** 알고리즘으로 덮는다:
+    ///   - ASCII A-Z(+32)
+    ///   - Latin-1 Supplement À-Ö·Ø-Þ(U+00C0–D6·D8–DE, +32; × U+00D7는 글자가 아니라 제외)
+    ///   - Greek Α-Ρ·Σ-Ω(U+0391–A1·A3–A9, +32; U+03A2 reserved 제외)
+    ///   - Cyrillic А-Я(U+0410–042F, +32) / Ѐ-Џ(U+0400–040F, +80)
+    /// **미덮음(후속)**: Latin Extended-A(parity가 U+0139에서 뒤집혀 단일 오프셋 불가 — 표가 필요),
+    /// ß→ss·İ 등 1:N·로케일 특수 폴딩. 이들은 표/생성기를 들일 때(docs/font·width 정책과 같은 시점) 확장한다.
+    fn foldCase(cp: u21) u21 {
+        return switch (cp) {
+            'A'...'Z' => cp + 32,
+            0x00C0...0x00D6, 0x00D8...0x00DE => cp + 32, // Latin-1 À-Ö, Ø-Þ
+            0x0391...0x03A1, 0x03A3...0x03A9 => cp + 32, // Greek Α-Ρ, Σ-Ω
+            0x0410...0x042F => cp + 32, // Cyrillic А-Я
+            0x0400...0x040F => cp + 80, // Cyrillic Ѐ-Џ
+            else => cp,
+        };
     }
 
-    /// haystack 앞부분이 needle과 ASCII 대소문자 무시로 일치하는지(needle.len ≤ haystack.len 가정 — 호출자가 보장).
+    /// haystack 앞부분이 needle과 대소문자 무시(foldCase)로 일치하는지(needle.len ≤ haystack.len 가정 — 호출자가 보장).
     fn matchAtIgnoreCase(haystack: []const u21, needle: []const u21) bool {
         for (needle, 0..) |n, k| {
-            if (foldAscii(haystack[k]) != foldAscii(n)) return false;
+            if (foldCase(haystack[k]) != foldCase(n)) return false;
         }
         return true;
     }
@@ -4931,6 +4946,34 @@ test "findMatches: 대소문자 무시 부분일치 + 비겹침 + 절대 좌표"
     try std.testing.expectEqual(@as(usize, 0), matches.items.len);
     try core.findMatches(std.testing.allocator, "", &matches);
     try std.testing.expectEqual(@as(usize, 0), matches.items.len);
+}
+
+test "findMatches: 유니코드 대소문자 무시(Latin-1·Greek·Cyrillic foldCase)" {
+    // foldCase 직접 — 각 블록 대문자→소문자, 비-글자/미덮음 블록은 그대로.
+    try std.testing.expectEqual(@as(u21, 'a'), TerminalCore.foldCase('A'));
+    try std.testing.expectEqual(@as(u21, 0x00E9), TerminalCore.foldCase(0x00C9)); // É→é
+    try std.testing.expectEqual(@as(u21, 0x00F1), TerminalCore.foldCase(0x00D1)); // Ñ→ñ
+    try std.testing.expectEqual(@as(u21, 0x00D7), TerminalCore.foldCase(0x00D7)); // × 그대로(글자 아님)
+    try std.testing.expectEqual(@as(u21, 0x03B1), TerminalCore.foldCase(0x0391)); // Α→α
+    try std.testing.expectEqual(@as(u21, 0x03C9), TerminalCore.foldCase(0x03A9)); // Ω→ω
+    try std.testing.expectEqual(@as(u21, 0x0430), TerminalCore.foldCase(0x0410)); // А→а
+    try std.testing.expectEqual(@as(u21, 0x044F), TerminalCore.foldCase(0x042F)); // Я→я
+    try std.testing.expectEqual(@as(u21, 0x0450), TerminalCore.foldCase(0x0400)); // Ѐ→ѐ
+    try std.testing.expectEqual(@as(u21, 0x0100), TerminalCore.foldCase(0x0100)); // Ā 미덮음(Latin Ext-A — 그대로)
+
+    // findMatches 통합 — 악센트/스크립트 대소문자 무시(코드포인트는 \u{}로 명시해 편집기 정규화 회피).
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    try core.write("CAF\u{00C9}\r\n\u{0391}\u{039B}\u{03A6}\u{0391}\r\n\u{041F}\u{0420}\u{0418}\u{0412}\u{0415}\u{0422}");
+    var matches: std.ArrayList(types.Match) = .empty;
+    defer matches.deinit(std.testing.allocator);
+
+    try core.findMatches(std.testing.allocator, "caf\u{00E9}", &matches); // café ↔ CAFÉ
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+    try core.findMatches(std.testing.allocator, "\u{03B1}\u{03BB}\u{03C6}\u{03B1}", &matches); // αλφα ↔ ΑΛΦΑ
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+    try core.findMatches(std.testing.allocator, "\u{043F}\u{0440}\u{0438}\u{0432}\u{0435}\u{0442}", &matches); // привет ↔ ПРИВЕТ
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
 }
 
 test "findMatches: soft-wrap 경계를 넘는 매치" {

@@ -780,6 +780,7 @@ pub const TerminalCore = struct {
         };
         self.selection_anchor = bounds.start;
         self.selection_head = bounds.end;
+        self.selection_block = false; // 새 선택은 선형 — 블록은 setSelectionBlock으로만 opt-in(selectionStart와 일관)
         self.dirty = fullDirty(self.size);
     }
 
@@ -1024,6 +1025,7 @@ pub const TerminalCore = struct {
         const end_cells = self.absRow(end_row) orelse return;
         self.selection_anchor = .{ .row = start_row, .col = 0 };
         self.selection_head = .{ .row = end_row, .col = @intCast(end_cells.len -| 1) };
+        self.selection_block = false; // 새 선택은 선형(selectionStart와 일관)
         self.dirty = fullDirty(self.size);
     }
 
@@ -1037,11 +1039,14 @@ pub const TerminalCore = struct {
         const end_cells = self.absRow(last_abs) orelse return;
         self.selection_anchor = .{ .row = 0, .col = 0 };
         self.selection_head = .{ .row = last_abs, .col = @intCast(end_cells.len -| 1) };
+        self.selection_block = false; // 새 선택은 선형 — Option+드래그 블록 뒤 ⌘A가 직사각형으로 새던 누수 수정
         self.dirty = fullDirty(self.size);
     }
 
     /// 스크롤백 + 활성 화면 전체에서 needle을 찾아 절대-좌표 Match로 out에 채운다(out은 먼저 비운다).
-    /// 대소문자 무시 부분일치(Ghostty 스크롤백 검색의 기본 — 같은 1차 레퍼런스, 우리 팝업 필터와도 일관),
+    /// 대소문자 무시 부분일치(Ghostty 스크롤백 검색의 기본 — 같은 1차 레퍼런스). 대소문자 무시는 `foldCase`
+    /// (ASCII+Latin-1·Greek·Cyrillic 유니코드) — command_palette 필터(ASCII `toLower`)보다 넓다(거기는 영문
+    /// 명령명이라 ASCII로 충분; 통일은 후속).
     /// 논리 줄(soft-wrap 이음) 단위로 스캔해 wrap 경계를 넘는 매치도 잡는다. 같은 줄 안에선 비겹침(매치 뒤로
     /// needle 길이만큼 건너뜀, 관례). needle이 비면 무동작. 대소문자 무시는 `foldCase`(ASCII + Latin-1·Greek·
     /// Cyrillic 깔끔한 오프셋 블록 — Latin Ext-A 등은 후속). 스크롤백 Find의 단일 출처(코어 상태) — UI 상태머신
@@ -7415,6 +7420,33 @@ test "block selection span carries block flag + lo/hi; selectionStart resets to 
     // setSelectionBlock은 anchor 없으면 무시(선택 없는데 블록 토글은 무효).
     core.selectionClear();
     core.setSelectionBlock(true);
+    try std.testing.expect(!core.selection_block);
+}
+
+test "selectAll/selectWordAt/selectLineAt이 블록 모드를 리셋한다(Option+드래그 뒤 누수 방지)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    try core.write("abcdef\r\nghijkl\r\nmnopqr");
+
+    // selectAll: 블록 켠 뒤 ⌘A는 선형 전체여야 한다(직사각형 truncate 누수 방지 — 리뷰 발견 #1).
+    core.selectionStart(0, 1);
+    core.setSelectionBlock(true);
+    core.selectionExtend(2, 3);
+    core.selectAll();
+    try std.testing.expect(!core.selection_block);
+    const all = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(all);
+    try std.testing.expectEqualStrings("abcdef\nghijkl\nmnopqr", all); // 직사각형이 아니라 전체
+
+    // selectWordAt(더블클릭)·selectLineAt(트리플클릭)도 새 선택이라 선형으로 리셋.
+    core.selectionStart(0, 1);
+    core.setSelectionBlock(true);
+    core.selectWordAt(0, 0); // 'a'..'f' run
+    try std.testing.expect(!core.selection_block);
+
+    core.selectionStart(0, 1);
+    core.setSelectionBlock(true);
+    core.selectLineAt(1);
     try std.testing.expect(!core.selection_block);
 }
 

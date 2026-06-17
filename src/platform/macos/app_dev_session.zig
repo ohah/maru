@@ -183,8 +183,13 @@ fn gridFromRectPx(cell_width_px: u32, cell_height_px: u32, w_px: u32, h_px: u32)
 
 /// color.Rgb를 불투명(A=0xFF) 0xAARRGGBB로 packing한다(사이드바 strip/활성 밴드 셀 배경 색용). 셀
 /// 배경은 A=0xFF여야 셰이더가 그 색으로 칠한다(A=0이면 "배경 없음").
+/// rgb + alpha를 GpuQuad/cell 색 워드(0xAARRGGBB)로 패킹. 색 패킹의 단일 출처 — packOpaqueRgb·스크롤바 fade가 공유.
+fn packRgbAlpha(rgb: maru.color.Rgb, alpha: u8) u32 {
+    return (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+}
+
 fn packOpaqueRgb(rgb: maru.color.Rgb) u32 {
-    return 0xFF00_0000 | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+    return packRgbAlpha(rgb, 0xFF);
 }
 
 /// 활성 탭 하이라이트 밴드 셀 1개를 만든다(못 만들면 null). 사이드바 폭을 cell 폭으로 floor해 칸 수
@@ -2207,6 +2212,13 @@ pub const DevSession = struct {
         } };
     }
 
+    /// maru 스크롤백 Find를 지금 끌지 — **단일 정책 출처**(toggleFind/findNavigate/tick-close가 공유). alt screen
+    /// (vim/less/htop)에선 그 화면을 앱이 소유하고 스크롤백 뷰포트가 잠겨(scrollToAbs 무동작) 매치로 갈 수 없으니
+    /// 앱 자체 검색(`/`)에 맡긴다(iTerm2 관례). surface 미초기화(narrow 테스트)면 false(activeSurfaceConst 보호).
+    fn findSuppressed(self: *const DevSession) bool {
+        return self.surface_initialized and self.activeSurfaceConst().core.alt_active;
+    }
+
     /// 스크롤백 Find를 토글한다 — 열려 있으면 닫고(매치 하이라이트 정리), 아니면 연다(빈 검색어). 팝업과 배타적
     /// 이라 팝업을 닫고 연다. UI 상태는 chrome_host.find, 검색은 검색어가 생길 때 recomputeFind가 한다.
     fn toggleFind(self: *DevSession) void {
@@ -2215,10 +2227,7 @@ pub const DevSession = struct {
             self.find_matches.clearRetainingCapacity(); // 닫힘 — 하이라이트 중단
             self.find_nav = false; // ⌘G 닫힘-네비 세션도 종료
         } else {
-            // alt screen(vim/less/htop 등)에선 maru 스크롤백 Find를 끈다 — 그 화면은 앱이 소유하고 스크롤백
-            // 뷰포트가 잠겨(scrollToAbs 무동작) 매치로 갈 수 없으니, 앱 자체 검색(`/`)에 맡긴다(iTerm2 관례).
-            // ⌘F는 alt에선 오버레이를 안 연다(무동작). surface 미초기화(narrow 테스트)면 alt 판정 생략.
-            if (self.surface_initialized and self.activeSurface().core.alt_active) return;
+            if (self.findSuppressed()) return; // alt screen이면 ⌘F가 오버레이를 안 연다(앱 자체 검색에 맡김)
             self.chrome_host.notice.dismiss(); // 배타적 — notice 위에 열지 않는다
             self.chrome_host.palette.hide();
             self.chrome_host.find.show(); // show가 검색어/현재/카운트를 비운다(새 검색)
@@ -2233,7 +2242,7 @@ pub const DevSession = struct {
     /// 시 재검색을 닫힌 채로도 유지한다. 오버레이가 열려 있으면 모달 라우팅이 키를 가로채 이 경로는 안 탄다.
     fn findNavigate(self: *DevSession, forward: bool) void {
         if (!self.surface_initialized) return;
-        if (self.activeSurface().core.alt_active) return; // alt screen — maru Find 끔(toggleFind와 같은 정책)
+        if (self.findSuppressed()) return; // alt screen — maru Find 끔(toggleFind와 같은 정책)
         if (self.chrome_host.find.input.query.items.len == 0) return; // 검색 이력 없음 — 무동작
         if (self.find_matches.items.len == 0) {
             self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
@@ -2443,6 +2452,7 @@ pub const DevSession = struct {
                 if (self.find_nav) { // 셸에 타이핑 재개 = 검색 종료 — 닫힘-네비 하이라이트 해제
                     self.find_nav = false;
                     self.find_matches.clearRetainingCapacity();
+                    self.metal_dirty = true; // 현재-매치 하이라이트가 한 프레임 남지 않게(다른 clear 사이트와 일관)
                 }
             },
             .app_action => |action| {
@@ -3938,9 +3948,9 @@ pub const DevSession = struct {
             } else try self.frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
             defer tick_result.deinit(self.allocator);
 
-            // Find가 열린(또는 ⌘G 닫힘-네비) 채 앱이 출력으로 alt screen에 들어가면 Find를 닫는다 — alt에선
-            // maru Find를 끄는 정책(toggleFind/findNavigate와 일관). 매치도 비워 하이라이트를 정리한다.
-            if ((self.chrome_host.find.open or self.find_nav) and self.activeSurface().core.alt_active) {
+            // Find가 열린(또는 ⌘G 닫힘-네비) 채 앱이 출력으로 alt screen에 들어가면 Find를 닫는다 — 같은
+            // findSuppressed 정책(surface 가드 포함). 매치도 비워 하이라이트를 정리한다.
+            if ((self.chrome_host.find.open or self.find_nav) and self.findSuppressed()) {
                 self.chrome_host.find.hide();
                 self.find_matches.clearRetainingCapacity();
                 self.find_nav = false;
@@ -4595,6 +4605,9 @@ pub const DevSession = struct {
         if (rect.w == 0 or self.cell_width_px == 0) return null;
         const core = &self.activeSurfaceConst().core;
         const geom = scrollbarThumbGeom(core.scrollbackLen(), core.viewOffset(), self.cell_height_px, rect.h) orelse return null;
+        // thumb가 트랙을 꽉 채워 스크롤 여지가 없으면(track<=0, degenerate 작은 pane) 잡지 않는다 — 안 그러면
+        // 클릭을 캡처하고도 dragScrollbarTo가 무동작이라 선택도 스크롤도 안 되는 dead zone이 된다.
+        if (geom.h >= @as(f32, @floatFromInt(rect.h))) return null;
         // hit-test는 base 폭(비-emphasized) + 4px 여유 — hover로 굵어진 폭이 아니라 안정된 base로 잡는다.
         const bar_w: f64 = scrollbarBarWidthPx(self.cell_width_px, false);
         const right: f64 = @floatFromInt(rect.x + rect.w);
@@ -4671,7 +4684,7 @@ pub const DevSession = struct {
         const x: f32 = @as(f32, @floatFromInt(rect.x + rect.w)) - bar_w - 2.0; // 우측 가장자리에서 2px 안쪽
         const alpha: u8 = if (emphasized) scrollbar_alpha_full else computeScrollbarAlpha(pane.scrollbar_idle_ticks);
         const rgb = self.mutedForeground(); // muted 전경(사이드바 비활성 탭과 같은 톤)
-        const color: u32 = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b; // 셰이더가 rgb*=a premultiply
+        const color: u32 = packRgbAlpha(rgb, alpha); // 셰이더가 rgb*=a premultiply
         const r = bar_w * 0.5; // pill 모양(반지름 = 폭 절반)
         self.gpu_quads.append(self.allocator, .{
             .x = x,

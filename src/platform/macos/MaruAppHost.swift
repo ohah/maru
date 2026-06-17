@@ -1457,9 +1457,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 메뉴엔 keyEquivalent를 안 단다(달면 macOS가 그 키를 가로채 키바인딩을 가린다 — 모달 토글은 ⌘⇧P처럼
         // 키바인딩 전용이 maru 관례). 클릭은 runAction으로 — Find 닫힘일 때 동작(열림 중엔 모달이 키를 가짐).
         let find = NSMenu()
-        find.addItem(actionMenuItem("Find…", "toggle_find"))
-        find.addItem(actionMenuItem("Find Next", "find_next"))
-        find.addItem(actionMenuItem("Find Previous", "find_previous"))
+        find.addItem(actionMenuItem("toggle_find", catalog))
+        find.addItem(actionMenuItem("find_next", catalog))
+        find.addItem(actionMenuItem("find_previous", catalog))
         let findItem = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
         findItem.submenu = find
         edit.addItem(findItem)
@@ -1533,11 +1533,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return item
     }
 
-    /// 단축키 없이 Zig 액션(action_key)을 호출하는 메뉴 항목 — 발견성용(Find 등). 클릭 시 runCatalogAction →
-    /// run_action. keyEquivalent를 비워 macOS가 키를 가로채지 않게 한다(단축키는 Zig 키바인딩이 소유).
-    private func actionMenuItem(_ title: String, _ actionKey: String) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: #selector(runCatalogAction(_:)), keyEquivalent: "")
-        item.representedObject = actionKey
+    /// 단축키 없이 Zig 액션(key)을 호출하는 메뉴 항목 — 발견성용(Find 등). 제목은 카탈로그(단일 출처)에서 읽어
+    /// catalogMenuItem과 제목이 어긋나지 않게 한다. keyEquivalent를 비워 macOS가 키를 가로채지 않게 한다(단축키는
+    /// Zig 키바인딩이 소유). 클릭 시 runCatalogAction → run_action.
+    private func actionMenuItem(_ key: String, _ catalog: [String: (title: String, keyEquiv: String, mods: NSEvent.ModifierFlags)]) -> NSMenuItem {
+        let item = NSMenuItem(title: catalog[key]?.title ?? key, action: #selector(runCatalogAction(_:)), keyEquivalent: "")
+        item.representedObject = key
         item.target = self
         return item
     }

@@ -114,6 +114,17 @@ const sidebar_slot_height_ratio_milli: u32 = 2500;
 const font_size_min: f32 = 6.0;
 const font_size_max: f32 = 72.0;
 
+// 스크롤바 thumb 폭(굵기). cell_width의 비율, 최소 px 보장. hover/드래그면 +emphasize_px로 살짝 굵게(affordance).
+const scrollbar_bar_mul: f32 = 0.5; // cell_width 대비 폭 비율(굵게 — 잡기/보기 쉽게)
+const scrollbar_bar_min_px: f32 = 7.0; // 작은 폰트에서도 최소 두께
+const scrollbar_bar_emphasize_px: f32 = 2.0; // hover/드래그 시 추가 폭
+// fade(자동 흐려짐) — 스크롤(view_offset 변화) 후 visible_ticks 동안 full, 이어 fade_ticks 동안 idle(faint)로
+// 흐려진다(30Hz tick). 숨기지 않고 faint로만 남겨(위치·잡을 곳을 잃지 않게) macOS overlay 관례를 따른다.
+const scrollbar_visible_ticks: u32 = 50; // ~1.7s full 유지
+const scrollbar_fade_ticks: u32 = 14; // ~0.45s 동안 full→faint
+const scrollbar_alpha_full: u8 = 0xFF; // 활성/hover/드래그
+const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
+
 // 커서 깜빡임 반주기(30Hz tick 단위). 15틱 = 500ms — 일반 터미널 관례(on 500ms / off 500ms). 틱이 고정 30Hz라
 // 정확히 500ms다. ms 기반 위상·config 노출·deadline 스케줄러는 문서화된 시간-모델 후속(docs/layering §5).
 const blink_interval_ticks: u32 = 15;
@@ -767,6 +778,14 @@ pub const DevSession = struct {
     // 스크롤바 thumb 드래그 중일 때, 잡은 지점의 thumb_top 기준 y 오프셋(px). null=드래그 안 함.
     // down(1)이 스크롤바 영역을 hit하면 세워지고, drag(2)가 마우스 y를 view_offset으로 매핑, up(3)이 푼다.
     scrollbar_drag_grab: ?f32 = null,
+    // 마우스가 스크롤바 영역 위에 있는지(hover 강조 — full alpha·살짝 굵게). hoverCursor가 매 이동 갱신한다.
+    scrollbar_hovered: bool = false,
+    // fade 타이머(tick 수). 스크롤(view_offset 변화)·hover·드래그면 0(full)로 리셋되고, idle하면 매 tick 늘어
+    // visible_ticks 후 fade_ticks 동안 faint로 흐려진다. updateScrollbarFade가 갱신.
+    scrollbar_idle_ticks: u32 = 0,
+    // 직전 tick의 활성 surface view_offset — updateScrollbarFade가 변화(=스크롤)를 감지해 fade를 리셋한다
+    // (scroll/wheel/drag/page-key 각 호출처에 흩지 않고 한 곳에서). 활성 surface가 바뀌어도 변화로 잡힌다.
+    scrollbar_last_view_offset: usize = 0,
     // 자동 스크롤 중 선택 확장에 쓸 마지막 드래그 열.
     last_drag_col: u16 = 0,
     // 큰 붙여넣기의 미전송 잔여(인코딩 완료분). 자식이 stdin을 읽는 속도에 맞춰 tick마다
@@ -3181,6 +3200,9 @@ pub const DevSession = struct {
     /// Cmd+hover URL=pointingHand(link). 창 밖 sentinel(-1,-1)이면 inSidebar=false→터미널 경로로 호버 해제.
     pub fn hoverCursor(self: *DevSession, x_px: f64, y_px: f64, cmd_held: bool) CursorKind {
         if (!self.surface_initialized) return .text;
+        // 스크롤바 hover 강조를 매 이동 갱신한다(어느 zone이든 — 아래 early return 전에 항상). scrollbarGrabAt이
+        // 영역+스크롤백 유무를 본다(우측 얇은 띠). 커서 종류는 안 바꾼다(얇은 띠라 iBeam 깜빡임 방지) — 강조만.
+        self.setScrollbarHovered(self.scrollbarGrabAt(x_px, y_px) != null);
         // 사이드바 우측 경계(폭 조절) 위면 리사이즈 커서 — 사이드바/터미널보다 먼저(경계는 둘 사이 밴드).
         if (chrome.components.sidebar.onResizeEdge(x_px, self.sidebar_width_px, if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px)) {
             self.setHoveredSlot(null);
@@ -3881,6 +3903,7 @@ pub const DevSession = struct {
         // steady/숨김 커서 + 오버레이 닫힘이면 updateCursorBlink가 무토글로 고정한다. 오버레이 caret도 같은 위상으로
         // 깜빡이고, suffix-trim(setCursorVisible)이라 재빌드 없이 토글된다(터미널 커서와 같은 메커니즘 재활용).
         if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink();
+        self.updateScrollbarFade(); // 스크롤바 fade: view_offset 변화/hover/드래그로 full↔faint(appendScrollbar 전에 갱신)
         // synchronized output(DECSET 2026): sync 중이면 frame 투영을 멈춘다(metal_dirty는 쌓인 채 유지) — ESU(2026
         // reset)로 sync가 꺼지면 다음 tick에 누적 출력을 한 frame으로 투영한다(render skip과 동형). 단 ESU가
         // 영영 안 오면 freeze되므로 hold가 sync_timeout_ticks를 넘으면 강제 해제한다(아래 sync_blocks).
@@ -4486,6 +4509,62 @@ pub const DevSession = struct {
         return @intFromFloat(@round(tt * @as(f64, @floatFromInt(sb_count))));
     }
 
+    /// 스크롤바 thumb 폭(px) — cell_width 비율, 최소 px 보장. emphasized(hover/드래그)면 +emphasize_px로 굵게.
+    /// appendScrollbar(그리기)·scrollbarGrabAt(hit-test)가 공유해 폭이 어긋나지 않게 한다(순수 함수 — 테스트 가능).
+    fn scrollbarBarWidthPx(cell_width_px: u32, emphasized: bool) f32 {
+        const base = @max(@as(f32, @floatFromInt(cell_width_px)) * scrollbar_bar_mul, scrollbar_bar_min_px);
+        return if (emphasized) base + scrollbar_bar_emphasize_px else base;
+    }
+
+    /// idle 틱에 따른 스크롤바 alpha(0xAARRGGBB의 A). visible_ticks까지 full, 이어 fade_ticks 동안 full→idle로
+    /// 선형 감쇠, 이후 idle(faint) 유지(숨기지 않음). 순수 함수 — 테스트 가능. hover/드래그 override는 호출처에서.
+    fn computeScrollbarAlpha(idle_ticks: u32) u8 {
+        if (idle_ticks <= scrollbar_visible_ticks) return scrollbar_alpha_full;
+        if (idle_ticks >= scrollbar_visible_ticks + scrollbar_fade_ticks) return scrollbar_alpha_idle;
+        const into: u32 = idle_ticks - scrollbar_visible_ticks; // 1..fade_ticks-1
+        const drop: u32 = @as(u32, scrollbar_alpha_full - scrollbar_alpha_idle) * into / scrollbar_fade_ticks;
+        return @intCast(@as(u32, scrollbar_alpha_full) - drop);
+    }
+
+    /// 마우스가 스크롤바 영역에 있는지 갱신(hoverCursor가 매 이동 호출). 바뀌면 redraw 표시 — hover 강조가
+    /// 곧바로 나타나거나 사라지게. fade 리셋(idle_ticks=0)은 updateScrollbarFade가 hover를 보고 한다.
+    fn setScrollbarHovered(self: *DevSession, on: bool) void {
+        if (self.scrollbar_hovered == on) return;
+        self.scrollbar_hovered = on;
+        self.metal_dirty = true;
+    }
+
+    /// 매 tick 스크롤바 fade를 갱신한다(updateCursorBlink와 같은 30Hz tick). 한 곳에서 활성 surface의 view_offset
+    /// 변화를 감지해(스크롤·드래그·page-key·surface 전환) idle_ticks를 0(full)으로 리셋하고, hover/드래그면 full로
+    /// 핀, 그 외엔 매 tick 늘려 fade 창에서 alpha가 바뀔 때만 metal_dirty를 세운다(idle 정착 후엔 정적 — 비용 0).
+    fn updateScrollbarFade(self: *DevSession) void {
+        if (!self.surface_initialized) return;
+        const core = &self.activeSurface().core;
+        if (core.scrollbackLen() == 0) {
+            // 스크롤바 없음 — 다음 등장이 full로 시작하게 타이머를 리셋해 둔다(0→nonzero 전환 처리).
+            self.scrollbar_idle_ticks = 0;
+            self.scrollbar_last_view_offset = 0;
+            return;
+        }
+        const vo = core.viewOffset();
+        if (vo != self.scrollbar_last_view_offset) { // 스크롤 활동 → full로 복귀
+            self.scrollbar_last_view_offset = vo;
+            if (self.scrollbar_idle_ticks != 0) self.metal_dirty = true; // faint였다면 다시 그린다
+            self.scrollbar_idle_ticks = 0;
+            return;
+        }
+        if (self.scrollbar_hovered or self.scrollbar_drag_grab != null) { // 상호작용 중 — full로 핀
+            if (self.scrollbar_idle_ticks != 0) {
+                self.scrollbar_idle_ticks = 0;
+                self.metal_dirty = true;
+            }
+            return;
+        }
+        if (self.scrollbar_idle_ticks >= scrollbar_visible_ticks + scrollbar_fade_ticks) return; // 이미 faint 정착 — 정적
+        self.scrollbar_idle_ticks += 1;
+        if (self.scrollbar_idle_ticks > scrollbar_visible_ticks) self.metal_dirty = true; // fade 창 — alpha 변함
+    }
+
     /// down 좌표가 활성 pane 스크롤바(thumb 또는 트랙)에 있으면 잡은 grab offset(y_px - thumb_top, px)을 돌려준다.
     /// thumb 위면 그 offset(드래그가 thumb 내 상대 위치를 유지), thumb 밖 트랙이면 thumb_h/2(클릭 지점에 thumb
     /// 중앙을 맞춰 점프). 스크롤백 없음·메트릭 0·영역 밖이면 null. x 영역은 thumb 폭 + 좌측 4px 여유(잡기 쉽게),
@@ -4495,7 +4574,8 @@ pub const DevSession = struct {
         if (rect.w == 0 or self.cell_width_px == 0) return null;
         const core = &self.activeSurfaceConst().core;
         const geom = scrollbarThumbGeom(core.scrollbackLen(), core.viewOffset(), self.cell_height_px, rect.h) orelse return null;
-        const bar_w: f64 = @max(@as(f64, @floatFromInt(self.cell_width_px)) * 0.32, 5.0);
+        // hit-test는 base 폭(비-emphasized) + 4px 여유 — hover로 굵어진 폭이 아니라 안정된 base로 잡는다.
+        const bar_w: f64 = scrollbarBarWidthPx(self.cell_width_px, false);
         const right: f64 = @floatFromInt(rect.x + rect.w);
         const zone_left: f64 = right - bar_w - 2.0 - 4.0; // thumb 좌단(우측 2px 안쪽) - 4px grab 여유
         if (x_px < zone_left or x_px > right) return null;
@@ -4538,16 +4618,20 @@ pub const DevSession = struct {
     /// 터미널 영역 우측에 스크롤바 thumb(둥근 GpuQuad)를 그린다 — 스크롤백이 있을 때만(sb_count>0). thumb 높이는
     /// 보이는 비율, 위치는 view_offset(0=바닥, sb_count=꼭대기)을 반영한다. 셀 위(layer 0)에 떠 텍스트를 가린다.
     /// 메모리 'UI는 Zig+GPU 렌더러로' — 네이티브 NSScroller가 아니라 chrome GpuQuad 프리미티브. 마우스 드래그는
-    /// mouse()의 scrollbarGrabAt/dragScrollbarTo가 처리한다(thumb 잡고 끌어 스크롤). 자동 숨김(fade)은 후속.
-    /// 좌표는 backing 픽셀(rect·cell 메트릭과 동일).
+    /// mouse()의 scrollbarGrabAt/dragScrollbarTo가 처리한다(thumb 잡고 끌어 스크롤). hover면 굵게+full alpha,
+    /// idle하면 faint로 fade(updateScrollbarFade의 idle_ticks). 좌표는 backing 픽셀(rect·cell 메트릭과 동일).
     fn appendScrollbar(self: *DevSession, rect: app.SplitRect, core: *const terminal.TerminalCore) void {
         if (rect.w == 0) return;
         const geom = scrollbarThumbGeom(core.scrollbackLen(), core.viewOffset(), self.cell_height_px, rect.h) orelse return;
         const thumb_y: f32 = @as(f32, @floatFromInt(rect.y)) + geom.y;
         const thumb_h: f32 = geom.h;
-        const bar_w: f32 = @max(@as(f32, @floatFromInt(self.cell_width_px)) * 0.32, 5.0);
+        // hover/드래그면 굵게(affordance) + full alpha, 아니면 base 폭 + fade alpha(idle_ticks).
+        const emphasized = self.scrollbar_hovered or self.scrollbar_drag_grab != null;
+        const bar_w: f32 = scrollbarBarWidthPx(self.cell_width_px, emphasized);
         const x: f32 = @as(f32, @floatFromInt(rect.x + rect.w)) - bar_w - 2.0; // 우측 가장자리에서 2px 안쪽
-        const color = packOpaqueRgb(self.mutedForeground()); // muted 전경(사이드바 비활성 탭과 같은 톤)
+        const alpha: u8 = if (emphasized) scrollbar_alpha_full else computeScrollbarAlpha(self.scrollbar_idle_ticks);
+        const rgb = self.mutedForeground(); // muted 전경(사이드바 비활성 탭과 같은 톤)
+        const color: u32 = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b; // 셰이더가 rgb*=a premultiply
         const r = bar_w * 0.5; // pill 모양(반지름 = 폭 절반)
         self.gpu_quads.append(self.allocator, .{
             .x = x,
@@ -9022,6 +9106,33 @@ test "scrollbarTargetOffset: clamp + round, and round-trips scrollbarThumbGeom" 
         const track: f64 = @as(f64, @floatFromInt(view)) - @as(f64, g.h);
         const t: f64 = 1.0 - @as(f64, g.y) / track;
         try std.testing.expectEqual(@as(usize, V), DevSession.scrollbarTargetOffset(t, sb));
+    }
+}
+
+test "scrollbarBarWidthPx: cell 비율·최소 px·emphasize 가산" {
+    // cell_width 큰 경우 비율(0.5)이 최소(7)를 넘는다.
+    try std.testing.expectApproxEqAbs(@as(f32, 10), DevSession.scrollbarBarWidthPx(20, false), 0.01); // 20*0.5
+    try std.testing.expectApproxEqAbs(@as(f32, 12), DevSession.scrollbarBarWidthPx(20, true), 0.01); // +2 emphasize
+    // 작은 cell이면 최소 px로 clamp.
+    try std.testing.expectApproxEqAbs(@as(f32, 7), DevSession.scrollbarBarWidthPx(8, false), 0.01); // 8*0.5=4 < 7
+    try std.testing.expectApproxEqAbs(@as(f32, 9), DevSession.scrollbarBarWidthPx(8, true), 0.01); // 7+2
+}
+
+test "computeScrollbarAlpha: full→idle 감쇠(visible 유지·fade 후 faint·단조 감소)" {
+    // visible_ticks까지 full.
+    try std.testing.expectEqual(scrollbar_alpha_full, DevSession.computeScrollbarAlpha(0));
+    try std.testing.expectEqual(scrollbar_alpha_full, DevSession.computeScrollbarAlpha(scrollbar_visible_ticks));
+    // fade 완료 후(visible+fade 이상) faint 정착.
+    try std.testing.expectEqual(scrollbar_alpha_idle, DevSession.computeScrollbarAlpha(scrollbar_visible_ticks + scrollbar_fade_ticks));
+    try std.testing.expectEqual(scrollbar_alpha_idle, DevSession.computeScrollbarAlpha(scrollbar_visible_ticks + scrollbar_fade_ticks + 100));
+    // fade 창 안은 full~idle 사이에서 단조 감소(틱이 늘수록 alpha가 줄거나 같다).
+    var prev: u8 = scrollbar_alpha_full;
+    var k: u32 = scrollbar_visible_ticks;
+    while (k <= scrollbar_visible_ticks + scrollbar_fade_ticks) : (k += 1) {
+        const a = DevSession.computeScrollbarAlpha(k);
+        try std.testing.expect(a <= prev);
+        try std.testing.expect(a >= scrollbar_alpha_idle);
+        prev = a;
     }
 }
 

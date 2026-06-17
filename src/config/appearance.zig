@@ -46,6 +46,8 @@ pub const ResolvedAppearance = struct {
     cursor: ResolvedCursor,
     chrome_theme: theme.ChromeTheme = .tui, // tui|rich — platform buildChromeTokens가 tui()/rich() 분기에 읽는다(C4a)
     blink_text: bool = false, // SGR 5 blink 글자 점멸 여부(기본 정적 — 접근성). app이 blink 위상 wiring 게이트로 쓴다.
+    window_padding_x: u32 = 8, // 터미널 셀↔컨테이너 좌우 inset(논리 pt). refreshCellMetrics가 scale_milli로 px 환산.
+    window_padding_y: u32 = 4, // 터미널 셀↔컨테이너 상하 inset(논리 pt). 기본 8/4 — 콘텐츠 가독성(사실상 표준).
 };
 
 pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
@@ -61,6 +63,8 @@ pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
         },
         .chrome_theme = config.chrome_theme,
         .blink_text = config.blink_text,
+        .window_padding_x = config.window_padding_x,
+        .window_padding_y = config.window_padding_y,
     };
 }
 

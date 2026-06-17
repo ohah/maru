@@ -229,6 +229,16 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "text.blink은 true|false — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "window.padding-x")) {
+        config.window_padding_x = parsePaddingPt(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "window.padding-x는 0~256 정수 — 기본값 유지" });
+            return;
+        };
+    } else if (std.mem.eql(u8, key, "window.padding-y")) {
+        config.window_padding_y = parsePaddingPt(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "window.padding-y는 0~256 정수 — 기본값 유지" });
+            return;
+        };
     } else if (std.mem.eql(u8, key, "term")) {
         const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
         if (trimmed.len == 0) {
@@ -470,6 +480,13 @@ fn parseBool(value: []const u8) ?bool {
     return null;
 }
 
+/// window padding(논리 pt) 파싱 — 음수/비정수/256 초과는 null(기본값 유지). 256 상한은 비정상 큰 값이
+/// grid를 0으로 만들지 않게 막는 가드(gridFromBacking은 어차피 saturate하지만 진단으로 일찍 거른다).
+fn parsePaddingPt(value: []const u8) ?u32 {
+    const n = std.fmt.parseInt(u32, std.mem.trim(u8, value, &std.ascii.whitespace), 10) catch return null;
+    return if (n <= 256) n else null;
+}
+
 /// 빈 기본 결과(파일 없음/HOME 없음 등). config 텍스트를 안 읽었으므로 arena도 비어 있다.
 fn emptyDefault(allocator: std.mem.Allocator) Parsed {
     return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .unbinds = &.{}, .terminal_bindings = &.{}, .global_bindings = &.{}, .diagnostics = &.{} };
@@ -520,6 +537,8 @@ test "parse: full config sets every field" {
         \\cursor.blink = false
         \\chrome.theme = rich
         \\text.blink = true
+        \\window.padding-x = 12
+        \\window.padding-y = 6
     );
     defer p.deinit();
     try std.testing.expectEqualStrings("JetBrains Mono", p.config.font.family);
@@ -531,7 +550,27 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(false, p.config.cursor.blink);
     try std.testing.expectEqual(theme.ChromeTheme.rich, p.config.chrome_theme); // C4a chrome.theme 파싱
     try std.testing.expectEqual(true, p.config.blink_text); // text.blink 파싱(기본 false)
+    try std.testing.expectEqual(@as(u32, 12), p.config.window_padding_x); // window.padding-x 파싱(기본 8)
+    try std.testing.expectEqual(@as(u32, 6), p.config.window_padding_y); // window.padding-y 파싱(기본 4)
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+}
+
+test "parse: window padding defaults to 8/4; bad/out-of-range values are forgiving" {
+    // 키 없으면 기본 8/4(사실상 표준 inset).
+    var d = try parse(std.testing.allocator, "font.size = 14");
+    defer d.deinit();
+    try std.testing.expectEqual(@as(u32, 8), d.config.window_padding_x);
+    try std.testing.expectEqual(@as(u32, 4), d.config.window_padding_y);
+    // 0은 유효(셀이 가장자리에 붙음). 비정수·256 초과는 기본값 유지 + diagnostic.
+    var p = try parse(std.testing.allocator,
+        \\window.padding-x = 0
+        \\window.padding-y = abc
+        \\window.padding-x = 999
+    );
+    defer p.deinit();
+    try std.testing.expectEqual(@as(u32, 0), p.config.window_padding_x); // 첫 줄 0 적용 후, 셋째 줄 999는 거부돼 0 유지
+    try std.testing.expectEqual(@as(u32, 4), p.config.window_padding_y); // abc 거부 → 기본 4
+    try std.testing.expectEqual(@as(usize, 2), p.diagnostics.len); // abc + 999 두 건
 }
 
 test "parse: font.size-step out-of-range/non-numeric is forgiving (keeps default 1)" {

@@ -36,6 +36,9 @@ theme.selection  = #334455
 
 cursor.shape = block
 cursor.blink = true
+
+window.padding-x = 8
+window.padding-y = 4
 ```
 
 ## 키
@@ -51,6 +54,8 @@ cursor.blink = true
 | `theme.selection` | `#RRGGBB` | `#334455` | 선택 하이라이트 배경 |
 | `cursor.shape` | `block`\|`bar`\|`underline` | `block` | 그 외 값은 무시 |
 | `cursor.blink` | `true`\|`false` | `true` | |
+| `window.padding-x` | 정수(0~256) | `8` | 터미널 셀과 컨테이너(사이드바·탭 바 안쪽) **좌우** 가장자리 사이 여백(논리 pt, DPI 스케일). 0이면 셀이 가장자리에 붙음. 범위 밖/비정수는 무시(기본 유지) |
+| `window.padding-y` | 정수(0~256) | `4` | 위와 같되 **상하** 여백 |
 | `input.page-keys` | `passthrough`\|`scroll` | `scroll` | 메인 화면 PageUp/Down 동작. 아래 참조 |
 | `quick-terminal.height` | 숫자(0.1~1.0) | `0.45` | 가장자리에 수직인 '두께' 비율(화면 대비). `top`/`bottom`=높이, `left`/`right`=폭, `center`=세로 비율. 범위 밖/비숫자는 무시 |
 | `quick-terminal.width` | 숫자(0.1~1.0) | (`height` 따라감) | **`center` 전용** 가로 비율(화면 대비). 미설정이면 `height`와 같게(정사각). `top`/`bottom`(전폭)·`left`/`right`(`height`로 두께)에선 무시. 범위 밖/비숫자는 무시 |

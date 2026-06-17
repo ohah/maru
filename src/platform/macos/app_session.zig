@@ -128,6 +128,7 @@ const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
 // 커서 깜빡임 반주기(30Hz tick 단위). 15틱 = 500ms — 일반 터미널 관례(on 500ms / off 500ms). 틱이 고정 30Hz라
 // 정확히 500ms다. ms 기반 위상·config 노출·deadline 스케줄러는 문서화된 시간-모델 후속(docs/layering §5).
 const blink_interval_ticks: u32 = 15;
+const agent_poll_interval_ticks: u32 = 15; // ≈0.5s@30Hz — 포그라운드 프로세스(에이전트) polling 주기.
 // synchronized output(DECSET 2026) ESU-유실 복구 deadline. 30틱 = 1초(고정 30Hz). BSU(2026h) 후 ESU(2026l)가
 // 영영 안 오면(앱 크래시·SSH 끊김·버그) frame 투영이 무한정 막혀 화면이 freeze되므로, 이 한도를 넘는 hold는
 // sync를 강제 해제하고 투영한다. 베이스: ESU-유실 안전장치(Ghostty termio sync_reset_ms=1000·xterm.js
@@ -583,7 +584,39 @@ const Term = struct {
     // termGitBranch가 cwd가 바뀔 때만 재계산(매 프레임 fs 읽기 회피). destroyTerm이 해제. 영속 안 함(파생값 — restore가 재도출).
     git_branch: ?[]const u8 = null,
     git_branch_cwd: ?[]const u8 = null,
+    // 이 Term의 포그라운드 프로세스가 어떤 에이전트 CLI인지(none/claude/codex). pollAgentKinds가 ≈0.5s마다
+    // tcgetpgrp+proc_name으로 갱신. 사이드바 라벨에 에이전트 심볼로 표시. 파생값(영속 안 함).
+    agent_kind: AgentKind = .none,
 };
+
+/// Term 포그라운드에서 도는 에이전트 CLI 종류. 사이드바에 심볼로 표시(claude=✳, codex=⬢).
+const AgentKind = enum(u8) { none = 0, claude, codex };
+
+/// 에이전트 종류별 사이드바 라벨 prefix 심볼(없으면 ""). 브랜드 마크의 전용 유니코드가 없어 근사 글리프를 쓴다:
+/// claude=✳(U+2733, Anthropic 선버스트), codex=⬢(U+2B22, OpenAI 육각 모티프). CoreText 폰트 폴백으로 렌더.
+/// 에이전트가 포그라운드인 동안만 붙으므로(pollAgentKinds), 심볼의 존재 자체가 "그 에이전트 진행중" 표시다.
+fn agentSymbol(kind: AgentKind) []const u8 {
+    return switch (kind) {
+        .none => "",
+        .claude => "\u{2733} ",
+        .codex => "\u{2B22} ",
+    };
+}
+
+/// haystack이 prefix로 시작하는가(대소문자 무시). 프로세스명 분류용 — 부분일치(claudia·mycodex 오탐)를 피하면서
+/// 변종("claude-code"·"codex-cli")은 잡는다.
+fn startsWithCi(haystack: []const u8, prefix: []const u8) bool {
+    return haystack.len >= prefix.len and std.ascii.eqlIgnoreCase(haystack[0..prefix.len], prefix);
+}
+
+/// 포그라운드 프로세스 이름을 에이전트 종류로 분류한다(대소문자 무시 prefix 일치). claude/codex가 node 등 인터프리터
+/// 이름으로 뜨거나(v1 한계 — 네이티브/래퍼 바이너리명이 claude/codex일 때 동작) 파이프라인 비-리더 단계면 감지 못 함.
+fn classifyAgent(name: ?[]const u8) AgentKind {
+    const n = name orelse return .none;
+    if (startsWithCi(n, "claude")) return .claude;
+    if (startsWithCi(n, "codex")) return .codex;
+    return .none;
+}
 
 /// 한 panel(split leaf = 화면의 한 분할 영역). 탭 모델로 **여러 Term(터미널)을 가로 탭으로** 담는 컨테이너다
 /// — `⌘T`가 활성 Pane에 Term을 추가하고, Pane 상단 탭 바가 각 Term을 탭으로 보여준다(PR-C+). 지금(PR-A)은
@@ -950,6 +983,9 @@ pub const AppSession = struct {
     // PaneFrame.cursor라 setCursorVisible(suffix-trim)이 재빌드 없이 토글한다(터미널 커서와 동일 경로 재활용).
     blink_visible: bool = true,
     blink_ticks: u32 = 0,
+    // 에이전트 감지 polling 카운터 — 매 tick tcgetpgrp+proc_name(syscall)은 비싸므로 N tick마다(≈0.5s) 각 Term의
+    // 포그라운드 프로세스명을 polling해 agent_kind를 갱신한다(claude/codex/none).
+    agent_poll_ticks: u32 = 0,
     // synchronized output(2026) hold가 이어진 tick 수(활성 surface 기준). sync_timeout_ticks를 넘으면 ESU
     // 유실로 보고 강제 투영해 freeze를 푼다. sync가 꺼지면 0으로 리셋한다.
     sync_hold_ticks: u32 = 0,
@@ -4571,6 +4607,29 @@ pub const AppSession = struct {
         core.clearShellEvents();
     }
 
+    /// 각 Term의 포그라운드 프로세스(claude/codex)를 throttled로 polling해 agent_kind를 갱신한다. 매 tick
+    /// syscall은 비싸므로 agent_poll_interval_ticks(≈0.5s)마다. 변화가 있으면 metal_dirty로 재렌더(심볼 표시 갱신).
+    fn pollAgentKinds(self: *AppSession) void {
+        self.agent_poll_ticks += 1;
+        if (self.agent_poll_ticks < agent_poll_interval_ticks) return;
+        self.agent_poll_ticks = 0;
+        if (!self.surface_initialized) return;
+        // 사이드바가 보여주는 건 워크스페이스별 **활성 pane의 활성 Term** 하나뿐이라(buildSidebarTitleFrame), 그 Term만
+        // poll한다 — 모든 split pane·백그라운드 Term까지 poll하면 syscall이 Term 수로 불어나고, 안 보이는 Term의 agent_kind
+        // 변화가 metal_dirty를 올려 동일 프레임을 헛 재렌더한다(code-review 지적). 활성 Term은 전환 후 ≤0.5s 안에 갱신.
+        var buf: [256]u8 = undefined;
+        for (self.tabs.items) |tab| {
+            const term = tab.activePane().activeTerm();
+            if (!term.live_initialized) continue;
+            const prev = term.agent_kind;
+            term.agent_kind = classifyAgent(term.live_pty.session.foregroundProcessName(&buf));
+            if (term.agent_kind != prev) {
+                self.metal_dirty = true; // 표시되는 Term의 에이전트 변화 → 사이드바 재렌더
+                if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
+            }
+        }
+    }
+
     pub fn tick(self: *AppSession) !FrameSummary {
         // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
         // 아님). 그래야 summary의 glyph/atlas 통계가 실제 rasterized glyph를 반영하고, 이후
@@ -4586,6 +4645,7 @@ pub const AppSession = struct {
         // (reader join/child reap)을 건너뛰지 않게 한다.
         self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 30Hz로 한 줄씩 스크롤+확장
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
+        self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         // 모든 탭의 모든 panel의 모든 Term PTY를 drain한다 — 백그라운드 탭/panel/탭(Term)도 출력을 받게
         // (routing은 surface_id로 각 surface에 가고, frame은 아래에서 활성 탭만 빌드한다). summary는 보고용.
         var drain_summary: app.RuntimePumpDrainSummary = .{};
@@ -5603,14 +5663,16 @@ pub const AppSession = struct {
                 defer self.allocator.free(edit);
                 try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, edit));
             } else {
-                // 라벨 = [📌 ](위치 고정 시) + 워크스페이스 이름 + "  ⎇ {branch}"(cwd가 repo 안일 때). 좁으면 라벨 빌더가
-                // ellipsize. 브랜치는 termGitBranch가 cwd 변경 시에만 .git/HEAD를 읽어 캐시. pin 표시는 \u{1F4CC}(📌).
+                // 라벨 = [에이전트 심볼](claude=✳/codex=⬢, 포그라운드일 때) + [📌 ](위치 고정) + 이름 + "  ⎇ {branch}"
+                // (cwd가 repo 안일 때). 좁으면 라벨 빌더가 ellipsize. 브랜치는 termGitBranch가 cwd 변경 시에만 캐시.
+                const term = tab.activePane().activeTerm();
                 const base = workspaceLabel(tab);
+                const agent = agentSymbol(term.agent_kind);
                 const pin: []const u8 = if (tab.pinned) "\u{1F4CC} " else "";
-                const body = if (self.termGitBranch(tab.activePane().activeTerm())) |branch|
-                    try std.fmt.allocPrint(self.allocator, "{s}{s}  \u{2387} {s}", .{ pin, base, branch })
+                const body = if (self.termGitBranch(term)) |branch|
+                    try std.fmt.allocPrint(self.allocator, "{s}{s}{s}  \u{2387} {s}", .{ agent, pin, base, branch })
                 else
-                    try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ pin, base });
+                    try std.fmt.allocPrint(self.allocator, "{s}{s}{s}", .{ agent, pin, base });
                 defer self.allocator.free(body);
                 try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, body));
             }
@@ -6386,6 +6448,21 @@ test "gridFromBacking divides backing pixels by cell size with placeholder + cla
 
 // window padding이 터미널 영역 rect(termRect)를 좌상으로 들이고 폭/높이를 2배만큼 줄이는지 고정한다 — 이 rect가
 // 렌더 origin·마우스 hit-test(pxToCell)·IME·split leaf의 단일 출처라, 여기서 inset이 맞으면 그 전부가 정합한다.
+test "classifyAgent: claude/codex 부분일치(대소문자 무시), 그 외·null=none" {
+    try std.testing.expectEqual(AgentKind.claude, classifyAgent("claude"));
+    try std.testing.expectEqual(AgentKind.claude, classifyAgent("Claude")); // 대소문자 무시
+    try std.testing.expectEqual(AgentKind.codex, classifyAgent("codex"));
+    try std.testing.expectEqual(AgentKind.codex, classifyAgent("codex-cli")); // 부분일치
+    try std.testing.expectEqual(AgentKind.none, classifyAgent("zsh"));
+    try std.testing.expectEqual(AgentKind.none, classifyAgent("node")); // 인터프리터명이면 미감지(v1 한계)
+    try std.testing.expectEqual(AgentKind.none, classifyAgent(null));
+    try std.testing.expectEqual(AgentKind.none, classifyAgent(""));
+    // 심볼 매핑.
+    try std.testing.expectEqualStrings("", agentSymbol(.none));
+    try std.testing.expectEqualStrings("\u{2733} ", agentSymbol(.claude));
+    try std.testing.expectEqualStrings("\u{2B22} ", agentSymbol(.codex));
+}
+
 test "parseGitHead: ref branch / nested ref / detached SHA / empty ref / junk" {
     try std.testing.expectEqualStrings("main", parseGitHead("ref: refs/heads/main\n").?);
     try std.testing.expectEqualStrings("feature/x", parseGitHead("ref: refs/heads/feature/x").?); // 슬래시 포함 브랜치

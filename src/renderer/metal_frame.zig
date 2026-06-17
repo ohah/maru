@@ -117,6 +117,8 @@ fn packRgb(rgb: color.Rgb) u32 {
 fn inSelection(span: ?terminal.SelectionSpan, row: u16, col: u16) bool {
     const s = span orelse return false;
     if (row < s.start.row or row > s.end.row) return false;
+    // 블록(직사각형): 모든 행에서 [start.col,end.col] 같은 열 범위(start.col=lo·end.col=hi로 채워져 옴).
+    if (s.block) return col >= s.start.col and col <= s.end.col;
     if (row == s.start.row and col < s.start.col) return false;
     if (row == s.end.row and col > s.end.col) return false;
     return true;
@@ -1683,6 +1685,26 @@ test "bar and underline cursors project partial-rect kinds without inverting the
     });
     defer allocator.free(cells2);
     try std.testing.expectEqual(@as(u16, 2), cells2[cells2.len - 1].reserved); // underline kind
+}
+
+test "inSelection: block span selects the rectangle on every row; linear flows by row" {
+    // 선형: (0,3)~(2,1) — 첫 행 col>=3, 끝 행 col<=1, 중간 행은 전부(행 흐름).
+    const lin = terminal.SelectionSpan{ .start = .{ .row = 0, .col = 3 }, .end = .{ .row = 2, .col = 1 } };
+    try std.testing.expect(inSelection(lin, 0, 5)); // 첫 행 col 3 이후 포함
+    try std.testing.expect(!inSelection(lin, 0, 2)); // 첫 행 col 3 전 제외
+    try std.testing.expect(inSelection(lin, 1, 0)); // 중간 행은 전부
+    try std.testing.expect(inSelection(lin, 1, 7));
+    try std.testing.expect(inSelection(lin, 2, 1)); // 끝 행 col 1까지
+    try std.testing.expect(!inSelection(lin, 2, 2)); // 끝 행 col 1 이후 제외
+
+    // 블록: lo/hi=[1,3]을 모든 행에 동일 적용 — 직사각형.
+    const blk = terminal.SelectionSpan{ .start = .{ .row = 0, .col = 1 }, .end = .{ .row = 2, .col = 3 }, .block = true };
+    try std.testing.expect(inSelection(blk, 1, 1)); // 중간 행도 [1,3]만
+    try std.testing.expect(inSelection(blk, 1, 3));
+    try std.testing.expect(!inSelection(blk, 1, 0)); // 중간 행 col 0 제외(선형이면 포함됐을 곳)
+    try std.testing.expect(!inSelection(blk, 1, 4)); // 중간 행 col 4 제외
+    try std.testing.expect(inSelection(blk, 0, 2)); // 첫 행도 [1,3]
+    try std.testing.expect(!inSelection(blk, 3, 2)); // 행 범위 밖
 }
 
 test "hover link span projects underline-kind cells across its rows" {

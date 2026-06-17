@@ -5,15 +5,17 @@
 //!
 //! 범위: 삼각형 separator(E0B0 우·E0B2 좌 — solid, E0B1·E0B3 — thin chevron), 모서리 삼각형(E0B8 좌하·E0BA 우하·
 //! E0BC 좌상·E0BE 우상 — solid, E0B9·E0BB·E0BD·E0BF — thin 대각선), 반원(E0B4 우·E0B6 좌 — solid D-shape,
-//! E0B5·E0B7 — thin arc). 베이스 = powerline-symbols 표준 모양. Ghostty font/sprite/draw/powerline.zig 동작만
-//! 비교(코드 미복사 — clean-room: 삼각형 정점·반원 D-shape·thin=edge stroke). 중립 모듈.
+//! E0B5·E0B7 — thin arc), Powerline-extra 사다리꼴 separator(E0D2 우·E0D4 좌). 베이스 = powerline-symbols·
+//! powerline-extra 표준 모양. Ghostty font/sprite/draw/powerline.zig 동작만 비교(코드 미복사 — clean-room:
+//! 삼각형 정점·반원 D-shape·thin=edge stroke·extra=두 사다리꼴). 나머지 E0C0~(불꽃·고드름 등)은 Ghostty도
+//! 합성 안 함(Nerd Font 의존) → 폰트 폴백. 중립 모듈.
 
 const std = @import("std");
-const gp = @import("glyph_pixels.zig"); // 슬롯 검증·clear·setPixel·대각선 공유 프리미티브(단일 출처).
+const gp = @import("glyph_pixels.zig"); // 슬롯 검증·clear·setPixel·대각선·폴리곤 공유 프리미티브(단일 출처).
 
-/// cp가 합성 대상 Powerline 글리프인지(E0B0~E0BF). 그 밖이면 false → 폰트 글리프 폴백.
+/// cp가 합성 대상 Powerline 글리프인지(E0B0~E0BF + Powerline-extra E0D2·E0D4). 그 밖이면 폰트 글리프 폴백.
 pub fn isPowerline(cp: u32) bool {
-    return cp >= 0xE0B0 and cp <= 0xE0BF;
+    return (cp >= 0xE0B0 and cp <= 0xE0BF) or cp == 0xE0D2 or cp == 0xE0D4;
 }
 
 /// cp Powerline 글리프를 width×height RGBA8 슬롯에 coverage로 채운다(흰색 불투명 0xFFFFFFFF — 셰이더가 alpha를
@@ -53,8 +55,32 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
         0xE0B6 => fillHalfCircle(pixels, bytes_per_row, w, h, 0, false, true), // 좌 solid
         0xE0B5 => fillHalfCircle(pixels, bytes_per_row, w, h, t, true, false), // 우 thin
         0xE0B7 => fillHalfCircle(pixels, bytes_per_row, w, h, t, false, false), // 좌 thin
+        // ── Powerline-extra 사다리꼴 separator ── 위/아래 두 사다리꼴(가운데 t 두께 가로 gap), 오른쪽-중앙이
+        // 대각으로 깎임. E0D4는 E0D2의 좌우 반전.
+        0xE0D2 => fillExtraTrapezoid(pixels, bytes_per_row, w, h, t, false), // 우
+        0xE0D4 => fillExtraTrapezoid(pixels, bytes_per_row, w, h, t, true), // 좌(반전)
         else => 0,
     };
+}
+
+/// Powerline-extra E0D2/E0D4 — 위·아래 두 사다리꼴(평평한 변 한쪽, 반대쪽-중앙이 대각으로 깎임), 가운데 t 두께
+/// 가로 gap. flip이면 좌우 반전(E0D4). 정점이 셀 모서리·중점이라 격자에 스냅. 공유 fillPolygon으로 채운다.
+fn fillExtraTrapezoid(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, t: u32, flip: bool) u32 {
+    const fw = @as(f32, @floatFromInt(w));
+    const fh = @as(f32, @floatFromInt(h));
+    const ht = @as(f32, @floatFromInt(t)) / 2.0; // gap 반폭
+    const cy = fh / 2.0;
+    const xm = fw / 2.0;
+    const xl: f32 = if (flip) fw else 0; // 평평한 변(flip 시 우측)
+    const xr: f32 = if (flip) 0 else fw; // 대각으로 깎이는 쪽
+    var count: u32 = 0;
+    // 위 사다리꼴: 평평한 변~상단 full, 아래변은 평평변~중앙(xm)까지(반대쪽은 (xr,0)→(xm,cy-ht) 대각).
+    var top = [4][2]f32{ .{ xl, 0 }, .{ xr, 0 }, .{ xm, cy - ht }, .{ xl, cy - ht } };
+    count += gp.fillPolygon(pixels, bytes_per_row, w, h, &top);
+    // 아래 사다리꼴: 위 조각을 가로 중심 기준 상하 반전.
+    var bot = [4][2]f32{ .{ xl, fh }, .{ xr, fh }, .{ xm, cy + ht }, .{ xl, cy + ht } };
+    count += gp.fillPolygon(pixels, bytes_per_row, w, h, &bot);
+    return count;
 }
 
 /// thin chevron(삼각형 separator의 빗변 두 선만). right=true면 (0,0)->(w,h/2)·(0,h)->(w,h/2), false면 좌우 반전.
@@ -122,13 +148,17 @@ fn fillHalfCircle(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, t: u32, ri
     return count;
 }
 
-test "isPowerline: E0B0~E0BF만" {
+test "isPowerline: E0B0~E0BF + extra E0D2·E0D4" {
     try std.testing.expect(isPowerline(0xE0B0)); // 우 화살표 solid
     try std.testing.expect(isPowerline(0xE0B3)); // 좌 thin
     try std.testing.expect(isPowerline(0xE0B4)); // 우 반원
     try std.testing.expect(isPowerline(0xE0BF)); // 우상 thin
+    try std.testing.expect(isPowerline(0xE0D2)); // extra 사다리꼴 우
+    try std.testing.expect(isPowerline(0xE0D4)); // extra 사다리꼴 좌
     try std.testing.expect(!isPowerline(0xE0AF)); // 범위 밖
-    try std.testing.expect(!isPowerline(0xE0C0)); // 범위 밖
+    try std.testing.expect(!isPowerline(0xE0C0)); // E0C0~(불꽃 등)은 합성 안 함
+    try std.testing.expect(!isPowerline(0xE0D1)); // extra지만 미합성
+    try std.testing.expect(!isPowerline(0xE0D3)); // extra지만 미합성
     try std.testing.expect(!isPowerline(0x2500)); // box-drawing
     try std.testing.expect(!isPowerline('A'));
 }
@@ -213,4 +243,31 @@ test "fillCoverage: E0B5 thin 반원은 극에서 핀치되지 않는다(호에 
         }
         try std.testing.expect(any);
     }
+}
+
+test "fillCoverage: E0D2 우/E0D4 좌 사다리꼴 — 가운데 gap·반대쪽-중앙 대각 깎임" {
+    const w: u32 = 16;
+    const h: u32 = 32; // t=2 → ht=1, cy=16, xm=8
+    const bpr: usize = w * 4;
+    var pixels: [32 * 16 * 4]u8 = undefined;
+    const a = struct {
+        fn at(p: []const u8, bpr_: usize, x: u32, y: u32) u8 {
+            return p[@as(usize, y) * bpr_ + @as(usize, x) * 4 + 3];
+        }
+    }.at;
+
+    // E0D2(우): 좌측 평평·우측-중앙 깎임. 가운데(y≈16) 가로 gap.
+    _ = fillCoverage(0xE0D2, w, h, bpr, &pixels);
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 1, 1)); // 좌상 채움
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 1, h - 2)); // 좌하 채움
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 1, 14)); // 좌-중앙(gap 위) 채움
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 1, 16)); // 가운데 gap 빔
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 14, 14)); // 우-중앙 대각 깎임
+
+    // E0D4(좌): E0D2의 좌우 반전 — 우측 평평·좌측-중앙 깎임.
+    _ = fillCoverage(0xE0D4, w, h, bpr, &pixels);
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 14, 1)); // 우상 채움
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 14, 14)); // 우-중앙 채움
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 1, 14)); // 좌-중앙 깎임
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 8, 16)); // 가운데 gap 빔
 }

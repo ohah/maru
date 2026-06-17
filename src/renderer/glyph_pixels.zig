@@ -106,6 +106,41 @@ pub fn fillDiagonal(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, t: u32, 
     return count;
 }
 
+/// 점 (px,py)에서 선분 (ax,ay)-(bx,by)까지 최단거리(끝점 클램프).
+pub fn distSeg(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) f32 {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    if (len2 == 0) return @sqrt((px - ax) * (px - ax) + (py - ay) * (py - ay));
+    var tparam = ((px - ax) * dx + (py - ay) * dy) / len2;
+    tparam = std.math.clamp(tparam, 0.0, 1.0);
+    const qx = ax + tparam * dx;
+    const qy = ay + tparam * dy;
+    return @sqrt((px - qx) * (px - qx) + (py - qy) * (py - qy));
+}
+
+/// 선분 (x0,y0)-(x1,y1)을 두께 t로 stroke한다(선분까지 거리 ≤ max(0.5, t/2)). 끝점이 셀 모서리·모서리중점·
+/// 중앙이면 격자에 스냅된다. 대각선 글리프(🮠~🮮·🯐~🯟)용. 새로 칠한 픽셀 수 반환. slotFits 통과 가정.
+pub fn fillSegment(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, x0: f32, y0: f32, x1: f32, y1: f32, t: u32) u32 {
+    const half = @max(0.5, @as(f32, @floatFromInt(t)) / 2.0);
+    var count: u32 = 0;
+    var y: u32 = 0;
+    while (y < h) : (y += 1) {
+        const py = @as(f32, @floatFromInt(y)) + 0.5;
+        const row_off = @as(usize, y) * bytes_per_row;
+        var x: u32 = 0;
+        while (x < w) : (x += 1) {
+            const px = @as(f32, @floatFromInt(x)) + 0.5;
+            if (distSeg(px, py, x0, y0, x1, y1) <= half) {
+                const off = row_off + @as(usize, x) * 4;
+                if (pixels[off + 3] == 0) count += 1;
+                setPixel(pixels, off);
+            }
+        }
+    }
+    return count;
+}
+
 /// 점 (px,py)가 삼각형 (ax,ay)-(bx,by)-(cx,cy) 안인지 — 세 변 외적 부호가 모두 같은(또는 0인) 쪽. 경계 포함.
 pub fn pointInTriangle(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) bool {
     const d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by);

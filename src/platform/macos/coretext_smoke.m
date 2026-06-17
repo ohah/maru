@@ -396,7 +396,12 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
         return true;
     }
     // braille_glyph: Braille 점 패턴(U+2800~28FF — 2열×4행 8점 비트마스크). renderer/braille_glyph.zig와 동기.
-    return (cp >= 0x2800 && cp <= 0x28FF);
+    if (cp >= 0x2800 && cp <= 0x28FF) {
+        return true;
+    }
+    // legacy_mosaic_glyph: Legacy Computing 블록 모자이크 — sextant(U+1FB00~1FB3B 2×3)·octant(U+1CD00~1CDE5
+    // 2×4). renderer/legacy_mosaic_glyph.zig와 동기.
+    return (cp >= 0x1FB00 && cp <= 0x1FB3B) || (cp >= 0x1CD00 && cp <= 0x1CDE5);
 }
 
 static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFIndex *len, CFIndex capacity) {

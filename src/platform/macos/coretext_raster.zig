@@ -102,6 +102,18 @@ pub const CoreTextGlyphRasterizer = struct {
             );
             return .{ .non_clear_pixels = non_clear };
         }
+        // Legacy Computing 블록 모자이크(sextant U+1FB00~1FB3B 2×3·octant U+1CD00~1CDE5 2×4): 하위 칸 패턴을
+        // 셀 격자에 스냅해 채운다(Teletext·PETSCII식 터미널 그래픽). block_glyph quadrant를 더 잘게 쪼갠 격.
+        if (renderer.legacy_mosaic_glyph.isLegacyMosaic(request.run.codepoint)) {
+            const non_clear = renderer.legacy_mosaic_glyph.fillCoverage(
+                request.run.codepoint,
+                request.slot.width_px,
+                request.slot.height_px,
+                request.bytes_per_row,
+                request.pixels,
+            );
+            return .{ .non_clear_pixels = non_clear };
+        }
         const font_identity = self.font_registry.get(request.run.font_id) orelse
             return error.RasterizerFailed;
 

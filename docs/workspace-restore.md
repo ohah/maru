@@ -89,6 +89,34 @@ layout
 
 실제 직렬화는 나중에 정한다. 중요한 것은 저장 대상이 live object가 아니라 선언적 상태라는 점이다. 첫 줄 schema 토큰은 snapshot/trace와 같은 규칙으로 bare 토큰(`maru.workspace.v1`)을 쓰고 `schema=` 접두어를 두지 않는다.
 
+## 사용자 지정 이름(custom_name)과 자동 제목
+
+워크스페이스(사이드바 탭)·Pane(분할 영역)·Term(가로 탭)에는 두 종류의 라벨 출처가 있다.
+
+- **자동 제목(auto title)**: 셸/프로그램이 정하는 값. Term은 OSC 0/2(window title)·OSC 7(cwd)에서 매 세션 라이브로 다시 도출된다. 워크스페이스·Pane은 자동 제목 출처가 없다(번호로 식별).
+- **사용자 지정 이름(custom_name)**: 사용자가 직접 붙인(rename) 이름. 이것만이 사용자 의도라서 **영속해야 할 유일한 라벨 데이터**다.
+
+표시 규칙(단일):
+
+```text
+표시 라벨 = custom_name(비어있지 않으면) → 없으면 auto title → 없으면 기본값("shell"/번호)
+```
+
+베이스/결정: "사용자 이름이 있으면 우선, 없으면 자동"은 iTerm2·Terminal.app의 탭 제목 동작을 베이스로 한다(사용자가 이름을 정하면 셸 OSC가 덮어쓰지 않고 고정). 자동 제목은 매 세션 라이브로 재도출되므로 사용자 의도가 아니며, **custom_name과 별도 필드**로 둔다 — 같은 칸에 섞으면 OSC가 들어오는 순간 사용자 이름이 사라진다.
+
+저장 모델(앞 절 직렬화 모델에 필드 추가, 빈 문자열 = 이름 없음):
+
+```text
+tab ... title="<workspace custom_name>"        # tab 줄의 title = 워크스페이스 custom_name (자동 출처 없음)
+pane ... custom-name="<pane custom_name>"       # pane custom_name (자동 출처 없음)
+surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
+                                                # surface는 custom_name(사용자)과 title(자동) 둘 다 저장
+```
+
+- custom_name은 트리 내 위치(인덱스)로 round-trip한다(cwd/title과 같은 식별).
+- 자동 제목(surface `title`)은 복원 직후 셸이 OSC를 다시 보내기 전까지의 폴백 표시용으로만 저장·소비한다. custom_name이 있으면 표시 규칙상 자동 제목보다 우선한다.
+- 하위 호환은 고려하지 않는다 — 필드는 `maru.workspace.v1`에 직접 추가한다(구버전 파일 읽기 보장 없음).
+
 ## env 저장 정책
 
 환경변수는 민감정보가 많다.

@@ -164,6 +164,12 @@ Node = leaf(Pane)
   기준). ② **더블클릭** — 사이드바 엔트리·Term 탭·pane 라벨 세그먼트. ③ **Zig 오버레이 우클릭 메뉴** — 네이티브 메뉴가
   아니라 Zig로 그린 컨텍스트 메뉴의 "Rename" 항목(chrome을 Zig로 그리는 전략과 일치). 키보드/팔릿은 활성 대상,
   더블클릭/우클릭은 클릭된 대상으로 해석한다.
+- **우클릭 메뉴 — 워크스페이스 추가 항목**: 사이드바 워크스페이스를 우클릭하면 "Rename" 외에 **위치 고정(Pin/Unpin)**과
+  **배경색 프리셋**(없음·앰버·파랑·초록·빨강·보라; 앰버=maru accent #DDA15E)이 뜬다(pane/Term은 "Rename"만). 메뉴 항목은
+  chrome 중립이라 platform이 대상 타입에 맞게 동적 주입하고(`buildContextMenuItems`), accept는 selected 인덱스로 분기
+  (`acceptContextMenu`). 위치 고정은 드래그 재정렬에서 그 탭을 안 움직이고(`moveTab` no-op) 사이드바에 📌, 배경색은
+  카드에 반투명 tint(chrome draw op은 role 기반이라 임의 RGB는 platform이 명시-색 GpuQuad로 직접 lower). 둘 다
+  workspace.v1에 영속(`pinned`/`background-color` — docs/workspace-restore.md).
 - **기본 키바인딩 없음(베이스)**: rename 기본 단축키는 macOS 단일 관례가 없어(Terminal.app은 탭 rename 기본키 없음,
   iTerm2는 더블클릭/⌘I 등 제각각) 임의로 고르지 않는다 — 액션은 정의해 bindable로 두고, 발견성은 커맨드 팔릿·더블클릭·
   우클릭으로 확보한다. 이 결정은 `config/action.zig` 주석에도 남긴다([필수 프로젝트 규칙](project-rules.md)의 베이스 명시

@@ -107,14 +107,17 @@ layout
 저장 모델(앞 절 직렬화 모델에 필드 추가, 빈 문자열 = 이름 없음):
 
 ```text
-tab ... custom-name="<workspace custom_name>"   # 워크스페이스 custom_name (자동 출처 없음; 예전 placeholder title 대체)
+tab ... custom-name="<workspace custom_name>" pinned=<0|1> background-color=<0xRRGGBB 10진>
+                                                 # 워크스페이스 custom_name + 위치 고정(pinned) + 카드 배경 tint
 pane ... custom-name="<pane custom_name>"        # pane custom_name (자동 출처 없음)
 surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
                                                  # surface는 custom_name(사용자)과 title(자동) 둘 다 저장
 ```
 
-세 계층의 사용자 이름은 모두 `custom-name=` 키로 통일한다(Surface만 추가로 auto `title=`를 둔다). 직렬화 파서는
-positional이라 키 순서·개수가 writer와 정확히 맞아야 한다.
+세 계층의 사용자 이름은 모두 `custom-name=` 키로 통일한다(Surface만 추가로 auto `title=`를 둔다). 워크스페이스(tab)는
+우클릭 컨텍스트 메뉴로 정하는 **위치 고정(`pinned`)·카드 배경색(`background-color`)**도 사용자 의도라 영속한다(custom_name과
+같은 자리). 직렬화 파서는 positional이라 키 순서·개수가 writer와 정확히 맞아야 한다(필드 추가는 포맷 변경 —
+하위호환 없이 옛 저장 파일은 시작 시 조용히 기본 창으로 폴백).
 
 - custom_name은 트리 내 위치(인덱스)로 round-trip한다(cwd/title과 같은 식별).
 - 자동 제목(surface `title`)은 복원 직후 셸이 OSC를 다시 보내기 전까지의 폴백 표시용으로만 저장·소비한다. custom_name이 있으면 표시 규칙상 자동 제목보다 우선한다.

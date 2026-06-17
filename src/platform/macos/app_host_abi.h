@@ -503,14 +503,14 @@ int32_t maru_macos_app_session_pending_notification(
    (NSSound.beep)을 울린다(벨은 OS 소유). */
 uint32_t maru_macos_app_session_take_bell(MaruAppHostSession *session);
 /* OSC 7로 셸이 보고한 현재 작업 디렉터리(percent-decode된 경로, UTF-8). 버퍼는 Zig(core) 소유로
-   다음 OSC 7/RIS/destroy까지 유효, 없으면 *out_ptr=NULL/*out_len=0. Swift가 창 제목에 쓴다. */
+   다음 OSC 7/RIS/destroy까지 유효, 없으면 *out_ptr=NULL, *out_len=0. Swift가 창 제목에 쓴다. */
 int32_t maru_macos_app_session_cwd(
     MaruAppHostSession *session,
     const uint8_t **out_ptr,
     size_t *out_len
 );
 /* config 파일 경로(Open Config 메뉴). MARU_CONFIG override 또는 $HOME/.config/maru/config — 규칙은 Zig
-   loader가 단일 출처. 버퍼는 Zig 소유로 destroy까지 유효, 없으면 *out_ptr=NULL/*out_len=0. Swift가 파일을
+   loader가 단일 출처. 버퍼는 Zig 소유로 destroy까지 유효, 없으면 *out_ptr=NULL, *out_len=0. Swift가 파일을
    (없으면 생성) 기본 편집기로 연다(파일 열기는 OS 동작). */
 int32_t maru_macos_app_session_config_path(
     MaruAppHostSession *session,

@@ -205,14 +205,15 @@ fn coreTextGlyphRecordFromDrawRecord(
         .fallback = record.fallback != 0,
         .style = source_cell.style,
         .color_glyph_kind = if (record.color_glyph_kind != 0) .color else .monochrome,
-        // 폰트가 글리프를 주면(glyph_id!=0) drawable. **단 box-drawing(U+2500~257F)·block(U+2580~259F)은
-        // rasterizer가 코드포인트로 직접 합성하므로 폰트 글리프가 없어도(glyph_id==0) drawable이어야 한다** —
-        // 안 그러면 폰트에 box 글리프가 없거나 CoreText가 notdef를 줄 때 셀이 스킵돼 합성에 도달조차 못 한다
-        // (보더가 안 보이던 원인). 합성은 폰트 커버리지와 무관하다.
+        // 폰트가 글리프를 주면(glyph_id!=0) drawable. **단 box-drawing(U+2500~257F)·block(U+2580~259F)·
+        // Powerline(U+E0B0~E0BF)은 rasterizer가 코드포인트로 직접 합성하므로 폰트 글리프가 없어도(glyph_id==0)
+        // drawable이어야 한다** — 안 그러면 폰트에 그 글리프가 없거나 CoreText가 notdef를 줄 때 셀이 스킵돼 합성에
+        // 도달조차 못 한다(보더가 안 보이던 원인). 합성은 폰트 커버리지와 무관하다.
         .drawable = record.drawable != 0 and
             (record.glyph_id != 0 or
                 renderer.block_glyph.isBlockElement(record.codepoint) or
-                renderer.box_glyph.isBoxDrawing(record.codepoint)),
+                renderer.box_glyph.isBoxDrawing(record.codepoint) or
+                renderer.powerline_glyph.isPowerline(record.codepoint)),
     };
 }
 

@@ -388,7 +388,11 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
     }
     // box_glyph: **U+2500~257F 전체** 합성(직선·모서리·T·사거리·dashed·둥근·이중선·single↔double 혼합·대각선·
     // 반선 — light·heavy·혼합 전부). **renderer/box_glyph.zig specFor가 이 범위를 빠짐없이 덮음**(동기 유지).
-    return (cp >= 0x2500 && cp <= 0x257F);
+    if (cp >= 0x2500 && cp <= 0x257F) {
+        return true;
+    }
+    // powerline_glyph: Powerline separator(U+E0B0~E0BF — 삼각형·반원·thin). renderer/powerline_glyph.zig와 동기.
+    return (cp >= 0xE0B0 && cp <= 0xE0BF);
 }
 
 static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFIndex *len, CFIndex capacity) {

@@ -141,6 +141,28 @@ Node = leaf(Pane)
   끌리는 탭은 **floating 탭 미리보기**(박스+제목)가 커서를 따라간다(`buildFloatingTabFrame`, 맨 위 frame).
   **호버 커서(②)**: divider=↔/↕ resize, 사이드바 경계=↔, "+"=손가락, 터미널=I-beam.
 
+### 사용자 지정 이름(rename)
+
+워크스페이스(사이드바 탭)·Pane(분할 영역)·Term(가로 탭) 세 계층 모두 사용자가 직접 이름을 붙일 수 있다. 자동
+제목과 사용자 이름의 관계(우선순위)·저장 위치·필드 모델은 [Workspace Restore 전략](workspace-restore.md#사용자-지정-이름custom_name과-자동-제목)을 단일 출처로 둔다. 여기서는 **표시 위치와 편집 UX**만 정한다.
+
+- **표시 라벨(단일 해석)**: `custom_name(비면 안 씀) orelse auto title orelse 기본값`. 사이드바 워크스페이스 라벨,
+  pane 탭바의 Term 탭 라벨은 모두 이 한 해석을 거친다(자동 제목은 Term=OSC 0/2·cwd, 워크스페이스/Pane=없음).
+- **Pane 이름 표시 자리**: Pane은 라벨 자리가 없었으므로 **pane 탭바 좌측에 pane 라벨 세그먼트**를 새로 둔다(좌측
+  세그먼트 | Term 탭들 | ‹› | +). `tabbar` 메트릭(segOf/tabIndex)이 라벨 폭만큼 offset해 "보이는 탭 == 클릭되는 탭"을
+  유지한다. custom_name이 없으면 세그먼트는 비운다(중복 라벨 방지).
+- **편집 UX(인라인)**: 별도 팝업이 아니라 기존 라벨 자리에서 바로 편집한다 — find·palette 오버레이와 같은 입력 모델
+  (`OverlayInput`: IME 조합 preedit·UTF-8 경계·EAW caret)을 재사용하고, 키 라우팅도 같은 모달 가드 + `inputFocus()`
+  IME 분기를 탄다. `Enter`=확정, `Esc`=취소, 포커스 상실=확정.
+- **트리거(세 가지 모두)**: ① **키보드 액션 + 커맨드 팔릿** — `rename_workspace`/`rename_pane`/`rename_term`(활성 대상
+  기준). ② **더블클릭** — 사이드바 엔트리·Term 탭·pane 라벨 세그먼트. ③ **Zig 오버레이 우클릭 메뉴** — 네이티브 메뉴가
+  아니라 Zig로 그린 컨텍스트 메뉴의 "Rename" 항목(chrome을 Zig로 그리는 전략과 일치). 키보드/팔릿은 활성 대상,
+  더블클릭/우클릭은 클릭된 대상으로 해석한다.
+- **기본 키바인딩 없음(베이스)**: rename 기본 단축키는 macOS 단일 관례가 없어(Terminal.app은 탭 rename 기본키 없음,
+  iTerm2는 더블클릭/⌘I 등 제각각) 임의로 고르지 않는다 — 액션은 정의해 bindable로 두고, 발견성은 커맨드 팔릿·더블클릭·
+  우클릭으로 확보한다. 이 결정은 `config/action.zig` 주석에도 남긴다([필수 프로젝트 규칙](project-rules.md)의 베이스 명시
+  규칙).
+
 quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.
 
 ## clean-room

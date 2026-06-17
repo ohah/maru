@@ -587,6 +587,10 @@ const RenameTarget = union(enum) {
     term: *Term,
 };
 
+/// 우클릭 컨텍스트 메뉴 항목 라벨(현재 "Rename" 하나 — docs/tabs-splits-layout.md). render·itemAt·item_count가 같은
+/// 배열을 공유한다(보이는 항목 == 클릭/실행되는 항목). 향후 항목(Close 등)은 여기에 추가하고 acceptContextMenu가 분기.
+const context_menu_items = [_][]const u8{"Rename"};
+
 fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
     if (a == null and b == null) return true;
     if (a == null or b == null) return false;
@@ -772,6 +776,10 @@ pub const DevSession = struct {
     // UTF-8 경계 공유). 대상 객체가 teardown되면 invalidate가 null로 비운다(stale 포인터 방지).
     rename: ?RenameTarget = null,
     rename_input: chrome.components.overlay_input.OverlayInput = .{},
+    // 우클릭 컨텍스트 메뉴의 대상(어느 워크스페이스/pane/Term을 우클릭했나). 메뉴 상태(open·anchor·selected)는
+    // chrome_host.context_menu(중립)에, 라이브 포인터 대상은 여기에 둔다(rename과 같은 분리). 메뉴 "Rename" 선택
+    // 시 이 대상으로 startRename. 대상 teardown 시 null로 비운다(stale 포인터 방지, rename과 같은 funnel).
+    context_menu_target: ?RenameTarget = null,
     // 사이드바 탭 드래그 재정렬 상태. down이 사이드바 슬롯(✕ 아님)에서 시작하면 active=true가 되고,
     // 이후 drag(kind 2)는 타겟 슬롯으로 live 재정렬(moveTab), up(kind 3)이 끝낸다. index는 드래그 중인
     // 탭의 현재 인덱스(이동을 따라간다). 드래그 중엔 다른 down/이벤트가 아니라 drag/up만 캡처한다.
@@ -1938,6 +1946,11 @@ pub const DevSession = struct {
             self.rename = null;
             self.rename_input.clear();
         }
+        // 컨텍스트 메뉴 대상이 이 Term이면 메뉴를 닫고 대상을 비운다(stale 포인터 방지).
+        if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .term and t.term == term) {
+            self.context_menu_target = null;
+            self.chrome_host.context_menu.hide();
+        };
         if (term.live_initialized) {
             if (self.runtime_initialized) term.live_pty.closeAndDetach(&self.runtime);
             term.live_pty.deinit();
@@ -2064,6 +2077,11 @@ pub const DevSession = struct {
             self.rename = null;
             self.rename_input.clear();
         }
+        // 컨텍스트 메뉴 대상이 이 pane이면 메뉴를 닫고 대상을 비운다(stale 포인터 방지).
+        if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .pane and t.pane == pane) {
+            self.context_menu_target = null;
+            self.chrome_host.context_menu.hide();
+        };
         self.hovered_slot = null;
         self.hovered_plus = false;
         // chrome ChromeState 훅(현재 무동작). 핸들 기반 드래그 상태가 C2/C3서 ChromeState로 이주하면 여기 한 줄이
@@ -2451,6 +2469,43 @@ pub const DevSession = struct {
         }
     }
 
+    /// 점(x,y px)에 있는 rename 대상 — 사이드바 슬롯=워크스페이스, pane 라벨 세그먼트=pane, Term 탭=term. 없으면
+    /// null(터미널 본문·‹›/+·"+" 슬롯·바 밖). 더블클릭(kind 4)과 우클릭 메뉴가 공유해 **같은 자리를 같은 대상으로**
+    /// 친다(단일 출처). hit-test는 paneBar(full/tabs/label_cols)·barMetrics를 재사용.
+    fn renameTargetAt(self: *DevSession, x_px: f64, y_px: f64) ?RenameTarget {
+        if (self.inSidebar(x_px)) {
+            // 사이드바: 슬롯이면 그 워크스페이스, "+" 슬롯/빈 영역이면 없음.
+            if (self.sidebarSlotAt(y_px)) |slot| return .{ .workspace = self.tabs.items[slot] };
+            return null;
+        }
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
+        for (leaf_rects.items) |lr| {
+            const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+            if (!pointInRect(x_px, y_px, pb.full)) continue;
+            // 좌측 라벨 세그먼트 → 그 pane.
+            if (pb.label_cols > 0 and x_px < @as(f64, @floatFromInt(pb.tabs.x))) return .{ .pane = lr.leaf };
+            const count = lr.leaf.terms.items.len;
+            const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse return null;
+            if (m.inScrollLeftZone(x_px) or m.inScrollRightZone(x_px) or m.inPlusZone(x_px)) return null; // ‹›/+ 은 대상 아님
+            const tab = m.tabIndex(count, x_px);
+            if (tab < count) return .{ .term = lr.leaf.terms.items[tab] };
+            return null;
+        }
+        return null;
+    }
+
+    /// 컨텍스트 메뉴의 선택 항목을 실행한다 — 현재 메뉴는 "Rename" 1항목이라 대상 rename을 연다. 메뉴를 먼저 닫고
+    /// 대상이 살아 있으면 startRename(대상 teardown 시 context_menu_target은 이미 null화됨).
+    fn acceptContextMenu(self: *DevSession) void {
+        const target = self.context_menu_target;
+        self.context_menu_target = null;
+        self.chrome_host.context_menu.hide();
+        self.metal_dirty = true;
+        if (target) |t| self.startRename(t); // "Rename" 항목(selected 0) — 항목이 늘면 selected로 분기
+    }
+
     /// Find 다음/이전 매치로(⌘G/⌘⇧G). 오버레이가 닫혀 있어도 동작한다 — show가 비우기 전까지 검색어는
     /// chrome_host.find가 보존하므로, 닫은 뒤에도 그 검색어로 재검색해 네비게이션한다(macOS Find Next 관례).
     /// 검색 이력(검색어)이 없으면 무동작. 닫을 때 매치를 비웠으니 비어 있으면 보존 검색어로 다시 채우고(현재
@@ -2483,6 +2538,12 @@ pub const DevSession = struct {
             .palette_query_changed => self.recomputePalette(), // 재필터 + result_count 동기화
             .palette_selection_changed => {}, // 선택만 이동 — 스크롤 윈도우는 buildChromeOverlayFrame이 파생, 부수효과 없음
             .palette_accept => self.acceptPalette(), // 선택 명령 해석·닫기·dispatch
+            .context_menu_accept => self.acceptContextMenu(), // selected 항목 실행(현재 "Rename" → 대상 rename)
+            .context_menu_close => { // Esc/그 외 키 — 컴포넌트가 이미 hide, 대상 포인터만 비운다
+                self.context_menu_target = null;
+                self.metal_dirty = true;
+            },
+            .context_menu_selection_changed => self.metal_dirty = true, // ↑↓ 선택 이동 — 재렌더
         }
     }
 
@@ -2634,7 +2695,7 @@ pub const DevSession = struct {
         // chrome 모달(Notice·Find·Palette)이 열려 있으면 키를 chrome으로 라우팅한다 — 최상위(PTY/스크롤보다 먼저,
         // 셋은 배타적). handleInput이 컴포넌트 handle로 보내 의도(HostAction)를 내고, dispatchChromeAction이 session
         // 부수효과(재검색·스크롤·필터·실행·닫기)를 실행한다. 모든 키를 소비한다(모달이라 터미널엔 안 내려간다).
-        if (self.chrome_host.notice.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
+        if (self.chrome_host.notice.open or self.chrome_host.context_menu.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
             if (self.chrome_host.handleInput(self.allocator, chromeInputFromKeyEvent(event))) |action| {
                 self.dispatchChromeAction(action);
             }
@@ -2873,6 +2934,43 @@ pub const DevSession = struct {
         // 인라인 rename 중 마우스 down(어디든)이면 편집을 확정한다(포커스 상실 = 확정 — docs/tabs-splits-layout.md).
         // 그 뒤 클릭은 정상 처리된다(탭 전환·pane 포커스 등). drag/up(2/3)은 down이 선행하므로 여기서 안 걸린다.
         if (kind == 1 and self.rename != null) self.commitRename();
+        // 컨텍스트 메뉴가 열려 있으면 클릭(down)을 메뉴로 라우팅한다 — 항목 위면 그 항목 실행, 밖이면 닫는다(다른
+        // 마우스 이벤트도 메뉴 중엔 소비). 메뉴는 최상위 모달이라 뒤(터미널/탭)로 안 흘린다.
+        if (self.chrome_host.context_menu.open) {
+            if (kind == 1) {
+                if (chrome.components.context_menu.itemAt(&self.chrome_host.context_menu, &context_menu_items, self.buildChromeProps(), x_px, y_px)) |idx| {
+                    self.chrome_host.context_menu.selected = idx;
+                    self.acceptContextMenu();
+                } else {
+                    self.chrome_host.context_menu.hide();
+                    self.context_menu_target = null;
+                    self.metal_dirty = true;
+                }
+            }
+            return;
+        }
+        // 우클릭(button==2, down) → 그 자리의 rename 대상에 컨텍스트 메뉴(현재 "Rename")를 띄운다. 대상이 없으면
+        // (터미널 본문 등) 메뉴 없이 소비(우클릭이 좌클릭처럼 탭 전환·선택하지 않게 — Zig가 button을 무시하던 것 정정).
+        if (kind == 1 and button == 2) {
+            if (self.renameTargetAt(x_px, y_px)) |target| {
+                self.context_menu_target = target;
+                self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), context_menu_items.len);
+                self.metal_dirty = true;
+            }
+            return;
+        }
+        // 더블클릭(kind 4) → 그 자리의 rename 대상(사이드바 슬롯·pane 라벨·Term 탭)을 인라인 편집한다. 대상이 없으면
+        // return 안 하고 아래로 흘러 kind 4 = 터미널 단어 선택으로 폴백한다. 첫 클릭(kind 1)이 이미 포커스했고 그
+        // 사이 up(3)이 드래그 arm을 풀었다(더블클릭은 드래그 아님 — 안전하게 한 번 더 해제). 우클릭 메뉴와 같은
+        // renameTargetAt를 써 "더블클릭 == 우클릭"이 같은 자리를 같은 대상으로 친다.
+        if (kind == 4) {
+            if (self.renameTargetAt(x_px, y_px)) |target| {
+                self.sidebar_drag_active = false;
+                self.tab_drag_active = false;
+                self.startRename(target);
+                return;
+            }
+        }
         // 사이드바 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(x가 사이드바 밖으로 나가도) — 새
         // down(1)은 아래 일반 처리로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
         if (self.sidebar_drag_active and (kind == 2 or kind == 3)) {
@@ -2958,52 +3056,11 @@ pub const DevSession = struct {
                         self.sidebar_drag_index = slot;
                     }
                 }
-            } else if (kind == 4) {
-                // 더블클릭 → 그 워크스페이스 rename(첫 클릭 kind 1이 이미 그 탭으로 전환·드래그 arm; 여기서 편집 시작).
-                // "+" 슬롯 더블클릭은 대상이 아니다(sidebarSlotAt이 null이면 무동작).
-                if (self.sidebarSlotAt(y_px)) |slot| {
-                    self.sidebar_drag_active = false; // 더블클릭은 드래그가 아니다 — 첫 클릭이 arm한 걸 해제
-                    self.startRename(.{ .workspace = self.tabs.items[slot] });
-                }
             }
+            // 사이드바 더블클릭(kind 4) rename은 위 통합 kind==4 핸들러(renameTargetAt)가 이미 처리했다.
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
             return;
-        }
-        // 더블클릭(kind 4)으로 Term 탭 / pane 라벨을 rename한다(사이드바 워크스페이스는 위 블록에서 처리). 탭 바가
-        // 아니면 return하지 않고 아래로 흘러 kind 4 = 터미널 단어 선택으로 폴백한다. 첫 클릭(kind 1)이 이미 그
-        // pane/Term을 포커스했고, 그 사이 up(3)이 tab_drag_active를 풀었다(더블클릭은 드래그 아님).
-        if (kind == 4) {
-            var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-            defer leaf_rects.deinit(self.allocator);
-            if (self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects)) |_| {
-                for (leaf_rects.items) |lr| {
-                    const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
-                    if (!pointInRect(x_px, y_px, pb.full)) continue;
-                    // 좌측 라벨 세그먼트 더블클릭 → 그 pane rename.
-                    if (pb.label_cols > 0 and x_px < @as(f64, @floatFromInt(pb.tabs.x))) {
-                        self.tab_drag_active = false;
-                        self.startRename(.{ .pane = lr.leaf });
-                        return;
-                    }
-                    const count = lr.leaf.terms.items.len;
-                    const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols);
-                    if (m) |bm| {
-                        // ‹›/+ zone 더블클릭은 rename 아님 — 소비하고 무동작(단어 선택 폴백도 막는다).
-                        if (bm.inScrollLeftZone(x_px) or bm.inScrollRightZone(x_px) or bm.inPlusZone(x_px)) {
-                            self.mouse_drag_selecting = false;
-                            return;
-                        }
-                        const tab = bm.tabIndex(count, x_px);
-                        if (tab < lr.leaf.terms.items.len) {
-                            self.tab_drag_active = false;
-                            self.startRename(.{ .term = lr.leaf.terms.items[tab] });
-                            return;
-                        }
-                    }
-                }
-            } else |_| {}
-            // 탭 바가 아니면 아래로 흘러 터미널 단어 선택(kind 4)으로 폴백한다.
         }
         // down(1)에서 pane/탭 바 클릭을 hit-test한다(kind!=1이면 단락 평가로 self.tabs를 안 건드린다 — 최소-셋업
         // 드래그 테스트는 kind 2/3만 보낸다). 활성 탭 leaf rect를 한 번 펴 ① 탭 바 클릭(어느 pane의 상단 바면 그
@@ -3888,6 +3945,12 @@ pub const DevSession = struct {
             self.rename = null;
             self.rename_input.clear();
         }
+        // 컨텍스트 메뉴 대상이 이 워크스페이스면 메뉴를 닫고 대상을 비운다(stale 포인터 방지). pane/Term은 아래
+        // destroyPane/destroyTerm가 처리.
+        if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .workspace and t.workspace == tab) {
+            self.context_menu_target = null;
+            self.chrome_host.context_menu.hide();
+        };
         for (tab.panes.items) |pane| self.destroyPane(pane);
         // 트리를 통째 해제하기 전에, divider_drag가 이 트리 소속 split이면 표적 null(다른 탭 트리를 가리키면 유지 —
         // 무관한 탭 close가 진행 중 divider 드래그를 안 끊는다). collapse 경로의 invalidateForFreedSplit과 같은 규율.
@@ -4348,7 +4411,7 @@ pub const DevSession = struct {
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             if (builtin.os.tag == .macos) {
-                if (self.chrome_host.notice.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
+                if (self.chrome_host.notice.open or self.chrome_host.context_menu.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
                     overlay_frame = self.buildChromeOverlayFrame() catch null;
                 }
             }
@@ -5608,6 +5671,9 @@ pub const DevSession = struct {
             const rows = try self.buildPaletteRows(arena); // 카탈로그 행 주입(platform 소유)
             try self.chrome_host.collectPaletteDraws(rows, props, &tokens, arena, &draws);
         }
+        if (self.chrome_host.context_menu.open) {
+            try self.chrome_host.collectContextMenuDraws(&context_menu_items, props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유)
+        }
         if (draws.items.len == 0) return error.NotOpen;
 
         var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch);
@@ -6245,6 +6311,47 @@ test "double-click on a Term tab or sidebar slot starts rename" {
     session.mouse(4, sx, sy, 0, 0);
     try std.testing.expect(session.renamingWorkspace(tab));
     session.closeRename();
+}
+
+// 우클릭 컨텍스트 메뉴(PR5): Term 탭 우클릭 → 메뉴 열림 + 대상 세팅, 항목(Rename) 클릭 → 메뉴 닫힘 + 그 대상
+// rename 시작. 터미널 본문 우클릭 → 메뉴 안 열림(대상 없음). 실 좌표 hit-test라 macOS 게이트.
+test "right-click opens context menu on a rename target; clicking Rename starts rename" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(DevSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const term0 = session.activePane().activeTerm();
+
+    // ① Term 탭 우클릭(button==2) → 메뉴 열림 + 대상 = term0(아직 rename 아님 — 메뉴만).
+    session.mouse(1, @floatFromInt(bar.x + 4), @floatFromInt(bar.y + 1), 2, 0);
+    try std.testing.expect(session.chrome_host.context_menu.open);
+    try std.testing.expect(session.rename == null);
+
+    // ② 메뉴 항목(Rename, 행 0)을 좌클릭 → 메뉴 닫힘 + term0 rename 시작. anchor = 우클릭 px(작아서 clamp 없음).
+    const mx: f64 = @floatFromInt(session.chrome_host.context_menu.anchor_x + 1);
+    const my: f64 = @floatFromInt(session.chrome_host.context_menu.anchor_y + 1);
+    session.mouse(1, mx, my, 0, 0);
+    try std.testing.expect(!session.chrome_host.context_menu.open);
+    try std.testing.expect(session.renamingTerm(term0));
+    session.closeRename();
+
+    // ③ 터미널 본문(바 아래) 우클릭 → 대상 없음 → 메뉴 안 열림.
+    session.mouse(1, @floatFromInt(bar.x + 4), @floatFromInt(bar.y + bar.h + 5), 2, 0);
+    try std.testing.expect(!session.chrome_host.context_menu.open);
 }
 
 test "synchronized output(2026) hold: ESU 누락 시 sync_timeout_ticks를 넘으면 강제 투영(freeze 복구)" {

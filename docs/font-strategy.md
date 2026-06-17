@@ -86,7 +86,7 @@ v1에서 약속하지 않는 것:
 - 폰트에 해당 face가 없을 때의 합성 bold/italic(faux) 품질.
 - 글리프 합성(cell-snapping, 폰트 대신 셀에 직접 — nearest 샘플 + alpha coverage라 1:1 픽셀-퍼펙트):
   - **Block Elements(U+2580~259F solid) 완료**(`renderer/block_glyph.zig` — eighth/half/full/quadrant 사각형. shade ░▒▓ 후속).
-  - **Box-drawing(U+2500~257F light) 완료**(`renderer/box_glyph.zig` — arm 모델로 ─│┌┐└┘├┤┬┴┼·둥근 ╭╮╰╯[arc는 직각 근사], 셀 경계까지 뻗어 이음매 없이 연결). heavy(━┃)·double(═║)·dashed·둥근 arc·Powerline은 후속.
+  - **Box-drawing(U+2500~257F light) 완료**(`renderer/box_glyph.zig` — arm 모델로 ─│┌┐└┘├┤┬┴┼, 둥근 ╭╮╰╯는 **실제 quarter-arc**(중심 C=(cx+dir·r,cy+dir·r)·반지름 r=min(cx,cy)·띠 [r-t/2,r+t/2] + 접점 너머 직선 팔), 셀 경계까지 뻗어 이음매 없이 연결). heavy(━┃)·double(═║)·dashed·Powerline은 후속.
 - pixel-perfect golden을 기본 CI에서 강제.
 - HarfBuzz, FreeType, fontconfig, DirectWrite 같은 외부/타 플랫폼 폰트 스택 추가.
 

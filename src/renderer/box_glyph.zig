@@ -7,9 +7,9 @@
 //! 세로 팔은 가로 중앙의 t-두께 띠로 그리고, 각 팔을 **셀 경계까지** 뻗어(left→x=0, right→x=w, up→y=0, down→y=h)
 //! 이웃 셀의 선과 정확히 맞닿게 한다. 중앙에서 팔들이 교차해 모서리(┌)·삼거리(├)·사거리(┼)가 된다.
 //!
-//! 범위(작게 시작): **light single 선만** — ─│ 직선, ┌┐└┘ 모서리, ├┤┬┴┼ 교차, 둥근 ╭╮╰╯. 둥근 모서리는
-//! 우선 직각으로 근사(arc는 후속). heavy(━┃)·double(═║)·dashed·혼합 굵기는 후속(폰트 글리프로 폴백). 베이스 =
-//! Unicode Box Drawing 기하. Ghostty font/sprite/draw/box.zig 동작만 비교(코드 미복사 — clean-room). 중립 모듈.
+//! 범위: **light single 선만** — ─│ 직선, ┌┐└┘ 모서리, ├┤┬┴┼ 교차, 둥근 ╭╮╰╯(**실제 quarter-arc** —
+//! fillRoundedCorner). heavy(━┃)·double(═║)·dashed·혼합 굵기는 후속(폰트 글리프로 폴백). 베이스 = Unicode
+//! Box Drawing 기하. Ghostty font/sprite/draw/box.zig 동작만 비교(코드 미복사 — clean-room). 중립 모듈.
 
 const std = @import("std");
 
@@ -65,12 +65,78 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
     const xb0 = (w - t) / 2;
     const xb1 = xb0 + t;
 
+    // 둥근 모서리(╭╮╰╯)는 직각 대신 quarter-arc로 — 두 팔 방향(h_dir·v_dir)으로 아크 코너를 그린다.
+    switch (cp) {
+        0x256D => return fillRoundedCorner(pixels, bytes_per_row, w, h, t, yb0, yb1, xb0, xb1, 1, 1), // ╭ right+down
+        0x256E => return fillRoundedCorner(pixels, bytes_per_row, w, h, t, yb0, yb1, xb0, xb1, -1, 1), // ╮ left+down
+        0x256F => return fillRoundedCorner(pixels, bytes_per_row, w, h, t, yb0, yb1, xb0, xb1, -1, -1), // ╯ left+up
+        0x2570 => return fillRoundedCorner(pixels, bytes_per_row, w, h, t, yb0, yb1, xb0, xb1, 1, -1), // ╰ right+up
+        else => {},
+    }
+
     var count: u32 = 0;
     // 각 팔을 셀 경계까지 뻗는다(중앙 교차 [xb0,xb1)×[yb0,yb1)를 공유해 모서리/교차가 자연히 이어진다).
     if (arms.left) count += fillRect(pixels, bytes_per_row, 0, yb0, xb1, yb1); // 좌단~중앙
     if (arms.right) count += fillRect(pixels, bytes_per_row, xb0, yb0, w, yb1); // 중앙~우단
     if (arms.up) count += fillRect(pixels, bytes_per_row, xb0, 0, xb1, yb1); // 상단~중앙
     if (arms.down) count += fillRect(pixels, bytes_per_row, xb0, yb0, xb1, h); // 중앙~하단
+    return count;
+}
+
+/// 둥근 모서리(╭╮╰╯)를 quarter-arc + 접점 너머 직선 팔로 채운다. 슬롯은 이미 0으로 비워진 상태. h_dir/v_dir은
+/// 가로/세로 팔 방향(+1=right/down, -1=left/up). 아크 중심 C=(cx+h_dir·r, cy+v_dir·r), r=min(cx,cy)(셀에 맞는
+/// 최대 반지름). 아크 띠 = C에서 거리 [r-t/2, r+t/2]이고 셀 중앙을 향한 사분면((x-C)·dir ≤ 0). 접점 너머는
+/// 기존 직선 팔(y/x 띠)로 셀 경계까지 뻗어 이웃 셀과 연결. pixel center(+0.5)로 거리 계산 → 대칭·연결 정확.
+fn fillRoundedCorner(
+    pixels: []u8,
+    bytes_per_row: usize,
+    w: u32,
+    h: u32,
+    t: u32,
+    yb0: u32,
+    yb1: u32,
+    xb0: u32,
+    xb1: u32,
+    h_dir: i32,
+    v_dir: i32,
+) u32 {
+    const cx = @as(f32, @floatFromInt(w)) * 0.5;
+    const cy = @as(f32, @floatFromInt(h)) * 0.5;
+    const r = @min(cx, cy); // 코너 반지름 = 셀 짧은 반 치수(아크가 셀에 들어가는 최대)
+    const hd = @as(f32, @floatFromInt(h_dir));
+    const vd = @as(f32, @floatFromInt(v_dir));
+    const c_x = cx + hd * r; // 아크 중심
+    const c_y = cy + vd * r;
+    const tf = @as(f32, @floatFromInt(t));
+    const r_lo = r - tf * 0.5;
+    const r_hi = r + tf * 0.5;
+
+    var count: u32 = 0;
+    var y: u32 = 0;
+    while (y < h) : (y += 1) {
+        const fy = @as(f32, @floatFromInt(y)) + 0.5;
+        const dy = fy - c_y;
+        var x: u32 = 0;
+        while (x < w) : (x += 1) {
+            const fx = @as(f32, @floatFromInt(x)) + 0.5;
+            const dx = fx - c_x;
+            const dist = @sqrt(dx * dx + dy * dy);
+            // 아크: 거리 band 안 + 셀 중앙을 향한 사분면(접점 사이 호).
+            const in_arc = dist >= r_lo and dist <= r_hi and dx * hd <= 0.0 and dy * vd <= 0.0;
+            // 가로 직선 팔: y 띠 + 아크 접점 바깥((x-C)·h_dir ≥ 0) → 셀 가로 경계까지.
+            const in_h = (y >= yb0 and y < yb1) and dx * hd >= 0.0;
+            // 세로 직선 팔: x 띠 + 접점 바깥 → 셀 세로 경계까지.
+            const in_v = (x >= xb0 and x < xb1) and dy * vd >= 0.0;
+            if (in_arc or in_h or in_v) {
+                const off = @as(usize, y) * bytes_per_row + @as(usize, x) * 4;
+                pixels[off] = 0xFF;
+                pixels[off + 1] = 0xFF;
+                pixels[off + 2] = 0xFF;
+                pixels[off + 3] = 0xFF;
+                count += 1;
+            }
+        }
+    }
     return count;
 }
 
@@ -148,4 +214,29 @@ test "fillCoverage: 직선·모서리·교차가 셀 경계까지 닿고 중앙�
     try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w - 1, cy));
     try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, cx, 0));
     try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, cx, h - 1));
+}
+
+test "fillCoverage: 둥근 모서리 ╭는 호로 두 팔을 잇고 직각 코너는 비운다(이웃과 연결 유지)" {
+    const w: u32 = 10;
+    const h: u32 = 32; // t=2
+    const bpr: usize = w * 4;
+    var pixels: [32 * 10 * 4]u8 = undefined;
+    const a = struct {
+        fn at(p: []const u8, bytes_per_row: usize, x: u32, y: u32) u8 {
+            return p[@as(usize, y) * bytes_per_row + @as(usize, x) * 4 + 3];
+        }
+    }.at;
+    const cy = h / 2; // 16
+    const cx = w / 2; // 5
+
+    _ = fillCoverage(0x256D, w, h, bpr, &pixels); // ╭ (right+down 둥근)
+    // 이웃 연결: 우단 가로선(y=cy 띠)·하단 세로선(x=cx 띠)에 닿아야 ─/│ 이웃과 이어진다.
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w - 1, cy)); // 우단 → ─ 연결
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, cx, h - 1)); // 하단 → │ 연결
+    // ╭는 좌·상으로 안 뻗는다 — 좌단 가로/상단 세로는 빈다.
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 0, cy)); // 좌단 빈다
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, cx, 0)); // 상단 빈다
+    // 둥근 효과: 직각 코너점(좌상 바깥 0,0)과 반대 코너(우하 w-1,h-1)는 비어야 한다.
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 0, 0)); // 좌상 바깥
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, w - 1, h - 1)); // 우하(╭ 영역 아님)
 }

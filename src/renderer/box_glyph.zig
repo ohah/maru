@@ -23,15 +23,19 @@ const Weight = enum { light, heavy, double };
 /// 모서리·교차·반선(╴╵)·혼합 굵기(┍┞)·이중선을 모두 표현한다(Ghostty linesChar와 같은 per-arm-weight 모델).
 const Arms = struct { up: ?Weight = null, down: ?Weight = null, left: ?Weight = null, right: ?Weight = null };
 
-/// box 문자 한 글자의 합성 명세: 팔(방향별 굵기) + 점선 개수(dash) + 둥근 모서리(rounded).
+/// 대각선 종류(코너↔코너 선). ╱(fwd)·╲(back)·╳(둘 다). arm 모델 밖이라 fillDiagonal가 거리 기반으로 그린다.
+const Diagonal = enum { none, forward, backward, cross };
+
+/// box 문자 한 글자의 합성 명세: 팔(방향별 굵기) + 점선 개수(dash) + 둥근 모서리(rounded) + 대각선(diagonal).
 const Spec = struct {
     arms: Arms = .{},
     dash: u8 = 0, // 0=실선, 2/3/4=점선 개수(직선 전용 — Unicode double/triple/quadruple dash)
     rounded: bool = false, // ╭╮╰╯ quarter-arc(light 전용)
+    diagonal: Diagonal = .none, // ╱╲╳ — arm 모델 밖, fillDiagonal
 };
 
-/// cp가 합성 대상 box-drawing 문자인지(light·heavy·혼합·반선·dashed·double). single↔double 혼합(╒╓…)·대각선
-/// (╱╲╳)은 미지원 → false면 폰트 글리프로 폴백.
+/// cp가 합성 대상 box-drawing 문자인지(light·heavy·혼합·반선·dashed·double·대각선). single↔double 혼합(╒╓…)은
+/// 미지원 → false면 폰트 글리프로 폴백.
 pub fn isBoxDrawing(cp: u32) bool {
     return specFor(cp) != null;
 }
@@ -165,6 +169,10 @@ fn specFor(cp: u32) ?Spec {
         0x257D => .{ .arms = .{ .up = L, .down = H } }, // ╽
         0x257E => .{ .arms = .{ .left = H, .right = L } }, // ╾
         0x257F => .{ .arms = .{ .up = H, .down = L } }, // ╿
+        // ── 대각선 ╱╲╳ ──
+        0x2571 => .{ .diagonal = .forward }, // ╱ (좌하→우상)
+        0x2572 => .{ .diagonal = .backward }, // ╲ (좌상→우하)
+        0x2573 => .{ .diagonal = .cross }, // ╳
         else => null,
     };
 }
@@ -203,6 +211,9 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
     lt = @min(lt, @min(w, h));
     const ht: u32 = @min(lt * 2, @min(w, h));
     const arms = spec.arms;
+
+    // 대각선(╱╲╳): 코너↔코너 선이라 arm 모델 밖 — 거리 기반으로 light 두께만큼 칠한다.
+    if (spec.diagonal != .none) return fillDiagonal(pixels, bytes_per_row, w, h, lt, spec.diagonal);
 
     // 둥근 모서리(╭╮╰╯)는 직각 대신 quarter-arc로 — 두 팔 방향(h_dir·v_dir)으로 아크 코너를 그린다(light).
     if (spec.rounded) {
@@ -277,6 +288,41 @@ fn fillLines(arms: Arms, w: u32, h: u32, bytes_per_row: usize, pixels: []u8, lt:
     if (td > 0) {
         const x0 = cx -| td / 2;
         count += fillRect(pixels, bytes_per_row, x0, cby0, @min(w, x0 + td), h); // 중앙 교차 상변~하단
+    }
+    return count;
+}
+
+/// 대각선(╱╲╳)을 코너↔코너 선으로 합성한다. 픽셀 중심(+0.5)에서 선까지 수직거리가 t/2 이하면 칠한다 — ╲는
+/// (0,0)→(w,h), ╱는 (0,h)→(w,0). 셀 코너를 지나므로 대각으로 이웃한 셀의 같은 대각선과 코너에서 이어진다.
+/// 거리 정규화로 w≠h(비정사각 셀)에서도 두께가 일정. cross(╳)는 둘 다.
+fn fillDiagonal(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, t: u32, kind: Diagonal) u32 {
+    const fw = @as(f32, @floatFromInt(w));
+    const fh = @as(f32, @floatFromInt(h));
+    const norm = @sqrt(fw * fw + fh * fh);
+    if (norm == 0) return 0;
+    const half = @max(0.5, @as(f32, @floatFromInt(t)) / 2.0);
+    const do_back = kind == .backward or kind == .cross; // ╲
+    const do_fwd = kind == .forward or kind == .cross; // ╱
+    var count: u32 = 0;
+    var y: u32 = 0;
+    while (y < h) : (y += 1) {
+        const py = @as(f32, @floatFromInt(y)) + 0.5;
+        const row_off = @as(usize, y) * bytes_per_row;
+        var x: u32 = 0;
+        while (x < w) : (x += 1) {
+            const px = @as(f32, @floatFromInt(x)) + 0.5;
+            // ╲: px·fh − py·fw = 0. ╱: px·fh + py·fw − fw·fh = 0. (정규화 분모 norm 공유)
+            const hit = (do_back and @abs(px * fh - py * fw) / norm <= half) or
+                (do_fwd and @abs(px * fh + py * fw - fw * fh) / norm <= half);
+            if (hit) {
+                const off = row_off + @as(usize, x) * 4;
+                pixels[off] = 0xFF;
+                pixels[off + 1] = 0xFF;
+                pixels[off + 2] = 0xFF;
+                pixels[off + 3] = 0xFF;
+                count += 1;
+            }
+        }
     }
     return count;
 }
@@ -492,11 +538,46 @@ test "isBoxDrawing: light·heavy·혼합·dashed·double·반선 (single↔doubl
     try std.testing.expect(isBoxDrawing(0x2504)); // ┄ dashed
     try std.testing.expect(isBoxDrawing(0x2550)); // ═ double
     try std.testing.expect(isBoxDrawing(0x256C)); // ╬ double cross
+    try std.testing.expect(isBoxDrawing(0x2571)); // ╱ 대각선
+    try std.testing.expect(isBoxDrawing(0x2573)); // ╳ 대각 십자
     // 폴백(이 모듈 밖)
     try std.testing.expect(!isBoxDrawing(0x2552)); // ╒ single↔double 혼합 (후속)
-    try std.testing.expect(!isBoxDrawing(0x2571)); // ╱ 대각선 (후속)
     try std.testing.expect(!isBoxDrawing(0x2588)); // █ block(block_glyph)
     try std.testing.expect(!isBoxDrawing('A'));
+}
+
+test "fillCoverage: 대각선 ╲는 좌상→우하, ╱는 좌하→우상 코너를 지난다" {
+    const w: u32 = 16;
+    const h: u32 = 16;
+    const bpr: usize = w * 4;
+    var pixels: [16 * 16 * 4]u8 = undefined;
+    const a = struct {
+        fn at(p: []const u8, bpr_: usize, x: u32, y: u32) u8 {
+            return p[@as(usize, y) * bpr_ + @as(usize, x) * 4 + 3];
+        }
+    }.at;
+
+    // ╲ U+2572: 좌상(0,0)·우하(w-1,h-1) 코너 닿고, 반대 코너(우상·좌하)는 빈다.
+    _ = fillCoverage(0x2572, w, h, bpr, &pixels);
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 0, 0)); // 좌상
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w - 1, h - 1)); // 우하
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, w - 1, 0)); // 우상 빔
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 0, h - 1)); // 좌하 빔
+
+    // ╱ U+2571: 좌하(0,h-1)·우상(w-1,0) 코너 닿고, 좌상·우하는 빈다.
+    _ = fillCoverage(0x2571, w, h, bpr, &pixels);
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 0, h - 1)); // 좌하
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w - 1, 0)); // 우상
+    try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 0, 0)); // 좌상 빔
+
+    // ╳ U+2573: 네 코너 다 닿는다(둘 다).
+    _ = fillCoverage(0x2573, w, h, bpr, &pixels);
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 0, 0));
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w - 1, h - 1));
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w - 1, 0));
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, 0, h - 1));
+    // 중앙도 칠해진다(두 선이 교차).
+    try std.testing.expectEqual(@as(u8, 0xFF), a(&pixels, bpr, w / 2, h / 2));
 }
 
 test "fillCoverage: 혼합 굵기 ┞(up heavy + down/right light)는 위 stem만 굵고 아래·우는 가늘다" {

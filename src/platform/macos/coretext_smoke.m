@@ -386,12 +386,11 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
     if ((cp >= 0x2580 && cp <= 0x2590) || (cp >= 0x2594 && cp <= 0x259F)) {
         return true;
     }
-    // box_glyph: U+2500~254F(직선·모서리·T·사거리·dashed — light·heavy·혼합 전부) + 둥근 ╭╮╰╯(256D~2570) +
-    // 반선·두께전이(2574~257F) + 이중선(pure double 11자). single↔double 혼합(╒╓ 2552…)·대각선(2571~2573)은
-    // box_glyph가 아직 안 덮어 폴백. **renderer/box_glyph.zig specFor와 동기 유지**.
+    // box_glyph: U+2500~254F(직선·모서리·T·사거리·dashed — light·heavy·혼합 전부) + 둥근 ╭╮╰╯·대각선 ╱╲╳·
+    // 반선·두께전이(256D~257F 연속) + 이중선(pure double 11자). single↔double 혼합(╒╓ 2552…)은 box_glyph가
+    // 아직 안 덮어 폴백. **renderer/box_glyph.zig specFor와 동기 유지**.
     if ((cp >= 0x2500 && cp <= 0x254F) || // 직선·모서리·T·사거리·dashed(전 굵기·혼합)
-        (cp >= 0x256D && cp <= 0x2570) || // 둥근 모서리
-        (cp >= 0x2574 && cp <= 0x257F)) { // 반선·두께전이
+        (cp >= 0x256D && cp <= 0x257F)) { // 둥근·대각선·반선·두께전이
         return true;
     }
     switch (cp) { // 이중선(pure double)만 — single↔double 혼합은 제외

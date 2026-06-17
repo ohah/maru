@@ -933,10 +933,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             maru_macos_app_dev_session_workspace_window_count(session, buf.baseAddress, buf.count)
         }
         if count < 0 {
-            // -1=손상/헤더 불일치: 저장 파일이 깨졌다. 기본 단일 창으로 시작하되 chrome Notice 모달로 사용자에게
-            // 알린다(저장본은 종료 시 saveWorkspace가 덮어쓸 때까지 보존). 빈 workspace(count==0)는 손상이 아니라
-            // 저장이 없는 정상 상태이므로 알림 없이 조용히 기본 창으로 시작한다.
-            showNotice("저장된 작업 공간을 복원할 수 없습니다 — 파일이 손상되었습니다. 기본 창으로 시작합니다.")
+            // -1=파싱 실패(헤더 불일치·직렬화 포맷 변경·손상). 저장 파일을 복원할 수 없으니 **조용히 기본 단일 창으로
+            // 시작**한다(notice 안 띄움 — 사용자 결정). 특히 직렬화 포맷이 바뀌면(하위호환 미고려 정책) 이전 버전의
+            // 저장 파일이 이 경로로 떨어지는데, 이를 '손상' 모달로 알리면 업데이트 후 첫 실행마다 키를 막는 중앙
+            // 팝업이 떠 UX가 나쁘다(복원 불가는 사용자 잘못이 아니다). 저장본은 종료 시 saveWorkspace가 새 포맷으로
+            // 덮어쓸 때까지 보존된다(self-heal). 빈 workspace(count==0)와 동일하게 조용히 기본 창으로 시작한다.
             return
         }
         guard count > 0 else { return } // 0=빈 workspace → 기본 단일 창(알림 없음)

@@ -71,3 +71,16 @@ test "filter: 빈 쿼리=전부·부분일치·actionAt 해석" {
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
     try std.testing.expect(actionAt(out.items, 0) == null);
 }
+
+test "filter: 'find'로 Find 명령군이 팝업에 노출된다(toggle_find/next/previous)" {
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(usize) = .empty;
+    defer out.deinit(allocator);
+
+    // "find" → Find / Find Next / Find Previous 3개(팝업에서 Find 띄우기). 카탈로그 순서대로.
+    try filter(allocator, "find", &out);
+    try std.testing.expectEqual(@as(usize, 3), out.items.len);
+    try std.testing.expect(actionAt(out.items, 0).? == .toggle_find);
+    try std.testing.expect(actionAt(out.items, 1).? == .find_next);
+    try std.testing.expect(actionAt(out.items, 2).? == .find_previous);
+}

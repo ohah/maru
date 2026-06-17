@@ -95,7 +95,10 @@ fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeProps
     const bh_px: i32 = @intCast(m.backing_height_px);
     if (x + @as(i32, @intCast(box_w)) > bw_px) x = bw_px - @as(i32, @intCast(box_w)); // 우단 넘으면 왼쪽으로
     if (y + @as(i32, @intCast(box_h)) > bh_px) y = bh_px - @as(i32, @intCast(box_h)); // 하단 넘으면 위로
-    if (x < 0) x = 0;
+    // 좌단은 사이드바 오른쪽으로 — 메뉴는 터미널 영역 오버레이라 사이드바 chrome 위로 겹치지 않게 한다(좁은 창에서
+    // anchor가 작거나 box가 클 때). 사이드바 슬롯 우클릭이면 anchor가 사이드바 안이라 메뉴가 그 오른쪽 가장자리에 붙는다.
+    const sidebar: i32 = @intCast(m.sidebar_width_px);
+    if (x < sidebar) x = sidebar;
     if (y < 0) y = 0;
     return .{ .x = x, .y = y, .w = box_w, .h = box_h };
 }
@@ -220,4 +223,25 @@ test "context_menu itemAt/view: anchor 박스 안 항목 행, 화면 밖이면 c
     try std.testing.expect(out.items[1] == .fill and out.items[1].fill.role == .tab_active_bg);
     try std.testing.expect(out.items[2] == .text);
     try std.testing.expectEqualStrings("Rename", out.items[2].text.runs[0].text);
+}
+
+test "context_menu menuRect: 좌단을 사이드바 폭으로 clamp(사이드바 chrome 위 겹침 방지)" {
+    const items = [_][]const u8{"Rename"};
+    const p = props.ChromeProps{
+        .metrics = .{
+            .cell_width_px = 8,
+            .cell_height_px = 16,
+            .sidebar_width_px = 200, // 넓은 사이드바
+            .backing_width_px = 800,
+            .backing_height_px = 600,
+        },
+    };
+    var s: State = .{};
+    // anchor가 사이드바 안(x=20)이어도 메뉴 좌단은 사이드바 오른쪽(>=200)으로 밀린다 — 터미널 영역 오버레이라 chrome 위 안 겹침.
+    s.show(20, 50, items.len);
+    const r = menuRect(&s, &items, p).?;
+    try std.testing.expect(r.x >= 200);
+    // 사이드바 밖 anchor는 그대로(clamp 무영향).
+    s.show(400, 50, items.len);
+    try std.testing.expectEqual(@as(i32, 400), menuRect(&s, &items, p).?.x);
 }

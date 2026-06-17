@@ -156,6 +156,46 @@ fn usableRestoreCwd(cwd: []const u8) ?[]const u8 {
     return cwd;
 }
 
+fn isHexStr(s: []const u8) bool {
+    for (s) |c| if (!std.ascii.isHex(c)) return false;
+    return s.len > 0;
+}
+
+/// `.git/HEAD` 내용에서 브랜치명을 뽑는 순수 파서(입력 슬라이스 참조 반환 — 할당 없음). `ref: refs/heads/<branch>`면
+/// branch, detached(raw SHA ≥7 hex)면 짧게 7자, 그 외(빈 ref·쓰레기)면 null. readGitBranch가 fs 읽은 뒤 호출·dupe.
+fn parseGitHead(content: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, content, &std.ascii.whitespace);
+    const ref_prefix = "ref: refs/heads/";
+    if (std.mem.startsWith(u8, trimmed, ref_prefix)) {
+        const branch = trimmed[ref_prefix.len..];
+        return if (branch.len == 0) null else branch;
+    }
+    return if (isHexStr(trimmed) and trimmed.len >= 7) trimmed[0..7] else null;
+}
+
+/// cwd(OSC 7 보고)에서 부모로 올라가며 `<dir>/.git/HEAD`를 찾아 git 브랜치명을 도출한다(owned 슬라이스, 호출자 해제).
+/// `ref: refs/heads/<branch>`면 그 branch, detached(raw SHA)면 짧게 7자. 못 찾으면 null(브랜치 표시 없음).
+/// 절대 경로만, walk-up은 루트까지(깊이 128 가드). 베이스: git이 cwd부터 부모로 .git을 찾는 방식. worktree(.git가
+/// gitdir: 파일)는 best-effort 미지원(.git/HEAD 못 읽으면 null) — 후속. fs 읽기는 cwd 변경 시에만(termGitBranch 캐시).
+fn readGitBranch(io: std.Io, allocator: std.mem.Allocator, cwd: []const u8) ?[]const u8 {
+    if (cwd.len == 0 or cwd.len >= std.fs.max_path_bytes or !std.fs.path.isAbsolute(cwd)) return null;
+    var dir: []const u8 = cwd;
+    var depth: usize = 0;
+    while (depth < 128) : (depth += 1) {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const head_path = std.fmt.bufPrint(&buf, "{s}/.git/HEAD", .{dir}) catch return null;
+        if (std.Io.Dir.cwd().readFileAlloc(io, head_path, allocator, .limited(4096))) |data| {
+            defer allocator.free(data);
+            // .git/HEAD가 있으니 이미 repo 안 — 파싱 결과가 null이어도 더 올라가지 않는다.
+            return if (parseGitHead(data)) |b| (allocator.dupe(u8, b) catch null) else null;
+        } else |_| {}
+        const parent = std.fs.path.dirname(dir) orelse return null;
+        if (parent.len >= dir.len) return null; // 진전 없음(루트 도달)
+        dir = parent;
+    }
+    return null;
+}
+
 /// backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다. cell 크기가 0이면
 /// placeholder로 대체하고, u16 상한으로 막은 뒤 terminal.clampGridSize로 최소 크기(cols>=2)를
 /// 적용한다 — cols>=2 불변식은 TerminalCore가 단일 소유하므로 여기서 직접 하드코딩하지 않는다.
@@ -528,6 +568,10 @@ const Term = struct {
     // 이 Term의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이 Term별로
     // 한 번만 finish하도록, 세션 종료(모든 Term terminated) 판정에 쓴다.
     terminated: bool = false,
+    // git 브랜치 표시 캐시(owned). cwd(OSC 7)에서 .git/HEAD를 walk-up해 도출한 브랜치명과, 그걸 계산한 cwd.
+    // termGitBranch가 cwd가 바뀔 때만 재계산(매 프레임 fs 읽기 회피). destroyTerm이 해제. 영속 안 함(파생값 — restore가 재도출).
+    git_branch: ?[]const u8 = null,
+    git_branch_cwd: ?[]const u8 = null,
 };
 
 /// 한 panel(split leaf = 화면의 한 분할 영역). 탭 모델로 **여러 Term(터미널)을 가로 탭으로** 담는 컨테이너다
@@ -2099,6 +2143,9 @@ pub const AppSession = struct {
         // custom_name(사용자 rename, owned)만 해제 — surface.title은 정적/borrowed라 해제 안 함. Surface.deinit에
         // allocator가 없어 owned 문자열 해제는 세션 allocator를 가진 이 funnel에서 한다.
         if (term.surface.custom_name) |n| self.allocator.free(n);
+        // git 브랜치 캐시(owned)도 해제.
+        if (term.git_branch) |b| self.allocator.free(b);
+        if (term.git_branch_cwd) |c| self.allocator.free(c);
         term.surface.deinit();
         self.allocator.destroy(term);
     }
@@ -3921,6 +3968,24 @@ pub const AppSession = struct {
         return self.activeSurface().core.currentCwd();
     }
 
+    /// term의 git 브랜치(owned 캐시). 그 surface의 cwd(OSC 7)가 바뀌었을 때만 .git/HEAD를 walk-up해 재계산한다
+    /// (사이드바는 매 프레임 빌드되므로 fs 읽기를 cwd 변경으로 게이트). 없으면 null. 반환은 term 소유(다음 cwd 변경/
+    /// teardown까지 유효). 파생값이라 영속 안 함 — restore가 cwd에서 재도출.
+    fn termGitBranch(self: *AppSession, term: *Term) ?[]const u8 {
+        const cwd = term.surface.core.currentCwd();
+        if (cwd.len == 0) return null;
+        if (term.git_branch_cwd) |c| {
+            if (std.mem.eql(u8, c, cwd)) return term.git_branch; // 캐시 적중(cwd 불변)
+        }
+        // cwd 변경 → 재계산(옛 캐시 해제 후 갱신).
+        if (term.git_branch) |b| self.allocator.free(b);
+        if (term.git_branch_cwd) |c| self.allocator.free(c);
+        term.git_branch = readGitBranch(self.io, self.allocator, cwd);
+        term.git_branch_cwd = self.allocator.dupe(u8, cwd) catch null;
+        if (diag_gate.maruDebugEnabled()) std.log.scoped(.git).info("branch: cwd={s} -> {?s}", .{ cwd, term.git_branch });
+        return term.git_branch;
+    }
+
     /// config 파일 경로(Open Config 메뉴용). loader.defaultConfigPath(MARU_CONFIG override·$HOME/.config/maru/
     /// config)가 단일 출처 — 한 번 계산해 세션 소유 버퍼에 캐시한다(다음 호출은 캐시, destroy까지 유효).
     /// HOME 없음·OOM이면 빈 슬라이스(Swift가 무동작). 경로 계산만 — 파일 생성/열기는 platform(Swift) OS 동작.
@@ -5437,7 +5502,16 @@ pub const AppSession = struct {
                 defer self.allocator.free(edit);
                 try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, edit));
             } else {
-                try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, workspaceLabel(tab)));
+                // 워크스페이스 라벨 뒤에 git 브랜치를 "⎇ {branch}"로 붙인다(cwd가 repo 안일 때만; 좁으면 라벨 빌더가
+                // ellipsize). 브랜치는 termGitBranch가 cwd 변경 시에만 .git/HEAD를 읽어 캐시.
+                const base = workspaceLabel(tab);
+                if (self.termGitBranch(tab.activePane().activeTerm())) |branch| {
+                    const with_branch = try std.fmt.allocPrint(self.allocator, "{s}  \u{2387} {s}", .{ base, branch });
+                    defer self.allocator.free(with_branch);
+                    try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, with_branch));
+                } else {
+                    try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, base));
+                }
             }
         }
 
@@ -6211,6 +6285,17 @@ test "gridFromBacking divides backing pixels by cell size with placeholder + cla
 
 // window padding이 터미널 영역 rect(termRect)를 좌상으로 들이고 폭/높이를 2배만큼 줄이는지 고정한다 — 이 rect가
 // 렌더 origin·마우스 hit-test(pxToCell)·IME·split leaf의 단일 출처라, 여기서 inset이 맞으면 그 전부가 정합한다.
+test "parseGitHead: ref branch / nested ref / detached SHA / empty ref / junk" {
+    try std.testing.expectEqualStrings("main", parseGitHead("ref: refs/heads/main\n").?);
+    try std.testing.expectEqualStrings("feature/x", parseGitHead("ref: refs/heads/feature/x").?); // 슬래시 포함 브랜치
+    try std.testing.expectEqualStrings("0123456", parseGitHead("0123456789abcdef0123456789abcdef01234567\n").?); // detached → short
+    try std.testing.expect(parseGitHead("ref: refs/heads/\n") == null); // 빈 브랜치
+    try std.testing.expect(parseGitHead("garbage here") == null); // hex 아님·ref 아님
+    try std.testing.expect(parseGitHead("ref: refs/tags/v1") == null); // heads 아님(태그) → 미지원
+    try std.testing.expect(parseGitHead("") == null);
+    try std.testing.expect(parseGitHead("abc") == null); // 7자 미만 hex
+}
+
 test "termRect insets the terminal area by window padding (sidebar + pad origin, 2×pad shrink)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

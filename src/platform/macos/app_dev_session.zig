@@ -756,6 +756,9 @@ pub const DevSession = struct {
     // 드래그 자동 스크롤 방향(+1=위/과거, -1=아래, 0=없음). 드래그 좌표가 grid 위/아래 밖으로
     // 나가면 세워지고, 30Hz tick마다 한 줄 스크롤하며 선택을 가장자리 행으로 확장한다.
     drag_autoscroll: i8 = 0,
+    // 스크롤바 thumb 드래그 중일 때, 잡은 지점의 thumb_top 기준 y 오프셋(px). null=드래그 안 함.
+    // down(1)이 스크롤바 영역을 hit하면 세워지고, drag(2)가 마우스 y를 view_offset으로 매핑, up(3)이 푼다.
+    scrollbar_drag_grab: ?f32 = null,
     // 자동 스크롤 중 선택 확장에 쓸 마지막 드래그 열.
     last_drag_col: u16 = 0,
     // 큰 붙여넣기의 미전송 잔여(인코딩 완료분). 자식이 stdin을 읽는 속도에 맞춰 tick마다
@@ -2611,6 +2614,15 @@ pub const DevSession = struct {
             }
             return;
         }
+        // 스크롤바 thumb 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 마우스 y를 view_offset으로
+        // 매핑(스크롤), up이 끝낸다. 새 down(1)은 아래로 흘려 새 드래그(또는 일반 클릭)를 시작한다. 다른
+        // 드래그 가드처럼 x가 영역 밖으로 나가도 캡처를 유지한다(thumb를 잡았으면 끝까지 따라간다).
+        if (self.scrollbar_drag_grab != null and (kind == 2 or kind == 3)) {
+            if (kind == 2) self.dragScrollbarTo(y_px) else {
+                self.scrollbar_drag_grab = null;
+            }
+            return;
+        }
         // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드).
         if (kind == 1 and chrome.components.sidebar.onResizeEdge(x_px, self.sidebar_width_px, if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px)) {
             self.sidebar_resize_active = true;
@@ -2722,6 +2734,18 @@ pub const DevSession = struct {
                     }
                 }
             } else |_| {}
+        }
+        // 스크롤바 thumb/트랙 down(활성 pane 우측, 스크롤백 있을 때) → thumb 드래그 시작. 터미널 선택/리포팅
+        // 보다 먼저 가로챈다 — 우측 가장자리 얇은 띠라 평소 셀 선택을 거의 안 가린다(스크롤백 없으면 스크롤바
+        // 자체가 없어 이 분기도 안 탄다). 트랙(thumb 밖) 클릭은 즉시 그 지점으로 점프하고 이어서 드래그한다.
+        if (kind == 1) {
+            if (self.scrollbarGrabAt(x_px, y_px)) |grab| {
+                self.scrollbar_drag_grab = grab;
+                self.drag_autoscroll = 0;
+                self.mouse_drag_selecting = false;
+                self.dragScrollbarTo(y_px);
+                return;
+            }
         }
         const cell = self.pxToCell(x_px, y_px) orelse {
             // 비유한(NaN/Inf) 좌표 — 셀로 못 바꾼다. up(3)/down(1)이면 드래그 자동 스크롤을
@@ -4399,10 +4423,69 @@ pub const DevSession = struct {
         return .{ .y = (view_px - thumb_h) * (1.0 - t), .h = thumb_h };
     }
 
+    /// 드래그 위치 t(0=트랙 바닥, 1=꼭대기)를 view_offset으로 매핑 — scrollbarThumbGeom의 `t = view_offset/sb_count`
+    /// 역(逆). [0,1]로 clamp 후 round해 [0,sb_count] 정수 offset. 순수 함수라 단위 테스트 가능.
+    fn scrollbarTargetOffset(t: f64, sb_count: usize) usize {
+        var tt = t;
+        if (tt < 0) tt = 0;
+        if (tt > 1) tt = 1;
+        return @intFromFloat(@round(tt * @as(f64, @floatFromInt(sb_count))));
+    }
+
+    /// down 좌표가 활성 pane 스크롤바(thumb 또는 트랙)에 있으면 잡은 grab offset(y_px - thumb_top, px)을 돌려준다.
+    /// thumb 위면 그 offset(드래그가 thumb 내 상대 위치를 유지), thumb 밖 트랙이면 thumb_h/2(클릭 지점에 thumb
+    /// 중앙을 맞춰 점프). 스크롤백 없음·메트릭 0·영역 밖이면 null. x 영역은 thumb 폭 + 좌측 4px 여유(잡기 쉽게),
+    /// y는 트랙(pane) 전체. appendScrollbar와 같은 bar_w(cell_width*0.32, 최소 5)·우측 2px 안쪽 배치를 쓴다.
+    fn scrollbarGrabAt(self: *const DevSession, x_px: f64, y_px: f64) ?f32 {
+        const rect = self.active_pane_rect;
+        if (rect.w == 0 or self.cell_width_px == 0) return null;
+        const core = &self.activeSurfaceConst().core;
+        const geom = scrollbarThumbGeom(core.scrollbackLen(), core.viewOffset(), self.cell_height_px, rect.h) orelse return null;
+        const bar_w: f64 = @max(@as(f64, @floatFromInt(self.cell_width_px)) * 0.32, 5.0);
+        const right: f64 = @floatFromInt(rect.x + rect.w);
+        const zone_left: f64 = right - bar_w - 2.0 - 4.0; // thumb 좌단(우측 2px 안쪽) - 4px grab 여유
+        if (x_px < zone_left or x_px > right) return null;
+        const top: f64 = @floatFromInt(rect.y);
+        const bottom: f64 = top + @as(f64, @floatFromInt(rect.h));
+        if (y_px < top or y_px > bottom) return null;
+        const thumb_top: f64 = top + @as(f64, geom.y);
+        const grab: f64 = y_px - thumb_top;
+        if (grab >= 0 and grab <= @as(f64, geom.h)) return @floatCast(grab); // thumb 위 — 상대 위치 유지
+        return geom.h * 0.5; // 트랙 — thumb 중앙을 클릭에 맞춤(점프)
+    }
+
+    /// 드래그/트랙-점프 중 마우스 y로 view_offset을 절대 설정한다. new_thumb_top(view 내) = (y_px - rect.y) - grab을
+    /// [0, track]로 clamp(track = view_h - thumb_h), t = 1 - thumb_top/track(0=바닥, 1=꼭대기), target =
+    /// scrollbarTargetOffset(t, sb_count). 현재 viewOffset과의 차이만큼 scrollViewport(절대 위치 → 상대 delta).
+    fn dragScrollbarTo(self: *DevSession, y_px: f64) void {
+        const grab: f64 = self.scrollbar_drag_grab orelse return;
+        const rect = self.active_pane_rect;
+        if (rect.h == 0 or self.cell_height_px == 0) return;
+        const core = &self.activeSurface().core;
+        const total_sb = core.scrollbackLen();
+        if (total_sb == 0) return;
+        // thumb_h는 view_offset과 무관(sb_count·ch·view_h만) — 현재 offset으로 구해도 .h는 안정적.
+        const geom = scrollbarThumbGeom(total_sb, core.viewOffset(), self.cell_height_px, rect.h) orelse return;
+        const view_px: f64 = @floatFromInt(rect.h);
+        const track: f64 = view_px - @as(f64, geom.h); // thumb_top 가동 범위
+        if (track <= 0) return; // thumb가 트랙을 꽉 채움 — 스크롤 여지 없음
+        var thumb_top: f64 = (y_px - @as(f64, @floatFromInt(rect.y))) - grab;
+        if (thumb_top < 0) thumb_top = 0;
+        if (thumb_top > track) thumb_top = track;
+        const t: f64 = 1.0 - thumb_top / track; // 0=바닥(offset 0), 1=꼭대기(offset sb_count)
+        const target = scrollbarTargetOffset(t, total_sb);
+        const delta: isize = @as(isize, @intCast(target)) - @as(isize, @intCast(core.viewOffset()));
+        if (delta != 0) {
+            core.scrollViewport(delta);
+            self.metal_dirty = true;
+        }
+    }
+
     /// 터미널 영역 우측에 스크롤바 thumb(둥근 GpuQuad)를 그린다 — 스크롤백이 있을 때만(sb_count>0). thumb 높이는
     /// 보이는 비율, 위치는 view_offset(0=바닥, sb_count=꼭대기)을 반영한다. 셀 위(layer 0)에 떠 텍스트를 가린다.
-    /// 메모리 'UI는 Zig+GPU 렌더러로' — 네이티브 NSScroller가 아니라 chrome GpuQuad 프리미티브. 마우스 드래그·
-    /// 자동 숨김(fade)은 후속. 좌표는 backing 픽셀(rect·cell 메트릭과 동일).
+    /// 메모리 'UI는 Zig+GPU 렌더러로' — 네이티브 NSScroller가 아니라 chrome GpuQuad 프리미티브. 마우스 드래그는
+    /// mouse()의 scrollbarGrabAt/dragScrollbarTo가 처리한다(thumb 잡고 끌어 스크롤). 자동 숨김(fade)은 후속.
+    /// 좌표는 backing 픽셀(rect·cell 메트릭과 동일).
     fn appendScrollbar(self: *DevSession, rect: app.SplitRect, core: *const terminal.TerminalCore) void {
         if (rect.w == 0) return;
         const geom = scrollbarThumbGeom(core.scrollbackLen(), core.viewOffset(), self.cell_height_px, rect.h) orelse return;
@@ -5346,6 +5429,7 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
     session.metal_dirty = false;
     session.divider_drag = null;
     session.sidebar_resize_active = false;
+    session.scrollbar_drag_grab = null; // mouse()의 스크롤바 드래그 캡처가 읽는다(undefined ?f32도 garbage non-null)
     session.cell_width_px = 8;
     session.cell_height_px = 16;
     session.scale_milli = 1000;
@@ -5377,6 +5461,7 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.mouse_drag_selecting = true;
     session.divider_drag = null; // mouse()의 divider 드래그 캡처가 읽는다(undefined 옵셔널 포인터는 garbage non-null)
     session.sidebar_resize_active = false; // mouse()의 사이드바 폭 조절 캡처가 읽는다(undefined bool도 garbage)
+    session.scrollbar_drag_grab = null; // mouse()의 스크롤바 드래그 캡처가 읽는다(undefined ?f32도 garbage non-null)
     session.drag_autoscroll = 0;
     session.last_drag_col = 1;
     session.cell_width_px = 8;
@@ -8626,6 +8711,7 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.mouse_drag_selecting = false; // 더블클릭(kind 4) 후 상태
     session.divider_drag = null; // mouse()의 divider 드래그 캡처가 읽는다(undefined 옵셔널 포인터는 garbage non-null)
     session.sidebar_resize_active = false; // mouse()의 사이드바 폭 조절 캡처가 읽는다(undefined bool도 garbage)
+    session.scrollbar_drag_grab = null; // mouse()의 스크롤바 드래그 캡처가 읽는다(undefined ?f32도 garbage non-null)
     session.drag_autoscroll = 0;
     session.last_drag_col = 0;
     session.cell_width_px = 8;
@@ -8781,6 +8867,30 @@ test "scrollbarThumbGeom: null without scrollback, thumb size/position track vie
     // 스크롤백이 많으면 thumb는 최소 높이(18px)로 clamp.
     const tiny = DevSession.scrollbarThumbGeom(10000, 0, 16, 320).?;
     try std.testing.expectApproxEqAbs(@as(f32, 18), tiny.h, 0.5);
+}
+
+test "scrollbarTargetOffset: clamp + round, and round-trips scrollbarThumbGeom" {
+    // t(0=바닥, 1=꼭대기)를 view_offset으로. 경계·중간.
+    try std.testing.expectEqual(@as(usize, 0), DevSession.scrollbarTargetOffset(0.0, 20)); // 바닥
+    try std.testing.expectEqual(@as(usize, 20), DevSession.scrollbarTargetOffset(1.0, 20)); // 꼭대기
+    try std.testing.expectEqual(@as(usize, 10), DevSession.scrollbarTargetOffset(0.5, 20)); // 중간
+    // [0,1] 밖은 clamp.
+    try std.testing.expectEqual(@as(usize, 0), DevSession.scrollbarTargetOffset(-0.3, 20));
+    try std.testing.expectEqual(@as(usize, 20), DevSession.scrollbarTargetOffset(1.5, 20));
+    // round(0.5*20=10 정수경계 위 1.54→2).
+    try std.testing.expectEqual(@as(usize, 2), DevSession.scrollbarTargetOffset(0.077, 20));
+
+    // 역매핑은 scrollbarThumbGeom의 정확한 역이어야 한다 — 각 view_offset에서 thumb_top(geom.y)을 뽑아
+    // t로 되돌리면 같은 offset이 나온다(드래그 위치 ↔ scroll 위치가 1:1, drift 없음).
+    const sb: usize = 20;
+    const ch: u32 = 16;
+    const view: u32 = 320;
+    inline for (.{ 0, 3, 7, 13, 20 }) |V| {
+        const g = DevSession.scrollbarThumbGeom(sb, V, ch, view).?;
+        const track: f64 = @as(f64, @floatFromInt(view)) - @as(f64, g.h);
+        const t: f64 = 1.0 - @as(f64, g.y) / track;
+        try std.testing.expectEqual(@as(usize, V), DevSession.scrollbarTargetOffset(t, sb));
+    }
 }
 
 test "imeCursorRect returns the cursor cell rect in backing px for IME candidate placement" {

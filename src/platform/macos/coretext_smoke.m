@@ -386,12 +386,22 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
     if ((cp >= 0x2580 && cp <= 0x2590) || (cp >= 0x2594 && cp <= 0x259F)) {
         return true;
     }
-    // box_glyph: light single 선(─│ 직선·┌┐└┘ 모서리·├┤┬┴┼ 교차·둥근 ╭╮╰╯).
+    // box_glyph: light single(─│┌┐└┘├┤┬┴┼·둥근 ╭╮╰╯) + heavy(━┃┏┓┗┛┣┫┳┻╋) + dashed(┄┅┆┇┈┉┊┋╌╍╎╏).
+    // double(═║ 등)·혼합 굵기는 box_glyph가 아직 안 덮어 폴백(여기도 제외).
     switch (cp) {
+        // light single
         case 0x2500: case 0x2502: case 0x250C: case 0x2510:
         case 0x2514: case 0x2518: case 0x251C: case 0x2524:
         case 0x252C: case 0x2534: case 0x253C:
         case 0x256D: case 0x256E: case 0x256F: case 0x2570:
+        // heavy
+        case 0x2501: case 0x2503: case 0x250F: case 0x2513:
+        case 0x2517: case 0x251B: case 0x2523: case 0x252B:
+        case 0x2533: case 0x253B: case 0x254B:
+        // dashed
+        case 0x2504: case 0x2505: case 0x2506: case 0x2507:
+        case 0x2508: case 0x2509: case 0x250A: case 0x250B:
+        case 0x254C: case 0x254D: case 0x254E: case 0x254F:
             return true;
         default:
             return false;

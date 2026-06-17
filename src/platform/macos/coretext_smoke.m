@@ -549,12 +549,6 @@ static void maru_append_draw_glyph_record(
     const bool drawable = (glyph != 0 || synth) &&
         category != MaruGlyphCategorySpace &&
         cell.width != 0;
-    // MARU_DEBUG 진단: box/block 코드포인트가 셰이퍼에 도달하는지 + CoreText가 주는 glyph(0=폰트 미보유/
-    // fallback 실패, ≠0=폰트 보유)를 본다. 합성 글리프가 안 보일 때 어느 게이트가 원인인지 실측하는 단일 지점.
-    if (maru_is_synthesized_glyph(cell.codepoint) && getenv("MARU_DEBUG") != NULL) {
-        fprintf(stderr, "maru.shaper: cp=0x%x glyph=%u synth=%d drawable=%d fallback=%u cat=%u width=%u\n",
-                cell.codepoint, (unsigned)glyph, synth ? 1 : 0, drawable ? 1 : 0, fallback, category, cell.width);
-    }
     if (glyph == 0 && !synth) {
         result->missing_glyph_count += 1;
         return;

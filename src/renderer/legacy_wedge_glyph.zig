@@ -63,75 +63,36 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
     };
 }
 
+// corner → 반쪽 삼각형 세 꼭짓점 {ax,ay,bx,by,cx,cy}(셀 분수). 셀 모서리 셋으로 대각 반쪽. 순서는 Corner enum과 일치.
+const corner_tri = [4][6]f32{
+    .{ 0, 0, 1, 0, 0, 1 }, // ◤ ul 좌상: 좌상·우상·좌하
+    .{ 0, 0, 1, 0, 1, 1 }, // ◥ ur 우상: 좌상·우상·우하
+    .{ 1, 0, 0, 1, 1, 1 }, // ◢ lr 우하: 우상·좌하·우하
+    .{ 0, 0, 0, 1, 1, 1 }, // ◣ ll 좌하: 좌상·좌하·우하
+};
+
 /// 대각 반쪽 corner 삼각형을 alpha로 채운다 — ◤=ul·◥=ur·◢=lr·◣=ll. 빗변은 셀 대각선이라 격자에 스냅된다.
 fn fillCorner(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, corner: Corner, alpha: u8) u32 {
     const fw = @as(f32, @floatFromInt(w));
     const fh = @as(f32, @floatFromInt(h));
-    // 셀 네 모서리: 좌상(0,0)·우상(fw,0)·좌하(0,fh)·우하(fw,fh). corner마다 세 모서리로 반쪽 삼각형.
-    // 첫 꼭짓점 y(ay)는 네 경우 모두 0(좌상 또는 우상 시작)이라 불변.
-    const ay: f32 = 0;
-    var ax: f32 = 0;
-    var bx: f32 = 0;
-    var by: f32 = 0;
-    var ccx: f32 = 0;
-    var ccy: f32 = 0;
-    switch (corner) {
-        .ul => { // ◤ 좌상: 좌상·우상·좌하
-            bx = fw;
-            ccy = fh;
-        },
-        .ur => { // ◥ 우상: 좌상·우상·우하
-            bx = fw;
-            ccx = fw;
-            ccy = fh;
-        },
-        .lr => { // ◢ 우하: 우상·좌하·우하
-            ax = fw;
-            by = fh;
-            ccx = fw;
-            ccy = fh;
-        },
-        .ll => { // ◣ 좌하: 좌상·좌하·우하
-            by = fh;
-            ccx = fw;
-            ccy = fh;
-        },
-    }
-    return gp.fillTriangleAlpha(pixels, bytes_per_row, w, h, ax, ay, bx, by, ccx, ccy, false, alpha);
+    const c = corner_tri[@intFromEnum(corner)];
+    return gp.fillTriangleAlpha(pixels, bytes_per_row, w, h, c[0] * fw, c[1] * fh, c[2] * fw, c[3] * fh, c[4] * fw, c[5] * fh, false, alpha);
 }
+
+// edge → 밑변 두 끝점 {ax,ay,bx,by}(셀 분수: x·fw, y·fh). 순서는 Edge enum과 일치.
+const edge_base = [4][4]f32{
+    .{ 0, 0, 0, 1 }, // left 좌변
+    .{ 0, 0, 1, 0 }, // top 상변
+    .{ 1, 0, 1, 1 }, // right 우변
+    .{ 0, 1, 1, 1 }, // bottom 하변
+};
 
 /// edge wedge를 채운다 — 밑변 = edge가 가리키는 셀 변(두 꼭짓점), 세 번째 꼭짓점 = 셀 중앙. invert면 바깥.
 fn fillWedge(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, edge: Edge, invert: bool) u32 {
     const fw = @as(f32, @floatFromInt(w));
     const fh = @as(f32, @floatFromInt(h));
-    const cx = fw / 2.0;
-    const cy = fh / 2.0;
-    // 밑변 두 끝점(셀 변).
-    var ax: f32 = 0;
-    var ay: f32 = 0;
-    var bx: f32 = 0;
-    var by: f32 = 0;
-    switch (edge) {
-        .left => { // 좌변
-            bx = 0;
-            by = fh;
-        },
-        .top => { // 상변
-            bx = fw;
-            by = 0;
-        },
-        .right => { // 우변
-            ax = fw;
-            bx = fw;
-            by = fh;
-        },
-        .bottom => { // 하변
-            ay = fh;
-            bx = fw;
-            by = fh;
-        },
-    }
-    return gp.fillTriangle(pixels, bytes_per_row, w, h, cx, cy, ax, ay, bx, by, invert);
+    const e = edge_base[@intFromEnum(edge)];
+    return gp.fillTriangle(pixels, bytes_per_row, w, h, fw / 2.0, fh / 2.0, e[0] * fw, e[1] * fh, e[2] * fw, e[3] * fh, invert);
 }
 
 test "isLegacyWedge·isCornerTriangle 범위" {

@@ -106,6 +106,30 @@ pub fn isSynthesizedCodepoint(cp: u32) bool {
         legacy_diagonal_glyph.isLegacyDiagonal(cp);
 }
 
+/// cp가 합성 대상이면 슬롯에 coverage를 채우고 **non_clear 픽셀 수**를, 아니면 null을 돌려준다 — 합성 dispatch의
+/// **단일 출처**. rasterizer는 폰트 경로 전에 이걸 한 번 호출한다(`synthesizeGlyph(...) orelse <폰트 경로>`).
+/// 각 모듈 fillCoverage는 시그니처가 같아 분기만 다르다. 슬롯이 cell 크기라 합성은 셀에 꽉 차 이음매 없이
+/// 타일링/연결된다(폰트 글리프는 셀에 안 맞아 gap·흐림·끊김). isSynthesizedCodepoint와 같은 모듈 집합을 덮는다.
+pub fn synthesizeGlyph(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize, pixels: []u8) ?u32 {
+    if (block_glyph.isBlockElement(cp)) // U+2580~259F eighth/half/full/quadrant·shade
+        return block_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
+    if (box_glyph.isBoxDrawing(cp)) // U+2500~257F 직선·모서리·T·사거리·둥근·이중선·대각선·반선
+        return box_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
+    if (powerline_glyph.isPowerline(cp)) // U+E0B0~E0BF 삼각형·반원·thin + extra 사다리꼴 E0D2/E0D4
+        return powerline_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
+    if (braille_glyph.isBraille(cp)) // U+2800~28FF 2×4 점 비트마스크
+        return braille_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
+    if (legacy_mosaic_glyph.isLegacyMosaic(cp)) // sextant 2×3·octant 2×4 블록 모자이크
+        return legacy_mosaic_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
+    if (legacy_wedge_glyph.isLegacyWedge(cp) or legacy_wedge_glyph.isCornerTriangle(cp)) // edge wedge·bowtie·corner 삼각형
+        return legacy_wedge_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
+    if (legacy_smooth_glyph.isSmoothMosaic(cp)) // U+1FB3C~1FB67 대각 폴리곤
+        return legacy_smooth_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
+    if (legacy_diagonal_glyph.isLegacyDiagonal(cp)) // 대각선 stroke·hatch
+        return legacy_diagonal_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
+    return null;
+}
+
 test "isSynthesizedCodepoint: 각 합성 범위 대표 + 비합성 대조" {
     const std = @import("std");
     // 각 모듈 범위에서 하나씩(C 게이트 maru_is_synthesized_glyph와 같은 집합이어야 한다).

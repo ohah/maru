@@ -539,10 +539,14 @@ static void maru_append_draw_glyph_record(
     }
 
     const uint32_t category = maru_category_for_codepoint(cell.codepoint);
-    // 합성 대상(box-drawing·block)은 폰트가 글리프를 못 줘도(glyph==0) Zig rasterizer가 코드포인트로 직접
-    // 그린다 → record를 남겨야 한다(여기서 드롭하면 보더가 안 보임). glyph_id=0이어도 rasterizer는 코드포인트
-    // 분기라 무시한다.
-    const bool synth = (glyph == 0) && maru_is_synthesized_glyph(cell.codepoint);
+    // 합성 대상(box-drawing·block·Powerline)은 폰트 글리프 유무와 무관하게 Zig rasterizer가 코드포인트로
+    // 직접 그린다 → 폰트가 글리프를 주더라도(glyph!=0) 그 글리프는 절대 쓰이지 않는다. 따라서 synth 판정은
+    // glyph 유무가 아니라 코드포인트만으로 한다. 폰트가 글리프를 주는 경우(glyph!=0)에도 synth로 봐야:
+    //   (1) 아래에서 glyph_id를 0으로 정규화 → cache_key가 codepoint로 키잉되어 primary/fallback이 한 슬롯에
+    //       모인다(옛 `glyph==0 &&` 조건은 폰트 보유 시 일반 경로로 새서 폰트 glyph_id로 키잉 → 같은 합성
+    //       비트맵을 두 슬롯에 중복 업로드, 드물게 다른 글자와 glyph_id가 겹치면 aliasing).
+    //   (2) font_name 복사 실패 시에도 드롭하지 않는다(합성은 폰트명 불요).
+    const bool synth = maru_is_synthesized_glyph(cell.codepoint);
     const bool drawable = (glyph != 0 || synth) &&
         category != MaruGlyphCategorySpace &&
         cell.width != 0;
@@ -559,7 +563,9 @@ static void maru_append_draw_glyph_record(
     record->reserved = 0;
     record->codepoint = cell.codepoint;
     record->combining = cell.combining;
-    record->glyph_id = (uint32_t)glyph;
+    // synth는 codepoint로 합성하므로 폰트 glyph_id는 무의미하다. 0으로 정규화해 downstream(cache_key)이
+    // codepoint로 키잉하게 한다(glyph_id!=0이면 폰트 glyph_id로 키잉되어 중복/aliasing). 비-synth는 그대로.
+    record->glyph_id = synth ? 0 : (uint32_t)glyph;
     record->drawable = drawable ? 1 : 0;
     record->fallback = fallback;
     record->color_glyph_kind = category == MaruGlyphCategoryEmoji ? 1 : 0;

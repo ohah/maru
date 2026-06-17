@@ -290,6 +290,17 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        // 대부분의 contract 테스트는 fake native 결과로 순수 Zig 로직을 검증하지만, box-drawing
+        // glyph_id 정규화(#1·#2·#6)처럼 네이티브 셰이퍼(coretext_smoke.m)를 실제로 통과해야만 잡히는
+        // 회귀가 있다. 그 테스트가 maru_macos_coretext_shape_draw_list extern을 부르므로 ObjC 소스와
+        // 프레임워크를 링크한다(실행 파일 타깃과 동일). macOS 게이트 안이라 Linux CI에는 영향 없다.
+        macos_coretext_smoke_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        macos_coretext_smoke_tests.root_module.linkFramework("Foundation", .{});
+        macos_coretext_smoke_tests.root_module.linkFramework("CoreText", .{});
+        macos_coretext_smoke_tests.root_module.linkFramework("CoreGraphics", .{});
 
         const test_macos_coretext_smoke_step = b.step("test-macos-coretext-smoke", "Run macOS CoreText smoke contract tests");
         const run_macos_coretext_smoke_tests = b.addRunArtifact(macos_coretext_smoke_tests);

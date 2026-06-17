@@ -68,7 +68,11 @@ pub fn buildGlyphRunListFromShapedRecordsWithSurface(
     var skipped_count: usize = 0;
 
     for (records) |record| {
-        if (!record.drawable or record.glyph_id == 0 or record.cell_width == 0) {
+        // drawable 하나로 판정한다. notdef(폰트 미보유) 일반 글자는 coreTextGlyphRecordFromDrawRecord
+        // (#609)에서 이미 drawable=false라 여기서 걸러진다. 반면 box-drawing·block(U+2500~257F·2580~259F)은
+        // 폰트 글리프가 없어도(glyph_id==0) rasterizer가 codepoint로 합성하므로 drawable=true다 — 예전의
+        // `glyph_id == 0` 스킵이 이 합성 record를 GlyphRunList 진입 직전에 죽여 보더가 안 보였다(스킵 제거).
+        if (!record.drawable or record.cell_width == 0) {
             skipped_count += 1;
             continue;
         }
@@ -93,7 +97,11 @@ pub fn buildGlyphRunListFromShapedRecordsWithSurface(
             .style = record.style,
             .cache_key = .{
                 .font_id = record.font_id,
-                .glyph_id = record.glyph_id,
+                // 합성 glyph(box/block)은 폰트 글리프가 없어 glyph_id=0·font_id=0(intern 제외, needsFontIdentity)을
+                // 공유한다. 그대로 두면 모든 합성 글자가 같은 cache_key로 atlas 한 슬롯에 충돌해 ─│╭╮ 가 전부 같은
+                // 모양이 된다. codepoint로 키잉해 코드포인트마다 고유 슬롯을 받게 한다(font_id=0 공간은 합성 전용이라
+                // 일반 glyph와 안 겹친다). run.glyph_id는 0 그대로라 rasterizer는 codepoint로 합성 분기한다.
+                .glyph_id = if (record.glyph_id == 0) @as(glyph_layout.GlyphId, record.codepoint) else record.glyph_id,
                 .font_size_px = config.font_size_px,
                 .device_scale = config.device_scale,
                 .cell_width_px = config.cell_width_px,
@@ -134,7 +142,8 @@ fn derivedSurfaceFromRecords(records: []const ShapedGlyphRecord) ShapedGlyphSurf
     var any_drawable = false;
 
     for (records) |record| {
-        if (!record.drawable or record.glyph_id == 0 or record.cell_width == 0) continue;
+        // drawable 단일 판정(위 build 루프와 동일) — 합성 glyph(glyph_id==0)도 drawable이면 surface 범위에 든다.
+        if (!record.drawable or record.cell_width == 0) continue;
 
         any_drawable = true;
         const end_col = std.math.add(u16, record.col, @as(u16, record.cell_width)) catch
@@ -240,9 +249,11 @@ test "shaped records reject drawable glyphs outside the provided surface" {
 test "shaped records filter non drawable records before atlas preparation" {
     // space나 .notdef 같은 record를 atlas 후보로 보내면 upload 수가 부풀고, 실제 화면이
     // 비었는지 glyph가 없는지 진단이 흐려진다. 그래서 필터링도 renderer 계약으로 둔다.
+    // 일반 notdef('?')은 합성 대상이 아니라 coreTextGlyphRecordFromDrawRecord(#609)에서 drawable=false로
+    // 표시된다. 필터는 그 drawable을 본다(glyph_id==0 자체로 거르지 않음 — 합성 glyph가 glyph_id=0이라서).
     const records = [_]ShapedGlyphRecord{
         .{ .col = 0, .cell_width = 1, .codepoint = ' ', .font_id = 1, .glyph_id = 5, .drawable = false },
-        .{ .col = 1, .cell_width = 1, .codepoint = '?', .font_id = 1, .glyph_id = 0 },
+        .{ .col = 1, .cell_width = 1, .codepoint = '?', .font_id = 1, .glyph_id = 0, .drawable = false },
         .{ .col = 2, .cell_width = 1, .codepoint = 'A', .font_id = 1, .glyph_id = 10 },
     };
 
@@ -253,6 +264,34 @@ test "shaped records filter non drawable records before atlas preparation" {
     try std.testing.expectEqual(@as(usize, 2), result.skipped_count);
     try std.testing.expectEqual(@as(u16, 3), result.runs.size.cols);
     try std.testing.expect(result.runs.dirty != null);
+}
+
+test "shaped records keep synthesized box/block glyphs (glyph_id==0) and key cache by codepoint" {
+    // 보더가 안 보이던 버그: 폰트가 box-drawing/block 글리프를 안 가지면 glyph_id==0인데, 예전 필터가
+    // glyph_id==0을 무조건 스킵해 합성 record가 GlyphRunList 진입 전에 죽었다. 합성 glyph는 drawable=true로
+    // 들어오므로(#609) 통과해야 하고, font_id=0·glyph_id=0을 공유하니 cache_key를 codepoint로 키잉해 충돌을 막아야 한다.
+    const records = [_]ShapedGlyphRecord{
+        .{ .col = 0, .cell_width = 1, .codepoint = 0x2500, .font_id = 0, .glyph_id = 0, .drawable = true }, // ─
+        .{ .col = 1, .cell_width = 1, .codepoint = 0x2502, .font_id = 0, .glyph_id = 0, .drawable = true }, // │
+        .{ .col = 2, .cell_width = 1, .codepoint = 0x2588, .font_id = 0, .glyph_id = 0, .drawable = true }, // █ block
+    };
+
+    var result = try buildGlyphRunListFromShapedRecords(std.testing.allocator, &records, .{});
+    defer result.deinit(std.testing.allocator);
+
+    // 셋 다 살아남아야 한다(예전엔 0개 — 전부 스킵 → 보더 안 보임).
+    try std.testing.expectEqual(@as(usize, 3), result.runs.glyphs.len);
+    try std.testing.expectEqual(@as(usize, 0), result.skipped_count);
+
+    // run.glyph_id는 0 그대로(rasterizer가 codepoint로 합성 분기), cache_key.glyph_id는 codepoint(고유 슬롯).
+    try std.testing.expectEqual(@as(glyph_layout.GlyphId, 0), result.runs.glyphs[0].glyph_id);
+    try std.testing.expectEqual(@as(glyph_layout.GlyphId, 0x2500), result.runs.glyphs[0].cache_key.glyph_id);
+    try std.testing.expectEqual(@as(glyph_layout.GlyphId, 0x2502), result.runs.glyphs[1].cache_key.glyph_id);
+    try std.testing.expectEqual(@as(glyph_layout.GlyphId, 0x2588), result.runs.glyphs[2].cache_key.glyph_id);
+
+    // 서로 다른 cache_key여야 atlas에서 안 겹친다(─ ≠ │ ≠ █).
+    try std.testing.expect(!std.meta.eql(result.runs.glyphs[0].cache_key, result.runs.glyphs[1].cache_key));
+    try std.testing.expect(!std.meta.eql(result.runs.glyphs[1].cache_key, result.runs.glyphs[2].cache_key));
 }
 
 test "shaped records preserve raster style boundary" {

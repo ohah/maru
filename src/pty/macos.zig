@@ -15,6 +15,11 @@ extern "c" fn openpty(
 // Used by the session-close grace window between escalation signals.
 extern "c" fn nanosleep(rqtp: *const std.c.timespec, rmtp: ?*std.c.timespec) c_int;
 
+// 포그라운드 프로세스 감지(foregroundProcessName) — tcgetpgrp: 터미널 포그라운드 pgid, proc_name: libproc(libSystem
+// 내장, 추가 링크 불요)로 pid의 프로세스 이름. macOS 전용(pty/macos.zig 자체가 macOS 전용).
+extern "c" fn tcgetpgrp(fd: c_int) c_int;
+extern "c" fn proc_name(pid: c_int, buffer: [*]u8, buffersize: u32) c_int;
+
 const tio_cs_ctty: c_int = 0x20007461;
 const tio_cs_winsz: c_int = @bitCast(@as(u32, 0x80087467));
 
@@ -258,6 +263,24 @@ pub const PtySession = struct {
         var window_size: std.posix.winsize = undefined;
         if (std.c.ioctl(fd, std.c.T.IOCGWINSZ, &window_size) < 0) return error.IoctlFailed;
         return .{ .cols = window_size.col, .rows = window_size.row };
+    }
+
+    /// 이 PTY의 **포그라운드 프로세스 그룹 리더의 프로세스 이름**을 out에 채워 반환한다(없으면 null). 셸 안에서
+    /// `claude`/`codex`를 실행하면 그게 포그라운드가 되므로, 어느 에이전트가 도는지 식별하는 데 쓴다. tcgetpgrp로
+    /// 터미널 포그라운드 pgid를 얻고(=그룹 리더 pid — 파이프라인이면 첫 단계라 비-리더 단계는 못 봄, v1 한계),
+    /// libproc proc_name으로 이름을 얻는다(libSystem 내장, 추가 링크 불요). 닫혔거나 fd 음수·pgid≤0·proc_name 실패면
+    /// null. proc_name은 NUL-종단 이름을 복사하고 strlen(=복사 바이트)을 반환하므로 out[0..n]은 NUL 없는 깨끗한 이름.
+    /// out은 ≥ 2*MAXCOMLEN(32) 바이트여야 한다(작으면 proc_name이 0 반환 → null). 호출자가 [256]u8로 넘긴다.
+    /// **틱 스레드에서만 호출**(close는 closing만 올리고 fd는 reader join 후 deinit에서만 닫혀 fd 재사용 레이스 없음).
+    pub fn foregroundProcessName(self: *PtySession, out: []u8) ?[]const u8 {
+        if (self.closing.load(.acquire)) return null;
+        const fd = self.master_fd.load(.acquire);
+        if (fd < 0) return null;
+        const pgid = tcgetpgrp(fd);
+        if (pgid <= 0) return null;
+        const n = proc_name(pgid, out.ptr, @intCast(out.len));
+        if (n <= 0) return null; // 0=실패(버퍼<32 포함). proc_name은 ≤ buffersize-1만 반환하므로 out[0..n]은 항상 buf 내.
+        return out[0..@intCast(n)];
     }
 
     fn activeMasterFd(self: *PtySession) !std.posix.fd_t {

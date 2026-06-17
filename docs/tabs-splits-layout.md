@@ -10,6 +10,11 @@ cmux 같은 유연한 레이아웃:
 - **세로 탭 사이드바**(왼쪽) — 탭마다 제목 + 메타데이터(우리 OSC 7 cwd, OSC 133 ✓/✗ 종료, 셸 이벤트)를 보여준다.
   워크스페이스 라벨 뒤엔 **git 브랜치**를 `⎇ {branch}`로 붙인다 — OSC 7 cwd에서 부모로 `.git/HEAD`를 walk-up해
   도출하며(cwd 변경 시에만 읽어 per-Term 캐시; 파생값이라 영속 안 함), repo 밖이면 생략(`readGitBranch`/`termGitBranch`).
+  라벨 앞엔 **에이전트 심볼**(claude=`✳`, codex=`⬢`)을 그 Term의 포그라운드 프로세스가 해당 CLI인 동안만 붙인다 —
+  PTY 포그라운드 프로세스명(`tcgetpgrp`+libproc `proc_name`)을 ≈0.5s마다 polling해(`pollAgentKinds`/`classifyAgent`)
+  `Term.agent_kind`로 둔다. 심볼의 존재 자체가 "그 에이전트 진행중", 사라지면 종료(파생값, 영속 안 함). 브랜드
+  전용 유니코드가 없어 근사 글리프(Anthropic 선버스트/OpenAI 육각)를 CoreText 폴백으로 렌더. node 등 인터프리터명으로
+  뜨면 미감지(v1 한계).
 - **탭마다 split(panel)** — 각 탭은 surface 1개가 아니라 가로/세로로 나눌 수 있는 surface 트리.
 - **드래그 재배치** — panel을 끌어 split을 재배열, 탭을 끌어 순서 변경.
 

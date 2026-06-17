@@ -378,6 +378,26 @@ static uint32_t maru_category_for_codepoint(uint32_t codepoint) {
     return MaruGlyphCategoryOther;
 }
 
+/* Zig renderer가 코드포인트로 직접 합성하는 글리프(폰트 글리프 불요)인지. **renderer/block_glyph.zig·
+   box_glyph.zig의 집합과 동기 유지**(거기 추가하면 여기도). CoreText가 글리프를 못 줘도(glyph==0) 이
+   코드포인트는 record를 남겨야 rasterizer 합성에 도달한다(안 그러면 셰이퍼가 드롭 → 보더가 안 보임). */
+static bool maru_is_synthesized_glyph(uint32_t cp) {
+    // block_glyph: solid block(eighth/half/full/quadrant), shade ░▒▓(2591~2593)는 제외.
+    if ((cp >= 0x2580 && cp <= 0x2590) || (cp >= 0x2594 && cp <= 0x259F)) {
+        return true;
+    }
+    // box_glyph: light single 선(─│ 직선·┌┐└┘ 모서리·├┤┬┴┼ 교차·둥근 ╭╮╰╯).
+    switch (cp) {
+        case 0x2500: case 0x2502: case 0x250C: case 0x2510:
+        case 0x2514: case 0x2518: case 0x251C: case 0x2524:
+        case 0x252C: case 0x2534: case 0x253C:
+        case 0x256D: case 0x256E: case 0x256F: case 0x2570:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFIndex *len, CFIndex capacity) {
     if (buffer == NULL || len == NULL) {
         return false;
@@ -522,10 +542,14 @@ static void maru_append_draw_glyph_record(
     }
 
     const uint32_t category = maru_category_for_codepoint(cell.codepoint);
-    const bool drawable = glyph != 0 &&
+    // 합성 대상(box-drawing·block)은 폰트가 글리프를 못 줘도(glyph==0) Zig rasterizer가 코드포인트로 직접
+    // 그린다 → record를 남겨야 한다(여기서 드롭하면 보더가 안 보임). glyph_id=0이어도 rasterizer는 코드포인트
+    // 분기라 무시한다.
+    const bool synth = (glyph == 0) && maru_is_synthesized_glyph(cell.codepoint);
+    const bool drawable = (glyph != 0 || synth) &&
         category != MaruGlyphCategorySpace &&
         cell.width != 0;
-    if (glyph == 0) {
+    if (glyph == 0 && !synth) {
         result->missing_glyph_count += 1;
         return;
     }
@@ -542,10 +566,14 @@ static void maru_append_draw_glyph_record(
     record->drawable = drawable ? 1 : 0;
     record->fallback = fallback;
     record->color_glyph_kind = category == MaruGlyphCategoryEmoji ? 1 : 0;
-    if (!maru_copy_cfstring(font_name, record->font_name, sizeof(record->font_name)) && drawable) {
-        result->glyph_record_overflow = 1;
+    if (!maru_copy_cfstring(font_name, record->font_name, sizeof(record->font_name))) {
         record->font_name[0] = '\0';
-        return;
+        // 합성(synth) 글리프는 font_name이 불요하다(rasterizer가 코드포인트로 그림) → 복사 실패로 드롭하지
+        // 않는다. 일반 drawable 글리프만 폰트명이 없으면 overflow로 드롭(렌더가 폰트를 못 찾으니).
+        if (drawable && !synth) {
+            result->glyph_record_overflow = 1;
+            return;
+        }
     }
     result->glyph_record_count += 1;
 }

@@ -44,6 +44,10 @@ pub const Action = union(enum) {
     increase_font_size,
     decrease_font_size,
     reset_font_size,
+    // 런타임 폰트 크기를 절대값(pt)으로 지정한다. config 바인딩 전용(`set_font_size:18`처럼) — 절대값이라
+    // 메뉴/팝업엔 안 넣는다(어느 크기인지 고정 못 함). dispatchAppAction이 setFontSize로 넘겨 [6,72]pt로 클램프.
+    // 키 프리셋(예: ⌘⌥1=14, ⌘⌥2=18)을 사용자가 직접 묶을 수 있다.
+    set_font_size: f32,
 };
 
 pub fn parseAction(value: []const u8) ?Action {
@@ -76,6 +80,13 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.startsWith(u8, value, prefix)) {
         const index = std.fmt.parseUnsigned(usize, value[prefix.len..], 10) catch return null;
         return .{ .select_tab = index };
+    }
+
+    const fs_prefix = "set_font_size:";
+    if (std.mem.startsWith(u8, value, fs_prefix)) {
+        const size = std.fmt.parseFloat(f32, value[fs_prefix.len..]) catch return null;
+        if (!std.math.isFinite(size)) return null; // nan/inf 거부(std.meta.eql 비교·클램프 안전)
+        return .{ .set_font_size = size };
     }
 
     return null;
@@ -122,6 +133,13 @@ test "parse configured actions" {
     const action = parseAction("select_tab:3").?;
     try std.testing.expectEqual(@as(usize, 3), action.select_tab);
     try std.testing.expect(parseAction("unknown") == null);
+
+    // set_font_size:N — 절대 폰트 크기(파라미터 액션). 정수·소수 모두, 비숫자·비유한은 null.
+    try std.testing.expectEqual(@as(f32, 18), parseAction("set_font_size:18").?.set_font_size);
+    try std.testing.expectEqual(@as(f32, 13.5), parseAction("set_font_size:13.5").?.set_font_size);
+    try std.testing.expect(parseAction("set_font_size:abc") == null);
+    try std.testing.expect(parseAction("set_font_size:") == null);
+    try std.testing.expect(parseAction("set_font_size:inf") == null); // 비유한 거부
 }
 
 test "parse global actions" {

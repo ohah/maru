@@ -2117,6 +2117,8 @@ pub const DevSession = struct {
             .increase_font_size => self.adjustFontSize(self.appearance.font.size_step),
             .decrease_font_size => self.adjustFontSize(-self.appearance.font.size_step),
             .reset_font_size => self.resetFontSize(),
+            // 절대 폰트 크기(config 바인딩 `set_font_size:N`). setFontSize가 [6,72]pt로 클램프.
+            .set_font_size => |size| self.setFontSize(size),
         }
         self.metal_dirty = true;
     }
@@ -6511,6 +6513,15 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     try std.testing.expectEqual(base + 4, session.appearance.font.size);
     session.dispatchAppAction(.reset_font_size); // 다시 base로(아래 경계 테스트 기준 복원)
     session.appearance.font.size_step = 1; // 기본 step으로 되돌려 경계 반복이 1pt씩 움직이게
+
+    // set_font_size:N — 절대 지정(config 바인딩). 그 크기로 바로 설정, [6,72]로 클램프.
+    session.dispatchAppAction(.{ .set_font_size = 24 });
+    try std.testing.expectEqual(@as(f32, 24), session.appearance.font.size);
+    session.dispatchAppAction(.{ .set_font_size = 1000 }); // 상한 클램프
+    try std.testing.expectEqual(font_size_max, session.appearance.font.size);
+    session.dispatchAppAction(.{ .set_font_size = 1 }); // 하한 클램프
+    try std.testing.expectEqual(font_size_min, session.appearance.font.size);
+    session.dispatchAppAction(.reset_font_size); // base로 복원(아래 경계 반복 기준)
 
     // ⌘- 반복 : 하한(font_size_min) 아래로 안 내려간다(경계에서 무동작).
     var i: usize = 0;

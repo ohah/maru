@@ -813,6 +813,13 @@ pub const AppSession = struct {
     // tick마다 활성 surface의 매치를 뷰포트 span으로 클립해 담는 재사용 버퍼(cell_colors.search_matches로 넘긴다).
     // 매 frame 새로 채우되 capacity는 재사용한다 — 스크롤·출력에 따라 뷰 안 매치가 바뀌므로 캐시하지 않는다.
     find_view_spans: std.ArrayList(terminal.SelectionSpan) = .empty,
+    // I/O–렌더 스레딩 분리(docs/io-render-threading.md): 렌더 CellColors.palette가 코어의
+    // palette_override 포인터를 직접 들면, PR3에서 리더 스레드의 OSC 4 변경과 data race가 난다.
+    // 그래서 매 tick paletteOverride()를 이 소유 버퍼로 복사하고 CellColors.palette가 여기를
+    // 가리키게 한다(코어 alias 제거). 활성 1개 + split 비활성 pane용 리스트(루프 전 capacity 예약해
+    // appendAssumeCapacity로 realloc 없이 → items 포인터 안정).
+    active_palette_copy: [256]?terminal.Rgb = .{null} ** 256,
+    pane_palette_copies: std.ArrayList([256]?terminal.Rgb) = .empty,
     // ⌘G/⌘⇧G로 Find 오버레이가 **닫힌 채** 매치를 네비게이션 중인지. true면 오버레이가 닫혀 있어도 매치
     // 하이라이트(현재 매치만)와 출력 시 재검색을 유지한다(findNavigate가 켠다). 오버레이 열기(toggleFind)나
     // 터미널 타이핑(.terminal_input)이 끄면 하이라이트가 사라진다(검색 종료 신호).
@@ -4903,11 +4910,14 @@ pub const AppSession = struct {
             }
             // Metal view 데이터 투영 실패(OOM 등)는 터미널 코어 동작과 무관하다. 마지막
             // frame을 유지하고 dirty를 남겨 다음 tick에 재시도한다(세션을 죽이지 않는다).
+            // OSC 4 팔레트를 소유 버퍼로 복사해 CellColors가 코어 포인터를 안 들게 한다
+            // (docs/io-render-threading.md — PR3 data race 방지). 복사본은 이 tick 동안 유효(replace가 소비).
+            self.active_palette_copy = self.activeSurface().core.paletteOverride().*;
             const cell_colors: metal_frame.CellColors = .{
                 // OSC 10/11 색 설정이 있으면 그 색, 없으면 theme 기본. SGR reverse의 default 색 스왑·OSC 11 배경에도 반영.
                 .default_fg = self.activeSurface().core.defaultFgOverride() orelse self.appearance.theme.foreground,
                 .default_bg = self.activeSurface().core.defaultBgOverride() orelse self.appearance.theme.background,
-                .palette = self.activeSurface().core.paletteOverride(), // OSC 4 팔레트 재정의(.indexed 색 풀이)
+                .palette = &self.active_palette_copy, // 코어 alias 대신 소유 복사본(OSC 4 .indexed 색 풀이)
                 .screen_reverse = self.activeSurface().core.reverseScreen(), // DECSCNM(?5) 화면 전역 반전(G9)
                 // blink(SGR 5): config text.blink가 켜졌을 때만 위상(blink_visible)을 반영해 off 위상에 숨긴다.
                 // 꺼져 있으면(기본) 항상 on → 정적(안 깜빡임). 접근성 기본값.
@@ -5142,6 +5152,9 @@ pub const AppSession = struct {
 
                 // 2) 비활성 panel 터미널 frame(자기 활성 Term surface, 바 아래 origin). split일 때만 여럿이다.
                 if (leaf_rects.items.len > 1) {
+                    // 비활성 pane palette 복사 버퍼를 leaf 수만큼 예약(루프 중 realloc 없이 → 포인터 안정).
+                    self.pane_palette_copies.clearRetainingCapacity();
+                    self.pane_palette_copies.ensureTotalCapacity(self.allocator, leaf_rects.items.len) catch {};
                     for (leaf_rects.items) |lr| {
                         if (lr.leaf == active_pane) continue; // 활성은 맨 뒤에 따로 넣는다
                         const pane_core = &lr.leaf.activeTerm().surface.core;
@@ -5153,7 +5166,12 @@ pub const AppSession = struct {
                         };
                         // 비활성 pane도 자기 core의 OSC 4 팔레트·OSC 10/11 색 설정을 쓴다(둘 다 per-터미널 상태).
                         var pane_colors = inactive_colors;
-                        pane_colors.palette = pane_core.paletteOverride();
+                        // palette를 소유 버퍼로 복사(코어 alias 제거 — docs/io-render-threading.md). 예약 capacity가
+                        // 부족(OOM)하면 코어 포인터로 폴백(드문 degraded 경로).
+                        pane_colors.palette = if (self.pane_palette_copies.items.len < self.pane_palette_copies.capacity) blk: {
+                            self.pane_palette_copies.appendAssumeCapacity(pane_core.paletteOverride().*);
+                            break :blk &self.pane_palette_copies.items[self.pane_palette_copies.items.len - 1];
+                        } else pane_core.paletteOverride();
                         pane_colors.screen_reverse = pane_core.reverseScreen(); // DECSCNM(G9) per-pane
                         pane_colors.blink_on = !self.appearance.blink_text or self.blink_visible; // blink 위상(전역, config 게이트)
                         if (pane_core.defaultFgOverride()) |fg| pane_colors.default_fg = fg;
@@ -6383,6 +6401,7 @@ pub const AppSession = struct {
             self.allocator.free(n.body);
         }
         self.agent_notifications.deinit(self.allocator);
+        self.pane_palette_copies.deinit(self.allocator);
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
         if (self.config_path_buffer) |b| self.allocator.free(b);
         self.pending_paste.deinit(self.allocator);

@@ -135,11 +135,14 @@ Phase 1(§1–§7, 완료)은 **읽기·코어 처리·질의 응답을 I/O 스�
 
 ### 8.5 시퀀싱 (각 단계 green, doc-first)
 - **P2-0 — 이 설계** ✅.
-- **P2-1 — PtyWriteQueue**: bounded owned-buffer FIFO + enqueue/drainChunk + 단위 테스트. 미배선(primitive — `PtyEventQueue` 선례).
-- **P2-2 — I/O 루프 write 통합 + 응답 라우팅**: `PtyReader.run`을 `poll(read+write+wake)` 루프로. 응답을 write_q로 enqueue(직접 `writeInput` 대신). 메인 입력은 아직 직접(두 writer 일시 공존 — 현재와 동일 위험, 무회귀).
-- **P2-3 — 메인 입력 단일화**: 키/paste/스크롤을 write_q.enqueue로(직접 `writeInput` 제거). 단일 writer 달성.
+- **P2-1 — PtyWriteQueue** ✅: bounded owned-buffer FIFO + enqueueBlocking/drainChunk/consume + 단위 테스트. 미배선(primitive — `PtyEventQueue` 선례).
+- **P2-2 — I/O 프리미티브 분리** ✅: `PtySession.readEvent`를 `waitIo`(POLLIN|POLLOUT+wake 한 poll)·`readChunk`(비차단 read)·`reapAfterEof`(close-가능 reap)로 분해(동작 보존). 통합 루프가 read·write를 한 poll에 인터리브할 기반.
+- **P2-3a — reader-processing 통합 poll 루프** ✅: `PtyReader.run`의 처리 경로를 `runProcessing`(`waitIo`[read+write+wake] 단일 루프)으로. 코어가 만든 응답(OSC 10/11·CPR·DA)을 **reader-로컬 outbound 버퍼**에 쌓아 POLLOUT일 때 비차단 전송 — 응답 write가 막혀도 read 무정지. 응답 버퍼가 `ArrayList`(append 무블록)라 self-write 데드락 없음. 메인 입력은 아직 직접(두 writer 일시 공존 — 현재와 동일 위험, 무회귀).
+- **P2-3b — 메인 입력 단일화**: 키/paste/스크롤을 write_q.enqueue + `signalWrite`(wake)로(직접 `writeInput` 제거). reader가 write_q를 같은 루프 write 단계에서 drain → 단일 writer 달성. reader의 응답 경로는 reader-로컬 버퍼라 write_q 포화와 무관(자기-enqueue 데드락 회피 — P2-3a/b 분할 이유).
 - **P2-4 — close/backpressure 정련 + 테스트**: write 대기 중 close(폐기·무UAF·무좀비), write_q 포화 backpressure. §6-4 확장.
 - **P2-5 — 문서 + `/code-review max`**: 이 문서·`pty-operating-model.md` 갱신, tip에서 결함 즉시 수정.
+
+> P2-3 분할 근거: 단일 큐로 응답+메인을 다 보내면, reader가 응답을 enqueue하면서 동시에 drain하는 구조라 큐 포화 시 reader가 자기 enqueue에서 막혀 drain 불가 → 데드락. 그래서 응답은 reader-로컬 버퍼(P2-3a), 메인만 공유 write_q(P2-3b)로 둔다. 둘 다 같은 루프 write 단계에서 비차단 전송돼 단일 writer는 유지된다.
 
 ### 8.6 테스트 전략
 - **단일 writer**(통합): 메인+I/O가 동시 enqueue해도 master 바이트가 안 섞임(write_q FIFO 직렬화 — 결정론).
@@ -148,6 +151,6 @@ Phase 1(§1–§7, 완료)은 **읽기·코어 처리·질의 응답을 I/O 스�
 - 기존 §6-1~§6-4·smoke는 그대로 green(응답·키 경로가 write_q로 바뀌어도 동작 보존).
 
 ### 8.7 리스크
-- **I/O 루프 재작성**이 가장 위험: EOF/reap/close 엣지(kqueue 경로)에 write를 더하므로 한 poll에서 read·write·wake·close를 정확히. P2-2를 작게(루프 골격) + 경계 테스트로 고정.
+- **I/O 루프 재작성**이 가장 위험: EOF/reap/close 엣지(kqueue 경로)에 write를 더하므로 한 poll에서 read·write·wake·close를 정확히. P2-2(프리미티브 분리, 동작 보존) → P2-3a(응답 write만 루프에, reader-로컬 버퍼) → P2-3b(메인 write_q)로 작게 쪼개 §6 테스트로 고정.
 - **backpressure 정책**: write_q 포화 시 키 입력 손실 금지(대기 또는 명시 backpressure). paste는 기존 per-tick 모델 재사용.
 - 이벤트 루프 라이브러리(libxev 등) 도입 안 함(hand-rolled poll 유지 — 의존성 최소, [[prefer-policy-over-codebase-mimicry]]). 이식 시 재평가.

@@ -4918,7 +4918,13 @@ pub const AppSession = struct {
         // synchronized output(DECSET 2026): sync 중이면 frame 투영을 멈춘다(metal_dirty는 쌓인 채 유지) — ESU(2026
         // reset)로 sync가 꺼지면 다음 tick에 누적 출력을 한 frame으로 투영한다(render skip과 동형). 단 ESU가
         // 영영 안 오면 freeze되므로 hold가 sync_timeout_ticks를 넘으면 강제 해제한다(아래 sync_blocks).
-        const sync_active = self.activeSurface().core.sync_output;
+        const sync_active = blk: {
+            // sync_output(DECSET 2026)은 리더 core.write가 set/clear — 락 아래 읽는다(docs/io-render-threading.md PR3).
+            const s = self.activeSurface();
+            s.core_mutex.lockUncancelable(self.io);
+            defer s.core_mutex.unlock(self.io);
+            break :blk s.core.sync_output;
+        };
         if (sync_active) {
             self.sync_hold_ticks +|= 1;
         } else {
@@ -4952,24 +4958,29 @@ pub const AppSession = struct {
             // Find 열린 채(또는 ⌘G 닫힘-네비 중) 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백
             // eviction). 재검색해 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다.
             const find_active = self.chrome_host.find.open or self.find_nav;
-            if (find_active and drain_summary.output_events > 0) {
-                self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
-                self.chrome_host.find.setMatchCount(self.find_matches.items.len); // 매치 수 동기화 + current clamp(스크롤은 안 함)
-            }
-            // 스크롤백 Find: 활성 surface의 매치를 뷰포트 span으로 클립해 하이라이트로 넘긴다(Find 활성일 때만).
-            // 현재 매치는 search_matches에서 빼 별도 강조색(current_match)으로만 칠한다. 매 frame 다시 클립한다 —
-            // 스크롤/출력으로 뷰 안에 보이는 매치가 바뀐다. find_view_spans는 capacity만 재사용(매 frame 새로 채움).
-            // 닫힌 채 ⌘G 네비(find_nav, !open)면 **현재 매치만** 강조한다(전체 하이라이트는 오버레이 열림 전용 —
-            // 바 없이 화면 전체가 칠해지는 노이즈를 피한다).
+            // 스크롤백 Find 재검색·뷰포트 클립은 활성 surface 코어를 읽고(findMatches는 ensureScrollbackRewrapped로
+            // 스크롤백을 mutate) 리더 core.write와 경합하므로 락 아래(docs/io-render-threading.md PR3). matchViewportSpan
+            // 루프까지 한 락으로 — find_view_spans/setMatchCount는 app 상태라 락 보유 중 안전.
             self.find_view_spans.clearRetainingCapacity();
             var find_current_span: ?terminal.SelectionSpan = null;
-            if (find_active) {
-                for (self.find_matches.items, 0..) |m, mi| {
-                    const span = self.activeSurface().core.matchViewportSpan(m) orelse continue;
-                    if (mi == self.chrome_host.find.current) {
-                        find_current_span = span;
-                    } else if (self.chrome_host.find.open) {
-                        self.find_view_spans.append(self.allocator, span) catch {};
+            {
+                const fa_surface = self.activeSurface();
+                fa_surface.core_mutex.lockUncancelable(self.io);
+                defer fa_surface.core_mutex.unlock(self.io);
+                if (find_active and drain_summary.output_events > 0) {
+                    fa_surface.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
+                    self.chrome_host.find.setMatchCount(self.find_matches.items.len); // 매치 수 동기화 + current clamp(스크롤은 안 함)
+                }
+                // 활성 surface 매치를 뷰포트 span으로 클립(Find 활성일 때만). 현재 매치는 별도 강조색(current_match),
+                // 나머지는 find_view_spans. 닫힌 채 ⌘G 네비(find_nav,!open)면 현재 매치만.
+                if (find_active) {
+                    for (self.find_matches.items, 0..) |m, mi| {
+                        const span = fa_surface.core.matchViewportSpan(m) orelse continue;
+                        if (mi == self.chrome_host.find.current) {
+                            find_current_span = span;
+                        } else if (self.chrome_host.find.open) {
+                            self.find_view_spans.append(self.allocator, span) catch {};
+                        }
                     }
                 }
             }

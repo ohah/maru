@@ -879,3 +879,61 @@ test "macOS close during flood reaps reader-processing child without UAF or zomb
     const rc = std.c.waitpid(child_pid, &status, std.c.W.NOHANG);
     try std.testing.expect(rc < 0);
 }
+
+test "macOS reader-processing writes main input via write_queue as the sole writer (io-render-threading §8 P2-3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    // P2-3b 단일 writer: 메인 입력(키/paste/스크롤)은 직접 PTY로 쓰지 않고 write_queue에 enqueue + signalWrite로
+    // I/O 스레드(reader)를 깨워, reader가 같은 poll 루프에서 drain해 PTY로 보낸다(reader가 **유일한** writer).
+    // child는 raw 모드로 입력을 한 번 read해 받은 바이트를 hex로 에코한다 — reader가 write_queue를 drain해 입력을
+    // child에 전달해야만 그 hex가 core에 나타난다. teeth: enqueue 시점에 reader가 read 전용 poll에 park돼 있을 수
+    // 있으므로 signalWrite가 reader를 깨워야 한다 — 없으면 입력이 안 나가 child read가 타임아웃(hex 없음) → FAIL.
+    const allocator = std.testing.allocator;
+    const size: maru.terminal.Size = .{ .cols = 50, .rows = 4 };
+
+    // child: raw(min 1 = 최소 1바이트 올 때까지, time 50 = 5s 상한), -echo(입력이 출력에 안 섞이게), 받은 입력을
+    // hex로 에코(제어문자가 core를 안 흩뜨리고 결정론적 관찰) → |END.
+    const script =
+        "stty -icanon -echo min 1 time 50 2>/dev/null; " ++
+        "dd bs=64 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'; " ++
+        "printf '|END\\n'";
+
+    var session = try maru.pty.PtySession.spawn(allocator, .{
+        .command = "/bin/bash",
+        .args = &.{ "-c", script },
+        .size = size,
+    });
+    defer session.deinit();
+
+    var surface = try maru.app.Surface.init(allocator, 1, size);
+    defer surface.deinit();
+
+    var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 64);
+    defer queue.deinit();
+    defer queue.close();
+    var write_queue = try maru.app.PtyWriteQueue.init(std.testing.io, allocator, 4096);
+    defer write_queue.deinit();
+    var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    reader.setWriteQueue(&write_queue); // 단일 writer 경로 주입(setProcessing/start 전)
+    reader.setProcessing(&surface.core, &surface.core_mutex, std.testing.io);
+    try reader.start();
+
+    // 메인 스레드: 입력을 직접 session.writeInput 하지 않고 write_queue로 보낸 뒤 reader를 깨운다.
+    try write_queue.enqueueBlocking("MARU-INPUT\n");
+    session.signalWrite();
+
+    reader.join(); // child가 입력 받아 hex 찍고 |END 후 exit → reader가 EOF로 종료
+
+    const screen = try surface.core.dumpUtf8(allocator);
+    defer allocator.free(screen);
+    try artifacts.writeTextWithFinalNewline(
+        allocator,
+        "tests/artifacts/integration/pty/single-writer-main-input.screen.txt",
+        screen,
+    );
+
+    // 4d4152552d494e505554 = "MARU-INPUT"의 hex — child가 write_queue 경유로 그 입력을 받아 에코했다는 직접 증거
+    // (reader가 유일한 writer로 메인 입력을 drain·전달). 입력 미전달(signalWrite 누락 등)이면 hex 없음 → FAIL.
+    try std.testing.expect(std.mem.indexOf(u8, screen, "|END") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "4d4152552d494e505554") != null);
+}

@@ -7,11 +7,44 @@ const runtime_pump = @import("runtime_pump.zig");
 const surface_mod = @import("surface.zig");
 const pty_reader = @import("pty_reader.zig");
 
+/// 입력 방향 write 큐 버퍼링 상한(바이트). 키 입력은 작아 paste 뒤에 막히지 않을 만큼 넉넉하게 두고, 큰
+/// paste는 per-tick enqueueSome으로 흘려보낸다(상한 초과분은 다음 tick). 사전 할당 없이 필요 시 이만큼까지 grow.
+const pty_write_queue_capacity: usize = 1 << 18; // 256 KiB
+
+/// 단일 writer 라우팅(docs/io-render-threading.md §8 P2-3b): 메인 입력을 직접 세션에 쓰지 않고 write 큐에
+/// enqueue + I/O 스레드 wake. PtyIo.ctx가 이 구조를 가리킨다(LivePtySession이 핀 고정해 주소 안정). resize는
+/// 바이트 스트림이 아니라 ioctl이라 큐를 안 거치고 세션에 바로 전달한다(write(2) 바이트와 독립이라 안전).
+const WriteQueueIo = struct {
+    write_queue: *pty_reader.PtyWriteQueue,
+    session: *pty.PtySession,
+
+    fn writeInput(ctx: *anyopaque, bytes: []const u8) !void {
+        const self: *WriteQueueIo = @ptrCast(@alignCast(ctx));
+        try self.write_queue.enqueueBlocking(bytes); // 키/스크롤: 전량 보장(포화 시 backpressure)
+        self.session.signalWrite();
+    }
+
+    fn writeInputNonBlocking(ctx: *anyopaque, bytes: []const u8) !usize {
+        const self: *WriteQueueIo = @ptrCast(@alignCast(ctx));
+        const n = try self.write_queue.enqueueSome(bytes); // paste: 들어가는 만큼만(잔량은 다음 tick)
+        if (n > 0) self.session.signalWrite();
+        return n;
+    }
+
+    fn resize(ctx: *anyopaque, size: terminal.Size) !void {
+        const self: *WriteQueueIo = @ptrCast(@alignCast(ctx));
+        try self.session.resize(size);
+    }
+};
+
 pub const LivePtySession = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     session: *pty.PtySession,
     queue: *pty_reader.PtyEventQueue,
+    write_queue: *pty_reader.PtyWriteQueue,
+    // PtyIo.ctx로 넘길 안정 저장(interactive 라우팅). init에서 채운다. 핀 고정 불변식 덕에 주소가 안정적.
+    write_io_ctx: WriteQueueIo = undefined,
     reader: pty_reader.PtyReader,
     pty_id: runtime_mod.PtyId,
     link: ?runtime_mod.RuntimeLink = null,
@@ -33,6 +66,7 @@ pub const LivePtySession = struct {
             .io = io,
             .session = undefined,
             .queue = undefined,
+            .write_queue = undefined,
             .reader = undefined,
             .pty_id = pty_id,
         };
@@ -61,12 +95,28 @@ pub const LivePtySession = struct {
         var queue_initialized = true;
         errdefer if (queue_initialized) self.queue.deinit();
 
+        // 입력 방향 단일-writer 큐(docs/io-render-threading.md §8 P2-3b): interactive 세션에서 메인 입력이
+        // 이리로 들어오면 reader가 같은 poll 루프에서 drain해 PTY로 write한다(유일한 writer). 사전 할당 없이
+        // cap까지 grow하므로 non-interactive 세션에선 사실상 0바이트(idle). 라우팅은 attachSurface가 켠다.
+        self.write_queue = try allocator.create(pty_reader.PtyWriteQueue);
+        var write_queue_allocated = true;
+        errdefer if (write_queue_allocated) allocator.destroy(self.write_queue);
+        self.write_queue.* = try pty_reader.PtyWriteQueue.init(io, allocator, pty_write_queue_capacity);
+        var write_queue_initialized = true;
+        errdefer if (write_queue_initialized) self.write_queue.deinit();
+        // PtyIo ctx 안정 저장(LivePtySession이 핀 고정되므로 &self.write_io_ctx도 안정). 단일 writer 라우팅용.
+        self.write_io_ctx = .{ .write_queue = self.write_queue, .session = self.session };
+
         self.reader = pty_reader.PtyReader.init(allocator, pty_id, self.session, self.queue);
         errdefer {
             queue_allocated = false;
             queue_initialized = false;
+            write_queue_allocated = false;
+            write_queue_initialized = false;
             session_allocated = false;
             session_initialized = false;
+            self.write_queue.deinit();
+            allocator.destroy(self.write_queue);
             self.queue.deinit();
             allocator.destroy(self.queue);
             self.session.deinit();
@@ -79,12 +129,16 @@ pub const LivePtySession = struct {
         // pre-attach 출력이 큐로 새 순서가 어긋날 수 있어, 처음부터 알맞은 모드로 시작한다.
         queue_allocated = false;
         queue_initialized = false;
+        write_queue_allocated = false;
+        write_queue_initialized = false;
         session_allocated = false;
         session_initialized = false;
     }
 
     pub fn deinit(self: *LivePtySession) void {
         self.close();
+        self.write_queue.deinit();
+        self.allocator.destroy(self.write_queue);
         self.queue.deinit();
         self.allocator.destroy(self.queue);
         self.session.deinit();
@@ -105,9 +159,14 @@ pub const LivePtySession = struct {
         // attach link도 live PTY owner가 기록한다. closeAndDetach가 이 link를 이용해
         // runtime routing을 먼저 끊으므로, 어느 PTY가 어느 surface와 연결됐는지는
         // 이 owner가 알아야 한다.
-        const link = try runtime.attach(surface, self.pty_id, self.ptyIo());
+        const link = try runtime.attach(surface, self.pty_id, self.ptyIo(process_in_reader));
         self.link = link;
-        if (process_in_reader) self.reader.setProcessing(&surface.core, &surface.core_mutex, self.io);
+        if (process_in_reader) {
+            // 단일 writer(P2-3b): write_queue 주입을 setProcessing의 release-store 전에 둬 함께 publish하고,
+            // 메인 입력은 ptyIo(true)가 돌려준 write-queue-backed PtyIo로 enqueue된다(직접 세션 write 없음).
+            self.reader.setWriteQueue(self.write_queue);
+            self.reader.setProcessing(&surface.core, &surface.core_mutex, self.io);
+        }
         self.reader.start() catch |err| {
             runtime.detachSurface(link.surface_id);
             self.link = null;
@@ -116,7 +175,18 @@ pub const LivePtySession = struct {
         return link;
     }
 
-    pub fn ptyIo(self: *LivePtySession) runtime_mod.PtyIo {
+    /// interactive(process_in_reader=true)면 메인 입력을 write_queue로 보내는 PtyIo(단일 writer, P2-3b).
+    /// 그 외(controlled smoke/테스트)는 세션 직접 write — reader가 readEvent 경로라 write_queue를 drain하지
+    /// 않으므로 큐로 보내면 안 나간다(직접 경로 유지).
+    pub fn ptyIo(self: *LivePtySession, process_in_reader: bool) runtime_mod.PtyIo {
+        if (process_in_reader) {
+            return .{
+                .ctx = &self.write_io_ctx,
+                .write_input = WriteQueueIo.writeInput,
+                .resize_fn = WriteQueueIo.resize,
+                .write_input_nb = WriteQueueIo.writeInputNonBlocking,
+            };
+        }
         return runtime_mod.PtyIo.fromSession(self.session);
     }
 
@@ -143,6 +213,7 @@ pub const LivePtySession = struct {
         // 빠져 session.close()를 부르지 않으므로, child가 deinit() 전까지 좀비로 남는다.
         self.session.close();
         self.queue.close();
+        self.write_queue.close(); // 단일 writer: 메인이 enqueueBlocking 대기 중이면 QueueClosed로 풀어준다
     }
 
     pub fn detachSurface(self: *LivePtySession, runtime: *runtime_mod.SurfaceRuntime) void {
@@ -167,6 +238,9 @@ pub const LivePtySession = struct {
         // 조기 실패, tab close, app quit은 같은 종료 순서를 타야 한다.
         // PtyReader.stopAndJoin이 queue.close -> session.close -> reader.join 순서를 소유하고,
         // 이 owner는 그 순서가 최대 한 번만 실행되도록 상태를 보관한다.
+        // write_queue도 닫아, 메인이 enqueueBlocking에서 backpressure 대기 중이면 QueueClosed로 풀어준다
+        // (단일 writer, §8.6 close-with-pending-write). close()는 idempotent.
+        self.write_queue.close();
         if (!self.reader_finished) {
             self.reader.stopAndJoin();
             self.reader_finished = true;
@@ -247,11 +321,14 @@ test "live pty closeAndDetach removes runtime routing before closing the queue" 
 
     var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 1);
     defer queue.deinit();
+    var write_queue = try pty_reader.PtyWriteQueue.init(std.testing.io, allocator, 4096);
+    defer write_queue.deinit();
     var live: LivePtySession = .{
         .allocator = allocator,
         .io = std.testing.io,
         .session = undefined,
         .queue = &queue,
+        .write_queue = &write_queue,
         .reader = undefined,
         .pty_id = 10,
         .link = link,

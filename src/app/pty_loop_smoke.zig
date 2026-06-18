@@ -80,7 +80,8 @@ pub fn run(
     var pump = live_pty.pump(&runtime);
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
-    var frame_loop = frame_loop_mod.FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
+    // io: frame 조립 코어 락(docs/io-render-threading.md PR3). live_pty.pump의 queue.io에 기대지 않고 valid한 io를 직접 넘긴다.
+    var frame_loop = frame_loop_mod.FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state, io);
 
     const scripted_input = try sendScriptedInputIfConfigured(&frame_loop, smoke_config);
 
@@ -486,7 +487,7 @@ test "app PTY loop scripted input goes through FrameLoop keybinding boundary" {
     defer renderer_state.deinit();
     var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
     var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
-    var frame_loop = frame_loop_mod.FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
+    var frame_loop = frame_loop_mod.FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state, pump.queue.io);
 
     const input = "printf smoke\nexit\n";
     const probe = try sendScriptedInputIfConfigured(&frame_loop, .{

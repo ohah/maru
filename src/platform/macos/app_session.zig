@@ -1168,7 +1168,9 @@ pub const AppSession = struct {
         // 직접 drain하고 `tickAfterDrainWithFrameBuilder`(이미 drain된 summary를 받아 frame만 조립 — frame_loop.pump
         // 무시)만 쓴다. 즉 frame_loop.pump는 이 경로에서 절대 읽히지 않으므로 포커스/닫기마다 재바인딩하지 않는다
         // (읽히지 않는 필드를 유지하는 방어 코드 불필요). frame_loop.tick/tickWithFrameBuilder로 바꾸려면 그때 pump를 살려야 한다.
-        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.activePane().activeTerm().pump, &self.renderer_state);
+        // io는 frame 조립 경로의 코어 락에 쓰인다 — frame_loop.pump는 위 주석대로 안 읽히므로 그 queue.io에 기대지
+        // 않고(undefined일 수 있다) AppSession이 가진 valid한 io를 직접 넘긴다(docs/io-render-threading.md PR3).
+        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.activePane().activeTerm().pump, &self.renderer_state, io);
         // 활성 panel rect를 초기화한다 — refreshCellMetrics가 사이드바 폭을 채운 '뒤'라야 단일 panel 기준
         // (x = 사이드바 폭, y = 0)이 맞다(createTab 시점엔 사이드바 폭이 아직 0이라 여기서 다시 잡는다).
         self.recomputeActivePaneRect();

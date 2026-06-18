@@ -685,3 +685,61 @@ fn renderSurfaceMetadata(
         },
     );
 }
+
+test "macOS reader-processing delivers OSC 11 reply without any render tick (PR3 docs/io-render-threading §6-1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    // §6-1 수락 기준: I/O–렌더 분리의 핵심을 **타이밍 비의존**으로 직접 인코딩한다. 통제 child가 OSC 11 배경
+    // 질의를 보내고 응답을 읽어 OSC11_OK 마커를 찍는다. 이 테스트는 drainAvailable/renderTick을 **한 번도**
+    // 호출하지 않는다 — 리더(I/O 스레드)가 락 아래 core.write로 질의를 처리하고 응답을 즉시 PTY로 되써야만
+    // child가 응답을 받아 마커를 찍고, 그 마커 출력을 다시 리더가 core에 적용한다. child 종료 → 리더 종료(join)
+    // 뒤 core 화면에 OSC11_OK가 있으면 PASS. 구모델(리더 비처리)이면 출력이 큐에만 쌓여 core가 비고, child도
+    // 응답을 못 받아(OSC11_FAIL/타임아웃) OSC11_OK가 없어 FAIL — "렌더 분리"가 직접 검증된다.
+    const allocator = std.testing.allocator;
+    const size: maru.terminal.Size = .{ .cols = 40, .rows = 4 };
+
+    // child: OSC 11 응답은 줄바꿈이 없어 canonical이면 버퍼링되므로 raw(min 0 time 30 = 데이터 즉시·없으면 3s),
+    // 응답이 출력으로 echo돼 섞이지 않게 -echo. OSC 11 질의(? + ST) 송신 → 한 번 read(dd)로 응답 수신 → **받은
+    // 바이트를 hex로 stdout에 에코**(리더가 그 hex를 core에 적용 → 테스트가 core에서 확인) → |END. hex라 제어문자
+    // 가 core를 안 흩뜨리고, "받았는지"를 결정론적으로 관찰한다(파싱·타임아웃 불필요).
+    const script =
+        "stty -icanon -echo min 0 time 30 2>/dev/null; " ++
+        "printf '\\033]11;?\\033\\\\'; " ++
+        "dd bs=64 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'; " ++
+        "printf '|END\\n'";
+
+    var session = try maru.pty.PtySession.spawn(allocator, .{
+        .command = "/bin/bash",
+        .args = &.{ "-c", script },
+        .size = size,
+    });
+    defer session.deinit();
+
+    var surface = try maru.app.Surface.init(allocator, 1, size);
+    defer surface.deinit();
+
+    // 리더-처리 켬: 출력을 락 아래 직접 core에 적용 + OSC 응답을 self.session으로 즉시 되쓰기(렌더 tick 무관).
+    // 큐는 "출력 발생" 빈 신호 + exit만 받으므로(메인이 안 드레인) 신호가 안 막히게 넉넉히 잡는다.
+    var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 64);
+    defer queue.deinit();
+    defer queue.close();
+    var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    reader.setProcessing(&surface.core, &surface.core_mutex, std.testing.io);
+    try reader.start();
+    // drainAvailable/renderTick 호출 없음. child가 끝나면(응답 받아 마커 찍고 exit) 리더도 EOF로 끝난다.
+    reader.join();
+
+    const screen = try surface.core.dumpUtf8(allocator);
+    defer allocator.free(screen);
+    try artifacts.writeTextWithFinalNewline(
+        allocator,
+        "tests/artifacts/integration/pty/osc11-reader-delivery.screen.txt",
+        screen,
+    );
+
+    // |END = child가 끝까지 실행됐고 그 출력이 (드레인/렌더 없이) 리더로 core에 적용됨.
+    // 1b5d31313b726762 = `\x1b]11;rgb` — child가 받은 바이트가 OSC 11 배경 응답으로 시작 = 리더가 렌더 틱 없이
+    // 질의 응답을 PTY로 되써 child가 받았다는 직접 증거. 구모델(리더 비처리)이면 응답이 안 나가 이 hex가 없다.
+    try std.testing.expect(std.mem.indexOf(u8, screen, "|END") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "1b5d31313b726762") != null);
+}

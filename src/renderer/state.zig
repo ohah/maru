@@ -57,10 +57,32 @@ pub const RendererState = struct {
         // 끝난다. 이렇게 해야 Metal backend가 DrawList를 다시 해석하지 않는다.
         var list = try draw_list.buildDrawList(allocator, snapshot);
         errdefer list.deinit(allocator);
+        return self.buildFrameFromDrawListWithRasterizer(allocator, list, shaper, rasterizer);
+    }
 
+    /// 이미 만든 DrawList로 frame을 준비한다(shaping + atlas/raster — 코어 snapshot 무관).
+    /// I/O–렌더 스레딩 분리(docs/io-render-threading.md): app/platform이 코어 락 안에서
+    /// snapshot→buildDrawList(코어→DrawList 복사)까지 끝낸 뒤, **락 밖**에서 이걸 불러 shaping을
+    /// 코어와 분리한다(shaping은 DrawList 복사본만 보므로 리더의 core.write와 무관). 성공 시 반환
+    /// frame이 list를 소유하고, 실패 시 caller가 여전히 list를 소유한다(caller errdefer).
+    pub fn buildFrameFromDrawList(
+        self: *RendererState,
+        allocator: std.mem.Allocator,
+        list: draw_list.DrawList,
+        shaper: anytype,
+    ) !types.RenderFrame {
+        return self.buildFrameFromDrawListWithRasterizer(allocator, list, shaper, glyph_raster.FakeGlyphRasterizer{});
+    }
+
+    pub fn buildFrameFromDrawListWithRasterizer(
+        self: *RendererState,
+        allocator: std.mem.Allocator,
+        list: draw_list.DrawList,
+        shaper: anytype,
+        rasterizer: anytype,
+    ) !types.RenderFrame {
         var glyphs = try glyph_layout.buildGlyphRunList(allocator, list, self.text_config, shaper);
         defer glyphs.deinit(allocator);
-
         return self.buildFrameFromGlyphRunListWithRasterizer(allocator, list, glyphs, rasterizer);
     }
 

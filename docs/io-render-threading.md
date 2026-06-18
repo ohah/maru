@@ -93,3 +93,61 @@
 - 렌더 백엔드 변경(Metal/WebGPU) — 무관, [renderer-strategy.md].
 - 벽시계 ms 기반 blink/애니메이션 시간-모델 — 별개 후속([레이어링] §5.6 note). 단 deadline 스케줄러로 진화 시 이 I/O 스레드 모델과 합류 가능.
 - 코어 자체의 파싱/상태 로직 변경 — 불변. 소유 스레드와 동기화만 바꾼다.
+
+## 8. Phase 2 — 단일 writer I/O 스레드 (이벤트 루프)
+
+Phase 1(§1–§7, 완료)은 **읽기·코어 처리·질의 응답을 I/O 스레드로** 옮겼다. 남은 비대칭: **PTY 쓰기(입력)가 아직 두 스레드에서** 일어난다 — 메인(키보드/paste/스크롤)과 I/O(질의 응답). Phase 2는 **모든 PTY 쓰기를 I/O 스레드로 단일화**해 I/O 스레드가 PTY를 양방향 모두 소유하게 한다(Ghostty termio 모델 수렴).
+
+### 8.1 동기 (아키텍처 — 인터리브가 아니라)
+
+인터리브 위험은 낮다(실측 코드 확인: 모든 write가 ≤512B — paste는 `writeInputNonBlocking`로 512B 청크, 키·응답·스크롤 배치 모두 ≤512B라 단일 `write()` 시스콜로 원자 전달; PTY 입력 버퍼 포화로 부분 write가 날 때만 드물게 인터리브). §4 PR2를 "흡수"로 둔 근거다. Phase 2의 진짜 동기는:
+- **소유권 단일화**: I/O 스레드가 PTY read+write 모두 소유 → 책임 경계가 깨끗(Ghostty termio 동일).
+- **UI가 블로킹 write에 안 묶임**: 메인은 입력을 큐에 넣기만(non-blocking). 혼잡한 PTY/큰 paste가 UI(렌더) 스레드를 안 멈춘다(현재 메인의 blocking `writeInput`은 PTY 버퍼 포화 시 메인을 막을 수 있다).
+- **이식성**: I/O 계층을 이벤트 루프로 진화시키는 작업([[portability-is-roadmap-goal]])과 정렬 — read+write를 한 poll/이벤트 루프에서.
+- **인터리브 0**(부수): 단일 writer라 부분-write 인터리브 가능성도 사라진다.
+
+### 8.2 목표 모델
+
+```text
+[I/O 스레드 (reader 승격 — 유일한 PTY writer)]
+  loop:
+    poll(master[POLLIN | (POLLOUT if write_q 비지 않음)], wake[POLLIN])
+    wake readable    -> wake 바이트 비움(closing이면 종료 준비)
+    master writable  -> write_q에서 한 청크 master로 write(부분이면 잔량 보관, 다음 루프)
+    master readable  -> read(output) -> lock(core){ core.write; reply=takeResponse } unlock
+                        -> reply 있으면 write_q에 enqueue(같은 스레드) -> markDirty 신호
+    closing          -> write_q 폐기 -> 종료
+
+[메인/렌더 스레드]
+  입력(키/paste/스크롤) -> write_q.enqueue(bytes)   // 복사 + wake 신호, non-blocking
+  렌더 -> lock(core){ snapshot+buildDrawList } unlock (Phase 1 그대로)
+```
+
+### 8.3 구성요소
+- **PtyWriteQueue**(신규, `PtySession` 소유): bounded FIFO of owned byte buffers. `enqueue(bytes)`(복사; 포화 시 backpressure), I/O 스레드가 `drainChunk`로 빼 master write. mutex 보호(메인 enqueue ↔ I/O drain). `PtyEventQueue`와 같은 결.
+- **wake self-pipe 재사용**: 현재 close 깨우기용 self-pipe를, 메인이 enqueue 후 write해 I/O poll을 "write 대기"로도 깨우는 데 쓴다(close는 `closing` 플래그로 구분).
+- **I/O 루프**: blocking `readEvent` → `poll(read+write+wake)` 루프로 진화. 기존 EOF/reap(kqueue `NOTE_EXIT`)·close 경로를 포함하되 write 단계를 더한다.
+
+### 8.4 close / backpressure / 순서
+- **close**: `closing` + wake → 루프가 write_q 폐기 후 종료. child-bound 미전송 입력은 close 시 버린다(허용 — 세션 종료). `core.deinit`은 I/O 스레드 join 후(§6-4 계약 유지).
+- **backpressure**: write_q bounded. 포화 시 enqueue가 backpressure(작은 키는 거의 안 참; 큰 paste는 현재 `pending_paste` per-tick flush를 enqueue 위로 옮겨 재시도). 출력 backpressure(`PtyEventQueue`)와 대칭.
+- **순서**: 응답(I/O)·키(메인)는 write_q enqueue 순서로 나간다. 질의→응답 인과는 응답이 그 질의 처리 시 enqueue돼 유지. 키와의 상대 순서는 비결정적이나 무해(터미널 입력 관용).
+
+### 8.5 시퀀싱 (각 단계 green, doc-first)
+- **P2-0 — 이 설계** ✅.
+- **P2-1 — PtyWriteQueue**: bounded owned-buffer FIFO + enqueue/drainChunk + 단위 테스트. 미배선(primitive — `PtyEventQueue` 선례).
+- **P2-2 — I/O 루프 write 통합 + 응답 라우팅**: `PtyReader.run`을 `poll(read+write+wake)` 루프로. 응답을 write_q로 enqueue(직접 `writeInput` 대신). 메인 입력은 아직 직접(두 writer 일시 공존 — 현재와 동일 위험, 무회귀).
+- **P2-3 — 메인 입력 단일화**: 키/paste/스크롤을 write_q.enqueue로(직접 `writeInput` 제거). 단일 writer 달성.
+- **P2-4 — close/backpressure 정련 + 테스트**: write 대기 중 close(폐기·무UAF·무좀비), write_q 포화 backpressure. §6-4 확장.
+- **P2-5 — 문서 + `/code-review max`**: 이 문서·`pty-operating-model.md` 갱신, tip에서 결함 즉시 수정.
+
+### 8.6 테스트 전략
+- **단일 writer**(통합): 메인+I/O가 동시 enqueue해도 master 바이트가 안 섞임(write_q FIFO 직렬화 — 결정론).
+- **UI 비블로킹**: PTY 버퍼 포화(child가 입력 안 읽음)에서 메인 enqueue가 안 막힘(즉시 반환 + backpressure 신호).
+- **close-with-pending-write**: write_q에 데이터 남은 채 close → 무UAF/좀비(§6-4 확장).
+- 기존 §6-1~§6-4·smoke는 그대로 green(응답·키 경로가 write_q로 바뀌어도 동작 보존).
+
+### 8.7 리스크
+- **I/O 루프 재작성**이 가장 위험: EOF/reap/close 엣지(kqueue 경로)에 write를 더하므로 한 poll에서 read·write·wake·close를 정확히. P2-2를 작게(루프 골격) + 경계 테스트로 고정.
+- **backpressure 정책**: write_q 포화 시 키 입력 손실 금지(대기 또는 명시 backpressure). paste는 기존 per-tick 모델 재사용.
+- 이벤트 루프 라이브러리(libxev 등) 도입 안 함(hand-rolled poll 유지 — 의존성 최소, [[prefer-policy-over-codebase-mimicry]]). 이식 시 재평가.

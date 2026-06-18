@@ -19,6 +19,10 @@ pub const FrameLoop = struct {
     runtime: *runtime_mod.SurfaceRuntime,
     pump: *runtime_pump.RuntimeEventPump,
     renderer_state: *renderer.RendererState,
+    // 코어 락(docs/io-render-threading.md PR3)에 쓰는 io. **pump.queue.io가 아니라 직접 소유한다** — AppSession은
+    // frame_loop.pump를 첫 Term pump로 두고 재바인딩하지 않아(tick에서 안 읽힌다는 가정) pump.queue.io가 undefined일
+    // 수 있다. frame 조립 경로가 pump.queue.io를 읽으면 그 undefined를 역참조해 크래시하므로(0xaa) io를 init에서 받는다.
+    io: std.Io,
     frame_index: usize = 0,
 
     pub fn init(
@@ -27,6 +31,7 @@ pub const FrameLoop = struct {
         runtime: *runtime_mod.SurfaceRuntime,
         pump: *runtime_pump.RuntimeEventPump,
         renderer_state: *renderer.RendererState,
+        io: std.Io,
     ) FrameLoop {
         return .{
             .allocator = allocator,
@@ -34,6 +39,7 @@ pub const FrameLoop = struct {
             .runtime = runtime,
             .pump = pump,
             .renderer_state = renderer_state,
+            .io = io,
         };
     }
 
@@ -66,7 +72,7 @@ pub const FrameLoop = struct {
             self.renderer_state,
             shaper,
             drain_summary,
-            self.pump.queue.io,
+            self.io,
         );
         return self.finishTick(frame);
     }
@@ -93,7 +99,7 @@ pub const FrameLoop = struct {
             self.app_window,
             self.renderer_state,
             drain_summary,
-            self.pump.queue.io, // 코어 락(docs/io-render-threading.md) — build이 buildFrameAfterDrain에 전달
+            self.io, // 코어 락(docs/io-render-threading.md) — build이 buildFrameAfterDrain에 전달
         );
         return self.finishTick(frame);
     }
@@ -125,7 +131,7 @@ pub const FrameLoop = struct {
     pub fn resizeActiveSurface(self: *FrameLoop, size: terminal.Size) !void {
         // resize도 frame loop가 직접 storage를 고치는 대신 SurfaceRuntime action으로 보낸다.
         // 그래야 PTY resize와 TerminalCore resize가 한 경로에서 같이 일어난다.
-        try host.resizeActiveSurface(self.app_window, self.runtime, size, self.pump.queue.io);
+        try host.resizeActiveSurface(self.app_window, self.runtime, size, self.io);
     }
 
     pub fn closeActiveLivePty(self: *FrameLoop, registry: *live_pty_registry.LivePtyRegistry) !void {
@@ -219,7 +225,7 @@ pub fn runSmoke(
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
 
-    var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
+    var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state, pump.queue.io);
     var frame_log: std.Io.Writer.Allocating = .init(allocator);
     errdefer frame_log.deinit();
     try frame_log.writer.writeAll("maru.app-loop-frames.v1\n");
@@ -449,7 +455,7 @@ test "app frame loop ticks keep building frames while the queue is empty or acti
     var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
-    var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
+    var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state, pump.queue.io);
 
     try pushOutput(&queue, allocator, 10, "first");
     var first = try loop.tick(renderer.FakeFontBackend{});
@@ -497,7 +503,7 @@ test "app frame loop can delegate frame construction after an already applied dr
     var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
-    var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
+    var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state, pump.queue.io);
 
     try pushOutput(&queue, allocator, 10, "builder");
     const drain_summary = try pump.drainAvailable();
@@ -509,6 +515,41 @@ test "app frame loop can delegate frame construction after an already applied dr
     try std.testing.expectEqual(@as(usize, 1), tick.frame.drain_summary.output_events);
     try std.testing.expect(tick.render_stats.prepared());
     try std.testing.expectEqual(@as(usize, 1), loop.frame_index);
+}
+
+test "frame builder locks via FrameLoop.io, not pump.queue.io (PR3 crash regression)" {
+    // 회귀(실측 크래시 far=0xaaaaaaaaaaaaaaaa): AppSession은 frame_loop.pump를 첫 Term pump로 두고 "tick에서
+    // 안 읽힌다"는 가정으로 재바인딩하지 않는다. 그런데 frame 조립이 pump.queue.io를 읽으면 그 undefined io를
+    // active.core_mutex.lockUncancelable(io)에 넘겨 역참조 크래시했다. 수정은 FrameLoop가 io를 직접 소유(self.io).
+    // 이 테스트는 pump.queue.io에 '쓰면 터지는' undefined를 심고 FrameLoop.io엔 valid io를 줘서, 빌더가 valid io를
+    // 받아 락에 성공하는지(=self.io 경로)로 회귀를 잡는다 — 버그 코드면 lock(undefined)에서 크래시한다.
+    const allocator = std.testing.allocator;
+    var memory_pty = MemoryPty.init(allocator);
+    defer memory_pty.deinit();
+    var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 16, .rows = 3 })};
+    defer surfaces[0].deinit();
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
+
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surfaces[0], 10, memory_pty.io());
+
+    var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 4);
+    defer queue.deinit();
+    var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
+    var renderer_state = renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
+    // FrameLoop.io엔 valid io, pump.queue.io엔 undefined(쓰면 크래시) — 둘을 갈라 어느 io로 락하는지 본다.
+    var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state, std.testing.io);
+    pump.queue.io = undefined;
+
+    // 출력은 미리 드레인된 summary로 받는다(여기서 pump를 드레인하지 않으므로 undefined queue.io를 안 건드린다).
+    var tick = try loop.tickAfterDrainWithFrameBuilder(.{ .output_events = 1 }, FakeFrameBuilder{});
+    defer tick.deinit(allocator);
+    try std.testing.expect(tick.render_stats.prepared()); // lock이 valid io로 돌아 frame이 만들어졌다
+
+    pump.queue.io = std.testing.io; // queue.deinit가 io를 만질 수 있으니 복원 후 스코프 종료
 }
 
 test "app frame loop can reuse an injected frame builder across interactive ticks" {
@@ -533,7 +574,7 @@ test "app frame loop can reuse an injected frame builder across interactive tick
     var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
-    var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
+    var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state, pump.queue.io);
 
     try pushOutput(&queue, allocator, 10, "maru$ ");
     const prompt_drain = try pump.drainAvailable();
@@ -610,7 +651,7 @@ test "app frame loop routes key events through the same app host policy" {
     var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
-    var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
+    var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state, pump.queue.io);
 
     const resolver: config_mod.KeyBindingResolver = .{
         .terminal_bindings = &.{.{

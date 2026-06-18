@@ -210,7 +210,8 @@ fn buildLivePtyFixture(
     var pump = live_pty.pump(&runtime);
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
-    var frame_loop = app.AppFrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state);
+    // io: frame 조립 코어 락(docs/io-render-threading.md PR3). live_pty.pump의 queue.io 대신 valid한 io를 직접 넘긴다.
+    var frame_loop = app.AppFrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state, io);
 
     var raw_bytes: std.ArrayList(u8) = .empty;
     errdefer raw_bytes.deinit(allocator);
@@ -241,7 +242,7 @@ fn buildLivePtyFixture(
         // missing이 생긴다. 그래서 key capture용 frame은 별도 renderer state로 격리한다.
         var keydown_renderer_state = renderer.RendererState.init(allocator, .{});
         defer keydown_renderer_state.deinit();
-        var keydown_frame_loop = app.AppFrameLoop.init(allocator, &app_window, &runtime, &pump, &keydown_renderer_state);
+        var keydown_frame_loop = app.AppFrameLoop.init(allocator, &app_window, &runtime, &pump, &keydown_renderer_state, io);
         var ready_tick = try keydown_frame_loop.tickAfterDrainWithFrameBuilder(drain_summary, coretext_frame_builder.CoreTextFrameBuilder{
             .appearance = appearance,
             .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,

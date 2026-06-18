@@ -134,7 +134,7 @@ pub const RuntimeEventPump = struct {
 
         const kind = queuedEventKind(event);
         const termination = queuedTermination(event);
-        self.runtime.applyPtyEvent(event.runtimeEvent()) catch |err| {
+        self.runtime.applyPtyEvent(event.runtimeEvent(), self.queue.io) catch |err| {
             // RuntimePtyEvent.read_error는 SurfaceRuntime이 surface를 exited로 latch한 뒤
             // error.ReadFailed를 반환한다. 이것은 환경 의존적 종료 신호이지 root-cause
             // 결함이 아니므로 pump summary의 종료 데이터로 바꾼다.

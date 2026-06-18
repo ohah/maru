@@ -427,7 +427,7 @@ fn verifyCloseLifecycle(
     const input_rejected = if (runtime.writeInput(surface_id, .{ .bytes = "after close" })) false else |err| err == error.UnknownSurface;
     const late_output_rejected = if (runtime.applyPtyEvent(.{
         .output = .{ .pty_id = pty_id, .bytes = "late output after close" },
-    })) false else |err| err == error.UnknownPty;
+    }, io)) false else |err| err == error.UnknownPty;
     const queue_closed = if (live_pty.eventQueue().tryPush(.{
         .exited = .{ .pty_id = pty_id, .status = .{ .exited = 0 } },
     })) false else |err| err == error.QueueClosed;

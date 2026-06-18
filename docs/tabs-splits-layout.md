@@ -7,14 +7,20 @@
 
 cmux 같은 유연한 레이아웃:
 
-- **세로 탭 사이드바**(왼쪽) — 탭마다 제목 + 메타데이터(우리 OSC 7 cwd, OSC 133 ✓/✗ 종료, 셸 이벤트)를 보여준다.
-  워크스페이스 라벨 뒤엔 **git 브랜치**를 `⎇ {branch}`로 붙인다 — OSC 7 cwd에서 부모로 `.git/HEAD`를 walk-up해
-  도출하며(cwd 변경 시에만 읽어 per-Term 캐시; 파생값이라 영속 안 함), repo 밖이면 생략(`readGitBranch`/`termGitBranch`).
-  라벨 앞엔 **에이전트 심볼**(claude=`✳`, codex=`⬢`)을 그 Term의 포그라운드 프로세스가 해당 CLI인 동안만 붙인다 —
-  PTY 포그라운드 프로세스명(`tcgetpgrp`+libproc `proc_name`)을 ≈0.5s마다 polling해(`pollAgentKinds`/`classifyAgent`)
-  `Term.agent_kind`로 둔다. 심볼의 존재 자체가 "그 에이전트 진행중", 사라지면 종료(파생값, 영속 안 함). 브랜드
-  전용 유니코드가 없어 근사 글리프(Anthropic 선버스트/OpenAI 육각)를 CoreText 폴백으로 렌더. node 등 인터프리터명으로
-  뜨면 미감지(v1 한계).
+- **세로 탭 사이드바**(왼쪽) — 워크스페이스마다 **1~3줄 카드**로 보여준다. line0=이름(워크스페이스 번호 prefix는
+  안 붙임 — 사용자 요청), git repo 안이면 line1=`⎇ {branch}`, line2=cwd 경로(`$HOME`→`~` 축약). 보조줄(브랜치·경로)은
+  git repo일 때만 추가되고 흐린 색, 줄들은 슬롯 안에 세로 중앙 정렬한다. 세로 위치는 row에 `slot*32 + line_count*4 +
+  line_index`로 인코딩(`sidebarGlyphRow` 단일 출처)하고 렌더러(.m)가 디코드 — 인코딩은 향후 4번째 줄(상태)까지 여유,
+  현재 구현은 3줄. 카드 높이는 cell의 3.8×. **베이스/결정**: git 브랜치는 OSC 7 cwd에서 `.git/HEAD` walk-up(cwd 변경
+  시에만 읽어 per-Term 캐시; 파생값·영속 안 함; `readGitBranch`/`termGitBranch`), repo 밖이면 보조줄 생략.
+- **에이전트 아이콘** — 그 Term 포그라운드가 claude/codex CLI인 동안만, 카드 **줄과 무관하게 슬롯 세로 중앙·좌측에 독립**
+  배치한다(아바타식; 텍스트 줄은 그만큼 우측으로 들여씀). 아이콘 존재=그 에이전트 진행중, 사라지면 종료(파생값, 영속 안 함).
+  - 감지: PTY 포그라운드 프로세스명(`tcgetpgrp`+libproc `proc_name`)을 ≈0.5s마다 polling(`pollAgentKinds`/`classifyAgent`).
+    comm이 인터프리터(node 등)면 `KERN_PROCARGS2`로 argv[1] 스크립트 basename을 꺼내 분류 — codex가 `#!/usr/bin/env node`
+    스크립트라 comm="node"로 떠도 잡힌다(claude는 네이티브라 comm="claude"). 공개 sysctl API(ps·libproc와 동일), clean-room.
+  - 심볼·색(베이스/결정): 브랜드 전용 유니코드가 없어 근사 글리프 — claude=`✳`(U+2733, Anthropic 선버스트)·codex=`✻`
+    (U+273B, OpenAI 블로썸/6잎 꽃). 가독을 위해 1.7× 확대 + 브랜드 강조색(claude 코랄·codex 그린)으로 칠한다(`agentSymbolCodepoint`).
+    근거: codex는 ⬢(육각)이 안 맞아 ✻(블로썸 근사)로 교체, 색은 각 에이전트 식별성을 위한 선택(사용자 요청).
 - **탭마다 split(panel)** — 각 탭은 surface 1개가 아니라 가로/세로로 나눌 수 있는 surface 트리.
 - **드래그 재배치** — panel을 끌어 split을 재배열, 탭을 끌어 순서 변경.
 

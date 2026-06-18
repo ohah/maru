@@ -19,6 +19,105 @@ extern "c" fn nanosleep(rqtp: *const std.c.timespec, rmtp: ?*std.c.timespec) c_i
 // 내장, 추가 링크 불요)로 pid의 프로세스 이름. macOS 전용(pty/macos.zig 자체가 macOS 전용).
 extern "c" fn tcgetpgrp(fd: c_int) c_int;
 extern "c" fn proc_name(pid: c_int, buffer: [*]u8, buffersize: u32) c_int;
+// KERN_PROCARGS2: pid의 argv/envp 덤프(공개 macOS sysctl — ps·libproc도 같은 방식). codex처럼 `#!/usr/bin/env node`
+// 스크립트로 도는 에이전트는 proc_name이 "node"라 미감지되므로, comm이 인터프리터면 argv[1] 스크립트 basename
+// ("codex")으로 분류한다. clean-room: 공개 sysctl API 사용(코드 표현 복사 아님).
+extern "c" fn sysctl(name: [*c]c_int, namelen: c_uint, oldp: ?*anyopaque, oldlenp: ?*usize, newp: ?*anyopaque, newlen: usize) c_int;
+const ctl_kern: c_int = 1;
+const kern_procargs2: c_int = 49;
+// KERN_PROCARGS2 sysctl 버퍼(argv+envp 전체를 담아야 sysctl이 성공 — 부족하면 ENOMEM). kern.argmax(=1MB) 상한이라
+// 256KB면 현실 거의 모든 argv+envp를 담는다(초과 시 ENOMEM → comm 폴백). **틱 스레드 전용**(pollAgentKinds 단일
+// 호출 경로)이라 단일 정적 버퍼를 공유한다 — 다른 스레드에서 foregroundProcessName을 부르면 동기화 필요.
+var procargs_buf: [256 * 1024]u8 = undefined;
+
+/// comm이 스크립트 인터프리터면 true — 그때만 argv[1](스크립트 경로)로 에이전트를 식별한다. 정확 일치라
+/// `vim codex.md`(comm="vim")는 argv 검사를 안 타 오탐하지 않는다.
+fn isInterpreterName(name: []const u8) bool {
+    const interps = [_][]const u8{ "node", "deno", "bun", "python", "python3", "ruby" };
+    for (interps) |it| if (std.mem.eql(u8, name, it)) return true;
+    return false;
+}
+
+fn lastPathComponent(path: []const u8) []const u8 {
+    var end: usize = path.len;
+    while (end > 0 and path[end - 1] == '/') end -= 1; // 끝 슬래시 제거("/opt/tool/" → "tool")
+    var i: usize = end;
+    while (i > 0) : (i -= 1) if (path[i - 1] == '/') return path[i..end];
+    return path[0..end];
+}
+
+/// KERN_PROCARGS2 버퍼에서 argv[1] basename을 파싱하는 순수 함수(sysctl과 분리해 단위 테스트). 레이아웃:
+/// [argc:int][exec_path\0][\0 패딩][argv0\0][argv1\0]…[envp…]. argv[1](스크립트 경로)의 basename 반환(없으면 null).
+fn parseArgv1Basename(data: []const u8) ?[]const u8 {
+    if (data.len <= @sizeOf(c_int)) return null;
+    // argc(첫 int, macOS는 항상 little-endian). argv[1]이 존재하려면 argc >= 2 — 아니면 argv[0] 다음은 argv가
+    // 아니라 envp라, 그걸 argv[1]로 오독한다(인자 없는 bare `node`/`python` REPL → env 값 기반 오분류 위험).
+    const argc: u32 = @as(u32, data[0]) | (@as(u32, data[1]) << 8) | (@as(u32, data[2]) << 16) | (@as(u32, data[3]) << 24);
+    if (argc < 2) return null;
+    var off: usize = @sizeOf(c_int); // argc(int) 건너뜀
+    while (off < data.len and data[off] != 0) off += 1; // exec_path 문자열
+    while (off < data.len and data[off] == 0) off += 1; // null 패딩
+    while (off < data.len and data[off] != 0) off += 1; // argv[0]
+    while (off < data.len and data[off] == 0) off += 1; // argv[0]·argv[1] 구분 null
+    const start = off; // argv[1] 시작
+    while (off < data.len and data[off] != 0) off += 1;
+    if (off <= start) return null; // argv[1] 없음
+    const base = lastPathComponent(data[start..off]);
+    return if (base.len == 0) null else base; // 끝-슬래시뿐인 비정상 경로면 null
+}
+
+/// 포그라운드 pgid의 argv[1] 스크립트 basename(KERN_PROCARGS2). 정적 procargs_buf의 슬라이스다.
+fn foregroundScriptBasename(pgid: c_int) ?[]const u8 {
+    var mib = [_]c_int{ ctl_kern, kern_procargs2, pgid };
+    var size: usize = procargs_buf.len;
+    if (sysctl(&mib, 3, &procargs_buf, &size, null, 0) != 0) return null;
+    return parseArgv1Basename(procargs_buf[0..size]);
+}
+
+test "parseArgv1Basename: node 래퍼의 argv[1] 스크립트 basename 추출(codex 감지)" {
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    try buf.appendSlice(a, &[_]u8{ 3, 0, 0, 0 }); // argc=3 (LE int)
+    try buf.appendSlice(a, "/Users/x/.local/share/node/24/bin/node"); // exec_path
+    try buf.append(a, 0);
+    try buf.appendSlice(a, &[_]u8{ 0, 0, 0 }); // null 패딩
+    try buf.appendSlice(a, "node"); // argv[0]
+    try buf.append(a, 0);
+    try buf.appendSlice(a, "/Users/x/.local/share/node/24/bin/codex"); // argv[1] = 스크립트 경로
+    try buf.append(a, 0);
+    try buf.appendSlice(a, "--resume"); // argv[2]
+    try buf.append(a, 0);
+    const r = parseArgv1Basename(buf.items) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("codex", r);
+
+    // argv[1] 없는(인자 없는 인터프리터, argc=1) 경우 — argv[0] 다음에 envp가 와도 argc 게이트로 null이어야 한다
+    // (envp를 argv[1]로 오독하면 안 됨 — 회귀 방지).
+    var bare: std.ArrayList(u8) = .empty;
+    defer bare.deinit(a);
+    try bare.appendSlice(a, &[_]u8{ 1, 0, 0, 0 }); // argc=1
+    try bare.appendSlice(a, "/bin/node"); // exec_path
+    try bare.append(a, 0);
+    try bare.append(a, 0); // 패딩
+    try bare.appendSlice(a, "node"); // argv[0]만
+    try bare.append(a, 0);
+    try bare.appendSlice(a, "PATH=/usr/local/bin:/usr/bin"); // envp[0] — argc 게이트 없으면 이걸 argv[1]로 오독("bin" 반환)
+    try bare.append(a, 0);
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgv1Basename(bare.items));
+
+    // 끝-슬래시 경로는 그 앞 컴포넌트를 반환(빈 문자열로 안 떨어짐).
+    try std.testing.expectEqualStrings("tool", lastPathComponent("/opt/tool/"));
+    try std.testing.expectEqualStrings("node", lastPathComponent("node"));
+}
+
+test "isInterpreterName: node/python 등만 true, 에이전트·일반 명령은 false" {
+    try std.testing.expect(isInterpreterName("node"));
+    try std.testing.expect(isInterpreterName("python3"));
+    try std.testing.expect(!isInterpreterName("claude")); // 네이티브 에이전트는 comm 그대로 분류
+    try std.testing.expect(!isInterpreterName("codex"));
+    try std.testing.expect(!isInterpreterName("vim")); // 일반 명령 → argv 검사 안 탐(오탐 방지)
+    try std.testing.expect(!isInterpreterName("node_modules")); // 정확 일치라 prefix 오탐 없음
+}
 
 const tio_cs_ctty: c_int = 0x20007461;
 const tio_cs_winsz: c_int = @bitCast(@as(u32, 0x80087467));
@@ -280,7 +379,20 @@ pub const PtySession = struct {
         if (pgid <= 0) return null;
         const n = proc_name(pgid, out.ptr, @intCast(out.len));
         if (n <= 0) return null; // 0=실패(버퍼<32 포함). proc_name은 ≤ buffersize-1만 반환하므로 out[0..n]은 항상 buf 내.
-        return out[0..@intCast(n)];
+        const comm = out[0..@intCast(n)];
+        // comm이 인터프리터(node 등)면 argv[1] 스크립트 basename으로 교체 — codex 등 `#!/usr/bin/env node` 스크립트
+        // 에이전트는 comm="node"라 안 잡히므로. 스크립트 basename은 정적 procargs_buf 슬라이스라 out으로 복사해 반환한다
+        // (호출자가 다음 호출 전에 동기 소비 — out과 procargs_buf는 별개 버퍼라 겹침 없음).
+        if (isInterpreterName(comm)) {
+            if (foregroundScriptBasename(pgid)) |script| {
+                const m = @min(script.len, out.len);
+                if (m > 0) {
+                    std.mem.copyForwards(u8, out[0..m], script[0..m]);
+                    return out[0..m];
+                }
+            }
+        }
+        return comm;
     }
 
     fn activeMasterFd(self: *PtySession) !std.posix.fd_t {

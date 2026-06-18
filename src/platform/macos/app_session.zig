@@ -103,9 +103,10 @@ const default_sidebar_width_pt: u32 = 180;
 const sidebar_min_pt: u32 = 120; // 너무 좁으면 제목/✕가 안 보임
 const sidebar_max_pt: u32 = 480; // 너무 넓으면 터미널이 좁아짐
 
-// 사이드바 탭 슬롯 한 칸의 높이를 cell 높이의 몇 배로 할지(천분율). 2500 = 2.5× — 큰
-// 탭 슬롯(라이브 요청). refreshCellMetrics가 cell_height_px × 이 비율로 backing 픽셀 슬롯 높이를 구한다.
-const sidebar_slot_height_ratio_milli: u32 = 2500;
+// 사이드바 탭 슬롯 한 칸의 높이를 cell 높이의 몇 배로 할지(천분율). 3800 = 3.8× — 3줄 카드(이름·브랜치·경로,
+// 각 1×cell = 3×cell)를 위아래 여백 두고 담을 큰 슬롯(라이브 요청). 1~2줄 탭도 같은 슬롯에 블록 세로 중앙.
+// refreshCellMetrics가 cell_height_px × 이 비율로 backing 픽셀 슬롯 높이를 구한다.
+const sidebar_slot_height_ratio_milli: u32 = 3800;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -195,6 +196,18 @@ fn readGitBranch(io: std.Io, allocator: std.mem.Allocator, cwd: []const u8) ?[]c
         dir = parent;
     }
     return null;
+}
+
+/// 사이드바 경로줄(2줄 카드 아래줄)용 cwd 문자열(owned). $HOME 접두는 "~"로 축약한다(예: /Users/x/p → ~/p).
+/// cwd가 비면 "". 파생값(영속 안 함) — 매 프레임 빌드라 owned 슬라이스를 호출부가 바로 해제한다.
+fn sidebarCwdPath(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
+    const cwd = term.surface.core.currentCwd();
+    if (cwd.len == 0) return allocator.dupe(u8, "");
+    const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
+    // $HOME 정확 경계(home 자체 또는 home/ 하위)일 때만 "~"로 — "/Users/xyz"가 "/Users/x"로 잘못 잡히지 않게.
+    if (home.len > 0 and std.mem.startsWith(u8, cwd, home) and (cwd.len == home.len or cwd[home.len] == '/'))
+        return std.fmt.allocPrint(allocator, "~{s}", .{cwd[home.len..]});
+    return allocator.dupe(u8, cwd);
 }
 
 /// backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다. cell 크기가 0이면
@@ -338,6 +351,10 @@ fn premultipliedRgba(rgb: u32, alpha: u8) u32 {
     const b = ((rgb & 0xFF) * a) / 255;
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
+
+/// per-tab 배경색(우클릭 "배경: …") tint 세기 — rich gpu_quad·tui 밴드 두 경로 단일 출처. 0xB0 ≈ 69%
+/// (0x66 ≈ 40%에서 올림 — 옅어서 안 보인다는 라이브 요청). 0=투명, 0xFF=완전 불투명.
+const tab_bg_tint_alpha: u8 = 0xB0;
 
 /// base(0xAARRGGBB)의 RGB를 tint_rgb(0xRRGGBB) 쪽으로 alpha/255만큼 lerp한다(base의 알파 보존). 사이드바 밴드에
 /// per-tab 배경 tint를 섞어, tui 기본 테마의 불투명 활성/호버 밴드가 tint quad를 덮어도 활성 슬롯에서 색이 보이게 한다.
@@ -589,17 +606,17 @@ const Term = struct {
     agent_kind: AgentKind = .none,
 };
 
-/// Term 포그라운드에서 도는 에이전트 CLI 종류. 사이드바에 심볼로 표시(claude=✳, codex=⬢).
+/// Term 포그라운드에서 도는 에이전트 CLI 종류. 사이드바에 심볼로 표시(claude=✳, codex=✻).
 const AgentKind = enum(u8) { none = 0, claude, codex };
 
-/// 에이전트 종류별 사이드바 라벨 prefix 심볼(없으면 ""). 브랜드 마크의 전용 유니코드가 없어 근사 글리프를 쓴다:
-/// claude=✳(U+2733, Anthropic 선버스트), codex=⬢(U+2B22, OpenAI 육각 모티프). CoreText 폰트 폴백으로 렌더.
-/// 에이전트가 포그라운드인 동안만 붙으므로(pollAgentKinds), 심볼의 존재 자체가 "그 에이전트 진행중" 표시다.
-fn agentSymbol(kind: AgentKind) []const u8 {
+/// 에이전트 아이콘 코드포인트(없으면 0) — 사이드바 카드에서 이름줄과 분리해 슬롯 세로 중앙에 독립 배치한다
+/// (buildSidebarDrawList의 agents). 0=아이콘 없음. 브랜드 마크의 전용 유니코드가 없어 근사 글리프: claude=✳
+/// (U+2733, Anthropic 선버스트), codex=✻(U+273B, OpenAI 블로썸/6잎 꽃 모티프). 포그라운드인 동안만 표시.
+fn agentSymbolCodepoint(kind: AgentKind) u21 {
     return switch (kind) {
-        .none => "",
-        .claude => "\u{2733} ",
-        .codex => "\u{2B22} ",
+        .none => 0,
+        .claude => 0x2733,
+        .codex => 0x273B,
     };
 }
 
@@ -1282,10 +1299,11 @@ pub const AppSession = struct {
                 const idx = for (self.tabs.items, 0..) |t, i| {
                     if (t == tab) break i;
                 } else return null;
-                // 사이드바 제목 좌단 indent(buildSidebarTitleFrame와 같은 ceil(card_gap+accent_bar)/cw) + "{n} " prefix.
+                // 사이드바 이름줄(line 0) 좌단 indent(buildSidebarTitleFrame와 같은 ceil(card_gap+accent_bar)/cw).
+                // 번호 prefix는 제거됐으므로(이름줄에 번호 없음) caret = indent + query 폭.
                 const sp = self.buildChromeTokens().space;
                 const indent_cols: u32 = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
-                const caret_col = indent_cols + numberPrefixCols(idx) + qcols;
+                const caret_col = indent_cols + qcols;
                 const slot_h = self.sidebar_slot_height_px;
                 return .{
                     .x = @intCast(caret_col * cw),
@@ -5265,7 +5283,7 @@ pub const AppSession = struct {
         const slot_h = self.sidebar_slot_height_px;
         if (slot_h > 0 and self.sidebar_width_px > 0) for (self.tabs.items, 0..) |tab, i| {
             if (tab.background_color == 0) continue;
-            const c = premultipliedRgba(tab.background_color & 0x00FF_FFFF, 0x66);
+            const c = premultipliedRgba(tab.background_color & 0x00FF_FFFF, tab_bg_tint_alpha);
             self.gpu_quads.append(self.allocator, .{
                 .x = 0,
                 .y = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(slot_h)),
@@ -5595,7 +5613,7 @@ pub const AppSession = struct {
                 if (band_row_i >= 0) {
                     const ri: usize = @intCast(band_row_i);
                     if (ri < self.tabs.items.len and self.tabs.items[ri].background_color != 0)
-                        color = blendRgb(color, self.tabs.items[ri].background_color & 0x00FF_FFFF, 0x66);
+                        color = blendRgb(color, self.tabs.items[ri].background_color & 0x00FF_FFFF, tab_bg_tint_alpha);
                 }
                 const has_radius = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;
                 if (!has_radius) {
@@ -5649,32 +5667,46 @@ pub const AppSession = struct {
         const sidebar_cols: u16 = @intCast(@min(@min(text_area.w / cw, full_cols -| indent_cols), @as(u32, std.math.maxInt(u16))));
         if (sidebar_cols == 0) return error.NoSidebar;
 
-        // 탭 라벨 "{n} {title}"을 소유 버퍼로 모은다(buildSidebarDrawList가 코드포인트로 디코드).
-        var labels: std.ArrayList([]const u8) = .empty;
+        // 탭 카드를 소유 버퍼로 모은다(buildSidebarDrawList가 코드포인트로 디코드): names=이름줄(📌 포함, 번호 없음),
+        // branch_lines=⎇ 브랜치줄, path_lines=경로줄(branch/path가 ""면 그 줄 생략 → 1~3줄). agents=에이전트 아이콘
+        // 코드포인트(0=없음) — 이름과 분리해 슬롯 세로 중앙에 독립 배치(buildSidebarDrawList).
+        var names: std.ArrayList([]const u8) = .empty;
         defer {
-            for (labels.items) |l| self.allocator.free(l);
-            labels.deinit(self.allocator);
+            for (names.items) |l| self.allocator.free(l);
+            names.deinit(self.allocator);
         }
-        for (self.tabs.items, 0..) |tab, i| {
-            // 탭 대표 라벨 = 워크스페이스 custom_name(rename) 우선, 없으면 활성 panel 활성 Term 라벨. "{n} {label}".
-            // 이 워크스페이스를 rename 중이면 편집 텍스트(+caret)로 대체해 사이드바 슬롯에서 바로 편집되게 한다.
-            if (self.renamingWorkspace(tab)) {
-                const edit = try self.renameEditText(self.allocator);
-                defer self.allocator.free(edit);
-                try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, edit));
+        var branch_lines: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (branch_lines.items) |l| self.allocator.free(l);
+            branch_lines.deinit(self.allocator);
+        }
+        var path_lines: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (path_lines.items) |l| self.allocator.free(l);
+            path_lines.deinit(self.allocator);
+        }
+        var agents: std.ArrayList(u21) = .empty;
+        defer agents.deinit(self.allocator);
+        for (self.tabs.items) |tab| {
+            const term = tab.activePane().activeTerm();
+            const renaming = self.renamingWorkspace(tab);
+            // 에이전트 아이콘은 슬롯 중앙에 독립 배치. 단 rename 중엔 숨긴다(0) — 안 그러면 편집 텍스트가 icon_cols
+            // 만큼 우측으로 밀려 renameCaretRect(아이콘 오프셋 미반영)의 caret/IME 후보창과 어긋난다.
+            try agents.append(self.allocator, if (renaming) 0 else agentSymbolCodepoint(term.agent_kind));
+            // 이름줄 = custom_name(rename) 우선, 없으면 활성 Term 라벨. rename 중이면 편집 텍스트로 대체하고 보조줄은 숨긴다.
+            if (renaming) {
+                try names.append(self.allocator, try self.renameEditText(self.allocator)); // owned → names가 소유
+                try branch_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
             } else {
-                // 라벨 = [에이전트 심볼](claude=✳/codex=⬢, 포그라운드일 때) + [📌 ](위치 고정) + 이름 + "  ⎇ {branch}"
-                // (cwd가 repo 안일 때). 좁으면 라벨 빌더가 ellipsize. 브랜치는 termGitBranch가 cwd 변경 시에만 캐시.
-                const term = tab.activePane().activeTerm();
                 const base = workspaceLabel(tab);
-                const agent = agentSymbol(term.agent_kind);
                 const pin: []const u8 = if (tab.pinned) "\u{1F4CC} " else "";
-                const body = if (self.termGitBranch(term)) |branch|
-                    try std.fmt.allocPrint(self.allocator, "{s}{s}{s}  \u{2387} {s}", .{ agent, pin, base, branch })
-                else
-                    try std.fmt.allocPrint(self.allocator, "{s}{s}{s}", .{ agent, pin, base });
-                defer self.allocator.free(body);
-                try labels.append(self.allocator, try tabNumberLabel(self.allocator, i, body));
+                // 이름줄 = [📌] + 이름 (에이전트 심볼·번호 없음 — 심볼은 독립 아이콘으로 분리).
+                try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ pin, base }));
+                // 브랜치줄·경로줄: cwd가 git repo 안일 때만(branch != null). 아니면 "" → 그 줄 생략.
+                const branch = self.termGitBranch(term); // cwd 변경 시에만 .git/HEAD 재읽기(캐시)
+                try branch_lines.append(self.allocator, if (branch) |b| try std.fmt.allocPrint(self.allocator, "\u{2387} {s}", .{b}) else try self.allocator.dupe(u8, ""));
+                try path_lines.append(self.allocator, if (branch != null) try sidebarCwdPath(self.allocator, term) else try self.allocator.dupe(u8, ""));
             }
         }
 
@@ -5682,11 +5714,22 @@ pub const AppSession = struct {
         const fg: terminal.Color = .{ .rgb = self.mutedForeground() };
         const active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
         // 호버 슬롯엔 닫기 ✕(없으면 null). plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼.
-        const draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, labels.items, sidebar_cols, fg, self.hovered_slot, self.tabs.items.len, self.app_window.active_tab, active_fg);
-        // U2/B2: 제목·✕·+ 셀을 content rect 좌단(indent_cols)만큼 우측으로 민다 — 좌측 maru-accent 막대 + 카드 패딩 안 가리게(rich만; tui indent=0 no-op).
-        if (indent_cols > 0) for (draw_list.cells) |*c| {
-            c.col += indent_cols;
+        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, agents.items, sidebar_cols, fg, self.hovered_slot, self.tabs.items.len, self.app_window.active_tab, active_fg);
+        // 에이전트 아이콘(✳ claude / ✻ codex)에 브랜드 강조색을 입혀 나머지 라벨과 구분한다 — claude=Anthropic 코랄,
+        // codex=OpenAI 그린. 아이콘은 독립 셀(슬롯 중앙)이라 codepoint로 찾아 칠한다.
+        for (draw_list.cells) |*c| switch (c.codepoint) {
+            0x2733 => c.style.foreground = .{ .rgb = .{ .r = 0xD9, .g = 0x78, .b = 0x5C } }, // claude — Anthropic 코랄
+            0x273B => c.style.foreground = .{ .rgb = .{ .r = 0x10, .g = 0xA3, .b = 0x7F } }, // codex — OpenAI 그린(#10A37F)
+            else => {},
         };
+        // U2/B2: 제목·✕·+ 셀을 content rect 좌단(indent_cols)만큼 우측으로 민다 — 좌측 maru-accent 막대 + 카드 패딩 안 가리게(rich만; tui indent=0 no-op).
+        if (indent_cols > 0) {
+            for (draw_list.cells) |*c| c.col += indent_cols;
+            // 시프트로 셀이 [indent_cols, sidebar_cols+indent_cols)로 가므로 surface 폭도 full_cols로 넓힌다 — 안 그러면
+            // 폭을 꽉 채운 긴 경로줄이 size.cols(=sidebar_cols)를 넘어 ShapedRecordOutsideSurface로 프레임이 통째로 실패
+            // (짧은 이름은 안 걸리던 잠재 버그를 경로줄이 깨움). full_cols ≥ sidebar_cols+indent_cols라 항상 수용한다.
+            draw_list.size.cols = @intCast(@min(full_cols, @as(u32, std.math.maxInt(u16))));
+        }
         // buildFromDrawList가 draw_list 소유권을 가져간다(실패 시 정리, 성공 시 RenderFrame으로 이동).
         const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
             .appearance = self.appearance,
@@ -6454,13 +6497,13 @@ test "classifyAgent: claude/codex 부분일치(대소문자 무시), 그 외·nu
     try std.testing.expectEqual(AgentKind.codex, classifyAgent("codex"));
     try std.testing.expectEqual(AgentKind.codex, classifyAgent("codex-cli")); // 부분일치
     try std.testing.expectEqual(AgentKind.none, classifyAgent("zsh"));
-    try std.testing.expectEqual(AgentKind.none, classifyAgent("node")); // 인터프리터명이면 미감지(v1 한계)
+    try std.testing.expectEqual(AgentKind.none, classifyAgent("node")); // "node"는 에이전트명 아님 — foregroundProcessName이 argv[1]("codex")로 먼저 해소
     try std.testing.expectEqual(AgentKind.none, classifyAgent(null));
     try std.testing.expectEqual(AgentKind.none, classifyAgent(""));
-    // 심볼 매핑.
-    try std.testing.expectEqualStrings("", agentSymbol(.none));
-    try std.testing.expectEqualStrings("\u{2733} ", agentSymbol(.claude));
-    try std.testing.expectEqualStrings("\u{2B22} ", agentSymbol(.codex));
+    // 아이콘 코드포인트 매핑(독립 아이콘 셀에 쓰임).
+    try std.testing.expectEqual(@as(u21, 0), agentSymbolCodepoint(.none));
+    try std.testing.expectEqual(@as(u21, 0x2733), agentSymbolCodepoint(.claude));
+    try std.testing.expectEqual(@as(u21, 0x273B), agentSymbolCodepoint(.codex));
 }
 
 test "parseGitHead: ref branch / nested ref / detached SHA / empty ref / junk" {
@@ -6747,6 +6790,81 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
         });
         defer session.deinit();
         try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 30 }, session.activePane().activeTerm().surface.core.size);
+    }
+}
+
+test "buildSidebarTitleFrame: 에이전트 심볼(✳/✻) prefix여도 프레임 빌드 성공(제목 사라짐 회귀 방지)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText shaper 경로
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    // 에이전트 없음 → 정상 빌드(baseline).
+    {
+        var f = try session.buildSidebarTitleFrame();
+        f.deinit(allocator);
+    }
+    // claude/codex 심볼 prefix가 붙어도 buildSidebarTitleFrame이 에러 없이 프레임을 만들어야 한다
+    // (catch null로 흘러 전체 사이드바 제목이 사라지면 안 됨).
+    session.activeTab().activePane().activeTerm().agent_kind = .claude;
+    {
+        var f = try session.buildSidebarTitleFrame();
+        f.deinit(allocator);
+    }
+    session.activeTab().activePane().activeTerm().agent_kind = .codex;
+    {
+        var f = try session.buildSidebarTitleFrame();
+        f.deinit(allocator);
+    }
+    // 3줄 카드(이름/브랜치/경로): buildSidebarTitleFrame은 buildSidebarDrawList 결과를 indent_cols만큼 우측 시프트한다.
+    // 폭을 꽉 채운 긴 경로줄이 size.cols를 넘으면 ShapedRecordOutsideSurface로 프레임이 통째로 실패(catch null →
+    // 사이드바 텍스트 전부 사라짐). 시프트 후 size.cols를 full_cols로 넓혀 수용하는지 고정 — 실 앱에서 못 봤던 버그.
+    {
+        const names = [_][]const u8{"\u{2733} maru"};
+        const branches = [_][]const u8{"\u{2387} main"};
+        const paths = [_][]const u8{"~/documents/workspace/maru"}; // 길어 좁은 폭을 꽉 채움 → 시프트 시 overflow
+        const muted: terminal.Color = .{ .rgb = session.appearance.theme.sidebar_foreground };
+        const sidebar_cols: u16 = 12;
+        const indent_cols: u16 = 3;
+        const full_cols: u16 = 20; // ≥ sidebar_cols + indent_cols
+        const fb = coretext_frame_builder.CoreTextFrameBuilder{
+            .appearance = session.appearance,
+            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+            .scale_milli = session.scale_milli,
+            .cell_width_px = @intCast(session.cell_width_px),
+            .cell_height_px = @intCast(session.cell_height_px),
+        };
+        // (1) 시프트만 하고 size.cols를 안 넓히면 ShapedRecordOutsideSurface로 실패함을 고정(버그 재현 — buildFromDrawList가
+        //     실패 시 draw_list를 정리하므로 별도 free 안 함).
+        {
+            const dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_]u21{}, sidebar_cols, muted, null, 1, 0, muted);
+            for (dl.cells) |*c| c.col += indent_cols;
+            try std.testing.expectError(error.ShapedRecordOutsideSurface, fb.buildFromDrawList(allocator, dl, &session.renderer_state));
+        }
+        // (2) 시프트 후 size.cols=full_cols로 넓히면(수정) 정상 빌드 + row 보존(이름 idx0·경로 idx2, count=3).
+        {
+            var dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_]u21{}, sidebar_cols, muted, null, 1, 0, muted);
+            for (dl.cells) |*c| c.col += indent_cols;
+            dl.size.cols = full_cols;
+            var f = try fb.buildFromDrawList(allocator, dl, &session.renderer_state);
+            defer f.deinit(allocator);
+            var saw_name = false;
+            var saw_path = false;
+            for (f.glyph_quad_frame.glyphs) |g| {
+                if (g.run.codepoint == 'm' and g.run.row == coretext_frame_builder.sidebarGlyphRow(0, 0, 3)) saw_name = true;
+                if (g.run.codepoint == '~' and g.run.row == coretext_frame_builder.sidebarGlyphRow(0, 2, 3)) saw_path = true;
+            }
+            try std.testing.expect(saw_name);
+            try std.testing.expect(saw_path);
+        }
     }
 }
 
@@ -8335,8 +8453,8 @@ test "sidebar gets an active-tab highlight band that follows tab create and swit
         try std.testing.expect(session.sidebar_cells.items[0].width > 0);
         // 밴드를 그릴 사이드바 폭은 터미널 origin offset과 같은 단일 출처다.
         try std.testing.expectEqual(session.sidebar_width_px, frame.terminal_origin_x_px);
-        // 탭 슬롯 높이는 cell 높이 × 2.5(큰 슬롯) — cell 높이보다 크고 메트릭에서 파생.
-        try std.testing.expectEqual(session.cell_height_px * 2500 / 1000, frame.sidebar_slot_height_px);
+        // 탭 슬롯 높이는 cell 높이 × 비율(큰 슬롯, 2줄 카드 수용) — 단일 출처 상수에서 파생, cell 높이보다 크다.
+        try std.testing.expectEqual(session.cell_height_px * sidebar_slot_height_ratio_milli / 1000, frame.sidebar_slot_height_px);
         try std.testing.expect(frame.sidebar_slot_height_px > session.cell_height_px);
     }
 

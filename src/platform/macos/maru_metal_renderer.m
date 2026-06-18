@@ -279,7 +279,8 @@ static void maru_fill_cell_quad(
     float py_top,
     float cell_h,
     float drawable_w,
-    float drawable_h
+    float drawable_h,
+    float glyph_scale // 글리프 확대 배율(1.0=무확대). 사이드바 에이전트 심볼만 >1로 키운다.
 ) {
     const float span = (float)(cell.width == 0 ? 1 : cell.width);
     float px_left = origin_x + (float)cell.col * cw;
@@ -312,6 +313,16 @@ static void maru_fill_cell_quad(
         const float gap = fmaxf(2.0f, cell_h * 0.10f); // 두 선 사이 간격
         px_bottom = px_bottom - t2 - gap; // 하단 선 + gap 만큼 위로
         px_top = px_bottom - fmaxf(1.5f, cell_h * 0.10f); // 둘째 선(약간 얇게)
+    }
+    // 글리프 확대(사이드바 에이전트 심볼): 셀 사각형을 중앙 기준으로 키워 같은 atlas slot을 stretch한다(약간
+    // 부드러우나 보조 심볼이라 무방). UV는 그대로라 글리프만 커진다. glyph_scale=1.0이면 무동작(일반 셀·커서).
+    if (glyph_scale != 1.0f) {
+        const float cx = (px_left + px_right) * 0.5f;
+        const float cy = (px_top + px_bottom) * 0.5f;
+        px_left = cx + (px_left - cx) * glyph_scale;
+        px_right = cx + (px_right - cx) * glyph_scale;
+        px_top = cy + (px_top - cy) * glyph_scale;
+        px_bottom = cy + (px_bottom - cy) * glyph_scale;
     }
     const float left = (px_left / drawable_w) * 2.0f - 1.0f;
     const float right = (px_right / drawable_w) * 2.0f - 1.0f;
@@ -639,7 +650,7 @@ bool maru_metal_renderer_draw(
         //    단일 panel이면 전부 (사이드바 폭, 0)이라 기존과 같다. split은 panel별로 다른 origin을 준다.
         for (size_t i = 0; i < cell_count; i++) {
             const MaruAppHostMetalCell tc = cells[i];
-            maru_fill_cell_quad(&vertices[i * vertices_per_cell], tc, (float)tc.origin_x, cw, (float)tc.origin_y + (float)tc.row * ch, ch, drawable_w, drawable_h);
+            maru_fill_cell_quad(&vertices[i * vertices_per_cell], tc, (float)tc.origin_x, cw, (float)tc.origin_y + (float)tc.row * ch, ch, drawable_w, drawable_h, 1.0f);
         }
         size_t quad_index = cell_count;
         // 2) 사이드바 배경 quad(x:0..origin_x, 전체 높이) — UV(-1) sentinel로 배경만 칠한다(셰이더가
@@ -664,26 +675,35 @@ bool maru_metal_renderer_draw(
             memcpy(&vertices[quad_index * vertices_per_cell], squad, sizeof(squad));
             quad_index += 1;
         }
-        // 3) 사이드바 cells — origin 0, 배경 quad 위에 그린다(painter 순서). 탭 슬롯 높이(≈2.5×)로
-        //    배치하되 셀 종류를 slot_id로 구분한다: 밴드(slot_id==0, sentinel UV)는 슬롯 전체를 채우고
-        //    (py=row×slot_h, 높이 slot_h), 제목 glyph(slot_id≠0)는 슬롯 안 세로 중앙에 ch 높이로
-        //    그린다(py=row×slot_h + (slot_h−ch)/2). 제목 glyph는 약간의 좌측 여백(cw×0.5)을 둔다.
+        // 3) 사이드바 cells — origin 0, 배경 quad 위에 그린다(painter 순서). 탭 슬롯 높이로 배치하되 셀 종류를
+        //    slot_id로 구분한다: 밴드(slot_id==0, sentinel UV)는 row=slot으로 슬롯 전체를 채우고(py=row×slot_h,
+        //    높이 slot_h). 카드 glyph(slot_id≠0)는 row에 슬롯+(줄 수,줄 위치)가 인코딩돼 있다
+        //    (coretext_frame_builder.sidebarGlyphRow: row=slot*32 + line_count*4 + line_index). line_count줄(각
+        //    1×cell)을 슬롯 안 블록으로 세로 중앙 정렬하고 line_index번째 줄에 ch 높이 + 좌측 여백(cw×0.5)으로 그린다.
         const float slot_h = (sidebar_slot_height_px > 0u) ? (float)sidebar_slot_height_px : ch;
         const float glyph_pad = cw * 0.5f; // 제목 텍스트 좌측 여백(폰트 크기에 비례)
         for (size_t i = 0; i < sidebar_cells_n; i++) {
             const MaruAppHostMetalCell sc = sidebar_cells[i];
-            const float slot_top = (float)sc.row * slot_h;
             float py_top, cell_h, sx_origin;
-            if (sc.slot_id == 0u) { // 밴드/배경 — 슬롯 전체, 여백 없음
-                py_top = slot_top;
+            if (sc.slot_id == 0u) { // 밴드/배경 — row=slot, 슬롯 전체, 여백 없음
+                py_top = (float)sc.row * slot_h;
                 cell_h = slot_h;
                 sx_origin = 0.0f;
-            } else { // 제목 glyph — 슬롯 안 세로 중앙, ch 높이, 좌측 여백
-                py_top = slot_top + (slot_h - ch) * 0.5f;
+            } else { // 카드 glyph — row=slot*32 + line_count*4 + line_index 디코드 후 슬롯 안 블록 중앙 배치
+                const uint32_t slot_idx = sc.row / 32u;
+                const uint32_t rem = sc.row % 32u;
+                const uint32_t line_count = rem / 4u;  // 카드 줄 수(1~4)
+                const uint32_t line_index = rem % 4u;  // 그 줄 위치(0=맨 위)
+                const float slot_top = (float)slot_idx * slot_h;
+                const float block_h = (float)line_count * ch;
+                const float block_top = slot_top + (slot_h - block_h) * 0.5f; // line_count줄 블록을 슬롯 세로 중앙
+                py_top = block_top + (float)line_index * ch;
                 cell_h = ch;
                 sx_origin = glyph_pad;
             }
-            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h);
+            // 에이전트 심볼(✳ U+2733 / ✻ U+273B)은 가독을 위해 1.7× 키운다(다른 글리프·밴드는 1.0).
+            const float gscale = (sc.slot_id != 0u && (sc.codepoint == 0x2733u || sc.codepoint == 0x273Bu)) ? 1.7f : 1.0f;
+            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h, gscale);
         }
     }
 

@@ -119,11 +119,12 @@ pub fn resizeActiveSurface(
     app_window: *window_mod.AppWindow,
     runtime: *runtime_mod.SurfaceRuntime,
     size: terminal.Size,
+    io: std.Io,
 ) HostError!void {
     // window resize는 screen storage와 PTY 둘 다 바꾼다. SurfaceRuntime을 통하면
     // 두 경로가 같은 action에서 함께 일어나고, app host가 TerminalCore를 직접 고치지 않는다.
     const active = app_window.active() orelse return error.NoActiveSurface;
-    try runtime.resize(active.id, size);
+    try runtime.resize(active.id, size, io); // io는 코어 락(docs/io-render-threading.md)
 }
 
 pub fn closeActiveLivePty(
@@ -196,7 +197,7 @@ pub fn runSmoke(io: std.Io, allocator: std.mem.Allocator, config: AppSmokeConfig
         return err;
     };
 
-    try resizeActiveSurface(&app_window, &runtime, config.resized_size);
+    try resizeActiveSurface(&app_window, &runtime, config.resized_size, io);
     try sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = config.input_bytes });
 
     var frame = try buildFrame(allocator, &app_window, &pump, &renderer_state, renderer.FakeFontBackend{});
@@ -484,7 +485,7 @@ test "app host close action detaches active live PTY before closing queue" {
     try std.testing.expectError(error.UnknownSurface, runtime.writeInput(1, .{ .bytes = "after close" }));
     try std.testing.expectError(error.UnknownPty, runtime.applyPtyEvent(.{
         .output = .{ .pty_id = 10, .bytes = "late output" },
-    }));
+    }, std.testing.io));
     try std.testing.expectError(error.QueueClosed, queue.tryPush(.{
         .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } },
     }));
@@ -602,7 +603,7 @@ test "app host routes focused input and resize through SurfaceRuntime" {
     _ = try runtime.attach(&surfaces[0], 10, memory_pty.io());
 
     try sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = "abc" });
-    try resizeActiveSurface(&app_window, &runtime, .{ .cols = 30, .rows = 5 });
+    try resizeActiveSurface(&app_window, &runtime, .{ .cols = 30, .rows = 5 }, std.testing.io);
 
     try std.testing.expectEqualStrings("abc", memory_pty.writes.items);
     try std.testing.expectEqual(@as(usize, 1), memory_pty.resize_calls);

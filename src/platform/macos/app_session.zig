@@ -1435,9 +1435,9 @@ pub const AppSession = struct {
             // 활성 panel의 활성 Term만 에러를 전파(기존 단일 surface resize의 try 동작 보존), 나머지는 무시.
             for (lr.leaf.terms.items) |term| {
                 if (lr.leaf == active_pane and term == lr.leaf.activeTerm()) {
-                    try self.runtime.resize(term.surface.id, psize);
+                    try self.runtime.resize(term.surface.id, psize, self.io);
                 } else {
-                    self.runtime.resize(term.surface.id, psize) catch {};
+                    self.runtime.resize(term.surface.id, psize, self.io) catch {};
                 }
             }
         }
@@ -1454,7 +1454,7 @@ pub const AppSession = struct {
         for (leaf_rects.items) |lr| {
             const trect = self.paneTermRect(lr.rect);
             const psize = gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
-            for (lr.leaf.terms.items) |term| self.runtime.resize(term.surface.id, psize) catch {};
+            for (lr.leaf.terms.items) |term| self.runtime.resize(term.surface.id, psize, self.io) catch {};
         }
     }
 
@@ -2198,7 +2198,7 @@ pub const AppSession = struct {
         }
 
         // 5) 기존 panel의 모든 Term을 a 크기로 줄인다(PTY winsize 포함). 죽은 PTY 등의 실패는 무시(split 자체는 성공).
-        for (active.terms.items) |term| self.runtime.resize(term.surface.id, a_size) catch {};
+        for (active.terms.items) |term| self.runtime.resize(term.surface.id, a_size, self.io) catch {};
 
         // 6) 새 panel로 포커스 이동(멀티플렉서 split 관행). focusPane이 탭 대표 surface(= app_window.active())·
         //    frame_loop pump 재바인딩 + 활성 panel rect 재계산 + metal_dirty를 한 곳에서 한다. 탭 인덱스는

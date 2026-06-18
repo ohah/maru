@@ -123,7 +123,7 @@ pub const FrameLoop = struct {
     pub fn resizeActiveSurface(self: *FrameLoop, size: terminal.Size) !void {
         // resize도 frame loop가 직접 storage를 고치는 대신 SurfaceRuntime action으로 보낸다.
         // 그래야 PTY resize와 TerminalCore resize가 한 경로에서 같이 일어난다.
-        try host.resizeActiveSurface(self.app_window, self.runtime, size);
+        try host.resizeActiveSurface(self.app_window, self.runtime, size, self.pump.queue.io);
     }
 
     pub fn closeActiveLivePty(self: *FrameLoop, registry: *live_pty_registry.LivePtyRegistry) !void {

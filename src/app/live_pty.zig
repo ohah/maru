@@ -244,7 +244,7 @@ test "live pty closeAndDetach removes runtime routing before closing the queue" 
     try std.testing.expectError(error.UnknownSurface, runtime.writeInput(1, .{ .bytes = "x" }));
     try std.testing.expectError(error.UnknownPty, runtime.applyPtyEvent(.{
         .output = .{ .pty_id = 10, .bytes = "late output" },
-    }));
+    }, std.testing.io));
     try std.testing.expectError(error.QueueClosed, queue.tryPush(.{
         .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } },
     }));

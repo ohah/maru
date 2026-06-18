@@ -173,7 +173,7 @@ test "live pty registry closes the session attached to the active surface" {
     try std.testing.expectError(error.UnknownSurface, runtime.writeInput(1, .{ .bytes = "after close" }));
     try std.testing.expectError(error.UnknownPty, runtime.applyPtyEvent(.{
         .output = .{ .pty_id = 10, .bytes = "late output" },
-    }));
+    }, std.testing.io));
     try std.testing.expectError(error.QueueClosed, queue.tryPush(.{
         .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } },
     }));

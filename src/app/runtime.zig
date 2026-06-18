@@ -202,7 +202,7 @@ pub const SurfaceRuntime = struct {
         return link.pty_io.writeInputNonBlocking(bytes) catch return error.WriteFailed;
     }
 
-    pub fn resize(self: *SurfaceRuntime, surface_id: SurfaceId, size: terminal.Size) RuntimeError!void {
+    pub fn resize(self: *SurfaceRuntime, surface_id: SurfaceId, size: terminal.Size, io: std.Io) RuntimeError!void {
         const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
         if (link.surface.process_state == .exited) return error.ProcessExited;
 
@@ -210,11 +210,19 @@ pub const SurfaceRuntime = struct {
         // glyph continuation 때문에 cols>=2를 요구하고 init/resize에서 자체 clamp하는데, PTY
         // winsize를 raw size로 보내면 grid(2칸)와 셸 winsize(1칸)가 어긋난다. 같은 clamp 값을 둘 다에.
         const grid = terminal.clampGridSize(size);
-        try link.surface.core.resize(grid.cols, grid.rows);
+        {
+            // 코어 resize도 코어 변경이라 락 아래(docs/io-render-threading.md). PTY ioctl은 락 밖.
+            link.surface.core_mutex.lockUncancelable(io);
+            defer link.surface.core_mutex.unlock(io);
+            try link.surface.core.resize(grid.cols, grid.rows);
+        }
         link.pty_io.resize(grid) catch return error.ResizeFailed;
     }
 
-    pub fn applyPtyEvent(self: *SurfaceRuntime, event: RuntimePtyEvent) RuntimeError!void {
+    /// io는 코어 락(std.Io.Mutex)을 잡는 데 쓴다 — 호출자(pump는 queue.io, 테스트는 testing.io)가
+    /// 자기 io를 넘긴다. docs/io-render-threading.md PR3에서 이 처리가 I/O 스레드로 이동하면
+    /// 같은 io로 잠근다.
+    pub fn applyPtyEvent(self: *SurfaceRuntime, event: RuntimePtyEvent, io: std.Io) RuntimeError!void {
         switch (event) {
             .output => |output| {
                 // PTY bytes는 여기서 해석하지 않고 TerminalCore로만 전달한다.
@@ -227,19 +235,33 @@ pub const SurfaceRuntime = struct {
                     var ebuf: [320]u8 = undefined;
                     input_diag.info("pty->core {d}B: {s}", .{ output.bytes.len, escapeForLog(output.bytes, &ebuf) });
                 }
-                link.surface.core.write(output.bytes) catch return error.InvalidOutput;
+                // 코어 변경은 락 아래에서 한다. 터미널이 만든 응답(CPR·OSC 10/11·DA 등 query 답)
+                // 바이트는 **락 안에서 복사**해 꺼내고, PTY write는 **락 밖**에서 한다 — write는
+                // 자식이 stdin을 안 읽으면 blocking(poll POLL.OUT)일 수 있어, 락을 들고 있으면
+                // 렌더 스레드의 snapshot(같은 락)을 막는다. (이 블록이 docs/io-render-threading.md
+                // PR3에서 I/O 스레드로 이동하면 이 분리가 응답 지연 결함의 핵심 해소다.)
+                var reply_buf: ?[]u8 = null;
+                {
+                    link.surface.core_mutex.lockUncancelable(io);
+                    defer link.surface.core_mutex.unlock(io);
+                    link.surface.core.write(output.bytes) catch return error.InvalidOutput;
+                    const reply = link.surface.core.pendingResponse();
+                    if (reply.len > 0) {
+                        // OOM이면 best-effort 드롭(기존 writeInput catch{}와 같은 결) — 응답은 비운다.
+                        reply_buf = self.allocator.dupe(u8, reply) catch null;
+                        link.surface.core.clearResponse();
+                    }
+                }
                 link.surface.process_state = .running;
-                // 터미널이 만든 응답(CPR 커서 위치 보고 등 query 답)을 PTY로 되쓴다 — 프로그램이
-                // 입력처럼 읽는다. zsh는 SIGWINCH redraw 때 CSI 6n으로 커서를 묻고, 응답이 없으면
-                // redraw가 어긋나 프롬프트가 중복된다. best-effort(실패해도 출력 적용은 유지).
-                const reply = link.surface.core.pendingResponse();
-                if (reply.len > 0) {
+                // zsh는 SIGWINCH redraw 때 CSI 6n으로 커서를 묻고, 응답이 없으면 redraw가 어긋나
+                // 프롬프트가 중복된다. best-effort(실패해도 출력 적용은 유지).
+                if (reply_buf) |reply| {
+                    defer self.allocator.free(reply);
                     if (self.debug_input) {
                         var rbuf: [64]u8 = undefined;
                         input_diag.info("core->pty reply: {s}", .{escapeForLog(reply, &rbuf)});
                     }
                     link.pty_io.writeInput(reply) catch {};
-                    link.surface.core.clearResponse();
                 }
             },
             .exited => |exited| {
@@ -384,7 +406,7 @@ test "runtime routes pty output to the matching surface core" {
     _ = try runtime.attach(&surface_a, 10, pty_a.io());
     _ = try runtime.attach(&surface_b, 20, pty_b.io());
 
-    try runtime.applyPtyEvent(.{ .output = .{ .pty_id = 20, .bytes = "runtime" } });
+    try runtime.applyPtyEvent(.{ .output = .{ .pty_id = 20, .bytes = "runtime" } }, std.testing.io);
 
     const screen_a = try surface_a.core.dumpUtf8(allocator);
     defer allocator.free(screen_a);
@@ -442,7 +464,7 @@ test "runtime resize updates core and pty io together" {
     defer fake_pty.deinit();
 
     _ = try runtime.attach(&surface, 10, fake_pty.io());
-    try runtime.resize(1, .{ .cols = 42, .rows = 13 });
+    try runtime.resize(1, .{ .cols = 42, .rows = 13 }, std.testing.io);
 
     try std.testing.expectEqual(terminal.Size{ .cols = 42, .rows = 13 }, surface.core.size);
     try std.testing.expectEqual(@as(usize, 1), fake_pty.resize_calls);
@@ -463,7 +485,7 @@ test "runtime resize clamps to at least 2 columns for both core and pty winsize"
 
     // cols<2 resize: TerminalCore grid와 PTY winsize 둘 다 cols>=2로 clamp돼 일치해야 한다.
     // 한쪽만 clamp하면 grid(2칸)와 셸 winsize(1칸)가 어긋난다.
-    try runtime.resize(1, .{ .cols = 1, .rows = 5 });
+    try runtime.resize(1, .{ .cols = 1, .rows = 5 }, std.testing.io);
     try std.testing.expectEqual(@as(u16, 2), surface.core.size.cols);
     try std.testing.expectEqual(@as(u16, 2), fake_pty.last_size.?.cols);
     try std.testing.expectEqual(@as(u16, 5), fake_pty.last_size.?.rows);
@@ -484,7 +506,7 @@ test "runtime maps pty resize failures to ResizeFailed after updating the surfac
 
     try std.testing.expectError(
         error.ResizeFailed,
-        runtime.resize(1, .{ .cols = 42, .rows = 13 }),
+        runtime.resize(1, .{ .cols = 42, .rows = 13 }, std.testing.io),
     );
     try std.testing.expectEqual(terminal.Size{ .cols = 42, .rows = 13 }, surface.core.size);
 }
@@ -504,7 +526,7 @@ test "runtime detaches surface and rejects late pty output" {
 
     try std.testing.expectError(
         error.UnknownPty,
-        runtime.applyPtyEvent(.{ .output = .{ .pty_id = 10, .bytes = "late" } }),
+        runtime.applyPtyEvent(.{ .output = .{ .pty_id = 10, .bytes = "late" } }, std.testing.io),
     );
     try std.testing.expectError(
         error.UnknownSurface,
@@ -523,7 +545,7 @@ test "runtime marks a surface exited and blocks further input" {
     defer fake_pty.deinit();
 
     _ = try runtime.attach(&surface, 10, fake_pty.io());
-    try runtime.applyPtyEvent(.{ .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } } });
+    try runtime.applyPtyEvent(.{ .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } } }, std.testing.io);
 
     try std.testing.expectEqual(surface_mod.ProcessState.exited, surface.process_state);
     try std.testing.expectError(
@@ -546,7 +568,7 @@ test "runtime reports pty read errors without tracing them as output" {
 
     try std.testing.expectError(
         error.ReadFailed,
-        runtime.applyPtyEvent(.{ .read_error = .{ .pty_id = 10, .message = "read failed" } }),
+        runtime.applyPtyEvent(.{ .read_error = .{ .pty_id = 10, .message = "read failed" } }, std.testing.io),
     );
 
     // A fatal read error must latch the surface as terminal, so later input is

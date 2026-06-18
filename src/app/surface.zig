@@ -36,6 +36,11 @@ pub const Surface = struct {
     command: ?[]const u8 = null,
     process_state: ProcessState = .starting,
     core: terminal.TerminalCore,
+    // 코어 접근을 보호하는 락. 현재는 메인 스레드만 코어를 만져 무경합이지만, I/O–렌더 스레딩
+    // 분리(docs/io-render-threading.md)에서 PTY 처리(core.write+응답)가 I/O 스레드로 이동하면
+    // 렌더 스레드의 snapshot 읽기와 경합한다. 그 계약을 지금 형식화한다. **attach 이후 Surface를
+    // 이동/복사하면 안 된다**(락을 잡는 코드가 포인터를 들고 있음 — reader 포인터 불변식과 동일).
+    core_mutex: std.Io.Mutex = .init,
 
     pub fn init(allocator: std.mem.Allocator, id: u64, size: terminal.Size) !Surface {
         return .{

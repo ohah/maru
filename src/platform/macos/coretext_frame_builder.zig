@@ -28,6 +28,7 @@ pub const CoreTextFrameBuilder = struct {
         app_window: *app.AppWindow,
         renderer_state: *renderer.RendererState,
         drain_summary: app.RuntimePumpDrainSummary,
+        io: std.Io,
     ) !app.AppHostFrame {
         // FrameLoop는 "drain 뒤 active surface를 frame으로 만든다"는 순서만 소유한다.
         // macOS CoreText는 platform font/raster 경계라 app layer에 새면 안 되므로, 이
@@ -36,7 +37,14 @@ pub const CoreTextFrameBuilder = struct {
         const active = app_window.active() orelse return error.NoActiveSurface;
         // renderSnapshot: 위로 스크롤한 상태면 뷰포트 윈도(스크롤백+활성)를 합성해 그린다. 바닥이면
         // snapshot()과 동일(합성 없음).
-        const draw_list = try renderer.buildDrawList(allocator, active.core.renderSnapshot());
+        //
+        // I/O–렌더 스레딩 분리(docs/io-render-threading.md): 코어 읽기(renderSnapshot→buildDrawList,
+        // 코어 메모리를 DrawList로 복사)는 **락 아래**, CoreText shaping(buildFromDrawList — DrawList
+        // 복사본만 봄)은 **락 밖**. PR3에서 리더의 core.write가 CoreText shaping에 안 막히게 한다.
+        active.core_mutex.lockUncancelable(io);
+        const list_or = renderer.buildDrawList(allocator, active.core.renderSnapshot());
+        active.core_mutex.unlock(io);
+        const draw_list = try list_or;
         // buildFromDrawList가 draw_list 소유권을 가져간다(실패 시 정리, 성공 시 RenderFrame으로 이동).
         const render_frame = try self.buildFromDrawList(allocator, draw_list, renderer_state);
 
@@ -642,7 +650,7 @@ test "CoreText frame builder builds AppHostFrame from active surface" {
         .shape_draw_list = testShapeDrawList,
         .rasterize_glyph = testRasterizeGlyph,
     };
-    var frame = try builder.build(allocator, &app_window, &renderer_state, .{ .output_events = 1 });
+    var frame = try builder.build(allocator, &app_window, &renderer_state, .{ .output_events = 1 }, std.testing.io);
     defer frame.deinit(allocator);
 
     const stats = renderer.renderFrameStats(frame.render_frame, renderer_state.atlas.entryCount());
@@ -673,7 +681,7 @@ test "CoreText frame builder reports no active surface before shaping" {
 
     try std.testing.expectError(
         error.NoActiveSurface,
-        builder.build(allocator, &app_window, &renderer_state, .{}),
+        builder.build(allocator, &app_window, &renderer_state, .{}, std.testing.io),
     );
 }
 
@@ -698,7 +706,7 @@ test "CoreText frame builder surfaces native shape failures" {
 
     try std.testing.expectError(
         error.CoreTextDrawListShapeFailed,
-        builder.build(allocator, &app_window, &renderer_state, .{}),
+        builder.build(allocator, &app_window, &renderer_state, .{}, std.testing.io),
     );
 }
 

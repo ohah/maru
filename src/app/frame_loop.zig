@@ -66,6 +66,7 @@ pub const FrameLoop = struct {
             self.renderer_state,
             shaper,
             drain_summary,
+            self.pump.queue.io,
         );
         return self.finishTick(frame);
     }
@@ -92,6 +93,7 @@ pub const FrameLoop = struct {
             self.app_window,
             self.renderer_state,
             drain_summary,
+            self.pump.queue.io, // 코어 락(docs/io-render-threading.md) — build이 buildFrameAfterDrain에 전달
         );
         return self.finishTick(frame);
     }
@@ -141,6 +143,7 @@ const FakeFrameBuilder = struct {
         app_window: *window_mod.AppWindow,
         renderer_state: *renderer.RendererState,
         drain_summary: runtime_pump.DrainSummary,
+        io: std.Io,
     ) !host.AppHostFrame {
         return host.buildFrameAfterDrain(
             allocator,
@@ -148,6 +151,7 @@ const FakeFrameBuilder = struct {
             renderer_state,
             renderer.FakeFontBackend{},
             drain_summary,
+            io,
         );
     }
 };

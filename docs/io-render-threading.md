@@ -1,0 +1,92 @@
+# I/O–렌더 스레딩 분리 전략
+
+이 문서는 PTY I/O(읽기·파싱·질의 응답 쓰기)와 터미널 코어 소유권을 **렌더 루프에서 분리**하는 재설계의 단일 출처다. 현재 [PTY 운영 모델](pty-operating-model.md)의 "reader 스레드는 바이트만 큐에 넣고 메인 스레드가 core.write" 모델을 대체한다. 레이어링 위상은 [레이어링과 이식성](layering-and-portability.md)을 따른다(스레딩은 그 위상에 직교하는 축이다).
+
+## 1. 동기 (증명된 결함)
+
+**측정 사실**: 자식 프로세스가 startup에 출력을 폭주시키면(codex가 전체 화면을 한 번에 렌더), maru의 터미널 **질의 응답(OSC 10/11·CPR·DA)이 ~4.2초 지연**된다(출력 없는 단순 프로브는 33ms). 응답은 드롭이 아니라 거대한 지연이다.
+
+**원인**: 질의 응답을 **메인 렌더 스레드의 30Hz tick에서, blocking write로** 보낸다.
+- `app_session.tick()` → `pump.drainAvailable()` → `runtime.applyPtyEvent` → `core.write` + `pendingResponse` 드레인 → `pty_io.writeInput(reply)` (`runtime.zig`).
+- `PtySession.writeInput`(`pty/macos.zig`)은 master fd가 O_NONBLOCK이라 버퍼가 차면 `waitWritableOrClosing`의 `poll(POLL.OUT, -1)`로 **메인 스레드를 블로킹**한다. 출력 폭주가 PTY를 혼잡하게 만드는 동안 이 write가 막혀 응답이 초 단위로 밀린다.
+
+**영향**: codex는 OSC 11 응답을 ~50–100ms 안에 못 받으면 입력창 배경 틴트(회색)를 영구 포기한다(직접 측정). startup에 OSC 11/커서 위치를 묻고 짧은 데드라인을 두는 다른 TUI에도 동일한 잠재 결함이다. 더불어 blocking write는 폭주 시 메인 스레드(=렌더)를 멈춰 startup 끊김을 만든다.
+
+**레퍼런스 대조**(베이스, [document-basis-and-decision]): Ghostty는 질의 응답을 **termio I/O 스레드**(`termio/stream_handler.zig`)에서 즉시 쓴다 — 렌더와 분리. xterm.js는 단일 JS 이벤트 루프에서 파싱 콜백 중 **동기** 응답. 두 레퍼런스 모두 응답 전달이 렌더에 묶이지 않는다. maru만 렌더-결합이다.
+
+## 2. 현재 모델 (단일 스레드 코어)
+
+- `TerminalCore`는 thread-safe가 아니다. 메인 스레드가 소유하고, `tick()`마다 `drainAvailable`로 큐의 출력 바이트를 꺼내 `core.write`로 상태를 바꾼다.
+- `core.snapshot()`/`renderSnapshot()`은 `.cells = self.cells`로 **코어 메모리를 zero-copy로 빌려준다**. 렌더 경로(`buildDrawList`)가 이 슬라이스를 읽어 `DrawList`로 **복사**한다.
+- reader 스레드는 PTY를 읽어 `PtyEventQueue`에 바이트만 넣는다(코어를 안 만진다). backpressure는 bounded queue로 건다([PTY 운영 모델](pty-operating-model.md) §backpressure).
+- 결과: 출력 처리(core.write)·응답 쓰기·렌더가 전부 메인 tick에 직렬화된다 → I/O 지연이 렌더에 묶인다.
+
+## 3. 목표 스레딩 모델
+
+**I/O 스레드(=기존 reader 스레드 승격)가 PTY I/O와 코어를 소유한다. 렌더는 락 아래 스냅샷만 읽는다.** (Ghostty `renderer_state.mutex` 모델로 수렴.)
+
+```text
+[per-surface I/O 스레드 (reader 승격)]
+  PTY readEvent (poll: master + wake_fd)
+   -> lock(core.mutex)
+        core.write(bytes)              // 파싱·상태 변경
+        reply = core.takePendingResponse()
+      unlock
+   -> if reply: ptyWriter.write(reply) // 락 밖, 즉시 (렌더와 무관)
+   -> markDirty signal -> 메인에 "다시 그려라" 통지
+
+[메인/렌더 스레드 (timer tick)]
+  lock(core.mutex)
+     snap = core.renderSnapshot()
+     draw_list = buildDrawList(snap)   // dirty cell을 DrawList로 *복사*
+  unlock
+  shape/atlas/GPU draw                 // DrawList 복사본만, 코어 접근 0
+```
+
+**동기화 핵심**:
+- **per-surface mutex**가 `TerminalCore` 접근을 보호한다(write는 I/O 스레드, snapshot은 렌더 스레드). 락은 **양쪽 모두 짧게**만 잡는다: I/O는 `core.write` 동안, 렌더는 `renderSnapshot`+`buildDrawList`(dirty cell 복사) 동안. shaping·atlas·GPU는 락 밖 DrawList 복사본에서 한다.
+- **zero-copy snapshot race 해소**: 현재 snapshot이 코어 메모리를 alias하므로, 렌더는 락을 잡은 채 `buildDrawList`까지 끝내 **복사를 완료**한 뒤 언락한다(`buildDrawList`는 이미 dirty cell을 새 `DrawCell` 리스트로 복사 — 그 구간만 락). 락 밖에서 코어 메모리를 가리키는 슬라이스를 들고 있지 않는다.
+- **질의 응답 write가 I/O 스레드로 이동** → 렌더·출력 혼잡과 무관하게 즉시(ms) 나간다. 결함의 직접 해소.
+- **PTY write 단일화**: 입력 write가 두 곳(키보드/paste=메인, 응답=I/O)에서 일어나므로, `PtySession`에 **write mutex**를 두거나 모든 입력을 I/O 스레드 큐로 위임해 직렬화한다(부분 write·인터리브 방지).
+
+## 4. 시퀀싱 (의존성 순서, 각 단계 green)
+
+각 PR은 tests green을 유지하고, 동작을 한 번에 한 가지만 바꾼다. doc-first.
+
+- **PR0 — 이 설계 문서** (현재). AGENTS.md 인덱스에 링크. `pty-operating-model.md`·`layering-and-portability.md`는 구현 PR에서 갱신(단일 출처).
+- **PR1 — core mutex 도입(동작 불변)**: `TerminalCore`(또는 그 owner)에 mutex 추가. 현재 단일 스레드 경로의 모든 코어 접근(core.write·snapshot·resize·입력 처리)을 락으로 감싼다. 아직 같은 스레드라 무경합 — 동작 불변, 락 계약만 형식화. 경계 테스트로 "락 없이 코어 접근하는 경로 0" 고정.
+- **PR2 — PTY write 직렬화**: `PtySession`에 write mutex(또는 입력 큐). 키보드·paste·응답이 안전히 섞이게. 응답 write를 메인 blocking 경로에서 떼어낼 준비. green(동작 불변, 직렬화만 추가).
+- **PR3 — 코어 처리 I/O 스레드 이관(핵심)**: reader 스레드가 `readEvent` 후 락 아래 `core.write` + 응답 take → 락 밖 응답 write로 바꾼다. 메인 tick은 큐 바이트 드레인 대신 락 아래 `renderSnapshot`+`buildDrawList`만. `PtyEventQueue`는 출력 바이트 운반에서 **dirty/exit/error 신호**로 축소. 이 PR이 결함을 해소한다 — 실제 codex로 회색 재현 검증.
+- **PR4 — lifecycle/close 재정렬 + ABI 락**: 코어 소유가 I/O 스레드로 갔으므로 `core.deinit`은 reader join **후**에만(현 close 순서 `queue.close → session.close → reader.join` 위에 core 수명 추가). Swift ABI의 `metal_frame` 코어 읽기를 락 안으로. multi-surface(탭/split별 코어+I/O 스레드+락) 검증.
+- **PR5 — 문서 갱신 + 스트레스/회귀 테스트**: `pty-operating-model.md`(처리 위치 변경)·`layering-and-portability.md` §5.6 note·§7 "zig_owns_frame_loop" 갱신. 대량 출력 중 응답 지연 상한·UI responsiveness·RSS·close race 스트레스 테스트 추가([PTY 운영 모델] "아직 추가하지 않은 테스트" 일부 해소).
+- **마지막 — `/code-review max`**: 스택 tip에서 결함 즉시 수정([[drive-multi-pr-plan-to-completion]]). main 자동 머지 안 함.
+
+## 5. 리스크 & 미해결 (정직)
+
+- **lifecycle/close가 가장 위험**: 현재 close는 reader가 `readEvent`에 잡힌 채 self-pipe wake로 깨우는 delicate한 순서다([PTY 운영 모델] §session close). I/O 스레드가 코어까지 소유하면 "코어 mutate 중 close"가 새 race surface다. 락 + closing 플래그로 막고, core.deinit을 reader join 뒤로 강제한다. [[devsession-undefined-test-field-trap]]식 UB를 경계 테스트로 잡는다.
+- **lock 보유 시간**: 렌더가 `buildDrawList`까지 락을 잡으면 그동안 I/O가 대기한다. `buildDrawList`는 dirty cell 복사라 짧지만, 큰 화면·full-dirty 프레임에서 비용을 측정해 상한을 둔다. 필요 시 더블버퍼 스냅샷으로 진화(후속).
+- **scroll 합성**: `renderSnapshot`은 스크롤 시 `viewport_cells`를 lazy 할당·합성한다(코어 상태 변경). 이 경로도 렌더 스레드가 락 안에서 하므로, I/O 스레드의 write와 같은 락으로 안전. 단 할당이 락 안에 들어가는 점을 측정.
+- **multi-surface 비용**: 탭/split마다 I/O 스레드 1개(이미 reader 스레드 N개 존재 — 새 스레드 증가 아님). 스레드 수는 reader와 동일하게 유지.
+- **backpressure 의미 변화**: 큐가 바이트 운반에서 신호로 바뀌면, 기존 bounded-queue backpressure([PTY 운영 모델] §backpressure)를 I/O 스레드가 직접 처리(읽은 즉시 core.write)로 대체. "출력 안 버림" 계약은 유지하되 메커니즘이 read→write 직결로 단순해진다.
+- **테스트 결정성**: 스레드 경합이 늘면 deterministic command 테스트가 흔들릴 수 있다([PTY 운영 모델] §왜 reader thread). 락·신호 계약을 단위 테스트로 고정하고, headless 경로는 동기 drain 옵션을 유지(테스트는 단일 스레드로 코어 검증 가능하게).
+
+## 6. 테스트 전략 (검증 가능성)
+
+기존 테스트가 원결함을 못 잡은 이유는 **동기·단일 스레드**라 타이밍/동시성을 안 건드렸기 때문이다. 그래서 그 약점을 정조준한다. 핵심은 **타이밍 비의존 결정론 테스트**가 가능하다는 점이다.
+
+1. **결정론적 핵심 — "렌더 tick 없이 응답 전달"**: 통제 child가 OSC 11 질의. 테스트는 `renderTick`/`drainAvailable`을 **한 번도 호출하지 않는다**. 신모델은 I/O 스레드가 응답을 보내 child가 받음(PASS); 구모델은 tick 없으면 무전달(FAIL). 타이밍 의존 0 — "렌더 분리"를 직접 인코딩한다. PR3의 수락 기준.
+2. **회귀(통합) — 폭주 중 응답 지연 상한**: 통제 child가 대량 출력 폭주 + OSC 11 질의 → 실제 PTY+런타임 통과 → 응답이 **유실 없이 관대한 상한(예: <200ms) 안에** 도착하는지 assert. 원결함(4.2초)을 정확히 잡고 수정을 검증. `live_pty.zig`/`tests/e2e/headless.zig` 인프라 재사용. codex 데드라인(~50–100ms)보다 훨씬 관대한 bound로 flaky 회피("초 단위 지연" 회귀만 잡으면 충분).
+3. **동시성 스트레스**: I/O write ↔ 렌더 snapshot 동시 hammer(N회 반복), 손상/크래시 0. 가능하면 ThreadSanitizer 빌드로.
+4. **lifecycle/close race**: 폭주 중 close → UAF/좀비 0, `core.deinit`이 reader join 후([PTY 운영 모델] §session close 테스트 확장).
+5. **lock 계약**: debug 빌드 assert("락 없이 코어 접근 시 패닉")로 모든 테스트가 위반을 자동 노출. 경계 테스트로 강제([[devsession-undefined-test-field-trap]] UB 방지).
+6. **기존 단일 스레드 코어 단위 테스트 유지**: headless 경로는 **동기 drain 옵션**을 남겨 코어 파싱/상태 로직을 단일 스레드로 계속 검증(결정성 보존 — [PTY 운영 모델] §왜 reader thread).
+
+신규 테스트 파일은 같은 PR에서 `build.zig`·`.mise.toml`에 연결한다([파일/폴더 구조](project-structure.md) §build.zig 연결 원칙).
+
+**한계(정직)**: 실제 Metal/Swift GPU 경로는 headless 단위테스트 불가 — 그러나 결함은 GPU가 아니라 **I/O 전달**이라 무관하고, 결함이 사는 런타임 층은 GPU 없이 검증된다. 타이밍 상한 테스트는 관대 bound로 flaky를 줄이되 0은 아니다. race-freedom은 TSan/스트레스로 낮추되 증명은 아니다.
+
+## 7. 비목표
+
+- 렌더 백엔드 변경(Metal/WebGPU) — 무관, [renderer-strategy.md].
+- 벽시계 ms 기반 blink/애니메이션 시간-모델 — 별개 후속([레이어링] §5.6 note). 단 deadline 스케줄러로 진화 시 이 I/O 스레드 모델과 합류 가능.
+- 코어 자체의 파싱/상태 로직 변경 — 불변. 소유 스레드와 동기화만 바꾼다.

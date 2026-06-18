@@ -651,3 +651,25 @@ test "PtyWriteQueue: enqueueSome — 상한까지만 넣고 넘침은 0(안 막�
     q.close();
     try std.testing.expectError(error.QueueClosed, q.enqueueSome("x")); // 닫힘
 }
+
+test "PtyWriteQueue: enqueueBlocking 대기 중 close → QueueClosed로 깨어남(무한 대기 없음, P2-4)" {
+    // 단일 writer close-with-pending(docs/io-render-threading.md §8 P2-4): 소비자(I/O 스레드)가 멈춰 큐가 가득
+    // 찬 채 생산자(메인)가 enqueueBlocking backpressure로 대기 중일 때, close가 그 대기를 QueueClosed로 풀어야
+    // 한다(앱 종료/탭 close 시 메인이 영영 안 막히게). 풀리지 않으면 thread.join()이 영원히 hang → 테스트 실패(teeth).
+    var q = try PtyWriteQueue.init(std.testing.io, std.testing.allocator, 4); // cap 4
+    defer q.deinit();
+    try q.enqueueBlocking("ABCD"); // 가득 채움(소비자 없음 → drain 안 됨)
+
+    const Blocker = struct {
+        fn run(qq: *PtyWriteQueue, out: *(QueueError!void)) void {
+            out.* = qq.enqueueBlocking("E"); // 가득 참 → not_full 대기 → close가 풀어줄 때까지 막힘
+        }
+    };
+    var result: QueueError!void = {};
+    var thread = try std.Thread.spawn(.{}, Blocker.run, .{ &q, &result });
+    // 생산자가 대기 상태가 되게 둔다(close가 깨우는 경로 검증). Zig 0.16 sleep은 std.Io.
+    try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake);
+    q.close();
+    thread.join();
+    try std.testing.expectError(error.QueueClosed, result);
+}

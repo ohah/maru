@@ -2940,7 +2940,11 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return;
         const cur = self.chrome_host.find.current;
         if (cur >= self.find_matches.items.len) return;
-        self.activeSurface().core.scrollToAbs(self.find_matches.items[cur].start.row);
+        const surface = self.activeSurface();
+        // scrollToAbs는 코어 변경 — 락 아래(docs/io-render-threading.md PR3).
+        surface.core_mutex.lockUncancelable(self.io);
+        surface.core.scrollToAbs(self.find_matches.items[cur].start.row);
+        surface.core_mutex.unlock(self.io);
     }
 
     /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거친다 —
@@ -3602,22 +3606,30 @@ pub const AppSession = struct {
         };
         const col = cell.col;
         const row = cell.row;
-        const core = &self.activeSurface().core;
+        const click_surface = self.activeSurface();
+        const core = &click_surface.core;
         // mouse reporting: 트래킹 모드(DECSET 1000~1003)고 shift·option 미포함이면 셀렉션 대신 앱에 리포트한다 —
-        // 여기까지 왔으면 활성 pane 터미널 영역 클릭(사이드바/탭바/divider/다른 pane은 위에서 처리). shift+click은
-        // xterm 관례대로 선형 셀렉션 override, option+click은 블록(직사각형) 셀렉션 override(둘 다 아래 switch로
-        // 흘린다 — iTerm2 관례). mods 비트(xterm Cb): shift=4·option=8. 8b-2: button/mods는 Swift가 변환해 넘긴다.
-        if (core.mouse_tracking != .none and (mods & 4) == 0 and (mods & 8) == 0) {
-            // reporting 모드로 들어가면 진행 중이던 셀렉션 드래그 autoscroll을 멈춘다 — 안 그러면 셀렉션
-            // 도중 앱이 mouse tracking을 켤 때 이 분기가 매 이벤트 조기 return하면서, 이미 걸린 autoscroll이
-            // 30Hz tick으로 영원히 돈다(reporting 모드는 셀렉션을 하지 않으므로 autoscroll이 무의미).
+        // shift+click은 선형 셀렉션 override, option+click은 블록 override(iTerm2 관례). mods: shift=4·option=8.
+        // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
+        // docs/io-render-threading.md PR3). reporting 모드면 진행 중 셀렉션 autoscroll도 멈춘다. writeInput은 락 밖.
+        click_surface.core_mutex.lockUncancelable(self.io);
+        const do_report = core.mouse_tracking != .none and (mods & 4) == 0 and (mods & 8) == 0;
+        var report_reply: ?[]u8 = null;
+        if (do_report) {
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
             core.reportMouse(@intCast(button), col, row, cell.term_x_px, cell.term_y_px, kind != 3, kind == 2, @intCast(mods));
             const reply = core.pendingResponse();
             if (reply.len > 0) {
-                self.runtime.writeInput(self.activeSurface().id, .{ .bytes = reply }) catch {};
+                report_reply = self.allocator.dupe(u8, reply) catch null;
                 core.clearResponse();
+            }
+        }
+        click_surface.core_mutex.unlock(self.io);
+        if (do_report) {
+            if (report_reply) |reply| {
+                defer self.allocator.free(reply);
+                self.runtime.writeInput(self.activeSurface().id, .{ .bytes = reply }) catch {};
             }
             return;
         }
@@ -3792,9 +3804,15 @@ pub const AppSession = struct {
         // (handleKeyEvent의 "입력하면 live 복귀"와 같은 동작; 조합 키는 그 경로를 안 타므로 여기서).
         // **터미널 입력일 때만** — find/palette에서 조합하면 뒤 터미널 스크롤백을 건드리면 안 된다(조합은
         // 오버레이 입력칸으로 가지 터미널로 안 간다; inputFocus 단일 출처로 판정).
-        if (self.inputFocus() == .terminal and self.activeSurface().core.viewOffset() != 0) {
-            self.activeSurface().core.scrollToBottom();
-            self.metal_dirty = true;
+        if (self.inputFocus() == .terminal) {
+            // viewOffset 읽기 + scrollToBottom(변경)은 락 아래(docs/io-render-threading.md PR3).
+            const surface = self.activeSurface();
+            surface.core_mutex.lockUncancelable(self.io);
+            defer surface.core_mutex.unlock(self.io);
+            if (surface.core.viewOffset() != 0) {
+                surface.core.scrollToBottom();
+                self.metal_dirty = true;
+            }
         }
         self.ime_active = true;
         self.ime_inserted.clearRetainingCapacity();
@@ -4955,9 +4973,13 @@ pub const AppSession = struct {
             }
             // Metal view 데이터 투영 실패(OOM 등)는 터미널 코어 동작과 무관하다. 마지막
             // frame을 유지하고 dirty를 남겨 다음 tick에 재시도한다(세션을 죽이지 않는다).
-            // OSC 4 팔레트를 소유 버퍼로 복사해 CellColors가 코어 포인터를 안 들게 한다
-            // (docs/io-render-threading.md — PR3 data race 방지). 복사본은 이 tick 동안 유효(replace가 소비).
-            self.active_palette_copy = self.activeSurface().core.paletteOverride().*;
+            // 활성 surface 코어 색/선택 상태(palette 복사·fg/bg·reverse·selection·hover)를 하나의 락 아래
+            // 읽는다(docs/io-render-threading.md PR3 — 리더 core.write와 경합 방지). palette는 소유 버퍼로 복사해
+            // CellColors가 코어 포인터를 안 들게 한다(복사본은 이 tick 동안 유효, replace가 소비). 리터럴은
+            // shaping/GPU 없이 값만 모으므로 락 보유가 짧다(.cursor 등 app state는 코어 무관).
+            const cc_surface = self.activeSurface();
+            cc_surface.core_mutex.lockUncancelable(self.io);
+            self.active_palette_copy = cc_surface.core.paletteOverride().*;
             const cell_colors: metal_frame.CellColors = .{
                 // OSC 10/11 색 설정이 있으면 그 색, 없으면 theme 기본. SGR reverse의 default 색 스왑·OSC 11 배경에도 반영.
                 .default_fg = self.activeSurface().core.defaultFgOverride() orelse self.appearance.theme.foreground,
@@ -4984,6 +5006,7 @@ pub const AppSession = struct {
                     .text = self.appearance.theme.background,
                 },
             };
+            cc_surface.core_mutex.unlock(self.io); // cell_colors의 활성 코어 읽기 끝 — 이후 shaping/GPU는 락 밖
             // 사이드바 탭 제목 glyph 패스(macOS만 — buildFromDrawList는 실 CoreText 브리지). 터미널과
             // 같은 frame_builder/renderer_state(atlas)를 써서 제목 glyph도 같은 slot을 재사용한다. 실패는
             // 무시하고 제목 없이 밴드만 그린다(세션을 죽이지 않음). 짧은 제목이라 매 frame 재-shape해도

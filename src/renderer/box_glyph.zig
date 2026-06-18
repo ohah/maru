@@ -308,34 +308,35 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
 /// 폭 × 가장 굵은 가로 팔 높이)를 모두가 덮어 모서리(┌┍)·T(├┞)·사거리(┼╀)·반선(╴╵)이 자연히 이어진다.
 /// 혼합 굵기(┞: up heavy + down/right light)는 팔마다 다른 두께가 같은 중앙에 모여 한 모델로 처리된다.
 fn fillLines(arms: Arms, w: u32, h: u32, bytes_per_row: usize, pixels: []u8, lt: u32, ht: u32) u32 {
-    const cx = w / 2;
-    const cy = h / 2;
     const tu: u32 = if (arms.up) |wt| weightT(wt, lt, ht) else 0;
     const td: u32 = if (arms.down) |wt| weightT(wt, lt, ht) else 0;
     const tl: u32 = if (arms.left) |wt| weightT(wt, lt, ht) else 0;
     const tr: u32 = if (arms.right) |wt| weightT(wt, lt, ht) else 0;
-    // 중앙 교차 박스: 세로 팔 최대 두께 = 가로폭, 가로 팔 최대 두께 = 세로높이. 각 팔이 이 박스 반대변까지 뻗어 겹친다.
+    // 밴드 시작 = `(치수-두께)/2` (Ghostty font/sprite/draw/box.zig와 동일 — `(cell -| thick)/2`). 둥근 아크
+    // (fillRoundedCorner)·점선도 같은 식이라 직선·모서리·둥근이 모두 한 기준으로 정렬돼, even 치수 + 홀 두께
+    // (예 codex 보더 셀 8x18, t=1)에서도 어긋나지 않는다. (옛 `치수/2 -| 두께/2`는 even+홀에서 1px 우측으로 밀려
+    // 둥근 모서리가 직선과 안 맞았다. 동작 비교 베이스: Ghostty box.zig:408·423·704. clean-room — 코드 미복사.)
     const max_v = @max(tu, td);
     const max_h = @max(tl, tr);
-    const cbx0 = cx -| max_v / 2;
+    const cbx0 = (w -| max_v) / 2;
     const cbx1 = @min(w, cbx0 + max_v);
-    const cby0 = cy -| max_h / 2;
+    const cby0 = (h -| max_h) / 2;
     const cby1 = @min(h, cby0 + max_h);
     var count: u32 = 0;
     if (tl > 0) {
-        const y0 = cy -| tl / 2;
+        const y0 = (h -| tl) / 2;
         count += gp.fillRect(pixels, bytes_per_row, 0, y0, cbx1, @min(h, y0 + tl)); // 좌단~중앙 교차 우변
     }
     if (tr > 0) {
-        const y0 = cy -| tr / 2;
+        const y0 = (h -| tr) / 2;
         count += gp.fillRect(pixels, bytes_per_row, cbx0, y0, w, @min(h, y0 + tr)); // 중앙 교차 좌변~우단
     }
     if (tu > 0) {
-        const x0 = cx -| tu / 2;
+        const x0 = (w -| tu) / 2;
         count += gp.fillRect(pixels, bytes_per_row, x0, 0, @min(w, x0 + tu), cby1); // 상단~중앙 교차 하변
     }
     if (td > 0) {
-        const x0 = cx -| td / 2;
+        const x0 = (w -| td) / 2;
         count += gp.fillRect(pixels, bytes_per_row, x0, cby0, @min(w, x0 + td), h); // 중앙 교차 상변~하단
     }
     return count;
@@ -390,14 +391,17 @@ fn fillRoundedCorner(
     h_dir: i32,
     v_dir: i32,
 ) u32 {
-    const cx = @as(f32, @floatFromInt(w)) * 0.5;
-    const cy = @as(f32, @floatFromInt(h)) * 0.5;
+    const tf = @as(f32, @floatFromInt(t));
+    // 아크 중심 cx/cy = 직선 팔 centerline = `(치수-두께)/2 + 두께/2` (Ghostty box.zig:704-705 center_x/y).
+    // `치수*0.5`가 아니다 — even 치수 + 홀 두께(예 9x18·8x18)에서 `치수*0.5`는 line centerline보다 0.5px 밀려
+    // 아크가 직선 ─│와 다른 행/열에 닿아 모서리가 끊겼다. 같은 식으로 맞춰 fillLines·밴드와 정렬한다.
+    const cx = @as(f32, @floatFromInt((w -| t) / 2)) + tf * 0.5;
+    const cy = @as(f32, @floatFromInt((h -| t) / 2)) + tf * 0.5;
     const r = @min(cx, cy); // 코너 반지름 = 셀 짧은 반 치수(아크가 셀에 들어가는 최대)
     const hd = @as(f32, @floatFromInt(h_dir));
     const vd = @as(f32, @floatFromInt(v_dir));
     const c_x = cx + hd * r; // 아크 중심
     const c_y = cy + vd * r;
-    const tf = @as(f32, @floatFromInt(t));
     const r_lo = r - tf * 0.5;
     const r_hi = r + tf * 0.5;
 
@@ -909,4 +913,49 @@ test "fillCoverage: 둥근 모서리 ╭는 호로 두 팔을 잇고 직각 코�
     // 둥근 효과: 직각 코너점(좌상 바깥 0,0)과 반대 코너(우하 w-1,h-1)는 비어야 한다.
     try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, 0, 0)); // 좌상 바깥
     try std.testing.expectEqual(@as(u8, 0x00), a(&pixels, bpr, w - 1, h - 1)); // 우하(╭ 영역 아님)
+}
+
+test "fillCoverage: 둥근 모서리 ╭ 가 직선 │─와 정렬(짝/홀 폭 × 짝/홀 두께 4조합 — Ghostty parity 회귀)" {
+    // ╭ 의 세로 팔 col은 │ 와 완전히 같고, 우단에서 ─ 의 행을 덮어야 보더 모서리가 이어진다. 밴드를
+    // (치수-두께)/2(Ghostty box.zig)로 통일하기 전엔 fillLines가 치수/2-두께/2라 even폭+홀두께(8x18)에서
+    // 1px 어긋났다(실측: codex 입력창 둥근 보더 모서리 끊김). Ghostty처럼 4 parity 조합을 모두 고정한다.
+    const sizes = [_][2]u32{
+        .{ 8, 18 }, // even 폭, t=(18+8)/16=1 (홀) — 회귀 케이스
+        .{ 9, 18 }, // 홀 폭,   t=1 (홀)
+        .{ 8, 32 }, // even 폭, t=2 (짝)
+        .{ 9, 32 }, // 홀 폭,   t=2 (짝)
+    };
+    const a = struct {
+        fn at(p: []const u8, bpr_: usize, x: u32, y: u32) u8 {
+            return p[@as(usize, y) * bpr_ + @as(usize, x) * 4 + 3];
+        }
+    }.at;
+    var line_buf: [32 * 9 * 4]u8 = undefined;
+    var corner_buf: [32 * 9 * 4]u8 = undefined;
+    var horiz_buf: [32 * 9 * 4]u8 = undefined;
+    for (sizes) |sz| {
+        const w = sz[0];
+        const h = sz[1];
+        const bpr: usize = @as(usize, w) * 4;
+        const n = @as(usize, h) * bpr;
+        _ = fillCoverage(0x2502, w, h, bpr, line_buf[0..n]); // │
+        _ = fillCoverage(0x256D, w, h, bpr, corner_buf[0..n]); // ╭
+        _ = fillCoverage(0x2500, w, h, bpr, horiz_buf[0..n]); // ─
+        // 세로: 하단 행(아크 영역 밖, 세로 팔만)에서 ╭ 가 채운 col == │ 가 채운 col(완전 일치).
+        var x: u32 = 0;
+        while (x < w) : (x += 1) {
+            try std.testing.expectEqual(
+                a(&line_buf, bpr, x, h - 1),
+                a(&corner_buf, bpr, x, h - 1),
+            );
+        }
+        // 가로: ─ 가 우단 열(x=w-1)에서 채운 행을 ╭ 도 채운다(아크가 그 행에서 우측 경계에 닿아 ─ 이웃과 연결).
+        var line_row: ?u32 = null;
+        var y: u32 = 0;
+        while (y < h) : (y += 1) {
+            if (a(&horiz_buf, bpr, w - 1, y) == 0xFF) line_row = y;
+        }
+        try std.testing.expect(line_row != null);
+        try std.testing.expectEqual(@as(u8, 0xFF), a(&corner_buf, bpr, w - 1, line_row.?));
+    }
 }

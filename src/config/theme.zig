@@ -137,4 +137,14 @@ pub const Config = struct {
     /// 셸에 줄 TERM 값. 셸 설정/통합이 $TERM에 따라 키바인딩(예: Ctrl+A 줄-시작)을 다르게 잡는
     /// 경우, 사용자가 자기 환경이 기대하는 값(예: xterm-ghostty)으로 바꿀 수 있다. 빈 값은 무시.
     term: []const u8 = "xterm-256color",
+    /// 데스크톱 알림 설정. loader가 `notifications.*` 키로 파싱.
+    notifications: NotificationConfig = .{},
+};
+
+/// 데스크톱 알림 설정.
+pub const NotificationConfig = struct {
+    /// 터미널에서 도는 에이전트(claude/codex) 세션이 **비활성 탭/창**에서 완료(running→idle)될 때 macOS 알림을
+    /// 띄울지. 기본 true — 다른 일을 보는 동안 끝났음을 알린다(활성 탭은 화면으로 이미 보이므로 안 띄움).
+    /// loader가 `notifications.agent-complete` 키로 파싱.
+    agent_complete: bool = true,
 };

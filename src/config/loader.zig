@@ -229,6 +229,11 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "text.blink은 true|false — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "notifications.agent-complete")) {
+        config.notifications.agent_complete = parseBool(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "notifications.agent-complete는 true|false — 기본값 유지" });
+            return;
+        };
     } else if (std.mem.eql(u8, key, "window.padding-x")) {
         config.window_padding_x = parsePaddingPt(value) orelse {
             try diags.append(a, .{ .line = line_no, .message = "window.padding-x는 0~256 정수 — 기본값 유지" });
@@ -539,6 +544,7 @@ test "parse: full config sets every field" {
         \\text.blink = true
         \\window.padding-x = 12
         \\window.padding-y = 6
+        \\notifications.agent-complete = false
     );
     defer p.deinit();
     try std.testing.expectEqualStrings("JetBrains Mono", p.config.font.family);
@@ -552,6 +558,7 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(true, p.config.blink_text); // text.blink 파싱(기본 false)
     try std.testing.expectEqual(@as(u32, 12), p.config.window_padding_x); // window.padding-x 파싱(기본 8)
     try std.testing.expectEqual(@as(u32, 6), p.config.window_padding_y); // window.padding-y 파싱(기본 4)
+    try std.testing.expectEqual(false, p.config.notifications.agent_complete); // notifications.agent-complete 파싱(기본 true)
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
 }
 

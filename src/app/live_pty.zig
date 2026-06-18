@@ -9,6 +9,7 @@ const pty_reader = @import("pty_reader.zig");
 
 pub const LivePtySession = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     session: *pty.PtySession,
     queue: *pty_reader.PtyEventQueue,
     reader: pty_reader.PtyReader,
@@ -29,6 +30,7 @@ pub const LivePtySession = struct {
         // 서로 다른 수명 규칙을 갖게 되므로, app layer에는 이 owner만 노출한다.
         self.* = .{
             .allocator = allocator,
+            .io = io,
             .session = undefined,
             .queue = undefined,
             .reader = undefined,
@@ -72,7 +74,9 @@ pub const LivePtySession = struct {
             self.* = undefined;
         }
 
-        try self.reader.start();
+        // reader.start()는 attachSurface로 옮겼다 — 거기서 (interactive면) setProcessing으로 코어/락/io를
+        // 주입한 뒤 활성화 상태로 시작한다(docs/io-render-threading.md PR3). init-start 뒤 활성화하면
+        // pre-attach 출력이 큐로 새 순서가 어긋날 수 있어, 처음부터 알맞은 모드로 시작한다.
         queue_allocated = false;
         queue_initialized = false;
         session_allocated = false;
@@ -88,16 +92,27 @@ pub const LivePtySession = struct {
         self.* = undefined;
     }
 
+    /// process_in_reader=true면 리더가 출력을 직접 코어에 적용·응답한다(docs/io-render-threading.md PR3 —
+    /// 렌더 tick에 안 묶여 즉시 응답). interactive 세션만 켠다. controlled_smoke/테스트는 false로 둬 기존
+    /// 큐-드레인 경로를 유지한다(테스트가 코어를 메인 스레드에서 직접 조작하므로, 리더 처리와 경합하지 않게).
+    /// 어느 경우든 reader.start()는 여기서(attach 후) 한다 — 활성 모드로 시작해 pre-attach 순서 문제를 없앤다.
     pub fn attachSurface(
         self: *LivePtySession,
         runtime: *runtime_mod.SurfaceRuntime,
         surface: *surface_mod.Surface,
-    ) runtime_mod.RuntimeError!runtime_mod.RuntimeLink {
+        process_in_reader: bool,
+    ) (runtime_mod.RuntimeError || std.Thread.SpawnError)!runtime_mod.RuntimeLink {
         // attach link도 live PTY owner가 기록한다. closeAndDetach가 이 link를 이용해
         // runtime routing을 먼저 끊으므로, 어느 PTY가 어느 surface와 연결됐는지는
         // 이 owner가 알아야 한다.
         const link = try runtime.attach(surface, self.pty_id, self.ptyIo());
         self.link = link;
+        if (process_in_reader) self.reader.setProcessing(&surface.core, &surface.core_mutex, self.io);
+        self.reader.start() catch |err| {
+            runtime.detachSurface(link.surface_id);
+            self.link = null;
+            return err;
+        };
         return link;
     }
 
@@ -172,6 +187,9 @@ test "live pty session owns controlled command until normal termination" {
         .size = .{ .cols = 20, .rows = 3 },
     }, 4);
     defer live.deinit();
+    // start는 attachSurface로 옮겼으므로(PR3) 이 standalone 리더-큐 경로 테스트는 직접 시작한다.
+    // setProcessing 없이 → processing=false → 기존처럼 바이트를 큐에 넣는다(이 경로 검증).
+    try live.reader.start();
 
     var saw_output = false;
     while (true) {
@@ -231,6 +249,7 @@ test "live pty closeAndDetach removes runtime routing before closing the queue" 
     defer queue.deinit();
     var live: LivePtySession = .{
         .allocator = allocator,
+        .io = std.testing.io,
         .session = undefined,
         .queue = &queue,
         .reader = undefined,

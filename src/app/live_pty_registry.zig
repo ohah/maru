@@ -155,6 +155,7 @@ test "live pty registry closes the session attached to the active surface" {
     defer queue.deinit();
     var live: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
+        .io = std.testing.io,
         .session = undefined,
         .queue = &queue,
         .reader = undefined,
@@ -206,6 +207,7 @@ test "live pty registry refuses duplicate surface and pty registrations" {
     defer queue_b.deinit();
     var live_a: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
+        .io = std.testing.io,
         .session = undefined,
         .queue = &queue_a,
         .reader = undefined,
@@ -215,6 +217,7 @@ test "live pty registry refuses duplicate surface and pty registrations" {
     };
     var live_b: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
+        .io = std.testing.io,
         .session = undefined,
         .queue = &queue_b,
         .reader = undefined,
@@ -224,6 +227,7 @@ test "live pty registry refuses duplicate surface and pty registrations" {
     };
     var duplicate_surface: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
+        .io = std.testing.io,
         .session = undefined,
         .queue = &queue_b,
         .reader = undefined,
@@ -233,6 +237,7 @@ test "live pty registry refuses duplicate surface and pty registrations" {
     };
     var duplicate_pty: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
+        .io = std.testing.io,
         .session = undefined,
         .queue = &queue_b,
         .reader = undefined,
@@ -273,6 +278,7 @@ test "live pty registry does not close a non-active surface" {
     defer queue.deinit();
     var live: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
+        .io = std.testing.io,
         .session = undefined,
         .queue = &queue,
         .reader = undefined,
@@ -311,6 +317,7 @@ test "live pty registry keeps mapping when the attached session invariant is bro
     defer queue.deinit();
     var live: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
+        .io = std.testing.io,
         .session = undefined,
         .queue = &queue,
         .reader = undefined,

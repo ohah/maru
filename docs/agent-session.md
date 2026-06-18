@@ -101,9 +101,12 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
 
 ## 알림 (결정)
 
-- `running → idle`(완료 마커) 전환 시 **macOS 알림**(제목=워크스페이스, 본문=마지막 답변 일부). **활성(현재 보고
-  있는) 탭은 알림 안 함 — 비활성 탭/창에서 끝났을 때만 알림**(사용자 결정). Swift `UNUserNotificationCenter`
-  (ABI 추가: `notify(title, body)`). 디바운스·중복 방지(세션별 마지막 완료 timestamp 기억). 켜기/끄기 config.
+- `running → idle`(완료 마커) 전환 시 **macOS 알림**(제목=워크스페이스, 본문=마지막 답변 일부 또는 "완료").
+  **활성(현재 보고 있는) 탭은 알림 안 함 — 비활성 탭/창에서 끝났을 때만 알림**(사용자 결정). **구현은 기존 OSC
+  9/777 알림 경로를 재사용**한다 — `pendingNotification`(Swift가 tick마다 poll)에 에이전트 완료 큐를 합류시켜
+  Swift `UNUserNotificationCenter`로 띄운다. 설계 초안의 `notify(title, body)` ABI 신설 대신 이미 있는 drain ABI를
+  쓰므로 **새 ABI/Swift 코드가 없다**(더 단순·검증된 경로). 디바운스는 **전환 edge 자체**(idle 유지 중엔 mtime-skip
+  으로 재진입 안 해 한 번만 발화 — 별도 timestamp 기억 불필요). 켜기/끄기 config(`notifications.agent-complete`).
 
 ## PR 분해
 
@@ -126,7 +129,14 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
   idle=`✓ {답변}`) + 아이콘 **펄스**(running일 때 blink 위상으로 밝기 변조, `dimRgb`) + 슬롯 높이 3.8×→**4.6×**
   (`lines:[3]→[4]`). Metal `.m` 디코더는 이미 4줄 지원(`line_count*4`)이라 무변경. temp-dir 통합 테스트(claude/codex
   최신 선택·cwd 매칭·mtime skip)는 macOS. **실 세션 육안 검증은 수동**(아래 한계).
-- **PR4**: **완료 알림**(Swift 알림 API + ABI + config). ABI `.h`/`.zig`/`.swift` 동기.
+- **PR4**: **완료 알림** ✅ **완료** — `running → idle` 전환을 **비활성 탭/창**에서 관측하면 macOS 알림을 띄운다
+  (제목=워크스페이스 이름, 본문=마지막 답변 또는 "완료"). **기존 OSC 9/777 알림 ABI를 재사용**(`pendingNotification`
+  /`maru_macos_app_session_pending_notification` v52 + Swift `UNUserNotificationCenter`) — **새 ABI/Swift 불필요**
+  (설계 초안의 `notify(title,body)` 추가 대신 이미 있는 drain 경로에 합류). `pollAgentState`가 전환 edge에서
+  `enqueueAgentCompletion`(owned 큐, 상한 가드), `pendingNotification`이 OSC보다 먼저 드레인. 디바운스=전환 edge
+  자체(idle 유지 중 mtime-skip으로 재진입 없음). "보고 있는 탭"=포커스 창(`window_focused`, focusChanged)의 활성
+  탭은 제외. config `notifications.agent-complete`(기본 true). 헤드리스 테스트(enqueue→OSC보다 먼저 드레인·답변
+  폴백·config 파싱).
 - **PR5(선택)**: **마지막 답변 미리보기**(길이/위치 결정 후).
 
 ## 검증

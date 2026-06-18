@@ -622,6 +622,13 @@ const Term = struct {
 /// Term 포그라운드에서 도는 에이전트 CLI 종류. 사이드바에 심볼로 표시(claude=✳, codex=✻).
 const AgentKind = enum(u8) { none = 0, claude, codex };
 
+/// 에이전트 완료 알림 한 건(owned). title=워크스페이스 이름, body=마지막 답변 일부. agent_notifications 큐에
+/// 쌓였다가 pendingNotification()이 드레인하며 둘 다 해제한다.
+const AgentNotification = struct { title: []u8, body: []u8 };
+
+/// 동시에 쌓일 수 있는 완료 알림 상한(폭주 가드). 보통 한 tick에 0~1건이라 넉넉하다 — 넘으면 가장 오래된 걸 버린다.
+const agent_notification_cap: usize = 16;
+
 /// 에이전트 아이콘 코드포인트(없으면 0) — 사이드바 카드에서 이름줄과 분리해 슬롯 세로 중앙에 독립 배치한다
 /// (buildSidebarDrawList의 agents). 0=아이콘 없음. 브랜드 마크의 전용 유니코드가 없어 근사 글리프: claude=✳
 /// (U+2733, Anthropic 선버스트), codex=✻(U+273B, OpenAI 블로썸/6잎 꽃 모티프). 포그라운드인 동안만 표시.
@@ -976,6 +983,13 @@ pub const AppSession = struct {
     // pendingNotification()이 돌려준 OSC 9/777 알림 title/body의 소유 버퍼(다음 pendingNotification/destroy까지 유효).
     notification_title_out: []u8 = &.{},
     notification_body_out: []u8 = &.{},
+    // 에이전트 세션 완료(running→idle) 알림 큐(owned title/body). pendingNotification()이 OSC 9/777보다 먼저
+    // 드레인해 Swift 알림으로 띄운다. running→idle 전환은 한 번만 일어나 자연 디바운스되고, 비활성 탭/창에서
+    // 끝났을 때만 enqueue된다(docs/agent-session.md "알림"). 한 tick에 여러 탭 완료를 안 잃게 큐(상한 가드).
+    agent_notifications: std.ArrayList(AgentNotification) = .empty,
+    // 창이 키(포커스) 상태인지. focusChanged가 갱신. "활성 탭 AND 포커스 창"이면 사용자가 보고 있으므로 알림을
+    // 띄우지 않는다(그 외 — 비활성 탭이거나 창이 백그라운드 — 는 띄운다).
+    window_focused: bool = true,
     // urlAt()이 돌려준 URL의 소유 버퍼(다음 urlAt/destroy까지 유효).
     url_buffer: []u8 = &.{},
     // configPath()가 한 번 계산해 캐시하는 config 파일 경로(소유, destroy까지 유효). 경로 규칙(MARU_CONFIG
@@ -3167,6 +3181,7 @@ pub const AppSession = struct {
     /// 창 포커스 변화(OS window key/resign)를 활성 surface 코어에 알린다 — focus reporting(DECSET 1004)이 켜져
     /// 있으면 CSI I(gained)/CSI O(lost)가 PTY로 흐른다(vim FocusGained/Lost). off면 reportFocus가 무동작이라 무전송.
     pub fn focusChanged(self: *AppSession, gained: bool) void {
+        self.window_focused = gained; // 완료 알림: 포커스 창의 활성 탭만 "보고 있는" 것으로 친다.
         if (!self.surface_initialized) return;
         const surface = self.activeSurface();
         surface.core.reportFocus(gained);
@@ -4073,6 +4088,16 @@ pub const AppSession = struct {
     /// 뜨지 않게 한다. 알림은 OS 리소스라 native(Swift)만 띄우고 코어/여기는 데이터만 넘긴다(경계). 클립보드와
     /// 달리 env 게이트 없음 — 알림은 OS authorization이 게이트하는 저위험 표면(iTerm2/Ghostty도 기본 허용).
     pub fn pendingNotification(self: *AppSession) ?struct { title: []const u8, body: []const u8 } {
+        // 에이전트 완료 알림(running→idle)을 OSC 9/777보다 먼저 드레인한다 — 큐의 owned 버퍼를 그대로 반환하고
+        // 직전 반환 버퍼는 여기서 해제(다음 pendingNotification/destroy까지 유효 규약은 동일).
+        if (self.agent_notifications.items.len > 0) {
+            const n = self.agent_notifications.orderedRemove(0);
+            if (self.notification_title_out.len > 0) self.allocator.free(self.notification_title_out);
+            if (self.notification_body_out.len > 0) self.allocator.free(self.notification_body_out);
+            self.notification_title_out = n.title;
+            self.notification_body_out = n.body;
+            return .{ .title = self.notification_title_out, .body = self.notification_body_out };
+        }
         if (!self.surface_initialized) return null;
         const pending = self.activeSurface().core.pendingNotification() orelse return null;
         if (self.notification_title_out.len > 0) {
@@ -4660,7 +4685,7 @@ pub const AppSession = struct {
         // poll한다 — 모든 split pane·백그라운드 Term까지 poll하면 syscall이 Term 수로 불어나고, 안 보이는 Term의 agent_kind
         // 변화가 metal_dirty를 올려 동일 프레임을 헛 재렌더한다(code-review 지적). 활성 Term은 전환 후 ≤0.5s 안에 갱신.
         var buf: [256]u8 = undefined;
-        for (self.tabs.items) |tab| {
+        for (self.tabs.items, 0..) |tab, idx| {
             const term = tab.activePane().activeTerm();
             if (!term.live_initialized) continue;
             const prev = term.agent_kind;
@@ -4676,14 +4701,17 @@ pub const AppSession = struct {
                     term.agent_answer_len = 0;
                 }
             }
-            if (term.agent_kind != .none) self.pollAgentState(term);
+            // "보고 있는" 탭 = 포커스 창의 활성 탭. 그 외(비활성 탭 / 백그라운드 창)에서 완료되면 알림한다.
+            const is_current = idx == self.app_window.active_tab and self.window_focused;
+            if (term.agent_kind != .none) self.pollAgentState(term, tab, is_current);
         }
     }
 
     /// 에이전트 포그라운드인 Term의 진행 상태(running/idle)를 세션 JSONL tail로 갱신한다. 세션 파일 위치 I/O는
     /// agent_session(L4)이, 바이트→상태 판정은 session core가 한다. cwd(OSC 7)를 모르면(아직 미보고) 보류한다 —
     /// 잘못된 cwd로 엉뚱한 세션을 읽지 않게. mtime이 직전과 같으면 agent_session.poll이 재파싱을 건너뛴다.
-    fn pollAgentState(self: *AppSession, term: *Term) void {
+    /// `is_current`=포커스 창의 활성 탭(사용자가 보고 있음) — 그게 아닌데 running→idle로 끝나면 완료 알림을 큐에 넣는다.
+    fn pollAgentState(self: *AppSession, term: *Term, tab: *Tab, is_current: bool) void {
         const kind: agent_session.Kind = switch (term.agent_kind) {
             .none => return,
             .claude => .claude,
@@ -4699,6 +4727,7 @@ pub const AppSession = struct {
         var root_buf: [4096]u8 = undefined;
         const root = std.fmt.bufPrint(&root_buf, "{s}/{s}", .{ home, subdir }) catch return;
 
+        const prev_state = term.agent_state;
         const r = agent_session.poll(self.io, self.allocator, kind, root, cwd, term.agent_session_mtime, &term.agent_answer_buf);
         term.agent_session_mtime = r.mtime;
         const new_state = r.state orelse return; // null = mtime 안 바뀜 → 직전 상태 유지(재파싱 skip)
@@ -4709,6 +4738,31 @@ pub const AppSession = struct {
         }
         term.agent_state = new_state;
         term.agent_answer_len = new_answer_len;
+        // 완료 알림: running→idle 전환을 처음 관측했고(전환 edge가 자연 디바운스 — idle 유지 중엔 mtime-skip으로
+        // 재진입 안 함), "보고 있는" 탭이 아니며, config가 켜졌을 때만. unknown→idle(원래 idle이던 세션)은 알림 안 함.
+        if (prev_state == .running and new_state == .idle and !is_current and self.loaded_config.config.notifications.agent_complete) {
+            self.enqueueAgentCompletion(tab, term);
+        }
+    }
+
+    /// 완료 알림 한 건을 큐에 넣는다(title=워크스페이스 이름, body=마지막 답변 일부 또는 "완료"). owned dup 실패는
+    /// 조용히 버린다(best-effort — 알림은 부가 기능). 큐가 상한이면 가장 오래된 걸 버려 폭주를 막는다.
+    fn enqueueAgentCompletion(self: *AppSession, tab: *Tab, term: *Term) void {
+        const title = self.allocator.dupe(u8, workspaceLabel(tab)) catch return;
+        const body_src: []const u8 = if (term.agent_answer_len > 0) term.agent_answer_buf[0..term.agent_answer_len] else "완료";
+        const body = self.allocator.dupe(u8, body_src) catch {
+            self.allocator.free(title);
+            return;
+        };
+        if (self.agent_notifications.items.len >= agent_notification_cap) {
+            const dropped = self.agent_notifications.orderedRemove(0);
+            self.allocator.free(dropped.title);
+            self.allocator.free(dropped.body);
+        }
+        self.agent_notifications.append(self.allocator, .{ .title = title, .body = body }) catch {
+            self.allocator.free(title);
+            self.allocator.free(body);
+        };
     }
 
     pub fn tick(self: *AppSession) !FrameSummary {
@@ -6305,6 +6359,11 @@ pub const AppSession = struct {
         if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
         if (self.notification_title_out.len > 0) self.allocator.free(self.notification_title_out);
         if (self.notification_body_out.len > 0) self.allocator.free(self.notification_body_out);
+        for (self.agent_notifications.items) |n| {
+            self.allocator.free(n.title);
+            self.allocator.free(n.body);
+        }
+        self.agent_notifications.deinit(self.allocator);
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
         if (self.config_path_buffer) |b| self.allocator.free(b);
         self.pending_paste.deinit(self.allocator);
@@ -6604,6 +6663,50 @@ test "classifyAgent: claude/codex 부분일치(대소문자 무시), 그 외·nu
     try std.testing.expectEqual(@as(u21, 0), agentSymbolCodepoint(.none));
     try std.testing.expectEqual(@as(u21, 0x2733), agentSymbolCodepoint(.claude));
     try std.testing.expectEqual(@as(u21, 0x273B), agentSymbolCodepoint(.codex));
+}
+
+test "dimRgb: 펄스 off 위상은 브랜드색을 45%로 낮춘다(글자 안 사라짐)" {
+    // 밝기 변조라 0이 아니다(깜빡임 아님). 200×45/100=90.
+    try std.testing.expectEqual(maru.color.Rgb{ .r = 90, .g = 90, .b = 90 }, dimRgb(.{ .r = 200, .g = 200, .b = 200 }));
+    try std.testing.expectEqual(maru.color.Rgb{ .r = 0, .g = 0, .b = 0 }, dimRgb(.{ .r = 0, .g = 0, .b = 0 }));
+}
+
+test "에이전트 완료 알림: enqueue 후 pendingNotification이 OSC보다 먼저 큐를 드레인" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const tab = session.tabs.items[0];
+    const term = tab.activePane().activeTerm();
+    // 완료 답변을 채우고 비활성 탭 완료를 모사해 enqueue(실제 경로 함수 사용).
+    const ans = "PR 머지 완료";
+    @memcpy(term.agent_answer_buf[0..ans.len], ans);
+    term.agent_answer_len = ans.len;
+    session.enqueueAgentCompletion(tab, term);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_notifications.items.len);
+
+    // pendingNotification이 OSC 9/777보다 먼저 에이전트 큐를 드레인하고, body=답변. 큐가 비워진다.
+    const n = session.pendingNotification() orelse return error.TestExpectedNotification;
+    try std.testing.expectEqualStrings(ans, n.body);
+    try std.testing.expect(n.title.len > 0); // title=워크스페이스 라벨(비어있지 않음)
+    try std.testing.expectEqual(@as(usize, 0), session.agent_notifications.items.len);
+    // 큐가 비면 OSC 경로로 떨어지고, controlled_smoke엔 OSC 알림이 없어 null.
+    try std.testing.expect(session.pendingNotification() == null);
+
+    // 답변이 비면 body="완료"로 폴백.
+    term.agent_answer_len = 0;
+    session.enqueueAgentCompletion(tab, term);
+    const n2 = session.pendingNotification() orelse return error.TestExpectedNotification;
+    try std.testing.expectEqualStrings("완료", n2.body);
 }
 
 test "parseGitHead: ref branch / nested ref / detached SHA / empty ref / junk" {

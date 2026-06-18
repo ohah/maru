@@ -995,3 +995,62 @@ test "macOS close with pending main-input write unblocks producer and reaps with
     const rc = std.c.waitpid(child_pid, &status, std.c.W.NOHANG);
     try std.testing.expect(rc < 0);
 }
+
+test "macOS reader drains main input even when the output event queue is full — no cross-queue deadlock (io-render-threading §8 P2-5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    // 교차-큐 데드락 회귀(P2-5 /code-review max에서 발견·수정): 출력 이벤트 큐가 작고 메인이 드레인하지 않으면,
+    // reader가 "출력 발생" 빈 신호 push에서 막혀 write_queue를 못 비우는 순환 대기가 가능했다(reader는 출력 큐의,
+    // 메인은 입력 큐의 유일한 drainer). runProcessing이 빈 신호를 **tryPush(비블로킹, full이면 드롭)**로 보내
+    // 막히지 않게 고쳤다. 검증: child가 먼저 출력 폭주로 이벤트 큐를 채운 뒤(이때 reader가 push에 막히면 안 됨)
+    // stdin을 읽는다. 큐가 찬 뒤 메인 입력을 넣고, write_queue가 **유한 상한(~2s) 안에** 비워지면(=reader가 막히지
+    // 않고 drain) PASS. 데드락이면 hasPending이 계속 true → 깔끔히 FAIL(무한 hang 아님 — 폴링 상한 + stopAndJoin).
+    const allocator = std.testing.allocator;
+    const size: maru.terminal.Size = .{ .cols = 40, .rows = 6 };
+
+    const script =
+        "stty -icanon -echo min 1 time 50 2>/dev/null; " ++
+        "seq 1 5000; " ++ // 출력 폭주 ~28KB(>4KB 청크 여러 개) → 작은 이벤트 큐를 채운다
+        "dd bs=64 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'; " ++ // 그 뒤 stdin 한 번 read
+        "printf '|END\\n'";
+
+    var session = try maru.pty.PtySession.spawn(allocator, .{
+        .command = "/bin/bash",
+        .args = &.{ "-c", script },
+        .size = size,
+    });
+    defer session.deinit();
+
+    var surface = try maru.app.Surface.init(allocator, 1, size);
+    defer surface.deinit();
+
+    var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 4); // 작게 — 폭주가 곧 채운다
+    defer queue.deinit();
+    defer queue.close();
+    var write_queue = try maru.app.PtyWriteQueue.init(std.testing.io, allocator, 4096);
+    defer write_queue.deinit();
+    var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    reader.setWriteQueue(&write_queue);
+    reader.setProcessing(&surface.core, &surface.core_mutex, std.testing.io);
+    try reader.start();
+
+    // 폭주가 이벤트 큐를 채우도록(메인은 드레인 안 함) 잠깐 둔 뒤 메인 입력을 넣는다 — 데드락이면 reader는 이미
+    // push에서 막혀 이 입력을 영영 drain하지 못한다.
+    try sleepMillis(50);
+    try write_queue.enqueueBlocking("MARU\n");
+    session.signalWrite();
+
+    // 유한 상한 안에 write_queue가 비워져야 한다(reader가 이벤트 큐 full에 막히지 않고 PTY로 write). 데드락이면 계속 pending.
+    var drained = false;
+    var i: usize = 0;
+    while (i < 200) : (i += 1) { // 최대 ~2s
+        if (!write_queue.hasPending()) {
+            drained = true;
+            break;
+        }
+        try sleepMillis(10);
+    }
+    reader.stopAndJoin(); // 정리(데드락이어도 queue.close가 막힌 push를 깨워 종료 — 무한 hang 없음)
+
+    try std.testing.expect(drained); // false면 교차-큐 데드락 회귀(reader가 출력 큐 push에 막혀 입력 미-drain)
+}

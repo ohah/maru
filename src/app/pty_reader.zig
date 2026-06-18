@@ -307,6 +307,27 @@ test "pty event queue rejects zero capacity" {
     );
 }
 
+test "setProcessing wires core/lock and enables reader core-processing (PR3)" {
+    // I/O–렌더 스레딩 분리(docs/io-render-threading.md PR3): setProcessing이 코어/락/io를 주입하고
+    // processing 플래그를 켠다. 켜지면 run()이 출력을 직접 코어에 적용·응답한다(렌더 tick과 무관).
+    // attachSurface가 interactive 세션에만 이걸 부른다(controlled_smoke/테스트는 false → 큐-드레인).
+    const allocator = std.testing.allocator;
+    var queue = try PtyEventQueue.init(std.testing.io, allocator, 1);
+    defer queue.deinit();
+    var session: pty.PtySession = undefined; // run()을 시작하지 않으므로 역참조 안 됨
+    var reader = PtyReader.init(allocator, 7, &session, &queue);
+    try std.testing.expect(!reader.processing.load(.acquire)); // 기본 off — 큐잉 경로
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 3 });
+    defer core.deinit();
+    var mutex: std.Io.Mutex = .init;
+    reader.setProcessing(&core, &mutex, std.testing.io);
+
+    try std.testing.expect(reader.processing.load(.acquire)); // 켜짐 — run()이 직접 처리
+    try std.testing.expectEqual(@as(?*terminal.TerminalCore, &core), reader.core);
+    try std.testing.expectEqual(@as(?*std.Io.Mutex, &mutex), reader.core_mutex);
+}
+
 test "pty event queue preserves event order and output ownership" {
     const allocator = std.testing.allocator;
     var queue = try PtyEventQueue.init(std.testing.io, allocator, 2);

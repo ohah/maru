@@ -1,6 +1,7 @@
 const std = @import("std");
 const pty = @import("../pty.zig");
 const runtime_mod = @import("runtime.zig");
+const terminal = @import("../terminal.zig");
 
 pub const QueueError = std.mem.Allocator.Error || error{
     ZeroCapacity,
@@ -172,6 +173,16 @@ pub const PtyReader = struct {
     session: *pty.PtySession,
     queue: *PtyEventQueue,
     thread: ?std.Thread = null,
+    // I/O–렌더 스레딩 분리(docs/io-render-threading.md PR3): processing이 켜지면 리더가 읽은 출력을
+    // 직접 코어에 적용하고(락 아래) 코어가 만든 응답을 PTY로 되쓴다 — 렌더 tick에 안 묶여 즉시.
+    // start() 전에 setProcessing으로 주입한다(스레드가 읽기 전에 설정돼야 race 없음). off면 기존처럼
+    // 바이트만 큐에 넣는다(3b-1: 주입만, 동작 불변). 코어 write는 self.session으로 응답을 되쓴다.
+    core: ?*terminal.TerminalCore = null,
+    core_mutex: ?*std.Io.Mutex = null,
+    io: std.Io = undefined,
+    // processing이 켜지면(setProcessing이 release-store) run()이 코어를 직접 처리한다. release-acquire로
+    // core/core_mutex/io 주입이 reader 스레드에 보인다(설정→store, 읽기 전 load).
+    processing: std.atomic.Value(bool) = .init(false),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -185,6 +196,15 @@ pub const PtyReader = struct {
             .session = session,
             .queue = queue,
         };
+    }
+
+    /// 리더가 출력을 직접 코어에 적용(락 아래)하고 응답을 PTY로 되쓰도록 코어/락/io를 주입한다.
+    /// **start() 전에** 호출해야 한다(스레드가 읽기 전 설정 — race 방지). docs/io-render-threading.md PR3.
+    pub fn setProcessing(self: *PtyReader, core: *terminal.TerminalCore, core_mutex: *std.Io.Mutex, io: std.Io) void {
+        self.core = core;
+        self.core_mutex = core_mutex;
+        self.io = io;
+        self.processing.store(true, .release); // 필드 설정 뒤 release — reader가 acquire-load로 본다
     }
 
     pub fn start(self: *PtyReader) !void {
@@ -222,16 +242,44 @@ pub const PtyReader = struct {
 
             switch (event) {
                 .output => |bytes| {
-                    // readEvent가 allocator-owned bytes를 반환한다. push가 성공하면
-                    // queue event가 소유권을 가져가고, consumer가 deinit한다.
-                    // queue가 닫혀 push가 실패하면 reader가 즉시 해제해 누수를 막는다.
-                    self.queue.pushBlocking(.{ .output = .{
-                        .pty_id = self.pty_id,
-                        .bytes = bytes,
-                    } }) catch {
-                        self.allocator.free(bytes);
-                        return;
-                    };
+                    if (self.processing.load(.acquire)) {
+                        // I/O–렌더 스레딩 분리(docs/io-render-threading.md PR3): 리더가 출력을 직접
+                        // 코어에 적용(락 아래)하고 코어가 만든 query 응답(OSC 10/11·CPR·DA)을 PTY로
+                        // 즉시 되쓴다 — 렌더 tick에 안 묶여 출력 폭주 중에도 데드라인 안에 응답한다.
+                        // 응답은 락 안에서 복사하고 writeInput은 락 밖(메인 렌더 snapshot 락을 안 막게).
+                        const core = self.core.?;
+                        const mutex = self.core_mutex.?;
+                        var reply_buf: ?[]u8 = null;
+                        mutex.lockUncancelable(self.io);
+                        core.write(bytes) catch {}; // best-effort(파서 OOM 등 드문 실패는 그 청크 드롭)
+                        const reply = core.pendingResponse();
+                        if (reply.len > 0) {
+                            reply_buf = self.allocator.dupe(u8, reply) catch null;
+                            core.clearResponse();
+                        }
+                        mutex.unlock(self.io);
+                        self.allocator.free(bytes); // 코어에 적용 완료 — 바이트 해제(큐로 안 넘김)
+                        if (reply_buf) |r| {
+                            defer self.allocator.free(r);
+                            self.session.writeInput(r) catch {}; // 자기 PTY로 응답 되쓰기(메인 렌더와 무관)
+                        }
+                        // 메인에 "출력 발생" 신호(빈 bytes): output_events를 올려 렌더를 트리거한다.
+                        // applyPtyEvent의 core.write(&.{})는 no-op, deinit의 free(len 0)도 no-op.
+                        self.queue.pushBlocking(.{ .output = .{
+                            .pty_id = self.pty_id,
+                            .bytes = &.{},
+                        } }) catch return;
+                    } else {
+                        // readEvent가 allocator-owned bytes를 반환한다. push가 성공하면 queue event가
+                        // 소유권을 가져가고 consumer가 deinit한다. push 실패(큐 닫힘)면 즉시 해제해 누수 방지.
+                        self.queue.pushBlocking(.{ .output = .{
+                            .pty_id = self.pty_id,
+                            .bytes = bytes,
+                        } }) catch {
+                            self.allocator.free(bytes);
+                            return;
+                        };
+                    }
                 },
                 .exited => |status| {
                     self.queue.pushBlocking(.{ .exited = .{

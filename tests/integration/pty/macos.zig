@@ -937,3 +937,61 @@ test "macOS reader-processing writes main input via write_queue as the sole writ
     try std.testing.expect(std.mem.indexOf(u8, screen, "|END") != null);
     try std.testing.expect(std.mem.indexOf(u8, screen, "4d4152552d494e505554") != null);
 }
+
+test "macOS close with pending main-input write unblocks producer and reaps without UAF/zombie (io-render-threading §8 P2-4)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    // P2-4 close-with-pending-write(§6-4 확장): child(`yes`)는 stdin을 안 읽으므로 PTY 입력버퍼가 차면 reader가
+    // write_queue를 더 비우지 못해 큐가 cap까지 쌓이고, 큰 입력을 넣는 생산자(메인 대역 스레드)는 enqueueBlocking
+    // backpressure로 막힌다. 이 상태에서 close가 (1) write_queue를 닫아 막힌 생산자를 QueueClosed로 풀고(무한
+    // 대기 금지) (2) session.close로 child를 SIGKILL reap하고 (3) reader join **뒤** surface.deinit이라 UAF가
+    // 없어야 한다. 생산자가 안 풀리면 producer.join()에서 영원히 hang → 테스트 실패(teeth).
+    const allocator = std.testing.allocator;
+    const size: maru.terminal.Size = .{ .cols = 30, .rows = 6 };
+
+    // `yes`: stdout 무한 폭주 + stdin 무시. PTY 입력버퍼가 차면 우리 입력이 write_queue에 남는다.
+    var session = try maru.pty.PtySession.spawn(allocator, .{
+        .command = "/usr/bin/yes",
+        .args = &.{"maru-flood"},
+        .size = size,
+    });
+    const child_pid = session.child_pid;
+
+    var surface = try maru.app.Surface.init(allocator, 1, size);
+    var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 64);
+    var write_queue = try maru.app.PtyWriteQueue.init(std.testing.io, allocator, 1 << 16); // 64KiB cap
+    var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    reader.setWriteQueue(&write_queue);
+    reader.setProcessing(&surface.core, &surface.core_mutex, std.testing.io);
+    try reader.start();
+
+    // 생산자: child가 안 읽어 PTY 버퍼가 차면 write_queue가 cap까지 차고 여기서 backpressure로 막힌다.
+    const Producer = struct {
+        fn run(wq: *maru.app.PtyWriteQueue, sess: *maru.pty.PtySession) void {
+            var chunk: [4096]u8 = undefined;
+            @memset(&chunk, 'x');
+            var i: usize = 0;
+            while (i < 64) : (i += 1) { // 256KB 시도 — cap(64KB)+PTY버퍼를 넘겨 막히게
+                wq.enqueueBlocking(&chunk) catch return; // close되면 QueueClosed로 끝남
+                sess.signalWrite();
+            }
+        }
+    };
+    var producer = try std.Thread.spawn(.{}, Producer.run, .{ &write_queue, &session });
+
+    try sleepMillis(20); // 생산자가 backpressure로 막히는 상태가 되게 둔다(정확한 시점 불필요)
+
+    // close 순서: write_queue를 먼저 닫아 막힌 생산자를 QueueClosed로 풀고, 그 뒤 reader 멈춤 + child reap.
+    write_queue.close();
+    reader.stopAndJoin(); // queue.close → session.close[SIGKILL] → join
+    producer.join(); // QueueClosed로 끝났어야 한다(무한 대기면 여기서 hang)
+    surface.deinit(); // reader join 후 core.deinit — UAF 없음
+    session.deinit();
+    queue.deinit();
+    write_queue.deinit();
+
+    // child가 reap돼 좀비가 없어야 한다: 이미 reap된 pid의 waitpid는 ECHILD(rc<0).
+    var status: c_int = 0;
+    const rc = std.c.waitpid(child_pid, &status, std.c.W.NOHANG);
+    try std.testing.expect(rc < 0);
+}

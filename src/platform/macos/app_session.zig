@@ -2601,7 +2601,13 @@ pub const AppSession = struct {
             .next_term => self.focusTermRelative(1),
             .previous_term => self.focusTermRelative(-1),
             // 전체 선택(⌘A) — 활성 surface 코어의 selection을 스크롤백+화면 전체로. clipboard 쓰기는 네이티브.
-            .select_all => self.activeSurface().core.selectAll(),
+            .select_all => {
+                // 코어 mutate(스크롤백 읽음) — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
+                const s = self.activeSurface();
+                s.core_mutex.lockUncancelable(self.io);
+                defer s.core_mutex.unlock(self.io);
+                s.core.selectAll();
+            },
             // 커맨드 팝업 토글(Cmd+Shift+P). 열려 있으면 닫고, 아니면 연다(상태머신은 PaletteState).
             .toggle_command_palette => self.togglePalette(),
             // 스크롤백 Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState, 검색은 코어).
@@ -2685,8 +2691,14 @@ pub const AppSession = struct {
     /// maru 스크롤백 Find를 지금 끌지 — **단일 정책 출처**(toggleFind/findNavigate/tick-close가 공유). alt screen
     /// (vim/less/htop)에선 그 화면을 앱이 소유하고 스크롤백 뷰포트가 잠겨(scrollToAbs 무동작) 매치로 갈 수 없으니
     /// 앱 자체 검색(`/`)에 맡긴다(iTerm2 관례). surface 미초기화(narrow 테스트)면 false(activeSurfaceConst 보호).
-    fn findSuppressed(self: *const AppSession) bool {
-        return self.surface_initialized and self.activeSurfaceConst().core.alt_active;
+    fn findSuppressed(self: *AppSession) bool {
+        if (!self.surface_initialized) return false; // narrow 테스트(surface 미초기화) 보호
+        // alt_active는 리더 core.write가 락 아래 토글하므로 같은 락으로 읽는다(docs/io-render-threading.md PR3).
+        // 호출처(toggleFind/findNavigate/render-tick close)는 모두 락 밖이라 더블락 없음.
+        const s = self.activeSurface();
+        s.core_mutex.lockUncancelable(self.io);
+        defer s.core_mutex.unlock(self.io);
+        return s.core.alt_active;
     }
 
     /// 스크롤백 Find를 토글한다 — 열려 있으면 닫고(매치 하이라이트 정리), 아니면 연다(빈 검색어). 팝업과 배타적
@@ -2892,7 +2904,11 @@ pub const AppSession = struct {
         if (self.findSuppressed()) return; // alt screen — maru Find 끔(toggleFind와 같은 정책)
         if (self.chrome_host.find.input.query.items.len == 0) return; // 검색 이력 없음 — 무동작
         if (self.find_matches.items.len == 0) {
-            self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
+            // findMatches는 코어 mutate(스크롤백 rewrap)+읽기 — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
+            const s = self.activeSurface();
+            s.core_mutex.lockUncancelable(self.io);
+            s.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
+            s.core_mutex.unlock(self.io);
             self.chrome_host.find.setMatchCount(self.find_matches.items.len); // current를 범위로 clamp(닫기 전 위치 보존)
         }
         if (self.find_matches.items.len == 0) return; // 매치 없음
@@ -2928,9 +2944,16 @@ pub const AppSession = struct {
     /// chrome_host.find.match_count를 동기화해(setMatchCount) 컴포넌트의 카운터·next/prev wrap이 맞게 한다.
     fn recomputeFind(self: *AppSession) void {
         if (!self.surface_initialized) return;
-        self.activeSurface().core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch {
-            self.find_matches.clearRetainingCapacity();
-        };
+        {
+            // findMatches는 코어 mutate(ensureScrollbackRewrapped로 스크롤백 realloc)+읽기 — 락 아래
+            // (docs/io-render-threading.md PR3 — 리더 core.write와 경합 시 UAF/크래시 방지).
+            const s = self.activeSurface();
+            s.core_mutex.lockUncancelable(self.io);
+            defer s.core_mutex.unlock(self.io);
+            s.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch {
+                self.find_matches.clearRetainingCapacity();
+            };
+        }
         self.chrome_host.find.setMatchCount(self.find_matches.items.len);
         self.chrome_host.find.current = 0; // 재검색은 첫 매치로 리셋(증분)
         self.scrollToCurrentMatch();
@@ -3104,7 +3127,14 @@ pub const AppSession = struct {
         // 인코딩한다(아래 frame_loop 경로). 스크롤 키라 '타이핑하면 바닥으로' 로직보다 먼저 처리해
         // 매 PageUp마다 뷰가 바닥으로 튀지 않게 한다.
         if (self.surface_initialized) {
-            const page_delta = pageScrollDelta(self.page_keys_scroll, self.activeSurface().core.alt_active, event.key);
+            const page_alt_active = blk: {
+                // alt_active는 리더가 락 아래 토글 — 같은 락으로 읽는다(docs/io-render-threading.md PR3).
+                const s = self.activeSurface();
+                s.core_mutex.lockUncancelable(self.io);
+                defer s.core_mutex.unlock(self.io);
+                break :blk s.core.alt_active;
+            };
+            const page_delta = pageScrollDelta(self.page_keys_scroll, page_alt_active, event.key);
             if (page_delta != 0) {
                 self.scrollPage(page_delta);
                 self.total_app_key_events += 1; // 앱(터미널)이 소비 — PTY로 안 보냄
@@ -3292,10 +3322,19 @@ pub const AppSession = struct {
     fn scrollSurfaceLines(self: *AppSession, surface: *app.Surface, lines: i32) void {
         if (lines == 0) return;
         const core = &surface.core;
-        if (core.alt_active and core.alternate_scroll) {
+        // alt_active/alternate_scroll 모드 읽기 + encodeKey(코어 모드 읽음)는 리더 core.write와 경합하므로
+        // 락 아래(docs/io-render-threading.md PR3). encodeKey 직후 unlock해 writeInput(블로킹 가능 PTY 쓰기)을
+        // 락 밖에서 한다 — bytes는 함수-스택 key_buffer를 가리켜 unlock 후에도 유효.
+        core_mutex_blk: {
+            surface.core_mutex.lockUncancelable(self.io);
+            if (!(core.alt_active and core.alternate_scroll)) break :core_mutex_blk;
             const key: terminal.input.Key = if (lines > 0) .arrow_up else .arrow_down;
             var key_buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
-            const bytes = core.encodeKey(.{ .key = key }, &key_buffer) catch return;
+            const bytes = core.encodeKey(.{ .key = key }, &key_buffer) catch {
+                surface.core_mutex.unlock(self.io);
+                return;
+            };
+            surface.core_mutex.unlock(self.io);
             // 시퀀스를 한 버퍼에 반복해 묶어 보낸다 — 줄마다 writeInput(쓰기 시스콜)을 하면 빠른
             // 플릭에서 초당 수백 회가 되고, PTY 버퍼가 차면 나머지가 통째로 드랍된다.
             var batch: [512]u8 = undefined;
@@ -3315,7 +3354,9 @@ pub const AppSession = struct {
             }
             return;
         }
+        // break로 도달(non-alt 경로): 락은 아직 보유 중 — scrollViewport(코어 변경)까지 한 락으로 덮고 푼다.
         core.scrollViewport(@as(isize, lines));
+        surface.core_mutex.unlock(self.io);
         self.metal_dirty = true;
     }
 
@@ -3638,6 +3679,11 @@ pub const AppSession = struct {
         // 셀렉션은 left 버튼(0)만 시작한다 — tracking 아닌 상태의 right/middle 클릭은 무시(셀렉션·context 메뉴 없음).
         if (button != 0) return;
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
+        // 선택 변경(selectionStart/Extend/Clear/Word/Line)은 코어 mutate라 락 아래(docs/io-render-threading.md
+        // PR3 — 리더 core.write와 경합 방지; selectWordAt/LineAt는 스크롤백도 읽음). handleClick은 metal_dirty
+        // 직후 끝나므로 함수-스코프 defer로 풀어 switch 내 early return도 안전히 unlock한다.
+        click_surface.core_mutex.lockUncancelable(self.io);
+        defer click_surface.core_mutex.unlock(self.io);
         switch (kind) {
             1 => {
                 self.mouse_drag_selecting = true;
@@ -3745,7 +3791,13 @@ pub const AppSession = struct {
     /// 스크롤하며 선택을 가장자리 행으로 확장한다 — 화면보다 긴 내용을 드래그로 선택하는 표준 UX.
     fn applyDragAutoscroll(self: *AppSession) void {
         if (self.drag_autoscroll == 0) return;
-        const core = &self.activeSurface().core;
+        const surface = self.activeSurface();
+        const core = &surface.core;
+        // selection_anchor/view_offset/selection_head 읽기 + scrollViewport/selectionExtend(코어 변경)는 리더
+        // core.write와 경합 — 메서드 전체를 락 아래(docs/io-render-threading.md PR3). 짧은 메서드라 락 비용 무시 가능;
+        // 함수가 metal_dirty 직후 끝나므로 함수-스코프 defer로 풀어 early return도 안전히 unlock.
+        surface.core_mutex.lockUncancelable(self.io);
+        defer surface.core_mutex.unlock(self.io);
         // 게이트는 "확장할 선택이 있는가"다 — mouse_drag_selecting로 걸면 더블/트리플클릭(4/5)으로
         // 시작한 선택을 드래그로 화면 밖까지 늘릴 때 자동 스크롤이 영원히 안 걸린다.
         if (core.selection_anchor == null) return;
@@ -3782,7 +3834,13 @@ pub const AppSession = struct {
             .rename => self.rename_input.setPreedit(self.allocator, bytes) catch {},
             .find => self.chrome_host.find.input.setPreedit(self.allocator, bytes) catch {},
             .palette => self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {},
-            .terminal => self.activeSurface().core.setPreedit(bytes) catch {},
+            .terminal => {
+                // setPreedit는 코어 변경 — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
+                const s = self.activeSurface();
+                s.core_mutex.lockUncancelable(self.io);
+                defer s.core_mutex.unlock(self.io);
+                s.core.setPreedit(bytes) catch {};
+            },
         }
     }
 
@@ -3954,7 +4012,12 @@ pub const AppSession = struct {
                 self.metal_dirty = true; // 조합 글자가 편집 텍스트로 확정됨(렌더 갱신)
             },
             .terminal => {
-                const core = &self.activeSurface().core;
+                // preedit 읽기 + setPreedit("") 변경은 코어 mutate — 락 아래(docs/io-render-threading.md PR3,
+                // 리더 경합 방지). sendCommittedText는 PTY로만 나가(코어 mutex 재취득 없음) 락 보유 중 호출해도 안전.
+                const s = self.activeSurface();
+                const core = &s.core;
+                s.core_mutex.lockUncancelable(self.io);
+                defer s.core_mutex.unlock(self.io);
                 if (core.preedit) |pending| {
                     // setPreedit가 버퍼를 해제하므로 먼저 사본을 떠서 보낸다.
                     const copy = self.allocator.dupe(u8, pending) catch return;

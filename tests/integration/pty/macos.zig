@@ -743,3 +743,55 @@ test "macOS reader-processing delivers OSC 11 reply without any render tick (PR3
     try std.testing.expect(std.mem.indexOf(u8, screen, "|END") != null);
     try std.testing.expect(std.mem.indexOf(u8, screen, "1b5d31313b726762") != null);
 }
+
+test "macOS reader-processing answers OSC 11 within a bound under output flood (io-render-threading §6-2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    // §6-2 회귀: 원결함은 출력 폭주 중 OSC 11 응답이 ~4.2초 지연(렌더 tick 결합)이었다. reader-processing는
+    // 폭주와 무관하게 즉시 응답해야 한다. child가 대량 출력(~106KB)을 쏟은 뒤 OSC 11 질의를 보내고, 응답을
+    // **유한 상한(VTIME=20 = 2초) 안에** 한 번의 read로 받으면 그 바이트를 hex로 에코한다. 신모델은 폭주를
+    // 인라인 처리(<<2s)하고 응답을 즉시 되써 child가 받음 → core에 OSC 11 응답 hex가 있음(PASS). 응답이 초 단위로
+    // 지연되면(원결함 회귀) child read가 2초에 타임아웃 → hex 없음 → FAIL. 상한은 codex 데드라인(~50–100ms)보다
+    // 훨씬 관대해 머신 편차 flaky를 피하면서 "초 단위 지연"만 정조준한다(docs/io-render-threading §6-2).
+    const allocator = std.testing.allocator;
+    const size: maru.terminal.Size = .{ .cols = 60, .rows = 6 };
+
+    const script =
+        "stty -icanon -echo min 0 time 20 2>/dev/null; " ++ // raw, read는 데이터 즉시 / 없으면 2s(VTIME)
+        "seq 1 20000; " ++ // 출력 폭주 ~106KB (reader가 4KB 청크로 인라인 처리)
+        "printf '\\033]11;?\\033\\\\'; " ++ // 폭주 뒤 OSC 11 배경 질의
+        "dd bs=64 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'; " ++ // 응답을 한 번 read(≤2s) → hex 에코
+        "printf '|END\\n'";
+
+    var session = try maru.pty.PtySession.spawn(allocator, .{
+        .command = "/bin/bash",
+        .args = &.{ "-c", script },
+        .size = size,
+    });
+    defer session.deinit();
+
+    var surface = try maru.app.Surface.init(allocator, 1, size);
+    defer surface.deinit();
+
+    // 큐는 폭주의 "출력 발생" 빈 신호(청크당 1개, 빈-신호 coalescing 없음 — pty_reader)를 받는다. ~106KB/4KB≈27개
+    // ≪ 256이라 메인이 안 드레인해도 reader가 pushBlocking에서 안 막힌다(drain/render 호출 없이 §6-2 성립).
+    var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 256);
+    defer queue.deinit();
+    defer queue.close();
+    var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    reader.setProcessing(&surface.core, &surface.core_mutex, std.testing.io);
+    try reader.start();
+    reader.join(); // child가 응답을 (상한 안에) 받아 마커 찍고 exit → reader도 EOF로 끝남
+
+    const screen = try surface.core.dumpUtf8(allocator);
+    defer allocator.free(screen);
+    try artifacts.writeTextWithFinalNewline(
+        allocator,
+        "tests/artifacts/integration/pty/osc11-reader-flood-latency.screen.txt",
+        screen,
+    );
+
+    // 폭주 뒤에도 OSC 11 응답이 2초 상한 안에 child에 도달 = 원결함(4.2s) 회귀 없음.
+    try std.testing.expect(std.mem.indexOf(u8, screen, "|END") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "1b5d31313b726762") != null);
+}

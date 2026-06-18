@@ -243,18 +243,6 @@ fn copyJsonStringFirstLine(dst: []u8, v: ?std.json.Value) usize {
     return copyFirstLineTruncated(dst, s);
 }
 
-/// mtime 목록에서 최신(최대) 인덱스를 고른다(동률이면 먼저 나온 것). 비면 null. 그 cwd의 활성 세션 = 그
-/// 디렉터리에서 mtime이 가장 최신인 `.jsonl`이다(docs/agent-session.md "데이터 소스"). 디렉터리 나열·stat은
-/// platform(L4)이 하고, 여기선 그 결과에서 고른다(순수). mtime은 std.fs의 나노초 i128과 맞춘다.
-pub fn pickNewestIndex(mtimes: []const i128) ?usize {
-    if (mtimes.len == 0) return null;
-    var best: usize = 0;
-    for (mtimes, 0..) |m, i| {
-        if (m > mtimes[best]) best = i;
-    }
-    return best;
-}
-
 // ── std.json.Value 접근 helper(태그 확인 후 안전 추출) ───────────────────────────────
 // 태그 union을 switch로 좁혀 잘못된 활성 필드 접근(safety panic)을 원천 차단한다.
 
@@ -396,13 +384,6 @@ test "encodeClaudeProjectDir: 절대 cwd의 / 를 - 로 치환" {
     // 버퍼가 작으면 null.
     var tiny: [4]u8 = undefined;
     try std.testing.expectEqual(@as(?[]const u8, null), encodeClaudeProjectDir(&tiny, "/Users/x"));
-}
-
-test "pickNewestIndex: 최대 mtime 인덱스(동률은 먼저), 빈 목록은 null" {
-    try std.testing.expectEqual(@as(?usize, 2), pickNewestIndex(&.{ 100, 200, 300 }));
-    try std.testing.expectEqual(@as(?usize, 1), pickNewestIndex(&.{ 300, 900, 50, 900 })); // 첫 900
-    try std.testing.expectEqual(@as(?usize, 0), pickNewestIndex(&.{42}));
-    try std.testing.expectEqual(@as(?usize, null), pickNewestIndex(&.{}));
 }
 
 // ── codex 어댑터 테스트 ──────────────────────────────────────────────────────────────

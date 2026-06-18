@@ -3635,9 +3635,12 @@ pub const AppSession = struct {
         // 인라인 rename 편집 caret도 깜빡인다 — 사이드바/탭/라벨 셀 스트림의 '|' 글자라(터미널 커서처럼 suffix-trim
         // 으로 못 숨김) text-blink와 같이 full rebuild가 필요하다(renameEditText가 blink_visible로 '|'↔공백 토글).
         const rename_active = self.rename != null;
+        // 에이전트 아이콘 펄스: 사이드바 카드 중 running인 에이전트가 있으면 위상을 진행해야 아이콘이 맥동한다.
+        // 사이드바 아이콘은 suffix-trim으로 못 숨기는 별도 frame이라 text-blink/rename처럼 full rebuild(dirty)가 필요.
+        const agent_pulsing = self.anyAgentRunning();
         // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
         // core.preedit로 이미 막지만, 오버레이/rename은 imeComposingActive로 막아야 한다(단일 출처).
-        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active) or self.imeComposingActive()) {
+        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !agent_pulsing) or self.imeComposingActive()) {
             self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
             return;
         }
@@ -3648,9 +3651,19 @@ pub const AppSession = struct {
             // suffix-trim 토글(재빌드 없음). 오버레이가 열렸으면 suffix=오버레이 caret이라 caret을, 닫혔으면 suffix=
             // 터미널 커서라 커서를 깜빡인다 — 같은 코드(generation↑만, idle에 full-grid reshape 안 함).
             self.metal_buffer.setCursorVisible(self.blink_visible);
-            // 텍스트 blink·rename caret은 셀 글자라 full rebuild가 필요하다(suffix-trim으로 못 숨김) — dirty 표시.
-            if (text_blinks or rename_active) self.metal_dirty = true;
+            // 텍스트 blink·rename caret·에이전트 아이콘 펄스는 셀/사이드바 glyph라 full rebuild가 필요하다
+            // (suffix-trim으로 못 숨김) — dirty 표시해 사이드바를 위상마다 재투영(아이콘 dimRgb 적용/해제).
+            if (text_blinks or rename_active or agent_pulsing) self.metal_dirty = true;
         }
+    }
+
+    /// 사이드바에 보이는 워크스페이스 카드(탭별 활성 Term) 중 하나라도 에이전트가 running이면 true. 아이콘 펄스
+    /// 위상을 진행할지 결정한다(running이 있어야 blink_visible을 토글하고 사이드바를 재투영한다).
+    fn anyAgentRunning(self: *AppSession) bool {
+        for (self.tabs.items) |tab| {
+            if (tab.activePane().activeTerm().agent_state == .running) return true;
+        }
+        return false;
     }
 
     /// 깜빡임을 보이는 위상으로 리셋한다(입력/출력 직후 — caret이 항상 보이며 새 주기를 시작).
@@ -4693,13 +4706,12 @@ pub const AppSession = struct {
             if (term.agent_kind != prev) {
                 self.metal_dirty = true; // 표시되는 Term의 에이전트 변화 → 사이드바 재렌더
                 if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
-                // kind가 바뀌면(새 에이전트 시작/종료) 상태 캐시를 리셋한다 — 옛 세션의 mtime/답변이 새 에이전트로
-                // 새지 않게. none이 되면(에이전트 종료) 상태도 비운다.
+                // kind가 바뀌면(새 에이전트 시작/종료/claude↔codex 직접 전환) 상태 캐시를 **전부** 리셋한다 —
+                // 옛 세션의 mtime/상태/답변이 새 에이전트로 새지 않게. 특히 agent_state를 unknown으로 되돌려야
+                // 직접 전환(claude .running → codex) 때 stale한 prev_state로 가짜 running→idle 알림이 안 뜬다.
                 term.agent_session_mtime = 0;
-                if (term.agent_kind == .none) {
-                    term.agent_state = .unknown;
-                    term.agent_answer_len = 0;
-                }
+                term.agent_state = .unknown;
+                term.agent_answer_len = 0;
             }
             // "보고 있는" 탭 = 포커스 창의 활성 탭. 그 외(비활성 탭 / 백그라운드 창)에서 완료되면 알림한다.
             const is_current = idx == self.app_window.active_tab and self.window_focused;
@@ -4729,8 +4741,15 @@ pub const AppSession = struct {
 
         const prev_state = term.agent_state;
         const r = agent_session.poll(self.io, self.allocator, kind, root, cwd, term.agent_session_mtime, &term.agent_answer_buf);
+        const new_state = r.state orelse {
+            term.agent_session_mtime = r.mtime; // null = mtime 동일 — 갱신 무해, 직전 상태 유지(재파싱 skip)
+            return;
+        };
+        // unknown(세션 못 찾음 / tail에 완전한 엔트리 없음)은 **직전 상태를 보존**한다(AgentState.unknown 계약).
+        // running을 unknown으로 덮으면 사이드바가 깜빡이고, running→idle 전환 edge를 놓쳐 완료 알림이 누락된다.
+        // mtime을 갱신하지 않아 다음 poll에 다시 시도한다(거대 단일 줄/쓰는 중이던 경우 곧 완전한 줄이 보임).
+        if (new_state == .unknown) return;
         term.agent_session_mtime = r.mtime;
-        const new_state = r.state orelse return; // null = mtime 안 바뀜 → 직전 상태 유지(재파싱 skip)
         const new_answer_len: usize = if (new_state == .idle) r.answer_len else 0;
         if (new_state != term.agent_state or new_answer_len != term.agent_answer_len) {
             self.metal_dirty = true; // 상태/답변 변화 → 사이드바 재렌더
@@ -5800,8 +5819,8 @@ pub const AppSession = struct {
         if (sidebar_cols == 0) return error.NoSidebar;
 
         // 탭 카드를 소유 버퍼로 모은다(buildSidebarDrawList가 코드포인트로 디코드): names=이름줄(📌 포함, 번호 없음),
-        // branch_lines=⎇ 브랜치줄, path_lines=경로줄(branch/path가 ""면 그 줄 생략 → 1~3줄). agents=에이전트 아이콘
-        // 코드포인트(0=없음) — 이름과 분리해 슬롯 세로 중앙에 독립 배치(buildSidebarDrawList).
+        // branch_lines=⎇ 브랜치줄, path_lines=경로줄, status_lines=상태줄(빈 보조줄은 생략 → 1~4줄). agents=에이전트
+        // 아이콘 코드포인트(0=없음) — 이름과 분리해 슬롯 세로 중앙에 독립 배치(buildSidebarDrawList).
         var names: std.ArrayList([]const u8) = .empty;
         defer {
             for (names.items) |l| self.allocator.free(l);
@@ -6887,6 +6906,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     session.blink_ticks = 0;
     session.chrome_host = .{}; // updateCursorBlink이 find/palette.open을 읽음 — undefined면 UB([[devsession-undefined-test-field-trap]])
     session.rename = null; // inputFocus/updateCursorBlink가 rename을 읽음(undefined면 garbage가 .rename 분기)
+    session.tabs = .empty; // updateCursorBlink→anyAgentRunning이 tabs를 순회 — undefined면 UB(같은 함정). 빈 목록=펄스 없음
 
     // 기본(DECSCUSR 1 = 깜빡 block): interval 틱마다 토글. rebuild(metal_dirty) 없이 generation만(suffix 토글).
     var i: u32 = 0;

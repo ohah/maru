@@ -649,6 +649,12 @@ const EnvStorage = struct {
         while (environ[index]) |entry| : (index += 1) {
             const slice = std.mem.span(entry);
             if (std.mem.startsWith(u8, slice, "TERM=") or std.mem.startsWith(u8, slice, "COLORTERM=")) continue;
+            // 런처(빌드 도구·부모 셸·CI)가 남긴 색-강제 override를 떨군다. supports-color(codex 등)는
+            // CLICOLOR_FORCE!=0 / FORCE_COLOR을 env_force_color로 먼저 평가해 색 레벨을 강제하는데, 흔히 1(basic
+            // 16색)이라 COLORTERM=truecolor를 무시하고 truecolor를 끈다(실측: `zig build`로 띄운 maru에서 상속된
+            // CLICOLOR_FORCE=1 때문에 codex가 입력창 회색 컴포저를 truecolor로 못 그림 — GUI 실행 시엔 없어 정상).
+            // maru가 터미널이므로 색 capability는 위 COLORTERM/TERM으로만 알린다 — 이 force 변수는 자식에 안 넘긴다.
+            if (std.mem.startsWith(u8, slice, "CLICOLOR_FORCE=") or std.mem.startsWith(u8, slice, "FORCE_COLOR=")) continue;
             if (zdotdir != null) {
                 if (std.mem.startsWith(u8, slice, "ZDOTDIR=")) {
                     old_zdotdir = slice["ZDOTDIR=".len..];
@@ -985,6 +991,32 @@ test "EnvStorage empty env inherits the parent but forces TERM/COLORTERM to Maru
     try std.testing.expect(maru_term);
     try std.testing.expect(maru_colorterm);
     try std.testing.expect(i >= 2); // 부모 env도 물려받았다(최소 PATH 등)
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "EnvStorage strips launcher color-force overrides (CLICOLOR_FORCE/FORCE_COLOR)" {
+    // 런처(빌드 도구·CI·부모 셸)가 남긴 색-강제 override는 supports-color류(codex 등)가 env_force_color로
+    // 먼저 평가해 색 레벨을 강제(흔히 basic 16색)하므로 COLORTERM=truecolor를 무시한다 → truecolor 꺼짐
+    // (실측: `zig build`로 띄운 maru에서 상속된 CLICOLOR_FORCE=1 때문에 codex 입력창 회색 컴포저가 안 그려짐).
+    // maru는 색 capability를 COLORTERM/TERM으로만 알리므로 이 force 변수를 자식 env에 넘기지 않는다.
+    _ = setenv("CLICOLOR_FORCE", "1", 1);
+    _ = setenv("FORCE_COLOR", "1", 1);
+    defer {
+        _ = unsetenv("CLICOLOR_FORCE");
+        _ = unsetenv("FORCE_COLOR");
+    }
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-256color", null);
+    defer storage.deinit();
+    const envp = storage.envpPtr();
+    var i: usize = 0;
+    while (envp[i]) |entry| : (i += 1) {
+        const slice = std.mem.span(entry);
+        try std.testing.expect(!std.mem.startsWith(u8, slice, "CLICOLOR_FORCE="));
+        try std.testing.expect(!std.mem.startsWith(u8, slice, "FORCE_COLOR="));
+    }
+    try std.testing.expect(i >= 2); // 나머지 부모 env는 그대로 물려받았다
 }
 
 test "EnvStorage explicit env is passed through verbatim (term arg ignored)" {

@@ -197,6 +197,9 @@ pub const PtySession = struct {
         }
         try setCloseOnExec(wake_fds[0]);
         try setCloseOnExec(wake_fds[1]);
+        // read end는 non-blocking — write-pending wake(Phase 2 §8)가 반복돼도 drainWake가 누적 바이트를
+        // EAGAIN까지 비울 수 있게(블로킹 없이). close-wake는 poll만 깨우고 read는 안 하므로 영향 없다.
+        try setNonBlocking(wake_fds[0]);
 
         const pid = std.c.fork();
         if (pid < 0) return error.ForkFailed;
@@ -261,43 +264,79 @@ pub const PtySession = struct {
         }
     }
 
-    pub fn readEvent(self: *PtySession, allocator: std.mem.Allocator) !types.PtyEvent {
-        if (self.exited.load(.acquire)) return error.NoMoreEvents;
-        const fd = self.activeMasterFd() catch return error.SessionClosed;
+    /// 단일 I/O 루프(docs/io-render-threading.md §8 Phase 2)용 I/O 준비 상태. closing이면 waitIo가
+    /// error.SessionClosed. 둘 다 false면 write-pending wake(호출자가 write 큐 확인 후 다음 poll에 POLLOUT 반영).
+    pub const IoReady = struct { readable: bool = false, writable: bool = false };
 
-        var buffer: [4096]u8 = undefined;
-        const read_len = while (true) {
-            try self.waitReadableOrClosing(fd);
-            break std.posix.read(fd, &buffer) catch |err| switch (err) {
-                // PTY EOF is reported as EIO on some Unix implementations after
-                // the slave side closes. Treat it the same as a zero-byte read so
-                // callers do not need OS-specific EOF rules.
-                error.InputOutput => 0,
-                // master fd가 O_NONBLOCK이라 poll-readable과 read 사이의 드문 race에서 EAGAIN이
-                // 날 수 있다 — 데이터가 아직 없다는 뜻이니 다시 기다린다(루프, 스택 안전).
-                error.WouldBlock => continue,
-                else => {
-                    if (self.closing.load(.acquire)) return error.SessionClosed;
-                    return err;
-                },
-            };
-        };
+    /// 비차단 read 결과: 읽은 길이 / EOF(자식 stdio 닫힘) / EAGAIN(데이터 아직 없음 — 재시도).
+    pub const ReadOutcome = union(enum) { data: usize, eof, again };
 
-        if (read_len > 0) {
-            const owned = try allocator.dupe(u8, buffer[0..read_len]);
-            return .{ .output = owned };
-        }
-
-        // EOF. Reap the child, but never block in a bare waitpid so close() can
-        // always interrupt us. The child has usually exited already (that is what
-        // produced the EOF), so the non-blocking reap below returns immediately. If
-        // the child only closed its stdio but keeps running, wait for its real exit
-        // through kqueue NOTE_EXIT (or a close wake) instead of a blocking waitpid.
+    /// 한 번의 poll로 master(POLLIN | POLLOUT if want_write) + wake self-pipe를 기다린다(timeout -1). 단일 I/O
+    /// 루프가 read·write를 한 poll에서 인터리브하는 기반(write가 막혀도 read 진전). closing이면 SessionClosed.
+    /// wake가 오면 바이트를 비우고(drainWake), closing이면 SessionClosed·아니면 write-pending이라 준비된 read/write
+    /// 없이 반환(호출자 재-poll). wake/close를 master보다 먼저 확인한다(close 직후 재사용된 fd가 readable로 보여도
+    /// 오인 안 하게 — 기존 readEvent 동작 보존).
+    pub fn waitIo(self: *PtySession, want_write: bool) !IoReady {
         while (true) {
             if (self.closing.load(.acquire)) return error.SessionClosed;
-            // reaping을 잡는 건 close()와 double-reap을 피하기 위해서다. WNOHANG가
-            // 실패하거나 아직 살아 있으면 다시 풀어줘 close()/deinit이 거둘 수 있게 한다.
-            if (self.reaping.swap(true, .acq_rel)) return error.SessionClosed;
+            const fd = self.master_fd.load(.acquire);
+            if (fd < 0) return error.SessionClosed;
+            var want: i16 = poll_in_events;
+            if (want_write) want |= @as(i16, @intCast(std.posix.POLL.OUT));
+            var fds = [_]std.posix.pollfd{
+                .{ .fd = fd, .events = want, .revents = 0 },
+                .{ .fd = self.wake_read_fd, .events = poll_in_events, .revents = 0 },
+            };
+            _ = try std.posix.poll(&fds, -1);
+
+            if (self.closing.load(.acquire)) return error.SessionClosed;
+            if (fds[1].revents != 0) {
+                self.drainWake();
+                if (self.closing.load(.acquire)) return error.SessionClosed;
+                return .{}; // write-pending wake — 준비된 read/write 없음(호출자가 want_write로 재-poll)
+            }
+            const r = fds[0].revents;
+            if ((r & @as(i16, @intCast(std.posix.POLL.NVAL))) != 0) return error.PollFailed;
+            const readable = (r & poll_readable_revents) != 0;
+            const writable = want_write and (r & @as(i16, @intCast(std.posix.POLL.OUT))) != 0;
+            if (readable or writable) return .{ .readable = readable, .writable = writable };
+            // POLLIN/HUP/ERR도 OUT도 아닌 드문 spurious wakeup — 다시 기다린다.
+        }
+    }
+
+    /// wake self-pipe에 쌓인 바이트를 비운다(read end가 O_NONBLOCK이라 EAGAIN까지 비차단). write-pending wake가
+    /// 반복돼도 누적되지 않게. close-wake는 waitIo가 closing을 먼저 봐 여기 오지 않는다.
+    fn drainWake(self: *PtySession) void {
+        var buf: [64]u8 = undefined;
+        while (true) {
+            const n = std.posix.read(self.wake_read_fd, &buf) catch return; // EAGAIN 등 → 비움 완료
+            if (n == 0) return;
+        }
+    }
+
+    /// 비차단으로 master를 buf에 읽는다(호출자가 waitIo로 readable 확인 후). EOF는 0바이트 또는 EIO(일부 Unix가
+    /// 슬레이브 close를 EIO로 보고)로 통일. EAGAIN(readable과 read 사이 race)은 .again으로 재시도 신호.
+    pub fn readChunk(self: *PtySession, buf: []u8) !ReadOutcome {
+        const fd = self.activeMasterFd() catch return error.SessionClosed;
+        const n = std.posix.read(fd, buf) catch |err| switch (err) {
+            error.InputOutput => return .eof,
+            error.WouldBlock => return .again,
+            else => {
+                if (self.closing.load(.acquire)) return error.SessionClosed;
+                return err;
+            },
+        };
+        if (n == 0) return .eof;
+        return .{ .data = n };
+    }
+
+    /// EOF를 본 뒤 자식을 reap한다(블로킹 waitpid 금지 — close가 항상 끼어들 수 있게). 보통 EOF가 이미 종료를
+    /// 뜻해 WNOHANG로 즉시 거둔다. 자식이 stdio만 닫고 살아있으면(daemonize) kqueue로 실제 종료/close를 기다렸다
+    /// 재시도. double-reap은 reaping swap-guard로 막는다(close와 경합 시 한쪽만 reap). 반환: 종료 코드 / null=close로 중단.
+    pub fn reapAfterEof(self: *PtySession) !?types.ExitStatus {
+        while (true) {
+            if (self.closing.load(.acquire)) return null;
+            if (self.reaping.swap(true, .acq_rel)) return null;
 
             const reaped = reapNoHang(self.child_pid) catch |err| {
                 self.reaping.store(false, .release);
@@ -305,13 +344,34 @@ pub const PtySession = struct {
             };
             if (reaped) |status| {
                 self.exited.store(true, .release);
-                return .{ .exited = status };
+                return status;
             }
 
-            // child가 stdio만 닫고 계속 살아 있다(드문 daemonize 경우). reap 권한을
-            // 돌려주고, 실제 종료나 close가 올 때까지 kqueue로 기다린다.
             self.reaping.store(false, .release);
             try self.waitChildExitOrClosing();
+        }
+    }
+
+    /// 출력 이벤트를 하나 읽어 반환한다(blocking). 큐-기반 경로와 reader-processing 모두 사용. 내부적으로
+    /// waitIo(write 없음)+readChunk+reapAfterEof로 조립한다(Phase 2 P2-2 — 동작 보존). EOF면 reap해
+    /// exited/SessionClosed.
+    pub fn readEvent(self: *PtySession, allocator: std.mem.Allocator) !types.PtyEvent {
+        if (self.exited.load(.acquire)) return error.NoMoreEvents;
+        var buffer: [4096]u8 = undefined;
+        while (true) {
+            const ready = try self.waitIo(false);
+            if (!ready.readable) continue; // write-pending wake(이 경로엔 안 옴) — 다시 기다린다
+            switch (try self.readChunk(&buffer)) {
+                .again => continue,
+                .data => |n| {
+                    const owned = try allocator.dupe(u8, buffer[0..n]);
+                    return .{ .output = owned };
+                },
+                .eof => return if (try self.reapAfterEof()) |status|
+                    .{ .exited = status }
+                else
+                    error.SessionClosed,
+            }
         }
     }
 
@@ -402,29 +462,6 @@ pub const PtySession = struct {
         const fd = self.master_fd.load(.acquire);
         if (fd < 0) return error.SessionClosed;
         return fd;
-    }
-
-    fn waitReadableOrClosing(self: *PtySession, fd: std.posix.fd_t) !void {
-        while (true) {
-            if (self.closing.load(.acquire)) return error.SessionClosed;
-
-            var fds = [_]std.posix.pollfd{
-                .{ .fd = fd, .events = poll_in_events, .revents = 0 },
-                .{ .fd = self.wake_read_fd, .events = poll_in_events, .revents = 0 },
-            };
-            // timeout -1: master fd가 readable이 되거나 close()가 self-pipe로
-            // 깨울 때까지 무한 대기한다. 출력 없는 pane은 주기적 wakeup 없이 잠든다.
-            _ = try std.posix.poll(&fds, -1);
-
-            // wake/close를 master-readable보다 먼저 확인한다. close()가 막 닫고
-            // 재사용된 fd가 readable로 보여도 엉뚱한 read로 새지 않게 한다.
-            if (self.closing.load(.acquire)) return error.SessionClosed;
-            if (fds[1].revents != 0) return error.SessionClosed;
-
-            const revents = fds[0].revents;
-            if ((revents & @as(i16, @intCast(std.posix.POLL.NVAL))) != 0) return error.PollFailed;
-            if ((revents & poll_readable_revents) != 0) return;
-        }
     }
 
     // EOF를 봤지만 child가 아직 살아 있을 때(stdio만 닫은 daemonize 경우) 호출한다.

@@ -475,11 +475,14 @@ test "app host close action detaches active live PTY before closing queue" {
 
     var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 1);
     defer queue.deinit();
+    var write_queue = try pty_reader.PtyWriteQueue.init(std.testing.io, allocator, 4096);
+    defer write_queue.deinit();
     var live: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
         .io = std.testing.io,
         .session = undefined,
         .queue = &queue,
+        .write_queue = &write_queue,
         .reader = undefined,
         .pty_id = 10,
         .link = link,
@@ -541,11 +544,14 @@ test "app host close action refuses to close a live PTY attached to another tab"
 
     var queue = try pty_reader.PtyEventQueue.init(std.testing.io, allocator, 1);
     defer queue.deinit();
+    var write_queue = try pty_reader.PtyWriteQueue.init(std.testing.io, allocator, 4096);
+    defer write_queue.deinit();
     var live: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
         .io = std.testing.io,
         .session = undefined,
         .queue = &queue,
+        .write_queue = &write_queue,
         .reader = undefined,
         .pty_id = 10,
         .link = link,

@@ -39,6 +39,7 @@ pub const PtyEventQueue = pty_reader.PtyEventQueue;
 pub const PtyId = runtime.PtyId;
 pub const PtyIo = runtime.PtyIo;
 pub const PtyReader = pty_reader.PtyReader;
+pub const PtyWriteQueue = pty_reader.PtyWriteQueue;
 pub const QueuedPtyEvent = pty_reader.QueuedPtyEvent;
 pub const QueueError = pty_reader.QueueError;
 pub const RestorableSurfaceMetadata = surface.RestorableSurfaceMetadata;

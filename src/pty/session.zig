@@ -65,6 +65,11 @@ const UnsupportedPtySession = struct {
         return error.UnsupportedPlatform;
     }
 
+    /// 비-macOS 스텁 — macOS 백엔드의 signalWrite(I/O 스레드 wake)와 구조 동기. 백엔드 없어 no-op.
+    pub fn signalWrite(self: *UnsupportedPtySession) void {
+        _ = self;
+    }
+
     pub fn resize(self: *UnsupportedPtySession, size: terminal.Size) !void {
         _ = self;
         _ = size;

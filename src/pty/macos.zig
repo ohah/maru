@@ -264,6 +264,13 @@ pub const PtySession = struct {
         }
     }
 
+    /// 메인 스레드가 write_queue에 입력을 넣은 뒤 I/O 스레드의 poll을 깨운다(docs/io-render-threading.md
+    /// §8 P2-3b — 단일 writer). wake self-pipe를 재사용한다: waitIo가 wake를 보면 closing 플래그로
+    /// write-wake(아직 안 닫힘 → 재-poll로 POLLOUT 반영) vs close-wake(SessionClosed)를 구분한다.
+    pub fn signalWrite(self: *PtySession) void {
+        self.signalWake();
+    }
+
     /// 단일 I/O 루프(docs/io-render-threading.md §8 Phase 2)용 I/O 준비 상태. closing이면 waitIo가
     /// error.SessionClosed. 둘 다 false면 write-pending wake(호출자가 write 큐 확인 후 다음 poll에 POLLOUT 반영).
     pub const IoReady = struct { readable: bool = false, writable: bool = false };

@@ -219,6 +219,21 @@ pub const PtyWriteQueue = struct {
         try self.bytes.appendSlice(self.allocator, data);
     }
 
+    /// 메인(non-blocking): 상한을 넘지 않는 선에서 `data`의 앞부분만 넣고 넣은 길이를 반환한다(0=지금은
+    /// 공간 없음). 큰 paste를 UI tick에 걸쳐 흘려보내는 경로가 쓴다 — `enqueueBlocking`과 달리 안 막히고,
+    /// 못 넣은 잔량은 호출자가 다음 tick에 재시도한다(기존 per-tick paste 모델 보존). 닫혔으면 QueueClosed.
+    pub fn enqueueSome(self: *PtyWriteQueue, data: []const u8) QueueError!usize {
+        if (data.len == 0) return 0;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.QueueClosed;
+        const room = self.cap -| self.pendingAssumeLocked(); // pending이 cap을 넘긴 직후엔 0(saturating)
+        const n = @min(room, data.len);
+        if (n == 0) return 0;
+        try self.bytes.appendSlice(self.allocator, data[0..n]);
+        return n;
+    }
+
     pub fn hasPending(self: *PtyWriteQueue) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -265,8 +280,12 @@ pub const PtyReader = struct {
     core: ?*terminal.TerminalCore = null,
     core_mutex: ?*std.Io.Mutex = null,
     io: std.Io = undefined,
+    // 단일 writer(docs/io-render-threading.md §8 P2-3b): processing 경로에서 메인 입력(키/paste/스크롤)이
+    // 이 큐로 들어오면 runProcessing이 같은 poll 루프에서 drain해 PTY로 write한다 — 메인은 직접 안 쓴다.
+    // 옵셔널(null이면 메인 입력 drain 없이 응답만 — controlled smoke/단위 테스트 경로). start() 전 주입.
+    write_queue: ?*PtyWriteQueue = null,
     // processing이 켜지면(setProcessing이 release-store) run()이 코어를 직접 처리한다. release-acquire로
-    // core/core_mutex/io 주입이 reader 스레드에 보인다(설정→store, 읽기 전 load).
+    // core/core_mutex/io/write_queue 주입이 reader 스레드에 보인다(설정→store, 읽기 전 load).
     processing: std.atomic.Value(bool) = .init(false),
 
     pub fn init(
@@ -290,6 +309,13 @@ pub const PtyReader = struct {
         self.core_mutex = core_mutex;
         self.io = io;
         self.processing.store(true, .release); // 필드 설정 뒤 release — reader가 acquire-load로 본다
+    }
+
+    /// 단일 writer(P2-3b): 메인 입력이 흐를 write 큐를 주입한다. **setProcessing/start() 전에** 호출해야
+    /// 한다(setProcessing의 release-store가 이 주입도 reader에 publish — 스레드 시작 전 설정이라 race 없음).
+    /// 없으면 runProcessing은 응답만 쓰고 메인 입력은 drain하지 않는다(controlled smoke/단위 테스트).
+    pub fn setWriteQueue(self: *PtyReader, write_queue: *PtyWriteQueue) void {
+        self.write_queue = write_queue;
     }
 
     pub fn start(self: *PtyReader) !void {
@@ -352,12 +378,14 @@ pub const PtyReader = struct {
         }
     }
 
-    /// reader-processing 통합 I/O 루프(docs/io-render-threading.md §8 Phase 2 — P2-3a). 한 poll로
-    /// read+write(+wake)를 인터리브한다: 출력을 직접 코어에 적용(락 아래)하고 코어가 만든 query
-    /// 응답(OSC 10/11·CPR·DA)을 reader-로컬 버퍼에 쌓아 **POLLOUT일 때 비차단으로** 흘려보낸다 —
-    /// 응답 write가 막혀도 read가 멈추지 않는다(기존 blocking writeInput은 자식이 stdin을 안 읽으면
-    /// read 루프를 정지시킬 수 있었다). 응답 버퍼는 ArrayList(append는 안 막힘)라 self-write
-    /// 데드락이 없다. 메인 입력은 아직 직접 경로다(단일 writer는 P2-3b).
+    /// reader-processing 통합 I/O 루프(docs/io-render-threading.md §8 Phase 2 — P2-3a/b). 한 poll로
+    /// read+write(+wake)를 인터리브한다: 출력을 직접 코어에 적용(락 아래)하고, 두 outbound 소스를
+    /// **POLLOUT일 때 비차단으로** 흘려보낸다 — (1) 코어가 만든 query 응답(OSC 10/11·CPR·DA)을
+    /// reader-로컬 버퍼에, (2) 메인 입력(키/paste/스크롤)을 공유 write_queue에서. write가 막혀도 read가
+    /// 멈추지 않는다(기존 blocking writeInput은 자식이 stdin을 안 읽으면 read 루프를 정지시킬 수 있었다).
+    /// 응답 버퍼는 ArrayList(append는 안 막힘)라 reader가 자기 응답을 적재하며 동시에 drain해도 self-write
+    /// 데드락이 없다. **리더가 유일한 PTY writer**다(P2-3b — 메인은 write_queue.enqueue + signalWrite만).
+    /// write_queue가 null이면(controlled smoke/단위 테스트) 응답만 쓴다.
     fn runProcessing(self: *PtyReader) void {
         const core = self.core.?;
         const mutex = self.core_mutex.?;
@@ -366,21 +394,32 @@ pub const PtyReader = struct {
         defer out_buf.deinit(self.allocator);
         var out_head: usize = 0;
         var readbuf: [4096]u8 = undefined;
+        var writebuf: [512]u8 = undefined; // write_queue drain 청크(writeInputNonBlocking이 ≤512B 쓰므로)
         while (true) {
-            const want_write = out_head < out_buf.items.len;
-            const ready = self.session.waitIo(want_write) catch |err| {
+            const reply_pending = out_head < out_buf.items.len;
+            const main_pending = if (self.write_queue) |wq| wq.hasPending() else false;
+            const ready = self.session.waitIo(reply_pending or main_pending) catch |err| {
                 if (err != error.SessionClosed and err != error.NoMoreEvents) {
                     self.pushReadError(@errorName(err));
                 }
                 return;
             };
-            // write 단계: writable이고 응답이 남았으면 한 청크 비차단 전송(read를 막지 않음).
-            if (ready.writable and out_head < out_buf.items.len) {
-                const written = self.session.writeInputNonBlocking(out_buf.items[out_head..]) catch 0;
-                out_head += written;
-                if (out_head >= out_buf.items.len) {
-                    out_buf.clearRetainingCapacity();
-                    out_head = 0;
+            // write 단계(비차단, read 무정지): 응답을 먼저 비운다(query 응답 지연 최소화), 응답이 다 나가면
+            // 메인 입력을 한 청크 drain한다. 한 iteration에 한 소스/한 청크 — 다음 poll에서 이어 비운다.
+            if (ready.writable) {
+                if (out_head < out_buf.items.len) {
+                    const written = self.session.writeInputNonBlocking(out_buf.items[out_head..]) catch 0;
+                    out_head += written;
+                    if (out_head >= out_buf.items.len) {
+                        out_buf.clearRetainingCapacity();
+                        out_head = 0;
+                    }
+                } else if (self.write_queue) |wq| {
+                    const n = wq.drainChunk(&writebuf);
+                    if (n > 0) {
+                        const written = self.session.writeInputNonBlocking(writebuf[0..n]) catch 0;
+                        wq.consume(written); // 실제 쓴 만큼만 head 전진(부분 write 잔량은 다음 poll)
+                    }
                 }
             }
             // read 단계: 출력을 코어에 적용하고 응답을 outbound 버퍼에 적재한다.
@@ -589,4 +628,26 @@ test "PtyWriteQueue: backpressure — 상한 초과 enqueue는 소비자가 drai
     while (i < total) : (i += 1) {
         try std.testing.expectEqual(@as(u8, @intCast('A' + (i % 26))), got.items[i]);
     }
+}
+
+test "PtyWriteQueue: enqueueSome — 상한까지만 넣고 넘침은 0(안 막힘), drain 후 재개, 빈/닫힘 처리" {
+    // P2-3b paste 경로: 큰 paste를 per-tick으로 흘려보낸다 — enqueueBlocking과 달리 안 막히고, 들어간 만큼만
+    // 반환해 호출자가 잔량을 다음 tick에 재시도한다.
+    var q = try PtyWriteQueue.init(std.testing.io, std.testing.allocator, 4); // cap 4
+    defer q.deinit();
+
+    try std.testing.expectEqual(@as(usize, 4), try q.enqueueSome("ABCDE")); // 앞 4만
+    try std.testing.expectEqual(@as(usize, 0), try q.enqueueSome("FG")); // 가득 참 → 0(안 막힘)
+
+    var buf: [2]u8 = undefined;
+    const n = q.drainChunk(&buf);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("AB", buf[0..n]);
+    q.consume(n); // 공간 2 생김
+
+    try std.testing.expectEqual(@as(usize, 2), try q.enqueueSome("FGH")); // 공간 2만큼만
+
+    try std.testing.expectEqual(@as(usize, 0), try q.enqueueSome("")); // 빈 입력은 no-op
+    q.close();
+    try std.testing.expectError(error.QueueClosed, q.enqueueSome("x")); // 닫힘
 }

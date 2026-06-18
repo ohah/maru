@@ -167,6 +167,91 @@ pub const PtyEventQueue = struct {
     }
 };
 
+/// PTY **입력 방향** 단일-writer 큐(docs/io-render-threading.md §8 Phase 2 — P2-1). 메인 스레드가 PTY로 보낼
+/// 입력(키/paste/스크롤/질의 응답)을 `enqueueBlocking`으로 넣고, I/O 스레드(PtyReader)가 `drainChunk`로 빼
+/// master에 write한다 — **유일한 writer**라 동시 write 인터리브가 없다(PtyEventQueue=출력 방향과 대칭).
+/// bounded 바이트 FIFO + mutex. 포화 시 enqueue가 backpressure(셸이 입력을 안 읽으면 생산자를 늦춘다).
+/// **P2-1은 primitive만 추가(미배선)** — I/O 루프 통합·라우팅은 P2-2/P2-3.
+pub const PtyWriteQueue = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    mutex: std.Io.Mutex = .init,
+    not_full: std.Io.Condition = .init,
+    // FIFO 바이트: `head`부터 소비, 다 비면 clearRetainingCapacity로 head=0 리셋(재할당 없이 재사용).
+    bytes: std.ArrayList(u8) = .empty,
+    head: usize = 0,
+    cap: usize, // 버퍼링 상한(바이트) — backpressure 기준
+    closed: bool = false,
+
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, capacity_bytes: usize) QueueError!PtyWriteQueue {
+        if (capacity_bytes == 0) return error.ZeroCapacity;
+        return .{ .io = io, .allocator = allocator, .cap = capacity_bytes };
+    }
+
+    pub fn deinit(self: *PtyWriteQueue) void {
+        self.bytes.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn close(self: *PtyWriteQueue) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.closed = true;
+        self.not_full.broadcast(self.io); // backpressure 대기 중인 enqueue를 깨워 QueueClosed로 풀어준다
+    }
+
+    fn pendingAssumeLocked(self: *const PtyWriteQueue) usize {
+        return self.bytes.items.len - self.head;
+    }
+
+    /// 메인 스레드: `data`를 큐에 복사한다. 버퍼링이 상한을 넘으면 공간이 날 때까지 backpressure로 대기한다
+    /// (그동안 I/O 스레드가 drain). 닫혔으면 `error.QueueClosed`. 빈 입력은 no-op. 호출 후 호출자가 wake로
+    /// I/O 스레드 poll을 깨운다(P2-2). 입력은 버리면 안 되므로 가득 차도 드롭하지 않고 대기한다(출력 backpressure 대칭).
+    pub fn enqueueBlocking(self: *PtyWriteQueue, data: []const u8) QueueError!void {
+        if (data.len == 0) return;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        // data가 cap보다 크면 단독으로도 상한을 넘으므로, 버퍼가 빌 때까지 기다렸다 통째로 넣는다(분할은 호출자 몫이 아님).
+        while (!self.closed and self.pendingAssumeLocked() + data.len > self.cap and self.pendingAssumeLocked() > 0) {
+            self.not_full.waitUncancelable(self.io, &self.mutex);
+        }
+        if (self.closed) return error.QueueClosed;
+        try self.bytes.appendSlice(self.allocator, data);
+    }
+
+    pub fn hasPending(self: *PtyWriteQueue) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.pendingAssumeLocked() > 0;
+    }
+
+    /// I/O 스레드: head부터 최대 `out.len` 바이트를 `out`에 복사하고 길이를 반환한다(0=빔). 락 밖에서 그만큼 master에
+    /// write한 뒤 실제 쓴 길이로 `consume`을 부른다(부분 write면 잔량은 다음 루프). 슬라이스가 아니라 복사를 돌려줘
+    /// 락 밖 write 중 enqueue가 버퍼를 realloc해도 안전하다.
+    pub fn drainChunk(self: *PtyWriteQueue, out: []u8) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const n = @min(self.pendingAssumeLocked(), out.len);
+        @memcpy(out[0..n], self.bytes.items[self.head .. self.head + n]);
+        return n;
+    }
+
+    /// I/O 스레드: 실제로 write한 `n` 바이트만큼 head를 진행한다. 다 비면 버퍼를 비워 head=0으로 되돌리고(재사용),
+    /// 공간이 생겼으니 backpressure 대기를 깨운다. head는 I/O 스레드만 움직이므로(단일 소비자) drain↔consume 사이
+    /// enqueue가 tail에 append해도 안전하다.
+    pub fn consume(self: *PtyWriteQueue, n: usize) void {
+        if (n == 0) return;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.head += n;
+        if (self.head >= self.bytes.items.len) {
+            self.bytes.clearRetainingCapacity();
+            self.head = 0;
+        }
+        self.not_full.broadcast(self.io);
+    }
+};
+
 pub const PtyReader = struct {
     allocator: std.mem.Allocator,
     pty_id: runtime_mod.PtyId,
@@ -381,4 +466,81 @@ test "pty event queue close stops new pushes and wakes empty consumers" {
         queue.pushBlocking(.{ .exited = .{ .pty_id = 1, .status = .{ .exited = 0 } } }),
     );
     try std.testing.expect(queue.popBlocking() == null);
+}
+
+test "PtyWriteQueue: enqueue→drainChunk→consume preserves FIFO bytes" {
+    var q = try PtyWriteQueue.init(std.testing.io, std.testing.allocator, 64);
+    defer q.deinit();
+    try std.testing.expect(!q.hasPending());
+    try q.enqueueBlocking("abc");
+    try q.enqueueBlocking("def");
+    try std.testing.expect(q.hasPending());
+    var buf: [16]u8 = undefined;
+    const n = q.drainChunk(&buf);
+    try std.testing.expectEqualStrings("abcdef", buf[0..n]);
+    q.consume(n);
+    try std.testing.expect(!q.hasPending());
+}
+
+test "PtyWriteQueue: 작은 out으로 청크 분할 drain + 부분 consume(잔량 보존)" {
+    var q = try PtyWriteQueue.init(std.testing.io, std.testing.allocator, 64);
+    defer q.deinit();
+    try q.enqueueBlocking("abcdef");
+    var small: [3]u8 = undefined;
+    const n1 = q.drainChunk(&small);
+    try std.testing.expectEqual(@as(usize, 3), n1);
+    try std.testing.expectEqualStrings("abc", small[0..n1]);
+    q.consume(2); // 3개 봤지만 2개만 실제로 write됐다고 가정 — head는 2만 전진
+    const n2 = q.drainChunk(&small);
+    try std.testing.expectEqualStrings("cde", small[0..n2]); // 'c'부터 다시
+    q.consume(n2);
+    var rest: [16]u8 = undefined;
+    const n3 = q.drainChunk(&rest);
+    try std.testing.expectEqualStrings("f", rest[0..n3]);
+    q.consume(n3);
+    try std.testing.expect(!q.hasPending());
+}
+
+test "PtyWriteQueue: zero capacity 거부 / close 후 enqueue는 QueueClosed" {
+    try std.testing.expectError(error.ZeroCapacity, PtyWriteQueue.init(std.testing.io, std.testing.allocator, 0));
+    var q = try PtyWriteQueue.init(std.testing.io, std.testing.allocator, 8);
+    defer q.deinit();
+    q.close();
+    try std.testing.expectError(error.QueueClosed, q.enqueueBlocking("x"));
+}
+
+test "PtyWriteQueue: backpressure — 상한 초과 enqueue는 소비자가 drain할 때까지 대기, 순서·전량 보존" {
+    var q = try PtyWriteQueue.init(std.testing.io, std.testing.allocator, 8); // 작은 상한
+    defer q.deinit();
+
+    const total = 2000; // 상한(8)의 250배 — 생산자가 여러 번 backpressure로 막혀야 한다
+    const Producer = struct {
+        fn run(qq: *PtyWriteQueue, n: usize) void {
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                const b = [_]u8{@as(u8, @intCast('A' + (i % 26)))};
+                qq.enqueueBlocking(&b) catch return;
+            }
+        }
+    };
+    var thread = try std.Thread.spawn(.{}, Producer.run, .{ &q, total });
+
+    // 소비자(이 스레드): 전량을 순서대로 drain. 생산자가 backpressure로 막혀도 drain이 공간을 내 진행시킨다.
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    var buf: [5]u8 = undefined; // 작게 — 여러 청크로 쪼개 drain
+    while (got.items.len < total) {
+        const n = q.drainChunk(&buf);
+        if (n == 0) continue; // 아직 생산 전 — 다시 시도(스핀, 테스트라 OK)
+        try got.appendSlice(std.testing.allocator, buf[0..n]);
+        q.consume(n);
+    }
+    thread.join();
+
+    try std.testing.expectEqual(@as(usize, total), got.items.len);
+    // 순서 보존: i번째 바이트는 'A'+(i%26)
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        try std.testing.expectEqual(@as(u8, @intCast('A' + (i % 26))), got.items[i]);
+    }
 }

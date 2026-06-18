@@ -4138,9 +4138,39 @@ pub const TerminalCore = struct {
         };
     }
 
-    /// IME 조합 중 텍스트를 커서 위치에 반전 스타일로 합성한 snapshot. 셀 그리드는 그대로 두고
-    /// 합성 버퍼(viewport_cells 재사용)에만 그린다. 커서는 preedit 끝으로 옮겨 보여(다음 글자
-    /// 위치) 입력기 사용감을 따른다. 행 끝을 넘는 조합은 잘린다(조합은 보통 1~2칸).
+    /// 조합 글자들을 row_cells의 draw_col부터 반전 스타일로 그린다. 행 끝을 넘는 글자는 잘린다
+    /// (오버레이 폴백 경로에서만 발생 — 삽입형 경로는 호출 전에 공간을 보장한다). draw_col은
+    /// 그린 폭만큼 전진해, 호출자가 조합 끝(=커서 표시 위치)을 알 수 있다.
+    fn drawPreeditCells(pen: types.Style, preedit_bytes: []const u8, row_cells: []types.Cell, draw_col: *u16) void {
+        const cols: u16 = @intCast(row_cells.len);
+        var it = (std.unicode.Utf8View.init(preedit_bytes) catch return).iterator();
+        while (it.nextCodepoint()) |cp| {
+            const w = width.cellWidth(cp);
+            if (w == 0) continue;
+            if (@as(u32, draw_col.*) + @as(u32, w) > @as(u32, cols)) break; // 행 끝 — 잘림
+            var style = pen;
+            style.reverse = true; // 조합 중임을 반전으로 표시(밑줄 렌더는 후속)
+            row_cells[draw_col.*] = .{ .codepoint = cp, .style = style, .width = w };
+            if (w == 2) row_cells[draw_col.* + 1] = .{ .style = style, .width = 0, .continuation = true };
+            draw_col.* += w;
+        }
+    }
+
+    /// IME 조합 중 텍스트를 커서 위치에 합성한 snapshot. 셀 그리드는 그대로 두고 합성
+    /// 버퍼(viewport_cells 재사용)에만 그린다. 커서는 조합 끝으로 옮겨 보여(다음 글자 위치)
+    /// 입력기 사용감을 따른다.
+    ///
+    /// 동작(삽입형 미리보기): 줄 가운데에서 조합하면 커서 뒤 글자들을 조합 폭만큼 오른쪽으로
+    /// 밀고 그 자리에 조합 글자를 넣어, 확정 후 셸이 그릴 모습("가나다"의 '나' 앞에서 조합 →
+    /// "가[라]나다")을 조합 중에도 미리 보여준다. 합성 버퍼에서만 미는 것이라 실제 그리드와
+    /// 셸 상태는 불변이고, 확정 순간 셸이 동일 배치를 그려 화면이 자연스럽게 이어진다.
+    ///
+    /// 베이스/결정: 터미널 사실상 표준(Ghostty·iTerm2·Terminal.app)은 조합 글자를 커서 칸에
+    /// '오버레이'만 해 뒤 글자를 가린다("가라다"). Maru는 이를 한글 입력 결함으로 보고 의도적으로
+    /// 삽입형을 택한다(사용자 요청). preedit은 셸 미전송 텍스트라 GUI 입력창처럼 자체 버퍼
+    /// 가운데 삽입이 원칙적으론 불가하지만, '합성 버퍼에만' 미리 그려 시각만 흉내낸다. 단 미는
+    /// 게 행 밖으로 콘텐츠를 잘라낼 때(줄 끝 근처)나 조합이 행에 안 들어갈 때는 기존 오버레이로
+    /// 폴백한다 — 잘려 사라지는 것보다 가리는 편이 덜 혼란스럽다.
     fn snapshotWithPreedit(self: *TerminalCore, preedit_bytes: []const u8) types.RenderSnapshot {
         const needed = cellCount(self.size);
         if (self.viewport_cells.len != needed) {
@@ -4152,32 +4182,61 @@ pub const TerminalCore = struct {
         }
         @memcpy(self.viewport_cells, self.cells[0..needed]);
 
-        var cursor_col: u16 = self.cursor.col;
+        const cols = self.size.cols;
         const row = self.cursor.row;
+        const cursor_col = self.cursor.col;
+
+        // 잘못된 UTF-8이면 표시만 포기. 동시에 조합 폭(셀 수)을 미리 합산한다 — 삽입형 시프트가
+        // '뒤 글자를 얼마나 밀지' 결정하려면 전체 폭이 먼저 필요하다.
         var iter = std.unicode.Utf8View.init(preedit_bytes) catch {
-            return self.snapshot(); // 잘못된 UTF-8 — 표시만 포기
+            return self.snapshot();
         };
-        var it = iter.iterator();
-        while (it.nextCodepoint()) |cp| {
-            const w = width.cellWidth(cp);
-            if (w == 0) continue;
-            if (@as(usize, cursor_col) + w > self.size.cols) break; // 행 끝 — 잘림
-            const idx = @as(usize, row) * self.size.cols + cursor_col;
-            var style = self.pen;
-            style.reverse = true; // 조합 중임을 반전으로 표시(밑줄 렌더는 후속)
-            self.viewport_cells[idx] = .{ .codepoint = cp, .style = style, .width = w };
-            if (w == 2) {
-                self.viewport_cells[idx + 1] = .{ .style = style, .width = 0, .continuation = true };
-            }
-            cursor_col += w;
+        var preedit_width: u16 = 0;
+        {
+            var it = iter.iterator();
+            while (it.nextCodepoint()) |cp| preedit_width += @as(u16, width.cellWidth(cp));
         }
+        if (preedit_width == 0) return self.snapshot(); // 그릴 게 없음(조합 폭 0)
+
+        const row_cells = self.viewport_cells[@as(usize, row) * cols ..][0..cols];
+
+        // 커서 뒤(포함)의 마지막 콘텐츠 칸. 빈 칸은 codepoint==' ' & 비-continuation이고, wide의
+        // 뒤칸(continuation)도 콘텐츠로 친다(앞 base와 한 쌍이라 같이 밀려야 한다).
+        const last_content: ?u16 = blk: {
+            var found: ?u16 = null;
+            var i: u16 = cursor_col;
+            while (i < cols) : (i += 1) {
+                if (row_cells[i].codepoint != ' ' or row_cells[i].continuation) found = i;
+            }
+            break :blk found;
+        };
+        // 삽입형으로 그릴 수 있는 조건: 조합 글자가 행에 들어가고(커서+폭 ≤ cols), 뒤 콘텐츠를
+        // 밀어도 행 밖으로 잘리지 않는다(마지막 콘텐츠+폭 < cols). 아니면 오버레이로 폴백.
+        const insert_ok = cursor_col < cols and
+            @as(u32, cursor_col) + @as(u32, preedit_width) <= @as(u32, cols) and
+            (last_content == null or @as(u32, last_content.?) + @as(u32, preedit_width) < @as(u32, cols));
+
+        if (insert_ok) {
+            // 커서 뒤 콘텐츠 [cursor_col, last]를 preedit_width칸 오른쪽으로(역방향: 겹침 보호).
+            if (last_content) |lc| {
+                var i: u16 = lc;
+                while (true) {
+                    row_cells[i + preedit_width] = row_cells[i];
+                    if (i == cursor_col) break;
+                    i -= 1;
+                }
+            }
+        }
+        var draw_col = cursor_col;
+        drawPreeditCells(self.pen, preedit_bytes, row_cells, &draw_col);
+        clearTruncatedWideBase(row_cells); // 시프트/잘림으로 끝칸에 wide base만 남으면 정리
 
         return .{
             .size = self.size,
-            // 조합 중에는 블록 커서를 숨긴다 — 반전 스타일 preedit이 커서 역할을 하므로, preedit
-            // 끝에 또 블록 커서를 그리면 커서가 둘로 보인다(라이브 제보). 위치는 preedit 끝에
-            // 둬 후속(후보창 배치 등)이 참조할 수 있게 하되 그리지는 않는다.
-            .cursor = .{ .row = row, .col = @min(cursor_col, self.size.cols - 1), .visible = false },
+            // 조합 중에는 블록 커서를 숨긴다 — 반전 스타일 preedit이 커서 역할을 하므로, 조합
+            // 끝에 또 블록 커서를 그리면 커서가 둘로 보인다(라이브 제보). 위치는 조합 끝에 둬
+            // 후속(후보창 배치 등)이 참조할 수 있게 하되 그리지는 않는다.
+            .cursor = .{ .row = row, .col = @min(draw_col, cols - 1), .visible = false },
             .cells = self.viewport_cells,
             .prompt_marks = self.prompt_marks, // preedit은 행 태그를 바꾸지 않는다(활성 그대로)
             .last_command_exit = self.last_command_exit,
@@ -7766,6 +7825,48 @@ test "preedit clips at the row end instead of wrapping" {
     try core.setPreedit("한"); // wide(2칸)는 안 들어간다 — 잘림
     const snap = core.renderSnapshot();
     try std.testing.expectEqual(@as(u21, 'c'), snap.cells[2].codepoint);
+    try std.testing.expect(!snap.cursor.visible);
+}
+
+test "preedit inserts mid-line, shifting trailing glyphs (가나다 + 나앞 조합 → 가[라]나다)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
+    defer core.deinit();
+    try core.write("\xea\xb0\x80\xeb\x82\x98\xeb\x8b\xa4"); // "가나다": 가=0,나=2,다=4 (각 wide)
+    try core.write("\x1b[4D"); // 커서를 '나' base(col2)로 — 왼쪽 4칸 이동(글자는 그대로)
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
+
+    try core.setPreedit("\xeb\x9d\xbc"); // "라"(wide) 조합 중
+    const snap = core.renderSnapshot();
+    // 삽입형: '나'/'다'가 오른쪽으로 밀리고 그 자리에 '라'가 들어가 "가[라]나다"로 보인다.
+    try std.testing.expectEqual(@as(u21, 0xAC00), snap.cells[0].codepoint); // 가(그대로)
+    try std.testing.expectEqual(@as(u21, 0xB77C), snap.cells[2].codepoint); // 라(조합, 반전)
+    try std.testing.expect(snap.cells[2].style.reverse);
+    try std.testing.expectEqual(@as(u2, 2), snap.cells[2].width);
+    try std.testing.expect(snap.cells[3].continuation);
+    try std.testing.expectEqual(@as(u21, 0xB098), snap.cells[4].codepoint); // 나(2칸 밀림)
+    try std.testing.expectEqual(@as(u21, 0xB2E4), snap.cells[6].codepoint); // 다(2칸 밀림)
+    try std.testing.expect(!snap.cursor.visible);
+    try std.testing.expectEqual(@as(u16, 4), snap.cursor.col); // 커서는 조합 끝
+    // 실제 그리드는 불변 — 확정 전까지 셸 상태는 "가나다" 그대로다.
+    try std.testing.expectEqual(@as(u21, 0xB098), core.cells[2].codepoint); // grid의 '나'는 col2
+    try std.testing.expectEqual(@as(u21, 0xB2E4), core.cells[4].codepoint); // grid의 '다'는 col4
+}
+
+test "preedit falls back to overlay when shifting would clip trailing content" {
+    // cols=7: "가나다"가 col0~5를 채우고 col6만 빈다. 조합 폭 2칸을 밀 자리가 없어('다'가
+    // 행 밖으로 잘림) 삽입형 대신 오버레이로 폴백한다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 7, .rows = 2 });
+    defer core.deinit();
+    try core.write("\xea\xb0\x80\xeb\x82\x98\xeb\x8b\xa4"); // "가나다"
+    try core.write("\x1b[4D"); // 커서를 '나' base(col2)로
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
+
+    try core.setPreedit("\xeb\x9d\xbc"); // "라"(wide) — 밀면 '다'가 행 밖으로 잘린다
+    const snap = core.renderSnapshot();
+    // 폴백(오버레이): '나' 자리에 '라'가 덮이고 '다'는 제자리(col4)에 남는다("가[라]다").
+    try std.testing.expectEqual(@as(u21, 0xB77C), snap.cells[2].codepoint); // 라(덮어씀)
+    try std.testing.expect(snap.cells[2].style.reverse);
+    try std.testing.expectEqual(@as(u21, 0xB2E4), snap.cells[4].codepoint); // 다(안 밀림)
     try std.testing.expect(!snap.cursor.visible);
 }
 

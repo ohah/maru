@@ -1,16 +1,23 @@
-//! L2 session core — 에이전트(claude) 세션 JSONL 트랜스크립트의 순수 상태 판정. 터미널에서 도는 claude가
-//! 디스크에 남기는 세션 트랜스크립트(`~/.claude/projects/<enc-cwd>/<session-uuid>.jsonl`)의 *끝부분(tail)*
-//! 바이트만 받아 running/idle/unknown과 마지막 답변 미리보기를 계산한다. 파일 I/O(세션 찾기·tail read·디렉터리
-//! 나열)는 platform(L4)이 하고, 여기는 바이트→상태의 순수 함수라 라이브 에이전트 없이 헤드리스로 단위
-//! 테스트한다(docs/agent-session.md "아키텍처/레이어" — session core). OS·렌더 무관, std만 의존 —
-//! tests/boundary/imports.zig가 OS 타입 누수를 막는다.
+//! L2 session core — 에이전트(claude·codex) 세션 JSONL 트랜스크립트의 순수 상태 판정. 터미널에서 도는
+//! 에이전트가 디스크에 남기는 세션 트랜스크립트의 *끝부분(tail)* 바이트만 받아 running/idle/unknown과 마지막
+//! 답변 미리보기를 계산한다. 파일 I/O(세션 찾기·tail read·디렉터리 나열)는 platform(L4)이 하고, 여기는
+//! 바이트→상태의 순수 함수라 라이브 에이전트 없이 헤드리스로 단위 테스트한다(docs/agent-session.md
+//! "아키텍처/레이어" — session core). OS·렌더 무관, std만 의존 — tests/boundary/imports.zig가 OS 타입
+//! 누수를 막는다. 에이전트별 스키마 어댑터(claude/codex)가 같은 `AgentState`/`Status` 타입을 공유하고, 어느
+//! 어댑터를 부를지는 platform이 `agent_kind`로 디스패치한다(PR3).
 //!
-//! 베이스(document-basis-and-decision): claude 트랜스크립트 포맷은 공식 문서(code.claude.com/docs, statusline
-//! 훅이 주는 transcript_path)와 실 세션 파일을 베이스로 한다. 완료를 mtime이 아니라 "마지막 *대화* 엔트리의 턴
-//! 완료 여부"로 본 근거는 느린 API(응답까지 수십 초~분 걸릴 수 있음)에도 false idle이 없게 하기 위함이다 —
-//! "턴 미완료"는 파일이 안 써져도 성립하는 구조적 사실이다(docs/agent-session.md "상태 모델"). 데이터 포맷
-//! (JSONL)은 저작권 대상이 아니며 Maru 자체 파서로 읽는다(clean-room). 참고 OSS 파서는 *포맷 이해*용으로만
-//! 보고 코드는 복사하지 않는다.
+//!   - claude: `~/.claude/projects/<enc-cwd>/<session-uuid>.jsonl`. 완료 = 마지막 *대화* 엔트리가 turn-종료
+//!     assistant(stop_reason). cwd 인코딩으로 디렉터리를 찾는다.
+//!   - codex:  `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<uuid>.jsonl`. 완료 = 마지막 turn 엔트리가
+//!     `event_msg`/`task_complete`(명시적). 날짜 분할이라 cwd로 디렉터리를 못 찾아 첫 줄 session_meta.cwd로
+//!     매핑한다.
+//!
+//! 베이스(document-basis-and-decision): claude 포맷은 공식 문서(code.claude.com/docs, statusline 훅의
+//! transcript_path), codex 포맷은 오픈소스(openai/codex, Apache-2.0)와 실 세션 파일을 베이스로 한다. 완료를
+//! mtime이 아니라 "마지막 turn 엔트리의 완료 여부"로 본 근거는 느린 API(응답까지 수십 초~분)에도 false idle이
+//! 없게 하기 위함이다 — "턴 미완료"는 파일이 안 써져도 성립하는 구조적 사실이다(docs/agent-session.md "상태
+//! 모델"). 데이터 포맷(JSONL)은 저작권 대상이 아니며 Maru 자체 파서로 읽는다(clean-room). 참고 OSS 파서는
+//! *포맷 이해*용으로만 보고 코드는 복사하지 않는다.
 
 const std = @import("std");
 
@@ -151,6 +158,89 @@ pub fn encodeClaudeProjectDir(out: []u8, cwd: []const u8) ?[]const u8 {
     if (cwd.len > out.len) return null;
     for (cwd, 0..) |ch, i| out[i] = if (ch == '/') '-' else ch;
     return out[0..cwd.len];
+}
+
+// ── codex 어댑터 ────────────────────────────────────────────────────────────────────
+// 베이스: openai/codex(Apache-2.0) rollout 포맷 + 실 세션 파일 검증. claude와 달리 완료가 **명시적**이라
+// (event_msg/task_complete) 추론이 필요 없다.
+
+/// codex 세션 rollout JSONL의 tail 바이트에서 상태·마지막 답변을 계산한다(순수). claude와 같은 tail 규약
+/// (파싱 실패한 줄 skip). 줄을 순서대로 fold, 마지막 *turn* 엔트리의 mark가 최종:
+///   - `event_msg`/`task_complete`: **idle** + payload.last_agent_message 첫 줄을 answer로(최종 답변이 이
+///     엔트리에 직접 담긴다 — claude처럼 content 블록을 뒤질 필요 없음).
+///   - `event_msg`/`token_count`: 토큰 회계라 **무시**(턴 내내 자주 찍히고 task_complete 뒤에도 올 수 있어
+///     상태를 바꾸면 안 된다).
+///   - 그 밖의 `event_msg`(user_message/agent_message/task_started/patch_apply_*/…)와 모든 `response_item`
+///     (message/reasoning/function_call/function_call_output/…): 턴 진행 중이므로 **running**.
+///   - `session_meta`/`turn_context`/모르는 타입: 메타라 무시.
+/// turn 엔트리를 하나도 못 보면 **unknown**.
+///
+/// 근거(docs/agent-session.md): codex 완료는 `event_msg`+`task_complete`로 명시적이다. token_count를 무시하지
+/// 않으면 task_complete 뒤 회계 엔트리에 false running이 될 수 있어 명시적으로 거른다(실측: 한 턴에 token_count
+/// 19건). 마지막 turn 엔트리만 의미를 가지므로 메타는 건너뛴다.
+pub fn parseCodexTail(scratch: std.mem.Allocator, tail: []const u8, answer_buf: []u8) Status {
+    var state: AgentState = .unknown;
+    var answer_len: usize = 0;
+
+    var lines = std.mem.splitScalar(u8, tail, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, scratch, line, .{}) catch continue;
+        defer parsed.deinit();
+
+        const obj = asObject(parsed.value) orelse continue;
+        const entry_type = asString(obj.get("type") orelse continue) orelse continue;
+        const payload = if (obj.get("payload")) |pv| (asObject(pv) orelse continue) else continue;
+        const payload_type: ?[]const u8 = if (payload.get("type")) |tv| asString(tv) else null;
+
+        if (std.mem.eql(u8, entry_type, "event_msg")) {
+            const pt = payload_type orelse continue;
+            if (std.mem.eql(u8, pt, "task_complete")) {
+                state = .idle;
+                // 최종 답변이 task_complete 엔트리에 직접 담긴다 — Value 해제 전에 buf로 복사.
+                answer_len = copyJsonStringFirstLine(answer_buf, payload.get("last_agent_message"));
+            } else if (std.mem.eql(u8, pt, "token_count")) {
+                // 토큰 회계 — 상태 불변(무시).
+            } else {
+                state = .running; // user_message/agent_message/task_started/patch_apply_* 등 진행 신호.
+                answer_len = 0;
+            }
+        } else if (std.mem.eql(u8, entry_type, "response_item")) {
+            state = .running; // 모델 출력/도구 호출 — 턴 진행 중.
+            answer_len = 0;
+        }
+        // session_meta/turn_context/모르는 타입은 메타 — 상태 불변.
+    }
+
+    return .{ .state = state, .answer = answer_buf[0..answer_len] };
+}
+
+/// codex rollout 첫 줄(`session_meta`)에서 `payload.cwd`를 `out`으로 복사해 돌려준다. session_meta가 아니거나
+/// cwd가 없거나 버퍼가 작으면 null. codex는 날짜 분할(`<YYYY>/<MM>/<DD>/`)이라 cwd로 디렉터리를 못 찾으므로,
+/// platform이 최근 rollout들의 첫 줄을 읽어 이 함수로 cwd를 뽑아 일치하는 최신 세션을 고른다(순수 — 줄 파싱만).
+pub fn parseCodexCwd(scratch: std.mem.Allocator, first_line: []const u8, out: []u8) ?[]const u8 {
+    const line = std.mem.trim(u8, first_line, " \t\r\n");
+    const parsed = std.json.parseFromSlice(std.json.Value, scratch, line, .{}) catch return null;
+    defer parsed.deinit();
+
+    const obj = asObject(parsed.value) orelse return null;
+    const entry_type = asString(obj.get("type") orelse return null) orelse return null;
+    if (!std.mem.eql(u8, entry_type, "session_meta")) return null;
+    const payload = asObject(obj.get("payload") orelse return null) orelse return null;
+    const cwd = asString(payload.get("cwd") orelse return null) orelse return null;
+
+    if (cwd.len > out.len) return null;
+    @memcpy(out[0..cwd.len], cwd);
+    return out[0..cwd.len];
+}
+
+/// JSON 문자열 값의 첫 줄을 `dst`에 UTF-8 경계로 말줄임 복사하고 쓴 바이트 수를 반환(문자열이 아니거나 null이면
+/// 0). codex의 last_agent_message처럼 답변이 단일 문자열일 때 쓴다.
+fn copyJsonStringFirstLine(dst: []u8, v: ?std.json.Value) usize {
+    const s = asString(v orelse return 0) orelse return 0;
+    return copyFirstLineTruncated(dst, s);
 }
 
 /// mtime 목록에서 최신(최대) 인덱스를 고른다(동률이면 먼저 나온 것). 비면 null. 그 cwd의 활성 세션 = 그
@@ -313,4 +403,90 @@ test "pickNewestIndex: 최대 mtime 인덱스(동률은 먼저), 빈 목록은 n
     try std.testing.expectEqual(@as(?usize, 1), pickNewestIndex(&.{ 300, 900, 50, 900 })); // 첫 900
     try std.testing.expectEqual(@as(?usize, 0), pickNewestIndex(&.{42}));
     try std.testing.expectEqual(@as(?usize, null), pickNewestIndex(&.{}));
+}
+
+// ── codex 어댑터 테스트 ──────────────────────────────────────────────────────────────
+
+test "parseCodexTail: 마지막이 task_complete면 idle + last_agent_message 첫 줄" {
+    // codex 완료는 명시적(event_msg/task_complete)이고 최종 답변이 그 엔트리에 직접 담긴다 — 첫 줄만 미리보기.
+    const tail =
+        \\{"type":"event_msg","payload":{"type":"agent_message","message":"진행하겠습니다."}}
+        \\{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"..."}]}}
+        \\{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"설치와 설정 완료했습니다.\n둘째 줄은 버림"}}
+    ;
+    var buf: [256]u8 = undefined;
+    const s = parseCodexTail(std.testing.allocator, tail, &buf);
+    try std.testing.expectEqual(AgentState.idle, s.state);
+    try std.testing.expectEqualStrings("설치와 설정 완료했습니다.", s.answer);
+}
+
+test "parseCodexTail: task_complete 뒤 token_count는 무시 — idle 유지" {
+    // token_count는 턴 내내·완료 뒤에도 찍히는 회계라 무시해야 false running이 안 된다(실측 한 턴 19건).
+    const tail =
+        \\{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"완료"}}
+        \\{"type":"event_msg","payload":{"type":"token_count","info":{"total":123}}}
+    ;
+    var buf: [256]u8 = undefined;
+    const s = parseCodexTail(std.testing.allocator, tail, &buf);
+    try std.testing.expectEqual(AgentState.idle, s.state);
+    try std.testing.expectEqualStrings("완료", s.answer);
+}
+
+test "parseCodexTail: 진행 신호(agent_message / response_item / user_message)는 running" {
+    // task_complete 전의 모든 turn 활동은 running. 답변 미리보기는 idle에서만 — running이면 길이 0.
+    var buf: [256]u8 = undefined;
+    const commentary =
+        \\{"type":"event_msg","payload":{"type":"task_started"}}
+        \\{"type":"event_msg","payload":{"type":"agent_message","message":"먼저 확인하겠습니다."}}
+    ;
+    try std.testing.expectEqual(AgentState.running, parseCodexTail(std.testing.allocator, commentary, &buf).state);
+    const tool =
+        \\{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}"}}
+    ;
+    try std.testing.expectEqual(AgentState.running, parseCodexTail(std.testing.allocator, tool, &buf).state);
+    const new_prompt =
+        \\{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"이전 완료"}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"또 해줘"}}
+    ;
+    const s = parseCodexTail(std.testing.allocator, new_prompt, &buf);
+    try std.testing.expectEqual(AgentState.running, s.state); // 새 user 입력 → 다시 running
+    try std.testing.expectEqual(@as(usize, 0), s.answer.len);
+}
+
+test "parseCodexTail: 메타(session_meta/turn_context)뿐이면 unknown, 잘린 선두 줄 skip" {
+    var buf: [256]u8 = undefined;
+    const meta_only =
+        \\{"type":"session_meta","payload":{"id":"x","cwd":"/Users/y/ws"}}
+        \\{"type":"turn_context","payload":{"cwd":"/Users/y/ws"}}
+    ;
+    try std.testing.expectEqual(AgentState.unknown, parseCodexTail(std.testing.allocator, meta_only, &buf).state);
+    // 잘린 선두 줄(불량 JSON)은 skip되고 온전한 task_complete로 idle.
+    const partial =
+        \\complete","last_agent_message":"x"}}  ← 잘린 첫 줄
+        \\{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"온전"}}
+    ;
+    const s = parseCodexTail(std.testing.allocator, partial, &buf);
+    try std.testing.expectEqual(AgentState.idle, s.state);
+    try std.testing.expectEqualStrings("온전", s.answer);
+}
+
+test "parseCodexCwd: session_meta 첫 줄에서 payload.cwd 추출" {
+    var scratch_buf: [256]u8 = undefined;
+    const meta =
+        \\{"timestamp":"2026-06-01T18:52:03Z","type":"session_meta","payload":{"id":"u","cwd":"/Users/yoonhb/Documents/workspace/maru","cli_version":"1.0"}}
+    ;
+    try std.testing.expectEqualStrings(
+        "/Users/yoonhb/Documents/workspace/maru",
+        parseCodexCwd(std.testing.allocator, meta, &scratch_buf).?,
+    );
+    // session_meta가 아니면 null(잘못된 첫 줄/회전된 파일 보호).
+    const not_meta =
+        \\{"type":"response_item","payload":{"type":"message"}}
+    ;
+    try std.testing.expectEqual(@as(?[]const u8, null), parseCodexCwd(std.testing.allocator, not_meta, &scratch_buf));
+    // cwd 누락도 null.
+    const no_cwd =
+        \\{"type":"session_meta","payload":{"id":"u"}}
+    ;
+    try std.testing.expectEqual(@as(?[]const u8, null), parseCodexCwd(std.testing.allocator, no_cwd, &scratch_buf));
 }

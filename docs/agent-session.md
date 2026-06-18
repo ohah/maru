@@ -114,7 +114,11 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
   `tests/boundary/imports.zig` 가드). 고정 JSONL fixture로 헤드리스 테스트(running=user/tool_use, idle=end_turn,
   느린 API 갭, end_turn 뒤 tool_result/메타 꼬리/isMeta user, 잘린 선두 줄 skip, UTF-8 경계 말줄임, cwd→디렉터리).
   파일 I/O(세션 찾기·tail read·디렉터리 나열)와 사이드바 배선은 PR3(platform).
-- **PR2**: **codex 어댑터**(rollout·session_meta.cwd·task_complete). 같은 인터페이스, fixture 테스트.
+- **PR2**: **codex 어댑터** ✅ **완료** — 같은 `src/session/agent_transcript.zig`에 `parseCodexTail`(완료=명시적
+  `event_msg`/`task_complete`, 답변=`last_agent_message`, `token_count` 무시, 그 밖 turn 엔트리=running),
+  `parseCodexCwd`(첫 줄 `session_meta.payload.cwd` 추출 — 날짜 분할이라 cwd로 디렉터리를 못 찾아 첫 줄로 매핑).
+  claude와 `AgentState`/`Status`·tail 규약·헬퍼 공유. fixture 테스트(idle/token_count 무시/진행 신호/메타뿐/잘린
+  선두 줄/cwd 추출).
 - **PR3**: 사이드바 **상태 표시**(상태줄/아이콘 상태) + `pollAgentKinds`에 상태 polling·tail 배선. 슬롯 높이 조정.
 - **PR4**: **완료 알림**(Swift 알림 API + ABI + config). ABI `.h`/`.zig`/`.swift` 동기.
 - **PR5(선택)**: **마지막 답변 미리보기**(길이/위치 결정 후).

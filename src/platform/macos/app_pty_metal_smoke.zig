@@ -202,7 +202,7 @@ fn buildLivePtyFixture(
 
     var runtime = app.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
-    _ = try live_pty.attachSurface(&runtime, &surfaces[0]);
+    _ = try live_pty.attachSurface(&runtime, &surfaces[0], false); // controlled smoke — 리더 처리 끔(큐-드레인)
     var live_registry = app.LivePtyRegistry.init(allocator);
     defer live_registry.deinit();
     try live_registry.register(&live_pty);

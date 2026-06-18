@@ -2239,7 +2239,9 @@ pub const AppSession = struct {
         term.surface.title = title;
         term.surface.command = command;
 
-        _ = try term.live_pty.attachSurface(&self.runtime, &term.surface);
+        // interactive 셸(login 래핑)만 리더 코어-처리를 켠다 — 렌더 tick에 안 묶여 OSC 응답이 즉시 나간다
+        // (docs/io-render-threading.md PR3). controlled_smoke(login=false, 테스트)는 큐-드레인 유지.
+        _ = try term.live_pty.attachSurface(&self.runtime, &term.surface, request.login);
         term.pump = term.live_pty.pump(&self.runtime);
         self.next_id += 1;
         return term;

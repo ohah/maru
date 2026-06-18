@@ -477,6 +477,7 @@ test "app host close action detaches active live PTY before closing queue" {
     defer queue.deinit();
     var live: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
+        .io = std.testing.io,
         .session = undefined,
         .queue = &queue,
         .reader = undefined,
@@ -542,6 +543,7 @@ test "app host close action refuses to close a live PTY attached to another tab"
     defer queue.deinit();
     var live: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
+        .io = std.testing.io,
         .session = undefined,
         .queue = &queue,
         .reader = undefined,

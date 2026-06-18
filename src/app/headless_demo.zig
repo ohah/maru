@@ -52,7 +52,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, config: DemoConfig) !DemoRe
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
-    _ = try live_pty.attachSurface(&runtime, &surface);
+    _ = try live_pty.attachSurface(&runtime, &surface, false); // headless demo — 리더 처리 끔(큐-드레인)
 
     // window loop가 아직 없으므로 pump가 종료 이벤트까지 직접 기다린다. 이 경로가
     // 안정적이어야 이후 macOS app host가 같은 queue/runtime 계약을 frame loop에서

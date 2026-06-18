@@ -66,7 +66,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, config: AppPtySmokeConfig) 
 
     var runtime = runtime_mod.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
-    _ = try live_pty.attachSurface(&runtime, &surfaces[0]);
+    _ = try live_pty.attachSurface(&runtime, &surfaces[0], false); // controlled smoke — 리더 처리 끔(큐-드레인)
 
     var pump = live_pty.pump(&runtime);
     var raw_bytes: std.ArrayList(u8) = .empty;

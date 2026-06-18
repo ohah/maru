@@ -46,12 +46,16 @@ RuntimeEventPump
   -> snapshot/artifact 갱신
 ```
 
-> **interactive 세션의 처리 위치(PR3, [I/O–렌더 스레딩 분리](io-render-threading.md))**: 위 "큐→메인 드레인→core.write"
+> **interactive 세션의 처리 위치([I/O–렌더 스레딩 분리](io-render-threading.md))**: 위 "큐→메인 드레인→core.write"
 > 흐름은 controlled_smoke·테스트(직접 코어 구동)와 headless에 그대로 유효하다. 그러나 **interactive 세션**
-> (`attachSurface(process_in_reader=true)`)은 reader thread가 `readEvent` 후 **직접** `core.write`(`Surface.core_mutex`
-> 락 아래)하고 코어가 만든 query 응답(OSC 10/11·CPR·DA)을 자기 PTY로 **즉시** 되쓴다. 응답이 30Hz 렌더 tick에
-> 안 묶여, 출력 폭주(예: codex startup) 중에도 짧은 OSC 11 데드라인 안에 도착한다. 메인 tick은 그 코어를
-> 락 아래 snapshot만 읽어 렌더한다(코어 읽기는 락 안, shaping/GPU는 락 밖).
+> (`attachSurface(process_in_reader=true)`)은 reader thread가 `runProcessing`의 한 poll 루프(`waitIo`[read+write+wake])에서
+> 출력을 `core.write`(`Surface.core_mutex` 락 아래)하고 코어가 만든 query 응답(OSC 10/11·CPR·DA)을 자기 PTY로
+> 되쓴다. 응답이 30Hz 렌더 tick에 안 묶여, 출력 폭주(예: codex startup) 중에도 짧은 OSC 11 데드라인 안에
+> 도착한다. 메인 tick은 그 코어를 락 아래 snapshot만 읽어 렌더한다(코어 읽기는 락 안, shaping/GPU는 락 밖).
+>
+> Phase 2(§8)에서 이 reader가 **유일한 PTY writer**가 됐다: 응답은 reader-로컬 outbound 버퍼에서 `POLLOUT`일 때
+> 비차단으로 흘려보내(응답 write가 막혀도 read 무정지), 메인 입력(키/paste)은 공유 `PtyWriteQueue`로 들어와 같은
+> 루프 write 단계에서 drain된다. 메인은 직접 PTY write를 하지 않는다(아래 "input write 정책").
 
 ## 왜 `openpty`인가
 
@@ -121,11 +125,16 @@ TerminalCore
 
 ## input write 정책
 
-초기 input은 작다. 사용자가 누른 key나 paste 일부가 대부분이다.
+input은 작다. 사용자가 누른 key나 paste 일부가 대부분이다. 그러나 PTY로 보내는 write의 **소유 스레드**가 둘이면(메인 입력 + I/O 스레드 응답) master fd에 동시 write가 생긴다 — 그래서 interactive 세션은 **단일 writer**로 모은다([I/O–렌더 스레딩 분리](io-render-threading.md) §8 Phase 2).
 
-초기 구현은 `SurfaceRuntime.writeInput(surface_id, input)`이 해당 `PtySession.writeInput(bytes)`를 호출한다.
+**단일 writer 모델(interactive, `attachSurface(process_in_reader=true)`)**: 메인 스레드는 PTY에 직접 쓰지 않는다. `SurfaceRuntime.writeInput`/`writeInputNonBlocking`은 `LivePtySession.ptyIo(true)`가 돌려준 write-queue-backed `PtyIo`(`WriteQueueIo`)를 거쳐 입력을 `PtyWriteQueue`에 enqueue하고 `PtySession.signalWrite`로 I/O 스레드(reader)를 깨운다. 실제 master write는 **reader만** 한다 — reader가 `runProcessing`의 한 poll 루프 write 단계에서 (1) 코어가 만든 query 응답(reader-로컬 버퍼)을 먼저, (2) 그 다음 `PtyWriteQueue`를 비차단으로 drain한다. 이렇게 reader가 유일한 PTY writer가 돼 메인·I/O 동시 write 인터리브가 사라진다.
 
-나중에 paste가 매우 크거나 write가 막히는 문제가 보이면 output처럼 write queue를 둔다. 초기에는 설계를 복잡하게 만들지 않는다.
+- 키/스크롤·메인스레드 query 응답: `enqueueBlocking`(전량 보장, 큐 포화 시 backpressure 대기 — 기존 직접 write가 PTY-full에 막히던 것과 동치).
+- paste: `enqueueSome`(non-blocking, 들어가는 만큼만 — 잔량은 다음 tick, UI를 안 막는다).
+- 응답이 reader-로컬 버퍼(`ArrayList`, append 무블록)인 이유: reader가 자기 응답을 적재하며 동시에 같은 큐를 drain하면 큐 포화 시 자기-enqueue에서 막혀 데드락이 된다. 그래서 응답(reader-로컬)과 메인 입력(공유 `PtyWriteQueue`)을 분리한다.
+- `signalWrite`는 close용 wake self-pipe를 재사용한다(아래 close 참고). `waitIo`가 wake를 보면 `closing` 플래그로 write-wake(재-poll로 `POLLOUT` 반영)와 close-wake(`SessionClosed`)를 구분한다.
+
+**non-interactive(controlled smoke/테스트, `process_in_reader=false`)**: reader가 `readEvent` 큐잉 경로라 `PtyWriteQueue`를 drain하지 않으므로, `ptyIo(false)`는 `PtySession.writeInput` 직접 경로를 유지한다(입력이 안 나가는 일이 없게).
 
 ## resize 순서
 
@@ -159,6 +168,8 @@ close (child가 아직 살아 있을 때)
 이 escalation은 `PtySession.close`에서 동기적으로 수행하고, `deinit`은 같은 close 경로를 재사용한다. 이 분리가 필요한 이유는 app이 탭/창을 닫을 때 session memory를 바로 파괴하면 reader thread가 아직 `readEvent` 안에서 같은 session을 잡고 있을 수 있기 때문이다.
 
 reader thread가 blocking `readEvent`에 들어간 상태도 `PtyReader.stopAndJoin`으로 정리한다. 순서는 `queue.close -> session.close -> reader.join`이다. queue를 먼저 닫는 이유는 사용자가 닫은 pane에 새 output/read_error event를 더 쌓지 않기 위해서다. session close는 child를 reap하고, reader를 깨운다. master fd 자체는 여기서 닫지 않고 reader가 join된 뒤 `deinit`에서 닫는다. reader가 아직 그 fd 번호로 poll/read 중일 때 닫으면 OS가 번호를 재사용해 reader가 엉뚱한 fd를 읽을 수 있기 때문이다.
+
+단일 writer 모델에서는 `LivePtySession.close`/`finishAfterTermination`이 event queue·session에 더해 `PtyWriteQueue`도 닫는다. 메인이 큐 포화로 `enqueueBlocking` backpressure 대기 중일 때 close가 그 대기를 `QueueClosed`로 풀어주지 않으면, 닫는 스레드와 입력 스레드가 다를 경우 메인이 영영 막힌다. reader는 `PtyWriteQueue`를 비차단으로 drain하므로 큐에서 대기하지 않고, `session.close`의 self-pipe wake로 `waitIo`에서 깨어나 종료한다(write 대기 중 close에서도 무UAF/좀비 — io-render-threading.md §8 P2-4).
 
 app host, smoke, demo 코드는 `PtySession`, `PtyEventQueue`, `PtyReader`를 각각 조립하지 않고 `LivePtySession` owner를 사용한다. 이유는 정상 종료 경로와 close/error cleanup 경로가 같은 reader를 서로 다른 방식으로 만지기 시작하면, 이미 join된 reader를 다시 stop하거나 반대로 실패 경로에서 reader thread를 놓치는 버그가 생기기 쉽기 때문이다. `LivePtySession.finishAfterTermination`은 정상 종료 뒤 reader join과 queue close를 한 번만 기록하고, `LivePtySession.close`/`deinit`은 아직 join되지 않은 경우에만 `PtyReader.stopAndJoin`을 호출한다. tab/window close처럼 surface도 함께 사라지는 경로는 `LivePtyRegistry`가 active surface의 live PTY mapping을 찾고 link 불변식을 검증한 뒤 `LivePtySession.closeAndDetach`를 호출한다. 이 함수는 닫힌 pane으로 늦게 도착한 output이나 input이 흘러가지 않도록 `SurfaceRuntime.detachSurface`를 먼저 수행하고, 그 다음 같은 PTY close 순서를 탄다. registry mapping은 close 성공 뒤 제거하고, 검증 실패 시에는 원인 분석을 위해 보존한다.
 

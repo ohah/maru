@@ -3109,9 +3109,15 @@ pub const AppSession = struct {
         }
         // 타이핑하면 live(바닥)로 돌아간다 — 과거를 보다가 입력하면 현재 화면으로 점프(표준 터미널).
         // 스크롤 중이었으면 즉시 다시 그리도록 metal_dirty도 세운다(echo 출력 전에라도 뷰 복귀).
-        if (self.surface_initialized and self.activeSurface().core.viewOffset() != 0) {
-            self.activeSurface().core.scrollToBottom();
-            self.metal_dirty = true;
+        if (self.surface_initialized) {
+            // 코어 읽기+scrollToBottom(변경)은 락 아래(docs/io-render-threading.md PR3 — 리더 core.write 경합 방지).
+            const surface = self.activeSurface();
+            surface.core_mutex.lockUncancelable(self.io);
+            defer surface.core_mutex.unlock(self.io);
+            if (surface.core.viewOffset() != 0) {
+                surface.core.scrollToBottom();
+                self.metal_dirty = true;
+            }
         }
         // 사용자 config의 keybind를 적용한다 — resolver가 사용자 바인딩(앱 액션 + terminal 매크로)을 먼저 보고
         // 없으면 빌트인(`default_*_bindings`)으로 폴백한다(override/추가/`=unbind`로 기본 끄기/`text:`·`esc:`·`ctrl:`
@@ -3144,7 +3150,11 @@ pub const AppSession = struct {
     /// 이 함수로 넘기는 얇은 글루다).
     pub fn scroll(self: *AppSession, delta_up: i32) void {
         if (!self.surface_initialized) return;
-        self.activeSurface().core.scrollViewport(@as(isize, delta_up));
+        const surface = self.activeSurface();
+        // scrollViewport는 코어 변경 — 락 아래(docs/io-render-threading.md PR3).
+        surface.core_mutex.lockUncancelable(self.io);
+        surface.core.scrollViewport(@as(isize, delta_up));
+        surface.core_mutex.unlock(self.io);
         self.metal_dirty = true;
     }
 
@@ -3166,18 +3176,31 @@ pub const AppSession = struct {
         // 같은 기준). 커서 아래 비활성 pane이 tracking이어도 활성에 보낸다(pane↔좌표 불일치 방지). non-tracking이면
         // 아래에서 커서 아래 pane(target)을 스크롤백한다. lines>0=위(과거)=64, <0=아래=65, 앱이 휠을 소비한다.
         const active = self.activeSurface();
-        if (active.core.mouse_tracking != .none) {
-            if (lines != 0) {
+        // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
+        // docs/io-render-threading.md PR3). writeInput은 락 밖(PR1 패턴).
+        var tracking: bool = undefined;
+        var reply_buf: ?[]u8 = null;
+        {
+            active.core_mutex.lockUncancelable(self.io);
+            defer active.core_mutex.unlock(self.io);
+            tracking = active.core.mouse_tracking != .none;
+            if (tracking and lines != 0) {
                 if (self.pxToCell(x_px, y_px)) |cell| {
                     const wb: u8 = if (lines > 0) 64 else 65;
                     var n: i32 = if (lines > 0) lines else -lines;
                     while (n > 0) : (n -= 1) active.core.reportMouse(wb, cell.col, cell.row, cell.term_x_px, cell.term_y_px, true, false, 0);
                     const reply = active.core.pendingResponse();
                     if (reply.len > 0) {
-                        self.runtime.writeInput(active.id, .{ .bytes = reply }) catch {};
+                        reply_buf = self.allocator.dupe(u8, reply) catch null;
                         active.core.clearResponse();
                     }
                 }
+            }
+        }
+        if (tracking) {
+            if (reply_buf) |reply| {
+                defer self.allocator.free(reply);
+                self.runtime.writeInput(active.id, .{ .bytes = reply }) catch {};
             }
             return; // 휠을 앱이 소비 — 스크롤백/가로 스크롤 안 함
         }
@@ -3197,12 +3220,23 @@ pub const AppSession = struct {
         self.window_focused = gained; // 완료 알림: 포커스 창의 활성 탭만 "보고 있는" 것으로 친다.
         if (!self.surface_initialized) return;
         const surface = self.activeSurface();
-        surface.core.reportFocus(gained);
+        // reportFocus는 코어 response를 생성(리더 core.write도 response 생성 — 같은 ArrayList 경합).
+        // 락 안에서 reportFocus+응답 복사, writeInput은 락 밖(docs/io-render-threading.md PR3, PR1 패턴).
+        var reply_buf: ?[]u8 = null;
+        {
+            surface.core_mutex.lockUncancelable(self.io);
+            defer surface.core_mutex.unlock(self.io);
+            surface.core.reportFocus(gained);
+            const reply = surface.core.pendingResponse();
+            if (reply.len > 0) {
+                reply_buf = self.allocator.dupe(u8, reply) catch null;
+                surface.core.clearResponse();
+            }
+        }
         // window 이벤트라 PTY output 경로(runtime의 응답 drain)를 안 타므로 여기서 직접 흘린다(DSR/CPR drain과 같은 형태).
-        const reply = surface.core.pendingResponse();
-        if (reply.len > 0) {
+        if (reply_buf) |reply| {
+            defer self.allocator.free(reply);
             self.runtime.writeInput(surface.id, .{ .bytes = reply }) catch {};
-            surface.core.clearResponse();
         }
     }
 

@@ -5157,8 +5157,22 @@ pub const AppSession = struct {
                     self.pane_palette_copies.ensureTotalCapacity(self.allocator, leaf_rects.items.len) catch {};
                     for (leaf_rects.items) |lr| {
                         if (lr.leaf == active_pane) continue; // 활성은 맨 뒤에 따로 넣는다
-                        const pane_core = &lr.leaf.activeTerm().surface.core;
-                        const dl = renderer.buildDrawList(self.allocator, pane_core.renderSnapshot()) catch continue;
+                        const pane_surface = &lr.leaf.activeTerm().surface;
+                        const pane_core = &pane_surface.core;
+                        // 코어 읽기(snapshot→DrawList 복사 + per-pane 색 상태)는 락 아래, CoreText shaping
+                        // (buildFromDrawList — DrawList 복사본만 봄)은 락 밖(docs/io-render-threading.md PR3).
+                        pane_surface.core_mutex.lockUncancelable(self.io);
+                        const dl_or = renderer.buildDrawList(self.allocator, pane_core.renderSnapshot());
+                        // palette를 소유 버퍼로 복사(코어 alias 제거). 예약 capacity 부족(OOM)이면 코어 포인터 폴백.
+                        const pane_palette_ptr = if (self.pane_palette_copies.items.len < self.pane_palette_copies.capacity) blk: {
+                            self.pane_palette_copies.appendAssumeCapacity(pane_core.paletteOverride().*);
+                            break :blk &self.pane_palette_copies.items[self.pane_palette_copies.items.len - 1];
+                        } else pane_core.paletteOverride();
+                        const pane_rev = pane_core.reverseScreen(); // DECSCNM(G9) per-pane
+                        const pane_fg = pane_core.defaultFgOverride();
+                        const pane_bg = pane_core.defaultBgOverride();
+                        pane_surface.core_mutex.unlock(self.io);
+                        const dl = dl_or catch continue;
                         var f = pane_frame_builder.buildFromDrawList(self.allocator, dl, &self.renderer_state) catch continue;
                         built_frames.append(self.allocator, f) catch {
                             f.deinit(self.allocator);
@@ -5166,16 +5180,11 @@ pub const AppSession = struct {
                         };
                         // 비활성 pane도 자기 core의 OSC 4 팔레트·OSC 10/11 색 설정을 쓴다(둘 다 per-터미널 상태).
                         var pane_colors = inactive_colors;
-                        // palette를 소유 버퍼로 복사(코어 alias 제거 — docs/io-render-threading.md). 예약 capacity가
-                        // 부족(OOM)하면 코어 포인터로 폴백(드문 degraded 경로).
-                        pane_colors.palette = if (self.pane_palette_copies.items.len < self.pane_palette_copies.capacity) blk: {
-                            self.pane_palette_copies.appendAssumeCapacity(pane_core.paletteOverride().*);
-                            break :blk &self.pane_palette_copies.items[self.pane_palette_copies.items.len - 1];
-                        } else pane_core.paletteOverride();
-                        pane_colors.screen_reverse = pane_core.reverseScreen(); // DECSCNM(G9) per-pane
+                        pane_colors.palette = pane_palette_ptr;
+                        pane_colors.screen_reverse = pane_rev;
                         pane_colors.blink_on = !self.appearance.blink_text or self.blink_visible; // blink 위상(전역, config 게이트)
-                        if (pane_core.defaultFgOverride()) |fg| pane_colors.default_fg = fg;
-                        if (pane_core.defaultBgOverride()) |bg| pane_colors.default_bg = bg;
+                        if (pane_fg) |fg| pane_colors.default_fg = fg;
+                        if (pane_bg) |bg| pane_colors.default_bg = bg;
                         const t = self.paneTermRect(lr.rect); // 바 아래 영역 origin
                         pane_frames.append(self.allocator, .{
                             .frame = f, // built_frames가 소유(deinit) — 여기는 같은 frame을 가리키는 view

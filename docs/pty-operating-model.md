@@ -46,6 +46,13 @@ RuntimeEventPump
   -> snapshot/artifact 갱신
 ```
 
+> **interactive 세션의 처리 위치(PR3, [I/O–렌더 스레딩 분리](io-render-threading.md))**: 위 "큐→메인 드레인→core.write"
+> 흐름은 controlled_smoke·테스트(직접 코어 구동)와 headless에 그대로 유효하다. 그러나 **interactive 세션**
+> (`attachSurface(process_in_reader=true)`)은 reader thread가 `readEvent` 후 **직접** `core.write`(`Surface.core_mutex`
+> 락 아래)하고 코어가 만든 query 응답(OSC 10/11·CPR·DA)을 자기 PTY로 **즉시** 되쓴다. 응답이 30Hz 렌더 tick에
+> 안 묶여, 출력 폭주(예: codex startup) 중에도 짧은 OSC 11 데드라인 안에 도착한다. 메인 tick은 그 코어를
+> 락 아래 snapshot만 읽어 렌더한다(코어 읽기는 락 안, shaping/GPU는 락 밖).
+
 ## 왜 `openpty`인가
 
 비교하면 다음과 같다.

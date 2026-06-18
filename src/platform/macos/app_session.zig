@@ -3012,7 +3012,13 @@ pub const AppSession = struct {
         self.rebuildSidebar() catch {};
         // 폰트/DPI 변경을 활성 surface 코어에 즉시 반영(kitty 자동 크기 advance용 — renderFrame 안전망보다
         // 먼저, 변경 직후 첫 PTY 출력에서 정확하도록). surface 생성 전(init 순서)이면 surface_initialized로 가드.
-        if (self.surface_initialized) self.activeSurface().core.setCellMetrics(self.cell_width_px, self.cell_height_px);
+        if (self.surface_initialized) {
+            // 코어 변경이라 락 아래(docs/io-render-threading.md PR3 — 리더 core.write와 경합 방지).
+            const active_surface = self.activeSurface();
+            active_surface.core_mutex.lockUncancelable(self.io);
+            defer active_surface.core_mutex.unlock(self.io);
+            active_surface.core.setCellMetrics(self.cell_width_px, self.cell_height_px);
+        }
     }
 
     /// 폰트 크기를 delta(pt)만큼 조절한다(⌘+/⌘-). setFontSize가 클램프·메트릭·grid를 처리한다.
@@ -5222,14 +5228,18 @@ pub const AppSession = struct {
                 defer self.allocator.free(kg_pixels);
                 defer kg_live_ids.deinit(self.allocator);
                 if (self.surface_initialized) {
-                    // kitty 자동 크기 이미지의 커서 advance용 셀 메트릭을 활성 surface 코어에 주입한다(매 tick
-                    // 최신). 메트릭은 전역(폰트·DPI)이라 활성 surface가 PTY 출력을 처리할 때 최신값을 갖는다 —
-                    // multi-surface 전체 주입은 후속(#5~7과 함께). 그 외 픽셀↔셀 환산은 여전히 렌더러 책임(K1).
-                    self.activeSurface().core.setCellMetrics(self.cell_width_px, self.cell_height_px);
-                    // OSC 10/11 색 질의 응답용 theme 전경/배경 RGB도 같이 주입(셀 메트릭과 같은 결 — 코어는
-                    // Color.default 추상만 알아 실제 theme 색을 받아야 질의에 답한다).
-                    self.activeSurface().core.setDefaultColors(self.appearance.theme.foreground, self.appearance.theme.background);
-                    const snap = self.activeSurface().core.renderSnapshot();
+                    // 코어 변경(setCellMetrics·setDefaultColors)과 kitty 이미지 읽기(snap.placements/images는
+                    // 코어 alias)는 모두 락 아래(docs/io-render-threading.md PR3 — 리더 core.write와 경합 방지).
+                    // buildGpuImages/planImageUploads가 이미지 데이터를 owned 버퍼로 복사하므로(planImageUploads는
+                    // img.pixels를 appendSlice로 복사), 락 밖 replace()는 코어를 안 본다.
+                    const active_surface = self.activeSurface();
+                    active_surface.core_mutex.lockUncancelable(self.io);
+                    defer active_surface.core_mutex.unlock(self.io);
+                    // kitty 자동 크기 이미지의 커서 advance용 셀 메트릭을 활성 surface 코어에 주입한다(매 tick 최신).
+                    active_surface.core.setCellMetrics(self.cell_width_px, self.cell_height_px);
+                    // OSC 10/11 색 질의 응답용 theme 전경/배경 RGB도 주입(코어는 Color.default 추상만 알아 실제 색 필요).
+                    active_surface.core.setDefaultColors(self.appearance.theme.foreground, self.appearance.theme.background);
+                    const snap = active_surface.core.renderSnapshot();
                     // K4c: 살아있는 이미지 id 집합(활성 surface 저장소). Swift가 이 집합에 없는 텍스처를 evict.
                     for (snap.images) |img| kg_live_ids.append(self.allocator, img.image_id) catch {};
                     // kitty_uploaded를 같은 집합으로 prune — 텍스처가 evict된(=live 아님) 이미지는 dedup 상태에서도

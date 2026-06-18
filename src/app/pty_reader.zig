@@ -407,8 +407,14 @@ pub const PtyReader = struct {
             // write 단계(비차단, read 무정지): 응답을 먼저 비운다(query 응답 지연 최소화), 응답이 다 나가면
             // 메인 입력을 한 청크 drain한다. 한 iteration에 한 소스/한 청크 — 다음 poll에서 이어 비운다.
             if (ready.writable) {
+                // EAGAIN(버퍼 참)은 writeInputNonBlocking이 0으로 돌려준다(에러 아님 — 다음 poll에 이어 씀).
+                // catch로 잡히는 건 치명적 write 실패(EIO 등)/SessionClosed뿐 — `catch 0`로 삼키면 head가 안 늘어
+                // POLLOUT 스핀(라이브락)·입력 조용한 손실이 되므로, 에러면 reader를 종료한다(read 에러 경로와 동일).
                 if (out_head < out_buf.items.len) {
-                    const written = self.session.writeInputNonBlocking(out_buf.items[out_head..]) catch 0;
+                    const written = self.session.writeInputNonBlocking(out_buf.items[out_head..]) catch |err| {
+                        if (err != error.SessionClosed) self.pushReadError(@errorName(err));
+                        return;
+                    };
                     out_head += written;
                     if (out_head >= out_buf.items.len) {
                         out_buf.clearRetainingCapacity();
@@ -417,7 +423,10 @@ pub const PtyReader = struct {
                 } else if (self.write_queue) |wq| {
                     const n = wq.drainChunk(&writebuf);
                     if (n > 0) {
-                        const written = self.session.writeInputNonBlocking(writebuf[0..n]) catch 0;
+                        const written = self.session.writeInputNonBlocking(writebuf[0..n]) catch |err| {
+                            if (err != error.SessionClosed) self.pushReadError(@errorName(err));
+                            return;
+                        };
                         wq.consume(written); // 실제 쓴 만큼만 head 전진(부분 write 잔량은 다음 poll)
                     }
                 }
@@ -438,11 +447,18 @@ pub const PtyReader = struct {
                             core.clearResponse();
                         }
                         mutex.unlock(self.io);
-                        // 메인에 "출력 발생" 신호(빈 bytes): output_events를 올려 렌더 트리거.
-                        self.queue.pushBlocking(.{ .output = .{
+                        // 메인에 "출력 발생" 신호(빈 bytes): output_events를 올려 렌더 트리거. **비블로킹**(tryPush)으로
+                        // 보낸다 — 큐가 차면 드롭한다. 근거: (1) 빈 신호라 데이터 손실 없음 — 렌더는 코어 최신 상태를
+                        // 읽고, 큐에 이미 신호가 있어 catch-up 렌더가 일어난다(드롭=렌더 coalescing). (2) pushBlocking이면
+                        // reader가 출력 큐 backpressure에 막혀 write_queue를 못 비우고, 그 사이 메인이 write_queue
+                        // enqueueBlocking에 막히면 교차-큐 데드락(서로 상대 큐의 유일한 drainer)이 된다 — 비블로킹이 차단.
+                        self.queue.tryPush(.{ .output = .{
                             .pty_id = self.pty_id,
                             .bytes = &.{},
-                        } }) catch return;
+                        } }) catch |err| switch (err) {
+                            error.QueueFull => {}, // 렌더 이미 대기 중 — 드롭 OK(coalescing)
+                            else => return, // QueueClosed(닫힘) 등 — reader 종료
+                        };
                     },
                     .eof => {
                         const status = self.session.reapAfterEof() catch |err| {

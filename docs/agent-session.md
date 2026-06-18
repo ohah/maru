@@ -119,7 +119,13 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
   `parseCodexCwd`(첫 줄 `session_meta.payload.cwd` 추출 — 날짜 분할이라 cwd로 디렉터리를 못 찾아 첫 줄로 매핑).
   claude와 `AgentState`/`Status`·tail 규약·헬퍼 공유. fixture 테스트(idle/token_count 무시/진행 신호/메타뿐/잘린
   선두 줄/cwd 추출).
-- **PR3**: 사이드바 **상태 표시**(상태줄/아이콘 상태) + `pollAgentKinds`에 상태 polling·tail 배선. 슬롯 높이 조정.
+- **PR3**: platform tail-read + 사이드바 **상태 표시** ✅ **완료** — `src/platform/macos/agent_session.zig`(L4:
+  세션 파일 찾기·디렉터리 나열·끝 64KB seek read; claude=enc(cwd) 디렉터리 최신 .jsonl, codex=최신 날짜
+  디렉터리에서 첫 줄 cwd 일치 최신 rollout; mtime 안 바뀌면 재파싱 skip). `pollAgentKinds`가 활성 Term의
+  `agent_state`를 갱신(cwd=OSC7 `currentCwd()`, 세션 코어로 판정). 사이드바 카드 4번째 **상태줄**(running=`● 진행중`,
+  idle=`✓ {답변}`) + 아이콘 **펄스**(running일 때 blink 위상으로 밝기 변조, `dimRgb`) + 슬롯 높이 3.8×→**4.6×**
+  (`lines:[3]→[4]`). Metal `.m` 디코더는 이미 4줄 지원(`line_count*4`)이라 무변경. temp-dir 통합 테스트(claude/codex
+  최신 선택·cwd 매칭·mtime skip)는 macOS. **실 세션 육안 검증은 수동**(아래 한계).
 - **PR4**: **완료 알림**(Swift 알림 API + ABI + config). ABI `.h`/`.zig`/`.swift` 동기.
 - **PR5(선택)**: **마지막 답변 미리보기**(길이/위치 결정 후).
 

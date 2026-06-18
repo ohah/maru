@@ -21,6 +21,7 @@ const pageScrollDelta = input_math.pageScrollDelta;
 const imeDecide = maru.session.ime.decide;
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
+const agent_session = @import("agent_session.zig"); // L4 — 에이전트 세션 트랜스크립트 파일 찾기 + tail read
 const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
@@ -103,10 +104,11 @@ const default_sidebar_width_pt: u32 = 180;
 const sidebar_min_pt: u32 = 120; // 너무 좁으면 제목/✕가 안 보임
 const sidebar_max_pt: u32 = 480; // 너무 넓으면 터미널이 좁아짐
 
-// 사이드바 탭 슬롯 한 칸의 높이를 cell 높이의 몇 배로 할지(천분율). 3800 = 3.8× — 3줄 카드(이름·브랜치·경로,
-// 각 1×cell = 3×cell)를 위아래 여백 두고 담을 큰 슬롯(라이브 요청). 1~2줄 탭도 같은 슬롯에 블록 세로 중앙.
-// refreshCellMetrics가 cell_height_px × 이 비율로 backing 픽셀 슬롯 높이를 구한다.
-const sidebar_slot_height_ratio_milli: u32 = 3800;
+// 사이드바 탭 슬롯 한 칸의 높이를 cell 높이의 몇 배로 할지(천분율). 4600 = 4.6× — 최대 4줄 카드(이름·브랜치·
+// 경로·상태, 각 1×cell = 4×cell)를 위아래 여백 두고 담을 큰 슬롯. 1~3줄 탭도 같은 슬롯에 블록 세로 중앙(빈 줄
+// 없음). 에이전트 상태줄(4번째)을 추가하며 3.8×→4.6×로 키웠다. refreshCellMetrics가 cell_height_px × 이
+// 비율로 backing 픽셀 슬롯 높이를 구한다.
+const sidebar_slot_height_ratio_milli: u32 = 4600;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -130,6 +132,9 @@ const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
 // 정확히 500ms다. ms 기반 위상·config 노출·deadline 스케줄러는 문서화된 시간-모델 후속(docs/layering §5).
 const blink_interval_ticks: u32 = 15;
 const agent_poll_interval_ticks: u32 = 15; // ≈0.5s@30Hz — 포그라운드 프로세스(에이전트) polling 주기.
+// 에이전트 마지막 답변 미리보기를 담는 Term inline 버퍼 크기(바이트). 한 줄 미리보기라 충분하고, 사이드바가
+// 카드 폭으로 다시 말줄임하므로 여기선 넉넉히만 잡는다(UTF-8 경계로 잘려 들어옴).
+const agent_answer_max: usize = 192;
 // synchronized output(DECSET 2026) ESU-유실 복구 deadline. 30틱 = 1초(고정 30Hz). BSU(2026h) 후 ESU(2026l)가
 // 영영 안 오면(앱 크래시·SSH 끊김·버그) frame 투영이 무한정 막혀 화면이 freeze되므로, 이 한도를 넘는 hold는
 // sync를 강제 해제하고 투영한다. 베이스: ESU-유실 안전장치(Ghostty termio sync_reset_ms=1000·xterm.js
@@ -604,6 +609,14 @@ const Term = struct {
     // 이 Term의 포그라운드 프로세스가 어떤 에이전트 CLI인지(none/claude/codex). pollAgentKinds가 ≈0.5s마다
     // tcgetpgrp+proc_name으로 갱신. 사이드바 라벨에 에이전트 심볼로 표시. 파생값(영속 안 함).
     agent_kind: AgentKind = .none,
+    // 에이전트 세션 진행 상태(unknown/running/idle) — pollAgentState가 세션 JSONL tail로 판정(agent_kind가 none이
+    // 아닐 때만 의미). 사이드바 상태줄·아이콘 펄스에 쓴다. 파생값(영속 안 함). agent_session_mtime=찾은 세션 파일의
+    // 마지막 mtime(나노초) — 안 바뀌면 tail 재파싱 skip. agent_answer_buf/_len=idle일 때 마지막 답변 첫 줄(inline
+    // 버퍼라 alloc 없음 — 사이드바 폭으로 다시 말줄임). 모두 derived: destroyTerm이 따로 해제할 owned 포인터 없음.
+    agent_state: agent_session.State = .unknown,
+    agent_session_mtime: i128 = 0,
+    agent_answer_buf: [agent_answer_max]u8 = undefined,
+    agent_answer_len: usize = 0,
 };
 
 /// Term 포그라운드에서 도는 에이전트 CLI 종류. 사이드바에 심볼로 표시(claude=✳, codex=✻).
@@ -617,6 +630,17 @@ fn agentSymbolCodepoint(kind: AgentKind) u21 {
         .none => 0,
         .claude => 0x2733,
         .codex => 0x273B,
+    };
+}
+
+/// 아이콘 펄스 off 위상에서 쓰는 어두운 색. 브랜드색을 배경 쪽으로 낮춘다(고정 비율). 깜빡임이 아니라 밝기 변조라
+/// 글자가 사라지지 않고 부드럽게 맥동한다(접근성 — 급격한 on/off 회피). 비율 45%는 full-color와 충분히 구분되되
+/// 너무 어둡지 않은 값으로 택했다.
+fn dimRgb(c: maru.color.Rgb) maru.color.Rgb {
+    return .{
+        .r = @intCast(@as(u16, c.r) * 45 / 100),
+        .g = @intCast(@as(u16, c.g) * 45 / 100),
+        .b = @intCast(@as(u16, c.b) * 45 / 100),
     };
 }
 
@@ -4644,8 +4668,47 @@ pub const AppSession = struct {
             if (term.agent_kind != prev) {
                 self.metal_dirty = true; // 표시되는 Term의 에이전트 변화 → 사이드바 재렌더
                 if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
+                // kind가 바뀌면(새 에이전트 시작/종료) 상태 캐시를 리셋한다 — 옛 세션의 mtime/답변이 새 에이전트로
+                // 새지 않게. none이 되면(에이전트 종료) 상태도 비운다.
+                term.agent_session_mtime = 0;
+                if (term.agent_kind == .none) {
+                    term.agent_state = .unknown;
+                    term.agent_answer_len = 0;
+                }
             }
+            if (term.agent_kind != .none) self.pollAgentState(term);
         }
+    }
+
+    /// 에이전트 포그라운드인 Term의 진행 상태(running/idle)를 세션 JSONL tail로 갱신한다. 세션 파일 위치 I/O는
+    /// agent_session(L4)이, 바이트→상태 판정은 session core가 한다. cwd(OSC 7)를 모르면(아직 미보고) 보류한다 —
+    /// 잘못된 cwd로 엉뚱한 세션을 읽지 않게. mtime이 직전과 같으면 agent_session.poll이 재파싱을 건너뛴다.
+    fn pollAgentState(self: *AppSession, term: *Term) void {
+        const kind: agent_session.Kind = switch (term.agent_kind) {
+            .none => return,
+            .claude => .claude,
+            .codex => .codex,
+        };
+        const cwd = term.surface.core.currentCwd();
+        if (cwd.len == 0) return; // OSC 7 cwd 아직 없음 — 다음 poll에.
+        const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else return;
+        const subdir: []const u8 = switch (kind) {
+            .claude => ".claude/projects",
+            .codex => ".codex/sessions",
+        };
+        var root_buf: [4096]u8 = undefined;
+        const root = std.fmt.bufPrint(&root_buf, "{s}/{s}", .{ home, subdir }) catch return;
+
+        const r = agent_session.poll(self.io, self.allocator, kind, root, cwd, term.agent_session_mtime, &term.agent_answer_buf);
+        term.agent_session_mtime = r.mtime;
+        const new_state = r.state orelse return; // null = mtime 안 바뀜 → 직전 상태 유지(재파싱 skip)
+        const new_answer_len: usize = if (new_state == .idle) r.answer_len else 0;
+        if (new_state != term.agent_state or new_answer_len != term.agent_answer_len) {
+            self.metal_dirty = true; // 상태/답변 변화 → 사이드바 재렌더
+            if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent state: {s}", .{@tagName(new_state)});
+        }
+        term.agent_state = new_state;
+        term.agent_answer_len = new_answer_len;
     }
 
     pub fn tick(self: *AppSession) !FrameSummary {
@@ -5645,6 +5708,21 @@ pub const AppSession = struct {
         };
     }
 
+    /// 사이드바 카드 4번째 줄(상태줄) 텍스트를 owned 슬라이스로 만든다. 에이전트 포그라운드가 아니면(none) "" —
+    /// 그 줄은 생략된다. running이면 "● 진행중", idle이면 "✓ {답변 첫 줄}"(답변이 없으면 "✓ 완료"). 답변은 Term의
+    /// inline 버퍼(이미 UTF-8 경계로 말줄임됨)에서 가져오고, 사이드바가 카드 폭으로 다시 말줄임한다.
+    fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
+        if (term.agent_kind == .none) return self.allocator.dupe(u8, "");
+        return switch (term.agent_state) {
+            .running => self.allocator.dupe(u8, "\u{25CF} 진행중"), // ● 진행중
+            .idle => if (term.agent_answer_len > 0)
+                std.fmt.allocPrint(self.allocator, "\u{2713} {s}", .{term.agent_answer_buf[0..term.agent_answer_len]}) // ✓ {답변}
+            else
+                self.allocator.dupe(u8, "\u{2713} 완료"), // ✓ 완료(답변 텍스트 없음)
+            .unknown => self.allocator.dupe(u8, ""), // 트랜스크립트 못 읽음 — 상태줄 생략(아이콘만)
+        };
+    }
+
     /// 탭 제목들을 "{n} {title}" 라벨로 모아 사이드바 제목 glyph RenderFrame을 만든다(한 줄=한 탭,
     /// row=탭 인덱스). `build`(터미널)와 같은 CoreTextFrameBuilder/renderer_state(atlas)를 써서 제목
     /// glyph도 터미널과 같은 slot을 재사용하고 새 glyph만 추가 업로드된다. macOS 전용(실 CoreText
@@ -5685,6 +5763,13 @@ pub const AppSession = struct {
             for (path_lines.items) |l| self.allocator.free(l);
             path_lines.deinit(self.allocator);
         }
+        // 상태줄(4번째 줄): 에이전트 포그라운드일 때만 — running이면 "● 진행중", idle이면 "✓ {답변}"(완료 답변
+        // 미리보기). none/unknown이면 ""(그 줄 생략). 아이콘 펄스와 함께 진행 상태를 보여준다(docs/agent-session.md).
+        var status_lines: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (status_lines.items) |l| self.allocator.free(l);
+            status_lines.deinit(self.allocator);
+        }
         var agents: std.ArrayList(u21) = .empty;
         defer agents.deinit(self.allocator);
         for (self.tabs.items) |tab| {
@@ -5698,6 +5783,7 @@ pub const AppSession = struct {
                 try names.append(self.allocator, try self.renameEditText(self.allocator)); // owned → names가 소유
                 try branch_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                 try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                try status_lines.append(self.allocator, try self.allocator.dupe(u8, "")); // rename 중엔 상태줄 숨김
             } else {
                 const base = workspaceLabel(tab);
                 const pin: []const u8 = if (tab.pinned) "\u{1F4CC} " else "";
@@ -5707,6 +5793,7 @@ pub const AppSession = struct {
                 const branch = self.termGitBranch(term); // cwd 변경 시에만 .git/HEAD 재읽기(캐시)
                 try branch_lines.append(self.allocator, if (branch) |b| try std.fmt.allocPrint(self.allocator, "\u{2387} {s}", .{b}) else try self.allocator.dupe(u8, ""));
                 try path_lines.append(self.allocator, if (branch != null) try sidebarCwdPath(self.allocator, term) else try self.allocator.dupe(u8, ""));
+                try status_lines.append(self.allocator, try self.agentStatusLine(term));
             }
         }
 
@@ -5714,14 +5801,27 @@ pub const AppSession = struct {
         const fg: terminal.Color = .{ .rgb = self.mutedForeground() };
         const active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
         // 호버 슬롯엔 닫기 ✕(없으면 null). plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼.
-        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, agents.items, sidebar_cols, fg, self.hovered_slot, self.tabs.items.len, self.app_window.active_tab, active_fg);
+        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, sidebar_cols, fg, self.hovered_slot, self.tabs.items.len, self.app_window.active_tab, active_fg);
         // 에이전트 아이콘(✳ claude / ✻ codex)에 브랜드 강조색을 입혀 나머지 라벨과 구분한다 — claude=Anthropic 코랄,
-        // codex=OpenAI 그린. 아이콘은 독립 셀(슬롯 중앙)이라 codepoint로 찾아 칠한다.
-        for (draw_list.cells) |*c| switch (c.codepoint) {
-            0x2733 => c.style.foreground = .{ .rgb = .{ .r = 0xD9, .g = 0x78, .b = 0x5C } }, // claude — Anthropic 코랄
-            0x273B => c.style.foreground = .{ .rgb = .{ .r = 0x10, .g = 0xA3, .b = 0x7F } }, // codex — OpenAI 그린(#10A37F)
-            else => {},
-        };
+        // codex=OpenAI 그린. 아이콘은 독립 셀(슬롯 중앙)이라 codepoint로 찾는다. running이면 blink 위상으로 밝기를
+        // 낮춰 **펄스**(진행중 표시), idle/none이면 정적 full-color(docs/agent-session.md "사이드바 통합").
+        for (draw_list.cells) |*c| {
+            const brand: ?maru.color.Rgb = switch (c.codepoint) {
+                0x2733 => .{ .r = 0xD9, .g = 0x78, .b = 0x5C }, // claude — Anthropic 코랄
+                0x273B => .{ .r = 0x10, .g = 0xA3, .b = 0x7F }, // codex — OpenAI 그린(#10A37F)
+                else => null,
+            };
+            const col = brand orelse continue;
+            // 아이콘 셀 row에서 슬롯(탭) 인덱스를 디코드(row=slot*32+…)해 그 Term이 running이면 펄스. row는 아직
+            // 인코딩 상태(아래 indent 시프트는 col만 바꿈)라 정확히 slot으로 역산된다.
+            const slot = c.row / coretext_frame_builder.sidebar_line_base;
+            var rgb = col;
+            if (slot < self.tabs.items.len) {
+                const t = self.tabs.items[slot].activePane().activeTerm();
+                if (t.agent_state == .running and !self.blink_visible) rgb = dimRgb(col); // off 위상 → 어둡게
+            }
+            c.style.foreground = .{ .rgb = rgb };
+        }
         // U2/B2: 제목·✕·+ 셀을 content rect 좌단(indent_cols)만큼 우측으로 민다 — 좌측 maru-accent 막대 + 카드 패딩 안 가리게(rich만; tui indent=0 no-op).
         if (indent_cols > 0) {
             for (draw_list.cells) |*c| c.col += indent_cols;
@@ -6845,13 +6945,13 @@ test "buildSidebarTitleFrame: 에이전트 심볼(✳/✻) prefix여도 프레�
         // (1) 시프트만 하고 size.cols를 안 넓히면 ShapedRecordOutsideSurface로 실패함을 고정(버그 재현 — buildFromDrawList가
         //     실패 시 draw_list를 정리하므로 별도 free 안 함).
         {
-            const dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_]u21{}, sidebar_cols, muted, null, 1, 0, muted);
+            const dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, sidebar_cols, muted, null, 1, 0, muted);
             for (dl.cells) |*c| c.col += indent_cols;
             try std.testing.expectError(error.ShapedRecordOutsideSurface, fb.buildFromDrawList(allocator, dl, &session.renderer_state));
         }
         // (2) 시프트 후 size.cols=full_cols로 넓히면(수정) 정상 빌드 + row 보존(이름 idx0·경로 idx2, count=3).
         {
-            var dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_]u21{}, sidebar_cols, muted, null, 1, 0, muted);
+            var dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, sidebar_cols, muted, null, 1, 0, muted);
             for (dl.cells) |*c| c.col += indent_cols;
             dl.size.cols = full_cols;
             var f = try fb.buildFromDrawList(allocator, dl, &session.renderer_state);

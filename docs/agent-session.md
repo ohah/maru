@@ -30,9 +30,16 @@
   (예: `/Users/x/Documents/workspace/maru` → `-Users-x-Documents-workspace-maru`). 그 디렉터리에서 **mtime 최신
   `.jsonl`** = 그 cwd의 활성 세션.
 - 엔트리(줄): `{type, message?, timestamp, ...}`. `type` ∈ `user`/`assistant`/`system`/`attachment`/
-  `file-history-snapshot`/`queue-operation`/…. **대화** 엔트리는 `user`/`assistant`(나머지는 메타 — 무시).
-- **완료 판정**: 마지막 *대화* 엔트리가 `assistant`이고 그 턴이 끝남(stop_reason=end_turn 류). 구현 시 정확한
-  완료 필드를 fixture로 고정(공식 statusline 훅이 주는 `transcript_path`로 포맷 확인 가능).
+  `file-history-snapshot`/`queue-operation`/`mode`/`permission-mode`/`pr-link`/…. **대화** 엔트리는
+  `user`/`assistant`(나머지는 메타 — 무시). 단 `isMeta:true`인 `user`(local-command caveat·hook 주입)는
+  대화가 아니라 메타다 — 완료된 턴 뒤에 붙어도 false running으로 뒤집히면 안 되므로 제외한다(실측 함정).
+- **완료 판정(실측 정밀화)**: 마지막 *대화* 엔트리가 `assistant`이고 `message.stop_reason`가 **턴-종료 사유**
+  (`end_turn`/`stop_sequence`/`max_tokens`)면 idle. `tool_use`(도구 결과 대기)·`null`·모르는 값은 **running**
+  으로 보수 판정 — 모르는 값을 idle로 보면 느린 API 중 false idle이 생긴다(allowlist 근거: Anthropic Messages
+  API stop_reason). 실 세션 분포 검증: 한 세션에서 `tool_use` 2860건 vs `end_turn` 111건(도구 호출마다 tool_use).
+- **메타 꼬리 주의(실측 함정)**: 파일의 *물리적 마지막 줄*은 대화가 아니라 메타(`mode`/`permission-mode`/
+  `pr-link`)인 경우가 잦다. 그래서 "마지막 줄"이 아니라 "마지막 *대화* 엔트리"를 본다 — tail에서 메타 꼬리를
+  건너뛴다. 정확한 필드는 `transcript_path`(statusline 훅)로 포맷 확인 후 고정 JSONL fixture로 못박았다.
 - 검증: user 엔트리가 **제출 즉시** 기록되고 assistant는 응답 시 기록(실측 user 02:18:09 → assistant 02:18:53,
   **44초 갭**). 그 44초 동안 마지막 대화 엔트리 = user → running.
 
@@ -100,9 +107,13 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
 
 ## PR 분해
 
-- **PR0(이 문서)**: 설계 단일 출처(doc-first).
-- **PR1**: `AgentTranscript` 인터페이스 + **claude 어댑터**(세션 찾기·상태·마지막답변) + 순수 파싱. 고정 JSONL
-  fixture로 헤드리스 테스트(running/idle/완료·느린 API 갭·tail 큰 파일·cwd→세션). 사이드바 배선은 다음 PR.
+- **PR0(이 문서)**: 설계 단일 출처(doc-first). ✅ 완료.
+- **PR1**: session core 순수 파싱 + **claude 어댑터** ✅ **완료** — `src/session/agent_transcript.zig`
+  (`session.zig` 파사드 노출). `parseClaudeTail`(tail 바이트→`AgentState{unknown,running,idle}`+답변 미리보기),
+  `encodeClaudeProjectDir`(cwd→디렉터리), `pickNewestIndex`(최신 세션 선택)는 전부 OS-중립 순수 함수(std만 의존,
+  `tests/boundary/imports.zig` 가드). 고정 JSONL fixture로 헤드리스 테스트(running=user/tool_use, idle=end_turn,
+  느린 API 갭, end_turn 뒤 tool_result/메타 꼬리/isMeta user, 잘린 선두 줄 skip, UTF-8 경계 말줄임, cwd→디렉터리).
+  파일 I/O(세션 찾기·tail read·디렉터리 나열)와 사이드바 배선은 PR3(platform).
 - **PR2**: **codex 어댑터**(rollout·session_meta.cwd·task_complete). 같은 인터페이스, fixture 테스트.
 - **PR3**: 사이드바 **상태 표시**(상태줄/아이콘 상태) + `pollAgentKinds`에 상태 polling·tail 배선. 슬롯 높이 조정.
 - **PR4**: **완료 알림**(Swift 알림 API + ABI + config). ABI `.h`/`.zig`/`.swift` 동기.

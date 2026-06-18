@@ -31,6 +31,28 @@ const UnsupportedPtySession = struct {
         return error.UnsupportedPlatform;
     }
 
+    // 비-macOS 스텁 — macOS 백엔드의 단일 I/O 루프 프리미티브(waitIo/readChunk/reapAfterEof)와 구조
+    // 동기(이식성 목표 + pty_reader.runProcessing이 모든 타깃에서 컴파일되게). 항상 UnsupportedPlatform.
+    pub const IoReady = struct { readable: bool = false, writable: bool = false };
+    pub const ReadOutcome = union(enum) { data: usize, eof, again };
+
+    pub fn waitIo(self: *UnsupportedPtySession, want_write: bool) !IoReady {
+        _ = self;
+        _ = want_write;
+        return error.UnsupportedPlatform;
+    }
+
+    pub fn readChunk(self: *UnsupportedPtySession, buf: []u8) !ReadOutcome {
+        _ = self;
+        _ = buf;
+        return error.UnsupportedPlatform;
+    }
+
+    pub fn reapAfterEof(self: *UnsupportedPtySession) !?types.ExitStatus {
+        _ = self;
+        return error.UnsupportedPlatform;
+    }
+
     pub fn writeInput(self: *UnsupportedPtySession, bytes: []const u8) !void {
         _ = self;
         _ = bytes;

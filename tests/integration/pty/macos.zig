@@ -795,3 +795,87 @@ test "macOS reader-processing answers OSC 11 within a bound under output flood (
     try std.testing.expect(std.mem.indexOf(u8, screen, "|END") != null);
     try std.testing.expect(std.mem.indexOf(u8, screen, "1b5d31313b726762") != null);
 }
+
+test "macOS reader write and render snapshot hammer concurrently without corruption (io-render-threading §6-3)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    // §6-3 동시성 스트레스: reader-processing가 출력 폭주를 `core_mutex` 아래 core에 적용(write)하는 동안, 메인
+    // 스레드가 같은 락으로 renderSnapshot+buildDrawList(렌더 read 경로)를 N회 hammer한다. mutex가 write↔read를
+    // 직렬화하므로 손상/크래시가 없어야 한다 — 각 snapshot의 grid 치수가 일관(torn read면 어긋남)하고 buildDrawList
+    // 가 성공(또는 OOM만)하며 최종 core도 유효. (ThreadSanitizer 빌드면 데이터 레이스까지 잡는다.)
+    const allocator = std.testing.allocator;
+    const size: maru.terminal.Size = .{ .cols = 40, .rows = 8 };
+
+    var session = try maru.pty.PtySession.spawn(allocator, .{
+        .command = "/bin/bash",
+        .args = &.{ "-c", "seq 1 50000" }, // ~288KB 폭주 — reader가 계속 core를 mutate
+        .size = size,
+    });
+    defer session.deinit();
+
+    var surface = try maru.app.Surface.init(allocator, 1, size);
+    defer surface.deinit();
+
+    var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 1024); // ~70 chunk ≪ 1024 → 비블록(drain 불필요)
+    defer queue.deinit();
+    defer queue.close();
+    var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    reader.setProcessing(&surface.core, &surface.core_mutex, std.testing.io);
+    try reader.start();
+
+    // 폭주가 흐르는 동안(reader가 write 중) 같은 락으로 render-read를 hammer한다.
+    var i: usize = 0;
+    while (i < 30000) : (i += 1) {
+        surface.core_mutex.lockUncancelable(std.testing.io);
+        const snap = surface.core.renderSnapshot();
+        const dims_ok = snap.size.cols == size.cols and snap.size.rows == size.rows;
+        var list_or = maru.renderer.buildDrawList(allocator, snap); // 셀을 DrawList로 복사(read 경로) — 락 안
+        surface.core_mutex.unlock(std.testing.io);
+        if (list_or) |*list| list.deinit(allocator) else |_| {} // OOM은 허용(크래시만 없으면 됨)
+        try std.testing.expect(dims_ok); // 손상되면 치수가 어긋난다
+    }
+    reader.join();
+
+    // 동시 write/read에서 크래시·손상 0으로 여기 도달. 최종 core도 유효(dump 가능).
+    const screen = try surface.core.dumpUtf8(allocator);
+    defer allocator.free(screen);
+    try std.testing.expect(screen.len > 0);
+}
+
+test "macOS close during flood reaps reader-processing child without UAF or zombie (io-render-threading §6-4)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    // §6-4 lifecycle/close race: reader-processing가 폭주를 `core_mutex` 아래 적용(또는 큐 backpressure로 대기)
+    // 하는 중에 close한다. stopAndJoin(queue.close → session.close[SIGKILL escalate] → join)으로 reader가 코어
+    // 접근을 멈춘 **뒤에야** surface.deinit(core.deinit)이 일어나야 UAF가 없다. child는 reap돼 좀비도 없어야 한다.
+    const allocator = std.testing.allocator;
+    const size: maru.terminal.Size = .{ .cols = 30, .rows = 8 };
+
+    // 끝없이 폭주하는 child(`yes`). PTY 버퍼가 차면 child가 write에서 막히고 reader는 작은 큐가 차 push에서 막힌다 —
+    // close가 그 막힌 reader를 깨우고 child를 SIGKILL로 reap해야 한다.
+    var session = try maru.pty.PtySession.spawn(allocator, .{
+        .command = "/usr/bin/yes",
+        .args = &.{"maru-flood"},
+        .size = size,
+    });
+    const child_pid = session.child_pid;
+
+    var surface = try maru.app.Surface.init(allocator, 1, size);
+    var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 16); // 작게 — 곧 차 reader가 backpressure 대기
+    var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    reader.setProcessing(&surface.core, &surface.core_mutex, std.testing.io);
+    try reader.start();
+
+    // 폭주가 흐르고 reader가 코어를 mutate/대기 중이 되게 잠깐 둔다(정확한 시점이 아니라 close가 그 상태를 안전히
+    // 끝내는지가 핵심). 그 뒤 close.
+    try sleepMillis(20);
+    reader.stopAndJoin(); // reader가 멈춘다(코어 접근 종료) + child reap
+    surface.deinit(); // reader join 후 core.deinit — UAF 없음
+    session.deinit();
+    queue.deinit();
+
+    // child가 reap돼 좀비가 없어야 한다: 이미 reap된 pid의 waitpid는 ECHILD(rc<0). 좀비면 pid 반환, 살아있으면 0.
+    var status: c_int = 0;
+    const rc = std.c.waitpid(child_pid, &status, std.c.W.NOHANG);
+    try std.testing.expect(rc < 0);
+}

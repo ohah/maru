@@ -314,57 +314,32 @@ pub const PtyReader = struct {
     }
 
     pub fn run(self: *PtyReader) void {
+        // processing은 start() 전에 setProcessing이 release-store하므로(불변식: 스레드가 읽기 전 설정)
+        // run 진입 시 한 번만 acquire-load하면 충분하다 — 시작 후 뒤집히지 않는다.
+        if (self.processing.load(.acquire)) {
+            self.runProcessing();
+            return;
+        }
+        // 큐-기반 경로(controlled smoke / non-interactive): readEvent가 반환한 allocator-owned
+        // bytes의 소유권을 큐 event로 넘긴다(consumer가 deinit). 동작 불변.
         while (true) {
             const event = self.session.readEvent(self.allocator) catch |err| {
-                // SessionClosed/NoMoreEvents는 사용자가 닫은 정상 종료다. read 실패가
-                // 아니므로 read_error로 surface하지 않는다(queue close 순서와 무관하게
-                // 깔끔히 멈춘다). 그 밖의 에러만 consumer에게 read_error로 알린다.
+                // SessionClosed/NoMoreEvents는 사용자가 닫은 정상 종료다. read 실패가 아니므로
+                // read_error로 surface하지 않는다. 그 밖의 에러만 consumer에게 알린다.
                 if (err != error.SessionClosed and err != error.NoMoreEvents) {
                     self.pushReadError(@errorName(err));
                 }
                 return;
             };
-
             switch (event) {
                 .output => |bytes| {
-                    if (self.processing.load(.acquire)) {
-                        // I/O–렌더 스레딩 분리(docs/io-render-threading.md PR3): 리더가 출력을 직접
-                        // 코어에 적용(락 아래)하고 코어가 만든 query 응답(OSC 10/11·CPR·DA)을 PTY로
-                        // 즉시 되쓴다 — 렌더 tick에 안 묶여 출력 폭주 중에도 데드라인 안에 응답한다.
-                        // 응답은 락 안에서 복사하고 writeInput은 락 밖(메인 렌더 snapshot 락을 안 막게).
-                        const core = self.core.?;
-                        const mutex = self.core_mutex.?;
-                        var reply_buf: ?[]u8 = null;
-                        mutex.lockUncancelable(self.io);
-                        core.write(bytes) catch {}; // best-effort(파서 OOM 등 드문 실패는 그 청크 드롭)
-                        const reply = core.pendingResponse();
-                        if (reply.len > 0) {
-                            reply_buf = self.allocator.dupe(u8, reply) catch null;
-                            core.clearResponse();
-                        }
-                        mutex.unlock(self.io);
-                        self.allocator.free(bytes); // 코어에 적용 완료 — 바이트 해제(큐로 안 넘김)
-                        if (reply_buf) |r| {
-                            defer self.allocator.free(r);
-                            self.session.writeInput(r) catch {}; // 자기 PTY로 응답 되쓰기(메인 렌더와 무관)
-                        }
-                        // 메인에 "출력 발생" 신호(빈 bytes): output_events를 올려 렌더를 트리거한다.
-                        // applyPtyEvent의 core.write(&.{})는 no-op, deinit의 free(len 0)도 no-op.
-                        self.queue.pushBlocking(.{ .output = .{
-                            .pty_id = self.pty_id,
-                            .bytes = &.{},
-                        } }) catch return;
-                    } else {
-                        // readEvent가 allocator-owned bytes를 반환한다. push가 성공하면 queue event가
-                        // 소유권을 가져가고 consumer가 deinit한다. push 실패(큐 닫힘)면 즉시 해제해 누수 방지.
-                        self.queue.pushBlocking(.{ .output = .{
-                            .pty_id = self.pty_id,
-                            .bytes = bytes,
-                        } }) catch {
-                            self.allocator.free(bytes);
-                            return;
-                        };
-                    }
+                    self.queue.pushBlocking(.{ .output = .{
+                        .pty_id = self.pty_id,
+                        .bytes = bytes,
+                    } }) catch {
+                        self.allocator.free(bytes); // push 실패(큐 닫힘) — 즉시 해제해 누수 방지
+                        return;
+                    };
                 },
                 .exited => |status| {
                     self.queue.pushBlocking(.{ .exited = .{
@@ -373,6 +348,77 @@ pub const PtyReader = struct {
                     } }) catch return;
                     return;
                 },
+            }
+        }
+    }
+
+    /// reader-processing 통합 I/O 루프(docs/io-render-threading.md §8 Phase 2 — P2-3a). 한 poll로
+    /// read+write(+wake)를 인터리브한다: 출력을 직접 코어에 적용(락 아래)하고 코어가 만든 query
+    /// 응답(OSC 10/11·CPR·DA)을 reader-로컬 버퍼에 쌓아 **POLLOUT일 때 비차단으로** 흘려보낸다 —
+    /// 응답 write가 막혀도 read가 멈추지 않는다(기존 blocking writeInput은 자식이 stdin을 안 읽으면
+    /// read 루프를 정지시킬 수 있었다). 응답 버퍼는 ArrayList(append는 안 막힘)라 self-write
+    /// 데드락이 없다. 메인 입력은 아직 직접 경로다(단일 writer는 P2-3b).
+    fn runProcessing(self: *PtyReader) void {
+        const core = self.core.?;
+        const mutex = self.core_mutex.?;
+        // 응답 outbound 버퍼: out_buf[out_head..]가 아직 못 쓴 응답. 다 비우면 compact.
+        var out_buf: std.ArrayList(u8) = .empty;
+        defer out_buf.deinit(self.allocator);
+        var out_head: usize = 0;
+        var readbuf: [4096]u8 = undefined;
+        while (true) {
+            const want_write = out_head < out_buf.items.len;
+            const ready = self.session.waitIo(want_write) catch |err| {
+                if (err != error.SessionClosed and err != error.NoMoreEvents) {
+                    self.pushReadError(@errorName(err));
+                }
+                return;
+            };
+            // write 단계: writable이고 응답이 남았으면 한 청크 비차단 전송(read를 막지 않음).
+            if (ready.writable and out_head < out_buf.items.len) {
+                const written = self.session.writeInputNonBlocking(out_buf.items[out_head..]) catch 0;
+                out_head += written;
+                if (out_head >= out_buf.items.len) {
+                    out_buf.clearRetainingCapacity();
+                    out_head = 0;
+                }
+            }
+            // read 단계: 출력을 코어에 적용하고 응답을 outbound 버퍼에 적재한다.
+            if (ready.readable) {
+                switch (self.session.readChunk(&readbuf) catch |err| {
+                    if (err != error.SessionClosed) self.pushReadError(@errorName(err));
+                    return;
+                }) {
+                    .again => {}, // readable/read race — 다음 poll에서 재시도
+                    .data => |n| {
+                        mutex.lockUncancelable(self.io);
+                        core.write(readbuf[0..n]) catch {}; // best-effort(파서 OOM 등은 그 청크 드롭)
+                        const reply = core.pendingResponse();
+                        if (reply.len > 0) {
+                            out_buf.appendSlice(self.allocator, reply) catch {}; // OOM이면 그 응답 드롭
+                            core.clearResponse();
+                        }
+                        mutex.unlock(self.io);
+                        // 메인에 "출력 발생" 신호(빈 bytes): output_events를 올려 렌더 트리거.
+                        self.queue.pushBlocking(.{ .output = .{
+                            .pty_id = self.pty_id,
+                            .bytes = &.{},
+                        } }) catch return;
+                    },
+                    .eof => {
+                        const status = self.session.reapAfterEof() catch |err| {
+                            if (err != error.SessionClosed) self.pushReadError(@errorName(err));
+                            return;
+                        };
+                        if (status) |s| {
+                            self.queue.pushBlocking(.{ .exited = .{
+                                .pty_id = self.pty_id,
+                                .status = s,
+                            } }) catch return;
+                        }
+                        return; // EOF(또는 close 중) — 리더 종료
+                    },
+                }
             }
         }
     }

@@ -51,7 +51,7 @@ pub fn buildFrame(
     // 이 경계가 있어야 나중에 macOS window loop가 terminal storage나 glyph atlas를
     // 직접 만지지 않는다.
     const drain_summary = try pump.drainAvailable();
-    return try buildFrameAfterDrain(allocator, app_window, renderer_state, shaper, drain_summary);
+    return try buildFrameAfterDrain(allocator, app_window, renderer_state, shaper, drain_summary, pump.queue.io);
 }
 
 pub fn buildFrameAfterDrain(
@@ -60,6 +60,7 @@ pub fn buildFrameAfterDrain(
     renderer_state: *renderer.RendererState,
     shaper: anytype,
     drain_summary: runtime_pump.DrainSummary,
+    io: std.Io,
 ) HostError!AppHostFrame {
     // 실제 app loop에서는 queue drain과 frame 조립이 같은 frame 안에 있지만, smoke나
     // trace recorder는 raw event를 먼저 관찰해야 할 수 있다. 이 helper는 drain 결과를
@@ -68,7 +69,16 @@ pub fn buildFrameAfterDrain(
     // renderSnapshot: 스크롤백 뷰포트가 열려 있으면(view_offset>0) 합성된 윈도를, 바닥이면 활성
     // 화면을 준다. snapshot()을 쓰면 이 frame 조립 경로(비-CoreText/fake backend 포함)가 스크롤
     // 위치를 무시한다.
-    const render_frame = try renderer_state.buildFrame(allocator, active.core.renderSnapshot(), shaper);
+    //
+    // I/O–렌더 스레딩 분리(docs/io-render-threading.md): 코어 읽기(renderSnapshot→buildDrawList,
+    // 코어 메모리를 DrawList로 복사)는 **락 아래**, shaping(buildFrameFromDrawList — DrawList 복사본만
+    // 봄)은 **락 밖**. PR3에서 리더의 core.write가 렌더 shaping에 안 막히게 한다.
+    active.core_mutex.lockUncancelable(io);
+    const list_or = renderer.buildDrawList(allocator, active.core.renderSnapshot());
+    active.core_mutex.unlock(io);
+    var list = try list_or;
+    errdefer list.deinit(allocator);
+    const render_frame = try renderer_state.buildFrameFromDrawList(allocator, list, shaper);
 
     return .{
         .surface_id = active.id,

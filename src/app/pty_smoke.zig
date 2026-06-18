@@ -90,6 +90,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, config: AppPtySmokeConfig) 
         &renderer_state,
         renderer.FakeFontBackend{},
         drain_summary,
+        io,
     );
     defer frame.deinit(allocator);
 
@@ -328,6 +329,7 @@ test "app PTY frame artifact records renderer input cells" {
         &renderer_state,
         renderer.FakeFontBackend{},
         .{ .output_events = 1 },
+        std.testing.io,
     );
     defer frame.deinit(std.testing.allocator);
 

@@ -3638,13 +3638,18 @@ pub const AppSession = struct {
     /// 위상으로 고정한다 — 토글 없으니 idle 재투영도 없다. 오버레이(find·palette)가 열렸으면 커서 blink 설정과 무관
     /// 하게 caret이 깜빡인다(텍스트 입력 caret 관용). 터미널 커서의 기존 메커니즘(틱-카운터 + suffix-trim)을 그대로 탄다.
     fn updateCursorBlink(self: *AppSession) void {
-        const core = &self.activeSurface().core;
+        const surface = self.activeSurface();
+        const core = &surface.core;
+        // 코어 읽기(cursor 상태 + viewportHasBlink는 셀 스캔)는 락 아래(docs/io-render-threading.md PR3 —
+        // 리더 core.write와 경합 방지). 커서/blink 조건을 먼저 다 읽고 락을 푼다.
+        surface.core_mutex.lockUncancelable(self.io);
         // 커서 자체가 깜빡이는 조건(DECSCUSR blink·표시·조합 아님).
         const cursor_blinks = core.cursor_blink and core.cursor_visible and core.preedit == null;
-        const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open;
         // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상을 진행한다
         // (없으면 idle 재투영 없음). blink 글자는 커서/caret과 달리 suffix-trim으로 못 숨겨 full rebuild가 필요하다.
         const text_blinks = self.appearance.blink_text and core.viewportHasBlink();
+        surface.core_mutex.unlock(self.io);
+        const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open;
         // 인라인 rename 편집 caret도 깜빡인다 — 사이드바/탭/라벨 셀 스트림의 '|' 글자라(터미널 커서처럼 suffix-trim
         // 으로 못 숨김) text-blink와 같이 full rebuild가 필요하다(renameEditText가 blink_visible로 '|'↔공백 토글).
         const rename_active = self.rename != null;
@@ -5592,14 +5597,19 @@ pub const AppSession = struct {
         // 매 tick 싸다). 활성 pane은 hover/드래그면 full로 핀. 한 pane이라도 alpha가 바뀌면 metal_dirty.
         const active_pane = self.activePane();
         for (self.activeTab().panes.items) |pane| {
-            const core = &pane.activeTerm().surface.core;
-            if (core.scrollbackLen() == 0) {
+            const psurface = &pane.activeTerm().surface;
+            // scrollbackLen(리더 core.write가 증가)·viewOffset 스칼라를 락 아래 한 번에 읽는다
+            // (docs/io-render-threading.md PR3). 비-const 메서드라 락 가능.
+            psurface.core_mutex.lockUncancelable(self.io);
+            const sb_len = psurface.core.scrollbackLen();
+            const vo = psurface.core.viewOffset();
+            psurface.core_mutex.unlock(self.io);
+            if (sb_len == 0) {
                 // 스크롤바 없음 — 다음 등장이 full로 시작하게 타이머 리셋(0→nonzero 전환).
                 pane.scrollbar_idle_ticks = 0;
                 pane.scrollbar_last_view_offset = 0;
                 continue;
             }
-            const vo = core.viewOffset();
             if (vo != pane.scrollbar_last_view_offset) { // 이 pane 스크롤 활동 → full로 복귀
                 pane.scrollbar_last_view_offset = vo;
                 if (pane.scrollbar_idle_ticks != 0) self.metal_dirty = true;
@@ -5652,7 +5662,12 @@ pub const AppSession = struct {
         const grab: f64 = self.scrollbar_drag_grab orelse return;
         const rect = self.active_pane_rect;
         if (rect.h == 0 or self.cell_height_px == 0) return;
-        const core = &self.activeSurface().core;
+        // 스크롤백 읽기 + scrollViewport(코어 변경) — 메서드 전체를 락 아래(docs/io-render-threading.md
+        // PR3 — 리더 core.write와 경합 방지). 짧은 메서드라 락 보유 비용 무시 가능.
+        const surface = self.activeSurface();
+        surface.core_mutex.lockUncancelable(self.io);
+        defer surface.core_mutex.unlock(self.io);
+        const core = &surface.core;
         const total_sb = core.scrollbackLen();
         if (total_sb == 0) return;
         // thumb_h는 view_offset과 무관(sb_count·ch·view_h만) — 현재 offset으로 구해도 .h는 안정적.

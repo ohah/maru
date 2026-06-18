@@ -53,12 +53,12 @@
 
 각 PR은 tests green을 유지하고, 동작을 한 번에 한 가지만 바꾼다. doc-first.
 
-- **PR0 — 이 설계 문서** (현재). AGENTS.md 인덱스에 링크. `pty-operating-model.md`·`layering-and-portability.md`는 구현 PR에서 갱신(단일 출처).
-- **PR1 — core mutex 도입(동작 불변)**: `TerminalCore`(또는 그 owner)에 mutex 추가. 현재 단일 스레드 경로의 모든 코어 접근(core.write·snapshot·resize·입력 처리)을 락으로 감싼다. 아직 같은 스레드라 무경합 — 동작 불변, 락 계약만 형식화. 경계 테스트로 "락 없이 코어 접근하는 경로 0" 고정.
-- **PR2 — PTY write 직렬화**: `PtySession`에 write mutex(또는 입력 큐). 키보드·paste·응답이 안전히 섞이게. 응답 write를 메인 blocking 경로에서 떼어낼 준비. green(동작 불변, 직렬화만 추가).
-- **PR3 — 코어 처리 I/O 스레드 이관(핵심)**: reader 스레드가 `readEvent` 후 락 아래 `core.write` + 응답 take → 락 밖 응답 write로 바꾼다. 메인 tick은 큐 바이트 드레인 대신 락 아래 `renderSnapshot`+`buildDrawList`만. `PtyEventQueue`는 출력 바이트 운반에서 **dirty/exit/error 신호**로 축소. 이 PR이 결함을 해소한다 — 실제 codex로 회색 재현 검증.
-- **PR4 — lifecycle/close 재정렬 + ABI 락**: 코어 소유가 I/O 스레드로 갔으므로 `core.deinit`은 reader join **후**에만(현 close 순서 `queue.close → session.close → reader.join` 위에 core 수명 추가). Swift ABI의 `metal_frame` 코어 읽기를 락 안으로. multi-surface(탭/split별 코어+I/O 스레드+락) 검증.
-- **PR5 — 문서 갱신 + 스트레스/회귀 테스트**: `pty-operating-model.md`(처리 위치 변경)·`layering-and-portability.md` §5.6 note·§7 "zig_owns_frame_loop" 갱신. 대량 출력 중 응답 지연 상한·UI responsiveness·RSS·close race 스트레스 테스트 추가([PTY 운영 모델] "아직 추가하지 않은 테스트" 일부 해소).
+- **PR0 — 이 설계 문서** ✅. AGENTS.md 인덱스에 링크.
+- **PR1 — core mutex 도입(동작 불변)** ✅: `Surface.core_mutex`(`std.Io.Mutex`) 추가. `applyPtyEvent`를 lock{core.write; 응답 복사} unlock → writeInput(락 밖) 구조로(blocking write가 렌더 락을 안 막게). io를 lock 메서드에 배선.
+- **PR2 — PTY write 직렬화** ✅(흡수): 별도 직렬화 불필요로 판단 — `PtySession.writeInput`은 syscall 수준 thread-safe고 작은 메시지(응답·키)는 write() 단위로 atomic. 큰 paste의 양성 byte-interleave만 후속(필요 시).
+- **PR3 — 코어 처리 I/O 스레드 이관(핵심)** ✅: **3a** — 모든 메인 스레드 코어 접근(렌더 snapshot+buildDrawList, palette 소유 복사, kitty, blink 셀스캔, scroll 변경, 입력 리포트, cell_colors)을 `core_mutex` 락 아래로, shaping/GPU는 락 밖(`buildFrameFromDrawList` 분리). **3b** — `PtyReader`가 interactive 세션의 출력을 락 아래 직접 `core.write`+응답 take → 락 밖 `session.writeInput`로 즉시 되쓴다(렌더 tick 무관). controlled_smoke/테스트는 큐-드레인 유지(`process_in_reader=false` — 테스트의 직접 코어 접근과 무경합). **실제 codex(v0.135)로 입력창 회색 배경 복원 확인**(수정 전 bg 셀 0행 → 후 표시).
+- **PR4 — lifecycle/ABI/multi-surface** ✅(기존 구조로 충족): close 순서가 `closeAndDetach → reader.join → surface.deinit`라 reader가 코어 접근을 멈춘 뒤 코어가 해제됨(UAF 없음 — 기존 close 테스트 green). ABI `metal_frame` 코어 읽기는 3a에서 락 안. multi-surface는 per-surface 락(각 Term이 자기 core_mutex·reader). 전체 check 게이트(stress 포함) green.
+- **PR5 — 문서 갱신 + 후속 테스트**: 이 문서·`pty-operating-model.md`(interactive 처리 위치 변경) 갱신 ✅. **후속**: threaded-io 하네스 기반 "렌더 tick 없이 응답 전달" 결정론 통합 테스트 + 대량 출력 중 응답 지연 상한·close race 스트레스(현재는 setProcessing 게이트 단위 테스트 + 실 codex 실측으로 커버).
 - **마지막 — `/code-review max`**: 스택 tip에서 결함 즉시 수정([[drive-multi-pr-plan-to-completion]]). main 자동 머지 안 함.
 
 ## 5. 리스크 & 미해결 (정직)

@@ -39,6 +39,8 @@ pub const entries = [_]Entry{
     .{ .action = .focus_pane_right, .key = "focus_pane_right", .title = "Focus Pane Right" },
     .{ .action = .focus_pane_up, .key = "focus_pane_up", .title = "Focus Pane Up" },
     .{ .action = .focus_pane_down, .key = "focus_pane_down", .title = "Focus Pane Down" },
+    .{ .action = .next_pane, .key = "next_pane", .title = "Next Pane" },
+    .{ .action = .previous_pane, .key = "previous_pane", .title = "Previous Pane" },
     // 사용자 지정 이름(rename) — 활성 대상을 인라인 편집기로 연다(custom_name). 기본 키바인딩이 없어 팔릿이 주
     // 발견 경로다(+ 더블클릭·우클릭). select_all과 같은 일반 액션.
     .{ .action = .rename_workspace, .key = "rename_workspace", .title = "Rename Workspace" },

@@ -1457,6 +1457,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 번들 ID가 없으면(app shell 일부) UNUserNotificationCenter를 못 써 조용히 건너뛴다(GUI 수동 검증은 제품 앱).
     private func drainNotification() {
         guard let session = appSession else { return }
+        // 권한 팝업이 알림보다 먼저 떠야 첫 알림을 놓치지 않는다 — 세션이 사는 동안 선요청한다(내부 플래그로 실제 1회만).
+        // 이전엔 has!=0(알림이 실제로 올 때) 게이트 뒤에서 요청해, 프로그램이 OSC 9/777을 한 번도 안 보내면 권한 팝업조차 안 떴다.
+        ensureNotificationAuthorization()
         var has: UInt32 = 0
         var titlePtr: UnsafePointer<UInt8>? = nil
         var titleLen: size_t = 0
@@ -1467,7 +1470,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard Bundle.main.bundleIdentifier != nil else { return } // 번들 없으면 알림 API 사용 불가 — skip
         let title = titleLen > 0 ? String(decoding: UnsafeBufferPointer(start: titlePtr!, count: titleLen), as: UTF8.self) : ""
         let body = bodyLen > 0 ? String(decoding: UnsafeBufferPointer(start: bodyPtr!, count: bodyLen), as: UTF8.self) : ""
-        ensureNotificationAuthorization()
         let content = UNMutableNotificationContent()
         content.title = title.isEmpty ? "maru" : title // OSC 9는 title 없음 → 앱 이름
         content.body = body

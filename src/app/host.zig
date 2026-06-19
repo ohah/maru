@@ -73,9 +73,9 @@ pub fn buildFrameAfterDrain(
     // I/O–렌더 스레딩 분리(docs/io-render-threading.md): 코어 읽기(renderSnapshot→buildDrawList,
     // 코어 메모리를 DrawList로 복사)는 **락 아래**, shaping(buildFrameFromDrawList — DrawList 복사본만
     // 봄)은 **락 밖**. PR3에서 리더의 core.write가 렌더 shaping에 안 막히게 한다.
-    active.core_mutex.lockUncancelable(io);
+    active.lockCore(io);
     const list_or = renderer.buildDrawList(allocator, active.core.renderSnapshot());
-    active.core_mutex.unlock(io);
+    active.unlockCore(io);
     var list = try list_or;
     errdefer list.deinit(allocator);
     const render_frame = try renderer_state.buildFrameFromDrawList(allocator, list, shaper);

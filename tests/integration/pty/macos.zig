@@ -826,11 +826,11 @@ test "macOS reader write and render snapshot hammer concurrently without corrupt
     // 폭주가 흐르는 동안(reader가 write 중) 같은 락으로 render-read를 hammer한다.
     var i: usize = 0;
     while (i < 30000) : (i += 1) {
-        surface.core_mutex.lockUncancelable(std.testing.io);
+        surface.lockCore(std.testing.io);
         const snap = surface.core.renderSnapshot();
         const dims_ok = snap.size.cols == size.cols and snap.size.rows == size.rows;
         var list_or = maru.renderer.buildDrawList(allocator, snap); // 셀을 DrawList로 복사(read 경로) — 락 안
-        surface.core_mutex.unlock(std.testing.io);
+        surface.unlockCore(std.testing.io);
         if (list_or) |*list| list.deinit(allocator) else |_| {} // OOM은 허용(크래시만 없으면 됨)
         try std.testing.expect(dims_ok); // 손상되면 치수가 어긋난다
     }

@@ -212,8 +212,8 @@ pub const SurfaceRuntime = struct {
         const grid = terminal.clampGridSize(size);
         {
             // 코어 resize도 코어 변경이라 락 아래(docs/io-render-threading.md). PTY ioctl은 락 밖.
-            link.surface.core_mutex.lockUncancelable(io);
-            defer link.surface.core_mutex.unlock(io);
+            link.surface.lockCore(io);
+            defer link.surface.unlockCore(io);
             try link.surface.core.resize(grid.cols, grid.rows);
         }
         link.pty_io.resize(grid) catch return error.ResizeFailed;
@@ -242,8 +242,8 @@ pub const SurfaceRuntime = struct {
                 // PR3에서 I/O 스레드로 이동하면 이 분리가 응답 지연 결함의 핵심 해소다.)
                 var reply_buf: ?[]u8 = null;
                 {
-                    link.surface.core_mutex.lockUncancelable(io);
-                    defer link.surface.core_mutex.unlock(io);
+                    link.surface.lockCore(io);
+                    defer link.surface.unlockCore(io);
                     link.surface.core.write(output.bytes) catch return error.InvalidOutput;
                     const reply = link.surface.core.pendingResponse();
                     if (reply.len > 0) {

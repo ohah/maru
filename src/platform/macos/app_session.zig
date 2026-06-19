@@ -2778,8 +2778,8 @@ pub const AppSession = struct {
             .select_all => {
                 // 코어 mutate(스크롤백 읽음) — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
                 const s = self.activeSurface();
-                s.core_mutex.lockUncancelable(self.io);
-                defer s.core_mutex.unlock(self.io);
+                s.lockCore(self.io);
+                defer s.unlockCore(self.io);
                 s.core.selectAll();
             },
             // 화면+스크롤백 비우기(⌘K). 코어 mutate(셀·스크롤백)는 락 아래(리더 경합 방지, docs/io-render-threading.md
@@ -2787,9 +2787,9 @@ pub const AppSession = struct {
             // (writeInput은 블로킹 PTY 쓰기 — PR1 패턴). 프롬프트일 때만 true(alt 화면·비프롬프트면 안 보냄).
             .clear_screen => {
                 const s = self.activeSurface();
-                s.core_mutex.lockUncancelable(self.io);
+                s.lockCore(self.io);
                 const send_form_feed = s.core.clearScreen();
-                s.core_mutex.unlock(self.io);
+                s.unlockCore(self.io);
                 if (send_form_feed) self.runtime.writeInput(s.id, .{ .bytes = "\x0c" }) catch {};
             },
             // 커맨드 팝업 토글(Cmd+Shift+P). 열려 있으면 닫고, 아니면 연다(상태머신은 PaletteState).
@@ -2880,8 +2880,8 @@ pub const AppSession = struct {
         // alt_active는 리더 core.write가 락 아래 토글하므로 같은 락으로 읽는다(docs/io-render-threading.md PR3).
         // 호출처(toggleFind/findNavigate/render-tick close)는 모두 락 밖이라 더블락 없음.
         const s = self.activeSurface();
-        s.core_mutex.lockUncancelable(self.io);
-        defer s.core_mutex.unlock(self.io);
+        s.lockCore(self.io);
+        defer s.unlockCore(self.io);
         return s.core.alt_active;
     }
 
@@ -3090,9 +3090,9 @@ pub const AppSession = struct {
         if (self.find_matches.items.len == 0) {
             // findMatches는 코어 mutate(스크롤백 rewrap)+읽기 — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
             const s = self.activeSurface();
-            s.core_mutex.lockUncancelable(self.io);
+            s.lockCore(self.io);
             s.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
-            s.core_mutex.unlock(self.io);
+            s.unlockCore(self.io);
             self.chrome_host.find.setMatchCount(self.find_matches.items.len); // current를 범위로 clamp(닫기 전 위치 보존)
         }
         if (self.find_matches.items.len == 0) return; // 매치 없음
@@ -3132,8 +3132,8 @@ pub const AppSession = struct {
             // findMatches는 코어 mutate(ensureScrollbackRewrapped로 스크롤백 realloc)+읽기 — 락 아래
             // (docs/io-render-threading.md PR3 — 리더 core.write와 경합 시 UAF/크래시 방지).
             const s = self.activeSurface();
-            s.core_mutex.lockUncancelable(self.io);
-            defer s.core_mutex.unlock(self.io);
+            s.lockCore(self.io);
+            defer s.unlockCore(self.io);
             s.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch {
                 self.find_matches.clearRetainingCapacity();
             };
@@ -3151,9 +3151,9 @@ pub const AppSession = struct {
         if (cur >= self.find_matches.items.len) return;
         const surface = self.activeSurface();
         // scrollToAbs는 코어 변경 — 락 아래(docs/io-render-threading.md PR3).
-        surface.core_mutex.lockUncancelable(self.io);
+        surface.lockCore(self.io);
         surface.core.scrollToAbs(self.find_matches.items[cur].start.row);
-        surface.core_mutex.unlock(self.io);
+        surface.unlockCore(self.io);
     }
 
     /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거친다 —
@@ -3246,8 +3246,8 @@ pub const AppSession = struct {
         if (self.surface_initialized) {
             // 코어 변경이라 락 아래(docs/io-render-threading.md PR3 — 리더 core.write와 경합 방지).
             const active_surface = self.activeSurface();
-            active_surface.core_mutex.lockUncancelable(self.io);
-            defer active_surface.core_mutex.unlock(self.io);
+            active_surface.lockCore(self.io);
+            defer active_surface.unlockCore(self.io);
             active_surface.core.setCellMetrics(self.cell_width_px, self.cell_height_px);
         }
     }
@@ -3344,8 +3344,8 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    term.surface.core_mutex.lockUncancelable(self.io);
-                    defer term.surface.core_mutex.unlock(self.io);
+                    term.surface.lockCore(self.io);
+                    defer term.surface.unlockCore(self.io);
                     term.surface.core.setConfigPalette(palette);
                 }
             }
@@ -3360,8 +3360,8 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    term.surface.core_mutex.lockUncancelable(self.io);
-                    defer term.surface.core_mutex.unlock(self.io);
+                    term.surface.lockCore(self.io);
+                    defer term.surface.unlockCore(self.io);
                     term.surface.core.max_scrollback = lines;
                 }
             }
@@ -3416,8 +3416,8 @@ pub const AppSession = struct {
             const page_alt_active = blk: {
                 // alt_active는 리더가 락 아래 토글 — 같은 락으로 읽는다(docs/io-render-threading.md PR3).
                 const s = self.activeSurface();
-                s.core_mutex.lockUncancelable(self.io);
-                defer s.core_mutex.unlock(self.io);
+                s.lockCore(self.io);
+                defer s.unlockCore(self.io);
                 break :blk s.core.alt_active;
             };
             const page_delta = pageScrollDelta(self.page_keys_scroll, page_alt_active, event.key);
@@ -3434,8 +3434,8 @@ pub const AppSession = struct {
         if (self.surface_initialized) {
             // 코어 읽기+scrollToBottom(변경)은 락 아래(docs/io-render-threading.md PR3 — 리더 core.write 경합 방지).
             const surface = self.activeSurface();
-            surface.core_mutex.lockUncancelable(self.io);
-            defer surface.core_mutex.unlock(self.io);
+            surface.lockCore(self.io);
+            defer surface.unlockCore(self.io);
             if (surface.core.viewOffset() != 0) {
                 surface.core.scrollToBottom();
                 self.metal_dirty = true;
@@ -3474,9 +3474,9 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return;
         const surface = self.activeSurface();
         // scrollViewport는 코어 변경 — 락 아래(docs/io-render-threading.md PR3).
-        surface.core_mutex.lockUncancelable(self.io);
+        surface.lockCore(self.io);
         surface.core.scrollViewport(@as(isize, delta_up));
-        surface.core_mutex.unlock(self.io);
+        surface.unlockCore(self.io);
         self.metal_dirty = true;
     }
 
@@ -3503,8 +3503,8 @@ pub const AppSession = struct {
         var tracking: bool = undefined;
         var reply_buf: ?[]u8 = null;
         {
-            active.core_mutex.lockUncancelable(self.io);
-            defer active.core_mutex.unlock(self.io);
+            active.lockCore(self.io);
+            defer active.unlockCore(self.io);
             tracking = active.core.mouse_tracking != .none;
             if (tracking and lines != 0) {
                 if (self.pxToCell(x_px, y_px)) |cell| {
@@ -3546,8 +3546,8 @@ pub const AppSession = struct {
         // 락 안에서 reportFocus+응답 복사, writeInput은 락 밖(docs/io-render-threading.md PR3, PR1 패턴).
         var reply_buf: ?[]u8 = null;
         {
-            surface.core_mutex.lockUncancelable(self.io);
-            defer surface.core_mutex.unlock(self.io);
+            surface.lockCore(self.io);
+            defer surface.unlockCore(self.io);
             surface.core.reportFocus(gained);
             const reply = surface.core.pendingResponse();
             if (reply.len > 0) {
@@ -3612,15 +3612,15 @@ pub const AppSession = struct {
         // 락 아래(docs/io-render-threading.md PR3). encodeKey 직후 unlock해 writeInput(블로킹 가능 PTY 쓰기)을
         // 락 밖에서 한다 — bytes는 함수-스택 key_buffer를 가리켜 unlock 후에도 유효.
         core_mutex_blk: {
-            surface.core_mutex.lockUncancelable(self.io);
+            surface.lockCore(self.io);
             if (!(core.alt_active and core.alternate_scroll)) break :core_mutex_blk;
             const key: terminal.input.Key = if (lines > 0) .arrow_up else .arrow_down;
             var key_buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
             const bytes = core.encodeKey(.{ .key = key }, &key_buffer) catch {
-                surface.core_mutex.unlock(self.io);
+                surface.unlockCore(self.io);
                 return;
             };
-            surface.core_mutex.unlock(self.io);
+            surface.unlockCore(self.io);
             // 시퀀스를 한 버퍼에 반복해 묶어 보낸다 — 줄마다 writeInput(쓰기 시스콜)을 하면 빠른
             // 플릭에서 초당 수백 회가 되고, PTY 버퍼가 차면 나머지가 통째로 드랍된다.
             var batch: [512]u8 = undefined;
@@ -3642,7 +3642,7 @@ pub const AppSession = struct {
         }
         // break로 도달(non-alt 경로): 락은 아직 보유 중 — scrollViewport(코어 변경)까지 한 락으로 덮고 푼다.
         core.scrollViewport(@as(isize, lines));
-        surface.core_mutex.unlock(self.io);
+        surface.unlockCore(self.io);
         self.metal_dirty = true;
     }
 
@@ -3941,7 +3941,7 @@ pub const AppSession = struct {
         // shift+click은 선형 셀렉션 override, option+click은 블록 override(iTerm2 관례). mods: shift=4·option=8.
         // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
         // docs/io-render-threading.md PR3). reporting 모드면 진행 중 셀렉션 autoscroll도 멈춘다. writeInput은 락 밖.
-        click_surface.core_mutex.lockUncancelable(self.io);
+        click_surface.lockCore(self.io);
         const do_report = core.mouse_tracking != .none and (mods & 4) == 0 and (mods & 8) == 0;
         var report_reply: ?[]u8 = null;
         if (do_report) {
@@ -3954,7 +3954,7 @@ pub const AppSession = struct {
                 core.clearResponse();
             }
         }
-        click_surface.core_mutex.unlock(self.io);
+        click_surface.unlockCore(self.io);
         if (do_report) {
             if (report_reply) |reply| {
                 defer self.allocator.free(reply);
@@ -3968,8 +3968,8 @@ pub const AppSession = struct {
         // 선택 변경(selectionStart/Extend/Clear/Word/Line)은 코어 mutate라 락 아래(docs/io-render-threading.md
         // PR3 — 리더 core.write와 경합 방지; selectWordAt/LineAt는 스크롤백도 읽음). handleClick은 metal_dirty
         // 직후 끝나므로 함수-스코프 defer로 풀어 switch 내 early return도 안전히 unlock한다.
-        click_surface.core_mutex.lockUncancelable(self.io);
-        defer click_surface.core_mutex.unlock(self.io);
+        click_surface.lockCore(self.io);
+        defer click_surface.unlockCore(self.io);
         switch (kind) {
             1 => {
                 self.mouse_drag_selecting = true;
@@ -4022,13 +4022,13 @@ pub const AppSession = struct {
         const core = &surface.core;
         // 코어 읽기(cursor 상태 + viewportHasBlink는 셀 스캔)는 락 아래(docs/io-render-threading.md PR3 —
         // 리더 core.write와 경합 방지). 커서/blink 조건을 먼저 다 읽고 락을 푼다.
-        surface.core_mutex.lockUncancelable(self.io);
+        surface.lockCore(self.io);
         // 커서 자체가 깜빡이는 조건(DECSCUSR blink·표시·조합 아님).
         const cursor_blinks = core.cursor_blink and core.cursor_visible and core.preedit == null;
         // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상을 진행한다
         // (없으면 idle 재투영 없음). blink 글자는 커서/caret과 달리 suffix-trim으로 못 숨겨 full rebuild가 필요하다.
         const text_blinks = self.appearance.blink_text and core.viewportHasBlink();
-        surface.core_mutex.unlock(self.io);
+        surface.unlockCore(self.io);
         const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open;
         // 인라인 rename 편집 caret도 깜빡인다 — 사이드바/탭/라벨 셀 스트림의 '|' 글자라(터미널 커서처럼 suffix-trim
         // 으로 못 숨김) text-blink와 같이 full rebuild가 필요하다(renameEditText가 blink_visible로 '|'↔공백 토글).
@@ -4082,8 +4082,8 @@ pub const AppSession = struct {
         // selection_anchor/view_offset/selection_head 읽기 + scrollViewport/selectionExtend(코어 변경)는 리더
         // core.write와 경합 — 메서드 전체를 락 아래(docs/io-render-threading.md PR3). 짧은 메서드라 락 비용 무시 가능;
         // 함수가 metal_dirty 직후 끝나므로 함수-스코프 defer로 풀어 early return도 안전히 unlock.
-        surface.core_mutex.lockUncancelable(self.io);
-        defer surface.core_mutex.unlock(self.io);
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
         // 게이트는 "확장할 선택이 있는가"다 — mouse_drag_selecting로 걸면 더블/트리플클릭(4/5)으로
         // 시작한 선택을 드래그로 화면 밖까지 늘릴 때 자동 스크롤이 영원히 안 걸린다.
         if (core.selection_anchor == null) return;
@@ -4123,8 +4123,8 @@ pub const AppSession = struct {
             .terminal => {
                 // setPreedit는 코어 변경 — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
                 const s = self.activeSurface();
-                s.core_mutex.lockUncancelable(self.io);
-                defer s.core_mutex.unlock(self.io);
+                s.lockCore(self.io);
+                defer s.unlockCore(self.io);
                 s.core.setPreedit(bytes) catch {};
             },
         }
@@ -4153,8 +4153,8 @@ pub const AppSession = struct {
         if (self.inputFocus() == .terminal) {
             // viewOffset 읽기 + scrollToBottom(변경)은 락 아래(docs/io-render-threading.md PR3).
             const surface = self.activeSurface();
-            surface.core_mutex.lockUncancelable(self.io);
-            defer surface.core_mutex.unlock(self.io);
+            surface.lockCore(self.io);
+            defer surface.unlockCore(self.io);
             if (surface.core.viewOffset() != 0) {
                 surface.core.scrollToBottom();
                 self.metal_dirty = true;
@@ -4308,8 +4308,8 @@ pub const AppSession = struct {
                 const core = &s.core;
                 var committed: ?[]u8 = null;
                 {
-                    s.core_mutex.lockUncancelable(self.io);
-                    defer s.core_mutex.unlock(self.io);
+                    s.lockCore(self.io);
+                    defer s.unlockCore(self.io);
                     if (core.preedit) |pending| {
                         // setPreedit가 버퍼를 해제하므로 먼저 사본을 뜬다. dupe 실패(OOM)면 비우지 않고
                         // 그대로 둔다(반쪽 커밋 방지 — 기존 동작 보존).
@@ -5235,8 +5235,8 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.live_initialized) continue;
-                    term.surface.core_mutex.lockUncancelable(self.io);
-                    defer term.surface.core_mutex.unlock(self.io);
+                    term.surface.lockCore(self.io);
+                    defer term.surface.unlockCore(self.io);
                     const live = term.surface.core.windowTitle();
                     term.auto_title.clearRetainingCapacity();
                     if (live.len > 0) term.auto_title.appendSlice(self.allocator, live) catch {};
@@ -5311,8 +5311,8 @@ pub const AppSession = struct {
         const sync_active = blk: {
             // sync_output(DECSET 2026)은 리더 core.write가 set/clear — 락 아래 읽는다(docs/io-render-threading.md PR3).
             const s = self.activeSurface();
-            s.core_mutex.lockUncancelable(self.io);
-            defer s.core_mutex.unlock(self.io);
+            s.lockCore(self.io);
+            defer s.unlockCore(self.io);
             break :blk s.core.sync_output;
         };
         if (sync_active) {
@@ -5355,8 +5355,8 @@ pub const AppSession = struct {
             var find_current_span: ?terminal.SelectionSpan = null;
             {
                 const fa_surface = self.activeSurface();
-                fa_surface.core_mutex.lockUncancelable(self.io);
-                defer fa_surface.core_mutex.unlock(self.io);
+                fa_surface.lockCore(self.io);
+                defer fa_surface.unlockCore(self.io);
                 if (find_active and drain_summary.output_events > 0) {
                     fa_surface.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
                     self.chrome_host.find.setMatchCount(self.find_matches.items.len); // 매치 수 동기화 + current clamp(스크롤은 안 함)
@@ -5381,7 +5381,7 @@ pub const AppSession = struct {
             // CellColors가 코어 포인터를 안 들게 한다(복사본은 이 tick 동안 유효, replace가 소비). 리터럴은
             // shaping/GPU 없이 값만 모으므로 락 보유가 짧다(.cursor 등 app state는 코어 무관).
             const cc_surface = self.activeSurface();
-            cc_surface.core_mutex.lockUncancelable(self.io);
+            cc_surface.lockCore(self.io);
             self.active_palette_copy = cc_surface.core.paletteOverride().*;
             const cell_colors: metal_frame.CellColors = .{
                 // OSC 10/11 색 설정이 있으면 그 색, 없으면 theme 기본. SGR reverse의 default 색 스왑·OSC 11 배경에도 반영.
@@ -5412,7 +5412,7 @@ pub const AppSession = struct {
                     .text = self.appearance.theme.background,
                 },
             };
-            cc_surface.core_mutex.unlock(self.io); // cell_colors의 활성 코어 읽기 끝 — 이후 shaping/GPU는 락 밖
+            cc_surface.unlockCore(self.io); // cell_colors의 활성 코어 읽기 끝 — 이후 shaping/GPU는 락 밖
             // 사이드바 탭 제목 glyph 패스(macOS만 — buildFromDrawList는 실 CoreText 브리지). 터미널과
             // 같은 frame_builder/renderer_state(atlas)를 써서 제목 glyph도 같은 slot을 재사용한다. 실패는
             // 무시하고 제목 없이 밴드만 그린다(세션을 죽이지 않음). 짧은 제목이라 매 frame 재-shape해도
@@ -5638,7 +5638,7 @@ pub const AppSession = struct {
                         const pane_core = &pane_surface.core;
                         // 코어 읽기(snapshot→DrawList 복사 + per-pane 색 상태)는 락 아래, CoreText shaping
                         // (buildFromDrawList — DrawList 복사본만 봄)은 락 밖(docs/io-render-threading.md PR3).
-                        pane_surface.core_mutex.lockUncancelable(self.io);
+                        pane_surface.lockCore(self.io);
                         const dl_or = renderer.buildDrawList(self.allocator, pane_core.renderSnapshot());
                         // palette를 소유 버퍼로 복사(코어 alias 제거). 예약 capacity 부족(OOM)이면 코어 포인터 폴백.
                         const pane_palette_ptr = if (self.pane_palette_copies.items.len < self.pane_palette_copies.capacity) blk: {
@@ -5648,7 +5648,7 @@ pub const AppSession = struct {
                         const pane_rev = pane_core.reverseScreen(); // DECSCNM(G9) per-pane
                         const pane_fg = pane_core.defaultFgOverride();
                         const pane_bg = pane_core.defaultBgOverride();
-                        pane_surface.core_mutex.unlock(self.io);
+                        pane_surface.unlockCore(self.io);
                         const dl = dl_or catch continue;
                         var f = pane_frame_builder.buildFromDrawList(self.allocator, dl, &self.renderer_state) catch continue;
                         built_frames.append(self.allocator, f) catch {
@@ -5704,8 +5704,8 @@ pub const AppSession = struct {
                     // buildGpuImages/planImageUploads가 이미지 데이터를 owned 버퍼로 복사하므로(planImageUploads는
                     // img.pixels를 appendSlice로 복사), 락 밖 replace()는 코어를 안 본다.
                     const active_surface = self.activeSurface();
-                    active_surface.core_mutex.lockUncancelable(self.io);
-                    defer active_surface.core_mutex.unlock(self.io);
+                    active_surface.lockCore(self.io);
+                    defer active_surface.unlockCore(self.io);
                     // kitty 자동 크기 이미지의 커서 advance용 셀 메트릭을 활성 surface 코어에 주입한다(매 tick 최신).
                     active_surface.core.setCellMetrics(self.cell_width_px, self.cell_height_px);
                     // OSC 10/11 색 질의 응답용 theme 전경/배경 RGB도 주입(코어는 Color.default 추상만 알아 실제 색 필요).
@@ -6066,10 +6066,10 @@ pub const AppSession = struct {
             const psurface = &pane.activeTerm().surface;
             // scrollbackLen(리더 core.write가 증가)·viewOffset 스칼라를 락 아래 한 번에 읽는다
             // (docs/io-render-threading.md PR3). 비-const 메서드라 락 가능.
-            psurface.core_mutex.lockUncancelable(self.io);
+            psurface.lockCore(self.io);
             const sb_len = psurface.core.scrollbackLen();
             const vo = psurface.core.viewOffset();
-            psurface.core_mutex.unlock(self.io);
+            psurface.unlockCore(self.io);
             if (sb_len == 0) {
                 // 스크롤바 없음 — 다음 등장이 full로 시작하게 타이머 리셋(0→nonzero 전환).
                 pane.scrollbar_idle_ticks = 0;
@@ -6131,8 +6131,8 @@ pub const AppSession = struct {
         // 스크롤백 읽기 + scrollViewport(코어 변경) — 메서드 전체를 락 아래(docs/io-render-threading.md
         // PR3 — 리더 core.write와 경합 방지). 짧은 메서드라 락 보유 비용 무시 가능.
         const surface = self.activeSurface();
-        surface.core_mutex.lockUncancelable(self.io);
-        defer surface.core_mutex.unlock(self.io);
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
         const core = &surface.core;
         const total_sb = core.scrollbackLen();
         if (total_sb == 0) return;
@@ -11927,6 +11927,8 @@ test "commitComposition during terminal preedit does not deadlock (회귀: bd5fd
     // 재취득해 메인 스레드가 ulock_wait에 박혀 hang했다(std.Io.Mutex는 비재진입 → self-deadlock;
     // sendCommittedText→sendTextAsKeys 통일 #2/bd5fd14로 "락 보유 중 호출 안전" 가정이 깨진 회귀).
     // 이 테스트가 끝까지 반환한다는 것 자체가 데드락이 사라졌다는 증거다(데드락이면 영영 멈춘다).
+    // 더해서, 이제는 같은 클래스 회귀가 들어오면 디버그 빌드의 core_mutex 재진입 안전망
+    // (CoreOwner, docs/io-render-threading.md §6-5)이 hang 대신 즉시 panic으로 노출한다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);

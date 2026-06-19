@@ -439,14 +439,14 @@ pub const PtyReader = struct {
                 }) {
                     .again => {}, // readable/read race — 다음 poll에서 재시도
                     .data => |n| {
-                        mutex.lockUncancelable(self.io);
+                        core.owner_dbg.lock(mutex, self.io);
                         core.write(readbuf[0..n]) catch {}; // best-effort(파서 OOM 등은 그 청크 드롭)
                         const reply = core.pendingResponse();
                         if (reply.len > 0) {
                             out_buf.appendSlice(self.allocator, reply) catch {}; // OOM이면 그 응답 드롭
                             core.clearResponse();
                         }
-                        mutex.unlock(self.io);
+                        core.owner_dbg.unlock(mutex, self.io);
                         // 메인에 "출력 발생" 신호(빈 bytes): output_events를 올려 렌더 트리거. **비블로킹**(tryPush)으로
                         // 보낸다 — 큐가 차면 드롭한다. 근거: (1) 빈 신호라 데이터 손실 없음 — 렌더는 코어 최신 상태를
                         // 읽고, 큐에 이미 신호가 있어 catch-up 렌더가 일어난다(드롭=렌더 coalescing). (2) pushBlocking이면

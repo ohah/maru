@@ -482,3 +482,121 @@ test "scanForbiddenIdentifiers flags code identifiers but not comments or string
         try std.testing.expectEqual(@as(usize, 0), v);
     }
 }
+
+// ── core_mutex 직접 lock/unlock 금지 가드 ────────────────────────────────────────────────────────────────
+// core_mutex(Surface 소유)는 재진입을 lock 전에 감지하는 owner-추적 래퍼(`Surface.lockCore`/`unlockCore`,
+// `CoreOwner.lock`/`unlock`)로만 잡아야 한다. `core_mutex.lockUncancelable`/`.unlock` 직접 호출이 새로 들어오면
+// owner 추적이 비어 재진입 안전망(docs/io-render-threading.md §6-5)이 새고, 이번 IME hang 같은 self-deadlock이
+// 다시 런타임에서만 드러난다. 식별자 시퀀스 `core_mutex` `.` (`lockUncancelable`|`unlock`)를 토크나이저로 잡아
+// 빌드에서 막는다 — 주석·문자열 속 언급은 토큰이 아니라 오탐 0이고, 필드 선언(`core_mutex:` 뒤가 `:`)이나
+// 포인터 전달(`&x.core_mutex,` 뒤가 `,`)은 `.lock*`가 아니라 통과한다.
+
+fn scanCoreMutexDirectCalls(text: [:0]const u8, path: []const u8, violations: *usize, emit_diagnostics: bool) void {
+    var tokenizer = std.zig.Tokenizer.init(text);
+    var saw_core_mutex = false; // 직전 식별자가 `core_mutex`였나
+    var saw_dot = false; // `core_mutex` 직후 `.`를 봤나
+    while (true) {
+        const token = tokenizer.next();
+        switch (token.tag) {
+            .eof => break,
+            .identifier => {
+                const ident = text[token.loc.start..token.loc.end];
+                if (saw_dot and (std.mem.eql(u8, ident, "lockUncancelable") or std.mem.eql(u8, ident, "unlock"))) {
+                    if (emit_diagnostics) {
+                        std.debug.print(
+                            "core_mutex direct-call violation: {s} calls core_mutex.{s} directly — use Surface.lockCore/unlockCore (또는 CoreOwner.lock/unlock)\n",
+                            .{ path, ident },
+                        );
+                    }
+                    violations.* += 1;
+                    saw_core_mutex = false;
+                    saw_dot = false;
+                } else {
+                    saw_core_mutex = std.mem.eql(u8, ident, "core_mutex");
+                    saw_dot = false;
+                }
+            },
+            .period => {
+                saw_dot = saw_core_mutex;
+                saw_core_mutex = false;
+            },
+            else => {
+                saw_core_mutex = false;
+                saw_dot = false;
+            },
+        }
+    }
+}
+
+fn scanTreeForCoreMutexCalls(allocator: std.mem.Allocator, dir_path: []const u8, violations: *usize) !void {
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, dir_path, .{ .iterate = true });
+    defer dir.close(std.testing.io);
+
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.path });
+        defer allocator.free(path);
+
+        const text = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024)) catch |err| {
+            std.debug.print("core_mutex check could not read {s}: {s}\n", .{ path, @errorName(err) });
+            return err;
+        };
+        defer allocator.free(text);
+
+        const text_z = try allocator.dupeZ(u8, text);
+        defer allocator.free(text_z);
+
+        scanCoreMutexDirectCalls(text_z, path, violations, true);
+    }
+}
+
+test "core_mutex is acquired only via owner-tracking wrappers (no direct lockUncancelable/unlock)" {
+    const allocator = std.testing.allocator;
+    var violations: usize = 0;
+    try scanTreeForCoreMutexCalls(allocator, "src", &violations);
+    try scanTreeForCoreMutexCalls(allocator, "tests", &violations);
+    try std.testing.expectEqual(@as(usize, 0), violations);
+}
+
+test "scanCoreMutexDirectCalls flags direct lock but not wrappers/fields/pointers/comments" {
+    // 직접 호출은 잡는다.
+    {
+        var v: usize = 0;
+        scanCoreMutexDirectCalls("s.core_mutex.lockUncancelable(io);", "test", &v, false);
+        try std.testing.expectEqual(@as(usize, 1), v);
+    }
+    {
+        var v: usize = 0;
+        scanCoreMutexDirectCalls("surface.core_mutex.unlock(self.io);", "test", &v, false);
+        try std.testing.expectEqual(@as(usize, 1), v);
+    }
+    // 포인터 전달(owner-추적 래퍼로 넘김)은 통과 — 뒤가 `,`라 `.lock*`가 아니다.
+    {
+        var v: usize = 0;
+        scanCoreMutexDirectCalls("self.core.owner_dbg.lock(&self.core_mutex, io);", "test", &v, false);
+        try std.testing.expectEqual(@as(usize, 0), v);
+    }
+    // 필드 선언·optional 언랩은 통과.
+    {
+        var v: usize = 0;
+        scanCoreMutexDirectCalls("core_mutex: std.Io.Mutex = .init,\nconst m = self.core_mutex.?;", "test", &v, false);
+        try std.testing.expectEqual(@as(usize, 0), v);
+    }
+    // 주석 속 언급은 오탐 아님(토큰이 아니다).
+    {
+        var v: usize = 0;
+        scanCoreMutexDirectCalls("// 옛 방식: active.core_mutex.lockUncancelable(io)\nconst x = 1;", "test", &v, false);
+        try std.testing.expectEqual(@as(usize, 0), v);
+    }
+    // 다른 변수의 lockUncancelable(예: 큐 mutex)은 통과.
+    {
+        var v: usize = 0;
+        scanCoreMutexDirectCalls("self.mutex.lockUncancelable(self.io);", "test", &v, false);
+        try std.testing.expectEqual(@as(usize, 0), v);
+    }
+}

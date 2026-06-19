@@ -22,6 +22,11 @@ pub const Action = union(enum) {
     focus_pane_right,
     focus_pane_up,
     focus_pane_down,
+    // 활성 워크스페이스의 split(pane)을 순서대로 순환한다(⌘]/⌘[ wrap-around). 방향 이동(focus_pane_*)과 달리
+    // 공간 배치와 무관하게 panes 리스트 순서로 다음/이전 pane을 고른다. split이 1개(분할 없음)면 무동작.
+    // (Term 순환 previous_term/next_term은 ⌘⌥[/⌘⌥]로 옮겨 ⌘[]를 split에 양보 — 사용자 요청.)
+    previous_pane,
+    next_pane,
     // 사용자 지정 이름(rename) 시작 — 활성 대상의 이름을 인라인으로 편집한다. workspace=활성 사이드바 탭,
     // pane=활성 분할 영역, term=활성 가로 탭. dispatchAppAction이 인라인 편집기를 연다(custom_name을 쓴다).
     // 기본 키바인딩은 없다(macOS 단일 관례 부재 — 발견성은 커맨드 팔릿·더블클릭·우클릭). 단일 출처:
@@ -71,6 +76,8 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "focus_pane_right")) return .focus_pane_right;
     if (std.mem.eql(u8, value, "focus_pane_up")) return .focus_pane_up;
     if (std.mem.eql(u8, value, "focus_pane_down")) return .focus_pane_down;
+    if (std.mem.eql(u8, value, "previous_pane")) return .previous_pane;
+    if (std.mem.eql(u8, value, "next_pane")) return .next_pane;
     if (std.mem.eql(u8, value, "rename_workspace")) return .rename_workspace;
     if (std.mem.eql(u8, value, "rename_pane")) return .rename_pane;
     if (std.mem.eql(u8, value, "rename_term")) return .rename_term;

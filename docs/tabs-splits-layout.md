@@ -123,10 +123,12 @@ Node = leaf(Pane)
   없으면 무동작. `Cmd+화살표`(줄 처음/끝)·`Option+화살표`(단어 이동)와는 모디파이어 조합이 달라(command+option) 안 겹친다.
   포커스된 panel은 서브-rect에 있으므로 마우스/커서/IME 좌표가 그 panel의 origin(`active_pane_rect`) 기준으로 매핑된다.
 - **Term(가로 탭) 키(PR-B, cmux 모델)**: 한 pane은 여러 Term(터미널)을 가로 탭으로 든다. `Cmd+T`=활성 pane에
-  **새 Term**, `Cmd+]`/`Cmd+[`=활성 pane 안에서 **다음/이전 Term**(wrap). 워크스페이스(사이드바 탭)는 한 단계
-  위라 `Cmd+Shift+T`=**새 워크스페이스**, `Cmd+Shift+]`/`Cmd+Shift+[`=워크스페이스 전환으로 **shift로 갈린다**
-  (modifier 정확 비교). 추가로 **`Cmd+1`~`Cmd+9`=N번째 워크스페이스로 직접 전환**(`select_tab(N-1)`, 범위 밖이면
-  no-op — Safari/Terminal.app/iTerm2식). **베이스**: cmux의 ⌘T(pane 내 새 탭)·⌘[](탭 전환). 워크스페이스 생성은
+  **새 Term**. `]`/`[` 계열은 modifier로 **세 단계**로 갈린다(modifier 정확 비교): **`Cmd+]`/`Cmd+[`=split(pane)
+  순환**(활성 워크스페이스 안의 분할 영역을 panes 순서로 wrap, 분할 없으면 무동작), **`Cmd+Opt+]`/`Cmd+Opt+[`=Term
+  순환**(pane 안 가로 탭 wrap), **`Cmd+Shift+]`/`Cmd+Shift+[`=워크스페이스 전환**. 워크스페이스는 `Cmd+Shift+T`=
+  **새 워크스페이스**로 만든다. 추가로 **`Cmd+1`~`Cmd+9`=N번째 워크스페이스로 직접 전환**(`select_tab(N-1)`, 범위
+  밖이면 no-op — Safari/Terminal.app/iTerm2식). **베이스**: cmux의 ⌘T(pane 내 새 탭)·⌘[](탭 전환); `⌘[]`를 split
+  순환에 두고 Term을 `⌘⌥[]`로 옮긴 것은 사용자 요청 배치다(split을 가장 자주 오가므로 무수식 `⌘[]`에 둠). 워크스페이스 생성은
   cmux처럼 **사이드바 하단 "+" 버튼**(③b)으로도 한다 — 탭 목록 아래 슬롯의 "+"를 클릭하면 새 워크스페이스(`newTab`).
 - **닫기(PR5a + PR-B cascade)**: `Cmd+W`는 **cmux식 계층 cascade** — 활성 pane에 Term이 여럿이면 **활성 Term**을
   닫고, Term이 1개면 **pane**을(split이면 형제로 collapse, 형제가 빈자리 차지) 닫고, pane이 1개면 **워크스페이스**를

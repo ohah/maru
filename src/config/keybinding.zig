@@ -172,10 +172,11 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'T' } }, .action = .new_term }, // Cmd+T: 활성 pane에 새 Term
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'T' } }, .action = .new_tab }, // Cmd+Shift+T: 새 워크스페이스
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'W' } }, .action = .close_term }, // Cmd+W: 활성 Term 닫기(마지막이면 pane→워크스페이스 cascade)
-    // Term 탭 전환: ⌘]=다음, ⌘[=이전(활성 pane 안에서 wrap). shift 없는 대괄호라 char는 ]/[ 그대로다
-    // (브레이스 }/{ 는 shift일 때만 나오므로 변형 불요). 워크스페이스 전환 ⌘⇧]/⌘⇧[ 와 modifier로 갈린다.
-    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = ']' } }, .action = .next_term },
-    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '[' } }, .action = .previous_term },
+    // split(pane) 순환: ⌘]=다음, ⌘[=이전(활성 워크스페이스 안에서 wrap, 분할 없으면 무동작). shift 없는 대괄호라
+    // char는 ]/[ 그대로다(브레이스 }/{ 는 shift일 때만). 워크스페이스 ⌘⇧]/⌘⇧[ · Term ⌘⌥]/⌘⌥[ 와 modifier로
+    // 갈린다(사용자 요청 배치 — ⌘[]를 split 이동에 둔다).
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = ']' } }, .action = .next_pane },
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '[' } }, .action = .previous_pane },
     // Cmd+Shift+]/[ : 다음/이전 워크스페이스(wrap). Swift는 charactersIgnoringModifiers로 char를 보내는데, Cmd
     // 조합에서 Shift가 적용돼 닫는/여는 중괄호(}/{)로 올 수도, 대괄호(]/[)가 그대로 올 수도 있다(OS/레이아웃
     // 차이). 두 변형을 모두 묶는다. 모디파이어는 정확 비교라 shift=true가 필수다.
@@ -205,6 +206,10 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_right }, .action = .focus_pane_right },
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_up }, .action = .focus_pane_up },
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_down }, .action = .focus_pane_down },
+    // Cmd+Option+]/[ : Term(가로 탭) 순환 — ⌘[]를 split 이동에 양보하고 Term을 여기로 옮겼다(사용자 요청). shift
+    // 없는 대괄호 char(]/[) + command·option 정확 비교. (focus_pane 방향 이동은 위 화살표, 대괄호는 Term 순환.)
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = ']' } }, .action = .next_term },
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = '[' } }, .action = .previous_term },
     // Cmd+A: 전체 선택(Select All). macOS 앱 보편 단축키 — Terminal.app/iTerm2도 터미널 내용 전체를 선택한다.
     // 셸 줄-시작은 Ctrl+A(C0)라 안 겹친다. normalizeEventChar가 'a'를 'A'로 fold, 모디파이어 정확 비교.
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'A' } }, .action = .select_all },
@@ -602,11 +607,16 @@ test "built-in app bindings resolve Cmd+Shift+]/[ to next/previous tab for both 
         const r = try resolver.resolve(.{ .key = .{ .char = c }, .modifiers = .{ .command = true, .shift = true } }, &buffer, .{});
         try std.testing.expectEqual(action_mod.Action.previous_tab, r.app_action);
     }
-    // Shift 없는 Cmd+]/[ 는 Term 전환(워크스페이스가 아니라) — modifier로 갈린다.
+    // Shift 없는 Cmd+]/[ 는 split(pane) 순환(워크스페이스가 아니라) — modifier로 갈린다.
     const nt = try resolver.resolve(.{ .key = .{ .char = ']' }, .modifiers = .{ .command = true } }, &buffer, .{});
-    try std.testing.expectEqual(action_mod.Action.next_term, nt.app_action);
+    try std.testing.expectEqual(action_mod.Action.next_pane, nt.app_action);
     const pt = try resolver.resolve(.{ .key = .{ .char = '[' }, .modifiers = .{ .command = true } }, &buffer, .{});
-    try std.testing.expectEqual(action_mod.Action.previous_term, pt.app_action);
+    try std.testing.expectEqual(action_mod.Action.previous_pane, pt.app_action);
+    // Cmd+Option+]/[ 는 Term(가로 탭) 순환 — ⌘[]를 split에 양보하고 Term을 ⌘⌥[]로 옮겼다(사용자 요청).
+    const not_ = try resolver.resolve(.{ .key = .{ .char = ']' }, .modifiers = .{ .command = true, .option = true } }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.next_term, not_.app_action);
+    const pot = try resolver.resolve(.{ .key = .{ .char = '[' }, .modifiers = .{ .command = true, .option = true } }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.previous_term, pot.app_action);
 }
 
 test "built-in app bindings resolve Cmd+1..9 to select_tab(N-1)" {

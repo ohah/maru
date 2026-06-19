@@ -5086,6 +5086,9 @@ pub const AppSession = struct {
                 .default_fg = self.activeSurface().core.defaultFgOverride() orelse self.appearance.theme.foreground,
                 .default_bg = self.activeSurface().core.defaultBgOverride() orelse self.appearance.theme.background,
                 .palette = &self.active_palette_copy, // 코어 alias 대신 소유 복사본(OSC 4 .indexed 색 풀이)
+                // ANSI 16색 config base(theme.palette). OSC4 override가 없을 때만 index<16에 적용(OSC4 → config → xterm256).
+                // appearance는 세션 동안 불변·소유라 포인터 안전(복사 불필요) — OSC4 복사본과 달리 매 tick 변하지 않는다.
+                .config_palette = &self.appearance.theme.palette,
                 .screen_reverse = self.activeSurface().core.reverseScreen(), // DECSCNM(?5) 화면 전역 반전(G9)
                 // blink(SGR 5): config text.blink가 켜졌을 때만 위상(blink_visible)을 반영해 off 위상에 숨긴다.
                 // 꺼져 있으면(기본) 항상 on → 정적(안 깜빡임). 접근성 기본값.
@@ -5225,10 +5228,13 @@ pub const AppSession = struct {
                 for (built_frames.items) |*bf| bf.deinit(self.allocator);
                 built_frames.deinit(self.allocator);
             }
-            // 비활성 panel 색: 포커스 안 된 panel이라 커서/선택/호버 없음(default 전경/배경만).
+            // 비활성 panel 색: 포커스 안 된 panel이라 커서/선택/호버 없음(default 전경/배경만). config_palette는 ANSI 16색
+            // base(theme.palette) — 비활성 pane도 자기 OSC4(palette)를 쓰되, OSC4가 없으면 이 config base로 폴백한다
+            // (pane_colors가 inactive_colors를 복사해 쓰므로 여기 한 곳에 둔다). appearance는 세션 불변·소유라 포인터 안전.
             const inactive_colors: metal_frame.CellColors = .{
                 .default_fg = self.appearance.theme.foreground,
                 .default_bg = self.appearance.theme.background,
+                .config_palette = &self.appearance.theme.palette,
             };
             // 탭 바 제목 색: 전경=테마 글자색, 배경은 chrome이 이미 깔아 둠(투명).
             const tabbar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };

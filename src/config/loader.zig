@@ -159,6 +159,25 @@ fn applyKey(
         config.theme.cursor = try dupValidColor(a, diags, line_no, key, value, config.theme.cursor);
     } else if (std.mem.eql(u8, key, "theme.selection")) {
         config.theme.selection = try dupValidColor(a, diags, line_no, key, value, config.theme.selection);
+    } else if (std.mem.startsWith(u8, key, "theme.palette.")) {
+        // ANSI 16색 override: theme.palette.0~.15 = #RRGGBB. suffix를 u8로 파싱해 0~15 범위 검사. 인덱스가 비정수·
+        // 범위 밖이면 forgiving(diagnostic + 무시), 색은 dupValidColor가 검증(틀린 색도 forgiving). OSC4가 없을 때의
+        // base라 per-core OSC4 표가 아니라 config에 둔다(렌더 폴백이 OSC4 → config → xterm256 우선순위로 쓴다).
+        const suffix = key["theme.palette.".len..];
+        const idx = std.fmt.parseInt(u8, suffix, 10) catch {
+            try diags.append(a, .{ .line = line_no, .message = "theme.palette.N의 N은 0~15 정수여야 함 — 무시" });
+            return;
+        };
+        if (idx > 15) {
+            try diags.append(a, .{ .line = line_no, .message = "theme.palette.N의 N은 0~15 범위 — 무시" });
+            return;
+        }
+        // 색 검증은 dupValidColor 재사용(단일 출처). 틀린 색이면 그 인덱스는 기존(기본 xterm) 유지.
+        if (appearance.parseHexColor(value)) |_| {
+            config.theme.palette[idx] = try a.dupe(u8, value);
+        } else |_| {
+            try diags.append(a, .{ .line = line_no, .message = "색이 #RRGGBB 형식이 아님 — 기본값 유지" });
+        }
     } else if (std.mem.eql(u8, key, "cursor.shape")) {
         config.cursor.shape = parseCursorShape(value) orelse {
             try diags.append(a, .{ .line = line_no, .message = "cursor.shape는 block|bar|underline — 기본값 유지" });
@@ -743,6 +762,33 @@ test "parse: forgiving — unknown key and bad values keep defaults with diagnos
     try std.testing.expectEqual(defaults.chrome_theme, p.config.chrome_theme); // 미지값(neon) → tui 폴백(C4a)
     // 7개 문제 줄 각각 diagnostic(chrome.theme=neon·누락 '=' 포함).
     try std.testing.expectEqual(@as(usize, 7), p.diagnostics.len);
+}
+
+test "parse: theme.palette.N parses ANSI 16 overrides; out-of-range/bad index/color are forgiving" {
+    const defaults: theme.Config = .{};
+    var p = try parse(std.testing.allocator,
+        \\theme.palette.0 = #ff0000
+        \\theme.palette.15 = #00ff00
+        \\theme.palette.16 = #abcdef
+        \\theme.palette.7 = not-a-color
+        \\theme.palette.x = #112233
+    );
+    defer p.deinit();
+    // 유효한 인덱스(0, 15)는 색을 담는다.
+    try std.testing.expectEqualStrings("#ff0000", p.config.theme.palette[0].?);
+    try std.testing.expectEqualStrings("#00ff00", p.config.theme.palette[15].?);
+    // 범위 밖 인덱스(16)·잘못된 색(7)·비정수 인덱스(x)는 forgiving — 그 인덱스는 null 유지(기본 xterm).
+    try std.testing.expect(p.config.theme.palette[7] == null);
+    // override 안 한 다른 인덱스도 기본값(null) 유지.
+    try std.testing.expectEqual(defaults.theme.palette[1], p.config.theme.palette[1]);
+    // 문제 줄 3개(인덱스 16 범위 밖, 인덱스 7 색 형식, 인덱스 x 비정수) 각각 diagnostic.
+    try std.testing.expectEqual(@as(usize, 3), p.diagnostics.len);
+
+    // 파싱된 config는 resolve가 실패하지 않아야 한다(valid 색만 담기므로) + override가 ResolvedTheme까지 전파.
+    const ra = try appearance.resolve(p.config);
+    try std.testing.expectEqual(@as(?terminal.Rgb, terminal.Rgb{ .r = 0xff, .g = 0x00, .b = 0x00 }), ra.theme.palette[0]);
+    try std.testing.expectEqual(@as(?terminal.Rgb, terminal.Rgb{ .r = 0x00, .g = 0xff, .b = 0x00 }), ra.theme.palette[15]);
+    try std.testing.expect(ra.theme.palette[7] == null); // 잘못된 색은 안 담겨 기본 폴백
 }
 
 test "parse: resolved appearance never fails on parsed config (values pre-validated)" {

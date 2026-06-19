@@ -412,10 +412,10 @@ pub fn buildNativeCellsSplit(
                 .background = 0xFF00_0000 | packRgb(effectiveLineColor(l, colors)),
             });
         },
-        // OSC 133 거터 마크: 프롬프트 시작 행 col 0의 왼쪽 가장자리에 세로 색 바(커서 bar와 같은
-        // kind=3 부분 사각형 재사용 — 셰이더 변경 없음). 명령 성공=초록/실패=빨강.
-        // 알려진 한계: DECSCUSR 5/6(bar 커서)가 같은 프롬프트 행 col 0에 있으면 커서 bar(마지막에
-        // 블렌딩으로 그려짐)가 거터 바를 덮는다 — 드문 엣지(전용 거터 컬럼/오프셋은 후속).
+        // OSC 133 거터 마크: 프롬프트 시작 행에서 셀 그리드 '왼쪽 바깥'(col 0 글자 시작 전, window
+        // padding 여백 쪽)에 세로 색 바를 그린다 — 명령 성공=초록/실패=빨강. reserved=8(셀 왼쪽
+        // 바깥 thickness, 렌더러 px_left를 origin 왼쪽으로 뺌)이라 col 0 글자와 겹치지 않는다.
+        // bar 커서(reserved=3)는 셀 '안' 왼쪽이라 별개 경로 — 거터와 커서가 더는 충돌하지 않는다.
         .gutter => |g| {
             if (g.row >= frame.size.rows) continue;
             const bar_rgb: color.Rgb = if (g.success)
@@ -426,7 +426,7 @@ pub fn buildNativeCellsSplit(
                 .row = g.row,
                 .col = 0,
                 .width = 1,
-                .reserved = 3, // bar(좌측 세로 부분 사각형) 재사용
+                .reserved = 8, // 셀 왼쪽 '바깥' 세로 바(거터 — col 0 글자와 분리). bar 커서(3)와 별개.
                 .codepoint = ' ',
                 .slot_id = 0,
                 .atlas_x_px = 0,

@@ -23,6 +23,11 @@ pub const CoreOwner = struct {
     /// 비교만 정밀하면 된다). release에선 `void`라 필드 크기 0.
     thread: if (enabled) std.atomic.Value(usize) else void = if (enabled) .init(0) else {},
 
+    /// 이 코어가 reader(I/O) 스레드에 노출됐는가 — reader가 setProcessing으로 붙을 때 arm()으로 켠다.
+    /// armed 전(단일 스레드: 독립 코어·헤드리스 단위 테스트)에는 락 없는 코어 접근이 정상이라
+    /// assertOwnedBySelf를 면제한다. 한 방향(false→true) 전이라 idempotent. release에선 void.
+    armed: if (enabled) std.atomic.Value(bool) else void = if (enabled) .init(false) else {},
+
     inline fn currentId() usize {
         return @intCast(std.Thread.getCurrentId());
     }
@@ -44,6 +49,25 @@ pub const CoreOwner = struct {
     pub fn exit(self: *CoreOwner) void {
         if (!enabled) return;
         self.thread.store(0, .monotonic);
+    }
+
+    /// reader가 이 코어를 소유·처리하기 시작할 때(setProcessing) 호출 — 이후 코어 mutate는 owner(락)를
+    /// 요구한다. 이 시점 전(reader 미부착)은 단일 스레드라 락이 무의미하므로 assertOwnedBySelf가 면제된다.
+    pub fn arm(self: *CoreOwner) void {
+        if (!enabled) return;
+        self.armed.store(true, .monotonic);
+    }
+
+    /// 코어 mutate 진입에서 호출 — armed(reader 노출) 상태인데 현재 스레드가 락을 안 쥐고 있으면 panic.
+    /// 락 없이 코어를 만져 reader와 data race를 내는 결함을 잡는다(docs/io-render-threading.md §6-5의
+    /// "락 없이 코어 접근 시 패닉" 절반). armed 전 단일 스레드 경로는 면제한다.
+    pub fn assertOwnedBySelf(self: *const CoreOwner) void {
+        if (!enabled) return;
+        if (!self.armed.load(.monotonic)) return; // reader 미부착(단일 스레드) — 락 불필요
+        if (self.thread.load(.monotonic) != currentId()) {
+            @panic("core mutate에 core_mutex 미보유 — reader 노출 상태의 코어 변경은 " ++
+                "Surface.lockCore / owner_dbg.lock 아래에서만(docs/io-render-threading.md §6-5).");
+        }
     }
 
     /// 테스트/진단 관찰자(패닉 없이 상태만). 현재 스레드가 owner인가.
@@ -103,4 +127,18 @@ test "CoreOwner: 다른 스레드가 보유 중이면 재진입이 아니다(진
 test "CoreOwner: release 빌드에서 0비용(@sizeOf 0)" {
     if (CoreOwner.enabled) return error.SkipZigTest;
     try std.testing.expectEqual(@as(usize, 0), @sizeOf(CoreOwner));
+}
+
+test "CoreOwner: arm 전엔 assertOwnedBySelf 면제, arm 후 owner 보유면 통과" {
+    if (!CoreOwner.enabled) return error.SkipZigTest;
+    var owner: CoreOwner = .{};
+    // reader 미부착(arm 안 함): owner가 비어 있어도 panic 없이 통과해야 한다 — 헤드리스 단위 테스트와
+    // 독립 코어가 락 없이 코어를 만져도 거짓 panic이 나지 않게 하는 면제.
+    owner.assertOwnedBySelf();
+    // arm 후(reader 노출) 현재 스레드가 락을 보유하면 통과(미보유 시 panic은 자식 프로세스가 필요해
+    // 여기선 보유-통과 경로만 — 면제/보유 두 정상 경로를 단위로 고정).
+    owner.arm();
+    owner.enter();
+    owner.assertOwnedBySelf();
+    owner.exit();
 }

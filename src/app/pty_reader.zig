@@ -308,6 +308,9 @@ pub const PtyReader = struct {
         self.core = core;
         self.core_mutex = core_mutex;
         self.io = io;
+        // 이 코어가 이제 reader 스레드에 노출된다 — 락 계약(assertOwnedBySelf)을 활성화한다(디버그 전용,
+        // docs/io-render-threading.md §6-5). reader 미부착 단일 스레드 경로는 armed가 아니라 면제된다.
+        core.owner_dbg.arm();
         self.processing.store(true, .release); // 필드 설정 뒤 release — reader가 acquire-load로 본다
     }
 

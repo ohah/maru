@@ -546,6 +546,7 @@ pub const TerminalCore = struct {
     /// 뷰포트를 delta_up줄만큼 위(과거, 양수)/아래(현재, 음수)로 스크롤한다. [0, sb_count]로 clamp.
     /// 뷰가 바뀌면 화면 전체를 dirty로 표시한다(렌더가 새 윈도를 다시 그리도록).
     pub fn scrollViewport(self: *TerminalCore, delta_up: isize) void {
+        self.owner_dbg.assertOwnedBySelf(); // reader 노출 시 core_mutex 보유 강제(디버그 전용 §6-5)
         // alt screen에서는 스크롤백 뷰가 잠긴다(xterm 동작) — TUI 화면 위로 history가 겹치지 않게.
         if (self.alt_active) return;
         // 지연된 재-wrap을 먼저 수행한다 — sb_count(스크롤 범위)가 재-wrap으로 바뀔 수 있다.
@@ -563,6 +564,7 @@ pub const TerminalCore = struct {
 
     /// 뷰포트를 바닥(활성 화면)으로 되돌린다.
     pub fn scrollToBottom(self: *TerminalCore) void {
+        self.owner_dbg.assertOwnedBySelf(); // reader 노출 시 core_mutex 보유 강제(디버그 전용 §6-5)
         if (self.view_offset != 0) {
             self.view_offset = 0;
             self.dirty = fullDirty(self.size);
@@ -1171,6 +1173,7 @@ pub const TerminalCore = struct {
     /// IME 조합 중 텍스트를 설정한다(빈 입력 = 조합 종료/취소). 렌더 합성 전용 상태라 셀
     /// 그리드·커서는 변하지 않는다. 표시는 renderSnapshot이 한다.
     pub fn setPreedit(self: *TerminalCore, bytes: []const u8) !void {
+        self.owner_dbg.assertOwnedBySelf(); // reader 노출 시 core_mutex 보유 강제(디버그 전용 §6-5)
         if (self.preedit) |old| {
             self.allocator.free(old);
             self.preedit = null;
@@ -1590,6 +1593,7 @@ pub const TerminalCore = struct {
     }
 
     pub fn write(self: *TerminalCore, bytes: []const u8) !void {
+        self.owner_dbg.assertOwnedBySelf(); // reader 노출 시 core_mutex 보유 강제(디버그 전용 §6-5)
         // Process output bytes through a small VT escape-sequence state machine
         // (planned in implementation-plan.md: expand the parser only as the
         // shell path needs). ground state still converts UTF-8 to cells; ESC

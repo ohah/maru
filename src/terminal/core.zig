@@ -301,6 +301,10 @@ pub const TerminalCore = struct {
     // OSC 104로 리셋(인덱스 없으면 전부). 렌더러가 `.indexed` 색을 풀 때 이 표를 먼저 본다(app이
     // paletteOverride()를 CellColors.palette로 wiring — 코어는 셀 픽셀/렌더를 모르는 K1 경계 유지). RIS에서 전부 null.
     palette_override: [256]?types.Rgb = .{null} ** 256,
+    // K1 경계 보강: 코어는 config palette base를 palette_override 옆 별도 레이어로 보관한다 — 렌더(metal_frame)와
+    // OSC 4 query 응답이 같은 우선순위(override > config > xterm256)를 공유해 화면·보고가 일치한다. OSC 4가 없을 때의
+    // ANSI 16색 base(theme.palette)를 platform이 setConfigPalette로 주입한다. RIS/OSC104는 override만 리셋(config base 유지).
+    config_palette: [16]?types.Rgb = .{null} ** 16,
     // OSC 52 클립보드 쓰기 요청(디코드된 바이트, pending). platform이 정책(allow) 확인 후 drain → system clipboard.
     clipboard_write: std.ArrayListUnmanaged(u8) = .empty,
     // OSC 9(iTerm2)·OSC 777(rxvt) 데스크톱 알림 pending. 코어는 title/body 파싱만 하고, platform이 매 tick drain해
@@ -1734,17 +1738,21 @@ pub const TerminalCore = struct {
         return self.default_bg_override;
     }
 
-    /// OSC 4 — 256색 팔레트 설정/질의. `<index>;<spec>` 쌍을 반복 파싱한다. spec이 `?`면 현재 색(override 또는
-    /// 기본 xterm256)을 `OSC 4 ; <index> ; rgb:rrrr/gggg/bbbb ST`로 회신, color spec이면 그 인덱스를 덮어쓴다.
-    /// 인덱스는 0..255(parseInt u8 — 256+ 자동 실패→skip). 짝이 안 맞는 끝 토큰은 버린다. 베이스: xterm ctlseqs
-    /// OSC 4(`rgb:`/`#` 색 명세). 색 적용은 렌더러가 palette_override를 소비(코어는 표만 보관 — K1 경계).
+    /// OSC 4 — 256색 팔레트 설정/질의. `<index>;<spec>` 쌍을 반복 파싱한다. spec이 `?`면 현재 색(우선순위
+    /// override > config base(idx<16) > 기본 xterm256)을 `OSC 4 ; <index> ; rgb:rrrr/gggg/bbbb ST`로 회신, color
+    /// spec이면 그 인덱스를 덮어쓴다. 인덱스는 0..255(parseInt u8 — 256+ 자동 실패→skip). 짝이 안 맞는 끝 토큰은
+    /// 버린다. 베이스: xterm ctlseqs OSC 4(`rgb:`/`#` 색 명세). 색 적용은 렌더러가 palette_override+config_palette를
+    /// 소비(코어는 표만 보관 — K1 경계). query 응답은 렌더(metal_frame)와 같은 우선순위라 화면·보고가 일치한다.
     fn dispatchOscPalette(self: *TerminalCore, body: []const u8) void {
         var it = std.mem.splitScalar(u8, body, ';');
         while (it.next()) |idx_str| {
             const spec = it.next() orelse break; // 쌍이 안 맞는 마지막 index는 무시
             const idx = std.fmt.parseInt(u8, idx_str, 10) catch continue; // 0..255 밖 → skip
             if (std.mem.eql(u8, spec, "?")) {
-                const rgb = self.palette_override[idx] orelse types.xterm256(idx);
+                // 렌더(metal_frame.paletteColor)와 동일 우선순위: OSC4 override → config base(idx<16) → xterm256.
+                const rgb = self.palette_override[idx] orelse
+                    (if (idx < 16) self.config_palette[idx] else null) orelse
+                    types.xterm256(idx);
                 var buf: [48]u8 = undefined;
                 // 8-bit 채널을 16-bit로 복제(0xAB → 0xABAB) — xterm 4-hex-per-channel 표준 응답 형식.
                 const resp = std.fmt.bufPrint(&buf, "\x1b]4;{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}\x1b\\", .{
@@ -1775,6 +1783,13 @@ pub const TerminalCore = struct {
     /// CellColors.palette로 wiring한다 — 코어는 셀 픽셀을 모르고 표만 들고 있다(K1 경계).
     pub fn paletteOverride(self: *const TerminalCore) *const [256]?types.Rgb {
         return &self.palette_override;
+    }
+
+    /// config theme.palette(ANSI 16색 base)를 주입한다 — OSC 4가 없을 때의 base 레이어. platform이 createTerm에서
+    /// appearance.theme.palette로 주입하며, OSC 4 query 응답이 렌더(metal_frame)와 같은 우선순위(override > config >
+    /// xterm256)를 보도록 한다. RIS/OSC104는 override만 리셋하고 이 base는 건드리지 않는다(렌더 동작과 일치).
+    pub fn setConfigPalette(self: *TerminalCore, palette: [16]?types.Rgb) void {
+        self.config_palette = palette;
     }
 
     /// DECSCNM(G9) 화면 반전 상태. app이 CellColors.screen_reverse·clear color에 반영한다(코어는 셀 색을 안 바꾼다).
@@ -6812,6 +6827,44 @@ test "OSC 4 (palette) set/query, multi-pair, OSC 104 reset(one/all), RIS clears 
     try std.testing.expect(core.palette_override[5] != null);
     try core.write("\x1bc"); // RIS
     try std.testing.expectEqual(@as(?types.Rgb, null), core.palette_override[5]);
+}
+
+test "OSC 4 query reflects config_palette base (override > config > xterm256); RIS keeps config" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // platform이 주입하는 config theme.palette base를 흉내(인덱스 1 = {0x12,0x34,0x56}).
+    var cfg: [16]?types.Rgb = .{null} ** 16;
+    cfg[1] = .{ .r = 0x12, .g = 0x34, .b = 0x56 };
+    core.setConfigPalette(cfg);
+
+    // (a) OSC4 override가 없고 config base가 있으면 config 색을 회신(xterm256이 아니라).
+    try core.write("\x1b]4;1;?\x1b\\");
+    try std.testing.expectEqualStrings("\x1b]4;1;rgb:1212/3434/5656\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // (b) OSC4 override가 있으면 그게 config base보다 우선.
+    try core.write("\x1b]4;1;rgb:aa/bb/cc\x1b\\");
+    try core.write("\x1b]4;1;?\x1b\\");
+    try std.testing.expectEqualStrings("\x1b]4;1;rgb:aaaa/bbbb/cccc\x1b\\", core.pendingResponse());
+    core.clearResponse();
+
+    // (c) RIS(ESC c)는 override만 리셋(config base는 유지) — query는 다시 config 색을 회신해야 한다.
+    try core.write("\x1bc"); // RIS
+    try std.testing.expectEqual(@as(?types.Rgb, null), core.palette_override[1]); // override는 리셋
+    try core.write("\x1b]4;1;?\x1b\\");
+    try std.testing.expectEqualStrings("\x1b]4;1;rgb:1212/3434/5656\x1b\\", core.pendingResponse()); // config base 살아남음
+    core.clearResponse();
+
+    // (d) idx>=16은 config_palette 대상이 아니므로 xterm256으로 회신(인덱스 16 = xterm256 {0,0,0}).
+    const exp16 = types.xterm256(16);
+    var buf: [48]u8 = undefined;
+    const want16 = try std.fmt.bufPrint(&buf, "\x1b]4;16;rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}\x1b\\", .{
+        exp16.r, exp16.r, exp16.g, exp16.g, exp16.b, exp16.b,
+    });
+    try core.write("\x1b]4;16;?\x1b\\");
+    try std.testing.expectEqualStrings(want16, core.pendingResponse());
+    core.clearResponse();
 }
 
 test "OSC 10/11 (default fg/bg) set/query/reset; query reflects override; RIS clears" {

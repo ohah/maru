@@ -176,3 +176,7 @@ run = "sh tools/terminfo/check.sh"
 [tasks.install-terminfo]
 description = "Install the opt-in maru terminfo into ~/.terminfo (no sudo). Then set `term = \"xterm-maru\"`."
 run = "sh tools/terminfo/install.sh"
+
+[tasks.ssh-smoke]
+description = "Opt-in `maru ssh` propagation smoke over `ssh localhost` (skips if no sshd/key). Needs `mise run build` first."
+run = "sh tools/ssh/smoke.sh"

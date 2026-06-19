@@ -1,5 +1,6 @@
 pub const app = @import("app.zig");
 pub const chrome = @import("chrome.zig");
+pub const cli = @import("cli.zig");
 pub const color = @import("color.zig");
 pub const config = @import("config.zig");
 pub const observability = @import("observability.zig");

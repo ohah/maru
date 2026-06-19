@@ -168,13 +168,21 @@ term = xterm-maru
 
 > **원격(SSH) 주의**: terminfo는 프로그램이 읽는 머신에 있어야 한다. `xterm-maru`를 켠 채 원격에
 > 접속하면 원격에는 이 항목이 없어 `vim`/`tmux`/`less` 등이 `unknown terminal type`으로 깨질 수
-> 있다. 원격 자동 전파는 별도 증분(`maru ssh`)이며, 그 전까지는 원격마다 한 번씩 직접 설치한다:
+> 있다. 이를 자동으로 푸는 opt-in 래퍼가 **`maru ssh`** 다 — 원격에 terminfo를 먼저 심고 평범한
+> `ssh`로 넘어간다(당신의 평소 `ssh`는 건드리지 않는다):
+>
+> ```sh
+> maru ssh <host>               # 원격에 xterm-maru 설치 후 exec ssh
+> maru ssh --terminfo-only <host>   # 설치만(세션 없음) — ssh 래핑을 원치 않을 때
+> ```
+>
+> `maru ssh`는 로컬에 `xterm-maru`가 깔려 있어야 하고(위 `install-terminfo`), 원격에 `tic`이 없거나
+> 설치가 실패하면 자동으로 `TERM=xterm-256color`로 폴백해 세션이 깨지지 않는다. 수동으로 한 줄로
+> 설치하려면:
 >
 > ```sh
 > infocmp -x xterm-maru | ssh <host> 'mkdir -p ~/.terminfo && tic -x -o ~/.terminfo -'
 > ```
->
-> 원격에 설치할 수 없으면 원격 세션에서는 `term`을 기본 `xterm-256color`로 두는 편이 안전하다.
 
 > Maru는 대화형 셸을 macOS `login(1)`로 감싸 띄운다(Terminal.app·Ghostty와 동일) — 전체 로그인
 > 세션(getlogin·SHELL·utmp·hushlogin)을 셋업하고 `.zprofile`/`.zlogin`까지 source한다. 그래서

@@ -68,15 +68,17 @@ Maru는 자식 셸 env에 `TERM_PROGRAM=ghostty`를 주입한다(부모가 남�
 선행 조건 충족 현황:
 
 - [x] terminfo 설치/배포/원격 fallback 정책을 사용자가 이해할 수 있게 문서화한다 —
-  [설정 파일](configuration.md)의 `term` 절(원격 미설치 시 깨짐·수동 설치 한 줄·기본값 폴백 안내)과
+  [설정 파일](configuration.md)의 `term` 절(원격 미설치 시 깨짐·`maru ssh` 자동 전파·기본값 폴백 안내)과
   이 문서.
-- [ ] `tests/oracle/` fixture로 주요 CSI/OSC/alternate screen 동작을 비교할 수 있다.
-- [ ] `tests/integration/ssh/` 또는 opt-in SSH smoke에서 원격 fallback 손해를 볼 수 있다(원격 자동
-  전파 `maru ssh` 증분과 함께 추가한다).
+- [x] 원격 자동 전파 `maru ssh`(opt-in CLI 래퍼) + opt-in SSH smoke. 원격에 maru terminfo를 심고
+  평범한 ssh로 exec하며, `tic` 없음·설치 실패 시 `TERM=xterm-256color`로 폴백해 세션이 안 깨진다.
+  순수 로직(`src/cli/ssh.zig`)은 단위 테스트, end-to-end는 `mise run ssh-smoke`(`ssh localhost`, 환경
+  없으면 graceful skip). 레퍼런스: Ghostty `ghostty +ssh`(MIT, 동작만 비교 — clean-room).
+- [ ] `tests/oracle/` fixture로 주요 CSI/OSC/alternate screen 동작을 비교할 수 있다(남은 선행 조건).
 
-기본값 전환은 위 남은 조건을 채운 뒤 **별도 PR에서 사용자와 다시 논의한다** — 전파+폴백이 충분히
-무던해진 다음에 "벌어서" 얻는다(opt-in이어도 전파를 붙이면 원격에서 자동으로 안전해져, 전환의 실익
-자체가 작다).
+기본값 전환은 위 남은 조건(oracle fixture)을 채운 뒤 **별도 PR에서 사용자와 다시 논의한다** —
+전파+폴백이 충분히 무던해진 다음에 "벌어서" 얻는다(opt-in이어도 전파를 붙이면 원격에서 자동으로
+안전해져, 전환의 실익 자체가 작다).
 
 ## OSC52 clipboard
 

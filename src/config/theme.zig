@@ -139,6 +139,10 @@ pub const Config = struct {
     term: []const u8 = "xterm-256color",
     /// 데스크톱 알림 설정. loader가 `notifications.*` 키로 파싱.
     notifications: NotificationConfig = .{},
+    /// 스크롤백(가시 화면 위로 보관하는 과거 줄) 설정. loader가 `scrollback.*` 키로 파싱.
+    scrollback: ScrollbackConfig = .{},
+    /// 벨(BEL) 설정. loader가 `bell.*` 키로 파싱.
+    bell: BellConfig = .{},
 };
 
 /// 데스크톱 알림 설정.
@@ -147,4 +151,18 @@ pub const NotificationConfig = struct {
     /// 띄울지. 기본 true — 다른 일을 보는 동안 끝났음을 알린다(활성 탭은 화면으로 이미 보이므로 안 띄움).
     /// loader가 `notifications.agent-complete` 키로 파싱.
     agent_complete: bool = true,
+};
+
+/// 스크롤백 설정.
+pub const ScrollbackConfig = struct {
+    /// 가시 화면 위로 보관할 과거 줄 수(ring). 0이면 스크롤백 비활성(과거 줄 안 보관). 기본 1000.
+    /// loader가 `scrollback.lines` 키로 파싱(0~100000, 상한은 메모리 폭주 가드).
+    lines: u32 = 1000,
+};
+
+/// 벨(BEL, 0x07) 설정.
+pub const BellConfig = struct {
+    /// BEL 수신 시 시스템 소리(NSSound.beep)를 낼지. 기본 true. false면 음소거(코어 플래그는 정상 소비).
+    /// loader가 `bell.audible` 키로 파싱.
+    audible: bool = true,
 };

@@ -19,6 +19,8 @@ src/
   maru.zig              public import facade
   main.zig              개발용 CLI entrypoint
   app.zig               탭/창/surface facade
+  chrome.zig            플랫폼 중립 디자인 시스템(ChromeDraw) facade
+  cli.zig               개발용 CLI 서브커맨드 구현 facade(main.zig가 디스패치, 로직은 cli/에)
   color.zig             backend-neutral 색 primitive(Rgb). terminal/renderer/config가 공유
   config.zig            action/config facade
   pty.zig               process/PTY facade
@@ -28,6 +30,7 @@ src/
   plugin.zig            action/plugin facade
 
   app/                  window/surface/runtime/pty_reader/runtime_pump처럼 앱 상태와 live 연결 책임별 구현
+  cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다
   config/               action parsing, raw theme/font/cursor config, resolved appearance config
   pty/                  PTY backend, spawn request, process handle
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding

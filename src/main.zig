@@ -52,6 +52,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "ssh")) {
+        try runSsh(allocator, &args, stderr);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         try printUsage(stdout);
         return;
@@ -188,6 +193,52 @@ fn runAppPtySmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
     try stdout.flush();
 }
 
+fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !void {
+    // `maru ssh [--terminfo-only] <ssh args...>`: 원격에 maru terminfo(xterm-maru)를 먼저 심고 평범한
+    // ssh로 exec한다. 순수 로직(파싱·스크립트·argv)은 maru.cli.ssh가 갖고, 여기선 인자 수집과 실제
+    // 프로세스 교체(execve)만 한다. "ssh" 뒤 인자를 execve까지 유효하도록 소유 복사해 모은다.
+    var collected: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (collected.items) |s| allocator.free(s);
+        collected.deinit(allocator);
+    }
+    while (args.next()) |a| try collected.append(allocator, try allocator.dupe(u8, a));
+
+    const parsed = maru.cli.ssh.parse(collected.items) catch |err| switch (err) {
+        error.MissingDestination => {
+            try stderr.writeAll("usage: maru ssh [--terminfo-only] <ssh args...>\n");
+            try stderr.flush();
+            return error.UnknownCommand;
+        },
+    };
+
+    const argv = try maru.cli.ssh.buildArgv(allocator, parsed);
+    defer allocator.free(argv);
+
+    // execve용 null-terminated C argv(pty/macos.zig ArgvStorage와 같은 패턴). alloc은 미초기화
+    // 메모리라, dupeZ가 도중에 실패(OOM)하면 아직 안 채운 슬롯은 쓰레기 slice다 — defer가 그걸 free하면
+    // heap이 손상된다. built로 실제 채운 개수를 세어 채운 것만 free한다(ArgvStorage의 initialized 가드와 동치).
+    const c_strings = try allocator.alloc([:0]u8, argv.len);
+    defer allocator.free(c_strings);
+    var built: usize = 0;
+    defer for (c_strings[0..built]) |s| allocator.free(s);
+    for (argv, 0..) |s, i| {
+        c_strings[i] = try allocator.dupeZ(u8, s);
+        built += 1;
+    }
+
+    const c_argv = try allocator.allocSentinel(?[*:0]const u8, argv.len, null);
+    defer allocator.free(c_argv);
+    for (c_strings, 0..) |s, i| c_argv[i] = s.ptr;
+
+    // 현재 환경을 상속해 `/bin/sh -c <script>`를 exec한다 — 성공하면 이 프로세스가 sh→ssh로 대체된다
+    // (SSH_AUTH_SOCK 등 그대로 흐른다. TERM은 스크립트가 ssh `-o SetEnv`로 정한다). 돌아오면 실패다.
+    _ = std.c.execve("/bin/sh", c_argv, @ptrCast(std.c.environ));
+    try stderr.writeAll("maru ssh: /bin/sh exec에 실패했습니다\n");
+    try stderr.flush();
+    return error.UnknownCommand;
+}
+
 fn printUsage(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\usage:
@@ -198,6 +249,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru app-pty-loop-smoke
         \\  maru app-pty-interactive-loop-smoke
         \\  maru app-pty-smoke
+        \\  maru ssh [--terminfo-only] <ssh args...>
         \\
         \\commands:
         \\  demo       run the headless PTY -> SurfaceRuntime -> snapshot demo
@@ -206,6 +258,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  app-pty-loop-smoke run the live PTY -> repeated app frame-loop smoke
         \\  app-pty-interactive-loop-smoke run the interactive shell -> repeated app frame-loop smoke
         \\  app-pty-smoke run the live PTY -> app host -> RenderFrame smoke
+        \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
         \\
     );
     try writer.flush();

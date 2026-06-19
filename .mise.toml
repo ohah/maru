@@ -168,3 +168,11 @@ depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "
 [tasks.vttest]
 description = "Launch the Maru app for local vttest visual conformance (BSD tool; run `vttest` inside)"
 run = "echo 'Maru 앱을 띄웁니다. 터미널 안에서 `vttest`를 실행해 시각 점검하세요(brew install vttest). docs/conformance-testing.md 참조.' && zig build macos-app"
+
+[tasks.terminfo-check]
+description = "Validate the opt-in maru terminfo (compiles clean, Sync 2026 round-trip, Tc) — run when editing terminfo/"
+run = "sh tools/terminfo/check.sh"
+
+[tasks.install-terminfo]
+description = "Install the opt-in maru terminfo into ~/.terminfo (no sudo). Then set `term = \"xterm-maru\"`."
+run = "sh tools/terminfo/install.sh"

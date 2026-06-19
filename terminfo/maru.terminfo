@@ -1,0 +1,24 @@
+# Maru 터미널 에뮬레이터 terminfo (opt-in).
+#
+# 기본값이 아니다. 사용자가 config에서 `term = "xterm-maru"`로 명시적으로 켜고, 이 항목을 (로컬과,
+# SSH라면 원격에도) 설치했을 때만 쓰인다 — 정책: docs/terminal-compatibility-policy.md(TERM/terminfo).
+# 설치: `mise run install-terminfo` (= tic -x -o ~/.terminfo terminfo/maru.terminfo). 검증: `mise run
+# terminfo-check`.
+#
+# primary 이름은 Ghostty(`xterm-ghostty`)의 선례를 따라 `xterm-` 접두를 둔다 — 일부 소프트웨어가
+# `xterm*` TERM을 "xterm식 동작"으로 보수적으로 가정하기 때문이다. 짧은 alias `maru`도 같은 항목을
+# 가리킨다(XTVERSION 자기식별 이름과 일치).
+#
+# 캡은 maru가 "실제로" 지원하는 것만 정직하게 선언한다(없는 걸 광고하면 원격 프로그램이 오작동한다):
+#  - use=xterm-256color: 색·alt screen·마우스·커서키 등 표준 토대를 상속(tic가 compile-time에 펼침).
+#  - Sync(DECSET 2026 동기화 출력): begin=ESC[?2026h / end=ESC[?2026l. tmux가 재그리기를 이걸로 감싸
+#    플리커가 사라진다 — 이 항목을 만든 핵심 이유. 문자열은 ncurses xterm+sync 사실상 표준 형태이고
+#    tools/terminfo/check.sh가 실제 바이트를 round-trip 검증한다.
+#  - Tc: truecolor(SGR 38;2/48;2). maru는 24bit 색을 지원하고 COLORTERM=truecolor도 함께 알린다.
+#
+# 아직 선언하지 않은(후속 audit 후 추가 후보) 캡: bracketed paste(BE/BD, mode 2004 지원함), OSC52
+# 클립보드(Ms — 단 maru는 정책상 ask), focus(mode 1004). 최소·검증된 집합으로 시작한다.
+xterm-maru|maru|maru terminal emulator,
+	Sync=\E[?2026%?%p1%{1}%-%tl%eh%;,
+	Tc,
+	use=xterm-256color,

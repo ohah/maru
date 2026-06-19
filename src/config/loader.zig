@@ -157,6 +157,15 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "font.letter-spacing이 -8~32 범위 밖이거나 숫자가 아님 — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "theme.preset")) {
+        // 이름 붙은 컬러 테마(프리셋). config.theme를 통째로 그 색 세트로 깐다(theme.presetColors가 단일 출처).
+        // 개별 theme.* 키가 이 줄 *뒤에* 오면 그 색만 override한다(loader 순차 적용 — 나중 줄 우선). 프리셋 색은
+        // 정적 리터럴이라 arena dupe 불필요. 알 수 없는 값은 forgiving(기본 maru 유지 + diagnostic).
+        const preset = parseThemePreset(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "theme.preset은 maru|ghostty — 기본값 유지" });
+            return;
+        };
+        config.theme = theme.presetColors(preset);
     } else if (std.mem.eql(u8, key, "theme.background")) {
         config.theme.background = try dupValidColor(a, diags, line_no, key, value, config.theme.background);
     } else if (std.mem.eql(u8, key, "theme.foreground")) {
@@ -530,6 +539,12 @@ fn parseCursorShape(value: []const u8) ?theme.CursorShape {
     return null;
 }
 
+fn parseThemePreset(value: []const u8) ?theme.ThemePreset {
+    if (std.mem.eql(u8, value, "maru")) return .maru;
+    if (std.mem.eql(u8, value, "ghostty")) return .ghostty;
+    return null;
+}
+
 fn parseBool(value: []const u8) ?bool {
     if (std.mem.eql(u8, value, "true")) return true;
     if (std.mem.eql(u8, value, "false")) return false;
@@ -852,6 +867,47 @@ test "parse: theme.palette.N parses ANSI 16 overrides; out-of-range/bad index/co
     try std.testing.expectEqual(@as(?terminal.Rgb, terminal.Rgb{ .r = 0xff, .g = 0x00, .b = 0x00 }), ra.theme.palette[0]);
     try std.testing.expectEqual(@as(?terminal.Rgb, terminal.Rgb{ .r = 0x00, .g = 0xff, .b = 0x00 }), ra.theme.palette[15]);
     try std.testing.expect(ra.theme.palette[7] == null); // 잘못된 색은 안 담겨 기본 폴백
+}
+
+test "parse: theme.preset selects a named color theme as base; individual theme.* keys override" {
+    const defaults: theme.Config = .{};
+
+    // ghostty 프리셋: 배경/전경 + ANSI 16색이 Ghostty 기본색으로 깔린다(xterm 표준과 다름).
+    var g = try parse(std.testing.allocator, "theme.preset = ghostty");
+    defer g.deinit();
+    try std.testing.expectEqualStrings("#282c34", g.config.theme.background);
+    try std.testing.expectEqualStrings("#ffffff", g.config.theme.foreground);
+    try std.testing.expectEqualStrings("#1d1f21", g.config.theme.palette[0].?); // Ghostty black
+    try std.testing.expectEqualStrings("#eaeaea", g.config.theme.palette[15].?); // Ghostty bright white
+    try std.testing.expectEqual(@as(usize, 0), g.diagnostics.len);
+
+    // maru 프리셋 = struct default(기본 테마). 명시해도 기본값과 같고, 팔레트는 xterm 표준 폴백(null).
+    var m = try parse(std.testing.allocator, "theme.preset = maru");
+    defer m.deinit();
+    try std.testing.expectEqualStrings(defaults.theme.background, m.config.theme.background);
+    try std.testing.expect(m.config.theme.palette[0] == null);
+    try std.testing.expectEqual(@as(usize, 0), m.diagnostics.len);
+
+    // 프리셋은 base — 그 뒤 개별 theme.* 키가 일부만 override(순차 적용, 나중 줄 우선).
+    var o = try parse(std.testing.allocator,
+        \\theme.preset = ghostty
+        \\theme.background = #000000
+    );
+    defer o.deinit();
+    try std.testing.expectEqualStrings("#000000", o.config.theme.background); // override
+    try std.testing.expectEqualStrings("#ffffff", o.config.theme.foreground); // 프리셋 유지
+    try std.testing.expectEqualStrings("#1d1f21", o.config.theme.palette[0].?); // 프리셋 팔레트 유지
+
+    // 알 수 없는 프리셋은 forgiving — maru 기본 유지 + diagnostic 1건.
+    var b = try parse(std.testing.allocator, "theme.preset = bogus");
+    defer b.deinit();
+    try std.testing.expectEqualStrings(defaults.theme.background, b.config.theme.background);
+    try std.testing.expectEqual(@as(usize, 1), b.diagnostics.len);
+
+    // 파싱된 ghostty config는 resolve가 성공해야 한다(색 전부 유효) + background/palette가 ResolvedTheme까지 전파.
+    const ra = try appearance.resolve(g.config);
+    try std.testing.expectEqual(terminal.Rgb{ .r = 0x28, .g = 0x2c, .b = 0x34 }, ra.theme.background);
+    try std.testing.expectEqual(@as(?terminal.Rgb, terminal.Rgb{ .r = 0x1d, .g = 0x1f, .b = 0x21 }), ra.theme.palette[0]);
 }
 
 test "parse: resolved appearance never fails on parsed config (values pre-validated)" {

@@ -55,6 +55,47 @@ pub const ThemeConfig = struct {
     palette: [16]?[]const u8 = .{null} ** 16,
 };
 
+/// 이름 붙은 컬러 테마(프리셋). 색 세트의 base를 한 번에 고른다. 기본 maru. loader가 `theme.preset` 키로
+/// 파싱해 presetColors()로 config.theme를 채우고, 개별 theme.* 키가 그 뒤에서 일부를 override한다(순차 적용 —
+/// 나중 줄 우선; 프리셋 줄이 개별 색 키보다 뒤면 앞 설정을 리셋 — Ghostty `theme` 시맨틱과 동일). 색(룩)만
+/// 정하며, chrome 디자인 룩(`chrome.theme` = tui|rich)과는 직교다(둘은 그대로 공존).
+pub const ThemePreset = enum {
+    maru, // maru 기본 테마 — ThemeConfig struct default와 동일.
+    ghostty, // Ghostty 기본 테마 색(배경/전경 + ANSI 16색 팔레트).
+};
+
+/// Ghostty 기본 ANSI 16색(0~15). 출처: references/ghostty/src/terminal/color.zig의 Name.default(). xterm
+/// 표준(color.ansi16)과 **다른** Ghostty 고유 팔레트다 — `theme.preset = ghostty`가 이 값을 깐다.
+const ghostty_palette: [16]?[]const u8 = .{
+    "#1d1f21", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6",
+    "#666666", "#d54e53", "#b9ca4a", "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#eaeaea",
+};
+
+/// 프리셋의 색 세트를 ThemeConfig로 돌려준다(loader가 `theme.preset`을 만나면 config.theme에 통째로 깐다).
+/// 반환 색 문자열은 전부 **정적 리터럴**이라 arena dupe가 필요 없다(영구 수명 — resolve가 빌려도 안전).
+///
+/// 베이스/결정(메모리 "베이스·의사결정 명시"): ghostty는 references/ghostty의 기본값을 베이스로 한다 —
+/// background/foreground는 src/config/Config.zig, ANSI 16색은 src/terminal/color.zig(Name.default()). Ghostty가
+/// 정의하지 않는 값(cursor/selection은 Ghostty가 null=동적/반전, search_match·sidebar는 maru 고유 chrome 개념)은
+/// maru 기본값을 유지한다: cursor=#ffffff(Ghostty foreground와 같음), selection=#334455(Ghostty 배경 #282c34
+/// 청회색 톤에 어울림), sidebar_*=null(배경 #282c34에서 파생 — 사이드바·chrome도 자동으로 Ghostty 톤).
+pub fn presetColors(preset: ThemePreset) ThemeConfig {
+    return switch (preset) {
+        .maru => .{}, // struct default가 곧 maru 테마.
+        .ghostty => .{
+            .background = "#282c34",
+            .foreground = "#ffffff",
+            // cursor/selection/search_match*는 Ghostty가 안 정하므로 maru 기본과 같게 명시(프리셋 전환 시 리셋 일관성).
+            .cursor = "#ffffff",
+            .selection = "#334455",
+            .search_match = "#554a1a",
+            .search_match_current = "#997722",
+            // sidebar_*는 null 유지 → resolveTheme이 background(#282c34)에서 파생(+24/+48).
+            .palette = ghostty_palette,
+        },
+    };
+}
+
 pub const CursorShape = enum {
     block,
     bar,

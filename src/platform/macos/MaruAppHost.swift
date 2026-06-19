@@ -34,6 +34,28 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         window?.makeFirstResponder(self)
         updateDrawableSize()
         updateTrackingAreas()
+        // 파일/이미지/텍스트 드래그를 받으려면 타입을 등록해야 한다 — 등록하지 않으면 OS가 드래그 이벤트를
+        // 뷰에 전달조차 하지 않는다(드래그가 무반응이던 원인).
+        registerForDraggedTypes(Array(Self.dropTypes))
+    }
+
+    // MARK: 드래그앤드롭 (파일/이미지/URL/텍스트를 드래그 → 경로/텍스트 삽입)
+    //
+    // 베이스/결정: Ghostty 드롭 동작을 베이스로 한다(references/ghostty/.../SurfaceView_AppKit.swift) — 우선순위
+    // URL > 파일 URL(각각 셸 이스케이프 후 공백으로 join) > 평문(이스케이프 안 함 — 실행할 명령일 수 있음). 코드
+    // 표현은 옮기지 않고 maru 독립 구현이다. 이미지를 인라인으로 그리지는 않는다(경로만 — 그래픽 프로토콜은 별도).
+    static let dropTypes: Set<NSPasteboard.PasteboardType> = [.string, .fileURL, .URL]
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard let types = sender.draggingPasteboard.types,
+              !Set(types).isDisjoint(with: Self.dropTypes) else { return [] }
+        return .copy // copy 아이콘으로 드롭 가능함을 표시
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        // 내용 추출·삽입은 paste 로직을 가진 controller에 위임한다(클립보드 paste와 같은 경로 재사용 — keyDown이
+        // handleKeyDown에 위임하는 것과 동형). 세션/PTY 접근은 controller가 소유한다.
+        return controller?.handleDrop(sender.draggingPasteboard) ?? false
     }
 
     // Cmd+hover URL 하이라이트용 mouseMoved 추적. 보이는 영역 전체를 따라가게 inVisibleRect로 둔다.
@@ -1315,9 +1337,49 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func pastePasteboardText() {
-        guard let session = appSession,
-              let text = NSPasteboard.general.string(forType: .string),
-              !text.isEmpty else { return }
+        // 텍스트뿐 아니라 파일/이미지(파일 URL)·URL도 붙여넣는다 — pasteboardDropContent가 경로를 셸 이스케이프한다.
+        guard let content = pasteboardDropContent(NSPasteboard.general) else { return }
+        sendPasteText(content)
+    }
+
+    /// 드롭된 pasteboard 내용(경로/URL/텍스트)을 paste 경로로 삽입한다 — 뷰(MaruMetalTerminalView.performDragOperation)가
+    /// 위임한다. 클립보드 paste와 동일한 추출·전송 헬퍼를 재사용한다. 삽입할 게 있으면 true.
+    func handleDrop(_ pb: NSPasteboard) -> Bool {
+        guard let content = pasteboardDropContent(pb) else { return false }
+        sendPasteText(content)
+        return true
+    }
+
+    /// 드래그/클립보드에서 삽입할 내용을 뽑는다. 우선순위는 Ghostty 드롭과 동일하다(베이스):
+    /// URL > 파일 URL(각 경로를 셸 이스케이프 후 공백으로 join) > 평문(이스케이프 안 함 — 실행할 명령일 수 있음).
+    private func pasteboardDropContent(_ pb: NSPasteboard) -> String? {
+        if let url = pb.string(forType: .URL) {
+            return Self.shellEscape(url)
+        }
+        if let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty {
+            return urls.map { Self.shellEscape($0.path) }.joined(separator: " ")
+        }
+        if let text = pb.string(forType: .string), !text.isEmpty {
+            return text
+        }
+        return nil
+    }
+
+    /// 셸 버퍼에 경로/URL을 넣을 때 셸이 단어를 쪼개지 않게 공백·괄호 등 특수문자 앞에 백슬래시를 붙인다(평문
+    /// paste에는 적용 안 함 — 명령 보존). 베이스: Ghostty Shell.escape의 특수문자 집합. 백슬래시를 가장 먼저
+    /// 처리해(escapeChars 첫 글자) 이후 추가되는 백슬래시가 중복 이스케이프되지 않게 한다.
+    private static let shellEscapeChars = "\\ ()[]{}<>\"'`!#$&;|*?\t"
+    private static func shellEscape(_ s: String) -> String {
+        var result = s
+        for ch in shellEscapeChars {
+            result = result.replacingOccurrences(of: String(ch), with: "\\\(ch)")
+        }
+        return result
+    }
+
+    /// 텍스트를 paste 경로로 PTY에 보낸다(개행 정규화·bracketed paste 감싸기는 Zig 소유). 드래그·클립보드 공용.
+    private func sendPasteText(_ text: String) {
+        guard let session = appSession, !text.isEmpty else { return }
         let bytes = Array(text.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_paste_text(session, buf.baseAddress, buf.count)

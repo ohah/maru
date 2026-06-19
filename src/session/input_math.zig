@@ -19,6 +19,22 @@ pub fn adjustActiveForMove(active: usize, from: usize, to: usize) usize {
     return active;
 }
 
+/// 드래그 재정렬에서 목표 인덱스를 옮기는 탭과 같은 그룹(고정/비고정)으로 clamp한다. 베이스/결정: 사이드바는
+/// 고정 탭을 항상 배열 앞쪽 `[0, pinned_count)`에 모으는 불변식을 둔다(브라우저 탭 고정의 사실상 표준 — 고정/비고정이
+/// 안 섞임). 옮기는 탭이 고정이면(`moving_pinned`) 목표는 고정 영역 `[0, pinned_count-1]`로, 비고정이면 비고정 영역
+/// `[pinned_count, len-1]`로 가둔다. 그래서 비고정을 위로 끌어도 고정 영역을 침범하지 않고, 고정을 아래로 끌어도 비고정
+/// 영역으로 안 간다. 호출자는 `pinned_count <= len`·`len >= 1`을 보장하고, 불변식상 옮기는 탭이 고정이면 pinned_count≥1,
+/// 비고정이면 len>pinned_count다. 순수 함수라 OS·렌더 없이 단위 테스트로 경계를 고정한다.
+pub fn clampMoveToGroup(to: usize, moving_pinned: bool, pinned_count: usize, len: usize) usize {
+    if (moving_pinned) {
+        // 고정 영역 [0, pinned_count). pinned_count는 from(고정)이 있으니 ≥1.
+        const hi = pinned_count - 1;
+        return @min(to, hi);
+    }
+    // 비고정 영역 [pinned_count, len). from(비고정)이 있으니 len > pinned_count.
+    return std.math.clamp(to, pinned_count, len - 1);
+}
+
 /// 슬라이스에서 from의 원소를 to로 옮긴다(사이 원소는 회전으로 한 칸 밀림). std.mem.rotate라 무할당
 /// in-place — 실패 불가. from==to면 무동작. 호출자는 from/to가 범위 안임을 보장한다.
 pub fn rotateMove(comptime T: type, items: []T, from: usize, to: usize) void {
@@ -118,6 +134,25 @@ test "adjustActiveForMove follows the dragged tab and shifts in-between indices"
     try std.testing.expectEqual(@as(usize, 0), adjustActiveForMove(2, 2, 0)); // active=드래그 탭 → to
     try std.testing.expectEqual(@as(usize, 1), adjustActiveForMove(0, 2, 0)); // 사이(to<from) → +1
     try std.testing.expectEqual(@as(usize, 1), adjustActiveForMove(1, 1, 1)); // from==to 무동작
+}
+
+test "clampMoveToGroup keeps a drag target inside the dragged tab's pin group" {
+    // pinned 2 + unpinned 2 (len=4, pinned_count=2).
+    // 비고정 탭을 위(0)로 끌어도 비고정 영역 [2,3)으로만 — 고정 영역 침범 금지.
+    try std.testing.expectEqual(@as(usize, 2), clampMoveToGroup(0, false, 2, 4));
+    try std.testing.expectEqual(@as(usize, 2), clampMoveToGroup(1, false, 2, 4));
+    try std.testing.expectEqual(@as(usize, 2), clampMoveToGroup(2, false, 2, 4)); // 이미 경계
+    try std.testing.expectEqual(@as(usize, 3), clampMoveToGroup(3, false, 2, 4)); // 제자리
+    // 고정 탭을 아래로 끌어도 고정 영역 [0,2)로만 — 비고정 영역 침범 금지.
+    try std.testing.expectEqual(@as(usize, 1), clampMoveToGroup(3, true, 2, 4));
+    try std.testing.expectEqual(@as(usize, 1), clampMoveToGroup(2, true, 2, 4));
+    try std.testing.expectEqual(@as(usize, 0), clampMoveToGroup(0, true, 2, 4)); // 제자리
+    try std.testing.expectEqual(@as(usize, 1), clampMoveToGroup(1, true, 2, 4)); // 고정끼리 swap
+    // pinned 0(전부 비고정): 비고정 영역 [0, len)이라 clamp가 [0,len-1].
+    try std.testing.expectEqual(@as(usize, 0), clampMoveToGroup(0, false, 0, 3));
+    try std.testing.expectEqual(@as(usize, 2), clampMoveToGroup(9, false, 0, 3));
+    // 전부 고정(pinned_count==len): 고정 영역 [0, len-1].
+    try std.testing.expectEqual(@as(usize, 2), clampMoveToGroup(9, true, 3, 3));
 }
 
 test "rotateMove moves an element from→to, rotating the span between" {

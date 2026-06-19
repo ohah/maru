@@ -246,6 +246,27 @@ fn gridFromRectPx(cell_width_px: u32, cell_height_px: u32, w_px: u32, h_px: u32)
     return terminal.clampGridSize(.{ .cols = @intCast(raw_cols), .rows = @intCast(raw_rows) });
 }
 
+/// font.line-height(배수)·font.letter-spacing(논리 pt)을 base cell px에 적용한다(refreshCellMetrics의 단일
+/// 적용점이 호출하는 순수 helper — OS·CoreText 없이 곱/가산 산술을 단위 테스트로 못박는다). line-height는
+/// cell_height_px에 곱하고, letter-spacing은 논리 pt를 backing px(× scale_milli/1000, padding px 환산과 동형)로
+/// 바꿔 cell_width_px에 가산한다(음수 가능 → 최소 1px로 saturate해 0폭 grid를 막는다). 두 px가 grid·atlas·
+/// hit-test의 진실 소스라, 여기 한 곳만 바꾸면 나머지가 자동 정합한다. 기본값(1.0/0.0)이면 입력 그대로 통과.
+fn applyFontSpacing(
+    base_width_px: u32,
+    base_height_px: u32,
+    line_height: f32,
+    letter_spacing_pt: f32,
+    scale_milli: u32,
+) struct { width_px: u32, height_px: u32 } {
+    const height_px: u32 = @intFromFloat(@round(@as(f32, @floatFromInt(base_height_px)) * line_height));
+    // 논리 pt → backing px(분수 scale 그대로). padding px 환산(× scale_milli / 1000)과 같은 방식.
+    const spacing_px: f32 = letter_spacing_pt * @as(f32, @floatFromInt(scale_milli)) / 1000.0;
+    // i64로 가산해(음수 spacing) 1px 미만이면 1로 saturate — 0폭이면 grid가 div-by-cell에서 폭주한다.
+    const width_i: i64 = @as(i64, base_width_px) + @as(i64, @intFromFloat(@round(spacing_px)));
+    const width_px: u32 = @intCast(@max(@as(i64, 1), width_i));
+    return .{ .width_px = width_px, .height_px = height_px };
+}
+
 /// color.Rgb를 불투명(A=0xFF) 0xAARRGGBB로 packing한다(사이드바 strip/활성 밴드 셀 배경 색용). 셀
 /// 배경은 A=0xFF여야 셰이더가 그 색으로 칠한다(A=0이면 "배경 없음").
 /// rgb + alpha를 GpuQuad/cell 색 워드(0xAARRGGBB)로 패킹. 색 패킹의 단일 출처 — packOpaqueRgb·스크롤바 fade가 공유.
@@ -3045,6 +3066,20 @@ pub const AppSession = struct {
                 self.cell_height_px = metrics.cell_height_px;
             }
         }
+        // line-height(행간)·letter-spacing(자간) config를 cell 두 px에 단일 적용한다 — native/fallback이 base
+        // cell 크기를 정한 '직후', grid·atlas·hit-test·IME가 파생되기 '전'. line-height는 cell_height_px에 곱하고,
+        // letter-spacing은 논리 pt를 backing px로 환산(× scale_milli/1000, padding px 환산과 동일 방식)해 cell_width_px에
+        // 가산한다. 늘어난 cell은 native 셰이퍼가 glyph를 slot 안 가운데로 그려 자동 여백이 된다 — 셰이퍼엔 안 넘긴다
+        // (넘기면 Zig grid 계산과 native slot이 어긋난다). 기본값(1.0/0.0)이면 곱 1.0·가산 0이라 현 동작과 동일.
+        const spaced = applyFontSpacing(
+            self.cell_width_px,
+            self.cell_height_px,
+            self.appearance.font.line_height,
+            self.appearance.font.letter_spacing,
+            self.scale_milli,
+        );
+        self.cell_width_px = spaced.width_px;
+        self.cell_height_px = spaced.height_px;
         // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처). 폭은 현재
         // 논리 폭(sidebar_width_pt — 사용자 드래그로 바뀔 수 있음)에서 파생하므로 DPI 변경에도 유지된다.
         // minimal 세션은 사이드바가 없으므로 0 고정(터미널이 전폭을 쓴다).
@@ -6884,6 +6919,50 @@ test "gridFromBacking divides backing pixels by cell size with placeholder + cla
     try std.testing.expectEqual(terminal.Size{ .cols = 116, .rows = 32 }, gridFromBacking(960, 600, 8, 18, 0, .{ .left = 10, .right = 20, .top = 4, .bottom = 8 }));
     // 비정상 큰 padding도 언더플로 없이 최소 grid로 saturate.
     try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(960, 600, 8, 18, 0, .{ .left = 10000, .right = 10000, .top = 10000, .bottom = 10000 }));
+}
+
+// refreshCellMetrics의 단일 적용점이 호출하는 line-height·letter-spacing 산술을 못박는다(OS·CoreText 없이 곱/가산
+// 검증 — 비-macOS CI에서도 돈다). 이 두 px가 grid·atlas·hit-test의 진실 소스라, 여기 곱/가산이 맞으면 나머지가 자동 정합.
+test "applyFontSpacing: line-height multiplies height, letter-spacing adds to width (scaled, saturating)" {
+    // 기본값(1.0/0.0)은 base 그대로 — 회귀 최소(현 동작과 동일).
+    {
+        const r = applyFontSpacing(8, 18, 1.0, 0.0, 1000);
+        try std.testing.expectEqual(@as(u32, 8), r.width_px);
+        try std.testing.expectEqual(@as(u32, 18), r.height_px);
+    }
+    // line-height 2.0 → 높이 2배(18→36), 폭은 letter-spacing 0이라 불변.
+    {
+        const r = applyFontSpacing(8, 18, 2.0, 0.0, 1000);
+        try std.testing.expectEqual(@as(u32, 8), r.width_px);
+        try std.testing.expectEqual(@as(u32, 36), r.height_px);
+    }
+    // line-height 1.5 → 18×1.5=27(round). letter-spacing 4pt @1x → +4px(8→12).
+    {
+        const r = applyFontSpacing(8, 18, 1.5, 4.0, 1000);
+        try std.testing.expectEqual(@as(u32, 12), r.width_px);
+        try std.testing.expectEqual(@as(u32, 27), r.height_px);
+    }
+    // letter-spacing은 논리 pt × 분수 scale로 환산 — 2x(scale 2000)에서 4pt는 +8px(8→16). 높이는 1.0이라 불변.
+    {
+        const r = applyFontSpacing(8, 18, 1.0, 4.0, 2000);
+        try std.testing.expectEqual(@as(u32, 16), r.width_px);
+        try std.testing.expectEqual(@as(u32, 18), r.height_px);
+    }
+    // 음수 letter-spacing → 폭 좁힘(8 + (-3) = 5). round 동작 확인(-2.5pt → -3px? round(-2.5)= -2 in zig? half-away: -3).
+    {
+        const r = applyFontSpacing(8, 18, 1.0, -3.0, 1000);
+        try std.testing.expectEqual(@as(u32, 5), r.width_px);
+    }
+    // 큰 음수 letter-spacing이 폭을 1 미만으로 끌어내려도 1px로 saturate(0폭 grid div 폭주 방지).
+    {
+        const r = applyFontSpacing(8, 18, 1.0, -100.0, 1000);
+        try std.testing.expectEqual(@as(u32, 1), r.width_px);
+    }
+    // 정확히 base를 0으로 만드는 음수도 1로 saturate(8 + (-8) = 0 → 1).
+    {
+        const r = applyFontSpacing(8, 18, 1.0, -8.0, 1000);
+        try std.testing.expectEqual(@as(u32, 1), r.width_px);
+    }
 }
 
 // window padding이 터미널 영역 rect(termRect)를 좌상으로 들이고 폭/높이를 2배만큼 줄이는지 고정한다 — 이 rect가

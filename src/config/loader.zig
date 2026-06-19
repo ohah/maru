@@ -66,6 +66,11 @@ const min_font_size: f32 = 1.0;
 // font.size-step 허용 범위 — theme.zig가 단일 출처(resolveFont도 같은 const를 써 drift 없음).
 const max_font_step: f32 = theme.font_size_step_max;
 const min_font_step: f32 = theme.font_size_step_min;
+// font.line-height / font.letter-spacing 허용 범위 — theme.zig 단일 출처(resolveFont도 같은 const 공유, drift 없음).
+const max_line_height: f32 = theme.font_line_height_max;
+const min_line_height: f32 = theme.font_line_height_min;
+const max_letter_spacing: f32 = theme.font_letter_spacing_max;
+const min_letter_spacing: f32 = theme.font_letter_spacing_min;
 
 /// config 텍스트를 raw Config로 파싱한다(파일시스템 무관, 순수). 알 수 없는 key/잘못된 값은
 /// 기본값 유지 + diagnostic. OOM만 에러.
@@ -151,6 +156,27 @@ fn applyKey(
             return;
         }
         config.font.size_step = step;
+    } else if (std.mem.eql(u8, key, "font.line-height")) {
+        const lh = std.fmt.parseFloat(f32, value) catch {
+            try diags.append(a, .{ .line = line_no, .message = "font.line-height가 숫자가 아님 — 기본값 유지" });
+            return;
+        };
+        if (!(lh >= min_line_height and lh <= max_line_height)) {
+            try diags.append(a, .{ .line = line_no, .message = "font.line-height가 0.5~3.0 범위 밖 — 기본값 유지" });
+            return;
+        }
+        config.font.line_height = lh;
+    } else if (std.mem.eql(u8, key, "font.letter-spacing")) {
+        const ls = std.fmt.parseFloat(f32, value) catch {
+            try diags.append(a, .{ .line = line_no, .message = "font.letter-spacing이 숫자가 아님 — 기본값 유지" });
+            return;
+        };
+        // 음수 허용(칸 좁힘) — 범위만 검사한다(NaN은 !(>=min and <=max)로 함께 거부).
+        if (!(ls >= min_letter_spacing and ls <= max_letter_spacing)) {
+            try diags.append(a, .{ .line = line_no, .message = "font.letter-spacing이 -8~32 범위 밖 — 기본값 유지" });
+            return;
+        }
+        config.font.letter_spacing = ls;
     } else if (std.mem.eql(u8, key, "theme.background")) {
         config.theme.background = try dupValidColor(a, diags, line_no, key, value, config.theme.background);
     } else if (std.mem.eql(u8, key, "theme.foreground")) {
@@ -599,6 +625,8 @@ test "parse: full config sets every field" {
         \\font.family = JetBrains Mono
         \\font.size = 16
         \\font.size-step = 2
+        \\font.line-height = 1.25
+        \\font.letter-spacing = 1.5
         \\theme.background = #001122
         \\theme.foreground = #ffeedd
         \\cursor.shape = bar
@@ -613,6 +641,8 @@ test "parse: full config sets every field" {
     try std.testing.expectEqualStrings("JetBrains Mono", p.config.font.family);
     try std.testing.expectEqual(@as(f32, 16), p.config.font.size);
     try std.testing.expectEqual(@as(f32, 2), p.config.font.size_step); // font.size-step 파싱(기본 1)
+    try std.testing.expectEqual(@as(f32, 1.25), p.config.font.line_height); // font.line-height 파싱(기본 1.0)
+    try std.testing.expectEqual(@as(f32, 1.5), p.config.font.letter_spacing); // font.letter-spacing 파싱(기본 0.0)
     try std.testing.expectEqualStrings("#001122", p.config.theme.background);
     try std.testing.expectEqualStrings("#ffeedd", p.config.theme.foreground);
     try std.testing.expectEqual(theme.CursorShape.bar, p.config.cursor.shape);
@@ -727,6 +757,68 @@ test "parse: font.size-step out-of-range/non-numeric is forgiving (keeps default
         defer p.deinit();
         try std.testing.expectEqual(@as(f32, 4.5), p.config.font.size_step);
         try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+    }
+}
+
+test "parse: font.line-height parses valid; out-of-range/non-numeric is forgiving (keeps default 1.0)" {
+    const defaults = theme.Config{};
+    {
+        var p = try parse(std.testing.allocator, "font.line-height = 1.5\n"); // 유효(소수 배수)
+        defer p.deinit();
+        try std.testing.expectEqual(@as(f32, 1.5), p.config.font.line_height);
+        try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+    }
+    {
+        var p = try parse(std.testing.allocator, "font.line-height = 0.4\n"); // 0.5 미만 → 거부
+        defer p.deinit();
+        try std.testing.expectEqual(defaults.font.line_height, p.config.font.line_height);
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+    {
+        var p = try parse(std.testing.allocator, "font.line-height = 4\n"); // 3.0 초과 → 거부
+        defer p.deinit();
+        try std.testing.expectEqual(defaults.font.line_height, p.config.font.line_height);
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+    {
+        var p = try parse(std.testing.allocator, "font.line-height = tall\n"); // 비숫자 → 거부
+        defer p.deinit();
+        try std.testing.expectEqual(defaults.font.line_height, p.config.font.line_height);
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+}
+
+test "parse: font.letter-spacing parses valid (incl. negative); out-of-range/non-numeric is forgiving" {
+    const defaults = theme.Config{};
+    {
+        var p = try parse(std.testing.allocator, "font.letter-spacing = 2.5\n"); // 양수 유효
+        defer p.deinit();
+        try std.testing.expectEqual(@as(f32, 2.5), p.config.font.letter_spacing);
+        try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+    }
+    {
+        var p = try parse(std.testing.allocator, "font.letter-spacing = -1.5\n"); // 음수 유효(칸 좁힘)
+        defer p.deinit();
+        try std.testing.expectEqual(@as(f32, -1.5), p.config.font.letter_spacing);
+        try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+    }
+    {
+        var p = try parse(std.testing.allocator, "font.letter-spacing = -16\n"); // -8 미만 → 거부
+        defer p.deinit();
+        try std.testing.expectEqual(defaults.font.letter_spacing, p.config.font.letter_spacing);
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+    {
+        var p = try parse(std.testing.allocator, "font.letter-spacing = 64\n"); // 32 초과 → 거부
+        defer p.deinit();
+        try std.testing.expectEqual(defaults.font.letter_spacing, p.config.font.letter_spacing);
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+    {
+        var p = try parse(std.testing.allocator, "font.letter-spacing = wide\n"); // 비숫자 → 거부
+        defer p.deinit();
+        try std.testing.expectEqual(defaults.font.letter_spacing, p.config.font.letter_spacing);
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
     }
 }
 

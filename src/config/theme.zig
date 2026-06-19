@@ -4,12 +4,32 @@ pub const FontConfig = struct {
     /// ⌘+/⌘-(increase/decrease_font_size)가 한 번에 바꾸는 폰트 크기 증분(pt). 기본 1.0. loader가 `font.size-step`
     /// 키로 파싱하고, 런타임 폰트 조절이 이 값을 쓴다(⌘0 reset은 size로 복귀 — step과 무관). 범위는 아래 const.
     size_step: f32 = 1.0,
+    /// 행간 배수(line-height multiplier). 1.0=CoreText 자동 cell 높이 그대로, 1.5=50% 더 큰 줄 간격. loader가
+    /// `font.line-height` 키로 파싱한다. 적용은 refreshCellMetrics 한 곳뿐 — cell_height_px에 이 배수를 곱한다.
+    /// 늘어난 높이는 native 셰이퍼가 glyph를 slot 안 baseline·세로 가운데로 그려 위아래 여백이 된다(grid 자동 정합).
+    /// 범위는 아래 const(0.5~3.0 — 너무 작으면 줄이 겹치고, 너무 크면 화면당 행이 급감).
+    line_height: f32 = 1.0,
+    /// 자간(letter-spacing, 논리 pt). 0=CoreText advance 그대로, 양수=칸 넓힘, 음수=칸 좁힘. loader가
+    /// `font.letter-spacing` 키로 파싱한다. 적용은 refreshCellMetrics 한 곳뿐 — 논리 pt를 backing px로 환산해
+    /// cell_width_px에 가산한다(최소 1px로 saturate). 늘어난 폭은 native 셰이퍼가 glyph를 가로 가운데로 그려 좌우
+    /// 여백이 된다(grid 자동 정합). 범위는 아래 const(-8~32 pt — 음수 허용).
+    letter_spacing: f32 = 0.0,
 };
 
 /// font.size-step 허용 범위(단일 출처 — loader 파싱 검증과 appearance resolveFont 검증이 공유해 drift 방지).
 /// 0/음수면 ⌘+/⌘-가 무동작/역방향이 되고, 너무 크면 한 번에 범위를 튄다.
 pub const font_size_step_min: f32 = 0.1;
 pub const font_size_step_max: f32 = 32.0;
+
+/// font.line-height 허용 배수 범위(단일 출처 — loader 파싱과 appearance resolveFont가 공유). 0.5 미만이면 줄이
+/// 겹쳐 읽기 어렵고, 3.0 초과면 화면당 행 수가 급감한다(가독성 가드).
+pub const font_line_height_min: f32 = 0.5;
+pub const font_line_height_max: f32 = 3.0;
+
+/// font.letter-spacing 허용 범위(논리 pt, 단일 출처 — loader 파싱과 appearance resolveFont가 공유). 음수(칸 좁힘)를
+/// 허용하되 -8pt 미만이면 글자가 심하게 겹치고, 32pt 초과면 칸이 과도하게 벌어진다(가독성 가드).
+pub const font_letter_spacing_min: f32 = -8.0;
+pub const font_letter_spacing_max: f32 = 32.0;
 
 pub const ThemeConfig = struct {
     background: []const u8 = "#101010",

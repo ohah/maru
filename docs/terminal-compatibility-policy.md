@@ -56,13 +56,27 @@ Maru는 자식 셸 env에 `TERM_PROGRAM=ghostty`를 주입한다(부모가 남�
 
 이건 알림 호환을 위한 **식별값**이며 `TERM`(터미널 capability)과는 별개다 — `TERM`은 `config.term`으로 사용자가 바꿀 수 있지만 `TERM_PROGRAM`은 알림 식별용 고정값이다. 트레이드오프: Maru가 진짜 Ghostty는 아니므로 Ghostty 특화 시퀀스를 가정하는 프로그램과 미세한 차이가 날 수 있으나, Maru가 미지원하는 시퀀스는 무시하므로 무해하다. `TERM_PROGRAM_VERSION`은 주입하지 않는다(현재 식별 whitelist는 키 이름만 보므로 불요).
 
-자체 terminfo는 다음 조건이 갖춰진 뒤 opt-in 실험으로 추가한다.
+**현재 상태 — opt-in `xterm-maru` 추가됨**: 자체 terminfo 항목 `terminfo/maru.terminfo`(primary
+`xterm-maru`, 짧은 alias `maru`)가 있다. Maru가 **실제 지원하는 캡만 정직하게** 선언한다 —
+`use=xterm-256color` 토대 위에 동기화 출력(`Sync`, DECSET 2026)과 truecolor(`Tc`)를 더한다.
+`Sync`는 tmux가 재그리기를 한 프레임으로 묶게 해 tmux+SSH 레이아웃 플리커를 직접 고친다. 로컬
+설치는 `mise run install-terminfo`(→ `~/.terminfo`, sudo 불필요), 적합성 검증은
+`mise run terminfo-check`(`tic` 클린 컴파일 + `Sync`의 2026 begin/end 바이트 round-trip + `Tc`
+실측 — "추측 말고 캡처"). 켜는 법은 [설정 파일](configuration.md)의 `term` 절. **기본 `term`은
+여전히 `xterm-256color`다.**
 
-- `tests/oracle/` fixture로 주요 CSI/OSC/alternate screen 동작을 비교할 수 있다.
-- `tests/integration/ssh/` 또는 opt-in SSH smoke에서 원격 fallback 손해를 볼 수 있다.
-- terminfo 설치/배포/원격 fallback 정책을 사용자가 이해할 수 있게 문서화한다.
+선행 조건 충족 현황:
 
-기본값 전환은 별도 PR에서 사용자와 다시 논의한다.
+- [x] terminfo 설치/배포/원격 fallback 정책을 사용자가 이해할 수 있게 문서화한다 —
+  [설정 파일](configuration.md)의 `term` 절(원격 미설치 시 깨짐·수동 설치 한 줄·기본값 폴백 안내)과
+  이 문서.
+- [ ] `tests/oracle/` fixture로 주요 CSI/OSC/alternate screen 동작을 비교할 수 있다.
+- [ ] `tests/integration/ssh/` 또는 opt-in SSH smoke에서 원격 fallback 손해를 볼 수 있다(원격 자동
+  전파 `maru ssh` 증분과 함께 추가한다).
+
+기본값 전환은 위 남은 조건을 채운 뒤 **별도 PR에서 사용자와 다시 논의한다** — 전파+폴백이 충분히
+무던해진 다음에 "벌어서" 얻는다(opt-in이어도 전파를 붙이면 원격에서 자동으로 안전해져, 전환의 실익
+자체가 작다).
 
 ## OSC52 clipboard
 

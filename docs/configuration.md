@@ -148,6 +148,34 @@ window.padding-left   = 8
 term = xterm-ghostty   # 그 terminfo가 설치돼 있어야 한다
 ```
 
+#### opt-in: Maru 자체 terminfo (`xterm-maru`)
+
+Maru는 자체 terminfo 항목 `xterm-maru`(짧은 alias `maru`)를 제공한다. 이건 **기본값이 아니라
+opt-in**이다 — 기본 `term`은 호환성을 위해 `xterm-256color`로 둔다(정책: [터미널 호환성/보안
+정책](terminal-compatibility-policy.md)의 TERM/terminfo). `xterm-maru`는 Maru가 실제 지원하는
+캡만 정직하게 선언한다. 특히 **동기화 출력(`Sync`, DECSET 2026)** 을 알려, tmux가 재그리기를 한
+프레임으로 묶어 **tmux+SSH에서 보이던 짧은 레이아웃 플리커가 사라진다**. truecolor(`Tc`)도 선언한다.
+
+켜는 법:
+
+```sh
+mise run install-terminfo   # ~/.terminfo에 설치(sudo 불필요)
+```
+
+```conf
+term = xterm-maru
+```
+
+> **원격(SSH) 주의**: terminfo는 프로그램이 읽는 머신에 있어야 한다. `xterm-maru`를 켠 채 원격에
+> 접속하면 원격에는 이 항목이 없어 `vim`/`tmux`/`less` 등이 `unknown terminal type`으로 깨질 수
+> 있다. 원격 자동 전파는 별도 증분(`maru ssh`)이며, 그 전까지는 원격마다 한 번씩 직접 설치한다:
+>
+> ```sh
+> infocmp -x xterm-maru | ssh <host> 'mkdir -p ~/.terminfo && tic -x -o ~/.terminfo -'
+> ```
+>
+> 원격에 설치할 수 없으면 원격 세션에서는 `term`을 기본 `xterm-256color`로 두는 편이 안전하다.
+
 > Maru는 대화형 셸을 macOS `login(1)`로 감싸 띄운다(Terminal.app·Ghostty와 동일) — 전체 로그인
 > 세션(getlogin·SHELL·utmp·hushlogin)을 셋업하고 `.zprofile`/`.zlogin`까지 source한다. 그래서
 > PATH·EDITOR·키바인딩(예: `bindkey -e`로 `Cmd+←/→`=줄 시작/끝)이 사용자 환경대로 잡혀, 대개 `term`을

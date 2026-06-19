@@ -313,6 +313,13 @@ static void maru_fill_cell_quad(
         const float gap = fmaxf(2.0f, cell_h * 0.10f); // 두 선 사이 간격
         px_bottom = px_bottom - t2 - gap; // 하단 선 + gap 만큼 위로
         px_top = px_bottom - fmaxf(1.5f, cell_h * 0.10f); // 둘째 선(약간 얇게)
+    } else if (cell.reserved == 8) {
+        // OSC 133 거터 바: 셀 왼쪽 '바깥'(col 0 글자 시작 전 여백)에 세로 띠를 그린다 — bar(3)는 셀
+        // 안 왼쪽이지만 이건 origin 왼쪽으로 빼 col 0 글자와 안 겹친다. window padding 여백이 있으면
+        // 그 안에 들어가고, 없으면 사이드바 경계에 살짝 붙는다(글자 침범보단 낫다).
+        const float thickness = fmaxf(2.0f, cw * 0.15f);
+        px_right = px_left;             // 셀 왼쪽 가장자리에서
+        px_left = px_left - thickness;  // 바깥쪽으로 thickness만큼
     }
     // 글리프 확대(사이드바 에이전트 심볼): 셀 사각형을 중앙 기준으로 키워 같은 atlas slot을 stretch한다(약간
     // 부드러우나 보조 심볼이라 무방). UV는 그대로라 글리프만 커진다. glyph_scale=1.0이면 무동작(일반 셀·커서).

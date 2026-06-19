@@ -170,7 +170,7 @@ keybind = Ctrl+Cmd+1 = select_tab:0
 keybind = Cmd+D = unbind
 keybind = F2 = text:hello
 keybind = Cmd+E = ctrl:[
-keybind = Cmd+K = esc:[2J
+keybind = F4 = esc:[2J
 ```
 
 - **조합**: `Cmd`/`Ctrl`/`Alt`/`Shift`(대소문자 무관)를 `+`로 잇고 마지막에 키. 키는 글자 한 자,
@@ -181,7 +181,9 @@ keybind = Cmd+K = esc:[2J
   pane 포커스 `focus_pane_left`·`focus_pane_right`·`focus_pane_up`·`focus_pane_down`, split 순환 `next_pane`·`previous_pane`,
   폰트 크기 `increase_font_size`·`decrease_font_size`(증분은 `font.size-step`)·`reset_font_size`·`set_font_size:N`
   (N=절대 pt, 6~72로 클램프 — 예: `Ctrl+Cmd+1 = set_font_size:14`로 크기 프리셋), 그리고 `select_all`·
-  `toggle_find`·`find_next`·`find_previous`·`toggle_command_palette`.
+  `clear_screen`(화면+스크롤백 비우기, 빌트인 ⌘K — alt 화면 무동작, 셸 프롬프트면 ^L로 재그림. 자세히는
+  [키 입력과 단축키](key-input-and-shortcuts.md))·`toggle_find`·`find_next`·
+  `find_previous`·`toggle_command_palette`.
 - **`unbind`**: action 자리에 `unbind`를 적으면 그 조합의 **빌트인 기본 동작을 끈다**(예:
   `keybind = Cmd+T = unbind` → Cmd+T가 새 Term을 안 연다). 끈 조합은 빌트인 테이블을 건너뛰어
   `Cmd`+키는 아무 동작도 안 하고, 그 외 조합은 셸로 입력이 전달된다. 다른 action을 지정하면(덮어쓰기)

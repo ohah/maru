@@ -26,9 +26,13 @@ pub fn adjustActiveForMove(active: usize, from: usize, to: usize) usize {
 /// 영역으로 안 간다. 호출자는 `pinned_count <= len`·`len >= 1`을 보장하고, 불변식상 옮기는 탭이 고정이면 pinned_count≥1,
 /// 비고정이면 len>pinned_count다. 순수 함수라 OS·렌더 없이 단위 테스트로 경계를 고정한다.
 pub fn clampMoveToGroup(to: usize, moving_pinned: bool, pinned_count: usize, len: usize) usize {
+    // 계약을 코드로: 옮기는 탭이 고정이면 그 탭이 고정 영역에 있으니 pinned_count≥1이어야 한다(불변식 위반을
+    // 디버그/테스트에서 노출). 불변식이 모든 진입 경로에서 성립하면 도달 불가지만, 깨졌을 때 아래 hi 계산이
+    // usize underflow(maxInt)로 clamp를 조용히 무력화하는 걸 막는다.
+    std.debug.assert(!moving_pinned or pinned_count >= 1);
     if (moving_pinned) {
-        // 고정 영역 [0, pinned_count). pinned_count는 from(고정)이 있으니 ≥1.
-        const hi = pinned_count - 1;
+        // 고정 영역 [0, pinned_count). pinned_count는 from(고정)이 있으니 ≥1 — saturating으로 0이어도 안전.
+        const hi = if (pinned_count == 0) 0 else pinned_count - 1;
         return @min(to, hi);
     }
     // 비고정 영역 [pinned_count, len). from(비고정)이 있으니 len > pinned_count.

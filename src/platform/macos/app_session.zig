@@ -2587,16 +2587,61 @@ pub const AppSession = struct {
     /// 같이 회전(무할당 in-place)하고 active_tab을 보정한다. Tab은 heap-pin이라 포인터만 셔플되고 surface/PTY/reader
     /// 포인터는 안 흔들린다. app_window.tabs는 surface_ptrs.items(같은 backing 배열, 내용만 재정렬)라 재바인딩 불요.
     /// 범위 밖이면 무동작.
-    fn moveTab(self: *AppSession, from: usize, raw_to: usize) void {
+    /// clamp으로 확정된 **최종 안착 인덱스**를 반환한다(no-op·범위 밖이면 from) — 드래그 핫패스가 pre-clamp를
+    /// 따로 안 하고 이 반환값을 단일 출처로 쓴다(countPinnedTabs O(n)가 drag당 1회로 준다). 반환값 무시도 호환된다.
+    fn moveTab(self: *AppSession, from: usize, raw_to: usize) usize {
         const len = self.tabs.items.len;
-        if (from >= len or raw_to >= len) return;
+        if (from >= len or raw_to >= len) return from;
         const to = clampMoveToGroup(raw_to, self.tabs.items[from].pinned, self.countPinnedTabs(), len);
-        if (from == to) return; // 같은 그룹으로 clamp한 결과 제자리면 무동작
+        if (from == to) return from; // 같은 그룹으로 clamp한 결과 제자리면 무동작
         rotateMove(*Tab, self.tabs.items, from, to);
         rotateMove(*app.Surface, self.surface_ptrs.items, from, to);
         self.app_window.active_tab = adjustActiveForMove(self.app_window.active_tab, from, to);
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
+        return to;
+    }
+
+    /// 고정 탭을 앞쪽으로 stable-partition한다(고정끼리·비고정끼리 상대 순서 유지). tabs와 surface_ptrs를 **함께**
+    /// 재배열하고 active_tab도 가리키던 *Tab을 추적해 새 인덱스로 보정한다. 복원(applyWorkspaceWindow)이 저장 순서를
+    /// 그대로 깔아 고정/비고정이 섞였을 때 불변식([0, pinned_count)에 고정 연속)을 복구한다. two-pass(고정 먼저, 비고정
+    /// 뒤)라 안정적이고 무할당이 아닌 임시 버퍼를 쓴다(탭 수는 적다). active *Tab은 재배열 전 캡처해 새 위치를 찾는다.
+    fn stablePartitionPinned(self: *AppSession) void {
+        const len = self.tabs.items.len;
+        if (len == 0) return;
+        const active_ptr: ?*Tab = if (self.app_window.active_tab < len) self.tabs.items[self.app_window.active_tab] else null;
+        var new_tabs = self.allocator.alloc(*Tab, len) catch return; // 실패 시 재배열 생략(복원은 진행, 불변식만 미보장)
+        defer self.allocator.free(new_tabs);
+        var new_surfaces = self.allocator.alloc(*app.Surface, len) catch return;
+        defer self.allocator.free(new_surfaces);
+        var w: usize = 0;
+        for (self.tabs.items, self.surface_ptrs.items) |t, s| if (t.pinned) { // pass 1: 고정(상대 순서 유지)
+            new_tabs[w] = t;
+            new_surfaces[w] = s;
+            w += 1;
+        };
+        for (self.tabs.items, self.surface_ptrs.items) |t, s| if (!t.pinned) { // pass 2: 비고정(상대 순서 유지)
+            new_tabs[w] = t;
+            new_surfaces[w] = s;
+            w += 1;
+        };
+        @memcpy(self.tabs.items, new_tabs);
+        @memcpy(self.surface_ptrs.items, new_surfaces);
+        if (active_ptr) |ap| for (self.tabs.items, 0..) |t, i| if (t == ap) { // active *Tab의 새 인덱스로 보정
+            self.app_window.active_tab = i;
+            break;
+        };
+    }
+
+    /// 디버그 불변식 확인(런타임 — assertPinnedPrefix는 테스트 전용 std.testing이라 별도). 고정 탭이 앞쪽
+    /// [0, pinned_count)에 연속이고 그 뒤는 전부 비고정인지 assert. 위반은 정렬 로직 버그를 디버그에서 노출한다.
+    fn assertPinnedPrefixRuntime(self: *const AppSession) void {
+        var seen_unpinned = false;
+        for (self.tabs.items) |t| {
+            if (t.pinned) {
+                std.debug.assert(!seen_unpinned); // 비고정 뒤에 고정이 나오면 불변식 위반
+            } else seen_unpinned = true;
+        }
     }
 
     /// 워크스페이스 탭의 위치 고정을 토글하고 불변식(고정 탭은 배열 앞쪽 `[0, pinned_count)`에 연속)을 유지한다.
@@ -2620,8 +2665,14 @@ pub const AppSession = struct {
         // 새 pinned_count 기준 목적 인덱스: pin이면 고정 영역 끝(count-1), unpin이면 비고정 영역 시작(count).
         const pinned_count = self.countPinnedTabs();
         const to: usize = if (tab.pinned) pinned_count - 1 else pinned_count;
-        self.moveTab(idx, to); // 같은 그룹 내 clamp이라 그대로 to로 이동(active_tab·surface_ptrs도 같이)
-        self.metal_dirty = true; // moveTab이 이미 세우지만, from==to(이미 경계)면 안 세우므로 보장.
+        _ = self.moveTab(idx, to); // 같은 그룹 내 clamp이라 그대로 to로 이동(active_tab·surface_ptrs도 같이)
+        // 무조건 rebuildSidebar: moveTab은 from==to(이미 그룹 경계 — 단일 탭/경계 탭 토글)면 early-return해 사이드바
+        // 밴드/슬롯 상태(rebuildSidebar 산출)를 다시 짓지 않는다. 토글이 reorder 없이도 사이드바 모델을 새 pin 상태로
+        // 일관되게 두려고 여기서 무조건 다시 짓는다(토글은 핫패스가 아니라 중복 호출 무해). 📌 prefix 자체는 매 frame
+        // buildSidebarTitleFrame이 tab.pinned를 라이브로 읽어 그리므로 metal_dirty=true만으로도 즉시 갱신된다 —
+        // 핀 아이콘은 metal_dirty가 단일 트리거다(원래 "from==to 안전망"이 metal_dirty라던 주석을 정정).
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
     }
 
     /// live 탭이 모두 종료됐는가(세션/창 종료 판정). 탭이 없으면 false(아직 안 만든 상태).
@@ -3649,13 +3700,10 @@ pub const AppSession = struct {
         if (self.sidebar_drag_active and (kind == 2 or kind == 3)) {
             if (kind == 2 and self.sidebar_drag_index < self.tabs.items.len) {
                 const raw_target = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_slot_height_px, self.tabs.items.len);
-                // 드래그 탭의 그룹(고정/비고정)으로 미리 clamp — moveTab도 clamp하지만 여기서 미리 맞춰야
-                // sidebar_drag_index가 탭이 실제로 안착하는 자리를 따라가(다음 delta가 *그* 탭을 재정렬). 단일 출처 clampMoveToGroup.
-                const target = clampMoveToGroup(raw_target, self.tabs.items[self.sidebar_drag_index].pinned, self.countPinnedTabs(), self.tabs.items.len);
-                if (target != self.sidebar_drag_index) {
-                    self.moveTab(self.sidebar_drag_index, target);
-                    self.sidebar_drag_index = target; // 드래그 탭은 이제 target에 있다
-                }
+                // moveTab이 그룹(고정/비고정)으로 clamp한 **실제 안착 인덱스**를 단일 출처로 받는다(여기서 따로
+                // pre-clamp하지 않는다 — countPinnedTabs O(n)가 drag당 1회로 줄고, 이중-clamp 일치 가정이 사라진다).
+                // sidebar_drag_index를 안착 인덱스로 갱신해 다음 delta가 *그* 탭을 재정렬한다. no-op이면 from을 그대로 반환.
+                self.sidebar_drag_index = self.moveTab(self.sidebar_drag_index, raw_target);
             } else if (kind == 3) {
                 self.sidebar_drag_active = false; // up: 드래그 종료
             }
@@ -4698,6 +4746,11 @@ pub const AppSession = struct {
         }
         self.app_window.tabs = self.surface_ptrs.items;
         self.app_window.active_tab = @min(win.active_tab, self.tabs.items.len - 1);
+        // 고정-prefix 불변식 강제(복원): clampMoveToGroup/countPinnedTabs는 "고정 탭이 앞쪽 [0, pinned_count)에
+        // 연속"을 가정한다. 저장 순서를 그대로 복원하면(재정렬 안 함) #685 이전 빌드가 만든 [P,u,P,u]처럼 섞인
+        // workspace가 들어와 드래그/토글 clamp가 엉뚱한 슬롯에 떨어진다. 여기서 stable-partition으로 고정을 전부
+        // 앞으로 모은다(고정끼리·비고정끼리 상대 순서 유지). 불변식을 모든 진입 경로(토글·드래그·복원)에서 성립시킨다.
+        self.stablePartitionPinned();
         // 트리·탭을 통째로 교체했으니 해제된 옛 트리를 가리키던 상호작용 포인터를 비워야 하는데, 위 destroyTabStandalone
         // 루프의 destroyPane이 invalidateForFreedPane(S1 chokepoint)으로 옛 Pane을 가리키던 호버·드래그 포인터를 이미
         // 비웠다(표적 무효화라 옛 Pane을 가리키던 tab_drag_pane도 포함). 지금은 시작 전용이라 드래그가 없지만,
@@ -4711,6 +4764,7 @@ pub const AppSession = struct {
         self.recomputeActivePaneRect();
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
+        if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 복원 후 불변식 확인(디버그)
     }
 
     /// 컬렉션에 안 든 Tab을 teardown·해제한다(closeTab의 teardown 부분 — 단, tabs/surface_ptrs는 호출자가 관리).
@@ -7733,14 +7787,16 @@ test "moveTab: 고정 탭은 고정 영역 안에서만, 비고정은 비고정 
     t1.pinned = true; // [P0, P1, u2, u3], pinned_count=2
 
     // 고정(0)을 아래(끝, 3)로 끌어도 고정 영역 [0,2)로 clamp → swap(0↔1)만. 비고정(2,3) 불변.
-    session.moveTab(0, 3);
+    // moveTab은 clamp으로 확정된 안착 인덱스(1)를 반환한다.
+    try std.testing.expectEqual(@as(usize, 1), session.moveTab(0, 3));
     try std.testing.expectEqual(t1, session.tabs.items[0]);
     try std.testing.expectEqual(t0, session.tabs.items[1]);
     try std.testing.expectEqual(t2, session.tabs.items[2]); // 비고정 불변
     try std.testing.expectEqual(t3, session.tabs.items[3]);
 
     // 비고정(끝, 3=t3)을 위(0)로 끌어도 비고정 영역 [2,4)로 clamp → t3가 2로, t2가 3으로. 고정(0,1) 불변.
-    session.moveTab(3, 0);
+    // 안착 인덱스(2) 반환.
+    try std.testing.expectEqual(@as(usize, 2), session.moveTab(3, 0));
     try std.testing.expectEqual(t1, session.tabs.items[0]); // 고정 영역 불변
     try std.testing.expectEqual(t0, session.tabs.items[1]);
     try std.testing.expectEqual(t3, session.tabs.items[2]); // 비고정 영역 시작으로만
@@ -7800,6 +7856,91 @@ fn assertPinnedPrefix(session: *AppSession) !void {
     for (session.tabs.items, 0..) |t, i| {
         if (i < pc) try std.testing.expect(t.pinned) else try std.testing.expect(!t.pinned);
     }
+}
+
+/// 사이드바 제목 프레임에 📌(U+1F4CC) 핀 prefix 글리프 셀이 있는가 — buildSidebarTitleFrame이 names줄에
+/// "📌 "를 붙였을 때만 나타난다. 프레임은 매 frame 재-shape(tab.pinned 라이브)되므로 토글 직후 빌드하면 새 상태가 보인다.
+fn frameHasPinGlyph(session: *AppSession) !bool {
+    var f = try session.buildSidebarTitleFrame();
+    defer f.deinit(session.allocator);
+    for (f.draw_list.cells) |c| if (c.codepoint == 0x1F4CC) return true;
+    return false;
+}
+
+test "togglePin: 경계 탭(from==to)도 토글 즉시 📌 라벨이 갱신된다(불변식 유지)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText shaper 경로
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000); // 사이드바 grid 확보(제목 프레임 빌드 가능)
+    // 단일 탭: pin하면 새 pinned_count=1, to=count-1=0=현재 인덱스 → moveTab이 from==to로 early-return(reorder 없음).
+    // togglePin이 무조건 rebuildSidebar를 부르고 metal_dirty를 세워 즉시 재렌더되며, 제목 프레임이 tab.pinned를
+    // 라이브로 읽어 📌를 붙인다. 토글 전엔 없고, pin 후엔 있고, unpin 후엔 다시 없어야 한다(경계 탭에서도).
+    const t0 = session.tabs.items[0];
+    try std.testing.expect(!(try frameHasPinGlyph(session)));
+    session.togglePin(t0); // 경계 탭(from==to)
+    try std.testing.expect(t0.pinned);
+    try std.testing.expect(session.metal_dirty); // 재렌더 트리거
+    try std.testing.expect(try frameHasPinGlyph(session)); // 📌가 즉시 떠야 한다
+    try assertPinnedPrefix(session); // 불변식 성립
+    session.togglePin(t0); // unpin도 경계(from==to)
+    try std.testing.expect(!t0.pinned);
+    try std.testing.expect(!(try frameHasPinGlyph(session))); // 📌가 즉시 사라져야 한다
+    try assertPinnedPrefix(session);
+}
+
+test "applyWorkspaceWindow: 섞인 [P,u,P,u] 복원을 고정-prefix로 stable-partition한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // 4개 단일-pane 탭, 저장 순서 [P, u, P, u](#685 이전 빌드가 만든 섞인 상태). custom_name으로 정렬 추적.
+    const s0 = [_]app.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
+    const s1 = [_]app.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
+    const s2 = [_]app.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
+    const s3 = [_]app.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
+    const p0 = [_]app.workspace.Pane{.{ .surfaces = &s0 }};
+    const p1 = [_]app.workspace.Pane{.{ .surfaces = &s1 }};
+    const p2 = [_]app.workspace.Pane{.{ .surfaces = &s2 }};
+    const p3 = [_]app.workspace.Pane{.{ .surfaces = &s3 }};
+    const leaf = [_]app.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]app.workspace.Tab{
+        .{ .custom_name = "P0", .pinned = true, .tree = &leaf, .panes = &p0 },
+        .{ .custom_name = "u1", .pinned = false, .tree = &leaf, .panes = &p1 },
+        .{ .custom_name = "P2", .pinned = true, .tree = &leaf, .panes = &p2 },
+        .{ .custom_name = "u3", .pinned = false, .tree = &leaf, .panes = &p3 },
+    };
+    // active_tab=3(u3, 비고정 끝) — 재배열 후에도 u3을 가리켜야(stable-partition이 active *Tab 추적).
+    try session.applyWorkspaceWindow(.{ .active_tab = 3, .tabs = &tabs });
+
+    try std.testing.expectEqual(@as(usize, 4), session.tabs.items.len);
+    // stable-partition: 고정(P0,P2)이 앞으로(상대 순서 유지), 비고정(u1,u3)이 뒤로(상대 순서 유지) → [P0, P2, u1, u3].
+    try std.testing.expectEqualStrings("P0", session.tabs.items[0].custom_name.?);
+    try std.testing.expectEqualStrings("P2", session.tabs.items[1].custom_name.?);
+    try std.testing.expectEqualStrings("u1", session.tabs.items[2].custom_name.?);
+    try std.testing.expectEqualStrings("u3", session.tabs.items[3].custom_name.?);
+    try std.testing.expectEqual(@as(usize, 2), session.countPinnedTabs());
+    try assertPinnedPrefix(session); // 불변식 성립
+    // active_tab은 가리키던 u3(원래 index 3)의 새 위치(index 3)로 보정 — 여기선 그대로지만 추적 경로를 탄다.
+    try std.testing.expectEqualStrings("u3", session.tabs.items[session.app_window.active_tab].custom_name.?);
 }
 
 test "사이드바 드래그: 비고정 탭을 위로 끌어도 고정 영역을 침범하지 않는다(그룹 경계)" {

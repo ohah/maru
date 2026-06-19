@@ -19,6 +19,13 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     override func makeBackingLayer() -> CALayer {
         let metalLayer = CAMetalLayer()
         metalLayer.pixelFormat = .bgra8Unorm
+        // 색 정확도: 레이어 픽셀을 sRGB로 색관리되게 태그한다. 미설정(nil)이면 macOS가 색 관리를 하지 않아,
+        // sRGB 기준으로 만든 색(테마 #RRGGBB·ANSI 팔레트)이 wide-gamut(Display P3) 디스플레이에서 native gamut으로
+        // 직접 표시돼 채도가 과장되고 색조가 어긋난다. sRGB 태그를 주면 macOS가 디스플레이로 정확히 색 변환한다.
+        // 베이스/결정: Ghostty도 Metal 레이어 colorspace를 명시한다(references/ghostty/src/renderer/metal/Target.zig —
+        // 레이어는 displayP3, window-colorspace 기본 srgb). maru는 색 값이 sRGB 기준이라 레이어를 sRGB로 태그하는 게
+        // 가장 단순·정확하다(P3 gamut 확장은 후속 옵션). 셀 색 packing/셰이더는 그대로 — 표시 단계 색관리만 바로잡는다.
+        metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         metalLayer.device = MTLCreateSystemDefaultDevice()
         metalLayer.framebufferOnly = true
         metalLayer.isOpaque = true

@@ -21,6 +21,10 @@
     <string>0.1</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <!-- 실행 가능한 최소 macOS 버전. Apple Silicon(arm64)은 11.0(Big Sur)부터 시작하므로
+         arm64 단일 빌드의 하한이 11.0이다. build.zig의 default_target os_version_min과 값을 맞춘다. -->
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>

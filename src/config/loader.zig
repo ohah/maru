@@ -244,16 +244,43 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "bell.audible은 true|false — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "window.padding-top")) {
+        config.window_padding_top = parsePaddingPt(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "window.padding-top은 0~256 정수 — 기본값 유지" });
+            return;
+        };
+    } else if (std.mem.eql(u8, key, "window.padding-bottom")) {
+        config.window_padding_bottom = parsePaddingPt(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "window.padding-bottom은 0~256 정수 — 기본값 유지" });
+            return;
+        };
+    } else if (std.mem.eql(u8, key, "window.padding-left")) {
+        config.window_padding_left = parsePaddingPt(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "window.padding-left는 0~256 정수 — 기본값 유지" });
+            return;
+        };
+    } else if (std.mem.eql(u8, key, "window.padding-right")) {
+        config.window_padding_right = parsePaddingPt(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "window.padding-right는 0~256 정수 — 기본값 유지" });
+            return;
+        };
     } else if (std.mem.eql(u8, key, "window.padding-x")) {
-        config.window_padding_x = parsePaddingPt(value) orelse {
+        // x는 left+right 동시 alias(대칭 좌우 여백). 한 번 파싱해 두 필드에 같은 값. 명시 left/right와 혼용 시
+        // loader가 줄을 순차 적용하므로 "마지막 줄 우선"이 자동(padding-x=10 다음 padding-left=20 → left=20,right=10).
+        const v = parsePaddingPt(value) orelse {
             try diags.append(a, .{ .line = line_no, .message = "window.padding-x는 0~256 정수 — 기본값 유지" });
             return;
         };
+        config.window_padding_left = v;
+        config.window_padding_right = v;
     } else if (std.mem.eql(u8, key, "window.padding-y")) {
-        config.window_padding_y = parsePaddingPt(value) orelse {
+        // y는 top+bottom 동시 alias(대칭 상하 여백). x와 동일하게 순차 적용 → 마지막 줄 우선.
+        const v = parsePaddingPt(value) orelse {
             try diags.append(a, .{ .line = line_no, .message = "window.padding-y는 0~256 정수 — 기본값 유지" });
             return;
         };
+        config.window_padding_top = v;
+        config.window_padding_bottom = v;
     } else if (std.mem.eql(u8, key, "term")) {
         const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
         if (trimmed.len == 0) {
@@ -573,18 +600,22 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(false, p.config.cursor.blink);
     try std.testing.expectEqual(theme.ChromeTheme.rich, p.config.chrome_theme); // C4a chrome.theme 파싱
     try std.testing.expectEqual(true, p.config.blink_text); // text.blink 파싱(기본 false)
-    try std.testing.expectEqual(@as(u32, 12), p.config.window_padding_x); // window.padding-x 파싱(기본 8)
-    try std.testing.expectEqual(@as(u32, 6), p.config.window_padding_y); // window.padding-y 파싱(기본 4)
+    try std.testing.expectEqual(@as(u32, 12), p.config.window_padding_left); // window.padding-x alias → left+right
+    try std.testing.expectEqual(@as(u32, 12), p.config.window_padding_right);
+    try std.testing.expectEqual(@as(u32, 6), p.config.window_padding_top); // window.padding-y alias → top+bottom
+    try std.testing.expectEqual(@as(u32, 6), p.config.window_padding_bottom);
     try std.testing.expectEqual(false, p.config.notifications.agent_complete); // notifications.agent-complete 파싱(기본 true)
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
 }
 
-test "parse: window padding defaults to 8/4; bad/out-of-range values are forgiving" {
-    // 키 없으면 기본 8/4(사실상 표준 inset).
+test "parse: window padding defaults to left/right=8, top/bottom=4; bad/out-of-range values are forgiving" {
+    // 키 없으면 기본 좌우 8·상하 4(사실상 표준 inset).
     var d = try parse(std.testing.allocator, "font.size = 14");
     defer d.deinit();
-    try std.testing.expectEqual(@as(u32, 8), d.config.window_padding_x);
-    try std.testing.expectEqual(@as(u32, 4), d.config.window_padding_y);
+    try std.testing.expectEqual(@as(u32, 8), d.config.window_padding_left);
+    try std.testing.expectEqual(@as(u32, 8), d.config.window_padding_right);
+    try std.testing.expectEqual(@as(u32, 4), d.config.window_padding_top);
+    try std.testing.expectEqual(@as(u32, 4), d.config.window_padding_bottom);
     // 0은 유효(셀이 가장자리에 붙음). 비정수·256 초과는 기본값 유지 + diagnostic.
     var p = try parse(std.testing.allocator,
         \\window.padding-x = 0
@@ -592,9 +623,70 @@ test "parse: window padding defaults to 8/4; bad/out-of-range values are forgivi
         \\window.padding-x = 999
     );
     defer p.deinit();
-    try std.testing.expectEqual(@as(u32, 0), p.config.window_padding_x); // 첫 줄 0 적용 후, 셋째 줄 999는 거부돼 0 유지
-    try std.testing.expectEqual(@as(u32, 4), p.config.window_padding_y); // abc 거부 → 기본 4
+    // 첫 줄 x=0 → left=right=0; 셋째 줄 x=999는 거부돼 0 유지(left·right 둘 다).
+    try std.testing.expectEqual(@as(u32, 0), p.config.window_padding_left);
+    try std.testing.expectEqual(@as(u32, 0), p.config.window_padding_right);
+    // y=abc 거부 → 상하 기본 4 유지.
+    try std.testing.expectEqual(@as(u32, 4), p.config.window_padding_top);
+    try std.testing.expectEqual(@as(u32, 4), p.config.window_padding_bottom);
     try std.testing.expectEqual(@as(usize, 2), p.diagnostics.len); // abc + 999 두 건
+}
+
+test "parse: window padding 4-way individual keys (top/right/bottom/left)" {
+    var p = try parse(std.testing.allocator,
+        \\window.padding-top = 1
+        \\window.padding-right = 2
+        \\window.padding-bottom = 3
+        \\window.padding-left = 4
+    );
+    defer p.deinit();
+    try std.testing.expectEqual(@as(u32, 1), p.config.window_padding_top);
+    try std.testing.expectEqual(@as(u32, 2), p.config.window_padding_right);
+    try std.testing.expectEqual(@as(u32, 3), p.config.window_padding_bottom);
+    try std.testing.expectEqual(@as(u32, 4), p.config.window_padding_left);
+    try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+    // 개별 키 forgiving: 비정수는 그 한 필드만 기본 유지 + diagnostic(나머지 정상).
+    var f = try parse(std.testing.allocator,
+        \\window.padding-top = nope
+        \\window.padding-left = 20
+    );
+    defer f.deinit();
+    try std.testing.expectEqual(@as(u32, 4), f.config.window_padding_top); // nope 거부 → 기본 4
+    try std.testing.expectEqual(@as(u32, 20), f.config.window_padding_left);
+    try std.testing.expectEqual(@as(usize, 1), f.diagnostics.len);
+}
+
+test "parse: padding-x sets left+right (alias); last line wins when aliasing mixes with explicit keys" {
+    // x는 left·right 둘 다 같은 값으로 설정(대칭 alias).
+    var a = try parse(std.testing.allocator, "window.padding-x = 10");
+    defer a.deinit();
+    try std.testing.expectEqual(@as(u32, 10), a.config.window_padding_left);
+    try std.testing.expectEqual(@as(u32, 10), a.config.window_padding_right);
+    // 마지막 줄 우선(loader 순차 적용): padding-x=10 다음 padding-left=20 → left=20, right=10(x가 깐 값 유지).
+    // 베이스/결정: 비대칭 padding엔 단일 표준이 없어, 사실상 표준 키 순서 의미(나중 키가 덮어씀)를 채택.
+    var m = try parse(std.testing.allocator,
+        \\window.padding-x = 10
+        \\window.padding-left = 20
+    );
+    defer m.deinit();
+    try std.testing.expectEqual(@as(u32, 20), m.config.window_padding_left);
+    try std.testing.expectEqual(@as(u32, 10), m.config.window_padding_right);
+    // 반대 순서: padding-left=20 먼저 깔고 padding-x=10이 left·right 둘 다 10으로 덮는다(마지막 줄 우선).
+    var r = try parse(std.testing.allocator,
+        \\window.padding-left = 20
+        \\window.padding-x = 10
+    );
+    defer r.deinit();
+    try std.testing.expectEqual(@as(u32, 10), r.config.window_padding_left);
+    try std.testing.expectEqual(@as(u32, 10), r.config.window_padding_right);
+    // y alias도 동일하게 top+bottom 동시.
+    var y = try parse(std.testing.allocator,
+        \\window.padding-y = 6
+        \\window.padding-bottom = 12
+    );
+    defer y.deinit();
+    try std.testing.expectEqual(@as(u32, 6), y.config.window_padding_top);
+    try std.testing.expectEqual(@as(u32, 12), y.config.window_padding_bottom);
 }
 
 test "parse: font.size-step out-of-range/non-numeric is forgiving (keeps default 1)" {

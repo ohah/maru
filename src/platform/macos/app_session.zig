@@ -1190,18 +1190,15 @@ pub const AppSession = struct {
     }
 
     /// 사이드바를 뺀 터미널 영역 사각형(backing px, 좌상단 = (사이드바 폭, 0)). split 레이아웃·resize·렌더가
-    /// 공유하는 단일 출처. backing 크기는 마지막 resize 값이고, 첫 resize 전(0)이면 폭/높이가 0이라 단일
-    /// leaf가 origin에만 그려진다(무해).
+    /// 공유하는 단일 출처. window padding은 여기서 빼지 않는다 — 탭 바·divider·pane 배경 같은 chrome은 사이드바
+    /// 경계/창 가장자리까지 꽉 차고, padding은 paneTermRect가 셀 그리드 영역에만 inset한다. backing 크기는 마지막
+    /// resize 값이고, 첫 resize 전(0)이면 폭/높이가 0이라 단일 leaf가 origin에만 그려진다(무해).
     fn termRect(self: *const AppSession) app.SplitRect {
-        // 사이드바 폭 + window padding(좌상 inset)만큼 origin을 들이고, 폭/높이는 좌우·상하 padding 2배만큼 줄인다.
-        // gridFromBacking이 같은 양을 빼므로 grid와 rect가 정합. saturate(-|)로 비정상 큰 padding에도 언더플로 없음.
-        const pad_x = self.window_padding_x_px;
-        const pad_y = self.window_padding_y_px;
         return .{
-            .x = self.sidebar_width_px +| pad_x,
-            .y = pad_y,
-            .w = self.backing_width_px -| self.sidebar_width_px -| (2 *| pad_x),
-            .h = self.backing_height_px -| (2 *| pad_y),
+            .x = self.sidebar_width_px,
+            .y = 0,
+            .w = self.backing_width_px -| self.sidebar_width_px,
+            .h = self.backing_height_px,
         };
     }
 
@@ -1214,15 +1211,26 @@ pub const AppSession = struct {
         return self.cell_height_px + 2 * @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px);
     }
 
-    /// panel leaf rect의 상단 탭 바를 뺀 '터미널 영역' 사각형. leaf rect가 바보다 충분히 높으면(바 + 최소
-    /// 1칸) 상단 바 높이만큼 내려 잘라낸 rect, 아니면(너무 작음) leaf rect 그대로(바 없음). 좌표 변환·resize·
-    /// 렌더 origin이 이 '바 아래' 영역을 쓴다.
+    /// panel leaf rect의 상단 탭 바와 window padding을 뺀 '셀 그리드 영역' 사각형. 먼저 leaf rect가 바보다
+    /// 충분히 높으면(바 + 최소 1칸) 상단 바 높이만큼 내려 자르고, 그 영역에 좌우·상하 window padding을 inset한다.
+    /// chrome(탭 바·divider)은 leaf rect 가장자리까지 꽉 차고 셀 그리드만 여백을 갖는다. 좌표 변환(pxToCell)·
+    /// resize·렌더 origin·IME(imeCursorRect)가 이 영역을 단일 출처로 쓰므로, padding을 여기 한 곳에 두면 grid
+    /// origin·hit-test·IME 후보창이 함께 안쪽으로 정합한다. saturate(-|)로 바/패딩이 leaf보다 커도 언더플로 없이
+    /// 0에 수렴 → gridFromRectPx가 clampGridSize 최소로 떨어진다.
     fn paneTermRect(self: *const AppSession, rect: app.SplitRect) app.SplitRect {
         const bar_h = self.paneBarHeightPx();
-        if (bar_h > 0 and rect.h > bar_h) {
-            return .{ .x = rect.x, .y = rect.y + bar_h, .w = rect.w, .h = rect.h - bar_h };
-        }
-        return rect;
+        const pad_x = self.window_padding_x_px;
+        const pad_y = self.window_padding_y_px;
+        const body: app.SplitRect = if (bar_h > 0 and rect.h > bar_h)
+            .{ .x = rect.x, .y = rect.y + bar_h, .w = rect.w, .h = rect.h - bar_h }
+        else
+            rect;
+        return .{
+            .x = body.x +| pad_x,
+            .y = body.y +| pad_y,
+            .w = body.w -| (2 *| pad_x),
+            .h = body.h -| (2 *| pad_y),
+        };
     }
 
     /// panel leaf rect의 상단 탭 바 rect(못 그리면 null — 바 없을 만큼 작거나 cell 미상). paneTermRect의 보수.
@@ -1598,9 +1606,9 @@ pub const AppSession = struct {
             active = @intCast(pane.active_term);
         } else return;
 
-        // 화면 폭(셀 칸). minimal이라 사이드바 없음 — termRect.x=window_padding_x_px, w=backing−2·padding_x,
-        // 상단 origin은 termRect.y=window_padding_y_px(점 인디케이터도 셀과 같은 padding 안쪽에 정렬). 칸 0이면 안 그림.
-        const term_rect = self.termRect();
+        // 화면 폭(셀 칸). minimal이라 사이드바 없음. paneTermRect가 window padding을 inset하므로(minimal은 바 없음)
+        // 점 인디케이터도 셀 그리드와 같은 padding 안쪽에 정렬된다. 칸 0이면 안 그림.
+        const term_rect = self.paneTermRect(self.termRect());
         const cols = term_rect.w / cw;
         if (cols == 0) return;
 
@@ -6927,7 +6935,7 @@ test "parseGitHead: ref branch / nested ref / detached SHA / empty ref / junk" {
     try std.testing.expect(parseGitHead("abc") == null); // 7자 미만 hex
 }
 
-test "termRect insets the terminal area by window padding (sidebar + pad origin, 2×pad shrink)" {
+test "window padding insets only the cell grid, not chrome (termRect/paneBarRect to edge, paneTermRect inset)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -6943,21 +6951,39 @@ test "termRect insets the terminal area by window padding (sidebar + pad origin,
     // 결정적 padding(scale 1000 기본이라 appearance 8/4가 그대로 8/4px이지만 명시 고정).
     session.window_padding_x_px = 8;
     session.window_padding_y_px = 4;
+    session.cell_height_px = 18; // 탭 바 높이 결정적(bar_h = cell_height + 2·tab_bar_pad_y)
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
+
+    // termRect: 사이드바만 뺀다 — window padding 없음(chrome이 사이드바 경계/창 가장자리까지).
     const r = session.termRect();
-    try std.testing.expectEqual(session.sidebar_width_px + 8, r.x); // 좌 origin = 사이드바 + padding_x
-    try std.testing.expectEqual(@as(u32, 4), r.y); // 상 origin = padding_y
-    try std.testing.expectEqual(@as(u32, 800 - 16), r.w); // 폭 = backing − 사이드바 − 2·padding_x
-    try std.testing.expectEqual(@as(u32, 600 - 8), r.h); // 높이 = backing − 2·padding_y
-    // padding 0이면 inset 없음(기존 동작): origin=(사이드바,0), 폭=backing−사이드바, 높이=backing.
+    try std.testing.expectEqual(session.sidebar_width_px, r.x);
+    try std.testing.expectEqual(@as(u32, 0), r.y);
+    try std.testing.expectEqual(@as(u32, 800), r.w);
+    try std.testing.expectEqual(@as(u32, 600), r.h);
+
+    // 탭 바: leaf rect 상단·사이드바 경계에 붙는다(padding inset 없음 — chrome은 가장자리까지).
+    const bar = session.paneBarRect(r).?;
+    try std.testing.expectEqual(session.sidebar_width_px, bar.x);
+    try std.testing.expectEqual(@as(u32, 0), bar.y);
+    try std.testing.expectEqual(@as(u32, 800), bar.w);
+
+    // 셀 그리드: 탭 바 아래 + window padding inset(여기만 여백).
+    const bar_h = session.paneBarHeightPx();
+    const g = session.paneTermRect(r);
+    try std.testing.expectEqual(session.sidebar_width_px + 8, g.x); // 좌 = 사이드바 + pad_x
+    try std.testing.expectEqual(bar_h + 4, g.y); // 상 = 탭 바 + pad_y
+    try std.testing.expectEqual(@as(u32, 800 - 16), g.w); // 폭 = backing − 사이드바 − 2·pad_x
+    try std.testing.expectEqual(@as(u32, 600) -| bar_h -| 8, g.h); // 높이 = backing − 바 − 2·pad_y
+
+    // padding 0이면 grid도 inset 없음(탭 바만 뺀 영역).
     session.window_padding_x_px = 0;
     session.window_padding_y_px = 0;
-    const r0 = session.termRect();
-    try std.testing.expectEqual(session.sidebar_width_px, r0.x);
-    try std.testing.expectEqual(@as(u32, 0), r0.y);
-    try std.testing.expectEqual(@as(u32, 800), r0.w);
-    try std.testing.expectEqual(@as(u32, 600), r0.h);
+    const g0 = session.paneTermRect(r);
+    try std.testing.expectEqual(session.sidebar_width_px, g0.x);
+    try std.testing.expectEqual(bar_h, g0.y);
+    try std.testing.expectEqual(@as(u32, 800), g0.w);
+    try std.testing.expectEqual(@as(u32, 600) -| bar_h, g0.h);
 }
 
 // wheelDeltaToLines 단위 테스트는 함수와 함께 src/session/input_math.zig로 이동.
@@ -7677,7 +7703,10 @@ test "chrome_minimal session suppresses the pane tab bar and the sidebar" {
     defer session.deinit();
 
     // minimal: 사이드바 폭 0(refreshCellMetrics 게이트), 탭 바 높이 0(paneBarHeightPx 게이트) →
-    // paneBarRect가 null, paneTermRect는 leaf rect 그대로(바를 빼지 않음).
+    // paneBarRect가 null, paneTermRect는 바를 빼지 않는다. window padding은 0으로 격리해 바 기하만 본다
+    // (paneTermRect가 이제 padding도 inset — minimal grid의 padding 동작은 별도 테스트가 커버).
+    session.window_padding_x_px = 0;
+    session.window_padding_y_px = 0;
     try std.testing.expectEqual(@as(u32, 0), session.sidebar_width_px);
     try std.testing.expectEqual(@as(u32, 0), session.paneBarHeightPx());
     const rect: app.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
@@ -9264,6 +9293,8 @@ test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
     session.chrome_minimal = false; // paneBarHeightPx가 읽는다(false=바 있음)
     session.cell_width_px = 12;
     session.cell_height_px = 12; // paneBarHeightPx = cell_height + 2*pad_y(tui 0) = 12
+    session.window_padding_x_px = 0; // paneTermRect가 이제 padding을 읽는다 — 바 기하만 격리(undefined UB 회피)
+    session.window_padding_y_px = 0;
 
     const rect: app.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
     const term = session.paneTermRect(rect);

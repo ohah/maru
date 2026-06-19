@@ -1821,7 +1821,7 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 활성 pane의 Term을 delta(+1=다음, -1=이전)만큼 wrap-around로 옮긴다(⌘]/⌘[). Term이 1개면 무동작.
+    /// 활성 pane의 Term을 delta(+1=다음, -1=이전)만큼 wrap-around로 옮긴다(⌘⌥]/⌘⌥[). Term이 1개면 무동작.
     fn focusTermRelative(self: *AppSession, delta: i64) void {
         const pane = self.activePane();
         const n = pane.terms.items.len;
@@ -1829,6 +1829,17 @@ pub const AppSession = struct {
         const cur: i64 = @intCast(pane.active_term);
         const next = @mod(cur + delta, @as(i64, @intCast(n)));
         self.focusTerm(@intCast(next));
+    }
+
+    /// 활성 워크스페이스의 split(pane)을 delta(+1=다음, -1=이전)만큼 wrap-around로 옮긴다(⌘]/⌘[). pane이
+    /// 1개(분할 없음)면 무동작. focusPane이 active_pane·대표 surface·active rect를 갱신한다(focusTermRelative와 동형).
+    fn focusPaneRelative(self: *AppSession, delta: i64) void {
+        const tab = self.activeTab();
+        const n = tab.panes.items.len;
+        if (n <= 1) return;
+        const cur: i64 = @intCast(tab.active_pane);
+        const next = @mod(cur + delta, @as(i64, @intCast(n)));
+        self.focusPane(@intCast(next));
     }
 
     /// 드래그 중인 Term 탭을 현재 마우스 x에 따라 소스 pane 바 안에서 재정렬한다(PR-E1: pane 내). 소스 pane의
@@ -2749,6 +2760,8 @@ pub const AppSession = struct {
             .close_term => self.closeActiveTermOrPane(),
             .next_term => self.focusTermRelative(1),
             .previous_term => self.focusTermRelative(-1),
+            .next_pane => self.focusPaneRelative(1),
+            .previous_pane => self.focusPaneRelative(-1),
             // 전체 선택(⌘A) — 활성 surface 코어의 selection을 스크롤백+화면 전체로. clipboard 쓰기는 네이티브.
             .select_all => {
                 // 코어 mutate(스크롤백 읽음) — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
@@ -11498,7 +11511,7 @@ test "handleKeyEvent applies user config keybindings (resolver wired from loaded
 
 // Term 생명주기: ⌘T가 활성 pane에 Term을 쌓고, ⌘]/⌘[가 Term을 wrap 순환하고, ⌘W가 Term →(마지막이면)
 // pane →(마지막이면) 워크스페이스 순으로 cascade close하는지 — 실 PTY teardown이라 macOS 게이트. 키 경로 전체.
-test "Term lifecycle: Cmd+T adds, Cmd+]/[ cycle, Cmd+W cascades Term to workspace" {
+test "Term lifecycle: Cmd+T adds, Cmd+Opt+]/[ cycle, Cmd+W cascades Term to workspace" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -11521,10 +11534,11 @@ test "Term lifecycle: Cmd+T adds, Cmd+]/[ cycle, Cmd+W cascades Term to workspac
     try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len);
     try std.testing.expectEqual(@as(usize, 2), session.activePane().active_term);
 
-    // ⌘] → 다음(wrap): 2→0. ⌘[ → 이전(wrap): 0→2.
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = ']' }, .modifiers = cmd });
+    // ⌘⌥] → 다음(wrap): 2→0. ⌘⌥[ → 이전(wrap): 0→2. (⌘[]는 이제 split 순환이라 Term 순환은 ⌘⌥[]로 옮겼다.)
+    const cmd_opt: terminal.ModifierSet = .{ .command = true, .option = true };
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = ']' }, .modifiers = cmd_opt });
     try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term);
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = '[' }, .modifiers = cmd });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '[' }, .modifiers = cmd_opt });
     try std.testing.expectEqual(@as(usize, 2), session.activePane().active_term);
 
     // ⌘W → 활성 Term(2) 닫힘 → Term 2개, 활성 1(보정). pane/워크스페이스 수 불변.
@@ -11541,6 +11555,34 @@ test "Term lifecycle: Cmd+T adds, Cmd+]/[ cycle, Cmd+W cascades Term to workspac
     // ⌘W → 이제 Term 1·pane 1·워크스페이스 1 → 마지막 워크스페이스 close = 세션 종료 latch(cascade 끝).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = cmd });
     try std.testing.expect(session.ended_seen);
+}
+
+// Cmd+]/[ 가 키 경로(handleKeyEvent → resolver → app_action)로 split(pane)을 순환하는지 — 실 PTY라 macOS
+// 게이트. ⌘D로 pane 2개 만든 뒤 ⌘]는 활성 pane을 다음으로, ⌘[는 이전(wrap)으로 옮긴다. (⌘[]는 Term이 아니라
+// split 순환 — Term은 ⌘⌥[]로 옮겼다, 사용자 요청 배치.)
+test "Cmd bracket keys cycle split panes through the key path" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const cmd: terminal.ModifierSet = .{ .command = true };
+    // ⌘D=좌우 split → 활성 워크스페이스에 pane 2개(splitActivePane이 새 pane으로 포커스).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'd' }, .modifiers = cmd });
+    try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
+    const start = session.activeTab().active_pane;
+    // ⌘] → 다음 pane(wrap, 2개라 토글), ⌘[ → 다시 원래.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = ']' }, .modifiers = cmd });
+    try std.testing.expectEqual((start + 1) % 2, session.activeTab().active_pane);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '[' }, .modifiers = cmd });
+    try std.testing.expectEqual(start, session.activeTab().active_pane);
 }
 
 // Cmd+Shift+]/[ 가 키 경로(handleKeyEvent → resolver → app_action)로 다음/이전 탭을 순환하는지 — 실

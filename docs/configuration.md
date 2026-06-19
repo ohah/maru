@@ -33,6 +33,9 @@ theme.background = #101010
 theme.foreground = #e8e8e8
 theme.cursor     = #ffffff
 theme.selection  = #334455
+# ANSI 16색 override(선택, 인덱스 0~15). 적은 인덱스만 덮으면 나머지는 xterm 표준색.
+theme.palette.0  = #1c1c1c
+theme.palette.1  = #d35f5f
 
 cursor.shape = block
 cursor.blink = true
@@ -55,6 +58,7 @@ window.padding-left   = 8
 | `theme.foreground` | `#RRGGBB` | `#e8e8e8` | |
 | `theme.cursor` | `#RRGGBB` | `#ffffff` | |
 | `theme.selection` | `#RRGGBB` | `#334455` | 선택 하이라이트 배경 |
+| `theme.palette.0`~`theme.palette.15` | `#RRGGBB` | xterm 표준색 | ANSI 16색(0~15) override — `ls`/`vim`/프롬프트 색 테마 완성용. 적은 인덱스만 덮어도 됨(나머지는 xterm 표준 폴백). 우선순위는 **OSC 4(앱 동적 설정) > config > xterm256**: 앱이 OSC 4로 색을 바꾸면 그게 우선이고, RIS·OSC 104(리셋) 후엔 다시 이 config 값으로 돌아온다. 범위 밖 인덱스(16+)·비정수 인덱스·형식 오류 색은 무시(그 인덱스는 기본 유지) |
 | `cursor.shape` | `block`\|`bar`\|`underline` | `block` | 그 외 값은 무시 |
 | `cursor.blink` | `true`\|`false` | `true` | |
 | `window.padding-top` | 정수(0~256) | `4` | 셀 그리드와 pane 가장자리 사이 **위** 여백(논리 pt, DPI 스케일). 탭 바·split divider·pane 배경 등 chrome은 사이드바 경계/창 가장자리까지 꽉 차고 셀 그리드만 들인다. 0이면 셀이 가장자리에 붙음. 범위 밖/비정수는 무시(기본 유지) |

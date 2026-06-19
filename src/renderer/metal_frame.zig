@@ -80,6 +80,12 @@ pub const CellColors = struct {
     /// 가리키게 wiring한다 — `.indexed` 색을 풀 때 이 표를 먼저 본다. 포인터로 들어 CellColors 복사가 가볍다
     /// (표 1KB를 매 복사하지 않음); 가리키는 core는 frame 렌더 동안 살아 있다.
     palette: ?*const [256]?color.Rgb = null,
+    /// config theme.palette ANSI 16색 override base(null = 전부 기본 xterm256). OSC4 override가 *없을 때만* index<16에
+    /// 적용되는 별도 fallback 레이어다 — OSC4(palette) override → config_palette[index](index<16) → xterm256 우선순위.
+    /// config를 OSC4 표에 pre-seed하지 않는 이유: OSC4는 per-core이고 RIS·OSC104가 xterm256으로 리셋하므로 config가
+    /// 사라진다. 별도 base 레이어로 둬 OSC4/OSC104/RIS가 OSC4 레이어만 건드려도 config base는 살아남게 한다. app이
+    /// 세션 동안 불변·소유인 appearance.theme.palette를 가리키게 wiring한다(포인터 안전 — 복사 불필요).
+    config_palette: ?*const [16]?color.Rgb = null,
     /// DECSCNM(CSI ?5h, G9) 화면 반전. true면 모든 셀의 전경/배경을 전역 스왑한다(packForeground/packBackground가
     /// style.reverse와 XOR). app이 그 surface core의 reverseScreen()을 wiring한다.
     screen_reverse: bool = false,
@@ -142,16 +148,19 @@ fn highlightBg(colors: CellColors, row: u16, col: u16) ?color.Rgb {
     return null;
 }
 
-/// 256색 index를 RGB로 푼다: OSC 4 override 표에 그 인덱스가 있으면 그 색, 없으면 기본 xterm256.
-fn paletteColor(index: u8, palette: ?*const [256]?color.Rgb) color.Rgb {
+/// 256색 index를 RGB로 푼다. 우선순위: OSC 4 override(palette) → config theme.palette base(index<16) → 기본 xterm256.
+/// OSC4 표가 그 인덱스를 가지면 그 색(동적 override 최우선). 없고 index<16이면 config_palette base를 보고, 그것도
+/// null이면 xterm256으로 폴백한다. config는 OSC4가 없을 때의 ANSI 16색 base라 index>=16(256색 cube/grayscale)엔 안 쓴다.
+fn paletteColor(index: u8, palette: ?*const [256]?color.Rgb, config_palette: ?*const [16]?color.Rgb) color.Rgb {
     if (palette) |p| if (p[index]) |rgb| return rgb;
+    if (index < 16) if (config_palette) |cp| if (cp[index]) |rgb| return rgb;
     return color.xterm256(index);
 }
 
-fn resolveColor(c: terminal.Color, default_rgb: color.Rgb, palette: ?*const [256]?color.Rgb) color.Rgb {
+fn resolveColor(c: terminal.Color, default_rgb: color.Rgb, palette: ?*const [256]?color.Rgb, config_palette: ?*const [16]?color.Rgb) color.Rgb {
     return switch (c) {
         .default => default_rgb,
-        .indexed => |index| paletteColor(index, palette),
+        .indexed => |index| paletteColor(index, palette, config_palette),
         .rgb => |value| value,
     };
 }
@@ -175,22 +184,22 @@ fn packForeground(style: terminal.Style, colors: CellColors) u32 {
     // reverse면 스왑된 배경.
     if (style.conceal or (style.blink and !colors.blink_on)) {
         return packRgb(if (reverse)
-            resolveColor(style.foreground, colors.default_fg, colors.palette)
+            resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette)
         else
-            resolveColor(style.background, colors.default_bg, colors.palette));
+            resolveColor(style.background, colors.default_bg, colors.palette, colors.config_palette));
     }
     const fg = if (reverse)
-        resolveColor(style.background, colors.default_bg, colors.palette)
+        resolveColor(style.background, colors.default_bg, colors.palette, colors.config_palette)
     else
-        resolveColor(style.foreground, colors.default_fg, colors.palette);
+        resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette);
     if (style.dim) {
         // SGR 2 faint: 전경을 그 셀의 배경 쪽으로 0.5 보간(intensity 감소). 베이스: Ghostty
         // faint-opacity 기본 0.5(glyph alpha)인데, maru 전경색엔 alpha가 없어 같은 시각 효과를
         // RGB 보간으로 낸다(alpha 0.5 over bg = (fg+bg)/2). reverse면 보간 대상 배경도 스왑된 값.
         const bg = if (reverse)
-            resolveColor(style.foreground, colors.default_fg, colors.palette)
+            resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette)
         else
-            resolveColor(style.background, colors.default_bg, colors.palette);
+            resolveColor(style.background, colors.default_bg, colors.palette, colors.config_palette);
         return packRgb(lerpHalf(fg, bg));
     }
     return packRgb(fg);
@@ -201,7 +210,7 @@ fn packForeground(style: terminal.Style, colors: CellColors) u32 {
 /// default 배경이다: overlay는 셀 배경을 캐리하지 않으므로 컬러 배경 셀의 장식선 dim은 packForeground와
 /// 미세하게 다를 수 있으나(셀 배경 vs theme 배경), dim+컬러배경+장식선이 겹치는 드문 조합이라 허용한다.
 fn effectiveLineColor(l: renderer.LineOverlay, colors: CellColors) color.Rgb {
-    const fg = resolveColor(l.color, colors.default_fg, colors.palette);
+    const fg = resolveColor(l.color, colors.default_fg, colors.palette, colors.config_palette);
     if (!l.dim) return fg;
     return lerpHalf(fg, colors.default_bg);
 }
@@ -213,10 +222,10 @@ fn effectiveLineColor(l: renderer.LineOverlay, colors: CellColors) color.Rgb {
 fn packBackground(style: terminal.Style, colors: CellColors) u32 {
     // DECSCNM(G9) XOR SGR reverse: 반전이면 전경색으로 칠한다(default 전경도 풀어 실제로 칠해야 반전이 보인다).
     const reverse = style.reverse != colors.screen_reverse;
-    if (reverse) return 0xFF00_0000 | packRgb(resolveColor(style.foreground, colors.default_fg, colors.palette));
+    if (reverse) return 0xFF00_0000 | packRgb(resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette));
     const rgb = switch (style.background) {
         .default => return 0,
-        .indexed => |index| paletteColor(index, colors.palette),
+        .indexed => |index| paletteColor(index, colors.palette, colors.config_palette),
         .rgb => |value| value,
     };
     return 0xFF00_0000 | packRgb(rgb);
@@ -1641,6 +1650,50 @@ test "OSC 4 palette override: indexed colors resolve to override before xterm256
     try std.testing.expectEqual(packRgb(.{ .r = 0x12, .g = 0x34, .b = 0x56 }), packForeground(.{ .foreground = .{ .indexed = 5 } }, colors));
     try std.testing.expectEqual(packRgb(color.xterm256(6)), packForeground(.{ .foreground = .{ .indexed = 6 } }, colors));
     try std.testing.expectEqual(@as(u32, 0xFF00_0000) | packRgb(.{ .r = 0x12, .g = 0x34, .b = 0x56 }), packBackground(.{ .background = .{ .indexed = 5 } }, colors));
+}
+
+test "config palette base resolves between OSC4 override and xterm256 (OSC4 > config > xterm256)" {
+    // config theme.palette는 OSC4 override가 *없을 때*의 ANSI 16색 base다. 우선순위를 못박는다:
+    //   OSC4 override(palette) → config_palette[index](index<16) → xterm256.
+    const cfg_red: color.Rgb = .{ .r = 0xAA, .g = 0xBB, .b = 0xCC }; // config가 인덱스 1을 재정의
+    const cfg_blue: color.Rgb = .{ .r = 0x11, .g = 0x22, .b = 0x33 }; // config가 인덱스 4를 재정의
+    var config_palette: [16]?color.Rgb = .{null} ** 16;
+    config_palette[1] = cfg_red;
+    config_palette[4] = cfg_blue;
+
+    // (a) OSC4 override 없음 + config 있음 → config 색을 쓴다(xterm256 대신).
+    {
+        const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .config_palette = &config_palette };
+        try std.testing.expectEqual(packRgb(cfg_red), packForeground(.{ .foreground = .{ .indexed = 1 } }, colors));
+        // config가 정의 안 한 인덱스 6 → 기본 xterm256으로 폴백.
+        try std.testing.expectEqual(packRgb(color.xterm256(6)), packForeground(.{ .foreground = .{ .indexed = 6 } }, colors));
+        // 배경 경로도 config base를 쓴다(index 4).
+        try std.testing.expectEqual(@as(u32, 0xFF00_0000) | packRgb(cfg_blue), packBackground(.{ .background = .{ .indexed = 4 } }, colors));
+    }
+
+    // (b) OSC4 override도 있으면 OSC4가 config보다 우선이다(같은 인덱스 1을 둘 다 정의).
+    {
+        var osc4: [256]?color.Rgb = .{null} ** 256;
+        const osc4_green: color.Rgb = .{ .r = 0x01, .g = 0x99, .b = 0x01 };
+        osc4[1] = osc4_green; // OSC4가 인덱스 1을 재정의 — config(cfg_red)를 덮는다
+        const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .palette = &osc4, .config_palette = &config_palette };
+        try std.testing.expectEqual(packRgb(osc4_green), packForeground(.{ .foreground = .{ .indexed = 1 } }, colors)); // OSC4 우선
+        // OSC4가 안 건드린 인덱스 4는 config base로 폴백(OSC4 없음 → config).
+        try std.testing.expectEqual(packRgb(cfg_blue), packForeground(.{ .foreground = .{ .indexed = 4 } }, colors));
+    }
+
+    // (c) 둘 다 없으면 xterm256(기존 동작 — config_palette는 폴백 레이어일 뿐 기본 동작을 안 바꾼다).
+    {
+        const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } };
+        try std.testing.expectEqual(packRgb(color.xterm256(1)), packForeground(.{ .foreground = .{ .indexed = 1 } }, colors));
+    }
+
+    // (d) config base는 index<16(ANSI 16색)에만 적용 — 256색 cube/grayscale(index>=16)엔 안 쓴다.
+    // config_palette는 16칸이라 index>=16은 구조적으로 닿지 않지만, 그 인덱스가 xterm256으로 폴백함을 고정한다.
+    {
+        const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .config_palette = &config_palette };
+        try std.testing.expectEqual(packRgb(color.xterm256(200)), packForeground(.{ .foreground = .{ .indexed = 200 } }, colors));
+    }
 }
 
 test "SGR reverse swaps foreground and background, resolving defaults to theme colors" {

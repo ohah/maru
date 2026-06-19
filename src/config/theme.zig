@@ -28,6 +28,11 @@ pub const ThemeConfig = struct {
     // 사이드바·pane 탭 바 제목 글자색(선택, #RRGGBB). null이면 foreground(터미널 글자색)를 그대로 쓴다.
     // 활성 탭은 이 색(full), 비활성 탭은 이 색을 background 쪽으로 흐리게 한 muted(렌더가 파생).
     sidebar_foreground: ?[]const u8 = null,
+    // ANSI 16색(0~15) config override(선택, 각 #RRGGBB). null=그 인덱스는 기본 xterm 표준색(color.ansi16). loader가
+    // `theme.palette.0`~`.15` 키로 파싱한다. 이 값은 OSC 4 동적 override가 *없을 때*의 base다 — 렌더 폴백 우선순위는
+    // OSC4 override → config palette → xterm256(color.zig)이라, OSC4/OSC104/RIS는 OSC4 레이어만 건드리고 config base는
+    // 살아남는다(per-core OSC4에 pre-seed하면 RIS가 지우므로 별도 레이어로 둔다). `ls`/`vim`/프롬프트 색 테마 완성용.
+    palette: [16]?[]const u8 = .{null} ** 16,
 };
 
 pub const CursorShape = enum {

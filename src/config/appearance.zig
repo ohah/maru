@@ -33,6 +33,10 @@ pub const ResolvedTheme = struct {
     // 사이드바·pane 탭 바 제목 글자색. 명시 안 하면 foreground(터미널 글자색). 활성 탭은 이 색, 비활성 탭은
     // 렌더가 background 쪽으로 흐리게 한 muted를 쓴다(mutedForeground). 색 출처를 여기 둔다.
     sidebar_foreground: color.Rgb,
+    // ANSI 16색(0~15) config override. null=그 인덱스는 기본 xterm 표준색(color.ansi16/xterm256). 렌더(metal_frame)가
+    // `.indexed` 색을 풀 때 OSC4 override → 이 config base → xterm256 순으로 폴백한다(OSC4가 없을 때만 이 값이 보인다).
+    // 명시 색은 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 resolveTheme에서 막힌다).
+    palette: [16]?color.Rgb = .{null} ** 16,
 };
 
 pub const ResolvedCursor = struct {
@@ -96,6 +100,12 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
 fn resolveTheme(config: theme.ThemeConfig) ResolveError!ResolvedTheme {
     const background = try parseHexColor(config.background);
     const foreground = try parseHexColor(config.foreground);
+    // ANSI 16색 override: non-null만 검증·변환(다른 테마 색과 같은 #RRGGBB 검증), null은 null 유지(그 인덱스는 기본
+    // xterm). 깨진 색은 여기서 막힌다(loader가 valid만 담지만, resolve 단독 호출·테스트도 검증을 거치게 한다).
+    var palette: [16]?color.Rgb = .{null} ** 16;
+    for (config.palette, 0..) |maybe, i| {
+        if (maybe) |hex| palette[i] = try parseHexColor(hex);
+    }
     return .{
         .background = background,
         .foreground = foreground,
@@ -109,6 +119,7 @@ fn resolveTheme(config: theme.ThemeConfig) ResolveError!ResolvedTheme {
         .sidebar_active = if (config.sidebar_active) |s| try parseHexColor(s) else lighten(background, 48),
         // 사이드바 글자색: 명시하면 그 색, null이면 foreground(터미널 글자색)와 같게 — 기본은 기존 동작 보존.
         .sidebar_foreground = if (config.sidebar_foreground) |s| try parseHexColor(s) else foreground,
+        .palette = palette,
     };
 }
 
@@ -194,6 +205,30 @@ test "appearance resolver derives sidebar colors from background and honors expl
     // 명시 사이드바 색도 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 여기서 막힌다).
     try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .sidebar_background = "bad" } }));
     try std.testing.expectError(error.InvalidHexColorDigit, resolve(.{ .theme = .{ .sidebar_active = "#11GG33" } }));
+}
+
+test "appearance resolver propagates ANSI palette overrides and keeps unset indices null" {
+    // 기본(아무 override 없음): 16칸 전부 null(그 인덱스는 렌더에서 xterm256으로 폴백).
+    const default_resolved = try resolve(.{});
+    for (default_resolved.theme.palette) |c| try std.testing.expect(c == null);
+
+    // non-null만 변환·전파, 나머지는 null 유지. 인덱스 0(black)과 9(bright red)만 override.
+    var raw: [16]?[]const u8 = .{null} ** 16;
+    raw[0] = "#ff0000";
+    raw[9] = "#00ff00";
+    const resolved = try resolve(.{ .theme = .{ .palette = raw } });
+    try std.testing.expectEqual(@as(?color.Rgb, color.Rgb{ .r = 0xff, .g = 0x00, .b = 0x00 }), resolved.theme.palette[0]);
+    try std.testing.expectEqual(@as(?color.Rgb, color.Rgb{ .r = 0x00, .g = 0xff, .b = 0x00 }), resolved.theme.palette[9]);
+    try std.testing.expect(resolved.theme.palette[1] == null); // override 안 한 인덱스는 null 유지
+    try std.testing.expect(resolved.theme.palette[15] == null);
+
+    // 명시 palette 색도 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 resolveTheme에서 막힌다).
+    var bad: [16]?[]const u8 = .{null} ** 16;
+    bad[3] = "#zzzzzz";
+    try std.testing.expectError(error.InvalidHexColorDigit, resolve(.{ .theme = .{ .palette = bad } }));
+    var bad_fmt: [16]?[]const u8 = .{null} ** 16;
+    bad_fmt[7] = "nope";
+    try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .palette = bad_fmt } }));
 }
 
 test "appearance resolver trims font family and preserves cursor options" {

@@ -50,6 +50,12 @@ Maru는 자식 셸 env에서 부모 `TERM`/`COLORTERM`을 위 값으로 덮을 �
 
 근거(실측): `zig build`로 Maru를 띄우면 빌드 컨텍스트의 `CLICOLOR_FORCE=1`이 상속돼 자식 셸로 전파됐다. Rust `supports-color`(codex 등이 사용)는 `env_force_color`로 `CLICOLOR_FORCE!=0`·`FORCE_COLOR`을 **가장 먼저** 평가해 색 레벨을 강제(보통 basic 16색)하므로 `COLORTERM=truecolor`를 무시한다 → codex가 truecolor를 못 보고 입력창 회색 컴포저(pill 배경)를 끈다. GUI(Finder) 실행 시엔 이 변수가 없어 정상이라, 개발 중 `zig build`로 띄울 때만 나타나는 함정이었다. `NO_COLOR`/`CLICOLOR`는 사용자 의도(색 끄기 선호)일 수 있어 건드리지 않는다.
 
+### 데스크톱 알림 식별 (`TERM_PROGRAM=ghostty`)
+
+Maru는 자식 셸 env에 `TERM_PROGRAM=ghostty`를 주입한다(부모가 남긴 `TERM_PROGRAM`/`TERM_PROGRAM_VERSION`은 제거 후 덮어쓴다). Claude Code·Codex 같은 TUI는 데스크톱 알림을 보낼 터미널을 `TERM_PROGRAM` 화이트리스트(`iTerm.app`/`ghostty`/`kitty`/`WezTerm`)로 식별하는데, Maru는 그 명단에 없어 기본값에선 OSC 9 알림을 못 받기 때문이다(Claude의 `preferredNotifChannel`은 환경변수로 못 바꿔 우회 불가). `ghostty`를 고른 건 Maru가 kitty graphics·OSC 9/133/777을 Ghostty와 같은 셋으로 지원해, 식별 후 기대되는 기능과 어긋나지 않아서다(`iTerm.app`은 inline-image OSC 1337을 기대해 부적합).
+
+이건 알림 호환을 위한 **식별값**이며 `TERM`(터미널 capability)과는 별개다 — `TERM`은 `config.term`으로 사용자가 바꿀 수 있지만 `TERM_PROGRAM`은 알림 식별용 고정값이다. 트레이드오프: Maru가 진짜 Ghostty는 아니므로 Ghostty 특화 시퀀스를 가정하는 프로그램과 미세한 차이가 날 수 있으나, Maru가 미지원하는 시퀀스는 무시하므로 무해하다. `TERM_PROGRAM_VERSION`은 주입하지 않는다(현재 식별 whitelist는 키 이름만 보므로 불요).
+
 자체 terminfo는 다음 조건이 갖춰진 뒤 opt-in 실험으로 추가한다.
 
 - `tests/oracle/` fixture로 주요 CSI/OSC/alternate screen 동작을 비교할 수 있다.

@@ -410,11 +410,17 @@ fn tabNumberLabel(allocator: std.mem.Allocator, index: usize, title: []const u8)
     return std.fmt.allocPrint(allocator, "{d} {s}", .{ index + 1, title });
 }
 
-/// Term(가로 탭) 표시 라벨 — 사용자 rename(surface.custom_name)이 있으면 그것, 없으면 자동 제목(surface.title).
-/// 사이드바 워크스페이스 라벨·pane 탭바가 공유하는 단일 해석(app.pickLabel). 반환은 borrowed(custom_name은 세션
-/// 소유, title은 정적) — 호출자가 즉시 라벨 버퍼로 복사해 쓰므로 수명 안전.
+/// Term(가로 탭) 표시 라벨 — 사용자 rename(surface.custom_name)이 있으면 그것, 없으면 자동 제목.
+/// 자동 제목은 **라이브 OSC 0/2 창 제목**(`core.windowTitle` — OSC 제목이 없으면 cwd basename)을 우선해, 사이드바·
+/// 탭바가 현재 실행 중인 프로그램(Claude Code 등 OSC 제목을 설정하는 TUI)의 제목을 실시간 반영한다. 라이브가 비면
+/// (spawn 직후 OSC·cwd 보고 전) spawn 시 초기 제목(`surface.title`)으로 폴백한다. 베이스: Ghostty 탭 제목도 OSC
+/// 제목 우선·없으면 cwd basename(동작 비교). 이전엔 `surface.title`(정적/복원값) 고정이라 복원된 옛 OSC 제목이 stale하게
+/// 남았다 — 라이브 windowTitle 우선으로 그 stale을 없앤다.
+/// 사이드바 워크스페이스 라벨·pane 탭바가 공유하는 단일 해석(app.pickLabel). 반환은 borrowed(custom_name은 세션 소유,
+/// windowTitle은 core 소유로 다음 OSC/RIS/destroy까지, surface.title은 정적) — 호출자가 즉시 라벨 버퍼로 복사해 수명 안전.
 fn termLabel(term: *const Term) []const u8 {
-    return app.pickLabel(term.surface.custom_name, term.surface.title);
+    const live = term.surface.core.windowTitle();
+    return app.pickLabel(term.surface.custom_name, if (live.len > 0) live else term.surface.title);
 }
 
 /// 워크스페이스(사이드바 탭) 표시 라벨 — 탭 custom_name 우선, 없으면 활성 Term 라벨로 폴백(워크스페이스는 자동
@@ -11285,6 +11291,43 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
     try std.testing.expectEqualStrings("Maru shell", session.tabs.items[2].activePane().activeTerm().surface.title);
     try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
     try std.testing.expect(!session.sidebar_drag_active);
+}
+
+// 사이드바·탭 라벨이 라이브 OSC 0/2 창 제목을 반영하는지 — 이전엔 정적 surface.title(= 워크스페이스 복원 시
+// 저장된 옛 OSC 제목)에 고정돼, 새로 실행한 프로그램(Claude Code/Codex 등 OSC 제목을 설정하는 TUI)의 제목이
+// 반영되지 않고 stale 제목이 남았다. termLabel이 core.windowTitle()(OSC 제목 > cwd basename > 정적 폴백)을
+// 우선하므로 회귀를 막는다. 실 PTY라 macOS 게이트.
+test "사이드바·탭 라벨이 라이브 OSC 제목을 반영한다(복원된 정적 surface.title에 고정 안 됨)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const tab = session.tabs.items[0];
+    const term = tab.activePane().activeTerm();
+    // 정적 초기 제목(= 워크스페이스 복원 시 저장된 옛 OSC 제목을 흉내 — stale 라벨의 원인이었다).
+    try std.testing.expectEqualStrings("Maru shell", term.surface.title);
+
+    // 1) 프로그램(Claude Code/Codex 등 TUI)이 OSC 2로 라이브 제목 설정 → 라벨이 즉시 그걸 반영.
+    try term.surface.core.write("\x1b]2;claude\x1b\\");
+    try std.testing.expectEqualStrings("claude", workspaceLabel(tab));
+
+    // 2) OSC 제목 해제 + cwd만 있으면 cwd basename 폴백(라이브 우선의 일관성).
+    try term.surface.core.write("\x1b]7;file://h/Users/me/proj\x1b\\");
+    try term.surface.core.write("\x1b]2;\x1b\\"); // 빈 OSC 2 = 제목 해제
+    try std.testing.expectEqualStrings("proj", workspaceLabel(tab));
+
+    // 3) OSC 제목도 cwd도 없으면(RIS로 둘 다 초기화) 정적 surface.title로 폴백 — spawn 직후 빈 라벨 방지.
+    try term.surface.core.write("\x1bc");
+    try std.testing.expectEqualStrings("Maru shell", workspaceLabel(tab));
 }
 
 // ③a: 사이드바 우측 경계를 드래그하면 폭이 바뀌는지 — 경계 호버=resize_h, down=리사이즈 시작, drag=폭 갱신,

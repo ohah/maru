@@ -4217,14 +4217,13 @@ pub const TerminalCore = struct {
             (last_content == null or @as(u32, last_content.?) + @as(u32, preedit_width) < @as(u32, cols));
 
         if (insert_ok) {
-            // 커서 뒤 콘텐츠 [cursor_col, last]를 preedit_width칸 오른쪽으로(역방향: 겹침 보호).
+            // 커서 뒤 콘텐츠 [cursor_col, lc]를 preedit_width칸 오른쪽으로 민다. @memmove가 겹침을
+            // 안전하게 처리한다(insert_ok가 lc+preedit_width < cols를 보장 — 목적지가 행 안).
             if (last_content) |lc| {
-                var i: u16 = lc;
-                while (true) {
-                    row_cells[i + preedit_width] = row_cells[i];
-                    if (i == cursor_col) break;
-                    i -= 1;
-                }
+                @memmove(
+                    row_cells[cursor_col + preedit_width .. lc + 1 + preedit_width],
+                    row_cells[cursor_col .. lc + 1],
+                );
             }
         }
         var draw_col = cursor_col;

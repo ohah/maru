@@ -1365,10 +1365,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// 드롭된 pasteboard 내용(경로/URL/텍스트)을 삽입한다 — 뷰(MaruMetalTerminalView.performDragOperation)가 위임한다.
     /// 드롭은 사용자 제스처라 URL/파일을 모두 이스케이프하는 pasteboardDropContent로 추출한다(Cmd+V paste는 웹 URL을
-    /// 이스케이프하지 않는 별도 추출 — pastePasteboardText). 전송은 공용 sendPasteText. 삽입할 게 있으면 true.
+    /// 이스케이프하지 않는 별도 추출 — pastePasteboardText). 전송은 **bracketed paste 없는** sendDirectText다 — 이스케이프된
+    /// 경로를 bracketed paste로 감싸면 셸이 word-split을 안 해 백슬래시가 이중 처리되므로(Ghostty도 드롭은 직접 입력). 삽입할 게 있으면 true.
     func handleDrop(_ pb: NSPasteboard) -> Bool {
         guard let content = pasteboardDropContent(pb) else { return false }
-        sendPasteText(content)
+        sendDirectText(content)
         return true
     }
 
@@ -1404,12 +1405,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return out
     }
 
-    /// 텍스트를 paste 경로로 PTY에 보낸다(개행 정규화·bracketed paste 감싸기는 Zig 소유). 드래그·클립보드 공용.
+    /// 텍스트를 paste 경로로 PTY에 보낸다 — **bracketed paste**(DECSET 2004) 감싸기·개행 정규화는 Zig 소유. Cmd+V 전용.
     private func sendPasteText(_ text: String) {
         guard let session = appSession, !text.isEmpty else { return }
         let bytes = Array(text.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_paste_text(session, buf.baseAddress, buf.count)
+        }
+    }
+
+    /// 텍스트를 **bracketed paste 없이** 키 입력 시퀀스로 직접 PTY에 보낸다 — 드래그앤드롭용(Ghostty sendText와 같은 의미).
+    /// 이스케이프된 경로를 bracketed paste로 감쌀 때 생기는 이중 처리를 피한다. 개행 정규화(\r)는 Zig가 한다.
+    private func sendDirectText(_ text: String) {
+        guard let session = appSession, !text.isEmpty else { return }
+        let bytes = Array(text.utf8)
+        _ = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_session_send_text(session, buf.baseAddress, buf.count)
         }
     }
 

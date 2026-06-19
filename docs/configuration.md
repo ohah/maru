@@ -54,7 +54,7 @@ window.padding-y = 4
 | `theme.selection` | `#RRGGBB` | `#334455` | 선택 하이라이트 배경 |
 | `cursor.shape` | `block`\|`bar`\|`underline` | `block` | 그 외 값은 무시 |
 | `cursor.blink` | `true`\|`false` | `true` | |
-| `window.padding-x` | 정수(0~256) | `8` | 터미널 셀과 컨테이너(사이드바·탭 바 안쪽) **좌우** 가장자리 사이 여백(논리 pt, DPI 스케일). 0이면 셀이 가장자리에 붙음. 범위 밖/비정수는 무시(기본 유지) |
+| `window.padding-x` | 정수(0~256) | `8` | 셀 그리드와 pane 가장자리 사이 **좌우** 여백(논리 pt, DPI 스케일). 탭 바·split divider·pane 배경 등 chrome은 사이드바 경계/창 가장자리까지 꽉 차고 셀 그리드만 들인다. 0이면 셀이 가장자리에 붙음. 범위 밖/비정수는 무시(기본 유지) |
 | `window.padding-y` | 정수(0~256) | `4` | 위와 같되 **상하** 여백 |
 | `input.page-keys` | `passthrough`\|`scroll` | `scroll` | 메인 화면 PageUp/Down 동작. 아래 참조 |
 | `quick-terminal.height` | 숫자(0.1~1.0) | `0.45` | 가장자리에 수직인 '두께' 비율(화면 대비). `top`/`bottom`=높이, `left`/`right`=폭, `center`=세로 비율. 범위 밖/비숫자는 무시 |

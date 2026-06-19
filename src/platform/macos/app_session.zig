@@ -4293,17 +4293,28 @@ pub const AppSession = struct {
             },
             .terminal => {
                 // preedit 읽기 + setPreedit("") 변경은 코어 mutate — 락 아래(docs/io-render-threading.md PR3,
-                // 리더 경합 방지). sendTextAsKeys는 PTY로만 나가(코어 mutex 재취득 없음) 락 보유 중 호출해도 안전.
+                // 리더 경합 방지). 단 확정 텍스트 전송(sendTextAsKeys)은 락을 푼 뒤에 한다:
+                // sendTextAsKeys→handleKeyEvent가 같은 core_mutex를 재취득하므로 락 보유 중 호출하면
+                // self-deadlock이다(std.Io.Mutex는 비재진입). 과거 PTY 직접 쓰기(sendCommittedText)는 락
+                // 안에서 안전했지만 sendTextAsKeys 공유(#2, bd5fd14)로 그 가정이 깨졌다 — 한글 조합 중
+                // 창 포커스 상실 시 메인 스레드가 ulock_wait에 박혀 hang으로 드러난 회귀.
                 const s = self.activeSurface();
                 const core = &s.core;
-                s.core_mutex.lockUncancelable(self.io);
-                defer s.core_mutex.unlock(self.io);
-                if (core.preedit) |pending| {
-                    // setPreedit가 버퍼를 해제하므로 먼저 사본을 떠서 보낸다.
-                    const copy = self.allocator.dupe(u8, pending) catch return;
+                var committed: ?[]u8 = null;
+                {
+                    s.core_mutex.lockUncancelable(self.io);
+                    defer s.core_mutex.unlock(self.io);
+                    if (core.preedit) |pending| {
+                        // setPreedit가 버퍼를 해제하므로 먼저 사본을 뜬다. dupe 실패(OOM)면 비우지 않고
+                        // 그대로 둔다(반쪽 커밋 방지 — 기존 동작 보존).
+                        committed = self.allocator.dupe(u8, pending) catch return;
+                        core.setPreedit("") catch {};
+                        self.metal_dirty = true;
+                    }
+                }
+                // 락 밖에서 전송 — handleKeyEvent가 필요한 core_mutex를 알아서 잡는다.
+                if (committed) |copy| {
                     defer self.allocator.free(copy);
-                    core.setPreedit("") catch {};
-                    self.metal_dirty = true;
                     self.sendTextAsKeys(copy);
                 }
             },
@@ -11865,6 +11876,37 @@ test "sendTextAsKeys normalizes newlines to CR and imeBegin snaps to bottom" {
     session.imeInsert("a\nb");
     session.imeEnd(null);
     try std.testing.expectEqual(before + 3, session.total_terminal_input_bytes);
+}
+
+test "commitComposition during terminal preedit does not deadlock (회귀: bd5fd14)" {
+    // 한글 조합 중(core.preedit 존재) 창 키포커스를 잃으면 setFocused(false)→commitComposition이
+    // 조합을 확정 전송한다. 과거엔 core_mutex를 쥔 채 sendTextAsKeys→handleKeyEvent가 같은 락을
+    // 재취득해 메인 스레드가 ulock_wait에 박혀 hang했다(std.Io.Mutex는 비재진입 → self-deadlock;
+    // sendCommittedText→sendTextAsKeys 통일 #2/bd5fd14로 "락 보유 중 호출 안전" 가정이 깨진 회귀).
+    // 이 테스트가 끝까지 반환한다는 것 자체가 데드락이 사라졌다는 증거다(데드락이면 영영 멈춘다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const core = &session.activeSurface().core;
+
+    // 터미널 조합 중 상태를 만든다(inputFocus 기본 .terminal → core.preedit 세팅).
+    session.imeMarked("한");
+    try std.testing.expect(core.preedit != null);
+
+    const before = session.total_terminal_input_bytes;
+    session.setFocused(false); // 창 키포커스 상실 → commitComposition(.terminal)
+
+    try std.testing.expect(core.preedit == null); // 조합이 확정되며 비워짐(다시 안 남음)
+    try std.testing.expect(session.total_terminal_input_bytes > before); // "한"이 PTY로 확정 전송됨
 }
 
 test "scrollbarThumbGeom: null without scrollback, thumb size/position track view_offset" {

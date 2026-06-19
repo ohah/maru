@@ -1,5 +1,6 @@
 references/
 .zig-cache/
 zig-out/
+dist/
 .DS_Store
 tests/oracle/alacritty-dumper/target/

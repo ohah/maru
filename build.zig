@@ -1,7 +1,17 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    // macOS 배포 하한을 11.0(Big Sur, Apple Silicon 시작 버전)으로 고정해 구형 macOS에서도
+    // 실행되게 한다. cpu_arch/os_tag/abi는 null로 두어 native를 유지하므로(=os_version_min만
+    // 덮어씀) Zig가 시스템 SDK(Metal/CoreText 등 프레임워크 헤더)를 계속 자동 탐지한다.
+    // 버전을 triple로 명시(예: aarch64-macos.11.0)하면 cross-compile로 간주돼 SDK 탐지가
+    // 꺼지므로 그 방식은 쓰지 않는다. -Dtarget을 주면 그 값이 우선한다.
+    // Swift app host도 swiftMacOSTarget()이 이 min 버전을 그대로 읽어 함께 낮아진다.
+    const target = b.standardTargetOptions(.{
+        .default_target = .{
+            .os_version_min = .{ .semver = .{ .major = 11, .minor = 0, .patch = 0 } },
+        },
+    });
     const optimize = b.standardOptimizeOption(.{});
 
     const maru_mod = b.addModule("maru", .{
@@ -612,6 +622,61 @@ pub fn build(b: *std.Build) void {
 
         const macos_app_bundle_step = b.step("macos-app-bundle", "Package the macOS app shell as a HiDPI .app bundle");
         macos_app_bundle_step.dependOn(&macos_app_bundle.step);
+
+        // macos-dmg: 서명·공증·staple까지 끝낸 배포용 .dmg를 한 번에 만든다.
+        // 비밀값(앱 전용 암호)은 build.zig·리포에 절대 두지 않는다. 공증 자격증명은 notarytool
+        // 키체인 프로파일(기본 "maru-notary")에 미리 저장해 두고 이름만 참조한다. 서명 인증서
+        // 이름과 팀ID는 공개 정보라 옵션 기본값으로 둔다. 둘 다 -D 옵션으로 덮어쓸 수 있다.
+        //   사전 1회: xcrun notarytool store-credentials maru-notary \
+        //               --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+        //               --password "$APPLE_APP_SPECIFIC_PASSWORD"
+        // arm64 단일 빌드이므로 산출물 이름에 -arm64를 박는다. 버전은 빌드된 번들의
+        // Info.plist(CFBundleShortVersionString)에서 읽어 파일명과 1:1로 맞춘다.
+        const macos_sign_identity = b.option(
+            []const u8,
+            "macos-sign-identity",
+            "codesign에 쓸 Developer ID Application 인증서 이름(키체인에서 조회)",
+        ) orelse "Developer ID Application: Payhere Inc. (2MS57VWFU8)";
+        const macos_notary_profile = b.option(
+            []const u8,
+            "macos-notary-profile",
+            "notarytool 키체인 프로파일 이름(store-credentials로 미리 저장)",
+        ) orelse "maru-notary";
+
+        const macos_dmg = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            // 인증서 이름/프로파일명은 환경변수로 넘겨 셸 escape 문제를 피한다(아래 setEnvironmentVariable).
+            // set -eu라 어느 단계든 실패하면 즉시 멈춘다. notarytool submit --wait는 공증 완료까지
+            // 블록하고, staple로 티켓을 dmg에 부착해 오프라인에서도 Gatekeeper를 통과하게 한다.
+            ": \"${MARU_SIGN_IDENTITY:?set -Dmacos-sign-identity}\"; " ++
+                ": \"${MARU_NOTARY_PROFILE:?set -Dmacos-notary-profile}\"; " ++
+                "[ -d zig-out/Maru.app ] || { echo 'error: zig-out/Maru.app missing (run macos-app-bundle first)' >&2; exit 1; }; " ++
+                "echo '==> codesign app (Developer ID, hardened runtime, timestamp)'; " ++
+                "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app; " ++
+                "codesign --verify --strict zig-out/Maru.app; " ++
+                "version=$(/usr/libexec/PlistBuddy -c \"Print :CFBundleShortVersionString\" zig-out/Maru.app/Contents/Info.plist); " ++
+                "rm -rf dist/dmg-staging; mkdir -p dist/dmg-staging; " ++
+                "ditto zig-out/Maru.app dist/dmg-staging/Maru.app; " ++
+                "ln -s /Applications dist/dmg-staging/Applications; " ++
+                "dmg=\"dist/Maru-${version}-arm64.dmg\"; " ++
+                "rm -f \"$dmg\"; " ++
+                "echo \"==> create dmg: $dmg\"; " ++
+                "hdiutil create -volname Maru -srcfolder dist/dmg-staging -ov -format UDZO \"$dmg\"; " ++
+                "rm -rf dist/dmg-staging; " ++
+                "codesign --force --timestamp --sign \"$MARU_SIGN_IDENTITY\" \"$dmg\"; " ++
+                "echo '==> notarize (submit + wait) via keychain profile'; " ++
+                "xcrun notarytool submit \"$dmg\" --keychain-profile \"$MARU_NOTARY_PROFILE\" --wait; " ++
+                "xcrun stapler staple \"$dmg\"; " ++
+                "spctl -a -t open --context context:primary-signature -v \"$dmg\"; " ++
+                "echo \"==> done: $dmg\"",
+        });
+        macos_dmg.setEnvironmentVariable("MARU_SIGN_IDENTITY", macos_sign_identity);
+        macos_dmg.setEnvironmentVariable("MARU_NOTARY_PROFILE", macos_notary_profile);
+        macos_dmg.setCwd(b.path("."));
+        macos_dmg.step.dependOn(&macos_app_bundle.step);
+
+        const macos_dmg_step = b.step("macos-dmg", "Sign, notarize and staple a distributable .dmg (needs keychain cert + notarytool profile)");
+        macos_dmg_step.dependOn(&macos_dmg.step);
 
         const macos_app_step = b.step("macos-app", "Run the macOS Swift app host app shell");
         const macos_app_run = b.addSystemCommand(&.{"./zig-out/Maru.app/Contents/MacOS/maru-macos-app"});

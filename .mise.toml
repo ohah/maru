@@ -89,6 +89,10 @@ run = "zig build macos-app"
 description = "Run the macOS Swift app host dev shell smoke"
 run = "zig build macos-app-smoke"
 
+[tasks.macos-dmg]
+description = "Sign+notarize+staple a distributable .dmg (needs keychain cert + notarytool profile)"
+run = "zig build macos-dmg -Doptimize=ReleaseFast"
+
 [tasks.macos-coretext-smoke]
 description = "Run macOS CoreText font shaping/raster smoke"
 run = "zig build macos-coretext-smoke"

@@ -1047,6 +1047,51 @@ pub const TerminalCore = struct {
         self.dirty = fullDirty(self.size);
     }
 
+    /// 화면 + 스크롤백을 비운다(⌘K). 베이스/결정: Ghostty `clear_screen`(키바인딩 수렴의 1차 레퍼런스 —
+    /// docs/key-input-and-shortcuts.md). 반환값 = 호출자가 셸에 form-feed(0x0C, ^L)를 보내 프롬프트를 맨 위에
+    /// 다시 그리게 할지 여부. 코어는 PTY로 못 쓰므로(L1 경계 — docs/io-render-threading.md) "보낼지"만 알려주고
+    /// 실제 쓰기는 app_session이 락 밖에서 한다.
+    ///
+    /// 세 경로(전부 Ghostty와 동작 일치):
+    /// 1. alt 화면(vim/less/htop): 무동작(false). 그 화면은 앱이 소유하고 셀을 에뮬레이터가 지우면 앱의 커서
+    ///    모델과 어긋난다. clear는 앱 자신(:clear 등)에 맡긴다.
+    /// 2. 셸 프롬프트(OSC 133 prompt/input): 화면 전체 + 스크롤백을 비우고 커서를 홈으로 둔 뒤 true 반환 →
+    ///    셸이 ^L(clear-screen 위젯)로 프롬프트를 맨 위에 다시 그린다. 셸이 커서를 다시 잡으므로 readline 모델과
+    ///    어긋나지 않는다(프롬프트 분류는 셸 통합이 있을 때만 = 그때 ^L이 정상 동작).
+    /// 3. 그 외(셸 통합 없음/명령 실행 중): 스크롤백 + 커서 위 행만 비우고 현재 줄과 그 아래·커서는 보존, false.
+    ///    커서를 안 옮겨 비통합 셸·실행 중 프로그램의 커서 모델과 어긋나지 않게 하고 form-feed도 안 보낸다.
+    pub fn clearScreen(self: *TerminalCore) bool {
+        if (self.alt_active) return false;
+        if (self.size.rows == 0 or self.size.cols == 0) return false;
+        self.pending_wrap = false;
+        self.clearScrollback(); // 스크롤백(history)은 항상 비운다 — 프롬프트 위치와 무관, selection도 무효화
+        const blank: types.Cell = .{ .style = self.pen };
+
+        if (isPromptish(self.semantic_state)) {
+            @memset(self.cells, blank);
+            @memset(self.wrapped, false);
+            @memset(self.prompt_marks, .{}); // 전체 clear는 OSC 133 분류도 지운다(셸이 곧 재마킹)
+            self.semantic_state = .unknown;
+            self.cursor = .{ .row = 0, .col = 0 };
+            self.last_print = null;
+            self.dirty = fullDirty(self.size);
+            return true;
+        }
+
+        // 비프롬프트: 커서 행 위쪽만 비운다. index(row,0) = 커서 행 시작 셀 인덱스 = 위쪽 행들의 셀 수.
+        if (self.cursor.row > 0) {
+            const above = self.index(self.cursor.row, 0);
+            @memset(self.cells[0..above], blank);
+            for (0..self.cursor.row) |r| {
+                self.wrapped[r] = false;
+                self.prompt_marks[r] = .{};
+            }
+            self.last_print = null;
+            self.dirty = fullDirty(self.size);
+        }
+        return false;
+    }
+
     /// 스크롤백 + 활성 화면 전체에서 needle을 찾아 절대-좌표 Match로 out에 채운다(out은 먼저 비운다).
     /// 대소문자 무시 부분일치(Ghostty 스크롤백 검색의 기본 — 같은 1차 레퍼런스). 대소문자 무시는 `foldCase`
     /// (ASCII+Latin-1·Greek·Cyrillic 유니코드) — command_palette 필터(ASCII `toLower`)보다 넓다(거기는 영문
@@ -5462,6 +5507,52 @@ test "CSI 2J clears the whole screen" {
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("   \n   ", dump);
+}
+
+test "clearScreen at the shell prompt wipes screen+scrollback, homes cursor, and requests redraw" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    // rows=3보다 많은 줄 → 스크롤백 생성.
+    try core.write("l1\nl2\nl3\nl4\n");
+    try std.testing.expect(core.scrollbackLen() > 0);
+    // 셸 프롬프트 표시(OSC 133 A→B = prompt→input). semantic_state=.input → isPromptish.
+    try core.write("\x1b]133;A\x1b\\");
+    try core.write("\x1b]133;B\x1b\\");
+
+    const redraw = core.clearScreen();
+    try std.testing.expect(redraw); // 프롬프트 → 호출자가 ^L(form-feed)로 프롬프트 재그림
+    try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen()); // 스크롤백 비움
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.row); // 커서 홈
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.col);
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("    \n    \n    ", dump); // 4×3 전부 공백
+}
+
+test "clearScreen on the alternate screen is a no-op and does not request redraw" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[?1049h"); // alt 진입(vim/less 류) — 앱이 화면 소유
+    try core.write("vi");
+    const redraw = core.clearScreen();
+    try std.testing.expect(!redraw);
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("vi  \n    ", dump); // alt 내용 보존(무동작)
+}
+
+test "clearScreen without prompt classification clears above the cursor and keeps the current line" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    // CUP로 결정적으로 배치한다(\n의 CR 동반 여부에 의존하지 않게). 셸 통합 없음 → semantic_state=.unknown.
+    try core.write("\x1b[1;1Haaa"); // row0 = "aaa "
+    try core.write("\x1b[2;1Hbbb"); // row1 = "bbb "
+    try core.write("\x1b[3;1Hccc"); // row2 = "ccc ", 커서 (2,3)
+    const redraw = core.clearScreen();
+    try std.testing.expect(!redraw); // 비프롬프트 → form-feed 안 보냄
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("    \n    \nccc ", dump); // 커서 행 위만 비우고 현재 줄 보존
 }
 
 test "escape sequence split across writes is parsed as one sequence" {

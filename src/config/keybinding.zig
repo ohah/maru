@@ -213,6 +213,9 @@ pub const default_app_bindings = [_]AppBinding{
     // Cmd+A: 전체 선택(Select All). macOS 앱 보편 단축키 — Terminal.app/iTerm2도 터미널 내용 전체를 선택한다.
     // 셸 줄-시작은 Ctrl+A(C0)라 안 겹친다. normalizeEventChar가 'a'를 'A'로 fold, 모디파이어 정확 비교.
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'A' } }, .action = .select_all },
+    // Cmd+K: 화면 + 스크롤백 비우기(clear_screen). iTerm2/Terminal.app/Ghostty 공통 Mac 단축키(Ghostty 기본도 ⌘K).
+    // 셸 줄-삭제는 Ctrl+K(C0)라 안 겹친다. normalizeEventChar가 'k'를 'K'로 fold, 모디파이어 정확 비교(Shift 등은 별개).
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'K' } }, .action = .clear_screen },
     // Cmd+Shift+P: 커맨드 팝업 토글(VS Code/Sublime/Zed 관례). 'p'→'P' fold, 모디파이어 정확 비교(Shift 필수라
     // Cmd+P[프린트 관습]와 안 겹친다). 팝업 열림 동안엔 handleKeyEvent가 키를 팝업으로 가로채 이 경로 안 탄다.
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'P' } }, .action = .toggle_command_palette },
@@ -540,6 +543,17 @@ test "built-in app bindings: Cmd+T new_term, Cmd+Shift+T new_tab (tab model)" {
         .key = .{ .char = 's' },
         .modifiers = .{ .command = true },
     }, &buffer, .{})) == .ignored);
+}
+
+test "built-in app binding resolves Cmd+K to clear_screen without user config" {
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{};
+    // 'k'는 normalizeEventChar가 'K'로 fold → default_app_bindings의 'K'와 매칭. 화면+스크롤백 비우기.
+    const resolved = try resolver.resolve(.{
+        .key = .{ .char = 'k' },
+        .modifiers = .{ .command = true },
+    }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.clear_screen, resolved.app_action);
 }
 
 test "built-in app binding resolves Cmd+W to close_term without user config" {

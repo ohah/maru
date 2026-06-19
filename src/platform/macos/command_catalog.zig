@@ -47,6 +47,8 @@ pub const entries = [_]Entry{
     .{ .action = .rename_pane, .key = "rename_pane", .title = "Rename Pane" },
     .{ .action = .rename_term, .key = "rename_term", .title = "Rename Terminal" },
     .{ .action = .select_all, .key = "select_all", .title = "Select All" },
+    // 화면+스크롤백 비우기(⌘K). select_all과 같은 일반 코어 액션 — 메뉴/팝업에 노출, 메뉴는 ⌘K chord를 표시한다.
+    .{ .action = .clear_screen, .key = "clear_screen", .title = "Clear" },
     // 런타임 폰트 크기(⌘+/⌘-/⌘0). 모달 토글(toggle_find 등)과 달리 일반 액션이라 팝업/메뉴에 노출한다 —
     // 메뉴는 catalogMenuItem이 바인딩 chord(⌘+/⌘-/⌘0)를 그대로 표시한다(select_all과 같은 결).
     .{ .action = .increase_font_size, .key = "increase_font_size", .title = "Bigger" },

@@ -2770,6 +2770,16 @@ pub const AppSession = struct {
                 defer s.core_mutex.unlock(self.io);
                 s.core.selectAll();
             },
+            // 화면+스크롤백 비우기(⌘K). 코어 mutate(셀·스크롤백)는 락 아래(리더 경합 방지, docs/io-render-threading.md
+            // PR3). clearScreen이 "셸에 ^L을 보내 프롬프트를 다시 그릴지"를 돌려주면, form-feed는 락 밖에서 보낸다
+            // (writeInput은 블로킹 PTY 쓰기 — PR1 패턴). 프롬프트일 때만 true(alt 화면·비프롬프트면 안 보냄).
+            .clear_screen => {
+                const s = self.activeSurface();
+                s.core_mutex.lockUncancelable(self.io);
+                const send_form_feed = s.core.clearScreen();
+                s.core_mutex.unlock(self.io);
+                if (send_form_feed) self.runtime.writeInput(s.id, .{ .bytes = "\x0c" }) catch {};
+            },
             // 커맨드 팝업 토글(Cmd+Shift+P). 열려 있으면 닫고, 아니면 연다(상태머신은 PaletteState).
             .toggle_command_palette => self.togglePalette(),
             // 스크롤백 Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState, 검색은 코어).

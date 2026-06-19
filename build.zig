@@ -25,6 +25,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .link_libc = true,
     });
+    // terminfo 소스는 src/ 밖(terminfo/maru.terminfo — tools/·docs가 공유하는 단일 출처)이라 @embedFile이
+    // 직접 못 읽는다. 빌드 import로 등록해 cli/ssh.zig가 @embedFile("maru_terminfo")로 바이너리에 심는다
+    // (maru ssh 자기완결성 — 로컬 설치 없이 원격 전파). 파일을 옮기지 않아 참조 중복이 없다.
+    maru_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const test_support_mod = b.addModule("test_support", .{
         .root_source_file = b.path("tests/support/artifacts.zig"),
         .target = target,

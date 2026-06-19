@@ -176,7 +176,8 @@ term = xterm-maru
 > maru ssh --terminfo-only <host>   # 설치만(세션 없음) — ssh 래핑을 원치 않을 때
 > ```
 >
-> `maru ssh`는 로컬에 `xterm-maru`가 깔려 있어야 하고(위 `install-terminfo`), 원격에 `tic`이 없거나
+> `maru ssh`는 terminfo 소스를 바이너리에 내장해 **로컬 설치 없이도** 동작한다(자기완결 — `install-terminfo`는
+> 로컬 셸에서 `term = "xterm-maru"`를 쓸 때만 필요하다). 원격에 `tic`이 없거나
 > 설치가 실패하면 자동으로 `TERM=xterm-256color`로 폴백해 세션이 깨지지 않는다. 키/agent 인증이면
 > ControlMaster로 **단일 연결**(인증 1회)에서 설치와 세션을 함께 처리한다. `maru ssh`는 **대화형
 > 세션용**이다 — `maru ssh host cmd`처럼 원격 command를 붙이면 terminfo 설치를 건너뛰고(설치 스크립트가

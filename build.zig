@@ -1,17 +1,23 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     // macOS 배포 하한을 11.0(Big Sur, Apple Silicon 시작 버전)으로 고정해 구형 macOS에서도
-    // 실행되게 한다. cpu_arch/os_tag/abi는 null로 두어 native를 유지하므로(=os_version_min만
-    // 덮어씀) Zig가 시스템 SDK(Metal/CoreText 등 프레임워크 헤더)를 계속 자동 탐지한다.
-    // 버전을 triple로 명시(예: aarch64-macos.11.0)하면 cross-compile로 간주돼 SDK 탐지가
-    // 꺼지므로 그 방식은 쓰지 않는다. -Dtarget을 주면 그 값이 우선한다.
-    // Swift app host도 swiftMacOSTarget()이 이 min 버전을 그대로 읽어 함께 낮아진다.
-    const target = b.standardTargetOptions(.{
-        .default_target = .{
-            .os_version_min = .{ .semver = .{ .major = 11, .minor = 0, .patch = 0 } },
-        },
-    });
+    // 실행되게 한다. 단 이 기본값은 macOS 호스트에서 빌드할 때만 건다.
+    //   os_version_min을 모든 호스트의 default_target에 박으면, Linux CI에서 target이
+    //   native-native.11.0이 되어 std.Target.Query.isNative()가 false가 되고, Zig가 native
+    //   시스템 라이브러리 경로(libvterm 등) 탐지를 꺼버린다("searched paths: none") →
+    //   외부 오라클 빌드가 깨진다. 그래서 macOS 호스트에서만 min을 덮어쓴다.
+    // macOS에서는 cpu_arch/os_tag/abi를 null로 둬 native를 유지하므로(=os_version_min만 덮어씀)
+    // Zig가 시스템 SDK(Metal/CoreText 등 프레임워크 헤더)를 계속 자동 탐지한다. 버전을
+    // triple로 명시(예: aarch64-macos.11.0)하면 cross-compile로 간주돼 SDK 탐지가 꺼지므로
+    // 그 방식은 쓰지 않는다. -Dtarget을 주면 그 값이 우선한다. Swift app host도
+    // swiftMacOSTarget()이 이 min 버전을 그대로 읽어 함께 낮아진다.
+    const default_target_query: std.Target.Query = if (builtin.os.tag == .macos)
+        .{ .os_version_min = .{ .semver = .{ .major = 11, .minor = 0, .patch = 0 } } }
+    else
+        .{};
+    const target = b.standardTargetOptions(.{ .default_target = default_target_query });
     const optimize = b.standardOptimizeOption(.{});
 
     const maru_mod = b.addModule("maru", .{

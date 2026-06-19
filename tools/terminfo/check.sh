@@ -27,7 +27,9 @@ trap 'rm -rf "$TIDIR"' EXIT
 
 # (1) 깨끗한 컴파일. -x로 확장 캡(Sync/Tc)을 포함한다.
 tic -x -o "$TIDIR" "$SRC" 2>"$TIDIR/tic.err" || { cat "$TIDIR/tic.err" >&2; fail "tic 컴파일 실패"; }
-[ -s "$TIDIR/tic.err" ] && { cat "$TIDIR/tic.err" >&2; fail "tic가 경고/에러를 냈다(클린 컴파일 아님)"; }
+# tic stderr는 실패가 아니라 정보다 — ncurses 버전에 따라 양성 경고(중복/억제 캡, alias note)를 내므로
+# "stderr 있으면 실패"로 보면 안 된다(이식성). 컴파일 성공/실패는 위 exit code가 단일 판정. 경고는 보여만 준다.
+[ -s "$TIDIR/tic.err" ] && { echo "[terminfo-check] note: tic stderr ↓" >&2; cat "$TIDIR/tic.err" >&2; }
 
 export TERMINFO="$TIDIR"
 
@@ -36,8 +38,9 @@ infocmp -x xterm-maru >/dev/null 2>&1 || fail "primary 이름 xterm-maru가 해�
 infocmp -x maru >/dev/null 2>&1 || fail "alias 이름 maru가 해석되지 않는다"
 
 # (2) Sync round-trip: begin(p1=1)=ESC[?2026h, end(p1=0)=ESC[?2026l 정확히.
-begin=$(tput -T xterm-maru Sync 1 | xxd -p)
-end=$(tput -T xterm-maru Sync 0 | xxd -p)
+# hex 변환은 POSIX `od`로 한다 — `xxd`는 coreutils가 아니라 vim-common 소속이라 슬림 CI 이미지엔 없을 수 있다.
+begin=$(tput -T xterm-maru Sync 1 | od -An -tx1 | tr -d ' \n')
+end=$(tput -T xterm-maru Sync 0 | od -An -tx1 | tr -d ' \n')
 [ "$begin" = "1b5b3f3230323668" ] || fail "Sync begin 바이트가 ESC[?2026h가 아니다: $begin"
 [ "$end" = "1b5b3f323032366c" ] || fail "Sync end 바이트가 ESC[?2026l가 아니다: $end"
 

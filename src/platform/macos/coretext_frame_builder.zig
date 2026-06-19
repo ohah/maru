@@ -41,9 +41,9 @@ pub const CoreTextFrameBuilder = struct {
         // I/O–렌더 스레딩 분리(docs/io-render-threading.md): 코어 읽기(renderSnapshot→buildDrawList,
         // 코어 메모리를 DrawList로 복사)는 **락 아래**, CoreText shaping(buildFromDrawList — DrawList
         // 복사본만 봄)은 **락 밖**. PR3에서 리더의 core.write가 CoreText shaping에 안 막히게 한다.
-        active.core_mutex.lockUncancelable(io);
+        active.lockCore(io);
         const list_or = renderer.buildDrawList(allocator, active.core.renderSnapshot());
-        active.core_mutex.unlock(io);
+        active.unlockCore(io);
         const draw_list = try list_or;
         // buildFromDrawList가 draw_list 소유권을 가져간다(실패 시 정리, 성공 시 RenderFrame으로 이동).
         const render_frame = try self.buildFromDrawList(allocator, draw_list, renderer_state);

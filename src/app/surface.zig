@@ -53,6 +53,18 @@ pub const Surface = struct {
         self.core.deinit();
     }
 
+    /// core_mutex 취득 — **모든 메인 스레드 코어 접근은 이 래퍼로 잡는다**(직접 `core_mutex.lockUncancelable`
+    /// 금지, check-boundaries가 강제). 재진입(락 보유 중 같은 락 재취득 = self-deadlock)을 lock 전에
+    /// 디버그 panic으로 노출한다(docs/io-render-threading.md §6-5). reader는 Surface가 없어 같은
+    /// owner를 core.owner_dbg.lock으로 직접 공유한다(단일 출처).
+    pub fn lockCore(self: *Surface, io: std.Io) void {
+        self.core.owner_dbg.lock(&self.core_mutex, io);
+    }
+
+    pub fn unlockCore(self: *Surface, io: std.Io) void {
+        self.core.owner_dbg.unlock(&self.core_mutex, io);
+    }
+
     pub fn restorableMetadata(self: *const Surface) RestorableSurfaceMetadata {
         // env는 allowlist/redaction 정책이 정해질 때까지 저장하지 않는다.
         // workspace restore가 민감한 환경변수를 실수로 기록하지 않도록 비워 둔다.

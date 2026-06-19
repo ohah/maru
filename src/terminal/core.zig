@@ -3,6 +3,7 @@ const input = @import("input.zig");
 const types = @import("types.zig");
 const png = @import("png.zig"); // kitty graphics f=100 PNG 디코드(K3c)
 const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
+const CoreOwner = @import("core_owner.zig").CoreOwner; // core_mutex 재진입 추적(디버그 전용 안전망)
 
 /// mouse tracking 모드(DECSET 9/1000/1002/1003) — 어떤 마우스 이벤트를 앱에 리포트할지(상호 배타). 베이스: xterm
 /// mouse tracking. none=꺼짐, x10=press만, normal=press+release, button=+버튼 눌린 채 drag, any=+모든 motion.
@@ -96,6 +97,10 @@ pub const TerminalCore = struct {
     size: types.Size,
     cursor: types.Cursor = .{},
     cells: []types.Cell,
+    // core_mutex(Surface 소유)를 잡는 스레드를 추적하는 디버그 전용 안전망. lock은 Surface.lockCore
+    // 와 reader가 owner_dbg.lock/unlock으로만 잡아 재진입(self-deadlock)을 lock 전에 panic으로
+    // 노출한다. release에선 @sizeOf 0(ABI 영향 없음). 단일 출처: src/terminal/core_owner.zig.
+    owner_dbg: CoreOwner = .{},
     dirty: ?types.DirtyRegion = null,
     utf8_tail: [4]u8 = undefined,
     utf8_tail_len: usize = 0,

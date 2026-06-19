@@ -234,6 +234,16 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "notifications.agent-complete는 true|false — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "scrollback.lines")) {
+        config.scrollback.lines = parseScrollbackLines(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "scrollback.lines는 0~100000 정수 — 기본값 유지" });
+            return;
+        };
+    } else if (std.mem.eql(u8, key, "bell.audible")) {
+        config.bell.audible = parseBool(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "bell.audible은 true|false — 기본값 유지" });
+            return;
+        };
     } else if (std.mem.eql(u8, key, "window.padding-x")) {
         config.window_padding_x = parsePaddingPt(value) orelse {
             try diags.append(a, .{ .line = line_no, .message = "window.padding-x는 0~256 정수 — 기본값 유지" });
@@ -490,6 +500,13 @@ fn parseBool(value: []const u8) ?bool {
 fn parsePaddingPt(value: []const u8) ?u32 {
     const n = std.fmt.parseInt(u32, std.mem.trim(u8, value, &std.ascii.whitespace), 10) catch return null;
     return if (n <= 256) n else null;
+}
+
+/// scrollback 줄 수 파싱 — 비정수/100000 초과는 null(기본값 유지). 0은 유효(스크롤백 비활성).
+/// 상한 100000은 비정상 큰 값의 메모리 폭주 가드(행당 ptr 슬롯 ring).
+fn parseScrollbackLines(value: []const u8) ?u32 {
+    const n = std.fmt.parseInt(u32, std.mem.trim(u8, value, &std.ascii.whitespace), 10) catch return null;
+    return if (n <= 100000) n else null;
 }
 
 /// 빈 기본 결과(파일 없음/HOME 없음 등). config 텍스트를 안 읽었으므로 arena도 비어 있다.
@@ -807,6 +824,47 @@ test "parse: input.page-keys scroll(default)/passthrough + invalid is forgiving"
         var p = try parse(std.testing.allocator, "input.page-keys = bogus\n");
         defer p.deinit();
         try std.testing.expectEqual(theme.PageKeys.scroll, p.config.input.page_keys); // 잘못된 값 → 기본 유지
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+}
+
+test "parse: scrollback.lines + bell.audible (defaults and forgiving)" {
+    {
+        var p = try parse(std.testing.allocator, "");
+        defer p.deinit();
+        try std.testing.expectEqual(@as(u32, 1000), p.config.scrollback.lines); // 기본
+        try std.testing.expectEqual(true, p.config.bell.audible); // 기본
+    }
+    {
+        var p = try parse(std.testing.allocator, "scrollback.lines = 5000\n");
+        defer p.deinit();
+        try std.testing.expectEqual(@as(u32, 5000), p.config.scrollback.lines);
+    }
+    {
+        var p = try parse(std.testing.allocator, "scrollback.lines = 0\n"); // 0=비활성, 유효
+        defer p.deinit();
+        try std.testing.expectEqual(@as(u32, 0), p.config.scrollback.lines);
+    }
+    {
+        var p = try parse(std.testing.allocator, "scrollback.lines = 999999\n"); // 상한 초과 → 기본 + 진단
+        defer p.deinit();
+        try std.testing.expectEqual(@as(u32, 1000), p.config.scrollback.lines);
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+    {
+        var p = try parse(std.testing.allocator, "scrollback.lines = abc\n"); // 비정수 → 기본
+        defer p.deinit();
+        try std.testing.expectEqual(@as(u32, 1000), p.config.scrollback.lines);
+    }
+    {
+        var p = try parse(std.testing.allocator, "bell.audible = false\n");
+        defer p.deinit();
+        try std.testing.expectEqual(false, p.config.bell.audible);
+    }
+    {
+        var p = try parse(std.testing.allocator, "bell.audible = bogus\n"); // 잘못 → 기본 true + 진단
+        defer p.deinit();
+        try std.testing.expectEqual(true, p.config.bell.audible);
         try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
     }
 }

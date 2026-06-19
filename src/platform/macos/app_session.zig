@@ -847,6 +847,8 @@ pub const AppSession = struct {
     // input.page-keys=scroll이면 메인 화면에서 PageUp/Down이 Maru 스크롤백을 스크롤한다. 기본
     // (false=passthrough)은 xterm/Ghostty처럼 \e[5~/\e[6~를 PTY로 보낸다.
     page_keys_scroll: bool = false,
+    /// BEL 시스템 소리 여부(config bell.audible 캐시). takeBell이 음소거 게이트로 읽는다. 기본 true.
+    audible_bell: bool = true,
     // 한 cell의 device 픽셀 크기(advance 폭 × line-height). 실제 CoreText 메트릭에서 뽑아
     // shaper(atlas slot 크기)·rasterizer·renderer fixed-cell layout·host resize가 모두 같은 값을
     // 쓰게 한다. 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다.
@@ -1081,6 +1083,7 @@ pub const AppSession = struct {
             try config_mod.loadConfigDefault(io, allocator);
         self.config_loaded = true;
         self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
+        self.audible_bell = self.loaded_config.config.bell.audible;
 
         // 전역 단축키 config를 OS 등록용 기술자로 변환해 둔다(Swift가 global_hotkeys ABI로 읽어 등록).
         // 가상 키코드로 매핑 안 되는 chord(+/Insert 등)는 descriptorFor가 null → 건너뛴다(등록 불가).
@@ -2246,6 +2249,9 @@ pub const AppSession = struct {
 
         term.surface = try app.Surface.init(self.allocator, id, size);
         errdefer term.surface.deinit();
+        // config 스크롤백 ring 크기를 주입한다(모든 surface가 이 chokepoint를 지난다 — init 첫 탭·새 탭·split·
+        // restore). lazy-alloc(첫 scroll) 전이라 안전. 0이면 스크롤백 비활성.
+        term.surface.core.max_scrollback = self.loaded_config.config.scrollback.lines;
         term.surface.title = title;
         term.surface.command = command;
 
@@ -4285,7 +4291,8 @@ pub const AppSession = struct {
     /// 울린다 — 코어는 OS 소리를 직접 내지 않는다(OSC 52/9·777과 같은 경계). 한 tick 1회로 합쳐져 벨 폭주 방지.
     pub fn takeBell(self: *AppSession) bool {
         if (!self.surface_initialized) return false;
-        return self.activeSurface().core.takeBell();
+        // 코어 플래그는 항상 drain(음소거 중에도 누적 방지)하고, 시스템 소리는 audible_bell일 때만 요청한다.
+        return self.activeSurface().core.takeBell() and self.audible_bell;
     }
 
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
@@ -6984,6 +6991,37 @@ test "window padding insets only the cell grid, not chrome (termRect/paneBarRect
     try std.testing.expectEqual(bar_h, g0.y);
     try std.testing.expectEqual(@as(u32, 800), g0.w);
     try std.testing.expectEqual(@as(u32, 600) -| bar_h, g0.h);
+}
+
+test "takeBell respects bell.audible; createTerm injects config scrollback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // createTerm이 config 스크롤백(is_test 빈 config → 기본 1000)을 활성 surface core에 주입했다.
+    try std.testing.expectEqual(@as(usize, 1000), session.activeSurface().core.max_scrollback);
+
+    // audible(기본 true): BEL → takeBell true, 한 번 울리고 drain(두 번째는 false).
+    session.audible_bell = true;
+    try session.activeSurface().core.write("\x07");
+    try std.testing.expect(session.takeBell());
+    try std.testing.expect(!session.takeBell());
+
+    // 음소거: BEL → takeBell false(소리 억제). 단 플래그는 drain돼 stale 벨이 안 쌓인다.
+    session.audible_bell = false;
+    try session.activeSurface().core.write("\x07");
+    try std.testing.expect(!session.takeBell());
+    session.audible_bell = true; // 다시 켜도 이전 BEL은 이미 소비됨.
+    try std.testing.expect(!session.takeBell());
 }
 
 // wheelDeltaToLines 단위 테스트는 함수와 함께 src/session/input_math.zig로 이동.

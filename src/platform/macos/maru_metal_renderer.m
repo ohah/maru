@@ -321,6 +321,12 @@ static void maru_fill_cell_quad(
         const float gap = fmaxf(2.0f, cw * 0.12f); // 거터와 col 0 글자 사이 여백
         px_right = px_left - gap;        // 글자 시작에서 gap만큼 왼쪽
         px_left = px_right - thickness;  // 거기서 thickness만큼 바깥
+        // window padding이 0이면 px_left(=origin_x-gap-thickness)가 음수(화면 밖)거나 사이드바를 침범할 수 있다.
+        // 화면 왼쪽 밖으로 안 나가게 0 하한으로 clamp하고, px_right가 그보다 작아지면 폭 0으로 접는다. 사이드바
+        // 폭은 .m이 모르니 0 하한만 둔다 — padding 0이면 거터가 좁아지거나 사이드바 경계에 붙을 수 있으나
+        // 글자 침범보다 낫다.
+        px_left = fmaxf(px_left, 0.0f);
+        px_right = fmaxf(px_right, px_left);
     }
     // 글리프 확대(사이드바 에이전트 심볼): 셀 사각형을 중앙 기준으로 키워 같은 atlas slot을 stretch한다(약간
     // 부드러우나 보조 심볼이라 무방). UV는 그대로라 글리프만 커진다. glyph_scale=1.0이면 무동작(일반 셀·커서).

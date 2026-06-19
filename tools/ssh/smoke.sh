@@ -1,7 +1,7 @@
 #!/bin/sh
 # `maru ssh` 원격 terminfo 전파의 opt-in 통합 smoke. `ssh localhost`를 원격으로 써서 전파 파이프라인
-# (maru → /bin/sh -c → infocmp → ssh → 원격 tic/infocmp)이 끝까지 에러 없이 돌고, 원격이 결국
-# `xterm-maru`를 동기화 출력(Sync) 캡과 함께 해석하는지 확인한다.
+# (maru → /bin/sh -c → embed된 terminfo 소스 emit → ssh → 원격 tic)이 끝까지 에러 없이 돌고, 원격이
+# 결국 `xterm-maru`를 동기화 출력(Sync) 캡과 함께 해석하는지 확인한다.
 #
 # 기본 `mise run check`에 넣지 않는다 — sshd(Remote Login)와 localhost 키 인증이 필요해 환경 의존적
 # 이다(없으면 graceful SKIP). 그래서 정책 문서가 요구하는 "opt-in SSH smoke"다(terminal-compatibility-
@@ -22,16 +22,13 @@ if ! ssh -o BatchMode=yes -o ConnectTimeout=5 localhost true >/dev/null 2>&1; th
 	exit 0
 fi
 
-# 2) maru 바이너리.
+# 2) maru 바이너리. (terminfo 소스는 바이너리에 embed돼 있어 로컬 install이 필요 없다 — 자기완결 경로.)
 [ -x "$MARU" ] || { echo "[ssh-smoke] FAIL: $MARU 없음 — 'mise run build' 먼저." >&2; exit 1; }
 
-# 3) 전파 소스가 로컬에 있어야 한다(maru ssh는 로컬 infocmp -x xterm-maru를 파이프한다).
-sh "$ROOT/tools/terminfo/install.sh" >/dev/null
-
-# 4) 전파만 실행(세션 exec 없음) — 끝까지 에러 없이 돌아야 한다.
+# 3) 전파만 실행(세션 exec 없음) — embed 소스를 원격 tic에 흘려 설치. 끝까지 에러 없이 돌아야 한다.
 "$MARU" ssh --terminfo-only localhost || { echo "[ssh-smoke] FAIL: maru ssh --terminfo-only 실패" >&2; exit 1; }
 
-# 5) 원격(localhost)이 xterm-maru를 Sync 캡과 함께 해석하는가.
+# 4) 원격(localhost)이 xterm-maru를 Sync 캡과 함께 해석하는가.
 if ssh -o BatchMode=yes localhost 'infocmp -x xterm-maru 2>/dev/null | grep -q "Sync="'; then
 	echo "[ssh-smoke] OK: 전파 파이프라인 실행 + 원격이 xterm-maru(Sync) 해석"
 else

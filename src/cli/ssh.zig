@@ -14,9 +14,8 @@
 //! 이 모듈은 std만 의존하는 순수 로직이라 단위 테스트로 동작을 못박는다. 실제 프로세스 exec(I/O)는
 //! main.zig가 맡고, 원격 연결 검증은 opt-in `ssh localhost` smoke가 맡는다.
 //!
-//! 의도적으로 뺀 것(후속): 호스트 설치 캐시(Ghostty `+ssh-cache` 대응), terminfo 소스를 바이너리에
-//! embed해 로컬 설치 의존을 없애기. 지금은 로컬 `infocmp -x xterm-maru`(= `mise run install-terminfo`
-//! 후)를 쓴다. 단일 연결(ControlMaster)·원격 command 안전 처리(bootstrapEligible)는 이 슬라이스에서 했다.
+//! 의도적으로 뺀 것(후속): 호스트 설치 캐시(Ghostty `+ssh-cache` 대응). terminfo 소스 embed(로컬 설치
+//! 의존 제거 — 자기완결적)·단일 연결(ControlMaster)·원격 command 안전 처리(bootstrapEligible)는 했다.
 
 const std = @import("std");
 
@@ -32,6 +31,28 @@ pub const remote_install =
     "command -v tic >/dev/null 2>&1 || exit 1; " ++
     "tic -x -o \"$HOME/.terminfo\" - 2>/dev/null";
 
+/// xterm-maru terminfo 소스를 바이너리에 embed한다. 이게 핵심 — `maru ssh`가 **자기완결적**이 된다:
+/// 예전엔 로컬 `infocmp -x xterm-maru`로 소스를 떠서(= `mise run install-terminfo`를 먼저 해야 함)
+/// 원격에 파이프했지만, 이제 embed한 소스를 그대로 흘린다. 로컬 설치 없이도 원격 전파가 되고,
+/// 로컬/원격 terminfo 버전이 항상 일치한다. 베이스: terminfo 소스 파일(공개 포맷). 단일 신원 출처는
+/// `terminfo/maru.terminfo` 하나다(중복 없음).
+pub const embedded_terminfo = @embedFile("maru_terminfo");
+
+// 인라인 안전 가드: embed 소스를 `printf '%s' '<소스>'`로 single-quoted 셸 리터럴에 그대로 넣으므로,
+// 소스에 작은따옴표가 생기면 셸 인용이 깨진다. 그때 빌드를 실패시켜(escape 추가하거나 따옴표 제거하라고)
+// 런타임에 조용히 깨지는 걸 막는다.
+comptime {
+    @setEvalBranchQuota(embedded_terminfo.len + 100); // 소스 바이트 수만큼 comptime 루프 분기가 필요
+    for (embedded_terminfo) |c| {
+        if (c == '\'') @compileError("terminfo/maru.terminfo에 작은따옴표(')가 생겼다 — maru ssh의 single-quoted 인라인이 깨진다. 따옴표를 빼거나 escape 로직을 추가하라.");
+    }
+}
+
+/// embed한 terminfo 소스를 stdout으로 내보내는 셸 구절. `infocmp -x xterm-maru`(로컬 설치 의존)를 대체한다.
+/// `printf '%s'`는 인자의 `%`·`\`를 해석하지 않아(format이 아니라 data) 소스의 `\E`·`%p1` 등이 그대로
+/// 나간다. 소스를 single-quote로 감싸 셸 확장도 막는다(위 comptime 가드가 작은따옴표 부재를 보장).
+const emit_terminfo = "printf '%s' '" ++ embedded_terminfo ++ "'";
+
 /// ssh 값 옵션 letter set — 이 옵션 바로 다음 토큰은 옵션의 값이지 목적지가 아니다(ssh(1) 기준).
 /// bootstrapEligible이 목적지(첫 비옵션 토큰)를 찾을 때 값 토큰을 건너뛰는 데 쓴다.
 const ssh_value_opts = "bcDEeFIiJLlmOopQRSWw";
@@ -39,8 +60,8 @@ const ssh_value_opts = "bcDEeFIiJLlmOopQRSWw";
 /// 전체 래퍼 스크립트(`/bin/sh -c <script> sh <elig> <ssh args...>`로 실행). `$1`=bootstrap 적격
 /// 플래그(Zig `bootstrapEligible` 결과 "1"/"0"), 나머지 `"$@"`=ssh 인자.
 ///
-/// 적격("$1"=1: 원격 command 없는 순수 세션 + 로컬에 xterm-maru 있음)일 때만 **ControlMaster 단일
-/// 연결** 안에서 terminfo를 심고 같은 연결로 세션을 exec한다 — 부트스트랩 ssh가 master가 되고
+/// 적격("$1"=1: 원격 command 없는 순수 세션)일 때만 **ControlMaster 단일 연결** 안에서 embed한
+/// terminfo 소스(emit_terminfo)를 원격에 심고 같은 연결로 세션을 exec한다 — 부트스트랩 ssh가 master가 되고
 /// (`ControlMaster=auto`·`ControlPersist=10`) 세션 ssh가 그 소켓을 재사용해 **인증이 한 번**만 일어난다
 /// (리뷰 #3: 비밀번호 인증 이중 프롬프트 제거). 설치 성공→`TERM=xterm-maru`, 실패→`xterm-256color` 폴백.
 ///
@@ -52,9 +73,9 @@ const ssh_value_opts = "bcDEeFIiJLlmOopQRSWw";
 /// 전용이라 구버전 클라이언트 회귀를 만든다(리뷰 #4). `env TERM=...`는 POSIX라 그 의존이 없다.
 pub const wrapper_script =
     "elig=\"$1\"; shift; " ++
-    "if [ \"$elig\" = 1 ] && command -v infocmp >/dev/null 2>&1 && infocmp -x xterm-maru >/dev/null 2>&1; then " ++
+    "if [ \"$elig\" = 1 ]; then " ++
     "ctl=$(mktemp -u \"${TMPDIR:-/tmp}/maru-ssh-XXXXXX\"); " ++
-    "if infocmp -x xterm-maru | ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10 \"$@\" '" ++ remote_install ++ "' >/dev/null 2>&1; then " ++
+    "if " ++ emit_terminfo ++ " | ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10 \"$@\" '" ++ remote_install ++ "' >/dev/null 2>&1; then " ++
     "exec env TERM=xterm-maru ssh -o ControlPath=\"$ctl\" \"$@\"; " ++
     "else exec env TERM=xterm-256color ssh -o ControlPath=\"$ctl\" \"$@\"; fi; " ++
     "fi; " ++
@@ -66,7 +87,7 @@ pub const wrapper_script =
 pub const terminfo_only_script =
     "elig=\"$1\"; shift; " ++
     "[ \"$elig\" = 1 ] || { echo 'maru ssh --terminfo-only: 목적지만 지정하세요(원격 command 불가)' >&2; exit 2; }; " ++
-    "infocmp -x xterm-maru | ssh \"$@\" '" ++ remote_install ++ "'";
+    emit_terminfo ++ " | ssh \"$@\" '" ++ remote_install ++ "'";
 
 pub const ParseError = error{MissingDestination};
 
@@ -157,7 +178,7 @@ test "parse: --terminfo-only만 있고 목적지 없음 → MissingDestination" 
     try std.testing.expectError(error.MissingDestination, parse(&.{"--terminfo-only"}));
 }
 
-test "wrapper 스크립트: ControlMaster 단일연결·terminfo 설치·안전 폴백·적격 분기 불변식" {
+test "wrapper 스크립트: ControlMaster·embed 소스·안전 폴백·적격 분기 불변식" {
     const s = scriptFor(false);
     // 핵심 동작을 바이트로 고정한다("추측 말고 캡처").
     try std.testing.expect(std.mem.indexOf(u8, s, "ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10 \"$@\"") != null); // 부트스트랩=master
@@ -165,9 +186,22 @@ test "wrapper 스크립트: ControlMaster 단일연결·terminfo 설치·안전 
     try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-maru ssh -o ControlPath=\"$ctl\"") != null); // 성공 시 maru + master 재사용
     try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-256color ssh \"$@\"") != null); // 부적격/실패 폴백
     try std.testing.expect(std.mem.indexOf(u8, s, "[ \"$elig\" = 1 ]") != null); // 적격 게이트
+    // embed 회귀 가드: 로컬 infocmp 의존 없이(printf로 embed 소스 emit) 자기완결적이다.
+    try std.testing.expect(std.mem.indexOf(u8, s, "printf '%s' '") != null); // embed 소스 emit
+    try std.testing.expect(std.mem.indexOf(u8, s, "Sync=") != null); // embed된 terminfo가 스크립트에 들어있다
+    try std.testing.expect(std.mem.indexOf(u8, s, "infocmp -x") == null); // 로컬 infocmp 의존 없음
+    try std.testing.expect(std.mem.indexOf(u8, s, "command -v infocmp") == null); // 로컬 게이트 없음
     // 회귀 가드: SetEnv(OpenSSH 7.8+ 전용)·mkdir(tic -o가 대신) 미사용.
     try std.testing.expect(std.mem.indexOf(u8, s, "SetEnv") == null);
     try std.testing.expect(std.mem.indexOf(u8, s, "mkdir") == null);
+}
+
+test "embed: 바이너리에 terminfo 소스가 들어있고 emit 구절이 그걸 흘린다" {
+    // 자기완결성: 로컬 설치 없이도 원격 전파가 되려면 소스가 바이너리 안에 있어야 한다.
+    try std.testing.expect(std.mem.indexOf(u8, embedded_terminfo, "xterm-maru|maru") != null); // 항목 헤더
+    try std.testing.expect(std.mem.indexOf(u8, embedded_terminfo, "Sync=") != null); // 핵심 캡
+    try std.testing.expect(std.mem.startsWith(u8, emit_terminfo, "printf '%s' '"));
+    try std.testing.expectEqual(@as(u8, '\''), emit_terminfo[emit_terminfo.len - 1]); // 닫는 따옴표
 }
 
 test "terminfo-only 스크립트: 적격일 때만 설치, 세션 exec 없음" {

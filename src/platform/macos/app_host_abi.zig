@@ -499,6 +499,23 @@ pub export fn maru_macos_app_session_config_path(
     return @intFromEnum(Status.ok);
 }
 
+// Reload Config 메뉴 — config 파일을 재로드해 재시작 없이 반영한다(폰트·여백·테마·palette·scrollback·bell·
+// page-keys). 파싱은 forgiving, 로드 실패(OOM 등)면 무동작(기존 config 유지)이라 항상 Status.ok. 규칙(경로·
+// 파싱)은 Zig loader가 단일 출처. Swift는 메뉴 클릭에서 호출만 한다.
+pub export fn maru_macos_app_session_reload_config(session: ?*AppSession) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    app_session.reloadConfig();
+    return @intFromEnum(Status.ok);
+}
+
+// Reset to Defaults 메뉴 — 런타임 줌(⌘+/−)·여백 변경을 프로그램 처음 실행했던 설정으로 되돌린다(appearance만 —
+// behavior는 런타임에 안 바뀌므로 대상 아님). 항상 Status.ok. Swift는 메뉴 클릭에서 호출만 한다.
+pub export fn maru_macos_app_session_reset_defaults(session: ?*AppSession) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    app_session.resetToInitial();
+    return @intFromEnum(Status.ok);
+}
+
 // 창 제목으로 보여줄 문자열(OSC 0/2 제목 우선, 없으면 OSC 7 cwd basename). 우선순위는 core가
 // 정한다(native 최소). 반환 버퍼는 Zig(core) 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효, 없으면
 // len 0(Swift가 앱 이름으로 폴백). Swift가 window.title에 쓴다.

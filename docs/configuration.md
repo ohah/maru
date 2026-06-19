@@ -5,8 +5,8 @@ Maru는 시작 시 사용자 설정 파일을 읽어 폰트·색·커서를 적�
 터미널은 정상 동작한다.
 
 > 이 문서는 config 토대의 appearance(폰트/테마/커서) + 키바인딩 파싱을 다룬다. 동작 토글
-> (이모지 grapheme 기본값 등)·런타임 reload·설정 UI는 후속 단계다(아래 "범위와
-> 후속" 참조).
+> (이모지 grapheme 기본값 등)·파일 변경 자동 감지 reload·설정 UI는 후속 단계다(아래 "범위와
+> 후속" 참조). 메뉴의 수동 Reload Config·Reset to Defaults는 구현됨.
 
 ## 위치
 
@@ -211,5 +211,5 @@ appearance(폰트/테마/커서)와 키바인딩 **파싱**까지 구현됐다. 
   8단계 탭/quick terminal/global shortcut에서.
 - **동작 토글**: paste 보호, 이모지 grapheme 기본값(DEC mode 2027 강제) 등.
 - **terminal 입력 remap**: `<조합> → 바이트` 매크로(TerminalBinding) config.
-- **런타임 reload**: 파일 변경 감지 후 재-resolve(소유권은 이미 reload를 염두에 둔 arena 구조).
+- **파일 변경 자동 감지 reload**: 파일 watcher로 변경을 감지해 자동 재-resolve(자동 감지만 후속). 메뉴의 수동 **Reload Config**(파일 재로드해 재시작 없이 적용)·**Reset to Defaults**(런타임 줌·여백 변경을 프로그램 처음 실행 설정으로 복원)는 구현됨.
 - **설정 UI**: v1 범위 밖일 수 있음([터미널 호환성/보안 정책](terminal-compatibility-policy.md)).

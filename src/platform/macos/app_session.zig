@@ -246,6 +246,12 @@ fn gridFromRectPx(cell_width_px: u32, cell_height_px: u32, w_px: u32, h_px: u32)
     return terminal.clampGridSize(.{ .cols = @intCast(raw_cols), .rows = @intCast(raw_rows) });
 }
 
+/// 논리 pt → backing 정수 px(분수 scale milli, ×scale_milli/1000). sidebar 폭·window padding 4방 같은 정수
+/// pt 환산의 단일 출처다(letter-spacing의 f32 경로는 분수 정밀이 필요해 applyFontSpacing이 별도로 처리한다).
+fn ptToPx(pt: u32, scale_milli: u32) u32 {
+    return pt * scale_milli / 1000;
+}
+
 /// font.line-height(배수)·font.letter-spacing(논리 pt)을 base cell px에 적용한다(refreshCellMetrics의 단일
 /// 적용점이 호출하는 순수 helper — OS·CoreText 없이 곱/가산 산술을 단위 테스트로 못박는다). line-height는
 /// cell_height_px에 곱하고, letter-spacing은 논리 pt를 backing px(× scale_milli/1000, padding px 환산과 동형)로
@@ -1734,7 +1740,7 @@ pub const AppSession = struct {
         const pt: u32 = std.math.clamp(px * 1000 / self.scale_milli, sidebar_min_pt, sidebar_max_pt);
         if (pt == self.sidebar_width_pt) return;
         self.sidebar_width_pt = pt;
-        self.sidebar_width_px = pt * self.scale_milli / 1000;
+        self.sidebar_width_px = ptToPx(pt, self.scale_milli);
         for (self.tabs.items) |tab| self.resizeTabPanes(tab); // 모든 탭의 term 폭이 바뀐다(best-effort)
         self.recomputeActivePaneRect();
         self.rebuildSidebar() catch {}; // sidebar_cols 환산이 바뀌므로 밴드 재생성
@@ -2277,6 +2283,9 @@ pub const AppSession = struct {
         // config 스크롤백 ring 크기를 주입한다(모든 surface가 이 chokepoint를 지난다 — init 첫 탭·새 탭·split·
         // restore). lazy-alloc(첫 scroll) 전이라 안전. 0이면 스크롤백 비활성.
         term.surface.core.max_scrollback = self.loaded_config.config.scrollback.lines;
+        // config theme.palette(ANSI 16색 base)를 코어에 주입한다 — OSC 4 query 응답이 렌더(metal_frame)와 같은
+        // 우선순위(OSC4 override > config base > xterm256)를 보도록(화면·보고 정합). RIS/OSC104는 override만 리셋.
+        term.surface.core.setConfigPalette(self.appearance.theme.palette);
         term.surface.title = title;
         term.surface.command = command;
 
@@ -3083,15 +3092,15 @@ pub const AppSession = struct {
         // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처). 폭은 현재
         // 논리 폭(sidebar_width_pt — 사용자 드래그로 바뀔 수 있음)에서 파생하므로 DPI 변경에도 유지된다.
         // minimal 세션은 사이드바가 없으므로 0 고정(터미널이 전폭을 쓴다).
-        self.sidebar_width_px = if (self.chrome_minimal) 0 else self.sidebar_width_pt * self.scale_milli / 1000;
+        self.sidebar_width_px = if (self.chrome_minimal) 0 else ptToPx(self.sidebar_width_pt, self.scale_milli);
         // window padding도 같은 단일 출처(논리 pt × 분수 scale)로 backing px 환산 — DPI 변경에도 유지된다.
         // termRect/gridFromBacking이 이 px를 inset으로 쓴다(렌더 origin·hit-test·IME 자동 정합). minimal 세션도
         // 동일 적용(터미널 콘텐츠 inset이라 chrome 유무와 무관).
         self.window_padding_px = .{
-            .left = self.appearance.window_padding_left * self.scale_milli / 1000,
-            .right = self.appearance.window_padding_right * self.scale_milli / 1000,
-            .top = self.appearance.window_padding_top * self.scale_milli / 1000,
-            .bottom = self.appearance.window_padding_bottom * self.scale_milli / 1000,
+            .left = ptToPx(self.appearance.window_padding_left, self.scale_milli),
+            .right = ptToPx(self.appearance.window_padding_right, self.scale_milli),
+            .top = ptToPx(self.appearance.window_padding_top, self.scale_milli),
+            .bottom = ptToPx(self.appearance.window_padding_bottom, self.scale_milli),
         };
         // 탭 슬롯 높이 = cell 높이 × 2.5(큰 슬롯). cell_height_px가 이미 위에서 갱신됐으므로
         // 그걸 쓴다 — 슬롯 높이도 cell 메트릭과 같은 단일 출처에서 파생한다.

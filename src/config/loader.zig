@@ -137,46 +137,26 @@ fn applyKey(
         }
         config.font.family = try a.dupe(u8, trimmed);
     } else if (std.mem.eql(u8, key, "font.size")) {
-        const size = std.fmt.parseFloat(f32, value) catch {
-            try diags.append(a, .{ .line = line_no, .message = "font.size가 숫자가 아님 — 기본값 유지" });
+        config.font.size = parseFloatInRange(value, min_font_size, max_font_size) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "font.size가 1~512 범위 밖이거나 숫자가 아님 — 기본값 유지" });
             return;
         };
-        if (!(size >= min_font_size and size <= max_font_size)) {
-            try diags.append(a, .{ .line = line_no, .message = "font.size가 1~512 범위 밖 — 기본값 유지" });
-            return;
-        }
-        config.font.size = size;
     } else if (std.mem.eql(u8, key, "font.size-step")) {
-        const step = std.fmt.parseFloat(f32, value) catch {
-            try diags.append(a, .{ .line = line_no, .message = "font.size-step이 숫자가 아님 — 기본값 유지" });
+        config.font.size_step = parseFloatInRange(value, min_font_step, max_font_step) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "font.size-step이 0.1~32 범위 밖이거나 숫자가 아님 — 기본값 유지" });
             return;
         };
-        if (!(step >= min_font_step and step <= max_font_step)) {
-            try diags.append(a, .{ .line = line_no, .message = "font.size-step이 0.1~32 범위 밖 — 기본값 유지" });
-            return;
-        }
-        config.font.size_step = step;
     } else if (std.mem.eql(u8, key, "font.line-height")) {
-        const lh = std.fmt.parseFloat(f32, value) catch {
-            try diags.append(a, .{ .line = line_no, .message = "font.line-height가 숫자가 아님 — 기본값 유지" });
+        config.font.line_height = parseFloatInRange(value, min_line_height, max_line_height) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "font.line-height가 0.5~3.0 범위 밖이거나 숫자가 아님 — 기본값 유지" });
             return;
         };
-        if (!(lh >= min_line_height and lh <= max_line_height)) {
-            try diags.append(a, .{ .line = line_no, .message = "font.line-height가 0.5~3.0 범위 밖 — 기본값 유지" });
-            return;
-        }
-        config.font.line_height = lh;
     } else if (std.mem.eql(u8, key, "font.letter-spacing")) {
-        const ls = std.fmt.parseFloat(f32, value) catch {
-            try diags.append(a, .{ .line = line_no, .message = "font.letter-spacing이 숫자가 아님 — 기본값 유지" });
+        // min을 음수로 줘 칸 좁힘을 허용한다(NaN은 parseFloatInRange가 범위검사로 함께 거부).
+        config.font.letter_spacing = parseFloatInRange(value, min_letter_spacing, max_letter_spacing) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "font.letter-spacing이 -8~32 범위 밖이거나 숫자가 아님 — 기본값 유지" });
             return;
         };
-        // 음수 허용(칸 좁힘) — 범위만 검사한다(NaN은 !(>=min and <=max)로 함께 거부).
-        if (!(ls >= min_letter_spacing and ls <= max_letter_spacing)) {
-            try diags.append(a, .{ .line = line_no, .message = "font.letter-spacing이 -8~32 범위 밖 — 기본값 유지" });
-            return;
-        }
-        config.font.letter_spacing = ls;
     } else if (std.mem.eql(u8, key, "theme.background")) {
         config.theme.background = try dupValidColor(a, diags, line_no, key, value, config.theme.background);
     } else if (std.mem.eql(u8, key, "theme.foreground")) {
@@ -198,12 +178,11 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "theme.palette.N의 N은 0~15 범위 — 무시" });
             return;
         }
-        // 색 검증은 dupValidColor 재사용(단일 출처). 틀린 색이면 그 인덱스는 기존(기본 xterm) 유지.
-        if (appearance.parseHexColor(value)) |_| {
-            config.theme.palette[idx] = try a.dupe(u8, value);
-        } else |_| {
-            try diags.append(a, .{ .line = line_no, .message = "색이 #RRGGBB 형식이 아님 — 기본값 유지" });
-        }
+        // 색 검증·arena dupe·diagnostic은 dupValidColor 재사용(단일 출처). 슬롯은 ?[]const u8라 sentinel ""을
+        // current로 넘긴다 — 틀린 색이면 dupValidColor가 ""(diagnostic 후)를 돌려주므로 그때만 슬롯을 안 건드려
+        // 기존(보통 null) 값을 유지한다(forgiving). 유효하면 dupe된 색으로 갱신.
+        const validated = try dupValidColor(a, diags, line_no, key, value, "");
+        if (validated.len != 0) config.theme.palette[idx] = validated;
     } else if (std.mem.eql(u8, key, "cursor.shape")) {
         config.cursor.shape = parseCursorShape(value) orelse {
             try diags.append(a, .{ .line = line_no, .message = "cursor.shape는 block|bar|underline — 기본값 유지" });
@@ -220,25 +199,15 @@ fn applyKey(
             return;
         };
     } else if (std.mem.eql(u8, key, "quick-terminal.height")) {
-        const frac = std.fmt.parseFloat(f32, value) catch {
-            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.height가 숫자가 아님(예: 0.45) — 기본값 유지" });
+        config.quick_terminal.height_fraction = parseFloatInRange(value, 0.1, 1.0) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.height는 0.1~1.0(예: 0.45) — 기본값 유지" });
             return;
         };
-        if (!(frac >= 0.1 and frac <= 1.0)) {
-            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.height는 0.1~1.0 — 기본값 유지" });
-            return;
-        }
-        config.quick_terminal.height_fraction = frac;
     } else if (std.mem.eql(u8, key, "quick-terminal.width")) {
-        const frac = std.fmt.parseFloat(f32, value) catch {
-            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.width가 숫자가 아님(예: 0.6) — 기본값 유지" });
+        config.quick_terminal.width_fraction = parseFloatInRange(value, 0.1, 1.0) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.width는 0.1~1.0(예: 0.6) — 기본값 유지" });
             return;
         };
-        if (!(frac >= 0.1 and frac <= 1.0)) {
-            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.width는 0.1~1.0 — 기본값 유지" });
-            return;
-        }
-        config.quick_terminal.width_fraction = frac;
     } else if (std.mem.eql(u8, key, "quick-terminal.auto-hide")) {
         config.quick_terminal.auto_hide = parseBool(value) orelse {
             try diags.append(a, .{ .line = line_no, .message = "quick-terminal.auto-hide는 true|false — 기본값 유지" });
@@ -280,7 +249,7 @@ fn applyKey(
             return;
         };
     } else if (std.mem.eql(u8, key, "scrollback.lines")) {
-        config.scrollback.lines = parseScrollbackLines(value) orelse {
+        config.scrollback.lines = parseUintMax(value, 100000) orelse {
             try diags.append(a, .{ .line = line_no, .message = "scrollback.lines는 0~100000 정수 — 기본값 유지" });
             return;
         };
@@ -290,29 +259,29 @@ fn applyKey(
             return;
         };
     } else if (std.mem.eql(u8, key, "window.padding-top")) {
-        config.window_padding_top = parsePaddingPt(value) orelse {
+        config.window_padding_top = parseUintMax(value, 256) orelse {
             try diags.append(a, .{ .line = line_no, .message = "window.padding-top은 0~256 정수 — 기본값 유지" });
             return;
         };
     } else if (std.mem.eql(u8, key, "window.padding-bottom")) {
-        config.window_padding_bottom = parsePaddingPt(value) orelse {
+        config.window_padding_bottom = parseUintMax(value, 256) orelse {
             try diags.append(a, .{ .line = line_no, .message = "window.padding-bottom은 0~256 정수 — 기본값 유지" });
             return;
         };
     } else if (std.mem.eql(u8, key, "window.padding-left")) {
-        config.window_padding_left = parsePaddingPt(value) orelse {
+        config.window_padding_left = parseUintMax(value, 256) orelse {
             try diags.append(a, .{ .line = line_no, .message = "window.padding-left는 0~256 정수 — 기본값 유지" });
             return;
         };
     } else if (std.mem.eql(u8, key, "window.padding-right")) {
-        config.window_padding_right = parsePaddingPt(value) orelse {
+        config.window_padding_right = parseUintMax(value, 256) orelse {
             try diags.append(a, .{ .line = line_no, .message = "window.padding-right는 0~256 정수 — 기본값 유지" });
             return;
         };
     } else if (std.mem.eql(u8, key, "window.padding-x")) {
         // x는 left+right 동시 alias(대칭 좌우 여백). 한 번 파싱해 두 필드에 같은 값. 명시 left/right와 혼용 시
         // loader가 줄을 순차 적용하므로 "마지막 줄 우선"이 자동(padding-x=10 다음 padding-left=20 → left=20,right=10).
-        const v = parsePaddingPt(value) orelse {
+        const v = parseUintMax(value, 256) orelse {
             try diags.append(a, .{ .line = line_no, .message = "window.padding-x는 0~256 정수 — 기본값 유지" });
             return;
         };
@@ -320,7 +289,7 @@ fn applyKey(
         config.window_padding_right = v;
     } else if (std.mem.eql(u8, key, "window.padding-y")) {
         // y는 top+bottom 동시 alias(대칭 상하 여백). x와 동일하게 순차 적용 → 마지막 줄 우선.
-        const v = parsePaddingPt(value) orelse {
+        const v = parseUintMax(value, 256) orelse {
             try diags.append(a, .{ .line = line_no, .message = "window.padding-y는 0~256 정수 — 기본값 유지" });
             return;
         };
@@ -567,18 +536,20 @@ fn parseBool(value: []const u8) ?bool {
     return null;
 }
 
-/// window padding(논리 pt) 파싱 — 음수/비정수/256 초과는 null(기본값 유지). 256 상한은 비정상 큰 값이
-/// grid를 0으로 만들지 않게 막는 가드(gridFromBacking은 어차피 saturate하지만 진단으로 일찍 거른다).
-fn parsePaddingPt(value: []const u8) ?u32 {
+/// 음이 아닌 정수를 [0, max]로 파싱한다 — 음수/비정수/max 초과는 null(기본값 유지). 0은 유효.
+/// padding(max=256: grid를 0으로 만드는 비정상 큰 값 가드)·scrollback(max=100000: 행당 ptr 슬롯 ring
+/// 메모리 폭주 가드)이 같은 forgiving 패턴을 공유한다.
+fn parseUintMax(value: []const u8, max: u32) ?u32 {
     const n = std.fmt.parseInt(u32, std.mem.trim(u8, value, &std.ascii.whitespace), 10) catch return null;
-    return if (n <= 256) n else null;
+    return if (n <= max) n else null;
 }
 
-/// scrollback 줄 수 파싱 — 비정수/100000 초과는 null(기본값 유지). 0은 유효(스크롤백 비활성).
-/// 상한 100000은 비정상 큰 값의 메모리 폭주 가드(행당 ptr 슬롯 ring).
-fn parseScrollbackLines(value: []const u8) ?u32 {
-    const n = std.fmt.parseInt(u32, std.mem.trim(u8, value, &std.ascii.whitespace), 10) catch return null;
-    return if (n <= 100000) n else null;
+/// 실수를 [min, max]로 파싱한다 — 비실수는 null. 범위 검사는 `!(>=min and <=max)`로 NaN까지 함께
+/// 거부한다(NaN은 두 비교가 모두 false라 항상 reject). font 크기/스텝/줄높이/자간·quick-terminal 비율이
+/// 같은 forgiving 패턴을 공유한다(letter-spacing은 음수 허용 — min을 음수로 줘 호출처가 정한다).
+fn parseFloatInRange(value: []const u8, min: f32, max: f32) ?f32 {
+    const n = std.fmt.parseFloat(f32, value) catch return null;
+    return if (n >= min and n <= max) n else null;
 }
 
 /// 빈 기본 결과(파일 없음/HOME 없음 등). config 텍스트를 안 읽었으므로 arena도 비어 있다.

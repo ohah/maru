@@ -18,7 +18,7 @@ pub const CoreOwner = struct {
     pub const enabled = builtin.mode == .Debug;
 
     /// 현재 락을 보유한 스레드 id(0 = unowned). 보유 스레드는 enter/exit로 쓰고, 다른 스레드는
-    /// lock 직전 detectReentry로 읽으므로(곧 자신이 블록될지 판정) atomic으로 data race를 피한다.
+    /// lock 직전 isOwnedBySelf로 읽으므로(곧 자신이 블록될지 판정) atomic으로 data race를 피한다.
     /// 진단용 단일 워드라 `.monotonic`으로 충분하다(자기 store는 자기가 항상 본다 — 같은 스레드
     /// 비교만 정밀하면 된다). release에선 `void`라 필드 크기 0.
     thread: if (enabled) std.atomic.Value(usize) else void = if (enabled) .init(0) else {},
@@ -30,13 +30,6 @@ pub const CoreOwner = struct {
 
     inline fn currentId() usize {
         return @intCast(std.Thread.getCurrentId());
-    }
-
-    /// 실제 mutex 락 "전에" 호출한다 — 이미 이 스레드가 보유 중이면 true(재취득 시도). 비재진입
-    /// 락은 재취득하면 lock 안에서 영영 멈추므로 lock 이후 판정은 불가능하다.
-    pub fn detectReentry(self: *const CoreOwner) bool {
-        if (!enabled) return false;
-        return self.thread.load(.monotonic) == currentId();
     }
 
     /// 락 취득 직후 — 현재 스레드를 owner로 기록.
@@ -70,7 +63,9 @@ pub const CoreOwner = struct {
         }
     }
 
-    /// 테스트/진단 관찰자(패닉 없이 상태만). 현재 스레드가 owner인가.
+    /// 현재 스레드가 이 코어 락의 owner인가. 두 용도: (1) lock() 진입 "전에" 호출하면 "이미 내가
+    /// 보유 중 = 재취득(재진입)" 판정 — 비재진입 락은 재취득 시 lock 안에서 영영 멈춰 lock 이후
+    /// 판정이 불가능하므로 반드시 lock 전에 본다. (2) 테스트/진단 관찰자(패닉 없이 상태만).
     pub fn isOwnedBySelf(self: *const CoreOwner) bool {
         if (!enabled) return false;
         return self.thread.load(.monotonic) == currentId();
@@ -80,7 +75,7 @@ pub const CoreOwner = struct {
     /// `Surface.lockCore`와 reader(`runProcessing`)가 공유하는 **단일 출처** — `core_mutex`를
     /// 직접 `lockUncancelable`하지 말고 항상 이 경로로 잡는다(check-boundaries가 강제).
     pub fn lock(self: *CoreOwner, mutex: *std.Io.Mutex, io: std.Io) void {
-        if (self.detectReentry()) {
+        if (self.isOwnedBySelf()) { // 이미 이 스레드가 보유 = 재진입(이대로 mutex.lock이면 self-deadlock)
             @panic("core_mutex 재진입 — 비재진입 std.Io.Mutex라 self-deadlock. " ++
                 "락 보유 중 다른 코어 경로(예: sendTextAsKeys→handleKeyEvent)가 재취득했다. " ++
                 "내부 호출 전에 락을 푸세요(docs/io-render-threading.md §6-5).");
@@ -101,17 +96,14 @@ comptime {
     if (!CoreOwner.enabled) std.debug.assert(@sizeOf(CoreOwner) == 0);
 }
 
-test "CoreOwner: 같은 스레드 재취득을 재진입으로 감지한다" {
+test "CoreOwner: 같은 스레드 보유 판정(lock 전 호출이면 재진입 = self-deadlock 신호)" {
     if (!CoreOwner.enabled) return error.SkipZigTest;
     var owner: CoreOwner = .{};
-    try std.testing.expect(!owner.detectReentry()); // unowned
-    try std.testing.expect(!owner.isOwnedBySelf());
+    try std.testing.expect(!owner.isOwnedBySelf()); // unowned
     owner.enter();
-    try std.testing.expect(owner.detectReentry()); // 보유 중 재취득 = 재진입(=lock이면 panic)
-    try std.testing.expect(owner.isOwnedBySelf());
+    try std.testing.expect(owner.isOwnedBySelf()); // 보유 중 — lock 전 호출이면 재진입(=lock이면 panic)
     owner.exit();
-    try std.testing.expect(!owner.detectReentry()); // 풀린 뒤엔 다시 안전
-    try std.testing.expect(!owner.isOwnedBySelf());
+    try std.testing.expect(!owner.isOwnedBySelf()); // 풀린 뒤엔 다시 안전
 }
 
 test "CoreOwner: 다른 스레드가 보유 중이면 재진입이 아니다(진짜 락 경합)" {
@@ -120,7 +112,6 @@ test "CoreOwner: 다른 스레드가 보유 중이면 재진입이 아니다(진
     const me: usize = @intCast(std.Thread.getCurrentId());
     owner.thread.store(me +% 1, .monotonic); // 다른 스레드가 보유한 상태를 흉내
     // 다른 스레드가 잡고 있으면 우리는 정상적으로 블록되어야 한다(재진입 아님) — panic 금물.
-    try std.testing.expect(!owner.detectReentry());
     try std.testing.expect(!owner.isOwnedBySelf());
 }
 

@@ -162,7 +162,7 @@ fn applyKey(
         // 개별 theme.* 키가 이 줄 *뒤에* 오면 그 색만 override한다(loader 순차 적용 — 나중 줄 우선). 프리셋 색은
         // 정적 리터럴이라 arena dupe 불필요. 알 수 없는 값은 forgiving(기본 maru 유지 + diagnostic).
         const preset = parseThemePreset(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "theme.preset은 maru|ghostty — 기본값 유지" });
+            try diags.append(a, .{ .line = line_no, .message = "theme.preset은 maru|ghostty|gruvbox-dark|solarized-dark|solarized-light|dracula|catppuccin-mocha|catppuccin-latte — 기본값 유지" });
             return;
         };
         config.theme = theme.presetColors(preset);
@@ -542,6 +542,12 @@ fn parseCursorShape(value: []const u8) ?theme.CursorShape {
 fn parseThemePreset(value: []const u8) ?theme.ThemePreset {
     if (std.mem.eql(u8, value, "maru")) return .maru;
     if (std.mem.eql(u8, value, "ghostty")) return .ghostty;
+    if (std.mem.eql(u8, value, "gruvbox-dark")) return .gruvbox_dark;
+    if (std.mem.eql(u8, value, "solarized-dark")) return .solarized_dark;
+    if (std.mem.eql(u8, value, "solarized-light")) return .solarized_light;
+    if (std.mem.eql(u8, value, "dracula")) return .dracula;
+    if (std.mem.eql(u8, value, "catppuccin-mocha")) return .catppuccin_mocha;
+    if (std.mem.eql(u8, value, "catppuccin-latte")) return .catppuccin_latte;
     return null;
 }
 
@@ -908,6 +914,49 @@ test "parse: theme.preset selects a named color theme as base; individual theme.
     const ra = try appearance.resolve(g.config);
     try std.testing.expectEqual(terminal.Rgb{ .r = 0x28, .g = 0x2c, .b = 0x34 }, ra.theme.background);
     try std.testing.expectEqual(@as(?terminal.Rgb, terminal.Rgb{ .r = 0x1d, .g = 0x1f, .b = 0x21 }), ra.theme.palette[0]);
+}
+
+test "parse: theme.preset supports all named presets with correct palettes; light themes pin sidebar colors" {
+    // 대표 다크 프리셋: 배경 + 특징 팔레트 색.
+    var gv = try parse(std.testing.allocator, "theme.preset = gruvbox-dark");
+    defer gv.deinit();
+    try std.testing.expectEqualStrings("#282828", gv.config.theme.background);
+    try std.testing.expectEqualStrings("#fb4934", gv.config.theme.palette[9].?); // gruvbox bright red
+
+    var dr = try parse(std.testing.allocator, "theme.preset = dracula");
+    defer dr.deinit();
+    try std.testing.expectEqualStrings("#282a36", dr.config.theme.background);
+    try std.testing.expectEqualStrings("#bd93f9", dr.config.theme.palette[4].?); // dracula purple
+
+    var sd = try parse(std.testing.allocator, "theme.preset = solarized-dark");
+    defer sd.deinit();
+    try std.testing.expectEqualStrings("#002b36", sd.config.theme.background);
+
+    var cm = try parse(std.testing.allocator, "theme.preset = catppuccin-mocha");
+    defer cm.deinit();
+    try std.testing.expectEqualStrings("#1e1e2e", cm.config.theme.background);
+    try std.testing.expectEqualStrings("#89b4fa", cm.config.theme.palette[4].?); // mocha blue
+    try std.testing.expectEqualStrings("#585b70", cm.config.theme.selection); // 가독성 위해 어두운 surface2(rosewater 아님)
+
+    // 다크 프리셋은 사이드바 명시 안 함(배경에서 파생).
+    try std.testing.expect(gv.config.theme.sidebar_background == null);
+
+    // 라이트 프리셋: 사이드바를 배경보다 어둡게 명시(파생 lighten이 라이트 배경에서 흰색이 되는 함정 회피).
+    var sl = try parse(std.testing.allocator, "theme.preset = solarized-light");
+    defer sl.deinit();
+    try std.testing.expectEqualStrings("#fdf6e3", sl.config.theme.background);
+    try std.testing.expectEqualStrings("#eee8d5", sl.config.theme.sidebar_background.?);
+    try std.testing.expectEqualStrings("#ded8c5", sl.config.theme.sidebar_active.?);
+
+    var cl = try parse(std.testing.allocator, "theme.preset = catppuccin-latte");
+    defer cl.deinit();
+    try std.testing.expectEqualStrings("#eff1f5", cl.config.theme.background);
+    try std.testing.expectEqualStrings("#e6e9ef", cl.config.theme.sidebar_background.?);
+
+    // 라이트 프리셋도 resolve 성공(모든 색 유효) + 명시 사이드바가 ResolvedTheme까지 전파(파생 아님).
+    const ra = try appearance.resolve(cl.config);
+    try std.testing.expectEqual(terminal.Rgb{ .r = 0xef, .g = 0xf1, .b = 0xf5 }, ra.theme.background);
+    try std.testing.expectEqual(terminal.Rgb{ .r = 0xe6, .g = 0xe9, .b = 0xef }, ra.theme.sidebar_background);
 }
 
 test "parse: resolved appearance never fails on parsed config (values pre-validated)" {

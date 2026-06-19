@@ -62,36 +62,120 @@ pub const ThemeConfig = struct {
 pub const ThemePreset = enum {
     maru, // maru 기본 테마 — ThemeConfig struct default와 동일.
     ghostty, // Ghostty 기본 테마 색(배경/전경 + ANSI 16색 팔레트).
+    gruvbox_dark, // Gruvbox Dark(웜 레트로 — 갈색·주황·올리브).
+    solarized_dark, // Solarized Dark(Ethan Schoonover, 청록 다크).
+    solarized_light, // Solarized Light(라이트 — 베이지 배경).
+    dracula, // Dracula(보라·핑크 다크).
+    catppuccin_mocha, // Catppuccin Mocha(파스텔 다크).
+    catppuccin_latte, // Catppuccin Latte(파스텔 라이트).
 };
 
-/// Ghostty 기본 ANSI 16색(0~15). 출처: references/ghostty/src/terminal/color.zig의 Name.default(). xterm
-/// 표준(color.ansi16)과 **다른** Ghostty 고유 팔레트다 — `theme.preset = ghostty`가 이 값을 깐다.
+// 각 프리셋의 ANSI 16색(0~15). 출처: iTerm2-Color-Schemes(mbadolato/iTerm2-Color-Schemes)의 Ghostty 형식 파일 —
+// 사실상 표준 색 스킴 저장소에서 **색 값만** 가져왔다(코드 표현은 옮기지 않음 — clean-room). xterm 표준(color.ansi16)과
+// 다른 테마 고유 팔레트다. ghostty는 references/ghostty/src/terminal/color.zig(Name.default())가 출처.
 const ghostty_palette: [16]?[]const u8 = .{
     "#1d1f21", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6",
     "#666666", "#d54e53", "#b9ca4a", "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#eaeaea",
+};
+const gruvbox_dark_palette: [16]?[]const u8 = .{
+    "#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984",
+    "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2",
+};
+const solarized_dark_palette: [16]?[]const u8 = .{
+    "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+    "#335e69", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
+};
+const solarized_light_palette: [16]?[]const u8 = .{
+    "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#bbb5a2",
+    "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
+};
+const dracula_palette: [16]?[]const u8 = .{
+    "#21222c", "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9", "#ff79c6", "#8be9fd", "#f8f8f2",
+    "#6272a4", "#ff6e6e", "#69ff94", "#ffffa5", "#d6acff", "#ff92df", "#a4ffff", "#ffffff",
+};
+const catppuccin_mocha_palette: [16]?[]const u8 = .{
+    "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
+    "#585b70", "#f7aec2", "#c2ecbf", "#fcd682", "#aeccfc", "#f398da", "#b1eae1", "#a6adc8",
+};
+const catppuccin_latte_palette: [16]?[]const u8 = .{
+    "#bcc0cc", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#5c5f77",
+    "#acb0be", "#e7103f", "#46b02f", "#e49931", "#3878f6", "#ef95d7", "#19a1a8", "#6c6f85",
 };
 
 /// 프리셋의 색 세트를 ThemeConfig로 돌려준다(loader가 `theme.preset`을 만나면 config.theme에 통째로 깐다).
 /// 반환 색 문자열은 전부 **정적 리터럴**이라 arena dupe가 필요 없다(영구 수명 — resolve가 빌려도 안전).
 ///
-/// 베이스/결정(메모리 "베이스·의사결정 명시"): ghostty는 references/ghostty의 기본값을 베이스로 한다 —
-/// background/foreground는 src/config/Config.zig, ANSI 16색은 src/terminal/color.zig(Name.default()). Ghostty가
-/// 정의하지 않는 값(cursor/selection은 Ghostty가 null=동적/반전, search_match·sidebar는 maru 고유 chrome 개념)은
-/// maru 기본값을 유지한다: cursor=#ffffff(Ghostty foreground와 같음), selection=#334455(Ghostty 배경 #282c34
-/// 청회색 톤에 어울림), sidebar_*=null(배경 #282c34에서 파생 — 사이드바·chrome도 자동으로 Ghostty 톤).
+/// 베이스/결정(메모리 "베이스·의사결정 명시"):
+/// - ghostty는 references/ghostty 기본값(Config.zig 배경/전경, terminal/color.zig 팔레트). cursor/selection을
+///   Ghostty가 안 정하므로(null=동적/반전) maru 기본과 같게 명시한다.
+/// - 나머지(gruvbox/solarized/dracula/catppuccin)는 iTerm2-Color-Schemes의 표준 값을 그대로 쓴다 — background/
+///   foreground/cursor/selection/palette를 그 스킴이 정의한 대로. search_match*(스크롤백 Find)는 maru 고유라
+///   전 프리셋에서 maru 기본을 유지한다(테마 스킴이 정의하지 않음).
+/// - **라이트 테마**(solarized_light/catppuccin_latte)는 sidebar_*를 명시한다: resolveTheme의 사이드바 파생은
+///   배경을 lighten(+24/+48)하는데, 라이트 배경에선 거의 흰색이 돼 구분이 사라진다. 그래서 배경보다 **어두운**
+///   표면색을 직접 준다(Solarized base2 / Catppuccin mantle·surface0).
+/// - catppuccin의 selection은 스킴 원값이 rosewater(밝은색)이고 selection-foreground와 함께 쓰는 전제다. maru는
+///   selection 글자색을 안 바꾸고 배경만 칠하므로, 밝은 글자 가독성을 위해 어두운/중간 표면색(surface2/surface1)으로 둔다.
 pub fn presetColors(preset: ThemePreset) ThemeConfig {
     return switch (preset) {
         .maru => .{}, // struct default가 곧 maru 테마.
         .ghostty => .{
             .background = "#282c34",
             .foreground = "#ffffff",
-            // cursor/selection/search_match*는 Ghostty가 안 정하므로 maru 기본과 같게 명시(프리셋 전환 시 리셋 일관성).
+            // cursor/selection은 Ghostty가 안 정하므로 maru 기본과 같게 명시(프리셋 전환 시 리셋 일관성).
             .cursor = "#ffffff",
             .selection = "#334455",
-            .search_match = "#554a1a",
-            .search_match_current = "#997722",
             // sidebar_*는 null 유지 → resolveTheme이 background(#282c34)에서 파생(+24/+48).
             .palette = ghostty_palette,
+        },
+        .gruvbox_dark => .{
+            .background = "#282828",
+            .foreground = "#ebdbb2",
+            .cursor = "#ebdbb2",
+            .selection = "#665c54",
+            .palette = gruvbox_dark_palette,
+        },
+        .solarized_dark => .{
+            .background = "#002b36",
+            .foreground = "#839496",
+            .cursor = "#839496",
+            .selection = "#073642",
+            .palette = solarized_dark_palette,
+        },
+        .solarized_light => .{
+            .background = "#fdf6e3",
+            .foreground = "#657b83",
+            .cursor = "#657b83",
+            .selection = "#eee8d5",
+            // 라이트 배경: 사이드바를 배경(#fdf6e3)보다 어둡게 명시(Solarized base2 + 한 단계 더). 파생 lighten 회피.
+            .sidebar_background = "#eee8d5",
+            .sidebar_active = "#ded8c5",
+            .palette = solarized_light_palette,
+        },
+        .dracula => .{
+            .background = "#282a36",
+            .foreground = "#f8f8f2",
+            .cursor = "#f8f8f2",
+            .selection = "#44475a",
+            .palette = dracula_palette,
+        },
+        .catppuccin_mocha => .{
+            .background = "#1e1e2e",
+            .foreground = "#cdd6f4",
+            .cursor = "#f5e0dc",
+            // selection: 스킴 원값 rosewater(#f5e0dc) 대신 어두운 surface2 — maru는 selection 글자색을 안 바꾼다(가독성).
+            .selection = "#585b70",
+            .palette = catppuccin_mocha_palette,
+        },
+        .catppuccin_latte => .{
+            .background = "#eff1f5",
+            .foreground = "#4c4f69",
+            .cursor = "#dc8a78",
+            .selection = "#bcc0cc", // 라이트: surface1(중간 회색) — 어두운 글자와 대비.
+            // 라이트 배경: 사이드바를 배경보다 어둡게 명시(Catppuccin mantle·surface0). 파생 lighten 회피.
+            .sidebar_background = "#e6e9ef",
+            .sidebar_active = "#ccd0da",
+            .palette = catppuccin_latte_palette,
         },
     };
 }

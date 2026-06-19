@@ -31,7 +31,8 @@ font.size-step = 1
 font.line-height = 1.0
 font.letter-spacing = 0.0
 
-# 컬러 테마 프리셋(선택). 한 줄로 색 세트를 고른다. maru(기본) | ghostty.
+# 컬러 테마 프리셋(선택). 한 줄로 색 세트를 고른다.
+# maru(기본)·ghostty·gruvbox-dark·solarized-dark·solarized-light·dracula·catppuccin-mocha·catppuccin-latte.
 # 프리셋은 base다 — 아래 개별 theme.* 키를 프리셋 줄 *뒤에* 두면 그 색만 덮어쓴다.
 theme.preset = maru
 
@@ -62,7 +63,7 @@ window.padding-left   = 8
 | `font.size-step` | 숫자 | `1` | ⌘+/⌘-(Bigger/Smaller)가 한 번에 바꾸는 증분(pt). 0.1~32 범위. ⌘0(Actual Size)은 step과 무관하게 `font.size`로 복귀 |
 | `font.line-height` | 숫자 | `1.0` | 행간 배수. 1.0=CoreText 자동 cell 높이, 1.5=50% 더 큰 줄 간격. 0.5~3.0 범위. 범위 밖/비숫자는 무시. 늘어난 높이는 글자를 셀 안 세로 가운데로 그려 위아래 여백이 된다 |
 | `font.letter-spacing` | 숫자 | `0.0` | 자간(논리 pt). 0=advance 그대로, 양수=칸 넓힘, 음수=칸 좁힘. -8~32 범위(음수 허용). 범위 밖/비숫자는 무시. 늘어난 폭은 글자를 셀 안 가로 가운데로 그려 좌우 여백이 된다 |
-| `theme.preset` | `maru`\|`ghostty` | `maru` | 이름 붙은 컬러 테마 **base**. 색 세트(배경/전경/커서/선택 + ANSI 16색)를 한 번에 고른다. 개별 `theme.*` 키를 **이 줄 뒤에** 두면 그 색만 override(순차 적용, 나중 줄 우선). 그 외 값은 무시. 아래 [컬러 테마 프리셋](#컬러-테마-프리셋-themepreset) 참조 |
+| `theme.preset` | 프리셋 이름 | `maru` | 이름 붙은 컬러 테마 **base**. 색 세트(배경/전경/커서/선택 + ANSI 16색)를 한 번에 고른다. `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`. 개별 `theme.*` 키를 **이 줄 뒤에** 두면 그 색만 override(순차 적용, 나중 줄 우선). 그 외 값은 무시. 아래 [컬러 테마 프리셋](#컬러-테마-프리셋-themepreset) 참조 |
 | `theme.background` | `#RRGGBB` | `#101010` | 16진 색. 형식 오류는 무시 |
 | `theme.foreground` | `#RRGGBB` | `#e8e8e8` | |
 | `theme.cursor` | `#RRGGBB` | `#ffffff` | |
@@ -95,22 +96,32 @@ window.padding-left   = 8
 그 뒤에 오는 개별 `theme.*` 키가 일부만 덮어쓴다(loader 순차 적용 — 나중 줄 우선). **프리셋 줄을 개별 색
 키보다 위에 두라** — 프리셋이 개별 색 키보다 뒤에 오면 앞 설정을 리셋한다(Ghostty `theme` 시맨틱과 동일).
 
-- `maru` (기본): Maru 기본 테마. 위 키 표의 기본값 그대로(배경 `#101010`, 전경 `#e8e8e8`, ANSI 16색은 xterm 표준).
-- `ghostty`: Ghostty 기본 테마 색.
+사용 가능한 프리셋:
 
-| 항목 | `maru`(기본) | `ghostty` |
+| 값 | 설명 | 배경 |
 |---|---|---|
-| `background` | `#101010` | `#282c34` |
-| `foreground` | `#e8e8e8` | `#ffffff` |
-| ANSI 16색(0~15) | xterm 표준 | Ghostty 기본 팔레트(아래) |
+| `maru` (기본) | Maru 기본 테마(무채색 다크, ANSI 16색은 xterm 표준) | `#101010` |
+| `ghostty` | Ghostty 기본 테마(청회색 다크) | `#282c34` |
+| `gruvbox-dark` | Gruvbox Dark(웜 레트로 — 갈색·주황·올리브) | `#282828` |
+| `solarized-dark` | Solarized Dark(청록 다크) | `#002b36` |
+| `solarized-light` | Solarized Light(**라이트** — 베이지) | `#fdf6e3` |
+| `dracula` | Dracula(보라·핑크 다크) | `#282a36` |
+| `catppuccin-mocha` | Catppuccin Mocha(파스텔 다크) | `#1e1e2e` |
+| `catppuccin-latte` | Catppuccin Latte(**라이트** — 파스텔) | `#eff1f5` |
 
-Ghostty 팔레트(0~15): `#1d1f21 #cc6666 #b5bd68 #f0c674 #81a2be #b294bb #8abeb7 #c5c8c6`(0~7),
-`#666666 #d54e53 #b9ca4a #e7c547 #7aa6da #c397d8 #70c0b1 #eaeaea`(8~15).
-
-> **베이스/결정**: `ghostty`는 Ghostty 기본값을 베이스로 한다 — 배경/전경은 Ghostty `Config.zig`, ANSI 16색은
-> Ghostty `terminal/color.zig`의 기본 팔레트(xterm 표준과 다름). Ghostty가 정의하지 않는 값은 Maru 기본을 유지한다:
-> `cursor`/`selection`(Ghostty는 동적/반전이라 고정값이 없음)은 Maru 기본(`#ffffff`/`#334455`), 사이드바 색은
-> 명시 없이 배경(`#282c34`)에서 파생돼 chrome도 자동으로 Ghostty 톤이 된다. 검색 매치색·앰버 accent는 Maru 고유라 유지.
+> **베이스/결정**: `maru`는 Maru 기본값. `ghostty`는 Ghostty 기본값(배경/전경은 Ghostty `Config.zig`, ANSI 16색은
+> `terminal/color.zig`의 기본 팔레트)을 베이스로 하되, Ghostty가 정의하지 않는 `cursor`/`selection`은 Maru 기본을 쓴다.
+> 나머지(`gruvbox-dark`·`solarized-*`·`dracula`·`catppuccin-*`)는 **iTerm2-Color-Schemes**의 표준 색 값(배경/전경/커서/
+> 선택/팔레트)을 그대로 가져왔다 — 색 **값만** 인용했고 코드 표현은 옮기지 않았다(clean-room). 정확한 팔레트 16색은
+> `src/config/theme.zig`의 프리셋 상수가 단일 출처다.
+>
+> - **검색 매치색**(스크롤백 Find 하이라이트)은 Maru 고유라 전 프리셋에서 Maru 기본을 유지한다. 사이드바 활성 좌측
+>   앰버 막대(rich 룩)도 Maru 브랜드 고정이라 프리셋과 무관하다.
+> - **라이트 테마**(`solarized-light`·`catppuccin-latte`)는 사이드바 색을 명시한다 — 사이드바 기본 파생은 배경을 *밝게*
+>   하는데, 라이트 배경에선 거의 흰색이 돼 구분이 사라지므로 배경보다 *어두운* 표면색을 직접 준다.
+> - `catppuccin-*`의 선택색은 스킴 원값(rosewater, 밝은색)이 selection-foreground와 함께 쓰는 전제라, Maru(선택 글자색을
+>   안 바꿈)에선 글자 가독성을 위해 어두운/중간 표면색으로 바꿨다.
+>
 > 색 룩만 정하며, chrome **디자인 룩**(`chrome.theme` = tui|rich)과는 직교다.
 
 ### PageUp/PageDown (`input.page-keys`)

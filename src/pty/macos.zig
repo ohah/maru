@@ -641,6 +641,15 @@ const EnvStorage = struct {
     strings: [][:0]u8,
     envp: ?[:null]?[*:0]const u8,
 
+    /// owned env 문자열을 entries에 추가하되 append 실패(OOM)면 그 문자열을 해제한다 — errdefer가 entries.items만
+    /// 풀어 append 인자에서 만든 dupe가 새는 것을 막는 OOM-safe 관용구(부모 복사·TERM·COLORTERM·TERM_PROGRAM·ZDOTDIR 공용).
+    fn appendOwnedEnv(allocator: std.mem.Allocator, entries: *std.ArrayList([:0]u8), owned: [:0]u8) !void {
+        entries.append(allocator, owned) catch |err| {
+            allocator.free(owned);
+            return err;
+        };
+    }
+
     fn init(allocator: std.mem.Allocator, env: []const []const u8, term: []const u8, zdotdir: ?[]const u8) !EnvStorage {
         if (env.len == 0) {
             // 부모 환경을 물려주되 TERM/COLORTERM은 Maru 값으로 덮어쓴다. 부모 TERM을 그대로 주면
@@ -708,24 +717,11 @@ const EnvStorage = struct {
                 }
                 if (std.mem.startsWith(u8, slice, "MARU_ZDOTDIR_PREV=")) continue; // stale 제거
             }
-            // dupe를 지역 변수로 받아 append 실패(OOM) 시에도 고아가 되지 않게 한다 — errdefer는
-            // entries.items만 해제하므로 append 인자 안에서 dupe하면 그 문자열이 샌다.
-            const owned = try allocator.dupeZ(u8, slice);
-            entries.append(allocator, owned) catch |err| {
-                allocator.free(owned);
-                return err;
-            };
+            // append 인자 안에서 dupe하면 OOM 시 새므로(errdefer는 entries.items만 해제) appendOwnedEnv로 묶는다.
+            try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, slice));
         }
-        const term_owned = try std.fmt.allocPrintSentinel(allocator, "TERM={s}", .{term}, 0);
-        entries.append(allocator, term_owned) catch |err| {
-            allocator.free(term_owned);
-            return err;
-        };
-        const colorterm_owned = try allocator.dupeZ(u8, "COLORTERM=truecolor");
-        entries.append(allocator, colorterm_owned) catch |err| {
-            allocator.free(colorterm_owned);
-            return err;
-        };
+        try appendOwnedEnv(allocator, &entries, try std.fmt.allocPrintSentinel(allocator, "TERM={s}", .{term}, 0));
+        try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, "COLORTERM=truecolor"));
         // Claude Code/Codex 등 TUI는 데스크톱 알림을 보낼 터미널을 TERM_PROGRAM 화이트리스트
         // (iTerm.app/ghostty/kitty/WezTerm)로 식별한다 — maru는 그 명단에 없어 기본(auto)에선 OSC 9 알림을
         // 못 받는다(사용자가 settings.json·config.toml 수동 설정 필요; preferredNotifChannel은 env override가
@@ -733,23 +729,11 @@ const EnvStorage = struct {
         // graphics·OSC 9/133/777을 ghostty와 같은 셋으로 지원해 식별 후 기대되는 기능과 어긋나지 않기 때문이다
         // (iTerm.app은 inline-image OSC 1337을 기대해 부적합). maru는 OSC 9를 직접 파싱해(core.zig) 네이티브
         // 알림으로 띄운다. 베이스/결정: 알림 호환을 위한 식별값일 뿐 — 사용자가 config.term으로 TERM은 바꿔도 이 값은 고정.
-        const term_program_owned = try allocator.dupeZ(u8, "TERM_PROGRAM=ghostty");
-        entries.append(allocator, term_program_owned) catch |err| {
-            allocator.free(term_program_owned);
-            return err;
-        };
+        try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, "TERM_PROGRAM=ghostty"));
         if (zdotdir) |zd| {
-            const z = try std.fmt.allocPrintSentinel(allocator, "ZDOTDIR={s}", .{zd}, 0);
-            entries.append(allocator, z) catch |err| {
-                allocator.free(z);
-                return err;
-            };
+            try appendOwnedEnv(allocator, &entries, try std.fmt.allocPrintSentinel(allocator, "ZDOTDIR={s}", .{zd}, 0));
             if (old_zdotdir) |prev| {
-                const p = try std.fmt.allocPrintSentinel(allocator, "MARU_ZDOTDIR_PREV={s}", .{prev}, 0);
-                entries.append(allocator, p) catch |err| {
-                    allocator.free(p);
-                    return err;
-                };
+                try appendOwnedEnv(allocator, &entries, try std.fmt.allocPrintSentinel(allocator, "MARU_ZDOTDIR_PREV={s}", .{prev}, 0));
             }
         }
 

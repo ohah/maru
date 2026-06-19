@@ -411,16 +411,17 @@ fn tabNumberLabel(allocator: std.mem.Allocator, index: usize, title: []const u8)
 }
 
 /// Term(가로 탭) 표시 라벨 — 사용자 rename(surface.custom_name)이 있으면 그것, 없으면 자동 제목.
-/// 자동 제목은 **라이브 OSC 0/2 창 제목**(`core.windowTitle` — OSC 제목이 없으면 cwd basename)을 우선해, 사이드바·
-/// 탭바가 현재 실행 중인 프로그램(Claude Code 등 OSC 제목을 설정하는 TUI)의 제목을 실시간 반영한다. 라이브가 비면
-/// (spawn 직후 OSC·cwd 보고 전) spawn 시 초기 제목(`surface.title`)으로 폴백한다. 베이스: Ghostty 탭 제목도 OSC
-/// 제목 우선·없으면 cwd basename(동작 비교). 이전엔 `surface.title`(정적/복원값) 고정이라 복원된 옛 OSC 제목이 stale하게
-/// 남았다 — 라이브 windowTitle 우선으로 그 stale을 없앤다.
-/// 사이드바 워크스페이스 라벨·pane 탭바가 공유하는 단일 해석(app.pickLabel). 반환은 borrowed(custom_name은 세션 소유,
-/// windowTitle은 core 소유로 다음 OSC/RIS/destroy까지, surface.title은 정적) — 호출자가 즉시 라벨 버퍼로 복사해 수명 안전.
+/// 자동 제목은 **라이브 OSC 0/2 창 제목**(없으면 cwd basename)을 반영해 사이드바·탭바가 현재 실행 중인 프로그램
+/// (Claude Code 등 OSC 제목을 설정하는 TUI)의 제목을 실시간 보인다. 단 그 값(`core.windowTitle()` 반환 슬라이스 =
+/// core.title/cwd)은 reader 스레드가 OSC 0/2/7로 free+realloc하므로 렌더 스레드가 직접 읽으면 use-after-free다 —
+/// `syncAutoTitles`가 매 tick core_mutex 하에 owned 복사본(`term.auto_title`)으로 캐시하고, termLabel은 그 캐시만
+/// 읽는다(io-render-threading PR3). 캐시가 비면(첫 sync 전·빈 제목) 정적 `surface.title`로 폴백. 베이스: Ghostty 탭
+/// 제목도 OSC 제목 우선·없으면 cwd basename(동작 비교).
+/// 사이드바 워크스페이스 라벨·pane 탭바가 공유하는 단일 해석(app.pickLabel). 반환은 borrowed(custom_name=세션 소유,
+/// auto_title=메인 스레드 소유 캐시, surface.title=정적) — 모두 reader 스레드가 안 건드려 렌더 중 안정. 호출자가 즉시 복사.
 fn termLabel(term: *const Term) []const u8 {
-    const live = term.surface.core.windowTitle();
-    return app.pickLabel(term.surface.custom_name, if (live.len > 0) live else term.surface.title);
+    const auto = if (term.auto_title.items.len > 0) term.auto_title.items else term.surface.title;
+    return app.pickLabel(term.surface.custom_name, auto);
 }
 
 /// 워크스페이스(사이드바 탭) 표시 라벨 — 탭 custom_name 우선, 없으면 활성 Term 라벨로 폴백(워크스페이스는 자동
@@ -655,6 +656,10 @@ const Term = struct {
     agent_session_mtime: i128 = 0,
     agent_answer_buf: [agent_answer_max]u8 = undefined,
     agent_answer_len: usize = 0,
+    // 사이드바·탭 라벨용 자동 제목 캐시(owned). syncAutoTitles가 매 tick core_mutex 하에 core.windowTitle()
+    // (OSC 0/2 제목 > cwd basename)을 복사해 채운다 — 렌더 스레드(termLabel)가 reader 스레드의 core.title/cwd
+    // free(OSC 0/2/7)와 경합하지 않게(io-render-threading PR3). 파생값(영속 안 함). destroyTerm이 해제.
+    auto_title: std.ArrayListUnmanaged(u8) = .empty,
 };
 
 /// Term 포그라운드에서 도는 에이전트 CLI 종류. 사이드바에 심볼로 표시(claude=✳, codex=✻).
@@ -2347,6 +2352,7 @@ pub const AppSession = struct {
         // git 브랜치 캐시(owned)도 해제.
         if (term.git_branch) |b| self.allocator.free(b);
         if (term.git_branch_cwd) |c| self.allocator.free(c);
+        term.auto_title.deinit(self.allocator);
         term.surface.deinit();
         self.allocator.destroy(term);
     }
@@ -4348,6 +4354,9 @@ pub const AppSession = struct {
     /// **IME 확정 텍스트 전용** — 코드포인트 단위로 기존 key event 경로(handleKeyEvent)에 태운다. 인코딩 단일 출처
     /// (encodeKey)·입력 회계(terminal_input)·IME preedit 정리 등 부작용을 유지한다(IME 트랜잭션이 이것에 의존). 개행은
     /// .enter(\r)로 정규화. bracketed paste 없음. 드래그앤드롭은 paste 경로(pasteText→encodePaste)로 별도다 — TUI([Image]) 인식을 위해 DECSET 2004가 켜졌을 때 bracketed paste로 감싸야 하므로.
+    /// **불변식: 호출 시 surface.core_mutex를 보유하면 안 된다** — handleKeyEvent가 인코딩 중 core_mutex를 재취득하는데
+    /// std.Io.Mutex는 비재진입이라 같은 스레드가 이미 보유 중이면 자기 데드락(ulock_wait)이다. imeEnd의 .terminal 확정
+    /// 경로는 preedit를 락 아래 복사한 뒤 락을 풀고 이 함수를 호출한다(아래 imeEnd 참조). 신규 호출처도 이 규율을 지킬 것.
     pub fn sendTextAsKeys(self: *AppSession, bytes: []const u8) void {
         const view = std.unicode.Utf8View.init(bytes) catch return;
         var it = view.iterator();
@@ -5217,6 +5226,25 @@ pub const AppSession = struct {
         };
     }
 
+    /// 모든 Term의 자동 제목 캐시(auto_title)를 core_mutex 하에 갱신한다 — termLabel(렌더 스레드)이 reader 스레드의
+    /// core.title/cwd free(OSC 0/2/7)와 경합하지 않게 owned 복사본을 만든다(io-render-threading PR3). 매 tick 호출.
+    /// 라이브 windowTitle(OSC 제목 > cwd basename)이 비면 캐시를 비워 termLabel이 정적 surface.title로 폴백한다.
+    /// OOM이면 append만 무시(라벨이 잠깐 비어 surface.title 폴백 — 안전). live_pty 미초기화 Term은 건너뛴다.
+    fn syncAutoTitles(self: *AppSession) void {
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (!term.live_initialized) continue;
+                    term.surface.core_mutex.lockUncancelable(self.io);
+                    defer term.surface.core_mutex.unlock(self.io);
+                    const live = term.surface.core.windowTitle();
+                    term.auto_title.clearRetainingCapacity();
+                    if (live.len > 0) term.auto_title.appendSlice(self.allocator, live) catch {};
+                }
+            }
+        }
+    }
+
     pub fn tick(self: *AppSession) !FrameSummary {
         // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
         // 아님). 그래야 summary의 glyph/atlas 통계가 실제 rasterized glyph를 반영하고, 이후
@@ -5233,6 +5261,7 @@ pub const AppSession = struct {
         self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 30Hz로 한 줄씩 스크롤+확장
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
         self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
+        self.syncAutoTitles(); // 라벨용 자동 제목 캐시 갱신(core_mutex 하 owned 복사 — termLabel use-after-free 회피)
         // 모든 탭의 모든 panel의 모든 Term PTY를 drain한다 — 백그라운드 탭/panel/탭(Term)도 출력을 받게
         // (routing은 surface_id로 각 surface에 가고, frame은 아래에서 활성 탭만 빌드한다). summary는 보고용.
         var drain_summary: app.RuntimePumpDrainSummary = .{};
@@ -6927,9 +6956,13 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    // custom_name(사용자 rename, owned) 해제 — destroyTerm과 같은 규율(deinit은 runtime.deinit 순서
-                    // 때문에 teardown을 직접 풀어 써서 destroyTerm을 못 부르므로 여기서도 해제한다).
+                    // custom_name(사용자 rename) + git_branch 캐시 + auto_title 캐시(owned) 해제 — destroyTerm과 같은
+                    // 규율(deinit은 runtime.deinit 순서 때문에 teardown을 직접 풀어 써서 destroyTerm을 못 부르므로 여기서도
+                    // 해제한다). destroyTerm의 owned 필드 목록과 동기 유지할 것.
                     if (term.surface.custom_name) |n| self.allocator.free(n);
+                    if (term.git_branch) |b| self.allocator.free(b);
+                    if (term.git_branch_cwd) |c| self.allocator.free(c);
+                    term.auto_title.deinit(self.allocator);
                     term.surface.deinit();
                     self.allocator.destroy(term);
                 }
@@ -11327,18 +11360,28 @@ test "사이드바·탭 라벨이 라이브 OSC 제목을 반영한다(복원된
     // 정적 초기 제목(= 워크스페이스 복원 시 저장된 옛 OSC 제목을 흉내 — stale 라벨의 원인이었다).
     try std.testing.expectEqualStrings("Maru shell", term.surface.title);
 
-    // 1) 프로그램(Claude Code/Codex 등 TUI)이 OSC 2로 라이브 제목 설정 → 라벨이 즉시 그걸 반영.
+    // 1) 프로그램(Claude Code/Codex 등 TUI)이 OSC 2로 라이브 제목 설정 → syncAutoTitles가 core_mutex 하에
+    //    auto_title 캐시로 복사(렌더 스레드 use-after-free 회피) → termLabel이 그 캐시를 반영한다.
     try term.surface.core.write("\x1b]2;claude\x1b\\");
+    session.syncAutoTitles();
     try std.testing.expectEqualStrings("claude", workspaceLabel(tab));
 
     // 2) OSC 제목 해제 + cwd만 있으면 cwd basename 폴백(라이브 우선의 일관성).
     try term.surface.core.write("\x1b]7;file://h/Users/me/proj\x1b\\");
     try term.surface.core.write("\x1b]2;\x1b\\"); // 빈 OSC 2 = 제목 해제
+    session.syncAutoTitles();
     try std.testing.expectEqualStrings("proj", workspaceLabel(tab));
 
     // 3) OSC 제목도 cwd도 없으면(RIS로 둘 다 초기화) 정적 surface.title로 폴백 — spawn 직후 빈 라벨 방지.
     try term.surface.core.write("\x1bc");
+    session.syncAutoTitles();
     try std.testing.expectEqualStrings("Maru shell", workspaceLabel(tab));
+
+    // 4) 사용자 rename(custom_name)은 라이브 OSC 제목보다 우선한다 — 사용자 의도 보존(pickLabel custom_name 우선).
+    try term.surface.core.write("\x1b]2;vim\x1b\\");
+    session.syncAutoTitles();
+    term.surface.custom_name = try allocator.dupe(u8, "myproj"); // destroyTerm(session.deinit)이 해제
+    try std.testing.expectEqualStrings("myproj", workspaceLabel(tab));
 }
 
 // ③a: 사이드바 우측 경계를 드래그하면 폭이 바뀌는지 — 경계 호버=resize_h, down=리사이즈 시작, drag=폭 갱신,

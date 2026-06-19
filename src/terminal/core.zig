@@ -5555,6 +5555,19 @@ test "clearScreen without prompt classification clears above the cursor and keep
     try std.testing.expectEqualStrings("    \n    \nccc ", dump); // 커서 행 위만 비우고 현재 줄 보존
 }
 
+test "clearScreen without prompt classification at row 0 keeps the whole screen (only scrollback wiped)" {
+    // 경계: 비프롬프트 + 커서가 0행이면 '커서 위 행'이 없으므로 화면 셀을 하나도 안 지우고 보존한다(스크롤백만 비움).
+    // 회귀 가드 — 미래에 row==0 분기가 last_print/화면을 잘못 건드리면 잡는다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[1;1Haaa"); // row0 = "aaa ", 커서 (0,3)
+    const redraw = core.clearScreen();
+    try std.testing.expect(!redraw); // 비프롬프트 → form-feed 안 보냄
+    const dump = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(dump);
+    try std.testing.expectEqualStrings("aaa \n    ", dump); // 현재 줄(0행) 그대로 보존
+}
+
 test "escape sequence split across writes is parsed as one sequence" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
     defer core.deinit();

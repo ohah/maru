@@ -1027,7 +1027,7 @@ test "parse: keybind = <chord> = unbind collects unbinds; dedups across binds an
 test "parse: text:/esc:/ctrl: become terminal macros; bad payloads are forgiving" {
     var p = try parse(std.testing.allocator,
         \\keybind = F2 = text:hello
-        \\keybind = Cmd+K = esc:[2J
+        \\keybind = F4 = esc:[2J
         \\keybind = Cmd+E = ctrl:[
         \\keybind = Cmd+X = ctrl:1
         \\keybind = F3 = text:

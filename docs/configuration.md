@@ -28,6 +28,8 @@ Maru는 시작 시 사용자 설정 파일을 읽어 폰트·색·커서를 적�
 font.family = JetBrains Mono
 font.size = 14
 font.size-step = 1
+font.line-height = 1.0
+font.letter-spacing = 0.0
 
 theme.background = #101010
 theme.foreground = #e8e8e8
@@ -54,6 +56,8 @@ window.padding-left   = 8
 | `font.family` | 문자열 | `JetBrains Mono` | 내부 공백 보존. 비어 있으면 무시(기본 유지) |
 | `font.size` | 숫자 | `14` | 1~512 범위. 범위 밖/비숫자는 무시 |
 | `font.size-step` | 숫자 | `1` | ⌘+/⌘-(Bigger/Smaller)가 한 번에 바꾸는 증분(pt). 0.1~32 범위. ⌘0(Actual Size)은 step과 무관하게 `font.size`로 복귀 |
+| `font.line-height` | 숫자 | `1.0` | 행간 배수. 1.0=CoreText 자동 cell 높이, 1.5=50% 더 큰 줄 간격. 0.5~3.0 범위. 범위 밖/비숫자는 무시. 늘어난 높이는 글자를 셀 안 세로 가운데로 그려 위아래 여백이 된다 |
+| `font.letter-spacing` | 숫자 | `0.0` | 자간(논리 pt). 0=advance 그대로, 양수=칸 넓힘, 음수=칸 좁힘. -8~32 범위(음수 허용). 범위 밖/비숫자는 무시. 늘어난 폭은 글자를 셀 안 가로 가운데로 그려 좌우 여백이 된다 |
 | `theme.background` | `#RRGGBB` | `#101010` | 16진 색. 형식 오류는 무시 |
 | `theme.foreground` | `#RRGGBB` | `#e8e8e8` | |
 | `theme.cursor` | `#RRGGBB` | `#ffffff` | |
@@ -177,6 +181,8 @@ keybind = Cmd+K = esc:[2J
 - `=` 없는 줄 → 무시.
 - `font.size`가 숫자가 아니거나 1~512 밖 → 기본 14 유지.
 - `font.size-step`이 숫자가 아니거나 0.1~32 밖 → 기본 1 유지.
+- `font.line-height`가 숫자가 아니거나 0.5~3.0 밖 → 기본 1.0 유지.
+- `font.letter-spacing`이 숫자가 아니거나 -8~32 밖 → 기본 0.0 유지(음수는 허용).
 - `cursor.shape`/`cursor.blink`가 허용 값이 아님 → 기본 유지.
 - 색이 `#RRGGBB` 형식이 아님 → 기본 색 유지.
 

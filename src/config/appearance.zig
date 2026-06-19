@@ -14,6 +14,10 @@ pub const ResolvedFontRequest = struct {
     size: f32,
     /// ⌘+/⌘- 폰트 조절 증분(pt). resolveFont가 [0.1, 32]로 검증(범위 밖은 InvalidFontSize).
     size_step: f32,
+    /// 행간 배수. resolveFont가 [0.5, 3.0]으로 재검증(범위 밖은 InvalidFontSize). refreshCellMetrics가 cell_height_px에 곱한다.
+    line_height: f32,
+    /// 자간(논리 pt, 음수 허용). resolveFont가 [-8, 32]로 재검증(범위 밖은 InvalidFontSize). refreshCellMetrics가 px로 환산해 cell_width_px에 가산.
+    letter_spacing: f32,
 };
 
 pub const ResolvedTheme = struct {
@@ -87,6 +91,10 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
     if (!(config.size >= 1.0 and config.size <= 512.0)) return error.InvalidFontSize;
     // step은 1 클릭당 증분(pt). 범위는 theme가 단일 출처(loader 파싱 검증과 같은 const — drift 없음).
     if (!(config.size_step >= theme.font_size_step_min and config.size_step <= theme.font_size_step_max)) return error.InvalidFontSize;
+    // line-height(배수)·letter-spacing(논리 pt)도 theme const로 재검증(loader가 valid만 담지만, resolve 단독
+    // 호출·테스트도 같은 게이트를 거치게 한다). !(>=min and <=max) 형태라 NaN도 함께 거부된다(size 가드와 동형).
+    if (!(config.line_height >= theme.font_line_height_min and config.line_height <= theme.font_line_height_max)) return error.InvalidFontSize;
+    if (!(config.letter_spacing >= theme.font_letter_spacing_min and config.letter_spacing <= theme.font_letter_spacing_max)) return error.InvalidFontSize;
 
     return .{
         // 이 slice는 raw config 문자열을 빌린다. 아직 config 파일 parser가 없으므로
@@ -94,6 +102,8 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
         .family = family,
         .size = config.size,
         .size_step = config.size_step,
+        .line_height = config.line_height,
+        .letter_spacing = config.letter_spacing,
     };
 }
 
@@ -167,6 +177,8 @@ test "default appearance resolves to renderer-friendly values" {
 
     try std.testing.expectEqualStrings("JetBrains Mono", resolved.font.family);
     try std.testing.expectEqual(@as(f32, 14), resolved.font.size);
+    try std.testing.expectEqual(@as(f32, 1.0), resolved.font.line_height); // 기본 행간 배수(자동 cell 높이 그대로)
+    try std.testing.expectEqual(@as(f32, 0.0), resolved.font.letter_spacing); // 기본 자간(advance 그대로)
     try std.testing.expectEqual(color.Rgb{ .r = 0x10, .g = 0x10, .b = 0x10 }, resolved.theme.background);
     try std.testing.expectEqual(color.Rgb{ .r = 0xe8, .g = 0xe8, .b = 0xe8 }, resolved.theme.foreground);
     try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff }, resolved.theme.cursor);
@@ -233,7 +245,7 @@ test "appearance resolver propagates ANSI palette overrides and keeps unset indi
 
 test "appearance resolver trims font family and preserves cursor options" {
     const resolved = try resolve(.{
-        .font = .{ .family = "  Menlo  ", .size = 16, .size_step = 3 },
+        .font = .{ .family = "  Menlo  ", .size = 16, .size_step = 3, .line_height = 1.5, .letter_spacing = -2.0 },
         .theme = .{
             .background = "#000000",
             .foreground = "#FFFFFF",
@@ -246,6 +258,8 @@ test "appearance resolver trims font family and preserves cursor options" {
     try std.testing.expectEqualStrings("Menlo", resolved.font.family);
     try std.testing.expectEqual(@as(f32, 16), resolved.font.size);
     try std.testing.expectEqual(@as(f32, 3), resolved.font.size_step); // size_step 통과(기본 1)
+    try std.testing.expectEqual(@as(f32, 1.5), resolved.font.line_height); // line_height 전파(범위 내)
+    try std.testing.expectEqual(@as(f32, -2.0), resolved.font.letter_spacing); // letter_spacing 전파(음수 허용)
     try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff }, resolved.theme.foreground);
     try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0x00, .b = 0xaa }, resolved.theme.cursor);
     try std.testing.expectEqual(theme.CursorShape.bar, resolved.cursor.shape);
@@ -261,6 +275,18 @@ test "appearance resolver rejects invalid font values" {
     try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .size_step = 0 } }));
     try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .size_step = -2 } }));
     try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .size_step = 64 } }));
+    // line-height도 [0.5, 3.0] 밖이면 거부(겹침·행 급감 가드). 경계값은 통과.
+    try std.testing.expectEqual(@as(f32, 0.5), (try resolve(.{ .font = .{ .family = "Menlo", .size = 14, .line_height = 0.5 } })).font.line_height);
+    try std.testing.expectEqual(@as(f32, 3.0), (try resolve(.{ .font = .{ .family = "Menlo", .size = 14, .line_height = 3.0 } })).font.line_height);
+    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .line_height = 0.4 } }));
+    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .line_height = 3.1 } }));
+    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .line_height = std.math.nan(f32) } }));
+    // letter-spacing도 [-8, 32] 밖이면 거부(음수 경계 포함). 경계값은 통과.
+    try std.testing.expectEqual(@as(f32, -8.0), (try resolve(.{ .font = .{ .family = "Menlo", .size = 14, .letter_spacing = -8.0 } })).font.letter_spacing);
+    try std.testing.expectEqual(@as(f32, 32.0), (try resolve(.{ .font = .{ .family = "Menlo", .size = 14, .letter_spacing = 32.0 } })).font.letter_spacing);
+    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .letter_spacing = -8.1 } }));
+    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .letter_spacing = 32.1 } }));
+    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .letter_spacing = std.math.nan(f32) } }));
 }
 
 test "hex color parser accepts only full rgb hex colors" {

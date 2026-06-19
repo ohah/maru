@@ -75,12 +75,20 @@ esctest는 black-box로 응답을 *질의해 추론*하지만, Maru는 white-box
 |---|---|---|
 | DA1 `CSI c` / `CSI 0 c` | `CSI ? 6 c`(VT102) | xterm ctlseqs (Primary DA), DEC STD 070 |
 | DA2 `CSI > c` | `CSI > 1 ; 10 ; 0 c` | xterm ctlseqs (Secondary DA) |
+| XTVERSION `CSI > q`(Ps=0) | `DCS > \| maru 0.0.0 ST` | xterm ctlseqs (XTVERSION) |
 | DSR `CSI 5 n` | `CSI 0 n`(OK) | ECMA-48 8.3.35 (DSR) |
 | CPR `CSI 6 n` | `CSI row ; col R`(1-indexed) | ECMA-48 8.3.14 (CPR) |
 | DECRQM `CSI ? Ps $ p` | `CSI ? Ps ; Pm $ y`(Pm 0/1/2) | DEC STD 070, xterm ctlseqs (DECRQM/DECRPM) |
 
 DECRQM의 Pm 의미: 0=미인식, 1=set, 2=reset, 3=영구 set, 4=영구 reset. 우리는 아는 모드(2027/
 2004/25/1)는 현재 상태(1/2)를, 모르는 모드는 0을 답한다 — 앱이 mode 지원을 감지하고 켤 수 있게.
+
+XTVERSION은 단말 **자기식별**의 백본이다. DA1/DA2가 범용 VT102/VT220 신원만 주는 것과 달리
+`DCS > | maru <version> ST`로 "이 단말은 maru다"를 이름으로 알려, terminfo 파일이 원격에 없어도
+capability를 런타임 질의로 감지하는 도구(tmux/nvim 등)가 maru를 식별할 수 있게 한다. 이름/버전은
+`core.zig`의 `terminal_name`/`terminal_version` 단일 출처에서 조립하며, 이후 추가할 자체 terminfo
+생성과 XTGETTCAP 응답이 같은 값을 재사용한다(채널 간 신원 drift 방지). 버전의 정식 단일 출처는
+`build.zig.zon`의 `.version`이고, 현재는 둘 다 `0.0.0` placeholder다(릴리스 시 함께 올린다).
 
 ### 상태 적합성은 어디서
 

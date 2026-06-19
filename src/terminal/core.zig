@@ -5,6 +5,14 @@ const png = @import("png.zig"); // kitty graphics f=100 PNG 디코드(K3c)
 const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
 const CoreOwner = @import("core_owner.zig").CoreOwner; // core_mutex 재진입 추적(디버그 전용 안전망)
 
+/// 단말 자기식별의 단일 신원 출처. XTVERSION(CSI > q) 응답이 지금 이걸 쓰고, 이후 추가할 자체
+/// terminfo 생성과 XTGETTCAP(DCS + q) 응답도 같은 값을 재사용한다 — 이름/버전이 채널마다 어긋나지
+/// 않도록 한곳에서만 정의한다. 버전의 정식 단일 출처는 build.zig.zon의 `.version`이며, 지금은 둘 다
+/// "0.0.0" placeholder다. build_options로 연결하면 drift가 사라지지만, 순수 VT core를 빌드 시스템에
+/// 결합하지 않으려고(이식성·단위 테스트 격리) 지금은 상수로 둔다 — 릴리스가 생기면 이 값을 함께 올린다.
+pub const terminal_name = "maru";
+pub const terminal_version = "0.0.0";
+
 /// mouse tracking 모드(DECSET 9/1000/1002/1003) — 어떤 마우스 이벤트를 앱에 리포트할지(상호 배타). 베이스: xterm
 /// mouse tracking. none=꺼짐, x10=press만, normal=press+release, button=+버튼 눌린 채 drag, any=+모든 motion.
 pub const MouseTracking = enum { none, x10, normal, button, any };
@@ -3021,6 +3029,13 @@ pub const TerminalCore = struct {
                     // DA2(CSI > c): 단말 버전 식별. DA1만 답하고 침묵하면 vim 등이 DA2 응답을
                     // 타임아웃까지 기다린다. VT220급(1), 버전 10, ROM 0으로 답한다.
                     'c' => if (self.csiRawParam(0) == 0) self.appendResponse("\x1b[>1;10;0c"),
+                    // XTVERSION(CSI > q, Ps=0): xterm ctlseqs "Report xterm name and version".
+                    // DA1/DA2가 범용 신원만 주는 것과 달리 "이 단말은 maru다"를 이름으로 알리는
+                    // 런타임 자기식별 채널이다. 응답은 DCS `DCS > | <name> <version> ST`
+                    // (= ESC P > | ... ESC \). Ps=0만 정의돼 있어 그 외엔 침묵한다. 이름/버전은
+                    // terminal_name/terminal_version 단일 출처에서 comptime으로 조립한다.
+                    'q' => if (self.csiRawParam(0) == 0)
+                        self.appendResponse("\x1bP>|" ++ terminal_name ++ " " ++ terminal_version ++ "\x1b\\"),
                     // kitty keyboard(CSI > flags u): flag 스택에 push(enable). flags는 u5로 truncate.
                     'u' => self.kitty_flags.push(kittyFlagsFromParam(self.csiRawParam(0))),
                     else => {},
@@ -9010,6 +9025,32 @@ test "conformance: DA2 (CSI > c) answers secondary device attributes" {
     // xterm ctlseqs Secondary DA. VT220급(1), 버전 10, ROM 0.
     try core.write("\x1b[>c");
     try std.testing.expectEqualStrings("\x1b[>1;10;0c", core.pendingResponse());
+}
+
+// XTVERSION(CSI > q, Ps=0): xterm ctlseqs "Report xterm name and version". 응답은 DCS 시퀀스
+// `DCS > | <name version> ST`(= ESC P > | ... ESC \). 이건 런타임 자기식별의 백본이다 — DA1/DA2가
+// 범용 VT102/VT220 신원만 주는 것과 달리, XTVERSION은 "이 단말은 maru다"를 이름으로 알린다. terminfo
+// 파일이 원격에 없어도 capability를 런타임 질의로 감지하는 도구(tmux/nvim 등)가 maru를 식별할 수 있게
+// 하는 가장 미래지향적 채널이며, terminfo·XTGETTCAP 작업이 공유할 단일 신원 출처(terminal_name/version)다.
+test "conformance: XTVERSION (CSI > q) reports terminal name and version over DCS, no SGR leak" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[>q");
+    // 정확한 wire 바이트를 고정한다("추측 말고 캡처"): ESC P > | maru 0.0.0 ESC \.
+    try std.testing.expectEqualStrings("\x1bP>|maru 0.0.0\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // '>' 마커 시퀀스가 뒤따르는 SGR로 새지 않는다(DA2 격리 테스트와 같은 불변식).
+    try core.write("\x1b[4m"); // underline on
+    try core.write("X");
+    try std.testing.expect(core.cells[0].style.underline);
+}
+
+test "XTVERSION (CSI > q) ignores non-zero Ps (only Ps=0 is defined)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    // xterm ctlseqs는 Ps=0만 XTVERSION으로 정의한다. 그 외 Ps는 미정의라 침묵한다(안전 기본값).
+    try core.write("\x1b[>1q");
+    try std.testing.expectEqualStrings("", core.pendingResponse());
 }
 
 test "conformance: DECRQM reports known modes (bracketed paste 2004, DECTCEM 25)" {

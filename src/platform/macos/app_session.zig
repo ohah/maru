@@ -44,7 +44,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 55; // 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 56; // 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -813,6 +813,10 @@ pub const AppSession = struct {
     // config가 정한 기본 폰트 크기(pt). ⌘0(reset_font_size)이 여기로 되돌린다 — appearance.font.size는
     // 런타임에 바뀌므로 원래 값을 따로 보관한다. init에서 resolve된 appearance.font.size로 채운다.
     base_font_size: f32 = 0,
+    // 프로그램 처음 실행 시점(init)에 resolve한 appearance. "Reset to Defaults"(resetToInitial)의 단일 출처다 —
+    // 런타임 줌(⌘+/−)·여백 변경을 init 시점 값으로 되돌린다. init에서만 채우고 이후 절대 안 바꾼다(reloadConfig가
+    // 파일 새 값으로 appearance를 갈아도 이건 그대로라, reset 기준이 "프로그램 처음"으로 불변).
+    initial_appearance: config_mod.ResolvedAppearance = undefined,
     // serializeWorkspaceWindow가 돌려주는 workspace 텍스트의 소유 버퍼(다음 호출/deinit까지 유효 — cwd ABI와 같은
     // 소유 규칙). Swift가 멀티 창 저장에서 세션마다 한 번 읽는다.
     workspace_buffer: ?[]u8 = null,
@@ -1160,6 +1164,9 @@ pub const AppSession = struct {
         self.appearance = config_mod.resolveAppearance(self.loaded_config.config) catch
             try config_mod.resolveAppearance(.{});
         self.base_font_size = self.appearance.font.size; // ⌘0 리셋 기준(런타임에 appearance.font.size는 바뀜)
+        // "Reset to Defaults"(resetToInitial)의 단일 출처 — 프로그램 처음 실행 설정. init에서만 잡고 reloadConfig가
+        // 파일 새 값으로 appearance를 갈아도 안 바꾼다(reset 기준은 "프로그램 처음"이라 불변).
+        self.initial_appearance = self.appearance;
         // config의 무시된 줄(알 수 없는 key·잘못된 값)을 알린다 — 사용자가 오타를 눈치채게.
         for (self.loaded_config.diagnostics) |d| {
             std.log.scoped(.config).warn("config line {d}: {s}", .{ d.line, d.message });
@@ -3129,18 +3136,34 @@ pub const AppSession = struct {
     }
 
     /// 런타임 폰트 크기를 size(pt)로 바꾼다(클램프 [font_size_min, font_size_max]). 변화가 없으면 무동작.
-    /// 폰트 크기는 cell 메트릭(→ 글리프 cache key)을 바꾸므로: ① appearance.font.size 갱신 → ② refreshCellMetrics로
-    /// cell 픽셀·사이드바 재계산 → ③ atlas 무효화(새 크기로 재래스터·옛 슬롯 회수) → ④ 같은 창(backing px)에서
-    /// 새 cell 크기로 grid 재산출 + 각 pane resize(코어 resize의 reflow 경로 공유 — PTY winsize/SIGWINCH 포함).
-    /// 터미널 콘텐츠 reflow는 없다(셀 크기·grid 차원만, Ghostty 동일).
+    /// 폰트 크기는 cell 메트릭(→ 글리프 cache key)을 바꾸므로: ① appearance.font.size 갱신 → ② applyMetricsPipeline로
+    /// cell 픽셀·사이드바 재계산 + atlas 무효화 + grid 재산출 + 각 pane resize(코어 resize의 reflow 경로 공유 —
+    /// PTY winsize/SIGWINCH 포함). 터미널 콘텐츠 reflow는 없다(셀 크기·grid 차원만, Ghostty 동일).
     fn setFontSize(self: *AppSession, size: f32) void {
         const clamped = std.math.clamp(size, font_size_min, font_size_max);
         if (clamped == self.appearance.font.size) return; // 경계에서 더 눌러도 변화 없으면 재작업 스킵
         self.appearance.font.size = clamped;
+        self.applyMetricsPipeline();
+    }
+
+    /// appearance(폰트·여백·테마)가 통째로 바뀌었을 때의 일반 적용 경로. setFontSize의 메트릭 재계산을 일반화한 것 —
+    /// reloadConfig(파일 새 값)·resetToInitial(처음 설정 복원)이 공유한다. appearance를 갈아끼우고 base_font_size를
+    /// 새 폰트 크기로 맞춘 뒤(⌘0 기준도 따라감), 메트릭·grid·atlas 파이프라인을 돌린다. palette/scrollback 같은
+    /// 코어 behavior 재주입은 호출자가 한다(appearance만 다루는 단일 책임).
+    fn applyAppearance(self: *AppSession, new_appearance: config_mod.ResolvedAppearance) void {
+        self.appearance = new_appearance;
+        self.base_font_size = new_appearance.font.size; // 새 config 기본 폰트 크기 = ⌘0 reset 기준
+        self.applyMetricsPipeline();
+    }
+
+    /// appearance.font(크기·family·line-height·letter-spacing)·window_padding이 바뀐 뒤 cell 메트릭과 그것에서
+    /// 파생되는 모든 것을 다시 잡는다(setFontSize·applyAppearance 공유): ① refreshCellMetrics(cell 픽셀·사이드바·
+    /// 패딩 px 재계산) → ② atlas 무효화(새 크기로 재래스터·옛 슬롯 회수) → ③ 같은 창(backing px)에서 grid 재산출
+    /// + 각 pane resize(resize 본문과 동일한 reflow). 아직 첫 resize 전(backing 0)이면 grid는 스킵 — 곧 올 Swift
+    /// resize가 새 메트릭으로 grid를 잡는다.
+    fn applyMetricsPipeline(self: *AppSession) void {
         self.refreshCellMetrics();
         _ = self.renderer_state.atlas.invalidate(.font_size_changed);
-        // 같은 backing 픽셀에서 새 cell 크기로 grid를 다시 잡고 각 pane을 resize한다(resize 본문과 동일한 reflow).
-        // 아직 첫 resize 전(backing 0)이면 스킵 — 곧 올 Swift resize가 새 메트릭으로 grid를 잡는다.
         if (self.backing_width_px > 0 and self.backing_height_px > 0) {
             const grid = gridFromBacking(self.backing_width_px, self.backing_height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px, self.window_padding_px);
             self.resizeActiveTabPanes() catch {};
@@ -3148,6 +3171,74 @@ pub const AppSession = struct {
             self.last_resize_size = grid;
         }
         self.metal_dirty = true;
+    }
+
+    /// "Reset to Defaults" 메뉴 — 런타임 줌(⌘+/−)·여백 변경을 **프로그램 처음 실행했던** 설정(initial_appearance)으로
+    /// 되돌린다. behavior(scrollback/bell/page-keys)는 런타임에 안 바뀌므로 reset 대상이 아니다 — appearance만
+    /// 되돌린다. 단 palette는 appearance에 속하므로 applyAppearance가 갈아끼운 initial palette를 모든 surface에
+    /// 재주입한다(코어 setConfigPalette 단일 출처). initial_appearance는 init에서만 잡혀 reload 후에도 불변이라,
+    /// reset 기준이 항상 "프로그램 처음"이다.
+    pub fn resetToInitial(self: *AppSession) void {
+        self.applyAppearance(self.initial_appearance);
+        self.reapplyConfigPalette();
+    }
+
+    /// "Reload Config" 메뉴 — config 파일을 재로드해 재시작 없이 반영한다. 파싱은 forgiving(알 수 없는 key/잘못된
+    /// 값은 기본값 유지 + diagnostic), 로드 자체가 실패(OOM 등)하면 무동작이다(기존 config 유지). 적용 순서:
+    /// ① 새 Parsed로 loaded_config 교체(옛 arena deinit 후 — appearance가 family 슬라이스를 빌리므로 새 appearance를
+    ///    먼저 만들지 말고 loaded_config를 갈아끼운 뒤 resolve한다 → 옛 family를 빌린 옛 appearance는 이 시점에 버린다).
+    /// ② appearance resolve + applyAppearance(메트릭·grid·atlas + base_font_size).
+    /// ③ 파일 새 값이라 코어 behavior(scrollback/bell/page-keys/palette)도 모든 surface에 재적용.
+    /// initial_appearance는 건드리지 않는다 — reset 기준은 "프로그램 처음"이라 reload 후에도 불변(위 필드 주석).
+    pub fn reloadConfig(self: *AppSession) void {
+        var new_parsed = config_mod.loadConfigDefault(self.io, self.allocator) catch return; // 실패 시 무동작(forgiving)
+        // 새 config로 appearance를 먼저 resolve한 뒤에 옛 loaded_config를 버린다 — resolve가 실패하면 옛
+        // appearance·loaded_config를 그대로 보존해 use-after-free(옛 arena의 family를 빌린 appearance)를 막는다.
+        const new_appearance = config_mod.resolveAppearance(new_parsed.config) catch {
+            new_parsed.deinit();
+            return;
+        };
+        self.applyAppearance(new_appearance); // appearance 통째 교체 — 옛 family를 더는 안 읽는다
+        self.loaded_config.deinit(); // 이제 옛 loaded_config(arena)를 버려도 안전
+        self.loaded_config = new_parsed;
+        // 파일 새 값이라 캐시된 behavior도 갱신한다(appearance 밖 — applyAppearance가 안 건드림).
+        self.audible_bell = self.loaded_config.config.bell.audible;
+        self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
+        self.reapplyScrollback();
+        self.reapplyConfigPalette();
+    }
+
+    /// 현재 appearance.theme.palette를 모든 탭/panel/Term 코어에 재주입한다(reload·reset 공유). createTerm의
+    /// setConfigPalette와 같은 chokepoint지만, 여기 surface들은 이미 live(리더 스레드가 코어 접근)라 코어 변경은
+    /// core_mutex 아래서 한다(docs/io-render-threading.md PR3 — OSC 4 변경과의 data race 방지). metal_dirty는
+    /// 호출자(applyAppearance→applyMetricsPipeline)가 이미 세운다.
+    fn reapplyConfigPalette(self: *AppSession) void {
+        const palette = self.appearance.theme.palette;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    term.surface.core_mutex.lockUncancelable(self.io);
+                    defer term.surface.core_mutex.unlock(self.io);
+                    term.surface.core.setConfigPalette(palette);
+                }
+            }
+        }
+    }
+
+    /// config scrollback.lines를 모든 탭/panel/Term 코어 max_scrollback에 재주입한다(reload 전용 — reset은 behavior를
+    /// 안 건드린다). createTerm과 같은 chokepoint지만 live surface라 core_mutex 아래서 쓴다(리더 스레드가 ring을
+    /// lazy-alloc/scroll로 읽으므로). 이미 할당된 ring을 줄이지는 않는다 — 코어가 다음 eviction에서 새 cap을 본다.
+    fn reapplyScrollback(self: *AppSession) void {
+        const lines = self.loaded_config.config.scrollback.lines;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    term.surface.core_mutex.lockUncancelable(self.io);
+                    defer term.surface.core_mutex.unlock(self.io);
+                    term.surface.core.max_scrollback = lines;
+                }
+            }
+        }
     }
 
     pub fn handleKeyEvent(self: *AppSession, event: terminal.KeyEvent) !FrameSummary {
@@ -8758,6 +8849,78 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     i = 0;
     while (i < 200) : (i += 1) session.dispatchAppAction(.increase_font_size);
     try std.testing.expectEqual(font_size_max, session.appearance.font.size);
+}
+
+// Reset to Defaults: 런타임 appearance 변경(폰트 줌·여백)을 프로그램 처음(init) 설정으로 되돌리는지.
+// resetToInitial이 initial_appearance(init 단일 출처)를 applyAppearance로 복원해 appearance·cell 메트릭이
+// init 값으로 돌아오는지 고정한다. initial_appearance가 reset로 안 바뀌어 반복 reset도 같은 기준인지도 본다.
+test "resetToInitial: 런타임 폰트 줌·여백을 프로그램 처음 설정으로 되돌린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 메트릭 + PTY
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000); // backing px 확정 → grid 산출
+
+    const init_size = session.initial_appearance.font.size;
+    const init_padding_right = session.initial_appearance.window_padding_right;
+    const cw0 = session.cell_width_px;
+    try std.testing.expectEqual(init_size, session.appearance.font.size); // init 직후 appearance == initial
+
+    // 런타임 줌(폰트 확대)과 여백 변경을 가한다 — reset이 되돌릴 대상.
+    session.setFontSize(init_size + 6);
+    session.appearance.window_padding_right = init_padding_right + 20;
+    try std.testing.expect(session.appearance.font.size != init_size);
+    try std.testing.expect(session.cell_width_px > cw0); // 폰트 키우면 cell 픽셀이 커진다(메트릭)
+
+    // Reset to Defaults — appearance·메트릭이 init 값으로 복원된다(applyAppearance가 결정적 재계산).
+    session.resetToInitial();
+    try std.testing.expectEqual(init_size, session.appearance.font.size);
+    try std.testing.expectEqual(init_padding_right, session.appearance.window_padding_right);
+    try std.testing.expectEqual(cw0, session.cell_width_px);
+    try std.testing.expectEqual(init_size, session.base_font_size); // ⌘0 기준도 init로 복원
+
+    // initial_appearance는 reset로 안 바뀐다 — 반복 reset도 같은 기준("프로그램 처음")이다.
+    try std.testing.expectEqual(init_size, session.initial_appearance.font.size);
+    session.setFontSize(init_size + 6);
+    session.resetToInitial();
+    try std.testing.expectEqual(init_size, session.appearance.font.size);
+}
+
+// applyAppearance: 새 appearance를 통째로 갈아끼우면 appearance·base_font_size·cell 메트릭이 따라 바뀌는지.
+// reloadConfig가 파일 새 값으로 부르는 일반 적용 경로 — 파일 I/O 없이 직접 호출로 핵심(appearance/메트릭 갱신)을 고정한다.
+test "applyAppearance: 새 appearance로 appearance·base_font_size·메트릭을 갱신한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 메트릭 + PTY
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+
+    const cw0 = session.cell_width_px;
+    // 폰트가 더 큰 appearance를 만든다(기본 resolve에서 size만 키움).
+    var bigger = try config_mod.resolveAppearance(.{});
+    bigger.font = session.appearance.font; // family 슬라이스는 살아있는 loaded_config 빌림(undefined family 회피)
+    bigger.font.size = session.appearance.font.size + 8;
+
+    session.applyAppearance(bigger);
+    try std.testing.expectEqual(bigger.font.size, session.appearance.font.size);
+    try std.testing.expectEqual(bigger.font.size, session.base_font_size); // base_font_size도 새 크기로(⌘0 기준)
+    try std.testing.expect(session.cell_width_px > cw0); // 메트릭 재계산(큰 폰트 → 큰 cell)
 }
 
 test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 캡처" {

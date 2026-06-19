@@ -1435,6 +1435,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         app.addItem(.separator())
         // Open Config(⌘,) — macOS Settings 관례 자리. config 파일을 기본 편집기로 연다(경로는 Zig가 소유).
         app.addItem(nativeMenuItem("Open Config…", #selector(menuOpenConfig(_:)), key: ",", target: self))
+        // Reload Config — config 파일 편집을 재시작 없이 반영(Zig가 파일 재로드·재적용). Reset to Defaults — 런타임
+        // 줌/여백 변경을 프로그램 처음 실행 설정으로 복원(둘 다 단축키 없음 — 메뉴 클릭 전용, 발견성용).
+        app.addItem(nativeMenuItem("Reload Config", #selector(menuReloadConfig(_:)), key: "", target: self))
+        app.addItem(nativeMenuItem("Reset to Defaults", #selector(menuResetDefaults(_:)), key: "", target: self))
         app.addItem(.separator())
         app.addItem(nativeMenuItem("Hide maru", #selector(NSApplication.hide(_:)), key: "h"))
         app.addItem(nativeMenuItem("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), key: "h", mods: [.command, .option]))
@@ -1600,6 +1604,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if !NSWorkspace.shared.open(url) {
             NSWorkspace.shared.activateFileViewerSelecting([url]) // 연결 앱 없음 → Finder에 표시
         }
+    }
+
+    /// Reload Config — config 파일을 재로드해 재시작 없이 반영한다(폰트·여백·테마·palette·scrollback·bell·page-keys).
+    /// 파일 재로드·파싱·재적용은 Zig가 단일 출처로 한다(forgiving — 실패 시 무동작). 여기선 활성 세션에 호출만 한다.
+    @objc private func menuReloadConfig(_ sender: Any?) {
+        _ = sender
+        guard let session = appSession else { return }
+        _ = maru_macos_app_session_reload_config(session)
+    }
+
+    /// Reset to Defaults — 런타임 줌(⌘+/−)·여백 변경을 프로그램 처음 실행했던 설정으로 되돌린다(appearance만 — behavior는
+    /// 런타임에 안 바뀌므로 대상 아님). 복원 기준·적용은 Zig가 단일 출처로 한다. 여기선 활성 세션에 호출만 한다.
+    @objc private func menuResetDefaults(_ sender: Any?) {
+        _ = sender
+        guard let session = appSession else { return }
+        _ = maru_macos_app_session_reset_defaults(session)
     }
 
     @objc private func menuToggleFullScreen(_ sender: Any?) {

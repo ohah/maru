@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 55u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 56u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -517,6 +517,12 @@ int32_t maru_macos_app_session_config_path(
     const uint8_t **out_ptr,
     size_t *out_len
 );
+/* Reload Config 메뉴 — config 파일을 재로드해 재시작 없이 반영(폰트·여백·테마·palette·scrollback·bell·page-keys).
+   파싱은 forgiving, 로드 실패면 무동작(기존 config 유지)이라 항상 Status.ok. 규칙은 Zig loader가 단일 출처. */
+int32_t maru_macos_app_session_reload_config(MaruAppHostSession *session);
+/* Reset to Defaults 메뉴 — 런타임 줌(⌘+/−)·여백 변경을 프로그램 처음 실행 설정으로 되돌린다(appearance만 —
+   behavior는 런타임에 안 바뀌므로 대상 아님). 항상 Status.ok. */
+int32_t maru_macos_app_session_reset_defaults(MaruAppHostSession *session);
 /* 창 제목 문자열(OSC 0/2 제목 우선, 없으면 OSC 7 cwd basename; UTF-8). 우선순위는 core가 정한다.
    버퍼는 Zig(core) 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효, 없으면 *out_len=0(Swift가 앱 이름
    폴백). Swift가 window.title에 쓴다. */

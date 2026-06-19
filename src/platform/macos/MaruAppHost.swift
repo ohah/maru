@@ -1344,13 +1344,28 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func pastePasteboardText() {
-        // 텍스트뿐 아니라 파일/이미지(파일 URL)·URL도 붙여넣는다 — pasteboardDropContent가 경로를 셸 이스케이프한다.
-        guard let content = pasteboardDropContent(NSPasteboard.general) else { return }
-        sendPasteText(content)
+        // Cmd+V 붙여넣기. 베이스/결정: Ghostty getOpinionatedStringContents 동작(동작 비교만 — 코드 표현은 옮기지
+        // 않은 독립 구현). NSURL이 있으면 **파일 URL은 경로를 셸 이스케이프**(셸이 공백에서 단어를 쪼개지 않게),
+        // **그 외(웹) URL은 absoluteString 그대로**(이스케이프하면 붙여넣은 URL이 깨진다), URL 표현이 없으면 평문
+        // 텍스트. 이로써 텍스트·웹 URL·파일 클립보드가 모두 자연스럽게 붙는다. 드래그(handleDrop)는 사용자 제스처라
+        // 웹 URL도 이스케이프하는 별도 정책(pasteboardDropContent)이라 분리한다.
+        let pb = NSPasteboard.general
+        if let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty {
+            var parts: [String] = []
+            for url in urls {
+                parts.append(url.isFileURL ? Self.shellEscape(url.path) : url.absoluteString)
+            }
+            sendPasteText(parts.joined(separator: " "))
+            return
+        }
+        if let text = pb.string(forType: .string), !text.isEmpty {
+            sendPasteText(text)
+        }
     }
 
-    /// 드롭된 pasteboard 내용(경로/URL/텍스트)을 paste 경로로 삽입한다 — 뷰(MaruMetalTerminalView.performDragOperation)가
-    /// 위임한다. 클립보드 paste와 동일한 추출·전송 헬퍼를 재사용한다. 삽입할 게 있으면 true.
+    /// 드롭된 pasteboard 내용(경로/URL/텍스트)을 삽입한다 — 뷰(MaruMetalTerminalView.performDragOperation)가 위임한다.
+    /// 드롭은 사용자 제스처라 URL/파일을 모두 이스케이프하는 pasteboardDropContent로 추출한다(Cmd+V paste는 웹 URL을
+    /// 이스케이프하지 않는 별도 추출 — pastePasteboardText). 전송은 공용 sendPasteText. 삽입할 게 있으면 true.
     func handleDrop(_ pb: NSPasteboard) -> Bool {
         guard let content = pasteboardDropContent(pb) else { return false }
         sendPasteText(content)
@@ -1372,16 +1387,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return nil
     }
 
-    /// 셸 버퍼에 경로/URL을 넣을 때 셸이 단어를 쪼개지 않게 공백·괄호 등 특수문자 앞에 백슬래시를 붙인다(평문
-    /// paste에는 적용 안 함 — 명령 보존). 베이스: Ghostty Shell.escape의 특수문자 집합. 백슬래시를 가장 먼저
-    /// 처리해(escapeChars 첫 글자) 이후 추가되는 백슬래시가 중복 이스케이프되지 않게 한다.
-    private static let shellEscapeChars = "\\ ()[]{}<>\"'`!#$&;|*?\t"
+    /// 셸 버퍼에 경로를 넣을 때 셸이 공백 등에서 단어를 쪼개지 않게 메타문자 앞에 백슬래시를 붙인다(평문 paste·웹
+    /// URL엔 적용 안 함). 대상 집합은 POSIX 셸 메타문자 기준이고, 동작은 Ghostty Shell.escape와 같다(동작 비교만 —
+    /// 코드 표현은 옮기지 않는다). 원본을 한 번만 순회하며 메타문자면 백슬래시를 앞세워 새 문자열을 만든다 — 누적
+    /// 결과를 재스캔하지 않아 중복 이스케이프·문자 순서 의존이 없다.
+    private static let shellEscapeChars: Set<Character> = [
+        "\\", " ", "(", ")", "[", "]", "{", "}", "<", ">", "\"", "'", "`", "!", "#", "$", "&", ";", "|", "*", "?", "\t",
+    ]
     private static func shellEscape(_ s: String) -> String {
-        var result = s
-        for ch in shellEscapeChars {
-            result = result.replacingOccurrences(of: String(ch), with: "\\\(ch)")
+        var out = ""
+        out.reserveCapacity(s.count)
+        for ch in s {
+            if shellEscapeChars.contains(ch) { out.append("\\") }
+            out.append(ch)
         }
-        return result
+        return out
     }
 
     /// 텍스트를 paste 경로로 PTY에 보낸다(개행 정규화·bracketed paste 감싸기는 Zig 소유). 드래그·클립보드 공용.

@@ -80,7 +80,7 @@
 2. **회귀(통합) — 폭주 중 응답 지연 상한** ✅(구현됨): 통제 child가 대량 출력 폭주 + OSC 11 질의 → 실제 PTY 통과 → 응답이 **관대한 상한 안에** 도착하는지 assert. 원결함(4.2초)을 정조준. 구현: `tests/integration/pty/macos.zig`의 "answers OSC 11 within a bound under output flood"(opt-in `test-pty`) — child가 `seq 1 20000`(~106KB) 폭주 뒤 OSC 11 질의를 보내고 raw 모드 한 번의 read로 **VTIME=2초 상한** 안에 응답을 받으면 그 바이트를 hex로 에코, 테스트는 core에서 `1b5d31313b726762`(=`\x1b]11;rgb`) 확인. 상한은 codex 데드라인(~50–100ms)보다 훨씬 관대해 머신 편차 flaky를 피하며 "초 단위 지연"만 잡는다(VTIME 타임아웃이 상한을 child에 인코딩 — 별도 벽시계 측정 불필요).
 3. **동시성 스트레스** ✅(구현됨): I/O write ↔ 렌더 snapshot 동시 hammer(N회 반복), 손상/크래시 0. 가능하면 ThreadSanitizer 빌드로. 구현: `tests/integration/pty/macos.zig`의 "reader write and render snapshot hammer concurrently"(opt-in `test-pty`) — reader-processing가 ~288KB 폭주를 `core_mutex` 아래 적용하는 동안 메인이 같은 락으로 `renderSnapshot`+`buildDrawList`를 30000회 hammer, 매 회 grid 치수 일관성 assert + buildDrawList 성공/OOM-only + 최종 core 유효.
 4. **lifecycle/close race** ✅(구현됨): 폭주 중 close → UAF/좀비 0, `core.deinit`이 reader join 후([PTY 운영 모델] §session close 테스트 확장). 구현: `tests/integration/pty/macos.zig`의 "close during flood reaps reader-processing child without UAF or zombie"(opt-in `test-pty`) — `yes` 폭주 + 작은 큐로 reader가 backpressure 대기 중 `stopAndJoin`(queue.close→session.close[SIGKILL]→join) 뒤 `surface.deinit`(core.deinit) 순서로 UAF 없음, `waitpid` ECHILD로 좀비 0 확인.
-5. **lock 계약**: debug 빌드 assert("락 없이 코어 접근 시 패닉")로 모든 테스트가 위반을 자동 노출. 경계 테스트로 강제([[devsession-undefined-test-field-trap]] UB 방지).
+5. **lock 계약** ✅(구현됨): `CoreOwner`(`src/terminal/core_owner.zig`, 디버그 전용·release `@sizeOf` 0)가 두 위반을 panic으로 노출한다. **(1) 재진입**: `core_mutex`를 쥔 채 같은 락을 재취득하면 lock **전에** 감지한다(비재진입 `std.Io.Mutex`는 lock 안에서 영영 멈춰 사후 판정 불가). 모든 취득을 owner-추적 래퍼(`Surface.lockCore`/`unlockCore`, reader는 `core.owner_dbg.lock`/`unlock`)로 단일화하고, `check-boundaries`가 직접 `core_mutex.lockUncancelable`/`.unlock` 호출을 빌드에서 차단한다(`tests/boundary/imports.zig`). **(2) 락 미보유**: reader가 부착(`setProcessing`→`arm`)된 코어를 락 없이 mutate(`write`/`setPreedit`/`scrollViewport`/`scrollToBottom`)하면 panic — `arm` 전 단일 스레드(독립 코어·헤드리스 단위 테스트)는 면제해 거짓 panic 0. IME 조합 중 포커스 상실 hang(#700)이 이 재진입 클래스이며, 이제 재발 시 hang이 아니라 panic으로 즉시 잡힌다. 검증: `mise run check` + `test-pty` 15/15(armed 경로 거짓 panic 0).
 6. **기존 단일 스레드 코어 단위 테스트 유지**: headless 경로는 **동기 drain 옵션**을 남겨 코어 파싱/상태 로직을 단일 스레드로 계속 검증(결정성 보존 — [PTY 운영 모델] §왜 reader thread).
 7. **회귀(단위) — frame 조립 io 소스** ✅(추가됨): `pump.queue.io`에 `undefined`(쓰면 크래시)를 심고 `FrameLoop.io`엔 valid io를 줘서, frame builder(`buildFrameAfterDrain`→`core_mutex.lockUncancelable(io)`)가 valid io로 락에 성공하는지로 "frame 조립이 `pump.queue.io`를 안 읽는다"를 **타이밍 비의존**으로 잡는다(`frame_loop.zig` — "frame builder locks via FrameLoop.io"). 버그 코드면 lock(undefined)에서 크래시(`far=0xaa…`)해 테스트가 죽는다. §3 `io` 배선 항목의 실측 크래시를 직접 봉인. **이 결함이 `mise run check`(smoke의 pump는 queue.io가 valid)를 통과한 교훈**: smoke는 실제 앱의 "재바인딩 안 한 pump" 위상을 재현 못 하므로, 위상 차이를 노린 단위 테스트로 보완한다.
 
@@ -161,3 +161,61 @@ Phase 2 누적 변경에 다각도 리뷰를 돌려 두 결함을 tip에서 수�
 - **교차-큐 데드락(수정)**: reader가 "출력 발생" 빈 신호를 출력 이벤트 큐에 `pushBlocking`하면, 메인이 그 큐를 안 드레인할 때 reader가 push에서 막혀 write_queue를 못 비우고, 동시에 메인이 write_queue `enqueueBlocking`에 막히면 서로 상대 큐의 유일한 drainer라 순환 대기가 된다. 빈 신호를 **`tryPush`(비블로킹, full이면 드롭)**로 바꿔 끊었다 — 빈 신호라 데이터 손실 없음(렌더는 코어 최신 상태를 읽고 큐의 기존 신호가 catch-up 렌더를 부른다 = 렌더 coalescing). 회귀 테스트는 §8 P2-5(이벤트 큐 full에도 reader가 메인 입력을 유한 시간 내 drain) 통합.
 - **치명적 write 에러 삼킴(수정)**: `writeInputNonBlocking ... catch 0`은 EAGAIN(0 반환, 정상)과 치명적 실패(EIO 등)를 같은 0-진전으로 합쳐, 영구 에러 시 POLLOUT 스핀(라이브락)·입력 조용한 손실이 됐다. 에러면 reader를 종료하도록 고쳤다(read 에러 경로와 동일). EAGAIN은 여전히 0으로 정상 재시도.
 - **수용된 한계(미수정, 무회귀 또는 pathological)**: (1) reader write 단계가 응답(reader-로컬)을 메인 입력보다 먼저 비워, **지속적 응답 폭주**(질의 시퀀스 연속) 시 메인 입력 지연 가능 — 응답은 지연 민감(query 답)이라 우선순위 유지, 입력 순서 비결정성은 §8.4대로 터미널 관용. (2) paste throttle 지점이 PTY 버퍼→write_queue cap(256KiB)로 이동(전량·순서 보존, 흐름 제어는 cap에서). (3) OOM 시 응답 드롭은 기존 best-effort 패턴 유지. 실측 근거 생기면 재검토([[no-defensive-code-without-consult]]).
+
+## 9. Phase 3 — 메인발 코어 mutate를 I/O 스레드로 위임 (설계, 미구현)
+
+Phase 1(읽기·코어 처리·응답)·Phase 2(PTY 쓰기)는 I/O 스레드로 옮겼지만, **메인 스레드가 아직 비-PTY 코어 mutate(IME `setPreedit`, 스크롤, 선택, 리포팅)를 `core_mutex` 아래 직접 수행**한다. 이 잔재가 재진입 데드락의 토양이다(#700). §6-5의 `CoreOwner` 안전망이 그 클래스를 panic으로 봉인했지만(1단계), 근본 해소는 **메인이 코어를 직접 안 만지는 것** — Ghostty termio 단일 소유 수렴의 완성이다(2단계). 이 절은 그 설계이며 **doc-first 제안(미구현)**으로, 특히 §9.4 latency 결정은 검토가 필요하다.
+
+### 9.1 메인의 코어 접근 분류
+
+런타임 조사 결과(`src/platform/macos/app_session.zig` 등):
+
+- **위임 대상(mutate)**: `setPreedit`(IME), `scrollViewport`/`scrollToBottom`(PageUp·휠·드래그 autoscroll·타이핑 후 바닥 스냅), `selection*`(마우스 선택), `reportMouse`/`reportFocus`(리포팅 — PTY 응답 생성), `setCellMetrics`/`setConfigPalette`/`max_scrollback`(폰트·config reload).
+- **메인 락-아래 유지(동기 읽기 — 위임 불가)**: `renderSnapshot`(매 프레임 30Hz, DrawList 복사), `imeCursorRect`(IME 후보창 위치 — **즉시 동기 반환** 필수), `alt_active`(PageUp 분기 판정), `cursor_blink`/`viewportHasBlink`/`scrollbackLen`/`viewOffset`(틱 상태). 이들은 즉시 값이 필요해 명령 큐로 못 옮긴다 → `core_mutex`는 사라지지 않고 **렌더 읽기 ↔ reader/위임 write**를 계속 보호한다("완전 무락"은 이 렌더 구조상 불가).
+
+### 9.2 CoreCommandQueue
+
+기존 `PtyWriteQueue`/`runProcessing` 패턴(`src/app/pty_reader.zig`)을 그대로 재사용한다 — 바이트 대신 tagged union 명령:
+
+```text
+Command = union(enum) {
+    set_preedit: []const u8,
+    scroll: isize,           // scrollViewport
+    scroll_to_bottom,
+    select: SelectionOp,
+    report_mouse: MouseReport,
+    ...
+};
+```
+
+메인은 명령을 enqueue(+wake self-pipe), reader가 `runProcessing` write 단계에서 drain해 `owner_dbg.lock` 아래 코어에 적용한다(출력 `core.write`와 같은 락·같은 스레드라 일관). bounded FIFO·backpressure·close 계약은 `PtyWriteQueue`와 대칭.
+
+### 9.3 무엇이 데드락을 없애나
+
+위임 후 메인은 코어를 **읽기(락-아래 snapshot)만** 하고 mutate는 명령으로 보낸다. `commitComposition` 같은 경로가 `core_mutex`를 잡고 그 안에서 또 잡을 일이 없어져, 재진입 데드락이 **구조적으로 불가능**해진다(1단계 안전망이 잡던 클래스를 애초에 만들지 않음). §3의 "메인/렌더는 락-아래 스냅샷만 읽는다"가 글자 그대로 성립한다.
+
+### 9.4 latency 트레이드오프 (결정 필요)
+
+mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 프레임(~16–33ms) 지연**될 수 있다.
+
+- IME 확정·리포팅·config는 지연 비민감 → 위임 안전.
+- **스크롤·마우스 선택은 즉시성이 중요** → 한 프레임 지연이 체감될 수 있다.
+
+옵션: **(a)** 전부 비동기 위임(단일 소유 모델로 가장 깨끗, scroll/선택 지연 감수) / **(b)** scroll·선택은 메인 동기 유지(재진입은 §6-5 안전망이 이미 차단하므로 데드락 안전)하고 IME·리포팅·config만 위임.
+
+**제안: (b)** — latency 민감 경로는 메인 동기를 유지하되 안전망으로 재진입만 막고, 비민감 mutate만 위임한다. 완전 단일 소유보다 실용적이며 1단계 안전망이 잔여 동기 경로를 지켜준다. (a)는 scroll/선택 지연을 측정해 수용 가능하면 후속으로 승격. **이 결정을 사용자와 확정한 뒤 P3-2 이후를 진행한다.**
+
+### 9.5 시퀀싱 (각 PR green, doc-first)
+
+- **P3-0 — 이 설계** ✅(이 PR).
+- **P3-1 — CoreCommandQueue 프리미티브** + 단위 테스트(미배선 — `PtyWriteQueue` 선례).
+- **P3-2 — IME `setPreedit` 위임**(비민감 첫 사례 — `commitComposition`/`imeMarked`를 명령으로). 재진입 토양 1순위 제거.
+- **P3-3 — 리포팅·config 위임**.
+- **P3-4 — (옵션 a 채택 시) scroll·선택 위임 + latency 측정**.
+- 각 단계 §6 테스트(reader-processing·hammer·close-race) 확장, `assertOwnedBySelf`가 위임 경로의 락 계약을 강제.
+
+### 9.6 리스크
+
+- **순서·원자성**: 명령 큐와 reader 출력 처리(`core.write`)가 같은 스레드 직렬화라 적용 순서는 보존된다. 메인 읽기(snapshot)는 `core_mutex`로 보호되어 torn read는 없으나, 위임 mutate가 reader에서 적용되는 사이의 중간 상태를 볼 수 있다(기존 reader write와 동일 — 논리 원자성은 명령 1건 단위).
+- **즉시 읽기 잔존**: `imeCursorRect` 등은 위임 불가라 메인 락-아래 유지를 명시한다 — Phase 3는 "메인 mutate 0"이 목표이지 "메인 코어 접근 0"이 아니다.
+- **큐 오버헤드/backpressure**: 작은 명령이라 비용 미미하나 `PtyWriteQueue`와 같은 cap·close 계약을 따른다.

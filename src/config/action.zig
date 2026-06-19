@@ -38,6 +38,10 @@ pub const Action = union(enum) {
     // dispatchAppAction이 core.selectAll로 넘긴다. clipboard 쓰기(copy)는 NSPasteboard(OS) 소유라 Action이
     // 아니다(경계: Zig는 selection, Swift는 clipboard).
     select_all,
+    // 활성 터미널의 화면 + 스크롤백을 비운다(⌘K — iTerm2/Terminal.app/Ghostty 공통). 코어 상태라 dispatchAppAction이
+    // core.clearScreen으로 넘긴다. 베이스/결정·세 경로(alt=무동작, 프롬프트=clear+^L 재그림, 그 외=커서 위만)는
+    // core.clearScreen 주석과 docs/key-input-and-shortcuts.md가 단일 출처. clipboard·PTY 쓰기 경계는 select_all과 동일.
+    clear_screen,
     // 커맨드 팝업(Cmd+Shift+P)을 토글한다. 앱 UI 상태(PaletteState)라 dispatchAppAction이 열고/닫는다.
     // 카탈로그(command_catalog.entries)에는 안 넣는다 — 팝업이 자기 토글을 목록에 보이는 재귀를 피한다.
     toggle_command_palette,
@@ -86,6 +90,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "previous_term")) return .previous_term;
     if (std.mem.eql(u8, value, "next_term")) return .next_term;
     if (std.mem.eql(u8, value, "select_all")) return .select_all;
+    if (std.mem.eql(u8, value, "clear_screen")) return .clear_screen;
     if (std.mem.eql(u8, value, "toggle_command_palette")) return .toggle_command_palette;
     if (std.mem.eql(u8, value, "toggle_find")) return .toggle_find;
     if (std.mem.eql(u8, value, "find_next")) return .find_next;
@@ -143,6 +148,7 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.next_term, parseAction("next_term").?);
     try std.testing.expectEqual(Action.previous_term, parseAction("previous_term").?);
     try std.testing.expectEqual(Action.select_all, parseAction("select_all").?);
+    try std.testing.expectEqual(Action.clear_screen, parseAction("clear_screen").?);
     try std.testing.expectEqual(Action.toggle_command_palette, parseAction("toggle_command_palette").?);
     try std.testing.expectEqual(Action.toggle_find, parseAction("toggle_find").?);
     try std.testing.expectEqual(Action.find_next, parseAction("find_next").?);

@@ -261,10 +261,37 @@ Ghostty 기본 keybind와 동작이 같다.
 `KeyChord.eql`이 modifier를 정확히 비교하므로 `Cmd+Backspace`만 매칭한다(`Cmd+Shift+Backspace`는
 빌트인이 아니라 `.ignored`). 사용자가 `keybind`로 같은 조합을 다시 묶으면 그게 우선한다.
 
+## 화면 비우기 (⌘K, clear_screen)
+
+`⌘K`는 활성 터미널의 화면과 스크롤백을 비운다(빌트인 app 바인딩 → `Action.clear_screen` →
+`TerminalCore.clearScreen`). iTerm2·Terminal.app·Ghostty가 공통으로 이 키에 화면 비우기를 두는 Mac 관례다.
+셸 줄-삭제는 `Ctrl+K`(C0)라 안 겹친다.
+
+**베이스/결정**: Ghostty `clear_screen`(키바인딩을 수렴시키는 1차 레퍼런스)을 베이스로 하고, 동작 비교로만
+참고했다(코드 표현은 옮기지 않았다 — clean-room). 단일 표준이 없는 동작이라 레퍼런스 간 차이에서 택한 바를
+명시한다: iTerm2 `Clear Buffer`는 셸 통합 없이 버퍼만 지우고, Terminal.app `Clear to Start`는 스크롤백만
+지운다. Maru는 셸 readline 모델과 어긋나지 않게 Ghostty식 3분기를 택했다.
+
+| 상황 | 판정 근거 | 동작 | form-feed(^L) |
+|---|---|---|---|
+| alt 화면(vim/less/htop) | `alt_active` | 무동작 — 그 화면은 앱이 소유하므로 에뮬레이터가 지우면 앱 커서 모델과 어긋난다 | 안 보냄 |
+| 셸 프롬프트 | OSC 133 분류 `prompt`/`input`(`semantic_state`) | 화면+스크롤백 비우고 커서 홈 | **보냄** — 셸 `clear-screen` 위젯이 프롬프트를 맨 위에 다시 그린다(셸이 커서를 다시 잡아 desync 없음) |
+| 그 외(통합 없음/명령 실행 중) | 위 둘 다 아님 | 스크롤백 + 커서 위 행만 비우고 현재 줄·커서 보존 | 안 보냄 — 커서를 안 옮겨 비통합 셸·실행 중 프로그램과 어긋나지 않게 한다 |
+
+경계: `TerminalCore.clearScreen`은 코어 상태(셀·스크롤백·커서)만 바꾸고 PTY로는 쓰지 않는다(L1 경계 —
+docs/io-render-threading.md). 대신 "form-feed를 보낼지"를 bool로 돌려주고, `app_session.dispatchAppAction`이
+코어 락 **밖**에서 `0x0C`를 PTY로 쓴다(블로킹 PTY 쓰기를 락 밖으로 — PR1/PR3 패턴). 프롬프트 분류는 셸
+통합(OSC 133)이 있을 때만 생기고, 그때만 셸 `^L`이 정상 동작하므로 프롬프트 분기와 form-feed가 일관된다.
+
+**config**: 빌트인이라 사용자 config로 끄거나(`keybind = Cmd+K = unbind`) 다른 키로 옮길 수 있고
+(`keybind = Cmd+L = clear_screen`), `clear_screen`은 `parseAction`이 인식하므로 임의 chord에 묶을 수 있다.
+
 ## 검증 계획
 
 - key chord parser test: modifier 중복, 알 수 없는 alias, key 누락, key 중복, F-key 범위 오류를 실패로 보고한다.
 - config/keybinding resolver test: 같은 key 조합이 app action과 terminal override에 동시에 있으면 실패한다.
+- keybinding resolver test: `Cmd+K`가 빌트인 `clear_screen` app action으로 resolve된다(사용자 config 없이).
+- core clearScreen test: 프롬프트(화면+스크롤백 비움·커서 홈·form-feed 요청)·alt 화면(무동작)·비프롬프트(커서 위만 비움) 세 경로.
 - config validation test: terminal 관용 조합을 app/global shortcut으로 등록하면 경고한다.
 - resolver unit test: `Cmd+B -> send_control("b")`는 `0x02` terminal input으로 변환된다.
 - resolver unit test: app action과 terminal input macro가 같은 key chord를 쓰면 오류다.

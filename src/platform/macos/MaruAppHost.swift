@@ -1558,9 +1558,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         file.addItem(catalogMenuItem("close_term", catalog))
         attachSubmenu(mainMenu, "File", file)
 
-        // Edit — Select All은 Zig 액션(카탈로그), Copy/Paste는 네이티브(NSPasteboard 소유).
+        // Edit — Select All/Clear은 Zig 액션(카탈로그), Copy/Paste는 네이티브(NSPasteboard 소유).
         let edit = NSMenu()
         edit.addItem(catalogMenuItem("select_all", catalog))
+        // Clear(⌘K) — 화면+스크롤백 비우기. 카탈로그 항목이라 catalogMenuItem이 ⌘K chord를 그대로 표시·dispatch한다.
+        edit.addItem(catalogMenuItem("clear_screen", catalog))
         edit.addItem(.separator())
         edit.addItem(nativeMenuItem("Copy", #selector(menuCopy(_:)), key: "c", target: self))
         edit.addItem(nativeMenuItem("Paste", #selector(menuPaste(_:)), key: "v", target: self))

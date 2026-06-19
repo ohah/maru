@@ -127,13 +127,18 @@ pub const Config = struct {
     /// SGR 5(blink) 글자를 실제로 깜빡일지(true)·정적으로 둘지(false). **기본 false** — 깜빡이는 콘텐츠는 접근성
     /// (WCAG 발작 위험) 우려라 다수 터미널이 기본으로 끈다. loader가 `text.blink` 키로 파싱.
     blink_text: bool = false,
-    /// 터미널 셀과 컨테이너(사이드바·탭 바 안쪽) 가장자리 사이의 빈 여백(논리 pt, DPI로 스케일). x=좌우 각각,
-    /// y=상하 각각. loader가 `window.padding-x`/`window.padding-y` 키로 파싱. 0이면 inset 없음(셀이 가장자리에 붙음).
+    /// 터미널 셀과 컨테이너(사이드바·탭 바 안쪽) 가장자리 사이의 빈 여백(논리 pt, DPI로 스케일). 4방 개별
+    /// (top/right/bottom/left); x/y는 loader에서 alias(`window.padding-x`=left+right 동시, `window.padding-y`=top+bottom
+    /// 동시)로 두 필드에 같은 값을 대입한다. loader가 `window.padding-{top,right,bottom,left,x,y}` 키로 파싱. 0이면
+    /// inset 없음(셀이 가장자리에 붙음).
     /// 베이스/결정: 콘텐츠 inset 자체는 흔한 관행이나 기본값은 터미널마다 달라 단일 표준이 없다(0~수 pt). maru는
-    /// **8/4**를 택했다 — 가로를 세로보다 크게 둬(좌우 숨통) 모노스페이스 텍스트가 가장자리에 붙어 보이지 않게 하되,
-    /// 세로는 작게 둬 가시 행 손실을 줄였다. 사용자가 config로 자유 조절. (docs/configuration.md·tabs-splits-layout.md)
-    window_padding_x: u32 = 8,
-    window_padding_y: u32 = 4,
+    /// 좌우 **8**·상하 **4**를 택했다 — 가로를 세로보다 크게 둬(좌우 숨통) 모노스페이스 텍스트가 가장자리에 붙어
+    /// 보이지 않게 하되, 세로는 작게 둬 가시 행 손실을 줄였다. 사용자가 config로 자유 조절(4방 개별 또는 x/y alias).
+    /// (docs/configuration.md·tabs-splits-layout.md)
+    window_padding_top: u32 = 4,
+    window_padding_right: u32 = 8,
+    window_padding_bottom: u32 = 4,
+    window_padding_left: u32 = 8,
     /// 셸에 줄 TERM 값. 셸 설정/통합이 $TERM에 따라 키바인딩(예: Ctrl+A 줄-시작)을 다르게 잡는
     /// 경우, 사용자가 자기 환경이 기대하는 값(예: xterm-ghostty)으로 바꿀 수 있다. 빈 값은 무시.
     term: []const u8 = "xterm-256color",

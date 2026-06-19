@@ -148,29 +148,25 @@ fn checkDirectory(
     }
 }
 
+// .zig 소스를 sentinel 종료 버퍼([:0]u8 — std.zig.Tokenizer가 요구)로 읽는다. 호출자가 free한다.
+// 읽기 상한 1MB: core.zig가 256KB를 넘어 StreamTooLong이 났던 이력이라 넉넉히 둔다(정상적 코드 성장).
+fn readZigFileZ(allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {
+    const text = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024)) catch |err| {
+        std.debug.print("boundary scan could not read {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
+    defer allocator.free(text);
+    return allocator.dupeZ(u8, text);
+}
+
 fn checkFile(
     allocator: std.mem.Allocator,
     rule: Rule,
     path: []const u8,
     violations: *usize,
 ) !void {
-    const text = std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        path,
-        allocator,
-        // 소스 한 파일당 읽기 상한. import 스캔용이라 넉넉히 둔다 — core.zig가 256KB를 넘어서며
-        // (정상적 코드 성장) StreamTooLong이 났다. 1MB면 당분간 모든 파일을 커버한다.
-        .limited(1024 * 1024),
-    ) catch |err| {
-        std.debug.print("boundary check could not read {s}: {s}\n", .{ path, @errorName(err) });
-        return err;
-    };
-    defer allocator.free(text);
-
-    // std.zig.Tokenizer는 sentinel 종료 버퍼([:0]u8)를 요구한다.
-    const text_z = try allocator.dupeZ(u8, text);
+    const text_z = try readZigFileZ(allocator, path);
     defer allocator.free(text_z);
-
     scanImports(text_z, rule, path, violations);
 }
 
@@ -415,15 +411,8 @@ fn checkDirectoryForOsTypes(allocator: std.mem.Allocator, nl: NeutralLayer, viol
 }
 
 fn checkFileForOsTypes(allocator: std.mem.Allocator, layer: []const u8, path: []const u8, violations: *usize) !void {
-    const text = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024)) catch |err| {
-        std.debug.print("neutrality check could not read {s}: {s}\n", .{ path, @errorName(err) });
-        return err;
-    };
-    defer allocator.free(text);
-
-    const text_z = try allocator.dupeZ(u8, text);
+    const text_z = try readZigFileZ(allocator, path);
     defer allocator.free(text_z);
-
     scanForbiddenIdentifiers(text_z, layer, path, violations, true);
 }
 
@@ -542,15 +531,8 @@ fn scanTreeForCoreMutexCalls(allocator: std.mem.Allocator, dir_path: []const u8,
         const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.path });
         defer allocator.free(path);
 
-        const text = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1024 * 1024)) catch |err| {
-            std.debug.print("core_mutex check could not read {s}: {s}\n", .{ path, @errorName(err) });
-            return err;
-        };
-        defer allocator.free(text);
-
-        const text_z = try allocator.dupeZ(u8, text);
+        const text_z = try readZigFileZ(allocator, path);
         defer allocator.free(text_z);
-
         scanCoreMutexDirectCalls(text_z, path, violations, true);
     }
 }

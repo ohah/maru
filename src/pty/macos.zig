@@ -693,6 +693,8 @@ const EnvStorage = struct {
         while (environ[index]) |entry| : (index += 1) {
             const slice = std.mem.span(entry);
             if (std.mem.startsWith(u8, slice, "TERM=") or std.mem.startsWith(u8, slice, "COLORTERM=")) continue;
+            // 부모(런처/상위 터미널)가 남긴 TERM_PROGRAM(+VERSION)을 떨군다 — 아래에서 ghostty로 덮어쓴다(알림 식별용).
+            if (std.mem.startsWith(u8, slice, "TERM_PROGRAM=") or std.mem.startsWith(u8, slice, "TERM_PROGRAM_VERSION=")) continue;
             // 런처(빌드 도구·부모 셸·CI)가 남긴 색-강제 override를 떨군다. supports-color(codex 등)는
             // CLICOLOR_FORCE!=0 / FORCE_COLOR을 env_force_color로 먼저 평가해 색 레벨을 강제하는데, 흔히 1(basic
             // 16색)이라 COLORTERM=truecolor를 무시하고 truecolor를 끈다(실측: `zig build`로 띄운 maru에서 상속된
@@ -722,6 +724,18 @@ const EnvStorage = struct {
         const colorterm_owned = try allocator.dupeZ(u8, "COLORTERM=truecolor");
         entries.append(allocator, colorterm_owned) catch |err| {
             allocator.free(colorterm_owned);
+            return err;
+        };
+        // Claude Code/Codex 등 TUI는 데스크톱 알림을 보낼 터미널을 TERM_PROGRAM 화이트리스트
+        // (iTerm.app/ghostty/kitty/WezTerm)로 식별한다 — maru는 그 명단에 없어 기본(auto)에선 OSC 9 알림을
+        // 못 받는다(사용자가 settings.json·config.toml 수동 설정 필요; preferredNotifChannel은 env override가
+        // 불가해 우회 못 함). maru를 ghostty로 식별시켜 무설정 자동 알림을 받는다. ghostty를 고른 건 maru가 kitty
+        // graphics·OSC 9/133/777을 ghostty와 같은 셋으로 지원해 식별 후 기대되는 기능과 어긋나지 않기 때문이다
+        // (iTerm.app은 inline-image OSC 1337을 기대해 부적합). maru는 OSC 9를 직접 파싱해(core.zig) 네이티브
+        // 알림으로 띄운다. 베이스/결정: 알림 호환을 위한 식별값일 뿐 — 사용자가 config.term으로 TERM은 바꿔도 이 값은 고정.
+        const term_program_owned = try allocator.dupeZ(u8, "TERM_PROGRAM=ghostty");
+        entries.append(allocator, term_program_owned) catch |err| {
+            allocator.free(term_program_owned);
             return err;
         };
         if (zdotdir) |zd| {
@@ -1039,6 +1053,35 @@ test "EnvStorage empty env inherits the parent but forces TERM/COLORTERM to Maru
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "EnvStorage forces TERM_PROGRAM to ghostty (알림 식별 — 부모 값 덮어씀, VERSION strip)" {
+    // Claude Code/Codex가 TERM_PROGRAM 화이트리스트로 알림 터미널을 식별하므로 maru를 ghostty로 알린다.
+    // 부모(상위 터미널/런처)가 남긴 TERM_PROGRAM·VERSION은 제거되고 ghostty 하나만 남아야 한다(중복 키는 첫 항목이 이김).
+    _ = setenv("TERM_PROGRAM", "Apple_Terminal", 1);
+    _ = setenv("TERM_PROGRAM_VERSION", "447", 1);
+    defer _ = unsetenv("TERM_PROGRAM");
+    defer _ = unsetenv("TERM_PROGRAM_VERSION");
+
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-256color", null);
+    defer storage.deinit();
+
+    var tp_count: usize = 0;
+    var tpv_count: usize = 0;
+    var is_ghostty = false;
+    const envp = storage.envpPtr();
+    var i: usize = 0;
+    while (envp[i]) |entry| : (i += 1) {
+        const slice = std.mem.span(entry);
+        if (std.mem.startsWith(u8, slice, "TERM_PROGRAM=")) {
+            tp_count += 1;
+            is_ghostty = std.mem.eql(u8, slice, "TERM_PROGRAM=ghostty");
+        }
+        if (std.mem.startsWith(u8, slice, "TERM_PROGRAM_VERSION=")) tpv_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), tp_count); // 부모 Apple_Terminal 제거 + ghostty 하나만
+    try std.testing.expect(is_ghostty);
+    try std.testing.expectEqual(@as(usize, 0), tpv_count); // 부모 VERSION은 strip하고 주입 안 함
+}
 
 test "EnvStorage strips launcher color-force overrides (CLICOLOR_FORCE/FORCE_COLOR)" {
     // 런처(빌드 도구·CI·부모 셸)가 남긴 색-강제 override는 supports-color류(codex 등)가 env_force_color로

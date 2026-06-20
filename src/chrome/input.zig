@@ -2,8 +2,8 @@
 //! 컴포넌트 `handle`이 소비한다. 키보드 + 모디파이어. 마우스(pointer)는 hit-test 컴포넌트(divider/tabbar, C2)
 //! 이주 때 추가한다. 단일 출처: docs/chrome-strategy.md §5.4.
 
-/// 의미적 키(레이아웃 독립). 평문 입력은 `.char` + codepoint.
-pub const Key = enum { enter, escape, up, down, backspace, char, other };
+/// 의미적 키(레이아웃 독립). 평문 입력은 `.char` + codepoint. left/right는 가로 포커스 이동(confirm 버튼 선택 등).
+pub const Key = enum { enter, escape, up, down, left, right, backspace, char, other };
 
 /// 모디파이어 상태. find의 Shift+Enter(이전 매치)·⌘/⌃/⌥+글자(닫기) 같은 조합 판정에 쓴다. platform 어댑터가
 /// OS 모디파이어를 이걸로 매핑한다(예: app_session.chromeInputFromKeyEvent).

@@ -4369,9 +4369,24 @@ pub const AppSession = struct {
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (!self.surface_initialized) return;
-        // 닫기 확인 모달이 열려 있으면 모든 마우스 이벤트를 삼킨다 — 키보드 전용(Enter/Esc·Y/N) 결정 모달이라, 뒤
-        // 터미널/사이드바/탭 ✕로 클릭이 새면 또 다른 닫기를 띄우거나 엉뚱한 조작이 된다(파괴적 게이트라 차단형).
-        if (self.chrome_host.confirm.open) return;
+        // 닫기 확인 모달이 열려 있으면 마우스는 **버튼 클릭만** 처리하고 나머지는 삼킨다 — 파괴적 게이트라 뒤
+        // 터미널/사이드바/탭 ✕로 클릭이 새면 또 다른 닫기를 띄우거나 엉뚱한 조작이 된다. down(kind 1)이면
+        // confirm.buttonAtPoint로 hit-test(view와 같은 buttonGeom 단일 레이아웃): 확인 버튼=confirmed, 취소 버튼·
+        // 패널 밖=cancelled(바깥 클릭 dismiss 관례), 패널 안 비-버튼=무동작. 키보드(Enter/Esc·Y/N) 경로와 동일하게
+        // dismiss 후 dispatchChromeAction으로 같은 후처리(executeClose/버림)한다. move/drag/up·비-버튼은 삼킨다.
+        if (self.chrome_host.confirm.open) {
+            if (kind == 1) {
+                const tk = self.buildChromeTokens();
+                if (chrome.components.confirm.buttonAtPoint(&self.chrome_host.confirm, self.buildChromeProps(), &tk, x_px, y_px)) |act| {
+                    self.chrome_host.confirm.dismiss();
+                    self.dispatchChromeAction(switch (act) {
+                        .confirmed => .confirm_accept,
+                        .cancelled => .confirm_cancel,
+                    });
+                }
+            }
+            return;
+        }
         // 인라인 rename 중 마우스 down(어디든)이면 편집을 확정한다(포커스 상실 = 확정 — docs/tabs-splits-layout.md).
         // 그 뒤 클릭은 정상 처리된다(탭 전환·pane 포커스 등). drag/up(2/3)은 down이 선행하므로 여기서 안 걸린다.
         if (kind == 1 and self.rename != null) self.commitRename();

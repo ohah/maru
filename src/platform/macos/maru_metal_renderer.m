@@ -287,8 +287,15 @@ static void maru_fill_cell_quad(
     float px_right = px_left + cw * span;
     float px_top = py_top;
     float px_bottom = py_top + cell_h;
-    // 커서 모양(DECSCUSR): reserved 2=underline(하단 ~15%), 3=bar(좌측 ~15%, 최소 2px). block(0)은 전체 cell.
-    // 4=상단선/overline(SGR 53), 5=우측선(active pane 테두리용 — 2/3의 반대 변), 6=strikethrough(세로 중앙 띠). 모두 cell의 한 변/중앙 ~2px 띠로 그린다.
+    // 커서·테두리·장식선 부분 사각형(reserved). 셀의 한 변 또는 중앙에 가는 띠를 그린다.
+    //   강조선(셀 높이/폭 ~15%): 2=underline 커서·pane/divider 하단선, 3=bar 커서·세로 divider 좌측,
+    //   4=pane/divider 상단선, 5=pane 우측선, 8=OSC 133 거터 바(셀 왼쪽 바깥). block(0)은 전체 cell.
+    //   텍스트 장식선(SGR)은 글자에 붙는 가는 선이라 강조선(15%)의 절반인 ~7.5%로 가늘게 그린다 —
+    //   9=밑줄(SGR 4)·링크 hover 하단, 10=윗줄(SGR 53) 상단, 6=취소선(SGR 9) 중앙, 7=2중밑줄(SGR 21) 둘째 선.
+    //   베이스: Ghostty는 폰트 메트릭 underline_thickness(=max(1,ceil(face.underlineThickness)))를 쓰지만,
+    //   maru는 폰트 메트릭을 .m에 전달하지 않으므로 cell_h 비례 근사를 쓰되 텍스트 장식선은 그 가는 밑줄에
+    //   맞춰 절반으로 둔다. 커서·창 테두리·divider는 강조 요소라 15%를 유지한다(텍스트만 가늘게).
+    const float text_line = fmaxf(1.0f, cell_h * 0.075f); // 텍스트 장식선(밑줄·윗줄·취소선·2중선) 공통 두께
     if (cell.reserved == 2) {
         const float thickness = fmaxf(2.0f, cell_h * 0.15f);
         px_top = px_bottom - thickness;
@@ -301,18 +308,22 @@ static void maru_fill_cell_quad(
     } else if (cell.reserved == 5) {
         const float thickness = fmaxf(2.0f, cw * 0.15f);
         px_left = px_right - thickness;
+    } else if (cell.reserved == 9) {
+        // 텍스트 밑줄(SGR 4)·링크 hover: 셀 하단에 가는 띠(커서 underline=2의 절반 두께).
+        px_top = px_bottom - text_line;
+    } else if (cell.reserved == 10) {
+        // 텍스트 윗줄(SGR 53): 셀 상단에 가는 띠(테두리 상단=4와 분리된 가는 선).
+        px_bottom = px_top + text_line;
     } else if (cell.reserved == 6) {
-        // strikethrough(SGR 9): 셀 세로 중앙 ~15% 띠(underline은 하단, 이건 중앙).
-        const float thickness = fmaxf(2.0f, cell_h * 0.15f);
+        // strikethrough(SGR 9): 셀 세로 중앙 가는 띠(밑줄은 하단, 이건 중앙).
         const float center = py_top + cell_h * 0.5f;
-        px_top = center - thickness * 0.5f;
-        px_bottom = center + thickness * 0.5f;
+        px_top = center - text_line * 0.5f;
+        px_bottom = center + text_line * 0.5f;
     } else if (cell.reserved == 7) {
-        // double underline(SGR 21) 둘째 선: 하단 선(reserved 2) 위로 gap만큼 띄운 얇은 띠. 둘이 합쳐 2중선.
-        const float t2 = fmaxf(2.0f, cell_h * 0.15f); // 하단 선 두께(reserved 2와 동일)
-        const float gap = fmaxf(2.0f, cell_h * 0.10f); // 두 선 사이 간격
-        px_bottom = px_bottom - t2 - gap; // 하단 선 + gap 만큼 위로
-        px_top = px_bottom - fmaxf(1.5f, cell_h * 0.10f); // 둘째 선(약간 얇게)
+        // double underline(SGR 21) 둘째 선: 하단 선(reserved 9) 위로 gap만큼 띄운 가는 띠. 둘이 합쳐 2중선.
+        const float gap = fmaxf(1.0f, cell_h * 0.06f); // 두 선 사이 간격
+        px_bottom = px_bottom - text_line - gap; // 하단 선 + gap 만큼 위로
+        px_top = px_bottom - text_line;          // 둘째 선(첫째선과 같은 두께)
     } else if (cell.reserved == 8) {
         // OSC 133 거터 바: 셀 왼쪽 '바깥'(col 0 글자 시작 전 여백)에 세로 띠를 그린다 — bar(3)는 셀
         // 안 왼쪽이지만 이건 origin 왼쪽으로 빼 col 0 글자와 안 겹친다. 글자에 딱 붙지 않게 gap을 둬

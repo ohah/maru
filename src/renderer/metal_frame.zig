@@ -343,7 +343,7 @@ pub fn buildNativeCellsSplit(
         });
     }
 
-    // 2.5) Cmd+hover 중인 URL 범위에 전경색 밑줄을 긋는다(underline kind=2 부분 사각형 재사용).
+    // 2.5) Cmd+hover 중인 URL 범위에 전경색 밑줄을 긋는다(텍스트 밑줄과 같은 가는 kind=9 부분 사각형 재사용).
     if (colors.hover_link) |span| {
         const underline_color = 0xFF00_0000 | packRgb(colors.default_fg);
         // 행 범위도 grid 안으로 clamp(예약 용량은 cols-기준이므로 row가 넘쳐도 안전하지만, 좌표를
@@ -362,7 +362,7 @@ pub fn buildNativeCellsSplit(
                     .row = hover_row,
                     .col = hover_col,
                     .width = 1,
-                    .reserved = 2, // underline 부분 사각형
+                    .reserved = 9, // 텍스트 밑줄과 같은 가는 부분 사각형(하단)
                     .codepoint = ' ',
                     .slot_id = 0,
                     .atlas_x_px = 0,
@@ -381,10 +381,12 @@ pub fn buildNativeCellsSplit(
     }
 
     // 2.6) 텍스트 장식선(SGR 4 밑줄/9 취소선/53 윗줄): draw_list의 line overlay마다 셀의 한 띠를
-    //      전경색으로 긋는다 — kind로 위치(하단 reserved=2/중앙 6/상단 4 — hover·커서·테두리와 같은
-    //      부분-사각형 재사용, 셰이더 변경 없음). 커서와 무관하게 그려야 하므로(colors.cursor null인 smoke
-    //      포함) 별도 pass다. wide 글자는 base 칸에만 — 셰이더가 width로 두 칸 폭의 선을 그린다. dim(SGR 2)
-    //      이면 effectiveLineColor가 전경처럼 배경 쪽으로 흐린다(packForeground와 같은 규칙).
+    //      전경색으로 긋는다 — kind로 위치/두께(하단 reserved=9/중앙 6/상단 10/2중선 둘째 7). 텍스트
+    //      장식선은 글자에 붙는 가는 선이라 커서·테두리(reserved 2/4, 셀 높이 ~15%)와 별도 reserved를
+    //      써서 셰이더가 절반 두께(~7.5%)로 가늘게 긋는다 — Ghostty의 가는 밑줄에 맞춘다. 커서와 무관하게
+    //      그려야 하므로(colors.cursor null인 smoke 포함) 별도 pass다. wide 글자는 base 칸에만 — 셰이더가
+    //      width로 두 칸 폭의 선을 그린다. dim(SGR 2)이면 effectiveLineColor가 전경처럼 배경 쪽으로
+    //      흐린다(packForeground와 같은 규칙).
     for (frame.overlays) |overlay| switch (overlay) {
         .line => |l| {
             if (l.row >= frame.size.rows or l.col >= frame.size.cols) continue;
@@ -393,10 +395,10 @@ pub fn buildNativeCellsSplit(
                 .col = l.col,
                 .width = l.width,
                 .reserved = switch (l.kind) {
-                    .underline => 2, // 하단
-                    .double_underline => 7, // 하단 2중선(SGR 21)
+                    .underline => 9, // 하단(가는 텍스트 밑줄 — 커서·테두리 reserved 2와 분리)
+                    .double_underline => 7, // 하단 2중선 둘째 선(SGR 21)
                     .strikethrough => 6, // 중앙
-                    .overline => 4, // 상단(active pane 테두리와 같은 모양)
+                    .overline => 10, // 상단(가는 텍스트 윗줄 — 테두리 reserved 4와 분리)
                 },
                 .codepoint = ' ',
                 .slot_id = 0,
@@ -1444,7 +1446,7 @@ test "cursor overlay projects at the overlay's own row and col" {
 test "an underline overlay and a cursor overlay both project (underline rendered, not skipped)" {
     const allocator = std.testing.allocator;
     // SGR 4 밑줄은 이제 투영된다(pass 2.6). underline + cursor가 함께 오면 두 cell: col0에 밑줄
-    // (reserved=2, 전경색), col1에 커서. 밑줄 pass(2.6)가 커서 pass(3)보다 먼저라 cells[0]이 밑줄.
+    // (reserved=9, 전경색), col1에 커서. 밑줄 pass(2.6)가 커서 pass(3)보다 먼저라 cells[0]이 밑줄.
     var overlays = [_]renderer.DrawOverlay{
         .{ .line = .{ .row = 0, .col = 0, .width = 1, .color = .default, .kind = .underline } },
         .{ .cursor = .{ .row = 0, .col = 1, .visible = true } },
@@ -1464,14 +1466,14 @@ test "an underline overlay and a cursor overlay both project (underline rendered
     defer allocator.free(cells);
     try std.testing.expectEqual(@as(usize, 2), cells.len); // 밑줄(col0) + 커서(col1)
     try std.testing.expectEqual(@as(u16, 0), cells[0].col);
-    try std.testing.expectEqual(@as(u16, 2), cells[0].reserved); // underline 부분 사각형
+    try std.testing.expectEqual(@as(u16, 9), cells[0].reserved); // 텍스트 밑줄 부분 사각형
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), cells[0].background); // 전경색(흰색)
     try std.testing.expectEqual(@as(u16, 1), cells[1].col); // 커서
 }
 
 test "a strikethrough overlay projects a reserved=6 center-line cell, independent of underline" {
     const allocator = std.testing.allocator;
-    // SGR 9 취소선은 reserved=6(세로 중앙 가로선)으로 투영된다 — underline(reserved=2, 하단)과 독립
+    // SGR 9 취소선은 reserved=6(세로 중앙 가로선)으로 투영된다 — underline(reserved=9, 하단)과 독립
     // 비트라, 같은 셀이 둘 다 오면 두 cell이 나온다(2.6 밑줄 pass가 2.7 취소선 pass보다 먼저).
     var overlays = [_]renderer.DrawOverlay{
         .{ .line = .{ .row = 0, .col = 0, .width = 1, .color = .default, .kind = .underline } },
@@ -1490,16 +1492,16 @@ test "a strikethrough overlay projects a reserved=6 center-line cell, independen
         .cursor = null,
     });
     defer allocator.free(cells);
-    try std.testing.expectEqual(@as(usize, 2), cells.len); // underline(reserved=2) + strikethrough(reserved=6)
-    try std.testing.expectEqual(@as(u16, 2), cells[0].reserved); // 2.6 underline pass 먼저
+    try std.testing.expectEqual(@as(usize, 2), cells.len); // 텍스트 밑줄(reserved=9) + strikethrough(reserved=6)
+    try std.testing.expectEqual(@as(u16, 9), cells[0].reserved); // 2.6 underline pass 먼저
     try std.testing.expectEqual(@as(u16, 6), cells[1].reserved); // 2.7 strikethrough pass
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), cells[1].background); // 전경색(흰색)
 }
 
 test "an overline overlay projects a reserved=4 top-line cell" {
     const allocator = std.testing.allocator;
-    // SGR 53 overline은 reserved=4(셀 상단선 — active pane 상단 테두리와 같은 모양)로 투영된다.
-    // strikethrough(reserved=6, 중앙)·underline(reserved=2, 하단)과 독립이라 같은 모양을 안 다툰다.
+    // SGR 53 overline은 reserved=10(셀 상단 가는 선 — 테두리 reserved=4와 분리된 텍스트 윗줄)으로 투영된다.
+    // strikethrough(reserved=6, 중앙)·밑줄(reserved=9, 하단)과 독립이라 같은 모양을 안 다툰다.
     var overlays = [_]renderer.DrawOverlay{
         .{ .line = .{ .row = 0, .col = 0, .width = 1, .color = .default, .kind = .overline } },
     };
@@ -1517,7 +1519,7 @@ test "an overline overlay projects a reserved=4 top-line cell" {
     });
     defer allocator.free(cells);
     try std.testing.expectEqual(@as(usize, 1), cells.len);
-    try std.testing.expectEqual(@as(u16, 4), cells[0].reserved); // 상단선(overline)
+    try std.testing.expectEqual(@as(u16, 10), cells[0].reserved); // 가는 상단선(overline)
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), cells[0].background); // 전경색(흰색)
 }
 
@@ -1544,7 +1546,7 @@ test "a dim line overlay interpolates its color toward the background (SGR 2 con
     });
     defer allocator.free(cells);
     try std.testing.expectEqual(@as(usize, 1), cells.len);
-    try std.testing.expectEqual(@as(u16, 2), cells[0].reserved); // underline(하단)
+    try std.testing.expectEqual(@as(u16, 9), cells[0].reserved); // underline(하단)
     try std.testing.expectEqual(@as(u32, 0xFF878787), cells[0].background); // dim 보간된 전경
 }
 
@@ -1779,7 +1781,7 @@ test "hover link span projects underline-kind cells across its rows" {
     // 행0 col2-3 + 행1 col0-1 = 4개 underline cell, 전경색으로.
     try std.testing.expectEqual(@as(usize, 4), cells.len);
     for (cells) |cell| {
-        try std.testing.expectEqual(@as(u16, 2), cell.reserved);
+        try std.testing.expectEqual(@as(u16, 9), cell.reserved);
         try std.testing.expectEqual(@as(u32, 0xFF010203), cell.background);
     }
     try std.testing.expectEqual(@as(u16, 2), cells[0].col);
@@ -1819,7 +1821,7 @@ test "cursor cells are a suffix and setCursorVisible toggles exposure without re
     try std.testing.expectEqual(built.cells.len, buffer.view().cell_count);
 }
 
-test "SGR underline overlays project a foreground-colored underline cell (kind 2), cursor-independent" {
+test "SGR underline overlays project a foreground-colored underline cell (kind 9), cursor-independent" {
     const allocator = std.testing.allocator;
     var overlays = [_]renderer.DrawOverlay{
         .{ .line = .{ .row = 1, .col = 2, .width = 1, .color = .default, .kind = .underline } },
@@ -1840,7 +1842,7 @@ test "SGR underline overlays project a foreground-colored underline cell (kind 2
     try std.testing.expectEqual(@as(usize, 1), cells.len);
     try std.testing.expectEqual(@as(u16, 1), cells[0].row);
     try std.testing.expectEqual(@as(u16, 2), cells[0].col);
-    try std.testing.expectEqual(@as(u16, 2), cells[0].reserved); // underline 부분 사각형
+    try std.testing.expectEqual(@as(u16, 9), cells[0].reserved); // 텍스트 밑줄 부분 사각형
     try std.testing.expectEqual(@as(u32, 0xFFAABBCC), cells[0].background); // 전경색
     try std.testing.expectEqual(@as(f32, -1.0), cells[0].u0); // sentinel UV(atlas 미샘플)
 }

@@ -709,8 +709,10 @@ bool maru_metal_renderer_draw(
             //   ⚙(view options)·+(새 워크스페이스): 1.7× 확대(에이전트 심볼과 같은 slot-stretch) + 줄0이 창 top에
             //   붙어 위로 쏠리므로 신호등 수직 중앙에 맞춰 아래로 내린다(py_nudge=ch×0.45 — 확대로 위가 잘리는 것도
             //   함께 방지). 🔍(검색)은 검색 텍스트와 같은 크기라 확대하지 않는다(1.0, 텍스트보다 커 보이던 것 정정).
+            // 헤더 아이콘은 줄0(row==0)의 ⚙/+만 — 검색 줄(row≥1)에 사용자가 친 '+'(예: 브랜치 `feat/a+b` 검색)는
+            // 같은 헤더 frame(origin_x==0)이라 row 조건이 없으면 1.7×로 확대돼 깨져 보인다. row 0으로 한정한다.
             const bool is_header = (terminal_origin_x_px > 0u && tc.origin_x == 0u);
-            const bool is_corner_icon = is_header && (tc.codepoint == 0x2699u || tc.codepoint == (uint32_t)'+');
+            const bool is_corner_icon = is_header && tc.row == 0u && (tc.codepoint == 0x2699u || tc.codepoint == (uint32_t)'+');
             const float hscale = is_corner_icon ? 1.7f : 1.0f;
             const float py_nudge = is_corner_icon ? ch * 0.45f : 0.0f;
             maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x, cw, (float)tc.origin_y + (float)tc.row * ch + py_nudge, ch, drawable_w, drawable_h, hscale);
@@ -877,12 +879,17 @@ bool maru_metal_renderer_draw(
 
     // vertex_buffer가 nil이면(cell 없음) clear만 한 빈 frame이다. 어떤 경우든 encoder는 반드시
     // endEncoding하고 present/commit한다.
-    // C4b: 레이어 순서 = [터미널 + 사이드바 배경 strip] → quad(둥근 밴드) → [사이드바 cells(제목)].
-    // 사이드바 배경 strip은 셀 패스의 불투명 셀(squad)이라, rich 밴드 quad를 셀 패스 '전체' 앞에 두면
-    // 배경 strip이 그 위에 덮어 밴드가 안 보인다(z-order). 그래서 셀 패스를 '사이드바 cells 시작'에서 둘로
-    // 쪼개, 밴드 quad를 배경 strip '뒤'·제목 glyph '앞'에 끼운다. (모달/divider quad의 위 레이어 분리는 후속.)
+    // C4b: 레이어 순서 = [사이드바 배경 strip] → [터미널 cells(헤더 glyph 포함)] → quad(둥근 밴드) → [사이드바
+    // cells(제목)]. 배경 strip(불투명 bg quad)을 '맨 앞'에 그려야 (a)사이드바 헤더 glyph(origin_x=0, 터미널 셀 패스)가
+    // 그 위에 보이고 (b)rich 밴드 quad가 strip 위에 보인다(strip을 셀 패스 전체 뒤에 두면 밴드를 덮어 안 보였다).
+    // 그래서 셀 패스를 [배경 strip(1a)] · [터미널(1b)] · [사이드바 제목(4)] 셋으로 쪼개고, 밴드 quad(under)를
+    // 터미널 '뒤'·제목 glyph '앞'에 끼운다. (모달/divider quad의 위 레이어 분리는 후속.)
     const size_t cell_count_v = cell_count * 6;
     const size_t pre_sidebar_vertices = (cell_count + sidebar_bg_quads) * 6;
+    // 버퍼 레이아웃은 [사이드바 bg quad][터미널 cells][사이드바 cells]다(채우기 순서). bg quad가 '맨 앞'이므로
+    // 터미널 cell i의 정점은 cells_base_v + i*6에서 시작한다(0이 아님). 셀 패스 오프셋은 전부 이 base를 더해야
+    // 한다 — 안 그러면 모달 분할(terminal_end/modal_cells_start)이 한 셀씩 밀린다.
+    const size_t cells_base_v = sidebar_bg_quads * 6;
     const size_t bottom_vertex_count = bottom_quad_n * 6; // C4b-5: 탭 밴드(part1 앞 패스)
     const size_t under_vertex_count = under_quad_n * 6;
     // C4b 모달: 모달(overlay) 셀이 cells[modal_cells_start..cell_count]에 있으면, over quad(모달 배경)를 모달
@@ -927,9 +934,12 @@ bool maru_metal_renderer_draw(
     } while (0)
     if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(0, bottom_vertex_count);   // 0. bottom quad(탭 밴드 — 터미널·제목 앞, 제목 아래로)
     MARU_DRAW_IMAGES(0, image_above_start);                                   // 0.5 kitty 이미지(텍스트 뒤 — 투명 셀로 비침)
-    if (vertex_buffer != nil) MARU_DRAW_CELLS(0, terminal_end_v);             // 1. 터미널(모달 제외, 탭 제목 포함)
+    // 1a. 사이드바 배경 strip(bg quad, 버퍼 맨 앞 [0, cells_base_v)) — 터미널 cells '앞'에 그려 사이드바 헤더
+    //     glyph(origin_x=0, 셀 패스)·밴드·제목이 배경 '위'에 보이게 한다(painter — 헤더 glyph 가림 회귀 fix).
+    if (vertex_buffer != nil) MARU_DRAW_CELLS(0, cells_base_v);
+    // 1b. 터미널(모달 제외, 탭 제목 포함) — cells는 bg quad 다음(cells_base_v)부터.
+    if (vertex_buffer != nil) MARU_DRAW_CELLS(cells_base_v, terminal_end_v);
     MARU_DRAW_IMAGES(image_above_start, gpu_image_n);                         // 1.5 kitty 이미지(텍스트 앞)
-    if (vertex_buffer != nil) MARU_DRAW_CELLS(cell_count_v, pre_sidebar_vertices - cell_count_v); // 2. 사이드바 배경 strip
     if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count, under_vertex_count); // 3. under quad(사이드바 밴드)
     if (vertex_buffer != nil) MARU_DRAW_CELLS(pre_sidebar_vertices, total_vertices - pre_sidebar_vertices); // 4. 사이드바 cells(제목)
     // C4b: shadow 패스 — 터미널·사이드바 위, 모달 배경(over quad) 아래. 모달이 떠 보이게(리뷰 #1 — 맨 처음이면
@@ -940,7 +950,7 @@ bool maru_metal_renderer_draw(
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:shadow_vertex_total];
     }
     if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count + under_vertex_count, quad_vertex_total - bottom_vertex_count - under_vertex_count); // 5. over quad(모달 배경)
-    if (vertex_buffer != nil && has_modal) MARU_DRAW_CELLS(modal_cells_start * 6, cell_count_v - modal_cells_start * 6); // 6. 모달 텍스트
+    if (vertex_buffer != nil && has_modal) MARU_DRAW_CELLS(cells_base_v + modal_cells_start * 6, cell_count_v - modal_cells_start * 6); // 6. 모달 텍스트(cells_base_v 오프셋)
 #undef MARU_DRAW_CELLS
 #undef MARU_DRAW_QUADS
 #undef MARU_DRAW_IMAGES

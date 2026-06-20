@@ -613,8 +613,9 @@ fn parseFloatInRange(value: []const u8, min: f32, max: f32) ?f32 {
 /// config 한 줄을 갱신할 키·값 쌍. value는 이미 직렬화된 토큰(`true`/`false` 등).
 pub const KeyValue = struct { key: []const u8, value: []const u8 };
 
-/// 원본 config 텍스트를 줄 단위로 순회해 `updates`의 키를 `key = value`로 **in-place 교체**한다 —
-/// 주석·빈 줄·미파싱 키·갱신 대상이 아닌 줄은 그대로 보존하고, 원본에 없던 키만 파일 끝에 append한다.
+/// 원본 config 텍스트를 줄 단위로 순회해 `updates`의 키를 `key = value`로 **in-place 교체**한다(같은 키가 여러
+/// 번 나오면 **모든** 줄을 교체 — parse가 last-wins라 일부만 바꾸면 옛 값이 reload 시 이긴다). 주석·빈 줄·미파싱
+/// 키·갱신 대상이 아닌 줄은 그대로 보존하고, 원본에 없던 키만 파일 끝에 append한다.
 /// 앱(view options 토글)→config 부분 갱신용. 통째 재작성은 사용자 주석·미파싱 키를 전부 잃으므로 택하지
 /// 않았다([document-basis-and-decision]: 보존을 우선). 교체 줄은 `key = value`로 정규화하므로 그 줄에
 /// 달려 있던 인라인 주석/비표준 공백은 사라진다(round-trip 테스트가 보존 범위를 못박는다). 반환은 owned.
@@ -636,11 +637,13 @@ pub fn updateConfigText(allocator: std.mem.Allocator, original: []const u8, upda
             if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
                 const k = std.mem.trim(u8, trimmed[0..eq], &std.ascii.whitespace);
                 for (updates, 0..) |u, i| {
-                    if (!applied[i] and std.mem.eql(u8, k, u.key)) {
+                    if (std.mem.eql(u8, k, u.key)) {
+                        // **모든** occurrence를 새 값으로 교체한다(첫 줄만 바꾸면 안 된다) — parse()는 같은 키가 여러
+                        // 번이면 last-wins라, 뒤 중복 줄을 stale로 남기면 reload 시 그 옛 값이 이겨 토글이 되돌아간다.
                         try out.appendSlice(allocator, u.key);
                         try out.appendSlice(allocator, " = ");
                         try out.appendSlice(allocator, u.value);
-                        applied[i] = true;
+                        applied[i] = true; // 발견됨 표시(끝에 append 안 하게). guard 없이 매 occurrence를 교체한다.
                         replaced = true;
                         break;
                     }
@@ -773,6 +776,26 @@ test "updateConfigText: in-place 키 교체로 주석·다른 줄 보존, 없는
     defer p.deinit();
     try std.testing.expectEqual(false, p.config.sidebar.show_branch);
     try std.testing.expectEqual(false, p.config.sidebar.show_folder);
+}
+
+test "updateConfigText: 같은 키가 중복이면 모든 occurrence를 교체한다(last-wins 정합 — 토글 되돌아감 방지)" {
+    const a = std.testing.allocator;
+    // 같은 키가 두 번(사용자가 실수로/병합으로 중복). parse는 last-wins라, 첫 줄만 바꾸면 둘째 줄(true)이 이겨
+    // reload 시 토글이 되돌아간다. 모든 occurrence가 false가 돼야 한다.
+    const original =
+        \\sidebar.show-branch = true
+        \\font.size = 16
+        \\sidebar.show-branch = true
+        \\
+    ;
+    const updates = [_]KeyValue{.{ .key = "sidebar.show-branch", .value = "false" }};
+    const updated = try updateConfigText(a, original, &updates);
+    defer a.free(updated);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "sidebar.show-branch = true") == null); // 남은 true 없음
+    // round-trip: 다시 파싱하면 last-wins로도 false(둘 다 false라 결과 동일).
+    var p = try parse(a, updated);
+    defer p.deinit();
+    try std.testing.expectEqual(false, p.config.sidebar.show_branch);
 }
 
 test "updateConfigText: 빈 원본에도 키를 append한다(파일 없음 케이스)" {

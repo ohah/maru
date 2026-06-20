@@ -222,6 +222,12 @@ workspace.split-inherit-cwd = true   # 새 분할(⌘D, 팬)
 > 주로 첫 창에 쓰인다"고 한다). 새 Term(`new_term`)은 Ghostty에 없는 maru 고유(pane 내 가로 탭)라 가장 가까운
 > '탭'으로 보고 `tab-inherit-cwd`에 묶었다.
 >
+> **퀵 터미널**(`toggle_quick_terminal`)도 `workspace.root`에서 연다 — 별도 세션(독립 `AppSession`)이라 메인 창의
+> 포커스 cwd를 상속하지 않고 항상 고정 `root`(없으면 상속/home 폴백)를 쓴다. 이것도 Ghostty와 같다: Ghostty의
+> 퀵 터미널은 부모 surface 없이 **fresh `SurfaceConfiguration`**으로 만들어져 전역 `working-directory`로 떨어지고
+> 메인 창 cwd를 상속하지 않는다(`QuickTerminalController` — 메인 창/탭/split만 `ghostty_surface_inherited_config`로
+> 상속). 즉 `workspace.root`를 정하면 퀵 터미널 시작 경로도 거기로 바뀐다.
+>
 > 워크스페이스 **복원**(이전 세션 재시작)은 이 값과 무관하다 — 저장된 surface별 cwd를 그대로 쓴다
 > ([Workspace Restore 전략](workspace-restore.md)). `workspace.*`는 새로 여는 창/탭/분할에만 적용된다.
 

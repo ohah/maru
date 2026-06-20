@@ -3155,7 +3155,7 @@ pub const AppSession = struct {
     }
 
     /// 현재(네비게이션) 매치를 뷰포트로 스크롤한다 — 없으면 무동작. 검색·네비게이션 후 호출(scrollToAbs가
-    /// 매치를 세로 중앙쯤에 둬 상단 Find 오버레이에 안 가린다). 현재 인덱스는 chrome_host.find.current.
+    /// 매치를 세로 중앙쯤에 둬 Find 오버레이(활성 pane 상단 한 줄)에 안 가린다). 현재 인덱스는 chrome_host.find.current.
     fn scrollToCurrentMatch(self: *AppSession) void {
         if (!self.surface_initialized) return;
         const cur = self.chrome_host.find.current;
@@ -6560,6 +6560,9 @@ pub const AppSession = struct {
             },
             // C4b: 박스 모양 토큰을 tokens.space에서(단일 출처). tui=0(직각·셀 밴드), rich>0(둥근 GPU quad).
             .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px, .accent_bar_width_px = tk.space.accent_bar_width_px, .card_gap_px = tk.space.card_gap_px },
+            // 활성 pane rect(셀 그리드 영역) — find 오버레이가 활성 pane 우상단에 붙도록(findLayout 단일 출처).
+            // palette는 안 쓴다(창 중앙 유지). active_pane_rect는 recomputeActivePaneRect가 포커스·resize마다 갱신.
+            .active_pane = .{ .x = self.active_pane_rect.x, .y = self.active_pane_rect.y, .w = self.active_pane_rect.w, .h = self.active_pane_rect.h },
         };
     }
 

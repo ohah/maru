@@ -117,15 +117,15 @@ pub fn handle(allocator: std.mem.Allocator, ev: input.InputEvent, state: *State)
 /// 조합 글자 위에). 조합이 없으면 query 끝(다음 입력 위치)이 곧 그 자리다. 표시 폭은 EAW(input.queryCols).
 pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     if (!state.open) return null;
-    const lay = overlay_input.panelLayout(p) orelse return null;
+    const lay = overlay_input.findLayout(p) orelse return null;
     // preedit은 더하지 않는다 — 커서가 조합 글자를 덮어야 하므로 그 시작점(query 끝)에 둔다(터미널과 동일).
     const caret_col = prompt_cols + state.input.queryCols();
     if (caret_col >= lay.panel_cols) return null; // 패널 밖
     return .{ .x = lay.x + @as(i32, @intCast(caret_col * lay.cw)), .y = lay.y, .w = lay.cw, .h = lay.ch };
 }
 
-/// 상단-중앙 한 줄 패널을 `out`에 append한다(배경 fill + "Find: <query><조합중>" + 우측 정렬 "cur/total" + 커서).
-/// 안 열렸거나 터미널 영역이 0칸이면 무동작. 순수: state·props·tokens만 읽는다. ops·runs 슬라이스는 호출자 frame
+/// **활성 pane 우상단**(findLayout) 한 줄 패널을 `out`에 append한다(배경 fill + "Find: <query><조합중>" + 우측 정렬
+/// "cur/total" + 커서). 안 열렸거나 활성 pane 영역이 0칸이면 무동작. 순수: state·props·tokens만 읽는다. ops·runs 슬라이스는 호출자 frame
 /// arena 소유. 색은 surface_bg(패널)·surface_fg(글자)·cursor(커서) role. caret 위치는 caretRect가 EAW(한글/CJK 2칸)로 계산.
 pub fn view(
     state: *const State,
@@ -136,7 +136,7 @@ pub fn view(
 ) !void {
     _ = tk;
     if (!state.open) return;
-    const lay = overlay_input.panelLayout(p) orelse return; // 터미널 영역이 0칸이면 생략(≥1칸이면 작아도 그려 soft-lock 회피)
+    const lay = overlay_input.findLayout(p) orelse return; // 활성 pane 영역이 0칸이면 생략(≥1칸이면 작아도 그려 soft-lock 회피)
     const cw = lay.cw;
     const panel_w = lay.panel_cols * cw;
     const x = lay.x;
@@ -275,8 +275,34 @@ test "find view: 닫힘이면 ops 0, 열림이면 fill+prompt+counter+caret" {
     try std.testing.expect(out.items[3].fill.role == .cursor);
     try std.testing.expectEqual(out.items[0].quad.rect.x + 7 * 8, out.items[3].fill.rect.x);
     try std.testing.expectEqual(@as(u32, 8), out.items[3].fill.rect.w); // 1칸
-    // 패널은 사이드바 오른쪽.
+    // 패널은 사이드바 오른쪽(active_pane 미설정 → 창 전체 우상단 폴백).
     try std.testing.expect(out.items[0].quad.rect.x >= 40);
+}
+
+test "find view: 활성 pane 우상단에 패널 — pane rect 기준 우측 정렬(왼쪽 pane 안 침범)" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    // 활성 pane = 창 오른쪽 절반(x=400..800, top=32). 바는 그 pane 우상단에 붙어야 한다(왼쪽 pane x<400엔 안 뜸).
+    const p = props.ChromeProps{
+        .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 800, .backing_height_px = 600 },
+        .active_pane = .{ .x = 400, .y = 32, .w = 400, .h = 568 },
+    };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+
+    var s: State = .{};
+    defer s.deinit(std.testing.allocator);
+    s.show();
+    try s.input.appendChar(std.testing.allocator, 'a');
+    try view(&s, p, &tk, arena, &out);
+
+    const panel = out.items[0].quad.rect; // pane w=400→50칸, panel_cols=min(60,50-4)=46, panel_w=368
+    try std.testing.expectEqual(@as(i32, 432), panel.x); // 400 + (400-368) = 432(우측 정렬)
+    try std.testing.expectEqual(@as(i32, 800), panel.x + @as(i32, @intCast(panel.w))); // 우단이 pane 우단
+    try std.testing.expectEqual(@as(i32, 48), panel.y); // pane top(32) + 한 줄(16)
+    try std.testing.expect(panel.x >= 400); // 왼쪽 pane(x<400) 안 침범
 }
 
 test "find view: IME 조합(preedit)이 query 뒤에 보이고 커서가 조합 글자를 덮음" {

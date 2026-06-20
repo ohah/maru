@@ -1,6 +1,7 @@
 //! 단일행 입력 오버레이(find·palette)의 **공유 기반** — 컴포넌트가 아니라 두 입력 오버레이가 같은 모델을 쓰게 하는
 //! neutral 헬퍼다. (1) `OverlayInput`: IME 조합을 보존하는 검색어 입력(query+preedit) 상태·전이, (2) `displayCols`:
-//! UTF-8 표시 폭(EAW), (3) `panelLayout`: 상단-중앙 패널 가로 레이아웃. 이주 전엔 find.zig·palette.zig에 같은 코드가
+//! UTF-8 표시 폭(EAW), (3) `panelLayout`: palette의 창-중앙 패널 레이아웃, (4) `findLayout`: find의 활성 pane 우상단
+//! 레이아웃(p.active_pane 경계). 이주 전엔 find.zig·palette.zig에 같은 코드가
 //! 복붙돼 있었다(C1 리뷰 cleanup으로 단일 출처화). 의존은 std + sibling chrome(draw/props) + ../../width.zig뿐
 //! (chrome neutral). 단일 출처: docs/chrome-strategy.md §5.4, docs/layering-and-portability.md §5.
 
@@ -78,29 +79,59 @@ pub const OverlayInput = struct {
     }
 };
 
-/// 패널 가로 레이아웃(사이드바 오른쪽, 상단-중앙). find·palette가 caretRect·view에서 공유한다(이주 전엔 palette에만
-/// 추출돼 있고 find는 두 곳에 인라인이었다). term_cols==0이면 null(터미널 영역 0칸 — 호출자가 무동작). 패널 폭 =
-/// min(60, term_cols−4 여백), 최소 1. clamp로 panel_w ≤ term_w_px라 중앙배치 뺄셈이 안전. y는 상단에서 두 줄 아래.
 pub const PanelLayout = struct { x: i32, y: i32, panel_cols: u32, cw: u32, ch: u32 };
-pub fn panelLayout(p: props.ChromeProps) ?PanelLayout {
+
+/// 패널 **폭 산출 공유 코어** — panelLayout(palette 창-중앙)·findLayout(find pane 우상단)이 정렬만 달리하고 이걸
+/// 함께 쓴다. 이 모듈의 존재 이유가 패널 레이아웃 복붙 제거(위 모듈 doc)이므로, 폭 규약(60·−4·2*pad)을 여기 한
+/// 곳에만 둔다. region_w(가용 가로 px)/cw==0이면 null(영역 0칸 — 호출자 무동작). C4b 패딩: 폭 상한을 2*pad만큼
+/// 줄인 가용 칸으로 panel_cols를 산출 — platform lowering이 배경 quad를 ±pad 확장한 뒤에도 박스가 영역에 들도록
+/// 텍스트 폭을 양보한다(pad=0(tui)이면 무변화). 단 avail_cols==0(region_w < 2*pad, 1~3칸의 비정상적으로 좁은
+/// 영역)이면 soft-lock 방지로 panel_cols=1을 강제하므로 ±pad 확장이 최대 pad만큼 경계를 침범할 수 있다 — bounded
+/// 이고 '안 보이는 열린 모달'보다 작은 박스가 낫다는 절충(panelLayout·findLayout 양쪽 동일).
+const PanelSize = struct { panel_cols: u32, panel_w: u32, cw: u32, ch: u32 };
+fn panelSize(p: props.ChromeProps, region_w: u32) ?PanelSize {
     const m = p.metrics;
     const cw = @max(m.cell_width_px, 1);
     const ch = @max(m.cell_height_px, 1);
-    const term_w_px = m.backing_width_px -| m.sidebar_width_px;
-    const term_cols = term_w_px / cw;
-    if (term_cols == 0) return null;
-    // C4b 패딩: 폭 상한을 2*pad만큼 줄인 가용 칸으로 panel_cols를 산출한다 — platform lowering이 배경 quad를
-    // ±pad 확장한 뒤에도 박스가 터미널 영역에 들도록 텍스트 폭을 양보한다(avail_cols>=1이면 [sidebar,
-    // sidebar+term_w_px] 안). pad=0(tui)이면 avail_cols == term_cols라 무변화. 단 avail_cols==0(term_w_px < 2*pad,
-    // 터미널 영역 1~3칸의 비정상적으로 좁은 창)이면 soft-lock 방지로 panel_cols=1을 강제하므로 ±pad 확장이 최대
-    // pad만큼 사이드바/우측을 침범할 수 있다 — bounded이고, '안 보이는 열린 모달'보다 작은 박스가 낫다는 절충.
+    if (region_w / cw == 0) return null;
     const pad: u32 = p.shape.modal_padding_px;
-    const avail_cols = (term_w_px -| 2 * pad) / cw;
+    const avail_cols = (region_w -| 2 * pad) / cw;
     const panel_cols: u32 = @max(@min(@as(u32, 60), avail_cols -| 4), 1);
-    const panel_w = panel_cols * cw;
-    const x = @as(i32, @intCast(m.sidebar_width_px)) + @as(i32, @intCast((term_w_px - panel_w) / 2));
-    const y = 2 * @as(i32, @intCast(ch)); // 상단에서 두 줄 내려(기존 오버레이와 같은 위치)
-    return .{ .x = x, .y = y, .panel_cols = panel_cols, .cw = cw, .ch = ch };
+    return .{ .panel_cols = panel_cols, .panel_w = panel_cols * cw, .cw = cw, .ch = ch };
+}
+
+/// palette 패널 가로 레이아웃(사이드바 오른쪽, 상단-중앙) — **palette 전용**(find는 활성 pane 우상단 findLayout으로
+/// 분리). 폭은 panelSize 공유. clamp로 panel_w ≤ term_w_px라 중앙배치 뺄셈이 안전. y는 상단에서 두 줄 아래.
+pub fn panelLayout(p: props.ChromeProps) ?PanelLayout {
+    const m = p.metrics;
+    const term_w_px = m.backing_width_px -| m.sidebar_width_px;
+    const sz = panelSize(p, term_w_px) orelse return null;
+    const x = @as(i32, @intCast(m.sidebar_width_px)) + @as(i32, @intCast((term_w_px - sz.panel_w) / 2));
+    const y = 2 * @as(i32, @intCast(sz.ch)); // 상단에서 두 줄 내려(기존 오버레이와 같은 위치)
+    return .{ .x = x, .y = y, .panel_cols = sz.panel_cols, .cw = sz.cw, .ch = sz.ch };
+}
+
+/// find 오버레이 레이아웃 — **활성 pane 우상단**(브라우저/iTerm/VS Code 관례). palette의 창-중앙 panelLayout과
+/// 분리: 검색·하이라이트가 활성 surface만 보므로(app_session.activeSurface) 바도 그 pane에 붙여 어느 분할을 검색
+/// 중인지 시각적으로 맞춘다. 경계 = `p.active_pane`(platform active_pane_rect 미러); 미초기화(w==0)면 사이드바
+/// 오른쪽 터미널 영역 전체로 폴백해 단일-pane·헤드리스 테스트에서도 안전. 폭은 panelSize 공유. 우측 정렬이라
+/// 오른쪽 여백을 pad로 둬 **정상 폭에선** 우측 pane/divider를 안 침범한다 — 단 panelSize가 panel_cols=1을 강제하는
+/// 비정상적으로 좁은 pane(panel_w+pad > 영역 폭)이면 우측 여백이 0으로 saturate돼 ±pad 확장이 최대 pad만큼 경계를
+/// 넘을 수 있다(bounded, panelLayout과 동일 절충). y는 pane 상단 한 줄 아래 — 패널 높이는 한 칸이라 region.h는
+/// 안 본다(2칸보다 낮은 극단적 pane이면 아래로 한 칸 넘칠 수 있으나 bounded).
+pub fn findLayout(p: props.ChromeProps) ?PanelLayout {
+    const m = p.metrics;
+    // 활성 pane rect를 경계로. 미초기화(w==0)면 사이드바 오른쪽 터미널 영역 전체로 폴백(단일-pane/테스트 안전).
+    const region: struct { x: u32, y: u32, w: u32 } = if (p.active_pane.w > 0)
+        .{ .x = p.active_pane.x, .y = p.active_pane.y, .w = p.active_pane.w }
+    else
+        .{ .x = m.sidebar_width_px, .y = 0, .w = m.backing_width_px -| m.sidebar_width_px };
+    const sz = panelSize(p, region.w) orelse return null; // 영역 0칸 — 무동작
+    const pad: u32 = p.shape.modal_padding_px;
+    // 우상단: 우측 정렬(오른쪽 여백 = pad라 정상 폭이면 lowering ±pad 확장 후에도 pane 안), 상단에서 한 줄 내려.
+    const x = @as(i32, @intCast(region.x)) + @as(i32, @intCast(region.w -| sz.panel_w -| pad));
+    const y = @as(i32, @intCast(region.y)) + @as(i32, @intCast(sz.ch));
+    return .{ .x = x, .y = y, .panel_cols = sz.panel_cols, .cw = sz.cw, .ch = sz.ch };
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -192,4 +223,36 @@ test "panelLayout: rich 패딩이면 확장 박스(panel_w + 2*pad)가 터미널
     try std.testing.expect(panel_w + 2 * pad <= term_w_px);
     try std.testing.expect(lay.x - @as(i32, @intCast(pad)) >= @as(i32, @intCast(sidebar)));
     try std.testing.expect(lay.x + @as(i32, @intCast(panel_w + pad)) <= @as(i32, @intCast(sidebar + term_w_px)));
+}
+
+test "findLayout: 활성 pane 우상단 우측 정렬·미초기화면 창 전체로 폴백" {
+    // 활성 pane = 창 오른쪽 절반(x=400..800, top=32 — 탭 바 아래). 바는 그 pane 우상단에 붙는다.
+    const lay = findLayout(.{
+        .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 800, .backing_height_px = 600 },
+        .active_pane = .{ .x = 400, .y = 32, .w = 400, .h = 568 },
+    }) orelse return error.NoLayout;
+    const panel_w = lay.panel_cols * lay.cw;
+    try std.testing.expectEqual(@as(i32, 800), lay.x + @as(i32, @intCast(panel_w))); // 우단이 pane 우단(800)에 닿음(pad=0)
+    try std.testing.expect(lay.x >= 400); // pane 안 — 왼쪽 pane 안 침범
+    try std.testing.expectEqual(@as(i32, 48), lay.y); // pane top(32) + 한 줄(16)
+
+    // 미초기화(active_pane.w==0) → 사이드바 오른쪽 터미널 영역 전체로 폴백, 그 영역 우상단.
+    const fb = findLayout(.{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 800, .backing_height_px = 600 } }) orelse return error.NoLayout;
+    const fb_w = fb.panel_cols * fb.cw;
+    try std.testing.expectEqual(@as(i32, 800), fb.x + @as(i32, @intCast(fb_w))); // 우단이 창 우단
+    try std.testing.expect(fb.x >= 40); // 사이드바 오른쪽
+    try std.testing.expectEqual(@as(i32, 16), fb.y); // 폴백 영역 top(0) + 한 줄
+}
+
+test "findLayout: rich 패딩이면 우측 확장 박스가 pane 안 — 우측 pane/divider 침범 방지" {
+    const pad: u32 = 12;
+    const lay = findLayout(.{
+        .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 800, .backing_height_px = 600 },
+        .active_pane = .{ .x = 400, .y = 0, .w = 200, .h = 600 }, // 좁은 가운데 pane(우측에 divider/다른 pane)
+        .shape = .{ .modal_padding_px = @intCast(pad) },
+    }) orelse return error.NoLayout;
+    const panel_w = lay.panel_cols * lay.cw;
+    // lowering이 ±pad 확장해도 박스가 [pane.x, pane.x+pane.w](=[400,600]) 안.
+    try std.testing.expect(lay.x + @as(i32, @intCast(panel_w + pad)) <= 600);
+    try std.testing.expect(lay.x - @as(i32, @intCast(pad)) >= 400);
 }

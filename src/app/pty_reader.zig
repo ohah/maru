@@ -267,6 +267,131 @@ pub const PtyWriteQueue = struct {
     }
 };
 
+/// 메인발 비-PTY 코어 mutate(IME·스크롤·선택·리포팅·config)를 I/O 스레드(reader)로 위임하는 명령
+/// (docs/io-render-threading.md §9 Phase 3, (a) 단일책임). reader가 `runProcessing` write 단계에서 drain해
+/// 코어 락 아래 적용한다 — 출력 `core.write`와 같은 스레드·같은 락이라 메인이 코어를 직접 mutate하지 않게 된다.
+/// 가변 payload(`set_preedit` 바이트)는 큐가 owned 복사를 들고 적용·드롭·close 시 해제한다. P3-1은 프리미티브만
+/// (미배선) — 배선은 P3-2~P3-4. 명령 집합은 §9.2를 따라 단계적으로 확장한다(여기선 P3-2 IME·P3-4 scroll 대표).
+pub const CoreCommand = union(enum) {
+    set_preedit: []const u8, // owned(큐 소유) — 적용/드롭 시 해제. IME 조합 텍스트.
+    clear_preedit,
+    scroll: isize, // scrollViewport(delta_up)
+    scroll_to_bottom,
+};
+
+/// 위임 명령의 bounded FIFO. `PtyWriteQueue`(바이트 FIFO)의 명령 버전 — 같은 mutex·condition·head-리셋 구조.
+/// cap은 **대기 명령 수**(count) 기준. 메인이 enqueue(+wake), reader가 pop해 적용한다(단일 소비자). MARU_DEBUG면
+/// enqueue/pop/close와 enqueue 시각(적용 지연 산출용)을 `coreq` 스코프로 로깅한다(기본 off, hot path 비용 분기 하나).
+pub const CoreCommandQueue = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    mutex: std.Io.Mutex = .init,
+    not_full: std.Io.Condition = .init,
+    // FIFO: `head`부터 소비, 다 비면 clearRetainingCapacity로 head=0 리셋(재할당 없이 재사용) — PtyWriteQueue와 동형.
+    items: std.ArrayList(Entry) = .empty,
+    head: usize = 0,
+    cap: usize, // 최대 대기 명령 수 — backpressure 기준
+    closed: bool = false,
+    debug: bool, // MARU_DEBUG(init 1회 캐시) — coreq 로깅·enqueue 타임스탬프 게이트(미설정 시 분기 하나, no-alloc)
+
+    const coreq = std.log.scoped(.coreq);
+
+    /// 큐가 보관하는 명령 1건 + enqueue 시각(MARU_DEBUG일 때만, 아니면 0). reader가 pop 후 `enqueued_ns`로
+    /// 적용 지연을 산출한다(P3-2~). `enqueued_ns`는 `std.Io.Clock.awake` 나노초.
+    pub const Entry = struct {
+        cmd: CoreCommand,
+        enqueued_ns: i96 = 0,
+    };
+
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, capacity_commands: usize) QueueError!CoreCommandQueue {
+        if (capacity_commands == 0) return error.ZeroCapacity;
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .cap = capacity_commands,
+            .debug = std.c.getenv("MARU_DEBUG") != null,
+        };
+    }
+
+    pub fn deinit(self: *CoreCommandQueue) void {
+        for (self.items.items[self.head..]) |entry| freeCommand(self.allocator, entry.cmd);
+        self.items.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    /// 명령의 owned payload를 해제한다(payload 없는 변형은 no-op). `pop`한 호출자가 적용 후 호출한다.
+    pub fn freeCommand(allocator: std.mem.Allocator, cmd: CoreCommand) void {
+        switch (cmd) {
+            .set_preedit => |b| allocator.free(b),
+            .clear_preedit, .scroll, .scroll_to_bottom => {},
+        }
+    }
+
+    fn dupeCommand(allocator: std.mem.Allocator, cmd: CoreCommand) QueueError!CoreCommand {
+        return switch (cmd) {
+            .set_preedit => |b| .{ .set_preedit = try allocator.dupe(u8, b) },
+            .clear_preedit, .scroll, .scroll_to_bottom => cmd,
+        };
+    }
+
+    fn pendingAssumeLocked(self: *const CoreCommandQueue) usize {
+        return self.items.items.len - self.head;
+    }
+
+    pub fn close(self: *CoreCommandQueue) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const dropped = self.pendingAssumeLocked();
+        for (self.items.items[self.head..]) |entry| freeCommand(self.allocator, entry.cmd);
+        self.items.clearRetainingCapacity();
+        self.head = 0;
+        self.closed = true;
+        if (self.debug and dropped > 0) coreq.info("close: {d} unapplied command(s) dropped", .{dropped});
+        self.not_full.broadcast(self.io); // backpressure 대기 중인 enqueue를 QueueClosed로 풀어준다
+    }
+
+    /// 메인 스레드: 명령을 큐에 **복사**해 넣는다(가변 payload는 dupe — 호출자는 슬라이스 소유권 유지). 대기 명령이
+    /// cap에 차면 reader가 비울 때까지 backpressure로 대기한다(UI mutate는 버리면 안 됨). 닫혔으면 QueueClosed. 호출
+    /// 후 호출자가 wake로 reader poll을 깨운다(P3-2). 입력 손실 금지라 가득 차도 드롭하지 않고 대기한다(출력 backpressure 대칭).
+    pub fn enqueueBlocking(self: *CoreCommandQueue, cmd: CoreCommand) QueueError!void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        while (!self.closed and self.pendingAssumeLocked() >= self.cap) {
+            self.not_full.waitUncancelable(self.io, &self.mutex);
+        }
+        if (self.closed) return error.QueueClosed;
+        const owned = try dupeCommand(self.allocator, cmd);
+        errdefer freeCommand(self.allocator, owned);
+        const ts: i96 = if (self.debug) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
+        try self.items.append(self.allocator, .{ .cmd = owned, .enqueued_ns = ts });
+        if (self.debug) coreq.info("enqueue {s} (depth={d})", .{ @tagName(owned), self.pendingAssumeLocked() });
+    }
+
+    /// I/O 스레드: 다음 명령 1건을 꺼내 **소유권을 호출자에 넘긴다**(없으면 null). 호출자가 코어 락 아래 적용 후
+    /// `freeCommand`로 해제한다. head는 I/O 스레드만 움직이는 단일 소비자라, pop↔적용 사이 메인 enqueue가 tail에
+    /// append해도 안전하다. 다 비면 버퍼를 비워 head=0으로 되돌린다(재사용).
+    pub fn pop(self: *CoreCommandQueue) ?Entry {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.pendingAssumeLocked() == 0) return null;
+        const entry = self.items.items[self.head];
+        self.head += 1;
+        if (self.head >= self.items.items.len) {
+            self.items.clearRetainingCapacity();
+            self.head = 0;
+        }
+        self.not_full.broadcast(self.io);
+        if (self.debug) coreq.info("pop {s} (depth={d})", .{ @tagName(entry.cmd), self.pendingAssumeLocked() });
+        return entry;
+    }
+
+    pub fn hasPending(self: *CoreCommandQueue) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.pendingAssumeLocked() > 0;
+    }
+};
+
 pub const PtyReader = struct {
     allocator: std.mem.Allocator,
     pty_id: runtime_mod.PtyId,
@@ -691,4 +816,94 @@ test "PtyWriteQueue: enqueueBlocking 대기 중 close → QueueClosed로 깨어�
     q.close();
     thread.join();
     try std.testing.expectError(error.QueueClosed, result);
+}
+
+test "CoreCommandQueue: enqueue→pop FIFO 보존 + owned payload는 복사본(원본 변경 불가시)" {
+    var q = try CoreCommandQueue.init(std.testing.io, std.testing.allocator, 8);
+    defer q.deinit();
+    try std.testing.expect(!q.hasPending());
+
+    var src = [_]u8{ 'a', 'b', 'c' };
+    try q.enqueueBlocking(.{ .set_preedit = &src });
+    try q.enqueueBlocking(.{ .scroll = 5 });
+    try q.enqueueBlocking(.scroll_to_bottom);
+    src[0] = 'Z'; // 큐가 복사본을 들어야 한다 — enqueue 후 원본을 바꿔도 안 보여야
+
+    try std.testing.expect(q.hasPending());
+
+    const e1 = q.pop().?;
+    try std.testing.expect(e1.cmd == .set_preedit);
+    try std.testing.expectEqualStrings("abc", e1.cmd.set_preedit); // 복사본 — 'Z' 안 보임
+    CoreCommandQueue.freeCommand(std.testing.allocator, e1.cmd);
+
+    const e2 = q.pop().?;
+    try std.testing.expectEqual(@as(isize, 5), e2.cmd.scroll);
+    CoreCommandQueue.freeCommand(std.testing.allocator, e2.cmd);
+
+    const e3 = q.pop().?;
+    try std.testing.expect(e3.cmd == .scroll_to_bottom);
+    CoreCommandQueue.freeCommand(std.testing.allocator, e3.cmd);
+
+    try std.testing.expect(q.pop() == null);
+    try std.testing.expect(!q.hasPending());
+}
+
+test "CoreCommandQueue: zero capacity 거부 / close 후 enqueue는 QueueClosed" {
+    try std.testing.expectError(error.ZeroCapacity, CoreCommandQueue.init(std.testing.io, std.testing.allocator, 0));
+    var q = try CoreCommandQueue.init(std.testing.io, std.testing.allocator, 4);
+    defer q.deinit();
+    q.close();
+    try std.testing.expectError(error.QueueClosed, q.enqueueBlocking(.{ .scroll = 1 }));
+}
+
+test "CoreCommandQueue: close가 미적용 명령 폐기 + owned payload 해제(누수 0)" {
+    var q = try CoreCommandQueue.init(std.testing.io, std.testing.allocator, 8);
+    defer q.deinit();
+    try q.enqueueBlocking(.{ .set_preedit = "leak-check" }); // owned 복사 — close가 풀어야 누수 0
+    try q.enqueueBlocking(.{ .scroll = 3 });
+    try std.testing.expect(q.hasPending());
+    q.close(); // 미적용 2건 폐기 + set_preedit 복사본 free
+    try std.testing.expect(!q.hasPending());
+    // testing.allocator가 누수를 잡는다(close가 payload를 안 풀면 실패 — teeth).
+}
+
+test "CoreCommandQueue: backpressure 대기 중 close → QueueClosed로 깨어남(무한 대기 없음)" {
+    var q = try CoreCommandQueue.init(std.testing.io, std.testing.allocator, 2); // cap 2
+    defer q.deinit();
+    try q.enqueueBlocking(.{ .scroll = 1 });
+    try q.enqueueBlocking(.{ .scroll = 2 }); // 가득(소비자 없음 → drain 안 됨)
+
+    const Blocker = struct {
+        fn run(qq: *CoreCommandQueue, out: *(QueueError!void)) void {
+            out.* = qq.enqueueBlocking(.{ .scroll = 3 }); // 가득 → not_full 대기 → close가 풀어줄 때까지 막힘
+        }
+    };
+    var result: QueueError!void = {};
+    var thread = try std.Thread.spawn(.{}, Blocker.run, .{ &q, &result });
+    try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake);
+    q.close();
+    thread.join();
+    try std.testing.expectError(error.QueueClosed, result);
+}
+
+test "CoreCommandQueue: backpressure — 생산자가 막혀도 소비자 pop이 진행, scroll 순서·전량 보존" {
+    var q = try CoreCommandQueue.init(std.testing.io, std.testing.allocator, 8); // 작은 상한
+    defer q.deinit();
+    const total = 2000; // 상한(8)의 250배 — 생산자가 여러 번 backpressure로 막혀야 한다
+    const Producer = struct {
+        fn run(qq: *CoreCommandQueue, n: usize) void {
+            var i: usize = 0;
+            while (i < n) : (i += 1) qq.enqueueBlocking(.{ .scroll = @intCast(i) }) catch return;
+        }
+    };
+    var thread = try std.Thread.spawn(.{}, Producer.run, .{ &q, total });
+    var got: usize = 0;
+    while (got < total) {
+        const e = q.pop() orelse continue; // 아직 생산 전 — 재시도(스핀, 테스트라 OK)
+        try std.testing.expectEqual(@as(isize, @intCast(got)), e.cmd.scroll); // 순서 보존
+        CoreCommandQueue.freeCommand(std.testing.allocator, e.cmd);
+        got += 1;
+    }
+    thread.join();
+    try std.testing.expectEqual(@as(usize, total), got);
 }

@@ -89,7 +89,11 @@ bool maru_metal_renderer_draw(
     size_t live_image_id_count,
     /* 화면 clear color(0xAARRGGBB) — render pass clearColor. OSC 11(배경 set) 있으면 그 색, 없으면
        theme.background. 0이면 기존 기본 clear(어두운 남색)로 폴백. 빈 영역/기본 배경(A0) 셀이 비치는 색. */
-    uint32_t terminal_bg
+    uint32_t terminal_bg,
+    /* 상단 타이틀바 띠(신호등·헤더 아이콘 줄) 높이(px). 접힘 펼치기 토글(◧) 글리프를 이 띠 [0, strip] 안에
+       세로 중앙 배치해 신호등과 정렬시키는 데만 쓴다. terminal_origin_x_px>0(펼침)이면 무관(헤더 아이콘은
+       기존 0.3ch nudge). 0이면 띠 없음(0.3ch nudge 폴백). */
+    uint32_t titlebar_strip_px
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

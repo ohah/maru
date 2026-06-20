@@ -608,7 +608,8 @@ bool maru_metal_renderer_draw(
     size_t image_pixel_count,
     const uint32_t *live_image_ids,
     size_t live_image_id_count,
-    uint32_t terminal_bg
+    uint32_t terminal_bg,
+    uint32_t titlebar_strip_px
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -713,9 +714,21 @@ bool maru_metal_renderer_draw(
             //  드물게 확대 — 무시 가능. NB: 화질은 slot-stretch라 약간 부드럽다 — per-cell 큰-크기 래스터화는 후속.)
             const bool is_header = (tc.origin_x == 0u && tc.origin_y == 0u);
             const bool is_corner_icon = is_header && tc.row == 0u && (tc.codepoint == 0x2699u || tc.codepoint == (uint32_t)'+' || tc.codepoint == 0x25E7u);
+            // 접힘 펼치기 토글(◧)은 사이드바가 없을 때(terminal_origin_x_px==0) 신호등 바로 옆에 단독으로 떠,
+            // 신호등과 수직 정렬돼야 한다. 펼침 헤더 아이콘(◧/⚙/+)은 사이드바 안(origin_x>0)이라 신호등과
+            // 비교되지 않으므로 기존 0.3ch nudge를 유지한다. 접힘 토글이면 타이틀바 띠 [0, titlebar_strip_px]
+            // 안에 셀(높이 ch)을 세로 중앙 배치한다 — 띠는 max(cell_h, 30pt)라 0.3ch nudge로는 위로 쏠렸다.
+            const bool is_collapsed_toggle = is_corner_icon && tc.codepoint == 0x25E7u && terminal_origin_x_px == 0u;
             const float hscale = is_corner_icon ? 1.7f : 1.0f;
-            const float py_nudge = is_corner_icon ? ch * 0.30f : 0.0f;
-            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x, cw, (float)tc.origin_y + (float)tc.row * ch + py_nudge, ch, drawable_w, drawable_h, hscale);
+            float py_top;
+            if (is_collapsed_toggle && titlebar_strip_px > 0u) {
+                const float strip = (float)titlebar_strip_px;
+                py_top = (strip > ch) ? (strip - ch) * 0.5f : 0.0f; // 띠 안 세로 중앙(신호등 정렬)
+            } else {
+                const float py_nudge = is_corner_icon ? ch * 0.30f : 0.0f;
+                py_top = (float)tc.origin_y + (float)tc.row * ch + py_nudge;
+            }
+            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, hscale);
         }
         quad_index += cell_count;
         // 3) 사이드바 cells — origin 0, 배경 quad 위에 그린다(painter 순서). 탭 슬롯 높이로 배치하되 셀 종류를

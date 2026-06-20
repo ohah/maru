@@ -861,7 +861,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.image_pixel_count,
             frame.live_image_ids,         // kitty graphics(K4c): 살아있는 이미지 id 집합(없는 텍스처 evict)
             frame.live_image_id_count,
-            frame.terminal_bg             // 화면 clear color(OSC 11 배경 set 또는 theme.background; 0=기본 clear)
+            frame.terminal_bg,            // 화면 clear color(OSC 11 배경 set 또는 theme.background; 0=기본 clear)
+            frame.titlebar_strip_px       // 상단 타이틀바 띠 높이 — 접힘 펼치기 토글(◧)을 띠 안 세로 중앙(신호등 정렬)
         )
         if drew {
             lastDrawnGeneration = frame.generation

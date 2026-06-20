@@ -44,9 +44,6 @@ pub const GlyphCacheKey = struct {
     cell_width: u2 = 1,
     style: RasterStyleFlags = .{},
     color_glyph_kind: ColorGlyphKind = .monochrome,
-    // glyph를 큰 크기로 직접 래스터화할 배율(천분율, 1000=무배율). estimateGlyphBitmapSize가 slot을, rasterizer가
-    // CoreText 폰트 크기를 이만큼 키운다. 같은 glyph라도 배율이 다르면 다른 slot이라 cache identity의 일부다.
-    glyph_scale_milli: u16 = 1000,
 };
 
 pub const GlyphRun = struct {
@@ -170,7 +167,6 @@ pub fn buildGlyphRunList(
                 .cell_width = cell.width, // span — slot 폭 = cell_width_px × span이라 키에 포함(span 충돌 방지)
                 .style = flags,
                 .color_glyph_kind = shaped.color_glyph_kind,
-                .glyph_scale_milli = cell.glyph_scale_milli, // crisp 큰 아이콘 배율 — slot·폰트·de-dup
             },
         });
     }

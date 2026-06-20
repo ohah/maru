@@ -19,8 +19,10 @@ cmux 같은 유연한 레이아웃:
     comm이 인터프리터(node 등)면 `KERN_PROCARGS2`로 argv[1] 스크립트 basename을 꺼내 분류 — codex가 `#!/usr/bin/env node`
     스크립트라 comm="node"로 떠도 잡힌다(claude는 네이티브라 comm="claude"). 공개 sysctl API(ps·libproc와 동일), clean-room.
   - 심볼·색(베이스/결정): 브랜드 전용 유니코드가 없어 근사 글리프 — claude=`✳`(U+2733, Anthropic 선버스트)·codex=`✻`
-    (U+273B, OpenAI 블로썸/6잎 꽃). 가독을 위해 1.7× 확대 + 브랜드 강조색(claude 코랄·codex 그린)으로 칠한다(`agentSymbolCodepoint`).
-    근거: codex는 ⬢(육각)이 안 맞아 ✻(블로썸 근사)로 교체, 색은 각 에이전트 식별성을 위한 선택(사용자 요청).
+    (U+273B, OpenAI 블로썸/6잎 꽃)로 **종류**를 구분한다(`agentSymbolCodepoint`). 가독을 위해 1.7× 확대. **색은 종류가
+    아니라 에이전트 상태**를 따른다(보편 관례 — 진행=앰버 `#E5C07B`, 대기=초록 `#3FB950`, 미상=회색 `#808080`; 진행
+    중엔 blink로 맥동). 근거: codex는 ⬢(육각)이 안 맞아 ✻(블로썸 근사)로 교체. 종류 식별(과거 브랜드색)보다 "지금
+    작업 중인가"가 사용자에게 더 급한 정보라 색을 상태 기반으로 둔다(#7; 종류는 심볼이 계속 구분).
 - **탭마다 split(panel)** — 각 탭은 surface 1개가 아니라 가로/세로로 나눌 수 있는 surface 트리.
 - **드래그 재배치** — panel을 끌어 split을 재배열, 탭을 끌어 순서 변경.
 

@@ -881,6 +881,10 @@ pub const MetalFrame = extern struct {
     // theme.background. 렌더 pass의 clearColor로 쓴다 — 셀이 default 배경(A=0)일 때 드러나는 색. app이 활성
     // surface 기준으로 채운다(0이면 렌더러가 기존 기본 clear로 폴백). 끝에 추가해 기존 필드 offset 불변(ABI v51).
     terminal_bg: u32 = 0,
+    // 상단 타이틀바 띠(신호등·헤더 아이콘 줄)의 픽셀 높이. 렌더러가 **접힘 펼치기 토글(◧)** 글리프를 이 띠
+    // [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 수직 정렬시키는 데만 쓴다(펼침 헤더 아이콘은 영향
+    // 없음 — 사이드바 폭>0이라 구분). 0이면 띠 없음(렌더러가 기존 0.3ch nudge 폴백). 끝에 추가해 기존 offset 불변(ABI v66).
+    titlebar_strip_px: u32 = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).

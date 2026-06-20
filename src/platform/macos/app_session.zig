@@ -45,7 +45,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 65; // 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 66; // 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -122,6 +122,9 @@ const sidebar_search_icon_col: u16 = 1; // 🔍 좌측 패딩 1칸
 const sidebar_search_text_col: u16 = sidebar_search_icon_col + 3; // 🔍(2칸)+공백(1) 뒤 = 입력/caret 시작 col(=4)
 // 사이드바 접힘 시 좌상단 펼치기 버튼이 신호등 오른쪽에서 비울 가로 여백(논리 pt). 신호등은 좌상단 ~70pt를 차지한다.
 const traffic_light_clearance_pt: u32 = 72;
+// 접힘 펼치기 토글(◧)을 신호등 클리어런스에서 더 오른쪽으로 미는 칸 수 — 호버 배경이 셀 중심 기준 좌측으로
+// ≈0.8칸 번지므로, 1칸이면 신호등에 닿을 만큼 붙어 보였다(사용자 피드백). 2칸으로 한 칸 이상 간격을 둔다.
+const collapsed_toggle_gap_cells: u32 = 2;
 // 접힘 시 상단 타이틀바 띠의 최소 높이(논리 pt) — 신호등 세로 높이(~28pt)를 가려야 터미널/탭이 신호등을 침범 안 함.
 // 펼침은 한 줄(터미널이 사이드바 우측이라 신호등 아래가 아님)이지만, 접힘은 터미널이 전폭이라 신호등 높이를 확보한다.
 const collapsed_titlebar_min_pt: u32 = 30;
@@ -1109,6 +1112,9 @@ pub const AppSession = struct {
     // 호버 중인 헤더 아이콘 영역(◧ toggle·⚙ view_options·+ new_workspace). 마우스가 그 아이콘 위면 rebuildSidebar가
     // 아이콘 뒤에 둥근 호버 배경(웹 버튼 hover처럼)을 그린다. 검색·빈 영역·아이콘 밖이면 null. 바뀔 때만 재빌드.
     hovered_header_region: ?chrome.components.sidebar.HeaderRegion = null,
+    // 접힘 펼치기 토글(◧, 신호등 옆) 호버 여부. 접힘 시엔 사이드바 폭 0이라 hovered_header_region 경로(inSidebar)가
+    // 안 타므로 별도 추적한다. true면 rebuildSidebar가 토글 뒤에 둥근 호버 배경(헤더 아이콘과 같은 스타일)을 그린다.
+    hovered_collapsed_toggle: bool = false,
     // 인라인 rename 상태(없으면 null=비활성). 활성이면 키/IME가 rename_input으로 라우팅되고(모달), 렌더가 대상
     // 슬롯/탭/라벨에 편집 텍스트+caret을 그린다. rename_input은 find/palette와 같은 OverlayInput(IME preedit·EAW·
     // UTF-8 경계 공유). 대상 객체가 teardown되면 invalidate가 null로 비운다(stale 포인터 방지).
@@ -1955,6 +1961,7 @@ pub const AppSession = struct {
         // 않는 검색에 갇히고 매 blink마다 재투영). 검색어는 보존(blur 규율) — 호출 경로(◧ 클릭/향후 키바인딩)와 무관하게
         // 토글 자체가 책임진다. 아래 rebuildSidebar가 필터 일시정지를 반영한다.
         self.sidebar_search_active = false;
+        self.hovered_collapsed_toggle = false; // 토글 전후로 stale 호버 배경이 남지 않게(다음 hoverCursor가 다시 판정)
         self.sidebar_collapsed = !self.sidebar_collapsed;
         self.sidebar_width_px = if (self.sidebar_collapsed) 0 else ptToPx(self.sidebar_width_pt, self.scale_milli);
         self.titlebar_strip_px = self.computeTitlebarStripPx(); // 접힘=신호등 높이, 펼침=한 줄 — termRect/grid 전에 갱신
@@ -5220,6 +5227,25 @@ pub const AppSession = struct {
         // 스크롤바 hover 강조를 매 이동 갱신한다(어느 zone이든 — 아래 early return 전에 항상). scrollbarGrabAt이
         // 영역+스크롤백 유무를 본다(우측 얇은 띠). 커서 종류는 안 바꾼다(얇은 띠라 iBeam 깜빡임 방지) — 강조만.
         self.setScrollbarHovered(self.scrollbarGrabAt(x_px, y_px) != null);
+        // 접힘 펼치기 토글(◧, 신호등 옆) 호버 — 접힘 시 사이드바 폭 0이라 아래 inSidebar(헤더 아이콘) 경로가 안 타고,
+        // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
+        // 토글 밖이면 끄고 아래 일반 경로로 흐른다. mouse down hit-test(collapsedToggleRect)와 같은 rect로 일치.
+        if (self.sidebar_collapsed) {
+            if (self.collapsedToggleRect()) |r| {
+                const rx: f64 = @floatFromInt(r.x);
+                const ry: f64 = @floatFromInt(r.y);
+                if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w)) and
+                    y_px >= ry and y_px < ry + @as(f64, @floatFromInt(r.h)))
+                {
+                    self.setHoveredCollapsedToggle(true);
+                    self.setHoveredSlot(null);
+                    self.setHoveredTab(null);
+                    self.clearHoverUrlAnchor();
+                    return .link;
+                }
+            }
+            self.setHoveredCollapsedToggle(false);
+        }
         // 사이드바 우측 경계(폭 조절) 위면 리사이즈 커서 — 사이드바/터미널보다 먼저(경계는 둘 사이 밴드).
         if (chrome.components.sidebar.onResizeEdge(x_px, self.sidebar_width_px, if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px)) {
             self.setHoveredSlot(null);
@@ -6754,6 +6780,16 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 접힘 펼치기 토글(◧) 호버 상태를 갱신한다 — 바뀔 때만 rebuildSidebar(호버 quad 추가/제거)+재렌더. 접힘이
+    /// 아니면 항상 false로 둔다(펼치며 stale 호버 방지). setHoveredHeaderRegion의 접힘 버전.
+    fn setHoveredCollapsedToggle(self: *AppSession, hovered: bool) void {
+        const next = hovered and self.sidebar_collapsed;
+        if (self.hovered_collapsed_toggle == next) return;
+        self.hovered_collapsed_toggle = next;
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
     /// 마우스가 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로 호버 탭을 갱신하고, 아니면 null로 비운다. 활성
     /// 탭 leaf rect를 펴 각 pane 바를 hit-test한다(마우스 이동마다 — 작은 트리라 cheap). hoverCursor이 호출한다.
     fn updateHoveredTab(self: *AppSession, x_px: f64, y_px: f64) bool {
@@ -6890,6 +6926,32 @@ pub const AppSession = struct {
                 .layer = 0,
             }) catch {};
         };
+        // 접힘 펼치기 토글(◧) 호버 배경 — 접힘 시 위 헤더-아이콘 호버 경로(sidebar_width_px>0 가드)가 안 타므로 여기서
+        // 별도로 그린다. 토글 글리프는 .m이 titlebar_strip 안 세로 중앙 + 1.7×로 그리므로(metalFrame.titlebar_strip_px),
+        // quad도 같은 중심에 맞춘다: 가로=셀 중심(col+0.5), 세로=띠 중앙, 폭≈2.6칸. 색·알파·둥글기는 헤더 아이콘 호버와
+        // 동일(밝은 fg 반투명 — straight-alpha packRgbAlpha; premultipliedRgba면 셰이더 이중 premultiply로 흐려짐).
+        if (self.sidebar_collapsed and self.hovered_collapsed_toggle and self.cell_width_px > 0 and self.cell_height_px > 0 and self.titlebar_strip_px > 0) {
+            const cw: f32 = @floatFromInt(self.cell_width_px);
+            const ch: f32 = @floatFromInt(self.cell_height_px);
+            const strip: f32 = @floatFromInt(self.titlebar_strip_px);
+            const w: f32 = cw * 2.6; // 아이콘(~1.7칸) + 좌우 여백 — 헤더 아이콘 호버와 같은 폭
+            const h: f32 = @min(ch * 1.7, strip); // 띠를 넘지 않게(큰 폰트면 cap)
+            const radius: f32 = @min(w, h) * 0.28;
+            const hover_fill = packRgbAlpha(self.appearance.theme.sidebar_foreground, 0x40); // ≈25% 밝은 하이라이트
+            self.gpu_quads.append(self.allocator, .{
+                .x = (@as(f32, @floatFromInt(self.collapsedToggleCol())) + 0.5) * cw - w / 2.0, // 셀 중심 기준 중앙
+                .y = (strip - h) / 2.0, // 띠 안 세로 중앙(글리프 중심과 일치)
+                .w = w,
+                .h = h,
+                .corner_radii = .{ radius, radius, radius, radius },
+                .border_widths = .{ 0, 0, 0, 0 },
+                .fill_color0 = hover_fill,
+                .fill_color1 = hover_fill,
+                .border_color = 0,
+                .gradient_kind = 0,
+                .layer = 0,
+            }) catch {};
+        }
     }
 
     /// C4b 모달: self.gpu_quads에서 모달 배경 quad(layer==1)를 제거한다. sidebar 밴드(layer 0)는 retained
@@ -7487,7 +7549,10 @@ pub const AppSession = struct {
     fn collapsedToggleCol(self: *const AppSession) u16 {
         if (self.cell_width_px == 0) return 0;
         const clearance_px = ptToPx(traffic_light_clearance_pt, self.scale_milli); // 신호등 클리어런스(backing px, pt→px 단일 출처)
-        return @intCast(@min(clearance_px / self.cell_width_px + 1, @as(u32, std.math.maxInt(u16))));
+        // 신호등 오른쪽 + 여백 칸. 호버 배경(아래 buildSidebar… hover quad)이 셀 중심 기준 ≈2.6칸 폭이라 col-0.8칸까지
+        // 왼쪽으로 번져, +1이면 호버가 신호등에 닿을 만큼 붙어 보였다(사용자 피드백 "초록 아이콘이랑 붙어있다"). 칸을
+        // 더 줘 신호등과 한 칸 이상 간격을 둔다(호버 좌단 = clearance + ≈1.2칸).
+        return @intCast(@min(clearance_px / self.cell_width_px + collapsed_toggle_gap_cells, @as(u32, std.math.maxInt(u16))));
     }
 
     /// 접힘 상태 좌상단 펼치기 버튼(◧)만 그린 frame — 사이드바 폭 0이라 터미널 좌상단에 겹쳐 그린다(replace가 커서
@@ -7988,6 +8053,10 @@ pub const AppSession = struct {
         // 상단 헤더(검색바 + view options·새 워크스페이스 아이콘) 높이 — 렌더러가 사이드바 셀(밴드·카드 glyph)을
         // 이만큼 아래로 민다(밴드 view는 슬롯 상대 좌표라 .m이 시프트 단일 책임). 헤더 glyph는 절대 좌표 별도 frame.
         frame.sidebar_header_height_px = self.sidebar_header_height_px;
+        // 상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글(◧) 글리프를 이 띠 안에 세로 중앙 배치해 신호등과
+        // 정렬시키는 데만 쓴다(펼침 헤더 아이콘은 terminal_origin_x_px>0이라 0.3ch nudge 유지). hit-test
+        // (collapsedToggleRect)는 이미 이 띠 전체 높이를 클릭 영역으로 쓴다.
+        frame.titlebar_strip_px = self.titlebar_strip_px;
         return frame;
     }
 
@@ -13159,6 +13228,61 @@ test "sidebar collapse toggle: hides (width 0, pt preserved) and the top-left bu
         session.mouse(1, toggle_x, toggle_y, 0, 0);
         try std.testing.expect(session.sidebar_collapsed);
     }
+}
+
+// 접힘 펼치기 토글(◧) 폴리시: (1) hoverCursor가 토글 위에서 호버 배경 quad를 켜고 밖에서 끈다(접힘 시 사이드바
+// 폭 0이라 헤더 호버 경로가 안 타므로 별도 추적), (2) metalFrame이 titlebar_strip_px를 실어 렌더러가 ◧를 띠 안
+// 세로 중앙에 정렬(신호등 정렬)할 수 있게 한다. 호버 quad는 distinctive한 fg-반투명 색(packRgbAlpha 0x40)으로 식별.
+test "collapsed toggle: hover emits a highlight quad and metalFrame carries titlebar_strip_px" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    session.toggleSidebarCollapsed();
+    try std.testing.expect(session.sidebar_collapsed);
+
+    // metalFrame이 띠 높이를 실어 렌더러가 ◧를 띠 안 세로 중앙에 정렬할 수 있다(접힘 띠 = max(cell_h, 30pt) > 0).
+    try std.testing.expect(session.titlebar_strip_px > 0);
+    try std.testing.expectEqual(session.titlebar_strip_px, session.metalFrame().titlebar_strip_px);
+
+    // 호버 quad를 식별하는 distinctive 색 — 헤더 아이콘 호버와 같은 밝은 fg 반투명(straight-alpha).
+    const hover_fill = packRgbAlpha(session.appearance.theme.sidebar_foreground, 0x40);
+    const hasHoverQuad = struct {
+        fn run(s: *const AppSession, fill: u32) bool {
+            for (s.gpu_quads.items) |q| if (q.fill_color0 == fill) return true;
+            return false;
+        }
+    }.run;
+
+    // 토글 밖(띠 빈 곳) 호버 → 호버 off, 호버 quad 없음.
+    const r = session.collapsedToggleRect().?;
+    const far_x: f64 = @floatFromInt(r.x + @as(i32, @intCast(r.w)) + 100);
+    _ = session.hoverCursor(far_x, 1, false);
+    try std.testing.expect(!session.hovered_collapsed_toggle);
+    try std.testing.expect(!hasHoverQuad(session, hover_fill));
+
+    // 토글 중심 호버 → pointingHand(.link) + 호버 on + 호버 quad 방출.
+    const cx: f64 = @floatFromInt(r.x + @as(i32, @intCast(r.w / 2)));
+    const cy: f64 = @floatFromInt(@as(i32, @intCast(r.h / 2)));
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(cx, cy, false));
+    try std.testing.expect(session.hovered_collapsed_toggle);
+    try std.testing.expect(hasHoverQuad(session, hover_fill));
+
+    // 다시 밖으로 → 호버 off, quad 제거(rebuildSidebar가 다시 비움).
+    _ = session.hoverCursor(far_x, 1, false);
+    try std.testing.expect(!session.hovered_collapsed_toggle);
+    try std.testing.expect(!hasHoverQuad(session, hover_fill));
 }
 
 // 멀티-탭 핵심 계약: 두 번째 탭을 만들면 자기 셸 PTY가 spawn되고, tick이 '모든' 탭을 drain하므로

@@ -110,9 +110,14 @@ const sidebar_max_pt: u32 = 480; // 너무 넓으면 터미널이 좁아짐
 // 없음). 에이전트 상태줄(4번째)을 추가하며 3.8×→4.6×로 키웠다. refreshCellMetrics가 cell_height_px × 이
 // 비율로 backing 픽셀 슬롯 높이를 구한다.
 const sidebar_slot_height_ratio_milli: u32 = 4600;
-// 사이드바 상단 헤더(검색바 + view options·새 워크스페이스 아이콘) 높이 = cell 높이 × 2.0(검색 1줄 + 상하 패딩).
-// 0이면 헤더 없음(하위호환). slot_height와 같은 단일 출처(cell 메트릭)에서 파생한다.
+// 사이드바 상단 헤더(검색바 + 사이드바 접기·view options·새 워크스페이스 아이콘) 높이 = cell 높이 × 3.0(아이콘 줄 +
+// 검색 줄 + 패딩). 0이면 헤더 없음(하위호환). slot_height와 같은 단일 출처(cell 메트릭)에서 파생한다.
 const sidebar_header_height_ratio_milli: u32 = 3000;
+// 사이드바 접기/펼치기 토글 아이콘 코드포인트(◧ U+25E7 — 좌측 절반 채운 사각형 = 왼쪽 패널). 헤더 아이콘 줄(펼침)·
+// 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
+const sidebar_toggle_codepoint: u21 = 0x25E7;
+// 사이드바 접힘 시 좌상단 펼치기 버튼이 신호등 오른쪽에서 비울 가로 여백(논리 pt). 신호등은 좌상단 ~70pt를 차지한다.
+const traffic_light_clearance_pt: u32 = 72;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -988,6 +993,10 @@ pub const AppSession = struct {
     // 사이드바 우측 경계 드래그로 폭을 조절하는 중인가. down이 경계 밴드에서 시작하면 true, drag(2)가
     // setSidebarWidthPx로 live 갱신, up(3)이 끝낸다(divider 드래그와 같은 패턴).
     sidebar_resize_active: bool = false,
+    // 사이드바 접힘(사용자 토글). true면 effective 폭이 0(카드·검색 숨김, 터미널이 그 자리까지 확장)이고, 좌상단에
+    // 펼치기 버튼만 남는다. 폭(pt)은 sidebar_width_pt에 보존돼 펼치면 복원된다. chrome_minimal(quick terminal)과
+    // 달리 메인 창 전용 토글이라 별도 플래그 — refreshCellMetrics가 둘 다 0으로 환산한다.
+    sidebar_collapsed: bool = false,
     // 마지막 resize의 backing(drawable) 픽셀 크기. split된 panel의 leaf rect 계산(터미널 영역 = backing −
     // 사이드바)에 쓴다. 첫 resize 전엔 0 — 그땐 단일 leaf라 rect.w/h가 0이어도 활성 frame은 origin에 그려져
     // 무해하다(split은 창이 떠 backing이 잡힌 뒤에야 가능). resize가 갱신한다.
@@ -1866,6 +1875,19 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| self.resizeTabPanes(tab); // 모든 탭의 term 폭이 바뀐다(best-effort)
         self.recomputeActivePaneRect();
         self.rebuildSidebar() catch {}; // sidebar_cols 환산이 바뀌므로 밴드 재생성
+        self.metal_dirty = true;
+    }
+
+    /// 사이드바 접기/펼치기 토글 — 헤더 토글 아이콘·접힘 시 좌상단 펼치기 버튼이 부른다. 접으면 effective 폭이 0(카드·
+    /// 검색 숨김, 터미널이 그 자리까지 확장)이고 폭(pt)은 sidebar_width_pt에 보존돼 펼치면 복원된다. 폭이 모든 탭 term을
+    /// 바꾸므로 setSidebarWidthPx와 같은 재배치(전 탭 resize + 활성 rect + 사이드바 재빌드)를 한다.
+    fn toggleSidebarCollapsed(self: *AppSession) void {
+        if (self.chrome_minimal) return; // quick terminal minimal은 항상 사이드바 없음 — 토글 대상 아님
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        self.sidebar_width_px = if (self.sidebar_collapsed) 0 else ptToPx(self.sidebar_width_pt, self.scale_milli);
+        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
+        self.recomputeActivePaneRect();
+        self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }
 
@@ -3540,8 +3562,8 @@ pub const AppSession = struct {
         self.cell_height_px = spaced.height_px;
         // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처). 폭은 현재
         // 논리 폭(sidebar_width_pt — 사용자 드래그로 바뀔 수 있음)에서 파생하므로 DPI 변경에도 유지된다.
-        // minimal 세션은 사이드바가 없으므로 0 고정(터미널이 전폭을 쓴다).
-        self.sidebar_width_px = if (self.chrome_minimal) 0 else ptToPx(self.sidebar_width_pt, self.scale_milli);
+        // minimal 세션(quick terminal)·접힘(사용자 토글)이면 사이드바 폭 0 고정(터미널이 전폭). 폭(pt)은 보존돼 펼치면 복원.
+        self.sidebar_width_px = if (self.chrome_minimal or self.sidebar_collapsed) 0 else ptToPx(self.sidebar_width_pt, self.scale_milli);
         // window padding도 같은 단일 출처(논리 pt × 분수 scale)로 backing px 환산 — DPI 변경에도 유지된다.
         // termRect/gridFromBacking이 이 px를 inset으로 쓴다(렌더 origin·hit-test·IME 자동 정합). minimal 세션도
         // 동일 적용(터미널 콘텐츠 inset이라 chrome 유무와 무관).
@@ -4162,8 +4184,21 @@ pub const AppSession = struct {
             }
             return;
         }
-        // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드).
-        if (kind == 1 and chrome.components.sidebar.onResizeEdge(x_px, self.sidebar_width_px, if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px)) {
+        // 접힘 상태 좌상단 펼치기 버튼(◧) 클릭 → 펼친다. 사이드바 폭 0이라 inSidebar=false(아래 분기를 안 탐)라 별도 체크.
+        if (kind == 1 and self.collapsedToggleRect() != null) {
+            const r = self.collapsedToggleRect().?;
+            const rx: f64 = @floatFromInt(r.x);
+            const ry: f64 = @floatFromInt(r.y);
+            if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w)) and
+                y_px >= ry and y_px < ry + @as(f64, @floatFromInt(r.h)))
+            {
+                self.toggleSidebarCollapsed();
+                return;
+            }
+        }
+        // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드). 접힘이면
+        // 사이드바가 없어(폭 0) 경계 드래그 비활성(onResizeEdge가 x=0 근처를 잡아 의도치 않게 트리거되는 것 방지).
+        if (kind == 1 and !self.sidebar_collapsed and chrome.components.sidebar.onResizeEdge(x_px, self.sidebar_width_px, if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px)) {
             self.sidebar_resize_active = true;
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
@@ -4180,6 +4215,7 @@ pub const AppSession = struct {
                 const header_region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px);
                 switch (header_region) {
                     .new_workspace => _ = self.newTab() catch {},
+                    .toggle_sidebar => self.toggleSidebarCollapsed(), // ◧ → 사이드바 접기(좌상단 펼치기 버튼만 남음)
                     .view_options => {
                         // ⚙ 클릭 → 사이드바 표시 토글 메뉴(브랜치·폴더)를 ⚙ 아이콘 아래에 띄운다(체크박스 패널).
                         // 다시 ⚙(메뉴 박스 밖)를 클릭하면 닫힌다(아래 context_menu.open 분기의 바깥-클릭 경로).
@@ -6998,20 +7034,26 @@ pub const AppSession = struct {
     /// 레이아웃 — 그려진 아이콘과 클릭 영역이 일치한다(§5.4 단일 레이아웃 소스). 검색 입력 텍스트·caret은 P3.
     fn buildSidebarHeaderFrame(self: *AppSession) !?renderer.RenderFrame {
         const cw = self.cell_width_px;
-        if (cw == 0 or self.sidebar_header_height_px == 0 or self.tabs.items.len == 0) return null;
+        if (cw == 0 or self.cell_height_px == 0 or self.tabs.items.len == 0) return null;
+        // 접힘이면 헤더 대신 좌상단 펼치기 버튼만 — 사이드바 폭 0이라 터미널 좌상단에 겹쳐 그린다(replace가 커서 suffix
+        // '앞'에 끼워 터미널 위에 보임). 헤더 높이·검색·카드는 없다(완전히 숨김 + 좌상단 버튼).
+        if (self.sidebar_collapsed) return self.buildCollapsedToggleFrame();
+        if (self.sidebar_header_height_px == 0) return null;
         const cols: u16 = @intCast(@min(self.sidebar_width_px / cw, @as(u32, std.math.maxInt(u16))));
-        if (cols < 6) return null; // 검색 영역 + 우측 아이콘 2개(각 2칸)가 들어갈 최소 폭
+        if (cols < 8) return null; // 검색 줄 + 우측 아이콘 3개(◧/⚙/+, 각 2칸 간격)가 들어갈 최소 폭
 
         var cells: std.ArrayList(renderer.DrawCell) = .empty;
         errdefer cells.deinit(self.allocator);
         const muted: terminal.Color = .{ .rgb = self.mutedForeground() };
         const fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
-        // 헤더 2줄: 줄0(신호등 줄)은 좌측 네이티브 신호등(닫기·최소화·확대) 영역을 비우고 우측에 view options(⚙)·
-        // 새 워크스페이스(+) 아이콘. 검색은 신호등 아래 줄(search_row)에 🔍 + 입력/placeholder로 둔다(headerHit과
+        // 헤더: 줄0(신호등 줄)은 좌측 네이티브 신호등(닫기·최소화·확대) 영역을 비우고 우측에 사이드바 접기(◧)·view
+        // options(⚙)·새 워크스페이스(+) 아이콘. 검색은 신호등 아래 줄(search_row)에 🔍 + 입력/placeholder로 둔다(headerHit과
         // 같은 줄/우측 정렬 — view↔hitTest 단일 레이아웃). 줄 수는 headerRows 단일 소스(headerHit·caretRect과 동일).
         const header_rows: u16 = @intCast(chrome.components.sidebar.headerRows(self.sidebar_header_height_px, self.cell_height_px));
         const search_row: u16 = header_rows - 1; // 헤더 마지막 줄(신호등 아래)
-        // 줄0: 우측 view options(⚙)·새 워크스페이스(+) 아이콘.
+        // 줄0: 우측 아이콘 3개 — 사이드바 접기(◧ cols-6)·view options(⚙ cols-4)·새 워크스페이스(+ cols-2). 2칸 간격,
+        // 우측 1칸 패딩(cols-1 비움). headerHit의 toggle/view_options/new_workspace zone과 같은 col(단일 레이아웃 소스).
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 6, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 4, .codepoint = 0x2699, .style = .{ .foreground = fg } });
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
         // 검색 줄: 🔍(EAW 2칸) + 입력 텍스트(query+preedit, EAW 한글 2칸), 비면 placeholder "Search"(muted).
@@ -7064,6 +7106,52 @@ pub const AppSession = struct {
             .cell_height_px = @intCast(self.cell_height_px),
         };
         return try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
+    }
+
+    /// 사이드바 접힘 시 좌상단 펼치기 버튼(◧)의 col(신호등 오른쪽). render(buildCollapsedToggleFrame)와 hit-test
+    /// (collapsedToggleRect)가 같은 값을 써야 그려진 버튼과 클릭 영역이 일치한다(단일 출처). cell_width 0이면 0.
+    fn collapsedToggleCol(self: *const AppSession) u16 {
+        if (self.cell_width_px == 0) return 0;
+        const clearance_px: u32 = traffic_light_clearance_pt * self.scale_milli / 1000; // 신호등 클리어런스(backing px)
+        return @intCast(@min(clearance_px / self.cell_width_px + 1, @as(u32, std.math.maxInt(u16))));
+    }
+
+    /// 접힘 상태 좌상단 펼치기 버튼(◧)만 그린 frame — 사이드바 폭 0이라 터미널 좌상단에 겹쳐 그린다(replace가 커서
+    /// suffix 앞에 끼워 터미널 '위'에). 신호등 오른쪽 col(collapsedToggleCol) 줄0에 1글자. 헤더 frame과 같은 절대 좌표 경로.
+    fn buildCollapsedToggleFrame(self: *AppSession) !?renderer.RenderFrame {
+        const cw = self.cell_width_px;
+        if (cw == 0 or self.cell_height_px == 0 or self.tabs.items.len == 0) return null;
+        const fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+        const btn_col = self.collapsedToggleCol();
+        var cells: std.ArrayList(renderer.DrawCell) = .empty;
+        errdefer cells.deinit(self.allocator);
+        try cells.append(self.allocator, .{ .row = 0, .col = btn_col, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
+        const draw_list = renderer.DrawList{
+            .size = .{ .cols = btn_col + 2, .rows = 1 },
+            .cursor = .{ .row = 0, .col = 0 },
+            .dirty = null,
+            .cells = try cells.toOwnedSlice(self.allocator),
+            .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
+        };
+        const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
+            .appearance = self.appearance,
+            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+            .scale_milli = self.scale_milli,
+            .cell_width_px = @intCast(self.cell_width_px),
+            .cell_height_px = @intCast(self.cell_height_px),
+        };
+        return try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
+    }
+
+    /// 접힘 상태 좌상단 펼치기 버튼의 backing-px rect(클릭 hit-test) — render(collapsedToggleCol)와 같은 col. 펼침/접힘
+    /// 아니면 null. mouse 핸들러가 이 rect 안 클릭이면 toggleSidebarCollapsed(펼치기)한다(사이드바가 없어 inSidebar=false라
+    /// 별도 체크). 버튼 1칸 + 좌우 약간 여유(클릭 쉬움)로 잡는다.
+    fn collapsedToggleRect(self: *const AppSession) ?chrome.draw.Rect {
+        if (!self.sidebar_collapsed or self.cell_width_px == 0 or self.cell_height_px == 0) return null;
+        const cw = self.cell_width_px;
+        const x = self.collapsedToggleCol() * cw;
+        return .{ .x = @intCast(x), .y = 0, .w = cw, .h = self.cell_height_px };
     }
 
     /// 오버레이(커맨드 팝업·Find·Notice) frame의 공통 마무리. 채워진 cells(소유권 인계) + 격자 크기(cols×rows) +
@@ -12369,6 +12457,55 @@ test "isWindowDragRegion: only empty header area drags the window (not icons/sea
     // 사이드바 접힘(width 0) → 헤더 없음, 드래그 아님.
     session.sidebar_width_px = 0;
     try std.testing.expect(!session.isWindowDragRegion(2 * cw, icon_y));
+}
+
+// 사이드바 접기 토글: ◧ 클릭/토글 → 폭 0(완전 숨김) + pt 보존, 좌상단 펼치기 버튼 클릭 → 폭 복원. macOS 게이트.
+test "sidebar collapse toggle: hides (width 0, pt preserved) and the top-left button expands it" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const w0 = session.sidebar_width_px;
+    const pt0 = session.sidebar_width_pt;
+    try std.testing.expect(w0 > 0);
+    try std.testing.expect(!session.sidebar_collapsed);
+    try std.testing.expect(session.collapsedToggleRect() == null); // 펼침일 땐 버튼 없음
+
+    // 접기(토글) → 폭 0, pt는 보존(복원용), 좌상단 버튼 등장.
+    session.toggleSidebarCollapsed();
+    try std.testing.expect(session.sidebar_collapsed);
+    try std.testing.expectEqual(@as(u32, 0), session.sidebar_width_px);
+    try std.testing.expectEqual(pt0, session.sidebar_width_pt); // pt 보존
+    try std.testing.expect(session.collapsedToggleRect() != null);
+
+    // 좌상단 펼치기 버튼 안 클릭 → 펼침(폭 복원). 사이드바 폭 0이라 inSidebar=false인데도 별도 경로로 잡힌다.
+    const r = session.collapsedToggleRect().?;
+    const bx: f64 = @floatFromInt(r.x);
+    session.mouse(1, bx + 1, 1, 0, 0);
+    try std.testing.expect(!session.sidebar_collapsed);
+    try std.testing.expectEqual(w0, session.sidebar_width_px); // 폭 복원
+
+    // 헤더 ◧(toggle_sidebar) 영역 클릭으로도 접힌다(폭이 충분해 헤더가 그려질 때).
+    const cw: f64 = @floatFromInt(session.cell_width_px);
+    const cols = session.sidebar_width_px / session.cell_width_px;
+    if (cols >= 8) {
+        const toggle_x: f64 = @as(f64, @floatFromInt(cols - 5)) * cw; // ◧ zone [cols-6, cols-4)
+        const toggle_y: f64 = @as(f64, @floatFromInt(session.cell_height_px)) * 0.5;
+        try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.toggle_sidebar, chrome.components.sidebar.headerHit(toggle_x, toggle_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px));
+        session.mouse(1, toggle_x, toggle_y, 0, 0);
+        try std.testing.expect(session.sidebar_collapsed);
+    }
 }
 
 // 멀티-탭 핵심 계약: 두 번째 탭을 만들면 자기 셸 PTY가 spawn되고, tick이 '모든' 탭을 drain하므로

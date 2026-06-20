@@ -1056,15 +1056,6 @@ pub const MetalFrameBuffer = struct {
         var cells_list: std.ArrayList(NativeMetalCell) = .empty;
         errdefer cells_list.deinit(allocator);
         try cells_list.appendSlice(allocator, pane_chrome_cells);
-        // 사이드바 헤더 glyph를 origin(0,0) 기반 cells로 (pane_chrome 다음) 둔다 — 사이드바 영역(origin_x=0)이라
-        // 터미널과 안 겹치고, .m이 maru_fill_cell_quad(origin_x + col*cw, origin_y + row*ch)로 헤더 영역 [0,header)에
-        // 그린다(셀 row 시프트 비대상). pane_chrome 뒤라 탭 바 chrome cells[0] 가정을 안 깨고, 커서 suffix(맨 끝)도 보존.
-        if (sidebar_header_frame) |hf| {
-            const hcells = try buildNativeCellsFromGlyphQuads(allocator, hf.glyph_quad_frame, hf.draw_list.cells, sidebar_colors);
-            defer allocator.free(hcells);
-            setCellsPaneOrigin(hcells, 0, 0);
-            try cells_list.appendSlice(allocator, hcells);
-        }
         var cursor_cells: usize = 0;
         for (pane_frames, 0..) |pf, i| {
             const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
@@ -1077,6 +1068,16 @@ pub const MetalFrameBuffer = struct {
         // (커서가 divider에 안 가림). cursor_cells(suffix 길이)는 그대로라 blink rebuild가 안 깨진다.
         if (pane_overlay_cells.len > 0) {
             try cells_list.insertSlice(allocator, cells_list.items.len - cursor_cells, pane_overlay_cells);
+        }
+        // 사이드바 헤더 glyph(검색·아이콘 / 접힘 시 좌상단 펼치기 버튼)를 origin(0,0) cells로 활성 커서 suffix '앞'에
+        // 끼운다 — 터미널 내용 '위'에 그려져, 접힘(사이드바 폭 0이라 헤더가 터미널 좌상단과 겹침)일 때 펼치기 버튼이
+        // 터미널에 가려지지 않는다. 펼침일 땐 헤더(origin_x=0)와 터미널(origin_x≥사이드바폭)이 안 겹쳐 순서 무관(시각 동일).
+        // cursor_cells(suffix)는 보존돼 blink rebuild가 안 깨진다(divider와 같은 삽입 규율). pane_chrome cells[0] 가정도 유지.
+        if (sidebar_header_frame) |hf| {
+            const hcells = try buildNativeCellsFromGlyphQuads(allocator, hf.glyph_quad_frame, hf.draw_list.cells, sidebar_colors);
+            defer allocator.free(hcells);
+            setCellsPaneOrigin(hcells, 0, 0);
+            try cells_list.insertSlice(allocator, cells_list.items.len - cursor_cells, hcells);
         }
         // 오버레이 frame은 커서 suffix '뒤'(맨 뒤)에 append → 터미널·chrome·커서 위 최상위. 불투명 bg 셀이라
         // 아래(커서 포함)를 덮는다. 오버레이가 자기 caret(PaneFrame.cursor — find·palette 입력 커서)을 내면 그

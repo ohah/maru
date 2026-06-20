@@ -703,16 +703,15 @@ bool maru_metal_renderer_draw(
         //    순서라 사이드바 영역에 배경 위로 그려진다. 인덱스는 배경(quad_index) 다음부터.
         for (size_t i = 0; i < cell_count; i++) {
             const MaruAppHostMetalCell tc = cells[i];
-            // 사이드바 헤더 아이콘 확대/정렬. 헤더 glyph만 origin_x==0이다 — 사이드바가 켜지면(terminal_origin_x_px>0)
-            // 터미널 cell은 origin_x=사이드바폭>0이라 origin_x==0은 헤더뿐이고, 사이드바가 꺼지면 헤더 frame 자체가
-            // 없어(buildSidebarHeaderFrame가 null) 터미널 '+'를 오확대하지 않는다.
+            // 사이드바 헤더 아이콘 확대/정렬. 헤더 frame은 origin(0,0)에 박힌다(setCellsPaneOrigin 0,0)라 origin_x==0 &&
+            // origin_y==0이 헤더 cell이다. 터미널/pane은 상단 타이틀바 띠로 origin_y≥띠>0(메인 창)이라 안 걸리고, 펼침이면
+            // 터미널 origin_x>0이라 더 확실하다. 그래서 펼침·접힘(터미널 origin_x=0이어도 origin_y>0) 모두 헤더만 잡는다.
             //   ◧(사이드바 접기)·⚙(view options)·+(새 워크스페이스): 1.7× 확대(에이전트 심볼과 같은 slot-stretch) +
-            //   줄0이 창 top에 붙어 위로 쏠리므로 신호등 수직 중앙에 맞춰 약간 아래로 내린다(py_nudge=ch×0.30 — 확대로
-            //   위가 잘리는 것도 함께 방지). 🔍(검색)은 검색 텍스트와 같은 크기라 확대하지 않는다(1.0).
-            // 헤더 아이콘은 줄0(row==0)의 ◧/⚙/+만 — 검색 줄(row≥1)에 사용자가 친 '+'(예: 브랜치 `feat/a+b` 검색)는
-            // 같은 헤더 frame(origin_x==0)이라 row 조건이 없으면 1.7×로 확대돼 깨져 보인다. row 0으로 한정한다.
-            // (NB: 화질은 slot-stretch라 약간 부드럽다 — per-cell 큰-크기 래스터화는 후속.)
-            const bool is_header = (terminal_origin_x_px > 0u && tc.origin_x == 0u);
+            //   줄0이 창 top에 붙어 위로 쏠리므로 신호등 수직 중앙에 맞춰 약간 아래로 내린다(py_nudge=ch×0.30). 🔍(검색)은
+            //   검색 텍스트와 같은 크기라 확대 안 함. row 0으로 한정해 검색 줄(row≥1)에 친 '+'를 오확대하지 않는다.
+            // (quick terminal은 띠 0이라 터미널이 origin_y=0일 수 있으나 헤더 frame이 없어 ◧/⚙는 거의 없고 '+' 좌상단만
+            //  드물게 확대 — 무시 가능. NB: 화질은 slot-stretch라 약간 부드럽다 — per-cell 큰-크기 래스터화는 후속.)
+            const bool is_header = (tc.origin_x == 0u && tc.origin_y == 0u);
             const bool is_corner_icon = is_header && tc.row == 0u && (tc.codepoint == 0x2699u || tc.codepoint == (uint32_t)'+' || tc.codepoint == 0x25E7u);
             const float hscale = is_corner_icon ? 1.7f : 1.0f;
             const float py_nudge = is_corner_icon ? ch * 0.30f : 0.0f;

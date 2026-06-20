@@ -706,13 +706,11 @@ bool maru_metal_renderer_draw(
             // 사이드바 헤더 아이콘 확대/정렬. 헤더 frame은 origin(0,0)에 박힌다(setCellsPaneOrigin 0,0)라 origin_x==0 &&
             // origin_y==0이 헤더 cell이다. 터미널/pane은 상단 타이틀바 띠로 origin_y≥띠>0(메인 창)이라 안 걸리고, 펼침이면
             // 터미널 origin_x>0이라 더 확실하다. 그래서 펼침·접힘(터미널 origin_x=0이어도 origin_y>0) 모두 헤더만 잡는다.
-            //   ◧(사이드바 접기)·⚙(view options)·+(새 워크스페이스): rect를 1.7×로 키워(hscale) 같은 배율로 직접
-            //   래스터화된(glyph_scale_milli=1700, app_session.header_icon_scale_milli) 큰 slot을 1:1 매핑 → **crisp**(slot-stretch
-            //   흐림 아님). hscale은 그 래스터 배율과 **같아야** 한다. 줄0이 창 top에 붙어 위로 쏠리므로 신호등 수직 중앙에
-            //   맞춰 약간 아래로 내린다(py_nudge=ch×0.30). 🔍(검색)은 검색 텍스트와 같은 크기라 확대 안 함. row 0 한정으로
-            //   검색 줄(row≥1)에 친 '+'를 오확대하지 않는다.
+            //   ◧(사이드바 접기)·⚙(view options)·+(새 워크스페이스): 1.7× 확대(에이전트 심볼과 같은 slot-stretch) +
+            //   줄0이 창 top에 붙어 위로 쏠리므로 신호등 수직 중앙에 맞춰 약간 아래로 내린다(py_nudge=ch×0.30). 🔍(검색)은
+            //   검색 텍스트와 같은 크기라 확대 안 함. row 0으로 한정해 검색 줄(row≥1)에 친 '+'를 오확대하지 않는다.
             // (quick terminal은 띠 0이라 터미널이 origin_y=0일 수 있으나 헤더 frame이 없어 ◧/⚙는 거의 없고 '+' 좌상단만
-            //  드물게 확대 — 무시 가능. 근본은 cell.glyph_scale_milli를 ABI로 실어 sniff를 없애는 것(후속).)
+            //  드물게 확대 — 무시 가능. NB: 화질은 slot-stretch라 약간 부드럽다 — per-cell 큰-크기 래스터화는 후속.)
             const bool is_header = (tc.origin_x == 0u && tc.origin_y == 0u);
             const bool is_corner_icon = is_header && tc.row == 0u && (tc.codepoint == 0x2699u || tc.codepoint == (uint32_t)'+' || tc.codepoint == 0x25E7u);
             const float hscale = is_corner_icon ? 1.7f : 1.0f;

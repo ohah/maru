@@ -116,9 +116,6 @@ const sidebar_header_height_ratio_milli: u32 = 3000;
 // 사이드바 접기/펼치기 토글 아이콘 코드포인트(◧ U+25E7 — 좌측 절반 채운 사각형 = 왼쪽 패널). 헤더 아이콘 줄(펼침)·
 // 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
 const sidebar_toggle_codepoint: u21 = 0x25E7;
-// 헤더 아이콘(◧/⚙/+) glyph를 큰 크기로 직접 래스터화할 배율(천분율) — slot·CoreText 폰트를 1.7×로 키워 또렷하게.
-// `maru_metal_renderer.m`의 헤더 아이콘 gscale(1.7×)과 **같은 값**이어야 큰 slot이 큰 rect에 1:1 매핑돼 crisp하다.
-const header_icon_scale_milli: u16 = 1700;
 // 사이드바 접힘 시 좌상단 펼치기 버튼이 신호등 오른쪽에서 비울 가로 여백(논리 pt). 신호등은 좌상단 ~70pt를 차지한다.
 const traffic_light_clearance_pt: u32 = 72;
 // 접힘 시 상단 타이틀바 띠의 최소 높이(논리 pt) — 신호등 세로 높이(~28pt)를 가려야 터미널/탭이 신호등을 침범 안 함.
@@ -7287,9 +7284,9 @@ pub const AppSession = struct {
         const search_row: u16 = header_rows - 1; // 헤더 마지막 줄(신호등 아래)
         // 줄0: 우측 아이콘 3개 — 사이드바 접기(◧ cols-6)·view options(⚙ cols-4)·새 워크스페이스(+ cols-2). 2칸 간격,
         // 우측 1칸 패딩(cols-1 비움). headerHit의 toggle/view_options/new_workspace zone과 같은 col(단일 레이아웃 소스).
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 6, .codepoint = sidebar_toggle_codepoint, .glyph_scale_milli = header_icon_scale_milli, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 4, .codepoint = 0x2699, .glyph_scale_milli = header_icon_scale_milli, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .glyph_scale_milli = header_icon_scale_milli, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 6, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 4, .codepoint = 0x2699, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
         // 검색 줄: 🔍(EAW 2칸) + 입력 텍스트(query+preedit, EAW 한글 2칸), 비면 placeholder "Search"(muted).
         // 검색어는 blur(비활성)돼도 보존해 그대로 그린다 — 다시 클릭해 이어서 편집·필터(초안 보존). preedit은 활성일
         // 때만 존재. caret/IME 후보창은 sidebarSearchCaretRect가 잡는다(활성일 때만).
@@ -7359,7 +7356,7 @@ pub const AppSession = struct {
         const btn_col = self.collapsedToggleCol();
         var cells: std.ArrayList(renderer.DrawCell) = .empty;
         errdefer cells.deinit(self.allocator);
-        try cells.append(self.allocator, .{ .row = 0, .col = btn_col, .codepoint = sidebar_toggle_codepoint, .glyph_scale_milli = header_icon_scale_milli, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = btn_col, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
         const draw_list = renderer.DrawList{
             .size = .{ .cols = btn_col + 2, .rows = 1 },
             .cursor = .{ .row = 0, .col = 0 },

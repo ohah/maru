@@ -6819,9 +6819,14 @@ pub const AppSession = struct {
                 const cw: f32 = @floatFromInt(self.cell_width_px);
                 const ch: f32 = @floatFromInt(self.cell_height_px);
                 const center_x: f32 = (@as(f32, @floatFromInt(icon_col)) + 0.5) * cw; // 셀 중심(=.m gscale 중심)
-                const w: f32 = cw * 2.0;
+                const w: f32 = cw * 2.6; // 좌우 패딩을 더 줘 버튼처럼(아이콘 ~1.7칸 + 양옆 여백) — 사용자 피드백
                 const h: f32 = ch * 1.7;
                 const radius: f32 = @min(w, h) * 0.28; // 둥근 버튼
+                // 호버 배경은 **반투명**으로 둔다 — 헤더 아이콘 glyph는 터미널 셀 패스(draw 1b)에 그려지고 이 호버
+                // quad는 layer 0(under, draw 3)이라 아이콘보다 '뒤'가 아니라 '위'에 그려진다(그 사이에 끼울 패스가
+                // 없음). 불투명이면 색이 아이콘을 완전히 덮어 안 보였다(사용자 피드백). 반투명이면 아이콘이 비치고,
+                // 아래 buildSidebarHeaderFrame이 호버 아이콘 glyph 색까지 밝게(sidebar_active) 해 hover가 분명히 보인다.
+                const hover_fill = premultipliedRgba(self.sidebarHoverBg() & 0x00FF_FFFF, 0x66); // ≈40%
                 self.gpu_quads.append(self.allocator, .{
                     .x = center_x - w / 2.0,
                     .y = 0,
@@ -6829,8 +6834,8 @@ pub const AppSession = struct {
                     .h = h,
                     .corner_radii = .{ radius, radius, radius, radius },
                     .border_widths = .{ 0, 0, 0, 0 },
-                    .fill_color0 = self.sidebarHoverBg(),
-                    .fill_color1 = self.sidebarHoverBg(),
+                    .fill_color0 = hover_fill,
+                    .fill_color1 = hover_fill,
                     .border_color = 0,
                     .gradient_kind = 0,
                     .layer = 0,
@@ -7394,9 +7399,17 @@ pub const AppSession = struct {
         // 줄0: 우측 아이콘 3개 — 사이드바 접기(◧ cols-8)·view options(⚙ cols-5)·새 워크스페이스(+ cols-2). 3칸 간격,
         // 우측 1칸 패딩(cols-1 비움). 아이콘이 ~1.7칸 폭이라 2칸 간격이면 서로 붙어 보여(사용자 피드백) 3칸으로 띄운다.
         // headerHit의 toggle/view_options/new_workspace zone과 같은 col(단일 레이아웃 소스).
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 8, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 5, .codepoint = 0x2699, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
+        // 호버 중인 아이콘은 밝은 색(sidebar_active)으로 강조 — 호버 배경 quad가 반투명이라 아이콘이 비치고, glyph
+        // 색까지 밝아져 hover가 분명히 보인다(불투명 배경이 아이콘을 덮던 문제의 보강). 호버 영역은 setHoveredHeaderRegion이
+        // 아이콘(◧/⚙/+)일 때만 set한다(검색·none은 null).
+        const icon_hover: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_active };
+        const hr = self.hovered_header_region orelse .none;
+        const fg_toggle = if (hr == .toggle_sidebar) icon_hover else fg;
+        const fg_view = if (hr == .view_options) icon_hover else fg;
+        const fg_new = if (hr == .new_workspace) icon_hover else fg;
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 8, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg_toggle } });
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 5, .codepoint = 0x2699, .style = .{ .foreground = fg_view } });
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg_new } });
         // 검색 줄: 🔍(EAW 2칸) + 입력 텍스트(query+preedit, EAW 한글 2칸), 비면 placeholder "Search"(muted).
         // 검색어는 blur(비활성)돼도 보존해 그대로 그린다 — 다시 클릭해 이어서 편집·필터(초안 보존). preedit은 활성일
         // 때만 존재. caret/IME 후보창은 sidebarSearchCaretRect가 잡는다(활성일 때만).

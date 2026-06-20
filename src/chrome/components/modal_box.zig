@@ -1,8 +1,9 @@
-//! ModalBox — 중앙 모달 박스의 공유 레이아웃/렌더. notice(알림)·confirm(예/아니오 확인)이 같은 박스 기하를
-//! 공유한다: 폭 clamp(터미널 영역=사이드바 오른쪽), soft-lock 방지 가드, 중앙 배치, 둥근 배경 quad + focus 테두리,
-//! 줄별 텍스트. 줄 수만 다르다(notice 1줄, confirm 메시지+안내 2줄). State·handle(입력)·라이프사이클은 각 컴포넌트가
-//! 소유하고, 이 모듈은 "열렸을 때 줄들을 박스로 그리는" **순수 view**만 제공한다 — 두 컴포넌트가 클램프/중앙배치
-//! 로직을 복붙하던 중복(및 한쪽만 고쳐 갈리는 위험)을 없앤다. 단일 출처: docs/chrome-strategy.md §5.4.
+//! ModalBox — 중앙 모달 박스의 **공유 레이아웃 프리미티브**(디자인 시스템). notice(알림)·confirm(예/아니오 확인)·
+//! 향후 모달이 같은 박스 기하를 재사용한다: 폭 clamp(터미널 영역=사이드바 오른쪽), soft-lock 방지 가드, 중앙 배치,
+//! 둥근 배경 quad + focus 테두리, 콘텐츠 셀 좌표 계산. 컴포넌트는 `layout`으로 Box(rect+콘텐츠 좌표)를 얻고, `frame`
+//! 으로 배경/테두리를, `text`/`fillCells`/`centerX`/`rowY`로 콘텐츠를 그 안에 배치한다 — 클램프/중앙배치 로직을
+//! 복붙하지 않고 한 곳(여기)에서만 둔다. State·handle(입력)·콘텐츠 구성(줄/버튼)은 각 컴포넌트가 소유한다.
+//! 단일 출처: docs/chrome-strategy.md §5.4.
 
 const std = @import("std");
 const draw = @import("../draw.zig");
@@ -13,16 +14,90 @@ const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭
 /// 이 박스가 그리는 레이어(최상위 모달). notice/confirm이 그대로 재노출한다.
 pub const layer = draw.Layer.modal;
 
-/// 박스에 그릴 한 줄(텍스트 + 색 역할). 보통 첫 줄=메시지(surface_fg), 이후=안내(muted_fg).
+/// 박스에 그릴 한 줄(텍스트 + 색 역할). 보통 첫 줄=메시지(surface_fg), 이후=안내(muted_fg). notice가 view()에 쓴다.
 pub const Line = struct { text: []const u8, role: tokens.ColorRole };
 
-/// lines를 중앙 모달 박스로 그려 out에 append한다(quad + border + 줄별 text). lines가 비면 무동작(호출자가 열림
-/// 가드). 폭 = 가장 긴 줄 **표시 폭**(EAW — overlay_input.displayCols, 한글/CJK=2칸) + 좌우 여백, **터미널 영역
-/// (사이드바 오른쪽)으로 clamp**한다 — 넘으면 사이드바 침범/우측 오버플로. 폭을 placeText와 같은 EAW 규약으로 재야
-/// 한글 메시지가 박스를 넘쳐 잘리지 않는다(코드포인트 수로 재면 한글이 2배 과소측정돼 클리핑됐다 — 확인 모달
-/// 한글 문구가 안 보이던 버그). term_cols==0(터미널 영역이 한 셀보다 좁음)이면만 생략한다(중앙배치 뺄셈 언더플로
-/// 방지); 1~3칸이어도 작은 박스라도 그린다 — '열림이지만 안 보임'이면 handle이 모든 키를 소비해 soft-lock이 된다.
-/// 높이 = (줄 수 + 위/아래 여백 한 줄씩)·ch. ops·runs 슬라이스는 호출자가 준 frame arena가 소유한다.
+/// 배치된 모달 박스 — rect(backing px)와 콘텐츠 영역 좌표/메트릭. layout()이 반환하고, frame()·text()·fillCells()·
+/// centerX()·rowY()가 이걸 받아 그 안에 콘텐츠를 둔다. inner_*는 사방 여백(modal_margin_cells열 + 1행)을 뺀 영역.
+pub const Box = struct {
+    rect: draw.Rect, // 박스 외곽(배경 quad/테두리)
+    inner_x: i32, // 콘텐츠 좌측(px) = rect.x + 좌측 여백
+    inner_y: i32, // 콘텐츠 상단(px) = rect.y + 위 여백 한 줄
+    inner_cols: u32, // 콘텐츠 가로 칸 수(좌우 여백 제외) — 중앙 정렬 계산 기준
+    cw: u32,
+    ch: u32,
+};
+
+/// 콘텐츠 크기(셀 단위)로 박스 rect·중앙배치·폭 clamp·soft-lock 가드를 계산한다(**기하 단일 출처**). null=생략
+/// (term_cols==0, 터미널 영역이 한 셀보다 좁음 — 중앙배치 뺄셈 언더플로 방지). 박스는 콘텐츠 사방에 여백
+/// (좌우 modal_margin_cells열 + 위아래 1행)을 둔다. 폭은 **터미널 영역(사이드바 오른쪽)으로 clamp**한다 — 넘으면
+/// 사이드바 침범/우측 오버플로. content_cols는 호출자가 **EAW 표시폭**(overlay_input.displayCols, 한글/CJK=2칸)으로
+/// 재서 넘겨야 placeText 배치 폭과 맞아 한글이 안 잘린다(코드포인트 수로 재면 2배 과소측정돼 클리핑).
+pub fn layout(content_cols: u32, content_rows: u32, p: props.ChromeProps, tk: *const tokens.Tokens) ?Box {
+    const m = p.metrics;
+    const cw = @max(m.cell_width_px, 1);
+    const ch = @max(m.cell_height_px, 1);
+    const term_w_px = m.backing_width_px -| m.sidebar_width_px;
+    const term_cols = term_w_px / cw;
+    if (term_cols == 0) return null;
+    // C4b 패딩: rich lowering이 배경 quad를 ±pad 확장하므로, 그만큼 줄인 가용 칸으로 clamp(tui=0이면 무변화).
+    const pad: u32 = p.shape.modal_padding_px;
+    const avail_cols = (term_w_px -| 2 * pad) / cw;
+    const margin = tk.space.modal_margin_cells;
+    const box_cols = @max(@min(content_cols + 2 * margin, avail_cols), 1);
+    const box_w = box_cols * cw;
+    const box_h = (content_rows + 2) * ch; // 위/아래 여백 한 줄씩 + 콘텐츠 행
+    const sidebar = @as(i32, @intCast(m.sidebar_width_px));
+    const x = sidebar + @as(i32, @intCast((term_w_px - box_w) / 2));
+    const y = @divTrunc(@as(i32, @intCast(m.backing_height_px)) - @as(i32, @intCast(box_h)), 2);
+    return .{
+        .rect = .{ .x = x, .y = y, .w = box_w, .h = box_h },
+        .inner_x = x + @as(i32, @intCast(margin * cw)),
+        .inner_y = y + @as(i32, @intCast(ch)),
+        .inner_cols = box_cols -| 2 * margin,
+        .cw = cw,
+        .ch = ch,
+    };
+}
+
+/// 박스 배경 quad + focus 테두리를 emit한다(notice/confirm 공유). tui(corner/border=0)면 셀 배경 + Op.border 셀,
+/// rich(>0)면 둥근 quad + quad 테두리. 콘텐츠(text/fillCells)는 호출자가 이 뒤에 emit해 그 위에 그려진다.
+pub fn frame(box: Box, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
+    const bg_r = p.shape.corner_radius_px;
+    const bw = p.shape.border_width_px;
+    try out.append(arena, .{ .quad = .{ .rect = box.rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
+    try out.append(arena, .{ .border = .{
+        .rect = box.rect,
+        .sides = .{ .top = true, .right = true, .bottom = true, .left = true },
+        .role = .focus_accent,
+    } });
+}
+
+/// 콘텐츠 row(0-based) 상단 y(px). 콘텐츠 영역 inner_y에서 row행 아래.
+pub fn rowY(box: Box, row: u32) i32 {
+    return box.inner_y + @as(i32, @intCast(row)) * @as(i32, @intCast(box.ch));
+}
+
+/// 콘텐츠 영역 안에서 `cols`칸 폭 콘텐츠를 가로 중앙 정렬한 좌측 x(px). cols가 inner_cols보다 크면 0 오프셋(좌측).
+pub fn centerX(box: Box, cols: u32) i32 {
+    return box.inner_x + @as(i32, @intCast((box.inner_cols -| cols) / 2 * box.cw));
+}
+
+/// (x, row) 위치에 텍스트 한 조각을 emit한다. x는 호출자가 centerX/inner_x로 정한다. runs는 arena 소유.
+pub fn text(box: Box, x: i32, row: u32, label: []const u8, role: tokens.ColorRole, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
+    const runs = try arena.alloc(draw.Run, 1);
+    runs[0] = .{ .text = label };
+    try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = rowY(box, row) }, .runs = runs, .role = role } });
+}
+
+/// (x, row)부터 `cols`칸을 배경 색(role)으로 채운다 — 버튼/하이라이트 배경. 텍스트보다 **먼저** emit해야 글자가
+/// 그 위에 그려진다(painter order). rich 모달에서도 surface_bg가 아닌 배경이라 평탄화가 skip하지 않는다.
+pub fn fillCells(box: Box, x: i32, row: u32, cols: u32, role: tokens.ColorRole, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
+    try out.append(arena, .{ .fill = .{ .rect = .{ .x = x, .y = rowY(box, row), .w = cols * box.cw, .h = box.ch }, .role = role } });
+}
+
+/// lines를 중앙 모달 박스로 그린다(notice용 — 줄 텍스트만, 좌측 정렬). 빈 lines면 무동작(호출자 열림 가드).
+/// 박스 기하는 layout/frame 단일 출처에 위임한다. ops·runs 슬라이스는 호출자가 준 frame arena가 소유한다.
 pub fn view(
     lines: []const Line,
     p: props.ChromeProps,
@@ -31,51 +106,11 @@ pub fn view(
     out: *std.ArrayList(draw.Op),
 ) !void {
     if (lines.len == 0) return;
-    const m = p.metrics;
-    const cw = @max(m.cell_width_px, 1);
-    const ch = @max(m.cell_height_px, 1);
-
-    const term_w_px = m.backing_width_px -| m.sidebar_width_px;
-    const term_cols = term_w_px / cw;
-    if (term_cols == 0) return; // 터미널 영역 < 한 셀 — 중앙배치 뺄셈 언더플로 방지로 생략
-
-    // C4b 패딩: 폭 상한을 2*pad만큼 줄인 가용 칸으로 box_cols를 clamp한다 — platform lowering이 배경 quad를 ±pad
-    // 확장한 뒤에도 박스가 터미널 영역에 들도록 텍스트 폭을 양보한다. pad=0(tui)이면 avail_cols == term_cols(무변화).
-    const pad: u32 = p.shape.modal_padding_px;
-    const avail_cols = (term_w_px -| 2 * pad) / cw;
     var content_cols: u32 = 0;
     for (lines) |ln| content_cols = @max(content_cols, overlay_input.displayCols(ln.text)); // EAW 표시폭(placeText와 동일 규약)
-    const box_cols = @max(@min(content_cols + 2 * tk.space.modal_margin_cells, avail_cols), 1);
-    const box_w = box_cols * cw;
-    const box_h = (@as(u32, @intCast(lines.len)) + 2) * ch; // 위 여백 + 줄들 + 아래 여백
-
-    // 터미널 영역 안에서 중앙 배치. box_w <= term_w_px(위 clamp)라 (term_w_px - box_w)는 비음수 → x는 항상 사이드바 오른쪽.
-    const sidebar = @as(i32, @intCast(m.sidebar_width_px));
-    const x = sidebar + @as(i32, @intCast((term_w_px - box_w) / 2));
-    const y = @divTrunc(@as(i32, @intCast(m.backing_height_px)) - @as(i32, @intCast(box_h)), 2);
-    const rect = draw.Rect{ .x = x, .y = y, .w = box_w, .h = box_h };
-
-    const bg_r = p.shape.corner_radius_px;
-    const bw = p.shape.border_width_px;
-    // C4b 모달: 배경을 quad로(둥근+테두리) — tui(0)면 셀 배경 + 아래 Op.border 셀, rich(>0)면 둥근 quad + quad 테두리.
-    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
-    try out.append(arena, .{ .border = .{
-        .rect = rect,
-        .sides = .{ .top = true, .right = true, .bottom = true, .left = true },
-        .role = .focus_accent,
-    } });
-
-    // 줄 i는 좌측 여백 + (i+1)번째 줄(위 여백 한 줄 아래부터). runs는 arena 소유.
-    const text_x = x + @as(i32, @intCast(tk.space.modal_margin_cells * cw));
-    for (lines, 0..) |ln, i| {
-        const runs = try arena.alloc(draw.Run, 1);
-        runs[0] = .{ .text = ln.text };
-        try out.append(arena, .{ .text = .{
-            .origin = .{ .x = text_x, .y = y + @as(i32, @intCast(i + 1)) * @as(i32, @intCast(ch)) },
-            .runs = runs,
-            .role = ln.role,
-        } });
-    }
+    const box = layout(content_cols, @intCast(lines.len), p, tk) orelse return;
+    try frame(box, p, arena, out);
+    for (lines, 0..) |ln, i| try text(box, box.inner_x, @intCast(i), ln.text, ln.role, arena, out);
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────

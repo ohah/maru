@@ -138,7 +138,9 @@ pub fn view(state: *const State, props: NoticeProps, tokens: Tokens) ChromeDraw;
 pub fn hitTest(props: NoticeProps, p: Px) ?Region;                                // 순수(키보드 전용이면 생략)
 pub fn handle(ev: InputEvent, state: *State) ?Action;                             // 순수, intent 반환
 ```
-`chrome/components/confirm.zig`는 notice의 형제 모달이다 — 같은 계약을 따르되 의도가 1개(dismissed)가 아니라 **2개**(`confirmed`/`cancelled`)다. 파괴적 동작(닫기) 전 확인이라 host가 confirmed면 보류한 동작을 실행하고 cancelled면 버린다(예: 실행 중 명령이 있는 터미널/창 닫기 확인 — [macos-app-host-boundary.md](macos-app-host-boundary.md) "닫기 확인"). 라우팅 우선순위는 **최우선**(파괴적 게이트라 notice보다 앞).
+`chrome/components/confirm.zig`는 **재사용 가능한 예/아니오 확인 다이얼로그** 컴포넌트다 — host가 메시지 + 버튼 라벨을 주입하면(`show(message, .{ .confirm = "닫기", .cancel = "취소" })`) 경계선 패널 + accent 기본 버튼 + 보조 버튼 + 키 안내(Enter/Esc)를 그린다. 닫기 확인뿐 아니라 삭제·저장 등 어떤 확인에도 쓴다(컴포넌트는 용도를 모르고 host가 라벨·의미를 정함 — 경계). 의도는 notice의 1개(dismissed)가 아니라 **2개**(`confirmed`/`cancelled`): host가 confirmed면 보류한 동작을 실행, cancelled면 버린다(예: 실행 중 명령이 있는 터미널/창 닫기 — [macos-app-host-boundary.md](macos-app-host-boundary.md) "닫기 확인"). 라우팅 우선순위는 **최우선**(파괴적 게이트라 notice보다 앞).
+
+박스 기하(폭 clamp·중앙배치·soft-lock 가드·배경 quad/테두리·콘텐츠 셀 좌표)는 `chrome/components/modal_box.zig` **공유 프리미티브**가 단일 출처로 제공한다 — notice(줄 텍스트), confirm(메시지+버튼), 향후 모달이 `layout`/`frame`/`text`/`fillCells`/`centerX`/`rowY`로 재사용한다(각 컴포넌트는 콘텐츠 구성만 소유). 폭은 `overlay_input.displayCols`(EAW 표시폭, placeText와 동일 규약)로 재 한글/CJK가 안 잘린다.
 
 규칙(기존 패턴에서 승계):
 - State는 **렌더를 모르고**, view는 **State를 읽기만**, handle은 **State를 mutate + `?Action` 반환**(단방향).

@@ -2845,10 +2845,11 @@ pub const AppSession = struct {
     }
 
     /// 닫기 확인 모달을 연다. 메시지는 세션 소유 버퍼로 복사(copyOverlayMessage)하고 다른 오버레이를 닫아 배타성을
-    /// 지킨다(dismissMessageOverlays — confirm/보류는 caller가 소유). 다음 tick이 그린다.
+    /// 지킨다(dismissMessageOverlays — confirm/보류는 caller가 소유). 버튼 라벨은 닫기 의미에 맞게 "닫기"/"취소"로
+    /// 주입한다(confirm 컴포넌트는 범용이라 host가 용도별 라벨을 정한다). 다음 tick이 그린다.
     fn showConfirm(self: *AppSession, message: []const u8) void {
         self.dismissMessageOverlays();
-        self.chrome_host.confirm.show(copyOverlayMessage(&self.confirm_message_buf, message));
+        self.chrome_host.confirm.show(copyOverlayMessage(&self.confirm_message_buf, message), .{ .confirm = "닫기", .cancel = "취소" });
         self.metal_dirty = true;
     }
 
@@ -12489,9 +12490,9 @@ test "guardrail: 한글 확인 모달 메시지·안내가 오버레이 셀에 �
         raster.gpu_shadows.deinit(allocator);
     }
 
-    // 메시지 + 정적 안내 두 줄 모두 — 각 줄의 비-공백 코드포인트가 셀에 존재해야 한다(우측 클리핑 0). 코드포인트
-    // 수로 박스를 쟀다면(버그) 한글 표시폭의 절반만 담겨 뒷부분 코드포인트가 셀에 없어 이 단언이 실패한다.
-    const lines_to_check = [_][]const u8{ msg, chrome.components.confirm.hint };
+    // 메시지 + 버튼 라벨(닫기/취소) 모두 — 각 글자의 비-공백 코드포인트가 셀에 존재해야 한다(우측 클리핑 0).
+    // 코드포인트 수로 박스를 쟀다면(버그) 한글 표시폭의 절반만 담겨 뒷부분 코드포인트가 셀에 없어 이 단언이 실패한다.
+    const lines_to_check = [_][]const u8{ msg, "닫기", "취소" };
     for (lines_to_check) |line| {
         var it = (std.unicode.Utf8View.init(line) catch unreachable).iterator();
         while (it.nextCodepoint()) |cp| {

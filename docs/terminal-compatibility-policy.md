@@ -54,9 +54,13 @@ tmux가 `Sync`를 읽어 레이아웃 플리커가 사라진다). 사용자는 `
 있다.
 
 **남는 위험은 원격(SSH)뿐이다.** `TERMINFO`는 로컬 env라 ssh가 전달하지 않으므로, **평범한 `ssh`**로
-항목 없는 원격에 접속하면 깨질 수 있다. 이건 `maru ssh`(원격에 terminfo를 심고 exec)가 푼다 — 평범한
-`ssh`까지 자동으로 덮으려면 shell-integration `ssh` alias가 필요한데 그건 opt-in 영역이다(Ghostty도
-plain ssh 깨짐은 감수하고 `ssh-env`/`ssh-terminfo`를 기본 off로 둔다).
+항목 없는 원격에 접속하면 깨질 수 있다. 이건 `maru ssh`(원격에 terminfo를 심고 exec)가 푼다. 직접 `maru
+ssh`를 입력하지 않고 **평범한 `ssh`까지 자동으로** 덮으려면 shell-integration `ssh` 라우팅
+(`shell-integration.ssh`, **기본 off** opt-in)을 켠다 — 통합 zsh가 `ssh`를 가리는 함수로 `maru ssh`에
+위임한다(env `MARU_BIN`/`MARU_SSH_INTEGRATION` 주입 시에만, 없으면 평범한 ssh 그대로 — graceful). 기본
+off인 건 `ssh`를 가리는 게 침습적이라 사용자 동의가 필요해서다(Ghostty도 plain ssh 깨짐을 감수하고
+`ssh-env`/`ssh-terminfo`를 기본 off로 둔다 — 동작 비교). 설정은 [설정 파일](configuration.md)의
+`shell-integration.ssh` 절.
 
 ### 런처 색-강제 override 제거 (`CLICOLOR_FORCE` / `FORCE_COLOR`)
 
@@ -89,7 +93,8 @@ Maru는 자식 셸 env에 `TERM_PROGRAM=ghostty`를 주입한다(부모가 남�
   `Sync`(렌더 타이밍 — 화면 골든 비관찰, 전용 단위 테스트가 검증)·`Tc`(색 — 문자 골든 비검증)라 새 골든 픽스쳐 실익이 없다.
 
 남는 위험은 **원격 plain-ssh**뿐이다(위 본문) — `maru ssh`로 덮고, 평범한 `ssh`까지의 자동화는
-shell-integration `ssh` alias(opt-in)의 후속 몫이다. Ghostty도 이 깨짐은 감수한다.
+shell-integration `ssh` 라우팅(`shell-integration.ssh`, opt-in)으로 덮는다(기본 off라 켜야 적용). Ghostty도
+plain ssh 깨짐 자체는 감수하고 `ssh-*`를 기본 off로 둔다.
 
 ## OSC52 clipboard
 

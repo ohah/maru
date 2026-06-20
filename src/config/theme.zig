@@ -301,6 +301,19 @@ pub const Config = struct {
     scrollback: ScrollbackConfig = .{},
     /// 벨(BEL) 설정. loader가 `bell.*` 키로 파싱.
     bell: BellConfig = .{},
+    /// 셸 통합(zsh ZDOTDIR 주입) 설정. loader가 `shell-integration.*` 키로 파싱.
+    shell_integration: ShellIntegrationConfig = .{},
+};
+
+/// 셸 통합 설정. 통합 자체(macOS 편집키·OSC 133/7)는 zsh면 항상 켜지지만, 아래 항목은 추가 동작을
+/// 켜고 끄는 opt-in 토글이다.
+pub const ShellIntegrationConfig = struct {
+    /// 평범한 `ssh`를 `maru ssh`로 라우팅할지. **기본 false**(opt-in). 켜면 통합 zsh에서 `ssh` 호출이
+    /// `maru ssh`를 거쳐 maru terminfo(`xterm-maru`)를 원격에 자동 전파한다 — 평범한 `ssh`엔 `TERMINFO`
+    /// (로컬 env)가 안 따라가 항목 없는 원격이 깨질 수 있는 문제(terminal-compatibility-policy.md)를 덮는다.
+    /// 기본 off인 이유: `ssh`를 가리는 함수 주입은 침습적이라 사용자 동의가 필요하다(Ghostty도 `ssh-*`를
+    /// 기본 off로 둔다 — 동작 비교). loader가 `shell-integration.ssh` 키로 파싱.
+    ssh: bool = false,
 };
 
 /// 데스크톱 알림 설정.

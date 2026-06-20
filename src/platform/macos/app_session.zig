@@ -814,6 +814,9 @@ pub const AppSession = struct {
     // term은 loaded_config.config.term(arena 소유)에서 매번 읽는다.
     new_tab_config: NormalizedConfig = undefined,
     new_tab_zdotdir: ?[]const u8 = null,
+    // opt-in ssh 라우팅(`shell-integration.ssh`)이 켜졌을 때 현재 maru 실행 파일 경로(owned). 새 탭 spawn에도
+    // 필요하므로 init 끝에 free하지 않고 보관하다 deinit에서 푼다. 꺼졌거나 경로 해석 실패면 null(주입 안 함).
+    new_tab_ssh_bin: ?[]const u8 = null,
     app_window: app.AppWindow = undefined,
     runtime: app.SurfaceRuntime = undefined,
     renderer_state: renderer.RendererState = undefined,
@@ -1163,6 +1166,14 @@ pub const AppSession = struct {
         // init 끝에 free하지 않고 보관한다(새 탭 Cmd+T spawn에도 필요) — deinit에서 푼다. 바로 store해
         // 이후 init 실패도 errdefer self.deinit()가 정리하게 한다.
         self.new_tab_zdotdir = integ_dir;
+        // opt-in ssh 라우팅(`shell-integration.ssh`): 통합 .zshenv가 로드될 때(integ_dir != null = zsh 통합)만
+        // ssh() 함수가 정의되므로 그때만 의미가 있다. 켜졌으면 현재 maru 실행 파일 경로를 잡아 두고 spawn 때
+        // MARU_BIN/MARU_SSH_INTEGRATION으로 주입한다(같은 바이너리가 `maru ssh`를 처리 — main.zig). 경로
+        // 해석이 실패하면 null로 둬 주입을 건너뛴다(평범한 ssh 그대로 — graceful). 새 탭에도 필요해 보관 후 deinit에서 푼다.
+        self.new_tab_ssh_bin = if (integ_dir != null and self.loaded_config.config.shell_integration.ssh)
+            (std.process.executablePathAlloc(io, allocator) catch null)
+        else
+            null;
         self.new_tab_config = config;
 
         // runtime을 먼저 세운다 — createTab의 attachSurface가 surface를 runtime link에 등록한다.
@@ -1210,7 +1221,7 @@ pub const AppSession = struct {
         // Swift는 opaque handle만 보유하고 AppSession은 heap에 고정된다(LivePtySession reader가
         // `&pane.live_pty.reader`를 잡으므로 Pane도 heap-pin — createPane이 allocator.create로 띄운다).
         _ = try self.createTab(
-            spawnRequest(spawn_config, self.loaded_config.config.term, integ_dir),
+            spawnRequest(spawn_config, self.loaded_config.config.term, integ_dir, self.new_tab_ssh_bin),
             spawn_config.size,
             config.queue_capacity,
             "Maru shell",
@@ -2200,7 +2211,7 @@ pub const AppSession = struct {
         var cfg = self.new_tab_config;
         cfg.size = size;
         const term = try self.createTerm(
-            spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir),
+            spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin),
             size,
             cfg.queue_capacity,
             "Maru",
@@ -2258,7 +2269,7 @@ pub const AppSession = struct {
         var cfg = self.new_tab_config;
         cfg.size = b_size;
         const new_pane = try self.createPane(
-            spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir),
+            spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin),
             b_size,
             cfg.queue_capacity,
             "Maru",
@@ -2720,7 +2731,7 @@ pub const AppSession = struct {
         var cfg = self.new_tab_config;
         cfg.size = self.activeSurface().core.size; // 첫 탭 크기가 아니라 지금 창 크기로
         return self.createTab(
-            spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir),
+            spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin),
             cfg.size,
             cfg.queue_capacity,
             "Maru",
@@ -4987,7 +4998,7 @@ pub const AppSession = struct {
         var cfg = self.new_tab_config;
         const size = restoreSurfaceSize(sm);
         cfg.size = size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir);
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin);
         if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c; // 존재하는 디렉터리면 거기서, 아니면 기본 cwd(surface 안 잃음)
         return .{ .req = req, .size = size };
     }
@@ -7041,6 +7052,11 @@ pub const AppSession = struct {
             self.allocator.free(d);
             self.new_tab_zdotdir = null;
         }
+        // 보관했던 maru 실행 파일 경로(opt-in ssh 라우팅용 — executablePathAlloc owned).
+        if (self.new_tab_ssh_bin) |b| {
+            self.allocator.free(b);
+            self.new_tab_ssh_bin = null;
+        }
         self.* = undefined;
     }
 
@@ -7108,7 +7124,7 @@ pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
     };
 }
 
-fn spawnRequest(config: NormalizedConfig, term: []const u8, zdotdir: ?[]const u8) maru.pty.SpawnRequest {
+fn spawnRequest(config: NormalizedConfig, term: []const u8, zdotdir: ?[]const u8, ssh_bin: ?[]const u8) maru.pty.SpawnRequest {
     var request: maru.pty.SpawnRequest = switch (config.command_kind) {
         .controlled_smoke => .{
             .command = "/bin/sh",
@@ -7132,6 +7148,9 @@ fn spawnRequest(config: NormalizedConfig, term: []const u8, zdotdir: ?[]const u8
     // TERM/COLORTERM override 경로를 타게 한다. zdotdir이 있으면 셸 통합용 ZDOTDIR을 주입한다.
     request.term = term;
     request.zdotdir = zdotdir;
+    // opt-in ssh 라우팅이 켜졌으면 maru 실행 파일 경로를 실어 EnvStorage가 MARU_BIN/MARU_SSH_INTEGRATION을
+    // 주입하게 한다(null이면 주입 안 함 — 평범한 ssh 그대로).
+    request.ssh_integration_bin = ssh_bin;
     return request;
 }
 

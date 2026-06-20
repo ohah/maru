@@ -12,6 +12,7 @@ const props = @import("props.zig");
 const input = @import("input.zig");
 const ChromeState = @import("state.zig").ChromeState;
 const notice = @import("components/notice.zig");
+const confirm = @import("components/confirm.zig");
 const find = @import("components/find.zig");
 const palette = @import("components/palette.zig");
 const context_menu = @import("components/context_menu.zig");
@@ -31,11 +32,14 @@ pub const HostAction = union(enum) {
     context_menu_accept, // 우클릭 메뉴 항목 선택 — platform이 selected→대상 액션(rename) 해석·실행
     context_menu_close,
     context_menu_selection_changed,
+    confirm_accept, // 확인 모달 Enter/Y — platform이 보류한 닫기(pending_close)를 실행
+    confirm_cancel, // 확인 모달 Esc/N — platform이 보류한 닫기를 버린다
 };
 
 pub const ChromeHost = struct {
     interaction: ChromeState = .{},
     notice: notice.State = .{},
+    confirm: confirm.State = .{},
     find: find.State = .{},
     palette: palette.State = .{},
     context_menu: context_menu.State = .{},
@@ -60,6 +64,11 @@ pub const ChromeHost = struct {
             var ops: std.ArrayList(draw.Op) = .empty;
             try notice.view(&self.notice, p, tk, arena, &ops);
             if (ops.items.len > 0) try out.append(arena, .{ .layer = notice.layer, .ops = ops.items });
+        }
+        {
+            var ops: std.ArrayList(draw.Op) = .empty;
+            try confirm.view(&self.confirm, p, tk, arena, &ops);
+            if (ops.items.len > 0) try out.append(arena, .{ .layer = confirm.layer, .ops = ops.items });
         }
         {
             var ops: std.ArrayList(draw.Op) = .empty;
@@ -103,6 +112,13 @@ pub const ChromeHost = struct {
     /// 디스패치). 열린 게 없으면 null(소비 안 함 — 뒤 터미널로 흘림). 우선순위: Notice > Find(배타적이라 동시
     /// 열림은 라우팅이 막는다). find는 query 변형에 allocator가 필요해 받는다(notice는 안 씀).
     pub fn handleInput(self: *ChromeHost, allocator: std.mem.Allocator, ev: input.InputEvent) ?HostAction {
+        if (self.confirm.open) {
+            // 확인 모달은 파괴적 동작(닫기) 게이트라 최우선. Enter/Y=accept·Esc/N=cancel, 그 외는 소비(.none).
+            return switch (confirm.handle(ev, &self.confirm) orelse return .none) {
+                .confirmed => .confirm_accept,
+                .cancelled => .confirm_cancel,
+            };
+        }
         if (self.notice.open) {
             _ = notice.handle(ev, &self.notice); // Enter/Esc면 닫음. session 부수효과 없음.
             return .none;
@@ -164,6 +180,48 @@ test "host: Notice 열리면 collectDraws가 modal 1개, handleInput 소비/닫�
 
     try std.testing.expectEqual(HostAction.none, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .escape } }).?); // 열림 → 소비(.none)
     try std.testing.expect(!host.notice.open); // Esc로 닫힘
+}
+
+test "host: Confirm 라우팅 — Enter=confirm_accept·Esc=confirm_cancel·다른 키=none, collectDraws가 modal 1개" {
+    const Rgb = @import("../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 40,
+        .backing_width_px = 800,
+        .backing_height_px = 600,
+    } };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var host = ChromeHost{};
+    defer host.deinit(std.testing.allocator);
+    var out: std.ArrayList(draw.ChromeDraw) = .empty;
+
+    // 닫힘 → 라우팅 안 가로챔, 빈 출력.
+    try std.testing.expect(host.handleInput(std.testing.allocator, .{ .key = .{ .key = .enter } }) == null);
+    try host.collectDraws(p, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+
+    host.confirm.show("running: vim — 닫을까요?");
+    out.clearRetainingCapacity();
+    try host.collectDraws(p, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expectEqual(draw.Layer.modal, out.items[0].layer);
+
+    // 다른 글자는 소비(.none)하되 안 닫힘.
+    try std.testing.expectEqual(HostAction.none, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .char, .codepoint = 'a' } }).?);
+    try std.testing.expect(host.confirm.open);
+    // Esc → cancel + 닫힘.
+    try std.testing.expectEqual(HostAction.confirm_cancel, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .escape } }).?);
+    try std.testing.expect(!host.confirm.open);
+    // Enter → accept + 닫힘.
+    host.confirm.show("x");
+    try std.testing.expectEqual(HostAction.confirm_accept, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .enter } }).?);
+    try std.testing.expect(!host.confirm.open);
 }
 
 test "host: Find 라우팅 — 글자=query_changed·Enter=navigated·Esc=close, collectDraws가 오버레이 1개" {

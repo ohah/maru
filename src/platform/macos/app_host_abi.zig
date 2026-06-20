@@ -211,6 +211,15 @@ pub export fn maru_macos_app_session_close(
     return @intFromEnum(Status.ok);
 }
 
+/// 빨간 닫기 버튼/창 단위 닫기 요청(windowShouldClose). 닫힐 창(세션)에 실행 중인 명령이 있으면 Zig가 확인 모달을
+/// 열고 1(deferred)을 돌려준다 — Swift는 false를 반환해 닫기를 보류하고, 모달 확정 시 tick의 session-ended가 실제로
+/// 창을 닫는다(closeWindowOrQuit — 프로그래밍적 close라 windowShouldClose 재호출/재확인 루프가 없다). 실행 중 명령이
+/// 없으면 0 — Swift가 평소대로 닫는다(windowWillClose → terminate/teardown). null session이면 0(평소 닫기).
+pub export fn maru_macos_app_session_request_window_close(session: ?*AppSession) c_int {
+    const app_session = session orelse return 0;
+    return if (app_session.requestWindowClose()) 1 else 0;
+}
+
 // 휠 스크롤: Swift는 raw 델타(포인트)·정밀 델타 여부·마우스 위치(backing px)만 넘기고, 줄 수 환산(매직
 // 상수·clamp·NaN 가드)과 어느 panel로 보낼지(커서 아래 pane)는 app session이 한다. 스크롤 자체는
 // TerminalCore가 소유한다. x/y는 split에서 비활성 panel 위 휠을 그 panel로 라우팅하는 데 쓴다(단일 panel

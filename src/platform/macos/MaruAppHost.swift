@@ -668,6 +668,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return false
     }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // 빨간 닫기 버튼/창 단위 닫기 요청. 닫힐 창(세션)에 실행 중인 명령이 있으면 Zig가 확인 모달을 열고 1을
+        // 돌려준다 → false로 닫기를 보류한다(데이터 손실 방지 — iTerm2/Terminal.app/Ghostty 관례). 모달 확정 시
+        // tick의 session-ended가 closeWindowOrQuit으로 실제 창을 닫는다 — 그건 프로그래밍적 close()라 이 델리게이트가
+        // 다시 안 불려 재확인 루프가 없다. 실행 중 명령이 없으면 true(평소 닫기 → windowWillClose가 terminate/
+        // teardown). session이 없으면(quick 창 등 delegate 미사용 경로) 평소대로 닫는다.
+        guard let surface = surfaceForWindow(sender), let session = surface.appSession else { return true }
+        return maru_macos_app_session_request_window_close(session) == 0
+    }
+
     func windowWillClose(_ notification: Notification) {
         // 닫히는 창의 일반-창 surface(quick은 delegate를 안 써 여기 안 옴). 마지막 일반 창이면 앱 종료
         // (정리·요약은 applicationWillTerminate — primary가 살아 있어야 요약이 그 세션 기준. 원래 단일 창 동작

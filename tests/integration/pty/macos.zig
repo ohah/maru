@@ -1054,3 +1054,52 @@ test "macOS reader drains main input even when the output event queue is full �
 
     try std.testing.expect(drained); // false면 교차-큐 데드락 회귀(reader가 출력 큐 push에 막혀 입력 미-drain)
 }
+
+// PtySession.hasForegroundJob — 닫기 확인(실행 중 명령 보호)의 핵심 술어를 실제 PTY로 결정론적으로 증명한다.
+// 술어: "셸이 아닌 포그라운드 명령이 실행 중인가" = tcgetpgrp(master) ≠ 셸 child_pid. 두 분기를 각각 증명한다:
+//   (a) job control이 없으면 자식이 셸과 같은 pgrp라 tcgetpgrp == child_pid → false. idle 프롬프트(포그라운드 ==
+//       셸)와 같은 경계 — 표준 터미널이 "running process"를 포그라운드 pgrp로 판정하는 것과 동형이다.
+//   (b) job control(`set -m`)이면 셸이 명령을 새 pgrp로 띄우고 tcsetpgrp로 포그라운드를 옮겨 tcgetpgrp ≠ child_pid
+//       → true. 실사용의 대화형 셸은 job control이 기본 켜져 있어 (b)가 일반 동작이다.
+// 대화형 셸의 ZLE 라인에디터 타이밍을 피하려고 `sh -c 'set -m; ...'`로 job control을 결정론적으로 켠다(비대화형도
+// -m이면 포그라운드 tcsetpgrp를 한다). app_session 단위 테스트는 job-control 셸이 없어 모달 흐름(accept/cancel)만
+// 다루고, 이 통합 테스트가 술어 자체를 맡는다. 단일 출처: src/pty/macos.zig hasForegroundJob.
+test "macOS hasForegroundJob: 같은 pgrp 자식은 false, job-control 포그라운드 명령은 true" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    // (a) job control 없음 → sleep이 셸과 같은 pgrp라 포그라운드 작업으로 안 잡힌다(false). deinit이 process group을
+    //     정리하므로 sleep이 5s 매달리지 않는다.
+    {
+        var s = try maru.pty.PtySession.spawn(allocator, .{
+            .command = "/bin/sh",
+            .args = &.{ "-c", "sleep 5" },
+            .size = .{ .cols = 40, .rows = 10 },
+        });
+        defer s.deinit();
+        try sleepMillis(300); // sleep이 실제 도는 시점까지 — 그래도 같은 pgrp라 false여야 한다
+        try std.testing.expect(!s.hasForegroundJob());
+    }
+
+    // (b) job control(set -m) → 셸이 sleep을 새 pgrp로 띄우고 tcsetpgrp로 포그라운드를 옮긴다 → true. 포그라운드가
+    //     옮겨질 때까지 폴링(최대 ~2s — sleep 5s 창 안이라 반드시 잡힌다).
+    {
+        var s = try maru.pty.PtySession.spawn(allocator, .{
+            .command = "/bin/sh",
+            .args = &.{ "-c", "set -m; sleep 5" },
+            .size = .{ .cols = 40, .rows = 10 },
+        });
+        defer s.deinit();
+        var saw_running = false;
+        var waited: i64 = 0;
+        while (waited < 2000) : (waited += 20) {
+            if (s.hasForegroundJob()) {
+                saw_running = true;
+                break;
+            }
+            try sleepMillis(20);
+        }
+        try std.testing.expect(saw_running);
+    }
+}

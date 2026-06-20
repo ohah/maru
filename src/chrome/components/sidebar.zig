@@ -46,21 +46,23 @@ pub fn slotAt(y_px: f64, header_height_px: u32, slot_height_px: u32, tab_count: 
     return @intFromFloat(slot_f);
 }
 
-/// 사이드바 상단 헤더([0, header_h) 영역)의 어느 부분을 가리키는가. 우측에 아이콘 2개(각 2칸 폭: 가장 우측 =
-/// 새 워크스페이스, 그 왼쪽 = view options), 나머지 왼쪽이 검색 입력 영역. 헤더 밖(y>=header_h)·헤더 없음
-/// (header_h==0)·폭/cell 0·비유한이면 none. view의 헤더 아이콘 레이아웃(우측 정렬 4칸)과 같은 수학을 공유한다 —
-/// 그려진 아이콘과 클릭 영역이 어긋나지 않게(§5.4 단일 레이아웃 소스). 하단 "+" 슬롯(inPlus)을 대체했다.
+/// 사이드바 상단 **2줄** 헤더([0, header_h) 영역)의 어느 부분을 가리키는가. 하단(y ≥ header_h×0.6)은 **검색 줄**
+/// (전체 폭 검색 입력). 상단은 **아이콘 줄** — 우측 아이콘 2개(각 2칸: 최우측=새 워크스페이스, 그 왼쪽=view options),
+/// 좌측은 네이티브 신호등(닫기·최소화·확대) 영역이라 none(macOS가 클릭 소비). 헤더 밖·없음·폭/cell 0·비유한도 none.
+/// view의 헤더 레이아웃(아이콘 우측 정렬 4칸, 검색 하단 줄)과 같은 수학을 공유한다(§5.4 단일 레이아웃 소스).
 pub const HeaderRegion = enum { none, search, view_options, new_workspace };
 pub fn headerHit(x_px: f64, y_px: f64, sidebar_width_px: u32, cell_width_px: u32, header_height_px: u32) HeaderRegion {
     if (header_height_px == 0 or sidebar_width_px == 0 or cell_width_px == 0) return .none;
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return .none;
-    if (y_px < 0 or y_px >= @as(f64, @floatFromInt(header_height_px))) return .none;
+    const h: f64 = @floatFromInt(header_height_px);
+    if (y_px < 0 or y_px >= h) return .none;
     if (x_px < 0 or x_px >= @as(f64, @floatFromInt(sidebar_width_px))) return .none;
     const w: f64 = @floatFromInt(sidebar_width_px);
     const cw: f64 = @floatFromInt(cell_width_px);
-    if (x_px >= w - 2 * cw) return .new_workspace; // 최우측 2칸
+    if (y_px >= h * 0.6) return .search; // 하단 검색 줄(신호등 아래, 전체 폭 입력)
+    if (x_px >= w - 2 * cw) return .new_workspace; // 상단 줄 최우측 2칸
     if (x_px >= w - 4 * cw) return .view_options; // 그 왼쪽 2칸
-    return .search; // 나머지 왼쪽 = 검색 입력 영역
+    return .none; // 상단 좌측 = 네이티브 신호등 영역(클릭은 macOS가 소비) 또는 빈 영역
 }
 
 /// x가 사이드바 슬롯의 닫기(✕) zone(우측 2칸) 안인가 — 호버 시 ✕를 그 자리에 그리므로 그 폭만큼을 닫기 영역으로 본다.
@@ -163,9 +165,11 @@ test "sidebar hit-test: inSidebar·onResizeEdge·slotAt·headerHit·closeButton�
     try std.testing.expectEqual(@as(?usize, 0), slotAt(20, 20, 16, 3)); // 헤더 직후 = 슬롯0
     try std.testing.expectEqual(@as(?usize, 1), slotAt(40, 20, 16, 3)); // (40-20)/16=1
     // headerHit: 우측 2칸=새 워크스페이스, 그 왼쪽 2칸=view options, 나머지=검색. w=100, cw=8, header=20.
-    try std.testing.expectEqual(HeaderRegion.new_workspace, headerHit(90, 10, 100, 8, 20)); // [84,100)
-    try std.testing.expectEqual(HeaderRegion.view_options, headerHit(70, 10, 100, 8, 20)); // [68,84)
-    try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 10, 100, 8, 20)); // [0,68)
+    // 2줄 헤더(header=20): 하단(y≥12=20×0.6)은 검색 줄, 상단 우측은 아이콘, 상단 좌측은 신호등 영역(none).
+    try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 15, 100, 8, 20)); // 하단 검색 줄
+    try std.testing.expectEqual(HeaderRegion.new_workspace, headerHit(90, 5, 100, 8, 20)); // 상단 우측 [84,100)
+    try std.testing.expectEqual(HeaderRegion.view_options, headerHit(70, 5, 100, 8, 20)); // 상단 [68,84)
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 5, 100, 8, 20)); // 상단 좌측 = 신호등 영역
     try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 25, 100, 8, 20)); // 헤더 밖(y>=20)
     try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 10, 100, 8, 0)); // 헤더 없음
     // closeButton: [w-2cw, w). w=100, cw=8 → [84, 100).

@@ -703,7 +703,15 @@ bool maru_metal_renderer_draw(
         //    순서라 사이드바 영역에 배경 위로 그려진다. 인덱스는 배경(quad_index) 다음부터.
         for (size_t i = 0; i < cell_count; i++) {
             const MaruAppHostMetalCell tc = cells[i];
-            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x, cw, (float)tc.origin_y + (float)tc.row * ch, ch, drawable_w, drawable_h, 1.0f);
+            // 사이드바 헤더 아이콘(⚙ U+2699 view options · + 새 워크스페이스 · 🔍 U+1F50D 검색)은 가독을 위해
+            // 1.4× 키운다(에이전트 심볼 1.7×과 같은 slot-stretch 경로). 헤더 glyph만 origin_x==0이다 — 사이드바가
+            // 켜지면(terminal_origin_x_px>0) 터미널 cell은 origin_x=사이드바폭>0이라 origin_x==0은 헤더뿐이고,
+            // 사이드바가 꺼지면 헤더 frame 자체가 없어(buildSidebarHeaderFrame가 null) 터미널 '+'를 오확대하지 않는다.
+            const float hscale = (terminal_origin_x_px > 0u && tc.origin_x == 0u &&
+                                  (tc.codepoint == 0x2699u || tc.codepoint == (uint32_t)'+' || tc.codepoint == 0x1F50Du))
+                                     ? 1.4f
+                                     : 1.0f;
+            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x, cw, (float)tc.origin_y + (float)tc.row * ch, ch, drawable_w, drawable_h, hscale);
         }
         quad_index += cell_count;
         // 3) 사이드바 cells — origin 0, 배경 quad 위에 그린다(painter 순서). 탭 슬롯 높이로 배치하되 셀 종류를

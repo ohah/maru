@@ -12,6 +12,7 @@
 
 - Swift는 지속 실행되는 `NSApplication`을 소유한다.
 - Swift는 window/tab/split lifecycle, focus, `keyDown:`, close/menu/preferences, IME, accessibility 같은 macOS UX를 소유한다.
+- **창 타이틀바 chrome(신호등 inset 포함)은 platform(Swift) 책임이다.** `MaruAppHost`의 placeholder window가 네이티브 타이틀바를 숨기되(`titlebarAppearsTransparent=true`, `titleVisibility=.hidden`, `titlebarSeparatorStyle=.none`) 신호등(닫기·최소화·확대)은 남기고, `styleMask`에 `.fullSizeContentView`를 더해 콘텐츠(사이드바 chrome)가 창 top까지 차게 한다. **베이스/결정**: Apple HIG의 "신호등은 유지하고 콘텐츠를 타이틀바 영역까지 끌어올린다" 패턴을 베이스로, maru의 Zig+GPU chrome 전략(네이티브 뷰 비사용)과 부합하게 골랐다 — 사이드바 헤더(검색바·view options·새 워크스페이스 아이콘)를 신호등 옆/아래에 maru chrome으로 그린다. **OS-중립 헤더 레이아웃(아이콘·검색 위치 = `chrome/components/sidebar.zig` headerHit)은 Zig**가 소유하고, Swift는 신호등을 남기는 창 스타일 inset만 책임진다(이식 시 타깃별 창 chrome으로 교체 — [layering-and-portability.md](layering-and-portability.md) 참조).
 - Zig는 `PtySession`, `LivePtySession`, `SurfaceRuntime`, `RuntimeEventPump`, `FrameLoop`, keybinding resolver, renderer frame 조립, 그리고 grid 계산·resize 중복 방지·device 픽셀 메트릭 같은 플랫폼 비의존 로직을 소유한다.
 - Swift는 terminal storage, PTY file descriptor, renderer atlas/resource를 직접 만지지 않는다.
 - Swift가 Zig에 넘기는 값은 `src/platform/macos/app_host_abi.h`의 fixed-width C ABI record만 사용한다. cols/rows 같은 파생값은 Swift가 계산하지 않는다. Swift는 backing 픽셀·scale만 resize 이벤트로 넘기고, app session(Zig)이 자기 cell 메트릭으로 grid를 내부에서 계산한다.

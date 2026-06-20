@@ -1,6 +1,9 @@
 const std = @import("std");
 const terminal = @import("../terminal.zig");
 const types = @import("types.zig");
+// maru 자체 terminfo 로컬 캐시(경로·버전·컴파일 명령)의 단일 출처. `maru terminfo` 서브커맨드(cli)와 공유해,
+// 서브커맨드로 재컴파일한 캐시를 여기 spawn 자동 컴파일이 그대로 재사용한다(top-level 중립 모듈 — color.zig 결).
+const terminfo_cache = @import("../terminfo_cache.zig");
 
 // macOS의 첫 backend는 openpty로 master/slave fd만 만들고 fork/exec는 직접 한다.
 // 이 경계가 있어야 cwd/env/stdio/controlling-terminal 실패를 단계별 artifact로 남길 수 있다.
@@ -637,11 +640,6 @@ const MacosLogin = struct {
 // `/bin/sh -c <cmd>`를 돌려 기다린다(POSIX). std.c에 노출이 없어 직접 선언한다(setenv/unsetenv와 같은 결).
 extern "c" fn system(command: [*:0]const u8) c_int;
 
-// terminfo 소스를 바이너리에 embed(빌드 import `maru_terminfo`, terminfo/maru.terminfo가 단일 출처).
-// cli/ssh.zig가 같은 import에 "작은따옴표 없음" comptime 가드를 걸어, 아래 `printf '%s' '<소스>'`
-// single-quote 인라인이 안전하다(가드가 깨지면 빌드 실패).
-const embedded_terminfo = @embedFile("maru_terminfo");
-
 const ResolvedTerm = struct { term: []const u8, terminfo_dir: ?[]const u8 };
 
 // 전환 #1(기본값 xterm-maru): 자식 셸에 줄 TERM/TERMINFO를 정한다. term이 "xterm-maru"면 embed된
@@ -653,7 +651,7 @@ const ResolvedTerm = struct { term: []const u8, terminfo_dir: ?[]const u8 };
 var g_resolved_term: ?ResolvedTerm = null;
 
 fn resolveTerm(term: []const u8) ResolvedTerm {
-    if (!std.mem.eql(u8, term, "xterm-maru")) return .{ .term = term, .terminfo_dir = null };
+    if (!std.mem.eql(u8, term, terminfo_cache.term_name)) return .{ .term = term, .terminfo_dir = null };
     if (g_resolved_term) |r| return r;
     const r = computeMaruTerminfo();
     g_resolved_term = r;
@@ -665,21 +663,16 @@ fn computeMaruTerminfo() ResolvedTerm {
     const page = std.heap.page_allocator;
     const home_z = std.c.getenv("HOME") orelse return fallback;
     const home = std.mem.span(home_z);
-    const dir = std.fmt.allocPrintSentinel(page, "{s}/.cache/maru/terminfo", .{home}, 0) catch return fallback;
-    // 이미 해석되면 즉시 성공, 아니면 캐시에 컴파일하고 최종 해석 여부를 exit code로 돌려준다.
-    const cmd = std.fmt.allocPrintSentinel(
-        page,
-        "d=\"$HOME/.cache/maru/terminfo\"; TERMINFO=\"$d\" infocmp xterm-maru >/dev/null 2>&1 && exit 0; " ++
-            "mkdir -p \"$d\"; printf '%s' '{s}' | tic -x -o \"$d\" - 2>/dev/null; " ++
-            "TERMINFO=\"$d\" infocmp xterm-maru >/dev/null 2>&1",
-        .{embedded_terminfo},
-        0,
-    ) catch {
+    const dir = terminfo_cache.cacheDirZ(page, home) catch return fallback;
+    // 버전 마커가 현재 embed 내용과 일치하고 xterm-maru가 해석되면 재컴파일 skip, 아니면(업데이트로 캡이
+    // 바뀜·마커 없음) 캐시를 자동 재컴파일한다 — terminfo를 늘려도 기존 캐시에 자동 반영된다(stale 방지).
+    // 같은 캐시·마커를 `maru terminfo` 서브커맨드(cli/terminfo.zig)가 공유한다.
+    const cmd = terminfo_cache.autoCompileCommand(page, terminfo_cache.version()) catch {
         page.free(dir);
         return fallback;
     };
     defer page.free(cmd);
-    if (system(cmd.ptr) == 0) return .{ .term = "xterm-maru", .terminfo_dir = dir }; // dir은 의도적 leak(프로세스 수명)
+    if (system(cmd.ptr) == 0) return .{ .term = terminfo_cache.term_name, .terminfo_dir = dir }; // dir은 의도적 leak(프로세스 수명)
     page.free(dir);
     return fallback;
 }

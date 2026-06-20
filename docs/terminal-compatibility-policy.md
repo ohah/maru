@@ -49,6 +49,13 @@ Ghostty와 같은 방식을 쓴다(`src/termio/Exec.zig` 동작 비교): terminf
 `tic`이 없거나 컴파일이 실패하면 `xterm-256color`로 **자동 폴백**해 로컬이 절대 안 깨진다. 프로세스당
 1회만 컴파일해 캐시한다.
 
+캐시 staleness는 버전 마커로 자동 처리한다: 캐시에 embed 내용의 지문(`.maru-version`)을 함께 적고, spawn
+때 지문이 일치하고 xterm-maru가 해석될 때만 재컴파일을 건너뛴다 — maru 업데이트로 terminfo 캡이 바뀌면
+지문이 달라져 다음 spawn이 **자동 재컴파일**한다(예전엔 한 번 컴파일하면 영영 안 바꿔, 캡을 늘려도 기존
+캐시에 반영되지 않는 footgun이 있었다). 경로·버전·컴파일 명령은 `terminfo_cache.zig`가 단일 출처로 갖고,
+강제·진단용 `maru terminfo`(`--status`/`--refresh`/`--clear`/`--path`) 서브커맨드(`cli/terminfo.zig`)가 같은
+캐시를 공유한다.
+
 이로써 Maru 고유 기능(`Sync`·truecolor)을 terminfo로만 감지하는 프로그램도 무설정으로 인식한다(특히
 tmux가 `Sync`를 읽어 레이아웃 플리커가 사라진다). 사용자는 `term = "xterm-256color"`로 언제든 되돌릴 수
 있다.

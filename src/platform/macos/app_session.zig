@@ -1090,6 +1090,9 @@ pub const AppSession = struct {
     // 닫는다(사이드바 hovered_slot의 per-pane Term 버전). pane은 heap-pin이라 frame 사이 포인터가 안정.
     hovered_tab: ?TabRef = null,
     hovered_scroll: ?ScrollRef = null, // #5b: 호버 중인 ‹/› 스크롤 버튼 — 렌더가 밝게 칠해 클릭 가능 표시
+    // 호버 중인 헤더 아이콘 영역(◧ toggle·⚙ view_options·+ new_workspace). 마우스가 그 아이콘 위면 rebuildSidebar가
+    // 아이콘 뒤에 둥근 호버 배경(웹 버튼 hover처럼)을 그린다. 검색·빈 영역·아이콘 밖이면 null. 바뀔 때만 재빌드.
+    hovered_header_region: ?chrome.components.sidebar.HeaderRegion = null,
     // 인라인 rename 상태(없으면 null=비활성). 활성이면 키/IME가 rename_input으로 라우팅되고(모달), 렌더가 대상
     // 슬롯/탭/라벨에 편집 텍스트+caret을 그린다. rename_input은 find/palette와 같은 OverlayInput(IME preedit·EAW·
     // UTF-8 경계 공유). 대상 객체가 teardown되면 invalidate가 null로 비운다(stale 포인터 방지).
@@ -5171,6 +5174,7 @@ pub const AppSession = struct {
         if (chrome.components.sidebar.onResizeEdge(x_px, self.sidebar_width_px, if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px)) {
             self.setHoveredSlot(null);
             self.setHoveredTab(null);
+            self.setHoveredHeaderRegion(.none);
             self.clearHoverUrlAnchor();
             return .resize_h; // 좌우로 끄는 세로 경계 ↔
         }
@@ -5178,6 +5182,7 @@ pub const AppSession = struct {
         if (self.inSidebar(x_px)) {
             // 상단 헤더(검색바·아이콘) 영역이면 슬롯 호버 해제 + 아이콘은 pointingHand·검색 영역은 I-beam.
             const region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px);
+            self.setHoveredHeaderRegion(region); // 아이콘이면 뒤에 호버 배경(검색·none이면 지움)
             if (region != .none) {
                 self.setHoveredSlot(null);
                 self.setHoveredTab(null);
@@ -5190,6 +5195,7 @@ pub const AppSession = struct {
             return if (self.hovered_slot != null) .link else .default; // 워크스페이스 슬롯은 클릭(전환) → pointingHand, 빈 영역은 arrow
         }
         self.setHoveredSlot(null); // 터미널 영역으로 나가면 사이드바 호버 해제
+        self.setHoveredHeaderRegion(.none); // 사이드바 밖 → 헤더 아이콘 호버 배경 지움
         // 어느 pane의 탭 바 위면 호버 탭을 갱신(✕ 표시). 바 위면 URL/divider 아니므로 밑줄 해제하고 arrow.
         if (self.updateHoveredTab(x_px, y_px)) {
             self.clearHoverUrlAnchor();
@@ -6684,6 +6690,20 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 호버 중인 헤더 아이콘 영역을 갱신한다. 아이콘(◧/⚙/+)이면 그 region, 그 외(검색·none)는 null로 정규화한다.
+    /// 바뀌면 사이드바를 재빌드해(retained layer 0 quad) 아이콘 뒤 호버 배경을 그리거나 지운다. 같으면 무동작
+    /// (재빌드 churn 방지 — 아이콘 경계를 넘을 때만 1회). 검색 줄은 caret만 있고 호버 배경 없음(텍스트 입력 영역).
+    fn setHoveredHeaderRegion(self: *AppSession, region: chrome.components.sidebar.HeaderRegion) void {
+        const next: ?chrome.components.sidebar.HeaderRegion = switch (region) {
+            .toggle_sidebar, .view_options, .new_workspace => region,
+            .search, .none => null,
+        };
+        if (self.hovered_header_region == next) return;
+        self.hovered_header_region = next;
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
     /// 마우스가 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로 호버 탭을 갱신하고, 아니면 null로 비운다. 활성
     /// 탭 leaf rect를 펴 각 pane 바를 hit-test한다(마우스 이동마다 — 작은 트리라 cheap). hoverCursor이 호출한다.
     fn updateHoveredTab(self: *AppSession, x_px: f64, y_px: f64) bool {
@@ -6753,6 +6773,40 @@ pub const AppSession = struct {
             const thickness: f32 = @floatFromInt(@max(@as(u32, 1), tk.border.line_thickness_px));
             const uy: f32 = @as(f32, @floatFromInt(self.sidebar_header_height_px)) - thickness;
             self.appendSolidQuad(0, uy, @floatFromInt(self.sidebar_width_px), thickness, self.dividerColor(), 0);
+        }
+        // 헤더 아이콘 호버 배경(웹 버튼 hover) — hovered_header_region이 아이콘이면 그 아이콘 뒤에 둥근 quad(layer 0,
+        // 아이콘 셀 아래). 아이콘 col은 buildSidebarHeaderFrame과 같은 단일 레이아웃(◧ cols-8·⚙ cols-5·+ cols-2).
+        // 아이콘은 .m이 1.7×로 확대+py_nudge 0.30하므로 셀 중심(가로)·~0.8ch(세로)에 앉는다 — quad를 거기에 맞춰 약 2칸×
+        // 1.7줄로 덮고 가운데 정렬. 색은 탭 ‹›/슬롯 호버와 같은 sidebarHoverBg(중간 톤).
+        if (self.hovered_header_region) |hr| {
+            if (self.cell_width_px > 0 and self.cell_height_px > 0 and self.sidebar_width_px / self.cell_width_px >= 10) {
+                const cols: u32 = self.sidebar_width_px / self.cell_width_px;
+                const icon_col: u32 = switch (hr) {
+                    .toggle_sidebar => cols -| 8,
+                    .view_options => cols -| 5,
+                    .new_workspace => cols -| 2,
+                    .search, .none => cols, // 도달 안 함(setHoveredHeaderRegion이 정규화) — 안전값
+                };
+                const cw: f32 = @floatFromInt(self.cell_width_px);
+                const ch: f32 = @floatFromInt(self.cell_height_px);
+                const center_x: f32 = (@as(f32, @floatFromInt(icon_col)) + 0.5) * cw; // 셀 중심(=.m gscale 중심)
+                const w: f32 = cw * 2.0;
+                const h: f32 = ch * 1.7;
+                const radius: f32 = @min(w, h) * 0.28; // 둥근 버튼
+                self.gpu_quads.append(self.allocator, .{
+                    .x = center_x - w / 2.0,
+                    .y = 0,
+                    .w = w,
+                    .h = h,
+                    .corner_radii = .{ radius, radius, radius, radius },
+                    .border_widths = .{ 0, 0, 0, 0 },
+                    .fill_color0 = self.sidebarHoverBg(),
+                    .fill_color1 = self.sidebarHoverBg(),
+                    .border_color = 0,
+                    .gradient_kind = 0,
+                    .layer = 0,
+                }) catch {};
+            }
         }
         // per-tab 배경 tint(우클릭 메뉴 "배경: …") — background_color 설정된 워크스페이스 슬롯(밴드 없는 idle 슬롯)에
         // 반투명(≈40%) 색 quad를 텍스트 셀 아래(layer 0)에 얹는다. 활성/호버 슬롯은 위 lowerSidebar가 밴드 색에

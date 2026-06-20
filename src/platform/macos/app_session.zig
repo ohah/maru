@@ -121,6 +121,9 @@ const traffic_light_clearance_pt: u32 = 72;
 // 접힘 시 상단 타이틀바 띠의 최소 높이(논리 pt) — 신호등 세로 높이(~28pt)를 가려야 터미널/탭이 신호등을 침범 안 함.
 // 펼침은 한 줄(터미널이 사이드바 우측이라 신호등 아래가 아님)이지만, 접힘은 터미널이 전폭이라 신호등 높이를 확보한다.
 const collapsed_titlebar_min_pt: u32 = 30;
+// 펼침 시 상단 타이틀바 띠의 최소 높이(논리 pt). 한 줄(cell_height ~17pt)만 띠로 두면 네이티브 macOS 타이틀바
+// (~28pt)보다 낮아 상단 드래그 영역이 좁게 느껴진다(사용자 피드백). 네이티브 높이를 바닥으로 잡아 드래그 영역을 맞춘다.
+const titlebar_strip_min_pt: u32 = 28;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -1410,7 +1413,7 @@ pub const AppSession = struct {
     fn computeTitlebarStripPx(self: *const AppSession) u32 {
         if (self.chrome_minimal) return 0;
         if (self.sidebar_collapsed) return @max(self.cell_height_px, ptToPx(collapsed_titlebar_min_pt, self.scale_milli));
-        return self.cell_height_px;
+        return @max(self.cell_height_px, ptToPx(titlebar_strip_min_pt, self.scale_milli));
     }
 
     /// per-pane 가로 탭 바의 backing 픽셀 높이 = cell 높이 + 위아래 tab_bar_pad_y_px 패딩(rich — 텍스트 세로 여유).

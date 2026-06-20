@@ -34,6 +34,8 @@ pub const parseConfig = loader.parse;
 pub const loadConfigFile = loader.loadFile;
 pub const loadConfigDefault = loader.loadDefault;
 pub const defaultConfigPath = loader.defaultConfigPath;
+pub const updateConfigText = loader.updateConfigText;
+pub const ConfigKeyValue = loader.KeyValue;
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

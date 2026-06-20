@@ -20,6 +20,13 @@ pub const MouseReport = struct {
 
 pub const CellMetrics = struct { width: u32, height: u32 };
 
+/// 마우스 선택 위치(셀). full (a)(P3-4)에서 선택 코어 mutate는 명령으로 위임하고, read-modify-decide(아래
+/// `select_extend_or_collapse`·`scroll_and_extend`)는 reader가 락 아래 **원자 실행**한다 — 메인은 코어를 안 만진다.
+pub const SelectAt = struct { row: u16, col: u16 };
+pub const SelectStart = struct { row: u16, col: u16, block: bool };
+/// 드래그 autoscroll: scrollViewport(delta) + selectionExtend(row,col)를 한 명령으로(원래 핸들러의 write 묶음).
+pub const ScrollExtend = struct { delta: isize, row: u16, col: u16 };
+
 pub const CoreCommand = union(enum) {
     set_preedit: []const u8, // owned(큐 소유) — IME 조합 텍스트. 적용/드롭/close 시 해제.
     clear_preedit, // IME 조합 해제(빈 preedit)
@@ -32,6 +39,18 @@ pub const CoreCommand = union(enum) {
     set_cell_metrics: CellMetrics,
     set_config_palette: [16]?terminal.Rgb,
     set_max_scrollback: usize,
+    // P3-4 scroll·선택 위임(full (a) — read-modify-decide는 reader가 원자 실행, 메인 코어 mutate 0):
+    scroll_to_abs: usize, // scrollToAbs(절대 행) — find 점프
+    scroll_to_offset: usize, // 절대 view_offset로 — reader가 **fresh offset에서 delta 계산**(스크롤바 드래그: 메인이
+    // delta를 미리 빼면 연속 명령이 옛 base로 double-count돼 어긋남 — 절대 목표를 보내 reader가 적용 시점에 빼야 정확)
+    scroll_and_extend: ScrollExtend, // 드래그 autoscroll: scrollViewport+selectionExtend 묶음
+    select_start: SelectStart, // selectionStart(+block)
+    select_extend: SelectAt, // selectionExtend
+    select_extend_or_collapse: SelectAt, // extend 후 anchor==head면 clear(이동 없는 클릭=해제 — read-after-write 원자)
+    select_word: SelectAt, // selectWordAt(더블클릭)
+    select_line: u16, // selectLineAt(트리플클릭, row)
+    select_all,
+    jump_to_prompt: i8, // jumpToPrompt(dir) — OSC 133 프롬프트 블록 점프(Cmd+↑/↓), view_offset mutate
 };
 
 /// 명령을 코어에 적용한다. **호출자가 코어 락(core_mutex)을 잡은 상태여야 한다** — reader는 `owner_dbg.lock`,
@@ -48,6 +67,35 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) void {
         .set_cell_metrics => |cm| core.setCellMetrics(cm.width, cm.height),
         .set_config_palette => |palette| core.setConfigPalette(palette),
         .set_max_scrollback => |lines| core.max_scrollback = lines,
+        .scroll_to_abs => |abs| core.scrollToAbs(abs),
+        .scroll_to_offset => |target| {
+            // 적용 시점의 fresh view_offset에서 delta를 구해 절대 위치로 — 연속 스크롤바 드래그가 double-count로 어긋나지 않게.
+            const cur: isize = @intCast(core.viewOffset());
+            core.scrollViewport(@as(isize, @intCast(target)) - cur);
+        },
+        .scroll_and_extend => |se| {
+            core.scrollViewport(se.delta);
+            core.selectionExtend(se.row, se.col);
+        },
+        .select_start => |s| {
+            core.selectionStart(s.row, s.col);
+            if (s.block) core.setSelectionBlock(true);
+        },
+        .select_extend => |s| core.selectionExtend(s.row, s.col),
+        .select_extend_or_collapse => |s| {
+            // 이동 없는 클릭은 선택이 아니라 해제(다른 터미널과 동일). extend→collapse 판정→clear을 reader가
+            // 원자 실행한다 — 메인이 위임 후 옛 상태를 읽어 오판하던 read-after-write 문제 제거(§9.4 full (a)).
+            core.selectionExtend(s.row, s.col);
+            if (core.selection_anchor) |a| {
+                if (core.selection_head) |h| {
+                    if (a.row == h.row and a.col == h.col) core.selectionClear();
+                }
+            }
+        },
+        .select_word => |s| core.selectWordAt(s.row, s.col),
+        .select_line => |row| core.selectLineAt(row),
+        .select_all => core.selectAll(),
+        .jump_to_prompt => |dir| _ = core.jumpToPrompt(dir), // bool 반환(스크롤됨)은 reader 렌더 트리거로 대체
     }
 }
 
@@ -84,4 +132,23 @@ test "core_command.apply: 각 명령이 코어를 올바르게 mutate (위임 �
     palette[1] = .{ .r = 10, .g = 20, .b = 30 };
     apply(&core, .{ .set_config_palette = palette });
     try std.testing.expect(core.config_palette[1] != null);
+
+    // P3-4 scroll·선택(full (a)) — 코어 상태 변화 검증
+    apply(&core, .scroll_to_bottom); // 바닥에서 선택 좌표 일관
+    apply(&core, .select_all);
+    try std.testing.expect(core.selection_anchor != null);
+    apply(&core, .{ .jump_to_prompt = -1 }); // OSC 133 없으면 no-op — 무크래시 경로
+    apply(&core, .{ .select_start = .{ .row = 0, .col = 0, .block = false } }); // 새 선택이 이전을 대체
+    apply(&core, .{ .select_extend = .{ .row = 1, .col = 2 } });
+    try std.testing.expect(core.selection_anchor != null);
+    // 같은 위치로 extend → anchor==head → collapse(clear): read-after-write를 apply가 원자 실행
+    apply(&core, .{ .select_extend_or_collapse = .{ .row = 0, .col = 0 } });
+    try std.testing.expect(core.selection_anchor == null);
+    // scroll_to_abs / scroll_to_offset / scroll_and_extend / select_word / select_line: 무크래시 경로
+    apply(&core, .{ .scroll_to_abs = 0 });
+    apply(&core, .{ .scroll_to_offset = 0 });
+    apply(&core, .{ .select_start = .{ .row = 0, .col = 0, .block = false } });
+    apply(&core, .{ .scroll_and_extend = .{ .delta = 0, .row = 1, .col = 1 } });
+    apply(&core, .{ .select_word = .{ .row = 0, .col = 0 } });
+    apply(&core, .{ .select_line = 0 });
 }

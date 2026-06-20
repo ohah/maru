@@ -169,10 +169,10 @@ fn usableRestoreCwd(cwd: []const u8) ?[]const u8 {
 
 // config `workspace.root`(시작 창·새 워크스페이스 탭 전용)를 spawn cwd로 해석한다. 빈 값이면 null(상속
 // cwd로 spawn — maru를 띄운 디렉터리). `~`·`~/…`는 `home`($HOME)으로 확장해 `buf`에 쓰고 그 슬라이스를
-// 돌려준다(확장 없으면 `configured`를 그대로 빌린다 — loaded_config arena가 세션 동안 소유). 형식 필터는
-// usableRestoreCwd와 동일: 절대경로가 아니면 null(상대경로를 넘기면 자식이 앱 cwd 기준으로 chdir해 예측
-// 불가). 존재·디렉터리 여부는 검사하지 않는다 — childExec가 chdir 실패 시 $HOME으로 graceful 폴백한다(TOCTOU
-// 회피, usableRestoreCwd와 같은 결). 반환 슬라이스는 `buf`가 살아 있는 동안(=spawn 호출까지) 유효하다.
+// 돌려준다(확장 없으면 `configured`를 그대로 빌린다 — loaded_config arena가 세션 동안 소유). 최종 형식 필터는
+// **usableRestoreCwd 단일 출처에 위임**한다(빈/과길이/비절대 → null) — 상대경로를 넘기면 자식이 앱 cwd 기준으로
+// chdir해 예측 불가. 존재·디렉터리 여부는 검사하지 않는다 — childExec가 chdir 실패 시 $HOME으로 graceful 폴백한다
+// (TOCTOU 회피, usableRestoreCwd와 같은 결). 반환 슬라이스는 `buf`가 살아 있는 동안(=spawn 호출까지) 유효하다.
 // loader는 raw 문자열만 보관하므로 env 의존(`~` 확장)을 여기 platform layer에서 처리한다.
 fn resolveWorkspaceRoot(buf: []u8, configured: []const u8, home: ?[]const u8) ?[]const u8 {
     if (configured.len == 0) return null;
@@ -187,8 +187,7 @@ fn resolveWorkspaceRoot(buf: []u8, configured: []const u8, home: ?[]const u8) ?[
         const rest = configured[1..]; // "" 또는 "/…"
         path = std.fmt.bufPrint(buf, "{s}{s}", .{ h, rest }) catch return null; // 너무 길면 null(폴백 spawn)
     }
-    if (!std.fs.path.isAbsolute(path)) return null;
-    return path;
+    return usableRestoreCwd(path); // 절대경로·길이 필터(단일 출처 재사용 — 비절대/과길이는 null)
 }
 
 // config `workspace.root` **미설정** 시 첫 창/폴백 cwd를 정한다. maru의 launch cwd가 `/`였으면(`launch_is_root`
@@ -1299,9 +1298,10 @@ pub const AppSession = struct {
         var first_req = spawnRequest(spawn_config, self.loaded_config.config.term, integ_dir, self.new_tab_ssh_bin);
         // launch cwd가 `/`인지 한 번 캐시(.app 더블클릭 home 승격용 — workspaceRootCwd가 매번 getcwd하지 않게).
         self.launch_cwd_is_root = detectLaunchCwdIsRoot(io);
-        // 시작 창은 config workspace.root에서 연다(빈 값이면 상속 cwd — maru를 띄운 디렉터리, `/`면 home). 새 탭과 같은 규칙.
+        // 시작 창은 config workspace.root에서 연다(빈 값이면 상속 cwd — maru를 띄운 디렉터리, `/`면 home). 첫 창은
+        // 상속할 직전 surface가 없으므로 inherit=false(=root 직행 — newSurfaceCwd가 focusedTermCwd를 안 거친다).
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (self.workspaceRootCwd(&root_buf)) |root| first_req.cwd = root;
+        self.applySpawnCwd(&first_req, &root_buf, false);
         _ = try self.createTab(
             first_req,
             spawn_config.size,
@@ -2296,7 +2296,7 @@ pub const AppSession = struct {
         // 서페이스(새 Term)는 Term 탭이라 tab-inherit-cwd 토글을 따른다(켜지면 포커스 cwd 상속, 아니면 root).
         // append 전에 읽어야 focusedTermCwd의 activeTerm이 아직 현재(=직전 포커스) Term을 가리킨다.
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (self.newSurfaceCwd(&root_buf, self.loaded_config.config.workspace.tab_inherit_cwd)) |c| req.cwd = c;
+        self.applySpawnCwd(&req, &root_buf, self.loaded_config.config.workspace.tab_inherit_cwd);
         const term = try self.createTerm(
             req,
             size,
@@ -2359,7 +2359,7 @@ pub const AppSession = struct {
         // 팬(분할)은 split-inherit-cwd면 분할되는(활성) pane의 활성 Term cwd 상속, 아니면 root. 아래 트리 변형
         // 전에 읽어 focusedTermCwd의 active가 아직 포커스 Term을 가리킨다.
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (self.newSurfaceCwd(&root_buf, self.loaded_config.config.workspace.split_inherit_cwd)) |c| req.cwd = c;
+        self.applySpawnCwd(&req, &root_buf, self.loaded_config.config.workspace.split_inherit_cwd);
         const new_pane = try self.createPane(
             req,
             b_size,
@@ -2860,6 +2860,17 @@ pub const AppSession = struct {
         return self.workspaceRootCwd(buf); // 꺼졌거나 상속할 cwd 없음 → 고정 root
     }
 
+    /// 새 surface spawn 요청에 cwd를 채운다(newSurfaceCwd 결과를 `req.cwd`에 얹는다). 모든 spawn 진입점
+    /// (첫 창·새 탭·새 Term·분할)이 공유하는 단일 funnel이다.
+    ///
+    /// **`buf` 수명 계약(여기 단일 출처)**: 반환 cwd 슬라이스는 `buf`(또는 core/config arena)를 가리키고,
+    /// childExec가 **spawn 시점에 dupeZ로 복사**한다. 그래서 `buf`는 호출자 스택에 두고 spawn(createTab/createTerm/
+    /// createPane) 호출이 끝날 때까지 살아 있어야 한다 — 헬퍼가 `buf`를 내부 선언하면 반환 시 소멸해 use-after-scope가
+    /// 된다. 호출자는 `var root_buf: [std.fs.max_path_bytes]u8 = undefined;`를 spawn과 같은 스코프에 두고 그 포인터를 넘긴다.
+    fn applySpawnCwd(self: *AppSession, req: *maru.pty.SpawnRequest, buf: []u8, inherit: bool) void {
+        if (self.newSurfaceCwd(buf, inherit)) |c| req.cwd = c;
+    }
+
     /// 사용자 액션(Cmd+T)으로 새 탭을 연다 — 첫 탭과 같은 종류의 셸을 '현재 창 크기'로 띄운다(보관한
     /// new_tab_config/zdotdir, term은 loaded_config). createTab이 새 탭을 활성으로 만든다.
     fn newTab(self: *AppSession) !*Tab {
@@ -2868,7 +2879,7 @@ pub const AppSession = struct {
         var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin);
         // 새 워크스페이스 탭: tab-inherit-cwd면 포커스 cwd 상속, 아니면 root(Ghostty tab-inherit 모델).
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (self.newSurfaceCwd(&root_buf, self.loaded_config.config.workspace.tab_inherit_cwd)) |c| req.cwd = c;
+        self.applySpawnCwd(&req, &root_buf, self.loaded_config.config.workspace.tab_inherit_cwd);
         return self.createTab(
             req,
             cfg.size,

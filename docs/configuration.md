@@ -181,7 +181,12 @@ term = xterm-maru
 > 설치가 실패하면 자동으로 `TERM=xterm-256color`로 폴백해 세션이 깨지지 않는다. 키/agent 인증이면
 > ControlMaster로 **단일 연결**(인증 1회)에서 설치와 세션을 함께 처리한다. `maru ssh`는 **대화형
 > 세션용**이다 — `maru ssh host cmd`처럼 원격 command를 붙이면 terminfo 설치를 건너뛰고(설치 스크립트가
-> command와 충돌해 이중 실행되는 것을 막는다) `xterm-256color`로 연결한다. 수동으로 한 줄로 설치하려면:
+> command와 충돌해 이중 실행되는 것을 막는다) `xterm-256color`로 연결한다.
+>
+> **설치 캐시**: 한 번 설치에 성공한 목적지는 `${XDG_CACHE_HOME:-~/.cache}/maru/ssh-terminfo-hosts`에
+> 기록돼, 다음 접속부터 설치 단계를 건너뛴다(매 접속 설치 round-trip 제거). 원격 `~/.terminfo`를 비웠다면
+> (스테일) `maru ssh --terminfo-only <host>`로 **강제 재설치**하거나 캐시 파일을 지운다(`rm
+> ~/.cache/maru/ssh-terminfo-hosts`). 수동으로 한 줄로 설치하려면:
 >
 > ```sh
 > infocmp -x xterm-maru | ssh <host> 'mkdir -p ~/.terminfo && tic -x -o ~/.terminfo -'

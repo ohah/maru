@@ -14,8 +14,9 @@
 //! 이 모듈은 std만 의존하는 순수 로직이라 단위 테스트로 동작을 못박는다. 실제 프로세스 exec(I/O)는
 //! main.zig가 맡고, 원격 연결 검증은 opt-in `ssh localhost` smoke가 맡는다.
 //!
-//! 의도적으로 뺀 것(후속): 호스트 설치 캐시(Ghostty `+ssh-cache` 대응). terminfo 소스 embed(로컬 설치
-//! 의존 제거 — 자기완결적)·단일 연결(ControlMaster)·원격 command 안전 처리(bootstrapEligible)는 했다.
+//! 의도적으로 뺀 것(후속): 캐시 관리 서브커맨드(Ghostty `+ssh-cache` list/clear 대응 — 지금은 캐시
+//! 파일을 지워 비운다). 호스트 설치 캐시·terminfo 소스 embed(자기완결)·단일 연결(ControlMaster)·원격
+//! command 안전 처리(bootstrapEligible)는 했다.
 
 const std = @import("std");
 
@@ -57,37 +58,47 @@ const emit_terminfo = "printf '%s' '" ++ embedded_terminfo ++ "'";
 /// bootstrapEligible이 목적지(첫 비옵션 토큰)를 찾을 때 값 토큰을 건너뛰는 데 쓴다.
 const ssh_value_opts = "bcDEeFIiJLlmOopQRSWw";
 
-/// 전체 래퍼 스크립트(`/bin/sh -c <script> sh <elig> <ssh args...>`로 실행). `$1`=bootstrap 적격
-/// 플래그(Zig `bootstrapEligible` 결과 "1"/"0"), 나머지 `"$@"`=ssh 인자.
+/// 설치 캐시 파일 경로 구절. 목적지(한 줄에 하나)를 기록해, 같은 목적지 재접속 시 설치를 건너뛴다.
+/// `$XDG_CACHE_HOME` 우선, 없으면 `~/.cache`. 비우려면 이 파일을 지운다(아래 docs). 셸이 읽고 쓴다.
+const cache_path = "${XDG_CACHE_HOME:-$HOME/.cache}/maru/ssh-terminfo-hosts";
+
+/// 전체 래퍼 스크립트(`/bin/sh -c <script> sh <elig> <dest> <ssh args...>`로 실행). `$1`=bootstrap 적격
+/// 플래그("1"/"0"), `$2`=목적지(캐시 키), 나머지 `"$@"`=ssh 인자.
 ///
-/// 적격("$1"=1: 원격 command 없는 순수 세션)일 때만 **ControlMaster 단일 연결** 안에서 embed한
-/// terminfo 소스(emit_terminfo)를 원격에 심고 같은 연결로 세션을 exec한다 — 부트스트랩 ssh가 master가 되고
-/// (`ControlMaster=auto`·`ControlPersist=10`) 세션 ssh가 그 소켓을 재사용해 **인증이 한 번**만 일어난다
-/// (리뷰 #3: 비밀번호 인증 이중 프롬프트 제거). 설치 성공→`TERM=xterm-maru`, 실패→`xterm-256color` 폴백.
+/// **캐시 hit**(이 목적지에 이미 설치 기록 있음): bootstrap을 통째로 건너뛰고 `TERM=xterm-maru`로 바로
+/// exec한다 — 매 접속 설치 round-trip을 없앤다(Ghostty `+ssh-cache`식). 캐시는 셸이 grep으로 읽는다.
 ///
-/// 부적격("$1"=0: 원격 command가 붙었거나 파싱 불확실)이면 bootstrap을 **건너뛰고** 그냥
-/// `exec env TERM=xterm-256color ssh "$@"` 한다 — `ssh host cmd`에 설치 스크립트를 덧붙이면 사용자
-/// command가 부트스트랩과 세션에서 **두 번 실행**되는 위험(리뷰 #2)을 피한다.
+/// 캐시 miss + 적격("$1"=1: 원격 command 없는 순수 세션): **ControlMaster 단일 연결** 안에서 embed한
+/// terminfo 소스를 원격에 심고 같은 연결로 세션을 exec한다 — 부트스트랩 ssh가 master가 되고 세션 ssh가
+/// 그 소켓을 재사용해 **인증이 한 번**만 일어난다(리뷰 #3). 설치 **성공 시 목적지를 캐시에 기록**하고
+/// `TERM=xterm-maru`, 실패 시 `xterm-256color` 폴백.
 ///
-/// TERM은 `env`로 ssh 프로세스 환경에 실어 ssh가 원격으로 전달하게 한다 — `-o SetEnv`는 OpenSSH 7.8+
-/// 전용이라 구버전 클라이언트 회귀를 만든다(리뷰 #4). `env TERM=...`는 POSIX라 그 의존이 없다.
+/// 부적격("$1"=0: 원격 command가 붙었거나 파싱 불확실)이면 bootstrap을 건너뛰고 `xterm-256color`로
+/// 그냥 exec한다 — 사용자 command가 두 번 실행되는 위험(리뷰 #2)을 피한다.
+///
+/// TERM은 `env`로 실어 보낸다 — `-o SetEnv`는 OpenSSH 7.8+ 전용 회귀(리뷰 #4)라 안 쓴다.
 pub const wrapper_script =
-    "elig=\"$1\"; shift; " ++
+    "elig=\"$1\"; dest=\"$2\"; shift 2; cache=\"" ++ cache_path ++ "\"; " ++
+    "if [ -n \"$dest\" ] && grep -qxF \"$dest\" \"$cache\" 2>/dev/null; then exec env TERM=xterm-maru ssh \"$@\"; fi; " ++
     "if [ \"$elig\" = 1 ]; then " ++
     "ctl=$(mktemp -u \"${TMPDIR:-/tmp}/maru-ssh-XXXXXX\"); " ++
     "if " ++ emit_terminfo ++ " | ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10 \"$@\" '" ++ remote_install ++ "' >/dev/null 2>&1; then " ++
+    "[ -n \"$dest\" ] && { mkdir -p \"${cache%/*}\" 2>/dev/null; printf '%s\\n' \"$dest\" >> \"$cache\" 2>/dev/null; }; " ++
     "exec env TERM=xterm-maru ssh -o ControlPath=\"$ctl\" \"$@\"; " ++
     "else exec env TERM=xterm-256color ssh -o ControlPath=\"$ctl\" \"$@\"; fi; " ++
     "fi; " ++
     "exec env TERM=xterm-256color ssh \"$@\"";
 
 /// 설치만 하고 세션은 띄우지 않는 안전 primitive(= 문서의 수동 한 줄을 자동화). `ssh localhost` smoke의
-/// 대상이자 ssh 가로채기 싫은 사용자용. wrapper와 같은 `$1`=적격 플래그를 받아, 원격 command가 붙은
-/// 오용(`--terminfo-only host cmd`)이면 설치하지 않고 에러낸다(command 이중 실행 방지).
+/// 대상이자, ssh 가로채기 싫은 사용자의 강제 설치 경로다 — wrapper와 달리 **캐시를 읽지 않고 항상
+/// 설치**한다(스테일 캐시 복구용). `$1`=적격 플래그(원격 command 붙으면 에러), `$2`=목적지. 설치 성공 시
+/// 목적지를 캐시에 기록한다(중복 없이).
 pub const terminfo_only_script =
-    "elig=\"$1\"; shift; " ++
+    "elig=\"$1\"; dest=\"$2\"; shift 2; cache=\"" ++ cache_path ++ "\"; " ++
     "[ \"$elig\" = 1 ] || { echo 'maru ssh --terminfo-only: 목적지만 지정하세요(원격 command 불가)' >&2; exit 2; }; " ++
-    emit_terminfo ++ " | ssh \"$@\" '" ++ remote_install ++ "'";
+    emit_terminfo ++ " | ssh \"$@\" '" ++ remote_install ++ "'; rc=$?; " ++
+    "[ \"$rc\" = 0 ] && [ -n \"$dest\" ] && { grep -qxF \"$dest\" \"$cache\" 2>/dev/null || { mkdir -p \"${cache%/*}\" 2>/dev/null; printf '%s\\n' \"$dest\" >> \"$cache\" 2>/dev/null; }; }; " ++
+    "exit \"$rc\"";
 
 pub const ParseError = error{MissingDestination};
 
@@ -124,6 +135,13 @@ pub fn scriptFor(terminfo_only: bool) []const u8 {
 /// 목적지 = 첫 비옵션 토큰, 값 받는 옵션(ssh_value_opts)의 값 토큰은 건너뛴다; 목적지가 마지막이면
 /// command 없음. 베이스: ssh(1) 옵션 문법. 틀려도 실패 모드는 "bootstrap skip → 평범한 ssh"라 안전하다.
 pub fn bootstrapEligible(ssh_args: []const []const u8) bool {
+    const di = destinationIndex(ssh_args) orelse return false; // 목적지 못 찾으면 보수적 skip
+    return di == ssh_args.len - 1; // 목적지가 마지막 토큰 = 뒤에 원격 command 없음
+}
+
+/// ssh 인자에서 목적지(첫 비옵션 토큰)의 인덱스를 찾는다. 값 받는 옵션(ssh_value_opts)의 값 토큰은
+/// 건너뛴다. 옵션만 있고 목적지가 없으면 null. bootstrapEligible과 destination이 공유하는 파서다.
+pub fn destinationIndex(ssh_args: []const []const u8) ?usize {
     var i: usize = 0;
     while (i < ssh_args.len) {
         const arg = ssh_args[i];
@@ -134,15 +152,21 @@ pub fn bootstrapEligible(ssh_args: []const []const u8) bool {
                 i += 1; // 부울 플래그·붙은 값(`-p2222`)·결합 플래그(`-tt`)는 한 토큰으로
             }
         } else {
-            return i == ssh_args.len - 1; // destination — 뒤에 토큰이 더 있으면 원격 command
+            return i; // 첫 비옵션 토큰 = 목적지
         }
     }
-    return false; // destination을 못 찾음(옵션만) → 보수적으로 skip
+    return null; // 목적지 없음(옵션만)
 }
 
-/// `/bin/sh -c <script> sh <elig> <ssh args...>` 형태의 argv를 만든다. `sh`는 `$0`, `$1`=bootstrap 적격
-/// 플래그("1"/"0"), 그 뒤 ssh_args가 `"$@"`로 들어간다. 반환 slice는 caller가 free한다(요소는 script
-/// 상수·"1"/"0" 리터럴·ssh_args를 빌려 가리킨다 — 복사 아님).
+/// ssh 목적지 문자열(예: `user@host`, `host`). 설치 캐시의 **키**로 쓴다 — 이 목적지에 terminfo를
+/// 설치했으면 다음 접속에서 bootstrap을 건너뛴다. 못 찾으면 null(그땐 캐시 안 함).
+pub fn destination(ssh_args: []const []const u8) ?[]const u8 {
+    return if (destinationIndex(ssh_args)) |i| ssh_args[i] else null;
+}
+
+/// `/bin/sh -c <script> sh <elig> <dest> <ssh args...>` 형태의 argv를 만든다. `sh`는 `$0`,
+/// `$1`=bootstrap 적격 플래그("1"/"0"), `$2`=목적지(캐시 키, 없으면 빈 문자열), 그 뒤 ssh_args가 `"$@"`로
+/// 들어간다. 반환 slice는 caller가 free한다(요소는 script 상수·리터럴·ssh_args를 빌려 가리킨다 — 복사 아님).
 pub fn buildArgv(allocator: std.mem.Allocator, parsed: Parsed) ![]const []const u8 {
     var list: std.ArrayList([]const u8) = .empty;
     errdefer list.deinit(allocator);
@@ -151,6 +175,7 @@ pub fn buildArgv(allocator: std.mem.Allocator, parsed: Parsed) ![]const []const 
     try list.append(allocator, scriptFor(parsed.terminfo_only));
     try list.append(allocator, "sh"); // $0
     try list.append(allocator, if (bootstrapEligible(parsed.ssh_args)) "1" else "0"); // $1 = bootstrap 적격
+    try list.append(allocator, destination(parsed.ssh_args) orelse ""); // $2 = 목적지(캐시 키)
     for (parsed.ssh_args) |a| try list.append(allocator, a);
     return list.toOwnedSlice(allocator);
 }
@@ -178,22 +203,26 @@ test "parse: --terminfo-only만 있고 목적지 없음 → MissingDestination" 
     try std.testing.expectError(error.MissingDestination, parse(&.{"--terminfo-only"}));
 }
 
-test "wrapper 스크립트: ControlMaster·embed 소스·안전 폴백·적격 분기 불변식" {
+test "wrapper 스크립트: ControlMaster·embed 소스·캐시·안전 폴백·적격 분기 불변식" {
     const s = scriptFor(false);
     // 핵심 동작을 바이트로 고정한다("추측 말고 캡처").
     try std.testing.expect(std.mem.indexOf(u8, s, "ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10 \"$@\"") != null); // 부트스트랩=master
     try std.testing.expect(std.mem.indexOf(u8, s, "tic -x -o \"$HOME/.terminfo\" -") != null); // 원격 설치
-    try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-maru ssh -o ControlPath=\"$ctl\"") != null); // 성공 시 maru + master 재사용
+    try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-maru ssh -o ControlPath=\"$ctl\"") != null); // 설치 성공 시 maru + master 재사용
     try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-256color ssh \"$@\"") != null); // 부적격/실패 폴백
     try std.testing.expect(std.mem.indexOf(u8, s, "[ \"$elig\" = 1 ]") != null); // 적격 게이트
+    // 캐시: hit이면 bootstrap 건너뛰고 maru, 설치 성공 시 목적지 기록.
+    try std.testing.expect(std.mem.indexOf(u8, s, "grep -qxF \"$dest\" \"$cache\"") != null); // 캐시 read
+    try std.testing.expect(std.mem.indexOf(u8, s, "ssh-terminfo-hosts") != null); // 캐시 파일
+    try std.testing.expect(std.mem.indexOf(u8, s, ">> \"$cache\"") != null); // 캐시 write
+    try std.testing.expect(std.mem.indexOf(u8, s, "if [ -n \"$dest\" ] && grep -qxF \"$dest\" \"$cache\" 2>/dev/null; then exec env TERM=xterm-maru ssh \"$@\"") != null); // 캐시 hit → bootstrap 건너뜀
     // embed 회귀 가드: 로컬 infocmp 의존 없이(printf로 embed 소스 emit) 자기완결적이다.
     try std.testing.expect(std.mem.indexOf(u8, s, "printf '%s' '") != null); // embed 소스 emit
     try std.testing.expect(std.mem.indexOf(u8, s, "Sync=") != null); // embed된 terminfo가 스크립트에 들어있다
     try std.testing.expect(std.mem.indexOf(u8, s, "infocmp -x") == null); // 로컬 infocmp 의존 없음
     try std.testing.expect(std.mem.indexOf(u8, s, "command -v infocmp") == null); // 로컬 게이트 없음
-    // 회귀 가드: SetEnv(OpenSSH 7.8+ 전용)·mkdir(tic -o가 대신) 미사용.
+    // 회귀 가드: SetEnv(OpenSSH 7.8+ 전용) 미사용.
     try std.testing.expect(std.mem.indexOf(u8, s, "SetEnv") == null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "mkdir") == null);
 }
 
 test "embed: 바이너리에 terminfo 소스가 들어있고 emit 구절이 그걸 흘린다" {
@@ -204,10 +233,12 @@ test "embed: 바이너리에 terminfo 소스가 들어있고 emit 구절이 그�
     try std.testing.expectEqual(@as(u8, '\''), emit_terminfo[emit_terminfo.len - 1]); // 닫는 따옴표
 }
 
-test "terminfo-only 스크립트: 적격일 때만 설치, 세션 exec 없음" {
+test "terminfo-only 스크립트: 캐시 무시 강제 설치, 성공 시 기록, 세션 exec 없음" {
     const s = scriptFor(true);
     try std.testing.expect(std.mem.indexOf(u8, s, "tic -x -o \"$HOME/.terminfo\" -") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "[ \"$elig\" = 1 ]") != null); // 적격 게이트(원격 command 오용 차단)
+    try std.testing.expect(std.mem.indexOf(u8, s, ">> \"$cache\"") != null); // 성공 시 캐시 기록
+    try std.testing.expect(std.mem.indexOf(u8, s, "grep -qxF \"$dest\" \"$cache\"") != null); // 중복 없이(기록 전 확인)
     try std.testing.expect(std.mem.indexOf(u8, s, "exec ") == null); // 세션을 띄우지 않는다
 }
 
@@ -224,18 +255,28 @@ test "bootstrapEligible: 순수 세션은 적격, 원격 command가 있으면 �
     try std.testing.expect(!bootstrapEligible(&.{ "-p", "2222" }));
 }
 
-test "buildArgv: /bin/sh -c <script> sh <elig> <ssh 인자>" {
+test "destination: 첫 비옵션 토큰을 캐시 키로 뽑는다" {
+    try std.testing.expectEqualStrings("host", destination(&.{"host"}).?);
+    try std.testing.expectEqualStrings("user@host", destination(&.{"user@host"}).?);
+    try std.testing.expectEqualStrings("host", destination(&.{ "-p", "2222", "host" }).?); // 값 옵션 건너뜀
+    try std.testing.expectEqualStrings("host", destination(&.{ "host", "ls" }).?); // command 앞 목적지
+    try std.testing.expect(destination(&.{}) == null);
+    try std.testing.expect(destination(&.{ "-p", "2222" }) == null); // 옵션만 → 없음
+}
+
+test "buildArgv: /bin/sh -c <script> sh <elig> <dest> <ssh 인자>" {
     const a = std.testing.allocator;
     const p = try parse(&.{"user@host"});
     const argv = try buildArgv(a, p);
     defer a.free(argv);
-    try std.testing.expectEqual(@as(usize, 6), argv.len);
+    try std.testing.expectEqual(@as(usize, 7), argv.len);
     try std.testing.expectEqualStrings("/bin/sh", argv[0]);
     try std.testing.expectEqualStrings("-c", argv[1]);
     try std.testing.expectEqualStrings(scriptFor(false), argv[2]);
     try std.testing.expectEqualStrings("sh", argv[3]);
     try std.testing.expectEqualStrings("1", argv[4]); // host 단독 → 적격
-    try std.testing.expectEqualStrings("user@host", argv[5]);
+    try std.testing.expectEqualStrings("user@host", argv[5]); // $2 = 목적지(캐시 키)
+    try std.testing.expectEqualStrings("user@host", argv[6]); // ssh 인자
 }
 
 test "buildArgv: 원격 command가 있으면 적격 플래그 0" {

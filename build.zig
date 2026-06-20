@@ -20,6 +20,17 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{ .default_target = default_target_query });
     const optimize = b.standardOptimizeOption(.{});
 
+    // macOS에서 os_version_min을 박으면 Zig가 cross-compile로 보고(std.Target.Query.isNative()=false)
+    // SDK 프레임워크/라이브러리 자동 탐지를 꺼버린다("searched paths: none" — Xcode 26/Zig 0.16 실측;
+    // 위 "macOS는 native 유지라 자동 탐지" 주석의 가정이 이 조합에서 깨졌다). 배포 하한(11.0)은 유지해야
+    // 하므로 SDK 경로를 빌드 타임에 xcrun으로 얻어 공유 모듈에 명시 추가해 자동 탐지 부재를 메운다.
+    // (-Dtarget을 주면 target.result가 그 값이라 native면 이 보강이 무해하게 중복될 뿐이다.)
+    const macos_sdk: ?[]const u8 = if (target.result.os.tag == .macos and builtin.os.tag == .macos) blk: {
+        const out = b.run(&.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" });
+        const trimmed = std.mem.trim(u8, out, " \t\r\n");
+        break :blk if (trimmed.len > 0) trimmed else null;
+    } else null;
+
     const maru_mod = b.addModule("maru", .{
         .root_source_file = b.path("src/maru.zig"),
         .target = target,
@@ -29,6 +40,13 @@ pub fn build(b: *std.Build) void {
     // 직접 못 읽는다. 빌드 import로 등록해 cli/ssh.zig가 @embedFile("maru_terminfo")로 바이너리에 심는다
     // (maru ssh 자기완결성 — 로컬 설치 없이 원격 전파). 파일을 옮기지 않아 참조 중복이 없다.
     maru_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+    // SDK 프레임워크/라이브러리/헤더 경로를 공유 모듈에 명시 — cross 처리로 꺼진 자동 탐지를 메운다.
+    // maru를 import하는 Compile(코어 테스트, app host, .m 브리지 링크 포함)의 link에 합쳐진다.
+    if (macos_sdk) |sdk| {
+        maru_mod.addSystemFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
+        maru_mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
+        maru_mod.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk}) });
+    }
     const test_support_mod = b.addModule("test_support", .{
         .root_source_file = b.path("tests/support/artifacts.zig"),
         .target = target,

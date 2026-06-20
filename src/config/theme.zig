@@ -203,9 +203,29 @@ pub const PageKeys = enum {
     scroll,
 };
 
+/// Shift+Enter를 어떻게 인코딩할지. newline(기본)=Option+Enter와 같은 `\x1b\r`(Meta+Enter)을 보내
+/// Claude Code 등 CLI/TUI가 줄바꿈(전송 없이 멀티라인)으로 인식하게 한다 — 일반 Enter(`\r`)와 구분된다.
+/// native=Shift를 인코딩에 반영하지 않는 기존 터미널 동작(일반 셸은 `\r`, kitty 프로토콜이 켜지면 CSI u).
+pub const ShiftEnter = enum {
+    newline,
+    native,
+};
+
+/// IME(한글 등) 조합 중 Enter를 눌렀을 때. newline(기본)=조합을 확정하면서 그 Enter의 개행도 함께 보낸다
+/// (브라우저/웹 터미널 동작 — 엔터 한 번에 확정+실행). commit-only=조합만 확정하고 개행은 보내지 않는다
+/// (macOS 네이티브 입력기 기본 — 확정 후 Enter를 한 번 더 눌러야 개행).
+pub const ImeEnter = enum {
+    newline,
+    commit_only,
+};
+
 pub const InputConfig = struct {
     // 기본 scroll: Mac 관례(Terminal.app/iTerm2) + 셸 keymap 오해석(case 토글·'~' 삽입) 원천 차단.
     page_keys: PageKeys = .scroll,
+    // 기본 newline: Shift+Enter를 Option+Enter처럼 `\x1b\r`로 — CLI/TUI 멀티라인 줄바꿈(브라우저 기대치).
+    shift_enter: ShiftEnter = .newline,
+    // 기본 newline: IME 조합 중 Enter를 확정+개행 한 번에(브라우저 동작). commit-only면 조합만 확정.
+    ime_enter: ImeEnter = .newline,
 };
 
 /// quick terminal(전역 토글 오버레이 패널)을 어느 화면에 띄울지. main=주 디스플레이, mouse=마우스 포인터가

@@ -239,3 +239,34 @@ mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 
 - **perf 벤치(`tools/perf`)** — `core_command_apply`: 명령을 enqueue→reader가 drain·적용까지의 지연을 측정한다(헤드리스: reader-processing 루프에 명령 N건을 흘려 enqueue 시각과 적용 시각의 분포를 본다). P3-4의 scroll·선택은 이 수치로 (a) 유지 vs 국소 (b) 강등을 **데이터로** 판정한다. budget·게이트·리포트 포맷은 `render_build_drawlist` 선례(`maru.perf.v1`, 2s budget·머신 여유).
 - **MARU_DEBUG `coreq.*` 스코프**(`diag.maruDebugEnabled` 게이트 + `input_diag` 식 scoped logger 선례): 켜면 명령 enqueue(종류·바이트 수), reader drain(배치 크기·큐 깊이), 적용 지연(enqueue→apply ms), backpressure 대기, close 시 폐기 건수를 로깅한다. 기본 off(미설정 시 분기 하나, no-alloc). 데드락/지연 회귀를 사람이 즉시 본다(#700식 hang 재발 시 큐 깊이·미적용 명령이 바로 드러남).
 - **결정성 단위 테스트**: §6 패턴(타이밍 비의존)으로 "명령이 reader 1턴 내 enqueue 순서대로 적용"·"backpressure 시 손실 0"·"close 시 미적용 명령 폐기"를 고정한다. 측정 훅 자체(지연 기록)는 release에서 `@sizeOf` 0이거나 debug-only로 hot path 비용 0을 유지한다.
+
+## 10. 미래 논의(미확정) — present cadence / 프레임 페이싱
+
+> **상태: 계획 아님, 논의 기록.** 아래는 2026-06-21 사용자와 나눈 대화의 정리이며 확정된 설계가 아니다. 실제 착수 전 **별도 설계 문서(doc-first)** 가 필요하다([[document-basis-and-decision]]). 현재 코드/문서에 이 작업의 근거는 없다(현 구현은 30Hz 타이머 고정).
+
+### 10.1 동기 (관찰)
+
+호버/스크롤 반응이 "FPS 낮은 느낌"이라는 사용자 관찰. 원인은 **메인 스레드 `Timer(1/30)` 고정 30Hz present cadence**(`src/platform/macos/MaruAppHost.swift` `startFrameLoopTicks`)다 — 호버 상태 변경은 이미 `metal_generation`을 bump해 그려지지만, 다음 30Hz tick까지 최대 ~33ms 지연된다. vsync 비동기라 디스플레이 vblank와도 맞물리지 않는다.
+
+**중요(결함 아님)**: 이는 comfort 수준 폴리시지 결함이 아니다. §1의 4.2초 질의-응답 지연이나 #700 데드락 같은 측정된 결함과 다르다. 오히려 Phase 1–3가 PTY 파싱을 메인에서 빼 30Hz tick이 가벼워져, 호버 지연은 이제 "메인 경합"이 아니라 **순수 30Hz cadence**로 좁혀졌다(= 30Hz 자체가 예전보다 쾌적). **안 해도 기능 손실 0.**
+
+### 10.2 옵션 스펙트럼 (트레이드오프)
+
+| 옵션 | 작업량 | 효과 | 비용/리스크 |
+|---|---|---|---|
+| **A. 60Hz 타이머** (`1/30`→`1/60`) | 1줄(버려도 빚 0) | 지연 33→16ms | vsync 비정렬 judder(맥놀이), ProMotion 미적응, **idle wakeup 2배(배터리)** |
+| **B. CVDisplayLink가 메인 tick을 깨움** | focused PR | vsync 정렬(judder 0)·주사율 적응(120Hz)·idle/blur 시 stop(배터리 절약) | per-vsync 메인 hop coalesce 필요, 모달/라이브리사이즈 런루프 응답성, 생명주기 엣지 |
+| **C. 렌더 스레드에서 직접 present** | rework | B + **대량 출력 중 메인 응답성 분리** | Metal present를 @MainActor 밖으로 + drawable 리사이즈 동기화(코어 thread-safety는 Phase 1–3로 이미 충족이 유일한 위안) |
+
+호버 "즉시 리드로우"는 별도 레버지만 **60Hz/B와 중복**이 크다(호버는 이미 generation bump로 그려짐 — cadence만 지연). 하더라도 **상태 변화 시 dirty 플래그만**(동기 draw는 이중 present·타이밍 위험이라 지양).
+
+### 10.3 제약 / 사실 (확인됨)
+
+- **macOS 11.0 floor**(`build.zig`·`LSMinimumSystemVersion`) → 깔끔한 `NSView.displayLink`(CADisplayLink)는 macOS 14+라 못 씀. **CVDisplayLink**(10.4+, macOS 15 deprecated이나 동작)가 11.0 호환 선택 — **Ghostty 선례**(`references/ghostty/pkg/macos/video/display_link.zig`가 CVDisplayLink만, `@available` 분기 없이 사용; `set_display_id`로 멀티모니터 주사율 추적). 깔끔히 가려면 `@available(macOS 14, *)`로 14+는 CADisplayLink 분기.
+- **프레임 페이싱은 본질적으로 platform 책임**([[portability-is-roadmap-goal]], [layering](layering-and-portability.md)): macOS=CVDisplayLink, Win=DXGI/WaitForVBlank, Linux=Wayland frame 콜백, web=rAF. 비-macOS는 타이머 폴백(Ghostty `DisplayLink == void` 패턴). 코어 tick은 cadence 무관·idle-cheap을 유지해야 어댑터만 갈아끼움.
+- **헤드리스 테스트 불가 → 실기기 검증 필수**([[run-macos-app-before-merge]]): `zig build macos-app`로 키 입력·ProMotion·멀티모니터·슬립/웨이크까지 실행 확인이 머지 조건. 현재 frame pacing은 미검증([stress-testing](stress-testing.md) §, [verification-matrix](verification-matrix.md)).
+- §7 비목표의 "deadline 스케줄러" 시간-모델(blink/애니메이션)과 합류 가능 — present cadence가 vsync-구동이 되면 그 위에 시간-모델을 얹는 게 자연스럽다.
+
+### 10.4 결정 자세 (현재)
+
+**미루는 게 기본.** 거슬리지 않으면 안 함(손실 0). 거슬리면 **A(60Hz, 무빚 스톱갭)** 로 즉시 완화. ProMotion 수준 진짜 매끄러움을 원하면 **B(CVDisplayLink)를 doc-first 설계 후** 착수 — C(렌더 스레드)는 *대량 출력 중 메인 응답성*까지 필요해질 때. 우선순위 높은 다른 작업이 있으면 통째로 보류해도 무방하다.

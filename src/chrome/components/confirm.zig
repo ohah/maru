@@ -1,6 +1,6 @@
 //! Confirm — 예/아니오 확인 다이얼로그(키보드 전용, hit-test 없음). **재사용 가능한 디자인 시스템 컴포넌트**:
 //! 메시지 + 두 버튼 라벨을 host가 주입하면(`show(message, .{ .confirm = "닫기", .cancel = "취소" })`) 경계선 패널 +
-//! accent 기본 버튼 + 보조 버튼 + 키 안내(Enter/Esc)를 그린다. 닫기 확인뿐 아니라 삭제·저장 등 어떤 확인에도 쓴다 —
+//! accent 기본 버튼 + 보조 버튼(라벨에 TUI식 [Y]/[N] 단축키)을 그린다. 닫기 확인뿐 아니라 삭제·저장 등 어떤 확인에도 쓴다 —
 //! 컴포넌트는 "무엇을 확인하는지"를 모르고(중립), handle은 의도(confirmed/cancelled)만 돌려준다. host가 confirmed면
 //! 보류한 동작을 실행, cancelled면 버린다. chrome 계약: State(순수 데이터+전이) + view(순수) + handle(intent 반환).
 //! 박스 기하·중앙배치·폭 clamp는 modal_box 프리미티브(단일 출처)에 위임한다. 단일 출처: docs/chrome-strategy.md §5.4.
@@ -16,10 +16,10 @@ const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭
 /// 이 컴포넌트가 그리는 레이어(최상위 모달, modal_box 공유 — notice와 동일). host가 ops와 짝지어 백엔드에 넘긴다.
 pub const layer = modal_box.layer;
 
-/// 버튼 아래에 그리는 정적 키 라벨 — 어느 키가 어느 버튼인지(Enter=기본, Esc=취소). 키는 handle이 고정하므로
-/// (Enter/Y=confirm, Esc/N=cancel) 라벨도 정적이다. 버튼 라벨(닫기/삭제 등)과 달리 host가 안 바꾼다.
-const key_confirm = "Enter";
-const key_cancel = "Esc";
+/// 버튼에 표시하는 단축키 마커 — TUI 관례의 Y/N(Enter/Esc도 handle이 받지만, 표시는 짧은 Y/N로 통일해 영어
+/// 단어를 안 섞는다). 버튼 라벨 앞에 "[Y] "/"[N] "로 붙여 어느 키가 어느 버튼인지 보인다(키는 handle이 고정).
+const key_confirm = "Y";
+const key_cancel = "N";
 
 /// show가 받는 버튼 라벨(기본값 있음). 호출자는 `.{}`(기본 확인/취소)나 `.{ .confirm = "삭제", .cancel = "취소" }`처럼
 /// 용도에 맞는 라벨을 준다 — 컴포넌트가 닫기 전용이 아니라 범용이게 하는 재사용 seam.
@@ -83,8 +83,9 @@ pub fn handle(ev: input.InputEvent, state: *State) ?Action {
 }
 
 /// 확인 다이얼로그를 그린다 — 경계선 패널(modal_box.frame) 안에 (1) 메시지(중앙), (2) 가운데 버튼 행: 기본 버튼은
-/// accent 배경(focus_accent) + 대비색 라벨로 강조, 보조 버튼은 plain, (3) 버튼 아래 키 안내(Enter/Esc, muted). 안
-/// 열렸으면 무동작. 박스 기하/중앙배치/폭 clamp/soft-lock은 modal_box 단일 출처. 순수: state·props·tokens만 읽는다.
+/// accent 배경(focus_accent) + 대비색 라벨, 보조 버튼은 은은한 배경(tab_hover_bg). 두 버튼 다 라벨에 TUI식 단축키
+/// 마커([Y]/[N])를 단다(별도 영어 키 줄 없음). 안 열렸으면 무동작. 박스 기하/중앙배치/폭 clamp/soft-lock은 modal_box
+/// 단일 출처. 순수: state·props·tokens만 읽는다.
 pub fn view(
     state: *const State,
     p: props.ChromeProps,
@@ -94,9 +95,13 @@ pub fn view(
 ) !void {
     if (!state.open) return;
 
+    // 버튼 라벨에 단축키 마커를 통합한다("[Y] 닫기"·"[N] 취소") — 영어 단어(Enter/Esc) 줄 없이 TUI식 Y/N 단축키를
+    // 버튼 안에 보인다. arena에 만들어 view 동안 유효(out의 text op이 이 슬라이스를 가리킴).
+    const confirm_text = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_confirm, state.confirm_label });
+    const cancel_text = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_cancel, state.cancel_label });
     const msg_cols = overlay_input.displayCols(state.message);
-    const confirm_cols = overlay_input.displayCols(state.confirm_label);
-    const cancel_cols = overlay_input.displayCols(state.cancel_label);
+    const confirm_cols = overlay_input.displayCols(confirm_text);
+    const cancel_cols = overlay_input.displayCols(cancel_text);
     const btn_pad = 1; // 버튼 라벨 좌우 패딩(배경이 라벨을 감싸 버튼처럼 보이게)
     const default_btn_cols = confirm_cols + 2 * btn_pad;
     const cancel_btn_cols = cancel_cols + 2 * btn_pad; // 보조 버튼도 같은 패딩 — 둘 다 버튼 느낌
@@ -104,28 +109,22 @@ pub fn view(
     const btn_row_cols = default_btn_cols + gap + cancel_btn_cols;
     const content_cols = @max(msg_cols, btn_row_cols);
 
-    // 콘텐츠 4행: 0=메시지, 1=(빈 줄), 2=버튼, 3=키 라벨. modal_box가 사방 여백을 더해 패널처럼 보이게 한다.
-    const box = modal_box.layout(content_cols, 4, p, tk) orelse return;
+    // 콘텐츠 3행: 0=메시지, 1=(빈 줄), 2=버튼([Y]/[N] 단축키 포함). modal_box가 사방 여백을 더해 패널처럼 보이게 한다.
+    const box = modal_box.layout(content_cols, 3, p, tk) orelse return;
     try modal_box.frame(box, p, arena, out);
 
     // (1) 메시지 — 중앙.
     try modal_box.text(box, modal_box.centerX(box, msg_cols), 0, state.message, .surface_fg, arena, out);
 
     // (2) 버튼 행 — 그룹(기본+gap+보조)을 중앙 정렬. **둘 다 배경 fill로 버튼처럼** 보이게 한다(painter order: bg→glyph).
-    //     기본 버튼(확정): accent 배경(focus_accent) + 대비색(surface_bg) 라벨로 강조. 보조 버튼(취소): 은은한 배경
-    //     (tab_hover_bg) + 일반(surface_fg) 라벨 — 강조는 덜하되 버튼 형태는 갖춘다. 라벨은 버튼 패딩만큼 우측에서 시작.
+    //     기본 버튼(확정 [Y]): accent 배경(focus_accent) + 대비색(surface_bg) 라벨로 강조. 보조 버튼(취소 [N]): 은은한
+    //     배경(tab_hover_bg) + 일반(surface_fg) 라벨 — 강조는 덜하되 버튼 형태는 갖춘다. 라벨은 버튼 패딩만큼 우측에서 시작.
     const group_x = modal_box.centerX(box, btn_row_cols);
     try modal_box.fillCells(box, group_x, 2, default_btn_cols, .focus_accent, arena, out);
-    try modal_box.text(box, group_x + @as(i32, @intCast(btn_pad * box.cw)), 2, state.confirm_label, .surface_bg, arena, out);
+    try modal_box.text(box, group_x + @as(i32, @intCast(btn_pad * box.cw)), 2, confirm_text, .surface_bg, arena, out);
     const cancel_btn_x = group_x + @as(i32, @intCast((default_btn_cols + gap) * box.cw));
     try modal_box.fillCells(box, cancel_btn_x, 2, cancel_btn_cols, .tab_hover_bg, arena, out);
-    try modal_box.text(box, cancel_btn_x + @as(i32, @intCast(btn_pad * box.cw)), 2, state.cancel_label, .surface_fg, arena, out);
-
-    // (3) 키 안내 — Enter는 기본 버튼 아래 중앙, Esc는 보조 버튼 아래 중앙(muted). 각 버튼 폭 안에서 가운데.
-    const enter_off = (default_btn_cols -| overlay_input.displayCols(key_confirm)) / 2;
-    try modal_box.text(box, group_x + @as(i32, @intCast(enter_off * box.cw)), 3, key_confirm, .muted_fg, arena, out);
-    const esc_off = (cancel_btn_cols -| overlay_input.displayCols(key_cancel)) / 2;
-    try modal_box.text(box, cancel_btn_x + @as(i32, @intCast(esc_off * box.cw)), 3, key_cancel, .muted_fg, arena, out);
+    try modal_box.text(box, cancel_btn_x + @as(i32, @intCast(btn_pad * box.cw)), 2, cancel_text, .surface_fg, arena, out);
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -199,15 +198,13 @@ test "confirm view: 닫힘이면 ops 0, 열림이면 패널(quad+border)+accent 
     // 프레임이 먼저(quad 배경 + border 테두리).
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expect(out.items[1] == .border);
-    // 구조: 두 버튼 배경 fill(기본=accent, 보조=tab_hover_bg) + 메시지·기본라벨·보조라벨·키(Enter/Esc) 텍스트.
-    // 순서에 무관하게 존재 확인.
+    // 구조: 두 버튼 배경 fill(기본=accent, 보조=tab_hover_bg) + 메시지 + 단축키 통합 버튼 라벨("[Y] 닫기"/"[N] 취소").
+    // 영어 단어(Enter/Esc) 줄은 없다 — 단축키는 [Y]/[N]로 라벨에 통합. 순서에 무관하게 존재 확인.
     var saw_accent_fill = false;
     var saw_cancel_fill = false;
     var saw_msg = false;
     var saw_confirm = false;
     var saw_cancel = false;
-    var saw_enter = false;
-    var saw_esc = false;
     for (out.items) |op| switch (op) {
         .fill => |f| {
             if (f.role == .focus_accent) saw_accent_fill = true;
@@ -216,16 +213,14 @@ test "confirm view: 닫힘이면 ops 0, 열림이면 패널(quad+border)+accent 
         .text => |t| {
             const txt = t.runs[0].text;
             if (std.mem.eql(u8, txt, "실행 중인 명령이 있습니다.")) saw_msg = true;
-            if (std.mem.eql(u8, txt, "닫기")) saw_confirm = true;
-            if (std.mem.eql(u8, txt, "취소")) saw_cancel = true;
-            if (std.mem.eql(u8, txt, key_confirm)) saw_enter = true;
-            if (std.mem.eql(u8, txt, key_cancel)) saw_esc = true;
+            if (std.mem.eql(u8, txt, "[Y] 닫기")) saw_confirm = true; // 단축키 통합 라벨
+            if (std.mem.eql(u8, txt, "[N] 취소")) saw_cancel = true;
         },
         else => {},
     };
     try std.testing.expect(saw_accent_fill); // 기본 버튼이 accent 배경으로 강조됨
     try std.testing.expect(saw_cancel_fill); // 보조 버튼(취소)도 배경 fill로 버튼 느낌
-    try std.testing.expect(saw_msg and saw_confirm and saw_cancel and saw_enter and saw_esc);
+    try std.testing.expect(saw_msg and saw_confirm and saw_cancel); // 메시지 + [Y]/[N] 버튼 라벨
     // 박스는 터미널 영역(사이드바 오른쪽) 안. 기하 엣지케이스는 modal_box.zig 테스트가 단일 출처로 커버.
     try std.testing.expect(out.items[0].quad.rect.x >= 40);
 }

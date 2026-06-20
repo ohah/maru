@@ -83,6 +83,13 @@ const UnsupportedPtySession = struct {
         return null;
     }
 
+    /// 비-macOS 스텁 — macOS 백엔드의 hasForegroundJob(닫기 확인의 실행 중 명령 판정)과 구조 동기(이식성 목표).
+    /// 백엔드 없어 항상 false(실행 중 명령 없음으로 봐 닫기를 막지 않는다).
+    pub fn hasForegroundJob(self: *UnsupportedPtySession) bool {
+        _ = self;
+        return false;
+    }
+
     pub fn currentSize(self: *UnsupportedPtySession) !terminal.Size {
         _ = self;
         return error.UnsupportedPlatform;

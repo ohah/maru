@@ -321,7 +321,9 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
         try stderr.flush();
         return error.UnknownCommand;
     };
-    const dir = try maru.terminfo_cache.cacheDirZ(allocator, std.mem.span(home_z));
+    // 셸 명령과 같은 XDG 규칙으로 캐시 경로를 보여준다(둘이 같은 위치로 resolve).
+    const xdg = if (std.c.getenv("XDG_CACHE_HOME")) |x| std.mem.span(x) else null;
+    const dir = try maru.terminfo_cache.cacheDirZ(allocator, xdg, std.mem.span(home_z));
     defer allocator.free(dir);
 
     switch (action) {

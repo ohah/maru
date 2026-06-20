@@ -8,9 +8,10 @@
 //! (예전엔 한 번 컴파일되면 infocmp가 해석되는 한 영영 안 바꿔, terminfo 캡을 늘려도 기존 사용자
 //! 캐시에 반영되지 않는 footgun이 있었다).
 //!
-//! 이식성/clean-room: 순수 std + embed만. 캐시 경로는 현재 `$HOME/.cache/maru/terminfo`로 둔다(다른 maru
-//! 캐시 ssh-terminfo-hosts·shell-integration은 $XDG_CACHE_HOME을 따르는데 이 캐시만 아직 아니다 — 경로를
-//! 옮기면 기존 캐시가 orphan 되므로 통일은 별도 후속으로 두고, 여기선 pty/cli가 같은 경로를 쓰게만 한다).
+//! 이식성/clean-room: 순수 std + embed만. 캐시 경로는 다른 maru 캐시(ssh-terminfo-hosts·shell-integration)와
+//! 같은 규칙을 쓴다 — `$XDG_CACHE_HOME`(설정+비어있지않음) 우선, 없으면 `$HOME/.cache`. Zig 쪽 cacheDirZ와
+//! 셸 명령(cache_dir_sh)이 같은 규칙으로 resolve하므로 두 경로가 항상 일치한다(자식 env TERMINFO 값 = 셸이
+//! 컴파일한 위치).
 
 const std = @import("std");
 
@@ -39,12 +40,23 @@ pub fn version() u64 {
     return h;
 }
 
-/// 캐시 디렉터리 절대 경로(`<home>/.cache/maru/terminfo`). 자식 셸에 `TERMINFO=<이 값>`으로 주거나
-/// 사용자에게 보여줄 때 쓴다. 아래 셸 명령의 `$HOME/.cache/maru/terminfo`와 **반드시 같은 경로**여야
-/// 한다(셸은 $HOME을, 이 함수는 인자 home을 쓰되 둘 다 같은 결과). caller가 free한다.
-pub fn cacheDirZ(allocator: std.mem.Allocator, home: []const u8) ![:0]u8 {
+/// 캐시 디렉터리 절대 경로. 자식 셸에 `TERMINFO=<이 값>`으로 주거나 사용자에게 보여줄 때 쓴다. 다른 maru
+/// 캐시(ssh-terminfo-hosts·shell-integration)와 **같은 규칙**으로 base를 정한다: `xdg_cache_home`이 설정돼
+/// 있고 비어있지 않으면 `<xdg>/maru/terminfo`, 아니면 `<home>/.cache/maru/terminfo`. 아래 셸 명령의
+/// `cache_dir_sh`(`${XDG_CACHE_HOME:-$HOME/.cache}/maru/terminfo`)와 **반드시 같은 경로로 resolve**돼야
+/// 한다 — 셸은 파라미터 확장으로, 이 함수는 인자로 같은 규칙을 적용한다(빈 문자열도 `:-`와 동일하게 fallback).
+/// caller가 free한다.
+pub fn cacheDirZ(allocator: std.mem.Allocator, xdg_cache_home: ?[]const u8, home: []const u8) ![:0]u8 {
+    if (xdg_cache_home) |x| {
+        if (x.len > 0) return std.fmt.allocPrintSentinel(allocator, "{s}/maru/terminfo", .{x}, 0);
+    }
     return std.fmt.allocPrintSentinel(allocator, "{s}/.cache/maru/terminfo", .{home}, 0);
 }
+
+// 셸에서 캐시 디렉터리를 정하는 파라미터 확장 — cacheDirZ(Zig)와 같은 규칙의 단일 출처. 다른 maru 캐시와
+// 동일($XDG_CACHE_HOME 설정+비어있지않음 우선, 없으면 $HOME/.cache; ssh.zig의 ssh-terminfo-hosts와 같은 형태).
+// format string 빌더에는 `{s}` 인자로 넣어(중괄호 이스케이프 불필요), dupeZ 빌더에는 `++`로 이어 붙여 공유한다.
+const cache_dir_sh = "${XDG_CACHE_HOME:-$HOME/.cache}/maru/terminfo";
 
 // 캐시에 embed 소스를 컴파일하는 셸 명령의 공통 꼬리: 디렉터리를 비우고 다시 만들고 tic로 컴파일한 뒤
 // 성공하면 버전 마커를 쓴다. 마지막 infocmp의 exit code가 "xterm-maru가 해석되는가"를 돌려준다(호출자가
@@ -56,12 +68,14 @@ const compile_tail =
 /// spawn 자동 컴파일 명령: 마커가 현재 버전과 일치하고 xterm-maru가 이미 해석되면 즉시 성공(재컴파일
 /// skip), 아니면 캐시를 재컴파일한다. tic 오류는 버린다(조용히 폴백). caller가 free한다.
 pub fn autoCompileCommand(allocator: std.mem.Allocator, ver: u64) ![:0]u8 {
+    // cache_dir_sh는 `{s}` 인자로 넣어 그 안의 `${{...}}` 중괄호를 fmt가 안 건드리게 한다(셸 `{ ...; }`
+    // 그룹의 중괄호만 format string에서 `{{ }}`로 이스케이프).
     return std.fmt.allocPrintSentinel(
         allocator,
-        "d=\"$HOME/.cache/maru/terminfo\"; v=\"{x}\"; " ++
+        "d=\"{s}\"; v=\"{x}\"; " ++
             "{{ [ \"$(cat \"$d/.maru-version\" 2>/dev/null)\" = \"$v\" ] && TERMINFO=\"$d\" infocmp " ++ term_name ++ " >/dev/null 2>&1; }} && exit 0; " ++
             compile_tail,
-        .{ ver, source, " 2>/dev/null" },
+        .{ cache_dir_sh, ver, source, " 2>/dev/null" },
         0,
     );
 }
@@ -71,20 +85,20 @@ pub fn autoCompileCommand(allocator: std.mem.Allocator, ver: u64) ![:0]u8 {
 pub fn refreshCommand(allocator: std.mem.Allocator, ver: u64) ![:0]u8 {
     return std.fmt.allocPrintSentinel(
         allocator,
-        "d=\"$HOME/.cache/maru/terminfo\"; v=\"{x}\"; " ++ compile_tail,
-        .{ ver, source, "" },
+        "d=\"{s}\"; v=\"{x}\"; " ++ compile_tail,
+        .{ cache_dir_sh, ver, source, "" },
         0,
     );
 }
 
 /// `maru terminfo --clear` 삭제 명령: 캐시 디렉터리를 통째로 지운다(다음 spawn이 다시 컴파일). caller가 free.
 pub fn clearCommand(allocator: std.mem.Allocator) ![:0]u8 {
-    return allocator.dupeZ(u8, "rm -rf \"$HOME/.cache/maru/terminfo\"");
+    return allocator.dupeZ(u8, "rm -rf \"" ++ cache_dir_sh ++ "\"");
 }
 
 /// 상태 조회: 캐시에서 xterm-maru가 해석되는지 검사하는 명령(exit 0이면 컴파일됨). caller가 free.
 pub fn statusCommand(allocator: std.mem.Allocator) ![:0]u8 {
-    return allocator.dupeZ(u8, "TERMINFO=\"$HOME/.cache/maru/terminfo\" infocmp " ++ term_name ++ " >/dev/null 2>&1");
+    return allocator.dupeZ(u8, "TERMINFO=\"" ++ cache_dir_sh ++ "\" infocmp " ++ term_name ++ " >/dev/null 2>&1");
 }
 
 test "version is deterministic and nonzero" {
@@ -92,11 +106,34 @@ test "version is deterministic and nonzero" {
     try std.testing.expectEqual(version(), version()); // 같은 입력 → 같은 지문
 }
 
-test "cacheDirZ joins home with the fixed maru cache subpath" {
+test "cacheDirZ honors XDG_CACHE_HOME else $HOME/.cache (matches shell ${XDG_CACHE_HOME:-$HOME/.cache})" {
     const a = std.testing.allocator;
-    const d = try cacheDirZ(a, "/Users/me");
-    defer a.free(d);
-    try std.testing.expectEqualStrings("/Users/me/.cache/maru/terminfo", d);
+    {
+        const d = try cacheDirZ(a, null, "/Users/me"); // XDG 미설정 → $HOME/.cache
+        defer a.free(d);
+        try std.testing.expectEqualStrings("/Users/me/.cache/maru/terminfo", d);
+    }
+    {
+        const d = try cacheDirZ(a, "", "/Users/me"); // XDG 빈 문자열 → :-와 동일하게 fallback
+        defer a.free(d);
+        try std.testing.expectEqualStrings("/Users/me/.cache/maru/terminfo", d);
+    }
+    {
+        const d = try cacheDirZ(a, "/tmp/xdg", "/Users/me"); // XDG 설정 → <xdg>/maru/terminfo
+        defer a.free(d);
+        try std.testing.expectEqualStrings("/tmp/xdg/maru/terminfo", d);
+    }
+}
+
+test "shell commands use the same XDG-aware cache dir as cacheDirZ" {
+    const a = std.testing.allocator;
+    const auto = try autoCompileCommand(a, 0x1234);
+    defer a.free(auto);
+    const clear = try clearCommand(a);
+    defer a.free(clear);
+    // 셸 명령은 cacheDirZ와 같은 base 규칙(${XDG_CACHE_HOME:-$HOME/.cache})을 써야 경로가 어긋나지 않는다.
+    try std.testing.expect(std.mem.indexOf(u8, auto, "${XDG_CACHE_HOME:-$HOME/.cache}/maru/terminfo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, clear, "${XDG_CACHE_HOME:-$HOME/.cache}/maru/terminfo") != null);
 }
 
 test "autoCompileCommand skips when marker matches; refreshCommand always recompiles" {

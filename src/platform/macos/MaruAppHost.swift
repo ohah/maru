@@ -1446,7 +1446,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     // OSC 52: 코어가 디코드한 클립보드 쓰기 데이터를 활성 세션에서 drain해 NSPasteboard에 쓴다(매 tick).
-    // 정책(env opt-in MARU_OSC52_WRITE) deny이거나 데이터 없으면 Zig가 len 0을 줘 아무 것도 안 한다.
+    // write는 정책상 기본 allow(terminal-compatibility-policy.md §OSC52). 데이터 없으면 Zig가 len 0을 줘 무동작.
     // Cmd+C 복사(copySelectionToPasteboard)와 같은 NSPasteboard 경로.
     private func drainOsc52Clipboard() {
         guard let session = appSession else { return }

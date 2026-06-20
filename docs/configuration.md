@@ -198,12 +198,14 @@ workspace.tab-inherit-cwd   = true   # 새 워크스페이스 탭(⌘⇧T) + 새
 workspace.split-inherit-cwd = true   # 새 분할(⌘D, 팬)
 ```
 
-- **`workspace.root`** — 고정 시작 디렉터리. `~`·`~/…`는 $HOME으로 확장한다(셸을 거치지 않고 `execve`로
-  띄우므로 tilde 확장을 maru가 직접 한다). 절대경로가 아니거나(상대경로·`~user`) 없는 디렉터리면 자식 셸의
-  `chdir`이 실패해 **$HOME으로 graceful 폴백**한다(세션 안 깨짐). 경로에 공백이 있어도 따옴표 없이 그대로 쓴다
-  (값은 양끝 공백만 다듬는다). **비어 있으면(기본)** maru를 띄운 cwd를 상속하되, 그 cwd가 `/`이면(`.app`
-  더블클릭·`open`·launchd로 띄운 흔한 증상) **$HOME으로 올린다** — Ghostty가 launchd/`open` 실행을 `home`으로
-  보는 것과 같은 결(터미널에서 `maru`로 띄우면 cwd가 `/`가 아니라 그대로 상속).
+- **`workspace.root`** — 고정 시작 디렉터리. **절대경로 또는 `~`/`~/…`만** 받는다 — 상대경로나 `~user`(다른
+  사용자)는 설정 로드 시 무시하고 진단을 남긴다(다른 키처럼 forgiving — 잘못된 값이 조용히 무동작하지 않게).
+  `~`·`~/…`는 $HOME으로 확장한다(셸을 거치지 않고 `execve`로 띄우므로 tilde 확장을 maru가 직접 한다; $HOME이
+  비었거나 절대경로가 아니면 확장을 포기하고 폴백). 형식은 맞지만 **없는 디렉터리**면 자식 셸의 `chdir`이 실패해
+  **$HOME으로 graceful 폴백**한다(세션 안 깨짐). 경로에 공백이 있어도 따옴표 없이 그대로 쓴다(값은 양끝 공백만
+  다듬는다). **비어 있으면(기본)** maru를 띄운 cwd를 상속하되, 그 cwd가 `/`이면(`.app` 더블클릭·`open`·launchd로
+  띄운 흔한 증상) **$HOME으로 올린다** — Ghostty가 launchd/`open` 실행을 `home`으로 보는 것과 같은 결(터미널에서
+  `maru`로 띄우면 cwd가 `/`가 아니라 그대로 상속).
 
 - **`workspace.tab-inherit-cwd`** — 새 워크스페이스 탭(`new_tab`)과 새 Term(`new_term`)의 cwd 상속 여부.
   `true`(기본)면 포커스 cwd 상속, `false`면 `root`. Term 탭은 워크스페이스 탭과 같은 '탭'이라 이 토글이 함께

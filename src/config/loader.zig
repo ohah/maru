@@ -345,6 +345,14 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "workspace.root가 비어 있음 — 기본값(상속 cwd) 유지" });
             return;
         }
+        // 절대경로 또는 `~`/`~/…`만 받는다 — 상대경로·`~user`(다른 사용자)는 spawn 시 어차피 무시되므로 여기서
+        // 미리 거른다(forgiving+diagnostic, 다른 키와 동일하게 "설정은 통과했는데 조용히 무동작"을 막는다). $HOME
+        // 확장은 platform layer가 하므로 loader는 형식만 본다(순수 파서 — env 비의존).
+        const is_tilde = std.mem.eql(u8, trimmed, "~") or std.mem.startsWith(u8, trimmed, "~/");
+        if (!is_tilde and !std.fs.path.isAbsolute(trimmed)) {
+            try diags.append(a, .{ .line = line_no, .message = "workspace.root는 절대경로 또는 ~/… — 무시(기본값 유지)" });
+            return;
+        }
         config.workspace.root = try a.dupe(u8, trimmed);
     } else if (std.mem.eql(u8, key, "workspace.tab-inherit-cwd")) {
         config.workspace.tab_inherit_cwd = parseBool(value) orelse {
@@ -1482,9 +1490,32 @@ test "parse: workspace.root default empty, override, empty is forgiving" {
         try std.testing.expectEqualStrings("~/My Projects", p.config.workspace.root);
     }
     {
+        var p = try parse(std.testing.allocator, "workspace.root = /Users/me/work\n"); // 절대경로도 허용
+        defer p.deinit();
+        try std.testing.expectEqualStrings("/Users/me/work", p.config.workspace.root);
+    }
+    {
+        var p = try parse(std.testing.allocator, "workspace.root = ~\n"); // `~` 단독 허용
+        defer p.deinit();
+        try std.testing.expectEqualStrings("~", p.config.workspace.root);
+    }
+    {
         var p = try parse(std.testing.allocator, "workspace.root =   \n");
         defer p.deinit();
         try std.testing.expectEqualStrings("", p.config.workspace.root); // 빈 값 → 기본 유지 + 진단
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+    {
+        // 상대경로·`~user`는 spawn 시 무시되므로 parse-time에 거른다(forgiving+diagnostic) — 조용히 무동작 방지.
+        var p = try parse(std.testing.allocator, "workspace.root = projects\n");
+        defer p.deinit();
+        try std.testing.expectEqualStrings("", p.config.workspace.root); // 형식 불량 → 기본 유지 + 진단
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+    {
+        var p = try parse(std.testing.allocator, "workspace.root = ~bob/work\n"); // `~user`는 확장 불가 → 거부
+        defer p.deinit();
+        try std.testing.expectEqualStrings("", p.config.workspace.root);
         try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
     }
 }

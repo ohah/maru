@@ -172,9 +172,13 @@ term = xterm-maru
 > `ssh`로 넘어간다(당신의 평소 `ssh`는 건드리지 않는다):
 >
 > ```sh
+> maru install-cli              # maru 바이너리를 ~/.local/bin/maru에 symlink(셸에서 maru를 쓰려면 한 번)
 > maru ssh <host>               # 원격에 xterm-maru 설치 후 exec ssh
 > maru ssh --terminfo-only <host>   # 설치만(세션 없음) — ssh 래핑을 원치 않을 때
 > ```
+>
+> (`maru install-cli`는 현재 maru 바이너리를 `~/.local/bin/maru`에 링크해 PATH에서 `maru`를 쓸 수 있게
+> 한다 — sudo 불필요. `~/.local/bin`이 PATH에 없으면 추가 방법을 안내한다.)
 >
 > `maru ssh`는 terminfo 소스를 바이너리에 내장해 **로컬 설치 없이도** 동작한다(자기완결 — `install-terminfo`는
 > 로컬 셸에서 `term = "xterm-maru"`를 쓸 때만 필요하다). 원격에 `tic`이 없거나

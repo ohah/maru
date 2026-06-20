@@ -57,6 +57,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "install-cli")) {
+        try runInstallCli(io, allocator, stdout, stderr);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         try printUsage(stdout);
         return;
@@ -239,6 +244,53 @@ fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !
     return error.UnknownCommand;
 }
 
+fn runInstallCli(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    // `maru install-cli`: 현재 maru 바이너리를 `~/.local/bin/maru`에 symlink해 셸 PATH에서 쓸 수 있게
+    // 한다(VS Code `code` 설치식). 순수 경로/PATH 로직은 maru.cli.install, 여기선 자기 경로 resolve와
+    // 실제 mkdir/symlink(std.c)만 한다. sudo가 필요 없는 user-level 경로라 권한 상승이 없다.
+    const exe_path = try std.process.executablePathAlloc(io, allocator);
+    defer allocator.free(exe_path);
+
+    const home_z = std.c.getenv("HOME") orelse {
+        try stderr.writeAll("maru install-cli: $HOME가 없어 설치 위치를 정할 수 없습니다\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    const home = std.mem.span(home_z);
+
+    const bindir = try maru.cli.install.binDir(allocator, home);
+    defer allocator.free(bindir);
+    const link = try maru.cli.install.linkPath(allocator, home);
+    defer allocator.free(link);
+
+    // mkdir -p ~/.local/bin (단계별, 이미 있으면 무시 — std.c.mkdir는 EEXIST를 에러로 주지만 무시한다).
+    const local = try std.fmt.allocPrintSentinel(allocator, "{s}/.local", .{home}, 0);
+    defer allocator.free(local);
+    _ = std.c.mkdir(local.ptr, 0o755);
+    _ = std.c.mkdir(bindir.ptr, 0o755);
+
+    // 기존 링크/파일을 지우고(없으면 무시) 새로 건다 — 재실행 안전(idempotent).
+    _ = std.c.unlink(link.ptr);
+    if (std.c.symlink(exe_path.ptr, link.ptr) != 0) {
+        try stderr.print("maru install-cli: symlink 실패: {s}\n", .{link});
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+
+    try stdout.print("maru CLI 설치 완료: {s} -> {s}\n", .{ link, exe_path });
+
+    // bin 디렉터리가 PATH에 없으면 추가 방법을 안내한다.
+    if (std.c.getenv("PATH")) |path_z| {
+        if (!maru.cli.install.pathContainsDir(std.mem.span(path_z), bindir)) {
+            try stdout.print(
+                "\n주의: {s}가 PATH에 없습니다. 셸 설정(~/.zshrc 등)에 아래를 추가하세요:\n  export PATH=\"{s}:$PATH\"\n",
+                .{ bindir, bindir },
+            );
+        }
+    }
+    try stdout.flush();
+}
+
 fn printUsage(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\usage:
@@ -250,6 +302,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru app-pty-interactive-loop-smoke
         \\  maru app-pty-smoke
         \\  maru ssh [--terminfo-only] <ssh args...>
+        \\  maru install-cli
         \\
         \\commands:
         \\  demo       run the headless PTY -> SurfaceRuntime -> snapshot demo
@@ -259,6 +312,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  app-pty-interactive-loop-smoke run the interactive shell -> repeated app frame-loop smoke
         \\  app-pty-smoke run the live PTY -> app host -> RenderFrame smoke
         \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
+        \\  install-cli  symlink the maru binary into ~/.local/bin so `maru` works on your PATH
         \\
     );
     try writer.flush();

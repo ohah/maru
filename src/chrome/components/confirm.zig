@@ -1,6 +1,7 @@
 //! Confirm — 예/아니오 확인 다이얼로그(키보드 전용, hit-test 없음). **재사용 가능한 디자인 시스템 컴포넌트**:
 //! 메시지 + 두 버튼 라벨을 host가 주입하면(`show(message, .{ .confirm = "닫기", .cancel = "취소" })`) 경계선 패널 +
-//! accent 기본 버튼 + 보조 버튼(라벨에 TUI식 [Y]/[N] 단축키)을 그린다. 닫기 확인뿐 아니라 삭제·저장 등 어떤 확인에도 쓴다 —
+//! 가운데 버튼 두 개(라벨에 TUI식 [Y]/[N] 단축키)를 그리고, ←/→로 포커스를 옮기면 accent 강조가 따라간다(Enter는
+//! 포커스된 버튼 실행). 닫기 확인뿐 아니라 삭제·저장 등 어떤 확인에도 쓴다 —
 //! 컴포넌트는 "무엇을 확인하는지"를 모르고(중립), handle은 의도(confirmed/cancelled)만 돌려준다. host가 confirmed면
 //! 보류한 동작을 실행, cancelled면 버린다. chrome 계약: State(순수 데이터+전이) + view(순수) + handle(intent 반환).
 //! 박스 기하·중앙배치·폭 clamp는 modal_box 프리미티브(단일 출처)에 위임한다. 단일 출처: docs/chrome-strategy.md §5.4.
@@ -28,17 +29,22 @@ pub const Buttons = struct {
     cancel: []const u8 = "취소",
 };
 
-/// 순수 상태 — message + 버튼 라벨 + open 플래그. host가 보류(pending)하며 show를 부른다. 라벨은 show가 채운다.
+/// 어느 버튼에 포커스가 있나(←/→로 이동). Enter가 포커스된 버튼을 실행한다. 열 때마다 기본 = confirm(Enter=확정 유지).
+pub const Focus = enum { confirm, cancel };
+
+/// 순수 상태 — message + 버튼 라벨 + 포커스 + open 플래그. host가 보류(pending)하며 show를 부른다. 라벨은 show가 채운다.
 pub const State = struct {
     open: bool = false,
     message: []const u8 = "",
     confirm_label: []const u8 = "확인",
     cancel_label: []const u8 = "취소",
+    focused: Focus = .confirm,
 
     pub fn show(self: *State, message: []const u8, buttons: Buttons) void {
         self.message = message;
         self.confirm_label = buttons.confirm;
         self.cancel_label = buttons.cancel;
+        self.focused = .confirm; // 열 때마다 기본 포커스 = 확정 버튼(Enter=확정, ←/→로 이동)
         self.open = true;
     }
 
@@ -51,16 +57,22 @@ pub const State = struct {
 /// (notice는 dismissed 하나뿐이지만 confirm은 파괴적 동작 분기라 둘로 나뉜다.)
 pub const Action = enum { confirmed, cancelled };
 
-/// 키 이벤트 처리. 열려 있을 때만 동작 — Enter/Y면 confirmed, Esc/N이면 cancelled, 둘 다 닫는다. 그 외 키는
-/// **소비**하되 Action 없음(모달이라 뒤(터미널)로 안 흘린다 — host가 라우팅에서 소비 처리). 닫혀 있으면
-/// null(라우팅 안 가로챔). Y/N은 대소문자 무시 — 확인 다이얼로그 관례.
+/// 키 이벤트 처리. 열려 있을 때만 동작:
+///   ←/→ : 두 버튼 사이 포커스 이동(소비, intent 없음 → host가 재렌더). Enter : **포커스된** 버튼 실행
+///   (confirm/cancelled). Esc : 항상 cancelled(취소 관례). Y/N : 포커스와 무관하게 직접 실행(대소문자 무시 단축키).
+/// 그 외 키는 소비하되 Action 없음(모달이라 뒤(터미널)로 안 흘린다). 닫혀 있으면 null(라우팅 안 가로챔).
 pub fn handle(ev: input.InputEvent, state: *State) ?Action {
     if (!state.open) return null;
     switch (ev) {
         .key => |k| switch (k.key) {
+            .left, .right => {
+                // 버튼이 둘뿐이라 좌/우 모두 토글. 포커스만 바꾸고 소비(host가 재렌더, 결정은 아직).
+                state.focused = if (state.focused == .confirm) .cancel else .confirm;
+                return null;
+            },
             .enter => {
                 state.dismiss();
-                return .confirmed;
+                return if (state.focused == .confirm) .confirmed else .cancelled; // 포커스된 버튼 실행
             },
             .escape => {
                 state.dismiss();
@@ -82,10 +94,10 @@ pub fn handle(ev: input.InputEvent, state: *State) ?Action {
     }
 }
 
-/// 확인 다이얼로그를 그린다 — 경계선 패널(modal_box.frame) 안에 (1) 메시지(중앙), (2) 가운데 버튼 행: 기본 버튼은
-/// accent 배경(focus_accent) + 대비색 라벨, 보조 버튼은 은은한 배경(tab_hover_bg). 두 버튼 다 라벨에 TUI식 단축키
-/// 마커([Y]/[N])를 단다(별도 영어 키 줄 없음). 안 열렸으면 무동작. 박스 기하/중앙배치/폭 clamp/soft-lock은 modal_box
-/// 단일 출처. 순수: state·props·tokens만 읽는다.
+/// 확인 다이얼로그를 그린다 — 경계선 패널(modal_box.frame) 안에 (1) 메시지(중앙), (2) 가운데 버튼 행: **포커스된**
+/// 버튼이 accent 배경(focus_accent) + 대비색 라벨로 강조되고 나머지는 은은한 배경(tab_hover_bg)이다(←/→로 강조가
+/// 옮겨감). 두 버튼 다 라벨에 TUI식 단축키 마커([Y]/[N])를 단다(별도 영어 키 줄 없음). 안 열렸으면 무동작. 박스
+/// 기하/중앙배치/폭 clamp/soft-lock은 modal_box 단일 출처. 순수: state·props·tokens만 읽는다.
 pub fn view(
     state: *const State,
     p: props.ChromeProps,
@@ -117,14 +129,20 @@ pub fn view(
     try modal_box.text(box, modal_box.centerX(box, msg_cols), 0, state.message, .surface_fg, arena, out);
 
     // (2) 버튼 행 — 그룹(기본+gap+보조)을 중앙 정렬. **둘 다 배경 fill로 버튼처럼** 보이게 한다(painter order: bg→glyph).
-    //     기본 버튼(확정 [Y]): accent 배경(focus_accent) + 대비색(surface_bg) 라벨로 강조. 보조 버튼(취소 [N]): 은은한
-    //     배경(tab_hover_bg) + 일반(surface_fg) 라벨 — 강조는 덜하되 버튼 형태는 갖춘다. 라벨은 버튼 패딩만큼 우측에서 시작.
+    //     **포커스된 버튼이 accent**(focus_accent + 대비색 surface_bg 라벨)로 강조되고, 나머지는 은은한 배경
+    //     (tab_hover_bg + surface_fg 라벨)이다. ←/→로 포커스가 옮겨가면 강조도 따라 이동한다(어느 버튼이 Enter
+    //     대상인지 보임). 라벨은 버튼 패딩만큼 우측에서 시작.
+    const confirm_focused = state.focused == .confirm;
+    const confirm_bg: tokens.ColorRole = if (confirm_focused) .focus_accent else .tab_hover_bg;
+    const confirm_fg: tokens.ColorRole = if (confirm_focused) .surface_bg else .surface_fg;
+    const cancel_bg: tokens.ColorRole = if (confirm_focused) .tab_hover_bg else .focus_accent;
+    const cancel_fg: tokens.ColorRole = if (confirm_focused) .surface_fg else .surface_bg;
     const group_x = modal_box.centerX(box, btn_row_cols);
-    try modal_box.fillCells(box, group_x, 2, default_btn_cols, .focus_accent, arena, out);
-    try modal_box.text(box, group_x + @as(i32, @intCast(btn_pad * box.cw)), 2, confirm_text, .surface_bg, arena, out);
+    try modal_box.fillCells(box, group_x, 2, default_btn_cols, confirm_bg, arena, out);
+    try modal_box.text(box, group_x + @as(i32, @intCast(btn_pad * box.cw)), 2, confirm_text, confirm_fg, arena, out);
     const cancel_btn_x = group_x + @as(i32, @intCast((default_btn_cols + gap) * box.cw));
-    try modal_box.fillCells(box, cancel_btn_x, 2, cancel_btn_cols, .tab_hover_bg, arena, out);
-    try modal_box.text(box, cancel_btn_x + @as(i32, @intCast(btn_pad * box.cw)), 2, cancel_text, .surface_fg, arena, out);
+    try modal_box.fillCells(box, cancel_btn_x, 2, cancel_btn_cols, cancel_bg, arena, out);
+    try modal_box.text(box, cancel_btn_x + @as(i32, @intCast(btn_pad * box.cw)), 2, cancel_text, cancel_fg, arena, out);
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -171,6 +189,37 @@ test "confirm handle: Enter/Y=confirmed · Esc/N=cancelled · 닫힘이면 null 
     s.show("x", .{});
     try std.testing.expect(handle(.{ .key = .{ .key = .char, .codepoint = 'a' } }, &s) == null);
     try std.testing.expect(s.open);
+}
+
+test "confirm handle: ←/→로 포커스 이동, Enter는 포커스된 버튼 실행 (Esc는 항상 취소)" {
+    var s = State{};
+    s.show("x", .{}); // 기본 포커스 = confirm
+    try std.testing.expectEqual(Focus.confirm, s.focused);
+
+    // → 이동 → cancel 포커스(소비, intent 없음 — 재렌더는 host).
+    try std.testing.expect(handle(.{ .key = .{ .key = .right } }, &s) == null);
+    try std.testing.expectEqual(Focus.cancel, s.focused);
+    try std.testing.expect(s.open); // 포커스 이동은 안 닫음
+
+    // 이 상태에서 Enter → 포커스된 cancel 실행(닫기 아님!).
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .{ .key = .enter } }, &s).?);
+    try std.testing.expect(!s.open);
+
+    // ← 도 토글(버튼 둘뿐) — confirm→cancel.
+    s.show("x", .{});
+    try std.testing.expect(handle(.{ .key = .{ .key = .left } }, &s) == null);
+    try std.testing.expectEqual(Focus.cancel, s.focused);
+    // 다시 ← → confirm으로.
+    try std.testing.expect(handle(.{ .key = .{ .key = .left } }, &s) == null);
+    try std.testing.expectEqual(Focus.confirm, s.focused);
+    // confirm 포커스에서 Enter → confirmed.
+    try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .{ .key = .enter } }, &s).?);
+
+    // Esc는 포커스와 무관하게 항상 취소.
+    s.show("x", .{});
+    _ = handle(.{ .key = .{ .key = .right } }, &s); // cancel 포커스로 옮겨도
+    s.focused = .confirm; // 다시 confirm 포커스라도
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .{ .key = .escape } }, &s).?);
 }
 
 test "confirm view: 닫힘이면 ops 0, 열림이면 패널(quad+border)+accent 기본 버튼+메시지·버튼·키 텍스트" {
@@ -223,4 +272,39 @@ test "confirm view: 닫힘이면 ops 0, 열림이면 패널(quad+border)+accent 
     try std.testing.expect(saw_msg and saw_confirm and saw_cancel); // 메시지 + [Y]/[N] 버튼 라벨
     // 박스는 터미널 영역(사이드바 오른쪽) 안. 기하 엣지케이스는 modal_box.zig 테스트가 단일 출처로 커버.
     try std.testing.expect(out.items[0].quad.rect.x >= 40);
+}
+
+test "confirm view: 포커스가 accent 강조를 이동시킨다(←/→ 선택 가시화)" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 800, .backing_height_px = 600 } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // accent(focus_accent) fill의 x를 찾는 헬퍼 — 포커스된 버튼 위치.
+    const findAccentX = struct {
+        fn run(ops: []const draw.Op) i32 {
+            for (ops) |op| switch (op) {
+                .fill => |f| if (f.role == .focus_accent) return f.rect.x,
+                else => {},
+            };
+            return -1;
+        }
+    }.run;
+
+    var s = State{};
+    var out_confirm: std.ArrayList(draw.Op) = .empty;
+    s.show("실행 중인 명령이 있습니다.", .{ .confirm = "닫기", .cancel = "취소" }); // 기본 포커스 = confirm(왼쪽 버튼)
+    try view(&s, p, &tk, arena, &out_confirm);
+    const accent_x_confirm = findAccentX(out_confirm.items);
+
+    var out_cancel: std.ArrayList(draw.Op) = .empty;
+    s.focused = .cancel; // 포커스를 취소(오른쪽 버튼)로
+    try view(&s, p, &tk, arena, &out_cancel);
+    const accent_x_cancel = findAccentX(out_cancel.items);
+
+    try std.testing.expect(accent_x_confirm >= 0 and accent_x_cancel >= 0);
+    // 포커스가 오른쪽(취소) 버튼으로 가면 accent 강조도 오른쪽으로 이동한다.
+    try std.testing.expect(accent_x_cancel > accent_x_confirm);
 }

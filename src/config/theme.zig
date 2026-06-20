@@ -219,6 +219,18 @@ pub const ImeEnter = enum {
     commit_only,
 };
 
+/// EAW Ambiguous 문자(동그란 번호 ① 등)를 한 칸으로 볼지(narrow) 두 칸으로 볼지(wide).
+/// **기본 narrow** — UAX#11 §5 권고("문맥 불명 시 narrow") + Ghostty·xterm.js와 같아 1칸 가정 프로그램
+/// (셸 readline·대부분 TUI)과 정렬·커서가 안 깨진다. wide는 CJK 로캘처럼 그 문자를 2칸으로 가정하는 환경,
+/// 또는 plain 출력에서 동그란 번호를 전각 크기로 깔끔히 보고 싶을 때 opt-in(advance 2 — 1칸 가정 TUI/줄
+/// 편집과는 정렬이 어긋날 수 있다). 적용 범위는 width.isWideRenderSymbol(현재 Enclosed Alphanumerics
+/// U+2460~U+24FF — 폰트가 전각으로 그리는 동그란/괄호친 영숫자)이며, box/block·PUA(Nerd Font)는 maru가
+/// 합성/1칸으로 그리므로 제외한다. narrow에서도 다음 셀이 비면 렌더만 2칸으로 키운다(constraintWidth #764).
+pub const AmbiguousWidth = enum {
+    narrow,
+    wide,
+};
+
 pub const InputConfig = struct {
     // 기본 scroll: Mac 관례(Terminal.app/iTerm2) + 셸 keymap 오해석(case 토글·'~' 삽입) 원천 차단.
     page_keys: PageKeys = .scroll,
@@ -309,6 +321,9 @@ pub const Config = struct {
     /// SGR 5(blink) 글자를 실제로 깜빡일지(true)·정적으로 둘지(false). **기본 false** — 깜빡이는 콘텐츠는 접근성
     /// (WCAG 발작 위험) 우려라 다수 터미널이 기본으로 끈다. loader가 `text.blink` 키로 파싱.
     blink_text: bool = false,
+    /// EAW Ambiguous(동그란 번호 등) 문자의 셀 폭. 기본 narrow(1칸 — 정렬 안전·Ghostty/xterm.js 호환).
+    /// loader가 `text.ambiguous-width` 키로 파싱. 자세한 트레이드오프는 AmbiguousWidth 참고.
+    ambiguous_width: AmbiguousWidth = .narrow,
     /// 터미널 셀과 컨테이너(사이드바·탭 바 안쪽) 가장자리 사이의 빈 여백(논리 pt, DPI로 스케일). 4방 개별
     /// (top/right/bottom/left); x/y는 loader에서 alias(`window.padding-x`=left+right 동시, `window.padding-y`=top+bottom
     /// 동시)로 두 필드에 같은 값을 대입한다. loader가 `window.padding-{top,right,bottom,left,x,y}` 키로 파싱. 0이면

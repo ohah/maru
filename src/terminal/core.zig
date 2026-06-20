@@ -251,6 +251,10 @@ pub const TerminalCore = struct {
     sb_head: usize = 0,
     sb_count: usize = 0,
     max_scrollback: usize = default_max_scrollback,
+    // EAW Ambiguous(동그란 번호 등)를 2칸으로 advance할지(text.ambiguous-width=wide). 기본 false(narrow — 정렬
+    // 안전·Ghostty/xterm.js 호환). putCell이 셀 폭을 정할 때 width.cellWidthAmbiguous로 반영하므로 grid·커서·렌더가
+    // 같은 폭을 본다(단일 출처). app_session이 loaded_config에서 set(max_scrollback과 같은 직접 대입 패턴).
+    ambiguous_wide: bool = false,
     // 뷰포트: 바닥(0=활성 화면)에서 위로 스크롤한 줄 수. [0, sb_count] 범위. >0이면 화면 윗부분에
     // 스크롤백(과거)이 보이고 활성 화면 아랫부분은 가려진다. 과거를 보는 중 새 출력이 scroll되면
     // 같은 내용을 계속 보도록 함께 올린다(scroll-lock).
@@ -4369,7 +4373,7 @@ pub const TerminalCore = struct {
         var preedit_width: u16 = 0;
         {
             var it = iter.iterator();
-            while (it.nextCodepoint()) |cp| preedit_width += @as(u16, width.cellWidth(cp));
+            while (it.nextCodepoint()) |cp| preedit_width += @as(u16, width.cellWidthAmbiguous(cp, self.ambiguous_wide));
         }
         if (preedit_width == 0) return self.snapshot(); // 그릴 게 없음(조합 폭 0)
 
@@ -4706,7 +4710,7 @@ pub const TerminalCore = struct {
         if (self.cursor.col >= self.size.cols) self.cursor.col = self.size.cols - 1;
         if (self.cursor.row >= self.size.rows) self.cursor.row = self.size.rows - 1;
 
-        const cell_width: u2 = width.cellWidth(codepoint);
+        const cell_width: u2 = width.cellWidthAmbiguous(codepoint, self.ambiguous_wide);
         // wide glyph(2칸)가 줄 끝(마지막 칸, 1칸만 남음)에 안 들어가면 통째로 다음 줄로 넘긴다
         // (이전 줄 마지막 칸은 빈칸으로 남는다). grid는 항상 cols>=2라(clampGridSize) 넘긴 뒤엔
         // 반드시 들어가므로, 칸을 줄이는 degrade 없이 그대로 width 2로 쓴다.
@@ -5364,6 +5368,31 @@ test "terminal core drops a combining mark with no base on the current row" {
     try std.testing.expectEqual(@as(u21, 'A'), snapshot.cells[0].codepoint);
     try std.testing.expect(snapshot.cells[0].combining == null);
     for (snapshot.cells) |cell| try std.testing.expect(cell.combining == null);
+}
+
+test "ambiguous_wide makes circled numbers occupy two cells (advance 2) with a continuation" {
+    {
+        // 기본 narrow: ③는 1칸, 커서 advance 1(Ghostty/xterm.js 호환).
+        var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
+        defer core.deinit();
+        try core.write("③");
+        const s = core.snapshot();
+        try std.testing.expectEqual(@as(u2, 1), s.cells[0].width);
+        try std.testing.expectEqual(@as(u16, 1), s.cursor.col);
+    }
+    {
+        // wide: ③는 2칸(continuation) + 커서 advance 2 — CJK wide와 같은 경로(text.ambiguous-width=wide).
+        var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
+        defer core.deinit();
+        core.ambiguous_wide = true; // write 전에 설정(putCell이 읽음)
+        try core.write("③X");
+        const s = core.snapshot();
+        try std.testing.expectEqual(@as(u21, 0x2462), s.cells[0].codepoint);
+        try std.testing.expectEqual(@as(u2, 2), s.cells[0].width);
+        try std.testing.expect(s.cells[1].continuation);
+        try std.testing.expectEqual(@as(u21, 'X'), s.cells[2].codepoint); // ③가 2칸이라 X는 col2
+        try std.testing.expectEqual(@as(u16, 3), s.cursor.col); // ③(2) + X(1)
+    }
 }
 
 test "terminal core backspace moves exactly one column even over a wide continuation" {

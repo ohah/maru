@@ -16,6 +16,16 @@ pub fn isWideRenderSymbol(codepoint: u21) bool {
     return codepoint >= 0x2460 and codepoint <= 0x24FF;
 }
 
+/// `text.ambiguous-width` 설정을 반영한 셀 폭. `ambiguous_wide`가 false면 cellWidth와 같다(narrow — 기본).
+/// true면 EAW Ambiguous 중 폰트가 전각으로 그리는 심볼(isWideRenderSymbol)을 **advance 2**로 올린다 — 1칸
+/// (cellWidth) 결과만 대상이라 combining(0)·이미 wide(2)는 안 건드린다. box/block·PUA는 isWideRenderSymbol에
+/// 없어 1칸 유지(maru 합성/Nerd Font 보존). narrow에서도 다음 셀이 비면 렌더만 2칸(draw_list constraintWidth).
+pub fn cellWidthAmbiguous(codepoint: u21, ambiguous_wide: bool) u2 {
+    const base = cellWidth(codepoint);
+    if (base == 1 and ambiguous_wide and isWideRenderSymbol(codepoint)) return 2;
+    return base;
+}
+
 pub fn isCombiningMark(codepoint: u21) bool {
     // This is intentionally a small first table. It covers the common
     // combining mark blocks needed to keep accents from moving the terminal
@@ -135,6 +145,20 @@ fn isWideCodepoint(codepoint: u21) bool {
 
 test "cellWidth treats ASCII as single-cell" {
     try std.testing.expectEqual(@as(u2, 1), cellWidth('A'));
+}
+
+test "cellWidthAmbiguous: ambiguous symbols widen only when ambiguous_wide is set" {
+    // narrow(기본): 동그란 번호는 1칸(cellWidth와 동일).
+    try std.testing.expectEqual(@as(u2, 1), cellWidthAmbiguous(0x2462, false)); // ③
+    try std.testing.expectEqual(@as(u2, 1), cellWidthAmbiguous(0x2460, false)); // ①
+    // wide: isWideRenderSymbol(동그란/괄호친 영숫자)만 2칸으로.
+    try std.testing.expectEqual(@as(u2, 2), cellWidthAmbiguous(0x2462, true)); // ③ → 2
+    try std.testing.expectEqual(@as(u2, 2), cellWidthAmbiguous(0x24FF, true)); // 범위 끝
+    // wide여도 일반 ASCII·이미 wide·combining은 안 바뀐다(1→2만 대상).
+    try std.testing.expectEqual(@as(u2, 1), cellWidthAmbiguous('A', true));
+    try std.testing.expectEqual(@as(u2, 2), cellWidthAmbiguous('한', true)); // 이미 2
+    try std.testing.expectEqual(@as(u2, 0), cellWidthAmbiguous(0x0301, true)); // combining(0 유지)
+    try std.testing.expectEqual(@as(u2, 1), cellWidthAmbiguous(0x2500, true)); // box-drawing은 isWideRenderSymbol 밖 → 1 유지
 }
 
 test "cellWidth treats Hangul and CJK as double-cell" {

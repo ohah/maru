@@ -108,55 +108,92 @@ pub fn view(
     out: *std.ArrayList(draw.Op),
 ) !void {
     if (!state.open) return;
-
-    // 버튼 라벨에 단축키 마커를 통합한다("[Y] 닫기"·"[N] 취소") — 영어 단어(Enter/Esc) 줄 없이 TUI식 Y/N 단축키를
-    // 버튼 안에 보인다. arena에 만들어 view 동안 유효(out의 text op이 이 슬라이스를 가리킴).
-    const confirm_text = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_confirm, state.confirm_label });
-    const cancel_text = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_cancel, state.cancel_label });
-    const msg_cols = overlay_input.displayCols(state.message);
-    const confirm_cols = overlay_input.displayCols(confirm_text);
-    const cancel_cols = overlay_input.displayCols(cancel_text);
-    const btn_pad = 1; // 버튼 라벨 좌우 패딩(배경이 라벨을 감싸 버튼처럼 보이게)
-    const default_btn_cols = confirm_cols + 2 * btn_pad;
-    const cancel_btn_cols = cancel_cols + 2 * btn_pad; // 보조 버튼도 같은 패딩 — 둘 다 버튼 느낌
-    const gap = 2; // 두 버튼 사이 간격(칸) — 둘 다 버튼이라 살짝 좁혀 균형
-    const btn_row_cols = default_btn_cols + gap + cancel_btn_cols;
-    const content_cols = @max(msg_cols, btn_row_cols);
-
-    // 콘텐츠 3행: 0=메시지, 1=(빈 줄), 2=버튼([Y]/[N] 단축키 포함). modal_box가 사방 여백을 더해 패널처럼 보이게 한다.
-    const box = modal_box.layout(content_cols, 3, p, tk) orelse return;
+    const g = buttonGeom(state, p, tk) orelse return;
+    const box = g.box;
     try modal_box.frame(box, p, arena, out);
 
     // (1) 메시지 — 중앙.
-    try modal_box.text(box, modal_box.centerX(box, msg_cols), 0, state.message, .surface_fg, arena, out);
+    try modal_box.text(box, modal_box.centerX(box, overlay_input.displayCols(state.message)), 0, state.message, .surface_fg, arena, out);
 
-    // (2) 버튼 행 — 그룹(기본+gap+보조)을 중앙 정렬. **둘 다 배경 fill로 버튼처럼** 보이게 한다(painter order: bg→glyph).
-    //     **포커스된 버튼이 accent**(focus_accent + 대비색 surface_bg 라벨)로 강조되고, 나머지는 은은한 배경
-    //     (tab_hover_bg + surface_fg 라벨)이다. ←/→로 포커스가 옮겨가면 강조도 따라 이동한다(어느 버튼이 Enter
-    //     대상인지 보임). 라벨은 버튼 패딩만큼 우측에서 시작.
+    // (2) 버튼 행 — **포커스된 버튼이 accent**(focus_accent + 대비색 surface_bg 라벨)로 강조되고, 나머지는 은은한 배경
+    //     (tab_hover_bg + surface_fg 라벨)이다. ←/→로 포커스가 옮겨가면 강조도 따라 이동한다(어느 버튼이 Enter 대상인지
+    //     보임). 둘 다 배경 fill로 버튼처럼(painter order: bg→glyph). 위치/폭은 buttonGeom 단일 출처(클릭 hit-test와 공유).
+    //     라벨은 버튼 패딩만큼 우측에서 시작. arena에 만든 라벨 슬라이스는 view 동안(=lower까지) 유효.
     const confirm_focused = state.focused == .confirm;
-    const confirm_bg: tokens.ColorRole = if (confirm_focused) .focus_accent else .tab_hover_bg;
-    const confirm_fg: tokens.ColorRole = if (confirm_focused) .surface_bg else .surface_fg;
-    const cancel_bg: tokens.ColorRole = if (confirm_focused) .tab_hover_bg else .focus_accent;
-    const cancel_fg: tokens.ColorRole = if (confirm_focused) .surface_fg else .surface_bg;
+    if (g.confirm_fit > 0) {
+        try modal_box.fillCells(box, g.confirm_x, btn_content_row, g.confirm_fit, if (confirm_focused) .focus_accent else .tab_hover_bg, arena, out);
+        const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_confirm, state.confirm_label });
+        try modal_box.text(box, g.confirm_x + @as(i32, @intCast(btn_pad * box.cw)), btn_content_row, t, if (confirm_focused) .surface_bg else .surface_fg, arena, out);
+    }
+    if (g.cancel_fit > 0) {
+        try modal_box.fillCells(box, g.cancel_x, btn_content_row, g.cancel_fit, if (confirm_focused) .tab_hover_bg else .focus_accent, arena, out);
+        const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_cancel, state.cancel_label });
+        try modal_box.text(box, g.cancel_x + @as(i32, @intCast(btn_pad * box.cw)), btn_content_row, t, if (confirm_focused) .surface_fg else .surface_bg, arena, out);
+    }
+}
+
+const btn_pad: u32 = 1; // 버튼 라벨 좌우 패딩(배경이 라벨을 감싸 버튼처럼)
+const btn_gap: u32 = 2; // 두 버튼 사이 간격(칸)
+const btn_content_row: u32 = 2; // 콘텐츠 행: 0=메시지, 1=빈줄, 2=버튼
+
+/// 버튼 행 기하 — view(그리기)와 buttonAtPoint(클릭 hit-test)가 공유하는 **단일 레이아웃**(chrome 계약 §5.4의
+/// view↔hitTest 단일 모델). 박스·각 버튼 x·fit-clamp된 폭(칸; 0이면 너무 좁아 생략)을 돌려준다. null=안 열림/생략 박스.
+const ButtonGeom = struct {
+    box: modal_box.Box,
+    confirm_x: i32,
+    confirm_fit: u32,
+    cancel_x: i32,
+    cancel_fit: u32,
+};
+
+/// 마커 "[" + key + "] "의 표시 폭(칸). key는 "Y"/"N"(1칸)이라 보통 4.
+fn markerCols(key: []const u8) u32 {
+    return 3 + overlay_input.displayCols(key); // "[" + key + "] "
+}
+
+fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Tokens) ?ButtonGeom {
+    const confirm_cols = markerCols(key_confirm) + overlay_input.displayCols(state.confirm_label);
+    const cancel_cols = markerCols(key_cancel) + overlay_input.displayCols(state.cancel_label);
+    const default_btn_cols = confirm_cols + 2 * btn_pad;
+    const cancel_btn_cols = cancel_cols + 2 * btn_pad;
+    const btn_row_cols = default_btn_cols + btn_gap + cancel_btn_cols;
+    const content_cols = @max(overlay_input.displayCols(state.message), btn_row_cols);
+    // 콘텐츠 3행: 0=메시지, 1=빈줄, 2=버튼. modal_box가 사방 여백을 더해 패널처럼.
+    const box = modal_box.layout(content_cols, 3, p, tk) orelse return null;
     const group_x = modal_box.centerX(box, btn_row_cols);
-    // 버튼은 박스 안쪽 우측 끝을 넘지 않게 한다 — 아주 좁은 창/긴 라벨로 btn_row_cols > inner_cols면 centerX가 group_x를
-    // inner_x로 붙여도 버튼이 박스 밖으로 넘쳐, fill rect가 rasterize bounding box를 패널 밖(사이드바/터미널)으로 키운다.
-    // fitButtonCols로 폭을 안쪽 끝까지로 줄이고, **0이면(완전히 밖) 버튼을 아예 생략**한다(0폭 fill을 패널 밖 x에 두면
-    // 그 자체가 bbox를 키워서 — 그땐 키보드 Esc/Y/N로 조작). 폭이 충분하면(정상 창) cols 그대로라 무변화. 라벨
-    // (placeText)은 격자에 자동 clip. inner 영역 = [inner_x, inner_x + inner_cols×cw).
+    // 버튼이 박스 안쪽 우측 끝을 넘으면(좁은 창/긴 라벨) fill이 rasterize bbox를 패널 밖으로 키운다 → 폭을 clamp하고
+    // 0이면(완전히 밖) 호출자가 버튼을 생략(그땐 키보드 Esc/Y/N). 정상 창은 무변화. inner=[inner_x, inner_x+inner_cols×cw).
     const inner_right = box.inner_x + @as(i32, @intCast(box.inner_cols * box.cw));
-    const confirm_fit = fitButtonCols(group_x, default_btn_cols, box.cw, inner_right);
-    if (confirm_fit > 0) {
-        try modal_box.fillCells(box, group_x, 2, confirm_fit, confirm_bg, arena, out);
-        try modal_box.text(box, group_x + @as(i32, @intCast(btn_pad * box.cw)), 2, confirm_text, confirm_fg, arena, out);
+    const cancel_x = group_x + @as(i32, @intCast((default_btn_cols + btn_gap) * box.cw));
+    return .{
+        .box = box,
+        .confirm_x = group_x,
+        .confirm_fit = fitButtonCols(group_x, default_btn_cols, box.cw, inner_right),
+        .cancel_x = cancel_x,
+        .cancel_fit = fitButtonCols(cancel_x, cancel_btn_cols, box.cw, inner_right),
+    };
+}
+
+/// 마우스 클릭(backing px) hit-test — 확인 버튼 위면 confirmed, 취소 버튼 위면 cancelled, **패널 밖이면 cancelled**
+/// (바깥 클릭 dismiss 관례), 패널 안 비-버튼이면 null(소비, 무동작). 닫혀 있거나 좌표 비유한이면 null. view와 같은
+/// buttonGeom을 써 그려진 버튼과 클릭 영역이 항상 일치한다(view↔hitTest 단일 레이아웃). host가 반환 intent를
+/// confirm_accept/confirm_cancel로 디스패치한다(키보드 경로와 동일 후처리).
+pub fn buttonAtPoint(state: *const State, p: props.ChromeProps, tk: *const tokens.Tokens, x_px: f64, y_px: f64) ?Action {
+    if (!state.open) return null;
+    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
+    const g = buttonGeom(state, p, tk) orelse return null;
+    const x: i32 = @intFromFloat(x_px);
+    const y: i32 = @intFromFloat(y_px);
+    const b = g.box.rect;
+    // 패널 밖 → 취소(바깥 클릭 dismiss).
+    if (x < b.x or x >= b.x + @as(i32, @intCast(b.w)) or y < b.y or y >= b.y + @as(i32, @intCast(b.h))) return .cancelled;
+    // 버튼 행 y 범위 안에서 각 버튼 x 범위(fit 폭) 검사.
+    const ry = modal_box.rowY(g.box, btn_content_row);
+    if (y >= ry and y < ry + @as(i32, @intCast(g.box.ch))) {
+        if (g.confirm_fit > 0 and x >= g.confirm_x and x < g.confirm_x + @as(i32, @intCast(g.confirm_fit * g.box.cw))) return .confirmed;
+        if (g.cancel_fit > 0 and x >= g.cancel_x and x < g.cancel_x + @as(i32, @intCast(g.cancel_fit * g.box.cw))) return .cancelled;
     }
-    const cancel_btn_x = group_x + @as(i32, @intCast((default_btn_cols + gap) * box.cw));
-    const cancel_fit = fitButtonCols(cancel_btn_x, cancel_btn_cols, box.cw, inner_right);
-    if (cancel_fit > 0) {
-        try modal_box.fillCells(box, cancel_btn_x, 2, cancel_fit, cancel_bg, arena, out);
-        try modal_box.text(box, cancel_btn_x + @as(i32, @intCast(btn_pad * box.cw)), 2, cancel_text, cancel_fg, arena, out);
-    }
+    return null; // 패널 안, 버튼 아님 → 소비(무동작)
 }
 
 /// 버튼 배경 fill 폭(칸)을 박스 안쪽 우측 끝(right_px)까지로 줄인다 — x 위치에서 cols칸이 안쪽을 넘으면 안 넘게.
@@ -357,4 +394,58 @@ test "confirm view: 좁은 창에서 버튼 배경이 패널(quad) 밖으로 안
         .fill => |f| try std.testing.expect(f.rect.x + @as(i32, @intCast(f.rect.w)) <= panel_right),
         else => {},
     };
+}
+
+test "confirm buttonAtPoint: 그려진 버튼 중심 클릭이 같은 Action — view↔hitTest 단일 레이아웃 일치" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 800, .backing_height_px = 600 } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var s = State{};
+    // 닫힌 모달은 어디를 클릭해도 null(라우팅 안 가로챔).
+    try std.testing.expectEqual(@as(?Action, null), buttonAtPoint(&s, p, &tk, 400, 300));
+
+    s.show("실행 중인 명령이 있습니다.", .{ .confirm = "닫기", .cancel = "취소" }); // 기본 포커스=confirm
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, p, &tk, arena, &out);
+
+    // view가 그린 버튼 fill rect를 ground truth로 — 포커스=confirm이라 focus_accent=확인, tab_hover_bg=취소.
+    var confirm_rect: ?draw.Rect = null;
+    var cancel_rect: ?draw.Rect = null;
+    var panel_rect: ?draw.Rect = null;
+    for (out.items) |op| switch (op) {
+        .quad => |q| panel_rect = q.rect,
+        .fill => |f| {
+            if (f.role == .focus_accent) confirm_rect = f.rect;
+            if (f.role == .tab_hover_bg) cancel_rect = f.rect;
+        },
+        else => {},
+    };
+    const cr = confirm_rect.?;
+    const xr = cancel_rect.?;
+    const pr = panel_rect.?;
+
+    const centerX = struct {
+        fn run(r: draw.Rect) f64 {
+            return @as(f64, @floatFromInt(r.x)) + @as(f64, @floatFromInt(r.w)) / 2.0;
+        }
+    }.run;
+    const centerY = struct {
+        fn run(r: draw.Rect) f64 {
+            return @as(f64, @floatFromInt(r.y)) + @as(f64, @floatFromInt(r.h)) / 2.0;
+        }
+    }.run;
+
+    // 확인 버튼 중심 클릭 → confirmed, 취소 버튼 중심 클릭 → cancelled.
+    try std.testing.expectEqual(@as(?Action, .confirmed), buttonAtPoint(&s, p, &tk, centerX(cr), centerY(cr)));
+    try std.testing.expectEqual(@as(?Action, .cancelled), buttonAtPoint(&s, p, &tk, centerX(xr), centerY(xr)));
+    // 패널 밖(좌상단 원점) → cancelled(바깥 클릭 dismiss 관례).
+    try std.testing.expectEqual(@as(?Action, .cancelled), buttonAtPoint(&s, p, &tk, 0, 0));
+    // 패널 안이지만 버튼 행이 아닌 메시지 행(패널 top+2px) → null(소비, 무동작).
+    try std.testing.expectEqual(@as(?Action, null), buttonAtPoint(&s, p, &tk, centerX(pr), @floatFromInt(pr.y + 2)));
+    // 비유한 좌표 방어.
+    try std.testing.expectEqual(@as(?Action, null), buttonAtPoint(&s, p, &tk, std.math.nan(f64), 300));
 }

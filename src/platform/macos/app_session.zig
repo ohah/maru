@@ -6459,25 +6459,25 @@ pub const AppSession = struct {
         const active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
         // 호버 슬롯엔 닫기 ✕(없으면 null). plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼.
         var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, sidebar_cols, fg, self.hovered_slot, self.tabs.items.len, self.app_window.active_tab, active_fg);
-        // 에이전트 아이콘(✳ claude / ✻ codex)에 브랜드 강조색을 입혀 나머지 라벨과 구분한다 — claude=Anthropic 코랄,
-        // codex=OpenAI 그린. 아이콘은 독립 셀(슬롯 중앙)이라 codepoint로 찾는다. running이면 blink 위상으로 밝기를
-        // 낮춰 **펄스**(진행중 표시), idle/none이면 정적 full-color(docs/agent-session.md "사이드바 통합").
+        // 에이전트 아이콘(✳ claude / ✻ codex)에 **상태색**을 입힌다 — 보편 관례(진행 중=amber, 완료=초록,
+        // 불명=회색)로 사용자가 한눈에 진행 상태를 읽게 한다. 종류(claude/codex)는 심볼 모양으로 구분하므로
+        // 색은 상태 전용으로 쓴다(브랜드 색에서 전환). 아이콘은 독립 셀(슬롯 중앙)이라 codepoint로 찾는다.
+        // running이면 blink 위상으로 밝기를 낮춰 **펄스**(진행 중을 색+움직임 둘로 강조). docs/agent-session.md.
         for (draw_list.cells) |*c| {
-            const brand: ?maru.color.Rgb = switch (c.codepoint) {
-                0x2733 => .{ .r = 0xD9, .g = 0x78, .b = 0x5C }, // claude — Anthropic 코랄
-                0x273B => .{ .r = 0x10, .g = 0xA3, .b = 0x7F }, // codex — OpenAI 그린(#10A37F)
-                else => null,
-            };
-            const col = brand orelse continue;
-            // 아이콘 셀 row에서 슬롯(탭) 인덱스를 디코드(row=slot*32+…)해 그 Term이 running이면 펄스. row는 아직
-            // 인코딩 상태(아래 indent 시프트는 col만 바꿈)라 정확히 slot으로 역산된다.
+            const is_agent_icon = c.codepoint == 0x2733 or c.codepoint == 0x273B; // ✳ claude / ✻ codex
+            if (!is_agent_icon) continue;
+            // 아이콘 셀 row에서 슬롯(탭) 인덱스를 디코드(row=slot*32+…)해 그 Term의 상태색을 고른다.
             const slot = c.row / coretext_frame_builder.sidebar_line_base;
-            var rgb = col;
-            if (slot < self.tabs.items.len) {
-                const t = self.tabs.items[slot].activePane().activeTerm();
-                if (t.agent_state == .running and !self.blink_visible) rgb = dimRgb(col); // off 위상 → 어둡게
-            }
-            c.style.foreground = .{ .rgb = rgb };
+            if (slot >= self.tabs.items.len) continue;
+            const t = self.tabs.items[slot].activePane().activeTerm();
+            // 보편 관례 상태색: running=진행 중(amber), idle=완료(초록 — 거터 성공 #3FB950과 동일), unknown=불명(회색).
+            const state_rgb: maru.color.Rgb = switch (t.agent_state) {
+                .running => .{ .r = 0xE5, .g = 0xC0, .b = 0x7B }, // 진행 중 — amber
+                .idle => .{ .r = 0x3F, .g = 0xB9, .b = 0x50 }, // 완료 — 초록
+                .unknown => .{ .r = 0x80, .g = 0x80, .b = 0x80 }, // 불명 — 회색
+            };
+            // running이면 펄스(blink off 위상 어둡게) — 색에 더해 움직임으로도 진행 중을 알린다.
+            c.style.foreground = .{ .rgb = if (t.agent_state == .running and !self.blink_visible) dimRgb(state_rgb) else state_rgb };
         }
         // U2/B2: 제목·✕·+ 셀을 content rect 좌단(indent_cols)만큼 우측으로 민다 — 좌측 maru-accent 막대 + 카드 패딩 안 가리게(rich만; tui indent=0 no-op).
         if (indent_cols > 0) {

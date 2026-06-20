@@ -206,7 +206,7 @@ test "host: Confirm 라우팅 — Enter=confirm_accept·Esc=confirm_cancel·다�
     try host.collectDraws(p, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 
-    host.confirm.show("running: vim — 닫을까요?");
+    host.confirm.show("running: vim — 닫을까요?", .{ .confirm = "닫기", .cancel = "취소" });
     out.clearRetainingCapacity();
     try host.collectDraws(p, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 1), out.items.len);
@@ -219,7 +219,7 @@ test "host: Confirm 라우팅 — Enter=confirm_accept·Esc=confirm_cancel·다�
     try std.testing.expectEqual(HostAction.confirm_cancel, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .escape } }).?);
     try std.testing.expect(!host.confirm.open);
     // Enter → accept + 닫힘.
-    host.confirm.show("x");
+    host.confirm.show("x", .{});
     try std.testing.expectEqual(HostAction.confirm_accept, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .enter } }).?);
     try std.testing.expect(!host.confirm.open);
 }

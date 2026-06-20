@@ -311,6 +311,11 @@ fn applyKey(
             return;
         }
         config.term = try a.dupe(u8, trimmed);
+    } else if (std.mem.eql(u8, key, "shell-integration.ssh")) {
+        config.shell_integration.ssh = parseBool(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "shell-integration.ssh는 true|false — 기본값 유지" });
+            return;
+        };
     } else {
         try diags.append(a, .{ .line = line_no, .message = "알 수 없는 key — 무시" });
     }
@@ -1171,6 +1176,25 @@ test "parse: scrollback.lines + bell.audible (defaults and forgiving)" {
         var p = try parse(std.testing.allocator, "bell.audible = bogus\n"); // 잘못 → 기본 true + 진단
         defer p.deinit();
         try std.testing.expectEqual(true, p.config.bell.audible);
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+}
+
+test "parse: shell-integration.ssh (opt-in, default off, forgiving)" {
+    {
+        var p = try parse(std.testing.allocator, ""); // 기본 off — ssh 라우팅은 명시 opt-in
+        defer p.deinit();
+        try std.testing.expectEqual(false, p.config.shell_integration.ssh);
+    }
+    {
+        var p = try parse(std.testing.allocator, "shell-integration.ssh = true\n");
+        defer p.deinit();
+        try std.testing.expectEqual(true, p.config.shell_integration.ssh);
+    }
+    {
+        var p = try parse(std.testing.allocator, "shell-integration.ssh = nope\n"); // 잘못 → 기본 false + 진단
+        defer p.deinit();
+        try std.testing.expectEqual(false, p.config.shell_integration.ssh);
         try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
     }
 }

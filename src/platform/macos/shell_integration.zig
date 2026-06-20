@@ -6,12 +6,18 @@
 //! 알린다 — 거터 ✓/✗·프롬프트 점프·reflow 정확화의 토대다(명세: freedesktop semantic-prompts.md,
 //! FinalTerm 발). 또 OSC 7로 매 프롬프트 cwd를 보고한다(창 제목·새 탭 cwd가 읽는다).
 //!
+//! 또(opt-in) 평범한 `ssh`를 `maru ssh`로 라우팅하는 셸 함수를 정의해, maru terminfo(`xterm-maru`)가
+//! 원격에 자동 전파되게 한다(config `shell-integration.ssh`. 근거·트레이드오프는 terminal-compatibility-
+//! policy.md). maru가 env에 MARU_SSH_INTEGRATION/MARU_BIN을 줄 때만 동작한다.
+//!
 //! clean-room: Ghostty/kitty의 통합 스크립트는 GPLv3라 차용하지 않는다. 아래 zsh 스크립트는 zsh
 //! 매뉴얼의 ZDOTDIR/스타트업·precmd/preexec/add-zsh-hook·PS1 `%{%}` 동작과 freedesktop
 //! semantic-prompts.md 명세에서 직접 작성했다. 메커니즘(ZDOTDIR로 가리키기, precmd가 A/D·preexec가
 //! C·PS1 끝이 B를 emit)은 공개 동작/명세다(Ghostty의 MIT setup 로직과 같은 아이디어). OSC 7도
 //! VTE가 정의한 공개 형식(file://host/path)에서 직접 작성했다 — VTE의 vte.sh(GPL)는 열람하지
-//! 않고, percent-encoding은 OSC 7 형식 명세대로 zsh에서 바이트 단위로 구현했다.
+//! 않고, percent-encoding은 OSC 7 형식 명세대로 zsh에서 바이트 단위로 구현했다. ssh 라우팅(셸 함수로
+//! `ssh`를 가려 터미널의 ssh 래퍼로 위임)은 공개 동작 아이디어로, Ghostty `ssh-integration`(GPLv3)은
+//! 동작만 비교하고 zsh 함수·env 게이트는 직접 작성했다.
 
 const std = @import("std");
 
@@ -100,6 +106,15 @@ const zsh_zshenv =
     \\    'builtin' 'unfunction' '_maru_shell_integration'
     \\  }
     \\  add-zsh-hook precmd _maru_shell_integration
+    \\  # Opt-in: 평범한 `ssh`를 `maru ssh`로 라우팅해 maru terminfo(xterm-maru)가 원격에 자동 전파되게
+    \\  # 한다 — TERMINFO는 로컬 env라 평범한 ssh엔 안 따라가, 항목 없는 원격에서 깨질 수 있다(maru ssh가
+    \\  # 원격에 terminfo를 심고 exec해 이를 덮는다). config `shell-integration.ssh = true`일 때만 maru가
+    \\  # 자식 env에 MARU_SSH_INTEGRATION/MARU_BIN을 주입한다. 셋이 모두 충족될 때만 함수를 정의해, 꺼져
+    \\  # 있거나(opt-in 미설정) 바이너리를 못 찾으면 평범한 `ssh`가 그대로 동작한다(graceful). maru ssh는
+    \\  # 비대화형 /bin/sh에서 실제 ssh를 exec하므로 이 함수와 재귀하지 않는다. 우회: `command ssh`·`\ssh`.
+    \\  if [[ -n "${MARU_SSH_INTEGRATION+x}" && -n "${MARU_BIN}" && -x "${MARU_BIN}" ]]; then
+    \\    ssh() { "${MARU_BIN}" ssh "$@"; }
+    \\  fi
     \\fi
 ;
 
@@ -177,4 +192,14 @@ test "zsh integration script emits OSC 7 cwd reporting" {
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "nomultibyte") != null); // 바이트 단위 인코딩
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "%02X") != null); // 비-unreserved 바이트 → %XX
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "${HOST}") != null); // host(빈 값이면 localhost)
+}
+
+test "zsh integration script routes ssh through maru ssh only when opt-in env is injected" {
+    // opt-in: maru가 MARU_SSH_INTEGRATION/MARU_BIN을 주입할 때만 ssh 함수를 정의하는지(회귀 — 깨지면
+    // 평범한 ssh가 라우팅되지 않거나, 반대로 항상 가려져 graceful이 무너진다). env 게이트(셋 모두)와
+    // 함수 본문이 maru ssh로 위임하는지 확인. 실제 zsh가 함수로 ssh를 가리고 maru ssh로 위임하는지는
+    // PTY/수동으로 별도 검증한다(PR 본문 — 단위로는 셸을 실행하지 않으므로).
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "MARU_SSH_INTEGRATION+x") != null); // opt-in 게이트(설정됨)
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "-x \"${MARU_BIN}\"") != null); // 바이너리 실행 가능할 때만
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "ssh() { \"${MARU_BIN}\" ssh \"$@\"; }") != null); // maru ssh로 위임
 }

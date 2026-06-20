@@ -199,6 +199,27 @@ term = xterm-ghostty    # 다른 값(그 terminfo가 설치돼 있어야 함)
 
 > 빈 값(`term =`)은 무시하고 기본값을 유지한다. env를 명시로 주는 테스트 경로에선 이 값이 무시된다.
 
+### 셸 통합 ssh 라우팅 (`shell-integration.ssh`)
+
+```
+shell-integration.ssh = true    # 평범한 ssh를 maru ssh로 자동 라우팅 (기본 false)
+```
+
+위 `maru ssh`는 직접 입력할 때만 terminfo를 전파한다. 이 옵션을 켜면 **통합 zsh에서 평범한 `ssh`를
+입력해도** maru가 그 호출을 `maru ssh`로 라우팅해 자동으로 `xterm-maru`를 원격에 심는다 — 매번 `maru`를
+앞에 붙이지 않아도 된다.
+
+> **동작**: maru가 자식 셸 env에 현재 실행 파일 경로(`MARU_BIN`)와 플래그(`MARU_SSH_INTEGRATION`)를
+> 주입하고, Maru 통합 `.zshenv`가 이 둘이 모두 있을 때만 `ssh`를 가리는 함수를 정의해 `maru ssh`로
+> 위임한다. 같은 maru 바이너리가 `maru ssh`를 처리하므로 `install-cli` 없이도 동작한다.
+>
+> **기본 off인 이유**(opt-in): `ssh`를 함수로 가리는 건 침습적이라 사용자 동의가 필요하다(Ghostty도
+> `ssh-*`를 기본 off로 둔다). 끄면(기본) 평범한 `ssh`가 그대로 동작한다.
+>
+> **범위/우회**: zsh 통합이 켜진 대화형 셸에서만 적용된다(통합이 없으면 함수가 정의되지 않는다). 한 번만
+> 평범한 ssh로 가려면 `command ssh ...` 또는 `\ssh ...`. `maru ssh`와 동일하게 **대화형 세션용**이라
+> `ssh host cmd`(원격 command)는 terminfo 설치를 건너뛰고 `xterm-256color`로 연결한다.
+
 ### 키바인딩 (`keybind`)
 
 `keybind = <조합> = <action>` 한 줄에 하나씩, 여러 줄을 둘 수 있다(값 안에 `=`가 한 번 더 있는

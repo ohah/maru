@@ -70,6 +70,11 @@ pub const SpawnRequest = struct {
     // PREV로 보존) zsh가 그 디렉터리의 Maru .zshenv를 로드해 macOS 편집키를 바인딩한다. null이면
     // 통합 없이 띄운다. env를 명시로 넘기면(테스트) 무시된다.
     zdotdir: ?[]const u8 = null,
+    // 셸 통합 ssh 라우팅(opt-in)이 켜졌을 때 현재 maru 실행 파일 경로. 설정되면 셸에 MARU_BIN=<이 값>과
+    // MARU_SSH_INTEGRATION=1을 주입한다 — 통합 .zshenv가 이 둘을 보고 `ssh`를 `maru ssh`로 라우팅하는
+    // 함수를 정의한다(없으면 평범한 ssh 그대로). 이 단일 optional이 "기능 on + 바이너리 경로"를 함께
+    // 인코딩한다(null이면 주입 안 함). env를 명시로 넘기면(테스트) 무시된다.
+    ssh_integration_bin: ?[]const u8 = null,
     size: terminal.Size = terminal.Size.default,
 };
 

@@ -10209,6 +10209,38 @@ test "focusedTermCwd/workspaceRootCwd/newSurfaceCwd: 포커스 cwd 상속 + inhe
     try std.testing.expect(session.newSurfaceCwd(&buf, false) == null);
 }
 
+test "newSurfaceCwd: 설정된 workspace.root이 세션 배선을 통과 — inherit OFF는 root, ON은 포커스 우선" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // 테스트는 빈 config로 init되므로(workspace.root=""), 설정된 root를 직접 주입한다 — 절대경로 **정적 리터럴**이라
+    // arena가 추적/free하지 않아 안전(Parsed.deinit은 arena.deinit 일괄 해제만 한다). 이렇게 해야 resolveWorkspaceRoot
+    // 순수 단위 테스트 너머로 "설정된 root 경로가 실제 newSurfaceCwd 배선을 통과해 req.cwd가 되는지"가 검증된다(#5 공백 보강).
+    session.loaded_config.config.workspace.root = "/tmp/maru-root";
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    // 포커스 cwd 없음(OSC 7 전): inherit ON/OFF 둘 다 root로 떨어진다(설정된 절대경로가 그대로 흐른다).
+    try std.testing.expectEqualStrings("/tmp/maru-root", session.workspaceRootCwd(&buf).?);
+    try std.testing.expectEqualStrings("/tmp/maru-root", session.newSurfaceCwd(&buf, false).?); // 토글 OFF → root
+    try std.testing.expectEqualStrings("/tmp/maru-root", session.newSurfaceCwd(&buf, true).?); // 토글 ON이나 포커스 없음 → root
+
+    // 활성 Term이 OSC 7로 cwd 보고: inherit ON은 포커스 cwd가 root보다 우선, OFF는 여전히 root.
+    try session.activeSurface().core.write("\x1b]7;file://h/work/svc\x07");
+    try std.testing.expectEqualStrings("/work/svc", session.newSurfaceCwd(&buf, true).?); // ON → 포커스 우선
+    try std.testing.expectEqualStrings("/tmp/maru-root", session.newSurfaceCwd(&buf, false).?); // OFF → 포커스 무시, root
+}
+
 test "applyWorkspaceWindow: 없는 cwd여도 복원 성공(기본 cwd 폴백, surface 안 잃음)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
     const allocator = std.testing.allocator;

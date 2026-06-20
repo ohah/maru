@@ -1121,8 +1121,15 @@ void maru_macos_coretext_smoke_rasterize_glyph(
             CTFontDrawGlyphs(draw_font, &glyph, &position, 1, context);
             CGContextRestoreGState(context);
         } else {
-            // 기존 경로: 수평 가운데 + 공통 baseline(descent + 위아래 여백/2).
-            CGFloat x = -bounds.origin.x + floor((avail_w - bounds.size.width) / 2.0);
+            // 수평은 글리프 **advance 폭** 기준 가운데(ink 폭이 아니라) + 공통 baseline. 이전엔 ink
+            // bounds 가운데정렬이라, ink 폭이 글자마다 달라 글자가 셀 안에서 좌우로 흔들렸다 — 특히
+            // 숫자(JetBrains Mono tabular)는 ink가 셀 폭에 거의 꽉 차 좌측 획이 셀 왼쪽 끝에 바짝 붙어,
+            // 왼쪽에 글자가 있으면(`(1`·`0:2`) 0px 간격으로 겹쳐 보였다(공백 옆이면 안 보임). advance
+            // 기준으로 두면 글리프가 폰트가 의도한 셀 내 위치(left side bearing 반영)에 앉아 셀 경계를
+            // 침범하지 않는다. CTFontGetBoundingRects(ink)와 달리 advance는 폰트의 진짜 칸 폭이다.
+            CGSize glyph_advance = CGSizeZero;
+            CTFontGetAdvancesForGlyphs(draw_font, kCTFontOrientationHorizontal, &glyph, &glyph_advance, 1);
+            CGFloat x = floor((avail_w - glyph_advance.width) / 2.0);
             CGFloat y = descent;
             if (line_height > 0.0 && line_height <= avail_h) {
                 y = descent + floor((avail_h - line_height) / 2.0);

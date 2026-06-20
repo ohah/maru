@@ -124,6 +124,15 @@ Node = leaf(Pane)
   iTerm2의 pane navigation 키). 방향은 각 panel rect 중심의 반평면 + 정렬(같은 행/열 우대)로 고른다 — 그 방향에 panel이
   없으면 무동작. `Cmd+화살표`(줄 처음/끝)·`Option+화살표`(단어 이동)와는 모디파이어 조합이 달라(command+option) 안 겹친다.
   포커스된 panel은 서브-rect에 있으므로 마우스/커서/IME 좌표가 그 panel의 origin(`active_pane_rect`) 기준으로 매핑된다.
+- **휠 스크롤 라우팅(커서 아래 surface 소유)**: 마우스 휠/트랙패드 세로 스크롤은 **포인터 아래 surface가 통째로 처리**한다 —
+  포커스(활성 panel)와 무관하다(**베이스**: Ghostty/Warp — 휠은 커서 아래 surface 소유). split에서 비활성 panel 위를
+  굴리면 **그 panel의 스크롤백**이 움직이고 **포커스·텍스트 입력은 안 바뀐다**(클릭만 포커스를 옮긴다 ↔ 위 ①). 핵심:
+  **mouse tracking(vim/tmux 등 앱이 휠을 받는지) 판정도 커서 아래 surface 기준**이라, 포커스 panel이 트래킹 앱이어도 옆
+  비트래킹 셸 panel 위 휠은 그 셸 스크롤백을 움직이고, 반대로 커서 아래 panel이 트래킹이면 그 panel로 휠 리포트(SGR
+  64/65)를 보낸다 — 리포트 좌표(`pxToCellIn`)도 그 panel의 본문 rect 기준이라 pane↔좌표가 정합한다. 라우팅 단일 출처는
+  `scrollTargetAt`(점을 담는 leaf의 활성 Term surface + 본문 rect), 사이드바/밖이면 활성 surface로 폴백. alt 화면 +
+  alternate scroll(DECSET 1007)이면 스크롤백 대신 그 surface로 화살표 키를 보낸다(less/vim). 가로(트랙패드 2-finger)
+  델타는 직교 축이라 커서 아래 pane **탭 바**를 가로 스크롤한다(`scrollTabBarAt`, 탭 넘칠 때만).
 - **Term(가로 탭) 키(PR-B, pane 내 가로 탭 모델)**: 한 pane은 여러 Term(터미널)을 가로 탭으로 든다. `Cmd+T`=활성 pane에
   **새 Term**. `]`/`[` 계열은 modifier로 **세 단계**로 갈린다(modifier 정확 비교): **`Cmd+]`/`Cmd+[`=split(pane)
   순환**(활성 워크스페이스 안의 분할 영역을 panes 순서로 wrap, 분할 없으면 무동작), **`Cmd+Opt+]`/`Cmd+Opt+[`=Term

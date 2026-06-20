@@ -3872,36 +3872,41 @@ pub const AppSession = struct {
         // 방향 전환이 굼뜨게 느껴지는 것 방지(iTerm2/xterm.js 동작).
         if (std.math.isFinite(delta_y) and delta_y * self.wheel_accum < 0) self.wheel_accum = 0;
         const lines = wheelDeltaToLines(&self.wheel_accum, delta_y, precise, self.cell_height_px, self.scale_milli);
-        // 휠은 '커서 아래' panel로 라우팅한다 — split에서 비활성 panel 위 스크롤이 그 panel을 스크롤한다(포커스는
-        // 안 바꾼다). 단일 panel이면 활성과 같고, 사이드바/밖이면 활성 surface로 fallback.
-        const target = self.surfaceAt(x_px, y_px) orelse self.activeSurface();
-        // mouse reporting은 활성 pane(포커스 앱) 기준으로 보낸다 — 좌표(pxToCell)도 활성이라 일관(클릭 reporting과
-        // 같은 기준). 커서 아래 비활성 pane이 tracking이어도 활성에 보낸다(pane↔좌표 불일치 방지). non-tracking이면
-        // 아래에서 커서 아래 pane(target)을 스크롤백한다. lines>0=위(과거)=64, <0=아래=65, 앱이 휠을 소비한다.
-        const active = self.activeSurface();
+        // 휠은 '커서 아래' surface가 통째로 처리한다 — split에서 비활성 panel 위 스크롤이 그 panel을 스크롤하고
+        // (포커스는 안 바꾼다), mouse tracking 판정·리포트 좌표도 그 surface 기준이라 정합한다. 베이스: Ghostty/
+        // Warp — 휠은 포인터 아래 surface가 소유한다(포커스 무관). 그래야 포커스 pane이 트래킹 앱(vim/tmux 등)
+        // 이어도 옆 셸 pane 위 휠이 그 셸 스크롤백을 움직인다. 사이드바/밖(hit null)이면 활성 surface로 fallback.
+        // surface와 rect는 한 leaf에서 온 한 쌍이라 함께 unwrap한다 — 둘을 따로 풀면 다른 분기에서 와 pane↔좌표가
+        // 어긋날 수 있다(이 rework가 막으려는 것). rect는 트래킹 리포트 좌표용(pxToCellIn).
+        const hit = self.scrollTargetAt(x_px, y_px);
+        const target, const rect = if (hit) |h| .{ h.surface, h.rect } else .{ self.activeSurface(), self.active_pane_rect };
         // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
         // docs/io-render-threading.md PR3). writeInput은 락 밖(PR1 패턴).
         // mouse_tracking 읽기는 메인 락-아래(읽기 위임 안 함, §9.1). reportMouse(코어 mutate+응답)는 full (a)
         // (docs/io-render-threading.md §9 P3-4)로 reader에 위임 — 휠 lines만큼 반복 enqueue, reader가 각 적용 후
         // pendingResponse를 PTY로 흘린다.
         const tracking = blk: {
-            active.lockCore(self.io);
-            defer active.unlockCore(self.io);
-            break :blk active.core.mouse_tracking != .none;
+            target.lockCore(self.io);
+            defer target.unlockCore(self.io);
+            break :blk target.core.mouse_tracking != .none;
         };
+        // 세로(터미널) 축: 트래킹이면 앱이 휠을 소비(SGR 64/65 리포트), 아니면 커서 아래 surface 스크롤백을 굴린다.
         if (tracking) {
+            // 리포트는 target(커서 아래)으로, 좌표도 그 본문 rect 기준이라 pane↔좌표가 정합한다. 사이드바/밖(hit
+            // null)이면 활성 pane으로 폴백(target/rect 한 쌍). lines>0=위(과거)=64, <0=아래=65, 앱이 휠을 소비한다.
             if (lines != 0) {
-                if (self.pxToCell(x_px, y_px)) |cell| {
+                if (self.pxToCellIn(target, rect, x_px, y_px)) |cell| {
                     const wb: u8 = if (lines > 0) 64 else 65;
                     var n: i32 = if (lines > 0) lines else -lines;
-                    while (n > 0) : (n -= 1) self.runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{ .button = wb, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = false, .mods = 0 } }, self.io) catch {};
+                    while (n > 0) : (n -= 1) self.runtime.enqueueCoreCommand(target.id, .{ .report_mouse = .{ .button = wb, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = false, .mods = 0 } }, self.io) catch {};
                 }
             }
-            return; // 휠을 앱이 소비 — 스크롤백/가로 스크롤 안 함
+        } else {
+            self.scrollSurfaceLines(target, lines);
         }
-        self.scrollSurfaceLines(target, lines);
-        // 가로 델타(트랙패드 2-finger 가로 스와이프) → 커서 아래 pane 탭 바 가로 스크롤(#2b). 세로(터미널 스크롤백)와
-        // 독립 축이라 한 이벤트(대각선 스와이프)에서 둘 다 처리될 수 있다. 탭이 안 넘치면 scrollTabBarAt이 무동작.
+        // 가로(트랙패드 2-finger) 델타 → 커서 아래 pane 탭 바 가로 스크롤(#2b). 세로(터미널)와 **직교 축**이라 한
+        // 이벤트(대각선)에서 둘 다 처리될 수 있고, 탭 바는 Maru chrome(터미널 앱이 못 받는 축)이라 mouse tracking과
+        // 무관하게 항상 처리한다 — 트래킹 앱 pane 위에서도 탭 바는 굴러간다(세로만 앱이 소비). 안 넘치면 무동작.
         if (std.math.isFinite(delta_x) and delta_x != 0) {
             if (delta_x * self.tab_wheel_accum < 0) self.tab_wheel_accum = 0; // 방향 전환 시 잔여 버림(세로와 같은 규율)
             const cols = wheelDeltaToLines(&self.tab_wheel_accum, delta_x, precise, self.cell_width_px, self.scale_milli); // 셀 환산 범용 — 가로는 cell_width
@@ -3920,15 +3925,20 @@ pub const AppSession = struct {
         self.runtime.enqueueCoreCommand(self.activeSurface().id, .{ .report_focus = gained }, self.io) catch {};
     }
 
-    /// 스크린 점(backing px) 아래 panel의 활성 Term surface(없으면 — 사이드바/밖 — null). 휠 라우팅에 쓴다.
-    /// 활성 탭 leaf rect를 펴 paneAtPoint로 그 점의 pane을 찾는다. 단일 panel이면 그 panel(=활성)을 돌려준다.
-    fn surfaceAt(self: *AppSession, x_px: f64, y_px: f64) ?*app.Surface {
+    /// 스크린 점(backing px) 아래 panel의 활성 Term surface + 그 터미널 본문 rect(탭 바 제외 = 셀 origin).
+    /// 휠 라우팅 단일 출처 — 휠은 '커서 아래' surface가 스크롤백/mouse reporting을 처리하고 리포트 좌표도 그
+    /// rect 기준이라 정합한다(pane↔좌표). 활성 탭 leaf rect를 펴 점을 담는 leaf를 찾는다(없으면 — 사이드바/밖
+    /// — null). 단일 panel이면 그 panel(=활성)을 돌려준다.
+    fn scrollTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { surface: *app.Surface, rect: app.SplitRect } {
         if (!self.surface_initialized) return null;
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
-        const pane = paneAtPoint(leaf_rects.items, x_px, y_px) orelse return null;
-        return &pane.activeTerm().surface;
+        for (leaf_rects.items) |lr| {
+            if (!pointInRect(x_px, y_px, lr.rect)) continue; // paneAtPoint와 같은 반열린 hit-test
+            return .{ .surface = &lr.leaf.activeTerm().surface, .rect = self.paneTermRect(lr.rect) };
+        }
+        return null;
     }
 
     /// 가로 스와이프(delta_x→cols)를 커서 아래 pane의 탭 바 가로 스크롤로 바꾼다(#2b). 그 pane이 탭 넘침(has_scroll)이
@@ -3955,7 +3965,7 @@ pub const AppSession = struct {
     /// 줄 수만큼 스크롤한다. alt screen + alternate scroll(DECSET 1007)이면 화살표 키로 변환해
     /// 프로그램(less/vim)에 보낸다(iTerm2/Terminal.app 동작, DECCKM이면 SS3 형식). 휠과
     /// Shift+PageUp/Down이 같은 경로를 타 일관되게 동작한다.
-    /// 활성 surface를 줄 수만큼 스크롤(키보드 PageUp/Down 경로). 휠은 surfaceAt으로 고른 surface에 직접 쓴다.
+    /// 활성 surface를 줄 수만큼 스크롤(키보드 PageUp/Down 경로). 휠은 scrollTargetAt으로 고른 surface에 직접 쓴다.
     fn scrollLines(self: *AppSession, lines: i32) void {
         self.scrollSurfaceLines(self.activeSurface(), lines);
     }
@@ -4042,26 +4052,36 @@ pub const AppSession = struct {
         self.runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{ .button = 3, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = true, .mods = @intCast(mods) } }, self.io) catch {};
     }
 
-    /// backing 픽셀 좌표를 (row, col) 셀로 변환한다(grid 안으로 clamp). 핵심: clamp를 float
-    /// 도메인에서 먼저 한 뒤 @intFromFloat 한다 — 거대한 finite 좌표(손상/악성 입력)가 i64 변환
-    /// 에서 trap(앱 패닉)하던 것을 막는다(wheelDeltaToLines와 같은 규율). 비유한값은 null.
-    fn pxToCell(self: *const AppSession, x_px: f64, y_px: f64) ?struct { row: u16, col: u16, term_x_px: u16, term_y_px: u16 } {
+    /// 스크린 px → 셀 변환 결과(grid 좌표 + SGR-Pixels 리포트용 본문 backing px). pxToCell/pxToCellIn 공유.
+    const CellHit = struct { row: u16, col: u16, term_x_px: u16, term_y_px: u16 };
+
+    fn pxToCell(self: *const AppSession, x_px: f64, y_px: f64) ?CellHit {
+        // 활성 변형: 활성 surface와 그 본문 rect(active_pane_rect)를 일반형에 넘긴다. 클릭·선택·hover·IME가 쓴다.
+        return self.pxToCellIn(self.activeSurfaceConst(), self.active_pane_rect, x_px, y_px);
+    }
+
+    /// `pxToCell`의 일반형 — 주어진 surface와 그 터미널 본문 rect(origin·크기) 기준으로 backing 픽셀 좌표를
+    /// (row, col) 셀로 변환한다(grid 안으로 clamp). 활성 변형이 active_pane_rect로 부르고, 휠을 '커서 아래'
+    /// 비활성 pane으로 리포트할 때 그 pane 기준 좌표(pane↔좌표 정합)를 얻는 데도 쓴다. 핵심: clamp를 float
+    /// 도메인에서 먼저 한 뒤 @intFromFloat 한다 — 거대한 finite 좌표(손상/악성 입력)가 i64 변환에서 trap(앱
+    /// 패닉)하던 것을 막는다(wheelDeltaToLines와 같은 규율). 비유한값은 null, 음수(영역 밖) 좌표는 0 clamp.
+    fn pxToCellIn(self: *const AppSession, surface: *const app.Surface, rect: app.SplitRect, x_px: f64, y_px: f64) ?CellHit {
         if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
-        const core = &self.activeSurfaceConst().core;
+        const core = &surface.core;
         const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
         const max_col: f64 = @floatFromInt(core.size.cols - 1);
         const max_row: f64 = @floatFromInt(core.size.rows - 1);
-        // 활성 panel은 자기 rect의 origin(active_pane_rect.x/y = paneTermRect 단일 출처, window padding·사이드바
-        // 포함)에서 그려진다 — 단일 panel이면 (사이드바 폭+padding_x, padding_y), split이면 서브-rect의 origin.
-        // 셀 렌더 origin과 같은 출처라 정합한다(metalFrame.terminal_origin_x_px는 사이드바 bg strip 폭 전용 — 셀
-        // 위치엔 안 쓰임). 스크린 좌표에서 그 origin을 빼야 활성 panel의 열/행이 된다 — 안 빼면 선택/클릭 블록이
-        // origin만큼 어긋난다(라이브 제보). panel 왼쪽/위 바깥(음수) 클릭은 0 clamp라 (0,0) 모서리에 붙는다.
-        const term_x = x_px - @as(f64, @floatFromInt(self.active_pane_rect.x));
-        const term_y = y_px - @as(f64, @floatFromInt(self.active_pane_rect.y));
+        // panel은 자기 rect의 origin(paneTermRect 단일 출처, window padding·사이드바 포함)에서 그려진다 — 단일
+        // panel이면 (사이드바 폭+padding_x, padding_y), split이면 서브-rect의 origin. 셀 렌더 origin과 같은
+        // 출처라 정합한다(metalFrame.terminal_origin_x_px는 사이드바 bg strip 폭 전용 — 셀 위치엔 안 쓰임).
+        // 스크린 좌표에서 그 origin을 빼야 그 panel의 열/행이 된다 — 안 빼면 선택/클릭 블록이 origin만큼 어긋난다
+        // (라이브 제보). panel 왼쪽/위 바깥(음수) 클릭은 0 clamp라 (0,0) 모서리에 붙는다.
+        const term_x = x_px - @as(f64, @floatFromInt(rect.x));
+        const term_y = y_px - @as(f64, @floatFromInt(rect.y));
         const col_f = std.math.clamp(@max(term_x, 0) / cw, 0, max_col);
         const row_f = std.math.clamp(@max(term_y, 0) / ch, 0, max_row);
-        // SGR-Pixels(1016) mouse 리포트용 픽셀: 셀과 같은 origin(활성 pane 좌상단)·음수 0 clamp 정책으로
+        // SGR-Pixels(1016) mouse 리포트용 픽셀: 셀과 같은 origin(그 pane 좌상단)·음수 0 clamp 정책으로
         // 터미널 영역 backing px를 구해 셀 리포트와 같은 지점을 가리키게 한다. 영역 폭/높이-1로 clamp하고
         // u16 상한(65535)으로 saturate해 @intFromFloat가 안전하다.
         const max_x: f64 = @min(@max(@as(f64, @floatFromInt(core.size.cols)) * cw - 1, 0), 65535);
@@ -11575,6 +11595,51 @@ test "wheel over an inactive pane scrolls that pane (not the active one)" {
     try std.testing.expect(right_surface.core.view_offset > 0);
 }
 
+// 휠은 '커서 아래' surface가 소유한다(Ghostty/Warp) — 포커스(활성) pane이 마우스 트래킹 앱(vim/tmux 등)이어도,
+// 커서가 옆 비활성 셸 pane 위면 그 셸의 스크롤백이 움직이고(트래킹이 휠을 가로채지 않음) 포커스도 안 바뀐다.
+// 반대로 활성·트래킹 pane 본문 위 휠은 앱이 소비해 스크롤백이 안 움직인다. 실 init/split이라 macOS 게이트.
+test "wheel routes by the surface under the cursor even when the active pane has mouse tracking" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try session.splitActivePane(.horizontal); // 좌(기존)·우(새, 활성)
+
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const left_surface = &lr.items[0].leaf.activeTerm().surface;
+    const right_surface = &lr.items[1].leaf.activeTerm().surface;
+    // 활성(오른쪽) pane을 마우스 트래킹 앱으로 둔다 — 옛 동작이면 모든 휠이 여기로 가버렸다. 양쪽에 스크롤백.
+    right_surface.core.mouse_tracking = .normal;
+    try left_surface.core.write("L\r\n" ** 100);
+    try right_surface.core.write("R\r\n" ** 100);
+    try std.testing.expectEqual(@as(usize, 0), left_surface.core.view_offset);
+    try std.testing.expectEqual(@as(usize, 0), right_surface.core.view_offset);
+
+    const left_body = session.paneTermRect(lr.items[0].rect);
+    const right_body = session.paneTermRect(lr.items[1].rect);
+    // 비활성(왼쪽, 비트래킹) 본문 위 휠 → 왼쪽 스크롤백이 움직인다(활성 트래킹이 안 가로챔), 포커스 불변.
+    session.scrollWheel(3, 0, false, @floatFromInt(left_body.x + left_body.w / 2), @floatFromInt(left_body.y + left_body.h / 2));
+    try std.testing.expect(left_surface.core.view_offset > 0);
+    try std.testing.expectEqual(@as(usize, 0), right_surface.core.view_offset);
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane); // 포커스 안 바뀜
+
+    // 활성(오른쪽, 트래킹) 본문 위 휠 → 앱이 소비, 스크롤백 불변(커서 아래 surface 기준 판정).
+    session.scrollWheel(3, 0, false, @floatFromInt(right_body.x + right_body.w / 2), @floatFromInt(right_body.y + right_body.h / 2));
+    try std.testing.expectEqual(@as(usize, 0), right_surface.core.view_offset);
+}
+
 // #2b: 트랙패드 가로 스와이프(scroll_wheel delta_x)가 커서 아래 pane 탭 바를 가로 스크롤하는지 — rich 고정폭에서
 // 탭이 넘칠 때만(has_scroll). natural 방향: 왼쪽 스와이프(delta_x<0)→오른쪽 탭(scroll 증가), 오른쪽(delta_x>0)→감소.
 // delta_y=0이라 터미널 뷰포트는 안 움직인다(독립 축). 실 init/탭이라 macOS 게이트.
@@ -11615,6 +11680,42 @@ test "horizontal trackpad swipe scrolls the overflowing tab bar of the pane unde
     const mid = leaf.tab_scroll_cols;
     session.scrollWheel(0, -100, false, bx, by);
     try std.testing.expect(leaf.tab_scroll_cols > mid);
+}
+
+// 가로(탭 바) 축은 Maru chrome이라 그 pane의 터미널 앱이 mouse tracking을 켜도 가로 스와이프는 여전히 탭 바를
+// 굴린다(세로만 앱이 소비). 세로+가로 한 이벤트(대각선)에서 세로는 트래킹 앱이 받고 가로는 탭 바가 받는다. macOS 게이트.
+test "horizontal tab-bar swipe still scrolls even when the pane has mouse tracking" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.appearance.chrome_theme = .rich; // 고정폭 탭 → 넘쳐야 has_scroll
+    _ = try session.resize(session.sidebar_width_px + 400, 300, session.scale_milli);
+    for (0..6) |_| session.newTermInActivePane() catch {}; // 탭 여러 개 → 바 넘침
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const leaf = lr.items[0].leaf;
+    // 그 pane의 활성 Term을 마우스 트래킹 앱으로 둔다 — 옛 동작이면 tracking 분기의 return이 가로 스크롤을 삼켰다.
+    leaf.activeTerm().surface.core.mouse_tracking = .normal;
+    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const bx: f64 = @floatFromInt(bar.x + bar.w / 2);
+    const by: f64 = @floatFromInt(bar.y + 1);
+    const m = barMetrics(bar, session.cell_width_px, leaf.terms.items.len, session.buildChromeTokens().space.tab_width_cols, leaf.tab_scroll_cols).?;
+    try std.testing.expect(m.has_scroll);
+    const start = leaf.tab_scroll_cols;
+    try std.testing.expect(start > 0);
+    // 트래킹 켜진 pane 위 가로 스와이프 → 탭 바가 여전히 움직인다(chrome 축은 앱 mouse mode와 무관).
+    session.scrollWheel(0, 100, false, bx, by);
+    try std.testing.expect(leaf.tab_scroll_cols < start);
 }
 
 // Cmd+Option+화살표가 키 경로(handleKeyEvent → resolver → app_action → focusPaneInDirection)로 pane 포커스를

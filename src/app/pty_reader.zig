@@ -321,14 +321,14 @@ pub const CoreCommandQueue = struct {
         switch (cmd) {
             .set_preedit => |b| allocator.free(b),
             // payload 없는(또는 inline POD) 명령은 해제할 게 없다. exhaustive로 둬 owned payload 변형 추가 시 컴파일러가 강제.
-            .clear_preedit, .scroll, .scroll_to_bottom, .report_mouse, .report_focus, .set_cell_metrics, .set_config_palette, .set_max_scrollback, .scroll_to_abs, .scroll_to_offset, .scroll_and_extend, .select_start, .select_extend, .select_extend_or_collapse, .select_word, .select_line, .select_all, .jump_to_prompt => {},
+            .clear_preedit, .scroll, .scroll_to_bottom, .report_mouse, .report_focus, .set_cell_metrics, .set_config_palette, .set_max_scrollback, .set_ambiguous_wide, .scroll_to_abs, .scroll_to_offset, .scroll_and_extend, .select_start, .select_extend, .select_extend_or_collapse, .select_word, .select_line, .select_all, .jump_to_prompt => {},
         }
     }
 
     fn dupeCommand(allocator: std.mem.Allocator, cmd: CoreCommand) QueueError!CoreCommand {
         return switch (cmd) {
             .set_preedit => |b| .{ .set_preedit = try allocator.dupe(u8, b) },
-            .clear_preedit, .scroll, .scroll_to_bottom, .report_mouse, .report_focus, .set_cell_metrics, .set_config_palette, .set_max_scrollback, .scroll_to_abs, .scroll_to_offset, .scroll_and_extend, .select_start, .select_extend, .select_extend_or_collapse, .select_word, .select_line, .select_all, .jump_to_prompt => cmd,
+            .clear_preedit, .scroll, .scroll_to_bottom, .report_mouse, .report_focus, .set_cell_metrics, .set_config_palette, .set_max_scrollback, .set_ambiguous_wide, .scroll_to_abs, .scroll_to_offset, .scroll_and_extend, .select_start, .select_extend, .select_extend_or_collapse, .select_word, .select_line, .select_all, .jump_to_prompt => cmd,
         };
     }
 

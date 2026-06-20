@@ -3899,7 +3899,7 @@ pub const AppSession = struct {
     /// ① 새 Parsed로 loaded_config 교체(옛 arena deinit 후 — appearance가 family 슬라이스를 빌리므로 새 appearance를
     ///    먼저 만들지 말고 loaded_config를 갈아끼운 뒤 resolve한다 → 옛 family를 빌린 옛 appearance는 이 시점에 버린다).
     /// ② appearance resolve + applyAppearance(메트릭·grid·atlas + base_font_size).
-    /// ③ 파일 새 값이라 코어 behavior(scrollback/bell/page-keys/palette)도 모든 surface에 재적용.
+    /// ③ 파일 새 값이라 코어 behavior(scrollback/bell/page-keys/palette/ambiguous-width)도 모든 surface에 재적용.
     /// initial_appearance는 건드리지 않는다 — reset 기준은 "프로그램 처음"이라 reload 후에도 불변(위 필드 주석).
     pub fn reloadConfig(self: *AppSession) void {
         var new_parsed = config_mod.loadConfigDefault(self.io, self.allocator) catch return; // 실패 시 무동작(forgiving)
@@ -3919,6 +3919,7 @@ pub const AppSession = struct {
         self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
         self.reapplyScrollback();
         self.reapplyConfigPalette();
+        self.reapplyAmbiguousWidth();
         // 사이드바 카드 표시 토글(sidebar.show-branch/folder)이 파일에서 바뀌었을 수 있다 — 카드를 다시
         // 빌드해 즉시 반영한다(config→앱 양방향). rebuildSidebar 실패는 무시(다음 프레임에 자연 복구).
         self.rebuildSidebar() catch {};
@@ -3966,6 +3967,20 @@ pub const AppSession = struct {
                 for (pane.terms.items) |term| {
                     // Phase 3 위임(P3-3): scrollback cap 재적용도 reader로 위임(config 재적용과 동일 — best-effort).
                     self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_max_scrollback = lines }, self.io) catch {};
+                }
+            }
+        }
+    }
+
+    /// text.ambiguous-width reload를 라이브 코어에 재적용한다(createTerm chokepoint와 같은 값을 이미 떠 있는
+    /// surface에도). reader 단일 mutator 계약상 set_max_scrollback과 같이 CoreCommand로 위임한다. 이후 putCell부터
+    /// 새 폭이 반영된다(이미 저장된 셀은 옛 폭 유지 — 폭 변경은 본래 redraw 필요; max_scrollback과 같은 best-effort).
+    fn reapplyAmbiguousWidth(self: *AppSession) void {
+        const wide = self.loaded_config.config.ambiguous_width == .wide;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_ambiguous_wide = wide }, self.io) catch {};
                 }
             }
         }

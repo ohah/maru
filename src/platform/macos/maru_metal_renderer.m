@@ -706,15 +706,16 @@ bool maru_metal_renderer_draw(
             // 사이드바 헤더 아이콘 확대/정렬. 헤더 glyph만 origin_x==0이다 — 사이드바가 켜지면(terminal_origin_x_px>0)
             // 터미널 cell은 origin_x=사이드바폭>0이라 origin_x==0은 헤더뿐이고, 사이드바가 꺼지면 헤더 frame 자체가
             // 없어(buildSidebarHeaderFrame가 null) 터미널 '+'를 오확대하지 않는다.
-            //   ⚙(view options)·+(새 워크스페이스): 1.7× 확대(에이전트 심볼과 같은 slot-stretch) + 줄0이 창 top에
-            //   붙어 위로 쏠리므로 신호등 수직 중앙에 맞춰 아래로 내린다(py_nudge=ch×0.45 — 확대로 위가 잘리는 것도
-            //   함께 방지). 🔍(검색)은 검색 텍스트와 같은 크기라 확대하지 않는다(1.0, 텍스트보다 커 보이던 것 정정).
-            // 헤더 아이콘은 줄0(row==0)의 ⚙/+만 — 검색 줄(row≥1)에 사용자가 친 '+'(예: 브랜치 `feat/a+b` 검색)는
+            //   ◧(사이드바 접기)·⚙(view options)·+(새 워크스페이스): 1.7× 확대(에이전트 심볼과 같은 slot-stretch) +
+            //   줄0이 창 top에 붙어 위로 쏠리므로 신호등 수직 중앙에 맞춰 약간 아래로 내린다(py_nudge=ch×0.30 — 확대로
+            //   위가 잘리는 것도 함께 방지). 🔍(검색)은 검색 텍스트와 같은 크기라 확대하지 않는다(1.0).
+            // 헤더 아이콘은 줄0(row==0)의 ◧/⚙/+만 — 검색 줄(row≥1)에 사용자가 친 '+'(예: 브랜치 `feat/a+b` 검색)는
             // 같은 헤더 frame(origin_x==0)이라 row 조건이 없으면 1.7×로 확대돼 깨져 보인다. row 0으로 한정한다.
+            // (NB: 화질은 slot-stretch라 약간 부드럽다 — per-cell 큰-크기 래스터화는 후속.)
             const bool is_header = (terminal_origin_x_px > 0u && tc.origin_x == 0u);
-            const bool is_corner_icon = is_header && tc.row == 0u && (tc.codepoint == 0x2699u || tc.codepoint == (uint32_t)'+');
+            const bool is_corner_icon = is_header && tc.row == 0u && (tc.codepoint == 0x2699u || tc.codepoint == (uint32_t)'+' || tc.codepoint == 0x25E7u);
             const float hscale = is_corner_icon ? 1.7f : 1.0f;
-            const float py_nudge = is_corner_icon ? ch * 0.45f : 0.0f;
+            const float py_nudge = is_corner_icon ? ch * 0.30f : 0.0f;
             maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x, cw, (float)tc.origin_y + (float)tc.row * ch + py_nudge, ch, drawable_w, drawable_h, hscale);
         }
         quad_index += cell_count;

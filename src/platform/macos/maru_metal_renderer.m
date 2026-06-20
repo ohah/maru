@@ -674,13 +674,11 @@ bool maru_metal_renderer_draw(
         const float ch = (float)cell_height_px;
         // 1) 터미널 cells — 각 cell이 자기 panel의 origin을 들고 있다(origin_x + col×cw, origin_y + row×ch).
         //    단일 panel이면 전부 (사이드바 폭, 0)이라 기존과 같다. split은 panel별로 다른 origin을 준다.
-        for (size_t i = 0; i < cell_count; i++) {
-            const MaruAppHostMetalCell tc = cells[i];
-            maru_fill_cell_quad(&vertices[i * vertices_per_cell], tc, (float)tc.origin_x, cw, (float)tc.origin_y + (float)tc.row * ch, ch, drawable_w, drawable_h, 1.0f);
-        }
-        size_t quad_index = cell_count;
-        // 2) 사이드바 배경 quad(x:0..origin_x, 전체 높이) — UV(-1) sentinel로 배경만 칠한다(셰이더가
-        //    u<0이면 coverage 0 → bg.rgb만).
+        // 1) 사이드바 배경 quad(x:0..origin_x, 전체 높이)를 **cells보다 먼저** 그린다 — 사이드바 영역 cells(헤더
+        //    glyph 등 origin_x=0)가 배경 '위'에 보이게(painter 순서). UV(-1) sentinel로 배경만(셰이더 u<0 → coverage 0 → bg.rgb).
+        //    터미널 cells는 origin_x≥사이드바 폭이라 배경(x<origin_x)과 안 겹친다. quad_index 누적은 [배경][cells]
+        //    [사이드바 cells] 순서이지만 사이드바 cells의 시작 인덱스(=배경+cell_count)는 옛 순서와 같다(영향 없음).
+        size_t quad_index = 0;
         if (draw_sidebar) {
             const float sl = -1.0f;                                  // x=0 → NDC 좌
             const float sr = (origin_x / drawable_w) * 2.0f - 1.0f;  // x=origin_x → NDC
@@ -701,6 +699,13 @@ bool maru_metal_renderer_draw(
             memcpy(&vertices[quad_index * vertices_per_cell], squad, sizeof(squad));
             quad_index += 1;
         }
+        // 2) 터미널 cells — 각 cell이 자기 origin(origin_x + col×cw). 사이드바 헤더 glyph(origin_x=0)는 위 배경 '다음'
+        //    순서라 사이드바 영역에 배경 위로 그려진다. 인덱스는 배경(quad_index) 다음부터.
+        for (size_t i = 0; i < cell_count; i++) {
+            const MaruAppHostMetalCell tc = cells[i];
+            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x, cw, (float)tc.origin_y + (float)tc.row * ch, ch, drawable_w, drawable_h, 1.0f);
+        }
+        quad_index += cell_count;
         // 3) 사이드바 cells — origin 0, 배경 quad 위에 그린다(painter 순서). 탭 슬롯 높이로 배치하되 셀 종류를
         //    slot_id로 구분한다: 밴드(slot_id==0, sentinel UV)는 row=slot으로 슬롯 전체를 채우고(py=row×slot_h,
         //    높이 slot_h). 카드 glyph(slot_id≠0)는 row에 슬롯+(줄 수,줄 위치)가 인코딩돼 있다

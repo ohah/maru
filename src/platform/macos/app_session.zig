@@ -12442,6 +12442,69 @@ test "close-confirm: reap이 트리를 바꾸면 인덱스/활성 기준 보류�
     try std.testing.expect(session.chrome_host.confirm.open); // 모달 유지
 }
 
+// 가드레일(cross-layer): 확인 모달의 한글 메시지·안내가 오버레이 셀로 lower될 때 **잘리지 않고 전부 들어가는지**를
+// 검증한다. op 방출만 보던 단위 테스트가 못 잡던 class — modal_box.view가 박스 폭을 코드포인트 수로 재고 placeText는
+// EAW 표시폭(한글=2칸)으로 배치/클리핑해 한글이 박스를 넘쳐 안 보이던 버그(PR #765)를 회귀로 고정한다. showConfirm →
+// collectDraws → rasterizeOverlayCells(순수, CoreText 무관)까지 실제 seam을 태워, 메시지·안내의 모든 비-공백
+// 코드포인트가 래스터된 셀에 존재하는지 단언한다(공백은 rich 모드에서 빈 셀로 skip되므로 제외).
+test "guardrail: 한글 확인 모달 메시지·안내가 오버레이 셀에 안 잘리고 전부 들어간다 (EAW 폭 seam)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    // 넓은 창 — 박스가 창 폭으로 clamp되지 않게 해, '폭이 충분해도 한글이 잘리던' EAW 버그를 정조준한다.
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 실제 닫기 확인 경로의 메시지(한글)로 모달을 연다 — showConfirm이 copyOverlayMessage로 세션 버퍼에 복사.
+    const msg = "실행 중인 명령이 있습니다. 닫을까요?";
+    session.showConfirm(msg);
+    try std.testing.expect(session.chrome_host.confirm.open);
+
+    // buildChromeOverlayFrame과 같은 경로로 ChromeDraw 수집 → 셀 rasterize(여기까진 CoreText 무관 순수 단계).
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = session.buildChromeTokens();
+    const props = session.buildChromeProps();
+    var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+    try session.chrome_host.collectDraws(props, &tk, arena, &draws);
+    try std.testing.expect(draws.items.len > 0);
+
+    var raster = try AppSession.rasterizeOverlayCells(allocator, draws.items, &tk, session.cell_width_px, session.cell_height_px);
+    defer {
+        raster.cells.deinit(allocator);
+        raster.gpu_quads.deinit(allocator);
+        raster.gpu_shadows.deinit(allocator);
+    }
+
+    // 메시지 + 정적 안내 두 줄 모두 — 각 줄의 비-공백 코드포인트가 셀에 존재해야 한다(우측 클리핑 0). 코드포인트
+    // 수로 박스를 쟀다면(버그) 한글 표시폭의 절반만 담겨 뒷부분 코드포인트가 셀에 없어 이 단언이 실패한다.
+    const lines_to_check = [_][]const u8{ msg, chrome.components.confirm.hint };
+    for (lines_to_check) |line| {
+        var it = (std.unicode.Utf8View.init(line) catch unreachable).iterator();
+        while (it.nextCodepoint()) |cp| {
+            if (cp == ' ') continue; // 공백은 빈 셀로 skip될 수 있음(rich) — 표시 글자만 검사
+            var found = false;
+            for (raster.cells.items) |cell| {
+                if (cell.codepoint == cp) {
+                    found = true;
+                    break;
+                }
+            }
+            try std.testing.expect(found); // 안 찾히면 = 셀로 안 내려감 = 박스 폭 부족 클리핑(EAW seam 회귀)
+        }
+    }
+}
+
 // ② split pane: 한 pane의 유일한 Term이 exit하면 그 pane이 collapse되고 형제 pane이 전체를 차지한다.
 test "PR5b: a split pane whose only Term exits collapses to its sibling" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;

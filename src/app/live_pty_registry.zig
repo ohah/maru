@@ -154,6 +154,8 @@ test "live pty registry closes the session attached to the active surface" {
     var queue = try pty_reader_mod.PtyEventQueue.init(std.testing.io, allocator, 1);
     defer queue.deinit();
     var write_queue = try pty_reader_mod.PtyWriteQueue.init(std.testing.io, allocator, 4096);
+    var command_queue = try pty_reader_mod.CoreCommandQueue.init(std.testing.io, allocator, 1024);
+    defer command_queue.deinit();
     defer write_queue.deinit();
     var live: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
@@ -161,6 +163,7 @@ test "live pty registry closes the session attached to the active surface" {
         .session = undefined,
         .queue = &queue,
         .write_queue = &write_queue,
+        .command_queue = &command_queue,
         .reader = undefined,
         .pty_id = 10,
         .link = link,
@@ -210,6 +213,8 @@ test "live pty registry refuses duplicate surface and pty registrations" {
     defer queue_b.deinit();
     // 이 테스트는 register 검증만 한다(close 없음) — 4개 더블이 write_queue 하나를 공유해도 안전(미사용).
     var write_queue = try pty_reader_mod.PtyWriteQueue.init(std.testing.io, allocator, 4096);
+    var command_queue = try pty_reader_mod.CoreCommandQueue.init(std.testing.io, allocator, 1024);
+    defer command_queue.deinit();
     defer write_queue.deinit();
     var live_a: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
@@ -217,6 +222,7 @@ test "live pty registry refuses duplicate surface and pty registrations" {
         .session = undefined,
         .queue = &queue_a,
         .write_queue = &write_queue,
+        .command_queue = &command_queue,
         .reader = undefined,
         .pty_id = 10,
         .link = link_a,
@@ -228,6 +234,7 @@ test "live pty registry refuses duplicate surface and pty registrations" {
         .session = undefined,
         .queue = &queue_b,
         .write_queue = &write_queue,
+        .command_queue = &command_queue,
         .reader = undefined,
         .pty_id = 11,
         .link = link_b,
@@ -239,6 +246,7 @@ test "live pty registry refuses duplicate surface and pty registrations" {
         .session = undefined,
         .queue = &queue_b,
         .write_queue = &write_queue,
+        .command_queue = &command_queue,
         .reader = undefined,
         .pty_id = 12,
         .link = .{ .surface_id = 1, .pty_id = 12 },
@@ -250,6 +258,7 @@ test "live pty registry refuses duplicate surface and pty registrations" {
         .session = undefined,
         .queue = &queue_b,
         .write_queue = &write_queue,
+        .command_queue = &command_queue,
         .reader = undefined,
         .pty_id = 10,
         .link = .{ .surface_id = 3, .pty_id = 10 },
@@ -287,6 +296,8 @@ test "live pty registry does not close a non-active surface" {
     var queue = try pty_reader_mod.PtyEventQueue.init(std.testing.io, allocator, 1);
     defer queue.deinit();
     var write_queue = try pty_reader_mod.PtyWriteQueue.init(std.testing.io, allocator, 4096);
+    var command_queue = try pty_reader_mod.CoreCommandQueue.init(std.testing.io, allocator, 1024);
+    defer command_queue.deinit();
     defer write_queue.deinit();
     var live: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
@@ -294,6 +305,7 @@ test "live pty registry does not close a non-active surface" {
         .session = undefined,
         .queue = &queue,
         .write_queue = &write_queue,
+        .command_queue = &command_queue,
         .reader = undefined,
         .pty_id = 10,
         .link = link,
@@ -329,6 +341,8 @@ test "live pty registry keeps mapping when the attached session invariant is bro
     var queue = try pty_reader_mod.PtyEventQueue.init(std.testing.io, allocator, 1);
     defer queue.deinit();
     var write_queue = try pty_reader_mod.PtyWriteQueue.init(std.testing.io, allocator, 4096);
+    var command_queue = try pty_reader_mod.CoreCommandQueue.init(std.testing.io, allocator, 1024);
+    defer command_queue.deinit();
     defer write_queue.deinit();
     var live: live_pty_mod.LivePtySession = .{
         .allocator = allocator,
@@ -336,6 +350,7 @@ test "live pty registry keeps mapping when the attached session invariant is bro
         .session = undefined,
         .queue = &queue,
         .write_queue = &write_queue,
+        .command_queue = &command_queue,
         .reader = undefined,
         .pty_id = 10,
         .link = link,

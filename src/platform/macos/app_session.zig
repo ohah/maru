@@ -11155,7 +11155,7 @@ test "split dividers render as thin lines (reserved bar/underline), not full cel
         try std.testing.expect(c.origin_x + 1 >= seam_x and c.origin_x <= seam_x + 1); // 경계 x 센터
     }
 
-    // 상하 split → 가로 divider는 reserved=2(underline=얇은 가로선) 한 칸(폭=cols).
+    // 상하 split → 가로 divider는 reserved=2(셀 하단 가로선) 한 칸(폭=cols).
     try session.splitActivePane(.vertical);
     cells.clearRetainingCapacity();
     session.appendActiveTabDividers(&cells);

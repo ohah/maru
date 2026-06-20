@@ -1082,6 +1082,10 @@ pub const AppSession = struct {
     // non-blocking으로 흘려보낸다 — 멀티MB 붙여넣기가 UI를 동결시키지 않게.
     pending_paste: std.ArrayList(u8) = .empty,
     pending_paste_offset: usize = 0,
+    /// pending_paste가 향하는 surface id를 enqueue 시점에 고정한다(0=아직 없음). flush는 현재 활성
+    /// surface가 아니라 이 대상으로 쓴다 — paste/IME 확정 잔여가 다 빠지기 전 탭/pane이 바뀌어도
+    /// 바이트가 원래 surface로 가게 한다(과거엔 self.activeSurface()로 써 잔여가 새 탭에 입력되던 버그).
+    pending_paste_target: u64 = 0,
     // IME 키 트랜잭션 상태(Ghostty의 keyTextAccumulator 패턴과 같은 구조). Swift keyDown이
     // imeBegin으로 열고 입력기 콜백(imeInsert/imeMarked)이 쌓은 것을 imeEnd가 일괄 판정한다 —
     // 콜백마다 즉석 판단하면 입력기의 비동기/다중 호출에서 이중 전송·유실이 생긴다(라이브에서
@@ -4430,6 +4434,7 @@ pub const AppSession = struct {
     /// paste 전용이라 IME 확정엔 안 쓴다). pending_paste FIFO는 paste와 공유해 전송 순서를 지킨다.
     fn sendCommittedText(self: *AppSession, bytes: []const u8) void {
         if (!self.surface_initialized or bytes.len == 0) return;
+        self.pendingPasteRetarget();
         self.pending_paste.ensureUnusedCapacity(self.allocator, bytes.len) catch return;
         for (bytes) |b| self.pending_paste.appendAssumeCapacity(if (b == '\n') '\r' else b);
         // handleKeyEvent를 우회하므로 terminal input 회계를 여기서 직접 한다(\n→\r는 1:1이라 byte 수 동일).
@@ -4462,15 +4467,27 @@ pub const AppSession = struct {
         // 큐에 쌓고 즉시 flush를 시도한다. 자식이 읽는 중이면 보통 이 자리에서 다 들어가고,
         // 안 읽으면(vim 다이얼로그 등) 잔여가 tick마다 흘러나간다 — blocking 단일 write로 UI가
         // 동결되던 것을 없앤다. 큐는 FIFO라 bracketed paste 감싸기 순서는 깨지지 않는다.
+        self.pendingPasteRetarget();
         self.pending_paste.appendSlice(self.allocator, encoded) catch return;
         self.flushPendingPaste();
+    }
+
+    /// pending_paste가 다 빠진 뒤 새로 쌓기 시작할 때만 대상 surface를 현재 활성으로 다시 고정한다.
+    /// 잔여가 남아 있으면 대상을 바꾸지 않아, 이미 어떤 surface로 가던 paste/IME 확정 바이트가 탭/pane
+    /// 전환으로 다른 surface에 섞여 들어가지 않는다(원래 대상 우선; flushPendingPaste가 이 대상으로 쓴다).
+    fn pendingPasteRetarget(self: *AppSession) void {
+        if (self.pending_paste_offset >= self.pending_paste.items.len) {
+            self.pending_paste.clearRetainingCapacity();
+            self.pending_paste_offset = 0;
+            self.pending_paste_target = self.activeSurface().id;
+        }
     }
 
     /// pending paste를 지금 쓸 수 있는 만큼 non-blocking으로 흘려보낸다(0이 나오면 다음 tick).
     fn flushPendingPaste(self: *AppSession) void {
         while (self.pending_paste_offset < self.pending_paste.items.len) {
             const remaining = self.pending_paste.items[self.pending_paste_offset..];
-            const written = self.runtime.writeInputNonBlocking(self.activeSurface().id, remaining) catch {
+            const written = self.runtime.writeInputNonBlocking(self.pending_paste_target, remaining) catch {
                 // 세션 종료 등 — 잔여는 버린다(다시 쓸 수 없는 대상).
                 self.pending_paste.clearRetainingCapacity();
                 self.pending_paste_offset = 0;
@@ -12181,6 +12198,35 @@ test "imeEnd commit + transaction-less imeInsert send via non-blocking path (#10
     session.imeInsert("을");
     try std.testing.expect(session.total_terminal_input_bytes > bytes2);
     try std.testing.expectEqual(keys2, session.total_key_events);
+}
+
+test "pendingPasteRetarget: 빈 큐는 활성 surface로 고정, 잔여 있으면 대상 유지(탭 전환 오라우팅 방지)" {
+    // paste/IME 확정 잔여가 다 빠지기 전 탭/pane이 바뀌면, 과거엔 flushPendingPaste가 self.activeSurface()로
+    // 써 잔여가 새 surface에 입력됐다(선존 버그, code-review max 발견). 이제 대상을 enqueue 시점에
+    // pending_paste_target으로 고정한다: 큐가 비었을 때만 현재 활성으로 다시 잡고, 잔여가 있으면 안 바꾼다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 빈 큐 → 현재 활성 surface로 대상 고정.
+    session.pendingPasteRetarget();
+    try std.testing.expectEqual(session.activeSurface().id, session.pending_paste_target);
+
+    // 잔여를 남긴 채 다른(가짜) 대상을 박고 retarget → 대상이 안 바뀐다(원래 대상 우선 = 탭 전환에도 보존).
+    try session.pending_paste.appendSlice(allocator, "AB");
+    const other: u64 = session.activeSurface().id +% 1; // 다른 surface 대상 가정
+    session.pending_paste_target = other;
+    session.pendingPasteRetarget();
+    try std.testing.expectEqual(other, session.pending_paste_target);
 }
 
 test "scrollbarThumbGeom: null without scrollback, thumb size/position track view_offset" {

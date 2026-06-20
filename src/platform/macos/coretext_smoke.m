@@ -1105,7 +1105,12 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         // constraintWidth로 셀에 맞춘다(renderer/cell.zig: 다음 셀이 비면 2칸 허용, 아니면 1칸 축소).
         const bool is_emoji = maru_font_is_color(draw_font);
         const bool overflows_slot = bounds.size.width > avail_w;
-        if ((is_emoji || overflows_slot) && bounds.size.width > 0.0 && bounds.size.height > 0.0) {
+        // 헤더 아이콘 심볼(◧ U+25E7·⚙ U+2699)은 글리프마다 baseline 대비 ink 위치가 달라, 공통-baseline
+        // 정렬이면 같은 줄에 그려도 서로 세로로 어긋나 보인다(사용자 피드백 "3개 아이콘 수평이 안 맞음").
+        // 심볼은 ink-center가 자연스럽고(baseline 흔들림 우려는 글자에만 해당 — 심볼은 텍스트 줄과 안 섞임)
+        // 셀 중앙에 일관되게 앉아 서로 정렬된다. '+'(ASCII)는 math-axis라 이미 중앙 근처라 제외(텍스트 공유).
+        const bool center_symbol = (codepoint == 0x25E7u || codepoint == 0x2699u);
+        if ((is_emoji || overflows_slot || center_symbol) && bounds.size.width > 0.0 && bounds.size.height > 0.0) {
             // 이모지는 슬롯을 꽉 채우도록 종횡비 유지하며 키우거나 줄인다(Ghostty의 .cover와 같은
             // 의도 — 풀사이즈). 두 축 비율 중 작은 쪽으로 스케일하면 슬롯 안에 정확히 들어맞고
             // 넘치지 않는다(width 2 슬롯이면 2칸을 가득, width 1이면 셀 폭에 맞춰 온전히). cap 없이

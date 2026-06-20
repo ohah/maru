@@ -217,9 +217,24 @@ pub const SurfaceRuntime = struct {
         if (link.pty_io.enqueue_command) |enqueue| {
             enqueue(link.pty_io.ctx, cmd) catch return error.WriteFailed;
         } else {
-            link.surface.lockCore(io);
-            defer link.surface.unlockCore(io);
-            core_command.apply(&link.surface.core, cmd);
+            // non-interactive(reader 없음 — 테스트/smoke): 호출 스레드가 직접 적용. 응답 생성 명령(리포팅)은
+            // interactive면 reader가 PTY로 흘리므로 폴백에서도 같게 흘린다(pendingResponse → pty_io.writeInput).
+            // dupe 후 락 밖 write(블로킹 PTY 쓰기를 락 안에 안 두려고 — PR1 패턴).
+            var reply_buf: ?[]u8 = null;
+            {
+                link.surface.lockCore(io);
+                defer link.surface.unlockCore(io);
+                core_command.apply(&link.surface.core, cmd);
+                const reply = link.surface.core.pendingResponse();
+                if (reply.len > 0) {
+                    reply_buf = self.allocator.dupe(u8, reply) catch null;
+                    link.surface.core.clearResponse();
+                }
+            }
+            if (reply_buf) |reply| {
+                defer self.allocator.free(reply);
+                link.pty_io.writeInput(reply) catch return error.WriteFailed;
+            }
         }
     }
 

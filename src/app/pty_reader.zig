@@ -320,14 +320,15 @@ pub const CoreCommandQueue = struct {
     pub fn freeCommand(allocator: std.mem.Allocator, cmd: CoreCommand) void {
         switch (cmd) {
             .set_preedit => |b| allocator.free(b),
-            .clear_preedit, .scroll, .scroll_to_bottom => {},
+            // payload 없는(또는 inline POD) 명령은 해제할 게 없다. exhaustive로 둬 owned payload 변형 추가 시 컴파일러가 강제.
+            .clear_preedit, .scroll, .scroll_to_bottom, .report_mouse, .report_focus, .set_cell_metrics, .set_config_palette, .set_max_scrollback => {},
         }
     }
 
     fn dupeCommand(allocator: std.mem.Allocator, cmd: CoreCommand) QueueError!CoreCommand {
         return switch (cmd) {
             .set_preedit => |b| .{ .set_preedit = try allocator.dupe(u8, b) },
-            .clear_preedit, .scroll, .scroll_to_bottom => cmd,
+            .clear_preedit, .scroll, .scroll_to_bottom, .report_mouse, .report_focus, .set_cell_metrics, .set_config_palette, .set_max_scrollback => cmd,
         };
     }
 

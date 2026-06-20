@@ -37,15 +37,16 @@ Maru v1은 Ghostty보다 더 많은 터미널 기능을 제공하는 것이 목�
 
 ```text
 TERM=xterm-maru          # 자체 terminfo. 컴파일 실패 시 xterm-256color로 자동 폴백
-TERMINFO=~/.cache/maru/terminfo   # embed 소스를 자동 컴파일한 위치(자식 셸에만 주입)
+TERMINFO=${XDG_CACHE_HOME:-~/.cache}/maru/terminfo   # embed 소스를 자동 컴파일한 위치(자식 셸에만 주입)
 COLORTERM=truecolor
 ```
 
 **전환의 핵심은 "로컬을 안 깨지게" 하는 것**이다. 단순히 기본 `TERM`을 `xterm-maru`로 바꾸면, 로컬
 terminfo DB에 항목이 없는 사용자의 `vim`/`tmux`/`less`가 `unknown terminal type`으로 깨진다. 그래서
 Ghostty와 같은 방식을 쓴다(`src/termio/Exec.zig` 동작 비교): terminfo 소스를 바이너리에 **embed**하고,
-자식 셸을 띄울 때 maru 자기 캐시(`~/.cache/maru/terminfo`)에 **자동 컴파일**(`tic`)해 `TERMINFO`를 거기로
-가리킨다(`pty/macos.zig`의 `resolveTerm`). `~/.terminfo`나 시스템을 안 건드리는 **비침습** 방식이고,
+자식 셸을 띄울 때 maru 자기 캐시(`${XDG_CACHE_HOME:-~/.cache}/maru/terminfo` — 다른 maru 캐시와 같은 base)에
+**자동 컴파일**(`tic`)해 `TERMINFO`를 거기로 가리킨다(`pty/macos.zig`의 `resolveTerm`). `~/.terminfo`나
+시스템을 안 건드리는 **비침습** 방식이고,
 `tic`이 없거나 컴파일이 실패하면 `xterm-256color`로 **자동 폴백**해 로컬이 절대 안 깨진다. 프로세스당
 1회만 컴파일해 캐시한다.
 

@@ -663,7 +663,9 @@ fn computeMaruTerminfo() ResolvedTerm {
     const page = std.heap.page_allocator;
     const home_z = std.c.getenv("HOME") orelse return fallback;
     const home = std.mem.span(home_z);
-    const dir = terminfo_cache.cacheDirZ(page, home) catch return fallback;
+    // 다른 maru 캐시와 같은 XDG 규칙으로 base를 정한다(셸 명령도 동일 규칙 — 같은 경로로 resolve).
+    const xdg = if (std.c.getenv("XDG_CACHE_HOME")) |x| std.mem.span(x) else null;
+    const dir = terminfo_cache.cacheDirZ(page, xdg, home) catch return fallback;
     // 버전 마커가 현재 embed 내용과 일치하고 xterm-maru가 해석되면 재컴파일 skip, 아니면(업데이트로 캡이
     // 바뀜·마커 없음) 캐시를 자동 재컴파일한다 — terminfo를 늘려도 기존 캐시에 자동 반영된다(stale 방지).
     // 같은 캐시·마커를 `maru terminfo` 서브커맨드(cli/terminfo.zig)가 공유한다.

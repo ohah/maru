@@ -285,8 +285,11 @@ pub fn buildSidebarDrawList(
             const row = sidebarGlyphRow(i, j, n);
             // 이름줄(j==0)만 활성 강조(active_fg+bold), 보조줄(브랜치·경로·상태)은 흐린 fg. bold는 셰이퍼가 bold face 선택.
             const row_style: terminal.Style = if (active and j == 0) .{ .foreground = active_fg, .bold = true } else style;
-            // OSC 0/2(신뢰 불가)라 깨진 UTF-8은 U+FFFD, cols 넘으면 "…" 말줄임(appendEllipsizedTitle 단일 출처).
-            _ = try appendEllipsizedTitle(allocator, &cells, lines[j], row, text_col, cols, row_style);
+            // OSC 0/2(신뢰 불가)라 깨진 UTF-8은 U+FFFD, 폭 넘으면 "…" 말줄임(appendEllipsizedTitle 단일 출처).
+            // **우측 패딩 1칸 예약(cols-1)**: 카드 글리프는 렌더러가 glyph_pad(=cw×0.5)만큼 오른쪽으로 미는데,
+            // end_col=cols면 마지막 칸이 사이드바 경계를 반 칸 넘쳐 말줄임/텍스트가 경계에 붙어 답답했다(사용자
+            // 피드백). cols-1로 두면 우측에 ~0.5칸 여백이 생겨 좌측 glyph_pad와 균형이 맞는다.
+            _ = try appendEllipsizedTitle(allocator, &cells, lines[j], row, text_col, cols -| 1, row_style);
             max_row = @max(max_row, row);
         }
     }
@@ -937,7 +940,7 @@ test "tabLayout: rich 넘침 ‹›·tab_cols 축소·scroll clamp; tui·안넘�
 
 test "buildSidebarDrawList truncates to cols and advances wide glyphs by two columns" {
     const allocator = std.testing.allocator;
-    // cols=5: "abcdefg"는 5칸까지만(자름). 와이드 글자는 2칸 전진.
+    // cols=5: 우측 패딩 1칸 예약 → 텍스트 폭은 cols-1=4. "abcdefg"는 4칸까지만(말줄임). 와이드 글자는 2칸 전진.
     const titles = [_][]const u8{ "abcdefg", "한A" };
     var draw_list = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, 5, .default, null, null, null, .default);
     defer draw_list.deinit(allocator);
@@ -952,8 +955,8 @@ test "buildSidebarDrawList truncates to cols and advances wide glyphs by two col
             row1_i += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 5), row0); // 7글자 중 5칸까지만(말줄임 …)
-    // "한"(와이드, width 2)이 col 0, 다음 'A'가 col 2(2칸 전진).
+    try std.testing.expectEqual(@as(usize, 4), row0); // 7글자 중 4칸까지만(우측 패딩 1칸 예약, 말줄임 …)
+    // "한"(와이드, width 2)이 col 0, 다음 'A'가 col 2(2칸 전진). "한A"=3칸이라 폭 4 안에 들어 말줄임 없음.
     try std.testing.expectEqual(@as(u16, 0), row1_cols[0]);
     try std.testing.expectEqual(@as(u16, 2), row1_cols[1]);
 }
@@ -961,22 +964,22 @@ test "buildSidebarDrawList truncates to cols and advances wide glyphs by two col
 // 긴 제목은 하드 컷이 아니라 마지막 칸에 "…"(U+2026)를 둬 말줄임된다(사이드바·pane 탭 바 공유 규칙). 짧으면 없음.
 test "long titles are ellipsized with U+2026 at the last cell; short titles are not" {
     const allocator = std.testing.allocator;
-    // 사이드바: "abcdefg"(7) cols=5 → 'a','b','c','d','…'. 마지막 셀 = U+2026.
+    // 사이드바: 우측 패딩 1칸 예약 → 텍스트 폭 cols-1=4. "abcdefg"(7) cols=5 → 'a','b','c','…'. 마지막 셀 = U+2026.
     {
         const titles = [_][]const u8{"abcdefg"};
         var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, 5, .default, null, null, null, .default);
         defer dl.deinit(allocator);
-        try std.testing.expectEqual(@as(usize, 5), dl.cells.len);
-        try std.testing.expectEqual(title_ellipsis_glyph, dl.cells[4].codepoint); // 마지막 = …
-        try std.testing.expectEqual(@as(u16, 4), dl.cells[4].col);
-        for (dl.cells[0..4]) |c| try std.testing.expect(c.codepoint != title_ellipsis_glyph); // 앞은 글자
+        try std.testing.expectEqual(@as(usize, 4), dl.cells.len);
+        try std.testing.expectEqual(title_ellipsis_glyph, dl.cells[3].codepoint); // 마지막 = …(col 3, col 4는 우측 패딩)
+        try std.testing.expectEqual(@as(u16, 3), dl.cells[3].col);
+        for (dl.cells[0..3]) |c| try std.testing.expect(c.codepoint != title_ellipsis_glyph); // 앞은 글자
     }
-    // 딱 맞으면 말줄임 없음.
+    // 텍스트 폭(cols-1=4)에 딱 맞으면 말줄임 없음.
     {
-        const titles = [_][]const u8{"abcde"}; // 5칸 = cols
+        const titles = [_][]const u8{"abcd"}; // 4칸 = cols-1(우측 패딩 예약 후 가용 폭)
         var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, 5, .default, null, null, null, .default);
         defer dl.deinit(allocator);
-        try std.testing.expectEqual(@as(usize, 5), dl.cells.len);
+        try std.testing.expectEqual(@as(usize, 4), dl.cells.len);
         for (dl.cells) |c| try std.testing.expect(c.codepoint != title_ellipsis_glyph);
     }
     // pane 탭 바: 긴 제목도 세그먼트 한도에서 … . cols=11 → 탭 영역 8, 2탭 → tab_w=4, 탭 0 제목 칸 [1,4) = 3칸.

@@ -45,7 +45,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 58; // 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 59; // 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -1069,6 +1069,9 @@ pub const AppSession = struct {
     scrollbar_hovered: bool = false,
     // 자동 스크롤 중 선택 확장에 쓸 마지막 드래그 열.
     last_drag_col: u16 = 0,
+    // mouse-reporting motion(DECSET 1003 any-event)에서 마지막으로 리포트한 셀. 같은 셀로의 연속 이동을
+    // 스킵해(셀 단위 변화만 리포트) PTY·트래킹 앱 부하를 막는다(Ghostty cursorPosCallback의 그리드-동일 skip과 동일).
+    last_motion_cell: ?struct { col: u16, row: u16 } = null,
     // 큰 붙여넣기의 미전송 잔여(인코딩 완료분). 자식이 stdin을 읽는 속도에 맞춰 tick마다
     // non-blocking으로 흘려보낸다 — 멀티MB 붙여넣기가 UI를 동결시키지 않게.
     pending_paste: std.ArrayList(u8) = .empty,
@@ -3644,6 +3647,55 @@ pub const AppSession = struct {
         core.scrollViewport(@as(isize, lines));
         surface.unlockCore(self.io);
         self.metal_dirty = true;
+    }
+
+    /// 버튼 없는 마우스 이동(hover)을 mouse reporting으로 PTY에 흘린다. Swift가 mouseMoved마다(60~120Hz)
+    /// 부르지만, any-event(DECSET 1003)가 아니면 즉시 빠진다 — 매 이동마다 chrome 히트테스트(leaf_rects alloc)·
+    /// 셀 변환을 돌리지 않게 tracking gate를 가장 먼저 친다. tracking 읽기·reportMouse(코어 response 생성)는
+    /// 락 아래(리더 core.write·response 경합 방지, docs/io-render-threading.md PR3), writeInput은 락 밖(PR1).
+    /// 같은 셀로의 반복 이동은 스킵해(셀 단위 변화만 리포트) PTY·트래킹 앱 부하를 막는다. button 3 = no-button.
+    /// 베이스: xterm — any-event(1003)는 버튼 없는 motion도 Cb=3(+32 motion 비트)로 인코딩한다.
+    pub fn mouseMoved(self: *AppSession, x_px: f64, y_px: f64, mods: i32) void {
+        if (!self.surface_initialized) return;
+        const active = self.activeSurface();
+        // 비-1003이면 dedup도 비운다 — 다음 1003 진입의 첫 셀이 stale last_motion_cell로 막히지 않게.
+        {
+            active.lockCore(self.io);
+            defer active.unlockCore(self.io);
+            if (active.core.mouse_tracking != .any) {
+                self.last_motion_cell = null;
+                return;
+            }
+        }
+        if ((mods & 4) != 0 or (mods & 8) != 0) return; // shift·option은 셀렉션 override — 리포트 안 함
+        if (self.pointOnChrome(x_px, y_px)) {
+            self.last_motion_cell = null; // chrome(사이드바·탭 바) 경유 — 터미널 재진입 첫 셀이 stale로 막히지 않게
+            return;
+        }
+        // pxToCell은 좌표를 grid 안으로 clamp하므로(영역 밖도 가장자리 셀) chrome 가드를 먼저 통과해야 한다.
+        const cell = self.pxToCell(x_px, y_px) orelse return;
+        // 같은 셀로의 반복 이동은 스킵 — 셀 단위 변화만 보낸다(중복 motion 억제).
+        if (self.last_motion_cell) |last| {
+            if (last.col == cell.col and last.row == cell.row) return;
+        }
+        self.last_motion_cell = .{ .col = cell.col, .row = cell.row };
+        // reportMouse는 락 아래(response 생성), writeInput은 락 밖. 위 gate와 이 락 사이에 앱이 1003을 꺼도
+        // reportMouse 자체가 mouse_tracking 가드(.none이면 무동작)라 안전하다.
+        var reply_buf: ?[]u8 = null;
+        {
+            active.lockCore(self.io);
+            defer active.unlockCore(self.io);
+            active.core.reportMouse(3, cell.col, cell.row, cell.term_x_px, cell.term_y_px, true, true, @intCast(mods));
+            const reply = active.core.pendingResponse();
+            if (reply.len > 0) {
+                reply_buf = self.allocator.dupe(u8, reply) catch null;
+                active.core.clearResponse();
+            }
+        }
+        if (reply_buf) |reply| {
+            defer self.allocator.free(reply);
+            self.runtime.writeInput(active.id, .{ .bytes = reply }) catch {};
+        }
     }
 
     /// backing 픽셀 좌표를 (row, col) 셀로 변환한다(grid 안으로 clamp). 핵심: clamp를 float

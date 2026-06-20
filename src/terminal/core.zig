@@ -3261,7 +3261,7 @@ pub const TerminalCore = struct {
     }
 
     /// mouse 이벤트를 앱에 리포트한다(mouse_tracking이 .none이 아닐 때). col/row는 0-based(인코딩은 1-based로 +1).
-    /// button: 0=left,1=middle,2=right, 64=wheel-up,65=wheel-down. mods 비트: 4=shift,8=meta(alt),16=ctrl. motion이면
+    /// button: 0=left,1=middle,2=right, 3=no-button(any-event motion), 64=wheel-up,65=wheel-down. mods 비트: 4=shift,8=meta(alt),16=ctrl. motion이면
     /// drag/move(button·any 모드만, Cb에 +32). 베이스: xterm — SGR(1006/1016) `CSI < Cb;Px;Py M`(press)/`m`(release);
     /// x10 `CSI M` + (32+Cb)(32+Px)(32+Py) 바이트(좌표 223 초과는 깨져 SGR 권장, release는 버튼 미상이라 Cb=3).
     /// 마우스 이벤트를 활성 tracking 모드/format으로 PTY에 리포트한다. col/row는 0-based 셀,

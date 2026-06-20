@@ -2,6 +2,7 @@ const std = @import("std");
 const pty = @import("../pty.zig");
 const runtime_mod = @import("runtime.zig");
 const terminal = @import("../terminal.zig");
+const core_command = @import("core_command.zig");
 
 pub const QueueError = std.mem.Allocator.Error || error{
     ZeroCapacity,
@@ -272,12 +273,8 @@ pub const PtyWriteQueue = struct {
 /// 코어 락 아래 적용한다 — 출력 `core.write`와 같은 스레드·같은 락이라 메인이 코어를 직접 mutate하지 않게 된다.
 /// 가변 payload(`set_preedit` 바이트)는 큐가 owned 복사를 들고 적용·드롭·close 시 해제한다. P3-1은 프리미티브만
 /// (미배선) — 배선은 P3-2~P3-4. 명령 집합은 §9.2를 따라 단계적으로 확장한다(여기선 P3-2 IME·P3-4 scroll 대표).
-pub const CoreCommand = union(enum) {
-    set_preedit: []const u8, // owned(큐 소유) — 적용/드롭 시 해제. IME 조합 텍스트.
-    clear_preedit,
-    scroll: isize, // scrollViewport(delta_up)
-    scroll_to_bottom,
-};
+/// 명령 타입·적용 로직은 중립 모듈(`core_command.zig`)에 둔다 — runtime·live_pty가 순환 import 없이 공유.
+pub const CoreCommand = core_command.CoreCommand;
 
 /// 위임 명령의 bounded FIFO. `PtyWriteQueue`(바이트 FIFO)의 명령 버전 — 같은 mutex·condition·head-리셋 구조.
 /// cap은 **대기 명령 수**(count) 기준. 메인이 enqueue(+wake), reader가 pop해 적용한다(단일 소비자). MARU_DEBUG면
@@ -390,6 +387,15 @@ pub const CoreCommandQueue = struct {
         defer self.mutex.unlock(self.io);
         return self.pendingAssumeLocked() > 0;
     }
+
+    /// reader가 명령 적용 직후 호출 — MARU_DEBUG일 때만 enqueue→apply 지연(µs)을 `coreq.apply`로 찍는다(§9.7
+    /// 위임 latency 관측). `Entry.enqueued_ns`는 enqueue 시점(debug일 때만 기록). 비-debug면 분기 하나로 즉시 반환.
+    pub fn logApply(self: *CoreCommandQueue, entry: Entry) void {
+        if (!self.debug) return;
+        const apply_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        const delay_us = @divTrunc(apply_ns - entry.enqueued_ns, std.time.ns_per_us);
+        coreq.info("apply {s} (+{d}us)", .{ @tagName(entry.cmd), delay_us });
+    }
 };
 
 pub const PtyReader = struct {
@@ -409,8 +415,12 @@ pub const PtyReader = struct {
     // 이 큐로 들어오면 runProcessing이 같은 poll 루프에서 drain해 PTY로 write한다 — 메인은 직접 안 쓴다.
     // 옵셔널(null이면 메인 입력 drain 없이 응답만 — controlled smoke/단위 테스트 경로). start() 전 주입.
     write_queue: ?*PtyWriteQueue = null,
+    // Phase 3 단일책임(docs/io-render-threading.md §9 P3-2~): 메인발 코어 mutate(IME·스크롤 등)가 이 명령 큐로
+    // 들어오면 runProcessing이 같은 poll 루프에서 pop해 코어 락 아래 적용한다 — 메인은 코어를 직접 mutate 안 한다.
+    // 옵셔널(null이면 위임 없음 — controlled smoke/단위 테스트는 직접 경로). setProcessing/start() 전 주입.
+    command_queue: ?*CoreCommandQueue = null,
     // processing이 켜지면(setProcessing이 release-store) run()이 코어를 직접 처리한다. release-acquire로
-    // core/core_mutex/io/write_queue 주입이 reader 스레드에 보인다(설정→store, 읽기 전 load).
+    // core/core_mutex/io/write_queue/command_queue 주입이 reader 스레드에 보인다(설정→store, 읽기 전 load).
     processing: std.atomic.Value(bool) = .init(false),
 
     pub fn init(
@@ -444,6 +454,13 @@ pub const PtyReader = struct {
     /// 없으면 runProcessing은 응답만 쓰고 메인 입력은 drain하지 않는다(controlled smoke/단위 테스트).
     pub fn setWriteQueue(self: *PtyReader, write_queue: *PtyWriteQueue) void {
         self.write_queue = write_queue;
+    }
+
+    /// Phase 3(P3-2~): 메인발 코어 mutate가 흐를 명령 큐를 주입한다. **setProcessing/start() 전에** 호출해야
+    /// 한다(setProcessing의 release-store가 publish — 스레드 시작 전 설정이라 race 없음). 없으면 runProcessing은
+    /// 명령을 drain하지 않는다(controlled smoke/단위 테스트는 메인이 코어를 직접 mutate).
+    pub fn setCommandQueue(self: *PtyReader, command_queue: *CoreCommandQueue) void {
+        self.command_queue = command_queue;
     }
 
     pub fn start(self: *PtyReader) !void {
@@ -558,6 +575,31 @@ pub const PtyReader = struct {
                         wq.consume(written); // 실제 쓴 만큼만 head 전진(부분 write 잔량은 다음 poll)
                     }
                 }
+            }
+            // 명령 단계(docs/io-render-threading.md §9 P3-2): 메인이 위임한 코어 mutate(IME 등)를 락 아래 적용한다.
+            // PTY I/O와 무관(POLLOUT 불요) — 메인 enqueue 시 signalWrite로 깨어 여기서 비운다. 출력 core.write와
+            // 같은 락·같은 스레드라 단일 mutator가 보존된다(§9.3). 응답 생성 명령(리포팅 — P3-3)은 outbound로 적재한다.
+            if (self.command_queue) |cq| {
+                var applied = false;
+                while (cq.pop()) |entry| {
+                    core.owner_dbg.lock(mutex, self.io);
+                    core_command.apply(core, entry.cmd);
+                    const reply = core.pendingResponse();
+                    if (reply.len > 0) {
+                        out_buf.appendSlice(self.allocator, reply) catch {}; // OOM이면 그 응답 드롭(best-effort)
+                        core.clearResponse();
+                    }
+                    core.owner_dbg.unlock(mutex, self.io);
+                    cq.logApply(entry); // MARU_DEBUG면 enqueue→apply 지연 로깅
+                    CoreCommandQueue.freeCommand(self.allocator, entry.cmd);
+                    applied = true;
+                }
+                // 명령이 코어를 바꿨으면 렌더 트리거(출력과 같은 빈 신호). 비블로킹(tryPush) — full이면 드롭(coalescing,
+                // 교차-큐 데드락 방지, read 단계와 동일 근거).
+                if (applied) self.queue.tryPush(.{ .output = .{ .pty_id = self.pty_id, .bytes = &.{} } }) catch |err| switch (err) {
+                    error.QueueFull => {},
+                    else => return,
+                };
             }
             // read 단계: 출력을 코어에 적용하고 응답을 outbound 버퍼에 적재한다.
             if (ready.readable) {

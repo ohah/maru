@@ -4184,11 +4184,12 @@ pub const AppSession = struct {
             .find => self.chrome_host.find.input.setPreedit(self.allocator, bytes) catch {},
             .palette => self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {},
             .terminal => {
-                // setPreedit는 코어 변경 — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
-                const s = self.activeSurface();
-                s.lockCore(self.io);
-                defer s.unlockCore(self.io);
-                s.core.setPreedit(bytes) catch {};
+                // Phase 3 위임(docs/io-render-threading.md §9 P3-2): setPreedit는 코어 mutate라 메인이 직접 하지
+                // 않고 reader로 위임한다 — IME 조합 확정 중 포커스 상실 재진입 데드락(#700)을 구조적으로 없앤다.
+                // 빈 bytes=조합 해제(clear_preedit). interactive면 명령 큐로 enqueue+wake, non-interactive(테스트/
+                // smoke, reader 없음)면 runtime이 호출 스레드에서 직접 적용 폴백한다(enqueueCoreCommand 내부 분기).
+                const cmd: app.CoreCommand = if (bytes.len > 0) .{ .set_preedit = bytes } else .clear_preedit;
+                self.runtime.enqueueCoreCommand(self.activeSurface().id, cmd, self.io) catch {};
             },
         }
     }

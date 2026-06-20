@@ -112,7 +112,7 @@ const sidebar_max_pt: u32 = 480; // 너무 넓으면 터미널이 좁아짐
 const sidebar_slot_height_ratio_milli: u32 = 4600;
 // 사이드바 상단 헤더(검색바 + view options·새 워크스페이스 아이콘) 높이 = cell 높이 × 2.0(검색 1줄 + 상하 패딩).
 // 0이면 헤더 없음(하위호환). slot_height와 같은 단일 출처(cell 메트릭)에서 파생한다.
-const sidebar_header_height_ratio_milli: u32 = 2000;
+const sidebar_header_height_ratio_milli: u32 = 3000;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -3111,11 +3111,14 @@ pub const AppSession = struct {
 
     /// 검색 caret rect(헤더 검색 영역) — IME 후보창·커서 위치. 🔍(2칸)+공백 다음 입력 텍스트 폭만큼. 헤더 1줄(y=0).
     fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
-        if (!self.sidebar_search_active or self.cell_width_px == 0) return null;
+        if (!self.sidebar_search_active or self.cell_width_px == 0 or self.cell_height_px == 0) return null;
         const cw = self.cell_width_px;
+        const ch = self.cell_height_px;
+        const header_rows = @max(@as(u32, 2), self.sidebar_header_height_px / ch);
+        const search_row = header_rows - 1; // 검색 줄(buildSidebarHeaderFrame와 동일 — 신호등 아래)
         const prompt_cols: u32 = 3; // 🔍(2칸) + 공백(1)
         const caret_col = prompt_cols + self.sidebar_search_input.queryCols();
-        return .{ .x = @intCast(caret_col * cw), .y = 0, .w = cw, .h = self.cell_height_px };
+        return .{ .x = @intCast(caret_col * cw), .y = @intCast(search_row * ch), .w = cw, .h = ch };
     }
 
     /// 점(x,y px)에 있는 rename 대상 — 사이드바 슬롯=워크스페이스, pane 라벨 세그먼트=pane, Term 탭=term. 없으면
@@ -3991,7 +3994,8 @@ pub const AppSession = struct {
             if (kind == 1) {
                 // 상단 헤더: 새 워크스페이스 아이콘 → 새 탭(하단 "+"를 헤더로 이동), view options 아이콘 → 메뉴(P4),
                 // 검색 영역 → 검색 활성(P3). 헤더 밖(none)이면 카드 슬롯 hit-test(✕ 닫기 / 전환 + 드래그 재정렬).
-                switch (chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.sidebar_header_height_px)) {
+                const header_region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.sidebar_header_height_px);
+                switch (header_region) {
                     .new_workspace => _ = self.newTab() catch {},
                     .view_options => {}, // P4: view options 메뉴(아이콘 자리만 — 클릭 핸들은 P4에서 연결)
                     .search => {
@@ -4017,12 +4021,19 @@ pub const AppSession = struct {
                         }
                     },
                 }
+                // 검색 영역이 아닌 곳(카드·아이콘·빈 영역)을 클릭하면 검색을 blur한다 — 키 포커스를 터미널로 되돌려
+                // '검색 활성 중 터미널 입력 불가'를 푼다(rename focus-loss와 같은 규율). 카드 클릭의 visibleTab 역매핑은
+                // 위에서 이미 끝나 매핑이 안 깨진다. .search 분기는 방금 active=true로 켠 참이라 제외한다.
+                if (kind == 1 and header_region != .search and self.sidebar_search_active) self.closeSidebarSearch();
             }
             // 사이드바 더블클릭(kind 4) rename은 위 통합 kind==4 핸들러(renameTargetAt)가 이미 처리했다.
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
             return;
         }
+        // 사이드바 '밖'(터미널·pane·탭 바)을 클릭하면 검색을 blur한다 — 같은 이유(키를 터미널로 되돌림). 사이드바 밖은
+        // visibleTab 의존이 없어 여기서 바로 닫아도 안전하다.
+        if (kind == 1 and self.sidebar_search_active) self.closeSidebarSearch();
         // down(1)에서 pane/탭 바 클릭을 hit-test한다(kind!=1이면 단락 평가로 self.tabs를 안 건드린다 — 최소-셋업
         // 드래그 테스트는 kind 2/3만 보낸다). 활성 탭 leaf rect를 한 번 펴 ① 탭 바 클릭(어느 pane의 상단 바면 그
         // pane 포커스 + 클릭한 Term 탭 전환) ② 다른 panel의 터미널 영역 클릭(그 pane 포커스)을 차례로 본다. 둘 다
@@ -6762,9 +6773,17 @@ pub const AppSession = struct {
         errdefer cells.deinit(self.allocator);
         const muted: terminal.Color = .{ .rgb = self.mutedForeground() };
         const fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
-        // 검색 아이콘(🔍, EAW Wide=2칸) 좌측. 그 다음: 검색 활성 + 입력 있으면 입력 텍스트(query+preedit, fg, EAW 한글
-        // 2칸), 아니면 placeholder "Search"(muted). caret/IME 후보창은 sidebarSearchCaretRect가 잡는다.
-        try cells.append(self.allocator, .{ .row = 0, .col = 0, .codepoint = 0x1F50D, .width = 2, .style = .{ .foreground = muted } });
+        // 헤더 2줄: 줄0(신호등 줄)은 좌측 네이티브 신호등(닫기·최소화·확대) 영역을 비우고 우측에 view options(⚙)·
+        // 새 워크스페이스(+) 아이콘. 검색은 신호등 아래 줄(search_row)에 🔍 + 입력/placeholder로 둔다(headerHit과
+        // 같은 줄/우측 정렬 — view↔hitTest 단일 레이아웃). 줄 수는 header_h/cell_h로 산출(신호등 높이 흡수).
+        const header_rows: u16 = @intCast(@max(@as(u32, 2), self.sidebar_header_height_px / @max(self.cell_height_px, 1)));
+        const search_row: u16 = header_rows - 1; // 헤더 마지막 줄(신호등 아래)
+        // 줄0: 우측 view options(⚙)·새 워크스페이스(+) 아이콘.
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 4, .codepoint = 0x2699, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
+        // 검색 줄: 🔍(EAW 2칸) + 검색 활성+입력이면 입력 텍스트(query+preedit, EAW 한글 2칸), 아니면 placeholder
+        // "Search"(muted). caret/IME 후보창은 sidebarSearchCaretRect가 잡는다.
+        try cells.append(self.allocator, .{ .row = search_row, .col = 0, .codepoint = 0x1F50D, .width = 2, .style = .{ .foreground = muted } });
         const max_col = cols -| 4; // 우측 아이콘 영역 침범 방지
         if (self.sidebar_search_active and (self.sidebar_search_input.query.items.len > 0 or self.sidebar_search_input.preedit.items.len > 0)) {
             var col: u16 = 3;
@@ -6775,7 +6794,7 @@ pub const AppSession = struct {
                 while (iter.nextCodepoint()) |cp| {
                     if (col >= max_col) break;
                     const w: u2 = @intCast(@max(@as(u8, 1), @min(@as(u8, 2), terminal.width.cellWidth(cp))));
-                    try cells.append(self.allocator, .{ .row = 0, .col = col, .codepoint = cp, .width = w, .style = .{ .foreground = fg } });
+                    try cells.append(self.allocator, .{ .row = search_row, .col = col, .codepoint = cp, .width = w, .style = .{ .foreground = fg } });
                     col += w;
                 }
             }
@@ -6784,15 +6803,12 @@ pub const AppSession = struct {
             for (placeholder, 0..) |ch, i| {
                 const col: u16 = @intCast(3 + i);
                 if (col >= max_col) break;
-                try cells.append(self.allocator, .{ .row = 0, .col = col, .codepoint = ch, .style = .{ .foreground = muted } });
+                try cells.append(self.allocator, .{ .row = search_row, .col = col, .codepoint = ch, .style = .{ .foreground = muted } });
             }
         }
-        // view options(⚙) 우측 4칸 · 새 워크스페이스(+) 우측 2칸 — headerHit과 같은 우측 정렬.
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 4, .codepoint = 0x2699, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
 
         const draw_list = renderer.DrawList{
-            .size = .{ .cols = cols, .rows = 1 },
+            .size = .{ .cols = cols, .rows = header_rows },
             .cursor = .{ .row = 0, .col = 0 },
             .dirty = null,
             .cells = try cells.toOwnedSlice(self.allocator),
@@ -8590,7 +8606,7 @@ test "double-click on a Term tab or sidebar slot starts rename" {
     // ② 사이드바 슬롯 더블클릭 → 그 워크스페이스 rename.
     const tab = session.activeTab();
     const sx = @as(f64, @floatFromInt(session.sidebar_width_px)) * 0.5;
-    const sy = @as(f64, @floatFromInt(session.sidebar_slot_height_px)) * 0.5;
+    const sy = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + @as(f64, @floatFromInt(session.sidebar_slot_height_px)) * 0.5; // 슬롯 0 중앙(상단 헤더 아래)
     session.mouse(4, sx, sy, 0, 0);
     try std.testing.expect(session.renamingWorkspace(tab));
     session.closeRename();
@@ -8713,7 +8729,7 @@ test "review fixes: focus-loss commits rename, body right-click reports, close-z
     try std.testing.expectEqualStrings("z", term0.surface.custom_name.?);
 
     // (#8) 사이드바 슬롯 ✕(close) zone은 renameTargetAt가 null(닫기 자리에서 rename 방지), 좌측은 워크스페이스.
-    const slot_y = @as(f64, @floatFromInt(session.sidebar_slot_height_px)) * 0.5;
+    const slot_y = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + @as(f64, @floatFromInt(session.sidebar_slot_height_px)) * 0.5; // 슬롯 0 중앙(상단 헤더 아래)
     const close_x = @as(f64, @floatFromInt(session.sidebar_width_px - session.cell_width_px)); // 우측 ✕ 영역
     try std.testing.expect(session.renameTargetAt(close_x, slot_y) == null);
     try std.testing.expect(session.renameTargetAt(@floatFromInt(session.cell_width_px), slot_y) != null); // 좌측=워크스페이스
@@ -11389,7 +11405,7 @@ test "hoverCursor returns region-specific cursor kinds" {
     // 사이드바 워크스페이스 슬롯 위 = link(클릭=전환), "+" 슬롯 아래 빈 영역 = default(arrow) — #5c.
     if (session.sidebar_width_px > 0 and session.sidebar_slot_height_px > 0) {
         const sb_x: f64 = @floatFromInt(session.sidebar_width_px / 2);
-        const slot0_y: f64 = @floatFromInt(session.sidebar_slot_height_px / 2); // 슬롯 0 중앙 — 확실히 슬롯 안
+        const slot0_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + @as(f64, @floatFromInt(session.sidebar_slot_height_px / 2)); // 슬롯 0 중앙(상단 헤더 아래) — 확실히 슬롯 안
         try std.testing.expectEqual(CursorKind.link, session.hoverCursor(sb_x, slot0_y, false));
         const empty_y: f64 = @floatFromInt((session.tabs.items.len + 2) * session.sidebar_slot_height_px); // "+" 슬롯 아래(빈)
         try std.testing.expectEqual(CursorKind.default, session.hoverCursor(sb_x, empty_y, false));
@@ -11866,6 +11882,50 @@ test "③b: clicking the sidebar '+' button opens a new workspace" {
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     try std.testing.expect(!session.ended_seen);
     _ = try session.tick();
+}
+
+// 회귀: 사이드바 검색이 활성인 채 검색 영역 '밖'(터미널·카드)을 클릭하면 검색을 blur해 키 포커스를 터미널로
+// 되돌린다. P3에서 검색이 한번 켜지면 평문 키가 전부 검색으로 들어가 '터미널에 입력 불가'로 갇히던 것을 방지한다
+// (rename focus-loss와 같은 규율 — Esc 외에 클릭으로도 빠져나온다). 실 좌표 hit-test라 macOS 게이트.
+test "sidebar search blurs when clicking outside it (terminal/card) — restores terminal key focus" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{}; // 레이아웃 기하만 격리
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 검색 줄(헤더 하단)을 클릭 → 검색 활성, 키 포커스가 검색으로 라우팅.
+    const search_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) * 0.5;
+    const search_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) * 0.8;
+    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.search, chrome.components.sidebar.headerHit(search_x, search_y, session.sidebar_width_px, session.cell_width_px, session.sidebar_header_height_px));
+    session.mouse(1, search_x, search_y, 0, 0);
+    try std.testing.expect(session.sidebar_search_active);
+    try std.testing.expectEqual(AppSession.InputFocus.sidebar_search, session.inputFocus());
+
+    // 터미널 본문 클릭 → 검색 blur, 키 포커스가 터미널로 복구.
+    const term_x: f64 = @floatFromInt(session.active_pane_rect.x + 50);
+    const term_y: f64 = @floatFromInt(session.active_pane_rect.y + 50);
+    session.mouse(1, term_x, term_y, 0, 0);
+    try std.testing.expect(!session.sidebar_search_active);
+    try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
+
+    // 다시 검색 활성 → 사이드바 카드 슬롯 클릭도 blur(카드 전환 + 검색 종료).
+    session.mouse(1, search_x, search_y, 0, 0);
+    try std.testing.expect(session.sidebar_search_active);
+    const card_x: f64 = @as(f64, @floatFromInt(session.cell_width_px));
+    const card_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + @as(f64, @floatFromInt(session.sidebar_slot_height_px)) * 0.5; // 슬롯 0 중앙
+    session.mouse(1, card_x, card_y, 0, 0);
+    try std.testing.expect(!session.sidebar_search_active);
+    try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 }
 
 // 멀티-탭 핵심 계약: 두 번째 탭을 만들면 자기 셸 PTY가 spawn되고, tick이 '모든' 탭을 drain하므로

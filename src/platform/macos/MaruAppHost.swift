@@ -740,6 +740,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 곧 앱 종료라 안 드러났지만, 멀티 창에서 한 창만 닫으면(앱 유지) 터진다. quick 패널과 같은 가드.
         window.isReleasedWhenClosed = false
         window.title = "Maru"
+        // 네이티브 타이틀바를 숨기고 신호등(닫기·최소화·확대)만 좌상단에 남긴다: 타이틀바 투명 + 제목 숨김 +
+        // fullSizeContentView로 콘텐츠(사이드바)가 창 top까지 차오르게 한다. 사이드바 헤더 chrome이 신호등 영역에
+        // 정렬한다(maru Zig+GPU chrome 전략 — 네이티브 뷰 없이 직접 그림). 베이스: 모던 macOS 표준 패턴. 외부
+        // 터미널은 동작 형태만 참고했고 산출물은 Maru 독립 설계다(docs/macos-app-host-boundary.md).
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.titlebarSeparatorStyle = .none
+        window.styleMask.insert(.fullSizeContentView)
 
         let content = MaruMetalTerminalView(frame: window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 960, height: 600))
         content.controller = self

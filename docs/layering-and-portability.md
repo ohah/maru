@@ -30,6 +30,8 @@ flowchart TD
 
 **의존 방향**: L3→L2→L1, L4가 가장자리에서 셋을 구현/투영. L1~L3에 OS 타입이 새지 않는다(check-boundaries로 강제 — §8).
 
+**창 chrome 분해 예시(사이드바 헤더·신호등)**: 네이티브 타이틀바를 숨기고 신호등(traffic lights)만 남기는 **창 스타일 inset은 L4 macOS 전용**이다(AppKit `titlebarAppearsTransparent`/`.fullSizeContentView` — `platform/macos`의 Swift host, [macos-app-host-boundary.md](macos-app-host-boundary.md)). 반면 **헤더 레이아웃(검색바·view options·새 워크스페이스 아이콘의 위치·hit-test)은 L3 chrome**(`chrome/components/sidebar.zig` `headerHit`)이라 OS-중립으로 **재사용**된다 — 이식 시 타깃별로 새로 짜는 건 "신호등을 남기는 창 chrome" 한 조각뿐이고(Linux/Win/web은 각자의 창 데코레이션 모델), 그 위에 그려지는 헤더는 같은 L3 코드가 투영된다. 신호등 영역만큼 헤더를 아래로 미는 좌표 시프트(`sidebar_header_height_px`)는 L1 DTO로 L4에 전달돼 GPU 백엔드가 적용한다.
+
 ## 3. 두 번의 추출
 
 현재 `platform/macos/app_session.zig`(7649줄)는 L3+L2+L4를 뒤섞고 있다. 두 번 빼낸다:

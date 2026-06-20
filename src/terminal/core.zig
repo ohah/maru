@@ -4320,11 +4320,13 @@ pub const TerminalCore = struct {
     /// 조합 글자들을 row_cells의 draw_col부터 반전 스타일로 그린다. 행 끝을 넘는 글자는 잘린다
     /// (오버레이 폴백 경로에서만 발생 — 삽입형 경로는 호출 전에 공간을 보장한다). draw_col은
     /// 그린 폭만큼 전진해, 호출자가 조합 끝(=커서 표시 위치)을 알 수 있다.
-    fn drawPreeditCells(pen: types.Style, preedit_bytes: []const u8, row_cells: []types.Cell, draw_col: *u16) void {
+    fn drawPreeditCells(pen: types.Style, preedit_bytes: []const u8, row_cells: []types.Cell, draw_col: *u16, ambiguous_wide: bool) void {
         const cols: u16 = @intCast(row_cells.len);
         var it = (std.unicode.Utf8View.init(preedit_bytes) catch return).iterator();
         while (it.nextCodepoint()) |cp| {
-            const w = width.cellWidth(cp);
+            // 폭은 snapshotWithPreedit의 preedit_width 합산(cellWidthAmbiguous)과 **같은 출처**여야 한다 — 안 그러면
+            // ambiguous-width=wide에서 동그란 번호 등이 측정(2)과 그리기(1)가 어긋나 memmove 시프트만큼 칸이 빈다.
+            const w = width.cellWidthAmbiguous(cp, ambiguous_wide);
             if (w == 0) continue;
             if (@as(u32, draw_col.*) + @as(u32, w) > @as(u32, cols)) break; // 행 끝 — 잘림
             var style = pen;
@@ -4406,7 +4408,7 @@ pub const TerminalCore = struct {
             }
         }
         var draw_col = cursor_col;
-        drawPreeditCells(self.pen, preedit_bytes, row_cells, &draw_col);
+        drawPreeditCells(self.pen, preedit_bytes, row_cells, &draw_col, self.ambiguous_wide);
         clearTruncatedWideBase(row_cells); // 시프트/잘림으로 끝칸에 wide base만 남으면 정리
 
         return .{
@@ -4777,7 +4779,10 @@ pub const TerminalCore = struct {
     fn lastCellIsWideEmoji(self: *const TerminalCore) bool {
         const last = self.last_print orelse return false;
         const cell = self.cells[self.index(last.row, last.col)];
-        return cell.width == 2 and cell.combining == null;
+        // width 2를 wide emoji 대용으로 본다(스킨톤 modifier 부착 대상). 단 ambiguous-width=wide로 2칸이 된
+        // 동그란 번호(isWideRenderSymbol)는 이모지가 아니라 스킨톤 부착 대상이 아니므로 제외 — 안 그러면 ③ 뒤
+        // 스킨톤이 ③의 combining 슬롯에 잘못 병합된다(mode 2027).
+        return cell.width == 2 and cell.combining == null and !width.isWideRenderSymbol(cell.codepoint);
     }
 
     /// 직전 출력 셀이 짝 없는(combining 안 붙은) 지역 표시자인지 — 다음 RI와 국기로 묶기 위함.
@@ -8181,6 +8186,25 @@ test "preedit inserts mid-line, shifting trailing glyphs (가나다 + 나앞 조
     // 실제 그리드는 불변 — 확정 전까지 셸 상태는 "가나다" 그대로다.
     try std.testing.expectEqual(@as(u21, 0xB098), core.cells[2].codepoint); // grid의 '나'는 col2
     try std.testing.expectEqual(@as(u21, 0xB2E4), core.cells[4].codepoint); // grid의 '다'는 col4
+}
+
+test "preedit ambiguous-width=wide: circled number drawn 2 cells matches the insert shift (no gap)" {
+    // 코드리뷰 결함: preedit_width(snapshotWithPreedit)는 cellWidthAmbiguous로 2칸 시프트하는데 drawPreeditCells가
+    // cellWidth(1칸)로 그리면, wide 모드에서 동그란 번호 뒤에 빈 칸/잔상이 남고 커서가 1칸 모자랐다. 두 출처를 일치시킴.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+    core.ambiguous_wide = true;
+    try core.write("ab"); // 커서 col 2
+    try core.write("\x1b[2D"); // 커서를 col 0으로(mid-line insert)
+    try std.testing.expectEqual(@as(u16, 0), core.cursor.col);
+    try core.setPreedit("③"); // U+2462 — wide면 2칸. 시프트(2)와 그리기(2)가 일치해야 빈 칸/잔상이 없다.
+    const snap = core.renderSnapshot();
+    try std.testing.expectEqual(@as(u21, 0x2462), snap.cells[0].codepoint); // ③(조합)
+    try std.testing.expectEqual(@as(u2, 2), snap.cells[0].width); // drawPreeditCells도 ambiguous-aware → 2칸
+    try std.testing.expect(snap.cells[1].continuation); // continuation(잔상 'b'가 아님)
+    try std.testing.expectEqual(@as(u21, 'a'), snap.cells[2].codepoint); // 2칸 밀림
+    try std.testing.expectEqual(@as(u21, 'b'), snap.cells[3].codepoint);
+    try std.testing.expectEqual(@as(u16, 2), snap.cursor.col); // 조합 끝 = preedit_width(2)와 일치
 }
 
 test "preedit falls back to overlay when shifting would clip trailing content" {

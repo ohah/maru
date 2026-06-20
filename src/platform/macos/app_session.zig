@@ -997,6 +997,11 @@ pub const AppSession = struct {
     // 펼치기 버튼만 남는다. 폭(pt)은 sidebar_width_pt에 보존돼 펼치면 복원된다. chrome_minimal(quick terminal)과
     // 달리 메인 창 전용 토글이라 별도 플래그 — refreshCellMetrics가 둘 다 0으로 환산한다.
     sidebar_collapsed: bool = false,
+    // 상단 타이틀바 띠(backing px) — 네이티브 타이틀바를 숨겼으므로(신호등만) 그 높이만큼 '터미널 영역'을 아래로 들여
+    // 신호등·헤더 아이콘이 있는 상단 줄과 pane 탭 바·서페이스가 겹치지 않게 한다(cmux식: 상단 타이틀바 → 탭 → 본문).
+    // termRect.y/h와 spawn grid(gridFromBacking 호출의 padding.top)에 같이 적용해 단일 출처. quick terminal(chrome_minimal,
+    // borderless·신호등 없음)이면 0. refreshCellMetrics가 cell 높이에서 파생한다(보통 한 줄).
+    titlebar_strip_px: u32 = 0,
     // 마지막 resize의 backing(drawable) 픽셀 크기. split된 panel의 leaf rect 계산(터미널 영역 = backing −
     // 사이드바)에 쓴다. 첫 resize 전엔 0 — 그땐 단일 leaf라 rect.w/h가 0이어도 활성 frame은 origin에 그려져
     // 무해하다(split은 창이 떠 backing이 잡힌 뒤에야 가능). resize가 갱신한다.
@@ -1294,7 +1299,7 @@ pub const AppSession = struct {
         // 테스트·창 미상) 폴백. gridFromBacking은 resize 경로와 같은 단일 출처라 첫 grid와 이후 resize가 일치한다.
         var spawn_config = config;
         if (config.width_px > 0 and config.height_px > 0) {
-            spawn_config.size = gridFromBacking(config.width_px, config.height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px, self.window_padding_px);
+            spawn_config.size = gridFromBacking(config.width_px, config.height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px, self.gridPadding());
         }
         // MARU_DEBUG 관측: 첫 셸 spawn grid가 무슨 입력(창 backing px·scale·cell·사이드바)에서 어떻게 나왔는지
         // 한 줄로 남긴다. PTY winsize=surface grid=이 값이라, 셸 COLUMNS(첫 프롬프트 PROMPT_EOL_MARK % 폭)와
@@ -1359,12 +1364,23 @@ pub const AppSession = struct {
     /// 경계/창 가장자리까지 꽉 차고, padding은 paneTermRect가 셀 그리드 영역에만 inset한다. backing 크기는 마지막
     /// resize 값이고, 첫 resize 전(0)이면 폭/높이가 0이라 단일 leaf가 origin에만 그려진다(무해).
     fn termRect(self: *const AppSession) app.SplitRect {
+        // 상단 타이틀바 띠(titlebar_strip_px)만큼 터미널 영역을 아래로 들인다 — 신호등·헤더 아이콘 줄과 pane 탭 바·
+        // 서페이스가 안 겹친다(cmux식). 사이드바는 별도(좌측 전체 높이) — 띠는 터미널 영역에만. 단일 출처라 grid·
+        // 렌더 origin·마우스 hit-test·IME가 함께 띠 아래로 정합한다.
         return .{
             .x = self.sidebar_width_px,
-            .y = 0,
+            .y = self.titlebar_strip_px,
             .w = self.backing_width_px -| self.sidebar_width_px,
-            .h = self.backing_height_px,
+            .h = self.backing_height_px -| self.titlebar_strip_px,
         };
+    }
+
+    /// gridFromBacking(spawn grid)용 padding — window padding에 상단 타이틀바 띠를 top으로 더해 termRect.y 들임과
+    /// 같은 양을 spawn grid에서도 빼게 한다(spawn grid ↔ 실제 pane grid 정합, PR8 spawn-크기 레이스 회피와 같은 규율).
+    fn gridPadding(self: *const AppSession) PaddingPx {
+        var p = self.window_padding_px;
+        p.top +|= self.titlebar_strip_px;
+        return p;
     }
 
     /// per-pane 가로 탭 바의 backing 픽셀 높이 = cell 높이 + 위아래 tab_bar_pad_y_px 패딩(rich — 텍스트 세로 여유).
@@ -3577,6 +3593,9 @@ pub const AppSession = struct {
         // 그걸 쓴다 — 슬롯 높이도 cell 메트릭과 같은 단일 출처에서 파생한다.
         self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
         self.sidebar_header_height_px = self.cell_height_px * sidebar_header_height_ratio_milli / 1000;
+        // 상단 타이틀바 띠 = 한 셀 줄(사용자 요청 "탭은 한칸 밑으로"). 신호등·헤더 아이콘이 이 줄, 탭 바는 그 아래.
+        // quick terminal(chrome_minimal — 신호등 없는 borderless)이면 0.
+        self.titlebar_strip_px = if (self.chrome_minimal) 0 else self.cell_height_px;
         // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
         self.rebuildSidebar() catch {};
         // 폰트/DPI 변경을 활성 surface 코어에 즉시 반영(kitty 자동 크기 advance용 — renderFrame 안전망보다
@@ -3629,7 +3648,7 @@ pub const AppSession = struct {
         self.refreshCellMetrics();
         _ = self.renderer_state.atlas.invalidate(.font_size_changed);
         if (self.backing_width_px > 0 and self.backing_height_px > 0) {
-            const grid = gridFromBacking(self.backing_width_px, self.backing_height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px, self.window_padding_px);
+            const grid = gridFromBacking(self.backing_width_px, self.backing_height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px, self.gridPadding());
             self.resizeActiveTabPanes() catch {};
             self.recomputeActivePaneRect();
             self.last_resize_size = grid;
@@ -5574,7 +5593,7 @@ pub const AppSession = struct {
         // grid(cols/rows)를 Swift가 아니라 app session이 backing 픽셀 + 자기 cell 메트릭에서 직접
         // 계산한다. init이 메트릭을 미리 뽑으므로 cell 크기는 항상 준비돼 있어, Swift가 첫 resize에서
         // placeholder 크기로 cols/rows를 잘못 잡던(창과 grid가 어긋나던) 문제가 사라진다.
-        const size = gridFromBacking(width_px, height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px, self.window_padding_px);
+        const size = gridFromBacking(width_px, height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px, self.gridPadding());
         const size_changed = self.last_resize_size == null or
             self.last_resize_size.?.cols != size.cols or self.last_resize_size.?.rows != size.rows;
         // 같은 size+scale이면 비싼 재작업(TerminalCore.resize alloc/memcpy + PTY winsize/SIGWINCH)을
@@ -6385,16 +6404,29 @@ pub const AppSession = struct {
         return chrome.components.sidebar.inSidebar(x_px, self.sidebar_width_px);
     }
 
-    /// (x,y backing px)가 사이드바 헤더의 '빈' 영역(아이콘·검색이 아닌 곳 — 신호등 주변 빈 공간 포함)인가. Swift가
-    /// 1이면 네이티브 타이틀바처럼 창 이동(performDrag)·더블클릭 확대(zoom)를 한다. MaruMetalTerminalView는
-    /// mouseDownCanMoveWindow=false라(터미널/사이드바가 자체 마우스 사용) 콘텐츠 자동 드래그가 없고, 이 '빈 헤더'만
-    /// 창 chrome 드래그 영역이다. headerHit==.none(아이콘·검색 제외)이 빈 영역이고, 사이드바 접힘/헤더 없음이면 false.
+    /// (x,y backing px)가 창 chrome의 '빈' 영역(아이콘·검색·접힘 버튼이 아닌 곳)인가. Swift가 1이면 네이티브 타이틀바처럼
+    /// 창 이동(performDrag)·더블클릭 확대(zoom)를 한다. MaruMetalTerminalView는 mouseDownCanMoveWindow=false라(터미널/
+    /// 사이드바가 자체 마우스 사용) 콘텐츠 자동 드래그가 없고, 여기만 창 드래그 영역이다. 두 부분:
+    ///   ① 사이드바 헤더(펼침, 좌측)의 빈 영역 — headerHit==.none(아이콘·검색 제외, 신호등 옆 빈 공간 포함).
+    ///   ② 상단 타이틀바 띠(터미널 위·접힘 시 전체)의 빈 영역 — y<titlebar_strip_px, 접힘 ◧ 펼치기 버튼은 제외(클릭).
+    /// quick terminal(chrome_minimal — 신호등 없는 borderless)이면 항상 false.
     pub fn isWindowDragRegion(self: *const AppSession, x_px: f64, y_px: f64) bool {
-        if (self.sidebar_width_px == 0 or self.sidebar_header_height_px == 0) return false;
-        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
-        if (y_px < 0 or y_px >= @as(f64, @floatFromInt(self.sidebar_header_height_px))) return false;
-        if (!self.inSidebar(x_px)) return false;
-        return chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px) == .none;
+        if (self.chrome_minimal) return false;
+        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px) or y_px < 0) return false;
+        // ① 사이드바 헤더(펼침): 3줄 헤더의 빈 영역.
+        if (self.sidebar_width_px > 0 and self.sidebar_header_height_px > 0 and self.inSidebar(x_px)) {
+            if (y_px >= @as(f64, @floatFromInt(self.sidebar_header_height_px))) return false;
+            return chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px) == .none;
+        }
+        // ② 상단 타이틀바 띠(터미널 위, 또는 접힘 시 전체 폭): 한 줄. 접힘 ◧ 펼치기 버튼 위면 드래그 아님(클릭).
+        if (self.titlebar_strip_px > 0 and y_px < @as(f64, @floatFromInt(self.titlebar_strip_px))) {
+            if (self.collapsedToggleRect()) |r| {
+                const rx: f64 = @floatFromInt(r.x);
+                if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false;
+            }
+            return true;
+        }
+        return false;
     }
 
     /// 사이드바 y → 탭 슬롯 인덱스(순수 `sidebarSlot` 래퍼 — 슬롯 높이·탭 수로 판정).
@@ -8062,6 +8094,7 @@ test "window padding insets only the cell grid, not chrome (termRect/paneBarRect
     // 결정적 padding(scale 1000 기본이라 appearance 8/4가 그대로 8/4px이지만 명시 고정).
     session.window_padding_px = .{ .left = 8, .right = 8, .top = 4, .bottom = 4 };
     session.cell_height_px = 18; // 탭 바 높이 결정적(bar_h = cell_height + 2·tab_bar_pad_y)
+    session.titlebar_strip_px = 0; // 상단 타이틀바 띠는 별도 테스트 — 여기선 window padding/grid 수학만 격리
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
 
@@ -8114,6 +8147,7 @@ test "asymmetric window padding insets paneTermRect by left/top and grid by left
     // 비대칭: 좌 10·우 20·상 4·하 8.
     session.window_padding_px = .{ .left = 10, .right = 20, .top = 4, .bottom = 8 };
     session.cell_height_px = 18; // 탭 바 높이 결정적
+    session.titlebar_strip_px = 0; // 상단 타이틀바 띠는 별도 테스트 — 여기선 비대칭 padding/grid 수학만 격리
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
 
@@ -8383,7 +8417,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
         });
         defer session.deinit();
         // spawn 크기 = gridFromBacking(창 px, 세션 자신의 cell·사이드바 메트릭) — resize 경로와 같은 단일 출처.
-        const expected = gridFromBacking(1600, 900, session.cell_width_px, session.cell_height_px, session.sidebar_width_px, session.window_padding_px);
+        const expected = gridFromBacking(1600, 900, session.cell_width_px, session.cell_height_px, session.sidebar_width_px, session.gridPadding()); // spawn은 gridPadding(상단 띠 포함)을 쓴다
         const got = session.activePane().activeTerm().surface.core.size;
         try std.testing.expectEqual(expected, got);
         try std.testing.expect(got.cols != 80 or got.rows != 24); // 80×24 폴백이 아니다(창이 더 넓어 grid가 다름)
@@ -8404,7 +8438,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
         });
         defer session.deinit();
         // 진단으로 확인됨: 2x에서 cell=17×37·sidebar_px=360·grid 91×32. init의 spawn 그리드는 정확하다(불일치 없음).
-        const expected = gridFromBacking(1920, 1200, session.cell_width_px, session.cell_height_px, session.sidebar_width_px, session.window_padding_px);
+        const expected = gridFromBacking(1920, 1200, session.cell_width_px, session.cell_height_px, session.sidebar_width_px, session.gridPadding()); // spawn은 gridPadding(상단 띠 포함)을 쓴다
         try std.testing.expectEqual(expected, session.activePane().activeTerm().surface.core.size);
     }
     // backing px 0(헤드리스·창 미상) — cols/rows로 폴백 spawn.
@@ -10926,18 +10960,18 @@ test "pane reserves a top tab-bar strip and renders a bar chrome cell" {
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    // 단일 panel: 터미널 영역(active_pane_rect)은 사이드바 옆·바 아래(y = 바 높이)에서 시작, 높이가 바만큼 줄었다.
+    // 단일 panel: 터미널 영역(active_pane_rect)은 사이드바 옆·상단 타이틀바 띠 + 바 아래(y = 띠 + 바 높이)에서 시작.
     try std.testing.expectEqual(session.sidebar_width_px, session.active_pane_rect.x);
-    try std.testing.expectEqual(session.paneBarHeightPx(), session.active_pane_rect.y);
+    try std.testing.expectEqual(session.titlebar_strip_px + session.paneBarHeightPx(), session.active_pane_rect.y);
     try std.testing.expect(session.active_pane_rect.h < session.backing_height_px);
 
     // tick이 바 chrome 셀을 포함해 크래시 없이 돈다. chrome(바 배경)은 cells 맨 앞에 prepend된다 —
-    // 첫 셀은 바 top(origin_y = leaf rect top = 0)·sentinel UV(slot_id 0)·불투명 bg.
+    // 첫 셀은 바 top(origin_y = leaf rect top = 상단 띠)·sentinel UV(slot_id 0)·불투명 bg.
     _ = try session.tick();
     const frame = session.metalFrame();
     try std.testing.expect(frame.cell_count >= 1);
     const first = frame.cells.?[0];
-    try std.testing.expectEqual(@as(u32, 0), first.origin_y);
+    try std.testing.expectEqual(session.titlebar_strip_px, first.origin_y);
     try std.testing.expectEqual(@as(u32, 0), first.slot_id);
     try std.testing.expectEqual(@as(u32, 0xFF), first.background >> 24); // 불투명 바 배경
 }
@@ -10972,9 +11006,9 @@ test "pane tab bar draws Term-title tabs with an active-Term highlight" {
     try std.testing.expect(frame.cell_count >= 2);
     const c0 = frame.cells.?[0]; // 바 배경(전체 폭)
     const c1 = frame.cells.?[1]; // 활성 Term 탭 하이라이트(세그먼트)
-    try std.testing.expectEqual(@as(u32, 0), c0.origin_y);
+    try std.testing.expectEqual(session.titlebar_strip_px, c0.origin_y); // 바 top = 상단 타이틀바 띠
     try std.testing.expectEqual(@as(u32, 0), c0.slot_id);
-    try std.testing.expectEqual(@as(u32, 0), c1.origin_y);
+    try std.testing.expectEqual(session.titlebar_strip_px, c1.origin_y);
     try std.testing.expectEqual(@as(u32, 0), c1.slot_id);
     // 하이라이트(c1)는 활성 Term(1) 세그먼트 = col tab_w(2탭이라 cols/2)에서 시작 — 바 배경(col 0)과 다르다.
     try std.testing.expect(c1.col > 0);
@@ -11018,10 +11052,11 @@ test "vertical split renders the bottom pane tab bar at its own y (not overlappi
         const c = frame.cells.?[i];
         // chrome 바 셀: slot_id 0(배경) + row 0 + sentinel UV(u0=-1) + 불투명 bg.
         if (c.slot_id == 0 and c.row == 0 and c.u0 == -1.0 and (c.background >> 24) == 0xFF) {
-            if (c.origin_y == 0) found_top_bar = true;
-            if (c.origin_y > 0) found_bottom_bar = true;
-            if (c.origin_y > 0 and c.background == active_bg) found_active_hl = true; // 아래(활성) = 밝게
-            if (c.origin_y == 0 and c.background == inactive_bg) found_inactive_hl = true; // 위(비활성) = dim
+            // 위 pane 바 = 상단 타이틀바 띠(strip), 아래 pane 바 = 그보다 아래(strip + 위 pane 높이).
+            if (c.origin_y == session.titlebar_strip_px) found_top_bar = true;
+            if (c.origin_y > session.titlebar_strip_px) found_bottom_bar = true;
+            if (c.origin_y > session.titlebar_strip_px and c.background == active_bg) found_active_hl = true; // 아래(활성) = 밝게
+            if (c.origin_y == session.titlebar_strip_px and c.background == inactive_bg) found_inactive_hl = true; // 위(비활성) = dim
         }
     }
     try std.testing.expect(found_top_bar);
@@ -11068,8 +11103,8 @@ test "clicking a tab in the pane bar switches to that Term" {
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
 
-    // 탭 바는 단일 panel이라 터미널 영역 전체 폭의 상단 strip(y in [0, 바 높이)). 탭 0 = 바 좌단, 탭 1 = 바 우반.
-    const bar_y: f64 = 1; // 바 안(y < 바 높이)
+    // 탭 바는 단일 panel이라 터미널 영역(상단 타이틀바 띠 아래) 전체 폭의 상단 strip. 탭 0 = 바 좌단, 탭 1 = 바 우반.
+    const bar_y: f64 = @as(f64, @floatFromInt(session.titlebar_strip_px)) + 1; // 띠 아래 바 안(y in [띠, 띠+바높이))
     const left_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 30); // 탭 0 세그먼트(사이드바 우측 리사이즈 밴드보다 안쪽)
     session.mouse(1, left_tab_x, bar_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term); // 탭 0으로 전환
@@ -12443,7 +12478,7 @@ test "isWindowDragRegion: only empty header area drags the window (not icons/sea
     const icon_y: f64 = @as(f64, @floatFromInt(session.cell_height_px)) * 0.5; // 아이콘 줄(row 0)
     // 헤더 빈 영역(줄0 좌측 = 신호등 영역 옆 빈 공간) → 드래그 영역.
     try std.testing.expect(session.isWindowDragRegion(2 * cw, icon_y));
-    // 우측 아이콘(⚙/+) → 드래그 아님(클릭 대상).
+    // 우측 아이콘(◧/⚙/+) → 드래그 아님(클릭 대상).
     const gear_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 3 * cw;
     try std.testing.expect(!session.isWindowDragRegion(gear_x, icon_y));
     // 검색 줄 → 드래그 아님.
@@ -12452,11 +12487,18 @@ test "isWindowDragRegion: only empty header area drags the window (not icons/sea
     // 헤더 아래 카드 영역 → 드래그 아님.
     const card_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + 5;
     try std.testing.expect(!session.isWindowDragRegion(2 * cw, card_y));
-    // 터미널 본문(사이드바 밖) → 드래그 아님.
-    try std.testing.expect(!session.isWindowDragRegion(@floatFromInt(session.active_pane_rect.x + 50), icon_y));
-    // 사이드바 접힘(width 0) → 헤더 없음, 드래그 아님.
-    session.sidebar_width_px = 0;
-    try std.testing.expect(!session.isWindowDragRegion(2 * cw, icon_y));
+    // 터미널 위 타이틀바 띠(y<strip) → 드래그 영역(② cmux식 상단 띠).
+    const term_x: f64 = @floatFromInt(session.active_pane_rect.x + 50);
+    try std.testing.expect(session.isWindowDragRegion(term_x, @as(f64, @floatFromInt(session.titlebar_strip_px)) * 0.5));
+    // 터미널 '본문'(띠 아래 y≥strip) → 드래그 아님(셀 선택).
+    try std.testing.expect(!session.isWindowDragRegion(term_x, @as(f64, @floatFromInt(session.titlebar_strip_px)) + 5));
+    // 접힘: 전체 폭 타이틀바 띠가 드래그, 단 ◧ 펼치기 버튼 위는 아님(클릭).
+    session.toggleSidebarCollapsed();
+    const strip_y: f64 = @as(f64, @floatFromInt(session.titlebar_strip_px)) * 0.5;
+    try std.testing.expect(session.isWindowDragRegion(2 * cw, strip_y)); // 띠 빈 곳
+    const btn = session.collapsedToggleRect().?;
+    try std.testing.expect(!session.isWindowDragRegion(@as(f64, @floatFromInt(btn.x)) + 1, strip_y)); // ◧ 버튼 위
+    session.toggleSidebarCollapsed(); // 원복
 }
 
 // 사이드바 접기 토글: ◧ 클릭/토글 → 폭 0(완전 숨김) + pt 보존, 좌상단 펼치기 버튼 클릭 → 폭 복원. macOS 게이트.

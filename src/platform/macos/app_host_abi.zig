@@ -479,6 +479,13 @@ pub export fn maru_macos_app_session_take_bell(session: ?*AppSession) u32 {
     return if (app_session.takeBell()) 1 else 0;
 }
 
+// view options(⚙) 사이드바 토글이 바뀌어 config 파일 반영이 필요하면 1(플래그 비움), 없으면 0. Swift가 tick마다
+// 호출해 1이면 serialize_sidebar_config로 받은 텍스트를 config 경로에 atomic write한다(앱→config). session null=0.
+pub export fn maru_macos_app_session_take_sidebar_config_dirty(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeSidebarConfigDirty()) 1 else 0;
+}
+
 // OSC 7로 셸이 보고한 현재 작업 디렉터리(percent-decode된 경로). 반환 버퍼는 Zig(core) 소유로
 // 다음 OSC 7/RIS/destroy까지 유효하다. 한 번도 안 받았으면 len 0. Swift가 창 제목에 쓴다.
 pub export fn maru_macos_app_session_cwd(

@@ -579,6 +579,7 @@ bool maru_metal_renderer_draw(
     const MaruAppHostMetalCell *sidebar_cells,
     size_t sidebar_cell_count,
     uint32_t sidebar_slot_height_px,
+    uint32_t sidebar_header_height_px,
     /* C4b: chrome rich GPU quad 프리미티브(둥근 사각형). NULL/0이면 안 그림(tui 테마). 셀 패스 아래
        (배경 레이어)에 별개 파이프라인으로 그린다. */
     const MaruAppHostGpuQuad *gpu_quads,
@@ -695,12 +696,13 @@ bool maru_metal_renderer_draw(
         //    (coretext_frame_builder.sidebarGlyphRow: row=slot*32 + line_count*4 + line_index). line_count줄(각
         //    1×cell)을 슬롯 안 블록으로 세로 중앙 정렬하고 line_index번째 줄에 ch 높이 + 좌측 여백(cw×0.5)으로 그린다.
         const float slot_h = (sidebar_slot_height_px > 0u) ? (float)sidebar_slot_height_px : ch;
+        const float sidebar_header_px = (float)sidebar_header_height_px; // 상단 헤더(검색바·아이콘)만큼 셀을 아래로 민다
         const float glyph_pad = cw * 0.5f; // 제목 텍스트 좌측 여백(폰트 크기에 비례)
         for (size_t i = 0; i < sidebar_cells_n; i++) {
             const MaruAppHostMetalCell sc = sidebar_cells[i];
             float py_top, cell_h, sx_origin;
             if (sc.slot_id == 0u) { // 밴드/배경 — row=slot, 슬롯 전체, 여백 없음
-                py_top = (float)sc.row * slot_h;
+                py_top = (float)sc.row * slot_h + sidebar_header_px;
                 cell_h = slot_h;
                 sx_origin = 0.0f;
             } else { // 카드 glyph — row=slot*32 + line_count*4 + line_index 디코드 후 슬롯 안 블록 중앙 배치
@@ -708,7 +710,7 @@ bool maru_metal_renderer_draw(
                 const uint32_t rem = sc.row % 32u;
                 const uint32_t line_count = rem / 4u;  // 카드 줄 수(1~4)
                 const uint32_t line_index = rem % 4u;  // 그 줄 위치(0=맨 위)
-                const float slot_top = (float)slot_idx * slot_h;
+                const float slot_top = (float)slot_idx * slot_h + sidebar_header_px;
                 const float block_h = (float)line_count * ch;
                 const float block_top = slot_top + (slot_h - block_h) * 0.5f; // line_count줄 블록을 슬롯 세로 중앙
                 py_top = block_top + (float)line_index * ch;

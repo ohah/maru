@@ -817,6 +817,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.sidebar_cells,        // 사이드바 셀(탭 엔트리) — origin 0에 그림
             frame.sidebar_cell_count,
             frame.sidebar_slot_height_px, // 탭 슬롯 높이(≈2.5×cell) — 사이드바 셀 세로 배치
+            frame.sidebar_header_height_px, // 상단 헤더(검색바·아이콘) 높이 — 사이드바 셀을 이만큼 아래로
             frame.gpu_quads,              // C4b: chrome rich 둥근 사각형(tui면 NULL — Swift는 패스스루만)
             frame.gpu_quad_count,
             frame.modal_cells_start,      // C4b 모달: over quad를 모달 텍스트 앞에 끼우는 분할점(패스스루)

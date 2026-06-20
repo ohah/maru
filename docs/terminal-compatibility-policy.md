@@ -22,7 +22,7 @@ Maru v1은 Ghostty보다 더 많은 터미널 기능을 제공하는 것이 목�
 
 | 영역 | Ghostty가 취한 방향 | Maru v1 기본 정책 |
 | --- | --- | --- |
-| `TERM` / terminfo | 자체 terminfo와 `xterm-ghostty` 기본값을 사용하고, 필요하면 `xterm-256color`로 fallback한다. | `xterm-256color`를 기본값으로 둔다. 자체 `xterm-maru`/`maru` terminfo는 opt-in 실험으로 시작한다. |
+| `TERM` / terminfo | 자체 terminfo와 `xterm-ghostty` 기본값을 사용하고, 필요하면 `xterm-256color`로 fallback한다. | 자체 `xterm-maru` terminfo를 **기본값**으로 둔다(embed→자기 캐시 자동 컴파일 + `TERMINFO` env). 컴파일 실패 시 `xterm-256color` 자동 폴백 — Ghostty와 같은 방식. |
 | OSC52 clipboard | OSC52를 지원한다. 읽기는 사용자 확인, 쓰기는 기본 허용에 가깝다. | OSC52는 지원하되 읽기와 쓰기 모두 기본 `ask`로 둔다. |
 | bracketed paste | bracketed paste를 지원하고 paste protection을 기본 ON으로 둔다. bracketed paste는 기본적으로 safe로 본다. | bracketed paste와 paste protection은 v1 필수다. bracketed paste를 safe로 보되, 더 엄격한 설정을 열 수 있게 한다. |
 | shell integration | 기본 detect로 자동 주입하고 OSC 133/OSC 7, cwd 보고, ssh/sudo 보조 기능까지 제공한다. | 자동 주입하지 않는다. v1은 명시 opt-in zsh hook부터 시작한다. |
@@ -33,16 +33,30 @@ Maru v1은 Ghostty보다 더 많은 터미널 기능을 제공하는 것이 목�
 
 ## `TERM` / terminfo
 
-v1 기본값:
+기본값:
 
 ```text
-TERM=xterm-256color
+TERM=xterm-maru          # 자체 terminfo. 컴파일 실패 시 xterm-256color로 자동 폴백
+TERMINFO=~/.cache/maru/terminfo   # embed 소스를 자동 컴파일한 위치(자식 셸에만 주입)
 COLORTERM=truecolor
 ```
 
-이 선택은 멋은 덜하지만 실사용 위험이 작다. 많은 CLI와 원격 서버는 `xterm-256color`를 이미 알고 있다. 반대로 `xterm-maru`나 `maru`를 기본값으로 두면 원격 서버에 terminfo가 없을 때 `vim`, `tmux`, `less`, `htop` 같은 프로그램이 색상, 키 입력, alternate screen을 잘못 처리할 수 있다.
+**전환의 핵심은 "로컬을 안 깨지게" 하는 것**이다. 단순히 기본 `TERM`을 `xterm-maru`로 바꾸면, 로컬
+terminfo DB에 항목이 없는 사용자의 `vim`/`tmux`/`less`가 `unknown terminal type`으로 깨진다. 그래서
+Ghostty와 같은 방식을 쓴다(`src/termio/Exec.zig` 동작 비교): terminfo 소스를 바이너리에 **embed**하고,
+자식 셸을 띄울 때 maru 자기 캐시(`~/.cache/maru/terminfo`)에 **자동 컴파일**(`tic`)해 `TERMINFO`를 거기로
+가리킨다(`pty/macos.zig`의 `resolveTerm`). `~/.terminfo`나 시스템을 안 건드리는 **비침습** 방식이고,
+`tic`이 없거나 컴파일이 실패하면 `xterm-256color`로 **자동 폴백**해 로컬이 절대 안 깨진다. 프로세스당
+1회만 컴파일해 캐시한다.
 
-손해도 명확하다. Maru가 OSC52, bracketed paste, future keyboard protocol 같은 기능을 실제로 지원하더라도, `TERM=xterm-256color`만 보고 기능을 감지하는 프로그램은 Maru 고유 기능을 모를 수 있다. v1은 이 discoverability 손해를 받아들이고, SSH/원격 호환성과 안전한 fallback을 먼저 얻는다.
+이로써 Maru 고유 기능(`Sync`·truecolor)을 terminfo로만 감지하는 프로그램도 무설정으로 인식한다(특히
+tmux가 `Sync`를 읽어 레이아웃 플리커가 사라진다). 사용자는 `term = "xterm-256color"`로 언제든 되돌릴 수
+있다.
+
+**남는 위험은 원격(SSH)뿐이다.** `TERMINFO`는 로컬 env라 ssh가 전달하지 않으므로, **평범한 `ssh`**로
+항목 없는 원격에 접속하면 깨질 수 있다. 이건 `maru ssh`(원격에 terminfo를 심고 exec)가 푼다 — 평범한
+`ssh`까지 자동으로 덮으려면 shell-integration `ssh` alias가 필요한데 그건 opt-in 영역이다(Ghostty도
+plain ssh 깨짐은 감수하고 `ssh-env`/`ssh-terminfo`를 기본 off로 둔다).
 
 ### 런처 색-강제 override 제거 (`CLICOLOR_FORCE` / `FORCE_COLOR`)
 
@@ -56,29 +70,26 @@ Maru는 자식 셸 env에 `TERM_PROGRAM=ghostty`를 주입한다(부모가 남�
 
 이건 알림 호환을 위한 **식별값**이며 `TERM`(터미널 capability)과는 별개다 — `TERM`은 `config.term`으로 사용자가 바꿀 수 있지만 `TERM_PROGRAM`은 알림 식별용 고정값이다. 트레이드오프: Maru가 진짜 Ghostty는 아니므로 Ghostty 특화 시퀀스를 가정하는 프로그램과 미세한 차이가 날 수 있으나, Maru가 미지원하는 시퀀스는 무시하므로 무해하다. `TERM_PROGRAM_VERSION`은 주입하지 않는다(현재 식별 whitelist는 키 이름만 보므로 불요).
 
-**현재 상태 — opt-in `xterm-maru` 추가됨**: 자체 terminfo 항목 `terminfo/maru.terminfo`(primary
-`xterm-maru`, 짧은 alias `maru`)가 있다. Maru가 **실제 지원하는 캡만 정직하게** 선언한다 —
-`use=xterm-256color` 토대 위에 동기화 출력(`Sync`, DECSET 2026)과 truecolor(`Tc`)를 더한다.
-`Sync`는 tmux가 재그리기를 한 프레임으로 묶게 해 tmux+SSH 레이아웃 플리커를 직접 고친다. 로컬
-설치는 `mise run install-terminfo`(→ `~/.terminfo`, sudo 불필요), 적합성 검증은
-`mise run terminfo-check`(`tic` 클린 컴파일 + `Sync`의 2026 begin/end 바이트 round-trip + `Tc`
-실측 — "추측 말고 캡처"). 켜는 법은 [설정 파일](configuration.md)의 `term` 절. **기본 `term`은
-여전히 `xterm-256color`다.**
+**현재 상태 — 기본값 `xterm-maru`로 전환됨**: 자체 terminfo 항목 `terminfo/maru.terminfo`(primary
+`xterm-maru`, alias `maru`)를 바이너리에 embed해, 자식 셸마다 자기 캐시에 자동 컴파일하고 `TERMINFO`로
+가리킨다(위 본문). `use=xterm-256color` 토대 + 동기화 출력(`Sync`, 2026) + truecolor(`Tc`)를 정직하게
+선언한다. 적합성 검증은 `mise run terminfo-check`(`tic` 클린 컴파일 + `Sync` 2026 begin/end round-trip +
+`Tc` — "추측 말고 캡처"). `mise run install-terminfo`는 **Maru 밖 셸**에서 쓸 때만 필요하다(Maru 안에선
+자동 캐시로 충분).
 
-선행 조건 충족 현황:
+전환은 다음 선행 조건을 모두 채운 뒤 했다:
 
-- [x] terminfo 설치/배포/원격 fallback 정책을 사용자가 이해할 수 있게 문서화한다 —
-  [설정 파일](configuration.md)의 `term` 절(원격 미설치 시 깨짐·`maru ssh` 자동 전파·기본값 폴백 안내)과
-  이 문서.
-- [x] 원격 자동 전파 `maru ssh`(opt-in CLI 래퍼) + opt-in SSH smoke. 원격에 maru terminfo를 심고
-  평범한 ssh로 exec하며, `tic` 없음·설치 실패 시 `TERM=xterm-256color`로 폴백해 세션이 안 깨진다.
-  순수 로직(`src/cli/ssh.zig`)은 단위 테스트, end-to-end는 `mise run ssh-smoke`(`ssh localhost`, 환경
-  없으면 graceful skip). 레퍼런스: Ghostty `ghostty +ssh`(MIT, 동작만 비교 — clean-room).
-- [ ] `tests/oracle/` fixture로 주요 CSI/OSC/alternate screen 동작을 비교할 수 있다(남은 선행 조건).
+- [x] **로컬을 안 깨지게** — embed + 자동 캐시 컴파일 + `TERMINFO` env + `tic` 실패 시 `xterm-256color`
+  폴백(`pty/macos.zig` `resolveTerm`). 비침습(`~/.terminfo` 미변경).
+- [x] terminfo 설치/배포/원격 fallback 정책 문서화 — [설정 파일](configuration.md)의 `term` 절과 이 문서.
+- [x] 원격 자동 전파 `maru ssh`(embed·ControlMaster·캐시·command 안전) + opt-in SSH smoke. 순수 로직
+  (`src/cli/ssh.zig`)은 단위 테스트, e2e는 `mise run ssh-smoke`. 레퍼런스: Ghostty `ghostty +ssh`(동작 비교).
+- [x] `tests/oracle/` CSI/OSC/alternate screen 비교 — 기존 스위트(`alt_screen`·`scroll_region`·
+  `insert_delete_lines`·`cursor_save_restore` 등 + libvterm/Alacritty/Ghostty 3-way)로 충족. 전환의 두 캡은
+  `Sync`(렌더 타이밍 — 화면 골든 비관찰, 전용 단위 테스트가 검증)·`Tc`(색 — 문자 골든 비검증)라 새 골든 픽스쳐 실익이 없다.
 
-기본값 전환은 위 남은 조건(oracle fixture)을 채운 뒤 **별도 PR에서 사용자와 다시 논의한다** —
-전파+폴백이 충분히 무던해진 다음에 "벌어서" 얻는다(opt-in이어도 전파를 붙이면 원격에서 자동으로
-안전해져, 전환의 실익 자체가 작다).
+남는 위험은 **원격 plain-ssh**뿐이다(위 본문) — `maru ssh`로 덮고, 평범한 `ssh`까지의 자동화는
+shell-integration `ssh` alias(opt-in)의 후속 몫이다. Ghostty도 이 깨짐은 감수한다.
 
 ## OSC52 clipboard
 

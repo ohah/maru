@@ -634,6 +634,56 @@ const MacosLogin = struct {
     }
 };
 
+// `/bin/sh -c <cmd>`를 돌려 기다린다(POSIX). std.c에 노출이 없어 직접 선언한다(setenv/unsetenv와 같은 결).
+extern "c" fn system(command: [*:0]const u8) c_int;
+
+// terminfo 소스를 바이너리에 embed(빌드 import `maru_terminfo`, terminfo/maru.terminfo가 단일 출처).
+// cli/ssh.zig가 같은 import에 "작은따옴표 없음" comptime 가드를 걸어, 아래 `printf '%s' '<소스>'`
+// single-quote 인라인이 안전하다(가드가 깨지면 빌드 실패).
+const embedded_terminfo = @embedFile("maru_terminfo");
+
+const ResolvedTerm = struct { term: []const u8, terminfo_dir: ?[]const u8 };
+
+// 전환 #1(기본값 xterm-maru): 자식 셸에 줄 TERM/TERMINFO를 정한다. term이 "xterm-maru"면 embed된
+// 소스를 maru 자기 캐시(`~/.cache/maru/terminfo`)에 (없으면) 컴파일하고, xterm-maru가 해석되면
+// TERM=xterm-maru + TERMINFO=캐시로 쓴다 — 로컬 프로그램이 설치 없이 찾는다(비침습: ~/.terminfo 안 건드림).
+// tic이 없거나 컴파일 실패면 xterm-256color로 폴백 → 로컬이 절대 안 깨진다(Ghostty Exec.zig 동작 비교).
+// 프로세스 1회만 판정해 캐시한다(이후 spawn은 재사용 — 가벼운 race는 무해, 결과 동일). dir은 프로세스
+// 동안 모든 spawn이 env에 쓰므로 page_allocator로 의도적 leak(작은 문자열).
+var g_resolved_term: ?ResolvedTerm = null;
+
+fn resolveTerm(term: []const u8) ResolvedTerm {
+    if (!std.mem.eql(u8, term, "xterm-maru")) return .{ .term = term, .terminfo_dir = null };
+    if (g_resolved_term) |r| return r;
+    const r = computeMaruTerminfo();
+    g_resolved_term = r;
+    return r;
+}
+
+fn computeMaruTerminfo() ResolvedTerm {
+    const fallback = ResolvedTerm{ .term = "xterm-256color", .terminfo_dir = null };
+    const page = std.heap.page_allocator;
+    const home_z = std.c.getenv("HOME") orelse return fallback;
+    const home = std.mem.span(home_z);
+    const dir = std.fmt.allocPrintSentinel(page, "{s}/.cache/maru/terminfo", .{home}, 0) catch return fallback;
+    // 이미 해석되면 즉시 성공, 아니면 캐시에 컴파일하고 최종 해석 여부를 exit code로 돌려준다.
+    const cmd = std.fmt.allocPrintSentinel(
+        page,
+        "d=\"$HOME/.cache/maru/terminfo\"; TERMINFO=\"$d\" infocmp xterm-maru >/dev/null 2>&1 && exit 0; " ++
+            "mkdir -p \"$d\"; printf '%s' '{s}' | tic -x -o \"$d\" - 2>/dev/null; " ++
+            "TERMINFO=\"$d\" infocmp xterm-maru >/dev/null 2>&1",
+        .{embedded_terminfo},
+        0,
+    ) catch {
+        page.free(dir);
+        return fallback;
+    };
+    defer page.free(cmd);
+    if (system(cmd.ptr) == 0) return .{ .term = "xterm-maru", .terminfo_dir = dir }; // dir은 의도적 leak(프로세스 수명)
+    page.free(dir);
+    return fallback;
+}
+
 // env가 비어 있으면 부모 환경을 그대로 상속한다.
 // 명시 env가 있으면 execve가 요구하는 null-terminated envp 배열로 바꿔 child에게만 전달한다.
 const EnvStorage = struct {
@@ -702,6 +752,9 @@ const EnvStorage = struct {
         while (environ[index]) |entry| : (index += 1) {
             const slice = std.mem.span(entry);
             if (std.mem.startsWith(u8, slice, "TERM=") or std.mem.startsWith(u8, slice, "COLORTERM=")) continue;
+            // 부모(런처/상위 터미널)의 TERMINFO도 떨군다 — 아래에서 maru 캐시를 가리키거나, 폴백이면 안 준다.
+            // 부모 TERMINFO를 그대로 두면 xterm-maru를 엉뚱한 DB에서 찾아 못 찾을 수 있다.
+            if (std.mem.startsWith(u8, slice, "TERMINFO=")) continue;
             // 부모(런처/상위 터미널)가 남긴 TERM_PROGRAM(+VERSION)을 떨군다 — 아래에서 ghostty로 덮어쓴다(알림 식별용).
             if (std.mem.startsWith(u8, slice, "TERM_PROGRAM=") or std.mem.startsWith(u8, slice, "TERM_PROGRAM_VERSION=")) continue;
             // 런처(빌드 도구·부모 셸·CI)가 남긴 색-강제 override를 떨군다. supports-color(codex 등)는
@@ -720,7 +773,13 @@ const EnvStorage = struct {
             // append 인자 안에서 dupe하면 OOM 시 새므로(errdefer는 entries.items만 해제) appendOwnedEnv로 묶는다.
             try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, slice));
         }
-        try appendOwnedEnv(allocator, &entries, try std.fmt.allocPrintSentinel(allocator, "TERM={s}", .{term}, 0));
+        // 전환 #1: TERM이 xterm-maru면 embed 소스를 캐시에 컴파일하고 TERMINFO를 거기로, 안 되면
+        // xterm-256color 폴백(로컬 안 깨짐). 그 외 term은 그대로(사용자 명시값).
+        const resolved = resolveTerm(term);
+        try appendOwnedEnv(allocator, &entries, try std.fmt.allocPrintSentinel(allocator, "TERM={s}", .{resolved.term}, 0));
+        if (resolved.terminfo_dir) |dir| {
+            try appendOwnedEnv(allocator, &entries, try std.fmt.allocPrintSentinel(allocator, "TERMINFO={s}", .{dir}, 0));
+        }
         try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, "COLORTERM=truecolor"));
         // Claude Code/Codex 등 TUI는 데스크톱 알림을 보낼 터미널을 TERM_PROGRAM 화이트리스트
         // (iTerm.app/ghostty/kitty/WezTerm)로 식별한다 — maru는 그 명단에 없어 기본(auto)에선 OSC 9 알림을

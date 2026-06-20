@@ -2790,11 +2790,8 @@ pub const AppSession = struct {
             .previous_pane => self.focusPaneRelative(-1),
             // 전체 선택(⌘A) — 활성 surface 코어의 selection을 스크롤백+화면 전체로. clipboard 쓰기는 네이티브.
             .select_all => {
-                // 코어 mutate(스크롤백 읽음) — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
-                const s = self.activeSurface();
-                s.lockCore(self.io);
-                defer s.unlockCore(self.io);
-                s.core.selectAll();
+                // 선택 코어 mutate는 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
+                self.runtime.enqueueCoreCommand(self.activeSurface().id, .select_all, self.io) catch {};
             },
             // 화면+스크롤백 비우기(⌘K). 코어 mutate(셀·스크롤백)는 락 아래(리더 경합 방지, docs/io-render-threading.md
             // PR3). clearScreen이 "셸에 ^L을 보내 프롬프트를 다시 그릴지"를 돌려주면, form-feed는 락 밖에서 보낸다
@@ -3164,10 +3161,8 @@ pub const AppSession = struct {
         const cur = self.chrome_host.find.current;
         if (cur >= self.find_matches.items.len) return;
         const surface = self.activeSurface();
-        // scrollToAbs는 코어 변경 — 락 아래(docs/io-render-threading.md PR3).
-        surface.lockCore(self.io);
-        surface.core.scrollToAbs(self.find_matches.items[cur].start.row);
-        surface.unlockCore(self.io);
+        // scrollToAbs는 코어 mutate라 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
+        self.runtime.enqueueCoreCommand(surface.id, .{ .scroll_to_abs = self.find_matches.items[cur].start.row }, self.io) catch {};
     }
 
     /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거친다 —
@@ -3445,12 +3440,15 @@ pub const AppSession = struct {
         // 타이핑하면 live(바닥)로 돌아간다 — 과거를 보다가 입력하면 현재 화면으로 점프(표준 터미널).
         // 스크롤 중이었으면 즉시 다시 그리도록 metal_dirty도 세운다(echo 출력 전에라도 뷰 복귀).
         if (self.surface_initialized) {
-            // 코어 읽기+scrollToBottom(변경)은 락 아래(docs/io-render-threading.md PR3 — 리더 core.write 경합 방지).
+            // viewOffset 읽기는 메인 락-아래(§9.1), scrollToBottom mutate는 reader로 위임(full (a), §9 P3-4).
             const surface = self.activeSurface();
-            surface.lockCore(self.io);
-            defer surface.unlockCore(self.io);
-            if (surface.core.viewOffset() != 0) {
-                surface.core.scrollToBottom();
+            const scrolled = blk: {
+                surface.lockCore(self.io);
+                defer surface.unlockCore(self.io);
+                break :blk surface.core.viewOffset() != 0;
+            };
+            if (scrolled) {
+                self.runtime.enqueueCoreCommand(surface.id, .scroll_to_bottom, self.io) catch {};
                 self.metal_dirty = true;
             }
         }
@@ -3486,10 +3484,8 @@ pub const AppSession = struct {
     pub fn scroll(self: *AppSession, delta_up: i32) void {
         if (!self.surface_initialized) return;
         const surface = self.activeSurface();
-        // scrollViewport는 코어 변경 — 락 아래(docs/io-render-threading.md PR3).
-        surface.lockCore(self.io);
-        surface.core.scrollViewport(@as(isize, delta_up));
-        surface.unlockCore(self.io);
+        // scrollViewport는 코어 mutate라 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
+        self.runtime.enqueueCoreCommand(surface.id, .{ .scroll = @as(isize, delta_up) }, self.io) catch {};
         self.metal_dirty = true;
     }
 
@@ -3513,29 +3509,21 @@ pub const AppSession = struct {
         const active = self.activeSurface();
         // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
         // docs/io-render-threading.md PR3). writeInput은 락 밖(PR1 패턴).
-        var tracking: bool = undefined;
-        var reply_buf: ?[]u8 = null;
-        {
+        // mouse_tracking 읽기는 메인 락-아래(읽기 위임 안 함, §9.1). reportMouse(코어 mutate+응답)는 full (a)
+        // (docs/io-render-threading.md §9 P3-4)로 reader에 위임 — 휠 lines만큼 반복 enqueue, reader가 각 적용 후
+        // pendingResponse를 PTY로 흘린다.
+        const tracking = blk: {
             active.lockCore(self.io);
             defer active.unlockCore(self.io);
-            tracking = active.core.mouse_tracking != .none;
-            if (tracking and lines != 0) {
+            break :blk active.core.mouse_tracking != .none;
+        };
+        if (tracking) {
+            if (lines != 0) {
                 if (self.pxToCell(x_px, y_px)) |cell| {
                     const wb: u8 = if (lines > 0) 64 else 65;
                     var n: i32 = if (lines > 0) lines else -lines;
-                    while (n > 0) : (n -= 1) active.core.reportMouse(wb, cell.col, cell.row, cell.term_x_px, cell.term_y_px, true, false, 0);
-                    const reply = active.core.pendingResponse();
-                    if (reply.len > 0) {
-                        reply_buf = self.allocator.dupe(u8, reply) catch null;
-                        active.core.clearResponse();
-                    }
+                    while (n > 0) : (n -= 1) self.runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{ .button = wb, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = false, .mods = 0 } }, self.io) catch {};
                 }
-            }
-        }
-        if (tracking) {
-            if (reply_buf) |reply| {
-                defer self.allocator.free(reply);
-                self.runtime.writeInput(active.id, .{ .bytes = reply }) catch {};
             }
             return; // 휠을 앱이 소비 — 스크롤백/가로 스크롤 안 함
         }
@@ -3606,21 +3594,25 @@ pub const AppSession = struct {
     fn scrollSurfaceLines(self: *AppSession, surface: *app.Surface, lines: i32) void {
         if (lines == 0) return;
         const core = &surface.core;
-        // alt_active/alternate_scroll 모드 읽기 + encodeKey(코어 모드 읽음)는 리더 core.write와 경합하므로
-        // 락 아래(docs/io-render-threading.md PR3). encodeKey 직후 unlock해 writeInput(블로킹 가능 PTY 쓰기)을
-        // 락 밖에서 한다 — bytes는 함수-스택 key_buffer를 가리켜 unlock 후에도 유효.
-        core_mutex_blk: {
+        // alt+alternate_scroll 판정 + (alt면) encodeKey는 코어 read라 메인 락-아래(읽기는 위임 안 함, §9.1).
+        // non-alt의 scrollViewport(코어 mutate)는 full (a)(docs/io-render-threading.md §9 P3-4)로 reader에 위임한다.
+        var is_alt = false;
+        var key_buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+        var alt_len: usize = 0;
+        {
             surface.lockCore(self.io);
-            if (!(core.alt_active and core.alternate_scroll)) break :core_mutex_blk;
-            const key: terminal.input.Key = if (lines > 0) .arrow_up else .arrow_down;
-            var key_buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
-            const bytes = core.encodeKey(.{ .key = key }, &key_buffer) catch {
-                surface.unlockCore(self.io);
-                return;
-            };
-            surface.unlockCore(self.io);
-            // 시퀀스를 한 버퍼에 반복해 묶어 보낸다 — 줄마다 writeInput(쓰기 시스콜)을 하면 빠른
-            // 플릭에서 초당 수백 회가 되고, PTY 버퍼가 차면 나머지가 통째로 드랍된다.
+            defer surface.unlockCore(self.io);
+            if (core.alt_active and core.alternate_scroll) {
+                is_alt = true;
+                const key: terminal.input.Key = if (lines > 0) .arrow_up else .arrow_down;
+                const bytes = core.encodeKey(.{ .key = key }, &key_buffer) catch return;
+                alt_len = bytes.len;
+            }
+        }
+        if (is_alt) {
+            // alt screen + alternate scroll(DECSET 1007): 프로그램에 화살표 키를 보낸다(PTY write — core mutate 아님).
+            // 시퀀스를 한 버퍼에 반복해 묶어 보낸다 — 줄마다 writeInput을 하면 빠른 플릭에서 PTY 버퍼가 차 나머지가 드랍.
+            const bytes = key_buffer[0..alt_len];
             var batch: [512]u8 = undefined;
             const per_batch = batch.len / bytes.len;
             var remaining: u32 = @abs(lines);
@@ -3632,15 +3624,13 @@ pub const AppSession = struct {
                     @memcpy(batch[len..][0..bytes.len], bytes);
                     len += bytes.len;
                 }
-                // 쓰기 실패(PTY 버퍼 풀 등)는 남은 스크롤 입력 드랍일 뿐이라 중단한다.
-                self.runtime.writeInput(surface.id, .{ .bytes = batch[0..len] }) catch break;
+                self.runtime.writeInput(surface.id, .{ .bytes = batch[0..len] }) catch break; // 쓰기 실패 = 남은 스크롤 드랍, 중단
                 remaining -= count;
             }
             return;
         }
-        // break로 도달(non-alt 경로): 락은 아직 보유 중 — scrollViewport(코어 변경)까지 한 락으로 덮고 푼다.
-        core.scrollViewport(@as(isize, lines));
-        surface.unlockCore(self.io);
+        // non-alt: scrollViewport를 reader에 위임.
+        self.runtime.enqueueCoreCommand(surface.id, .{ .scroll = @as(isize, lines) }, self.io) catch {};
         self.metal_dirty = true;
     }
 
@@ -3674,23 +3664,10 @@ pub const AppSession = struct {
             if (last.col == cell.col and last.row == cell.row) return;
         }
         self.last_motion_cell = .{ .col = cell.col, .row = cell.row };
-        // reportMouse는 락 아래(response 생성), writeInput은 락 밖. 위 gate와 이 락 사이에 앱이 1003을 꺼도
-        // reportMouse 자체가 mouse_tracking 가드(.none이면 무동작)라 안전하다.
-        var reply_buf: ?[]u8 = null;
-        {
-            active.lockCore(self.io);
-            defer active.unlockCore(self.io);
-            active.core.reportMouse(3, cell.col, cell.row, cell.term_x_px, cell.term_y_px, true, true, @intCast(mods));
-            const reply = active.core.pendingResponse();
-            if (reply.len > 0) {
-                reply_buf = self.allocator.dupe(u8, reply) catch null;
-                active.core.clearResponse();
-            }
-        }
-        if (reply_buf) |reply| {
-            defer self.allocator.free(reply);
-            self.runtime.writeInput(active.id, .{ .bytes = reply }) catch {};
-        }
+        // reportMouse(코어 mutate + 응답)는 full (a)(docs/io-render-threading.md §9 P3-4)로 reader에 위임 — reader가
+        // 적용 후 pendingResponse를 PTY로 흘린다. button 3 = no-button motion(any-event 1003). 적용 시점에 앱이 1003을
+        // 꺼도 reportMouse 자체가 mouse_tracking 가드(.none이면 무동작)라 안전.
+        self.runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{ .button = 3, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = true, .mods = @intCast(mods) } }, self.io) catch {};
     }
 
     /// backing 픽셀 좌표를 (row, col) 셀로 변환한다(grid 안으로 clamp). 핵심: clamp를 float
@@ -3988,73 +3965,67 @@ pub const AppSession = struct {
         // shift+click은 선형 셀렉션 override, option+click은 블록 override(iTerm2 관례). mods: shift=4·option=8.
         // mouse_tracking 읽기 + reportMouse(코어 response 생성)는 락 아래(리더 core.write와 response 경합 방지,
         // docs/io-render-threading.md PR3). reporting 모드면 진행 중 셀렉션 autoscroll도 멈춘다. writeInput은 락 밖.
+        // mouse_tracking 읽기는 메인 락-아래(읽기는 위임 안 함 — §9.1). reportMouse(코어 mutate + PTY 응답)는
+        // full (a)(P3-4)로 reader에 위임 — reader가 적용 후 pendingResponse를 PTY로 흘린다(메인 직접 mutate 0).
         click_surface.lockCore(self.io);
         const do_report = core.mouse_tracking != .none and (mods & 4) == 0 and (mods & 8) == 0;
-        var report_reply: ?[]u8 = null;
+        click_surface.unlockCore(self.io);
         if (do_report) {
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
-            core.reportMouse(@intCast(button), col, row, cell.term_x_px, cell.term_y_px, kind != 3, kind == 2, @intCast(mods));
-            const reply = core.pendingResponse();
-            if (reply.len > 0) {
-                report_reply = self.allocator.dupe(u8, reply) catch null;
-                core.clearResponse();
-            }
-        }
-        click_surface.unlockCore(self.io);
-        if (do_report) {
-            if (report_reply) |reply| {
-                defer self.allocator.free(reply);
-                self.runtime.writeInput(self.activeSurface().id, .{ .bytes = reply }) catch {};
-            }
+            self.runtime.enqueueCoreCommand(click_surface.id, .{ .report_mouse = .{
+                .button = @intCast(button),
+                .col = col,
+                .row = row,
+                .x_px = cell.term_x_px,
+                .y_px = cell.term_y_px,
+                .pressed = kind != 3,
+                .motion = kind == 2,
+                .mods = @intCast(mods),
+            } }, self.io) catch {};
             return;
         }
         // 셀렉션은 left 버튼(0)만 시작한다 — tracking 아닌 상태의 right/middle 클릭은 무시(셀렉션·context 메뉴 없음).
         if (button != 0) return;
         const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
-        // 선택 변경(selectionStart/Extend/Clear/Word/Line)은 코어 mutate라 락 아래(docs/io-render-threading.md
-        // PR3 — 리더 core.write와 경합 방지; selectWordAt/LineAt는 스크롤백도 읽음). handleClick은 metal_dirty
-        // 직후 끝나므로 함수-스코프 defer로 풀어 switch 내 early return도 안전히 unlock한다.
-        click_surface.lockCore(self.io);
-        defer click_surface.unlockCore(self.io);
+        // 선택 코어 mutate(selectionStart/Extend/Clear/Word/Line)는 full (a)(docs/io-render-threading.md §9 P3-4)로
+        // reader에 위임한다 — read-modify-decide(kind 3 "이동 없는 클릭=해제")는 `select_extend_or_collapse` 명령으로
+        // reader가 락 아래 **원자 실행**(메인이 위임 후 옛 상태를 읽어 오판하던 문제 제거). 메인은 UI 상태
+        // (mouse_drag_selecting·drag_autoscroll·last_drag_col)만 만지고 코어는 안 만진다.
         switch (kind) {
             1 => {
                 self.mouse_drag_selecting = true;
                 self.drag_autoscroll = 0;
-                core.selectionStart(row, col);
-                if ((mods & 8) != 0) core.setSelectionBlock(true); // Option+드래그 = 블록(직사각형) 선택
+                self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_start = .{ .row = row, .col = col, .block = (mods & 8) != 0 } }, self.io) catch {};
             },
             2 => {
-                // 드래그가 활성 panel grid 위/아래 밖으로 나가면 자동 스크롤을 건다(tick이 수행). panel은
-                // active_pane_rect.y에서 시작하므로 위 경계는 그 y, 아래 경계는 y + grid 높이다(단일 panel이면
-                // window padding_y + 탭 바 높이 — 셀 렌더와 같은 출처라 경계가 정확히 맞는다).
+                // 드래그가 활성 panel grid 위/아래 밖으로 나가면 자동 스크롤을 건다(tick이 수행). grid 높이용 rows는
+                // 코어 read(메인 락-아래 — 읽기는 위임 안 함, §9.1). panel은 active_pane_rect.y에서 시작.
                 const pane_top: f64 = @floatFromInt(self.active_pane_rect.y);
-                const grid_height: f64 = @as(f64, @floatFromInt(core.size.rows)) * ch;
+                const rows: u16 = blk: {
+                    click_surface.lockCore(self.io);
+                    defer click_surface.unlockCore(self.io);
+                    break :blk core.size.rows;
+                };
+                const grid_height: f64 = @as(f64, @floatFromInt(rows)) * ch;
                 self.drag_autoscroll = if (y_px < pane_top) 1 else if (y_px > pane_top + grid_height) -1 else 0;
                 self.last_drag_col = col;
-                core.selectionExtend(row, col);
+                self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_extend = .{ .row = row, .col = col } }, self.io) catch {};
             },
             3 => {
                 self.drag_autoscroll = 0;
-                // 더블/트리플클릭 직후의 up은 그 선택을 건드리면 안 된다(단어가 1칸이면 "이동 없는
-                // 클릭" 판정에 걸려 즉시 해제돼 버린다).
+                // 더블/트리플클릭 직후의 up은 그 선택을 건드리면 안 된다(단어가 1칸이면 "이동 없는 클릭" 판정에 걸려 즉시 해제).
                 if (!self.mouse_drag_selecting) return;
                 self.mouse_drag_selecting = false;
-                core.selectionExtend(row, col);
-                // 이동 없는 클릭은 선택이 아니라 해제다(다른 터미널과 동일).
-                if (core.selection_anchor) |a| {
-                    if (core.selection_head != null and a.row == core.selection_head.?.row and a.col == core.selection_head.?.col) {
-                        core.selectionClear();
-                    }
-                }
+                self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_extend_or_collapse = .{ .row = row, .col = col } }, self.io) catch {};
             },
             4 => {
                 self.mouse_drag_selecting = false;
-                core.selectWordAt(row, col);
+                self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_word = .{ .row = row, .col = col } }, self.io) catch {};
             },
             5 => {
                 self.mouse_drag_selecting = false;
-                core.selectLineAt(row);
+                self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_line = row }, self.io) catch {};
             },
             else => return,
         }
@@ -4129,21 +4100,20 @@ pub const AppSession = struct {
         // selection_anchor/view_offset/selection_head 읽기 + scrollViewport/selectionExtend(코어 변경)는 리더
         // core.write와 경합 — 메서드 전체를 락 아래(docs/io-render-threading.md PR3). 짧은 메서드라 락 비용 무시 가능;
         // 함수가 metal_dirty 직후 끝나므로 함수-스코프 defer로 풀어 early return도 안전히 unlock.
-        surface.lockCore(self.io);
-        defer surface.unlockCore(self.io);
-        // 게이트는 "확장할 선택이 있는가"다 — mouse_drag_selecting로 걸면 더블/트리플클릭(4/5)으로
-        // 시작한 선택을 드래그로 화면 밖까지 늘릴 때 자동 스크롤이 영원히 안 걸린다.
-        if (core.selection_anchor == null) return;
-        const before_offset = core.view_offset;
-        const before_head = core.selection_head;
-        core.scrollViewport(@as(isize, self.drag_autoscroll));
-        const row: u16 = if (self.drag_autoscroll > 0) 0 else core.size.rows - 1;
-        core.selectionExtend(row, self.last_drag_col);
-        // 변화가 없으면(스크롤백 끝/alt screen에서 잠겨 view도 head도 그대로) 재투영하지 않는다 —
-        // 포인터를 grid 밖에 누른 채 둬도 30Hz full rebuild 루프가 돌지 않게.
-        if (core.view_offset != before_offset or !pointEql(core.selection_head, before_head)) {
-            self.metal_dirty = true;
-        }
+        // 게이트("확장할 선택이 있는가") + grid rows는 코어 read(메인 락-아래 — 읽기는 위임 안 함, §9.1).
+        // mouse_drag_selecting로 걸면 더블/트리플클릭(4/5)으로 시작한 선택을 드래그로 화면 밖까지 늘릴 때 자동
+        // 스크롤이 영원히 안 걸린다.
+        const rows: u16 = blk: {
+            surface.lockCore(self.io);
+            defer surface.unlockCore(self.io);
+            if (core.selection_anchor == null) return; // 확장할 선택 없음
+            break :blk core.size.rows;
+        };
+        const row: u16 = if (self.drag_autoscroll > 0) 0 else rows - 1;
+        // scroll+extend는 full (a)(docs/io-render-threading.md §9 P3-4)로 reader에 위임 — **kind-2 드래그 extend와
+        // 같은 명령 큐를 타 순서 보존**(둘이 다른 스레드면 선택이 어긋날 수 있다). 원래의 "변화 시만 재투영" 최적화는
+        // reader 렌더 트리거로 대체한다(스크롤백 끝에서 포인터를 grid 밖에 둘 때 cheap render tick 몇 개 — §9 trade-off).
+        self.runtime.enqueueCoreCommand(surface.id, .{ .scroll_and_extend = .{ .delta = @as(isize, self.drag_autoscroll), .row = row, .col = self.last_drag_col } }, self.io) catch {};
     }
 
     /// 입력(키·IME)이 지금 어디로 가는가 — **단일 출처**. 모달은 배타적(show가 서로 닫는다 — showNotice/toggleFind/
@@ -4199,12 +4169,15 @@ pub const AppSession = struct {
         // **터미널 입력일 때만** — find/palette에서 조합하면 뒤 터미널 스크롤백을 건드리면 안 된다(조합은
         // 오버레이 입력칸으로 가지 터미널로 안 간다; inputFocus 단일 출처로 판정).
         if (self.inputFocus() == .terminal) {
-            // viewOffset 읽기 + scrollToBottom(변경)은 락 아래(docs/io-render-threading.md PR3).
+            // viewOffset 읽기는 메인 락-아래(§9.1), scrollToBottom mutate는 reader로 위임(full (a), §9 P3-4).
             const surface = self.activeSurface();
-            surface.lockCore(self.io);
-            defer surface.unlockCore(self.io);
-            if (surface.core.viewOffset() != 0) {
-                surface.core.scrollToBottom();
+            const scrolled = blk: {
+                surface.lockCore(self.io);
+                defer surface.unlockCore(self.io);
+                break :blk surface.core.viewOffset() != 0;
+            };
+            if (scrolled) {
+                self.runtime.enqueueCoreCommand(surface.id, .scroll_to_bottom, self.io) catch {};
                 self.metal_dirty = true;
             }
         }
@@ -4556,8 +4529,14 @@ pub const AppSession = struct {
             self.allocator.free(self.copy_buffer);
             self.copy_buffer = &.{};
         }
-        const extracted = self.activeSurface().core.extractSelection(self.allocator) catch null orelse return &.{};
-        self.copy_buffer = extracted;
+        // extractSelection은 선택 + 스크롤백을 읽는다 — 락 아래(docs/io-render-threading.md §9.1). full (a)에서 선택이
+        // 이제 reader 스레드가 async로 mutate하므로, 락 없이 읽으면 드래그-선택 직후 Cmd+C가 torn/stale 선택을 본다
+        // (렌더 경로는 이미 락 아래 selectionViewportSpan을 읽는다 — copyText만 노출됐던 갭). 추출 바이트는 owned이라 unlock 후 안전.
+        const s = self.activeSurface();
+        s.lockCore(self.io);
+        const extracted = s.core.extractSelection(self.allocator) catch null;
+        s.unlockCore(self.io);
+        self.copy_buffer = extracted orelse return &.{};
         return self.copy_buffer;
     }
 
@@ -5045,7 +5024,10 @@ pub const AppSession = struct {
     /// 세운다(Swift는 방향만 넘기는 얇은 글루 — scrollPage와 같은 규율).
     pub fn jumpToPrompt(self: *AppSession, dir: i8) void {
         if (!self.surface_initialized) return;
-        if (self.activeSurface().core.jumpToPrompt(dir)) self.metal_dirty = true;
+        // view_offset mutate라 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4) — 위임된 scroll과 같은
+        // 큐를 타 순서 보존(메인 직접 mutate면 reader scroll과 view_offset race). "스크롤됨" 최적화는 reader 렌더 트리거로 대체.
+        self.runtime.enqueueCoreCommand(self.activeSurface().id, .{ .jump_to_prompt = dir }, self.io) catch {};
+        self.metal_dirty = true;
     }
 
     pub fn resize(self: *AppSession, width_px: u32, height_px: u32, scale_milli: u32) !FrameSummary {
@@ -6176,16 +6158,19 @@ pub const AppSession = struct {
         const grab: f64 = self.scrollbar_drag_grab orelse return;
         const rect = self.active_pane_rect;
         if (rect.h == 0 or self.cell_height_px == 0) return;
-        // 스크롤백 읽기 + scrollViewport(코어 변경) — 메서드 전체를 락 아래(docs/io-render-threading.md
-        // PR3 — 리더 core.write와 경합 방지). 짧은 메서드라 락 보유 비용 무시 가능.
+        // 코어 읽기(scrollbackLen·viewOffset)는 락 아래(§9.1). scrollViewport mutate는 **락 밖에서** reader에 위임
+        // (full (a)) — 락을 잡은 채 enqueueCoreCommand하면 non-interactive 폴백이 같은 core_mutex를 재취득해 재진입
+        // (panic/deadlock). 그래서 읽기만 락에 가두고, enqueue는 락 해제 후 한다(다른 위임 사이트와 같은 규율).
         const surface = self.activeSurface();
-        surface.lockCore(self.io);
-        defer surface.unlockCore(self.io);
-        const core = &surface.core;
-        const total_sb = core.scrollbackLen();
+        const snap = blk: {
+            surface.lockCore(self.io);
+            defer surface.unlockCore(self.io);
+            break :blk .{ .total_sb = surface.core.scrollbackLen(), .view_offset = surface.core.viewOffset() };
+        };
+        const total_sb = snap.total_sb;
         if (total_sb == 0) return;
         // thumb_h는 view_offset과 무관(sb_count·ch·view_h만) — 현재 offset으로 구해도 .h는 안정적.
-        const geom = scrollbarThumbGeom(total_sb, core.viewOffset(), self.cell_height_px, rect.h) orelse return;
+        const geom = scrollbarThumbGeom(total_sb, snap.view_offset, self.cell_height_px, rect.h) orelse return;
         const view_px: f64 = @floatFromInt(rect.h);
         const track: f64 = view_px - @as(f64, geom.h); // thumb_top 가동 범위
         if (track <= 0) return; // thumb가 트랙을 꽉 채움 — 스크롤 여지 없음
@@ -6194,9 +6179,10 @@ pub const AppSession = struct {
         if (thumb_top > track) thumb_top = track;
         const t: f64 = 1.0 - thumb_top / track; // 0=바닥(offset 0), 1=꼭대기(offset sb_count)
         const target = scrollbarTargetOffset(t, total_sb);
-        const delta: isize = @as(isize, @intCast(target)) - @as(isize, @intCast(core.viewOffset()));
-        if (delta != 0) {
-            core.scrollViewport(delta);
+        // 절대 목표를 reader에 위임(scroll_to_offset) — reader가 적용 시점의 fresh view_offset에서 delta 계산
+        // (메인이 delta를 미리 빼면 연속 드래그가 옛 base로 double-count돼 어긋남).
+        if (target != snap.view_offset) {
+            self.runtime.enqueueCoreCommand(surface.id, .{ .scroll_to_offset = target }, self.io) catch {};
             self.metal_dirty = true;
         }
     }
@@ -7505,6 +7491,17 @@ test "commitComposition is a safe no-op when there is no active preedit" {
     try std.testing.expect(!session.metal_dirty); // 보낼 게 없으니 다시 그릴 것도 없다
 }
 
+// (P3-4) 위임 핸들러(scroll/선택/reportMouse)를 호출하는 단위 테스트용 헬퍼. 메인 mutate가 runtime을 거쳐
+// reader로 가므로, 테스트는 surface를 빈 runtime에 attach해 **non-interactive 폴백(직접 적용)**으로 동기 검증한다
+// (enqueue_command=null → enqueueCoreCommand가 코어 락 아래 즉시 apply). io도 세워 폴백의 lockCore에 넘긴다.
+fn testNoopPtyWrite(_: *anyopaque, _: []const u8) anyerror!void {}
+fn testNoopPtyResize(_: *anyopaque, _: terminal.Size) anyerror!void {}
+fn attachTestRuntime(session: *AppSession, surface: *app.Surface) !void {
+    session.io = std.testing.io;
+    session.runtime = app.SurfaceRuntime.init(std.testing.allocator);
+    _ = try session.runtime.attach(surface, surface.id, .{ .ctx = undefined, .write_input = testNoopPtyWrite, .resize_fn = testNoopPtyResize });
+}
+
 test "scrollPage scrolls one screen (rows-1) per page using the core's authoritative rows" {
     var session: AppSession = undefined;
     var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
@@ -7512,6 +7509,8 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
     session.surface_initialized = true;
     var st_ptrs = [_]*app.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
+    try attachTestRuntime(&session, &tab_surface);
+    defer session.runtime.deinit();
     session.metal_dirty = false;
     // 9줄 출력 -> 5행 화면 위로 4줄이 스크롤백에 쌓인다.
     try tab_surface.core.write("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9");
@@ -7533,6 +7532,8 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
     session.surface_initialized = true;
     var st_ptrs = [_]*app.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
+    try attachTestRuntime(&session, &tab_surface);
+    defer session.runtime.deinit();
     session.metal_dirty = false;
     session.chrome_host = .{}; // mouse()가 context_menu.open을 kind 무관하게 읽음([[devsession-undefined-test-field-trap]])
     session.rename = null;
@@ -7566,6 +7567,8 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.surface_initialized = true;
     var st_ptrs = [_]*app.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
+    try attachTestRuntime(&session, &tab_surface);
+    defer session.runtime.deinit();
     session.metal_dirty = false;
     session.chrome_host = .{}; // mouse()가 context_menu.open을 kind 무관하게 읽음([[devsession-undefined-test-field-trap]])
     session.rename = null;
@@ -8986,6 +8989,8 @@ test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 �
     session.surface_initialized = true;
     var st_ptrs = [_]*app.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
+    try attachTestRuntime(&session, &tab_surface);
+    defer session.runtime.deinit();
     session.metal_dirty = false;
     session.chrome_host = .{}; // inputFocus가 읽음
     session.rename = null; // inputFocus가 rename을 읽음([[devsession-undefined-test-field-trap]])
@@ -11832,6 +11837,8 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.surface_initialized = true;
     var st_ptrs = [_]*app.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
+    try attachTestRuntime(&session, &tab_surface);
+    defer session.runtime.deinit();
     session.metal_dirty = false;
     session.metal_buffer = .{};
     session.chrome_host = .{}; // mouse()가 context_menu.open을 kind 무관하게 읽음([[devsession-undefined-test-field-trap]])

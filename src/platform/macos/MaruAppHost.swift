@@ -1191,6 +1191,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainOsc52Clipboard() // OSC 52: 이번 tick에 셸이 보낸 클립보드 쓰기를 NSPasteboard에 반영(정책 gate는 Zig).
             drainNotification() // OSC 9/777: 이번 tick에 셸이 보낸 데스크톱 알림을 네이티브 알림으로 띄운다.
             drainBell() // G12 BEL: 이번 tick에 셸이 보낸 벨(0x07)을 시스템 벨로 울린다.
+            drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
         }
         return status
     }
@@ -1512,6 +1513,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let session = appSession else { return }
         if maru_macos_app_session_take_bell(session) != 0 {
             NSSound.beep()
+        }
+    }
+
+    // view options(⚙) 메뉴에서 사이드바 표시 토글(show-branch/show-folder)을 바꾸면 Zig가 dirty 플래그를 세운다 —
+    // tick마다 drain해 1이면 config 파일에 반영(persist)한다(앱→config). 변경 없으면 Zig가 0을 줘 파일을 안 건드린다.
+    private func drainSidebarConfig() {
+        guard let session = appSession else { return }
+        if maru_macos_app_session_take_sidebar_config_dirty(session) != 0 {
+            persistSidebarConfig()
         }
     }
 

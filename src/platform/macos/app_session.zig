@@ -45,7 +45,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 62; // 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 63; // 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -1021,6 +1021,13 @@ pub const AppSession = struct {
     // chrome_host.context_menu(중립)에, 라이브 포인터 대상은 여기에 둔다(rename과 같은 분리). 메뉴 "Rename" 선택
     // 시 이 대상으로 startRename. 대상 teardown 시 null로 비운다(stale 포인터 방지, rename과 같은 funnel).
     context_menu_target: ?RenameTarget = null,
+    // view options(⚙) 메뉴 — chrome_host.context_menu 상태를 공유하되, 이게 true면 rename 컨텍스트 메뉴가 아니라
+    // 사이드바 표시 토글(브랜치·폴더) 메뉴다(buildContextMenuItems/acceptContextMenu가 이 플래그로 분기). 체크박스
+    // 패널처럼 토글해도 닫히지 않고 열린 채 라벨(체크마크)만 갱신한다 — 바깥 클릭/Esc로 닫는다(closeContextMenu).
+    view_options_menu: bool = false,
+    // view options 토글(show_branch/show_folder)이 바뀌어 config 파일에 반영(persist)해야 하는지. Swift가 매 tick
+    // take_sidebar_config_dirty로 drain해 serializeSidebarConfig→atomic write한다(앱→config, take_bell과 같은 1회성 신호).
+    sidebar_config_dirty: bool = false,
     // 컨텍스트 메뉴 항목(동적, 대상 타입·pin 상태에 따라). show가 buildContextMenuItems로 채우고 itemAt/draws/accept가
     // contextMenuItems로 같은 리스트를 본다(보이는 항목 == 클릭/실행되는 항목). 라벨은 정적 리터럴이라 소유 불요.
     // 크기 = 최대 항목 수(Rename + Pin + 배경 프리셋)로 정확히 잡아 buf 오버플로를 컴파일 타임에 막는다.
@@ -3201,9 +3208,42 @@ pub const AppSession = struct {
         return self.context_menu_items_buf[0..self.context_menu_items_len];
     }
 
+    /// view options(⚙) 메뉴 항목 — 사이드바 카드 표시 토글. 라벨 체크마크 prefix로 현재 on/off를 보인다(✓+공백=표시,
+    /// 공백 2칸=숨김 — EAW 폭 정렬). 이름줄은 항상 표시라 토글 없음(사용자 요청). rename 메뉴와 같은 context_menu_items_buf·
+    /// itemAt/draws/accept 경로를 공유하고, 분기는 view_options_menu 플래그로 한다. 라벨은 정적 리터럴이라 소유 불요.
+    fn buildViewOptionsMenuItems(self: *AppSession) []const []const u8 {
+        const sb = self.loaded_config.config.sidebar;
+        self.context_menu_items_buf[0] = if (sb.show_branch) "\u{2713} 브랜치 표시" else "  브랜치 표시";
+        self.context_menu_items_buf[1] = if (sb.show_folder) "\u{2713} 폴더 표시" else "  폴더 표시";
+        self.context_menu_items_len = 2;
+        return self.context_menu_items_buf[0..2];
+    }
+
+    /// 컨텍스트/뷰옵션 메뉴 공통 teardown — hide + 대상·뷰옵션 플래그 비움. 바깥 클릭·Esc 경로가 공유한다.
+    fn closeContextMenu(self: *AppSession) void {
+        self.chrome_host.context_menu.hide();
+        self.context_menu_target = null;
+        self.view_options_menu = false;
+        self.metal_dirty = true;
+    }
+
     /// 컨텍스트 메뉴의 선택 항목을 실행한다. 0=Rename(모든 대상), workspace는 1=위치 고정 토글·2..=배경 tint 프리셋.
     /// 메뉴를 먼저 닫고(대상 teardown 시 context_menu_target은 이미 null화됨) selected로 분기한다.
     fn acceptContextMenu(self: *AppSession) void {
+        // view options 메뉴: 항목 선택 = 표시 토글. 메뉴를 '닫지 않고'(체크박스 패널) config bool을 뒤집고 라벨(체크마크)을
+        // 갱신한 뒤 카드를 재빌드하고, config 파일 반영을 예약한다(sidebar_config_dirty → Swift persist). 닫기는 바깥 클릭/Esc.
+        if (self.view_options_menu) {
+            switch (self.chrome_host.context_menu.selected) {
+                0 => self.loaded_config.config.sidebar.show_branch = !self.loaded_config.config.sidebar.show_branch,
+                1 => self.loaded_config.config.sidebar.show_folder = !self.loaded_config.config.sidebar.show_folder,
+                else => {},
+            }
+            _ = self.buildViewOptionsMenuItems(); // 라벨 체크마크 갱신(메뉴 열린 채)
+            self.rebuildSidebar() catch {}; // 카드 표시 즉시 반영
+            self.sidebar_config_dirty = true; // config 파일 persist 예약(앱→config)
+            self.metal_dirty = true;
+            return;
+        }
         const target = self.context_menu_target;
         const sel = self.chrome_host.context_menu.selected;
         self.context_menu_target = null;
@@ -3261,8 +3301,9 @@ pub const AppSession = struct {
             .palette_selection_changed => {}, // 선택만 이동 — 스크롤 윈도우는 buildChromeOverlayFrame이 파생, 부수효과 없음
             .palette_accept => self.acceptPalette(), // 선택 명령 해석·닫기·dispatch
             .context_menu_accept => self.acceptContextMenu(), // selected 항목 실행(현재 "Rename" → 대상 rename)
-            .context_menu_close => { // Esc/그 외 키 — 컴포넌트가 이미 hide, 대상 포인터만 비운다
+            .context_menu_close => { // Esc/그 외 키 — 컴포넌트가 이미 hide, 대상 포인터·view_options 플래그만 비운다
                 self.context_menu_target = null;
+                self.view_options_menu = false;
                 self.metal_dirty = true;
             },
             .context_menu_selection_changed => self.metal_dirty = true, // ↑↓ 선택 이동 — 재렌더
@@ -3899,9 +3940,7 @@ pub const AppSession = struct {
                     self.chrome_host.context_menu.selected = idx;
                     self.acceptContextMenu();
                 } else {
-                    self.chrome_host.context_menu.hide();
-                    self.context_menu_target = null;
-                    self.metal_dirty = true;
+                    self.closeContextMenu(); // 항목 밖 클릭 → 닫기(대상·view_options 플래그 비움)
                 }
             }
             return;
@@ -4007,7 +4046,16 @@ pub const AppSession = struct {
                 const header_region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.sidebar_header_height_px);
                 switch (header_region) {
                     .new_workspace => _ = self.newTab() catch {},
-                    .view_options => {}, // P4: view options 메뉴(아이콘 자리만 — 클릭 핸들은 P4에서 연결)
+                    .view_options => {
+                        // ⚙ 클릭 → 사이드바 표시 토글 메뉴(브랜치·폴더)를 ⚙ 아이콘 아래에 띄운다(체크박스 패널).
+                        // 다시 ⚙(메뉴 박스 밖)를 클릭하면 닫힌다(아래 context_menu.open 분기의 바깥-클릭 경로).
+                        self.view_options_menu = true;
+                        const items = self.buildViewOptionsMenuItems();
+                        const anchor_x: i32 = @intCast(self.sidebar_width_px -| 4 * self.cell_width_px); // ⚙ 아이콘 col
+                        const anchor_y: i32 = @intCast(self.cell_height_px); // 아이콘 줄(0) 바로 아래
+                        self.chrome_host.context_menu.show(anchor_x, anchor_y, items.len);
+                        self.metal_dirty = true;
+                    },
                     .search => {
                         self.sidebar_search_active = true; // 검색바 클릭 → 활성(키/IME가 검색으로 라우팅)
                         self.rebuildSidebar() catch {}; // 보존된 검색어가 있으면 필터를 즉시 재개(blur 중 일시정지됐던 것)
@@ -4871,6 +4919,14 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return false;
         // 코어 플래그는 항상 drain(음소거 중에도 누적 방지)하고, 시스템 소리는 audible_bell일 때만 요청한다.
         return self.activeSurface().core.takeBell() and self.audible_bell;
+    }
+
+    /// view options 토글(show_branch/show_folder)이 바뀌어 config 파일에 반영해야 하면 true(플래그 비움 — 1회성).
+    /// Swift가 매 tick drain해 serializeSidebarConfig→atomic write한다(앱→config 단방향, take_bell과 같은 신호 패턴).
+    pub fn takeSidebarConfigDirty(self: *AppSession) bool {
+        const dirty = self.sidebar_config_dirty;
+        self.sidebar_config_dirty = false;
+        return dirty;
     }
 
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
@@ -6723,10 +6779,14 @@ pub const AppSession = struct {
                 const pin: []const u8 = if (tab.pinned) "\u{1F4CC} " else "";
                 // 이름줄 = [📌] + 이름 (에이전트 심볼·번호 없음 — 심볼은 독립 아이콘으로 분리).
                 try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ pin, base }));
-                // 브랜치줄·경로줄: cwd가 git repo 안일 때만(branch != null). 아니면 "" → 그 줄 생략.
-                const branch = self.termGitBranch(term); // cwd 변경 시에만 .git/HEAD 재읽기(캐시)
-                try branch_lines.append(self.allocator, if (branch) |b| try std.fmt.allocPrint(self.allocator, "\u{2387} {s}", .{b}) else try self.allocator.dupe(u8, ""));
-                try path_lines.append(self.allocator, if (branch != null) try sidebarCwdPath(self.allocator, term) else try self.allocator.dupe(u8, ""));
+                // 브랜치줄·경로줄: cwd가 git repo 안일 때만(branch != null) + view options 토글로 표시 여부 결정.
+                // 이름줄은 항상 표시(사용자 요청). show-branch=false면 브랜치줄 생략, show-folder=false면 경로줄 생략.
+                // 토글은 독립적이다 — 둘 다 "git repo 안"을 전제로 하되(maru는 repo 밖 cwd 줄을 안 그림) 서로 안 묶인다.
+                const branch = self.termGitBranch(term); // cwd 변경 시에만 .git/HEAD 재읽기(캐시) — repo 판정에도 씀
+                const show_branch = self.loaded_config.config.sidebar.show_branch;
+                const show_folder = self.loaded_config.config.sidebar.show_folder;
+                try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "\u{2387} {s}", .{b}) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
+                try path_lines.append(self.allocator, if (show_folder and branch != null) try sidebarCwdPath(self.allocator, term) else try self.allocator.dupe(u8, ""));
                 try status_lines.append(self.allocator, try self.agentStatusLine(term));
             }
         }
@@ -11957,6 +12017,58 @@ test "sidebar search blurs when clicking outside it (terminal/card) — restores
     session.closeSidebarSearch();
     try std.testing.expect(!session.sidebar_search_active);
     try std.testing.expectEqual(@as(usize, 0), session.sidebar_search_input.query.items.len);
+}
+
+// P4: view options(⚙) 메뉴 — ⚙ 클릭 → 표시 토글 메뉴 열림, 항목 클릭 시 show-branch/folder를 뒤집고(즉시 카드
+// 반영) 메뉴는 열린 채(체크박스 패널), config persist 신호(sidebar_config_dirty)를 1회성으로 세운다. 바깥 클릭=닫힘.
+// 실 좌표 hit-test + config 토글이라 macOS 게이트.
+test "view options menu: ⚙ toggles sidebar show-branch/folder, stays open, signals config persist" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{}; // 레이아웃 기하만 격리
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const init_branch = session.loaded_config.config.sidebar.show_branch;
+    const init_folder = session.loaded_config.config.sidebar.show_folder;
+
+    // ⚙ 아이콘(헤더 상단 우측 [w-4cw, w-2cw)) 클릭 → view options 메뉴 열림.
+    const gear_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - @as(f64, @floatFromInt(session.cell_width_px)) * 3;
+    const gear_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) * 0.2; // 상단 아이콘 줄
+    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.view_options, chrome.components.sidebar.headerHit(gear_x, gear_y, session.sidebar_width_px, session.cell_width_px, session.sidebar_header_height_px));
+    session.mouse(1, gear_x, gear_y, 0, 0);
+    try std.testing.expect(session.view_options_menu);
+    try std.testing.expect(session.chrome_host.context_menu.open);
+
+    // 항목 0(브랜치 표시) 선택·accept → show_branch 토글 + 메뉴 유지 + persist 신호(1회성).
+    session.chrome_host.context_menu.selected = 0;
+    session.acceptContextMenu();
+    try std.testing.expectEqual(!init_branch, session.loaded_config.config.sidebar.show_branch);
+    try std.testing.expect(session.view_options_menu); // 체크박스 패널 — 닫히지 않는다
+    try std.testing.expect(session.takeSidebarConfigDirty()); // persist 예약 — true
+    try std.testing.expect(!session.takeSidebarConfigDirty()); // 1회성 — 비워짐
+
+    // 항목 1(폴더 표시) 토글 — 메뉴 유지.
+    session.chrome_host.context_menu.selected = 1;
+    session.acceptContextMenu();
+    try std.testing.expectEqual(!init_folder, session.loaded_config.config.sidebar.show_folder);
+    try std.testing.expect(session.view_options_menu);
+
+    // 메뉴 밖(터미널) 클릭 → 닫힘(view_options 플래그·메뉴 상태 모두 해제).
+    const out_x: f64 = @floatFromInt(session.active_pane_rect.x + 50);
+    const out_y: f64 = @floatFromInt(session.active_pane_rect.y + 50);
+    session.mouse(1, out_x, out_y, 0, 0);
+    try std.testing.expect(!session.view_options_menu);
+    try std.testing.expect(!session.chrome_host.context_menu.open);
 }
 
 // 멀티-탭 핵심 계약: 두 번째 탭을 만들면 자기 셸 PTY가 spawn되고, tick이 '모든' 탭을 drain하므로

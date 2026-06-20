@@ -4208,7 +4208,10 @@ pub const AppSession = struct {
     pub fn imeInsert(self: *AppSession, bytes: []const u8) void {
         if (!self.surface_initialized) return;
         if (!self.ime_active) {
-            self.sendTextAsKeys(bytes);
+            // 트랜잭션 밖 직접 커밋(입력기가 keyDown 없이 직접 — 포커스 전환 등 windowLostKey와 같은
+            // AppKit 동기 콜백 클래스)도 현재 입력 대상으로 라우팅한다(#10 후속) — 터미널이면 non-blocking
+            // PTY, find/palette 입력칸이면 기존 키 경로(routeCommittedText 참조).
+            self.routeCommittedText(bytes);
             return;
         }
         self.ime_inserted.appendSlice(self.allocator, bytes) catch {
@@ -4258,7 +4261,12 @@ pub const AppSession = struct {
         if (self.ime_insert_failed) return;
         switch (imeDecide(composing, self.ime_inserted.items, self.ime_marked_changed, self.ime_did_delete)) {
             .commit_text => |text| {
-                self.sendTextAsKeys(text);
+                // #10 후속: 확정 텍스트를 현재 입력 대상으로 라우팅한다 — imeEnd는 keyDown(interpretKeyEvents
+                // 직후) 동기 콜백이라, 터미널 PTY로 blocking enqueue하면 write_queue 포화 시 tick을 멈춰
+                // commitComposition과 같은 backpressure 데드락이 된다(#10이 그쪽만 되돌렸다). 터미널이면
+                // non-blocking, find/palette 입력칸이면 기존 키 경로(routeCommittedText 참조). 아래 화살표
+                // replay는 그대로 키 경로 — 커서 이동이라 인코딩이 필요하고 단발이라 데드락과 무관하다.
+                self.routeCommittedText(text);
                 // 한글 후보를 화살표로 확정하는 경우(insertText('안') + 화살표): 텍스트만 보내고
                 // 화살표를 버리면 커서가 안 움직인다. 확정 후 그 화살표를 다시 보낸다(Ghostty
                 // shouldReplayCommittedPreeditKey와 같은 의미론 — 위/오른/아래는 항상, 왼쪽은
@@ -4421,6 +4429,21 @@ pub const AppSession = struct {
         self.total_terminal_input_events += 1;
         self.total_terminal_input_bytes += bytes.len;
         self.flushPendingPaste();
+    }
+
+    /// IME 확정 텍스트를 현재 입력 대상(inputFocus 단일 출처)으로 라우팅한다. 터미널이면 non-blocking PTY
+    /// 전송(sendCommittedText — AppKit 동기 콜백에서 write_queue backpressure 데드락 회피, #10 후속). find/
+    /// palette 입력칸이면 그 입력은 메모리 조작이라 write_queue를 안 거쳐 데드락과 무관하므로, inputFocus
+    /// 분기를 흡수하는 기존 키 경로(sendTextAsKeys→handleKeyEvent)로 보내 검색어/명령어에 글자가 들어가게
+    /// 한다(이 분기를 빼면 find 조합 확정이 PTY로 새 입력칸이 빈다 — 회귀 테스트가 고정). 터미널 타이핑은
+    /// "검색 종료(find_nav)"도 함께 처리한다(handleKeyEvent 3478과 동일 의미).
+    fn routeCommittedText(self: *AppSession, bytes: []const u8) void {
+        if (self.inputFocus() == .terminal) {
+            if (self.find_nav) self.find_nav = false;
+            self.sendCommittedText(bytes);
+        } else {
+            self.sendTextAsKeys(bytes);
+        }
     }
 
     /// 클립보드 텍스트 붙여넣기(Cmd+V). 인코딩(개행 정규화 + bracketed paste 감싸기)은 core가
@@ -12087,6 +12110,43 @@ test "commitComposition sends committed text via non-blocking path, not blocking
     // 핵심 불변식: blocking key 경로(handleKeyEvent)를 경유하지 않는다(non-blocking pending 전송).
     // 수정 전이면 sendTextAsKeys→handleKeyEvent로 total_key_events가 늘어 이 단언이 깨진다(#10 가드).
     try std.testing.expectEqual(keys_before, session.total_key_events);
+}
+
+test "imeEnd commit + transaction-less imeInsert send via non-blocking path (#10 follow-up)" {
+    // #10은 commitComposition(windowLostKey)만 non-blocking으로 되돌렸으나, 같은 backpressure 데드락
+    // 클래스인 두 경로가 남아 있었다: imeEnd(.commit_text)는 keyDown(interpretKeyEvents 직후) 동기
+    // 콜백에서, 트랜잭션-밖 imeInsert(!ime_active — 입력기가 keyDown 없이 직접 커밋, 포커스 전환 등)는
+    // AppKit 콜백에서 blocking sendTextAsKeys→handleKeyEvent(enqueueBlocking)를 탔다. 둘 다 같은
+    // 불변식(handleKeyEvent 미경유 = total_key_events 불변)으로 non-blocking 경로를 고정한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // (1) imeEnd(.commit_text): 조합 시작 → 텍스트 누적 → 키 없이 종료 = 확정 텍스트만 전송.
+    session.imeBegin(); // ime_active=true
+    session.imeMarked("한"); // 조합 중 표시 → 종료 시 composing 판정 + ime_marked_changed
+    session.imeInsert("한"); // 트랜잭션 안 — ime_inserted에 누적만
+    const keys1 = session.total_key_events;
+    const bytes1 = session.total_terminal_input_bytes;
+    session.imeEnd(null); // 정규화 불가 키 없이 종료 → commit_text("한")
+    try std.testing.expect(session.total_terminal_input_bytes > bytes1); // PTY로 확정 전송됨
+    try std.testing.expectEqual(keys1, session.total_key_events); // 수정 전이면 sendTextAsKeys로 늘어 깨짐
+
+    // (2) imeInsert(!ime_active): 위 imeEnd가 ime_active를 꺼 트랜잭션 밖 직접 커밋 경로.
+    const keys2 = session.total_key_events;
+    const bytes2 = session.total_terminal_input_bytes;
+    session.imeInsert("을");
+    try std.testing.expect(session.total_terminal_input_bytes > bytes2);
+    try std.testing.expectEqual(keys2, session.total_key_events);
 }
 
 test "scrollbarThumbGeom: null without scrollback, thumb size/position track view_offset" {

@@ -401,7 +401,7 @@ Maru 차별화:
 - 장기 web target은 Wasm + WebGPU backend로 별도 검토
 - 적은 기능, 강한 기본값
 
-터미널 호환성, clipboard, paste, shell integration, workspace restore, plugin, update/telemetry의 기본 정책은 [터미널 호환성/보안 정책](docs/terminal-compatibility-policy.md)을 단일 출처로 둔다. 요약하면 Maru v1은 Ghostty보다 보수적으로 시작한다. `TERM`은 `xterm-256color`, OSC52는 읽기/쓰기 모두 `ask`, shell hook은 opt-in, command restore는 자동 재실행 금지다.
+터미널 호환성, clipboard, paste, shell integration, workspace restore, plugin, update/telemetry의 기본 정책은 [터미널 호환성/보안 정책](docs/terminal-compatibility-policy.md)을 단일 출처로 둔다. 요약하면 Maru v1은 Ghostty보다 보수적으로 시작한다. `TERM`은 `xterm-256color`, OSC52는 쓰기 `allow`·읽기 `deny`(로컬 데스크톱 단일 사용자, 사용자 결정 2026-06-20), shell hook은 opt-in, command restore는 자동 재실행 금지다.
 
 목표는 Ghostty 엔진을 직접 이기는 것이 아니다.
 

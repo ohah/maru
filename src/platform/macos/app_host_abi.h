@@ -489,8 +489,8 @@ int32_t maru_macos_app_session_copy_text(
     size_t *out_len
 );
 /* OSC 52 클립보드 쓰기 데이터(디코드된 UTF-8). 버퍼는 Zig 소유로 다음 pending_clipboard/destroy까지 유효,
-   정책(env opt-in MARU_OSC52_WRITE) deny이거나 없으면 *out_ptr=NULL, *out_len=0. Swift가 tick마다 호출해
-   NSPasteboard에 쓴다. */
+   write는 정책상 기본 allow(terminal-compatibility-policy.md §OSC52). 데이터 없으면 *out_ptr=NULL, *out_len=0.
+   Swift가 tick마다 호출해 NSPasteboard에 쓴다. */
 int32_t maru_macos_app_session_pending_clipboard(
     MaruAppHostSession *session,
     const uint8_t **out_ptr,

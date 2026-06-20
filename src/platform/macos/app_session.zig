@@ -4565,13 +4565,13 @@ pub const AppSession = struct {
         return self.copy_buffer;
     }
 
-    /// OSC 52 클립보드 쓰기 요청을 내부 버퍼로 돌려준다(정책 deny이거나 없으면 빈 슬라이스). Swift가 NSPasteboard에
-    /// 쓴다. **정책**: 보안 정책(terminal-compatibility-policy.md §OSC52)상 기본 deny — ask UI 구현 전 `allow`
-    /// shortcut 금지. 사용자가 env `MARU_OSC52_WRITE`로 명시 opt-in해야 allow한다(정식 config 키는 후속).
-    /// 코어 pending을 비워(한 번 쓰고 소비) 같은 데이터가 다음 tick에 또 쓰이지 않게 한다.
+    /// OSC 52 클립보드 쓰기 요청을 내부 버퍼로 돌려준다(없으면 빈 슬라이스). Swift가 NSPasteboard에 쓴다.
+    /// **정책**(terminal-compatibility-policy.md §OSC52, 사용자 결정 2026-06-20): write는 기본 `allow` — 로컬
+    /// 단일 사용자 데스크톱 터미널이라 트래킹 앱의 드래그 복사를 시스템 클립보드에 반영한다(iTerm2/Ghostty도 유사).
+    /// **read**는 클립보드 탈취 방지로 계속 deny한다 — core가 `?` 쿼리에 응답하지 않아 read 요청은 여기 안 온다.
+    /// 코어 pending을 비워(한 번 쓰고 소비) 같은 데이터가 다음 tick에 또 쓰이지 않게 한다. ask(요청별 확인 UI)는 후속.
     pub fn pendingClipboard(self: *AppSession) []const u8 {
         if (!self.surface_initialized) return &.{};
-        if (std.c.getenv("MARU_OSC52_WRITE") == null) return &.{}; // 정책 deny(기본) — opt-in 없으면 무시
         const pending = self.activeSurface().core.pendingClipboardWrite();
         if (pending.len == 0) return &.{};
         if (self.clipboard_out_buffer.len > 0) {

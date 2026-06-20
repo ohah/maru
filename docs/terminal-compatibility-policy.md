@@ -23,7 +23,7 @@ Maru v1은 Ghostty보다 더 많은 터미널 기능을 제공하는 것이 목�
 | 영역 | Ghostty가 취한 방향 | Maru v1 기본 정책 |
 | --- | --- | --- |
 | `TERM` / terminfo | 자체 terminfo와 `xterm-ghostty` 기본값을 사용하고, 필요하면 `xterm-256color`로 fallback한다. | 자체 `xterm-maru` terminfo를 **기본값**으로 둔다(embed→자기 캐시 자동 컴파일 + `TERMINFO` env). 컴파일 실패 시 `xterm-256color` 자동 폴백 — Ghostty와 같은 방식. |
-| OSC52 clipboard | OSC52를 지원한다. 읽기는 사용자 확인, 쓰기는 기본 허용에 가깝다. | OSC52는 지원하되 읽기와 쓰기 모두 기본 `ask`로 둔다. |
+| OSC52 clipboard | OSC52를 지원한다. 읽기는 사용자 확인, 쓰기는 기본 허용에 가깝다. | OSC52를 지원한다. 쓰기는 기본 `allow`(로컬 단일 사용자 데스크톱), 읽기는 기본 `deny`(클립보드 탈취 방지)로 둔다. |
 | bracketed paste | bracketed paste를 지원하고 paste protection을 기본 ON으로 둔다. bracketed paste는 기본적으로 safe로 본다. | bracketed paste와 paste protection은 v1 필수다. bracketed paste를 safe로 보되, 더 엄격한 설정을 열 수 있게 한다. |
 | shell integration | 기본 detect로 자동 주입하고 OSC 133/OSC 7, cwd 보고, ssh/sudo 보조 기능까지 제공한다. | 자동 주입하지 않는다. v1은 명시 opt-in zsh hook부터 시작한다. |
 | command restore | window/tab/split 복원은 있지만 임의의 command 자동 재실행에는 보수적이다. | layout/cwd/env/shell restore까지만 기본 지원한다. 마지막 foreground command 자동 재실행은 금지한다. |
@@ -95,18 +95,20 @@ shell-integration `ssh` alias(opt-in)의 후속 몫이다. Ghostty도 이 깨짐
 
 OSC52는 터미널 내부 프로그램이 system clipboard를 읽거나 쓰는 escape sequence다. 편하지만 보안 표면이 크다. 예를 들어 원격 SSH 세션 안의 프로그램이 로컬 clipboard에 값을 쓰거나 읽으려 할 수 있다.
 
-v1 기본값:
+v1 기본값(사용자 결정 2026-06-20):
 
 ```text
-osc52.read = ask
-osc52.write = ask
+osc52.read  = deny    # 클립보드 탈취 방지 — core가 `?` 쿼리에 응답하지 않는다(무동작)
+osc52.write = allow   # 로컬 데스크톱 단일 사용자 — 트래킹 앱의 드래그 복사를 시스템 클립보드에 반영
 ```
 
 정책:
 
-- `deny`, `ask`, `allow` 세 값을 지원할 수 있게 설계한다.
-- 기본값은 읽기/쓰기 모두 `ask`다.
-- 사용자가 `allow`로 바꾸기 전까지 background clipboard 변경은 하지 않는다.
+- `deny`, `ask`, `allow` 세 값을 지원할 수 있게 설계한다(정식 config 키는 후속).
+- write 기본 `allow`: 로컬 단일 사용자 데스크톱 터미널이라 편의를 택했다(iTerm2/Ghostty도 유사). 트래킹 앱
+  (예: Claude Code)의 드래그 복사가 그대로 시스템 클립보드에 반영된다.
+- read 기본 `deny`: 원격/내부 프로그램이 로컬 clipboard를 탈취하지 못하게 한다. core가 `?` 쿼리에 응답하지 않는다.
+- ask(요청별 확인 UI)는 후속 작업이다. 구현되면 write 기본을 `ask`로 올릴지 다시 논의한다.
 - clipboard 요청은 trace fixture에 원문을 저장하지 않는다. 필요하면 redaction된 event만 남긴다.
 
 요청 흐름:
@@ -116,7 +118,7 @@ PTY output
 -> TerminalCore parses OSC52
 -> TerminalCore emits ClipboardRequest domain event
 -> SurfaceRuntime queues AppRequest.clipboard
--> app/platform asks the user or applies deny/allow policy
+-> app/platform applies policy (현재 write=allow, read=deny; 요청별 ask UI는 후속)
 -> app/platform completes the request
 ```
 
@@ -125,7 +127,7 @@ PTY output
 - `TerminalCore`는 macOS pasteboard나 system clipboard API를 직접 호출하지 않는다.
 - `SurfaceRuntime`은 clipboard 요청을 app layer로 올리는 큐 역할만 한다.
 - app/platform layer만 사용자 확인 UI와 실제 clipboard read/write를 안다.
-- `ask` 정책을 구현하기 전에는 OSC52를 `allow`로 shortcut하지 않는다.
+- write는 사용자 결정(2026-06-20)으로 `allow`다. read는 ask 구현 전까지 `deny`로 둔다(read를 `allow`로 shortcut하지 않는다).
 
 ## Bracketed Paste
 

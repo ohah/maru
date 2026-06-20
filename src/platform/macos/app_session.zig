@@ -6071,7 +6071,7 @@ pub const AppSession = struct {
             const c = premultipliedRgba(tab.background_color & 0x00FF_FFFF, tab_bg_tint_alpha);
             self.gpu_quads.append(self.allocator, .{
                 .x = 0,
-                .y = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(slot_h)),
+                .y = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(slot_h)) + @as(f32, @floatFromInt(self.sidebar_header_height_px)),
                 .w = @floatFromInt(self.sidebar_width_px),
                 .h = @floatFromInt(slot_h),
                 .corner_radii = .{ 0, 0, 0, 0 },
@@ -6382,6 +6382,9 @@ pub const AppSession = struct {
     fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
         const slot_h = self.sidebar_slot_height_px;
         if (slot_h == 0) return;
+        // gpu_quad(accent bar·rich 밴드)는 슬롯 상대 y를 절대 좌표로 박으므로 상단 헤더만큼 내려야 한다 — .m이
+        // header_h 시프트하는 건 sidebar_cells(텍스트·tui 밴드)뿐이라 gpu_quad는 여기서 header_h를 더한다(위치 정합).
+        const header_f: f32 = @floatFromInt(self.sidebar_header_height_px);
         for (ops) |op| switch (op) {
             .quad => |q| {
                 if (q.fill_role == .accent_bar) {
@@ -6389,7 +6392,7 @@ pub const AppSession = struct {
                     const ac = packOpaqueRgb(self.buildChromeTokens().palette.get(.accent_bar));
                     self.gpu_quads.append(self.allocator, .{
                         .x = @floatFromInt(q.rect.x),
-                        .y = @floatFromInt(q.rect.y),
+                        .y = @as(f32, @floatFromInt(q.rect.y)) + header_f,
                         .w = @floatFromInt(q.rect.w),
                         .h = @floatFromInt(q.rect.h),
                         .corner_radii = .{ 0, 0, 0, 0 },
@@ -6427,7 +6430,7 @@ pub const AppSession = struct {
                     // rich: GPU quad 프리미티브(둥근 밴드) — 셀 그리드와 별개 파이프라인으로 렌더된다.
                     self.gpu_quads.append(self.allocator, .{
                         .x = @floatFromInt(q.rect.x),
-                        .y = @floatFromInt(q.rect.y),
+                        .y = @as(f32, @floatFromInt(q.rect.y)) + header_f,
                         .w = @floatFromInt(q.rect.w),
                         .h = @floatFromInt(q.rect.h),
                         .corner_radii = .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) },

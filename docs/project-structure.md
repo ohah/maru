@@ -26,11 +26,12 @@ src/
   pty.zig               process/PTY facade
   renderer.zig          render facade
   terminal.zig          terminal-core facade
+  terminfo_cache.zig    maru 자체 terminfo 로컬 캐시 단일 출처(경로·버전·컴파일 셸 명령). pty 자동 컴파일 + cli/terminfo 서브커맨드가 공유(top-level 중립 — color.zig 결)
   observability.zig     debug event/trace/snapshot facade
   plugin.zig            action/plugin facade
 
   app/                  window/surface/runtime/pty_reader/runtime_pump처럼 앱 상태와 live 연결 책임별 구현
-  cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv; install: maru CLI를 PATH에 symlink하는 경로/PATH 헬퍼). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다
+  cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv; install: maru CLI를 PATH에 symlink하는 경로/PATH 헬퍼; terminfo: `maru terminfo` 캐시 관리 인자 파싱 — 캐시 메커니즘은 top-level terminfo_cache.zig). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다
   config/               action parsing, raw theme/font/cursor config, resolved appearance config
   pty/                  PTY backend, spawn request, process handle
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding

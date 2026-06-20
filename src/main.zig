@@ -62,6 +62,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "terminfo")) {
+        try runTerminfo(allocator, &args, stdout, stderr);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         try printUsage(stdout);
         return;
@@ -291,6 +296,75 @@ fn runInstallCli(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Write
     try stdout.flush();
 }
 
+// `/bin/sh -c <cmd>`를 돌려 기다린다(POSIX). std.c에 노출이 없어 직접 선언한다(pty/macos.zig와 같은 결).
+extern "c" fn system(command: [*:0]const u8) c_int;
+
+fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    // `maru terminfo [--status|--refresh|--clear|--path]`: maru 자체 terminfo(xterm-maru)의 로컬 캐시를
+    // 관리한다. 순수 인자 파싱은 maru.cli.terminfo, 캐시 경로·버전·셸 명령은 maru.terminfo_cache(pty 자동
+    // 컴파일과 공유), 여기선 인자 수집과 셸 실행·출력만 한다. "terminfo" 뒤 인자를 모은다.
+    var collected: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (collected.items) |s| allocator.free(s);
+        collected.deinit(allocator);
+    }
+    while (args.next()) |a| try collected.append(allocator, try allocator.dupe(u8, a));
+
+    const action = maru.cli.terminfo.parse(collected.items) catch {
+        try stderr.writeAll("usage: maru terminfo [--status|--refresh|--clear|--path]\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+
+    const home_z = std.c.getenv("HOME") orelse {
+        try stderr.writeAll("maru terminfo: $HOME가 없어 캐시 위치를 정할 수 없습니다\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    const dir = try maru.terminfo_cache.cacheDirZ(allocator, std.mem.span(home_z));
+    defer allocator.free(dir);
+
+    switch (action) {
+        // 스크립트에서 캐시 경로만 필요할 때(예: 지우기 자동화). 경로만 한 줄 출력한다.
+        .path => try stdout.print("{s}\n", .{dir}),
+        // 캐시가 컴파일돼 xterm-maru가 해석되는지 보고한다(아무것도 바꾸지 않는 안전 기본).
+        .status => {
+            const cmd = try maru.terminfo_cache.statusCommand(allocator);
+            defer allocator.free(cmd);
+            try stdout.print("maru terminfo 캐시: {s}\n", .{dir});
+            try stdout.flush(); // system()이 fd로 직접 쓰므로 버퍼를 먼저 비운다.
+            if (system(cmd.ptr) == 0) {
+                try stdout.writeAll("상태: xterm-maru 컴파일됨 (config term = \"xterm-maru\"면 이 캐시를 TERMINFO로 쓴다)\n");
+            } else {
+                try stdout.writeAll("상태: 아직 컴파일 안 됨 — maru를 한 번 실행하면 자동 컴파일되거나, `maru terminfo --refresh`로 지금 컴파일한다\n");
+            }
+        },
+        // 업데이트로 terminfo 캡이 바뀐 뒤 등, 캐시를 강제로 비우고 다시 컴파일한다(보통은 자동 stale 감지로
+        // 불필요하지만 강제·복구용). tic 경고/오류는 사용자에게 그대로 보인다.
+        .refresh => {
+            const cmd = try maru.terminfo_cache.refreshCommand(allocator, maru.terminfo_cache.version());
+            defer allocator.free(cmd);
+            try stdout.print("maru terminfo 캐시 재컴파일: {s}\n", .{dir});
+            try stdout.flush();
+            if (system(cmd.ptr) == 0) {
+                try stdout.writeAll("완료: xterm-maru 재컴파일됨\n");
+            } else {
+                try stderr.writeAll("maru terminfo: 재컴파일 실패 — tic(ncurses)이 설치돼 있는지 확인하세요(셸에선 xterm-256color로 폴백)\n");
+                try stderr.flush();
+                return error.UnknownCommand;
+            }
+        },
+        // 캐시 디렉터리를 통째로 지운다(다음 maru 실행이 자동 재컴파일).
+        .clear => {
+            const cmd = try maru.terminfo_cache.clearCommand(allocator);
+            defer allocator.free(cmd);
+            _ = system(cmd.ptr);
+            try stdout.print("maru terminfo 캐시 삭제: {s}\n", .{dir});
+        },
+    }
+    try stdout.flush();
+}
+
 fn printUsage(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\usage:
@@ -303,6 +377,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru app-pty-smoke
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
+        \\  maru terminfo [--status|--refresh|--clear|--path]
         \\
         \\commands:
         \\  demo       run the headless PTY -> SurfaceRuntime -> snapshot demo
@@ -313,6 +388,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  app-pty-smoke run the live PTY -> app host -> RenderFrame smoke
         \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
         \\  install-cli  symlink the maru binary into ~/.local/bin so `maru` works on your PATH
+        \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)
         \\
     );
     try writer.flush();

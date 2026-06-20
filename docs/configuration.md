@@ -147,6 +147,18 @@ Maru가 이 terminfo 소스를 바이너리에 내장하고, 자식 셸을 띄�
 **`xterm-256color`로 자동 폴백**해 로컬이 절대 깨지지 않는다(Ghostty의 번들 terminfo + `TERMINFO` env
 방식과 같은 결 — `pty/macos.zig`의 `resolveTerm`).
 
+> **캐시 자동 갱신**: 캐시 디렉터리에 내장 terminfo의 버전 지문(`.maru-version`)을 함께 둔다. maru를 업데이트해
+> terminfo 캡이 바뀌면 지문이 달라져 **다음 셸 spawn이 stale 캐시를 자동 재컴파일**한다(예전엔 한 번 컴파일하면
+> 안 바꿔, 캡을 늘려도 기존 캐시에 반영되지 않았다). 보통은 손댈 일이 없지만, 강제·진단용으로 `maru terminfo`
+> 서브커맨드를 둔다:
+>
+> ```sh
+> maru terminfo            # 상태(캐시 경로 + xterm-maru 해석 여부)
+> maru terminfo --refresh  # 캐시를 강제로 비우고 다시 컴파일
+> maru terminfo --clear    # 캐시 삭제(다음 실행이 자동 재컴파일)
+> maru terminfo --path     # 캐시 경로만 출력(스크립트용)
+> ```
+
 `xterm-maru`가 알리는 캡(Maru가 실제 지원하는 것만 정직하게 — 없는 걸 광고하면 원격 프로그램이 오작동):
 - **동기화 출력(`Sync`, DECSET 2026)** — tmux가 재그리기를 한 프레임으로 묶어 **tmux 레이아웃 플리커가 사라진다**.
 - **truecolor(`Tc`)** — 24-bit 색.

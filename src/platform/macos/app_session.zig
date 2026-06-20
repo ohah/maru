@@ -3251,15 +3251,20 @@ pub const AppSession = struct {
             std.ascii.indexOfIgnoreCase(folder, query) != null;
     }
 
-    /// 검색 caret rect(헤더 검색 영역) — IME 후보창·커서 위치. 🔍(2칸)+공백 다음 입력 텍스트 폭만큼. 헤더 1줄(y=0).
+    /// 검색 caret rect(헤더 검색 영역) — IME 후보창·커서 위치. 🔍(2칸)+공백 다음 입력 텍스트 폭만큼. 검색 줄(마지막
+    /// 줄)의 y. 줄 수는 headerRows 단일 소스(headerHit·buildSidebarHeaderFrame과 동일 — 따로 계산하면 어긋난다).
     fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
         if (!self.sidebar_search_active or self.cell_width_px == 0 or self.cell_height_px == 0) return null;
         const cw = self.cell_width_px;
         const ch = self.cell_height_px;
-        const header_rows = @max(@as(u32, 2), self.sidebar_header_height_px / ch);
-        const search_row = header_rows - 1; // 검색 줄(buildSidebarHeaderFrame와 동일 — 신호등 아래)
+        const cols = self.sidebar_width_px / cw;
+        const search_row = chrome.components.sidebar.headerRows(self.sidebar_header_height_px, ch) - 1;
         const prompt_cols: u32 = 3; // 🔍(2칸) + 공백(1)
         const caret_col = prompt_cols + self.sidebar_search_input.queryCols();
+        // 검색어가 입력 영역(col 3..cols-4, 우측은 아이콘)을 넘으면 caret를 숨긴다 — buildSidebarHeaderFrame이 col
+        // cols-4에서 query를 자르는 것과 동일. 안 그러면 IME 후보창이 사이드바 밖 터미널 pane 위로 떠 텍스트와 분리된다
+        // (find.caretRect의 panel_cols 가드와 동형). cols<6이면 헤더가 없어 검색이 활성될 수 없으므로 cols≥6 전제.
+        if (caret_col >= cols -| 4) return null;
         return .{ .x = @intCast(caret_col * cw), .y = @intCast(search_row * ch), .w = cw, .h = ch };
     }
 
@@ -4079,6 +4084,10 @@ pub const AppSession = struct {
                 self.context_menu_target = target;
                 const items = self.buildContextMenuItems(); // 대상 타입에 맞는 항목(workspace=Rename+Pin+배경, pane/term=Rename)
                 self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), items.len);
+                // 검색이 활성인 채 메뉴가 뜨면 키 라우팅이 검색을 먼저 봐(handleSidebarSearchKey) 메뉴를 ↑↓/Enter로 못
+                // 움직이고 Esc가 메뉴 대신 검색을 닫는다 — blur해 키 포커스를 메뉴로 넘긴다(검색어는 보존). 대상은 위에서
+                // 이미 잡았고 context_menu_target은 라이브 포인터라 rebuildSidebar의 visible_tabs 변화에 안 깨진다.
+                if (self.sidebar_search_active) self.blurSidebarSearch();
                 self.metal_dirty = true;
                 return;
             }
@@ -4168,7 +4177,7 @@ pub const AppSession = struct {
             if (kind == 1) {
                 // 상단 헤더: 새 워크스페이스 아이콘 → 새 탭(하단 "+"를 헤더로 이동), view options 아이콘 → 메뉴(P4),
                 // 검색 영역 → 검색 활성(P3). 헤더 밖(none)이면 카드 슬롯 hit-test(✕ 닫기 / 전환 + 드래그 재정렬).
-                const header_region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.sidebar_header_height_px);
+                const header_region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px);
                 switch (header_region) {
                     .new_workspace => _ = self.newTab() catch {},
                     .view_options => {
@@ -4623,8 +4632,8 @@ pub const AppSession = struct {
                 // #10 후속: 확정 텍스트를 현재 입력 대상으로 라우팅한다 — imeEnd는 keyDown(interpretKeyEvents
                 // 직후) 동기 콜백이라, 터미널 PTY로 blocking enqueue하면 write_queue 포화 시 tick을 멈춰
                 // commitComposition과 같은 backpressure 데드락이 된다(#10이 그쪽만 되돌렸다). 터미널이면
-                // non-blocking, find/palette 입력칸이면 기존 키 경로(routeCommittedText 참조). 아래 화살표
-                // replay는 그대로 키 경로 — 커서 이동이라 인코딩이 필요하고 단발이라 데드락과 무관하다.
+                // non-blocking, find/palette 입력칸이면 기존 키 경로(routeCommittedText 참조). 아래 replay(화살표·Enter)는
+                // 인코딩이 필요해 그대로 키 경로(handleKeyEvent)를 쓴다 — 버퍼 포화 시 순서/blocking 한계는 그 블록 주석 참조.
                 self.routeCommittedText(text);
                 // 한글 후보를 화살표로 확정하는 경우(insertText('안') + 화살표): 텍스트만 보내고
                 // 화살표를 버리면 커서가 안 움직인다. 확정 후 그 화살표를 다시 보낸다(Ghostty
@@ -4632,7 +4641,13 @@ pub const AppSession = struct {
                 // 수정자 있을 때만; plain 왼쪽은 AppKit이 이미 커서를 제자리에 둬 중복 이동 방지).
                 // Enter는 config(input.ime-enter=newline, 기본)면 함께 replay해 조합 확정과 개행을 한 번에
                 // 처리한다(브라우저 동작). replay되는 Enter는 handleKeyEvent를 거쳐 일반 Enter=`\r`,
-                // Shift+Enter=Meta 변형(`\x1b\r`)으로 인코딩된다.
+                // Shift+Enter=Meta 변형(`\x1b\r`)으로 인코딩된다(shift→meta 변환·kitty 인코딩·find_nav 등 부작용 유지).
+                // **알려진 한계(드묾)**: 확정 텍스트는 non-blocking pending_paste FIFO(#10 데드락 회피)지만 이 replay는
+                // blocking writeInput(키 경로)이라 '다른 스트림'이다. PTY 쓰기 버퍼가 포화면(자식이 stdin을 안 읽는 중)
+                // 확정 문자는 FIFO에 남고 '\r'가 fd에 먼저 써져 글자가 다음 줄로 밀릴 수 있고, 동기 콜백에서 blocking
+                // write가 잠깐 막힐 수도 있다. 대화형 셸은 키 입력을 즉시 읽어 버퍼가 차는 일이 거의 없어 실사용 트리거는
+                // 희박하다. 근본 해결은 키 경로도 pending_paste FIFO로 통합(키·paste·IME가 한 순서 스트림)하는 구조
+                // 변경이라, IME 트랜잭션(부작용)을 안 깨게 별도 작업으로 둔다([document-basis-and-decision]).
                 if (event) |ev| if (shouldReplayAfterCommit(ev, self.ime_enter_newline)) {
                     _ = self.handleKeyEvent(ev) catch {};
                 };
@@ -4880,7 +4895,7 @@ pub const AppSession = struct {
         // 사이드바 영역 호버는 슬롯(또는 상단 헤더)을 추적한다(터미널 URL 호버 아님).
         if (self.inSidebar(x_px)) {
             // 상단 헤더(검색바·아이콘) 영역이면 슬롯 호버 해제 + 아이콘은 pointingHand·검색 영역은 I-beam.
-            const region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.sidebar_header_height_px);
+            const region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px);
             if (region != .none) {
                 self.setHoveredSlot(null);
                 self.setHoveredTab(null);
@@ -6979,8 +6994,8 @@ pub const AppSession = struct {
         const fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
         // 헤더 2줄: 줄0(신호등 줄)은 좌측 네이티브 신호등(닫기·최소화·확대) 영역을 비우고 우측에 view options(⚙)·
         // 새 워크스페이스(+) 아이콘. 검색은 신호등 아래 줄(search_row)에 🔍 + 입력/placeholder로 둔다(headerHit과
-        // 같은 줄/우측 정렬 — view↔hitTest 단일 레이아웃). 줄 수는 header_h/cell_h로 산출(신호등 높이 흡수).
-        const header_rows: u16 = @intCast(@max(@as(u32, 2), self.sidebar_header_height_px / @max(self.cell_height_px, 1)));
+        // 같은 줄/우측 정렬 — view↔hitTest 단일 레이아웃). 줄 수는 headerRows 단일 소스(headerHit·caretRect과 동일).
+        const header_rows: u16 = @intCast(chrome.components.sidebar.headerRows(self.sidebar_header_height_px, self.cell_height_px));
         const search_row: u16 = header_rows - 1; // 헤더 마지막 줄(신호등 아래)
         // 줄0: 우측 view options(⚙)·새 워크스페이스(+) 아이콘.
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 4, .codepoint = 0x2699, .style = .{ .foreground = fg } });
@@ -11964,10 +11979,11 @@ test "hovering the sidebar + slot adds a hover band at the plus row" {
         "sh",
     );
     const header_h: f64 = @floatFromInt(session.sidebar_header_height_px);
+    const icon_y: f64 = @as(f64, @floatFromInt(session.cell_height_px)) / 2; // 아이콘 줄(row 0) — 3줄 헤더의 빈 가운데 줄 아님
     const x_in: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1; // 사이드바 우측 끝(헤더 새 워크스페이스 아이콘 영역)
 
     // 헤더 새 워크스페이스 아이콘(우측 끝) 호버 → link 커서. 카드 슬롯이 아니라 hovered_slot=null(하단 "+" → 헤더로 이동).
-    const cursor = session.hoverCursor(x_in, header_h / 2, false);
+    const cursor = session.hoverCursor(x_in, icon_y, false);
     try std.testing.expectEqual(CursorKind.link, cursor);
     try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
 
@@ -12172,10 +12188,11 @@ test "③b: clicking the sidebar '+' button opens a new workspace" {
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 
-    // 새 워크스페이스 아이콘 = 헤더 영역(y<header) 우측 끝 2칸. headerHit이 new_workspace 반환(하단 "+" → 헤더로 이동).
-    const header_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) / 2;
+    // 새 워크스페이스 아이콘 = 헤더 아이콘 줄(row 0) 우측 끝. headerHit이 new_workspace 반환(하단 "+" → 헤더로 이동).
+    // 아이콘은 줄0이므로 y는 cell_h 안(헤더 전체 높이의 절반은 3줄 헤더에선 빈 가운데 줄이라 none).
+    const header_y: f64 = @as(f64, @floatFromInt(session.cell_height_px)) / 2;
     const new_ws_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
-    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.new_workspace, chrome.components.sidebar.headerHit(new_ws_x, header_y, session.sidebar_width_px, session.cell_width_px, session.sidebar_header_height_px));
+    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.new_workspace, chrome.components.sidebar.headerHit(new_ws_x, header_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px));
 
     // 새 워크스페이스 아이콘 호버 → pointingHand(link) affordance.
     try std.testing.expectEqual(CursorKind.link, session.hoverCursor(new_ws_x, header_y, false));
@@ -12210,7 +12227,7 @@ test "sidebar search blurs when clicking outside it (terminal/card) — restores
     // 검색 줄(헤더 하단)을 클릭 → 검색 활성, 키 포커스가 검색으로 라우팅.
     const search_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) * 0.5;
     const search_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) * 0.8;
-    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.search, chrome.components.sidebar.headerHit(search_x, search_y, session.sidebar_width_px, session.cell_width_px, session.sidebar_header_height_px));
+    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.search, chrome.components.sidebar.headerHit(search_x, search_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px));
     session.mouse(1, search_x, search_y, 0, 0);
     try std.testing.expect(session.sidebar_search_active);
     try std.testing.expectEqual(AppSession.InputFocus.sidebar_search, session.inputFocus());
@@ -12268,7 +12285,7 @@ test "view options menu: ⚙ toggles sidebar show-branch/folder, stays open, sig
     // ⚙ 아이콘(헤더 상단 우측 [w-4cw, w-2cw)) 클릭 → view options 메뉴 열림.
     const gear_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - @as(f64, @floatFromInt(session.cell_width_px)) * 3;
     const gear_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) * 0.2; // 상단 아이콘 줄
-    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.view_options, chrome.components.sidebar.headerHit(gear_x, gear_y, session.sidebar_width_px, session.cell_width_px, session.sidebar_header_height_px));
+    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.view_options, chrome.components.sidebar.headerHit(gear_x, gear_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px));
     session.mouse(1, gear_x, gear_y, 0, 0);
     try std.testing.expect(session.view_options_menu);
     try std.testing.expect(session.chrome_host.context_menu.open);

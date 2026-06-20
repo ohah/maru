@@ -1301,7 +1301,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let (xPx, yPx) = backingPx(view.convert(event.locationInWindow, from: nil), in: view)
         guard maru_macos_app_session_is_window_drag_region(session, xPx, yPx) != 0 else { return false }
         if event.clickCount == 2 {
-            window.zoom(nil)
+            // 시스템 설정(데스크탑 및 Dock > "윈도우 제목 막대를 두 번 클릭하여")을 따른다 — 네이티브 타이틀바를 숨겨
+            // AppKit 자동 처리가 안 되므로 직접 읽는다. AppleActionOnDoubleClick: Maximize(=zoom, 기본)·Minimize·None.
+            switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") ?? "Maximize" {
+            case "Minimize": window.miniaturize(nil)
+            case "None": break
+            default: window.zoom(nil)
+            }
         } else {
             window.performDrag(with: event)
         }

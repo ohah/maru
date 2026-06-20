@@ -1911,6 +1911,10 @@ pub const AppSession = struct {
     /// 바꾸므로 setSidebarWidthPx와 같은 재배치(전 탭 resize + 활성 rect + 사이드바 재빌드)를 한다.
     fn toggleSidebarCollapsed(self: *AppSession) void {
         if (self.chrome_minimal) return; // quick terminal minimal은 항상 사이드바 없음 — 토글 대상 아님
+        // 접으면 검색 입력칸이 사라지니 검색을 비활성화한다(안 그러면 inputFocus가 .sidebar_search로 남아 키가 보이지
+        // 않는 검색에 갇히고 매 blink마다 재투영). 검색어는 보존(blur 규율) — 호출 경로(◧ 클릭/향후 키바인딩)와 무관하게
+        // 토글 자체가 책임진다. 아래 rebuildSidebar가 필터 일시정지를 반영한다.
+        self.sidebar_search_active = false;
         self.sidebar_collapsed = !self.sidebar_collapsed;
         self.sidebar_width_px = if (self.sidebar_collapsed) 0 else ptToPx(self.sidebar_width_pt, self.scale_milli);
         self.titlebar_strip_px = self.computeTitlebarStripPx(); // 접힘=신호등 높이, 펼침=한 줄 — termRect/grid 전에 갱신
@@ -3314,7 +3318,7 @@ pub const AppSession = struct {
         const caret_col = prompt_cols + self.sidebar_search_input.queryCols();
         // 검색어가 입력 영역(col 3..cols-4, 우측은 아이콘)을 넘으면 caret를 숨긴다 — buildSidebarHeaderFrame이 col
         // cols-4에서 query를 자르는 것과 동일. 안 그러면 IME 후보창이 사이드바 밖 터미널 pane 위로 떠 텍스트와 분리된다
-        // (find.caretRect의 panel_cols 가드와 동형). cols<6이면 헤더가 없어 검색이 활성될 수 없으므로 cols≥6 전제.
+        // (find.caretRect의 panel_cols 가드와 동형). cols<8이면 헤더 frame이 null이라 검색이 활성될 수 없으므로 cols≥8 전제.
         if (caret_col >= cols -| 4) return null;
         return .{ .x = @intCast(caret_col * cw), .y = @intCast(search_row * ch), .w = cw, .h = ch };
     }
@@ -4520,7 +4524,11 @@ pub const AppSession = struct {
         // 사이드바 아이콘은 suffix-trim으로 못 숨기는 별도 frame이라 text-blink/rename처럼 full rebuild(dirty)가 필요.
         const agent_pulsing = self.anyAgentRunning();
         // 사이드바 검색 caret도 깜빡인다 — 헤더 frame의 '|' 글자라(rename과 동형) full rebuild가 필요하다.
-        const sidebar_search = self.sidebar_search_active;
+        // 검색 caret이 '실제로 그려질' 때만 blink로 재투영한다(buildSidebarHeaderFrame이 caret을 그리는 조건과 동일:
+        // 활성 + 접힘 아님 + cols≥8). 안 그러면 활성인 채 사이드바를 8칸 미만으로 드래그하면 안 보이는 caret 때문에 매
+        // 틱 전체 grid가 CoreText 재셰이프된다(idle 못 듦). (접힘은 toggleSidebarCollapsed가 search_active를 끄지만 방어적으로 포함.)
+        const sidebar_search = self.sidebar_search_active and !self.sidebar_collapsed and
+            self.cell_width_px > 0 and self.sidebar_width_px / self.cell_width_px >= 8;
         // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
         // core.preedit로 이미 막지만, 오버레이/rename/검색은 imeComposingActive로 막아야 한다(단일 출처).
         if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !agent_pulsing and !sidebar_search) or self.imeComposingActive()) {
@@ -7176,7 +7184,7 @@ pub const AppSession = struct {
     /// (collapsedToggleRect)가 같은 값을 써야 그려진 버튼과 클릭 영역이 일치한다(단일 출처). cell_width 0이면 0.
     fn collapsedToggleCol(self: *const AppSession) u16 {
         if (self.cell_width_px == 0) return 0;
-        const clearance_px: u32 = traffic_light_clearance_pt * self.scale_milli / 1000; // 신호등 클리어런스(backing px)
+        const clearance_px = ptToPx(traffic_light_clearance_pt, self.scale_milli); // 신호등 클리어런스(backing px, pt→px 단일 출처)
         return @intCast(@min(clearance_px / self.cell_width_px + 1, @as(u32, std.math.maxInt(u16))));
     }
 
@@ -7210,12 +7218,14 @@ pub const AppSession = struct {
 
     /// 접힘 상태 좌상단 펼치기 버튼의 backing-px rect(클릭 hit-test) — render(collapsedToggleCol)와 같은 col. 펼침/접힘
     /// 아니면 null. mouse 핸들러가 이 rect 안 클릭이면 toggleSidebarCollapsed(펼치기)한다(사이드바가 없어 inSidebar=false라
-    /// 별도 체크). 버튼 1칸 + 좌우 약간 여유(클릭 쉬움)로 잡는다.
+    /// 별도 체크). 높이는 **타이틀바 띠 전체**(cell_h가 아님) — 접힘 띠는 max(cell_h, 30pt)라 1.7× 버튼이 cell_h
+    /// 아래로 삐져나가는데 cell_h로 잡으면 그 부분이 데드존(클릭·드래그 둘 다 안 됨)이 된다. 폭도 확대 글리프(≈1.7칸)를
+    /// 덮게 2칸.
     fn collapsedToggleRect(self: *const AppSession) ?chrome.draw.Rect {
-        if (!self.sidebar_collapsed or self.cell_width_px == 0 or self.cell_height_px == 0) return null;
+        if (!self.sidebar_collapsed or self.cell_width_px == 0 or self.titlebar_strip_px == 0) return null;
         const cw = self.cell_width_px;
         const x = self.collapsedToggleCol() * cw;
-        return .{ .x = @intCast(x), .y = 0, .w = cw, .h = self.cell_height_px };
+        return .{ .x = @intCast(x), .y = 0, .w = 2 * cw, .h = self.titlebar_strip_px };
     }
 
     /// 오버레이(커맨드 팝업·Find·Notice) frame의 공통 마무리. 채워진 cells(소유권 인계) + 격자 크기(cols×rows) +
@@ -12637,12 +12647,16 @@ test "sidebar collapse toggle: hides (width 0, pt preserved) and the top-left bu
     try std.testing.expect(!session.sidebar_collapsed);
     try std.testing.expect(session.collapsedToggleRect() == null); // 펼침일 땐 버튼 없음
 
-    // 접기(토글) → 폭 0, pt는 보존(복원용), 좌상단 버튼 등장.
+    // 접기(토글) → 폭 0, pt는 보존(복원용), 좌상단 버튼 등장. 검색이 활성이었으면 비활성화(키 갇힘 방지, code-review #3).
+    session.sidebar_search_active = true; // 접기 직전 검색 활성 상태 가정
     session.toggleSidebarCollapsed();
     try std.testing.expect(session.sidebar_collapsed);
+    try std.testing.expect(!session.sidebar_search_active); // 접으면 검색 비활성(보이지 않는 검색에 키 안 갇힘)
     try std.testing.expectEqual(@as(u32, 0), session.sidebar_width_px);
     try std.testing.expectEqual(pt0, session.sidebar_width_pt); // pt 보존
     try std.testing.expect(session.collapsedToggleRect() != null);
+    // 펼치기 버튼 rect 높이 = 타이틀바 띠 전체(cell_h가 아님) — 1.7× 버튼이 띠 하단으로 삐져나간 데드존 방지(code-review #1).
+    try std.testing.expectEqual(session.titlebar_strip_px, session.collapsedToggleRect().?.h);
 
     // 좌상단 펼치기 버튼 안 클릭 → 펼침(폭 복원). 사이드바 폭 0이라 inSidebar=false인데도 별도 경로로 잡힌다.
     const r = session.collapsedToggleRect().?;

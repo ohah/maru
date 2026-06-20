@@ -28,6 +28,13 @@ const budgets = struct {
     // 캐시화(#10)가 불필요하다고 결론. 이 게이트는 그 비용이 조용히 회귀하지 않게 1000회 2s(회당 2ms
     // 상한 — findImage O(placements×images)가 더 나빠지거나 sort/alloc 구조가 퇴화하면 잡는다)로 고정.
     const kitty_image_pipeline_ns = 2 * std.time.ns_per_s;
+    // I/O–렌더 스레딩(docs/io-render-threading.md §5): 렌더는 core_mutex를 잡은 채
+    // renderSnapshot()+buildDrawList()로 dirty 셀을 DrawList로 복사한 뒤 언락한다(host.zig). 이
+    // 구간이 길면 그동안 I/O 스레드(코어 write)가 대기하므로, 그 락-보유 비용의 상한을 잰다. 2000회
+    // 2s = 회당 1ms 상한 — 30Hz tick(33ms)의 ~1/33이라 I/O 대기로 충분히 작고, 구조 회귀(셀당 비용
+    // 증가·여분 할당)는 잡는다. perf는 머신 의존이라 budget 여유가 원칙(다른 벤치와 동일한 2s).
+    const render_build_drawlist_ns = 2 * std.time.ns_per_s;
+    const render_build_scrolled_ns = 2 * std.time.ns_per_s;
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -46,6 +53,8 @@ pub fn main(init: std.process.Init) !void {
         try measureSnapshotSerialization(allocator, io),
         try measureScrollbackRewrap(allocator, io),
         try measureKittyImagePipeline(allocator, io),
+        try measureRenderBuildDrawList(allocator, io),
+        try measureRenderBuildScrolled(allocator, io),
     };
 
     const report = try renderReport(allocator, &results);
@@ -226,6 +235,85 @@ fn measureKittyImagePipeline(allocator: std.mem.Allocator, io: std.Io) !Budget {
         .name = "kitty_image_pipeline",
         .elapsed_ns = elapsed,
         .budget_ns = budgets.kitty_image_pipeline_ns,
+        .units = iterations,
+    };
+}
+
+fn measureRenderBuildDrawList(allocator: std.mem.Allocator, io: std.Io) !Budget {
+    // I/O–렌더 스레딩 분리(docs/io-render-threading.md §5)의 "lock 보유 시간" 항목을 실측한다. 렌더
+    // 스레드는 core_mutex를 잡은 채 renderSnapshot()+buildDrawList()로 dirty 셀을 DrawList로 *복사*하고
+    // 언락한다(src/app/host.zig). 그 구간 동안 I/O 스레드의 core.write가 대기하므로, "큰 화면 + full-dirty +
+    // 전 셀 장식"이라는 락-보유 최악으로 상한을 잡는다(셀 복사 + 셀당 underline overlay까지 방출).
+    const size: maru.terminal.Size = .{ .cols = 300, .rows = 90 }; // 5K 모니터급 큰 화면(27,000 셀)
+    var core = try maru.terminal.TerminalCore.init(allocator, size);
+    defer core.deinit();
+
+    // 화면을 가득 채우되 underline+전경색을 켜 둔다 — buildDrawList가 모든 셀을 복사하고 셀마다
+    // underline overlay까지 내게 해 overlay 경로 비용도 상한에 포함한다. 채우는 write는 타이밍 밖이다.
+    const cell_count = @as(usize, size.cols) * @as(usize, size.rows);
+    const fill = try allocator.alloc(u8, cell_count);
+    defer allocator.free(fill);
+    @memset(fill, 'M');
+    try core.write("\x1b[4;38;5;205m"); // SGR 4(underline) + 256색 전경 — 전 셀 장식
+    try core.write(fill);
+
+    // 반복은 200회로 둔다 — `mise run perf`는 기본 Debug고, 가장 느린 게이트인 CI 러너(ubuntu)는
+    // 이 셀-복사 루프에서 회당 ~4ms라 500회면 budget(2s)을 아슬하게 넘긴다(실측 2039ms). 200회면
+    // CI ~0.8s로 다른 벤치와 같은 ~2.5x 여유고, ReleaseFast(회당 ~0.12ms)에서도 200 표본이면 안정적이다.
+    const iterations = 200;
+    const start = now(io);
+    for (0..iterations) |_| {
+        var list = try maru.renderer.buildDrawList(allocator, core.renderSnapshot());
+        list.deinit(allocator);
+    }
+    const elapsed = now(io) - start;
+
+    // full-dirty 큰 화면이면 셀이 가득 나와야 한다(빈 결과면 dirty/계약 회귀를 드러낸다).
+    var probe = try maru.renderer.buildDrawList(allocator, core.renderSnapshot());
+    defer probe.deinit(allocator);
+    if (probe.cells.len < cell_count / 2) return error.PerfResultDrawListTooSmall;
+
+    return .{
+        .name = "render_build_drawlist",
+        .elapsed_ns = elapsed,
+        .budget_ns = budgets.render_build_drawlist_ns,
+        .units = iterations,
+    };
+}
+
+fn measureRenderBuildScrolled(allocator: std.mem.Allocator, io: std.Io) !Budget {
+    // §5의 "scroll 합성" 항목: 과거를 보는 중(view_offset>0)이면 renderSnapshot이 보이는 윈도를
+    // viewport_cells로 매 프레임 합성(rows×cols memcpy + 행별 prompt)한 뒤 buildDrawList가 복사한다 —
+    // 둘 다 락 안이다. viewport_cells는 첫 프레임에 할당되고 이후엔 memcpy만이라, "스크롤 중 큰 화면"
+    // 락-보유의 정상 상태 비용 상한을 잰다(첫 1회 할당은 워밍업으로 타이밍 밖에 둔다).
+    const size: maru.terminal.Size = .{ .cols = 300, .rows = 90 };
+    var core = try maru.terminal.TerminalCore.init(allocator, size);
+    defer core.deinit();
+
+    // 스크롤백을 화면보다 넉넉히 채운 뒤 과거로 스크롤한다(뷰포트가 스크롤백 윈도에 들어가게).
+    for (0..2_000) |line_no| {
+        var line_buffer: [320]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&line_buffer);
+        try writer.print("scroll-src-{d}-MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\r\n", .{line_no});
+        try core.write(writer.buffered());
+    }
+    core.scrollViewport(45); // 화면 절반 위로
+    _ = core.renderSnapshot(); // 첫 합성으로 viewport_cells 할당(이후엔 memcpy만) — 워밍업
+
+    const iterations = 200; // render_build_drawlist와 동일한 이유(CI budget 여유)
+    const start = now(io);
+    for (0..iterations) |_| {
+        var list = try maru.renderer.buildDrawList(allocator, core.renderSnapshot());
+        list.deinit(allocator);
+    }
+    const elapsed = now(io) - start;
+
+    if (core.viewOffset() == 0) return error.PerfResultNotScrolled; // 스크롤 상태가 유지돼야 합성 경로를 잰 것
+
+    return .{
+        .name = "render_build_scrolled",
+        .elapsed_ns = elapsed,
+        .budget_ns = budgets.render_build_scrolled_ns,
         .units = iterations,
     };
 }

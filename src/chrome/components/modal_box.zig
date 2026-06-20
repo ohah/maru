@@ -8,6 +8,7 @@ const std = @import("std");
 const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
+const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭) 공유 — 박스 폭을 placeText와 같은 폭 규약으로 잡는다
 
 /// 이 박스가 그리는 레이어(최상위 모달). notice/confirm이 그대로 재노출한다.
 pub const layer = draw.Layer.modal;
@@ -16,11 +17,12 @@ pub const layer = draw.Layer.modal;
 pub const Line = struct { text: []const u8, role: tokens.ColorRole };
 
 /// lines를 중앙 모달 박스로 그려 out에 append한다(quad + border + 줄별 text). lines가 비면 무동작(호출자가 열림
-/// 가드). 폭 = 가장 긴 줄 표시 폭 + 좌우 여백, **터미널 영역(사이드바 오른쪽)으로 clamp**한다 — 넘으면 사이드바
-/// 침범/우측 오버플로. term_cols==0(터미널 영역이 한 셀보다 좁음)이면만 생략한다(중앙배치 뺄셈 언더플로 방지);
-/// 1~3칸이어도 작은 박스라도 그린다 — '열림이지만 안 보임'이면 handle이 모든 키를 소비해 soft-lock이 된다. 표시
-/// 폭은 코드포인트 근사라 wide(EAW=2) 문자는 과소측정될 수 있다(정확 보정은 후속). 높이 = (줄 수 + 위/아래 여백
-/// 한 줄씩)·ch. ops·runs 슬라이스는 호출자가 준 frame arena가 소유한다.
+/// 가드). 폭 = 가장 긴 줄 **표시 폭**(EAW — overlay_input.displayCols, 한글/CJK=2칸) + 좌우 여백, **터미널 영역
+/// (사이드바 오른쪽)으로 clamp**한다 — 넘으면 사이드바 침범/우측 오버플로. 폭을 placeText와 같은 EAW 규약으로 재야
+/// 한글 메시지가 박스를 넘쳐 잘리지 않는다(코드포인트 수로 재면 한글이 2배 과소측정돼 클리핑됐다 — 확인 모달
+/// 한글 문구가 안 보이던 버그). term_cols==0(터미널 영역이 한 셀보다 좁음)이면만 생략한다(중앙배치 뺄셈 언더플로
+/// 방지); 1~3칸이어도 작은 박스라도 그린다 — '열림이지만 안 보임'이면 handle이 모든 키를 소비해 soft-lock이 된다.
+/// 높이 = (줄 수 + 위/아래 여백 한 줄씩)·ch. ops·runs 슬라이스는 호출자가 준 frame arena가 소유한다.
 pub fn view(
     lines: []const Line,
     p: props.ChromeProps,
@@ -42,10 +44,7 @@ pub fn view(
     const pad: u32 = p.shape.modal_padding_px;
     const avail_cols = (term_w_px -| 2 * pad) / cw;
     var content_cols: u32 = 0;
-    for (lines) |ln| {
-        const c: u32 = @intCast(std.unicode.utf8CountCodepoints(ln.text) catch ln.text.len);
-        content_cols = @max(content_cols, c);
-    }
+    for (lines) |ln| content_cols = @max(content_cols, overlay_input.displayCols(ln.text)); // EAW 표시폭(placeText와 동일 규약)
     const box_cols = @max(@min(content_cols + 2 * tk.space.modal_margin_cells, avail_cols), 1);
     const box_w = box_cols * cw;
     const box_h = (@as(u32, @intCast(lines.len)) + 2) * ch; // 위 여백 + 줄들 + 아래 여백
@@ -115,6 +114,33 @@ test "modal_box: lines 0이면 ops 0, 1줄이면 quad+border+text(3), 2줄이면
     try std.testing.expect(out.items[3].text.origin.y > out.items[2].text.origin.y); // 둘째 줄이 아래
     try std.testing.expect(out.items[0].quad.rect.h > h1); // 2줄 박스가 1줄보다 한 줄 큼
     try std.testing.expect(out.items[0].quad.rect.x >= 40); // 사이드바 오른쪽
+}
+
+test "modal_box: 한글(wide) 메시지는 EAW 표시폭만큼 박스를 넓힌다 — 코드포인트 수로 재면 잘리던 버그" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    // 넓은 창(clamp 안 걸림)이라 박스 폭은 콘텐츠 표시폭이 결정한다.
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 40,
+        .backing_width_px = 1200,
+        .backing_height_px = 600,
+    } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+
+    const msg = "실행 중인 명령이 있습니다. 닫을까요?"; // 한글=2칸이라 표시폭 ≫ 코드포인트 수
+    try view(&.{.{ .text = msg, .role = .surface_fg }}, p, &tk, arena, &out);
+    const box_cols = out.items[0].quad.rect.w / 8; // cw=8
+    const disp = overlay_input.displayCols(msg);
+    const cps: u32 = @intCast(std.unicode.utf8CountCodepoints(msg) catch msg.len);
+    try std.testing.expect(disp > cps); // 한글이라 표시폭 > 코드포인트 수(전제)
+    // 박스 안쪽 폭(좌우 여백 제외)이 EAW 표시폭을 담아야 placeText가 안 자른다. 코드포인트 수로 쟀다면 box_cols가
+    // disp보다 작아 텍스트가 박스 밖으로 넘쳐 잘렸다(이 테스트가 그 회귀를 막는다).
+    try std.testing.expect(box_cols >= disp + 2 * tk.space.modal_margin_cells);
 }
 
 test "modal_box: 좁은 창(1~3칸)도 작은 박스를 그리되 term_cols==0이면 생략 (soft-lock 방지)" {

@@ -78,7 +78,8 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        controller?.handleHover(event, in: self)
+        controller?.handleHover(event, in: self)        // Cmd+링크 밑줄·커서 모양
+        controller?.handleMouseMotion(event, in: self)  // mouse reporting(DECSET 1003) — Zig가 트래킹 확인 후 리포트
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -1254,21 +1255,39 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         markMetalNeedsRedraw()
     }
 
-    // 마우스 좌표를 backing 픽셀(좌상단 원점)로 환산해 Zig 선택 모델에 넘긴다(kind 1=down/2=drag/3=up).
-    func handleMouse(_ event: NSEvent, kind: Int32, in view: NSView) {
-        guard let session = appSession else { return }
-        let local = view.convert(event.locationInWindow, from: nil)
+    // NSView 로컬 좌표(좌하단 원점)를 backing(device) 픽셀(좌상단 원점)로 환산한다 — Zig 좌표 규약.
+    // scale·y 뒤집기 공식의 단일 출처(handleMouse·handleMouseMotion·updateHover 공용 — 규약이 바뀌면 여기만 고친다).
+    private func backingPx(_ local: NSPoint, in view: NSView) -> (x: Double, y: Double) {
         let scale = window?.backingScaleFactor ?? 1.0
-        let xPx = Double(local.x * scale)
-        let yPx = Double((view.bounds.height - local.y) * scale) // NSView는 좌하단 원점 — 위가 0이 되게 뒤집는다
-        // macOS buttonNumber(0=L,1=R,2=M) → xterm(0=L,1=M,2=R). modifierFlags → xterm mods 비트(4=shift,8=opt/meta,16=ctrl).
-        let button: Int32 = event.buttonNumber == 1 ? 2 : (event.buttonNumber == 2 ? 1 : 0)
+        return (Double(local.x * scale), Double((view.bounds.height - local.y) * scale))
+    }
+
+    // NSEvent 모디파이어 → xterm mods 비트(4=shift, 8=opt/meta, 16=ctrl). mouse reporting(handleMouse·handleMouseMotion) 공용.
+    private func modsBits(_ event: NSEvent) -> Int32 {
         var mods: Int32 = 0
         if event.modifierFlags.contains(.shift) { mods |= 4 }
         if event.modifierFlags.contains(.option) { mods |= 8 }
         if event.modifierFlags.contains(.control) { mods |= 16 }
-        _ = maru_macos_app_session_mouse(session, kind, xPx, yPx, button, mods)
+        return mods
+    }
+
+    // 마우스 좌표를 backing 픽셀(좌상단 원점)로 환산해 Zig 선택 모델에 넘긴다(kind 1=down/2=drag/3=up).
+    func handleMouse(_ event: NSEvent, kind: Int32, in view: NSView) {
+        guard let session = appSession else { return }
+        let (xPx, yPx) = backingPx(view.convert(event.locationInWindow, from: nil), in: view)
+        // macOS buttonNumber(0=L,1=R,2=M) → xterm(0=L,1=M,2=R).
+        let button: Int32 = event.buttonNumber == 1 ? 2 : (event.buttonNumber == 2 ? 1 : 0)
+        _ = maru_macos_app_session_mouse(session, kind, xPx, yPx, button, modsBits(event))
         markMetalNeedsRedraw()
+    }
+
+    // 버튼 없는 마우스 이동을 mouse reporting(DECSET 1003 any-event)으로 PTY에 흘린다. Zig가 트래킹 모드를
+    // 확인해 1003일 때만 리포트하고(아니면 no-op) 같은 셀 반복은 스킵한다. handleHover(Cmd+링크)와 병행 호출된다.
+    // markMetalNeedsRedraw는 부르지 않는다 — 리포트는 PTY로 나가고 화면 dirty는 앱 출력에 따라 Zig가 세운다.
+    func handleMouseMotion(_ event: NSEvent, in view: NSView) {
+        guard let session = appSession else { return }
+        let (xPx, yPx) = backingPx(view.convert(event.locationInWindow, from: nil), in: view)
+        maru_macos_app_session_mouse_moved(session, xPx, yPx, modsBits(event))
     }
 
     // Cmd+C: Zig가 추출한 선택 텍스트(UTF-8, Zig 소유 버퍼)를 NSPasteboard에 쓴다 — 클립보드는
@@ -1297,9 +1316,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             clearHover()
             return
         }
-        let scale = window?.backingScaleFactor ?? 1.0
-        let xPx = Double(local.x * scale)
-        let yPx = Double((view.bounds.height - local.y) * scale)
+        let (xPx, yPx) = backingPx(local, in: view)
         // Zig가 위치별 커서 종류를 판정해 돌려준다(CursorKind). Swift는 그 값을 NSCursor로 매핑만 한다 —
         // 전부 iBeam이던 걸 영역별로(사이드바·탭 바=arrow, divider=resize, 터미널=iBeam, URL=pointingHand).
         var cursorKind: Int32 = 1

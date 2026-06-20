@@ -242,6 +242,18 @@ pub export fn maru_macos_app_session_mouse(
     return @intFromEnum(Status.ok);
 }
 
+// 버튼 없는 마우스 이동(hover, backing px). Zig가 트래킹 모드를 확인해 any-event(DECSET 1003)일 때만 mouse
+// reporting한다(아니면 no-op). mouseMoved마다 호출되지만 Zig가 같은 셀 반복은 스킵한다. handleHover(Cmd+링크 밑줄)와 병행.
+pub export fn maru_macos_app_session_mouse_moved(
+    session: ?*AppSession,
+    x_px: f64,
+    y_px: f64,
+    mods: i32,
+) void {
+    const app_session = session orelse return;
+    app_session.mouseMoved(x_px, y_px, mods);
+}
+
 // 클립보드 붙여넣기. 개행 정규화(\n->\r)와 bracketed paste(DECSET 2004) 감싸기는 Zig가 한다.
 pub export fn maru_macos_app_session_paste_text(
     session: ?*AppSession,

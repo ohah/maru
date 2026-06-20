@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 58u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 59u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -406,6 +406,14 @@ int32_t maru_macos_app_session_mouse(
     double x_px,
     double y_px,
     int32_t button,
+    int32_t mods
+);
+/* 버튼 없는 마우스 이동(hover, backing px). Zig가 mouse tracking을 확인해 any-event(DECSET 1003)일 때만
+   SGR/x10 motion 리포트한다(아니면 no-op). 같은 셀 반복 이동은 Zig가 스킵한다. mods 비트는 mouse와 동일. */
+void maru_macos_app_session_mouse_moved(
+    MaruAppHostSession *session,
+    double x_px,
+    double y_px,
     int32_t mods
 );
 /* 선택 텍스트 추출(UTF-8). 반환 버퍼는 Zig 소유로 다음 copy_text 또는 destroy까지 유효하다.

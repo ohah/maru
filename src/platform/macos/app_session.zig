@@ -2520,6 +2520,9 @@ pub const AppSession = struct {
         // config 스크롤백 ring 크기를 주입한다(모든 surface가 이 chokepoint를 지난다 — init 첫 탭·새 탭·split·
         // restore). lazy-alloc(첫 scroll) 전이라 안전. 0이면 스크롤백 비활성.
         term.surface.core.max_scrollback = self.loaded_config.config.scrollback.lines;
+        // EAW Ambiguous(동그란 번호 등) 폭(text.ambiguous-width). 같은 chokepoint라 모든 surface가 일관된 폭으로
+        // putCell한다(grid·커서·렌더 단일 출처). 기본 narrow — wide면 동그란 번호 등을 2칸 advance.
+        term.surface.core.ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide;
         // config theme.palette(ANSI 16색 base)를 코어에 주입한다 — OSC 4 query 응답이 렌더(metal_frame)와 같은
         // 우선순위(OSC4 override > config base > xterm256)를 보도록(화면·보고 정합). RIS/OSC104는 override만 리셋.
         term.surface.core.setConfigPalette(self.appearance.theme.palette);

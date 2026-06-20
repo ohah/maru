@@ -82,6 +82,7 @@ window.padding-left   = 8
 | `workspace.split-inherit-cwd` | `true`\|`false` | `true` | 새 분할(`split_*`, 팬)이 포커스 Term의 현재 cwd를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `split-inherit-working-directory`). 아래 참조 |
 | `scrollback.lines` | 정수(0~100000) | `1000` | 가시 화면 위로 보관할 과거 줄 수. `0`이면 스크롤백 비활성(과거 줄 안 보관). 범위 밖/비정수는 무시(기본 유지) |
 | `bell.audible` | `true`\|`false` | `true` | BEL(0x07) 수신 시 시스템 소리(NSSound.beep)를 낼지. `false`면 음소거(코어 플래그는 정상 소비) |
+| `text.ambiguous-width` | `narrow`\|`wide` | `narrow` | EAW Ambiguous 문자(동그란 번호 ① 등)의 셀 폭. 아래 참조 |
 | `input.page-keys` | `passthrough`\|`scroll` | `scroll` | 메인 화면 PageUp/Down 동작. 아래 참조 |
 | `input.shift-enter` | `newline`\|`native` | `newline` | Shift+Enter 인코딩. `newline`(기본)=Option+Enter와 같은 `\x1b\r`(멀티라인 줄바꿈). 아래 참조 |
 | `input.ime-enter` | `newline`\|`commit-only` | `newline` | IME(한글 등) 조합 중 Enter. `newline`(기본)=확정+개행 한 번에(브라우저 동작). 아래 참조 |
@@ -144,6 +145,25 @@ window.padding-left   = 8
   keymap은 끝 `~`를 vi-swap-case로 해석해 대소문자를 토글한다**(실측 확인). xterm 순정이 필요할 때만.
 
 > `Shift+PageUp`/`Shift+PageDown`은 이 설정과 무관하게 항상 스크롤백을 스크롤한다.
+
+### Ambiguous 문자 폭 (`text.ambiguous-width`)
+
+동그란 번호(① ② ③ U+2460~U+24FF) 같은 **East Asian Width "Ambiguous"** 문자가 한 칸을 차지할지(narrow)
+두 칸을 차지할지(wide)를 정한다. 이 문자들은 문맥에 따라 폭이 갈리는데, 폰트는 보통 전각(~2칸)으로 그린다.
+
+- `narrow` (기본): 한 칸(advance 1). **UAX #11 §5 권고**("문맥을 신뢰성 있게 정할 수 없으면 narrow로")와
+  Ghostty·xterm.js가 모두 따르는 기본값이다. 그 문자를 1칸으로 가정하는 프로그램(셸 readline·대부분의 TUI)과
+  커서·정렬이 안 깨진다. 폰트가 전각으로 그려 1칸에 안 맞을 때는 **다음 셀이 비어 있으면 렌더만 2칸으로** 키워
+  온전히 보여주고(advance는 1 유지 — Ghostty `constraintWidth`와 동일), 다음 셀이 차 있으면 1칸에 맞춰 축소한다.
+- `wide` (opt-in): 두 칸(advance 2). plain 출력에서 동그란 번호를 전각 크기로 깔끔하게 보고 싶거나, **CJK 로캘처럼
+  프로그램도 그 문자를 2칸으로 가정하는 환경**에 맞춘다. 단 1칸을 가정하는 프로그램(셸 줄 편집·일부 TUI 박스/표)과는
+  **커서·정렬이 1칸씩 어긋날 수 있다** — 폭은 maru와 프로그램의 공유 약속이라 한쪽만 바꾸면 틀어지기 때문이다.
+
+적용 범위는 동그란/괄호친 영숫자(Enclosed Alphanumerics U+2460~U+24FF)다. **box/block(─ █)·Powerline·Nerd Font
+아이콘(PUA)** 은 maru가 합성하거나 1칸으로 그리므로 `wide`여도 폭이 안 바뀐다(레이아웃 보존). 잘못된 값은 무시(기본 유지).
+
+> 베이스/결정: 기본 `narrow`는 Ghostty·xterm.js·UAX #11과 일치한다. `wide`는 iTerm2 등이 가진 "ambiguous를 wide로"
+> 옵션과 같은 트레이드오프(표시 깔끔 ↔ 1칸 가정 프로그램과의 정렬)를 사용자가 고르게 한 것이다.
 
 ### Shift+Enter (`input.shift-enter`)
 

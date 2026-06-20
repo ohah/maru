@@ -272,6 +272,11 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "text.blink은 true|false — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "text.ambiguous-width")) {
+        config.ambiguous_width = parseAmbiguousWidth(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "text.ambiguous-width는 narrow|wide — 기본값 유지" });
+            return;
+        };
     } else if (std.mem.eql(u8, key, "notifications.agent-complete")) {
         config.notifications.agent_complete = parseBool(value) orelse {
             try diags.append(a, .{ .line = line_no, .message = "notifications.agent-complete는 true|false — 기본값 유지" });
@@ -393,6 +398,12 @@ fn parseQuickTerminalChrome(value: []const u8) ?theme.QuickTerminalChrome {
 fn parsePageKeys(value: []const u8) ?theme.PageKeys {
     if (std.mem.eql(u8, value, "passthrough")) return .passthrough;
     if (std.mem.eql(u8, value, "scroll")) return .scroll;
+    return null;
+}
+
+fn parseAmbiguousWidth(value: []const u8) ?theme.AmbiguousWidth {
+    if (std.mem.eql(u8, value, "narrow")) return .narrow;
+    if (std.mem.eql(u8, value, "wide")) return .wide;
     return null;
 }
 
@@ -1315,6 +1326,25 @@ test "parse: input.page-keys scroll(default)/passthrough + invalid is forgiving"
         var p = try parse(std.testing.allocator, "input.page-keys = bogus\n");
         defer p.deinit();
         try std.testing.expectEqual(theme.PageKeys.scroll, p.config.input.page_keys); // 잘못된 값 → 기본 유지
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+}
+
+test "parse: text.ambiguous-width narrow(default)/wide + invalid is forgiving" {
+    {
+        var p = try parse(std.testing.allocator, "");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.AmbiguousWidth.narrow, p.config.ambiguous_width); // 기본 narrow(정렬 안전)
+    }
+    {
+        var p = try parse(std.testing.allocator, "text.ambiguous-width = wide\n");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.AmbiguousWidth.wide, p.config.ambiguous_width); // opt-in
+    }
+    {
+        var p = try parse(std.testing.allocator, "text.ambiguous-width = bogus\n");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.AmbiguousWidth.narrow, p.config.ambiguous_width); // 잘못된 값 → 기본 유지
         try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
     }
 }

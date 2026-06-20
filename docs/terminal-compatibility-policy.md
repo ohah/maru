@@ -61,14 +61,23 @@ Ghostty와 같은 방식을 쓴다(`src/termio/Exec.zig` 동작 비교): terminf
 tmux가 `Sync`를 읽어 레이아웃 플리커가 사라진다). 사용자는 `term = "xterm-256color"`로 언제든 되돌릴 수
 있다.
 
-**남는 위험은 원격(SSH)뿐이다.** `TERMINFO`는 로컬 env라 ssh가 전달하지 않으므로, **평범한 `ssh`**로
-항목 없는 원격에 접속하면 깨질 수 있다. 이건 `maru ssh`(원격에 terminfo를 심고 exec)가 푼다. 직접 `maru
-ssh`를 입력하지 않고 **평범한 `ssh`까지 자동으로** 덮으려면 shell-integration `ssh` 라우팅
-(`shell-integration.ssh`, **기본 off** opt-in)을 켠다 — 통합 zsh가 `ssh`를 가리는 함수로 `maru ssh`에
-위임한다(env `MARU_BIN`/`MARU_SSH_INTEGRATION` 주입 시에만, 없으면 평범한 ssh 그대로 — graceful). 기본
-off인 건 `ssh`를 가리는 게 침습적이라 사용자 동의가 필요해서다(Ghostty도 plain ssh 깨짐을 감수하고
-`ssh-env`/`ssh-terminfo`를 기본 off로 둔다 — 동작 비교). 설정은 [설정 파일](configuration.md)의
-`shell-integration.ssh` 절.
+**남는 위험은 원격(SSH)이다.** `TERMINFO`는 로컬 env라 ssh가 전달하지 않으므로, **평범한 `ssh`**로 `TERM=xterm-maru`를
+항목 없는 원격에 보내면 mux/TUI가 자기 터미널 설명을 못 찾아 커서·레이아웃이 깨진다(2026-06-20 회귀로 실측 — ssh 너머
+tmux/mux 선택 화면 커서가 엉뚱한 위치에 그려짐). 이걸 **기본값으로** 막는다 — 두 갈래(zsh 통합 한정. bash/fish는 셸
+통합 자체가 미구현이라 아래 보호가 안 닿는다. 그쪽은 `term = "xterm-256color"`로 되돌리거나 원격에 직접 설치해야 한다):
+
+1. **기본 다운그레이드(항상 켜짐, 권장)** — 통합 zsh가 `ssh`를 가리는 함수로, `TERM`이 maru 고유 `xterm-maru`일 때
+   **그 `ssh` 호출에 한해** `TERM=xterm-256color`(모든 원격이 가진 표준값)로 낮춰 `command ssh`를 부른다. 원격이 깨지지
+   않는다(Ghostty `ssh-env`와 같은 결). `TERM`이 이미 폴백/override로 `xterm-256color` 등이면 함수를 안 만들어 평범한
+   `ssh`가 그대로 동작한다(graceful). xterm-maru의 이점(Sync 등)은 ssh 너머에선 포기하는 절충 — "안 깨짐"이 우선.
+2. **opt-in 전파(`shell-integration.ssh = true`)** — 원격에서도 xterm-maru 이점을 살리려면 켠다. 통합 zsh가 `ssh`를
+   `maru ssh`로 라우팅해 원격에 terminfo를 심고 exec한다(env `MARU_BIN`/`MARU_SSH_INTEGRATION` 주입 시에만 — graceful;
+   설치 실패 시 `maru ssh`가 `xterm-256color` 폴백). 기본 off인 건 원격 설치가 침습적이라 동의가 필요해서다. 이 토글이
+   켜지면 (1)의 다운그레이드보다 우선해 라우팅이 이긴다. 직접 `maru ssh <host>`를 입력해도 같다.
+
+설정은 [설정 파일](configuration.md)의 `term`·`shell-integration.ssh` 절. (Ghostty는 `xterm-ghostty`가 upstream
+terminfo DB에 병합돼 원격이 대체로 이미 갖고 있고 `ssh-env`/`ssh-terminfo`도 제공한다 — 동작 비교. maru `xterm-maru`는
+신규라 원격에 없으므로 기본 다운그레이드가 더 중요하다.)
 
 ### 런처 색-강제 override 제거 (`CLICOLOR_FORCE` / `FORCE_COLOR`)
 

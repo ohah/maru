@@ -89,7 +89,7 @@ window.padding-left   = 8
 | `quick-terminal.minimal-tabs` | `true`\|`false` | `false` | `chrome=minimal`일 때 탭(워크스페이스·pane Term) 생성 허용 여부. `false`(기본)=단일 스크래치 — `⌘T`/`⌘⇧T` 무동작(사이드바·탭 바가 없어 안 보이는 탭 생성을 막음; split `⌘D`은 divider로 보이므로 유지). `true`=탭 허용(`⌘1..9`/`⌘]`로 전환). 탭이 2개 이상이면 **우상단에 작은 탭 점 인디케이터**가 떠 활성 탭을 보여준다(워크스페이스가 여러 개면 워크스페이스, 아니면 활성 pane의 Term). `chrome=full`이면 이 값과 무관하게 탭이 항상 동작. 그 외 값은 무시 |
 | `sidebar.show-branch` | `true`\|`false` | `true` | 세로 사이드바 세션 카드에 git 브랜치명을 표시할지. 카드 이름줄은 식별용이라 항상 표시. 그 외 값은 무시 |
 | `sidebar.show-folder` | `true`\|`false` | `true` | 위와 같되 폴더(cwd) 경로 줄 |
-| `term` | 문자열 | `xterm-256color` | 셸에 줄 `$TERM`. 아래 참조 |
+| `term` | 문자열 | `xterm-maru` | 셸에 줄 `$TERM`(컴파일 실패 시 `xterm-256color` 폴백). 아래 참조 |
 | `keybind` | `<조합> = <action>` | (없음) | 여러 줄 가능. 아래 참조 |
 
 ### 컬러 테마 프리셋 (`theme.preset`)
@@ -181,11 +181,17 @@ term = xterm-ghostty    # 다른 값(그 terminfo가 설치돼 있어야 함)
 > 시스템 전역이나 **Maru 밖의 셸**(예: 다른 터미널에서 Maru에 붙는 경우)에서도 `xterm-maru`를 쓰려면
 > `mise run install-terminfo`로 `~/.terminfo`에 설치한다(Maru 안에서는 위 자동 캐시로 충분해 불필요).
 
-> **원격(SSH) 주의**: terminfo는 프로그램이 읽는 머신에 있어야 한다. 기본이 `xterm-maru`라 **평범한
-> `ssh`로 원격에** 접속하면(maru의 `TERMINFO`는 로컬 env라 안 따라간다) 원격에 항목이 없어
-> `vim`/`tmux`/`less` 등이 `unknown terminal type`으로 깨질 수 있다. 이를 푸는 게 **`maru ssh`** 다 —
-> 원격에 terminfo를 먼저 심고 평범한
-> `ssh`로 넘어간다(당신의 평소 `ssh`는 건드리지 않는다):
+> **원격(SSH) 동작**: terminfo는 프로그램이 읽는 머신에 있어야 한다. 기본이 `xterm-maru`인데 maru의 `TERMINFO`는
+> 로컬 env라 ssh가 안 따라가므로, 그대로 두면 항목 없는 원격에서 `vim`/`tmux`/`mux`/`less`가 커서·레이아웃이 깨진다
+> (`unknown terminal type` 또는 커서가 엉뚱한 위치). **그래서 통합 zsh는 기본적으로** `ssh`를 가리는 함수로, `TERM`이
+> `xterm-maru`일 때 **그 `ssh` 호출에 한해** `TERM=xterm-256color`(모든 원격이 가진 표준값)로 낮춰 넘긴다 — 평범한
+> `ssh`가 그대로 안 깨진다(Ghostty `ssh-env`와 같은 결). 별도 설정 없이 동작하며, `TERM`을 직접 `xterm-256color` 등으로
+> 바꿔 뒀으면 함수를 안 만들어 평범한 `ssh` 그대로다(graceful). **주의**: 이 보호는 **zsh 전용**이다(bash/fish는 셸 통합
+> 미구현 — 그 셸을 쓰면 `term = "xterm-256color"`로 두거나 아래처럼 원격에 직접 설치한다).
+>
+> 원격에서도 `xterm-maru` 이점(Sync 등)을 **그대로 살리려면**(다운그레이드 대신 원격에 항목을 심으려면) **`maru ssh`** 를
+> 쓴다 — 원격에 terminfo를 먼저 심고 평범한 `ssh`로 넘어간다. `shell-integration.ssh = true`면 통합 zsh가 평범한 `ssh`를
+> 자동으로 `maru ssh`로 라우팅한다(기본 off, opt-in — 이게 켜지면 위 다운그레이드보다 우선한다):
 >
 > ```sh
 > maru install-cli              # maru 바이너리를 ~/.local/bin/maru에 symlink(셸에서 maru를 쓰려면 한 번)
@@ -226,16 +232,18 @@ term = xterm-ghostty    # 다른 값(그 terminfo가 설치돼 있어야 함)
 shell-integration.ssh = true    # 평범한 ssh를 maru ssh로 자동 라우팅 (기본 false)
 ```
 
-위 `maru ssh`는 직접 입력할 때만 terminfo를 전파한다. 이 옵션을 켜면 **통합 zsh에서 평범한 `ssh`를
-입력해도** maru가 그 호출을 `maru ssh`로 라우팅해 자동으로 `xterm-maru`를 원격에 심는다 — 매번 `maru`를
-앞에 붙이지 않아도 된다.
+이건 **다운그레이드 대신 원격에 항목을 심는 "업그레이드" 경로**다. 끄면(기본) 통합 zsh는 `TERM=xterm-maru`인 `ssh`를
+`xterm-256color`로 **다운그레이드**해 원격이 안 깨지게만 한다(위 `term` 절의 "원격(SSH) 동작"). 켜면 그 다운그레이드 대신
+**통합 zsh에서 평범한 `ssh`를 입력해도** maru가 그 호출을 `maru ssh`로 라우팅해 `xterm-maru`를 원격에 심는다 — 매번
+`maru`를 앞에 붙이지 않아도 원격에서 xterm-maru 이점(Sync 등)을 그대로 쓴다.
 
 > **동작**: maru가 자식 셸 env에 현재 실행 파일 경로(`MARU_BIN`)와 플래그(`MARU_SSH_INTEGRATION`)를
-> 주입하고, Maru 통합 `.zshenv`가 이 둘이 모두 있을 때만 `ssh`를 가리는 함수를 정의해 `maru ssh`로
-> 위임한다. 같은 maru 바이너리가 `maru ssh`를 처리하므로 `install-cli` 없이도 동작한다.
+> 주입하고, Maru 통합 `.zshenv`가 이 둘이 모두 있을 때만 `ssh`를 `maru ssh`로 위임하는 함수를 정의한다(이게
+> 기본 다운그레이드 함수보다 우선). 같은 maru 바이너리가 `maru ssh`를 처리하므로 `install-cli` 없이도 동작한다.
 >
-> **기본 off인 이유**(opt-in): `ssh`를 함수로 가리는 건 침습적이라 사용자 동의가 필요하다(Ghostty도
-> `ssh-*`를 기본 off로 둔다). 끄면(기본) 평범한 `ssh`가 그대로 동작한다.
+> **기본 off인 이유**(opt-in): 원격 terminfo 설치는 침습적이라 사용자 동의가 필요하다(Ghostty도 `ssh-*`를 기본
+> off로 둔다). 끄면(기본)에도 위 다운그레이드로 원격이 안 깨지므로, 이 옵션은 "원격에서도 xterm-maru를 쓰고 싶을
+> 때"만 켜면 된다.
 >
 > **범위/우회**: zsh 통합이 켜진 대화형 셸에서만 적용된다(통합이 없으면 함수가 정의되지 않는다). 한 번만
 > 평범한 ssh로 가려면 `command ssh ...` 또는 `\ssh ...`. `maru ssh`와 동일하게 **대화형 세션용**이라

@@ -6,9 +6,12 @@
 //! 알린다 — 거터 ✓/✗·프롬프트 점프·reflow 정확화의 토대다(명세: freedesktop semantic-prompts.md,
 //! FinalTerm 발). 또 OSC 7로 매 프롬프트 cwd를 보고한다(창 제목·새 탭 cwd가 읽는다).
 //!
-//! 또(opt-in) 평범한 `ssh`를 `maru ssh`로 라우팅하는 셸 함수를 정의해, maru terminfo(`xterm-maru`)가
-//! 원격에 자동 전파되게 한다(config `shell-integration.ssh`. 근거·트레이드오프는 terminal-compatibility-
-//! policy.md). maru가 env에 MARU_SSH_INTEGRATION/MARU_BIN을 줄 때만 동작한다.
+//! 또 `ssh`를 셸 함수로 감싸 원격이 모르는 TERM이 새지 않게 한다(zsh 전용 — bash/fish 통합은 미구현):
+//! (1) 기본 다운그레이드 — TERM이 maru 고유 `xterm-maru`면 ssh 호출에 한해 `xterm-256color`(표준값)로 낮춰
+//! 항목 없는 원격에서 mux/TUI 커서·레이아웃이 깨지는 걸 막는다(Ghostty `ssh-env`와 같은 결, 항상 켜짐).
+//! (2) opt-in 전파 — config `shell-integration.ssh = true`로 maru가 MARU_SSH_INTEGRATION/MARU_BIN을 주면
+//! `ssh`를 `maru ssh`로 라우팅해 maru terminfo(`xterm-maru`)를 원격에 자동 전파한다. 근거·트레이드오프는
+//! terminal-compatibility-policy.md.
 //!
 //! clean-room: Ghostty/kitty의 통합 스크립트는 GPLv3라 차용하지 않는다. 아래 zsh 스크립트는 zsh
 //! 매뉴얼의 ZDOTDIR/스타트업·precmd/preexec/add-zsh-hook·PS1 `%{%}` 동작과 freedesktop
@@ -116,14 +119,20 @@ const zsh_zshenv =
     \\    'builtin' 'unfunction' '_maru_shell_integration'
     \\  }
     \\  add-zsh-hook precmd _maru_shell_integration
-    \\  # Opt-in: 평범한 `ssh`를 `maru ssh`로 라우팅해 maru terminfo(xterm-maru)가 원격에 자동 전파되게
-    \\  # 한다 — TERMINFO는 로컬 env라 평범한 ssh엔 안 따라가, 항목 없는 원격에서 깨질 수 있다(maru ssh가
-    \\  # 원격에 terminfo를 심고 exec해 이를 덮는다). config `shell-integration.ssh = true`일 때만 maru가
-    \\  # 자식 env에 MARU_SSH_INTEGRATION/MARU_BIN을 주입한다. 셋이 모두 충족될 때만 함수를 정의해, 꺼져
-    \\  # 있거나(opt-in 미설정) 바이너리를 못 찾으면 평범한 `ssh`가 그대로 동작한다(graceful). maru ssh는
-    \\  # 비대화형 /bin/sh에서 실제 ssh를 exec하므로 이 함수와 재귀하지 않는다. 우회: `command ssh`·`\ssh`.
+    \\  # ssh 안전 처리: 평범한 `ssh`는 자식 env의 TERM(기본 xterm-maru)을 원격에 그대로 전달하지만 TERMINFO
+    \\  # (로컬 env)는 안 따라가, 항목 없는 원격에선 mux/TUI가 커서·레이아웃을 깬다(terminal-compatibility-policy.md).
+    \\  # 두 갈래로 막는다(우선순위 순):
+    \\  #  (1) opt-in 전파(config `shell-integration.ssh = true` → maru가 MARU_SSH_INTEGRATION/MARU_BIN 주입):
+    \\  #      `ssh`를 `maru ssh`로 라우팅해 원격에 xterm-maru terminfo를 심는다(설치 실패 시 maru ssh가 256color 폴백).
+    \\  #  (2) 기본 다운그레이드(opt-in 미설정 + TERM이 maru 고유 `xterm-maru`): 그 ssh 호출에 한해 TERM을
+    \\  #      xterm-256color(모든 원격이 가진 표준값)로 낮춰 커서/레이아웃 깨짐을 막는다(Ghostty `ssh-env`와 같은 결).
+    \\  # TERM이 이미 xterm-256color 등(로컬 tic 폴백/사용자 override)이면 함수를 안 만들어 평범한 `ssh`가 그대로
+    \\  # 동작한다(graceful). 둘 다 `maru ssh`(비대화형 /bin/sh exec)·`command ssh`로 실제 ssh를 불러 재귀하지
+    \\  # 않는다. 명시 우회: `command ssh` 또는 절대경로 `/usr/bin/ssh`(함수는 `\ssh`로 안 풀린다 — alias 전용).
     \\  if [[ -n "${MARU_SSH_INTEGRATION+x}" && -n "${MARU_BIN}" && -x "${MARU_BIN}" ]]; then
     \\    ssh() { "${MARU_BIN}" ssh "$@"; }
+    \\  elif [[ "$TERM" == "xterm-maru" ]]; then
+    \\    ssh() { TERM=xterm-256color command ssh "$@"; }
     \\  fi
     \\fi
 ;
@@ -226,4 +235,15 @@ test "zsh integration script routes ssh through maru ssh only when opt-in env is
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "MARU_SSH_INTEGRATION+x") != null); // opt-in 게이트(설정됨)
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "-x \"${MARU_BIN}\"") != null); // 바이너리 실행 가능할 때만
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "ssh() { \"${MARU_BIN}\" ssh \"$@\"; }") != null); // maru ssh로 위임
+}
+
+test "zsh integration script downgrades TERM to xterm-256color over plain ssh (default, xterm-maru only)" {
+    // 기본 동작(opt-in 미설정): TERM이 maru 고유 xterm-maru면 평범한 ssh 호출을 xterm-256color로 다운그레이드해,
+    // TERMINFO가 안 따라가는 원격에서 mux/TUI 커서·레이아웃이 깨지는 걸 막는다(회귀 — 깨지면 ssh+mux 커서가
+    // 다시 엉뚱한 위치에 그려진다). 실제 zsh가 함수로 ssh를 가려 TERM을 낮추는지는 PTY/수동으로 별도 검증.
+    // opt-in maru ssh 라우팅(위 테스트)보다 우선순위가 낮은 elif라, 둘이 배타적으로 한 갈래만 함수를 정의한다.
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "elif [[ \"$TERM\" == \"xterm-maru\" ]]; then") != null); // maru 고유 TERM일 때만
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "ssh() { TERM=xterm-256color command ssh \"$@\"; }") != null); // 그 호출만 256color로 낮춰 실제 ssh
+    // graceful: TERM이 폴백/override로 이미 xterm-256color 등이면 함수 자체를 안 만들어 평범한 ssh가 그대로 동작.
+    // (xterm-maru 리터럴이 조건에만 쓰이고 무조건 ssh를 가리지 않음을 위 elif 가드가 보장.)
 }

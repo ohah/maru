@@ -1,5 +1,6 @@
 const std = @import("std");
 const terminal = @import("../terminal.zig");
+const width = @import("../width.zig");
 
 pub const DrawCell = struct {
     row: u16,
@@ -101,16 +102,36 @@ pub fn buildDrawList(
                 try overlays.ensureTotalCapacity(allocator, (end_row - start_row + 1) * (4 * col_count + 1) + 1); // 셀당 최대 4 line overlay(underline+double+strike+overline) + cursor
 
                 for (start_row..end_row + 1) |row| {
+                    // isWideRenderSymbol이 다음 빈 셀을 흡수(2칸 렌더)하면 그 셀은 emit하지 않는다 — 행마다 리셋.
+                    var skip_one = false;
                     for (0..col_count) |col| {
+                        if (skip_one) {
+                            skip_one = false;
+                            continue;
+                        }
                         const cell = snapshot.cells[index(snapshot.size, row, col)];
                         if (cell.continuation) continue;
+
+                        // EAW Ambiguous(폭 1)지만 폰트가 ~2칸으로 그리는 심볼(동그란/괄호친 영숫자 — 동그란 번호 등)은,
+                        // 다음 셀이 비었으면 **그릴 폭**을 2칸으로 키워 온전한 크기로 그린다(작아짐/잘림 방지). advance/커서는
+                        // grid가 1로 유지하므로(DrawCell.width는 렌더 전용 — 커서는 snapshot.cursor에서 별도) 셸 wcwidth와
+                        // 정합이 안 깨진다. 흡수한 다음 빈 셀은 emit 안 함(wide continuation과 동형 — 안 그러면 그 셀 bg가
+                        // 심볼 오른쪽 절반을 덮어쓴다). 다음 셀이 차있으면 1칸 유지(constrain이 축소) — Ghostty constraintWidth와 동일.
+                        var render_width = cell.width;
+                        if (cell.width == 1 and width.isWideRenderSymbol(cell.codepoint) and col + 1 < col_count) {
+                            const next = snapshot.cells[index(snapshot.size, row, col + 1)];
+                            if (!next.continuation and (next.codepoint == 0 or next.codepoint == ' ')) {
+                                render_width = 2;
+                                skip_one = true;
+                            }
+                        }
 
                         cells.appendAssumeCapacity(.{
                             .row = @intCast(row),
                             .col = @intCast(col),
                             .codepoint = cell.codepoint,
                             .combining = cell.combining,
-                            .width = cell.width,
+                            .width = render_width,
                             .style = cell.style,
                         });
 
@@ -308,6 +329,33 @@ test "draw list keeps wide glyph metadata and skips continuation cells" {
     try std.testing.expectEqual(@as(u2, 2), draw_list.cells[1].width);
     try std.testing.expectEqual(@as(u16, 3), draw_list.cells[2].col);
     try std.testing.expectEqual(@as(u21, 'B'), draw_list.cells[2].codepoint);
+}
+
+test "draw list renders wide-render symbol (circled number) at 2 cells when next is blank, 1 when occupied" {
+    // ③(U+2462)는 EAW Ambiguous(폭 1)지만 폰트가 ~2칸으로 그린다. 다음 셀이 비면 그릴 폭을 2칸으로 키워 온전히
+    // 그린다(advance는 grid가 1로 유지 — Ghostty constraintWidth). 다음 셀이 차있으면 1칸(constrain이 축소·겹침 방지).
+    {
+        var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 1 });
+        defer core.deinit();
+        try core.write("③ X"); // ③ 다음 공백 → 2칸 렌더, 공백 흡수
+        var dl = try buildDrawList(std.testing.allocator, core.snapshot());
+        defer dl.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u21, 0x2462), dl.cells[0].codepoint);
+        try std.testing.expectEqual(@as(u2, 2), dl.cells[0].width); // 공백 흡수 → 2칸 렌더
+        try std.testing.expectEqual(@as(u16, 2), dl.cells[1].col); // col1(공백) 흡수 → 다음 emit은 col2의 X
+        try std.testing.expectEqual(@as(u21, 'X'), dl.cells[1].codepoint);
+    }
+    {
+        var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 5, .rows = 1 });
+        defer core.deinit();
+        try core.write("③X"); // ③ 다음 글자 점유 → 1칸 유지(겹침 방지)
+        var dl = try buildDrawList(std.testing.allocator, core.snapshot());
+        defer dl.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u21, 0x2462), dl.cells[0].codepoint);
+        try std.testing.expectEqual(@as(u2, 1), dl.cells[0].width); // 다음 셀 점유 → 1칸
+        try std.testing.expectEqual(@as(u16, 1), dl.cells[1].col); // X는 col1(흡수 안 함)
+        try std.testing.expectEqual(@as(u21, 'X'), dl.cells[1].codepoint);
+    }
 }
 
 test "draw list carries style and combining mark for font layout" {

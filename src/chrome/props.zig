@@ -32,8 +32,16 @@ pub const ShapeTokens = struct {
     card_gap_px: u16 = 0,
 };
 
+/// 활성 pane(분할 leaf)의 backing px 사각형 — 사이드바·탭 바·window padding을 뺀 셀 그리드 영역(platform
+/// `active_pane_rect` 미러). **find 오버레이를 활성 pane 우상단에 붙이는 위치의 단일 출처**다. palette는 안 쓴다
+/// (전역 명령이라 창 중앙 유지 — overlay_input.panelLayout). w==0이면 미초기화 → findLayout이 창 전체(사이드바
+/// 오른쪽 터미널 영역)로 폴백해 단일-pane·헤드리스 테스트에서도 안전하다. 좌표·크기는 split_tree.Rect와 같은 u32.
+pub const PaneRect = struct { x: u32 = 0, y: u32 = 0, w: u32 = 0, h: u32 = 0 };
+
 pub const ChromeProps = struct {
     metrics: CellMetrics,
     /// C4b: 박스 모양(둥근 모서리·테두리). tui=0(직각·셀 fill), rich>0(둥근·GPU quad).
     shape: ShapeTokens = .{},
+    /// 활성 pane rect(find 오버레이 위치 단일 출처). 기본 0 = 미초기화(findLayout이 창 전체로 폴백).
+    active_pane: PaneRect = .{},
 };

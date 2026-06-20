@@ -169,4 +169,18 @@ test "modal_box: rich 패딩이어도 확장 박스(box_w + 2*pad)가 터미널 
     try std.testing.expect(box.w + 2 * pad <= term_w_px);
     try std.testing.expect(box.x - @as(i32, @intCast(pad)) >= @as(i32, @intCast(sidebar)));
     try std.testing.expect(box.x + @as(i32, @intCast(box.w + pad)) <= @as(i32, @intCast(sidebar + term_w_px)));
+
+    // 2줄(confirm 류)도 같은 폭 clamp가 걸린다 — 다줄 box_h 증가가 폭/중앙배치를 깨지 않는지(rich 패딩 조합) 확인.
+    out.clearRetainingCapacity();
+    try view(&.{
+        .{ .text = "this is a fairly long message to force the width clamp", .role = .surface_fg },
+        .{ .text = "Enter to close   Esc to cancel", .role = .muted_fg },
+    }, p, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 4), out.items.len); // quad+border+text+text
+    const ch = p.metrics.cell_height_px; // 16
+    const box2 = out.items[0].quad.rect;
+    try std.testing.expect(box2.w + 2 * pad <= term_w_px); // 폭 clamp 동일
+    try std.testing.expect(box2.x - @as(i32, @intCast(pad)) >= @as(i32, @intCast(sidebar)));
+    try std.testing.expect(box2.h == box.h + ch); // 2줄 박스가 1줄보다 정확히 한 줄(ch) 큼
+    try std.testing.expect(out.items[3].text.origin.y == out.items[2].text.origin.y + @as(i32, @intCast(ch))); // 둘째 줄 = 첫째 + ch
 }

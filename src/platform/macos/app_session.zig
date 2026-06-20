@@ -3050,11 +3050,21 @@ pub const AppSession = struct {
         }
     }
 
-    /// 검색바를 닫는다(검색어·조합 비움 + 비활성 + 필터 해제 후 재빌드).
+    /// 검색바를 닫는다(검색어·조합 비움 + 비활성 + 필터 해제 후 재빌드). Esc·Enter(이동 후)처럼 검색을 '끝낼' 때만.
     fn closeSidebarSearch(self: *AppSession) void {
         self.sidebar_search_active = false;
         self.sidebar_search_input.clear();
         self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
+    /// 검색바를 blur한다(포커스 아웃 — 검색 영역 밖 클릭). 비활성만 하고 **검색어는 보존**한다 — 다시 검색바를
+    /// 클릭하면 그 검색어로 이어서 편집·필터한다(rename은 확정/취소뿐이라 다르지만, 검색은 '초안 보존'이 자연스럽다).
+    /// 비활성이라 recomputeVisibleTabs가 필터를 일시정지(전체 표시)하므로, blur 중 새 워크스페이스를 만들어도
+    /// 필터에 숨지 않는다. 완전히 비우려면 Esc(closeSidebarSearch). 키 포커스는 터미널로 돌아간다(inputFocus).
+    fn blurSidebarSearch(self: *AppSession) void {
+        self.sidebar_search_active = false;
+        self.rebuildSidebar() catch {}; // 비활성 → 필터 일시정지(전체), 검색어 텍스트는 헤더에 유지
         self.metal_dirty = true;
     }
 
@@ -4000,6 +4010,7 @@ pub const AppSession = struct {
                     .view_options => {}, // P4: view options 메뉴(아이콘 자리만 — 클릭 핸들은 P4에서 연결)
                     .search => {
                         self.sidebar_search_active = true; // 검색바 클릭 → 활성(키/IME가 검색으로 라우팅)
+                        self.rebuildSidebar() catch {}; // 보존된 검색어가 있으면 필터를 즉시 재개(blur 중 일시정지됐던 것)
                         self.resetCursorBlink();
                         self.metal_dirty = true;
                     },
@@ -4022,18 +4033,18 @@ pub const AppSession = struct {
                     },
                 }
                 // 검색 영역이 아닌 곳(카드·아이콘·빈 영역)을 클릭하면 검색을 blur한다 — 키 포커스를 터미널로 되돌려
-                // '검색 활성 중 터미널 입력 불가'를 푼다(rename focus-loss와 같은 규율). 카드 클릭의 visibleTab 역매핑은
-                // 위에서 이미 끝나 매핑이 안 깨진다. .search 분기는 방금 active=true로 켠 참이라 제외한다.
-                if (kind == 1 and header_region != .search and self.sidebar_search_active) self.closeSidebarSearch();
+                // '검색 활성 중 터미널 입력 불가'를 푼다(검색어는 보존). 카드 클릭의 visibleTab 역매핑은 위에서 이미
+                // 끝나 매핑이 안 깨진다. .search 분기는 방금 active=true로 켠 참이라 제외한다.
+                if (kind == 1 and header_region != .search and self.sidebar_search_active) self.blurSidebarSearch();
             }
             // 사이드바 더블클릭(kind 4) rename은 위 통합 kind==4 핸들러(renameTargetAt)가 이미 처리했다.
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
             return;
         }
-        // 사이드바 '밖'(터미널·pane·탭 바)을 클릭하면 검색을 blur한다 — 같은 이유(키를 터미널로 되돌림). 사이드바 밖은
-        // visibleTab 의존이 없어 여기서 바로 닫아도 안전하다.
-        if (kind == 1 and self.sidebar_search_active) self.closeSidebarSearch();
+        // 사이드바 '밖'(터미널·pane·탭 바)을 클릭하면 검색을 blur한다 — 같은 이유(키를 터미널로 되돌림, 검색어 보존).
+        // 사이드바 밖은 visibleTab 의존이 없어 여기서 바로 blur해도 안전하다.
+        if (kind == 1 and self.sidebar_search_active) self.blurSidebarSearch();
         // down(1)에서 pane/탭 바 클릭을 hit-test한다(kind!=1이면 단락 평가로 self.tabs를 안 건드린다 — 최소-셋업
         // 드래그 테스트는 kind 2/3만 보낸다). 활성 탭 leaf rect를 한 번 펴 ① 탭 바 클릭(어느 pane의 상단 바면 그
         // pane 포커스 + 클릭한 Term 탭 전환) ② 다른 panel의 터미널 영역 클릭(그 pane 포커스)을 차례로 본다. 둘 다
@@ -6232,6 +6243,14 @@ pub const AppSession = struct {
         var ops: std.ArrayList(chrome.draw.Op) = .empty;
         chrome.components.sidebar.view(tabs, self.hovered_slot, self.buildChromeProps(), arena, &ops) catch return;
         self.lowerSidebar(ops.items);
+        // 헤더(검색바) 하단 구분선 — 검색 줄과 카드 목록 사이 경계를 명확히(사용자 요청 "Searchbar에 언더바"). divider
+        // 색·border 두께로 사이드바 폭 전체에 가로선(layer 0=사이드바 retained). 검색 줄 바로 아래(=header_h 하단)에 둔다.
+        if (self.sidebar_width_px > 0 and self.sidebar_header_height_px > 0) {
+            const tk = self.buildChromeTokens();
+            const thickness: f32 = @floatFromInt(@max(@as(u32, 1), tk.border.line_thickness_px));
+            const uy: f32 = @as(f32, @floatFromInt(self.sidebar_header_height_px)) - thickness;
+            self.appendSolidQuad(0, uy, @floatFromInt(self.sidebar_width_px), thickness, self.dividerColor(), 0);
+        }
         // per-tab 배경 tint(우클릭 메뉴 "배경: …") — background_color 설정된 워크스페이스 슬롯(밴드 없는 idle 슬롯)에
         // 반투명(≈40%) 색 quad를 텍스트 셀 아래(layer 0)에 얹는다. 활성/호버 슬롯은 위 lowerSidebar가 밴드 색에
         // tint를 블렌딩해 보이게 한다(tui 불투명 밴드가 이 quad를 덮으므로). chrome draw op은 role 기반이라 임의 RGB를
@@ -6781,11 +6800,12 @@ pub const AppSession = struct {
         // 줄0: 우측 view options(⚙)·새 워크스페이스(+) 아이콘.
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 4, .codepoint = 0x2699, .style = .{ .foreground = fg } });
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
-        // 검색 줄: 🔍(EAW 2칸) + 검색 활성+입력이면 입력 텍스트(query+preedit, EAW 한글 2칸), 아니면 placeholder
-        // "Search"(muted). caret/IME 후보창은 sidebarSearchCaretRect가 잡는다.
+        // 검색 줄: 🔍(EAW 2칸) + 입력 텍스트(query+preedit, EAW 한글 2칸), 비면 placeholder "Search"(muted).
+        // 검색어는 blur(비활성)돼도 보존해 그대로 그린다 — 다시 클릭해 이어서 편집·필터(초안 보존). preedit은 활성일
+        // 때만 존재. caret/IME 후보창은 sidebarSearchCaretRect가 잡는다(활성일 때만).
         try cells.append(self.allocator, .{ .row = search_row, .col = 0, .codepoint = 0x1F50D, .width = 2, .style = .{ .foreground = muted } });
         const max_col = cols -| 4; // 우측 아이콘 영역 침범 방지
-        if (self.sidebar_search_active and (self.sidebar_search_input.query.items.len > 0 or self.sidebar_search_input.preedit.items.len > 0)) {
+        if (self.sidebar_search_input.query.items.len > 0 or self.sidebar_search_input.preedit.items.len > 0) {
             var col: u16 = 3;
             const texts = [_][]const u8{ self.sidebar_search_input.query.items, self.sidebar_search_input.preedit.items };
             for (texts) |text| {
@@ -11911,21 +11931,32 @@ test "sidebar search blurs when clicking outside it (terminal/card) — restores
     try std.testing.expect(session.sidebar_search_active);
     try std.testing.expectEqual(AppSession.InputFocus.sidebar_search, session.inputFocus());
 
-    // 터미널 본문 클릭 → 검색 blur, 키 포커스가 터미널로 복구.
+    // 검색어를 입력한 채 터미널 본문 클릭 → blur(검색어 '보존'), 키 포커스가 터미널로 복구.
+    session.sidebar_search_input.appendChar(allocator, 'a') catch {};
     const term_x: f64 = @floatFromInt(session.active_pane_rect.x + 50);
     const term_y: f64 = @floatFromInt(session.active_pane_rect.y + 50);
     session.mouse(1, term_x, term_y, 0, 0);
     try std.testing.expect(!session.sidebar_search_active);
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
+    try std.testing.expectEqualStrings("a", session.sidebar_search_input.query.items); // blur는 검색어를 안 지운다
 
-    // 다시 검색 활성 → 사이드바 카드 슬롯 클릭도 blur(카드 전환 + 검색 종료).
+    // 다시 검색 활성 → 검색어가 그대로 이어진다(초안 보존).
     session.mouse(1, search_x, search_y, 0, 0);
     try std.testing.expect(session.sidebar_search_active);
+    try std.testing.expectEqualStrings("a", session.sidebar_search_input.query.items);
+
+    // 사이드바 카드 슬롯 클릭도 blur(카드 전환 + 검색 비활성, 검색어 보존).
     const card_x: f64 = @as(f64, @floatFromInt(session.cell_width_px));
     const card_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + @as(f64, @floatFromInt(session.sidebar_slot_height_px)) * 0.5; // 슬롯 0 중앙
     session.mouse(1, card_x, card_y, 0, 0);
     try std.testing.expect(!session.sidebar_search_active);
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
+
+    // Esc 경로(closeSidebarSearch)만 검색어를 완전히 비운다 — blur와 구분.
+    session.mouse(1, search_x, search_y, 0, 0); // 재활성
+    session.closeSidebarSearch();
+    try std.testing.expect(!session.sidebar_search_active);
+    try std.testing.expectEqual(@as(usize, 0), session.sidebar_search_input.query.items.len);
 }
 
 // 멀티-탭 핵심 계약: 두 번째 탭을 만들면 자기 셸 PTY가 spawn되고, tick이 '모든' 탭을 drain하므로

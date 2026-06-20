@@ -13,6 +13,12 @@ const CoreOwner = @import("core_owner.zig").CoreOwner; // core_mutex 재진입 �
 pub const terminal_name = "maru";
 pub const terminal_version = "0.0.0";
 
+/// terminfo 항목의 primary 이름. XTGETTCAP의 `TN`(terminal name) 캡 응답에 쓴다. XTVERSION의 자유형
+/// 이름(`terminal_name` = "maru")과 달리, 이건 terminfo `TN`이라 `terminfo/maru.terminfo`의 primary
+/// 이름과 **반드시 일치**해야 한다(Ghostty도 XTVERSION "ghostty" vs terminfo "xterm-ghostty"로 분리).
+/// 그 파일을 바꾸면 이 값도 함께 바꾼다(단일 출처는 그 파일, 이 상수는 그 미러).
+pub const terminfo_name = "xterm-maru";
+
 /// mouse tracking 모드(DECSET 9/1000/1002/1003) — 어떤 마우스 이벤트를 앱에 리포트할지(상호 배타). 베이스: xterm
 /// mouse tracking. none=꺼짐, x10=press만, normal=press+release, button=+버튼 눌린 채 drag, any=+모든 motion.
 pub const MouseTracking = enum { none, x10, normal, button, any };
@@ -1966,7 +1972,80 @@ pub const TerminalCore = struct {
         const body = self.dcs_buffer[0..self.dcs_len];
         if (std.mem.startsWith(u8, body, "$q")) {
             self.dispatchDecrqss(body[2..]);
+        } else if (std.mem.startsWith(u8, body, "+q")) {
+            self.dispatchXtgettcap(body[2..]);
         }
+    }
+
+    /// XTGETTCAP(`DCS + q <hex names> ST`): terminfo/termcap 캡을 런타임 질의한다(xterm ctlseqs). terminfo
+    /// 파일이 원격에 없어도 도구(tmux 등)가 캡을 직접 물어 자기식별·기능 협상을 한다 — XTVERSION(CSI > q)과
+    /// 함께 "파일 없는 자기식별"의 두 번째 채널이다. 요청은 `;`로 구분된 hex 캡 이름들이고, 캡마다 따로
+    /// 응답한다(per-cap): 알면 `DCS 1 + r <hex이름>=<hex값> ST`, 모르면 `DCS 0 + r <hex이름> ST`.
+    /// maru가 정직하게 지원하는 캡만 안다고 답한다. 요청 hex 이름은 그대로 echo하고 값만 hex 인코딩한다.
+    fn dispatchXtgettcap(self: *TerminalCore, names_hex: []const u8) void {
+        var it = std.mem.splitScalar(u8, names_hex, ';');
+        while (it.next()) |hex_name| {
+            if (hex_name.len == 0) continue;
+            self.respondXtgettcap(hex_name);
+        }
+    }
+
+    /// 캡 하나에 응답한다. hex 이름을 디코드해 식별하고, 아는 캡이면 값을 hex로 실어 `1+r`로, 모르면
+    /// `0+r`로 답한다. maru가 아는 캡: TN(terminfo 이름)·Co(색 수 256)·RGB(truecolor, 8bit/채널). 이게
+    /// maru가 실제 지원하는 정직한 집합이다 — 모르는 캡에 거짓 응답하면 도구가 없는 기능을 켜 깨진다.
+    fn respondXtgettcap(self: *TerminalCore, hex_name: []const u8) void {
+        var name_buf: [16]u8 = undefined; // 캡 이름은 짧다(TN/Co/RGB 등). 길면 모르는 캡으로 처리.
+        const name = decodeHex(hex_name, &name_buf) orelse return self.appendXtgettcapInvalid(hex_name);
+        const value: ?[]const u8 =
+            if (std.mem.eql(u8, name, "TN")) terminfo_name else if (std.mem.eql(u8, name, "Co")) "256" else if (std.mem.eql(u8, name, "RGB")) "8" else null;
+        if (value) |v| {
+            self.appendResponse("\x1bP1+r");
+            self.appendResponse(hex_name); // 요청 이름을 그대로 echo(이미 hex)
+            self.appendResponse("=");
+            self.appendHexEncoded(v);
+            self.appendResponse("\x1b\\");
+        } else {
+            self.appendXtgettcapInvalid(hex_name);
+        }
+    }
+
+    fn appendXtgettcapInvalid(self: *TerminalCore, hex_name: []const u8) void {
+        self.appendResponse("\x1bP0+r");
+        self.appendResponse(hex_name);
+        self.appendResponse("\x1b\\");
+    }
+
+    /// 바이트열을 대문자 hex(2자리/바이트)로 인코딩해 응답에 붙인다(xterm/Ghostty 관례).
+    fn appendHexEncoded(self: *TerminalCore, bytes: []const u8) void {
+        const digits = "0123456789ABCDEF";
+        for (bytes) |b| {
+            const pair = [2]u8{ digits[b >> 4], digits[b & 0xf] };
+            self.appendResponse(&pair);
+        }
+    }
+
+    /// hex 문자열(2자리/바이트, 대소문자 무관)을 디코드해 out에 채우고 그 슬라이스를 돌려준다. 길이가
+    /// 홀수거나 비-hex거나 out보다 길면 null(호출 측은 모르는 캡으로 처리). XTGETTCAP 이름 디코드에 쓴다.
+    fn decodeHex(hex: []const u8, out: []u8) ?[]const u8 {
+        if (hex.len % 2 != 0) return null;
+        const n = hex.len / 2;
+        if (n > out.len) return null;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const hi = hexNibble(hex[i * 2]) orelse return null;
+            const lo = hexNibble(hex[i * 2 + 1]) orelse return null;
+            out[i] = (@as(u8, hi) << 4) | lo;
+        }
+        return out[0..n];
+    }
+
+    fn hexNibble(c: u8) ?u4 {
+        return switch (c) {
+            '0'...'9' => @intCast(c - '0'),
+            'a'...'f' => @intCast(c - 'a' + 10),
+            'A'...'F' => @intCast(c - 'A' + 10),
+            else => null,
+        };
     }
 
     /// DECRQSS(`DCS $ q <req> ST`): 현재 설정을 회신한다. 유효하면 `DCS 1 $ r <설정> ST`, 미지원이면
@@ -9051,6 +9130,37 @@ test "XTVERSION (CSI > q) ignores non-zero Ps (only Ps=0 is defined)" {
     // xterm ctlseqs는 Ps=0만 XTVERSION으로 정의한다. 그 외 Ps는 미정의라 침묵한다(안전 기본값).
     try core.write("\x1b[>1q");
     try std.testing.expectEqualStrings("", core.pendingResponse());
+}
+
+// XTGETTCAP(`DCS + q <hex names> ST`): terminfo/termcap 캡 런타임 질의(xterm ctlseqs). terminfo 파일이
+// 원격에 없어도 도구가 캡을 직접 물어 자기식별/기능 협상을 한다 — XTVERSION과 함께 "파일 없는 자기식별"
+// 두 번째 채널. maru가 정직하게 아는 캡만 응답하고(TN=단말 이름·Co=색 수·RGB=truecolor) 나머지는 0+r.
+test "conformance: XTGETTCAP (DCS + q) answers TN/Co/RGB, 0+r for unknown" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    // RGB = hex 524742, 값 "8" = hex 38. 응답 이름은 요청 hex를 그대로 echo, 값은 대문자 hex.
+    try core.write("\x1bP+q524742\x1b\\");
+    try std.testing.expectEqualStrings("\x1bP1+r524742=38\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // Co = 436f, 값 "256" = 323536.
+    try core.write("\x1bP+q436f\x1b\\");
+    try std.testing.expectEqualStrings("\x1bP1+r436f=323536\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // TN = 544e, 값 "xterm-maru"(terminfo 이름) = 787465726D2D6D617275.
+    try core.write("\x1bP+q544e\x1b\\");
+    try std.testing.expectEqualStrings("\x1bP1+r544e=787465726D2D6D617275\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // 모르는 캡(ZZ = 5a5a) → 0+r(요청 hex echo).
+    try core.write("\x1bP+q5a5a\x1b\\");
+    try std.testing.expectEqualStrings("\x1bP0+r5a5a\x1b\\", core.pendingResponse());
+}
+
+test "XTGETTCAP: 여러 캡은 ;로 구분 — 각각 per-cap 응답(알려짐 1+r, 모름 0+r)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    // RGB(알려짐) ; ZZ(모름): 1+r 다음 0+r를 차례로.
+    try core.write("\x1bP+q524742;5a5a\x1b\\");
+    try std.testing.expectEqualStrings("\x1bP1+r524742=38\x1b\\\x1bP0+r5a5a\x1b\\", core.pendingResponse());
 }
 
 test "conformance: DECRQM reports known modes (bracketed paste 2004, DECTCEM 25)" {

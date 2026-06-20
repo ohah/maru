@@ -118,6 +118,9 @@ const sidebar_header_height_ratio_milli: u32 = 3000;
 const sidebar_toggle_codepoint: u21 = 0x25E7;
 // 사이드바 접힘 시 좌상단 펼치기 버튼이 신호등 오른쪽에서 비울 가로 여백(논리 pt). 신호등은 좌상단 ~70pt를 차지한다.
 const traffic_light_clearance_pt: u32 = 72;
+// 접힘 시 상단 타이틀바 띠의 최소 높이(논리 pt) — 신호등 세로 높이(~28pt)를 가려야 터미널/탭이 신호등을 침범 안 함.
+// 펼침은 한 줄(터미널이 사이드바 우측이라 신호등 아래가 아님)이지만, 접힘은 터미널이 전폭이라 신호등 높이를 확보한다.
+const collapsed_titlebar_min_pt: u32 = 30;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -1383,6 +1386,15 @@ pub const AppSession = struct {
         return p;
     }
 
+    /// 상단 타이틀바 띠 높이(backing px). quick terminal(신호등 없음)=0. 접힘이면 터미널이 전폭이라 신호등 세로
+    /// 높이(collapsed_titlebar_min_pt)를 확보(겹침 방지), 펼침이면 한 줄(터미널이 사이드바 우측이라 신호등 아래 아님).
+    /// refreshCellMetrics(메트릭 변경)·toggleSidebarCollapsed(접힘 상태 변경)가 호출해 titlebar_strip_px에 보관한다.
+    fn computeTitlebarStripPx(self: *const AppSession) u32 {
+        if (self.chrome_minimal) return 0;
+        if (self.sidebar_collapsed) return @max(self.cell_height_px, ptToPx(collapsed_titlebar_min_pt, self.scale_milli));
+        return self.cell_height_px;
+    }
+
     /// per-pane 가로 탭 바의 backing 픽셀 높이 = cell 높이 + 위아래 tab_bar_pad_y_px 패딩(rich — 텍스트 세로 여유).
     /// tui(pad=0)면 cell 1칸(기존). 제목은 origin_y를 pad_y만큼 내려 바 가운데에 둔다. paneTermRect가 이 높이만큼
     /// 내려 터미널 영역을 잘라 바와 터미널 첫 줄이 안 겹친다. cell 높이 미상이면 0(바 없음).
@@ -1901,6 +1913,7 @@ pub const AppSession = struct {
         if (self.chrome_minimal) return; // quick terminal minimal은 항상 사이드바 없음 — 토글 대상 아님
         self.sidebar_collapsed = !self.sidebar_collapsed;
         self.sidebar_width_px = if (self.sidebar_collapsed) 0 else ptToPx(self.sidebar_width_pt, self.scale_milli);
+        self.titlebar_strip_px = self.computeTitlebarStripPx(); // 접힘=신호등 높이, 펼침=한 줄 — termRect/grid 전에 갱신
         for (self.tabs.items) |tab| self.resizeTabPanes(tab);
         self.recomputeActivePaneRect();
         self.rebuildSidebar() catch {};
@@ -3593,9 +3606,8 @@ pub const AppSession = struct {
         // 그걸 쓴다 — 슬롯 높이도 cell 메트릭과 같은 단일 출처에서 파생한다.
         self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
         self.sidebar_header_height_px = self.cell_height_px * sidebar_header_height_ratio_milli / 1000;
-        // 상단 타이틀바 띠 = 한 셀 줄(사용자 요청 "탭은 한칸 밑으로"). 신호등·헤더 아이콘이 이 줄, 탭 바는 그 아래.
-        // quick terminal(chrome_minimal — 신호등 없는 borderless)이면 0.
-        self.titlebar_strip_px = if (self.chrome_minimal) 0 else self.cell_height_px;
+        // 상단 타이틀바 띠(신호등·헤더 아이콘 줄, 탭 바는 그 아래). 펼침=한 줄, 접힘=신호등 높이 확보(computeTitlebarStripPx).
+        self.titlebar_strip_px = self.computeTitlebarStripPx();
         // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
         self.rebuildSidebar() catch {};
         // 폰트/DPI 변경을 활성 surface 코어에 즉시 반영(kitty 자동 크기 advance용 — renderFrame 안전망보다

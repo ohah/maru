@@ -465,6 +465,25 @@ pub const PtySession = struct {
         return comm;
     }
 
+    /// 이 PTY에 **셸 자신이 아닌 포그라운드 작업(명령)이 돌고 있는지**를 반환한다. child(셸)는 spawn 때 setsid로
+    /// 세션·프로세스그룹 리더가 되므로(spawn 경로 line 853), 셸이 프롬프트에 idle이면 터미널 포그라운드 pgid가 곧
+    /// 셸 pid(child_pid)다. vim·ssh·빌드 등을 실행하면 셸이 그걸 새 프로세스그룹으로 띄우고 tcsetpgrp로 포그라운드를
+    /// 옮기므로 pgid != child_pid가 된다. 따라서 (포그라운드 pgid != child_pid)면 명령 실행 중이다. 닫기 확인
+    /// (데이터 손실 방지 — iTerm2/Terminal.app/Ghostty의 "running process가 있으면 닫기 확인" 관례)이 이 술어를 쓴다.
+    /// foregroundProcessName이 **이름**을 얻는 것과 달리 이건 **boolean**만 필요해 proc_name 없이 pgid 비교로 끝낸다
+    /// (이름 비교는 셸 종류·인터프리터 스크립트 때문에 불안정 — pgid 비교가 더 견고). 파이프라인은 그룹 리더만 보지만
+    /// boolean 판정엔 충분하다(foregroundProcessName과 같은 v1 한계). 닫혔거나 fd 음수·pgid≤0면 false(보수적 —
+    /// 닫히는 중이면 확인 불필요). **틱 스레드에서만 호출**(foregroundProcessName과 같은 fd-race 규약 — close는
+    /// closing만 올리고 fd는 reader join 후 deinit에서만 닫혀 fd 재사용 레이스가 없다).
+    pub fn hasForegroundJob(self: *PtySession) bool {
+        if (self.closing.load(.acquire)) return false;
+        const fd = self.master_fd.load(.acquire);
+        if (fd < 0) return false;
+        const pgid = tcgetpgrp(fd);
+        if (pgid <= 0) return false;
+        return pgid != self.child_pid;
+    }
+
     fn activeMasterFd(self: *PtySession) !std.posix.fd_t {
         // close()는 master fd를 닫지 않고 closing 플래그만 올린다(close 주석 참고).
         // 그래서 닫힌 세션 여부는 fd 음수가 아니라 closing으로 판단한다.

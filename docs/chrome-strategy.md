@@ -136,6 +136,8 @@ pub fn view(state: *const State, props: NoticeProps, tokens: Tokens) ChromeDraw;
 pub fn hitTest(props: NoticeProps, p: Px) ?Region;                                // 순수(키보드 전용이면 생략)
 pub fn handle(ev: InputEvent, state: *State) ?Action;                             // 순수, intent 반환
 ```
+`chrome/components/confirm.zig`는 notice의 형제 모달이다 — 같은 계약을 따르되 의도가 1개(dismissed)가 아니라 **2개**(`confirmed`/`cancelled`)다. 파괴적 동작(닫기) 전 확인이라 host가 confirmed면 보류한 동작을 실행하고 cancelled면 버린다(예: 실행 중 명령이 있는 터미널/창 닫기 확인 — [macos-app-host-boundary.md](macos-app-host-boundary.md) "닫기 확인"). 라우팅 우선순위는 **최우선**(파괴적 게이트라 notice보다 앞).
+
 규칙(기존 패턴에서 승계):
 - State는 **렌더를 모르고**, view는 **State를 읽기만**, handle은 **State를 mutate + `?Action` 반환**(단방향).
 - 라이프사이클(언제 열고/배타성)은 **host**가 소유(현 `toggle*` 패턴).

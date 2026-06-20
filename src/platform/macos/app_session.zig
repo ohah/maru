@@ -45,7 +45,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 64; // 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 65; // 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -718,6 +718,17 @@ const Term = struct {
     auto_title: std.ArrayListUnmanaged(u8) = .empty,
 };
 
+/// 닫기 확인이 보류한 닫기 대상. 닫기 진입점마다 cascade 정책이 달라(closeActivePaneOrTab / closeActiveTermOrPane /
+/// closeTab(index) / closeActiveTerm / 창 닫기), 확정 시 같은 경로를 다시 부르려고 어느 경로였는지 기억한다. 실행 중
+/// 명령 판정(closeTargetHasRunningJob)도 같은 cascade를 따라 "이 닫기로 실제 teardown될 Term들"만 검사한다.
+const PendingClose = union(enum) {
+    pane_or_tab, // close_tab 액션(워크스페이스 cascade): split이면 활성 pane, 아니면 탭(마지막이면 창)
+    term_or_pane, // close_term 액션(⌘W Term cascade): Term>pane>워크스페이스
+    tab_index: usize, // 사이드바 ✕ 클릭 — 특정 탭(마지막이면 창)
+    active_term, // 탭바 ✕ 클릭 — 활성 pane의 활성 Term
+    window, // macOS 빨간 닫기 버튼 — 창(세션) 전체
+};
+
 /// Term 포그라운드에서 도는 에이전트 CLI 종류. 사이드바에 심볼로 표시(claude=✳, codex=✻).
 const AgentKind = enum(u8) { none = 0, claude, codex };
 
@@ -945,6 +956,13 @@ pub const AppSession = struct {
     // 그대로 가리키면 dangling이 된다 → showNotice가 여기로 복사하고 State.message가 이걸 가리킨다. 알림 문구라
     // 512B면 충분(초과분은 잘라 표시).
     notice_message_buf: [512]u8 = undefined,
+    // 닫기 확인 모달(confirm)의 메시지 세션 소유 백킹(notice_message_buf와 같은 이유 — confirm.State.message는 slice).
+    // 문구가 짧아 256B면 충분.
+    confirm_message_buf: [256]u8 = undefined,
+    // 닫기 확인에서 "닫기"를 확정하면 실행할 보류된 닫기. null=보류 없음. requestClose가 실행 중 명령이 있으면 여기
+    // 담고 확인 모달을 열며, confirm_accept가 executeClose로 실행하고 confirm_cancel이 버린다. 단일 출처: 어느 닫기
+    // 경로였는지(cascade 정책이 경로마다 다름)를 기억해 확정 시 같은 함수를 다시 부른다.
+    pending_close: ?PendingClose = null,
     // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
     // 마다 leaf rect/divider seg 레이아웃을 새 ArrayList에 할당·해제하던 churn을 없앤다 — 레이아웃은 매번
     // 다시 계산하므로(작은 트리라 cheap) 결과는 항상 최신이라 stale 캐시 위험이 없고, 버퍼 capacity만 재사용한다.
@@ -2657,6 +2675,130 @@ pub const AppSession = struct {
         if (self.divider_drag == split) self.divider_drag = null;
     }
 
+    // ── 닫기 확인(실행 중 명령 보호) ────────────────────────────────────────────────────────────
+    // 실행 중인 포그라운드 명령이 있는 터미널을 실수로 닫아 데이터를 잃지 않게, 닫기 전에 확인 모달을 띄운다
+    // (iTerm2/Terminal.app/Ghostty의 "running process가 있으면 닫기 확인" 관례). 모든 in-app 닫기 경로(close_tab/
+    // close_term 액션, 사이드바/탭바 ✕)는 requestClose를, macOS 빨간 버튼은 requestWindowClose를 거친다. 판정은
+    // 그 닫기가 실제 teardown할 Term들만 검사한다(경로별 cascade를 그대로 따라감 — closeTargetHasRunningJob).
+    // 단일 출처: docs/macos-app-host-boundary.md "닫기 확인".
+
+    /// 이 Term에 셸이 아닌 포그라운드 명령이 실행 중인가 — 닫기 확인의 단위 판정. live_pty 미초기화(attach 전)나
+    /// 이미 종료(exited)면 false(명령 없음). PtySession.hasForegroundJob이 tcgetpgrp≠셸 pid로 판정한다(틱 스레드
+    /// 전용 — 닫기 경로는 메인/틱 스레드라 안전). 단일 출처: src/pty/macos.zig hasForegroundJob 주석.
+    fn termHasRunningJob(term: *Term) bool {
+        if (!term.live_initialized) return false;
+        if (term.surface.process_state == .exited) return false;
+        return term.live_pty.session.hasForegroundJob();
+    }
+
+    fn paneHasRunningJob(pane: *Pane) bool {
+        for (pane.terms.items) |t| if (termHasRunningJob(t)) return true;
+        return false;
+    }
+
+    fn tabHasRunningJob(tab: *Tab) bool {
+        for (tab.panes.items) |p| if (paneHasRunningJob(p)) return true;
+        return false;
+    }
+
+    fn sessionHasRunningJob(self: *AppSession) bool {
+        for (self.tabs.items) |t| if (tabHasRunningJob(t)) return true;
+        return false;
+    }
+
+    /// closeActivePaneOrTab(워크스페이스 cascade)와 같은 정책으로, 그 닫기가 teardown할 Term들에 실행 중 명령이
+    /// 있나. split이면 활성 pane만 collapse, 단일 pane이면 탭(마지막이면 창=세션 전체)을 닫는다.
+    fn closeWorkspaceScopeHasRunningJob(self: *AppSession) bool {
+        if (self.activeTabHasSplit()) return paneHasRunningJob(self.activePane());
+        if (self.tabs.items.len == 1) return self.sessionHasRunningJob();
+        return tabHasRunningJob(self.activeTab());
+    }
+
+    /// 보류 대상이 실제 닫을 Term들에 실행 중 명령이 있나 — 경로별 cascade를 closeActiveTermOrPane/closeActivePaneOrTab/
+    /// closeTab/closeActiveTerm과 동일하게 따라간다(과도하게 넓거나 좁게 묻지 않게 단일 출처로 정렬).
+    fn closeTargetHasRunningJob(self: *AppSession, target: PendingClose) bool {
+        return switch (target) {
+            .active_term => termHasRunningJob(self.activePane().activeTerm()),
+            .term_or_pane => if (self.activePane().terms.items.len > 1)
+                termHasRunningJob(self.activePane().activeTerm()) // Term>1 → 활성 Term만 닫힘
+            else
+                self.closeWorkspaceScopeHasRunningJob(), // Term 1 → pane/워크스페이스 cascade
+            .pane_or_tab => self.closeWorkspaceScopeHasRunningJob(),
+            .tab_index => |idx| if (idx >= self.tabs.items.len)
+                false
+            else if (self.tabs.items.len == 1)
+                self.sessionHasRunningJob() // 마지막 탭 → 세션 전체
+            else
+                tabHasRunningJob(self.tabs.items[idx]),
+            .window => self.sessionHasRunningJob(),
+        };
+    }
+
+    /// 닫기 진입점 게이트(in-app 경로). 닫힐 대상에 실행 중 명령이 있으면 확인 모달을 띄우고 보류, 없으면 즉시 실행.
+    /// 창 닫기(빨간 버튼)는 Swift 핸드셰이크가 달라 requestWindowClose가 따로 맡는다.
+    fn requestClose(self: *AppSession, target: PendingClose) void {
+        if (self.closeTargetHasRunningJob(target)) {
+            self.pending_close = target;
+            self.showConfirm(switch (target) {
+                .window => "실행 중인 명령이 있습니다. 이 창을 닫을까요?",
+                else => "실행 중인 명령이 있습니다. 닫을까요?",
+            });
+        } else {
+            self.executeClose(target);
+        }
+    }
+
+    /// 보류한 닫기를 실제 실행 — confirm_accept(확정)와 requestClose의 "명령 없음" 즉시 경로가 공유한다. 닫기 정책
+    /// 단일 출처는 각 cascade 함수다(여긴 디스패치만).
+    fn executeClose(self: *AppSession, target: PendingClose) void {
+        switch (target) {
+            .pane_or_tab => self.closeActivePaneOrTab(),
+            .term_or_pane => self.closeActiveTermOrPane(),
+            .tab_index => |idx| self.closeTab(idx),
+            .active_term => self.closeActiveTerm(),
+            .window => self.latchSessionClose(),
+        }
+    }
+
+    /// 창(세션) 닫기를 latch — 빨간 버튼 확인 확정 시. closeTab 마지막-탭 경로와 같은 종료 latch(ended_seen +
+    /// process_state=exited)라, 다음 tick summary.ended를 본 Swift가 closeWindowOrQuit으로 실제 창을 닫는다
+    /// (프로그래밍적 close라 windowShouldClose 재호출 없음 — 재확인 루프가 안 생긴다). 단일 출처: closeTab 주석.
+    fn latchSessionClose(self: *AppSession) void {
+        self.ended_seen = true;
+        self.activeSurface().process_state = .exited;
+        self.metal_dirty = true;
+    }
+
+    /// 빨간 닫기 버튼/창 단위 닫기 ABI(maru_macos_app_session_request_window_close)가 부른다. 실행 중 명령이 있으면
+    /// 확인 모달을 열고 true(deferred — Swift가 windowShouldClose에서 false 반환해 보류), 없으면 false(Swift가 평소대로
+    /// 닫음 → windowWillClose가 정리). pending은 .window로 두고 confirm_accept가 latchSessionClose로 마무리한다.
+    pub fn requestWindowClose(self: *AppSession) bool {
+        if (!self.closeTargetHasRunningJob(.window)) return false;
+        self.pending_close = .window;
+        self.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?");
+        return true;
+    }
+
+    /// 닫기 확인 모달을 연다. 메시지는 세션 소유 버퍼로 복사(showNotice와 같은 이유 — slice dangling 방지, UTF-8
+    /// 코드포인트 경계 절단)하고 다른 오버레이(notice/find/palette/context_menu)를 닫아 배타성을 지킨다(단일 오버레이
+    /// frame 가정). 다음 tick이 그린다.
+    fn showConfirm(self: *AppSession, message: []const u8) void {
+        self.chrome_host.notice.dismiss();
+        self.chrome_host.find.hide();
+        self.find_matches.clearRetainingCapacity();
+        self.chrome_host.palette.hide();
+        self.chrome_host.context_menu.hide();
+        self.context_menu_target = null;
+        self.view_options_menu = false;
+        var n = @min(message.len, self.confirm_message_buf.len);
+        if (n < message.len) {
+            while (n > 0 and (message[n] & 0xC0) == 0x80) n -= 1;
+        }
+        @memcpy(self.confirm_message_buf[0..n], message[0..n]);
+        self.chrome_host.confirm.show(self.confirm_message_buf[0..n]);
+        self.metal_dirty = true;
+    }
+
     /// 탭을 닫는다. 마지막 한 개면 창(세션)을 닫는다 — 탭을 헐지 않고 종료를 latch해 기존 terminate/
     /// deinit 경로가 정리하게 한다(빈 tabs 리스트로 activeSurface가 패닉하는 걸 피한다). 그 외엔 teardown
     /// (deinit과 같은 순서: closeAndDetach(runtime) → live_pty.deinit(reader join) → surface.deinit → Tab
@@ -2973,9 +3115,10 @@ pub const AppSession = struct {
                 _ = self.switchTab((self.app_window.active_tab + self.tabs.items.len - 1) % self.tabs.items.len);
             },
             .select_tab => |index| _ = self.switchTab(index),
-            // close_tab(액션)은 워크스페이스 close — 사이드바 ✕는 closeTab을 직접 부르고, 기본 키엔 ⌘W가 아니라
-            // Term cascade(close_term)가 묶인다. config로 직접 close_tab을 묶은 경우를 위해 유지한다.
-            .close_tab => self.closeActivePaneOrTab(),
+            // close_tab(액션)은 워크스페이스 close — 사이드바 ✕는 requestClose(.tab_index)를 부르고, 기본 키엔 ⌘W가
+            // 아니라 Term cascade(close_term)가 묶인다. config로 직접 close_tab을 묶은 경우를 위해 유지한다. 실행 중
+            // 명령이 있으면 requestClose가 확인 모달을 띄운다(없으면 즉시 닫음).
+            .close_tab => self.requestClose(.pane_or_tab),
             // 분할 실패(셸 spawn/alloc 실패)는 세션을 죽이지 않고 무시한다 — splitActivePane이 errdefer로
             // 트리/탭을 원복하므로 활성 panel 하나가 그대로 남는다.
             .split_horizontal => self.splitActivePane(.horizontal) catch {},
@@ -2995,7 +3138,8 @@ pub const AppSession = struct {
             .new_term => if (!self.tabsBlocked()) {
                 self.newTermInActivePane() catch {};
             },
-            .close_term => self.closeActiveTermOrPane(),
+            // ⌘W Term cascade. 실행 중 명령이 있으면 requestClose가 확인 모달을 띄운다(없으면 즉시 닫음).
+            .close_term => self.requestClose(.term_or_pane),
             .next_term => self.focusTermRelative(1),
             .previous_term => self.focusTermRelative(-1),
             .next_pane => self.focusPaneRelative(1),
@@ -3492,6 +3636,16 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
             .context_menu_selection_changed => self.metal_dirty = true, // ↑↓ 선택 이동 — 재렌더
+            .confirm_accept => { // Enter/Y — 보류한 닫기를 실행. pending을 먼저 비워(executeClose 재진입 방지) 실행.
+                const target = self.pending_close;
+                self.pending_close = null;
+                self.metal_dirty = true;
+                if (target) |t| self.executeClose(t);
+            },
+            .confirm_cancel => { // Esc/N — 보류한 닫기를 버린다(아무것도 안 닫음).
+                self.pending_close = null;
+                self.metal_dirty = true;
+            },
         }
     }
 
@@ -3796,7 +3950,7 @@ pub const AppSession = struct {
         // chrome 모달(Notice·Find·Palette)이 열려 있으면 키를 chrome으로 라우팅한다 — 최상위(PTY/스크롤보다 먼저,
         // 셋은 배타적). handleInput이 컴포넌트 handle로 보내 의도(HostAction)를 내고, dispatchChromeAction이 session
         // 부수효과(재검색·스크롤·필터·실행·닫기)를 실행한다. 모든 키를 소비한다(모달이라 터미널엔 안 내려간다).
-        if (self.chrome_host.notice.open or self.chrome_host.context_menu.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
+        if (self.chrome_host.confirm.open or self.chrome_host.notice.open or self.chrome_host.context_menu.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
             if (self.chrome_host.handleInput(self.allocator, chromeInputFromKeyEvent(event))) |action| {
                 self.dispatchChromeAction(action);
             }
@@ -4136,6 +4290,9 @@ pub const AppSession = struct {
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (!self.surface_initialized) return;
+        // 닫기 확인 모달이 열려 있으면 모든 마우스 이벤트를 삼킨다 — 키보드 전용(Enter/Esc·Y/N) 결정 모달이라, 뒤
+        // 터미널/사이드바/탭 ✕로 클릭이 새면 또 다른 닫기를 띄우거나 엉뚱한 조작이 된다(파괴적 게이트라 차단형).
+        if (self.chrome_host.confirm.open) return;
         // 인라인 rename 중 마우스 down(어디든)이면 편집을 확정한다(포커스 상실 = 확정 — docs/tabs-splits-layout.md).
         // 그 뒤 클릭은 정상 처리된다(탭 전환·pane 포커스 등). drag/up(2/3)은 down이 선행하므로 여기서 안 걸린다.
         if (kind == 1 and self.rename != null) self.commitRename();
@@ -4292,7 +4449,7 @@ pub const AppSession = struct {
                         const on_close = chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px) and
                             self.hovered_slot != null and self.hovered_slot.? == slot;
                         if (on_close) {
-                            self.closeTab(tab_idx);
+                            self.requestClose(.{ .tab_index = tab_idx }); // 실행 중 명령 있으면 확인 모달(없으면 즉시 closeTab)
                         } else {
                             self.hovered_slot = null; // 드래그 중엔 stale 호버 밴드/✕를 안 보이게
                             _ = self.switchTab(tab_idx);
@@ -4373,7 +4530,8 @@ pub const AppSession = struct {
                         self.focusTerm(tab); // 그 pane의 클릭한 Term으로(같으면 무동작)
                         if (on_close) {
                             self.hovered_tab = null; // 닫으면 Pane/Term이 바뀔 수 있으니 stale 호버 비움
-                            self.closeActiveTermOrPane();
+                            // 위에서 focusPaneByPtr+focusTerm로 클릭한 Term을 활성으로 만든 뒤라, 활성 cascade로 닫는다.
+                            self.requestClose(.term_or_pane); // 실행 중 명령 있으면 확인 모달(없으면 즉시 닫음)
                         } else {
                             // ✕가 아니면 탭 드래그를 arm한다(이어지는 drag(2)가 pane 내 재정렬). 안 끌면 그냥 전환.
                             self.tab_drag_active = true;
@@ -4595,8 +4753,9 @@ pub const AppSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    const InputFocus = enum { terminal, notice, rename, sidebar_search, find, palette };
+    const InputFocus = enum { terminal, confirm, notice, rename, sidebar_search, find, palette };
     fn inputFocus(self: *const AppSession) InputFocus {
+        if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
         if (self.rename != null) return .rename; // 인라인 rename(find/palette와 배타적 — startRename이 닫음)
         if (self.sidebar_search_active) return .sidebar_search; // 사이드바 검색바(상주 — 활성이면 키/IME를 받는다)
@@ -4609,7 +4768,7 @@ pub const AppSession = struct {
     /// switch라 입력 대상 추가 시 컴파일러가 누락을 막는다.
     fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
         switch (self.inputFocus()) {
-            .notice => {}, // notice는 조합을 표시하지 않는다(텍스트 입력 대상 아님)
+            .confirm, .notice => {}, // 확인/notice 모달은 조합을 표시하지 않는다(텍스트 입력 대상 아님)
             .rename => self.rename_input.setPreedit(self.allocator, bytes) catch {},
             .sidebar_search => self.sidebar_search_input.setPreedit(self.allocator, bytes) catch {},
             .find => self.chrome_host.find.input.setPreedit(self.allocator, bytes) catch {},
@@ -4629,7 +4788,7 @@ pub const AppSession = struct {
     /// find/palette 조합을 놓쳤다(단일-출처 위반 → 조합 보호·표시 버그). inputFocus로 통일.
     fn imeComposingActive(self: *const AppSession) bool {
         return switch (self.inputFocus()) {
-            .notice => false, // notice는 조합 상태가 없다
+            .confirm, .notice => false, // 확인/notice 모달은 조합 상태가 없다
             .rename => self.rename_input.preedit.items.len > 0,
             .sidebar_search => self.sidebar_search_input.preedit.items.len > 0,
             .find => self.chrome_host.find.input.preedit.items.len > 0,
@@ -4783,7 +4942,7 @@ pub const AppSession = struct {
         // null(패널 밖)이거나 터미널이면 아래 터미널 커서로 폴백.
         const props = self.buildChromeProps();
         const overlay_caret: ?chrome.draw.Rect = switch (self.inputFocus()) {
-            .notice => null, // 조합을 안 받으므로 후보창 위치 무의미 — 아래 터미널 커서로 폴백(실제론 안 뜸)
+            .confirm, .notice => null, // 조합을 안 받으므로 후보창 위치 무의미 — 아래 터미널 커서로 폴백(실제론 안 뜸)
             // rename 인라인 편집기의 caret(사이드바 슬롯/탭/라벨)에 후보창을 띄운다 — renameCaretRect가 대상별 위치를
             // 잡는다(사이드바 y는 slot 기준 근사). null이면 아래 터미널 커서로 폴백.
             .rename => self.renameCaretRect(),
@@ -4813,7 +4972,7 @@ pub const AppSession = struct {
     pub fn commitComposition(self: *AppSession) void {
         if (!self.surface_initialized) return;
         switch (self.inputFocus()) {
-            .notice => {}, // notice는 확정할 조합이 없다
+            .confirm, .notice => {}, // 확인/notice 모달은 확정할 조합이 없다
             .rename => if (self.rename_input.commitPreedit(self.allocator)) {
                 self.metal_dirty = true; // 조합 글자가 편집 텍스트로 확정됨(렌더 갱신)
             },
@@ -5258,7 +5417,7 @@ pub const AppSession = struct {
         // 모달(chrome Notice·커맨드 팝업·스크롤백 Find)이 열린 동안엔 메뉴바 keyEquivalent(Swift가 OS에서 잡아 이
         // 경로로 보낸다)를 무시한다 — 모달 중 단축키가 뒤의 터미널을 조작하면 안 된다. 모달 자신의 키(팝업 Enter,
         // Find 네비게이션)는 chrome_host.handleInput → dispatchChromeAction이 처리하므로 이 경로를 안 거친다.
-        if (self.chrome_host.notice.open or self.chrome_host.palette.open or self.chrome_host.find.open) return false;
+        if (self.chrome_host.confirm.open or self.chrome_host.notice.open or self.chrome_host.palette.open or self.chrome_host.find.open) return false;
         const action = config_mod.parseAction(action_key) orelse return false;
         self.dispatchAppAction(action);
         return true;
@@ -6057,7 +6216,7 @@ pub const AppSession = struct {
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             if (builtin.os.tag == .macos) {
-                if (self.chrome_host.notice.open or self.chrome_host.context_menu.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
+                if (self.chrome_host.confirm.open or self.chrome_host.notice.open or self.chrome_host.context_menu.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
                     overlay_frame = self.buildChromeOverlayFrame() catch null;
                 }
             }
@@ -11204,6 +11363,83 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
     try std.testing.expect(session.hovered_tab == null);
     try std.testing.expect(!session.ended_seen); // 아직 Term 남음 — 세션 유지
+}
+
+// 닫기 확인(실행 중 명령 보호): controlled_smoke child는 setsid로 포그라운드 그룹 리더라 hasForegroundJob=false
+// (셸이 명령을 새 pgrp로 띄운 상태가 아님). 그래서 닫을 때 확인 모달이 뜨지 않고 **즉시** 닫혀야 한다 — requestClose가
+// closeTargetHasRunningJob=false면 바로 executeClose하는 경로를 증명한다. (running job→모달 트리거는 실제 포그라운드
+// 작업이 필요해 tests/integration/pty의 hasForegroundJob 테스트와 수동 E2E가 커버 — 단위 PTY엔 job-control 셸이 없음.)
+test "close-confirm: 실행 중 명령이 없으면(idle) 확인 모달 없이 즉시 닫는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // ⌘T → Term 2개(활성 pane).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+
+    // 전제: idle(포그라운드 그룹 리더가 곧 child)이라 실행 중 명령 없음.
+    try std.testing.expect(!session.closeTargetHasRunningJob(.term_or_pane));
+
+    // requestClose → 즉시 닫힘(모달 안 뜸, 보류 없음).
+    session.requestClose(.term_or_pane);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expect(!session.chrome_host.confirm.open);
+    try std.testing.expect(session.pending_close == null);
+}
+
+// 닫기 확인의 모달 흐름(실제 키 경로): 확인 모달이 떠 있고 닫기가 보류된 상태에서 Esc면 보류를 버리고(안 닫음),
+// Enter면 보류한 닫기를 실행한다. predicate(hasForegroundJob)는 단위 PTY에서 강제하기 어려워, 모달이 뜬 **이후**의
+// 분기(confirm_accept/confirm_cancel → executeClose/버림)를 handleKeyEvent → chrome 라우팅 → dispatchChromeAction
+// 전 경로로 증명한다. requestClose의 트리거 자체는 위 idle 테스트 + 통합 PTY가 커버한다.
+test "close-confirm: 모달에서 Esc=취소(안 닫음)·Enter=확정(보류한 닫기 실행)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+
+    // 모달이 뜨고 active_term 닫기가 보류된 상태를 직접 구성(requestClose의 모달-오픈 분기와 같은 상태).
+    session.pending_close = .active_term;
+    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?");
+    try std.testing.expect(session.chrome_host.confirm.open);
+
+    // Esc → 취소: 모달 닫힘, 보류 버림, 아무것도 안 닫힘(2개 유지).
+    _ = try session.handleKeyEvent(.{ .key = .escape });
+    try std.testing.expect(!session.chrome_host.confirm.open);
+    try std.testing.expect(session.pending_close == null);
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+
+    // 다시 보류하고 Enter → 확정: active_term 닫힘(1개), 보류 비워짐, 모달 닫힘.
+    session.pending_close = .active_term;
+    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?");
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    try std.testing.expect(!session.chrome_host.confirm.open);
+    try std.testing.expect(session.pending_close == null);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expect(!session.ended_seen); // Term이 남아 세션 유지
 }
 
 // 바 우측 "+" 버튼을 클릭하면 그 pane에 새 Term이 뜨는지(PR-F) — ⌘T의 마우스 버전. 실 init/spawn이라 macOS 게이트.

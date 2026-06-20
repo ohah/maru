@@ -18,6 +18,17 @@
 - Swift가 Zig에 넘기는 값은 `src/platform/macos/app_host_abi.h`의 fixed-width C ABI record만 사용한다. cols/rows 같은 파생값은 Swift가 계산하지 않는다. Swift는 backing 픽셀·scale만 resize 이벤트로 넘기고, app session(Zig)이 자기 cell 메트릭으로 grid를 내부에서 계산한다.
 - Objective-C `*.m` smoke bridge는 삭제하지 않는다. 제품 앱 회귀와 low-level AppKit/Metal/CoreText 회귀를 분리해서 보기 위한 regression smoke로 남긴다.
 
+## 닫기 확인(실행 중 명령 보호)
+
+실행 중인 포그라운드 명령이 있는 터미널을 실수로 닫아 작업/데이터를 잃지 않도록, 닫기 전에 확인 모달을 띄운다.
+
+- **베이스/결정(사실상 표준)**: iTerm2·Terminal.app·Ghostty는 닫으려는 surface/창에 **셸이 아닌 실행 중 프로세스**가 있으면 닫기 확인 시트/다이얼로그를 띄운다. maru도 같은 관례를 택한다 — 단, 다이얼로그는 네이티브 NSAlert가 아니라 **maru 자체 오버레이**(`chrome/components/confirm.zig`)로 통일해 모든 닫기 경로에서 같은 룩/키(Enter·Y=닫기, Esc·N=취소)를 쓴다.
+- **트리거 판정**: "실행 중 명령"은 `PtySession.hasForegroundJob()` = `tcgetpgrp(master) ≠ 셸 child_pid`로 본다. 셸은 spawn 때 `setsid`로 세션·프로세스그룹 리더가 되므로(`src/pty/macos.zig`), 프롬프트에 idle이면 포그라운드 그룹이 곧 셸이라 false, 셸이 명령을 새 pgrp로 띄우면 tcsetpgrp가 포그라운드를 옮겨 true다. ProcessState(starting/running/exited)는 "셸 살아있음"만 알고 "명령 실행 중"은 모르므로 이 syscall 판정을 단일 출처로 둔다. (이름 비교가 아니라 pgid 비교 — 셸 종류·인터프리터 스크립트에 견고.)
+- **판정 범위**: 그 닫기가 **실제 teardown할 Term들**만 검사한다(과도하게 넓게/좁게 묻지 않게 cascade를 따라감 — `app_session.zig` `closeTargetHasRunningJob`). Term ✕=그 Term, pane collapse=그 pane의 Term들, 워크스페이스/창=그 탭(마지막이면 세션 전체)의 모든 Term.
+- **in-app 닫기 경로**(Cmd+W/메뉴 `close_tab`·`close_term`, 사이드바 ✕, 탭바 ✕): `requestClose(target)`가 게이트다 — 실행 중 명령이 있으면 확인 모달을 띄우고 닫기를 보류(`pending_close`), 없으면 즉시 닫는다. 모달의 Enter/Y=`confirm_accept`→보류한 닫기 실행, Esc/N=`confirm_cancel`→버림(chrome 라우팅→`dispatchChromeAction`).
+- **macOS 빨간 닫기 버튼/창 단위 닫기**: AppKit `windowWillClose`는 이미 닫히는 중이라 가로챌 수 없으므로, `windowShouldClose`에서 `maru_macos_app_session_request_window_close`(ABI v65)를 부른다. 실행 중 명령이 있으면 Zig가 확인 모달을 열고 1(deferred)을 돌려주고 Swift는 `false`를 반환해 닫기를 **보류**한다. 모달에서 확정하면 세션 종료를 latch(`ended_seen`+`process_state=exited`)해, 다음 tick의 `summary.ended`를 본 Swift가 `closeWindowOrQuit`으로 실제 창을 닫는다 — 그건 **프로그래밍적 `close()`**라 `windowShouldClose`가 다시 안 불려 재확인 루프가 없다. 실행 중 명령이 없으면 0 → Swift가 평소대로 닫는다(`windowWillClose`가 terminate/teardown).
+- **검증**: 술어(`hasForegroundJob`)는 `tests/integration/pty/macos.zig`가 실제 PTY(`set -m` job control)로 두 분기를 결정론적으로 증명한다. 모달 흐름(accept/cancel→실행/버림)은 `app_session.zig` 단위 테스트가 키 경로로 증명한다(단위 PTY엔 job-control 셸이 없어 트리거 자체는 통합 테스트가 맡음). 컴포넌트(`confirm.zig`)·라우팅(`host.zig`)은 헤드리스 테스트. 빨간 버튼 defer 핸드셰이크의 실제 창-닫힘은 수동 E2E(실행 중 명령이 있는 창을 빨간 버튼으로 닫아 모달→확정 시 닫힘, 취소 시 유지 확인).
+
 ## 현재 app shell 범위
 
 현재 app shell PR은 다음만 목표로 한다.

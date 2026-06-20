@@ -22,6 +22,7 @@ pub const Tokens = tokens.Tokens;
 pub const components = struct {
     pub const overlay_input = @import("chrome/components/overlay_input.zig"); // find·palette 공유 기반(컴포넌트 아님)
     pub const notice = @import("chrome/components/notice.zig");
+    pub const confirm = @import("chrome/components/confirm.zig"); // 예/아니오 확인 모달(닫기 전 실행 중 명령 확인)
     pub const find = @import("chrome/components/find.zig");
     pub const palette = @import("chrome/components/palette.zig");
     pub const divider = @import("chrome/components/divider.zig"); // 마우스 hit-test 컴포넌트(State 없는 순수 함수)

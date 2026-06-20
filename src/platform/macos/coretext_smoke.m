@@ -1096,13 +1096,16 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         const CGFloat avail_w = (CGFloat)width_px;
         const CGFloat avail_h = (CGFloat)height_px;
 
-        // 축소-맞춤은 이모지(컬러 글리프)에만 적용한다 — Ghostty도 constraint(.cover)를 이모지에만
-        // 건다(SharedGrid.zig: `if (p == .emoji)`). 일반 텍스트(한글/CJK 포함)는 ink가 셀보다 커도
-        // 축소+가운데정렬하면 baseline이 흔들려 윗/아랫줄과 어긋나 보인다(이게 회귀의 원인이었다).
-        // 텍스트는 공통-baseline 정렬을 그대로 써 줄이 일관되게 맞고, 큰 글자는 셀 메트릭으로 맞춘다.
-        // 좁은 셀(EAW 1칸)의 이모지는 ink가 슬롯을 넘으므로 종횡비 유지 축소로 안 잘리게 한다.
+        // 축소-맞춤은 (1) 이모지(컬러 글리프) (2) ink가 슬롯 폭을 넘는 글리프에 적용한다. 일반
+        // 텍스트(한글/CJK 포함)는 ink가 슬롯에 맞아(slot=cell×span) 이 분기에 안 들어가므로,
+        // 축소+가운데정렬로 baseline이 흔들리던 회귀가 재발하지 않는다 — 아래 공통-baseline/advance
+        // 정렬을 그대로 쓴다. overflow 분기는 EAW Ambiguous 기호(동그란 번호 ③ U+2460대 등)를 폰트가
+        // 셀보다 넓게 그려 오른쪽이 잘리던 것을 종횡비 유지 축소로 온전히 그리게 한다. 폭은 UAX#11
+        // 권고대로 width 1로 두고(Ghostty/xterm.js 동일), 렌더에서만 셀에 맞춘다 — Ghostty도 symbol을
+        // constraintWidth로 셀에 맞춘다(renderer/cell.zig: 다음 셀이 비면 2칸 허용, 아니면 1칸 축소).
         const bool is_emoji = maru_font_is_color(draw_font);
-        if (is_emoji && bounds.size.width > 0.0 && bounds.size.height > 0.0) {
+        const bool overflows_slot = bounds.size.width > avail_w;
+        if ((is_emoji || overflows_slot) && bounds.size.width > 0.0 && bounds.size.height > 0.0) {
             // 이모지는 슬롯을 꽉 채우도록 종횡비 유지하며 키우거나 줄인다(Ghostty의 .cover와 같은
             // 의도 — 풀사이즈). 두 축 비율 중 작은 쪽으로 스케일하면 슬롯 안에 정확히 들어맞고
             // 넘치지 않는다(width 2 슬롯이면 2칸을 가득, width 1이면 셀 폭에 맞춰 온전히). cap 없이

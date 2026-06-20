@@ -162,7 +162,7 @@ Phase 2 누적 변경에 다각도 리뷰를 돌려 두 결함을 tip에서 수�
 - **치명적 write 에러 삼킴(수정)**: `writeInputNonBlocking ... catch 0`은 EAGAIN(0 반환, 정상)과 치명적 실패(EIO 등)를 같은 0-진전으로 합쳐, 영구 에러 시 POLLOUT 스핀(라이브락)·입력 조용한 손실이 됐다. 에러면 reader를 종료하도록 고쳤다(read 에러 경로와 동일). EAGAIN은 여전히 0으로 정상 재시도.
 - **수용된 한계(미수정, 무회귀 또는 pathological)**: (1) reader write 단계가 응답(reader-로컬)을 메인 입력보다 먼저 비워, **지속적 응답 폭주**(질의 시퀀스 연속) 시 메인 입력 지연 가능 — 응답은 지연 민감(query 답)이라 우선순위 유지, 입력 순서 비결정성은 §8.4대로 터미널 관용. (2) paste throttle 지점이 PTY 버퍼→write_queue cap(256KiB)로 이동(전량·순서 보존, 흐름 제어는 cap에서). (3) OOM 시 응답 드롭은 기존 best-effort 패턴 유지. 실측 근거 생기면 재검토([[no-defensive-code-without-consult]]).
 
-## 9. Phase 3 — 메인발 코어 mutate를 I/O 스레드로 위임 ((a) 단일책임 확정, 구현 예정)
+## 9. Phase 3 — 메인발 코어 mutate를 I/O 스레드로 위임 ((a) 단일책임 확정 — P3-1~P3-4 구현 완료, 최종 `/code-review max` 잔여)
 
 Phase 1(읽기·코어 처리·응답)·Phase 2(PTY 쓰기)는 I/O 스레드로 옮겼지만, **메인 스레드가 아직 비-PTY 코어 mutate(IME `setPreedit`, 스크롤, 선택, 리포팅)를 `core_mutex` 아래 직접 수행**한다. 이 잔재가 재진입 데드락의 토양이다(#700). §6-5의 `CoreOwner` 안전망이 그 클래스를 panic으로 봉인했지만(1단계), 근본 해소는 **메인이 코어를 직접 안 만지는 것** — **I/O 스레드를 코어의 유일한 mutator로 두는 단일책임 모델**이며, §3의 "I/O 스레드가 코어를 소유한다, 렌더는 락 아래 스냅샷만 읽는다"를 **글자 그대로 실현**한다(2단계).
 
@@ -219,12 +219,12 @@ mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 
 ### 9.5 시퀀싱 (각 PR green, doc-first)
 
 - **P3-0 — 이 설계 + (a) 확정 + §9.7 측정/디버그** ✅(이 PR).
-- **P3-1 — CoreCommandQueue 프리미티브** + 단위 테스트 + `coreq.*` 디버그 스코프 + `core_command_apply` perf 벤치(미배선 — `PtyWriteQueue` 선례).
-- **P3-2 — IME `setPreedit` 위임**(비민감 첫 사례 — `commitComposition`/`imeMarked`를 명령으로). 재진입 토양 1순위 제거.
-- **P3-3 — `reportFocus`·config 위임** ✅: `reportFocus`(드묾)·`setConfigPalette`/`max_scrollback`(reload 루프)·`setCellMetrics`(폰트 변경)를 `enqueueCoreCommand`로 위임. 응답 생성 명령은 reader가 PTY로 흘리고 non-interactive 폴백도 같게 흘린다. `report_mouse`/config 명령 변형 + `apply` 추가. createTerm 초기화·per-tick 렌더 metric은 §9.1대로 직접 유지. `reportMouse`는 P3-4(측정)로 이동.
-- **P3-4 — scroll·선택·`reportMouse` 위임(full (a))** ✅: read-modify-decide를 명령으로 원자화(`select_extend_or_collapse`·`scroll_and_extend`·`scroll_to_offset`)해 메인 코어 mutate 0 달성(§9.4 구현 결과). 모든 mouse 선택/scroll/reportMouse 사이트(클릭·드래그·휠·PageUp·find·스크롤바·hover)를 `enqueueCoreCommand`로. 예외(per-tick 렌더·createTerm init)는 §9.1 직접 유지. 검증: `core_command.apply` 단위(선택/scroll 변형)·macos-app-build·런타임 GUI는 수동.
+- **P3-1 — CoreCommandQueue 프리미티브** ✅(`e77a82c`): `src/app/core_command.zig` + 단위 테스트 + `coreq.*` 디버그 스코프 + `core_command_apply` perf 벤치. P3-1에선 미배선 프리미티브로 추가(`PtyWriteQueue` 선례) — P3-2부터 `enqueueCoreCommand`로 배선된다.
+- **P3-2 — IME `setPreedit` 위임** ✅(`85658ce`): 비민감 첫 사례 — `commitComposition`/`imeMarked`를 명령으로. 재진입 토양 1순위 제거.
+- **P3-3 — `reportFocus`·config 위임** ✅(`8e9581a`): `reportFocus`(드묾)·`setConfigPalette`/`max_scrollback`(reload 루프)·`setCellMetrics`(폰트 변경)를 `enqueueCoreCommand`로 위임. 응답 생성 명령은 reader가 PTY로 흘리고 non-interactive 폴백도 같게 흘린다. `report_mouse`/config 명령 변형 + `apply` 추가. createTerm 초기화·per-tick 렌더 metric은 §9.1대로 직접 유지. `reportMouse`는 P3-4(측정)로 이동.
+- **P3-4 — scroll·선택·`reportMouse` 위임(full (a))** ✅(`e147604`): read-modify-decide를 명령으로 원자화(`select_extend_or_collapse`·`scroll_and_extend`·`scroll_to_offset`)해 메인 코어 mutate 0 달성(§9.4 구현 결과). 모든 mouse 선택/scroll/reportMouse 사이트(클릭·드래그·휠·PageUp·find·스크롤바·hover)를 `enqueueCoreCommand`로. 예외(per-tick 렌더·createTerm init)는 §9.1 직접 유지. 검증: `core_command.apply` 단위(선택/scroll 변형)·macos-app-build·런타임 GUI는 수동.
 - 각 단계 §6 테스트(reader-processing·hammer·close-race) 확장 + §9.7 관측 훅 동반, `assertOwnedBySelf`가 위임 경로의 락 계약을 강제.
-- **마지막 — `/code-review max`**: 스택 tip에서 결함 즉시 수정([[drive-multi-pr-plan-to-completion]]). main 자동 머지 안 함.
+- **마지막 — `/code-review max`** ⏳(미실행): Phase 3의 **유일한 잔여 단계**. 구현(P3-1~P3-4)은 완료됐으나 스택 tip 리뷰는 아직 안 돌렸다 — Phase 1(§4 마지막)·Phase 2(§8.5 P2-5)는 마쳤다. 위임은 동시성 코드라 closeout 리뷰로 남은 결함을 봉인하고 닫는다([[drive-multi-pr-plan-to-completion]]). main 자동 머지 안 함.
 
 ### 9.6 리스크
 

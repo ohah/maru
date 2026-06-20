@@ -905,6 +905,12 @@ pub const AppSession = struct {
     page_keys_scroll: bool = false,
     /// BEL 시스템 소리 여부(config bell.audible 캐시). takeBell이 음소거 게이트로 읽는다. 기본 true.
     audible_bell: bool = true,
+    /// Shift+Enter를 Option+Enter처럼 `\x1b\r`(Meta+Enter)로 보낼지(config input.shift-enter=newline 캐시).
+    /// handleKeyEvent가 PTY 전송 직전에 게이트로 읽는다 — CLI/TUI 멀티라인 줄바꿈. 기본 true(newline).
+    shift_enter_meta: bool = true,
+    /// IME 조합 확정 시 그 Enter의 개행도 함께 보낼지(config input.ime-enter=newline 캐시). shouldReplayAfterCommit이
+    /// 읽는다 — 브라우저처럼 엔터 한 번에 확정+개행. 기본 true(newline); false면 조합만 확정(macOS 네이티브).
+    ime_enter_newline: bool = true,
     // 한 cell의 device 픽셀 크기(advance 폭 × line-height). 실제 CoreText 메트릭에서 뽑아
     // shaper(atlas slot 크기)·rasterizer·renderer fixed-cell layout·host resize가 모두 같은 값을
     // 쓰게 한다. 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다.
@@ -1155,6 +1161,8 @@ pub const AppSession = struct {
         self.config_loaded = true;
         self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
         self.audible_bell = self.loaded_config.config.bell.audible;
+        self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
+        self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
 
         // 전역 단축키 config를 OS 등록용 기술자로 변환해 둔다(Swift가 global_hotkeys ABI로 읽어 등록).
         // 가상 키코드로 매핑 안 되는 chord(+/Insert 등)는 descriptorFor가 null → 건너뛴다(등록 불가).
@@ -3454,6 +3462,8 @@ pub const AppSession = struct {
         // 파일 새 값이라 캐시된 behavior도 갱신한다(appearance 밖 — applyAppearance가 안 건드림).
         self.audible_bell = self.loaded_config.config.bell.audible;
         self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
+        self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
+        self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
         self.reapplyScrollback();
         self.reapplyConfigPalette();
         // 사이드바 카드 표시 토글(sidebar.show-branch/folder)이 파일에서 바뀌었을 수 있다 — 카드를 다시
@@ -3594,10 +3604,21 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             }
         }
+        // Shift+Enter를 Meta+Enter(`\x1b\r`)로 보낸다(config input.shift-enter=newline, 기본). Shift는 Enter 인코딩에
+        // 안 실려(input.zig encodeKey) 일반 Enter와 같은 `\r`이 되는데, 그러면 CLI/TUI가 둘을 구분 못 해 줄바꿈 대신
+        // 명령 실행이 된다. Option(Meta)으로 바꾸면 encodeKey가 ESC 프리픽스를 붙여 Option+Enter와 같은 `\x1b\r`이
+        // 나가고, Claude Code 등이 이를 멀티라인 줄바꿈으로 인식한다. 모달(find=이전 매치 등)은 위에서 이미 키를
+        // 소비했으니 여기 도달한 Shift+Enter는 PTY로 갈 입력뿐이다. native면 변형 없이 기존 동작.
+        var key_event = event;
+        if (self.shift_enter_meta and key_event.key == .enter and key_event.modifiers.shift and
+            !key_event.modifiers.control and !key_event.modifiers.option and !key_event.modifiers.command)
+        {
+            key_event.modifiers = .{ .option = true };
+        }
         // 사용자 config의 keybind를 적용한다 — resolver가 사용자 바인딩(앱 액션 + terminal 매크로)을 먼저 보고
         // 없으면 빌트인(`default_*_bindings`)으로 폴백한다(override/추가/`=unbind`로 기본 끄기/`text:`·`esc:`·`ctrl:`
         // 매크로로 셸 바이트 묶기 가능). 빈 config(테스트·파일 없음)면 사용자 바인딩이 비어 곧장 빌트인으로 떨어진다.
-        const result = try self.frame_loop.handleKeyEvent(self.loaded_config.keyBindingResolver(), event);
+        const result = try self.frame_loop.handleKeyEvent(self.loaded_config.keyBindingResolver(), key_event);
         switch (result) {
             .terminal_input => |terminal_input| {
                 self.total_terminal_input_events += 1;
@@ -4411,7 +4432,10 @@ pub const AppSession = struct {
                 // 화살표를 버리면 커서가 안 움직인다. 확정 후 그 화살표를 다시 보낸다(Ghostty
                 // shouldReplayCommittedPreeditKey와 같은 의미론 — 위/오른/아래는 항상, 왼쪽은
                 // 수정자 있을 때만; plain 왼쪽은 AppKit이 이미 커서를 제자리에 둬 중복 이동 방지).
-                if (event) |ev| if (shouldReplayAfterCommit(ev)) {
+                // Enter는 config(input.ime-enter=newline, 기본)면 함께 replay해 조합 확정과 개행을 한 번에
+                // 처리한다(브라우저 동작). replay되는 Enter는 handleKeyEvent를 거쳐 일반 Enter=`\r`,
+                // Shift+Enter=Meta 변형(`\x1b\r`)으로 인코딩된다.
+                if (event) |ev| if (shouldReplayAfterCommit(ev, self.ime_enter_newline)) {
                     _ = self.handleKeyEvent(ev) catch {};
                 };
             },
@@ -4422,12 +4446,15 @@ pub const AppSession = struct {
         }
     }
 
-    /// 한글 후보를 확정시키며 함께 온 키를 확정 후 다시 보낼지(Ghostty 정책 동작 비교).
-    fn shouldReplayAfterCommit(event: terminal.KeyEvent) bool {
+    /// 한글 후보를 확정시키며 함께 온 키를 확정 후 다시 보낼지(Ghostty 정책 동작 비교). 화살표는 커서
+    /// 이동이라 항상(왼쪽만 수정자 조건), Enter는 enter_newline(config input.ime-enter=newline)일 때만 —
+    /// 브라우저처럼 조합 확정과 개행을 한 번에. commit-only면 false라 조합만 확정되고 Enter는 입력기가 소유.
+    fn shouldReplayAfterCommit(event: terminal.KeyEvent, enter_newline: bool) bool {
         return switch (event.key) {
             .arrow_up, .arrow_right, .arrow_down => true,
             .arrow_left => event.modifiers.shift or event.modifiers.control or
                 event.modifiers.option or event.modifiers.command,
+            .enter => enter_newline,
             else => false,
         };
     }
@@ -12260,12 +12287,17 @@ test "imeEnd always closes the transaction even with a null key (no leak) and fa
 }
 
 test "shouldReplayAfterCommit: arrows replay after candidate commit (left only when modified)" {
-    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .arrow_right, .modifiers = .{} }));
-    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .arrow_down, .modifiers = .{} }));
-    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .arrow_up, .modifiers = .{} }));
-    try std.testing.expect(!AppSession.shouldReplayAfterCommit(.{ .key = .arrow_left, .modifiers = .{} }));
-    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .arrow_left, .modifiers = .{ .shift = true } }));
-    try std.testing.expect(!AppSession.shouldReplayAfterCommit(.{ .key = .enter, .modifiers = .{} }));
+    // 화살표는 enter_newline과 무관하게 동작(둘째 인자 영향 없음).
+    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .arrow_right, .modifiers = .{} }, false));
+    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .arrow_down, .modifiers = .{} }, false));
+    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .arrow_up, .modifiers = .{} }, false));
+    try std.testing.expect(!AppSession.shouldReplayAfterCommit(.{ .key = .arrow_left, .modifiers = .{} }, false));
+    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .arrow_left, .modifiers = .{ .shift = true } }, false));
+    // Enter는 enter_newline일 때만 replay(브라우저 동작) — commit-only면 조합만 확정.
+    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .enter, .modifiers = .{} }, true));
+    try std.testing.expect(!AppSession.shouldReplayAfterCommit(.{ .key = .enter, .modifiers = .{} }, false));
+    // Shift+Enter도 .enter라 같은 게이트를 따른다(replay 시 handleKeyEvent가 Meta 변형으로 \x1b\r 인코딩).
+    try std.testing.expect(AppSession.shouldReplayAfterCommit(.{ .key = .enter, .modifiers = .{ .shift = true } }, true));
 }
 
 test "sendTextAsKeys normalizes newlines to CR and imeBegin snaps to bottom" {

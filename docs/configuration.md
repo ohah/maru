@@ -80,6 +80,8 @@ window.padding-left   = 8
 | `scrollback.lines` | 정수(0~100000) | `1000` | 가시 화면 위로 보관할 과거 줄 수. `0`이면 스크롤백 비활성(과거 줄 안 보관). 범위 밖/비정수는 무시(기본 유지) |
 | `bell.audible` | `true`\|`false` | `true` | BEL(0x07) 수신 시 시스템 소리(NSSound.beep)를 낼지. `false`면 음소거(코어 플래그는 정상 소비) |
 | `input.page-keys` | `passthrough`\|`scroll` | `scroll` | 메인 화면 PageUp/Down 동작. 아래 참조 |
+| `input.shift-enter` | `newline`\|`native` | `newline` | Shift+Enter 인코딩. `newline`(기본)=Option+Enter와 같은 `\x1b\r`(멀티라인 줄바꿈). 아래 참조 |
+| `input.ime-enter` | `newline`\|`commit-only` | `newline` | IME(한글 등) 조합 중 Enter. `newline`(기본)=확정+개행 한 번에(브라우저 동작). 아래 참조 |
 | `quick-terminal.height` | 숫자(0.1~1.0) | `0.45` | 가장자리에 수직인 '두께' 비율(화면 대비). `top`/`bottom`=높이, `left`/`right`=폭, `center`=세로 비율. 범위 밖/비숫자는 무시 |
 | `quick-terminal.width` | 숫자(0.1~1.0) | (`height` 따라감) | **`center` 전용** 가로 비율(화면 대비). 미설정이면 `height`와 같게(정사각). `top`/`bottom`(전폭)·`left`/`right`(`height`로 두께)에선 무시. 범위 밖/비숫자는 무시 |
 | `quick-terminal.auto-hide` | `true`\|`false` | `true` | 포커스 잃으면(다른 창/앱 클릭) 자동 숨김. `false`면 토글로만 |
@@ -139,6 +141,34 @@ window.padding-left   = 8
   keymap은 끝 `~`를 vi-swap-case로 해석해 대소문자를 토글한다**(실측 확인). xterm 순정이 필요할 때만.
 
 > `Shift+PageUp`/`Shift+PageDown`은 이 설정과 무관하게 항상 스크롤백을 스크롤한다.
+
+### Shift+Enter (`input.shift-enter`)
+
+Shift+Enter를 어떻게 인코딩할지 정한다. macOS 터미널의 키 인코딩은 Shift를 Enter에 반영하지 않아, 기본 동작이면
+Shift+Enter가 일반 Enter와 똑같은 `\r` 한 바이트를 보낸다 — 그래서 셸/CLI가 둘을 **구분하지 못해** 줄바꿈이 아니라
+명령 실행이 된다. Option(Alt)+Enter는 `\x1b\r`(ESC+CR)이라 앱이 별도 키로 인식해 멀티라인 줄바꿈으로 처리한다.
+
+- `newline` (기본): Shift+Enter를 **Option+Enter와 같은 `\x1b\r`** 로 보낸다. Claude Code 등 CLI/TUI가 이를 줄바꿈
+  (전송 없이 다음 줄)으로 인식한다 — 모던 에디터/브라우저의 Shift+Enter 기대치와 일치한다.
+- `native` (opt-out): Shift를 인코딩에 반영하지 않는 기존 터미널 동작. 일반 셸에선 `\r`(일반 Enter와 동일),
+  kitty 키보드 프로토콜이 켜진 앱에선 `\x1b[13;2u`(CSI u). xterm/Ghostty 순정 동작이 필요할 때만.
+
+> Shift는 chord modifier가 아니라 IME 키 트랜잭션을 거쳐 들어오므로, 이 변환은 **모달(Find의 Shift+Enter=이전
+> 매치 등)이 키를 소비하지 않고 PTY로 내려보내는 경우**에만 적용된다. IME 조합 중 Shift+Enter도 같은 규칙을 따른다.
+
+### IME 조합 중 Enter (`input.ime-enter`)
+
+한글 등 IME 조합 중에 Enter를 눌렀을 때의 동작이다. macOS 입력기는 이 Enter를 **조합 확정**에만 쓰고 개행은
+소비하므로(Terminal.app/Ghostty 기본), 기본 동작이면 Enter를 한 번 더 눌러야 줄바꿈/실행이 된다. 웹 브라우저의
+터미널은 확정과 개행을 한 번에 처리한다 — 그 동작을 기본값으로 둔다.
+
+- `newline` (기본): 조합을 확정하면서 그 Enter의 **개행도 함께 보낸다**(엔터 한 번에 확정+실행 — 브라우저 동작).
+  확정 텍스트 전송 뒤 Enter를 replay하며, 입력기가 Enter를 이미 소비했으므로 중복 개행은 생기지 않는다.
+- `commit-only` (opt-out): 조합만 확정하고 개행은 보내지 않는다(macOS 네이티브 입력기 기본). 확정 후 Enter를
+  한 번 더 눌러야 개행된다.
+
+> `input.shift-enter`와 직교한다 — IME 조합 중 Shift+Enter를 확정하면, replay되는 Enter가 `input.shift-enter`
+> 규칙대로 인코딩된다(`newline`이면 `\x1b\r`).
 
 ### `$TERM` (`term`)
 

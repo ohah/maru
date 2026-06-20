@@ -207,6 +207,16 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "input.page-keys는 passthrough|scroll — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "input.shift-enter")) {
+        config.input.shift_enter = parseShiftEnter(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "input.shift-enter는 newline|native — 기본값 유지" });
+            return;
+        };
+    } else if (std.mem.eql(u8, key, "input.ime-enter")) {
+        config.input.ime_enter = parseImeEnter(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "input.ime-enter는 newline|commit-only — 기본값 유지" });
+            return;
+        };
     } else if (std.mem.eql(u8, key, "quick-terminal.height")) {
         config.quick_terminal.height_fraction = parseFloatInRange(value, 0.1, 1.0) orelse {
             try diags.append(a, .{ .line = line_no, .message = "quick-terminal.height는 0.1~1.0(예: 0.45) — 기본값 유지" });
@@ -355,6 +365,18 @@ fn parseQuickTerminalChrome(value: []const u8) ?theme.QuickTerminalChrome {
 fn parsePageKeys(value: []const u8) ?theme.PageKeys {
     if (std.mem.eql(u8, value, "passthrough")) return .passthrough;
     if (std.mem.eql(u8, value, "scroll")) return .scroll;
+    return null;
+}
+
+fn parseShiftEnter(value: []const u8) ?theme.ShiftEnter {
+    if (std.mem.eql(u8, value, "newline")) return .newline;
+    if (std.mem.eql(u8, value, "native")) return .native;
+    return null;
+}
+
+fn parseImeEnter(value: []const u8) ?theme.ImeEnter {
+    if (std.mem.eql(u8, value, "newline")) return .newline;
+    if (std.mem.eql(u8, value, "commit-only")) return .commit_only;
     return null;
 }
 
@@ -1238,6 +1260,44 @@ test "parse: input.page-keys scroll(default)/passthrough + invalid is forgiving"
         var p = try parse(std.testing.allocator, "input.page-keys = bogus\n");
         defer p.deinit();
         try std.testing.expectEqual(theme.PageKeys.scroll, p.config.input.page_keys); // 잘못된 값 → 기본 유지
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+}
+
+test "parse: input.shift-enter newline(default)/native + invalid is forgiving" {
+    {
+        var p = try parse(std.testing.allocator, "");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.ShiftEnter.newline, p.config.input.shift_enter); // 기본(멀티라인 줄바꿈)
+    }
+    {
+        var p = try parse(std.testing.allocator, "input.shift-enter = native\n");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.ShiftEnter.native, p.config.input.shift_enter); // opt-out(기존 동작)
+    }
+    {
+        var p = try parse(std.testing.allocator, "input.shift-enter = bogus\n");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.ShiftEnter.newline, p.config.input.shift_enter); // 잘못된 값 → 기본 유지
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+}
+
+test "parse: input.ime-enter newline(default)/commit-only + invalid is forgiving" {
+    {
+        var p = try parse(std.testing.allocator, "");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.ImeEnter.newline, p.config.input.ime_enter); // 기본(확정+개행)
+    }
+    {
+        var p = try parse(std.testing.allocator, "input.ime-enter = commit-only\n");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.ImeEnter.commit_only, p.config.input.ime_enter); // opt-out(조합만 확정)
+    }
+    {
+        var p = try parse(std.testing.allocator, "input.ime-enter = bogus\n");
+        defer p.deinit();
+        try std.testing.expectEqual(theme.ImeEnter.newline, p.config.input.ime_enter); // 잘못된 값 → 기본 유지
         try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
     }
 }

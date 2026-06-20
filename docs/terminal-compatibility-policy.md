@@ -76,10 +76,13 @@ Maru는 자식 셸 env에 `TERM_PROGRAM=ghostty`를 주입한다(부모가 남�
 
 **현재 상태 — 기본값 `xterm-maru`로 전환됨**: 자체 terminfo 항목 `terminfo/maru.terminfo`(primary
 `xterm-maru`, alias `maru`)를 바이너리에 embed해, 자식 셸마다 자기 캐시에 자동 컴파일하고 `TERMINFO`로
-가리킨다(위 본문). `use=xterm-256color` 토대 + 동기화 출력(`Sync`, 2026) + truecolor(`Tc`)를 정직하게
-선언한다. 적합성 검증은 `mise run terminfo-check`(`tic` 클린 컴파일 + `Sync` 2026 begin/end round-trip +
-`Tc` — "추측 말고 캡처"). `mise run install-terminfo`는 **Maru 밖 셸**에서 쓸 때만 필요하다(Maru 안에선
-자동 캐시로 충분).
+가리킨다(위 본문). `use=xterm-256color` 토대에, maru가 실제 지원하는 캡만 정직하게 더한다: 동기화 출력
+(`Sync`, 2026), truecolor(`Tc`), bracketed paste(`BE`/`BD`, 2004), OSC 52 클립보드 set(`Ms` — write=allow),
+커서 스타일(`Ss`/`Se`, DECSCUSR), focus 이벤트(`fe`/`fd`+`kxIN`/`kxOUT`, 1004). 캡 이름은 Ghostty terminfo를
+second-opinion으로 비교하되 문자열은 maru 코어가 실제 처리하는 공개 escape에서 유도한다(코드 차용 아님 —
+clean-room). 적합성 검증은 `mise run terminfo-check`(`tic` 클린 컴파일 + `Sync` round-trip + `Tc` 선언 +
+확장 캡 9개의 실제 바이트 `tput` round-trip — "추측 말고 캡처"). `mise run install-terminfo`는 **Maru 밖
+셸**에서 쓸 때만 필요하다(Maru 안에선 자동 캐시로 충분).
 
 전환은 다음 선행 조건을 모두 채운 뒤 했다:
 

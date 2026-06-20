@@ -47,4 +47,26 @@ end=$(tput -T xterm-maru Sync 0 | od -An -tx1 | tr -d ' \n')
 # (4) truecolor(Tc) 선언.
 infocmp -x xterm-maru | grep -q 'Tc,' || fail "truecolor 캡 Tc가 선언되지 않았다"
 
-echo "[terminfo-check] OK: xterm-maru/maru 컴파일 클린, Sync 2026 round-trip 정확, Tc 선언"
+# (5) 확장 캡 round-trip: 컴파일된 terminfo가 내는 바이트가 maru 코어가 처리하는 escape와 정확히
+# 일치하는지 실측한다(이름만 맞고 문자열이 한 글자라도 틀리면 tmux/nvim이 깨진 시퀀스를 낸다 —
+# "추측 말고 캡처"). 기대 바이트는 printf POSIX 8진 escape(\033/\007)로 만든다(\xNN은 일부 sh에서 비이식적).
+check_cap() {
+	_cap=$1
+	_want_printf=$2
+	shift 2
+	_got=$(tput -T xterm-maru "$_cap" "$@" | od -An -tx1 | tr -d ' \n')
+	_want=$(printf "$_want_printf" | od -An -tx1 | tr -d ' \n')
+	[ "$_got" = "$_want" ] || fail "$_cap 바이트가 코어 기대와 다르다: got=$_got want=$_want"
+}
+
+check_cap BE '\033[?2004h' # bracketed paste enable(DECSET 2004)
+check_cap BD '\033[?2004l' # bracketed paste disable(DECRST 2004)
+check_cap fe '\033[?1004h' # focus reporting enable(DECSET 1004)
+check_cap fd '\033[?1004l' # focus reporting disable(DECRST 1004)
+check_cap kxIN '\033[I'    # focus gained 보고(CSI I)
+check_cap kxOUT '\033[O'   # focus lost 보고(CSI O)
+check_cap Ss '\033[5 q' 5  # DECSCUSR set(param 5 = 깜빡이는 bar)
+check_cap Se '\033[0 q'    # DECSCUSR reset(기본 커서)
+check_cap Ms '\033]52;c;TWFydQ==\007' c TWFydQ== # OSC52 set clipboard(sel=c, base64=TWFydQ==)
+
+echo "[terminfo-check] OK: xterm-maru/maru 컴파일 클린, Sync 2026 round-trip 정확, Tc 선언, 확장 캡(BE/BD/Ms/Ss/Se/fe/fd/kxIN/kxOUT) round-trip 정확"

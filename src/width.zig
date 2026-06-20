@@ -6,6 +6,16 @@ pub fn cellWidth(codepoint: u21) u2 {
     return 1;
 }
 
+/// 셀 폭은 1(EAW Ambiguous)이지만 폰트가 글리프를 한 칸보다 넓게 그려, **여유가 있으면(다음 셀이 비면) 2칸으로
+/// 렌더**하는 게 자연스러운 심볼인지. advance(커서 폭)는 1로 두고 그릴 폭만 2로 키우는 Ghostty `constraintWidth`
+/// 패턴의 maru판 — 동그란/괄호친 영숫자(Enclosed Alphanumerics U+2460~U+24FF: ①②③ ⑴ ⒈ Ⓐ ⓐ ⓪ 등)는
+/// 거의 다 폰트에서 ~2칸 폭이라 1칸에 욱여넣으면 작아진다(사용자 피드백 "③가 너무 작다"). 베이스: UAX#11이
+/// 이들을 Ambiguous=narrow(1)로 두므로 advance는 1 유지(셸 wcwidth와 커서 정합), 렌더만 2칸 허용(Ghostty 동일).
+/// 셀 폭 자체(cellWidth)는 바꾸지 않는다 — 이건 draw-list가 "다음 셀이 비었을 때만" 그릴 폭을 키우는 판정용이다.
+pub fn isWideRenderSymbol(codepoint: u21) bool {
+    return codepoint >= 0x2460 and codepoint <= 0x24FF;
+}
+
 pub fn isCombiningMark(codepoint: u21) bool {
     // This is intentionally a small first table. It covers the common
     // combining mark blocks needed to keep accents from moving the terminal

@@ -167,6 +167,40 @@ fn usableRestoreCwd(cwd: []const u8) ?[]const u8 {
     return cwd;
 }
 
+// config `workspace.root`(시작 창·새 워크스페이스 탭 전용)를 spawn cwd로 해석한다. 빈 값이면 null(상속
+// cwd로 spawn — maru를 띄운 디렉터리). `~`·`~/…`는 `home`($HOME)으로 확장해 `buf`에 쓰고 그 슬라이스를
+// 돌려준다(확장 없으면 `configured`를 그대로 빌린다 — loaded_config arena가 세션 동안 소유). 형식 필터는
+// usableRestoreCwd와 동일: 절대경로가 아니면 null(상대경로를 넘기면 자식이 앱 cwd 기준으로 chdir해 예측
+// 불가). 존재·디렉터리 여부는 검사하지 않는다 — childExec가 chdir 실패 시 $HOME으로 graceful 폴백한다(TOCTOU
+// 회피, usableRestoreCwd와 같은 결). 반환 슬라이스는 `buf`가 살아 있는 동안(=spawn 호출까지) 유효하다.
+// loader는 raw 문자열만 보관하므로 env 의존(`~` 확장)을 여기 platform layer에서 처리한다.
+fn resolveWorkspaceRoot(buf: []u8, configured: []const u8, home: ?[]const u8) ?[]const u8 {
+    if (configured.len == 0) return null;
+    var path = configured;
+    // `~` 단독 또는 `~/…`를 $HOME으로 확장한다(셸의 tilde expansion은 셸을 안 거치는 execve엔 안 일어난다).
+    // $HOME이 없으면(드묾) 확장 못 하므로 null(상속 cwd) — `~`로 시작하는 상대경로를 그대로 넘기지 않는다.
+    if (std.mem.eql(u8, configured, "~") or std.mem.startsWith(u8, configured, "~/")) {
+        const h = home orelse return null;
+        const rest = configured[1..]; // "" 또는 "/…"
+        path = std.fmt.bufPrint(buf, "{s}{s}", .{ h, rest }) catch return null; // 너무 길면 null(폴백 spawn)
+    }
+    if (!std.fs.path.isAbsolute(path)) return null;
+    return path;
+}
+
+// config `workspace.root` **미설정** 시 첫 창/폴백 cwd를 정한다. maru의 현재 cwd(`launch_cwd` — 자식이 그대로
+// 상속)가 `/`이면(.app 더블클릭·launchd·open으로 뜬 흔한 증상) `home`(절대경로)을 `buf`에 써서 돌려주고, 그
+// 외(정상 cwd·home 없음·`/` 아님)는 null(=launch cwd를 그대로 상속). Ghostty가 launchd/open 실행을 `home`으로
+// 보는 것과 같은 결인데, 침습적 런처 감지 대신 "cwd가 `/`" 증상으로 좁혀 잡는다(터미널에서 띄운 정상 세션은
+// cwd가 `/`가 아니라 그대로 상속). getcwd I/O는 호출자가 미리 해 `launch_cwd`로 주입하므로 이 함수는 순수(테스트 가능).
+fn homeForRootCwd(buf: []u8, launch_cwd: []const u8, home: ?[]const u8) ?[]const u8 {
+    if (!std.mem.eql(u8, launch_cwd, "/")) return null; // 정상 cwd면 그대로 상속(폴백 안 함)
+    const h = home orelse return null;
+    if (!std.fs.path.isAbsolute(h) or h.len > buf.len) return null;
+    @memcpy(buf[0..h.len], h);
+    return buf[0..h.len];
+}
+
 fn isHexStr(s: []const u8) bool {
     for (s) |c| if (!std.ascii.isHex(c)) return false;
     return s.len > 0;
@@ -1246,8 +1280,12 @@ pub const AppSession = struct {
         // append + app_window 갱신을 createTab이 한 묶음으로 한다(create/switch 후속도 같은 경로를 쓴다).
         // Swift는 opaque handle만 보유하고 AppSession은 heap에 고정된다(LivePtySession reader가
         // `&pane.live_pty.reader`를 잡으므로 Pane도 heap-pin — createPane이 allocator.create로 띄운다).
+        var first_req = spawnRequest(spawn_config, self.loaded_config.config.term, integ_dir, self.new_tab_ssh_bin);
+        // 시작 창은 config workspace.root에서 연다(빈 값이면 상속 cwd — maru를 띄운 디렉터리). 새 탭과 같은 규칙.
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (self.workspaceRootCwd(&root_buf)) |root| first_req.cwd = root;
         _ = try self.createTab(
-            spawnRequest(spawn_config, self.loaded_config.config.term, integ_dir, self.new_tab_ssh_bin),
+            first_req,
             spawn_config.size,
             config.queue_capacity,
             "Maru shell",
@@ -2236,8 +2274,13 @@ pub const AppSession = struct {
         const size = gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
         var cfg = self.new_tab_config;
         cfg.size = size;
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        // 서페이스(새 Term)는 Term 탭이라 tab-inherit-cwd 토글을 따른다(켜지면 포커스 cwd 상속, 아니면 root).
+        // append 전에 읽어야 focusedTermCwd의 activeTerm이 아직 현재(=직전 포커스) Term을 가리킨다.
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (self.newSurfaceCwd(&root_buf, self.loaded_config.config.workspace.tab_inherit_cwd)) |c| req.cwd = c;
         const term = try self.createTerm(
-            spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin),
+            req,
             size,
             cfg.queue_capacity,
             "Maru",
@@ -2294,8 +2337,13 @@ pub const AppSession = struct {
         // 3) 새 panel을 b 크기로 spawn(새 셸). 실패하면 트리/탭은 그대로다.
         var cfg = self.new_tab_config;
         cfg.size = b_size;
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        // 팬(분할)은 split-inherit-cwd면 분할되는(활성) pane의 활성 Term cwd 상속, 아니면 root. 아래 트리 변형
+        // 전에 읽어 focusedTermCwd의 active가 아직 포커스 Term을 가리킨다.
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (self.newSurfaceCwd(&root_buf, self.loaded_config.config.workspace.split_inherit_cwd)) |c| req.cwd = c;
         const new_pane = try self.createPane(
-            spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin),
+            req,
             b_size,
             cfg.queue_capacity,
             "Maru",
@@ -2750,13 +2798,51 @@ pub const AppSession = struct {
         return true;
     }
 
+    /// 고정 시작 디렉터리(config `workspace.root`)를 spawn cwd로 해석한다 — **첫 창**과, inherit 토글이 꺼졌거나
+    /// 상속할 포커스 cwd가 없을 때의 폴백. 설정돼 있으면 `~` 확장·절대경로 필터(resolveWorkspaceRoot)를 거치고,
+    /// 비어 있으면 launch cwd를 상속하되 그게 `/`이면 $HOME으로 올린다(homeForRootCwd — .app 더블클릭 친절).
+    /// null이면 자식이 maru의 cwd를 그대로 상속한다. 결과 슬라이스는 `buf`(또는 config arena)에 묶이므로 호출자는
+    /// spawn이 끝날 때까지 `buf`를 살려 둔다. $HOME·getcwd 같은 env/I/O는 platform layer만 아는 값이라 여기서 읽는다.
+    fn workspaceRootCwd(self: *const AppSession, buf: []u8) ?[]const u8 {
+        const home: ?[]const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else null;
+        const configured = self.loaded_config.config.workspace.root;
+        if (configured.len > 0) return resolveWorkspaceRoot(buf, configured, home);
+        // 미설정: launch cwd 상속이 기본. 단 cwd가 `/`이면(.app 더블클릭) home으로 올린다(getcwd로 증상 판정).
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = std.process.currentPath(self.io, &cwd_buf) catch return null; // 실패 시 상속 그대로
+        return homeForRootCwd(buf, cwd_buf[0..n], home);
+    }
+
+    /// 새 split(팬)·새 Term(서페이스)이 상속할 cwd — 포커스된(활성 pane의 활성) Term이 OSC 7로 보고한 현재
+    /// cwd(절대경로 형식일 때만; usableRestoreCwd 필터). 못 받았으면(셸 통합 없음·첫 프롬프트 전) null. 반환은
+    /// core 소유 슬라이스로, spawn은 동기라 그 사이 OSC 7이 안 들어와 안정적이다(호출 즉시 spawn에 넘긴다).
+    fn focusedTermCwd(self: *AppSession) ?[]const u8 {
+        return usableRestoreCwd(self.activePane().activeTerm().surface.core.currentCwd());
+    }
+
+    /// 새 surface(탭/Term/split)가 열릴 cwd를 정한다(Ghostty `*-inherit-working-directory` 모델). `inherit`가
+    /// 켜졌고 포커스 Term이 cwd를 보고했으면 그 cwd를 상속(focusedTermCwd), 아니면 고정 `root`로 폴백
+    /// (workspaceRootCwd). 호출자는 surface 종류별 토글(tab_inherit_cwd/split_inherit_cwd)을 `inherit`로 넘긴다.
+    /// 반환 슬라이스는 spawn 호출까지 유효(core/buf/config 소유 — 호출자가 `buf`를 그때까지 살린다). null이면
+    /// req.cwd 미설정(자식이 maru cwd 상속).
+    fn newSurfaceCwd(self: *AppSession, buf: []u8, inherit: bool) ?[]const u8 {
+        if (inherit) {
+            if (self.focusedTermCwd()) |c| return c; // 포커스 Term cwd 상속(켜짐 + 보고됨)
+        }
+        return self.workspaceRootCwd(buf); // 꺼졌거나 상속할 cwd 없음 → 고정 root
+    }
+
     /// 사용자 액션(Cmd+T)으로 새 탭을 연다 — 첫 탭과 같은 종류의 셸을 '현재 창 크기'로 띄운다(보관한
     /// new_tab_config/zdotdir, term은 loaded_config). createTab이 새 탭을 활성으로 만든다.
     fn newTab(self: *AppSession) !*Tab {
         var cfg = self.new_tab_config;
         cfg.size = self.activeSurface().core.size; // 첫 탭 크기가 아니라 지금 창 크기로
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        // 새 워크스페이스 탭: tab-inherit-cwd면 포커스 cwd 상속, 아니면 root(Ghostty tab-inherit 모델).
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (self.newSurfaceCwd(&root_buf, self.loaded_config.config.workspace.tab_inherit_cwd)) |c| req.cwd = c;
         return self.createTab(
-            spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin),
+            req,
             cfg.size,
             cfg.queue_capacity,
             "Maru",
@@ -9930,6 +10016,66 @@ test "usableRestoreCwd: 절대경로 형식 필터(존재·디렉터리는 child
     // 형식 불량(빈값·상대경로)만 거른다 — 상대경로를 cwd로 넘기면 자식이 앱 cwd 기준 chdir해 예측 불가.
     try std.testing.expect(usableRestoreCwd("") == null);
     try std.testing.expect(usableRestoreCwd("relative/path") == null);
+}
+
+test "resolveWorkspaceRoot: 빈값=상속(null), 절대경로 그대로, `~` 확장, 형식 필터" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    // 빈 값(기본) → null = 상속 cwd로 spawn(설정 안 함).
+    try std.testing.expect(resolveWorkspaceRoot(&buf, "", "/home/u") == null);
+    // 절대경로는 그대로(config arena 슬라이스를 빌림 — buf 안 씀).
+    try std.testing.expectEqualStrings("/work/proj", resolveWorkspaceRoot(&buf, "/work/proj", "/home/u").?);
+    // `~` 단독 → $HOME, `~/sub` → $HOME/sub(셸을 안 거치는 execve엔 tilde expansion이 없어 직접 한다).
+    try std.testing.expectEqualStrings("/home/u", resolveWorkspaceRoot(&buf, "~", "/home/u").?);
+    try std.testing.expectEqualStrings("/home/u/proj", resolveWorkspaceRoot(&buf, "~/proj", "/home/u").?);
+    // `~`인데 $HOME이 없으면 확장 불가 → null(`~`로 시작하는 상대경로를 그대로 넘기지 않는다).
+    try std.testing.expect(resolveWorkspaceRoot(&buf, "~/proj", null) == null);
+    // 상대경로(절대 아님)는 거른다 → null. `~user`(다른 사용자)는 확장 안 하므로 상대경로로 떨어져 null.
+    try std.testing.expect(resolveWorkspaceRoot(&buf, "relative/path", "/home/u") == null);
+    try std.testing.expect(resolveWorkspaceRoot(&buf, "~user/proj", "/home/u") == null);
+}
+
+test "homeForRootCwd: cwd가 `/`(.app)면 home으로, 정상 cwd면 상속(null)" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    // maru cwd가 `/`(.app 더블클릭) + home 절대경로 → home으로 올린다.
+    try std.testing.expectEqualStrings("/Users/me", homeForRootCwd(&buf, "/", "/Users/me").?);
+    // 정상 cwd(터미널에서 띄움)면 그대로 상속 → null(폴백 안 함).
+    try std.testing.expect(homeForRootCwd(&buf, "/Users/me/proj", "/Users/me") == null);
+    // cwd가 `/`여도 home이 없거나 절대경로가 아니면 폴백 불가 → null(상속).
+    try std.testing.expect(homeForRootCwd(&buf, "/", null) == null);
+    try std.testing.expect(homeForRootCwd(&buf, "/", "relative") == null);
+}
+
+test "focusedTermCwd/workspaceRootCwd/newSurfaceCwd: 포커스 cwd 상속 + inherit 토글 폴백" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // OSC 7 보고 전(셸 통합 없음·첫 프롬프트 전) → 상속할 포커스 cwd 없음(null).
+    try std.testing.expect(session.focusedTermCwd() == null);
+    // 테스트는 빈 config로 init(workspace.root="")·정상 cwd(test runner는 `/`가 아님) → root 폴백도 상속(null).
+    // 기본 동작 회귀 방지(이 가정은 테스트를 `/`에서 돌리지 않는 한 성립).
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expect(session.workspaceRootCwd(&buf) == null);
+    // 상속할 cwd가 없으면 inherit on/off 둘 다 root 폴백(null) — toggle만으로 갑자기 경로가 안 생긴다.
+    try std.testing.expect(session.newSurfaceCwd(&buf, true) == null);
+    try std.testing.expect(session.newSurfaceCwd(&buf, false) == null);
+
+    // 활성 Term이 OSC 7로 cwd를 보고하면, inherit ON인 새 surface(탭/Term/split)는 그 절대경로를 상속한다.
+    try session.activeSurface().core.write("\x1b]7;file://h/tmp/proj\x07");
+    try std.testing.expectEqualStrings("/tmp/proj", session.focusedTermCwd().?);
+    try std.testing.expectEqualStrings("/tmp/proj", session.newSurfaceCwd(&buf, true).?);
+    // inherit OFF면 포커스 cwd가 있어도 무시하고 root 폴백(여기선 root 미설정·정상 cwd라 null).
+    try std.testing.expect(session.newSurfaceCwd(&buf, false) == null);
 }
 
 test "applyWorkspaceWindow: 없는 cwd여도 복원 성공(기본 cwd 폴백, surface 안 잃음)" {

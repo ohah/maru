@@ -77,6 +77,9 @@ window.padding-left   = 8
 | `window.padding-left` | 정수(0~256) | `8` | 위와 같되 **왼쪽** 여백 |
 | `window.padding-x` | 정수(0~256) | `8` | **left+right alias** — `padding-left`·`padding-right`를 같은 값으로 동시에 설정(대칭 좌우 여백). 개별 키와 혼용 시 파일에서 **나중에 나온 줄이 우선**(예: `padding-x=10` 다음 `padding-left=20` → left=20, right=10). 범위 밖/비정수는 무시(기본 유지) |
 | `window.padding-y` | 정수(0~256) | `4` | **top+bottom alias** — `padding-top`·`padding-bottom`을 같은 값으로 동시에 설정(대칭 상하 여백). 우선순위 규칙은 `padding-x`와 동일(나중 줄 우선) |
+| `workspace.root` | 경로 | (없음) | 고정 시작 디렉터리(Ghostty `working-directory` 대응). 첫 창 + 상속이 꺼졌거나 상속할 cwd가 없을 때 폴백. 비어 있으면 maru cwd 상속(단 `/`면 `~`). `~`·`~/…`는 $HOME으로 확장. 아래 참조 |
+| `workspace.tab-inherit-cwd` | `true`\|`false` | `true` | 새 워크스페이스 탭(`new_tab`)·새 Term(`new_term`)이 포커스 Term의 현재 cwd(OSC 7)를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `tab-inherit-working-directory`). 아래 참조 |
+| `workspace.split-inherit-cwd` | `true`\|`false` | `true` | 새 분할(`split_*`, 팬)이 포커스 Term의 현재 cwd를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `split-inherit-working-directory`). 아래 참조 |
 | `scrollback.lines` | 정수(0~100000) | `1000` | 가시 화면 위로 보관할 과거 줄 수. `0`이면 스크롤백 비활성(과거 줄 안 보관). 범위 밖/비정수는 무시(기본 유지) |
 | `bell.audible` | `true`\|`false` | `true` | BEL(0x07) 수신 시 시스템 소리(NSSound.beep)를 낼지. `false`면 음소거(코어 플래그는 정상 소비) |
 | `input.page-keys` | `passthrough`\|`scroll` | `scroll` | 메인 화면 PageUp/Down 동작. 아래 참조 |
@@ -175,6 +178,50 @@ Shift+Enter가 일반 Enter와 똑같은 `\r` 한 바이트를 보낸다 — 그
 
 > `input.shift-enter`와 직교한다 — IME 조합 중 Shift+Enter를 확정하면, replay되는 Enter가 `input.shift-enter`
 > 규칙대로 인코딩된다(`newline`이면 `\x1b\r`).
+
+### 시작 디렉터리 (`workspace.*`)
+
+새로 여는 셸이 어느 디렉터리에서 시작할지 정한다. **Ghostty의 `working-directory` +
+`*-inherit-working-directory` 모델**을 그대로 따른다 — 고정 시작 경로 하나(`workspace.root`)에, surface
+종류별 cwd 상속 토글(기본 켜짐)을 둔다.
+
+**기본 동작(설정 없음)**: 새 워크스페이스 탭·새 Term·분할 모두 **직전 포커스 Term의 현재 cwd(OSC 7)를
+상속**한다. 즉 `cd`로 옮긴 디렉터리에서 ⌘T/⌘⇧T/⌘D를 누르면 그 위치에서 새 셸이 시작한다(tmux·iTerm2·Ghostty
+기본과 동일). 셸 통합이 없거나 첫 프롬프트 전이면 상속할 cwd가 없어 `workspace.root`로 폴백한다.
+
+```conf
+# 고정 시작 경로(Ghostty working-directory). 첫 창 + 상속이 꺼졌거나 상속할 cwd가 없을 때 쓴다.
+workspace.root = ~/projects
+
+# 상속 토글(기본 둘 다 true = 포커스 cwd 상속). false면 그 종류는 항상 root에서 연다.
+workspace.tab-inherit-cwd   = true   # 새 워크스페이스 탭(⌘⇧T) + 새 Term(⌘T)
+workspace.split-inherit-cwd = true   # 새 분할(⌘D, 팬)
+```
+
+- **`workspace.root`** — 고정 시작 디렉터리. `~`·`~/…`는 $HOME으로 확장한다(셸을 거치지 않고 `execve`로
+  띄우므로 tilde 확장을 maru가 직접 한다). 절대경로가 아니거나(상대경로·`~user`) 없는 디렉터리면 자식 셸의
+  `chdir`이 실패해 **$HOME으로 graceful 폴백**한다(세션 안 깨짐). 경로에 공백이 있어도 따옴표 없이 그대로 쓴다
+  (값은 양끝 공백만 다듬는다). **비어 있으면(기본)** maru를 띄운 cwd를 상속하되, 그 cwd가 `/`이면(`.app`
+  더블클릭·`open`·launchd로 띄운 흔한 증상) **$HOME으로 올린다** — Ghostty가 launchd/`open` 실행을 `home`으로
+  보는 것과 같은 결(터미널에서 `maru`로 띄우면 cwd가 `/`가 아니라 그대로 상속).
+
+- **`workspace.tab-inherit-cwd`** — 새 워크스페이스 탭(`new_tab`)과 새 Term(`new_term`)의 cwd 상속 여부.
+  `true`(기본)면 포커스 cwd 상속, `false`면 `root`. Term 탭은 워크스페이스 탭과 같은 '탭'이라 이 토글이 함께
+  관할한다.
+
+- **`workspace.split-inherit-cwd`** — 새 분할(`split_*`, 팬)의 cwd 상속 여부. `true`(기본)면 포커스 cwd
+  상속, `false`면 `root`.
+
+> **베이스/결정**: 동작·기본값·키 의미를 모두 **Ghostty**(`working-directory`,
+> `window/tab/split-inherit-working-directory`, 모두 기본 `true`)에 맞췄다(레퍼런스는 동작만 비교, 코드
+> 미참고). 새 split/탭이 현재 디렉터리를 물려받는 동작은 tmux `split-window`·iTerm2 새 split의 보편 관례이기도
+> 하다. Ghostty의 `window-inherit-working-directory`(창 간 상속)는 maru에선 **두지 않는다** — 새 창은 별도
+> 세션(AppSession)이라 직전 창의 포커스 cwd를 알 길이 없어 항상 `root`에서 연다(Ghostty도 "`working-directory`는
+> 주로 첫 창에 쓰인다"고 한다). 새 Term(`new_term`)은 Ghostty에 없는 maru 고유(pane 내 가로 탭)라 가장 가까운
+> '탭'으로 보고 `tab-inherit-cwd`에 묶었다.
+>
+> 워크스페이스 **복원**(이전 세션 재시작)은 이 값과 무관하다 — 저장된 surface별 cwd를 그대로 쓴다
+> ([Workspace Restore 전략](workspace-restore.md)). `workspace.*`는 새로 여는 창/탭/분할에만 적용된다.
 
 ### `$TERM` (`term`)
 

@@ -335,6 +335,31 @@ pub const Config = struct {
     bell: BellConfig = .{},
     /// 셸 통합(zsh ZDOTDIR 주입) 설정. loader가 `shell-integration.*` 키로 파싱.
     shell_integration: ShellIntegrationConfig = .{},
+    /// 워크스페이스(시작 창·새 탭이 열리는 디렉터리) 설정. loader가 `workspace.*` 키로 파싱.
+    workspace: WorkspaceConfig = .{},
+};
+
+/// 워크스페이스(시작 창·새 탭/분할) 설정. Ghostty `working-directory` + `*-inherit-working-directory` 모델을
+/// 따른다 — 고정 시작 경로(`root`) 하나에, surface 종류별 cwd 상속 토글(기본 켜짐)을 둔다.
+pub const WorkspaceConfig = struct {
+    /// 고정 시작 디렉터리(Ghostty `working-directory` 대응). **첫 창**과, 아래 inherit 토글이 꺼졌거나 상속할
+    /// 포커스 cwd가 없을 때 새 surface가 여기서 열린다. 예: `~/projects`·`/Users/me/work`. `~`·`~/…`는 spawn
+    /// 시점에 $HOME으로 확장한다(loader는 raw 문자열만 보관 — env 의존을 platform layer로 미룬다). 절대경로가
+    /// 아니거나 없는 디렉터리면 자식 셸의 chdir이 실패해 childExec가 $HOME으로 graceful 폴백한다(세션 안 깨짐).
+    ///
+    /// **빈 값(기본)**: maru를 띄운 cwd를 상속하되, 그 cwd가 `/`이면(.app 더블클릭 흔한 증상) $HOME으로 폴백한다
+    /// — Ghostty가 launchd/`open` 실행을 `home`으로 보는 것과 같은 결(터미널에서 `maru`로 띄우면 그 cwd 그대로).
+    /// loader가 `workspace.root` 키로 파싱.
+    root: []const u8 = "",
+    /// 새 워크스페이스 탭(`new_tab`, ⌘⇧T)·새 Term(`new_term`, ⌘T)이 직전 포커스 Term의 현재 cwd(OSC 7)를
+    /// 상속할지. **기본 true**(Ghostty `tab-inherit-working-directory` 기본과 동일). `false`면 `root`에서 연다.
+    /// 상속이 켜져도 포커스 cwd가 없으면(셸 통합 없음·첫 프롬프트 전) `root`로 폴백한다. Term 탭은 워크스페이스
+    /// 탭과 같은 '탭'이라 이 토글이 함께 관할한다. loader가 `workspace.tab-inherit-cwd` 키로 파싱.
+    tab_inherit_cwd: bool = true,
+    /// 새 분할(팬, `split_horizontal`/`split_vertical`, ⌘D)이 직전 포커스 Term의 cwd를 상속할지. **기본 true**
+    /// (Ghostty `split-inherit-working-directory` 기본과 동일; tmux `split-window`·iTerm2 새 split도 현재 디렉터리
+    /// 상속). `false`면 `root`에서 연다(상속할 cwd 없으면 마찬가지). loader가 `workspace.split-inherit-cwd` 키로 파싱.
+    split_inherit_cwd: bool = true,
 };
 
 /// 셸 통합 설정. 통합 자체(macOS 편집키·OSC 133/7)는 zsh면 항상 켜지지만, 아래 항목은 추가 동작을

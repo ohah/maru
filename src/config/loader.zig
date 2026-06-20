@@ -336,6 +336,26 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "shell-integration.ssh는 true|false — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "workspace.root")) {
+        // 시작 창·새 탭이 열리는 디렉터리. raw 문자열만 보관한다 — `~` 확장·존재 검증은 $HOME이 필요해
+        // platform layer(spawn 시점)가 한다(loader는 순수 파서라 env에 의존하지 않는다 — Linux CI). 경로는
+        // 내부 공백을 가질 수 있어 value는 양끝만 trim(term과 동일 규칙). 빈 값이면 기본(상속 cwd) 유지.
+        const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
+        if (trimmed.len == 0) {
+            try diags.append(a, .{ .line = line_no, .message = "workspace.root가 비어 있음 — 기본값(상속 cwd) 유지" });
+            return;
+        }
+        config.workspace.root = try a.dupe(u8, trimmed);
+    } else if (std.mem.eql(u8, key, "workspace.tab-inherit-cwd")) {
+        config.workspace.tab_inherit_cwd = parseBool(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "workspace.tab-inherit-cwd는 true|false — 기본값 유지" });
+            return;
+        };
+    } else if (std.mem.eql(u8, key, "workspace.split-inherit-cwd")) {
+        config.workspace.split_inherit_cwd = parseBool(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "workspace.split-inherit-cwd는 true|false — 기본값 유지" });
+            return;
+        };
     } else {
         try diags.append(a, .{ .line = line_no, .message = "알 수 없는 key — 무시" });
     }
@@ -1445,6 +1465,47 @@ test "parse: term default xterm-maru, override, empty is forgiving" {
         var p = try parse(std.testing.allocator, "term =   \n");
         defer p.deinit();
         try std.testing.expectEqualStrings("xterm-maru", p.config.term); // 빈 값 → 기본 유지
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+}
+
+test "parse: workspace.root default empty, override, empty is forgiving" {
+    {
+        var p = try parse(std.testing.allocator, "");
+        defer p.deinit();
+        try std.testing.expectEqualStrings("", p.config.workspace.root); // 기본 = 상속 cwd(빈 문자열)
+    }
+    {
+        // 내부 공백 보존(경로에 공백이 있을 수 있다 — term과 같은 양끝-trim 규칙). `~`는 spawn 시 platform이 확장.
+        var p = try parse(std.testing.allocator, "workspace.root = ~/My Projects\n");
+        defer p.deinit();
+        try std.testing.expectEqualStrings("~/My Projects", p.config.workspace.root);
+    }
+    {
+        var p = try parse(std.testing.allocator, "workspace.root =   \n");
+        defer p.deinit();
+        try std.testing.expectEqualStrings("", p.config.workspace.root); // 빈 값 → 기본 유지 + 진단
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+}
+
+test "parse: workspace.tab/split-inherit-cwd 기본 true, override, forgiving" {
+    {
+        var p = try parse(std.testing.allocator, "");
+        defer p.deinit();
+        try std.testing.expect(p.config.workspace.tab_inherit_cwd); // 기본 상속(Ghostty 기본과 동일)
+        try std.testing.expect(p.config.workspace.split_inherit_cwd);
+    }
+    {
+        var p = try parse(std.testing.allocator, "workspace.tab-inherit-cwd = false\nworkspace.split-inherit-cwd = false\n");
+        defer p.deinit();
+        try std.testing.expect(!p.config.workspace.tab_inherit_cwd); // 끄면 새 탭/Term이 root에서 열림
+        try std.testing.expect(!p.config.workspace.split_inherit_cwd);
+    }
+    {
+        var p = try parse(std.testing.allocator, "workspace.tab-inherit-cwd = nope\n"); // 비-불리언 → 기본 + 진단
+        defer p.deinit();
+        try std.testing.expect(p.config.workspace.tab_inherit_cwd);
         try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
     }
 }

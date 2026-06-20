@@ -3462,7 +3462,7 @@ pub const AppSession = struct {
         const caret_col = prompt_cols + self.sidebar_search_input.queryCols();
         // 검색어가 입력 영역(col 3..cols-4, 우측은 아이콘)을 넘으면 caret를 숨긴다 — buildSidebarHeaderFrame이 col
         // cols-4에서 query를 자르는 것과 동일. 안 그러면 IME 후보창이 사이드바 밖 터미널 pane 위로 떠 텍스트와 분리된다
-        // (find.caretRect의 panel_cols 가드와 동형). cols<8이면 헤더 frame이 null이라 검색이 활성될 수 없으므로 cols≥8 전제.
+        // (find.caretRect의 panel_cols 가드와 동형). cols<10이면 헤더 frame이 null이라 검색이 활성될 수 없으므로 cols≥10 전제.
         if (caret_col >= cols -| 4) return null;
         return .{ .x = @intCast(caret_col * cw), .y = @intCast(search_row * ch), .w = cw, .h = ch };
     }
@@ -4683,10 +4683,10 @@ pub const AppSession = struct {
         const agent_pulsing = self.anyAgentRunning();
         // 사이드바 검색 caret도 깜빡인다 — 헤더 frame의 '|' 글자라(rename과 동형) full rebuild가 필요하다.
         // 검색 caret이 '실제로 그려질' 때만 blink로 재투영한다(buildSidebarHeaderFrame이 caret을 그리는 조건과 동일:
-        // 활성 + 접힘 아님 + cols≥8). 안 그러면 활성인 채 사이드바를 8칸 미만으로 드래그하면 안 보이는 caret 때문에 매
+        // 활성 + 접힘 아님 + cols≥10). 안 그러면 활성인 채 사이드바를 10칸 미만으로 드래그하면 안 보이는 caret 때문에 매
         // 틱 전체 grid가 CoreText 재셰이프된다(idle 못 듦). (접힘은 toggleSidebarCollapsed가 search_active를 끄지만 방어적으로 포함.)
         const sidebar_search = self.sidebar_search_active and !self.sidebar_collapsed and
-            self.cell_width_px > 0 and self.sidebar_width_px / self.cell_width_px >= 8;
+            self.cell_width_px > 0 and self.sidebar_width_px / self.cell_width_px >= 10;
         // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
         // core.preedit로 이미 막지만, 오버레이/rename/검색은 imeComposingActive로 막아야 한다(단일 출처).
         if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !agent_pulsing and !sidebar_search) or self.imeComposingActive()) {
@@ -7271,7 +7271,7 @@ pub const AppSession = struct {
         if (self.sidebar_collapsed) return self.buildCollapsedToggleFrame();
         if (self.sidebar_header_height_px == 0) return null;
         const cols: u16 = @intCast(@min(self.sidebar_width_px / cw, @as(u32, std.math.maxInt(u16))));
-        if (cols < 8) return null; // 검색 줄 + 우측 아이콘 3개(◧/⚙/+, 각 2칸 간격)가 들어갈 최소 폭
+        if (cols < 10) return null; // 검색 줄 + 우측 아이콘 3개(◧/⚙/+, 각 3칸 간격)가 들어갈 최소 폭
 
         var cells: std.ArrayList(renderer.DrawCell) = .empty;
         errdefer cells.deinit(self.allocator);
@@ -7282,10 +7282,11 @@ pub const AppSession = struct {
         // 같은 줄/우측 정렬 — view↔hitTest 단일 레이아웃). 줄 수는 headerRows 단일 소스(headerHit·caretRect과 동일).
         const header_rows: u16 = @intCast(chrome.components.sidebar.headerRows(self.sidebar_header_height_px, self.cell_height_px));
         const search_row: u16 = header_rows - 1; // 헤더 마지막 줄(신호등 아래)
-        // 줄0: 우측 아이콘 3개 — 사이드바 접기(◧ cols-6)·view options(⚙ cols-4)·새 워크스페이스(+ cols-2). 2칸 간격,
-        // 우측 1칸 패딩(cols-1 비움). headerHit의 toggle/view_options/new_workspace zone과 같은 col(단일 레이아웃 소스).
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 6, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 4, .codepoint = 0x2699, .style = .{ .foreground = fg } });
+        // 줄0: 우측 아이콘 3개 — 사이드바 접기(◧ cols-8)·view options(⚙ cols-5)·새 워크스페이스(+ cols-2). 3칸 간격,
+        // 우측 1칸 패딩(cols-1 비움). 아이콘이 ~1.7칸 폭이라 2칸 간격이면 서로 붙어 보여(사용자 피드백) 3칸으로 띄운다.
+        // headerHit의 toggle/view_options/new_workspace zone과 같은 col(단일 레이아웃 소스).
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 8, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 5, .codepoint = 0x2699, .style = .{ .foreground = fg } });
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
         // 검색 줄: 🔍(EAW 2칸) + 입력 텍스트(query+preedit, EAW 한글 2칸), 비면 placeholder "Search"(muted).
         // 검색어는 blur(비활성)돼도 보존해 그대로 그린다 — 다시 클릭해 이어서 편집·필터(초안 보존). preedit은 활성일
@@ -12785,8 +12786,8 @@ test "view options menu: ⚙ toggles sidebar show-branch/folder, stays open, sig
     const init_branch = session.loaded_config.config.sidebar.show_branch;
     const init_folder = session.loaded_config.config.sidebar.show_folder;
 
-    // ⚙ 아이콘(헤더 상단 우측 [w-4cw, w-2cw)) 클릭 → view options 메뉴 열림.
-    const gear_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - @as(f64, @floatFromInt(session.cell_width_px)) * 3;
+    // ⚙ 아이콘(헤더 상단 우측 view_options zone [w-6cw, w-3cw), ⚙ col=cols-5) 클릭 → view options 메뉴 열림.
+    const gear_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - @as(f64, @floatFromInt(session.cell_width_px)) * 4;
     const gear_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) * 0.2; // 상단 아이콘 줄
     try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.view_options, chrome.components.sidebar.headerHit(gear_x, gear_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px));
     session.mouse(1, gear_x, gear_y, 0, 0);
@@ -12904,8 +12905,8 @@ test "sidebar collapse toggle: hides (width 0, pt preserved) and the top-left bu
     // 헤더 ◧(toggle_sidebar) 영역 클릭으로도 접힌다(폭이 충분해 헤더가 그려질 때).
     const cw: f64 = @floatFromInt(session.cell_width_px);
     const cols = session.sidebar_width_px / session.cell_width_px;
-    if (cols >= 8) {
-        const toggle_x: f64 = @as(f64, @floatFromInt(cols - 5)) * cw; // ◧ zone [cols-6, cols-4)
+    if (cols >= 10) {
+        const toggle_x: f64 = @as(f64, @floatFromInt(cols - 7)) * cw; // ◧ zone [cols-9, cols-6)
         const toggle_y: f64 = @as(f64, @floatFromInt(session.cell_height_px)) * 0.5;
         try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.toggle_sidebar, chrome.components.sidebar.headerHit(toggle_x, toggle_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px));
         session.mouse(1, toggle_x, toggle_y, 0, 0);

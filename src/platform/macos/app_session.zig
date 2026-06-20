@@ -45,7 +45,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 61; // 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 62; // 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -110,6 +110,9 @@ const sidebar_max_pt: u32 = 480; // 너무 넓으면 터미널이 좁아짐
 // 없음). 에이전트 상태줄(4번째)을 추가하며 3.8×→4.6×로 키웠다. refreshCellMetrics가 cell_height_px × 이
 // 비율로 backing 픽셀 슬롯 높이를 구한다.
 const sidebar_slot_height_ratio_milli: u32 = 4600;
+// 사이드바 상단 헤더(검색바 + view options·새 워크스페이스 아이콘) 높이 = cell 높이 × 2.0(검색 1줄 + 상하 패딩).
+// 0이면 헤더 없음(하위호환). slot_height와 같은 단일 출처(cell 메트릭)에서 파생한다.
+const sidebar_header_height_ratio_milli: u32 = 2000;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -943,6 +946,9 @@ pub const AppSession = struct {
     // 사이드바 탭 슬롯 한 칸의 backing 픽셀 높이(= cell_height_px × 2.5). refreshCellMetrics가 갱신.
     // metalFrame()이 렌더러에 넘겨 사이드바 셀을 cell 높이가 아니라 이 슬롯 높이로 세로 배치한다.
     sidebar_slot_height_px: u32 = 0,
+    // 사이드바 상단 헤더(검색바 + 아이콘 2개) 높이(px) = cell_height × header_ratio. 0이면 헤더 없음. 밴드·카드·
+    // hit-test가 이만큼 아래로 시프트되고, .m이 사이드바 셀 py_top에 더한다(chrome props.sidebar_header_height_px로 전달).
+    sidebar_header_height_px: u32 = 0,
     // backing(Retina) scale을 천분율로 보관한다(예: 2000 = 2.0×, 1500 = 1.5×). 정수 배율로
     // 반올림하지 않고 분수 그대로 들고 있어, glyph rasterize 크기와 cell 메트릭을 분수 Retina
     // 해상도에 정확히 맞춘다. resize 이벤트의 scale_milli에서 갱신한다.
@@ -986,10 +992,6 @@ pub const AppSession = struct {
     // rebuildSidebar가 이 슬롯에 호버 하이라이트 밴드를 그린다(활성 슬롯과 다를 때만). 후속 호버 X
     // 닫기 아이콘의 대상 슬롯도 이 값이다.
     hovered_slot: ?usize = null,
-    // 마우스가 사이드바 하단 "+"(새 워크스페이스) 슬롯 위인가. hoverCursor이 갱신하고, rebuildSidebar가
-    // true면 그 슬롯(row=탭 개수)에 호버 하이라이트 밴드를 그린다 — 탭 슬롯과 같은 affordance(글리프+커서뿐
-    // 아니라 밴드로도 클릭 가능함을 보여준다). 탭 슬롯 호버(hovered_slot)와 직교다("+"는 탭 범위 밖).
-    hovered_plus: bool = false,
     // 마우스가 호버 중인 per-pane 탭(없으면 null). hoverCursor이 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로
     // 갱신하고, 탭 바 렌더가 이 탭에 호버 ✕(닫기 아이콘)를 그린다. mouse down이 이 탭의 ✕ zone이면 그 Term을
     // 닫는다(사이드바 hovered_slot의 per-pane Term 버전). pane은 heap-pin이라 frame 사이 포인터가 안정.
@@ -2475,7 +2477,7 @@ pub const AppSession = struct {
     /// 가리키면 유지한다. 이게 핵심: 무관한 Pane 닫힘(또는 reap)이 진행 중 탭 드래그/호버를 끊지 않으면서, 드래그
     /// 중인 Pane 자체가 reap으로 해제되는 비동기 UAF는 닫는다(tick reap ↔ 마우스 드래그가 메인 스레드에서 교차).
     ///
-    /// **보수적 무효화**(`hovered_slot`/`hovered_plus`=슬롯 인덱스): 슬롯 인덱스는 pane 수에 의존해 어느 Pane
+    /// **보수적 무효화**(`hovered_slot`=슬롯 인덱스): 슬롯 인덱스는 pane 수에 의존해 어느 Pane
     /// 해제든 stale이 되므로 비운다(캐시라 다음 이동이 재설정). `divider_drag`(*Split)는 여기서 안 건드린다 —
     /// removeLeaf가 떼어낸 split을 돌려주므로 그 호출처(collapsePaneIn·closeActivePane)가 invalidateForFreedSplit으로
     /// **표적** 무효화하고, 트리 통째 해제(destroyTabStandalone)는 거기서 따로 비운다.
@@ -2498,7 +2500,6 @@ pub const AppSession = struct {
             self.chrome_host.context_menu.hide();
         };
         self.hovered_slot = null;
-        self.hovered_plus = false;
         // chrome ChromeState 훅(현재 무동작). 핸들 기반 드래그 상태가 C2/C3서 ChromeState로 이주하면 여기 한 줄이
         // 그 무효화를 떠맡는다 — destroyPane 단일 chokepoint라 호출처는 그대로 따라온다(docs/chrome-strategy.md §5.5).
         self.chrome_host.interaction.invalidateForStructuralChange();
@@ -3255,6 +3256,7 @@ pub const AppSession = struct {
         // 탭 슬롯 높이 = cell 높이 × 2.5(큰 슬롯). cell_height_px가 이미 위에서 갱신됐으므로
         // 그걸 쓴다 — 슬롯 높이도 cell 메트릭과 같은 단일 출처에서 파생한다.
         self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
+        self.sidebar_header_height_px = self.cell_height_px * sidebar_header_height_ratio_milli / 1000;
         // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
         self.rebuildSidebar() catch {};
         // 폰트/DPI 변경을 활성 surface 코어에 즉시 반영(kitty 자동 크기 advance용 — renderFrame 안전망보다
@@ -3782,7 +3784,7 @@ pub const AppSession = struct {
         // down(1)은 아래 일반 처리로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
         if (self.sidebar_drag_active and (kind == 2 or kind == 3)) {
             if (kind == 2 and self.sidebar_drag_index < self.tabs.items.len) {
-                const raw_target = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_slot_height_px, self.tabs.items.len);
+                const raw_target = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.tabs.items.len);
                 // moveTab이 그룹(고정/비고정)으로 clamp한 **실제 안착 인덱스**를 단일 출처로 받는다(여기서 따로
                 // pre-clamp하지 않는다 — countPinnedTabs O(n)가 drag당 1회로 줄고, 이중-clamp 일치 가정이 사라진다).
                 // sidebar_drag_index를 안착 인덱스로 갱신해 다음 delta가 *그* 탭을 재정렬한다. no-op이면 from을 그대로 반환.
@@ -3847,25 +3849,28 @@ pub const AppSession = struct {
         // (빈 영역)은 무시. 진행 중이던 터미널 드래그 선택은 멈춘다. 사이드바 클릭은 터미널에 안 닿는다.
         if (self.inSidebar(x_px)) {
             if (kind == 1) {
-                if (chrome.components.sidebar.inPlus(y_px, self.sidebar_slot_height_px, self.tabs.items.len)) {
-                    // 탭 목록 아래 "+" 슬롯 클릭 → 새 워크스페이스(⌘⇧T의 마우스 버전). createTab이 활성으로 만든다.
-                    self.hovered_plus = false; // 새 탭이 생겨 "+"가 한 행 내려가니 호버 밴드를 비운다(다음 이동이 재계산).
-                    _ = self.newTab() catch {};
-                } else if (self.sidebarSlotAt(y_px)) |slot| {
-                    const on_close = chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px) and
-                        self.hovered_slot != null and self.hovered_slot.? == slot;
-                    if (on_close) {
-                        self.closeTab(slot);
-                    } else {
-                        self.hovered_slot = null; // 드래그 중엔 stale 호버 밴드/✕를 안 보이게
-                        _ = self.switchTab(slot);
-                        // 고정 탭도 드래그 reorder를 arm한다(고정끼리 영역 내 재정렬 가능) — moveTab/드래그 타겟이
-                        // 같은 그룹으로 clamp하므로 고정/비고정 영역을 안 넘는다(비동기화 없음). 슬롯 유효성만 검사.
-                        if (slot < self.tabs.items.len) {
-                            self.sidebar_drag_active = true;
-                            self.sidebar_drag_index = slot;
+                // 상단 헤더: 새 워크스페이스 아이콘 → 새 탭(하단 "+"를 헤더로 이동), view options 아이콘 → 메뉴(P4),
+                // 검색 영역 → 검색 활성(P3). 헤더 밖(none)이면 카드 슬롯 hit-test(✕ 닫기 / 전환 + 드래그 재정렬).
+                switch (chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.sidebar_header_height_px)) {
+                    .new_workspace => _ = self.newTab() catch {},
+                    .view_options => {}, // P4: view options 메뉴(아이콘 자리만 — 클릭 핸들은 P4에서 연결)
+                    .search => {}, // P3: 검색 활성(입력 영역 — 검색 핸들은 P3에서 연결)
+                    .none => if (self.sidebarSlotAt(y_px)) |slot| {
+                        const on_close = chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px) and
+                            self.hovered_slot != null and self.hovered_slot.? == slot;
+                        if (on_close) {
+                            self.closeTab(slot);
+                        } else {
+                            self.hovered_slot = null; // 드래그 중엔 stale 호버 밴드/✕를 안 보이게
+                            _ = self.switchTab(slot);
+                            // 고정 탭도 드래그 reorder를 arm한다(고정끼리 영역 내 재정렬 가능) — moveTab/드래그 타겟이
+                            // 같은 그룹으로 clamp하므로 고정/비고정 영역을 안 넘는다(비동기화 없음). 슬롯 유효성만 검사.
+                            if (slot < self.tabs.items.len) {
+                                self.sidebar_drag_active = true;
+                                self.sidebar_drag_index = slot;
+                            }
                         }
-                    }
+                    },
                 }
             }
             // 사이드바 더블클릭(kind 4) rename은 위 통합 kind==4 핸들러(renameTargetAt)가 이미 처리했다.
@@ -4514,24 +4519,26 @@ pub const AppSession = struct {
         // 사이드바 우측 경계(폭 조절) 위면 리사이즈 커서 — 사이드바/터미널보다 먼저(경계는 둘 사이 밴드).
         if (chrome.components.sidebar.onResizeEdge(x_px, self.sidebar_width_px, if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px)) {
             self.setHoveredSlot(null);
-            self.setHoveredPlus(false);
             self.setHoveredTab(null);
             self.clearHoverUrlAnchor();
             return .resize_h; // 좌우로 끄는 세로 경계 ↔
         }
-        // 사이드바 영역 호버는 슬롯을 추적한다(터미널 URL 호버 아님).
+        // 사이드바 영역 호버는 슬롯(또는 상단 헤더)을 추적한다(터미널 URL 호버 아님).
         if (self.inSidebar(x_px)) {
-            const on_plus = chrome.components.sidebar.inPlus(y_px, self.sidebar_slot_height_px, self.tabs.items.len);
+            // 상단 헤더(검색바·아이콘) 영역이면 슬롯 호버 해제 + 아이콘은 pointingHand·검색 영역은 I-beam.
+            const region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.sidebar_header_height_px);
+            if (region != .none) {
+                self.setHoveredSlot(null);
+                self.setHoveredTab(null);
+                self.clearHoverUrlAnchor();
+                return if (region == .search) .text else .link;
+            }
             self.setHoveredSlot(self.sidebarSlotAt(y_px));
-            self.setHoveredPlus(on_plus); // "+" 슬롯 위면 호버 밴드(rebuildSidebar)
             self.setHoveredTab(null); // 사이드바로 가면 pane 탭 호버 해제(stale ✕ 방지)
             self.clearHoverUrlAnchor();
-            // 하단 "+" 버튼 슬롯은 클릭 가능 — pointingHand로 affordance. 탭 슬롯은 arrow.
-            if (on_plus) return .link;
-            return if (self.hovered_slot != null) .link else .default; // #5c: 워크스페이스 슬롯도 클릭(전환) → pointingHand, 빈 영역은 arrow(hovered_slot은 위 setHoveredSlot이 sidebarSlotAt로 방금 설정 — 재계산 안 함)
+            return if (self.hovered_slot != null) .link else .default; // 워크스페이스 슬롯은 클릭(전환) → pointingHand, 빈 영역은 arrow
         }
         self.setHoveredSlot(null); // 터미널 영역으로 나가면 사이드바 호버 해제
-        self.setHoveredPlus(false);
         // 어느 pane의 탭 바 위면 호버 탭을 갱신(✕ 표시). 바 위면 URL/divider 아니므로 밑줄 해제하고 arrow.
         if (self.updateHoveredTab(x_px, y_px)) {
             self.clearHoverUrlAnchor();
@@ -5557,6 +5564,14 @@ pub const AppSession = struct {
                 sidebar_frame = self.buildSidebarTitleFrame() catch null;
             }
             defer if (sidebar_frame) |*sf| sf.deinit(self.allocator);
+            // 사이드바 상단 헤더 glyph(검색 placeholder + view options ⚙·새 워크스페이스 + 아이콘) — 절대 좌표라
+            // 카드(sidebar_frame)와 별도 frame. replace가 origin(0,0) 기반 cells로 헤더 영역 [0,header)에 직접
+            // 박는다(카드·밴드만 .m이 header_h 시프트). 실패는 무시(헤더 없이 정상). 같은 atlas라 slot 비충돌.
+            var sidebar_header_frame: ?renderer.RenderFrame = null;
+            if (builtin.os.tag == .macos) {
+                sidebar_header_frame = self.buildSidebarHeaderFrame() catch null;
+            }
+            defer if (sidebar_header_frame) |*hf| hf.deinit(self.allocator);
             // 최상위 모달 오버레이 frame(열렸을 때만, macOS). Notice·Find·Palette는 배타적이라 하나만 그린다(replace의
             // overlay_frame). 셋 다 chrome 컴포넌트 경로(buildChromeOverlayFrame → collectDraws/collectPaletteDraws →
             // 일반 rasterizer placeText)로 lower한다 — palette도 C1b에서 이주해 같은 EAW-폭 경로를 탄다. 실패는 무시
@@ -5865,7 +5880,7 @@ pub const AppSession = struct {
                         }
                     }
                 }
-                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items, self.gpu_shadows.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items, self.gpu_shadows.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     self.metal_dirty = false;
                 } else |_| {}
             }
@@ -5957,7 +5972,7 @@ pub const AppSession = struct {
 
     /// 사이드바 y → 탭 슬롯 인덱스(순수 `sidebarSlot` 래퍼 — 슬롯 높이·탭 수로 판정).
     fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
-        return chrome.components.sidebar.slotAt(y_px, self.sidebar_slot_height_px, self.tabs.items.len);
+        return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.tabs.items.len);
     }
 
     /// 호버 중인 사이드바 슬롯을 갱신한다. 바뀌면 호버 밴드를 다시 만들고(rebuildSidebar) 재드로우한다.
@@ -5965,15 +5980,6 @@ pub const AppSession = struct {
     fn setHoveredSlot(self: *AppSession, slot: ?usize) void {
         if (usizeOptEql(self.hovered_slot, slot)) return;
         self.hovered_slot = slot;
-        self.rebuildSidebar() catch {};
-        self.metal_dirty = true;
-    }
-
-    /// 사이드바 "+" 슬롯 호버 상태를 갱신한다. 바뀌면 호버 밴드를 다시 만들고(rebuildSidebar) 재드로우한다.
-    /// 같은 상태면 무동작 — "+" 슬롯 안에서의 마우스 이동이 매번 재드로우를 유발하지 않게 한다(setHoveredSlot과 동형).
-    fn setHoveredPlus(self: *AppSession, hovered: bool) void {
-        if (self.hovered_plus == hovered) return;
-        self.hovered_plus = hovered;
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }
@@ -6053,7 +6059,7 @@ pub const AppSession = struct {
         const arena = arena_state.allocator();
         const tabs = self.sidebarTabs(arena) catch return;
         var ops: std.ArrayList(chrome.draw.Op) = .empty;
-        chrome.components.sidebar.view(tabs, self.hovered_slot, self.hovered_plus, self.buildChromeProps(), arena, &ops) catch return;
+        chrome.components.sidebar.view(tabs, self.hovered_slot, self.buildChromeProps(), arena, &ops) catch return;
         self.lowerSidebar(ops.items);
         // per-tab 배경 tint(우클릭 메뉴 "배경: …") — background_color 설정된 워크스페이스 슬롯(밴드 없는 idle 슬롯)에
         // 반투명(≈40%) 색 quad를 텍스트 셀 아래(layer 0)에 얹는다. 활성/호버 슬롯은 위 lowerSidebar가 밴드 색에
@@ -6531,7 +6537,8 @@ pub const AppSession = struct {
         const fg: terminal.Color = .{ .rgb = self.mutedForeground() };
         const active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
         // 호버 슬롯엔 닫기 ✕(없으면 null). plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼.
-        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, sidebar_cols, fg, self.hovered_slot, self.tabs.items.len, self.app_window.active_tab, active_fg);
+        // plus_row=null — 하단 "+" 버튼은 헤더 우측 아이콘으로 이동·폐기(P2). 호버 슬롯엔 닫기 ✕(없으면 null).
+        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, sidebar_cols, fg, self.hovered_slot, null, self.app_window.active_tab, active_fg);
         // 에이전트 아이콘(✳ claude / ✻ codex)에 **상태색**을 입힌다 — 보편 관례(진행 중=amber, 완료=초록,
         // 불명=회색)로 사용자가 한눈에 진행 상태를 읽게 한다. 종류(claude/codex)는 심볼 모양으로 구분하므로
         // 색은 상태 전용으로 쓴다(브랜드 색에서 전환). 아이콘은 독립 셀(슬롯 중앙)이라 codepoint로 찾는다.
@@ -6570,6 +6577,51 @@ pub const AppSession = struct {
             .cell_height_px = @intCast(self.cell_height_px),
         };
         return frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
+    }
+
+    /// 사이드바 상단 헤더 glyph(검색 placeholder + view options ⚙·새 워크스페이스 + 아이콘) frame을 만든다.
+    /// 카드(buildSidebarTitleFrame)와 달리 절대 좌표라 .m 헤더 시프트 대상이 아니다 — replace가 origin(0,0)
+    /// 기반 cells로 헤더 영역 [0, header)에 직접 박는다(카드·밴드는 .m이 header_h만큼 아래로 시프트). 폭이 너무
+    /// 좁거나 헤더 없으면 null(헤더 안 그림). 아이콘 우측 정렬(⚙=cols-4, +=cols-2)은 sidebar.headerHit과 같은
+    /// 레이아웃 — 그려진 아이콘과 클릭 영역이 일치한다(§5.4 단일 레이아웃 소스). 검색 입력 텍스트·caret은 P3.
+    fn buildSidebarHeaderFrame(self: *AppSession) !?renderer.RenderFrame {
+        const cw = self.cell_width_px;
+        if (cw == 0 or self.sidebar_header_height_px == 0 or self.tabs.items.len == 0) return null;
+        const cols: u16 = @intCast(@min(self.sidebar_width_px / cw, @as(u32, std.math.maxInt(u16))));
+        if (cols < 6) return null; // 검색 영역 + 우측 아이콘 2개(각 2칸)가 들어갈 최소 폭
+
+        var cells: std.ArrayList(renderer.DrawCell) = .empty;
+        errdefer cells.deinit(self.allocator);
+        const muted: terminal.Color = .{ .rgb = self.mutedForeground() };
+        const fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+        // 검색 아이콘(🔍, EAW Wide=2칸) 좌측 + placeholder "Search"(muted). 실제 입력 텍스트·caret은 P3에서 채운다.
+        try cells.append(self.allocator, .{ .row = 0, .col = 0, .codepoint = 0x1F50D, .width = 2, .style = .{ .foreground = muted } });
+        const placeholder = "Search";
+        for (placeholder, 0..) |ch, i| {
+            const col: u16 = @intCast(3 + i);
+            if (col >= cols -| 4) break; // 우측 아이콘 영역 침범 방지
+            try cells.append(self.allocator, .{ .row = 0, .col = col, .codepoint = ch, .style = .{ .foreground = muted } });
+        }
+        // view options(⚙) 우측 4칸 · 새 워크스페이스(+) 우측 2칸 — headerHit과 같은 우측 정렬.
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 4, .codepoint = 0x2699, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
+
+        const draw_list = renderer.DrawList{
+            .size = .{ .cols = cols, .rows = 1 },
+            .cursor = .{ .row = 0, .col = 0 },
+            .dirty = null,
+            .cells = try cells.toOwnedSlice(self.allocator),
+            .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
+        };
+        const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
+            .appearance = self.appearance,
+            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+            .scale_milli = self.scale_milli,
+            .cell_width_px = @intCast(self.cell_width_px),
+            .cell_height_px = @intCast(self.cell_height_px),
+        };
+        return try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
     }
 
     /// 오버레이(커맨드 팝업·Find·Notice) frame의 공통 마무리. 채워진 cells(소유권 인계) + 격자 크기(cols×rows) +
@@ -7030,6 +7082,9 @@ pub const AppSession = struct {
         // 세팅한다(self.sidebar_cells는 밴드 source라 replace에만 넘긴다). 여기선 슬롯 높이만 더한다:
         // 렌더러가 사이드바 셀을 cell 높이가 아니라 탭 슬롯 높이(≈2.5×)로 세로 배치하게.
         frame.sidebar_slot_height_px = self.sidebar_slot_height_px;
+        // 상단 헤더(검색바 + view options·새 워크스페이스 아이콘) 높이 — 렌더러가 사이드바 셀(밴드·카드 glyph)을
+        // 이만큼 아래로 민다(밴드 view는 슬롯 상대 좌표라 .m이 시프트 단일 책임). 헤더 glyph는 절대 좌표 별도 frame.
+        frame.sidebar_header_height_px = self.sidebar_header_height_px;
         return frame;
     }
 
@@ -8208,14 +8263,15 @@ test "사이드바 드래그: 비고정 탭을 위로 끌어도 고정 영역을
     session.rebuildSidebar() catch {};
 
     const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
+    const header_h: f64 = @floatFromInt(session.sidebar_header_height_px); // 슬롯은 상단 헤더 아래로 시프트
     const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
 
     // 비고정 끝 탭(slot 3=t3)을 잡아 slot 0(고정 영역)으로 드래그 → 비고정 영역 시작(index 2)으로만 안착.
-    session.mouse(1, x, slot_h * 3 + 1, 0, 0); // down on slot 3 → arm
+    session.mouse(1, x, header_h + slot_h * 3 + 1, 0, 0); // down on slot 3 → arm
     try std.testing.expect(session.sidebar_drag_active);
     try std.testing.expectEqual(@as(usize, 3), session.sidebar_drag_index);
-    session.mouse(2, x, 1, 0, 0); // drag toward slot 0
-    session.mouse(3, x, 1, 0, 0); // up
+    session.mouse(2, x, header_h + 1, 0, 0); // drag toward slot 0
+    session.mouse(3, x, header_h + 1, 0, 0); // up
 
     // 고정(t0,t1)은 [0,1] 불변, t3는 비고정 영역 시작(2)으로만, t2가 3으로 밀림.
     try std.testing.expectEqual(t0, session.tabs.items[0]);
@@ -8249,14 +8305,15 @@ test "사이드바 드래그: 고정 탭끼리 재정렬(고정 영역 내 swap,
     session.rebuildSidebar() catch {};
 
     const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
+    const header_h: f64 = @floatFromInt(session.sidebar_header_height_px); // 슬롯은 상단 헤더 아래로 시프트
     const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
 
     // 고정 탭 0(t0)을 slot 1(다른 고정)로 드래그 → 고정 영역 내 swap. 비고정 영향 없음.
-    session.mouse(1, x, 1, 0, 0); // down slot 0(고정도 이제 arm)
+    session.mouse(1, x, header_h + 1, 0, 0); // down slot 0(고정도 이제 arm)
     try std.testing.expect(session.sidebar_drag_active);
     try std.testing.expectEqual(@as(usize, 0), session.sidebar_drag_index);
-    session.mouse(2, x, slot_h * 1 + 1, 0, 0); // drag to slot 1
-    session.mouse(3, x, slot_h * 1 + 1, 0, 0); // up
+    session.mouse(2, x, header_h + slot_h * 1 + 1, 0, 0); // drag to slot 1
+    session.mouse(3, x, header_h + slot_h * 1 + 1, 0, 0); // up
 
     try std.testing.expectEqual(t1, session.tabs.items[0]); // swap
     try std.testing.expectEqual(t0, session.tabs.items[1]);
@@ -9954,7 +10011,6 @@ test "S1 구조-무효화 계약: destroyPane이 해제 Pane 포인터를 표적
     session.hovered_tab = .{ .pane = pane_b, .tab = 0 };
     session.divider_drag = split_node;
     session.hovered_slot = 3;
-    session.hovered_plus = true;
 
     session.closeActivePane(); // b 해제 → destroyPane(b) → invalidateForFreedPane(b)
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
@@ -9963,7 +10019,6 @@ test "S1 구조-무효화 계약: destroyPane이 해제 Pane 포인터를 표적
     try std.testing.expect(session.hovered_tab == null); // 표적: b를 가리켰으니 null
     try std.testing.expect(session.divider_drag == null); // 표적: 닫힌 게 바로 이 split이라 null
     try std.testing.expect(session.hovered_slot == null);
-    try std.testing.expect(!session.hovered_plus);
 
     // ── 케이스 2: 무관한 Pane을 닫아도 다른 Pane을 가리키던 드래그/호버는 보존(tab-drag 불변식) ──
     try session.splitActivePane(.horizontal); // panes [a, c], 활성 c
@@ -11349,27 +11404,28 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
 
     const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
+    const header_h: f64 = @floatFromInt(session.sidebar_header_height_px); // 슬롯은 상단 헤더만큼 아래로 시프트
     const x_in: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1; // 사이드바 영역 안
 
-    // 슬롯 0(y in [0, slot_h)) 다운클릭 → 탭 0으로 전환.
-    session.mouse(1, x_in, 1, 0, 0);
+    // 슬롯 0(y in [header, header+slot_h)) 다운클릭 → 탭 0으로 전환.
+    session.mouse(1, x_in, header_h + 1, 0, 0);
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
     // 슬롯 1 클릭 → 탭 1.
-    session.mouse(1, x_in, slot_h + 1, 0, 0);
+    session.mouse(1, x_in, header_h + slot_h + 1, 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     // 슬롯 밖(마지막 슬롯 아래 빈 영역) 클릭은 전환 안 함.
-    session.mouse(1, x_in, slot_h * 10, 0, 0);
+    session.mouse(1, x_in, header_h + slot_h * 10, 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     // 터미널 영역(x ≥ 사이드바 폭, 우측 경계 리사이즈 밴드보다 충분히 안쪽) 클릭은 탭 전환 경로가 아님(활성 불변).
     session.mouse(1, @floatFromInt(session.sidebar_width_px + 50), 1, 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
 
     // 호버: 비활성 슬롯(0, 활성은 1) 위면 호버 밴드가 추가된다(활성 밴드 + 호버 밴드 = 2).
-    _ = session.hoverCursor(x_in, 1, false);
+    _ = session.hoverCursor(x_in, header_h + 1, false);
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
     try std.testing.expectEqual(@as(usize, 2), session.sidebar_cells.items.len);
     // 호버가 활성 슬롯(1) 위면 별도 호버 밴드 없음(활성 색 우선) → 밴드 1개.
-    _ = session.hoverCursor(x_in, slot_h + 1, false);
+    _ = session.hoverCursor(x_in, header_h + slot_h + 1, false);
     try std.testing.expectEqual(@as(?usize, 1), session.hovered_slot);
     try std.testing.expectEqual(@as(usize, 1), session.sidebar_cells.items.len);
     // 터미널 영역(리사이즈 밴드보다 안쪽)으로 나가면 호버 해제.
@@ -11400,23 +11456,16 @@ test "hovering the sidebar + slot adds a hover band at the plus row" {
         "tab 2",
         "sh",
     );
-    const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
-    const x_in: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1; // 사이드바 영역 안
+    const header_h: f64 = @floatFromInt(session.sidebar_header_height_px);
+    const x_in: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1; // 사이드바 우측 끝(헤더 새 워크스페이스 아이콘 영역)
 
-    // "+" 슬롯 호버 → link 커서 + hovered_plus + 밴드 2개(활성 row1 + "+" 호버 row2). 탭 슬롯은 아니라 hovered_slot=null.
-    const cursor = session.hoverCursor(x_in, slot_h * 2 + 1, false);
+    // 헤더 새 워크스페이스 아이콘(우측 끝) 호버 → link 커서. 카드 슬롯이 아니라 hovered_slot=null(하단 "+" → 헤더로 이동).
+    const cursor = session.hoverCursor(x_in, header_h / 2, false);
     try std.testing.expectEqual(CursorKind.link, cursor);
-    try std.testing.expect(session.hovered_plus);
     try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
-    try std.testing.expectEqual(@as(usize, 2), session.sidebar_cells.items.len);
-    // 마지막(추가된) 밴드 셀이 "+"행(row=탭 개수=2)이고 사이드바 폭을 덮는다.
-    const last = session.sidebar_cells.items[session.sidebar_cells.items.len - 1];
-    try std.testing.expectEqual(@as(u16, 2), last.row);
-    try std.testing.expect(last.width > 0);
 
-    // 탭 슬롯(0, 비활성)으로 이동 → "+" 호버 해제, 호버 밴드는 그 탭 행으로(밴드 2개: 활성 row1 + 호버 row0).
-    _ = session.hoverCursor(x_in, 1, false);
-    try std.testing.expect(!session.hovered_plus);
+    // 탭 슬롯(0, 비활성)으로 이동(헤더 아래) → 호버 밴드가 그 탭 행으로(slotAt이 header_h를 빼고 슬롯 0).
+    _ = session.hoverCursor(x_in, header_h + 1, false);
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
     try std.testing.expectEqual(@as(usize, 2), session.sidebar_cells.items.len);
 }
@@ -11448,16 +11497,17 @@ test "clicking the hovered slot close zone closes that tab, elsewhere switches" 
     const w: f64 = @floatFromInt(session.sidebar_width_px);
     const cw: f64 = @floatFromInt(session.cell_width_px);
     const close_x = w - cw; // ✕ zone(우측 2칸) 안
+    const slot0_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + 1; // 슬롯 0(상단 헤더 아래)
 
     // 슬롯 0 좌측(✕ zone 밖) 클릭 → 닫지 않고 전환(active 0). 닫기 전 전환 동작 가드.
-    session.mouse(1, 2, 1, 0, 0);
+    session.mouse(1, 2, slot0_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
 
     // 슬롯 0을 호버(✕ 표시)한 뒤 그 ✕ zone 클릭 → 탭 0 닫힘(switchTab 아님).
-    _ = session.hoverCursor(close_x, 1, false);
+    _ = session.hoverCursor(close_x, slot0_y, false);
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
-    session.mouse(1, close_x, 1, 0, 0);
+    session.mouse(1, close_x, slot0_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 }
 
@@ -11490,14 +11540,15 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
     try std.testing.expectEqual(@as(usize, 2), session.app_window.active_tab);
 
     const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
+    const header_h: f64 = @floatFromInt(session.sidebar_header_height_px); // 슬롯은 상단 헤더 아래로 시프트
     const x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
 
     // 탭 0(Maru)을 슬롯 2로 드래그: down(슬롯0)=전환+드래그 시작 → drag(슬롯2)=moveTab(0,2) → up.
-    session.mouse(1, x, 1, 0, 0);
+    session.mouse(1, x, header_h + 1, 0, 0);
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
     try std.testing.expect(session.sidebar_drag_active);
-    session.mouse(2, x, slot_h * 2 + 1, 0, 0);
-    session.mouse(3, x, slot_h * 2 + 1, 0, 0);
+    session.mouse(2, x, header_h + slot_h * 2 + 1, 0, 0);
+    session.mouse(3, x, header_h + slot_h * 2 + 1, 0, 0);
 
     // 순서 [tab 2, tab 3, Maru], 활성=드래그 탭(Maru)=2, 드래그 종료.
     try std.testing.expectEqualStrings("tab 2", session.tabs.items[0].activePane().activeTerm().surface.title);
@@ -11614,17 +11665,16 @@ test "③b: clicking the sidebar '+' button opens a new workspace" {
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 
-    // "+" 슬롯 y = 탭 목록 바로 아래(인덱스 tab_count=1). 사이드바 안 x.
-    const slot_h: f64 = @floatFromInt(session.sidebar_slot_height_px);
-    const plus_y = @as(f64, @floatFromInt(session.tabs.items.len)) * slot_h + 1;
-    const sidebar_x: f64 = @floatFromInt(session.sidebar_width_px / 2);
-    try std.testing.expect(chrome.components.sidebar.inPlus(plus_y, session.sidebar_slot_height_px, session.tabs.items.len));
+    // 새 워크스페이스 아이콘 = 헤더 영역(y<header) 우측 끝 2칸. headerHit이 new_workspace 반환(하단 "+" → 헤더로 이동).
+    const header_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) / 2;
+    const new_ws_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
+    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.new_workspace, chrome.components.sidebar.headerHit(new_ws_x, header_y, session.sidebar_width_px, session.cell_width_px, session.sidebar_header_height_px));
 
-    // "+" 호버 → pointingHand(link) affordance.
-    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(sidebar_x, plus_y, false));
+    // 새 워크스페이스 아이콘 호버 → pointingHand(link) affordance.
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(new_ws_x, header_y, false));
 
-    // "+" 클릭 → 워크스페이스 2개, 새 탭이 활성.
-    session.mouse(1, sidebar_x, plus_y, 0, 0);
+    // 새 워크스페이스 아이콘 클릭 → 워크스페이스 2개, 새 탭이 활성.
+    session.mouse(1, new_ws_x, header_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     try std.testing.expect(!session.ended_seen);

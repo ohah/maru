@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 61u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 62u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -313,6 +313,9 @@ typedef struct MaruAppHostMetalFrame {
     /* 사이드바 탭 슬롯 한 칸의 픽셀 높이(≈2.5×cell_height). renderer가 사이드바 셀을 cell 높이가 아니라
        이 슬롯 높이로 세로 배치한다(밴드 row i → py=i×slot_h) — 큰 탭 슬롯. 0이면 cell 높이로 폴백. */
     uint32_t sidebar_slot_height_px;
+    /* 사이드바 상단 헤더(검색바 + 아이콘) 높이(px). renderer가 사이드바 셀 py_top에 더해 헤더만큼 아래로
+       민다(밴드·카드 glyph 공통). 0이면 헤더 없음. MetalFrame(Zig extern)과 같은 위치·타입(ABI 일치). */
+    uint32_t sidebar_header_height_px;
     /* chrome rich GPU 프리미티브(C4b). tui 테마는 빈 배열(NULL/0)이라 렌더 무동작(셀 그리드 유지),
        rich 테마만 lowering이 채운다(C4b-2~). NativeMetalCell과 별개 파이프라인으로 SDF AA로 그린다. */
     const MaruAppHostGpuQuad *gpu_quads;

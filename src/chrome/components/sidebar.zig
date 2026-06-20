@@ -34,22 +34,33 @@ pub fn onResizeEdge(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bool {
     return x_px >= edge and x_px < edge + margin;
 }
 
-/// 사이드바 y(backing px) → 탭 슬롯 인덱스(y / slot_height). 슬롯 높이 0·탭 0·비유한·음수·범위 밖이면 null
-/// (@intFromFloat 전에 [0, count) 검사로 OOB cast trap 방지).
-pub fn slotAt(y_px: f64, slot_height_px: u32, tab_count: usize) ?usize {
-    if (slot_height_px == 0 or tab_count == 0 or !std.math.isFinite(y_px) or y_px < 0) return null;
-    const slot_f = y_px / @as(f64, @floatFromInt(slot_height_px));
+/// 사이드바 y(backing px) → 탭 슬롯 인덱스((y-header) / slot_height). 헤더(검색바·아이콘) 영역 y<header,
+/// 슬롯 높이 0·탭 0·비유한·범위 밖이면 null(@intFromFloat 전에 [0, count) 검사로 OOB cast trap 방지).
+/// header_height_px=0이면 헤더 없음(기존 동작 — 슬롯이 y=0부터).
+pub fn slotAt(y_px: f64, header_height_px: u32, slot_height_px: u32, tab_count: usize) ?usize {
+    if (slot_height_px == 0 or tab_count == 0 or !std.math.isFinite(y_px)) return null;
+    const h: f64 = @floatFromInt(header_height_px);
+    if (y_px < h) return null; // 헤더(검색바·아이콘) 영역 — 슬롯 아님
+    const slot_f = (y_px - h) / @as(f64, @floatFromInt(slot_height_px));
     if (slot_f >= @as(f64, @floatFromInt(tab_count))) return null;
     return @intFromFloat(slot_f);
 }
 
-/// 사이드바 y가 "+"(새 워크스페이스) 버튼 슬롯(탭 목록 바로 아래, 인덱스 tab_count) 안인가 — y in
-/// [count×h, (count+1)×h). 밴드/glyph가 그 행에 그려지는 위치와 정렬. 슬롯 높이 0·비유한·음수면 false.
-pub fn inPlus(y_px: f64, slot_height_px: u32, tab_count: usize) bool {
-    if (slot_height_px == 0 or !std.math.isFinite(y_px) or y_px < 0) return false;
-    const slot_f = y_px / @as(f64, @floatFromInt(slot_height_px));
-    const tc: f64 = @floatFromInt(tab_count);
-    return slot_f >= tc and slot_f < tc + 1;
+/// 사이드바 상단 헤더([0, header_h) 영역)의 어느 부분을 가리키는가. 우측에 아이콘 2개(각 2칸 폭: 가장 우측 =
+/// 새 워크스페이스, 그 왼쪽 = view options), 나머지 왼쪽이 검색 입력 영역. 헤더 밖(y>=header_h)·헤더 없음
+/// (header_h==0)·폭/cell 0·비유한이면 none. view의 헤더 아이콘 레이아웃(우측 정렬 4칸)과 같은 수학을 공유한다 —
+/// 그려진 아이콘과 클릭 영역이 어긋나지 않게(§5.4 단일 레이아웃 소스). 하단 "+" 슬롯(inPlus)을 대체했다.
+pub const HeaderRegion = enum { none, search, view_options, new_workspace };
+pub fn headerHit(x_px: f64, y_px: f64, sidebar_width_px: u32, cell_width_px: u32, header_height_px: u32) HeaderRegion {
+    if (header_height_px == 0 or sidebar_width_px == 0 or cell_width_px == 0) return .none;
+    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return .none;
+    if (y_px < 0 or y_px >= @as(f64, @floatFromInt(header_height_px))) return .none;
+    if (x_px < 0 or x_px >= @as(f64, @floatFromInt(sidebar_width_px))) return .none;
+    const w: f64 = @floatFromInt(sidebar_width_px);
+    const cw: f64 = @floatFromInt(cell_width_px);
+    if (x_px >= w - 2 * cw) return .new_workspace; // 최우측 2칸
+    if (x_px >= w - 4 * cw) return .view_options; // 그 왼쪽 2칸
+    return .search; // 나머지 왼쪽 = 검색 입력 영역
 }
 
 /// x가 사이드바 슬롯의 닫기(✕) zone(우측 2칸) 안인가 — 호버 시 ✕를 그 자리에 그리므로 그 폭만큼을 닫기 영역으로 본다.
@@ -62,10 +73,12 @@ pub fn closeButton(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bool {
 
 /// 드래그 중 사이드바 y → 타겟 슬롯(항상 valid 인덱스로 clamp — slotAt과 달리 슬롯 아래 빈 영역도 마지막 슬롯으로
 /// 본다, 드래그를 끝까지 끌 수 있게). 슬롯 높이/탭 0이면 0.
-pub fn dragTargetSlot(y_px: f64, slot_height_px: u32, tab_count: usize) usize {
-    if (slot_height_px == 0 or tab_count == 0 or !std.math.isFinite(y_px) or y_px <= 0) return 0;
+pub fn dragTargetSlot(y_px: f64, header_height_px: u32, slot_height_px: u32, tab_count: usize) usize {
+    if (slot_height_px == 0 or tab_count == 0 or !std.math.isFinite(y_px)) return 0;
+    const h: f64 = @floatFromInt(header_height_px);
+    if (y_px <= h) return 0;
     const last = tab_count - 1;
-    const slot_f = y_px / @as(f64, @floatFromInt(slot_height_px));
+    const slot_f = (y_px - h) / @as(f64, @floatFromInt(slot_height_px));
     if (slot_f >= @as(f64, @floatFromInt(last))) return last;
     return @intFromFloat(slot_f);
 }
@@ -76,10 +89,13 @@ pub fn dragTargetSlot(y_px: f64, slot_height_px: u32, tab_count: usize) usize {
 /// slot_h). **slot_height_px는 cell 높이가 아니다**(= cell_h × ratio, 더 크다) — platform이 `sidebar_slot_height_px`를
 /// 넘긴다. strip 배경·제목 glyph는 platform이 따로(밴드만 chrome). 활성 우선(활성 슬롯은 호버여도 활성 색). tabs
 /// 빈(사이드바 꺼짐)이거나 메트릭 0이면 무동작. 순수: tabs·hover 상태만 읽는다. out·op은 호출자 frame arena 소유.
-pub fn view(tabs: []const Tab, hovered_slot: ?usize, hovered_plus: bool, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
+pub fn view(tabs: []const Tab, hovered_slot: ?usize, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
     const w = p.metrics.sidebar_width_px;
     const slot_h = p.metrics.sidebar_slot_height_px;
     if (w == 0 or slot_h == 0 or tabs.len == 0) return;
+    // 밴드는 슬롯 **상대** 좌표(row*slot_h)로 낸다 — platform lowerSidebar가 rect.y/slot_h로 슬롯 행을 역산하므로
+    // 헤더 높이를 더하면 그 역산이 깨진다. 헤더(검색바·아이콘)만큼의 시프트는 .m이 사이드바 셀 py_top에 더하고
+    // (sidebar_header_height_px), 헤더 높이는 hit-test(slotAt/headerHit)만 안다. 하단 "+" 밴드는 헤더 아이콘으로 이동해 폐기.
 
     // 활성 슬롯 밴드(첫 active=true 탭).
     var active_idx: ?usize = null;
@@ -105,12 +121,10 @@ pub fn view(tabs: []const Tab, hovered_slot: ?usize, hovered_plus: bool, p: prop
             try out.append(arena, bandFill(hs, w, slot_h, .tab_hover_bg, p.shape));
         }
     }
-
-    // "+"(새 워크스페이스) 호버 밴드 — 탭 목록 바로 아래 행(row=탭 개수).
-    if (hovered_plus) try out.append(arena, bandFill(tabs.len, w, slot_h, .tab_hover_bg, p.shape));
 }
 
-/// 슬롯 r의 전체-폭 밴드 fill op. row→y는 slot_h 배수(한 탭=한 슬롯). platform lowerSidebar가 sidebarBandCell로 lower.
+/// 슬롯 r의 전체-폭 밴드 fill op. row→y는 slot_h 배수(한 탭=한 슬롯, 슬롯 상대). platform lowerSidebar가
+/// sidebarBandCell로 lower하고(.m이 header_h를 더해 절대 y를 맞춘다 — 헤더 시프트는 .m 단일 책임).
 fn bandFill(row: usize, w: u32, slot_h: u32, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
     // U2: 슬롯 rect에서 사방 card_gap을 inset(content rect)으로 빼 카드 사이 여백을 둔다(선언적 패딩 — 좌표 산술 대신).
     // tui(gap=0)면 inset 0이라 슬롯 꽉(기존과 동일).
@@ -124,7 +138,7 @@ fn bandFill(row: usize, w: u32, slot_h: u32, role: tokens.ColorRole, shape: prop
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
 
-test "sidebar hit-test: inSidebar·onResizeEdge·slotAt·inPlus·closeButton·dragTargetSlot 경계" {
+test "sidebar hit-test: inSidebar·onResizeEdge·slotAt·headerHit·closeButton·dragTargetSlot 경계" {
     // inSidebar: [0, w).
     try std.testing.expect(inSidebar(50, 100));
     try std.testing.expect(!inSidebar(100, 100)); // 경계 밖(반열림)
@@ -137,24 +151,31 @@ test "sidebar hit-test: inSidebar·onResizeEdge·slotAt·inPlus·closeButton·dr
     try std.testing.expect(!onResizeEdge(99, 100, 8)); // 사이드바 안쪽
     try std.testing.expect(!onResizeEdge(105, 100, 0)); // cell 0 → false(렌더 전; platform이 placeholder 적용)
     try std.testing.expect(!onResizeEdge(std.math.nan(f64), 100, 8)); // 비유한
-    // slotAt: y/slot_h, 범위 밖 null. slot_h=16, count=3.
-    try std.testing.expectEqual(@as(?usize, 0), slotAt(8, 16, 3));
-    try std.testing.expectEqual(@as(?usize, 2), slotAt(40, 16, 3)); // 2번 슬롯
-    try std.testing.expectEqual(@as(?usize, null), slotAt(48, 16, 3)); // 슬롯 아래 빈 영역
-    try std.testing.expectEqual(@as(?usize, null), slotAt(8, 16, 0)); // 탭 없음
-    try std.testing.expectEqual(@as(?usize, null), slotAt(40, 0, 3)); // 슬롯 높이 0
-    try std.testing.expectEqual(@as(?usize, null), slotAt(std.math.nan(f64), 16, 3)); // 비유한
-    // inPlus: [count×h, (count+1)×h). count=3, h=16 → [48, 64).
-    try std.testing.expect(inPlus(50, 16, 3));
-    try std.testing.expect(!inPlus(40, 16, 3)); // 탭 슬롯
-    try std.testing.expect(!inPlus(64, 16, 3)); // + 아래
+    // slotAt(header=0): (y)/slot_h, 범위 밖 null. slot_h=16, count=3 — 기존 동작 보존.
+    try std.testing.expectEqual(@as(?usize, 0), slotAt(8, 0, 16, 3));
+    try std.testing.expectEqual(@as(?usize, 2), slotAt(40, 0, 16, 3)); // 2번 슬롯
+    try std.testing.expectEqual(@as(?usize, null), slotAt(48, 0, 16, 3)); // 슬롯 아래 빈 영역
+    try std.testing.expectEqual(@as(?usize, null), slotAt(8, 0, 16, 0)); // 탭 없음
+    try std.testing.expectEqual(@as(?usize, null), slotAt(40, 0, 0, 3)); // 슬롯 높이 0
+    try std.testing.expectEqual(@as(?usize, null), slotAt(std.math.nan(f64), 0, 16, 3)); // 비유한
+    // slotAt(header=20): 헤더 영역(y<20)은 null, 슬롯은 (y-20)/16.
+    try std.testing.expectEqual(@as(?usize, null), slotAt(10, 20, 16, 3)); // 헤더 영역
+    try std.testing.expectEqual(@as(?usize, 0), slotAt(20, 20, 16, 3)); // 헤더 직후 = 슬롯0
+    try std.testing.expectEqual(@as(?usize, 1), slotAt(40, 20, 16, 3)); // (40-20)/16=1
+    // headerHit: 우측 2칸=새 워크스페이스, 그 왼쪽 2칸=view options, 나머지=검색. w=100, cw=8, header=20.
+    try std.testing.expectEqual(HeaderRegion.new_workspace, headerHit(90, 10, 100, 8, 20)); // [84,100)
+    try std.testing.expectEqual(HeaderRegion.view_options, headerHit(70, 10, 100, 8, 20)); // [68,84)
+    try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 10, 100, 8, 20)); // [0,68)
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 25, 100, 8, 20)); // 헤더 밖(y>=20)
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 10, 100, 8, 0)); // 헤더 없음
     // closeButton: [w-2cw, w). w=100, cw=8 → [84, 100).
     try std.testing.expect(closeButton(90, 100, 8));
     try std.testing.expect(!closeButton(83, 100, 8));
-    // dragTargetSlot: 항상 clamp. 아래 빈 영역도 마지막.
-    try std.testing.expectEqual(@as(usize, 2), dragTargetSlot(999, 16, 3)); // 끝으로 clamp
-    try std.testing.expectEqual(@as(usize, 0), dragTargetSlot(8, 16, 3));
-    try std.testing.expectEqual(@as(usize, 0), dragTargetSlot(50, 16, 0)); // 탭 없음 → 0
+    // dragTargetSlot(header=0): 항상 clamp. 아래 빈 영역도 마지막.
+    try std.testing.expectEqual(@as(usize, 2), dragTargetSlot(999, 0, 16, 3)); // 끝으로 clamp
+    try std.testing.expectEqual(@as(usize, 0), dragTargetSlot(8, 0, 16, 3));
+    try std.testing.expectEqual(@as(usize, 0), dragTargetSlot(50, 0, 16, 0)); // 탭 없음 → 0
+    try std.testing.expectEqual(@as(usize, 0), dragTargetSlot(25, 20, 16, 3)); // header=20: (25-20)/16=0
 }
 
 test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
@@ -177,10 +198,10 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
         .{ .label = "3 top", .active = false },
     };
 
-    // 활성(idx 1) + 호버(idx 0) + "+" 호버 → 밴드 3개.
+    // 활성(idx 1) + 호버(idx 0) → 밴드 2개(header_h=0, 하단 "+" 밴드는 헤더 아이콘으로 이동해 폐기).
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&tabs, 0, true, p, arena, &out);
-    try std.testing.expectEqual(@as(usize, 3), out.items.len);
+    try view(&tabs, 0, p, arena, &out);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
     // 활성: row 1 → y=40, role tab_active_bg, 전체 폭.
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expect(out.items[0].quad.fill_role == .tab_active_bg);
@@ -192,30 +213,28 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     // 호버: row 0 → y=0, tab_hover_bg.
     try std.testing.expect(out.items[1].quad.fill_role == .tab_hover_bg);
     try std.testing.expectEqual(@as(i32, 0), out.items[1].quad.rect.y);
-    // "+": row 3(탭 개수) → y=120.
-    try std.testing.expectEqual(@as(i32, 120), out.items[2].quad.rect.y);
 
     // 호버 슬롯 == 활성이면 호버 밴드 생략(활성 색 우선).
     out.clearRetainingCapacity();
-    try view(&tabs, 1, false, p, arena, &out);
+    try view(&tabs, 1, p, arena, &out);
     try std.testing.expectEqual(@as(usize, 1), out.items.len); // 활성만
 
     // 사이드바 꺼짐(폭 0)·slot_h 0·탭 없음이면 무동작.
     out.clearRetainingCapacity();
     var off = p;
     off.metrics.sidebar_width_px = 0;
-    try view(&tabs, null, false, off, arena, &out);
+    try view(&tabs, null, off, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
     off = p;
     off.metrics.sidebar_slot_height_px = 0;
-    try view(&tabs, 0, true, off, arena, &out);
+    try view(&tabs, 0, off, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 
     // rich shape(corner_radius>0): 같은 밴드가 둥근 quad로(radii 실림 → lowering이 GPU quad). tui와 같은 view 코드.
     out.clearRetainingCapacity();
     var rich_p = p;
     rich_p.shape = .{ .corner_radius_px = 8, .border_width_px = 1 };
-    try view(&tabs, null, false, rich_p, arena, &out);
+    try view(&tabs, null, rich_p, arena, &out);
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expectEqual(@as(u16, 8), out.items[0].quad.corner_radii[0]);
 
@@ -223,7 +242,7 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     out.clearRetainingCapacity();
     var bar_p = p;
     bar_p.shape = .{ .accent_bar_width_px = 3 };
-    try view(&tabs, null, false, bar_p, arena, &out);
+    try view(&tabs, null, bar_p, arena, &out);
     try std.testing.expectEqual(@as(usize, 2), out.items.len); // 활성 밴드(idx 1) + 좌측 막대
     try std.testing.expect(out.items[1].quad.fill_role == .accent_bar);
     try std.testing.expectEqual(@as(u32, 3), out.items[1].quad.rect.w); // 막대 폭 3px
@@ -234,7 +253,7 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     out.clearRetainingCapacity();
     var card_p = p;
     card_p.shape = .{ .corner_radius_px = 8, .accent_bar_width_px = 3, .card_gap_px = 4 };
-    try view(&tabs, null, false, card_p, arena, &out);
+    try view(&tabs, null, card_p, arena, &out);
     try std.testing.expectEqual(@as(usize, 2), out.items.len); // 활성 카드 밴드 + 좌측 막대
     const card = out.items[0].quad.rect;
     try std.testing.expectEqual(@as(i32, 4), card.x); // 좌 패딩(gap)

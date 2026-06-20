@@ -844,6 +844,10 @@ pub const MetalFrame = extern struct {
     // 아니라 이 슬롯 높이로 세로 배치한다(밴드 row i → py=i×slot_h, 높이 slot_h) — 큰 탭
     // 슬롯. 0이면 cell 높이로 폴백(슬롯=한 줄). 호버/X(후속)의 픽셀 hit-test 기준 높이도 이 값.
     sidebar_slot_height_px: u32 = 0,
+    // 사이드바 상단 헤더(검색바 + 아이콘) 높이(px). 렌더러가 사이드바 셀(밴드·카드 glyph) py_top에 더해
+    // 헤더만큼 아래로 민다(밴드 view는 슬롯 상대 좌표라 .m이 시프트 단일 책임). 0이면 헤더 없음. C struct
+    // MaruAppHostMetalFrame과 같은 위치·타입(ABI 일치).
+    sidebar_header_height_px: u32 = 0,
     // chrome rich GPU 프리미티브(C4b). tui 테마는 빈 배열(null/0)이라 렌더가 무동작 — 셀 그리드 유지.
     // rich 테마만 lowering이 채운다(C4b-2~). NativeMetalCell과 별개 파이프라인으로 SDF AA로 그린다.
     // 설계: docs/layering-and-portability.md §5(C4b). 포인터 수명은 cells와 같은 계약(다음 갱신/해제까지).
@@ -945,6 +949,7 @@ fn buildMergedUploadsN(
     allocator: std.mem.Allocator,
     pane_frames: []const PaneFrame,
     sidebar_raster: ?renderer.GlyphRasterFrame,
+    sidebar_header_raster: ?renderer.GlyphRasterFrame,
     palette_raster: ?renderer.GlyphRasterFrame,
 ) !MergedUploads {
     var pixels: std.ArrayList(u8) = .empty;
@@ -954,6 +959,7 @@ fn buildMergedUploadsN(
 
     for (pane_frames) |pf| try appendRaster(allocator, &pixels, &uploads, pf.frame.glyph_raster_frame);
     if (sidebar_raster) |sr| try appendRaster(allocator, &pixels, &uploads, sr);
+    if (sidebar_header_raster) |hr| try appendRaster(allocator, &pixels, &uploads, hr);
     if (palette_raster) |pr| try appendRaster(allocator, &pixels, &uploads, pr);
 
     return .{ .uploads = try uploads.toOwnedSlice(allocator), .pixels = try pixels.toOwnedSlice(allocator) };
@@ -1011,6 +1017,9 @@ pub const MetalFrameBuffer = struct {
         cell_width_px: u32,
         cell_height_px: u32,
         sidebar_frame: ?renderer.RenderFrame,
+        // 사이드바 상단 헤더 glyph(검색 placeholder + ⚙·+ 아이콘) — 절대 좌표(origin 0,0 기반 cells). 카드(sidebar_frame)는
+        // 슬롯 row 기반이라 .m이 header_h 시프트하지만, 헤더는 헤더 영역 [0,header)에 그대로 박는다. null이면 헤더 없음.
+        sidebar_header_frame: ?renderer.RenderFrame,
         sidebar_band_cells: []const NativeMetalCell,
         sidebar_colors: CellColors,
         // per-pane 탭 바 chrome 셀(배경 밴드 등). 각 셀이 자기 origin_x/origin_y를 들어 터미널 셀과 같은 경로로
@@ -1045,6 +1054,15 @@ pub const MetalFrameBuffer = struct {
         var cells_list: std.ArrayList(NativeMetalCell) = .empty;
         errdefer cells_list.deinit(allocator);
         try cells_list.appendSlice(allocator, pane_chrome_cells);
+        // 사이드바 헤더 glyph를 origin(0,0) 기반 cells로 (pane_chrome 다음) 둔다 — 사이드바 영역(origin_x=0)이라
+        // 터미널과 안 겹치고, .m이 maru_fill_cell_quad(origin_x + col*cw, origin_y + row*ch)로 헤더 영역 [0,header)에
+        // 그린다(셀 row 시프트 비대상). pane_chrome 뒤라 탭 바 chrome cells[0] 가정을 안 깨고, 커서 suffix(맨 끝)도 보존.
+        if (sidebar_header_frame) |hf| {
+            const hcells = try buildNativeCellsFromGlyphQuads(allocator, hf.glyph_quad_frame, hf.draw_list.cells, sidebar_colors);
+            defer allocator.free(hcells);
+            setCellsPaneOrigin(hcells, 0, 0);
+            try cells_list.appendSlice(allocator, hcells);
+        }
         var cursor_cells: usize = 0;
         for (pane_frames, 0..) |pf, i| {
             const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
@@ -1095,7 +1113,7 @@ pub const MetalFrameBuffer = struct {
         const new_live_image_ids = try allocator.dupe(u32, live_image_ids);
         errdefer allocator.free(new_live_image_ids);
 
-        const merged = try buildMergedUploadsN(allocator, pane_frames, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, if (overlay_frame) |pf| pf.frame.glyph_raster_frame else null);
+        const merged = try buildMergedUploadsN(allocator, pane_frames, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, if (sidebar_header_frame) |hf| hf.glyph_raster_frame else null, if (overlay_frame) |pf| pf.frame.glyph_raster_frame else null);
         errdefer {
             allocator.free(merged.uploads);
             allocator.free(merged.pixels);

@@ -1002,6 +1002,15 @@ pub const AppSession = struct {
     // UTF-8 경계 공유). 대상 객체가 teardown되면 invalidate가 null로 비운다(stale 포인터 방지).
     rename: ?RenameTarget = null,
     rename_input: chrome.components.overlay_input.OverlayInput = .{},
+    /// 사이드바 헤더 검색바 입력(query+preedit, IME·EAW 폭). rename_input과 같은 OverlayInput 모델이지만 모달이
+    /// 아니라 사이드바 상주 — sidebar_search_active일 때 키/IME가 여기로 라우팅되고, 카드 목록을 이름·브랜치·폴더로
+    /// 필터링한다(visible_slots). Esc로 종료, Enter로 첫 매칭 세션 이동. P3.
+    sidebar_search_input: chrome.components.overlay_input.OverlayInput = .{},
+    sidebar_search_active: bool = false,
+    /// 검색 필터로 좁힌 표시 카드 → 원본 tab 인덱스(표시 슬롯 순서). 검색 비활성/빈 검색어면 전체(0..tabs.len).
+    /// rebuildSidebar가 recomputeVisibleTabs로 채우고, sidebarTabs/buildSidebarTitleFrame이 순회, slotAt/click/hover가
+    /// 표시 슬롯→원본 탭 역매핑(visibleTab)에 쓴다(P3 필터). 슬롯↔탭 단일 출처(인덱스 어긋남 방지).
+    sidebar_visible_tabs: std.ArrayList(usize) = .empty,
     // 우클릭 컨텍스트 메뉴의 대상(어느 워크스페이스/pane/Term을 우클릭했나). 메뉴 상태(open·anchor·selected)는
     // chrome_host.context_menu(중립)에, 라이브 포인터 대상은 여기에 둔다(rename과 같은 분리). 메뉴 "Rename" 선택
     // 시 이 대상으로 startRename. 대상 teardown 시 null로 비운다(stale 포인터 방지, rename과 같은 funnel).
@@ -3004,6 +3013,103 @@ pub const AppSession = struct {
         }
     }
 
+    /// 사이드바 검색바 키 — handleRenameKey 동형(평문 글자·backspace·Enter·Esc). 모달이 아니라 활성 중에만 키를
+    /// 소비한다. Enter=첫 매칭 세션으로 이동·검색 종료, Esc=종료(검색어 비움). 단축키 조합(⌘ 등)은 안 쌓는다.
+    /// 입력이 바뀌면 rebuildSidebar로 카드 필터(visible_slots)를 다시 적용한다.
+    fn handleSidebarSearchKey(self: *AppSession, ev: chrome.input.InputEvent) void {
+        switch (ev) {
+            .key => |k| switch (k.key) {
+                .escape => self.closeSidebarSearch(),
+                .enter => {
+                    _ = self.sidebar_search_input.commitPreedit(self.allocator); // 조합 잔여 확정
+                    self.sidebarSearchActivateFirst();
+                },
+                .backspace => {
+                    self.sidebar_search_input.backspace();
+                    self.rebuildSidebar() catch {};
+                    self.resetCursorBlink();
+                    self.metal_dirty = true;
+                },
+                .char => {
+                    if (k.mods.command or k.mods.control or k.mods.option) return; // 단축키 조합은 안 쌓음
+                    self.sidebar_search_input.appendChar(self.allocator, k.codepoint) catch {};
+                    self.rebuildSidebar() catch {};
+                    self.resetCursorBlink();
+                    self.metal_dirty = true;
+                },
+                else => {},
+            },
+        }
+    }
+
+    /// 검색바를 닫는다(검색어·조합 비움 + 비활성 + 필터 해제 후 재빌드).
+    fn closeSidebarSearch(self: *AppSession) void {
+        self.sidebar_search_active = false;
+        self.sidebar_search_input.clear();
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
+    /// 검색 Enter — 필터된 첫 매칭 세션으로 전환하고 검색을 종료한다. 매칭 없으면 무동작(검색 유지).
+    fn sidebarSearchActivateFirst(self: *AppSession) void {
+        if (self.firstMatchingTab()) |idx| {
+            _ = self.switchTab(idx);
+            self.closeSidebarSearch();
+        }
+    }
+
+    /// 검색어(이름·브랜치·폴더 대소문자 무시 substring)에 맞는 첫 탭 인덱스. 빈 검색어면 null. P3 필터·Enter 공유.
+    fn firstMatchingTab(self: *AppSession) ?usize {
+        const q = self.sidebar_search_input.query.items;
+        if (q.len == 0) return null;
+        for (self.tabs.items, 0..) |tab, i| if (self.tabMatchesSearch(tab, q)) return i;
+        return null;
+    }
+
+    /// 검색 필터로 좁힌 표시 카드 목록(sidebar_visible_tabs)을 다시 계산한다 — 검색 활성 + 검색어 있으면 매칭 탭만,
+    /// 아니면 전체. rebuildSidebar/검색 입력 변경 시 호출. 빈 검색어/비활성이면 전체라 필터 없음과 동일하게 동작한다.
+    fn recomputeVisibleTabs(self: *AppSession) void {
+        self.sidebar_visible_tabs.clearRetainingCapacity();
+        const q: []const u8 = if (self.sidebar_search_active) self.sidebar_search_input.query.items else "";
+        for (self.tabs.items, 0..) |tab, i| {
+            if (self.tabMatchesSearch(tab, q)) self.sidebar_visible_tabs.append(self.allocator, i) catch {};
+        }
+    }
+
+    /// 표시 슬롯 → 원본 tab 인덱스(검색 필터 역매핑). 범위 밖이면 null. slotAt/click/hover가 표시 슬롯을 실제 탭으로.
+    fn visibleTab(self: *const AppSession, display_slot: usize) ?usize {
+        if (display_slot < self.sidebar_visible_tabs.items.len) return self.sidebar_visible_tabs.items[display_slot];
+        return null;
+    }
+
+    /// 원본 tab 인덱스 → 표시 슬롯(검색 필터 정방향). 필터로 숨겨졌으면 null. 활성 밴드를 표시 슬롯에 그릴 때 쓴다.
+    fn displaySlotOf(self: *const AppSession, tab_index: usize) ?usize {
+        for (self.sidebar_visible_tabs.items, 0..) |orig, slot| if (orig == tab_index) return slot;
+        return null;
+    }
+
+    /// 탭이 검색어에 매칭하는가 — 이름(라벨)·git 브랜치·폴더(cwd) 중 하나라도 query를 포함(ASCII 대소문자 무시,
+    /// 한글 등은 그대로). 빈 query는 항상 true(필터 없음). 사이드바 카드 필터·Enter 첫 매칭이 공유한다.
+    fn tabMatchesSearch(self: *AppSession, tab: *Tab, query: []const u8) bool {
+        if (query.len == 0) return true;
+        const term = tab.activePane().activeTerm();
+        const name = workspaceLabel(tab);
+        const branch = self.termGitBranch(term) orelse "";
+        const folder = term.surface.core.currentCwd();
+        return std.ascii.indexOfIgnoreCase(name, query) != null or
+            std.ascii.indexOfIgnoreCase(branch, query) != null or
+            std.ascii.indexOfIgnoreCase(folder, query) != null;
+    }
+
+    /// 검색 caret rect(헤더 검색 영역) — IME 후보창·커서 위치. 🔍(2칸)+공백 다음 입력 텍스트 폭만큼. 헤더 1줄(y=0).
+    fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
+        if (!self.sidebar_search_active or self.cell_width_px == 0) return null;
+        const cw = self.cell_width_px;
+        const prompt_cols: u32 = 3; // 🔍(2칸) + 공백(1)
+        const caret_col = prompt_cols + self.sidebar_search_input.queryCols();
+        return .{ .x = @intCast(caret_col * cw), .y = 0, .w = cw, .h = self.cell_height_px };
+    }
+
     /// 점(x,y px)에 있는 rename 대상 — 사이드바 슬롯=워크스페이스, pane 라벨 세그먼트=pane, Term 탭=term. 없으면
     /// null(터미널 본문·‹›/+·"+" 슬롯·바 밖). 더블클릭(kind 4)과 우클릭 메뉴가 공유해 **같은 자리를 같은 대상으로**
     /// 친다(단일 출처). hit-test는 paneBar(full/tabs/label_cols)·barMetrics를 재사용.
@@ -3013,7 +3119,7 @@ pub const AppSession = struct {
             // "+" 슬롯/빈 영역은 sidebarSlotAt이 null이라 자연히 제외.
             if (self.sidebarSlotAt(y_px)) |slot| {
                 if (chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px)) return null;
-                return .{ .workspace = self.tabs.items[slot] };
+                if (self.visibleTab(slot)) |tab_idx| return .{ .workspace = self.tabs.items[tab_idx] }; // 표시 슬롯 → 원본(검색 필터)
             }
             return null;
         }
@@ -3422,6 +3528,16 @@ pub const AppSession = struct {
             self.handleRenameKey(chromeInputFromKeyEvent(event));
             self.metal_dirty = true;
             self.total_app_key_events += 1; // rename(앱)이 소비
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+            return self.last_summary;
+        }
+        // 사이드바 검색바가 활성이면 키를 검색 입력으로 라우팅한다(rename과 같은 규율 — 활성 중 모든 키 소비).
+        // Enter=첫 매칭 이동·Esc=종료·Backspace·평문 글자를 handleSidebarSearchKey가 처리한다(단축키 조합은 안 쌓음).
+        if (self.sidebar_search_active) {
+            self.handleSidebarSearchKey(chromeInputFromKeyEvent(event));
+            self.metal_dirty = true;
+            self.total_app_key_events += 1; // 검색(앱)이 소비
             self.writeSummaryFromState();
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
@@ -3854,20 +3970,25 @@ pub const AppSession = struct {
                 switch (chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.sidebar_header_height_px)) {
                     .new_workspace => _ = self.newTab() catch {},
                     .view_options => {}, // P4: view options 메뉴(아이콘 자리만 — 클릭 핸들은 P4에서 연결)
-                    .search => {}, // P3: 검색 활성(입력 영역 — 검색 핸들은 P3에서 연결)
-                    .none => if (self.sidebarSlotAt(y_px)) |slot| {
+                    .search => {
+                        self.sidebar_search_active = true; // 검색바 클릭 → 활성(키/IME가 검색으로 라우팅)
+                        self.resetCursorBlink();
+                        self.metal_dirty = true;
+                    },
+                    .none => if (self.sidebarSlotAt(y_px)) |slot| if (self.visibleTab(slot)) |tab_idx| {
+                        // slot=표시 슬롯, tab_idx=원본 탭(검색 필터 역매핑). 닫기/전환/드래그는 원본 인덱스로 한다.
                         const on_close = chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px) and
                             self.hovered_slot != null and self.hovered_slot.? == slot;
                         if (on_close) {
-                            self.closeTab(slot);
+                            self.closeTab(tab_idx);
                         } else {
                             self.hovered_slot = null; // 드래그 중엔 stale 호버 밴드/✕를 안 보이게
-                            _ = self.switchTab(slot);
-                            // 고정 탭도 드래그 reorder를 arm한다(고정끼리 영역 내 재정렬 가능) — moveTab/드래그 타겟이
-                            // 같은 그룹으로 clamp하므로 고정/비고정 영역을 안 넘는다(비동기화 없음). 슬롯 유효성만 검사.
-                            if (slot < self.tabs.items.len) {
+                            _ = self.switchTab(tab_idx);
+                            // 검색 필터 중엔 드래그 재정렬을 비활성(부분 목록 재정렬은 의미 모호). 비활성/빈 검색이면 visible=전체라
+                            // 정상 동작. 고정 탭도 arm — moveTab/드래그 타겟이 같은 그룹으로 clamp(고정/비고정 영역 안 넘음).
+                            if (!self.sidebar_search_active and tab_idx < self.tabs.items.len) {
                                 self.sidebar_drag_active = true;
-                                self.sidebar_drag_index = slot;
+                                self.sidebar_drag_index = tab_idx;
                             }
                         }
                     },
@@ -4149,10 +4270,11 @@ pub const AppSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    const InputFocus = enum { terminal, notice, rename, find, palette };
+    const InputFocus = enum { terminal, notice, rename, sidebar_search, find, palette };
     fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
         if (self.rename != null) return .rename; // 인라인 rename(find/palette와 배타적 — startRename이 닫음)
+        if (self.sidebar_search_active) return .sidebar_search; // 사이드바 검색바(상주 — 활성이면 키/IME를 받는다)
         if (self.chrome_host.find.open) return .find;
         if (self.chrome_host.palette.open) return .palette;
         return .terminal;
@@ -4164,6 +4286,7 @@ pub const AppSession = struct {
         switch (self.inputFocus()) {
             .notice => {}, // notice는 조합을 표시하지 않는다(텍스트 입력 대상 아님)
             .rename => self.rename_input.setPreedit(self.allocator, bytes) catch {},
+            .sidebar_search => self.sidebar_search_input.setPreedit(self.allocator, bytes) catch {},
             .find => self.chrome_host.find.input.setPreedit(self.allocator, bytes) catch {},
             .palette => self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {},
             .terminal => {
@@ -4183,6 +4306,7 @@ pub const AppSession = struct {
         return switch (self.inputFocus()) {
             .notice => false, // notice는 조합 상태가 없다
             .rename => self.rename_input.preedit.items.len > 0,
+            .sidebar_search => self.sidebar_search_input.preedit.items.len > 0,
             .find => self.chrome_host.find.input.preedit.items.len > 0,
             .palette => self.chrome_host.palette.input.preedit.items.len > 0,
             .terminal => self.activeSurfaceConst().core.preedit != null,
@@ -4326,6 +4450,7 @@ pub const AppSession = struct {
             // rename 인라인 편집기의 caret(사이드바 슬롯/탭/라벨)에 후보창을 띄운다 — renameCaretRect가 대상별 위치를
             // 잡는다(사이드바 y는 slot 기준 근사). null이면 아래 터미널 커서로 폴백.
             .rename => self.renameCaretRect(),
+            .sidebar_search => self.sidebarSearchCaretRect(),
             .find => chrome.components.find.caretRect(&self.chrome_host.find, props),
             .palette => chrome.components.palette.caretRect(&self.chrome_host.palette, props),
             .terminal => null,
@@ -4354,6 +4479,10 @@ pub const AppSession = struct {
             .notice => {}, // notice는 확정할 조합이 없다
             .rename => if (self.rename_input.commitPreedit(self.allocator)) {
                 self.metal_dirty = true; // 조합 글자가 편집 텍스트로 확정됨(렌더 갱신)
+            },
+            .sidebar_search => if (self.sidebar_search_input.commitPreedit(self.allocator)) {
+                self.rebuildSidebar() catch {}; // 확정 글자로 필터 재적용
+                self.metal_dirty = true;
             },
             .terminal => {
                 // preedit 읽기 + setPreedit("") 변경은 코어 mutate — 락 아래(docs/io-render-threading.md PR3,
@@ -5972,7 +6101,7 @@ pub const AppSession = struct {
 
     /// 사이드바 y → 탭 슬롯 인덱스(순수 `sidebarSlot` 래퍼 — 슬롯 높이·탭 수로 판정).
     fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
-        return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.tabs.items.len);
+        return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_visible_tabs.items.len);
     }
 
     /// 호버 중인 사이드바 슬롯을 갱신한다. 바뀌면 호버 밴드를 다시 만들고(rebuildSidebar) 재드로우한다.
@@ -6051,6 +6180,7 @@ pub const AppSession = struct {
     fn rebuildSidebar(self: *AppSession) !void {
         self.sidebar_cells.clearRetainingCapacity();
         self.gpu_quads.clearRetainingCapacity();
+        self.recomputeVisibleTabs(); // 검색 필터로 표시 카드(sidebar_visible_tabs) 갱신 — 아래는 전부 표시 슬롯 기준
         if (self.tabs.items.len == 0) return;
         // 밴드(활성/호버 슬롯·"+" 호버)는 chrome `sidebar.view`가 fill op으로 단일 출처. `lowerSidebar`가 그 fill을
         // sidebarBandCell(행=슬롯)로 lower한다(색·NativeMetalCell은 platform). host가 중립 Tab(활성)을 주입(palette Row 선례).
@@ -6066,7 +6196,8 @@ pub const AppSession = struct {
         // tint를 블렌딩해 보이게 한다(tui 불투명 밴드가 이 quad를 덮으므로). chrome draw op은 role 기반이라 임의 RGB를
         // 못 실어, platform이 명시 색 GpuQuad로 직접 lower(사이드바 명시-색 경로). y는 f32 도메인으로 곱해 i32 overflow 회피.
         const slot_h = self.sidebar_slot_height_px;
-        if (slot_h > 0 and self.sidebar_width_px > 0) for (self.tabs.items, 0..) |tab, i| {
+        if (slot_h > 0 and self.sidebar_width_px > 0) for (self.sidebar_visible_tabs.items, 0..) |orig, i| {
+            const tab = self.tabs.items[orig]; // 표시 슬롯 i → 원본 탭(검색 필터)
             if (tab.background_color == 0) continue;
             const c = premultipliedRgba(tab.background_color & 0x00FF_FFFF, tab_bg_tint_alpha);
             self.gpu_quads.append(self.allocator, .{
@@ -6369,9 +6500,10 @@ pub const AppSession = struct {
     /// app `*Tab`에서 chrome 중립 `sidebar.Tab`(라벨·활성)을 빌드한다 — chrome은 app 트리를 모르므로 host가 떼어 준다
     /// (palette Row 선례). 라벨 = 활성 panel surface 제목(제목 glyph는 buildSidebarTitleFrame이 이 라벨로 그린다).
     fn sidebarTabs(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.sidebar.Tab {
-        const out = try arena.alloc(chrome.components.sidebar.Tab, self.tabs.items.len);
-        for (self.tabs.items, 0..) |tab, i| {
-            out[i] = .{ .label = workspaceLabel(tab), .active = (i == self.app_window.active_tab) };
+        const out = try arena.alloc(chrome.components.sidebar.Tab, self.sidebar_visible_tabs.items.len);
+        for (self.sidebar_visible_tabs.items, 0..) |orig, i| {
+            const tab = self.tabs.items[orig]; // 표시 슬롯 i → 원본 탭(검색 필터)
+            out[i] = .{ .label = workspaceLabel(tab), .active = (orig == self.app_window.active_tab) };
         }
         return out;
     }
@@ -6414,8 +6546,10 @@ pub const AppSession = struct {
                 const band_row_i = @divTrunc(q.rect.y, @as(i32, @intCast(slot_h)));
                 if (band_row_i >= 0) {
                     const ri: usize = @intCast(band_row_i);
-                    if (ri < self.tabs.items.len and self.tabs.items[ri].background_color != 0)
-                        color = blendRgb(color, self.tabs.items[ri].background_color & 0x00FF_FFFF, tab_bg_tint_alpha);
+                    if (self.visibleTab(ri)) |orig| { // 표시 슬롯 ri → 원본(검색 필터)
+                        if (self.tabs.items[orig].background_color != 0)
+                            color = blendRgb(color, self.tabs.items[orig].background_color & 0x00FF_FFFF, tab_bg_tint_alpha);
+                    }
                 }
                 const has_radius = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;
                 if (!has_radius) {
@@ -6511,7 +6645,8 @@ pub const AppSession = struct {
         }
         var agents: std.ArrayList(u21) = .empty;
         defer agents.deinit(self.allocator);
-        for (self.tabs.items) |tab| {
+        for (self.sidebar_visible_tabs.items) |orig| {
+            const tab = self.tabs.items[orig]; // 표시 슬롯 순서 → 원본 탭(검색 필터)
             const term = tab.activePane().activeTerm();
             const renaming = self.renamingWorkspace(tab);
             // 에이전트 아이콘은 슬롯 중앙에 독립 배치. 단 rename 중엔 숨긴다(0) — 안 그러면 편집 텍스트가 icon_cols
@@ -6541,7 +6676,7 @@ pub const AppSession = struct {
         const active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
         // 호버 슬롯엔 닫기 ✕(없으면 null). plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼.
         // plus_row=null — 하단 "+" 버튼은 헤더 우측 아이콘으로 이동·폐기(P2). 호버 슬롯엔 닫기 ✕(없으면 null).
-        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, sidebar_cols, fg, self.hovered_slot, null, self.app_window.active_tab, active_fg);
+        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, sidebar_cols, fg, self.hovered_slot, null, self.displaySlotOf(self.app_window.active_tab), active_fg);
         // 에이전트 아이콘(✳ claude / ✻ codex)에 **상태색**을 입힌다 — 보편 관례(진행 중=amber, 완료=초록,
         // 불명=회색)로 사용자가 한눈에 진행 상태를 읽게 한다. 종류(claude/codex)는 심볼 모양으로 구분하므로
         // 색은 상태 전용으로 쓴다(브랜드 색에서 전환). 아이콘은 독립 셀(슬롯 중앙)이라 codepoint로 찾는다.
@@ -6550,9 +6685,9 @@ pub const AppSession = struct {
             const is_agent_icon = c.codepoint == 0x2733 or c.codepoint == 0x273B; // ✳ claude / ✻ codex
             if (!is_agent_icon) continue;
             // 아이콘 셀 row에서 슬롯(탭) 인덱스를 디코드(row=slot*32+…)해 그 Term의 상태색을 고른다.
-            const slot = c.row / coretext_frame_builder.sidebar_line_base;
-            if (slot >= self.tabs.items.len) continue;
-            const t = self.tabs.items[slot].activePane().activeTerm();
+            const slot = c.row / coretext_frame_builder.sidebar_line_base; // 표시 슬롯
+            const orig = self.visibleTab(slot) orelse continue; // 표시 슬롯 → 원본 탭(검색 필터)
+            const t = self.tabs.items[orig].activePane().activeTerm();
             // 보편 관례 상태색: running=진행 중(amber), idle=완료(초록 — 거터 성공 #3FB950과 동일), unknown=불명(회색).
             const state_rgb: maru.color.Rgb = switch (t.agent_state) {
                 .running => .{ .r = 0xE5, .g = 0xC0, .b = 0x7B }, // 진행 중 — amber
@@ -6597,13 +6732,30 @@ pub const AppSession = struct {
         errdefer cells.deinit(self.allocator);
         const muted: terminal.Color = .{ .rgb = self.mutedForeground() };
         const fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
-        // 검색 아이콘(🔍, EAW Wide=2칸) 좌측 + placeholder "Search"(muted). 실제 입력 텍스트·caret은 P3에서 채운다.
+        // 검색 아이콘(🔍, EAW Wide=2칸) 좌측. 그 다음: 검색 활성 + 입력 있으면 입력 텍스트(query+preedit, fg, EAW 한글
+        // 2칸), 아니면 placeholder "Search"(muted). caret/IME 후보창은 sidebarSearchCaretRect가 잡는다.
         try cells.append(self.allocator, .{ .row = 0, .col = 0, .codepoint = 0x1F50D, .width = 2, .style = .{ .foreground = muted } });
-        const placeholder = "Search";
-        for (placeholder, 0..) |ch, i| {
-            const col: u16 = @intCast(3 + i);
-            if (col >= cols -| 4) break; // 우측 아이콘 영역 침범 방지
-            try cells.append(self.allocator, .{ .row = 0, .col = col, .codepoint = ch, .style = .{ .foreground = muted } });
+        const max_col = cols -| 4; // 우측 아이콘 영역 침범 방지
+        if (self.sidebar_search_active and (self.sidebar_search_input.query.items.len > 0 or self.sidebar_search_input.preedit.items.len > 0)) {
+            var col: u16 = 3;
+            const texts = [_][]const u8{ self.sidebar_search_input.query.items, self.sidebar_search_input.preedit.items };
+            for (texts) |text| {
+                var view = std.unicode.Utf8View.init(text) catch continue;
+                var iter = view.iterator();
+                while (iter.nextCodepoint()) |cp| {
+                    if (col >= max_col) break;
+                    const w: u2 = @intCast(@max(@as(u8, 1), @min(@as(u8, 2), terminal.width.cellWidth(cp))));
+                    try cells.append(self.allocator, .{ .row = 0, .col = col, .codepoint = cp, .width = w, .style = .{ .foreground = fg } });
+                    col += w;
+                }
+            }
+        } else {
+            const placeholder = "Search";
+            for (placeholder, 0..) |ch, i| {
+                const col: u16 = @intCast(3 + i);
+                if (col >= max_col) break;
+                try cells.append(self.allocator, .{ .row = 0, .col = col, .codepoint = ch, .style = .{ .foreground = muted } });
+            }
         }
         // view options(⚙) 우측 4칸 · 새 워크스페이스(+) 우측 2칸 — headerHit과 같은 우측 정렬.
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 4, .codepoint = 0x2699, .style = .{ .foreground = fg } });
@@ -7122,6 +7274,8 @@ pub const AppSession = struct {
         self.palette_filtered.deinit(self.allocator);
         self.chrome_host.deinit(self.allocator); // chrome 컴포넌트 heap(find.query) 해제
         self.rename_input.deinit(self.allocator); // 인라인 rename 입력(query/preedit) heap 해제
+        self.sidebar_search_input.deinit(self.allocator); // 사이드바 검색바 입력 heap 해제
+        self.sidebar_visible_tabs.deinit(self.allocator); // 검색 필터 표시 슬롯 매핑 heap 해제
         self.find_matches.deinit(self.allocator);
         self.find_view_spans.deinit(self.allocator);
         if (self.workspace_buffer) |b| self.allocator.free(b);

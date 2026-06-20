@@ -6847,9 +6847,9 @@ pub const AppSession = struct {
                 // 이 호버 quad는 layer 0(under, draw 3)이라 아이콘 '뒤'가 아니라 '위'에 그려진다(그 사이에 끼울 패스가
                 // 없음). 그래서 중간톤/불투명이면 아이콘을 어둡게 덮었다(사용자 피드백). 밝은 전경색을 낮은 알파로 깔면
                 // 어두운 사이드바 배경 위엔 밝은 하이라이트로 보이고, 밝은 아이콘 위엔 같은 밝기라 아이콘이 안 어두워진다.
-                const fgc = self.appearance.theme.sidebar_foreground;
-                const fg_rgb: u32 = (@as(u32, fgc.r) << 16) | (@as(u32, fgc.g) << 8) | fgc.b;
-                const hover_fill = premultipliedRgba(fg_rgb, 0x40); // ≈25% 밝은 하이라이트(아이콘은 안 어두워짐)
+                // GpuQuad는 **straight-alpha**(packRgbAlpha) — SDF quad 셰이더가 rgb*=a로 직접 premultiply한다
+                // (스크롤바 quad와 같은 규약). premultipliedRgba를 쓰면 셰이더가 또 곱해 ~4배 흐려진다(코드리뷰 발견).
+                const hover_fill = packRgbAlpha(self.appearance.theme.sidebar_foreground, 0x40); // ≈25% 밝은 하이라이트
                 self.gpu_quads.append(self.allocator, .{
                     .x = center_x - w / 2.0,
                     .y = 0,

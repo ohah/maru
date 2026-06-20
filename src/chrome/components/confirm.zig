@@ -36,8 +36,10 @@ pub const Focus = enum { confirm, cancel };
 pub const State = struct {
     open: bool = false,
     message: []const u8 = "",
-    confirm_label: []const u8 = "확인",
-    cancel_label: []const u8 = "취소",
+    // 기본값은 빈 문자열 — 실제 라벨은 show(message, Buttons)가 채운다(기본 "확인"/"취소"는 Buttons 단일 출처).
+    // view는 open일 때만 그리고 show 없이는 열리지 않으므로 빈 기본값이 렌더되는 일은 없다.
+    confirm_label: []const u8 = "",
+    cancel_label: []const u8 = "",
     focused: Focus = .confirm,
 
     pub fn show(self: *State, message: []const u8, buttons: Buttons) void {

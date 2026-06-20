@@ -486,6 +486,13 @@ pub export fn maru_macos_app_session_take_sidebar_config_dirty(session: ?*AppSes
     return if (app_session.takeSidebarConfigDirty()) 1 else 0;
 }
 
+// (x,y backing px)가 사이드바 헤더의 빈 영역(아이콘·검색 아님)이면 1 — Swift가 창 이동(performDrag)·더블클릭 확대(zoom)를
+// 한다(네이티브 타이틀바 대체). 사이드바 접힘/헤더 없음/세션 null이면 0.
+pub export fn maru_macos_app_session_is_window_drag_region(session: ?*AppSession, x_px: f64, y_px: f64) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.isWindowDragRegion(x_px, y_px)) 1 else 0;
+}
+
 // OSC 7로 셸이 보고한 현재 작업 디렉터리(percent-decode된 경로). 반환 버퍼는 Zig(core) 소유로
 // 다음 OSC 7/RIS/destroy까지 유효하다. 한 번도 안 받았으면 len 0. Swift가 창 제목에 쓴다.
 pub export fn maru_macos_app_session_cwd(

@@ -45,7 +45,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 63; // 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 64; // 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -4432,9 +4432,11 @@ pub const AppSession = struct {
         // 에이전트 아이콘 펄스: 사이드바 카드 중 running인 에이전트가 있으면 위상을 진행해야 아이콘이 맥동한다.
         // 사이드바 아이콘은 suffix-trim으로 못 숨기는 별도 frame이라 text-blink/rename처럼 full rebuild(dirty)가 필요.
         const agent_pulsing = self.anyAgentRunning();
+        // 사이드바 검색 caret도 깜빡인다 — 헤더 frame의 '|' 글자라(rename과 동형) full rebuild가 필요하다.
+        const sidebar_search = self.sidebar_search_active;
         // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
-        // core.preedit로 이미 막지만, 오버레이/rename은 imeComposingActive로 막아야 한다(단일 출처).
-        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !agent_pulsing) or self.imeComposingActive()) {
+        // core.preedit로 이미 막지만, 오버레이/rename/검색은 imeComposingActive로 막아야 한다(단일 출처).
+        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !agent_pulsing and !sidebar_search) or self.imeComposingActive()) {
             self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
             return;
         }
@@ -4447,7 +4449,7 @@ pub const AppSession = struct {
             self.metal_buffer.setCursorVisible(self.blink_visible);
             // 텍스트 blink·rename caret·에이전트 아이콘 펄스는 셀/사이드바 glyph라 full rebuild가 필요하다
             // (suffix-trim으로 못 숨김) — dirty 표시해 사이드바를 위상마다 재투영(아이콘 dimRgb 적용/해제).
-            if (text_blinks or rename_active or agent_pulsing) self.metal_dirty = true;
+            if (text_blinks or rename_active or agent_pulsing or sidebar_search) self.metal_dirty = true;
         }
     }
 
@@ -6347,6 +6349,18 @@ pub const AppSession = struct {
         return chrome.components.sidebar.inSidebar(x_px, self.sidebar_width_px);
     }
 
+    /// (x,y backing px)가 사이드바 헤더의 '빈' 영역(아이콘·검색이 아닌 곳 — 신호등 주변 빈 공간 포함)인가. Swift가
+    /// 1이면 네이티브 타이틀바처럼 창 이동(performDrag)·더블클릭 확대(zoom)를 한다. MaruMetalTerminalView는
+    /// mouseDownCanMoveWindow=false라(터미널/사이드바가 자체 마우스 사용) 콘텐츠 자동 드래그가 없고, 이 '빈 헤더'만
+    /// 창 chrome 드래그 영역이다. headerHit==.none(아이콘·검색 제외)이 빈 영역이고, 사이드바 접힘/헤더 없음이면 false.
+    pub fn isWindowDragRegion(self: *const AppSession, x_px: f64, y_px: f64) bool {
+        if (self.sidebar_width_px == 0 or self.sidebar_header_height_px == 0) return false;
+        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
+        if (y_px < 0 or y_px >= @as(f64, @floatFromInt(self.sidebar_header_height_px))) return false;
+        if (!self.inSidebar(x_px)) return false;
+        return chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px) == .none;
+    }
+
     /// 사이드바 y → 탭 슬롯 인덱스(순수 `sidebarSlot` 래퍼 — 슬롯 높이·탭 수로 판정).
     fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
         return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_visible_tabs.items.len);
@@ -7005,8 +7019,9 @@ pub const AppSession = struct {
         // 때만 존재. caret/IME 후보창은 sidebarSearchCaretRect가 잡는다(활성일 때만).
         try cells.append(self.allocator, .{ .row = search_row, .col = 0, .codepoint = 0x1F50D, .width = 2, .style = .{ .foreground = muted } });
         const max_col = cols -| 4; // 우측 아이콘 영역 침범 방지
-        if (self.sidebar_search_input.query.items.len > 0 or self.sidebar_search_input.preedit.items.len > 0) {
-            var col: u16 = 3;
+        const has_text = self.sidebar_search_input.query.items.len > 0 or self.sidebar_search_input.preedit.items.len > 0;
+        var col: u16 = 3;
+        if (has_text) {
             const texts = [_][]const u8{ self.sidebar_search_input.query.items, self.sidebar_search_input.preedit.items };
             for (texts) |text| {
                 var view = std.unicode.Utf8View.init(text) catch continue;
@@ -7018,13 +7033,19 @@ pub const AppSession = struct {
                     col += w;
                 }
             }
-        } else {
+        } else if (!self.sidebar_search_active) {
+            // placeholder "Search"는 비활성+빈 검색일 때만(활성+빈 검색은 caret만 — Find/팔레트처럼 빈 입력칸에 커서).
             const placeholder = "Search";
             for (placeholder, 0..) |ch, i| {
-                const col: u16 = @intCast(3 + i);
-                if (col >= max_col) break;
-                try cells.append(self.allocator, .{ .row = search_row, .col = col, .codepoint = ch, .style = .{ .foreground = muted } });
+                const c: u16 = @intCast(3 + i);
+                if (c >= max_col) break;
+                try cells.append(self.allocator, .{ .row = search_row, .col = c, .codepoint = ch, .style = .{ .foreground = muted } });
             }
+        }
+        // 검색 caret — 활성일 때 입력 텍스트 끝(빈 검색은 col 3)에 깜빡이는 '|'(rename in-place caret과 동형, Find/팔레트
+        // 처럼 커서 표시). blink_visible로 토글(off 위상엔 생략). IME 조합 중엔 blink 핸들러가 위상을 고정해 항상 보인다.
+        if (self.sidebar_search_active and self.blink_visible and col < max_col) {
+            try cells.append(self.allocator, .{ .row = search_row, .col = col, .codepoint = '|', .style = .{ .foreground = fg } });
         }
 
         const draw_list = renderer.DrawList{
@@ -12310,6 +12331,44 @@ test "view options menu: ⚙ toggles sidebar show-branch/folder, stays open, sig
     session.mouse(1, out_x, out_y, 0, 0);
     try std.testing.expect(!session.view_options_menu);
     try std.testing.expect(!session.chrome_host.context_menu.open);
+}
+
+// isWindowDragRegion: 헤더 '빈' 영역(아이콘·검색 아님)만 창 드래그/확대 영역(Swift performDrag·zoom). 아이콘·검색·
+// 카드·접힘은 아니다 — 터미널 본문 드래그로 창이 끌려가던 것을 막고(mouseDownCanMoveWindow=false) 헤더만 타이틀바화.
+test "isWindowDragRegion: only empty header area drags the window (not icons/search/cards/collapsed)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const cw: f64 = @floatFromInt(session.cell_width_px);
+    const icon_y: f64 = @as(f64, @floatFromInt(session.cell_height_px)) * 0.5; // 아이콘 줄(row 0)
+    // 헤더 빈 영역(줄0 좌측 = 신호등 영역 옆 빈 공간) → 드래그 영역.
+    try std.testing.expect(session.isWindowDragRegion(2 * cw, icon_y));
+    // 우측 아이콘(⚙/+) → 드래그 아님(클릭 대상).
+    const gear_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 3 * cw;
+    try std.testing.expect(!session.isWindowDragRegion(gear_x, icon_y));
+    // 검색 줄 → 드래그 아님.
+    const search_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) * 0.85;
+    try std.testing.expect(!session.isWindowDragRegion(2 * cw, search_y));
+    // 헤더 아래 카드 영역 → 드래그 아님.
+    const card_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + 5;
+    try std.testing.expect(!session.isWindowDragRegion(2 * cw, card_y));
+    // 터미널 본문(사이드바 밖) → 드래그 아님.
+    try std.testing.expect(!session.isWindowDragRegion(@floatFromInt(session.active_pane_rect.x + 50), icon_y));
+    // 사이드바 접힘(width 0) → 헤더 없음, 드래그 아님.
+    session.sidebar_width_px = 0;
+    try std.testing.expect(!session.isWindowDragRegion(2 * cw, icon_y));
 }
 
 // 멀티-탭 핵심 계약: 두 번째 탭을 만들면 자기 셸 PTY가 spawn되고, tick이 '모든' 탭을 drain하므로

@@ -331,9 +331,19 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         controller?.handleScroll(event, in: self)
     }
 
+    // fullSizeContentView로 콘텐츠가 창 top까지 차오르면, mouseDownCanMoveWindow 기본값(레이어 백드 뷰는 YES일 수
+    // 있다)일 때 터미널 본문 '어디서나' 드래그가 '창 이동'으로 가로채여 텍스트 선택이 안 되고 창이 끌려간다(드래그 중
+    // window.title "Maru"도 뜬다 — 사용자 보고). 터미널/사이드바 콘텐츠는 자체 마우스(선택·hit-test·드래그 재정렬)를
+    // 쓰므로 콘텐츠 영역에선 창 이동을 막는다. 창 이동은 상단 신호등 타이틀바 영역(AppKit이 소유)에서만 한다.
+    override var mouseDownCanMoveWindow: Bool { false }
+
     // 마우스 선택: raw 좌표만 backing 픽셀(좌상단 원점)로 바꿔 Zig에 넘긴다 — 셀 변환·선택 모델은
     // Zig가 소유한다(네이티브 최소화). NSView 좌표는 좌하단 원점이라 y를 뒤집는다.
     override func mouseDown(with event: NSEvent) {
+        // 사이드바 헤더 빈 영역(maru "타이틀바")이면 네이티브 타이틀바처럼: 더블클릭=창 확대(zoom), 단일 down=창 이동
+        // (performDrag). 아이콘·검색·터미널 본문은 false라 아래 일반 처리로 흐른다. mouseDownCanMoveWindow=false라
+        // AppKit 자동 드래그가 없어 여기서 명시적으로 한다(드래그 영역 hit-test 단일 출처는 Zig).
+        if controller?.handleWindowChromeMouseDown(event, in: self) == true { return }
         // Cmd+클릭 = 그 위치의 URL 열기(선택하지 않음). URL 인식은 Zig가 한다.
         if event.modifierFlags.contains(.command) {
             controller?.handleCommandClick(event, in: self)
@@ -739,10 +749,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // release해, surface.window 강참조를 ARC가 release할 때 over-release 크래시가 난다). 단일 창은 close가
         // 곧 앱 종료라 안 드러났지만, 멀티 창에서 한 창만 닫으면(앱 유지) 터진다. quick 패널과 같은 가드.
         window.isReleasedWhenClosed = false
-        // 창 제목을 빈 문자열로 둔다 — titleVisibility=.hidden이어도 창을 드래그(이동)하면 AppKit이 제목 텍스트를
-        // 잠깐 띄우는데(특히 fullSizeContentView에서 콘텐츠 위로), 사이드바 헤더 chrome과 겹쳐 "Maru"가 떠 보였다.
-        // 제목 자체를 비워 드래그 중에도 안 뜨게 한다(앱 이름은 Info.plist가 소유 — 메뉴/Dock엔 영향 없음).
-        window.title = ""
+        // 창 제목(window.title)은 updateWindowTitle이 매 tick OSC 0/2·cwd·"Maru"로 갱신한다(Window 메뉴·Mission
+        // Control용). titleVisibility=.hidden이라 타이틀바엔 안 보이고, 드래그 중 "Maru"가 떠 보이던 건 콘텐츠 뷰가
+        // 창을 끌던 탓이라 MaruMetalTerminalView.mouseDownCanMoveWindow=false로 막았다(여기서 title을 비울 필요 없음).
         // 네이티브 타이틀바를 숨기고 신호등(닫기·최소화·확대)만 좌상단에 남긴다: 타이틀바 투명 + 제목 숨김 +
         // fullSizeContentView로 콘텐츠(사이드바)가 창 top까지 차오르게 한다. 사이드바 헤더 chrome이 신호등 영역에
         // 정렬한다(maru Zig+GPU chrome 전략 — 네이티브 뷰 없이 직접 그림). 베이스: 모던 macOS 표준 패턴. 외부
@@ -1282,6 +1291,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if event.modifierFlags.contains(.option) { mods |= 8 }
         if event.modifierFlags.contains(.control) { mods |= 16 }
         return mods
+    }
+
+    // 사이드바 헤더 빈 영역(maru "타이틀바")에서의 down을 네이티브 타이틀바처럼 처리한다 — 더블클릭=zoom(시스템
+    // 설정의 타이틀바 더블클릭 동작), 단일=performDrag(창 이동). 처리하면 true(호출자는 일반 마우스 처리를 건너뛴다).
+    // 빈 영역 판정은 Zig(is_window_drag_region)가 단일 출처 — 아이콘·검색·터미널이면 0이라 false.
+    func handleWindowChromeMouseDown(_ event: NSEvent, in view: NSView) -> Bool {
+        guard let session = appSession, let window else { return false }
+        let (xPx, yPx) = backingPx(view.convert(event.locationInWindow, from: nil), in: view)
+        guard maru_macos_app_session_is_window_drag_region(session, xPx, yPx) != 0 else { return false }
+        if event.clickCount == 2 {
+            window.zoom(nil)
+        } else {
+            window.performDrag(with: event)
+        }
+        return true
     }
 
     // 마우스 좌표를 backing 픽셀(좌상단 원점)로 환산해 Zig 선택 모델에 넘긴다(kind 1=down/2=drag/3=up).

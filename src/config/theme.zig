@@ -289,9 +289,12 @@ pub const Config = struct {
     window_padding_right: u32 = 8,
     window_padding_bottom: u32 = 4,
     window_padding_left: u32 = 8,
-    /// 셸에 줄 TERM 값. 셸 설정/통합이 $TERM에 따라 키바인딩(예: Ctrl+A 줄-시작)을 다르게 잡는
-    /// 경우, 사용자가 자기 환경이 기대하는 값(예: xterm-ghostty)으로 바꿀 수 있다. 빈 값은 무시.
-    term: []const u8 = "xterm-256color",
+    /// 셸에 줄 TERM 값. 기본 `xterm-maru` — maru가 자체 terminfo(Sync 등)를 embed해 자식 셸에
+    /// `TERMINFO=~/.cache/maru/terminfo`(자동 컴파일)로 가리키므로 로컬은 설치 없이 동작하고,
+    /// tic이 없거나 실패하면 `xterm-256color`로 폴백한다(로컬 안 깨짐 — pty/macos.zig resolveTerm).
+    /// 사용자가 자기 환경이 기대하는 값(예: `xterm-256color`·`xterm-ghostty`)으로 바꿀 수 있다(빈 값 무시).
+    /// 원격(SSH)은 별개다 — 평범한 `ssh`엔 terminfo가 안 따라가니 `maru ssh`를 쓰거나 원격에 설치한다.
+    term: []const u8 = "xterm-maru",
     /// 데스크톱 알림 설정. loader가 `notifications.*` 키로 파싱.
     notifications: NotificationConfig = .{},
     /// 스크롤백(가시 화면 위로 보관하는 과거 줄) 설정. loader가 `scrollback.*` 키로 파싱.

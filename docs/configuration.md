@@ -140,35 +140,30 @@ window.padding-left   = 8
 
 ### `$TERM` (`term`)
 
-셸에 줄 `$TERM` 값이다(기본 `xterm-256color`, Maru의 xterm식 동작과 맞는 표준값). 보통 바꿀
-필요 없다. 드물게 셸 설정/프레임워크가 `$TERM`에 따라 다르게 동작하는 경우, 셸이 기대하는 값으로
-맞출 수 있다:
+셸에 줄 `$TERM` 값이다. 기본은 **`xterm-maru`** — Maru 자체 terminfo 항목이다(짧은 alias `maru`).
+Maru가 이 terminfo 소스를 바이너리에 내장하고, 자식 셸을 띄울 때 자기 캐시(`~/.cache/maru/terminfo`)에
+자동 컴파일(`tic`)해 자식 env에 `TERMINFO=<그 캐시>`를 실어준다. 그래서 **로컬은 별도 설치 없이**
+`xterm-maru`가 동작한다(비침습 — `~/.terminfo`나 시스템을 안 건드림). `tic`이 없거나 컴파일이 실패하면
+**`xterm-256color`로 자동 폴백**해 로컬이 절대 깨지지 않는다(Ghostty의 번들 terminfo + `TERMINFO` env
+방식과 같은 결 — `pty/macos.zig`의 `resolveTerm`).
+
+`xterm-maru`가 알리는 캡: **동기화 출력(`Sync`, DECSET 2026)** — tmux가 재그리기를 한 프레임으로 묶어
+**tmux 레이아웃 플리커가 사라진다**. truecolor(`Tc`)도. Maru가 실제 지원하는 캡만 정직하게 선언한다.
+
+드물게 셸 설정/프레임워크가 특정 `$TERM`을 기대하면 바꿀 수 있다:
 
 ```conf
-term = xterm-ghostty   # 그 terminfo가 설치돼 있어야 한다
+term = xterm-256color   # 표준값으로 되돌리기
+term = xterm-ghostty    # 다른 값(그 terminfo가 설치돼 있어야 함)
 ```
 
-#### opt-in: Maru 자체 terminfo (`xterm-maru`)
+> 시스템 전역이나 **Maru 밖의 셸**(예: 다른 터미널에서 Maru에 붙는 경우)에서도 `xterm-maru`를 쓰려면
+> `mise run install-terminfo`로 `~/.terminfo`에 설치한다(Maru 안에서는 위 자동 캐시로 충분해 불필요).
 
-Maru는 자체 terminfo 항목 `xterm-maru`(짧은 alias `maru`)를 제공한다. 이건 **기본값이 아니라
-opt-in**이다 — 기본 `term`은 호환성을 위해 `xterm-256color`로 둔다(정책: [터미널 호환성/보안
-정책](terminal-compatibility-policy.md)의 TERM/terminfo). `xterm-maru`는 Maru가 실제 지원하는
-캡만 정직하게 선언한다. 특히 **동기화 출력(`Sync`, DECSET 2026)** 을 알려, tmux가 재그리기를 한
-프레임으로 묶어 **tmux+SSH에서 보이던 짧은 레이아웃 플리커가 사라진다**. truecolor(`Tc`)도 선언한다.
-
-켜는 법:
-
-```sh
-mise run install-terminfo   # ~/.terminfo에 설치(sudo 불필요)
-```
-
-```conf
-term = xterm-maru
-```
-
-> **원격(SSH) 주의**: terminfo는 프로그램이 읽는 머신에 있어야 한다. `xterm-maru`를 켠 채 원격에
-> 접속하면 원격에는 이 항목이 없어 `vim`/`tmux`/`less` 등이 `unknown terminal type`으로 깨질 수
-> 있다. 이를 자동으로 푸는 opt-in 래퍼가 **`maru ssh`** 다 — 원격에 terminfo를 먼저 심고 평범한
+> **원격(SSH) 주의**: terminfo는 프로그램이 읽는 머신에 있어야 한다. 기본이 `xterm-maru`라 **평범한
+> `ssh`로 원격에** 접속하면(maru의 `TERMINFO`는 로컬 env라 안 따라간다) 원격에 항목이 없어
+> `vim`/`tmux`/`less` 등이 `unknown terminal type`으로 깨질 수 있다. 이를 푸는 게 **`maru ssh`** 다 —
+> 원격에 terminfo를 먼저 심고 평범한
 > `ssh`로 넘어간다(당신의 평소 `ssh`는 건드리지 않는다):
 >
 > ```sh

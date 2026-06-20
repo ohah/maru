@@ -1239,21 +1239,21 @@ test "parse: quick-terminal options (height/auto-hide/screen) with defaults and 
     }
 }
 
-test "parse: term default xterm-256color, override, empty is forgiving" {
+test "parse: term default xterm-maru, override, empty is forgiving" {
     {
         var p = try parse(std.testing.allocator, "");
         defer p.deinit();
-        try std.testing.expectEqualStrings("xterm-256color", p.config.term);
+        try std.testing.expectEqualStrings("xterm-maru", p.config.term); // 전환된 기본값(조건부+폴백은 pty가 처리)
     }
     {
-        var p = try parse(std.testing.allocator, "term = xterm-ghostty\n");
+        var p = try parse(std.testing.allocator, "term = xterm-256color\n");
         defer p.deinit();
-        try std.testing.expectEqualStrings("xterm-ghostty", p.config.term);
+        try std.testing.expectEqualStrings("xterm-256color", p.config.term); // 사용자가 명시로 되돌릴 수 있다
     }
     {
         var p = try parse(std.testing.allocator, "term =   \n");
         defer p.deinit();
-        try std.testing.expectEqualStrings("xterm-256color", p.config.term); // 빈 값 → 기본 유지
+        try std.testing.expectEqualStrings("xterm-maru", p.config.term); // 빈 값 → 기본 유지
         try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
     }
 }

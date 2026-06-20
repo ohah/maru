@@ -8,9 +8,10 @@ const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
 const input = @import("../input.zig");
+const modal_box = @import("modal_box.zig");
 
-/// 이 컴포넌트가 그리는 레이어(최상위 모달). host가 ops와 짝지어 백엔드에 넘긴다.
-pub const layer = draw.Layer.modal;
+/// 이 컴포넌트가 그리는 레이어(최상위 모달, modal_box 공유). host가 ops와 짝지어 백엔드에 넘긴다.
+pub const layer = modal_box.layer;
 
 /// 순수 상태 — message 슬롯 + open 플래그. host(또는 복원 손상 감지)가 show를 부른다.
 pub const State = struct {
@@ -45,8 +46,8 @@ pub fn handle(ev: input.InputEvent, state: *State) ?Action {
     }
 }
 
-/// 중앙 모달 박스(배경 fill + focus 테두리 + 메시지 text)를 `out`에 append한다. 안 열렸으면 무동작.
-/// 순수: state·props·tokens만 읽는다. ops·runs 슬라이스는 호출자가 준 frame arena가 소유한다.
+/// 메시지 한 줄을 중앙 모달 박스로 그린다 — 박스 기하·폭 clamp·soft-lock 가드·배경 quad+테두리는 modal_box.view
+/// 단일 출처에 위임한다(notice/confirm 공유). 안 열렸으면 무동작. 순수: state·props·tokens만 읽는다.
 pub fn view(
     state: *const State,
     p: props.ChromeProps,
@@ -55,57 +56,7 @@ pub fn view(
     out: *std.ArrayList(draw.Op),
 ) !void {
     if (!state.open) return;
-    const m = p.metrics;
-    const cw = @max(m.cell_width_px, 1);
-    const ch = @max(m.cell_height_px, 1);
-
-    // 박스 폭 = 메시지 표시 폭 + 좌우 여백, 단 **터미널 영역(사이드바 오른쪽) 칸 수를 넘지 않게 clamp**한다 —
-    // 넘으면 박스가 사이드바를 침범하거나 우측으로 오버플로한다(좁은 창·넓은 사이드바). 표시 폭은 코드포인트
-    // 근사라 wide(EAW=2) 문자는 과소측정돼 박스 우측서 잘릴 수 있다 — 정확한 display-width 보정은 후속.
-    const term_w_px = m.backing_width_px -| m.sidebar_width_px;
-    const term_cols = term_w_px / cw;
-    // 0칸(터미널 영역이 한 셀보다 좁은 비정상 창)이면만 생략한다. 1~3칸이어도 작은 박스라도 그린다 —
-    // 모달이 '열림이지만 안 보임'이면 handleKeyEvent가 모든 키를 소비해 터미널이 멈춘 듯 보이는 soft-lock이
-    // 된다(리뷰 발견). box_cols는 아래에서 term_cols로 clamp되므로(≥1) box_w ≤ term_w_px가 유지돼 중앙배치
-    // 뺄셈이 안전하다. (term_cols==0은 box_w=cw > term_w_px라 뺄셈이 언더플로하므로 반드시 생략.)
-    if (term_cols == 0) return;
-    // C4b 패딩: 폭 상한을 2*pad만큼 줄인 가용 칸으로 box_cols를 clamp한다 — platform lowering이 배경 quad를
-    // ±pad 확장한 뒤에도 박스가 터미널 영역에 들도록 텍스트 폭을 양보한다(avail_cols>=1이면 안; overlay_input.
-    // panelLayout과 동형). pad=0(tui)이면 avail_cols == term_cols라 무변화. 단 avail_cols==0(term_w_px < 2*pad,
-    // 터미널 영역 1~3칸의 비정상적으로 좁은 창)이면 soft-lock 방지로 box_cols=1을 강제하므로 ±pad 확장이 최대
-    // pad만큼 침범할 수 있다 — bounded이고, '안 보이는 열린 모달'보다 작은 박스가 낫다는 절충.
-    const pad: u32 = p.shape.modal_padding_px;
-    const avail_cols = (term_w_px -| 2 * pad) / cw;
-    const msg_cols: u32 = @intCast(std.unicode.utf8CountCodepoints(state.message) catch state.message.len);
-    const box_cols = @max(@min(msg_cols + 2 * tk.space.modal_margin_cells, avail_cols), 1);
-    const box_w = box_cols * cw;
-    const box_h = 3 * ch; // 위 여백 한 줄 + 메시지 한 줄 + 아래 여백 한 줄
-
-    // 터미널 영역 안에서 중앙 배치. box_w <= term_w_px(위 clamp)라 (term_w_px - box_w)는 비음수 → x는 항상
-    // 사이드바 오른쪽에 머문다.
-    const sidebar = @as(i32, @intCast(m.sidebar_width_px));
-    const x = sidebar + @as(i32, @intCast((term_w_px - box_w) / 2));
-    const y = @divTrunc(@as(i32, @intCast(m.backing_height_px)) - @as(i32, @intCast(box_h)), 2);
-    const rect = draw.Rect{ .x = x, .y = y, .w = box_w, .h = box_h };
-
-    const bg_r = p.shape.corner_radius_px;
-    const bw = p.shape.border_width_px;
-    // C4b 모달: 배경을 quad로(둥근+테두리) — tui(0)면 셀 배경 + 아래 Op.border 셀(무변화), rich(>0)면 둥근
-    // quad + quad 테두리(focus_accent). rich에선 아래 Op.border 셀을 rasterize가 skip(직각 중복 방지).
-    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
-    try out.append(arena, .{ .border = .{
-        .rect = rect,
-        .sides = .{ .top = true, .right = true, .bottom = true, .left = true },
-        .role = .focus_accent,
-    } });
-    // 메시지는 좌측 여백 + 한 줄 아래(가운데 줄)에 그린다. runs는 arena 소유.
-    const runs = try arena.alloc(draw.Run, 1);
-    runs[0] = .{ .text = state.message };
-    try out.append(arena, .{ .text = .{
-        .origin = .{ .x = x + @as(i32, @intCast(tk.space.modal_margin_cells * cw)), .y = y + @as(i32, @intCast(ch)) },
-        .runs = runs,
-        .role = .surface_fg,
-    } });
+    try modal_box.view(&.{.{ .text = state.message, .role = .surface_fg }}, p, tk, arena, out);
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -162,67 +113,8 @@ test "notice view: 닫힘이면 ops 0, 열림이면 fill+border+text(modal)" {
     try std.testing.expect(out.items[1] == .border);
     try std.testing.expect(out.items[2] == .text);
     try std.testing.expectEqualStrings("file corrupt", out.items[2].text.runs[0].text);
-    // 모달 박스는 터미널 영역(사이드바 오른쪽) 안, 화면 중앙쯤.
+    // 모달 박스는 터미널 영역(사이드바 오른쪽) 안, 화면 중앙쯤. 박스 기하 엣지케이스(soft-lock 가드·폭 clamp·
+    // rich 패딩 침범)는 modal_box.zig 테스트가 단일 출처로 커버한다(notice/confirm 공유 — 여기선 위임만 확인).
     try std.testing.expect(out.items[0].quad.rect.x >= 40);
     try std.testing.expect(out.items[0].quad.rect.w > 0);
-}
-
-test "notice view: 좁은 창(1~3칸)이어도 작은 박스를 그린다 — soft-lock 방지" {
-    const Rgb = @import("../../color.zig").Rgb;
-    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
-    // term 영역 = backing − sidebar = 60 − 40 = 20px, cw=8 → term_cols=2(예전 <4 가드면 생략됐다).
-    const p = props.ChromeProps{ .metrics = .{
-        .cell_width_px = 8,
-        .cell_height_px = 16,
-        .sidebar_width_px = 40,
-        .backing_width_px = 60,
-        .backing_height_px = 600,
-    } };
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var out: std.ArrayList(draw.Op) = .empty;
-
-    var s = State{};
-    s.show("file corrupt"); // 메시지가 2칸보다 길어도 box_cols는 term_cols(2)로 clamp.
-    try view(&s, p, &tk, arena, &out);
-    try std.testing.expectEqual(@as(usize, 3), out.items.len); // 생략 안 함 — 작아도 그린다(보여서 Esc 가능)
-    const box = out.items[0].quad.rect;
-    try std.testing.expect(box.w > 0 and box.w <= 20); // term 영역 안(오버플로/언더플로 없음)
-    try std.testing.expect(box.x >= 40); // 사이드바 오른쪽 유지
-
-    // term_cols==0(터미널 영역이 한 셀보다 좁음)은 여전히 생략(중앙배치 뺄셈 언더플로 방지).
-    out.clearRetainingCapacity();
-    const narrow = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 45, .backing_height_px = 600 } };
-    try view(&s, narrow, &tk, arena, &out);
-    try std.testing.expectEqual(@as(usize, 0), out.items.len); // term_w=5px < cw=8 → term_cols=0 → 생략
-}
-
-test "notice view: rich 패딩이면 확장 박스(box_w + 2*pad)가 터미널 영역 안 — 사이드바 침범 방지" {
-    const Rgb = @import("../../color.zig").Rgb;
-    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
-    const pad: u32 = 12;
-    const sidebar: u32 = 40;
-    const backing: u32 = 200; // 좁은 창 — 폭 clamp가 걸리는 경계
-    const p = props.ChromeProps{ .metrics = .{
-        .cell_width_px = 8,
-        .cell_height_px = 16,
-        .sidebar_width_px = sidebar,
-        .backing_width_px = backing,
-        .backing_height_px = 600,
-    }, .shape = .{ .modal_padding_px = @intCast(pad) } };
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var out: std.ArrayList(draw.Op) = .empty;
-
-    var s = State{};
-    s.show("this is a fairly long corruption message to force the width clamp"); // 길어 box_cols가 avail_cols로 clamp
-    try view(&s, p, &tk, arena, &out);
-    const box = out.items[0].quad.rect;
-    const term_w_px = backing - sidebar;
-    // lowering이 ±pad 확장해도 박스가 [sidebar, sidebar+term_w_px] 안: 좌단 quad.x>=sidebar, 우단<=sidebar+term_w_px.
-    try std.testing.expect(box.w + 2 * pad <= term_w_px);
-    try std.testing.expect(box.x - @as(i32, @intCast(pad)) >= @as(i32, @intCast(sidebar)));
-    try std.testing.expect(box.x + @as(i32, @intCast(box.w + pad)) <= @as(i32, @intCast(sidebar + term_w_px)));
 }

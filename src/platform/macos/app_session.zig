@@ -721,15 +721,27 @@ const Term = struct {
     auto_title: std.ArrayListUnmanaged(u8) = .empty,
 };
 
-/// 닫기 확인이 보류한 닫기 대상. 닫기 진입점마다 cascade 정책이 달라(closeActivePaneOrTab / closeActiveTermOrPane /
-/// closeTab(index) / closeActiveTerm / 창 닫기), 확정 시 같은 경로를 다시 부르려고 어느 경로였는지 기억한다. 실행 중
-/// 명령 판정(closeTargetHasRunningJob)도 같은 cascade를 따라 "이 닫기로 실제 teardown될 Term들"만 검사한다.
+/// 닫기 확인이 보류한 닫기 **진입점**(어떤 UI 동작이 닫기를 요청했나). 진입점마다 cascade 정책이 달라, 확정 시 같은
+/// 판단을 다시 하려고 어느 경로였는지 기억한다. 진입점 → 실제 teardown 범위(CloseScope) 변환은 resolveCloseScope가
+/// **단일 출처**로 한다 — 실행 중 명령 판정(closeTargetHasRunningJob)과 실제 실행(executeClose)이 그 한 함수를 공유한다.
 const PendingClose = union(enum) {
     pane_or_tab, // close_tab 액션(워크스페이스 cascade): split이면 활성 pane, 아니면 탭(마지막이면 창)
     term_or_pane, // close_term 액션(⌘W Term cascade): Term>pane>워크스페이스
     tab_index: usize, // 사이드바 ✕ 클릭 — 특정 탭(마지막이면 창)
     active_term, // 탭바 ✕ 클릭 — 활성 pane의 활성 Term
     window, // macOS 빨간 닫기 버튼 — 창(세션) 전체
+};
+
+/// 닫기 진입점(PendingClose)을 실제로 teardown될 **범위**로 해석한 결과. resolveCloseScope가 cascade(Term>pane>탭>창)를
+/// 한 곳에서 풀어 이 값으로 돌려주고, scopeHasRunningJob(실행 중 명령 검사)과 executeClose(실제 닫기)가 같은 값을
+/// 소비한다 — 판정과 실행이 따로 인코딩돼 갈리지 않게 하는 단일 출처. term/pane은 항상 활성 대상(닫기 cascade가
+/// 활성에 동작), tab은 인덱스(활성 탭 또는 사이드바에서 클릭한 탭).
+const CloseScope = union(enum) {
+    none, // 닫을 게 없음(범위 밖 인덱스)
+    term, // 활성 pane의 활성 Term 하나
+    pane, // 활성 pane(collapse)
+    tab: usize, // 그 인덱스의 탭(워크스페이스)
+    session, // 창(세션) 전체
 };
 
 /// Term 포그라운드에서 도는 에이전트 CLI 종류. 사이드바에 심볼로 표시(claude=✳, codex=✻).
@@ -2712,32 +2724,46 @@ pub const AppSession = struct {
         return false;
     }
 
-    /// closeActivePaneOrTab(워크스페이스 cascade)와 같은 정책으로, 그 닫기가 teardown할 Term들에 실행 중 명령이
-    /// 있나. split이면 활성 pane만 collapse, 단일 pane이면 탭(마지막이면 창=세션 전체)을 닫는다.
-    fn closeWorkspaceScopeHasRunningJob(self: *AppSession) bool {
-        if (self.activeTabHasSplit()) return paneHasRunningJob(self.activePane());
-        if (self.tabs.items.len == 1) return self.sessionHasRunningJob();
-        return tabHasRunningJob(self.activeTab());
+    /// 워크스페이스 cascade(close_tab/close_term이 단일 pane에서 떨어질 때)를 범위로 해석한다 — split이면 활성 pane만
+    /// collapse, 단일 pane이면 탭(마지막 탭이면 세션 전체)을 닫는다. resolveCloseScope의 하위 단계(단일 출처).
+    fn resolveWorkspaceScope(self: *AppSession) CloseScope {
+        if (self.activeTabHasSplit()) return .pane;
+        if (self.tabs.items.len == 1) return .session;
+        return .{ .tab = self.app_window.active_tab };
     }
 
-    /// 보류 대상이 실제 닫을 Term들에 실행 중 명령이 있나 — 경로별 cascade를 closeActiveTermOrPane/closeActivePaneOrTab/
-    /// closeTab/closeActiveTerm과 동일하게 따라간다(과도하게 넓거나 좁게 묻지 않게 단일 출처로 정렬).
-    fn closeTargetHasRunningJob(self: *AppSession, target: PendingClose) bool {
+    /// 닫기 진입점이 실제로 무엇을 teardown하는지 cascade(Term>pane>탭>창)를 **단일 출처**로 해석한다. 판정
+    /// (scopeHasRunningJob)과 실행(executeClose)이 이 한 함수를 공유해, 둘이 따로 인코딩돼 갈리는 일(과도하게 넓거나
+    /// 좁게 묻기·엉뚱한 대상 닫기)을 막는다.
+    fn resolveCloseScope(self: *AppSession, target: PendingClose) CloseScope {
         return switch (target) {
-            .active_term => termHasRunningJob(self.activePane().activeTerm()),
-            .term_or_pane => if (self.activePane().terms.items.len > 1)
-                termHasRunningJob(self.activePane().activeTerm()) // Term>1 → 활성 Term만 닫힘
-            else
-                self.closeWorkspaceScopeHasRunningJob(), // Term 1 → pane/워크스페이스 cascade
-            .pane_or_tab => self.closeWorkspaceScopeHasRunningJob(),
+            .active_term => .term,
+            .term_or_pane => if (self.activePane().terms.items.len > 1) .term else self.resolveWorkspaceScope(),
+            .pane_or_tab => self.resolveWorkspaceScope(),
             .tab_index => |idx| if (idx >= self.tabs.items.len)
-                false
+                .none
             else if (self.tabs.items.len == 1)
-                self.sessionHasRunningJob() // 마지막 탭 → 세션 전체
+                .session // 마지막 탭 = 창 전체
             else
-                tabHasRunningJob(self.tabs.items[idx]),
-            .window => self.sessionHasRunningJob(),
+                .{ .tab = idx },
+            .window => .session,
         };
+    }
+
+    /// 해석된 범위에 셸이 아닌 실행 중 명령이 있나 — 그 범위가 teardown할 Term들만 검사한다(leaf→root fold).
+    fn scopeHasRunningJob(self: *AppSession, scope: CloseScope) bool {
+        return switch (scope) {
+            .none => false,
+            .term => termHasRunningJob(self.activePane().activeTerm()),
+            .pane => paneHasRunningJob(self.activePane()),
+            .tab => |idx| tabHasRunningJob(self.tabs.items[idx]),
+            .session => self.sessionHasRunningJob(),
+        };
+    }
+
+    /// 보류 대상이 실제 닫을 Term들에 실행 중 명령이 있나 — resolveCloseScope(cascade 단일 출처)로 범위를 풀고 검사.
+    fn closeTargetHasRunningJob(self: *AppSession, target: PendingClose) bool {
+        return self.scopeHasRunningJob(self.resolveCloseScope(target));
     }
 
     /// 닫기 진입점 게이트(in-app 경로). 닫힐 대상에 실행 중 명령이 있으면 확인 모달을 띄우고 보류, 없으면 즉시 실행.
@@ -2754,21 +2780,22 @@ pub const AppSession = struct {
         }
     }
 
-    /// 보류한 닫기를 실제 실행 — confirm_accept(확정)와 requestClose의 "명령 없음" 즉시 경로가 공유한다. 닫기 정책
-    /// 단일 출처는 각 cascade 함수다(여긴 디스패치만).
+    /// 보류한 닫기를 실제 실행 — confirm_accept(확정)와 requestClose의 "명령 없음" 즉시 경로가 공유한다.
+    /// resolveCloseScope(cascade 단일 출처)로 범위를 풀어 그 범위의 leaf teardown으로 디스패치한다 — 판정
+    /// (closeTargetHasRunningJob)과 정확히 같은 cascade를 타므로 "묻고 닫는 대상"이 항상 일치한다.
     fn executeClose(self: *AppSession, target: PendingClose) void {
-        switch (target) {
-            .pane_or_tab => self.closeActivePaneOrTab(),
-            .term_or_pane => self.closeActiveTermOrPane(),
-            .tab_index => |idx| self.closeTab(idx),
-            .active_term => self.closeActiveTerm(),
-            .window => self.latchSessionClose(),
+        switch (self.resolveCloseScope(target)) {
+            .none => {},
+            .term => self.closeActiveTerm(),
+            .pane => self.closeActivePane(),
+            .tab => |idx| self.closeTab(idx),
+            .session => self.latchSessionClose(),
         }
     }
 
-    /// 창(세션) 닫기를 latch — 빨간 버튼 확인 확정 시. closeTab 마지막-탭 경로와 같은 종료 latch(ended_seen +
-    /// process_state=exited)라, 다음 tick summary.ended를 본 Swift가 closeWindowOrQuit으로 실제 창을 닫는다
-    /// (프로그래밍적 close라 windowShouldClose 재호출 없음 — 재확인 루프가 안 생긴다). 단일 출처: closeTab 주석.
+    /// 창(세션) 닫기를 latch — 빨간 버튼 확인 확정 / 마지막 탭 닫기(closeTab)가 공유하는 **종료 latch 단일 출처**.
+    /// ended_seen + process_state=exited를 세우면, 다음 tick summary.ended를 본 Swift가 closeWindowOrQuit으로 실제 창을
+    /// 닫는다(프로그래밍적 close라 windowShouldClose 재호출 없음 — 재확인 루프가 안 생긴다).
     fn latchSessionClose(self: *AppSession) void {
         self.ended_seen = true;
         self.activeSurface().process_state = .exited;
@@ -2785,23 +2812,37 @@ pub const AppSession = struct {
         return true;
     }
 
-    /// 닫기 확인 모달을 연다. 메시지는 세션 소유 버퍼로 복사(showNotice와 같은 이유 — slice dangling 방지, UTF-8
-    /// 코드포인트 경계 절단)하고 다른 오버레이(notice/find/palette/context_menu)를 닫아 배타성을 지킨다(단일 오버레이
-    /// frame 가정). 다음 tick이 그린다.
-    fn showConfirm(self: *AppSession, message: []const u8) void {
+    /// 오버레이 모달 메시지를 세션 소유 버퍼로 UTF-8 코드포인트 경계에서 잘라 복사하고 그 슬라이스를 돌려준다 —
+    /// notice/confirm.State.message는 slice라 호출자(ABI/Swift) transient 버퍼를 가리키면 dangling. 버퍼 초과는
+    /// continuation 바이트(0x80~0xBF) 앞 lead까지 되돌려 한글 등 multibyte가 U+FFFD로 깨지지 않게 자른다(리뷰 발견).
+    /// notice·confirm 단일 출처.
+    fn copyOverlayMessage(buf: []u8, message: []const u8) []const u8 {
+        var n = @min(message.len, buf.len);
+        if (n < message.len) {
+            while (n > 0 and (message[n] & 0xC0) == 0x80) n -= 1;
+        }
+        @memcpy(buf[0..n], message[0..n]);
+        return buf[0..n];
+    }
+
+    /// confirm을 **제외한** 다른 오버레이(notice/find/palette/context_menu)와 그 platform 부수상태를 닫는다 — 새 모달을
+    /// 열기 전 단일-오버레이 불변식(collectDraws·inputFocus가 한 번에 하나 가정)을 한 곳에서 강제한다. confirm/보류
+    /// 닫기를 건드리지 않으므로, requestClose가 pending_close를 세운 뒤 showConfirm을 불러도 보류가 보존된다.
+    fn dismissMessageOverlays(self: *AppSession) void {
         self.chrome_host.notice.dismiss();
         self.chrome_host.find.hide();
-        self.find_matches.clearRetainingCapacity();
+        self.find_matches.clearRetainingCapacity(); // find 닫힘 — 매치 하이라이트 정리(toggleFind와 동일)
         self.chrome_host.palette.hide();
         self.chrome_host.context_menu.hide();
         self.context_menu_target = null;
         self.view_options_menu = false;
-        var n = @min(message.len, self.confirm_message_buf.len);
-        if (n < message.len) {
-            while (n > 0 and (message[n] & 0xC0) == 0x80) n -= 1;
-        }
-        @memcpy(self.confirm_message_buf[0..n], message[0..n]);
-        self.chrome_host.confirm.show(self.confirm_message_buf[0..n]);
+    }
+
+    /// 닫기 확인 모달을 연다. 메시지는 세션 소유 버퍼로 복사(copyOverlayMessage)하고 다른 오버레이를 닫아 배타성을
+    /// 지킨다(dismissMessageOverlays — confirm/보류는 caller가 소유). 다음 tick이 그린다.
+    fn showConfirm(self: *AppSession, message: []const u8) void {
+        self.dismissMessageOverlays();
+        self.chrome_host.confirm.show(copyOverlayMessage(&self.confirm_message_buf, message));
         self.metal_dirty = true;
     }
 
@@ -2833,10 +2874,8 @@ pub const AppSession = struct {
     pub fn closeTab(self: *AppSession, index: usize) void {
         if (index >= self.tabs.items.len) return;
         if (self.tabs.items.len == 1) {
-            // 마지막 탭 = 창 닫기. close()와 같은 종료 latch — 탭은 deinit이 정리한다.
-            self.ended_seen = true;
-            self.activeSurface().process_state = .exited;
-            self.metal_dirty = true;
+            // 마지막 탭 = 창 닫기. 종료 latch는 latchSessionClose 단일 출처(빨간 버튼 확인 경로와 공유) — 탭은 deinit이 정리.
+            self.latchSessionClose();
             return;
         }
 
@@ -2861,7 +2900,7 @@ pub const AppSession = struct {
     /// 활성 탭의 활성 panel을 닫는다(split이 있으면 pane을 하나씩 닫는다). 트리를 형제로
     /// collapse(removeLeaf)하고 panel을 teardown(destroyPane)한 뒤, active_pane을 보정하고, 대표 surface·
     /// pump를 새 활성 panel로 재바인딩하고, 남은 panel을 collapse된 트리의 새 leaf rect로 resize한다. panel이
-    /// 1개뿐이면 무동작(그건 closeActivePaneOrTab이 closeTab으로 보낸다). 활성 탭에만 적용한다.
+    /// 1개뿐이면 무동작(그 경우 resolveWorkspaceScope가 .tab/.session으로 보내 closeTab/latch가 맡는다). 활성 탭에만 적용한다.
     fn closeActivePane(self: *AppSession) void {
         const tab = self.activeTab();
         if (tab.panes.items.len <= 1) return; // 단일 panel은 탭 close 경로
@@ -2888,16 +2927,6 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// Cmd+W 정책: split이 있으면 활성 panel을 하나 닫고(collapse), 단일 panel이면 탭을 닫는다
-    /// (마지막 탭이면 창). 즉 Cmd+W를 반복하면 pane이 하나씩 닫히다가 마지막 1개에서 탭이 닫힌다.
-    fn closeActivePaneOrTab(self: *AppSession) void {
-        if (self.activeTabHasSplit()) {
-            self.closeActivePane();
-        } else {
-            self.closeTab(self.app_window.active_tab);
-        }
-    }
-
     /// 활성 pane의 활성 Term(가로 탭)을 닫는다. pane에 Term이 2개 이상일 때만 — teardown(destroyTerm)하고
     /// terms에서 빼고 active_term을 보정한 뒤 새 활성 Term surface로 재바인딩한다. Term이 1개뿐이면 무동작
     /// (closeActiveTermOrPane이 pane/워크스페이스 close로 보낸다). tree leaf는 pane이라 Term close엔 안 바뀐다.
@@ -2916,15 +2945,11 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// Cmd+W 정책(계층 cascade): 활성 pane에 Term이 2개 이상이면 활성 Term을 하나 닫고, 1개뿐이면
-    /// pane을(split이면 collapse) 또는 워크스페이스를(단일 pane이면 탭/창) 닫는다. 즉 ⌘W를 반복하면 Term →
-    /// pane → 워크스페이스 순으로 하나씩 닫힌다.
+    /// Cmd+W 정책(계층 cascade): 활성 pane에 Term이 2개 이상이면 활성 Term을, 1개뿐이면 pane(split이면 collapse)을,
+    /// 단일 pane이면 워크스페이스(탭/창)를 닫는다. cascade 판단은 resolveCloseScope 단일 출처라, 여긴 그 진입점으로
+    /// 위임하는 얇은 별칭이다(직접 호출하는 테스트·문서용 이름 유지).
     fn closeActiveTermOrPane(self: *AppSession) void {
-        if (self.activePane().terms.items.len > 1) {
-            self.closeActiveTerm();
-        } else {
-            self.closeActivePaneOrTab();
-        }
+        self.executeClose(.term_or_pane);
     }
 
     /// 사이드바 고정 탭(우클릭 Pin) 개수. 불변식: 고정 탭은 항상 배열 앞쪽 `[0, pinned_count)`에 연속으로 모인다
@@ -7832,24 +7857,14 @@ pub const AppSession = struct {
         return self.finishOverlayFrame(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y, appearance, cw, ch, raster.cursor);
     }
 
-    /// chrome Notice 모달(손상 알림 등)을 연다. 메시지는 세션 소유 버퍼로 복사한다 — notice.State.message는 slice라
-    /// 호출자(ABI/Swift) 버퍼가 transient면 dangling. 512B 초과는 잘라 표시하되 **UTF-8 코드포인트 경계에서** 자른다
-    /// (바이트 경계에서 자르면 한글 등 multibyte가 U+FFFD로 깨진다 — 리뷰 발견). 다음 tick이 오버레이로 그린다.
+    /// chrome Notice 모달(손상 알림 등)을 연다. 메시지는 세션 소유 버퍼로 복사한다(copyOverlayMessage — slice
+    /// dangling 방지·UTF-8 경계 절단). 다른 오버레이를 닫아 배타성을 지키되(dismissMessageOverlays), confirm은 닫기
+    /// 확인이라 보류한 닫기까지 취소한다(cancelPendingClose — showConfirm이 notice를 닫는 것과 대칭, 단일 오버레이
+    /// 불변식). 다음 tick이 오버레이로 그린다.
     pub fn showNotice(self: *AppSession, message: []const u8) void {
-        // 오버레이 배타 — notice가 뜨면 find/palette/confirm을 닫는다(한 번에 하나만: collectDraws·inputFocus가 단일
-        // 오버레이를 가정한다 — 안 닫으면 두 박스가 합쳐진 frame으로 깨져 보이고 IME가 뒤 find로 샌다). confirm은
-        // 닫기 확인이라, 닫으면서 보류한 닫기도 취소한다(showConfirm이 notice를 닫는 것과 대칭 — 단일 오버레이 불변식).
-        self.chrome_host.find.hide();
-        self.find_matches.clearRetainingCapacity(); // find 닫힘 — 매치 하이라이트 정리(toggleFind와 동일)
-        self.chrome_host.palette.hide();
+        self.dismissMessageOverlays();
         self.cancelPendingClose(); // confirm 모달 + 보류 닫기 취소(열려 있을 때만 의미; 닫혀 있으면 무해)
-        var n = @min(message.len, self.notice_message_buf.len);
-        // 잘렸으면 continuation 바이트(0x80~0xBF)에서 멈추지 않게 lead 바이트까지 되돌린다(코드포인트 중간 절단 방지).
-        if (n < message.len) {
-            while (n > 0 and (message[n] & 0xC0) == 0x80) n -= 1;
-        }
-        @memcpy(self.notice_message_buf[0..n], message[0..n]);
-        self.chrome_host.notice.show(self.notice_message_buf[0..n]);
+        self.chrome_host.notice.show(copyOverlayMessage(&self.notice_message_buf, message));
         self.metal_dirty = true;
     }
 

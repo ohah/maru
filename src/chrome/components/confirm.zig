@@ -97,10 +97,11 @@ pub fn view(
     const msg_cols = overlay_input.displayCols(state.message);
     const confirm_cols = overlay_input.displayCols(state.confirm_label);
     const cancel_cols = overlay_input.displayCols(state.cancel_label);
-    const btn_pad = 1; // 기본 버튼 라벨 좌우 패딩(accent 배경이 라벨을 감싸 버튼처럼 보이게)
+    const btn_pad = 1; // 버튼 라벨 좌우 패딩(배경이 라벨을 감싸 버튼처럼 보이게)
     const default_btn_cols = confirm_cols + 2 * btn_pad;
-    const gap = 3; // 두 버튼 사이 간격(칸)
-    const btn_row_cols = default_btn_cols + gap + cancel_cols;
+    const cancel_btn_cols = cancel_cols + 2 * btn_pad; // 보조 버튼도 같은 패딩 — 둘 다 버튼 느낌
+    const gap = 2; // 두 버튼 사이 간격(칸) — 둘 다 버튼이라 살짝 좁혀 균형
+    const btn_row_cols = default_btn_cols + gap + cancel_btn_cols;
     const content_cols = @max(msg_cols, btn_row_cols);
 
     // 콘텐츠 4행: 0=메시지, 1=(빈 줄), 2=버튼, 3=키 라벨. modal_box가 사방 여백을 더해 패널처럼 보이게 한다.
@@ -110,19 +111,21 @@ pub fn view(
     // (1) 메시지 — 중앙.
     try modal_box.text(box, modal_box.centerX(box, msg_cols), 0, state.message, .surface_fg, arena, out);
 
-    // (2) 버튼 행 — 그룹(기본+gap+보조)을 중앙 정렬. 기본 버튼: accent 배경 fill 먼저(painter order: bg→glyph) +
-    //     대비색(surface_bg) 라벨. 보조 버튼: plain(surface_fg). 라벨은 버튼 패딩만큼 우측에서 시작.
+    // (2) 버튼 행 — 그룹(기본+gap+보조)을 중앙 정렬. **둘 다 배경 fill로 버튼처럼** 보이게 한다(painter order: bg→glyph).
+    //     기본 버튼(확정): accent 배경(focus_accent) + 대비색(surface_bg) 라벨로 강조. 보조 버튼(취소): 은은한 배경
+    //     (tab_hover_bg) + 일반(surface_fg) 라벨 — 강조는 덜하되 버튼 형태는 갖춘다. 라벨은 버튼 패딩만큼 우측에서 시작.
     const group_x = modal_box.centerX(box, btn_row_cols);
     try modal_box.fillCells(box, group_x, 2, default_btn_cols, .focus_accent, arena, out);
     try modal_box.text(box, group_x + @as(i32, @intCast(btn_pad * box.cw)), 2, state.confirm_label, .surface_bg, arena, out);
-    const cancel_x = group_x + @as(i32, @intCast((default_btn_cols + gap) * box.cw));
-    try modal_box.text(box, cancel_x, 2, state.cancel_label, .surface_fg, arena, out);
+    const cancel_btn_x = group_x + @as(i32, @intCast((default_btn_cols + gap) * box.cw));
+    try modal_box.fillCells(box, cancel_btn_x, 2, cancel_btn_cols, .tab_hover_bg, arena, out);
+    try modal_box.text(box, cancel_btn_x + @as(i32, @intCast(btn_pad * box.cw)), 2, state.cancel_label, .surface_fg, arena, out);
 
-    // (3) 키 안내 — Enter는 기본 버튼 아래 중앙, Esc는 보조 버튼 아래 중앙(muted). 각 버튼 영역 폭 안에서 가운데.
+    // (3) 키 안내 — Enter는 기본 버튼 아래 중앙, Esc는 보조 버튼 아래 중앙(muted). 각 버튼 폭 안에서 가운데.
     const enter_off = (default_btn_cols -| overlay_input.displayCols(key_confirm)) / 2;
     try modal_box.text(box, group_x + @as(i32, @intCast(enter_off * box.cw)), 3, key_confirm, .muted_fg, arena, out);
-    const esc_off = (cancel_cols -| overlay_input.displayCols(key_cancel)) / 2;
-    try modal_box.text(box, cancel_x + @as(i32, @intCast(esc_off * box.cw)), 3, key_cancel, .muted_fg, arena, out);
+    const esc_off = (cancel_btn_cols -| overlay_input.displayCols(key_cancel)) / 2;
+    try modal_box.text(box, cancel_btn_x + @as(i32, @intCast(esc_off * box.cw)), 3, key_cancel, .muted_fg, arena, out);
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -196,16 +199,19 @@ test "confirm view: 닫힘이면 ops 0, 열림이면 패널(quad+border)+accent 
     // 프레임이 먼저(quad 배경 + border 테두리).
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expect(out.items[1] == .border);
-    // 구조: accent 기본 버튼 배경 fill 1개 + 메시지·기본라벨·보조라벨·키(Enter/Esc) 텍스트. 순서에 무관하게 존재 확인.
+    // 구조: 두 버튼 배경 fill(기본=accent, 보조=tab_hover_bg) + 메시지·기본라벨·보조라벨·키(Enter/Esc) 텍스트.
+    // 순서에 무관하게 존재 확인.
     var saw_accent_fill = false;
+    var saw_cancel_fill = false;
     var saw_msg = false;
     var saw_confirm = false;
     var saw_cancel = false;
     var saw_enter = false;
     var saw_esc = false;
     for (out.items) |op| switch (op) {
-        .fill => |f| if (f.role == .focus_accent) {
-            saw_accent_fill = true;
+        .fill => |f| {
+            if (f.role == .focus_accent) saw_accent_fill = true;
+            if (f.role == .tab_hover_bg) saw_cancel_fill = true;
         },
         .text => |t| {
             const txt = t.runs[0].text;
@@ -218,6 +224,7 @@ test "confirm view: 닫힘이면 ops 0, 열림이면 패널(quad+border)+accent 
         else => {},
     };
     try std.testing.expect(saw_accent_fill); // 기본 버튼이 accent 배경으로 강조됨
+    try std.testing.expect(saw_cancel_fill); // 보조 버튼(취소)도 배경 fill로 버튼 느낌
     try std.testing.expect(saw_msg and saw_confirm and saw_cancel and saw_enter and saw_esc);
     // 박스는 터미널 영역(사이드바 오른쪽) 안. 기하 엣지케이스는 modal_box.zig 테스트가 단일 출처로 커버.
     try std.testing.expect(out.items[0].quad.rect.x >= 40);

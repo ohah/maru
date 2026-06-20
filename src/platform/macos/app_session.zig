@@ -7815,7 +7815,12 @@ pub const AppSession = struct {
                     c += if (w == 2) @as(u16, 2) else 1;
                     continue;
                 }
-                cells.appendAssumeCapacity(.{ .row = r, .col = c, .codepoint = cp[idx], .width = w, .style = .{ .foreground = fg[idx], .background = bg[idx] } });
+                // rich 모달: surface_bg 글자 셀은 배경을 칠하지 않고(default=투명, A0) GPU 배경 quad가 그대로 비치게
+                // 한다 — 셀 배경 사각형이 quad와 미세하게 어긋나 '글자 뒤에만 배경색이 떠' 부자연스럽던 문제 제거
+                // (사용자 피드백). 빈 surface_bg 셀은 위에서 skip, accent/보조 버튼 등 비-surface_bg 배경은 그대로 칠해
+                // 버튼이 보인다. tui(modal_bg_quad=false)는 박스가 셀 배경이라 그대로 surface_bg를 유지한다.
+                const cell_bg: terminal.Color = if (modal_bg_quad and std.meta.eql(bg[idx], surface_bg_col)) .default else bg[idx];
+                cells.appendAssumeCapacity(.{ .row = r, .col = c, .codepoint = cp[idx], .width = w, .style = .{ .foreground = fg[idx], .background = cell_bg } });
                 c += if (w == 2) @as(u16, 2) else 1; // wide면 continuation 칸 스킵
             }
         }

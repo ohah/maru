@@ -147,8 +147,15 @@ Maru가 이 terminfo 소스를 바이너리에 내장하고, 자식 셸을 띄�
 **`xterm-256color`로 자동 폴백**해 로컬이 절대 깨지지 않는다(Ghostty의 번들 terminfo + `TERMINFO` env
 방식과 같은 결 — `pty/macos.zig`의 `resolveTerm`).
 
-`xterm-maru`가 알리는 캡: **동기화 출력(`Sync`, DECSET 2026)** — tmux가 재그리기를 한 프레임으로 묶어
-**tmux 레이아웃 플리커가 사라진다**. truecolor(`Tc`)도. Maru가 실제 지원하는 캡만 정직하게 선언한다.
+`xterm-maru`가 알리는 캡(Maru가 실제 지원하는 것만 정직하게 — 없는 걸 광고하면 원격 프로그램이 오작동):
+- **동기화 출력(`Sync`, DECSET 2026)** — tmux가 재그리기를 한 프레임으로 묶어 **tmux 레이아웃 플리커가 사라진다**.
+- **truecolor(`Tc`)** — 24-bit 색.
+- **bracketed paste(`BE`/`BD`, DECSET 2004)** — nvim/vim의 안전한 붙여넣기.
+- **OSC 52 클립보드 set(`Ms`)** — tmux `set-clipboard` 등이 시스템 클립보드에 쓴다(`osc52.write=allow`라 정직; read는 deny).
+- **커서 스타일(`Ss`/`Se`, DECSCUSR)** — vim이 모드별 bar/underline/block 커서를 전환한다(원격에서도).
+- **focus 이벤트(`fe`/`fd`+`kxIN`/`kxOUT`, DECSET 1004)** — 창 포커스 in/out 보고(vim FocusGained/Lost).
+
+`use=xterm-256color`를 토대로 위 캡을 더한다. 적합성은 `mise run terminfo-check`가 컴파일 + 각 캡의 실제 바이트 round-trip으로 검증한다("추측 말고 캡처").
 
 드물게 셸 설정/프레임워크가 특정 `$TERM`을 기대하면 바꿀 수 있다:
 

@@ -16,9 +16,30 @@
 #    tools/terminfo/check.sh가 실제 바이트를 round-trip 검증한다.
 #  - Tc: truecolor(SGR 38;2/48;2). maru는 24bit 색을 지원하고 COLORTERM=truecolor도 함께 알린다.
 #
-# 아직 선언하지 않은(후속 audit 후 추가 후보) 캡: bracketed paste(BE/BD, mode 2004 지원함), OSC52
-# 클립보드(Ms — 단 maru는 정책상 ask), focus(mode 1004). 최소·검증된 집합으로 시작한다.
+# 아래 캡은 모두 maru 코어가 "실제로" 처리한다 — terminfo 문자열의 바이트가 코어 핸들러가 받는/내는
+# 바이트와 정확히 일치한다(tools/terminfo/check.sh가 `tput`로 실측 round-trip). 이름/문자열은 공개
+# escape에서 유도하고, 어느 캡 이름을 쓸지는 Ghostty terminfo를 second-opinion으로 비교했다(코드 차용
+# 아님 — 정책: clean-room + 호환성 정책 문서). 각 캡의 코어 근거:
+#  - BE/BD: bracketed paste enable/disable(DECSET/DECRST 2004). 켜지면 붙여넣기를 ESC[200~..ESC[201~로
+#    감싼다(core.zig encodePaste·DECSET 2004). nvim/vim이 안전한 붙여넣기에 쓴다.
+#  - Ms: OSC 52 system clipboard "set"(ESC]52;<sel>;<base64>BEL). maru는 osc52.write=allow라 정직하게
+#    광고한다(read는 deny라 set 전용 캡 Ms만 둔다; core.zig dispatchOscClipboard). tmux set-clipboard가 읽는다.
+#  - Ss/Se: DECSCUSR 커서 스타일(set ESC[<n> SP q / reset ESC[0 SP q). maru가 param 0..6을 block/
+#    underline/bar×blink로 받아 실제 렌더 커서에 반영한다(core.zig setCursorStyle→snapshot). vim이 모드별
+#    커서 모양 전환에 쓴다 — 원격(ssh)에서도 동작하게 하는 캡.
+#  - fe/fd + kxIN/kxOUT: focus 이벤트(DECSET 1004 enable/disable; 보고는 CSI I=gained / CSI O=lost). 켜지면
+#    창 포커스 in/out을 ESC[I/ESC[O로 보낸다(core.zig reportFocus). 표준 terminfo 캡이 없어 Ghostty 명명을
+#    따른다(focus는 주로 mode 1004로 구동되고 terminfo 캡은 보조 광고다).
 xterm-maru|maru|maru terminal emulator,
+	BD=\E[?2004l,
+	BE=\E[?2004h,
+	Ms=\E]52;%p1%s;%p2%s\007,
+	Se=\E[0 q,
+	Ss=\E[%p1%d q,
 	Sync=\E[?2026%?%p1%{1}%-%tl%eh%;,
 	Tc,
+	fd=\E[?1004l,
+	fe=\E[?1004h,
+	kxIN=\E[I,
+	kxOUT=\E[O,
 	use=xterm-256color,

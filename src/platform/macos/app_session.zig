@@ -3604,11 +3604,14 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             }
         }
-        // Shift+Enter를 Meta+Enter(`\x1b\r`)로 보낸다(config input.shift-enter=newline, 기본). Shift는 Enter 인코딩에
-        // 안 실려(input.zig encodeKey) 일반 Enter와 같은 `\r`이 되는데, 그러면 CLI/TUI가 둘을 구분 못 해 줄바꿈 대신
-        // 명령 실행이 된다. Option(Meta)으로 바꾸면 encodeKey가 ESC 프리픽스를 붙여 Option+Enter와 같은 `\x1b\r`이
-        // 나가고, Claude Code 등이 이를 멀티라인 줄바꿈으로 인식한다. 모달(find=이전 매치 등)은 위에서 이미 키를
-        // 소비했으니 여기 도달한 Shift+Enter는 PTY로 갈 입력뿐이다. native면 변형 없이 기존 동작.
+        // Shift+Enter를 Meta+Enter로 보낸다(config input.shift-enter=newline, 기본). Shift는 Enter 인코딩에 안 실려
+        // (input.zig encodeKey) 일반 Enter와 같은 `\r`이 되는데, 그러면 CLI/TUI가 둘을 구분 못 해 줄바꿈 대신 명령
+        // 실행이 된다. Option(Meta)으로 바꾸면 encodeKey가 Option+Enter와 똑같은 시퀀스를 낸다 — kitty 프로토콜이
+        // 꺼졌으면 `\x1b\r`(ESC+CR), 켜졌으면 `\x1b[13;3u`(Alt+Enter CSI u). 어느 쪽이든 Option+Enter와 동일이라
+        // Claude Code 등이 멀티라인 줄바꿈으로 인식한다. 모달(find=이전 매치 등)은 위에서 이미 키를 소비했으니
+        // 여기 도달한 Shift+Enter는 PTY로 갈 입력뿐이다. 변환이 keyBindingResolver 앞이라 `keybind = Opt+Enter`가
+        // 있으면 Shift+Enter가 그걸 발동하고 `keybind = Shift+Enter`는 닿지 않는다(native로 끄면 회피 —
+        // docs/configuration.md). native면 변형 없이 기존 동작.
         var key_event = event;
         if (self.shift_enter_meta and key_event.key == .enter and key_event.modifiers.shift and
             !key_event.modifiers.control and !key_event.modifiers.option and !key_event.modifiers.command)

@@ -478,15 +478,11 @@ pub const TerminalCore = struct {
         self.last_print = null;
         self.scroll_top = 0;
         self.scroll_bottom = self.size.rows - 1;
-        self.application_cursor_keys = false;
-        self.application_keypad = false; // DECKPAM도 numeric(off)으로 공장 초기화(G10).
-        self.cursor_visible = true;
-        self.bracketed_paste = false;
-        self.focus_events = false;
-        self.mouse_tracking = .none;
-        self.mouse_format = .x10;
-        self.sync_output = false;
-        self.kitty_flags = .{};
+        self.cursor_visible = true; // DECTCEM(25) — 입력 모드가 아니라 화면 표시라 fullReset에 남긴다.
+        self.sync_output = false; // 2026 동기 출력 — 입력 모드가 아니라 렌더 타이밍이라 fullReset에 남긴다.
+        // 입력 인코딩 모드(application_cursor_keys/keypad·bracketed_paste·focus_events·mouse_tracking·
+        // mouse_format·kitty_flags)는 resetInputModes가 단일 출처로 끈다 — 메뉴 Reset과 같은 코드를 공유(중복 제거).
+        self.resetInputModes();
         self.kitty_images.clear(self.allocator); // RIS는 전송된 kitty graphics 이미지를 전부 비운다
         self.kitty_placements.clearRetainingCapacity(); // placement도 함께 비운다
         self.abortKittyChunk(); // 진행 중이던 chunked 전송도 폐기
@@ -505,6 +501,22 @@ pub const TerminalCore = struct {
         self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
         self.origin_mode = false; // DECOM도 공장 기본(off — 화면 절대 좌표)으로 복원.
         self.dirty = fullDirty(self.size);
+    }
+
+    /// 입력 인코딩에 영향을 주는 사적 모드만 공장 초기화한다(화면·스크롤백·커서·pen은 보존).
+    /// ssh 너머 TUI가 focus(1004)/mouse(1000·1002·1003)/kitty keyboard 모드를 켠 채 SIGKILL로
+    /// 비정상 종료해 정리 시퀀스를 못 보내면, 잔류 모드 탓에 raw 셸에서 포커스/마우스마다 CSI I·
+    /// 좌표가 흘러나가 입력이 오염된다. 이 함수는 그 잔류만 끊고 보이는 내용은 그대로 둔다 —
+    /// fullReset(RIS)의 비파괴 변형으로, 메뉴 "Reset"이 호출한다(셸 통합 precmd 리셋의 백업 경로).
+    /// bracketed_paste·application_cursor_keys도 끄지만, zsh zle이 다음 줄에 재설정하므로 안전하다.
+    pub fn resetInputModes(self: *TerminalCore) void {
+        self.application_cursor_keys = false; // DECCKM(1) — 방향키 SS3 인코딩 복원
+        self.application_keypad = false; // DECKPAM — keypad numeric 복원
+        self.bracketed_paste = false; // 2004 — 붙여넣기 래핑 해제(셸 zle이 다음 줄 재설정)
+        self.focus_events = false; // 1004 — 포커스 CSI I/O 중단
+        self.mouse_tracking = .none; // 9/1000/1002/1003 — 마우스 리포트 중단
+        self.mouse_format = .x10; // 1006/1015/1016 — 마우스 인코딩 기본 복원
+        self.kitty_flags = .{}; // kitty keyboard 스택·플래그 전부 비움
     }
 
     pub fn deinit(self: *TerminalCore) void {
@@ -6508,6 +6520,37 @@ test "focus reporting (DECSET 1004): off=무리포트, on=CSI I / CSI O" {
     core.clearResponse();
     core.reportFocus(true);
     try std.testing.expectEqualStrings("", core.pendingResponse());
+}
+
+test "resetInputModes: 입력 모드만 끄고 화면·커서는 보존한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    // 입력 오염 모드를 켜고(focus·mouse·bracketed·app-cursor·kitty) 화면에 글자를 찍는다.
+    try core.write("\x1b[?1004h\x1b[?1000h\x1b[?2004h\x1b[?1h\x1b[>1u");
+    try core.write("hi");
+    try std.testing.expect(core.focus_events);
+    try std.testing.expect(core.mouse_tracking != .none);
+    try std.testing.expect(core.bracketed_paste);
+    try std.testing.expect(core.application_cursor_keys);
+    const cursor_before = core.cursor;
+
+    core.resetInputModes();
+
+    // 입력 모드는 전부 꺼진다.
+    try std.testing.expect(!core.focus_events);
+    try std.testing.expectEqual(MouseTracking.none, core.mouse_tracking);
+    try std.testing.expectEqual(MouseFormat.x10, core.mouse_format);
+    try std.testing.expect(!core.bracketed_paste);
+    try std.testing.expect(!core.application_cursor_keys);
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_flags.depth);
+    // 잔류 증상 해소: 포커스를 더는 리포트하지 않는다.
+    core.clearResponse();
+    core.reportFocus(true);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    // 보이는 내용과 커서는 그대로 보존된다(비파괴).
+    try std.testing.expectEqual(cursor_before, core.cursor);
+    try std.testing.expectEqual(@as(u21, 'h'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'i'), core.cells[core.index(0, 1)].codepoint);
 }
 
 test "mouse reporting (DECSET 1000 + SGR 1006): off=무리포트, press/release/wheel, mode off" {

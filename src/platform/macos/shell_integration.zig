@@ -90,10 +90,20 @@ const zsh_zshenv =
     \\    done
     \\    'builtin' 'print' '-rn' -- $'\e]7;file://'"${HOST}${_maru_enc}"$'\e\\'
     \\  }
+    \\  # ssh 너머 TUI(claude/codex/tmux/vim)가 SIGKILL로 비정상 종료해 정리 시퀀스를 못 보낸 잔류
+    \\  # 입력 모드를 매 프롬프트에서 끈다: focus(1004)·mouse(1000/1002/1003)·kitty keyboard 스택.
+    \\  # 그러면 raw 셸에서 포커스/마우스마다 CSI I·좌표가 흘러나와 입력이 오염되는 증상이 다음
+    \\  # 프롬프트에서 자동 회복된다. precmd는 프롬프트가 그려질 때(=풀스크린 TUI가 없을 때)만 돌아
+    \\  # 정상 앱을 깨지 않는다. bracketed paste(2004)·app cursor(1)는 zle이 매 줄 직접 켜고 끄므로
+    \\  # 제외한다. kitty pop은 스택 한도(16)만큼 보내 잔류 스택을 전부 비운다(빈 스택 pop은 no-op).
+    \\  _maru_reset_input_modes() {
+    \\    'builtin' 'print' '-rn' -- $'\e[?1004l\e[?1000l\e[?1002l\e[?1003l\e[<16u'
+    \\  }
     \\  add-zsh-hook precmd _maru_osc133_precmd
     \\  add-zsh-hook preexec _maru_osc133_preexec
     \\  add-zsh-hook precmd _maru_osc133_ps1
     \\  add-zsh-hook precmd _maru_osc7
+    \\  add-zsh-hook precmd _maru_reset_input_modes
     \\  _maru_shell_integration() {
     \\    add-zsh-hook -d precmd _maru_shell_integration
     \\    # macOS 편집키가 보내는 C0/meta 시퀀스를 표준 라인 위젯에 바인딩(현재 main keymap에).
@@ -181,6 +191,20 @@ test "zsh integration script emits OSC 133 semantic prompt markers" {
     // B 훅이 프레임워크 PS1 재생성에도 살아남도록 precmd_functions 맨 뒤로 재정렬하는지(회귀 방지).
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "precmd_functions[-1]") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "${(@)precmd_functions:#_maru_osc133_ps1}") != null);
+}
+
+test "zsh integration script resets stale input modes each prompt (ssh-kill recovery)" {
+    // ssh 너머 TUI가 SIGKILL로 죽어 정리 못 한 focus·mouse·kitty 모드를 매 프롬프트에서 끄는지(회귀
+    // 방지 — 깨지면 ssh 끊김 후 포커스마다 ^[[I·비프 증상이 되살아난다). ESC 바이트는 raw string에
+    // literal `\e`로 들어가므로, 기존 OSC 테스트처럼 ESC 뒤 안정 바이트로 매칭한다.
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "add-zsh-hook precmd _maru_reset_input_modes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "[?1004l") != null); // focus reporting off
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "[?1000l") != null); // mouse normal off
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "[?1002l") != null); // mouse button-event off
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "[?1003l") != null); // mouse any-event off
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "[<16u") != null); // kitty keyboard 스택 전체 pop
+    // 충돌 회피: zle이 매 줄 직접 관리하는 bracketed paste(2004)는 리셋하지 않는다.
+    try std.testing.expect(std.mem.indexOf(u8, zsh_zshenv, "[?2004l") == null);
 }
 
 test "zsh integration script emits OSC 7 cwd reporting" {

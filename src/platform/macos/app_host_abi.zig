@@ -528,6 +528,15 @@ pub export fn maru_macos_app_session_reset_defaults(session: ?*AppSession) c_int
     return @intFromEnum(Status.ok);
 }
 
+// Reset 메뉴(⌘⇧R) — 활성 터미널의 잔류 입력 모드(focus 1004·mouse·kitty keyboard)만 끈다. ssh 너머 TUI가
+// SIGKILL로 죽어 정리 못 한 모드가 raw 셸 입력을 오염시키는 증상(포커스마다 CSI I·비프)의 수동 회복 경로다.
+// 화면·스크롤백은 보존한다(fullReset/RIS와 다름). 항상 Status.ok. Swift는 메뉴 클릭에서 호출만 한다.
+pub export fn maru_macos_app_session_reset_input_modes(session: ?*AppSession) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    app_session.resetInputModes();
+    return @intFromEnum(Status.ok);
+}
+
 // 창 제목으로 보여줄 문자열(OSC 0/2 제목 우선, 없으면 OSC 7 cwd basename). 우선순위는 core가
 // 정한다(native 최소). 반환 버퍼는 Zig(core) 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효, 없으면
 // len 0(Swift가 앱 이름으로 폴백). Swift가 window.title에 쓴다.

@@ -238,6 +238,8 @@ Maru는 **셸 통합**으로 이를 메운다(Ghostty·iTerm2·kitty가 하는 �
 
 이 분류로 **프롬프트 점프 네비게이션**이 동작한다 — `Cmd+↑`/`Cmd+↓`로 이전/다음 명령의 프롬프트로 뷰포트를 점프한다(iTerm2·VSCode식). `core.jumpToPrompt(dir)`가 "프롬프트 블록 시작"(prompt/input run의 첫 행)을 절대 행 좌표로 찾아 뷰포트 맨 위에 둔다. Swift는 Cmd+↑/↓ keyCode만 감지해 `jump_prompt` ABI로 방향을 넘기고(native 최소, scroll_page와 같은 규율), 분류·이동은 Zig가 한다. 셸 통합이 없으면 분류가 전부 unknown이라 무동작.
 
+같은 통합 `.zshenv`는 **잔류 입력 모드도 매 프롬프트에서 자동 복구**한다 — `precmd` 훅(`_maru_reset_input_modes`)이 focus reporting(`\e[?1004l`)·mouse tracking(`\e[?1000l\e[?1002l\e[?1003l`)·kitty keyboard 스택(`\e[<16u`)을 끈다. ssh 너머 TUI(claude/vim/tmux 등)가 이 모드를 켠 채 **SIGKILL로 비정상 종료**하면 정리 시퀀스(`\e[?1004l`)가 전달되지 못해, raw 셸로 돌아온 뒤 **창 포커스마다 `^[[I`/`^[[O`가 입력줄에 쌓이고 비프음**이 나는 잔류 증상이 생긴다(모든 터미널 공통 문제 — 터미널은 ssh 끊김을 알 수 없어 자동 감지가 불가능하다). precmd는 **프롬프트가 그려질 때(=풀스크린 TUI가 없을 때)만** 돌아 정상 앱을 깨지 않으므로, 다음 프롬프트에서 사용자 개입 없이 회복된다. `bracketed paste(2004)`·application cursor keys(1)는 zsh `zle`이 매 줄 직접 켜고 끄므로 제외한다(충돌 회피). 셸 통합이 안 닿는 비zsh 셸·hang 복구 직후엔 수동 `⌘⇧R`(아래 "터미널 입력 모드 리셋")로 회복한다.
+
 clean-room: 통합 스크립트는 **zsh 매뉴얼의 ZDOTDIR/스타트업·precmd/preexec·PS1 `%{%}` 동작과 semantic-prompts.md 명세에서 직접 작성**했다. Ghostty·kitty의 통합 스크립트는 GPLv3라 차용하지 않았다(메커니즘 자체는 zsh 공개 동작/공개 명세). **거터 마크(✓/✗)도 구현했다** — 프롬프트 시작 행 왼쪽 가장자리에 명령 성공(초록)/실패(빨강) 세로 색 바(`D;<code>`의 종료코드를 그 프롬프트 행에 스탬프; 렌더는 커서 bar와 같은 부분 사각형 재사용, 그리드/PTY 폭 불변). 현재 zsh 전용이고, bash/fish 마커 emit·OSC 7 cwd는 후속이다.
 
 ## 기본 제공 macOS 줄 편집 단축키 (빌트인)
@@ -285,6 +287,21 @@ docs/io-render-threading.md). 대신 "form-feed를 보낼지"를 bool로 돌려�
 
 **config**: 빌트인이라 사용자 config로 끄거나(`keybind = Cmd+K = unbind`) 다른 키로 옮길 수 있고
 (`keybind = Cmd+L = clear_screen`), `clear_screen`은 `parseAction`이 인식하므로 임의 chord에 묶을 수 있다.
+
+## 터미널 입력 모드 리셋 (⌘⇧R, Reset Terminal)
+
+`⌘⇧R`(maru 메뉴 **Reset Terminal**)은 활성 터미널의 **잔류 입력 모드만** 끈다: focus reporting(1004)·mouse
+tracking(1000/1002/1003)·mouse format(1006)·kitty keyboard 스택·bracketed paste(2004)·application cursor
+keys(1)·keypad. **화면·스크롤백·커서는 보존**한다(`TerminalCore.resetInputModes` — `fullReset`/RIS의 비파괴 변형).
+
+용도: ssh 너머 TUI가 SIGKILL로 죽어 정리 시퀀스를 못 보낸 탓에 포커스/마우스마다 `^[[I`·좌표가 흘러나오는
+증상의 **수동 회복 경로**다. 위 셸 통합 자동 복구(precmd)가 주력이고, 이 메뉴는 **셸 통합이 안 닿는 경우**
+(bash/fish 등 비zsh, 또는 ssh가 hang해 프롬프트가 아직 안 그려진 직후)를 위한 백업이다. 표준 `reset`은 화면·
+스크롤백까지 지우지만, Maru는 증상 원인(잔류 모드)만 끊어 작업 맥락을 보존한다.
+
+경계: Swift 메뉴 액션 → ABI `maru_macos_app_session_reset_input_modes` → `app_session.resetInputModes`(활성
+surface 코어 락 아래 `core.resetInputModes`). 입력 인코딩 상태만 바꿔 렌더에 영향이 없다(focusChanged와 같은
+PR3 패턴 — 코어 변경을 `core_mutex` 아래서 한다).
 
 ## 검증 계획
 

@@ -1550,6 +1550,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 줌/여백 변경을 프로그램 처음 실행 설정으로 복원(둘 다 단축키 없음 — 메뉴 클릭 전용, 발견성용).
         app.addItem(nativeMenuItem("Reload Config", #selector(menuReloadConfig(_:)), key: "", target: self))
         app.addItem(nativeMenuItem("Reset to Defaults", #selector(menuResetDefaults(_:)), key: "", target: self))
+        // Reset Terminal(⌘⇧R) — 활성 터미널의 잔류 입력 모드(focus·mouse·kitty keyboard)만 끈다. ssh가 비정상
+        // 종료해 정리 못 한 모드가 raw 셸 입력을 오염시키는 증상(포커스마다 ^[[I·비프)의 수동 회복 — 셸 통합
+        // 자동 리셋이 안 닿는 타 셸·hang 복구 직후용. 화면·스크롤백은 보존(Reset to Defaults와 대상이 다르다).
+        app.addItem(nativeMenuItem("Reset Terminal", #selector(menuResetTerminal(_:)), key: "r", mods: [.command, .shift], target: self))
         app.addItem(.separator())
         app.addItem(nativeMenuItem("Hide maru", #selector(NSApplication.hide(_:)), key: "h"))
         app.addItem(nativeMenuItem("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), key: "h", mods: [.command, .option]))
@@ -1733,6 +1737,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = sender
         guard let session = appSession else { return }
         _ = maru_macos_app_session_reset_defaults(session)
+    }
+
+    /// Reset Terminal(⌘⇧R) — 활성 터미널의 잔류 입력 모드(focus 1004·mouse·kitty keyboard)만 끈다. ssh 너머 TUI가
+    /// SIGKILL로 죽어 정리 못 한 모드가 raw 셸 입력을 오염시키는 증상의 수동 회복. 화면은 보존(비파괴). Zig가 단일 출처.
+    @objc private func menuResetTerminal(_ sender: Any?) {
+        _ = sender
+        guard let session = appSession else { return }
+        _ = maru_macos_app_session_reset_input_modes(session)
     }
 
     @objc private func menuToggleFullScreen(_ sender: Any?) {

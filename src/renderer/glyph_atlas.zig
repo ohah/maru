@@ -246,12 +246,15 @@ fn estimateGlyphBitmapSize(glyph: glyph_layout.GlyphRun) EstimatedGlyphBitmapSiz
     // (테스트/fake backend)는 font_size × scale 정사각으로 대체한다(기존 동작 보존).
     const cell_w = @as(u32, glyph.cache_key.cell_width_px);
     const cell_h = @as(u32, glyph.cache_key.cell_height_px);
+    // crisp 큰 아이콘: slot을 glyph_scale_milli만큼 키운다(rasterizer도 같은 배율로 폰트를 키워 큰 glyph가 큰 slot을
+    // 꽉 채워 또렷하다). 1000(일반 텍스트)이면 무영향. 폰트 배율과 같은 단일 출처(cache_key.glyph_scale_milli).
+    const gscale = @max(@as(u32, glyph.cache_key.glyph_scale_milli), 1);
     var width_px: u32 = undefined;
     var height_px: u32 = undefined;
     if (cell_w > 0 and cell_h > 0) {
         const span = @max(@as(u32, glyph.cell_width), 1);
-        width_px = cell_w * span;
-        height_px = cell_h;
+        width_px = cell_w * span * gscale / 1000;
+        height_px = cell_h * gscale / 1000;
     } else {
         const font_size = @max(@as(u32, glyph.cache_key.font_size_px), 1);
         const scale = @max(@as(u32, glyph.cache_key.device_scale), 1);

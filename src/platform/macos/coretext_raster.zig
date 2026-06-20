@@ -73,10 +73,13 @@ pub const CoreTextGlyphRasterizer = struct {
             .status = -1,
             .non_clear_pixels = 0,
         };
+        // crisp 큰 아이콘: 폰트 크기를 glyph_scale_milli만큼 키운다(slot도 estimateGlyphBitmapSize가 같은 배율로 키워,
+        // 큰 glyph가 큰 slot을 또렷하게 채운다 — slot-stretch 흐림 회피). 1000(일반 텍스트)이면 무영향.
+        const glyph_scale = @as(f64, @floatFromInt(request.run.cache_key.glyph_scale_milli)) / 1000.0;
         self.rasterize_glyph(
             self.appearance.font.family.ptr,
             self.appearance.font.family.len,
-            renderer.deviceFontSizeFromMilli(self.appearance.font.size, self.scale_milli),
+            renderer.deviceFontSizeFromMilli(self.appearance.font.size, self.scale_milli) * glyph_scale,
             font_identity.postscript_name.ptr,
             font_identity.postscript_name.len,
             request.run.codepoint,

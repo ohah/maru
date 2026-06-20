@@ -8,6 +8,10 @@ pub const DrawCell = struct {
     combining: ?u21 = null,
     width: u2 = 1,
     style: terminal.Style = .{},
+    // glyph를 **큰 크기로 직접 래스터화**할 배율(천분율, 1000=무배율). >1000이면 atlas slot·CoreText 폰트 크기를
+    // 그만큼 키워 또렷한 큰 glyph를 만든다(렌더러가 같은 배율로 rect를 키워 1:1 매핑). 헤더 아이콘(◧/⚙/+)이 1700으로
+    // slot-stretch(흐림) 대신 crisp 큰 아이콘이 되게 한다. 일반 텍스트는 1000(무영향). cache_key에 들어가 de-dup.
+    glyph_scale_milli: u16 = 1000,
 };
 
 pub const CursorOverlay = struct {

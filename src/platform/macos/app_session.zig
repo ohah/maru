@@ -4352,10 +4352,12 @@ pub const AppSession = struct {
                         self.metal_dirty = true;
                     }
                 }
-                // 락 밖에서 전송 — handleKeyEvent가 필요한 core_mutex를 알아서 잡는다.
+                // 락 밖 + non-blocking 전송(sendCommittedText) — windowLostKey(AppKit 동기 콜백)에서
+                // 호출돼도 메인 run loop(tick)를 막지 않아 #10 write_queue backpressure 데드락을 피한다
+                // (과거 sendTextAsKeys→handleKeyEvent의 enqueueBlocking이 tick을 멈춰 hang했다).
                 if (committed) |copy| {
                     defer self.allocator.free(copy);
-                    self.sendTextAsKeys(copy);
+                    self.sendCommittedText(copy);
                 }
             },
             .find => if (self.chrome_host.find.input.commitPreedit(self.allocator)) {
@@ -4402,6 +4404,23 @@ pub const AppSession = struct {
                 (terminal.input.charKeyFromCodepoint(cp) catch continue);
             _ = self.handleKeyEvent(.{ .key = key, .modifiers = .{} }) catch return;
         }
+    }
+
+    /// IME 확정 텍스트를 **non-blocking**으로 PTY에 보낸다 — paste와 같은 pending 큐 패턴
+    /// (`pending_paste` FIFO + `flushPendingPaste`의 `writeInputNonBlocking`). `windowLostKey` 등
+    /// AppKit 동기 콜백 안에서 호출돼도 blocking enqueue로 메인 run loop(=tick)를 멈추지 않아 #10
+    /// write_queue backpressure 데드락을 피한다(설계 전제 "입력 전송은 tick 안"에 코드를 맞춤 —
+    /// P2-3b write_queue 구조는 그대로). 확정 텍스트는 완성된 평문이라 키 인코딩(handleKeyEvent)
+    /// 없이 바이트로 보내되 개행만 \r로 정규화한다(sendTextAsKeys와 동일 규약; bracketed 감싸기는
+    /// paste 전용이라 IME 확정엔 안 쓴다). pending_paste FIFO는 paste와 공유해 전송 순서를 지킨다.
+    fn sendCommittedText(self: *AppSession, bytes: []const u8) void {
+        if (!self.surface_initialized or bytes.len == 0) return;
+        self.pending_paste.ensureUnusedCapacity(self.allocator, bytes.len) catch return;
+        for (bytes) |b| self.pending_paste.appendAssumeCapacity(if (b == '\n') '\r' else b);
+        // handleKeyEvent를 우회하므로 terminal input 회계를 여기서 직접 한다(\n→\r는 1:1이라 byte 수 동일).
+        self.total_terminal_input_events += 1;
+        self.total_terminal_input_bytes += bytes.len;
+        self.flushPendingPaste();
     }
 
     /// 클립보드 텍스트 붙여넣기(Cmd+V). 인코딩(개행 정규화 + bracketed paste 감싸기)은 core가
@@ -12031,6 +12050,43 @@ test "commitComposition during terminal preedit does not deadlock (회귀: bd5fd
 
     try std.testing.expect(core.preedit == null); // 조합이 확정되며 비워짐(다시 안 남음)
     try std.testing.expect(session.total_terminal_input_bytes > before); // "한"이 PTY로 확정 전송됨
+}
+
+test "commitComposition sends committed text via non-blocking path, not blocking key path (#10)" {
+    // #10: 한글 조합 중 창 포커스 상실 시 commitComposition이 확정 텍스트를 보내는데, 과거엔
+    // sendTextAsKeys→handleKeyEvent(write_queue enqueueBlocking)를 탔다. windowLostKey는 AppKit이 메인
+    // run loop를 동기 점유한 콜백이라, 그 안에서 enqueueBlocking이 write_queue 포화로 막히면 다음
+    // tick(output drain)이 영영 안 와 reader도 멈추는 양방향 backpressure 데드락이 됐다(실측 hang
+    // 리포트 2건, 28s·53s). 수정: sendCommittedText가 paste와 같은 non-blocking pending 경로로 보내
+    // handleKeyEvent를 경유하지 않는다. backpressure 데드락 자체는 blocking이 본질이라 단위로 hang
+    // 없이 재현이 어려워(재현하면 테스트가 멈춘다), 이 경로 불변식(handleKeyEvent 미경유 =
+    // total_key_events 불변)으로 회귀를 고정하고, 실제 재현·소멸은 maru 실행으로 확인한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const core = &session.activeSurface().core;
+
+    session.imeMarked("한");
+    try std.testing.expect(core.preedit != null);
+
+    const keys_before = session.total_key_events;
+    const bytes_before = session.total_terminal_input_bytes;
+    session.setFocused(false); // windowLostKey → commitComposition(.terminal)
+
+    try std.testing.expect(core.preedit == null); // 확정됨
+    try std.testing.expect(session.total_terminal_input_bytes > bytes_before); // PTY로 전송됨
+    // 핵심 불변식: blocking key 경로(handleKeyEvent)를 경유하지 않는다(non-blocking pending 전송).
+    // 수정 전이면 sendTextAsKeys→handleKeyEvent로 total_key_events가 늘어 이 단언이 깨진다(#10 가드).
+    try std.testing.expectEqual(keys_before, session.total_key_events);
 }
 
 test "scrollbarThumbGeom: null without scrollback, thumb size/position track view_offset" {

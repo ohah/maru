@@ -2331,6 +2331,9 @@ pub const AppSession = struct {
         while (guard < 4096) : (guard += 1) {
             if (self.allTabsTerminated()) return; // 전부 죽음 → 세션 종료가 마지막을 닫는다(여기선 reap 안 함)
             const loc = self.findTerminatedTerm() orelse return; // 더 닫을 죽은 Term 없음
+            // 닫기 확인 모달이 보류 중이면, 곧 닫을 closeTermAt이 탭/pane 인덱스·활성 선택을 바꿔 보류 표적이 stale가
+            // 된다 → 무효화(.window 제외). 첫 reap에서 한 번 취소하면 이후는 무동작(pending null).
+            self.invalidatePendingCloseOnReap();
             self.closeTermAt(loc.tab_index, loc.pane, loc.term_index);
         }
     }
@@ -2800,6 +2803,26 @@ pub const AppSession = struct {
         @memcpy(self.confirm_message_buf[0..n], message[0..n]);
         self.chrome_host.confirm.show(self.confirm_message_buf[0..n]);
         self.metal_dirty = true;
+    }
+
+    /// 보류한 닫기를 취소하고 확인 모달을 닫는다 — 표적이 더 이상 유효하지 않거나(트리 변경) 다른 오버레이가
+    /// 선점할 때. pending_close가 없어도 모달은 닫아 단일-오버레이 불변식을 지킨다(showNotice가 호출).
+    fn cancelPendingClose(self: *AppSession) void {
+        self.pending_close = null;
+        self.chrome_host.confirm.dismiss();
+        self.metal_dirty = true;
+    }
+
+    /// reap(자동 종료 정리)이 트리를 바꾸기 직전에 보류한 닫기를 무효화한다. .window(창 전체)는 표적이 불변이라
+    /// 유지하고, 그 외(.tab_index·.active_term·.term_or_pane·.pane_or_tab)는 인덱스·활성 선택 기준이라 reap이
+    /// 탭/pane/Term을 지우거나 활성 선택을 옮기면 stale → 확정 시 엉뚱한 대상을 닫는다(데이터 손실). 그래서 reap이
+    /// 일어나면 보류를 취소하고 모달을 닫는다(사용자는 새 상태에서 다시 닫으면 됨 — 안전한 abort).
+    fn invalidatePendingCloseOnReap(self: *AppSession) void {
+        const p = self.pending_close orelse return;
+        switch (p) {
+            .window => {}, // 창 전체 닫기는 reap이 탭을 줄여도 유효
+            else => self.cancelPendingClose(),
+        }
     }
 
     /// 탭을 닫는다. 마지막 한 개면 창(세션)을 닫는다 — 탭을 헐지 않고 종료를 latch해 기존 terminate/
@@ -7812,11 +7835,13 @@ pub const AppSession = struct {
     /// 호출자(ABI/Swift) 버퍼가 transient면 dangling. 512B 초과는 잘라 표시하되 **UTF-8 코드포인트 경계에서** 자른다
     /// (바이트 경계에서 자르면 한글 등 multibyte가 U+FFFD로 깨진다 — 리뷰 발견). 다음 tick이 오버레이로 그린다.
     pub fn showNotice(self: *AppSession, message: []const u8) void {
-        // 오버레이 배타 — notice가 뜨면 find/palette를 닫는다(한 번에 하나만: collectDraws·inputFocus가 단일
-        // 오버레이를 가정한다 — 안 닫으면 두 박스가 합쳐진 frame으로 깨져 보이고 IME가 뒤 find로 샌다).
+        // 오버레이 배타 — notice가 뜨면 find/palette/confirm을 닫는다(한 번에 하나만: collectDraws·inputFocus가 단일
+        // 오버레이를 가정한다 — 안 닫으면 두 박스가 합쳐진 frame으로 깨져 보이고 IME가 뒤 find로 샌다). confirm은
+        // 닫기 확인이라, 닫으면서 보류한 닫기도 취소한다(showConfirm이 notice를 닫는 것과 대칭 — 단일 오버레이 불변식).
         self.chrome_host.find.hide();
         self.find_matches.clearRetainingCapacity(); // find 닫힘 — 매치 하이라이트 정리(toggleFind와 동일)
         self.chrome_host.palette.hide();
+        self.cancelPendingClose(); // confirm 모달 + 보류 닫기 취소(열려 있을 때만 의미; 닫혀 있으면 무해)
         var n = @min(message.len, self.notice_message_buf.len);
         // 잘렸으면 continuation 바이트(0x80~0xBF)에서 멈추지 않게 lead 바이트까지 되돌린다(코드포인트 중간 절단 방지).
         if (n < message.len) {
@@ -12300,6 +12325,51 @@ test "PR5b: a Term whose shell exits is reaped, the sibling Term survives" {
     try std.testing.expectEqual(t1_id, session.activeSurface().id);
     try std.testing.expect(!session.ended_seen);
     _ = try session.tick(); // 다음 tick 크래시 없음
+}
+
+// 닫기 확인 모달이 보류 중일 때 배경 Term이 자기 셸 종료로 reap되면 트리(인덱스·활성 선택)가 바뀌어 보류 표적이
+// stale가 된다 — reap이 이를 취소하고 모달을 닫아 확정 시 엉뚱한 대상이 닫히는 데이터 손실을 막는다. 단, .window
+// (창 전체 닫기)는 표적이 불변이라 reap에도 유지된다. (/code-review max 발견 — pending_close staleness)
+test "close-confirm: reap이 트리를 바꾸면 인덱스/활성 기준 보류는 취소하되 .window 보류는 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // (a) 인덱스/활성 기준 보류(.active_term)는 reap이 취소한다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개
+    const pane = session.activePane();
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    session.pending_close = .active_term;
+    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?");
+    try std.testing.expect(session.chrome_host.confirm.open);
+
+    pane.terms.items[0].terminated = true; // 배경 Term이 셸 종료
+    session.reapTerminatedTerms();
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len); // T0 reap됨(트리 변경)
+    try std.testing.expect(session.pending_close == null); // 보류 취소
+    try std.testing.expect(!session.chrome_host.confirm.open); // 모달 닫힘
+
+    // (b) .window 보류는 reap에도 유지된다(창 전체 표적이라 인덱스 stale 무관).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // 다시 Term 2개
+    const pane2 = session.activePane();
+    try std.testing.expectEqual(@as(usize, 2), pane2.terms.items.len);
+    session.pending_close = .window;
+    session.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?");
+    pane2.terms.items[0].terminated = true;
+    session.reapTerminatedTerms();
+    try std.testing.expect(session.pending_close != null); // .window 유지
+    try std.testing.expect(session.chrome_host.confirm.open); // 모달 유지
 }
 
 // ② split pane: 한 pane의 유일한 Term이 exit하면 그 pane이 collapse되고 형제 pane이 전체를 차지한다.

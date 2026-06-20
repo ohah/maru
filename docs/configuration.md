@@ -148,13 +148,19 @@ Shift+Enter를 어떻게 인코딩할지 정한다. macOS 터미널의 키 인�
 Shift+Enter가 일반 Enter와 똑같은 `\r` 한 바이트를 보낸다 — 그래서 셸/CLI가 둘을 **구분하지 못해** 줄바꿈이 아니라
 명령 실행이 된다. Option(Alt)+Enter는 `\x1b\r`(ESC+CR)이라 앱이 별도 키로 인식해 멀티라인 줄바꿈으로 처리한다.
 
-- `newline` (기본): Shift+Enter를 **Option+Enter와 같은 `\x1b\r`** 로 보낸다. Claude Code 등 CLI/TUI가 이를 줄바꿈
-  (전송 없이 다음 줄)으로 인식한다 — 모던 에디터/브라우저의 Shift+Enter 기대치와 일치한다.
+- `newline` (기본): Shift+Enter를 **Option+Enter와 같은 바이트**로 보낸다 — kitty 키보드 프로토콜이 꺼진 일반
+  셸에선 `\x1b\r`(ESC+CR), 켜진 앱에선 `\x1b[13;3u`(Alt+Enter via CSI u). 어느 쪽이든 Option+Enter와 **항상 같은**
+  시퀀스라(내부적으로 Meta 수정자로 바꿔 인코딩한다), Claude Code 등 CLI/TUI가 줄바꿈(전송 없이 다음 줄)으로
+  인식한다 — 모던 에디터/브라우저의 Shift+Enter 기대치와 일치한다.
 - `native` (opt-out): Shift를 인코딩에 반영하지 않는 기존 터미널 동작. 일반 셸에선 `\r`(일반 Enter와 동일),
   kitty 키보드 프로토콜이 켜진 앱에선 `\x1b[13;2u`(CSI u). xterm/Ghostty 순정 동작이 필요할 때만.
 
 > Shift는 chord modifier가 아니라 IME 키 트랜잭션을 거쳐 들어오므로, 이 변환은 **모달(Find의 Shift+Enter=이전
 > 매치 등)이 키를 소비하지 않고 PTY로 내려보내는 경우**에만 적용된다. IME 조합 중 Shift+Enter도 같은 규칙을 따른다.
+
+> 변환은 keybind 해석 **앞에서** 일어난다(Shift+Enter를 Option+Enter로 바꾼 뒤 resolver가 본다). 그래서
+> `keybind = Opt+Enter = <action>`을 두면 Shift+Enter도 그 action을 발동하고, `keybind = Shift+Enter = <action>`은
+> `newline`에선 닿지 않는다(변환이 먼저 적용됨). Shift+Enter에 직접 바인딩을 걸려면 `native`로 둔다.
 
 ### IME 조합 중 Enter (`input.ime-enter`)
 

@@ -247,6 +247,16 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "chrome.theme은 tui|rich — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "sidebar.show-branch")) {
+        config.sidebar.show_branch = parseBool(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "sidebar.show-branch는 true|false — 기본값 유지" });
+            return;
+        };
+    } else if (std.mem.eql(u8, key, "sidebar.show-folder")) {
+        config.sidebar.show_folder = parseBool(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "sidebar.show-folder는 true|false — 기본값 유지" });
+            return;
+        };
     } else if (std.mem.eql(u8, key, "text.blink")) {
         config.blink_text = parseBool(value) orelse {
             try diags.append(a, .{ .line = line_no, .message = "text.blink은 true|false — 기본값 유지" });
@@ -578,6 +588,57 @@ fn parseFloatInRange(value: []const u8, min: f32, max: f32) ?f32 {
     return if (n >= min and n <= max) n else null;
 }
 
+/// config 한 줄을 갱신할 키·값 쌍. value는 이미 직렬화된 토큰(`true`/`false` 등).
+pub const KeyValue = struct { key: []const u8, value: []const u8 };
+
+/// 원본 config 텍스트를 줄 단위로 순회해 `updates`의 키를 `key = value`로 **in-place 교체**한다 —
+/// 주석·빈 줄·미파싱 키·갱신 대상이 아닌 줄은 그대로 보존하고, 원본에 없던 키만 파일 끝에 append한다.
+/// 앱(view options 토글)→config 부분 갱신용. 통째 재작성은 사용자 주석·미파싱 키를 전부 잃으므로 택하지
+/// 않았다([document-basis-and-decision]: 보존을 우선). 교체 줄은 `key = value`로 정규화하므로 그 줄에
+/// 달려 있던 인라인 주석/비표준 공백은 사라진다(round-trip 테스트가 보존 범위를 못박는다). 반환은 owned.
+pub fn updateConfigText(allocator: std.mem.Allocator, original: []const u8, updates: []const KeyValue) LoadError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    const applied = try allocator.alloc(bool, updates.len);
+    defer allocator.free(applied);
+    @memset(applied, false);
+
+    var it = std.mem.splitScalar(u8, original, '\n');
+    var first = true;
+    while (it.next()) |raw_line| {
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
+        var replaced = false;
+        if (trimmed.len > 0 and trimmed[0] != '#') {
+            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
+                const k = std.mem.trim(u8, trimmed[0..eq], &std.ascii.whitespace);
+                for (updates, 0..) |u, i| {
+                    if (!applied[i] and std.mem.eql(u8, k, u.key)) {
+                        try out.appendSlice(allocator, u.key);
+                        try out.appendSlice(allocator, " = ");
+                        try out.appendSlice(allocator, u.value);
+                        applied[i] = true;
+                        replaced = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!replaced) try out.appendSlice(allocator, raw_line);
+    }
+    // 원본에 없던 키는 끝에 append(직전 줄이 개행으로 안 끝나면 개행 먼저).
+    for (updates, 0..) |u, i| {
+        if (applied[i]) continue;
+        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append(allocator, '\n');
+        try out.appendSlice(allocator, u.key);
+        try out.appendSlice(allocator, " = ");
+        try out.appendSlice(allocator, u.value);
+        try out.append(allocator, '\n');
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// 빈 기본 결과(파일 없음/HOME 없음 등). config 텍스트를 안 읽었으므로 arena도 비어 있다.
 fn emptyDefault(allocator: std.mem.Allocator) Parsed {
     return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .unbinds = &.{}, .terminal_bindings = &.{}, .global_bindings = &.{}, .diagnostics = &.{} };
@@ -629,6 +690,8 @@ test "parse: full config sets every field" {
         \\cursor.shape = bar
         \\cursor.blink = false
         \\chrome.theme = rich
+        \\sidebar.show-branch = false
+        \\sidebar.show-folder = false
         \\text.blink = true
         \\window.padding-x = 12
         \\window.padding-y = 6
@@ -645,6 +708,8 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(theme.CursorShape.bar, p.config.cursor.shape);
     try std.testing.expectEqual(false, p.config.cursor.blink);
     try std.testing.expectEqual(theme.ChromeTheme.rich, p.config.chrome_theme); // C4a chrome.theme 파싱
+    try std.testing.expectEqual(false, p.config.sidebar.show_branch); // sidebar.show-branch 파싱(기본 true)
+    try std.testing.expectEqual(false, p.config.sidebar.show_folder); // sidebar.show-folder 파싱(기본 true)
     try std.testing.expectEqual(true, p.config.blink_text); // text.blink 파싱(기본 false)
     try std.testing.expectEqual(@as(u32, 12), p.config.window_padding_left); // window.padding-x alias → left+right
     try std.testing.expectEqual(@as(u32, 12), p.config.window_padding_right);
@@ -652,6 +717,44 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(@as(u32, 6), p.config.window_padding_bottom);
     try std.testing.expectEqual(false, p.config.notifications.agent_complete); // notifications.agent-complete 파싱(기본 true)
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+}
+
+test "updateConfigText: in-place 키 교체로 주석·다른 줄 보존, 없는 키는 append, round-trip" {
+    const a = std.testing.allocator;
+    const original =
+        \\# 내 설정
+        \\font.size = 16
+        \\sidebar.show-branch = true
+        \\theme.background = #001122
+        \\
+    ;
+    const updates = [_]KeyValue{
+        .{ .key = "sidebar.show-branch", .value = "false" }, // 기존 줄 교체
+        .{ .key = "sidebar.show-folder", .value = "false" }, // 원본에 없음 → append
+    };
+    const updated = try updateConfigText(a, original, &updates);
+    defer a.free(updated);
+    // 주석·갱신 대상이 아닌 줄 보존
+    try std.testing.expect(std.mem.indexOf(u8, updated, "# 내 설정") != null);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "font.size = 16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "theme.background = #001122") != null);
+    // 기존 줄 in-place 교체(true→false), append
+    try std.testing.expect(std.mem.indexOf(u8, updated, "sidebar.show-branch = false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "sidebar.show-branch = true") == null);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "sidebar.show-folder = false") != null);
+    // round-trip: 갱신 텍스트를 다시 파싱하면 새 값
+    var p = try parse(a, updated);
+    defer p.deinit();
+    try std.testing.expectEqual(false, p.config.sidebar.show_branch);
+    try std.testing.expectEqual(false, p.config.sidebar.show_folder);
+}
+
+test "updateConfigText: 빈 원본에도 키를 append한다(파일 없음 케이스)" {
+    const a = std.testing.allocator;
+    const updates = [_]KeyValue{.{ .key = "sidebar.show-branch", .value = "false" }};
+    const updated = try updateConfigText(a, "", &updates);
+    defer a.free(updated);
+    try std.testing.expectEqualStrings("sidebar.show-branch = false\n", updated);
 }
 
 test "parse: window padding defaults to left/right=8, top/bottom=4; bad/out-of-range values are forgiving" {

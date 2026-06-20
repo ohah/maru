@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 60u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 61u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -548,6 +548,16 @@ int32_t maru_macos_app_session_window_title(
    maru.workspace.v1 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유로 다음 호출/destroy까지 유효,
    캡처/직렬화 실패·빈 경우 *out_len=0(Swift가 그 창을 건너뜀). 정상 종료(applicationWillTerminate) 시 저장. */
 int32_t maru_macos_app_session_serialize_workspace(
+    MaruAppHostSession *session,
+    const uint8_t **out_ptr,
+    size_t *out_len
+);
+
+/* 현재 sidebar 토글(show-branch/show-folder)을 반영한 갱신 config 텍스트(UTF-8)를 직렬화한다 — Swift가
+   maru_macos_app_session_config_path 경로에 atomic write한다(앱 view options 토글 → config 파일 양방향).
+   원본 config를 부분 갱신하므로 주석·미파싱 키를 보존한다. 버퍼는 Zig 소유로 다음 호출/destroy까지 유효,
+   직렬화 실패·빈 경우 *out_len=0(Swift가 write를 건너뜀). */
+int32_t maru_macos_app_session_serialize_sidebar_config(
     MaruAppHostSession *session,
     const uint8_t **out_ptr,
     size_t *out_len

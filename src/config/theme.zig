@@ -242,6 +242,16 @@ pub const ChromeTheme = enum {
     rich,
 };
 
+/// 사이드바 세션 카드에 보조 정보를 표시할지. view options 메뉴(앱)와 config가 **양방향**으로 공유한다 —
+/// 앱에서 토글하면 config 파일에 저장되고, config를 편집하면 다음 로드/Reload에 반영된다. 이름줄은 카드
+/// 식별에 필수라 항상 표시하고, git 브랜치·폴더(cwd) 경로만 토글한다. loader가 `sidebar.*` 키로 파싱.
+pub const SidebarConfig = struct {
+    /// 카드에 git 브랜치명을 표시할지(기본 true). loader `sidebar.show-branch`.
+    show_branch: bool = true,
+    /// 카드에 폴더(cwd) 경로를 표시할지(기본 true). loader `sidebar.show-folder`.
+    show_folder: bool = true,
+};
+
 /// quick terminal 표시 옵션. 값 검증/기본값은 loader가 채우고, 플랫폼(Swift)이 ABI로 받아 패널 크기·위치·
 /// 화면·자동 숨김 동작에 쓴다.
 pub const QuickTerminalConfig = struct {
@@ -274,6 +284,8 @@ pub const Config = struct {
     quick_terminal: QuickTerminalConfig = .{},
     /// chrome(탭바·사이드바·divider·테두리) 디자인 테마(tui|rich). 기본 tui(현행 cell-grid 룩). loader가 `chrome.theme` 키로 파싱.
     chrome_theme: ChromeTheme = .tui,
+    /// 사이드바 카드 표시 옵션(git 브랜치·폴더). view options 메뉴(앱)와 양방향 공유. loader가 `sidebar.*` 키로 파싱.
+    sidebar: SidebarConfig = .{},
     /// SGR 5(blink) 글자를 실제로 깜빡일지(true)·정적으로 둘지(false). **기본 false** — 깜빡이는 콘텐츠는 접근성
     /// (WCAG 발작 위험) 우려라 다수 터미널이 기본으로 끈다. loader가 `text.blink` 키로 파싱.
     blink_text: bool = false,

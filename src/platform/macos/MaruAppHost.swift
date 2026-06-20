@@ -1731,6 +1731,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = maru_macos_app_session_reload_config(session)
     }
 
+    /// view options에서 sidebar 토글(show-branch/show-folder)을 바꿨을 때, 갱신된 config 텍스트를 받아 config
+    /// 파일에 atomic write한다(앱→config 양방향). 직렬화·경로 해석·부분 갱신(주석 보존)은 Zig가 단일 출처다.
+    /// best-effort — 실패해도 런타임 토글은 이미 반영됐다(Zig가 즉시 rebuildSidebar). config 토글 UI(view
+    /// options 메뉴, P4)의 accept 핸들러에서 호출한다.
+    func persistSidebarConfig() {
+        guard let session = appSession else { return }
+        var pathPtr: UnsafePointer<UInt8>? = nil
+        var pathLen: size_t = 0
+        guard maru_macos_app_session_config_path(session, &pathPtr, &pathLen) == Self.statusOK,
+              let pathBytes = pathPtr, pathLen > 0 else { return }
+        let path = String(decoding: UnsafeBufferPointer(start: pathBytes, count: pathLen), as: UTF8.self)
+        var textPtr: UnsafePointer<UInt8>? = nil
+        var textLen: size_t = 0
+        guard maru_macos_app_session_serialize_sidebar_config(session, &textPtr, &textLen) == Self.statusOK,
+              let textBytes = textPtr, textLen > 0 else { return }
+        let text = String(decoding: UnsafeBufferPointer(start: textBytes, count: textLen), as: UTF8.self)
+        let url = URL(fileURLWithPath: path)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? text.data(using: .utf8)?.write(to: url, options: .atomic)
+    }
+
     /// Reset to Defaults — 런타임 줌(⌘+/−)·여백 변경을 프로그램 처음 실행했던 설정으로 되돌린다(appearance만 — behavior는
     /// 런타임에 안 바뀌므로 대상 아님). 복원 기준·적용은 Zig가 단일 출처로 한다. 여기선 활성 세션에 호출만 한다.
     @objc private func menuResetDefaults(_ sender: Any?) {

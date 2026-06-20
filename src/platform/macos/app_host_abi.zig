@@ -576,6 +576,28 @@ pub export fn maru_macos_app_session_serialize_workspace(
     return @intFromEnum(Status.ok);
 }
 
+// 현재 sidebar 토글(show-branch/show-folder)을 반영한 갱신 config 텍스트를 직렬화해 돌려준다 — Swift가
+// config 경로(maru_macos_app_session_config_path)에 atomic write한다(앱 view options 토글 → config 파일
+// 양방향). 원본 config를 부분 갱신하므로 주석·미파싱 키를 보존한다. 버퍼는 Zig 소유(다음 호출/destroy까지
+// 유효). 직렬화 실패(OOM 등)면 *out_len=0(Swift가 write를 건너뜀) — best-effort.
+pub export fn maru_macos_app_session_serialize_sidebar_config(
+    session: ?*AppSession,
+    out_ptr: ?*?[*]const u8,
+    out_len: ?*usize,
+) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
+    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const text = app_session.serializeSidebarConfig() catch {
+        ptr_out.* = null;
+        len_out.* = 0;
+        return @intFromEnum(Status.ok);
+    };
+    ptr_out.* = if (text.len > 0) text.ptr else null;
+    len_out.* = text.len;
+    return @intFromEnum(Status.ok);
+}
+
 // 시작 시 저장된 workspace 텍스트(헤더 + N개 창 블록)에서 window_index번째 창을 parse해 이 세션에 복원 적용한다
 // (R4b). **포맷 파싱은 전부 Zig가 소유한다** — Swift는 전체 텍스트와 인덱스만 넘기고 'window ' 경계를 직접 안
 // 나눈다(파싱 권위가 Zig·Swift로 갈려 silent divergence 나는 걸 막음). parse 실패=invalid_config, 인덱스 범위

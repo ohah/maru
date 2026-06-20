@@ -11,9 +11,10 @@ const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
 const input = @import("../input.zig");
+const modal_box = @import("modal_box.zig");
 
-/// 이 컴포넌트가 그리는 레이어(최상위 모달). notice와 동일 — host가 ops와 짝지어 백엔드에 넘긴다.
-pub const layer = draw.Layer.modal;
+/// 이 컴포넌트가 그리는 레이어(최상위 모달, modal_box 공유 — notice와 동일). host가 ops와 짝지어 백엔드에 넘긴다.
+pub const layer = modal_box.layer;
 
 /// 확인창 아래 줄에 항상 그리는 키 안내. 메시지(host가 주입)와 달리 정적이라 컴포넌트가 소유한다.
 /// Enter/Y = 닫기 진행, Esc/N = 취소. 표준 확인 다이얼로그 키 관례(기본 동작은 안전한 취소가 아니라 명시
@@ -70,10 +71,9 @@ pub fn handle(ev: input.InputEvent, state: *State) ?Action {
     }
 }
 
-/// 중앙 모달 박스(배경 fill + focus 테두리 + 메시지 줄 + 안내 줄)를 `out`에 append한다. 안 열렸으면 무동작.
-/// 순수: state·props·tokens만 읽는다. ops·runs 슬라이스는 호출자가 준 frame arena가 소유한다. 폭/클램프 로직은
-/// notice.view와 동형(soft-lock 방지·사이드바 침범 방지)이되, 메시지+안내 **두 줄**이라 박스 높이가 한 줄 더 크고
-/// 박스 폭은 두 줄 중 넓은 쪽 기준이다.
+/// 메시지 줄 + 안내 줄(2줄)을 중앙 모달 박스로 그린다 — 박스 기하·폭 clamp·soft-lock 가드·배경 quad+테두리는
+/// modal_box.view 단일 출처에 위임한다(notice는 1줄, confirm은 2줄). 안 열렸으면 무동작. 메시지=surface_fg,
+/// 안내=muted_fg(위계). 순수: state·props·tokens만 읽는다.
 pub fn view(
     state: *const State,
     p: props.ChromeProps,
@@ -82,59 +82,10 @@ pub fn view(
     out: *std.ArrayList(draw.Op),
 ) !void {
     if (!state.open) return;
-    const m = p.metrics;
-    const cw = @max(m.cell_width_px, 1);
-    const ch = @max(m.cell_height_px, 1);
-
-    // 박스 폭 = 두 줄(메시지·안내) 중 넓은 쪽 표시 폭 + 좌우 여백. notice와 같은 이유로 터미널 영역(사이드바
-    // 오른쪽) 칸 수로 clamp한다 — 넘으면 사이드바를 침범하거나 우측 오버플로. 표시 폭은 코드포인트 근사라
-    // wide(EAW=2) 문자는 과소측정될 수 있다(notice와 동일 한계 — 정확한 display-width 보정은 후속).
-    const term_w_px = m.backing_width_px -| m.sidebar_width_px;
-    const term_cols = term_w_px / cw;
-    // notice와 동일: term_cols==0(터미널 영역이 한 셀보다 좁음)이면만 생략한다(중앙배치 뺄셈 언더플로 방지).
-    // 1~3칸이어도 작은 박스라도 그린다 — '열림이지만 안 보임'이면 handle이 모든 키를 소비해 soft-lock이 된다.
-    if (term_cols == 0) return;
-    const pad: u32 = p.shape.modal_padding_px;
-    const avail_cols = (term_w_px -| 2 * pad) / cw;
-    const msg_cols: u32 = @intCast(std.unicode.utf8CountCodepoints(state.message) catch state.message.len);
-    const hint_cols: u32 = @intCast(std.unicode.utf8CountCodepoints(hint) catch hint.len);
-    const content_cols = @max(msg_cols, hint_cols);
-    const box_cols = @max(@min(content_cols + 2 * tk.space.modal_margin_cells, avail_cols), 1);
-    const box_w = box_cols * cw;
-    const box_h = 4 * ch; // 위 여백 + 메시지 + 안내 + 아래 여백 (notice보다 한 줄 큼)
-
-    // 터미널 영역 안에서 중앙 배치(notice와 동일). box_w <= term_w_px라 (term_w_px - box_w)는 비음수.
-    const sidebar = @as(i32, @intCast(m.sidebar_width_px));
-    const x = sidebar + @as(i32, @intCast((term_w_px - box_w) / 2));
-    const y = @divTrunc(@as(i32, @intCast(m.backing_height_px)) - @as(i32, @intCast(box_h)), 2);
-    const rect = draw.Rect{ .x = x, .y = y, .w = box_w, .h = box_h };
-
-    const bg_r = p.shape.corner_radius_px;
-    const bw = p.shape.border_width_px;
-    // notice와 동일한 모달 배경: 둥근 quad + quad 테두리(focus_accent). tui(0)면 셀 배경 + 아래 Op.border 셀.
-    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
-    try out.append(arena, .{ .border = .{
-        .rect = rect,
-        .sides = .{ .top = true, .right = true, .bottom = true, .left = true },
-        .role = .focus_accent,
-    } });
-    const text_x = x + @as(i32, @intCast(tk.space.modal_margin_cells * cw));
-    // 메시지 줄(가운데 위) — runs는 arena 소유.
-    const msg_runs = try arena.alloc(draw.Run, 1);
-    msg_runs[0] = .{ .text = state.message };
-    try out.append(arena, .{ .text = .{
-        .origin = .{ .x = text_x, .y = y + @as(i32, @intCast(ch)) },
-        .runs = msg_runs,
-        .role = .surface_fg,
-    } });
-    // 안내 줄(메시지 아래 한 줄) — 같은 좌측 여백, 흐린 역할(muted_fg)로 메시지와 위계를 준다.
-    const hint_runs = try arena.alloc(draw.Run, 1);
-    hint_runs[0] = .{ .text = hint };
-    try out.append(arena, .{ .text = .{
-        .origin = .{ .x = text_x, .y = y + @as(i32, @intCast(2 * ch)) },
-        .runs = hint_runs,
-        .role = .muted_fg,
-    } });
+    try modal_box.view(&.{
+        .{ .text = state.message, .role = .surface_fg },
+        .{ .text = hint, .role = .muted_fg },
+    }, p, tk, arena, out);
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -210,37 +161,7 @@ test "confirm view: 닫힘이면 ops 0, 열림이면 fill+border+message+hint(4 
     try std.testing.expectEqualStrings(hint, out.items[3].text.runs[0].text);
     // 안내 줄은 메시지 줄보다 한 줄 아래.
     try std.testing.expect(out.items[3].text.origin.y > out.items[2].text.origin.y);
-    // 모달 박스는 터미널 영역(사이드바 오른쪽) 안.
+    // 모달 박스는 터미널 영역(사이드바 오른쪽) 안. 박스 기하 엣지케이스(soft-lock 가드·폭 clamp·rich 패딩)는
+    // modal_box.zig 테스트가 단일 출처로 커버한다(여긴 confirm이 2줄을 넘겨 4 ops·역할·줄 순서를 내는지 위임 확인).
     try std.testing.expect(out.items[0].quad.rect.x >= 40);
-}
-
-test "confirm view: 좁은 창(1~3칸)이어도 작은 박스를 그린다 — soft-lock 방지(notice와 동일)" {
-    const Rgb = @import("../../color.zig").Rgb;
-    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
-    // term 영역 = backing − sidebar = 60 − 40 = 20px, cw=8 → term_cols=2.
-    const p = props.ChromeProps{ .metrics = .{
-        .cell_width_px = 8,
-        .cell_height_px = 16,
-        .sidebar_width_px = 40,
-        .backing_width_px = 60,
-        .backing_height_px = 600,
-    } };
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var out: std.ArrayList(draw.Op) = .empty;
-
-    var s = State{};
-    s.show("실행 중인 명령이 있습니다");
-    try view(&s, p, &tk, arena, &out);
-    try std.testing.expectEqual(@as(usize, 4), out.items.len); // 생략 안 함 — 작아도 그린다(보여서 Esc 가능)
-    const box = out.items[0].quad.rect;
-    try std.testing.expect(box.w > 0 and box.w <= 20); // term 영역 안(오버플로/언더플로 없음)
-    try std.testing.expect(box.x >= 40); // 사이드바 오른쪽 유지
-
-    // term_cols==0이면 생략(중앙배치 뺄셈 언더플로 방지) — notice와 동일.
-    out.clearRetainingCapacity();
-    const narrow = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 45, .backing_height_px = 600 } };
-    try view(&s, narrow, &tk, arena, &out);
-    try std.testing.expectEqual(@as(usize, 0), out.items.len); // term_w=5px < cw=8 → term_cols=0 → 생략
 }

@@ -116,6 +116,10 @@ const sidebar_header_height_ratio_milli: u32 = 3000;
 // 사이드바 접기/펼치기 토글 아이콘 코드포인트(◧ U+25E7 — 좌측 절반 채운 사각형 = 왼쪽 패널). 헤더 아이콘 줄(펼침)·
 // 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
 const sidebar_toggle_codepoint: u21 = 0x25E7;
+// 검색 줄 레이아웃 — 렌더(buildSidebarHeaderFrame)·caret(sidebarSearchCaretRect)가 공유하는 단일 출처. 🔍를 왼쪽
+// 끝(col 0)에 붙이지 않고 좌측 패딩 1칸을 둔다(사용자 피드백: 너무 붙음). 입력/placeholder/caret은 🔍(2칸)+공백(1) 뒤.
+const sidebar_search_icon_col: u16 = 1; // 🔍 좌측 패딩 1칸
+const sidebar_search_text_col: u16 = sidebar_search_icon_col + 3; // 🔍(2칸)+공백(1) 뒤 = 입력/caret 시작 col(=4)
 // 사이드바 접힘 시 좌상단 펼치기 버튼이 신호등 오른쪽에서 비울 가로 여백(논리 pt). 신호등은 좌상단 ~70pt를 차지한다.
 const traffic_light_clearance_pt: u32 = 72;
 // 접힘 시 상단 타이틀바 띠의 최소 높이(논리 pt) — 신호등 세로 높이(~28pt)를 가려야 터미널/탭이 신호등을 침범 안 함.
@@ -3516,7 +3520,7 @@ pub const AppSession = struct {
         const ch = self.cell_height_px;
         const cols = self.sidebar_width_px / cw;
         const search_row = chrome.components.sidebar.headerRows(self.sidebar_header_height_px, ch) - 1;
-        const prompt_cols: u32 = 3; // 🔍(2칸) + 공백(1)
+        const prompt_cols: u32 = sidebar_search_text_col; // 🔍 좌측 패딩 + 🔍(2칸) + 공백(1) — 렌더와 단일 출처
         const caret_col = prompt_cols + self.sidebar_search_input.queryCols();
         // 검색어가 입력 영역(col 3..cols-4, 우측은 아이콘)을 넘으면 caret를 숨긴다 — buildSidebarHeaderFrame이 col
         // cols-4에서 query를 자르는 것과 동일. 안 그러면 IME 후보창이 사이드바 밖 터미널 pane 위로 떠 텍스트와 분리된다
@@ -6822,11 +6826,13 @@ pub const AppSession = struct {
                 const w: f32 = cw * 2.6; // 좌우 패딩을 더 줘 버튼처럼(아이콘 ~1.7칸 + 양옆 여백) — 사용자 피드백
                 const h: f32 = ch * 1.7;
                 const radius: f32 = @min(w, h) * 0.28; // 둥근 버튼
-                // 호버 배경은 **반투명**으로 둔다 — 헤더 아이콘 glyph는 터미널 셀 패스(draw 1b)에 그려지고 이 호버
-                // quad는 layer 0(under, draw 3)이라 아이콘보다 '뒤'가 아니라 '위'에 그려진다(그 사이에 끼울 패스가
-                // 없음). 불투명이면 색이 아이콘을 완전히 덮어 안 보였다(사용자 피드백). 반투명이면 아이콘이 비치고,
-                // 아래 buildSidebarHeaderFrame이 호버 아이콘 glyph 색까지 밝게(sidebar_active) 해 hover가 분명히 보인다.
-                const hover_fill = premultipliedRgba(self.sidebarHoverBg() & 0x00FF_FFFF, 0x66); // ≈40%
+                // 호버 배경은 **전경색(밝음) 기반 반투명**으로 둔다. 헤더 아이콘 glyph는 터미널 셀 패스(draw 1b)에,
+                // 이 호버 quad는 layer 0(under, draw 3)이라 아이콘 '뒤'가 아니라 '위'에 그려진다(그 사이에 끼울 패스가
+                // 없음). 그래서 중간톤/불투명이면 아이콘을 어둡게 덮었다(사용자 피드백). 밝은 전경색을 낮은 알파로 깔면
+                // 어두운 사이드바 배경 위엔 밝은 하이라이트로 보이고, 밝은 아이콘 위엔 같은 밝기라 아이콘이 안 어두워진다.
+                const fgc = self.appearance.theme.sidebar_foreground;
+                const fg_rgb: u32 = (@as(u32, fgc.r) << 16) | (@as(u32, fgc.g) << 8) | fgc.b;
+                const hover_fill = premultipliedRgba(fg_rgb, 0x40); // ≈25% 밝은 하이라이트(아이콘은 안 어두워짐)
                 self.gpu_quads.append(self.allocator, .{
                     .x = center_x - w / 2.0,
                     .y = 0,
@@ -7399,24 +7405,19 @@ pub const AppSession = struct {
         // 줄0: 우측 아이콘 3개 — 사이드바 접기(◧ cols-8)·view options(⚙ cols-5)·새 워크스페이스(+ cols-2). 3칸 간격,
         // 우측 1칸 패딩(cols-1 비움). 아이콘이 ~1.7칸 폭이라 2칸 간격이면 서로 붙어 보여(사용자 피드백) 3칸으로 띄운다.
         // headerHit의 toggle/view_options/new_workspace zone과 같은 col(단일 레이아웃 소스).
-        // 호버 중인 아이콘은 밝은 색(sidebar_active)으로 강조 — 호버 배경 quad가 반투명이라 아이콘이 비치고, glyph
-        // 색까지 밝아져 hover가 분명히 보인다(불투명 배경이 아이콘을 덮던 문제의 보강). 호버 영역은 setHoveredHeaderRegion이
-        // 아이콘(◧/⚙/+)일 때만 set한다(검색·none은 null).
-        const icon_hover: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_active };
-        const hr = self.hovered_header_region orelse .none;
-        const fg_toggle = if (hr == .toggle_sidebar) icon_hover else fg;
-        const fg_view = if (hr == .view_options) icon_hover else fg;
-        const fg_new = if (hr == .new_workspace) icon_hover else fg;
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 8, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg_toggle } });
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 5, .codepoint = 0x2699, .style = .{ .foreground = fg_view } });
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg_new } });
+        // 아이콘 색은 호버 여부와 무관하게 항상 sidebar_foreground다 — hover 강조는 아래 호버 배경 quad(밝은 반투명)가
+        // 맡는다. 예전엔 호버 아이콘을 sidebar_active로 재색칠했는데, Ghostty 테마에선 sidebar_active가 밝은 전경색이
+        // 아니라 어두운 밴드색이라 아이콘이 오히려 어두워졌다(사용자 피드백) — 재색칠을 제거한다.
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 8, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 5, .codepoint = 0x2699, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
         // 검색 줄: 🔍(EAW 2칸) + 입력 텍스트(query+preedit, EAW 한글 2칸), 비면 placeholder "Search"(muted).
         // 검색어는 blur(비활성)돼도 보존해 그대로 그린다 — 다시 클릭해 이어서 편집·필터(초안 보존). preedit은 활성일
         // 때만 존재. caret/IME 후보창은 sidebarSearchCaretRect가 잡는다(활성일 때만).
-        try cells.append(self.allocator, .{ .row = search_row, .col = 0, .codepoint = 0x1F50D, .width = 2, .style = .{ .foreground = muted } });
+        try cells.append(self.allocator, .{ .row = search_row, .col = sidebar_search_icon_col, .codepoint = 0x1F50D, .width = 2, .style = .{ .foreground = muted } });
         const max_col = cols -| 4; // 우측 아이콘 영역 침범 방지
         const has_text = self.sidebar_search_input.query.items.len > 0 or self.sidebar_search_input.preedit.items.len > 0;
-        var col: u16 = 3;
+        var col: u16 = sidebar_search_text_col;
         if (has_text) {
             const texts = [_][]const u8{ self.sidebar_search_input.query.items, self.sidebar_search_input.preedit.items };
             for (texts) |text| {
@@ -7433,7 +7434,7 @@ pub const AppSession = struct {
             // placeholder "Search"는 비활성+빈 검색일 때만(활성+빈 검색은 caret만 — Find/팔레트처럼 빈 입력칸에 커서).
             const placeholder = "Search";
             for (placeholder, 0..) |ch, i| {
-                const c: u16 = @intCast(3 + i);
+                const c: u16 = @intCast(sidebar_search_text_col + i);
                 if (c >= max_col) break;
                 try cells.append(self.allocator, .{ .row = search_row, .col = c, .codepoint = ch, .style = .{ .foreground = muted } });
             }

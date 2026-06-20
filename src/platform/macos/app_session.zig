@@ -6873,7 +6873,9 @@ pub const AppSession = struct {
         if (slot_h > 0 and self.sidebar_width_px > 0) for (self.sidebar_visible_tabs.items, 0..) |orig, i| {
             const tab = self.tabs.items[orig]; // 표시 슬롯 i → 원본 탭(검색 필터)
             if (tab.background_color == 0) continue;
-            const c = premultipliedRgba(tab.background_color & 0x00FF_FFFF, tab_bg_tint_alpha);
+            // GpuQuad는 straight-alpha(셰이더가 rgb*=a) — premultipliedRgba를 쓰면 이중 premultiply로 틴트가
+            // 흐려져 활성/호버 슬롯의 blendRgb(직접 알파) 경로보다 약했다(code-review 발견). straight로 맞춰 일치시킨다.
+            const c = (@as(u32, tab_bg_tint_alpha) << 24) | (tab.background_color & 0x00FF_FFFF);
             self.gpu_quads.append(self.allocator, .{
                 .x = 0,
                 .y = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(slot_h)) + @as(f32, @floatFromInt(self.sidebar_header_height_px)),

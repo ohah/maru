@@ -140,11 +140,31 @@ pub fn view(
     const cancel_bg: tokens.ColorRole = if (confirm_focused) .tab_hover_bg else .focus_accent;
     const cancel_fg: tokens.ColorRole = if (confirm_focused) .surface_fg else .surface_bg;
     const group_x = modal_box.centerX(box, btn_row_cols);
-    try modal_box.fillCells(box, group_x, 2, default_btn_cols, confirm_bg, arena, out);
-    try modal_box.text(box, group_x + @as(i32, @intCast(btn_pad * box.cw)), 2, confirm_text, confirm_fg, arena, out);
+    // 버튼은 박스 안쪽 우측 끝을 넘지 않게 한다 — 아주 좁은 창/긴 라벨로 btn_row_cols > inner_cols면 centerX가 group_x를
+    // inner_x로 붙여도 버튼이 박스 밖으로 넘쳐, fill rect가 rasterize bounding box를 패널 밖(사이드바/터미널)으로 키운다.
+    // fitButtonCols로 폭을 안쪽 끝까지로 줄이고, **0이면(완전히 밖) 버튼을 아예 생략**한다(0폭 fill을 패널 밖 x에 두면
+    // 그 자체가 bbox를 키워서 — 그땐 키보드 Esc/Y/N로 조작). 폭이 충분하면(정상 창) cols 그대로라 무변화. 라벨
+    // (placeText)은 격자에 자동 clip. inner 영역 = [inner_x, inner_x + inner_cols×cw).
+    const inner_right = box.inner_x + @as(i32, @intCast(box.inner_cols * box.cw));
+    const confirm_fit = fitButtonCols(group_x, default_btn_cols, box.cw, inner_right);
+    if (confirm_fit > 0) {
+        try modal_box.fillCells(box, group_x, 2, confirm_fit, confirm_bg, arena, out);
+        try modal_box.text(box, group_x + @as(i32, @intCast(btn_pad * box.cw)), 2, confirm_text, confirm_fg, arena, out);
+    }
     const cancel_btn_x = group_x + @as(i32, @intCast((default_btn_cols + gap) * box.cw));
-    try modal_box.fillCells(box, cancel_btn_x, 2, cancel_btn_cols, cancel_bg, arena, out);
-    try modal_box.text(box, cancel_btn_x + @as(i32, @intCast(btn_pad * box.cw)), 2, cancel_text, cancel_fg, arena, out);
+    const cancel_fit = fitButtonCols(cancel_btn_x, cancel_btn_cols, box.cw, inner_right);
+    if (cancel_fit > 0) {
+        try modal_box.fillCells(box, cancel_btn_x, 2, cancel_fit, cancel_bg, arena, out);
+        try modal_box.text(box, cancel_btn_x + @as(i32, @intCast(btn_pad * box.cw)), 2, cancel_text, cancel_fg, arena, out);
+    }
+}
+
+/// 버튼 배경 fill 폭(칸)을 박스 안쪽 우측 끝(right_px)까지로 줄인다 — x 위치에서 cols칸이 안쪽을 넘으면 안 넘게.
+/// x가 이미 끝을 넘었으면 0(호출자가 그 버튼을 생략). 폭이 충분하면 cols 그대로(정상 창 무변화).
+fn fitButtonCols(x: i32, cols: u32, cw: u32, right_px: i32) u32 {
+    if (x >= right_px or cw == 0) return 0;
+    const avail: u32 = @intCast(@divFloor(right_px - x, @as(i32, @intCast(cw))));
+    return @min(cols, avail);
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -309,4 +329,32 @@ test "confirm view: 포커스가 accent 강조를 이동시킨다(←/→ 선택
     try std.testing.expect(accent_x_confirm >= 0 and accent_x_cancel >= 0);
     // 포커스가 오른쪽(취소) 버튼으로 가면 accent 강조도 오른쪽으로 이동한다.
     try std.testing.expect(accent_x_cancel > accent_x_confirm);
+}
+
+test "confirm view: 좁은 창에서 버튼 배경이 패널(quad) 밖으로 안 넘친다 — fill clamp 회귀" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    // term 영역 = 140 − 40 = 100px, cw=8 → term_cols=12, avail=12. 버튼 행(≈22칸)이 inner_cols(8)보다 넓어
+    // clamp 없으면 fill이 패널 밖으로 넘쳐 rasterize 격자를 키운다(사이드바/터미널 침범).
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 140, .backing_height_px = 600 } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+
+    var s = State{};
+    s.show("닫을까요?", .{ .confirm = "닫기", .cancel = "취소" });
+    try view(&s, p, &tk, arena, &out);
+
+    // 패널(quad) 우측 끝.
+    var panel_right: i32 = 0;
+    for (out.items) |op| if (op == .quad) {
+        panel_right = op.quad.rect.x + @as(i32, @intCast(op.quad.rect.w));
+    };
+    try std.testing.expect(panel_right > 0);
+    // 모든 배경 fill(버튼)이 패널 우측 끝을 넘지 않아야 한다(넘으면 격자 확장 → 패널 밖 그림).
+    for (out.items) |op| switch (op) {
+        .fill => |f| try std.testing.expect(f.rect.x + @as(i32, @intCast(f.rect.w)) <= panel_right),
+        else => {},
+    };
 }

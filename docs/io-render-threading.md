@@ -172,7 +172,9 @@ Phase 1(읽기·코어 처리·응답)·Phase 2(PTY 쓰기)는 I/O 스레드로 
 
 런타임 조사 결과(`src/platform/macos/app_session.zig` 등):
 
-- **위임 대상(mutate)**: `setPreedit`(IME), `scrollViewport`/`scrollToBottom`(PageUp·휠·드래그 autoscroll·타이핑 후 바닥 스냅), `selection*`(마우스 선택), `reportMouse`/`reportFocus`(리포팅 — PTY 응답 생성), `setCellMetrics`/`setConfigPalette`/`max_scrollback`(폰트·config reload).
+- **위임 대상(mutate)**: `setPreedit`(IME), `scrollViewport`/`scrollToBottom`(PageUp·휠·드래그 autoscroll·타이핑 후 바닥 스냅), `selection*`(마우스 선택), `reportMouse`/`reportFocus`(리포팅 — PTY 응답 생성), `setConfigPalette`/`max_scrollback`/`setCellMetrics`(config reload·폰트 변경).
+  - **구현 중 발견한 세분(P3-3)**: `reportFocus`는 P3-3(드묾, latency 무관). **`reportMouse`는 P3-4로 이동** — 마우스마다 PTY 응답을 만드는 빈번한 경로라 위임 지연이 §1 원결함(질의-응답 지연)과 **같은 latency 클래스**다. 그래서 §9.4 측정 대상(scroll·선택과 함께)으로 둔다. config(palette/scrollback/font-metrics)는 P3-3(infrequent).
+  - **위임 안 하는 mutate 예외(직접 유지)**: ① **`createTerm` 초기화**의 `setConfigPalette`/`max_scrollback`은 surface가 아직 runtime/reader에 **attach 전**이라 단일 스레드 — 위임 경로(링크)가 없고 경합도 없어 직접. ② **per-tick 렌더 경로**의 `setCellMetrics`/`setDefaultColors`(buildFrame이 `renderSnapshot` 직전 매 tick 적용)는 **렌더 read 준비**라 즉시 동기 필요 — `renderSnapshot`(아래)과 같은 부류로 메인 동기 유지. 폰트 변경 핸들러의 `setCellMetrics`는 위임하되 이 per-tick 안전망이 지연을 덮는다.
 - **메인 락-아래 유지(동기 읽기 — 위임 불가)**: `renderSnapshot`(매 프레임 30Hz, DrawList 복사), `imeCursorRect`(IME 후보창 위치 — **즉시 동기 반환** 필수), `alt_active`(PageUp 분기 판정), `cursor_blink`/`viewportHasBlink`/`scrollbackLen`/`viewOffset`(틱 상태). 이들은 즉시 값이 필요해 명령 큐로 못 옮긴다 → `core_mutex`는 사라지지 않고 **렌더 읽기 ↔ reader/위임 write**를 계속 보호한다("완전 무락"은 이 렌더 구조상 불가).
 
 ### 9.2 CoreCommandQueue
@@ -217,8 +219,8 @@ mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 
 - **P3-0 — 이 설계 + (a) 확정 + §9.7 측정/디버그** ✅(이 PR).
 - **P3-1 — CoreCommandQueue 프리미티브** + 단위 테스트 + `coreq.*` 디버그 스코프 + `core_command_apply` perf 벤치(미배선 — `PtyWriteQueue` 선례).
 - **P3-2 — IME `setPreedit` 위임**(비민감 첫 사례 — `commitComposition`/`imeMarked`를 명령으로). 재진입 토양 1순위 제거.
-- **P3-3 — 리포팅·config 위임**.
-- **P3-4 — scroll·선택 위임 + latency 실측**((a) 기본; 실측상 체감되는 경로만 국소 (b) 강등).
+- **P3-3 — `reportFocus`·config 위임** ✅: `reportFocus`(드묾)·`setConfigPalette`/`max_scrollback`(reload 루프)·`setCellMetrics`(폰트 변경)를 `enqueueCoreCommand`로 위임. 응답 생성 명령은 reader가 PTY로 흘리고 non-interactive 폴백도 같게 흘린다. `report_mouse`/config 명령 변형 + `apply` 추가. createTerm 초기화·per-tick 렌더 metric은 §9.1대로 직접 유지. `reportMouse`는 P3-4(측정)로 이동.
+- **P3-4 — scroll·선택·`reportMouse` 위임 + latency 실측**((a) 기본; 실측상 체감되는 경로만 국소 (b) 강등). `reportMouse`는 빈번한 PTY-응답이라 §1 결함과 같은 클래스 — 여기서 측정해 판정.
 - 각 단계 §6 테스트(reader-processing·hammer·close-race) 확장 + §9.7 관측 훅 동반, `assertOwnedBySelf`가 위임 경로의 락 계약을 강제.
 - **마지막 — `/code-review max`**: 스택 tip에서 결함 즉시 수정([[drive-multi-pr-plan-to-completion]]). main 자동 머지 안 함.
 

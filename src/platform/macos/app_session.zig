@@ -3258,11 +3258,10 @@ pub const AppSession = struct {
         // 폰트/DPI 변경을 활성 surface 코어에 즉시 반영(kitty 자동 크기 advance용 — renderFrame 안전망보다
         // 먼저, 변경 직후 첫 PTY 출력에서 정확하도록). surface 생성 전(init 순서)이면 surface_initialized로 가드.
         if (self.surface_initialized) {
-            // 코어 변경이라 락 아래(docs/io-render-threading.md PR3 — 리더 core.write와 경합 방지).
-            const active_surface = self.activeSurface();
-            active_surface.lockCore(self.io);
-            defer active_surface.unlockCore(self.io);
-            active_surface.core.setCellMetrics(self.cell_width_px, self.cell_height_px);
+            // Phase 3 위임(docs/io-render-threading.md §9 P3-3): 폰트/DPI 변경 시 셀 메트릭을 reader로 위임한다(메인
+            // 직접 mutate 없음). 한 reader-턴 지연이 있어도 per-tick 렌더 경로(buildFrame의 setCellMetrics 안전망 —
+            // 렌더 준비라 §9 예외로 메인 동기 유지)가 재적용하므로 무해.
+            self.runtime.enqueueCoreCommand(self.activeSurface().id, .{ .set_cell_metrics = .{ .width = self.cell_width_px, .height = self.cell_height_px } }, self.io) catch {};
         }
     }
 
@@ -3358,9 +3357,10 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    term.surface.lockCore(self.io);
-                    defer term.surface.unlockCore(self.io);
-                    term.surface.core.setConfigPalette(palette);
+                    // Phase 3 위임(docs/io-render-threading.md §9 P3-3): config 재적용도 메인이 직접 mutate 안 하고
+                    // reader로 위임한다(interactive면 큐, 아니면 enqueueCoreCommand 내부 직접 폴백). reload는 attach 후라
+                    // 링크 존재(없으면 UnknownSurface로 스킵 — best-effort).
+                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_config_palette = palette }, self.io) catch {};
                 }
             }
         }
@@ -3374,9 +3374,8 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    term.surface.lockCore(self.io);
-                    defer term.surface.unlockCore(self.io);
-                    term.surface.core.max_scrollback = lines;
+                    // Phase 3 위임(P3-3): scrollback cap 재적용도 reader로 위임(config 재적용과 동일 — best-effort).
+                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_max_scrollback = lines }, self.io) catch {};
                 }
             }
         }
@@ -3555,25 +3554,10 @@ pub const AppSession = struct {
     pub fn focusChanged(self: *AppSession, gained: bool) void {
         self.window_focused = gained; // 완료 알림: 포커스 창의 활성 탭만 "보고 있는" 것으로 친다.
         if (!self.surface_initialized) return;
-        const surface = self.activeSurface();
-        // reportFocus는 코어 response를 생성(리더 core.write도 response 생성 — 같은 ArrayList 경합).
-        // 락 안에서 reportFocus+응답 복사, writeInput은 락 밖(docs/io-render-threading.md PR3, PR1 패턴).
-        var reply_buf: ?[]u8 = null;
-        {
-            surface.lockCore(self.io);
-            defer surface.unlockCore(self.io);
-            surface.core.reportFocus(gained);
-            const reply = surface.core.pendingResponse();
-            if (reply.len > 0) {
-                reply_buf = self.allocator.dupe(u8, reply) catch null;
-                surface.core.clearResponse();
-            }
-        }
-        // window 이벤트라 PTY output 경로(runtime의 응답 drain)를 안 타므로 여기서 직접 흘린다(DSR/CPR drain과 같은 형태).
-        if (reply_buf) |reply| {
-            defer self.allocator.free(reply);
-            self.runtime.writeInput(surface.id, .{ .bytes = reply }) catch {};
-        }
+        // Phase 3 위임(docs/io-render-threading.md §9 P3-3): reportFocus는 코어 mutate(+response 생성)라 메인이
+        // 직접 안 하고 reader로 위임한다 — reader가 적용 후 pendingResponse를 PTY로 흘린다(non-interactive 폴백은
+        // enqueueCoreCommand가 직접 흘림). focus→응답 인과는 그 명령 처리 시 응답 생성으로 보존.
+        self.runtime.enqueueCoreCommand(self.activeSurface().id, .{ .report_focus = gained }, self.io) catch {};
     }
 
     /// 스크린 점(backing px) 아래 panel의 활성 Term surface(없으면 — 사이드바/밖 — null). 휠 라우팅에 쓴다.

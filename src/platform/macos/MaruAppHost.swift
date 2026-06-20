@@ -739,7 +739,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // release해, surface.window 강참조를 ARC가 release할 때 over-release 크래시가 난다). 단일 창은 close가
         // 곧 앱 종료라 안 드러났지만, 멀티 창에서 한 창만 닫으면(앱 유지) 터진다. quick 패널과 같은 가드.
         window.isReleasedWhenClosed = false
-        window.title = "Maru"
+        // 창 제목을 빈 문자열로 둔다 — titleVisibility=.hidden이어도 창을 드래그(이동)하면 AppKit이 제목 텍스트를
+        // 잠깐 띄우는데(특히 fullSizeContentView에서 콘텐츠 위로), 사이드바 헤더 chrome과 겹쳐 "Maru"가 떠 보였다.
+        // 제목 자체를 비워 드래그 중에도 안 뜨게 한다(앱 이름은 Info.plist가 소유 — 메뉴/Dock엔 영향 없음).
+        window.title = ""
         // 네이티브 타이틀바를 숨기고 신호등(닫기·최소화·확대)만 좌상단에 남긴다: 타이틀바 투명 + 제목 숨김 +
         // fullSizeContentView로 콘텐츠(사이드바)가 창 top까지 차오르게 한다. 사이드바 헤더 chrome이 신호등 영역에
         // 정렬한다(maru Zig+GPU chrome 전략 — 네이티브 뷰 없이 직접 그림). 베이스: 모던 macOS 표준 패턴. 외부

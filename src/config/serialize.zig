@@ -63,6 +63,25 @@ pub fn valueForKey(kvs: []const KeyValue, key: []const u8) ?[]const u8 {
     return null;
 }
 
+/// 주어진 키들의 **현재 값만** config 텍스트에 in-place 반영한다(즉시-저장 GUI write-back의 토대 — S0-1b). 각 키의
+/// 값은 `configKeyValues`(스키마 직렬화 단일 출처)에서 가져오고, `updateConfigText`로 부분 갱신해 주석·미파싱 키·다른
+/// 줄을 보존한다. **override-only by construction** — 넘긴 키만 쓰므로 기본값 40개를 파일에 쏟지 않는다(full-dump 회피).
+/// `configKeyValues`가 emit하는 키(스키마 스칼라 + 특수 workspace.root·shell.args, 그리고 설정된 palette.N·env.*)만
+/// 처리한다. 거기 없는 키(`keybind`·`theme.preset`·오타)는 `valueForKey`가 null이라 **스킵**한다(그 키는 호출처가
+/// 자체 직렬화). 반환은 owned(`allocator`). 사이드바 ⚙ 토글이 쓰던 2키 하드코딩을 이걸로 일반화.
+pub fn updateForKeys(allocator: std.mem.Allocator, original: []const u8, config: theme.Config, keys: []const []const u8) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const all = try configKeyValues(aa, config);
+    var updates: std.ArrayList(KeyValue) = .empty;
+    for (keys) |k| {
+        const v = valueForKey(all, k) orelse continue; // 스키마 키만 — 특수 키는 호출처 책임
+        try updates.append(aa, .{ .key = k, .value = v });
+    }
+    return loader.updateConfigText(allocator, original, updates.items);
+}
+
 // ── round-trip 대칭 테스트 ──────────────────────────────────────────────────────────────────────
 // parse(render(configKeyValues(cfg)))가 원래 cfg 필드를 그대로 복원하는지 못박는다. parse와 configKeyValues 중
 // 한쪽만 새 키를 다루면 여기서 깨진다(둘을 같이 늘리게 강제하는 가드). Linux CI(순수)에서 돈다.
@@ -208,4 +227,24 @@ test "valueForKey: 직렬화 목록에서 단일 키 값을 고른다" {
     const kvs = try configKeyValues(arena.allocator(), cfg);
     try std.testing.expectEqualStrings("bar", valueForKey(kvs, "cursor.shape").?);
     try std.testing.expectEqual(@as(?[]const u8, null), valueForKey(kvs, "no.such.key"));
+}
+
+test "updateForKeys: 넘긴 키만 현재값으로 부분 갱신, 나머지/주석 보존, 비-스키마 키 스킵 (S0-1b)" {
+    const a = std.testing.allocator;
+    var cfg: theme.Config = .{};
+    cfg.cursor.blink = false; // 기본 true에서 변경
+    cfg.font.size = 16; // 변경했지만 키를 안 넘기면 안 써져야 함(override-only)
+
+    const original = "# 사용자 주석\ncursor.blink = true\nfont.family = Menlo\n";
+    // cursor.blink만 갱신 요청(+ configKeyValues에 없는 키 keybind는 스킵돼야 — keybind/preset/오타는 valueForKey null)
+    const text = try updateForKeys(a, original, cfg, &.{ "cursor.blink", "keybind" });
+    defer a.free(text);
+
+    var p = try loader.parse(a, text);
+    defer p.deinit();
+    try std.testing.expectEqual(false, p.config.cursor.blink); // 갱신됨
+    try std.testing.expectEqual(@as(f32, 14), p.config.font.size); // 안 넘김 → 텍스트에 없음 → 기본 14(override-only)
+    try std.testing.expectEqualStrings("Menlo", p.config.font.family); // 원본 다른 줄 보존
+    try std.testing.expect(std.mem.indexOf(u8, text, "# 사용자 주석") != null); // 주석 보존
+    try std.testing.expect(std.mem.indexOf(u8, text, "keybind") == null); // configKeyValues에 없는 키는 스킵(안 써짐)
 }

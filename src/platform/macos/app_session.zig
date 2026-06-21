@@ -928,6 +928,9 @@ pub const AppSession = struct {
     // serializeConfig가 돌려주는 갱신된 config 텍스트의 소유 버퍼(다음 호출/deinit까지 유효 —
     // workspace_buffer 패턴). Swift가 받아 config 경로에 atomic write한다(앱→config 양방향 동기).
     sidebar_config_buffer: ?[]u8 = null,
+    // Reset to Defaults가 예약한 전체 config 텍스트(세팅 줄 제거본). serializeConfig가 이게 있으면 부분 갱신 대신
+    // 통째 반환한다(소유 이전). takeConfigDirty가 이걸 dirty 신호로도 본다. 소비/deinit 시 free.
+    pending_config_text: ?[]u8 = null,
     // 시작 시 로드한 raw config(~/.config/maru/config). arena가 font.family 문자열을 소유하고,
     // resolve된 appearance.font.family가 그 슬라이스를 빌리므로 세션 동안 살아 있어야 한다.
     loaded_config: config_mod.ParsedConfig = undefined,
@@ -4338,48 +4341,41 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// "Reset to Defaults" 메뉴 — config 파일 값이 아니라 **하드코딩 공장 기본값**(`Config{}` resolve)으로 되돌린다.
-    /// 두 가지를 한다: ① **즉시** appearance(폰트·줌·여백·색/palette)와 behavior(scrollback/bell/page-keys/shift-enter/
-    /// ime-enter/ambiguous-width/sidebar)를 기본값으로 런타임 적용(reloadConfig가 파일로 하는 것을 기본 Config로). ②
-    /// **영구**: 세팅 화면이 다루는 스칼라 중 기본값에서 바뀐 키만 dirty로 표시해 다음 tick의 serializeConfig가 config
-    /// 파일을 in-place로 기본값으로 되돌린다(주석·수동/특수 키 — keybind·env·palette·theme.preset·cursor.color·
-    /// workspace.root·shell.* — 는 보존; 도배 방지는 changedScalarKeys가 책임). 순서: 변경 키 수집은 config 교체 전(old
-    /// 기준), applyAppearance는 loaded_config 교체 전(옛 font.family 슬라이스 참조를 끊는다 — reloadConfig와 동일 원리).
+    /// "Reset to Defaults" 메뉴 — config 파일 값이 아니라 **하드코딩 공장 기본값**으로 되돌린다. config 파일에서 세팅
+    /// 대상 줄(`resettableKeys` — 스칼라 − {shell.command, term} + preset/alias)을 제거한 텍스트 하나를 만들어,
+    /// ① 그 텍스트를 파싱해 런타임에 적용하고(`reloadConfigFromText` — 세팅은 기본값으로, env·shell·term·workspace.root·
+    /// keybind·palette·cursor.color·주석은 파일에 남아 그대로 보존) ② **같은 텍스트**를 파일에 write 예약한다
+    /// (`pending_config_text` → 다음 tick Swift atomic write). 단일 텍스트가 출처라 런타임==파일이 자동 일관하고,
+    /// "줄 제거" 방식이라 기본값 줄을 새로 쏟지 않아 파일 도배가 없으며 preset/alias 줄도 깔끔히 사라진다(parse-time에
+    /// 펼쳐진 색/패딩이 진짜 기본으로 복귀). 읽기·키목록·제거 실패면 무동작(forgiving).
     pub fn resetToDefaults(self: *AppSession) void {
-        const base: config_mod.Config = .{};
-        const default_appearance = config_mod.resolveAppearance(base) catch return; // 기본값은 항상 valid(방어적 무동작)
-        // ① 영구 초기화 예약: override된 스칼라 키만 dirty(파일에 줄이 있으니 in-place 교체 → full-dump 도배 없음).
+        const original = self.readConfigText() catch return; // OOM만 무동작
+        defer self.allocator.free(original);
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        if (config_mod.changedScalarKeys(arena.allocator(), self.loaded_config.config, base)) |keys| {
-            for (keys) |k| self.markConfigKeyDirty(k); // k는 스키마 정적 리터럴 → arena.deinit 후에도 유효
-        } else |_| {}
-        // ② 즉시 런타임 적용. appearance 먼저(옛 family 참조 끊김; 기본 family는 정적 리터럴).
-        self.applyAppearance(default_appearance);
-        self.loaded_config.config = base; // 슬라이스 필드 전부 정적/빈이라 arena 의존 없음
-        // behavior 캐시 + 라이브 surface 재적용(reloadConfig 패턴 — base 기준).
-        self.audible_bell = base.bell.audible;
-        self.page_keys_scroll = base.input.page_keys == .scroll;
-        self.shift_enter_meta = base.input.shift_enter == .newline;
-        self.ime_enter_newline = base.input.ime_enter == .newline;
-        self.reapplyScrollback();
-        self.reapplyConfigPalette();
-        self.reapplyAmbiguousWidth();
-        self.rebuildSidebar() catch {};
-        self.metal_dirty = true;
+        const keys = config_mod.resettableKeys(arena.allocator()) catch return;
+        const reset_text = config_mod.removeConfigKeys(self.allocator, original, keys) catch return;
+        // ① 런타임: 제거된 텍스트를 파싱해 적용(reset_text는 parse가 값을 dupe하므로 이후 빌림 없음).
+        self.reloadConfigFromText(reset_text);
+        // ② 파일: 같은 텍스트를 전체 write 예약(소유 이전 — serializeConfig/deinit이 free).
+        if (self.pending_config_text) |old| self.allocator.free(old);
+        self.pending_config_text = reset_text;
     }
 
-    /// "Reload Config" 메뉴 — config 파일을 재로드해 재시작 없이 반영한다. 파싱은 forgiving(알 수 없는 key/잘못된
-    /// 값은 기본값 유지 + diagnostic), 로드 자체가 실패(OOM 등)하면 무동작이다(기존 config 유지). 적용 순서:
-    /// ① 새 Parsed로 loaded_config 교체(옛 arena deinit 후 — appearance가 family 슬라이스를 빌리므로 새 appearance를
-    ///    먼저 만들지 말고 loaded_config를 갈아끼운 뒤 resolve한다 → 옛 family를 빌린 옛 appearance는 이 시점에 버린다).
-    /// ② appearance resolve + applyAppearance(메트릭·grid·atlas + base_font_size).
-    /// ③ 파일 새 값이라 코어 behavior(scrollback/bell/page-keys/palette/ambiguous-width)도 모든 surface에 재적용.
-    /// resetToDefaults와 형제 경로다 — reload는 파일 값으로, reset은 기본 Config로 같은 appearance/behavior 적용을 한다.
-    pub fn reloadConfig(self: *AppSession) void {
-        var new_parsed = config_mod.loadConfigDefault(self.io, self.allocator) catch return; // 실패 시 무동작(forgiving)
-        // 새 config로 appearance를 먼저 resolve한 뒤에 옛 loaded_config를 버린다 — resolve가 실패하면 옛
-        // appearance·loaded_config를 그대로 보존해 use-after-free(옛 arena의 family를 빌린 appearance)를 막는다.
+    /// config 파일 텍스트를 읽어 owned로 돌려준다(경로 없음·읽기 실패면 빈 문자열의 dup — forgiving). serializeConfig·
+    /// reloadConfig·resetToDefaults가 공유한다. 호출자가 free한다. OOM만 error로 빠진다.
+    fn readConfigText(self: *AppSession) ![]u8 {
+        const path = self.configPath();
+        if (path.len == 0) return self.allocator.dupe(u8, "");
+        return std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(1 << 20)) catch self.allocator.dupe(u8, "");
+    }
+
+    /// 주어진 config 텍스트를 파싱해 런타임에 적용한다(reloadConfig=디스크 텍스트, resetToDefaults=세팅 줄 제거 텍스트
+    /// — 형제 경로). 순서: 새 Parsed로 appearance를 먼저 resolve한 뒤 옛 loaded_config를 버린다 — resolve 실패면 옛
+    /// 것을 보존해 use-after-free(옛 arena의 family를 빌린 appearance)를 막는다. behavior 캐시·palette·scrollback·
+    /// ambiguous-width·사이드바도 새 config로 재적용. 파싱/resolve 실패면 무동작(forgiving — 기존 config 유지).
+    fn reloadConfigFromText(self: *AppSession, text: []const u8) void {
+        var new_parsed = config_mod.parseConfig(self.allocator, text) catch return; // 실패 시 무동작(forgiving)
         const new_appearance = config_mod.resolveAppearance(new_parsed.config) catch {
             new_parsed.deinit();
             return;
@@ -4387,7 +4383,7 @@ pub const AppSession = struct {
         self.applyAppearance(new_appearance); // appearance 통째 교체 — 옛 family를 더는 안 읽는다
         self.loaded_config.deinit(); // 이제 옛 loaded_config(arena)를 버려도 안전
         self.loaded_config = new_parsed;
-        // 파일 새 값이라 캐시된 behavior도 갱신한다(appearance 밖 — applyAppearance가 안 건드림).
+        // 캐시된 behavior도 갱신한다(appearance 밖 — applyAppearance가 안 건드림).
         self.audible_bell = self.loaded_config.config.bell.audible;
         self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
         self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
@@ -4395,10 +4391,19 @@ pub const AppSession = struct {
         self.reapplyScrollback();
         self.reapplyConfigPalette();
         self.reapplyAmbiguousWidth();
-        // 사이드바 카드 표시 토글(sidebar.show-branch/folder)이 파일에서 바뀌었을 수 있다 — 카드를 다시
-        // 빌드해 즉시 반영한다(config→앱 양방향). rebuildSidebar 실패는 무시(다음 프레임에 자연 복구).
+        // 사이드바 카드 표시 토글(sidebar.show-branch/folder)이 바뀌었을 수 있다 — 카드를 다시 빌드해 즉시 반영한다
+        // (config→앱 양방향). rebuildSidebar 실패는 무시(다음 프레임에 자연 복구).
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
+    }
+
+    /// "Reload Config" 메뉴 — config 파일을 재로드해 재시작 없이 반영한다. 파싱은 forgiving(알 수 없는 key/잘못된
+    /// 값은 기본값 유지 + diagnostic), 읽기/파싱 실패면 무동작(기존 config 유지)이다. 디스크 텍스트를
+    /// reloadConfigFromText에 넘긴다(resetToDefaults는 같은 함수에 "세팅 줄을 지운 텍스트"를 넘기는 형제 경로).
+    pub fn reloadConfig(self: *AppSession) void {
+        const text = self.readConfigText() catch return; // OOM만 무동작
+        defer self.allocator.free(text);
+        self.reloadConfigFromText(text);
     }
 
     /// "Reset" 메뉴(⌘⇧R) — 활성 터미널 코어의 잔류 입력 모드(focus 1004·mouse·kitty keyboard 등)만
@@ -6172,7 +6177,7 @@ pub const AppSession = struct {
     /// 않는다 — serializeConfig가 성공적으로 직렬화한 뒤 비운다(실패 시 키 유지→다음 tick 재시도). Swift가 매 tick
     /// take_sidebar_config_dirty(ABI 이름 유지)로 drain해 1이면 serialize→atomic write한다.
     pub fn takeConfigDirty(self: *AppSession) bool {
-        return self.config_dirty_keys.items.len > 0;
+        return self.config_dirty_keys.items.len > 0 or self.pending_config_text != null;
     }
 
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
@@ -6369,14 +6374,15 @@ pub const AppSession = struct {
             self.allocator.free(b);
             self.sidebar_config_buffer = null;
         }
-        const path = self.configPath();
-        const owned: ?[]u8 = if (path.len == 0)
-            null
-        else
-            std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(1 << 20)) catch null;
-        defer if (owned) |o| self.allocator.free(o);
-        const original: []const u8 = owned orelse &.{};
-
+        // Reset to Defaults가 예약한 전체 텍스트가 있으면 키 기반 부분 갱신 대신 그것을 통째 쓴다(세팅 줄을 지운
+        // reset_text — 줄 삭제까지 반영). 소유를 sidebar_config_buffer로 옮겨 다음 호출/deinit이 free한다.
+        if (self.pending_config_text) |t| {
+            self.sidebar_config_buffer = t;
+            self.pending_config_text = null;
+            return t;
+        }
+        const original = try self.readConfigText();
+        defer self.allocator.free(original);
         // 바뀐 키만 현재값으로 부분 갱신(override-only write-back, S0-1b 일반화 — 사이드바 view options·세팅 화면
         // 공용). 값은 스키마 직렬화(configKeyValues)가 단일 출처라 타입별 손코드 중복이 없다. 성공 시 dirty 집합을
         // 비운다(아래) — updateConfigForKeys가 실패하면 try가 빠져나가 키가 남아 다음 tick 재시도된다.
@@ -8877,6 +8883,7 @@ pub const AppSession = struct {
         self.find_view_spans.deinit(self.allocator);
         if (self.workspace_buffer) |b| self.allocator.free(b);
         if (self.sidebar_config_buffer) |b| self.allocator.free(b);
+        if (self.pending_config_text) |b| self.allocator.free(b);
         self.config_dirty_keys.deinit(self.allocator);
         self.hover_leaf_scratch.deinit(self.allocator);
         self.scrollbar_leaf_scratch.deinit(self.allocator);
@@ -11305,10 +11312,11 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     try std.testing.expectEqual(font_size_max, session.appearance.font.size);
 }
 
-// Reset to Defaults: config 파일 값이 아니라 하드코딩 공장 기본값으로 되돌리는지. ① 런타임 줌·여백 + config behavior
-// 변경을 공장 기본값(resolveAppearance(.{}))으로 즉시 복원하고(appearance·메트릭·behavior 캐시·loaded_config), ②
-// 기본값에서 바뀐 스칼라 키만 config_dirty_keys에 예약하는지(다음 tick에 Swift가 파일 in-place 저장) 고정한다.
-test "resetToDefaults: 런타임/config 변경을 공장 기본값으로 복원하고 바뀐 키를 dirty로 예약한다" {
+// Reset to Defaults: config 파일에서 세팅 줄을 제거한 텍스트로 런타임을 공장 기본값으로 되돌리고, 같은 전체 텍스트를
+// 파일 write로 예약하는지(런타임==파일 단일 출처) 고정한다. 테스트 세션은 config 파일이 없어(readConfigText="")
+// reset_text="" → 완전 기본으로 복원된다. "어떤 줄을 지우고 어떤 줄을 보존하나"(preset 제거·shell.command 보존)의
+// 세부는 loader.removeKeys·serialize.resettableKeys 단위 테스트가 따로 못박는다.
+test "resetToDefaults: 런타임을 공장 기본값으로 복원하고 전체 텍스트를 파일 write로 예약한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 메트릭 + PTY
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -11323,31 +11331,24 @@ test "resetToDefaults: 런타임/config 변경을 공장 기본값으로 복원�
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000); // backing px 확정 → grid 산출
 
-    const dirtyHas = struct {
-        fn f(s: *AppSession, key: []const u8) bool {
-            for (s.config_dirty_keys.items) |k| if (std.mem.eql(u8, k, key)) return true;
-            return false;
-        }
-    }.f;
-
     // 테스트엔 config 파일이 없어 init appearance == 공장 기본값.
     const factory = try config_mod.resolveAppearance(.{});
     const cw0 = session.cell_width_px;
     try std.testing.expectEqual(factory.font.size, session.appearance.font.size);
+    try std.testing.expect(!session.takeConfigDirty()); // 시작 시 write 예약 없음
 
-    // 런타임 줌·여백 + config behavior 변경(세팅 화면이 파일에 저장했을 법한 상태를 흉내).
+    // 런타임 줌·여백 + config behavior 변경(세팅 화면으로 바꾼 상태를 흉내).
     session.setFontSize(factory.font.size + 6);
     session.appearance.window_padding_right = factory.window_padding_right + 20;
-    session.loaded_config.config.font.size = factory.font.size + 6; // 파일에 저장됐던 비기본 폰트
-    session.loaded_config.config.bell.audible = false; // 기본 true에서 변경
+    session.loaded_config.config.font.size = factory.font.size + 6;
+    session.loaded_config.config.bell.audible = false;
     session.audible_bell = false;
     try std.testing.expect(session.appearance.font.size != factory.font.size);
     try std.testing.expect(session.cell_width_px > cw0); // 폰트 키우면 cell 픽셀이 커진다(메트릭)
-    session.config_dirty_keys.clearRetainingCapacity(); // 변경 과정에서 남았을 수 있는 dirty 정리
 
     session.resetToDefaults();
 
-    // ① 즉시: appearance·메트릭·behavior·loaded_config가 공장 기본값으로.
+    // ① 런타임: appearance·메트릭·behavior·loaded_config가 공장 기본값으로(reloadConfigFromText("")=기본 파싱).
     try std.testing.expectEqual(factory.font.size, session.appearance.font.size);
     try std.testing.expectEqual(factory.window_padding_right, session.appearance.window_padding_right);
     try std.testing.expectEqual(cw0, session.cell_width_px);
@@ -11356,15 +11357,14 @@ test "resetToDefaults: 런타임/config 변경을 공장 기본값으로 복원�
     try std.testing.expectEqual(factory.font.size, session.loaded_config.config.font.size);
     try std.testing.expectEqual(true, session.loaded_config.config.bell.audible);
 
-    // ② 영구: 바뀐 스칼라 키만 dirty로 예약(안 바뀐 키는 미포함 → 파일 도배 없음).
-    try std.testing.expect(dirtyHas(session, "font.size"));
-    try std.testing.expect(dirtyHas(session, "bell.audible"));
-    try std.testing.expect(!dirtyHas(session, "font.family"));
+    // ② 파일: 전체 reset 텍스트가 write 예약된다(다음 tick Swift atomic write).
+    try std.testing.expect(session.pending_config_text != null);
+    try std.testing.expect(session.takeConfigDirty());
 
-    // 반복 reset(이미 기본값) → 바뀐 키 없음(no-op이면 파일도 안 건드림).
-    session.config_dirty_keys.clearRetainingCapacity();
-    session.resetToDefaults();
-    try std.testing.expectEqual(@as(usize, 0), session.config_dirty_keys.items.len);
+    // serializeConfig가 예약 텍스트를 반환하고 예약을 비운다(소비 후 dirty 없음).
+    _ = try session.serializeConfig();
+    try std.testing.expect(session.pending_config_text == null);
+    try std.testing.expect(!session.takeConfigDirty());
 }
 
 // applyAppearance: 새 appearance를 통째로 갈아끼우면 appearance·base_font_size·cell 메트릭이 따라 바뀌는지.

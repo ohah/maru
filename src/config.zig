@@ -43,7 +43,8 @@ pub const ConfigKeyValue = loader.KeyValue;
 pub const configKeyValues = serialize.configKeyValues;
 pub const configValueForKey = serialize.valueForKey;
 pub const updateConfigForKeys = serialize.updateForKeys;
-pub const changedScalarKeys = serialize.changedScalarKeys;
+pub const removeConfigKeys = loader.removeKeys;
+pub const resettableKeys = serialize.resettableKeys;
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

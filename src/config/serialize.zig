@@ -86,23 +86,23 @@ pub fn updateForKeys(allocator: std.mem.Allocator, original: []const u8, config:
     return loader.updateConfigText(allocator, original, updates.items);
 }
 
-/// `config`가 `base`(보통 기본값 `.{}`)와 값이 다른 **스칼라 키만** 돌려준다(override-only reset의 토대 — "Reset to
-/// Defaults"가 config 파일을 기본값으로 되돌릴 때 쓴다). `appendSerialized`는 스칼라만 emit하므로(특수·수동 키 —
-/// `theme.palette.N`·`env.*`·`cursor.color/text`·`workspace.root`·`shell.args` — 는 빠진다) 두 dump를 같은 comptime
-/// 순서로 zip 비교하면 "세팅 화면이 다루는 스칼라 중 기본값에서 바뀐 것"만 남는다. 이 키만 dirty로 표시해 파일을
-/// in-place 갱신하면, 파일에 없던 기본값 줄을 새로 쏟지 않는다(`updateConfigText`의 append로 인한 full-dump 도배 방지).
-/// 반환 슬라이스는 `arena` 소유지만, 키 문자열은 스키마 정적 리터럴이라 arena 수명과 무관하다(호출자가 그대로 보관 가능).
-pub fn changedScalarKeys(arena: std.mem.Allocator, config: theme.Config, base: theme.Config) ![]const []const u8 {
-    var cur: std.ArrayList(KeyValue) = .empty;
-    var def: std.ArrayList(KeyValue) = .empty;
-    try schema.appendSerialized(arena, config, &cur);
-    try schema.appendSerialized(arena, base, &def);
-    std.debug.assert(cur.items.len == def.items.len); // 같은 comptime 순회 → 길이·키·순서 동일
+/// "Reset to Defaults"가 config 파일에서 **제거**할 키 목록(loader.removeKeys에 넘긴다). 줄을 지우면 다음 parse가
+/// 기본값을 쓰므로, 세팅 화면이 다루는 스칼라가 리셋 대상이다. `appendSerialized`로 스칼라 키를 comptime 순회해 모으되:
+///   - `shell.command`·`term`은 제외(보존) — 셸/PTY spawn이 새 탭마다 매번 읽어, 리셋이 런타임 셸/TERM을 바꾸면 안 됨.
+///   - `theme.preset`·`window.padding-x/y`·`window.padding`은 parse-time에 개별 스칼라로 펼쳐져 config엔 이름이 안 남는다
+///     — 파일 줄로만 식별되므로 명시 추가한다(이 줄을 지워야 펼쳐진 색/패딩이 진짜 기본으로 돌아간다).
+/// 그 밖의 특수·수동 키(`theme.palette.N`·`cursor.color/text`·`env.*`·`workspace.root`·`shell.args`)는 appendSerialized가
+/// 애초에 emit하지 않으므로 자동 보존된다. 반환 슬라이스는 arena 소유, 키 문자열은 스키마 정적 리터럴(수명 무관).
+pub fn resettableKeys(arena: std.mem.Allocator) ![]const []const u8 {
+    var kv: std.ArrayList(KeyValue) = .empty;
+    try schema.appendSerialized(arena, .{}, &kv); // 값은 무시, 키만 — 스칼라 전체 열거
     var out: std.ArrayList([]const u8) = .empty;
-    for (cur.items, def.items) |kc, kd| {
-        std.debug.assert(std.mem.eql(u8, kc.key, kd.key));
-        if (!std.mem.eql(u8, kc.value, kd.value)) try out.append(arena, kc.key);
+    for (kv.items) |e| {
+        if (std.mem.eql(u8, e.key, "shell.command") or std.mem.eql(u8, e.key, "term")) continue; // spawn이 읽음 — 보존
+        try out.append(arena, e.key);
     }
+    // parse-time 펼침(preset)·alias(padding-x/y) 줄은 스칼라 열거에 안 잡혀 명시 추가.
+    try out.appendSlice(arena, &.{ "theme.preset", "window.padding-x", "window.padding-y", "window.padding" });
     return out.toOwnedSlice(arena);
 }
 
@@ -277,11 +277,10 @@ test "updateForKeys: 넘긴 키만 현재값으로 부분 갱신, 나머지/주�
     try std.testing.expect(std.mem.indexOf(u8, text, "keybind") == null); // configKeyValues에 없는 키는 스킵(안 써짐)
 }
 
-test "changedScalarKeys: 기본값에서 바뀐 스칼라 키만 반환, 특수·미변경 키는 제외 (Reset to Defaults)" {
+test "resettableKeys: 세팅 스칼라 전체 포함, shell.command·term 제외, preset/alias 명시 추가 (Reset to Defaults)" {
     const a = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    const aa = arena.allocator();
     const has = struct {
         fn f(keys: []const []const u8, key: []const u8) bool {
             for (keys) |k| if (std.mem.eql(u8, k, key)) return true;
@@ -289,22 +288,24 @@ test "changedScalarKeys: 기본값에서 바뀐 스칼라 키만 반환, 특수�
         }
     }.f;
 
-    // 기본값 == 기본값 → 바뀐 키 없음(no-op reset이면 dirty 0 → 파일 무변경).
-    try std.testing.expectEqual(@as(usize, 0), (try changedScalarKeys(aa, .{}, .{})).len);
-
-    // 스칼라 변경 + 특수 키(palette/cursor.color/env) 변경 → 스칼라만 잡히고 특수는 빠진다(보존 대상).
-    var cfg: theme.Config = .{};
-    cfg.font.size = 20; // 스칼라(f32) 변경
-    cfg.cursor.shape = .bar; // 스칼라(enum) 변경
-    cfg.theme.palette[1] = "#d35f5f"; // 특수(theme.palette.N) — 제외
-    cfg.cursor.color = "#ff5555"; // 특수(nullable) — 제외
-    cfg.env = &.{"EDITOR=nvim"}; // 특수(env.*) — 제외
-    const keys = try changedScalarKeys(aa, cfg, .{});
-    try std.testing.expect(has(keys, "font.size")); // 바뀐 스칼라 포함
+    const keys = try resettableKeys(arena.allocator());
+    // 세팅 스칼라(appearance·behavior)는 리셋 대상.
+    try std.testing.expect(has(keys, "font.size"));
+    try std.testing.expect(has(keys, "font.family"));
+    try std.testing.expect(has(keys, "theme.background")); // preset이 펼치는 색도 직접 키로 리셋 대상
     try std.testing.expect(has(keys, "cursor.shape"));
-    try std.testing.expect(!has(keys, "theme.palette.1")); // 특수 키 제외
+    try std.testing.expect(has(keys, "bell.audible"));
+    try std.testing.expect(has(keys, "window.padding-top"));
+    // spawn이 매번 읽는 키는 보존(제외).
+    try std.testing.expect(!has(keys, "shell.command"));
+    try std.testing.expect(!has(keys, "term"));
+    // parse-time 펼침/alias 줄은 명시 추가(파일에서 지워야 기본으로 복귀).
+    try std.testing.expect(has(keys, "theme.preset"));
+    try std.testing.expect(has(keys, "window.padding-x"));
+    try std.testing.expect(has(keys, "window.padding-y"));
+    // 특수·수동 키는 appendSerialized가 emit 안 해 자동 보존.
+    try std.testing.expect(!has(keys, "theme.palette.1"));
     try std.testing.expect(!has(keys, "cursor.color"));
-    try std.testing.expect(!has(keys, "env.EDITOR"));
-    try std.testing.expect(!has(keys, "font.family")); // 안 바꾼 스칼라는 미포함(도배 방지의 핵심)
-    try std.testing.expect(!has(keys, "cursor.blink"));
+    try std.testing.expect(!has(keys, "workspace.root"));
+    try std.testing.expect(!has(keys, "shell.args"));
 }

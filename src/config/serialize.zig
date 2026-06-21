@@ -86,6 +86,26 @@ pub fn updateForKeys(allocator: std.mem.Allocator, original: []const u8, config:
     return loader.updateConfigText(allocator, original, updates.items);
 }
 
+/// `config`가 `base`(보통 기본값 `.{}`)와 값이 다른 **스칼라 키만** 돌려준다(override-only reset의 토대 — "Reset to
+/// Defaults"가 config 파일을 기본값으로 되돌릴 때 쓴다). `appendSerialized`는 스칼라만 emit하므로(특수·수동 키 —
+/// `theme.palette.N`·`env.*`·`cursor.color/text`·`workspace.root`·`shell.args` — 는 빠진다) 두 dump를 같은 comptime
+/// 순서로 zip 비교하면 "세팅 화면이 다루는 스칼라 중 기본값에서 바뀐 것"만 남는다. 이 키만 dirty로 표시해 파일을
+/// in-place 갱신하면, 파일에 없던 기본값 줄을 새로 쏟지 않는다(`updateConfigText`의 append로 인한 full-dump 도배 방지).
+/// 반환 슬라이스는 `arena` 소유지만, 키 문자열은 스키마 정적 리터럴이라 arena 수명과 무관하다(호출자가 그대로 보관 가능).
+pub fn changedScalarKeys(arena: std.mem.Allocator, config: theme.Config, base: theme.Config) ![]const []const u8 {
+    var cur: std.ArrayList(KeyValue) = .empty;
+    var def: std.ArrayList(KeyValue) = .empty;
+    try schema.appendSerialized(arena, config, &cur);
+    try schema.appendSerialized(arena, base, &def);
+    std.debug.assert(cur.items.len == def.items.len); // 같은 comptime 순회 → 길이·키·순서 동일
+    var out: std.ArrayList([]const u8) = .empty;
+    for (cur.items, def.items) |kc, kd| {
+        std.debug.assert(std.mem.eql(u8, kc.key, kd.key));
+        if (!std.mem.eql(u8, kc.value, kd.value)) try out.append(arena, kc.key);
+    }
+    return out.toOwnedSlice(arena);
+}
+
 // ── round-trip 대칭 테스트 ──────────────────────────────────────────────────────────────────────
 // parse(render(configKeyValues(cfg)))가 원래 cfg 필드를 그대로 복원하는지 못박는다. parse와 configKeyValues 중
 // 한쪽만 새 키를 다루면 여기서 깨진다(둘을 같이 늘리게 강제하는 가드). Linux CI(순수)에서 돈다.
@@ -255,4 +275,36 @@ test "updateForKeys: 넘긴 키만 현재값으로 부분 갱신, 나머지/주�
     try std.testing.expectEqualStrings("Menlo", p.config.font.family); // 원본 다른 줄 보존
     try std.testing.expect(std.mem.indexOf(u8, text, "# 사용자 주석") != null); // 주석 보존
     try std.testing.expect(std.mem.indexOf(u8, text, "keybind") == null); // configKeyValues에 없는 키는 스킵(안 써짐)
+}
+
+test "changedScalarKeys: 기본값에서 바뀐 스칼라 키만 반환, 특수·미변경 키는 제외 (Reset to Defaults)" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const has = struct {
+        fn f(keys: []const []const u8, key: []const u8) bool {
+            for (keys) |k| if (std.mem.eql(u8, k, key)) return true;
+            return false;
+        }
+    }.f;
+
+    // 기본값 == 기본값 → 바뀐 키 없음(no-op reset이면 dirty 0 → 파일 무변경).
+    try std.testing.expectEqual(@as(usize, 0), (try changedScalarKeys(aa, .{}, .{})).len);
+
+    // 스칼라 변경 + 특수 키(palette/cursor.color/env) 변경 → 스칼라만 잡히고 특수는 빠진다(보존 대상).
+    var cfg: theme.Config = .{};
+    cfg.font.size = 20; // 스칼라(f32) 변경
+    cfg.cursor.shape = .bar; // 스칼라(enum) 변경
+    cfg.theme.palette[1] = "#d35f5f"; // 특수(theme.palette.N) — 제외
+    cfg.cursor.color = "#ff5555"; // 특수(nullable) — 제외
+    cfg.env = &.{"EDITOR=nvim"}; // 특수(env.*) — 제외
+    const keys = try changedScalarKeys(aa, cfg, .{});
+    try std.testing.expect(has(keys, "font.size")); // 바뀐 스칼라 포함
+    try std.testing.expect(has(keys, "cursor.shape"));
+    try std.testing.expect(!has(keys, "theme.palette.1")); // 특수 키 제외
+    try std.testing.expect(!has(keys, "cursor.color"));
+    try std.testing.expect(!has(keys, "env.EDITOR"));
+    try std.testing.expect(!has(keys, "font.family")); // 안 바꾼 스칼라는 미포함(도배 방지의 핵심)
+    try std.testing.expect(!has(keys, "cursor.blink"));
 }

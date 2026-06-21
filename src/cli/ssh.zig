@@ -62,11 +62,15 @@ const ssh_value_opts = "bcDEeFIiJLlmOopQRSWw";
 /// `$XDG_CACHE_HOME` 우선, 없으면 `~/.cache`. 비우려면 이 파일을 지운다(아래 docs). 셸이 읽고 쓴다.
 const cache_path = "${XDG_CACHE_HOME:-$HOME/.cache}/maru/ssh-terminfo-hosts";
 
-/// 전체 래퍼 스크립트(`/bin/sh -c <script> sh <elig> <dest> <ssh args...>`로 실행). `$1`=bootstrap 적격
-/// 플래그("1"/"0"), `$2`=목적지(캐시 키), 나머지 `"$@"`=ssh 인자.
+/// 전체 래퍼 스크립트(`/bin/sh -c <script> sh <elig> <dest> <ctl> <ssh args...>`로 실행). `$1`=bootstrap
+/// 적격 플래그("1"/"0"), `$2`=목적지(캐시 키), `$3`=control socket 경로(빈 문자열이면 미사용), 나머지
+/// `"$@"`=ssh 인자. `$ctl`이 있으면 디렉터리를 만들고(`mkdir -p`) ssh `ControlPath`로 쓴다 — 드롭 파일
+/// 업로드가 이 socket으로 가는 사이드채널(docs/ssh-integration.md §4)의 토대다.
 ///
-/// **캐시 hit**(이 목적지에 이미 설치 기록 있음): bootstrap을 통째로 건너뛰고 `TERM=xterm-maru`로 바로
-/// exec한다 — 매 접속 설치 round-trip을 없앤다(Ghostty `+ssh-cache`식). 캐시는 셸이 grep으로 읽는다.
+/// **캐시 hit**(이 목적지에 이미 설치 기록 있음): bootstrap을 통째로 건너뛰되, `$ctl`이 있으면
+/// `ControlMaster=auto`로 **control socket을 유지하며** `TERM=xterm-maru`로 exec한다(이전엔 캐시 hit
+/// 경로에 socket이 없어 재접속 세션엔 사이드채널이 없었다). 매 접속 설치 round-trip은 그대로 없앤다
+/// (Ghostty `+ssh-cache`식). 캐시는 셸이 grep으로 읽는다.
 ///
 /// 캐시 miss + 적격("$1"=1: 원격 command 없는 순수 세션): **ControlMaster 단일 연결** 안에서 embed한
 /// terminfo 소스를 원격에 심고 같은 연결로 세션을 exec한다 — 부트스트랩 ssh가 master가 되고 세션 ssh가
@@ -78,10 +82,12 @@ const cache_path = "${XDG_CACHE_HOME:-$HOME/.cache}/maru/ssh-terminfo-hosts";
 ///
 /// TERM은 `env`로 실어 보낸다 — `-o SetEnv`는 OpenSSH 7.8+ 전용 회귀(리뷰 #4)라 안 쓴다.
 pub const wrapper_script =
-    "elig=\"$1\"; dest=\"$2\"; shift 2; cache=\"" ++ cache_path ++ "\"; " ++
-    "if [ -n \"$dest\" ] && grep -qxF \"$dest\" \"$cache\" 2>/dev/null; then exec env TERM=xterm-maru ssh \"$@\"; fi; " ++
-    "if [ \"$elig\" = 1 ]; then " ++
-    "ctl=$(mktemp -u \"${TMPDIR:-/tmp}/maru-ssh-XXXXXX\"); " ++
+    "elig=\"$1\"; dest=\"$2\"; ctl=\"$3\"; shift 3; cache=\"" ++ cache_path ++ "\"; " ++
+    "[ -n \"$ctl\" ] && mkdir -p \"${ctl%/*}\" 2>/dev/null; " ++
+    "if [ -n \"$dest\" ] && grep -qxF \"$dest\" \"$cache\" 2>/dev/null; then " ++
+    "if [ -n \"$ctl\" ]; then exec env TERM=xterm-maru ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\"; fi; " ++
+    "exec env TERM=xterm-maru ssh \"$@\"; fi; " ++
+    "if [ \"$elig\" = 1 ] && [ -n \"$ctl\" ]; then " ++
     "if " ++ emit_terminfo ++ " | ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10 \"$@\" '" ++ remote_install ++ "' >/dev/null 2>&1; then " ++
     "[ -n \"$dest\" ] && { mkdir -p \"${cache%/*}\" 2>/dev/null; printf '%s\\n' \"$dest\" >> \"$cache\" 2>/dev/null; }; " ++
     "exec env TERM=xterm-maru ssh -o ControlPath=\"$ctl\" \"$@\"; " ++
@@ -94,11 +100,36 @@ pub const wrapper_script =
 /// 설치**한다(스테일 캐시 복구용). `$1`=적격 플래그(원격 command 붙으면 에러), `$2`=목적지. 설치 성공 시
 /// 목적지를 캐시에 기록한다(중복 없이).
 pub const terminfo_only_script =
-    "elig=\"$1\"; dest=\"$2\"; shift 2; cache=\"" ++ cache_path ++ "\"; " ++
+    // ctl($3)은 안 쓰지만(설치만 하고 세션을 안 띄움) buildArgv가 항상 $3에 넣으므로 자리를 맞춰 shift 3 한다.
+    "elig=\"$1\"; dest=\"$2\"; shift 3; cache=\"" ++ cache_path ++ "\"; " ++
     "[ \"$elig\" = 1 ] || { echo 'maru ssh --terminfo-only: 목적지만 지정하세요(원격 command 불가)' >&2; exit 2; }; " ++
     emit_terminfo ++ " | ssh \"$@\" '" ++ remote_install ++ "'; rc=$?; " ++
     "[ \"$rc\" = 0 ] && [ -n \"$dest\" ] && { grep -qxF \"$dest\" \"$cache\" 2>/dev/null || { mkdir -p \"${cache%/*}\" 2>/dev/null; printf '%s\\n' \"$dest\" >> \"$cache\" 2>/dev/null; }; }; " ++
     "exit \"$rc\"";
+
+/// 결정론적 control socket 경로. `maru ssh`(이 모듈)와 로컬 Maru 앱(후속 "원격 인식" 단계)이 **같은
+/// 규약으로 같은 경로를 도출**해야 OSC 통지 없이도 Maru가 socket을 찾을 수 있다. 그래서 순수 함수로
+/// 두고 양쪽이 공유한다. 경로 = `<home>/.cache/maru/ctl-<dest 해시 hex>`. 설계 근거는
+/// docs/ssh-integration.md §4(접속 방식 maru ssh 전용·결정론적 해시 경로, 사용자 결정 2026-06-21).
+///
+/// 해시는 dest 문자열의 Wyhash다 — 암호 용도가 아니라 **목적지별 유일 경로**가 목적이고(같은 host
+/// 재접속은 같은 master를 공유), control socket은 세션 동안만 사는 일시 파일이라 빌드 간 영구 안정성은
+/// 필요 없다(maru ssh와 Maru 앱은 같은 빌드의 같은 함수를 쓰므로 한 세션 안에서는 항상 일치한다).
+/// unix domain socket 경로는 `sun_path` 길이 제한(macOS 104바이트, NUL 포함)이 있어 103자를 넘으면
+/// `error.ControlPathTooLong`을 돌려준다 — 호출 측은 그때 control socket 없이 폴백한다.
+pub const ControlPathError = error{ControlPathTooLong} || std.mem.Allocator.Error;
+
+pub fn controlSocketPath(allocator: std.mem.Allocator, home: []const u8, dest: []const u8) ControlPathError![]u8 {
+    // home 끝의 '/'는 떼어 `//` 중복을 막는다("/"가 home이면 base가 빈 문자열이 되어 `/.cache/...`가 됨).
+    const base = std.mem.trimEnd(u8, home, "/");
+    const hash = std.hash.Wyhash.hash(0, dest);
+    const path = try std.fmt.allocPrint(allocator, "{s}/.cache/maru/ctl-{x}", .{ base, hash });
+    if (path.len > 103) {
+        allocator.free(path);
+        return error.ControlPathTooLong;
+    }
+    return path;
+}
 
 pub const ParseError = error{MissingDestination};
 
@@ -164,10 +195,12 @@ pub fn destination(ssh_args: []const []const u8) ?[]const u8 {
     return if (destinationIndex(ssh_args)) |i| ssh_args[i] else null;
 }
 
-/// `/bin/sh -c <script> sh <elig> <dest> <ssh args...>` 형태의 argv를 만든다. `sh`는 `$0`,
-/// `$1`=bootstrap 적격 플래그("1"/"0"), `$2`=목적지(캐시 키, 없으면 빈 문자열), 그 뒤 ssh_args가 `"$@"`로
-/// 들어간다. 반환 slice는 caller가 free한다(요소는 script 상수·리터럴·ssh_args를 빌려 가리킨다 — 복사 아님).
-pub fn buildArgv(allocator: std.mem.Allocator, parsed: Parsed) ![]const []const u8 {
+/// `/bin/sh -c <script> sh <elig> <dest> <ctl> <ssh args...>` 형태의 argv를 만든다. `sh`는 `$0`,
+/// `$1`=bootstrap 적격 플래그("1"/"0"), `$2`=목적지(캐시 키, 없으면 빈 문자열), `$3`=control socket
+/// 경로(빈 문자열이면 미사용 → 스크립트가 control socket 없이 폴백), 그 뒤 ssh_args가 `"$@"`로 들어간다.
+/// `ctl`은 caller가 소유·수명 관리하고 여기선 빌려 가리킨다(반환 slice의 다른 요소도 script 상수·리터럴·
+/// ssh_args를 빌린다 — 복사 아님). 반환 slice는 caller가 free한다.
+pub fn buildArgv(allocator: std.mem.Allocator, parsed: Parsed, ctl: []const u8) ![]const []const u8 {
     var list: std.ArrayList([]const u8) = .empty;
     errdefer list.deinit(allocator);
     try list.append(allocator, "/bin/sh");
@@ -176,6 +209,7 @@ pub fn buildArgv(allocator: std.mem.Allocator, parsed: Parsed) ![]const []const 
     try list.append(allocator, "sh"); // $0
     try list.append(allocator, if (bootstrapEligible(parsed.ssh_args)) "1" else "0"); // $1 = bootstrap 적격
     try list.append(allocator, destination(parsed.ssh_args) orelse ""); // $2 = 목적지(캐시 키)
+    try list.append(allocator, ctl); // $3 = control socket 경로(빈 문자열이면 미사용)
     for (parsed.ssh_args) |a| try list.append(allocator, a);
     return list.toOwnedSlice(allocator);
 }
@@ -203,19 +237,24 @@ test "parse: --terminfo-only만 있고 목적지 없음 → MissingDestination" 
     try std.testing.expectError(error.MissingDestination, parse(&.{"--terminfo-only"}));
 }
 
-test "wrapper 스크립트: ControlMaster·embed 소스·캐시·안전 폴백·적격 분기 불변식" {
+test "wrapper 스크립트: 결정론적 ctl·캐시 hit 유지·ControlMaster·embed·안전 폴백 불변식" {
     const s = scriptFor(false);
     // 핵심 동작을 바이트로 고정한다("추측 말고 캡처").
+    // ctl은 $3로 받고(buildArgv/controlSocketPath가 결정론적 경로를 만든다) 디렉터리를 준비한다.
+    try std.testing.expect(std.mem.indexOf(u8, s, "ctl=\"$3\"; shift 3") != null); // ctl을 $3로 수신
+    try std.testing.expect(std.mem.indexOf(u8, s, "[ -n \"$ctl\" ] && mkdir -p \"${ctl%/*}\"") != null); // socket 디렉터리 준비
+    try std.testing.expect(std.mem.indexOf(u8, s, "mktemp") == null); // 랜덤 mktemp 제거(결정론적 경로로 대체)
+    // 부트스트랩=master, 세션=슬레이브(같은 $ctl 재사용 → 인증 1회).
     try std.testing.expect(std.mem.indexOf(u8, s, "ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10 \"$@\"") != null); // 부트스트랩=master
     try std.testing.expect(std.mem.indexOf(u8, s, "tic -x -o \"$HOME/.terminfo\" -") != null); // 원격 설치
     try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-maru ssh -o ControlPath=\"$ctl\"") != null); // 설치 성공 시 maru + master 재사용
-    try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-256color ssh \"$@\"") != null); // 부적격/실패 폴백
-    try std.testing.expect(std.mem.indexOf(u8, s, "[ \"$elig\" = 1 ]") != null); // 적격 게이트
-    // 캐시: hit이면 bootstrap 건너뛰고 maru, 설치 성공 시 목적지 기록.
+    try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-256color ssh \"$@\"") != null); // 부적격/실패/ctl 없음 폴백
+    try std.testing.expect(std.mem.indexOf(u8, s, "[ \"$elig\" = 1 ] && [ -n \"$ctl\" ]") != null); // 적격 게이트(부트스트랩은 ctl이 있어야)
+    // 캐시: hit이면 bootstrap 건너뛰되 ctl 있으면 control socket을 유지하며 maru로 exec, 설치 성공 시 목적지 기록.
     try std.testing.expect(std.mem.indexOf(u8, s, "grep -qxF \"$dest\" \"$cache\"") != null); // 캐시 read
     try std.testing.expect(std.mem.indexOf(u8, s, "ssh-terminfo-hosts") != null); // 캐시 파일
     try std.testing.expect(std.mem.indexOf(u8, s, ">> \"$cache\"") != null); // 캐시 write
-    try std.testing.expect(std.mem.indexOf(u8, s, "if [ -n \"$dest\" ] && grep -qxF \"$dest\" \"$cache\" 2>/dev/null; then exec env TERM=xterm-maru ssh \"$@\"") != null); // 캐시 hit → bootstrap 건너뜀
+    try std.testing.expect(std.mem.indexOf(u8, s, "exec env TERM=xterm-maru ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\"") != null); // 캐시 hit + ctl → control socket 유지
     // embed 회귀 가드: 로컬 infocmp 의존 없이(printf로 embed 소스 emit) 자기완결적이다.
     try std.testing.expect(std.mem.indexOf(u8, s, "printf '%s' '") != null); // embed 소스 emit
     try std.testing.expect(std.mem.indexOf(u8, s, "Sync=") != null); // embed된 terminfo가 스크립트에 들어있다
@@ -240,6 +279,7 @@ test "terminfo-only 스크립트: 캐시 무시 강제 설치, 성공 시 기록
     try std.testing.expect(std.mem.indexOf(u8, s, ">> \"$cache\"") != null); // 성공 시 캐시 기록
     try std.testing.expect(std.mem.indexOf(u8, s, "grep -qxF \"$dest\" \"$cache\"") != null); // 중복 없이(기록 전 확인)
     try std.testing.expect(std.mem.indexOf(u8, s, "exec ") == null); // 세션을 띄우지 않는다
+    try std.testing.expect(std.mem.indexOf(u8, s, "shift 3") != null); // ctl($3) 자리 소비(buildArgv argv 일관)
 }
 
 test "bootstrapEligible: 순수 세션은 적격, 원격 command가 있으면 부적격" {
@@ -264,25 +304,53 @@ test "destination: 첫 비옵션 토큰을 캐시 키로 뽑는다" {
     try std.testing.expect(destination(&.{ "-p", "2222" }) == null); // 옵션만 → 없음
 }
 
-test "buildArgv: /bin/sh -c <script> sh <elig> <dest> <ssh 인자>" {
+test "buildArgv: /bin/sh -c <script> sh <elig> <dest> <ctl> <ssh 인자>" {
     const a = std.testing.allocator;
     const p = try parse(&.{"user@host"});
-    const argv = try buildArgv(a, p);
+    const argv = try buildArgv(a, p, "/tmp/ctl-x");
     defer a.free(argv);
-    try std.testing.expectEqual(@as(usize, 7), argv.len);
+    try std.testing.expectEqual(@as(usize, 8), argv.len);
     try std.testing.expectEqualStrings("/bin/sh", argv[0]);
     try std.testing.expectEqualStrings("-c", argv[1]);
     try std.testing.expectEqualStrings(scriptFor(false), argv[2]);
     try std.testing.expectEqualStrings("sh", argv[3]);
     try std.testing.expectEqualStrings("1", argv[4]); // host 단독 → 적격
     try std.testing.expectEqualStrings("user@host", argv[5]); // $2 = 목적지(캐시 키)
-    try std.testing.expectEqualStrings("user@host", argv[6]); // ssh 인자
+    try std.testing.expectEqualStrings("/tmp/ctl-x", argv[6]); // $3 = control socket 경로
+    try std.testing.expectEqualStrings("user@host", argv[7]); // ssh 인자
 }
 
 test "buildArgv: 원격 command가 있으면 적격 플래그 0" {
     const a = std.testing.allocator;
     const p = try parse(&.{ "host", "ls" });
-    const argv = try buildArgv(a, p);
+    const argv = try buildArgv(a, p, "");
     defer a.free(argv);
     try std.testing.expectEqualStrings("0", argv[4]); // host + command → 부적격
+}
+
+test "controlSocketPath: 결정론적이고 dest별로 다르다" {
+    const a = std.testing.allocator;
+    const p1 = try controlSocketPath(a, "/Users/me", "user@host");
+    defer a.free(p1);
+    const p2 = try controlSocketPath(a, "/Users/me", "user@host");
+    defer a.free(p2);
+    try std.testing.expectEqualStrings(p1, p2); // 같은 (home,dest) → 같은 경로(결정론 — Maru가 OSC 통지 없이 계산)
+    try std.testing.expect(std.mem.startsWith(u8, p1, "/Users/me/.cache/maru/ctl-"));
+    const p3 = try controlSocketPath(a, "/Users/me", "other@host");
+    defer a.free(p3);
+    try std.testing.expect(!std.mem.eql(u8, p1, p3)); // 다른 dest → 다른 경로(목적지별 유일)
+}
+
+test "controlSocketPath: home 끝 슬래시를 정규화한다" {
+    const a = std.testing.allocator;
+    const p = try controlSocketPath(a, "/Users/me/", "host");
+    defer a.free(p);
+    try std.testing.expect(std.mem.indexOf(u8, p, "//") == null); // `//` 중복 없음
+    try std.testing.expect(std.mem.startsWith(u8, p, "/Users/me/.cache/maru/ctl-"));
+}
+
+test "controlSocketPath: sun_path 한도를 넘으면 ControlPathTooLong" {
+    const a = std.testing.allocator;
+    const long_home = "/" ++ ("x" ** 120); // 경로가 sun_path(104B)를 넘는다
+    try std.testing.expectError(error.ControlPathTooLong, controlSocketPath(a, long_home, "host"));
 }

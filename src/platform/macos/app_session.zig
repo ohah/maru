@@ -1239,7 +1239,7 @@ pub const AppSession = struct {
     upload_mutex: std.Io.Mutex = .init,
     upload_results: std.ArrayList([]u8) = .empty,
     upload_inflight: usize = 0,
-    upload_counter: usize = 0, // 클립보드 이미지 paste 파일명(pasted-N.png) 고유화 카운터(메인 스레드 전용)
+    upload_counter: usize = 0, // 클립보드 이미지 paste 파일명(pasted-<pid>-N.png) 세션 내 고유화 카운터(메인 스레드 전용)
     // IME 키 트랜잭션 상태(Ghostty의 keyTextAccumulator 패턴과 같은 구조). Swift keyDown이
     // imeBegin으로 열고 입력기 콜백(imeInsert/imeMarked)이 쌓은 것을 imeEnd가 일괄 판정한다 —
     // 콜백마다 즉석 판단하면 입력기의 비동기/다중 호출에서 이중 전송·유실이 생긴다(라이브에서
@@ -5671,7 +5671,8 @@ pub const AppSession = struct {
     /// 클립보드 이미지(Cmd+V)를 처리한다. maru ssh 원격 세션이면 control socket으로 업로드하고 완료 시
     /// 원격 경로를 paste한 뒤 true를 돌려준다(Swift는 더 안 함). 로컬이거나 업로드를 시작 못 하면 false
     /// (Swift가 기존 텍스트·URL paste 진행 — 로컬은 Claude 등이 OS 클립보드를 직접 읽으므로 maru 불개입).
-    /// 파일 드롭과 달리 경로가 없어 바이트를 직접 받고 "pasted-<N>.png" 이름을 붙인다(docs/ssh-integration.md §4).
+    /// 파일 드롭과 달리 경로가 없어 바이트를 직접 받고 "pasted-<pid>-<N>.png" 이름을 붙인다 — pid로 앱 재시작 후
+    /// cross-session 덮어쓰기를 막는다(카운터는 재시작 시 0이라 pid 없이는 다른 세션과 충돌). docs/ssh-integration.md §4.
     pub fn handleDroppedImage(self: *AppSession, bytes: []const u8) bool {
         if (!self.surface_initialized or bytes.len == 0) return false;
         if (bytes.len > maru.cli.ssh.max_upload_bytes) return false; // 16MB 초과 — 로컬 처리로 폴백
@@ -5680,7 +5681,7 @@ pub const AppSession = struct {
 
         // 클립보드 이미지엔 파일명이 없으므로 카운터로 고유 이름을 만든다(시간 API는 코어 결정성 위해 회피).
         self.upload_counter += 1;
-        const name = std.fmt.allocPrint(self.allocator, "pasted-{d}.png", .{self.upload_counter}) catch return false;
+        const name = std.fmt.allocPrint(self.allocator, "pasted-{d}-{d}.png", .{ std.c.getpid(), self.upload_counter }) catch return false;
         const bytes_owned = self.allocator.dupe(u8, bytes) catch {
             self.allocator.free(name);
             return false;

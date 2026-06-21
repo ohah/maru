@@ -31,6 +31,7 @@ pub const components = struct {
     pub const tabbar = @import("chrome/components/tabbar.zig"); // 마우스 hit-test 컴포넌트(pane 탭 바)
     pub const context_menu = @import("chrome/components/context_menu.zig"); // 우클릭 컨텍스트 메뉴(오버레이 모달)
     pub const toggle = @import("chrome/components/toggle.zig"); // 설정 폼 위젯 — on/off 스위치(CS-4-1, leaf 컴포넌트)
+    pub const settings = @import("chrome/components/settings.zig"); // schema-주도 세팅 모달(CS-4-4)
 };
 
 test {

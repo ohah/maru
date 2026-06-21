@@ -168,10 +168,14 @@ pub fn sanitizeDropFilename(allocator: std.mem.Allocator, path: []const u8) ![]u
 /// 바이트를 stdin으로 흘리면, 원격이 저장 디렉터리를 만들고 stdin을 그 파일로 받은 뒤 **원격 절대경로를
 /// stdout으로 돌려준다** — 로컬은 그 절대경로를 받아 메인 PTY로 paste한다(원격 $HOME을 로컬이 모르므로
 /// 원격이 알려준다). `remote_name`은 sanitizeDropFilename으로 정제돼 큰따옴표 안에서 안전하다.
+///
+/// 업로드 전에 7일 지난 파일을 정리한다(`find -mtime +7 -delete`) — 저장 디렉터리가 paste/drop마다 무한
+/// 누적되는 걸 막는 보존 정책(사용자 결정 2026-06-21, 7일). maru가 만든 dropped/만 건드리고, 진행 중
+/// 파일(7일 이내)은 남기며, find 실패는 무시한다(업로드 자체는 계속). dropped/는 디렉터리당 1회 mkdir.
 pub fn uploadShellCommand(allocator: std.mem.Allocator, remote_name: []const u8) ![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "d=\"$HOME/.cache/maru/dropped\"; mkdir -p \"$d\" && cat > \"$d/{s}\" && printf '%s' \"$d/{s}\"",
+        "d=\"$HOME/.cache/maru/dropped\"; mkdir -p \"$d\" && find \"$d\" -type f -mtime +7 -delete 2>/dev/null; cat > \"$d/{s}\" && printf '%s' \"$d/{s}\"",
         .{ remote_name, remote_name },
     );
 }
@@ -429,4 +433,5 @@ test "uploadShellCommand: mkdir + cat + 원격 절대경로 echo" {
     try std.testing.expect(std.mem.indexOf(u8, cmd, "cat > \"$d/img.png\"") != null); // stdin→파일
     try std.testing.expect(std.mem.indexOf(u8, cmd, "printf '%s' \"$d/img.png\"") != null); // 원격 절대경로 반환
     try std.testing.expect(std.mem.indexOf(u8, cmd, ".cache/maru/dropped") != null); // 저장 위치
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "find \"$d\" -type f -mtime +7 -delete") != null); // 7일 보존 정리
 }

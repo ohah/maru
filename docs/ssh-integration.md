@@ -126,7 +126,7 @@ flowchart TD
 
 ## 5. 보안·정책
 
-- **원격 파일 쓰기**는 새 권한면이다. 위치를 `$HOME/.cache/maru/dropped/`로 한정하고, 파일명은 `sanitizeDropFilename`(드롭, 셸 메타·`..` 차단)/`pasted-N.png`(paste)로 안전·비충돌하게 만든다. 정리 주기(세션/용량 기반)는 후속(§6).
+- **원격 파일 쓰기**는 새 권한면이다. 위치를 `$HOME/.cache/maru/dropped/`로 한정하고, 파일명은 `sanitizeDropFilename`(드롭, 셸 메타·`..` 차단)/`pasted-<pid>-N.png`(paste, pid로 세션 간 충돌 방지)로 안전·비충돌하게 만든다. 누적은 업로드 시 **7일 보존 정리**(`uploadShellCommand`의 `find -mtime +7 -delete`).
 - Maru의 OSC 정책은 보수적이다(OSC 52 쓰기 allow·읽기 deny, 로컬 단일 사용자, 사용자 결정 2026-06-20, `terminal-compatibility-policy.md`). 드롭 업로드도 같은 보수성을 따른다 — **명시적 사용자 행동(드롭)으로만** 트리거되고 자동 업로드는 없다. 세부 정책(기본 on/off, 크기 상한, 확장자 제한)은 사용자 결정 사항(§6).
 - 업로드는 **사용자가 이미 인증한 control socket**으로만 간다(새 자격증명·새 연결 없음). control socket 경로 자체가 다른 사용자에게 노출되지 않도록 권한을 좁힌다.
 - trace/로그에 호스트·경로·바이트가 남을 수 있으므로 `project-rules.md` §민감정보 redaction을 따른다(기본 local-only).
@@ -143,7 +143,7 @@ flowchart TD
 ### 보안 기본값 (사용자 결정 2026-06-21)
 
 - **파일 종류 = 모든 파일**(범용 드롭-업로드), **크기 상한 = 16MB**(OSC 52와 동일, `cli/ssh.zig` `max_upload_bytes`), **업로드 = 백그라운드 스레드**(UI 비차단), **트리거 = 드롭 + paste(클립보드 이미지)**, 기능 기본 **on**(드롭은 명시적 사용자 행동). 원격 저장 위치 = `$HOME/.cache/maru/dropped/`(원격이 `mkdir -p`). 파일명은 `sanitizeDropFilename`으로 정제(셸 메타·`..` 경로 탈출 차단).
-- 후속: 원격 저장 정리 주기(현재 누적 — 세션/용량 기반 정리). (확장자 제한은 "모든 파일" 결정으로 비범위.)
+- **원격 저장 정리 = 7일 보존**(사용자 결정 2026-06-21): 업로드마다 `uploadShellCommand`가 `find "$d" -type f -mtime +7 -delete`로 7일 지난 파일을 지운다(진행 중 파일은 보존, find 실패 무시). (확장자 제한은 "모든 파일" 결정으로 비범위.)
 
 ## 7. 검증·관측
 

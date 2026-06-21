@@ -222,7 +222,21 @@ fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !
         },
     };
 
-    const argv = try maru.cli.ssh.buildArgv(allocator, parsed);
+    // control socket 경로(결정론적): HOME과 목적지로 maru ssh와 Maru 앱이 같은 경로를 도출한다(후속
+    // "원격 인식" 단계가 같은 controlSocketPath를 재사용해 OSC 통지 없이 socket을 찾는다). 경로가 너무
+    // 길거나 HOME/목적지가 없으면 빈 문자열 → 스크립트가 control socket 없이 폴백한다. getenv 같은 I/O는
+    // 여기(main)서 하고, 경로 계산은 순수 함수(maru.cli.ssh.controlSocketPath)가 갖는다.
+    const ctl: []const u8 = blk: {
+        const home = std.c.getenv("HOME") orelse break :blk "";
+        const dest = maru.cli.ssh.destination(parsed.ssh_args) orelse break :blk "";
+        break :blk maru.cli.ssh.controlSocketPath(allocator, std.mem.span(home), dest) catch |err| switch (err) {
+            error.ControlPathTooLong => "", // 경로 한도 초과 → control socket 없이 폴백
+            error.OutOfMemory => return err,
+        };
+    };
+    defer if (ctl.len > 0) allocator.free(ctl);
+
+    const argv = try maru.cli.ssh.buildArgv(allocator, parsed, ctl);
     defer allocator.free(argv);
 
     // execve용 null-terminated C argv(pty/macos.zig ArgvStorage와 같은 패턴). alloc은 미초기화

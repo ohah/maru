@@ -40,6 +40,9 @@ pub fn build(b: *std.Build) void {
     // 직접 못 읽는다. 빌드 import로 등록해 cli/ssh.zig가 @embedFile("maru_terminfo")로 바이너리에 심는다
     // (maru ssh 자기완결성 — 로컬 설치 없이 원격 전파). 파일을 옮기지 않아 참조 중복이 없다.
     maru_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+    // docs/configuration.md도 src/ 밖이라 @embedFile이 직접 못 읽는다. config 스키마 doc-drift 가드(CS-3,
+    // src/config/schema.zig 테스트)가 @embedFile("config_doc_md")로 박아 모든 스키마 키가 표에 문서화됐는지 검증한다.
+    maru_mod.addAnonymousImport("config_doc_md", .{ .root_source_file = b.path("docs/configuration.md") });
     // SDK 프레임워크/라이브러리/헤더 경로를 공유 모듈에 명시 — cross 처리로 꺼진 자동 탐지를 메운다.
     // maru를 import하는 Compile(코어 테스트, app host, .m 브리지 링크 포함)의 link에 합쳐진다.
     if (macos_sdk) |sdk| {

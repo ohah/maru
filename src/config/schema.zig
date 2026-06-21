@@ -334,3 +334,40 @@ fn find(items: []const KeyValue, key: []const u8) ?[]const u8 {
     for (items) |kv| if (std.mem.eql(u8, kv.key, key)) return kv.value;
     return null;
 }
+
+// ── doc-drift 가드(CS-3): 모든 스키마 키가 configuration.md 키 표에 문서화돼 있어야 한다 ──────────────
+// configuration.md를 @embedFile로 컴파일 타임에 박아, 스키마 키를 추가하고 문서 표 행을 깜빡하면 이 테스트가
+// 깨진다(키·동작·기본값이 사용자와의 공개 계약이라 문서 누락을 CI가 잡는다). 전체 표 *생성*(마커 블록)은 풍부한
+// 주석(비고 열)을 meta.doc로 옮겨야 해 별도(CS-3b) — 여기선 풍부한 손-주석 표를 유지하며 누락만 막는다.
+fn docHasKeyRow(comptime full_key: []const u8) bool {
+    const doc = @embedFile("config_doc_md"); // build.zig 익명 import(docs/configuration.md — src/ 밖이라 import로 등록)
+    return std.mem.indexOf(u8, doc, "| `" ++ full_key ++ "`") != null;
+}
+
+test "doc 정합성: 모든 스키마 키가 configuration.md 표에 문서화됨 (drift guard)" {
+    var missing: usize = 0;
+    // 최상위(Config.schema)
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            const full_key = comptime topKey(sf.name, @field(theme.Config.schema, sf.name));
+            if (!docHasKeyRow(full_key)) {
+                std.debug.print("미문서 스키마 키: '{s}' (configuration.md 표에 '| `{s}` | …' 행 추가 필요)\n", .{ full_key, full_key });
+                missing += 1;
+            }
+        }
+    }
+    // sub-struct
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            inline for (@typeInfo(@TypeOf(Container.schema)).@"struct".fields) |sf| {
+                const full_key = comptime keyOf(cf.name, sf.name, @field(Container.schema, sf.name));
+                if (!docHasKeyRow(full_key)) {
+                    std.debug.print("미문서 스키마 키: '{s}'\n", .{full_key});
+                    missing += 1;
+                }
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missing);
+}

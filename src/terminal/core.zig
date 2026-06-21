@@ -1151,6 +1151,11 @@ pub const TerminalCore = struct {
         if (needle.items.len == 0) return;
 
         const total = self.sb_count + self.size.rows;
+        // alt screen에선 현재 화면(active 영역 [sb_count, total))만 검색한다. primary면 스크롤백 포함 0부터.
+        // 이유: alt에선 scrollToAbs가 잠겨(무동작) primary 스크롤백 매치로 갈 수 없어 "찾았지만 못 가는"
+        // 카운터만 늘고, alt는 화면 밖 과거를 스크롤백에 안 쌓으므로(scrollRegionUp의 push 가드) 현재 화면이
+        // 검색 가능한 전부다. 베이스: Ghostty도 alt에선 active area(현재 화면)만 검색한다(search ActiveSearch).
+        const start_abs: usize = if (self.alt_active) self.sb_count else 0;
         // 논리 줄마다 코드포인트 시퀀스(cps)와 각 코드포인트의 절대 좌표(coords)를 만들어 검색하고, 다음 줄에서
         // 버퍼를 재사용한다(스크롤백 전체를 한 문자열로 들지 않음 — 메모리는 가장 긴 논리 줄 하나).
         var cps: std.ArrayList(u21) = .empty;
@@ -1158,7 +1163,7 @@ pub const TerminalCore = struct {
         var coords: std.ArrayList(types.SelectionPoint) = .empty;
         defer coords.deinit(allocator);
 
-        var abs: usize = 0;
+        var abs: usize = start_abs;
         while (abs < total) {
             cps.clearRetainingCapacity();
             coords.clearRetainingCapacity();
@@ -5236,6 +5241,45 @@ test "findMatches: soft-wrap 경계를 넘는 매치" {
     try std.testing.expectEqual(@as(u16, 6), matches.items[0].start.col);
     try std.testing.expectEqual(@as(usize, 1), matches.items[0].end.row); // 'j' = row1 col1
     try std.testing.expectEqual(@as(u16, 1), matches.items[0].end.col);
+}
+
+test "findMatches: alt screen에선 현재 화면만 검색한다(primary 스크롤백 제외)" {
+    // alt screen(vim/less/Claude/Codex)에선 scrollToAbs가 잠겨 primary 스크롤백 매치로 갈 수 없고, alt는
+    // 화면 밖 과거를 스크롤백에 안 쌓으므로, findMatches는 현재 alt 화면만 검색해야 한다(Ghostty ActiveSearch와
+    // 같은 범위). 이게 깨지면 "찾았지만 못 가는" 매치가 카운터에 섞여 ⌘G 네비가 헛돈다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 3 });
+    defer core.deinit();
+
+    // primary에 needle "alpha"를 출력한 뒤 화면(3행) 밖 스크롤백으로 밀어낸다.
+    try core.write("alpha\r\n");
+    var i: usize = 0;
+    while (i < 6) : (i += 1) try core.write("filler\r\n");
+    try std.testing.expect(core.sb_count > 0);
+
+    var matches: std.ArrayList(types.Match) = .empty;
+    defer matches.deinit(std.testing.allocator);
+
+    // primary에선 스크롤백의 alpha가 잡힌다(대조군 — 스크롤백 포함 검색).
+    try core.findMatches(std.testing.allocator, "alpha", &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+
+    // alt screen 진입(DECSET 1049: alt 버퍼 + 화면 클리어) 후 alt 화면에 다른 텍스트.
+    try core.write("\x1b[?1049h");
+    try std.testing.expect(core.alt_active);
+    try core.write("bravo");
+
+    // alt에선 primary 스크롤백의 alpha는 검색되지 않는다(현재 화면 밖이므로 제외).
+    try core.findMatches(std.testing.allocator, "alpha", &matches);
+    try std.testing.expectEqual(@as(usize, 0), matches.items.len);
+    // alt 현재 화면의 bravo는 검색된다(현재 화면이 검색 가능한 전부).
+    try core.findMatches(std.testing.allocator, "bravo", &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+
+    // primary 복귀하면(alt 버퍼만 버려짐) 다시 스크롤백의 alpha가 잡힌다.
+    try core.write("\x1b[?1049l");
+    try std.testing.expect(!core.alt_active);
+    try core.findMatches(std.testing.allocator, "alpha", &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
 }
 
 test "scrollToAbs: 스크롤백 매치를 뷰포트로 가져온다" {

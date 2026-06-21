@@ -1444,11 +1444,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // "이스케이프 대상인지"만 판정해 NUL 구분 토큰(escapeItems: true) 또는 raw(false)로 넘긴다. 드래그
         // (handleDrop)는 사용자 제스처라 웹 URL도 이스케이프하는 별도 판정(pasteboardDropPayload)이라 분리한다.
         let pb = NSPasteboard.general
-        // 클립보드 이미지(스크린샷 등): 원격 maru ssh면 Zig가 control socket 업로드+경로 paste(true 반환, 더
-        // 안 함), 로컬이면 false → 아래 기존 처리(로컬은 Claude 등이 OS 클립보드를 직접 읽어 maru 불개입).
-        if let imgData = pb.data(forType: .png) ?? pb.data(forType: .tiff), sendDropImage(imgData) {
-            return
-        }
         if let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty {
             if urls.allSatisfy({ $0.isFileURL }) {
                 // 파일 경로(들) — Zig가 각 경로를 셸 이스케이프 후 공백 join(공백 든 경로가 안 쪼개지게).
@@ -1464,11 +1459,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             sendPasteText(text, escapeItems: false)
             return
         }
-        if let imagePath = clipboardImageTempPath(pb) {
-            // 스크린샷·복사된 이미지(비트맵, 파일 아님) — 임시 PNG로 저장해 경로를 붙인다. escapeItems=true라 Zig가
-            // 셸 이스케이프 후 bracketed paste로 한 덩어리 전송 → claude/codex가 [Image]로 인식. URL·text가 없을 때만 —
-            // 비트맵+텍스트를 함께 주는 리치 콘텐츠는 위 텍스트를 우선해 의도치 않은 이미지 경로 삽입을 막는다.
-            sendPasteText(imagePath, escapeItems: true)
+        if let pngData = clipboardImagePng(pb) {
+            // 비트맵 이미지(스크린샷·복사, 파일 아님) — URL·text가 없을 때만(리치 콘텐츠는 텍스트 우선해 의도치
+            // 않은 이미지 삽입 방지). 원격 maru ssh면 PNG 바이트를 control socket으로 업로드하고(Zig가 판정,
+            // true면 끝), 로컬이면 임시 PNG로 저장해 경로를 붙인다(escapeItems=true → bracketed paste로
+            // claude/codex가 [Image] 인식). 둘 다 같은 PNG로 정규화해 넘기므로 원격 저장 파일(pasted-N.png)도
+            // 확장자/내용이 일치한다(스크린샷은 흔히 TIFF로만 와서, raw로 .png 저장하면 디코드가 깨진다).
+            if sendDropImage(pngData) { return }
+            if let imagePath = saveTempPng(pngData) {
+                sendPasteText(imagePath, escapeItems: true)
+            }
         }
     }
 
@@ -1503,29 +1503,30 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if let text = pb.string(forType: .string), !text.isEmpty {
             return (text, false)
         }
-        if let imagePath = clipboardImageTempPath(pb) {
+        if let pngData = clipboardImagePng(pb), let imagePath = saveTempPng(pngData) {
             // 비트맵 이미지(URL·파일·텍스트가 없을 때만) — 임시 PNG 경로(이스케이프). tiff+텍스트 리치 드래그는 위 텍스트 우선.
             return (imagePath, true)
         }
         return nil
     }
 
-    /// 클립보드/드래그 pasteboard의 이미지 비트맵(png/tiff)을 임시 PNG 파일로 저장하고 그 경로를 돌려준다(없으면 nil).
-    /// 스크린샷(⌃⌘⇧4)·브라우저 이미지 복사처럼 파일이 아니라 **비트맵 데이터**로 온 이미지를 claude/codex가 [Image]로
-    /// 인식하도록 경로 paste(sendPasteText)에 태우기 위함 — iTerm2의 "비트맵→임시파일→경로" 동작을 참고한 maru 독립
-    /// 구현(코드 표현은 옮기지 않음). PNG가 있으면 그대로, 없고 TIFF면 NSBitmapImageRep로 PNG 변환. pasteImageDir에 UUID
-    /// 이름으로 **atomic** 저장(부분 파일 노출 방지). 실패 시 nil(호출자는 다음 타입으로 폴백). 누적 파일은 앱 시작 시
-    /// cleanupPasteImages가 비운다(paste 직후엔 claude 읽기 타이밍을 몰라 못 지움).
-    private func clipboardImageTempPath(_ pb: NSPasteboard) -> String? {
-        let png: Data?
-        if let p = pb.data(forType: .png) {
-            png = p
-        } else if let tiff = pb.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff) {
-            png = rep.representation(using: .png, properties: [:])
-        } else {
-            png = nil
+    /// 클립보드/드래그 pasteboard의 이미지 비트맵을 **PNG 데이터로 정규화**해 돌려준다(없으면 nil). PNG가 있으면
+    /// 그대로, 없고 TIFF면 NSBitmapImageRep로 PNG 변환 — 원격 업로드(sendDropImage)와 로컬 임시저장(saveTempPng)이
+    /// 같은 PNG 바이트를 쓰게 해, 원격 저장 파일명(pasted-N.png)의 확장자/내용이 일치하도록 한다(스크린샷 ⌃⌘⇧4은
+    /// 흔히 TIFF로만 온다). 스크린샷·브라우저 이미지 복사처럼 파일이 아니라 비트맵으로 온 이미지를 claude/codex가
+    /// [Image]로 인식하게 하는 토대 — iTerm2의 "비트맵→임시파일→경로" 동작 참고(코드 표현은 옮기지 않은 독립 구현).
+    private func clipboardImagePng(_ pb: NSPasteboard) -> Data? {
+        if let p = pb.data(forType: .png) { return p }
+        if let tiff = pb.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff) {
+            return rep.representation(using: .png, properties: [:])
         }
-        guard let data = png else { return nil }
+        return nil
+    }
+
+    /// PNG 데이터를 pasteImageDir에 UUID 이름으로 **atomic** 저장하고 경로를 돌려준다(로컬 이미지 paste/drop용 —
+    /// claude/codex가 경로로 [Image] 인식). atomic write로 부분 파일 노출을 막는다. 실패 시 nil(호출자 폴백). 누적
+    /// 파일은 앱 시작 시 cleanupPasteImages가 비운다(paste 직후엔 claude 읽기 타이밍을 몰라 못 지움).
+    private func saveTempPng(_ data: Data) -> String? {
         let dir = Self.pasteImageDir
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

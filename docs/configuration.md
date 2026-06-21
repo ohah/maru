@@ -83,7 +83,10 @@ window.padding-left   = 8
 | `workspace.split-inherit-cwd` | `true`\|`false` | `true` | 새 분할(`split_*`, 팬)이 포커스 Term의 현재 cwd를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `split-inherit-working-directory`). 아래 참조 |
 | `scrollback.lines` | 정수(0~100000) | `1000` | 가시 화면 위로 보관할 과거 줄 수. `0`이면 스크롤백 비활성(과거 줄 안 보관). 범위 밖/비정수는 무시(기본 유지) |
 | `bell.audible` | `true`\|`false` | `true` | BEL(0x07) 수신 시 시스템 소리(NSSound.beep)를 낼지. `false`면 음소거(코어 플래그는 정상 소비) |
+| `notifications.agent-complete` | `true`\|`false` | `true` | 터미널에서 도는 에이전트(claude/codex) 세션이 **비활성 탭/창**에서 완료(running→idle)될 때 macOS 알림을 띄울지. 활성 탭은 화면으로 이미 보이므로 안 띄운다. 그 외 값은 무시 |
 | `text.ambiguous-width` | `narrow`\|`wide` | `narrow` | EAW Ambiguous 문자(동그란 번호 ① 등)의 셀 폭. 아래 참조 |
+| `text.blink` | `true`\|`false` | `false` | SGR 5(blink) 글자를 실제로 깜빡일지. **기본 false** — 깜빡이는 콘텐츠는 접근성(WCAG 발작) 우려라 다수 터미널이 기본으로 끈다. 그 외 값은 무시 |
+| `chrome.theme` | `tui`\|`rich` | `tui` | chrome(탭바·사이드바·divider·focus 테두리) 디자인 테마. `tui`=현행 cell-grid 룩, `rich`=분리 색 팔레트(둥근 모서리·gradient). 색 룩(theme.preset)과는 직교. 그 외 값은 무시. 자세히는 [Chrome 전략](chrome-strategy.md) |
 | `input.page-keys` | `passthrough`\|`scroll` | `scroll` | 메인 화면 PageUp/Down 동작. 아래 참조 |
 | `input.shift-enter` | `newline`\|`native` | `newline` | Shift+Enter 인코딩. `newline`(기본)=Option+Enter와 같은 `\x1b\r`(멀티라인 줄바꿈). 아래 참조 |
 | `input.ime-enter` | `newline`\|`commit-only` | `newline` | IME(한글 등) 조합 중 Enter. `newline`(기본)=확정+개행 한 번에(브라우저 동작). 아래 참조 |
@@ -97,6 +100,7 @@ window.padding-left   = 8
 | `sidebar.show-branch` | `true`\|`false` | `true` | 세로 사이드바 세션 카드에 git 브랜치명을 표시할지. 카드 이름줄은 식별용이라 항상 표시. 그 외 값은 무시. 사이드바 헤더 **view options(⚙) 메뉴**에서 토글하면 이 키에 양방향 반영(앱→config 파일 atomic write, 주석 보존) |
 | `sidebar.show-folder` | `true`\|`false` | `true` | 위와 같되 폴더(cwd) 경로 줄(cwd가 git repo 안일 때만). 마찬가지로 view options(⚙) 메뉴에서 토글·양방향 |
 | `term` | 문자열 | `xterm-maru` | 셸에 줄 `$TERM`(컴파일 실패 시 `xterm-256color` 폴백). 아래 참조 |
+| `shell-integration.ssh` | `true`\|`false` | `false` | 평범한 `ssh`를 `maru ssh`로 라우팅해 원격에 `xterm-maru` terminfo를 전파할지(opt-in). 기본 off(다운그레이드로 원격 안 깨짐). 아래 [셸 통합 ssh 라우팅](#셸-통합-ssh-라우팅-shell-integrationssh) 참조 |
 | `env.<KEY>` | 문자열 | (없음) | 새 셸에 주입할 환경변수(`env.EDITOR = nvim`처럼 여러 줄). 부모 상속 env + maru override(TERM 등) **위에 upsert** — 같은 KEY면 덮어쓰고 없으면 추가("부모 + 사용자"). 값은 양끝만 trim(내부 공백 보존), 빈 값 허용. 빈 KEY(`env. =`)는 무시. 새로 여는 셸에만 적용(reload는 기존 셸 env 안 바꿈). 아래 참조 |
 | `shell.command` | 경로 | (없음) | 대화형 셸 실행 파일 경로(절대경로). 비어 있으면(기본) `$MARU_INTERACTIVE_SHELL`→`$SHELL`→`/bin/sh` 순으로 자동 결정(현행). 새로 여는 셸에만 적용. 아래 참조 |
 | `shell.args` | 문자열 | `-i` | 셸 인자(argv, command 제외). 공백으로 토큰 분리(`shell.args = -i -l`). 따옴표 미지원. 빈 값(`shell.args =`)이면 인자 없음. 아래 참조 |

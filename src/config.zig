@@ -19,6 +19,7 @@ pub const ResolvedCursor = appearance.ResolvedCursor;
 pub const ResolvedFontRequest = appearance.ResolvedFontRequest;
 pub const ResolvedTheme = appearance.ResolvedTheme;
 pub const ThemeConfig = theme.ThemeConfig;
+pub const ShellConfig = theme.ShellConfig;
 pub const AppBinding = keybinding.AppBinding;
 pub const KeyBindingError = keybinding.KeyBindingError;
 pub const KeyBindingResolver = keybinding.KeyBindingResolver;

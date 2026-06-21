@@ -145,6 +145,24 @@ fn applyKey(
         try env_overrides.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, value }));
         return;
     }
+    if (std.mem.eql(u8, key, "shell.command")) {
+        // 셸 실행 파일 경로. 빈 값이면 무시(기본 "" 유지 = resolveInteractiveShell 폴백) — term과 같은 forgiving.
+        const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
+        if (trimmed.len == 0) {
+            try diags.append(a, .{ .line = line_no, .message = "shell.command가 비어 있음 — 기본(셸 자동 결정) 유지" });
+            return;
+        }
+        config.shell.command = try a.dupe(u8, trimmed);
+        return;
+    }
+    if (std.mem.eql(u8, key, "shell.args")) {
+        // 공백으로 토큰 분리해 argv로(따옴표 미지원 — 셸 플래그는 단순). 빈 값이면 인자 없음(&.{}). 줄 여러 번이면 마지막이 이김.
+        var list: std.ArrayList([]const u8) = .empty;
+        var it = std.mem.tokenizeAny(u8, value, &std.ascii.whitespace);
+        while (it.next()) |tok| try list.append(a, try a.dupe(u8, tok));
+        config.shell.args = try list.toOwnedSlice(a);
+        return;
+    }
     if (std.mem.eql(u8, key, "font.family")) {
         const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
         if (trimmed.len == 0) {
@@ -824,6 +842,28 @@ test "parse: env.<KEY>가 누적되고 빈 KEY는 무시, 값 내부 공백 보�
     try std.testing.expectEqualStrings("GREETING=hello world", p.config.env[1]); // 내부 공백 보존(양끝만 trim)
     try std.testing.expectEqualStrings("EMPTY=", p.config.env[2]); // 빈 값도 유효
     try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len); // env. (빈 KEY) 한 건
+}
+
+test "parse: shell.command/shell.args — 경로 + 공백 분리 argv, 빈 값 처리" {
+    var p = try parse(std.testing.allocator,
+        \\shell.command = /opt/homebrew/bin/fish
+        \\shell.args = -i -l
+    );
+    defer p.deinit();
+    try std.testing.expectEqualStrings("/opt/homebrew/bin/fish", p.config.shell.command);
+    try std.testing.expectEqual(@as(usize, 2), p.config.shell.args.len);
+    try std.testing.expectEqualStrings("-i", p.config.shell.args[0]);
+    try std.testing.expectEqualStrings("-l", p.config.shell.args[1]);
+
+    // 빈 shell.args → 인자 없음(&.{}); 빈 shell.command → 기본 유지("" — 셸 자동 결정) + diagnostic.
+    var q = try parse(std.testing.allocator,
+        \\shell.command =
+        \\shell.args =
+    );
+    defer q.deinit();
+    try std.testing.expectEqualStrings("", q.config.shell.command); // 빈 값 무시 → 기본 유지
+    try std.testing.expectEqual(@as(usize, 0), q.config.shell.args.len); // 빈 값 → 인자 없음
+    try std.testing.expectEqual(@as(usize, 1), q.diagnostics.len); // shell.command 빈 값 한 건
 }
 
 test "updateConfigText: in-place 키 교체로 주석·다른 줄 보존, 없는 키는 append, round-trip" {

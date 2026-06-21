@@ -98,6 +98,8 @@ window.padding-left   = 8
 | `sidebar.show-folder` | `true`\|`false` | `true` | 위와 같되 폴더(cwd) 경로 줄(cwd가 git repo 안일 때만). 마찬가지로 view options(⚙) 메뉴에서 토글·양방향 |
 | `term` | 문자열 | `xterm-maru` | 셸에 줄 `$TERM`(컴파일 실패 시 `xterm-256color` 폴백). 아래 참조 |
 | `env.<KEY>` | 문자열 | (없음) | 새 셸에 주입할 환경변수(`env.EDITOR = nvim`처럼 여러 줄). 부모 상속 env + maru override(TERM 등) **위에 upsert** — 같은 KEY면 덮어쓰고 없으면 추가("부모 + 사용자"). 값은 양끝만 trim(내부 공백 보존), 빈 값 허용. 빈 KEY(`env. =`)는 무시. 새로 여는 셸에만 적용(reload는 기존 셸 env 안 바꿈). 아래 참조 |
+| `shell.command` | 경로 | (없음) | 대화형 셸 실행 파일 경로(절대경로). 비어 있으면(기본) `$MARU_INTERACTIVE_SHELL`→`$SHELL`→`/bin/sh` 순으로 자동 결정(현행). 새로 여는 셸에만 적용. 아래 참조 |
+| `shell.args` | 문자열 | `-i` | 셸 인자(argv, command 제외). 공백으로 토큰 분리(`shell.args = -i -l`). 따옴표 미지원. 빈 값(`shell.args =`)이면 인자 없음. 아래 참조 |
 | `keybind` | `<조합> = <action>` | (없음) | 여러 줄 가능. 아래 참조 |
 
 ### 컬러 테마 프리셋 (`theme.preset`)
@@ -360,6 +362,29 @@ env.MY_FLAG = a b c   # 값 내부 공백은 보존(양끝만 다듬는다), 빈
 - **베이스/결정**: 상속 + override 모델은 Ghostty `env`(부모 상속 위에 사용자 값 추가)를 베이스로 했다. 저장은
   값 보존이 기본이다(config 파일은 사용자 소유) — 민감값 마스킹은 GUI 표시·trace에만 적용한다([필수 프로젝트 규칙]
   redaction 기준, settings-page.md §8).
+
+### 대화형 셸 (`shell.command` / `shell.args`)
+
+기본적으로 maru는 `$MARU_INTERACTIVE_SHELL`→`$SHELL`→`/bin/sh` 순으로 셸을 정하고 `-i`로 띄운다. 이를
+사용자가 바꿀 수 있다.
+
+```conf
+shell.command = /opt/homebrew/bin/fish
+shell.args = -i -l    # 공백으로 토큰 분리(따옴표 미지원). 빈 값이면 인자 없음
+```
+
+- **`shell.command`** — 셸 실행 파일 경로. 비어 있으면(기본) 위 자동 결정. maru는 셸을 거치지 않고 `execve`로
+  직접 띄우므로 **절대경로**여야 한다(PATH 탐색 없음). 없는 경로면 spawn이 실패한다.
+- **`shell.args`** — argv(command 제외). 공백으로 토큰을 나눈다(`-i -l` → `["-i", "-l"]`). 따옴표·이스케이프는
+  지원하지 않는다(셸 플래그는 보통 단순). 빈 값이면 인자 없이 띄운다. 미설정 시 기본 `-i`.
+- **login 래퍼는 유지**: macOS는 셸을 `login(1)`로 감싸 전체 로그인 세션을 셋업하고(Terminal.app·Ghostty 동일),
+  이 `command`/`args`가 그 안의 `exec -l <command> <args>`로 들어가 최종 로그인 셸이 된다. 즉 셸을 바꿔도 로그인
+  셸 셋업(PATH·`.zprofile` 등)은 그대로 동작한다.
+- **적용 시점**: 새로 여는 셸(첫 창·새 탭/Term·분할)에만. 런타임 Reload Config는 이미 떠 있는 셸을 안 바꾼다.
+  퀵 터미널·controlled smoke(테스트용 `/bin/sh -c`)에는 영향 없다(대화형 셸에만 적용).
+- **베이스/결정**: Ghostty `command`/`shell`(사용자 지정 셸 프로그램)에 대응한다. Ghostty의 `command`는 `/bin/sh -c`로
+  한 문자열을 실행하지만, maru는 `execve` 직접 모델이라 **경로 + argv 토큰 배열**(셸-split 없음)로 둔다 — quoting
+  모호성을 피하고 실패 원인을 줄인다.
 
 ### 셸 통합 ssh 라우팅 (`shell-integration.ssh`)
 

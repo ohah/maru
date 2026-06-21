@@ -365,6 +365,21 @@ pub const Config = struct {
     shell_integration: ShellIntegrationConfig = .{},
     /// 워크스페이스(시작 창·새 탭이 열리는 디렉터리) 설정. loader가 `workspace.*` 키로 파싱.
     workspace: WorkspaceConfig = .{},
+    /// 대화형 셸 프로그램·인자 override. loader가 `shell.command`/`shell.args` 키로 파싱. 기본은 빈 command
+    /// (= resolveInteractiveShell 폴백)이라 미설정 시 현행 동작과 동일.
+    shell: ShellConfig = .{},
+};
+
+/// 대화형 셸 프로그램과 인자 override. 미설정(기본)이면 `resolveInteractiveShell()`(MARU_INTERACTIVE_SHELL >
+/// SHELL > /bin/sh) + `-i`로 현행과 동일하게 띄운다. `controlled_smoke`(테스트용 `/bin/sh -c`)에는 영향 없다
+/// (interactive_shell에만 적용). login(1) 래퍼는 그대로 — 이 command/args가 래퍼의 `exec -l <command> <args>`로
+/// 들어가 최종 로그인 셸이 된다(Ghostty `command`/`shell` 대응; maru는 execve 직접이라 셸-split 없이 토큰 배열).
+pub const ShellConfig = struct {
+    /// 셸 실행 파일 경로(절대경로). 빈 값(기본)이면 `resolveInteractiveShell()` 폴백. loader `shell.command`.
+    command: []const u8 = "",
+    /// 셸 인자(argv, command 제외). 기본 `-i`(대화형). loader `shell.args`가 공백으로 토큰 분리해 교체한다
+    /// (빈 줄이면 인자 없음). 따옴표 미지원 — 셸 플래그는 보통 단순(`-i`·`-l`).
+    args: []const []const u8 = &.{"-i"},
 };
 
 /// 워크스페이스(시작 창·새 탭/분할) 설정. Ghostty `working-directory` + `*-inherit-working-directory` 모델을

@@ -62,6 +62,8 @@ pub const FieldRow = struct {
 /// 내고 실제 변경+write-back은 platform이 한다. slider 드래그 중엔 pending_ratio에 최신 ratio를 담아 platform이 읽는다.
 /// 인라인 편집 버퍼 용량(바이트) — 폰트 패밀리·#RRGGBB는 짧아 고정 버퍼면 충분(별도 allocator 불요).
 const edit_cap: usize = 128;
+/// 검색 쿼리 버퍼 용량(바이트) — 짧은 키워드면 충분(고정 버퍼).
+const search_cap: usize = 64;
 
 pub const State = struct {
     open: bool = false,
@@ -87,6 +89,11 @@ pub const State = struct {
     /// keybind 행 녹음 중(Enter/클릭으로 켜짐) — 다음 raw 키를 platform이 가로채 chord로 캡처한다(컴포넌트 handle을
     /// 안 거침). 켜지면 그 행이 "키 입력 대기..."로 보인다. platform이 캡처/취소 후 끈다(text editing과 별개 상태).
     recording: bool = false,
+    /// 현재 섹션 폼 검색 중(`/`로 시작, Esc로 종료). 켜지면 char가 검색 버퍼로 가고, platform이 searchQuery()로 행을
+    /// 필터한다(라벨 부분일치). ↑↓ 나비·Enter 활성은 그대로(필터된 행 위에서). 고정 버퍼라 별도 allocator 불요.
+    searching: bool = false,
+    search_buf: [search_cap]u8 = undefined,
+    search_len: usize = 0,
 
     pub fn show(self: *State) void {
         self.open = true;
@@ -96,6 +103,8 @@ pub const State = struct {
         self.editing = false;
         self.grid_cell = 0;
         self.recording = false;
+        self.searching = false;
+        self.search_len = 0;
     }
     /// 섹션 전환(좌측 네비 클릭) — 선택 섹션과 첫 필드로. platform이 새 섹션 필드 수를 setFieldCount로 다시 준다.
     pub fn selectSection(self: *State, i: usize) void {
@@ -105,6 +114,37 @@ pub const State = struct {
         self.editing = false;
         self.grid_cell = 0;
         self.recording = false;
+        self.searching = false; // 섹션 바꾸면 검색 초기화(필터는 섹션 내라)
+        self.search_len = 0;
+    }
+    /// 검색 쿼리(현재 버퍼). platform이 currentSectionFields에서 읽어 행을 필터한다.
+    pub fn searchQuery(self: *const State) []const u8 {
+        return self.search_buf[0..self.search_len];
+    }
+    /// 검색 시작(`/`) — 빈 쿼리로 모드 진입. 켜는 동안 selected는 보존(필터 후 platform이 clamp).
+    pub fn startSearch(self: *State) void {
+        self.searching = true;
+        self.search_len = 0;
+    }
+    /// 검색 종료(Esc) — 쿼리 비우고 모드 해제(필터 풀려 전체 행 복귀).
+    pub fn endSearch(self: *State) void {
+        self.searching = false;
+        self.search_len = 0;
+    }
+    /// 검색 쿼리에 코드포인트 추가(UTF-8, 넘치면 무시 — 고정 버퍼).
+    pub fn appendSearchCp(self: *State, cp: u21) void {
+        var tmp: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(cp, &tmp) catch return;
+        if (self.search_len + n > search_cap) return;
+        @memcpy(self.search_buf[self.search_len..][0..n], tmp[0..n]);
+        self.search_len += n;
+    }
+    /// 검색 쿼리 마지막 코드포인트 제거(UTF-8 경계).
+    pub fn backspaceSearch(self: *State) void {
+        if (self.search_len == 0) return;
+        var i = self.search_len - 1;
+        while (i > 0 and (self.search_buf[i] & 0xC0) == 0x80) i -= 1;
+        self.search_len = i;
     }
     /// palette_grid 선택 셀을 delta만큼 옮긴다(wrap, 0..15). platform이 ←→(adjust)에서 호출(선택 행이 palette_grid일 때).
     pub fn moveGridCell(self: *State, delta: i32) void {
@@ -149,6 +189,8 @@ pub const State = struct {
         self.dragging = false;
         self.editing = false;
         self.recording = false;
+        self.searching = false;
+        self.search_len = 0;
     }
     pub fn setFieldCount(self: *State, n: usize) void {
         self.count = n;
@@ -166,7 +208,7 @@ pub const State = struct {
 /// handle/handlePointer가 돌려주는 intent. platform이 rows[selected] 기준으로 처리:
 ///   toggle=bool flip, slider_set=pending_ratio→값 매핑, adjust_left/right=slider 한 스텝, selection_changed=재렌더,
 ///   close=hide, consumed=소비만(모달 뒤로 안 샘). 값 종류 판정(toggle인지 slider인지)은 platform이 rows로 한다.
-pub const Action = enum { close, toggle, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, consumed };
+pub const Action = enum { close, toggle, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, consumed };
 
 const label_gap_cols: u32 = 2; // 라벨과 우측 위젯 사이 최소 간격(칸)
 
@@ -310,12 +352,19 @@ pub fn view(
     const l = computeLayout(sections, rows, state.selected, p, tk) orelse return;
     const box = l.box;
     try modal_box.frame(box, p, arena, out);
-    // 제목 — 폼 행이 창보다 많으면 "Settings   sel/total" 위치 표식(스크롤 발견성).
-    const title = if (rows.len > l.win_len)
-        try std.fmt.allocPrint(arena, "{s}   {d}/{d}", .{ title_text, @min(state.selected + 1, rows.len), rows.len })
-    else
-        title_text;
-    try modal_box.text(box, box.inner_x, 0, title, .surface_fg, arena, out);
+    // 제목 — 검색 중이면 "검색: <쿼리>▏"(accent + caret), 아니면 "Settings" + 폼이 창보다 많으면 sel/total 위치 표식.
+    if (state.searching) {
+        const title = try std.fmt.allocPrint(arena, "검색: {s}", .{state.searchQuery()});
+        try modal_box.text(box, box.inner_x, 0, title, .accent_bar, arena, out);
+        const caret_x = box.inner_x + @as(i32, @intCast(overlay_input.displayCols(title) * box.cw));
+        try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = modal_box.rowY(box, 0), .w = box.cw, .h = box.ch }, .role = .cursor } });
+    } else {
+        const title = if (rows.len > l.win_len)
+            try std.fmt.allocPrint(arena, "{s}   {d}/{d}", .{ title_text, @min(state.selected + 1, rows.len), rows.len })
+        else
+            title_text;
+        try modal_box.text(box, box.inner_x, 0, title, .surface_fg, arena, out);
+    }
 
     // 좌측 네비: 섹션 라벨(선택 섹션은 tab_active_bg 강조 + accent_bar 라벨). 라벨은 좌측 1칸 패딩.
     for (sections, 0..) |label, i| {
@@ -435,6 +484,33 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
             else => return .consumed,
         }
     }
+    // 검색 중이면 char가 쿼리로(필터), ↑↓=필터된 행 나비, Enter=활성, Esc=검색 종료, Backspace=쿼리 편집. 그 외 소비.
+    if (state.searching) {
+        switch (k.key) {
+            .escape => {
+                state.endSearch();
+                return .search_changed; // 종료 + 필터 해제(전체 행 복귀)
+            },
+            .backspace => {
+                state.backspaceSearch();
+                return .search_changed;
+            },
+            .up => {
+                state.moveSelection(-1);
+                return .selection_changed;
+            },
+            .down => {
+                state.moveSelection(1);
+                return .selection_changed;
+            },
+            .enter => return if (state.count == 0) .consumed else .toggle, // 필터된 선택 행 활성
+            .char => {
+                state.appendSearchCp(k.codepoint);
+                return .search_changed;
+            },
+            else => return .consumed,
+        }
+    }
     switch (k.key) {
         .escape => {
             state.hide();
@@ -451,7 +527,13 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
         .left => return if (state.count == 0) .consumed else .adjust_left,
         .right => return if (state.count == 0) .consumed else .adjust_right,
         .enter => return if (state.count == 0) .consumed else .toggle,
-        .char => return if (k.codepoint == ' ' and state.count > 0) .toggle else .consumed,
+        .char => {
+            if (k.codepoint == '/') { // '/'로 검색 시작(현재 섹션 필터)
+                state.startSearch();
+                return .search_changed;
+            }
+            return if (k.codepoint == ' ' and state.count > 0) .toggle else .consumed;
+        },
         else => return .consumed,
     }
 }
@@ -923,6 +1005,52 @@ test "settings palette_grid: 16 스와치 + 선택 셀 테두리·hex 렌더, �
     try std.testing.expectEqual(Action.selection_changed, a2);
     try std.testing.expect(s.editing);
     try std.testing.expectEqualStrings("#000000", s.editText());
+}
+
+test "settings 검색: '/'로 시작·char 쿼리·Backspace·↑↓ 나비·Enter 활성·Esc 종료 + 제목 렌더 (CS-4-4 검색)" {
+    var s = State{};
+    s.show();
+    s.setFieldCount(5);
+
+    // '/'로 검색 시작.
+    try std.testing.expectEqual(Action.search_changed, handle(.{ .key = .char, .codepoint = '/' }, &s));
+    try std.testing.expect(s.searching);
+    try std.testing.expectEqualStrings("", s.searchQuery());
+
+    // char가 쿼리로(필터 신호).
+    try std.testing.expectEqual(Action.search_changed, handle(.{ .key = .char, .codepoint = 's' }, &s));
+    try std.testing.expectEqual(Action.search_changed, handle(.{ .key = .char, .codepoint = 'p' }, &s));
+    try std.testing.expectEqualStrings("sp", s.searchQuery());
+    // Backspace.
+    try std.testing.expectEqual(Action.search_changed, handle(.{ .key = .backspace }, &s));
+    try std.testing.expectEqualStrings("s", s.searchQuery());
+    // ↑↓는 필터된 행 나비(검색 유지).
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .down }, &s));
+    try std.testing.expect(s.searching);
+    // Enter는 선택 행 활성(toggle).
+    try std.testing.expectEqual(Action.toggle, handle(.{ .key = .enter }, &s));
+    // Esc는 검색 종료(모달 close 아님) + 필터 해제.
+    try std.testing.expectEqual(Action.search_changed, handle(.{ .key = .escape }, &s));
+    try std.testing.expect(!s.searching);
+    try std.testing.expectEqualStrings("", s.searchQuery());
+    try std.testing.expect(s.open); // 모달은 안 닫힘
+
+    // view: 검색 중이면 제목이 "검색: <쿼리>"(accent).
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk2 = testTokens();
+    s.startSearch();
+    s.appendSearchCp('f');
+    s.appendSearchCp('o');
+    const rows2 = [_]FieldRow{.{ .label = "Font size", .kind = .{ .toggle = true } }};
+    var out2: std.ArrayList(draw.Op) = .empty;
+    try view(&s, no_sections, &rows2, test_props, &tk2, arena, &out2);
+    var saw_search = false;
+    for (out2.items) |op| if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, "검색: fo") != null and op.text.role == .accent_bar) {
+        saw_search = true;
+    };
+    try std.testing.expect(saw_search);
 }
 
 test "settings keybind: chord 표시·녹음 시 '키 입력 대기'·control 클릭→toggle(녹음 시작) (CS-4-3)" {

@@ -43,6 +43,7 @@ pub const HostAction = union(enum) {
     settings_selection_changed, // 세팅 행 ↑↓/행 클릭 — platform이 재렌더(부수효과 없음)
     settings_section_changed, // 세팅 좌측 네비 클릭 — platform이 새 섹션 필드 수 주입(refreshSettingsFieldCount) + 재렌더
     settings_text_commit, // 세팅 text 행 인라인 편집 Enter — platform이 editText()→config arena dupe→setText + 적용
+    settings_search_changed, // 세팅 검색 쿼리 변경(시작/입력/Backspace/종료) — platform이 필터 재적용(refreshSettingsFieldCount) + 재렌더
 };
 
 pub const ChromeHost = struct {
@@ -185,6 +186,7 @@ pub const ChromeHost = struct {
                         .selection_changed => .settings_selection_changed,
                         .section_changed => .none, // 키 경로엔 안 옴(섹션 전환은 좌측 네비 클릭 전용) — exhaustiveness
                         .text_commit => .settings_text_commit, // 인라인 편집 Enter
+                        .search_changed => .settings_search_changed, // 검색 시작/입력/종료 — 필터 재적용
                         .consumed => .none,
                     };
                 }

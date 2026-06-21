@@ -107,9 +107,9 @@ flowchart TD
    - 변경: 캐시 hit 경로에서도 `-o ControlMaster=auto -o ControlPath=<경로>`로 master를 유지하고, 경로는 **목적지 해시 기반 결정론적 경로**로 만들어 Maru가 계산으로 안다(§6 결정 — `maru ssh`와 Maru가 같은 dest 해시로 동일 경로 도출).
 2. **로컬 Maru가 "이 세션이 maru ssh 원격 세션"임을 안다. ✅ 2단계 구현**
    - `maru ssh`가 `OSC 5379 ; ssh ; <dest>`로 목적지를 통지하고(`wrapper_script`의 `notify`, `$TMUX`면 DCS passthrough), Maru가 `dispatchOscMaru`로 받아 `ssh_remote_dest`에 저장한다(`sshRemoteDest()` getter). dest로 `controlSocketPath`를 계산하므로 control socket 경로를 따로 알릴 필요가 없다. control socket이 살아있는 maru exec 경로(캐시 hit·부트스트랩 성공)에서만 통지한다.
-3. **드롭 핸들러가 분기한다 (1차: 드롭만, paste 업로드는 후속).**
-   - 로컬 세션: 지금처럼 로컬 경로 paste.
-   - maru ssh 원격 세션: 드롭 바이트를 control socket으로 업로드(`ssh -S <ctl> <host> 'mkdir -p ... && base64 -d > <원격경로>'`에 base64 파이프) → 성공하면 **원격 경로**를 메인 PTY로 paste. 실패하면 명확히 보고(조용한 실패 금지, `project-rules.md` §전략 유지).
+3. **드롭 핸들러가 분기한다. ✅ 3단계 구현 (1차: 드롭만)**
+   - Swift `handleDrop`은 fileURL 드롭이면 경로(NUL 구분)를 ABI `maru_macos_app_session_drop_files`(v68)로 넘긴다(웹 URL·텍스트는 기존 paste_text).
+   - Zig `handleDroppedFiles`가 분기한다: 로컬 세션이면 경로를 셸 이스케이프해 paste, maru ssh 원격이면 각 파일을 메인 스레드에서 읽어(16MB 상한) **백그라운드 스레드**(`uploadWorker`→`ssh_upload.uploadBytes`)로 control socket에 업로드하고, 완료 시 메인 tick(`drainUploadResults`)이 원격 절대경로를 paste한다. 한 파일도 못 올리면 로컬 경로 paste로 폴백(graceful). 원격 수신 셸 구절은 `cli/ssh.zig` `uploadShellCommand`(mkdir + cat(stdin→파일) + 절대경로 stdout echo).
 
 ### 4.2 원격 의존성
 
@@ -138,11 +138,10 @@ flowchart TD
 - **트리거 = 드롭만 (1차).** 파일/이미지 드래그앤드롭만 업로드한다. paste(클립보드 이미지) 업로드는 [후속](#8-후속비범위)으로 둔다.
 - **원격 인식 토대 = `maru ssh` 전용 OSC 통지 (OSC 5379).** `maru ssh`가 `exec` 직전에 `OSC 5379 ; ssh ; <dest> BEL`을 emit하고(`cli/ssh.zig` `wrapper_script`의 `notify` — control socket이 살아있는 maru exec 경로에서만), **`$TMUX`가 있으면 DCS tmux passthrough로 감싸** tmux 안에서도 로컬 Maru까지 도달하게 한다. Maru(`terminal/core.zig` `dispatchOscMaru`)는 이를 받아 `ssh_remote_dest`에 dest를 저장하고(`sshRemoteDest()` getter), dest로 control socket 경로 해시를 계산한다. **5379**는 표준/벤더(iTerm 1337 등) 충돌을 피한 사설 번호이고, payload는 `<서브커맨드>;<인자>` 형식(현재 `ssh;<dest>`)이라 확장 가능하다. 모르는 터미널은 무시하므로 안전하다. RIS에선 유지한다(ssh 연결은 터미널 리셋과 무관, maru ssh가 재보고하지 않음). OSC 7 host 보관은 원격 cwd 표시용 보조로만 남긴다.
 
-### 미결정 (구현 전 합의 필요)
+### 보안 기본값 (사용자 결정 2026-06-21)
 
-아래는 보안에 영향을 주는 결정이라 구현(드롭 업로드 단계) 전 합의가 필요하다(`pr-checklist.md` §전략 수정 규칙).
-
-1. **보안 기본값.** 기능 기본 on/off, 파일 크기 상한, 허용 확장자, 원격 저장 위치·정리 주기.
+- **파일 종류 = 모든 파일**(범용 드롭-업로드), **크기 상한 = 16MB**(OSC 52와 동일, `cli/ssh.zig` `max_upload_bytes`), **업로드 = 백그라운드 스레드**(UI 비차단), **트리거 = 드롭만**(paste 업로드는 후속), 기능 기본 **on**(드롭은 명시적 사용자 행동). 원격 저장 위치 = `$HOME/.cache/maru/dropped/`(원격이 `mkdir -p`). 파일명은 `sanitizeDropFilename`으로 정제(셸 메타·`..` 경로 탈출 차단).
+- 후속(미결정): 원격 저장 정리 주기(현재 누적 — 세션/용량 기반 정리), 확장자 제한(현재 없음).
 
 ## 7. 검증·관측
 

@@ -1517,8 +1517,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// [Image]로 인식하게 하는 토대 — iTerm2의 "비트맵→임시파일→경로" 동작 참고(코드 표현은 옮기지 않은 독립 구현).
     private func clipboardImagePng(_ pb: NSPasteboard) -> Data? {
         if let p = pb.data(forType: .png) { return p }
-        if let tiff = pb.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff) {
-            return rep.representation(using: .png, properties: [:])
+        // PNG가 없으면 TIFF·JPEG 등 비트맵을 NSBitmapImageRep로 PNG 정규화(스크린샷은 TIFF, 일부 앱은 JPEG로 복사).
+        for type in [NSPasteboard.PasteboardType.tiff, NSPasteboard.PasteboardType("public.jpeg")] {
+            if let d = pb.data(forType: type), let rep = NSBitmapImageRep(data: d) {
+                return rep.representation(using: .png, properties: [:])
+            }
         }
         return nil
     }

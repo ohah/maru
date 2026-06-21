@@ -142,7 +142,18 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **선택·편집**: `←→`로 셀 이동(`State.grid_cell`, wrap), `Enter`/스와치 클릭으로 선택, 선택 셀의 hex를 인라인 편집(text/color 위젯과 같은 고정 버퍼·Enter 커밋·Esc 취소). 커밋은 `schema.setPaletteColor`(파일 로드와 같은 `#RRGGBB` 검증)로 적용 + `theme.palette.N` 키 dirty.
 - **선택 표식 = 인덱스 텍스트**: 우측에 **`N  #rrggbb`**(선택 ANSI 인덱스 + hex)를 보여준다. 셀 위에 `Op.border`/`fill`을 얹으면 tui lowering(`paintRectBg`가 셀 단위)이 **1행 높이라 셀 전체를 그 색으로 칠해 스와치 색을 덮으므로** 안 쓴다. 인덱스는 색과 무관하게 어느 칸인지 분명히 보여준다.
 - **영속은 공짜**: write-back(`serialize.configKeyValues`)이 **이미 set된 `theme.palette.N`을 직렬화**한다(round-trip 테스트가 보장). 그래서 별도 write-경로 확장 없이 dirty만 찍으면 파일에 써진다 — `theme.preset`이 깐 팔레트도 이 그리드로 직접 칠하면 영속된다([§6.3] 한계의 직접 해소 경로).
-- **한계(후속)**: 온-그리드 선택 마커(현재는 인덱스 텍스트 — reserved 밑줄 프리미티브가 생기면 셀 위 얇은 띠로), 셀별 프리셋 순환(현재는 hex 입력만), null로 되돌리기(현재는 통합 리셋이 담당), env/shell.args bespoke 에디터(CS-4-5 나머지).
+- **한계(후속)**: 온-그리드 선택 마커(현재는 인덱스 텍스트 — reserved 밑줄 프리미티브가 생기면 셀 위 얇은 띠로), 셀별 프리셋 순환(현재는 hex 입력만), null로 되돌리기(현재는 통합 리셋이 담당), env/shell.args bespoke 에디터(§6.6).
+
+### 6.6 셸 인자(`shell.args`) + 환경 변수(`env.<KEY>`) — 특수 행 (CS-4-5)
+
+터미널 섹션에 두 특수 키(schema 필드 아님, loader가 명시 핸들러)를 **`.text` 위젯 재사용**으로 합성 주입한다(palette처럼 새 Kind를 안 만든다 — 둘 다 한 줄짜리 문자열 편집이라 text로 충분). platform이 `currentSectionFields`의 terminal 분기에서 행을 더하고, `commitSelectedText`가 **키로 라우팅**한다(`theme.preset`·palette 선례).
+
+- **`shell.args`**: `셸 인자 (공백 구분)` 행 — 값 = 현재 argv를 공백으로 join(`"-i -l"`). 편집 커밋 시 `setShellArgs`가 공백으로 토큰 분리해(`tokenizeAny`, loader와 같은 규칙 — 따옴표 미지원) `config.shell.args`에 적용 + `markConfigKeyDirty("shell.args")`. write-back은 `serialize.configKeyValues`가 join해 한 줄로 쓴다.
+- **`env.<KEY>`**: 각 환경 변수가 한 행(라벨=KEY, 값=VALUE 인라인 편집). 커밋 시 `setEnvVar(name, value)`가 `config.env`(`"KEY=VALUE"` 리스트)에서 그 KEY를 **upsert**(있으면 교체, 없으면 추가) + `markConfigKeyDirty("env.KEY")`. dirty 키는 동적이라 세션 arena에 둬 안정 포인터로 보관(serialize drain까지 유효 — palette의 정적 키와 다른 점).
+- **추가 행**: 목록 끝 `환경 변수 추가 (KEY=VALUE)` 행(빈 `env.` sentinel 키). 편집 커밋 시 `addEnvVar`가 `KEY=VALUE`를 파싱해 `setEnvVar`로 upsert(첫 `=` 기준, KEY는 양끝 trim; `=` 없거나 빈 KEY면 notice).
+- **라이브 적용 없음**: env·shell.args는 **셸 spawn 시점에만** 쓰이므로 `reapplyLoadedConfig`를 안 부른다(이미 뜬 셸엔 영향 없고, 다음 새 Term부터 반영 — 정확한 동작). appearance/렌더 무변경이라 metal_dirty도 불필요.
+- **영속은 공짜**: write-back이 `shell.args`·set된 `env.<KEY>`를 이미 직렬화(serialize.zig, round-trip 테스트 보장)하므로 별도 write-경로 확장 없이 dirty만 찍으면 파일에 써진다.
+- **한계(후속)**: **삭제·KEY 변경**은 `updateConfigText`가 override-only(줄 갱신/추가만, 삭제 없음)라 영속 안 됨 — 줄 삭제 확장이 필요해 후속(현재는 upsert만; 완전 제거는 통합 리셋이 담당). 토큰 따옴표(공백 포함 인자)도 후속.
 
 ## 7. 의존성
 
@@ -163,7 +174,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | **CS-4-2** ✅ | color input(16색 프리셋 + hex 입력) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-3** | keybind recorder(`command_catalog` 행 + 키 캡처) | 헤드리스 + 실기 |
 | **CS-4-4** ✅ | **세팅 페이지 셸** — Section 네비 + 제너릭 폼(schema 메타 소비) + 폼 스크롤 + `toggle_settings`(⌘,) 키/메뉴 (상단 검색은 후속) | ✅ 머지(헤드리스 + 실기) |
-| **CS-4-5** | write-back 연결(S0-1b ✅) + bespoke 에디터: **palette 16색 그리드 ✅**(§6.5) → env·shell.args(후속) | 헤드리스 + 실기 |
+| **CS-4-5** | write-back 연결(S0-1b ✅) + bespoke 에디터: **palette 16색 그리드 ✅**(§6.5) · **env·shell.args ✅**(§6.6, upsert; 삭제는 후속) → keybind(CS-4-3) | 헤드리스 + 실기 |
 | **CS-4-6+** | (선택) color HSV picker 2차, 고급화 | 실기 |
 
 > 시각/상호작용 PR(CS-4-0~5)은 로직을 헤드리스 단위로 고정하되, **머지 전 `zig build macos-app`로 ohah가 실기

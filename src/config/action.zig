@@ -64,6 +64,10 @@ pub const Action = union(enum) {
     increase_font_size,
     decrease_font_size,
     reset_font_size,
+    // maru CLI를 PATH(~/.local/bin/maru)에 설치한다(VS Code "Install 'code' command" 결). dispatchAppAction이
+    // installCli로 넘겨 GUI 바이너리의 형제 `maru` CLI를 symlink한다(sudo 불요 user-level, 결과는 notice).
+    // **카탈로그에 넣어 커맨드 팝업(Cmd+Shift+P)에 노출** — 기본 키바인딩은 없다(발견 경로=팝업). 단일 출처: cli/install.zig.
+    install_cli,
     // 런타임 폰트 크기를 절대값(pt)으로 지정한다. config 바인딩 전용(`set_font_size:18`처럼) — 절대값이라
     // 메뉴/팝업엔 안 넣는다(어느 크기인지 고정 못 함). dispatchAppAction이 setFontSize로 넘겨 [6,72]pt로 클램프.
     // 키 프리셋(예: ⌘⌥1=14, ⌘⌥2=18)을 사용자가 직접 묶을 수 있다.
@@ -96,6 +100,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "clear_screen")) return .clear_screen;
     if (std.mem.eql(u8, value, "toggle_command_palette")) return .toggle_command_palette;
     if (std.mem.eql(u8, value, "toggle_settings")) return .toggle_settings;
+    if (std.mem.eql(u8, value, "install_cli")) return .install_cli;
     if (std.mem.eql(u8, value, "toggle_find")) return .toggle_find;
     if (std.mem.eql(u8, value, "find_next")) return .find_next;
     if (std.mem.eql(u8, value, "find_previous")) return .find_previous;

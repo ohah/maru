@@ -105,9 +105,11 @@ struct 필드로 안 떨어지는 키는 **명시 핸들러**로 둔다(지금 �
 | `theme.palette.N` | **인덱스 키**(N=0~15) | suffix 파싱 + 색 검증 — 현행 유지. GUI는 16칸 팔레트 에디터(bespoke) |
 | `env.<KEY>` | **동적 prefix**(임의 KEY) | prefix 누적 → `Config.env` 리스트 — 현행 유지. GUI는 KEY/VALUE 리스트 에디터(bespoke) |
 | `keybind` | 별도 문법(chord=action) | `KeyBindingResolver` + action 카탈로그 — 현행 유지. GUI는 카탈로그 기반 리바인더(bespoke) |
+| `workspace.root` | **경로 검증**(절대경로/`~`만) | loader가 `std.fs.path.isAbsolute`/tilde 검사 — 제너릭 text 경로엔 없는 특수 검증이라 명시 핸들러 유지 |
+| `shell.args` | **공백-토큰 리스트** | 한 줄을 공백으로 분리해 argv 배열 — 제너릭 스칼라(1키=1값)가 아니라 명시 핸들러. GUI는 토큰 리스트 에디터(bespoke) |
 
-> 즉 **스칼라/enum/bool/색/문자열/리스트 ~40개는 스키마-주도(공짜)**, 위 5종만 bespoke다. bespoke GUI 위젯
-> (팔레트·env·keybind)은 어차피 [settings-page.md] Phase G에서 만들 것이라 손해가 아니다 — 다만 **본문(스칼라)이
+> 즉 **스칼라/enum/bool/색/문자열 ~40개는 스키마-주도(공짜)**, 위 **7종만 bespoke**(명시 핸들러). bespoke GUI 위젯
+> (팔레트·env·keybind 등)은 어차피 [settings-page.md] Phase G에서 만들 것이라 손해가 아니다 — 다만 **본문(스칼라)이
 > 공짜**가 된다.
 
 ## 7. 드리프트 방지 (comptime)

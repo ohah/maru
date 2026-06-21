@@ -370,7 +370,10 @@ pub const QuickTerminalConfig = struct {
 
     pub const schema = .{ // namespace quick-terminal(dashed). height_fraction/width_fraction은 키가 height/width라 key_seg 명시.
         .height_fraction = Meta{ .key_seg = "height", .doc = "두께 비율(화면 대비)", .range = .{ 0.1, 1.0 }, .widget = .slider, .section = .quick_terminal },
-        .width_fraction = Meta{ .key_seg = "width", .doc = "center 가로 비율", .range = .{ 0.1, 1.0 }, .widget = .slider, .section = .quick_terminal },
+        // width 기본 0은 "center 가로를 height와 같게(정사각)"라는 **유효 sentinel**이라 range 하한을 0으로 둔다
+        // (0.1로 두면 기본 0을 직렬화→재파싱할 때 spurious diagnostic이 난다 — code-review 후속). height는 sentinel이
+        // 없어 0.1~1.0 그대로. 0<x<0.1(아주 좁은 폭)도 forgiving하게 허용(padding 0 허용과 같은 결).
+        .width_fraction = Meta{ .key_seg = "width", .doc = "center 가로 비율(0=height 따라감)", .range = .{ 0, 1.0 }, .widget = .slider, .section = .quick_terminal },
         .auto_hide = Meta{ .doc = "포커스 잃으면 자동 숨김", .widget = .toggle, .section = .quick_terminal },
         .screen = Meta{ .doc = "어느 화면에 띄울지", .widget = .dropdown, .section = .quick_terminal },
         .position = Meta{ .doc = "어느 가장자리에서 나올지", .widget = .dropdown, .section = .quick_terminal },

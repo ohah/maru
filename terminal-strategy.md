@@ -522,6 +522,8 @@ Maru는 모든 개발 과정에서 디버깅, 테스트, 로그, 리플레이가
 
 ## 13. SSH 테스트
 
+> SSH 통합(terminfo 전파·자기식별·원격 cwd·드롭 파일 전송)의 설계와 현황은 [docs/ssh-integration.md](docs/ssh-integration.md)를 단일 출처로 둔다. 이 절은 그중 **테스트 전략**만 다룬다.
+
 SSH 관련해서는 두 가지를 구분해야 한다.
 
 1. SSH로 원격 Mac에 접속해서 개발하는 경우:

@@ -19,6 +19,7 @@ const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭
 const toggle = @import("toggle.zig");
 const slider = @import("slider.zig");
 const dropdown = @import("dropdown.zig");
+const color = @import("color.zig");
 
 /// 최상위 모달 레이어(palette/notice와 동일).
 pub const layer = modal_box.layer;
@@ -33,9 +34,11 @@ pub const FieldRow = struct {
         toggle: bool, // 현재 on/off
         slider: Slider, // 현재 값 + 범위(f32/u32; value/min/max는 f64로 통일)
         dropdown: []const u8, // enum 현재 변형 표시 토큰(클릭/←→로 순환 — platform이 schema.cycleEnum)
-        text: []const u8, // 문자열 현재값(폰트 패밀리·색 hex). 클릭/Enter로 인라인 편집(platform이 schema.setText)
+        text: []const u8, // 문자열 현재값(폰트 패밀리). 클릭/Enter로 인라인 편집(platform이 schema.setText)
+        color: Color, // 색 #RRGGBB — 스와치 + hex. 스와치/←→로 프리셋 순환, hex 클릭으로 편집(platform)
     };
     pub const Slider = struct { value: f64, min: f64, max: f64 };
+    pub const Color = struct { hex: []const u8, rgb: @import("../../color.zig").Rgb }; // 현재 hex + platform이 파싱한 RGB(스와치)
 
     /// 슬라이더 값의 정규화 위치(0..1). min==max면 0(0분모 가드).
     fn sliderRatio(s: Slider) f32 {
@@ -297,6 +300,17 @@ pub fn view(
                     try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = ctrl.y, .w = box.cw, .h = box.ch }, .role = .cursor } });
                 }
             },
+            .color => |c| {
+                // 스와치(literal RGB) + hex. 편집 중인 선택 행이면 hex 대신 편집 버퍼 + caret(hexX 뒤). text 위젯과 동형.
+                const editing_this = state.editing and actual == state.selected;
+                const shown: []const u8 = if (editing_this) state.editText() else c.hex;
+                const text_role: tokens.ColorRole = if (editing_this) .accent_bar else .surface_fg;
+                try color.view(ctrl, c.rgb, shown, text_role, box.cw, arena, out);
+                if (editing_this) {
+                    const caret_x = color.hexX(ctrl, box.cw) + @as(i32, @intCast(overlay_input.displayCols(shown) * box.cw));
+                    try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = ctrl.y, .w = box.cw, .h = box.ch }, .role = .cursor } });
+                }
+            },
         }
     }
 }
@@ -415,6 +429,14 @@ pub fn handlePointer(
                 },
                 .dropdown => return if (dropdown.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 클릭 → 변형 순환(.toggle=활성)
                 .text => return if (ev.x_px >= @as(f64, @floatFromInt(ctrl.x))) .toggle else .selection_changed, // control 영역 클릭 → 인라인 편집(.toggle=활성), 라벨은 선택만
+                .color => |c| switch (color.zoneAt(ctrl, box.cw, ev.x_px, ev.y_px)) {
+                    .swatch => return .toggle, // 스와치 클릭 → 프리셋 순환(.toggle=활성, platform이 cycleColor)
+                    .hex => { // hex 클릭 → 인라인 편집(현재 hex 시드 — 컴포넌트가 rows 값을 가짐)
+                        state.enterEdit(c.hex);
+                        return .selection_changed;
+                    },
+                    .outside => return .selection_changed,
+                },
             }
         }
     }
@@ -693,6 +715,42 @@ test "settings 좁은 창 → 렌더 안 함(겹침 회피), 편집 중 다른 �
     const c1 = fieldControlRect(l, 1); // 행1(toggle)
     _ = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.form_x + 2), .y_px = @floatFromInt(c1.y + 4) }, no_sections, &rows, test_props, &tk, &s);
     try std.testing.expect(!s.editing); // 다른 행 클릭 → 편집 종료
+}
+
+test "settings color: 스와치+hex 렌더, 스와치 클릭→toggle(프리셋 순환), hex 클릭→인라인 편집 (CS-4-2)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = testTokens();
+    const rows = [_]FieldRow{.{ .label = "BG", .kind = .{ .color = .{ .hex = "#ff0000", .rgb = .{ .r = 255, .g = 0, .b = 0 } } } }};
+    var s = State{};
+    s.show();
+    s.setFieldCount(rows.len);
+
+    // view: 스와치(literal RGB) + hex 텍스트.
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    var has_swatch = false;
+    var has_hex = false;
+    for (out.items) |op| {
+        if (op == .swatch and op.swatch.rgb.r == 255) has_swatch = true;
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, "#ff0000")) has_hex = true;
+    }
+    try std.testing.expect(has_swatch and has_hex);
+
+    // handlePointer: 스와치 영역 클릭 → .toggle(platform이 cycleColor).
+    const l = computeLayout(no_sections, &rows, 0, test_props, &tk).?;
+    const ctrl = fieldControlRect(l, 0);
+    const sw_act = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(ctrl.x + 2), .y_px = @floatFromInt(ctrl.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    try std.testing.expectEqual(Action.toggle, sw_act);
+    try std.testing.expect(!s.editing); // 스와치 클릭은 편집 아님
+
+    // hex 영역 클릭 → 인라인 편집 시작(현재 hex 시드).
+    const hx = color.hexX(ctrl, test_props.metrics.cell_width_px) + 4;
+    const hex_act = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(hx), .y_px = @floatFromInt(ctrl.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    try std.testing.expectEqual(Action.selection_changed, hex_act);
+    try std.testing.expect(s.editing);
+    try std.testing.expectEqualStrings("#ff0000", s.editText());
 }
 
 test "settings text view: 행 값 렌더, 편집 중이면 버퍼+caret(cursor fill)" {

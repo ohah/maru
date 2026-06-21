@@ -3320,9 +3320,12 @@ pub const AppSession = struct {
             defer bl.deinit(self.allocator);
             var nl: std.ArrayList(config_mod.schema.NumberField) = .empty;
             defer nl.deinit(self.allocator);
+            var el: std.ArrayList(config_mod.schema.EnumField) = .empty;
+            defer el.deinit(self.allocator);
             config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &bl) catch {};
             config_mod.schema.appendNumberFields(self.allocator, self.loaded_config.config, &nl) catch {};
-            self.chrome_host.settings.setFieldCount(bl.items.len + nl.items.len);
+            config_mod.schema.appendEnumFields(self.allocator, self.loaded_config.config, &el) catch {};
+            self.chrome_host.settings.setFieldCount(bl.items.len + nl.items.len + el.items.len);
         }
     }
 
@@ -3334,10 +3337,11 @@ pub const AppSession = struct {
         try config_mod.schema.appendBoolFields(arena, self.loaded_config.config, &bools);
         var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
         try config_mod.schema.appendNumberFields(arena, self.loaded_config.config, &nums);
-        // 결합 순서: bool(toggle) 행 먼저, 그다음 number(slider) 행. selected/handler 인덱싱이 이 순서를 공유한다
-        // (toggleSelectedSetting은 bool 리스트를 selected로 인덱싱 → slider 행(>=bool_count)은 자동 무동작;
-        //  applySelectedSlider/adjustSelectedSetting은 selected-bool_count로 number 리스트를 인덱싱).
-        const rows = try arena.alloc(Row, bools.items.len + nums.items.len);
+        var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
+        try config_mod.schema.appendEnumFields(arena, self.loaded_config.config, &enums);
+        // 결합 순서: bool(toggle) → number(slider) → enum(dropdown). selected/handler 인덱싱이 이 순서를 공유한다
+        // (toggleSelectedSetting/adjustSelectedSetting이 같은 bool/num/enum 빌드로 selected를 구간 매핑).
+        const rows = try arena.alloc(Row, bools.items.len + nums.items.len + enums.items.len);
         var i: usize = 0;
         for (bools.items) |b| {
             rows[i] = .{ .label = if (b.doc.len > 0) b.doc else b.key, .kind = .{ .toggle = b.value } };
@@ -3345,6 +3349,10 @@ pub const AppSession = struct {
         }
         for (nums.items) |n| {
             rows[i] = .{ .label = if (n.doc.len > 0) n.doc else n.key, .kind = .{ .slider = .{ .value = n.value, .min = n.min, .max = n.max } } };
+            i += 1;
+        }
+        for (enums.items) |e| {
+            rows[i] = .{ .label = if (e.doc.len > 0) e.doc else e.key, .kind = .{ .dropdown = e.current } };
             i += 1;
         }
         return rows;
@@ -3355,16 +3363,38 @@ pub const AppSession = struct {
     /// (updateConfigForKeys + dirty/Swift atomic write) — 지금은 세션 내 라이브 적용까지. 행 목록은 schema 순서라
     /// 컴포넌트 selected 인덱스와 일치한다(buildSettingsFields와 같은 appendBoolFields 순회).
     fn toggleSelectedSetting(self: *AppSession) void {
-        var list: std.ArrayList(config_mod.schema.BoolField) = .empty;
-        defer list.deinit(self.allocator);
-        config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &list) catch return;
+        var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
+        defer bools.deinit(self.allocator);
+        var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
+        defer nums.deinit(self.allocator);
+        var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
+        defer enums.deinit(self.allocator);
+        config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &bools) catch return;
+        config_mod.schema.appendNumberFields(self.allocator, self.loaded_config.config, &nums) catch return;
+        config_mod.schema.appendEnumFields(self.allocator, self.loaded_config.config, &enums) catch return;
         const sel = self.chrome_host.settings.selected;
-        if (sel >= list.items.len) return;
-        const f = list.items[sel];
-        if (config_mod.schema.setBool(&self.loaded_config.config, f.key, !f.value)) {
-            self.reapplyLoadedConfig(); // 세션 라이브 적용
-            self.markConfigKeyDirty(f.key); // 파일 영속 예약(CS-4-4c — Swift가 drain해 atomic write)
+        if (sel < bools.items.len) {
+            // bool 행 — flip.
+            const f = bools.items[sel];
+            if (config_mod.schema.setBool(&self.loaded_config.config, f.key, !f.value)) {
+                self.reapplyLoadedConfig();
+                self.markConfigKeyDirty(f.key);
+            }
+            return;
         }
+        const after_nums = bools.items.len + nums.items.len;
+        if (sel >= after_nums) {
+            // enum(dropdown) 행 — 활성(클릭/Enter/Space) = 다음 변형 순환.
+            const ei = sel - after_nums;
+            if (ei < enums.items.len) {
+                const e = enums.items[ei];
+                if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, 1)) {
+                    self.reapplyLoadedConfig();
+                    self.markConfigKeyDirty(e.key);
+                }
+            }
+        }
+        // slider 행(bool..after_nums)은 toggle/Enter 무동작(드래그/←→로 조절).
     }
 
     /// 슬라이더 드래그/클릭(settings.pending_ratio)을 선택 행의 number config 값으로 매핑해 적용한다(라이브 + 영속
@@ -3396,17 +3426,32 @@ pub const AppSession = struct {
         defer nums.deinit(self.allocator);
         config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &bools) catch return;
         config_mod.schema.appendNumberFields(self.allocator, self.loaded_config.config, &nums) catch return;
+        var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
+        defer enums.deinit(self.allocator);
+        config_mod.schema.appendEnumFields(self.allocator, self.loaded_config.config, &enums) catch return;
         const sel = self.chrome_host.settings.selected;
         if (sel < bools.items.len) return; // bool 행 — ←/→ 무동작
-        const ni = sel - bools.items.len;
-        if (ni >= nums.items.len) return;
-        const n = nums.items[ni];
-        const span = n.max - n.min;
-        const step = if (n.is_int) @max(@as(f64, 1), span * 0.04) else span * 0.04;
-        const value = std.math.clamp(n.value + @as(f64, @floatFromInt(dir)) * step, n.min, n.max);
-        if (config_mod.schema.setNumber(&self.loaded_config.config, n.key, value)) {
-            self.reapplyLoadedConfig();
-            self.markConfigKeyDirty(n.key);
+        const after_nums = bools.items.len + nums.items.len;
+        if (sel < after_nums) {
+            // slider 행 — 한 스텝 조절.
+            const n = nums.items[sel - bools.items.len];
+            const span = n.max - n.min;
+            const step = if (n.is_int) @max(@as(f64, 1), span * 0.04) else span * 0.04;
+            const value = std.math.clamp(n.value + @as(f64, @floatFromInt(dir)) * step, n.min, n.max);
+            if (config_mod.schema.setNumber(&self.loaded_config.config, n.key, value)) {
+                self.reapplyLoadedConfig();
+                self.markConfigKeyDirty(n.key);
+            }
+            return;
+        }
+        // enum(dropdown) 행 — ←/→ = 이전/다음 변형 순환.
+        const ei = sel - after_nums;
+        if (ei < enums.items.len) {
+            const e = enums.items[ei];
+            if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, dir)) {
+                self.reapplyLoadedConfig();
+                self.markConfigKeyDirty(e.key);
+            }
         }
     }
 

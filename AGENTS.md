@@ -32,6 +32,7 @@
 - [macOS 앱 호스트 경계](docs/macos-app-host-boundary.md)
 - [세팅 페이지 전략과 구현 계획](docs/settings-page.md)
 - [config 스키마(메타 1급 필드)](docs/config-schema.md)
+- [config GUI(스키마-주도 세팅 화면)](docs/config-gui.md)
 
 ## 설계 문서
 

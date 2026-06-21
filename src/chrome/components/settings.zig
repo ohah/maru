@@ -83,9 +83,13 @@ pub const State = struct {
         self.dragging = false;
         self.editing = false;
     }
-    /// 인라인 편집 시작(platform이 text 행 활성 시 호출 — 현재값으로 시드). 버퍼 초과는 잘라 담는다.
+    /// 인라인 편집 시작(platform이 text 행 활성 시 호출 — 현재값으로 시드). 버퍼 초과는 잘라 담되, UTF-8 코드포인트
+    /// 중간에서 자르지 않게 경계로 back-up한다(리뷰 #823 — 잘린 멀티바이트는 무효 UTF-8 → view/backspace 오작동).
     pub fn enterEdit(self: *State, value: []const u8) void {
-        const n = @min(value.len, edit_cap);
+        var n = @min(value.len, edit_cap);
+        if (n < value.len) {
+            while (n > 0 and (value[n] & 0xC0) == 0x80) n -= 1; // continuation 바이트면 코드포인트 시작까지 back-up
+        }
         @memcpy(self.edit_buf[0..n], value[0..n]);
         self.edit_len = n;
         self.editing = true;
@@ -114,6 +118,7 @@ pub const State = struct {
     pub fn hide(self: *State) void {
         self.open = false;
         self.dragging = false;
+        self.editing = false;
     }
     pub fn setFieldCount(self: *State, n: usize) void {
         self.count = n;
@@ -123,8 +128,8 @@ pub const State = struct {
         if (self.count == 0) return;
         const c: i32 = @intCast(self.count);
         const cur: i32 = @intCast(@min(self.selected, self.count - 1));
-        const next = @mod(cur + delta, c);
-        self.selected = @intCast(if (next < 0) next + c else next);
+        const next = @mod(cur + delta, c); // @mod(.,c>0) ∈ [0,c) — 음수 보정 불요(리뷰 #823: dead branch 제거)
+        self.selected = @intCast(next);
     }
 };
 
@@ -200,6 +205,11 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     const box = modal_box.layout(content_cols, content_rows, p, tk) orelse return null;
     const form_x = box.inner_x + @as(i32, @intCast((nav_cols + nav_gap_cols) * box.cw));
     const form_cols = box.inner_cols -| (nav_cols + nav_gap_cols);
+    // 창이 너무 좁아 modal_box가 박스를 nav+gap+control보다 좁게 clamp하면 form_cols가 control 열보다 작아져
+    // fieldControlRect의 (form_cols -| ctrl_cols)가 0으로 saturate → 위젯이 라벨 위로 겹쳐 그려졌다(리뷰 #823).
+    // 그 경우 레이아웃 불가로 보고 null(view/handlePointer가 그리지 않음 — 창을 넓히면 보임). modal_box가 폭 부족 시
+    // 그리는 것과 같은 "안 되면 안 그림" 규율.
+    if (form_cols <= ctrl_cols) return null;
     return .{ .box = box, .ctrl_cols = ctrl_cols, .first_field_row = title_rows, .win_start = win_start, .win_len = win_len, .nav_cols = nav_cols, .form_x = form_x, .form_cols = form_cols };
 }
 
@@ -212,9 +222,10 @@ fn fieldControlRect(l: Layout, vi: usize) draw.Rect {
 }
 
 /// control 열 안의 toggle rect — **좌측정렬**(ctrl 좌단). slider(전체)·dropdown(좌단 text)과 같은 시작 x라
-/// 세 위젯의 control 열 left edge가 일관된다(text 위젯 전환 후 정렬 통일). hit-test/view 공유.
-fn toggleRectIn(ctrl: draw.Rect, ch: u32) draw.Rect {
-    return .{ .x = ctrl.x, .y = ctrl.y, .w = toggle.width(ch), .h = ch };
+/// 세 위젯의 control 열 left edge가 일관된다(text 위젯 전환 후 정렬 통일). hit-test/view 공유. 폭은 그려지는 위젯
+/// 전체 — tui 트랙 `[  ]`(4*cw)이 pill(width(ch))보다 넓을 수 있어 둘 중 큰 쪽(클릭=보이는 위젯, 리뷰 #823).
+fn toggleRectIn(ctrl: draw.Rect, ch: u32, cw: u32) draw.Rect {
+    return .{ .x = ctrl.x, .y = ctrl.y, .w = @max(toggle.width(ch), 4 * cw), .h = ch };
 }
 
 const title_text = "Settings";
@@ -266,7 +277,7 @@ pub fn view(
         switch (r.kind) {
             .toggle => |v| {
                 var ts = toggle.State{ .value = v };
-                try toggle.view(&ts, toggleRectIn(ctrl, box.ch), box.cw, tk, arena, out);
+                try toggle.view(&ts, toggleRectIn(ctrl, box.ch, box.cw), box.cw, tk, arena, out);
             },
             .slider => |s| try slider.view(ctrl, FieldRow.sliderRatio(s), box.cw, tk, arena, out),
             .dropdown => |cur| try dropdown.view(ctrl, cur, tk, arena, out),
@@ -369,6 +380,9 @@ pub fn handlePointer(
         state.hide();
         return .close;
     }
+    // 인라인 편집 중 다른 곳 down → 편집 종료(버퍼가 다른 행으로 새지 않게 — 리뷰 #823). 같은 text control을 다시
+    // 누르면 아래에서 .toggle → platform이 현재값으로 재시드한다(커밋은 Enter 전용).
+    if (state.editing) state.cancelEdit();
     // 좌측 네비 영역(x < form_x) 클릭 → 섹션 행 선택(y로 판정). 비-행이면 소비.
     const form_x_f: f64 = @floatFromInt(l.form_x);
     if (ev.x_px < form_x_f) {
@@ -392,7 +406,7 @@ pub fn handlePointer(
         if (ev.y_px >= ry and ev.y_px < ry + @as(f64, @floatFromInt(ctrl.h))) {
             state.selected = actual;
             switch (r.kind) {
-                .toggle => return if (toggle.hitTest(toggleRectIn(ctrl, box.ch), ev.x_px, ev.y_px)) .toggle else .selection_changed,
+                .toggle => return if (toggle.hitTest(toggleRectIn(ctrl, box.ch, box.cw), ev.x_px, ev.y_px)) .toggle else .selection_changed,
                 .slider => {
                     if (!slider.hitTest(ctrl, ev.x_px, ev.y_px)) return .selection_changed;
                     state.dragging = true;
@@ -552,7 +566,7 @@ test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, slider �
 
     // 행0 toggle 중앙 클릭 → 선택=0 + .toggle.
     s.show();
-    const tgl = toggleRectIn(fieldControlRect(l, 0), test_props.metrics.cell_height_px);
+    const tgl = toggleRectIn(fieldControlRect(l, 0), test_props.metrics.cell_height_px, test_props.metrics.cell_width_px);
     try std.testing.expectEqual(Action.toggle, handlePointer(.{ .phase = .down, .x_px = @floatFromInt(tgl.x + 4), .y_px = @floatFromInt(tgl.y + 4) }, no_sections, &rows, test_props, &tk, &s));
     try std.testing.expectEqual(@as(usize, 0), s.selected);
 
@@ -642,6 +656,43 @@ test "settings text edit: enterEdit 시드 + char/backspace 편집 + Enter=text_
     try std.testing.expectEqual(@as(usize, 3), s.editText().len);
     s.backspaceEdit();
     try std.testing.expectEqual(@as(usize, 0), s.editText().len);
+
+    // enterEdit가 edit_cap에서 잘릴 때 멀티바이트 코드포인트를 쪼개지 않는다(리뷰 #823): 127*'a' + '한'(3B)=130B>cap(128).
+    var long: [130]u8 = undefined;
+    for (long[0..127]) |*c| c.* = 'a';
+    @memcpy(long[127..130], "한");
+    s.enterEdit(&long);
+    try std.testing.expectEqual(@as(usize, 127), s.editText().len); // 쪼개진 '한'은 통째로 드롭
+    try std.testing.expect(std.unicode.utf8ValidateSlice(s.editText())); // 유효 UTF-8
+}
+
+test "settings 좁은 창 → 렌더 안 함(겹침 회피), 편집 중 다른 곳 클릭 → 편집 종료 (리뷰 #823)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = testTokens();
+    const rows = [_]FieldRow{
+        .{ .label = "Family", .kind = .{ .text = "JetBrains Mono" } },
+        .{ .label = "Blink", .kind = .{ .toggle = true } },
+    };
+    var s = State{};
+    s.show();
+
+    // [1][3] 좁은 창: form_cols <= ctrl_cols면 computeLayout=null → view 무동작(위젯이 라벨 위로 겹쳐 그려지지 않게).
+    const narrow = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 160, .backing_height_px = 600 } };
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, &test_sections, &rows, narrow, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len); // 너무 좁아 안 그림
+
+    // [11] 편집 bleed: text 행 편집 중 다른 행(toggle) 클릭 → 편집 종료(버퍼가 안 샘).
+    s.setFieldCount(rows.len);
+    s.selected = 0;
+    s.enterEdit("editing...");
+    try std.testing.expect(s.editing);
+    const l = computeLayout(no_sections, &rows, s.selected, test_props, &tk).?;
+    const c1 = fieldControlRect(l, 1); // 행1(toggle)
+    _ = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.form_x + 2), .y_px = @floatFromInt(c1.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    try std.testing.expect(!s.editing); // 다른 행 클릭 → 편집 종료
 }
 
 test "settings text view: 행 값 렌더, 편집 중이면 버퍼+caret(cursor fill)" {

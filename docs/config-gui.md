@@ -102,8 +102,9 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 ## 7. 의존성
 
-- **S0-1b**(override-only 직렬화 + dirty 일반화) — GUI 저장의 토대. 현재 `configKeyValues`는 full-dump라 기본값
-  까지 쓴다(빈 문자열 기본값 round-trip diagnostic 이슈도 여기서 해결 — code-review 후속 기록). **CS-4-5 전에 S0-1b 필요.**
+- **S0-1b** ✅(머지) — `serialize.updateForKeys(original, config, keys)`로 **변경 키만** write-back(즉시-저장 결정에
+  맞춤; override-only by construction — 기본값 40개를 안 쏟는다). `serializeSidebarConfig`가 이걸로 재구현됨. GUI도
+  같은 경로(바뀐 필드의 키를 넘김). (full-config diff·dirty 비트마스크는 불필요 — 즉시-저장은 키 단위.)
 - **CS-4-0**(ChromeHost pointer) — 슬라이더·색 그리드 선결.
 - **S0-2**(자동 reload) — 외부 편집 즉시 반영(선택, GUI와 직교).
 - 위젯 컴포넌트(CS-4-1~3).
@@ -112,7 +113,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 | PR | 내용 | 검증 |
 |---|---|---|
-| **S0-1b** | override-only 직렬화(기본값 안 씀, 빈 문자열 기본값 포함) + `config_dirty` 일반화 + `serializeSidebarConfig` 재구현 | 순수 단위(Linux CI) |
+| **S0-1b** ✅ | per-key write-back(`updateForKeys` — 변경 키만, override-only) + `serializeSidebarConfig` 재구현 | ✅ 머지(순수 단위) |
 | **CS-4-0** | `ChromeHost` pointer 이벤트(InputEvent + 라우팅 + drag) | 헤드리스 + macos 실기 |
 | **CS-4-1** | 위젯 컴포넌트 toggle·dropdown·text/number·slider(neutral State+view+handle) | 헤드리스 단위 + 실기 |
 | **CS-4-2** | color input(16색 프리셋 + hex 입력) | 헤드리스 + 실기 |

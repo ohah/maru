@@ -41,6 +41,7 @@ pub const updateConfigText = loader.updateConfigText;
 pub const ConfigKeyValue = loader.KeyValue;
 pub const configKeyValues = serialize.configKeyValues;
 pub const configValueForKey = serialize.valueForKey;
+pub const updateConfigForKeys = serialize.updateForKeys;
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

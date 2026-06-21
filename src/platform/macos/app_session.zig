@@ -5658,11 +5658,9 @@ pub const AppSession = struct {
         defer if (owned) |o| self.allocator.free(o);
         const original: []const u8 = owned orelse &.{};
 
-        const updates = [_]config_mod.ConfigKeyValue{
-            .{ .key = "sidebar.show-branch", .value = if (self.loaded_config.config.sidebar.show_branch) "true" else "false" },
-            .{ .key = "sidebar.show-folder", .value = if (self.loaded_config.config.sidebar.show_folder) "true" else "false" },
-        };
-        const text = try config_mod.updateConfigText(self.allocator, original, &updates);
+        // 사이드바 2키만 현재값으로 부분 갱신(override-only write-back, S0-1b 일반화 — GUI도 같은 경로). 값은
+        // 스키마 직렬화(configKeyValues)가 단일 출처라 bool→"true"/"false" 손코드 중복이 사라진다.
+        const text = try config_mod.updateConfigForKeys(self.allocator, original, self.loaded_config.config, &.{ "sidebar.show-branch", "sidebar.show-folder" });
         self.sidebar_config_buffer = text;
         return text;
     }

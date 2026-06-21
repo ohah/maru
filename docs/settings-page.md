@@ -68,7 +68,7 @@ dirty region에 박혀 있어 렌더 파이프라인 재설계가 필요하고, 
 | PR | 내용 | 난이도 | 상태 |
 |---|---|---|---|
 | **S0-1a** | **역파싱 코어** `config.configKeyValues(arena, Config) → []KeyValue`(`src/config/serialize.zig`) — parse의 대칭 역연산. 전 필드를 정규 토큰으로(enum은 명시 매핑 — `commit-only` 등; palette는 non-null만; float은 `{d}` shortest round-trip). **round-trip 대칭 테스트**(`parse(render(configKeyValues(cfg))) == cfg`)가 parse/serialize 누락을 못박는다. | 중간 | ✅ 구현·green(1058/1060). `updateConfigText` 재사용 |
-| **S0-1b** | **파일 write 정책 + dirty 일반화** — `serializeConfig(original, config)`가 "기본값 위 override + 원본에 이미 있는 키"만 골라 `updateConfigText`로 부분 갱신(파일 비대화 방지·revert 시 stale 줄 없게). `config_dirty` 비트마스크(appearance/behavior/keys/sidebar). `serializeSidebarConfig`를 이 위로 재구현. | 중간 | 🔜 GUI write 경로(G7)와 함께 — 소비자가 생길 때 정책 확정 |
+| **S0-1b** ✅ | **per-key write-back 일반화** — `serialize.updateForKeys(original, config, keys)`가 넘긴 키만 현재값으로 `updateConfigText` 부분 갱신(즉시-저장 GUI 결정에 맞춤 — full-config diff 대신 변경 키만; **override-only by construction**). `serializeSidebarConfig`를 이걸로 재구현(bool 손코드 제거, byte-identical). | 낮음 | ✅ 머지. dirty 비트마스크·전체 diff는 불필요(즉시-저장은 변경 키만 씀); GUI는 같은 `updateForKeys` 경로 |
 | **S0-2** | config 파일 **자동 감지 reload** — macOS `DispatchSource`/FSEvents watcher(Swift), debounce(0.5~1s), 편집 중 불완전 파일 회피(.tmp→rename 가정), 기존 `reloadConfig` 재사용. `behavior.auto-reload`로 끌 수 있게. | 낮음~중간 | 🔜 Zig는 변경 없음(reload 이미 있음). watcher만 platform(Swift) |
 
 > 경계: write-back은 **앱→파일**(GUI 편집 저장), reload는 **파일→앱**(외부 편집 감지). 둘은 직교하며 같은

@@ -6935,12 +6935,12 @@ pub const AppSession = struct {
             const ch: f32 = @floatFromInt(self.cell_height_px);
             const strip: f32 = @floatFromInt(self.titlebar_strip_px);
             const w: f32 = cw * 2.6; // 아이콘(~1.7칸) + 좌우 여백 — 헤더 아이콘 호버와 같은 폭
-            const h: f32 = @min(ch * 1.7, strip); // 띠를 넘지 않게(큰 폰트면 cap)
-            const radius: f32 = @min(w, h) * 0.28;
+            const h: f32 = ch * 1.7; // 글리프(1.7× 셀)와 같은 높이 — 헤더 아이콘 호버와 동일. cap하면 큰 폰트(1.7ch>strip)서
+            const radius: f32 = @min(w, h) * 0.28; // 글리프가 pill 밖으로 삐져나가므로(code-review) 무cap으로 글리프와 정확히 일치
             const hover_fill = packRgbAlpha(self.appearance.theme.sidebar_foreground, 0x40); // ≈25% 밝은 하이라이트
             self.gpu_quads.append(self.allocator, .{
                 .x = (@as(f32, @floatFromInt(self.collapsedToggleCol())) + 0.5) * cw - w / 2.0, // 셀 중심 기준 중앙
-                .y = (strip - h) / 2.0, // 띠 안 세로 중앙(글리프 중심과 일치)
+                .y = (strip - h) / 2.0, // 글리프와 같은 중심(strip/2). 1.7ch>strip이면 y<0(글리프도 띠 밖으로 나가므로 일치) — 렌더러 clip
                 .w = w,
                 .h = h,
                 .corner_radii = .{ radius, radius, radius, radius },
@@ -7584,15 +7584,20 @@ pub const AppSession = struct {
     }
 
     /// 접힘 상태 좌상단 펼치기 버튼의 backing-px rect(클릭 hit-test) — render(collapsedToggleCol)와 같은 col. 펼침/접힘
-    /// 아니면 null. mouse 핸들러가 이 rect 안 클릭이면 toggleSidebarCollapsed(펼치기)한다(사이드바가 없어 inSidebar=false라
-    /// 별도 체크). 높이는 **타이틀바 띠 전체**(cell_h가 아님) — 접힘 띠는 max(cell_h, 30pt)라 1.7× 버튼이 cell_h
-    /// 아래로 삐져나가는데 cell_h로 잡으면 그 부분이 데드존(클릭·드래그 둘 다 안 됨)이 된다. 폭도 확대 글리프(≈1.7칸)를
-    /// 덮게 2칸.
+    /// 아니거나 탭이 없으면(글리프 frame도 안 그려짐 — buildCollapsedToggleFrame과 같은 전제) null. mouse 핸들러가 이
+    /// rect 안 클릭이면 toggleSidebarCollapsed(펼치기)한다(사이드바가 없어 inSidebar=false라 별도 체크). 높이는
+    /// **타이틀바 띠 전체**(cell_h가 아님) — 접힘 띠는 max(cell_h, 30pt)라 1.7× 버튼이 cell_h 밖으로 삐져나가는데
+    /// cell_h로 잡으면 그 부분이 데드존(클릭·드래그 둘 다 안 됨)이 된다. 가로는 **글리프 중심에 맞춘다**: .m이 ◧를
+    /// 셀 중심((col+0.5)·cw) 기준 1.7×로 키우므로(maru_fill_cell_quad가 중심 기준 확대) 글리프는 ≈[(col-0.35),
+    /// (col+1.35)]·cw에 그려진다. rect를 col·cw부터 잡으면 클릭 영역이 글리프보다 0.5칸 오른쪽으로 치우쳐 글리프
+    /// 좌측 일부가 안 눌리므로(code-review), 셀 중심에 2칸 폭을 중앙 정렬한다([(col-0.5),(col+1.5)]·cw — 호버 quad·
+    /// 글리프와 동심).
     fn collapsedToggleRect(self: *const AppSession) ?chrome.draw.Rect {
-        if (!self.sidebar_collapsed or self.cell_width_px == 0 or self.titlebar_strip_px == 0) return null;
+        if (!self.sidebar_collapsed or self.cell_width_px == 0 or self.titlebar_strip_px == 0 or self.tabs.items.len == 0) return null;
         const cw = self.cell_width_px;
-        const x = self.collapsedToggleCol() * cw;
-        return .{ .x = @intCast(x), .y = 0, .w = 2 * cw, .h = self.titlebar_strip_px };
+        // 글리프 중심 (col+0.5)·cw에 2칸 폭 rect를 중앙 정렬 → 좌단 = col·cw − cw/2.
+        const center_x = @as(i32, self.collapsedToggleCol()) * @as(i32, @intCast(cw)) + @as(i32, @intCast(cw / 2));
+        return .{ .x = center_x - @as(i32, @intCast(cw)), .y = 0, .w = 2 * cw, .h = self.titlebar_strip_px };
     }
 
     /// 오버레이(커맨드 팝업·Find·Notice) frame의 공통 마무리. 채워진 cells(소유권 인계) + 격자 크기(cols×rows) +
@@ -13265,8 +13270,16 @@ test "collapsed toggle: hover emits a highlight quad and metalFrame carries titl
         }
     }.run;
 
-    // 토글 밖(띠 빈 곳) 호버 → 호버 off, 호버 quad 없음.
+    // 클릭 rect는 글리프와 동심이어야 한다 — .m이 ◧를 셀 중심 (col+0.5)·cw 기준 1.7×로 그리므로(maru_fill_cell_quad
+    // 중심 확대), rect를 col·cw부터 잡으면 0.5칸 우측으로 치우쳐 글리프 좌측이 안 눌린다(code-review). rect 중심 ==
+    // col·cw + cw/2(글리프 중심)인지 고정한다.
     const r = session.collapsedToggleRect().?;
+    {
+        const cw_i: i32 = @intCast(session.cell_width_px);
+        const glyph_center = @as(i32, session.collapsedToggleCol()) * cw_i + @divTrunc(cw_i, 2);
+        try std.testing.expectEqual(glyph_center, r.x + @as(i32, @intCast(r.w / 2)));
+    }
+    // 토글 밖(띠 빈 곳) 호버 → 호버 off, 호버 quad 없음.
     const far_x: f64 = @floatFromInt(r.x + @as(i32, @intCast(r.w)) + 100);
     _ = session.hoverCursor(far_x, 1, false);
     try std.testing.expect(!session.hovered_collapsed_toggle);

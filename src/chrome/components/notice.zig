@@ -33,16 +33,15 @@ pub const Action = enum { dismissed };
 
 /// 키 이벤트 처리. 열려 있을 때만 동작 — Enter/Esc면 닫고 `dismissed`. 그 외 키는 **소비**하되 Action
 /// 없음(모달이라 뒤(터미널)로 안 흘린다 — host가 라우팅에서 소비 처리). 닫혀 있으면 null(라우팅 안 가로챔).
-pub fn handle(ev: input.InputEvent, state: *State) ?Action {
+/// host가 `.key`/`.pointer`를 가르므로(CS-4-0) 이 handle은 KeyEvent만 받는다 — 포인터는 host.handlePointer.
+pub fn handle(k: input.InputEvent.KeyEvent, state: *State) ?Action {
     if (!state.open) return null;
-    switch (ev) {
-        .key => |k| switch (k.key) {
-            .enter, .escape => {
-                state.dismiss();
-                return .dismissed;
-            },
-            else => return null,
+    switch (k.key) {
+        .enter, .escape => {
+            state.dismiss();
+            return .dismissed;
         },
+        else => return null,
     }
 }
 
@@ -75,14 +74,14 @@ test "notice state: show/dismiss" {
 
 test "notice handle: Enter/Esc 닫고 dismissed, 닫힘이면 null" {
     var s = State{};
-    try std.testing.expect(handle(.{ .key = .{ .key = .enter } }, &s) == null); // 닫혀 있으면 무동작
+    try std.testing.expect(handle(.{ .key = .enter }, &s) == null); // 닫혀 있으면 무동작
     s.show("x");
-    try std.testing.expectEqual(Action.dismissed, handle(.{ .key = .{ .key = .escape } }, &s).?);
+    try std.testing.expectEqual(Action.dismissed, handle(.{ .key = .escape }, &s).?);
     try std.testing.expect(!s.open);
     s.show("y");
-    try std.testing.expectEqual(Action.dismissed, handle(.{ .key = .{ .key = .enter } }, &s).?);
+    try std.testing.expectEqual(Action.dismissed, handle(.{ .key = .enter }, &s).?);
     s.show("z");
-    try std.testing.expect(handle(.{ .key = .{ .key = .char, .codepoint = 'a' } }, &s) == null); // 소비하되 action 없음
+    try std.testing.expect(handle(.{ .key = .char, .codepoint = 'a' }, &s) == null); // 소비하되 action 없음
     try std.testing.expect(s.open); // 평문 키로는 안 닫힘
 }
 

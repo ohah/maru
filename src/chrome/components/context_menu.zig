@@ -54,22 +54,21 @@ pub const Action = enum {
 
 /// 키 처리(열려 있을 때만 host가 호출). ↑↓=이동, Enter=accept, 그 외(Esc·글자 등)=close. 모달이라 모든 키 소비
 /// (notice와 같은 규율 — 뒤 터미널로 안 흘린다). 마우스(항목 클릭)는 platform이 itemAt으로 따로 처리한다.
-pub fn handle(ev: input.InputEvent, state: *State) Action {
-    switch (ev) {
-        .key => |k| switch (k.key) {
-            .up => {
-                state.moveSelection(-1);
-                return .selection_changed;
-            },
-            .down => {
-                state.moveSelection(1);
-                return .selection_changed;
-            },
-            .enter => return .accept,
-            else => {
-                state.hide();
-                return .close;
-            },
+/// host가 `.key`/`.pointer`를 가르므로(CS-4-0) 이 handle은 KeyEvent만 받는다 — 포인터는 host.handlePointer.
+pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
+    switch (k.key) {
+        .up => {
+            state.moveSelection(-1);
+            return .selection_changed;
+        },
+        .down => {
+            state.moveSelection(1);
+            return .selection_changed;
+        },
+        .enter => return .accept,
+        else => {
+            state.hide();
+            return .close;
         },
     }
 }
@@ -169,14 +168,14 @@ test "context_menu state: show/hide/moveSelection clamp" {
 test "context_menu handle: ↑↓=이동, Enter=accept, Esc·글자=close" {
     var s: State = .{};
     s.show(0, 0, 2);
-    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .{ .key = .down } }, &s));
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .down }, &s));
     try std.testing.expectEqual(@as(usize, 1), s.selected);
-    try std.testing.expectEqual(Action.accept, handle(.{ .key = .{ .key = .enter } }, &s));
+    try std.testing.expectEqual(Action.accept, handle(.{ .key = .enter }, &s));
     try std.testing.expect(s.open); // accept는 닫지 않는다(host가 hide)
-    try std.testing.expectEqual(Action.close, handle(.{ .key = .{ .key = .escape } }, &s));
+    try std.testing.expectEqual(Action.close, handle(.{ .key = .escape }, &s));
     try std.testing.expect(!s.open);
     s.show(0, 0, 2);
-    try std.testing.expectEqual(Action.close, handle(.{ .key = .{ .key = .char, .codepoint = 'a' } }, &s)); // 그 외 키도 닫기
+    try std.testing.expectEqual(Action.close, handle(.{ .key = .char, .codepoint = 'a' }, &s)); // 그 외 키도 닫기
     try std.testing.expect(!s.open);
 }
 

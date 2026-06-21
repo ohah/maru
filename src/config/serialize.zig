@@ -21,29 +21,9 @@ const schema = @import("schema.zig");
 
 pub const KeyValue = loader.KeyValue;
 
-// cursorShapeToken은 cursor.shape가 스키마-주도로 이주(CS-1)해 schema의 enum 직렬화가 대신한다 — 제거.
-
-fn chromeThemeToken(t: theme.ChromeTheme) []const u8 {
-    return switch (t) {
-        .tui => "tui",
-        .rich => "rich",
-    };
-}
-
-fn ambiguousWidthToken(w: theme.AmbiguousWidth) []const u8 {
-    return switch (w) {
-        .narrow => "narrow",
-        .wide => "wide",
-    };
-}
-
-// pageKeysToken·shiftEnterToken·imeEnterToken·quick*Token은 input.*·quick-terminal.*가 스키마-주도 이주(CS-2)로
-// schema의 enum 직렬화('_'↔'-')가 대신한다 — 제거. chromeThemeToken·ambiguousWidthToken·boolToken만 남는다
-// (chrome.theme·text.*·theme.bold-is-bright는 최상위 스칼라라 아직 수동 emit).
-
-fn boolToken(b: bool) []const u8 {
-    return if (b) "true" else "false";
-}
+// 모든 enum/bool/색 토큰 헬퍼(cursorShapeToken·chromeThemeToken·ambiguousWidthToken·boolToken·pageKeysToken·
+// shiftEnterToken·imeEnterToken·quick*Token)는 스키마-주도 이주(CS-1/CS-2/CS-2b)로 schema.serializeValue가
+// 대신한다 — 전부 제거. configKeyValues의 수동 emit은 이제 특수(palette.N·workspace.root·shell.args·env.*)만.
 
 /// `theme.Config`의 모든 필드를 정규 `key = value` 목록으로 펼친다. 반환 슬라이스와 그 안의 동적 값 문자열
 /// (숫자/색은 allocPrint)은 모두 `arena`가 소유한다 — 호출자는 arena 하나를 만들어 넘기고, 텍스트를 만든 뒤
@@ -55,22 +35,10 @@ fn boolToken(b: bool) []const u8 {
 pub fn configKeyValues(arena: std.mem.Allocator, config: theme.Config) ![]const KeyValue {
     var list: std.ArrayList(KeyValue) = .empty;
 
-    // 스키마-주도 스칼라(font.*·theme 색·cursor.*·input.*·quick-terminal.*·sidebar.*·notifications.*·scrollback.*·
-    // bell.*·shell-integration.*·workspace.{tab,split}-inherit·shell.command)를 먼저 emit(CS-1+CS-2). 아래 수동 블록은
-    // **미이주 항목만** — 최상위 스칼라(chrome.theme·text.*·theme.bold-is-bright·window.padding-*·term)와 특수
-    // (theme.palette.N·env.*·workspace.root·shell.args). 단일 출처: docs/config-schema.md.
+    // 스키마-주도 스칼라(sub-struct 전부 + 최상위 스칼라 chrome.theme·text.*·theme.bold-is-bright·window.padding-*·
+    // term)를 먼저 emit(CS-1+CS-2+CS-2b). 아래 수동 블록은 **특수만**(theme.palette.N·workspace.root·shell.args·env.*).
+    // 단일 출처: docs/config-schema.md.
     try schema.appendSerialized(arena, config, &list);
-
-    // 최상위 스칼라(sub-struct가 아니라 Config 직속이라 스키마 namespace가 없음 — CS-2b 또는 Config.schema로 후속).
-    try list.append(arena, .{ .key = "chrome.theme", .value = chromeThemeToken(config.chrome_theme) });
-    try list.append(arena, .{ .key = "text.blink", .value = boolToken(config.blink_text) });
-    try list.append(arena, .{ .key = "text.ambiguous-width", .value = ambiguousWidthToken(config.ambiguous_width) });
-    try list.append(arena, .{ .key = "theme.bold-is-bright", .value = boolToken(config.bold_is_bright) });
-    try list.append(arena, .{ .key = "window.padding-top", .value = try std.fmt.allocPrint(arena, "{d}", .{config.window_padding_top}) });
-    try list.append(arena, .{ .key = "window.padding-right", .value = try std.fmt.allocPrint(arena, "{d}", .{config.window_padding_right}) });
-    try list.append(arena, .{ .key = "window.padding-bottom", .value = try std.fmt.allocPrint(arena, "{d}", .{config.window_padding_bottom}) });
-    try list.append(arena, .{ .key = "window.padding-left", .value = try std.fmt.allocPrint(arena, "{d}", .{config.window_padding_left}) });
-    try list.append(arena, .{ .key = "term", .value = config.term });
 
     // 특수: theme.palette.N(인덱스), workspace.root(절대경로 검증), shell.args(공백-토큰 리스트), env.<KEY>(동적).
     for (config.theme.palette, 0..) |entry, i| {

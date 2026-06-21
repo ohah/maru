@@ -11,8 +11,11 @@ pub const Section = enum { font, theme, cursor, window, input, terminal, workspa
 
 /// 한 필드의 메타. 값은 평범한 Zig 필드로 두고(직접 접근 보존), 메타만 sub-struct `schema` decl에 comptime으로 둔다.
 pub const Meta = struct {
-    /// 키 segment override(없으면 필드명 그대로). 전체 키 = `<namespace>.<segment>`(namespace=Config 필드명).
-    /// `-`가 필요한 키만 명시(`size_step` → `"size-step"`). 자동 `_`→`-` 변환은 키가 공개 계약이라 안 한다.
+    /// **전체 키** override(없으면 `<namespace>.<segment>`로 유도). 최상위 스칼라(Config.schema — namespace 없음)는
+    /// **필수**(예: `blink_text` 필드 → `"text.blink"`). sub-struct 필드도 키가 불규칙하면 이걸로 통째 지정 가능.
+    key: ?[]const u8 = null,
+    /// 키 segment override(없으면 필드명 dashed). 전체 키 = `<namespace>.<segment>`(namespace=Config 필드명 dashed).
+    /// field명≠segment인 예외만 명시(`height_fraction` → `"height"`). `key`가 있으면 이건 무시된다.
     key_seg: ?[]const u8 = null,
     doc: []const u8 = "",
     /// 숫자 범위(min,max). f32 필드엔 **필수**(파서 검증 + GUI 슬라이더 공유). 그 외 타입엔 null.
@@ -436,6 +439,20 @@ pub const Config = struct {
     /// 대화형 셸 프로그램·인자 override. loader가 `shell.command`/`shell.args` 키로 파싱. 기본은 빈 command
     /// (= resolveInteractiveShell 폴백)이라 미설정 시 현행 동작과 동일.
     shell: ShellConfig = .{},
+
+    // 최상위 스칼라(Config 직속 — sub-struct가 아니라 namespace가 없으므로 Meta.key로 전체 키를 명시한다, CS-2b).
+    // window.padding-x/y(alias)·env(동적)·sub-struct(font/theme/…)는 schema에 안 넣는다 — 각각 loader 명시 핸들러/하위 schema.
+    pub const schema = .{
+        .chrome_theme = Meta{ .key = "chrome.theme", .doc = "chrome 디자인 테마", .widget = .dropdown, .section = .theme },
+        .blink_text = Meta{ .key = "text.blink", .doc = "SGR5 blink 글자 깜빡임", .widget = .toggle, .section = .theme },
+        .ambiguous_width = Meta{ .key = "text.ambiguous-width", .doc = "EAW Ambiguous 문자 폭", .widget = .dropdown, .section = .theme },
+        .bold_is_bright = Meta{ .key = "theme.bold-is-bright", .doc = "bold를 bright 색으로", .widget = .toggle, .section = .theme },
+        .window_padding_top = Meta{ .key = "window.padding-top", .doc = "위 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
+        .window_padding_right = Meta{ .key = "window.padding-right", .doc = "오른쪽 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
+        .window_padding_bottom = Meta{ .key = "window.padding-bottom", .doc = "아래 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
+        .window_padding_left = Meta{ .key = "window.padding-left", .doc = "왼쪽 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
+        .term = Meta{ .key = "term", .doc = "$TERM 값", .widget = .text, .section = .terminal },
+    };
 };
 
 /// 대화형 셸 프로그램과 인자 override. 미설정(기본)이면 `resolveInteractiveShell()`(MARU_INTERACTIVE_SHELL >

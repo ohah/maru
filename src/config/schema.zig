@@ -410,6 +410,19 @@ pub fn appendTextFields(arena: std.mem.Allocator, config: theme.Config, list: *s
 /// 키로 문자열([]const u8, widget .text/.color) 스키마 필드를 설정한다(세팅 인라인 편집 → config). value는 **호출자가
 /// config arena에 미리 소유**시킨 슬라이스여야 한다(setText는 슬라이스만 대입 — 라이브 재적용/직렬화가 계속 읽음).
 /// 매칭하는 문자열 필드가 있으면 set하고 true. parse/serialize와 같은 키 순회(단일 출처).
+/// 문자열 필드 값을 **파일 로드(parseAndSet)와 같은 규칙**으로 검증한다 — GUI·파일 드리프트 방지(docs/config-gui.md
+/// §1). color=#RRGGBB(appearance.parseHexColor), text=trim 후 비어있지 않음. 통과면 trim된 슬라이스(입력의 부분
+/// 슬라이스 — 호출자 소유 유지), 실패면 null. setText 단일 출처.
+fn validatedText(widget: theme.Widget, value: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
+    if (widget == .color) {
+        _ = appearance.parseHexColor(trimmed) catch return null;
+        return trimmed;
+    }
+    if (trimmed.len == 0) return null; // text: 빈 값 거부(기본값 유지)
+    return trimmed;
+}
+
 pub fn setText(config: *theme.Config, key: []const u8, value: []const u8) bool {
     if (@hasDecl(theme.Config, "schema")) {
         inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
@@ -417,7 +430,8 @@ pub fn setText(config: *theme.Config, key: []const u8, value: []const u8) bool {
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
                 if (meta.widget == .text or meta.widget == .color) {
                     if (std.mem.eql(u8, key, comptime topKey(sf.name, meta))) {
-                        @field(config, sf.name) = value;
+                        const v = validatedText(meta.widget, value) orelse return false;
+                        @field(config, sf.name) = v;
                         return true;
                     }
                 }
@@ -433,7 +447,8 @@ pub fn setText(config: *theme.Config, key: []const u8, value: []const u8) bool {
                     const meta: theme.Meta = @field(sch, sf.name);
                     if (meta.widget == .text or meta.widget == .color) {
                         if (std.mem.eql(u8, key, comptime keyOf(cf.name, sf.name, meta))) {
-                            @field(@field(config, cf.name), sf.name) = value;
+                            const v = validatedText(meta.widget, value) orelse return false;
+                            @field(@field(config, cf.name), sf.name) = v;
                             return true;
                         }
                     }
@@ -739,11 +754,17 @@ test "schema appendTextFields/setText: 문자열(widget .text/.color) 열거·�
     }
     try std.testing.expect(saw_family and saw_bg); // text + color 둘 다 노출
 
-    // setText: family(text)·background(color hex) 설정. value는 호출자 소유(여기선 리터럴).
-    try std.testing.expect(setText(&cfg, "font.family", "Menlo"));
-    try std.testing.expectEqualStrings("Menlo", cfg.font.family);
+    // setText: family(text)·background(color hex) 설정. value는 호출자 소유(여기선 리터럴). trim 적용.
+    try std.testing.expect(setText(&cfg, "font.family", "  Menlo  "));
+    try std.testing.expectEqualStrings("Menlo", cfg.font.family); // trim
     try std.testing.expect(setText(&cfg, "theme.background", "#ff0000"));
     try std.testing.expectEqualStrings("#ff0000", cfg.theme.background);
+    // 검증(파일 로드 parseAndSet와 같은 규칙, 리뷰 #823): 잘못된 hex·빈 text는 false + 값 불변.
+    try std.testing.expect(!setText(&cfg, "theme.background", "#gggggg")); // 잘못된 hex
+    try std.testing.expect(!setText(&cfg, "theme.background", "red")); // # 형식 아님
+    try std.testing.expectEqualStrings("#ff0000", cfg.theme.background); // 거부 → 직전 값 유지
+    try std.testing.expect(!setText(&cfg, "font.family", "   ")); // 공백뿐 → 빈 text 거부
+    try std.testing.expectEqualStrings("Menlo", cfg.font.family); // 유지
     // 비스키마/비-text 키 → false.
     try std.testing.expect(!setText(&cfg, "cursor.blink", "x")); // bool 필드
     try std.testing.expect(!setText(&cfg, "no.such.key", "x"));

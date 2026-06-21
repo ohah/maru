@@ -202,7 +202,7 @@ pub const ChromeHost = struct {
     /// 위젯별 hit-test·드래그(divider `dragRatio` 패턴)는 위젯 컴포넌트가 들어오는 후속 PR에서 추가한다.
     pub fn handlePointer(self: *ChromeHost, ev: input.PointerEvent) ?HostAction {
         _ = ev; // 위젯이 좌표/버튼을 소비하는 건 CS-4-1+; 지금은 모달 열림 여부만으로 소비/통과를 가른다.
-        if (self.confirm.open or self.notice.open or self.context_menu.open or self.find.open or self.palette.open) {
+        if (self.confirm.open or self.notice.open or self.context_menu.open or self.find.open or self.palette.open or self.settings.open) {
             return .none;
         }
         return null;

@@ -53,11 +53,12 @@ fn geom(rect: draw.Rect, value: bool) Geom {
 /// (x,y)가 toggle pill 안인가 — 클릭 hit-test. view와 같은 geom을 써 "보이는 pill == 눌리는 pill". 셀 0/비유한 가드.
 pub fn hitTest(rect: draw.Rect, x_px: f64, y_px: f64) bool {
     if (rect.w == 0 or rect.h == 0 or !std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
-    const g = geom(rect, false); // pill 위치는 value 무관(knob만 좌우로 움직임)
-    const px0: f64 = @floatFromInt(g.pill.x);
-    const py0: f64 = @floatFromInt(g.pill.y);
-    return x_px >= px0 and x_px < px0 + @as(f64, @floatFromInt(g.pill.w)) and
-        y_px >= py0 and y_px < py0 + @as(f64, @floatFromInt(g.pill.h));
+    // 클릭 영역 = 주어진 control rect 전체(셸이 그려지는 위젯 폭으로 rect를 준다 — tui는 4칸 트랙이 pill보다 넓어,
+    // pill 기준으로 잡으면 닫는 `]` 우측이 안 눌렸다(리뷰 #823). rect가 곧 보이는 위젯이라 rect == 클릭.
+    const x0: f64 = @floatFromInt(rect.x);
+    const y0: f64 = @floatFromInt(rect.y);
+    return x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(rect.w)) and
+        y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(rect.h));
 }
 
 /// 포인터 처리 — pill 위 **좌클릭 down**이면 값 토글 + `.changed`. drag/up·우클릭·pill 밖은 무동작(null).
@@ -130,12 +131,13 @@ test "toggle width: 행 높이 × 9/5" {
     try std.testing.expectEqual(@as(u32, 36), width(20)); // 20*9/5
 }
 
-test "toggle hitTest: pill 안=true, 밖/비유한=false" {
-    // pill = x:100..136(width(20)=36), y:50..70.
+test "toggle hitTest: control rect 전체가 클릭 영역, 밖/비유한=false" {
+    // rect = x:100..160(w=60), y:50..70. 클릭 영역 = rect 전체(셸이 위젯 폭으로 rect를 줌).
     try std.testing.expect(hitTest(test_rect, 110, 60));
     try std.testing.expect(hitTest(test_rect, 100, 50)); // 좌상 경계 포함
-    try std.testing.expect(!hitTest(test_rect, 136, 60)); // 우측 밖(>=136)
-    try std.testing.expect(!hitTest(test_rect, 110, 70)); // 하단 밖(>=70)
+    try std.testing.expect(hitTest(test_rect, 159, 69)); // 우하 경계 안
+    try std.testing.expect(!hitTest(test_rect, 160, 60)); // 우측 밖(>=x+w)
+    try std.testing.expect(!hitTest(test_rect, 110, 70)); // 하단 밖(>=y+h)
     try std.testing.expect(!hitTest(test_rect, 200, 60)); // 멀리 밖
     try std.testing.expect(!hitTest(test_rect, std.math.inf(f64), 60));
     try std.testing.expect(!hitTest(.{ .x = 0, .y = 0, .w = 0, .h = 20 }, 0, 0)); // 0폭

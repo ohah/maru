@@ -49,7 +49,10 @@ pub fn layout(content_cols: u32, content_rows: u32, p: props.ChromeProps, tk: *c
     const box_h = (content_rows + 2) * ch; // 위/아래 여백 한 줄씩 + 콘텐츠 행
     const sidebar = @as(i32, @intCast(m.sidebar_width_px));
     const x = sidebar + @as(i32, @intCast((term_w_px - box_w) / 2));
-    const y = @divTrunc(@as(i32, @intCast(m.backing_height_px)) - @as(i32, @intCast(box_h)), 2);
+    // 세로 중앙. 단 box_h가 뷰포트보다 크면(예: 세팅 섹션이 많고 창이 짧음) 중앙값이 음수가 돼 제목/상단이 화면 위로
+    // 잘렸다(리뷰 #823) — y를 0 이상으로 clamp해 상단을 항상 보이게 한다(하단 초과분은 framebuffer가 클립, 네비
+    // 스크롤은 후속). 폭 clamp(box_cols)와 같은 "모달을 화면 안에" 취지.
+    const y = @max(@as(i32, 0), @divTrunc(@as(i32, @intCast(m.backing_height_px)) - @as(i32, @intCast(box_h)), 2));
     return .{
         .rect = .{ .x = x, .y = y, .w = box_w, .h = box_h },
         .inner_x = x + @as(i32, @intCast(margin * cw)),
@@ -244,4 +247,18 @@ test "modal_box: rich 패딩이어도 확장 박스(box_w + 2*pad)가 터미널 
     try std.testing.expect(box2.x - @as(i32, @intCast(pad)) >= @as(i32, @intCast(sidebar)));
     try std.testing.expect(box2.h == box.h + ch); // 2줄 박스가 1줄보다 정확히 한 줄(ch) 큼
     try std.testing.expect(out.items[3].text.origin.y == out.items[2].text.origin.y + @as(i32, @intCast(ch))); // 둘째 줄 = 첫째 + ch
+}
+
+test "modal_box: 박스가 뷰포트보다 높으면 y를 0으로 clamp (상단/제목 화면 위로 안 잘림 — 리뷰 #823)" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    // 짧은 창(backing_height 작게) + 많은 콘텐츠 행 → box_h > backing_height.
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 800, .backing_height_px = 120 } };
+    const box = layout(20, 30, p, &tk).?; // 30행 콘텐츠 → box_h=(30+2)*16=512 ≫ 120
+    try std.testing.expect(box.rect.y >= 0); // 상단이 화면 위로 안 나감
+    try std.testing.expect(box.inner_y >= 0); // 첫 콘텐츠 행도 화면 안
+    // 넉넉한 창에선 중앙 정렬(양수 y) 유지.
+    const p2 = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 800, .backing_height_px = 600 } };
+    const box2 = layout(20, 6, p2, &tk).?;
+    try std.testing.expect(box2.rect.y > 0); // 중앙
 }

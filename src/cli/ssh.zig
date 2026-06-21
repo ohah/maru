@@ -140,6 +140,42 @@ pub fn controlSocketPath(allocator: std.mem.Allocator, home: []const u8, dest: [
     return path;
 }
 
+/// 드롭 업로드 파일 크기 상한(사용자 결정 2026-06-21: 16MB, OSC 52 클립보드와 동일). 넘으면 업로드하지
+/// 않는다 — 느린 ssh 링크에서 거대 파일 전송으로 세션이 멎는 걸 막는다. 실제 크기 검사는 실행 측(3b).
+pub const max_upload_bytes: usize = 16 * 1024 * 1024;
+
+/// 드롭된 로컬 파일 경로에서 원격에 쓸 안전한 파일명을 만든다(호출자 소유). basename만 취하고(경로
+/// 구분자 제거), 영숫자·`.`·`-`·`_`만 남기고 나머지는 `_`로 바꾼다 — 셸 구절(uploadShellCommand)의
+/// 큰따옴표 안에 그대로 들어가도 안전하고(`$`·백틱·공백·`;` 등 차단) 원격에서 예측 가능한 이름이 된다.
+/// 선두 '.'(숨김 파일·`..` 경로 탈출)도 '_'로 바꾼다. 정제 후 비면 "drop"을 쓴다(충돌 회피 접두는 3b).
+pub fn sanitizeDropFilename(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const base = std.fs.path.basename(path);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (base) |c| {
+        const safe = std.ascii.isAlphanumeric(c) or c == '.' or c == '-' or c == '_';
+        try out.append(allocator, if (safe) c else '_');
+    }
+    if (out.items.len > 0 and out.items[0] == '.') out.items[0] = '_'; // 선두 '.' = 숨김/'..' 탈출 차단
+    if (out.items.len == 0) {
+        out.deinit(allocator);
+        return allocator.dupe(u8, "drop");
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// 원격에서 드롭 파일을 받는 셸 구절(호출자 소유). `ssh -S <ctl> <dest> '<이 구절>'`로 실행하고 파일
+/// 바이트를 stdin으로 흘리면, 원격이 저장 디렉터리를 만들고 stdin을 그 파일로 받은 뒤 **원격 절대경로를
+/// stdout으로 돌려준다** — 로컬은 그 절대경로를 받아 메인 PTY로 paste한다(원격 $HOME을 로컬이 모르므로
+/// 원격이 알려준다). `remote_name`은 sanitizeDropFilename으로 정제돼 큰따옴표 안에서 안전하다.
+pub fn uploadShellCommand(allocator: std.mem.Allocator, remote_name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "d=\"$HOME/.cache/maru/dropped\"; mkdir -p \"$d\" && cat > \"$d/{s}\" && printf '%s' \"$d/{s}\"",
+        .{ remote_name, remote_name },
+    );
+}
+
 pub const ParseError = error{MissingDestination};
 
 pub const Parsed = struct {
@@ -367,4 +403,30 @@ test "controlSocketPath: sun_path 한도를 넘으면 ControlPathTooLong" {
     const a = std.testing.allocator;
     const long_home = "/" ++ ("x" ** 120); // 경로가 sun_path(104B)를 넘는다
     try std.testing.expectError(error.ControlPathTooLong, controlSocketPath(a, long_home, "host"));
+}
+
+test "sanitizeDropFilename: basename + 안전 문자만(셸 메타·경로탈출 차단)" {
+    const a = std.testing.allocator;
+    const p1 = try sanitizeDropFilename(a, "/Users/me/Screen Shot.png");
+    defer a.free(p1);
+    try std.testing.expectEqualStrings("Screen_Shot.png", p1); // basename + 공백→_
+    const p2 = try sanitizeDropFilename(a, "/tmp/a$b`c;d.txt");
+    defer a.free(p2);
+    try std.testing.expectEqualStrings("a_b_c_d.txt", p2); // 셸 메타문자→_
+    const p3 = try sanitizeDropFilename(a, "/x/..");
+    defer a.free(p3);
+    try std.testing.expectEqualStrings("_.", p3); // 선두 '.'→_ ('..' 경로 탈출 차단)
+    const p4 = try sanitizeDropFilename(a, "");
+    defer a.free(p4);
+    try std.testing.expectEqualStrings("drop", p4); // basename 비면 기본명
+}
+
+test "uploadShellCommand: mkdir + cat + 원격 절대경로 echo" {
+    const a = std.testing.allocator;
+    const cmd = try uploadShellCommand(a, "img.png");
+    defer a.free(cmd);
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "mkdir -p \"$d\"") != null); // 저장 디렉터리 생성
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "cat > \"$d/img.png\"") != null); // stdin→파일
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "printf '%s' \"$d/img.png\"") != null); // 원격 절대경로 반환
+    try std.testing.expect(std.mem.indexOf(u8, cmd, ".cache/maru/dropped") != null); // 저장 위치
 }

@@ -3316,21 +3316,36 @@ pub const AppSession = struct {
             self.chrome_host.palette.hide();
             self.find_matches.clearRetainingCapacity();
             self.chrome_host.settings.show();
-            var list: std.ArrayList(config_mod.schema.BoolField) = .empty;
-            defer list.deinit(self.allocator);
-            config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &list) catch {};
-            self.chrome_host.settings.setFieldCount(list.items.len);
+            var bl: std.ArrayList(config_mod.schema.BoolField) = .empty;
+            defer bl.deinit(self.allocator);
+            var nl: std.ArrayList(config_mod.schema.NumberField) = .empty;
+            defer nl.deinit(self.allocator);
+            config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &bl) catch {};
+            config_mod.schema.appendNumberFields(self.allocator, self.loaded_config.config, &nl) catch {};
+            self.chrome_host.settings.setFieldCount(bl.items.len + nl.items.len);
         }
     }
 
     /// config 스키마의 bool 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2). 라벨=meta.doc(없으면 키),
     /// 값=현재 raw config(self.loaded_config.config). buildPaletteRows의 settings 짝 — arena 소유. macOS 전용.
     fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.settings.FieldRow {
+        const Row = chrome.components.settings.FieldRow;
         var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
         try config_mod.schema.appendBoolFields(arena, self.loaded_config.config, &bools);
-        const rows = try arena.alloc(chrome.components.settings.FieldRow, bools.items.len);
-        for (bools.items, 0..) |b, i| {
-            rows[i] = .{ .label = if (b.doc.len > 0) b.doc else b.key, .value = b.value };
+        var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
+        try config_mod.schema.appendNumberFields(arena, self.loaded_config.config, &nums);
+        // 결합 순서: bool(toggle) 행 먼저, 그다음 number(slider) 행. selected/handler 인덱싱이 이 순서를 공유한다
+        // (toggleSelectedSetting은 bool 리스트를 selected로 인덱싱 → slider 행(>=bool_count)은 자동 무동작;
+        //  applySelectedSlider/adjustSelectedSetting은 selected-bool_count로 number 리스트를 인덱싱).
+        const rows = try arena.alloc(Row, bools.items.len + nums.items.len);
+        var i: usize = 0;
+        for (bools.items) |b| {
+            rows[i] = .{ .label = if (b.doc.len > 0) b.doc else b.key, .kind = .{ .toggle = b.value } };
+            i += 1;
+        }
+        for (nums.items) |n| {
+            rows[i] = .{ .label = if (n.doc.len > 0) n.doc else n.key, .kind = .{ .slider = .{ .value = n.value, .min = n.min, .max = n.max } } };
+            i += 1;
         }
         return rows;
     }
@@ -3349,6 +3364,49 @@ pub const AppSession = struct {
         if (config_mod.schema.setBool(&self.loaded_config.config, f.key, !f.value)) {
             self.reapplyLoadedConfig(); // 세션 라이브 적용
             self.markConfigKeyDirty(f.key); // 파일 영속 예약(CS-4-4c — Swift가 drain해 atomic write)
+        }
+    }
+
+    /// 슬라이더 드래그/클릭(settings.pending_ratio)을 선택 행의 number config 값으로 매핑해 적용한다(라이브 + 영속
+    /// 예약). 결합 순서(bool 먼저)라 selected<bool_count면 slider 아님 → 무동작. number 리스트는 selected-bool_count.
+    fn applySelectedSlider(self: *AppSession) void {
+        var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
+        defer bools.deinit(self.allocator);
+        var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
+        defer nums.deinit(self.allocator);
+        config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &bools) catch return;
+        config_mod.schema.appendNumberFields(self.allocator, self.loaded_config.config, &nums) catch return;
+        const sel = self.chrome_host.settings.selected;
+        if (sel < bools.items.len) return; // bool 행 — slider 아님
+        const ni = sel - bools.items.len;
+        if (ni >= nums.items.len) return;
+        const n = nums.items[ni];
+        const value = n.min + @as(f64, self.chrome_host.settings.pending_ratio) * (n.max - n.min);
+        if (config_mod.schema.setNumber(&self.loaded_config.config, n.key, value)) {
+            self.reapplyLoadedConfig();
+            self.markConfigKeyDirty(n.key);
+        }
+    }
+
+    /// 선택 행이 slider면 한 스텝(dir=-1/+1) 조절한다(←/→ 키). 스텝=범위의 4%(정수는 최소 1). bool 행이면 무동작.
+    fn adjustSelectedSetting(self: *AppSession, dir: i8) void {
+        var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
+        defer bools.deinit(self.allocator);
+        var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
+        defer nums.deinit(self.allocator);
+        config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &bools) catch return;
+        config_mod.schema.appendNumberFields(self.allocator, self.loaded_config.config, &nums) catch return;
+        const sel = self.chrome_host.settings.selected;
+        if (sel < bools.items.len) return; // bool 행 — ←/→ 무동작
+        const ni = sel - bools.items.len;
+        if (ni >= nums.items.len) return;
+        const n = nums.items[ni];
+        const span = n.max - n.min;
+        const step = if (n.is_int) @max(@as(f64, 1), span * 0.04) else span * 0.04;
+        const value = std.math.clamp(n.value + @as(f64, @floatFromInt(dir)) * step, n.min, n.max);
+        if (config_mod.schema.setNumber(&self.loaded_config.config, n.key, value)) {
+            self.reapplyLoadedConfig();
+            self.markConfigKeyDirty(n.key);
         }
     }
 
@@ -3829,7 +3887,10 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
             .settings_close => {}, // settings.hide는 컴포넌트가 이미(handle/바깥클릭) — platform 부수효과 없음
-            .settings_toggle => self.toggleSelectedSetting(), // 선택 행 bool flip + 라이브 적용(파일 영속은 CS-4-4c)
+            .settings_toggle => self.toggleSelectedSetting(), // 선택 행 bool flip + 라이브 적용 + 영속 예약
+            .settings_slider_set => self.applySelectedSlider(), // 슬라이더 드래그/클릭 → 값 매핑 + 적용 + 영속
+            .settings_adjust_left => self.adjustSelectedSetting(-1), // ← 한 스텝 감소(slider)
+            .settings_adjust_right => self.adjustSelectedSetting(1), // → 한 스텝 증가(slider)
             .settings_selection_changed => self.metal_dirty = true, // ↑↓/행 클릭 — 재렌더
         }
     }
@@ -4549,7 +4610,9 @@ pub const AppSession = struct {
             self.dispatchChromeAction(switch (act) {
                 .close => .settings_close,
                 .toggle => .settings_toggle,
+                .slider_set => .settings_slider_set,
                 .selection_changed => .settings_selection_changed,
+                .adjust_left, .adjust_right => .none, // 포인터 경로엔 안 옴(키 전용) — exhaustiveness
                 .consumed => .none,
             });
             self.metal_dirty = true;

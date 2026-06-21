@@ -36,7 +36,10 @@ pub const HostAction = union(enum) {
     confirm_accept, // 확인 모달 Enter/Y — platform이 보류한 닫기(pending_close)를 실행
     confirm_cancel, // 확인 모달 Esc/N — platform이 보류한 닫기를 버린다
     settings_close, // 세팅 모달 Esc/바깥클릭 — platform이 hide
-    settings_toggle, // 세팅 행 Space/Enter/toggle 클릭 — platform이 rows[selected] 키 flip + 적용
+    settings_toggle, // 세팅 행 Space/Enter/toggle 클릭 — platform이 rows[selected](bool) flip + 적용
+    settings_slider_set, // 세팅 슬라이더 드래그/클릭 — platform이 settings.pending_ratio→값 매핑 + 적용
+    settings_adjust_left, // 세팅 행 ← — platform이 rows[selected](slider) 한 스텝 감소(toggle이면 무시)
+    settings_adjust_right, // 세팅 행 → — platform이 한 스텝 증가
     settings_selection_changed, // 세팅 행 ↑↓/행 클릭 — platform이 재렌더(부수효과 없음)
 };
 
@@ -173,6 +176,9 @@ pub const ChromeHost = struct {
                     return switch (settings.handle(k, &self.settings)) {
                         .close => .settings_close,
                         .toggle => .settings_toggle,
+                        .adjust_left => .settings_adjust_left,
+                        .adjust_right => .settings_adjust_right,
+                        .slider_set => .none, // 키 경로엔 안 옴(슬라이더 ratio 설정은 포인터 드래그 전용) — exhaustiveness
                         .selection_changed => .settings_selection_changed,
                         .consumed => .none,
                     };

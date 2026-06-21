@@ -67,6 +67,11 @@ const cache_path = "${XDG_CACHE_HOME:-$HOME/.cache}/maru/ssh-terminfo-hosts";
 /// `"$@"`=ssh 인자. `$ctl`이 있으면 디렉터리를 만들고(`mkdir -p`) ssh `ControlPath`로 쓴다 — 드롭 파일
 /// 업로드가 이 socket으로 가는 사이드채널(docs/ssh-integration.md §4)의 토대다.
 ///
+/// 또한 control socket이 살아있는 maru exec 경로(캐시 hit·부트스트랩 성공) 직전에 `notify`가 OSC 5379
+/// `ssh;<dest>`를 emit해(tmux 안이면 `$TMUX` 감지 후 DCS passthrough로 감쌈) Maru에 "이 세션은 maru ssh
+/// 원격, 목적지=dest"임을 알린다 — Maru가 dest로 control socket 경로를 계산해 드롭 업로드 대상으로 쓴다
+/// (docs/ssh-integration.md §4, 2단계). ctl 없는 폴백 경로는 socket이 없어 통지하지 않는다.
+///
 /// **캐시 hit**(이 목적지에 이미 설치 기록 있음): bootstrap을 통째로 건너뛰되, `$ctl`이 있으면
 /// `ControlMaster=auto`로 **control socket을 유지하며** `TERM=xterm-maru`로 exec한다(이전엔 캐시 hit
 /// 경로에 socket이 없어 재접속 세션엔 사이드채널이 없었다). 매 접속 설치 round-trip은 그대로 없앤다
@@ -84,13 +89,17 @@ const cache_path = "${XDG_CACHE_HOME:-$HOME/.cache}/maru/ssh-terminfo-hosts";
 pub const wrapper_script =
     "elig=\"$1\"; dest=\"$2\"; ctl=\"$3\"; shift 3; cache=\"" ++ cache_path ++ "\"; " ++
     "[ -n \"$ctl\" ] && mkdir -p \"${ctl%/*}\" 2>/dev/null; " ++
+    // notify: maru exec 직전 OSC 5379(ssh;<dest>)로 원격 세션을 Maru에 알린다. tmux 안($TMUX)이면 DCS
+    // passthrough(ESC P tmux; <inner의 ESC를 doubled> ESC \\)로 감싸 tmux를 통과시킨다. raw inner는
+    // ESC ] 5379 ; ssh ; <dest> BEL. dest는 printf '%s'라 format 해석 없이 그대로 들어간다.
+    "notify() { if [ -n \"$TMUX\" ]; then printf '\\033Ptmux;\\033\\033]5379;ssh;%s\\007\\033\\\\' \"$dest\"; else printf '\\033]5379;ssh;%s\\007' \"$dest\"; fi; }; " ++
     "if [ -n \"$dest\" ] && grep -qxF \"$dest\" \"$cache\" 2>/dev/null; then " ++
-    "if [ -n \"$ctl\" ]; then exec env TERM=xterm-maru ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\"; fi; " ++
+    "if [ -n \"$ctl\" ]; then notify; exec env TERM=xterm-maru ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\"; fi; " ++
     "exec env TERM=xterm-maru ssh \"$@\"; fi; " ++
     "if [ \"$elig\" = 1 ] && [ -n \"$ctl\" ]; then " ++
     "if " ++ emit_terminfo ++ " | ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10 \"$@\" '" ++ remote_install ++ "' >/dev/null 2>&1; then " ++
     "[ -n \"$dest\" ] && { mkdir -p \"${cache%/*}\" 2>/dev/null; printf '%s\\n' \"$dest\" >> \"$cache\" 2>/dev/null; }; " ++
-    "exec env TERM=xterm-maru ssh -o ControlPath=\"$ctl\" \"$@\"; " ++
+    "notify; exec env TERM=xterm-maru ssh -o ControlPath=\"$ctl\" \"$@\"; " ++
     "else exec env TERM=xterm-256color ssh -o ControlPath=\"$ctl\" \"$@\"; fi; " ++
     "fi; " ++
     "exec env TERM=xterm-256color ssh \"$@\"";
@@ -260,6 +269,11 @@ test "wrapper 스크립트: 결정론적 ctl·캐시 hit 유지·ControlMaster·
     try std.testing.expect(std.mem.indexOf(u8, s, "Sync=") != null); // embed된 terminfo가 스크립트에 들어있다
     try std.testing.expect(std.mem.indexOf(u8, s, "infocmp -x") == null); // 로컬 infocmp 의존 없음
     try std.testing.expect(std.mem.indexOf(u8, s, "command -v infocmp") == null); // 로컬 게이트 없음
+    // 2단계: maru exec 직전 OSC 5379로 원격 세션을 Maru에 통지(tmux면 DCS passthrough).
+    try std.testing.expect(std.mem.indexOf(u8, s, "notify() {") != null); // 통지 함수 정의
+    try std.testing.expect(std.mem.indexOf(u8, s, "]5379;ssh;%s") != null); // OSC 5379 payload(ssh;<dest>)
+    try std.testing.expect(std.mem.indexOf(u8, s, "Ptmux;") != null); // tmux passthrough 래핑
+    try std.testing.expect(std.mem.indexOf(u8, s, "notify; exec env TERM=xterm-maru") != null); // maru exec 직전 통지(폴백 경로엔 없음)
     // 회귀 가드: SetEnv(OpenSSH 7.8+ 전용) 미사용.
     try std.testing.expect(std.mem.indexOf(u8, s, "SetEnv") == null);
 }

@@ -255,6 +255,11 @@ pub const TerminalCore = struct {
     // 안전·Ghostty/xterm.js 호환). putCell이 셀 폭을 정할 때 width.cellWidthAmbiguous로 반영하므로 grid·커서·렌더가
     // 같은 폭을 본다(단일 출처). app_session이 loaded_config에서 set(max_scrollback과 같은 직접 대입 패턴).
     ambiguous_wide: bool = false,
+    // 이모지 표현(base+VS16, 키캡 2️⃣ 등)을 mode 2027 합의가 없어도 풀사이즈 width 2로 승격할지(text.emoji-width=wide).
+    // 기본 false(core 단독)지만 app_session이 config(기본 wide)에서 true로 켠다 — Ghostty/iTerm2처럼 이모지를 2칸으로
+    // 본다. ❤️·2️⃣가 1칸에 욱여넣어져 작아지던 것을 푼다. grapheme_cluster_mode(2027)면 이 플래그와 무관하게 항상 승격.
+    // 트레이드오프: zsh ZLE가 base+VS16을 1칸으로 가정하면 줄 편집이 어긋날 수 있어 narrow로 끌 수 있다(text.emoji-width).
+    emoji_wide: bool = false,
     // 뷰포트: 바닥(0=활성 화면)에서 위로 스크롤한 줄 수. [0, sb_count] 범위. >0이면 화면 윗부분에
     // 스크롤백(과거)이 보이고 활성 화면 아랫부분은 가려진다. 과거를 보는 중 새 출력이 scroll되면
     // 같은 내용을 계속 보도록 함께 올린다(scroll-lock).
@@ -4545,12 +4550,12 @@ pub const TerminalCore = struct {
                 const cp = self.translateCharset(codepoint);
                 if (width.cellWidth(cp) == 0) {
                     // VS16(U+FE0F) 등 변형 선택자/결합 문자는 0폭 combining으로 앞 글자에 붙인다.
-                    // 기본(mode 2027 off)은 폭을 EAW 그대로 둔다 — zsh의 ZLE는 ❤+VS16을 EAW 1칸으로
-                    // 보므로, 폭을 키우면 zsh의 redraw(CSI <N> D 재출력)가 어긋나 붙여넣기가 깨진다.
                     self.attachCombiningMark(cp);
-                    // mode 2027(grapheme cluster)에서는 앱과 너비를 합의한 상태라, VS16이 앞 글자를
-                    // 이모지 표현(width 2)으로 승격해 풀사이즈로 그려도 안전하다(❤+VS16 = ❤️ 2칸).
-                    if (self.grapheme_cluster_mode and cp == 0xFE0F) self.promoteLastToEmojiWidth();
+                    // VS16이 앞 글자를 이모지 표현(width 2)으로 승격해 풀사이즈로 그린다(❤+VS16=❤️, 키캡 2️⃣ 2칸).
+                    // 승격 조건은 둘 중 하나: (1) mode 2027(grapheme cluster) — 앱이 너비를 합의함, (2) emoji_wide
+                    // (text.emoji-width=wide, 기본) — Ghostty/iTerm2처럼 이모지를 항상 2칸으로 본다(모던 TUI 정합).
+                    // narrow(emoji_wide=false)면 EAW 그대로 1칸 — zsh ZLE가 ❤+VS16을 1칸으로 보는 환경의 줄 편집 보호.
+                    if ((self.grapheme_cluster_mode or self.emoji_wide) and cp == 0xFE0F) self.promoteLastToEmojiWidth();
                     return;
                 }
                 // mode 2027: grapheme을 한 셀로 묶는다(앱과 너비 합의 상태라 안전).
@@ -4836,7 +4841,7 @@ pub const TerminalCore = struct {
     }
 
     /// grapheme(VS16/RI 페어 등)이 붙은 직전 base 셀을 width 1 -> 2로 승격한다(이미 2면 무시).
-    /// mode 2027에서만 호출되므로 앱과 너비가 합의된 상태다.
+    /// mode 2027 또는 emoji_wide(text.emoji-width=wide)에서 호출된다 — 둘 다 이모지를 2칸으로 보는 상태다.
     fn promoteLastToEmojiWidth(self: *TerminalCore) void {
         const last = self.last_print orelse return;
         const base_idx = self.index(last.row, last.col);
@@ -8394,6 +8399,35 @@ test "mode 2027: VS16 promotes to width 2 only when grapheme cluster mode is on"
     try std.testing.expectEqual(@as(?u21, 0xFE0F), core.cells[10].combining);
     try std.testing.expectEqual(@as(u2, 2), core.cells[10].width);
     try std.testing.expect(core.cells[11].continuation);
+}
+
+test "emoji_wide promotes VS16/keycap to width 2 without mode 2027 (text.emoji-width=wide)" {
+    // 사용자 피드백: TUI(Claude Code)가 mode 2027을 안 켜서 키캡 2️⃣가 1칸에 욱여넣어져 작게 나옴.
+    // text.emoji-width=wide(emoji_wide)면 2027 합의 없이도 base+VS16을 width 2로 승격해 풀사이즈로 그린다
+    // (Ghostty/iTerm2·모던 TUI string-width와 정합). advance도 2 — 1칸짜리 작은 이모지 + 빈틈을 푼다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer core.deinit();
+    core.emoji_wide = true; // app_session이 config(text.emoji-width=wide 기본)에서 켜는 값
+    try std.testing.expect(!core.grapheme_cluster_mode); // 2027 없이도
+
+    // ❤+VS16 = ❤️ → width 2 + continuation.
+    try core.write("\xe2\x9d\xa4\xef\xb8\x8f");
+    try std.testing.expectEqual(@as(u21, 0x2764), core.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u2, 2), core.cells[0].width);
+    try std.testing.expect(core.cells[1].continuation);
+    try std.testing.expectEqual(@as(u16, 2), core.cursor.col); // advance 2
+
+    // 키캡 2️⃣ = '2'(0x32) + VS16(FE0F) + 엔클로징 키캡(U+20E3) → base 승격(FE0F가 트리거).
+    try core.write("\r\n\x32\xef\xb8\x8f\xe2\x83\xa3");
+    try std.testing.expectEqual(@as(u21, 0x32), core.cells[10].codepoint);
+    try std.testing.expectEqual(@as(u2, 2), core.cells[10].width);
+    try std.testing.expect(core.cells[11].continuation);
+
+    // 대조: emoji_wide=false면 같은 ❤️가 width 1 유지(zsh 정렬 보호 — 기존 동작).
+    var narrow = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer narrow.deinit();
+    try narrow.write("\xe2\x9d\xa4\xef\xb8\x8f");
+    try std.testing.expectEqual(@as(u2, 1), narrow.cells[0].width);
 }
 
 test "mode 2027: skin tone and flags cluster only when on" {

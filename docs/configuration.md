@@ -90,6 +90,7 @@ window.padding-left   = 8
 | `bell.audible` | `true`\|`false` | `true` | BEL(0x07) 수신 시 시스템 소리(NSSound.beep)를 낼지. `false`면 음소거(코어 플래그는 정상 소비) |
 | `notifications.agent-complete` | `true`\|`false` | `true` | 터미널에서 도는 에이전트(claude/codex) 세션이 **비활성 탭/창**에서 완료(running→idle)될 때 macOS 알림을 띄울지. 활성 탭은 화면으로 이미 보이므로 안 띄운다. 그 외 값은 무시 |
 | `text.ambiguous-width` | `narrow`\|`wide` | `narrow` | EAW Ambiguous 문자(동그란 번호 ① 등)의 셀 폭. 아래 참조 |
+| `text.emoji-width` | `narrow`\|`wide` | `wide` | 이모지 표현(base+VS16·키캡 2️⃣ 등)의 셀 폭. 아래 참조 |
 | `text.blink` | `true`\|`false` | `false` | SGR 5(blink) 글자를 실제로 깜빡일지. **기본 false** — 깜빡이는 콘텐츠는 접근성(WCAG 발작) 우려라 다수 터미널이 기본으로 끈다. 그 외 값은 무시 |
 | `chrome.theme` | `tui`\|`rich` | `tui` | chrome(탭바·사이드바·divider·focus 테두리) 디자인 테마. `tui`=현행 cell-grid 룩, `rich`=분리 색 팔레트(둥근 모서리·gradient). 색 룩(theme.preset)과는 직교. 그 외 값은 무시. 자세히는 [Chrome 전략](chrome-strategy.md) |
 | `input.page-keys` | `passthrough`\|`scroll` | `scroll` | 메인 화면 PageUp/Down 동작. 아래 참조 |
@@ -177,6 +178,25 @@ window.padding-left   = 8
 
 > 베이스/결정: 기본 `narrow`는 Ghostty·xterm.js·UAX #11과 일치한다. `wide`는 iTerm2 등이 가진 "ambiguous를 wide로"
 > 옵션과 같은 트레이드오프(표시 깔끔 ↔ 1칸 가정 프로그램과의 정렬)를 사용자가 고르게 한 것이다.
+
+### 이모지 폭 (`text.emoji-width`)
+
+VS16(U+FE0F)으로 이모지 표현이 된 글자(❤️ = ❤+VS16)와 **키캡**(2️⃣ = `2`+VS16+U+20E3) 같은 이모지 표현 클러스터가
+한 칸(narrow)을 차지할지 두 칸(wide)을 차지할지를 정한다. 이런 클러스터는 base가 텍스트 글자(폭 1)라, 폭을 안 키우면
+컬러 이모지가 **1칸에 욱여넣어져 작게** 나온다.
+
+- `wide` (기본): 두 칸(advance 2). Ghostty·iTerm2·kitty, 그리고 **모던 TUI가 쓰는 string-width 라이브러리**가
+  이모지(키캡 포함)를 2칸으로 세므로, maru도 2칸으로 맞춘다 — 이모지가 풀사이즈로 또렷하게 나오고, 2칸을 예약하는
+  TUI(예: Claude Code) 레이아웃과도 정합한다(1칸만 그리면 작은 이모지 + 옆 빈틈이 생긴다).
+- `narrow` (opt-in): 한 칸(advance 1, EAW 그대로). **zsh ZLE 등이 base+VS16을 1칸으로 가정**하는 환경에서 셸 줄
+  편집(커서·재출력)이 어긋나는 게 더 거슬릴 때 끈다. 이모지는 작게 나오지만 1칸 가정 프로그램과 정렬이 보존된다.
+
+`grapheme cluster mode`(DECSET 2027)를 켜는 앱과는 이 설정과 무관하게 항상 2칸이다(앱이 너비를 합의한 상태).
+적용 대상은 VS16 이모지 표현과 키캡이며, 스킨톤·국기(지역 표시자 페어)는 mode 2027에서만 한 글자로 묶는다(별도 동작).
+
+> 베이스/결정: 기본 `wide`는 Ghostty·iTerm2·kitty 및 모던 TUI의 사실상 표준(이모지=2칸)과 일치시켜, 키캡/VS16 이모지가
+> 작게 나오던 것을 푼다. `narrow`는 1칸을 가정하는 셸 줄 편집과의 정렬을 우선하려는 opt-out이다(`ambiguous-width`와 같은
+> 트레이드오프 구조 — 표시 정확 ↔ 1칸 가정 프로그램과의 정렬).
 
 ### Shift+Enter (`input.shift-enter`)
 

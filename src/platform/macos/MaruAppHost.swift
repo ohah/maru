@@ -589,6 +589,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
+        cleanupPasteImages() // 이전 세션이 남긴 임시 paste 이미지 청소(누적 방지 — 정상/비정상 종료 모두 커버).
 
         // 메인 창의 per-session 상태를 담을 surface를 가장 먼저 만든다 — 아래 window/appSession/렌더러
         // 대입이 전부 이 첫 창(primary = windows.first)으로 forwarding되므로(forwarder setter), 창이 없으면
@@ -1454,14 +1455,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             return
         }
-        if let imagePath = clipboardImageTempPath(pb) {
-            // 스크린샷·복사된 이미지(비트맵, 파일 아님) — 임시 PNG로 저장해 경로를 붙인다. escapeItems=true라 Zig가
-            // 셸 이스케이프 후 bracketed paste로 한 덩어리 전송 → claude/codex가 [Image]로 인식. 파일 URL은 위에서 처리.
-            sendPasteText(imagePath, escapeItems: true)
-            return
-        }
         if let text = pb.string(forType: .string), !text.isEmpty {
             sendPasteText(text, escapeItems: false)
+            return
+        }
+        if let imagePath = clipboardImageTempPath(pb) {
+            // 스크린샷·복사된 이미지(비트맵, 파일 아님) — 임시 PNG로 저장해 경로를 붙인다. escapeItems=true라 Zig가
+            // 셸 이스케이프 후 bracketed paste로 한 덩어리 전송 → claude/codex가 [Image]로 인식. URL·text가 없을 때만 —
+            // 비트맵+텍스트를 함께 주는 리치 콘텐츠는 위 텍스트를 우선해 의도치 않은 이미지 경로 삽입을 막는다.
+            sendPasteText(imagePath, escapeItems: true)
         }
     }
 
@@ -1486,20 +1488,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty {
             return (urls.map { $0.path }.joined(separator: "\u{0}"), true) // 파일 경로들 — 각 이스케이프 후 공백 join
         }
-        if let imagePath = clipboardImageTempPath(pb) {
-            return (imagePath, true) // 드래그된 비트맵 이미지 — 임시 PNG 경로(이스케이프). 파일 URL은 위에서 처리.
-        }
         if let text = pb.string(forType: .string), !text.isEmpty {
             return (text, false)
+        }
+        if let imagePath = clipboardImageTempPath(pb) {
+            // 비트맵 이미지(URL·파일·텍스트가 없을 때만) — 임시 PNG 경로(이스케이프). tiff+텍스트 리치 드래그는 위 텍스트 우선.
+            return (imagePath, true)
         }
         return nil
     }
 
     /// 클립보드/드래그 pasteboard의 이미지 비트맵(png/tiff)을 임시 PNG 파일로 저장하고 그 경로를 돌려준다(없으면 nil).
     /// 스크린샷(⌃⌘⇧4)·브라우저 이미지 복사처럼 파일이 아니라 **비트맵 데이터**로 온 이미지를 claude/codex가 [Image]로
-    /// 인식하도록 경로 paste(sendPasteText)에 태우기 위함 — iTerm2/Ghostty도 같은 "비트맵→임시파일→경로" 방식(동작
-    /// 비교만, 독립 구현). PNG가 있으면 그대로, 없고 TIFF면 NSBitmapImageRep로 PNG 변환. 임시 디렉터리(maru-paste)에
-    /// UUID 이름으로 저장한다. 저장 실패 시 nil(호출자는 다음 타입으로 폴백).
+    /// 인식하도록 경로 paste(sendPasteText)에 태우기 위함 — iTerm2의 "비트맵→임시파일→경로" 동작을 참고한 maru 독립
+    /// 구현(코드 표현은 옮기지 않음). PNG가 있으면 그대로, 없고 TIFF면 NSBitmapImageRep로 PNG 변환. pasteImageDir에 UUID
+    /// 이름으로 **atomic** 저장(부분 파일 노출 방지). 실패 시 nil(호출자는 다음 타입으로 폴백). 누적 파일은 앱 시작 시
+    /// cleanupPasteImages가 비운다(paste 직후엔 claude 읽기 타이밍을 몰라 못 지움).
     private func clipboardImageTempPath(_ pb: NSPasteboard) -> String? {
         let png: Data?
         if let p = pb.data(forType: .png) {
@@ -1510,15 +1514,26 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             png = nil
         }
         guard let data = png else { return nil }
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("maru-paste", isDirectory: true)
+        let dir = Self.pasteImageDir
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let url = dir.appendingPathComponent("\(UUID().uuidString).png")
-            try data.write(to: url)
+            try data.write(to: url, options: .atomic)
             return url.path
         } catch {
             return nil
         }
+    }
+
+    /// 이미지 paste/drop이 비트맵을 저장하는 임시 PNG 디렉터리(단일 출처 — clipboardImageTempPath·cleanupPasteImages 공유).
+    private static var pasteImageDir: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("maru-paste", isDirectory: true)
+    }
+
+    /// 앱 시작 시 이전 세션이 남긴 임시 paste 이미지를 통째로 비운다. paste 직후엔 claude/codex가 경로를 언제 읽을지
+    /// 몰라 못 지우므로(읽기 전에 사라지면 [Image]가 깨짐) 누적되는데, 다음 실행 시작에서 청소한다. best-effort(실패 무시).
+    private func cleanupPasteImages() {
+        try? FileManager.default.removeItem(at: Self.pasteImageDir)
     }
 
     /// 텍스트를 paste 경로로 PTY에 보낸다 — **bracketed paste**(DECSET 2004) 감싸기·개행 정규화·셸 이스케이프는

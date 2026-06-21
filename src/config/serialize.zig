@@ -164,6 +164,10 @@ pub fn configKeyValues(arena: std.mem.Allocator, config: theme.Config) ![]const 
     try list.append(arena, .{ .key = "sidebar.show-branch", .value = boolToken(config.sidebar.show_branch) });
     try list.append(arena, .{ .key = "sidebar.show-folder", .value = boolToken(config.sidebar.show_folder) });
 
+    // shell.* — command는 그대로, args는 공백으로 join(파서가 다시 토큰 분리). 빈 args면 빈 값("shell.args = ").
+    try list.append(arena, .{ .key = "shell.command", .value = config.shell.command });
+    try list.append(arena, .{ .key = "shell.args", .value = try std.mem.join(arena, " ", config.shell.args) });
+
     // workspace.*
     try list.append(arena, .{ .key = "workspace.root", .value = config.workspace.root });
     try list.append(arena, .{ .key = "workspace.tab-inherit-cwd", .value = boolToken(config.workspace.tab_inherit_cwd) });
@@ -224,6 +228,8 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     cfg.window_padding_left = 4;
     cfg.term = "xterm-256color";
     cfg.env = &.{ "EDITOR=nvim", "MY_VAR=a b c" }; // 내부 공백 보존도 함께 검증
+    cfg.shell.command = "/opt/homebrew/bin/fish";
+    cfg.shell.args = &.{ "-i", "-l" };
     cfg.notifications.agent_complete = false;
     cfg.scrollback.lines = 5000;
     cfg.bell.audible = false;
@@ -280,6 +286,10 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     try std.testing.expectEqual(@as(usize, 2), got.env.len);
     try std.testing.expectEqualStrings("EDITOR=nvim", got.env[0]);
     try std.testing.expectEqualStrings("MY_VAR=a b c", got.env[1]); // env.<KEY> round-trip + 내부 공백 보존
+    try std.testing.expectEqualStrings("/opt/homebrew/bin/fish", got.shell.command);
+    try std.testing.expectEqual(@as(usize, 2), got.shell.args.len);
+    try std.testing.expectEqualStrings("-i", got.shell.args[0]);
+    try std.testing.expectEqualStrings("-l", got.shell.args[1]); // shell.args join↔split round-trip
     try std.testing.expectEqual(false, got.notifications.agent_complete);
     try std.testing.expectEqual(@as(u32, 5000), got.scrollback.lines);
     try std.testing.expectEqual(false, got.bell.audible);

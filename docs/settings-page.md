@@ -85,7 +85,7 @@ config 키 추가 + 기존 경로에 분기 한 줄. GUI 없이 config 파일로
 | **F1-6** | 타이핑 중 커서 숨김 `input.mouse-hide-while-typing` | keyDown `NSCursor.hide()` + idle 타이머 복원 | AppKit only |
 | **F1-7** | 탭 닫기 확인 | 창 닫기 confirm(`request_window_close`)을 탭 close에도 호출 | 모달 토대 이미 있음(창에만 적용 중) |
 | **F1-8** ✅ | env 주입 `env.<KEY>` | `SpawnRequest.env_overrides` + `EnvStorage` upsert(부모 상속 위 덮어쓰기/추가) | ✅ 머지. 부모+사용자 정책, EnvStorage upsert 단위 테스트 |
-| **F1-9** | 커스텀 셸 `shell.command`/`shell.args` | spawn override + login wrapper 하드코딩 `/bin/bash` 제거 | `command/args`는 spawn이 이미 받음 |
+| **F1-9** ✅ | 커스텀 셸 `shell.command`/`shell.args` | `spawnRequest` interactive 분기가 config.shell 사용(login 래퍼는 그대로 — `/bin/bash`는 메커니즘) | ✅ 머지. loader·serialize 단위 테스트. `command/args`는 spawn이 이미 받음 |
 | **F1-10** | 스크롤 `scroll.multiplier`/`scroll.on-output` | `handleScroll` delta 배수, PTY 출력 후 viewport 조정 | delta 경로 존재 |
 
 ## 4. 신규 기능 — 중간 (Phase F2)

@@ -85,6 +85,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
     var unbinds: std.ArrayList(keybinding.KeyChord) = .empty;
     var term_binds: std.ArrayList(keybinding.TerminalBinding) = .empty;
     var global_binds: std.ArrayList(keybinding.GlobalBinding) = .empty;
+    var env_overrides: std.ArrayList([]const u8) = .empty; // env.<KEY> 줄 누적(각 "KEY=VALUE", arena 소유)
 
     var line_no: usize = 0;
     var it = std.mem.splitScalar(u8, source, '\n');
@@ -100,8 +101,10 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
         const key = std.mem.trim(u8, line[0..eq], &std.ascii.whitespace);
         const value = std.mem.trim(u8, line[eq + 1 ..], &std.ascii.whitespace);
 
-        try applyKey(a, &config, &binds, &unbinds, &term_binds, &global_binds, &diags, line_no, key, value);
+        try applyKey(a, &config, &binds, &unbinds, &term_binds, &global_binds, &env_overrides, &diags, line_no, key, value);
     }
+
+    config.env = try env_overrides.toOwnedSlice(a); // 누적한 env.<KEY>를 Config로(arena 소유)
 
     return .{
         .arena = arena,
@@ -121,6 +124,7 @@ fn applyKey(
     unbinds: *std.ArrayList(keybinding.KeyChord),
     term_binds: *std.ArrayList(keybinding.TerminalBinding),
     global_binds: *std.ArrayList(keybinding.GlobalBinding),
+    env_overrides: *std.ArrayList([]const u8),
     diags: *std.ArrayList(Diagnostic),
     line_no: usize,
     key: []const u8,
@@ -128,6 +132,18 @@ fn applyKey(
 ) LoadError!void {
     if (std.mem.eql(u8, key, "keybind")) {
         return applyKeybind(a, binds, unbinds, term_binds, global_binds, diags, line_no, value);
+    }
+    if (std.mem.startsWith(u8, key, "env.")) {
+        // env.<KEY> = value → 환경변수 주입(부모 상속 위에 upsert). KEY는 "env." 뒤 전체(빈 KEY는 무시).
+        // 값은 양끝만 trim(loader 공통) — 내부 공백 보존. 여러 줄 누적, 같은 KEY 중복이면 spawn 시 last-wins.
+        const name = key["env.".len..];
+        if (name.len == 0) {
+            try diags.append(a, .{ .line = line_no, .message = "env.<KEY>의 KEY가 비어 있음 — 무시" });
+            return;
+        }
+        // "KEY=VALUE"로 합쳐 arena에 둔다(EnvStorage가 이 형식을 그대로 upsert). value가 비어도 유효(빈 값).
+        try env_overrides.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, value }));
+        return;
     }
     if (std.mem.eql(u8, key, "font.family")) {
         const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
@@ -792,6 +808,22 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(@as(u32, 6), p.config.window_padding_bottom);
     try std.testing.expectEqual(false, p.config.notifications.agent_complete); // notifications.agent-complete 파싱(기본 true)
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+}
+
+test "parse: env.<KEY>가 누적되고 빈 KEY는 무시, 값 내부 공백 보존" {
+    var p = try parse(std.testing.allocator,
+        \\env.EDITOR = nvim
+        \\env.GREETING = hello world
+        \\env. = ignored
+        \\env.EMPTY =
+    );
+    defer p.deinit();
+    // env. (빈 KEY)는 diagnostic 후 무시 — 나머지 3개만 누적(EDITOR/GREETING/EMPTY).
+    try std.testing.expectEqual(@as(usize, 3), p.config.env.len);
+    try std.testing.expectEqualStrings("EDITOR=nvim", p.config.env[0]);
+    try std.testing.expectEqualStrings("GREETING=hello world", p.config.env[1]); // 내부 공백 보존(양끝만 trim)
+    try std.testing.expectEqualStrings("EMPTY=", p.config.env[2]); // 빈 값도 유효
+    try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len); // env. (빈 KEY) 한 건
 }
 
 test "updateConfigText: in-place 키 교체로 주석·다른 줄 보존, 없는 키는 append, round-trip" {

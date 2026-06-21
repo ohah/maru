@@ -84,7 +84,7 @@ config 키 추가 + 기존 경로에 분기 한 줄. GUI 없이 config 파일로
 | **F1-5** | URL 클릭 modifier `input.url-click-modifier` | `.command` 하드코딩을 config 비교로 | `MaruAppHost.swift` 한 줄 |
 | **F1-6** | 타이핑 중 커서 숨김 `input.mouse-hide-while-typing` | keyDown `NSCursor.hide()` + idle 타이머 복원 | AppKit only |
 | **F1-7** | 탭 닫기 확인 | 창 닫기 confirm(`request_window_close`)을 탭 close에도 호출 | 모달 토대 이미 있음(창에만 적용 중) |
-| **F1-8** | env 주입 `env.<KEY>` | `SpawnRequest.env` 채움 + redaction 기준 | env 필드 이미 존재(`pty/macos.zig`) |
+| **F1-8** ✅ | env 주입 `env.<KEY>` | `SpawnRequest.env_overrides` + `EnvStorage` upsert(부모 상속 위 덮어쓰기/추가) | ✅ 머지. 부모+사용자 정책, EnvStorage upsert 단위 테스트 |
 | **F1-9** | 커스텀 셸 `shell.command`/`shell.args` | spawn override + login wrapper 하드코딩 `/bin/bash` 제거 | `command/args`는 spawn이 이미 받음 |
 | **F1-10** | 스크롤 `scroll.multiplier`/`scroll.on-output` | `handleScroll` delta 배수, PTY 출력 후 viewport 조정 | delta 경로 존재 |
 

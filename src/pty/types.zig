@@ -62,6 +62,10 @@ pub const SpawnRequest = struct {
     // self-insert → Cmd+←/→가 줄 시작/끝으로 안 감).
     login: bool = false,
     env: []const []const u8 = &.{},
+    // 사용자 config `env.<KEY> = value`로 주입할 환경변수(각 "KEY=VALUE"). 부모 상속 env(또는 명시 env)와
+    // maru override(TERM 등) **위에** upsert한다 — 같은 KEY가 있으면 덮어쓰고, 없으면 추가한다("부모 + 사용자"
+    // 정책). env(전체 명시)와 달리 부모 상속을 끊지 않는다. 비어 있으면(기본) 무동작. EnvStorage.init이 적용.
+    env_overrides: []const []const u8 = &.{},
     // env가 빈(부모 상속) 경로에서 셸에 줄 TERM 값. 사용자 config(`term =`)로 바꿀 수 있다 —
     // 일부 셸 설정/통합이 $TERM에 따라 키바인딩을 다르게 잡기 때문이다(예: Ctrl+A 줄-시작).
     // env를 명시로 넘기면(테스트) 이 값은 무시된다.

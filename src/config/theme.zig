@@ -350,6 +350,11 @@ pub const Config = struct {
     /// 사용자가 자기 환경이 기대하는 값(예: `xterm-256color`·`xterm-ghostty`)으로 바꿀 수 있다(빈 값 무시).
     /// 원격(SSH)은 별개다 — 평범한 `ssh`엔 terminfo가 안 따라가니 `maru ssh`를 쓰거나 원격에 설치한다.
     term: []const u8 = "xterm-maru",
+    /// 사용자가 주입할 환경변수(각 "KEY=VALUE"). loader가 `env.<KEY> = value` 여러 줄을 모은다(arena 소유).
+    /// spawn 시 **부모 상속 env + maru override(TERM 등) 위에 upsert**한다 — 같은 KEY면 덮어쓰고 없으면 추가
+    /// ("부모 + 사용자" 정책, Ghostty `env`와 같은 결). 새로 여는 셸에만 적용(reload는 기존 셸 env를 안 바꿈).
+    /// 값 보존이 기본(파일은 사용자 소유) — GUI 표시/trace에서만 redaction(project-rules.md 기준).
+    env: []const []const u8 = &.{},
     /// 데스크톱 알림 설정. loader가 `notifications.*` 키로 파싱.
     notifications: NotificationConfig = .{},
     /// 스크롤백(가시 화면 위로 보관하는 과거 줄) 설정. loader가 `scrollback.*` 키로 파싱.

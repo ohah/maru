@@ -171,7 +171,7 @@ pub const PtySession = struct {
         var argv_storage = try ArgvStorage.init(allocator, eff_command, eff_args);
         defer argv_storage.deinit();
 
-        var env_storage = try EnvStorage.init(allocator, request.env, request.term, request.zdotdir, request.ssh_integration_bin);
+        var env_storage = try EnvStorage.init(allocator, request.env, request.env_overrides, request.term, request.zdotdir, request.ssh_integration_bin);
         defer env_storage.deinit();
 
         var window_size = winsizeFromTerminalSize(request.size);
@@ -714,52 +714,70 @@ const EnvStorage = struct {
         };
     }
 
-    fn init(allocator: std.mem.Allocator, env: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8) !EnvStorage {
-        if (env.len == 0) {
-            // 부모 환경을 물려주되 TERM/COLORTERM은 Maru 값으로 덮어쓴다. 부모 TERM을 그대로 주면
-            // (예: 멀티플렉서 TERM, 또는 Maru 동작과 안 맞는 terminfo) zsh의 SIGWINCH redraw가
-            // wrap 행 수를 잘못 계산해(상대 커서 이동 \e[A 횟수가 어긋남) 프롬프트가 중복된다.
-            // 기본 xterm-256color는 Maru의 xterm식(auto-wrap + deferred wrap) 동작과 맞는다. 단
-            // 사용자 config(`term =`)로 바꿀 수 있다. zdotdir이 있으면 셸 통합용 ZDOTDIR을 주입한다.
-            return initFromParentWithTermOverride(allocator, term, zdotdir, ssh_integration_bin);
-        }
-
-        const strings = try allocator.alloc([:0]u8, env.len);
-        errdefer allocator.free(strings);
-
-        var initialized: usize = 0;
-        errdefer {
-            for (strings[0..initialized]) |owned| allocator.free(owned);
-        }
-
-        for (env, 0..) |entry, index| {
-            strings[index] = try allocator.dupeZ(u8, entry);
-            initialized += 1;
-        }
-
-        const envp = try allocator.allocSentinel(?[*:0]const u8, env.len, null);
-        errdefer allocator.free(envp);
-        for (strings, 0..) |entry, index| envp[index] = entry.ptr;
-
-        return .{
-            .allocator = allocator,
-            .strings = strings,
-            .envp = envp,
-        };
-    }
-
-    // 부모 환경(std.c.environ)을 복사하되 TERM은 인자 값(기본 xterm-256color, 사용자 config로 변경
-    // 가능)으로, COLORTERM은 truecolor로 교체한 owned envp를 만든다. zdotdir이 있으면 ZDOTDIR을
-    // 그 값으로 주입하고(셸 통합), 기존 ZDOTDIR은 MARU_ZDOTDIR_PREV로 보존해 통합 .zshenv가 복원한다.
-    // ssh_integration_bin이 있으면(opt-in) MARU_BIN/MARU_SSH_INTEGRATION을 주입해 통합 .zshenv가 ssh를
-    // maru ssh로 라우팅하게 한다.
-    fn initFromParentWithTermOverride(allocator: std.mem.Allocator, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8) !EnvStorage {
+    fn init(allocator: std.mem.Allocator, env: []const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8) !EnvStorage {
         var entries: std.ArrayList([:0]u8) = .empty;
         errdefer {
             for (entries.items) |owned| allocator.free(owned);
             entries.deinit(allocator);
         }
 
+        if (env.len == 0) {
+            // 부모 환경을 물려주되 TERM/COLORTERM은 Maru 값으로 덮어쓴다(appendParentEnv). 부모 TERM을 그대로 주면
+            // (예: 멀티플렉서 TERM, 또는 Maru 동작과 안 맞는 terminfo) zsh의 SIGWINCH redraw가 wrap 행 수를 잘못
+            // 계산해(상대 커서 이동 \e[A 횟수가 어긋남) 프롬프트가 중복된다. 기본 xterm-256color는 Maru의 xterm식
+            // (auto-wrap + deferred wrap) 동작과 맞는다. 단 사용자 config(`term =`)로 바꿀 수 있다.
+            try appendParentEnv(allocator, &entries, term, zdotdir, ssh_integration_bin);
+        } else {
+            // 명시 env(테스트 등): 부모 상속·maru override 없이 그대로 쓴다(term 인자 무시 — 기존 동작 보존).
+            for (env) |entry| try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, entry));
+        }
+
+        // 사용자 config `env.<KEY>`를 **마지막에** upsert — 부모/명시 env + maru override(TERM 등) 위에 적용한다.
+        // 같은 KEY가 이미 있으면 그 자리에서 덮어쓰고, 없으면 추가("부모 + 사용자" 정책). 비어 있으면 무동작.
+        for (env_overrides) |ov| try upsertEnv(allocator, &entries, ov);
+
+        return materialize(allocator, &entries);
+    }
+
+    /// entries를 owned strings + sentinel envp로 굳혀 EnvStorage를 만든다(부모/명시 두 경로 공용 tail).
+    /// toOwnedSlice가 entries 버퍼 소유권을 strings로 옮기므로(entries는 비워짐), 호출자 errdefer(entries)는
+    /// 이후 빈 리스트를 보고 아무것도 안 푼다(이중 free 없음).
+    fn materialize(allocator: std.mem.Allocator, entries: *std.ArrayList([:0]u8)) !EnvStorage {
+        const strings = try entries.toOwnedSlice(allocator);
+        errdefer {
+            for (strings) |owned| allocator.free(owned);
+            allocator.free(strings);
+        }
+        const envp = try allocator.allocSentinel(?[*:0]const u8, strings.len, null);
+        for (strings, 0..) |entry, i| envp[i] = entry.ptr;
+        return .{ .allocator = allocator, .strings = strings, .envp = envp };
+    }
+
+    /// `env_overrides`의 "KEY=VALUE"를 entries에 upsert한다 — 같은 KEY("KEY=" 접두)가 있으면 그 자리에서 교체
+    /// (덮어쓰기), 없으면 끝에 추가. '='가 없으면 graceful skip(loader가 형식을 보장하지만 안전하게 무시).
+    fn upsertEnv(allocator: std.mem.Allocator, entries: *std.ArrayList([:0]u8), override: []const u8) !void {
+        const eq = std.mem.indexOfScalar(u8, override, '=') orelse return;
+        const key_prefix = override[0 .. eq + 1]; // "KEY=" (= 포함) — 정확한 키 경계 매칭
+        const owned = try allocator.dupeZ(u8, override);
+        for (entries.items, 0..) |entry, i| {
+            if (std.mem.startsWith(u8, entry, key_prefix)) {
+                allocator.free(entry);
+                entries.items[i] = owned;
+                return;
+            }
+        }
+        entries.append(allocator, owned) catch |err| {
+            allocator.free(owned);
+            return err;
+        };
+    }
+
+    // 부모 환경(std.c.environ)을 entries에 복사하되 TERM은 인자 값(기본 xterm-256color, 사용자 config로 변경
+    // 가능)으로, COLORTERM은 truecolor로 교체한다. zdotdir이 있으면 ZDOTDIR을 그 값으로 주입하고(셸 통합),
+    // 기존 ZDOTDIR은 MARU_ZDOTDIR_PREV로 보존해 통합 .zshenv가 복원한다. ssh_integration_bin이 있으면(opt-in)
+    // MARU_BIN/MARU_SSH_INTEGRATION을 주입해 통합 .zshenv가 ssh를 maru ssh로 라우팅하게 한다. entries 소유권·
+    // errdefer는 호출자(init)가 가진다(materialize에서 굳힌다).
+    fn appendParentEnv(allocator: std.mem.Allocator, entries: *std.ArrayList([:0]u8), term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8) !void {
         // 부모의 모든 env entry를 복사한다. 단 TERM/COLORTERM(+통합 시 ZDOTDIR/MARU_ZDOTDIR_PREV)은
         // 건너뛰고 아래에서 우리 값으로 넣는다(중복 키는 첫 항목이 이기므로 부모 것을 빼야 한다).
         var old_zdotdir: ?[]const u8 = null; // environ 슬라이스(프로세스 수명 동안 유효) — 루프 후 사용
@@ -790,16 +808,16 @@ const EnvStorage = struct {
             if (ssh_integration_bin != null and
                 (std.mem.startsWith(u8, slice, "MARU_BIN=") or std.mem.startsWith(u8, slice, "MARU_SSH_INTEGRATION="))) continue;
             // append 인자 안에서 dupe하면 OOM 시 새므로(errdefer는 entries.items만 해제) appendOwnedEnv로 묶는다.
-            try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, slice));
+            try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, slice));
         }
         // 전환 #1: TERM이 xterm-maru면 embed 소스를 캐시에 컴파일하고 TERMINFO를 거기로, 안 되면
         // xterm-256color 폴백(로컬 안 깨짐). 그 외 term은 그대로(사용자 명시값).
         const resolved = resolveTerm(term);
-        try appendOwnedEnv(allocator, &entries, try std.fmt.allocPrintSentinel(allocator, "TERM={s}", .{resolved.term}, 0));
+        try appendOwnedEnv(allocator, entries, try std.fmt.allocPrintSentinel(allocator, "TERM={s}", .{resolved.term}, 0));
         if (resolved.terminfo_dir) |dir| {
-            try appendOwnedEnv(allocator, &entries, try std.fmt.allocPrintSentinel(allocator, "TERMINFO={s}", .{dir}, 0));
+            try appendOwnedEnv(allocator, entries, try std.fmt.allocPrintSentinel(allocator, "TERMINFO={s}", .{dir}, 0));
         }
-        try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, "COLORTERM=truecolor"));
+        try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, "COLORTERM=truecolor"));
         // Claude Code/Codex 등 TUI는 데스크톱 알림을 보낼 터미널을 TERM_PROGRAM 화이트리스트
         // (iTerm.app/ghostty/kitty/WezTerm)로 식별한다 — maru는 그 명단에 없어 기본(auto)에선 OSC 9 알림을
         // 못 받는다(사용자가 settings.json·config.toml 수동 설정 필요; preferredNotifChannel은 env override가
@@ -807,35 +825,20 @@ const EnvStorage = struct {
         // graphics·OSC 9/133/777을 ghostty와 같은 셋으로 지원해 식별 후 기대되는 기능과 어긋나지 않기 때문이다
         // (iTerm.app은 inline-image OSC 1337을 기대해 부적합). maru는 OSC 9를 직접 파싱해(core.zig) 네이티브
         // 알림으로 띄운다. 베이스/결정: 알림 호환을 위한 식별값일 뿐 — 사용자가 config.term으로 TERM은 바꿔도 이 값은 고정.
-        try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, "TERM_PROGRAM=ghostty"));
+        try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, "TERM_PROGRAM=ghostty"));
         if (zdotdir) |zd| {
-            try appendOwnedEnv(allocator, &entries, try std.fmt.allocPrintSentinel(allocator, "ZDOTDIR={s}", .{zd}, 0));
+            try appendOwnedEnv(allocator, entries, try std.fmt.allocPrintSentinel(allocator, "ZDOTDIR={s}", .{zd}, 0));
             if (old_zdotdir) |prev| {
-                try appendOwnedEnv(allocator, &entries, try std.fmt.allocPrintSentinel(allocator, "MARU_ZDOTDIR_PREV={s}", .{prev}, 0));
+                try appendOwnedEnv(allocator, entries, try std.fmt.allocPrintSentinel(allocator, "MARU_ZDOTDIR_PREV={s}", .{prev}, 0));
             }
         }
         // opt-in ssh 라우팅: 통합 .zshenv가 둘 다 보고 ssh()를 정의한다(둘 중 하나라도 없으면 평범한 ssh).
         // MARU_BIN은 현재 maru 실행 파일(같은 바이너리가 `maru ssh`를 처리 — main.zig). 값은 호출자 소유라
         // 여기서 dupe해 envp 수명에 맞춘다.
         if (ssh_integration_bin) |bin| {
-            try appendOwnedEnv(allocator, &entries, try std.fmt.allocPrintSentinel(allocator, "MARU_BIN={s}", .{bin}, 0));
-            try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, "MARU_SSH_INTEGRATION=1"));
+            try appendOwnedEnv(allocator, entries, try std.fmt.allocPrintSentinel(allocator, "MARU_BIN={s}", .{bin}, 0));
+            try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, "MARU_SSH_INTEGRATION=1"));
         }
-
-        const strings = try entries.toOwnedSlice(allocator);
-        errdefer {
-            for (strings) |owned| allocator.free(owned);
-            allocator.free(strings);
-        }
-
-        const envp = try allocator.allocSentinel(?[*:0]const u8, strings.len, null);
-        for (strings, 0..) |entry, i| envp[i] = entry.ptr;
-
-        return .{
-            .allocator = allocator,
-            .strings = strings,
-            .envp = envp,
-        };
     }
 
     // 두 init 경로 모두 owned envp를 만든다(빈 env면 부모 복사 + TERM 덮어쓰기, 명시 env면 그대로).
@@ -1091,7 +1094,7 @@ test "validateRequest rejects requests that cannot produce a reliable PTY" {
 }
 
 test "EnvStorage empty env inherits the parent but forces TERM/COLORTERM to Maru's values" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-256color", null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null);
     defer storage.deinit();
 
     var term_count: usize = 0;
@@ -1131,7 +1134,7 @@ test "EnvStorage forces TERM_PROGRAM to ghostty (알림 식별 — 부모 값 �
     defer _ = unsetenv("TERM_PROGRAM");
     defer _ = unsetenv("TERM_PROGRAM_VERSION");
 
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-256color", null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null);
     defer storage.deinit();
 
     var tp_count: usize = 0;
@@ -1163,7 +1166,7 @@ test "EnvStorage strips launcher color-force overrides (CLICOLOR_FORCE/FORCE_COL
         _ = unsetenv("CLICOLOR_FORCE");
         _ = unsetenv("FORCE_COLOR");
     }
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-256color", null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null);
     defer storage.deinit();
     const envp = storage.envpPtr();
     var i: usize = 0;
@@ -1177,12 +1180,53 @@ test "EnvStorage strips launcher color-force overrides (CLICOLOR_FORCE/FORCE_COL
 
 test "EnvStorage explicit env is passed through verbatim (term arg ignored)" {
     // 명시 env면 term 인자는 무시된다(테스트가 완전한 env를 직접 준다).
-    var storage = try EnvStorage.init(std.testing.allocator, &.{ "FOO=bar", "TERM=dumb" }, "xterm-ghostty", null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{ "FOO=bar", "TERM=dumb" }, &.{}, "xterm-ghostty", null, null);
     defer storage.deinit();
     const envp = storage.envpPtr();
     try std.testing.expectEqualStrings("FOO=bar", std.mem.span(envp[0].?));
     try std.testing.expectEqualStrings("TERM=dumb", std.mem.span(envp[1].?));
     try std.testing.expectEqual(@as(?[*:0]const u8, null), envp[2]);
+}
+
+// env.<KEY> 주입(config) — 부모 상속 위에 upsert. 같은 KEY는 덮어쓰고 없으면 추가("부모 + 사용자" 정책).
+fn envValueCount(storage: *const EnvStorage, key_prefix: []const u8) struct { count: usize, last: ?[]const u8 } {
+    var count: usize = 0;
+    var last: ?[]const u8 = null;
+    const envp = storage.envpPtr();
+    var i: usize = 0;
+    while (envp[i]) |entry| : (i += 1) {
+        const slice = std.mem.span(entry);
+        if (std.mem.startsWith(u8, slice, key_prefix)) {
+            count += 1;
+            last = slice[key_prefix.len..];
+        }
+    }
+    return .{ .count = count, .last = last };
+}
+
+test "EnvStorage env_overrides: 새 KEY는 추가, 기존 KEY(maru TERM)는 덮어쓴다 (부모 상속 위 upsert)" {
+    // 부모 상속 경로(env=&.{}) + 사용자 override. FOO는 새 키라 추가, TERM은 maru가 먼저 넣은 값을 사용자가 덮어쓴다.
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{ "FOO=bar", "TERM=screen-256color" }, "xterm-256color", null, null);
+    defer storage.deinit();
+
+    const foo = envValueCount(&storage, "FOO=");
+    try std.testing.expectEqual(@as(usize, 1), foo.count); // 새 키 한 번
+    try std.testing.expectEqualStrings("bar", foo.last.?);
+
+    const term = envValueCount(&storage, "TERM=");
+    try std.testing.expectEqual(@as(usize, 1), term.count); // 중복 없이 한 번(override가 maru 값을 교체)
+    try std.testing.expectEqualStrings("screen-256color", term.last.?); // 사용자 값이 이김
+}
+
+test "EnvStorage env_overrides: 명시 env 위에도 upsert (KEY 덮어쓰기·추가, 중복 없음)" {
+    var storage = try EnvStorage.init(std.testing.allocator, &.{ "A=1", "B=2" }, &.{ "B=3", "C=4" }, "xterm-ghostty", null, null);
+    defer storage.deinit();
+    try std.testing.expectEqual(@as(usize, 1), envValueCount(&storage, "A=").count);
+    try std.testing.expectEqualStrings("1", envValueCount(&storage, "A=").last.?);
+    const b = envValueCount(&storage, "B=");
+    try std.testing.expectEqual(@as(usize, 1), b.count); // 덮어써 한 번만
+    try std.testing.expectEqualStrings("3", b.last.?);
+    try std.testing.expectEqualStrings("4", envValueCount(&storage, "C=").last.?); // 새 키 추가
 }
 
 test "ArgvStorage uses the command path as argv[0] and appends args" {
@@ -1211,7 +1255,7 @@ test "MacosLogin wraps the shell in login(1) -flp <user> bash exec -l" {
 }
 
 test "EnvStorage empty env uses the supplied TERM (configurable)" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-ghostty", null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-ghostty", null, null);
     defer storage.deinit();
     var found = false;
     const envp = storage.envpPtr();
@@ -1223,7 +1267,7 @@ test "EnvStorage empty env uses the supplied TERM (configurable)" {
 }
 
 test "EnvStorage injects ZDOTDIR for shell integration and preserves the old one" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-256color", "/cache/maru/zsh", null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", "/cache/maru/zsh", null);
     defer storage.deinit();
     var saw_zdotdir = false;
     const envp = storage.envpPtr();
@@ -1238,7 +1282,7 @@ test "EnvStorage injects MARU_BIN + MARU_SSH_INTEGRATION only when ssh routing i
     // opt-in on: 통합 .zshenv가 ssh를 maru ssh로 라우팅하도록 두 키를 모두 주입한다(바이너리 경로 +
     // 게이트 플래그). 둘 중 하나라도 빠지면 .zshenv가 함수를 정의하지 않아 라우팅이 조용히 안 된다.
     {
-        var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-256color", null, "/Applications/Maru.app/Contents/MacOS/maru");
+        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, "/Applications/Maru.app/Contents/MacOS/maru");
         defer storage.deinit();
         var saw_bin = false;
         var saw_flag = false;
@@ -1254,7 +1298,7 @@ test "EnvStorage injects MARU_BIN + MARU_SSH_INTEGRATION only when ssh routing i
     }
     // opt-in off(기본): 두 키 모두 없어야 한다 — 평범한 ssh가 그대로 동작(graceful).
     {
-        var storage = try EnvStorage.init(std.testing.allocator, &.{}, "xterm-256color", null, null);
+        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null);
         defer storage.deinit();
         const envp = storage.envpPtr();
         var i: usize = 0;

@@ -1439,72 +1439,62 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // Cmd+V 붙여넣기. 베이스/결정: Ghostty getOpinionatedStringContents 동작(동작 비교만 — 코드 표현은 옮기지
         // 않은 독립 구현). NSURL이 있으면 **파일 URL은 경로를 셸 이스케이프**(셸이 공백에서 단어를 쪼개지 않게),
         // **그 외(웹) URL은 absoluteString 그대로**(이스케이프하면 붙여넣은 URL이 깨진다), URL 표현이 없으면 평문
-        // 텍스트. 이로써 텍스트·웹 URL·파일 클립보드가 모두 자연스럽게 붙는다. 드래그(handleDrop)는 사용자 제스처라
-        // 웹 URL도 이스케이프하는 별도 정책(pasteboardDropContent)이라 분리한다.
+        // 텍스트. 이스케이프 '메커니즘'은 Zig(app_session.shellEscapeJoin)가 소유한다 — Swift는 pasteboard 타입으로
+        // "이스케이프 대상인지"만 판정해 NUL 구분 토큰(escapeItems: true) 또는 raw(false)로 넘긴다. 드래그
+        // (handleDrop)는 사용자 제스처라 웹 URL도 이스케이프하는 별도 판정(pasteboardDropPayload)이라 분리한다.
         let pb = NSPasteboard.general
         if let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty {
-            var parts: [String] = []
-            for url in urls {
-                parts.append(url.isFileURL ? Self.shellEscape(url.path) : url.absoluteString)
+            if urls.allSatisfy({ $0.isFileURL }) {
+                // 파일 경로(들) — Zig가 각 경로를 셸 이스케이프 후 공백 join(공백 든 경로가 안 쪼개지게).
+                sendPasteText(urls.map { $0.path }.joined(separator: "\u{0}"), escapeItems: true)
+            } else {
+                // 웹 URL 포함 — absoluteString 그대로(이스케이프하면 ?,&,= 등이 깨진다). 파일+웹 혼합은 한
+                // 클립보드에 사실상 안 나오므로(파일 복사=파일들, 링크 복사=웹) 웹 분기로 단순화한다.
+                sendPasteText(urls.map { $0.absoluteString }.joined(separator: " "), escapeItems: false)
             }
-            sendPasteText(parts.joined(separator: " "))
             return
         }
         if let text = pb.string(forType: .string), !text.isEmpty {
-            sendPasteText(text)
+            sendPasteText(text, escapeItems: false)
         }
     }
 
     /// 드롭된 pasteboard 내용(경로/URL/텍스트)을 삽입한다 — 뷰(MaruMetalTerminalView.performDragOperation)가 위임한다.
-    /// 드롭은 사용자 제스처라 URL/파일을 모두 이스케이프하는 pasteboardDropContent로 추출한다(Cmd+V paste는 웹 URL을
-    /// 이스케이프하지 않는 별도 추출 — pastePasteboardText). 전송은 **paste 경로**(sendPasteText)다 — Ghostty도 드래그를
-    /// completeClipboardPaste로 보내 터미널이 DECSET 2004를 켜면(Claude Code 등 TUI) bracketed paste로 감싸지고, 그래야
-    /// 경로가 한-덩어리로 인식돼 [Image]로 첨부된다. 2004를 안 켠 일반 셸에선 raw(개행만 \r)라 escape된 경로가 안전하다. 삽입할 게 있으면 true.
+    /// 드롭은 사용자 제스처라 URL/파일을 모두 이스케이프한다(Cmd+V paste는 웹 URL을 이스케이프하지 않는 별도 판정 —
+    /// pastePasteboardText). 전송은 **paste 경로**(sendPasteText)다 — Ghostty도 드래그를 completeClipboardPaste로
+    /// 보내 터미널이 DECSET 2004를 켜면(Claude Code 등 TUI) bracketed paste로 감싸지고, 그래야 경로가 한-덩어리로
+    /// 인식돼 [Image]로 첨부된다. 2004를 안 켠 일반 셸에선 raw(개행만 \r)라 escape된 경로가 안전하다. 삽입할 게 있으면 true.
     func handleDrop(_ pb: NSPasteboard) -> Bool {
-        guard let content = pasteboardDropContent(pb) else { return false }
-        sendPasteText(content)
+        guard let payload = pasteboardDropPayload(pb) else { return false }
+        sendPasteText(payload.text, escapeItems: payload.escape)
         return true
     }
 
-    /// 드래그/클립보드에서 삽입할 내용을 뽑는다. 우선순위는 Ghostty 드롭과 동일하다(베이스):
-    /// URL > 파일 URL(각 경로를 셸 이스케이프 후 공백으로 join) > 평문(이스케이프 안 함 — 실행할 명령일 수 있음).
-    private func pasteboardDropContent(_ pb: NSPasteboard) -> String? {
+    /// 드래그에서 삽입할 내용 + 셸 이스케이프 여부를 뽑는다. 우선순위는 Ghostty 드롭과 동일하다(베이스):
+    /// URL > 파일 URL(경로들) > 평문(이스케이프 안 함 — 실행할 명령일 수 있음). escape=true면 text는 NUL('\0')
+    /// 구분 토큰이고 Zig가 각 토큰을 셸 이스케이프 후 공백 join한다(이스케이프 메커니즘은 Zig 단일 출처).
+    private func pasteboardDropPayload(_ pb: NSPasteboard) -> (text: String, escape: Bool)? {
         if let url = pb.string(forType: .URL) {
-            return Self.shellEscape(url)
+            return (url, true) // 드래그된 URL — 단일 토큰, 이스케이프
         }
         if let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty {
-            return urls.map { Self.shellEscape($0.path) }.joined(separator: " ")
+            return (urls.map { $0.path }.joined(separator: "\u{0}"), true) // 파일 경로들 — 각 이스케이프 후 공백 join
         }
         if let text = pb.string(forType: .string), !text.isEmpty {
-            return text
+            return (text, false)
         }
         return nil
     }
 
-    /// 셸 버퍼에 경로를 넣을 때 셸이 공백 등에서 단어를 쪼개지 않게 메타문자 앞에 백슬래시를 붙인다(평문 paste·웹
-    /// URL엔 적용 안 함). 대상 집합은 POSIX 셸 메타문자 기준이고, 동작은 Ghostty Shell.escape와 같다(동작 비교만 —
-    /// 코드 표현은 옮기지 않는다). 원본을 한 번만 순회하며 메타문자면 백슬래시를 앞세워 새 문자열을 만든다 — 누적
-    /// 결과를 재스캔하지 않아 중복 이스케이프·문자 순서 의존이 없다.
-    private static let shellEscapeChars: Set<Character> = [
-        "\\", " ", "(", ")", "[", "]", "{", "}", "<", ">", "\"", "'", "`", "!", "#", "$", "&", ";", "|", "*", "?", "\t",
-    ]
-    private static func shellEscape(_ s: String) -> String {
-        var out = ""
-        out.reserveCapacity(s.count)
-        for ch in s {
-            if shellEscapeChars.contains(ch) { out.append("\\") }
-            out.append(ch)
-        }
-        return out
-    }
-
-    /// 텍스트를 paste 경로로 PTY에 보낸다 — **bracketed paste**(DECSET 2004) 감싸기·개행 정규화는 Zig 소유.
-    /// Cmd+V paste와 드래그앤드롭 공용(Ghostty도 드래그를 paste 경로 completeClipboardPaste로 보낸다).
-    private func sendPasteText(_ text: String) {
+    /// 텍스트를 paste 경로로 PTY에 보낸다 — **bracketed paste**(DECSET 2004) 감싸기·개행 정규화·셸 이스케이프는
+    /// 모두 Zig 소유. Cmd+V paste와 드래그앤드롭 공용(Ghostty도 드래그를 paste 경로 completeClipboardPaste로 보낸다).
+    /// escapeItems가 true면 text를 NUL('\0') 구분 토큰으로 보고 Zig가 각 토큰을 셸 이스케이프 후 공백 join한다
+    /// (드래그된 파일 경로·URL). 평문·Cmd+V 웹 URL은 false(raw).
+    private func sendPasteText(_ text: String, escapeItems: Bool) {
         guard let session = appSession, !text.isEmpty else { return }
         let bytes = Array(text.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
-            maru_macos_app_session_paste_text(session, buf.baseAddress, buf.count)
+            maru_macos_app_session_paste_text(session, buf.baseAddress, buf.count, escapeItems ? 1 : 0)
         }
     }
 

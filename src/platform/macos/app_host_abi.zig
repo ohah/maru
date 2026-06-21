@@ -263,16 +263,21 @@ pub export fn maru_macos_app_session_mouse_moved(
     app_session.mouseMoved(x_px, y_px, mods);
 }
 
-// 클립보드 붙여넣기. 개행 정규화(\n->\r)와 bracketed paste(DECSET 2004) 감싸기는 Zig가 한다.
+// 클립보드 붙여넣기(Cmd+V)·드래그앤드롭. 개행 정규화(\n->\r)와 bracketed paste(DECSET 2004) 감싸기는
+// Zig가 한다. escape_each!=0이면 bytes를 NUL('\0') 구분 토큰으로 보고 각 토큰을 셸 이스케이프한 뒤 공백
+// 으로 join한다(드래그된 파일 경로·URL — 셸이 공백 등 메타문자에서 단어를 쪼개지 않게). 평문·Cmd+V 웹
+// URL은 0(raw)으로 보낸다(이스케이프하면 ?,&,= 등이 깨진다). 무엇을 이스케이프할지는 pasteboard 타입에
+// 묶여 Swift host가 정하고, 이스케이프 '메커니즘'은 Zig(app_session.shellEscapeJoin)가 단일 출처다. (v67)
 pub export fn maru_macos_app_session_paste_text(
     session: ?*AppSession,
     bytes: ?[*]const u8,
     len: usize,
+    escape_each: u32,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     if (len == 0) return @intFromEnum(Status.ok);
     const ptr = bytes orelse return @intFromEnum(Status.null_out);
-    app_session.pasteText(ptr[0..len]);
+    app_session.pasteText(ptr[0..len], escape_each != 0);
     return @intFromEnum(Status.ok);
 }
 

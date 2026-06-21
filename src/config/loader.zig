@@ -277,6 +277,11 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "text.ambiguous-width는 narrow|wide — 기본값 유지" });
             return;
         };
+    } else if (std.mem.eql(u8, key, "theme.bold-is-bright")) {
+        config.bold_is_bright = parseBool(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "theme.bold-is-bright는 true|false — 기본값 유지" });
+            return;
+        };
     } else if (std.mem.eql(u8, key, "notifications.agent-complete")) {
         config.notifications.agent_complete = parseBool(value) orelse {
             try diags.append(a, .{ .line = line_no, .message = "notifications.agent-complete는 true|false — 기본값 유지" });
@@ -757,6 +762,7 @@ test "parse: full config sets every field" {
         \\sidebar.show-branch = false
         \\sidebar.show-folder = false
         \\text.blink = true
+        \\theme.bold-is-bright = true
         \\input.shift-enter = native
         \\input.ime-enter = commit-only
         \\window.padding-x = 12
@@ -777,6 +783,7 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(false, p.config.sidebar.show_branch); // sidebar.show-branch 파싱(기본 true)
     try std.testing.expectEqual(false, p.config.sidebar.show_folder); // sidebar.show-folder 파싱(기본 true)
     try std.testing.expectEqual(true, p.config.blink_text); // text.blink 파싱(기본 false)
+    try std.testing.expectEqual(true, p.config.bold_is_bright); // theme.bold-is-bright 파싱(기본 false)
     try std.testing.expectEqual(theme.ShiftEnter.native, p.config.input.shift_enter); // input.shift-enter 파싱(기본 newline)
     try std.testing.expectEqual(theme.ImeEnter.commit_only, p.config.input.ime_enter); // input.ime-enter 파싱(기본 newline)
     try std.testing.expectEqual(@as(u32, 12), p.config.window_padding_left); // window.padding-x alias → left+right

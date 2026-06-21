@@ -79,7 +79,7 @@ config 키 추가 + 기존 경로에 분기 한 줄. GUI 없이 config 파일로
 |---|---|---|---|
 | **F1-1** | 배경 투명도 `window.opacity` | `metalLayer.isOpaque=false` + 셀 배경 alpha 곱 | 셀 배경 이미 `0xAARRGGBB`, 셰이더 alpha 블렌딩 중(`maru_metal_renderer.m`) |
 | **F1-2** | 폴백 폰트 `font.fallback` | `CTFontCopyDefaultCascadeListForLanguages` 명시 | per-cell CTLine이 이미 CoreText cascade 사용, FontIdentityRegistry가 face 분리 |
-| **F1-3** | bold-is-bright `theme.bold-is-bright` | `packForeground`에 indexed `+8` 분기 | palette 16칸 준비됨(`metal_frame.zig`). rgb는 무동작(개념 없음) |
+| **F1-3** ✅ | bold-is-bright `theme.bold-is-bright` | `packForeground`에 `brightenIfBold`(bold+indexed 0~7→+8) | ✅ 머지. render-only, packForeground 순수 단위 테스트 |
 | **F1-4** | 커서 `cursor.color`/`blink-interval-ms`/`unfocused` | theme에 색 추가, `blink_interval_ticks` 상수→ms, resignKey 시 override | 색은 일부 있음, 주기는 상수(`app_session.zig`) |
 | **F1-5** | URL 클릭 modifier `input.url-click-modifier` | `.command` 하드코딩을 config 비교로 | `MaruAppHost.swift` 한 줄 |
 | **F1-6** | 타이핑 중 커서 숨김 `input.mouse-hide-while-typing` | keyDown `NSCursor.hide()` + idle 타이머 복원 | AppKit only |

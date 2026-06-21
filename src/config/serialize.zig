@@ -129,6 +129,7 @@ pub fn configKeyValues(arena: std.mem.Allocator, config: theme.Config) ![]const 
     try list.append(arena, .{ .key = "chrome.theme", .value = chromeThemeToken(config.chrome_theme) });
     try list.append(arena, .{ .key = "text.blink", .value = boolToken(config.blink_text) });
     try list.append(arena, .{ .key = "text.ambiguous-width", .value = ambiguousWidthToken(config.ambiguous_width) });
+    try list.append(arena, .{ .key = "theme.bold-is-bright", .value = boolToken(config.bold_is_bright) });
 
     // input.*
     try list.append(arena, .{ .key = "input.page-keys", .value = pageKeysToken(config.input.page_keys) });
@@ -204,6 +205,7 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     cfg.chrome_theme = .rich;
     cfg.blink_text = true;
     cfg.ambiguous_width = .wide;
+    cfg.bold_is_bright = true;
     cfg.input.page_keys = .passthrough;
     cfg.input.shift_enter = .native;
     cfg.input.ime_enter = .commit_only;
@@ -256,6 +258,7 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     try std.testing.expectEqual(theme.ChromeTheme.rich, got.chrome_theme);
     try std.testing.expectEqual(true, got.blink_text);
     try std.testing.expectEqual(theme.AmbiguousWidth.wide, got.ambiguous_width);
+    try std.testing.expectEqual(true, got.bold_is_bright);
     try std.testing.expectEqual(theme.PageKeys.passthrough, got.input.page_keys);
     try std.testing.expectEqual(theme.ShiftEnter.native, got.input.shift_enter);
     try std.testing.expectEqual(theme.ImeEnter.commit_only, got.input.ime_enter);

@@ -32,6 +32,7 @@ pub const components = struct {
     pub const context_menu = @import("chrome/components/context_menu.zig"); // 우클릭 컨텍스트 메뉴(오버레이 모달)
     pub const toggle = @import("chrome/components/toggle.zig"); // 설정 폼 위젯 — on/off 스위치(CS-4-1, leaf 컴포넌트)
     pub const slider = @import("chrome/components/slider.zig"); // 설정 폼 위젯 — 범위 숫자(f32/u32+range) 슬라이더(CS-4-1b)
+    pub const dropdown = @import("chrome/components/dropdown.zig"); // 설정 폼 위젯 — enum 사이클러(CS-4-1c)
     pub const settings = @import("chrome/components/settings.zig"); // schema-주도 세팅 모달(CS-4-4)
 };
 

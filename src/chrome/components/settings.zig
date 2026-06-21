@@ -16,6 +16,7 @@ const modal_box = @import("modal_box.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭) — 라벨 폭 측정(modal_box와 같은 규약)
 const toggle = @import("toggle.zig");
 const slider = @import("slider.zig");
+const dropdown = @import("dropdown.zig");
 
 /// 최상위 모달 레이어(palette/notice와 동일).
 pub const layer = modal_box.layer;
@@ -29,6 +30,7 @@ pub const FieldRow = struct {
     pub const Kind = union(enum) {
         toggle: bool, // 현재 on/off
         slider: Slider, // 현재 값 + 범위(f32/u32; value/min/max는 f64로 통일)
+        dropdown: []const u8, // enum 현재 변형 표시 토큰(클릭/←→로 순환 — platform이 schema.cycleEnum)
     };
     pub const Slider = struct { value: f64, min: f64, max: f64 };
 
@@ -155,6 +157,7 @@ pub fn view(
                 try toggle.view(&ts, toggleRectIn(ctrl, box.ch), tk, arena, out);
             },
             .slider => |s| try slider.view(ctrl, FieldRow.sliderRatio(s), tk, arena, out),
+            .dropdown => |cur| try dropdown.view(ctrl, cur, tk, arena, out),
         }
     }
 }
@@ -230,6 +233,7 @@ pub fn handlePointer(
                     state.pending_ratio = slider.ratioAt(ctrl, ev.x_px);
                     return .slider_set;
                 },
+                .dropdown => return if (dropdown.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 클릭 → 변형 순환(.toggle=활성)
             }
         }
     }

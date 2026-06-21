@@ -311,6 +311,67 @@ fn setNumberField(ptr: anytype, comptime meta: theme.Meta, comptime full_key: []
     return true;
 }
 
+/// 한 enum 스키마 필드의 GUI dropdown 행 기술자. current는 현재 변형의 표시 토큰(dashed — config 파일 규약).
+/// CS-4-1c는 사이클러(현재값 표시 + 클릭/←→로 변형 순환)라 옵션 목록은 안 싣는다(팝업 목록은 후속).
+pub const EnumField = struct { key: []const u8, doc: []const u8, current: []const u8 };
+
+/// 스키마'd **enum 필드**를 전부 dropdown 행으로 emit한다(appendBoolFields의 enum 짝). current=현재 변형 dashed 토큰.
+pub fn appendEnumFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(EnumField)) !void {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            try appendEnumField(arena, @field(config, sf.name), @field(theme.Config.schema, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), list);
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                try appendEnumField(arena, @field(@field(config, cf.name), sf.name), @field(sch, sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), list);
+            }
+        }
+    }
+}
+
+fn appendEnumField(arena: std.mem.Allocator, value: anytype, comptime meta: theme.Meta, comptime full_key: []const u8, list: *std.ArrayList(EnumField)) !void {
+    const T = @TypeOf(value);
+    if (@typeInfo(T) != .@"enum") return;
+    // current는 정적 @tagName(소유/해제 불요 — 핸들러가 self.allocator로 호출해도 누수 없음). 표시 토큰의 '_'→'-'
+    // 변환(config 규약)은 표시 시점(dropdown.view, frame arena)에 한다 — 여기서 dupe하면 핸들러 경로가 누수된다.
+    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .current = @tagName(value) });
+}
+
+/// 키로 enum 스키마 필드를 한 변형 순환한다(dropdown 사이클러 — dir=+1 다음/-1 이전, wrap). 매칭하는 enum 필드가
+/// 있으면 변형을 바꾸고 true. 변형 순서는 선언 순(ordinal). default 값 enum(0..n-1)을 가정한다(config enum 전부 해당).
+pub fn cycleEnum(config: *theme.Config, key: []const u8, dir: i8) bool {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (cycleEnumField(&@field(config, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), key, dir)) return true;
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (cycleEnumField(&@field(@field(config, cf.name), sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), key, dir)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn cycleEnumField(ptr: anytype, comptime full_key: []const u8, key: []const u8, dir: i8) bool {
+    const T = @TypeOf(ptr.*);
+    if (@typeInfo(T) != .@"enum") return false;
+    if (!std.mem.eql(u8, key, full_key)) return false;
+    const n: i64 = @typeInfo(T).@"enum".fields.len;
+    const cur: i64 = @intFromEnum(ptr.*);
+    const next: i64 = @mod(cur + dir + n, n);
+    ptr.* = @enumFromInt(next);
+    return true;
+}
+
 // ── 파싱 프리미티브(CS-1 한정 중복 — CS-2에서 loader와 단일화 예정) ─────────────────────────────────
 
 fn parseBool(value: []const u8) ?bool {
@@ -550,6 +611,38 @@ test "schema appendNumberFields/setNumber: f32/u32+range 열거·클램프 설�
     // bool 키·非스키마 → false.
     try std.testing.expect(!setNumber(&cfg, "cursor.blink", 1));
     try std.testing.expect(!setNumber(&cfg, "no.such.key", 1));
+}
+
+test "schema appendEnumFields/cycleEnum: enum 열거·순환(dropdown 사이클러)" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var cfg: theme.Config = .{};
+
+    var list: std.ArrayList(EnumField) = .empty;
+    try appendEnumFields(arena.allocator(), cfg, &list);
+    var saw_shape = false;
+    for (list.items) |f| {
+        if (std.mem.eql(u8, f.key, "cursor.shape")) {
+            saw_shape = true;
+            try std.testing.expectEqualStrings("block", f.current); // 기본 cursor.shape=block
+            try std.testing.expect(f.doc.len > 0);
+        }
+    }
+    try std.testing.expect(saw_shape);
+
+    // cycleEnum: block → 다음(bar) → 다음(underline). dashed 토큰 비교는 appendEnumFields로 재확인.
+    try std.testing.expect(cycleEnum(&cfg, "cursor.shape", 1));
+    try std.testing.expect(cfg.cursor.shape != .block);
+    // 이전(-1)으로 되돌리면 block.
+    try std.testing.expect(cycleEnum(&cfg, "cursor.shape", -1));
+    try std.testing.expectEqual(theme.CursorShape.block, cfg.cursor.shape);
+    // wrap: -1이면 마지막 변형.
+    try std.testing.expect(cycleEnum(&cfg, "cursor.shape", -1));
+    try std.testing.expect(cfg.cursor.shape != .block);
+    // bool·非스키마 키 → false.
+    try std.testing.expect(!cycleEnum(&cfg, "cursor.blink", 1));
+    try std.testing.expect(!cycleEnum(&cfg, "no.such.key", 1));
 }
 
 // ── doc-drift 가드(CS-3): 모든 스키마 키가 configuration.md 키 표에 문서화돼 있어야 한다 ──────────────

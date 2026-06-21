@@ -166,6 +166,284 @@ fn serializeValue(arena: std.mem.Allocator, val: anytype) ![]const u8 {
     }
 }
 
+// ── 위젯(세팅 GUI)용 스키마 순회 — bool 필드 열거 + 키로 설정 (CS-4-4) ──────────────────────────────
+// 세팅 화면(config-gui.md §2)이 "메타가 곧 UI": platform이 스키마를 순회해 위젯 행을 만든다. parse/serialize와
+// 같은 comptime 순회(topKey/keyOf 단일 출처)를 재사용해, 새 bool 키를 추가하면 GUI에도 자동으로 뜬다(코드 0줄).
+
+/// 한 bool 스키마 필드의 GUI 행 기술자 — key(전체 키, 정적 리터럴)·doc(라벨, 정적)·현재 value. 문자열은 전부
+/// comptime 리터럴(schema decl·키 유도)이라 별도 수명 관리가 필요 없다(프로그램 수명).
+pub const BoolField = struct { key: []const u8, doc: []const u8, value: bool, section: ?theme.Section = null };
+
+/// 스키마'd **bool 필드**를 전부 GUI 행으로 emit한다(appendSerialized의 bool 한정 변형 — 세팅 폼 행 빌드).
+/// 순서는 parse/serialize와 같은 Config 필드 순회 순. list는 호출자(arena) 소유.
+pub fn appendBoolFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(BoolField)) !void {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (@TypeOf(@field(config, sf.name)) == bool) {
+                const meta: theme.Meta = @field(theme.Config.schema, sf.name);
+                const full_key = comptime topKey(sf.name, meta);
+                try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name), .section = meta.section });
+            }
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (@TypeOf(@field(@field(config, cf.name), sf.name)) == bool) {
+                    const meta: theme.Meta = @field(sch, sf.name);
+                    const full_key = comptime keyOf(cf.name, sf.name, meta);
+                    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
+                }
+            }
+        }
+    }
+}
+
+/// 키로 bool 스키마 필드를 설정한다(세팅 GUI 토글 → config flip). 매칭하는 bool 필드가 있으면 set하고 true,
+/// 없으면(키 오타·非bool·非스키마) false. parse/serialize와 같은 키 순회라 키 규약이 단일 출처.
+pub fn setBool(config: *theme.Config, key: []const u8, value: bool) bool {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (@TypeOf(@field(config, sf.name)) == bool) {
+                const meta: theme.Meta = @field(theme.Config.schema, sf.name);
+                const full_key = comptime topKey(sf.name, meta);
+                if (std.mem.eql(u8, key, full_key)) {
+                    @field(config, sf.name) = value;
+                    return true;
+                }
+            }
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (@TypeOf(@field(@field(config, cf.name), sf.name)) == bool) {
+                    const meta: theme.Meta = @field(sch, sf.name);
+                    const full_key = comptime keyOf(cf.name, sf.name, meta);
+                    if (std.mem.eql(u8, key, full_key)) {
+                        @field(@field(config, cf.name), sf.name) = value;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// 한 숫자(f32/u32 + range) 스키마 필드의 GUI 슬라이더 행 기술자. value/min/max는 f64로 통일(슬라이더 ratio
+/// 계산 공용), is_int면 u32(정수 스텝·표시). key/doc는 comptime 리터럴.
+pub const NumberField = struct { key: []const u8, doc: []const u8, value: f64, min: f64, max: f64, is_int: bool, section: ?theme.Section = null };
+
+/// 스키마'd **숫자 필드(f32/u32, range 필수)**를 전부 슬라이더 행으로 emit한다(appendBoolFields의 숫자 짝). range
+/// 메타가 슬라이더 min/max를 준다(파서 검증과 같은 출처). 순서는 parse/serialize와 같은 Config 필드 순회 순.
+pub fn appendNumberFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(NumberField)) !void {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            try appendNumberField(arena, config, theme.Config, theme.Config.schema, sf, comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), list);
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                try appendNumberFieldSub(arena, config, cf, Container, sch, sf, comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), list);
+            }
+        }
+    }
+}
+
+// 최상위(Config 직속) 숫자 필드 한 개를 append(있으면). comptime 분기를 함수로 빼 inline for 본문을 짧게 유지.
+fn appendNumberField(arena: std.mem.Allocator, config: theme.Config, comptime C: type, comptime sch: anytype, comptime sf: anytype, comptime full_key: []const u8, list: *std.ArrayList(NumberField)) !void {
+    _ = C;
+    const FieldT = @TypeOf(@field(config, sf.name));
+    if (FieldT != f32 and FieldT != u32) return;
+    const meta: theme.Meta = @field(sch, sf.name);
+    const r = comptime (meta.range orelse @compileError(full_key ++ ": 숫자 필드엔 range 필수"));
+    const v: f64 = if (FieldT == u32) @floatFromInt(@field(config, sf.name)) else @field(config, sf.name);
+    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32, .section = meta.section });
+}
+
+// sub-struct 숫자 필드 한 개를 append(있으면).
+fn appendNumberFieldSub(arena: std.mem.Allocator, config: theme.Config, comptime cf: anytype, comptime C: type, comptime sch: anytype, comptime sf: anytype, comptime full_key: []const u8, list: *std.ArrayList(NumberField)) !void {
+    _ = C;
+    const FieldT = @TypeOf(@field(@field(config, cf.name), sf.name));
+    if (FieldT != f32 and FieldT != u32) return;
+    const meta: theme.Meta = @field(sch, sf.name);
+    const r = comptime (meta.range orelse @compileError(full_key ++ ": 숫자 필드엔 range 필수"));
+    const v: f64 = if (FieldT == u32) @floatFromInt(@field(@field(config, cf.name), sf.name)) else @field(@field(config, cf.name), sf.name);
+    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32, .section = meta.section });
+}
+
+/// 키로 숫자(f32/u32) 스키마 필드를 설정한다(세팅 슬라이더 → config). value는 range로 클램프, u32면 반올림 정수화.
+/// 매칭하는 숫자 필드가 있으면 set하고 true. parse/serialize와 같은 키 순회(단일 출처).
+pub fn setNumber(config: *theme.Config, key: []const u8, value: f64) bool {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (setNumberField(&@field(config, sf.name), @field(theme.Config.schema, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), key, value)) return true;
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (setNumberField(&@field(@field(config, cf.name), sf.name), @field(sch, sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), key, value)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+// 한 필드 포인터가 숫자(f32/u32)이고 키가 맞으면 클램프해 설정하고 true. 그 외 false.
+fn setNumberField(ptr: anytype, comptime meta: theme.Meta, comptime full_key: []const u8, key: []const u8, value: f64) bool {
+    const T = @TypeOf(ptr.*);
+    if (T != f32 and T != u32) return false;
+    if (!std.mem.eql(u8, key, full_key)) return false;
+    const r = comptime (meta.range orelse @compileError(full_key ++ ": 숫자 필드엔 range 필수"));
+    const clamped = std.math.clamp(value, r[0], r[1]);
+    ptr.* = if (T == u32) @intFromFloat(@round(clamped)) else @floatCast(clamped);
+    return true;
+}
+
+/// 한 enum 스키마 필드의 GUI dropdown 행 기술자. current는 현재 변형의 표시 토큰(dashed — config 파일 규약).
+/// CS-4-1c는 사이클러(현재값 표시 + 클릭/←→로 변형 순환)라 옵션 목록은 안 싣는다(팝업 목록은 후속).
+pub const EnumField = struct { key: []const u8, doc: []const u8, current: []const u8, section: ?theme.Section = null };
+
+/// 스키마'd **enum 필드**를 전부 dropdown 행으로 emit한다(appendBoolFields의 enum 짝). current=현재 변형 dashed 토큰.
+pub fn appendEnumFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(EnumField)) !void {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            try appendEnumField(arena, @field(config, sf.name), @field(theme.Config.schema, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), list);
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                try appendEnumField(arena, @field(@field(config, cf.name), sf.name), @field(sch, sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), list);
+            }
+        }
+    }
+}
+
+fn appendEnumField(arena: std.mem.Allocator, value: anytype, comptime meta: theme.Meta, comptime full_key: []const u8, list: *std.ArrayList(EnumField)) !void {
+    const T = @TypeOf(value);
+    if (@typeInfo(T) != .@"enum") return;
+    // current는 정적 @tagName(소유/해제 불요 — 핸들러가 self.allocator로 호출해도 누수 없음). 표시 토큰의 '_'→'-'
+    // 변환(config 규약)은 표시 시점(dropdown.view, frame arena)에 한다 — 여기서 dupe하면 핸들러 경로가 누수된다.
+    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .current = @tagName(value), .section = meta.section });
+}
+
+/// 키로 enum 스키마 필드를 한 변형 순환한다(dropdown 사이클러 — dir=+1 다음/-1 이전, wrap). 매칭하는 enum 필드가
+/// 있으면 변형을 바꾸고 true. 변형 순서는 선언 순(ordinal). default 값 enum(0..n-1)을 가정한다(config enum 전부 해당).
+pub fn cycleEnum(config: *theme.Config, key: []const u8, dir: i8) bool {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (cycleEnumField(&@field(config, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), key, dir)) return true;
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (cycleEnumField(&@field(@field(config, cf.name), sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), key, dir)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn cycleEnumField(ptr: anytype, comptime full_key: []const u8, key: []const u8, dir: i8) bool {
+    const T = @TypeOf(ptr.*);
+    if (@typeInfo(T) != .@"enum") return false;
+    if (!std.mem.eql(u8, key, full_key)) return false;
+    const n: i64 = @typeInfo(T).@"enum".fields.len;
+    const cur: i64 = @intFromEnum(ptr.*);
+    const next: i64 = @mod(cur + dir + n, n);
+    ptr.* = @enumFromInt(next);
+    return true;
+}
+
+/// 한 문자열(widget .text 또는 .color, 타입 []const u8) 스키마 필드의 GUI 인라인 편집 행 기술자. text=폰트 패밀리,
+/// color=#RRGGBB(1차는 hex 텍스트 편집). value=현재값(빌림 — config arena 소유). key/doc는 comptime 리터럴.
+pub const TextField = struct { key: []const u8, doc: []const u8, value: []const u8, section: ?theme.Section = null };
+
+/// 스키마'd **문자열 필드(widget .text/.color, 타입 []const u8)**를 전부 인라인 편집 행으로 emit한다(appendBoolFields의
+/// 문자열 짝). 옵셔널(?[]const u8 — sidebar 파생색)은 제외(기본 파생 동작, 편집은 후속). 순서는 Config 필드 순회 순.
+pub fn appendTextFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(TextField)) !void {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (@TypeOf(@field(config, sf.name)) == []const u8) {
+                const meta: theme.Meta = @field(theme.Config.schema, sf.name);
+                if (meta.widget == .text or meta.widget == .color) {
+                    const full_key = comptime topKey(sf.name, meta);
+                    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name), .section = meta.section });
+                }
+            }
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (@TypeOf(@field(@field(config, cf.name), sf.name)) == []const u8) {
+                    const meta: theme.Meta = @field(sch, sf.name);
+                    if (meta.widget == .text or meta.widget == .color) {
+                        const full_key = comptime keyOf(cf.name, sf.name, meta);
+                        try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 키로 문자열([]const u8, widget .text/.color) 스키마 필드를 설정한다(세팅 인라인 편집 → config). value는 **호출자가
+/// config arena에 미리 소유**시킨 슬라이스여야 한다(setText는 슬라이스만 대입 — 라이브 재적용/직렬화가 계속 읽음).
+/// 매칭하는 문자열 필드가 있으면 set하고 true. parse/serialize와 같은 키 순회(단일 출처).
+pub fn setText(config: *theme.Config, key: []const u8, value: []const u8) bool {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (@TypeOf(@field(config, sf.name)) == []const u8) {
+                const meta: theme.Meta = @field(theme.Config.schema, sf.name);
+                if (meta.widget == .text or meta.widget == .color) {
+                    if (std.mem.eql(u8, key, comptime topKey(sf.name, meta))) {
+                        @field(config, sf.name) = value;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (@TypeOf(@field(@field(config, cf.name), sf.name)) == []const u8) {
+                    const meta: theme.Meta = @field(sch, sf.name);
+                    if (meta.widget == .text or meta.widget == .color) {
+                        if (std.mem.eql(u8, key, comptime keyOf(cf.name, sf.name, meta))) {
+                            @field(@field(config, cf.name), sf.name) = value;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
 // ── 파싱 프리미티브(CS-1 한정 중복 — CS-2에서 loader와 단일화 예정) ─────────────────────────────────
 
 fn parseBool(value: []const u8) ?bool {
@@ -337,6 +615,138 @@ test "schema appendSerialized: 스키마'd 필드를 토큰으로(파싱 역대�
 fn find(items: []const KeyValue, key: []const u8) ?[]const u8 {
     for (items) |kv| if (std.mem.eql(u8, kv.key, key)) return kv.value;
     return null;
+}
+
+test "schema appendBoolFields/setBool: bool 필드만 열거하고 키로 설정(세팅 GUI)" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var cfg: theme.Config = .{};
+    cfg.cursor.blink = true;
+
+    var list: std.ArrayList(BoolField) = .empty;
+    try appendBoolFields(arena.allocator(), cfg, &list);
+    // cursor.blink(sub-struct bool)와 text.blink(최상위 bool)가 포함된다(둘 다 스키마'd bool).
+    var saw_cursor_blink = false;
+    var saw_text_blink = false;
+    for (list.items) |f| {
+        if (std.mem.eql(u8, f.key, "cursor.blink")) {
+            saw_cursor_blink = true;
+            try std.testing.expectEqual(true, f.value); // 위에서 true로 설정
+            try std.testing.expect(f.doc.len > 0); // 라벨(doc) 있음
+        }
+        if (std.mem.eql(u8, f.key, "text.blink")) saw_text_blink = true;
+    }
+    try std.testing.expect(saw_cursor_blink and saw_text_blink);
+
+    // setBool: 키로 flip.
+    try std.testing.expect(setBool(&cfg, "cursor.blink", false));
+    try std.testing.expectEqual(false, cfg.cursor.blink);
+    try std.testing.expect(setBool(&cfg, "text.blink", true));
+    try std.testing.expectEqual(true, cfg.blink_text);
+    // 非bool 키(font.size=f32)·非스키마 키 → false(설정 안 함).
+    try std.testing.expect(!setBool(&cfg, "font.size", true));
+    try std.testing.expect(!setBool(&cfg, "no.such.key", true));
+}
+
+test "schema appendNumberFields/setNumber: f32/u32+range 열거·클램프 설정(세팅 슬라이더)" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var cfg: theme.Config = .{};
+
+    var list: std.ArrayList(NumberField) = .empty;
+    try appendNumberFields(arena.allocator(), cfg, &list);
+    var saw_font_size = false; // f32 + range
+    var saw_pad_top = false; // u32 + range(최상위 window.padding-top)
+    for (list.items) |f| {
+        if (std.mem.eql(u8, f.key, "font.size")) {
+            saw_font_size = true;
+            try std.testing.expect(!f.is_int);
+            try std.testing.expectEqual(@as(f64, 14), f.value); // 기본 font.size
+            try std.testing.expect(f.min < f.max);
+        }
+        if (std.mem.eql(u8, f.key, "window.padding-top")) {
+            saw_pad_top = true;
+            try std.testing.expect(f.is_int);
+        }
+    }
+    try std.testing.expect(saw_font_size and saw_pad_top);
+
+    // setNumber: f32 클램프 + u32 반올림 정수화.
+    try std.testing.expect(setNumber(&cfg, "font.size", 22.5));
+    try std.testing.expectEqual(@as(f32, 22.5), cfg.font.size);
+    try std.testing.expect(setNumber(&cfg, "font.size", 99999)); // range 밖 → max 클램프
+    try std.testing.expect(cfg.font.size < 99999);
+    try std.testing.expect(setNumber(&cfg, "window.padding-top", 7.6)); // u32 → 반올림 8
+    try std.testing.expectEqual(@as(u32, 8), cfg.window_padding_top);
+    // bool 키·非스키마 → false.
+    try std.testing.expect(!setNumber(&cfg, "cursor.blink", 1));
+    try std.testing.expect(!setNumber(&cfg, "no.such.key", 1));
+}
+
+test "schema appendEnumFields/cycleEnum: enum 열거·순환(dropdown 사이클러)" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var cfg: theme.Config = .{};
+
+    var list: std.ArrayList(EnumField) = .empty;
+    try appendEnumFields(arena.allocator(), cfg, &list);
+    var saw_shape = false;
+    for (list.items) |f| {
+        if (std.mem.eql(u8, f.key, "cursor.shape")) {
+            saw_shape = true;
+            try std.testing.expectEqualStrings("block", f.current); // 기본 cursor.shape=block
+            try std.testing.expect(f.doc.len > 0);
+        }
+    }
+    try std.testing.expect(saw_shape);
+
+    // cycleEnum: block → 다음(bar) → 다음(underline). dashed 토큰 비교는 appendEnumFields로 재확인.
+    try std.testing.expect(cycleEnum(&cfg, "cursor.shape", 1));
+    try std.testing.expect(cfg.cursor.shape != .block);
+    // 이전(-1)으로 되돌리면 block.
+    try std.testing.expect(cycleEnum(&cfg, "cursor.shape", -1));
+    try std.testing.expectEqual(theme.CursorShape.block, cfg.cursor.shape);
+    // wrap: -1이면 마지막 변형.
+    try std.testing.expect(cycleEnum(&cfg, "cursor.shape", -1));
+    try std.testing.expect(cfg.cursor.shape != .block);
+    // bool·非스키마 키 → false.
+    try std.testing.expect(!cycleEnum(&cfg, "cursor.blink", 1));
+    try std.testing.expect(!cycleEnum(&cfg, "no.such.key", 1));
+}
+
+test "schema appendTextFields/setText: 문자열(widget .text/.color) 열거·설정(인라인 편집)" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var cfg: theme.Config = .{};
+
+    var list: std.ArrayList(TextField) = .empty;
+    try appendTextFields(arena.allocator(), cfg, &list);
+    var saw_family = false;
+    var saw_bg = false;
+    for (list.items) |f| {
+        if (std.mem.eql(u8, f.key, "font.family")) {
+            saw_family = true;
+            try std.testing.expectEqualStrings("JetBrains Mono", f.value); // 기본 family
+        }
+        if (std.mem.eql(u8, f.key, "theme.background")) {
+            saw_bg = true;
+            try std.testing.expectEqualStrings("#101010", f.value); // 기본 배경
+        }
+    }
+    try std.testing.expect(saw_family and saw_bg); // text + color 둘 다 노출
+
+    // setText: family(text)·background(color hex) 설정. value는 호출자 소유(여기선 리터럴).
+    try std.testing.expect(setText(&cfg, "font.family", "Menlo"));
+    try std.testing.expectEqualStrings("Menlo", cfg.font.family);
+    try std.testing.expect(setText(&cfg, "theme.background", "#ff0000"));
+    try std.testing.expectEqualStrings("#ff0000", cfg.theme.background);
+    // 비스키마/비-text 키 → false.
+    try std.testing.expect(!setText(&cfg, "cursor.blink", "x")); // bool 필드
+    try std.testing.expect(!setText(&cfg, "no.such.key", "x"));
 }
 
 // ── doc-drift 가드(CS-3): 모든 스키마 키가 configuration.md 키 표에 문서화돼 있어야 한다 ──────────────

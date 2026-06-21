@@ -42,7 +42,7 @@ dirty region에 박혀 있어 렌더 파이프라인 재설계가 필요하고, 
 |---|---|---|
 | **Appearance › Font** | `font.*` | family, size, line-height, letter-spacing, (신규) family-bold/italic, fallback |
 | **Appearance › Theme** | `theme.*`, `chrome.theme` | preset, 개별 색, palette 16, (신규) search/sidebar 색, bold-is-bright, follow-system |
-| **Appearance › Cursor** | `cursor.*` | shape, blink, (신규) color, blink-interval, unfocused |
+| **Appearance › Cursor** | `cursor.*` | shape, blink, color/text, (신규) blink-interval, unfocused |
 | **Appearance › Window** | `window.*` | padding, (신규) opacity, blur, background-image, unfocused-dim |
 | **Input › Keys** | `input.*` | page-keys, shift-enter, ime-enter, (신규) option-as-meta |
 | **Input › Mouse** | `input.*` | (신규) url-click-modifier, right-click, mouse-hide-while-typing, word-separators, scroll.* |
@@ -85,7 +85,8 @@ config 키 추가 + 기존 경로에 분기 한 줄. GUI 없이 config 파일로
 | **F1-1** | 배경 투명도 `window.opacity` | `metalLayer.isOpaque=false` + 셀 배경 alpha 곱 | 셀 배경 이미 `0xAARRGGBB`, 셰이더 alpha 블렌딩 중(`maru_metal_renderer.m`) |
 | **F1-2** | 폴백 폰트 `font.fallback` | `CTFontCopyDefaultCascadeListForLanguages` 명시 | per-cell CTLine이 이미 CoreText cascade 사용, FontIdentityRegistry가 face 분리 |
 | **F1-3** ✅ | bold-is-bright `theme.bold-is-bright` | `packForeground`에 `brightenIfBold`(bold+indexed 0~7→+8) | ✅ 머지. render-only, packForeground 순수 단위 테스트 |
-| **F1-4** | 커서 `cursor.color`/`blink-interval-ms`/`unfocused` | theme에 색 추가, `blink_interval_ticks` 상수→ms, resignKey 시 override | 색은 일부 있음, 주기는 상수(`app_session.zig`) |
+| **F1-4a** ✅ | 커서 색 `cursor.color`(칸)·`cursor.text`(반전 글자) | 테마 독립 opt-in. nullable이라 loader 수동 핸들러·serialize 수동 emit(palette 선례), `ResolvedCursor`에 색 추가 후 렌더가 `orelse` 테마 폴백 | ✅ 머지. 기존 동작(흰 커서) 보존. resolve/round-trip/parse 단위 테스트 |
+| **F1-4b** | 커서 `cursor.blink-interval-ms`/`unfocused` | `blink_interval_ticks` 상수→ms, resignKey 시 override | 주기는 상수(`app_session.zig`) — 잔여 |
 | **F1-5** | URL 클릭 modifier `input.url-click-modifier` | `.command` 하드코딩을 config 비교로 | `MaruAppHost.swift` 한 줄 |
 | **F1-6** | 타이핑 중 커서 숨김 `input.mouse-hide-while-typing` | keyDown `NSCursor.hide()` + idle 타이머 복원 | AppKit only |
 | **F1-7** | 탭 닫기 확인 | 창 닫기 confirm(`request_window_close`)을 탭 close에도 호출 | 모달 토대 이미 있음(창에만 적용 중) |

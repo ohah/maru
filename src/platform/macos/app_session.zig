@@ -6564,12 +6564,14 @@ pub const AppSession = struct {
                 .current_match_bg = self.appearance.theme.search_match_current,
                 .current_match = find_current_span,
 
-                // 커서는 반전 블록으로 그린다: 칸 배경=theme.cursor, 그 위 glyph=theme.background.
+                // 커서는 반전 블록으로 그린다: 칸 배경=cursor.color(없으면 theme.cursor), 그 위 glyph=
+                // cursor.text(없으면 theme.background). cursor.* override는 테마와 독립적으로 커서만 칠하는
+                // opt-in이라 미설정 시 기존 동작(흰 커서 + 배경색 반전 글자)을 그대로 보존한다.
                 // blink와 무관하게 항상 투영한다 — off 위상 숨김은 metal_buffer가 커서 suffix 노출
                 // 길이로 처리해(setCursorVisible) frame rebuild가 필요 없다.
                 .cursor = .{
-                    .block = self.appearance.theme.cursor,
-                    .text = self.appearance.theme.background,
+                    .block = self.appearance.cursor.color orelse self.appearance.theme.cursor,
+                    .text = self.appearance.cursor.text orelse self.appearance.theme.background,
                 },
             };
             cc_surface.unlockCore(self.io); // cell_colors의 활성 코어 읽기 끝 — 이후 shaping/GPU는 락 밖
@@ -7941,10 +7943,11 @@ pub const AppSession = struct {
         };
         const frame = try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
         // caret이 있으면 cursor 색을 싣는다 — 컴포지터(metal_frame)가 colors.cursor가 있을 때만 반전 블록을 그린다.
-        // block=theme.cursor(caret 색), text=패널 bg(caret 아래 글자가 있으면 가독 — 입력 끝 빈칸이라 보통 무관).
+        // block=cursor.color(없으면 theme.cursor)=caret 색, text=cursor.text(없으면 패널 bg=sidebar_background —
+        // caret 아래 글자가 있으면 가독, 입력 끝 빈칸이라 보통 무관). cursor.* override는 메인 터미널 커서와 같은 색을 쓴다.
         const cursor_colors: ?metal_frame.CursorColors = if (cursor != null) .{
-            .block = self.appearance.theme.cursor,
-            .text = self.appearance.theme.sidebar_background,
+            .block = self.appearance.cursor.color orelse self.appearance.theme.cursor,
+            .text = self.appearance.cursor.text orelse self.appearance.theme.sidebar_background,
         } else null;
         return .{ .frame = frame, .origin_x = origin_x, .origin_y = origin_y, .colors = .{ .default_fg = self.appearance.theme.foreground, .cursor = cursor_colors } };
     }

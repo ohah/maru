@@ -282,6 +282,21 @@ pub export fn maru_macos_app_session_paste_text(
     return @intFromEnum(Status.ok);
 }
 
+// 드래그앤드롭한 파일 경로들(NUL '\0' 구분). maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드
+// 업로드한 뒤 원격 절대경로를 paste하고, 로컬 세션이면 경로를 셸 이스케이프해 paste한다 — 분기는
+// Zig(app_session.handleDroppedFiles). Swift는 fileURL 드롭일 때만 부른다(웹 URL·텍스트는 paste_text). (v68)
+pub export fn maru_macos_app_session_drop_files(
+    session: ?*AppSession,
+    bytes: ?[*]const u8,
+    len: usize,
+) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    if (len == 0) return @intFromEnum(Status.ok);
+    const ptr = bytes orelse return @intFromEnum(Status.null_out);
+    app_session.handleDroppedFiles(ptr[0..len]);
+    return @intFromEnum(Status.ok);
+}
+
 // chrome Notice 모달(손상 알림 등)을 연다. Swift가 워크스페이스 복원 손상(workspace_window_count<0)을 감지하면
 // UTF-8 메시지로 부른다. 세션이 복사 소유하므로 호출 뒤 버퍼는 free해도 된다. len==0이면 무동작. (v40)
 pub export fn maru_macos_app_session_show_notice(

@@ -28,6 +28,7 @@ const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
 const command_catalog = @import("command_catalog.zig");
 const command_palette = @import("command_palette.zig");
+const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh control socket 업로드(3b 실행)
 // find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). UI 상태(query/current/count)는
 // chrome_host.find가, 매치 리스트(terminal.Match)는 session(find_matches)이 소유한다 — chrome은 terminal 무참조.
 
@@ -45,7 +46,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 67; // 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 68; // 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -1230,6 +1231,14 @@ pub const AppSession = struct {
     /// surface가 아니라 이 대상으로 쓴다 — paste/IME 확정 잔여가 다 빠지기 전 탭/pane이 바뀌어도
     /// 바이트가 원래 surface로 가게 한다(과거엔 self.activeSurface()로 써 잔여가 새 탭에 입력되던 버그).
     pending_paste_target: u64 = 0,
+    // 드롭 파일 업로드(maru ssh 원격) 백그라운드 스레드 ↔ 메인 tick 통신. 업로드는 ssh 자식 프로세스라
+    // 느릴 수 있어 별도 스레드에서 하고(UI 안 멈춤), 완료된 원격 절대경로를 mutex 하에 upload_results에
+    // push한다. 메인 tick(drainUploadResults)이 빼서 pasteText로 흘려보낸다 — core 접근은 메인 전용이라
+    // 스레드가 직접 paste 못 한다. upload_inflight는 진행 중 스레드 수로, deinit이 0까지 기다려 detach
+    // 스레드의 self use-after-free를 막는다. 설계: docs/ssh-integration.md §4(3c).
+    upload_mutex: std.Io.Mutex = .init,
+    upload_results: std.ArrayList([]u8) = .empty,
+    upload_inflight: usize = 0,
     // IME 키 트랜잭션 상태(Ghostty의 keyTextAccumulator 패턴과 같은 구조). Swift keyDown이
     // imeBegin으로 열고 입력기 콜백(imeInsert/imeMarked)이 쌓은 것을 imeEnd가 일괄 판정한다 —
     // 콜백마다 즉석 판단하면 입력기의 비동기/다중 호출에서 이중 전송·유실이 생긴다(라이브에서
@@ -5503,6 +5512,128 @@ pub const AppSession = struct {
         self.flushPendingPaste();
     }
 
+    // 드롭 업로드 백그라운드 스레드에 넘기는 작업 묶음(모두 owned — 워커가 해제). io를 안 싣는다:
+    // 파일 읽기는 메인(startUpload)에서 끝내고, 워커는 io 없는 ssh 자식 프로세스 실행만 한다.
+    const UploadJob = struct {
+        session: *AppSession,
+        ctl: []u8,
+        dest: []u8,
+        name: []u8,
+        bytes: []u8,
+    };
+
+    /// 드롭한 파일들(NUL 구분 경로)을 처리한다. maru ssh 원격 세션이면 각 파일을 control socket으로
+    /// 백그라운드 업로드하고(완료 시 원격 경로 paste), 로컬 세션이면 기존처럼 경로를 셸 이스케이프해
+    /// paste한다. Swift 드롭 핸들러(3d ABI)가 fileURL 드롭 시 부른다. 설계: docs/ssh-integration.md §4.
+    pub fn handleDroppedFiles(self: *AppSession, paths_nul: []const u8) void {
+        if (!self.surface_initialized or paths_nul.len == 0) return;
+        // 원격 목적지를 core_mutex 하에 읽어 복사한다(reader 스레드의 ssh_remote_dest free와 경합 방지).
+        const surface = self.activeSurface();
+        surface.lockCore(self.io);
+        const dest: ?[]u8 = if (surface.core.sshRemoteDest()) |d|
+            (self.allocator.dupe(u8, d) catch null)
+        else
+            null;
+        surface.unlockCore(self.io);
+
+        const remote_dest = dest orelse {
+            self.pasteText(paths_nul, true); // 로컬 세션(또는 dupe OOM): 기존 경로 paste
+            return;
+        };
+        defer self.allocator.free(remote_dest);
+
+        // control socket 경로(1·2단계와 같은 규약). 못 구하면 로컬 paste로 폴백.
+        const home = std.c.getenv("HOME") orelse {
+            self.pasteText(paths_nul, true);
+            return;
+        };
+        const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), remote_dest) catch {
+            self.pasteText(paths_nul, true);
+            return;
+        };
+        defer self.allocator.free(ctl);
+
+        var it = std.mem.splitScalar(u8, paths_nul, 0);
+        var started: usize = 0;
+        while (it.next()) |path| {
+            if (path.len == 0) continue;
+            self.startUpload(ctl, remote_dest, path) catch continue; // 읽기/크기/spawn 실패는 그 파일만 스킵
+            started += 1;
+        }
+        // 한 파일도 못 올렸으면 사용자가 빈손이 되지 않게 로컬 경로라도 paste(graceful).
+        if (started == 0) self.pasteText(paths_nul, true);
+    }
+
+    /// 파일을 메인 스레드에서 읽고(io 필요) 크기를 검사한 뒤, 업로드(ssh 자식 프로세스)는 백그라운드
+    /// 스레드에 맡긴다. ctl/dest/name/bytes를 owned로 복사해 job에 실어 넘긴다(워커가 해제).
+    fn startUpload(self: *AppSession, ctl: []const u8, dest: []const u8, path: []const u8) !void {
+        const file = try std.Io.Dir.cwd().openFile(self.io, path, .{});
+        defer file.close(self.io);
+        var rbuf: [64 * 1024]u8 = undefined;
+        var reader = file.reader(self.io, &rbuf);
+        const size = reader.getSize() catch return error.ReadFailed;
+        if (size > maru.cli.ssh.max_upload_bytes) return error.FileTooLarge;
+        const bytes = try reader.interface.allocRemaining(self.allocator, .limited(maru.cli.ssh.max_upload_bytes));
+        errdefer self.allocator.free(bytes);
+
+        const ctl_owned = try self.allocator.dupe(u8, ctl);
+        errdefer self.allocator.free(ctl_owned);
+        const dest_owned = try self.allocator.dupe(u8, dest);
+        errdefer self.allocator.free(dest_owned);
+        const name = try maru.cli.ssh.sanitizeDropFilename(self.allocator, path);
+        errdefer self.allocator.free(name);
+
+        const job = try self.allocator.create(UploadJob);
+        errdefer self.allocator.destroy(job);
+        job.* = .{ .session = self, .ctl = ctl_owned, .dest = dest_owned, .name = name, .bytes = bytes };
+
+        self.upload_mutex.lockUncancelable(self.io);
+        self.upload_inflight += 1;
+        self.upload_mutex.unlock(self.io);
+
+        const thread = std.Thread.spawn(.{}, uploadWorker, .{job}) catch {
+            self.upload_mutex.lockUncancelable(self.io);
+            self.upload_inflight -= 1;
+            self.upload_mutex.unlock(self.io);
+            return error.SpawnFailed; // job/owned는 위 errdefer들이 해제
+        };
+        thread.detach();
+    }
+
+    /// 백그라운드 스레드 엔트리: bytes를 ssh로 업로드하고 결과(원격 경로)를 mutex 하에 큐에 넣는다. job과
+    /// owned 입력을 전부 해제한다(소유권을 넘겨받았다). io를 안 만지므로(ssh_upload는 std.process.Child만)
+    /// 스레드 안전하다.
+    fn uploadWorker(job: *UploadJob) void {
+        const self = job.session;
+        const result: ?[]u8 = ssh_upload.uploadBytes(self.allocator, job.ctl, job.dest, job.name, job.bytes) catch null;
+        self.allocator.free(job.ctl);
+        self.allocator.free(job.dest);
+        self.allocator.free(job.name);
+        self.allocator.free(job.bytes);
+        self.upload_mutex.lockUncancelable(self.io);
+        if (result) |r| {
+            self.upload_results.append(self.allocator, r) catch self.allocator.free(r);
+        }
+        self.upload_inflight -= 1;
+        self.upload_mutex.unlock(self.io);
+        self.allocator.destroy(job);
+    }
+
+    /// 메인 tick: 완료된 업로드의 원격 경로를 paste 큐로 흘려보낸다(core 접근=메인 전용이라 여기서 paste).
+    fn drainUploadResults(self: *AppSession) void {
+        self.upload_mutex.lockUncancelable(self.io);
+        const results = self.upload_results.toOwnedSlice(self.allocator) catch {
+            self.upload_mutex.unlock(self.io);
+            return;
+        };
+        self.upload_mutex.unlock(self.io);
+        defer self.allocator.free(results);
+        for (results) |path| {
+            self.pasteText(path, false); // 원격 절대경로(sanitize되어 공백 없음) raw paste
+            self.allocator.free(path);
+        }
+    }
+
     /// pending_paste가 다 빠진 뒤 새로 쌓기 시작할 때만 대상 surface를 현재 활성으로 다시 고정한다.
     /// 잔여가 남아 있으면 대상을 바꾸지 않아, 이미 어떤 surface로 가던 paste/IME 확정 바이트가 탭/pane
     /// 전환으로 다른 surface에 섞여 들어가지 않는다(원래 대상 우선; flushPendingPaste가 이 대상으로 쓴다).
@@ -6466,6 +6597,7 @@ pub const AppSession = struct {
         // (reader join/child reap)을 건너뛰지 않게 한다.
         self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 30Hz로 한 줄씩 스크롤+확장
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
+        self.drainUploadResults(); // 완료된 드롭 업로드의 원격 경로를 paste 큐로(백그라운드 스레드 → 메인)
         self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         self.syncAutoTitles(); // 라벨용 자동 제목 캐시 갱신(core_mutex 하 owned 복사 — termLabel use-after-free 회피)
         // 모든 탭의 모든 panel의 모든 Term PTY를 drain한다 — 백그라운드 탭/panel/탭(Term)도 출력을 받게
@@ -8422,6 +8554,16 @@ pub const AppSession = struct {
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
         if (self.config_path_buffer) |b| self.allocator.free(b);
         self.pending_paste.deinit(self.allocator);
+        // 진행 중 업로드 스레드 완료 대기(detach 스레드가 self.upload_*를 건드리므로 self 해제 전 0까지).
+        while (true) {
+            self.upload_mutex.lockUncancelable(self.io);
+            const n = self.upload_inflight;
+            self.upload_mutex.unlock(self.io);
+            if (n == 0) break;
+            std.atomic.spinLoopHint(); // 미완 업로드 완료 대기 — 보통 inflight=0이라 즉시 break(드물고 짧다)
+        }
+        for (self.upload_results.items) |p| self.allocator.free(p);
+        self.upload_results.deinit(self.allocator);
         self.ime_inserted.deinit(self.allocator);
 
         self.metal_buffer.deinit(self.allocator);

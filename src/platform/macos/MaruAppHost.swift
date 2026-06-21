@@ -1473,6 +1473,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 보내 터미널이 DECSET 2004를 켜면(Claude Code 등 TUI) bracketed paste로 감싸지고, 그래야 경로가 한-덩어리로
     /// 인식돼 [Image]로 첨부된다. 2004를 안 켠 일반 셸에선 raw(개행만 \r)라 escape된 경로가 안전하다. 삽입할 게 있으면 true.
     func handleDrop(_ pb: NSPasteboard) -> Bool {
+        // 파일 드롭은 Zig에 위임한다 — maru ssh 원격 세션이면 control socket으로 업로드 후 원격 경로를
+        // paste하고, 로컬이면 경로를 셸 이스케이프해 paste한다(분기는 Zig handleDroppedFiles). 웹 URL·평문은
+        // 원격에 올릴 게 아니라 기존 paste 경로 그대로다(이미지 드롭 over SSH 3단계).
+        if let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty,
+           urls.allSatisfy({ $0.isFileURL }) {
+            return sendDropFiles(urls.map { $0.path }.joined(separator: "\u{0}"))
+        }
         guard let payload = pasteboardDropPayload(pb) else { return false }
         sendPasteText(payload.text, escapeItems: payload.escape)
         return true
@@ -1546,6 +1553,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_paste_text(session, buf.baseAddress, buf.count, escapeItems ? 1 : 0)
         }
+    }
+
+    /// 드롭된 파일 경로들(NUL 구분)을 Zig로 보낸다. Zig가 maru ssh 원격 여부로 업로드/로컬 paste를 가른다.
+    private func sendDropFiles(_ pathsNul: String) -> Bool {
+        guard let session = appSession, !pathsNul.isEmpty else { return false }
+        let bytes = Array(pathsNul.utf8)
+        _ = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_session_drop_files(session, buf.baseAddress, buf.count)
+        }
+        return true
     }
 
     private func copySelectionToPasteboard() {

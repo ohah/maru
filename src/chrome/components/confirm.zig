@@ -63,36 +63,35 @@ pub const Action = enum { confirmed, cancelled };
 ///   ←/→ : 두 버튼 사이 포커스 이동(소비, intent 없음 → host가 재렌더). Enter : **포커스된** 버튼 실행
 ///   (confirm/cancelled). Esc : 항상 cancelled(취소 관례). Y/N : 포커스와 무관하게 직접 실행(대소문자 무시 단축키).
 /// 그 외 키는 소비하되 Action 없음(모달이라 뒤(터미널)로 안 흘린다). 닫혀 있으면 null(라우팅 안 가로챔).
-pub fn handle(ev: input.InputEvent, state: *State) ?Action {
+/// host가 `.key`/`.pointer`를 가르므로(CS-4-0) 이 handle은 KeyEvent만 받는다 — 포인터는 host.handlePointer.
+pub fn handle(k: input.InputEvent.KeyEvent, state: *State) ?Action {
     if (!state.open) return null;
-    switch (ev) {
-        .key => |k| switch (k.key) {
-            .left, .right => {
-                // 버튼이 둘뿐이라 좌/우 모두 토글. 포커스만 바꾸고 소비(host가 재렌더, 결정은 아직).
-                state.focused = if (state.focused == .confirm) .cancel else .confirm;
-                return null;
-            },
-            .enter => {
+    switch (k.key) {
+        .left, .right => {
+            // 버튼이 둘뿐이라 좌/우 모두 토글. 포커스만 바꾸고 소비(host가 재렌더, 결정은 아직).
+            state.focused = if (state.focused == .confirm) .cancel else .confirm;
+            return null;
+        },
+        .enter => {
+            state.dismiss();
+            return if (state.focused == .confirm) .confirmed else .cancelled; // 포커스된 버튼 실행
+        },
+        .escape => {
+            state.dismiss();
+            return .cancelled;
+        },
+        .char => switch (k.codepoint) {
+            'y', 'Y' => {
                 state.dismiss();
-                return if (state.focused == .confirm) .confirmed else .cancelled; // 포커스된 버튼 실행
+                return .confirmed;
             },
-            .escape => {
+            'n', 'N' => {
                 state.dismiss();
                 return .cancelled;
             },
-            .char => switch (k.codepoint) {
-                'y', 'Y' => {
-                    state.dismiss();
-                    return .confirmed;
-                },
-                'n', 'N' => {
-                    state.dismiss();
-                    return .cancelled;
-                },
-                else => return null, // 다른 글자는 소비만(모달 — 뒤로 안 샘)
-            },
-            else => return null,
+            else => return null, // 다른 글자는 소비만(모달 — 뒤로 안 샘)
         },
+        else => return null,
     }
 }
 
@@ -231,28 +230,28 @@ test "confirm state: show가 메시지+버튼 라벨을 주입, dismiss로 닫�
 test "confirm handle: Enter/Y=confirmed · Esc/N=cancelled · 닫힘이면 null · 다른 키는 소비" {
     var s = State{};
     // 닫혀 있으면 무동작(라우팅 안 가로챔).
-    try std.testing.expect(handle(.{ .key = .{ .key = .enter } }, &s) == null);
+    try std.testing.expect(handle(.{ .key = .enter }, &s) == null);
 
     s.show("x", .{});
-    try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .{ .key = .enter } }, &s).?);
+    try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .enter }, &s).?);
     try std.testing.expect(!s.open); // confirmed면 닫힘
 
     s.show("x", .{});
-    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .{ .key = .escape } }, &s).?);
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape }, &s).?);
     try std.testing.expect(!s.open); // cancelled면 닫힘
 
     s.show("x", .{});
-    try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .{ .key = .char, .codepoint = 'y' } }, &s).?);
+    try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .char, .codepoint = 'y' }, &s).?);
     s.show("x", .{});
-    try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .{ .key = .char, .codepoint = 'Y' } }, &s).?);
+    try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .char, .codepoint = 'Y' }, &s).?);
     s.show("x", .{});
-    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .{ .key = .char, .codepoint = 'n' } }, &s).?);
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .char, .codepoint = 'n' }, &s).?);
     s.show("x", .{});
-    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .{ .key = .char, .codepoint = 'N' } }, &s).?);
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .char, .codepoint = 'N' }, &s).?);
 
     // 다른 글자는 소비만(intent 없음, 모달이라 뒤로 안 샘) — 여전히 열려 있음.
     s.show("x", .{});
-    try std.testing.expect(handle(.{ .key = .{ .key = .char, .codepoint = 'a' } }, &s) == null);
+    try std.testing.expect(handle(.{ .key = .char, .codepoint = 'a' }, &s) == null);
     try std.testing.expect(s.open);
 }
 
@@ -262,29 +261,29 @@ test "confirm handle: ←/→로 포커스 이동, Enter는 포커스된 버튼 
     try std.testing.expectEqual(Focus.confirm, s.focused);
 
     // → 이동 → cancel 포커스(소비, intent 없음 — 재렌더는 host).
-    try std.testing.expect(handle(.{ .key = .{ .key = .right } }, &s) == null);
+    try std.testing.expect(handle(.{ .key = .right }, &s) == null);
     try std.testing.expectEqual(Focus.cancel, s.focused);
     try std.testing.expect(s.open); // 포커스 이동은 안 닫음
 
     // 이 상태에서 Enter → 포커스된 cancel 실행(닫기 아님!).
-    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .{ .key = .enter } }, &s).?);
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .enter }, &s).?);
     try std.testing.expect(!s.open);
 
     // ← 도 토글(버튼 둘뿐) — confirm→cancel.
     s.show("x", .{});
-    try std.testing.expect(handle(.{ .key = .{ .key = .left } }, &s) == null);
+    try std.testing.expect(handle(.{ .key = .left }, &s) == null);
     try std.testing.expectEqual(Focus.cancel, s.focused);
     // 다시 ← → confirm으로.
-    try std.testing.expect(handle(.{ .key = .{ .key = .left } }, &s) == null);
+    try std.testing.expect(handle(.{ .key = .left }, &s) == null);
     try std.testing.expectEqual(Focus.confirm, s.focused);
     // confirm 포커스에서 Enter → confirmed.
-    try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .{ .key = .enter } }, &s).?);
+    try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .enter }, &s).?);
 
     // Esc는 포커스와 무관하게 항상 취소.
     s.show("x", .{});
-    _ = handle(.{ .key = .{ .key = .right } }, &s); // cancel 포커스로 옮겨도
+    _ = handle(.{ .key = .right }, &s); // cancel 포커스로 옮겨도
     s.focused = .confirm; // 다시 confirm 포커스라도
-    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .{ .key = .escape } }, &s).?);
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape }, &s).?);
 }
 
 test "confirm view: 닫힘이면 ops 0, 열림이면 패널(quad+border)+accent 기본 버튼+메시지·버튼·키 텍스트" {

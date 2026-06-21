@@ -3420,6 +3420,7 @@ pub const AppSession = struct {
                 },
                 else => {}, // up/down/other — 무시(편집기 유지)
             },
+            .pointer => {}, // rename 텍스트 편집기는 포인터를 안 받는다(CS-4-0 — 모달 위젯 포인터는 chrome_host 경로).
         }
     }
 
@@ -3449,6 +3450,7 @@ pub const AppSession = struct {
                 },
                 else => {},
             },
+            .pointer => {}, // 사이드바 검색바는 포인터를 안 받는다(CS-4-0 — 모달 위젯 포인터는 chrome_host 경로).
         }
     }
 

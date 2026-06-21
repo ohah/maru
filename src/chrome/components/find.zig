@@ -71,44 +71,43 @@ pub const Action = enum {
 
 /// 키 처리(열려 있을 때만 호출 — host가 open 확인 후 디스패치). 모든 키를 소비하고 intent를 낸다(모달이라 뒤
 /// 터미널로 안 흘린다). query 변형(input.appendChar)에 allocator가 필요해 notice.handle과 달리 allocator를 받는다.
-pub fn handle(allocator: std.mem.Allocator, ev: input.InputEvent, state: *State) Action {
-    switch (ev) {
-        .key => |k| switch (k.key) {
-            .escape => {
+/// host가 `.key`/`.pointer`를 가르므로(CS-4-0) 이 handle은 KeyEvent만 받는다 — 포인터는 host.handlePointer.
+pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state: *State) Action {
+    switch (k.key) {
+        .escape => {
+            state.hide();
+            return .close;
+        },
+        .enter => {
+            if (k.mods.shift) state.prev() else state.next();
+            return .navigated;
+        },
+        .up => {
+            state.prev();
+            return .navigated;
+        },
+        .down => {
+            state.next();
+            return .navigated;
+        },
+        .backspace => {
+            state.input.backspace();
+            return .query_changed;
+        },
+        .char => {
+            // 모디파이어 조합(⌘F 토글-닫기·⌘C 등)은 검색어에 안 쌓고 닫는다(평문 글자만 입력).
+            if (k.mods.command or k.mods.control or k.mods.option) {
                 state.hide();
                 return .close;
-            },
-            .enter => {
-                if (k.mods.shift) state.prev() else state.next();
-                return .navigated;
-            },
-            .up => {
-                state.prev();
-                return .navigated;
-            },
-            .down => {
-                state.next();
-                return .navigated;
-            },
-            .backspace => {
-                state.input.backspace();
-                return .query_changed;
-            },
-            .char => {
-                // 모디파이어 조합(⌘F 토글-닫기·⌘C 등)은 검색어에 안 쌓고 닫는다(평문 글자만 입력).
-                if (k.mods.command or k.mods.control or k.mods.option) {
-                    state.hide();
-                    return .close;
-                }
-                state.input.appendChar(allocator, k.codepoint) catch {};
-                return .query_changed;
-            },
-            // left/right(가로 화살표)는 Find 입력줄에서 의미 없어 기타 키와 같이 닫는다(기존 동작 보존 — 예전엔
-            // arrow_left/right가 chrome .other로 매핑돼 같은 경로였다).
-            .left, .right, .other => {
-                state.hide();
-                return .close;
-            },
+            }
+            state.input.appendChar(allocator, k.codepoint) catch {};
+            return .query_changed;
+        },
+        // left/right(가로 화살표)는 Find 입력줄에서 의미 없어 기타 키와 같이 닫는다(기존 동작 보존 — 예전엔
+        // arrow_left/right가 chrome .other로 매핑돼 같은 경로였다).
+        .left, .right, .other => {
+            state.hide();
+            return .close;
         },
     }
 }
@@ -216,26 +215,26 @@ test "find handle: Enter/Shift+Enter 네비·글자=query_changed·Esc/⌘조합
     s.setMatchCount(3);
 
     // 평문 글자 → query_changed + 검색어에 쌓임.
-    try std.testing.expectEqual(Action.query_changed, handle(allocator, .{ .key = .{ .key = .char, .codepoint = 'x' } }, &s));
+    try std.testing.expectEqual(Action.query_changed, handle(allocator, .{ .key = .char, .codepoint = 'x' }, &s));
     try std.testing.expectEqualStrings("x", s.input.query.items);
     // Enter → next(navigated).
-    try std.testing.expectEqual(Action.navigated, handle(allocator, .{ .key = .{ .key = .enter } }, &s));
+    try std.testing.expectEqual(Action.navigated, handle(allocator, .{ .key = .enter }, &s));
     try std.testing.expectEqual(@as(usize, 1), s.current);
     // Shift+Enter → prev(navigated).
-    try std.testing.expectEqual(Action.navigated, handle(allocator, .{ .key = .{ .key = .enter, .mods = .{ .shift = true } } }, &s));
+    try std.testing.expectEqual(Action.navigated, handle(allocator, .{ .key = .enter, .mods = .{ .shift = true } }, &s));
     try std.testing.expectEqual(@as(usize, 0), s.current);
     // ↓/↑ → next/prev.
-    try std.testing.expectEqual(Action.navigated, handle(allocator, .{ .key = .{ .key = .down } }, &s));
+    try std.testing.expectEqual(Action.navigated, handle(allocator, .{ .key = .down }, &s));
     try std.testing.expectEqual(@as(usize, 1), s.current);
     // Backspace → query_changed + 글자 삭제.
-    try std.testing.expectEqual(Action.query_changed, handle(allocator, .{ .key = .{ .key = .backspace } }, &s));
+    try std.testing.expectEqual(Action.query_changed, handle(allocator, .{ .key = .backspace }, &s));
     try std.testing.expectEqual(@as(usize, 0), s.input.query.items.len);
     // ⌘+글자 → close(검색어에 안 쌓임).
-    try std.testing.expectEqual(Action.close, handle(allocator, .{ .key = .{ .key = .char, .codepoint = 'c', .mods = .{ .command = true } } }, &s));
+    try std.testing.expectEqual(Action.close, handle(allocator, .{ .key = .char, .codepoint = 'c', .mods = .{ .command = true } }, &s));
     try std.testing.expect(!s.open);
     // Esc → close.
     s.show();
-    try std.testing.expectEqual(Action.close, handle(allocator, .{ .key = .{ .key = .escape } }, &s));
+    try std.testing.expectEqual(Action.close, handle(allocator, .{ .key = .escape }, &s));
     try std.testing.expect(!s.open);
 }
 

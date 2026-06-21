@@ -69,9 +69,10 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
 ## 성능 (큰 파일 안전)
 
 긴 대화는 JSONL이 수백 MB가 될 수 있다. **절대 전체를 안 읽는다**:
-- 상태/완료: 파일 끝에서 **tail**(끝 N KB만 seek해 읽고 마지막 대화/완료 엔트리 파싱). O(1).
+- 상태/완료(codex): 파일 끝에서 **tail**(끝 64KB만 seek). codex는 마지막 엔트리가 `task_complete`(명시적 완료)라 끝부분만으로 충분. O(1).
+- 상태/완료(claude): claude는 마지막 `assistant` 턴 뒤에 대량 비-대화 엔트리(attachment·file-history-snapshot 등)를 append해 마지막 대화 턴이 끝에서 수백 KB까지 밀릴 수 있다(실측 ~800KB). 그래서 끝에서 **256KB부터 지수 확장(→2×→…→8MB 상한)하며 마지막 대화 엔트리를 찾는 `readTailScan`**을 쓴다(`agent_session.zig`). 활성 세션의 흔한 경우는 첫 청크로 끝나고, 멀 때만 확장. 8MB까지 못 찾으면 unknown(사실상 죽은 세션). 파서가 잘린 선두 줄을 skip하므로 청크 경계 처리가 불필요하다.
 - 마지막 답변: 같은 tail 버퍼에서 마지막 assistant/agent_message 추출. O(1).
-- 세션 찾기: 디렉터리 `stat`/엔트리 나열(claude) 또는 최근 rollout 첫 줄 읽기(codex). O(최근 파일 수).
+- 세션 찾기: 디렉터리 `stat`/엔트리 나열(claude=enc(cwd) 디렉터리 최신 `.jsonl`) 또는 최근 rollout 첫 줄 읽기(codex). codex는 날짜 분할(`YYYY/MM/DD`)이라 **최신 날짜 하나만 보면 자정·월말·연말을 넘긴 세션을 놓치므로**, 연(top)·월(top)·day(존재 기준 최대 14개)를 **최신순으로 평탄 순회**하며 cwd 일치 최신 rollout을 찾는다(첫 매칭=전역 최신). O(최근 day·파일 수).
 - 한 *줄*이 거대한 경우(초대형 메시지): tail 상한 내에서 잘라 미리보기(truncate). 폴링은 사이드바 빌드 주기에
   맞춰 ≈0.5~1s, mtime이 안 바뀌면 재파싱 skip.
 
@@ -123,8 +124,9 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
   claude와 `AgentState`/`Status`·tail 규약·헬퍼 공유. fixture 테스트(idle/token_count 무시/진행 신호/메타뿐/잘린
   선두 줄/cwd 추출).
 - **PR3**: platform tail-read + 사이드바 **상태 표시** ✅ **완료** — `src/platform/macos/agent_session.zig`(L4:
-  세션 파일 찾기·디렉터리 나열·끝 64KB seek read; claude=enc(cwd) 디렉터리 최신 .jsonl, codex=최신 날짜
-  디렉터리에서 첫 줄 cwd 일치 최신 rollout; mtime 안 바뀌면 재파싱 skip). `pollAgentKinds`가 활성 Term의
+  세션 파일 찾기·디렉터리 나열·tail read; claude=enc(cwd) 디렉터리 최신 .jsonl을 `readTailScan`(끝 256KB→8MB 지수
+  확장)으로 마지막 대화 턴까지 읽음, codex=연·월·day를 최신순 평탄 순회(자정 넘김 대응)해 첫 줄 cwd 일치 최신
+  rollout을 끝 64KB tail로 읽음; mtime 안 바뀌면 재파싱 skip). `pollAgentKinds`가 활성 Term의
   `agent_state`를 갱신(cwd=OSC7 `currentCwd()`, 세션 코어로 판정). 사이드바 카드 4번째 **상태줄**(running=`● 진행중`,
   idle=`✓ {답변}`) + 아이콘 **펄스**(running일 때 blink 위상으로 밝기 변조, `dimRgb`) + 슬롯 높이 3.8×→**4.6×**
   (`lines:[3]→[4]`). Metal `.m` 디코더는 이미 4줄 지원(`line_count*4`)이라 무변경. temp-dir 통합 테스트(claude/codex

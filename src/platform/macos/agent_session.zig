@@ -30,9 +30,28 @@ pub const Poll = struct {
     mtime: i128,
 };
 
-/// 파일 끝에서 읽는 창 크기. 마지막 대화/turn 엔트리(+ codex session_meta 첫 줄 ~22KB)를 담기 충분하면서도
-/// 거대 파일을 통째로 읽지 않게 작게 유지한다.
+/// codex tail/첫 줄 읽기용 창 크기. codex는 마지막 엔트리가 task_complete(명시적 완료)라 끝부분만으로 충분하다.
+/// claude는 마지막 assistant 턴이 대량 비-대화 엔트리(attachment·file-history-snapshot 등)에 밀릴 수 있어
+/// readTailScan으로 끝에서부터 더 거슬러 읽는다(아래). 거대 파일을 통째로 읽지 않게 둘 다 작게 유지한다.
 const tail_window: usize = 64 * 1024;
+
+/// claude readTailScan의 첫 청크 크기와 상한. 끝에서 tail_chunk부터 지수 확장하며 마지막 대화 엔트리(assistant
+/// stop_reason / non-meta user)를 찾고, tail_cap까지 못 찾으면 unknown(사실상 죽은 세션 — 거대 파일 통째
+/// 읽기 방지 안전판). 실측: 활성 세션도 마지막 assistant가 끝에서 ~800KB까지 밀릴 수 있어 64KB로는 부족했다.
+const tail_chunk: usize = 256 * 1024;
+const tail_cap: usize = 8 * 1024 * 1024;
+
+/// codex 세션 탐색 상한 — 자정/월말/연말을 넘긴 장수명 세션도 찾도록 최근 연(top)·월(top)·day(존재 기준)를
+/// 최신순으로 훑되, 방문 day 디렉터리 수를 제한해 비용을 묶는다(docs/agent-session.md "성능"). 14 = 빈 날을
+/// 안 세므로 보통 수 주를 커버. 매우 오래된 세션은 못 찾으나 그건 사실상 죽은 세션이다.
+const codex_topk_year: usize = 2;
+const codex_topk_month: usize = 2;
+const codex_max_day_dirs: usize = 14;
+
+/// codex 날짜 디렉터리 수집 버퍼 — 한 레벨(연/월/일)의 이름을 모아 최신순 정렬한다. 이름은 YYYY/MM/DD라 짧고(≤8),
+/// 한 레벨 개수도 적다(연 수개·월 12·일 31). cap은 day 31 + 여유.
+const subdir_name_max: usize = 8;
+const subdir_collect_cap: usize = 40;
 
 fn unknownPoll() Poll {
     return .{ .state = .unknown, .answer_len = 0, .mtime = 0 };
@@ -51,15 +70,19 @@ pub fn poll(
     prev_mtime: i128,
     answer_buf: []u8,
 ) Poll {
-    // tail read + codex 첫 줄 읽기용 임시 버퍼(tick 주기마다 alloc/free — 0.5s 간격이라 무시 가능). 거대 파일을
-    // 통째로 안 읽으려고 이 창 크기로 고정한다.
-    const scratch_buf = gpa.alloc(u8, tail_window) catch return unknownPoll();
-    defer gpa.free(scratch_buf);
+    // codex 첫 줄(session_meta ~22KB) + codex tail read용 임시 버퍼(tick 주기마다 alloc/free — 0.5s 간격이라 무시
+    // 가능). claude는 readTailScan이 청크 크기에 맞춰 자체 alloc하므로 codex일 때만 잡는다.
+    var scratch_buf: ?[]u8 = null;
+    defer if (scratch_buf) |s| gpa.free(s);
 
     var path_buf: [4096]u8 = undefined;
     const path = switch (kind) {
         .claude => resolveClaude(io, &path_buf, root_path, cwd),
-        .codex => resolveCodex(io, gpa, &path_buf, scratch_buf, root_path, cwd),
+        .codex => blk: {
+            const sc = gpa.alloc(u8, tail_window) catch return unknownPoll();
+            scratch_buf = sc;
+            break :blk resolveCodex(io, gpa, &path_buf, sc, root_path, cwd);
+        },
     } orelse return unknownPoll();
 
     const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch return unknownPoll();
@@ -67,10 +90,14 @@ pub fn poll(
     // mtime 안 바뀌었으면 tail read·재파싱을 건너뛴다(느린 API 중 잦은 헛 재파싱 회피).
     if (prev_mtime != 0 and mtime == prev_mtime) return .{ .state = null, .answer_len = 0, .mtime = mtime };
 
-    const tail = readTail(io, scratch_buf, path) orelse return .{ .state = .unknown, .answer_len = 0, .mtime = mtime };
     const status = switch (kind) {
-        .claude => transcript.parseClaudeTail(gpa, tail, answer_buf),
-        .codex => transcript.parseCodexTail(gpa, tail, answer_buf),
+        // claude는 마지막 assistant 턴이 대량 메타 엔트리에 밀릴 수 있어 끝에서부터 지수 확장 스캔한다.
+        .claude => readTailScan(io, gpa, path, answer_buf) orelse return .{ .state = .unknown, .answer_len = 0, .mtime = mtime },
+        // codex는 마지막이 task_complete라 끝 tail_window로 충분.
+        .codex => brk: {
+            const tail = readTail(io, scratch_buf.?, path) orelse return .{ .state = .unknown, .answer_len = 0, .mtime = mtime };
+            break :brk transcript.parseCodexTail(gpa, tail, answer_buf);
+        },
     };
     return .{ .state = status.state, .answer_len = status.answer.len, .mtime = mtime };
 }
@@ -107,35 +134,64 @@ fn resolveClaude(io: std.Io, path_buf: []u8, root_path: []const u8, cwd: []const
     return std.fmt.bufPrint(path_buf, "{s}/{s}/{s}", .{ root_path, enc, name }) catch null;
 }
 
-// ── codex: 최신 날짜 디렉터리에서 cwd 일치 최신 rollout ───────────────────────────────
+// ── codex: 최근 날짜 디렉터리들에서 cwd 일치 최신 rollout ──────────────────────────────
 
-/// codex 세션 파일 경로를 `path_buf`에 써서 돌려준다. `<root>/<YYYY>/<MM>/<DD>/`(가장 최신 날짜)의
-/// `rollout-*.jsonl` 중 첫 줄 session_meta.cwd가 `cwd`와 같은 최신 파일. 못 찾으면 null. 날짜 분할이라 cwd로
-/// 디렉터리를 바로 못 찾으므로 최신 날짜 디렉터리만 훑는다 — 자정을 넘긴 장수명 세션은 못 찾을 수 있다(한계).
+/// codex 세션 파일 경로를 `path_buf`에 써서 돌려준다. codex는 `<root>/<YYYY>/<MM>/<DD>/`로 날짜 분할이라 cwd로
+/// 디렉터리를 바로 못 찾는다. 최신 날짜 하나만 보면 자정·월말·연말을 넘긴 세션을 놓치므로, 연(top)·월(top)·day를
+/// **최신순으로 평탄 순회**하며 첫 줄 session_meta.cwd가 일치하는 최신 rollout을 찾는다(최신순이라 첫 매칭=전역
+/// 최신). 방문 day 디렉터리 수는 `codex_max_day_dirs`로 제한해 비용을 묶는다(빈 날은 안 셈). 못 찾으면 null.
 fn resolveCodex(io: std.Io, gpa: std.mem.Allocator, path_buf: []u8, scratch_buf: []u8, root_path: []const u8, cwd: []const u8) ?[]const u8 {
     var root = std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true }) catch return null;
     defer root.close(io);
 
-    var y_buf: [32]u8 = undefined;
-    const year = newestSubdir(io, root, &y_buf) orelse return null;
-    var year_dir = root.openDir(io, year, .{ .iterate = true }) catch return null;
-    defer year_dir.close(io);
+    var years: [subdir_collect_cap][subdir_name_max]u8 = undefined;
+    var year_lens: [subdir_collect_cap]usize = undefined;
+    const n_years = collectSubdirsDesc(io, root, &years, &year_lens);
 
-    var m_buf: [32]u8 = undefined;
-    const month = newestSubdir(io, year_dir, &m_buf) orelse return null;
-    var month_dir = year_dir.openDir(io, month, .{ .iterate = true }) catch return null;
-    defer month_dir.close(io);
+    var days_visited: usize = 0;
+    var yi: usize = 0;
+    while (yi < n_years and yi < codex_topk_year) : (yi += 1) {
+        const year = years[yi][0..year_lens[yi]];
+        var year_dir = root.openDir(io, year, .{ .iterate = true }) catch continue;
+        defer year_dir.close(io);
 
-    var d_buf: [32]u8 = undefined;
-    const day = newestSubdir(io, month_dir, &d_buf) orelse return null;
-    var day_dir = month_dir.openDir(io, day, .{ .iterate = true }) catch return null;
-    defer day_dir.close(io);
+        var months: [subdir_collect_cap][subdir_name_max]u8 = undefined;
+        var month_lens: [subdir_collect_cap]usize = undefined;
+        const n_months = collectSubdirsDesc(io, year_dir, &months, &month_lens);
 
-    // 그 날 디렉터리의 rollout 중 cwd 일치 최신을 단일 패스로 찾는다. 현재 best보다 최신인 후보만 첫 줄 cwd를
-    // 확인하므로(첫 줄 ~22KB read), 보통 최신 1~몇 개만 읽는다.
-    var best_name_buf: [256]u8 = undefined;
-    var best_name: ?[]const u8 = null;
+        var mi: usize = 0;
+        while (mi < n_months and mi < codex_topk_month) : (mi += 1) {
+            const month = months[mi][0..month_lens[mi]];
+            var month_dir = year_dir.openDir(io, month, .{ .iterate = true }) catch continue;
+            defer month_dir.close(io);
+
+            var days: [subdir_collect_cap][subdir_name_max]u8 = undefined;
+            var day_lens: [subdir_collect_cap]usize = undefined;
+            const n_days = collectSubdirsDesc(io, month_dir, &days, &day_lens);
+
+            var di: usize = 0;
+            while (di < n_days) : (di += 1) {
+                if (days_visited >= codex_max_day_dirs) return null; // 상한 — 더 오래된 세션은 사실상 죽은 것.
+                days_visited += 1;
+                const day = days[di][0..day_lens[di]];
+                var day_dir = month_dir.openDir(io, day, .{ .iterate = true }) catch continue;
+                defer day_dir.close(io);
+                var name_buf: [256]u8 = undefined;
+                if (scanDayForCwd(io, gpa, day_dir, scratch_buf, cwd, &name_buf)) |name| {
+                    return std.fmt.bufPrint(path_buf, "{s}/{s}/{s}/{s}/{s}", .{ root_path, year, month, day, name }) catch null;
+                }
+            }
+        }
+    }
+    return null;
+}
+
+/// `day_dir`의 `rollout-*.jsonl` 중 첫 줄 session_meta.cwd가 `cwd`와 같은 mtime 최신 파일 이름을 `out_name`에 복사해
+/// 돌려준다(없으면 null). 현재 best보다 최신인 후보만 첫 줄(~22KB)을 읽어 매칭하므로 보통 최신 1~몇 개만 읽는다.
+fn scanDayForCwd(io: std.Io, gpa: std.mem.Allocator, day_dir: std.Io.Dir, scratch_buf: []u8, cwd: []const u8, out_name: []u8) ?[]const u8 {
+    var best_len: usize = 0;
     var best_mtime: i128 = std.math.minInt(i128);
+    var found = false;
     var it = day_dir.iterate();
     while (it.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
@@ -143,34 +199,50 @@ fn resolveCodex(io: std.Io, gpa: std.mem.Allocator, path_buf: []u8, scratch_buf:
         if (!std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
         const st = day_dir.statFile(io, entry.name, .{}) catch continue;
         const mt: i128 = st.mtime.nanoseconds;
-        if (mt <= best_mtime) continue; // 이미 더 최신 매칭이 있으면 첫 줄 read 생략
+        if (found and mt <= best_mtime) continue; // 이미 더 최신 매칭이 있으면 첫 줄 read 생략
         const first_line = readFirstLine(io, scratch_buf, day_dir, entry.name) orelse continue;
         var cwd_buf: [4096]u8 = undefined;
         const got = transcript.parseCodexCwd(gpa, first_line, &cwd_buf) orelse continue;
         if (!std.mem.eql(u8, got, cwd)) continue;
-        if (entry.name.len > best_name_buf.len) continue;
+        if (entry.name.len > out_name.len) continue;
         best_mtime = mt;
-        @memcpy(best_name_buf[0..entry.name.len], entry.name);
-        best_name = best_name_buf[0..entry.name.len];
+        @memcpy(out_name[0..entry.name.len], entry.name);
+        best_len = entry.name.len;
+        found = true;
     }
-    const name = best_name orelse return null;
-    return std.fmt.bufPrint(path_buf, "{s}/{s}/{s}/{s}/{s}", .{ root_path, year, month, day, name }) catch null;
+    return if (found) out_name[0..best_len] else null;
 }
 
-/// `parent` 안에서 이름이 사전순(=날짜 분할은 zero-pad라 수치순) 최대인 하위 디렉터리 이름을 `out`에 복사해
-/// 돌려준다. 없으면 null. codex `<YYYY>/<MM>/<DD>/`에서 최신 날짜를 고를 때 쓴다.
-fn newestSubdir(io: std.Io, parent: std.Io.Dir, out: []u8) ?[]const u8 {
-    var best: ?[]const u8 = null;
+/// `parent`의 하위 디렉터리 이름들을 사전순(=zero-pad 날짜라 수치순) **내림차순**으로 `names`/`lens`에 채운다.
+/// 반환=개수(최대 subdir_collect_cap). codex 날짜 디렉터리(YYYY/MM/DD)를 최신순으로 훑는 단일 출처 — iterate
+/// 순서는 불정이라 직접 정렬해 최신순을 보장한다. 한 레벨 개수가 적어(연·월·일) 삽입정렬로 충분하다.
+fn collectSubdirsDesc(io: std.Io, parent: std.Io.Dir, names: *[subdir_collect_cap][subdir_name_max]u8, lens: *[subdir_collect_cap]usize) usize {
+    var count: usize = 0;
     var it = parent.iterate();
     while (it.next(io) catch null) |entry| {
         if (entry.kind != .directory) continue;
-        if (entry.name.len > out.len) continue;
-        if (best == null or std.mem.order(u8, entry.name, best.?) == .gt) {
-            @memcpy(out[0..entry.name.len], entry.name);
-            best = out[0..entry.name.len];
-        }
+        if (entry.name.len == 0 or entry.name.len > subdir_name_max) continue;
+        if (count >= subdir_collect_cap) break;
+        @memcpy(names[count][0..entry.name.len], entry.name);
+        lens[count] = entry.name.len;
+        count += 1;
     }
-    return best;
+    // 내림차순 삽입정렬(count는 작아 O(n^2) 무방). 이름 + 길이를 함께 옮긴다.
+    var i: usize = 1;
+    while (i < count) : (i += 1) {
+        var name_tmp: [subdir_name_max]u8 = undefined;
+        const len_tmp = lens[i];
+        @memcpy(name_tmp[0..len_tmp], names[i][0..len_tmp]);
+        var j: usize = i;
+        while (j > 0 and std.mem.order(u8, names[j - 1][0..lens[j - 1]], name_tmp[0..len_tmp]) == .lt) : (j -= 1) {
+            const prev_len = lens[j - 1];
+            @memcpy(names[j][0..prev_len], names[j - 1][0..prev_len]);
+            lens[j] = prev_len;
+        }
+        @memcpy(names[j][0..len_tmp], name_tmp[0..len_tmp]);
+        lens[j] = len_tmp;
+    }
+    return count;
 }
 
 // ── 파일 읽기(끝 tail / 첫 줄) ───────────────────────────────────────────────────────
@@ -187,6 +259,36 @@ fn readTail(io: std.Io, buf: []u8, path: []const u8) ?[]const u8 {
     reader.seekTo(start) catch return null;
     const n = reader.interface.readSliceShort(buf) catch return null;
     return buf[0..n];
+}
+
+/// claude 트랜스크립트의 마지막 대화 엔트리(assistant stop_reason / non-meta user)를 찾아 상태를 판정한다. 끝에서
+/// `tail_chunk`부터 지수 확장(→2×→…→`tail_cap`)하며 매번 "끝 window 바이트"를 통읽어 parseClaudeTail에 넣고,
+/// unknown이 아니면 멈춘다. 파서가 잘린 선두 줄을 skip하므로(parseFromSlice 실패 = skip) 청크 경계가 줄을 잘라도
+/// 안전하다 — 다음 더 큰 window가 그 줄을 온전히 포함한다. 활성 세션의 흔한 경우는 첫 청크로 끝나고, 마지막 턴이
+/// 멀 때만 확장한다. 파일을 못 열면 null(호출자가 unknown 처리). 매 청크 gpa.alloc/free — tick 0.5s 간격이라 무시.
+fn readTailScan(io: std.Io, gpa: std.mem.Allocator, path: []const u8, answer_buf: []u8) ?transcript.Status {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    defer file.close(io);
+
+    var size_rbuf: [512]u8 = undefined;
+    var size_reader = file.reader(io, &size_rbuf);
+    const size: usize = @intCast(size_reader.getSize() catch return null);
+
+    var window: usize = tail_chunk;
+    while (true) {
+        const read_len: usize = @min(window, size);
+        const start: usize = size - read_len;
+        const buf = gpa.alloc(u8, read_len) catch return null;
+        defer gpa.free(buf);
+        var rbuf: [512]u8 = undefined;
+        var reader = file.reader(io, &rbuf);
+        reader.seekTo(@intCast(start)) catch return null;
+        const n = reader.interface.readSliceShort(buf) catch return null;
+        const status = transcript.parseClaudeTail(gpa, buf[0..n], answer_buf);
+        // 마지막 대화 엔트리를 찾았거나(non-unknown), 파일 전체를 봤거나, 상한 도달이면 멈춘다.
+        if (status.state != .unknown or read_len >= size or window >= tail_cap) return status;
+        window = @min(window * 2, tail_cap);
+    }
 }
 
 /// `dir`/`name` 파일의 첫 줄(개행 전까지)을 `buf`로 읽어 돌려준다. 첫 줄이 `buf`보다 길어 개행을 못 찾으면 null
@@ -271,6 +373,71 @@ test "poll codex: 최신 날짜 디렉터리에서 cwd 일치 최신 rollout을 
     const r = poll(io, std.testing.allocator, .codex, root, "/Users/me/ws", 0, &answer);
     try std.testing.expectEqual(State.idle, r.state.?); // 남의 세션이 더 최신이어도 cwd 매칭으로 내 세션 선택
     try std.testing.expectEqualStrings("내 답변 완료", answer[0..r.answer_len]);
+}
+
+test "poll claude: 마지막 assistant가 첫 청크보다 멀어도 readTailScan 확장으로 idle" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "projects/-a-b");
+    // 마지막 assistant(end_turn)를 파일 맨 앞에 두고, 뒤에 첫 청크(tail_chunk=256KB)를 넘는 무시되는 메타 꼬리를
+    // 붙인다 → 끝 256KB엔 assistant가 없어 첫 청크는 unknown, 확장(512KB=전체)에서 assistant를 봐 idle이어야 한다.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    try buf.appendSlice(a,
+        \\{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"스캔 답변"}]}}
+    );
+    try buf.append(a, '\n');
+    const filler = "{\"type\":\"file-history-snapshot\",\"snapshot\":\"" ++ ("x" ** 4096) ++ "\"}\n"; // 무시되는 메타 줄
+    while (buf.items.len < 300 * 1024) try buf.appendSlice(a, filler);
+    try tmp.dir.writeFile(io, .{ .sub_path = "projects/-a-b/s.jsonl", .data = buf.items });
+
+    var root_buf: [4096]u8 = undefined;
+    const root = try tmpSubPath(&root_buf, tmp, "projects");
+    var answer: [192]u8 = undefined;
+    const r = poll(io, a, .claude, root, "/a/b", 0, &answer);
+    try std.testing.expectEqual(State.idle, r.state.?);
+    try std.testing.expectEqualStrings("스캔 답변", answer[0..r.answer_len]);
+}
+
+test "poll claude: 대화 엔트리 없이 메타만이면 unknown(스캔 무한루프 없이 종료)" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "projects/-a-b");
+    try tmp.dir.writeFile(io, .{ .sub_path = "projects/-a-b/s.jsonl", .data =
+        \\{"type":"file-history-snapshot","x":1}
+        \\{"type":"system","x":2}
+    });
+    var root_buf: [4096]u8 = undefined;
+    const root = try tmpSubPath(&root_buf, tmp, "projects");
+    var answer: [192]u8 = undefined;
+    const r = poll(io, std.testing.allocator, .claude, root, "/a/b", 0, &answer);
+    try std.testing.expectEqual(State.unknown, r.state.?);
+}
+
+test "poll codex: 자정 넘긴 과거 날짜 세션을 다중 day 스캔으로 찾는다" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // 더 최신 날짜(06/20)엔 타 cwd 세션만, 내 세션은 과거(06/13)에 — 단일-최신 로직이면 06/20만 보고 못 찾는다.
+    try tmp.dir.createDirPath(io, "sessions/2026/06/20");
+    try tmp.dir.createDirPath(io, "sessions/2026/06/13");
+    try tmp.dir.writeFile(io, .{ .sub_path = "sessions/2026/06/20/rollout-other.jsonl", .data =
+        \\{"type":"session_meta","payload":{"id":"o","cwd":"/other"}}
+        \\{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"남의 답변"}}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "sessions/2026/06/13/rollout-mine.jsonl", .data =
+        \\{"type":"session_meta","payload":{"id":"m","cwd":"/Users/me/ws"}}
+        \\{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"과거날 답변"}}
+    });
+    var root_buf: [4096]u8 = undefined;
+    const root = try tmpSubPath(&root_buf, tmp, "sessions");
+    var answer: [192]u8 = undefined;
+    const r = poll(io, std.testing.allocator, .codex, root, "/Users/me/ws", 0, &answer);
+    try std.testing.expectEqual(State.idle, r.state.?);
+    try std.testing.expectEqualStrings("과거날 답변", answer[0..r.answer_len]);
 }
 
 // 테스트 helper: tmpDir 하위 경로를 cwd 기준 상대 경로 문자열로(`.zig-cache/tmp/<sub>/<rel>`).

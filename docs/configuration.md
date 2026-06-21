@@ -445,7 +445,8 @@ keybind = F4 = esc:[2J
   (N=절대 pt, 6~72로 클램프 — 예: `Ctrl+Cmd+1 = set_font_size:14`로 크기 프리셋), 그리고 `select_all`·
   `clear_screen`(화면+스크롤백 비우기, 빌트인 ⌘K — alt 화면 무동작, 셸 프롬프트면 ^L로 재그림. 자세히는
   [키 입력과 단축키](key-input-and-shortcuts.md))·`toggle_find`·`find_next`·
-  `find_previous`·`toggle_command_palette`.
+  `find_previous`·`toggle_command_palette`·`toggle_settings`(세팅 화면 ⌘,)·`reset_settings`
+  (모든 설정을 기본값으로 되돌리는 통합 리셋 — 커맨드 팝업 "Reset All Settings to Defaults").
 - **`unbind`**: action 자리에 `unbind`를 적으면 그 조합의 **빌트인 기본 동작을 끈다**(예:
   `keybind = Cmd+T = unbind` → Cmd+T가 새 Term을 안 연다). 끈 조합은 빌트인 테이블을 건너뛰어
   `Cmd`+키는 아무 동작도 안 하고, 그 외 조합은 셸로 입력이 전달된다. 다른 action을 지정하면(덮어쓰기)

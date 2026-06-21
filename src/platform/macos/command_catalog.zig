@@ -71,6 +71,8 @@ pub const entries = [_]Entry{
     .{ .action = .{ .select_tab = 8 }, .key = "select_tab:8", .title = "Select Workspace 9" },
     // maru CLI를 PATH에 설치(VS Code "Install 'code' command" 결). 기본 키바인딩 없음 — 팝업이 발견 경로.
     .{ .action = .install_cli, .key = "install_cli", .title = "Install CLI" },
+    // 모든 설정을 내장 기본값으로 초기화(통합 리셋). 기본 키바인딩 없음 — 팝업이 발견 경로.
+    .{ .action = .reset_settings, .key = "reset_settings", .title = "Reset All Settings to Defaults" },
 };
 
 /// chord 표시 문자열의 최대 바이트(modifiers 4개 × 3바이트 + 키 심볼 + 여유). 32면 충분하다.

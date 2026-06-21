@@ -119,6 +119,19 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 - **미구현(후속)**: 프리셋 **팝업 그리드**(현재는 사이클러), 옵셔널 색(`?[]const u8` sidebar 파생색), IME 조합 편집, 값 길이에 따른 박스 폭 확장, color 스와치의 rich(둥근 quad) 렌더(현재 셀 bg).
 
+### 6.3 테마 프리셋(named 테마) — 특수 행
+
+테마 섹션 dropdown **"테마 프리셋"** — `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte` 8종을 클릭/←→로 순환·적용한다. `theme.preset`은 **schema 필드가 아니라 특수 지시어**(loader가 색 세트를 통째로 까는 명령, 저장 필드 없음)라 자동 노출되지 않으므로:
+
+- **표시값은 색에서 derive**: `detectThemePreset`이 config.theme의 주 색 4개(bg/fg/cursor/selection)를 8종 `presetColors`와 매칭 → 일치하면 그 이름, 없으면 "사용자 지정". 저장 안 해도 현재 프리셋을 안다.
+- **주입**: platform이 theme 섹션 `currentSectionFields.enums`에 **synthetic `EnumField`**(`key="theme.preset"`)를 더한다 → 기존 dropdown/enum 경로 재사용(새 Kind·index 수술 없음).
+- **적용**: 핸들러가 `key=="theme.preset"`만 특수 처리 → `applyThemePreset`이 `config.theme = presetColors(next)`(정적 리터럴) + 라이브 재resolve + 주 색 4개 write-back.
+- **한계(후속)**: ANSI 팔레트/search 색은 라이브만(reload 시 기본 — `theme.preset` 키 자체의 영속은 special write-back 필요), 팝업 그리드.
+
+### 6.4 통합 리셋(Reset All Settings to Defaults)
+
+커맨드 팝업(Cmd+Shift+P) **"Reset All Settings to Defaults"**(action `reset_settings`) — 모든 config를 **내장 기본값**으로 되돌린다. 메뉴 "Reset to Defaults"(런타임 줌/여백만 → init 설정)와 달리 config 전체다. `resetAllSettings`이 `loaded_config.config = Config{}`(정적 기본값, 새 arena 불요)로 갈고 `reloadConfig`와 같은 재적용(appearance·behavior·scrollback·palette·ambiguous·사이드바)을 한 뒤, `appendSerialized`로 **모든 schema 키를 기본값으로 write-back 예약**한다(파일 주석·키바인딩은 보존, 설정 값만 기본). 키는 정적 리터럴이라 소유/해제 불요. (확인 모달은 후속 — 현재는 팝업 제목이 명시적이라 바로 적용.)
+
 ## 7. 의존성
 
 - **S0-1b** ✅(머지) — `serialize.updateForKeys(original, config, keys)`로 **변경 키만** write-back(즉시-저장 결정에

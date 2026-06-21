@@ -1463,7 +1463,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 비트맵 이미지(스크린샷·복사, 파일 아님) — URL·text가 없을 때만(리치 콘텐츠는 텍스트 우선해 의도치
             // 않은 이미지 삽입 방지). 원격 maru ssh면 PNG 바이트를 control socket으로 업로드하고(Zig가 판정,
             // true면 끝), 로컬이면 임시 PNG로 저장해 경로를 붙인다(escapeItems=true → bracketed paste로
-            // claude/codex가 [Image] 인식). 둘 다 같은 PNG로 정규화해 넘기므로 원격 저장 파일(pasted-N.png)도
+            // claude/codex가 [Image] 인식). 둘 다 같은 PNG로 정규화해 넘기므로 원격 저장 파일(pasted-<pid>-N.png)도
             // 확장자/내용이 일치한다(스크린샷은 흔히 TIFF로만 와서, raw로 .png 저장하면 디코드가 깨진다).
             if sendDropImage(pngData) { return }
             if let imagePath = saveTempPng(pngData) {
@@ -1512,7 +1512,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// 클립보드/드래그 pasteboard의 이미지 비트맵을 **PNG 데이터로 정규화**해 돌려준다(없으면 nil). PNG가 있으면
     /// 그대로, 없고 TIFF면 NSBitmapImageRep로 PNG 변환 — 원격 업로드(sendDropImage)와 로컬 임시저장(saveTempPng)이
-    /// 같은 PNG 바이트를 쓰게 해, 원격 저장 파일명(pasted-N.png)의 확장자/내용이 일치하도록 한다(스크린샷 ⌃⌘⇧4은
+    /// 같은 PNG 바이트를 쓰게 해, 원격 저장 파일명(pasted-<pid>-N.png)의 확장자/내용이 일치하도록 한다(스크린샷 ⌃⌘⇧4은
     /// 흔히 TIFF로만 온다). 스크린샷·브라우저 이미지 복사처럼 파일이 아니라 비트맵으로 온 이미지를 claude/codex가
     /// [Image]로 인식하게 하는 토대 — iTerm2의 "비트맵→임시파일→경로" 동작 참고(코드 표현은 옮기지 않은 독립 구현).
     private func clipboardImagePng(_ pb: NSPasteboard) -> Data? {

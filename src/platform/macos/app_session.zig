@@ -970,6 +970,10 @@ pub const AppSession = struct {
     // 하이라이트(현재 매치만)와 출력 시 재검색을 유지한다(findNavigate가 켠다). 오버레이 열기(toggleFind)나
     // 터미널 타이핑(.terminal_input)이 끄면 하이라이트가 사라진다(검색 종료 신호).
     find_nav: bool = false,
+    // Find 재검색 직전의 alt 화면 여부 — primary<->alt 전환을 감지한다. 전환 시 매치 좌표 도메인이 통째로
+    // 바뀌어(스크롤백<->alt 버퍼) 이전 current 인덱스가 엉뚱한 매치를 가리키므로(setMatchCount는 clamp만),
+    // render-tick 재검색이 이 값과 비교해 다르면 current를 첫 매치로 리셋한다.
+    find_was_alt: bool = false,
     // chrome 호스트(플랫폼 중립 L3 — src/chrome). 현재 C0/Notice 모달만 소유한다(손상 알림 등). 열려 있으면
     // handleKeyEvent가 키를 chrome으로 라우팅하고, tick이 buildNoticeFrame을 최상위 오버레이로 그린다. tokens·
     // props는 매 frame AppSession이 빌드해 넘긴다(chrome은 config/terminal을 모름). 단일 출처: docs/chrome-strategy.md.
@@ -3311,19 +3315,6 @@ pub const AppSession = struct {
         } };
     }
 
-    /// maru 스크롤백 Find를 지금 끌지 — **단일 정책 출처**(toggleFind/findNavigate/tick-close가 공유). alt screen
-    /// (vim/less/htop)에선 그 화면을 앱이 소유하고 스크롤백 뷰포트가 잠겨(scrollToAbs 무동작) 매치로 갈 수 없으니
-    /// 앱 자체 검색(`/`)에 맡긴다(iTerm2 관례). surface 미초기화(narrow 테스트)면 false(activeSurfaceConst 보호).
-    fn findSuppressed(self: *AppSession) bool {
-        if (!self.surface_initialized) return false; // narrow 테스트(surface 미초기화) 보호
-        // alt_active는 리더 core.write가 락 아래 토글하므로 같은 락으로 읽는다(docs/io-render-threading.md PR3).
-        // 호출처(toggleFind/findNavigate/render-tick close)는 모두 락 밖이라 더블락 없음.
-        const s = self.activeSurface();
-        s.lockCore(self.io);
-        defer s.unlockCore(self.io);
-        return s.core.alt_active;
-    }
-
     /// 스크롤백 Find를 토글한다 — 열려 있으면 닫고(매치 하이라이트 정리), 아니면 연다(빈 검색어). 팝업과 배타적
     /// 이라 팝업을 닫고 연다. UI 상태는 chrome_host.find, 검색은 검색어가 생길 때 recomputeFind가 한다.
     fn toggleFind(self: *AppSession) void {
@@ -3332,7 +3323,9 @@ pub const AppSession = struct {
             self.find_matches.clearRetainingCapacity(); // 닫힘 — 하이라이트 중단
             self.find_nav = false; // ⌘G 닫힘-네비 세션도 종료
         } else {
-            if (self.findSuppressed()) return; // alt screen이면 ⌘F가 오버레이를 안 연다(앱 자체 검색에 맡김)
+            // alt screen(vim/less/Claude/Codex)에서도 연다 — alt에선 findMatches가 현재 화면만 검색해 매치를
+            // 하이라이트한다(스크롤백 매치 제외, 스크롤 네비는 무의미·무동작). 과거엔 iTerm2 관례로 막았으나,
+            // 자체 검색이 없는 TUI(Claude/Codex)를 위해 연다. 베이스: Ghostty(alt에서 active area 검색).
             self.chrome_host.notice.dismiss(); // 배타적 — notice 위에 열지 않는다
             self.chrome_host.palette.hide();
             self.chrome_host.find.show(); // show가 검색어/현재/카운트를 비운다(새 검색)
@@ -3672,7 +3665,6 @@ pub const AppSession = struct {
     /// 시 재검색을 닫힌 채로도 유지한다. 오버레이가 열려 있으면 모달 라우팅이 키를 가로채 이 경로는 안 탄다.
     fn findNavigate(self: *AppSession, forward: bool) void {
         if (!self.surface_initialized) return;
-        if (self.findSuppressed()) return; // alt screen — maru Find 끔(toggleFind와 같은 정책)
         if (self.chrome_host.find.input.query.items.len == 0) return; // 검색 이력 없음 — 무동작
         if (self.find_matches.items.len == 0) {
             // findMatches는 코어 mutate(스크롤백 rewrap)+읽기 — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
@@ -6251,14 +6243,6 @@ pub const AppSession = struct {
             } else try self.frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
             defer tick_result.deinit(self.allocator);
 
-            // Find가 열린(또는 ⌘G 닫힘-네비) 채 앱이 출력으로 alt screen에 들어가면 Find를 닫는다 — 같은
-            // findSuppressed 정책(surface 가드 포함). 매치도 비워 하이라이트를 정리한다.
-            if ((self.chrome_host.find.open or self.find_nav) and self.findSuppressed()) {
-                self.chrome_host.find.hide();
-                self.find_matches.clearRetainingCapacity();
-                self.find_nav = false;
-                self.metal_dirty = true;
-            }
             // Find 열린 채(또는 ⌘G 닫힘-네비 중) 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백
             // eviction). 재검색해 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다.
             const find_active = self.chrome_host.find.open or self.find_nav;
@@ -6272,8 +6256,13 @@ pub const AppSession = struct {
                 fa_surface.lockCore(self.io);
                 defer fa_surface.unlockCore(self.io);
                 if (find_active and drain_summary.output_events > 0) {
+                    const now_alt = fa_surface.core.alt_active;
                     fa_surface.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
                     self.chrome_host.find.setMatchCount(self.find_matches.items.len); // 매치 수 동기화 + current clamp(스크롤은 안 함)
+                    // primary<->alt 화면 전환이면 매치 셋의 좌표 도메인이 통째로 바뀌어 이전 current가 무의미하다
+                    // (setMatchCount는 clamp만). 첫 매치로 리셋한다 — 같은 화면 내 출력(스크롤백 eviction)이면 유지.
+                    if (now_alt != self.find_was_alt) self.chrome_host.find.current = 0;
+                    self.find_was_alt = now_alt;
                 }
                 // 활성 surface 매치를 뷰포트 span으로 클립(Find 활성일 때만). 현재 매치는 별도 강조색(current_match),
                 // 나머지는 find_view_spans. 닫힌 채 ⌘G 네비(find_nav,!open)면 현재 매치만.
@@ -10059,7 +10048,7 @@ test "find ⌘G/⌘⇧G: 오버레이 닫힌 채 다음/이전 매치 네비(보
     try std.testing.expect(!session.find_nav); // 검색어 없음 — 무동작
 }
 
-test "alt screen에선 maru Find를 끈다(⌘F 무동작·⌘G 무동작·열린 채 진입 시 tick이 닫음)" {
+test "alt screen에서도 maru Find가 열린다(⌘F 동작·진입해도 tick이 안 닫음 — 현재 화면 검색)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -10080,25 +10069,63 @@ test "alt screen에선 maru Find를 끈다(⌘F 무동작·⌘G 무동작·열�
     session.dispatchAppAction(.toggle_find); // 닫기
     try std.testing.expect(!session.chrome_host.find.open);
 
-    // alt screen 진입(DECSET 1049 — vim/less).
+    // alt screen 진입(DECSET 1049 — vim/less/Claude/Codex).
     try session.activeSurface().core.write("\x1b[?1049h");
     try std.testing.expect(session.activeSurface().core.alt_active);
 
-    // alt에선 ⌘F가 Find를 안 연다(앱 자체 검색에 맡김 — iTerm2 관례).
+    // alt에서도 ⌘F가 Find를 연다 — alt에선 findMatches가 현재 화면만 검색한다(과거엔 iTerm2 관례로 막았음).
     session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open);
+    session.dispatchAppAction(.toggle_find); // 닫기
     try std.testing.expect(!session.chrome_host.find.open);
-    // alt에선 ⌘G(findNavigate)도 무동작(find_nav 안 켜짐).
-    session.dispatchAppAction(.find_next);
-    try std.testing.expect(!session.find_nav);
 
-    // 엣지: 메인에서 Find를 연 뒤 앱이 출력으로 alt에 들어가면 tick이 Find를 닫는다.
+    // 엣지: 메인에서 Find를 연 뒤 앱이 출력으로 alt에 들어가도 tick이 Find를 닫지 않는다(현재 화면 검색 유지).
     try session.activeSurface().core.write("\x1b[?1049l"); // 메인 복귀
     try std.testing.expect(!session.activeSurface().core.alt_active);
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(session.chrome_host.find.open); // 메인에선 열림
     try session.activeSurface().core.write("\x1b[?1049h"); // 앱이 alt 진입
     _ = try session.tick();
-    try std.testing.expect(!session.chrome_host.find.open); // tick이 닫음
+    try std.testing.expect(session.chrome_host.find.open); // tick이 닫지 않음(유지)
+}
+
+test "alt screen Find: 실제 쿼리가 현재 화면만 매치하고 ⌘G가 동작한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY(controlled_smoke)
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // primary 스크롤백에 needle "MARUHIT"를 출력한 뒤 화면(6행) 밖으로 밀어낸다(대조군 — alt에선 제외돼야).
+    try session.activeSurface().core.write("MARUHIT primary\r\n");
+    var i: usize = 0;
+    while (i < 10) : (i += 1) try session.activeSurface().core.write("pad\r\n");
+
+    // alt 진입 + alt 화면에 needle 한 곳.
+    try session.activeSurface().core.write("\x1b[?1049h");
+    try std.testing.expect(session.activeSurface().core.alt_active);
+    try session.activeSurface().core.write("MARUHIT alt line");
+
+    // Find 열고 "MARUHIT" 타이핑 → recompute가 현재 화면(alt)만 스캔해 1곳 매치(primary 스크롤백 제외).
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open);
+    for ("MARUHIT") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 1), session.find_matches.items.len); // alt 화면 1곳만(스크롤백 제외)
+
+    // ⌘G(오버레이 닫힌 채): alt에서도 findNavigate가 동작한다(과거엔 무동작이었음) — 보존 검색어 재검색 + find_nav.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} }); // 닫기(검색어 보존)
+    try std.testing.expect(!session.chrome_host.find.open);
+    session.dispatchAppAction(.find_next);
+    try std.testing.expect(session.find_nav); // alt에서 ⌘G 동작(억제 안 됨)
+    try std.testing.expectEqual(@as(usize, 1), session.find_matches.items.len);
 }
 
 test "find IME 멀티-문자: 커밋이 다음 조합 preedit를 안 지운다(조합 안 보임 회귀)" {

@@ -176,48 +176,8 @@ fn applyKey(
         // 기존(보통 null) 값을 유지한다(forgiving). 유효하면 dupe된 색으로 갱신.
         const validated = try dupValidColor(a, diags, line_no, key, value, "");
         if (validated.len != 0) config.theme.palette[idx] = validated;
-        // cursor.*·input.*·quick-terminal.*는 스키마-주도로 이주(CS-1/CS-2) — 위 schema.tryParse가 처리.
-    } else if (std.mem.eql(u8, key, "chrome.theme")) {
-        config.chrome_theme = if (std.mem.eql(u8, value, "rich")) .rich else if (std.mem.eql(u8, value, "tui")) .tui else {
-            try diags.append(a, .{ .line = line_no, .message = "chrome.theme은 tui|rich — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "text.blink")) {
-        config.blink_text = parseBool(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "text.blink은 true|false — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "text.ambiguous-width")) {
-        config.ambiguous_width = parseAmbiguousWidth(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "text.ambiguous-width는 narrow|wide — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "theme.bold-is-bright")) {
-        config.bold_is_bright = parseBool(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "theme.bold-is-bright는 true|false — 기본값 유지" });
-            return;
-        };
-        // sidebar.*·notifications.*·scrollback.*·bell.*는 스키마-주도로 이주(CS-2) — 위 schema.tryParse가 처리.
-    } else if (std.mem.eql(u8, key, "window.padding-top")) {
-        config.window_padding_top = parseUintMax(value, 256) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "window.padding-top은 0~256 정수 — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "window.padding-bottom")) {
-        config.window_padding_bottom = parseUintMax(value, 256) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "window.padding-bottom은 0~256 정수 — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "window.padding-left")) {
-        config.window_padding_left = parseUintMax(value, 256) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "window.padding-left는 0~256 정수 — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "window.padding-right")) {
-        config.window_padding_right = parseUintMax(value, 256) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "window.padding-right는 0~256 정수 — 기본값 유지" });
-            return;
-        };
+        // cursor.*·input.*·quick-terminal.*(CS-1/CS-2)와 chrome.theme·text.*·theme.bold-is-bright·window.padding-{4방}·
+        // term(최상위 스칼라, CS-2b)은 스키마-주도로 이주 — 위 schema.tryParse가 처리. padding-x/y(alias)만 여기 남는다.
     } else if (std.mem.eql(u8, key, "window.padding-x")) {
         // x는 left+right 동시 alias(대칭 좌우 여백). 한 번 파싱해 두 필드에 같은 값. 명시 left/right와 혼용 시
         // loader가 줄을 순차 적용하므로 "마지막 줄 우선"이 자동(padding-x=10 다음 padding-left=20 → left=20,right=10).
@@ -235,14 +195,7 @@ fn applyKey(
         };
         config.window_padding_top = v;
         config.window_padding_bottom = v;
-    } else if (std.mem.eql(u8, key, "term")) {
-        const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
-        if (trimmed.len == 0) {
-            try diags.append(a, .{ .line = line_no, .message = "term이 비어 있음 — 기본값 유지" });
-            return;
-        }
-        config.term = try a.dupe(u8, trimmed);
-        // shell-integration.ssh는 스키마-주도로 이주(CS-2) — 위 schema.tryParse가 처리.
+        // term·shell-integration.ssh는 스키마-주도로 이주(CS-2b/CS-2) — 위 schema.tryParse가 처리.
     } else if (std.mem.eql(u8, key, "workspace.root")) {
         // 시작 창·새 탭이 열리는 디렉터리. raw 문자열만 보관한다 — `~` 확장·존재 검증은 $HOME이 필요해
         // platform layer(spawn 시점)가 한다(loader는 순수 파서라 env에 의존하지 않는다 — Linux CI). 경로는
@@ -267,14 +220,9 @@ fn applyKey(
     }
 }
 
-// parseQuickTerminal*·parsePageKeys·parseShiftEnter·parseImeEnter·parseCursorShape는 스키마-주도 이주(CS-1/CS-2)로
-// schema의 enum 파싱('_'↔'-' 규약)이 대신한다 — 제거. parseAmbiguousWidth만 남는다(text.ambiguous-width는 최상위
-// 스칼라라 아직 미이주 — CS-2b 또는 Config.schema로 후속).
-fn parseAmbiguousWidth(value: []const u8) ?theme.AmbiguousWidth {
-    if (std.mem.eql(u8, value, "narrow")) return .narrow;
-    if (std.mem.eql(u8, value, "wide")) return .wide;
-    return null;
-}
+// enum/bool 파싱 헬퍼(parseCursorShape·parsePageKeys·parseShiftEnter·parseImeEnter·parseQuickTerminal*·
+// parseAmbiguousWidth·parseBool)는 스키마-주도 이주(CS-1/CS-2/CS-2b)로 schema의 타입 분기 파싱이 대신한다 — 전부 제거.
+// loader 명시 핸들러에 남은 파싱은 parseThemePreset(preset)·parseUintMax(padding alias)·dupValidColor(palette)뿐.
 
 /// `keybind = <chord> = <rhs>` 한 줄을 처리한다. chord에 `global:` 접두사가 있으면 전역(OS) 단축키이고
 /// rhs는 GlobalAction(toggle_window/show_window)이다(별도 네임스페이스 — 자기들끼리만 dedup). 접두사가
@@ -476,12 +424,6 @@ fn parseThemePreset(value: []const u8) ?theme.ThemePreset {
     if (std.mem.eql(u8, value, "dracula")) return .dracula;
     if (std.mem.eql(u8, value, "catppuccin-mocha")) return .catppuccin_mocha;
     if (std.mem.eql(u8, value, "catppuccin-latte")) return .catppuccin_latte;
-    return null;
-}
-
-fn parseBool(value: []const u8) ?bool {
-    if (std.mem.eql(u8, value, "true")) return true;
-    if (std.mem.eql(u8, value, "false")) return false;
     return null;
 }
 

@@ -33,6 +33,18 @@ pub fn tryParse(
     diags: *std.ArrayList(Diag),
     line_no: usize,
 ) !bool {
+    // 최상위 스칼라(Config.schema — Config 직속 필드, namespace 없음, meta.key로 전체 키).
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            const meta: theme.Meta = @field(theme.Config.schema, sf.name);
+            const full_key = comptime topKey(sf.name, meta);
+            if (std.mem.eql(u8, key, full_key)) {
+                try parseAndSet(a, &@field(config, sf.name), full_key, meta, value, diags, line_no);
+                return true;
+            }
+        }
+    }
+    // sub-struct 스칼라(@hasDecl로 schema decl을 가진 sub-struct 자동 발견; namespace=Config 필드명).
     inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
@@ -110,6 +122,14 @@ fn parseAndSet(
 /// 스키마'd 필드 전부를 `key = value` 목록으로 emit한다(parse의 대칭). configKeyValues가 먼저 호출하고, 미이주
 /// 필드는 그 뒤에 수동 emit한다(CS-1 공존). CS-2 후엔 이게 스칼라 전부를 담당한다.
 pub fn appendSerialized(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(KeyValue)) !void {
+    // 최상위 스칼라(Config.schema) 먼저.
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            const meta: theme.Meta = @field(theme.Config.schema, sf.name);
+            const full_key = comptime topKey(sf.name, meta);
+            try list.append(arena, .{ .key = full_key, .value = try serializeValue(arena, @field(config, sf.name)) });
+        }
+    }
     inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
@@ -172,9 +192,15 @@ fn dashed(comptime s: []const u8) []const u8 {
     return out;
 }
 
-/// 전체 키 = `<namespace>.<segment>`. namespace=Config 필드명(dashed), segment=key_seg ?? 필드명(dashed). comptime-only.
+/// sub-struct 필드의 전체 키 = `<namespace>.<segment>`(meta.key가 있으면 그걸 통째로). namespace=Config 필드명(dashed),
+/// segment=key_seg ?? 필드명(dashed). comptime-only.
 fn keyOf(comptime ns: []const u8, comptime field: []const u8, comptime meta: theme.Meta) []const u8 {
-    return dashed(ns) ++ "." ++ (meta.key_seg orelse dashed(field));
+    return meta.key orelse (dashed(ns) ++ "." ++ (meta.key_seg orelse dashed(field)));
+}
+
+/// 최상위 스칼라(Config.schema) 필드의 전체 키 — namespace가 없어 meta.key 필수. comptime-only.
+fn topKey(comptime field: []const u8, comptime meta: theme.Meta) []const u8 {
+    return meta.key orelse @compileError("Config.schema 항목 '" ++ field ++ "'는 Meta.key 필수(최상위 필드는 namespace 없음)");
 }
 
 /// enum 토큰 파싱: '-'를 '_'로 정규화 후 stringToEnum(commit-only→commit_only; 나머지는 무변경). 너무 길면 null.
@@ -200,6 +226,15 @@ fn enumTokens(comptime T: type) []const u8 {
 // ── 드리프트 차단(comptime): schema 항목은 반드시 실제 필드여야 한다 ─────────────────────────────────
 // (CS-1은 한 방향만 — schema 항목→필드. "모든 필드→schema"의 역방향은 스칼라 전체 이주 CS-2에서 켠다.)
 comptime {
+    // 최상위(Config.schema) 항목 → Config 필드.
+    if (@hasDecl(theme.Config, "schema")) {
+        for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (!@hasField(theme.Config, sf.name)) {
+                @compileError("Config.schema 항목 '" ++ sf.name ++ "'는 Config의 필드가 아님");
+            }
+        }
+    }
+    // sub-struct schema 항목 → 그 struct 필드.
     for (@typeInfo(theme.Config).@"struct".fields) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
@@ -235,6 +270,29 @@ test "schema tryParse: bool·enum·범위 float·색을 파싱하고 미스매�
     // 미스매치 키(스키마에 없는 키) → false(loader 옛 경로로 폴백). "no.such.key"는 영원히 비-스키마.
     try std.testing.expect(!try tryParse(a, &cfg, "no.such.key", "X", &diags, 5));
     try std.testing.expectEqual(@as(usize, 0), diags.items.len); // 위 전부 유효 → diagnostic 없음
+}
+
+test "schema tryParse: 최상위 스칼라(Config.schema) — Meta.key 전체 키로 매칭(bool·u32·enum·text)" {
+    const a = std.testing.allocator;
+    var diags: std.ArrayList(Diag) = .empty;
+    defer diags.deinit(a);
+    var cfg: theme.Config = .{};
+
+    try std.testing.expect(try tryParse(a, &cfg, "text.blink", "true", &diags, 1)); // bool, key=text.blink
+    try std.testing.expectEqual(true, cfg.blink_text);
+    try std.testing.expect(try tryParse(a, &cfg, "window.padding-top", "12", &diags, 2)); // u32 range
+    try std.testing.expectEqual(@as(u32, 12), cfg.window_padding_top);
+    try std.testing.expect(try tryParse(a, &cfg, "text.ambiguous-width", "wide", &diags, 3)); // enum
+    try std.testing.expectEqual(theme.AmbiguousWidth.wide, cfg.ambiguous_width);
+    try std.testing.expect(try tryParse(a, &cfg, "term", "xterm-256color", &diags, 4)); // text
+    try std.testing.expectEqualStrings("xterm-256color", cfg.term);
+    a.free(cfg.term); // 위 dupe 회수(테스트 한정)
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    // 범위 밖 padding → diagnostic + 기본 유지
+    try std.testing.expect(try tryParse(a, &cfg, "window.padding-right", "999", &diags, 5));
+    try std.testing.expectEqual(@as(u32, 8), cfg.window_padding_right); // 기본 유지
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
 }
 
 test "schema tryParse: 잘못된 값은 diagnostic + 기본값 유지 + true(폴백 안 함)" {

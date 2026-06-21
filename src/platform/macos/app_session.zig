@@ -3328,6 +3328,12 @@ pub const AppSession = struct {
             self.chrome_host.settings.selected = self.chrome_host.settings.count - 1;
             self.toggleSelectedSetting();
         }
+        // MARU_OPEN_SETTINGS_SEARCH=<쿼리> — 검색 모드로 그 쿼리를 채워 필터된 폼을 캡처(검색 self-verify debug-gate).
+        if (std.c.getenv("MARU_OPEN_SETTINGS_SEARCH")) |sv| {
+            self.chrome_host.settings.startSearch();
+            for (std.mem.span(sv)) |c| self.chrome_host.settings.appendSearchCp(c);
+            self.refreshSettingsFieldCount();
+        }
     }
 
     /// `maru` CLI를 PATH(`~/.local/bin/maru`)에 symlink 설치한다(커맨드 팝업 "Install CLI"). main.zig install-cli와
@@ -3413,15 +3419,15 @@ pub const AppSession = struct {
         /// theme 섹션이면 ANSI 16색 팔레트 그리드 한 행을 color 뒤(마지막)에 추가한다(theme.palette.0~15 — 특수 키, schema
         /// 필드 아님). 핸들러가 selected==after_colors면 팔레트 행으로 라우팅한다.
         has_palette: bool = false,
-        /// input 섹션이면 command_catalog 액션마다 keybind 행을 추가한다(단축키 재바인딩 — 특수, schema 필드 아님).
-        /// 핸들러가 selected>=keybindRowStart면 그 행으로 라우팅(녹음 시작). palette와 배타(다른 섹션)라 같이 안 켜진다.
-        has_keybinds: bool = false,
+        /// input 섹션이면 command_catalog 액션의 keybind 행을 schema 필드 뒤에 둔다(단축키 재바인딩 — 특수, schema 필드
+        /// 아님). **검색 쿼리로 필터된 부분집합**이라 목록으로 보관한다(필터 후 인덱스가 view·핸들러에서 일관). palette와
+        /// 배타(다른 섹션). 핸들러가 selected>=keybindRowStart면 keybind_entries[selected-start]로 라우팅.
+        keybind_entries: []const command_catalog.Entry = &.{},
         fn nonSpecialTotal(self: SettingsSectionFields) usize {
             return self.bools.len + self.nums.len + self.enums.len + self.texts.len + self.colors.len;
         }
         fn total(self: SettingsSectionFields) usize {
-            return self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) +
-                (if (self.has_keybinds) command_catalog.entries.len else 0);
+            return self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) + self.keybind_entries.len;
         }
         /// 팔레트 그리드 행의 selected 인덱스(있으면 항상 마지막 = 다른 필드 다음). 없으면 null.
         fn paletteRowIndex(self: SettingsSectionFields) ?usize {
@@ -3429,9 +3435,16 @@ pub const AppSession = struct {
         }
         /// keybind 행들의 첫 selected 인덱스(있으면 schema 필드 다음 — input 섹션엔 palette 없음). 없으면 null.
         fn keybindRowStart(self: SettingsSectionFields) ?usize {
-            return if (self.has_keybinds) self.nonSpecialTotal() else null;
+            return if (self.keybind_entries.len > 0) self.nonSpecialTotal() else null;
         }
     };
+
+    /// 세팅 검색 매칭 — 쿼리가 비었으면 항상 true, 아니면 라벨(보이는 텍스트) 또는 키에 부분일치(ASCII 대소문자 무시;
+    /// 한글은 대소문자가 없어 그대로 부분일치). 필터의 단일 출처 — currentSectionFields가 모든 행 종류에 같은 규칙 적용.
+    fn settingsRowMatches(label: []const u8, key: []const u8, query: []const u8) bool {
+        if (query.len == 0) return true;
+        return std.ascii.indexOfIgnoreCase(label, query) != null or std.ascii.indexOfIgnoreCase(key, query) != null;
+    }
 
     /// 섹션 표시 라벨(config_mod.Section → 한국어). null=스키마 섹션 미지정 그룹("기타").
     fn settingsSectionLabel(sec: ?config_mod.Section) []const u8 {
@@ -3498,35 +3511,46 @@ pub const AppSession = struct {
         try config_mod.schema.appendTextFields(arena, self.loaded_config.config, &texts_all);
         var colors_all: std.ArrayList(config_mod.schema.ColorField) = .empty;
         try config_mod.schema.appendColorFields(arena, self.loaded_config.config, &colors_all);
+        // 검색 쿼리(현재 섹션 폼 필터 — 라벨/키 부분일치). 모든 행 종류에 같은 settingsRowMatches 규칙을 적용해 view·핸들러
+        // 인덱싱이 일관되게 한다(필터는 여기 단일 출처). 빈 쿼리면 전부 통과.
+        const q = self.chrome_host.settings.searchQuery();
         var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
-        for (bools_all.items) |b| if (b.section == sel_sec) try bools.append(arena, b);
+        for (bools_all.items) |b| if (b.section == sel_sec and settingsRowMatches(b.doc, b.key, q)) try bools.append(arena, b);
         var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
-        for (nums_all.items) |n| if (n.section == sel_sec) try nums.append(arena, n);
+        for (nums_all.items) |n| if (n.section == sel_sec and settingsRowMatches(n.doc, n.key, q)) try nums.append(arena, n);
         var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
-        for (enums_all.items) |e| if (e.section == sel_sec) try enums.append(arena, e);
+        for (enums_all.items) |e| if (e.section == sel_sec and settingsRowMatches(e.doc, e.key, q)) try enums.append(arena, e);
         // theme 섹션엔 named 테마 프리셋(특수 — schema 필드 아님)을 synthetic enum 행으로 주입한다(dropdown 재사용).
         // 현재값은 config 색에서 derive(매칭 프리셋 @tagName 또는 "사용자 지정"). 핸들러가 key="theme.preset"만 특수 처리.
-        if (sel_sec == .theme) {
+        if (sel_sec == .theme and settingsRowMatches("테마 프리셋", "theme.preset", q)) {
             const cur_name: []const u8 = if (detectThemePreset(self.loaded_config.config.theme)) |p| @tagName(p) else "사용자 지정";
             try enums.append(arena, .{ .key = "theme.preset", .doc = "테마 프리셋", .current = cur_name, .section = .theme });
         }
         var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
-        for (texts_all.items) |t| if (t.section == sel_sec) try texts.append(arena, t);
+        for (texts_all.items) |t| if (t.section == sel_sec and settingsRowMatches(t.doc, t.key, q)) try texts.append(arena, t);
         // terminal 섹션엔 특수 키(schema 필드 아님)를 synthetic text 행으로 주입한다(theme.preset enum 선례 — .text 위젯
         // 재사용, 핸들러가 key로 라우팅). shell.args(공백-토큰 리스트) + env.<KEY> 각 행(값 편집) + env 추가 행(KEY=VALUE).
         if (sel_sec == .terminal) {
-            try texts.append(arena, .{ .key = "shell.args", .doc = "셸 인자 (공백 구분)", .value = try std.mem.join(arena, " ", self.loaded_config.config.shell.args), .section = .terminal });
+            if (settingsRowMatches("셸 인자 (공백 구분)", "shell.args", q))
+                try texts.append(arena, .{ .key = "shell.args", .doc = "셸 인자 (공백 구분)", .value = try std.mem.join(arena, " ", self.loaded_config.config.shell.args), .section = .terminal });
             for (self.loaded_config.config.env) |entry| {
                 const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue; // 형식 오류(= 없음)는 건너뜀
-                try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "env.{s}", .{entry[0..eq]}), .doc = entry[0..eq], .value = entry[eq + 1 ..], .section = .terminal });
+                if (settingsRowMatches(entry[0..eq], "env", q))
+                    try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "env.{s}", .{entry[0..eq]}), .doc = entry[0..eq], .value = entry[eq + 1 ..], .section = .terminal });
             }
-            try texts.append(arena, .{ .key = "env.", .doc = "환경 변수 추가 (KEY=VALUE)", .value = "", .section = .terminal }); // 추가 행(빈 KEY = sentinel)
+            if (settingsRowMatches("환경 변수 추가 (KEY=VALUE)", "env", q))
+                try texts.append(arena, .{ .key = "env.", .doc = "환경 변수 추가 (KEY=VALUE)", .value = "", .section = .terminal }); // 추가 행(빈 KEY = sentinel)
         }
         var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
-        for (colors_all.items) |c| if (c.section == sel_sec) try colors.append(arena, c);
+        for (colors_all.items) |c| if (c.section == sel_sec and settingsRowMatches(c.doc, c.key, q)) try colors.append(arena, c);
         // theme 섹션엔 ANSI 16색 팔레트 그리드 한 행, input 섹션엔 command_catalog 액션별 keybind 행(둘 다 특수 — schema
-        // 필드 아님). 핸들러가 selected 인덱스로 라우팅(palette=마지막 1행, keybind=schema 필드 다음 전부).
-        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = (sel_sec == .theme), .has_keybinds = (sel_sec == .input) };
+        // 필드 아님). 검색 쿼리로도 필터한다(palette=한 행, keybind=매칭 액션만). 핸들러가 selected 인덱스로 라우팅.
+        var keybinds: std.ArrayList(command_catalog.Entry) = .empty;
+        if (sel_sec == .input) {
+            for (command_catalog.entries) |entry| if (settingsRowMatches(entry.title, entry.key, q)) try keybinds.append(arena, entry);
+        }
+        const palette_on = (sel_sec == .theme) and settingsRowMatches("ANSI 팔레트", "theme.palette", q);
+        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = palette_on, .keybind_entries = keybinds.items };
     }
 
     /// config 스키마의 **현재 섹션** 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2·§4). 라벨=meta.doc
@@ -3579,11 +3603,11 @@ pub const AppSession = struct {
             rows[i] = .{ .label = "ANSI 팔레트", .kind = .{ .palette_grid = .{ .cells = cells, .selected = sel } } };
             i += 1;
         }
-        if (cf.has_keybinds) {
-            // command_catalog 액션마다 keybind 행(라벨=title, 값=현재 chord 표시). 현재 chord는 resolver에서 fresh 계산
+        if (cf.keybind_entries.len > 0) {
+            // (검색으로 필터된) keybind 행(라벨=title, 값=현재 chord 표시). 현재 chord는 resolver에서 fresh 계산
             // (리바인딩 즉시 반영). 빈 chord(미지정)는 컴포넌트가 "(미지정)"으로 표시. arena 소유(이 프레임만).
             const resolver = self.loaded_config.keyBindingResolver();
-            for (command_catalog.entries) |entry| {
+            for (cf.keybind_entries) |entry| {
                 const chord = command_catalog.chordForAction(resolver, entry.action);
                 var disp_scratch: [command_catalog.max_chord_display_len]u8 = undefined;
                 const display: []const u8 = if (chord) |c| command_catalog.formatChord(c, &disp_scratch) else "";
@@ -3665,7 +3689,7 @@ pub const AppSession = struct {
             self.chrome_host.settings.enterEdit(seed);
             return;
         };
-        if (cf.keybindRowStart()) |ks| if (sel >= ks and sel - ks < command_catalog.entries.len) {
+        if (cf.keybindRowStart()) |ks| if (sel >= ks and sel - ks < cf.keybind_entries.len) {
             // keybind 행 — Enter/Space/클릭 = 녹음 시작. 다음 raw 키를 handleKeyEvent가 가로채 captureKeybindRecording로 rebind.
             self.chrome_host.settings.recording = true;
             self.metal_dirty = true;
@@ -4350,6 +4374,11 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
             .settings_text_commit => self.commitSelectedText(), // 인라인 편집 Enter — editText→setText + 적용 + 영속
+            .settings_search_changed => {
+                // 검색 쿼리 변경 — 필터된 행 수를 다시 주입(setFieldCount가 selected를 clamp) + 재렌더.
+                self.refreshSettingsFieldCount();
+                self.metal_dirty = true;
+            },
         }
     }
 
@@ -5175,6 +5204,7 @@ pub const AppSession = struct {
                 .section_changed => .settings_section_changed,
                 .text_commit => .none, // 포인터 경로엔 안 옴(인라인 편집 Enter는 키 전용) — exhaustiveness
                 .adjust_left, .adjust_right => .none, // 포인터 경로엔 안 옴(키 전용) — exhaustiveness
+                .search_changed => .none, // 포인터 경로엔 안 옴(검색은 '/'·타이핑 키 전용) — exhaustiveness
                 .consumed => .none,
             });
             self.metal_dirty = true;
@@ -6582,8 +6612,8 @@ pub const AppSession = struct {
         const cf = self.currentSectionFields(scratch.allocator()) catch return;
         const start = cf.keybindRowStart() orelse return;
         const sel = self.chrome_host.settings.selected;
-        if (sel < start or sel - start >= command_catalog.entries.len) return; // 선택이 keybind 행이 아님
-        self.rebindActionEntry(command_catalog.entries[sel - start], chord);
+        if (sel < start or sel - start >= cf.keybind_entries.len) return; // 선택이 keybind 행이 아님
+        self.rebindActionEntry(cf.keybind_entries[sel - start], chord);
     }
 
     /// 커맨드 카탈로그(메뉴바·팝업이 그릴 액션 목록). 세션 동안 불변. owned — destroy까지 유효.
@@ -14585,7 +14615,7 @@ test "settings keybind recorder: 입력 섹션 행 녹음→캡처→rebind + �
     session.chrome_host.settings.show();
     session.chrome_host.settings.section = input_idx;
     const cf = try session.currentSectionFields(scratch.allocator());
-    try std.testing.expect(cf.has_keybinds);
+    try std.testing.expect(cf.keybind_entries.len == command_catalog.entries.len); // 쿼리 없으면 전부
     const ks = cf.keybindRowStart().?;
 
     // new_term은 command_catalog.entries[0] — 그 keybind 행 선택 → Enter(toggle) = 녹음 시작.
@@ -14614,6 +14644,56 @@ test "settings keybind recorder: 입력 섹션 행 녹음→캡처→rebind + �
     session.captureKeybindRecording(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(!session.chrome_host.settings.recording);
     try std.testing.expectEqual(before, session.config_keybind_rebinds.items.len); // 변화 없음
+}
+
+test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 인덱스가 올바른 액션에 매핑 (CS-4-4 검색)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var input_idx: usize = 0;
+    for (sections, 0..) |s, i| if (s.section == .input) {
+        input_idx = i;
+    };
+    session.chrome_host.settings.show();
+    session.chrome_host.settings.section = input_idx;
+
+    // 검색 "split" → 입력 섹션 dropdown(page-keys 등)은 미매칭(0), keybind는 Split Right/Down 2개만.
+    session.chrome_host.settings.startSearch();
+    for ("split") |c| session.chrome_host.settings.appendSearchCp(c);
+    const cf = try session.currentSectionFields(scratch.allocator());
+    try std.testing.expectEqual(@as(usize, 0), cf.enums.len); // "split" 미매칭
+    try std.testing.expectEqual(@as(usize, 2), cf.keybind_entries.len); // Split Right, Split Down
+    for (cf.keybind_entries) |e| try std.testing.expect(std.ascii.indexOfIgnoreCase(e.title, "split") != null);
+
+    // 필터 후 keybindRowStart=0(schema 0개). 첫 행 녹음→캡처가 **필터된 첫 엔트리**(Split Right)를 rebind해야 한다(인덱스 정합).
+    const ks = cf.keybindRowStart().?;
+    try std.testing.expectEqual(@as(usize, 0), ks);
+    session.chrome_host.settings.selected = ks;
+    session.chrome_host.settings.recording = true;
+    session.config_keybind_rebinds.clearRetainingCapacity();
+    session.captureKeybindRecording(.{ .key = .{ .char = 'J' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 1), session.config_keybind_rebinds.items.len);
+    // 재바인딩된 action 키 = 필터된 목록의 첫 엔트리 키(엉뚱한 액션이 아니라).
+    try std.testing.expectEqualStrings(cf.keybind_entries[0].key, session.config_keybind_rebinds.items[0].action);
+
+    // 빈 쿼리(검색 종료)면 전부 복귀.
+    session.chrome_host.settings.endSearch();
+    const cf2 = try session.currentSectionFields(scratch.allocator());
+    try std.testing.expectEqual(command_catalog.entries.len, cf2.keybind_entries.len);
+    try std.testing.expect(cf2.enums.len > 0); // dropdown 복귀
 }
 
 test "settings env/shell.args: terminal 섹션 synthetic text 행 — shell.args 분리·env upsert·추가 행 파싱 (CS-4-5)" {

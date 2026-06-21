@@ -164,6 +164,16 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **영속(전용 write-back)**: keybind는 `key = value`가 아니라 줄마다 같은 `keybind` 키 + 두 번째 `=`로 chord/action을 나눠서 `updateConfigText`(key 기준)로는 못 다룬다(모든 keybind 줄이 한 키로 충돌). 그래서 `updateKeybindLines`(loader)가 **action 기준**으로 `keybind = <chord> = <action>` 줄을 찾아 교체(없으면 append)한다. chord는 `KeyChord.toConfigString`(parse와 round-trip되는 ASCII 표기 — 표시용 `formatChord`의 ⌘⇧ 기호와 다름). `serializeConfig`가 schema write-back 뒤에 이 패스를 **체이닝**하고, `takeConfigDirty`가 keybind 재바인딩도 본다. 매크로 줄(`text:`/`esc:` rhs에 `=` 포함)은 action 키와 안 겹쳐 자연히 보존된다.
 - **한계(후속)**: 옛 chord가 **빌트인 기본**이면 그 chord도 계속 액션을 발동한다(새 chord를 **추가**하는 셈 — 완전 교체는 옛 빌트인을 `unbind`해야 하므로 후속). 충돌 검출 UI(다른 액션에 이미 묶인 chord 경고)·unbind·terminal 매크로/global 바인딩 편집·F13+ 키도 후속.
 
+### 6.8 폼 검색(현재 섹션 필터) (CS-4-4 후속)
+
+섹션 폼이 커져서(입력 섹션은 keybind 행만 ~40개) 행을 빠르게 좁히는 검색을 둔다. `§4`에서 후속으로 미뤘던 항목.
+
+- **시작·종료**: 폼에서 `/`를 누르면 검색 모드(제목이 `검색: <쿼리>▏`로, accent + caret), 타이핑이 쿼리가 되고 `Esc`로 종료(필터 해제, 전체 행 복귀). 검색 중에도 `↑↓` 나비·`Enter` 활성은 그대로(필터된 행 위에서). 섹션을 바꾸면 검색이 초기화된다(필터는 섹션 내).
+- **필터는 단일 출처**: `currentSectionFields`가 `settingsRowMatches(label, key, query)`(쿼리 부분일치 — ASCII 대소문자 무시, 한글은 그대로)를 **모든 행 종류**(schema bool/num/enum/text/color + synthetic theme.preset/shell.args/env + palette + keybind)에 같은 규칙으로 적용한다. 그래서 필터 후에도 view(행 목록)와 핸들러(selected 인덱스 매핑)가 **일관**된다 — 핸들러가 `selected`로 라우팅할 때 필터된 같은 집합을 본다.
+- **keybind 필터의 인덱스 정합**: keybind 행은 검색으로 부분집합이 되므로 `SettingsSectionFields`가 `has_keybinds`(bool) 대신 **`keybind_entries`(필터된 목록)**를 들고, `total`/`keybindRowStart`/`buildSettingsFields`/`captureKeybindRecording`가 모두 이 목록을 쓴다. 그래서 "split"로 필터한 뒤 첫 행을 녹음하면 **필터된 첫 액션**(Split Right)이 정확히 rebind된다(단위 테스트가 못박음).
+- **흐름**: 컴포넌트가 `search_changed` Action을 내면 platform이 `refreshSettingsFieldCount`로 필터된 행 수를 다시 주입(`setFieldCount`가 `selected`를 clamp)하고 재렌더.
+- **한계(후속)**: 현재 섹션 안 필터만(섹션을 모르면 못 찾음 — **교차 섹션 검색**은 후속). 검색 활성화는 `/` 키(클릭 진입점은 후속).
+
 ## 7. 의존성
 
 - **S0-1b** ✅(머지) — `serialize.updateForKeys(original, config, keys)`로 **변경 키만** write-back(즉시-저장 결정에
@@ -182,7 +192,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | **CS-4-1** ✅ | 위젯 컴포넌트 toggle·dropdown·text/number·slider(neutral State+view+handle) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-2** ✅ | color input(16색 프리셋 + hex 입력) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-3** ✅ | keybind recorder(`command_catalog` 행 + 키 캡처 + `keybind` 줄 write-back) — §6.7. unbind·충돌 UI는 후속 | 헤드리스 + 실기 |
-| **CS-4-4** ✅ | **세팅 페이지 셸** — Section 네비 + 제너릭 폼(schema 메타 소비) + 폼 스크롤 + `toggle_settings`(⌘,) 키/메뉴 (상단 검색은 후속) | ✅ 머지(헤드리스 + 실기) |
+| **CS-4-4** ✅ | **세팅 페이지 셸** — Section 네비 + 제너릭 폼(schema 메타 소비) + 폼 스크롤 + `toggle_settings`(⌘,) 키/메뉴 + **폼 검색**(`/` 현재 섹션 필터 — §6.8; 교차 섹션은 후속) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-5** | write-back 연결(S0-1b ✅) + bespoke 에디터: **palette 16색 그리드 ✅**(§6.5) · **env·shell.args ✅**(§6.6, upsert; 삭제는 후속) → keybind(CS-4-3) | 헤드리스 + 실기 |
 | **CS-4-6+** | (선택) color HSV picker 2차, 고급화 | 실기 |
 

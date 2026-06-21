@@ -3321,6 +3321,34 @@ pub const AppSession = struct {
         } };
     }
 
+    /// ABI 마우스 이벤트(kind/button/mods)를 chrome `PointerEvent`로 변환한다 — `chromeInputFromKeyEvent`의 포인터 짝
+    /// (chrome은 platform/NSEvent 타입을 모르므로 이 변환을 어댑터가 소유한다, L1/L3 경계). kind 1=down·2=drag(move)·
+    /// 3=up·4/5=더블/트리플(down 취급). button은 xterm 규약(0=L,1=M,2=R — `MaruAppHost.handleMouse`가 NSEvent
+    /// buttonNumber를 이렇게 매핑) → `PointerButton`. mods는 xterm 비트(4=shift·8=option·16=control — `modsBits`;
+    /// command는 마우스 ABI에 실리지 않아 false). 좌표는 backing px(divider/tabbar hitTest와 같은 좌표계).
+    fn chromePointerFromMouse(kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) chrome.input.PointerEvent {
+        return .{
+            .phase = switch (kind) {
+                2 => .move,
+                3 => .up,
+                else => .down, // 1=down, 4/5=double/triple
+            },
+            .x_px = x_px,
+            .y_px = y_px,
+            .button = switch (button) {
+                2 => .right,
+                0 => .left,
+                else => .other, // 1=middle 등
+            },
+            .mods = .{
+                .shift = (mods & 4) != 0,
+                .option = (mods & 8) != 0,
+                .control = (mods & 16) != 0,
+                .command = false, // 마우스 ABI(modsBits)는 command를 안 보낸다
+            },
+        };
+    }
+
     /// 스크롤백 Find를 토글한다 — 열려 있으면 닫고(매치 하이라이트 정리), 아니면 연다(빈 검색어). 팝업과 배타적
     /// 이라 팝업을 닫고 연다. UI 상태는 chrome_host.find, 검색은 검색어가 생길 때 recomputeFind가 한다.
     fn toggleFind(self: *AppSession) void {
@@ -4423,6 +4451,11 @@ pub const AppSession = struct {
             }
             return;
         }
+        // chrome 오버레이 모달(notice/find/palette)이 열려 있으면 포인터를 chrome에 주고 소비한다(CS-4-0 handlePointer
+        // 배선). confirm/context_menu는 위에서 전용 hit-test로 이미 처리·return하므로, 여기 도달하는 열린 모달은 전용 마우스
+        // 처리가 없는 오버레이뿐이다 — 클릭이 뒤(터미널·divider/탭 드래그·사이드바)로 새지 않게 막는다(키가 모달에서 소비
+        // 되는 것과 같은 규율). 포인터를 실제로 쓰는 모달 위젯(슬라이더·토글·색)은 CS-4-1+에서 이 경로(handlePointer)에 붙는다.
+        if (self.chrome_host.handlePointer(chromePointerFromMouse(kind, x_px, y_px, button, mods)) != null) return;
         // 우클릭(button==2, down) → rename 대상이면 컨텍스트 메뉴("Rename")를 띄운다. 대상이 없을 때:
         //  - chrome(사이드바·탭 바) 위면 consume(우클릭이 좌클릭처럼 탭 전환·newTab 하지 않게).
         //  - 터미널 본문이면 **fall through** — 아래 mouse-reporting 경로(DECSET 1000~1003)가 우버튼을 트래킹 앱에
@@ -8507,6 +8540,27 @@ test "applyFontSpacing: line-height multiplies height, letter-spacing adds to wi
         const r = applyFontSpacing(8, 18, 1.0, -8.0, 1000);
         try std.testing.expectEqual(@as(u32, 1), r.width_px);
     }
+}
+
+test "chromePointerFromMouse: kind→phase, xterm button→PointerButton, mods 비트→Mods" {
+    // kind: 1=down, 2=drag→move, 3=up, 4/5=더블/트리플→down. 좌표는 그대로 통과.
+    const down = AppSession.chromePointerFromMouse(1, 12.5, 34.0, 0, 0);
+    try std.testing.expectEqual(chrome.input.PointerPhase.down, down.phase);
+    try std.testing.expectEqual(@as(f64, 12.5), down.x_px);
+    try std.testing.expectEqual(@as(f64, 34.0), down.y_px);
+    try std.testing.expectEqual(chrome.input.PointerButton.left, down.button);
+    try std.testing.expectEqual(chrome.input.Mods{}, down.mods);
+    try std.testing.expectEqual(chrome.input.PointerPhase.move, AppSession.chromePointerFromMouse(2, 0, 0, 0, 0).phase);
+    try std.testing.expectEqual(chrome.input.PointerPhase.up, AppSession.chromePointerFromMouse(3, 0, 0, 0, 0).phase);
+    try std.testing.expectEqual(chrome.input.PointerPhase.down, AppSession.chromePointerFromMouse(4, 0, 0, 0, 0).phase); // 더블클릭도 down
+
+    // button(xterm): 0=L, 2=R, 1(middle)/그 외=other.
+    try std.testing.expectEqual(chrome.input.PointerButton.right, AppSession.chromePointerFromMouse(1, 0, 0, 2, 0).button);
+    try std.testing.expectEqual(chrome.input.PointerButton.other, AppSession.chromePointerFromMouse(1, 0, 0, 1, 0).button);
+
+    // mods 비트: 4=shift, 8=option, 16=control(modsBits). command는 마우스 ABI에 없어 항상 false.
+    const m = AppSession.chromePointerFromMouse(1, 0, 0, 0, 4 | 8 | 16).mods;
+    try std.testing.expect(m.shift and m.option and m.control and !m.command);
 }
 
 // window padding이 터미널 영역 rect(termRect)를 좌상으로 들이고 폭/높이를 2배만큼 줄이는지 고정한다 — 이 rect가

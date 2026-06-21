@@ -928,7 +928,7 @@ pub const AppSession = struct {
     // serializeWorkspaceWindow가 돌려주는 workspace 텍스트의 소유 버퍼(다음 호출/deinit까지 유효 — cwd ABI와 같은
     // 소유 규칙). Swift가 멀티 창 저장에서 세션마다 한 번 읽는다.
     workspace_buffer: ?[]u8 = null,
-    // serializeSidebarConfig가 돌려주는 갱신된 config 텍스트의 소유 버퍼(다음 호출/deinit까지 유효 —
+    // serializeConfig가 돌려주는 갱신된 config 텍스트의 소유 버퍼(다음 호출/deinit까지 유효 —
     // workspace_buffer 패턴). Swift가 받아 config 경로에 atomic write한다(앱→config 양방향 동기).
     sidebar_config_buffer: ?[]u8 = null,
     // 시작 시 로드한 raw config(~/.config/maru/config). arena가 font.family 문자열을 소유하고,
@@ -1141,9 +1141,10 @@ pub const AppSession = struct {
     // 사이드바 표시 토글(브랜치·폴더) 메뉴다(buildContextMenuItems/acceptContextMenu가 이 플래그로 분기). 체크박스
     // 패널처럼 토글해도 닫히지 않고 열린 채 라벨(체크마크)만 갱신한다 — 바깥 클릭/Esc로 닫는다(closeContextMenu).
     view_options_menu: bool = false,
-    // view options 토글(show_branch/show_folder)이 바뀌어 config 파일에 반영(persist)해야 하는지. Swift가 매 tick
-    // take_sidebar_config_dirty로 drain해 serializeSidebarConfig→atomic write한다(앱→config, take_bell과 같은 1회성 신호).
-    sidebar_config_dirty: bool = false,
+    // 세팅 GUI(사이드바 view options·세팅 화면)에서 바뀐 config 키 집합 — app→파일 write-back 예약(중복은 한 번만).
+    // 키는 스키마 정적 리터럴이라 소유/해제 불요. Swift가 매 tick take_sidebar_config_dirty(=비어있지 않음)로 drain해
+    // serialize_sidebar_config(updateConfigForKeys)로 atomic write한다(serialize가 성공 시 집합을 비운다). ABI 이름은 호환을 위해 유지.
+    config_dirty_keys: std.ArrayList([]const u8) = .empty,
     // 시각 확인 디버그 훅: MARU_OPEN_SETTINGS env가 있으면 첫 frame에서 세팅 화면을 자동으로 연다(스크린샷
     // 하니스가 입력 없이 모달 상태를 캡처하게 — MARU_DEBUG와 같은 env-gate). env 미설정이면 무동작. 한 번만 연다.
     debug_settings_opened: bool = false,
@@ -3346,7 +3347,8 @@ pub const AppSession = struct {
         if (sel >= list.items.len) return;
         const f = list.items[sel];
         if (config_mod.schema.setBool(&self.loaded_config.config, f.key, !f.value)) {
-            self.reapplyLoadedConfig();
+            self.reapplyLoadedConfig(); // 세션 라이브 적용
+            self.markConfigKeyDirty(f.key); // 파일 영속 예약(CS-4-4c — Swift가 drain해 atomic write)
         }
     }
 
@@ -3739,7 +3741,7 @@ pub const AppSession = struct {
     /// 메뉴를 먼저 닫고(대상 teardown 시 context_menu_target은 이미 null화됨) selected로 분기한다.
     fn acceptContextMenu(self: *AppSession) void {
         // view options 메뉴: 항목 선택 = 표시 토글. 메뉴를 '닫지 않고'(체크박스 패널) config bool을 뒤집고 라벨(체크마크)을
-        // 갱신한 뒤 카드를 재빌드하고, config 파일 반영을 예약한다(sidebar_config_dirty → Swift persist). 닫기는 바깥 클릭/Esc.
+        // 갱신한 뒤 카드를 재빌드하고, config 파일 반영을 예약한다(config_dirty_keys → Swift persist). 닫기는 바깥 클릭/Esc.
         if (self.view_options_menu) {
             switch (self.chrome_host.context_menu.selected) {
                 0 => self.loaded_config.config.sidebar.show_branch = !self.loaded_config.config.sidebar.show_branch,
@@ -3748,7 +3750,9 @@ pub const AppSession = struct {
             }
             _ = self.buildViewOptionsMenuItems(); // 라벨 체크마크 갱신(메뉴 열린 채)
             self.rebuildSidebar() catch {}; // 카드 표시 즉시 반영
-            self.sidebar_config_dirty = true; // config 파일 persist 예약(앱→config)
+            // config 파일 persist 예약(앱→config) — 두 사이드바 표시 키를 dirty 집합에 넣는다(옛 동작과 동일하게 둘 다 기록).
+            self.markConfigKeyDirty("sidebar.show-branch");
+            self.markConfigKeyDirty("sidebar.show-folder");
             self.metal_dirty = true;
             return;
         }
@@ -5631,12 +5635,17 @@ pub const AppSession = struct {
         return self.activeSurface().core.takeBell() and self.audible_bell;
     }
 
-    /// view options 토글(show_branch/show_folder)이 바뀌어 config 파일에 반영해야 하면 true(플래그 비움 — 1회성).
-    /// Swift가 매 tick drain해 serializeSidebarConfig→atomic write한다(앱→config 단방향, take_bell과 같은 신호 패턴).
-    pub fn takeSidebarConfigDirty(self: *AppSession) bool {
-        const dirty = self.sidebar_config_dirty;
-        self.sidebar_config_dirty = false;
-        return dirty;
+    /// 세팅 GUI에서 바뀐 config 키를 write-back 예약 집합에 넣는다(중복은 무시 — 한 번만). 키는 스키마 정적 리터럴.
+    fn markConfigKeyDirty(self: *AppSession, key: []const u8) void {
+        for (self.config_dirty_keys.items) |k| if (std.mem.eql(u8, k, key)) return;
+        self.config_dirty_keys.append(self.allocator, key) catch {};
+    }
+
+    /// 반영할 config 키가 있으면 true(앱→파일 write-back 예약 — 사이드바 view options·세팅 화면 공용). 여기선 비우지
+    /// 않는다 — serializeConfig가 성공적으로 직렬화한 뒤 비운다(실패 시 키 유지→다음 tick 재시도). Swift가 매 tick
+    /// take_sidebar_config_dirty(ABI 이름 유지)로 drain해 1이면 serialize→atomic write한다.
+    pub fn takeConfigDirty(self: *AppSession) bool {
+        return self.config_dirty_keys.items.len > 0;
     }
 
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
@@ -5828,7 +5837,7 @@ pub const AppSession = struct {
     /// 호출/deinit까지 유효 — workspace_buffer 패턴). 원본 config를 읽어 updateConfigText로 부분 갱신하므로
     /// 주석·미파싱 키를 보존한다. Swift가 받아 config 경로에 atomic write한다(앱→config 방향). 원본이 없거나
     /// 읽기 실패면 빈 텍스트로 두 키를 append한다(forgiving — config가 없어도 토글이 새 파일을 만든다).
-    pub fn serializeSidebarConfig(self: *AppSession) ![]const u8 {
+    pub fn serializeConfig(self: *AppSession) ![]const u8 {
         if (self.sidebar_config_buffer) |b| {
             self.allocator.free(b);
             self.sidebar_config_buffer = null;
@@ -5841,10 +5850,12 @@ pub const AppSession = struct {
         defer if (owned) |o| self.allocator.free(o);
         const original: []const u8 = owned orelse &.{};
 
-        // 사이드바 2키만 현재값으로 부분 갱신(override-only write-back, S0-1b 일반화 — GUI도 같은 경로). 값은
-        // 스키마 직렬화(configKeyValues)가 단일 출처라 bool→"true"/"false" 손코드 중복이 사라진다.
-        const text = try config_mod.updateConfigForKeys(self.allocator, original, self.loaded_config.config, &.{ "sidebar.show-branch", "sidebar.show-folder" });
+        // 바뀐 키만 현재값으로 부분 갱신(override-only write-back, S0-1b 일반화 — 사이드바 view options·세팅 화면
+        // 공용). 값은 스키마 직렬화(configKeyValues)가 단일 출처라 타입별 손코드 중복이 없다. 성공 시 dirty 집합을
+        // 비운다(아래) — updateConfigForKeys가 실패하면 try가 빠져나가 키가 남아 다음 tick 재시도된다.
+        const text = try config_mod.updateConfigForKeys(self.allocator, original, self.loaded_config.config, self.config_dirty_keys.items);
         self.sidebar_config_buffer = text;
+        self.config_dirty_keys.clearRetainingCapacity();
         return text;
     }
 
@@ -8323,6 +8334,7 @@ pub const AppSession = struct {
         self.find_view_spans.deinit(self.allocator);
         if (self.workspace_buffer) |b| self.allocator.free(b);
         if (self.sidebar_config_buffer) |b| self.allocator.free(b);
+        self.config_dirty_keys.deinit(self.allocator);
         self.hover_leaf_scratch.deinit(self.allocator);
         self.scrollbar_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
@@ -13474,7 +13486,7 @@ test "sidebar search blurs when clicking outside it (terminal/card) — restores
 }
 
 // P4: view options(⚙) 메뉴 — ⚙ 클릭 → 표시 토글 메뉴 열림, 항목 클릭 시 show-branch/folder를 뒤집고(즉시 카드
-// 반영) 메뉴는 열린 채(체크박스 패널), config persist 신호(sidebar_config_dirty)를 1회성으로 세운다. 바깥 클릭=닫힘.
+// 반영) 메뉴는 열린 채(체크박스 패널), config persist 예약(config_dirty_keys)에 키를 넣는다. 바깥 클릭=닫힘.
 // 실 좌표 hit-test + config 토글이라 macOS 게이트.
 test "view options menu: ⚙ toggles sidebar show-branch/folder, stays open, signals config persist" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -13508,8 +13520,9 @@ test "view options menu: ⚙ toggles sidebar show-branch/folder, stays open, sig
     session.acceptContextMenu();
     try std.testing.expectEqual(!init_branch, session.loaded_config.config.sidebar.show_branch);
     try std.testing.expect(session.view_options_menu); // 체크박스 패널 — 닫히지 않는다
-    try std.testing.expect(session.takeSidebarConfigDirty()); // persist 예약 — true
-    try std.testing.expect(!session.takeSidebarConfigDirty()); // 1회성 — 비워짐
+    try std.testing.expect(session.takeConfigDirty()); // persist 예약 — true(dirty 키 있음)
+    session.config_dirty_keys.clearRetainingCapacity(); // serializeConfig가 하는 일(파일 IO 없이 계약만 확인)
+    try std.testing.expect(!session.takeConfigDirty()); // 비워짐 — false
 
     // 항목 1(폴더 표시) 토글 — 메뉴 유지.
     session.chrome_host.context_menu.selected = 1;
@@ -13523,6 +13536,52 @@ test "view options menu: ⚙ toggles sidebar show-branch/folder, stays open, sig
     session.mouse(1, out_x, out_y, 0, 0);
     try std.testing.expect(!session.view_options_menu);
     try std.testing.expect(!session.chrome_host.context_menu.open);
+}
+
+// 세팅 화면 토글 → 선택 행 bool config flip(라이브) + config_dirty_keys persist 예약(CS-4-4c). 실제 파일 write는
+// Swift atomic write(사이드바와 같은 경로 — 일반화)라 여기선 메모리 flip + dirty 예약까지 헤드리스로 고정한다.
+test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist 예약 (CS-4-4c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.toggleSettings(); // 세팅 열기 + 행 수 주입(setFieldCount)
+    try std.testing.expect(session.chrome_host.settings.open);
+    try std.testing.expect(session.chrome_host.settings.count > 0);
+    try std.testing.expect(!session.takeConfigDirty()); // 토글 전 — dirty 없음
+
+    // 첫 bool 필드의 키·현재값(buildSettingsFields와 같은 순서 — appendBoolFields).
+    var before: std.ArrayList(config_mod.schema.BoolField) = .empty;
+    defer before.deinit(allocator);
+    try config_mod.schema.appendBoolFields(allocator, session.loaded_config.config, &before);
+    const first_key = before.items[0].key;
+    const first_val = before.items[0].value;
+
+    session.chrome_host.settings.selected = 0;
+    session.toggleSelectedSetting();
+
+    // (1) 메모리 config가 flip됐다 — 같은 키를 다시 열거해 값이 뒤집혔는지 본다.
+    var after: std.ArrayList(config_mod.schema.BoolField) = .empty;
+    defer after.deinit(allocator);
+    try config_mod.schema.appendBoolFields(allocator, session.loaded_config.config, &after);
+    try std.testing.expectEqual(!first_val, after.items[0].value);
+
+    // (2) persist 예약 — 그 키가 config_dirty_keys에 들어갔다(Swift가 drain해 파일에 atomic write).
+    try std.testing.expect(session.takeConfigDirty());
+    var found = false;
+    for (session.config_dirty_keys.items) |k| {
+        if (std.mem.eql(u8, k, first_key)) found = true;
+    }
+    try std.testing.expect(found);
 }
 
 // isWindowDragRegion: 헤더 '빈' 영역(아이콘·검색 아님)만 창 드래그/확대 영역(Swift performDrag·zoom). 아이콘·검색·

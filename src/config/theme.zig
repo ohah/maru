@@ -39,9 +39,14 @@ pub const FontConfig = struct {
     /// 여백이 된다(grid 자동 정합). 범위는 아래 const(-8~32 pt — 음수 허용).
     letter_spacing: f32 = 0.0,
 
-    // 스키마-주도 필드(CS-1). 나머지(family·size_step·line_height·letter_spacing)는 CS-2에서 이주.
-    pub const schema = .{
-        .size = Meta{ .key_seg = null, .doc = "폰트 크기(pt)", .range = .{ 1, 512 }, .widget = .number, .section = .font },
+    // 범위는 아래 font_* const(단일 출처 — appearance.resolveFont도 같은 const를 써 schema↔resolve drift 없음).
+    // size는 1~512 리터럴(전용 const 없음 — resolveFont도 같은 범위).
+    pub const schema = .{ // 키: font.size / font.size-step / font.line-height / font.letter-spacing / font.family (필드명 dashed)
+        .size = Meta{ .doc = "폰트 크기(pt)", .range = .{ 1, 512 }, .widget = .number, .section = .font },
+        .size_step = Meta{ .doc = "⌘+/⌘- 폰트 증분(pt)", .range = .{ font_size_step_min, font_size_step_max }, .widget = .number, .section = .font },
+        .line_height = Meta{ .doc = "행간 배수", .range = .{ font_line_height_min, font_line_height_max }, .widget = .number, .section = .font },
+        .letter_spacing = Meta{ .doc = "자간(논리 pt, 음수 허용)", .range = .{ font_letter_spacing_min, font_letter_spacing_max }, .widget = .number, .section = .font },
+        .family = Meta{ .doc = "폰트 패밀리(내부 공백 보존)", .widget = .text, .section = .font },
     };
 };
 
@@ -83,9 +88,12 @@ pub const ThemeConfig = struct {
     // 살아남는다(per-core OSC4에 pre-seed하면 RIS가 지우므로 별도 레이어로 둔다). `ls`/`vim`/프롬프트 색 테마 완성용.
     palette: [16]?[]const u8 = .{null} ** 16,
 
-    // 스키마-주도 필드(CS-1). background만 우선 이주 — 나머지 색·palette는 CS-2(+ preset/palette.N 특수 처리 유지).
+    // 스키마-주도 색(CS-2). search_match*/sidebar_*는 config 키가 없어(preset 전용) 제외, palette는 특수(palette.N) 유지.
     pub const schema = .{
         .background = Meta{ .doc = "배경색(#RRGGBB)", .widget = .color, .section = .theme },
+        .foreground = Meta{ .doc = "전경색(#RRGGBB)", .widget = .color, .section = .theme },
+        .cursor = Meta{ .doc = "커서색(#RRGGBB)", .widget = .color, .section = .theme },
+        .selection = Meta{ .doc = "선택 하이라이트 배경(#RRGGBB)", .widget = .color, .section = .theme },
     };
 };
 
@@ -277,6 +285,12 @@ pub const InputConfig = struct {
     shift_enter: ShiftEnter = .newline,
     // 기본 newline: IME 조합 중 Enter를 확정+개행 한 번에(브라우저 동작). commit-only면 조합만 확정.
     ime_enter: ImeEnter = .newline,
+
+    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter (필드명 dashed)
+        .page_keys = Meta{ .doc = "메인 화면 PageUp/Down", .widget = .dropdown, .section = .input },
+        .shift_enter = Meta{ .doc = "Shift+Enter 인코딩", .widget = .dropdown, .section = .input },
+        .ime_enter = Meta{ .doc = "IME 조합 중 Enter", .widget = .dropdown, .section = .input },
+    };
 };
 
 /// quick terminal(전역 토글 오버레이 패널)을 어느 화면에 띄울지. main=주 디스플레이, mouse=마우스 포인터가
@@ -321,6 +335,11 @@ pub const SidebarConfig = struct {
     show_branch: bool = true,
     /// 카드에 폴더(cwd) 경로를 표시할지(기본 true). loader `sidebar.show-folder`.
     show_folder: bool = true,
+
+    pub const schema = .{ // 키: sidebar.show-branch / sidebar.show-folder
+        .show_branch = Meta{ .doc = "사이드바 카드에 git 브랜치 표시", .widget = .toggle, .section = .sidebar },
+        .show_folder = Meta{ .doc = "사이드바 카드에 폴더 경로 표시", .widget = .toggle, .section = .sidebar },
+    };
 };
 
 /// quick terminal 표시 옵션. 값 검증/기본값은 loader가 채우고, 플랫폼(Swift)이 ABI로 받아 패널 크기·위치·
@@ -345,6 +364,16 @@ pub const QuickTerminalConfig = struct {
     // 생성을 차단; split은 divider로 보이므로 유지). true면 탭을 허용한다(파워유저용 — ⌘1..9/⌘]로만 전환).
     // full 모드는 이 값과 무관하게 탭이 항상 동작한다(chrome이 탭을 보여줌). 적용은 그 세션 dispatch(Zig)가 한다.
     minimal_tabs: bool = false,
+
+    pub const schema = .{ // namespace quick-terminal(dashed). height_fraction/width_fraction은 키가 height/width라 key_seg 명시.
+        .height_fraction = Meta{ .key_seg = "height", .doc = "두께 비율(화면 대비)", .range = .{ 0.1, 1.0 }, .widget = .slider, .section = .quick_terminal },
+        .width_fraction = Meta{ .key_seg = "width", .doc = "center 가로 비율", .range = .{ 0.1, 1.0 }, .widget = .slider, .section = .quick_terminal },
+        .auto_hide = Meta{ .doc = "포커스 잃으면 자동 숨김", .widget = .toggle, .section = .quick_terminal },
+        .screen = Meta{ .doc = "어느 화면에 띄울지", .widget = .dropdown, .section = .quick_terminal },
+        .position = Meta{ .doc = "어느 가장자리에서 나올지", .widget = .dropdown, .section = .quick_terminal },
+        .chrome = Meta{ .doc = "패널 chrome 수준", .widget = .dropdown, .section = .quick_terminal },
+        .minimal_tabs = Meta{ .doc = "minimal에서 탭 허용", .widget = .toggle, .section = .quick_terminal },
+    };
 };
 
 pub const Config = struct {
@@ -419,6 +448,11 @@ pub const ShellConfig = struct {
     /// 셸 인자(argv, command 제외). 기본 `-i`(대화형). loader `shell.args`가 공백으로 토큰 분리해 교체한다
     /// (빈 줄이면 인자 없음). 따옴표 미지원 — 셸 플래그는 보통 단순(`-i`·`-l`).
     args: []const []const u8 = &.{"-i"},
+
+    // command(text)만 스키마-주도. args는 공백-토큰 리스트라 loader 명시 핸들러 유지(특수).
+    pub const schema = .{
+        .command = Meta{ .doc = "셸 실행 파일 경로(절대경로, 빈 값=자동)", .widget = .text, .section = .terminal },
+    };
 };
 
 /// 워크스페이스(시작 창·새 탭/분할) 설정. Ghostty `working-directory` + `*-inherit-working-directory` 모델을
@@ -442,6 +476,12 @@ pub const WorkspaceConfig = struct {
     /// (Ghostty `split-inherit-working-directory` 기본과 동일; tmux `split-window`·iTerm2 새 split도 현재 디렉터리
     /// 상속). `false`면 `root`에서 연다(상속할 cwd 없으면 마찬가지). loader가 `workspace.split-inherit-cwd` 키로 파싱.
     split_inherit_cwd: bool = true,
+
+    // root는 절대경로/~ 특수 검증이라 loader 명시 핸들러 유지. inherit 토글만 스키마-주도.
+    pub const schema = .{ // 키: workspace.tab-inherit-cwd / workspace.split-inherit-cwd
+        .tab_inherit_cwd = Meta{ .doc = "새 탭/Term이 포커스 cwd 상속", .widget = .toggle, .section = .workspace },
+        .split_inherit_cwd = Meta{ .doc = "새 분할이 포커스 cwd 상속", .widget = .toggle, .section = .workspace },
+    };
 };
 
 /// 셸 통합 설정. 통합 자체(macOS 편집키·OSC 133/7)는 zsh면 항상 켜지지만, 아래 항목은 추가 동작을
@@ -453,6 +493,10 @@ pub const ShellIntegrationConfig = struct {
     /// 기본 off인 이유: `ssh`를 가리는 함수 주입은 침습적이라 사용자 동의가 필요하다(Ghostty도 `ssh-*`를
     /// 기본 off로 둔다 — 동작 비교). loader가 `shell-integration.ssh` 키로 파싱.
     ssh: bool = false,
+
+    pub const schema = .{ // namespace shell-integration(dashed). 키: shell-integration.ssh
+        .ssh = Meta{ .doc = "평범한 ssh를 maru ssh로 라우팅", .widget = .toggle, .section = .terminal },
+    };
 };
 
 /// 데스크톱 알림 설정.
@@ -461,6 +505,10 @@ pub const NotificationConfig = struct {
     /// 띄울지. 기본 true — 다른 일을 보는 동안 끝났음을 알린다(활성 탭은 화면으로 이미 보이므로 안 띄움).
     /// loader가 `notifications.agent-complete` 키로 파싱.
     agent_complete: bool = true,
+
+    pub const schema = .{ // 키: notifications.agent-complete
+        .agent_complete = Meta{ .doc = "비활성 탭 에이전트 완료 알림", .widget = .toggle, .section = .terminal },
+    };
 };
 
 /// 스크롤백 설정.
@@ -468,6 +516,10 @@ pub const ScrollbackConfig = struct {
     /// 가시 화면 위로 보관할 과거 줄 수(ring). 0이면 스크롤백 비활성(과거 줄 안 보관). 기본 1000.
     /// loader가 `scrollback.lines` 키로 파싱(0~100000, 상한은 메모리 폭주 가드).
     lines: u32 = 1000,
+
+    pub const schema = .{ // 키: scrollback.lines (u32 range)
+        .lines = Meta{ .doc = "스크롤백 보관 줄 수", .range = .{ 0, 100000 }, .widget = .number, .section = .terminal },
+    };
 };
 
 /// 벨(BEL, 0x07) 설정.
@@ -475,4 +527,8 @@ pub const BellConfig = struct {
     /// BEL 수신 시 시스템 소리(NSSound.beep)를 낼지. 기본 true. false면 음소거(코어 플래그는 정상 소비).
     /// loader가 `bell.audible` 키로 파싱.
     audible: bool = true,
+
+    pub const schema = .{ // 키: bell.audible
+        .audible = Meta{ .doc = "BEL 수신 시 시스템 소리", .widget = .toggle, .section = .terminal },
+    };
 };

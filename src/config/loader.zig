@@ -59,16 +59,8 @@ pub const Parsed = struct {
     }
 };
 
-const max_font_size: f32 = 512.0;
-const min_font_size: f32 = 1.0;
-// font.size-step 허용 범위 — theme.zig가 단일 출처(resolveFont도 같은 const를 써 drift 없음).
-const max_font_step: f32 = theme.font_size_step_max;
-const min_font_step: f32 = theme.font_size_step_min;
-// font.line-height / font.letter-spacing 허용 범위 — theme.zig 단일 출처(resolveFont도 같은 const 공유, drift 없음).
-const max_line_height: f32 = theme.font_line_height_max;
-const min_line_height: f32 = theme.font_line_height_min;
-const max_letter_spacing: f32 = theme.font_letter_spacing_max;
-const min_letter_spacing: f32 = theme.font_letter_spacing_min;
+// font.* 수치 범위 const는 스키마-주도 이주(CS-1/CS-2) 후 theme.zig의 Meta.range가 직접 참조한다(단일 출처는
+// 여전히 theme.zig — appearance.resolveFont도 같은 const 공유, drift 없음). loader-local 별칭은 제거.
 
 /// config 텍스트를 raw Config로 파싱한다(파일시스템 무관, 순수). 알 수 없는 key/잘못된 값은
 /// 기본값 유지 + diagnostic. OOM만 에러.
@@ -143,16 +135,7 @@ fn applyKey(
         try env_overrides.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, value }));
         return;
     }
-    if (std.mem.eql(u8, key, "shell.command")) {
-        // 셸 실행 파일 경로. 빈 값이면 무시(기본 "" 유지 = resolveInteractiveShell 폴백) — term과 같은 forgiving.
-        const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
-        if (trimmed.len == 0) {
-            try diags.append(a, .{ .line = line_no, .message = "shell.command가 비어 있음 — 기본(셸 자동 결정) 유지" });
-            return;
-        }
-        config.shell.command = try a.dupe(u8, trimmed);
-        return;
-    }
+    // shell.command는 스키마-주도로 이주(CS-2) — 아래 schema.tryParse가 처리. shell.args만 특수(공백-토큰 리스트).
     if (std.mem.eql(u8, key, "shell.args")) {
         // 공백으로 토큰 분리해 argv로(따옴표 미지원 — 셸 플래그는 단순). 빈 값이면 인자 없음(&.{}). 줄 여러 번이면 마지막이 이김.
         var list: std.ArrayList([]const u8) = .empty;
@@ -161,34 +144,11 @@ fn applyKey(
         config.shell.args = try list.toOwnedSlice(a);
         return;
     }
-    // 스키마-주도 필드(CS-1: font.size·cursor.shape·cursor.blink·theme.background). 매칭되면 파싱·적용하고 끝.
-    // 미매칭이면 false → 아래 옛 if-else로 폴백(CS-2에서 스칼라 전부 이주하면 이 폴백이 사라진다). 단일 출처: docs/config-schema.md.
+    // 스키마-주도 스칼라(CS-1+CS-2: font.*·theme 색·cursor.*·input.*·quick-terminal.*·sidebar.*·notifications.*·
+    // scrollback.*·bell.*·shell-integration.*·workspace.{tab,split}-inherit·shell.command). 매칭되면 파싱·적용하고 끝.
+    // 미매칭이면 false → 아래 if-else(특수 5종 + 최상위 스칼라)로 폴백. 단일 출처: docs/config-schema.md.
     if (try schema.tryParse(a, config, key, value, diags, line_no)) return;
-    if (std.mem.eql(u8, key, "font.family")) {
-        const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
-        if (trimmed.len == 0) {
-            try diags.append(a, .{ .line = line_no, .message = "font.family가 비어 있음 — 기본값 유지" });
-            return;
-        }
-        config.font.family = try a.dupe(u8, trimmed);
-        // font.size는 스키마-주도로 이주(CS-1) — 위 schema.tryParse가 처리. 옛 분기 제거.
-    } else if (std.mem.eql(u8, key, "font.size-step")) {
-        config.font.size_step = parseFloatInRange(value, min_font_step, max_font_step) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "font.size-step이 0.1~32 범위 밖이거나 숫자가 아님 — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "font.line-height")) {
-        config.font.line_height = parseFloatInRange(value, min_line_height, max_line_height) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "font.line-height가 0.5~3.0 범위 밖이거나 숫자가 아님 — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "font.letter-spacing")) {
-        // min을 음수로 줘 칸 좁힘을 허용한다(NaN은 parseFloatInRange가 범위검사로 함께 거부).
-        config.font.letter_spacing = parseFloatInRange(value, min_letter_spacing, max_letter_spacing) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "font.letter-spacing이 -8~32 범위 밖이거나 숫자가 아님 — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "theme.preset")) {
+    if (std.mem.eql(u8, key, "theme.preset")) {
         // 이름 붙은 컬러 테마(프리셋). config.theme를 통째로 그 색 세트로 깐다(theme.presetColors가 단일 출처).
         // 개별 theme.* 키가 이 줄 *뒤에* 오면 그 색만 override한다(loader 순차 적용 — 나중 줄 우선). 프리셋 색은
         // 정적 리터럴이라 arena dupe 불필요. 알 수 없는 값은 forgiving(기본 maru 유지 + diagnostic).
@@ -197,13 +157,7 @@ fn applyKey(
             return;
         };
         config.theme = theme.presetColors(preset);
-        // theme.background는 스키마-주도로 이주(CS-1) — 위 schema.tryParse가 처리. 옛 분기 제거.
-    } else if (std.mem.eql(u8, key, "theme.foreground")) {
-        config.theme.foreground = try dupValidColor(a, diags, line_no, key, value, config.theme.foreground);
-    } else if (std.mem.eql(u8, key, "theme.cursor")) {
-        config.theme.cursor = try dupValidColor(a, diags, line_no, key, value, config.theme.cursor);
-    } else if (std.mem.eql(u8, key, "theme.selection")) {
-        config.theme.selection = try dupValidColor(a, diags, line_no, key, value, config.theme.selection);
+        // theme.background/foreground/cursor/selection은 스키마-주도로 이주(CS-1/CS-2). palette.N만 특수(인덱스).
     } else if (std.mem.startsWith(u8, key, "theme.palette.")) {
         // ANSI 16색 override: theme.palette.0~.15 = #RRGGBB. suffix를 u8로 파싱해 0~15 범위 검사. 인덱스가 비정수·
         // 범위 밖이면 forgiving(diagnostic + 무시), 색은 dupValidColor가 검증(틀린 색도 forgiving). OSC4가 없을 때의
@@ -222,70 +176,10 @@ fn applyKey(
         // 기존(보통 null) 값을 유지한다(forgiving). 유효하면 dupe된 색으로 갱신.
         const validated = try dupValidColor(a, diags, line_no, key, value, "");
         if (validated.len != 0) config.theme.palette[idx] = validated;
-        // cursor.shape·cursor.blink는 스키마-주도로 이주(CS-1) — 위 schema.tryParse가 처리. 옛 분기 제거.
-    } else if (std.mem.eql(u8, key, "input.page-keys")) {
-        config.input.page_keys = parsePageKeys(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "input.page-keys는 passthrough|scroll — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "input.shift-enter")) {
-        config.input.shift_enter = parseShiftEnter(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "input.shift-enter는 newline|native — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "input.ime-enter")) {
-        config.input.ime_enter = parseImeEnter(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "input.ime-enter는 newline|commit-only — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "quick-terminal.height")) {
-        config.quick_terminal.height_fraction = parseFloatInRange(value, 0.1, 1.0) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.height는 0.1~1.0(예: 0.45) — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "quick-terminal.width")) {
-        config.quick_terminal.width_fraction = parseFloatInRange(value, 0.1, 1.0) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.width는 0.1~1.0(예: 0.6) — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "quick-terminal.auto-hide")) {
-        config.quick_terminal.auto_hide = parseBool(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.auto-hide는 true|false — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "quick-terminal.screen")) {
-        config.quick_terminal.screen = parseQuickTerminalScreen(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.screen은 main|mouse — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "quick-terminal.position")) {
-        config.quick_terminal.position = parseQuickTerminalPosition(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.position은 top|bottom|left|right|center — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "quick-terminal.chrome")) {
-        config.quick_terminal.chrome = parseQuickTerminalChrome(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.chrome은 full|minimal — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "quick-terminal.minimal-tabs")) {
-        config.quick_terminal.minimal_tabs = parseBool(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "quick-terminal.minimal-tabs는 true|false — 기본값 유지" });
-            return;
-        };
+        // cursor.*·input.*·quick-terminal.*는 스키마-주도로 이주(CS-1/CS-2) — 위 schema.tryParse가 처리.
     } else if (std.mem.eql(u8, key, "chrome.theme")) {
         config.chrome_theme = if (std.mem.eql(u8, value, "rich")) .rich else if (std.mem.eql(u8, value, "tui")) .tui else {
             try diags.append(a, .{ .line = line_no, .message = "chrome.theme은 tui|rich — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "sidebar.show-branch")) {
-        config.sidebar.show_branch = parseBool(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "sidebar.show-branch는 true|false — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "sidebar.show-folder")) {
-        config.sidebar.show_folder = parseBool(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "sidebar.show-folder는 true|false — 기본값 유지" });
             return;
         };
     } else if (std.mem.eql(u8, key, "text.blink")) {
@@ -303,21 +197,7 @@ fn applyKey(
             try diags.append(a, .{ .line = line_no, .message = "theme.bold-is-bright는 true|false — 기본값 유지" });
             return;
         };
-    } else if (std.mem.eql(u8, key, "notifications.agent-complete")) {
-        config.notifications.agent_complete = parseBool(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "notifications.agent-complete는 true|false — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "scrollback.lines")) {
-        config.scrollback.lines = parseUintMax(value, 100000) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "scrollback.lines는 0~100000 정수 — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "bell.audible")) {
-        config.bell.audible = parseBool(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "bell.audible은 true|false — 기본값 유지" });
-            return;
-        };
+        // sidebar.*·notifications.*·scrollback.*·bell.*는 스키마-주도로 이주(CS-2) — 위 schema.tryParse가 처리.
     } else if (std.mem.eql(u8, key, "window.padding-top")) {
         config.window_padding_top = parseUintMax(value, 256) orelse {
             try diags.append(a, .{ .line = line_no, .message = "window.padding-top은 0~256 정수 — 기본값 유지" });
@@ -362,11 +242,7 @@ fn applyKey(
             return;
         }
         config.term = try a.dupe(u8, trimmed);
-    } else if (std.mem.eql(u8, key, "shell-integration.ssh")) {
-        config.shell_integration.ssh = parseBool(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "shell-integration.ssh는 true|false — 기본값 유지" });
-            return;
-        };
+        // shell-integration.ssh는 스키마-주도로 이주(CS-2) — 위 schema.tryParse가 처리.
     } else if (std.mem.eql(u8, key, "workspace.root")) {
         // 시작 창·새 탭이 열리는 디렉터리. raw 문자열만 보관한다 — `~` 확장·존재 검증은 $HOME이 필요해
         // platform layer(spawn 시점)가 한다(loader는 순수 파서라 env에 의존하지 않는다 — Linux CI). 경로는
@@ -385,63 +261,18 @@ fn applyKey(
             return;
         }
         config.workspace.root = try a.dupe(u8, trimmed);
-    } else if (std.mem.eql(u8, key, "workspace.tab-inherit-cwd")) {
-        config.workspace.tab_inherit_cwd = parseBool(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "workspace.tab-inherit-cwd는 true|false — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "workspace.split-inherit-cwd")) {
-        config.workspace.split_inherit_cwd = parseBool(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "workspace.split-inherit-cwd는 true|false — 기본값 유지" });
-            return;
-        };
+        // workspace.{tab,split}-inherit-cwd는 스키마-주도로 이주(CS-2) — 위 schema.tryParse가 처리.
     } else {
         try diags.append(a, .{ .line = line_no, .message = "알 수 없는 key — 무시" });
     }
 }
 
-fn parseQuickTerminalScreen(value: []const u8) ?theme.QuickTerminalScreen {
-    if (std.mem.eql(u8, value, "main")) return .main;
-    if (std.mem.eql(u8, value, "mouse")) return .mouse;
-    return null;
-}
-
-fn parseQuickTerminalPosition(value: []const u8) ?theme.QuickTerminalPosition {
-    if (std.mem.eql(u8, value, "top")) return .top;
-    if (std.mem.eql(u8, value, "bottom")) return .bottom;
-    if (std.mem.eql(u8, value, "left")) return .left;
-    if (std.mem.eql(u8, value, "right")) return .right;
-    if (std.mem.eql(u8, value, "center")) return .center;
-    return null;
-}
-
-fn parseQuickTerminalChrome(value: []const u8) ?theme.QuickTerminalChrome {
-    if (std.mem.eql(u8, value, "full")) return .full;
-    if (std.mem.eql(u8, value, "minimal")) return .minimal;
-    return null;
-}
-
-fn parsePageKeys(value: []const u8) ?theme.PageKeys {
-    if (std.mem.eql(u8, value, "passthrough")) return .passthrough;
-    if (std.mem.eql(u8, value, "scroll")) return .scroll;
-    return null;
-}
-
+// parseQuickTerminal*·parsePageKeys·parseShiftEnter·parseImeEnter·parseCursorShape는 스키마-주도 이주(CS-1/CS-2)로
+// schema의 enum 파싱('_'↔'-' 규약)이 대신한다 — 제거. parseAmbiguousWidth만 남는다(text.ambiguous-width는 최상위
+// 스칼라라 아직 미이주 — CS-2b 또는 Config.schema로 후속).
 fn parseAmbiguousWidth(value: []const u8) ?theme.AmbiguousWidth {
     if (std.mem.eql(u8, value, "narrow")) return .narrow;
     if (std.mem.eql(u8, value, "wide")) return .wide;
-    return null;
-}
-
-fn parseShiftEnter(value: []const u8) ?theme.ShiftEnter {
-    if (std.mem.eql(u8, value, "newline")) return .newline;
-    if (std.mem.eql(u8, value, "native")) return .native;
-    return null;
-}
-
-fn parseImeEnter(value: []const u8) ?theme.ImeEnter {
-    if (std.mem.eql(u8, value, "newline")) return .newline;
-    if (std.mem.eql(u8, value, "commit-only")) return .commit_only;
     return null;
 }
 
@@ -662,13 +493,7 @@ fn parseUintMax(value: []const u8, max: u32) ?u32 {
     return if (n <= max) n else null;
 }
 
-/// 실수를 [min, max]로 파싱한다 — 비실수는 null. 범위 검사는 `!(>=min and <=max)`로 NaN까지 함께
-/// 거부한다(NaN은 두 비교가 모두 false라 항상 reject). font 크기/스텝/줄높이/자간·quick-terminal 비율이
-/// 같은 forgiving 패턴을 공유한다(letter-spacing은 음수 허용 — min을 음수로 줘 호출처가 정한다).
-fn parseFloatInRange(value: []const u8, min: f32, max: f32) ?f32 {
-    const n = std.fmt.parseFloat(f32, value) catch return null;
-    return if (n >= min and n <= max) n else null;
-}
+// parseFloatInRange는 스키마-주도 이주(CS-1/CS-2)로 schema.parseFloatRange가 대신한다 — 제거(loader엔 더 이상 f32 키 없음).
 
 /// config 한 줄을 갱신할 키·값 쌍. value는 이미 직렬화된 토큰(`true`/`false` 등). 단일 출처는 schema.KeyValue.
 pub const KeyValue = schema.KeyValue;

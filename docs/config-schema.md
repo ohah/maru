@@ -129,7 +129,7 @@ struct 필드로 안 떨어지는 키는 **명시 핸들러**로 둔다(지금 �
 |---|---|---|
 | **CS-0** | 이 설계 문서 | doc-first(현재 PR) |
 | **CS-1** ✅ | **프레임워크** — `Meta`/`Widget`/`Section` 타입(`theme.zig`), comptime `tryParse`/`appendSerialized`/드리프트 체크(`src/config/schema.zig`). 대표 4종(`cursor.blink` bool·`font.size` 범위 float·`cursor.shape` enum·`theme.background` 색)을 스키마로 이주, 기존 round-trip·full-config 테스트가 동작 불변 증명 | ✅ 머지. 코엑시스턴스는 이 PR 한정. enum 토큰은 `_`↔`-` 규약으로 per-enum 테이블 불필요 |
-| **CS-2** | **스칼라 전 필드 이주** — loader의 거대한 if-else에서 스칼라 분기를 제거하고 제너릭 매처로 일원화. 특수 5종(§6)만 명시 핸들러로 남김. 기존 round-trip·full-config 테스트가 가드(동작 불변) | 큰 diff지만 기계적(삭제 위주) + 테스트 커버 |
+| **CS-2** ✅ | **sub-struct 스칼라 전 필드 이주** — font.*·theme 색·input.*·quick-terminal.*·sidebar.*·notifications.*·scrollback.*·bell.*·shell-integration.*·workspace.{tab,split}-inherit·shell.command. 엔진에 `_`↔`-` namespace/segment 변환 + u32 지원 추가. loader 죽은 분기·헬퍼(parseFloatInRange·parse{PageKeys,ShiftEnter,ImeEnter,QuickTerminal*}) + serialize 죽은 토큰 헬퍼 제거. 기존 round-trip·full-config 테스트가 동작 불변 가드 | ✅ 머지. **최상위 스칼라**(chrome.theme·text.*·theme.bold-is-bright·window.padding-*·term)는 Config.schema 미지원이라 아직 수동(CS-2b); 특수(§6 5종 + workspace.root·shell.args)는 명시 핸들러 |
 | **CS-3** | **문서 생성** — `configuration.md` 키 표를 메타에서 생성(마커 블록). 산문 절은 수동 유지 | doc-drift 제거 |
 | **CS-4+** | **GUI 제너릭 렌더러** — 위젯 N종 + section 네비. [settings-page.md] Phase G를 이 문서로 재정의(스칼라는 공짜, bespoke만 G에 남김) | G 단계 축소 |
 

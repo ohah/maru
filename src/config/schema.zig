@@ -39,7 +39,7 @@ pub fn tryParse(
             const sch = Container.schema;
             inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
                 const meta: theme.Meta = @field(sch, sf.name);
-                const full_key = cf.name ++ "." ++ (meta.key_seg orelse sf.name);
+                const full_key = comptime keyOf(cf.name, sf.name, meta);
                 if (std.mem.eql(u8, key, full_key)) {
                     try parseAndSet(a, &@field(@field(config, cf.name), sf.name), full_key, meta, value, diags, line_no);
                     return true;
@@ -71,6 +71,12 @@ fn parseAndSet(
         const r = comptime (meta.range orelse @compileError(full_key ++ ": f32 필드엔 range 메타가 필수"));
         ptr.* = parseFloatRange(value, @floatCast(r[0]), @floatCast(r[1])) orelse {
             try diags.append(a, .{ .line = line_no, .message = std.fmt.comptimePrint("{s}는 {d}~{d} 범위 밖이거나 숫자가 아님 — 기본값 유지", .{ full_key, r[0], r[1] }) });
+            return;
+        };
+    } else if (T == u32) {
+        const r = comptime (meta.range orelse @compileError(full_key ++ ": u32 필드엔 range 메타가 필수"));
+        ptr.* = parseUintRange(value, @intFromFloat(r[0]), @intFromFloat(r[1])) orelse {
+            try diags.append(a, .{ .line = line_no, .message = std.fmt.comptimePrint("{s}는 {d}~{d} 정수여야 함 — 기본값 유지", .{ full_key, @as(u32, @intFromFloat(r[0])), @as(u32, @intFromFloat(r[1])) }) });
             return;
         };
     } else if (@typeInfo(T) == .@"enum") {
@@ -110,7 +116,7 @@ pub fn appendSerialized(arena: std.mem.Allocator, config: theme.Config, list: *s
             const sch = Container.schema;
             inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
                 const meta: theme.Meta = @field(sch, sf.name);
-                const full_key = cf.name ++ "." ++ (meta.key_seg orelse sf.name);
+                const full_key = comptime keyOf(cf.name, sf.name, meta);
                 const val = @field(@field(config, cf.name), sf.name);
                 try list.append(arena, .{ .key = full_key, .value = try serializeValue(arena, val) });
             }
@@ -123,7 +129,7 @@ fn serializeValue(arena: std.mem.Allocator, val: anytype) ![]const u8 {
     const T = @TypeOf(val);
     if (T == bool) {
         return if (val) "true" else "false";
-    } else if (T == f32) {
+    } else if (T == f32 or T == u32) {
         return try std.fmt.allocPrint(arena, "{d}", .{val});
     } else if (@typeInfo(T) == .@"enum") {
         // tag의 '_'를 '-'로(enum 토큰 규약 — commit_only→commit-only; 나머지는 '_' 없어 무변경).
@@ -151,6 +157,24 @@ fn parseBool(value: []const u8) ?bool {
 fn parseFloatRange(value: []const u8, min: f32, max: f32) ?f32 {
     const n = std.fmt.parseFloat(f32, value) catch return null;
     return if (n >= min and n <= max) n else null; // NaN은 두 비교 모두 false → reject
+}
+
+fn parseUintRange(value: []const u8, min: u32, max: u32) ?u32 {
+    const n = std.fmt.parseInt(u32, std.mem.trim(u8, value, &std.ascii.whitespace), 10) catch return null;
+    return if (n >= min and n <= max) n else null;
+}
+
+/// config 키 segment의 '_'를 '-'로(field명→키 토큰 규약). namespace·segment 둘 다 이걸 쓴다(maru 키는 일관되게
+/// 하이픈). 예외(field명≠키 segment, 예: height_fraction→"height")만 Meta.key_seg로 명시 override. comptime-only.
+fn dashed(comptime s: []const u8) []const u8 {
+    var out: []const u8 = "";
+    for (s) |c| out = out ++ &[_]u8{if (c == '_') '-' else c};
+    return out;
+}
+
+/// 전체 키 = `<namespace>.<segment>`. namespace=Config 필드명(dashed), segment=key_seg ?? 필드명(dashed). comptime-only.
+fn keyOf(comptime ns: []const u8, comptime field: []const u8, comptime meta: theme.Meta) []const u8 {
+    return dashed(ns) ++ "." ++ (meta.key_seg orelse dashed(field));
 }
 
 /// enum 토큰 파싱: '-'를 '_'로 정규화 후 stringToEnum(commit-only→commit_only; 나머지는 무변경). 너무 길면 null.
@@ -208,8 +232,8 @@ test "schema tryParse: bool·enum·범위 float·색을 파싱하고 미스매�
     try std.testing.expectEqualStrings("#abcdef", cfg.theme.background);
     a.free(cfg.theme.background); // 위 dupe 회수(테스트 한정)
 
-    // 미스매치 키 → false(폴백)
-    try std.testing.expect(!try tryParse(a, &cfg, "font.family", "X", &diags, 5));
+    // 미스매치 키(스키마에 없는 키) → false(loader 옛 경로로 폴백). "no.such.key"는 영원히 비-스키마.
+    try std.testing.expect(!try tryParse(a, &cfg, "no.such.key", "X", &diags, 5));
     try std.testing.expectEqual(@as(usize, 0), diags.items.len); // 위 전부 유효 → diagnostic 없음
 }
 

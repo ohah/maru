@@ -3406,8 +3406,15 @@ pub const AppSession = struct {
         enums: []config_mod.schema.EnumField,
         texts: []config_mod.schema.TextField,
         colors: []config_mod.schema.ColorField,
+        /// theme 섹션이면 ANSI 16색 팔레트 그리드 한 행을 color 뒤(마지막)에 추가한다(theme.palette.0~15 — 특수 키, schema
+        /// 필드 아님). 핸들러가 selected==after_colors면 팔레트 행으로 라우팅한다.
+        has_palette: bool = false,
         fn total(self: SettingsSectionFields) usize {
-            return self.bools.len + self.nums.len + self.enums.len + self.texts.len + self.colors.len;
+            return self.bools.len + self.nums.len + self.enums.len + self.texts.len + self.colors.len + @as(usize, if (self.has_palette) 1 else 0);
+        }
+        /// 팔레트 그리드 행의 selected 인덱스(있으면 항상 마지막 = 다른 필드 다음). 없으면 null.
+        fn paletteRowIndex(self: SettingsSectionFields) ?usize {
+            return if (self.has_palette) self.bools.len + self.nums.len + self.enums.len + self.texts.len + self.colors.len else null;
         }
     };
 
@@ -3492,7 +3499,8 @@ pub const AppSession = struct {
         for (texts_all.items) |t| if (t.section == sel_sec) try texts.append(arena, t);
         var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
         for (colors_all.items) |c| if (c.section == sel_sec) try colors.append(arena, c);
-        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items };
+        // theme 섹션엔 ANSI 16색 팔레트 그리드 한 행(특수 — schema 필드 아님)을 color 뒤에 둔다. 핸들러가 마지막 인덱스로 라우팅.
+        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = (sel_sec == .theme) };
     }
 
     /// config 스키마의 **현재 섹션** 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2·§4). 라벨=meta.doc
@@ -3527,7 +3535,30 @@ pub const AppSession = struct {
             rows[i] = .{ .label = if (c.doc.len > 0) c.doc else c.key, .kind = .{ .color = .{ .hex = c.value, .rgb = rgb } } };
             i += 1;
         }
+        if (cf.has_palette) {
+            // ANSI 16색 팔레트 그리드(theme.palette.0~15). 각 셀의 효과색 = config override 있으면 그 hex, 없으면 표준
+            // xterm256 기본(index<16=ansi16). hex는 편집 시드용(override는 그대로, 기본은 RGB→#rrggbb 포맷). 선택 셀은
+            // State.grid_cell(클램프). arena 소유(이 프레임만 — view가 읽고 버린다).
+            var cells: [16]Row.PaletteGrid.Cell = undefined;
+            for (&cells, 0..) |*cell, idx| {
+                if (self.loaded_config.config.theme.palette[idx]) |hex| {
+                    const rgb = config_mod.appearance.parseHexColor(hex) catch (config_mod.appearance.parseHexColor("#808080") catch unreachable);
+                    cell.* = .{ .rgb = rgb, .hex = hex };
+                } else {
+                    const rgb = terminal.types.xterm256(@intCast(idx));
+                    cell.* = .{ .rgb = rgb, .hex = try rgbToHex(arena, rgb) };
+                }
+            }
+            const sel = @min(self.chrome_host.settings.grid_cell, cells.len - 1);
+            rows[i] = .{ .label = "ANSI 팔레트", .kind = .{ .palette_grid = .{ .cells = cells, .selected = sel } } };
+            i += 1;
+        }
         return rows;
+    }
+
+    /// RGB를 `#rrggbb` 소문자 hex로(arena 소유). 팔레트 그리드의 미override 셀(xterm256 기본)의 편집 시드/표시용.
+    fn rgbToHex(arena: std.mem.Allocator, rgb: @TypeOf(config_mod.appearance.parseHexColor("#000000") catch unreachable)) ![]const u8 {
+        return std.fmt.allocPrint(arena, "#{x:0>2}{x:0>2}{x:0>2}", .{ rgb.r, rgb.g, rgb.b });
     }
 
     /// 좌측 네비 라벨 목록(현재 섹션 강조는 컴포넌트가 settings.section으로). arena 소유.
@@ -3576,7 +3607,8 @@ pub const AppSession = struct {
             if (ti < cf.texts.len) self.chrome_host.settings.enterEdit(cf.texts[ti].value);
             return;
         }
-        if (sel >= after_texts) {
+        const after_colors = after_texts + cf.colors.len;
+        if (sel >= after_texts and sel < after_colors) {
             // color 행 — 활성(스와치 클릭/Enter) = 다음 16색 프리셋 순환. hex 영역 클릭 편집은 컴포넌트가 enterEdit.
             const ci = sel - after_texts;
             if (ci < cf.colors.len) {
@@ -3588,7 +3620,22 @@ pub const AppSession = struct {
             }
             return;
         }
+        if (cf.paletteRowIndex()) |pi| if (sel == pi) {
+            // 팔레트 그리드 행 — Enter/Space = 선택 셀 hex 인라인 편집 시작(현재 효과색 시드). 커밋은 commitSelectedText.
+            const gi = @min(self.chrome_host.settings.grid_cell, 15);
+            const seed = self.paletteCellHex(scratch.allocator(), gi) catch return;
+            self.chrome_host.settings.enterEdit(seed);
+            return;
+        };
         // slider 행(bool..after_nums)은 toggle/Enter 무동작(드래그/←→로 조절).
+    }
+
+    /// 팔레트 셀 idx의 효과색 hex(arena 소유) — config override 있으면 그 hex(빌림), 없으면 xterm256 기본을 #rrggbb로.
+    /// 그리드 행의 편집 시드용(enterEdit가 즉시 고정 버퍼에 복사하므로 arena 수명은 호출 직후까지면 충분).
+    fn paletteCellHex(self: *AppSession, arena: std.mem.Allocator, idx: usize) ![]const u8 {
+        if (idx >= self.loaded_config.config.theme.palette.len) return "#000000";
+        if (self.loaded_config.config.theme.palette[idx]) |hex| return hex;
+        return try rgbToHex(arena, terminal.types.xterm256(@intCast(idx)));
     }
 
     /// 인라인 편집 커밋(text 행 Enter) — settings.editText()를 config arena에 dupe해 schema.setText로 적용하고 라이브
@@ -3600,13 +3647,25 @@ pub const AppSession = struct {
         const sel = self.chrome_host.settings.selected;
         const after_enums = cf.bools.len + cf.nums.len + cf.enums.len;
         const after_texts = after_enums + cf.texts.len;
+        const after_colors = after_texts + cf.colors.len;
         defer self.chrome_host.settings.cancelEdit(); // 성공/실패 무관 편집 종료(키는 다시 네비로)
-        // 편집 가능 행 = text(after_enums..after_texts) 또는 color hex(after_texts..). 둘 다 setText로 커밋(검증 포함).
+        // 팔레트 그리드 행은 setText가 아니라 setPaletteColor로 커밋(theme.palette.N은 schema 필드가 아님). 그 칸 키를
+        // dirty로 — write-back(serialize)이 set된 palette.N을 이미 직렬화하므로 영속된다.
+        if (cf.paletteRowIndex()) |pi| if (sel == pi) {
+            const gi = @min(self.chrome_host.settings.grid_cell, 15);
+            const owned = self.loaded_config.arena.allocator().dupe(u8, self.chrome_host.settings.editText()) catch return;
+            if (config_mod.schema.setPaletteColor(&self.loaded_config.config, gi, owned)) {
+                self.reapplyLoadedConfig();
+                self.markConfigKeyDirty(config_mod.schema.paletteKey(gi));
+            }
+            return;
+        };
+        // 편집 가능 행 = text(after_enums..after_texts) 또는 color hex(after_texts..after_colors). 둘 다 setText로 커밋(검증 포함).
         const key: []const u8 = if (sel >= after_enums and sel < after_texts) blk: {
             const ti = sel - after_enums;
             if (ti >= cf.texts.len) return;
             break :blk cf.texts[ti].key;
-        } else if (sel >= after_texts) blk: {
+        } else if (sel >= after_texts and sel < after_colors) blk: {
             const ci = sel - after_texts;
             if (ci >= cf.colors.len) return;
             break :blk cf.colors[ci].key;
@@ -3669,7 +3728,8 @@ pub const AppSession = struct {
             return;
         }
         const after_texts = after_enums + cf.texts.len;
-        if (sel >= after_texts) {
+        const after_colors = after_texts + cf.colors.len;
+        if (sel >= after_texts and sel < after_colors) {
             // color 행 — ←/→ = 이전/다음 16색 프리셋 순환.
             const ci = sel - after_texts;
             if (ci < cf.colors.len) {
@@ -3681,6 +3741,11 @@ pub const AppSession = struct {
             }
             return;
         }
+        if (cf.paletteRowIndex()) |pi| if (sel == pi) {
+            // 팔레트 그리드 행 — ←/→ = 선택 셀 이동(색 변경 아님, 재렌더만). 색 변경은 Enter→hex 편집.
+            self.chrome_host.settings.moveGridCell(dir);
+            return;
+        };
         // text 행(after_enums..after_texts)은 ←/→ 무동작(편집은 hex 클릭).
     }
 
@@ -14237,6 +14302,70 @@ test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist �
         if (std.mem.eql(u8, k, first_key)) found = true;
     }
     try std.testing.expect(found);
+}
+
+test "settings palette grid: theme 섹션 마지막 행에서 셀 hex 편집 → palette[idx] set + theme.palette.idx dirty (CS-4-5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // theme 섹션 선택(네비에서 theme 인덱스 찾기 — 기본 config 기준).
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var theme_idx: usize = 0;
+    for (sections, 0..) |s, i| if (s.section == .theme) {
+        theme_idx = i;
+    };
+    session.chrome_host.settings.show();
+    session.chrome_host.settings.section = theme_idx;
+
+    // 팔레트 그리드 행은 theme 섹션 마지막(color 뒤). paletteRowIndex로 selected 설정.
+    const cf = try session.currentSectionFields(scratch.allocator());
+    try std.testing.expect(cf.has_palette);
+    const pi = cf.paletteRowIndex().?;
+    session.chrome_host.settings.selected = pi;
+
+    // 셀 5 선택 → Enter(toggle) = 편집 시작(기본 미override라 xterm256(5) 시드).
+    session.chrome_host.settings.grid_cell = 5;
+    session.toggleSelectedSetting();
+    try std.testing.expect(session.chrome_host.settings.editing);
+
+    // 편집 버퍼를 새 hex로 바꿔 커밋 → palette[5]=#abcdef, dirty=theme.palette.5(write-back이 직렬화).
+    session.chrome_host.settings.enterEdit("#abcdef");
+    session.config_dirty_keys.clearRetainingCapacity();
+    session.commitSelectedText();
+    try std.testing.expect(session.loaded_config.config.theme.palette[5] != null);
+    try std.testing.expectEqualStrings("#abcdef", session.loaded_config.config.theme.palette[5].?);
+    try std.testing.expect(!session.chrome_host.settings.editing); // 커밋 후 편집 종료
+    var found = false;
+    for (session.config_dirty_keys.items) |k| if (std.mem.eql(u8, k, "theme.palette.5")) {
+        found = true;
+    };
+    try std.testing.expect(found);
+
+    // ←/→(adjust) = 선택 셀 이동(색 변경 아님, wrap).
+    session.chrome_host.settings.grid_cell = 5;
+    session.adjustSelectedSetting(1);
+    try std.testing.expectEqual(@as(usize, 6), session.chrome_host.settings.grid_cell);
+    session.adjustSelectedSetting(-1);
+    try std.testing.expectEqual(@as(usize, 5), session.chrome_host.settings.grid_cell);
+
+    // 잘못된 hex는 거부(기존값 유지) — 파일 로드와 같은 검증.
+    session.chrome_host.settings.selected = pi;
+    session.chrome_host.settings.grid_cell = 5;
+    session.chrome_host.settings.enterEdit("#gggggg");
+    session.commitSelectedText();
+    try std.testing.expectEqualStrings("#abcdef", session.loaded_config.config.theme.palette[5].?); // 거부 — 유지
 }
 
 test "detectThemePreset / applyThemePreset / resetAllSettings: 테마 프리셋·통합 리셋" {

@@ -134,6 +134,16 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 커맨드 팝업(Cmd+Shift+P) **"Reset All Settings to Defaults"**(action `reset_settings`) — 모든 config를 **내장 기본값**으로 되돌린다. 메뉴 "Reset to Defaults"(런타임 줌/여백만 → init 설정)와 달리 config 전체다. `resetAllSettings`이 ① `loaded_config.config = Config{}`(정적 기본값, 새 arena 불요)로 갈고 ② `reapplyLoadedConfig`(=`reloadConfig`와 같은 재적용 — appearance·behavior·scrollback·palette·ambiguous·사이드바)를 한 뒤 ③ **config 파일을 삭제**한다(`std.c.unlink`). 부분 write-back이 아니라 삭제인 이유: schema 키만 dirty로 찍으면 (a) 비-schema 키(`theme.preset`·`palette.N`·`env.*`·`cursor.color`·`shell.args`)가 안 지워지고 (b) override-only write-back 정책상 빈 항목까지 기본값 40여 개를 쏟는다. 파일 부재 = 다음 로드에서 schema·특수 키·주석 전부 기본값(진짜 통합 리셋). 삭제 후 `config_dirty_keys`를 비워 Swift write-back이 끼지 않게 하고, 이후 GUI에서 값을 바꾸면 `serializeConfig`가 빈 원본에서 새 파일을 만든다(자연 복구). (확인 모달은 후속 — 현재는 팝업 제목이 명시적이라 바로 적용.)
 
+### 6.5 ANSI 16색 팔레트 그리드(`theme.palette.0~15`) — 특수 행 (CS-4-5 첫 조각)
+
+테마 섹션 맨 아래 **"ANSI 팔레트"** 행 — 16색을 한 줄 스와치 그리드로 편집한다. `theme.palette.N`은 **schema 필드가 아니라 특수 키**(loader가 인덱스 파싱, `[16]?[]const u8`)라 자동 노출되지 않으므로 platform이 color 뒤에 **한 행**을 합성 주입한다(`SettingsSectionFields.has_palette` — theme 섹션일 때만). 16칸이라 공유 control 열에 안 들어가므로 폼 우측에 그리드 블록(`palette_grid` Kind)을 펼친다(control 열 비공유, [§6.1] tui 규율은 그대로 — 색은 `Op.swatch` 원색).
+
+- **셀 색**: `cells[i].rgb` = config override(`theme.palette[i]`) 있으면 그 hex, 없으면 **표준 xterm256(i)**(ANSI 0~15 기본). 그래서 미override 칸도 실제 기본색을 보여준다. hex 시드도 같은 규칙(override는 그대로, 기본은 RGB→`#rrggbb`).
+- **선택·편집**: `←→`로 셀 이동(`State.grid_cell`, wrap), `Enter`/스와치 클릭으로 선택, 선택 셀의 hex를 인라인 편집(text/color 위젯과 같은 고정 버퍼·Enter 커밋·Esc 취소). 커밋은 `schema.setPaletteColor`(파일 로드와 같은 `#RRGGBB` 검증)로 적용 + `theme.palette.N` 키 dirty.
+- **선택 표식 = 인덱스 텍스트**: 우측에 **`N  #rrggbb`**(선택 ANSI 인덱스 + hex)를 보여준다. 셀 위에 `Op.border`/`fill`을 얹으면 tui lowering(`paintRectBg`가 셀 단위)이 **1행 높이라 셀 전체를 그 색으로 칠해 스와치 색을 덮으므로** 안 쓴다. 인덱스는 색과 무관하게 어느 칸인지 분명히 보여준다.
+- **영속은 공짜**: write-back(`serialize.configKeyValues`)이 **이미 set된 `theme.palette.N`을 직렬화**한다(round-trip 테스트가 보장). 그래서 별도 write-경로 확장 없이 dirty만 찍으면 파일에 써진다 — `theme.preset`이 깐 팔레트도 이 그리드로 직접 칠하면 영속된다([§6.3] 한계의 직접 해소 경로).
+- **한계(후속)**: 온-그리드 선택 마커(현재는 인덱스 텍스트 — reserved 밑줄 프리미티브가 생기면 셀 위 얇은 띠로), 셀별 프리셋 순환(현재는 hex 입력만), null로 되돌리기(현재는 통합 리셋이 담당), env/shell.args bespoke 에디터(CS-4-5 나머지).
+
 ## 7. 의존성
 
 - **S0-1b** ✅(머지) — `serialize.updateForKeys(original, config, keys)`로 **변경 키만** write-back(즉시-저장 결정에
@@ -153,7 +163,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | **CS-4-2** ✅ | color input(16색 프리셋 + hex 입력) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-3** | keybind recorder(`command_catalog` 행 + 키 캡처) | 헤드리스 + 실기 |
 | **CS-4-4** ✅ | **세팅 페이지 셸** — Section 네비 + 제너릭 폼(schema 메타 소비) + 폼 스크롤 + `toggle_settings`(⌘,) 키/메뉴 (상단 검색은 후속) | ✅ 머지(헤드리스 + 실기) |
-| **CS-4-5** | write-back 연결(S0-1b) ✅(CS-4-4c) + bespoke 에디터(palette·env·shell.args) 후속 | 헤드리스 + 실기 |
+| **CS-4-5** | write-back 연결(S0-1b ✅) + bespoke 에디터: **palette 16색 그리드 ✅**(§6.5) → env·shell.args(후속) | 헤드리스 + 실기 |
 | **CS-4-6+** | (선택) color HSV picker 2차, 고급화 | 실기 |
 
 > 시각/상호작용 PR(CS-4-0~5)은 로직을 헤드리스 단위로 고정하되, **머지 전 `zig build macos-app`로 ohah가 실기

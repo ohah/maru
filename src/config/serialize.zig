@@ -37,50 +37,9 @@ fn ambiguousWidthToken(w: theme.AmbiguousWidth) []const u8 {
     };
 }
 
-fn pageKeysToken(p: theme.PageKeys) []const u8 {
-    return switch (p) {
-        .passthrough => "passthrough",
-        .scroll => "scroll",
-    };
-}
-
-fn shiftEnterToken(s: theme.ShiftEnter) []const u8 {
-    return switch (s) {
-        .newline => "newline",
-        .native => "native",
-    };
-}
-
-fn imeEnterToken(i: theme.ImeEnter) []const u8 {
-    return switch (i) {
-        .newline => "newline",
-        .commit_only => "commit-only", // 토큰은 하이픈 — @tagName(commit_only)와 다르다
-    };
-}
-
-fn quickScreenToken(s: theme.QuickTerminalScreen) []const u8 {
-    return switch (s) {
-        .main => "main",
-        .mouse => "mouse",
-    };
-}
-
-fn quickPositionToken(p: theme.QuickTerminalPosition) []const u8 {
-    return switch (p) {
-        .top => "top",
-        .bottom => "bottom",
-        .left => "left",
-        .right => "right",
-        .center => "center",
-    };
-}
-
-fn quickChromeToken(c: theme.QuickTerminalChrome) []const u8 {
-    return switch (c) {
-        .full => "full",
-        .minimal => "minimal",
-    };
-}
+// pageKeysToken·shiftEnterToken·imeEnterToken·quick*Token은 input.*·quick-terminal.*가 스키마-주도 이주(CS-2)로
+// schema의 enum 직렬화('_'↔'-')가 대신한다 — 제거. chromeThemeToken·ambiguousWidthToken·boolToken만 남는다
+// (chrome.theme·text.*·theme.bold-is-bright는 최상위 스칼라라 아직 수동 emit).
 
 fn boolToken(b: bool) []const u8 {
     return if (b) "true" else "false";
@@ -96,86 +55,34 @@ fn boolToken(b: bool) []const u8 {
 pub fn configKeyValues(arena: std.mem.Allocator, config: theme.Config) ![]const KeyValue {
     var list: std.ArrayList(KeyValue) = .empty;
 
-    // 스키마-주도 필드(CS-1: font.size·cursor.shape·cursor.blink·theme.background)를 먼저 emit. 아래 수동 emit은
-    // 아직 미이주 스칼라만 담당한다(CS-2 후엔 이 수동 블록이 특수 5종 빼고 사라진다). 단일 출처: docs/config-schema.md.
+    // 스키마-주도 스칼라(font.*·theme 색·cursor.*·input.*·quick-terminal.*·sidebar.*·notifications.*·scrollback.*·
+    // bell.*·shell-integration.*·workspace.{tab,split}-inherit·shell.command)를 먼저 emit(CS-1+CS-2). 아래 수동 블록은
+    // **미이주 항목만** — 최상위 스칼라(chrome.theme·text.*·theme.bold-is-bright·window.padding-*·term)와 특수
+    // (theme.palette.N·env.*·workspace.root·shell.args). 단일 출처: docs/config-schema.md.
     try schema.appendSerialized(arena, config, &list);
 
-    // font.* (size는 위 스키마-주도)
-    try list.append(arena, .{ .key = "font.family", .value = config.font.family });
-    try list.append(arena, .{ .key = "font.size-step", .value = try std.fmt.allocPrint(arena, "{d}", .{config.font.size_step}) });
-    try list.append(arena, .{ .key = "font.line-height", .value = try std.fmt.allocPrint(arena, "{d}", .{config.font.line_height}) });
-    try list.append(arena, .{ .key = "font.letter-spacing", .value = try std.fmt.allocPrint(arena, "{d}", .{config.font.letter_spacing}) });
-
-    // theme.* (background는 위 스키마-주도; 색 문자열 그대로; palette는 non-null 인덱스만)
-    try list.append(arena, .{ .key = "theme.foreground", .value = config.theme.foreground });
-    try list.append(arena, .{ .key = "theme.cursor", .value = config.theme.cursor });
-    try list.append(arena, .{ .key = "theme.selection", .value = config.theme.selection });
-    for (config.theme.palette, 0..) |entry, i| {
-        const color = entry orelse continue; // null = 그 인덱스는 기본 xterm — 줄 안 만든다(parse가 기본 폴백)
-        try list.append(arena, .{
-            .key = try std.fmt.allocPrint(arena, "theme.palette.{d}", .{i}),
-            .value = color,
-        });
-    }
-
-    // cursor.* (shape·blink는 위 스키마-주도)
-
-    // chrome / text
+    // 최상위 스칼라(sub-struct가 아니라 Config 직속이라 스키마 namespace가 없음 — CS-2b 또는 Config.schema로 후속).
     try list.append(arena, .{ .key = "chrome.theme", .value = chromeThemeToken(config.chrome_theme) });
     try list.append(arena, .{ .key = "text.blink", .value = boolToken(config.blink_text) });
     try list.append(arena, .{ .key = "text.ambiguous-width", .value = ambiguousWidthToken(config.ambiguous_width) });
     try list.append(arena, .{ .key = "theme.bold-is-bright", .value = boolToken(config.bold_is_bright) });
-
-    // input.*
-    try list.append(arena, .{ .key = "input.page-keys", .value = pageKeysToken(config.input.page_keys) });
-    try list.append(arena, .{ .key = "input.shift-enter", .value = shiftEnterToken(config.input.shift_enter) });
-    try list.append(arena, .{ .key = "input.ime-enter", .value = imeEnterToken(config.input.ime_enter) });
-
-    // window.padding-* (4방 개별 — x/y alias는 parse 전용 입력 편의라 역직렬화는 4방으로 정규화한다)
     try list.append(arena, .{ .key = "window.padding-top", .value = try std.fmt.allocPrint(arena, "{d}", .{config.window_padding_top}) });
     try list.append(arena, .{ .key = "window.padding-right", .value = try std.fmt.allocPrint(arena, "{d}", .{config.window_padding_right}) });
     try list.append(arena, .{ .key = "window.padding-bottom", .value = try std.fmt.allocPrint(arena, "{d}", .{config.window_padding_bottom}) });
     try list.append(arena, .{ .key = "window.padding-left", .value = try std.fmt.allocPrint(arena, "{d}", .{config.window_padding_left}) });
-
-    // term
     try list.append(arena, .{ .key = "term", .value = config.term });
 
-    // env.<KEY> — 각 "KEY=VALUE"를 `env.<KEY> = <VALUE>`로 되돌린다(parse의 env. 누적과 대칭). 첫 '='로 가른다.
+    // 특수: theme.palette.N(인덱스), workspace.root(절대경로 검증), shell.args(공백-토큰 리스트), env.<KEY>(동적).
+    for (config.theme.palette, 0..) |entry, i| {
+        const color = entry orelse continue; // null = 그 인덱스는 기본 xterm — 줄 안 만든다(parse가 기본 폴백)
+        try list.append(arena, .{ .key = try std.fmt.allocPrint(arena, "theme.palette.{d}", .{i}), .value = color });
+    }
+    try list.append(arena, .{ .key = "workspace.root", .value = config.workspace.root });
+    try list.append(arena, .{ .key = "shell.args", .value = try std.mem.join(arena, " ", config.shell.args) });
     for (config.env) |entry| {
         const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue; // '=' 없으면 형식 오류 — 건너뜀
-        try list.append(arena, .{
-            .key = try std.fmt.allocPrint(arena, "env.{s}", .{entry[0..eq]}),
-            .value = entry[eq + 1 ..],
-        });
+        try list.append(arena, .{ .key = try std.fmt.allocPrint(arena, "env.{s}", .{entry[0..eq]}), .value = entry[eq + 1 ..] });
     }
-
-    // notifications / scrollback / bell / shell-integration
-    try list.append(arena, .{ .key = "notifications.agent-complete", .value = boolToken(config.notifications.agent_complete) });
-    try list.append(arena, .{ .key = "scrollback.lines", .value = try std.fmt.allocPrint(arena, "{d}", .{config.scrollback.lines}) });
-    try list.append(arena, .{ .key = "bell.audible", .value = boolToken(config.bell.audible) });
-    try list.append(arena, .{ .key = "shell-integration.ssh", .value = boolToken(config.shell_integration.ssh) });
-
-    // sidebar.*
-    try list.append(arena, .{ .key = "sidebar.show-branch", .value = boolToken(config.sidebar.show_branch) });
-    try list.append(arena, .{ .key = "sidebar.show-folder", .value = boolToken(config.sidebar.show_folder) });
-
-    // shell.* — command는 그대로, args는 공백으로 join(파서가 다시 토큰 분리). 빈 args면 빈 값("shell.args = ").
-    try list.append(arena, .{ .key = "shell.command", .value = config.shell.command });
-    try list.append(arena, .{ .key = "shell.args", .value = try std.mem.join(arena, " ", config.shell.args) });
-
-    // workspace.*
-    try list.append(arena, .{ .key = "workspace.root", .value = config.workspace.root });
-    try list.append(arena, .{ .key = "workspace.tab-inherit-cwd", .value = boolToken(config.workspace.tab_inherit_cwd) });
-    try list.append(arena, .{ .key = "workspace.split-inherit-cwd", .value = boolToken(config.workspace.split_inherit_cwd) });
-
-    // quick-terminal.*
-    try list.append(arena, .{ .key = "quick-terminal.height", .value = try std.fmt.allocPrint(arena, "{d}", .{config.quick_terminal.height_fraction}) });
-    try list.append(arena, .{ .key = "quick-terminal.width", .value = try std.fmt.allocPrint(arena, "{d}", .{config.quick_terminal.width_fraction}) });
-    try list.append(arena, .{ .key = "quick-terminal.auto-hide", .value = boolToken(config.quick_terminal.auto_hide) });
-    try list.append(arena, .{ .key = "quick-terminal.screen", .value = quickScreenToken(config.quick_terminal.screen) });
-    try list.append(arena, .{ .key = "quick-terminal.position", .value = quickPositionToken(config.quick_terminal.position) });
-    try list.append(arena, .{ .key = "quick-terminal.chrome", .value = quickChromeToken(config.quick_terminal.chrome) });
-    try list.append(arena, .{ .key = "quick-terminal.minimal-tabs", .value = boolToken(config.quick_terminal.minimal_tabs) });
 
     return list.toOwnedSlice(arena);
 }

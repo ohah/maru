@@ -9,7 +9,7 @@ PR 분해를 단일 출처로 둔다. config 키·메타는 [config-schema.md], 
 
 > 상태(2026-06): **CS-4 구현 진행**. 스키마 토대(CS-1·CS-2·CS-2b·CS-3)에 더해 CS-4-0(pointer)·CS-4-1(toggle·
 > slider·dropdown·text)·CS-4-2(color)·CS-4-4(세팅 페이지 셸 — Section 네비·폼 스크롤·즉시 write-back)가 머지됐다.
-> 후속은 CS-4-3(keybind recorder)·CS-4-5 bespoke 에디터(palette·env·shell.args)·CS-4-6(HSV picker)·상단 검색.
+> CS-4-3(keybind recorder)·CS-4-5 bespoke 에디터(palette·env·shell.args)도 머지됐다. 후속은 CS-4-6(HSV picker)·상단 검색·unbind/충돌 UI.
 > **CS-4는 시각/상호작용이라** 각 PR을 머지 전 `zig build macos-app`로 실기 확인한다(스키마 PR처럼 헤드리스
 > 단위만으로 blind 머지하지 않는다 — [run-macos-app-before-merge] 규율).
 
@@ -155,6 +155,15 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **영속은 공짜**: write-back이 `shell.args`·set된 `env.<KEY>`를 이미 직렬화(serialize.zig, round-trip 테스트 보장)하므로 별도 write-경로 확장 없이 dirty만 찍으면 파일에 써진다.
 - **한계(후속)**: **삭제·KEY 변경**은 `updateConfigText`가 override-only(줄 갱신/추가만, 삭제 없음)라 영속 안 됨 — 줄 삭제 확장이 필요해 후속(현재는 upsert만; 완전 제거는 통합 리셋이 담당). 토큰 따옴표(공백 포함 인자)도 후속.
 
+### 6.7 keybind recorder(단축키 재바인딩) — 특수 행 (CS-4-3)
+
+입력 섹션에 `command_catalog`의 모든 액션을 한 행씩(라벨=title, 우측=현재 단축키 표시 또는 "(미지정)") 주입한다(`has_keybinds`). 행을 Enter/클릭하면 **녹음 모드**(`State.recording`)로 들어가 "키 입력 대기..."를 보이고, 다음 키 한 번을 그 액션의 새 단축키로 묶는다. keybind는 `keybind = <chord> = <action>` 줄이라 다른 특수 키와 또 다른 영속 패스가 필요하다.
+
+- **전체 키 캡처**: 녹음 중엔 platform이 chrome 변환 **전에** raw `terminal.KeyEvent`를 가로챈다(`handleKeyEvent`). `chromeInputFromKeyEvent`가 키를 축약 enum(`enter`/`char`/`other`…)으로 줄여 Tab·Home·F-키를 잃으므로, 전체 키 정보가 있는 raw 이벤트를 `KeyChord.fromKeyEvent`로 chord화한다. 평범한 `Esc`(모디파이어 없음)는 녹음 취소(흔한 recorder 관례).
+- **즉시 반영**: `rebindActionEntry`가 `loaded_config.keybindings`를 새 슬라이스로 교체(그 액션을 새 chord로, 없으면 추가)하고 `rebuildCommandCatalog`로 메뉴바·팝업 표시도 갱신한다. resolver가 매 키 이벤트마다 이 슬라이스를 읽으므로 재시작 없이 바로 동작한다.
+- **영속(전용 write-back)**: keybind는 `key = value`가 아니라 줄마다 같은 `keybind` 키 + 두 번째 `=`로 chord/action을 나눠서 `updateConfigText`(key 기준)로는 못 다룬다(모든 keybind 줄이 한 키로 충돌). 그래서 `updateKeybindLines`(loader)가 **action 기준**으로 `keybind = <chord> = <action>` 줄을 찾아 교체(없으면 append)한다. chord는 `KeyChord.toConfigString`(parse와 round-trip되는 ASCII 표기 — 표시용 `formatChord`의 ⌘⇧ 기호와 다름). `serializeConfig`가 schema write-back 뒤에 이 패스를 **체이닝**하고, `takeConfigDirty`가 keybind 재바인딩도 본다. 매크로 줄(`text:`/`esc:` rhs에 `=` 포함)은 action 키와 안 겹쳐 자연히 보존된다.
+- **한계(후속)**: 옛 chord가 **빌트인 기본**이면 그 chord도 계속 액션을 발동한다(새 chord를 **추가**하는 셈 — 완전 교체는 옛 빌트인을 `unbind`해야 하므로 후속). 충돌 검출 UI(다른 액션에 이미 묶인 chord 경고)·unbind·terminal 매크로/global 바인딩 편집·F13+ 키도 후속.
+
 ## 7. 의존성
 
 - **S0-1b** ✅(머지) — `serialize.updateForKeys(original, config, keys)`로 **변경 키만** write-back(즉시-저장 결정에
@@ -172,7 +181,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | **CS-4-0** ✅ | `ChromeHost` pointer 이벤트(InputEvent + 라우팅 + drag) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-1** ✅ | 위젯 컴포넌트 toggle·dropdown·text/number·slider(neutral State+view+handle) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-2** ✅ | color input(16색 프리셋 + hex 입력) | ✅ 머지(헤드리스 + 실기) |
-| **CS-4-3** | keybind recorder(`command_catalog` 행 + 키 캡처) | 헤드리스 + 실기 |
+| **CS-4-3** ✅ | keybind recorder(`command_catalog` 행 + 키 캡처 + `keybind` 줄 write-back) — §6.7. unbind·충돌 UI는 후속 | 헤드리스 + 실기 |
 | **CS-4-4** ✅ | **세팅 페이지 셸** — Section 네비 + 제너릭 폼(schema 메타 소비) + 폼 스크롤 + `toggle_settings`(⌘,) 키/메뉴 (상단 검색은 후속) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-5** | write-back 연결(S0-1b ✅) + bespoke 에디터: **palette 16색 그리드 ✅**(§6.5) · **env·shell.args ✅**(§6.6, upsert; 삭제는 후속) → keybind(CS-4-3) | 헤드리스 + 실기 |
 | **CS-4-6+** | (선택) color HSV picker 2차, 고급화 | 실기 |

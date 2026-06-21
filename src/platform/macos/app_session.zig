@@ -1142,6 +1142,10 @@ pub const AppSession = struct {
     // 키는 스키마 정적 리터럴이라 소유/해제 불요. Swift가 매 tick take_sidebar_config_dirty(=비어있지 않음)로 drain해
     // serialize_sidebar_config(updateConfigForKeys)로 atomic write한다(serialize가 성공 시 집합을 비운다). ABI 이름은 호환을 위해 유지.
     config_dirty_keys: std.ArrayList([]const u8) = .empty,
+    // keybind recorder가 만든 재바인딩 — write-back 예약(키=value가 아닌 `keybind = chord = action` 줄이라 전용 패스).
+    // action은 command_catalog 정적 키, chord는 loaded_config.arena 소유(toConfigString 결과). serializeConfig가
+    // updateKeybindLines로 체이닝해 파일에 쓰고 비운다. takeConfigDirty가 이것도 본다(둘 중 하나라도 있으면 dirty).
+    config_keybind_rebinds: std.ArrayList(config_mod.KeybindRebind) = .empty,
     // 시각 확인 디버그 훅: MARU_OPEN_SETTINGS env가 있으면 첫 frame에서 세팅 화면을 자동으로 연다(스크린샷
     // 하니스가 입력 없이 모달 상태를 캡처하게 — MARU_DEBUG와 같은 env-gate). env 미설정이면 무동작. 한 번만 연다.
     debug_settings_opened: bool = false,
@@ -3409,12 +3413,23 @@ pub const AppSession = struct {
         /// theme 섹션이면 ANSI 16색 팔레트 그리드 한 행을 color 뒤(마지막)에 추가한다(theme.palette.0~15 — 특수 키, schema
         /// 필드 아님). 핸들러가 selected==after_colors면 팔레트 행으로 라우팅한다.
         has_palette: bool = false,
+        /// input 섹션이면 command_catalog 액션마다 keybind 행을 추가한다(단축키 재바인딩 — 특수, schema 필드 아님).
+        /// 핸들러가 selected>=keybindRowStart면 그 행으로 라우팅(녹음 시작). palette와 배타(다른 섹션)라 같이 안 켜진다.
+        has_keybinds: bool = false,
+        fn nonSpecialTotal(self: SettingsSectionFields) usize {
+            return self.bools.len + self.nums.len + self.enums.len + self.texts.len + self.colors.len;
+        }
         fn total(self: SettingsSectionFields) usize {
-            return self.bools.len + self.nums.len + self.enums.len + self.texts.len + self.colors.len + @as(usize, if (self.has_palette) 1 else 0);
+            return self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) +
+                (if (self.has_keybinds) command_catalog.entries.len else 0);
         }
         /// 팔레트 그리드 행의 selected 인덱스(있으면 항상 마지막 = 다른 필드 다음). 없으면 null.
         fn paletteRowIndex(self: SettingsSectionFields) ?usize {
-            return if (self.has_palette) self.bools.len + self.nums.len + self.enums.len + self.texts.len + self.colors.len else null;
+            return if (self.has_palette) self.nonSpecialTotal() else null;
+        }
+        /// keybind 행들의 첫 selected 인덱스(있으면 schema 필드 다음 — input 섹션엔 palette 없음). 없으면 null.
+        fn keybindRowStart(self: SettingsSectionFields) ?usize {
+            return if (self.has_keybinds) self.nonSpecialTotal() else null;
         }
     };
 
@@ -3509,8 +3524,9 @@ pub const AppSession = struct {
         }
         var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
         for (colors_all.items) |c| if (c.section == sel_sec) try colors.append(arena, c);
-        // theme 섹션엔 ANSI 16색 팔레트 그리드 한 행(특수 — schema 필드 아님)을 color 뒤에 둔다. 핸들러가 마지막 인덱스로 라우팅.
-        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = (sel_sec == .theme) };
+        // theme 섹션엔 ANSI 16색 팔레트 그리드 한 행, input 섹션엔 command_catalog 액션별 keybind 행(둘 다 특수 — schema
+        // 필드 아님). 핸들러가 selected 인덱스로 라우팅(palette=마지막 1행, keybind=schema 필드 다음 전부).
+        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = (sel_sec == .theme), .has_keybinds = (sel_sec == .input) };
     }
 
     /// config 스키마의 **현재 섹션** 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2·§4). 라벨=meta.doc
@@ -3562,6 +3578,18 @@ pub const AppSession = struct {
             const sel = @min(self.chrome_host.settings.grid_cell, cells.len - 1);
             rows[i] = .{ .label = "ANSI 팔레트", .kind = .{ .palette_grid = .{ .cells = cells, .selected = sel } } };
             i += 1;
+        }
+        if (cf.has_keybinds) {
+            // command_catalog 액션마다 keybind 행(라벨=title, 값=현재 chord 표시). 현재 chord는 resolver에서 fresh 계산
+            // (리바인딩 즉시 반영). 빈 chord(미지정)는 컴포넌트가 "(미지정)"으로 표시. arena 소유(이 프레임만).
+            const resolver = self.loaded_config.keyBindingResolver();
+            for (command_catalog.entries) |entry| {
+                const chord = command_catalog.chordForAction(resolver, entry.action);
+                var disp_scratch: [command_catalog.max_chord_display_len]u8 = undefined;
+                const display: []const u8 = if (chord) |c| command_catalog.formatChord(c, &disp_scratch) else "";
+                rows[i] = .{ .label = entry.title, .kind = .{ .keybind = try arena.dupe(u8, display) } };
+                i += 1;
+            }
         }
         return rows;
     }
@@ -3635,6 +3663,12 @@ pub const AppSession = struct {
             const gi = @min(self.chrome_host.settings.grid_cell, 15);
             const seed = self.paletteCellHex(scratch.allocator(), gi) catch return;
             self.chrome_host.settings.enterEdit(seed);
+            return;
+        };
+        if (cf.keybindRowStart()) |ks| if (sel >= ks and sel - ks < command_catalog.entries.len) {
+            // keybind 행 — Enter/Space/클릭 = 녹음 시작. 다음 raw 키를 handleKeyEvent가 가로채 captureKeybindRecording로 rebind.
+            self.chrome_host.settings.recording = true;
+            self.metal_dirty = true;
             return;
         };
         // slider 행(bool..after_nums)은 toggle/Enter 무동작(드래그/←→로 조절).
@@ -4717,6 +4751,18 @@ pub const AppSession = struct {
             self.handleSidebarSearchKey(chromeInputFromKeyEvent(event));
             self.metal_dirty = true;
             self.total_app_key_events += 1; // 검색(앱)이 소비
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+            return self.last_summary;
+        }
+        // keybind recorder 녹음 중이면 raw 키를 chord로 **가로챈다**(chrome 변환 전 — chromeInputFromKeyEvent가 키를
+        // 축약 enum으로 줄여 Tab/Home/F-키 등을 잃으므로, 전체 키 정보가 있는 terminal.KeyEvent를 직접 캡처). 한 키로
+        // 끝나고(취소든 rebind든) 모든 키를 소비한다(모달 중이라 터미널·단축키로 안 흘린다).
+        if (self.chrome_host.settings.open and self.chrome_host.settings.recording) {
+            self.captureKeybindRecording(event);
+            self.resetCursorBlink();
+            self.metal_dirty = true;
+            self.total_app_key_events += 1;
             self.writeSummaryFromState();
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
@@ -6398,7 +6444,7 @@ pub const AppSession = struct {
     /// 않는다 — serializeConfig가 성공적으로 직렬화한 뒤 비운다(실패 시 키 유지→다음 tick 재시도). Swift가 매 tick
     /// take_sidebar_config_dirty(ABI 이름 유지)로 drain해 1이면 serialize→atomic write한다.
     pub fn takeConfigDirty(self: *AppSession) bool {
-        return self.config_dirty_keys.items.len > 0;
+        return self.config_dirty_keys.items.len > 0 or self.config_keybind_rebinds.items.len > 0;
     }
 
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
@@ -6479,6 +6525,65 @@ pub const AppSession = struct {
                 .key_modifiers = modifiers,
             });
         }
+    }
+
+    /// 카탈로그를 비우고 다시 빌드한다(리바인딩 후 — 메뉴바·팝업의 단축키 표시 갱신). buildCommandCatalog가 append-only라
+    /// 먼저 owned 표시/equiv를 해제하고 비운다. Swift는 다음 commandCatalog 조회에서 갱신된 목록을 본다.
+    fn rebuildCommandCatalog(self: *AppSession) void {
+        for (self.command_key_displays.items) |s| self.allocator.free(s);
+        self.command_key_displays.clearRetainingCapacity();
+        for (self.command_key_equivalents.items) |s| self.allocator.free(s);
+        self.command_key_equivalents.clearRetainingCapacity();
+        self.command_entries.clearRetainingCapacity();
+        self.buildCommandCatalog() catch {};
+    }
+
+    /// 액션을 새 chord로 다시 묶는다(keybind recorder). loaded_config.keybindings를 새 슬라이스로 교체(그 액션 줄을 새
+    /// chord로, 없으면 추가 — resolver가 매 키 이벤트마다 이 슬라이스를 읽으므로 즉시 반영), 카탈로그 재빌드, write-back
+    /// 예약(updateKeybindLines가 `keybind = chord = action` 줄로 영속). 옛 슬라이스는 미참조로 남아 reload/deinit에 해제.
+    /// 한계(v1): 옛 chord가 빌트인이면 그 chord도 계속 액션을 발동한다(새 chord를 **추가**하는 셈 — unbind는 후속).
+    fn rebindActionEntry(self: *AppSession, entry: command_catalog.Entry, chord: config_mod.KeyChord) void {
+        const a = self.loaded_config.arena.allocator();
+        var list: std.ArrayList(config_mod.AppBinding) = .empty;
+        var replaced = false;
+        for (self.loaded_config.keybindings) |b| {
+            if (std.meta.eql(b.action, entry.action)) {
+                list.append(a, .{ .chord = chord, .action = entry.action }) catch return;
+                replaced = true;
+            } else list.append(a, b) catch return;
+        }
+        if (!replaced) list.append(a, .{ .chord = chord, .action = entry.action }) catch return;
+        self.loaded_config.keybindings = list.toOwnedSlice(a) catch return;
+        self.rebuildCommandCatalog();
+
+        // 영속 예약 — action 키별 upsert(같은 액션 여러 번 바꾸면 마지막만). chord는 config 표기로 arena에 둔다.
+        var chord_buf: [command_catalog.max_chord_display_len]u8 = undefined;
+        const chord_str = a.dupe(u8, chord.toConfigString(&chord_buf)) catch return;
+        for (self.config_keybind_rebinds.items) |*rb| {
+            if (std.mem.eql(u8, rb.action, entry.key)) {
+                rb.chord = chord_str;
+                self.metal_dirty = true;
+                return;
+            }
+        }
+        self.config_keybind_rebinds.append(self.allocator, .{ .action = entry.key, .chord = chord_str }) catch return;
+        self.metal_dirty = true;
+    }
+
+    /// keybind 녹음 중 raw 키 한 개를 처리한다(handleKeyEvent가 가로채 호출). 평범한 Esc(모디파이어 없음)는 취소(rebind
+    /// 안 함 — 흔한 recorder 관례). 그 외 키는 KeyChord로 만들어 선택된 keybind 행의 액션에 묶는다. 녹음은 한 키로 끝난다.
+    fn captureKeybindRecording(self: *AppSession, event: terminal.KeyEvent) void {
+        self.chrome_host.settings.recording = false; // 취소든 캡처든 한 키로 종료
+        const m = event.modifiers;
+        if (event.key == .escape and !m.shift and !m.control and !m.option and !m.command) return; // 취소
+        const chord = config_mod.KeyChord.fromKeyEvent(event) orelse return; // 매핑 불가 키는 무시(녹음만 끝남)
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const cf = self.currentSectionFields(scratch.allocator()) catch return;
+        const start = cf.keybindRowStart() orelse return;
+        const sel = self.chrome_host.settings.selected;
+        if (sel < start or sel - start >= command_catalog.entries.len) return; // 선택이 keybind 행이 아님
+        self.rebindActionEntry(command_catalog.entries[sel - start], chord);
     }
 
     /// 커맨드 카탈로그(메뉴바·팝업이 그릴 액션 목록). 세션 동안 불변. owned — destroy까지 유효.
@@ -6606,7 +6711,15 @@ pub const AppSession = struct {
         // 바뀐 키만 현재값으로 부분 갱신(override-only write-back, S0-1b 일반화 — 사이드바 view options·세팅 화면
         // 공용). 값은 스키마 직렬화(configKeyValues)가 단일 출처라 타입별 손코드 중복이 없다. 성공 시 dirty 집합을
         // 비운다(아래) — updateConfigForKeys가 실패하면 try가 빠져나가 키가 남아 다음 tick 재시도된다.
-        const text = try config_mod.updateConfigForKeys(self.allocator, original, self.loaded_config.config, self.config_dirty_keys.items);
+        var text = try config_mod.updateConfigForKeys(self.allocator, original, self.loaded_config.config, self.config_dirty_keys.items);
+        // keybind 재바인딩은 `keybind = chord = action` 줄이라 key=value 패스로 못 다룬다 — 전용 패스로 체이닝한다
+        // (앞 단계 결과 텍스트 위에 keybind 줄을 action 기준 갱신/추가). 성공해야 양쪽 dirty를 비운다.
+        if (self.config_keybind_rebinds.items.len > 0) {
+            const chained = try config_mod.updateKeybindLines(self.allocator, text, self.config_keybind_rebinds.items);
+            self.allocator.free(text);
+            text = chained;
+            self.config_keybind_rebinds.clearRetainingCapacity();
+        }
         self.sidebar_config_buffer = text;
         self.config_dirty_keys.clearRetainingCapacity();
         return text;
@@ -9104,6 +9217,7 @@ pub const AppSession = struct {
         if (self.workspace_buffer) |b| self.allocator.free(b);
         if (self.sidebar_config_buffer) |b| self.allocator.free(b);
         self.config_dirty_keys.deinit(self.allocator);
+        self.config_keybind_rebinds.deinit(self.allocator);
         self.hover_leaf_scratch.deinit(self.allocator);
         self.scrollbar_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
@@ -14444,6 +14558,62 @@ test "settings palette grid: theme 섹션 마지막 행에서 셀 hex 편집 →
     session.chrome_host.settings.enterEdit("#gggggg");
     session.commitSelectedText();
     try std.testing.expectEqualStrings("#abcdef", session.loaded_config.config.theme.palette[5].?); // 거부 — 유지
+}
+
+test "settings keybind recorder: 입력 섹션 행 녹음→캡처→rebind + 영속 예약, Esc 취소 (CS-4-3)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 입력 섹션 선택.
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var input_idx: usize = 0;
+    for (sections, 0..) |s, i| if (s.section == .input) {
+        input_idx = i;
+    };
+    session.chrome_host.settings.show();
+    session.chrome_host.settings.section = input_idx;
+    const cf = try session.currentSectionFields(scratch.allocator());
+    try std.testing.expect(cf.has_keybinds);
+    const ks = cf.keybindRowStart().?;
+
+    // new_term은 command_catalog.entries[0] — 그 keybind 행 선택 → Enter(toggle) = 녹음 시작.
+    session.chrome_host.settings.selected = ks; // entries[0]=new_term
+    session.toggleSelectedSetting();
+    try std.testing.expect(session.chrome_host.settings.recording);
+
+    // Cmd+E 캡처 → new_term이 Cmd+E로 rebind + dirty 예약 + 녹음 종료.
+    session.config_keybind_rebinds.clearRetainingCapacity();
+    session.captureKeybindRecording(.{ .key = .{ .char = 'E' }, .modifiers = .{ .command = true } });
+    try std.testing.expect(!session.chrome_host.settings.recording);
+    const resolver = session.loaded_config.keyBindingResolver();
+    const chord = command_catalog.chordForAction(resolver, .new_term).?;
+    try std.testing.expect((try config_mod.KeyChord.parse("Cmd+E")).eql(chord)); // resolver가 새 chord 반영
+    try std.testing.expect(session.takeConfigDirty()); // write-back 예약됨
+    var saw = false;
+    for (session.config_keybind_rebinds.items) |rb| if (std.mem.eql(u8, rb.action, "new_term") and std.mem.eql(u8, rb.chord, "Cmd+E")) {
+        saw = true;
+    };
+    try std.testing.expect(saw);
+
+    // 평범한 Esc 캡처 → 취소(rebind 안 함, dirty 변화 없음).
+    session.chrome_host.settings.selected = ks;
+    session.chrome_host.settings.recording = true;
+    const before = session.config_keybind_rebinds.items.len;
+    session.captureKeybindRecording(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(!session.chrome_host.settings.recording);
+    try std.testing.expectEqual(before, session.config_keybind_rebinds.items.len); // 변화 없음
 }
 
 test "settings env/shell.args: terminal 섹션 synthetic text 행 — shell.args 분리·env upsert·추가 행 파싱 (CS-4-5)" {

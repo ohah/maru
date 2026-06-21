@@ -3402,14 +3402,15 @@ pub const AppSession = struct {
     /// 좌측 네비 한 항목 — 섹션 enum(미지정=null) + 표시 라벨.
     const SettingsSectionEntry = struct { section: ?config_mod.Section, label: []const u8 };
 
-    /// 현재 선택 섹션의 필드(bool→num→enum→text 순). buildSettingsFields·핸들러 공유 단일 출처라 selected 인덱싱이 일치.
+    /// 현재 선택 섹션의 필드(bool→num→enum→text→color 순). buildSettingsFields·핸들러 공유 단일 출처라 selected 인덱싱이 일치.
     const SettingsSectionFields = struct {
         bools: []config_mod.schema.BoolField,
         nums: []config_mod.schema.NumberField,
         enums: []config_mod.schema.EnumField,
         texts: []config_mod.schema.TextField,
+        colors: []config_mod.schema.ColorField,
         fn total(self: SettingsSectionFields) usize {
-            return self.bools.len + self.nums.len + self.enums.len + self.texts.len;
+            return self.bools.len + self.nums.len + self.enums.len + self.texts.len + self.colors.len;
         }
     };
 
@@ -3429,11 +3430,12 @@ pub const AppSession = struct {
         };
     }
 
-    fn settingsSectionHasField(bools: []const config_mod.schema.BoolField, nums: []const config_mod.schema.NumberField, enums: []const config_mod.schema.EnumField, texts: []const config_mod.schema.TextField, sec: ?config_mod.Section) bool {
+    fn settingsSectionHasField(bools: []const config_mod.schema.BoolField, nums: []const config_mod.schema.NumberField, enums: []const config_mod.schema.EnumField, texts: []const config_mod.schema.TextField, colors: []const config_mod.schema.ColorField, sec: ?config_mod.Section) bool {
         for (bools) |b| if (b.section == sec) return true;
         for (nums) |n| if (n.section == sec) return true;
         for (enums) |e| if (e.section == sec) return true;
         for (texts) |t| if (t.section == sec) return true;
+        for (colors) |c| if (c.section == sec) return true;
         return false;
     }
 
@@ -3447,13 +3449,15 @@ pub const AppSession = struct {
         try config_mod.schema.appendEnumFields(arena, self.loaded_config.config, &enums);
         var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
         try config_mod.schema.appendTextFields(arena, self.loaded_config.config, &texts);
+        var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
+        try config_mod.schema.appendColorFields(arena, self.loaded_config.config, &colors);
         var list: std.ArrayList(SettingsSectionEntry) = .empty;
         inline for (@typeInfo(config_mod.Section).@"enum".fields) |ef| {
             const sec: config_mod.Section = @enumFromInt(ef.value);
-            if (settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, sec))
+            if (settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, colors.items, sec))
                 try list.append(arena, .{ .section = sec, .label = settingsSectionLabel(sec) });
         }
-        if (settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, null))
+        if (settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, colors.items, null))
             try list.append(arena, .{ .section = null, .label = settingsSectionLabel(null) });
         return list.items;
     }
@@ -3473,6 +3477,8 @@ pub const AppSession = struct {
         try config_mod.schema.appendEnumFields(arena, self.loaded_config.config, &enums_all);
         var texts_all: std.ArrayList(config_mod.schema.TextField) = .empty;
         try config_mod.schema.appendTextFields(arena, self.loaded_config.config, &texts_all);
+        var colors_all: std.ArrayList(config_mod.schema.ColorField) = .empty;
+        try config_mod.schema.appendColorFields(arena, self.loaded_config.config, &colors_all);
         var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
         for (bools_all.items) |b| if (b.section == sel_sec) try bools.append(arena, b);
         var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
@@ -3481,7 +3487,9 @@ pub const AppSession = struct {
         for (enums_all.items) |e| if (e.section == sel_sec) try enums.append(arena, e);
         var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
         for (texts_all.items) |t| if (t.section == sel_sec) try texts.append(arena, t);
-        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items };
+        var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
+        for (colors_all.items) |c| if (c.section == sel_sec) try colors.append(arena, c);
+        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items };
     }
 
     /// config 스키마의 **현재 섹션** 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2·§4). 라벨=meta.doc
@@ -3489,8 +3497,8 @@ pub const AppSession = struct {
     fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.settings.FieldRow {
         const Row = chrome.components.settings.FieldRow;
         const cf = try self.currentSectionFields(arena);
-        // 결합 순서: bool(toggle) → number(slider) → enum(dropdown) → text(인라인 편집). selected/handler 인덱싱이 이
-        // 순서를 공유한다(toggle/adjust/commitSelectedText가 같은 currentSectionFields 빌드로 selected를 구간 매핑).
+        // 결합 순서: bool(toggle) → number(slider) → enum(dropdown) → text(편집) → color(스와치). selected/handler
+        // 인덱싱이 이 순서를 공유한다(toggle/adjust/commitSelectedText가 같은 currentSectionFields 빌드로 구간 매핑).
         const rows = try arena.alloc(Row, cf.total());
         var i: usize = 0;
         for (cf.bools) |b| {
@@ -3507,6 +3515,13 @@ pub const AppSession = struct {
         }
         for (cf.texts) |t| {
             rows[i] = .{ .label = if (t.doc.len > 0) t.doc else t.key, .kind = .{ .text = t.value } };
+            i += 1;
+        }
+        for (cf.colors) |c| {
+            // 현재 hex를 RGB로 파싱해 스와치에. 저장 config는 검증돼 유효하지만 방어적으로 회색 폴백(상수 hex로 — 타입을
+            // parseHexColor 반환과 일치시켜 별도 color import 불요; #808080은 항상 유효).
+            const rgb = config_mod.appearance.parseHexColor(c.value) catch (config_mod.appearance.parseHexColor("#808080") catch unreachable);
+            rows[i] = .{ .label = if (c.doc.len > 0) c.doc else c.key, .kind = .{ .color = .{ .hex = c.value, .rgb = rgb } } };
             i += 1;
         }
         return rows;
@@ -3549,10 +3564,23 @@ pub const AppSession = struct {
             }
             return;
         }
-        if (sel >= after_enums) {
+        const after_texts = after_enums + cf.texts.len;
+        if (sel >= after_enums and sel < after_texts) {
             // text 행 — 활성(클릭/Enter) = 인라인 편집 시작(현재값으로 시드). 커밋은 Enter→commitSelectedText.
             const ti = sel - after_enums;
             if (ti < cf.texts.len) self.chrome_host.settings.enterEdit(cf.texts[ti].value);
+            return;
+        }
+        if (sel >= after_texts) {
+            // color 행 — 활성(스와치 클릭/Enter) = 다음 16색 프리셋 순환. hex 영역 클릭 편집은 컴포넌트가 enterEdit.
+            const ci = sel - after_texts;
+            if (ci < cf.colors.len) {
+                const c = cf.colors[ci];
+                if (config_mod.schema.cycleColor(&self.loaded_config.config, c.key, 1)) {
+                    self.reapplyLoadedConfig();
+                    self.markConfigKeyDirty(c.key);
+                }
+            }
             return;
         }
         // slider 행(bool..after_nums)은 toggle/Enter 무동작(드래그/←→로 조절).
@@ -3566,15 +3594,22 @@ pub const AppSession = struct {
         const cf = self.currentSectionFields(scratch.allocator()) catch return;
         const sel = self.chrome_host.settings.selected;
         const after_enums = cf.bools.len + cf.nums.len + cf.enums.len;
+        const after_texts = after_enums + cf.texts.len;
         defer self.chrome_host.settings.cancelEdit(); // 성공/실패 무관 편집 종료(키는 다시 네비로)
-        if (sel < after_enums) return; // text 행 아님
-        const ti = sel - after_enums;
-        if (ti >= cf.texts.len) return;
-        const t = cf.texts[ti];
+        // 편집 가능 행 = text(after_enums..after_texts) 또는 color hex(after_texts..). 둘 다 setText로 커밋(검증 포함).
+        const key: []const u8 = if (sel >= after_enums and sel < after_texts) blk: {
+            const ti = sel - after_enums;
+            if (ti >= cf.texts.len) return;
+            break :blk cf.texts[ti].key;
+        } else if (sel >= after_texts) blk: {
+            const ci = sel - after_texts;
+            if (ci >= cf.colors.len) return;
+            break :blk cf.colors[ci].key;
+        } else return; // 편집 행 아님
         const owned = self.loaded_config.arena.allocator().dupe(u8, self.chrome_host.settings.editText()) catch return;
-        if (config_mod.schema.setText(&self.loaded_config.config, t.key, owned)) {
+        if (config_mod.schema.setText(&self.loaded_config.config, key, owned)) {
             self.reapplyLoadedConfig();
-            self.markConfigKeyDirty(t.key);
+            self.markConfigKeyDirty(key);
         }
     }
 
@@ -3616,15 +3651,30 @@ pub const AppSession = struct {
             }
             return;
         }
-        // enum(dropdown) 행 — ←/→ = 이전/다음 변형 순환.
-        const ei = sel - after_nums;
-        if (ei < cf.enums.len) {
-            const e = cf.enums[ei];
+        const after_enums = after_nums + cf.enums.len;
+        if (sel < after_enums) {
+            // enum(dropdown) 행 — ←/→ = 이전/다음 변형 순환.
+            const e = cf.enums[sel - after_nums];
             if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, dir)) {
                 self.reapplyLoadedConfig();
                 self.markConfigKeyDirty(e.key);
             }
+            return;
         }
+        const after_texts = after_enums + cf.texts.len;
+        if (sel >= after_texts) {
+            // color 행 — ←/→ = 이전/다음 16색 프리셋 순환.
+            const ci = sel - after_texts;
+            if (ci < cf.colors.len) {
+                const c = cf.colors[ci];
+                if (config_mod.schema.cycleColor(&self.loaded_config.config, c.key, dir)) {
+                    self.reapplyLoadedConfig();
+                    self.markConfigKeyDirty(c.key);
+                }
+            }
+            return;
+        }
+        // text 행(after_enums..after_texts)은 ←/→ 무동작(편집은 hex 클릭).
     }
 
     /// 메모리의 loaded_config(스키마 필드 in-place 변경 — 세팅 GUI 토글)에서 appearance를 다시 resolve해 적용한다.
@@ -8510,6 +8560,7 @@ pub const AppSession = struct {
                 if (!modal_bg_quad) paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides);
             },
             .text => |t| placeText(cp, fg, cwid, cols, rows, origin_x, origin_y, cw, ch, t, .{ .rgb = tk.get(t.role) }),
+            .swatch => |sw| paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, sw.rect, .{ .rgb = sw.rgb }, null), // color picker 견본 — literal RGB 셀 bg(role 아님)
             .rule => {}, // 컴포넌트가 아직 안 냄 — 필요해질 때(C2 divider) 셀 라인으로 lower
             .quad => |q| {
                 const has_radius = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;

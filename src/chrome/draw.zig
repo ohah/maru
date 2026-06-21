@@ -4,6 +4,7 @@
 //! 단일 출처: docs/chrome-strategy.md §5.2, docs/layering-and-portability.md.
 
 const tokens = @import("tokens.zig");
+const Rgb = @import("../color.zig").Rgb;
 
 /// 픽셀 좌표 한 점.
 pub const Px = struct { x: i32, y: i32 };
@@ -61,9 +62,14 @@ pub const Op = union(enum) {
     rule: Rule,
     text: Text,
     quad: Quad,
+    swatch: Swatch,
 
     /// 사각 영역 채우기(밴드·탭 배경·hover·drop-zone). alpha<0xFF면 반투명 합성.
     pub const Fill = struct { rect: Rect, role: tokens.ColorRole, alpha: u8 = 0xFF };
+    /// **literal RGB** 색 견본(color picker 스와치). 다른 op은 색을 ColorRole(테마 토큰)로 두지만, 스와치는 "이
+    /// 색이 무엇인지"를 그대로 보여주는 값 미리보기라 role이 아니라 원색을 싣는다(의도적 예외 — config-gui §6.2 결정).
+    /// 백엔드가 셀 bg/quad에 이 RGB를 그대로 칠한다.
+    pub const Swatch = struct { rect: Rect, rgb: Rgb };
     /// 사각형의 일부 변에 선(focus 테두리). tui는 reserved-kind 띠, rich는 실제 테두리/radius로 lowering.
     pub const Border = struct { rect: Rect, sides: Sides, role: tokens.ColorRole };
     /// 한 줄(divider). 수평/수직은 from/to로 결정.

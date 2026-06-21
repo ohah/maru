@@ -376,14 +376,15 @@ fn cycleEnumField(ptr: anytype, comptime full_key: []const u8, key: []const u8, 
 /// color=#RRGGBB(1차는 hex 텍스트 편집). value=현재값(빌림 — config arena 소유). key/doc는 comptime 리터럴.
 pub const TextField = struct { key: []const u8, doc: []const u8, value: []const u8, section: ?theme.Section = null };
 
-/// 스키마'd **문자열 필드(widget .text/.color, 타입 []const u8)**를 전부 인라인 편집 행으로 emit한다(appendBoolFields의
-/// 문자열 짝). 옵셔널(?[]const u8 — sidebar 파생색)은 제외(기본 파생 동작, 편집은 후속). 순서는 Config 필드 순회 순.
+/// 스키마'd **텍스트 필드(widget .text, 타입 []const u8)**를 전부 인라인 편집 행으로 emit한다(appendBoolFields의
+/// 문자열 짝). 색(widget .color)은 appendColorFields(스와치 + 프리셋)로 따로 — text 위젯은 폰트 패밀리 등.
+/// 옵셔널(?[]const u8 — sidebar 파생색)은 제외. 순서는 Config 필드 순회 순.
 pub fn appendTextFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(TextField)) !void {
     if (@hasDecl(theme.Config, "schema")) {
         inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
             if (@TypeOf(@field(config, sf.name)) == []const u8) {
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
-                if (meta.widget == .text or meta.widget == .color) {
+                if (meta.widget == .text) {
                     const full_key = comptime topKey(sf.name, meta);
                     try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name), .section = meta.section });
                 }
@@ -397,7 +398,7 @@ pub fn appendTextFields(arena: std.mem.Allocator, config: theme.Config, list: *s
             inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
                 if (@TypeOf(@field(@field(config, cf.name), sf.name)) == []const u8) {
                     const meta: theme.Meta = @field(sch, sf.name);
-                    if (meta.widget == .text or meta.widget == .color) {
+                    if (meta.widget == .text) {
                         const full_key = comptime keyOf(cf.name, sf.name, meta);
                         try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
                     }
@@ -405,6 +406,93 @@ pub fn appendTextFields(arena: std.mem.Allocator, config: theme.Config, list: *s
             }
         }
     }
+}
+
+/// 한 색 필드(widget .color, 타입 []const u8 = #RRGGBB)의 GUI 스와치 행 기술자. value=현재 hex(빌림 — config arena
+/// 소유). platform이 parseHexColor로 스와치 RGB를 만들고, 클릭/←→로 16색 프리셋 순환(cycleColor)·hex 클릭으로 편집.
+pub const ColorField = struct { key: []const u8, doc: []const u8, value: []const u8, section: ?theme.Section = null };
+
+/// 16색 프리셋(스와치 picker 1차 — config-gui §6.2). 중립(흑/백/회) + dracula 계열 accent + maru 앰버. cycleColor가
+/// 현재값을 이 목록에서 찾아 다음/이전으로 돌린다(현재값이 프리셋 아니면 0번부터). 정적 리터럴이라 set에 dupe 불요.
+pub const color_presets = [_][]const u8{
+    "#000000", "#ffffff", "#101010", "#e8e8e8",
+    "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9",
+    "#8be9fd", "#ff79c6", "#ffb86c", "#6272a4",
+    "#282a36", "#44475a", "#dda15e", "#334455",
+};
+
+/// 스키마'd **색 필드(widget .color)**를 전부 스와치 행으로 emit한다(appendTextFields의 색 짝). value=현재 hex.
+pub fn appendColorFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(ColorField)) !void {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (@TypeOf(@field(config, sf.name)) == []const u8) {
+                const meta: theme.Meta = @field(theme.Config.schema, sf.name);
+                if (meta.widget == .color) {
+                    const full_key = comptime topKey(sf.name, meta);
+                    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name), .section = meta.section });
+                }
+            }
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (@TypeOf(@field(@field(config, cf.name), sf.name)) == []const u8) {
+                    const meta: theme.Meta = @field(sch, sf.name);
+                    if (meta.widget == .color) {
+                        const full_key = comptime keyOf(cf.name, sf.name, meta);
+                        try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 키로 색 필드(widget .color)를 16색 프리셋에서 한 칸 순환한다(dir=+1 다음/-1 이전, wrap). 현재값이 프리셋이면 그
+/// 다음, 아니면 0번부터. 프리셋은 정적 리터럴이라 dupe 없이 대입(라이브/직렬화가 계속 읽어도 안전). 매칭 시 true.
+pub fn cycleColor(config: *theme.Config, key: []const u8, dir: i8) bool {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (@TypeOf(@field(config, sf.name)) == []const u8) {
+                const meta: theme.Meta = @field(theme.Config.schema, sf.name);
+                if (meta.widget == .color and std.mem.eql(u8, key, comptime topKey(sf.name, meta))) {
+                    @field(config, sf.name) = nextPreset(@field(config, sf.name), dir);
+                    return true;
+                }
+            }
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (@TypeOf(@field(@field(config, cf.name), sf.name)) == []const u8) {
+                    const meta: theme.Meta = @field(sch, sf.name);
+                    if (meta.widget == .color and std.mem.eql(u8, key, comptime keyOf(cf.name, sf.name, meta))) {
+                        @field(@field(config, cf.name), sf.name) = nextPreset(@field(@field(config, cf.name), sf.name), dir);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// 현재 hex의 프리셋 다음/이전(현재값이 프리셋 목록에 있으면 그 이웃, 없으면 dir>=0이면 0번·아니면 마지막). 정적 리터럴.
+fn nextPreset(current: []const u8, dir: i8) []const u8 {
+    const n = color_presets.len;
+    var idx: ?usize = null;
+    for (color_presets, 0..) |p, i| {
+        if (std.ascii.eqlIgnoreCase(p, current)) idx = i;
+    }
+    const cur: i64 = if (idx) |i| @intCast(i) else (if (dir >= 0) -1 else 0);
+    const next: usize = @intCast(@mod(cur + dir + @as(i64, n), @as(i64, n)));
+    return color_presets[next];
 }
 
 /// 키로 문자열([]const u8, widget .text/.color) 스키마 필드를 설정한다(세팅 인라인 편집 → config). value는 **호출자가
@@ -738,21 +826,32 @@ test "schema appendTextFields/setText: 문자열(widget .text/.color) 열거·�
     defer arena.deinit();
     var cfg: theme.Config = .{};
 
+    // appendTextFields = text(.text)만 — color(.color)는 appendColorFields로 분리(스와치 위젯, CS-4-2).
     var list: std.ArrayList(TextField) = .empty;
     try appendTextFields(arena.allocator(), cfg, &list);
     var saw_family = false;
-    var saw_bg = false;
+    var saw_bg_in_text = false;
     for (list.items) |f| {
         if (std.mem.eql(u8, f.key, "font.family")) {
             saw_family = true;
             try std.testing.expectEqualStrings("JetBrains Mono", f.value); // 기본 family
         }
+        if (std.mem.eql(u8, f.key, "theme.background")) saw_bg_in_text = true;
+    }
+    try std.testing.expect(saw_family); // text(family) 노출
+    try std.testing.expect(!saw_bg_in_text); // color는 text 목록에 없음(appendColorFields로 이동)
+
+    // appendColorFields = color(.color)만 — theme.background 등.
+    var clist: std.ArrayList(ColorField) = .empty;
+    try appendColorFields(arena.allocator(), cfg, &clist);
+    var saw_bg = false;
+    for (clist.items) |f| {
         if (std.mem.eql(u8, f.key, "theme.background")) {
             saw_bg = true;
-            try std.testing.expectEqualStrings("#101010", f.value); // 기본 배경
+            try std.testing.expectEqualStrings("#101010", f.value);
         }
     }
-    try std.testing.expect(saw_family and saw_bg); // text + color 둘 다 노출
+    try std.testing.expect(saw_bg);
 
     // setText: family(text)·background(color hex) 설정. value는 호출자 소유(여기선 리터럴). trim 적용.
     try std.testing.expect(setText(&cfg, "font.family", "  Menlo  "));
@@ -768,6 +867,29 @@ test "schema appendTextFields/setText: 문자열(widget .text/.color) 열거·�
     // 비스키마/비-text 키 → false.
     try std.testing.expect(!setText(&cfg, "cursor.blink", "x")); // bool 필드
     try std.testing.expect(!setText(&cfg, "no.such.key", "x"));
+}
+
+test "schema cycleColor: 16색 프리셋 순환(현재값 프리셋이면 이웃, 아니면 0번부터)" {
+    var cfg: theme.Config = .{};
+    // 기본 theme.background = "#101010" = color_presets[2]. +1 → presets[3].
+    try std.testing.expectEqualStrings("#101010", cfg.theme.background);
+    try std.testing.expect(cycleColor(&cfg, "theme.background", 1));
+    try std.testing.expectEqualStrings(color_presets[3], cfg.theme.background);
+    // -1 → 다시 presets[2].
+    try std.testing.expect(cycleColor(&cfg, "theme.background", -1));
+    try std.testing.expectEqualStrings(color_presets[2], cfg.theme.background);
+    // wrap: presets[0]에서 -1 → 마지막.
+    cfg.theme.background = color_presets[0];
+    try std.testing.expect(cycleColor(&cfg, "theme.background", -1));
+    try std.testing.expectEqualStrings(color_presets[color_presets.len - 1], cfg.theme.background);
+    // 현재값이 프리셋 아니면 +1 → presets[0].
+    cfg.theme.background = "#123456";
+    try std.testing.expect(cycleColor(&cfg, "theme.background", 1));
+    try std.testing.expectEqualStrings(color_presets[0], cfg.theme.background);
+    // 비-color 키 → false.
+    try std.testing.expect(!cycleColor(&cfg, "font.family", 1)); // text 필드
+    try std.testing.expect(!cycleColor(&cfg, "cursor.blink", 1)); // bool 필드
+    try std.testing.expect(!cycleColor(&cfg, "no.such.key", 1));
 }
 
 // ── doc-drift 가드(CS-3): 모든 스키마 키가 configuration.md 키 표에 문서화돼 있어야 한다 ──────────────

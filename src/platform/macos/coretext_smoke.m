@@ -455,8 +455,19 @@ static CFStringRef maru_create_string_for_draw_cell(MaruCoreTextDrawCell cell) {
     if (!maru_append_utf16_scalar(cell.codepoint, units, &len, 4)) {
         return NULL;
     }
-    if (cell.combining != 0 && !maru_append_utf16_scalar(cell.combining, units, &len, 4)) {
-        return NULL;
+    if (cell.combining != 0) {
+        // 키캡 이모지(2️⃣ = base + VS16 + U+20E3)는 코드포인트 3개지만, maru 셀은 combining을 하나만
+        // 저장해 VS16(U+FE0F)이 U+20E3에 덮여 사라진다. VS16 없이 'base + U+20E3'만 주면 CoreText가
+        // AppleColorEmoji 대신 텍스트 폰트(LucidaGrande)로 폴백해 얇은 테두리 박스로 그린다(컬러 키캡 X).
+        // U+20E3(COMBINING ENCLOSING KEYCAP)은 항상 키캡 이모지 시퀀스에서만 쓰이므로 VS16을 재주입해
+        // 'base + VS16 + U+20E3' 온전한 시퀀스를 만든다 → CoreText가 AppleColorEmoji 단일 글리프(예: 키캡-2)를
+        // 골라 rasterizer(CTFontDrawGlyphs)가 컬러 키캡을 그린다. units[4]에 base(1)+VS16(1)+keycap(1) 들어간다.
+        if (cell.combining == 0x20E3 && !maru_append_utf16_scalar(0xFE0F, units, &len, 4)) {
+            return NULL;
+        }
+        if (!maru_append_utf16_scalar(cell.combining, units, &len, 4)) {
+            return NULL;
+        }
     }
     return CFStringCreateWithCharacters(kCFAllocatorDefault, units, len);
 }

@@ -1,9 +1,9 @@
 //! Slider — 범위 숫자 위젯(f32/u32 + range). divider와 같은 **State 없는 순수 함수 모듈**: 값은 셸이 들고(config
 //! 단일 출처), 컴포넌트는 rect + ratio(0..1)를 받아 트랙·채운 구간·thumb를 그리고(view), 클릭/드래그 x를 ratio로
 //! 환산한다(ratioAt — divider.dragRatio 패턴). 값↔ratio 매핑(min/max·step·클램프)과 드래그 상태는 셸이 소유한다
-//! (toggle은 자기 값을 토글하지만 slider는 연속값이라 셸이 매핑). 모양은 tokens.space(rich>0 → 둥근 트랙/원형
-//! thumb, tui=0 → 직각)로 분기 없이 두 룩. 색: 트랙=muted_fg, 채움=accent_bar(maru 앰버), thumb=surface_fg.
-//! 단일 출처: docs/config-gui.md §2·§6, docs/chrome-strategy.md §5.4.
+//! (toggle은 자기 값을 토글하지만 slider는 연속값이라 셸이 매핑). 모양은 tokens.space로 두 룩 분기: rich(>0)=GPU
+//! quad(얇은 트랙+채움+원형 thumb), tui(0, 기본)=셀 정렬 text 진행 막대 `[███   ]`(채움=`█`×ratio accent_bar,
+//! 트랙=muted_fg) — quad의 paintRectBg 셀 번짐 회피(§6.1 결정). 단일 출처: docs/config-gui.md §2·§6, chrome-strategy.md §5.4.
 
 const std = @import("std");
 const draw = @import("../draw.zig");
@@ -64,35 +64,55 @@ fn geom(rect: draw.Rect, ratio: f32) Geom {
     };
 }
 
-/// 트랙(muted_fg) → 채운 구간(accent_bar, 좌단~thumb) → thumb(surface_fg)를 그린다(painter 순서 — thumb가 위).
-/// rich(space.corner_radius_px>0)면 트랙/thumb를 둥글게(트랙 반지름=track_h/2, thumb=원), tui(0)면 직각. 순수:
-/// rect·ratio·tokens만 읽는다. out/op은 호출자(셸) frame arena 소유.
+const tui_fill = "\u{2588}"; // █ FULL BLOCK(합성 글리프) — 채운 칸
+const tui_min_cells: usize = 3; // 최소 '[ ]'
+
+/// slider를 control rect에 그린다. **두 룩 분기**(tokens.space.corner_radius_px):
+///  - rich(>0): GPU quad — 얇은 muted 트랙 + 채움(accent_bar) + 원형 thumb(sub-pixel, 우아).
+///  - tui(0): 셀 정렬 **text 진행 막대** `[███   ]` — 트랙 `[ ]`+빈칸(muted_fg), 채움 `█`×ratio(accent_bar). quad를
+///    tui에서 쓰면 paintRectBg가 셀 단위라 얇은 트랙(h/4)은 r0==r1로 사라지고 행 높이 채움이 위아래로 번졌다 —
+///    dropdown/toggle처럼 text 레이어로 그려 셀 정렬·선택 하이라이트 위 또렷(단일 출처: docs/config-gui.md §6 결정).
+/// 순수: rect·ratio·tokens만 읽는다. `cw`는 tui 칸 수/채움 셀 오프셋용(rich는 무시). out/op은 호출자(셸) frame arena 소유.
 pub fn view(
     rect: draw.Rect,
     ratio: f32,
+    cw: u32,
     tk: *const tokens.Tokens,
     arena: std.mem.Allocator,
     out: *std.ArrayList(draw.Op),
 ) !void {
     if (rect.w == 0 or rect.h == 0) return;
-    const g = geom(rect, ratio);
     const round = tk.space.corner_radius_px > 0;
-    // 두 룩의 차이는 셀 vs sub-pixel lowering 때문이다:
-    //  rich(round>0): GPU quad(SDF)라 얇은 muted 트랙 + 채움(accent_bar) + 원형 thumb를 그대로 그린다(우아).
-    //  tui(round=0): paintRectBg가 셀 단위라 셀보다 얇은 사각형(track h=rect.h/4)은 r0==r1로 사라진다. 또 muted_fg가
-    //   밝은 테마에선 행 전체 높이 muted 트랙이 패널을 덮어 큰 흰 블록처럼 보인다. 그래서 tui는 **트랙을 안 그리고**
-    //   (패널 bg=빈 트랙) 채움(accent_bar, 좌단~thumb, 행 전체 높이) + thumb(surface_fg, 행 전체 높이)만 그린다 —
-    //   진행 막대처럼 값이 읽힌다(blocky, 토글과 같은 규율). x/폭은 두 룩 공통(geom — ratioAt 매핑과 일치).
     if (round) {
+        const g = geom(rect, ratio);
         const track_r: u16 = @intCast(@min(g.track.h / 2, @as(u32, std.math.maxInt(u16))));
         const thumb_r: u16 = @intCast(@min(g.thumb.h / 2, @as(u32, std.math.maxInt(u16))));
         try out.append(arena, .{ .quad = .{ .rect = g.track, .fill_role = .muted_fg, .corner_radii = .{ track_r, track_r, track_r, track_r } } });
         if (g.filled.w > 0) try out.append(arena, .{ .quad = .{ .rect = g.filled, .fill_role = .accent_bar, .corner_radii = .{ track_r, track_r, track_r, track_r } } });
         try out.append(arena, .{ .quad = .{ .rect = g.thumb, .fill_role = .surface_fg, .corner_radii = .{ thumb_r, thumb_r, thumb_r, thumb_r } } });
-    } else {
-        const fill_w = @max(g.filled.w, @as(u32, 1)); // 최소 1px(ratio 0이어도 좌단 표식 — paintRectBg가 1셀은 칠한다)
-        try out.append(arena, .{ .quad = .{ .rect = .{ .x = rect.x, .y = rect.y, .w = fill_w, .h = rect.h }, .fill_role = .accent_bar } });
-        try out.append(arena, .{ .quad = .{ .rect = .{ .x = g.thumb.x, .y = rect.y, .w = g.thumb.w, .h = rect.h }, .fill_role = .surface_fg } });
+        return;
+    }
+    // tui: 칸 수 = rect 폭/cw(control 열 칸과 일치). 트랙 '[' + 빈칸×inner + ']'(muted) → 채움 '█'×k(accent) 덮기.
+    const cells: usize = @max(tui_min_cells, rect.w / @max(cw, 1));
+    const inner = cells - 2;
+    const r = std.math.clamp(ratio, 0, 1);
+    const k: usize = @intFromFloat(@round(@as(f32, @floatFromInt(inner)) * r));
+    // 트랙: '[' + ' '×inner + ']'.
+    const track = try arena.alloc(u8, cells + 1); // '[' + inner(' ') + ']' (ASCII 1B/char)
+    track[0] = '[';
+    @memset(track[1 .. 1 + inner], ' ');
+    track[1 + inner] = ']';
+    const trun = try arena.alloc(draw.Run, 1);
+    trun[0] = .{ .text = track[0..cells] };
+    try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x, .y = rect.y }, .runs = trun, .role = .muted_fg } });
+    if (k > 0) {
+        // 채움 '█'×k(각 3바이트 UTF-8) — 안쪽 좌(셀1)부터.
+        const fill = try arena.alloc(u8, k * tui_fill.len);
+        var i: usize = 0;
+        while (i < k) : (i += 1) @memcpy(fill[i * tui_fill.len ..][0..tui_fill.len], tui_fill);
+        const frun = try arena.alloc(draw.Run, 1);
+        frun[0] = .{ .text = fill };
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(cw)), .y = rect.y }, .runs = frun, .role = .accent_bar } });
     }
 }
 
@@ -124,34 +144,40 @@ test "slider hitTest: rect 안=true, 밖/비유한=false" {
     try std.testing.expect(!hitTest(.{ .x = 0, .y = 0, .w = 0, .h = 20 }, 0, 0));
 }
 
-test "slider view: tui=채움+thumb(트랙 없음·행 높이·직각), rich=얇은 muted 트랙+채움+원형 thumb" {
+test "slider view tui: 트랙 text '[ ]'(muted) + 채움 █×k(accent, ratio 비례)" {
     const Rgb = @import("../../color.zig").Rgb;
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    const cw: u32 = 8; // test_rect.w=100 → cells=12, inner=10
     const tui = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
     var out: std.ArrayList(draw.Op) = .empty;
 
-    // tui ratio=0: 채움(accent_bar, 좌단) + thumb(surface_fg, x=100). 트랙(muted) 없음(패널 bg=빈 트랙). 행 높이·직각.
-    try view(test_rect, 0, &tui, arena, &out);
-    try std.testing.expectEqual(@as(usize, 2), out.items.len);
-    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[0].quad.fill_role); // 채움
-    try std.testing.expectEqual(tokens.ColorRole.surface_fg, out.items[1].quad.fill_role); // thumb
-    try std.testing.expectEqual(@as(i32, 100), out.items[1].quad.rect.x); // ratio 0 → thumb 좌단(rect.x)
-    try std.testing.expectEqual(@as(u32, 20), out.items[1].quad.rect.h); // 행 높이(rect.h)
-    try std.testing.expectEqual(@as(u16, 0), out.items[0].quad.corner_radii[0]); // tui 직각
+    // ratio=0: 트랙만(채움 0칸 → op 1개). 트랙 = '[' + ' '×10 + ']' = 12칸, muted_fg.
+    try view(test_rect, 0, cw, &tui, arena, &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[0].text.role);
+    try std.testing.expect(std.mem.startsWith(u8, out.items[0].text.runs[0].text, "["));
+    try std.testing.expect(std.mem.endsWith(u8, out.items[0].text.runs[0].text, "]"));
 
-    // tui ratio=1: thumb 우단(x = 100 + usable(85) = 185).
+    // ratio=1: 트랙 + 채움 █×inner(10칸, accent_bar, 안쪽 좌=셀1 → x=100+8=108).
     out.clearRetainingCapacity();
-    try view(test_rect, 1, &tui, arena, &out);
+    try view(test_rect, 1, cw, &tui, arena, &out);
     try std.testing.expectEqual(@as(usize, 2), out.items.len);
-    try std.testing.expectEqual(@as(i32, 185), out.items[1].quad.rect.x);
+    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[1].text.role);
+    try std.testing.expectEqual(@as(i32, 108), out.items[1].text.origin.x);
+    try std.testing.expectEqual(@as(usize, 10 * tui_fill.len), out.items[1].text.runs[0].text.len); // █×10
 
-    // rich: 얇은 muted 트랙 + 채움 + 원형 thumb(3 ops, 둥글).
+    // ratio=0.5: 채움 █×5(round(10*0.5)).
+    out.clearRetainingCapacity();
+    try view(test_rect, 0.5, cw, &tui, arena, &out);
+    try std.testing.expectEqual(@as(usize, 5 * tui_fill.len), out.items[1].text.runs[0].text.len);
+
+    // rich: 얇은 muted 트랙 + 채움 + 원형 thumb(3 quad ops, 둥글).
     out.clearRetainingCapacity();
     var rich = tui;
     rich.space.corner_radius_px = 8;
-    try view(test_rect, 0.5, &rich, arena, &out);
+    try view(test_rect, 0.5, cw, &rich, arena, &out);
     try std.testing.expectEqual(@as(usize, 3), out.items.len);
     try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[0].quad.fill_role); // 얇은 트랙
     try std.testing.expect(out.items[0].quad.corner_radii[0] > 0); // 트랙 둥글

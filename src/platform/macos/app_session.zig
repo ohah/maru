@@ -3153,7 +3153,13 @@ pub const AppSession = struct {
     /// new_tab_config/zdotdir, term은 loaded_config). createTab이 새 탭을 활성으로 만든다.
     fn newTab(self: *AppSession) !*Tab {
         var cfg = self.new_tab_config;
-        cfg.size = self.activeSurface().core.size; // 첫 탭 크기가 아니라 지금 창 크기로
+        // 새 탭은 단일 panel(전체 터미널 영역)이다. 직전 활성 surface의 core grid(activeSurface().core.size)를 쓰면,
+        // 그 탭이 split이었을 때 activeSurface()가 분할된 '한 panel'이라 grid가 작아져, 새 탭이 그 작은 크기로 spawn돼
+        // 직전 활성 탭 사이즈를 물려받는다(resizeActiveTabPanes가 전체로 다시 펴는 강제 리사이즈 전까지 고착). 단일
+        // leaf가 실제로 차지할 영역(paneTermRect(termRect))의 grid로 잡아, init 첫 탭(spawn_config.size=전체 grid)과
+        // 같은 계약을 따른다 — resizeActiveTabPanes가 단일 leaf에 적용하는 grid와도 정확히 일치한다.
+        const full = self.paneTermRect(self.termRect());
+        cfg.size = gridFromRectPx(self.cell_width_px, self.cell_height_px, full.w, full.h);
         var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
         // 새 워크스페이스 탭: tab-inherit-cwd면 포커스 cwd 상속, 아니면 root(Ghostty tab-inherit 모델).
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -11131,6 +11137,41 @@ test "splitActivePane splits the active leaf, focuses the new panel, and renders
 
     // N-panel 렌더 경로(비활성 frame 빌드 + 활성 맨 뒤 합성)가 크래시 없이 돈다.
     _ = try session.tick();
+}
+
+test "newTab(새 워크스페이스): 직전 활성 탭이 split이어도 새 탭 surface는 전체 영역 grid(전 활성 panel 크기 안 물려받음)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane/newTab = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800; // split이 의미 있으려면 backing 필요
+    session.backing_height_px = 600;
+    session.window_padding_px = .{}; // split 기하만 검증(다른 split 테스트와 같은 규율)
+
+    // 단일 panel 탭의 '전체 영역' grid를 기준으로 잡는다 — resizeActiveTabPanes가 단일 leaf에 적용하는 grid가
+    // 곧 newTab이 새 단일-panel 탭에 잡아야 할 grid다(둘 다 paneTermRect(termRect) 경로라 정확히 일치해야 한다).
+    try session.resizeActiveTabPanes();
+    const full = session.activeSurface().core.size;
+
+    // 직전 활성 탭을 좌우로 분할 → 활성 surface는 분할된 '한 panel'이라 cols가 전체보다 작아진다.
+    try session.splitActivePane(.horizontal);
+    const split_panel = session.activeSurface().core.size;
+    try std.testing.expect(split_panel.cols < full.cols); // 분할로 폭이 줄었다(테스트 전제 확인)
+
+    // 새 워크스페이스(탭)를 연다. 새 탭은 단일 panel(전체 영역)이므로 surface grid가 전체 영역과 같아야 한다 —
+    // 회귀 전에는 cfg.size=activeSurface().core.size라 직전 활성 panel(split_panel) 크기를 물려받았다(버그).
+    _ = try session.newTab();
+    const new_tab_size = session.activeSurface().core.size;
+    try std.testing.expectEqual(full, new_tab_size); // 전체 영역 복원(직전 panel 크기 아님)
+    try std.testing.expect(new_tab_size.cols != split_panel.cols); // 회귀 가드: split panel 크기를 물려받지 않음
 }
 
 test "S1 구조-무효화 계약: destroyPane이 해제 Pane 포인터를 표적 무효화(무관 드래그 보존)·divider도 표적" {

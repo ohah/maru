@@ -234,7 +234,14 @@ pub const CursorShape = enum {
 pub const CursorConfig = struct {
     shape: CursorShape = .block,
     blink: bool = true,
+    // 커서 색(선택, #RRGGBB). 둘 다 테마와 독립적으로 커서만 칠하는 opt-in override다 — null이면 테마 동작을
+    // 그대로 따른다(기존 호환). color=커서 칸 배경(null이면 theme.cursor). text=반전 블록 커서 위 glyph 색
+    // (null이면 경로별 기존값 — 메인 터미널은 theme.background, chrome caret은 sidebar_background). nullable이라
+    // 스키마-주도(non-null 스칼라 전용)에서 빠지고, loader 수동 핸들러·serialize 수동 emit로 다룬다(palette 선례).
+    color: ?[]const u8 = null,
+    text: ?[]const u8 = null,
 
+    // color/text는 nullable이라 schema에서 제외(theme.sidebar_*·palette와 같은 선례 — theme.zig 상단 주석).
     pub const schema = .{
         .shape = Meta{ .doc = "커서 모양", .widget = .dropdown, .section = .cursor },
         .blink = Meta{ .doc = "커서 깜빡임", .widget = .toggle, .section = .cursor },

@@ -45,6 +45,10 @@ pub fn configKeyValues(arena: std.mem.Allocator, config: theme.Config) ![]const 
         const color = entry orelse continue; // null = 그 인덱스는 기본 xterm — 줄 안 만든다(parse가 기본 폴백)
         try list.append(arena, .{ .key = try std.fmt.allocPrint(arena, "theme.palette.{d}", .{i}), .value = color });
     }
+    // 커서 색 override: non-null만 emit한다(null=테마 폴백이라 줄 안 만듦 — palette와 동형). 스키마-주도가
+    // nullable을 안 다뤄 여기 수동으로 둔다(loader 수동 핸들러와 짝). 정적/arena 문자열 그대로 빌려준다.
+    if (config.cursor.color) |c| try list.append(arena, .{ .key = "cursor.color", .value = c });
+    if (config.cursor.text) |c| try list.append(arena, .{ .key = "cursor.text", .value = c });
     try list.append(arena, .{ .key = "workspace.root", .value = config.workspace.root });
     try list.append(arena, .{ .key = "shell.args", .value = try std.mem.join(arena, " ", config.shell.args) });
     for (config.env) |entry| {
@@ -104,6 +108,8 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     cfg.theme.palette[14] = "#70c0b1";
     cfg.cursor.shape = .underline;
     cfg.cursor.blink = false;
+    cfg.cursor.color = "#ff5555"; // nullable 색 round-trip(loader 수동 핸들러 ↔ serialize 수동 emit) 대칭 검증
+    cfg.cursor.text = "#101010";
     cfg.chrome_theme = .rich;
     cfg.blink_text = true;
     cfg.ambiguous_width = .wide;
@@ -160,6 +166,8 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     try std.testing.expectEqual(@as(?[]const u8, null), got.theme.palette[0]); // 안 적은 인덱스는 기본(null)
     try std.testing.expectEqual(theme.CursorShape.underline, got.cursor.shape);
     try std.testing.expectEqual(false, got.cursor.blink);
+    try std.testing.expectEqualStrings("#ff5555", got.cursor.color.?);
+    try std.testing.expectEqualStrings("#101010", got.cursor.text.?);
     try std.testing.expectEqual(theme.ChromeTheme.rich, got.chrome_theme);
     try std.testing.expectEqual(true, got.blink_text);
     try std.testing.expectEqual(theme.AmbiguousWidth.wide, got.ambiguous_width);

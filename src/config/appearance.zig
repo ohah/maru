@@ -46,6 +46,10 @@ pub const ResolvedTheme = struct {
 pub const ResolvedCursor = struct {
     shape: theme.CursorShape,
     blink: bool,
+    // 커서 색 override(opt-in). null이면 렌더가 경로별 테마 기본으로 폴백한다(color→theme.cursor,
+    // text→메인 background / chrome sidebar_background). 명시 색은 다른 테마 색과 같은 #RRGGBB 검증을 거친다.
+    color: ?color.Rgb = null,
+    text: ?color.Rgb = null,
 };
 
 pub const ResolvedAppearance = struct {
@@ -76,6 +80,10 @@ pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
         .cursor = .{
             .shape = config.cursor.shape,
             .blink = config.cursor.blink,
+            // non-null만 검증·변환(palette와 동형). 깨진 색은 여기서 막힌다(loader가 valid만 담지만, resolve
+            // 단독 호출·테스트도 같은 게이트를 거치게 한다). null은 그대로 둬 렌더가 테마 기본으로 폴백한다.
+            .color = if (config.cursor.color) |c| try parseHexColor(c) else null,
+            .text = if (config.cursor.text) |c| try parseHexColor(c) else null,
         },
         .chrome_theme = config.chrome_theme,
         .blink_text = config.blink_text,
@@ -198,6 +206,9 @@ test "default appearance resolves to renderer-friendly values" {
     try std.testing.expectEqual(color.Rgb{ .r = 0xe8, .g = 0xe8, .b = 0xe8 }, resolved.theme.sidebar_foreground);
     try std.testing.expectEqual(theme.CursorShape.block, resolved.cursor.shape);
     try std.testing.expect(resolved.cursor.blink);
+    // 커서 색 override는 기본 미지정 — 렌더가 theme.cursor/배경색으로 폴백(기존 동작 보존).
+    try std.testing.expect(resolved.cursor.color == null);
+    try std.testing.expect(resolved.cursor.text == null);
 }
 
 test "appearance resolver derives sidebar colors from background and honors explicit override" {
@@ -246,6 +257,27 @@ test "appearance resolver propagates ANSI palette overrides and keeps unset indi
     var bad_fmt: [16]?[]const u8 = .{null} ** 16;
     bad_fmt[7] = "nope";
     try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .palette = bad_fmt } }));
+}
+
+test "appearance resolver applies cursor color overrides and keeps them null by default" {
+    // 기본: 미지정이라 null(렌더가 theme.cursor / 배경색으로 폴백 — 기존 동작 보존).
+    const default_resolved = try resolve(.{});
+    try std.testing.expect(default_resolved.cursor.color == null);
+    try std.testing.expect(default_resolved.cursor.text == null);
+
+    // 명시 override: 테마와 독립적으로 커서만 그 색으로. #RRGGBB로 변환된다(palette·sidebar와 동형).
+    const custom = try resolve(.{ .cursor = .{ .color = "#ff5555", .text = "#101010" } });
+    try std.testing.expectEqual(@as(?color.Rgb, color.Rgb{ .r = 0xff, .g = 0x55, .b = 0x55 }), custom.cursor.color);
+    try std.testing.expectEqual(@as(?color.Rgb, color.Rgb{ .r = 0x10, .g = 0x10, .b = 0x10 }), custom.cursor.text);
+
+    // 한쪽만 지정하면 나머지는 null 유지(둘은 독립 opt-in).
+    const only_color = try resolve(.{ .cursor = .{ .color = "#00ff00" } });
+    try std.testing.expectEqual(@as(?color.Rgb, color.Rgb{ .r = 0x00, .g = 0xff, .b = 0x00 }), only_color.cursor.color);
+    try std.testing.expect(only_color.cursor.text == null);
+
+    // 명시 커서 색도 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 resolve에서 막힌다).
+    try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .cursor = .{ .color = "bad" } }));
+    try std.testing.expectError(error.InvalidHexColorDigit, resolve(.{ .cursor = .{ .text = "#zzzzzz" } }));
 }
 
 test "appearance resolver trims font family and preserves cursor options" {

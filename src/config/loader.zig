@@ -215,6 +215,19 @@ fn applyKey(
         }
         config.workspace.root = try a.dupe(u8, trimmed);
         // workspace.{tab,split}-inherit-cwd는 스키마-주도로 이주(CS-2) — 위 schema.tryParse가 처리.
+    } else if (std.mem.eql(u8, key, "cursor.color") or std.mem.eql(u8, key, "cursor.text")) {
+        // 커서 색 override(opt-in). nullable이라 스키마-주도에서 빠져 여기서 다룬다(palette와 동형). 색 검증·
+        // arena dupe·diagnostic은 dupValidColor 재사용(단일 출처). 슬롯은 ?[]const u8라 sentinel ""을 current로
+        // 넘긴다 — 틀린 색이면 dupValidColor가 ""를 돌려주므로 그때만 슬롯을 안 건드려 기존(보통 null) 값을
+        // 유지한다(forgiving). 유효하면 dupe된 색으로 갱신. color=커서 칸, text=커서 위 반전 glyph.
+        const validated = try dupValidColor(a, diags, line_no, key, value, "");
+        if (validated.len != 0) {
+            if (std.mem.eql(u8, key, "cursor.color")) {
+                config.cursor.color = validated;
+            } else {
+                config.cursor.text = validated;
+            }
+        }
     } else {
         try diags.append(a, .{ .line = line_no, .message = "알 수 없는 key — 무시" });
     }
@@ -541,6 +554,8 @@ test "parse: full config sets every field" {
         \\theme.foreground = #ffeedd
         \\cursor.shape = bar
         \\cursor.blink = false
+        \\cursor.color = #ff5555
+        \\cursor.text = #101010
         \\chrome.theme = rich
         \\sidebar.show-branch = false
         \\sidebar.show-folder = false
@@ -562,6 +577,8 @@ test "parse: full config sets every field" {
     try std.testing.expectEqualStrings("#ffeedd", p.config.theme.foreground);
     try std.testing.expectEqual(theme.CursorShape.bar, p.config.cursor.shape);
     try std.testing.expectEqual(false, p.config.cursor.blink);
+    try std.testing.expectEqualStrings("#ff5555", p.config.cursor.color.?);
+    try std.testing.expectEqualStrings("#101010", p.config.cursor.text.?);
     try std.testing.expectEqual(theme.ChromeTheme.rich, p.config.chrome_theme); // C4a chrome.theme 파싱
     try std.testing.expectEqual(false, p.config.sidebar.show_branch); // sidebar.show-branch 파싱(기본 true)
     try std.testing.expectEqual(false, p.config.sidebar.show_folder); // sidebar.show-folder 파싱(기본 true)
@@ -856,6 +873,7 @@ test "parse: forgiving — unknown key and bad values keep defaults with diagnos
         \\font.size = huge
         \\cursor.shape = triangle
         \\cursor.blink = maybe
+        \\cursor.color = nope
         \\theme.background = not-a-color
         \\nonsense.key = 1
         \\chrome.theme = neon
@@ -866,10 +884,11 @@ test "parse: forgiving — unknown key and bad values keep defaults with diagnos
     try std.testing.expectEqual(defaults.font.size, p.config.font.size);
     try std.testing.expectEqual(defaults.cursor.shape, p.config.cursor.shape);
     try std.testing.expectEqual(defaults.cursor.blink, p.config.cursor.blink);
+    try std.testing.expectEqual(defaults.cursor.color, p.config.cursor.color); // 틀린 색은 null 유지(미지정)
     try std.testing.expectEqualStrings(defaults.theme.background, p.config.theme.background);
     try std.testing.expectEqual(defaults.chrome_theme, p.config.chrome_theme); // 미지값(neon) → tui 폴백(C4a)
-    // 7개 문제 줄 각각 diagnostic(chrome.theme=neon·누락 '=' 포함).
-    try std.testing.expectEqual(@as(usize, 7), p.diagnostics.len);
+    // 8개 문제 줄 각각 diagnostic(cursor.color=nope·chrome.theme=neon·누락 '=' 포함).
+    try std.testing.expectEqual(@as(usize, 8), p.diagnostics.len);
 }
 
 test "parse: theme.palette.N parses ANSI 16 overrides; out-of-range/bad index/color are forgiving" {

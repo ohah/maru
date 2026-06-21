@@ -4143,6 +4143,9 @@ pub const AppSession = struct {
     /// NaN/∞·거대값은 무시/clamp한다(@intFromFloat trap 방지).
     pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool, x_px: f64, y_px: f64) void {
         if (!self.surface_initialized) return;
+        // 닫기 확인 모달은 결정 게이트라 마우스 클릭(mouse())뿐 아니라 휠도 막는다 — 안 막으면 모달 뒤 터미널/스크롤백이
+        // 사용자 결정 중에 움직이거나(스크롤) 트래킹 앱에 휠이 리포트된다(모달 의도 위배).
+        if (self.chrome_host.confirm.open) return;
         // 방향이 뒤집히면 1줄 미만 잔여를 버린다 — 이전 방향의 residue가 첫 반대 틱을 상쇄해
         // 방향 전환이 굼뜨게 느껴지는 것 방지(iTerm2/xterm.js 동작).
         if (std.math.isFinite(delta_y) and delta_y * self.wheel_accum < 0) self.wheel_accum = 0;
@@ -4299,6 +4302,8 @@ pub const AppSession = struct {
     /// 베이스: xterm — any-event(1003)는 버튼 없는 motion도 Cb=3(+32 motion 비트)로 인코딩한다.
     pub fn mouseMoved(self: *AppSession, x_px: f64, y_px: f64, mods: i32) void {
         if (!self.surface_initialized) return;
+        // 닫기 확인 모달 중엔 모션 리포트도 막는다 — 모달 뒤 트래킹 앱(DECSET 1003 등)에 stale 좌표가 새지 않게(모달 게이트).
+        if (self.chrome_host.confirm.open) return;
         const active = self.activeSurface();
         // 비-1003이면 dedup도 비운다 — 다음 1003 진입의 첫 셀이 stale last_motion_cell로 막히지 않게.
         {
@@ -4382,7 +4387,10 @@ pub const AppSession = struct {
         // 패널 밖=cancelled(바깥 클릭 dismiss 관례), 패널 안 비-버튼=무동작. 키보드(Enter/Esc·Y/N) 경로와 동일하게
         // dismiss 후 dispatchChromeAction으로 같은 후처리(executeClose/버림)한다. move/drag/up·비-버튼은 삼킨다.
         if (self.chrome_host.confirm.open) {
-            if (kind == 1) {
+            // **좌클릭(button==0) down만** 버튼을 활성한다 — 우/중클릭(button≠0)이 파괴적 확정 버튼을 누르는 것을 막는다
+            // (우클릭 down도 kind==1로 들어와 buttonAtPoint를 타면 ◧ 확정처럼 닫혀버린다). 그 외(우클릭·move·drag·up)는
+            // hit-test 없이 그냥 삼킨다(모달 뒤로 안 샘).
+            if (kind == 1 and button == 0) {
                 const tk = self.buildChromeTokens();
                 if (chrome.components.confirm.buttonAtPoint(&self.chrome_host.confirm, self.buildChromeProps(), &tk, x_px, y_px)) |act| {
                     self.chrome_host.confirm.dismiss();
@@ -5239,6 +5247,9 @@ pub const AppSession = struct {
     /// Cmd+hover URL=pointingHand(link). 창 밖 sentinel(-1,-1)이면 inSidebar=false→터미널 경로로 호버 해제.
     pub fn hoverCursor(self: *AppSession, x_px: f64, y_px: f64, cmd_held: bool) CursorKind {
         if (!self.surface_initialized) return .text;
+        // 닫기 확인 모달 중엔 호버 부수효과(사이드바/탭/◧ 호버 강조·스크롤바 hover·URL 밑줄)를 멈추고 화살표 커서만
+        // 둔다 — 안 그러면 모달 뒤 버튼/슬롯이 호버에 반응해 강조되며(모달 위로 비침) UI가 깨져 보인다(모달 게이트).
+        if (self.chrome_host.confirm.open) return .default;
         // 스크롤바 hover 강조를 매 이동 갱신한다(어느 zone이든 — 아래 early return 전에 항상). scrollbarGrabAt이
         // 영역+스크롤백 유무를 본다(우측 얇은 띠). 커서 종류는 안 바꾼다(얇은 띠라 iBeam 깜빡임 방지) — 강조만.
         self.setScrollbarHovered(self.scrollbarGrabAt(x_px, y_px) != null);
@@ -11669,6 +11680,46 @@ test "close-confirm: 모달에서 Esc=취소(안 닫음)·Enter=확정(보류한
     try std.testing.expect(session.pending_close == null);
     try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
     try std.testing.expect(!session.ended_seen); // Term이 남아 세션 유지
+}
+
+// 닫기 확인 모달 마우스 게이트(code-review 후속): (1) 좌클릭(button==0)만 버튼을 활성한다 — 우클릭(button==2)은
+// 파괴적 확정을 누르면 안 됨. (2) 패널 밖 좌클릭은 취소(바깥 클릭 dismiss). (3) 모달 중엔 hover/scroll도 막혀
+// 뒤 터미널/사이드바가 반응하지 않는다(완전 모달 게이트).
+test "close-confirm 마우스 게이트: 우클릭 비활성·좌클릭 바깥=취소·hover/scroll 차단" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // (1) 우클릭(button==2)은 버튼을 활성 안 한다 — 패널 어디를 눌러도 모달 유지(파괴적 확정 보호).
+    session.pending_close = .active_term;
+    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?");
+    try std.testing.expect(session.chrome_host.confirm.open);
+    session.mouse(1, 400, 300, 2, 0); // 우클릭 down(패널 중앙 근처)
+    try std.testing.expect(session.chrome_host.confirm.open); // 유지
+    session.mouse(1, 400, 300, 1, 0); // 중클릭(button==1)도 비활성
+    try std.testing.expect(session.chrome_host.confirm.open);
+
+    // (2) 좌클릭(button==0) 패널 밖(좌상단 원점) → 취소(바깥 클릭 dismiss) → 모달 닫힘, 보류 버림.
+    session.mouse(1, 1, 1, 0, 0);
+    try std.testing.expect(!session.chrome_host.confirm.open);
+    try std.testing.expect(session.pending_close == null);
+
+    // (3) 모달 중 hover는 화살표 커서만(.default) — 게이트 없으면 터미널 본문 지점은 iBeam(.text)이라 .default는
+    //     게이트가 실제로 동작함을 증명한다(뒤 사이드바/탭/◧ 호버 부수효과 차단).
+    session.showConfirm("닫을까요?");
+    const term_x: f64 = @floatFromInt(session.sidebar_width_px + 200); // 터미널 본문(게이트 없으면 .text)
+    try std.testing.expectEqual(CursorKind.default, session.hoverCursor(term_x, 300, false));
 }
 
 // 바 우측 "+" 버튼을 클릭하면 그 pane에 새 Term이 뜨는지(PR-F) — ⌘T의 마우스 버전. 실 init/spawn이라 macOS 게이트.

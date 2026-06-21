@@ -498,7 +498,7 @@ pub export fn maru_macos_app_session_take_bell(session: ?*AppSession) u32 {
 // 호출해 1이면 serialize_sidebar_config로 받은 텍스트를 config 경로에 atomic write한다(앱→config). session null=0.
 pub export fn maru_macos_app_session_take_sidebar_config_dirty(session: ?*AppSession) u32 {
     const app_session = session orelse return 0;
-    return if (app_session.takeSidebarConfigDirty()) 1 else 0;
+    return if (app_session.takeConfigDirty()) 1 else 0;
 }
 
 // (x,y backing px)가 사이드바 헤더의 빈 영역(아이콘·검색 아님)이면 1 — Swift가 창 이동(performDrag)·더블클릭 확대(zoom)를
@@ -617,7 +617,7 @@ pub export fn maru_macos_app_session_serialize_sidebar_config(
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
     const len_out = out_len orelse return @intFromEnum(Status.null_out);
-    const text = app_session.serializeSidebarConfig() catch {
+    const text = app_session.serializeConfig() catch {
         ptr_out.* = null;
         len_out.* = 0;
         return @intFromEnum(Status.ok);

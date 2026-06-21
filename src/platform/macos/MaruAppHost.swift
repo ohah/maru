@@ -146,6 +146,25 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, // F1~F12
     ]
 
+    // 조합(marked text) 중에 '텍스트 입력이 아닌' 사용자 상호작용이 오면 먼저 조합을 확정한다. 안 그러면
+    // AppKit 입력기 세션(hasMarkedText)과 Zig preedit가 안 비워진 채 그 상호작용이 실행돼, 이후 입력이
+    // stale한 조합에 이어 붙는다 — 예: 'ㅈ' 조합 중 다른 탭으로 가면 그 'ㅈ' 세션이 살아남아 새 탭의 첫
+    // 입력이 'ㅈ'부터 이어진다(사용자 보고). 키보드(keyDown: 단축키/특수키 우회), 포인터(handleMouse
+    // kind==1: 사이드바 카드·탭 바 클릭의 탭/Term 전환은 버튼 무관 kind==1 게이트라 좌·중·우 다운 모두),
+    // 메뉴(runCatalogAction: next/previous_tab 등 — 키 단축키로 와도 keyDown을 안 거친다) 세 입력 모달리티가
+    // 이 한 규칙('비-텍스트 조작이면 조합 확정')을 공유한다. 커밋은 전환 '전'에 일어나므로 조합 글자는
+    // 떠나는(현재) 터미널로 들어가고 새 터미널은 빈 상태로 시작한다.
+    //
+    // 왜 Zig switchTab/focusTerm(전환의 단일 chokepoint)이 아니라 Swift 입력 경계에서 하나 — AppKit 입력기
+    // 세션 종료(inputContext.discardMarkedText)는 NSView만 할 수 있다. Zig가 preedit를 커밋해도 그걸 못 부르면
+    // marked 세션이 살아 다음 입력이 'ㅈ'부터 이어진다(누수의 실제 출처가 AppKit 세션이라 Zig만으론 못 막는다).
+    func commitMarkedTextIfComposing() {
+        guard hasMarkedText() else { return }
+        controller?.imeCommit()            // core preedit 커밋(조합 글자 PTY로)
+        inputContext?.discardMarkedText()  // AppKit 입력기의 marked 상태 정리(콜백 없이)
+        markedTextBuffer = ""               // hasMarkedText() = false 로 동기화
+    }
+
     override func keyDown(with event: NSEvent) {
         let m = event.modifierFlags
         let mods = "\(m.contains(.command) ? "Cmd " : "")\(m.contains(.control) ? "Ctrl " : "")\(m.contains(.option) ? "Opt " : "")\(m.contains(.shift) ? "Shift " : "")"
@@ -167,10 +186,8 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // 조합(marked text) 중에 우회 키가 오면 '먼저 조합을 확정'한다 — 안 그러면 Swift의 marked
         // text(hasMarkedText)와 Zig의 preedit가 안 비워진 채 PageUp이 화면을 옮겨, 이후 입력이 stale한
         // marked range에 박혀 위치가 어긋나거나 안 먹거나 안 지워진다(특수키 우회의 누락된 처리).
-        if bypassesIME, hasMarkedText() {
-            controller?.imeCommit()            // core preedit 커밋(조합 글자 PTY로)
-            inputContext?.discardMarkedText()  // AppKit 입력기의 marked 상태 정리(콜백 없이)
-            markedTextBuffer = ""               // hasMarkedText() = false 로 동기화
+        if bypassesIME {
+            commitMarkedTextIfComposing()
         }
         if !chord.isEmpty {
             controller?.handleKeyDown(event)
@@ -1328,6 +1345,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 마우스 좌표를 backing 픽셀(좌상단 원점)로 환산해 Zig 선택 모델에 넘긴다(kind 1=down/2=drag/3=up).
     func handleMouse(_ event: NSEvent, kind: Int32, in view: NSView) {
         guard let session = appSession else { return }
+        // 마우스 다운(kind==1)은 텍스트 입력이 아니다 — 조합 중이면 Zig로 넘기기 '전'에 확정한다. 좌·중·우
+        // 다운이 모두 여기로 모이고(rightMouseDown/otherMouseDown 포함), 사이드바 카드·탭 바의 탭/Term 전환은
+        // 버튼이 아니라 kind==1로만 게이트되므로(app_session.zig mouse) 중간 클릭 전환도 이 한 곳에서 덮인다.
+        if kind == 1 { (view as? MaruMetalTerminalView)?.commitMarkedTextIfComposing() }
         let (xPx, yPx) = backingPx(view.convert(event.locationInWindow, from: nil), in: view)
         // macOS buttonNumber(0=L,1=R,2=M) → xterm(0=L,1=M,2=R).
         let button: Int32 = event.buttonNumber == 1 ? 2 : (event.buttonNumber == 2 ? 1 : 0)
@@ -1748,6 +1769,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// appSession(활성 surface)에 적용해, quick terminal이 key면 그쪽에 동작한다(메뉴는 포커스된 터미널에 작용).
     @objc private func runCatalogAction(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String, let session = appSession else { return }
+        // 메뉴 액션은 keyDown을 안 거친다 — next/previous_tab은 keyEquivalent가 달려 키 단축키로 와도
+        // 메뉴가 가로채 여기로 온다. 조합 중이면 먼저 확정해, 탭 전환으로 입력기 세션이 새 탭으로 새지 않게 한다.
+        activeSurface?.view?.commitMarkedTextIfComposing()
         let bytes = Array(key.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_run_action(session, buf.baseAddress, buf.count)

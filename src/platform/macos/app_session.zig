@@ -2860,6 +2860,7 @@ pub const AppSession = struct {
     /// 주입한다(confirm 컴포넌트는 범용이라 host가 용도별 라벨을 정한다). 다음 tick이 그린다.
     fn showConfirm(self: *AppSession, message: []const u8) void {
         self.dismissMessageOverlays();
+        self.clearAllHover(); // 모달 뒤(중앙 패널 밖)에 stale 호버 강조가 얼어붙지 않게 — hoverCursor는 모달 중 호버를 안 갱신
         self.chrome_host.confirm.show(copyOverlayMessage(&self.confirm_message_buf, message), .{ .confirm = "닫기", .cancel = "취소" });
         self.metal_dirty = true;
     }
@@ -4303,7 +4304,11 @@ pub const AppSession = struct {
     pub fn mouseMoved(self: *AppSession, x_px: f64, y_px: f64, mods: i32) void {
         if (!self.surface_initialized) return;
         // 닫기 확인 모달 중엔 모션 리포트도 막는다 — 모달 뒤 트래킹 앱(DECSET 1003 등)에 stale 좌표가 새지 않게(모달 게이트).
-        if (self.chrome_host.confirm.open) return;
+        // 아래 형제 early-return들처럼 last_motion_cell도 비운다 — 모달 후 같은 셀로 재진입하는 첫 1003 모션이 stale dedup에 막히지 않게.
+        if (self.chrome_host.confirm.open) {
+            self.last_motion_cell = null;
+            return;
+        }
         const active = self.activeSurface();
         // 비-1003이면 dedup도 비운다 — 다음 1003 진입의 첫 셀이 stale last_motion_cell로 막히지 않게.
         {
@@ -6817,6 +6822,19 @@ pub const AppSession = struct {
         self.hovered_collapsed_toggle = next;
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
+    }
+
+    /// 모든 마우스 호버 강조(슬롯 밴드·탭 ✕·헤더 아이콘·◧·스크롤바·Cmd+hover URL 밑줄)를 한 번에 끈다 — 닫기 확인
+    /// 모달을 열 때 호출한다. hoverCursor가 모달 중엔 호버를 재계산하지 않으므로(.default early-return), 열기 직전에
+    /// 비워야 중앙 패널 '밖'(사이드바·탭 바·좌상단 ◧·우측 스크롤바)에 켜져 있던 강조가 얼어붙어 보이지 않는다(키보드로
+    /// 닫으면 마우스 이동이 없어 영구 잔존하던 회귀 — code-review). 각 setter는 무변화면 no-op이라 중복 rebuild 없음.
+    fn clearAllHover(self: *AppSession) void {
+        self.setHoveredSlot(null);
+        self.setHoveredTab(null);
+        self.setHoveredHeaderRegion(.none);
+        self.setHoveredCollapsedToggle(false);
+        self.setScrollbarHovered(false);
+        self.clearHoverUrlAnchor();
     }
 
     /// 마우스가 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로 호버 탭을 갱신하고, 아니면 null로 비운다. 활성
@@ -11685,10 +11703,10 @@ test "close-confirm: 모달에서 Esc=취소(안 닫음)·Enter=확정(보류한
     try std.testing.expect(!session.ended_seen); // Term이 남아 세션 유지
 }
 
-// 닫기 확인 모달 마우스 게이트(code-review 후속): (1) 좌클릭(button==0)만 버튼을 활성한다 — 우클릭(button==2)은
-// 파괴적 확정을 누르면 안 됨. (2) 패널 밖 좌클릭은 취소(바깥 클릭 dismiss). (3) 모달 중엔 hover/scroll도 막혀
-// 뒤 터미널/사이드바가 반응하지 않는다(완전 모달 게이트).
-test "close-confirm 마우스 게이트: 우클릭 비활성·좌클릭 바깥=취소·hover/scroll 차단" {
+// 닫기 확인 모달 마우스 게이트(code-review 후속): (1) **확인 버튼 바로 위**에서 우/중클릭은 버튼을 활성 안 하고
+// 좌클릭만 확정한다 — 같은 좌표라 "우클릭은 무시, 좌클릭은 확정"을 정직하게 증명(버튼 중심은 view가 그린 fill에서
+// 얻음 → buttonAtPoint와 같은 buttonGeom). (2) 패널 밖 좌클릭은 취소(dismiss). (3) 모달 중 hover는 차단된다.
+test "close-confirm 마우스 게이트: 확인 버튼 위 우/중클릭 무시·좌클릭 확정·바깥 취소·hover 차단" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -11703,22 +11721,51 @@ test "close-confirm 마우스 게이트: 우클릭 비활성·좌클릭 바깥=�
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개(확정 닫기 검증용)
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
 
-    // (1) 우클릭(button==2)은 버튼을 활성 안 한다 — 패널 어디를 눌러도 모달 유지(파괴적 확정 보호).
     session.pending_close = .active_term;
     session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?");
     try std.testing.expect(session.chrome_host.confirm.open);
-    session.mouse(1, 400, 300, 2, 0); // 우클릭 down(패널 중앙 근처)
-    try std.testing.expect(session.chrome_host.confirm.open); // 유지
-    session.mouse(1, 400, 300, 1, 0); // 중클릭(button==1)도 비활성
-    try std.testing.expect(session.chrome_host.confirm.open);
 
-    // (2) 좌클릭(button==0) 패널 밖(좌상단 원점) → 취소(바깥 클릭 dismiss) → 모달 닫힘, 보류 버림.
+    // 확인 버튼(기본 포커스=confirm → focus_accent fill) 중심 좌표를 view가 그린 op에서 얻는다(buttonAtPoint과 동일 출처).
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var ops: std.ArrayList(chrome.draw.Op) = .empty;
+    const tk = session.buildChromeTokens();
+    try chrome.components.confirm.view(&session.chrome_host.confirm, session.buildChromeProps(), &tk, arena, &ops);
+    var btn: ?chrome.draw.Rect = null;
+    for (ops.items) |op| switch (op) {
+        .fill => |f| if (f.role == .focus_accent) {
+            btn = f.rect;
+        },
+        else => {},
+    };
+    const r = btn.?;
+    const cx: f64 = @floatFromInt(r.x + @as(i32, @intCast(r.w / 2)));
+    const cy: f64 = @floatFromInt(r.y + @as(i32, @intCast(r.h / 2)));
+
+    // (1) 확인 버튼 정중앙에서 우클릭(button==2)·중클릭(button==1) → 비활성(모달 유지). 같은 좌표 좌클릭이 확정하므로
+    //     이건 "위치가 버튼 밖이라 통과"가 아니라 "버튼 위인데도 비-좌클릭이라 무시"임이 증명된다.
+    session.mouse(1, cx, cy, 2, 0);
+    try std.testing.expect(session.chrome_host.confirm.open);
+    session.mouse(1, cx, cy, 1, 0);
+    try std.testing.expect(session.chrome_host.confirm.open);
+    // 좌클릭(button==0) → 확정: 모달 닫힘, 보류 실행(active_term 닫혀 1개로).
+    session.mouse(1, cx, cy, 0, 0);
+    try std.testing.expect(!session.chrome_host.confirm.open);
+    try std.testing.expect(session.pending_close == null);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+
+    // (2) 좌클릭 패널 밖(좌상단 원점) → 취소(바깥 클릭 dismiss) → 모달 닫힘, 보류 버림.
+    session.pending_close = .active_term;
+    session.showConfirm("닫을까요?");
     session.mouse(1, 1, 1, 0, 0);
     try std.testing.expect(!session.chrome_host.confirm.open);
     try std.testing.expect(session.pending_close == null);
 
-    // (3) 모달 중 hover는 화살표 커서만(.default) — 게이트 없으면 터미널 본문 지점은 iBeam(.text)이라 .default는
+    // (3) 모달 중 hover는 화살표 커서만(.default) — 게이트 없으면 터미널 본문 지점은 iBeam(.text)이라 .default가
     //     게이트가 실제로 동작함을 증명한다(뒤 사이드바/탭/◧ 호버 부수효과 차단).
     session.showConfirm("닫을까요?");
     const term_x: f64 = @floatFromInt(session.sidebar_width_px + 200); // 터미널 본문(게이트 없으면 .text)

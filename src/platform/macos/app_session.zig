@@ -46,7 +46,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 69; // 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 69; // 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 공장 기본값 복원+세팅 스칼라 키 config 영구 초기화). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -922,10 +922,6 @@ pub const AppSession = struct {
     // config가 정한 기본 폰트 크기(pt). ⌘0(reset_font_size)이 여기로 되돌린다 — appearance.font.size는
     // 런타임에 바뀌므로 원래 값을 따로 보관한다. init에서 resolve된 appearance.font.size로 채운다.
     base_font_size: f32 = 0,
-    // 프로그램 처음 실행 시점(init)에 resolve한 appearance. "Reset to Defaults"(resetToInitial)의 단일 출처다 —
-    // 런타임 줌(⌘+/−)·여백 변경을 init 시점 값으로 되돌린다. init에서만 채우고 이후 절대 안 바꾼다(reloadConfig가
-    // 파일 새 값으로 appearance를 갈아도 이건 그대로라, reset 기준이 "프로그램 처음"으로 불변).
-    initial_appearance: config_mod.ResolvedAppearance = undefined,
     // serializeWorkspaceWindow가 돌려주는 workspace 텍스트의 소유 버퍼(다음 호출/deinit까지 유효 — cwd ABI와 같은
     // 소유 규칙). Swift가 멀티 창 저장에서 세션마다 한 번 읽는다.
     workspace_buffer: ?[]u8 = null,
@@ -1353,9 +1349,6 @@ pub const AppSession = struct {
         self.appearance = config_mod.resolveAppearance(self.loaded_config.config) catch
             try config_mod.resolveAppearance(.{});
         self.base_font_size = self.appearance.font.size; // ⌘0 리셋 기준(런타임에 appearance.font.size는 바뀜)
-        // "Reset to Defaults"(resetToInitial)의 단일 출처 — 프로그램 처음 실행 설정. init에서만 잡고 reloadConfig가
-        // 파일 새 값으로 appearance를 갈아도 안 바꾼다(reset 기준은 "프로그램 처음"이라 불변).
-        self.initial_appearance = self.appearance;
         // config의 무시된 줄(알 수 없는 key·잘못된 값)을 알린다 — 사용자가 오타를 눈치채게.
         for (self.loaded_config.diagnostics) |d| {
             std.log.scoped(.config).warn("config line {d}: {s}", .{ d.line, d.message });
@@ -4330,7 +4323,7 @@ pub const AppSession = struct {
     }
 
     /// appearance(폰트·여백·테마)가 통째로 바뀌었을 때의 일반 적용 경로. setFontSize의 메트릭 재계산을 일반화한 것 —
-    /// reloadConfig(파일 새 값)·resetToInitial(처음 설정 복원)이 공유한다. appearance를 갈아끼우고 base_font_size를
+    /// reloadConfig(파일 새 값)·resetToDefaults(공장 기본값 복원)이 공유한다. appearance를 갈아끼우고 base_font_size를
     /// 새 폰트 크기로 맞춘 뒤(⌘0 기준도 따라감), 메트릭·grid·atlas 파이프라인을 돌린다. palette/scrollback 같은
     /// 코어 behavior 재주입은 호출자가 한다(appearance만 다루는 단일 책임).
     fn applyAppearance(self: *AppSession, new_appearance: config_mod.ResolvedAppearance) void {
@@ -4356,14 +4349,35 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// "Reset to Defaults" 메뉴 — 런타임 줌(⌘+/−)·여백 변경을 **프로그램 처음 실행했던** 설정(initial_appearance)으로
-    /// 되돌린다. behavior(scrollback/bell/page-keys)는 런타임에 안 바뀌므로 reset 대상이 아니다 — appearance만
-    /// 되돌린다. 단 palette는 appearance에 속하므로 applyAppearance가 갈아끼운 initial palette를 모든 surface에
-    /// 재주입한다(코어 setConfigPalette 단일 출처). initial_appearance는 init에서만 잡혀 reload 후에도 불변이라,
-    /// reset 기준이 항상 "프로그램 처음"이다.
-    pub fn resetToInitial(self: *AppSession) void {
-        self.applyAppearance(self.initial_appearance);
+    /// "Reset to Defaults" 메뉴 — config 파일 값이 아니라 **하드코딩 공장 기본값**(`Config{}` resolve)으로 되돌린다.
+    /// 두 가지를 한다: ① **즉시** appearance(폰트·줌·여백·색/palette)와 behavior(scrollback/bell/page-keys/shift-enter/
+    /// ime-enter/ambiguous-width/sidebar)를 기본값으로 런타임 적용(reloadConfig가 파일로 하는 것을 기본 Config로). ②
+    /// **영구**: 세팅 화면이 다루는 스칼라 중 기본값에서 바뀐 키만 dirty로 표시해 다음 tick의 serializeConfig가 config
+    /// 파일을 in-place로 기본값으로 되돌린다(주석·수동/특수 키 — keybind·env·palette·theme.preset·cursor.color·
+    /// workspace.root·shell.* — 는 보존; 도배 방지는 changedScalarKeys가 책임). 순서: 변경 키 수집은 config 교체 전(old
+    /// 기준), applyAppearance는 loaded_config 교체 전(옛 font.family 슬라이스 참조를 끊는다 — reloadConfig와 동일 원리).
+    pub fn resetToDefaults(self: *AppSession) void {
+        const base: config_mod.Config = .{};
+        const default_appearance = config_mod.resolveAppearance(base) catch return; // 기본값은 항상 valid(방어적 무동작)
+        // ① 영구 초기화 예약: override된 스칼라 키만 dirty(파일에 줄이 있으니 in-place 교체 → full-dump 도배 없음).
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        if (config_mod.changedScalarKeys(arena.allocator(), self.loaded_config.config, base)) |keys| {
+            for (keys) |k| self.markConfigKeyDirty(k); // k는 스키마 정적 리터럴 → arena.deinit 후에도 유효
+        } else |_| {}
+        // ② 즉시 런타임 적용. appearance 먼저(옛 family 참조 끊김; 기본 family는 정적 리터럴).
+        self.applyAppearance(default_appearance);
+        self.loaded_config.config = base; // 슬라이스 필드 전부 정적/빈이라 arena 의존 없음
+        // behavior 캐시 + 라이브 surface 재적용(reloadConfig 패턴 — base 기준).
+        self.audible_bell = base.bell.audible;
+        self.page_keys_scroll = base.input.page_keys == .scroll;
+        self.shift_enter_meta = base.input.shift_enter == .newline;
+        self.ime_enter_newline = base.input.ime_enter == .newline;
+        self.reapplyScrollback();
         self.reapplyConfigPalette();
+        self.reapplyAmbiguousWidth();
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
     }
 
     /// "Reload Config" 메뉴 — config 파일을 재로드해 재시작 없이 반영한다. 파싱은 forgiving(알 수 없는 key/잘못된
@@ -4372,7 +4386,7 @@ pub const AppSession = struct {
     ///    먼저 만들지 말고 loaded_config를 갈아끼운 뒤 resolve한다 → 옛 family를 빌린 옛 appearance는 이 시점에 버린다).
     /// ② appearance resolve + applyAppearance(메트릭·grid·atlas + base_font_size).
     /// ③ 파일 새 값이라 코어 behavior(scrollback/bell/page-keys/palette/ambiguous-width)도 모든 surface에 재적용.
-    /// initial_appearance는 건드리지 않는다 — reset 기준은 "프로그램 처음"이라 reload 후에도 불변(위 필드 주석).
+    /// resetToDefaults와 형제 경로다 — reload는 파일 값으로, reset은 기본 Config로 같은 appearance/behavior 적용을 한다.
     pub fn reloadConfig(self: *AppSession) void {
         var new_parsed = config_mod.loadConfigDefault(self.io, self.allocator) catch return; // 실패 시 무동작(forgiving)
         // 새 config로 appearance를 먼저 resolve한 뒤에 옛 loaded_config를 버린다 — resolve가 실패하면 옛
@@ -11356,10 +11370,10 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     try std.testing.expectEqual(font_size_max, session.appearance.font.size);
 }
 
-// Reset to Defaults: 런타임 appearance 변경(폰트 줌·여백)을 프로그램 처음(init) 설정으로 되돌리는지.
-// resetToInitial이 initial_appearance(init 단일 출처)를 applyAppearance로 복원해 appearance·cell 메트릭이
-// init 값으로 돌아오는지 고정한다. initial_appearance가 reset로 안 바뀌어 반복 reset도 같은 기준인지도 본다.
-test "resetToInitial: 런타임 폰트 줌·여백을 프로그램 처음 설정으로 되돌린다" {
+// Reset to Defaults: config 파일 값이 아니라 하드코딩 공장 기본값으로 되돌리는지. ① 런타임 줌·여백 + config behavior
+// 변경을 공장 기본값(resolveAppearance(.{}))으로 즉시 복원하고(appearance·메트릭·behavior 캐시·loaded_config), ②
+// 기본값에서 바뀐 스칼라 키만 config_dirty_keys에 예약하는지(다음 tick에 Swift가 파일 in-place 저장) 고정한다.
+test "resetToDefaults: 런타임/config 변경을 공장 기본값으로 복원하고 바뀐 키를 dirty로 예약한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 메트릭 + PTY
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -11374,29 +11388,48 @@ test "resetToInitial: 런타임 폰트 줌·여백을 프로그램 처음 설정
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000); // backing px 확정 → grid 산출
 
-    const init_size = session.initial_appearance.font.size;
-    const init_padding_right = session.initial_appearance.window_padding_right;
+    const dirtyHas = struct {
+        fn f(s: *AppSession, key: []const u8) bool {
+            for (s.config_dirty_keys.items) |k| if (std.mem.eql(u8, k, key)) return true;
+            return false;
+        }
+    }.f;
+
+    // 테스트엔 config 파일이 없어 init appearance == 공장 기본값.
+    const factory = try config_mod.resolveAppearance(.{});
     const cw0 = session.cell_width_px;
-    try std.testing.expectEqual(init_size, session.appearance.font.size); // init 직후 appearance == initial
+    try std.testing.expectEqual(factory.font.size, session.appearance.font.size);
 
-    // 런타임 줌(폰트 확대)과 여백 변경을 가한다 — reset이 되돌릴 대상.
-    session.setFontSize(init_size + 6);
-    session.appearance.window_padding_right = init_padding_right + 20;
-    try std.testing.expect(session.appearance.font.size != init_size);
+    // 런타임 줌·여백 + config behavior 변경(세팅 화면이 파일에 저장했을 법한 상태를 흉내).
+    session.setFontSize(factory.font.size + 6);
+    session.appearance.window_padding_right = factory.window_padding_right + 20;
+    session.loaded_config.config.font.size = factory.font.size + 6; // 파일에 저장됐던 비기본 폰트
+    session.loaded_config.config.bell.audible = false; // 기본 true에서 변경
+    session.audible_bell = false;
+    try std.testing.expect(session.appearance.font.size != factory.font.size);
     try std.testing.expect(session.cell_width_px > cw0); // 폰트 키우면 cell 픽셀이 커진다(메트릭)
+    session.config_dirty_keys.clearRetainingCapacity(); // 변경 과정에서 남았을 수 있는 dirty 정리
 
-    // Reset to Defaults — appearance·메트릭이 init 값으로 복원된다(applyAppearance가 결정적 재계산).
-    session.resetToInitial();
-    try std.testing.expectEqual(init_size, session.appearance.font.size);
-    try std.testing.expectEqual(init_padding_right, session.appearance.window_padding_right);
+    session.resetToDefaults();
+
+    // ① 즉시: appearance·메트릭·behavior·loaded_config가 공장 기본값으로.
+    try std.testing.expectEqual(factory.font.size, session.appearance.font.size);
+    try std.testing.expectEqual(factory.window_padding_right, session.appearance.window_padding_right);
     try std.testing.expectEqual(cw0, session.cell_width_px);
-    try std.testing.expectEqual(init_size, session.base_font_size); // ⌘0 기준도 init로 복원
+    try std.testing.expectEqual(factory.font.size, session.base_font_size); // ⌘0 기준도 기본으로
+    try std.testing.expectEqual(true, session.audible_bell); // 기본 bell.audible로 복원
+    try std.testing.expectEqual(factory.font.size, session.loaded_config.config.font.size);
+    try std.testing.expectEqual(true, session.loaded_config.config.bell.audible);
 
-    // initial_appearance는 reset로 안 바뀐다 — 반복 reset도 같은 기준("프로그램 처음")이다.
-    try std.testing.expectEqual(init_size, session.initial_appearance.font.size);
-    session.setFontSize(init_size + 6);
-    session.resetToInitial();
-    try std.testing.expectEqual(init_size, session.appearance.font.size);
+    // ② 영구: 바뀐 스칼라 키만 dirty로 예약(안 바뀐 키는 미포함 → 파일 도배 없음).
+    try std.testing.expect(dirtyHas(session, "font.size"));
+    try std.testing.expect(dirtyHas(session, "bell.audible"));
+    try std.testing.expect(!dirtyHas(session, "font.family"));
+
+    // 반복 reset(이미 기본값) → 바뀐 키 없음(no-op이면 파일도 안 건드림).
+    session.config_dirty_keys.clearRetainingCapacity();
+    session.resetToDefaults();
+    try std.testing.expectEqual(@as(usize, 0), session.config_dirty_keys.items.len);
 }
 
 // applyAppearance: 새 appearance를 통째로 갈아끼우면 appearance·base_font_size·cell 메트릭이 따라 바뀌는지.

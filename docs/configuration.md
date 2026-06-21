@@ -517,7 +517,7 @@ appearance(폰트/테마/커서)와 키바인딩 **파싱**까지 구현됐다. 
   8단계 탭/quick terminal/global shortcut에서.
 - **동작 토글**: paste 보호, 이모지 grapheme 기본값(DEC mode 2027 강제) 등.
 - **terminal 입력 remap**: `<조합> → 바이트` 매크로(TerminalBinding) config.
-- **파일 변경 자동 감지 reload**: 파일 watcher로 변경을 감지해 자동 재-resolve(자동 감지만 후속). 메뉴의 수동 **Reload Config**(파일 재로드해 재시작 없이 적용)·**Reset to Defaults**(런타임 줌·여백 변경을 프로그램 처음 실행 설정으로 복원)는 구현됨.
+- **파일 변경 자동 감지 reload**: 파일 watcher로 변경을 감지해 자동 재-resolve(자동 감지만 후속). 메뉴의 수동 **Reload Config**(파일 재로드해 재시작 없이 적용)·**Reset to Defaults**(config 파일 값이 아니라 하드코딩 공장 기본값으로 즉시 복원하고, 세팅 화면이 다루는 스칼라 중 바뀐 키만 config 파일에 영구 초기화 — 주석·수동/특수 키 keybind·env·palette·theme.preset·cursor.color·workspace.root·shell.*는 보존)는 구현됨.
 - **다른 셸(bash/fish) 통합·ssh 라우팅**(보류, 2026-06): 셸 통합(macOS 편집키·OSC 133/7·`shell-integration.ssh` ssh 라우팅)은 **현재 zsh 전용**(`ZDOTDIR`+`.zshenv` 주입)이다. fish는 vendor `conf.d`로 깔끔히 주입할 수 있으나, bash는 maru가 **login 셸**로 띄워(`login=true`) `--rcfile`이 무시되고 `~/.bash_profile`만 읽어 사용자 설정을 안 깨는 주입이 까다롭다(레퍼런스 동작 비교 + 신중한 검증 필요). 그래서 별도 후속으로 둔다 — bash/fish 사용자는 그때까지 직접 `maru ssh`를 쓴다.
 - **설정 UI**: 앱 내 세팅 화면(GUI) + config 파일 양방향 반영. 전략·섹션 구조·신규 키·PR 분해는
   [세팅 페이지 전략과 구현 계획](settings-page.md)을 단일 출처로 둔다(계획 단계, 2026-06).

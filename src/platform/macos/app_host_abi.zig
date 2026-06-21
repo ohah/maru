@@ -578,11 +578,12 @@ pub export fn maru_macos_app_session_reload_config(session: ?*AppSession) c_int 
     return @intFromEnum(Status.ok);
 }
 
-// Reset to Defaults 메뉴 — 런타임 줌(⌘+/−)·여백 변경을 프로그램 처음 실행했던 설정으로 되돌린다(appearance만 —
-// behavior는 런타임에 안 바뀌므로 대상 아님). 항상 Status.ok. Swift는 메뉴 클릭에서 호출만 한다.
+// Reset to Defaults 메뉴 — config 파일 값이 아니라 하드코딩 공장 기본값으로 되돌린다. 즉시 appearance(줌·여백·색)와
+// behavior(scrollback/bell/page-keys 등)를 기본값으로 런타임 적용하고, 세팅 화면이 다루는 스칼라 중 바뀐 키만 config
+// 파일에 영구 초기화 예약한다(주석·수동/특수 키는 보존). 항상 Status.ok. Swift는 메뉴 클릭에서 호출만 한다.
 pub export fn maru_macos_app_session_reset_defaults(session: ?*AppSession) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
-    app_session.resetToInitial();
+    app_session.resetToDefaults();
     return @intFromEnum(Status.ok);
 }
 

@@ -1,4 +1,4 @@
-//! Confirm — 예/아니오 확인 다이얼로그(키보드 전용, hit-test 없음). **재사용 가능한 디자인 시스템 컴포넌트**:
+//! Confirm — 예/아니오 확인 다이얼로그(키보드 Enter/Esc·Y/N + 마우스 클릭 hit-test `buttonAtPoint`). **재사용 가능한 디자인 시스템 컴포넌트**:
 //! 메시지 + 두 버튼 라벨을 host가 주입하면(`show(message, .{ .confirm = "닫기", .cancel = "취소" })`) 경계선 패널 +
 //! 가운데 버튼 두 개(라벨에 TUI식 [Y]/[N] 단축키)를 그리고, ←/→로 포커스를 옮기면 accent 강조가 따라간다(Enter는
 //! 포커스된 버튼 실행). 닫기 확인뿐 아니라 삭제·저장 등 어떤 확인에도 쓴다 —
@@ -182,16 +182,22 @@ pub fn buttonAtPoint(state: *const State, p: props.ChromeProps, tk: *const token
     if (!state.open) return null;
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
     const g = buttonGeom(state, p, tk) orelse return null;
-    const x: i32 = @intFromFloat(x_px);
-    const y: i32 = @intFromFloat(y_px);
     const b = g.box.rect;
+    // 비교는 **f64 도메인**으로 한다 — x_px/y_px를 @intFromFloat(i32)로 바꾸면 isFinite여도 i32 범위를 넘는 값(거대
+    // backing/스케일·합성 좌표)에서 안전 빌드 패닉(illegal behavior)이다. 형제 hit-test(app_session.collapsedToggleRect)도
+    // 같은 이유로 f64로 비교한다(@floatFromInt(rect)). 폭도 f64로 곱해 u32 overflow까지 회피.
+    const fx = @as(f64, @floatFromInt(b.x));
+    const fy = @as(f64, @floatFromInt(b.y));
     // 패널 밖 → 취소(바깥 클릭 dismiss).
-    if (x < b.x or x >= b.x + @as(i32, @intCast(b.w)) or y < b.y or y >= b.y + @as(i32, @intCast(b.h))) return .cancelled;
+    if (x_px < fx or x_px >= fx + @as(f64, @floatFromInt(b.w)) or y_px < fy or y_px >= fy + @as(f64, @floatFromInt(b.h))) return .cancelled;
     // 버튼 행 y 범위 안에서 각 버튼 x 범위(fit 폭) 검사.
-    const ry = modal_box.rowY(g.box, btn_content_row);
-    if (y >= ry and y < ry + @as(i32, @intCast(g.box.ch))) {
-        if (g.confirm_fit > 0 and x >= g.confirm_x and x < g.confirm_x + @as(i32, @intCast(g.confirm_fit * g.box.cw))) return .confirmed;
-        if (g.cancel_fit > 0 and x >= g.cancel_x and x < g.cancel_x + @as(i32, @intCast(g.cancel_fit * g.box.cw))) return .cancelled;
+    const ry = @as(f64, @floatFromInt(modal_box.rowY(g.box, btn_content_row)));
+    const cw_f = @as(f64, @floatFromInt(g.box.cw));
+    if (y_px >= ry and y_px < ry + @as(f64, @floatFromInt(g.box.ch))) {
+        const cfx = @as(f64, @floatFromInt(g.confirm_x));
+        if (g.confirm_fit > 0 and x_px >= cfx and x_px < cfx + @as(f64, @floatFromInt(g.confirm_fit)) * cw_f) return .confirmed;
+        const xcx = @as(f64, @floatFromInt(g.cancel_x));
+        if (g.cancel_fit > 0 and x_px >= xcx and x_px < xcx + @as(f64, @floatFromInt(g.cancel_fit)) * cw_f) return .cancelled;
     }
     return null; // 패널 안, 버튼 아님 → 소비(무동작)
 }

@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #import "maru_metal_shader.h"
+#import "maru_ppm_writer.h"
 
 typedef struct {
     int32_t status;
@@ -788,49 +789,6 @@ static char *maru_copy_path(const char *path, size_t path_len) {
     memcpy(copy, path, path_len);
     copy[path_len] = '\0';
     return copy;
-}
-
-static BOOL maru_write_ppm_from_bgra8_buffer(
-    const char *path,
-    const uint8_t *bgra_pixels,
-    size_t width,
-    size_t height,
-    size_t bytes_per_row
-) {
-    if (path == NULL || bgra_pixels == NULL || width == 0 || height == 0) {
-        return NO;
-    }
-
-    FILE *file = fopen(path, "wb");
-    if (file == NULL) {
-        return NO;
-    }
-
-    // 제품 Metal smoke는 대표 픽셀 readback으로 gate를 닫지만, 그 숫자만으로는 glyph
-    // bitmap 자체가 뒤집힌 회귀를 사람이 확인할 수 없다. PPM(P6)은 외부 이미지
-    // 라이브러리 없이 전체 drawable을 남기는 가장 단순한 artifact 포맷이다.
-    if (fprintf(file, "P6\n%zu %zu\n255\n", width, height) < 0) {
-        fclose(file);
-        return NO;
-    }
-
-    BOOL ok = YES;
-    for (size_t y = 0; y < height && ok; y++) {
-        const uint8_t *row = bgra_pixels + y * bytes_per_row;
-        for (size_t x = 0; x < width; x++) {
-            const uint8_t *pixel = row + x * 4;
-            const uint8_t rgb[3] = { pixel[2], pixel[1], pixel[0] };
-            if (fwrite(rgb, sizeof(rgb), 1, file) != 1) {
-                ok = NO;
-                break;
-            }
-        }
-    }
-
-    if (fclose(file) != 0) {
-        ok = NO;
-    }
-    return ok;
 }
 
 static uint32_t maru_count_mismatched_bytes(

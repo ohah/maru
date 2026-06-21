@@ -1,8 +1,37 @@
 #import "maru_metal_renderer.h"
 #import "maru_metal_shader.h"
+#import "maru_ppm_writer.h"
 #import <QuartzCore/QuartzCore.h>
+#include <dispatch/dispatch.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* 스크린샷 하니스(MARU_SCREENSHOT). 평소엔 비어 있고(NULL) lean 런타임에 비용이 없다 —
+   env가 설정됐을 때만 draw가 오프스크린 캡처 경로로 분기한다. getenv를 매 frame 부르지 않게
+   한 번만 캐시한다(draw는 Swift main-thread timer에서만 불리지만 dispatch_once로 못박는다).
+   반환값 NULL이면 평소(present) 경로, 비-NULL이면 그 경로로 PPM 한 장 쓰고 프로세스를 끝낸다. */
+static const char *maru_screenshot_path(void) {
+    static const char *path = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *env = getenv("MARU_SCREENSHOT");
+        if (env != NULL && env[0] != '\0') {
+            path = env;
+        }
+    });
+    return path;
+}
+
+/* Metal copyFromTexture:toBuffer:의 destinationBytesPerRow는 GPU에 따라 256 정렬을 요구하므로
+   (smoke의 readback stride와 같은 값) width*4를 256의 배수로 올림한다. PPM writer는 이 stride를
+   행 간격으로 받아 width 픽셀만 쓰므로 패딩 바이트는 무시된다. */
+static size_t maru_align_up_256(size_t value) {
+    const size_t alignment = 256;
+    if (value > SIZE_MAX - (alignment - 1)) {
+        return 0; // overflow
+    }
+    return (value + (alignment - 1)) & ~(alignment - 1);
+}
 
 // shader의 VertexIn(packed_float2 position + packed_float2 uv + packed_float3 color +
 // packed_float4 bg)과 같은 44바이트 tight-packed 레이아웃. 셀당 6정점(삼각형 2개)로 quad를
@@ -860,13 +889,40 @@ bool maru_metal_renderer_draw(
         }
     }
 
-    id<CAMetalDrawable> drawable = [layer nextDrawable];
-    if (drawable == nil) {
-        return false;
+    // 스크린샷 하니스: MARU_SCREENSHOT가 설정되면 layer의 drawable(framebufferOnly=true라 읽을 수
+    // 없다) 대신 같은 크기·픽셀포맷의 오프스크린 텍스처에 같은 패스를 그린다. 그래야 blit로 readback해
+    // PPM으로 남길 수 있다. 평소(NULL)엔 이 분기가 없는 것과 같다. atlas==nil·cols/rows==0 같은 이른
+    // return은 이 위에서 이미 걸러지므로, 캡처는 "내용이 있는 첫 frame"에서만 일어난다.
+    const char *screenshot_path = maru_screenshot_path();
+    const bool screenshot_mode = (screenshot_path != NULL);
+
+    id<CAMetalDrawable> drawable = nil;
+    id<MTLTexture> target_texture = nil;
+    if (screenshot_mode) {
+        MTLTextureDescriptor *offscreen_desc = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:layer.pixelFormat
+                                         width:(NSUInteger)drawable_size.width
+                                        height:(NSUInteger)drawable_size.height
+                                     mipmapped:NO];
+        // 렌더 타깃 + blit 소스. blit 소스는 별도 usage가 필요 없고, Private 스토리지가 Intel/Apple
+        // Silicon 모두에서 렌더 타깃으로 안전하다(Shared 텍스처는 일부 Intel GPU에서 렌더 타깃 불가).
+        offscreen_desc.storageMode = MTLStorageModePrivate;
+        offscreen_desc.usage = MTLTextureUsageRenderTarget;
+        target_texture = [impl.device newTextureWithDescriptor:offscreen_desc];
+        if (target_texture == nil) {
+            fprintf(stderr, "MARU_SCREENSHOT: offscreen texture 생성 실패\n");
+            exit(1);
+        }
+    } else {
+        drawable = [layer nextDrawable];
+        if (drawable == nil) {
+            return false;
+        }
+        target_texture = drawable.texture;
     }
 
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = drawable.texture;
+    pass.colorAttachments[0].texture = target_texture;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     // 화면 clear color: terminal_bg(0xAARRGGBB — OSC 11 배경 set 또는 theme.background)가 비-0이면 그 색,
@@ -968,6 +1024,54 @@ bool maru_metal_renderer_draw(
 #undef MARU_DRAW_QUADS
 #undef MARU_DRAW_IMAGES
     [encoder endEncoding];
+
+    if (screenshot_mode) {
+        // 오프스크린 텍스처(Private)를 Shared 버퍼로 blit해 CPU에서 읽고 PPM으로 쓴 뒤 프로세스를
+        // 끝낸다("한 frame 캡처 후 종료" — 하니스 계약). 캡처 실패는 retry 없이 즉시 exit(1)로 닫아
+        // 하니스가 멈추지 않게 한다(평소 경로의 이른 return과 달리 screenshot_mode는 항상 종료한다).
+        const size_t shot_w = (size_t)target_texture.width;
+        const size_t shot_h = (size_t)target_texture.height;
+        const size_t bytes_per_row = maru_align_up_256(shot_w * 4);
+        if (shot_w == 0 || shot_h == 0 || bytes_per_row == 0 ||
+            shot_h > SIZE_MAX / bytes_per_row) {
+            fprintf(stderr, "MARU_SCREENSHOT: 비정상 텍스처 크기 %zux%zu\n", shot_w, shot_h);
+            exit(1);
+        }
+        const size_t byte_count = bytes_per_row * shot_h;
+        id<MTLBuffer> readback = [impl.device newBufferWithLength:byte_count
+                                                         options:MTLResourceStorageModeShared];
+        if (readback == nil) {
+            fprintf(stderr, "MARU_SCREENSHOT: readback 버퍼 생성 실패 (%zu bytes)\n", byte_count);
+            exit(1);
+        }
+        id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+        if (blit == nil) {
+            fprintf(stderr, "MARU_SCREENSHOT: blit encoder 생성 실패\n");
+            exit(1);
+        }
+        [blit copyFromTexture:target_texture
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(shot_w, shot_h, 1)
+                     toBuffer:readback
+            destinationOffset:0
+       destinationBytesPerRow:bytes_per_row
+     destinationBytesPerImage:byte_count];
+        [blit endEncoding];
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+
+        const uint8_t *pixels = (const uint8_t *)readback.contents;
+        const BOOL wrote = maru_write_ppm_from_bgra8_buffer(
+            screenshot_path, pixels, shot_w, shot_h, bytes_per_row);
+        if (!wrote) {
+            fprintf(stderr, "MARU_SCREENSHOT: PPM 쓰기 실패 → %s\n", screenshot_path);
+            exit(1);
+        }
+        fprintf(stderr, "MARU_SCREENSHOT: %zux%zu PPM 캡처 → %s\n", shot_w, shot_h, screenshot_path);
+        exit(0);
+    }
 
     [command_buffer presentDrawable:drawable];
     [command_buffer commit];

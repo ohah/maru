@@ -195,12 +195,16 @@ fn dashed(comptime s: []const u8) []const u8 {
 /// sub-struct 필드의 전체 키 = `<namespace>.<segment>`(meta.key가 있으면 그걸 통째로). namespace=Config 필드명(dashed),
 /// segment=key_seg ?? 필드명(dashed). comptime-only.
 fn keyOf(comptime ns: []const u8, comptime field: []const u8, comptime meta: theme.Meta) []const u8 {
-    return meta.key orelse (dashed(ns) ++ "." ++ (meta.key_seg orelse dashed(field)));
+    const k = meta.key orelse (dashed(ns) ++ "." ++ (meta.key_seg orelse dashed(field)));
+    if (k.len == 0) @compileError("스키마 키가 비어 있음: " ++ ns ++ "." ++ field ++ " (Meta.key=\"\" 오타?)"); // 빈 키는 어떤 config 키와도 매칭 안 돼 필드가 조용히 무시됨 — comptime 차단(code-review 후속)
+    return k;
 }
 
 /// 최상위 스칼라(Config.schema) 필드의 전체 키 — namespace가 없어 meta.key 필수. comptime-only.
 fn topKey(comptime field: []const u8, comptime meta: theme.Meta) []const u8 {
-    return meta.key orelse @compileError("Config.schema 항목 '" ++ field ++ "'는 Meta.key 필수(최상위 필드는 namespace 없음)");
+    const k = meta.key orelse @compileError("Config.schema 항목 '" ++ field ++ "'는 Meta.key 필수(최상위 필드는 namespace 없음)");
+    if (k.len == 0) @compileError("Config.schema 항목 '" ++ field ++ "'의 Meta.key가 비어 있음 (오타?)");
+    return k;
 }
 
 /// enum 토큰 파싱: '-'를 '_'로 정규화 후 stringToEnum(commit-only→commit_only; 나머지는 무변경). 너무 길면 null.
@@ -341,7 +345,8 @@ fn find(items: []const KeyValue, key: []const u8) ?[]const u8 {
 // 주석(비고 열)을 meta.doc로 옮겨야 해 별도(CS-3b) — 여기선 풍부한 손-주석 표를 유지하며 누락만 막는다.
 fn docHasKeyRow(comptime full_key: []const u8) bool {
     const doc = @embedFile("config_doc_md"); // build.zig 익명 import(docs/configuration.md — src/ 밖이라 import로 등록)
-    return std.mem.indexOf(u8, doc, "| `" ++ full_key ++ "`") != null;
+    // 표 셀 경계(`| `key` |`)로 앵커한다 — 산문에 우연히 `| `key`` 패턴이 있어도 *행 누락*을 가리지 않게(code-review 후속).
+    return std.mem.indexOf(u8, doc, "| `" ++ full_key ++ "` |") != null;
 }
 
 test "doc 정합성: 모든 스키마 키가 configuration.md 표에 문서화됨 (drift guard)" {

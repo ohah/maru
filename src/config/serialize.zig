@@ -178,6 +178,27 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     try std.testing.expectEqual(true, got.quick_terminal.minimal_tabs);
 }
 
+test "round-trip: quick-terminal.* 기본값(width sentinel 0 포함)은 직렬화→재파싱 시 diagnostic 없음 (code-review 후속)" {
+    // GUI write-back이 기본 config를 저장→reload할 때, sentinel 기본값(quick-terminal.width=0='height 따라감')이
+    // range 밖이면 spurious diagnostic이 났다(width range 하한을 0으로 수정). quick-terminal.* 키가 깨끗이
+    // round-trip되는지 좁게 검증한다(빈 문자열 기본값 workspace.root/shell.command은 full-dump의 별개 이슈 —
+    // override-only 직렬화 S0-1b에서 다룬다). 새 quick-terminal sentinel이 range 밖이면 이 테스트가 잡는다.
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const kvs = try configKeyValues(arena.allocator(), .{}); // 전 필드 기본(width_fraction=0 포함)
+    const text = try loader.updateConfigText(a, "", kvs);
+    defer a.free(text);
+    var parsed = try loader.parse(a, text);
+    defer parsed.deinit();
+    for (parsed.diagnostics) |d| {
+        if (std.mem.indexOf(u8, d.message, "quick-terminal") != null) {
+            std.debug.print("기본 round-trip에서 quick-terminal diagnostic: {s}\n", .{d.message});
+            return error.UnexpectedQuickTerminalDiagnostic;
+        }
+    }
+}
+
 test "valueForKey: 직렬화 목록에서 단일 키 값을 고른다" {
     const a = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(a);

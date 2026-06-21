@@ -4,9 +4,10 @@
 //! 프리미티브, control 위젯은 toggle 등 leaf 컴포넌트를 재사용한다. State(open·selected) + view(rows→박스+행) +
 //! handle(키 네비/토글/닫기) + handlePointer(행/위젯 hit-test). 단일 출처: docs/config-gui.md §2·§4.
 //!
-//! 위젯은 FieldRow.kind union으로 가른다 — bool(toggle)·number(slider)·enum(dropdown). 레이아웃은 좌측 Section
+//! 위젯은 FieldRow.kind union으로 가른다 — bool(toggle)·number(slider)·enum(dropdown)·text(인라인 편집). text는
+//! 폰트 패밀리·색 hex를 고정 버퍼로 편집한다(Enter 커밋, Esc 취소 — State.editing/edit_buf). 레이아웃은 좌측 Section
 //! 네비(섹션 목록, platform이 settings.section으로 필터해 폼 주입) + 우측 폼(선택 섹션 필드, 길면 스크롤 윈도잉) —
-//! config-gui §4. text·color 위젯과 검색은 후속.
+//! config-gui §4. color 스와치/16색 프리셋(raw-RGB draw 필요)과 검색은 후속.
 
 const std = @import("std");
 const draw = @import("../draw.zig");
@@ -32,6 +33,7 @@ pub const FieldRow = struct {
         toggle: bool, // 현재 on/off
         slider: Slider, // 현재 값 + 범위(f32/u32; value/min/max는 f64로 통일)
         dropdown: []const u8, // enum 현재 변형 표시 토큰(클릭/←→로 순환 — platform이 schema.cycleEnum)
+        text: []const u8, // 문자열 현재값(폰트 패밀리·색 hex). 클릭/Enter로 인라인 편집(platform이 schema.setText)
     };
     pub const Slider = struct { value: f64, min: f64, max: f64 };
 
@@ -45,6 +47,9 @@ pub const FieldRow = struct {
 /// 순수 상태 — 열림 + 포커스된 행 + 슬라이더 드래그 상태. 행 데이터(rows)는 State에 두지 않고 매 프레임 platform이
 /// 주입한다(config 단일 출처 — palette 선례). 값도 config가 소유하므로 handle은 의도(toggle/slider_set/adjust)만
 /// 내고 실제 변경+write-back은 platform이 한다. slider 드래그 중엔 pending_ratio에 최신 ratio를 담아 platform이 읽는다.
+/// 인라인 편집 버퍼 용량(바이트) — 폰트 패밀리·#RRGGBB는 짧아 고정 버퍼면 충분(별도 allocator 불요).
+const edit_cap: usize = 128;
+
 pub const State = struct {
     open: bool = false,
     selected: usize = 0,
@@ -58,18 +63,53 @@ pub const State = struct {
     dragging: bool = false,
     /// 드래그/클릭이 만든 최신 슬라이더 ratio(0..1). platform이 .slider_set에서 읽어 rows[selected]의 값으로 매핑한다.
     pending_ratio: f32 = 0,
+    /// text 행 인라인 편집 중. 켜지면 키가 편집 버퍼로 라우팅된다(Enter=커밋, Esc=취소). platform이 enterEdit로 켜고
+    /// (현재값 시드) .text_commit에서 editText()를 읽어 config arena에 dupe→setText. 별도 allocator 없이 고정 버퍼.
+    editing: bool = false,
+    edit_buf: [edit_cap]u8 = undefined,
+    edit_len: usize = 0,
 
     pub fn show(self: *State) void {
         self.open = true;
         self.selected = 0;
         self.section = 0;
         self.dragging = false;
+        self.editing = false;
     }
     /// 섹션 전환(좌측 네비 클릭) — 선택 섹션과 첫 필드로. platform이 새 섹션 필드 수를 setFieldCount로 다시 준다.
     pub fn selectSection(self: *State, i: usize) void {
         self.section = i;
         self.selected = 0;
         self.dragging = false;
+        self.editing = false;
+    }
+    /// 인라인 편집 시작(platform이 text 행 활성 시 호출 — 현재값으로 시드). 버퍼 초과는 잘라 담는다.
+    pub fn enterEdit(self: *State, value: []const u8) void {
+        const n = @min(value.len, edit_cap);
+        @memcpy(self.edit_buf[0..n], value[0..n]);
+        self.edit_len = n;
+        self.editing = true;
+    }
+    pub fn cancelEdit(self: *State) void {
+        self.editing = false;
+    }
+    pub fn editText(self: *const State) []const u8 {
+        return self.edit_buf[0..self.edit_len];
+    }
+    /// 코드포인트 한 개를 UTF-8로 버퍼에 추가(넘치거나 인코딩 불가면 무시 — 고정 버퍼).
+    pub fn appendEditCp(self: *State, cp: u21) void {
+        var tmp: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(cp, &tmp) catch return;
+        if (self.edit_len + n > edit_cap) return;
+        @memcpy(self.edit_buf[self.edit_len..][0..n], tmp[0..n]);
+        self.edit_len += n;
+    }
+    /// 마지막 코드포인트(UTF-8 경계) 제거.
+    pub fn backspaceEdit(self: *State) void {
+        if (self.edit_len == 0) return;
+        var i = self.edit_len - 1;
+        while (i > 0 and (self.edit_buf[i] & 0xC0) == 0x80) i -= 1; // continuation 바이트 건너뛰기
+        self.edit_len = i;
     }
     pub fn hide(self: *State) void {
         self.open = false;
@@ -91,7 +131,7 @@ pub const State = struct {
 /// handle/handlePointer가 돌려주는 intent. platform이 rows[selected] 기준으로 처리:
 ///   toggle=bool flip, slider_set=pending_ratio→값 매핑, adjust_left/right=slider 한 스텝, selection_changed=재렌더,
 ///   close=hide, consumed=소비만(모달 뒤로 안 샘). 값 종류 판정(toggle인지 slider인지)은 platform이 rows로 한다.
-pub const Action = enum { close, toggle, slider_set, adjust_left, adjust_right, selection_changed, section_changed, consumed };
+pub const Action = enum { close, toggle, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, consumed };
 
 const label_gap_cols: u32 = 2; // 라벨과 우측 위젯 사이 최소 간격(칸)
 
@@ -230,6 +270,22 @@ pub fn view(
             },
             .slider => |s| try slider.view(ctrl, FieldRow.sliderRatio(s), box.cw, tk, arena, out),
             .dropdown => |cur| try dropdown.view(ctrl, cur, tk, arena, out),
+            .text => |cur| {
+                // 편집 중인 선택 행이면 편집 버퍼 + caret, 아니면 현재값. control 좌단(ctrl.x) 좌측정렬 text.
+                const editing_this = state.editing and actual == state.selected;
+                const shown: []const u8 = if (editing_this) state.editText() else cur;
+                const text_role: tokens.ColorRole = if (editing_this) .accent_bar else .surface_fg;
+                if (shown.len > 0) {
+                    const runs = try arena.alloc(draw.Run, 1);
+                    runs[0] = .{ .text = shown };
+                    try out.append(arena, .{ .text = .{ .origin = .{ .x = ctrl.x, .y = ctrl.y }, .runs = runs, .role = text_role } });
+                }
+                if (editing_this) {
+                    // caret = 편집 텍스트 끝 셀에 cursor fill 1칸(palette 입력 caret 패턴).
+                    const caret_x = ctrl.x + @as(i32, @intCast(overlay_input.displayCols(shown) * box.cw));
+                    try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = ctrl.y, .w = box.cw, .h = box.ch }, .role = .cursor } });
+                }
+            },
         }
     }
 }
@@ -237,6 +293,25 @@ pub fn view(
 /// 키 처리(열려 있을 때만 host 호출). ↑↓=행 이동, ←→=선택 행 조절(slider 스텝; toggle은 platform이 무시), Space/Enter=
 /// 선택 행 활성(toggle flip; slider는 무시), Esc=닫기, 그 외=소비. 값 종류 판정은 platform이 rows[selected]로 한다.
 pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
+    // 인라인 편집 중이면 키를 편집 버퍼로 라우팅한다(Enter=커밋, Esc=취소, Backspace/글자=버퍼 편집). 다른 키는 소비.
+    if (state.editing) {
+        switch (k.key) {
+            .enter => return .text_commit, // platform이 editText()→config arena dupe→setText
+            .escape => {
+                state.cancelEdit();
+                return .selection_changed; // 편집 취소(모달은 안 닫음)
+            },
+            .backspace => {
+                state.backspaceEdit();
+                return .selection_changed;
+            },
+            .char => {
+                state.appendEditCp(k.codepoint);
+                return .selection_changed;
+            },
+            else => return .consumed,
+        }
+    }
     switch (k.key) {
         .escape => {
             state.hide();
@@ -325,6 +400,7 @@ pub fn handlePointer(
                     return .slider_set;
                 },
                 .dropdown => return if (dropdown.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 클릭 → 변형 순환(.toggle=활성)
+                .text => return if (ev.x_px >= @as(f64, @floatFromInt(ctrl.x))) .toggle else .selection_changed, // control 영역 클릭 → 인라인 편집(.toggle=활성), 라벨은 선택만
             }
         }
     }
@@ -537,4 +613,66 @@ test "settings nav: 섹션 라벨 렌더(선택 강조) + 네비 클릭 → sect
     const act2 = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.box.inner_x + 4), .y_px = ny + 4 }, &test_sections, &rows, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, act2);
     try std.testing.expectEqual(@as(usize, 1), s.section);
+}
+
+test "settings text edit: enterEdit 시드 + char/backspace 편집 + Enter=text_commit + Esc=취소(close 아님)" {
+    var s = State{};
+    s.show();
+    // 편집 시작 — 현재값 시드.
+    s.enterEdit("ABC");
+    try std.testing.expect(s.editing);
+    try std.testing.expectEqualStrings("ABC", s.editText());
+    // editing 중 char → 버퍼 추가(handle이 appendEditCp 라우팅).
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .char, .codepoint = 'D' }, &s));
+    try std.testing.expectEqualStrings("ABCD", s.editText());
+    // backspace → 마지막 코드포인트 제거.
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .backspace }, &s));
+    try std.testing.expectEqualStrings("ABC", s.editText());
+    // Enter → text_commit(platform이 editText 읽어 setText + cancelEdit).
+    try std.testing.expectEqual(Action.text_commit, handle(.{ .key = .enter }, &s));
+    // Esc(편집 중) → 편집 취소(모달 close 아님).
+    s.enterEdit("X");
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .escape }, &s));
+    try std.testing.expect(!s.editing);
+    try std.testing.expect(s.open); // 모달은 안 닫힘
+
+    // UTF-8 경계: 한글(3바이트) append→backspace.
+    s.enterEdit("");
+    s.appendEditCp('한');
+    try std.testing.expectEqual(@as(usize, 3), s.editText().len);
+    s.backspaceEdit();
+    try std.testing.expectEqual(@as(usize, 0), s.editText().len);
+}
+
+test "settings text view: 행 값 렌더, 편집 중이면 버퍼+caret(cursor fill)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = testTokens();
+    var s = State{};
+    s.show();
+    const rows = [_]FieldRow{.{ .label = "Family", .kind = .{ .text = "JetBrains Mono" } }};
+
+    // 비편집: 현재값 text op(surface_fg), caret 없음.
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    var has_value = false;
+    var has_caret = false;
+    for (out.items) |op| {
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, "JetBrains Mono")) has_value = true;
+        if (op == .fill and op.fill.role == .cursor) has_caret = true;
+    }
+    try std.testing.expect(has_value and !has_caret);
+
+    // 편집 중: 버퍼 text(accent_bar) + caret(cursor fill).
+    out.clearRetainingCapacity();
+    s.enterEdit("Menlo");
+    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    var has_buf = false;
+    has_caret = false;
+    for (out.items) |op| {
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, "Menlo")) has_buf = true;
+        if (op == .fill and op.fill.role == .cursor) has_caret = true;
+    }
+    try std.testing.expect(has_buf and has_caret);
 }

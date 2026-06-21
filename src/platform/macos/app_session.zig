@@ -3319,6 +3319,11 @@ pub const AppSession = struct {
             self.chrome_host.settings.section = std.fmt.parseInt(usize, std.mem.span(sv), 10) catch 0;
             self.refreshSettingsFieldCount();
         }
+        // MARU_OPEN_SETTINGS_EDIT=1 — 섹션 마지막 행(text면)을 인라인 편집 모드로(text 위젯 caret 캡처용 debug-gate).
+        if (std.c.getenv("MARU_OPEN_SETTINGS_EDIT") != null and self.chrome_host.settings.count > 0) {
+            self.chrome_host.settings.selected = self.chrome_host.settings.count - 1;
+            self.toggleSelectedSetting();
+        }
     }
 
     /// 세팅 화면(⌘,)을 토글한다 — 열려 있으면 닫고, 아니면 다른 오버레이를 닫고 연다(배타적, palette/find와 같은 규율).
@@ -3349,13 +3354,14 @@ pub const AppSession = struct {
     /// 좌측 네비 한 항목 — 섹션 enum(미지정=null) + 표시 라벨.
     const SettingsSectionEntry = struct { section: ?config_mod.Section, label: []const u8 };
 
-    /// 현재 선택 섹션의 필드(bool→num→enum 순). buildSettingsFields·핸들러 공유 단일 출처라 selected 인덱싱이 일치.
+    /// 현재 선택 섹션의 필드(bool→num→enum→text 순). buildSettingsFields·핸들러 공유 단일 출처라 selected 인덱싱이 일치.
     const SettingsSectionFields = struct {
         bools: []config_mod.schema.BoolField,
         nums: []config_mod.schema.NumberField,
         enums: []config_mod.schema.EnumField,
+        texts: []config_mod.schema.TextField,
         fn total(self: SettingsSectionFields) usize {
-            return self.bools.len + self.nums.len + self.enums.len;
+            return self.bools.len + self.nums.len + self.enums.len + self.texts.len;
         }
     };
 
@@ -3375,10 +3381,11 @@ pub const AppSession = struct {
         };
     }
 
-    fn settingsSectionHasField(bools: []const config_mod.schema.BoolField, nums: []const config_mod.schema.NumberField, enums: []const config_mod.schema.EnumField, sec: ?config_mod.Section) bool {
+    fn settingsSectionHasField(bools: []const config_mod.schema.BoolField, nums: []const config_mod.schema.NumberField, enums: []const config_mod.schema.EnumField, texts: []const config_mod.schema.TextField, sec: ?config_mod.Section) bool {
         for (bools) |b| if (b.section == sec) return true;
         for (nums) |n| if (n.section == sec) return true;
         for (enums) |e| if (e.section == sec) return true;
+        for (texts) |t| if (t.section == sec) return true;
         return false;
     }
 
@@ -3390,18 +3397,20 @@ pub const AppSession = struct {
         try config_mod.schema.appendNumberFields(arena, self.loaded_config.config, &nums);
         var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
         try config_mod.schema.appendEnumFields(arena, self.loaded_config.config, &enums);
+        var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
+        try config_mod.schema.appendTextFields(arena, self.loaded_config.config, &texts);
         var list: std.ArrayList(SettingsSectionEntry) = .empty;
         inline for (@typeInfo(config_mod.Section).@"enum".fields) |ef| {
             const sec: config_mod.Section = @enumFromInt(ef.value);
-            if (settingsSectionHasField(bools.items, nums.items, enums.items, sec))
+            if (settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, sec))
                 try list.append(arena, .{ .section = sec, .label = settingsSectionLabel(sec) });
         }
-        if (settingsSectionHasField(bools.items, nums.items, enums.items, null))
+        if (settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, null))
             try list.append(arena, .{ .section = null, .label = settingsSectionLabel(null) });
         return list.items;
     }
 
-    /// 현재 선택 섹션(settings.section)으로 필터한 필드(bool→num→enum). arena 소유. 핸들러가 selected를 이 순서로 매핑.
+    /// 현재 선택 섹션(settings.section)으로 필터한 필드(bool→num→enum→text). arena 소유. 핸들러가 selected를 이 순서로 매핑.
     fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !SettingsSectionFields {
         const sections = try self.buildSectionList(arena);
         const sel_sec: ?config_mod.Section = if (sections.len > 0)
@@ -3414,13 +3423,17 @@ pub const AppSession = struct {
         try config_mod.schema.appendNumberFields(arena, self.loaded_config.config, &nums_all);
         var enums_all: std.ArrayList(config_mod.schema.EnumField) = .empty;
         try config_mod.schema.appendEnumFields(arena, self.loaded_config.config, &enums_all);
+        var texts_all: std.ArrayList(config_mod.schema.TextField) = .empty;
+        try config_mod.schema.appendTextFields(arena, self.loaded_config.config, &texts_all);
         var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
         for (bools_all.items) |b| if (b.section == sel_sec) try bools.append(arena, b);
         var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
         for (nums_all.items) |n| if (n.section == sel_sec) try nums.append(arena, n);
         var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
         for (enums_all.items) |e| if (e.section == sel_sec) try enums.append(arena, e);
-        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items };
+        var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
+        for (texts_all.items) |t| if (t.section == sel_sec) try texts.append(arena, t);
+        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items };
     }
 
     /// config 스키마의 **현재 섹션** 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2·§4). 라벨=meta.doc
@@ -3428,8 +3441,8 @@ pub const AppSession = struct {
     fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.settings.FieldRow {
         const Row = chrome.components.settings.FieldRow;
         const cf = try self.currentSectionFields(arena);
-        // 결합 순서: bool(toggle) → number(slider) → enum(dropdown). selected/handler 인덱싱이 이 순서를 공유한다
-        // (toggleSelectedSetting/adjustSelectedSetting이 같은 currentSectionFields 빌드로 selected를 구간 매핑).
+        // 결합 순서: bool(toggle) → number(slider) → enum(dropdown) → text(인라인 편집). selected/handler 인덱싱이 이
+        // 순서를 공유한다(toggle/adjust/commitSelectedText가 같은 currentSectionFields 빌드로 selected를 구간 매핑).
         const rows = try arena.alloc(Row, cf.total());
         var i: usize = 0;
         for (cf.bools) |b| {
@@ -3442,6 +3455,10 @@ pub const AppSession = struct {
         }
         for (cf.enums) |e| {
             rows[i] = .{ .label = if (e.doc.len > 0) e.doc else e.key, .kind = .{ .dropdown = e.current } };
+            i += 1;
+        }
+        for (cf.texts) |t| {
+            rows[i] = .{ .label = if (t.doc.len > 0) t.doc else t.key, .kind = .{ .text = t.value } };
             i += 1;
         }
         return rows;
@@ -3474,18 +3491,43 @@ pub const AppSession = struct {
             return;
         }
         const after_nums = cf.bools.len + cf.nums.len;
-        if (sel >= after_nums) {
+        const after_enums = after_nums + cf.enums.len;
+        if (sel >= after_nums and sel < after_enums) {
             // enum(dropdown) 행 — 활성(클릭/Enter/Space) = 다음 변형 순환.
-            const ei = sel - after_nums;
-            if (ei < cf.enums.len) {
-                const e = cf.enums[ei];
-                if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, 1)) {
-                    self.reapplyLoadedConfig();
-                    self.markConfigKeyDirty(e.key);
-                }
+            const e = cf.enums[sel - after_nums];
+            if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, 1)) {
+                self.reapplyLoadedConfig();
+                self.markConfigKeyDirty(e.key);
             }
+            return;
+        }
+        if (sel >= after_enums) {
+            // text 행 — 활성(클릭/Enter) = 인라인 편집 시작(현재값으로 시드). 커밋은 Enter→commitSelectedText.
+            const ti = sel - after_enums;
+            if (ti < cf.texts.len) self.chrome_host.settings.enterEdit(cf.texts[ti].value);
+            return;
         }
         // slider 행(bool..after_nums)은 toggle/Enter 무동작(드래그/←→로 조절).
+    }
+
+    /// 인라인 편집 커밋(text 행 Enter) — settings.editText()를 config arena에 dupe해 schema.setText로 적용하고 라이브
+    /// 재resolve + write-back 예약. 편집 종료. 라이브/직렬화가 계속 슬라이스를 읽으므로 loaded_config.arena가 소유한다.
+    fn commitSelectedText(self: *AppSession) void {
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const cf = self.currentSectionFields(scratch.allocator()) catch return;
+        const sel = self.chrome_host.settings.selected;
+        const after_enums = cf.bools.len + cf.nums.len + cf.enums.len;
+        defer self.chrome_host.settings.cancelEdit(); // 성공/실패 무관 편집 종료(키는 다시 네비로)
+        if (sel < after_enums) return; // text 행 아님
+        const ti = sel - after_enums;
+        if (ti >= cf.texts.len) return;
+        const t = cf.texts[ti];
+        const owned = self.loaded_config.arena.allocator().dupe(u8, self.chrome_host.settings.editText()) catch return;
+        if (config_mod.schema.setText(&self.loaded_config.config, t.key, owned)) {
+            self.reapplyLoadedConfig();
+            self.markConfigKeyDirty(t.key);
+        }
     }
 
     /// 슬라이더 드래그/클릭(settings.pending_ratio)을 선택 행의 number config 값으로 매핑해 적용한다(라이브 + 영속
@@ -4024,6 +4066,7 @@ pub const AppSession = struct {
                 self.refreshSettingsFieldCount();
                 self.metal_dirty = true;
             },
+            .settings_text_commit => self.commitSelectedText(), // 인라인 편집 Enter — editText→setText + 적용 + 영속
         }
     }
 
@@ -4746,6 +4789,7 @@ pub const AppSession = struct {
                 .slider_set => .settings_slider_set,
                 .selection_changed => .settings_selection_changed,
                 .section_changed => .settings_section_changed,
+                .text_commit => .none, // 포인터 경로엔 안 옴(인라인 편집 Enter는 키 전용) — exhaustiveness
                 .adjust_left, .adjust_right => .none, // 포인터 경로엔 안 옴(키 전용) — exhaustiveness
                 .consumed => .none,
             });

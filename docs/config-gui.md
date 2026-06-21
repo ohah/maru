@@ -109,6 +109,13 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
   **결정 근거**: tui lowering은 quad를 `paintRectBg`로 **셀 단위** 배경에 칠한다. 위젯을 quad로 두면 (1) 얇은 트랙(높이 h/4)이 `@divTrunc`로 r0==r1이 돼 사라지고, (2) 행 높이 채움이 셀 경계에서 위아래로 번지며, (3) 선택 하이라이트(셀 bg)와 같은 레이어라 서로 덮어 거칠게 겹쳤다(겹침·가림 회귀). text는 placeText가 셀 정렬로 놓고 **text 레이어**(셀 bg 위)라 선택 하이라이트 위에 또렷하다(dropdown·palette 행과 동형). `█`(U+2588)는 합성 글리프라 폰트 무관 렌더. 위젯 view에 `cw`(셀 폭)를 넘겨 tui text 칸/오프셋을 계산한다.
 
+### 6.2 text 위젯 + color(hex) — 인라인 편집
+
+`[]const u8` 스키마 필드(widget `.text` = 폰트 패밀리, `.color` = `#RRGGBB`)는 **하나의 인라인 text 편집 위젯**으로 다룬다(§6 "color: hex 입력(text 재사용)"). 행을 클릭/Enter하면 편집 모드(현재값 시드) — 글자/Backspace로 고치고 Enter 커밋, Esc 취소. 편집 버퍼는 컴포넌트 State의 **고정 버퍼**(`edit_buf[128]`)라 별도 allocator가 없다(폰트 패밀리·hex는 짧음). 커밋 시 platform이 `editText()`를 **config arena에 dupe**해 `schema.setText`로 적용(라이브 재resolve + write-back) — 라이브/직렬화가 슬라이스를 계속 읽으므로 config arena가 소유한다.
+
+- **color 1차 = hex 편집만**: 실제 색을 보여주는 **스와치**는 임의 RGB를 그려야 하는데 `ChromeDraw`는 role(테마 토큰) 기반이라 직접 RGB를 못 그린다. true-color 스와치 + 16색 프리셋 그리드는 **raw-RGB draw 프리미티브**(role 추상화 확장)가 선결이라 2차로 미룬다. 1차는 hex 텍스트로 충분히 보고 고친다.
+- **미구현(후속)**: 옵셔널 색(`?[]const u8` sidebar 파생색), IME 조합(preedit) 편집, 값 길이에 따른 박스 폭 확장(긴 값은 control 열에서 박스 가장자리에 클립될 수 있음).
+
 ## 7. 의존성
 
 - **S0-1b** ✅(머지) — `serialize.updateForKeys(original, config, keys)`로 **변경 키만** write-back(즉시-저장 결정에

@@ -372,6 +372,78 @@ fn cycleEnumField(ptr: anytype, comptime full_key: []const u8, key: []const u8, 
     return true;
 }
 
+/// 한 문자열(widget .text 또는 .color, 타입 []const u8) 스키마 필드의 GUI 인라인 편집 행 기술자. text=폰트 패밀리,
+/// color=#RRGGBB(1차는 hex 텍스트 편집). value=현재값(빌림 — config arena 소유). key/doc는 comptime 리터럴.
+pub const TextField = struct { key: []const u8, doc: []const u8, value: []const u8, section: ?theme.Section = null };
+
+/// 스키마'd **문자열 필드(widget .text/.color, 타입 []const u8)**를 전부 인라인 편집 행으로 emit한다(appendBoolFields의
+/// 문자열 짝). 옵셔널(?[]const u8 — sidebar 파생색)은 제외(기본 파생 동작, 편집은 후속). 순서는 Config 필드 순회 순.
+pub fn appendTextFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(TextField)) !void {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (@TypeOf(@field(config, sf.name)) == []const u8) {
+                const meta: theme.Meta = @field(theme.Config.schema, sf.name);
+                if (meta.widget == .text or meta.widget == .color) {
+                    const full_key = comptime topKey(sf.name, meta);
+                    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name), .section = meta.section });
+                }
+            }
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (@TypeOf(@field(@field(config, cf.name), sf.name)) == []const u8) {
+                    const meta: theme.Meta = @field(sch, sf.name);
+                    if (meta.widget == .text or meta.widget == .color) {
+                        const full_key = comptime keyOf(cf.name, sf.name, meta);
+                        try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 키로 문자열([]const u8, widget .text/.color) 스키마 필드를 설정한다(세팅 인라인 편집 → config). value는 **호출자가
+/// config arena에 미리 소유**시킨 슬라이스여야 한다(setText는 슬라이스만 대입 — 라이브 재적용/직렬화가 계속 읽음).
+/// 매칭하는 문자열 필드가 있으면 set하고 true. parse/serialize와 같은 키 순회(단일 출처).
+pub fn setText(config: *theme.Config, key: []const u8, value: []const u8) bool {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (@TypeOf(@field(config, sf.name)) == []const u8) {
+                const meta: theme.Meta = @field(theme.Config.schema, sf.name);
+                if (meta.widget == .text or meta.widget == .color) {
+                    if (std.mem.eql(u8, key, comptime topKey(sf.name, meta))) {
+                        @field(config, sf.name) = value;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (@TypeOf(@field(@field(config, cf.name), sf.name)) == []const u8) {
+                    const meta: theme.Meta = @field(sch, sf.name);
+                    if (meta.widget == .text or meta.widget == .color) {
+                        if (std.mem.eql(u8, key, comptime keyOf(cf.name, sf.name, meta))) {
+                            @field(@field(config, cf.name), sf.name) = value;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
 // ── 파싱 프리미티브(CS-1 한정 중복 — CS-2에서 loader와 단일화 예정) ─────────────────────────────────
 
 fn parseBool(value: []const u8) ?bool {
@@ -643,6 +715,38 @@ test "schema appendEnumFields/cycleEnum: enum 열거·순환(dropdown 사이클�
     // bool·非스키마 키 → false.
     try std.testing.expect(!cycleEnum(&cfg, "cursor.blink", 1));
     try std.testing.expect(!cycleEnum(&cfg, "no.such.key", 1));
+}
+
+test "schema appendTextFields/setText: 문자열(widget .text/.color) 열거·설정(인라인 편집)" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var cfg: theme.Config = .{};
+
+    var list: std.ArrayList(TextField) = .empty;
+    try appendTextFields(arena.allocator(), cfg, &list);
+    var saw_family = false;
+    var saw_bg = false;
+    for (list.items) |f| {
+        if (std.mem.eql(u8, f.key, "font.family")) {
+            saw_family = true;
+            try std.testing.expectEqualStrings("JetBrains Mono", f.value); // 기본 family
+        }
+        if (std.mem.eql(u8, f.key, "theme.background")) {
+            saw_bg = true;
+            try std.testing.expectEqualStrings("#101010", f.value); // 기본 배경
+        }
+    }
+    try std.testing.expect(saw_family and saw_bg); // text + color 둘 다 노출
+
+    // setText: family(text)·background(color hex) 설정. value는 호출자 소유(여기선 리터럴).
+    try std.testing.expect(setText(&cfg, "font.family", "Menlo"));
+    try std.testing.expectEqualStrings("Menlo", cfg.font.family);
+    try std.testing.expect(setText(&cfg, "theme.background", "#ff0000"));
+    try std.testing.expectEqualStrings("#ff0000", cfg.theme.background);
+    // 비스키마/비-text 키 → false.
+    try std.testing.expect(!setText(&cfg, "cursor.blink", "x")); // bool 필드
+    try std.testing.expect(!setText(&cfg, "no.such.key", "x"));
 }
 
 // ── doc-drift 가드(CS-3): 모든 스키마 키가 configuration.md 키 표에 문서화돼 있어야 한다 ──────────────

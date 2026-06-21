@@ -4,10 +4,10 @@
 //! 프리미티브, control 위젯은 toggle 등 leaf 컴포넌트를 재사용한다. State(open·selected) + view(rows→박스+행) +
 //! handle(키 네비/토글/닫기) + handlePointer(행/위젯 hit-test). 단일 출처: docs/config-gui.md §2·§4.
 //!
-//! 위젯은 FieldRow.kind union으로 가른다 — bool(toggle)·number(slider)·enum(dropdown)·text(인라인 편집). text는
-//! 폰트 패밀리·색 hex를 고정 버퍼로 편집한다(Enter 커밋, Esc 취소 — State.editing/edit_buf). 레이아웃은 좌측 Section
-//! 네비(섹션 목록, platform이 settings.section으로 필터해 폼 주입) + 우측 폼(선택 섹션 필드, 길면 스크롤 윈도잉) —
-//! config-gui §4. color 스와치/16색 프리셋(raw-RGB draw 필요)과 검색은 후속.
+//! 위젯은 FieldRow.kind union으로 가른다 — bool(toggle)·number(slider)·enum(dropdown)·text(인라인 편집)·color(스와치
+//! + 16색 프리셋 + hex). text는 폰트 패밀리·색 hex를 고정 버퍼로 편집한다(Enter 커밋, Esc 취소 — State.editing/edit_buf).
+//! 레이아웃은 좌측 Section 네비(섹션 목록, platform이 settings.section으로 필터해 폼 주입) + 우측 폼(선택 섹션 필드,
+//! 길면 스크롤 윈도잉) — config-gui §4. 상단 검색은 후속.
 
 const std = @import("std");
 const draw = @import("../draw.zig");
@@ -24,8 +24,8 @@ const color = @import("color.zig");
 /// 최상위 모달 레이어(palette/notice와 동일).
 pub const layer = modal_box.layer;
 
-/// 한 설정 행(platform이 config 스키마에서 빌드해 주입). kind union으로 위젯 종류를 가른다 — CS-4-4b는 bool(toggle),
-/// CS-4-1b는 number(slider) 추가. 후속에 enum(dropdown)·text·color로 확장. 값은 config가 소유(주입만).
+/// 한 설정 행(platform이 config 스키마에서 빌드해 주입). kind union으로 위젯 종류를 가른다 — bool(toggle, CS-4-1a)·
+/// number(slider, CS-4-1b)·enum(dropdown, CS-4-1c)·text(CS-4-1d)·color(CS-4-2)를 모두 지원한다. 값은 config가 소유(주입만).
 pub const FieldRow = struct {
     label: []const u8, // 행 라벨(meta.doc 또는 키)
     kind: Kind,

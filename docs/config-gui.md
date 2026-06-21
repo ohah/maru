@@ -7,9 +7,11 @@
 이 문서는 [세팅 페이지 전략](settings-page.md)의 **Phase G(GUI)를 스키마-주도로 재정의**하고, CS-4의 doc-first
 PR 분해를 단일 출처로 둔다. config 키·메타는 [config-schema.md], chrome 컴포넌트 구조는 [Chrome 전략](chrome-strategy.md)이 단일 출처다.
 
-> 상태(2026-06): **설계 단계**. config 스키마 마일스톤(CS-1·CS-2·CS-2b·CS-3)이 머지돼 토대는 완성. 이 문서로
-> 합의 후 CS-4를 스택으로 구현한다. **CS-4는 시각/상호작용이라** 각 PR을 머지 전 `zig build macos-app`로 실기
-> 확인한다(스키마 PR처럼 헤드리스 단위만으로 blind 머지하지 않는다 — [run-macos-app-before-merge] 규율).
+> 상태(2026-06): **CS-4 구현 진행**. 스키마 토대(CS-1·CS-2·CS-2b·CS-3)에 더해 CS-4-0(pointer)·CS-4-1(toggle·
+> slider·dropdown·text)·CS-4-2(color)·CS-4-4(세팅 페이지 셸 — Section 네비·폼 스크롤·즉시 write-back)가 머지됐다.
+> 후속은 CS-4-3(keybind recorder)·CS-4-5 bespoke 에디터(palette·env·shell.args)·CS-4-6(HSV picker)·상단 검색.
+> **CS-4는 시각/상호작용이라** 각 PR을 머지 전 `zig build macos-app`로 실기 확인한다(스키마 PR처럼 헤드리스
+> 단위만으로 blind 머지하지 않는다 — [run-macos-app-before-merge] 규율).
 
 ## 0. 목표와 범위
 
@@ -133,12 +135,12 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | PR | 내용 | 검증 |
 |---|---|---|
 | **S0-1b** ✅ | per-key write-back(`updateForKeys` — 변경 키만, override-only) + `serializeSidebarConfig` 재구현 | ✅ 머지(순수 단위) |
-| **CS-4-0** | `ChromeHost` pointer 이벤트(InputEvent + 라우팅 + drag) | 헤드리스 + macos 실기 |
-| **CS-4-1** | 위젯 컴포넌트 toggle·dropdown·text/number·slider(neutral State+view+handle) | 헤드리스 단위 + 실기 |
-| **CS-4-2** | color input(16색 프리셋 + hex 입력) | 헤드리스 + 실기 |
+| **CS-4-0** ✅ | `ChromeHost` pointer 이벤트(InputEvent + 라우팅 + drag) | ✅ 머지(헤드리스 + 실기) |
+| **CS-4-1** ✅ | 위젯 컴포넌트 toggle·dropdown·text/number·slider(neutral State+view+handle) | ✅ 머지(헤드리스 + 실기) |
+| **CS-4-2** ✅ | color input(16색 프리셋 + hex 입력) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-3** | keybind recorder(`command_catalog` 행 + 키 캡처) | 헤드리스 + 실기 |
-| **CS-4-4** | **세팅 페이지 셸** — Section 네비 + 검색 + 제너릭 폼(schema 메타 소비) + `toggle_settings` 키/메뉴 | 헤드리스 + 실기 |
-| **CS-4-5** | write-back 연결(S0-1b) + bespoke 에디터(palette·env·shell.args) | 헤드리스 + 실기 |
+| **CS-4-4** ✅ | **세팅 페이지 셸** — Section 네비 + 제너릭 폼(schema 메타 소비) + 폼 스크롤 + `toggle_settings`(⌘,) 키/메뉴 (상단 검색은 후속) | ✅ 머지(헤드리스 + 실기) |
+| **CS-4-5** | write-back 연결(S0-1b) ✅(CS-4-4c) + bespoke 에디터(palette·env·shell.args) 후속 | 헤드리스 + 실기 |
 | **CS-4-6+** | (선택) color HSV picker 2차, 고급화 | 실기 |
 
 > 시각/상호작용 PR(CS-4-0~5)은 로직을 헤드리스 단위로 고정하되, **머지 전 `zig build macos-app`로 ohah가 실기
@@ -152,12 +154,14 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **시각/상호작용**: `zig build macos-app` 실기(세팅 열기·각 위젯 조작·저장→파일 확인). 자동화 어려운 부분은 PR
   한계에 수동 검증 절차 기록([verification-matrix.md]).
 
-## 10. 결정 필요 (CS-4 착수 전)
+## 10. 결정 (CS-4 진행 중 확정)
 
-1. **세팅 열기 키**: `⌘,`(macOS 관례) 빌트인 vs 메뉴/팔릿만. (`⌘,`는 현재 "Open Config…"가 메뉴에 있음 — 충돌 정리.)
-2. **저장 방식**: 변경 즉시 write-back(사이드바 ⚙ 토글처럼) vs 명시 "저장" 버튼. (즉시가 maru 기존 결과 일치.)
-3. **color picker 1차 범위**: 16색 프리셋 + hex 입력 확정([settings-page.md] §8 합의). HSV는 CS-4-6.
-4. **Open Config 메뉴 관계**: 세팅 GUI와 "Open Config…"(파일 열기) 공존? GUI가 주, 파일 직접 편집은 보조.
+> 1~3은 구현으로 확정됐다(아래 결정대로 머지). 4는 공존으로 유지한다.
+
+1. **세팅 열기 키**: `⌘,`(macOS 관례) 빌트인으로 확정(CS-4-4b). "Open Config…"(파일 열기)는 메뉴에 별도 유지.
+2. **저장 방식**: 변경 즉시 write-back으로 확정(사이드바 ⚙ 토글과 동형 — CS-4-4c). 명시 "저장" 버튼 없음.
+3. **color picker 1차 범위**: 16색 프리셋 + hex 입력 확정([settings-page.md] §8 합의 — CS-4-2). HSV는 CS-4-6.
+4. **Open Config 메뉴 관계**: 세팅 GUI와 "Open Config…"(파일 열기) 공존. GUI가 주, 파일 직접 편집은 보조.
 
 ## 관련 문서
 

@@ -3497,6 +3497,16 @@ pub const AppSession = struct {
         }
         var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
         for (texts_all.items) |t| if (t.section == sel_sec) try texts.append(arena, t);
+        // terminal 섹션엔 특수 키(schema 필드 아님)를 synthetic text 행으로 주입한다(theme.preset enum 선례 — .text 위젯
+        // 재사용, 핸들러가 key로 라우팅). shell.args(공백-토큰 리스트) + env.<KEY> 각 행(값 편집) + env 추가 행(KEY=VALUE).
+        if (sel_sec == .terminal) {
+            try texts.append(arena, .{ .key = "shell.args", .doc = "셸 인자 (공백 구분)", .value = try std.mem.join(arena, " ", self.loaded_config.config.shell.args), .section = .terminal });
+            for (self.loaded_config.config.env) |entry| {
+                const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue; // 형식 오류(= 없음)는 건너뜀
+                try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "env.{s}", .{entry[0..eq]}), .doc = entry[0..eq], .value = entry[eq + 1 ..], .section = .terminal });
+            }
+            try texts.append(arena, .{ .key = "env.", .doc = "환경 변수 추가 (KEY=VALUE)", .value = "", .section = .terminal }); // 추가 행(빈 KEY = sentinel)
+        }
         var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
         for (colors_all.items) |c| if (c.section == sel_sec) try colors.append(arena, c);
         // theme 섹션엔 ANSI 16색 팔레트 그리드 한 행(특수 — schema 필드 아님)을 color 뒤에 둔다. 핸들러가 마지막 인덱스로 라우팅.
@@ -3660,21 +3670,89 @@ pub const AppSession = struct {
             }
             return;
         };
-        // 편집 가능 행 = text(after_enums..after_texts) 또는 color hex(after_texts..after_colors). 둘 다 setText로 커밋(검증 포함).
-        const key: []const u8 = if (sel >= after_enums and sel < after_texts) blk: {
+        const editor = self.chrome_host.settings.editText();
+        // text 행(after_enums..after_texts): shell.args·env.*는 특수 setter, 나머지 schema 텍스트(폰트 패밀리·term 등)는 setText.
+        if (sel >= after_enums and sel < after_texts) {
             const ti = sel - after_enums;
             if (ti >= cf.texts.len) return;
-            break :blk cf.texts[ti].key;
-        } else if (sel >= after_texts and sel < after_colors) blk: {
+            const tkey = cf.texts[ti].key;
+            if (std.mem.eql(u8, tkey, "shell.args")) {
+                self.setShellArgs(editor); // 공백-토큰 분리
+            } else if (std.mem.eql(u8, tkey, "env.")) {
+                self.addEnvVar(editor); // 추가 행 — "KEY=VALUE" 파싱
+            } else if (std.mem.startsWith(u8, tkey, "env.")) {
+                self.setEnvVar(tkey["env.".len..], editor); // 기존 env 값 편집
+            } else {
+                // schema 텍스트(.text) — config arena dupe 후 검증·적용.
+                const owned = self.loaded_config.arena.allocator().dupe(u8, editor) catch return;
+                if (config_mod.schema.setText(&self.loaded_config.config, tkey, owned)) {
+                    self.reapplyLoadedConfig();
+                    self.markConfigKeyDirty(tkey);
+                }
+            }
+            return;
+        }
+        // color hex 행(after_texts..after_colors): setText로 커밋(hex 검증).
+        if (sel >= after_texts and sel < after_colors) {
             const ci = sel - after_texts;
             if (ci >= cf.colors.len) return;
-            break :blk cf.colors[ci].key;
-        } else return; // 편집 행 아님
-        const owned = self.loaded_config.arena.allocator().dupe(u8, self.chrome_host.settings.editText()) catch return;
-        if (config_mod.schema.setText(&self.loaded_config.config, key, owned)) {
-            self.reapplyLoadedConfig();
-            self.markConfigKeyDirty(key);
+            const owned = self.loaded_config.arena.allocator().dupe(u8, editor) catch return;
+            if (config_mod.schema.setText(&self.loaded_config.config, cf.colors[ci].key, owned)) {
+                self.reapplyLoadedConfig();
+                self.markConfigKeyDirty(cf.colors[ci].key);
+            }
+            return;
         }
+    }
+
+    /// shell.args(셸 argv) 텍스트를 공백으로 토큰 분리해 config에 적용 + 영속 예약. 따옴표 미지원(loader와 같은 규칙 —
+    /// 셸 플래그는 단순). spawn 시점에만 쓰이므로 라이브 재적용 없음(이미 뜬 셸엔 영향 없고 다음 새 Term부터 적용).
+    /// 토큰은 loaded_config.arena 소유(라이브/직렬화가 계속 읽는다). 키 "shell.args"는 정적 리터럴.
+    fn setShellArgs(self: *AppSession, text: []const u8) void {
+        const a = self.loaded_config.arena.allocator();
+        var list: std.ArrayList([]const u8) = .empty;
+        var it = std.mem.tokenizeAny(u8, text, &std.ascii.whitespace);
+        while (it.next()) |tok| list.append(a, a.dupe(u8, tok) catch return) catch return;
+        self.loaded_config.config.shell.args = list.toOwnedSlice(a) catch return;
+        self.markConfigKeyDirty("shell.args");
+    }
+
+    /// env.<name>을 value로 upsert한다(있으면 교체, 없으면 추가 — config.env는 "KEY=VALUE" 리스트). value는 양끝 trim
+    /// (내부 공백 보존 — loader와 같은 규칙). 영속 예약(write-back이 env.KEY로 직렬화). dirty 키 "env.KEY"는 동적이라
+    /// 세션 arena에 둬 안정 포인터로 보관(serializeConfig drain까지 유효). spawn 시점 전용이라 라이브 재적용 없음.
+    /// 삭제/KEY 변경은 updateConfigText의 줄 삭제 확장이 필요해 후속(현재는 upsert만 — config-gui §6.6).
+    fn setEnvVar(self: *AppSession, name: []const u8, value: []const u8) void {
+        if (name.len == 0) return;
+        const a = self.loaded_config.arena.allocator();
+        const v = std.mem.trim(u8, value, &std.ascii.whitespace);
+        const new_entry = std.fmt.allocPrint(a, "{s}={s}", .{ name, v }) catch return;
+        var list: std.ArrayList([]const u8) = .empty;
+        var found = false;
+        for (self.loaded_config.config.env) |entry| {
+            const eq = std.mem.indexOfScalar(u8, entry, '=') orelse entry.len;
+            if (std.mem.eql(u8, entry[0..eq], name)) {
+                list.append(a, new_entry) catch return;
+                found = true;
+            } else list.append(a, entry) catch return;
+        }
+        if (!found) list.append(a, new_entry) catch return;
+        self.loaded_config.config.env = list.toOwnedSlice(a) catch return;
+        const dirty_key = std.fmt.allocPrint(a, "env.{s}", .{name}) catch return;
+        self.markConfigKeyDirty(dirty_key);
+    }
+
+    /// env 추가 행 커밋 — "KEY=VALUE" 텍스트를 파싱해 setEnvVar로 upsert. '=' 없거나 KEY(양끝 trim)가 비면 notice.
+    fn addEnvVar(self: *AppSession, text: []const u8) void {
+        const eq = std.mem.indexOfScalar(u8, text, '=') orelse {
+            self.showNotice("환경 변수는 KEY=VALUE 형식이어야 합니다");
+            return;
+        };
+        const name = std.mem.trim(u8, text[0..eq], &std.ascii.whitespace);
+        if (name.len == 0) {
+            self.showNotice("환경 변수 KEY가 비어 있습니다");
+            return;
+        }
+        self.setEnvVar(name, text[eq + 1 ..]);
     }
 
     /// 슬라이더 드래그/클릭(settings.pending_ratio)을 선택 행의 number config 값으로 매핑해 적용한다(라이브 + 영속
@@ -14366,6 +14444,82 @@ test "settings palette grid: theme 섹션 마지막 행에서 셀 hex 편집 →
     session.chrome_host.settings.enterEdit("#gggggg");
     session.commitSelectedText();
     try std.testing.expectEqualStrings("#abcdef", session.loaded_config.config.theme.palette[5].?); // 거부 — 유지
+}
+
+test "settings env/shell.args: terminal 섹션 synthetic text 행 — shell.args 분리·env upsert·추가 행 파싱 (CS-4-5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // terminal 섹션 선택.
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var term_idx: usize = 0;
+    for (sections, 0..) |s, i| if (s.section == .terminal) {
+        term_idx = i;
+    };
+    session.chrome_host.settings.show();
+    session.chrome_host.settings.section = term_idx;
+
+    // text 행 key로 selected 인덱스를 찾는 헬퍼(인라인): selected = bools+nums+enums + (cf.texts 안 인덱스).
+    const selForTextKey = struct {
+        fn f(s: *AppSession, a: std.mem.Allocator, key: []const u8) ?usize {
+            const c = s.currentSectionFields(a) catch return null;
+            const base = c.bools.len + c.nums.len + c.enums.len;
+            for (c.texts, 0..) |t, i| if (std.mem.eql(u8, t.key, key)) return base + i;
+            return null;
+        }
+    }.f;
+
+    // shell.args 행 편집 "-i -l" → 공백 분리 토큰 2개 + dirty "shell.args".
+    session.chrome_host.settings.selected = selForTextKey(session, scratch.allocator(), "shell.args").?;
+    session.chrome_host.settings.enterEdit("-i -l");
+    session.config_dirty_keys.clearRetainingCapacity();
+    session.commitSelectedText();
+    try std.testing.expectEqual(@as(usize, 2), session.loaded_config.config.shell.args.len);
+    try std.testing.expectEqualStrings("-i", session.loaded_config.config.shell.args[0]);
+    try std.testing.expectEqualStrings("-l", session.loaded_config.config.shell.args[1]);
+    var saw_sa = false;
+    for (session.config_dirty_keys.items) |k| if (std.mem.eql(u8, k, "shell.args")) {
+        saw_sa = true;
+    };
+    try std.testing.expect(saw_sa);
+
+    // env 추가 행("env." sentinel) 편집 "FOO=bar" → config.env에 "FOO=bar" + dirty "env.FOO".
+    session.chrome_host.settings.selected = selForTextKey(session, scratch.allocator(), "env.").?;
+    session.chrome_host.settings.enterEdit("FOO=bar");
+    session.config_dirty_keys.clearRetainingCapacity();
+    session.commitSelectedText();
+    try std.testing.expectEqual(@as(usize, 1), session.loaded_config.config.env.len);
+    try std.testing.expectEqualStrings("FOO=bar", session.loaded_config.config.env[0]);
+    var saw_foo = false;
+    for (session.config_dirty_keys.items) |k| if (std.mem.eql(u8, k, "env.FOO")) {
+        saw_foo = true;
+    };
+    try std.testing.expect(saw_foo);
+
+    // 이제 "env.FOO" 행이 생겼다 — 값만 "baz"로 편집 → upsert(교체, 추가 아님).
+    session.chrome_host.settings.selected = selForTextKey(session, scratch.allocator(), "env.FOO").?;
+    session.chrome_host.settings.enterEdit("baz");
+    session.commitSelectedText();
+    try std.testing.expectEqual(@as(usize, 1), session.loaded_config.config.env.len); // 교체 — 개수 그대로
+    try std.testing.expectEqualStrings("FOO=baz", session.loaded_config.config.env[0]);
+
+    // 추가 행에 '=' 없는 입력 → 무시(env 변화 없음).
+    session.chrome_host.settings.selected = selForTextKey(session, scratch.allocator(), "env.").?;
+    session.chrome_host.settings.enterEdit("INVALID");
+    session.commitSelectedText();
+    try std.testing.expectEqual(@as(usize, 1), session.loaded_config.config.env.len); // 그대로
 }
 
 test "detectThemePreset / applyThemePreset / resetAllSettings: 테마 프리셋·통합 리셋" {

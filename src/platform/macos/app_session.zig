@@ -5528,37 +5528,17 @@ pub const AppSession = struct {
     /// paste한다. Swift 드롭 핸들러(3d ABI)가 fileURL 드롭 시 부른다. 설계: docs/ssh-integration.md §4.
     pub fn handleDroppedFiles(self: *AppSession, paths_nul: []const u8) void {
         if (!self.surface_initialized or paths_nul.len == 0) return;
-        // 원격 목적지를 core_mutex 하에 읽어 복사한다(reader 스레드의 ssh_remote_dest free와 경합 방지).
-        const surface = self.activeSurface();
-        surface.lockCore(self.io);
-        const dest: ?[]u8 = if (surface.core.sshRemoteDest()) |d|
-            (self.allocator.dupe(u8, d) catch null)
-        else
-            null;
-        surface.unlockCore(self.io);
-
-        const remote_dest = dest orelse {
-            self.pasteText(paths_nul, true); // 로컬 세션(또는 dupe OOM): 기존 경로 paste
+        const rup = self.remoteUploadContext() orelse {
+            self.pasteText(paths_nul, true); // 로컬 세션(또는 dest/ctl 못 구함): 기존 경로 paste
             return;
         };
-        defer self.allocator.free(remote_dest);
-
-        // control socket 경로(1·2단계와 같은 규약). 못 구하면 로컬 paste로 폴백.
-        const home = std.c.getenv("HOME") orelse {
-            self.pasteText(paths_nul, true);
-            return;
-        };
-        const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), remote_dest) catch {
-            self.pasteText(paths_nul, true);
-            return;
-        };
-        defer self.allocator.free(ctl);
+        defer rup.deinit(self.allocator);
 
         var it = std.mem.splitScalar(u8, paths_nul, 0);
         var started: usize = 0;
         while (it.next()) |path| {
             if (path.len == 0) continue;
-            self.startUpload(ctl, remote_dest, path) catch continue; // 읽기/크기/spawn 실패는 그 파일만 스킵
+            self.startUpload(rup.ctl, rup.dest, path) catch continue; // 읽기/크기/spawn 실패는 그 파일만 스킵
             started += 1;
         }
         // 한 파일도 못 올렸으면 사용자가 빈손이 되지 않게 로컬 경로라도 paste(graceful).
@@ -5572,20 +5552,8 @@ pub const AppSession = struct {
     pub fn handleDroppedImage(self: *AppSession, bytes: []const u8) bool {
         if (!self.surface_initialized or bytes.len == 0) return false;
         if (bytes.len > maru.cli.ssh.max_upload_bytes) return false; // 16MB 초과 — 로컬 처리로 폴백
-        // 원격 목적지를 core_mutex 하에 읽어 복사(reader 스레드의 ssh_remote_dest free와 경합 방지).
-        const surface = self.activeSurface();
-        surface.lockCore(self.io);
-        const dest: ?[]u8 = if (surface.core.sshRemoteDest()) |d|
-            (self.allocator.dupe(u8, d) catch null)
-        else
-            null;
-        surface.unlockCore(self.io);
-        const remote_dest = dest orelse return false; // 로컬 세션 — Swift가 기존 처리
-        defer self.allocator.free(remote_dest);
-
-        const home = std.c.getenv("HOME") orelse return false;
-        const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), remote_dest) catch return false;
-        defer self.allocator.free(ctl);
+        const rup = self.remoteUploadContext() orelse return false; // 로컬 세션 — Swift가 기존 처리
+        defer rup.deinit(self.allocator);
 
         // 클립보드 이미지엔 파일명이 없으므로 카운터로 고유 이름을 만든다(시간 API는 코어 결정성 위해 회피).
         self.upload_counter += 1;
@@ -5595,8 +5563,50 @@ pub const AppSession = struct {
             return false;
         };
         // name/bytes 소유를 startUploadBytes로 넘긴다(성공/실패 무관 그쪽이 책임).
-        self.startUploadBytes(ctl, remote_dest, name, bytes_owned) catch return false;
+        self.startUploadBytes(rup.ctl, rup.dest, name, bytes_owned) catch return false;
         return true;
+    }
+
+    /// maru ssh 원격 세션의 업로드 컨텍스트(목적지 + control socket 경로). 드롭(handleDroppedFiles)과
+    /// paste(handleDroppedImage) 핸들러가 공유한다 — 둘 다 "activeSurface의 sshRemoteDest를 core_mutex(lockCore)
+    /// 하에 복사 + HOME으로 controlSocketPath 계산"이 똑같이 필요해서 한 곳으로 모은다. 로컬 세션(sshRemoteDest
+    /// 없음)·HOME 없음/빈 문자열·경로 계산 실패면 null(호출자가 각자 폴백). dest/ctl은 owned라 호출자가 deinit으로
+    /// 해제한다(startUpload/startUploadBytes는 빌려 dupe한다).
+    const RemoteUpload = struct {
+        dest: []u8,
+        ctl: []u8,
+        fn deinit(self: RemoteUpload, allocator: std.mem.Allocator) void {
+            allocator.free(self.dest);
+            allocator.free(self.ctl);
+        }
+    };
+
+    fn remoteUploadContext(self: *AppSession) ?RemoteUpload {
+        const surface = self.activeSurface();
+        surface.lockCore(self.io);
+        const dest: ?[]u8 = if (surface.core.sshRemoteDest()) |d|
+            (self.allocator.dupe(u8, d) catch null)
+        else
+            null;
+        surface.unlockCore(self.io);
+        const remote_dest = dest orelse return null; // 로컬 세션(또는 dupe OOM)
+
+        // getenv는 HOME=""(빈 문자열)도 non-null로 주므로 빈 값을 가드한다(코드베이스 컨벤션) — 빈 HOME이면
+        // controlSocketPath가 `/.cache/...` 같은 잘못된 경로를 만든다. optional 반환이라 errdefer가 안 먹어 명시 free.
+        const home = std.c.getenv("HOME") orelse {
+            self.allocator.free(remote_dest);
+            return null;
+        };
+        const home_span = std.mem.span(home);
+        if (home_span.len == 0) {
+            self.allocator.free(remote_dest);
+            return null;
+        }
+        const ctl = maru.cli.ssh.controlSocketPath(self.allocator, home_span, remote_dest) catch {
+            self.allocator.free(remote_dest);
+            return null;
+        };
+        return .{ .dest = remote_dest, .ctl = ctl };
     }
 
     /// 드롭 파일을 메인 스레드에서 읽고(io 필요) 크기를 검사한 뒤, 업로드는 startUploadBytes에 넘긴다.
@@ -5643,8 +5653,8 @@ pub const AppSession = struct {
     }
 
     /// 백그라운드 스레드 엔트리: bytes를 ssh로 업로드하고 결과(원격 경로)를 mutex 하에 큐에 넣는다. job과
-    /// owned 입력을 전부 해제한다(소유권을 넘겨받았다). io를 안 만지므로(ssh_upload는 std.process.Child만)
-    /// 스레드 안전하다.
+    /// owned 입력을 전부 해제한다(소유권을 넘겨받았다). io를 안 만지므로(ssh_upload는 posix fork+pipe만 씀 —
+    /// std.process.Child가 0.16에서 io 기반이라 회피) 스레드 안전하다.
     fn uploadWorker(job: *UploadJob) void {
         const self = job.session;
         const result: ?[]u8 = ssh_upload.uploadBytes(self.allocator, job.ctl, job.dest, job.name, job.bytes) catch null;

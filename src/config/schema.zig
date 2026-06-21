@@ -235,6 +235,82 @@ pub fn setBool(config: *theme.Config, key: []const u8, value: bool) bool {
     return false;
 }
 
+/// 한 숫자(f32/u32 + range) 스키마 필드의 GUI 슬라이더 행 기술자. value/min/max는 f64로 통일(슬라이더 ratio
+/// 계산 공용), is_int면 u32(정수 스텝·표시). key/doc는 comptime 리터럴.
+pub const NumberField = struct { key: []const u8, doc: []const u8, value: f64, min: f64, max: f64, is_int: bool };
+
+/// 스키마'd **숫자 필드(f32/u32, range 필수)**를 전부 슬라이더 행으로 emit한다(appendBoolFields의 숫자 짝). range
+/// 메타가 슬라이더 min/max를 준다(파서 검증과 같은 출처). 순서는 parse/serialize와 같은 Config 필드 순회 순.
+pub fn appendNumberFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(NumberField)) !void {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            try appendNumberField(arena, config, theme.Config, theme.Config.schema, sf, comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), list);
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                try appendNumberFieldSub(arena, config, cf, Container, sch, sf, comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), list);
+            }
+        }
+    }
+}
+
+// 최상위(Config 직속) 숫자 필드 한 개를 append(있으면). comptime 분기를 함수로 빼 inline for 본문을 짧게 유지.
+fn appendNumberField(arena: std.mem.Allocator, config: theme.Config, comptime C: type, comptime sch: anytype, comptime sf: anytype, comptime full_key: []const u8, list: *std.ArrayList(NumberField)) !void {
+    _ = C;
+    const FieldT = @TypeOf(@field(config, sf.name));
+    if (FieldT != f32 and FieldT != u32) return;
+    const meta: theme.Meta = @field(sch, sf.name);
+    const r = comptime (meta.range orelse @compileError(full_key ++ ": 숫자 필드엔 range 필수"));
+    const v: f64 = if (FieldT == u32) @floatFromInt(@field(config, sf.name)) else @field(config, sf.name);
+    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32 });
+}
+
+// sub-struct 숫자 필드 한 개를 append(있으면).
+fn appendNumberFieldSub(arena: std.mem.Allocator, config: theme.Config, comptime cf: anytype, comptime C: type, comptime sch: anytype, comptime sf: anytype, comptime full_key: []const u8, list: *std.ArrayList(NumberField)) !void {
+    _ = C;
+    const FieldT = @TypeOf(@field(@field(config, cf.name), sf.name));
+    if (FieldT != f32 and FieldT != u32) return;
+    const meta: theme.Meta = @field(sch, sf.name);
+    const r = comptime (meta.range orelse @compileError(full_key ++ ": 숫자 필드엔 range 필수"));
+    const v: f64 = if (FieldT == u32) @floatFromInt(@field(@field(config, cf.name), sf.name)) else @field(@field(config, cf.name), sf.name);
+    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32 });
+}
+
+/// 키로 숫자(f32/u32) 스키마 필드를 설정한다(세팅 슬라이더 → config). value는 range로 클램프, u32면 반올림 정수화.
+/// 매칭하는 숫자 필드가 있으면 set하고 true. parse/serialize와 같은 키 순회(단일 출처).
+pub fn setNumber(config: *theme.Config, key: []const u8, value: f64) bool {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (setNumberField(&@field(config, sf.name), @field(theme.Config.schema, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), key, value)) return true;
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (setNumberField(&@field(@field(config, cf.name), sf.name), @field(sch, sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), key, value)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+// 한 필드 포인터가 숫자(f32/u32)이고 키가 맞으면 클램프해 설정하고 true. 그 외 false.
+fn setNumberField(ptr: anytype, comptime meta: theme.Meta, comptime full_key: []const u8, key: []const u8, value: f64) bool {
+    const T = @TypeOf(ptr.*);
+    if (T != f32 and T != u32) return false;
+    if (!std.mem.eql(u8, key, full_key)) return false;
+    const r = comptime (meta.range orelse @compileError(full_key ++ ": 숫자 필드엔 range 필수"));
+    const clamped = std.math.clamp(value, r[0], r[1]);
+    ptr.* = if (T == u32) @intFromFloat(@round(clamped)) else @floatCast(clamped);
+    return true;
+}
+
 // ── 파싱 프리미티브(CS-1 한정 중복 — CS-2에서 loader와 단일화 예정) ─────────────────────────────────
 
 fn parseBool(value: []const u8) ?bool {
@@ -438,6 +514,42 @@ test "schema appendBoolFields/setBool: bool 필드만 열거하고 키로 설정
     // 非bool 키(font.size=f32)·非스키마 키 → false(설정 안 함).
     try std.testing.expect(!setBool(&cfg, "font.size", true));
     try std.testing.expect(!setBool(&cfg, "no.such.key", true));
+}
+
+test "schema appendNumberFields/setNumber: f32/u32+range 열거·클램프 설정(세팅 슬라이더)" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var cfg: theme.Config = .{};
+
+    var list: std.ArrayList(NumberField) = .empty;
+    try appendNumberFields(arena.allocator(), cfg, &list);
+    var saw_font_size = false; // f32 + range
+    var saw_pad_top = false; // u32 + range(최상위 window.padding-top)
+    for (list.items) |f| {
+        if (std.mem.eql(u8, f.key, "font.size")) {
+            saw_font_size = true;
+            try std.testing.expect(!f.is_int);
+            try std.testing.expectEqual(@as(f64, 14), f.value); // 기본 font.size
+            try std.testing.expect(f.min < f.max);
+        }
+        if (std.mem.eql(u8, f.key, "window.padding-top")) {
+            saw_pad_top = true;
+            try std.testing.expect(f.is_int);
+        }
+    }
+    try std.testing.expect(saw_font_size and saw_pad_top);
+
+    // setNumber: f32 클램프 + u32 반올림 정수화.
+    try std.testing.expect(setNumber(&cfg, "font.size", 22.5));
+    try std.testing.expectEqual(@as(f32, 22.5), cfg.font.size);
+    try std.testing.expect(setNumber(&cfg, "font.size", 99999)); // range 밖 → max 클램프
+    try std.testing.expect(cfg.font.size < 99999);
+    try std.testing.expect(setNumber(&cfg, "window.padding-top", 7.6)); // u32 → 반올림 8
+    try std.testing.expectEqual(@as(u32, 8), cfg.window_padding_top);
+    // bool 키·非스키마 → false.
+    try std.testing.expect(!setNumber(&cfg, "cursor.blink", 1));
+    try std.testing.expect(!setNumber(&cfg, "no.such.key", 1));
 }
 
 // ── doc-drift 가드(CS-3): 모든 스키마 키가 configuration.md 키 표에 문서화돼 있어야 한다 ──────────────

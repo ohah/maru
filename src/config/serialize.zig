@@ -145,6 +145,15 @@ pub fn configKeyValues(arena: std.mem.Allocator, config: theme.Config) ![]const 
     // term
     try list.append(arena, .{ .key = "term", .value = config.term });
 
+    // env.<KEY> — 각 "KEY=VALUE"를 `env.<KEY> = <VALUE>`로 되돌린다(parse의 env. 누적과 대칭). 첫 '='로 가른다.
+    for (config.env) |entry| {
+        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue; // '=' 없으면 형식 오류 — 건너뜀
+        try list.append(arena, .{
+            .key = try std.fmt.allocPrint(arena, "env.{s}", .{entry[0..eq]}),
+            .value = entry[eq + 1 ..],
+        });
+    }
+
     // notifications / scrollback / bell / shell-integration
     try list.append(arena, .{ .key = "notifications.agent-complete", .value = boolToken(config.notifications.agent_complete) });
     try list.append(arena, .{ .key = "scrollback.lines", .value = try std.fmt.allocPrint(arena, "{d}", .{config.scrollback.lines}) });
@@ -214,6 +223,7 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     cfg.window_padding_bottom = 3;
     cfg.window_padding_left = 4;
     cfg.term = "xterm-256color";
+    cfg.env = &.{ "EDITOR=nvim", "MY_VAR=a b c" }; // 내부 공백 보존도 함께 검증
     cfg.notifications.agent_complete = false;
     cfg.scrollback.lines = 5000;
     cfg.bell.audible = false;
@@ -267,6 +277,9 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     try std.testing.expectEqual(@as(u32, 3), got.window_padding_bottom);
     try std.testing.expectEqual(@as(u32, 4), got.window_padding_left);
     try std.testing.expectEqualStrings("xterm-256color", got.term);
+    try std.testing.expectEqual(@as(usize, 2), got.env.len);
+    try std.testing.expectEqualStrings("EDITOR=nvim", got.env[0]);
+    try std.testing.expectEqualStrings("MY_VAR=a b c", got.env[1]); // env.<KEY> round-trip + 내부 공백 보존
     try std.testing.expectEqual(false, got.notifications.agent_complete);
     try std.testing.expectEqual(@as(u32, 5000), got.scrollback.lines);
     try std.testing.expectEqual(false, got.bell.audible);

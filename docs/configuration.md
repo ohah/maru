@@ -97,6 +97,7 @@ window.padding-left   = 8
 | `sidebar.show-branch` | `true`\|`false` | `true` | 세로 사이드바 세션 카드에 git 브랜치명을 표시할지. 카드 이름줄은 식별용이라 항상 표시. 그 외 값은 무시. 사이드바 헤더 **view options(⚙) 메뉴**에서 토글하면 이 키에 양방향 반영(앱→config 파일 atomic write, 주석 보존) |
 | `sidebar.show-folder` | `true`\|`false` | `true` | 위와 같되 폴더(cwd) 경로 줄(cwd가 git repo 안일 때만). 마찬가지로 view options(⚙) 메뉴에서 토글·양방향 |
 | `term` | 문자열 | `xterm-maru` | 셸에 줄 `$TERM`(컴파일 실패 시 `xterm-256color` 폴백). 아래 참조 |
+| `env.<KEY>` | 문자열 | (없음) | 새 셸에 주입할 환경변수(`env.EDITOR = nvim`처럼 여러 줄). 부모 상속 env + maru override(TERM 등) **위에 upsert** — 같은 KEY면 덮어쓰고 없으면 추가("부모 + 사용자"). 값은 양끝만 trim(내부 공백 보존), 빈 값 허용. 빈 KEY(`env. =`)는 무시. 새로 여는 셸에만 적용(reload는 기존 셸 env 안 바꿈). 아래 참조 |
 | `keybind` | `<조합> = <action>` | (없음) | 여러 줄 가능. 아래 참조 |
 
 ### 컬러 테마 프리셋 (`theme.preset`)
@@ -337,6 +338,28 @@ term = xterm-ghostty    # 다른 값(그 terminfo가 설치돼 있어야 함)
 > 바이트만 보낸다.
 
 > 빈 값(`term =`)은 무시하고 기본값을 유지한다. env를 명시로 주는 테스트 경로에선 이 값이 무시된다.
+
+### 환경변수 주입 (`env.<KEY>`)
+
+새로 띄우는 셸에 줄 환경변수를 정한다. 여러 줄을 둘 수 있고, 각 줄의 `env.` 뒤가 변수 이름, `=` 뒤가 값이다.
+
+```conf
+env.EDITOR = nvim
+env.LANG = en_US.UTF-8
+env.MY_FLAG = a b c   # 값 내부 공백은 보존(양끝만 다듬는다), 빈 값(env.FOO =)도 허용
+```
+
+- **병합 정책**: 부모(maru를 띄운) 환경을 상속한 뒤, maru가 관리하는 변수(`TERM`/`COLORTERM`/`TERM_PROGRAM` 등)를
+  덮어쓰고, **그 위에** 이 `env.*` 값을 upsert한다 — 같은 KEY가 이미 있으면 덮어쓰고 없으면 추가한다. 즉 `env.*`가
+  가장 마지막에 적용돼 우선한다(부모 상속을 끊지 않는 "부모 + 사용자" 모델 — Ghostty `env`와 같은 결).
+- **TERM은 `term` 키로**: `$TERM`은 `term =`이 단일 출처다. `env.TERM = ...`으로도 덮을 수 있으나(마지막 적용이라
+  이김) terminfo 해석과 어긋날 수 있어 권장하지 않는다.
+- 같은 `env.KEY`를 여러 줄 쓰면 **나중 줄이 이긴다**(spawn 시 순서대로 upsert). 빈 KEY(`env. =`)는 무시(diagnostic).
+- **적용 시점**: 새로 여는 셸(첫 창·새 탭/Term·분할)에만 적용된다. 런타임 **Reload Config**는 이미 떠 있는 셸의
+  환경을 바꾸지 않는다(프로세스 env는 spawn 후 불변 — 이후 연 셸부터 반영).
+- **베이스/결정**: 상속 + override 모델은 Ghostty `env`(부모 상속 위에 사용자 값 추가)를 베이스로 했다. 저장은
+  값 보존이 기본이다(config 파일은 사용자 소유) — 민감값 마스킹은 GUI 표시·trace에만 적용한다([필수 프로젝트 규칙]
+  redaction 기준, settings-page.md §8).
 
 ### 셸 통합 ssh 라우팅 (`shell-integration.ssh`)
 

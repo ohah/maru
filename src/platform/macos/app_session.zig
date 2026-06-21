@@ -1365,7 +1365,7 @@ pub const AppSession = struct {
         // append + app_window 갱신을 createTab이 한 묶음으로 한다(create/switch 후속도 같은 경로를 쓴다).
         // Swift는 opaque handle만 보유하고 AppSession은 heap에 고정된다(LivePtySession reader가
         // `&pane.live_pty.reader`를 잡으므로 Pane도 heap-pin — createPane이 allocator.create로 띄운다).
-        var first_req = spawnRequest(spawn_config, self.loaded_config.config.term, integ_dir, self.new_tab_ssh_bin);
+        var first_req = spawnRequest(spawn_config, self.loaded_config.config.term, self.loaded_config.config.env, integ_dir, self.new_tab_ssh_bin);
         // launch cwd가 `/`인지 한 번 캐시(.app 더블클릭 home 승격용 — workspaceRootCwd가 매번 getcwd하지 않게).
         self.launch_cwd_is_root = detectLaunchCwdIsRoot(io);
         // 시작 창은 config workspace.root에서 연다(빈 값이면 상속 cwd — maru를 띄운 디렉터리, `/`면 home). 첫 창은
@@ -2404,7 +2404,7 @@ pub const AppSession = struct {
         const size = gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
         var cfg = self.new_tab_config;
         cfg.size = size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
         // 서페이스(새 Term)는 Term 탭이라 tab-inherit-cwd 토글을 따른다(켜지면 포커스 cwd 상속, 아니면 root).
         // append 전에 읽어야 focusedTermCwd의 activeTerm이 아직 현재(=직전 포커스) Term을 가리킨다.
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -2467,7 +2467,7 @@ pub const AppSession = struct {
         // 3) 새 panel을 b 크기로 spawn(새 셸). 실패하면 트리/탭은 그대로다.
         var cfg = self.new_tab_config;
         cfg.size = b_size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
         // 팬(분할)은 split-inherit-cwd면 분할되는(활성) pane의 활성 Term cwd 상속, 아니면 root. 아래 트리 변형
         // 전에 읽어 focusedTermCwd의 active가 아직 포커스 Term을 가리킨다.
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -3149,7 +3149,7 @@ pub const AppSession = struct {
     fn newTab(self: *AppSession) !*Tab {
         var cfg = self.new_tab_config;
         cfg.size = self.activeSurface().core.size; // 첫 탭 크기가 아니라 지금 창 크기로
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
         // 새 워크스페이스 탭: tab-inherit-cwd면 포커스 cwd 상속, 아니면 root(Ghostty tab-inherit 모델).
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
         self.applySpawnCwd(&req, &root_buf, self.loaded_config.config.workspace.tab_inherit_cwd);
@@ -5830,7 +5830,7 @@ pub const AppSession = struct {
         var cfg = self.new_tab_config;
         const size = restoreSurfaceSize(sm);
         cfg.size = size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
         if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c; // 존재하는 디렉터리면 거기서, 아니면 기본 cwd(surface 안 잃음)
         return .{ .req = req, .size = size };
     }
@@ -8256,7 +8256,7 @@ pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
     };
 }
 
-fn spawnRequest(config: NormalizedConfig, term: []const u8, zdotdir: ?[]const u8, ssh_bin: ?[]const u8) maru.pty.SpawnRequest {
+fn spawnRequest(config: NormalizedConfig, term: []const u8, env_overrides: []const []const u8, zdotdir: ?[]const u8, ssh_bin: ?[]const u8) maru.pty.SpawnRequest {
     var request: maru.pty.SpawnRequest = switch (config.command_kind) {
         .controlled_smoke => .{
             .command = "/bin/sh",
@@ -8279,6 +8279,8 @@ fn spawnRequest(config: NormalizedConfig, term: []const u8, zdotdir: ?[]const u8
     // 사용자 config의 TERM을 셸에 준다(기본 xterm-256color). env는 빈 채로 둬 부모 상속 +
     // TERM/COLORTERM override 경로를 타게 한다. zdotdir이 있으면 셸 통합용 ZDOTDIR을 주입한다.
     request.term = term;
+    // 사용자 config env.<KEY> 주입(부모 상속 + maru override 위에 upsert). 빈 슬라이스면 EnvStorage가 무동작.
+    request.env_overrides = env_overrides;
     request.zdotdir = zdotdir;
     // opt-in ssh 라우팅이 켜졌으면 maru 실행 파일 경로를 실어 EnvStorage가 MARU_BIN/MARU_SSH_INTEGRATION을
     // 주입하게 한다(null이면 주입 안 함 — 평범한 ssh 그대로).

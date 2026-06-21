@@ -271,9 +271,9 @@ test "settings view: 닫힘=0 ops, 열림=frame(quad+border)+제목+행(하이�
     try std.testing.expect(out.items[4] == .text); // 행0 라벨
     try std.testing.expectEqualStrings("Cursor blink", out.items[4].text.runs[0].text);
     try std.testing.expect(out.items[5] == .quad and out.items[6] == .quad); // 행0 toggle pill+knob
-    try std.testing.expectEqual(tokens.ColorRole.focus_accent, out.items[5].quad.fill_role); // value=true → 켜짐색
+    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[5].quad.fill_role); // value=true → 켜짐색(maru 앰버)
     try std.testing.expect(out.items[7] == .text); // 행1 라벨(선택 아님 → 하이라이트 없음)
-    try std.testing.expectEqual(tokens.ColorRole.tab_hover_bg, out.items[8].quad.fill_role); // 행1 value=false → 꺼짐색
+    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[8].quad.fill_role); // 행1 value=false → 꺼짐색
 }
 
 test "settings handlePointer: 박스 밖=닫기, toggle 위=.toggle+선택, 라벨=.selection_changed" {

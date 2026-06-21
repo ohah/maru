@@ -1144,6 +1144,9 @@ pub const AppSession = struct {
     // view options 토글(show_branch/show_folder)이 바뀌어 config 파일에 반영(persist)해야 하는지. Swift가 매 tick
     // take_sidebar_config_dirty로 drain해 serializeSidebarConfig→atomic write한다(앱→config, take_bell과 같은 1회성 신호).
     sidebar_config_dirty: bool = false,
+    // 시각 확인 디버그 훅: MARU_OPEN_SETTINGS env가 있으면 첫 frame에서 세팅 화면을 자동으로 연다(스크린샷
+    // 하니스가 입력 없이 모달 상태를 캡처하게 — MARU_DEBUG와 같은 env-gate). env 미설정이면 무동작. 한 번만 연다.
+    debug_settings_opened: bool = false,
     // 컨텍스트 메뉴 항목(동적, 대상 타입·pin 상태에 따라). show가 buildContextMenuItems로 채우고 itemAt/draws/accept가
     // contextMenuItems로 같은 리스트를 본다(보이는 항목 == 클릭/실행되는 항목). 라벨은 정적 리터럴이라 소유 불요.
     // 크기 = 최대 항목 수(Rename + Pin + 배경 프리셋)로 정확히 잡아 buf 오버플로를 컴파일 타임에 막는다.
@@ -3241,6 +3244,7 @@ pub const AppSession = struct {
             },
             // 커맨드 팝업 토글(Cmd+Shift+P). 열려 있으면 닫고, 아니면 연다(상태머신은 PaletteState).
             .toggle_command_palette => self.togglePalette(),
+            .toggle_settings => self.toggleSettings(),
             // 스크롤백 Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState, 검색은 코어).
             .toggle_find => self.toggleFind(),
             // Find 다음/이전 매치(⌘G/⌘⇧G) — 오버레이 닫힌 채도 동작(보존된 검색어로 네비).
@@ -3288,6 +3292,80 @@ pub const AppSession = struct {
         const action = command_palette.actionAt(self.palette_filtered.items, self.chrome_host.palette.selected);
         self.chrome_host.palette.hide();
         if (action) |a| self.dispatchAppAction(a);
+    }
+
+    /// 시각 확인 디버그 훅 — MARU_OPEN_SETTINGS env가 설정됐고 surface가 준비됐으면 세팅 화면을 한 번 자동으로 연다.
+    /// 스크린샷 하니스(MARU_SCREENSHOT)가 입력 없이 모달 상태를 캡처하도록(self-verify). env 미설정이면 무동작 —
+    /// 일반 실행/계약엔 영향 없다(MARU_DEBUG와 같은 env-gate). 매 frame 호출되지만 한 번만 연다(debug_settings_opened).
+    pub fn maybeDebugOpenSettings(self: *AppSession) void {
+        if (self.debug_settings_opened) return;
+        if (!self.surface_initialized) return;
+        self.debug_settings_opened = true;
+        if (std.c.getenv("MARU_OPEN_SETTINGS") != null) self.toggleSettings();
+    }
+
+    /// 세팅 화면(⌘,)을 토글한다 — 열려 있으면 닫고, 아니면 다른 오버레이를 닫고 연다(배타적, palette/find와 같은 규율).
+    /// 열 때 bool 스키마 필드 수를 컴포넌트에 주입해(setFieldCount) 키 라우팅(↑↓ wrap·Space/Enter 토글 가드)이 동작하게 한다.
+    fn toggleSettings(self: *AppSession) void {
+        if (self.chrome_host.settings.open) {
+            self.chrome_host.settings.hide();
+        } else {
+            self.chrome_host.notice.dismiss(); // 배타적
+            self.chrome_host.find.hide();
+            self.chrome_host.palette.hide();
+            self.find_matches.clearRetainingCapacity();
+            self.chrome_host.settings.show();
+            var list: std.ArrayList(config_mod.schema.BoolField) = .empty;
+            defer list.deinit(self.allocator);
+            config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &list) catch {};
+            self.chrome_host.settings.setFieldCount(list.items.len);
+        }
+    }
+
+    /// config 스키마의 bool 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2). 라벨=meta.doc(없으면 키),
+    /// 값=현재 raw config(self.loaded_config.config). buildPaletteRows의 settings 짝 — arena 소유. macOS 전용.
+    fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.settings.FieldRow {
+        var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
+        try config_mod.schema.appendBoolFields(arena, self.loaded_config.config, &bools);
+        const rows = try arena.alloc(chrome.components.settings.FieldRow, bools.items.len);
+        for (bools.items, 0..) |b, i| {
+            rows[i] = .{ .label = if (b.doc.len > 0) b.doc else b.key, .value = b.value };
+        }
+        return rows;
+    }
+
+    /// 선택된 세팅 행의 bool config 값을 뒤집고 라이브 적용한다(즉시 반영). raw config(loaded_config.config)를 키로
+    /// flip한 뒤 reapplyLoadedConfig가 appearance를 다시 resolve해 화면에 적용한다. **파일 영속(write-back)은 CS-4-4c**
+    /// (updateConfigForKeys + dirty/Swift atomic write) — 지금은 세션 내 라이브 적용까지. 행 목록은 schema 순서라
+    /// 컴포넌트 selected 인덱스와 일치한다(buildSettingsFields와 같은 appendBoolFields 순회).
+    fn toggleSelectedSetting(self: *AppSession) void {
+        var list: std.ArrayList(config_mod.schema.BoolField) = .empty;
+        defer list.deinit(self.allocator);
+        config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &list) catch return;
+        const sel = self.chrome_host.settings.selected;
+        if (sel >= list.items.len) return;
+        const f = list.items[sel];
+        if (config_mod.schema.setBool(&self.loaded_config.config, f.key, !f.value)) {
+            self.reapplyLoadedConfig();
+        }
+    }
+
+    /// 메모리의 loaded_config(스키마 필드 in-place 변경 — 세팅 GUI 토글)에서 appearance를 다시 resolve해 적용한다.
+    /// reloadConfig(파일 재로드)의 적용 단계만 떼어낸 것 — loaded_config를 교체/free하지 않으므로(같은 arena 유지)
+    /// appearance가 그 arena를 계속 빌려도 안전하다(reloadConfig의 swap-then-free 순서 가드는 불필요). resolve 실패면
+    /// 무동작(forgiving — appearance 보존). behavior 캐시·palette·scrollback·ambiguous-width·사이드바도 함께 갱신.
+    fn reapplyLoadedConfig(self: *AppSession) void {
+        const new_appearance = config_mod.resolveAppearance(self.loaded_config.config) catch return;
+        self.applyAppearance(new_appearance);
+        self.audible_bell = self.loaded_config.config.bell.audible;
+        self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
+        self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
+        self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
+        self.reapplyScrollback();
+        self.reapplyConfigPalette();
+        self.reapplyAmbiguousWidth();
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
     }
 
     /// terminal.KeyEvent → chrome.input.InputEvent. chrome은 terminal 타입을 모르므로(L1/L3 경계) 이 변환을
@@ -3746,6 +3824,9 @@ pub const AppSession = struct {
                 self.pending_close = null;
                 self.metal_dirty = true;
             },
+            .settings_close => {}, // settings.hide는 컴포넌트가 이미(handle/바깥클릭) — platform 부수효과 없음
+            .settings_toggle => self.toggleSelectedSetting(), // 선택 행 bool flip + 라이브 적용(파일 영속은 CS-4-4c)
+            .settings_selection_changed => self.metal_dirty = true, // ↑↓/행 클릭 — 재렌더
         }
     }
 
@@ -4065,7 +4146,7 @@ pub const AppSession = struct {
         // chrome 모달(Notice·Find·Palette)이 열려 있으면 키를 chrome으로 라우팅한다 — 최상위(PTY/스크롤보다 먼저,
         // 셋은 배타적). handleInput이 컴포넌트 handle로 보내 의도(HostAction)를 내고, dispatchChromeAction이 session
         // 부수효과(재검색·스크롤·필터·실행·닫기)를 실행한다. 모든 키를 소비한다(모달이라 터미널엔 안 내려간다).
-        if (self.chrome_host.confirm.open or self.chrome_host.notice.open or self.chrome_host.context_menu.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
+        if (self.chrome_host.confirm.open or self.chrome_host.notice.open or self.chrome_host.context_menu.open or self.chrome_host.find.open or self.chrome_host.palette.open or self.chrome_host.settings.open) {
             if (self.chrome_host.handleInput(self.allocator, chromeInputFromKeyEvent(event))) |action| {
                 self.dispatchChromeAction(action);
             }
@@ -4449,6 +4530,25 @@ pub const AppSession = struct {
                     self.closeContextMenu(); // 항목 밖 클릭 → 닫기(대상·view_options 플래그 비움)
                 }
             }
+            return;
+        }
+        // 세팅 모달이 열려 있으면 포인터를 settings 컴포넌트에 라우팅한다(confirm/context_menu처럼 전용 hit-test —
+        // 아래 generic handlePointer 게이트는 settings를 모르므로 여기서 먼저 처리·return해 클릭이 뒤로 안 샌다). 행은
+        // config 스키마에서 빌드해 주입(hit-test에 행 수·control rect 필요). 바깥 클릭=닫기·toggle=flip은 dispatchChromeAction.
+        if (self.chrome_host.settings.open) {
+            var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena_state.deinit();
+            const fields = self.buildSettingsFields(arena_state.allocator()) catch return;
+            const tk = self.buildChromeTokens();
+            const ev = chromePointerFromMouse(kind, x_px, y_px, button, mods);
+            const act = chrome.components.settings.handlePointer(ev, fields, self.buildChromeProps(), &tk, &self.chrome_host.settings);
+            self.dispatchChromeAction(switch (act) {
+                .close => .settings_close,
+                .toggle => .settings_toggle,
+                .selection_changed => .settings_selection_changed,
+                .consumed => .none,
+            });
+            self.metal_dirty = true;
             return;
         }
         // chrome 오버레이 모달(notice/find/palette)이 열려 있으면 포인터를 chrome에 주고 소비한다(CS-4-0 handlePointer
@@ -6427,7 +6527,7 @@ pub const AppSession = struct {
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             if (builtin.os.tag == .macos) {
-                if (self.chrome_host.confirm.open or self.chrome_host.notice.open or self.chrome_host.context_menu.open or self.chrome_host.find.open or self.chrome_host.palette.open) {
+                if (self.chrome_host.confirm.open or self.chrome_host.notice.open or self.chrome_host.context_menu.open or self.chrome_host.find.open or self.chrome_host.palette.open or self.chrome_host.settings.open) {
                     overlay_frame = self.buildChromeOverlayFrame() catch null;
                 }
             }
@@ -8124,6 +8224,10 @@ pub const AppSession = struct {
         }
         if (self.chrome_host.context_menu.open) {
             try self.chrome_host.collectContextMenuDraws(self.contextMenuItems(), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
+        }
+        if (self.chrome_host.settings.open) {
+            const fields = try self.buildSettingsFields(arena); // config 스키마 bool 행 주입(platform 소유)
+            try self.chrome_host.collectSettingsDraws(fields, props, &tokens, arena, &draws);
         }
         if (draws.items.len == 0) return error.NotOpen;
 

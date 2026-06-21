@@ -17,14 +17,12 @@ const appearance = @import("appearance.zig");
 const keybinding = @import("keybinding.zig");
 const action_mod = @import("action.zig");
 const terminal = @import("../terminal.zig");
+const schema = @import("schema.zig");
 
 pub const LoadError = std.mem.Allocator.Error;
 
-/// 비치명 진단 — 어느 줄에서 무엇이 무시됐는지. 메시지는 arena 소유.
-pub const Diagnostic = struct {
-    line: usize,
-    message: []const u8,
-};
+/// 비치명 진단 — 어느 줄에서 무엇이 무시됐는지. 메시지는 arena 소유. 공유 타입 단일 출처는 schema(loader→schema 단방향).
+pub const Diagnostic = schema.Diag;
 
 /// 파싱 결과. arena가 config의 문자열·키바인딩 slice·diagnostic 메시지를 소유한다 — config를 쓰는
 /// 동안(특히 resolve가 family를, KeyBindingResolver가 keybindings를 빌리는 동안) 살아 있어야 한다.
@@ -163,6 +161,9 @@ fn applyKey(
         config.shell.args = try list.toOwnedSlice(a);
         return;
     }
+    // 스키마-주도 필드(CS-1: font.size·cursor.shape·cursor.blink·theme.background). 매칭되면 파싱·적용하고 끝.
+    // 미매칭이면 false → 아래 옛 if-else로 폴백(CS-2에서 스칼라 전부 이주하면 이 폴백이 사라진다). 단일 출처: docs/config-schema.md.
+    if (try schema.tryParse(a, config, key, value, diags, line_no)) return;
     if (std.mem.eql(u8, key, "font.family")) {
         const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
         if (trimmed.len == 0) {
@@ -170,11 +171,7 @@ fn applyKey(
             return;
         }
         config.font.family = try a.dupe(u8, trimmed);
-    } else if (std.mem.eql(u8, key, "font.size")) {
-        config.font.size = parseFloatInRange(value, min_font_size, max_font_size) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "font.size가 1~512 범위 밖이거나 숫자가 아님 — 기본값 유지" });
-            return;
-        };
+        // font.size는 스키마-주도로 이주(CS-1) — 위 schema.tryParse가 처리. 옛 분기 제거.
     } else if (std.mem.eql(u8, key, "font.size-step")) {
         config.font.size_step = parseFloatInRange(value, min_font_step, max_font_step) orelse {
             try diags.append(a, .{ .line = line_no, .message = "font.size-step이 0.1~32 범위 밖이거나 숫자가 아님 — 기본값 유지" });
@@ -200,8 +197,7 @@ fn applyKey(
             return;
         };
         config.theme = theme.presetColors(preset);
-    } else if (std.mem.eql(u8, key, "theme.background")) {
-        config.theme.background = try dupValidColor(a, diags, line_no, key, value, config.theme.background);
+        // theme.background는 스키마-주도로 이주(CS-1) — 위 schema.tryParse가 처리. 옛 분기 제거.
     } else if (std.mem.eql(u8, key, "theme.foreground")) {
         config.theme.foreground = try dupValidColor(a, diags, line_no, key, value, config.theme.foreground);
     } else if (std.mem.eql(u8, key, "theme.cursor")) {
@@ -226,16 +222,7 @@ fn applyKey(
         // 기존(보통 null) 값을 유지한다(forgiving). 유효하면 dupe된 색으로 갱신.
         const validated = try dupValidColor(a, diags, line_no, key, value, "");
         if (validated.len != 0) config.theme.palette[idx] = validated;
-    } else if (std.mem.eql(u8, key, "cursor.shape")) {
-        config.cursor.shape = parseCursorShape(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "cursor.shape는 block|bar|underline — 기본값 유지" });
-            return;
-        };
-    } else if (std.mem.eql(u8, key, "cursor.blink")) {
-        config.cursor.blink = parseBool(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "cursor.blink는 true|false — 기본값 유지" });
-            return;
-        };
+        // cursor.shape·cursor.blink는 스키마-주도로 이주(CS-1) — 위 schema.tryParse가 처리. 옛 분기 제거.
     } else if (std.mem.eql(u8, key, "input.page-keys")) {
         config.input.page_keys = parsePageKeys(value) orelse {
             try diags.append(a, .{ .line = line_no, .message = "input.page-keys는 passthrough|scroll — 기본값 유지" });
@@ -647,12 +634,7 @@ fn dupValidColor(
     return try a.dupe(u8, value);
 }
 
-fn parseCursorShape(value: []const u8) ?theme.CursorShape {
-    if (std.mem.eql(u8, value, "block")) return .block;
-    if (std.mem.eql(u8, value, "bar")) return .bar;
-    if (std.mem.eql(u8, value, "underline")) return .underline;
-    return null;
-}
+// parseCursorShape는 cursor.shape가 스키마-주도로 이주(CS-1)해 schema의 enum 파싱이 대신한다 — 제거.
 
 fn parseThemePreset(value: []const u8) ?theme.ThemePreset {
     if (std.mem.eql(u8, value, "maru")) return .maru;
@@ -688,8 +670,8 @@ fn parseFloatInRange(value: []const u8, min: f32, max: f32) ?f32 {
     return if (n >= min and n <= max) n else null;
 }
 
-/// config 한 줄을 갱신할 키·값 쌍. value는 이미 직렬화된 토큰(`true`/`false` 등).
-pub const KeyValue = struct { key: []const u8, value: []const u8 };
+/// config 한 줄을 갱신할 키·값 쌍. value는 이미 직렬화된 토큰(`true`/`false` 등). 단일 출처는 schema.KeyValue.
+pub const KeyValue = schema.KeyValue;
 
 /// 원본 config 텍스트를 줄 단위로 순회해 `updates`의 키를 `key = value`로 **in-place 교체**한다(같은 키가 여러
 /// 번 나오면 **모든** 줄을 교체 — parse가 last-wins라 일부만 바꾸면 옛 값이 reload 시 이긴다). 주석·빈 줄·미파싱

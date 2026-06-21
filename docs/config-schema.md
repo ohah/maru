@@ -128,7 +128,7 @@ struct 필드로 안 떨어지는 키는 **명시 핸들러**로 둔다(지금 �
 | PR | 내용 | 비고 |
 |---|---|---|
 | **CS-0** | 이 설계 문서 | doc-first(현재 PR) |
-| **CS-1** | **프레임워크** — `Meta`/`Widget`/`Section` 타입, comptime `parseInto`/`serializeFrom`/드리프트 체크(`src/config/schema.zig`). 대표 4종(bool·범위 float·enum·색) 필드를 스키마로 이주해 parse+serialize+symmetry가 도는 걸 증명. 나머지는 기존 경로 유지(매처가 이주된 키만 처리, 미이주 키는 옛 if-else) | 코엑시스턴스는 **이 PR 한정** |
+| **CS-1** ✅ | **프레임워크** — `Meta`/`Widget`/`Section` 타입(`theme.zig`), comptime `tryParse`/`appendSerialized`/드리프트 체크(`src/config/schema.zig`). 대표 4종(`cursor.blink` bool·`font.size` 범위 float·`cursor.shape` enum·`theme.background` 색)을 스키마로 이주, 기존 round-trip·full-config 테스트가 동작 불변 증명 | ✅ 머지. 코엑시스턴스는 이 PR 한정. enum 토큰은 `_`↔`-` 규약으로 per-enum 테이블 불필요 |
 | **CS-2** | **스칼라 전 필드 이주** — loader의 거대한 if-else에서 스칼라 분기를 제거하고 제너릭 매처로 일원화. 특수 5종(§6)만 명시 핸들러로 남김. 기존 round-trip·full-config 테스트가 가드(동작 불변) | 큰 diff지만 기계적(삭제 위주) + 테스트 커버 |
 | **CS-3** | **문서 생성** — `configuration.md` 키 표를 메타에서 생성(마커 블록). 산문 절은 수동 유지 | doc-drift 제거 |
 | **CS-4+** | **GUI 제너릭 렌더러** — 위젯 N종 + section 네비. [settings-page.md] Phase G를 이 문서로 재정의(스칼라는 공짜, bespoke만 G에 남김) | G 단계 축소 |

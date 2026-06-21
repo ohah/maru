@@ -17,16 +17,11 @@
 const std = @import("std");
 const theme = @import("theme.zig");
 const loader = @import("loader.zig");
+const schema = @import("schema.zig");
 
 pub const KeyValue = loader.KeyValue;
 
-fn cursorShapeToken(s: theme.CursorShape) []const u8 {
-    return switch (s) {
-        .block => "block",
-        .bar => "bar",
-        .underline => "underline",
-    };
-}
+// cursorShapeToken은 cursor.shape가 스키마-주도로 이주(CS-1)해 schema의 enum 직렬화가 대신한다 — 제거.
 
 fn chromeThemeToken(t: theme.ChromeTheme) []const u8 {
     return switch (t) {
@@ -101,15 +96,17 @@ fn boolToken(b: bool) []const u8 {
 pub fn configKeyValues(arena: std.mem.Allocator, config: theme.Config) ![]const KeyValue {
     var list: std.ArrayList(KeyValue) = .empty;
 
-    // font.*
+    // 스키마-주도 필드(CS-1: font.size·cursor.shape·cursor.blink·theme.background)를 먼저 emit. 아래 수동 emit은
+    // 아직 미이주 스칼라만 담당한다(CS-2 후엔 이 수동 블록이 특수 5종 빼고 사라진다). 단일 출처: docs/config-schema.md.
+    try schema.appendSerialized(arena, config, &list);
+
+    // font.* (size는 위 스키마-주도)
     try list.append(arena, .{ .key = "font.family", .value = config.font.family });
-    try list.append(arena, .{ .key = "font.size", .value = try std.fmt.allocPrint(arena, "{d}", .{config.font.size}) });
     try list.append(arena, .{ .key = "font.size-step", .value = try std.fmt.allocPrint(arena, "{d}", .{config.font.size_step}) });
     try list.append(arena, .{ .key = "font.line-height", .value = try std.fmt.allocPrint(arena, "{d}", .{config.font.line_height}) });
     try list.append(arena, .{ .key = "font.letter-spacing", .value = try std.fmt.allocPrint(arena, "{d}", .{config.font.letter_spacing}) });
 
-    // theme.* (색 문자열 그대로; palette는 non-null 인덱스만)
-    try list.append(arena, .{ .key = "theme.background", .value = config.theme.background });
+    // theme.* (background는 위 스키마-주도; 색 문자열 그대로; palette는 non-null 인덱스만)
     try list.append(arena, .{ .key = "theme.foreground", .value = config.theme.foreground });
     try list.append(arena, .{ .key = "theme.cursor", .value = config.theme.cursor });
     try list.append(arena, .{ .key = "theme.selection", .value = config.theme.selection });
@@ -121,9 +118,7 @@ pub fn configKeyValues(arena: std.mem.Allocator, config: theme.Config) ![]const 
         });
     }
 
-    // cursor.*
-    try list.append(arena, .{ .key = "cursor.shape", .value = cursorShapeToken(config.cursor.shape) });
-    try list.append(arena, .{ .key = "cursor.blink", .value = boolToken(config.cursor.blink) });
+    // cursor.* (shape·blink는 위 스키마-주도)
 
     // chrome / text
     try list.append(arena, .{ .key = "chrome.theme", .value = chromeThemeToken(config.chrome_theme) });

@@ -41,6 +41,7 @@ pub const HostAction = union(enum) {
     settings_adjust_left, // 세팅 행 ← — platform이 rows[selected](slider) 한 스텝 감소(toggle이면 무시)
     settings_adjust_right, // 세팅 행 → — platform이 한 스텝 증가
     settings_selection_changed, // 세팅 행 ↑↓/행 클릭 — platform이 재렌더(부수효과 없음)
+    settings_section_changed, // 세팅 좌측 네비 클릭 — platform이 새 섹션 필드 수 주입(refreshSettingsFieldCount) + 재렌더
 };
 
 pub const ChromeHost = struct {
@@ -120,6 +121,7 @@ pub const ChromeHost = struct {
     /// 동형). 닫힘이면 무동작(빈 out).
     pub fn collectSettingsDraws(
         self: *ChromeHost,
+        sections: []const []const u8,
         fields: []const settings.FieldRow,
         p: props.ChromeProps,
         tk: *const tokens.Tokens,
@@ -127,7 +129,7 @@ pub const ChromeHost = struct {
         out: *std.ArrayList(draw.ChromeDraw),
     ) !void {
         var ops: std.ArrayList(draw.Op) = .empty;
-        try settings.view(&self.settings, fields, p, tk, arena, &ops);
+        try settings.view(&self.settings, sections, fields, p, tk, arena, &ops);
         if (ops.items.len > 0) try out.append(arena, .{ .layer = settings.layer, .ops = ops.items });
     }
 
@@ -180,6 +182,7 @@ pub const ChromeHost = struct {
                         .adjust_right => .settings_adjust_right,
                         .slider_set => .none, // 키 경로엔 안 옴(슬라이더 ratio 설정은 포인터 드래그 전용) — exhaustiveness
                         .selection_changed => .settings_selection_changed,
+                        .section_changed => .none, // 키 경로엔 안 옴(섹션 전환은 좌측 네비 클릭 전용) — exhaustiveness
                         .consumed => .none,
                     };
                 }

@@ -172,7 +172,7 @@ fn serializeValue(arena: std.mem.Allocator, val: anytype) ![]const u8 {
 
 /// 한 bool 스키마 필드의 GUI 행 기술자 — key(전체 키, 정적 리터럴)·doc(라벨, 정적)·현재 value. 문자열은 전부
 /// comptime 리터럴(schema decl·키 유도)이라 별도 수명 관리가 필요 없다(프로그램 수명).
-pub const BoolField = struct { key: []const u8, doc: []const u8, value: bool };
+pub const BoolField = struct { key: []const u8, doc: []const u8, value: bool, section: ?theme.Section = null };
 
 /// 스키마'd **bool 필드**를 전부 GUI 행으로 emit한다(appendSerialized의 bool 한정 변형 — 세팅 폼 행 빌드).
 /// 순서는 parse/serialize와 같은 Config 필드 순회 순. list는 호출자(arena) 소유.
@@ -182,7 +182,7 @@ pub fn appendBoolFields(arena: std.mem.Allocator, config: theme.Config, list: *s
             if (@TypeOf(@field(config, sf.name)) == bool) {
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
                 const full_key = comptime topKey(sf.name, meta);
-                try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name) });
+                try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name), .section = meta.section });
             }
         }
     }
@@ -194,7 +194,7 @@ pub fn appendBoolFields(arena: std.mem.Allocator, config: theme.Config, list: *s
                 if (@TypeOf(@field(@field(config, cf.name), sf.name)) == bool) {
                     const meta: theme.Meta = @field(sch, sf.name);
                     const full_key = comptime keyOf(cf.name, sf.name, meta);
-                    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name) });
+                    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name), .section = meta.section });
                 }
             }
         }
@@ -237,7 +237,7 @@ pub fn setBool(config: *theme.Config, key: []const u8, value: bool) bool {
 
 /// 한 숫자(f32/u32 + range) 스키마 필드의 GUI 슬라이더 행 기술자. value/min/max는 f64로 통일(슬라이더 ratio
 /// 계산 공용), is_int면 u32(정수 스텝·표시). key/doc는 comptime 리터럴.
-pub const NumberField = struct { key: []const u8, doc: []const u8, value: f64, min: f64, max: f64, is_int: bool };
+pub const NumberField = struct { key: []const u8, doc: []const u8, value: f64, min: f64, max: f64, is_int: bool, section: ?theme.Section = null };
 
 /// 스키마'd **숫자 필드(f32/u32, range 필수)**를 전부 슬라이더 행으로 emit한다(appendBoolFields의 숫자 짝). range
 /// 메타가 슬라이더 min/max를 준다(파서 검증과 같은 출처). 순서는 parse/serialize와 같은 Config 필드 순회 순.
@@ -266,7 +266,7 @@ fn appendNumberField(arena: std.mem.Allocator, config: theme.Config, comptime C:
     const meta: theme.Meta = @field(sch, sf.name);
     const r = comptime (meta.range orelse @compileError(full_key ++ ": 숫자 필드엔 range 필수"));
     const v: f64 = if (FieldT == u32) @floatFromInt(@field(config, sf.name)) else @field(config, sf.name);
-    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32 });
+    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32, .section = meta.section });
 }
 
 // sub-struct 숫자 필드 한 개를 append(있으면).
@@ -277,7 +277,7 @@ fn appendNumberFieldSub(arena: std.mem.Allocator, config: theme.Config, comptime
     const meta: theme.Meta = @field(sch, sf.name);
     const r = comptime (meta.range orelse @compileError(full_key ++ ": 숫자 필드엔 range 필수"));
     const v: f64 = if (FieldT == u32) @floatFromInt(@field(@field(config, cf.name), sf.name)) else @field(@field(config, cf.name), sf.name);
-    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32 });
+    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32, .section = meta.section });
 }
 
 /// 키로 숫자(f32/u32) 스키마 필드를 설정한다(세팅 슬라이더 → config). value는 range로 클램프, u32면 반올림 정수화.
@@ -313,7 +313,7 @@ fn setNumberField(ptr: anytype, comptime meta: theme.Meta, comptime full_key: []
 
 /// 한 enum 스키마 필드의 GUI dropdown 행 기술자. current는 현재 변형의 표시 토큰(dashed — config 파일 규약).
 /// CS-4-1c는 사이클러(현재값 표시 + 클릭/←→로 변형 순환)라 옵션 목록은 안 싣는다(팝업 목록은 후속).
-pub const EnumField = struct { key: []const u8, doc: []const u8, current: []const u8 };
+pub const EnumField = struct { key: []const u8, doc: []const u8, current: []const u8, section: ?theme.Section = null };
 
 /// 스키마'd **enum 필드**를 전부 dropdown 행으로 emit한다(appendBoolFields의 enum 짝). current=현재 변형 dashed 토큰.
 pub fn appendEnumFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(EnumField)) !void {
@@ -338,7 +338,7 @@ fn appendEnumField(arena: std.mem.Allocator, value: anytype, comptime meta: them
     if (@typeInfo(T) != .@"enum") return;
     // current는 정적 @tagName(소유/해제 불요 — 핸들러가 self.allocator로 호출해도 누수 없음). 표시 토큰의 '_'→'-'
     // 변환(config 규약)은 표시 시점(dropdown.view, frame arena)에 한다 — 여기서 dupe하면 핸들러 경로가 누수된다.
-    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .current = @tagName(value) });
+    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .current = @tagName(value), .section = meta.section });
 }
 
 /// 키로 enum 스키마 필드를 한 변형 순환한다(dropdown 사이클러 — dir=+1 다음/-1 이전, wrap). 매칭하는 enum 필드가

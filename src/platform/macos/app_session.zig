@@ -3312,7 +3312,13 @@ pub const AppSession = struct {
         if (self.debug_settings_opened) return;
         if (!self.surface_initialized) return;
         self.debug_settings_opened = true;
-        if (std.c.getenv("MARU_OPEN_SETTINGS") != null) self.toggleSettings();
+        if (std.c.getenv("MARU_OPEN_SETTINGS") == null) return;
+        self.toggleSettings();
+        // MARU_OPEN_SETTINGS_SECTION=N — 특정 섹션을 열어 캡처(스크린샷 self-verify용 debug-gate). 미설정=섹션 0.
+        if (std.c.getenv("MARU_OPEN_SETTINGS_SECTION")) |sv| {
+            self.chrome_host.settings.section = std.fmt.parseInt(usize, std.mem.span(sv), 10) catch 0;
+            self.refreshSettingsFieldCount();
+        }
     }
 
     /// 세팅 화면(⌘,)을 토글한다 — 열려 있으면 닫고, 아니면 다른 오버레이를 닫고 연다(배타적, palette/find와 같은 규율).
@@ -3326,46 +3332,127 @@ pub const AppSession = struct {
             self.chrome_host.palette.hide();
             self.find_matches.clearRetainingCapacity();
             self.chrome_host.settings.show();
-            var bl: std.ArrayList(config_mod.schema.BoolField) = .empty;
-            defer bl.deinit(self.allocator);
-            var nl: std.ArrayList(config_mod.schema.NumberField) = .empty;
-            defer nl.deinit(self.allocator);
-            var el: std.ArrayList(config_mod.schema.EnumField) = .empty;
-            defer el.deinit(self.allocator);
-            config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &bl) catch {};
-            config_mod.schema.appendNumberFields(self.allocator, self.loaded_config.config, &nl) catch {};
-            config_mod.schema.appendEnumFields(self.allocator, self.loaded_config.config, &el) catch {};
-            self.chrome_host.settings.setFieldCount(bl.items.len + nl.items.len + el.items.len);
+            self.chrome_host.settings.section = 0; // 항상 첫 섹션부터(네비 — config-gui §4)
+            self.refreshSettingsFieldCount();
         }
     }
 
-    /// config 스키마의 bool 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2). 라벨=meta.doc(없으면 키),
-    /// 값=현재 raw config(self.loaded_config.config). buildPaletteRows의 settings 짝 — arena 소유. macOS 전용.
-    fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.settings.FieldRow {
-        const Row = chrome.components.settings.FieldRow;
+    /// 현재 섹션의 필드 수를 컴포넌트에 주입한다(setFieldCount — ↑↓ wrap·Space/Enter 가드). 섹션 전환/열기 때 호출.
+    /// scratch arena로 빌드(핸들러와 같은 currentSectionFields 단일 출처).
+    fn refreshSettingsFieldCount(self: *AppSession) void {
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const cf = self.currentSectionFields(scratch.allocator()) catch return;
+        self.chrome_host.settings.setFieldCount(cf.total());
+    }
+
+    /// 좌측 네비 한 항목 — 섹션 enum(미지정=null) + 표시 라벨.
+    const SettingsSectionEntry = struct { section: ?config_mod.Section, label: []const u8 };
+
+    /// 현재 선택 섹션의 필드(bool→num→enum 순). buildSettingsFields·핸들러 공유 단일 출처라 selected 인덱싱이 일치.
+    const SettingsSectionFields = struct {
+        bools: []config_mod.schema.BoolField,
+        nums: []config_mod.schema.NumberField,
+        enums: []config_mod.schema.EnumField,
+        fn total(self: SettingsSectionFields) usize {
+            return self.bools.len + self.nums.len + self.enums.len;
+        }
+    };
+
+    /// 섹션 표시 라벨(config_mod.Section → 한국어). null=스키마 섹션 미지정 그룹("기타").
+    fn settingsSectionLabel(sec: ?config_mod.Section) []const u8 {
+        const s = sec orelse return "기타";
+        return switch (s) {
+            .font => "폰트",
+            .theme => "테마",
+            .cursor => "커서",
+            .window => "창",
+            .input => "입력",
+            .terminal => "터미널",
+            .workspace => "워크스페이스",
+            .quick_terminal => "퀵 터미널",
+            .sidebar => "사이드바",
+        };
+    }
+
+    fn settingsSectionHasField(bools: []const config_mod.schema.BoolField, nums: []const config_mod.schema.NumberField, enums: []const config_mod.schema.EnumField, sec: ?config_mod.Section) bool {
+        for (bools) |b| if (b.section == sec) return true;
+        for (nums) |n| if (n.section == sec) return true;
+        for (enums) |e| if (e.section == sec) return true;
+        return false;
+    }
+
+    /// 필드가 있는 섹션만 선언 순으로 모은다(좌측 네비 — config-gui §4). 미지정 필드가 있으면 끝에 "기타". arena 소유.
+    fn buildSectionList(self: *AppSession, arena: std.mem.Allocator) ![]SettingsSectionEntry {
         var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
         try config_mod.schema.appendBoolFields(arena, self.loaded_config.config, &bools);
         var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
         try config_mod.schema.appendNumberFields(arena, self.loaded_config.config, &nums);
         var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
         try config_mod.schema.appendEnumFields(arena, self.loaded_config.config, &enums);
+        var list: std.ArrayList(SettingsSectionEntry) = .empty;
+        inline for (@typeInfo(config_mod.Section).@"enum".fields) |ef| {
+            const sec: config_mod.Section = @enumFromInt(ef.value);
+            if (settingsSectionHasField(bools.items, nums.items, enums.items, sec))
+                try list.append(arena, .{ .section = sec, .label = settingsSectionLabel(sec) });
+        }
+        if (settingsSectionHasField(bools.items, nums.items, enums.items, null))
+            try list.append(arena, .{ .section = null, .label = settingsSectionLabel(null) });
+        return list.items;
+    }
+
+    /// 현재 선택 섹션(settings.section)으로 필터한 필드(bool→num→enum). arena 소유. 핸들러가 selected를 이 순서로 매핑.
+    fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !SettingsSectionFields {
+        const sections = try self.buildSectionList(arena);
+        const sel_sec: ?config_mod.Section = if (sections.len > 0)
+            sections[@min(self.chrome_host.settings.section, sections.len - 1)].section
+        else
+            null;
+        var bools_all: std.ArrayList(config_mod.schema.BoolField) = .empty;
+        try config_mod.schema.appendBoolFields(arena, self.loaded_config.config, &bools_all);
+        var nums_all: std.ArrayList(config_mod.schema.NumberField) = .empty;
+        try config_mod.schema.appendNumberFields(arena, self.loaded_config.config, &nums_all);
+        var enums_all: std.ArrayList(config_mod.schema.EnumField) = .empty;
+        try config_mod.schema.appendEnumFields(arena, self.loaded_config.config, &enums_all);
+        var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
+        for (bools_all.items) |b| if (b.section == sel_sec) try bools.append(arena, b);
+        var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
+        for (nums_all.items) |n| if (n.section == sel_sec) try nums.append(arena, n);
+        var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
+        for (enums_all.items) |e| if (e.section == sel_sec) try enums.append(arena, e);
+        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items };
+    }
+
+    /// config 스키마의 **현재 섹션** 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2·§4). 라벨=meta.doc
+    /// (없으면 키), 값=현재 raw config. buildPaletteRows의 settings 짝 — arena 소유. macOS 전용.
+    fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.settings.FieldRow {
+        const Row = chrome.components.settings.FieldRow;
+        const cf = try self.currentSectionFields(arena);
         // 결합 순서: bool(toggle) → number(slider) → enum(dropdown). selected/handler 인덱싱이 이 순서를 공유한다
-        // (toggleSelectedSetting/adjustSelectedSetting이 같은 bool/num/enum 빌드로 selected를 구간 매핑).
-        const rows = try arena.alloc(Row, bools.items.len + nums.items.len + enums.items.len);
+        // (toggleSelectedSetting/adjustSelectedSetting이 같은 currentSectionFields 빌드로 selected를 구간 매핑).
+        const rows = try arena.alloc(Row, cf.total());
         var i: usize = 0;
-        for (bools.items) |b| {
+        for (cf.bools) |b| {
             rows[i] = .{ .label = if (b.doc.len > 0) b.doc else b.key, .kind = .{ .toggle = b.value } };
             i += 1;
         }
-        for (nums.items) |n| {
+        for (cf.nums) |n| {
             rows[i] = .{ .label = if (n.doc.len > 0) n.doc else n.key, .kind = .{ .slider = .{ .value = n.value, .min = n.min, .max = n.max } } };
             i += 1;
         }
-        for (enums.items) |e| {
+        for (cf.enums) |e| {
             rows[i] = .{ .label = if (e.doc.len > 0) e.doc else e.key, .kind = .{ .dropdown = e.current } };
             i += 1;
         }
         return rows;
+    }
+
+    /// 좌측 네비 라벨 목록(현재 섹션 강조는 컴포넌트가 settings.section으로). arena 소유.
+    fn buildSettingsSectionLabels(self: *AppSession, arena: std.mem.Allocator) ![]const []const u8 {
+        const sections = try self.buildSectionList(arena);
+        const labels = try arena.alloc([]const u8, sections.len);
+        for (sections, 0..) |s, i| labels[i] = s.label;
+        return labels;
     }
 
     /// 선택된 세팅 행의 bool config 값을 뒤집고 라이브 적용한다(즉시 반영). raw config(loaded_config.config)를 키로
@@ -3373,31 +3460,25 @@ pub const AppSession = struct {
     /// (updateConfigForKeys + dirty/Swift atomic write) — 지금은 세션 내 라이브 적용까지. 행 목록은 schema 순서라
     /// 컴포넌트 selected 인덱스와 일치한다(buildSettingsFields와 같은 appendBoolFields 순회).
     fn toggleSelectedSetting(self: *AppSession) void {
-        var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
-        defer bools.deinit(self.allocator);
-        var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
-        defer nums.deinit(self.allocator);
-        var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
-        defer enums.deinit(self.allocator);
-        config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &bools) catch return;
-        config_mod.schema.appendNumberFields(self.allocator, self.loaded_config.config, &nums) catch return;
-        config_mod.schema.appendEnumFields(self.allocator, self.loaded_config.config, &enums) catch return;
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const cf = self.currentSectionFields(scratch.allocator()) catch return;
         const sel = self.chrome_host.settings.selected;
-        if (sel < bools.items.len) {
+        if (sel < cf.bools.len) {
             // bool 행 — flip.
-            const f = bools.items[sel];
+            const f = cf.bools[sel];
             if (config_mod.schema.setBool(&self.loaded_config.config, f.key, !f.value)) {
                 self.reapplyLoadedConfig();
                 self.markConfigKeyDirty(f.key);
             }
             return;
         }
-        const after_nums = bools.items.len + nums.items.len;
+        const after_nums = cf.bools.len + cf.nums.len;
         if (sel >= after_nums) {
             // enum(dropdown) 행 — 활성(클릭/Enter/Space) = 다음 변형 순환.
             const ei = sel - after_nums;
-            if (ei < enums.items.len) {
-                const e = enums.items[ei];
+            if (ei < cf.enums.len) {
+                const e = cf.enums[ei];
                 if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, 1)) {
                     self.reapplyLoadedConfig();
                     self.markConfigKeyDirty(e.key);
@@ -3410,17 +3491,14 @@ pub const AppSession = struct {
     /// 슬라이더 드래그/클릭(settings.pending_ratio)을 선택 행의 number config 값으로 매핑해 적용한다(라이브 + 영속
     /// 예약). 결합 순서(bool 먼저)라 selected<bool_count면 slider 아님 → 무동작. number 리스트는 selected-bool_count.
     fn applySelectedSlider(self: *AppSession) void {
-        var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
-        defer bools.deinit(self.allocator);
-        var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
-        defer nums.deinit(self.allocator);
-        config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &bools) catch return;
-        config_mod.schema.appendNumberFields(self.allocator, self.loaded_config.config, &nums) catch return;
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const cf = self.currentSectionFields(scratch.allocator()) catch return;
         const sel = self.chrome_host.settings.selected;
-        if (sel < bools.items.len) return; // bool 행 — slider 아님
-        const ni = sel - bools.items.len;
-        if (ni >= nums.items.len) return;
-        const n = nums.items[ni];
+        if (sel < cf.bools.len) return; // bool 행 — slider 아님
+        const ni = sel - cf.bools.len;
+        if (ni >= cf.nums.len) return;
+        const n = cf.nums[ni];
         const value = n.min + @as(f64, self.chrome_host.settings.pending_ratio) * (n.max - n.min);
         if (config_mod.schema.setNumber(&self.loaded_config.config, n.key, value)) {
             self.reapplyLoadedConfig();
@@ -3430,21 +3508,15 @@ pub const AppSession = struct {
 
     /// 선택 행이 slider면 한 스텝(dir=-1/+1) 조절한다(←/→ 키). 스텝=범위의 4%(정수는 최소 1). bool 행이면 무동작.
     fn adjustSelectedSetting(self: *AppSession, dir: i8) void {
-        var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
-        defer bools.deinit(self.allocator);
-        var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
-        defer nums.deinit(self.allocator);
-        config_mod.schema.appendBoolFields(self.allocator, self.loaded_config.config, &bools) catch return;
-        config_mod.schema.appendNumberFields(self.allocator, self.loaded_config.config, &nums) catch return;
-        var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
-        defer enums.deinit(self.allocator);
-        config_mod.schema.appendEnumFields(self.allocator, self.loaded_config.config, &enums) catch return;
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const cf = self.currentSectionFields(scratch.allocator()) catch return;
         const sel = self.chrome_host.settings.selected;
-        if (sel < bools.items.len) return; // bool 행 — ←/→ 무동작
-        const after_nums = bools.items.len + nums.items.len;
+        if (sel < cf.bools.len) return; // bool 행 — ←/→ 무동작
+        const after_nums = cf.bools.len + cf.nums.len;
         if (sel < after_nums) {
             // slider 행 — 한 스텝 조절.
-            const n = nums.items[sel - bools.items.len];
+            const n = cf.nums[sel - cf.bools.len];
             const span = n.max - n.min;
             const step = if (n.is_int) @max(@as(f64, 1), span * 0.04) else span * 0.04;
             const value = std.math.clamp(n.value + @as(f64, @floatFromInt(dir)) * step, n.min, n.max);
@@ -3456,8 +3528,8 @@ pub const AppSession = struct {
         }
         // enum(dropdown) 행 — ←/→ = 이전/다음 변형 순환.
         const ei = sel - after_nums;
-        if (ei < enums.items.len) {
-            const e = enums.items[ei];
+        if (ei < cf.enums.len) {
+            const e = cf.enums[ei];
             if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, dir)) {
                 self.reapplyLoadedConfig();
                 self.markConfigKeyDirty(e.key);
@@ -3947,6 +4019,11 @@ pub const AppSession = struct {
             .settings_adjust_left => self.adjustSelectedSetting(-1), // ← 한 스텝 감소(slider)
             .settings_adjust_right => self.adjustSelectedSetting(1), // → 한 스텝 증가(slider)
             .settings_selection_changed => self.metal_dirty = true, // ↑↓/행 클릭 — 재렌더
+            .settings_section_changed => {
+                // 좌측 네비 클릭 — 컴포넌트가 section·selected 갱신, platform은 새 섹션 필드 수 주입 + 재렌더.
+                self.refreshSettingsFieldCount();
+                self.metal_dirty = true;
+            },
         }
     }
 
@@ -4659,14 +4736,16 @@ pub const AppSession = struct {
             var arena_state = std.heap.ArenaAllocator.init(self.allocator);
             defer arena_state.deinit();
             const fields = self.buildSettingsFields(arena_state.allocator()) catch return;
+            const labels = self.buildSettingsSectionLabels(arena_state.allocator()) catch return;
             const tk = self.buildChromeTokens();
             const ev = chromePointerFromMouse(kind, x_px, y_px, button, mods);
-            const act = chrome.components.settings.handlePointer(ev, fields, self.buildChromeProps(), &tk, &self.chrome_host.settings);
+            const act = chrome.components.settings.handlePointer(ev, labels, fields, self.buildChromeProps(), &tk, &self.chrome_host.settings);
             self.dispatchChromeAction(switch (act) {
                 .close => .settings_close,
                 .toggle => .settings_toggle,
                 .slider_set => .settings_slider_set,
                 .selection_changed => .settings_selection_changed,
+                .section_changed => .settings_section_changed,
                 .adjust_left, .adjust_right => .none, // 포인터 경로엔 안 옴(키 전용) — exhaustiveness
                 .consumed => .none,
             });
@@ -8532,8 +8611,9 @@ pub const AppSession = struct {
             try self.chrome_host.collectContextMenuDraws(self.contextMenuItems(), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
         }
         if (self.chrome_host.settings.open) {
-            const fields = try self.buildSettingsFields(arena); // config 스키마 bool 행 주입(platform 소유)
-            try self.chrome_host.collectSettingsDraws(fields, props, &tokens, arena, &draws);
+            const labels = try self.buildSettingsSectionLabels(arena); // 좌측 네비 라벨(platform 소유)
+            const fields = try self.buildSettingsFields(arena); // 현재 섹션의 필드 행 주입(platform 소유)
+            try self.chrome_host.collectSettingsDraws(labels, fields, props, &tokens, arena, &draws);
         }
         if (draws.items.len == 0) return error.NotOpen;
 
@@ -13864,21 +13944,31 @@ test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist �
     try std.testing.expect(session.chrome_host.settings.count > 0);
     try std.testing.expect(!session.takeConfigDirty()); // 토글 전 — dirty 없음
 
-    // 첫 bool 필드의 키·현재값(buildSettingsFields와 같은 순서 — appendBoolFields).
-    var before: std.ArrayList(config_mod.schema.BoolField) = .empty;
-    defer before.deinit(allocator);
-    try config_mod.schema.appendBoolFields(allocator, session.loaded_config.config, &before);
-    const first_key = before.items[0].key;
-    const first_val = before.items[0].value;
+    // Section 네비(CS-4): 폼은 선택 섹션 필드만(bool→num→enum)이라 bool이 있는 섹션을 찾아 그 섹션·첫 행(bool)으로 간다.
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var found_section = false;
+    for (sections, 0..) |_, si| {
+        session.chrome_host.settings.section = si;
+        const cf = try session.currentSectionFields(scratch.allocator());
+        if (cf.bools.len > 0) {
+            found_section = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_section); // bool 필드가 있는 섹션이 존재
+    session.refreshSettingsFieldCount();
+    const cf0 = try session.currentSectionFields(scratch.allocator());
+    const first_key = cf0.bools[0].key; // 섹션 내 bool은 맨 앞(buildSettingsFields 순서)
+    const first_val = cf0.bools[0].value;
 
     session.chrome_host.settings.selected = 0;
     session.toggleSelectedSetting();
 
-    // (1) 메모리 config가 flip됐다 — 같은 키를 다시 열거해 값이 뒤집혔는지 본다.
-    var after: std.ArrayList(config_mod.schema.BoolField) = .empty;
-    defer after.deinit(allocator);
-    try config_mod.schema.appendBoolFields(allocator, session.loaded_config.config, &after);
-    try std.testing.expectEqual(!first_val, after.items[0].value);
+    // (1) 메모리 config가 flip됐다 — 같은 섹션을 다시 열거해 첫 bool 값이 뒤집혔는지 본다.
+    const cf1 = try session.currentSectionFields(scratch.allocator());
+    try std.testing.expectEqual(!first_val, cf1.bools[0].value);
 
     // (2) persist 예약 — 그 키가 config_dirty_keys에 들어갔다(Swift가 drain해 파일에 atomic write).
     try std.testing.expect(session.takeConfigDirty());

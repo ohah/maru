@@ -7,11 +7,16 @@
 #include <stddef.h>
 #include "app_host_abi.h"
 
-/* 제품 Metal terminal renderer. visible Metal smoke와 달리 readback/screenshot/sample 같은
-   검증 계측이 없는 lean 런타임 경로다(smoke 저자가 주석에서 예고한 "제품 renderer"). cell/
-   upload 입력은 app session의 metal-frame ABI(MaruAppHostMetalCell/RasterUpload)를 그대로
-   받아, Swift Metal view가 maru_macos_app_session_metal_frame 결과를 변환 없이 넘긴다.
-   GPU 셰이더는 maru_metal_shader.h로 smoke와 공유한다. */
+/* 제품 Metal terminal renderer. 평소엔 visible Metal smoke와 달리 readback/sample 같은 검증
+   계측이 없는 lean 런타임 경로다(smoke 저자가 주석에서 예고한 "제품 renderer"). cell/upload
+   입력은 app session의 metal-frame ABI(MaruAppHostMetalCell/RasterUpload)를 그대로 받아,
+   Swift Metal view가 maru_macos_app_session_metal_frame 결과를 변환 없이 넘긴다. GPU 셰이더는
+   maru_metal_shader.h로 smoke와 공유한다.
+
+   예외로 MARU_SCREENSHOT=<path> env가 설정됐을 때만 draw가 한 frame을 오프스크린 텍스처에
+   그려 BGRA readback 후 PPM(maru_ppm_writer.h)으로 쓰고 프로세스를 종료한다(시각 회귀를 사람이
+   눈으로 확인하는 하니스 — 그동안 smoke에만 있던 screenshot artifact를 제품 renderer로 옮긴 것).
+   env가 없으면 이 경로는 전혀 타지 않으므로 lean 런타임은 그대로다. */
 typedef struct MaruMetalRenderer MaruMetalRenderer;
 
 /* device + drawable pixel format으로 pipeline과 command queue를 만든다. 실패 시 NULL. */

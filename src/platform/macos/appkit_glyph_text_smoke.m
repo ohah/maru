@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#import "maru_ppm_writer.h"
 
 typedef struct {
     int32_t status;
@@ -426,50 +427,6 @@ static char *maru_copy_path(const char *path, size_t path_len) {
     memcpy(copy, path, path_len);
     copy[path_len] = '\0';
     return copy;
-}
-
-static BOOL maru_write_ppm_from_bgra8_buffer(
-    const char *path,
-    const uint8_t *bgra_pixels,
-    size_t width,
-    size_t height,
-    size_t bytes_per_row
-) {
-    if (path == NULL || bgra_pixels == NULL || width == 0 || height == 0) {
-        return NO;
-    }
-
-    FILE *file = fopen(path, "wb");
-    if (file == NULL) {
-        return NO;
-    }
-
-    // PPM(P6)은 압축도 메타데이터도 없지만, 외부 이미지 라이브러리 없이도 사람이
-    // Preview/이미지 도구로 열어볼 수 있다. 이 artifact는 gate를 통과한(검증된) glyph
-    // 프레임을 그대로 남겨, summary 숫자뿐 아니라 실제 그려진 픽셀을 사람이 눈으로
-    // 확인하게 한다. 목적은 픽셀 압축 효율이 아니라 그 시각 확인이다.
-    if (fprintf(file, "P6\n%zu %zu\n255\n", width, height) < 0) {
-        fclose(file);
-        return NO;
-    }
-
-    BOOL ok = YES;
-    for (size_t y = 0; y < height && ok; y++) {
-        const uint8_t *row = bgra_pixels + y * bytes_per_row;
-        for (size_t x = 0; x < width; x++) {
-            const uint8_t *pixel = row + x * 4;
-            const uint8_t rgb[3] = { pixel[2], pixel[1], pixel[0] };
-            if (fwrite(rgb, sizeof(rgb), 1, file) != 1) {
-                ok = NO;
-                break;
-            }
-        }
-    }
-
-    if (fclose(file) != 0) {
-        ok = NO;
-    }
-    return ok;
 }
 
 static MaruGlyphTextSourceSample *maru_build_source_samples(

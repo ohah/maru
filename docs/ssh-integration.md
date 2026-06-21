@@ -85,7 +85,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   Drop["로컬 Maru: 이미지 드롭"]
-  Up["sidechannel: ssh -S ctl host 로<br/>base64 디코드 파이프"]
+  Up["sidechannel: ssh -S ctl host 로<br/>바이트 stdin 파이프 (posix fork+pipe)"]
   Remote["원격 임시파일<br/>(~/.cache/maru/dropped/IMG.png)"]
   Paste["메인 PTY: 원격 경로 텍스트만 paste"]
   App["원격 포그라운드 앱이 경로를 읽음"]
@@ -107,9 +107,10 @@ flowchart TD
    - 변경: 캐시 hit 경로에서도 `-o ControlMaster=auto -o ControlPath=<경로>`로 master를 유지하고, 경로는 **목적지 해시 기반 결정론적 경로**로 만들어 Maru가 계산으로 안다(§6 결정 — `maru ssh`와 Maru가 같은 dest 해시로 동일 경로 도출).
 2. **로컬 Maru가 "이 세션이 maru ssh 원격 세션"임을 안다. ✅ 2단계 구현**
    - `maru ssh`가 `OSC 5379 ; ssh ; <dest>`로 목적지를 통지하고(`wrapper_script`의 `notify`, `$TMUX`면 DCS passthrough), Maru가 `dispatchOscMaru`로 받아 `ssh_remote_dest`에 저장한다(`sshRemoteDest()` getter). dest로 `controlSocketPath`를 계산하므로 control socket 경로를 따로 알릴 필요가 없다. control socket이 살아있는 maru exec 경로(캐시 hit·부트스트랩 성공)에서만 통지한다.
-3. **드롭 핸들러가 분기한다. ✅ 3단계 구현 (1차: 드롭만)**
-   - Swift `handleDrop`은 fileURL 드롭이면 경로(NUL 구분)를 ABI `maru_macos_app_session_drop_files`(v68)로 넘긴다(웹 URL·텍스트는 기존 paste_text).
-   - Zig `handleDroppedFiles`가 분기한다: 로컬 세션이면 경로를 셸 이스케이프해 paste, maru ssh 원격이면 각 파일을 메인 스레드에서 읽어(16MB 상한) **백그라운드 스레드**(`uploadWorker`→`ssh_upload.uploadBytes`)로 control socket에 업로드하고, 완료 시 메인 tick(`drainUploadResults`)이 원격 절대경로를 paste한다. 한 파일도 못 올리면 로컬 경로 paste로 폴백(graceful). 원격 수신 셸 구절은 `cli/ssh.zig` `uploadShellCommand`(mkdir + cat(stdin→파일) + 절대경로 stdout echo).
+3. **드롭/paste 핸들러가 분기한다. ✅ 3·4단계 구현**
+   - **드롭(3단계)**: Swift `handleDrop`이 fileURL 드롭이면 경로(NUL 구분)를 ABI `maru_macos_app_session_drop_files`(v68)로 넘긴다(웹 URL·텍스트는 기존 paste_text). Zig `handleDroppedFiles`가 각 파일을 메인 스레드에서 읽는다(16MB 상한).
+   - **paste(4단계)**: Swift `pastePasteboardText`(Cmd+V)가 클립보드 이미지(png/tiff)면 바이트를 ABI `maru_macos_app_session_drop_image`(v69)로 넘긴다. Zig `handleDroppedImage`가 `pasted-N.png` 이름으로 같은 업로드 경로를 탄다(원격이면 처리=true, 로컬이면 false→Swift가 기존 paste).
+   - **공통 업로드**: 로컬 세션이면 경로 셸 이스케이프 paste(드롭)/불개입(paste), maru ssh 원격이면 **백그라운드 스레드**(`startUploadBytes`→`uploadWorker`→`ssh_upload.uploadBytes`)가 control socket에 업로드하고 완료 시 메인 tick(`drainUploadResults`)이 원격 절대경로를 paste한다(드롭은 한 파일도 못 올리면 로컬 경로 폴백). 실행은 **posix fork+pipe**로 ssh 자식 프로세스(0.16 `std.process.Child`가 io 기반이라 백그라운드 스레드에 부적합 — `pty/macos.zig` 패턴). 원격 수신 셸 구절은 `cli/ssh.zig` `uploadShellCommand`(mkdir + cat(stdin→파일) + 절대경로 stdout echo).
 
 ### 4.2 원격 의존성
 
@@ -118,13 +119,14 @@ flowchart TD
 
 ### 4.3 경계 (어느 계층이 무엇을)
 
-- **Swift(`MaruAppHost.swift`)**: 드롭 바이트를 읽어 ABI로 넘긴다(이미 드롭을 읽는 경로 재사용). 네이티브 I/O만.
-- **Zig(`app_session.zig` + ssh 통합)**: 세션이 maru ssh 원격인지 판정, 업로드 명령 조립, 원격 경로 생성, paste 트리거. 결정 로직은 전부 Zig(테스트 가능, `macos-app-host-boundary.md` 정책).
-- **ssh 래퍼(`cli/ssh.zig`)**: control socket 경로 안정화 + 세션 유지.
+- **Swift(`MaruAppHost.swift`)**: 드롭 파일 경로(`drop_files`) 또는 클립보드 이미지 바이트(`drop_image`)를 ABI로 넘긴다. 네이티브 I/O(NSPasteboard)만.
+- **Zig(`app_session.zig`)**: 세션이 maru ssh 원격인지 판정(`sshRemoteDest`+`lockCore`), 파일 읽기(메인, io), 백그라운드 스레드 관리(`startUploadBytes`/`uploadWorker`/`drainUploadResults`), paste 트리거. 결정 로직은 전부 Zig(테스트 가능, `macos-app-host-boundary.md` 정책).
+- **순수 로직(`cli/ssh.zig`)**: `controlSocketPath`·`sanitizeDropFilename`·`uploadShellCommand`·`max_upload_bytes` + control socket 경로 안정화/세션 유지(`wrapper_script`).
+- **업로드 실행(`ssh_upload.zig`)**: posix fork+pipe로 ssh 자식 프로세스(io 무관 → 백그라운드 스레드 안전).
 
 ## 5. 보안·정책
 
-- **원격 파일 쓰기**는 새 권한면이다. 위치를 한정하고(`~/.cache/maru/dropped/` 등), 파일명을 예측 가능·비충돌로 만들며, 정리 정책(세션 종료 시/용량 상한)을 정한다.
+- **원격 파일 쓰기**는 새 권한면이다. 위치를 `$HOME/.cache/maru/dropped/`로 한정하고, 파일명은 `sanitizeDropFilename`(드롭, 셸 메타·`..` 차단)/`pasted-N.png`(paste)로 안전·비충돌하게 만든다. 정리 주기(세션/용량 기반)는 후속(§6).
 - Maru의 OSC 정책은 보수적이다(OSC 52 쓰기 allow·읽기 deny, 로컬 단일 사용자, 사용자 결정 2026-06-20, `terminal-compatibility-policy.md`). 드롭 업로드도 같은 보수성을 따른다 — **명시적 사용자 행동(드롭)으로만** 트리거되고 자동 업로드는 없다. 세부 정책(기본 on/off, 크기 상한, 확장자 제한)은 사용자 결정 사항(§6).
 - 업로드는 **사용자가 이미 인증한 control socket**으로만 간다(새 자격증명·새 연결 없음). control socket 경로 자체가 다른 사용자에게 노출되지 않도록 권한을 좁힌다.
 - trace/로그에 호스트·경로·바이트가 남을 수 있으므로 `project-rules.md` §민감정보 redaction을 따른다(기본 local-only).
@@ -135,13 +137,13 @@ flowchart TD
 
 - **접속 방식 = `maru ssh` 전용.** 이미지/파일 드롭 전송은 `maru ssh`로 접속한 세션에서만 동작한다. control socket이 그 경로에서만 확보되고, 구현이 단순하며, tmux 유무와 무관하기 때문이다. 맨 `ssh`(사용자가 직접 친) 지원은 **비범위** — Maru가 개입할 지점이 없어 control socket을 심을 수 없고, 지원하려면 tmux control mode 통합 등 별도 큰 트랙이 필요하므로 [후속](#8-후속비범위)으로 둔다. 사용자는 접속을 `maru ssh <dest>`로 통일한다(`maru ssh`는 ssh 인자를 그대로 넘기므로 `~/.ssh/config` 호스트 별칭도 동일하게 쓴다).
 - **control socket 경로 규약 = 목적지 기반 결정론적 해시.** `maru ssh`와 로컬 Maru가 같은 규약으로 목적지(dest) 문자열을 해시해 **동일 경로**를 도출한다(예: `~/.cache/maru/ctl-<dest 해시 앞부분>`). Maru가 경로를 OSC 통지 없이 **계산으로** 알 수 있고, 같은 host 재접속이 같은 master를 공유한다. unix socket 경로 길이 제한(macOS 약 104바이트)을 넘지 않게 해시를 짧게 자른다.
-- **트리거 = 드롭만 (1차).** 파일/이미지 드래그앤드롭만 업로드한다. paste(클립보드 이미지) 업로드는 [후속](#8-후속비범위)으로 둔다.
+- **트리거 = 드롭 + paste(클립보드 이미지).** 파일/이미지 드래그앤드롭(3단계)과 Cmd+V 클립보드 이미지(4단계)를 업로드한다.
 - **원격 인식 토대 = `maru ssh` 전용 OSC 통지 (OSC 5379).** `maru ssh`가 `exec` 직전에 `OSC 5379 ; ssh ; <dest> BEL`을 emit하고(`cli/ssh.zig` `wrapper_script`의 `notify` — control socket이 살아있는 maru exec 경로에서만), **`$TMUX`가 있으면 DCS tmux passthrough로 감싸** tmux 안에서도 로컬 Maru까지 도달하게 한다. Maru(`terminal/core.zig` `dispatchOscMaru`)는 이를 받아 `ssh_remote_dest`에 dest를 저장하고(`sshRemoteDest()` getter), dest로 control socket 경로 해시를 계산한다. **5379**는 표준/벤더(iTerm 1337 등) 충돌을 피한 사설 번호이고, payload는 `<서브커맨드>;<인자>` 형식(현재 `ssh;<dest>`)이라 확장 가능하다. 모르는 터미널은 무시하므로 안전하다. RIS에선 유지한다(ssh 연결은 터미널 리셋과 무관, maru ssh가 재보고하지 않음). OSC 7 host 보관은 원격 cwd 표시용 보조로만 남긴다.
 
 ### 보안 기본값 (사용자 결정 2026-06-21)
 
-- **파일 종류 = 모든 파일**(범용 드롭-업로드), **크기 상한 = 16MB**(OSC 52와 동일, `cli/ssh.zig` `max_upload_bytes`), **업로드 = 백그라운드 스레드**(UI 비차단), **트리거 = 드롭만**(paste 업로드는 후속), 기능 기본 **on**(드롭은 명시적 사용자 행동). 원격 저장 위치 = `$HOME/.cache/maru/dropped/`(원격이 `mkdir -p`). 파일명은 `sanitizeDropFilename`으로 정제(셸 메타·`..` 경로 탈출 차단).
-- 후속(미결정): 원격 저장 정리 주기(현재 누적 — 세션/용량 기반 정리), 확장자 제한(현재 없음).
+- **파일 종류 = 모든 파일**(범용 드롭-업로드), **크기 상한 = 16MB**(OSC 52와 동일, `cli/ssh.zig` `max_upload_bytes`), **업로드 = 백그라운드 스레드**(UI 비차단), **트리거 = 드롭 + paste(클립보드 이미지)**, 기능 기본 **on**(드롭은 명시적 사용자 행동). 원격 저장 위치 = `$HOME/.cache/maru/dropped/`(원격이 `mkdir -p`). 파일명은 `sanitizeDropFilename`으로 정제(셸 메타·`..` 경로 탈출 차단).
+- 후속: 원격 저장 정리 주기(현재 누적 — 세션/용량 기반 정리). (확장자 제한은 "모든 파일" 결정으로 비범위.)
 
 ## 7. 검증·관측
 
@@ -152,7 +154,7 @@ flowchart TD
 ## 8. 후속·비범위
 
 - **A(앱 in-band 이미지 입력)**: 전송 계층에 무관한 유일한 길이므로 장기 추적. Claude Code 등에 "stdin in-band 이미지" 또는 OSC 52/5522 기반 입력이 생기면 재검토.
-- **paste(클립보드 이미지) 업로드**: 1차 트리거는 드롭만(사용자 결정 2026-06-21). 클립보드 이미지 paste 업로드는 같은 ControlMaster 사이드채널 위에 얹는 후속이다.
+- **paste(클립보드 이미지) 업로드 ✅ 구현**: Cmd+V로 클립보드 이미지(png/tiff)를 maru ssh 원격에 업로드(ABI v69 `maru_macos_app_session_drop_image` → `app_session.handleDroppedImage` → `startUploadBytes` 공통 경로, `pasted-N.png`). 로컬은 Claude 등이 OS 클립보드를 직접 읽어 maru 불개입. 스크린샷 over SSH 워크플로 완성.
 - **맨 ssh + tmux control mode 통합**: 사용자 결정(2026-06-21)으로 접속 방식이 `maru ssh` 전용이 되어 **비범위**다. 맨 ssh(사용자가 직접 친)까지 지원하려면 tmux control mode 통합 등 별도 큰 트랙이 필요하며, 기본 설계(B)는 tmux 유무와 무관하므로 이 트랙 없이도 tmux 환경에서 동작한다.
 - **kitty graphics(이미지 *표시*, `implementation-plan.md` K1~K4)와의 관계**: 방향이 반대다(출력 vs 입력). 별개 기능이며 본 설계와 인프라를 공유하지 않는다.
 - **bash/fish용 ssh 통합·`.app` 메뉴 진입점**: 선행 작업 의존으로 별도 추적.

@@ -504,6 +504,68 @@ pub fn updateConfigText(allocator: std.mem.Allocator, original: []const u8, upda
     return out.toOwnedSlice(allocator);
 }
 
+/// keybind recorder write-back 한 건 — action(키)을 새 chord 표기로 다시 묶는다. action은 command_catalog 키(정적
+/// 리터럴, 예: `"new_term"`), chord는 `KeyChord.toConfigString` 결과(예: `"Cmd+E"`).
+pub const KeybindRebind = struct { action: []const u8, chord: []const u8 };
+
+/// keybind 줄(`keybind = <chord> = <action>`)을 **action 기준**으로 in-place 갱신한다 — updateConfigText의 keybind 짝.
+/// keybind는 `key = value`가 아니라 줄마다 같은 `keybind` 키 + 두 번째 `=`로 chord와 action을 나눠서, key 기준
+/// updateConfigText로는 다룰 수 없다(모든 keybind 줄이 한 키로 충돌). 그래서 전용 패스를 둔다: rhs(두 번째 `=` 뒤,
+/// 끝까지)를 trim해 action과 비교, 매칭하면 그 줄을 `keybind = <새 chord> = <action>`으로 교체한다. 원본에 그 action
+/// 줄이 없으면(빌트인 기본 바인딩 등) 끝에 append한다. **매크로 줄**(rhs가 `text:`/`esc:`/`ctrl:`, `=` 포함 가능)은
+/// app action 키와 절대 안 겹치므로 자연히 스킵된다(rhs를 끝까지 잡아 비교하므로 `text:a=b`도 통째로 안 매칭). 주석·다른
+/// 줄·미파싱 키는 보존(updateConfigText와 같은 규율 — [document-basis-and-decision]). 반환은 owned(`allocator`).
+pub fn updateKeybindLines(allocator: std.mem.Allocator, original: []const u8, rebinds: []const KeybindRebind) LoadError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    const applied = try allocator.alloc(bool, rebinds.len);
+    defer allocator.free(applied);
+    @memset(applied, false);
+
+    var it = std.mem.splitScalar(u8, original, '\n');
+    var first = true;
+    while (it.next()) |raw_line| {
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        var replaced = false;
+        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
+        if (trimmed.len > 0 and trimmed[0] != '#') {
+            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
+                const k = std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace);
+                if (std.mem.eql(u8, k, "keybind")) {
+                    const rest = trimmed[eq1 + 1 ..];
+                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
+                        const action = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace); // 두 번째 = 뒤 끝까지(매크로 = 포함)
+                        for (rebinds, 0..) |rb, i| {
+                            if (std.mem.eql(u8, rb.action, action)) {
+                                try out.appendSlice(allocator, "keybind = ");
+                                try out.appendSlice(allocator, rb.chord);
+                                try out.appendSlice(allocator, " = ");
+                                try out.appendSlice(allocator, action);
+                                applied[i] = true; // 같은 action 줄이 여러 개면 모두 교체(parse last-wins라 stale 방지)
+                                replaced = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (!replaced) try out.appendSlice(allocator, raw_line);
+    }
+    // 원본에 없던 action(빌트인 기본 등)은 끝에 append.
+    for (rebinds, 0..) |rb, i| {
+        if (applied[i]) continue;
+        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append(allocator, '\n');
+        try out.appendSlice(allocator, "keybind = ");
+        try out.appendSlice(allocator, rb.chord);
+        try out.appendSlice(allocator, " = ");
+        try out.appendSlice(allocator, rb.action);
+        try out.append(allocator, '\n');
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// 빈 기본 결과(파일 없음/HOME 없음 등). config 텍스트를 안 읽었으므로 arena도 비어 있다.
 fn emptyDefault(allocator: std.mem.Allocator) Parsed {
     return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .unbinds = &.{}, .terminal_bindings = &.{}, .global_bindings = &.{}, .diagnostics = &.{} };
@@ -688,6 +750,40 @@ test "updateConfigText: 빈 원본에도 키를 append한다(파일 없음 케�
     const updated = try updateConfigText(a, "", &updates);
     defer a.free(updated);
     try std.testing.expectEqualStrings("sidebar.show-branch = false\n", updated);
+}
+
+test "updateKeybindLines: action 기준 교체, 없으면 append, 매크로·다른 줄·주석 보존 (keybind recorder write-back)" {
+    const a = std.testing.allocator;
+    const original =
+        "# 사용자 주석\n" ++
+        "keybind = Cmd+T = new_term\n" ++ // 교체 대상(action=new_term)
+        "font.size = 14\n" ++ // 다른 줄 — 보존
+        "keybind = Cmd+B = text:hello=world\n"; // 매크로(rhs에 '=') — action과 안 겹쳐 보존
+    const rebinds = [_]KeybindRebind{
+        .{ .action = "new_term", .chord = "Cmd+E" }, // 기존 줄 교체
+        .{ .action = "new_tab", .chord = "Cmd+Shift+E" }, // 원본에 없음 → append
+    };
+    const out = try updateKeybindLines(a, original, &rebinds);
+    defer a.free(out);
+
+    // 파싱해서 결과 확인(텍스트 형식이 아니라 의미로 검증).
+    var p = try parse(a, out);
+    defer p.deinit();
+    // new_term은 Cmd+E로 재바인딩됨.
+    try std.testing.expect((try keybinding.KeyChord.parse("Cmd+E")).eql(p.keybindings[findBind(p.keybindings, .new_term)].chord));
+    // new_tab은 append돼 Cmd+Shift+E.
+    try std.testing.expect((try keybinding.KeyChord.parse("Cmd+Shift+E")).eql(p.keybindings[findBind(p.keybindings, .new_tab)].chord));
+    // 매크로 줄·주석·다른 줄 보존.
+    try std.testing.expect(std.mem.indexOf(u8, out, "text:hello=world") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "# 사용자 주석") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "font.size = 14") != null);
+    // 옛 Cmd+T = new_term 줄은 사라짐(교체됨).
+    try std.testing.expect(std.mem.indexOf(u8, out, "Cmd+T = new_term") == null);
+}
+
+fn findBind(binds: []const keybinding.AppBinding, want: action_mod.Action) usize {
+    for (binds, 0..) |b, i| if (std.meta.activeTag(b.action) == std.meta.activeTag(want)) return i;
+    return 0;
 }
 
 test "parse: window padding defaults to left/right=8, top/bottom=4; bad/out-of-range values are forgiving" {

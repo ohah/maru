@@ -38,6 +38,7 @@ pub const FieldRow = struct {
         text: []const u8, // 문자열 현재값(폰트 패밀리). 클릭/Enter로 인라인 편집(platform이 schema.setText)
         color: Color, // 색 #RRGGBB — 스와치 + hex. 스와치/←→로 프리셋 순환, hex 클릭으로 편집(platform)
         palette_grid: PaletteGrid, // ANSI 16색 그리드(theme.palette.0~15) — 스와치 줄 + 선택 셀 hex 편집(CS-4-5)
+        keybind: []const u8, // 현재 단축키 표시(⌘T 또는 빈=미지정). Enter/클릭 → 녹음 모드(platform이 raw 키 캡처→rebind, CS-4-3)
     };
     pub const Slider = struct { value: f64, min: f64, max: f64 };
     pub const Color = struct { hex: []const u8, rgb: @import("../../color.zig").Rgb }; // 현재 hex + platform이 파싱한 RGB(스와치)
@@ -83,6 +84,9 @@ pub const State = struct {
     /// palette_grid 행에서 선택된 셀(0~15). ←→가 이 값을 옮기고(platform이 moveGridCell), Enter/hex 클릭이 이 셀을
     /// 편집한다. 행 1개에 16칸이라 폼의 1D selected와 별도로 둔다(slider 드래그 상태가 별도인 것과 동형).
     grid_cell: usize = 0,
+    /// keybind 행 녹음 중(Enter/클릭으로 켜짐) — 다음 raw 키를 platform이 가로채 chord로 캡처한다(컴포넌트 handle을
+    /// 안 거침). 켜지면 그 행이 "키 입력 대기..."로 보인다. platform이 캡처/취소 후 끈다(text editing과 별개 상태).
+    recording: bool = false,
 
     pub fn show(self: *State) void {
         self.open = true;
@@ -91,6 +95,7 @@ pub const State = struct {
         self.dragging = false;
         self.editing = false;
         self.grid_cell = 0;
+        self.recording = false;
     }
     /// 섹션 전환(좌측 네비 클릭) — 선택 섹션과 첫 필드로. platform이 새 섹션 필드 수를 setFieldCount로 다시 준다.
     pub fn selectSection(self: *State, i: usize) void {
@@ -99,6 +104,7 @@ pub const State = struct {
         self.dragging = false;
         self.editing = false;
         self.grid_cell = 0;
+        self.recording = false;
     }
     /// palette_grid 선택 셀을 delta만큼 옮긴다(wrap, 0..15). platform이 ←→(adjust)에서 호출(선택 행이 palette_grid일 때).
     pub fn moveGridCell(self: *State, delta: i32) void {
@@ -142,6 +148,7 @@ pub const State = struct {
         self.open = false;
         self.dragging = false;
         self.editing = false;
+        self.recording = false;
     }
     pub fn setFieldCount(self: *State, n: usize) void {
         self.count = n;
@@ -392,6 +399,16 @@ pub fn view(
                     try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = grid.y, .w = box.cw, .h = box.ch }, .role = .cursor } });
                 }
             },
+            .keybind => |chord| {
+                // control 열에 현재 단축키 표시(dropdown과 같은 좌단 정렬 text). 녹음 중인 선택 행이면 "키 입력 대기..."
+                // accent로(platform이 raw 키를 가로채 chord 캡처). 빈 chord는 "(미지정)".
+                const recording_this = state.recording and actual == state.selected;
+                const shown: []const u8 = if (recording_this) "키 입력 대기..." else if (chord.len > 0) chord else "(미지정)";
+                const text_role: tokens.ColorRole = if (recording_this) .accent_bar else .surface_fg;
+                const runs = try arena.alloc(draw.Run, 1);
+                runs[0] = .{ .text = shown };
+                try out.append(arena, .{ .text = .{ .origin = .{ .x = ctrl.x, .y = ctrl.y }, .runs = runs, .role = text_role } });
+            },
         }
     }
 }
@@ -478,6 +495,7 @@ pub fn handlePointer(
     // 인라인 편집 중 다른 곳 down → 편집 종료(버퍼가 다른 행으로 새지 않게 — 리뷰 #823). 같은 text control을 다시
     // 누르면 아래에서 .toggle → platform이 현재값으로 재시드한다(커밋은 Enter 전용).
     if (state.editing) state.cancelEdit();
+    if (state.recording) state.recording = false; // 녹음 중 다른 곳 클릭 → 녹음 취소(아래에서 같은 keybind 재클릭 시 다시 켜짐)
     // 좌측 네비 영역(x < form_x) 클릭 → 섹션 행 선택(y로 판정). 비-행이면 소비.
     const form_x_f: f64 = @floatFromInt(l.form_x);
     if (ev.x_px < form_x_f) {
@@ -536,6 +554,7 @@ pub fn handlePointer(
                     }
                     return .selection_changed; // 스와치 선택만(편집은 hex 클릭/Enter — color 행의 select-then-act와 동형)
                 },
+                .keybind => return if (ev.x_px >= @as(f64, @floatFromInt(ctrl.x))) .toggle else .selection_changed, // control 영역 클릭 → 녹음 시작(.toggle=활성, platform이 recording 켬), 라벨은 선택만
             }
         }
     }
@@ -904,6 +923,48 @@ test "settings palette_grid: 16 스와치 + 선택 셀 테두리·hex 렌더, �
     try std.testing.expectEqual(Action.selection_changed, a2);
     try std.testing.expect(s.editing);
     try std.testing.expectEqualStrings("#000000", s.editText());
+}
+
+test "settings keybind: chord 표시·녹음 시 '키 입력 대기'·control 클릭→toggle(녹음 시작) (CS-4-3)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = testTokens();
+    const rows = [_]FieldRow{.{ .label = "New Terminal", .kind = .{ .keybind = "⌘T" } }};
+    var s = State{};
+    s.show();
+    s.setFieldCount(rows.len);
+
+    // 비녹음: 현재 chord "⌘T" 표시.
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    var has_chord = false;
+    for (out.items) |op| if (op == .text and std.mem.eql(u8, op.text.runs[0].text, "⌘T")) {
+        has_chord = true;
+    };
+    try std.testing.expect(has_chord);
+
+    // 녹음 중(선택 행): "키 입력 대기..."를 accent로.
+    out.clearRetainingCapacity();
+    s.recording = true;
+    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    var has_prompt = false;
+    for (out.items) |op| if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, "키 입력 대기") != null and op.text.role == .accent_bar) {
+        has_prompt = true;
+    };
+    try std.testing.expect(has_prompt);
+    s.recording = false;
+
+    // handlePointer: control 영역 클릭 → .toggle(platform이 recording 켬).
+    const l = computeLayout(no_sections, &rows, 0, test_props, &tk).?;
+    const ctrl = fieldControlRect(l, 0);
+    const act = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(ctrl.x + 2), .y_px = @floatFromInt(ctrl.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    try std.testing.expectEqual(Action.toggle, act);
+
+    // 녹음 중 다른 곳(라벨) 클릭 → 녹음 취소.
+    s.recording = true;
+    _ = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.form_x + 1), .y_px = @floatFromInt(ctrl.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    try std.testing.expect(!s.recording);
 }
 
 test "settings text view: 행 값 렌더, 편집 중이면 버퍼+caret(cursor fill)" {

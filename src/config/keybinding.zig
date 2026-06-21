@@ -101,6 +101,58 @@ pub const KeyChord = struct {
     pub fn eql(self: KeyChord, other: KeyChord) bool {
         return std.meta.eql(self.modifiers, other.modifiers) and self.key.eql(other.key);
     }
+
+    /// chord를 **config 표기**(parse가 받아들이는 정확한 ASCII 철자)로 직렬화한다 — keybind recorder의 write-back
+    /// (`keybind = <여기> = <action>`)용. parse와 round-trip 가능(`parse(toConfigString(c)) == c`, 테스트 보장).
+    /// modifier는 Cmd+Ctrl+Alt+Shift 순(parse는 순서 무관), 키는 parseKey의 짝(Esc/Tab/Up/F1/Space/Plus/글자). 표시용
+    /// `command_catalog.formatChord`(⌘⇧ 기호)와 달리 파일에 쓸 수 있는 표기다. buf는 max_chord_display_len(32)면 충분.
+    pub fn toConfigString(self: KeyChord, buf: []u8) []const u8 {
+        var w: usize = 0;
+        const put = struct {
+            fn s(b: []u8, i: *usize, text: []const u8) void {
+                if (i.* >= b.len) return;
+                const n = @min(text.len, b.len - i.*);
+                @memcpy(b[i.*..][0..n], text[0..n]);
+                i.* += n;
+            }
+        }.s;
+        if (self.modifiers.command) put(buf, &w, "Cmd+");
+        if (self.modifiers.control) put(buf, &w, "Ctrl+");
+        if (self.modifiers.option) put(buf, &w, "Alt+");
+        if (self.modifiers.shift) put(buf, &w, "Shift+");
+        switch (self.key) {
+            .char => |c| {
+                if (c == ' ') {
+                    put(buf, &w, "Space");
+                } else if (c == '+') {
+                    put(buf, &w, "Plus");
+                } else {
+                    var tmp: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(c, &tmp) catch 0;
+                    put(buf, &w, tmp[0..n]);
+                }
+            },
+            .enter => put(buf, &w, "Enter"),
+            .escape => put(buf, &w, "Esc"),
+            .tab => put(buf, &w, "Tab"),
+            .backspace => put(buf, &w, "Backspace"),
+            .delete => put(buf, &w, "Delete"),
+            .insert => put(buf, &w, "Insert"),
+            .home => put(buf, &w, "Home"),
+            .end => put(buf, &w, "End"),
+            .page_up => put(buf, &w, "PageUp"),
+            .page_down => put(buf, &w, "PageDown"),
+            .arrow_up => put(buf, &w, "Up"),
+            .arrow_down => put(buf, &w, "Down"),
+            .arrow_left => put(buf, &w, "Left"),
+            .arrow_right => put(buf, &w, "Right"),
+            .function => |n| {
+                var tmp: [8]u8 = undefined;
+                put(buf, &w, std.fmt.bufPrint(&tmp, "F{d}", .{n}) catch "F1");
+            },
+        }
+        return buf[0..w];
+    }
 };
 
 pub const TerminalInputMacro = union(enum) {
@@ -467,6 +519,27 @@ test "parses the literal plus key via the Plus spelling" {
     try std.testing.expect((try KeyChord.parse("Cmd+Plus")).key.eql(.{ .char = '+' }));
     // The bare '+' separator still cannot be a key, so an empty part errors.
     try std.testing.expectError(error.EmptyChordPart, KeyChord.parse("Cmd++"));
+}
+
+test "toConfigString round-trips through parse (keybind recorder write-back)" {
+    var buf: [32]u8 = undefined;
+    const cases = [_]KeyChord{
+        .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'T' } },
+        .{ .modifiers = .{ .control = true, .option = true }, .key = .{ .char = ' ' } }, // Space
+        .{ .modifiers = .{ .command = true }, .key = .{ .char = '+' } }, // Plus
+        .{ .modifiers = .{ .command = true }, .key = .arrow_up },
+        .{ .modifiers = .{ .shift = true }, .key = .{ .function = 5 } },
+        .{ .modifiers = .{}, .key = .escape },
+        .{ .modifiers = .{ .control = true, .option = true, .shift = true, .command = true }, .key = .page_down },
+    };
+    for (cases) |c| {
+        const s = c.toConfigString(&buf);
+        const parsed = try KeyChord.parse(s);
+        try std.testing.expect(parsed.eql(c)); // parse(toConfigString(c)) == c
+    }
+    // 표기 확인(사람이 읽는 철자) — option은 "Alt"(parseModifier 짝), 순서는 Cmd→Ctrl→Alt→Shift.
+    try std.testing.expectEqualStrings("Cmd+Shift+T", (KeyChord{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'T' } }).toConfigString(&buf));
+    try std.testing.expectEqualStrings("Ctrl+Alt+Space", (KeyChord{ .modifiers = .{ .control = true, .option = true }, .key = .{ .char = ' ' } }).toConfigString(&buf));
 }
 
 test "validate rejects a send_control macro with no C0 mapping" {

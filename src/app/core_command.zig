@@ -40,6 +40,7 @@ pub const CoreCommand = union(enum) {
     set_config_palette: [16]?terminal.Rgb,
     set_max_scrollback: usize,
     set_ambiguous_wide: bool, // text.ambiguous-width reload — 라이브 코어의 EAW Ambiguous 폭(이후 putCell부터 반영)
+    set_emoji_wide: bool, // text.emoji-width reload — 라이브 코어의 이모지(VS16/키캡) 폭 승격(이후 putCell부터 반영)
     // P3-4 scroll·선택 위임(full (a) — read-modify-decide는 reader가 원자 실행, 메인 코어 mutate 0):
     scroll_to_abs: usize, // scrollToAbs(절대 행) — find 점프
     scroll_to_offset: usize, // 절대 view_offset로 — reader가 **fresh offset에서 delta 계산**(스크롤바 드래그: 메인이
@@ -69,6 +70,7 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) void {
         .set_config_palette => |palette| core.setConfigPalette(palette),
         .set_max_scrollback => |lines| core.max_scrollback = lines,
         .set_ambiguous_wide => |v| core.ambiguous_wide = v,
+        .set_emoji_wide => |v| core.emoji_wide = v,
         .scroll_to_abs => |abs| core.scrollToAbs(abs),
         .scroll_to_offset => |target| {
             // 적용 시점의 fresh view_offset에서 delta를 구해 절대 위치로 — 연속 스크롤바 드래그가 double-count로 어긋나지 않게.
@@ -133,6 +135,10 @@ test "core_command.apply: 각 명령이 코어를 올바르게 mutate (위임 �
     try std.testing.expect(core.ambiguous_wide);
     apply(&core, .{ .set_ambiguous_wide = false });
     try std.testing.expect(!core.ambiguous_wide);
+    apply(&core, .{ .set_emoji_wide = false }); // text.emoji-width reload — 라이브 코어 이모지 폭 재적용
+    try std.testing.expect(!core.emoji_wide);
+    apply(&core, .{ .set_emoji_wide = true });
+    try std.testing.expect(core.emoji_wide);
     apply(&core, .{ .set_cell_metrics = .{ .width = 8, .height = 16 } });
     var palette: [16]?terminal.Rgb = .{null} ** 16;
     palette[1] = .{ .r = 10, .g = 20, .b = 30 };

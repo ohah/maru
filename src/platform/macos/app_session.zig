@@ -2552,6 +2552,9 @@ pub const AppSession = struct {
         // EAW Ambiguous(동그란 번호 등) 폭(text.ambiguous-width). 같은 chokepoint라 모든 surface가 일관된 폭으로
         // putCell한다(grid·커서·렌더 단일 출처). 기본 narrow — wide면 동그란 번호 등을 2칸 advance.
         term.surface.core.ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide;
+        // 이모지 표현(VS16/키캡) 폭(text.emoji-width, 기본 wide). 같은 chokepoint라 모든 surface가 일관되게 이모지를
+        // 2칸으로 putCell한다 — ❤️·2️⃣가 1칸에 작게 나오던 것을 풀고 TUI 레이아웃과 정합(grid·커서·렌더 단일 출처).
+        term.surface.core.emoji_wide = self.loaded_config.config.emoji_width == .wide;
         // config theme.palette(ANSI 16색 base)를 코어에 주입한다 — OSC 4 query 응답이 렌더(metal_frame)와 같은
         // 우선순위(OSC4 override > config base > xterm256)를 보도록(화면·보고 정합). RIS/OSC104는 override만 리셋.
         term.surface.core.setConfigPalette(self.appearance.theme.palette);
@@ -3702,6 +3705,7 @@ pub const AppSession = struct {
         self.reapplyScrollback();
         self.reapplyConfigPalette();
         self.reapplyAmbiguousWidth();
+        self.reapplyEmojiWidth();
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }
@@ -4392,6 +4396,7 @@ pub const AppSession = struct {
         self.reapplyScrollback();
         self.reapplyConfigPalette();
         self.reapplyAmbiguousWidth();
+        self.reapplyEmojiWidth();
         // 사이드바 카드 표시 토글(sidebar.show-branch/folder)이 파일에서 바뀌었을 수 있다 — 카드를 다시
         // 빌드해 즉시 반영한다(config→앱 양방향). rebuildSidebar 실패는 무시(다음 프레임에 자연 복구).
         self.rebuildSidebar() catch {};
@@ -4507,6 +4512,19 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_ambiguous_wide = wide }, self.io) catch {};
+                }
+            }
+        }
+    }
+
+    /// text.emoji-width reload를 라이브 코어에 재적용한다(reapplyAmbiguousWidth와 같은 best-effort 패턴 — 이후
+    /// putCell부터 새 폭, 이미 저장된 셀은 옛 폭 유지). 이모지(VS16/키캡)를 2칸으로 볼지를 라이브 surface에 반영.
+    fn reapplyEmojiWidth(self: *AppSession) void {
+        const wide = self.loaded_config.config.emoji_width == .wide;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_emoji_wide = wide }, self.io) catch {};
                 }
             }
         }

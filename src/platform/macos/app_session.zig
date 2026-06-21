@@ -6293,6 +6293,8 @@ pub const AppSession = struct {
                 // blink(SGR 5): config text.blink가 켜졌을 때만 위상(blink_visible)을 반영해 off 위상에 숨긴다.
                 // 꺼져 있으면(기본) 항상 on → 정적(안 깜빡임). 접근성 기본값.
                 .blink_on = !self.appearance.blink_text or self.blink_visible,
+                // bold-is-bright(theme.bold-is-bright): bold + indexed 0~7 전경을 bright(8~15)로(render-only).
+                .bold_is_bright = self.appearance.bold_is_bright,
                 .selection_bg = self.appearance.theme.selection,
                 .selection = self.activeSurface().core.selectionViewportSpan(),
                 .hover_link = self.hoverLinkSpan(),
@@ -6443,6 +6445,7 @@ pub const AppSession = struct {
                 .default_fg = self.appearance.theme.foreground,
                 .default_bg = self.appearance.theme.background,
                 .config_palette = &self.appearance.theme.palette,
+                .bold_is_bright = self.appearance.bold_is_bright, // pane_colors가 이걸 복사 — 비활성 pane도 동일 규칙
             };
             // 탭 바 제목 색: 전경=테마 글자색, 배경은 chrome이 이미 깔아 둠(투명).
             const tabbar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };

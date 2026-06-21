@@ -54,6 +54,7 @@ pub const ResolvedAppearance = struct {
     cursor: ResolvedCursor,
     chrome_theme: theme.ChromeTheme = .tui, // tui|rich — platform buildChromeTokens가 tui()/rich() 분기에 읽는다(C4a)
     blink_text: bool = false, // SGR 5 blink 글자 점멸 여부(기본 정적 — 접근성). app이 blink 위상 wiring 게이트로 쓴다.
+    bold_is_bright: bool = false, // bold + indexed 0~7 전경을 bright(8~15)로. app이 CellColors로 wiring(render-only).
     // 터미널 셀↔컨테이너 4방 inset(논리 pt). refreshCellMetrics가 scale_milli로 px 환산. 기본 좌우 8·상하 4 —
     // 콘텐츠 가독성(사실상 표준). x/y는 loader alias(left+right / top+bottom)라 여기선 항상 4방으로 펼쳐져 있다.
     window_padding_top: u32 = 4,
@@ -75,6 +76,7 @@ pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
         },
         .chrome_theme = config.chrome_theme,
         .blink_text = config.blink_text,
+        .bold_is_bright = config.bold_is_bright,
         .window_padding_top = config.window_padding_top,
         .window_padding_right = config.window_padding_right,
         .window_padding_bottom = config.window_padding_bottom,

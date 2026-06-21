@@ -324,6 +324,14 @@ pub const Config = struct {
     /// EAW Ambiguous(동그란 번호 등) 문자의 셀 폭. 기본 narrow(1칸 — 정렬 안전·Ghostty/xterm.js 호환).
     /// loader가 `text.ambiguous-width` 키로 파싱. 자세한 트레이드오프는 AmbiguousWidth 참고.
     ambiguous_width: AmbiguousWidth = .narrow,
+    /// SGR bold(1) 글자의 ANSI **indexed 전경(0~7)** 을 그 bright 짝(8~15)으로 올릴지. **기본 false**.
+    /// loader가 `theme.bold-is-bright` 키로 파싱한다. 켜면 bold + `.indexed` 0~7 전경만 +8 한다 — `.default`
+    /// 전경과 `.rgb`·256색 cube(8~255)는 안 바꾼다(가장 정의가 분명한 부분집합만; default까지 밝히면 본문
+    /// 기본색이 예고 없이 바뀐다). reverse(7)/conceal/blink-off 경로엔 적용하지 않는다(그 경로는 배경색을 그린다).
+    /// 베이스/결정: xterm `boldColors`(bold가 0~7을 8~15로 렌더)·Ghostty `bold-is-bright`와 같은 트레이드오프를
+    /// opt-in으로 둔다 — 폰트가 weight를 안 주는 환경에서 bold를 색으로도 구분하려는 사용자용. 적용은 render-only
+    /// (코어 셀/SGR 상태 불변)라 packForeground 한 곳이 단일 출처다.
+    bold_is_bright: bool = false,
     /// 터미널 셀과 컨테이너(사이드바·탭 바 안쪽) 가장자리 사이의 빈 여백(논리 pt, DPI로 스케일). 4방 개별
     /// (top/right/bottom/left); x/y는 loader에서 alias(`window.padding-x`=left+right 동시, `window.padding-y`=top+bottom
     /// 동시)로 두 필드에 같은 값을 대입한다. loader가 `window.padding-{top,right,bottom,left,x,y}` 키로 파싱. 0이면

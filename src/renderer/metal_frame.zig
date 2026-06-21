@@ -92,7 +92,21 @@ pub const CellColors = struct {
     /// blink(SGR 5) 점멸 위상. false(off 위상)면 blink 셀의 전경을 배경색으로 풀어 글자를 숨긴다(conceal과 같은
     /// 결). app이 blink_visible(커서 점멸과 같은 500ms 위상)을 wiring하고, 위상이 바뀔 때 frame을 재빌드한다.
     blink_on: bool = true,
+    /// bold(SGR 1) 글자의 indexed 0~7 전경을 bright 짝(8~15)으로 올릴지(`theme.bold-is-bright`). 기본 false.
+    /// packForeground가 비-reverse 전경에만 적용한다(brightenIfBold). app이 appearance.bold_is_bright를 wiring.
+    bold_is_bright: bool = false,
 };
+
+/// bold-is-bright: bold(SGR 1)이고 전경이 ANSI indexed 0~7이면 그 bright 짝(8~15)으로 올린다(그 외는 그대로).
+/// `.default`/`.rgb`/256색 cube(8~255)는 안 건드린다 — 정의가 분명한 부분집합만(theme.bold-is-bright 주석 참고).
+/// 비활성(enabled=false)·non-bold면 입력을 그대로 돌려준다. reverse 경로는 호출처에서 enabled=false로 끈다.
+fn brightenIfBold(c: terminal.Color, bold: bool, enabled: bool) terminal.Color {
+    if (!enabled or !bold) return c;
+    return switch (c) {
+        .indexed => |index| if (index < 8) .{ .indexed = index + 8 } else c,
+        else => c,
+    };
+}
 
 /// 컬러 글리프(이모지)인지 판정한다. 셰이더는 이 cell의 UV에 +2.0이 더해져 오면 atlas의 컬러
 /// RGBA를 그대로 쓴다(전경색 무시). 단일 출처는 width.isEmojiPresentation — 단색 텍스트 기호
@@ -191,7 +205,8 @@ fn packForeground(style: terminal.Style, colors: CellColors) u32 {
     const fg = if (reverse)
         resolveColor(style.background, colors.default_bg, colors.palette, colors.config_palette)
     else
-        resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette);
+        // bold-is-bright: 비-reverse 전경에만 적용(reverse는 배경색을 전경으로 그리므로 끈다).
+        resolveColor(brightenIfBold(style.foreground, style.bold, colors.bold_is_bright), colors.default_fg, colors.palette, colors.config_palette);
     if (style.dim) {
         // SGR 2 faint: 전경을 그 셀의 배경 쪽으로 0.5 보간(intensity 감소). 베이스: Ghostty
         // faint-opacity 기본 0.5(glyph alpha)인데, maru 전경색엔 alpha가 없어 같은 시각 효과를
@@ -1582,6 +1597,30 @@ test "packForeground halves a faint foreground toward the background (SGR 2)" {
     };
     try std.testing.expectEqual(@as(u32, 0xFFFFFF), packForeground(.{ .foreground = .default }, colors));
     try std.testing.expectEqual(@as(u32, 0x878787), packForeground(.{ .foreground = .default, .dim = true }, colors));
+}
+
+test "bold-is-bright: bold + indexed 0..7 전경만 bright(8..15)로, 그 외는 불변" {
+    const dfg: color.Rgb = .{ .r = 0, .g = 0, .b = 0 };
+    const off: CellColors = .{ .default_fg = dfg }; // bold_is_bright=false(기본)
+    const on: CellColors = .{ .default_fg = dfg, .bold_is_bright = true };
+
+    // 끔(기본): bold여도 indexed 1은 그대로 풀린다(8로 안 올라감).
+    try std.testing.expectEqual(packRgb(color.xterm256(1)), packForeground(.{ .foreground = .{ .indexed = 1 }, .bold = true }, off));
+
+    // 켬 + bold + indexed 1 → bright 짝 9(=1+8).
+    try std.testing.expectEqual(packRgb(color.xterm256(9)), packForeground(.{ .foreground = .{ .indexed = 1 }, .bold = true }, on));
+    // 켬이지만 bold 아님 → 그대로 1(밝히지 않음).
+    try std.testing.expectEqual(packRgb(color.xterm256(1)), packForeground(.{ .foreground = .{ .indexed = 1 } }, on));
+    // 켬 + bold지만 index>=8(이미 bright/256색 cube) → 그대로(안 올림).
+    try std.testing.expectEqual(packRgb(color.xterm256(9)), packForeground(.{ .foreground = .{ .indexed = 9 }, .bold = true }, on));
+    try std.testing.expectEqual(packRgb(color.xterm256(200)), packForeground(.{ .foreground = .{ .indexed = 200 }, .bold = true }, on));
+    // 켬 + bold지만 .default/.rgb 전경 → 안 건드림(분명한 부분집합만).
+    try std.testing.expectEqual(packRgb(dfg), packForeground(.{ .foreground = .default, .bold = true }, on));
+    try std.testing.expectEqual(@as(u32, 0x0A141E), packForeground(.{ .foreground = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } }, .bold = true }, on));
+
+    // reverse(7) 경로엔 적용 안 함 — 배경(.default)을 전경으로 그리고 bold-is-bright는 끈다.
+    const rev: CellColors = .{ .default_fg = dfg, .default_bg = .{ .r = 0x22, .g = 0x22, .b = 0x22 }, .bold_is_bright = true };
+    try std.testing.expectEqual(packRgb(.{ .r = 0x22, .g = 0x22, .b = 0x22 }), packForeground(.{ .background = .default, .bold = true, .reverse = true }, rev));
 }
 
 test "cursor over a space-codepoint glyph projects a solid block, not an inverted glyph" {

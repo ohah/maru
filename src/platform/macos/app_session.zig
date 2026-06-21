@@ -45,7 +45,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 66; // 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 67; // 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드, 런타임 줌·여백을 처음 설정으로 복원). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -5200,11 +5200,53 @@ pub const AppSession = struct {
         }
     }
 
-    /// 클립보드 텍스트 붙여넣기(Cmd+V). 인코딩(개행 정규화 + bracketed paste 감싸기)은 core가
-    /// 하고, 여기선 한 번의 writeInput으로 보낸다(부분 쓰기 실패로 감싸기가 깨지지 않게).
-    pub fn pasteText(self: *AppSession, bytes: []const u8) void {
+    /// 셸 메타문자 — 셸이 공백/특수문자에서 단어를 쪼개거나 글롭·치환으로 해석하지 않게 앞에
+    /// 백슬래시를 붙일 대상. POSIX 셸 기준이고 동작은 Ghostty Shell.escape와 같다(동작 비교만 —
+    /// 코드 표현은 옮기지 않음). 메타문자는 전부 ASCII라 UTF-8 바이트 단위로 안전하다(ASCII
+    /// 바이트는 멀티바이트 문자 중간에 안 나타난다 — UTF-8 self-synchronizing).
+    fn isShellMetachar(b: u8) bool {
+        return switch (b) {
+            '\\', ' ', '\t', '(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '`', '!', '#', '$', '&', ';', '|', '*', '?' => true,
+            else => false,
+        };
+    }
+
+    /// NUL('\0')로 구분된 토큰들을 각각 셸 이스케이프해 공백으로 join한다(토큰 1개면 그 토큰만
+    /// 이스케이프). 드래그된 파일 경로/URL을 셸 버퍼에 안전히 넣기 위한 paste 전처리다 — 이전엔
+    /// Swift host(MaruAppHost.shellEscape)에 있던 순수 문자열 로직을, 단위 테스트(std.testing)·
+    /// 이식성을 위해 Zig로 옮겼다(네이티브 레이어 최소화 정책 — macos-app-host-boundary.md).
+    /// 무엇을 이스케이프할지(pasteboard 타입)는 host가 정하고, 메커니즘만 여기 둔다. 호출자가 free한다.
+    fn shellEscapeJoin(alloc: std.mem.Allocator, tokens: []const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(alloc);
+        var it = std.mem.splitScalar(u8, tokens, 0);
+        var first = true;
+        while (it.next()) |tok| {
+            if (!first) try out.append(alloc, ' ');
+            first = false;
+            for (tok) |b| {
+                if (isShellMetachar(b)) try out.append(alloc, '\\');
+                try out.append(alloc, b);
+            }
+        }
+        return try out.toOwnedSlice(alloc);
+    }
+
+    /// 클립보드 텍스트 붙여넣기(Cmd+V)·드래그앤드롭. 인코딩(개행 정규화 + bracketed paste 감싸기)은
+    /// core가 하고, 여기선 한 번의 writeInput으로 보낸다(부분 쓰기 실패로 감싸기가 깨지지 않게).
+    /// `escape_each`가 true면 bytes를 NUL('\0') 구분 토큰으로 보고 각 토큰을 셸 이스케이프한 뒤 공백으로
+    /// join한다(드래그된 파일 경로·URL — 셸이 공백 등 메타문자에서 단어를 쪼개지 않게). 평문·Cmd+V 웹
+    /// URL은 false로 raw 전송한다(이스케이프하면 ?,&,= 등이 깨진다). 무엇을 이스케이프할지는 pasteboard
+    /// 타입에 묶여 host(Swift)가 정하고, 이스케이프 '메커니즘'은 여기(Zig)가 단일 출처로 한다.
+    pub fn pasteText(self: *AppSession, bytes: []const u8, escape_each: bool) void {
         if (!self.surface_initialized or bytes.len == 0) return;
-        const encoded = self.activeSurface().core.encodePaste(self.allocator, bytes) catch return;
+        // escape면 NUL 구분 토큰을 각각 셸 이스케이프 후 공백 join한 임시 버퍼를 encodePaste에 넘긴다.
+        const payload: []const u8 = if (escape_each)
+            shellEscapeJoin(self.allocator, bytes) catch return
+        else
+            bytes;
+        defer if (escape_each) self.allocator.free(payload);
+        const encoded = self.activeSurface().core.encodePaste(self.allocator, payload) catch return;
         defer self.allocator.free(encoded);
         // 큐에 쌓고 즉시 flush를 시도한다. 자식이 읽는 중이면 보통 이 자리에서 다 들어가고,
         // 안 읽으면(vim 다이얼로그 등) 잔여가 tick마다 흘러나간다 — blocking 단일 write로 UI가
@@ -13836,6 +13878,33 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     try std.testing.expect(!session.metal_dirty);
 }
 
+test "shellEscapeJoin escapes shell metacharacters per NUL-separated token (paste/drop helper)" {
+    // 드래그/붙여넣기로 파일 경로·URL을 셸 버퍼에 넣을 때, 셸이 공백 등 메타문자에서 단어를 쪼개거나
+    // 글롭·치환으로 해석하지 않게 백슬래시를 앞세운다. 이전엔 Swift host(MaruAppHost.shellEscape)에 있던
+    // 순수 문자열 로직을 Zig로 옮겨 단위 테스트로 회귀를 고정한다(네이티브 레이어 최소화 정책). 터미널에서
+    // 중요한 이유: 공백 든 경로가 그대로 들어가면 셸이 여러 인자로 쪼개 엉뚱한 파일을 가리킨다.
+    const allocator = std.testing.allocator;
+
+    // 단일 토큰: 공백·괄호 앞에 백슬래시(NUL 없으면 토큰 1개).
+    {
+        const out = try AppSession.shellEscapeJoin(allocator, "/tmp/My Photos (2024)");
+        defer allocator.free(out);
+        try std.testing.expectEqualStrings("/tmp/My\\ Photos\\ \\(2024\\)", out);
+    }
+    // NUL로 구분된 여러 토큰: 각각 이스케이프 후 한 칸 공백으로 join(토큰 사이 구분 공백은 이스케이프 안 함).
+    {
+        const out = try AppSession.shellEscapeJoin(allocator, "/a b\x00/c&d");
+        defer allocator.free(out);
+        try std.testing.expectEqualStrings("/a\\ b /c\\&d", out);
+    }
+    // 메타문자가 없으면 그대로(중복 백슬래시·재스캔 없음 — 한 번만 순회).
+    {
+        const out = try AppSession.shellEscapeJoin(allocator, "https://example.com/path");
+        defer allocator.free(out);
+        try std.testing.expectEqualStrings("https://example.com/path", out);
+    }
+}
+
 test "large paste drains through the non-blocking queue without freezing ticks" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 PTY 경로
     const allocator = std.testing.allocator;
@@ -13859,7 +13928,7 @@ test "large paste drains through the non-blocking queue without freezing ticks" 
     @memset(big, 'x');
     var li: usize = 79;
     while (li < big.len) : (li += 80) big[li] = '\n';
-    session.pasteText(big);
+    session.pasteText(big, false);
 
     // pasteText는 즉시 반환해야 하고(동결 없음), 잔여는 tick들이 흘려보낸다.
     var i: usize = 0;

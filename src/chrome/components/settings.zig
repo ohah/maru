@@ -94,28 +94,49 @@ const Layout = struct {
     box: modal_box.Box,
     ctrl_cols: u32,
     first_field_row: u32,
+    win_start: usize, // 보이는 창의 첫 행(전체 rows 인덱스) — 행이 많으면 selected 주위로 스크롤된다
+    win_len: usize, // 보이는 행 수(= min(count, maxVisible))
 };
 
 const title_rows: u32 = 2; // 제목(0) + 빈 줄(1)
 
-fn computeLayout(rows: []const FieldRow, p: props.ChromeProps, tk: *const tokens.Tokens) ?Layout {
+/// 한 화면에 보일 최대 필드 행 수 — 뷰포트 높이에서 제목·여백·여유를 뺀다. 행이 이보다 많으면 창을 스크롤한다
+/// (패널이 화면을 넘치지 않게). palette.max_visible과 같은 윈도잉 취지(여긴 뷰포트 적응형).
+fn maxVisible(p: props.ChromeProps) usize {
+    const ch = @max(p.metrics.cell_height_px, 1);
+    const avail = p.metrics.backing_height_px / ch; // 화면에 들어가는 총 행
+    return @max(@as(usize, 4), @as(usize, avail) -| 7); // 제목 2 + 위아래 여백 2 + 여유 3
+}
+
+/// selected가 보이도록 [0,total)에서 길이 mv(≤total)인 창의 시작을 고른다(palette 윈도잉: 끝맞춤 + clamp).
+fn windowStart(total: usize, selected: usize, mv: usize) usize {
+    if (total <= mv) return 0;
+    var s: usize = if (selected >= mv) selected - mv + 1 else 0;
+    if (s + mv > total) s = total - mv;
+    return s;
+}
+
+fn computeLayout(rows: []const FieldRow, selected: usize, p: props.ChromeProps, tk: *const tokens.Tokens) ?Layout {
     const cw = @max(p.metrics.cell_width_px, 1);
     const ch = @max(p.metrics.cell_height_px, 1);
     const ctrl_cols = controlCols(ch, cw);
-    var content_cols: u32 = overlay_input.displayCols(title_text);
+    var content_cols: u32 = overlay_input.displayCols(title_text) + 12; // 제목 + 스크롤 위치 표식 여유
     for (rows) |r| {
         const row_cols = overlay_input.displayCols(r.label) + label_gap_cols + ctrl_cols;
         content_cols = @max(content_cols, row_cols);
     }
-    const content_rows = title_rows + @as(u32, @intCast(rows.len));
+    const mv = maxVisible(p);
+    const win_start = windowStart(rows.len, @min(selected, rows.len -| 1), mv);
+    const win_len = @min(rows.len, mv);
+    const content_rows = title_rows + @as(u32, @intCast(win_len));
     const box = modal_box.layout(content_cols, content_rows, p, tk) orelse return null;
-    return .{ .box = box, .ctrl_cols = ctrl_cols, .first_field_row = title_rows };
+    return .{ .box = box, .ctrl_cols = ctrl_cols, .first_field_row = title_rows, .win_start = win_start, .win_len = win_len };
 }
 
-/// 필드 i의 control 열 rect(콘텐츠 우측, ctrl_cols 폭, 행 높이). slider는 이 전체를 쓰고, toggle은 이 안에서 우측정렬한다.
-fn fieldControlRect(l: Layout, i: usize) draw.Rect {
+/// 보이는 행 vi(0..win_len)의 control 열 rect(콘텐츠 우측, ctrl_cols 폭, 행 높이). slider는 전체, toggle은 우측정렬.
+fn fieldControlRect(l: Layout, vi: usize) draw.Rect {
     const box = l.box;
-    const row = l.first_field_row + @as(u32, @intCast(i));
+    const row = l.first_field_row + @as(u32, @intCast(vi));
     const ctrl_x = box.inner_x + @as(i32, @intCast((box.inner_cols -| l.ctrl_cols) * box.cw));
     return .{ .x = ctrl_x, .y = modal_box.rowY(box, row), .w = l.ctrl_cols * box.cw, .h = box.ch };
 }
@@ -139,18 +160,27 @@ pub fn view(
     out: *std.ArrayList(draw.Op),
 ) !void {
     if (!state.open) return;
-    const l = computeLayout(rows, p, tk) orelse return;
+    const l = computeLayout(rows, state.selected, p, tk) orelse return;
     const box = l.box;
     try modal_box.frame(box, p, arena, out);
-    try modal_box.text(box, box.inner_x, 0, title_text, .surface_fg, arena, out);
+    // 제목 — 행이 창보다 많으면 "Settings   sel/total" 위치 표식을 붙인다(스크롤 발견성).
+    const title = if (rows.len > l.win_len)
+        try std.fmt.allocPrint(arena, "{s}   {d}/{d}", .{ title_text, @min(state.selected + 1, rows.len), rows.len })
+    else
+        title_text;
+    try modal_box.text(box, box.inner_x, 0, title, .surface_fg, arena, out);
 
-    for (rows, 0..) |r, i| {
-        const content_row = l.first_field_row + @as(u32, @intCast(i));
-        if (i == state.selected) {
+    // 보이는 창 [win_start, win_start+win_len)만 그린다(나머지는 스크롤로). vi=화면 행(0..win_len), actual=전체 인덱스.
+    var vi: usize = 0;
+    while (vi < l.win_len) : (vi += 1) {
+        const actual = l.win_start + vi;
+        const r = rows[actual];
+        const content_row = l.first_field_row + @as(u32, @intCast(vi));
+        if (actual == state.selected) {
             try modal_box.fillCells(box, box.inner_x, content_row, box.inner_cols, .tab_hover_bg, arena, out);
         }
         try modal_box.text(box, box.inner_x, content_row, r.label, .surface_fg, arena, out);
-        const ctrl = fieldControlRect(l, i);
+        const ctrl = fieldControlRect(l, vi);
         switch (r.kind) {
             .toggle => |v| {
                 var ts = toggle.State{ .value = v };
@@ -197,7 +227,7 @@ pub fn handlePointer(
     state: *State,
 ) Action {
     if (ev.button != .left) return .consumed;
-    const l = computeLayout(rows, p, tk) orelse return .consumed;
+    const l = computeLayout(rows, state.selected, p, tk) orelse return .consumed;
     const box = l.box;
 
     if (ev.phase == .up) {
@@ -205,10 +235,11 @@ pub fn handlePointer(
         return .consumed;
     }
     if (ev.phase == .move) {
-        // 드래그 중이고 선택 행이 slider면 x→ratio로 추적(divider 라이브 드래그 패턴). 아니면 소비.
+        // 드래그 중이고 선택 행이 slider면 x→ratio로 추적(divider 라이브 드래그 패턴). 아니면 소비. 선택 행의 화면
+        // 위치 = selected - win_start(windowStart가 selected를 창 안에 보장).
         if (!state.dragging or state.selected >= rows.len) return .consumed;
         if (rows[state.selected].kind != .slider) return .consumed;
-        state.pending_ratio = slider.ratioAt(fieldControlRect(l, state.selected), ev.x_px);
+        state.pending_ratio = slider.ratioAt(fieldControlRect(l, state.selected -| l.win_start), ev.x_px);
         return .slider_set;
     }
     // down.
@@ -220,11 +251,15 @@ pub fn handlePointer(
         state.hide();
         return .close;
     }
-    for (rows, 0..) |r, i| {
-        const ctrl = fieldControlRect(l, i);
+    // 보이는 창만 hit-test. vi=화면 행, actual=전체 인덱스(win_start+vi).
+    var vi: usize = 0;
+    while (vi < l.win_len) : (vi += 1) {
+        const actual = l.win_start + vi;
+        const r = rows[actual];
+        const ctrl = fieldControlRect(l, vi);
         const ry: f64 = @floatFromInt(ctrl.y);
         if (ev.y_px >= ry and ev.y_px < ry + @as(f64, @floatFromInt(ctrl.h))) {
-            state.selected = i;
+            state.selected = actual;
             switch (r.kind) {
                 .toggle => return if (toggle.hitTest(toggleRectIn(ctrl, box.ch), ev.x_px, ev.y_px)) .toggle else .selection_changed,
                 .slider => {
@@ -253,6 +288,37 @@ const test_props = props.ChromeProps{ .metrics = .{
 fn testTokens() tokens.Tokens {
     const Rgb = @import("../../color.zig").Rgb;
     return tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+}
+
+test "settings windowStart: 전체≤창=0, 넘치면 selected를 창 안에 끝맞춤·clamp" {
+    try std.testing.expectEqual(@as(usize, 0), windowStart(5, 3, 10)); // 전체(5) ≤ 창(10) → 0
+    try std.testing.expectEqual(@as(usize, 0), windowStart(20, 2, 10)); // selected 2 < 창 → 0
+    try std.testing.expectEqual(@as(usize, 3), windowStart(20, 12, 10)); // selected 12 → start=12-10+1=3
+    try std.testing.expectEqual(@as(usize, 10), windowStart(20, 19, 10)); // 끝(19) → start=20-10=10(clamp)
+    try std.testing.expectEqual(@as(usize, 10), windowStart(20, 25, 10)); // selected 범위 밖이어도 clamp
+}
+
+test "settings view: 행이 창보다 많으면 창만 렌더 + 제목에 위치 표식 + selected가 창 안" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = testTokens();
+    // 작은 뷰포트(backing_height 작게)로 maxVisible를 줄여 윈도잉을 강제한다.
+    const small = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 1000, .backing_height_px = 200 } };
+    var rows: [20]FieldRow = undefined;
+    for (&rows, 0..) |*r, i| r.* = .{ .label = "field", .kind = .{ .toggle = (i % 2 == 0) } };
+    var s = State{};
+    s.show();
+    s.setFieldCount(rows.len);
+    s.selected = 18; // 끝 근처 — 창이 끝으로 스크롤되고 selected가 보여야 한다
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, &rows, small, &tk, arena, &out);
+    const mv = maxVisible(small);
+    try std.testing.expect(mv < rows.len); // 윈도잉 발생(작은 뷰포트)
+    // 제목에 "Settings   19/20" 위치 표식(rows.len > win_len).
+    try std.testing.expect(std.mem.indexOf(u8, out.items[2].text.runs[0].text, "19/20") != null);
+    // 패널 높이가 전체 20행이 아니라 창(mv)만큼이라 뷰포트(200) 안.
+    try std.testing.expect(out.items[0].quad.rect.h <= 200);
 }
 
 test "settings state: show/hide/setFieldCount clamp/moveSelection wrap" {
@@ -339,7 +405,7 @@ test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, slider �
         .{ .label = "A", .kind = .{ .toggle = false } },
         .{ .label = "Size", .kind = .{ .slider = .{ .value = 1, .min = 1, .max = 100 } } },
     };
-    const l = computeLayout(&rows, test_props, &tk).?;
+    const l = computeLayout(&rows, s.selected, test_props, &tk).?;
 
     // 박스 밖(0,0) 좌클릭 → 닫기.
     try std.testing.expectEqual(Action.close, handlePointer(.{ .phase = .down, .x_px = 0, .y_px = 0 }, &rows, test_props, &tk, &s));

@@ -85,7 +85,7 @@ pub const Action = enum { close, toggle, slider_set, adjust_left, adjust_right, 
 const label_gap_cols: u32 = 2; // 라벨과 우측 위젯 사이 최소 간격(칸)
 
 /// control 열 폭(칸) — 모든 행이 같은 우측 열을 공유한다(가장 넓은 위젯=slider 기준). 픽셀 폭을 cw로 ceil. view/
-/// hitTest 단일 출처. toggle은 이 열 안에서 우측정렬(slider 오른쪽 끝과 맞춤).
+/// hitTest 단일 출처. toggle은 이 열 안에서 좌측정렬(slider·dropdown과 같은 시작 x).
 fn controlCols(ch: u32, cw: u32) u32 {
     return (slider.width(ch) + cw - 1) / @max(cw, 1);
 }
@@ -133,7 +133,7 @@ fn computeLayout(rows: []const FieldRow, selected: usize, p: props.ChromeProps, 
     return .{ .box = box, .ctrl_cols = ctrl_cols, .first_field_row = title_rows, .win_start = win_start, .win_len = win_len };
 }
 
-/// 보이는 행 vi(0..win_len)의 control 열 rect(콘텐츠 우측, ctrl_cols 폭, 행 높이). slider는 전체, toggle은 우측정렬.
+/// 보이는 행 vi(0..win_len)의 control 열 rect(콘텐츠 우측, ctrl_cols 폭, 행 높이). slider는 전체, toggle은 좌측정렬.
 fn fieldControlRect(l: Layout, vi: usize) draw.Rect {
     const box = l.box;
     const row = l.first_field_row + @as(u32, @intCast(vi));
@@ -141,10 +141,10 @@ fn fieldControlRect(l: Layout, vi: usize) draw.Rect {
     return .{ .x = ctrl_x, .y = modal_box.rowY(box, row), .w = l.ctrl_cols * box.cw, .h = box.ch };
 }
 
-/// control 열 안의 toggle rect — 우측정렬(slider 오른쪽 끝과 맞춤). hit-test/view 공유.
+/// control 열 안의 toggle rect — **좌측정렬**(ctrl 좌단). slider(전체)·dropdown(좌단 text)과 같은 시작 x라
+/// 세 위젯의 control 열 left edge가 일관된다(text 위젯 전환 후 정렬 통일). hit-test/view 공유.
 fn toggleRectIn(ctrl: draw.Rect, ch: u32) draw.Rect {
-    const w = toggle.width(ch);
-    return .{ .x = ctrl.x + @as(i32, @intCast(ctrl.w -| w)), .y = ctrl.y, .w = w, .h = ch };
+    return .{ .x = ctrl.x, .y = ctrl.y, .w = toggle.width(ch), .h = ch };
 }
 
 const title_text = "Settings";
@@ -184,9 +184,9 @@ pub fn view(
         switch (r.kind) {
             .toggle => |v| {
                 var ts = toggle.State{ .value = v };
-                try toggle.view(&ts, toggleRectIn(ctrl, box.ch), tk, arena, out);
+                try toggle.view(&ts, toggleRectIn(ctrl, box.ch), box.cw, tk, arena, out);
             },
-            .slider => |s| try slider.view(ctrl, FieldRow.sliderRatio(s), tk, arena, out),
+            .slider => |s| try slider.view(ctrl, FieldRow.sliderRatio(s), box.cw, tk, arena, out),
             .dropdown => |cur| try dropdown.view(ctrl, cur, tk, arena, out),
         }
     }
@@ -367,7 +367,7 @@ test "settings handle: ↑↓ 네비·←→ 조절·Space/Enter 토글·Esc 닫
     try std.testing.expect(!s.open);
 }
 
-test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(pill+knob)+slider 행(트랙+채움+thumb)" {
+test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob text)+slider 행(트랙+채움 text)" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -381,20 +381,23 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(pill+knob)+sli
     s.show();
     const rows = [_]FieldRow{
         .{ .label = "Cursor blink", .kind = .{ .toggle = true } },
-        .{ .label = "Font size", .kind = .{ .slider = .{ .value = 14, .min = 1, .max = 512 } } },
+        .{ .label = "Font size", .kind = .{ .slider = .{ .value = 512, .min = 1, .max = 512 } } }, // ratio=1 → 채움 op
     };
     try view(&s, &rows, test_props, &tk, arena, &out);
-    // frame(quad+border)=2, 제목=1. 행0(선택: fill+label+toggle pill+knob)=4. 행1(label + slider 트랙+채움+thumb)=4.
-    try std.testing.expect(out.items[0] == .quad and out.items[1] == .border);
+    // tui: 위젯이 모두 셀 정렬 text(quad 아님 — paintRectBg 셀 번짐·선택 하이라이트 가림 회피). frame(quad+border)=2,
+    // 제목=1. 행0(선택 fill + label + toggle 트랙 text + knob text)=4. 행1(label + slider 트랙 text + 채움 text)=3.
+    try std.testing.expect(out.items[0] == .quad and out.items[1] == .border); // 박스 bg+테두리
     try std.testing.expect(out.items[2] == .text); // 제목
-    try std.testing.expect(out.items[3] == .fill); // 행0 선택 하이라이트
+    try std.testing.expect(out.items[3] == .fill); // 행0 선택 하이라이트(셀 bg)
     try std.testing.expectEqualStrings("Cursor blink", out.items[4].text.runs[0].text);
-    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[5].quad.fill_role); // toggle on(앰버)
-    // 행1: 라벨 + slider(tui — 채움 accent_bar + thumb surface_fg, muted 트랙 없음).
+    try std.testing.expect(out.items[5] == .text); // toggle 트랙(muted) — quad 아님
+    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[5].text.role);
+    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[6].text.role); // toggle knob on(앰버)
+    // 행1: 라벨 + slider 트랙 text(muted) + 채움 text(accent).
     try std.testing.expectEqualStrings("Font size", out.items[7].text.runs[0].text);
-    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[8].quad.fill_role); // slider 채움
-    const lastq = out.items[out.items.len - 1];
-    try std.testing.expectEqual(tokens.ColorRole.surface_fg, lastq.quad.fill_role); // slider thumb
+    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[8].text.role); // slider 트랙
+    const last = out.items[out.items.len - 1];
+    try std.testing.expectEqual(tokens.ColorRole.accent_bar, last.text.role); // slider 채움 █(앰버)
 }
 
 test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, slider 드래그=.slider_set+pending_ratio, 라벨=.selection_changed" {

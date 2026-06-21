@@ -3256,6 +3256,7 @@ pub const AppSession = struct {
             // 커맨드 팝업 토글(Cmd+Shift+P). 열려 있으면 닫고, 아니면 연다(상태머신은 PaletteState).
             .toggle_command_palette => self.togglePalette(),
             .toggle_settings => self.toggleSettings(),
+            .install_cli => self.installCli(), // maru CLI를 PATH에 symlink(결과 notice)
             // 스크롤백 Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState, 검색은 코어).
             .toggle_find => self.toggleFind(),
             // Find 다음/이전 매치(⌘G/⌘⇧G) — 오버레이 닫힌 채도 동작(보존된 검색어로 네비).
@@ -3312,6 +3313,8 @@ pub const AppSession = struct {
         if (self.debug_settings_opened) return;
         if (!self.surface_initialized) return;
         self.debug_settings_opened = true;
+        // MARU_RUN_INSTALL_CLI=1 — "Install CLI" 명령을 첫 frame에 실행해 결과 notice를 캡처(self-verify debug-gate).
+        if (std.c.getenv("MARU_RUN_INSTALL_CLI") != null) self.installCli();
         if (std.c.getenv("MARU_OPEN_SETTINGS") == null) return;
         self.toggleSettings();
         // MARU_OPEN_SETTINGS_SECTION=N — 특정 섹션을 열어 캡처(스크린샷 self-verify용 debug-gate). 미설정=섹션 0.
@@ -3324,6 +3327,51 @@ pub const AppSession = struct {
             self.chrome_host.settings.selected = self.chrome_host.settings.count - 1;
             self.toggleSelectedSetting();
         }
+    }
+
+    /// `maru` CLI를 PATH(`~/.local/bin/maru`)에 symlink 설치한다(커맨드 팝업 "Install CLI"). main.zig install-cli와
+    /// 같은 로직이되, GUI는 selfExePath=앱 바이너리(maru-macos-app)라 **형제 `maru`(CLI)**를 가리킨다. 순수 경로 로직은
+    /// maru.cli.install, 여기선 자기 경로 resolve + mkdir/symlink(std.c) + 결과 notice. sudo 불요 user-level이라 권한 상승 없음.
+    fn installCli(self: *AppSession) void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const exe = std.process.executablePathAlloc(self.io, a) catch {
+            self.showNotice("CLI 설치 실패: 앱 실행 경로를 찾지 못했습니다");
+            return;
+        };
+        const dir = std.fs.path.dirname(exe) orelse {
+            self.showNotice("CLI 설치 실패: 실행 경로 디렉터리가 없습니다");
+            return;
+        };
+        // GUI 바이너리의 형제 `maru`(CLI) — selfExePath는 앱 바이너리라 그대로 link하면 `maru`가 GUI를 띄운다.
+        const cli = std.fmt.allocPrintSentinel(a, "{s}/maru", .{dir}, 0) catch return;
+        if (std.c.access(cli.ptr, 0) != 0) { // F_OK=0(존재 확인). 형제 maru 부재면 명확히 실패(symlink는 dangling을 막음).
+            self.showNotice("CLI 설치 실패: maru CLI 바이너리를 찾지 못했습니다");
+            return;
+        }
+        const home_z = std.c.getenv("HOME") orelse {
+            self.showNotice("CLI 설치 실패: $HOME가 없습니다");
+            return;
+        };
+        const home = std.mem.span(home_z);
+        const bindir = maru.cli.install.binDir(a, home) catch return;
+        const link = maru.cli.install.linkPath(a, home) catch return;
+        // mkdir -p ~/.local/bin(단계별, EEXIST 무시) → 기존 링크 unlink → symlink(재실행 idempotent).
+        const local = std.fmt.allocPrintSentinel(a, "{s}/.local", .{home}, 0) catch return;
+        _ = std.c.mkdir(local.ptr, 0o755);
+        _ = std.c.mkdir(bindir.ptr, 0o755);
+        _ = std.c.unlink(link.ptr);
+        if (std.c.symlink(cli.ptr, link.ptr) != 0) {
+            self.showNotice("CLI 설치 실패: symlink를 만들 수 없습니다");
+            return;
+        }
+        const in_path = if (std.c.getenv("PATH")) |p| maru.cli.install.pathContainsDir(std.mem.span(p), bindir) else false;
+        const msg = if (in_path)
+            std.fmt.allocPrint(a, "maru CLI 설치됨: {s}", .{link}) catch "maru CLI 설치됨"
+        else
+            std.fmt.allocPrint(a, "maru CLI 설치됨: {s} — PATH에 {s} 추가 필요(예: ~/.zshrc)", .{ link, bindir }) catch "maru CLI 설치됨";
+        self.showNotice(msg); // showNotice가 notice_message_buf로 복사하므로 arena deinit 후에도 유효
     }
 
     /// 세팅 화면(⌘,)을 토글한다 — 열려 있으면 닫고, 아니면 다른 오버레이를 닫고 연다(배타적, palette/find와 같은 규율).

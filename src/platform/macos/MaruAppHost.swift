@@ -51,7 +51,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 베이스/결정: Ghostty 드롭 동작을 베이스로 한다(references/ghostty/.../SurfaceView_AppKit.swift) — 우선순위
     // URL > 파일 URL(각각 셸 이스케이프 후 공백으로 join) > 평문(이스케이프 안 함 — 실행할 명령일 수 있음). 코드
     // 표현은 옮기지 않고 maru 독립 구현이다. 이미지를 인라인으로 그리지는 않는다(경로만 — 그래픽 프로토콜은 별도).
-    static let dropTypes: Set<NSPasteboard.PasteboardType> = [.string, .fileURL, .URL]
+    static let dropTypes: Set<NSPasteboard.PasteboardType> = [.string, .fileURL, .URL, .png, .tiff]
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
         guard let types = sender.draggingPasteboard.types,
@@ -1454,6 +1454,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             return
         }
+        if let imagePath = clipboardImageTempPath(pb) {
+            // 스크린샷·복사된 이미지(비트맵, 파일 아님) — 임시 PNG로 저장해 경로를 붙인다. escapeItems=true라 Zig가
+            // 셸 이스케이프 후 bracketed paste로 한 덩어리 전송 → claude/codex가 [Image]로 인식. 파일 URL은 위에서 처리.
+            sendPasteText(imagePath, escapeItems: true)
+            return
+        }
         if let text = pb.string(forType: .string), !text.isEmpty {
             sendPasteText(text, escapeItems: false)
         }
@@ -1480,10 +1486,39 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty {
             return (urls.map { $0.path }.joined(separator: "\u{0}"), true) // 파일 경로들 — 각 이스케이프 후 공백 join
         }
+        if let imagePath = clipboardImageTempPath(pb) {
+            return (imagePath, true) // 드래그된 비트맵 이미지 — 임시 PNG 경로(이스케이프). 파일 URL은 위에서 처리.
+        }
         if let text = pb.string(forType: .string), !text.isEmpty {
             return (text, false)
         }
         return nil
+    }
+
+    /// 클립보드/드래그 pasteboard의 이미지 비트맵(png/tiff)을 임시 PNG 파일로 저장하고 그 경로를 돌려준다(없으면 nil).
+    /// 스크린샷(⌃⌘⇧4)·브라우저 이미지 복사처럼 파일이 아니라 **비트맵 데이터**로 온 이미지를 claude/codex가 [Image]로
+    /// 인식하도록 경로 paste(sendPasteText)에 태우기 위함 — iTerm2/Ghostty도 같은 "비트맵→임시파일→경로" 방식(동작
+    /// 비교만, 독립 구현). PNG가 있으면 그대로, 없고 TIFF면 NSBitmapImageRep로 PNG 변환. 임시 디렉터리(maru-paste)에
+    /// UUID 이름으로 저장한다. 저장 실패 시 nil(호출자는 다음 타입으로 폴백).
+    private func clipboardImageTempPath(_ pb: NSPasteboard) -> String? {
+        let png: Data?
+        if let p = pb.data(forType: .png) {
+            png = p
+        } else if let tiff = pb.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff) {
+            png = rep.representation(using: .png, properties: [:])
+        } else {
+            png = nil
+        }
+        guard let data = png else { return nil }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("maru-paste", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent("\(UUID().uuidString).png")
+            try data.write(to: url)
+            return url.path
+        } catch {
+            return nil
+        }
     }
 
     /// 텍스트를 paste 경로로 PTY에 보낸다 — **bracketed paste**(DECSET 2004) 감싸기·개행 정규화·셸 이스케이프는

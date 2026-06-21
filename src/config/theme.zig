@@ -1,3 +1,27 @@
+// ── 스키마 메타(메타 1급 필드) ────────────────────────────────────────────────────────────────────
+// config sub-struct의 `pub const schema` decl이 필드별 메타를 단다(키 segment·문서·범위·GUI 위젯·섹션).
+// 엔진(parse/serialize)은 src/config/schema.zig가 comptime으로 소비한다. 메타 타입을 여기 두는 이유: schema decl이
+// 이 파일에 있어 import 사이클을 피한다(theme는 schema를 import하지 않는다). 단일 출처: docs/config-schema.md.
+
+/// 세팅 GUI 위젯 종류(타입에서 유추하되 명시 override). CS-4+ 제너릭 렌더러가 소비.
+pub const Widget = enum { auto, toggle, number, slider, dropdown, text, color };
+
+/// 세팅 페이지 좌측 섹션(GUI 그룹). 단일 출처는 settings-page.md §1.
+pub const Section = enum { font, theme, cursor, window, input, terminal, workspace, quick_terminal, sidebar };
+
+/// 한 필드의 메타. 값은 평범한 Zig 필드로 두고(직접 접근 보존), 메타만 sub-struct `schema` decl에 comptime으로 둔다.
+pub const Meta = struct {
+    /// 키 segment override(없으면 필드명 그대로). 전체 키 = `<namespace>.<segment>`(namespace=Config 필드명).
+    /// `-`가 필요한 키만 명시(`size_step` → `"size-step"`). 자동 `_`→`-` 변환은 키가 공개 계약이라 안 한다.
+    key_seg: ?[]const u8 = null,
+    doc: []const u8 = "",
+    /// 숫자 범위(min,max). f32 필드엔 **필수**(파서 검증 + GUI 슬라이더 공유). 그 외 타입엔 null.
+    range: ?[2]f64 = null,
+    /// GUI 위젯(.auto면 타입에서 유추: bool→toggle, enum→dropdown, f32→number, color→color, []const u8→text).
+    widget: Widget = .auto,
+    section: ?Section = null,
+};
+
 pub const FontConfig = struct {
     family: []const u8 = "JetBrains Mono",
     size: f32 = 14,
@@ -14,6 +38,11 @@ pub const FontConfig = struct {
     /// cell_width_px에 가산한다(최소 1px로 saturate). 늘어난 폭은 native 셰이퍼가 glyph를 가로 가운데로 그려 좌우
     /// 여백이 된다(grid 자동 정합). 범위는 아래 const(-8~32 pt — 음수 허용).
     letter_spacing: f32 = 0.0,
+
+    // 스키마-주도 필드(CS-1). 나머지(family·size_step·line_height·letter_spacing)는 CS-2에서 이주.
+    pub const schema = .{
+        .size = Meta{ .key_seg = null, .doc = "폰트 크기(pt)", .range = .{ 1, 512 }, .widget = .number, .section = .font },
+    };
 };
 
 /// font.size-step 허용 범위(단일 출처 — loader 파싱 검증과 appearance resolveFont 검증이 공유해 drift 방지).
@@ -53,6 +82,11 @@ pub const ThemeConfig = struct {
     // OSC4 override → config palette → xterm256(color.zig)이라, OSC4/OSC104/RIS는 OSC4 레이어만 건드리고 config base는
     // 살아남는다(per-core OSC4에 pre-seed하면 RIS가 지우므로 별도 레이어로 둔다). `ls`/`vim`/프롬프트 색 테마 완성용.
     palette: [16]?[]const u8 = .{null} ** 16,
+
+    // 스키마-주도 필드(CS-1). background만 우선 이주 — 나머지 색·palette는 CS-2(+ preset/palette.N 특수 처리 유지).
+    pub const schema = .{
+        .background = Meta{ .doc = "배경색(#RRGGBB)", .widget = .color, .section = .theme },
+    };
 };
 
 /// 이름 붙은 컬러 테마(프리셋). 색 세트의 base를 한 번에 고른다. 기본 maru. loader가 `theme.preset` 키로
@@ -189,6 +223,11 @@ pub const CursorShape = enum {
 pub const CursorConfig = struct {
     shape: CursorShape = .block,
     blink: bool = true,
+
+    pub const schema = .{
+        .shape = Meta{ .doc = "커서 모양", .widget = .dropdown, .section = .cursor },
+        .blink = Meta{ .doc = "커서 깜빡임", .widget = .toggle, .section = .cursor },
+    };
 };
 
 /// 메인 화면(셸)에서 PageUp/PageDown를 어떻게 다룰지. alt 화면(vim/less)에선 어느 쪽이든 항상

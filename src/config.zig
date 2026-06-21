@@ -4,6 +4,7 @@ pub const keybinding = @import("config/keybinding.zig");
 pub const theme = @import("config/theme.zig");
 pub const loader = @import("config/loader.zig");
 pub const serialize = @import("config/serialize.zig");
+pub const schema = @import("config/schema.zig");
 
 pub const Action = action.Action;
 pub const GlobalAction = action.GlobalAction;

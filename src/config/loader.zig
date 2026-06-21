@@ -459,6 +459,14 @@ pub const KeyValue = schema.KeyValue;
 /// 앱(view options 토글)→config 부분 갱신용. 통째 재작성은 사용자 주석·미파싱 키를 전부 잃으므로 택하지
 /// 않았다([document-basis-and-decision]: 보존을 우선). 교체 줄은 `key = value`로 정규화하므로 그 줄에
 /// 달려 있던 인라인 주석/비표준 공백은 사라진다(round-trip 테스트가 보존 범위를 못박는다). 반환은 owned.
+/// config 한 줄에서 key를 뽑는다(주석·빈 줄·`=` 없는 줄은 null). updateConfigText/removeKeys가 줄 식별을 공유한다.
+fn lineKey(raw_line: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
+    if (trimmed.len == 0 or trimmed[0] == '#') return null;
+    const eq = std.mem.indexOfScalar(u8, trimmed, '=') orelse return null;
+    return std.mem.trim(u8, trimmed[0..eq], &std.ascii.whitespace);
+}
+
 pub fn updateConfigText(allocator: std.mem.Allocator, original: []const u8, updates: []const KeyValue) LoadError![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -471,22 +479,18 @@ pub fn updateConfigText(allocator: std.mem.Allocator, original: []const u8, upda
     while (it.next()) |raw_line| {
         if (!first) try out.append(allocator, '\n');
         first = false;
-        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
         var replaced = false;
-        if (trimmed.len > 0 and trimmed[0] != '#') {
-            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
-                const k = std.mem.trim(u8, trimmed[0..eq], &std.ascii.whitespace);
-                for (updates, 0..) |u, i| {
-                    if (std.mem.eql(u8, k, u.key)) {
-                        // **모든** occurrence를 새 값으로 교체한다(첫 줄만 바꾸면 안 된다) — parse()는 같은 키가 여러
-                        // 번이면 last-wins라, 뒤 중복 줄을 stale로 남기면 reload 시 그 옛 값이 이겨 토글이 되돌아간다.
-                        try out.appendSlice(allocator, u.key);
-                        try out.appendSlice(allocator, " = ");
-                        try out.appendSlice(allocator, u.value);
-                        applied[i] = true; // 발견됨 표시(끝에 append 안 하게). guard 없이 매 occurrence를 교체한다.
-                        replaced = true;
-                        break;
-                    }
+        if (lineKey(raw_line)) |k| {
+            for (updates, 0..) |u, i| {
+                if (std.mem.eql(u8, k, u.key)) {
+                    // **모든** occurrence를 새 값으로 교체한다(첫 줄만 바꾸면 안 된다) — parse()는 같은 키가 여러
+                    // 번이면 last-wins라, 뒤 중복 줄을 stale로 남기면 reload 시 그 옛 값이 이겨 토글이 되돌아간다.
+                    try out.appendSlice(allocator, u.key);
+                    try out.appendSlice(allocator, " = ");
+                    try out.appendSlice(allocator, u.value);
+                    applied[i] = true; // 발견됨 표시(끝에 append 안 하게). guard 없이 매 occurrence를 교체한다.
+                    replaced = true;
+                    break;
                 }
             }
         }
@@ -500,6 +504,33 @@ pub fn updateConfigText(allocator: std.mem.Allocator, original: []const u8, upda
         try out.appendSlice(allocator, " = ");
         try out.appendSlice(allocator, u.value);
         try out.append(allocator, '\n');
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// 원본 config 텍스트에서 `keys`에 속한 키의 줄을 **모두 제거**한다(같은 키 중복 줄도 전부). 주석·빈 줄·다른 키·
+/// 미파싱 줄은 그대로 보존하고, updateConfigText와 달리 **append는 하지 않는다**. "Reset to Defaults"가 세팅
+/// override 줄(+ `theme.preset`·`window.padding-x/y` 같은 parse-time 펼침/alias 줄)을 지워 기본값으로 되돌리는 데
+/// 쓴다 — 제거 방식이라 기본값 줄을 새로 쏟지 않아 파일 도배가 없다. 반환은 owned.
+pub fn removeKeys(allocator: std.mem.Allocator, original: []const u8, keys: []const []const u8) LoadError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var it = std.mem.splitScalar(u8, original, '\n');
+    var first = true;
+    while (it.next()) |raw_line| {
+        if (lineKey(raw_line)) |k| {
+            var drop = false;
+            for (keys) |key| {
+                if (std.mem.eql(u8, k, key)) {
+                    drop = true;
+                    break;
+                }
+            }
+            if (drop) continue; // 줄 통째 제거(개행도 안 씀 — 빈 줄을 남기지 않는다)
+        }
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        try out.appendSlice(allocator, raw_line);
     }
     return out.toOwnedSlice(allocator);
 }
@@ -688,6 +719,37 @@ test "updateConfigText: 빈 원본에도 키를 append한다(파일 없음 케�
     const updated = try updateConfigText(a, "", &updates);
     defer a.free(updated);
     try std.testing.expectEqualStrings("sidebar.show-branch = false\n", updated);
+}
+
+test "removeKeys: 지정 키 줄만 제거(주석·다른 키·없는 키 보존, append 없음) — Reset to Defaults" {
+    const a = std.testing.allocator;
+    const original =
+        \\# 내 설정
+        \\font.size = 20
+        \\theme.preset = dracula
+        \\shell.command = /opt/homebrew/bin/fish
+        \\window.padding-x = 12
+        \\
+    ;
+    // Reset 대상: font.size(스칼라)·theme.preset(펼침)·window.padding-x(alias) 제거. shell.command·주석은 보존.
+    // bell.audible은 원본에 없음 — removeKeys는 append하지 않으므로 그대로 부재여야(updateConfigText와의 차이).
+    const keys = [_][]const u8{ "font.size", "theme.preset", "window.padding-x", "bell.audible" };
+    const out = try removeKeys(a, original, &keys);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "font.size") == null); // 제거
+    try std.testing.expect(std.mem.indexOf(u8, out, "theme.preset") == null); // preset 제거 → 기본 테마 복귀
+    try std.testing.expect(std.mem.indexOf(u8, out, "window.padding-x") == null); // alias 제거
+    try std.testing.expect(std.mem.indexOf(u8, out, "# 내 설정") != null); // 주석 보존
+    try std.testing.expect(std.mem.indexOf(u8, out, "shell.command = /opt/homebrew/bin/fish") != null); // 보존(spawn 안정)
+    try std.testing.expect(std.mem.indexOf(u8, out, "bell.audible") == null); // 없던 키는 append 안 함
+
+    // round-trip: 제거된 키는 기본값, 보존된 키는 그대로.
+    var p = try parse(a, out);
+    defer p.deinit();
+    try std.testing.expectEqual(@as(f32, 14), p.config.font.size); // font.size 줄 사라져 기본 14
+    try std.testing.expectEqualStrings("#101010", p.config.theme.background); // preset 사라져 기본 테마
+    try std.testing.expectEqualStrings("/opt/homebrew/bin/fish", p.config.shell.command); // 보존
+    try std.testing.expectEqual(@as(u32, 8), p.config.window_padding_left); // padding-x 사라져 기본 8
 }
 
 test "parse: window padding defaults to left/right=8, top/bottom=4; bad/out-of-range values are forgiving" {

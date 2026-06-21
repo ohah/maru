@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 68u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 69u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -446,6 +446,13 @@ int32_t maru_macos_app_session_paste_text(
    paste하고, 로컬이면 경로를 셸 이스케이프해 paste한다(분기는 Zig). Swift는 fileURL 드롭일 때만 부른다
    (웹 URL·텍스트는 paste_text 유지). (v68) */
 int32_t maru_macos_app_session_drop_files(
+    MaruAppHostSession *session,
+    const uint8_t *bytes,
+    size_t len
+);
+/* 클립보드 이미지(Cmd+V). maru ssh 원격이면 control socket 업로드 후 원격 경로 paste(1 반환),
+   로컬/미처리면 0(Swift가 기존 paste 진행). 파일 드롭과 달리 바이트를 직접 받는다. */
+int32_t maru_macos_app_session_drop_image(
     MaruAppHostSession *session,
     const uint8_t *bytes,
     size_t len

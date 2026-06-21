@@ -297,6 +297,20 @@ pub export fn maru_macos_app_session_drop_files(
     return @intFromEnum(Status.ok);
 }
 
+// 클립보드 이미지(Cmd+V)를 paste한다. maru ssh 원격이면 control socket으로 업로드 후 원격 절대경로를 paste하고
+// 1을 돌려준다(Swift는 더 안 함). 로컬/미처리면 0(Swift가 기존 텍스트·URL paste 진행). 파일 드롭과 달리
+// 경로가 없어 바이트를 직접 받는다(app_session.handleDroppedImage). (v69)
+pub export fn maru_macos_app_session_drop_image(
+    session: ?*AppSession,
+    bytes: ?[*]const u8,
+    len: usize,
+) c_int {
+    const app_session = session orelse return 0;
+    if (len == 0) return 0;
+    const ptr = bytes orelse return 0;
+    return if (app_session.handleDroppedImage(ptr[0..len])) 1 else 0;
+}
+
 // chrome Notice 모달(손상 알림 등)을 연다. Swift가 워크스페이스 복원 손상(workspace_window_count<0)을 감지하면
 // UTF-8 메시지로 부른다. 세션이 복사 소유하므로 호출 뒤 버퍼는 free해도 된다. len==0이면 무동작. (v40)
 pub export fn maru_macos_app_session_show_notice(

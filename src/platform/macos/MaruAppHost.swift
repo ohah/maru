@@ -1444,6 +1444,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // "이스케이프 대상인지"만 판정해 NUL 구분 토큰(escapeItems: true) 또는 raw(false)로 넘긴다. 드래그
         // (handleDrop)는 사용자 제스처라 웹 URL도 이스케이프하는 별도 판정(pasteboardDropPayload)이라 분리한다.
         let pb = NSPasteboard.general
+        // 클립보드 이미지(스크린샷 등): 원격 maru ssh면 Zig가 control socket 업로드+경로 paste(true 반환, 더
+        // 안 함), 로컬이면 false → 아래 기존 처리(로컬은 Claude 등이 OS 클립보드를 직접 읽어 maru 불개입).
+        if let imgData = pb.data(forType: .png) ?? pb.data(forType: .tiff), sendDropImage(imgData) {
+            return
+        }
         if let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty {
             if urls.allSatisfy({ $0.isFileURL }) {
                 // 파일 경로(들) — Zig가 각 경로를 셸 이스케이프 후 공백 join(공백 든 경로가 안 쪼개지게).
@@ -1563,6 +1568,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             maru_macos_app_session_drop_files(session, buf.baseAddress, buf.count)
         }
         return true
+    }
+
+    /// 클립보드 이미지 바이트를 Zig로 보낸다. 원격 maru ssh면 업로드+경로 paste 후 true, 로컬이면 false.
+    private func sendDropImage(_ data: Data) -> Bool {
+        guard let session = appSession, !data.isEmpty else { return false }
+        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
+            guard let base = raw.baseAddress else { return false }
+            return maru_macos_app_session_drop_image(session, base.assumingMemoryBound(to: UInt8.self), raw.count) != 0
+        }
     }
 
     private func copySelectionToPasteboard() {

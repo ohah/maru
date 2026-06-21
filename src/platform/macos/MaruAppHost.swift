@@ -1915,8 +1915,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         try? text.data(using: .utf8)?.write(to: url, options: .atomic)
     }
 
-    /// Reset to Defaults — 런타임 줌(⌘+/−)·여백 변경을 프로그램 처음 실행했던 설정으로 되돌린다(appearance만 — behavior는
-    /// 런타임에 안 바뀌므로 대상 아님). 복원 기준·적용은 Zig가 단일 출처로 한다. 여기선 활성 세션에 호출만 한다.
+    /// Reset to Defaults — config 파일 값이 아니라 하드코딩 공장 기본값으로 되돌린다: 세팅 대상 줄(폰트·색·여백·동작 등)을
+    /// 제거한 텍스트로 런타임을 즉시 재적용하고 같은 텍스트를 config 파일에 영구 반영한다(셸·env·키바인딩·주석은 보존).
+    /// 무엇을 지우고/적용/저장하는지는 Zig가 단일 출처로 한다. 여기선 활성 세션에 호출만 한다.
     @objc private func menuResetDefaults(_ sender: Any?) {
         _ = sender
         guard let session = appSession else { return }

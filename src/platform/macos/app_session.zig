@@ -3267,7 +3267,7 @@ pub const AppSession = struct {
             .increase_font_size => self.adjustFontSize(self.appearance.font.size_step),
             .decrease_font_size => self.adjustFontSize(-self.appearance.font.size_step),
             .reset_font_size => self.resetFontSize(),
-            .reset_settings => self.resetAllSettings(), // 통합 리셋 — 모든 config를 내장 기본값으로 + write-back
+            .reset_settings => self.resetAllSettings(), // 통합 리셋 — 라이브를 내장 기본값으로 + config 파일 삭제(영속까지)
             // 절대 폰트 크기(config 바인딩 `set_font_size:N`). setFontSize가 [6,72]pt로 클램프.
             .set_font_size => |size| self.setFontSize(size),
         }
@@ -4401,48 +4401,44 @@ pub const AppSession = struct {
     /// **통합 리셋**(커맨드 팝업 "Reset All Settings to Defaults") — 모든 config를 **내장 기본값**으로 되돌린다. 메뉴
     /// "Reset to Defaults"(런타임 줌/여백만 → init 설정)와 달리 config 전체다. loaded_config.config를 정적 기본값으로
     /// 갈고(새 arena 불요 — 기본값은 정적 리터럴), reloadConfig와 같은 재적용(appearance·behavior·scrollback·palette·
-    /// ambiguous·사이드바)을 한 뒤, 모든 schema 키를 기본값으로 write-back 예약한다(파일 주석·키바인딩은 보존, 설정 값만
-    /// 기본으로). 키는 정적 리터럴이라 scratch arena 해제 후에도 유효(markConfigKeyDirty가 키만 보관). 사용자 요청.
+    /// ambiguous·사이드바)을 한 뒤, **config 파일을 삭제**해 영속까지 기본값으로 만든다(파일 부재 = 모든 키 기본). 사용자 요청.
     fn resetAllSettings(self: *AppSession) void {
         self.loaded_config.config = config_mod.Config{}; // 내장 기본값(정적 — 옛 arena 문자열은 미참조로 남았다 다음 reload/deinit에 해제)
-        const ap = config_mod.resolveAppearance(self.loaded_config.config) catch {
-            self.showNotice("설정 초기화 실패: appearance를 다시 계산하지 못했습니다");
-            return;
-        };
-        self.applyAppearance(ap); // 옛 family를 더는 안 읽는다(reloadConfig와 같은 순서)
-        self.audible_bell = self.loaded_config.config.bell.audible;
-        self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
-        self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
-        self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
-        self.reapplyScrollback();
-        self.reapplyConfigPalette();
-        self.reapplyAmbiguousWidth();
-        self.rebuildSidebar() catch {};
-        // 모든 schema 키를 기본값으로 write-back 예약(Swift가 drain해 atomic write — 파일 키 값만 기본으로 갱신).
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        var kvs: std.ArrayList(config_mod.schema.KeyValue) = .empty;
-        config_mod.schema.appendSerialized(scratch.allocator(), self.loaded_config.config, &kvs) catch {};
-        for (kvs.items) |kv| self.markConfigKeyDirty(kv.key);
+        self.reapplyLoadedConfig(); // resolve→apply→behavior 캐시→reapply* 재적용(resolve-first 안전; reloadConfig 미러 — 중복 제거, 리뷰 #827)
+        // **config 파일 삭제** → 다음 로드가 빈 상태 = schema·특수 키·주석 전부 기본값(진짜 통합 리셋). schema 키만 dirty로
+        // 찍으면 (a) 비-schema 키(theme.preset/palette/env/cursor.color/shell.args)가 안 지워지고 (b) 빈 config에 기본값
+        // 40개를 쏟는다(override-only 정책 위반 — 리뷰 #827). 그래서 부분 갱신 대신 삭제. Swift write-back이 안 끼게 dirty도
+        // 비운다(삭제 후 GUI 변경은 serializeConfig가 빈 원본에서 새 파일을 만든다 — 자연 복구). unlink는 main.zig 선례.
+        const path = self.configPath();
+        if (path.len > 0 and path.len < std.fs.max_path_bytes) {
+            var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+            @memcpy(pbuf[0..path.len], path);
+            pbuf[path.len] = 0;
+            _ = std.c.unlink(@as([*:0]const u8, @ptrCast(&pbuf)));
+        }
+        self.config_dirty_keys.clearRetainingCapacity();
         self.metal_dirty = true;
         self.showNotice("모든 설정을 기본값으로 초기화했습니다");
     }
 
     /// config.theme의 주 색 4개가 어느 named 프리셋과 일치하는지(없으면 null = "사용자 지정"). 테마 프리셋 dropdown
-    /// 표시·순환의 기준 — theme.preset은 저장 필드가 아니라 색에서 derive(loader가 깐 색을 역으로 식별).
+    /// 표시·순환의 기준 — theme.preset은 저장 필드가 아니라 색에서 derive(loader가 깐 색을 역으로 식별). hex는 대소문자
+    /// 무시 비교(#FFFFFF==#ffffff — loader는 사용자 입력 대소문자를 보존하므로, 리뷰 #827).
     fn detectThemePreset(t: config_mod.theme.ThemeConfig) ?config_mod.theme.ThemePreset {
         inline for (@typeInfo(config_mod.theme.ThemePreset).@"enum".fields) |ef| {
             const p: config_mod.theme.ThemePreset = @enumFromInt(ef.value);
             const pc = config_mod.theme.presetColors(p);
-            if (std.mem.eql(u8, t.background, pc.background) and std.mem.eql(u8, t.foreground, pc.foreground) and
-                std.mem.eql(u8, t.cursor, pc.cursor) and std.mem.eql(u8, t.selection, pc.selection)) return p;
+            if (std.ascii.eqlIgnoreCase(t.background, pc.background) and std.ascii.eqlIgnoreCase(t.foreground, pc.foreground) and
+                std.ascii.eqlIgnoreCase(t.cursor, pc.cursor) and std.ascii.eqlIgnoreCase(t.selection, pc.selection)) return p;
         }
         return null;
     }
 
-    /// 테마 프리셋을 dir(+1 다음/-1 이전)으로 순환 적용한다(테마 섹션 dropdown). 현재가 프리셋이면 이웃, 아니면 0번부터.
-    /// config.theme를 그 색 세트로 통째로 깔고(presetColors — 정적 리터럴이라 dupe 불요) 라이브 재resolve + 주 색 4개
-    /// write-back. (ANSI 팔레트/search 색은 라이브만 — reload 시 기본; theme.preset 키 영속은 후속.)
+    /// 테마 프리셋을 dir(+1 다음/-1 이전)으로 순환 적용한다(테마 섹션 dropdown). 현재가 프리셋이면 그 이웃으로,
+    /// "사용자 지정"(detect=null)이면 forward는 첫(0번) backward는 끝(n-1) — cur_ord를 dir>=0일 때 -1, 아니면 0으로
+    /// 둬 @mod 한 번으로 양방향 진입점을 만든다. config.theme를 그 색 세트로 통째로 깔고(presetColors — 정적 리터럴이라
+    /// dupe 불요) 라이브 재resolve + 주 색 4개만 write-back. **ANSI 16색 팔레트·search/sidebar 색은 라이브에만 반영되고
+    /// 영속 안 됨**(reload·재시작 시 파일의 옛 값으로 복귀) — theme.preset 키 자체 영속은 write-경로 확장이라 후속(§6.3).
     fn applyThemePreset(self: *AppSession, dir: i8) void {
         const Preset = config_mod.theme.ThemePreset;
         const n: i64 = @typeInfo(Preset).@"enum".fields.len;
@@ -14223,14 +14219,29 @@ test "detectThemePreset / applyThemePreset / resetAllSettings: 테마 프리셋�
     };
     try std.testing.expect(saw_bg_dirty);
 
-    // resetAllSettings: 바꾼 값을 기본값으로 + 그 키 dirty.
+    // resetAllSettings: 모든 config를 기본값으로 + **config 파일 삭제** + dirty 비움(write-back 안 함 — 파일 부재가 곧
+    // 영속 기본값). 안전: 실제 사용자 config가 아니라 tmp 파일을 unlink하도록 config_path_buffer를 미리 박는다.
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "font.size = 99\n" });
+    var path_buf: [4096]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/config", .{tmp.sub_path});
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, cfg_path); // 세션 소유 — deinit이 해제
+
     session.config_dirty_keys.clearRetainingCapacity();
     session.loaded_config.config.font.size = 99;
     session.loaded_config.config.cursor.blink = !(config_mod.Config{}).cursor.blink;
     session.resetAllSettings();
-    try std.testing.expectEqual((config_mod.Config{}).font.size, session.loaded_config.config.font.size); // 기본값
+    try std.testing.expectEqual((config_mod.Config{}).font.size, session.loaded_config.config.font.size); // 라이브 기본값
     try std.testing.expectEqual((config_mod.Config{}).cursor.blink, session.loaded_config.config.cursor.blink);
-    try std.testing.expect(session.takeConfigDirty()); // 모든 schema 키 dirty 예약됨
+    try std.testing.expect(!session.takeConfigDirty()); // write-back 예약 없음(파일 삭제로 영속까지 기본 — 부분 갱신 아님)
+    // config 파일이 실제로 지워졌는지(통합 리셋의 핵심).
+    var cfg_z: [4096]u8 = undefined;
+    @memcpy(cfg_z[0..cfg_path.len], cfg_path);
+    cfg_z[cfg_path.len] = 0;
+    try std.testing.expect(std.c.access(@as([*:0]const u8, @ptrCast(&cfg_z)), std.posix.F_OK) != 0); // 부재
 }
 
 // isWindowDragRegion: 헤더 '빈' 영역(아이콘·검색 아님)만 창 드래그/확대 영역(Swift performDrag·zoom). 아이콘·검색·

@@ -125,12 +125,12 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 - **표시값은 색에서 derive**: `detectThemePreset`이 config.theme의 주 색 4개(bg/fg/cursor/selection)를 8종 `presetColors`와 매칭 → 일치하면 그 이름, 없으면 "사용자 지정". 저장 안 해도 현재 프리셋을 안다.
 - **주입**: platform이 theme 섹션 `currentSectionFields.enums`에 **synthetic `EnumField`**(`key="theme.preset"`)를 더한다 → 기존 dropdown/enum 경로 재사용(새 Kind·index 수술 없음).
-- **적용**: 핸들러가 `key=="theme.preset"`만 특수 처리 → `applyThemePreset`이 `config.theme = presetColors(next)`(정적 리터럴) + 라이브 재resolve + 주 색 4개 write-back.
-- **한계(후속)**: ANSI 팔레트/search 색은 라이브만(reload 시 기본 — `theme.preset` 키 자체의 영속은 special write-back 필요), 팝업 그리드.
+- **적용**: 핸들러가 `key=="theme.preset"`만 특수 처리 → `applyThemePreset`이 `config.theme = presetColors(next)`(정적 리터럴) + 라이브 재resolve + **주 색 4개(bg/fg/cursor/selection)만** write-back(`detectThemePreset`이 그 4개로 식별하므로 재시작 후에도 같은 프리셋으로 표시됨).
+- **한계(후속)**: 프리셋이 깐 **ANSI 16색 팔레트·search/sidebar 색은 영속되지 않는다** — 라이브에만 반영되고 reload·재시작 시 config 파일의 옛 값으로 복귀(주 색 4개만 파일에 써지기 때문). 전체 영속은 `theme.preset` 키 자체를 쓰는 write-경로 확장(비-schema 키 직렬화)이 필요해 후속. 팝업 그리드도 후속.
 
 ### 6.4 통합 리셋(Reset All Settings to Defaults)
 
-커맨드 팝업(Cmd+Shift+P) **"Reset All Settings to Defaults"**(action `reset_settings`) — 모든 config를 **내장 기본값**으로 되돌린다. 메뉴 "Reset to Defaults"(런타임 줌/여백만 → init 설정)와 달리 config 전체다. `resetAllSettings`이 `loaded_config.config = Config{}`(정적 기본값, 새 arena 불요)로 갈고 `reloadConfig`와 같은 재적용(appearance·behavior·scrollback·palette·ambiguous·사이드바)을 한 뒤, `appendSerialized`로 **모든 schema 키를 기본값으로 write-back 예약**한다(파일 주석·키바인딩은 보존, 설정 값만 기본). 키는 정적 리터럴이라 소유/해제 불요. (확인 모달은 후속 — 현재는 팝업 제목이 명시적이라 바로 적용.)
+커맨드 팝업(Cmd+Shift+P) **"Reset All Settings to Defaults"**(action `reset_settings`) — 모든 config를 **내장 기본값**으로 되돌린다. 메뉴 "Reset to Defaults"(런타임 줌/여백만 → init 설정)와 달리 config 전체다. `resetAllSettings`이 ① `loaded_config.config = Config{}`(정적 기본값, 새 arena 불요)로 갈고 ② `reapplyLoadedConfig`(=`reloadConfig`와 같은 재적용 — appearance·behavior·scrollback·palette·ambiguous·사이드바)를 한 뒤 ③ **config 파일을 삭제**한다(`std.c.unlink`). 부분 write-back이 아니라 삭제인 이유: schema 키만 dirty로 찍으면 (a) 비-schema 키(`theme.preset`·`palette.N`·`env.*`·`cursor.color`·`shell.args`)가 안 지워지고 (b) override-only write-back 정책상 빈 항목까지 기본값 40여 개를 쏟는다. 파일 부재 = 다음 로드에서 schema·특수 키·주석 전부 기본값(진짜 통합 리셋). 삭제 후 `config_dirty_keys`를 비워 Swift write-back이 끼지 않게 하고, 이후 GUI에서 값을 바꾸면 `serializeConfig`가 빈 원본에서 새 파일을 만든다(자연 복구). (확인 모달은 후속 — 현재는 팝업 제목이 명시적이라 바로 적용.)
 
 ## 7. 의존성
 

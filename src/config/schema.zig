@@ -495,6 +495,32 @@ fn nextPreset(current: []const u8, dir: i8) []const u8 {
     return color_presets[next];
 }
 
+/// ANSI 16색 팔레트(`theme.palette.0`~`.15`)의 **정적 리터럴 키** 16개. 인덱스가 동적이라 markConfigKeyDirty가 키를
+/// dupe 없이 보관하려면 안정된 포인터가 필요하다(스키마 스칼라 키처럼 정적). comptime에 펼쳐 바이너리 상수로 둔다.
+/// 단일 출처: loader의 `theme.palette.N` 핸들러·serialize의 palette emit과 같은 키 표기(`theme.palette.{d}`).
+pub const palette_keys: [16][]const u8 = blk: {
+    var keys: [16][]const u8 = undefined;
+    for (&keys, 0..) |*k, i| k.* = std.fmt.comptimePrint("theme.palette.{d}", .{i});
+    break :blk keys;
+};
+
+/// 인덱스(0~15)의 팔레트 키(정적 리터럴). 범위 밖은 빈 슬라이스(호출처가 가드).
+pub fn paletteKey(idx: usize) []const u8 {
+    if (idx >= palette_keys.len) return &.{};
+    return palette_keys[idx];
+}
+
+/// ANSI 팔레트 한 칸(`theme.palette.idx`)을 hex로 설정한다(팔레트 그리드 인라인 편집 → config). value는 **호출자가
+/// config arena에 미리 소유**시킨 슬라이스여야 한다(라이브 재적용/직렬화가 계속 읽음). 파일 로드(loader)와 같은 규칙
+/// (#RRGGBB 검증 — validatedText(.color))으로 검증해 GUI·파일 드리프트를 막는다. 통과면 set하고 true, 실패/범위 밖은
+/// false(그 칸은 기존값 유지). null로 되돌리는 건 통합 리셋(파일 삭제)이 담당 — 여기선 override만 쓴다.
+pub fn setPaletteColor(config: *theme.Config, idx: usize, value: []const u8) bool {
+    if (idx >= config.theme.palette.len) return false;
+    const v = validatedText(.color, value) orelse return false;
+    config.theme.palette[idx] = v;
+    return true;
+}
+
 /// 키로 문자열([]const u8, widget .text/.color) 스키마 필드를 설정한다(세팅 인라인 편집 → config). value는 **호출자가
 /// config arena에 미리 소유**시킨 슬라이스여야 한다(setText는 슬라이스만 대입 — 라이브 재적용/직렬화가 계속 읽음).
 /// 매칭하는 문자열 필드가 있으면 set하고 true. parse/serialize와 같은 키 순회(단일 출처).
@@ -890,6 +916,24 @@ test "schema cycleColor: 16색 프리셋 순환(현재값 프리셋이면 이웃
     try std.testing.expect(!cycleColor(&cfg, "font.family", 1)); // text 필드
     try std.testing.expect(!cycleColor(&cfg, "cursor.blink", 1)); // bool 필드
     try std.testing.expect(!cycleColor(&cfg, "no.such.key", 1));
+}
+
+test "schema paletteKey/setPaletteColor: 정적 키 표기 + hex 검증 set + 범위 가드 (CS-4-5 palette grid)" {
+    // 정적 리터럴 키 표기는 loader/serialize의 `theme.palette.{d}`와 같아야 한다(write-back 매칭).
+    try std.testing.expectEqualStrings("theme.palette.0", paletteKey(0));
+    try std.testing.expectEqualStrings("theme.palette.15", paletteKey(15));
+    try std.testing.expectEqual(@as(usize, 0), paletteKey(16).len); // 범위 밖 → 빈 슬라이스
+    // 두 번 부른 키 포인터가 같다(정적 — markConfigKeyDirty가 dupe 없이 보관해도 안전).
+    try std.testing.expectEqual(paletteKey(3).ptr, paletteKey(3).ptr);
+
+    var cfg: theme.Config = .{};
+    try std.testing.expect(cfg.theme.palette[1] == null); // 기본 미override
+    try std.testing.expect(setPaletteColor(&cfg, 1, "#d35f5f")); // 유효 hex → set
+    try std.testing.expectEqualStrings("#d35f5f", cfg.theme.palette[1].?);
+    try std.testing.expect(!setPaletteColor(&cfg, 1, "#gggggg")); // 잘못된 hex → false, 기존값 유지
+    try std.testing.expectEqualStrings("#d35f5f", cfg.theme.palette[1].?);
+    try std.testing.expect(!setPaletteColor(&cfg, 1, "red")); // # 형식 아님
+    try std.testing.expect(!setPaletteColor(&cfg, 16, "#ffffff")); // 범위 밖
 }
 
 // ── doc-drift 가드(CS-3): 모든 스키마 키가 configuration.md 키 표에 문서화돼 있어야 한다 ──────────────

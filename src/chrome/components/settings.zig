@@ -4,10 +4,11 @@
 //! 프리미티브, control 위젯은 toggle 등 leaf 컴포넌트를 재사용한다. State(open·selected) + view(rows→박스+행) +
 //! handle(키 네비/토글/닫기) + handlePointer(행/위젯 hit-test). 단일 출처: docs/config-gui.md §2·§4.
 //!
-//! 위젯은 FieldRow.kind union으로 가른다 — bool(toggle)·number(slider)·enum(dropdown)·text(인라인 편집)·color(스와치
-//! + 16색 프리셋 + hex). text는 폰트 패밀리·색 hex를 고정 버퍼로 편집한다(Enter 커밋, Esc 취소 — State.editing/edit_buf).
-//! 레이아웃은 좌측 Section 네비(섹션 목록, platform이 settings.section으로 필터해 폼 주입) + 우측 폼(선택 섹션 필드,
-//! 길면 스크롤 윈도잉) — config-gui §4. 상단 검색은 후속.
+//! 위젯은 FieldRow.kind union으로 가른다 — bool(toggle)·number(slider)·enum(dropdown)·text(인라인 편집)·color(스와치+hex)
+//! ·palette_grid(ANSI 16색 한 줄 그리드). text/color는 고정 버퍼로 hex/문자열을 편집한다(Enter 커밋, Esc 취소 —
+//! State.editing/edit_buf). palette_grid는 16칸이라 control 열을 안 쓰고 폼 우측에 스와치 줄을 펼친다(←→로 셀 선택,
+//! Enter/hex 클릭으로 그 칸 편집 — State.grid_cell). 레이아웃은 좌측 Section 네비(섹션 목록, platform이 settings.section
+//! 으로 필터해 폼 주입) + 우측 폼(선택 섹션 필드, 길면 스크롤 윈도잉) — config-gui §4·§6.5. 폼 검색은 후속.
 
 const std = @import("std");
 const draw = @import("../draw.zig");
@@ -36,9 +37,17 @@ pub const FieldRow = struct {
         dropdown: []const u8, // enum 현재 변형 표시 토큰(클릭/←→로 순환 — platform이 schema.cycleEnum)
         text: []const u8, // 문자열 현재값(폰트 패밀리). 클릭/Enter로 인라인 편집(platform이 schema.setText)
         color: Color, // 색 #RRGGBB — 스와치 + hex. 스와치/←→로 프리셋 순환, hex 클릭으로 편집(platform)
+        palette_grid: PaletteGrid, // ANSI 16색 그리드(theme.palette.0~15) — 스와치 줄 + 선택 셀 hex 편집(CS-4-5)
     };
     pub const Slider = struct { value: f64, min: f64, max: f64 };
     pub const Color = struct { hex: []const u8, rgb: @import("../../color.zig").Rgb }; // 현재 hex + platform이 파싱한 RGB(스와치)
+    /// ANSI 16색 팔레트 그리드. cells[i]=효과색(platform이 config override 또는 xterm256 기본을 resolve), selected=선택 셀
+    /// (=State.grid_cell 주입). 색은 ColorRole이 아니라 원색 — 스와치(Op.swatch)로 그린다(color 위젯과 같은 의도적 예외).
+    pub const PaletteGrid = struct {
+        cells: [16]Cell,
+        selected: usize,
+        pub const Cell = struct { rgb: @import("../../color.zig").Rgb, hex: []const u8 };
+    };
 
     /// 슬라이더 값의 정규화 위치(0..1). min==max면 0(0분모 가드).
     fn sliderRatio(s: Slider) f32 {
@@ -71,6 +80,9 @@ pub const State = struct {
     editing: bool = false,
     edit_buf: [edit_cap]u8 = undefined,
     edit_len: usize = 0,
+    /// palette_grid 행에서 선택된 셀(0~15). ←→가 이 값을 옮기고(platform이 moveGridCell), Enter/hex 클릭이 이 셀을
+    /// 편집한다. 행 1개에 16칸이라 폼의 1D selected와 별도로 둔다(slider 드래그 상태가 별도인 것과 동형).
+    grid_cell: usize = 0,
 
     pub fn show(self: *State) void {
         self.open = true;
@@ -78,6 +90,7 @@ pub const State = struct {
         self.section = 0;
         self.dragging = false;
         self.editing = false;
+        self.grid_cell = 0;
     }
     /// 섹션 전환(좌측 네비 클릭) — 선택 섹션과 첫 필드로. platform이 새 섹션 필드 수를 setFieldCount로 다시 준다.
     pub fn selectSection(self: *State, i: usize) void {
@@ -85,6 +98,13 @@ pub const State = struct {
         self.selected = 0;
         self.dragging = false;
         self.editing = false;
+        self.grid_cell = 0;
+    }
+    /// palette_grid 선택 셀을 delta만큼 옮긴다(wrap, 0..15). platform이 ←→(adjust)에서 호출(선택 행이 palette_grid일 때).
+    pub fn moveGridCell(self: *State, delta: i32) void {
+        const n: i32 = @intCast(palette_count);
+        const cur: i32 = @intCast(@min(self.grid_cell, palette_count - 1));
+        self.grid_cell = @intCast(@mod(cur + delta, n));
     }
     /// 인라인 편집 시작(platform이 text 행 활성 시 호출 — 현재값으로 시드). 버퍼 초과는 잘라 담되, UTF-8 코드포인트
     /// 중간에서 자르지 않게 경계로 back-up한다(리뷰 #823 — 잘린 멀티바이트는 무효 UTF-8 → view/backspace 오작동).
@@ -149,6 +169,16 @@ fn controlCols(ch: u32, cw: u32) u32 {
     return (slider.width(ch) + cw - 1) / @max(cw, 1);
 }
 
+// ── palette_grid 기하(control 열을 공유하지 않는 특수 행 — 16칸은 control 열에 안 들어간다) ───────────────
+const palette_count: u32 = 16; // ANSI 0~15
+const palette_swatch_w: u32 = 2; // 스와치 1칸당 셀 폭(가시성 — 1칸 8px은 너무 작아 2칸)
+const palette_hex_cols: u32 = 12; // 선택 셀 "NN  #rrggbb"(=11) + 좌측 1칸 여백 — 인덱스 표시(셀 색과 무관한 선택 표식)
+
+/// palette_grid 행의 우측 블록 폭(칸) = 16 스와치 + 1 여백 + hex 열. computeLayout이 폼 폭 산정에 쓴다.
+fn paletteGridCols() u32 {
+    return palette_count * palette_swatch_w + 1 + palette_hex_cols;
+}
+
 const nav_gap_cols: u32 = 2; // 좌측 네비와 폼 사이 간격(칸) — 구분 여백
 
 /// 좌측 네비 폭(칸) — 가장 긴 섹션 라벨 + 좌측 1칸 패딩(선택 표식 여유). 빈 목록이면 최소 5.
@@ -195,7 +225,12 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     // 폼 콘텐츠 폭 = max(필드 라벨 + 간격 + control 열). 제목은 박스 상단에 걸치므로 별도 하한으로 본다.
     var form_content: u32 = ctrl_cols + label_gap_cols + 1;
     for (rows) |r| {
-        form_content = @max(form_content, overlay_input.displayCols(r.label) + label_gap_cols + ctrl_cols);
+        // palette_grid는 control 열이 아니라 16칸 그리드 블록을 우측에 둔다(특수 폭).
+        const right_cols: u32 = switch (r.kind) {
+            .palette_grid => paletteGridCols(),
+            else => ctrl_cols,
+        };
+        form_content = @max(form_content, overlay_input.displayCols(r.label) + label_gap_cols + right_cols);
     }
     const title_need = overlay_input.displayCols(title_text) + 12; // 제목 + 스크롤 위치 표식 여유
     const content_cols = @max(nav_cols + nav_gap_cols + form_content, title_need);
@@ -222,6 +257,25 @@ fn fieldControlRect(l: Layout, vi: usize) draw.Rect {
     const row = l.first_field_row + @as(u32, @intCast(vi));
     const ctrl_x = l.form_x + @as(i32, @intCast((l.form_cols -| l.ctrl_cols) * box.cw));
     return .{ .x = ctrl_x, .y = modal_box.rowY(box, row), .w = l.ctrl_cols * box.cw, .h = box.ch };
+}
+
+/// palette_grid 행의 그리드 블록 rect(폼 우측, paletteGridCols 폭 — control 열과 무관, 우측정렬). 16 스와치 + hex.
+fn paletteGridRect(l: Layout, vi: usize) draw.Rect {
+    const box = l.box;
+    const row = l.first_field_row + @as(u32, @intCast(vi));
+    const cols = paletteGridCols();
+    const gx = l.form_x + @as(i32, @intCast((l.form_cols -| cols) * box.cw));
+    return .{ .x = gx, .y = modal_box.rowY(box, row), .w = cols * box.cw, .h = box.ch };
+}
+
+/// 그리드 블록 안 i번째 스와치 셀 rect(palette_swatch_w칸 폭).
+fn paletteSwatchRect(grid: draw.Rect, i: usize, cw: u32, ch: u32) draw.Rect {
+    return .{ .x = grid.x + @as(i32, @intCast(@as(u32, @intCast(i)) * palette_swatch_w * cw)), .y = grid.y, .w = palette_swatch_w * cw, .h = ch };
+}
+
+/// 그리드 블록 안 hex 텍스트 좌단 x(16 스와치 + 1 여백 뒤).
+fn paletteHexX(grid: draw.Rect, cw: u32) i32 {
+    return grid.x + @as(i32, @intCast((palette_count * palette_swatch_w + 1) * cw));
 }
 
 /// control 열 안의 toggle rect — **좌측정렬**(ctrl 좌단). slider(전체)·dropdown(좌단 text)과 같은 시작 x라
@@ -309,6 +363,33 @@ pub fn view(
                 if (editing_this) {
                     const caret_x = color.hexX(ctrl, box.cw) + @as(i32, @intCast(overlay_input.displayCols(shown) * box.cw));
                     try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = ctrl.y, .w = box.cw, .h = box.ch }, .role = .cursor } });
+                }
+            },
+            .palette_grid => |g| {
+                // 16 스와치(원색 Op.swatch) 한 줄 + 선택 셀 테두리(accent) + 선택 셀 hex(편집 중이면 버퍼 + caret).
+                const grid = paletteGridRect(l, vi);
+                var ci: usize = 0;
+                while (ci < palette_count) : (ci += 1) {
+                    const sw = paletteSwatchRect(grid, ci, box.cw, box.ch);
+                    try out.append(arena, .{ .swatch = .{ .rect = sw, .rgb = g.cells[ci].rgb } });
+                }
+                // 선택 표식: 셀 위에 Op.border/fill을 얹으면 tui lowering(paintRectBg)이 1행 높이라 셀 전체를 그 색으로
+                // 칠해 스와치 색을 덮는다. 그래서 그리드 위에는 안 그리고, 우측 "N  #hex" 텍스트의 인덱스가 어느 칸인지
+                // 보여준다(색 무관). 온-그리드 마커(예: reserved 밑줄 프리미티브)는 후속(config-gui §6.5 한계).
+                const editing_this = state.editing and actual == state.selected;
+                const sel = @min(g.selected, palette_count - 1);
+                // "N  #rrggbb"(선택 ANSI 인덱스 + hex). 셀 색이 accent와 비슷하면 테두리가 묻히므로 인덱스 텍스트로 어느
+                // 칸인지 항상 분명히 보여준다(편집 중에도). 편집 중이면 hex 자리는 입력 버퍼, caret이 그 끝에 붙는다.
+                const body: []const u8 = if (editing_this) state.editText() else g.cells[sel].hex;
+                const shown = try std.fmt.allocPrint(arena, "{d}  {s}", .{ sel, body });
+                const text_role: tokens.ColorRole = if (editing_this) .accent_bar else .surface_fg;
+                const hex_x = paletteHexX(grid, box.cw);
+                const runs = try arena.alloc(draw.Run, 1);
+                runs[0] = .{ .text = shown };
+                try out.append(arena, .{ .text = .{ .origin = .{ .x = hex_x, .y = grid.y }, .runs = runs, .role = text_role } });
+                if (editing_this) {
+                    const caret_x = hex_x + @as(i32, @intCast(overlay_input.displayCols(shown) * box.cw));
+                    try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = grid.y, .w = box.cw, .h = box.ch }, .role = .cursor } });
                 }
             },
         }
@@ -436,6 +517,24 @@ pub fn handlePointer(
                         return .selection_changed;
                     },
                     .outside => return .selection_changed,
+                },
+                .palette_grid => |g| {
+                    // 스와치 줄: 어느 칸인지 hit-test → grid_cell 선택. hex 영역 클릭 → 선택 셀 인라인 편집(color hex 클릭과 동형).
+                    const grid = paletteGridRect(l, vi);
+                    const hex_x: f64 = @floatFromInt(paletteHexX(grid, box.cw));
+                    if (ev.x_px >= hex_x) {
+                        const sel = @min(state.grid_cell, palette_count - 1);
+                        state.enterEdit(g.cells[sel].hex);
+                        return .selection_changed;
+                    }
+                    const gx: f64 = @floatFromInt(grid.x);
+                    const sw_w: f64 = @floatFromInt(palette_swatch_w * box.cw);
+                    const span: f64 = sw_w * @as(f64, @floatFromInt(palette_count));
+                    if (ev.x_px >= gx and ev.x_px < gx + span) {
+                        const idx: usize = @intFromFloat((ev.x_px - gx) / sw_w);
+                        state.grid_cell = @min(idx, palette_count - 1);
+                    }
+                    return .selection_changed; // 스와치 선택만(편집은 hex 클릭/Enter — color 행의 select-then-act와 동형)
                 },
             }
         }
@@ -751,6 +850,60 @@ test "settings color: 스와치+hex 렌더, 스와치 클릭→toggle(프리셋 
     try std.testing.expectEqual(Action.selection_changed, hex_act);
     try std.testing.expect(s.editing);
     try std.testing.expectEqualStrings("#ff0000", s.editText());
+}
+
+test "settings palette_grid: 16 스와치 + 선택 셀 테두리·hex 렌더, ←→ 셀 이동(wrap), 스와치/hex 클릭 (CS-4-5)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = testTokens();
+    var cells: [16]FieldRow.PaletteGrid.Cell = undefined;
+    for (&cells, 0..) |*c, i| c.* = .{ .rgb = .{ .r = @intCast(i * 16), .g = 0, .b = 0 }, .hex = "#000000" };
+    cells[2].hex = "#abcdef"; // 선택 셀(2) hex 확인용
+    const rows = [_]FieldRow{.{ .label = "ANSI", .kind = .{ .palette_grid = .{ .cells = cells, .selected = 2 } } }};
+    var s = State{};
+    s.show();
+    s.setFieldCount(rows.len);
+
+    // view: 16 스와치(색은 안 가림 — 선택 셀 위에 fill/border 안 얹음) + "2  #abcdef"(선택 인덱스 + hex) 텍스트.
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    var swatch_count: usize = 0;
+    var has_sel_label = false;
+    for (out.items) |op| {
+        if (op == .swatch) swatch_count += 1;
+        // 선택 셀(2)의 라벨 "2  #abcdef" — 인덱스 접두 + hex가 한 텍스트에.
+        if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, "2  #abcdef") != null) has_sel_label = true;
+    }
+    try std.testing.expectEqual(@as(usize, 16), swatch_count);
+    try std.testing.expect(has_sel_label);
+    // 스와치를 덮는 선택 accent border/fill이 없어야 한다(색 보존) — 모달 frame border(focus_accent)는 허용.
+    for (out.items) |op| {
+        if (op == .border) try std.testing.expect(op.border.role != .accent_bar);
+    }
+
+    // moveGridCell: ←→ wrap(0..15).
+    s.grid_cell = 15;
+    s.moveGridCell(1);
+    try std.testing.expectEqual(@as(usize, 0), s.grid_cell); // 15→0 wrap
+    s.moveGridCell(-1);
+    try std.testing.expectEqual(@as(usize, 15), s.grid_cell); // 0→15 wrap
+
+    // handlePointer: 스와치 5번 클릭 → grid_cell=5, .selection_changed(편집 아님 — select-then-act).
+    const l = computeLayout(no_sections, &rows, 0, test_props, &tk).?;
+    const grid = paletteGridRect(l, 0);
+    const sw5 = paletteSwatchRect(grid, 5, test_props.metrics.cell_width_px, test_props.metrics.cell_height_px);
+    const a1 = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(sw5.x + 2), .y_px = @floatFromInt(sw5.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    try std.testing.expectEqual(Action.selection_changed, a1);
+    try std.testing.expectEqual(@as(usize, 5), s.grid_cell);
+    try std.testing.expect(!s.editing);
+
+    // hex 영역 클릭 → 선택 셀(5) 인라인 편집 시드(cells[5].hex="#000000").
+    const hx = paletteHexX(grid, test_props.metrics.cell_width_px) + 4;
+    const a2 = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(hx), .y_px = @floatFromInt(grid.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    try std.testing.expectEqual(Action.selection_changed, a2);
+    try std.testing.expect(s.editing);
+    try std.testing.expectEqualStrings("#000000", s.editText());
 }
 
 test "settings text view: 행 값 렌더, 편집 중이면 버퍼+caret(cursor fill)" {

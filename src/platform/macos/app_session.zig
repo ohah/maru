@@ -3267,6 +3267,7 @@ pub const AppSession = struct {
             .increase_font_size => self.adjustFontSize(self.appearance.font.size_step),
             .decrease_font_size => self.adjustFontSize(-self.appearance.font.size_step),
             .reset_font_size => self.resetFontSize(),
+            .reset_settings => self.resetAllSettings(), // 통합 리셋 — 모든 config를 내장 기본값으로 + write-back
             // 절대 폰트 크기(config 바인딩 `set_font_size:N`). setFontSize가 [6,72]pt로 클램프.
             .set_font_size => |size| self.setFontSize(size),
         }
@@ -3485,6 +3486,12 @@ pub const AppSession = struct {
         for (nums_all.items) |n| if (n.section == sel_sec) try nums.append(arena, n);
         var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
         for (enums_all.items) |e| if (e.section == sel_sec) try enums.append(arena, e);
+        // theme 섹션엔 named 테마 프리셋(특수 — schema 필드 아님)을 synthetic enum 행으로 주입한다(dropdown 재사용).
+        // 현재값은 config 색에서 derive(매칭 프리셋 @tagName 또는 "사용자 지정"). 핸들러가 key="theme.preset"만 특수 처리.
+        if (sel_sec == .theme) {
+            const cur_name: []const u8 = if (detectThemePreset(self.loaded_config.config.theme)) |p| @tagName(p) else "사용자 지정";
+            try enums.append(arena, .{ .key = "theme.preset", .doc = "테마 프리셋", .current = cur_name, .section = .theme });
+        }
         var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
         for (texts_all.items) |t| if (t.section == sel_sec) try texts.append(arena, t);
         var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
@@ -3556,9 +3563,11 @@ pub const AppSession = struct {
         const after_nums = cf.bools.len + cf.nums.len;
         const after_enums = after_nums + cf.enums.len;
         if (sel >= after_nums and sel < after_enums) {
-            // enum(dropdown) 행 — 활성(클릭/Enter/Space) = 다음 변형 순환.
+            // enum(dropdown) 행 — 활성(클릭/Enter/Space) = 다음 변형 순환. theme.preset은 synthetic(특수)이라 별도 적용.
             const e = cf.enums[sel - after_nums];
-            if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, 1)) {
+            if (std.mem.eql(u8, e.key, "theme.preset")) {
+                self.applyThemePreset(1);
+            } else if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, 1)) {
                 self.reapplyLoadedConfig();
                 self.markConfigKeyDirty(e.key);
             }
@@ -3653,9 +3662,11 @@ pub const AppSession = struct {
         }
         const after_enums = after_nums + cf.enums.len;
         if (sel < after_enums) {
-            // enum(dropdown) 행 — ←/→ = 이전/다음 변형 순환.
+            // enum(dropdown) 행 — ←/→ = 이전/다음 변형 순환. theme.preset은 synthetic(특수)이라 별도 적용.
             const e = cf.enums[sel - after_nums];
-            if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, dir)) {
+            if (std.mem.eql(u8, e.key, "theme.preset")) {
+                self.applyThemePreset(dir);
+            } else if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, dir)) {
                 self.reapplyLoadedConfig();
                 self.markConfigKeyDirty(e.key);
             }
@@ -4385,6 +4396,64 @@ pub const AppSession = struct {
         // 빌드해 즉시 반영한다(config→앱 양방향). rebuildSidebar 실패는 무시(다음 프레임에 자연 복구).
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
+    }
+
+    /// **통합 리셋**(커맨드 팝업 "Reset All Settings to Defaults") — 모든 config를 **내장 기본값**으로 되돌린다. 메뉴
+    /// "Reset to Defaults"(런타임 줌/여백만 → init 설정)와 달리 config 전체다. loaded_config.config를 정적 기본값으로
+    /// 갈고(새 arena 불요 — 기본값은 정적 리터럴), reloadConfig와 같은 재적용(appearance·behavior·scrollback·palette·
+    /// ambiguous·사이드바)을 한 뒤, 모든 schema 키를 기본값으로 write-back 예약한다(파일 주석·키바인딩은 보존, 설정 값만
+    /// 기본으로). 키는 정적 리터럴이라 scratch arena 해제 후에도 유효(markConfigKeyDirty가 키만 보관). 사용자 요청.
+    fn resetAllSettings(self: *AppSession) void {
+        self.loaded_config.config = config_mod.Config{}; // 내장 기본값(정적 — 옛 arena 문자열은 미참조로 남았다 다음 reload/deinit에 해제)
+        const ap = config_mod.resolveAppearance(self.loaded_config.config) catch {
+            self.showNotice("설정 초기화 실패: appearance를 다시 계산하지 못했습니다");
+            return;
+        };
+        self.applyAppearance(ap); // 옛 family를 더는 안 읽는다(reloadConfig와 같은 순서)
+        self.audible_bell = self.loaded_config.config.bell.audible;
+        self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
+        self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
+        self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
+        self.reapplyScrollback();
+        self.reapplyConfigPalette();
+        self.reapplyAmbiguousWidth();
+        self.rebuildSidebar() catch {};
+        // 모든 schema 키를 기본값으로 write-back 예약(Swift가 drain해 atomic write — 파일 키 값만 기본으로 갱신).
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        var kvs: std.ArrayList(config_mod.schema.KeyValue) = .empty;
+        config_mod.schema.appendSerialized(scratch.allocator(), self.loaded_config.config, &kvs) catch {};
+        for (kvs.items) |kv| self.markConfigKeyDirty(kv.key);
+        self.metal_dirty = true;
+        self.showNotice("모든 설정을 기본값으로 초기화했습니다");
+    }
+
+    /// config.theme의 주 색 4개가 어느 named 프리셋과 일치하는지(없으면 null = "사용자 지정"). 테마 프리셋 dropdown
+    /// 표시·순환의 기준 — theme.preset은 저장 필드가 아니라 색에서 derive(loader가 깐 색을 역으로 식별).
+    fn detectThemePreset(t: config_mod.theme.ThemeConfig) ?config_mod.theme.ThemePreset {
+        inline for (@typeInfo(config_mod.theme.ThemePreset).@"enum".fields) |ef| {
+            const p: config_mod.theme.ThemePreset = @enumFromInt(ef.value);
+            const pc = config_mod.theme.presetColors(p);
+            if (std.mem.eql(u8, t.background, pc.background) and std.mem.eql(u8, t.foreground, pc.foreground) and
+                std.mem.eql(u8, t.cursor, pc.cursor) and std.mem.eql(u8, t.selection, pc.selection)) return p;
+        }
+        return null;
+    }
+
+    /// 테마 프리셋을 dir(+1 다음/-1 이전)으로 순환 적용한다(테마 섹션 dropdown). 현재가 프리셋이면 이웃, 아니면 0번부터.
+    /// config.theme를 그 색 세트로 통째로 깔고(presetColors — 정적 리터럴이라 dupe 불요) 라이브 재resolve + 주 색 4개
+    /// write-back. (ANSI 팔레트/search 색은 라이브만 — reload 시 기본; theme.preset 키 영속은 후속.)
+    fn applyThemePreset(self: *AppSession, dir: i8) void {
+        const Preset = config_mod.theme.ThemePreset;
+        const n: i64 = @typeInfo(Preset).@"enum".fields.len;
+        const cur_ord: i64 = if (detectThemePreset(self.loaded_config.config.theme)) |c| @intFromEnum(c) else (if (dir >= 0) -1 else 0);
+        const next: Preset = @enumFromInt(@as(usize, @intCast(@mod(cur_ord + @as(i64, dir) + n, n))));
+        self.loaded_config.config.theme = config_mod.theme.presetColors(next);
+        self.reapplyLoadedConfig();
+        self.markConfigKeyDirty("theme.background");
+        self.markConfigKeyDirty("theme.foreground");
+        self.markConfigKeyDirty("theme.cursor");
+        self.markConfigKeyDirty("theme.selection");
     }
 
     /// "Reset" 메뉴(⌘⇧R) — 활성 터미널 코어의 잔류 입력 모드(focus 1004·mouse·kitty keyboard 등)만
@@ -14121,6 +14190,47 @@ test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist �
         if (std.mem.eql(u8, k, first_key)) found = true;
     }
     try std.testing.expect(found);
+}
+
+test "detectThemePreset / applyThemePreset / resetAllSettings: 테마 프리셋·통합 리셋" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // detectThemePreset: 프리셋 색 세트는 그 프리셋으로 식별, 임의 색은 null.
+    session.loaded_config.config.theme = config_mod.theme.presetColors(.dracula);
+    try std.testing.expectEqual(config_mod.theme.ThemePreset.dracula, AppSession.detectThemePreset(session.loaded_config.config.theme).?);
+    session.loaded_config.config.theme.background = "#123456";
+    try std.testing.expect(AppSession.detectThemePreset(session.loaded_config.config.theme) == null); // 사용자 지정
+
+    // applyThemePreset: dir=+1 적용 → config.theme가 그 프리셋 색 + 주 색 4개 dirty.
+    session.loaded_config.config.theme = config_mod.theme.presetColors(.maru);
+    session.applyThemePreset(1); // maru → 다음(ghostty)
+    try std.testing.expectEqualStrings(config_mod.theme.presetColors(.ghostty).background, session.loaded_config.config.theme.background);
+    try std.testing.expectEqual(config_mod.theme.ThemePreset.ghostty, AppSession.detectThemePreset(session.loaded_config.config.theme).?);
+    var saw_bg_dirty = false;
+    for (session.config_dirty_keys.items) |k| if (std.mem.eql(u8, k, "theme.background")) {
+        saw_bg_dirty = true;
+    };
+    try std.testing.expect(saw_bg_dirty);
+
+    // resetAllSettings: 바꾼 값을 기본값으로 + 그 키 dirty.
+    session.config_dirty_keys.clearRetainingCapacity();
+    session.loaded_config.config.font.size = 99;
+    session.loaded_config.config.cursor.blink = !(config_mod.Config{}).cursor.blink;
+    session.resetAllSettings();
+    try std.testing.expectEqual((config_mod.Config{}).font.size, session.loaded_config.config.font.size); // 기본값
+    try std.testing.expectEqual((config_mod.Config{}).cursor.blink, session.loaded_config.config.cursor.blink);
+    try std.testing.expect(session.takeConfigDirty()); // 모든 schema 키 dirty 예약됨
 }
 
 // isWindowDragRegion: 헤더 '빈' 영역(아이콘·검색 아님)만 창 드래그/확대 영역(Swift performDrag·zoom). 아이콘·검색·

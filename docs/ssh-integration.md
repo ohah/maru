@@ -109,7 +109,7 @@ flowchart TD
    - `maru ssh`가 `OSC 5379 ; ssh ; <dest>`로 목적지를 통지하고(`wrapper_script`의 `notify`, `$TMUX`면 DCS passthrough), Maru가 `dispatchOscMaru`로 받아 `ssh_remote_dest`에 저장한다(`sshRemoteDest()` getter). dest로 `controlSocketPath`를 계산하므로 control socket 경로를 따로 알릴 필요가 없다. control socket이 살아있는 maru exec 경로(캐시 hit·부트스트랩 성공)에서만 통지한다.
 3. **드롭/paste 핸들러가 분기한다. ✅ 3·4단계 구현**
    - **드롭(3단계)**: Swift `handleDrop`이 fileURL 드롭이면 경로(NUL 구분)를 ABI `maru_macos_app_session_drop_files`(v68)로 넘긴다(웹 URL·텍스트는 기존 paste_text). Zig `handleDroppedFiles`가 각 파일을 메인 스레드에서 읽는다(16MB 상한).
-   - **paste(4단계)**: Swift `pastePasteboardText`(Cmd+V)가 클립보드 이미지(png/tiff)면 바이트를 ABI `maru_macos_app_session_drop_image`(v69)로 넘긴다. Zig `handleDroppedImage`가 `pasted-N.png` 이름으로 같은 업로드 경로를 탄다(원격이면 처리=true, 로컬이면 false→Swift가 기존 paste).
+   - **paste(4단계)**: Swift `pastePasteboardText`(Cmd+V)가 클립보드 이미지(png/tiff/jpeg → `clipboardImagePng`가 PNG로 정규화)면 바이트를 ABI `maru_macos_app_session_drop_image`(v69)로 넘긴다. Zig `handleDroppedImage`가 `pasted-<pid>-N.png` 이름(pid로 세션 간 충돌 방지)으로 같은 업로드 경로를 탄다(원격이면 처리=true, 로컬이면 false→Swift가 기존 paste).
    - **공통 업로드**: 로컬 세션이면 경로 셸 이스케이프 paste(드롭)/불개입(paste), maru ssh 원격이면 **백그라운드 스레드**(`startUploadBytes`→`uploadWorker`→`ssh_upload.uploadBytes`)가 control socket에 업로드하고 완료 시 메인 tick(`drainUploadResults`)이 원격 절대경로를 paste한다(드롭은 한 파일도 못 올리면 로컬 경로 폴백). 실행은 **posix fork+pipe**로 ssh 자식 프로세스(0.16 `std.process.Child`가 io 기반이라 백그라운드 스레드에 부적합 — `pty/macos.zig` 패턴). 원격 수신 셸 구절은 `cli/ssh.zig` `uploadShellCommand`(mkdir + cat(stdin→파일) + 절대경로 stdout echo).
 
 ### 4.2 원격 의존성
@@ -154,7 +154,7 @@ flowchart TD
 ## 8. 후속·비범위
 
 - **A(앱 in-band 이미지 입력)**: 전송 계층에 무관한 유일한 길이므로 장기 추적. Claude Code 등에 "stdin in-band 이미지" 또는 OSC 52/5522 기반 입력이 생기면 재검토.
-- **paste(클립보드 이미지) 업로드 ✅ 구현**: Cmd+V로 클립보드 이미지(png/tiff)를 maru ssh 원격에 업로드(ABI v69 `maru_macos_app_session_drop_image` → `app_session.handleDroppedImage` → `startUploadBytes` 공통 경로, `pasted-N.png`). 로컬은 Claude 등이 OS 클립보드를 직접 읽어 maru 불개입. 스크린샷 over SSH 워크플로 완성.
+- **paste(클립보드 이미지) 업로드 ✅ 구현**: Cmd+V로 클립보드 이미지(png/tiff/jpeg → PNG 정규화)를 maru ssh 원격에 업로드(ABI v69 `maru_macos_app_session_drop_image` → `app_session.handleDroppedImage` → `startUploadBytes` 공통 경로, `pasted-<pid>-N.png`, 원격 7일 보존 정리). 로컬은 Claude 등이 OS 클립보드를 직접 읽어 maru 불개입. 스크린샷 over SSH 워크플로 완성.
 - **맨 ssh + tmux control mode 통합**: 사용자 결정(2026-06-21)으로 접속 방식이 `maru ssh` 전용이 되어 **비범위**다. 맨 ssh(사용자가 직접 친)까지 지원하려면 tmux control mode 통합 등 별도 큰 트랙이 필요하며, 기본 설계(B)는 tmux 유무와 무관하므로 이 트랙 없이도 tmux 환경에서 동작한다.
 - **kitty graphics(이미지 *표시*, `implementation-plan.md` K1~K4)와의 관계**: 방향이 반대다(출력 vs 입력). 별개 기능이며 본 설계와 인프라를 공유하지 않는다.
 - **bash/fish용 ssh 통합·`.app` 메뉴 진입점**: 선행 작업 의존으로 별도 추적.

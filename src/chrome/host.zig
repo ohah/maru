@@ -16,6 +16,7 @@ const confirm = @import("components/confirm.zig");
 const find = @import("components/find.zig");
 const palette = @import("components/palette.zig");
 const context_menu = @import("components/context_menu.zig");
+const settings = @import("components/settings.zig");
 
 /// 컴포넌트 handle이 낸 의도를 session이 디스패치할 형태로 host가 정규화한 것. chrome은 config.Action·session을
 /// 모르므로(중립) 부수효과를 직접 안 하고 이 intent만 돌려준다 — platform이 받아 재검색·스크롤·닫기를 실행한다.
@@ -34,6 +35,9 @@ pub const HostAction = union(enum) {
     context_menu_selection_changed,
     confirm_accept, // 확인 모달 Enter/Y — platform이 보류한 닫기(pending_close)를 실행
     confirm_cancel, // 확인 모달 Esc/N — platform이 보류한 닫기를 버린다
+    settings_close, // 세팅 모달 Esc/바깥클릭 — platform이 hide
+    settings_toggle, // 세팅 행 Space/Enter/toggle 클릭 — platform이 rows[selected] 키 flip + 적용
+    settings_selection_changed, // 세팅 행 ↑↓/행 클릭 — platform이 재렌더(부수효과 없음)
 };
 
 pub const ChromeHost = struct {
@@ -43,6 +47,7 @@ pub const ChromeHost = struct {
     find: find.State = .{},
     palette: palette.State = .{},
     context_menu: context_menu.State = .{},
+    settings: settings.State = .{},
 
     /// 컴포넌트 State 중 heap을 든 것(find/palette의 query·preedit)을 해제한다. AppSession.deinit가 부른다.
     pub fn deinit(self: *ChromeHost, allocator: std.mem.Allocator) void {
@@ -108,6 +113,21 @@ pub const ChromeHost = struct {
         if (ops.items.len > 0) try out.append(arena, .{ .layer = context_menu.layer, .ops = ops.items });
     }
 
+    /// settings도 행(FieldRow)을 platform이 config 스키마에서 빌드해 주입해야 그릴 수 있다(palette/context_menu와
+    /// 동형). 닫힘이면 무동작(빈 out).
+    pub fn collectSettingsDraws(
+        self: *ChromeHost,
+        fields: []const settings.FieldRow,
+        p: props.ChromeProps,
+        tk: *const tokens.Tokens,
+        arena: std.mem.Allocator,
+        out: *std.ArrayList(draw.ChromeDraw),
+    ) !void {
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try settings.view(&self.settings, fields, p, tk, arena, &ops);
+        if (ops.items.len > 0) try out.append(arena, .{ .layer = settings.layer, .ops = ops.items });
+    }
+
     /// 입력을 모달 우선으로 라우팅한다. `.key`는 활성 컴포넌트의 키 handle로, `.pointer`는 handlePointer로
     /// 가른다(CS-4-0 — docs/config-gui.md §3). 열린 컴포넌트가 있으면 소비하고 의도(HostAction)를 돌려준다
     /// (session이 디스패치). 열린 게 없으면 null(소비 안 함 — 뒤 터미널로 흘림). 우선순위: Confirm > Notice >
@@ -147,6 +167,14 @@ pub const ChromeHost = struct {
                         .accept => .palette_accept,
                         .query_changed => .palette_query_changed,
                         .selection_changed => .palette_selection_changed,
+                    };
+                }
+                if (self.settings.open) {
+                    return switch (settings.handle(k, &self.settings)) {
+                        .close => .settings_close,
+                        .toggle => .settings_toggle,
+                        .selection_changed => .settings_selection_changed,
+                        .consumed => .none,
                     };
                 }
                 return null;

@@ -166,6 +166,75 @@ fn serializeValue(arena: std.mem.Allocator, val: anytype) ![]const u8 {
     }
 }
 
+// ── 위젯(세팅 GUI)용 스키마 순회 — bool 필드 열거 + 키로 설정 (CS-4-4) ──────────────────────────────
+// 세팅 화면(config-gui.md §2)이 "메타가 곧 UI": platform이 스키마를 순회해 위젯 행을 만든다. parse/serialize와
+// 같은 comptime 순회(topKey/keyOf 단일 출처)를 재사용해, 새 bool 키를 추가하면 GUI에도 자동으로 뜬다(코드 0줄).
+
+/// 한 bool 스키마 필드의 GUI 행 기술자 — key(전체 키, 정적 리터럴)·doc(라벨, 정적)·현재 value. 문자열은 전부
+/// comptime 리터럴(schema decl·키 유도)이라 별도 수명 관리가 필요 없다(프로그램 수명).
+pub const BoolField = struct { key: []const u8, doc: []const u8, value: bool };
+
+/// 스키마'd **bool 필드**를 전부 GUI 행으로 emit한다(appendSerialized의 bool 한정 변형 — 세팅 폼 행 빌드).
+/// 순서는 parse/serialize와 같은 Config 필드 순회 순. list는 호출자(arena) 소유.
+pub fn appendBoolFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(BoolField)) !void {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (@TypeOf(@field(config, sf.name)) == bool) {
+                const meta: theme.Meta = @field(theme.Config.schema, sf.name);
+                const full_key = comptime topKey(sf.name, meta);
+                try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(config, sf.name) });
+            }
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (@TypeOf(@field(@field(config, cf.name), sf.name)) == bool) {
+                    const meta: theme.Meta = @field(sch, sf.name);
+                    const full_key = comptime keyOf(cf.name, sf.name, meta);
+                    try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = @field(@field(config, cf.name), sf.name) });
+                }
+            }
+        }
+    }
+}
+
+/// 키로 bool 스키마 필드를 설정한다(세팅 GUI 토글 → config flip). 매칭하는 bool 필드가 있으면 set하고 true,
+/// 없으면(키 오타·非bool·非스키마) false. parse/serialize와 같은 키 순회라 키 규약이 단일 출처.
+pub fn setBool(config: *theme.Config, key: []const u8, value: bool) bool {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (@TypeOf(@field(config, sf.name)) == bool) {
+                const meta: theme.Meta = @field(theme.Config.schema, sf.name);
+                const full_key = comptime topKey(sf.name, meta);
+                if (std.mem.eql(u8, key, full_key)) {
+                    @field(config, sf.name) = value;
+                    return true;
+                }
+            }
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (@TypeOf(@field(@field(config, cf.name), sf.name)) == bool) {
+                    const meta: theme.Meta = @field(sch, sf.name);
+                    const full_key = comptime keyOf(cf.name, sf.name, meta);
+                    if (std.mem.eql(u8, key, full_key)) {
+                        @field(@field(config, cf.name), sf.name) = value;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
 // ── 파싱 프리미티브(CS-1 한정 중복 — CS-2에서 loader와 단일화 예정) ─────────────────────────────────
 
 fn parseBool(value: []const u8) ?bool {
@@ -337,6 +406,38 @@ test "schema appendSerialized: 스키마'd 필드를 토큰으로(파싱 역대�
 fn find(items: []const KeyValue, key: []const u8) ?[]const u8 {
     for (items) |kv| if (std.mem.eql(u8, kv.key, key)) return kv.value;
     return null;
+}
+
+test "schema appendBoolFields/setBool: bool 필드만 열거하고 키로 설정(세팅 GUI)" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var cfg: theme.Config = .{};
+    cfg.cursor.blink = true;
+
+    var list: std.ArrayList(BoolField) = .empty;
+    try appendBoolFields(arena.allocator(), cfg, &list);
+    // cursor.blink(sub-struct bool)와 text.blink(최상위 bool)가 포함된다(둘 다 스키마'd bool).
+    var saw_cursor_blink = false;
+    var saw_text_blink = false;
+    for (list.items) |f| {
+        if (std.mem.eql(u8, f.key, "cursor.blink")) {
+            saw_cursor_blink = true;
+            try std.testing.expectEqual(true, f.value); // 위에서 true로 설정
+            try std.testing.expect(f.doc.len > 0); // 라벨(doc) 있음
+        }
+        if (std.mem.eql(u8, f.key, "text.blink")) saw_text_blink = true;
+    }
+    try std.testing.expect(saw_cursor_blink and saw_text_blink);
+
+    // setBool: 키로 flip.
+    try std.testing.expect(setBool(&cfg, "cursor.blink", false));
+    try std.testing.expectEqual(false, cfg.cursor.blink);
+    try std.testing.expect(setBool(&cfg, "text.blink", true));
+    try std.testing.expectEqual(true, cfg.blink_text);
+    // 非bool 키(font.size=f32)·非스키마 키 → false(설정 안 함).
+    try std.testing.expect(!setBool(&cfg, "font.size", true));
+    try std.testing.expect(!setBool(&cfg, "no.such.key", true));
 }
 
 // ── doc-drift 가드(CS-3): 모든 스키마 키가 configuration.md 키 표에 문서화돼 있어야 한다 ──────────────

@@ -1618,8 +1618,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let app = NSMenu()
         app.addItem(nativeMenuItem("About maru", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), key: "", mods: []))
         app.addItem(.separator())
-        // Open Config(⌘,) — macOS Settings 관례 자리. config 파일을 기본 편집기로 연다(경로는 Zig가 소유).
-        app.addItem(nativeMenuItem("Open Config…", #selector(menuOpenConfig(_:)), key: ",", target: self))
+        // Open Config… — config 파일을 기본 편집기로 연다(경로는 Zig가 소유). ⌘,는 세팅 화면(toggle_settings)에
+        // 양보했다(config-gui §10) — keyEquivalent 없이 메뉴 클릭 전용. ⌘,는 keyDown → Zig 키바인드 resolver가 처리.
+        app.addItem(nativeMenuItem("Open Config…", #selector(menuOpenConfig(_:)), key: "", target: self))
         // Reload Config — config 파일 편집을 재시작 없이 반영(Zig가 파일 재로드·재적용). Reset to Defaults — 런타임
         // 줌/여백 변경을 프로그램 처음 실행 설정으로 복원(둘 다 단축키 없음 — 메뉴 클릭 전용, 발견성용).
         app.addItem(nativeMenuItem("Reload Config", #selector(menuReloadConfig(_:)), key: "", target: self))

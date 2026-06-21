@@ -787,8 +787,8 @@ bool maru_metal_renderer_draw(
                 cell_h = ch;
                 sx_origin = glyph_pad;
             }
-            // 에이전트 심볼(✳ U+2733 / ✻ U+273B)은 가독을 위해 1.7× 키운다(다른 글리프·밴드는 1.0).
-            const float gscale = (sc.slot_id != 0u && (sc.codepoint == 0x2733u || sc.codepoint == 0x273Bu)) ? 1.7f : 1.0f;
+            // 에이전트 심볼(✳ U+2733 / ✻ U+273B)은 width=2(2칸 slot)로 또렷이 rasterize되므로 stretch는 보조만(1.1×).
+            const float gscale = (sc.slot_id != 0u && (sc.codepoint == 0x2733u || sc.codepoint == 0x273Bu)) ? 1.1f : 1.0f;
             maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h, gscale);
         }
     }

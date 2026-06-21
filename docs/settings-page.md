@@ -117,6 +117,11 @@ config 키 추가 + 기존 경로에 분기 한 줄. GUI 없이 config 파일로
 
 ## 6. 세팅 GUI — chrome 위젯 + 페이지 (Phase G)
 
+> **재정의(2026-06)**: config 계층이 스키마-주도가 되면서([config 스키마](config-schema.md)), 세팅 화면은
+> **스키마 메타(Widget/Section/range/doc)에서 자동 생성**된다 — 스칼라 ~40개는 GUI 코드 0줄. 그래서 아래 G0~G8
+> (필드마다 손 위젯)의 **상당수가 "제너릭 위젯 N종 + 제너릭 렌더러" 하나로 붕괴**한다. 갱신된 단일 출처:
+> **[config GUI(스키마-주도 세팅 화면)](config-gui.md)** (CS-4-0~5). 아래 표는 위젯 종류의 출발 스냅샷으로 남긴다.
+
 기능이 config로 다 들어간 뒤, 그 위에 GUI를 얹는다. **거의 모든 토대가 chrome에 이미 있다** — 텍스트
 입력+caret(Find/팔레트), 토글(context_menu 체크박스), 드롭다운(팔레트), 스크롤 리스트, hit-test 패턴,
 GPU rounded quad, 입력 라우팅(ChromeHost). **신규 리스크는 ① color picker(가장 무거움) ② ChromeHost에

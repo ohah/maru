@@ -380,6 +380,12 @@ pub const TerminalCore = struct {
     // 가정, SSH/원격 구분은 후속). 창 제목 등이 읽는다. 셸 상태라 화면 clear엔 안 지우고 RIS에서만
     // 지운다. 한 번도 안 받았으면 null(빈 cwd).
     cwd: ?[]u8 = null,
+    // maru ssh 전용 OSC(5379)로 받은 원격 세션의 목적지(dest). maru ssh 래퍼가 exec 직전 emit하면
+    // (docs/ssh-integration.md §4) Maru가 저장해 "이 세션은 maru ssh 원격, 목적지=dest"임을 안다 — dest로
+    // cli.ssh.controlSocketPath를 계산해 드롭 파일을 control socket으로 업로드하는 토대(3단계)다. cwd와
+    // 달리 RIS에서 유지한다: ssh 연결은 RIS(터미널 리셋)와 무관하고 maru ssh가 세션 시작에 한 번만
+    // 보고하므로(재보고 없음) 리셋하면 영영 잃는다. destroy(deinit)에서만 해제. 로컬/미수신이면 null.
+    ssh_remote_dest: ?[]u8 = null,
     // OSC 0/2: 프로그램이 지정한 창 제목(xterm ctlseqs — OSC 0=아이콘+제목, OSC 2=제목; OSC 1=아이콘만
     // 무시). core가 소유한다. 셸/앱이 지정하면 창 제목에 우선 쓰고, 없으면 cwd basename으로 폴백한다
     // (windowTitle). 빈 제목(OSC 2 ; ST)은 해제(null)로 본다. RIS에서 공장 초기화. 그리드엔 안 보인다.
@@ -526,6 +532,7 @@ pub const TerminalCore = struct {
     pub fn deinit(self: *TerminalCore) void {
         if (self.preedit) |p| self.allocator.free(p);
         if (self.cwd) |c| self.allocator.free(c);
+        if (self.ssh_remote_dest) |d| self.allocator.free(d);
         if (self.title) |t| self.allocator.free(t);
         self.shell_events.deinit(self.allocator);
         for (self.link_store.items) |uri| self.allocator.free(uri);
@@ -1783,6 +1790,8 @@ pub const TerminalCore = struct {
             self.dispatchOscNotify777(body[4..]); // OSC 777 = rxvt 데스크톱 알림(notify;title;body)
         } else if (std.mem.startsWith(u8, body, "9;")) {
             self.dispatchOscNotify9(body[2..]); // OSC 9 = iTerm2 알림(ConEmu 서브커맨드와 충돌 — 가드)
+        } else if (std.mem.startsWith(u8, body, "5379;")) {
+            self.dispatchOscMaru(body["5379;".len..]); // OSC 5379 = maru 전용 통지(사설 번호; 현재 ssh;<dest>)
         }
         // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
     }
@@ -2772,6 +2781,22 @@ pub const TerminalCore = struct {
         self.recordShellEvent(.cwd_changed); // 값은 currentCwd()가 권위 — 이벤트는 경계만 표시
     }
 
+    /// OSC 5379: maru 전용 통지(사설 OSC 번호 — 표준/벤더 충돌을 피하려 골랐다). payload는
+    /// `<서브커맨드>;<인자...>`. 현재 서브커맨드는 `ssh;<dest>` 하나로, maru ssh 래퍼가 exec 직전 emit해
+    /// "이 세션은 maru ssh 원격 세션, 목적지=dest"임을 Maru에 알린다(docs/ssh-integration.md §4). Maru는
+    /// dest로 cli.ssh.controlSocketPath를 계산해 드롭 파일을 그 control socket으로 업로드한다(3단계).
+    /// 알 수 없는 서브커맨드나 빈 dest는 무시하고(기존 상태 유지), OOM이면 갱신하지 않는다.
+    fn dispatchOscMaru(self: *TerminalCore, body: []const u8) void {
+        var it = std.mem.splitScalar(u8, body, ';');
+        const sub = it.next() orelse return;
+        if (!std.mem.eql(u8, sub, "ssh")) return; // 알 수 없는 서브커맨드는 무시(소비만)
+        const dest = it.rest(); // 첫 필드(sub) 뒤 나머지 전체 = dest(목적지 문자열)
+        if (dest.len == 0) return; // 빈 dest는 무시(기존 dest 유지)
+        const dup = self.allocator.dupe(u8, dest) catch return; // OOM이면 기존 dest 유지
+        if (self.ssh_remote_dest) |old| self.allocator.free(old);
+        self.ssh_remote_dest = dup;
+    }
+
     /// `%XX`를 바이트로 디코드한 새 문자열을 돌려준다(호출자 소유). 잘못된 %escape(두 hex가
     /// 아니거나 끝에서 잘림)는 관대하게 '%'를 리터럴로 두고 계속한다 — path 한 글자가 깨졌다고
     /// 전체를 버리지 않는다. UTF-8 바이트는 그대로 통과(셸이 raw로 보내든 %인코드로 보내든 복원).
@@ -2805,6 +2830,13 @@ pub const TerminalCore = struct {
     /// 창 제목 등 platform layer가 읽는다(facade를 통해 노출).
     pub fn currentCwd(self: *const TerminalCore) []const u8 {
         return self.cwd orelse "";
+    }
+
+    /// maru ssh 전용 OSC(5379 `ssh;<dest>`)로 받은 원격 세션 목적지. maru ssh로 접속한 세션이 아니면
+    /// null이다. platform layer가 드롭 파일 업로드 시 cli.ssh.controlSocketPath(dest)로 control socket
+    /// 경로를 계산하는 데 쓴다(docs/ssh-integration.md §4, 3단계).
+    pub fn sshRemoteDest(self: *const TerminalCore) ?[]const u8 {
+        return self.ssh_remote_dest;
     }
 
     /// OSC 0/2 창 제목을 설정한다(xterm ctlseqs). 빈 텍스트는 해제(null)로 본다 — `OSC 2 ; ST`로
@@ -5157,6 +5189,20 @@ test "terminal core stores size and resizes" {
     try std.testing.expectEqual(@as(u16, 120), snapshot.size.cols);
     try std.testing.expectEqual(@as(u16, 40), snapshot.size.rows);
     try std.testing.expectEqual(@as(usize, 120 * 40), snapshot.cells.len);
+}
+
+test "OSC 5379 ssh: maru ssh 원격 dest를 저장하고 잘못된 payload는 무시한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    try std.testing.expect(core.sshRemoteDest() == null); // 초기엔 로컬(미수신)
+    try core.write("\x1b]5379;ssh;user@host\x07"); // maru ssh 래퍼가 exec 직전 emit하는 통지
+    try std.testing.expectEqualStrings("user@host", core.sshRemoteDest().?);
+    try core.write("\x1b]5379;other;x\x07"); // 알 수 없는 서브커맨드 → 무시(기존 유지)
+    try std.testing.expectEqualStrings("user@host", core.sshRemoteDest().?);
+    try core.write("\x1b]5379;ssh;\x07"); // 빈 dest → 무시(기존 유지)
+    try std.testing.expectEqualStrings("user@host", core.sshRemoteDest().?);
+    try core.write("\x1b]5379;ssh;admin@box\x07"); // 새 dest로 갱신
+    try std.testing.expectEqualStrings("admin@box", core.sshRemoteDest().?);
 }
 
 test "terminal core writes process-like text into cells" {

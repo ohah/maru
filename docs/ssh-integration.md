@@ -105,8 +105,8 @@ flowchart TD
 1. **control socket을 세션 내내 유지하고 경로를 안정화한다.**
    - 현재: 첫 설치 접속에만 `mktemp -u` 랜덤 `$ctl`. 캐시 hit 경로엔 없음.
    - 변경: 캐시 hit 경로에서도 `-o ControlMaster=auto -o ControlPath=<경로>`로 master를 유지하고, 경로는 **목적지 해시 기반 결정론적 경로**로 만들어 Maru가 계산으로 안다(§6 결정 — `maru ssh`와 Maru가 같은 dest 해시로 동일 경로 도출).
-2. **로컬 Maru가 "이 세션이 control socket을 가진 maru ssh 원격 세션"임을 안다.**
-   - control socket 경로 + 목적지(host)를 Maru 터미널 앱에 알린다. OSC 7의 host를 살려서(§1.1, 현재 버림) 원격 인식의 토대로 쓰거나, 전용 OSC로 통지한다(§6).
+2. **로컬 Maru가 "이 세션이 maru ssh 원격 세션"임을 안다. ✅ 2단계 구현**
+   - `maru ssh`가 `OSC 5379 ; ssh ; <dest>`로 목적지를 통지하고(`wrapper_script`의 `notify`, `$TMUX`면 DCS passthrough), Maru가 `dispatchOscMaru`로 받아 `ssh_remote_dest`에 저장한다(`sshRemoteDest()` getter). dest로 `controlSocketPath`를 계산하므로 control socket 경로를 따로 알릴 필요가 없다. control socket이 살아있는 maru exec 경로(캐시 hit·부트스트랩 성공)에서만 통지한다.
 3. **드롭 핸들러가 분기한다 (1차: 드롭만, paste 업로드는 후속).**
    - 로컬 세션: 지금처럼 로컬 경로 paste.
    - maru ssh 원격 세션: 드롭 바이트를 control socket으로 업로드(`ssh -S <ctl> <host> 'mkdir -p ... && base64 -d > <원격경로>'`에 base64 파이프) → 성공하면 **원격 경로**를 메인 PTY로 paste. 실패하면 명확히 보고(조용한 실패 금지, `project-rules.md` §전략 유지).
@@ -136,7 +136,7 @@ flowchart TD
 - **접속 방식 = `maru ssh` 전용.** 이미지/파일 드롭 전송은 `maru ssh`로 접속한 세션에서만 동작한다. control socket이 그 경로에서만 확보되고, 구현이 단순하며, tmux 유무와 무관하기 때문이다. 맨 `ssh`(사용자가 직접 친) 지원은 **비범위** — Maru가 개입할 지점이 없어 control socket을 심을 수 없고, 지원하려면 tmux control mode 통합 등 별도 큰 트랙이 필요하므로 [후속](#8-후속비범위)으로 둔다. 사용자는 접속을 `maru ssh <dest>`로 통일한다(`maru ssh`는 ssh 인자를 그대로 넘기므로 `~/.ssh/config` 호스트 별칭도 동일하게 쓴다).
 - **control socket 경로 규약 = 목적지 기반 결정론적 해시.** `maru ssh`와 로컬 Maru가 같은 규약으로 목적지(dest) 문자열을 해시해 **동일 경로**를 도출한다(예: `~/.cache/maru/ctl-<dest 해시 앞부분>`). Maru가 경로를 OSC 통지 없이 **계산으로** 알 수 있고, 같은 host 재접속이 같은 master를 공유한다. unix socket 경로 길이 제한(macOS 약 104바이트)을 넘지 않게 해시를 짧게 자른다.
 - **트리거 = 드롭만 (1차).** 파일/이미지 드래그앤드롭만 업로드한다. paste(클립보드 이미지) 업로드는 [후속](#8-후속비범위)으로 둔다.
-- **원격 인식 토대 = `maru ssh` 전용 OSC 통지.** `maru ssh`가 `exec` 직전에 "maru ssh 세션 + dest"를 전용 OSC로 한 번 emit하고, **tmux passthrough(`DCS tmux; … ST` 래핑)로 감싸** tmux 안에서도 로컬 Maru까지 도달하게 한다. Maru는 이를 받아 세션을 "maru ssh 원격, dest=X"로 표시하고, dest로 control socket 경로 해시를 계산한다. maru 외 터미널은 모르는 OSC라 무시하므로 안전하다(OSC 번호는 사설 영역에서 구현 시 배정). OSC 7 host 보관은 원격 cwd 표시용 보조로만 남긴다(원격 인식의 주 신호는 이 전용 OSC).
+- **원격 인식 토대 = `maru ssh` 전용 OSC 통지 (OSC 5379).** `maru ssh`가 `exec` 직전에 `OSC 5379 ; ssh ; <dest> BEL`을 emit하고(`cli/ssh.zig` `wrapper_script`의 `notify` — control socket이 살아있는 maru exec 경로에서만), **`$TMUX`가 있으면 DCS tmux passthrough로 감싸** tmux 안에서도 로컬 Maru까지 도달하게 한다. Maru(`terminal/core.zig` `dispatchOscMaru`)는 이를 받아 `ssh_remote_dest`에 dest를 저장하고(`sshRemoteDest()` getter), dest로 control socket 경로 해시를 계산한다. **5379**는 표준/벤더(iTerm 1337 등) 충돌을 피한 사설 번호이고, payload는 `<서브커맨드>;<인자>` 형식(현재 `ssh;<dest>`)이라 확장 가능하다. 모르는 터미널은 무시하므로 안전하다. RIS에선 유지한다(ssh 연결은 터미널 리셋과 무관, maru ssh가 재보고하지 않음). OSC 7 host 보관은 원격 cwd 표시용 보조로만 남긴다.
 
 ### 미결정 (구현 전 합의 필요)
 

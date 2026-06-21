@@ -226,7 +226,7 @@ test "sidebarGlyphRow 인코딩 값 고정 (slot*32 + line_count*4 + line_index 
 
 /// 탭별 카드를 1~4줄로 합성한다: line0=이름(📌 포함), 이어서 branches[i]·paths[i]·statuses[i](각 있으면)를 한
 /// 줄씩. ""인 보조줄은 건너뛰어 줄 수가 줄고 남은 줄이 위로 당겨진다. `agents[i]`가 0이 아니면 그 코드포인트(✳ claude/
-/// ✻ codex)를 **슬롯 세로 중앙(count=1)·col 0** 아이콘으로 따로 그리고, 텍스트 줄은 그만큼(icon_cols) 우측으로
+/// ✻ codex)를 **슬롯 세로 중앙(count=1)·col 0·width 2(2칸)** 아이콘으로 따로 그리고, 텍스트 줄은 그만큼(icon_cols=3) 우측으로
 /// 들여 아이콘이 줄 수와 무관하게 워크스페이스 가운데에 보이게 한다. 세로 위치는 sidebarGlyphRow로 인코딩(렌더러가
 /// 슬롯 안 블록 중앙 정렬). cols 넘으면 "…" 말줄임. 이름줄 전경색은 `fg`(활성 탭 active_fg+bold), 보조줄은 `fg`
 /// (흐림). 깨진 UTF-8은 U+FFFD. `close_row`면 그 슬롯 이름줄 우측 안쪽에 닫기 ✕ 1개. 순수 함수라 OS 무관 단위 테스트.
@@ -248,7 +248,7 @@ pub fn buildSidebarDrawList(
     errdefer cells.deinit(allocator);
 
     const style: terminal.Style = .{ .foreground = fg };
-    const icon_cols: u16 = 2; // 에이전트 아이콘 자리(아이콘 1칸 + 간격)
+    const icon_cols: u16 = 3; // 에이전트 아이콘 자리(아이콘 2칸 + 간격 1칸) — 왼쪽 독립 gutter
     var max_row: u16 = 0;
     for (names, 0..) |name, i| {
         if (i > @as(usize, std.math.maxInt(u16)) / sidebar_line_base) break; // slot*32+…가 u16 한도 안에 들게
@@ -258,7 +258,7 @@ pub fn buildSidebarDrawList(
         const text_col: u16 = if (agent_cp != 0) icon_cols else 0;
         if (agent_cp != 0) {
             const icon_row = sidebarGlyphRow(i, 0, 1);
-            try cells.append(allocator, .{ .row = icon_row, .col = 0, .codepoint = agent_cp, .width = 1, .style = style });
+            try cells.append(allocator, .{ .row = icon_row, .col = 0, .codepoint = agent_cp, .width = 2, .style = style });
             max_row = @max(max_row, icon_row);
         }
         // 이 탭의 줄 모으기: 이름(항상) + 브랜치(있으면) + 경로(있으면) + 상태(에이전트면). 순서대로 line_index
@@ -776,21 +776,22 @@ test "buildSidebarDrawList agent icon: centered at col 0 independent of lines; t
     var dl = try buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &agents, 30, .default, null, null, null, .default);
     defer dl.deinit(allocator);
 
-    // 아이콘 ✳: 슬롯 세로 중앙(count=1, idx0) col 0 — 3줄 블록(count=3)과 무관한 독립 위치.
+    // 아이콘 ✳: 슬롯 세로 중앙(count=1, idx0) col 0·width 2 — 3줄 블록(count=3)과 무관한 독립 위치.
     var icon_centered = false;
     for (dl.cells) |c| {
         if (c.codepoint == 0x2733) {
             try std.testing.expectEqual(sidebarGlyphRow(0, 0, 1), c.row);
             try std.testing.expectEqual(@as(u16, 0), c.col);
+            try std.testing.expect(c.width == 2); // 2칸 아이콘(또렷) — 회귀 방지
             icon_centered = true;
         }
     }
     try std.testing.expect(icon_centered);
-    // 텍스트(이름 'm', 3줄 카드의 idx0)는 아이콘 자리만큼 들여써져 col>=2.
+    // 텍스트(이름 'm', 3줄 카드의 idx0)는 아이콘 자리(icon_cols=3)만큼 들여써져 col>=3.
     var name_indented = false;
     for (dl.cells) |c| {
         if (c.codepoint == 'm' and c.row == sidebarGlyphRow(0, 0, 3)) {
-            try std.testing.expect(c.col >= 2);
+            try std.testing.expect(c.col >= 3);
             name_indented = true;
         }
     }

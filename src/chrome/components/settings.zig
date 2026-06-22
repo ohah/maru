@@ -75,7 +75,7 @@ const pick_sv_cols: u32 = 16; // 채도 0~100
 const pick_sv_rows: u32 = 8; // 명도 100~0(위→아래)
 const pick_swatch_w: u32 = 2; // 셀당 2칸(가시성)
 const pick_hue_cols: u32 = 16; // hue 0~360
-const pick_help = "←→ 채도  ↑↓ 명도  [ ] 색상  Enter 확정  Esc 취소";
+const pick_help = "←→ 채도  ↑↓ 명도  [ ] 색상  ⇧ 미세조정  Enter 확정  Esc 취소";
 // picker 콘텐츠 행: 제목(0) + SV 그리드(1..pick_sv_rows) + hue 스트립 + 미리보기 + 도움말.
 const pick_hue_row: u32 = 1 + pick_sv_rows;
 const pick_preview_row: u32 = pick_hue_row + 1;
@@ -660,26 +660,45 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
                 return .selection_changed; // picker만 닫고 폼 복귀(모달 유지)
             },
             .enter => return .color_picked,
+            // 화살표: 기본은 그리드 **셀** 이동(빠른 coarse), **Shift**면 ±1 미세(연속 해상도 — 0~100/0~359 임의 값 도달).
+            // 셀-그리드는 이산 샘플이지만 pick_s/v/h는 full precision으로 저장되므로, Shift 미세 조정이 그 사이 값을 채운다.
             .left => {
-                const col = svColForSat(state.pick_s);
-                if (col > 0) state.pick_s = svSatForCol(col - 1);
+                if (k.mods.shift) {
+                    state.pick_s -|= 1; // 미세 -채도(saturating)
+                } else {
+                    const col = svColForSat(state.pick_s);
+                    if (col > 0) state.pick_s = svSatForCol(col - 1);
+                }
                 return .selection_changed;
             },
             .right => {
-                const col = svColForSat(state.pick_s);
-                if (col + 1 < pick_sv_cols) state.pick_s = svSatForCol(col + 1);
+                if (k.mods.shift) {
+                    state.pick_s = @min(100, state.pick_s + 1); // 미세 +채도
+                } else {
+                    const col = svColForSat(state.pick_s);
+                    if (col + 1 < pick_sv_cols) state.pick_s = svSatForCol(col + 1);
+                }
                 return .selection_changed;
             },
             .up => {
-                const row = svRowForVal(state.pick_v);
-                if (row > 0) state.pick_v = svValForRow(row - 1);
+                if (k.mods.shift) {
+                    state.pick_v = @min(100, state.pick_v + 1); // 미세 +명도
+                } else {
+                    const row = svRowForVal(state.pick_v);
+                    if (row > 0) state.pick_v = svValForRow(row - 1);
+                }
                 return .selection_changed;
             },
             .down => {
-                const row = svRowForVal(state.pick_v);
-                if (row + 1 < pick_sv_rows) state.pick_v = svValForRow(row + 1);
+                if (k.mods.shift) {
+                    state.pick_v -|= 1; // 미세 -명도
+                } else {
+                    const row = svRowForVal(state.pick_v);
+                    if (row + 1 < pick_sv_rows) state.pick_v = svValForRow(row + 1);
+                }
                 return .selection_changed;
             },
+            // 색상: `[`/`]` 셀 이동(coarse), `{`/`}`(=Shift+[/]) ±1° 미세(연속 해상도). h는 0~359 wrap.
             .char => {
                 if (k.codepoint == '[') {
                     const c = hueColForHue(state.pick_h);
@@ -689,6 +708,14 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
                 if (k.codepoint == ']') {
                     const c = hueColForHue(state.pick_h);
                     state.pick_h = hueForCol((c + 1) % pick_hue_cols);
+                    return .selection_changed;
+                }
+                if (k.codepoint == '{') { // Shift+[ — 미세 -1°
+                    state.pick_h = if (state.pick_h == 0) 359 else state.pick_h - 1;
+                    return .selection_changed;
+                }
+                if (k.codepoint == '}') { // Shift+] — 미세 +1°
+                    state.pick_h = (state.pick_h + 1) % 360;
                     return .selection_changed;
                 }
                 return .consumed;
@@ -1450,6 +1477,39 @@ test "settings HSV picker: openPicker 시드·SV/hue 스와치 렌더·←→↑
     const oa = handlePointer(.{ .phase = .down, .x_px = -10, .y_px = -10 }, no_sections, &rows, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, oa);
     try std.testing.expect(!s.picking);
+}
+
+test "settings HSV picker 미세 조정: Shift+화살표 ±1 채도/명도, {/} ±1° hue (연속 해상도 — 그리드 셀 사이 값)" {
+    var s: State = .{};
+    s.openPicker(.{ .r = 128, .g = 64, .b = 200 }); // 임의 시드(s,v < 100, h 임의)
+    // Shift+→ = 채도 +1(셀 점프 말고 ±1 미세 — 0~100 임의 값 도달).
+    const s0 = s.pick_s;
+    try std.testing.expect(s0 < 100);
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .right, .mods = .{ .shift = true } }, &s));
+    try std.testing.expectEqual(@as(u8, s0 + 1), s.pick_s);
+    // Shift+← = 채도 -1(복귀).
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .left, .mods = .{ .shift = true } }, &s));
+    try std.testing.expectEqual(s0, s.pick_s);
+    // Shift+↑ = 명도 +1.
+    const v0 = s.pick_v;
+    try std.testing.expect(v0 < 100);
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .up, .mods = .{ .shift = true } }, &s));
+    try std.testing.expectEqual(@as(u8, v0 + 1), s.pick_v);
+    // }/{ = hue ±1°(wrap) — Shift+]/[ 의 char.
+    const h0 = s.pick_h;
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .char, .codepoint = '}' }, &s));
+    try std.testing.expectEqual(@as(u16, (h0 + 1) % 360), s.pick_h);
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .char, .codepoint = '{' }, &s));
+    try std.testing.expectEqual(h0, s.pick_h);
+
+    // 미세는 그리드 셀 경계와 무관 — 평범한 → 셀 점프와 다른 값에 도달 가능(연속 해상도 입증).
+    // s0+1이 svColForSat이 가리키는 셀의 정확한 채도(svSatForCol)와 일반적으로 다름(셀은 0,6,13,...).
+    s.pick_s = s0;
+    _ = handle(.{ .key = .right, .mods = .{ .shift = true } }, &s); // s0+1
+    const fine = s.pick_s;
+    s.pick_s = s0;
+    _ = handle(.{ .key = .right }, &s); // 셀 점프(다음 셀의 svSatForCol)
+    try std.testing.expect(s.pick_s != fine or svSatForCol(svColForSat(s0) + 1) == s0 + 1); // 보통 셀≠미세(셀이 우연히 s0+1이면 예외)
 }
 
 test "settings 검색: '/'로 시작·char 쿼리·Backspace·↑↓ 나비·Enter 활성·Esc 종료 + 제목 렌더 (CS-4-4 검색)" {

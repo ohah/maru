@@ -173,7 +173,7 @@ Node = leaf(Pane)
   비면 collapse). 탭 바에 드롭하면 그 pane으로 Term 이동(PR-E2), 본문에 드롭하면 split 생성으로 갈린다. 드래그
   중에는 드롭 타겟 zone을 **반투명 하이라이트**(④b — `premultipliedRgba`로 미리 곱해 터미널이 비침)로 미리 보이고,
   끌리는 탭은 **floating 탭 미리보기**(박스+제목)가 커서를 따라간다(`buildFloatingTabFrame`, 맨 위 frame).
-  **호버 커서(②)**: divider=↔/↕ resize, 사이드바 경계=↔, "+"=손가락, 터미널=I-beam.
+  **호버 커서(②)**: divider=↔/↕ resize, 사이드바 경계=↔, pane grip=✋ openHand(드래그 손잡이), 탭/"+"=손가락(pointingHand), 터미널=I-beam.
 
 ### Pane을 워크스페이스로 분리·합치기 (드래그, 구현됨)
 
@@ -182,14 +182,17 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
 넘기는 **워크스페이스 간** 이동이다. 모델상 워크스페이스 = SplitTree 루트, Pane = leaf라 "leaf를 한 트리에서 떼
 다른 트리에 심기"라는 트리 연산으로 깔끔히 떨어진다 — Term을 옮기지 않고 `*Pane` 포인터를 통째로 재부모화한다.
 
-- **드래그 손잡이(베이스/결정)**: pane 탭바 **좌측 grip 핸들**(항상 보이는 ⠿ 글리프, `pane_grip_cols`=2칸 예약)을
-  잡으면 Pane 통째 드래그, **Term 탭**을 잡으면 기존대로 Term 1개 드래그(④)로 갈린다. **라벨 세그먼트만으로는 부족**
-  하다(custom_name 없는 pane은 라벨 폭이 0이라 잡을 자리가 없다 — `paneLabelCols`) → grip을 **이름 유무와 무관하게
-  항상 예약**해 모든 pane이 끌리게 한다(사용자 결정). custom_name이 있으면 grip 뒤에 이름이 붙는다(`paneBar`가
-  `grip_cols`+`label_cols`로 탭 영역을 우측 offset). 같은 탭바에서 "잡는 자리"로만 단위를 구분하므로 새 chrome가
-  필요 없다(`tab_drag_*`와 분리된 `pane_drag_*` arm; 좁은 바는 탭 영역 최소 `pane_min_tab_cols` 보장 위해 grip 생략).
-  **사이드바 카드 드래그(워크스페이스 순서 재정렬, `sidebar_drag_*`)와는 시작 위치로 구분**된다 — pane 드래그는
-  터미널 영역(pane 탭바 grip)에서 시작, 워크스페이스 재정렬은 사이드바 카드에서 시작.
+- **드래그 손잡이(베이스/결정)**: pane 탭바 **좌측 grip 핸들**(항상 보이는 ⠿ 글리프, `pane_grip_cols`=3칸 예약 —
+  좌패딩 + 글리프 중앙(`cols/2`) + 우패딩으로 글리프가 좌단·divider에 안 붙게)을 잡으면 Pane 통째 드래그, **Term 탭**을
+  잡으면 기존대로 Term 1개 드래그(④)로 갈린다. **라벨 세그먼트만으로는 부족**하다(custom_name 없는 pane은 라벨 폭이
+  0이라 잡을 자리가 없다 — `paneLabelCols`) → grip을 **이름 유무와 무관하게 항상 예약**해 모든 pane이 끌리게 한다(사용자
+  결정). custom_name이 있으면 grip 뒤에 이름이 붙는다(`paneBar`가 `grip_cols`+`label_cols`로 탭 영역을 우측 offset). 같은
+  탭바에서 "잡는 자리"로만 단위를 구분하므로 새 chrome가 필요 없다(`tab_drag_*`와 분리된 `pane_drag_*` arm; 좁은 바는 탭
+  영역 최소 `pane_min_tab_cols` 보장 위해 grip 생략). **호버 시 커서는 openHand(`CursorKind.grab`)** 로 바뀌어 드래그
+  가능을 알린다(`updateHoveredTab`이 좌측 grip+라벨 세그먼트를 `BarHover.grip`으로 구분 → `hoverCursor` → Swift
+  `NSCursor.openHand`; 탭/‹›/+ 영역은 기존대로 pointingHand). **사이드바 카드 드래그(워크스페이스 순서 재정렬,
+  `sidebar_drag_*`)와는 시작 위치로 구분**된다 — pane 드래그는 터미널 영역(pane 탭바 grip)에서 시작, 워크스페이스
+  재정렬은 사이드바 카드에서 시작.
 - **드롭 위치별 동작(단일 분기)**: 사이드바 드롭 좌표를 `sidebarSlotAt`로 해석해 ① **기존 워크스페이스 카드 위** →
   그 워크스페이스에 **합치기**, ② **빈 사이드바 영역**(카드 목록 아래/"+" 부근) → **새 단독 워크스페이스 생성**.
   사이드바 밖(원래 pane 본문·탭바)이면 ④ 경로(새 split/Term 이동) 그대로다.

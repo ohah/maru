@@ -158,7 +158,7 @@ Node = leaf(Pane)
   하이라이트·클릭. **PR-E**: 탭 드래그(pane 내/간). **PR-F**: "+" 버튼.
 - **탭 바 "+" 버튼(PR-F)**: 바 우측에 "+"를 그려 클릭하면 그 pane에 새 Term을 띄운다(⌘T의 마우스 버전). 바를
   `paneTabAreaCols(cols)`(넓으면 `cols - 3`, 좁으면 전체)로 나눠 **탭 영역**과 우측 **"+" 영역**을 분리한다 — 탭
-  렌더·hit-test(`tabIndexInBar`/`xInTabCloseZone`)·"+"(`xInPlusZone`)가 같은 분할을 공유해 "보이는 = 클릭되는"을
+  렌더·hit-test(tabbar `Metrics`의 `tabIndex`/`segOf`로 탭 인덱스, `inCloseZone`으로 ✕)·"+"(`inPlusZone`)가 같은 분할을 공유해 "보이는 = 클릭되는"을
   지킨다. cmux 비교상 "+"는 새 **탭(Term)** 추가이며, split은 ⌘D/⌘⇧D·divider(PR6)로 둔다.
 - **divider 렌더·드래그 리사이즈(PR6)**: 두 panel 사이 경계에 divider 선을 그리고, 끌어서 비율을 조절한다. 선은
   layout을 안 바꾸고(틈 없이 abut) **seam 중심 overlay 셀**로 터미널 위·커서 아래에 그린다(`metal_frame.replace`의

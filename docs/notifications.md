@@ -57,12 +57,15 @@
 
 - **히스토리(ring buffer)**: `NotificationHistoryItem { title, body, surface_id, timestamp_ns, is_read, is_agent }`.
   `pendingNotification()`이 드레인하는 단일 funnel에서 `pushNotificationHistory`로 보관한다(에이전트 큐 버퍼는 OS 배너로
-  move되므로 히스토리는 **다시 dupe**). 상한(`notification_history_cap=64`) 초과 시 가장 오래된 것을 버린다.
-  `notification_unread`는 안 읽은 개수 캐시(push/markRead/cap-drop 3곳에서만 증감).
-- **사이드바 헤더 종 + 배지**: 헤더 우측 아이콘 줄에 종(🔔, `cols-12`) + 안 읽은 개수 배지(coral) — 1~9는 숫자
-  1칸(`cols-10`), 10개 이상은 "9+" 2칸(`cols-10·cols-9`).
-  `HeaderRegion.notifications` zone은 `headerHit`(렌더 `buildSidebarHeaderFrame`과 같은 col)이 단일 출처 —
-  안 그리면 hit-test도 none(`cols < 13` 좁은 사이드바). 아이콘 4개(종·◧·⚙·+)가 3칸 간격으로 우측 정렬.
+  move되므로 히스토리는 **다시 dupe**). 상한은 config `notifications.history-limit`(기본 64, 8~512 — §1과 같은 단일 출처)이고,
+  push마다 다시 읽어 초과 시 가장 오래된 것을 버린다(cap-drop은 `pushNotificationHistory` 안). `notification_unread`는
+  안 읽은 개수 캐시(아래 "읽음/지우기 액션"의 5곳 — push/markRead/delete/markAll/clear 헬퍼에서만 증감, 단일 출처).
+- **사이드바 헤더 종 + 배지**: 헤더 우측 아이콘 줄에 4개 아이콘이 3칸 간격으로 우측 정렬된다 — 종(🔔)·접기(◧)·
+  view options(⚙)·새 워크스페이스(+)가 각각 `cols-11`·`cols-8`·`cols-5`·`cols-2`. 종은 EAW 2칸이라 `cols-11·cols-10`을
+  점유한다(1칸 아이콘과 중심 간격 정렬). 안 읽은 개수 배지(coral)는 **종 한 칸 왼쪽**부터 — 1~9는 숫자 1칸(`cols-12`),
+  10개 이상은 "9+" 2칸(`cols-13·cols-12`). `HeaderRegion.notifications` zone은 `headerHit`(렌더 `buildSidebarHeaderFrame`과
+  같은 col)이 단일 출처 — 종 글리프(`cols-11·cols-10`)+배지(`cols-12`)를 포함하는 3칸 zone `[cols-12, cols-9)`. 안 그리면
+  hit-test도 none(`cols < 13` 좁은 사이드바, 우측 아이콘 4개가 안 들어감).
 - **떠 있는 카드 패널**: `src/chrome/components/notifications.zig`(context_menu를 본뜸). 한 항목 = **2줄 카드**
   (제목 + 본문), 안읽음 점(●), 우측 상대시간("N분 전"), 닫힌 surface는 회색(`muted_fg` role). `layout`(폭·높이·스크롤
   윈도우·위치 clamp)을 view·hitTest·panelRect가 공유(보이는 카드 == 클릭되는 카드). 카드 구분선은 `.fill`(1px)로 —
@@ -90,7 +93,8 @@
   (`activateSurfaceById`), 히스토리 모델·정렬·상대시간 포맷, chrome 컴포넌트(state·hit-test·draw ops), 헤더 zone.
 - **Swift**: `UNUserNotificationCenter` 표시/권한/delegate, 창 키 활성화(`makeKeyAndOrderFront`/`NSApp.activate`),
   알림 `userInfo`에 정수 2개(`wt`/`sid`) 싣기·꺼내기, 전면 표시 스타일 적용(`willPresent`). 정책 결정은 안 한다.
-- **ABI**: `MARU_MACOS_APP_HOST_ABI_VERSION`(현재 v78) 주석이 ABI 함수의 단일 출처다 — `pending_notification`
+- **ABI**: `app_host_abi.h`의 `MARU_MACOS_APP_HOST_ABI_VERSION` 매크로(+ `app_session.zig` `abi_version` 상수, Zig
+  크로스체크가 동기 강제)가 ABI 버전의 단일 출처다. 알림 함수는 **v78에서 도입**됐다 — `pending_notification`
   (`surface_id`/`foreground` out) + `activate_surface(session, surface_id) → found`. 인앱 알림 센터는 chrome 오버레이라
   추가 ABI가 없다(Swift 무변경).
 

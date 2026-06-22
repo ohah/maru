@@ -42,12 +42,13 @@ dirty region에 박혀 있어 렌더 파이프라인 재설계가 필요하고, 
 | 섹션 | 포함 config 네임스페이스 | 주요 항목 |
 |---|---|---|
 | **Appearance › Font** | `font.*` | family, size, line-height, letter-spacing, (신규) family-bold/italic, fallback |
-| **Appearance › Theme** | `theme.*`, `chrome.theme` | preset(최상단·활성 시 개별 색·palette 잠금→클릭 시 "사용자 지정" 전환), 개별 색, palette 16, search/sidebar 색, bold-is-bright, follow-system |
+| **Appearance › Theme** | `theme.*`, `chrome.theme` | preset(최상단·활성 시 개별 색·palette 잠금→클릭 시 "사용자 지정" 전환), 개별 색, palette 16, bold-is-bright, follow-system (search_match\*/sidebar_\*는 config 키가 없어 preset에서 파생 — 직접 편집/노출 안 함, theme.zig 상단 주석) |
 | **Appearance › Cursor** | `cursor.*` | shape, blink, color/text, (신규) blink-interval, unfocused |
 | **Appearance › Window** | `window.*` | padding, (신규) opacity, blur, background-image, unfocused-dim |
 | **Input › Keys** | `input.*` | page-keys, shift-enter, ime-enter, (신규) option-as-meta |
 | **Input › Mouse** | `input.*` | (신규) url-click-modifier, right-click, mouse-hide-while-typing, word-separators, scroll.* |
-| **Keybindings** | `keybind` | 액션 카탈로그 전체 + 인라인 리바인드/unbind/매크로 |
+| (Input 안의 keybind 행) | `keybind` | 별도 네비 섹션이 아님 — 인앱 keybind 녹음 행은 **Input** 섹션에 접혀 든다(action 카탈로그 전체 + 인라인 리바인드/unbind, config-gui.md §6.7). `keybind` Section enum 멤버는 없다 |
+| **Global Hotkey** | (전역 OS 단축키) | schema 필드 없는 특수 섹션 — 전역 OS 단축키 녹음 행만(global action별 한 행, app_session이 강제 포함·라벨 "글로벌 핫키"). 매크로 rhs는 config 파일 직접 편집(후속) |
 | **Terminal** | `term`, `scrollback.*`, `bell.*`, `notifications.*`, `osc52.*`, `shell.*`, `env.*` | TERM, 스크롤백, 벨(audible/visual/badge), 알림, OSC52 read, 셸/인자, env |
 | **Workspace** | `workspace.*` | root, tab/split inherit-cwd |
 | **Quick Terminal** | `quick-terminal.*` | height/width/position/screen/auto-hide/chrome/minimal-tabs |
@@ -69,7 +70,7 @@ dirty region에 박혀 있어 렌더 파이프라인 재설계가 필요하고, 
 | PR | 내용 | 난이도 | 상태 |
 |---|---|---|---|
 | **S0-1a** | **역파싱 코어** `config.configKeyValues(arena, Config) → []KeyValue`(`src/config/serialize.zig`) — parse의 대칭 역연산. 전 필드를 정규 토큰으로(enum은 명시 매핑 — `commit-only` 등; palette는 non-null만; float은 `{d}` shortest round-trip). **round-trip 대칭 테스트**(`parse(render(configKeyValues(cfg))) == cfg`)가 parse/serialize 누락을 못박는다. | 중간 | ✅ 구현·green(1058/1060). `updateConfigText` 재사용 |
-| **S0-1b** ✅ | **per-key write-back 일반화** — `serialize.updateForKeys(original, config, keys)`가 넘긴 키만 현재값으로 `updateConfigText` 부분 갱신(즉시-저장 GUI 결정에 맞춤 — full-config diff 대신 변경 키만; **override-only by construction**). `serializeSidebarConfig`를 이걸로 재구현(bool 손코드 제거, byte-identical). | 낮음 | ✅ 머지. dirty 비트마스크·전체 diff는 불필요(즉시-저장은 변경 키만 씀); GUI는 같은 `updateForKeys` 경로 |
+| **S0-1b** ✅ | **per-key write-back 일반화** — `serialize.updateForKeys(original, config, keys)`가 넘긴 키만 현재값으로 `updateConfigText` 부분 갱신(즉시-저장 GUI 결정에 맞춤 — full-config diff 대신 변경 키만; **override-only by construction**). 사이드바 write-back 경로(`serialize_sidebar_config` ABI export, snake_case 이름은 호환 유지 — `AppSession.serializeConfig`가 래핑)도 이 `updateForKeys`를 쓴다(bool 손코드 제거, byte-identical). | 낮음 | ✅ 머지. dirty 비트마스크·전체 diff는 불필요(즉시-저장은 변경 키만 씀); GUI는 같은 `updateForKeys` 경로 |
 | **S0-2** | config 파일 **자동 감지 reload** — macOS `DispatchSource`/FSEvents watcher(Swift), debounce(0.5~1s), 편집 중 불완전 파일 회피(.tmp→rename 가정), 기존 `reloadConfig` 재사용. `behavior.auto-reload`로 끌 수 있게. | 낮음~중간 | 🔜 Zig는 변경 없음(reload 이미 있음). watcher만 platform(Swift) |
 
 > 경계: write-back은 **앱→파일**(GUI 편집 저장), reload는 **파일→앱**(외부 편집 감지). 둘은 직교하며 같은

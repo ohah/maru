@@ -35,8 +35,9 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | `[]const u8` (widget=`.text`) | text input | 현재값(IME) |
 | `[]const u8` (widget=`.color`) | color input | 현재 #RRGGBB |
 
-- **섹션**: `Meta.section`(font/theme/cursor/window/input/terminal/workspace/quick_terminal/sidebar)이 좌측
-  네비 그룹이 된다. 같은 section 필드가 한 패널에 모인다.
+- **섹션**: `Meta.section`(font/theme/cursor/window/input/terminal/workspace/quick_terminal/sidebar/global_hotkey)이 좌측
+  네비 그룹이 된다. 같은 section 필드가 한 패널에 모인다. `global_hotkey`는 schema 필드가 없는 특수 섹션이라
+  app_session이 강제로 목록에 넣는다(전역 OS 단축키 녹음 행만 — §6.7 keybind 선례).
 - **설명**: `Meta.doc`가 행 라벨/툴팁. (풍부한 비고는 configuration.md가 단일 출처 — GUI는 짧은 doc.)
 - **검증**: 입력값은 **parse와 같은 경로**(schema.tryParse)로 검증해 GUI와 파일이 같은 규칙을 쓴다(드리프트 없음).
 - **현재값/변경**: 현재값=resolved/raw Config. 변경=그 키만 write-back(override). 입력 즉시 또는 저장 버튼(§10 결정).
@@ -201,7 +202,8 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 ## 7. 의존성
 
 - **S0-1b** ✅(머지) — `serialize.updateForKeys(original, config, keys)`로 **변경 키만** write-back(즉시-저장 결정에
-  맞춤; override-only by construction — 기본값 40개를 안 쏟는다). `serializeSidebarConfig`가 이걸로 재구현됨. GUI도
+  맞춤; override-only by construction — 기본값 40개를 안 쏟는다). 사이드바 write-back 경로(`serialize_sidebar_config`
+  ABI export, snake_case 이름은 호환 유지 — `AppSession.serializeConfig`가 래핑)도 이 `updateForKeys`를 쓴다. GUI도
   같은 경로(바뀐 필드의 키를 넘김). (full-config diff·dirty 비트마스크는 불필요 — 즉시-저장은 키 단위.)
 - **CS-4-0**(ChromeHost pointer) — 슬라이더·색 그리드 선결.
 - **S0-2**(자동 reload) — 외부 편집 즉시 반영(선택, GUI와 직교).
@@ -211,7 +213,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 | PR | 내용 | 검증 |
 |---|---|---|
-| **S0-1b** ✅ | per-key write-back(`updateForKeys` — 변경 키만, override-only) + `serializeSidebarConfig` 재구현 | ✅ 머지(순수 단위) |
+| **S0-1b** ✅ | per-key write-back(`updateForKeys` — 변경 키만, override-only) + 사이드바 write-back 경로(`serialize_sidebar_config` ABI export) 재구현 | ✅ 머지(순수 단위) |
 | **CS-4-0** ✅ | `ChromeHost` pointer 이벤트(InputEvent + 라우팅 + drag) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-1** ✅ | 위젯 컴포넌트 toggle·dropdown·text/number·slider(neutral State+view+handle) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-2** ✅ | color input(16색 프리셋 + hex 입력) | ✅ 머지(헤드리스 + 실기) |

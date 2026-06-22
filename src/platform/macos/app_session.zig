@@ -1155,6 +1155,9 @@ pub const AppSession = struct {
     // unbind 예약된 keybind action(keybind recorder 해제) — `keybind = chord = action` 줄을 action 기준으로 제거한다
     // (key=value가 아니라 전용 removeKeybindLines). action은 command_catalog 정적 키. serializeConfig가 체이닝, takeConfigDirty가 봄.
     config_keybind_removed: std.ArrayList([]const u8) = .empty,
+    // 빌트인 단축키 죽이기 — `keybind = <chord> = unbind` 지시어로 쓸 chord 표기 목록(loaded_config.arena 소유). 사용자
+    // override 제거(위)로 안 죽는 빌트인 chord를 ignored로. serializeConfig가 appendKeybindUnbinds로 체이닝, takeConfigDirty가 봄.
+    config_keybind_unbinds: std.ArrayList([]const u8) = .empty,
     // 시각 확인 디버그 훅: MARU_OPEN_SETTINGS env가 있으면 첫 frame에서 세팅 화면을 자동으로 연다(스크린샷
     // 하니스가 입력 없이 모달 상태를 캡처하게 — MARU_DEBUG와 같은 env-gate). env 미설정이면 무동작. 한 번만 연다.
     debug_settings_opened: bool = false,
@@ -3459,9 +3462,10 @@ pub const AppSession = struct {
         fn paletteRowIndex(self: SettingsSectionFields) ?usize {
             return if (self.has_palette) self.nonSpecialTotal() else null;
         }
-        /// keybind 행들의 첫 selected 인덱스(있으면 schema 필드 다음 — input 섹션엔 palette 없음). 없으면 null.
+        /// keybind 행들의 첫 selected 인덱스(있으면 schema 필드 + palette 다음). 교차 섹션 검색에선 palette(theme)와
+        /// keybind(input)가 같이 나올 수 있어 palette 한 행을 오프셋에 더한다(없으면 0). 없으면 null.
         fn keybindRowStart(self: SettingsSectionFields) ?usize {
-            return if (self.keybind_entries.len > 0) self.nonSpecialTotal() else null;
+            return if (self.keybind_entries.len > 0) self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) else null;
         }
     };
 
@@ -3537,26 +3541,28 @@ pub const AppSession = struct {
         try config_mod.schema.appendTextFields(arena, self.loaded_config.config, &texts_all);
         var colors_all: std.ArrayList(config_mod.schema.ColorField) = .empty;
         try config_mod.schema.appendColorFields(arena, self.loaded_config.config, &colors_all);
-        // 검색 쿼리(현재 섹션 폼 필터 — 라벨/키 부분일치). 모든 행 종류에 같은 settingsRowMatches 규칙을 적용해 view·핸들러
-        // 인덱싱이 일관되게 한다(필터는 여기 단일 출처). 빈 쿼리면 전부 통과.
+        // 검색 쿼리(폼 필터 — 라벨/키 부분일치). 모든 행 종류에 같은 settingsRowMatches 규칙을 적용해 view·핸들러 인덱싱이
+        // 일관되게 한다(필터는 여기 단일 출처). 빈 쿼리면 전부 통과. **쿼리가 있으면(cross) 섹션 게이트를 무시**해 전 섹션의
+        // 매칭 행을 보여준다(교차 섹션 검색 — 설정이 어느 섹션인지 몰라도 찾는다). 빈 쿼리면 현재 섹션만.
         const q = self.chrome_host.settings.searchQuery();
+        const cross = q.len > 0;
         var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
-        for (bools_all.items) |b| if (b.section == sel_sec and settingsRowMatches(b.doc, b.key, q)) try bools.append(arena, b);
+        for (bools_all.items) |b| if ((cross or b.section == sel_sec) and settingsRowMatches(b.doc, b.key, q)) try bools.append(arena, b);
         var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
-        for (nums_all.items) |n| if (n.section == sel_sec and settingsRowMatches(n.doc, n.key, q)) try nums.append(arena, n);
+        for (nums_all.items) |n| if ((cross or n.section == sel_sec) and settingsRowMatches(n.doc, n.key, q)) try nums.append(arena, n);
         var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
-        for (enums_all.items) |e| if (e.section == sel_sec and settingsRowMatches(e.doc, e.key, q)) try enums.append(arena, e);
+        for (enums_all.items) |e| if ((cross or e.section == sel_sec) and settingsRowMatches(e.doc, e.key, q)) try enums.append(arena, e);
         // theme 섹션엔 named 테마 프리셋(특수 — schema 필드 아님)을 synthetic enum 행으로 주입한다(dropdown 재사용).
         // 현재값은 config 색에서 derive(매칭 프리셋 @tagName 또는 "사용자 지정"). 핸들러가 key="theme.preset"만 특수 처리.
-        if (sel_sec == .theme and settingsRowMatches("테마 프리셋", "theme.preset", q)) {
+        if ((cross or sel_sec == .theme) and settingsRowMatches("테마 프리셋", "theme.preset", q)) {
             const cur_name: []const u8 = if (detectThemePreset(self.loaded_config.config.theme)) |p| @tagName(p) else "사용자 지정";
             try enums.append(arena, .{ .key = "theme.preset", .doc = "테마 프리셋", .current = cur_name, .section = .theme });
         }
         var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
-        for (texts_all.items) |t| if (t.section == sel_sec and settingsRowMatches(t.doc, t.key, q)) try texts.append(arena, t);
+        for (texts_all.items) |t| if ((cross or t.section == sel_sec) and settingsRowMatches(t.doc, t.key, q)) try texts.append(arena, t);
         // terminal 섹션엔 특수 키(schema 필드 아님)를 synthetic text 행으로 주입한다(theme.preset enum 선례 — .text 위젯
         // 재사용, 핸들러가 key로 라우팅). shell.args(공백-토큰 리스트) + env.<KEY> 각 행(값 편집) + env 추가 행(KEY=VALUE).
-        if (sel_sec == .terminal) {
+        if (cross or sel_sec == .terminal) {
             if (settingsRowMatches("셸 인자 (공백 구분)", "shell.args", q))
                 try texts.append(arena, .{ .key = "shell.args", .doc = "셸 인자 (공백 구분)", .value = try std.mem.join(arena, " ", self.loaded_config.config.shell.args), .section = .terminal });
             for (self.loaded_config.config.env) |entry| {
@@ -3568,14 +3574,15 @@ pub const AppSession = struct {
                 try texts.append(arena, .{ .key = "env.", .doc = "환경 변수 추가 (KEY=VALUE)", .value = "", .section = .terminal }); // 추가 행(빈 KEY = sentinel)
         }
         var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
-        for (colors_all.items) |c| if (c.section == sel_sec and settingsRowMatches(c.doc, c.key, q)) try colors.append(arena, c);
+        for (colors_all.items) |c| if ((cross or c.section == sel_sec) and settingsRowMatches(c.doc, c.key, q)) try colors.append(arena, c);
         // theme 섹션엔 ANSI 16색 팔레트 그리드 한 행, input 섹션엔 command_catalog 액션별 keybind 행(둘 다 특수 — schema
         // 필드 아님). 검색 쿼리로도 필터한다(palette=한 행, keybind=매칭 액션만). 핸들러가 selected 인덱스로 라우팅.
+        // 교차 검색에선 palette(theme)·keybind(input)가 함께 나올 수 있어 keybindRowStart가 palette 오프셋을 더한다.
         var keybinds: std.ArrayList(command_catalog.Entry) = .empty;
-        if (sel_sec == .input) {
+        if (cross or sel_sec == .input) {
             for (command_catalog.entries) |entry| if (settingsRowMatches(entry.title, entry.key, q)) try keybinds.append(arena, entry);
         }
-        const palette_on = (sel_sec == .theme) and settingsRowMatches("ANSI 팔레트", "theme.palette", q);
+        const palette_on = (cross or sel_sec == .theme) and settingsRowMatches("ANSI 팔레트", "theme.palette", q);
         return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = palette_on, .keybind_entries = keybinds.items };
     }
 
@@ -6527,7 +6534,8 @@ pub const AppSession = struct {
     /// take_sidebar_config_dirty(ABI 이름 유지)로 drain해 1이면 serialize→atomic write한다.
     pub fn takeConfigDirty(self: *AppSession) bool {
         return self.config_dirty_keys.items.len > 0 or self.config_keybind_rebinds.items.len > 0 or
-            self.config_removed_keys.items.len > 0 or self.config_keybind_removed.items.len > 0;
+            self.config_removed_keys.items.len > 0 or self.config_keybind_removed.items.len > 0 or
+            self.config_keybind_unbinds.items.len > 0;
     }
 
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
@@ -6627,6 +6635,19 @@ pub const AppSession = struct {
     /// 한계(v1): 옛 chord가 빌트인이면 그 chord도 계속 액션을 발동한다(새 chord를 **추가**하는 셈 — unbind는 후속).
     fn rebindActionEntry(self: *AppSession, entry: command_catalog.Entry, chord: config_mod.KeyChord) void {
         const a = self.loaded_config.arena.allocator();
+        // 충돌 경고: 이 chord가 **다른 액션**에 이미 묶여 있으면 알린다(rebind는 진행 — 사용자 의도, last-wins). 현재 effective
+        // chord(사용자/빌트인) 기준으로 카탈로그 액션을 스캔. 메시지는 스택 버퍼 → showNotice가 복사하므로 안전.
+        const resolver_pre = self.loaded_config.keyBindingResolver();
+        for (command_catalog.entries) |other| {
+            if (std.meta.eql(other.action, entry.action)) continue;
+            const oc = command_catalog.chordForAction(resolver_pre, other.action) orelse continue;
+            if (oc.eql(chord)) {
+                var msg_buf: [160]u8 = undefined;
+                const msg = std.fmt.bufPrint(&msg_buf, "이 단축키는 '{s}'에 이미 묶여 있습니다 — 덮어씁니다", .{other.title}) catch "이 단축키는 이미 다른 동작에 묶여 있습니다 — 덮어씁니다";
+                self.showNotice(msg);
+                break;
+            }
+        }
         var list: std.ArrayList(config_mod.AppBinding) = .empty;
         var replaced = false;
         for (self.loaded_config.keybindings) |b| {
@@ -6653,33 +6674,50 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 액션의 **사용자 지정** 단축키를 해제한다(keybind 행 Backspace). loaded_config.keybindings에서 그 액션을 빼고(없으면
-    /// notice — 빌트인은 안 건드림, 후속) 카탈로그 재빌드, `keybind = * = action` 줄 제거 예약. 펜딩 rebind도 취소. 해제 후
-    /// resolver는 빌트인(있으면)을 반환하거나 미지정 — 행 표시가 그에 맞게 갱신된다. 한계: 빌트인 chord 자체를 죽이는
-    /// `keybind = chord = unbind`는 후속(현재는 사용자 override만 제거).
+    /// 액션의 단축키를 **완전히 해제**한다(keybind 행 Backspace). 현재 effective chord Y(resolver — 사용자/빌트인 무관)를
+    /// 구해, 사용자 바인딩이면 빼고 + Y를 loaded_config.unbinds에 넣어 빌트인이어도 ignored로 만든다(라이브 즉시 — resolver가
+    /// unbinds를 본다). 영속: 사용자 줄 제거 예약 + `keybind = Y = unbind` 지시어 예약. 펜딩 rebind 취소. 해제 후
+    /// chordForAction(Y가 unbinds라)이 null → 행은 "(미지정)". 이미 미지정이면 notice.
     fn unbindActionEntry(self: *AppSession, entry: command_catalog.Entry) void {
         const a = self.loaded_config.arena.allocator();
-        var list: std.ArrayList(config_mod.AppBinding) = .empty;
-        var found = false;
-        for (self.loaded_config.keybindings) |b| {
-            if (std.meta.eql(b.action, entry.action)) {
-                found = true; // 드롭
-            } else list.append(a, b) catch return;
-        }
-        if (!found) {
-            self.showNotice("사용자 지정 단축키가 없습니다 (기본 단축키 해제는 후속)");
+        const resolver = self.loaded_config.keyBindingResolver();
+        if (command_catalog.chordForAction(resolver, entry.action) == null) {
+            self.showNotice("이미 지정된 단축키가 없습니다");
             return;
         }
-        self.loaded_config.keybindings = list.toOwnedSlice(a) catch return;
+        // ① 사용자 바인딩 제거(사용자 chord는 제거만으로 죽는다 — config 줄 제거 + 라이브 슬라이스에서 드롭).
+        var list: std.ArrayList(config_mod.AppBinding) = .empty;
+        var found_user = false;
+        for (self.loaded_config.keybindings) |b| {
+            if (std.meta.eql(b.action, entry.action)) {
+                found_user = true; // 드롭
+            } else list.append(a, b) catch return;
+        }
+        if (found_user) self.loaded_config.keybindings = list.toOwnedSlice(a) catch return;
+        // ② **빌트인 chord**를 찾아 unbind(default_app_bindings). 사용자 chord만 빼면 빌트인이 되살아나므로 빌트인 chord를
+        // unbinds에 넣어(라이브) + `keybind = chord = unbind`로 영속(죽인다). 빌트인이 없으면 ①로 충분.
+        var builtin_chord: ?config_mod.KeyChord = null;
+        for (config_mod.keybinding.default_app_bindings) |db| {
+            if (std.meta.eql(db.action, entry.action)) builtin_chord = db.chord;
+        }
+        if (builtin_chord) |bc| {
+            var ub: std.ArrayList(config_mod.KeyChord) = .empty;
+            ub.appendSlice(a, self.loaded_config.unbinds) catch return;
+            ub.append(a, bc) catch return;
+            self.loaded_config.unbinds = ub.toOwnedSlice(a) catch return;
+            var chord_buf: [command_catalog.max_chord_display_len]u8 = undefined;
+            const chord_str = a.dupe(u8, bc.toConfigString(&chord_buf)) catch return;
+            self.markKeybindUnbind(chord_str);
+        }
         self.rebuildCommandCatalog();
-        // 펜딩 rebind 취소(unbind가 우선 — 같은 액션을 바꿨다 해제하면 줄 추가가 아니라 제거).
+        // 펜딩 rebind 취소(unbind가 우선).
         var i: usize = 0;
         while (i < self.config_keybind_rebinds.items.len) {
             if (std.mem.eql(u8, self.config_keybind_rebinds.items[i].action, entry.key)) {
                 _ = self.config_keybind_rebinds.orderedRemove(i);
             } else i += 1;
         }
-        self.markKeybindRemoved(entry.key); // 영속: 줄 제거 예약
+        if (found_user) self.markKeybindRemoved(entry.key); // 영속: 사용자 줄 제거
         self.metal_dirty = true;
     }
 
@@ -6687,6 +6725,12 @@ pub const AppSession = struct {
     fn markKeybindRemoved(self: *AppSession, action_key: []const u8) void {
         for (self.config_keybind_removed.items) |k| if (std.mem.eql(u8, k, action_key)) return;
         self.config_keybind_removed.append(self.allocator, action_key) catch {};
+    }
+
+    /// `keybind = chord = unbind` 지시어 예약(중복 한 번만). chord는 config 표기(loaded_config.arena 소유).
+    fn markKeybindUnbind(self: *AppSession, chord_str: []const u8) void {
+        for (self.config_keybind_unbinds.items) |c| if (std.mem.eql(u8, c, chord_str)) return;
+        self.config_keybind_unbinds.append(self.allocator, chord_str) catch {};
     }
 
     /// keybind 녹음 중 raw 키 한 개를 처리한다(handleKeyEvent가 가로채 호출). 평범한 Esc(모디파이어 없음)는 취소(rebind
@@ -6853,6 +6897,13 @@ pub const AppSession = struct {
             self.allocator.free(text);
             text = chained;
             self.config_keybind_removed.clearRetainingCapacity();
+        }
+        // 빌트인 죽이기 — `keybind = chord = unbind` 지시어 append(사용자 줄 제거 뒤, 마지막).
+        if (self.config_keybind_unbinds.items.len > 0) {
+            const chained = try config_mod.appendKeybindUnbinds(self.allocator, text, self.config_keybind_unbinds.items);
+            self.allocator.free(text);
+            text = chained;
+            self.config_keybind_unbinds.clearRetainingCapacity();
         }
         self.sidebar_config_buffer = text;
         self.config_dirty_keys.clearRetainingCapacity();
@@ -9354,6 +9405,7 @@ pub const AppSession = struct {
         self.config_keybind_rebinds.deinit(self.allocator);
         self.config_removed_keys.deinit(self.allocator);
         self.config_keybind_removed.deinit(self.allocator);
+        self.config_keybind_unbinds.deinit(self.allocator);
         self.hover_leaf_scratch.deinit(self.allocator);
         self.scrollbar_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
@@ -14810,23 +14862,65 @@ test "settings keybind unbind: keybind 행 Backspace → 사용자 바인딩 해
     };
     try std.testing.expect(has_user_bind);
 
-    // 이제 Backspace로 unbind → 사용자 바인딩 제거 + 줄 제거 예약 + 펜딩 rebind 취소.
+    // 이제 Backspace로 unbind → 사용자 바인딩 제거 + 빌트인 chord(Cmd+T) unbind 지시어 예약 + 줄 제거 + 펜딩 rebind 취소.
     session.deleteSelectedSettingRow();
     for (session.loaded_config.keybindings) |b| try std.testing.expect(std.meta.activeTag(b.action) != .new_term); // 사용자 바인딩 사라짐
+    // 완전 해제 — chordForAction(new_term)이 null(사용자 Cmd+E 제거 + 빌트인 Cmd+T unbinds로 죽음).
+    try std.testing.expect(command_catalog.chordForAction(session.loaded_config.keyBindingResolver(), .new_term) == null);
     var saw_removed = false;
     for (session.config_keybind_removed.items) |k| if (std.mem.eql(u8, k, "new_term")) {
         saw_removed = true;
     };
-    try std.testing.expect(saw_removed); // 줄 제거 예약
+    try std.testing.expect(saw_removed); // 사용자 줄 제거 예약
+    var saw_unbind = false; // 빌트인 Cmd+T unbind 지시어 예약
+    for (session.config_keybind_unbinds.items) |c| if (std.mem.eql(u8, c, "Cmd+T")) {
+        saw_unbind = true;
+    };
+    try std.testing.expect(saw_unbind);
     for (session.config_keybind_rebinds.items) |rb| try std.testing.expect(!std.mem.eql(u8, rb.action, "new_term")); // 펜딩 rebind 취소
     try std.testing.expect(session.takeConfigDirty());
 
-    // 사용자 바인딩 없는 액션을 다시 unbind 시도 → notice 경로(무동작, keybindings 불변).
+    // 이미 해제된 액션을 다시 unbind 시도 → notice 경로(무동작, keybindings 불변).
     const cf2 = try session.currentSectionFields(scratch.allocator());
     session.chrome_host.settings.selected = cf2.keybindRowStart().?;
     const len_before = session.loaded_config.keybindings.len;
     session.deleteSelectedSettingRow();
-    try std.testing.expectEqual(len_before, session.loaded_config.keybindings.len); // 불변(빌트인은 안 건드림)
+    try std.testing.expectEqual(len_before, session.loaded_config.keybindings.len); // 불변(이미 미지정)
+}
+
+test "settings keybind 충돌: 이미 다른 액션에 묶인 chord로 rebind → 경고 notice (rebind는 진행)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var input_idx: usize = 0;
+    for (sections, 0..) |s, i| if (s.section == .input) {
+        input_idx = i;
+    };
+    session.chrome_host.settings.show();
+    session.chrome_host.settings.section = input_idx;
+    const cf = try session.currentSectionFields(scratch.allocator());
+    session.chrome_host.settings.selected = cf.keybindRowStart().?; // entries[0]=new_term
+
+    // new_term을 close_term의 빌트인 Cmd+W로 rebind → 충돌(다른 액션에 이미 묶임) → 경고 notice.
+    session.chrome_host.settings.recording = true;
+    session.captureKeybindRecording(.{ .key = .{ .char = 'W' }, .modifiers = .{ .command = true } });
+    try std.testing.expect(session.chrome_host.notice.open); // 충돌 경고 표시
+    // rebind는 진행됨 — new_term이 Cmd+W로(사용자 바인딩 우선, last-wins).
+    const chord = command_catalog.chordForAction(session.loaded_config.keyBindingResolver(), .new_term).?;
+    try std.testing.expect((try config_mod.KeyChord.parse("Cmd+W")).eql(chord));
 }
 
 test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 인덱스가 올바른 액션에 매핑 (CS-4-4 검색)" {
@@ -14853,17 +14947,19 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
     session.chrome_host.settings.show();
     session.chrome_host.settings.section = input_idx;
 
-    // 검색 "split" → 입력 섹션 dropdown(page-keys 등)은 미매칭(0), keybind는 Split Right/Down 2개만.
+    // **교차 섹션** 검색 "split"(현재 섹션=input이지만 쿼리가 있으면 전 섹션) → workspace.split-inherit-cwd(bool, 키에
+    // "split") + Split Right/Down keybind 2개. enum은 "split" 미매칭(0).
     session.chrome_host.settings.startSearch();
     for ("split") |c| session.chrome_host.settings.appendSearchCp(c);
     const cf = try session.currentSectionFields(scratch.allocator());
     try std.testing.expectEqual(@as(usize, 0), cf.enums.len); // "split" 미매칭
+    try std.testing.expect(cf.bools.len >= 1); // 교차 섹션: workspace.split-inherit-cwd(다른 섹션) 매칭
     try std.testing.expectEqual(@as(usize, 2), cf.keybind_entries.len); // Split Right, Split Down
     for (cf.keybind_entries) |e| try std.testing.expect(std.ascii.indexOfIgnoreCase(e.title, "split") != null);
 
-    // 필터 후 keybindRowStart=0(schema 0개). 첫 행 녹음→캡처가 **필터된 첫 엔트리**(Split Right)를 rebind해야 한다(인덱스 정합).
+    // keybindRowStart는 앞선 schema 행(여기선 split bool 등) 다음. 그 행 녹음→캡처가 **필터된 첫 keybind 엔트리**(Split Right)를
+    // rebind해야 한다(교차 섹션 필터 후에도 인덱스 정합 — keybindRowStart가 정확히 keybind_entries[0]을 가리킨다).
     const ks = cf.keybindRowStart().?;
-    try std.testing.expectEqual(@as(usize, 0), ks);
     session.chrome_host.settings.selected = ks;
     session.chrome_host.settings.recording = true;
     session.config_keybind_rebinds.clearRetainingCapacity();
@@ -14872,11 +14968,12 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
     // 재바인딩된 action 키 = 필터된 목록의 첫 엔트리 키(엉뚱한 액션이 아니라).
     try std.testing.expectEqualStrings(cf.keybind_entries[0].key, session.config_keybind_rebinds.items[0].action);
 
-    // 빈 쿼리(검색 종료)면 전부 복귀.
+    // 빈 쿼리(검색 종료)면 현재 섹션(input)만 복귀 — keybind 전부 + input enum.
     session.chrome_host.settings.endSearch();
     const cf2 = try session.currentSectionFields(scratch.allocator());
     try std.testing.expectEqual(command_catalog.entries.len, cf2.keybind_entries.len);
-    try std.testing.expect(cf2.enums.len > 0); // dropdown 복귀
+    try std.testing.expect(cf2.enums.len > 0); // input dropdown 복귀
+    try std.testing.expectEqual(@as(usize, 0), cf2.bools.len); // input 섹션엔 bool 없음(split bool은 workspace — 검색 끝나 사라짐)
 }
 
 test "settings env 삭제: Backspace로 env.<KEY> 행 삭제 → config.env에서 제거 + 줄 삭제 예약 (env delete)" {

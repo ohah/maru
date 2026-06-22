@@ -487,6 +487,16 @@ pub const Config = struct {
     /// 렌더러가 **clear color의 alpha에만** 이 값을 곱한다(셰이더·셀 불변). metal layer/NSWindow도 opacity<1이면 비불투명.
     /// (docs/configuration.md·settings-page.md F1-1)
     window_opacity: f32 = 1.0,
+    /// 비활성 split pane 디밍 강도(0.0 끔 ~ 1.0 완전 배경색). 기본 0.0(현행 — 비활성 pane도 풀 밝기, 회귀 없음).
+    /// 0보다 크면 **활성이 아닌 split pane의 셀 색**(전경+명시 배경)을 그 pane 배경 쪽으로 이 비율만큼 보간해 흐리게
+    /// 그려 활성 pane을 시각적으로 구분한다. split이 없으면(단일 pane) 무효. 활성 pane은 항상 풀 밝기.
+    /// 베이스/결정: Ghostty `unfocused-split-opacity`(기본 0.7 불투명 = 0.3 dim, 비활성 split을 fill 쪽으로 합성)를
+    /// 베이스로 했다. 단 (1) maru config는 모든 신규 키를 "회귀 없음 opt-in"으로 기본화하는 선례(window.opacity=1.0 등)를
+    /// 따라 기본 0.0(끔)으로 두고, (2) Ghostty가 GTK 위젯 opacity 오버레이로 내는 것을 maru는 색공간 **per-cell 보간**
+    /// (packForeground/packBackground)으로 낸다 — maru는 색을 CPU에서 풀어 NativeMetalCell에 싣고 per-pane compositor
+    /// opacity가 없으므로, 셰이더·ABI 불변으로 같은 시각 효과를 낸다. loader가 `window.unfocused-dim` 0~1 range 검증.
+    /// (docs/configuration.md·settings-page.md F2-7)
+    window_unfocused_dim: f32 = 0.0,
     /// 셸에 줄 TERM 값. 기본 `xterm-maru` — maru가 자체 terminfo(Sync 등)를 embed해 자식 셸에
     /// `TERMINFO=~/.cache/maru/terminfo`(자동 컴파일)로 가리키므로 로컬은 설치 없이 동작하고,
     /// tic이 없거나 실패하면 `xterm-256color`로 폴백한다(로컬 안 깨짐 — pty/macos.zig resolveTerm).
@@ -527,6 +537,7 @@ pub const Config = struct {
         .window_padding_bottom = Meta{ .key = "window.padding-bottom", .doc = "아래 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
         .window_padding_left = Meta{ .key = "window.padding-left", .doc = "왼쪽 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
         .window_opacity = Meta{ .key = "window.opacity", .doc = "창 배경 투명도(0~1)", .range = .{ 0.0, 1.0 }, .widget = .slider, .section = .window },
+        .window_unfocused_dim = Meta{ .key = "window.unfocused-dim", .doc = "비활성 split pane 디밍(0~1)", .range = .{ 0.0, 1.0 }, .widget = .slider, .section = .window },
         .term = Meta{ .key = "term", .doc = "$TERM 값", .widget = .text, .section = .terminal },
     };
 };

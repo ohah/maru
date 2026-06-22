@@ -57,6 +57,7 @@ window.padding-bottom = 4
 window.padding-left   = 8
 # 또는 대칭 alias: window.padding-x = 8 (좌우 동시), window.padding-y = 4 (상하 동시)
 window.opacity        = 1.0   # 배경 투명도(0~1) — default 배경만 투명, 1=불투명
+window.unfocused-dim  = 0.0   # 비활성 split pane 디밍(0~1) — 0=끔, 클수록 흐림
 ```
 
 ## 키
@@ -89,6 +90,7 @@ window.opacity        = 1.0   # 배경 투명도(0~1) — default 배경만 투�
 | `window.padding-x` | 정수(0~256) | `8` | **left+right alias** — `padding-left`·`padding-right`를 같은 값으로 동시에 설정(대칭 좌우 여백). 개별 키와 혼용 시 파일에서 **나중에 나온 줄이 우선**(예: `padding-x=10` 다음 `padding-left=20` → left=20, right=10). 범위 밖/비정수는 무시(기본 유지) |
 | `window.padding-y` | 정수(0~256) | `4` | **top+bottom alias** — `padding-top`·`padding-bottom`을 같은 값으로 동시에 설정(대칭 상하 여백). 우선순위 규칙은 `padding-x`와 동일(나중 줄 우선) |
 | `window.opacity` | 실수(0.0~1.0) | `1.0` | 창 **배경 투명도**(0=완전 투명, 1=불투명). **default 배경**(빈 영역·기본 배경 셀)에만 적용 — 명시적 배경색 셀(ANSI bg·OSC 11 배경 set·선택 하이라이트)과 글자·커서는 불투명 유지(iTerm2/Ghostty `background-opacity` 모델). `1`보다 작으면 metal layer/창이 비불투명이 돼 뒤(데스크톱·다른 창)가 비친다. 범위 밖/비실수는 무시(기본 유지) |
+| `window.unfocused-dim` | 실수(0.0~1.0) | `0.0` | **비활성 split pane 디밍** — split이 여럿일 때 **활성이 아닌 pane**의 셀 색(전경·명시 배경·reverse)을 그 pane 배경색 쪽으로 이 비율만큼 보간해 흐리게 그려 활성 pane을 시각적으로 구분한다. `0`=끔(현행, 비활성 pane도 풀 밝기), `1`=완전히 배경색(글자 사라짐). 활성 pane은 항상 풀 밝기, split이 없으면(단일 pane) 무효. default 배경 셀(빈 영역)은 그대로(투명 유지). Ghostty `unfocused-split-opacity`(기본 0.7 불투명) 대응 — maru는 색공간 per-cell 보간, opt-in이라 기본 0.0. 범위 밖/비실수는 무시(기본 유지) |
 | `workspace.root` | 경로 | (없음) | 고정 시작 디렉터리(Ghostty `working-directory` 대응). 첫 창 + 상속이 꺼졌거나 상속할 cwd가 없을 때 폴백. 비어 있으면 maru cwd 상속(단 `/`면 `~`). `~`·`~/…`는 $HOME으로 확장. 아래 참조 |
 | `workspace.tab-inherit-cwd` | `true`\|`false` | `true` | 새 워크스페이스 탭(`new_tab`)·새 Term(`new_term`)이 포커스 Term의 현재 cwd(OSC 7)를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `tab-inherit-working-directory`). 아래 참조 |
 | `workspace.split-inherit-cwd` | `true`\|`false` | `true` | 새 분할(`split_*`, 팬)이 포커스 Term의 현재 cwd를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `split-inherit-working-directory`). 아래 참조 |

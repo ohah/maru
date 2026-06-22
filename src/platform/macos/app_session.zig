@@ -3359,6 +3359,19 @@ pub const AppSession = struct {
         self.debug_settings_opened = true;
         // MARU_RUN_INSTALL_CLI=1 — "Install CLI" 명령을 첫 frame에 실행해 결과 notice를 캡처(self-verify debug-gate).
         if (std.c.getenv("MARU_RUN_INSTALL_CLI") != null) self.installCli();
+        // MARU_FORCE_SPLIT=1 — 첫 frame에 활성 pane을 좌우로 한 번 분할해 비활성 split pane 디밍(window.unfocused-dim,
+        // F2-7)을 헤드리스 스크린샷으로 캡처(self-verify debug-gate). 분할 후 활성은 새 pane이라 반대쪽이 비활성=디밍 대상.
+        // 빈 셸은 첫 content frame까지 프롬프트가 안 와 디밍할 글자가 없으므로, 양쪽 pane core에 같은 SGR 샘플 줄을
+        // 직접 써 넣어(리더와 경합하니 락 아래) 활성(풀 밝기) vs 비활성(디밍)을 한 화면에서 대비시킨다.
+        if (std.c.getenv("MARU_FORCE_SPLIT") != null) {
+            self.splitActivePane(.horizontal) catch {};
+            for (self.activeTab().panes.items) |pane| {
+                const surface = &pane.activeTerm().surface;
+                surface.lockCore(self.io);
+                surface.core.write("\x1b[97mMARU\x1b[0m \x1b[91mred\x1b[0m \x1b[92mgreen\x1b[0m \x1b[44m bg \x1b[0m") catch {};
+                surface.unlockCore(self.io);
+            }
+        }
         if (std.c.getenv("MARU_OPEN_SETTINGS") == null) return;
         self.toggleSettings();
         // MARU_OPEN_SETTINGS_SECTION=N — 특정 섹션을 열어 캡처(스크린샷 self-verify용 debug-gate). 미설정=섹션 0.
@@ -7868,6 +7881,10 @@ pub const AppSession = struct {
                 .default_bg = self.appearance.theme.background,
                 .config_palette = &self.appearance.theme.palette,
                 .bold_is_bright = self.appearance.bold_is_bright, // pane_colors가 이걸 복사 — 비활성 pane도 동일 규칙
+                // 비활성 split pane 디밍(F2-7, window.unfocused-dim): 이 CellColors를 쓰는 pane은 전부 비활성이므로
+                // 여기 한 곳에 dim_milli를 세우면 모든 비활성 pane 셀 색이 배경 쪽으로 흐려진다. 활성 pane은
+                // CoreTextFrameBuilder(cell_colors, dim_milli=0)라 영향 없다. f32 0~1 → 천분율(클램프).
+                .dim_milli = @intFromFloat(@min(@max(self.appearance.unfocused_dim, 0.0), 1.0) * 1000.0),
             };
             // 탭 바 제목 색: 전경=테마 글자색, 배경은 chrome이 이미 깔아 둠(투명).
             const tabbar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };

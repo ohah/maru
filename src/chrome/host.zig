@@ -37,6 +37,9 @@ pub const HostAction = union(enum) {
     notifications_accept, // 알림 카드 선택(Enter/클릭) — platform이 selected→surface_id 해석 후 activateSurfaceById + 읽음 처리
     notifications_close,
     notifications_selection_changed,
+    notifications_delete, // Backspace/카드 ✕ — platform이 selected(또는 클릭한) 카드를 히스토리에서 삭제
+    notifications_mark_all_read, // 하단 "모두 읽음" — platform이 전체 읽음 처리(배지 0)
+    notifications_clear_all, // 하단 "모두 지우기" — platform이 히스토리 전체 삭제
     confirm_accept, // 확인 모달 Enter/Y — platform이 보류한 닫기(pending_close)를 실행
     confirm_cancel, // 확인 모달 Esc/N — platform이 보류한 닫기를 버린다
     settings_close, // 세팅 모달 Esc/바깥클릭 — platform이 hide
@@ -188,6 +191,7 @@ pub const ChromeHost = struct {
                         .accept => .notifications_accept,
                         .close => .notifications_close,
                         .selection_changed => .notifications_selection_changed,
+                        .delete_selected => .notifications_delete,
                     };
                 }
                 if (self.find.open) {

@@ -61,9 +61,13 @@
   공유(보이는 카드 == 클릭되는 카드). 카드 구분선은 `.fill`(1px)로 — `.rule` op은 macOS lowering에서 no-op이라.
   빈 목록도 패널 + "알림 없음"을 그린다. 항목은 platform이 매 프레임 arena로 주입(palette `Row` 선례) — chrome은
   중립(surface_id·라이브 포인터 모름).
-- **클릭 → 점프 + 읽음**: 카드 클릭/Enter → `acceptNotification`이 selected(역순: 0=최신)를 히스토리 인덱스로 되돌려
-  **그 항목만** 읽음 처리(점/배지 갱신)하고, `activateSurfaceById(surface_id)`(1단계 재사용)로 점프한 뒤 패널을 닫는다.
-  닫힌 surface면 점프 없이 닫기만(카드는 이미 회색).
+- **클릭 → 점프 + 읽음**: 카드 본문 클릭/Enter → `acceptNotification`이 selected(역순: 0=최신)를 히스토리 인덱스로
+  되돌려 **그 항목만** 읽음 처리(점/배지 갱신)하고, `activateSurfaceById(surface_id)`(1단계 재사용)로 점프한 뒤 패널을
+  닫는다. 닫힌 surface면 점프 없이 닫기만(카드는 이미 회색).
+- **읽음/지우기 액션**: 마우스 hit-test는 `Hit` union(`card`/`close`/`mark_all_read`/`clear_all`)으로 가른다 — 카드
+  우측 ✕(본문줄)=개별 삭제(`deleteNotification`), 키보드 Backspace=선택 카드 삭제. 패널 하단 액션 행 좌/우 절반=
+  "모두 읽음"(`markAllNotificationsRead` — 점/배지만 끄고 항목 유지) / "모두 지우기"(`clearNotifications` — 전체 삭제).
+  unread 캐시는 push/markRead/delete/markAll/clear 헬퍼에서만 증감(단일 출처).
 
 ## 4. 경계 분담 (단일 출처)
 
@@ -88,4 +92,5 @@
 
 ## 6. 범위 밖 (후속)
 
-알림 지우기/전체 읽음 버튼, 알림 설정(config), 데스크톱 배너와 인앱 센터의 읽음 동기화.
+알림 설정(config — 인앱 센터 on/off·보관 개수·OSC 포함 여부), 데스크톱 배너와 인앱 센터의 읽음 동기화(배너 클릭 시
+센터도 읽음). 배지 두 자리(현재 `min(9)` cap → "9+").

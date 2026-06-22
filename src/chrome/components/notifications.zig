@@ -33,6 +33,14 @@ const empty_label = "알림 없음";
 /// 제목이 빈 문자열(OSC 9는 title 없음)일 때 표시 폴백.
 const empty_title = "(제목 없음)";
 
+/// 카드 영역 아래 액션 행("모두 읽음" / "모두 지우기") 높이(cell). 목록이 있을 때만 그린다.
+const action_rows: u32 = 1;
+
+/// 카드 우측 ✕(개별 삭제) 글리프 — sidebar 닫기와 같은 BMP(이모지 fallback 없음).
+const close_glyph = "\u{2715}"; // ✕ U+2715
+const mark_all_label = "모두 읽음";
+const clear_all_label = "모두 지우기";
+
 /// host가 주입하는 알림 한 줄(카드). 중립 바이트/bool — platform이 히스토리에서 만든다(컴포넌트는 surface_id를 안
 /// 본다). title/body는 표시 문자열, relative_time="N분 전"(platform 포맷), is_read=안읽음 점 표시, is_alive=false면
 /// 닫힌 surface라 회색(muted_fg)으로 dim. selected는 State.selected로 판단(palette.Row와 달리 행에 안 싣는다).
@@ -83,13 +91,22 @@ pub const State = struct {
 
 /// handle이 돌려주는 intent(context_menu와 동일 계약). host가 받아 platform에 디스패치.
 pub const Action = enum {
-    accept, // Enter/항목 클릭 — selected 항목 실행(platform이 selected→surface_id 해석 후 activateSurfaceById)
+    accept, // Enter/카드 본문 클릭 — selected 항목 실행(platform이 selected→surface_id 해석 후 activateSurfaceById)
     close, // Esc / 그 외 키 — 닫기
     selection_changed, // ↑↓ — selected 이동(렌더 갱신)
+    delete_selected, // Backspace — selected 카드 삭제(platform이 히스토리에서 제거)
 };
 
-/// 키 처리(열려 있을 때만 host가 호출). ↑↓=이동, Enter=accept, 그 외(Esc·글자 등)=close. 모달이라 모든 키 소비
-/// (context_menu와 같은 규율 — 뒤 터미널로 안 흘린다). 마우스(항목 클릭)는 platform이 itemAt으로 따로 처리한다.
+/// 마우스 hit-test 결과(platform이 pointer로 해석). 카드 본문=점프, 우측 ✕=삭제, 하단 액션 행=전체 읽음/지우기.
+pub const Hit = union(enum) {
+    card: usize, // 카드 본문 클릭 → 점프(accept)
+    close: usize, // 카드 우측 ✕ → 그 카드 삭제
+    mark_all_read, // 하단 "모두 읽음"
+    clear_all, // 하단 "모두 지우기"
+};
+
+/// 키 처리(열려 있을 때만 host가 호출). ↑↓=이동, Enter=accept, Backspace=selected 삭제, 그 외(Esc·글자 등)=close.
+/// 모달이라 모든 키 소비(context_menu와 같은 규율 — 뒤 터미널로 안 흘린다). 마우스는 platform이 hitTest로 처리한다.
 pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
     switch (k.key) {
         .up => {
@@ -101,6 +118,7 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
             return .selection_changed;
         },
         .enter => return .accept,
+        .backspace => return .delete_selected, // selected 카드 삭제(platform이 제거 후 selected clamp)
         else => {
             state.hide();
             return .close;
@@ -134,7 +152,8 @@ fn panelRect(state: *const State, items: []const Item, p: props.ChromeProps) ?dr
     }
     content_cols = @max(content_cols, min_panel_cols); // Warp 스타일 최소 폭(넉넉한 고정 폭)
     const box_w = (content_cols + 2) * cw; // 좌우 1칸 패딩
-    const rows: u32 = if (items.len == 0) empty_panel_rows else @as(u32, @intCast(items.len)) * card_rows;
+    // 목록이 있으면 카드들 아래에 액션 행(모두 읽음/지우기) 1줄을 더한다(빈 목록은 액션 행 없음).
+    const rows: u32 = if (items.len == 0) empty_panel_rows else @as(u32, @intCast(items.len)) * card_rows + action_rows;
     const box_h = rows * ch;
     var x = state.anchor_x;
     var y = state.anchor_y;
@@ -149,18 +168,34 @@ fn panelRect(state: *const State, items: []const Item, p: props.ChromeProps) ?dr
     return .{ .x = x, .y = y, .w = box_w, .h = box_h };
 }
 
-/// 마우스 px가 패널 박스 안의 어느 카드인지([0, item_count)). 박스 밖/빈 목록이면 null(호출자가 close). view와 같은
-/// panelRect를 써서 "보이는 == 클릭되는". 카드 1개 = 2 cell 행이라 ch*2로 나눈다.
-pub fn itemAt(state: *const State, items: []const Item, p: props.ChromeProps, x_px: f64, y_px: f64) ?usize {
+/// 마우스 px를 패널 안의 동작으로 해석한다(박스 밖/빈 목록이면 null → 호출자가 닫기). view와 같은 panelRect를 써서
+/// "보이는 == 클릭되는". 세로: 카드 영역(각 카드 2행) 아래에 액션 행 1줄. 카드 안에서 본문줄(line 1) 우측 끝 1칸은
+/// ✕(삭제) zone, 나머지는 카드 본문(점프). 액션 행은 좌/우 절반으로 모두 읽음/지우기.
+pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x_px: f64, y_px: f64) ?Hit {
     if (!state.open or items.len == 0 or !std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
     const rect = panelRect(state, items, p) orelse return null;
     const x0: f64 = @floatFromInt(rect.x);
     const y0: f64 = @floatFromInt(rect.y);
     if (x_px < x0 or x_px >= x0 + @as(f64, @floatFromInt(rect.w))) return null;
     if (y_px < y0 or y_px >= y0 + @as(f64, @floatFromInt(rect.h))) return null;
-    const card_h: f64 = @floatFromInt(@max(p.metrics.cell_height_px, 1) * card_rows);
-    const row: usize = @intFromFloat((y_px - y0) / card_h);
-    return @min(row, items.len - 1);
+    const cw: f64 = @floatFromInt(@max(p.metrics.cell_width_px, 1));
+    const ch: f64 = @floatFromInt(@max(p.metrics.cell_height_px, 1));
+    const rel_y = y_px - y0;
+    const card_area_h = @as(f64, @floatFromInt(items.len)) * @as(f64, @floatFromInt(card_rows)) * ch;
+    // 하단 액션 행: 카드 영역 아래 → 좌/우 절반으로 모두 읽음/지우기.
+    if (rel_y >= card_area_h) {
+        const mid = x0 + @as(f64, @floatFromInt(rect.w)) / 2.0;
+        return if (x_px < mid) .mark_all_read else .clear_all;
+    }
+    // 카드: 어느 카드인지 + 본문줄 우측 ✕ zone인지.
+    const card_h = @as(f64, @floatFromInt(card_rows)) * ch;
+    const card_idx: usize = @min(@as(usize, @intFromFloat(rel_y / card_h)), items.len - 1);
+    const within = rel_y - @as(f64, @floatFromInt(card_idx)) * card_h;
+    const line: u32 = @intFromFloat(within / ch); // 0=제목줄, 1=본문줄
+    const panel_cols: u32 = rect.w / @as(u32, @intCast(@max(p.metrics.cell_width_px, 1)));
+    const close_x0 = x0 + @as(f64, @floatFromInt(panel_cols -| 2)) * cw; // ✕ col(panel_cols-2) 이상
+    if (line >= 1 and x_px >= close_x0) return .{ .close = card_idx };
+    return .{ .card = card_idx };
 }
 
 /// 패널(배경 quad + 카드들)을 `out`에 append한다. 안 열렸으면 무동작. 빈 목록도 패널 + "알림 없음"을 그린다. 순수:
@@ -220,11 +255,25 @@ pub fn view(
         const body_runs = try arena.alloc(draw.Run, 1);
         body_runs[0] = .{ .text = it.body };
         try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(text_indent_cols)) * cw, .y = card_y + ch }, .runs = body_runs, .role = fg } });
+        // 본문줄 우측 끝에 삭제 ✕(개별 삭제) — hitTest의 close zone(본문줄, panel 우측 1칸)과 같은 col.
+        const close_runs = try arena.alloc(draw.Run, 1);
+        close_runs[0] = .{ .text = close_glyph };
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(panel_cols -| 2)) * cw, .y = card_y + ch }, .runs = close_runs, .role = .muted_fg } });
         // 카드 구분선(마지막 제외) — **`.rule`은 macOS lowering no-op이라 `.fill` 1px**로 그린다(보이게).
         if (i + 1 < items.len) {
             try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y + ch * @as(i32, @intCast(card_rows)) - 1, .w = rect.w, .h = 1 }, .role = .divider } });
         }
     }
+    // 하단 액션 행: 카드들 아래 구분선 + "모두 읽음"(좌) / "모두 지우기"(우, muted). hitTest가 좌/우 절반으로 가른다.
+    const action_y = rect.y + @as(i32, @intCast(@as(u32, @intCast(items.len)) * card_rows)) * ch;
+    try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = action_y, .w = rect.w, .h = 1 }, .role = .divider } });
+    const mark_runs = try arena.alloc(draw.Run, 1);
+    mark_runs[0] = .{ .text = mark_all_label };
+    try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + cw, .y = action_y }, .runs = mark_runs, .role = .surface_fg } });
+    const clear_cols = overlay_input.displayCols(clear_all_label);
+    const clear_runs = try arena.alloc(draw.Run, 1);
+    clear_runs[0] = .{ .text = clear_all_label };
+    try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(panel_cols -| clear_cols -| 1)) * cw, .y = action_y }, .runs = clear_runs, .role = .muted_fg } });
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -249,18 +298,20 @@ test "notifications state: show/hide/moveSelection clamp + setItemCount" {
     try std.testing.expect(!s.open);
 }
 
-test "notifications handle: ↑↓=이동, Enter=accept, Esc·글자=close" {
+test "notifications handle: ↑↓=이동, Enter=accept, Backspace=delete, Esc·글자=close" {
     var s: State = .{};
     s.show(0, 0, 2);
     try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .down }, &s));
     try std.testing.expectEqual(@as(usize, 1), s.selected);
     try std.testing.expectEqual(Action.accept, handle(.{ .key = .enter }, &s));
     try std.testing.expect(s.open); // accept는 닫지 않는다(host가 hide)
+    try std.testing.expectEqual(Action.delete_selected, handle(.{ .key = .backspace }, &s)); // 선택 카드 삭제
+    try std.testing.expect(s.open); // delete도 닫지 않는다(platform이 삭제 후 유지)
     try std.testing.expectEqual(Action.close, handle(.{ .key = .escape }, &s));
     try std.testing.expect(!s.open);
 }
 
-test "notifications itemAt: 카드 1개=2행 높이, 박스 밖/빈목록 null" {
+test "notifications hitTest: 카드 본문=card / 본문줄 우측 ✕=close / 하단 액션행=mark·clear" {
     const p = props.ChromeProps{ .metrics = .{
         .cell_width_px = 8,
         .cell_height_px = 16,
@@ -274,13 +325,16 @@ test "notifications itemAt: 카드 1개=2행 높이, 박스 밖/빈목록 null" 
     };
     var s: State = .{};
     s.show(100, 50, items.len);
-    // 카드 높이 = 2*16 = 32. 카드0=[50,82), 카드1=[82,114).
-    try std.testing.expectEqual(@as(?usize, 0), itemAt(&s, &items, p, 110, 55));
-    try std.testing.expectEqual(@as(?usize, 0), itemAt(&s, &items, p, 110, 80)); // 카드0 본문줄도 카드0
-    try std.testing.expectEqual(@as(?usize, 1), itemAt(&s, &items, p, 110, 90));
-    try std.testing.expectEqual(@as(?usize, null), itemAt(&s, &items, p, 110, 200)); // 박스 아래 밖
-    // 빈 목록은 itemAt 항상 null.
-    try std.testing.expectEqual(@as(?usize, null), itemAt(&s, &.{}, p, 110, 55));
+    // box_w=(max(content,30)+2)*8=256, x=100, panel_cols=32, ✕ col=30 → close_x0=100+240=340.
+    // 카드 높이=32: 카드0=[50,82)(제목 50~66·본문 66~82), 카드1=[82,114). 액션행=[114,130). 중앙 x=100+128=228.
+    try std.testing.expectEqual(Hit{ .card = 0 }, hitTest(&s, &items, p, 110, 55).?); // 카드0 제목 좌측
+    try std.testing.expectEqual(Hit{ .close = 0 }, hitTest(&s, &items, p, 345, 70).?); // 카드0 본문줄 우측 ✕
+    try std.testing.expectEqual(Hit{ .card = 0 }, hitTest(&s, &items, p, 345, 55).?); // 제목줄 우측은 ✕ 아님(시간 영역)
+    try std.testing.expectEqual(Hit{ .card = 1 }, hitTest(&s, &items, p, 110, 90).?); // 카드1
+    try std.testing.expectEqual(Hit.mark_all_read, hitTest(&s, &items, p, 150, 120).?); // 액션행 좌측
+    try std.testing.expectEqual(Hit.clear_all, hitTest(&s, &items, p, 300, 120).?); // 액션행 우측
+    try std.testing.expectEqual(@as(?Hit, null), hitTest(&s, &items, p, 110, 400)); // 박스 아래 밖
+    try std.testing.expectEqual(@as(?Hit, null), hitTest(&s, &.{}, p, 110, 55)); // 빈 목록
 }
 
 test "notifications view: 빈목록=패널+안내, 항목들=점·제목·시간·본문·구분선(fill divider)" {
@@ -322,23 +376,32 @@ test "notifications view: 빈목록=패널+안내, 항목들=점·제목·시간
     var s: State = .{};
     s.show(100, 50, items.len);
     try view(&s, &items, p, &tk, arena, &out);
-    // quad + 선택fill(카드0) + 점(카드0 unread) + 제목0 + 시간0 + 본문0 + 구분선fill + 제목1(점 없음:read) + 시간1 + 본문1 = 10.
-    try std.testing.expectEqual(@as(usize, 10), out.items.len);
+    // quad + 카드0(선택fill+점+제목+시간+본문+✕+구분선=7) + 카드1(제목+시간+본문+✕=4, 점·구분선 없음) +
+    // 액션행(구분선+모두읽음+모두지우기=3) = 15.
+    try std.testing.expectEqual(@as(usize, 15), out.items.len);
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expect(out.items[1] == .fill and out.items[1].fill.role == .tab_active_bg); // 선택 카드0
     try std.testing.expect(out.items[2] == .text and out.items[2].text.role == .focus_accent); // 안읽음 점
     try std.testing.expectEqualStrings("\u{25CF}", out.items[2].text.runs[0].text);
     try std.testing.expect(out.items[3] == .text and out.items[3].text.role == .surface_fg); // 살아있는 제목
     try std.testing.expectEqualStrings("maru", out.items[3].text.runs[0].text);
-    // 구분선은 .fill + divider role(.rule no-op 회피).
+    // 구분선(.fill divider) + 카드 ✕ + 액션 행 라벨 존재 확인.
     var saw_divider = false;
     var saw_closed_title = false;
+    var close_count: usize = 0;
+    var saw_mark_all = false;
+    var saw_clear_all = false;
     for (out.items) |op| {
         if (op == .fill and op.fill.role == .divider) saw_divider = true;
-        if (op == .text and op.text.role == .muted_fg and op.text.runs[0].text.len > 0 and std.mem.eql(u8, op.text.runs[0].text, "web")) saw_closed_title = true;
+        if (op == .text and op.text.role == .muted_fg and std.mem.eql(u8, op.text.runs[0].text, "web")) saw_closed_title = true;
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, close_glyph)) close_count += 1;
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, mark_all_label)) saw_mark_all = true;
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, clear_all_label)) saw_clear_all = true;
     }
-    try std.testing.expect(saw_divider); // 카드 사이 구분선
+    try std.testing.expect(saw_divider); // 카드 구분선 + 액션 행 구분선
     try std.testing.expect(saw_closed_title); // 닫힌 surface 제목은 muted_fg(dim)
+    try std.testing.expectEqual(@as(usize, 2), close_count); // 카드마다 ✕ 1개
+    try std.testing.expect(saw_mark_all and saw_clear_all); // 하단 액션 행 라벨
 }
 
 test "notifications panelRect: 빈 제목 폴백 + 최소 폭 + 종 밑(사이드바 안 유지) + 화면 우/하단 clamp" {

@@ -53,6 +53,7 @@ typedef struct {
 
 enum {
     MaruDrawCellBoldBit = 1u << 0,
+    MaruDrawCellItalicBit = 1u << 1, // italic(SGR 3) — italic face로 셰이핑(F2-3). bold와 같이 켜지면 bold-italic.
 };
 
 typedef struct {
@@ -792,12 +793,75 @@ static void maru_rasterize_line_into_cpu_bitmap(MaruCoreTextSmokeResult *result,
     free(pixels);
 }
 
+// (want_bold, want_italic) 조합용 styled CTFont를 만든다(F2-3). bold/italic family가 지정+존재하면 그 패밀리에서
+// (+cascade+traits), 아니면 primary_font에서 symbolic trait 파생(이미 박힌 cascade list 상속). 조합에 맞는 face가
+// 없으면(SymbolicTraits NULL) NULL을 돌려 호출자가 primary(regular)로 폴백한다 — 없는 스타일을 합성하지 않는다.
+// 호출자 소유(CFRelease). bold-italic은 bold base(family-bold 또는 primary)에 italic trait을 더하는 우선순위다.
+static CTFontRef maru_create_styled_font(
+    CTFontRef primary_font,
+    double size,
+    const char *fallback_families,
+    size_t fallback_families_len,
+    const char *bold_family,
+    size_t bold_family_len,
+    const char *italic_family,
+    size_t italic_family_len,
+    bool want_bold,
+    bool want_italic
+) {
+    CTFontSymbolicTraits traits =
+        (CTFontSymbolicTraits)((want_bold ? kCTFontTraitBold : 0) | (want_italic ? kCTFontTraitItalic : 0));
+    if (traits == 0) {
+        return NULL; // regular = primary(호출자가 그대로 씀)
+    }
+    // 베이스 패밀리: bold면 family-bold 우선, 아니면 italic면 family-italic. 지정+존재할 때만.
+    const char *base_family = NULL;
+    size_t base_family_len = 0;
+    if (want_bold && bold_family != NULL && bold_family_len > 0) {
+        base_family = bold_family;
+        base_family_len = bold_family_len;
+    } else if (want_italic && italic_family != NULL && italic_family_len > 0) {
+        base_family = italic_family;
+        base_family_len = italic_family_len;
+    }
+    if (base_family != NULL) {
+        uint32_t matched = 0;
+        CTFontRef fam = maru_create_primary_font(base_family, base_family_len, size, &matched);
+        if (matched && fam != NULL) {
+            // 그 패밀리 안에서 굵게/기울임(variant 없으면 NULL → 그대로 regular weight of that family).
+            CTFontRef styled = CTFontCreateCopyWithSymbolicTraits(fam, 0.0, NULL, traits, traits);
+            if (styled != NULL) {
+                CFRelease(fam);
+                fam = styled;
+            }
+            // 새로 만든 폰트라 cascade(fallback)를 재적용한다(primary 파생과 달리 상속 안 되므로 — bold/italic 한글·이모지 폴백).
+            if (fallback_families != NULL && fallback_families_len > 0) {
+                CTFontRef with_cascade = maru_apply_cascade_list(fam, fallback_families, fallback_families_len, size);
+                if (with_cascade != NULL) {
+                    CFRelease(fam);
+                    fam = with_cascade;
+                }
+            }
+            return fam;
+        }
+        if (fam != NULL) {
+            CFRelease(fam); // 패밀리 못 찾음(matched=0) → 아래 primary 파생으로 폴백
+        }
+    }
+    // 지정 패밀리 없음/못 찾음 → primary_font에서 trait 파생(이미 박힌 cascade 상속).
+    return CTFontCreateCopyWithSymbolicTraits(primary_font, 0.0, NULL, traits, traits);
+}
+
 void maru_macos_coretext_shape_draw_list(
     const char *requested_font_family,
     size_t requested_font_family_len,
     double requested_font_size,
     const char *fallback_families,
     size_t fallback_families_len,
+    const char *bold_family, // F2-3: bold 글자용 폰트 패밀리(len 0=주 family bold variant)
+    size_t bold_family_len,
+    const char *italic_family, // F2-3: italic 글자용 폰트 패밀리(len 0=주 family italic variant)
+    size_t italic_family_len,
     const MaruCoreTextDrawCell *cells,
     size_t cell_count,
     MaruCoreTextDrawListShapeResult *result,
@@ -867,45 +931,43 @@ void maru_macos_coretext_shape_draw_list(
             return;
         }
 
-        // bold cell용 폰트 변형. 처음 만나는 bold cell에서 한 번만(lazy) 만든다 — bold cell이 하나도
-        // 없는 프레임(흔한 경우: 일반 터미널 출력·탭 제목)은 CoreText 변형 호출을 아예 안 한다.
-        // CTFontCreateCopyWithSymbolicTraits는 family에 bold variant가 없으면 NULL을 돌려주며, 그 경우
-        // bold cell도 primary(regular)로 폴백한다(없는 굵기를 합성하지 않음). 있으면 bold PostScript
-        // name(예: "Menlo-Bold")이 record로 흘러 rasterizer가 그 이름으로 굵은 glyph를 그린다.
-        CTFontRef bold_font = NULL;
-        CFStringRef bold_name = NULL;
-        CFDictionaryRef bold_attributes = NULL;
-        bool bold_attempted = false; // bold variant가 없는 폰트면 매 bold cell마다 재시도하지 않게
+        // 스타일 face 캐시(F2-3): index = (bold?1:0)|(italic?2:0). 0=regular(primary), 1=bold, 2=italic, 3=bold-italic.
+        // 각 조합을 처음 만나는 cell에서 lazy 생성(없는 조합은 매번 재시도 안 하게 attempted). regular(0)은 위에서 이미
+        // primary_font/primary_name/attributes로 준비됨. 생성 실패(없는 face)면 그 cell은 regular(0)로 폴백한다.
+        CTFontRef styled_fonts[4] = { primary_font, NULL, NULL, NULL };
+        CFStringRef styled_names[4] = { primary_name, NULL, NULL, NULL };
+        CFDictionaryRef styled_attrs[4] = { attributes, NULL, NULL, NULL };
+        bool styled_attempted[4] = { true, false, false, false };
 
         for (size_t cell_index = 0; cell_index < cell_count; cell_index++) {
             const MaruCoreTextDrawCell cell = cells[cell_index];
-            // 이 cell의 굵기를 정한다. 첫 bold cell에서 bold variant를 만들고(이후 재사용), 없으면(NULL) regular 폴백.
+            // 이 cell의 스타일(bold/italic)을 정해 해당 face를 lazy 생성·재사용한다. 없으면(NULL) regular 폴백.
             const bool want_bold = (cell.style_flags & MaruDrawCellBoldBit) != 0;
-            if (want_bold && !bold_attempted) {
-                bold_attempted = true;
-                // bold variant는 (이미 위에서 font.fallback cascade가 박힌) primary_font에서 파생하므로 cascade list를
-                // **상속**한다 — bold cell의 한글·이모지도 사용자 폴백을 탄다. 이 순서(cascade 적용 → bold 파생)를
-                // 뒤집으면 bold 폴백이 조용히 사라지니 유지한다(code-review max F1-2).
-                bold_font = CTFontCreateCopyWithSymbolicTraits(
-                    primary_font, 0.0, NULL, kCTFontTraitBold, kCTFontTraitBold);
-                if (bold_font != NULL) {
-                    bold_name = CTFontCopyPostScriptName(bold_font);
-                    const void *bold_values[] = { bold_font };
-                    bold_attributes = CFDictionaryCreate(
-                        kCFAllocatorDefault,
-                        keys,
-                        bold_values,
-                        1,
-                        &kCFTypeDictionaryKeyCallBacks,
-                        &kCFTypeDictionaryValueCallBacks
-                    );
+            const bool want_italic = (cell.style_flags & MaruDrawCellItalicBit) != 0;
+            const int style_index = (want_bold ? 1 : 0) | (want_italic ? 2 : 0);
+            if (style_index != 0 && !styled_attempted[style_index]) {
+                styled_attempted[style_index] = true;
+                CTFontRef styled = maru_create_styled_font(
+                    primary_font, requested_font_size,
+                    fallback_families, fallback_families_len,
+                    bold_family, bold_family_len,
+                    italic_family, italic_family_len,
+                    want_bold, want_italic);
+                if (styled != NULL) {
+                    styled_fonts[style_index] = styled;
+                    styled_names[style_index] = CTFontCopyPostScriptName(styled);
+                    const void *styled_values[] = { styled };
+                    styled_attrs[style_index] = CFDictionaryCreate(
+                        kCFAllocatorDefault, keys, styled_values, 1,
+                        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
                 }
             }
-            const bool use_bold = want_bold && bold_attributes != NULL;
-            CFDictionaryRef cell_attributes = use_bold ? bold_attributes : attributes;
-            // run의 폰트가 이 cell이 의도한 face와 다르면(진짜 fallback) 표시한다. bold cell은
-            // bold_name과 비교해야 bold variant를 fallback으로 오탐하지 않는다.
-            CFStringRef expected_name = use_bold ? bold_name : primary_name;
+            // styled face가 만들어졌으면 그걸로, 실패했으면(없는 face) regular(0)로 폴백.
+            const int use_index = (styled_attrs[style_index] != NULL) ? style_index : 0;
+            CFDictionaryRef cell_attributes = styled_attrs[use_index];
+            // run의 폰트가 이 cell이 의도한 face와 다르면(진짜 fallback) 표시한다. styled cell은 그 face name과 비교해야
+            // bold/italic variant를 fallback으로 오탐하지 않는다.
+            CFStringRef expected_name = styled_names[use_index];
             const uint32_t category = maru_category_for_codepoint(cell.codepoint);
             if (category == MaruGlyphCategorySpace || cell.width == 0) {
                 continue;
@@ -1026,14 +1088,11 @@ void maru_macos_coretext_shape_draw_list(
         }
 
         CFRelease(attributes);
-        if (bold_attributes != NULL) {
-            CFRelease(bold_attributes);
-        }
-        if (bold_name != NULL) {
-            CFRelease(bold_name);
-        }
-        if (bold_font != NULL) {
-            CFRelease(bold_font);
+        // styled face 캐시(1~3) 정리 — index 0(regular)은 primary_font/primary_name/attributes라 아래에서 따로 푼다(F2-3).
+        for (int si = 1; si < 4; si++) {
+            if (styled_attrs[si] != NULL) CFRelease(styled_attrs[si]);
+            if (styled_names[si] != NULL) CFRelease(styled_names[si]);
+            if (styled_fonts[si] != NULL) CFRelease(styled_fonts[si]);
         }
         if (primary_name != NULL) {
             CFRelease(primary_name);

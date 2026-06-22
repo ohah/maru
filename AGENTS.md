@@ -39,6 +39,7 @@
 ## 설계 문서
 
 - [초기 아키텍처](docs/architecture.md)
+- [TerminalCore(core.zig) 분해: Parser/Screen 분리](docs/terminal-core-decomposition.md)
 - [실제 구현 계획](docs/implementation-plan.md)
 - [렌더러 전략](docs/renderer-strategy.md)
 - [레이어링과 이식성 전략](docs/layering-and-portability.md)

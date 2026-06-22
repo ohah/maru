@@ -35,7 +35,9 @@
 - **역조회·활성화(Zig)**: `activateSurfaceById(id)` — `findTermWhere`로 `(tab, pane, term)`을 찾아
   **`switchTab → focusPaneByPtr → focusTerm`** 순서로 활성화(focusPaneByPtr는 활성 탭의 panes만, focusTerm은 활성
   pane만 보므로 순서가 강제된다 — 이 계약을 한 메서드에 가둔다). id는 재사용하지 않으므로(단조 증가) stale id가 다른
-  surface로 오인 활성화될 위험이 없다(닫힌 Term이면 못 찾아 false = 무동작).
+  surface로 오인 활성화될 위험이 없다(닫힌 Term이면 못 찾아 false = 무동작). 배너를 클릭했으면 그 surface를 본
+  것이므로, `activate_surface` export가 `markNotificationsReadBySurface(surface_id)`로 인앱 센터의 같은 surface
+  안읽음 알림도 읽음 처리한다(배너↔센터 읽음 동기화 — 닫힌 surface여도 읽음).
 - **delegate 타이밍**: `UNUserNotificationCenterDelegate`는 `applicationDidFinishLaunching`에서 **launch 완료 전**
   등록한다(Apple 요구사항 — 앱이 꺼진 상태에서 알림 클릭으로 켜진 콜드 런치의 첫 `didReceive`를 놓치지 않게).
 - **quick 패널**: 알림 대상이 quick 터미널이고 숨김이면 `showQuickTerminalAnimated`로 띄운다(화면 밖에 있는 패널을
@@ -57,7 +59,8 @@
   `pendingNotification()`이 드레인하는 단일 funnel에서 `pushNotificationHistory`로 보관한다(에이전트 큐 버퍼는 OS 배너로
   move되므로 히스토리는 **다시 dupe**). 상한(`notification_history_cap=64`) 초과 시 가장 오래된 것을 버린다.
   `notification_unread`는 안 읽은 개수 캐시(push/markRead/cap-drop 3곳에서만 증감).
-- **사이드바 헤더 종 + 배지**: 헤더 우측 아이콘 줄에 종(🔔, `cols-12`) + 안 읽은 개수 숫자 배지(`cols-10`, coral).
+- **사이드바 헤더 종 + 배지**: 헤더 우측 아이콘 줄에 종(🔔, `cols-12`) + 안 읽은 개수 배지(coral) — 1~9는 숫자
+  1칸(`cols-10`), 10개 이상은 "9+" 2칸(`cols-10·cols-9`).
   `HeaderRegion.notifications` zone은 `headerHit`(렌더 `buildSidebarHeaderFrame`과 같은 col)이 단일 출처 —
   안 그리면 hit-test도 none(`cols < 13` 좁은 사이드바). 아이콘 4개(종·◧·⚙·+)가 3칸 간격으로 우측 정렬.
 - **떠 있는 카드 패널**: `src/chrome/components/notifications.zig`(context_menu를 본뜸). 한 항목 = **2줄 카드**
@@ -96,4 +99,5 @@
 
 ## 6. 범위 밖 (후속)
 
-데스크톱 배너와 인앱 센터의 읽음 동기화(배너 클릭 시 센터도 읽음). 배지 두 자리(현재 `min(9)` cap → "9+").
+핵심 알림 기능(클릭→활성화·인앱 센터·읽음/지우기·config·배너↔센터 읽음 동기화·배지 9+)은 완결됐다. 추가 알림 채널
+(OSC 99 등)이나 알림 그룹화는 필요해지면 후속으로 둔다.

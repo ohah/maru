@@ -7559,7 +7559,20 @@ pub const AppSession = struct {
     /// 코어 플래그는 audible/visual 무관하게 항상 비운다(음소거·미설정에도 누적 방지). (F2-4)
     fn dispatchBell(self: *AppSession) void {
         if (!self.surface_initialized) return;
-        if (self.activeSurface().core.takeBell()) { // BEL 1회 — config에 따라 분배
+        // **모든 live term core**의 BEL을 drain(OR) — 배경 탭/pane/term의 BEL도 잡는다(active surface만 보던 한계, 리뷰 D).
+        // Dock 배지는 애초에 "언포커스(=배경) 벨"을 알리는 용도라 active만 보면 그 핵심 케이스를 놓친다. bell_pending은
+        // 단일 writer(리더 스레드)가 세우는 bool이라 active-surface 때와 같은 무잠금 읽기다(bool torn read 없음 — benign
+        // racy flag, docs/io-render-threading.md). **모든** core에 takeBell을 호출해 비워야 다음 tick 재트리거를 막는다(단락 금지).
+        var rang = false;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (!term.live_initialized or term.terminated) continue;
+                    if (term.surface.core.takeBell()) rang = true; // 매 live core drain(클리어) — OR로 누적
+                }
+            }
+        }
+        if (rang) { // BEL 1회 이상 — config에 따라 분배
             if (self.audible_bell) self.bell_audible_pending = true; // Swift take_bell이 NSSound.beep
             if (self.bell_visual) self.bell_flash_ticks = bell_flash_total_ticks; // 시각 flash 시작
             if (self.bell_dock_badge and !self.window_focused) self.bell_badge_pending = true; // 언포커스 시 Dock 배지
@@ -11434,6 +11447,42 @@ test "takeBell respects bell.audible; createTerm injects config scrollback" {
     session.dispatchBell();
     try std.testing.expect(session.takeBellBadge()); // 언포커스 → 배지
     try std.testing.expect(!session.takeBellBadge()); // 1회성
+}
+
+test "dispatchBell: 배경(비활성) pane의 BEL도 잡는다 — Dock 배지/소리 (리뷰 D)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+
+    try session.splitActivePane(.horizontal); // pane [p0, p1], 활성 p1
+    try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane); // 활성 = p1
+
+    // **배경** pane(p0)의 term core에 BEL을 쓴다(활성 p1이 아니다). active-surface만 보던 옛 dispatchBell은 못 잡았다.
+    const bg_core = &session.activeTab().panes.items[0].terms.items[0].surface.core;
+    try bg_core.write("\x07");
+
+    session.bell_dock_badge = true;
+    session.window_focused = false;
+    session.dispatchBell();
+    try std.testing.expect(session.takeBellBadge()); // 배경 pane BEL도 배지로(D 수정)
+    try std.testing.expect(!session.takeBellBadge()); // 1회성 — 배경 core도 drain됨(다음 tick 재트리거 없음)
+
+    // 다시 BEL 없이 dispatch → 배지 없음(stale 안 쌓임 확인).
+    session.dispatchBell();
+    try std.testing.expect(!session.takeBellBadge());
 }
 
 test "setSystemAppearance: follow-system on이면 light/dark 프리셋으로 교체, off면 무시 (F2-9)" {

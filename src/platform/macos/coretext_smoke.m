@@ -1155,6 +1155,13 @@ void maru_macos_coretext_smoke_rasterize_glyph(
             if (line_height > 0.0 && line_height <= avail_h) {
                 y = descent + floor((avail_h - line_height) / 2.0);
             }
+            // baseline을 정수 디바이스 픽셀로 스냅한다(루트커즈 개선). descent(분수)·leading·line-height 배수·
+            // 세로 중앙정렬이 겹치면 baseline이 분수 픽셀에 떨어지는데, 그러면 v·w처럼 바닥이 1px 두께 뾰족한
+            // 글자의 점이 폰트 크기·행간에 따라 픽셀 격자에 다르게 걸쳐 안티앨리어싱이 흔들렸다(줌마다 떠 보임).
+            // x는 floor라 이미 정수였고 y만 분수였다 — y를 round해 글자 바닥이 픽셀 줄에 딱 맞게 한다(또렷·크기 간
+            // 일관). 슬롯은 정수 px 셀에 배치되므로(grid 정수 px) 정수 baseline이면 화면 픽셀에도 정렬된다.
+            // 중앙정렬 의도는 유지(최대 0.5px 보정). is_emoji/overflow cover-fit 분기는 ink-center라 별개.
+            y = round(y);
             if (!isfinite((double)x)) {
                 x = 0.0;
             }

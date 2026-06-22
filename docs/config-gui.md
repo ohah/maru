@@ -193,7 +193,8 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **커밋**: 컴포넌트가 `Enter`에서 `color_picked` Action → host가 `settings_color_picked`로 정규화 → platform `commitPickerColor`가 `settings.pickerRgb()`를 `#rrggbb`로 직렬화해 선택 color 행 키에 `setText`(인라인 편집 커밋과 같은 인덱스 매핑·검증·write-back 예약) + picker 닫기. hex 문자열은 `loaded_config.arena` 소유.
 - **연속 해상도(키)**: pick_h/s/v는 full precision(0~359/0~100)으로 저장되므로, **Shift+화살표**(±1 채도/명도)·**`{`/`}`**(=Shift+[/], ±1° hue)로 그리드 셀 **사이** 임의 값에 도달한다. 평범한 화살표·`[`/`]`는 빠른 셀 점프(coarse) 그대로 — 이산 그리드는 표시·coarse용이고 값은 미세 조정으로 연속. 미리보기 `#rrggbb H S V`가 정확한 효과색을 실시간 표시. (picker 고급화 리뷰)
 - **포인터 sub-cell**: SV 그리드 클릭/드래그는 픽셀 위치를 0~100 s/v로 **연속** 매핑(셀 양자화 안 함 — 키 Shift 미세의 포인터 짝). hue 스트립은 셀 유지(`{`/`}` 키 미세로 보완 — 우측 끝 wrap 마커 회귀 회피).
-- **한계(후속)**: alpha(터미널 색은 #RRGGBB라 범위 밖에 가까움), eyedropper(macOS `NSColorSampler` 후속), hex 직접 입력 picker 내 동시 표시(현재 hex 편집은 §6.2 hex zone 별도).
+- **hex 인라인 입력**: picker 안에서 **`#`** 키로 hex 편집 진입 → 6자리 타이핑/붙여넣기 → Enter가 `color.parseHex`→`rgbToHsv`로 h/s/v 적용(Esc=취소·picker 유지). 정확한 hex를 picker를 안 닫고 잡는다(hex/# 자리만 받음). 미리보기 행이 편집 중엔 버퍼를 accent로 표시.
+- **한계(후속)**: alpha(터미널 색은 #RRGGBB라 범위 밖에 가까움), eyedropper(macOS `NSColorSampler` 후속).
 
 ## 7. 의존성
 

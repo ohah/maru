@@ -14,6 +14,18 @@ pub const Rgb = struct {
     b: u8,
 };
 
+/// `#rrggbb`(또는 `rrggbb`, 양끝 공백 허용) 6자리 hex를 Rgb로 파싱한다. 형식 오류(길이·비-hex)면 null. 색 picker의
+/// hex 인라인 편집·다른 hex 입력이 공유하는 단일 출처(소문자/대문자 허용). 3자리 단축형·알파는 미지원(터미널 색은 #RRGGBB).
+pub fn parseHex(text: []const u8) ?Rgb {
+    var s = std.mem.trim(u8, text, &std.ascii.whitespace);
+    if (s.len > 0 and s[0] == '#') s = s[1..];
+    if (s.len != 6) return null;
+    const r = std.fmt.parseInt(u8, s[0..2], 16) catch return null;
+    const g = std.fmt.parseInt(u8, s[2..4], 16) catch return null;
+    const b = std.fmt.parseInt(u8, s[4..6], 16) catch return null;
+    return .{ .r = r, .g = g, .b = b };
+}
+
 /// HSV 색(세팅 GUI 색 picker용). h=색상(0~359도), s=채도(0~100%), v=명도(0~100%). 정수라 셀-그리드 picker의
 /// 이산 선택과 맞물린다. RGB와 round-trip은 양자화 때문에 근사다(picker는 셀 해상도라 충분).
 pub const Hsv = struct { h: u16, s: u8, v: u8 };
@@ -222,4 +234,15 @@ test "parseSpec resolves xterm rgb: and # color specifications" {
     try std.testing.expectEqual(@as(?Rgb, null), parseSpec("#abcd")); // 4 hex = 채널당 균등 분할 불가(4%3!=0)
     try std.testing.expectEqual(@as(?Rgb, null), parseSpec("blue")); // 이름 색은 미지원
     try std.testing.expectEqual(@as(?Rgb, null), parseSpec("?")); // 질의는 파서가 아니라 호출자가 처리
+}
+
+test "parseHex: #rrggbb / rrggbb 파싱, 형식 오류는 null (색 picker hex 인라인)" {
+    try std.testing.expectEqual(Rgb{ .r = 0xff, .g = 0x00, .b = 0x80 }, parseHex("#ff0080").?);
+    try std.testing.expectEqual(Rgb{ .r = 0xab, .g = 0xcd, .b = 0xef }, parseHex("abcdef").?); // # 없이도
+    try std.testing.expectEqual(Rgb{ .r = 0x12, .g = 0x34, .b = 0x56 }, parseHex("  #123456  ").?); // 공백 trim
+    try std.testing.expectEqual(Rgb{ .r = 0xAA, .g = 0xBB, .b = 0xCC }, parseHex("#AABBCC").?); // 대문자
+    try std.testing.expectEqual(@as(?Rgb, null), parseHex("#fff")); // 3자리 미지원
+    try std.testing.expectEqual(@as(?Rgb, null), parseHex("#gg0000")); // 비-hex
+    try std.testing.expectEqual(@as(?Rgb, null), parseHex("")); // 빈 값
+    try std.testing.expectEqual(@as(?Rgb, null), parseHex("#1234567")); // 너무 김
 }

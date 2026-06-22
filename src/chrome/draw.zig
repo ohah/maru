@@ -63,6 +63,11 @@ pub const Op = union(enum) {
     text: Text,
     quad: Quad,
     swatch: Swatch,
+    /// 모달 오버레이를 이 px 사각(backing, 좌상단)으로 클리핑한다 — lowering이 OverlayRaster.clip_rect로 모아
+    /// MetalFrame.modal_clip으로 흘리고 renderer가 모달 셀 draw에 setScissorRect로 적용한다. 한 오버레이에 최대
+    /// 1개(여러 개면 마지막이 이김). 그리지 않으니 bounding-box·셀에는 영향 없다. 부분 카드 픽셀 스크롤(알림 패널
+    /// 등) 재사용 인프라 — 컴포넌트 적용은 후속.
+    clip: Rect,
 
     /// 사각 영역 채우기(밴드·탭 배경·hover·drop-zone). alpha<0xFF면 반투명 합성.
     pub const Fill = struct { rect: Rect, role: tokens.ColorRole, alpha: u8 = 0xFF };

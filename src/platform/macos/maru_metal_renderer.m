@@ -625,6 +625,11 @@ bool maru_metal_renderer_draw(
     const MaruAppHostGpuQuad *gpu_quads,
     size_t gpu_quad_count,
     size_t modal_cells_start,
+    /* C4b 모달 클리핑(px, 좌상단, w==0=없음). 모달 셀 draw에 setScissorRect로 적용(Metal 좌하단 원점 y 변환). */
+    uint32_t modal_clip_x_px,
+    uint32_t modal_clip_y_px,
+    uint32_t modal_clip_w_px,
+    uint32_t modal_clip_h_px,
     /* C4b: chrome 그림자(GpuShadow). NULL/0이면 안 그림. quad·셀보다 아래(맨 처음) 그린다. */
     const MaruAppHostGpuShadow *gpu_shadows,
     size_t gpu_shadow_count,
@@ -1031,7 +1036,22 @@ bool maru_metal_renderer_draw(
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:shadow_vertex_total];
     }
     if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count + under_vertex_count, quad_vertex_total - bottom_vertex_count - under_vertex_count); // 5. over quad(모달 배경)
-    if (vertex_buffer != nil && has_modal) MARU_DRAW_CELLS(cells_base_v + modal_cells_start * 6, cell_count_v - modal_cells_start * 6); // 6. 모달 텍스트(cells_base_v 오프셋)
+    // 6. 모달 텍스트(cells_base_v 오프셋) — clip 영역이 있으면 모달 셀만 scissor로 자른다(부분 카드 픽셀 스크롤
+    //    인프라). Metal scissor는 좌하단 원점이라 y = drawable_h - (y+h)로 뒤집고, drawable 안으로 clamp(범위 밖이면
+    //    Metal이 크래시). w==0이면 클리핑 없음(기존 동작). 모달 셀이 이 encoder의 마지막 draw라 복원 불필요.
+    if (vertex_buffer != nil && has_modal) {
+        if (modal_clip_w_px > 0) {
+            const NSUInteger dw = (NSUInteger)drawable_size.width;
+            const NSUInteger dh = (NSUInteger)drawable_size.height;
+            const NSUInteger cx = ((NSUInteger)modal_clip_x_px < dw) ? (NSUInteger)modal_clip_x_px : 0;
+            const NSUInteger cw2 = ((NSUInteger)modal_clip_x_px + (NSUInteger)modal_clip_w_px <= dw) ? (NSUInteger)modal_clip_w_px : (dw - cx);
+            const NSUInteger top = (NSUInteger)modal_clip_y_px + (NSUInteger)modal_clip_h_px;
+            const NSUInteger cy = (top <= dh) ? (dh - top) : 0;
+            const NSUInteger ch2 = (cy + (NSUInteger)modal_clip_h_px <= dh) ? (NSUInteger)modal_clip_h_px : (dh - cy);
+            [encoder setScissorRect:(MTLScissorRect){ .x = cx, .y = cy, .width = cw2, .height = ch2 }];
+        }
+        MARU_DRAW_CELLS(cells_base_v + modal_cells_start * 6, cell_count_v - modal_cells_start * 6);
+    }
 #undef MARU_DRAW_CELLS
 #undef MARU_DRAW_QUADS
 #undef MARU_DRAW_IMAGES

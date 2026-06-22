@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 83u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 84u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -352,6 +352,14 @@ typedef struct MaruAppHostMetalFrame {
        background-opacity 모델). host가 opacity<1이면 metal layer/NSWindow도 비불투명으로. float 대신 milli
        정수로 ABI를 정수 유지. 끝에 추가해 기존 offset 불변(ABI v70). */
     uint32_t window_opacity_milli;
+    /* C4b 모달 클리핑(인프라): 모달 오버레이 셀을 이 px 사각(backing, 좌상단)으로 클리핑한다 — chrome 컴포넌트가
+       draw.Op.clip을 내면 lowering이 채우고, renderer가 모달 셀 draw에 setScissorRect로 적용한다(Metal은 좌하단
+       원점이라 y = drawable_h - (y+h) 변환). w==0이면 클리핑 없음(기존 동작). 부분 카드 픽셀 스크롤(알림 패널 등)
+       재사용 인프라 — 컴포넌트 적용은 후속. 끝에 4필드 추가해 기존 offset 불변(ABI v84). */
+    uint32_t modal_clip_x_px;
+    uint32_t modal_clip_y_px;
+    uint32_t modal_clip_w_px;
+    uint32_t modal_clip_h_px;
 } MaruAppHostMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

@@ -79,8 +79,8 @@ pub fn wheelDeltaToLines(accum: *f64, delta_y: f64, precise: bool, cell_height_p
 
 /// 메인 화면에서 PageUp/PageDown를 스크롤백 페이지 스크롤로 돌릴 때의 페이지 델타(+1=위/과거, -1=아래/현재).
 /// scroll_mode(input.page-keys=scroll)가 아니거나 alt 화면이거나 page 키가 아니면 0 — 그땐 일반 인코딩 경로로
-/// 보내 앱(vim/less)이 \e[5~/\e[6~로 페이징하거나 셸이 그대로 받는다. 기본(passthrough)은 xterm/Ghostty와
-/// 일치, scroll은 Terminal.app/iTerm2식.
+/// 보내 앱(vim/less)이 \e[5~/\e[6~로 페이징하거나 셸이 그대로 받는다. 기본 `scroll`은 Terminal.app/iTerm2 관례,
+/// `passthrough`(opt-in)는 \e[5~/\e[6~를 그대로 PTY로 보내 xterm/Ghostty와 일치(project-rules.md §11 결정 예시).
 pub fn pageScrollDelta(scroll_mode: bool, alt_active: bool, key: terminal.input.Key) i32 {
     if (!scroll_mode or alt_active) return 0;
     return switch (key) {

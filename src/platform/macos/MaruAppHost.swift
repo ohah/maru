@@ -1249,6 +1249,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainNotification() // OSC 9/777: 이번 tick에 셸이 보낸 데스크톱 알림을 네이티브 알림으로 띄운다.
             drainBell() // G12 BEL: 이번 tick에 셸이 보낸 벨(0x07)을 시스템 벨로 울린다.
             drainMouseHide() // 타이핑(글자 입력) 중이면 마우스 커서를 숨긴다(config input.mouse-hide-while-typing).
+            drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
             drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
         }
         return status
@@ -1687,6 +1688,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let session = appSession else { return }
         if maru_macos_app_session_take_bell(session) != 0 {
             NSSound.beep()
+        }
+    }
+
+    // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 동작을 실행한다(매 tick). Zig가 pending_clipboard_action을
+    // 세우면 1=복사·2=붙여넣기. 클립보드는 OS 소유라 여기서 실행하고, "언제" 할지는 Zig가 정한다(Cmd+C/V와 같은 경로 재사용).
+    private func drainClipboardAction() {
+        guard let session = appSession else { return }
+        switch maru_macos_app_session_take_clipboard_action(session) {
+        case 1: copySelectionToPasteboard()
+        case 2: pastePasteboardText()
+        default: break
         }
     }
 

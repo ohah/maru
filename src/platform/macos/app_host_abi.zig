@@ -542,6 +542,14 @@ pub export fn maru_macos_app_session_option_as_meta(session: ?*AppSession) u32 {
     return if (app_session.optionAsMeta()) 1 else 0;
 }
 
+// OS 클립보드 1회성 동작(input.right-click=paste·menu). 0=무동작, 1=copy, 2=paste. Zig가 우클릭/터미널 메뉴에서
+// pending_clipboard_action을 세우고, Swift가 매 tick 호출해 1이면 copySelectionToPasteboard·2이면 pastePasteboardText를
+// 부른다(클립보드는 OS 소유). take_bell과 같은 1회성 패턴 — drain하면 비워진다. session null=0. (ABI v74)
+pub export fn maru_macos_app_session_take_clipboard_action(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return @intFromEnum(app_session.takeClipboardAction());
+}
+
 // view options(⚙) 사이드바 토글이 바뀌어 config 파일 반영이 필요하면 1(플래그 비움), 없으면 0. Swift가 tick마다
 // 호출해 1이면 serialize_sidebar_config로 받은 텍스트를 config 경로에 atomic write한다(앱→config). session null=0.
 pub export fn maru_macos_app_session_take_sidebar_config_dirty(session: ?*AppSession) u32 {

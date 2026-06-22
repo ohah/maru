@@ -46,7 +46,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 73; // 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 74; // 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -871,6 +871,15 @@ const RenameTarget = union(enum) {
     term: *Term,
 };
 
+/// OS 클립보드 1회성 동작 신호(input.right-click paste·menu). Zig가 우클릭/터미널 메뉴에서 세우고, Swift가 매 tick
+/// take_clipboard_action으로 drain해 실행한다(copy=copySelectionToPasteboard, paste=pastePasteboardText). ABI는
+/// u32로 전달(none=0/copy=1/paste=2) — 끝의 take_clipboard_action 주석과 1:1. 클립보드는 OS 소유라 Swift가 실행.
+const ClipboardAction = enum(u8) {
+    none = 0,
+    copy = 1,
+    paste = 2,
+};
+
 /// 워크스페이스 배경 tint 프리셋(0=없음, 그 외 0xRRGGBB) — 컨텍스트 메뉴 "배경: …" 항목 순서·tab_bg_labels와 1:1.
 /// 베이스/결정: 색 팔레트는 단일 표준이 없어 maru가 택한 기본 셋이다 — 앰버(#DDA15E)는 maru accent(마루=나무 마루),
 /// 나머지는 서로·앰버와 명확히 구분되는 중간 채도 색조(파랑/초록/빨강/보라)로 골라 여러 워크스페이스를 한눈에 가르게 했다.
@@ -1152,6 +1161,14 @@ pub const AppSession = struct {
     // 사이드바 표시 토글(브랜치·폴더) 메뉴다(buildContextMenuItems/acceptContextMenu가 이 플래그로 분기). 체크박스
     // 패널처럼 토글해도 닫히지 않고 열린 채 라벨(체크마크)만 갱신한다 — 바깥 클릭/Esc로 닫는다(closeContextMenu).
     view_options_menu: bool = false,
+    // 터미널 본문 우클릭 컨텍스트 메뉴(input.right-click=menu) — chrome_host.context_menu 상태를 공유하되 이게 true면
+    // 복사/붙여넣기 메뉴다(rename 대상·view_options와 배타). buildContextMenuItems/acceptContextMenu/closeContextMenu가
+    // 이 플래그로 분기한다. 항목 선택 시 pending_clipboard_action을 세워 Swift가 OS 클립보드 동작을 한다(F2-5).
+    terminal_context_menu: bool = false,
+    // OS 클립보드 동작 1회성 신호(input.right-click paste·menu). Zig가 우클릭/메뉴에서 세우고 Swift가 매 tick
+    // take_clipboard_action으로 drain해 copySelectionToPasteboard(copy)/pastePasteboardText(paste)를 호출한다 —
+    // 클립보드는 OS 소유라 Swift가 실행, "언제" 동작할지는 Zig가 정한다(take_bell과 같은 1회성 패턴, F2-5).
+    pending_clipboard_action: ClipboardAction = .none,
     // 세팅 GUI(사이드바 view options·세팅 화면)에서 바뀐 config 키 집합 — app→파일 write-back 예약(중복은 한 번만).
     // 키는 스키마 정적 리터럴이라 소유/해제 불요. Swift가 매 tick take_sidebar_config_dirty(=비어있지 않음)로 drain해
     // serialize_sidebar_config(updateConfigForKeys)로 atomic write한다(serialize가 성공 시 집합을 비운다). ABI 이름은 호환을 위해 유지.
@@ -3092,6 +3109,7 @@ pub const AppSession = struct {
         self.chrome_host.context_menu.hide();
         self.context_menu_target = null;
         self.view_options_menu = false;
+        self.terminal_context_menu = false;
     }
 
     /// 확인 모달을 연다(공통 경로). 메시지는 세션 소유 버퍼로 복사(copyOverlayMessage)하고 다른 오버레이를 닫아 배타성을
@@ -3568,6 +3586,10 @@ pub const AppSession = struct {
                 surface.unlockCore(self.io);
             }
         }
+        // MARU_FORCE_RIGHT_CLICK=1 — 첫 frame에 터미널 본문 우클릭을 시뮬레이트해 input.right-click=menu의 복사/붙여넣기
+        // 컨텍스트 메뉴 렌더를 헤드리스 스크린샷으로 캡처(self-verify debug-gate). 트래킹 .none(빈 셸)이라 config 분기를 탄다.
+        // 좌표는 사이드바 우측 터미널 본문(x=400, y=150 backing px). menu가 아니면(paste/reporting) 메뉴 안 뜸 — 그것도 검증.
+        if (std.c.getenv("MARU_FORCE_RIGHT_CLICK") != null) self.mouse(1, 400, 150, 2, 0);
         if (std.c.getenv("MARU_OPEN_SETTINGS") == null) return;
         self.toggleSettings();
         // MARU_OPEN_SETTINGS_SECTION=N — 특정 섹션을 열어 캡처(스크린샷 self-verify용 debug-gate). 미설정=섹션 0.
@@ -4618,17 +4640,55 @@ pub const AppSession = struct {
         return self.context_menu_items_buf[0..2];
     }
 
-    /// 컨텍스트/뷰옵션 메뉴 공통 teardown — hide + 대상·뷰옵션 플래그 비움. 바깥 클릭·Esc 경로가 공유한다.
+    /// 터미널 본문 우클릭 메뉴 항목(input.right-click=menu) — 복사/붙여넣기. rename·view_options와 같은
+    /// context_menu_items_buf·itemAt/draws/accept 경로를 공유하고 분기는 terminal_context_menu 플래그로 한다(F2-5).
+    fn buildTerminalContextMenuItems(self: *AppSession) []const []const u8 {
+        self.context_menu_items_buf[0] = "복사";
+        self.context_menu_items_buf[1] = "붙여넣기";
+        self.context_menu_items_len = 2;
+        return self.context_menu_items_buf[0..2];
+    }
+
+    /// 터미널 본문 (x,y backing px)에 복사/붙여넣기 컨텍스트 메뉴를 띄운다(input.right-click=menu). 항목 선택은
+    /// acceptContextMenu가 terminal_context_menu 분기로 pending_clipboard_action을 세운다(Swift가 OS 클립보드 실행).
+    fn showTerminalContextMenu(self: *AppSession, x_px: f64, y_px: f64) void {
+        self.terminal_context_menu = true;
+        const items = self.buildTerminalContextMenuItems();
+        self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), items.len);
+        self.metal_dirty = true;
+    }
+
+    /// OS 클립보드 1회성 동작을 drain한다(있으면 그 동작, 비우고). Swift가 매 tick 호출해 copy/paste를 실행한다(F2-5).
+    pub fn takeClipboardAction(self: *AppSession) ClipboardAction {
+        const action = self.pending_clipboard_action;
+        self.pending_clipboard_action = .none;
+        return action;
+    }
+
+    /// 컨텍스트/뷰옵션/터미널 메뉴 공통 teardown — hide + 대상·플래그 비움. 바깥 클릭·Esc 경로가 공유한다.
     fn closeContextMenu(self: *AppSession) void {
         self.chrome_host.context_menu.hide();
         self.context_menu_target = null;
         self.view_options_menu = false;
+        self.terminal_context_menu = false;
         self.metal_dirty = true;
     }
 
     /// 컨텍스트 메뉴의 선택 항목을 실행한다. 0=Rename(모든 대상), workspace는 1=위치 고정 토글·2..=배경 tint 프리셋.
     /// 메뉴를 먼저 닫고(대상 teardown 시 context_menu_target은 이미 null화됨) selected로 분기한다.
     fn acceptContextMenu(self: *AppSession) void {
+        // 터미널 본문 우클릭 메뉴(input.right-click=menu): 0=복사·1=붙여넣기 → pending_clipboard_action을 세워 Swift가
+        // OS 클립보드 동작을 한다. 메뉴를 닫고 return(rename·view_options와 배타). copy는 선택이 없으면 Swift가 no-op.
+        if (self.terminal_context_menu) {
+            const action: ClipboardAction = switch (self.chrome_host.context_menu.selected) {
+                0 => .copy,
+                1 => .paste,
+                else => .none,
+            };
+            self.pending_clipboard_action = action;
+            self.closeContextMenu(); // hide + terminal_context_menu 비움
+            return;
+        }
         // view options 메뉴: 항목 선택 = 표시 토글. 메뉴를 '닫지 않고'(체크박스 패널) config bool을 뒤집고 라벨(체크마크)을
         // 갱신한 뒤 카드를 재빌드하고, config 파일 반영을 예약한다(config_dirty_keys → Swift persist). 닫기는 바깥 클릭/Esc.
         if (self.view_options_menu) {
@@ -5649,7 +5709,27 @@ pub const AppSession = struct {
                 return;
             }
             if (self.pointOnChrome(x_px, y_px)) return; // chrome 위: consume
-            // 터미널 본문: 아래 reporting 경로로 흘린다(트래킹 앱 우클릭 보존).
+            // 터미널 본문 우클릭: 트래킹 앱(DECSET 1000~1003)이 마우스를 캡처 중이면 **리포팅 우선**(아래 reporting
+            // 경로로 fall through — 우-down도 리포트해 drag/up과 비대칭이 안 되게). 트래킹이 .none이면 input.right-click
+            // (paste|menu|reporting)을 적용한다(F2-5). 트래킹 읽기는 락 아래(리더 core.write와 경합 방지, §9.1).
+            const tracking = blk: {
+                const s = self.activeSurface();
+                s.lockCore(self.io);
+                defer s.unlockCore(self.io);
+                break :blk s.core.mouse_tracking != .none;
+            };
+            if (!tracking) switch (self.loaded_config.config.input.right_click) {
+                .reporting => {}, // 폴백 없음 — 아래 reporting 경로(트래킹 .none이라 사실상 무동작)로 흘림(현행).
+                .paste => {
+                    self.pending_clipboard_action = .paste; // Swift가 take_clipboard_action으로 drain → pastePasteboardText
+                    return;
+                },
+                .menu => {
+                    self.showTerminalContextMenu(x_px, y_px); // 복사/붙여넣기 컨텍스트 메뉴
+                    return;
+                },
+            };
+            // 트래킹 켜짐(또는 reporting 모드): 아래 reporting 경로로 흘린다(트래킹 앱 우클릭 보존).
         }
         // 더블클릭(kind 4) → 그 자리의 rename 대상(사이드바 슬롯·pane 라벨·Term 탭)을 인라인 편집한다. 대상이 없으면
         // return 안 하고 아래로 흘러 kind 4 = 터미널 단어 선택으로 폴백한다. 첫 클릭(kind 1)이 이미 포커스했고 그
@@ -10872,6 +10952,46 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     session.context_menu_target = .{ .pane = session.activePane() };
     try std.testing.expectEqual(@as(usize, 1), session.buildContextMenuItems().len);
     session.context_menu_target = null;
+}
+
+test "right-click menu(F2-5): 터미널 컨텍스트 메뉴 복사/붙여넣기 → pending_clipboard_action, takeClipboardAction 1회성" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // showTerminalContextMenu가 복사/붙여넣기 2항목을 박고 terminal_context_menu 플래그를 세운다.
+    session.showTerminalContextMenu(200, 100);
+    try std.testing.expect(session.terminal_context_menu);
+    const items = session.contextMenuItems();
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqualStrings("복사", items[0]);
+    try std.testing.expectEqualStrings("붙여넣기", items[1]);
+
+    // 항목 0(복사) accept → pending=.copy, 메뉴 닫힘(terminal_context_menu 비움).
+    session.chrome_host.context_menu.selected = 0;
+    session.acceptContextMenu();
+    try std.testing.expect(!session.terminal_context_menu);
+    // takeClipboardAction이 1회성 — 처음엔 .copy, 다음엔 .none.
+    try std.testing.expectEqual(ClipboardAction.copy, session.takeClipboardAction());
+    try std.testing.expectEqual(ClipboardAction.none, session.takeClipboardAction());
+
+    // 항목 1(붙여넣기) accept → pending=.paste.
+    session.showTerminalContextMenu(200, 100);
+    session.chrome_host.context_menu.selected = 1;
+    session.acceptContextMenu();
+    try std.testing.expectEqual(ClipboardAction.paste, session.takeClipboardAction());
+
+    // 기본 config는 paste(사용자 결정) — 트래킹 .none이면 우클릭이 paste 동작을 의도.
+    try std.testing.expectEqual(config_mod.theme.RightClick.paste, session.loaded_config.config.input.right_click);
 }
 
 test "moveTab: 고정 탭은 고정 영역 안에서만, 비고정은 비고정 영역 안에서만 재정렬(그룹 clamp)" {

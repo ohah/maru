@@ -170,7 +170,8 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **해제(unbind)**: keybind 행에서 `Backspace`(녹음 아님)를 누르면 그 액션의 **사용자 지정** 단축키를 해제한다 — `unbindActionEntry`가 `loaded_config.keybindings`에서 그 액션을 빼고 카탈로그를 재빌드, `keybind = * = action` 줄을 **`removeKeybindLines`(action 기준 제거)**로 빼며(serializeConfig 체이닝), 펜딩 rebind도 취소한다. 해제 후 resolver는 빌트인(있으면)을 반환하거나 미지정 — 행 표시가 그에 맞게 갱신. 사용자 바인딩이 없으면 notice(빌트인은 안 건드림).
 - **빌트인까지 완전 해제 + 재바인딩 완전 교체**: unbind/rebind는 공통 헬퍼 `unbindBuiltinChords(entry, except)`로 그 액션의 **빌트인 chord(들)**(`default_app_bindings`)를 `loaded_config.unbinds`에 넣고(라이브) `keybind = <chord> = unbind` 지시어로 영속해 죽인다. **unbind(완전 해제)는 `except=null`로 전부** 죽이고(해제 후 `chordForAction`=null → "(미지정)"), **rebind(완전 교체)는 `except=새 chord`로 새 chord만 살리고 나머지 빌트인을 죽인다** — 안 그러면 빌트인이 살아 옛 키 + 새 키 둘 다 발동(추가)이라 "표시=동작"·옛 키 되찾기가 안 된다. **한 액션에 빌트인 chord가 여럿이면(next_tab·previous_tab·increase/decrease_font_size는 2개) 전부** 처리(하나만 죽이면 `chordForAction`이 남은 chord를 반환해 실패 — 리뷰 #840). resolver는 사용자 바인딩을 unbinds보다 **먼저** 보므로(`keybinding.resolve` 우선순위) 새 chord가 빌트인과 같아도 `except`로 안 죽이면 그 키가 산다(중복 unbind 줄도 안 남김).
 - **충돌 경고**: rebind 시 그 chord가 다른 액션의 effective chord와 같으면 `showNotice`로 알린다(rebind는 진행 — 사용자 의도, last-wins). 다만 다중-chord 빌트인의 2번째 변형·terminal 매크로 바인딩과의 충돌은 못 잡는다(best-effort — 후속).
-- **한계(후속)**: terminal 매크로/global 바인딩 편집·F13+ 키·rebind 후 stale `unbind` 줄 정리. (rebind 완전 교체·다중-chord는 해결.)
+- **stale unbind 정리**: 어떤 chord를 다시 사용자 바인딩으로 묶으면(rebind), 옛 `keybind = <chord> = unbind` 줄이 모순되게 남는 걸 정리한다 — `clearStaleUnbind`가 ① 라이브 `unbinds`에서 제거 ② 이번 세션 펜딩 unbind-append 취소 ③ 파일의 옛 줄 제거 예약(`removeKeybindUnbindLines`, chord 기준). resolver는 사용자 바인딩을 unbinds보다 먼저 봐서 동작은 정상이었지만 파일 위생을 맞춘다.
+- **한계(후속)**: terminal 매크로(`keybind = <chord> = text:`/`esc:`) GUI 편집(chord뿐 아니라 전송 rhs 편집 위젯 신규 — config 파일 직접 편집 영역)·F13+ 키(F1~F12만 키 이벤트로 들어옴, ABI/Swift 매핑 신규 — 니치). (rebind 완전 교체·다중-chord·**global 바인딩 편집(rebind/unbind/라이브 OS 재등록)**·stale unbind는 해결.)
 
 ### 6.8 폼 검색(현재 섹션 필터) (CS-4-4 후속)
 

@@ -48,9 +48,12 @@ pub const FontConfig = struct {
     fallback: []const u8 = "",
 
     // 범위는 아래 font_* const(단일 출처 — appearance.resolveFont도 같은 const를 써 schema↔resolve drift 없음).
-    // size는 1~512 리터럴(전용 const 없음 — resolveFont도 같은 범위).
+    // size만 예외 구조: **GUI 슬라이더·⌘+/⌘- range = [font_size_min, font_size_max] = [6,72]** 와 **파일 검증 범위
+    // [1,512](resolveFont)** 가 의도적으로 다르다. 슬라이더가 resolver 범위(최대 512pt)를 쓰면 한 스텝(범위의 4%)이
+    // ~20pt라 "+" 한 번에 폰트가 수십 pt 뛰어 한 셀이 화면을 다 먹고 grid가 1×1로 붕괴한다 — 그래서 슬라이더·단축키는
+    // 보수 범위([6,72])만 노출하고, config 파일 직접 편집만 더 넓은 [1,512]를 허용한다.
     pub const schema = .{ // 키: font.size / font.size-step / font.line-height / font.letter-spacing / font.family / font.fallback (필드명 dashed)
-        .size = Meta{ .doc = "폰트 크기(pt)", .range = .{ 1, 512 }, .widget = .number, .section = .font },
+        .size = Meta{ .doc = "폰트 크기(pt)", .range = .{ font_size_min, font_size_max }, .widget = .number, .section = .font },
         .size_step = Meta{ .doc = "⌘+/⌘- 폰트 증분(pt)", .range = .{ font_size_step_min, font_size_step_max }, .widget = .number, .section = .font },
         .line_height = Meta{ .doc = "행간 배수", .range = .{ font_line_height_min, font_line_height_max }, .widget = .number, .section = .font },
         .letter_spacing = Meta{ .doc = "자간(논리 pt, 음수 허용)", .range = .{ font_letter_spacing_min, font_letter_spacing_max }, .widget = .number, .section = .font },
@@ -58,6 +61,13 @@ pub const FontConfig = struct {
         .fallback = Meta{ .doc = "폴백 폰트(쉼표 구분)", .widget = .text, .section = .font },
     };
 };
+
+/// font.size GUI 슬라이더·⌘+/⌘- 허용 범위(pt, 단일 출처 — 세팅 슬라이더 range가 이 const를 쓴다).
+/// app_session.setFontSize 클램프(단축키)도 같은 [6,72] 값을 쓴다(거기 const와 동기 — drift 시 둘 다 갱신).
+/// 6pt 미만은 글자가 안 읽히고, 72pt 초과는 한 셀이 화면을 다 먹어 grid가 1~2칸으로 붕괴한다. config 파일 직접
+/// 편집은 더 넓은 [1,512](resolveFont)를 허용하지만 GUI·단축키는 이 보수 범위만 노출한다.
+pub const font_size_min: f32 = 6.0;
+pub const font_size_max: f32 = 72.0;
 
 /// font.size-step 허용 범위(단일 출처 — loader 파싱 검증과 appearance resolveFont 검증이 공유해 drift 방지).
 /// 0/음수면 ⌘+/⌘-가 무동작/역방향이 되고, 너무 크면 한 번에 범위를 튄다.

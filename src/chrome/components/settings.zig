@@ -17,6 +17,7 @@ const props = @import("../props.zig");
 const input = @import("../input.zig");
 const modal_box = @import("modal_box.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭) — 라벨 폭 측정(modal_box와 같은 규약)
+const width = @import("../../width.zig"); // UTF-8 경계 절단/백스페이스 단일 출처(truncateToBoundary·dropLastCodepoint)
 const toggle = @import("toggle.zig");
 const slider = @import("slider.zig");
 const dropdown = @import("dropdown.zig");
@@ -219,10 +220,7 @@ pub const State = struct {
     }
     /// 검색 쿼리 마지막 코드포인트 제거(UTF-8 경계).
     pub fn backspaceSearch(self: *State) void {
-        if (self.search_len == 0) return;
-        var i = self.search_len - 1;
-        while (i > 0 and (self.search_buf[i] & 0xC0) == 0x80) i -= 1;
-        self.search_len = i;
+        self.search_len = width.dropLastCodepoint(&self.search_buf, self.search_len);
     }
     /// palette_grid 선택 셀을 delta만큼 옮긴다(wrap, 0..15). platform이 ←→(adjust)에서 호출(선택 행이 palette_grid일 때).
     pub fn moveGridCell(self: *State, delta: i32) void {
@@ -233,10 +231,7 @@ pub const State = struct {
     /// 인라인 편집 시작(platform이 text 행 활성 시 호출 — 현재값으로 시드). 버퍼 초과는 잘라 담되, UTF-8 코드포인트
     /// 중간에서 자르지 않게 경계로 back-up한다(리뷰 #823 — 잘린 멀티바이트는 무효 UTF-8 → view/backspace 오작동).
     pub fn enterEdit(self: *State, value: []const u8) void {
-        var n = @min(value.len, edit_cap);
-        if (n < value.len) {
-            while (n > 0 and (value[n] & 0xC0) == 0x80) n -= 1; // continuation 바이트면 코드포인트 시작까지 back-up
-        }
+        const n = width.truncateToBoundary(value, edit_cap); // 버퍼 초과는 UTF-8 경계로 자름(단일 출처 — #823)
         @memcpy(self.edit_buf[0..n], value[0..n]);
         self.edit_len = n;
         self.editing = true;
@@ -257,10 +252,7 @@ pub const State = struct {
     }
     /// 마지막 코드포인트(UTF-8 경계) 제거.
     pub fn backspaceEdit(self: *State) void {
-        if (self.edit_len == 0) return;
-        var i = self.edit_len - 1;
-        while (i > 0 and (self.edit_buf[i] & 0xC0) == 0x80) i -= 1; // continuation 바이트 건너뛰기
-        self.edit_len = i;
+        self.edit_len = width.dropLastCodepoint(&self.edit_buf, self.edit_len);
     }
     pub fn hide(self: *State) void {
         self.open = false;

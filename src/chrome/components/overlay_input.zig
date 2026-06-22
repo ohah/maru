@@ -119,12 +119,9 @@ pub const OverlayInput = struct {
         return true;
     }
 
-    /// 마지막 코드포인트 1개 삭제(UTF-8 경계 존중). 빈 쿼리면 무동작.
+    /// 마지막 코드포인트 1개 삭제(UTF-8 경계 존중). 빈 쿼리면 무동작. width.dropLastCodepoint 단일 출처.
     pub fn backspace(self: *OverlayInput) void {
-        if (self.query.items.len == 0) return;
-        var cut = self.query.items.len - 1;
-        while (cut > 0 and (self.query.items[cut] & 0xC0) == 0x80) cut -= 1; // continuation 바이트 건너뜀
-        self.query.shrinkRetainingCapacity(cut);
+        self.query.shrinkRetainingCapacity(width.dropLastCodepoint(self.query.items, self.query.items.len));
     }
 
     /// 검색어의 표시 폭(EAW). caret 열 = prompt_cols + 이 값(조합중 preedit는 안 더한다 — 커서가 조합 글자를 덮음).

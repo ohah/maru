@@ -2,9 +2,10 @@
 //! 텍스트·조합 변화·삭제 신호를 받아 "확정 텍스트 전송 / 무시 / 일반 키 인코딩"을 결정한다 — 부작용(PTY 전송)
 //! 에서 분리해 라이브 PTY 없이 단위 테스트한다(Ghostty의 shouldSuppressComposingControlInput 순수 판정과 같은
 //! 방식). platform/macos/app_session에서 추출(docs/layering-and-portability.md §3 — 2차 추출, "입력 수학" 그룹).
-//! OS·렌더 무관 — std만 의존.
+//! OS·렌더 무관 — std + 중립 width 유틸(순수 Unicode)만 의존.
 
 const std = @import("std");
+const width = @import("../width.zig"); // 중립 UTF-8 경계 유틸 — dropLastCodepoint 단일 출처
 
 /// imeEnd의 순수 판정 결과. 부작용(PTY 전송)에서 분리해 라이브 PTY 없이 unit 테스트한다.
 pub const Decision = union(enum) {
@@ -38,10 +39,7 @@ pub fn decide(composing: bool, inserted: []const u8, marked_changed: bool, did_d
 /// UTF-8 문자열에서 마지막 코드포인트를 뗀 슬라이스. continuation 바이트(0x80~0xBF)를 지나
 /// lead 바이트까지 되돌린다. 잘못된 UTF-8이면 1바이트만 뗀다(안전).
 fn dropLastCodepoint(s: []const u8) []const u8 {
-    if (s.len == 0) return s;
-    var i: usize = s.len - 1;
-    while (i > 0 and (s[i] & 0xC0) == 0x80) i -= 1;
-    return s[0..i];
+    return s[0..width.dropLastCodepoint(s, s.len)]; // 길이 계산은 width 단일 출처, 여기선 슬라이스 형태로 래핑
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────

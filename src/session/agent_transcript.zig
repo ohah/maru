@@ -2,8 +2,8 @@
 //! 에이전트가 디스크에 남기는 세션 트랜스크립트의 *끝부분(tail)* 바이트만 받아 running/idle/unknown과 마지막
 //! 답변 미리보기를 계산한다. 파일 I/O(세션 찾기·tail read·디렉터리 나열)는 platform(L4)이 하고, 여기는
 //! 바이트→상태의 순수 함수라 라이브 에이전트 없이 헤드리스로 단위 테스트한다(docs/agent-session.md
-//! "아키텍처/레이어" — session core). OS·렌더 무관, std만 의존 — tests/boundary/imports.zig가 OS 타입
-//! 누수를 막는다. 에이전트별 스키마 어댑터(claude/codex)가 같은 `AgentState`/`Status` 타입을 공유하고, 어느
+//! "아키텍처/레이어" — session core). OS·렌더 무관, std + 중립 width 유틸(순수 Unicode)만 의존 —
+//! tests/boundary/imports.zig가 OS 타입 누수를 막는다. 에이전트별 스키마 어댑터(claude/codex)가 같은 `AgentState`/`Status` 타입을 공유하고, 어느
 //! 어댑터를 부를지는 platform이 `agent_kind`로 디스패치한다(PR3).
 //!
 //!   - claude: `~/.claude/projects/<enc-cwd>/<session-uuid>.jsonl`. 완료 = 마지막 *대화* 엔트리가 turn-종료
@@ -20,6 +20,7 @@
 //! *포맷 이해*용으로만 보고 코드는 복사하지 않는다.
 
 const std = @import("std");
+const width = @import("../width.zig"); // 중립 UTF-8 경계 유틸(OS·렌더 무관, std만 의존) — 미리보기 절단 단일 출처
 
 /// transcript 코어가 판정하는 상태. `none`(포그라운드가 에이전트가 아님)은 platform이 `agent_kind`로 정하므로
 /// 여기엔 없다 — 이 레이어는 "트랜스크립트가 말하는" 세 상태만 안다. platform이 `agent_kind == .none`이면
@@ -138,11 +139,8 @@ fn copyAnswerPreview(dst: []u8, content: ?std.json.Value) usize {
 fn copyFirstLineTruncated(dst: []u8, src: []const u8) usize {
     var end: usize = 0;
     while (end < src.len and src[end] != '\n' and src[end] != '\r') : (end += 1) {}
-    var n = @min(end, dst.len);
-    // 잘렸고(n<end) 그 경계가 코드포인트 중간이면 lead 바이트까지 되돌린다. n<end<=src.len이라 src[n] 안전.
-    if (n < end) {
-        while (n > 0 and (src[n] & 0xC0) == 0x80) n -= 1;
-    }
+    // 첫 줄을 dst 길이로 자르되 UTF-8 경계 보정(width.truncateToBoundary 단일 출처 — 깨진 글자 미리보기 방지).
+    const n = width.truncateToBoundary(src[0..end], dst.len);
     @memcpy(dst[0..n], src[0..n]);
     return n;
 }

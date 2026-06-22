@@ -229,7 +229,7 @@ typedef struct MaruAppHostGpuQuad {
     uint32_t fill_color0;    /* 0xAARRGGBB — gradient 시작색 */
     uint32_t fill_color1;    /* gradient 끝색(solid면 무시) */
     uint32_t border_color;   /* 0xAARRGGBB */
-    uint32_t gradient_kind;  /* 0=solid, 1=vertical(top→bottom), 2=horizontal(left→right) */
+    uint32_t gradient_kind;  /* 0=solid, 1=vertical(top→bottom), 2=horizontal(left→right), 3=위 삼각형(말풍선 caret, fill_color0 단색+edge AA; corner/border 무시) */
     uint32_t layer;          /* C4b: 0=under(사이드바 밴드), 1=over(모달 최상위), 2=bottom(탭 밴드 — part1 앞·아래) — draw가 layer로 3패스 분리 */
 } MaruAppHostGpuQuad;
 

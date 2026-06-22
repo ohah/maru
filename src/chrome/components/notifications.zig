@@ -27,6 +27,11 @@ const min_panel_cols: u32 = 30;
 /// 빈 목록("알림 없음")일 때도 너무 작지 않게 둘 최소 행 수(카드 1.5개분 높이).
 const empty_panel_rows: u32 = 3;
 
+/// 항목이 있을 때 팝업 최소 높이(행). 알림이 한두 개뿐이어도 팝업이 납작하지 않게 baseline 높이를 보장한다
+/// (사용자 피드백 "기본 height를 한두 배 늘려라"). 카드는 상단, 액션 행(footer)은 하단 고정, 사이 여백은 패널
+/// 배경(클릭 무시 — Hit.background). 카드가 이보다 많으면 자연 높이로 커지므로 영향 없다(화면 높이는 layout이 cap).
+const min_panel_rows: u32 = 8;
+
 /// 비어 있을 때 패널에 그릴 안내 문구(빈 목록도 패널은 그린다 — context_menu가 len==0이면 null이던 것과 다름).
 const empty_label = "알림 없음";
 
@@ -132,6 +137,7 @@ pub const Hit = union(enum) {
     close: usize, // 카드 우측 ✕ → 그 카드 삭제
     mark_all_read, // 하단 "모두 읽음"
     clear_all, // 하단 "모두 지우기"
+    background, // 카드/액션 아닌 패널 내부 빈 여백(최소 높이 gap) — 클릭 무시(닫지 않음). hitTest는 박스 '밖'만 null(=닫기).
 };
 
 /// 키 처리(열려 있을 때만 host가 호출). ↑↓=이동, Enter=accept, Backspace=selected 삭제, 그 외(Esc·글자 등)=close.
@@ -223,11 +229,19 @@ fn layout(state: *const State, items: []const Item, p: props.ChromeProps) ?Layou
     const bh = m.backing_height_px;
     const first = @min(state.scroll_offset, sw.max_offset);
 
-    // 높이 — 빈 목록은 empty_panel_rows, 아니면 보이는 카드 + 액션 1줄.
-    const box_h: u32 = if (total == 0)
+    // 높이 — 빈 목록은 empty_panel_rows, 아니면 보이는 카드 + 액션 1줄. 단, **스크롤 안 하는(항목 적은)** 경우엔
+    // min_panel_rows를 baseline으로 보장해 팝업이 납작하지 않게 한다(카드 상단·액션 footer 하단·사이 여백=패널 배경).
+    // 스크롤되면(항목 많음) 카드가 화면을 채워 footer가 카드 영역 바로 아래라 늘릴 필요가 없고(스크롤바가 footer와
+    // 안 떨어지게) baseline을 적용하지 않는다. baseline은 화면(backing)을 넘기지 않게 cap한다(상하 1칸 여백 — scrollWindow
+    // 와 동일). content_h는 이미 scrollWindow가 화면에 맞췄으므로 그보다 작게 깎지 않는다(`@max(content_h, …)`).
+    const content_h: u32 = if (total == 0)
         empty_panel_rows * ch
     else
         @as(u32, @intCast(sw.visible)) * card_h + action_h;
+    const box_h: u32 = if (total == 0 or sw.scrollable)
+        content_h
+    else
+        @max(content_h, @min(min_panel_rows * ch, bh -| 2 * ch));
 
     // 위치 clamp.
     var x = state.anchor_x;
@@ -252,8 +266,9 @@ fn layout(state: *const State, items: []const Item, p: props.ChromeProps) ?Layou
     };
 }
 
-/// 패널 박스 rect(px). view·hitTest와 같은 layout을 쓴다(단일 출처). cell 0이면 null.
-fn panelRect(state: *const State, items: []const Item, p: props.ChromeProps) ?draw.Rect {
+/// 패널 박스 rect(px). view·hitTest와 같은 layout을 쓴다(단일 출처). cell 0이면 null. platform이 말풍선 caret을
+/// 벨↔패널 상단에 맞추려 패널 top/x/w를 읽는다(pub).
+pub fn panelRect(state: *const State, items: []const Item, p: props.ChromeProps) ?draw.Rect {
     const l = layout(state, items, p) orelse return null;
     return l.rect;
 }
@@ -274,11 +289,15 @@ pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x
     const card_h: f64 = @floatFromInt(l.card_h);
     const rel_y = y_px - y0;
     const card_area_h = @as(f64, @floatFromInt(l.visible)) * card_h;
-    // 하단 액션 행(viewport 하단 sticky): 보이는 카드 영역 아래 → 좌/우 절반으로 모두 읽음/지우기.
-    if (rel_y >= card_area_h) {
+    // 하단 액션 행(footer, 박스 하단 고정): 박스 하단 action_rows줄 → 좌/우 절반으로 모두 읽음/지우기. view의 action_y와 단일 출처.
+    const action_top = @as(f64, @floatFromInt(rect.h)) - @as(f64, @floatFromInt(l.ch * action_rows));
+    if (rel_y >= action_top) {
         const mid = x0 + @as(f64, @floatFromInt(rect.w)) / 2.0;
         return if (x_px < mid) .mark_all_read else .clear_all;
     }
+    // 카드 영역과 footer 사이 빈 여백(최소 높이로 생긴 gap) — 클릭 무시(닫지 않음). 카드가 박스를 채우면 gap이 없어
+    // (action_top == card_area_h) 이 분기는 도달하지 않는다(위 footer 분기가 잡음).
+    if (rel_y >= card_area_h) return .background;
     // 카드: 보이는 vis번째 → 실제 인덱스 first+vis + 본문줄 우측 ✕ zone인지.
     const vis_idx: usize = @min(@as(usize, @intFromFloat(rel_y / card_h)), l.visible - 1);
     const card_idx = l.first + vis_idx;
@@ -362,8 +381,9 @@ pub fn view(
             try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y + card_h_i - 1, .w = rect.w, .h = 1 }, .role = .divider } });
         }
     }
-    // 하단 액션 행(viewport 하단 sticky): 보이는 카드들 아래 구분선 + "모두 읽음"(좌) / "모두 지우기"(우, muted).
-    const action_y = rect.y + @as(i32, @intCast(l.visible)) * card_h_i;
+    // 하단 액션 행(footer, 박스 하단 고정): 카드는 상단, 사이 여백(최소 높이로 생긴 gap)은 패널 배경. 카드가 박스를
+    // 꽉 채우면(스크롤·충분한 항목) 카드 영역 바로 아래 = 기존 위치와 동일. 구분선 + "모두 읽음"(좌) / "모두 지우기"(우, muted).
+    const action_y = rect.y + @as(i32, @intCast(rect.h)) - @as(i32, @intCast(l.ch * action_rows));
     try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = action_y, .w = rect.w, .h = 1 }, .role = .divider } });
     const mark_runs = try arena.alloc(draw.Run, 1);
     mark_runs[0] = .{ .text = mark_all_label };
@@ -441,14 +461,16 @@ test "notifications hitTest: 카드 본문=card / 본문줄 우측 ✕=close / �
     var s: State = .{};
     s.show(100, 50, items.len);
     // box_w=(max(content,30)+2)*8=256, x=100, panel_cols=32, ✕ col=30 → close_x0=100+240=340.
-    // 카드 높이=32: 카드0=[50,82)(제목 50~66·본문 66~82), 카드1=[82,114). 액션행=[114,130). 중앙 x=100+128=228.
+    // 항목 2 → content_h=2×32+16=80인데 최소 높이 min_panel_rows(8)×16=128이 더 커 box_h=128(=[50,178)). 카드는 상단:
+    // 카드0=[50,82)(제목 50~66·본문 66~82), 카드1=[82,114). 액션행(footer)은 박스 하단 고정 [162,178). 사이 gap=[114,162)=background.
     try std.testing.expectEqual(Hit{ .card = 0 }, hitTest(&s, &items, p, 110, 55).?); // 카드0 제목 좌측
     try std.testing.expectEqual(Hit{ .close = 0 }, hitTest(&s, &items, p, 345, 70).?); // 카드0 본문줄 우측 ✕
     try std.testing.expectEqual(Hit{ .card = 0 }, hitTest(&s, &items, p, 345, 55).?); // 제목줄 우측은 ✕ 아님(시간 영역)
     try std.testing.expectEqual(Hit{ .card = 1 }, hitTest(&s, &items, p, 110, 90).?); // 카드1
-    try std.testing.expectEqual(Hit.mark_all_read, hitTest(&s, &items, p, 150, 120).?); // 액션행 좌측
-    try std.testing.expectEqual(Hit.clear_all, hitTest(&s, &items, p, 300, 120).?); // 액션행 우측
-    try std.testing.expectEqual(@as(?Hit, null), hitTest(&s, &items, p, 110, 400)); // 박스 아래 밖
+    try std.testing.expectEqual(Hit.background, hitTest(&s, &items, p, 150, 130).?); // 카드↔footer 사이 gap → 무시(닫지 않음)
+    try std.testing.expectEqual(Hit.mark_all_read, hitTest(&s, &items, p, 150, 170).?); // footer 좌측(하단 고정 [162,178))
+    try std.testing.expectEqual(Hit.clear_all, hitTest(&s, &items, p, 300, 170).?); // footer 우측
+    try std.testing.expectEqual(@as(?Hit, null), hitTest(&s, &items, p, 110, 400)); // 박스 아래 밖 → null(닫기)
     try std.testing.expectEqual(@as(?Hit, null), hitTest(&s, &.{}, p, 110, 55)); // 빈 목록
 }
 

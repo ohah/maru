@@ -526,8 +526,7 @@ pub const TerminalCore = struct {
     /// 막는 방어선(이미지 320MB·APC 4096·placement 1024 한계와 같은 결). 디코드된 이미지는 320MB로 따로
     /// 제한되므로, base64 오버헤드(~4/3)를 감안해 480MB로 둔다. 초과하면 그 chunked 전송을 폐기한다.
     const max_kitty_chunk_bytes: usize = 480 * 1000 * 1000;
-    // OSC 52 클립보드 쓰기 상한(디코드 후 바이트). 클립보드는 보통 작아 과대 페이로드는 거부한다(폭주 방어선).
-    const max_clipboard_bytes: usize = 16 * 1000 * 1000;
+    // OSC 52 클립보드 쓰기 상한(max_clipboard_bytes)은 osc.zig로 이동(clipboard 핸들러 전용).
 
     pub fn init(allocator: std.mem.Allocator, size: types.Size) !TerminalCore {
         const grid = clampGridSize(size);
@@ -1964,16 +1963,16 @@ pub const TerminalCore = struct {
         } else if (std.mem.eql(u8, body, "111")) {
             self.default_bg_override = null; // OSC 111 = 배경색 리셋
         } else if (std.mem.startsWith(u8, body, "52;")) {
-            self.dispatchOscClipboard(body[3..]); // OSC 52 = 클립보드(파싱+디코드만; 실제 쓰기·정책은 platform)
+            osc.dispatchClipboard(self, body[3..]); // OSC 52 = 클립보드(파싱+디코드만; 실제 쓰기·정책은 platform)
         } else if (std.mem.startsWith(u8, body, "4;")) {
             osc.dispatchPalette(self, body[2..]); // OSC 4 = 256색 팔레트 설정/질의(`<index>;<spec>` 쌍 반복)
         } else if (std.mem.eql(u8, body, "104") or std.mem.startsWith(u8, body, "104;")) {
             // OSC 104 = 팔레트 리셋. 인덱스 없으면(정확히 "104") 전부, "104;1;2"면 그 인덱스만.
             osc.dispatchPaletteReset(self, if (body.len > 4) body[4..] else "");
         } else if (std.mem.startsWith(u8, body, "777;")) {
-            self.dispatchOscNotify777(body[4..]); // OSC 777 = rxvt 데스크톱 알림(notify;title;body)
+            osc.dispatchNotify777(self, body[4..]); // OSC 777 = rxvt 데스크톱 알림(notify;title;body)
         } else if (std.mem.startsWith(u8, body, "9;")) {
-            self.dispatchOscNotify9(body[2..]); // OSC 9 = iTerm2 알림(ConEmu 서브커맨드와 충돌 — 가드)
+            osc.dispatchNotify9(self, body[2..]); // OSC 9 = iTerm2 알림(ConEmu 서브커맨드와 충돌 — 가드)
         } else if (std.mem.startsWith(u8, body, "5379;")) {
             self.dispatchOscMaru(body["5379;".len..]); // OSC 5379 = maru 전용 통지(사설 번호; 현재 ssh;<dest>)
         }
@@ -2007,37 +2006,6 @@ pub const TerminalCore = struct {
         return self.reverse_screen;
     }
 
-    /// OSC 52(클립보드) — `52;<targets>;<base64>`로 system clipboard 쓰기를 요청한다(tmux/nvim이 SSH 너머
-    /// `"+y`로 씀). **코어는 파싱+base64 디코드만** 하고 결과를 clipboard_write pending에 둔다 — 실제 clipboard
-    /// 쓰기와 정책(osc52.write ask/allow/deny)은 app/platform 책임이다(클립보드는 OS 리소스라 native 소유 —
-    /// terminal-compatibility-policy.md "TerminalCore parses OSC52, app/platform layer만 실제 read/write"). 읽기
-    /// (data가 `?`)는 코어가 target만 기억하고 clipboard_read_pending을 세운다(무시하지 않는다) — 실제 base64 읽기와
-    /// osc52.read(allow|deny, 기본 deny) 정책은 app/platform이 한다(write 대칭, 코어는 OS 클립보드를 직접 안 읽음 —
-    /// 원격 세션의 clipboard 탈취는 기본 deny로 막고, ask UI는 후속). 베이스: xterm/iTerm2 OSC 52(사실상 표준),
-    /// 보안 정책은 호환성/보안 정책 문서.
-    fn dispatchOscClipboard(self: *TerminalCore, body: []const u8) void {
-        const semi = std.mem.indexOfScalar(u8, body, ';') orelse return; // <targets>;<data>
-        const targets = body[0..semi];
-        const data = body[semi + 1 ..];
-        if (data.len == 0) return; // 빈 데이터 무시
-        if (std.mem.eql(u8, data, "?")) {
-            // 읽기 쿼리(`OSC 52 ; <Pc> ; ? ST`): target만 기억하고 pending을 세운다 — 실제 클립보드 읽기·정책(osc52.read)·
-            // base64 응답은 platform(app)이 한다(write 대칭, 코어는 OS 클립보드를 직접 안 읽음). target은 응답에 그대로 echo.
-            self.clipboard_read_target.clearRetainingCapacity();
-            self.clipboard_read_target.appendSlice(self.allocator, targets) catch return;
-            self.clipboard_read_pending = true;
-            return;
-        }
-        const dec = std.base64.standard.Decoder;
-        const decoded_len = dec.calcSizeForSlice(data) catch return; // 잘못된 base64
-        if (decoded_len == 0 or decoded_len > max_clipboard_bytes) return; // 빈/과대 거부(폭주 방어선)
-        self.clipboard_write.resize(self.allocator, decoded_len) catch return;
-        dec.decode(self.clipboard_write.items, data) catch {
-            self.clipboard_write.clearRetainingCapacity();
-            return;
-        };
-    }
-
     /// OSC 52로 들어온 clipboard 쓰기 요청(디코드된 바이트). 없으면 빈 슬라이스. platform이 정책(allow)을 확인한
     /// 뒤 system clipboard에 쓰고 clearClipboardWrite한다 — 코어는 OS clipboard를 직접 만지지 않는다(경계).
     pub fn pendingClipboardWrite(self: *const TerminalCore) []const u8 {
@@ -2062,51 +2030,6 @@ pub const TerminalCore = struct {
     pub fn clearClipboardRead(self: *TerminalCore) void {
         self.clipboard_read_pending = false;
         self.clipboard_read_target.clearRetainingCapacity();
-    }
-
-    /// OSC 777(rxvt/urxvt) 데스크톱 알림 — `OSC 777 ; notify ; <title> ; <body>`. `notify;` 접두만 처리하고
-    /// 나머지를 첫 `;`로 title/body로 가른다(body는 `;` 포함 가능). body가 없으면 빈 문자열. 다른 777 서브타입
-    /// (notify 외)은 무시. 베이스: urxvt OSC 777 notify.
-    fn dispatchOscNotify777(self: *TerminalCore, body: []const u8) void {
-        if (!std.mem.startsWith(u8, body, "notify;")) return; // notify 외 777 서브타입은 미지원(소비만)
-        const rest = body["notify;".len..];
-        const sep = std.mem.indexOfScalar(u8, rest, ';');
-        if (sep) |i| {
-            self.setNotification(rest[0..i], rest[i + 1 ..]);
-        } else {
-            self.setNotification(rest, ""); // body 없는 형태: title만
-        }
-    }
-
-    /// OSC 9(iTerm2) 데스크톱 알림 — `OSC 9 ; <message>`(title 없음, body=message). **ConEmu 충돌**: OSC 9는
-    /// ConEmu가 `9;1`(sleep)·`9;2`(msgbox)·`9;4`(progress)·`9;9`(cwd) 등으로도 쓴다. 이들을 알림으로 오발사하면
-    /// (특히 `9;4` progress가 진행바마다 알림 폭탄) 곤란하므로, `<숫자>;...` 형태는 ConEmu 서브커맨드로 보고
-    /// 소비만 한다(알림 안 함). **베이스/결정**: iTerm2 OSC 9(body=전체) 기준. ConEmu 분기는 Ghostty osc9가
-    /// 유효 서브커맨드만 소비하고 미완성은 알림으로 폴백하는데(예: `9;4`→알림 "4"), maru는 `<숫자>;` 패턴 전체를
-    /// 보수적으로 소비해 progress 등 완성 서브커맨드의 오발사를 확실히 막는다(순수 텍스트·단일 숫자 알림만 발사).
-    fn dispatchOscNotify9(self: *TerminalCore, body: []const u8) void {
-        if (body.len == 0) return;
-        if (looksLikeConemu9(body)) return; // `<숫자>;...` → ConEmu 서브커맨드(소비, 알림 안 함)
-        self.setNotification("", body); // iTerm2: title 없음, body=메시지 전체
-    }
-
-    /// OSC 9 body가 ConEmu 서브커맨드(`<숫자>;...`)처럼 보이는가. 선두 숫자 뒤에 `;`가 오면 true.
-    fn looksLikeConemu9(s: []const u8) bool {
-        var i: usize = 0;
-        while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) {}
-        return i > 0 and i < s.len and s[i] == ';';
-    }
-
-    /// 알림 title/body를 pending에 둔다(소유 버퍼에 복사). 할당 실패면 조용히 폐기(알림은 best-effort).
-    fn setNotification(self: *TerminalCore, title: []const u8, notify_body: []const u8) void {
-        self.notification_title.clearRetainingCapacity();
-        self.notification_body.clearRetainingCapacity();
-        self.notification_title.appendSlice(self.allocator, title) catch return;
-        self.notification_body.appendSlice(self.allocator, notify_body) catch {
-            self.notification_title.clearRetainingCapacity();
-            return;
-        };
-        self.notification_pending = true;
     }
 
     /// OSC 9/777로 들어온 데스크톱 알림(title, body). 없으면 null. platform이 매 tick drain해 네이티브 알림으로

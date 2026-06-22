@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 74u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 75u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -563,6 +563,12 @@ uint32_t maru_macos_app_session_option_as_meta(MaruAppHostSession *session);
    세우고 Swift가 매 tick 호출해 1=copySelectionToPasteboard·2=pastePasteboardText. take_bell과 같은 1회성(drain하면
    비움). session null=0. v74. */
 uint32_t maru_macos_app_session_take_clipboard_action(MaruAppHostSession *session);
+/* OSC 52 읽기(`?` 쿼리)가 대기 중이고 osc52.read=allow면 1(Swift가 시스템 클립보드를 읽어 provide_clipboard_read로
+   돌려줘야 함), 아니면 0. 정책 게이트가 여기다(deny면 클립보드 안 읽음 — 탈취 방지). pending 1회성 소비. session null=0. v75. */
+uint32_t maru_macos_app_session_take_clipboard_read_request(MaruAppHostSession *session);
+/* take_clipboard_read_request가 1을 준 뒤 Swift가 읽은 시스템 클립보드 바이트를 넘긴다 — Zig가 base64 OSC 52 응답을
+   요청 surface PTY로 비차단 전송한다(ESC ] 52 ; <Pc> ; <base64> ST). bytes/len 0이면 빈 클립보드 응답. v75. */
+int32_t maru_macos_app_session_provide_clipboard_read(MaruAppHostSession *session, const uint8_t *bytes, size_t len);
 /* view options(⚙) 사이드바 토글(show-branch/show-folder)이 바뀌어 config 반영이 필요하면 1(플래그 비움),
    없으면 0. Swift가 tick마다 호출해 1이면 serialize_sidebar_config 텍스트를 config 경로에 atomic write한다. */
 uint32_t maru_macos_app_session_take_sidebar_config_dirty(MaruAppHostSession *session);

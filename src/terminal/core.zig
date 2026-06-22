@@ -422,6 +422,11 @@ pub const TerminalCore = struct {
     config_palette: [16]?types.Rgb = .{null} ** 16,
     // OSC 52 클립보드 쓰기 요청(디코드된 바이트, pending). platform이 정책(allow) 확인 후 drain → system clipboard.
     clipboard_write: std.ArrayListUnmanaged(u8) = .empty,
+    // OSC 52 클립보드 **읽기**(`?` 쿼리) pending. true면 platform이 정책(osc52.read) 확인 후 시스템 클립보드를
+    // 읽어 base64 OSC 52 응답을 PTY로 보낸다(F2-6). 코어는 쿼리 파싱만 — 클립보드는 OS 소유라 직접 안 읽는다(write 대칭).
+    clipboard_read_pending: bool = false,
+    // 그 읽기 쿼리의 target(Pc) 문자열(예: "c"/"p"/"" — 응답 OSC 52에 그대로 echo). owned 복사라 deinit에서 해제.
+    clipboard_read_target: std.ArrayListUnmanaged(u8) = .empty,
     // OSC 9(iTerm2)·OSC 777(rxvt) 데스크톱 알림 pending. 코어는 title/body 파싱만 하고, platform이 매 tick drain해
     // 네이티브 알림(UNUserNotificationCenter)으로 띄운다(후속 PR). 한 tick에 여럿 오면 마지막만 남는다(드묾, 허용).
     // 알림은 transient 이벤트라 RIS 대상 아님(pending은 다음 tick에 drain되어 곧 사라진다). osc_overflow가 크기 방어.
@@ -650,6 +655,7 @@ pub const TerminalCore = struct {
         self.kitty_chunk.deinit(self.allocator);
         self.apc_buffer.deinit(self.allocator);
         self.clipboard_write.deinit(self.allocator);
+        self.clipboard_read_target.deinit(self.allocator);
         self.notification_title.deinit(self.allocator);
         self.notification_body.deinit(self.allocator);
         if (self.placement_views.len > 0) self.allocator.free(self.placement_views);
@@ -2033,8 +2039,17 @@ pub const TerminalCore = struct {
     /// 베이스: xterm/iTerm2 OSC 52(사실상 표준), 보안 정책은 호환성/보안 정책 문서.
     fn dispatchOscClipboard(self: *TerminalCore, body: []const u8) void {
         const semi = std.mem.indexOfScalar(u8, body, ';') orelse return; // <targets>;<data>
+        const targets = body[0..semi];
         const data = body[semi + 1 ..];
-        if (data.len == 0 or std.mem.eql(u8, data, "?")) return; // 빈 데이터·읽기(?)는 무시(읽기는 후속·정책)
+        if (data.len == 0) return; // 빈 데이터 무시
+        if (std.mem.eql(u8, data, "?")) {
+            // 읽기 쿼리(`OSC 52 ; <Pc> ; ? ST`): target만 기억하고 pending을 세운다 — 실제 클립보드 읽기·정책(osc52.read)·
+            // base64 응답은 platform(app)이 한다(write 대칭, 코어는 OS 클립보드를 직접 안 읽음). target은 응답에 그대로 echo.
+            self.clipboard_read_target.clearRetainingCapacity();
+            self.clipboard_read_target.appendSlice(self.allocator, targets) catch return;
+            self.clipboard_read_pending = true;
+            return;
+        }
         const dec = std.base64.standard.Decoder;
         const decoded_len = dec.calcSizeForSlice(data) catch return; // 잘못된 base64
         if (decoded_len == 0 or decoded_len > max_clipboard_bytes) return; // 빈/과대 거부(폭주 방어선)
@@ -2053,6 +2068,22 @@ pub const TerminalCore = struct {
 
     pub fn clearClipboardWrite(self: *TerminalCore) void {
         self.clipboard_write.clearRetainingCapacity();
+    }
+
+    /// OSC 52 읽기(`?` 쿼리)가 대기 중인지. platform이 매 tick 확인해 osc52.read 정책 통과 시 클립보드를 읽어 응답한다.
+    pub fn clipboardReadPending(self: *const TerminalCore) bool {
+        return self.clipboard_read_pending;
+    }
+
+    /// 그 읽기 쿼리의 target(Pc) 문자열(응답 OSC 52에 그대로 echo). pending이 아니면 빈 슬라이스.
+    pub fn clipboardReadTarget(self: *const TerminalCore) []const u8 {
+        return self.clipboard_read_target.items;
+    }
+
+    /// 읽기 pending을 소비(비움). platform이 정책 확인·응답(또는 거부) 후 호출한다 — 다음 tick에 또 트리거되지 않게.
+    pub fn clearClipboardRead(self: *TerminalCore) void {
+        self.clipboard_read_pending = false;
+        self.clipboard_read_target.clearRetainingCapacity();
     }
 
     /// OSC 777(rxvt/urxvt) 데스크톱 알림 — `OSC 777 ; notify ; <title> ; <body>`. `notify;` 접두만 처리하고
@@ -7458,17 +7489,35 @@ test "OSC 10 (foreground color) query answers; color-set spec is consumed silent
     try std.testing.expectEqualStrings("", core.pendingResponse());
 }
 
-test "OSC 52 (clipboard) write decodes base64 into pending; read(?) is ignored (코어는 파싱만)" {
+test "OSC 52 (clipboard) write decodes base64 into pending; read(?) sets read-pending+target, no core response (F2-6)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
     defer core.deinit();
     // "hi" = base64 "aGk=". OSC 52 ; c ; aGk= ST → 디코드된 "hi"가 clipboard_write pending에.
     try core.write("\x1b]52;c;aGk=\x1b\\");
     try std.testing.expectEqualStrings("hi", core.pendingClipboardWrite());
-    // 읽기(data가 ?)는 보안상 코어가 무시한다(pending 안 채우고 응답도 안 함 — 원격 clipboard 탈취 방지).
+    try std.testing.expect(!core.clipboardReadPending()); // write는 read pending과 무관
+
+    // 읽기(data가 ?): 코어는 쿼리만 파싱해 read-pending + target("c")을 세운다. 코어는 clipboard_write도 응답도
+    // 만들지 않는다(실제 클립보드 읽기·base64 응답·정책 osc52.read은 platform 책임 — write 대칭, 탈취 방지).
     core.clearClipboardWrite();
     try core.write("\x1b]52;c;?\x1b\\");
     try std.testing.expectEqualStrings("", core.pendingClipboardWrite());
     try std.testing.expectEqualStrings("", core.pendingResponse());
+    try std.testing.expect(core.clipboardReadPending());
+    try std.testing.expectEqualStrings("c", core.clipboardReadTarget());
+
+    // 소비(platform이 정책 확인·응답 후) → pending 비움.
+    core.clearClipboardRead();
+    try std.testing.expect(!core.clipboardReadPending());
+    try std.testing.expectEqualStrings("", core.clipboardReadTarget());
+
+    // target이 다른 Pc(예: p=primary)·빈 값도 그대로 기억한다.
+    try core.write("\x1b]52;p;?\x1b\\");
+    try std.testing.expectEqualStrings("p", core.clipboardReadTarget());
+    core.clearClipboardRead();
+    try core.write("\x1b]52;;?\x1b\\"); // 빈 Pc
+    try std.testing.expect(core.clipboardReadPending());
+    try std.testing.expectEqualStrings("", core.clipboardReadTarget());
 }
 
 test "OSC 4 (palette) set/query, multi-pair, OSC 104 reset(one/all), RIS clears overrides" {

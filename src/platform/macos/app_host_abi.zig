@@ -551,6 +551,22 @@ pub export fn maru_macos_app_session_take_clipboard_action(session: ?*AppSession
     return @intFromEnum(app_session.takeClipboardAction());
 }
 
+// OSC 52 읽기(`?` 쿼리)가 대기 중이고 osc52.read=allow면 1(Swift가 시스템 클립보드를 읽어 provide_clipboard_read로
+// 돌려줘야 함), 아니면 0. 정책 게이트가 여기다(deny면 클립보드 안 읽음 — 탈취 방지). pending은 1회성 소비. session null=0. (v75)
+pub export fn maru_macos_app_session_take_clipboard_read_request(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeClipboardReadRequest()) 1 else 0;
+}
+
+// take_clipboard_read_request가 1을 준 뒤, Swift가 읽은 시스템 클립보드 바이트를 넘긴다 — Zig가 base64 OSC 52 응답을
+// 요청 surface PTY로 비차단 전송한다(`ESC ] 52 ; <Pc> ; <base64> ST`). bytes/len 0이면 빈 클립보드 응답. (v75)
+pub export fn maru_macos_app_session_provide_clipboard_read(session: ?*AppSession, bytes: ?[*]const u8, len: usize) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const slice: []const u8 = if (bytes) |p| p[0..len] else &.{};
+    app_session.provideClipboardRead(slice);
+    return @intFromEnum(Status.ok);
+}
+
 // view options(⚙) 사이드바 토글이 바뀌어 config 파일 반영이 필요하면 1(플래그 비움), 없으면 0. Swift가 tick마다
 // 호출해 1이면 serialize_sidebar_config로 받은 텍스트를 config 경로에 atomic write한다(앱→config). session null=0.
 pub export fn maru_macos_app_session_take_sidebar_config_dirty(session: ?*AppSession) u32 {

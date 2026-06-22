@@ -1250,6 +1250,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainBell() // G12 BEL: 이번 tick에 셸이 보낸 벨(0x07)을 시스템 벨로 울린다.
             drainMouseHide() // 타이핑(글자 입력) 중이면 마우스 커서를 숨긴다(config input.mouse-hide-while-typing).
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
+            drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
             drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
         }
         return status
@@ -1700,6 +1701,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         case 1: copySelectionToPasteboard()
         case 2: pastePasteboardText()
         default: break
+        }
+    }
+
+    // OSC 52 읽기(input.osc52.read=allow): 셸 프로그램이 `OSC 52 ; <Pc> ; ? ST`로 클립보드를 물으면, Zig가 정책을
+    // 통과시킨 경우(take_clipboard_read_request==1)에만 여기서 NSPasteboard 텍스트를 읽어 provide_clipboard_read로
+    // 넘긴다 — Zig가 base64 OSC 52 응답을 PTY로 보낸다. **deny면 1을 안 줘 클립보드를 읽지도 않는다**(탈취 방지). 텍스트가
+    // 없으면 빈 응답(len 0)을 보낸다(쿼리 자체엔 응답 — 일부 프로그램이 빈 응답을 기대). 클립보드는 OS 소유라 read만 여기서.
+    private func drainClipboardRead() {
+        guard let session = appSession else { return }
+        guard maru_macos_app_session_take_clipboard_read_request(session) != 0 else { return }
+        let text = NSPasteboard.general.string(forType: .string) ?? ""
+        let bytes = Array(text.utf8)
+        _ = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_session_provide_clipboard_read(session, buf.baseAddress, buf.count)
         }
     }
 

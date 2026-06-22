@@ -476,16 +476,26 @@ pub fn view(
         const actual = l.win_start + vi;
         const r = rows[actual];
         const content_row = l.first_field_row + @as(u32, @intCast(vi));
-        if (actual == state.selected) {
-            try modal_box.fillCells(box, l.form_x, content_row, l.form_cols, .tab_hover_bg, arena, out);
-        }
-        // 비활성 행(프리셋 잠금 등)은 라벨도 muted_fg로 — 행 전체가 회색이라 잠긴 게 한눈에 보인다.
-        const label_role: tokens.ColorRole = if (r.disabled) .muted_fg else .surface_fg;
-        // 라벨도 control/palette 열을 침범하지 않게 폼 라벨 영역 폭으로 truncate(고정 폭 안에 가둠 — rich quad 밖 삐짐 방지).
+        // control/palette 우측 폭 — 라벨 truncate와 선택 하이라이트가 공유한다.
         const row_right_cols: u32 = switch (r.kind) {
             .palette_grid => paletteGridCols(),
             else => l.ctrl_cols,
         };
+        // 선택 행 하이라이트. rich 테마에서 quad 위젯(slider/toggle/color/palette)은 모달 셀(이 하이라이트가 사는 곳)보다
+        // 아래 레이어라, 행 전체를 칠하면 하이라이트 셀이 위젯을 덮어 가린다 → 그 행은 **control 칸을 비워**(라벨 영역만
+        // 칠해) 위젯이 빈 surface 셀로 비쳐 보이게 한다. 값이 text 셀인 dropdown/text/keybind는 같은 셀 레이어라 안 가려져
+        // 행 전체를 칠한다.
+        if (actual == state.selected) {
+            const quad_widget = switch (r.kind) {
+                .toggle, .slider, .color, .palette_grid => true,
+                else => false,
+            };
+            const hl_cols = if (quad_widget) l.form_cols -| row_right_cols else l.form_cols;
+            try modal_box.fillCells(box, l.form_x, content_row, hl_cols, .tab_hover_bg, arena, out);
+        }
+        // 비활성 행(프리셋 잠금 등)은 라벨도 muted_fg로 — 행 전체가 회색이라 잠긴 게 한눈에 보인다.
+        const label_role: tokens.ColorRole = if (r.disabled) .muted_fg else .surface_fg;
+        // 라벨도 control/palette 열을 침범하지 않게 폼 라벨 영역 폭으로 truncate(고정 폭 안에 가둠 — rich quad 밖 삐짐 방지).
         const label_shown = overlay_input.truncateToCols(arena, r.label, l.form_cols -| row_right_cols -| label_gap_cols) catch r.label;
         try modal_box.text(box, l.form_x, content_row, label_shown, label_role, arena, out);
         const ctrl = fieldControlRect(l, vi);

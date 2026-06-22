@@ -967,6 +967,14 @@ pub const MetalFrame = extern struct {
     // 주석 단일 출처). float 대신 milli u32로 실어 extern ABI를 정수로 유지(SessionConfig.scale_milli 선례). 끝에
     // 추가해 기존 offset 불변(ABI v70). app이 ResolvedAppearance.window_opacity에서 채운다.
     window_opacity_milli: u32 = 1000,
+    // C4b 모달 클리핑(인프라): 모달 오버레이 셀을 이 px 사각(backing, 좌상단)으로 클리핑한다 — chrome 컴포넌트가
+    // draw.Op.clip을 내면 lowering이 채우고, 렌더러가 모달 셀 draw에 setScissorRect로 적용한다(Metal은 좌하단 원점
+    // 이라 y 변환). w==0이면 클리핑 없음(기존 동작 그대로). 부분 카드 픽셀 스크롤(알림 패널 등) 재사용 인프라 —
+    // 컴포넌트 적용은 후속. 끝에 추가해 기존 필드 offset 불변(ABI v84).
+    modal_clip_x_px: u32 = 0,
+    modal_clip_y_px: u32 = 0,
+    modal_clip_w_px: u32 = 0,
+    modal_clip_h_px: u32 = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).
@@ -1003,11 +1011,17 @@ fn buildMergedSidebarCells(
 /// 박고, uploads/pixels를 모든 panel + 사이드바로 머지한다. 활성 panel은 슬라이스 맨 뒤에 둬야 한다
 /// (커서가 거기만 있음): 커서 cell이 합쳐진 cells의 끝에 와 blink 노출 길이 조정(cursor suffix)이 그대로
 /// 동작한다. 비활성 panel은 colors.cursor=null이라 커서 cell을 안 낸다.
+/// 모달 오버레이 클리핑 영역(backing px, 좌상단). w==0이면 클리핑 없음.
+pub const ClipPx = struct { x: u32, y: u32, w: u32, h: u32 };
+
 pub const PaneFrame = struct {
     frame: renderer.RenderFrame,
     origin_x: u32,
     origin_y: u32,
     colors: CellColors,
+    /// 모달 오버레이 클리핑(px, w==0=없음) — finishOverlayFrame이 OverlayRaster.clip_rect에서 채우고,
+    /// MetalFrameBuffer.view가 MetalFrame.modal_clip_*로 흘려 renderer가 모달 셀 draw에 scissor. 인프라(적용 후속).
+    clip_rect: ?ClipPx = null,
 };
 
 /// 머지된 raster 업로드 스트림. pixels는 [panel0 ++ panel1 ++ … ++ 사이드바], uploads도 같은 순서로
@@ -1089,6 +1103,8 @@ pub const MetalFrameBuffer = struct {
     // C4b 모달: 모달(overlay) 셀이 cells 배열에서 시작하는 인덱스. draw가 over quad(모달 배경)를 이 경계
     // '앞'에 끼워 모달 텍스트 셀 아래·터미널 위에 둔다. 0 = 모달 없음(분할 안 함).
     modal_cells_start: usize = 0,
+    // C4b 모달 클리핑: 모달 셀을 이 px 영역으로 scissor(없으면 null). view()가 MetalFrame.modal_clip_*로 투영.
+    modal_clip: ?ClipPx = null,
 
     /// N개 panel frame(`pane_frames`)과 사이드바 frame(선택)을 함께 투영해 교체한다. 각 panel 셀은 자기
     /// origin에 박혀(setCellsPaneOrigin) 렌더러가 origin_x+col*cw, origin_y+row*ch에 둔다 — N개 surface가
@@ -1173,6 +1189,7 @@ pub const MetalFrameBuffer = struct {
         // C4b 모달: 모달(overlay) 셀 시작 인덱스. draw가 over quad(모달 배경)를 이 경계 '앞'(모달 텍스트 셀
         // 아래·터미널 위)에 끼운다. 0 = 모달 없음(draw가 분할 안 함).
         var modal_cells_start: usize = 0;
+        var modal_clip: ?ClipPx = null; // 모달 오버레이 클리핑(px) — overlay PaneFrame에서 흘러와 renderer scissor
         if (overlay_frame) |pf| {
             const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
             defer allocator.free(built.cells);
@@ -1180,6 +1197,7 @@ pub const MetalFrameBuffer = struct {
             modal_cells_start = cells_list.items.len; // 모달 셀 시작(append 전)
             try cells_list.appendSlice(allocator, built.cells);
             overlay_cursor_cells = built.cursor_cells; // 오버레이 caret이 버퍼 맨 끝 — blink suffix
+            modal_clip = pf.clip_rect; // 모달 셀 draw에 scissor로 적용(renderer)
         }
         const new_cells = try cells_list.toOwnedSlice(allocator);
         errdefer allocator.free(new_cells);
@@ -1231,6 +1249,7 @@ pub const MetalFrameBuffer = struct {
         // 안 내면(notice 등) overlay_cursor_cells=0이라 chop 없음(정적). 오버레이가 없으면 활성 panel의 터미널 커서.
         self.cursor_cells = if (overlay_frame != null) overlay_cursor_cells else cursor_cells;
         self.modal_cells_start = modal_cells_start;
+        self.modal_clip = modal_clip;
         self.uploads = merged.uploads;
         self.pixels = merged.pixels;
         // cols/rows는 렌더러의 cols==0/rows==0 가드용 — 활성(마지막) panel의 grid를 쓴다(셀은 자기 row/col+
@@ -1284,6 +1303,10 @@ pub const MetalFrameBuffer = struct {
             // 모달 셀 시작에 영향 없음). exposed가 modal_cells_start보다 작으면 모달 텍스트가 안 보이는
             // 경우인데, 그땐 draw가 over quad를 모달 없음과 같게 다룬다(렌더러 가드).
             .modal_cells_start = self.modal_cells_start,
+            .modal_clip_x_px = if (self.modal_clip) |c| c.x else 0,
+            .modal_clip_y_px = if (self.modal_clip) |c| c.y else 0,
+            .modal_clip_w_px = if (self.modal_clip) |c| c.w else 0,
+            .modal_clip_h_px = if (self.modal_clip) |c| c.h else 0,
             // kitty graphics(K2): 이미지 드로우 프리미티브 + 업로드 채널. 비면 null로 둬 렌더러가 건너뛴다.
             .gpu_images = if (self.gpu_images.len > 0) self.gpu_images.ptr else null,
             .gpu_image_count = self.gpu_images.len,

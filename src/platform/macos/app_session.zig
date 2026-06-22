@@ -5308,10 +5308,11 @@ pub const AppSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
-        // chrome 모달(Notice·Find·Palette)이 열려 있으면 키를 chrome으로 라우팅한다 — 최상위(PTY/스크롤보다 먼저,
-        // 셋은 배타적). handleInput이 컴포넌트 handle로 보내 의도(HostAction)를 내고, dispatchChromeAction이 session
-        // 부수효과(재검색·스크롤·필터·실행·닫기)를 실행한다. 모든 키를 소비한다(모달이라 터미널엔 안 내려간다).
-        if (self.chrome_host.confirm.open or self.chrome_host.notice.open or self.chrome_host.context_menu.open or self.chrome_host.find.open or self.chrome_host.palette.open or self.chrome_host.settings.open) {
+        // chrome 모달(confirm/notice/context_menu/find/palette/settings) 중 하나라도 열려 있으면 키를 chrome으로
+        // 라우팅한다 — 최상위(PTY/스크롤보다 먼저, 모달은 단일-오버레이 불변식으로 한 번에 하나). handleInput이 컴포넌트
+        // handle로 보내 의도(HostAction)를 내고, dispatchChromeAction이 session 부수효과(재검색·스크롤·필터·실행·닫기)를
+        // 실행한다. 모든 키를 소비한다(모달이라 터미널엔 안 내려간다).
+        if (self.anyOverlayOpen()) {
             if (self.chrome_host.handleInput(self.allocator, chromeInputFromKeyEvent(event))) |action| {
                 self.dispatchChromeAction(action);
             }
@@ -5485,8 +5486,18 @@ pub const AppSession = struct {
     /// 창이 포커스를 잃었을 때 커서를 어떻게 그릴지(config.cursor.unfocused) renderer 모드로 환산한다. 포커스가
     /// 있으면(또는 .block) 현행(.normal). 활성 surface 빌드와 비활성 split pane 빌드가 같은 정책을 쓰도록 한 곳에
     /// 둔다(F1-4b-2). force_unfocused_cursor(self-verify debug-gate)면 포커스와 무관하게 unfocused로 강제한다.
+    /// chrome 모달(confirm/notice/context_menu/find/palette/settings) 중 하나라도 열렸는지 — 모달이 뜨면 터미널은
+    /// 입력·포커스를 완전히 잃는다. 키 라우팅(handleKeyEvent)·overlay frame 빌드·커서 unfocus/blink가 이 단일 판정을
+    /// 공유한다(6-way boolean 복붙 방지 — 모달 추가 시 여기 한 곳만 고친다).
+    fn anyOverlayOpen(self: *const AppSession) bool {
+        const h = &self.chrome_host;
+        return h.confirm.open or h.notice.open or h.context_menu.open or h.find.open or h.palette.open or h.settings.open;
+    }
+
     fn unfocusedCursorMode(self: *const AppSession) renderer.CursorUnfocused {
-        if (self.window_focused and !self.force_unfocused_cursor) return .normal;
+        // 모달이 열리면 OS 창이 key여도(window_focused=true) 터미널은 포커스를 잃은 것으로 친다 — 커서를 unfocused
+        // 모드(config.cursor.unfocused: hollow/hidden/block)로 그려 모달 중 채운 커서가 활성처럼 보이지 않게 한다.
+        if (self.window_focused and !self.anyOverlayOpen() and !self.force_unfocused_cursor) return .normal;
         return switch (self.appearance.cursor.unfocused) {
             .block => .normal,
             .hollow => .hollow,
@@ -6187,7 +6198,9 @@ pub const AppSession = struct {
         // 리더 core.write와 경합 방지). 커서/blink 조건을 먼저 다 읽고 락을 푼다.
         surface.lockCore(self.io);
         // 커서 자체가 깜빡이는 조건(DECSCUSR blink·표시·조합 아님).
-        const cursor_blinks = core.cursor_blink and core.cursor_visible and core.preedit == null;
+        // 모달(anyOverlayOpen)이 열리면 터미널 커서 blink를 멈춘다 — 포커스를 잃은 터미널 커서가 모달 뒤에서 계속
+        // 깜빡이지 않게(find/palette의 입력 caret은 아래 overlay_open이 따로 진행한다). 커서 모양은 unfocusedCursorMode가 hollow로.
+        const cursor_blinks = core.cursor_blink and core.cursor_visible and core.preedit == null and !self.anyOverlayOpen();
         // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상을 진행한다
         // (없으면 idle 재투영 없음). blink 글자는 커서/caret과 달리 suffix-trim으로 못 숨겨 full rebuild가 필요하다.
         const text_blinks = self.appearance.blink_text and core.viewportHasBlink();
@@ -8269,7 +8282,7 @@ pub const AppSession = struct {
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             if (builtin.os.tag == .macos) {
-                if (self.chrome_host.confirm.open or self.chrome_host.notice.open or self.chrome_host.context_menu.open or self.chrome_host.find.open or self.chrome_host.palette.open or self.chrome_host.settings.open) {
+                if (self.anyOverlayOpen()) {
                     overlay_frame = self.buildChromeOverlayFrame() catch null;
                 }
             }

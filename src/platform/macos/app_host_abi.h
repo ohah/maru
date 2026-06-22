@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 84u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 85u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -719,6 +719,11 @@ int32_t maru_macos_app_session_global_hotkeys(
    Swift가 tick마다 호출해 1이면 unregisterGlobalHotkeys 후 registerGlobalHotkeys로 새 global_hotkeys를 OS에 다시
    등록한다. take_bell과 같은 1회성 신호(drain하면 비워진다). session null=0. v82. */
 uint32_t maru_macos_app_session_take_global_hotkeys_dirty(MaruAppHostSession *session);
+
+/* 커맨드 카탈로그가 런타임에 재빌드돼(keybind rebind/unbind·reload·reset → rebuildCommandCatalog) 메뉴바 재빌드가
+   필요하면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면 buildMainMenu로 NSMenu keyEquivalent를 새
+   카탈로그로 다시 깐다(reset은 확인 모달-확정 후 tick에서 갱신 — 동기 호출 아님). take_*_dirty류 1회성. session null=0. v85. */
+uint32_t maru_macos_app_session_take_command_catalog_dirty(MaruAppHostSession *session);
 
 /* quick terminal(전역 토글 오버레이 패널) 표시 옵션. config에서 파싱되어 세션 동안 불변. Swift가 패널
    크기·화면·자동 숨김에 쓴다. screen: 0=main(주 디스플레이), 1=mouse(마우스가 있는 화면). */

@@ -1395,6 +1395,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainColorSample() // HSV picker `i`(스포이드): NSColorSampler로 화면 색을 추출해 picker에 반영(비동기).
             drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
             drainGlobalHotkeys() // 글로벌 핫키가 라이브로 바뀌었으면(녹음/해제·reload·reset) OS에 재등록(unregister 후 register).
+            drainMenuDirty() // 커맨드 카탈로그가 재빌드됐으면(rebind/unbind·reload·reset 확정) 메뉴바 keyEquivalent 다시 빌드.
         }
         return status
     }
@@ -2014,6 +2015,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    // 커맨드 카탈로그가 런타임에 재빌드되면(keybind rebind/unbind·reload·reset → Zig가 command_catalog_dirty) tick마다
+    // drain해 1이면 메뉴바를 다시 빌드한다(NSMenu keyEquivalent를 새 카탈로그로). reset은 확인 모달-확정 후 tick에서
+    // 갱신되므로 동기 호출이 아니라 이 신호가 단일 경로다 — 인앱 rebind·멀티창 활성 세션도 같이 커버한다(buildMainMenu는
+    // activeSurface 카탈로그를 읽는다). take_global_hotkeys_dirty(drainGlobalHotkeys)와 같은 1회성 신호 패턴.
+    private func drainMenuDirty() {
+        guard let session = appSession, !smokeMode else { return }
+        if maru_macos_app_session_take_command_catalog_dirty(session) != 0 {
+            buildMainMenu()
+        }
+    }
+
     // MARK: - 메뉴바 (NSMenu)
 
     /// command_catalog의 modifier 비트마스크(shift=1,control=2,option=4,command=8)를 NSEvent.ModifierFlags로.
@@ -2029,13 +2041,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 표준 macOS 메뉴바(maru/File/Edit/View/Window/Help)를 프로그래매틱하게 세운다. Zig 액션 항목은 커맨드
     /// 카탈로그(command_catalog ABI)에서 제목·단축키(keyEquivalent)를 읽어 만들고 선택 시 run_action으로
     /// 디스패치한다(네이티브는 NSMenu 구성만, 카탈로그·실행 결정은 Zig — 경계). copy/paste·about/hide/quit/
-    /// minimize/zoom·fullscreen은 OS 동작이라 네이티브 셀렉터. 시작 시 빌드하고, config reload/reset로 keybind가 바뀌면
-    /// (menuReloadConfig/menuResetDefaults가) 다시 빌드해 메뉴 keyEquivalent를 갱신한다 — 더는 세션-불변이 아니다(매번 새 NSMenu 재배정).
+    /// minimize/zoom·fullscreen은 OS 동작이라 네이티브 셀렉터. 시작 시 빌드하고, keybind가 바뀌면(rebind/unbind·reload·
+    /// reset → Zig가 command_catalog_dirty) 다음 tick의 drainMenuDirty가 다시 빌드해 keyEquivalent를 갱신한다 — 더는 세션-
+    /// 불변이 아니다(매번 새 NSMenu 재배정). 카탈로그는 activeSurface(활성 창) 세션에서 읽는다(멀티창 정합).
     private func buildMainMenu() {
-        // 카탈로그를 [action_key: (제목, keyEquivalent, modifier)]로 읽어 둔다(세션-불변). primary에서 읽는다
-        // (제목·단축키는 모든 세션 동일). 실제 디스패치는 runCatalogAction이 활성 세션(appSession)에 한다.
+        // 카탈로그를 [action_key: (제목, keyEquivalent, modifier)]로 읽어 둔다. **활성 세션(activeSurface)**에서 읽는다 —
+        // keybind는 세션마다 다를 수 있으므로(멀티창에서 한 창만 reload하면 분기), 메뉴바는 사용자가 보는 활성 창의 카탈로그를
+        // 반영해야 한다. 활성이 없으면(시작 직후 등) primary로 폴백. 재빌드는 drainMenuDirty가 command_catalog_dirty로 트리거.
         var catalog: [String: (title: String, keyEquiv: String, mods: NSEvent.ModifierFlags)] = [:]
-        if let session = primary?.appSession {
+        if let session = (activeSurface ?? primary)?.appSession {
             var ptr: UnsafePointer<MaruAppHostCommand>?
             var count = 0
             if maru_macos_app_session_command_catalog(session, &ptr, &count) == Self.statusOK, let base = ptr {
@@ -2245,9 +2259,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = sender
         guard let session = appSession else { return }
         _ = maru_macos_app_session_reload_config(session)
-        // reload로 keybind가 바뀌면 Zig가 커맨드 카탈로그를 재빌드한다 — 메뉴바 keyEquivalent는 카탈로그 스냅샷이라
-        // 여기서 메뉴를 다시 빌드해야 갱신된다(Zig-side 커맨드 팔레트는 command_key_displays를 라이브로 읽어 이미 최신).
-        buildMainMenu()
+        // reload가 keybind를 바꾸면 Zig가 rebuildCommandCatalog로 command_catalog_dirty를 세운다 → 다음 tick의 drainMenuDirty가
+        // 메뉴바를 다시 빌드한다(여기서 동기 호출하지 않는다 — reset/인앱 경로와 단일 경로로 통일, 멀티창 활성 세션 정합).
     }
 
     /// view options에서 sidebar 토글(show-branch/show-folder)을 바꿨을 때, 갱신된 config 텍스트를 받아 config
@@ -2277,8 +2290,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = sender
         guard let session = appSession else { return }
         _ = maru_macos_app_session_reset_defaults(session)
-        // reset으로 keybind가 기본값(빌트인만)이 되면 Zig 카탈로그도 재빌드된다 — 메뉴바 keyEquivalent를 갱신한다(menuReloadConfig와 동일).
-        buildMainMenu()
+        // reset_defaults는 확인 모달만 연다(즉시 reset 아님). 사용자가 확정하면 다음 tick에 resetAllSettings가 카탈로그를
+        // 재빌드해 command_catalog_dirty를 세우고, drainMenuDirty가 메뉴바를 갱신한다 — 여기서 동기 호출하면 모달 확정 전
+        // 옛 카탈로그를 읽어 no-op이 되므로 호출하지 않는다(리뷰: 동기 buildMainMenu가 reset에선 무효였음).
     }
 
     /// Reset Terminal(⌘⇧R) — 활성 터미널의 잔류 입력 모드(focus 1004·mouse·kitty keyboard)만 끈다. ssh 너머 TUI가

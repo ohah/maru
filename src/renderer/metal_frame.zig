@@ -116,6 +116,10 @@ fn brightenIfBold(c: terminal.Color, bold: bool, enabled: bool) terminal.Color {
 fn isColorGlyph(codepoint: u21, combining: ?u21) bool {
     if (combining == 0xFE0E) return false; // VS15 = 텍스트 표현 강제(default-emoji라도 단색)
     if (terminal.width.isEmojiPresentation(codepoint)) return true;
+    // 키캡(2️⃣ = base+VS16+U+20E3)은 단일-combining 슬롯에서 VS16이 U+20E3에 덮여 사라지지만 컬러 이모지다 —
+    // 셰이퍼가 VS16을 재주입해 atlas엔 컬러 키캡이 들어오므로(coretext_smoke.m), 여기서도 컬러로 인정해야
+    // 셰이더가 전경색 단색 tint 대신 atlas 컬러 RGBA를 쓴다(안 그러면 숫자 없는 단색 블롭으로 보인다).
+    if (terminal.width.isKeycapCombining(combining)) return true;
     return combining == 0xFE0F; // VS16 = 이모지 표현
 }
 
@@ -1977,6 +1981,22 @@ test "color emoji glyph cells get the +2.0 UV sentinel; normal glyphs do not" {
     }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
     defer allocator.free(hc);
     try std.testing.expectApproxEqAbs(@as(f32, 2.1), hc[0].u0, 0.001); // VS16 → +2.0
+
+    // 키캡(2️⃣ = '2' + VS16 + U+20E3): 단일 combining 슬롯이라 VS16이 U+20E3에 덮여 combining=0x20E3만 남지만
+    // 컬러 이모지다. 셰이퍼가 VS16을 재주입해 atlas는 컬러 키캡이라, 여기서 +2.0을 안 주면 셰이더가 전경색
+    // 단색으로 tint해 숫자 없는 블롭이 된다(리뷰 #1 회귀 가드).
+    var keycap = [_]renderer.GlyphQuad{mkGlyph('2')};
+    keycap[0].run.combining = 0x20E3;
+    const kc = try buildNativeCellsFromGlyphQuads(allocator, .{
+        .size = .{ .cols = 4, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0 },
+        .dirty = null,
+        .glyphs = &keycap,
+        .overlays = &.{},
+        .stats = .{},
+    }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
+    defer allocator.free(kc);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.1), kc[0].u0, 0.001); // 키캡(U+20E3) → +2.0(컬러)
 }
 
 test "appendRaster concatenates pixels and shifts upload offsets into the merged suffix (N-way merge core)" {

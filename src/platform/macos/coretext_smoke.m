@@ -462,6 +462,8 @@ static CFStringRef maru_create_string_for_draw_cell(MaruCoreTextDrawCell cell) {
         // U+20E3(COMBINING ENCLOSING KEYCAP)은 항상 키캡 이모지 시퀀스에서만 쓰이므로 VS16을 재주입해
         // 'base + VS16 + U+20E3' 온전한 시퀀스를 만든다 → CoreText가 AppleColorEmoji 단일 글리프(예: 키캡-2)를
         // 골라 rasterizer(CTFontDrawGlyphs)가 컬러 키캡을 그린다. units[4]에 base(1)+VS16(1)+keycap(1) 들어간다.
+        // 이 'U+20E3 ⇒ 키캡(VS16 재주입)' 가정의 Zig측 단일 출처는 width.isKeycapCombining이다(metal_frame.isColorGlyph가
+        // 컬러로 인정하고 core.appendRowUtf8가 복사 시 VS16을 재주입한다 — 단일-combining 셀 모델을 셋이 같이 보정).
         if (cell.combining == 0x20E3 && !maru_append_utf16_scalar(0xFE0F, units, &len, 4)) {
             return NULL;
         }

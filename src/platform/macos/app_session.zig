@@ -4586,6 +4586,7 @@ pub const AppSession = struct {
         self.reapplyScrollback();
         self.reapplyConfigPalette();
         self.reapplyAmbiguousWidth();
+        self.reapplyEmojiWidth();
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }

@@ -133,6 +133,7 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     cfg.chrome_theme = .rich;
     cfg.blink_text = true;
     cfg.ambiguous_width = .wide;
+    cfg.emoji_width = .narrow; // 기본 wide의 반대값 — 기본값 누수로 통과하는 가짜 green 방지(round-trip 강제)
     cfg.bold_is_bright = true;
     cfg.input.page_keys = .passthrough;
     cfg.input.shift_enter = .native;
@@ -191,6 +192,7 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     try std.testing.expectEqual(theme.ChromeTheme.rich, got.chrome_theme);
     try std.testing.expectEqual(true, got.blink_text);
     try std.testing.expectEqual(theme.AmbiguousWidth.wide, got.ambiguous_width);
+    try std.testing.expectEqual(theme.EmojiWidth.narrow, got.emoji_width);
     try std.testing.expectEqual(true, got.bold_is_bright);
     try std.testing.expectEqual(theme.PageKeys.passthrough, got.input.page_keys);
     try std.testing.expectEqual(theme.ShiftEnter.native, got.input.shift_enter);

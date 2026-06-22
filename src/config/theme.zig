@@ -281,6 +281,17 @@ pub const ImeEnter = enum {
     commit_only,
 };
 
+/// 터미널 안 URL을 **클릭으로 열 때** 눌러야 하는 수식키. 기본 command(macOS Cmd — iTerm2/Ghostty 관례:
+/// 수식키 없는 클릭은 텍스트 선택이라 URL 열기는 수식키로 구분). hover 시 URL 밑줄·링크 커서도 같은 키에서만
+/// 뜬다. 판정은 Zig 단일 출처(app_session가 마우스 mods 비트와 비교) — Swift는 NSEvent 수식키를 비트로 변환만
+/// 한다(네이티브 최소·이식성). 이식 시 command=Super(Linux/Win)로 매핑한다.
+pub const UrlClickModifier = enum {
+    command, // macOS Cmd (이식: Super)
+    control, // Ctrl
+    alt, // Alt/Option
+    shift, // Shift (xterm 셀렉션 override와 겹칠 수 있음 — 사용자 선택)
+};
+
 /// EAW Ambiguous 문자(동그란 번호 ① 등)를 한 칸으로 볼지(narrow) 두 칸으로 볼지(wide).
 /// **기본 narrow** — UAX#11 §5 권고("문맥 불명 시 narrow") + Ghostty·xterm.js와 같아 1칸 가정 프로그램
 /// (셸 readline·대부분 TUI)과 정렬·커서가 안 깨진다. wide는 CJK 로캘처럼 그 문자를 2칸으로 가정하는 환경,
@@ -304,11 +315,14 @@ pub const InputConfig = struct {
     shift_enter: ShiftEnter = .newline,
     // 기본 newline: IME 조합 중 Enter를 확정+개행 한 번에(브라우저 동작). commit-only면 조합만 확정.
     ime_enter: ImeEnter = .newline,
+    // 기본 command: Cmd+클릭으로 URL 열기(현행). URL 밑줄/링크 커서 hover도 같은 키에서만.
+    url_click_modifier: UrlClickModifier = .command,
 
-    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter (필드명 dashed)
+    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier (필드명 dashed)
         .page_keys = Meta{ .doc = "메인 화면 PageUp/Down", .widget = .dropdown, .section = .input },
         .shift_enter = Meta{ .doc = "Shift+Enter 인코딩", .widget = .dropdown, .section = .input },
         .ime_enter = Meta{ .doc = "IME 조합 중 Enter", .widget = .dropdown, .section = .input },
+        .url_click_modifier = Meta{ .doc = "URL 클릭 수식키", .widget = .dropdown, .section = .input },
     };
 };
 

@@ -704,6 +704,8 @@ test "schema tryParse: 최상위 스칼라(Config.schema) — Meta.key 전체 �
     try std.testing.expectEqual(@as(u32, 250), cfg.cursor.blink_interval_ms);
     try std.testing.expect(try tryParse(a, &cfg, "scroll.multiplier", "2.5", &diags, 7)); // sub-struct f32 range
     try std.testing.expectApproxEqAbs(@as(f32, 2.5), cfg.scroll.multiplier, 0.001);
+    try std.testing.expect(try tryParse(a, &cfg, "input.url-click-modifier", "control", &diags, 8)); // sub-struct enum
+    try std.testing.expectEqual(theme.UrlClickModifier.control, cfg.input.url_click_modifier);
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 
     // 범위 밖 padding → diagnostic + 기본 유지

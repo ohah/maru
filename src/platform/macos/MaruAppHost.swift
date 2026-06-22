@@ -361,11 +361,9 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // (performDrag). 아이콘·검색·터미널 본문은 false라 아래 일반 처리로 흐른다. mouseDownCanMoveWindow=false라
         // AppKit 자동 드래그가 없어 여기서 명시적으로 한다(드래그 영역 hit-test 단일 출처는 Zig).
         if controller?.handleWindowChromeMouseDown(event, in: self) == true { return }
-        // Cmd+클릭 = 그 위치의 URL 열기(선택하지 않음). URL 인식은 Zig가 한다.
-        if event.modifierFlags.contains(.command) {
-            controller?.handleCommandClick(event, in: self)
-            return
-        }
+        // (config 수식키)+클릭 = 그 위치의 URL 열기(선택하지 않음). 수식키 판정·URL 인식 모두 Zig가 한다
+        // (input.url-click-modifier). 열렸으면 클릭 소비, 아니면 아래 일반 선택으로 흐른다.
+        if controller?.handleUrlClick(event, in: self) == true { return }
         // 더블클릭=단어 선택(4), 트리플클릭=논리 줄 선택(5). 선택 의미론은 Zig가 소유한다.
         let kind: Int32 = event.clickCount >= 3 ? 5 : (event.clickCount == 2 ? 4 : 1)
         controller?.handleMouse(event, kind: kind, in: self)
@@ -1382,19 +1380,31 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 것은 macOS 터미널 관례와 동일 — 인터럽트는 Ctrl+C).
     // Cmd+hover: Zig가 URL 여부를 판정(+밑줄 투영)하고, 여기선 마우스 커서만 바꾼다.
     // mouseMoved는 event.locationInWindow가 유효하므로 그대로 쓴다.
-    func handleHover(_ event: NSEvent, in view: NSView) {
-        updateHover(atWindowPoint: event.locationInWindow, cmdHeld: event.modifierFlags.contains(.command), in: view)
+    // NSEvent 수식키 플래그를 hover/url_at ABI의 mods 비트(xterm 규약: shift=4, alt/option=8, control=16,
+    // command=32)로 변환한다. modifier '정책'(어느 키가 URL 활성인지)은 Zig가 config로 판정하고, Swift는 순수
+    // 변환만 한다(네이티브 최소·이식성 — v71). command 비트는 URL 판정 전용(mouse reporting과 별개).
+    static func urlModsBits(_ flags: NSEvent.ModifierFlags) -> Int32 {
+        var m: Int32 = 0
+        if flags.contains(.shift) { m |= 4 }
+        if flags.contains(.option) { m |= 8 }
+        if flags.contains(.control) { m |= 16 }
+        if flags.contains(.command) { m |= 32 }
+        return m
     }
 
-    // Cmd 키를 누르거나 떼는 순간의 재평가. flagsChanged(키 이벤트)의 locationInWindow는 정의되지
+    func handleHover(_ event: NSEvent, in view: NSView) {
+        updateHover(atWindowPoint: event.locationInWindow, mods: Self.urlModsBits(event.modifierFlags), in: view)
+    }
+
+    // 수식키를 누르거나 떼는 순간의 재평가. flagsChanged(키 이벤트)의 locationInWindow는 정의되지
     // 않으므로 쓰지 않고, 창의 현재 포인터 위치(mouseLocationOutsideOfEventStream)를 권위 있는
-    // 좌표로 쓴다.
+    // 좌표로 쓴다. 어느 수식키든 바뀌면 재평가한다(URL 활성 키는 Zig config가 정함).
     func handleModifierHover(_ event: NSEvent, in view: NSView) {
         guard let point = view.window?.mouseLocationOutsideOfEventStream else { return }
-        updateHover(atWindowPoint: point, cmdHeld: event.modifierFlags.contains(.command), in: view)
+        updateHover(atWindowPoint: point, mods: Self.urlModsBits(event.modifierFlags), in: view)
     }
 
-    private func updateHover(atWindowPoint windowPoint: NSPoint, cmdHeld: Bool, in view: NSView) {
+    private func updateHover(atWindowPoint windowPoint: NSPoint, mods: Int32, in view: NSView) {
         guard let session = appSession else { return }
         let local = view.convert(windowPoint, from: nil)
         // 포인터가 view 밖(타이틀바·다른 뷰 위)이면 hover를 강제하지 않는다 — 시스템/이웃 커서를
@@ -1406,8 +1416,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let (xPx, yPx) = backingPx(local, in: view)
         // Zig가 위치별 커서 종류를 판정해 돌려준다(CursorKind). Swift는 그 값을 NSCursor로 매핑만 한다 —
         // 전부 iBeam이던 걸 영역별로(사이드바·탭 바=arrow, divider=resize, 터미널=iBeam, URL=pointingHand).
+        // mods는 Zig가 config url-click-modifier와 비교해 URL 밑줄을 켜는 데 쓴다.
         var cursorKind: Int32 = 1
-        guard maru_macos_app_session_hover(session, xPx, yPx, cmdHeld ? 1 : 0, &cursorKind) == Self.statusOK else { return }
+        guard maru_macos_app_session_hover(session, xPx, yPx, mods, &cursorKind) == Self.statusOK else { return }
         Self.cursor(for: cursorKind).set()
     }
 
@@ -1431,20 +1442,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         NSCursor.arrow.set()
     }
 
-    // Cmd+클릭: Zig가 인식한 URL을 기본 브라우저로 연다(NSWorkspace는 OS 소유 경계).
-    func handleCommandClick(_ event: NSEvent, in view: NSView) {
-        guard let session = appSession else { return }
+    // (config 수식키)+클릭: Zig가 인식한 URL을 기본 브라우저로 연다(NSWorkspace는 OS 소유 경계). modifier 판정은
+    // Zig가(url_at에 mods 전달 — url-click-modifier 불일치면 빈 반환). URL을 열었으면 true(클릭 소비), 아니면 false
+    // (호출자가 일반 선택으로 진행). 일반 좌클릭마다 호출되지만 Zig가 수식키 불일치 시 즉시 빈 반환이라 가볍다.
+    func handleUrlClick(_ event: NSEvent, in view: NSView) -> Bool {
+        guard let session = appSession else { return false }
         let local = view.convert(event.locationInWindow, from: nil)
         let scale = window?.backingScaleFactor ?? 1.0
         let xPx = Double(local.x * scale)
         let yPx = Double((view.bounds.height - local.y) * scale)
+        let mods = Self.urlModsBits(event.modifierFlags)
         var ptr: UnsafePointer<UInt8>? = nil
         var len: size_t = 0
-        guard maru_macos_app_session_url_at(session, xPx, yPx, &ptr, &len) == Self.statusOK,
-              let bytes = ptr, len > 0 else { return }
+        guard maru_macos_app_session_url_at(session, xPx, yPx, mods, &ptr, &len) == Self.statusOK,
+              let bytes = ptr, len > 0 else { return false }
         let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
-        guard let url = URL(string: text) else { return }
+        guard let url = URL(string: text) else { return false }
         NSWorkspace.shared.open(url)
+        return true
     }
 
     private func pastePasteboardText() {

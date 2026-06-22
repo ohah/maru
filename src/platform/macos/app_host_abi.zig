@@ -426,27 +426,29 @@ pub export fn maru_macos_app_session_hover(
     session: ?*AppSession,
     x_px: f64,
     y_px: f64,
-    cmd_held: i32,
+    mods: i32, // 마우스 수식키 비트(xterm: shift=4, alt=8, ctrl=16, cmd=32) — Zig가 url-click-modifier와 비교(v71)
     out_cursor_kind: ?*i32,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const out = out_cursor_kind orelse return @intFromEnum(Status.null_out);
-    out.* = @intFromEnum(app_session.hoverCursor(x_px, y_px, cmd_held != 0));
+    out.* = @intFromEnum(app_session.hoverCursor(x_px, y_px, mods));
     return @intFromEnum(Status.ok);
 }
 
-// Cmd+클릭 위치의 URL(backing px). 버퍼는 Zig 소유로 다음 url_at/destroy까지 유효, 없으면 len 0.
+// (config 수식키)+클릭 위치의 URL(backing px). mods가 url-click-modifier와 안 맞으면 len 0(일반 클릭). 버퍼는
+// Zig 소유로 다음 url_at/destroy까지 유효(v71: mods 인자 추가 — modifier 판정을 Zig 단일 출처로).
 pub export fn maru_macos_app_session_url_at(
     session: ?*AppSession,
     x_px: f64,
     y_px: f64,
+    mods: i32,
     out_ptr: ?*?[*]const u8,
     out_len: ?*usize,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
     const len_out = out_len orelse return @intFromEnum(Status.null_out);
-    const url = app_session.urlAt(x_px, y_px);
+    const url = app_session.urlAt(x_px, y_px, mods);
     ptr_out.* = if (url.len > 0) url.ptr else null;
     len_out.* = url.len;
     return @intFromEnum(Status.ok);

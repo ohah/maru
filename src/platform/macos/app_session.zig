@@ -3875,6 +3875,15 @@ pub const AppSession = struct {
         if (std.c.getenv("MARU_FORCE_SYS_APPEARANCE")) |sv| {
             self.setSystemAppearance(std.mem.eql(u8, std.mem.span(sv), "dark"));
         }
+        // MARU_OPEN_NOTIFICATIONS=N — 첫 frame에 테스트 알림 N개(미설정/0→2)를 시드하고 알림 패널을 연다(말풍선 caret·
+        // 최소 높이·footer를 헤드리스 스크린샷으로 self-verify하는 debug-gate). env 미설정이면 무동작.
+        if (std.c.getenv("MARU_OPEN_NOTIFICATIONS")) |nv| {
+            var seed: usize = std.fmt.parseInt(usize, std.mem.span(nv), 10) catch 2;
+            if (seed == 0) seed = 2;
+            var i: usize = 0;
+            while (i < seed) : (i += 1) self.pushNotificationHistory("Maru", "에이전트 작업 완료 — 빌드 통과", 0, true);
+            self.openNotificationPanel();
+        }
         if (std.c.getenv("MARU_OPEN_SETTINGS") == null) return;
         self.toggleSettings();
         // MARU_OPEN_SETTINGS_SECTION=N — 특정 섹션을 열어 캡처(스크린샷 self-verify용 debug-gate). 미설정=섹션 0.
@@ -6197,6 +6206,7 @@ pub const AppSession = struct {
                         .close => |idx| self.deleteNotification(idx), // 카드 ✕ → 그 카드 삭제
                         .mark_all_read => self.markAllNotificationsRead(),
                         .clear_all => self.clearNotifications(),
+                        .background => {}, // 카드/액션 아닌 패널 내부 빈 여백(최소 높이 gap) — 무시(닫지 않음)
                     }
                 } else {
                     self.chrome_host.notifications.hide(); // 패널 밖 클릭 → 닫기
@@ -6422,18 +6432,7 @@ pub const AppSession = struct {
                         self.resetCursorBlink();
                         self.metal_dirty = true;
                     },
-                    .notifications => {
-                        // 종 클릭 → 인앱 알림 센터 패널(2줄 카드)을 종 아이콘 아래에 띄운다. 항목은 collect/itemAt 시점에
-                        // 히스토리에서 빌드한다(buildNotificationItems) — show엔 개수만 준다(키 nav clamp용). 열어도 읽음
-                        // 처리는 안 한다(클릭한 항목만 읽음 — 안읽음 점 유지).
-                        // 패널을 종 아이콘 바로 아래에 띄운다 — 종 글리프는 cols-11이지만, 알림 그룹 좌단(배지 col cols-12)에
-                        // 패널 좌단을 맞춰 종+배지 묶음 아래로 정렬한다.
-                        const hcols = self.sidebar_width_px / self.cell_width_px;
-                        const anchor_x: i32 = @intCast((hcols -| 12) * self.cell_width_px); // 알림 그룹 좌단(배지 col cols-12)
-                        const anchor_y: i32 = @intCast(self.cell_height_px); // 아이콘 줄(0) 바로 아래
-                        self.chrome_host.notifications.show(anchor_x, anchor_y, self.notification_history.items.len);
-                        self.metal_dirty = true;
-                    },
+                    .notifications => self.openNotificationPanel(), // 종 클릭 → 인앱 알림 센터 패널(앵커는 단일 출처 헬퍼)
                     .none => if (self.sidebarSlotAt(y_px)) |slot| if (self.visibleTab(slot)) |tab_idx| {
                         // slot=표시 슬롯, tab_idx=원본 탭(검색 필터 역매핑). 닫기/전환/드래그는 원본 인덱스로 한다.
                         const on_close = chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px) and
@@ -11091,10 +11090,11 @@ pub const AppSession = struct {
         if (self.chrome_host.context_menu.open) {
             try self.chrome_host.collectContextMenuDraws(self.contextMenuItems(), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
         }
+        var notif_items: []const chrome.components.notifications.Item = &.{}; // caret 배치(append 후)에 재사용 — 같은 패널 rect
         if (self.chrome_host.notifications.open) {
-            const items = try self.buildNotificationItems(arena); // 히스토리 → 카드(역순) 주입
-            self.chrome_host.notifications.setItemCount(items.len); // 패널 열린 채 새 알림 도착 시 selected clamp 동기화
-            try self.chrome_host.collectNotificationsDraws(items, props, &tokens, arena, &draws);
+            notif_items = try self.buildNotificationItems(arena); // 히스토리 → 카드(역순) 주입
+            self.chrome_host.notifications.setItemCount(notif_items.len); // 패널 열린 채 새 알림 도착 시 selected clamp 동기화
+            try self.chrome_host.collectNotificationsDraws(notif_items, props, &tokens, arena, &draws);
         }
         if (self.chrome_host.settings.open) {
             const labels = try self.buildSettingsSectionLabels(arena); // 좌측 네비 라벨(platform 소유)
@@ -11110,10 +11110,83 @@ pub const AppSession = struct {
         raster.gpu_quads.deinit(self.allocator);
         self.gpu_shadows.appendSlice(self.allocator, raster.gpu_shadows.items) catch {};
         raster.gpu_shadows.deinit(self.allocator);
+        // 말풍선 caret(GPU 삼각형, gradient_kind=3) — 패널 배경 quad '뒤'에 append해 패널 상단 테두리를 caret 폭만큼
+        // 덮어 'bubble을 연다'. 벨 바로 아래(빈 버퍼 행)에서 위로 뾰족. 패널이 세로 clamp로 밀렸거나 벨이 가로 밖이면 생략.
+        if (self.chrome_host.notifications.open) self.appendNotificationCaret(notif_items, props, &tokens);
         // finishOverlayFrame이 cells 소유권을 toOwnedSlice로 가져가기 **전에** 실패하면(예: overlays alloc OOM)
         // raster.cells가 미해제로 남는다 — 그 경로만 정리한다(성공/이전 후엔 cells가 비어 no-op).
         errdefer raster.cells.deinit(self.allocator);
         return self.finishOverlayFrame(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y, appearance, cw, ch, raster.cursor, raster.clip_rect);
+    }
+
+    /// 알림 센터 패널을 종(🔔) 아이콘 아래에 연다 — 종 클릭과 디버그 훅(MARU_OPEN_NOTIFICATIONS)의 단일 출처.
+    /// 패널 좌단을 알림 그룹 좌단(배지 col cols-12)에 맞추고, 상단(body)은 줄2(=2ch)부터 둔다: 벨 글리프가 py_nudge
+    /// (0.30ch)로 줄0에서 [0.30ch, 1.30ch]에 그려지므로 줄1(빈 버퍼 행)을 벨↔팝업 간격으로 비워 벨을 안 가린다(말풍선
+    /// caret이 들어갈 자리). 항목은 collect 시점에 히스토리에서 빌드(buildNotificationItems) — show엔 개수만 준다(키 nav clamp).
+    fn openNotificationPanel(self: *AppSession) void {
+        if (self.cell_width_px == 0) return;
+        const hcols = self.sidebar_width_px / self.cell_width_px;
+        const anchor_x: i32 = @intCast((hcols -| 12) * self.cell_width_px); // 알림 그룹 좌단(배지 col cols-12)
+        // content top(셀 격자)을 줄2 + modal_padding_px로 둔다. rich 모달 배경 quad는 lowering(rasterizeOverlayCells)이
+        // content rect를 사방 modal_padding_px만큼 outset하므로 **보이는** 패널 상단 = content_top − mp. mp를 더해 그
+        // 보이는 상단이 줄2(=2ch)에 와 벨(줄0)을 한 줄 띄우고, 그 사이(줄1)가 말풍선 caret 자리가 된다. mp를 빼먹으면
+        // 보이는 패널이 벨에 거의 붙어(2ch−12) caret이 들어갈 틈이 없다(코드리뷰 — 패딩 미반영 버그 정정).
+        const mp: u32 = self.buildChromeTokens().space.modal_padding_px;
+        const anchor_y: i32 = @intCast(self.cell_height_px * 2 + mp); // 보이는 패널 상단을 줄2에 — 벨 안 가림 + caret 틈
+        self.chrome_host.notifications.show(anchor_x, anchor_y, self.notification_history.items.len);
+        self.metal_dirty = true;
+    }
+
+    /// 알림 패널 말풍선 caret을 GPU 삼각형(gpu_quads gradient_kind=3) 2개로 그린다 — 외곽선(focus_accent) 위에
+    /// 채움(surface_bg, 패널 배경과 같은 색). 벨 글리프 중심(렌더러 가로 nudge 반영: col cols-11·width 2 슬롯이 0.5칸
+    /// 왼쪽으로 밀려 중심 (cols-10.5)*cw)에 apex를 두고, 밑변을 패널 상단에 overlap만큼 겹쳐 상단 테두리를 caret
+    /// 폭만큼 덮어 'bubble을 연다'. 패널이 세로 clamp로 anchor보다 위로 밀렸거나 벨이 패널 가로 밖이면 생략(벨과
+    /// 어긋난 caret 방지). buildChromeOverlayFrame이 패널 배경 quad를 self.gpu_quads에 append한 '뒤'에 부른다(테두리 위로).
+    fn appendNotificationCaret(self: *AppSession, items: []const chrome.components.notifications.Item, props: chrome.ChromeProps, tk: *const chrome.Tokens) void {
+        const cw = self.cell_width_px;
+        const ch = self.cell_height_px;
+        if (cw == 0 or ch == 0) return;
+        const cols = self.sidebar_width_px / cw;
+        if (cols < 13) return; // 벨이 안 그려지는 폭 — caret도 생략(buildSidebarHeaderFrame cols<13과 정합)
+        const panel = chrome.components.notifications.panelRect(&self.chrome_host.notifications, items, props) orelse return;
+        if (panel.y < self.chrome_host.notifications.anchor_y) return; // 세로 clamp로 위로 밀림 — 벨과 어긋나니 생략
+        const cw_f: f32 = @floatFromInt(cw);
+        const ch_f: f32 = @floatFromInt(ch);
+        const bell_cx: f32 = (@as(f32, @floatFromInt(cols)) - 10.5) * cw_f; // 벨 중심(가로 nudge 반영)
+        // panelRect는 content rect(셀 격자)다. rich 모달 배경 quad는 lowering이 사방 modal_padding_px만큼 outset하므로
+        // **보이는** 패널 경계는 content rect를 mp만큼 키운 것 — caret은 그 보이는 경계 기준으로 맞춰야 패널과 닿는다.
+        const mp: f32 = @floatFromInt(tk.space.modal_padding_px);
+        const px: f32 = @as(f32, @floatFromInt(panel.x)) - mp; // 보이는 패널 좌단
+        const pw: f32 = @as(f32, @floatFromInt(panel.w)) + 2 * mp; // 보이는 패널 폭
+        if (bell_cx < px or bell_cx > px + pw) return; // 벨이 (보이는) 패널 가로 밖 — 생략
+        const panel_top: f32 = @as(f32, @floatFromInt(panel.y)) - mp; // 보이는 패널 상단(content top − outset)
+        const caret_w: f32 = cw_f * 1.6; // ~1.6칸 폭(말풍선 꼭지)
+        const caret_h: f32 = ch_f * 0.5; // ~반 줄 높이
+        const overlap: f32 = 2.0; // 밑변을 패널 안으로 — 상단 테두리 seam 덮기
+        const outline: f32 = 1.5; // accent 외곽선(빗변 peek) — 패널 테두리(1px)와 어울리게
+        const fill = packRgbAlpha(tk.get(.surface_bg), 0xFF); // 채움=패널 배경색
+        const accent = packRgbAlpha(tk.get(.focus_accent), 0xFF); // 외곽선=패널 테두리색
+        // 외곽(accent) 삼각형 — 사방 outline만큼 큰 rect에 내접(빗변이 ~outline px 비져 외곽선) → 그 위에 채움.
+        self.gpu_quads.append(self.allocator, triangleQuad(bell_cx - caret_w / 2 - outline, panel_top - caret_h - outline, caret_w + 2 * outline, caret_h + outline + overlap, accent)) catch {};
+        self.gpu_quads.append(self.allocator, triangleQuad(bell_cx - caret_w / 2, panel_top - caret_h, caret_w, caret_h + overlap, fill)) catch {};
+    }
+
+    /// gradient_kind=3(위 삼각형) GpuQuad 한 개(말풍선 caret 헬퍼). 좌상단 (x,y)·크기 (w,h) backing px,
+    /// fill_color0=color(0xAARRGGBB), corner/border 0(셰이더가 삼각형 경로에서 무시), layer 1(모달 over).
+    fn triangleQuad(x: f32, y: f32, w: f32, h: f32, color: u32) metal_frame.GpuQuad {
+        return .{
+            .x = x,
+            .y = y,
+            .w = w,
+            .h = h,
+            .corner_radii = .{ 0, 0, 0, 0 },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = color,
+            .fill_color1 = color,
+            .border_color = 0,
+            .gradient_kind = 3, // 위로 뾰족한 삼각형(셰이더 분기)
+            .layer = 1, // 모달 over(패널 배경과 같은 패스)
+        };
     }
 
     /// chrome Notice 모달(손상 알림 등)을 연다. 메시지는 세션 소유 버퍼로 복사한다(copyOverlayMessage — slice

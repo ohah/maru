@@ -694,7 +694,8 @@ pub const GpuQuad = extern struct {
     fill_color1: u32,
     // 테두리 색(0xAARRGGBB). border_widths가 모두 0이면 무시.
     border_color: u32,
-    // 0=solid(fill_color0만), 1=수직 gradient(top→bottom), 2=수평(left→right).
+    // 0=solid(fill_color0만), 1=수직 gradient(top→bottom), 2=수평(left→right), 3=위로 뾰족한 삼각형(말풍선 caret —
+    // rect에 내접, apex=상단 중앙·base=하단, fill_color0 단색 + edge AA; corner/border 무시). 셰이더가 3에서 분기.
     gradient_kind: u32,
     // C4b: 합성 레이어. 0=under(사이드바 밴드 — 셀 part1 위·사이드바 제목 아래), 1=over(모달 — 셀 전체
     // 위·모달 텍스트 아래, 최상위), 2=bottom(탭 밴드 — part1 터미널·탭 제목 '앞'·아래, C4b-5). draw가 layer로

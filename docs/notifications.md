@@ -62,15 +62,31 @@
   안 읽은 개수 캐시(아래 "읽음/지우기 액션"의 5곳 — push/markRead/delete/markAll/clear 헬퍼에서만 증감, 단일 출처).
 - **사이드바 헤더 종 + 배지**: 헤더 우측 아이콘 줄에 4개 아이콘이 3칸 간격으로 우측 정렬된다 — 종(🔔)·접기(◧)·
   view options(⚙)·새 워크스페이스(+)가 각각 `cols-11`·`cols-8`·`cols-5`·`cols-2`. 종은 EAW 2칸이라 `cols-11·cols-10`을
-  점유한다(1칸 아이콘과 중심 간격 정렬). 안 읽은 개수 배지(coral)는 **종 한 칸 왼쪽**부터 — 1~9는 숫자 1칸(`cols-12`),
-  10개 이상은 "9+" 2칸(`cols-13·cols-12`). `HeaderRegion.notifications` zone은 `headerHit`(렌더 `buildSidebarHeaderFrame`과
-  같은 col)이 단일 출처 — 종 글리프(`cols-11·cols-10`)+배지(`cols-12`)를 포함하는 3칸 zone `[cols-12, cols-9)`. 안 그리면
-  hit-test도 none(`cols < 13` 좁은 사이드바, 우측 아이콘 4개가 안 들어감).
+  점유하는데, 정수 col 슬롯 중심이 `(cols-10)*cw`로 1칸 아이콘(중심 `col+0.5`)과 2.5칸이 되므로(좌우 패딩 어긋남)
+  렌더러(`maru_metal_renderer.m`)가 종 글리프만 가로로 0.5칸 왼쪽으로 미는 px nudge를 줘 중심을 `(cols-10.5)*cw`
+  (=균일 3칸 + hover quad 중앙·말풍선 caret과 동심)에 맞춘다(py_nudge와 동형 — 2칸 글리프는 정수 col로 반칸에 못 옴).
+  안 읽은 개수 배지(coral)는 **종 한 칸 왼쪽**부터 — 1~9는 숫자 1칸(`cols-12`), 10개 이상은 "9+" 2칸(`cols-13·cols-12`).
+  `HeaderRegion.notifications` zone은 `headerHit`(렌더 `buildSidebarHeaderFrame`과 같은 col)이 단일 출처 — 종 글리프
+  (`cols-11·cols-10`)+배지(`cols-12`)를 포함하는 3칸 zone `[cols-12, cols-9)`. 안 그리면 hit-test도 none(`cols < 13`
+  좁은 사이드바, 우측 아이콘 4개가 안 들어감).
 - **떠 있는 카드 패널**: `src/chrome/components/notifications.zig`(context_menu를 본뜸). 한 항목 = **2줄 카드**
   (제목 + 본문), 안읽음 점(●), 우측 상대시간("N분 전"), 닫힌 surface는 회색(`muted_fg` role). `layout`(폭·높이·스크롤
   윈도우·위치 clamp)을 view·hitTest·panelRect가 공유(보이는 카드 == 클릭되는 카드). 카드 구분선은 `.fill`(1px)로 —
   `.rule` op은 macOS lowering에서 no-op이라. 빈 목록도 패널 + "알림 없음"을 그린다. 항목은 platform이 매 프레임
   arena로 주입(palette `Row` 선례) — chrome은 중립(surface_id·라이브 포인터 모름).
+- **말풍선 팝오버(형태)**: `openNotificationPanel`이 content top을 `anchor_y = 2*cell_h + modal_padding_px`로 둔다(단일 출처).
+  rich 모달 배경 quad는 lowering(`rasterizeOverlayCells`)이 content rect를 사방 `modal_padding_px`만큼 **outset**하므로
+  **보이는** 패널 상단 = `anchor_y − mp` = 줄2(=2ch) — mp를 더해 보이는 상단을 줄2에 맞춘다(안 더하면 보이는 패널이
+  `2ch−12`로 종에 거의 붙어 caret 틈이 없다). 종 글리프는 py_nudge(0.30ch)로 줄0에서 ~1.30ch까지 내려오므로, 줄1(빈
+  버퍼 행)이 종↔패널 간격이자 **말풍선 caret**(위로 뾰족한 삼각형) 자리가 된다 — **팝업이 종을 안 가린다**(예전 `anchor_y=1ch`는
+  종 하단을 덮었다). caret은 chrome 모달 lowering이 셀 그리드(픽셀 정밀 도형은 둥근 quad뿐)라, platform `appendNotificationCaret`이
+  `self.gpu_quads`에 `GpuQuad{gradient_kind=3}`(셰이더가 rect 내접 삼각형 + fwidth edge AA로 그림 — 별도 파이프라인/ABI 없이
+  quad 채널 재활용) 2개(focus_accent 외곽선 + surface_bg 채움)를 종 중심(`(cols-10.5)*cw`)·**보이는** 패널 상단(`panel.y − mp`)에
+  append한다. 패널 배경 quad **'뒤'**라 상단 테두리를 caret 폭만큼 덮어 bubble을 연다. 패널이 세로 clamp로 밀렸거나
+  종이 보이는 패널 가로 밖이면 caret 생략(어긋남 방지).
+- **최소 높이**: 항목이 적어도 팝업이 납작하지 않게 `min_panel_rows`(8) baseline을 보장한다 — 카드는 상단, 액션
+  행(footer)은 박스 하단 고정, 사이 여백은 패널 배경(클릭 무시 = `Hit.background`; 박스 '밖'만 닫기). 카드가 그보다
+  많으면 자연 높이(화면 cap)로 커지므로 무영향(`layout` 단일 출처 — view·hitTest 공유).
 - **스크롤(화면 넘으면)**: 카드가 화면 가용 높이를 넘으면 **카드 단위 스크롤**(`draw.Op`에 scissor가 없어 부분 카드를
   못 자르므로 통째 카드만 보인다). `State.scroll_offset`(보이는 첫 카드, 0=최신)으로 `items[first..first+visible]`만
   렌더한다. 마우스 휠(패널 열림 시 `scrollWheel`이 가로채 터미널/스크롤백으로 안 흘림)·키보드 ↑↓(선택이 viewport
@@ -82,7 +98,7 @@
   되돌려 그 카드의 surface를 봤다는 의미로 **같은 surface의 안읽음을 모두** 읽음 처리(`markNotificationsReadBySurface`
   — 2단계 배너 클릭과 **동일 정책**)하고, `activateSurfaceById(surface_id)`(1단계 재사용)로 점프한 뒤 패널을 닫는다.
   닫힌 surface면 점프 없이 닫기만(카드는 이미 회색). 배너든 카드든 "그 터미널을 봤다"는 한 가지 읽음 정책으로 통일.
-- **읽음/지우기 액션**: 마우스 hit-test는 `Hit` union(`card`/`close`/`mark_all_read`/`clear_all`)으로 가른다 — 카드
+- **읽음/지우기 액션**: 마우스 hit-test는 `Hit` union(`card`/`close`/`mark_all_read`/`clear_all`/`background`)으로 가른다 — 카드
   우측 ✕(본문줄)=개별 삭제(`deleteNotification`), 키보드 Backspace=선택 카드 삭제. 패널 하단 액션 행 좌/우 절반=
   "모두 읽음"(`markAllNotificationsRead` — 점/배지만 끄고 항목 유지) / "모두 지우기"(`clearNotifications` — 전체 삭제).
   unread 캐시는 push/markRead/delete/markAll/clear 헬퍼에서만 증감(단일 출처).

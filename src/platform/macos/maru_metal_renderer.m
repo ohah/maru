@@ -55,7 +55,7 @@ typedef struct {
     float fill0[4];        // rgba(0..1) — gradient 시작색
     float fill1[4];        // rgba — gradient 끝색
     float border_color[4]; // rgba
-    float gradient_kind;   // 0=solid, 1=vertical, 2=horizontal
+    float gradient_kind;   // 0=solid, 1=vertical, 2=horizontal, 3=위 삼각형(말풍선 caret — fill0 단색+edge AA)
 } MaruRendererQuadVertex;
 
 // 셰이더 QuadIn(maru_metal_shader.h)이 이 정점을 buffer(0)로 raw 재해석하므로 레이아웃이 1:1이어야 한다.
@@ -773,7 +773,13 @@ bool maru_metal_renderer_draw(
                 const float py_nudge = (is_corner_icon || is_bell_icon) ? ch * 0.30f : 0.0f;
                 py_top = (float)tc.origin_y + (float)tc.row * ch + py_nudge;
             }
-            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, hscale);
+            // 종(🔔)은 EAW 2칸 글리프라 정수 col(cols-11)+width 2의 슬롯 중심이 (cols-10)*cw에 떨어진다. 1칸 아이콘
+            // (◧/⚙/+) 중심은 (col+0.5)*cw로 서로 3칸 간격인데, 종이 그 패턴에 맞으려면 중심이 (cols-10.5)*cw여야 한다
+            // ([종]–[토글] 3칸). 현재 (cols-10)이라 토글 쪽으로 0.5칸 쏠려 좌우 패딩이 어긋났다(사용자 피드백). hover
+            // 배경 quad도 (cols-11+0.5)=(cols-10.5)*cw 중심이라, 종 글리프를 0.5칸 왼쪽으로 밀면 균일 간격·hover 중앙
+            // 정렬에 동시에 맞는다(2칸 글리프 중심은 정수 col로는 반칸에 못 와 렌더 단계 가로 nudge가 필요 — py_nudge와 동형).
+            const float px_nudge = is_bell_icon ? cw * -0.5f : 0.0f;
+            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x + px_nudge, cw, py_top, ch, drawable_w, drawable_h, hscale);
         }
         quad_index += cell_count;
         // 3) 사이드바 cells — origin 0, 배경 quad 위에 그린다(painter 순서). 탭 슬롯 높이로 배치하되 셀 종류를

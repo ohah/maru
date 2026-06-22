@@ -6,7 +6,7 @@ PR 분해**를 단일 출처로 둔다. 실제 키·형식·검증은 항상 [�
 그리는 chrome 구조는 [Chrome 전략](chrome-strategy.md)이, 키바인딩 경계는 [키 입력과
 단축키](key-input-and-shortcuts.md)가 단일 출처다 — 여기서는 중복하지 않고 연결한다.
 
-> 상태(2026-06): **진행 중**. S0-1a·F1-1·F1-3·F1-4b(blink-interval-ms)·F1-5·F1-8·F1-9·F1-10(multiplier) 머지(F1-7은 기존 구현). 세팅 GUI
+> 상태(2026-06): **진행 중**. S0-1a·F1-1·F1-3·F1-4b(blink-interval-ms)·F1-5·F1-6·F1-8·F1-9·F1-10(multiplier) 머지(F1-7은 기존 구현). 세팅 GUI
 > (CS-4-0~6, config-gui.md) 완료 후 미뤄둔 신규 기능(F1~F3)을 schema-first로 채우는 단계. 가벼운(순수 Zig·ABI 무변경)
 > 항목부터 순차 진행. 진행 상황은 각 PR 표의 상태 칸으로 동기화한다.
 >
@@ -89,7 +89,7 @@ config 키 추가 + 기존 경로에 분기 한 줄. GUI 없이 config 파일로
 | **F1-4a** ✅ | 커서 색 `cursor.color`(칸)·`cursor.text`(반전 글자) | 테마 독립 opt-in. nullable이라 loader 수동 핸들러·serialize 수동 emit(palette 선례), `ResolvedCursor`에 색 추가 후 렌더가 `orelse` 테마 폴백 | ✅ 머지. 기존 동작(흰 커서) 보존. resolve/round-trip/parse 단위 테스트 |
 | **F1-4b** | 커서 `cursor.blink-interval-ms` ✅ / `cursor.unfocused`(후속) | `blink_interval_ticks` 상수(15)→config ms를 30Hz 틱으로 환산하는 `blinkIntervalTicks()` helper(F1-4b-1). `unfocused`(포커스 잃을 때 커서 모양)는 focus 추적+렌더라 별도 PR로 분리 | ✅ blink-interval-ms 머지(schema number + 환산 round/최소 1틱 단위 테스트). `unfocused` 잔여 |
 | **F1-5** ✅ | URL 클릭 modifier `input.url-click-modifier` | modifier 판정을 Zig 단일 출처로 이주(`urlModifierHeld`) — hover/url_at ABI의 `cmd_held`(bool)→`mods`(xterm 비트, **v71**), Swift는 NSEvent 수식키→비트 변환만(네이티브 최소·이식성). enum `command`/`control`/`alt`/`shift`(기본 command=현행 Cmd) | ✅ 머지(`urlModifierHeld` + schema enum 단위 테스트, 실기 빌드). 실제 클릭/hover는 수동 |
-| **F1-6** | 타이핑 중 커서 숨김 `input.mouse-hide-while-typing` | keyDown `NSCursor.hide()` + idle 타이머 복원 | AppKit only(순수 신규) |
+| **F1-6** ✅ | 타이핑 중 커서 숨김 `input.mouse-hide-while-typing` | Zig `handleKeyEvent`가 글자 입력(.terminal_input + .char + 단축키 아님) 시 `take_mouse_hide` 1회성 신호(ABI **v72**, take_bell 동형), Swift가 `NSCursor.setHiddenUntilMouseMoves`(복원은 마우스 이동에서 자동). 기본 false. Ghostty `mouse-hide-while-typing`(press+utf8>0) 모델 | ✅ 머지(글자/화살표/단축키/config-off 판정 + schema 단위 테스트, 실기 빌드) |
 | **F1-7** ✅ | 탭 닫기 확인 | **이미 구현** — `request_window_close`(ABI v65)가 in-app 닫기(close_tab/탭바 ✕)에도 `requestClose`로 같은 확인 모달을 띄운다(창 전용 아님) | ✅ 기존 구현(상단 노트와 동기 — 표 상태만 정정) |
 | **F1-8** ✅ | env 주입 `env.<KEY>` | `SpawnRequest.env_overrides` + `EnvStorage` upsert(부모 상속 위 덮어쓰기/추가) | ✅ 머지. 부모+사용자 정책, EnvStorage upsert 단위 테스트 |
 | **F1-9** ✅ | 커스텀 셸 `shell.command`/`shell.args` | `spawnRequest` interactive 분기가 config.shell 사용(login 래퍼는 그대로 — `/bin/bash`는 메커니즘) | ✅ 머지. loader·serialize 단위 테스트. `command/args`는 spawn이 이미 받음 |

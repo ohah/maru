@@ -567,8 +567,8 @@ int32_t maru_macos_app_session_config_path(
 /* Reload Config 메뉴 — config 파일을 재로드해 재시작 없이 반영(폰트·여백·테마·palette·scrollback·bell·page-keys).
    파싱은 forgiving, 로드 실패면 무동작(기존 config 유지)이라 항상 Status.ok. 규칙은 Zig loader가 단일 출처. */
 int32_t maru_macos_app_session_reload_config(MaruAppHostSession *session);
-/* Reset to Defaults 메뉴 — 런타임 줌(⌘+/−)·여백 변경을 프로그램 처음 실행 설정으로 되돌린다(appearance만 —
-   behavior는 런타임에 안 바뀌므로 대상 아님). 항상 Status.ok. */
+/* Reset to Defaults 메뉴 — 확인 모달을 연다(커맨드 팝업 "Reset All Settings to Defaults"와 같은 경로). 확정 시 모든
+   config를 내장 기본값으로 되돌리고 config 파일을 삭제한다(파괴적이라 무확인 즉시 실행 안 함). 항상 Status.ok. */
 int32_t maru_macos_app_session_reset_defaults(MaruAppHostSession *session);
 /* Reset 메뉴(⌘⇧R) — 활성 터미널의 잔류 입력 모드(focus 1004·mouse·kitty keyboard)만 끈다. ssh 너머 TUI가
    SIGKILL로 죽어 정리 못 한 모드가 raw 셸 입력을 오염(포커스마다 CSI I·비프)시키는 증상의 수동 회복.

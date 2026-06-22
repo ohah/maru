@@ -46,7 +46,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 69; // 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 위임=전체 기본값+config 파일 삭제). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 69; // 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 삭제). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -986,6 +986,9 @@ pub const AppSession = struct {
     // 담고 확인 모달을 열며, confirm_accept가 executeClose로 실행하고 confirm_cancel이 버린다. 단일 출처: 어느 닫기
     // 경로였는지(cascade 정책이 경로마다 다름)를 기억해 확정 시 같은 함수를 다시 부른다.
     pending_close: ?PendingClose = null,
+    // "Reset All Settings"(메뉴 reset_defaults·팝업 reset_settings) 확인 모달의 보류. true면 confirm_accept가
+    // resetAllSettings(전체 기본값 + config 파일 삭제)를 실행한다 — 파괴적이라 무확인 즉시 실행을 막는다. pending_close와 배타.
+    pending_reset: bool = false,
     // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
     // 마다 leaf rect/divider seg 레이아웃을 새 ArrayList에 할당·해제하던 churn을 없앤다 — 레이아웃은 매번
     // 다시 계산하므로(작은 트리라 cheap) 결과는 항상 최신이라 stale 캐시 위험이 없고, 버퍼 capacity만 재사용한다.
@@ -2806,6 +2809,7 @@ pub const AppSession = struct {
     fn requestClose(self: *AppSession, target: PendingClose) void {
         if (self.closeTargetHasRunningJob(target)) {
             self.pending_close = target;
+            self.pending_reset = false; // 리셋 보류와 배타(한 번에 한 모달)
             self.showConfirm(switch (target) {
                 .window => "실행 중인 명령이 있습니다. 이 창을 닫을까요?",
                 else => "실행 중인 명령이 있습니다. 닫을까요?",
@@ -2843,6 +2847,7 @@ pub const AppSession = struct {
     pub fn requestWindowClose(self: *AppSession) bool {
         if (!self.closeTargetHasRunningJob(.window)) return false;
         self.pending_close = .window;
+        self.pending_reset = false; // 리셋 보류와 배타(한 번에 한 모달)
         self.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?");
         return true;
     }
@@ -2873,20 +2878,35 @@ pub const AppSession = struct {
         self.view_options_menu = false;
     }
 
-    /// 닫기 확인 모달을 연다. 메시지는 세션 소유 버퍼로 복사(copyOverlayMessage)하고 다른 오버레이를 닫아 배타성을
-    /// 지킨다(dismissMessageOverlays — confirm/보류는 caller가 소유). 버튼 라벨은 닫기 의미에 맞게 "닫기"/"취소"로
-    /// 주입한다(confirm 컴포넌트는 범용이라 host가 용도별 라벨을 정한다). 다음 tick이 그린다.
-    fn showConfirm(self: *AppSession, message: []const u8) void {
+    /// 확인 모달을 연다(공통 경로). 메시지는 세션 소유 버퍼로 복사(copyOverlayMessage)하고 다른 오버레이를 닫아 배타성을
+    /// 지킨다(dismissMessageOverlays — confirm/보류는 caller가 소유). 버튼 라벨은 용도별로 host가 주입한다(confirm
+    /// 컴포넌트는 범용). 다음 tick이 그린다. showConfirm(닫기)·requestResetAll(리셋)이 공유.
+    fn showConfirmButtons(self: *AppSession, message: []const u8, buttons: chrome.components.confirm.Buttons) void {
         self.dismissMessageOverlays();
         self.clearAllHover(); // 모달 뒤(중앙 패널 밖)에 stale 호버 강조가 얼어붙지 않게 — hoverCursor는 모달 중 호버를 안 갱신
-        self.chrome_host.confirm.show(copyOverlayMessage(&self.confirm_message_buf, message), .{ .confirm = "닫기", .cancel = "취소" });
+        self.chrome_host.confirm.show(copyOverlayMessage(&self.confirm_message_buf, message), buttons);
         self.metal_dirty = true;
+    }
+
+    /// 닫기 확인 모달(라벨 "닫기"/"취소"). 보류 대상은 caller(requestClose/requestWindowClose)가 pending_close에 둔다.
+    fn showConfirm(self: *AppSession, message: []const u8) void {
+        self.showConfirmButtons(message, .{ .confirm = "닫기", .cancel = "취소" });
+    }
+
+    /// "Reset All Settings to Defaults"(메뉴 reset_defaults·팝업 reset_settings) 확인 모달을 연다. config 파일을 삭제하는
+    /// 파괴적 동작이라 즉시 실행하지 않고 확인을 받는다(닫기 확인과 같은 메커니즘 — 더 파괴적인데 무확인이던 비대칭
+    /// 제거, code-review #835). pending_reset=true로 두면 confirm_accept가 resetAllSettings를 실행한다(pending_close와 배타).
+    pub fn requestResetAll(self: *AppSession) void {
+        self.pending_close = null; // 닫기 보류와 배타(한 번에 한 모달)
+        self.pending_reset = true;
+        self.showConfirmButtons("모든 설정을 기본값으로 되돌리고 config 파일을 삭제합니다. 계속할까요?", .{ .confirm = "초기화", .cancel = "취소" });
     }
 
     /// 보류한 닫기를 취소하고 확인 모달을 닫는다 — 표적이 더 이상 유효하지 않거나(트리 변경) 다른 오버레이가
     /// 선점할 때. pending_close가 없어도 모달은 닫아 단일-오버레이 불변식을 지킨다(showNotice가 호출).
     fn cancelPendingClose(self: *AppSession) void {
         self.pending_close = null;
+        self.pending_reset = false;
         self.chrome_host.confirm.dismiss();
         self.metal_dirty = true;
     }
@@ -3267,7 +3287,7 @@ pub const AppSession = struct {
             .increase_font_size => self.adjustFontSize(self.appearance.font.size_step),
             .decrease_font_size => self.adjustFontSize(-self.appearance.font.size_step),
             .reset_font_size => self.resetFontSize(),
-            .reset_settings => self.resetAllSettings(), // 통합 리셋 — 라이브를 내장 기본값으로 + config 파일 삭제(영속까지)
+            .reset_settings => self.requestResetAll(), // 통합 리셋 — 확인 모달 후 전체 기본값 + config 파일 삭제
             // 절대 폰트 크기(config 바인딩 `set_font_size:N`). setFontSize가 [6,72]pt로 클램프.
             .set_font_size => |size| self.setFontSize(size),
         }
@@ -4352,14 +4372,20 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
             .context_menu_selection_changed => self.metal_dirty = true, // ↑↓ 선택 이동 — 재렌더
-            .confirm_accept => { // Enter/Y — 보류한 닫기를 실행. pending을 먼저 비워(executeClose 재진입 방지) 실행.
-                const target = self.pending_close;
-                self.pending_close = null;
+            .confirm_accept => { // Enter/Y — 보류한 동작 실행. pending을 먼저 비워(재진입 방지) 실행.
                 self.metal_dirty = true;
-                if (target) |t| self.executeClose(t);
+                if (self.pending_reset) {
+                    self.pending_reset = false;
+                    self.resetAllSettings(); // 리셋 확인 — 전체 기본값 + config 파일 삭제
+                } else {
+                    const target = self.pending_close;
+                    self.pending_close = null;
+                    if (target) |t| self.executeClose(t);
+                }
             },
-            .confirm_cancel => { // Esc/N — 보류한 닫기를 버린다(아무것도 안 닫음).
+            .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋)을 버린다(아무것도 안 함).
                 self.pending_close = null;
+                self.pending_reset = false;
                 self.metal_dirty = true;
             },
             .settings_close => {}, // settings.hide는 컴포넌트가 이미(handle/바깥클릭) — platform 부수효과 없음
@@ -11647,8 +11673,8 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
 }
 
 // resetAllSettings(통합 리셋 — 메뉴 Reset to Defaults·커맨드 팝업 공용 단일 함수)가 런타임 줌·config 변경을 공장
-// 기본값으로 되돌리는지. 파일 삭제·notice·테마 프리셋 측면은 별도 통합 테스트가 다루므로, 여기선 런타임 상태
-// (appearance·cell 메트릭·behavior 캐시·loaded_config)가 기본값이 되는지(회귀 가드)만 본다.
+// 기본값으로 되돌리는지. 파일 삭제·테마 프리셋은 별도 통합 테스트가 다루므로, 여기선 런타임 상태
+// (appearance·cell 메트릭·behavior 캐시·loaded_config)가 기본값이 되는지 + 완료 notice가 뜨는지(회귀 가드) 본다.
 test "resetAllSettings: 런타임 줌·config 변경을 공장 기본값으로 복원한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 메트릭 + PTY
     const allocator = std.testing.allocator;
@@ -11685,6 +11711,7 @@ test "resetAllSettings: 런타임 줌·config 변경을 공장 기본값으로 �
     try std.testing.expectEqual(true, session.audible_bell); // 기본 bell.audible로 복원
     try std.testing.expectEqual(factory.font.size, session.loaded_config.config.font.size);
     try std.testing.expectEqual(true, session.loaded_config.config.bell.audible);
+    try std.testing.expect(session.chrome_host.notice.open); // 완료 notice가 떴는지(showNotice)
 }
 
 // applyAppearance: 새 appearance를 통째로 갈아끼우면 appearance·base_font_size·cell 메트릭이 따라 바뀌는지.
@@ -12867,6 +12894,48 @@ test "close-confirm: 모달에서 Esc=취소(안 닫음)·Enter=확정(보류한
     try std.testing.expect(session.pending_close == null);
     try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
     try std.testing.expect(!session.ended_seen); // Term이 남아 세션 유지
+}
+
+// reset-confirm: requestResetAll(메뉴·팝업 공용)이 확인 모달을 열고, Enter면 resetAllSettings(전체 기본값)를 실행·Esc면
+// 버린다(config 안 건드림). config 파일을 삭제하는 파괴적 동작이라 무확인 즉시 실행을 막는 게이트를 close-confirm과 같은
+// 키 경로(handleKeyEvent → chrome 라우팅 → confirm_accept/cancel)로 증명한다.
+test "reset-confirm: 모달에서 Esc=취소(설정 유지)·Enter=확정(전체 기본값)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    const factory = try config_mod.resolveAppearance(.{});
+
+    // 비기본 config로 둔 뒤 리셋 요청 → 확인 모달이 뜨고 보류(아직 적용 안 됨).
+    session.loaded_config.config.font.size = factory.font.size + 6;
+    session.requestResetAll();
+    try std.testing.expect(session.chrome_host.confirm.open);
+    try std.testing.expect(session.pending_reset);
+    try std.testing.expectEqual(factory.font.size + 6, session.loaded_config.config.font.size); // 아직 안 바뀜
+
+    // Esc → 취소: 모달 닫힘, 보류 버림, config 그대로(리셋 안 됨).
+    _ = try session.handleKeyEvent(.{ .key = .escape });
+    try std.testing.expect(!session.chrome_host.confirm.open);
+    try std.testing.expect(!session.pending_reset);
+    try std.testing.expectEqual(factory.font.size + 6, session.loaded_config.config.font.size);
+
+    // 다시 요청 후 Enter → 확정: resetAllSettings 실행 → config 기본값.
+    session.requestResetAll();
+    try std.testing.expect(session.pending_reset);
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    try std.testing.expect(!session.chrome_host.confirm.open);
+    try std.testing.expect(!session.pending_reset);
+    try std.testing.expectEqual(factory.font.size, session.loaded_config.config.font.size); // 기본값으로
 }
 
 // 닫기 확인 모달 마우스 게이트(code-review 후속): (1) **확인 버튼 바로 위**에서 우/중클릭은 버튼을 활성 안 하고

@@ -730,6 +730,12 @@ test "schema tryParse: 최상위 스칼라(Config.schema) — Meta.key 전체 �
     try std.testing.expect(try tryParse(a, &cfg, "font.family-italic", "Courier New", &diags, 10)); // sub-struct text(F2-3)
     try std.testing.expectEqualStrings("Courier New", cfg.font.family_italic);
     a.free(cfg.font.family_italic);
+    try std.testing.expect(try tryParse(a, &cfg, "theme.follow-system", "true", &diags, 10)); // 최상위 bool(F2-9)
+    try std.testing.expectEqual(true, cfg.theme_follow_system);
+    try std.testing.expect(try tryParse(a, &cfg, "theme.preset-light", "solarized-light", &diags, 10)); // 최상위 enum(dash→underscore)
+    try std.testing.expectEqual(theme.ThemePreset.solarized_light, cfg.theme_preset_light);
+    try std.testing.expect(try tryParse(a, &cfg, "theme.preset-dark", "gruvbox-dark", &diags, 10));
+    try std.testing.expectEqual(theme.ThemePreset.gruvbox_dark, cfg.theme_preset_dark);
     try std.testing.expect(try tryParse(a, &cfg, "cursor.unfocused", "hollow", &diags, 11)); // sub-struct enum
     try std.testing.expectEqual(theme.UnfocusedCursor.hollow, cfg.cursor.unfocused);
     try std.testing.expect(try tryParse(a, &cfg, "window.unfocused-dim", "0.3", &diags, 12)); // 최상위 f32 range 0~1

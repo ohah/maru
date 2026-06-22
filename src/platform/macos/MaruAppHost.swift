@@ -389,6 +389,13 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     override func otherMouseDown(with event: NSEvent) { controller?.handleMouse(event, kind: 1, in: self) }
     override func otherMouseDragged(with event: NSEvent) { controller?.handleMouse(event, kind: 2, in: self) }
     override func otherMouseUp(with event: NSEvent) { controller?.handleMouse(event, kind: 3, in: self) }
+
+    // 시스템 라이트/다크 외관이 바뀌면(System Settings 토글·자동 야간) 모든 세션에 알린다 — Zig가 theme.follow-system이
+    // 켜졌으면 preset-light/dark로 테마를 교체한다(F2-9). NSView가 외관 변경마다 이걸 부른다(초기는 tick이 1회 적용).
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        controller?.applySystemAppearanceToAllSessions()
+    }
 }
 
 // 한 터미널 세션의 per-session 상태 — 창/PTY(appSession)/Metal 렌더러 + 렌더 캐시 메트릭을 묶는다.
@@ -465,6 +472,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // tick이 특정 surface를 명시적으로 대상 지정할 때 쓴다(이벤트가 아니라 타이머 구동이라 key 창으로 못 고름).
     // nil이면 입력 이벤트는 key 창 기준으로 surface를 고른다(이벤트는 key 창의 first responder로 전달되므로).
     private var explicitSurface: TerminalSurface?
+    // theme.follow-system 초기 외관을 한 번 적용했는지(F2-9). 세션 생성 직후 첫 tick에서 현재 NSAppearance를 알린다 —
+    // 이후 변경은 viewDidChangeEffectiveAppearance가 처리한다. tick은 세션이 확실히 있는 시점이라 초기 적용에 안전하다.
+    private var didApplyInitialAppearance = false
     // 세션별 forwarder의 대상. tick 중에는 explicitSurface, 그 외(입력/IME/hover)에는 key 창의 surface
     // (quick 패널이 key면 quick, 아니면 primary). 앱-전역으로 "메인 창"이 필요한 곳은 primary를 직접 쓴다.
     private var activeSurface: TerminalSurface? {
@@ -750,6 +760,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 한 번에 클리어한다(어느 창을 포커스하든). 배지를 안 띄웠으면 빈 라벨 대입은 무해.
         _ = notification
         NSApp.dockTile.badgeLabel = nil
+    }
+
+    // macOS 시스템 외관이 다크인지(NSAppearance). NSApp 전역 외관을 light/dark 중 가까운 쪽으로 매칭한다(F2-9).
+    private var isSystemDark: Bool {
+        NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
+
+    // 모든 세션(창·quick)에 현재 시스템 외관(light/dark)을 알린다 — Zig가 theme.follow-system이 켜졌으면 preset-light/dark로
+    // 교체한다(꺼졌으면 무시). 외관 변경(viewDidChangeEffectiveAppearance)·초기 1회(tick)에 호출. 외관 판정은 OS, 색은 Zig.
+    func applySystemAppearanceToAllSessions() {
+        let dark: Int32 = isSystemDark ? 1 : 0
+        for surface in windows {
+            if let session = surface.appSession {
+                _ = maru_macos_app_session_set_system_appearance(session, dark)
+            }
+        }
+        if let session = quick?.appSession {
+            _ = maru_macos_app_session_set_system_appearance(session, dark)
+        }
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
@@ -1240,6 +1269,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             if scale != lastSentBackingScale {
                 resizeAppSessionFromWindow()
             }
+        }
+
+        // theme.follow-system 초기 외관 1회 적용 — 세션이 생성된 첫 tick에 현재 시스템 light/dark를 알린다(F2-9).
+        // 위 guard let appSession 뒤라 세션 존재가 보장된다(applySystem...은 windows를 순회해 각 세션에 알림).
+        if !didApplyInitialAppearance {
+            didApplyInitialAppearance = true
+            applySystemAppearanceToAllSessions()
         }
 
         var summary = MaruAppHostFrameSummary()

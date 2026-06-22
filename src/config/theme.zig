@@ -494,6 +494,15 @@ pub const Config = struct {
     quick_terminal: QuickTerminalConfig = .{},
     /// chrome(탭바·사이드바·divider·테두리) 디자인 테마(tui|rich). 기본 tui(현행 cell-grid 룩). loader가 `chrome.theme` 키로 파싱.
     chrome_theme: ChromeTheme = .tui,
+    /// 시스템 라이트/다크 외관을 따라 테마 색을 자동 전환할지(F2-9). 기본 false(현행 — theme.preset/개별 색 그대로).
+    /// true면 macOS NSAppearance가 light면 theme_preset_light, dark면 theme_preset_dark의 색 세트로 라이브 교체한다
+    /// (개별 theme.* 색 override·theme.preset은 무시되고 system이 색을 정한다). loader가 `theme.follow-system` 키로 파싱.
+    /// 이 3필드는 색 세트(ThemeConfig)가 아니라 **선택 정책**이라 Config 직속이다(presetColors가 config.theme만 덮어쓰므로).
+    theme_follow_system: bool = false,
+    /// follow-system이 켜졌을 때 **light** 외관에 쓸 프리셋. 기본 solarized-light(라이트 색). loader가 `theme.preset-light` 키로 파싱.
+    theme_preset_light: ThemePreset = .solarized_light,
+    /// follow-system이 켜졌을 때 **dark** 외관에 쓸 프리셋. 기본 maru(다크 기본). loader가 `theme.preset-dark` 키로 파싱.
+    theme_preset_dark: ThemePreset = .maru,
     /// 사이드바 카드 표시 옵션(git 브랜치·폴더). view options 메뉴(앱)와 양방향 공유. loader가 `sidebar.*` 키로 파싱.
     sidebar: SidebarConfig = .{},
     /// SGR 5(blink) 글자를 실제로 깜빡일지(true)·정적으로 둘지(false). **기본 false** — 깜빡이는 콘텐츠는 접근성
@@ -578,6 +587,9 @@ pub const Config = struct {
     // window.padding-x/y(alias)·env(동적)·sub-struct(font/theme/…)는 schema에 안 넣는다 — 각각 loader 명시 핸들러/하위 schema.
     pub const schema = .{
         .chrome_theme = Meta{ .key = "chrome.theme", .doc = "chrome 디자인 테마", .widget = .dropdown, .section = .theme },
+        .theme_follow_system = Meta{ .key = "theme.follow-system", .doc = "시스템 라이트/다크 따라 테마 전환", .widget = .toggle, .section = .theme },
+        .theme_preset_light = Meta{ .key = "theme.preset-light", .doc = "라이트 외관 프리셋", .widget = .dropdown, .section = .theme },
+        .theme_preset_dark = Meta{ .key = "theme.preset-dark", .doc = "다크 외관 프리셋", .widget = .dropdown, .section = .theme },
         .blink_text = Meta{ .key = "text.blink", .doc = "SGR5 blink 글자 깜빡임", .widget = .toggle, .section = .theme },
         .ambiguous_width = Meta{ .key = "text.ambiguous-width", .doc = "EAW Ambiguous 문자 폭", .widget = .dropdown, .section = .theme },
         .emoji_width = Meta{ .key = "text.emoji-width", .doc = "이모지(VS16·키캡) 폭", .widget = .dropdown, .section = .theme },

@@ -533,6 +533,15 @@ pub export fn maru_macos_app_session_take_bell_badge(session: ?*AppSession) u32 
     return if (app_session.takeBellBadge()) 1 else 0;
 }
 
+// macOS 시스템 외관(NSAppearance)이 다크(is_dark!=0)/라이트(0)인지 Swift가 알려준다(생성 직후·외관 변경마다). config
+// theme.follow-system이 켜져 있으면 Zig가 theme.preset-light/dark 색 세트로 라이브 교체한다(꺼져 있으면 무시, write-back
+// 없음). 외관 판정·관찰은 OS(Swift), 색 정책은 Zig. session null=무동작. (v77)
+pub export fn maru_macos_app_session_set_system_appearance(session: ?*AppSession, is_dark: i32) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    app_session.setSystemAppearance(is_dark != 0);
+    return @intFromEnum(Status.ok);
+}
+
 // 타이핑(글자 입력) 중 마우스 숨김 1회성 신호(config input.mouse-hide-while-typing). pending이면 1(플래그 비움),
 // 없으면 0. Swift가 tick마다 호출해 1이면 NSCursor.setHiddenUntilMouseMoves(true)(다음 마우스 이동에서 자동 복원).
 // take_bell과 같은 1회성 패턴 — 한 tick에 여러 글자를 쳐도 hide 호출은 한 번. session null=0. (ABI v72)

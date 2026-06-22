@@ -93,8 +93,8 @@ pub const State = struct {
         self.selected = @intCast(std.math.clamp(cur + delta, 0, last));
     }
 
-    /// 마우스 휠/PageUp·Down용 — delta 카드만큼 스크롤(음수=위/최신, 양수=아래/오래된). 상한은 layout(items·metrics
-    /// 의존)이 알므로 그걸로 clamp(단일 출처). 스크롤 불필요(화면에 다 들어감)면 0으로.
+    /// 마우스 휠용 — delta 카드만큼 스크롤(음수=위/최신, 양수=아래/오래된). 상한은 layout(items·metrics 의존)이
+    /// 알므로 그걸로 clamp(단일 출처). 스크롤 불필요(화면에 다 들어감)면 0으로.
     pub fn scrollBy(self: *State, items: []const Item, p: props.ChromeProps, delta: i64) void {
         const l = layout(self, items, p) orelse return;
         if (!l.scrollable) {
@@ -186,7 +186,6 @@ const Layout = struct {
     total: usize, // 전체 카드 수
     first: usize, // 보이는 첫 카드 인덱스(scroll_offset clamp 결과)
     visible: usize, // 보이는 카드 수(≤ total)
-    has_action: bool, // 액션 행 그림(목록 있음)
     scrollable: bool, // total > visible — 스크롤바·휠 활성
 };
 
@@ -209,8 +208,7 @@ fn layout(state: *const State, items: []const Item, p: props.ChromeProps) ?Layou
     const box_w = (content_cols + 2) * cw;
 
     const total = items.len;
-    const has_action = total > 0;
-    const action_h: u32 = if (has_action) ch * action_rows else 0;
+    const action_h: u32 = if (total > 0) ch * action_rows else 0;
 
     // 화면 가용 높이 — 위아래 1칸씩 여백. 작은 창에서도 카드 1개 + 액션 행은 최소 보장한다.
     const bh = m.backing_height_px;
@@ -248,7 +246,6 @@ fn layout(state: *const State, items: []const Item, p: props.ChromeProps) ?Layou
         .total = total,
         .first = first,
         .visible = visible,
-        .has_action = has_action,
         .scrollable = scrollable,
     };
 }
@@ -382,7 +379,10 @@ pub fn view(
         const first_i: i32 = @intCast(l.first);
         const card_area_h: i32 = card_h_i * visible_i;
         const thumb_h = @max(ch, @divFloor(card_area_h * visible_i, total_i)); // 최소 1줄
-        const thumb_y = rect.y + @divFloor(card_area_h * first_i, total_i);
+        // thumb을 카드 영역 안에 가둔다 — 최소 높이(ch)로 키운 thumb이 max 스크롤에서 액션 행(sticky)으로 삐져나가지
+        // 않게 하단을 clamp(thumb_h <= card_h ≤ card_area_h라 thumb_max_y ≥ rect.y).
+        const thumb_max_y = rect.y + card_area_h - thumb_h;
+        const thumb_y = @min(rect.y + @divFloor(card_area_h * first_i, total_i), thumb_max_y);
         const thumb_w: i32 = 2; // 얇은 막대
         const sb_x = rect.x + @as(i32, @intCast(rect.w)) - thumb_w;
         try out.append(arena, .{ .fill = .{ .rect = .{ .x = sb_x, .y = thumb_y, .w = @intCast(thumb_w), .h = @intCast(thumb_h) }, .role = .muted_fg } });
@@ -597,4 +597,15 @@ test "notifications 스크롤: 화면 넘으면 카드 윈도우 + scrollBy/ensu
     }
     try std.testing.expect(saw_scrollbar); // 스크롤 가능 → thumb 표시
     try std.testing.expectEqual(@as(usize, 1), card_titles); // 보이는 카드 1장만(윈도우)
+
+    // 최대 스크롤(offset=4)에서도 thumb이 카드 영역(액션 행 위)을 넘지 않는다 — sticky 액션 행 침범 방지.
+    s.scroll_offset = 4;
+    out.clearRetainingCapacity();
+    try view(&s, items, p, &tk, arena_state.allocator(), &out);
+    const rect2 = panelRect(&s, items, p).?;
+    const card_area_bottom = rect2.y + 32; // visible(1) × card_h(2×16)
+    for (out.items) |op| {
+        if (op == .fill and op.fill.rect.w == 2) // 스크롤바 thumb
+            try std.testing.expect(op.fill.rect.y + @as(i32, @intCast(op.fill.rect.h)) <= card_area_bottom);
+    }
 }

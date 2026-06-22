@@ -914,6 +914,31 @@ test "buildPaneLabelDrawList: 이름을 [1,cols-1)에 깔고 좌패딩·우간�
     try std.testing.expect(has_ellipsis);
 }
 
+test "buildPaneGripDrawList: grip 글리프 ⠿를 중앙 칸(cols/2)에 깔아 양쪽 패딩을 둔다" {
+    const allocator = std.testing.allocator;
+    // cols=3(실사용 pane_grip_cols) → 글리프 U+283F가 col 1(좌패딩 col 0, 우패딩 col 2). 글리프 칸 위치를 잠가
+    // 회귀(글리프가 좌단 col 0으로 돌아가 양쪽 패딩이 깨지는 것)를 헤드리스로 잡는다 — 호버 테스트는 밴드 전체를
+    // .grip으로 보므로 글리프 위치를 검증 못 한다.
+    var dl = try buildPaneGripDrawList(allocator, 3, .default);
+    defer dl.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 3), dl.size.cols);
+    try std.testing.expectEqual(@as(u16, 1), dl.size.rows);
+    var grip_col: ?u16 = null;
+    for (dl.cells) |c| {
+        if (c.codepoint == 0x283F) grip_col = c.col;
+    }
+    try std.testing.expectEqual(@as(?u16, 1), grip_col); // 중앙(cols/2=1)
+
+    // cols=1(degenerate) → 글리프 col 0(중앙=0/2=0), 빈 칸 없음.
+    var one = try buildPaneGripDrawList(allocator, 1, .default);
+    defer one.deinit(allocator);
+    var one_col: ?u16 = null;
+    for (one.cells) |c| {
+        if (c.codepoint == 0x283F) one_col = c.col;
+    }
+    try std.testing.expectEqual(@as(?u16, 0), one_col);
+}
+
 test "buildPaneTabBarDrawList reserves a right '+' zone (no '+' when too narrow)" {
     const allocator = std.testing.allocator;
     // cols=20 → 탭 영역 17, "+"는 col 18. 좁은 바(cols=4 ≤ +zone+1)는 "+" 없음.

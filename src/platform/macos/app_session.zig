@@ -362,31 +362,6 @@ fn effectiveWindowBlur(blur: u32, opacity: f32) u32 {
     return blur;
 }
 
-/// `bytes`를 최대 `max` 바이트로 자르되 UTF-8 codepoint 경계에서 자른 길이를 돌려준다(F2-8). 멀티바이트가 max
-/// 중간에서 쪼개지면 그 codepoint의 시작 바이트까지 후퇴해, 소비자(core.selectWordAt의 Utf8View.init)가 슬라이스
-/// 전체를 거부하지 않게 한다. bytes.len ≤ max이면 그대로. 반환은 항상 ≤ max라 u8(max≤255 가정) 안전.
-fn utf8TruncateLen(bytes: []const u8, max: usize) u8 {
-    var n = @min(bytes.len, max);
-    if (n == bytes.len) return @intCast(n); // 안 잘림 — 보정 불필요
-    // 잘렸다 — bytes[n](프리픽스 다음 바이트)이 continuation(0b10xxxxxx)이면 codepoint 중간을 끊은 것. 시작 바이트까지 후퇴.
-    while (n > 0 and (bytes[n] & 0xC0) == 0x80) : (n -= 1) {}
-    return @intCast(n);
-}
-
-test "utf8TruncateLen: codepoint 경계에서 자른다(멀티바이트 중간 안 끊김)" {
-    // ASCII는 그대로(상한 이하).
-    try std.testing.expectEqual(@as(u8, 3), utf8TruncateLen("abc", 64));
-    // 정확히 상한이면 그대로.
-    try std.testing.expectEqual(@as(u8, 4), utf8TruncateLen("abcd", 4));
-    // 3바이트 codepoint(가 = EA B0 80)가 상한 경계에서 쪼개지면 시작 전까지 후퇴.
-    // "a가" = 61 EA B0 80 (4바이트). max=2면 'a'(1)+가의 첫 바이트 EA(continuation 아님)→ n=2에서 bytes[2]=B0 continuation→후퇴 n=1.
-    try std.testing.expectEqual(@as(u8, 1), utf8TruncateLen("a가", 2));
-    try std.testing.expectEqual(@as(u8, 1), utf8TruncateLen("a가", 3)); // n=3 bytes[3]=80 continuation→후퇴…n=1
-    try std.testing.expectEqual(@as(u8, 4), utf8TruncateLen("a가", 4)); // 딱 맞음(전체)
-    // 멀티바이트만: "가나"(EA B0 80 EB 82 98), max=4 → bytes[4]=82 continuation→후퇴 n=3(가 1글자).
-    try std.testing.expectEqual(@as(u8, 3), utf8TruncateLen("가나", 4));
-}
-
 test "effectiveWindowBlur: opacity 게이트 — 불투명이면 0, 투명일 때만 반경" {
     // 블러 0이면 opacity 무관하게 0.
     try std.testing.expectEqual(@as(u32, 0), effectiveWindowBlur(0, 0.5));
@@ -3313,10 +3288,7 @@ pub const AppSession = struct {
     /// continuation 바이트(0x80~0xBF) 앞 lead까지 되돌려 한글 등 multibyte가 U+FFFD로 깨지지 않게 자른다(리뷰 발견).
     /// notice·confirm 단일 출처.
     fn copyOverlayMessage(buf: []u8, message: []const u8) []const u8 {
-        var n = @min(message.len, buf.len);
-        if (n < message.len) {
-            while (n > 0 and (message[n] & 0xC0) == 0x80) n -= 1;
-        }
+        const n = terminal.width.truncateToBoundary(message, buf.len); // 멀티바이트 경계 절단(단일 출처)
         @memcpy(buf[0..n], message[0..n]);
         return buf[0..n];
     }
@@ -6481,10 +6453,10 @@ pub const AppSession = struct {
                 // 버퍼 크기(64)는 SelectWord.separators와 일치해야 한다 — 어긋나면 아래 .separators 대입이 컴파일 에러.
                 var sep_buf: [64]u8 = undefined;
                 const sep = self.loaded_config.config.input.word_separators;
-                // 64바이트 상한으로 자르되 **codepoint 경계**에서 자른다 — 멀티바이트 구분자가 64바이트 중간에서
-                // 쪼개지면 코어의 Utf8View.init이 슬라이스 전체를 거부해 **모든** 구분자가 조용히 무시되기 때문이다(F2-8
-                // 리뷰). 경계 보정: 잘린 경우(n<sep.len) 다음 바이트가 continuation(0b10xxxxxx)이면 시작 바이트까지 후퇴.
-                const n: u8 = utf8TruncateLen(sep, sep_buf.len);
+                // 64바이트 상한으로 자르되 **codepoint 경계**에서 자른다(width.truncateToBoundary 단일 출처) — 멀티바이트
+                // 구분자가 64바이트 중간에서 쪼개지면 코어의 Utf8View.init이 슬라이스 전체를 거부해 **모든** 구분자가 조용히
+                // 무시되기 때문이다(F2-8). 반환은 ≤ sep_buf.len(64)이라 u8 안전.
+                const n: u8 = @intCast(terminal.width.truncateToBoundary(sep, sep_buf.len));
                 @memcpy(sep_buf[0..n], sep[0..n]);
                 self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_word = .{ .row = row, .col = col, .separators = sep_buf, .sep_len = n } }, self.io) catch {};
             },

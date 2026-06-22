@@ -229,3 +229,50 @@ test "isEmojiPresentation: default-emoji yes, mono text symbols no (SGR fg prese
     try std.testing.expect(!isEmojiPresentation(0x2717)); // ✗
     try std.testing.expect(!isEmojiPresentation('A'));
 }
+
+/// `bytes`를 최대 `max` 바이트로 자르되 **UTF-8 codepoint 경계**에서 자른 길이를 돌려준다. 멀티바이트가 max 중간에서
+/// 쪼개지면 그 codepoint의 시작(lead 바이트)까지 후퇴한다(continuation 0x80~0xBF 앞). `bytes.len <= max`면 그대로.
+/// 잘린 멀티바이트(무효 UTF-8)가 소비자의 Utf8View/렌더/backspace를 깨뜨리는 걸 막는 **단일 출처** — terminal·session·
+/// chrome·platform이 고정 버퍼에 문자열을 담을 때 공유한다(F2-8·리뷰 #823 등 4중복 통합). 반환은 항상 ≤ max.
+pub fn truncateToBoundary(bytes: []const u8, max: usize) usize {
+    var n = @min(bytes.len, max);
+    if (n == bytes.len) return n; // 안 잘림 — 보정 불필요(bytes[n] 인덱스 안 함)
+    while (n > 0 and (bytes[n] & 0xC0) == 0x80) : (n -= 1) {}
+    return n;
+}
+
+/// `bytes[0..len]`에서 **마지막 codepoint 한 개**를 뺀 길이를 돌려준다(백스페이스 — UTF-8 경계). `len==0`이면 0.
+/// 마지막 바이트부터 continuation(0x80~0xBF)을 lead까지 건너뛴다. 백스페이스가 멀티바이트를 한 바이트씩 깨는 걸 막는
+/// 단일 출처(검색·인라인 편집 버퍼 공유). `len`은 `bytes`의 유효 길이(≤ bytes.len)여야 한다.
+pub fn dropLastCodepoint(bytes: []const u8, len: usize) usize {
+    if (len == 0) return 0;
+    var i = len - 1;
+    while (i > 0 and (bytes[i] & 0xC0) == 0x80) : (i -= 1) {}
+    return i;
+}
+
+test "truncateToBoundary: codepoint 경계에서 자른다(멀티바이트 중간 안 끊김)" {
+    try std.testing.expectEqual(@as(usize, 3), truncateToBoundary("abc", 64)); // 상한 이하 — 그대로
+    try std.testing.expectEqual(@as(usize, 4), truncateToBoundary("abcd", 4)); // 딱 상한 — 그대로
+    // "a가" = 61 EA B0 80. max=2: bytes[2]=B0 continuation→후퇴 n=1('a'만).
+    try std.testing.expectEqual(@as(usize, 1), truncateToBoundary("a가", 2));
+    try std.testing.expectEqual(@as(usize, 1), truncateToBoundary("a가", 3)); // bytes[3]=80→…→n=1
+    try std.testing.expectEqual(@as(usize, 4), truncateToBoundary("a가", 4)); // 전체
+    // "가나" = EA B0 80 EB 82 98. max=4: bytes[4]=82 continuation→후퇴 n=3('가'만).
+    try std.testing.expectEqual(@as(usize, 3), truncateToBoundary("가나", 4));
+    // max=0·빈 입력 안전.
+    try std.testing.expectEqual(@as(usize, 0), truncateToBoundary("가", 0));
+    try std.testing.expectEqual(@as(usize, 0), truncateToBoundary("", 5));
+    // 큰 max(>255)에서도 usize 반환이라 overflow 없음.
+    try std.testing.expectEqual(@as(usize, 2), truncateToBoundary("ab", 1000));
+}
+
+test "dropLastCodepoint: 마지막 codepoint 한 개 제거(UTF-8 경계)" {
+    try std.testing.expectEqual(@as(usize, 2), dropLastCodepoint("abc", 3)); // 'c' 제거
+    try std.testing.expectEqual(@as(usize, 0), dropLastCodepoint("a", 1)); // 마지막 하나
+    try std.testing.expectEqual(@as(usize, 0), dropLastCodepoint("abc", 0)); // 빈 길이
+    // "a가" 길이 4 → '가'(3바이트) 통째 제거 → 1.
+    try std.testing.expectEqual(@as(usize, 1), dropLastCodepoint("a가", 4));
+    // "가" 길이 3 → 통째 제거 → 0.
+    try std.testing.expectEqual(@as(usize, 0), dropLastCodepoint("가", 3));
+}

@@ -6,7 +6,7 @@ PR 분해**를 단일 출처로 둔다. 실제 키·형식·검증은 항상 [�
 그리는 chrome 구조는 [Chrome 전략](chrome-strategy.md)이, 키바인딩 경계는 [키 입력과
 단축키](key-input-and-shortcuts.md)가 단일 출처다 — 여기서는 중복하지 않고 연결한다.
 
-> 상태(2026-06): **진행 중**. S0-1a·F1-1·F1-2·F1-3·F1-4b(blink-interval-ms·unfocused)·F1-5·F1-6·F1-8·F1-9·F1-10(multiplier)·F2-2(option-as-meta)·F2-3(bold/italic-family)·F2-4(visual-bell·dock-badge)·F2-5(right-click)·F2-6(osc52-read)·F2-7(unfocused-dim)·F2-8(word-separators)·F2-9(follow-system)·F2-1(background-image) 머지(F1-7·F1-10 on-output은 기존 구현/표준) — **F2 트랙 전부 완료**. 세팅 GUI
+> 상태(2026-06): **진행 중**. S0-1a·F1-1·F1-2·F1-3·F1-4b(blink-interval-ms·unfocused)·F1-5·F1-6·F1-8·F1-9·F1-10(multiplier)·F2-2(option-as-meta)·F2-3(bold/italic-family)·F2-4(visual-bell·dock-badge)·F2-5(right-click)·F2-6(osc52-read)·F2-7(unfocused-dim)·F2-8(word-separators)·F2-9(follow-system)·F2-1(background-image)·F3-1(window-blur) 머지(F1-7·F1-10 on-output은 기존 구현/표준) — **F1·F2·F3 신규 기능 트랙 전부 완료**(다음은 G 트랙: 세팅 GUI 위젯·페이지). 세팅 GUI
 > (CS-4-0~6, config-gui.md) 완료 후 미뤄둔 신규 기능(F1~F3)을 schema-first로 채우는 단계. 가벼운(순수 Zig·ABI 무변경)
 > 항목부터 순차 진행. 진행 상황은 각 PR 표의 상태 칸으로 동기화한다.
 >
@@ -115,7 +115,7 @@ config 키 추가 + 기존 경로에 분기 한 줄. GUI 없이 config 파일로
 
 | PR | 기능 / 키 | 핵심 변경 | 근거(현황) |
 |---|---|---|---|
-| **F3-1** | 배경 블러 `window.blur` | 2-pass Metal(offscreen→Gaussian), F1-1 투명도 위에 | CAMetalLayer는 vibrancy 충돌 → 직접 구현. MTLRenderPassDescriptor 재설계 + 성능 튜닝 |
+| **F3-1** ✅ | 배경 블러 `window.blur` | **계획 정정**: "2-pass Metal offscreen→Gaussian"으로는 구현 불가 — 어느 OS도 **Metal로 창 뒤(backdrop) 픽셀을 못 읽는다**. 창 뒤 데스크톱 블러는 GPU 렌더러가 아니라 **OS/컴포지터 창 속성**이다. 그래서 **platform 어댑터**로 구현: config `window.blur`(u32 반경, 0=끔) + `window.opacity<1` 게이트(유효 반경 정책은 Zig 단일 출처 `windowBlurRadius`, ABI v78 getter `window_blur_radius`). macOS host가 `CGSSetWindowBackgroundBlurRadius`(Ghostty·Terminal.app과 동일한 비공개 CGS, Swift `@_silgen_name`)를 값 변화 시에만 호출. 추후 Windows=`DwmSetWindowAttribute`·Linux=`_KDE_NET_WM_BLUR_BEHIND_REGION`/kde-blur이 같은 자리를 채운다(컴포지터 의존 best-effort) | ✅ 머지. `effectiveWindowBlur`(게이트) + loader 파싱 단위 테스트, ABI v78. **시각 검증 한계**: 블러는 WindowServer가 창 뒤를 합성하므로 오프스크린 스크린샷 하니스로 못 잡는다(opacity<1+blur 설정 실기 실행으로 CGS 경로 no-crash 확인, 실제 블러는 데스크톱 수동 확인). Ghostty `background-blur` 베이스(references/ghostty embedded.zig:2106) |
 
 ## 6. 세팅 GUI — chrome 위젯 + 페이지 (Phase G)
 

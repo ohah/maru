@@ -75,7 +75,7 @@ const pick_sv_cols: u32 = 16; // 채도 0~100
 const pick_sv_rows: u32 = 8; // 명도 100~0(위→아래)
 const pick_swatch_w: u32 = 2; // 셀당 2칸(가시성)
 const pick_hue_cols: u32 = 16; // hue 0~360
-const pick_help = "←→ 채도  ↑↓ 명도  [ ] 색상  ⇧ 미세  # hex  Enter 확정  Esc 취소";
+const pick_help = "←→ 채도  ↑↓ 명도  [ ] 색상  ⇧ 미세  # hex  i 스포이드  Enter 확정  Esc 취소";
 // picker 콘텐츠 행: 제목(0) + SV 그리드(1..pick_sv_rows) + hue 스트립 + 미리보기 + 도움말.
 const pick_hue_row: u32 = 1 + pick_sv_rows;
 const pick_preview_row: u32 = pick_hue_row + 1;
@@ -185,6 +185,15 @@ pub const State = struct {
     pub fn pickerRgb(self: *const State) color_mod.Rgb {
         return color_mod.hsvToRgb(.{ .h = self.pick_h, .s = self.pick_s, .v = self.pick_v });
     }
+    /// 외부에서 고른 RGB(스포이드 NSColorSampler 결과·hex 등)를 picker 선택값으로 반영한다 — picking 중일 때만. platform이
+    /// provide_sampled_color에서 호출. editing(hex 인라인) 중이면 무시(편집 버퍼 우선). RGB→HSV는 양자화 근사.
+    pub fn setPickerRgb(self: *State, rgb: color_mod.Rgb) void {
+        if (!self.picking or self.editing) return;
+        const hsv = color_mod.rgbToHsv(rgb);
+        self.pick_h = hsv.h;
+        self.pick_s = hsv.s;
+        self.pick_v = hsv.v;
+    }
     /// 섹션 전환(좌측 네비 클릭) — 선택 섹션과 첫 필드로. platform이 새 섹션 필드 수를 setFieldCount로 다시 준다.
     pub fn selectSection(self: *State, i: usize) void {
         self.section = i;
@@ -280,7 +289,7 @@ pub const State = struct {
 /// handle/handlePointer가 돌려주는 intent. platform이 rows[selected] 기준으로 처리:
 ///   toggle=bool flip, slider_set=pending_ratio→값 매핑, adjust_left/right=slider 한 스텝, selection_changed=재렌더,
 ///   close=hide, consumed=소비만(모달 뒤로 안 샘). 값 종류 판정(toggle인지 slider인지)은 platform이 rows로 한다.
-pub const Action = enum { close, toggle, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, delete_row, color_picked, consumed };
+pub const Action = enum { close, toggle, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, delete_row, color_picked, eyedropper, consumed };
 
 const label_gap_cols: u32 = 2; // 라벨과 우측 위젯 사이 최소 간격(칸)
 
@@ -753,6 +762,7 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
                     state.pick_h = (state.pick_h + 1) % 360;
                     return .selection_changed;
                 }
+                if (k.codepoint == 'i') return .eyedropper; // 스포이드 — platform이 OS 화면 색 추출기(NSColorSampler)를 연다
                 return .consumed;
             },
             else => return .consumed,
@@ -1591,6 +1601,26 @@ test "settings HSV picker hex 인라인: # 진입·타이핑·Enter 파싱→h/s
     try std.testing.expect(!s.editing);
     try std.testing.expect(s.picking); // picker 유지(편집만 닫힘)
     try std.testing.expectEqual(before.r, s.pickerRgb().r); // 색 불변(취소)
+}
+
+test "settings HSV picker 스포이드: i→.eyedropper, setPickerRgb 반영 + picking·non-editing 가드 (picker 후속)" {
+    var s: State = .{};
+    s.openPicker(.{ .r = 0, .g = 0, .b = 0 }); // 검정 시드
+    // `i` → .eyedropper Action(platform이 NSColorSampler 연다).
+    try std.testing.expectEqual(Action.eyedropper, handle(.{ .key = .char, .codepoint = 'i' }, &s));
+    // setPickerRgb: picking·non-editing이면 반영(#ff0080 → pickerRgb 근사 r=0xff·b=0x80).
+    s.setPickerRgb(.{ .r = 0xff, .g = 0, .b = 0x80 });
+    try std.testing.expectEqual(@as(u8, 0xff), s.pickerRgb().r);
+    try std.testing.expectEqual(@as(u8, 0x80), s.pickerRgb().b);
+    // editing 중이면 무시(hex 편집 버퍼 우선).
+    _ = handle(.{ .key = .char, .codepoint = '#' }, &s); // editing=true
+    s.setPickerRgb(.{ .r = 0x10, .g = 0x20, .b = 0x30 });
+    try std.testing.expectEqual(@as(u8, 0xff), s.pickerRgb().r); // 안 바뀜(editing)
+    // picking 아니면 무시.
+    s.editing = false;
+    s.picking = false;
+    s.setPickerRgb(.{ .r = 0x10, .g = 0x20, .b = 0x30 });
+    try std.testing.expectEqual(@as(u8, 0xff), s.pickerRgb().r); // 안 바뀜(not picking)
 }
 
 test "settings 검색: '/'로 시작·char 쿼리·Backspace·↑↓ 나비·Enter 활성·Esc 종료 + 제목 렌더 (CS-4-4 검색)" {

@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 82u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 83u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -598,6 +598,12 @@ uint32_t maru_macos_app_session_take_file_pick_request(MaruAppHostSession *sessi
 /* take_file_pick_request가 1을 준 뒤 Swift가 NSOpenPanel에서 고른 파일의 절대경로를 넘긴다 — Zig가 window.background-image에
    setText + 라이브 반영 + dirty(영속). bytes/len 0(취소 등)이면 무동작. 지우기는 행 Backspace가 담당. v81. */
 int32_t maru_macos_app_session_provide_picked_file(MaruAppHostSession *session, const uint8_t *bytes, size_t len);
+/* HSV picker `i`(스포이드)로 화면 색 추출 요청이 대기 중이면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면
+   NSColorSampler(OS 화면 색 추출기)를 열고 고른 색을 provide_sampled_color로 되돌린다. take_bell과 같은 1회성. session null=0. v83. */
+uint32_t maru_macos_app_session_take_color_sample_request(MaruAppHostSession *session);
+/* take_color_sample_request가 1을 준 뒤 Swift NSColorSampler 콜백이 고른 화면 픽셀 RGB(각 0~255, u8로 truncate)를
+   넘긴다(비동기) — Zig가 picker 선택값(pick h/s/v)에 반영한다. picker가 닫혔으면 무시. v83. */
+int32_t maru_macos_app_session_provide_sampled_color(MaruAppHostSession *session, uint32_t r, uint32_t g, uint32_t b);
 /* view options(⚙) 사이드바 토글(show-branch/show-folder)이 바뀌어 config 반영이 필요하면 1(플래그 비움),
    없으면 0. Swift가 tick마다 호출해 1이면 serialize_sidebar_config 텍스트를 config 경로에 atomic write한다. */
 uint32_t maru_macos_app_session_take_sidebar_config_dirty(MaruAppHostSession *session);

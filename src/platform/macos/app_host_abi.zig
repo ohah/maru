@@ -642,6 +642,21 @@ pub export fn maru_macos_app_session_provide_picked_file(session: ?*AppSession, 
     return @intFromEnum(Status.ok);
 }
 
+// HSV picker `i`(스포이드)로 화면 색 추출 요청이 대기 중이면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면
+// NSColorSampler(OS 화면 색 추출기)를 열고 고른 색을 provide_sampled_color로 되돌린다. take_bell과 같은 1회성. session null=0. (v83)
+pub export fn maru_macos_app_session_take_color_sample_request(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeColorSampleRequest()) 1 else 0;
+}
+
+// take_color_sample_request가 1을 준 뒤, Swift NSColorSampler 콜백이 고른 화면 픽셀 RGB를 넘긴다(비동기) — Zig가 picker
+// 선택값(pick h/s/v)에 반영한다. r/g/b는 0~255(상위 비트는 무시 — u8로 truncate). picker가 닫혔으면 무시. (v83)
+pub export fn maru_macos_app_session_provide_sampled_color(session: ?*AppSession, r: u32, g: u32, b: u32) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    app_session.provideSampledColor(.{ .r = @truncate(r), .g = @truncate(g), .b = @truncate(b) });
+    return @intFromEnum(Status.ok);
+}
+
 // view options(⚙) 사이드바 토글이 바뀌어 config 파일 반영이 필요하면 1(플래그 비움), 없으면 0. Swift가 tick마다
 // 호출해 1이면 serialize_sidebar_config로 받은 텍스트를 config 경로에 atomic write한다(앱→config). session null=0.
 pub export fn maru_macos_app_session_take_sidebar_config_dirty(session: ?*AppSession) u32 {

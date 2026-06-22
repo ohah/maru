@@ -823,6 +823,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard maru_macos_app_session_metal_frame(appSession, &frame) == Self.statusOK else {
             return
         }
+        // 창 배경 투명도(window.opacity): opacity<1이면 layer·window를 비불투명으로 만들어 clear color의 낮은 alpha가
+        // 뒤(데스크톱/다른 창)를 비추게 하고, 1이면 불투명 유지(합성 비용·창 그림자 보존). 매 frame 멱등 — 값이 바뀔
+        // 때만 실제 set한다(reload config 런타임 반영). clear color alpha 자체는 renderer가 window_opacity_milli로 적용.
+        let opaqueWindow = frame.window_opacity_milli >= 1000
+        if metalLayer.isOpaque != opaqueWindow { metalLayer.isOpaque = opaqueWindow }
+        if let win = view.window, win.isOpaque != opaqueWindow {
+            win.isOpaque = opaqueWindow
+            win.backgroundColor = opaqueWindow ? .windowBackgroundColor : .clear
+            win.hasShadow = opaqueWindow // 투명 창은 그림자 끔(투명 영역 그림자가 어색)
+        }
         // 새 frame(generation 변경)일 때뿐 아니라, drawableSize/backing-scale 변경 등 surface가
         // 무효화돼 다시 칠해야 할 때(metalNeedsRedraw)도 그린다. generation만 보면 한가한 셸이
         // 리사이즈/디스플레이 전환 후 stale/blank로 남는다.
@@ -880,7 +890,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.live_image_ids,         // kitty graphics(K4c): 살아있는 이미지 id 집합(없는 텍스처 evict)
             frame.live_image_id_count,
             frame.terminal_bg,            // 화면 clear color(OSC 11 배경 set 또는 theme.background; 0=기본 clear)
-            frame.titlebar_strip_px       // 상단 타이틀바 띠 높이 — 접힘 펼치기 토글(◧)을 띠 안 세로 중앙(신호등 정렬)
+            frame.titlebar_strip_px,      // 상단 타이틀바 띠 높이 — 접힘 펼치기 토글(◧)을 띠 안 세로 중앙(신호등 정렬)
+            frame.window_opacity_milli    // 창 배경 투명도 ×1000 — clear color alpha(default 배경만 투명)
         )
         if drew {
             lastDrawnGeneration = frame.generation

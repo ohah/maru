@@ -6,8 +6,8 @@ PR 분해**를 단일 출처로 둔다. 실제 키·형식·검증은 항상 [�
 그리는 chrome 구조는 [Chrome 전략](chrome-strategy.md)이, 키바인딩 경계는 [키 입력과
 단축키](key-input-and-shortcuts.md)가 단일 출처다 — 여기서는 중복하지 않고 연결한다.
 
-> 상태(2026-06): **진행 중**. S0-1a·F1-3·F1-8·F1-9 머지(F1-7은 기존 구현). 진행 상황은 각 PR 표의 상태
-> 칸으로 동기화한다.
+> 상태(2026-06): **진행 중**. S0-1a·F1-1·F1-3·F1-8·F1-9 머지(F1-7은 기존 구현). 세팅 GUI(CS-4-0~6, config-gui.md)
+> 완료 후 미뤄둔 신규 기능(F1~F3)을 schema-first로 채우는 단계. 진행 상황은 각 PR 표의 상태 칸으로 동기화한다.
 >
 > **방향 전환(2026-06)**: config 계층을 **스키마-주도**로 옮긴다([config 스키마](config-schema.md)). 메타
 > 1급 필드 한 선언에서 parse·serialize·검증·문서·**GUI 위젯**이 파생되므로, 남은 스칼라 키(F1/F2 대부분)와
@@ -82,7 +82,7 @@ config 키 추가 + 기존 경로에 분기 한 줄. GUI 없이 config 파일로
 
 | PR | 기능 / 키 | 핵심 변경 | 근거(현황) |
 |---|---|---|---|
-| **F1-1** | 배경 투명도 `window.opacity` | `metalLayer.isOpaque=false` + 셀 배경 alpha 곱 | 셀 배경 이미 `0xAARRGGBB`, 셰이더 alpha 블렌딩 중(`maru_metal_renderer.m`) |
+| **F1-1** ✅ | 배경 투명도 `window.opacity` | schema f32 slider + `MetalFrame.window_opacity_milli`(ABI v70) → 렌더러가 **화면 clear color alpha**에 곱(default 배경만 투명, 명시 cell bg 불투명 — iTerm2/Ghostty 모델). Swift가 opacity<1이면 metal layer/NSWindow 비불투명 | ✅ 머지. schema 파싱/range·resolve·frame milli 단위 테스트 + 실기(크래시 없음). 셰이더·셀 불변(clear alpha만) |
 | **F1-2** | 폴백 폰트 `font.fallback` | `CTFontCopyDefaultCascadeListForLanguages` 명시 | per-cell CTLine이 이미 CoreText cascade 사용, FontIdentityRegistry가 face 분리 |
 | **F1-3** ✅ | bold-is-bright `theme.bold-is-bright` | `packForeground`에 `brightenIfBold`(bold+indexed 0~7→+8) | ✅ 머지. render-only, packForeground 순수 단위 테스트 |
 | **F1-4a** ✅ | 커서 색 `cursor.color`(칸)·`cursor.text`(반전 글자) | 테마 독립 opt-in. nullable이라 loader 수동 핸들러·serialize 수동 emit(palette 선례), `ResolvedCursor`에 색 추가 후 렌더가 `orelse` 테마 폴백 | ✅ 머지. 기존 동작(흰 커서) 보존. resolve/round-trip/parse 단위 테스트 |

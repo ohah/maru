@@ -98,7 +98,10 @@ bool maru_metal_renderer_draw(
     /* 상단 타이틀바 띠(신호등·헤더 아이콘 줄) 높이(px). 접힘 펼치기 토글(◧) 글리프를 이 띠 [0, strip] 안에
        세로 중앙 배치해 신호등과 정렬시키는 데만 쓴다. terminal_origin_x_px>0(펼침)이면 무관(헤더 아이콘은
        기존 0.3ch nudge). 0이면 띠 없음(0.3ch nudge 폴백). */
-    uint32_t titlebar_strip_px
+    uint32_t titlebar_strip_px,
+    /* 창 배경 투명도 × 1000(0~1000, 1000=불투명). 화면 clear color alpha에 이 값/1000을 곱한다 — default 배경
+       (빈 영역/기본 배경 A0 셀)만 투명, 명시적 배경색 셀은 불투명 유지. layer/창 비불투명은 host(Swift)가 별도로. */
+    uint32_t window_opacity_milli
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

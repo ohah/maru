@@ -21,6 +21,26 @@ pub fn displayCols(bytes: []const u8) u32 {
     return cols;
 }
 
+/// `bytes`를 표시 폭 `max_cols`칸 이내로 자른다(EAW 기준 — displayCols의 짝). 넘치면 끝에 `…`(1칸)를 붙여
+/// 잘렸음을 보인다(글자 예산=max_cols-1). 안 넘치면 원본을 그대로 돌려준다(복사 없음). 자를 때만 arena alloc.
+/// 코드포인트 경계로만 자르므로 UTF-8이 깨지지 않는다. 세팅 폼의 긴 값(폰트 패밀리 등)을 control 폭 안에 가두는 데 쓴다.
+pub fn truncateToCols(arena: std.mem.Allocator, bytes: []const u8, max_cols: u32) ![]const u8 {
+    if (displayCols(bytes) <= max_cols) return bytes;
+    if (max_cols == 0) return "";
+    const budget = max_cols - 1; // "…" 1칸 자리를 남긴다
+    const utf8 = std.unicode.Utf8View.init(bytes) catch return bytes; // 손상 UTF-8은 자르지 않음(원본)
+    var it = utf8.iterator();
+    var cols: u32 = 0;
+    var end: usize = 0;
+    while (it.nextCodepoint()) |cp| {
+        const w = @max(1, width.cellWidth(cp));
+        if (cols + w > budget) break;
+        cols += w;
+        end = it.i; // 이 코드포인트 끝(다음 시작) — 포함 경계
+    }
+    return std.fmt.allocPrint(arena, "{s}…", .{bytes[0..end]});
+}
+
 /// 검색어(query) + IME 조합(preedit) 입력 모델. **커밋과 조합은 독립** — `appendChar`는 preedit를 건드리지 않고,
 /// preedit는 `setPreedit`가 단일 관리한다(터미널 core와 같은 모델). 이주 전 두 컴포넌트가 `appendChar`에서 preedit를
 /// 비우다가 IME 멀티-문자 흐름(커밋 N + 조합 N+1)에서 다음 조합을 지워 "조합 안 보임" 버그를 냈다 — 그 모델을 여기

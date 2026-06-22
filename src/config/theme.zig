@@ -319,9 +319,10 @@ pub const InputConfig = struct {
     url_click_modifier: UrlClickModifier = .command,
     /// 타이핑(글자 입력) 중 마우스 커서를 숨기고, 마우스를 움직이면 다시 보인다. 기본 false(현행 — 안 숨김, opt-in).
     /// 베이스/결정: Ghostty `mouse-hide-while-typing`(기본 false)을 베이스로, "press + 텍스트 produce(utf8.len>0)"일
-    /// 때 숨기는 모델이다(references/ghostty/src/Surface.zig:2681 keyCallback). maru는 그 입력을 frame_loop의
-    /// `.terminal_input` + 글자키(.char) + 단축키 수식키(Ctrl/Cmd) 아님으로 근사한다 — 단축키(탭 전환 등)·화살표/기능키는
-    /// 안 숨긴다. 복원은 macOS `NSCursor.setHiddenUntilMouseMoves`가 다음 마우스 이동에서 자동으로 한다(별도 핸들러 불요).
+    /// 때 숨기는 모델이다(references/ghostty/src/Surface.zig:2681 keyCallback). maru는 그 입력을 **IME 확정 텍스트가
+    /// 터미널로 갈 때**(`routeCommittedText` — macOS NSTextInputClient가 평범한 글자 입력을 커밋하는 경로로, 키 인코딩
+    /// `handleKeyEvent`를 우회한다)로 잡는다. ASCII·한글·CJK가 모두 이 경로다. 단축키·화살표·기능키(`handleKeyEvent`로 감)·
+    /// find/palette 입력칸은 제외한다. 복원은 macOS `NSCursor.setHiddenUntilMouseMoves`가 다음 마우스 이동에서 자동.
     mouse_hide_while_typing: bool = false,
 
     pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing (필드명 dashed)

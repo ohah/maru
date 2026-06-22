@@ -18,12 +18,14 @@ cmux 같은 유연한 레이아웃:
   - 감지: PTY 포그라운드 프로세스명(`tcgetpgrp`+libproc `proc_name`)을 ≈0.5s마다 polling(`pollAgentKinds`/`classifyAgent`).
     comm이 인터프리터(node 등)면 `KERN_PROCARGS2`로 argv[1] 스크립트 basename을 꺼내 분류 — codex가 `#!/usr/bin/env node`
     스크립트라 comm="node"로 떠도 잡힌다(claude는 네이티브라 comm="claude"). 공개 sysctl API(ps·libproc와 동일), clean-room.
-  - 심볼·색(베이스/결정): 브랜드 전용 유니코드가 없어 근사 글리프 — claude=`✳`(U+2733, Anthropic 선버스트)·codex=`✻`
-    (U+273B, OpenAI 블로썸/6잎 꽃)로 **종류**를 구분한다(`agentSymbolCodepoint`). 아이콘은 카드 왼쪽 독립 gutter에
+  - 심볼·색(베이스/결정): 브랜드 전용 유니코드가 없어 근사 글리프 — claude=`✶`(U+2736 6각별, Anthropic 선버스트 근사)·
+    codex=`◆`(U+25C6 다이아)로 **종류**를 구분한다(`agentSymbolCodepoint`). 글리프는 **터미널 폰트(JetBrains Mono)가
+    보유한 것만** 고른다 — 미보유 코드포인트(예전 `✳` U+2733)는 CoreText fallback 폰트로 넘어가 한글 '정' 등으로 글리프가
+    어긋나 간헐 깨짐이 났다(근본 수정: 폰트가 가진 글리프만 쓰면 fallback 자체가 일어나지 않아 깨질 여지가 사라진다). 아이콘은 카드 왼쪽 독립 gutter에
     **2칸(width 2)**으로 또렷이 그린다(`icon_cols=3`; `.m` gscale 1.1× 보조 확대). **색은 종류**를 따른다 —
     claude=Anthropic 코랄 `#D9785C`, codex=OpenAI 청록 `#10A37F`(`term.agent_kind` 기준 단일 출처). **진행/완료**는
     색이 아니라 **펄스**(running일 때 `dimRgb` 밝기 변조)와 카드 **상태줄**(running=`● 진행중`, idle=`✓ {답변}`)이
-    구분한다. 근거: codex는 ⬢(육각)이 안 맞아 ✻(블로썸 근사)로 교체. 상태색(앰버/회색)이 어두운 사이드바 배경에서
+    구분한다. 근거: 종류 글리프는 폰트 미보유 시 fallback에서 깨지므로 보유 글리프(✶·◆)로 한정. 상태색(앰버/회색)이 어두운 사이드바 배경에서
     흐려 가독성이 나빴다 — 종류는 색, 상태는 펄스+상태줄로 분리해 둘 다 또렷하게 한다(브랜드색 복귀).
 - **탭마다 split(panel)** — 각 탭은 surface 1개가 아니라 가로/세로로 나눌 수 있는 surface 트리.
 - **드래그 재배치** — panel을 끌어 split을 재배열, 탭을 끌어 순서 변경.

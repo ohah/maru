@@ -803,14 +803,14 @@ test "buildSidebarDrawList agent icon: centered at col 0 independent of lines; t
     const names = [_][]const u8{"maru"};
     const branches = [_][]const u8{"\u{2387} main"};
     const paths = [_][]const u8{"~/dev/maru"};
-    const agents = [_]u21{0x2733}; // claude ✳
+    const agents = [_]u21{0x2736}; // claude ✶
     var dl = try buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &agents, 30, .default, null, null, null, .default);
     defer dl.deinit(allocator);
 
-    // 아이콘 ✳: 슬롯 세로 중앙(count=1, idx0) col 0·width 2 — 3줄 블록(count=3)과 무관한 독립 위치.
+    // 아이콘 ✶: 슬롯 세로 중앙(count=1, idx0) col 0·width 2 — 3줄 블록(count=3)과 무관한 독립 위치.
     var icon_centered = false;
     for (dl.cells) |c| {
-        if (c.codepoint == 0x2733) {
+        if (c.codepoint == 0x2736) {
             try std.testing.expectEqual(sidebarGlyphRow(0, 0, 1), c.row);
             try std.testing.expectEqual(@as(u16, 0), c.col);
             try std.testing.expect(c.width == 2); // 2칸 아이콘(또렷) — 회귀 방지

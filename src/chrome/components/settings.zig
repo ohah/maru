@@ -335,9 +335,11 @@ const Layout = struct {
     nav_cols: u32, // 좌측 네비 폭(칸)
     form_x: i32, // 폼 영역 좌단(px) = inner_x + (nav_cols + nav_gap_cols)*cw
     form_cols: u32, // 폼 영역 폭(칸) = inner_cols - nav_cols - nav_gap_cols
+    body_rows: u32, // 네비/폼 본문 행 수(FullHeight = maxVisible) — 활성 영역 세로 강조 바 높이·하단 힌트 행 위치에 쓴다
 };
 
 const title_rows: u32 = 2; // 제목(0) + 빈 줄(1)
+const hint_rows: u32 = 1; // 하단 힌트 1행("⇥ 섹션 ⇄ 설정" — Tab 영역 전환 안내). content_rows에 더해 박스 하단에 둔다.
 
 /// 한 화면에 보일 최대 필드 행 수 — 뷰포트 높이에서 제목·여백·여유를 뺀다. 행이 이보다 많으면 창을 스크롤한다
 /// (패널이 화면을 넘치지 않게). palette.max_visible과 같은 윈도잉 취지(여긴 뷰포트 적응형).
@@ -377,7 +379,7 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     // 섹션에서도 모달이 작아졌다 커졌다 하지 않고 화면 높이에 꽉 차게 한다(너비는 content_cols로 별도 고정 — #860).
     // 네비(섹션 수)가 mv보다 많을 일은 거의 없지만 안전하게 큰 쪽을 쓴다. win_len은 폼 스크롤 윈도로 그대로 유지.
     const body_rows = @max(sections.len, mv);
-    const content_rows = title_rows + @as(u32, @intCast(body_rows));
+    const content_rows = title_rows + @as(u32, @intCast(body_rows)) + hint_rows; // + 하단 힌트 1행
     const box = modal_box.layout(content_cols, content_rows, p, tk) orelse return null;
     const form_x = box.inner_x + @as(i32, @intCast((nav_cols + nav_gap_cols) * box.cw));
     const form_cols = box.inner_cols -| (nav_cols + nav_gap_cols);
@@ -386,7 +388,7 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     // 그 경우 레이아웃 불가로 보고 null(view/handlePointer가 그리지 않음 — 창을 넓히면 보임). modal_box가 폭 부족 시
     // 그리는 것과 같은 "안 되면 안 그림" 규율.
     if (form_cols <= ctrl_cols) return null;
-    return .{ .box = box, .ctrl_cols = ctrl_cols, .first_field_row = title_rows, .win_start = win_start, .win_len = win_len, .nav_cols = nav_cols, .form_x = form_x, .form_cols = form_cols };
+    return .{ .box = box, .ctrl_cols = ctrl_cols, .first_field_row = title_rows, .win_start = win_start, .win_len = win_len, .nav_cols = nav_cols, .form_x = form_x, .form_cols = form_cols, .body_rows = @intCast(body_rows) };
 }
 
 /// 보이는 폼 행 vi(0..win_len)의 control 열 rect(폼 영역 우측, ctrl_cols 폭, 행 높이). slider는 전체, toggle은 좌측정렬.
@@ -456,20 +458,17 @@ pub fn view(
         try modal_box.text(box, box.inner_x, 0, title, .surface_fg, arena, out);
     }
 
-    // 좌측 네비: 섹션 라벨(선택 섹션은 tab_active_bg 강조 + accent_bar 라벨). 라벨은 좌측 1칸 패딩.
+    // 좌측 네비: 섹션 라벨. inner_x 칸은 활성 영역 세로 바 자리로 비우고, 선택 강조(tab_active_bg)·라벨은 그 우측
+    // (inner_x+cw)부터 둔다. Tab 포커스가 폼에 있으면(!nav_focused) 비선택 섹션 라벨을 muted로 흐려, 지금 키 입력이
+    // 가는 영역이 폼임을 보인다(선택 섹션은 어느 섹션인지 알게 accent 유지).
+    const cw_i: i32 = @intCast(box.cw);
     for (sections, 0..) |label, i| {
         const row = l.first_field_row + @as(u32, @intCast(i));
         if (i == state.section) {
-            try modal_box.fillCells(box, box.inner_x, row, l.nav_cols, .tab_active_bg, arena, out);
+            try modal_box.fillCells(box, box.inner_x + cw_i, row, l.nav_cols -| 1, .tab_active_bg, arena, out);
         }
-        const role: tokens.ColorRole = if (i == state.section) .accent_bar else .surface_fg;
-        // 네비에 키보드 포커스(Tab) 중이면 선택 섹션 좌측에 ▸ 마커를 얹어 "지금 키 포커스가 좌측 메뉴"임을 보인다.
-        if (i == state.section and state.nav_focused) {
-            const marker = try arena.alloc(draw.Run, 1);
-            marker[0] = .{ .text = "▸" };
-            try out.append(arena, .{ .text = .{ .origin = .{ .x = box.inner_x, .y = modal_box.rowY(box, row) }, .runs = marker, .role = .accent_bar } });
-        }
-        try modal_box.text(box, box.inner_x + @as(i32, @intCast(box.cw)), row, label, role, arena, out);
+        const role: tokens.ColorRole = if (i == state.section) .accent_bar else if (!state.nav_focused) .muted_fg else .surface_fg;
+        try modal_box.text(box, box.inner_x + cw_i, row, label, role, arena, out);
     }
 
     // 우측 폼: 보이는 창 [win_start, win_start+win_len)만(스크롤). vi=화면 행, actual=섹션 내 전체 인덱스.
@@ -496,8 +495,8 @@ pub fn view(
             const hl_cols = if (quad_widget) l.form_cols -| row_right_cols else l.form_cols;
             try modal_box.fillCells(box, l.form_x, content_row, hl_cols, .tab_hover_bg, arena, out);
         }
-        // 비활성 행(프리셋 잠금 등)은 라벨도 muted_fg로 — 행 전체가 회색이라 잠긴 게 한눈에 보인다.
-        const label_role: tokens.ColorRole = if (r.disabled) .muted_fg else .surface_fg;
+        // 비활성 행(프리셋 잠금)이거나 Tab 포커스가 네비에 있을 때(nav_focused)는 라벨을 muted로 — 폼이 비활성 영역임을 흐림으로 보인다.
+        const label_role: tokens.ColorRole = if (r.disabled or state.nav_focused) .muted_fg else .surface_fg;
         // 라벨도 control/palette 열을 침범하지 않게 폼 라벨 영역 폭으로 truncate(고정 폭 안에 가둠 — rich quad 밖 삐짐 방지).
         const label_shown = overlay_input.truncateToCols(arena, r.label, l.form_cols -| row_right_cols -| label_gap_cols) catch r.label;
         try modal_box.text(box, l.form_x, content_row, label_shown, label_role, arena, out);
@@ -582,6 +581,16 @@ pub fn view(
             },
         }
     }
+
+    // 활성 영역(Tab 포커스) 좌단 세로 강조 바 — 섹션 모드는 네비 좌단(inner_x), 폼 모드는 폼 좌단 직전(form_x-cw).
+    // 지금 ↑↓·←→가 어느 영역에 작용하는지(섹션 이동 vs 값 조절)를 한눈에 보인다. 폼/네비 op 뒤에 둬 위 레이어로 얹는다.
+    const bar_x: i32 = if (state.nav_focused) box.inner_x else l.form_x - cw_i;
+    try out.append(arena, .{ .fill = .{ .rect = .{ .x = bar_x, .y = modal_box.rowY(box, l.first_field_row), .w = box.cw, .h = box.ch * l.body_rows }, .role = .accent_bar } });
+
+    // 하단 힌트: Tab으로 섹션(좌측)↔설정 폼(우측) 영역을 오간다는 안내. 본문 아래 한 줄에 muted로 둔다(활성 영역은
+    // 위 세로 바 + 비활성 dim으로 강조). 어느 영역이 활성이냐에 따라 ↑↓는 섹션 이동/행 이동으로 갈린다.
+    const hint_row = l.first_field_row + l.body_rows;
+    try modal_box.text(box, box.inner_x, hint_row, "⇥ 섹션 ⇄ 설정", .muted_fg, arena, out);
 }
 
 /// 선택 마커 ▾를 (x, row) 셀 위에 accent text로 얹는다(palette와 같은 이유 — Op.border는 tui lowering이 셀 전체를
@@ -1076,8 +1085,12 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
     // 행1: 라벨 + slider 트랙 text(muted) + 채움 text(accent).
     try std.testing.expectEqualStrings("Font size", out.items[7].text.runs[0].text);
     try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[8].text.role); // slider 트랙
-    const last = out.items[out.items.len - 1];
-    try std.testing.expectEqual(tokens.ColorRole.accent_bar, last.text.role); // slider 채움 █(앰버)
+    // slider 채움(accent) 뒤에 활성 영역 세로 바(fill) + 하단 힌트(text)가 본문 op 뒤로 붙는다.
+    const hint = out.items[out.items.len - 1];
+    try std.testing.expectEqualStrings("⇥ 섹션 ⇄ 설정", hint.text.runs[0].text); // 하단 힌트
+    try std.testing.expectEqual(tokens.ColorRole.muted_fg, hint.text.role);
+    try std.testing.expect(out.items[out.items.len - 2] == .fill); // 활성 영역 세로 바
+    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[out.items.len - 3].text.role); // slider 채움 █(앰버)
 }
 
 test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, slider 드래그=.slider_set+pending_ratio, 라벨=.selection_changed" {

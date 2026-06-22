@@ -310,6 +310,15 @@ pub const UrlClickModifier = enum {
     shift, // Shift (xterm 셀렉션 override와 겹칠 수 있음 — 사용자 선택)
 };
 
+/// 터미널 본문 우클릭(트래킹 앱이 마우스를 캡처하지 **않을** 때) 동작. paste=클립보드 즉시 붙여넣기(PuTTY/X11식),
+/// menu=복사/붙여넣기 컨텍스트 메뉴(macOS Terminal.app·iTerm2 관례), reporting=아무 동작 없음(현행 — 리포팅만).
+/// 트래킹 앱(DECSET 1000~1003)이 켜져 있으면 어느 값이든 마우스 리포팅이 우선한다(이 설정은 비-리포팅 폴백).
+pub const RightClick = enum {
+    paste,
+    menu,
+    reporting,
+};
+
 /// EAW Ambiguous 문자(동그란 번호 ① 등)를 한 칸으로 볼지(narrow) 두 칸으로 볼지(wide).
 /// **기본 narrow** — UAX#11 §5 권고("문맥 불명 시 narrow") + Ghostty·xterm.js와 같아 1칸 가정 프로그램
 /// (셸 readline·대부분 TUI)과 정렬·커서가 안 깨진다. wide는 CJK 로캘처럼 그 문자를 2칸으로 가정하는 환경,
@@ -351,14 +360,18 @@ pub const InputConfig = struct {
     /// Swift keyDown이 이 값으로 Option-단독 키를 입력기 경로(조합)로 보낼지(meta 인코딩 우회) 정하고, encodeKey는
     /// EncodeOptions.option_as_meta로 ESC-prefix 여부를 정한다(Cmd/Ctrl+Option 같은 우회 키에 적용).
     option_as_meta: bool = true,
+    /// 터미널 본문 우클릭 동작(트래킹 앱 비활성 시). 기본 paste(우클릭=클립보드 붙여넣기, PuTTY/X11식 — 사용자 결정).
+    /// 트래킹 앱이 마우스를 캡처 중이면 이 값과 무관하게 리포팅이 우선한다(RightClick 주석). [[right-click]]
+    right_click: RightClick = .paste,
 
-    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta (필드명 dashed)
+    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta / input.right-click (필드명 dashed)
         .page_keys = Meta{ .doc = "메인 화면 PageUp/Down", .widget = .dropdown, .section = .input },
         .shift_enter = Meta{ .doc = "Shift+Enter 인코딩", .widget = .dropdown, .section = .input },
         .ime_enter = Meta{ .doc = "IME 조합 중 Enter", .widget = .dropdown, .section = .input },
         .url_click_modifier = Meta{ .doc = "URL 클릭 수식키", .widget = .dropdown, .section = .input },
         .mouse_hide_while_typing = Meta{ .doc = "타이핑 중 마우스 숨김", .widget = .toggle, .section = .input },
         .option_as_meta = Meta{ .doc = "Option을 Meta(Alt)로", .widget = .toggle, .section = .input },
+        .right_click = Meta{ .doc = "터미널 우클릭 동작", .widget = .dropdown, .section = .input },
     };
 };
 

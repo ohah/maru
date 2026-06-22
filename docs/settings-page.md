@@ -6,7 +6,7 @@ PR 분해**를 단일 출처로 둔다. 실제 키·형식·검증은 항상 [�
 그리는 chrome 구조는 [Chrome 전략](chrome-strategy.md)이, 키바인딩 경계는 [키 입력과
 단축키](key-input-and-shortcuts.md)가 단일 출처다 — 여기서는 중복하지 않고 연결한다.
 
-> 상태(2026-06): **진행 중**. S0-1a·F1-1·F1-2·F1-3·F1-4b(blink-interval-ms·unfocused)·F1-5·F1-6·F1-8·F1-9·F1-10(multiplier)·F2-2(option-as-meta)·F2-7(unfocused-dim) 머지(F1-7·F1-10 on-output은 기존 구현/표준). 세팅 GUI
+> 상태(2026-06): **진행 중**. S0-1a·F1-1·F1-2·F1-3·F1-4b(blink-interval-ms·unfocused)·F1-5·F1-6·F1-8·F1-9·F1-10(multiplier)·F2-2(option-as-meta)·F2-5(right-click)·F2-7(unfocused-dim) 머지(F1-7·F1-10 on-output은 기존 구현/표준). 세팅 GUI
 > (CS-4-0~6, config-gui.md) 완료 후 미뤄둔 신규 기능(F1~F3)을 schema-first로 채우는 단계. 가벼운(순수 Zig·ABI 무변경)
 > 항목부터 순차 진행. 진행 상황은 각 PR 표의 상태 칸으로 동기화한다.
 >
@@ -105,7 +105,7 @@ config 키 추가 + 기존 경로에 분기 한 줄. GUI 없이 config 파일로
 | **F2-2** ✅ | Option=Meta 토글 `input.option-as-meta` | bool(기본 true=현행 항상 meta). `EncodeOptions.option_as_meta`로 encodeKey ESC-prefix 게이트 + AppSession 세션 캐시(reload 갱신) + frame_loop/host.handleKeyEvent에 인자 전달. **Swift keyDown**이 ABI `option_as_meta`(v73 getter)를 읽어 false면 Option-단독 키를 입력기 조합 경로(macOS 특수문자 ∫·´)로, Cmd/Ctrl 동반만 우회 | ✅ 머지. input.zig(false→ESC 없음)·schema 파싱 단위 테스트, ABI v73(순수 read getter). 좌/우 Option 구분은 후속(device-independent `.option`). Ghostty `macos-option-as-alt` 베이스, 기본은 maru "회귀 없음" 선례 따라 true |
 | **F2-3** | Bold/Italic family `font.family-bold`/`family-italic` | style_flags로 face 쿼리(없으면 synthetic) | 현재 synthetic bold만(`coretext_smoke.m`) |
 | **F2-4** | 시각 벨 + Dock 배지 `bell.visual`/`bell.dock-badge` | 프레임 flash overlay + `dockTile.badgeLabel` | audible만 구현(`bell.audible`) |
-| **F2-5** | 우클릭 동작 `input.right-click` (paste\|menu\|reporting) | reporting off일 때 분기 | 현재 reporting만 |
+| **F2-5** ✅ | 우클릭 동작 `input.right-click` (paste\|menu\|reporting) | enum(기본 **paste**=사용자 결정). 터미널 본문 우클릭에서 `core.mouse_tracking != .none`이면 리포팅 우선(현행 fall-through), 아니면 분기: paste→`pending_clipboard_action=.paste`, menu→`terminal_context_menu` 컨텍스트 메뉴(복사/붙여넣기), reporting→무동작. OS 클립보드는 **take_clipboard_action(ABI v74, take_bell식 1회성)**로 Swift가 copy/paste 실행 — "언제"는 Zig, "실행"은 OS. 사이드바/탭 우클릭은 그대로 Rename/Pin | ✅ 머지. schema enum + 파싱 단위 테스트, ABI v74. 기본 paste는 현행(reporting) 변경이라 사용자 결정 기록. menu는 기존 context_menu 인프라 재사용(terminal_context_menu 플래그) |
 | **F2-6** | OSC52 read `osc52.read` (allow\|deny) | read 요청 파싱 + clipboard read ABI 신규 | write만 구현(`terminal/core.zig`) |
 | **F2-7** ✅ | 비활성 split 디밍 `window.unfocused-dim` | f32(0~1) 최상위 키. **셰이더/ABI 불변** — metal_frame `packForeground`/`packBackground`가 최종 해석 색을 pane 배경 쪽으로 `dim_milli`만큼 per-cell 보간(`dimToward`). app은 비활성 pane `CellColors.dim_milli`에만 세움(`inactive_colors` 한 곳) → 활성 pane(CoreTextFrameBuilder, dim_milli=0)은 풀 밝기. SGR/truecolor 포함 모든 셀 일률 적용, default 배경(A=0)은 투명 유지 | ✅ 머지. 당초 "셀 focused 플래그+셰이더"보다 얕게(색공간 CPU 보간) — maru는 색을 CPU에서 풀어 NativeMetalCell에 싣고 per-pane compositor opacity가 없어 셰이더 변경 불필요. metal_frame/schema 단위 테스트 + `MARU_FORCE_SPLIT` 헤드리스 스크린샷 self-verify. 기본 0.0(opt-in, 회귀 없음). Ghostty `unfocused-split-opacity` 베이스 |
 | **F2-8** | word separators `input.word-separators` | core `wordBoundsAt` 수정 + ABI 전달 | 현재 비공백 run 고정(`terminal/core.zig`) |

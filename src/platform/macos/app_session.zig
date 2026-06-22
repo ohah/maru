@@ -3109,8 +3109,8 @@ pub const AppSession = struct {
         return buf[0..n];
     }
 
-    /// confirm을 **제외한** 다른 오버레이(notice/find/palette/context_menu)와 그 platform 부수상태를 닫는다 — 새 모달을
-    /// 열기 전 단일-오버레이 불변식(collectDraws·inputFocus가 한 번에 하나 가정)을 한 곳에서 강제한다. confirm/보류
+    /// confirm을 **제외한** 다른 오버레이(notice/find/palette/context_menu/settings)와 그 platform 부수상태를 닫는다 — 새
+    /// 모달을 열기 전 단일-오버레이 불변식(collectDraws·inputFocus가 한 번에 하나 가정)을 한 곳에서 강제한다. confirm/보류
     /// 닫기를 건드리지 않으므로, requestClose가 pending_close를 세운 뒤 showConfirm을 불러도 보류가 보존된다.
     fn dismissMessageOverlays(self: *AppSession) void {
         self.chrome_host.notice.dismiss();
@@ -3121,6 +3121,10 @@ pub const AppSession = struct {
         self.context_menu_target = null;
         self.view_options_menu = false;
         self.terminal_context_menu = false;
+        // 세팅 모달도 닫는다 — confirm/notice가 settings와 동시에 열리면 buildChromeOverlayFrame이 둘을 한 오버레이
+        // 그리드(union bbox)에 painter-order로 raster해 텍스트가 겹쳐 보였다(z-order 겹침). settings를 단일-오버레이
+        // 불변식에 포함해 한 번에 하나만 뜨게 한다. toggleSettings는 이 경로를 거치지 않아 열기엔 영향 없음.
+        self.chrome_host.settings.hide();
     }
 
     /// 확인 모달을 연다(공통 경로). 메시지는 세션 소유 버퍼로 복사(copyOverlayMessage)하고 다른 오버레이를 닫아 배타성을
@@ -9282,7 +9286,7 @@ pub const AppSession = struct {
         if (sidebar_cols == 0) return error.NoSidebar;
 
         // 탭 카드를 소유 버퍼로 모은다(buildSidebarDrawList가 코드포인트로 디코드): names=이름줄(📌 포함, 번호 없음),
-        // branch_lines=⎇ 브랜치줄, path_lines=경로줄, status_lines=상태줄(빈 보조줄은 생략 → 1~4줄). agents=에이전트
+        // branch_lines=├ 브랜치줄, path_lines=경로줄, status_lines=상태줄(빈 보조줄은 생략 → 1~4줄). agents=에이전트
         // 아이콘 코드포인트(0=없음) — 이름과 분리해 슬롯 세로 중앙에 독립 배치(buildSidebarDrawList).
         var names: std.ArrayList([]const u8) = .empty;
         defer {
@@ -9332,7 +9336,7 @@ pub const AppSession = struct {
                 const branch = self.termGitBranch(term); // cwd 변경 시에만 .git/HEAD 재읽기(캐시) — repo 판정에도 씀
                 const show_branch = self.loaded_config.config.sidebar.show_branch;
                 const show_folder = self.loaded_config.config.sidebar.show_folder;
-                try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "\u{2387} {s}", .{b}) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
+                try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "\u{251C} {s}", .{b}) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
                 try path_lines.append(self.allocator, if (show_folder and branch != null) try sidebarCwdPath(self.allocator, term) else try self.allocator.dupe(u8, ""));
                 try status_lines.append(self.allocator, try self.agentStatusLine(term));
             }
@@ -10924,7 +10928,7 @@ test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레�
     // 사이드바 텍스트 전부 사라짐). 시프트 후 size.cols를 full_cols로 넓혀 수용하는지 고정 — 실 앱에서 못 봤던 버그.
     {
         const names = [_][]const u8{"\u{2733} maru"};
-        const branches = [_][]const u8{"\u{2387} main"};
+        const branches = [_][]const u8{"\u{251C} main"};
         const paths = [_][]const u8{"~/documents/workspace/maru"}; // 길어 좁은 폭을 꽉 채움 → 시프트 시 overflow
         const muted: terminal.Color = .{ .rgb = session.appearance.theme.sidebar_foreground };
         const sidebar_cols: u16 = 12;

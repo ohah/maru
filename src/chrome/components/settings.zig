@@ -31,6 +31,9 @@ pub const layer = modal_box.layer;
 pub const FieldRow = struct {
     label: []const u8, // 행 라벨(meta.doc 또는 키)
     kind: Kind,
+    // platform이 주입하는 비활성 표식 — 회색(muted_fg)으로 그리고 입력은 platform이 차단/전환한다(예: 테마 프리셋이
+    // 활성이면 색·팔레트 행을 잠근다). 값은 config 비소유 — 매 프레임 platform이 판정해 주입(palette 선례와 같은 규율).
+    disabled: bool = false,
 
     pub const Kind = union(enum) {
         toggle: bool, // 현재 on/off
@@ -457,7 +460,9 @@ pub fn view(
         if (actual == state.selected) {
             try modal_box.fillCells(box, l.form_x, content_row, l.form_cols, .tab_hover_bg, arena, out);
         }
-        try modal_box.text(box, l.form_x, content_row, r.label, .surface_fg, arena, out);
+        // 비활성 행(프리셋 잠금 등)은 라벨도 muted_fg로 — 행 전체가 회색이라 잠긴 게 한눈에 보인다.
+        const label_role: tokens.ColorRole = if (r.disabled) .muted_fg else .surface_fg;
+        try modal_box.text(box, l.form_x, content_row, r.label, label_role, arena, out);
         const ctrl = fieldControlRect(l, vi);
         switch (r.kind) {
             .toggle => |v| {
@@ -486,7 +491,7 @@ pub fn view(
                 // 스와치(literal RGB) + hex. 편집 중인 선택 행이면 hex 대신 편집 버퍼 + caret(hexX 뒤). text 위젯과 동형.
                 const editing_this = state.editing and actual == state.selected;
                 const shown: []const u8 = if (editing_this) state.editText() else c.hex;
-                const text_role: tokens.ColorRole = if (editing_this) .accent_bar else .surface_fg;
+                const text_role: tokens.ColorRole = if (editing_this) .accent_bar else if (r.disabled) .muted_fg else .surface_fg;
                 try color.view(ctrl, c.rgb, shown, text_role, box.cw, arena, out);
                 if (editing_this) {
                     const caret_x = color.hexX(ctrl, box.cw) + @as(i32, @intCast(overlay_input.displayCols(shown) * box.cw));
@@ -514,7 +519,7 @@ pub fn view(
                 // 칸인지 항상 분명히 보여준다(편집 중에도). 편집 중이면 hex 자리는 입력 버퍼, caret이 그 끝에 붙는다.
                 const body: []const u8 = if (editing_this) state.editText() else g.cells[sel].hex;
                 const shown = try std.fmt.allocPrint(arena, "{d}  {s}", .{ sel, body });
-                const text_role: tokens.ColorRole = if (editing_this) .accent_bar else .surface_fg;
+                const text_role: tokens.ColorRole = if (editing_this) .accent_bar else if (r.disabled) .muted_fg else .surface_fg;
                 const hex_x = paletteHexX(grid, box.cw);
                 const runs = try arena.alloc(draw.Run, 1);
                 runs[0] = .{ .text = shown };
@@ -832,15 +837,22 @@ pub fn handlePointer(
                 },
                 .dropdown => return if (dropdown.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 클릭 → 변형 순환(.toggle=활성)
                 .text => return if (ev.x_px >= @as(f64, @floatFromInt(ctrl.x))) .toggle else .selection_changed, // control 영역 클릭 → 인라인 편집(.toggle=활성), 라벨은 선택만
-                .color => |c| switch (color.zoneAt(ctrl, box.cw, ev.x_px, ev.y_px)) {
-                    .swatch => return .toggle, // 스와치 클릭 → 프리셋 순환(.toggle=활성, platform이 cycleColor)
-                    .hex => { // hex 클릭 → 인라인 편집(현재 hex 시드 — 컴포넌트가 rows 값을 가짐)
-                        state.enterEdit(c.hex);
-                        return .selection_changed;
-                    },
-                    .outside => return .selection_changed,
+                .color => |c| {
+                    // 비활성(프리셋 잠금)이면 swatch/hex 어디를 눌러도 인라인 편집을 직접 시작하지 않고 .toggle을 올린다 —
+                    // platform이 "사용자 지정"으로 전환한 뒤 picker를 연다(클릭 시 자동 전환 후 편집).
+                    if (r.disabled) return .toggle;
+                    switch (color.zoneAt(ctrl, box.cw, ev.x_px, ev.y_px)) {
+                        .swatch => return .toggle, // 스와치 클릭 → 프리셋 순환(.toggle=활성, platform이 cycleColor)
+                        .hex => { // hex 클릭 → 인라인 편집(현재 hex 시드 — 컴포넌트가 rows 값을 가짐)
+                            state.enterEdit(c.hex);
+                            return .selection_changed;
+                        },
+                        .outside => return .selection_changed,
+                    }
                 },
                 .palette_grid => |g| {
+                    // 비활성(프리셋 잠금)이면 클릭을 .toggle로 — platform이 사용자 지정 전환 후 편집(color 잠금과 동형).
+                    if (r.disabled) return .toggle;
                     // 스와치 줄: 어느 칸인지 hit-test → grid_cell 선택. hex 영역 클릭 → 선택 셀 인라인 편집(color hex 클릭과 동형).
                     const grid = paletteGridRect(l, vi);
                     const hex_x: f64 = @floatFromInt(paletteHexX(grid, box.cw));

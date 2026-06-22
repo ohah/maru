@@ -68,9 +68,9 @@ pub const Action = union(enum) {
     // installCli로 넘겨 GUI 바이너리의 형제 `maru` CLI를 symlink한다(sudo 불요 user-level, 결과는 notice).
     // **카탈로그에 넣어 커맨드 팝업(Cmd+Shift+P)에 노출** — 기본 키바인딩은 없다(발견 경로=팝업). 단일 출처: cli/install.zig.
     install_cli,
-    // **모든 설정을 내장 기본값으로** 초기화한다(통합 리셋 — 메뉴 "Reset to Defaults"(런타임 줌/여백만)와 달리 config
-    // 전체). dispatchAppAction이 resetAllSettings로 넘겨 loaded_config.config=기본값으로 재적용 + **config 파일 삭제**한다
-    // (부분 write-back이 아닌 삭제라 비-schema 키·주석까지 전부 기본값). 커맨드 팝업에 노출, 기본 키바인딩 없음. 사용자 요청.
+    // **모든 설정을 내장 기본값으로** 초기화한다(통합 리셋). 메뉴 "Reset to Defaults"(ABI)와 이 팝업 액션 둘 다
+    // requestResetAll로 확인 모달을 연 뒤, 확정 시 resetAllSettings가 loaded_config.config=기본값 재적용 + **config 파일
+    // 덮어쓰기**(삭제 아님 — 파일 보존; 전체 덮어쓰기라 비-schema 키·주석까지 기본값). 커맨드 팝업에 노출, 기본 키바인딩 없음.
     reset_settings,
     // 런타임 폰트 크기를 절대값(pt)으로 지정한다. config 바인딩 전용(`set_font_size:18`처럼) — 절대값이라
     // 메뉴/팝업엔 안 넣는다(어느 크기인지 고정 못 함). dispatchAppAction이 setFontSize로 넘겨 [6,72]pt로 클램프.

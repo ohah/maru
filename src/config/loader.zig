@@ -630,6 +630,24 @@ pub fn removeKeybindLines(allocator: std.mem.Allocator, original: []const u8, ac
     return out.toOwnedSlice(allocator);
 }
 
+/// `keybind = <chord> = unbind` 지시어 줄을 추가한다(빌트인 단축키 죽이기 — chord를 ignored로). updateKeybindLines는
+/// action 기준 교체라 rhs가 모두 `unbind`인 줄들을 한데 collapse하므로 못 쓴다(서로 다른 chord를 unbind). 그래서 단순
+/// append하되 **동일 줄이 이미 있으면 스킵**(중복 누적 방지). chord는 KeyChord.toConfigString 결과("Cmd+T"). 반환 owned.
+pub fn appendKeybindUnbinds(allocator: std.mem.Allocator, original: []const u8, chords: []const []const u8) LoadError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, original);
+    for (chords) |chord| {
+        var buf: [96]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "keybind = {s} = unbind", .{chord}) catch continue;
+        if (std.mem.indexOf(u8, out.items, line) != null) continue; // 이미 있음
+        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append(allocator, '\n');
+        try out.appendSlice(allocator, line);
+        try out.append(allocator, '\n');
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// 빈 기본 결과(파일 없음/HOME 없음 등). config 텍스트를 안 읽었으므로 arena도 비어 있다.
 fn emptyDefault(allocator: std.mem.Allocator) Parsed {
     return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .unbinds = &.{}, .terminal_bindings = &.{}, .global_bindings = &.{}, .diagnostics = &.{} };

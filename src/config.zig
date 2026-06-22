@@ -47,6 +47,7 @@ pub const updateKeybindLines = loader.updateKeybindLines; // keybind recorder wr
 pub const KeybindRebind = loader.KeybindRebind;
 pub const removeConfigLines = loader.removeConfigLines; // 키 줄 삭제(env 변수 삭제 등)
 pub const removeKeybindLines = loader.removeKeybindLines; // keybind 줄 action 기준 삭제(unbind)
+pub const appendKeybindUnbinds = loader.appendKeybindUnbinds; // keybind = chord = unbind 지시어(빌트인 죽이기)
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

@@ -429,11 +429,15 @@ pub fn view(
                     const sw = paletteSwatchRect(grid, ci, box.cw, box.ch);
                     try out.append(arena, .{ .swatch = .{ .rect = sw, .rgb = g.cells[ci].rgb } });
                 }
-                // 선택 표식: 셀 위에 Op.border/fill을 얹으면 tui lowering(paintRectBg)이 1행 높이라 셀 전체를 그 색으로
-                // 칠해 스와치 색을 덮는다. 그래서 그리드 위에는 안 그리고, 우측 "N  #hex" 텍스트의 인덱스가 어느 칸인지
-                // 보여준다(색 무관). 온-그리드 마커(예: reserved 밑줄 프리미티브)는 후속(config-gui §6.5 한계).
-                const editing_this = state.editing and actual == state.selected;
+                // 선택 표식: 셀 위에 Op.border/fill을 얹으면 tui lowering(paintRectBg)이 1행 높이라 셀 전체를 그 색으로 칠해
+                // 스와치 색을 덮는다. 그래서 **마커 글리프 ▾**를 선택 스와치 위에 text 레이어로 얹는다 — 글리프라 셀 bg(스와치
+                // 색)는 거의 안 가리고 어느 칸인지 보여준다(우측 "N  #hex" 인덱스 텍스트와 함께). accent_bar 색.
                 const sel = @min(g.selected, palette_count - 1);
+                const sel_sw = paletteSwatchRect(grid, sel, box.cw, box.ch);
+                const marker = try arena.alloc(draw.Run, 1);
+                marker[0] = .{ .text = "▾" };
+                try out.append(arena, .{ .text = .{ .origin = .{ .x = sel_sw.x, .y = sel_sw.y }, .runs = marker, .role = .accent_bar } });
+                const editing_this = state.editing and actual == state.selected;
                 // "N  #rrggbb"(선택 ANSI 인덱스 + hex). 셀 색이 accent와 비슷하면 테두리가 묻히므로 인덱스 텍스트로 어느
                 // 칸인지 항상 분명히 보여준다(편집 중에도). 편집 중이면 hex 자리는 입력 버퍼, caret이 그 끝에 붙는다.
                 const body: []const u8 = if (editing_this) state.editText() else g.cells[sel].hex;

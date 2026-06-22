@@ -1980,6 +1980,18 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 사이드바 최소 폭(pt) — 헤더 아이콘 줄(좌측 네이티브 신호등 ~72pt + 우측 ◧/⚙/+ 아이콘, sidebar.zig headerHit)이
+    /// 겹치지 않는 하한. 아이콘은 cell 폭에 비례하므로 고정 sidebar_min_pt(120)로는 큰 폰트에서 신호등과 겹친다 — 신호등
+    /// 클리어런스 + 10칸(아이콘 9 + 여유 1, headerHit의 cols<10 가드도 만족)을 px로 잡아 pt 환산한 값과 sidebar_min_pt 중
+    /// 큰 쪽, **단 sidebar_max_pt를 넘지 않게 cap**(clamp 하한이 상한을 넘으면 std.math.clamp가 assert로 패닉 — 거대 폰트에선
+    /// max 우선). 폭을 정하는 **모든 경로**(드래그 setSidebarWidthPx·메트릭 변경 refreshCellMetrics)가 공유하는 단일 출처라
+    /// 어느 경로로도 겹침이 새지 않는다(드래그만 막던 갭 제거).
+    fn sidebarMinPt(self: *const AppSession) u32 {
+        if (self.scale_milli == 0) return sidebar_min_pt;
+        const header_min_px = ptToPx(traffic_light_clearance_pt, self.scale_milli) + 10 * self.cell_width_px;
+        return @min(@max(sidebar_min_pt, header_min_px * 1000 / self.scale_milli), sidebar_max_pt);
+    }
+
     /// 사이드바 우측 경계 드래그(kind 2) — 폭을 x_px(backing, 경계가 갈 위치)로 잡고 [sidebar_min_pt,
     /// sidebar_max_pt] pt로 clamp한다. pt를 권위 있게 저장(DPI 변경에도 유지), backing px·grid는 거기서 파생.
     /// 사이드바 폭이 모든 탭의 터미널 폭을 바꾸므로 전 탭 panel을 새 grid로 resize하고 활성 rect·사이드바를
@@ -1988,13 +2000,8 @@ pub const AppSession = struct {
         if (self.scale_milli == 0 or !std.math.isFinite(x_px)) return;
         const clamped_x = if (x_px < 0) 0 else @min(x_px, @as(f64, @floatFromInt(std.math.maxInt(u32))));
         const px: u32 = @intFromFloat(clamped_x);
-        // 헤더 아이콘 줄(좌측 네이티브 신호등 ~72pt + 우측 ◧/⚙/+ 아이콘 9칸, sidebar.zig headerHit)이 겹치지 않는 최소
-        // 폭. 아이콘은 cell 폭에 비례하므로 고정 sidebar_min_pt(120)로는 큰 폰트에서 신호등과 겹친다 — 신호등 클리어런스 +
-        // 10칸(아이콘 9 + 여유 1, headerHit의 cols<10 가드도 만족)을 px로 잡아 pt로 환산한 값과 sidebar_min_pt 중 큰 쪽을
-        // 하한으로 쓴다(cell_width_px=0인 초기 프레임이면 헤더 항이 0이라 sidebar_min_pt가 이긴다).
-        const header_min_px = ptToPx(traffic_light_clearance_pt, self.scale_milli) + 10 * self.cell_width_px;
-        const eff_min_pt = @max(sidebar_min_pt, header_min_px * 1000 / self.scale_milli);
-        const pt: u32 = std.math.clamp(px * 1000 / self.scale_milli, eff_min_pt, sidebar_max_pt);
+        // 헤더 아이콘이 겹치지 않는 동적 하한(sidebarMinPt — 신호등 + 아이콘 칸, max로 cap)으로 clamp.
+        const pt: u32 = std.math.clamp(px * 1000 / self.scale_milli, self.sidebarMinPt(), sidebar_max_pt);
         if (pt == self.sidebar_width_pt) return;
         self.sidebar_width_pt = pt;
         self.sidebar_width_px = ptToPx(pt, self.scale_milli);
@@ -4660,6 +4667,10 @@ pub const AppSession = struct {
         self.cell_height_px = spaced.height_px;
         // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처). 폭은 현재
         // 논리 폭(sidebar_width_pt — 사용자 드래그로 바뀔 수 있음)에서 파생하므로 DPI 변경에도 유지된다.
+        // **폰트/DPI가 바뀌어 cell 폭이 커지면 헤더 아이콘 하한(sidebarMinPt)이 올라가므로**, 저장된 폭을 그 하한 이상으로
+        // 끌어올린다(드래그 경로뿐 아니라 메트릭 변경 경로도 겹침 방지 — 단일 출처). 기본값 180pt가 하한 미만이 되는 큰-폰트
+        // 첫 실행도 여기서 보정된다. cap(sidebar_max_pt)도 sidebarMinPt가 보장.
+        self.sidebar_width_pt = std.math.clamp(self.sidebar_width_pt, self.sidebarMinPt(), sidebar_max_pt);
         // minimal 세션(quick terminal)·접힘(사용자 토글)이면 사이드바 폭 0 고정(터미널이 전폭). 폭(pt)은 보존돼 펼치면 복원.
         self.sidebar_width_px = if (self.chrome_minimal or self.sidebar_collapsed) 0 else ptToPx(self.sidebar_width_pt, self.scale_milli);
         // window padding도 같은 단일 출처(논리 pt × 분수 scale)로 backing px 환산 — DPI 변경에도 유지된다.
@@ -14826,11 +14837,16 @@ test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, c
     session.setSidebarWidthPx(1_000_000);
     try std.testing.expectEqual(sidebar_max_pt, session.sidebar_width_pt);
     session.setSidebarWidthPx(0);
-    // 좁게 → 헤더 아이콘(신호등 + ◧/⚙/+ 9칸)이 겹치지 않는 동적 최소로 clamp. 고정 sidebar_min_pt 이상.
-    const header_min_px = ptToPx(traffic_light_clearance_pt, session.scale_milli) + 10 * session.cell_width_px;
-    const eff_min = @max(sidebar_min_pt, header_min_px * 1000 / session.scale_milli);
-    try std.testing.expectEqual(eff_min, session.sidebar_width_pt);
-    try std.testing.expect(session.sidebar_width_pt >= sidebar_min_pt);
+    // 좁게 → 헤더 아이콘(신호등 + ◧/⚙/+)이 겹치지 않는 동적 최소(sidebarMinPt)로 clamp. 독립 검증: [sidebar_min_pt, max] 안.
+    try std.testing.expectEqual(session.sidebarMinPt(), session.sidebar_width_pt);
+    try std.testing.expect(session.sidebar_width_pt >= sidebar_min_pt and session.sidebar_width_pt <= sidebar_max_pt);
+    // cap: cell 폭이 거대해 헤더 하한이 max를 넘어도 pt는 sidebar_max_pt를 안 넘는다(clamp lower>upper assert 패닉 방지 —
+    // code-review). 고정 식과 무관한 독립 oracle(상한 == max).
+    const saved_cw = session.cell_width_px;
+    session.cell_width_px = 100_000; // 비현실적으로 큰 cell → 헤더 하한 ≫ max
+    session.setSidebarWidthPx(0);
+    try std.testing.expectEqual(sidebar_max_pt, session.sidebar_width_pt);
+    session.cell_width_px = saved_cw;
     _ = try session.tick(); // 폭 변경 후 다음 tick 크래시 없음
 }
 

@@ -7912,6 +7912,33 @@ pub const AppSession = struct {
     /// chord로, 없으면 추가 — resolver가 매 키 이벤트마다 이 슬라이스를 읽으므로 즉시 반영), 카탈로그 재빌드, write-back
     /// 예약(updateKeybindLines가 `keybind = chord = action` 줄로 영속). 옛 슬라이스는 미참조로 남아 reload/deinit에 해제.
     /// 한계(v1): 옛 chord가 빌트인이면 그 chord도 계속 액션을 발동한다(새 chord를 **추가**하는 셈 — unbind는 후속).
+    /// 한 액션의 **빌트인 chord(들)**(default_app_bindings)를 unbind한다 — loaded_config.unbinds에 넣어(라이브 ignored)
+    /// `keybind = chord = unbind`로 영속한다. `except`가 주어지면 그 chord는 안 죽인다(완전 교체에서 새 chord가 빌트인과
+    /// 같을 때 그 키를 살린다 — 사용자 바인딩이 resolver 우선이라 동작은 같지만 파일에 중복 unbind 줄을 안 남긴다). 이미
+    /// unbinds에 있으면 스킵(중복 누적 방지). 다중-chord 빌트인(next/previous_tab·increase/decrease_font_size=2개)은 전부
+    /// 처리(리뷰 #840). 카탈로그 재빌드는 호출자가 한다. **rebind(완전 교체)·unbind(완전 해제)가 공유하는 단일 출처.**
+    fn unbindBuiltinChords(self: *AppSession, entry: command_catalog.Entry, except: ?config_mod.KeyChord) void {
+        const a = self.loaded_config.arena.allocator();
+        var ub: std.ArrayList(config_mod.KeyChord) = .empty;
+        ub.appendSlice(a, self.loaded_config.unbinds) catch return;
+        var added_any = false;
+        for (config_mod.keybinding.default_app_bindings) |db| {
+            if (!std.meta.eql(db.action, entry.action)) continue;
+            if (except) |x| if (x.eql(db.chord)) continue; // 새 chord(=빌트인)는 안 죽임
+            var dup = false;
+            for (ub.items) |u| if (u.eql(db.chord)) {
+                dup = true;
+                break;
+            };
+            if (dup) continue;
+            ub.append(a, db.chord) catch return;
+            added_any = true;
+            var chord_buf: [command_catalog.max_chord_display_len]u8 = undefined;
+            self.markKeybindUnbind(a.dupe(u8, db.chord.toConfigString(&chord_buf)) catch return);
+        }
+        if (added_any) self.loaded_config.unbinds = ub.toOwnedSlice(a) catch return;
+    }
+
     fn rebindActionEntry(self: *AppSession, entry: command_catalog.Entry, chord: config_mod.KeyChord) void {
         const a = self.loaded_config.arena.allocator();
         // 충돌 경고: 이 chord가 **다른 액션**에 이미 묶여 있으면 알린다(rebind는 진행 — 사용자 의도, last-wins). 현재 effective
@@ -7937,6 +7964,10 @@ pub const AppSession = struct {
         }
         if (!replaced) list.append(a, .{ .chord = chord, .action = entry.action }) catch return;
         self.loaded_config.keybindings = list.toOwnedSlice(a) catch return;
+        // **완전 교체**: 새 chord를 묶는 데 더해, 그 액션의 빌트인 chord(새 chord 제외)를 unbind한다 — 안 그러면 빌트인이
+        // 살아 있어 옛 키 + 새 키 둘 다 동작한다(추가가 아니라 교체여야 표시=동작·옛 키 되찾기). 새 chord가 빌트인과
+        // 같으면(재확인) 그건 살린다(except). 키바인드 완전 교체 — docs/config-gui.md §6.7.
+        self.unbindBuiltinChords(entry, chord);
         self.rebuildCommandCatalog();
 
         // 영속 예약 — action 키별 upsert(같은 액션 여러 번 바꾸면 마지막만). chord는 config 표기로 arena에 둔다.
@@ -7973,27 +8004,9 @@ pub const AppSession = struct {
             } else list.append(a, b) catch return;
         }
         if (found_user) self.loaded_config.keybindings = list.toOwnedSlice(a) catch return;
-        // ② **빌트인 chord 전부**를 찾아 unbind(default_app_bindings). 사용자 chord만 빼면 빌트인이 되살아나므로 빌트인 chord를
-        // unbinds에 넣어(라이브) + `keybind = chord = unbind`로 영속(죽인다). **한 액션에 빌트인 chord가 여럿일 수 있다**
-        // (next_tab/previous_tab/increase·decrease_font_size는 2개) — 하나만 죽이면 chordForAction이 남은 chord를 반환해
-        // 해제가 실패하므로 매칭되는 모든 chord를 unbind한다(리뷰 #840 — 다중-chord 결함). 이미 unbinds에 있으면 스킵(중복 누적 방지).
-        var ub: std.ArrayList(config_mod.KeyChord) = .empty;
-        ub.appendSlice(a, self.loaded_config.unbinds) catch return;
-        var added_any = false;
-        for (config_mod.keybinding.default_app_bindings) |db| {
-            if (!std.meta.eql(db.action, entry.action)) continue;
-            var dup = false;
-            for (ub.items) |u| if (u.eql(db.chord)) {
-                dup = true;
-                break;
-            };
-            if (dup) continue;
-            ub.append(a, db.chord) catch return;
-            added_any = true;
-            var chord_buf: [command_catalog.max_chord_display_len]u8 = undefined;
-            self.markKeybindUnbind(a.dupe(u8, db.chord.toConfigString(&chord_buf)) catch return);
-        }
-        if (added_any) self.loaded_config.unbinds = ub.toOwnedSlice(a) catch return;
+        // ② **빌트인 chord 전부**를 unbind(except=null) — 사용자 chord만 빼면 빌트인이 되살아나므로 모두 죽인다(완전 해제).
+        // 다중-chord 빌트인도 전부(리뷰 #840). rebind(완전 교체)와 공유하는 unbindBuiltinChords 단일 출처.
+        self.unbindBuiltinChords(entry, null);
         self.rebuildCommandCatalog();
         // 펜딩 rebind 취소(unbind가 우선).
         var i: usize = 0;
@@ -17886,6 +17899,49 @@ test "settings keybind unbind 다중-chord: 빌트인 chord가 2개인 액션도
     // 두 빌트인 chord가 모두 죽어 next_tab이 **완전히** 미지정(하나만 죽이는 회귀면 첫 chord가 남아 non-null).
     try std.testing.expect(command_catalog.chordForAction(session.loaded_config.keyBindingResolver(), .next_tab) == null);
     try std.testing.expect(session.config_keybind_unbinds.items.len >= 2); // chord 2개 다 unbind 지시어 예약
+}
+
+test "settings keybind 완전 교체: rebind하면 그 액션 빌트인 chord가 죽는다 — 옛 키+새 키가 아니라 새 키만 (키바인드 완전 교체)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // next_tab 엔트리를 새 chord(Cmd+E — next_tab 빌트인 ⇧⌘]/⇧⌘}와 다른 자유 chord)로 rebind.
+    const new_chord = try config_mod.KeyChord.parse("Cmd+E");
+    var entry: ?command_catalog.Entry = null;
+    for (command_catalog.entries) |e| if (std.mem.eql(u8, e.key, "next_tab")) {
+        entry = e;
+    };
+    try std.testing.expect(entry != null);
+    session.config_keybind_unbinds.clearRetainingCapacity();
+    session.rebindActionEntry(entry.?, new_chord);
+
+    const resolver = session.loaded_config.keyBindingResolver();
+    // (1) next_tab의 effective chord = 새 Cmd+E(사용자 바인딩).
+    try std.testing.expect(command_catalog.chordForAction(resolver, .next_tab).?.eql(new_chord));
+    // (2) **핵심**: next_tab의 빌트인 chord(새 chord 아님)는 전부 unbinds에 들어가 죽었다 — 옛 키가 더는 next_tab을 안 함.
+    //     (add-only 회귀면 빌트인이 unbinds에 없어 옛 키가 살아 있다.)
+    var had_builtin = false;
+    for (config_mod.keybinding.default_app_bindings) |db| if (std.meta.eql(db.action, .next_tab) and !db.chord.eql(new_chord)) {
+        had_builtin = true;
+        var found = false;
+        for (session.loaded_config.unbinds) |u| if (u.eql(db.chord)) {
+            found = true;
+        };
+        try std.testing.expect(found); // 빌트인 chord가 unbind됨(라이브)
+    };
+    try std.testing.expect(had_builtin); // next_tab엔 죽일 빌트인이 있었다(테스트 전제)
+    // (3) 영속: 빌트인 unbind 지시어가 예약됐다(파일에 keybind = chord = unbind).
+    try std.testing.expect(session.config_keybind_unbinds.items.len >= 1);
 }
 
 test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 인덱스가 올바른 액션에 매핑 (CS-4-4 검색)" {

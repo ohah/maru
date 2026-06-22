@@ -51,6 +51,8 @@ pub const ResolvedCursor = struct {
     blink: bool,
     // 커서 깜빡임 반주기(ms). app이 30Hz tick으로 환산(근거는 theme.CursorConfig.blink_interval_ms 단일 출처).
     blink_interval_ms: u32 = 500,
+    // 창 포커스 잃을 때 커서 처리(block 유지/hollow 외곽선/hidden). app이 window_focused와 함께 cursor overlay에 wiring.
+    unfocused: theme.UnfocusedCursor = .block,
     // 커서 색 override(opt-in). null이면 렌더가 경로별 테마 기본으로 폴백한다(color→theme.cursor,
     // text→메인 background / chrome sidebar_background). 명시 색은 다른 테마 색과 같은 #RRGGBB 검증을 거친다.
     color: ?color.Rgb = null,
@@ -95,6 +97,7 @@ pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
             // 단독 호출·테스트도 같은 게이트를 거치게 한다). null은 그대로 둬 렌더가 테마 기본으로 폴백한다.
             .color = if (config.cursor.color) |c| try parseHexColor(c) else null,
             .text = if (config.cursor.text) |c| try parseHexColor(c) else null,
+            .unfocused = config.cursor.unfocused,
         },
         .chrome_theme = config.chrome_theme,
         .blink_text = config.blink_text,

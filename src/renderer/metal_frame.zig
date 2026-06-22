@@ -300,8 +300,9 @@ pub fn buildNativeCellsSplit(
     else
         0;
     // underline overlay는 셀당 밑줄 1개를 추가로 낸다(커서 overlay 예산과 별개) — overlays.len을
-    // 한 번 더 더해 두 pass(2.6 밑줄 + 3 커서)가 같은 예산을 다투지 않게 한다.
-    try cells.ensureTotalCapacity(allocator, frame.glyphs.len + draw_cells.len + 2 * frame.overlays.len + hover_cells);
+    // 한 번 더 더해 두 pass(2.6 밑줄 + 3 커서)가 같은 예산을 다투지 않게 한다. hollow 커서는 한 overlay가
+    // 4변(상·하·좌·우) cell을 내므로 overlay당 최악 4 cell로 예산을 잡는다(block 2 + 여유 — 과할당은 작다).
+    try cells.ensureTotalCapacity(allocator, frame.glyphs.len + draw_cells.len + 4 * frame.overlays.len + hover_cells);
 
     // 1) ink가 있는 glyph cell. 전경색 + (있으면) 배경색을 같이 싣는다. blank cell도
     //    GlyphQuadFrame에 들어올 수 있으므로 그릴 게 없는 space는 여기서 제외하고, 배경이
@@ -478,6 +479,34 @@ pub fn buildNativeCellsSplit(
                 .line, .gutter => continue,
             };
             if (!cur.visible) continue;
+
+            // hollow 커서(창 포커스 잃음 + cursor.unfocused=hollow): 채운 블록 대신 **빈 사각형 테두리**(외곽선)를
+            // 그린다(shape 무관). reserved 2(하단)/4(상단)/3(좌측)/5(우측) 부분-사각형 cell 4개를 커서 색으로 내면
+            // renderer가 각 변을 가는 띠로 그려 합쳐 외곽선 box가 된다(.m 무변경 — 기존 변 kind 재사용). 안은 비어
+            // 글자가 그대로 보인다(비활성 창임을 시각 표시 — iTerm2/Terminal.app 관례).
+            if (cur.hollow) {
+                for ([_]u16{ 2, 4, 3, 5 }) |edge| {
+                    cells.appendAssumeCapacity(.{
+                        .row = cur.row,
+                        .col = cur.col,
+                        .width = 1,
+                        .reserved = edge,
+                        .codepoint = ' ',
+                        .slot_id = 0,
+                        .atlas_x_px = 0,
+                        .atlas_y_px = 0,
+                        .atlas_width_px = 0,
+                        .atlas_height_px = 0,
+                        .u0 = -1.0,
+                        .v0 = -1.0,
+                        .u1 = -1.0,
+                        .v1 = -1.0,
+                        .foreground = 0,
+                        .background = cursor_bg,
+                    });
+                }
+                continue;
+            }
 
             // underline/bar 커서(DECSCUSR 3~6)는 글리프를 가리지 않는 부분 사각형이다 — 반전
             // 없이 sentinel UV 솔리드 cell로 내고, kind(reserved)로 renderer가 하단/좌측 일부만
@@ -1357,6 +1386,37 @@ test "cursor overlay on an empty cell projects a solid block with sentinel UV" {
     try std.testing.expectEqual(@as(u32, 0xFF00FF00), cells[0].background);
     try std.testing.expectEqual(@as(f32, -1.0), cells[0].u0);
     try std.testing.expectEqual(@as(u16, 1), cells[0].col);
+}
+
+test "hollow cursor overlay projects four edge-strip cells outlining the cell (F1-4b-2)" {
+    const allocator = std.testing.allocator;
+    // 창 포커스 잃음 + cursor.unfocused=hollow: 채운 블록 대신 4변(reserved 2/4/3/5) 띠 cell로 외곽선 box.
+    var overlays = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 1, .visible = true, .hollow = true } }};
+    const frame = renderer.GlyphQuadFrame{
+        .size = .{ .cols = 3, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 1 },
+        .dirty = null,
+        .glyphs = &.{},
+        .overlays = &overlays,
+        .stats = .{},
+    };
+    const cells = try buildNativeCellsFromGlyphQuads(allocator, frame, &.{}, .{
+        .default_fg = .{ .r = 255, .g = 255, .b = 255 },
+        .cursor = .{ .block = .{ .r = 0, .g = 255, .b = 0 }, .text = .{ .r = 0, .g = 0, .b = 0 } },
+    });
+    defer allocator.free(cells);
+
+    // 정확히 4 cell(상·하·좌·우 변), 전부 커서 col·커서 색·부분-사각형 reserved kind.
+    try std.testing.expectEqual(@as(usize, 4), cells.len);
+    var seen_edges: [6]bool = .{false} ** 6;
+    for (cells) |c| {
+        try std.testing.expectEqual(@as(u16, 1), c.col);
+        try std.testing.expectEqual(@as(u32, 0xFF00FF00), c.background); // cursor.block 색
+        try std.testing.expect(c.reserved >= 2 and c.reserved <= 5); // 부분-사각형 변 kind
+        seen_edges[c.reserved] = true;
+    }
+    // 네 변(2 하단·3 좌측·4 상단·5 우측)이 모두 한 번씩 — 빠진 변이 없어야 닫힌 외곽선이 된다.
+    try std.testing.expect(seen_edges[2] and seen_edges[3] and seen_edges[4] and seen_edges[5]);
 }
 
 test "cursor projection is skipped when cursor colors are null" {

@@ -46,7 +46,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 74; // 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 75; // 75: OSC 52 read(input.osc52.read=allow|deny — take_clipboard_read_request[정책 게이트, allow면 1]·provide_clipboard_read[Swift가 읽은 클립보드 바이트 → base64 OSC 52 응답을 요청 surface PTY로]. 코어는 `?` 쿼리 파싱만, 정책·실제 클립보드 읽기는 platform. deny 기본=탈취 방지. 끝에 export 2개 추가 — 구조체 offset 불변). 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -97,6 +97,9 @@ pub const CursorKind = enum(i32) {
 // 실제로는 init이 refreshCellMetrics를 부르므로 resize 시점엔 항상 실제 메트릭이 있다.
 const placeholder_cell_width_px: u32 = 12;
 const placeholder_cell_height_px = input_math.placeholder_cell_height_px; // session core 단일 출처(휠 환산과 공유)
+// OSC 52 읽기 응답 상한(원문 클립보드 바이트). 과대 클립보드를 base64 OSC 52로 PTY에 쏟는 폭주를 막는다
+// (코어 OSC 52 write 상한 max_clipboard_bytes와 같은 16MB). 초과하면 응답하지 않는다(F2-6).
+const max_clipboard_read_bytes: usize = 16 * 1000 * 1000;
 
 // 세로 탭 사이드바의 기본 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
 // 터미널 surface는 이 폭만큼 오른쪽으로 그려지고, 왼쪽 strip이 사이드바다("surface→rect" 첫 적용). 사용자가
@@ -1169,6 +1172,9 @@ pub const AppSession = struct {
     // take_clipboard_action으로 drain해 copySelectionToPasteboard(copy)/pastePasteboardText(paste)를 호출한다 —
     // 클립보드는 OS 소유라 Swift가 실행, "언제" 동작할지는 Zig가 정한다(take_bell과 같은 1회성 패턴, F2-5).
     pending_clipboard_action: ClipboardAction = .none,
+    // OSC 52 읽기 응답의 target(Pc) 문자열 — takeClipboardReadRequest가 코어 쿼리에서 캡처하고 provideClipboardRead가
+    // 응답 OSC 52에 echo한다(같은 tick 내 take→provide). owned, destroy까지 유효(F2-6).
+    clipboard_read_target_buf: std.ArrayListUnmanaged(u8) = .empty,
     // 세팅 GUI(사이드바 view options·세팅 화면)에서 바뀐 config 키 집합 — app→파일 write-back 예약(중복은 한 번만).
     // 키는 스키마 정적 리터럴이라 소유/해제 불요. Swift가 매 tick take_sidebar_config_dirty(=비어있지 않음)로 drain해
     // serialize_sidebar_config(updateConfigForKeys)로 atomic write한다(serialize가 성공 시 집합을 비운다). ABI 이름은 호환을 위해 유지.
@@ -3590,6 +3596,15 @@ pub const AppSession = struct {
         // 컨텍스트 메뉴 렌더를 헤드리스 스크린샷으로 캡처(self-verify debug-gate). 트래킹 .none(빈 셸)이라 config 분기를 탄다.
         // 좌표는 사이드바 우측 터미널 본문(x=400, y=150 backing px). menu가 아니면(paste/reporting) 메뉴 안 뜸 — 그것도 검증.
         if (std.c.getenv("MARU_FORCE_RIGHT_CLICK") != null) self.mouse(1, 400, 150, 2, 0);
+        // MARU_FORCE_OSC52_READ=1 — 첫 frame에 활성 코어에 OSC 52 읽기 쿼리(`?`)를 흘려, osc52.read=allow면 다음 tick에
+        // Swift가 시스템 클립보드를 읽어 base64 OSC 52 응답을 PTY로 보내는 전 경로를 self-verify(MARU_DEBUG=input 로그로
+        // core->pty 응답 확인). deny면 응답 없음(그것도 검증). 클립보드 읽기는 락 아래(리더 경합 방지).
+        if (std.c.getenv("MARU_FORCE_OSC52_READ") != null) {
+            const s = self.activeSurface();
+            s.lockCore(self.io);
+            s.core.write("\x1b]52;c;?\x1b\\") catch {};
+            s.unlockCore(self.io);
+        }
         if (std.c.getenv("MARU_OPEN_SETTINGS") == null) return;
         self.toggleSettings();
         // MARU_OPEN_SETTINGS_SECTION=N — 특정 섹션을 열어 캡처(스크린샷 self-verify용 debug-gate). 미설정=섹션 0.
@@ -6976,6 +6991,67 @@ pub const AppSession = struct {
         return self.clipboard_out_buffer;
     }
 
+    /// OSC 52 읽기(`?` 쿼리)가 대기 중이고 정책(osc52.read)이 allow면 true — Swift가 시스템 클립보드를 읽어
+    /// provideClipboardRead로 돌려준다. **정책 게이트는 여기**다(write의 platform 게이트와 대칭): 코어는 쿼리만
+    /// 파싱하고 pending을 세우며, deny여도 pending을 소비(clear)하되 클립보드는 읽지 않는다(allow일 때만 Swift가 읽음
+    /// = 탈취 방지). target(Pc)은 응답 echo용으로 캡처한다. 코어 읽기·clear는 락 아래(리더 경합 방지). (F2-6)
+    pub fn takeClipboardReadRequest(self: *AppSession) bool {
+        if (!self.surface_initialized) return false;
+        const s = self.activeSurface();
+        s.lockCore(self.io);
+        const pending = s.core.clipboardReadPending();
+        if (pending) {
+            self.clipboard_read_target_buf.clearRetainingCapacity();
+            self.clipboard_read_target_buf.appendSlice(self.allocator, s.core.clipboardReadTarget()) catch {};
+            s.core.clearClipboardRead(); // 소비(allow/deny 무관) — 다음 tick에 또 트리거되지 않게
+        }
+        s.unlockCore(self.io);
+        if (!pending) return false;
+        return self.loaded_config.config.osc52.read == .allow; // deny면 클립보드 안 읽음
+    }
+
+    /// Swift가 읽은 시스템 클립보드 바이트를 base64 OSC 52 응답(`ESC ] 52 ; <Pc> ; <base64> ST`)으로 만들어 요청한
+    /// surface의 PTY로 비차단 전송한다(paste FIFO 재사용 — 전송 순서·#10 데드락 회피). target은 직전
+    /// takeClipboardReadRequest가 캡처한 Pc(빈 값은 `c`). 과대 클립보드는 거부한다(폭주 방어선, write 상한과 동일). (F2-6)
+    pub fn provideClipboardRead(self: *AppSession, bytes: []const u8) void {
+        if (!self.surface_initialized) return;
+        if (bytes.len > max_clipboard_read_bytes) return; // 과대 거부(폭주 방어선)
+        const resp = self.formatOsc52ReadResponse(self.clipboard_read_target_buf.items, bytes) orelse return;
+        defer self.allocator.free(resp);
+        // 요청 surface PTY로 비차단 전송(paste FIFO 재사용 — 순서·#10 데드락 회피). 응답은 program stdin에서 읽힌다.
+        self.pendingPasteRetarget();
+        self.pending_paste.appendSlice(self.allocator, resp) catch return;
+        self.flushPendingPaste();
+    }
+
+    /// 클립보드 바이트를 OSC 52 읽기 응답(`ESC ] 52 ; <Pc> ; <base64> ST`)으로 인코딩한다(owned, 호출자 free).
+    /// target(Pc) 빈 값은 `c`(클립보드)로 채운다. 실패(OOM) 시 null. 순수 함수라 포맷을 단위 테스트로 고정(F2-6).
+    fn formatOsc52ReadResponse(self: *AppSession, target: []const u8, bytes: []const u8) ?[]u8 {
+        const tgt: []const u8 = if (target.len == 0) "c" else target;
+        const enc = std.base64.standard.Encoder;
+        const b64_len = enc.calcSize(bytes.len);
+        const resp_len = 2 + 3 + tgt.len + 1 + b64_len + 2; // ESC ] | "52;" | Pc | ";" | base64 | ESC \
+        const buf = self.allocator.alloc(u8, resp_len) catch return null;
+        var i: usize = 0;
+        buf[i] = 0x1b;
+        i += 1;
+        buf[i] = ']';
+        i += 1;
+        @memcpy(buf[i..][0..3], "52;");
+        i += 3;
+        @memcpy(buf[i..][0..tgt.len], tgt);
+        i += tgt.len;
+        buf[i] = ';';
+        i += 1;
+        _ = enc.encode(buf[i..][0..b64_len], bytes);
+        i += b64_len;
+        buf[i] = 0x1b;
+        i += 1;
+        buf[i] = '\\';
+        i += 1;
+        return buf;
+    }
+
     /// OSC 9/777 데스크톱 알림 pending(title, body)을 내부 버퍼로 돌려준다(없으면 null). Swift가
     /// UNUserNotificationCenter로 띄운다. 코어 pending을 비워(한 번 쓰고 소비) 다음 tick에 같은 알림이 또
     /// 뜨지 않게 한다. 알림은 OS 리소스라 native(Swift)만 띄우고 코어/여기는 데이터만 넘긴다(경계). 클립보드와
@@ -9928,6 +10004,7 @@ pub const AppSession = struct {
     pub fn deinit(self: *AppSession) void {
         if (self.copy_buffer.len > 0) self.allocator.free(self.copy_buffer);
         if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
+        self.clipboard_read_target_buf.deinit(self.allocator);
         if (self.notification_title_out.len > 0) self.allocator.free(self.notification_title_out);
         if (self.notification_body_out.len > 0) self.allocator.free(self.notification_body_out);
         for (self.agent_notifications.items) |n| {
@@ -10992,6 +11069,61 @@ test "right-click menu(F2-5): 터미널 컨텍스트 메뉴 복사/붙여넣기 
 
     // 기본 config는 paste(사용자 결정) — 트래킹 .none이면 우클릭이 paste 동작을 의도.
     try std.testing.expectEqual(config_mod.theme.RightClick.paste, session.loaded_config.config.input.right_click);
+}
+
+test "OSC 52 read(F2-6): 정책 게이트(deny=무응답·allow=true) + base64 응답 포맷" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 응답 포맷(순수): "hi" = base64 "aGk=" → ESC ] 52 ; c ; aGk= ESC \. 빈 target은 c로.
+    const r1 = session.formatOsc52ReadResponse("c", "hi").?;
+    defer allocator.free(r1);
+    try std.testing.expectEqualStrings("\x1b]52;c;aGk=\x1b\\", r1);
+    const r2 = session.formatOsc52ReadResponse("", "hi").?; // 빈 Pc → c
+    defer allocator.free(r2);
+    try std.testing.expectEqualStrings("\x1b]52;c;aGk=\x1b\\", r2);
+    const r3 = session.formatOsc52ReadResponse("p", "").?; // 빈 클립보드도 응답(빈 base64)
+    defer allocator.free(r3);
+    try std.testing.expectEqualStrings("\x1b]52;p;\x1b\\", r3);
+
+    // 정책 게이트: 기본 deny. 코어에 `?` 읽기 쿼리를 흘리고 takeClipboardReadRequest는 false(클립보드 안 읽음),
+    // 그래도 코어 pending은 소비(clear)된다.
+    try std.testing.expectEqual(config_mod.theme.Osc52Read.deny, session.loaded_config.config.osc52.read);
+    {
+        const s = session.activeSurface();
+        s.lockCore(session.io);
+        s.core.write("\x1b]52;c;?\x1b\\") catch {};
+        s.unlockCore(session.io);
+    }
+    try std.testing.expect(!session.takeClipboardReadRequest()); // deny → false
+    {
+        const s = session.activeSurface();
+        s.lockCore(session.io);
+        const still_pending = s.core.clipboardReadPending();
+        s.unlockCore(session.io);
+        try std.testing.expect(!still_pending); // deny여도 소비됨(재트리거 방지)
+    }
+
+    // allow면 true + target 캡처.
+    session.loaded_config.config.osc52.read = .allow;
+    {
+        const s = session.activeSurface();
+        s.lockCore(session.io);
+        s.core.write("\x1b]52;p;?\x1b\\") catch {};
+        s.unlockCore(session.io);
+    }
+    try std.testing.expect(session.takeClipboardReadRequest()); // allow → true
+    try std.testing.expectEqualStrings("p", session.clipboard_read_target_buf.items); // 응답 echo용 target
 }
 
 test "moveTab: 고정 탭은 고정 영역 안에서만, 비고정은 비고정 영역 안에서만 재정렬(그룹 clamp)" {

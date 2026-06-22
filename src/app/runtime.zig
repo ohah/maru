@@ -204,6 +204,11 @@ pub const SurfaceRuntime = struct {
     pub fn writeInputNonBlocking(self: *SurfaceRuntime, surface_id: SurfaceId, bytes: []const u8) RuntimeError!usize {
         const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
         if (link.surface.process_state == .exited) return error.ProcessExited;
+        // writeInput과 대칭으로 core->pty 비차단 입력(paste·IME 확정·OSC 52 read 응답)도 진단 로깅한다. MARU_DEBUG에서만.
+        if (self.debug_input) {
+            var ebuf: [320]u8 = undefined;
+            input_diag.info("core->pty(nb) {d}B: {s}", .{ bytes.len, escapeForLog(bytes, &ebuf) });
+        }
         return link.pty_io.writeInputNonBlocking(bytes) catch return error.WriteFailed;
     }
 

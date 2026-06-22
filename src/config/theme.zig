@@ -539,6 +539,8 @@ pub const Config = struct {
     scroll: ScrollConfig = .{},
     /// 벨(BEL) 설정. loader가 `bell.*` 키로 파싱.
     bell: BellConfig = .{},
+    /// OSC 52 클립보드 정책(읽기 allow/deny). loader가 `osc52.*` 키로 파싱. 기본 read=deny(클립보드 탈취 방지).
+    osc52: Osc52Config = .{},
     /// 셸 통합(zsh ZDOTDIR 주입) 설정. loader가 `shell-integration.*` 키로 파싱.
     shell_integration: ShellIntegrationConfig = .{},
     /// 워크스페이스(시작 창·새 탭이 열리는 디렉터리) 설정. loader가 `workspace.*` 키로 파싱.
@@ -661,6 +663,25 @@ pub const ScrollConfig = struct {
 
     pub const schema = .{ // 키: scroll.multiplier (f32 range)
         .multiplier = Meta{ .doc = "휠 스크롤 배수", .range = .{ 0.1, 10.0 }, .widget = .slider, .section = .input },
+    };
+};
+
+/// OSC 52 클립보드 **읽기**(`OSC 52 ; <Pc> ; ? ST` 쿼리) 정책. deny=응답 안 함(현행 — 클립보드 탈취 방지),
+/// allow=시스템 클립보드를 base64로 인코딩해 `OSC 52 ; <Pc> ; <base64> ST`로 PTY에 응답한다. 쓰기(write)는
+/// 별개로 기본 allow(코어 파싱→platform 드레인)다 — 이 설정은 읽기 전용이다.
+pub const Osc52Read = enum {
+    deny,
+    allow,
+};
+
+/// OSC 52 클립보드 정책. loader가 `osc52.*` 키로 파싱. read만 노출(쓰기는 기본 allow 하드코딩 — F2-6 범위는 읽기).
+/// 베이스/결정: 읽기 기본 **deny**는 단일 표준이 없으나 보안 표면이 커 xterm `allowWindowOps`/iTerm2도 기본 비활성에
+/// 가깝다 — 원격/내부 프로그램의 로컬 클립보드 탈취를 막는다(terminal-compatibility-policy.md §OSC52, 사용자 결정 2026-06-20).
+pub const Osc52Config = struct {
+    read: Osc52Read = .deny,
+
+    pub const schema = .{ // 키: osc52.read (enum)
+        .read = Meta{ .doc = "OSC 52 클립보드 읽기", .widget = .dropdown, .section = .terminal },
     };
 };
 

@@ -539,6 +539,10 @@ fn testShapeDrawList(
     _: f64,
     _: [*]const u8, // fallback CSV ptr
     _: usize, // fallback CSV len
+    _: [*]const u8, // bold family ptr (F2-3)
+    _: usize, // bold family len
+    _: [*]const u8, // italic family ptr (F2-3)
+    _: usize, // italic family len
     cells_ptr: [*]const coretext_shaper.NativeDrawCell,
     cell_count: usize,
     result: *coretext_shaper.NativeDrawListShapeResult,

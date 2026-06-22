@@ -37,6 +37,10 @@ pub extern fn maru_macos_coretext_shape_draw_list(
     requested_font_size: f64,
     fallback_families: [*]const u8, // 폴백 폰트 CSV(F1-2 — ObjC가 cascade list로 박음)
     fallback_families_len: usize,
+    bold_family: [*]const u8, // bold 글자용 폰트 패밀리(F2-3 — 빈 len 0=주 family bold variant)
+    bold_family_len: usize,
+    italic_family: [*]const u8, // italic 글자용 폰트 패밀리(F2-3)
+    italic_family_len: usize,
     cells: [*]const coretext_shaper.NativeDrawCell,
     cell_count: usize,
     result: *coretext_shaper.NativeDrawListShapeResult,

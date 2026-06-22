@@ -21,6 +21,10 @@ pub const ResolvedFontRequest = struct {
     /// 폴백 폰트 패밀리 목록(쉼표 구분 CSV, 빈="" = 폴백 명시 없음). 셰이퍼가 그대로 ObjC로 넘기면 거기서 split·trim해
     /// kCTFontCascadeListAttribute로 박는다(근거는 theme.FontConfig.fallback 주석 단일 출처).
     fallback: []const u8 = "",
+    /// bold/italic 글자용 별도 폰트 패밀리(빈="" = 주 family의 variant). 셰이퍼가 ObjC로 넘겨 bold/italic face를 만든다
+    /// (근거는 theme.FontConfig.family_bold/italic 주석 단일 출처, F2-3).
+    family_bold: []const u8 = "",
+    family_italic: []const u8 = "",
 };
 
 pub const ResolvedTheme = struct {
@@ -140,6 +144,10 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
         // fallback은 raw CSV를 그대로 빌린다(빈 ""=폴백 없음). split·trim·검증은 ObjC 셰이퍼가 cascade list를 만들 때 한다
         // (잘못된 폰트명은 CoreText가 그 항목을 무시 — family처럼 막진 않는다, 폴백은 best-effort).
         .fallback = config.fallback,
+        // bold/italic 패밀리도 raw를 그대로 빌린다(빈 ""=주 family variant). trim·검증은 ObjC가 face를 만들 때(없는
+        // 패밀리는 CoreText가 NULL→주 variant 폴백, family처럼 막진 않음 — best-effort, F2-3).
+        .family_bold = config.family_bold,
+        .family_italic = config.family_italic,
     };
 }
 

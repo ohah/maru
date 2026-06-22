@@ -9,6 +9,9 @@ const terminal = maru.terminal;
 /// NativeDrawCell.style_flags 비트 — bold cell이면 셰이퍼가 bold 폰트 face를 골라 bold variant의
 /// glyph_id/PostScript name을 만든다(rasterizer가 그 이름으로 다시 그려 실제 굵은 글리프가 나온다).
 pub const draw_cell_bold_bit: u16 = 1 << 0;
+/// italic(SGR 3) cell — 셰이퍼가 italic face(font.family-italic 또는 주 family italic variant)로 그린다(F2-3).
+/// bold와 같이 켜지면 bold-italic face. native MaruDrawCellItalicBit와 동일 비트.
+pub const draw_cell_italic_bit: u16 = 1 << 1;
 
 pub const NativeDrawCell = extern struct {
     row: u16,
@@ -54,6 +57,11 @@ pub const ShapeDrawListFn = *const fn (
     // 폴백 폰트 CSV(쉼표 구분, 빈 len 0=폴백 없음). ObjC가 split·trim해 주 폰트에 kCTFontCascadeListAttribute로 박는다(F1-2).
     fallback_families: [*]const u8,
     fallback_families_len: usize,
+    // bold/italic 글자용 별도 폰트 패밀리(빈 len 0=주 family variant). ObjC가 bold/italic face를 이 패밀리로 만든다(F2-3).
+    bold_family: [*]const u8,
+    bold_family_len: usize,
+    italic_family: [*]const u8,
+    italic_family_len: usize,
     cells: [*]const NativeDrawCell,
     cell_count: usize,
     result: *NativeDrawListShapeResult,
@@ -134,6 +142,10 @@ pub const CoreTextDrawListShaper = struct {
             @floatCast(self.appearance.font.size),
             self.appearance.font.fallback.ptr,
             self.appearance.font.fallback.len,
+            self.appearance.font.family_bold.ptr,
+            self.appearance.font.family_bold.len,
+            self.appearance.font.family_italic.ptr,
+            self.appearance.font.family_italic.len,
             native_cells.items.ptr,
             native_cells.items.len,
             &native,
@@ -167,7 +179,7 @@ fn nativeDrawCellFromDrawCell(cell: renderer.DrawCell) NativeDrawCell {
         .row = cell.row,
         .col = cell.col,
         .width = cell.width,
-        .style_flags = if (cell.style.bold) draw_cell_bold_bit else 0,
+        .style_flags = (if (cell.style.bold) draw_cell_bold_bit else 0) | (if (cell.style.italic) draw_cell_italic_bit else 0),
         .codepoint = cell.codepoint,
         .combining = cell.combining orelse 0,
     };
@@ -494,6 +506,10 @@ fn fakeShapeDrawList(
     _: f64,
     _: [*]const u8, // fallback CSV ptr
     _: usize, // fallback CSV len
+    _: [*]const u8, // bold family ptr (F2-3)
+    _: usize, // bold family len
+    _: [*]const u8, // italic family ptr (F2-3)
+    _: usize, // italic family len
     cells_ptr: [*]const NativeDrawCell,
     cell_count: usize,
     result: *NativeDrawListShapeResult,
@@ -552,6 +568,10 @@ fn failingShapeDrawList(
     _: f64,
     _: [*]const u8, // fallback CSV ptr
     _: usize, // fallback CSV len
+    _: [*]const u8, // bold family ptr (F2-3)
+    _: usize, // bold family len
+    _: [*]const u8, // italic family ptr (F2-3)
+    _: usize, // italic family len
     _: [*]const NativeDrawCell,
     _: usize,
     result: *NativeDrawListShapeResult,
@@ -576,6 +596,10 @@ fn outOfRangeRecordShapeDrawList(
     _: f64,
     _: [*]const u8, // fallback CSV ptr
     _: usize, // fallback CSV len
+    _: [*]const u8, // bold family ptr (F2-3)
+    _: usize, // bold family len
+    _: [*]const u8, // italic family ptr (F2-3)
+    _: usize, // italic family len
     cells_ptr: [*]const NativeDrawCell,
     cell_count: usize,
     result: *NativeDrawListShapeResult,

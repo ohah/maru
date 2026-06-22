@@ -46,19 +46,29 @@ pub const FontConfig = struct {
     /// 기본 cascade만 쓴다(현행). loader가 `font.fallback` 키로 파싱(내부 공백 보존, 각 항목은 trim). 적용은 셰이퍼가
     /// 주 폰트에 `kCTFontCascadeListAttribute`로 박는다(매 글리프 자동 폴백 — 근거: Ghostty도 cascade list 명시).
     fallback: []const u8 = "",
+    /// bold(SGR 1) 글자에 쓸 별도 폰트 패밀리. 빈 값(기본)이면 주 `family`의 bold variant를 쓴다(현행 — variant가
+    /// 없으면 regular 폴백, 합성 안 함). 설정하면 이 패밀리로 bold cell을 그려 주 family와 다른 글꼴로 강조할 수 있다.
+    /// 셰이퍼가 cascade(fallback)를 상속시켜 bold 한글·이모지도 폴백한다. loader가 `font.family-bold` 키로 파싱.
+    family_bold: []const u8 = "",
+    /// italic(SGR 3) 글자에 쓸 별도 폰트 패밀리. 빈 값(기본)이면 주 `family`의 italic variant를 쓴다(없으면 regular
+    /// 폴백). italic 렌더 자체가 F2-3에서 추가됐다(이전엔 SGR 3이 안 그려짐). bold+italic은 bold face(family-bold 또는
+    /// 주 bold)에 italic trait을 더한다. loader가 `font.family-italic` 키로 파싱.
+    family_italic: []const u8 = "",
 
     // 범위는 아래 font_* const(단일 출처 — appearance.resolveFont도 같은 const를 써 schema↔resolve drift 없음).
     // size만 예외 구조: **GUI 슬라이더·⌘+/⌘- range = [font_size_min, font_size_max] = [6,72]** 와 **파일 검증 범위
     // [1,512](resolveFont)** 가 의도적으로 다르다. 슬라이더가 resolver 범위(최대 512pt)를 쓰면 한 스텝(범위의 4%)이
     // ~20pt라 "+" 한 번에 폰트가 수십 pt 뛰어 한 셀이 화면을 다 먹고 grid가 1×1로 붕괴한다 — 그래서 슬라이더·단축키는
     // 보수 범위([6,72])만 노출하고, config 파일 직접 편집만 더 넓은 [1,512]를 허용한다.
-    pub const schema = .{ // 키: font.size / font.size-step / font.line-height / font.letter-spacing / font.family / font.fallback (필드명 dashed)
+    pub const schema = .{ // 키: font.size / font.size-step / font.line-height / font.letter-spacing / font.family / font.fallback / font.family-bold / font.family-italic (필드명 dashed)
         .size = Meta{ .doc = "폰트 크기(pt)", .range = .{ font_size_min, font_size_max }, .widget = .number, .section = .font },
         .size_step = Meta{ .doc = "⌘+/⌘- 폰트 증분(pt)", .range = .{ font_size_step_min, font_size_step_max }, .widget = .number, .section = .font },
         .line_height = Meta{ .doc = "행간 배수", .range = .{ font_line_height_min, font_line_height_max }, .widget = .number, .section = .font },
         .letter_spacing = Meta{ .doc = "자간(논리 pt, 음수 허용)", .range = .{ font_letter_spacing_min, font_letter_spacing_max }, .widget = .number, .section = .font },
         .family = Meta{ .doc = "폰트 패밀리(내부 공백 보존)", .widget = .text, .section = .font },
         .fallback = Meta{ .doc = "폴백 폰트(쉼표 구분)", .widget = .text, .section = .font },
+        .family_bold = Meta{ .doc = "bold 폰트 패밀리(빈 값=주 폰트 bold)", .widget = .text, .section = .font },
+        .family_italic = Meta{ .doc = "italic 폰트 패밀리(빈 값=주 폰트 italic)", .widget = .text, .section = .font },
     };
 };
 

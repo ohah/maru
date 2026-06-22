@@ -3645,6 +3645,14 @@ pub const AppSession = struct {
             s.core.write("\x07") catch {};
             s.unlockCore(self.io);
         }
+        // MARU_FORCE_STYLED=1 — 첫 frame에 bold/italic/bold-italic/regular SGR 텍스트를 활성 코어에 써 넣어 폰트 face
+        // 선택(font.family-bold/italic, F2-3)을 헤드리스 스크린샷으로 캡처(self-verify). italic 슬랜트·bold 굵기가 보인다.
+        if (std.c.getenv("MARU_FORCE_STYLED") != null) {
+            const s = self.activeSurface();
+            s.lockCore(self.io);
+            s.core.write("\x1b[1mBOLD\x1b[0m \x1b[3mITALIC\x1b[0m \x1b[1;3mBOTH\x1b[0m regular") catch {};
+            s.unlockCore(self.io);
+        }
         if (std.c.getenv("MARU_OPEN_SETTINGS") == null) return;
         self.toggleSettings();
         // MARU_OPEN_SETTINGS_SECTION=N — 특정 섹션을 열어 캡처(스크린샷 self-verify용 debug-gate). 미설정=섹션 0.

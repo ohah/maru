@@ -724,6 +724,12 @@ test "schema tryParse: 최상위 스칼라(Config.schema) — Meta.key 전체 �
     try std.testing.expect(try tryParse(a, &cfg, "font.fallback", "Apple SD Gothic Neo, Apple Color Emoji", &diags, 10)); // sub-struct text(내부 공백 보존)
     try std.testing.expectEqualStrings("Apple SD Gothic Neo, Apple Color Emoji", cfg.font.fallback);
     a.free(cfg.font.fallback); // dupe 회수(테스트 한정)
+    try std.testing.expect(try tryParse(a, &cfg, "font.family-bold", "Menlo Bold", &diags, 10)); // sub-struct text(F2-3)
+    try std.testing.expectEqualStrings("Menlo Bold", cfg.font.family_bold);
+    a.free(cfg.font.family_bold);
+    try std.testing.expect(try tryParse(a, &cfg, "font.family-italic", "Courier New", &diags, 10)); // sub-struct text(F2-3)
+    try std.testing.expectEqualStrings("Courier New", cfg.font.family_italic);
+    a.free(cfg.font.family_italic);
     try std.testing.expect(try tryParse(a, &cfg, "cursor.unfocused", "hollow", &diags, 11)); // sub-struct enum
     try std.testing.expectEqual(theme.UnfocusedCursor.hollow, cfg.cursor.unfocused);
     try std.testing.expect(try tryParse(a, &cfg, "window.unfocused-dim", "0.3", &diags, 12)); // 최상위 f32 range 0~1

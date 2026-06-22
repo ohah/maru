@@ -373,8 +373,10 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     const mv = maxVisible(p);
     const win_start = windowStart(rows.len, @min(selected, rows.len -| 1), mv);
     const win_len = @min(rows.len, mv);
-    // 박스 높이는 네비(섹션 수)와 폼(보이는 창) 중 큰 쪽에 맞춘다.
-    const body_rows = @max(sections.len, win_len);
+    // 박스 높이는 **항상 가용 최대(FullHeight)** — win_len(보이는 행 수) 대신 mv(maxVisible)로 고정해, 행이 적은
+    // 섹션에서도 모달이 작아졌다 커졌다 하지 않고 화면 높이에 꽉 차게 한다(너비는 content_cols로 별도 고정 — #860).
+    // 네비(섹션 수)가 mv보다 많을 일은 거의 없지만 안전하게 큰 쪽을 쓴다. win_len은 폼 스크롤 윈도로 그대로 유지.
+    const body_rows = @max(sections.len, mv);
     const content_rows = title_rows + @as(u32, @intCast(body_rows));
     const box = modal_box.layout(content_cols, content_rows, p, tk) orelse return null;
     const form_x = box.inner_x + @as(i32, @intCast((nav_cols + nav_gap_cols) * box.cw));

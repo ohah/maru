@@ -87,6 +87,7 @@ flowchart TD
 - **`zig_owns_frame_loop`는 라벨 과장**: Zig는 tick **본문**을 소유, 클럭은 OS(macOS `NSTimer` `.common` 모드 — drag-resize 우회)다. 타깃별 클럭/vsync 필요.
 - **정점확장→instancing 부채**: 현재 셀당 6정점(264B)은 Ghostty/Alacritty/kitty의 instancing 대비 ~10× 대역폭. 계약 불변이라 백엔드에서 교체 가능.
 - **renderer-strategy.md 자기모순 정정**: WebGPU-통일 표 vs Ghostty 3-backend 인용 — §4의 백엔드/호스트 2층 구분으로 정리.
+- **모달 px 클리핑 인프라(`MetalFrame.modal_clip`, ABI v84) — 적용 보류**: 모달 오버레이를 px 사각으로 scissor 클리핑하는 인프라(chrome `draw.Op.clip` → `OverlayRaster.clip_rect` → `PaneFrame.clip_rect` → `MetalFrame.modal_clip_*` → Swift `maru_metal_renderer.m` `setScissorRect`)는 머지됐다. 단 **이 clip을 내는 컴포넌트가 아직 없어**(`modal_clip_w==0`) 기존 렌더는 완전 무변이다. **한계(정직)**: 오버레이 **텍스트**는 `placeText`가 `@divTrunc`로 셀 행에 스냅하고 viewport(`rows`) 밖이면 자동 skip하므로, clip은 텍스트엔 사실상 불필요하고 **배경 quad(rich 모달, px 렌더)에만 실효**다 — 즉 텍스트의 픽셀-부드러운 스크롤/클리핑은 셀 그리드 구조상 불가능하고, clip은 "행 단위 부분 카드 + 배경" 정리용이다. 첫 실사용 후보(알림 패널 행 단위 스크롤[`docs/notifications.md` §6], 긴 설정 목록·command palette의 부분 행 클리핑)가 생기면 그때 적용한다. 진짜 px 부드러운 스크롤은 텍스트 렌더를 셀 그리드→px 기반으로 바꾸는 근본 작업이라 별도 대형 과제다.
 
 ## 8. neutrality 가드 + topological note
 

@@ -9278,6 +9278,31 @@ pub const AppSession = struct {
                 if (!has_radius) {
                     // tui: 직각 → 셀 배경(기존 fill 경로와 동일).
                     paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, q.rect, .{ .rgb = tk.get(q.fill_role) }, null);
+                } else if (modal_bg_quad) {
+                    // 모달 배경 **다음**의 rich quad = 위젯(slider track/filled/thumb·toggle pill/knob 등). 이걸 배경처럼
+                    // outset(pad)+shadow+layer=1로 처리하면 (a) pad만큼 커지고 (b) layer 1이 셀 그리드(선택 행 하이라이트
+                    // bg)보다 아래라 하이라이트에 가려진다(활성 행 위젯 가림 버그). 위젯은 q.rect 그대로 + **layer 3**(셀 위)으로
+                    // 올려 하이라이트 위에 보이게 한다. shadow 없음(위젯은 그림자 불필요). tui(직각)는 위 분기라 영향 없음.
+                    const fr = tk.get(q.fill_role);
+                    const fill: u32 = 0xFF000000 | (@as(u32, fr.r) << 16) | (@as(u32, fr.g) << 8) | @as(u32, fr.b);
+                    var border: u32 = 0;
+                    if (q.border_role) |brole| {
+                        const bc = tk.get(brole);
+                        border = 0xFF000000 | (@as(u32, bc.r) << 16) | (@as(u32, bc.g) << 8) | @as(u32, bc.b);
+                    }
+                    gpu_quads.append(allocator, .{
+                        .x = @floatFromInt(q.rect.x),
+                        .y = @floatFromInt(q.rect.y),
+                        .w = @floatFromInt(q.rect.w),
+                        .h = @floatFromInt(q.rect.h),
+                        .corner_radii = .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) },
+                        .border_widths = .{ @floatFromInt(q.border_widths[0]), @floatFromInt(q.border_widths[1]), @floatFromInt(q.border_widths[2]), @floatFromInt(q.border_widths[3]) },
+                        .fill_color0 = fill,
+                        .fill_color1 = fill,
+                        .border_color = border,
+                        .gradient_kind = 0,
+                        .layer = 3,
+                    }) catch {};
                 } else {
                     // rich: GPU quad(layer=1 over — 모달 배경, 둥근+테두리). 색 0xAARRGGBB 불투명.
                     // C4b 모달 패딩: 배경 quad/shadow를 텍스트 영역(q.rect)보다 사방 pad만큼 확장한다 — 텍스트 셀은

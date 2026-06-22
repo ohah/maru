@@ -95,7 +95,25 @@ pub const CellColors = struct {
     /// bold(SGR 1) 글자의 indexed 0~7 전경을 bright 짝(8~15)으로 올릴지(`theme.bold-is-bright`). 기본 false.
     /// packForeground가 비-reverse 전경에만 적용한다(brightenIfBold). app이 appearance.bold_is_bright를 wiring.
     bold_is_bright: bool = false,
+    /// 비활성 split pane 디밍 강도(천분율, 0=끔 ~ 1000=완전 배경색). 0보다 크면 packForeground/packBackground가
+    /// 최종 해석 색을 `default_bg`(fill) 쪽으로 이 비율만큼 보간해 흐리게 한다(`window.unfocused-dim`, F2-7). app이
+    /// **비활성 pane CellColors에만** 세운다 — 활성 pane(CoreTextFrameBuilder)은 0이라 풀 밝기. 모든 셀(전경·명시
+    /// 배경·reverse)에 일률 적용돼 SGR/truecolor 색도 같이 흐려진다(default 배경 셀은 A=0 투명 유지 — fill과 같음).
+    dim_milli: u32 = 0,
 };
+
+/// dim_milli(천분율)만큼 색 c를 fill 쪽으로 선형 보간한다(0=c 그대로, 1000=fill). 비활성 split pane 디밍
+/// (F2-7)을 색공간 per-cell로 낸다 — Ghostty unfocused-split-opacity의 합성 효과를 셰이더·ABI 변경 없이.
+fn dimToward(c: color.Rgb, fill: color.Rgb, dim_milli: u32) color.Rgb {
+    if (dim_milli == 0) return c;
+    const d: u32 = @min(dim_milli, 1000);
+    const keep: u32 = 1000 - d;
+    return .{
+        .r = @intCast((@as(u32, c.r) * keep + @as(u32, fill.r) * d) / 1000),
+        .g = @intCast((@as(u32, c.g) * keep + @as(u32, fill.g) * d) / 1000),
+        .b = @intCast((@as(u32, c.b) * keep + @as(u32, fill.b) * d) / 1000),
+    };
+}
 
 /// bold-is-bright: bold(SGR 1)이고 전경이 ANSI indexed 0~7이면 그 bright 짝(8~15)으로 올린다(그 외는 그대로).
 /// `.default`/`.rgb`/256색 cube(8~255)는 안 건드린다 — 정의가 분명한 부분집합만(theme.bold-is-bright 주석 참고).
@@ -198,30 +216,36 @@ fn lerpHalf(a: color.Rgb, b: color.Rgb) color.Rgb {
 fn packForeground(style: terminal.Style, colors: CellColors) u32 {
     // DECSCNM(화면 반전, G9)과 SGR reverse(7)를 XOR한다 — 둘 다 켜지면 상쇄(정상), 하나만 켜지면 스왑.
     const reverse = style.reverse != colors.screen_reverse;
-    // SGR 8 conceal(G1) 또는 blink(SGR 5) off 위상: 글자를 그 셀 배경색으로 그려 안 보이게 한다(invisible/점멸).
-    // reverse면 스왑된 배경.
-    if (style.conceal or (style.blink and !colors.blink_on)) {
-        return packRgb(if (reverse)
-            resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette)
+    // 최종 전경 RGB를 한 변수로 모아 끝에서 디밍(F2-7)을 **한 번만** 적용한다 — conceal/faint/일반 경로가
+    // 모두 같은 dim 후처리를 거치게(비활성 split pane이면 dim_milli>0).
+    const fg: color.Rgb = blk: {
+        // SGR 8 conceal(G1) 또는 blink(SGR 5) off 위상: 글자를 그 셀 배경색으로 그려 안 보이게 한다(invisible/점멸).
+        // reverse면 스왑된 배경.
+        if (style.conceal or (style.blink and !colors.blink_on)) {
+            break :blk if (reverse)
+                resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette)
+            else
+                resolveColor(style.background, colors.default_bg, colors.palette, colors.config_palette);
+        }
+        const base = if (reverse)
+            resolveColor(style.background, colors.default_bg, colors.palette, colors.config_palette)
         else
-            resolveColor(style.background, colors.default_bg, colors.palette, colors.config_palette));
-    }
-    const fg = if (reverse)
-        resolveColor(style.background, colors.default_bg, colors.palette, colors.config_palette)
-    else
-        // bold-is-bright: 비-reverse 전경에만 적용(reverse는 배경색을 전경으로 그리므로 끈다).
-        resolveColor(brightenIfBold(style.foreground, style.bold, colors.bold_is_bright), colors.default_fg, colors.palette, colors.config_palette);
-    if (style.dim) {
-        // SGR 2 faint: 전경을 그 셀의 배경 쪽으로 0.5 보간(intensity 감소). 베이스: Ghostty
-        // faint-opacity 기본 0.5(glyph alpha)인데, maru 전경색엔 alpha가 없어 같은 시각 효과를
-        // RGB 보간으로 낸다(alpha 0.5 over bg = (fg+bg)/2). reverse면 보간 대상 배경도 스왑된 값.
-        const bg = if (reverse)
-            resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette)
-        else
-            resolveColor(style.background, colors.default_bg, colors.palette, colors.config_palette);
-        return packRgb(lerpHalf(fg, bg));
-    }
-    return packRgb(fg);
+            // bold-is-bright: 비-reverse 전경에만 적용(reverse는 배경색을 전경으로 그리므로 끈다).
+            resolveColor(brightenIfBold(style.foreground, style.bold, colors.bold_is_bright), colors.default_fg, colors.palette, colors.config_palette);
+        if (style.dim) {
+            // SGR 2 faint: 전경을 그 셀의 배경 쪽으로 0.5 보간(intensity 감소). 베이스: Ghostty
+            // faint-opacity 기본 0.5(glyph alpha)인데, maru 전경색엔 alpha가 없어 같은 시각 효과를
+            // RGB 보간으로 낸다(alpha 0.5 over bg = (fg+bg)/2). reverse면 보간 대상 배경도 스왑된 값.
+            const bg = if (reverse)
+                resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette)
+            else
+                resolveColor(style.background, colors.default_bg, colors.palette, colors.config_palette);
+            break :blk lerpHalf(base, bg);
+        }
+        break :blk base;
+    };
+    // 비활성 split pane 디밍(F2-7): 최종 전경을 pane 배경 쪽으로 dim_milli만큼 흐리게(dim_milli=0이면 무변화).
+    return packRgb(dimToward(fg, colors.default_bg, colors.dim_milli));
 }
 
 /// 텍스트 장식선(line overlay)의 화면 RGB. 전경색을 풀고, dim(SGR 2)이면 packForeground와 같은 규칙으로
@@ -241,13 +265,15 @@ fn effectiveLineColor(l: renderer.LineOverlay, colors: CellColors) color.Rgb {
 fn packBackground(style: terminal.Style, colors: CellColors) u32 {
     // DECSCNM(G9) XOR SGR reverse: 반전이면 전경색으로 칠한다(default 전경도 풀어 실제로 칠해야 반전이 보인다).
     const reverse = style.reverse != colors.screen_reverse;
-    if (reverse) return 0xFF00_0000 | packRgb(resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette));
+    // 명시 배경·reverse 배경은 비활성 split pane이면 dim_milli만큼 흐리게(F2-7). default 배경(A=0)은 투명으로 둬
+    // window_opacity·clear color를 보존한다 — fill=default_bg와 같아 디밍해도 무변화이므로 칠하지 않는 게 맞다.
+    if (reverse) return 0xFF00_0000 | packRgb(dimToward(resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette), colors.default_bg, colors.dim_milli));
     const rgb = switch (style.background) {
         .default => return 0,
         .indexed => |index| paletteColor(index, colors.palette, colors.config_palette),
         .rgb => |value| value,
     };
-    return 0xFF00_0000 | packRgb(rgb);
+    return 0xFF00_0000 | packRgb(dimToward(rgb, colors.default_bg, colors.dim_milli));
 }
 
 pub const NativeMetalRasterUpload = extern struct {
@@ -1666,6 +1692,28 @@ test "packForeground halves a faint foreground toward the background (SGR 2)" {
     };
     try std.testing.expectEqual(@as(u32, 0xFFFFFF), packForeground(.{ .foreground = .default }, colors));
     try std.testing.expectEqual(@as(u32, 0x878787), packForeground(.{ .foreground = .default, .dim = true }, colors));
+}
+
+test "unfocused dim interpolates fg and explicit bg toward default_bg, leaving default bg transparent (F2-7)" {
+    // 비활성 split pane 디밍: dim_milli만큼 최종 색을 default_bg(fill) 쪽으로 보간. 흰 전경(255)을 어두운
+    // 배경(16)으로 50%(500‰) → (255+16)/2 = 135 = 0x87. dim_milli=0이면 무변화.
+    const off: CellColors = .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 }, .default_bg = .{ .r = 16, .g = 16, .b = 16 } };
+    const half: CellColors = .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 }, .default_bg = .{ .r = 16, .g = 16, .b = 16 }, .dim_milli = 500 };
+
+    // dim 끔: 전경 그대로.
+    try std.testing.expectEqual(@as(u32, 0xFFFFFF), packForeground(.{ .foreground = .default }, off));
+    // dim 50%: 흰 전경이 어두운 배경 쪽으로 절반 → 0x878787. SGR/truecolor도 같은 보간을 거친다.
+    try std.testing.expectEqual(@as(u32, 0x878787), packForeground(.{ .foreground = .default }, half));
+    try std.testing.expectEqual(@as(u32, 0x878787), packForeground(.{ .foreground = .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } } }, half));
+
+    // 명시 배경도 디밍: 흰 배경 → 0x878787, A=0xFF 유지.
+    try std.testing.expectEqual(@as(u32, 0xFF878787), packBackground(.{ .background = .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } } }, half));
+    // default 배경(A=0 투명)은 디밍 안 함 — fill=default_bg와 같아 칠하지 않는 게 맞다(window_opacity·clear color 보존).
+    try std.testing.expectEqual(@as(u32, 0), packBackground(.{ .background = .default }, half));
+
+    // dim_milli=1000(완전): 전경이 배경색과 같아진다(완전히 사라짐).
+    const full: CellColors = .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 }, .default_bg = .{ .r = 16, .g = 16, .b = 16 }, .dim_milli = 1000 };
+    try std.testing.expectEqual(@as(u32, 0x101010), packForeground(.{ .foreground = .default }, full));
 }
 
 test "bold-is-bright: bold + indexed 0..7 전경만 bright(8..15)로, 그 외는 불변" {

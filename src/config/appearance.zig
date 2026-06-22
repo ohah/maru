@@ -80,6 +80,9 @@ pub const ResolvedAppearance = struct {
     window_opacity: f32 = 1.0,
     // 휠/트랙패드 세로 스크롤 배수(0.1~10.0, 기본 1.0). app scrollWheel이 delta에 곱한다(근거는 theme.ScrollConfig 주석).
     scroll_multiplier: f32 = 1.0,
+    // 비활성 split pane 디밍 강도(0.0~1.0, 기본 0.0=끔). app이 비활성 pane CellColors.dim_milli로 환산해 셀 색을
+    // 배경 쪽으로 보간(근거는 theme.Config.window_unfocused_dim 주석 단일 출처). loader가 0~1 range 검증.
+    unfocused_dim: f32 = 0.0,
 };
 
 pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
@@ -108,6 +111,7 @@ pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
         .window_padding_left = config.window_padding_left,
         .window_opacity = config.window_opacity,
         .scroll_multiplier = config.scroll.multiplier,
+        .unfocused_dim = config.window_unfocused_dim,
     };
 }
 

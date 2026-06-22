@@ -713,6 +713,8 @@ test "schema tryParse: 최상위 스칼라(Config.schema) — Meta.key 전체 �
     a.free(cfg.font.fallback); // dupe 회수(테스트 한정)
     try std.testing.expect(try tryParse(a, &cfg, "cursor.unfocused", "hollow", &diags, 11)); // sub-struct enum
     try std.testing.expectEqual(theme.UnfocusedCursor.hollow, cfg.cursor.unfocused);
+    try std.testing.expect(try tryParse(a, &cfg, "window.unfocused-dim", "0.3", &diags, 12)); // 최상위 f32 range 0~1
+    try std.testing.expectApproxEqAbs(@as(f32, 0.3), cfg.window_unfocused_dim, 0.001);
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 
     // 범위 밖 padding → diagnostic + 기본 유지

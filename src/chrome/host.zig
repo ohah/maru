@@ -186,7 +186,7 @@ pub const ChromeHost = struct {
                         .adjust_right => .settings_adjust_right,
                         .slider_set => .none, // 키 경로엔 안 옴(슬라이더 ratio 설정은 포인터 드래그 전용) — exhaustiveness
                         .selection_changed => .settings_selection_changed,
-                        .section_changed => .none, // 키 경로엔 안 옴(섹션 전환은 좌측 네비 클릭 전용) — exhaustiveness
+                        .section_changed => .settings_section_changed, // 키보드 네비(Tab→↑↓ 섹션 이동)도 platform이 refreshSettingsFieldCount(새 섹션 행 수 재주입)·섹션 상한 clamp를 타게 한다 — 포인터(클릭) 경로와 동일. 안 그러면 count가 직전 섹션 값으로 고정돼 ↓가 입력 섹션 중간(right-click 부근)에서 wrap한다
                         .text_commit => .settings_text_commit, // 인라인 편집 Enter
                         .search_changed => .settings_search_changed, // 검색 시작/입력/종료 — 필터 재적용
                         .delete_row => .settings_delete_row, // 선택 행 Backspace — env 삭제 등
@@ -380,4 +380,18 @@ test "host: handlePointer — 모달 열리면 소비(.none), 닫히면 null(통
     const up = input.PointerEvent{ .phase = .up, .x_px = 10, .y_px = 10 };
     try std.testing.expectEqual(HostAction.none, host.handleInput(std.testing.allocator, .{ .pointer = up }).?);
     try std.testing.expect(host.notice.open);
+}
+
+test "host: settings 키보드 섹션 네비(Tab→↓)는 .settings_section_changed (count 재주입 — 회귀 방지)" {
+    // 회귀 가드: 키 경로(handleInput)가 settings .section_changed를 .none으로 버리면, 키보드로 섹션을 바꿀 때
+    // platform이 refreshSettingsFieldCount(새 섹션 행 수 재주입)를 안 타 입력 섹션에서 ↓가 직전 섹션 행 수
+    // 범위로만 wrap한다(right-click 부근에서 멈춤). 포인터(클릭) 경로(app_session)와 동일하게 .settings_section_changed로 살린다.
+    var host = ChromeHost{};
+    defer host.deinit(std.testing.allocator);
+    host.settings.show();
+    // Tab으로 네비 모드 진입(폼↔네비 토글) → 네비 모드의 ↑↓가 좌측 섹션을 바꾼다.
+    _ = host.handleInput(std.testing.allocator, .{ .key = .{ .key = .tab } });
+    // ↓ 섹션 이동 → host가 platform에 .settings_section_changed를 줘야 한다(.none이면 회귀).
+    const action = host.handleInput(std.testing.allocator, .{ .key = .{ .key = .down } });
+    try std.testing.expectEqual(HostAction.settings_section_changed, action.?);
 }

@@ -51,6 +51,9 @@ pub const ShapeDrawListFn = *const fn (
     requested_font_family: [*]const u8,
     requested_font_family_len: usize,
     requested_font_size: f64,
+    // 폴백 폰트 CSV(쉼표 구분, 빈 len 0=폴백 없음). ObjC가 split·trim해 주 폰트에 kCTFontCascadeListAttribute로 박는다(F1-2).
+    fallback_families: [*]const u8,
+    fallback_families_len: usize,
     cells: [*]const NativeDrawCell,
     cell_count: usize,
     result: *NativeDrawListShapeResult,
@@ -129,6 +132,8 @@ pub const CoreTextDrawListShaper = struct {
             self.appearance.font.family.ptr,
             self.appearance.font.family.len,
             @floatCast(self.appearance.font.size),
+            self.appearance.font.fallback.ptr,
+            self.appearance.font.fallback.len,
             native_cells.items.ptr,
             native_cells.items.len,
             &native,
@@ -487,6 +492,8 @@ fn fakeShapeDrawList(
     _: [*]const u8,
     _: usize,
     _: f64,
+    _: [*]const u8, // fallback CSV ptr
+    _: usize, // fallback CSV len
     cells_ptr: [*]const NativeDrawCell,
     cell_count: usize,
     result: *NativeDrawListShapeResult,
@@ -543,6 +550,8 @@ fn failingShapeDrawList(
     _: [*]const u8,
     _: usize,
     _: f64,
+    _: [*]const u8, // fallback CSV ptr
+    _: usize, // fallback CSV len
     _: [*]const NativeDrawCell,
     _: usize,
     result: *NativeDrawListShapeResult,
@@ -565,6 +574,8 @@ fn outOfRangeRecordShapeDrawList(
     _: [*]const u8,
     _: usize,
     _: f64,
+    _: [*]const u8, // fallback CSV ptr
+    _: usize, // fallback CSV len
     cells_ptr: [*]const NativeDrawCell,
     cell_count: usize,
     result: *NativeDrawListShapeResult,

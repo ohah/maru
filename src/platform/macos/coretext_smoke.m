@@ -265,6 +265,76 @@ static CTFontRef maru_create_primary_font(
     return CTFontCreateWithName(CFSTR("Menlo-Regular"), (CGFloat)font_size, NULL);
 }
 
+// base 폰트에 사용자 폴백 폰트(쉼표 구분 CSV)를 cascade list로 박은 새 CTFont를 돌려준다(F1-2 font.fallback). 사용자
+// 폴백을 **앞에** 두고 CoreText 기본 cascade(CTFontCopyDefaultCascadeListForLanguages)를 **뒤에** 이어, 주 폰트에 없는
+// 글리프(한글·이모지 등)를 사용자 폰트 우선으로 그린다. cascade list 요소는 CTFontDescriptor다(Apple 규약). 빈/실패면
+// NULL을 돌려 호출자가 base를 그대로 쓰게 한다(폴백은 best-effort — 잘못된 폰트명은 CoreText가 그 항목을 무시). 새
+// 폰트는 호출자 소유(CFRelease). 베이스: Ghostty도 cascade list를 명시해 사용자 폰트를 우선한다(동작 비교만).
+static CTFontRef maru_apply_cascade_list(
+    CTFontRef base,
+    const char *fallback_families,
+    size_t fallback_families_len,
+    double font_size
+) {
+    if (base == NULL || fallback_families == NULL || fallback_families_len == 0) {
+        return NULL;
+    }
+    CFMutableArrayRef cascade = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
+    if (cascade == NULL) {
+        return NULL;
+    }
+    char *dup = strndup(fallback_families, fallback_families_len);
+    if (dup != NULL) {
+        char *saveptr = NULL;
+        for (char *tok = strtok_r(dup, ",", &saveptr); tok != NULL; tok = strtok_r(NULL, ",", &saveptr)) {
+            // 항목 앞뒤 공백 trim(내부 공백은 폰트명이라 보존).
+            char *start = tok;
+            while (*start == ' ' || *start == '\t') start++;
+            char *end = start + strlen(start);
+            while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+            if (end == start) continue;
+            CFStringRef name = CFStringCreateWithBytes(
+                kCFAllocatorDefault, (const UInt8 *)start, (CFIndex)(end - start), kCFStringEncodingUTF8, false);
+            if (name == NULL) continue;
+            const void *dkeys[] = { (const void *)kCTFontFamilyNameAttribute };
+            const void *dvals[] = { name };
+            CFDictionaryRef dattrs = CFDictionaryCreate(
+                kCFAllocatorDefault, dkeys, dvals, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+            if (dattrs != NULL) {
+                CTFontDescriptorRef d = CTFontDescriptorCreateWithAttributes(dattrs);
+                if (d != NULL) {
+                    CFArrayAppendValue(cascade, d);
+                    CFRelease(d);
+                }
+                CFRelease(dattrs);
+            }
+            CFRelease(name);
+        }
+        free(dup);
+    }
+    // 사용자 폴백 뒤에 CoreText 기본 cascade를 이어 시스템 폴백(한글/이모지 기본 폰트 등)도 유지한다.
+    CFArrayRef default_cascade = CTFontCopyDefaultCascadeListForLanguages(base, NULL);
+    if (default_cascade != NULL) {
+        CFArrayAppendArray(cascade, default_cascade, CFRangeMake(0, CFArrayGetCount(default_cascade)));
+        CFRelease(default_cascade);
+    }
+    CTFontRef result = NULL;
+    const void *keys[] = { (const void *)kCTFontCascadeListAttribute };
+    const void *vals[] = { cascade };
+    CFDictionaryRef attrs = CFDictionaryCreate(
+        kCFAllocatorDefault, keys, vals, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if (attrs != NULL) {
+        CTFontDescriptorRef desc = CTFontDescriptorCreateWithAttributes(attrs);
+        if (desc != NULL) {
+            result = CTFontCreateCopyWithAttributes(base, (CGFloat)font_size, NULL, desc);
+            CFRelease(desc);
+        }
+        CFRelease(attrs);
+    }
+    CFRelease(cascade);
+    return result;
+}
+
 typedef struct {
     int32_t status;
     uint32_t cell_width_px;
@@ -726,6 +796,8 @@ void maru_macos_coretext_shape_draw_list(
     const char *requested_font_family,
     size_t requested_font_family_len,
     double requested_font_size,
+    const char *fallback_families,
+    size_t fallback_families_len,
     const MaruCoreTextDrawCell *cells,
     size_t cell_count,
     MaruCoreTextDrawListShapeResult *result,
@@ -761,6 +833,17 @@ void maru_macos_coretext_shape_draw_list(
             return;
         }
         result->primary_font_found = 1;
+
+        // 사용자 폴백 폰트(font.fallback)가 있으면 주 폰트에 cascade list로 박는다 — 이후 모든 CTLine(attributes의
+        // kCTFontAttributeName이 이 폰트)이 주 폰트에 없는 글리프를 사용자 폴백→시스템 폴백 순으로 그린다(매 cell 변경 불요).
+        if (fallback_families != NULL && fallback_families_len > 0) {
+            CTFontRef with_cascade = maru_apply_cascade_list(
+                primary_font, fallback_families, fallback_families_len, requested_font_size);
+            if (with_cascade != NULL) {
+                CFRelease(primary_font);
+                primary_font = with_cascade;
+            }
+        }
 
         CFStringRef primary_name = CTFontCopyPostScriptName(primary_font);
         const void *keys[] = { kCTFontAttributeName };

@@ -18,6 +18,9 @@ pub const ResolvedFontRequest = struct {
     line_height: f32,
     /// 자간(논리 pt, 음수 허용). resolveFont가 [-8, 32]로 재검증(범위 밖은 InvalidFontSize). refreshCellMetrics가 px로 환산해 cell_width_px에 가산.
     letter_spacing: f32,
+    /// 폴백 폰트 패밀리 목록(쉼표 구분 CSV, 빈="" = 폴백 명시 없음). 셰이퍼가 그대로 ObjC로 넘기면 거기서 split·trim해
+    /// kCTFontCascadeListAttribute로 박는다(근거는 theme.FontConfig.fallback 주석 단일 출처).
+    fallback: []const u8 = "",
 };
 
 pub const ResolvedTheme = struct {
@@ -127,6 +130,9 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
         .size_step = config.size_step,
         .line_height = config.line_height,
         .letter_spacing = config.letter_spacing,
+        // fallback은 raw CSV를 그대로 빌린다(빈 ""=폴백 없음). split·trim·검증은 ObjC 셰이퍼가 cascade list를 만들 때 한다
+        // (잘못된 폰트명은 CoreText가 그 항목을 무시 — family처럼 막진 않는다, 폴백은 best-effort).
+        .fallback = config.fallback,
     };
 }
 
@@ -292,7 +298,7 @@ test "appearance resolver applies cursor color overrides and keeps them null by 
 
 test "appearance resolver trims font family and preserves cursor options" {
     const resolved = try resolve(.{
-        .font = .{ .family = "  Menlo  ", .size = 16, .size_step = 3, .line_height = 1.5, .letter_spacing = -2.0 },
+        .font = .{ .family = "  Menlo  ", .size = 16, .size_step = 3, .line_height = 1.5, .letter_spacing = -2.0, .fallback = "Apple SD Gothic Neo, Apple Color Emoji" },
         .theme = .{
             .background = "#000000",
             .foreground = "#FFFFFF",
@@ -303,6 +309,8 @@ test "appearance resolver trims font family and preserves cursor options" {
     });
 
     try std.testing.expectEqualStrings("Menlo", resolved.font.family);
+    try std.testing.expectEqualStrings("Apple SD Gothic Neo, Apple Color Emoji", resolved.font.fallback); // 폴백 CSV는 raw 전파(split은 ObjC) — F1-2
+    try std.testing.expectEqualStrings("", (try resolve(.{ .theme = .{ .background = "#000000", .foreground = "#FFFFFF", .cursor = "#ffffff", .selection = "#123456" } })).font.fallback); // 기본 빈 폴백
     try std.testing.expectEqual(@as(f32, 16), resolved.font.size);
     try std.testing.expectEqual(@as(f32, 3), resolved.font.size_step); // size_step 통과(기본 1)
     try std.testing.expectEqual(@as(f32, 1.5), resolved.font.line_height); // line_height 전파(범위 내)

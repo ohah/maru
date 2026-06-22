@@ -1772,7 +1772,7 @@ pub const TerminalCore = struct {
                     if (self.escape_intermediate_byte == '#' and final == '8') {
                         self.decAlign(); // DECALN(G11)
                     } else {
-                        self.designateCharset(self.escape_intermediate_byte, final);
+                        screen.designateCharset(self, self.escape_intermediate_byte, final);
                     }
                     self.parser = .ground;
                     index_ += 1;
@@ -4111,7 +4111,7 @@ pub const TerminalCore = struct {
                 if (codepoint < 0x20) return;
                 // G3: GL에 호출된 G-set(G0/G1)의 charset으로 변환한다(dec_special이면 0x60..0x7e→box 문자,
                 // ascii면 무변환). box 문자는 width 1·non-combining이라 아래 grapheme/combining 로직과 호환.
-                const cp = self.translateCharset(codepoint);
+                const cp = screen.translateCharset(self, codepoint);
                 if (width.cellWidth(cp) == 0) {
                     // VS16(U+FE0F) 등 변형 선택자/결합 문자는 0폭 combining으로 앞 글자에 붙인다.
                     self.attachCombiningMark(cp);
@@ -4126,12 +4126,12 @@ pub const TerminalCore = struct {
                 if (self.grapheme_cluster_mode) {
                     // 스킨톤 modifier(👍 + 🏽): 앞 이모지에 combining으로 붙여 한 글자. base는 이미
                     // width 2(EAW Wide)라 폭 승격 불필요.
-                    if (isSkinToneModifier(cp) and self.lastCellIsWideEmoji()) {
+                    if (screen.isSkinToneModifier(cp) and screen.lastCellIsWideEmoji(self)) {
                         self.attachCombiningMark(cp);
                         return;
                     }
                     // 국기: 지역 표시자(RI) 2개를 한 셀(width 2)로. 직전이 짝 없는 RI면 combining + 승격.
-                    if (isRegionalIndicator(cp) and self.lastCellIsLoneRegionalIndicator()) {
+                    if (screen.isRegionalIndicator(cp) and screen.lastCellIsLoneRegionalIndicator(self)) {
                         self.attachCombiningMark(cp);
                         self.promoteLastToEmojiWidth();
                         return;
@@ -4140,68 +4140,6 @@ pub const TerminalCore = struct {
                 self.putCell(cp);
             },
         }
-    }
-
-    /// `ESC <intermediate> <final>`로 G-set을 지정한다. intermediate '('=G0·')'=G1, final '0'=dec_special·
-    /// 'B'=ascii(그 외 charset은 미지원이라 ascii로). G2/G3('*'/'+')는 maru가 호출(SS2/SS3)을 안 해 무시.
-    fn designateCharset(self: *TerminalCore, intermediate: u8, final: u8) void {
-        const set: Charset = switch (final) {
-            '0' => .dec_special, // DEC special graphics(box drawing)
-            else => .ascii, // 'B'(ASCII)·기타 미지원 → ascii
-        };
-        switch (intermediate) {
-            '(' => self.charset_g0 = set, // ESC ( = G0 지정
-            ')' => self.charset_g1 = set, // ESC ) = G1 지정
-            else => {}, // G2/G3·기타 intermediate는 소비(미지원)
-        }
-    }
-
-    /// GL에 호출된 G-set(charset_gl)의 charset으로 codepoint를 변환한다.
-    fn translateCharset(self: *const TerminalCore, codepoint: u21) u21 {
-        const set = if (self.charset_gl == 0) self.charset_g0 else self.charset_g1;
-        return switch (set) {
-            .ascii => codepoint,
-            .dec_special => decSpecial(codepoint),
-        };
-    }
-
-    /// DEC special graphics: 0x60..0x7e를 box-drawing/기호 Unicode로. 그 밖은 그대로. 베이스: VT100 special
-    /// graphics(Ghostty `charsets.zig` dec_special 표와 동작 비교 — 코드 표현 미복사).
-    fn decSpecial(codepoint: u21) u21 {
-        return switch (codepoint) {
-            0x60 => 0x25C6, // ◆
-            0x61 => 0x2592, // ▒
-            0x62 => 0x2409, // ␉ HT
-            0x63 => 0x240C, // ␌ FF
-            0x64 => 0x240D, // ␍ CR
-            0x65 => 0x240A, // ␊ LF
-            0x66 => 0x00B0, // °
-            0x67 => 0x00B1, // ±
-            0x68 => 0x2424, // ␤ NL
-            0x69 => 0x240B, // ␋ VT
-            0x6a => 0x2518, // ┘
-            0x6b => 0x2510, // ┐
-            0x6c => 0x250C, // ┌
-            0x6d => 0x2514, // └
-            0x6e => 0x253C, // ┼
-            0x6f => 0x23BA, // ⎺
-            0x70 => 0x23BB, // ⎻
-            0x71 => 0x2500, // ─
-            0x72 => 0x23BC, // ⎼
-            0x73 => 0x23BD, // ⎽
-            0x74 => 0x251C, // ├
-            0x75 => 0x2524, // ┤
-            0x76 => 0x2534, // ┴
-            0x77 => 0x252C, // ┬
-            0x78 => 0x2502, // │
-            0x79 => 0x2264, // ≤
-            0x7a => 0x2265, // ≥
-            0x7b => 0x03C0, // π
-            0x7c => 0x2260, // ≠
-            0x7d => 0x00A3, // £
-            0x7e => 0x00B7, // ·
-            else => codepoint,
-        };
     }
 
     fn completePendingUtf8(self: *TerminalCore, bytes: []const u8, index_: usize) !usize {
@@ -4309,39 +4247,6 @@ pub const TerminalCore = struct {
         }
     }
 
-    fn isSkinToneModifier(codepoint: u21) bool {
-        return codepoint >= 0x1F3FB and codepoint <= 0x1F3FF; // Fitzpatrick modifiers
-    }
-
-    fn isRegionalIndicator(codepoint: u21) bool {
-        return codepoint >= 0x1F1E6 and codepoint <= 0x1F1FF;
-    }
-
-    /// 직전 출력 셀이 짝 없는(아직 combining 안 붙은) wide 이모지 base인지 — 스킨톤 modifier를
-    /// 거기 붙이기 위함. combining이 이미 있으면(예: 국기의 2번째 RI) 거기에 스킨톤을 또 붙이면
-    /// 그 슬롯(하나뿐)을 덮어써 국기가 깨지므로 제외한다.
-    fn lastCellIsWideEmoji(self: *const TerminalCore) bool {
-        const last = self.last_print orelse return false;
-        const cell = self.cells[self.index(last.row, last.col)];
-        // width 2를 wide emoji 대용으로 본다(스킨톤 modifier 부착 대상). 단 ambiguous-width=wide로 2칸이 된
-        // 동그란 번호(isWideRenderSymbol)는 이모지가 아니라 스킨톤 부착 대상이 아니므로 제외 — 안 그러면 ③ 뒤
-        // 스킨톤이 ③의 combining 슬롯에 잘못 병합된다(mode 2027).
-        return cell.width == 2 and cell.combining == null and !width.isWideRenderSymbol(cell.codepoint);
-    }
-
-    /// 직전 출력 셀이 짝 없는(combining 안 붙은) 지역 표시자인지 — 다음 RI와 국기로 묶기 위함.
-    fn lastCellIsLoneRegionalIndicator(self: *const TerminalCore) bool {
-        const last = self.last_print orelse return false;
-        const cell = self.cells[self.index(last.row, last.col)];
-        return isRegionalIndicator(cell.codepoint) and cell.combining == null;
-    }
-
-    /// wide glyph의 오른쪽 continuation 칸(0폭). base의 style/link를 물려받는다 — putCell과
-    /// promoteLastToEmojiWidth가 같은 표현을 쓰게 한다.
-    fn wideContinuationCell(style: types.Style, link: u32) types.Cell {
-        return .{ .style = style, .width = 0, .continuation = true, .link = link };
-    }
-
     /// grapheme(VS16/RI 페어 등)이 붙은 직전 base 셀을 width 1 -> 2로 승격한다(이미 2면 무시).
     /// mode 2027 또는 emoji_wide(text.emoji-width=wide)에서 호출된다 — 둘 다 이모지를 2칸으로 보는 상태다.
     fn promoteLastToEmojiWidth(self: *TerminalCore) void {
@@ -4366,7 +4271,7 @@ pub const TerminalCore = struct {
             self.wrapped[row] = false;
             self.cells[self.index(row, 0)] = base;
             self.cells[self.index(row, 0)].width = 2;
-            self.cells[self.index(row, 1)] = wideContinuationCell(base.style, base.link);
+            self.cells[self.index(row, 1)] = screen.wideContinuationCell(base.style, base.link);
             self.last_print = .{ .row = row, .col = 0 };
             screen.markDirty(self, row);
             if (2 < self.size.cols) {
@@ -4380,7 +4285,7 @@ pub const TerminalCore = struct {
         }
 
         self.cells[base_idx].width = 2;
-        self.cells[self.index(last.row, last.col + 1)] = wideContinuationCell(self.cells[base_idx].style, self.cells[base_idx].link);
+        self.cells[self.index(last.row, last.col + 1)] = screen.wideContinuationCell(self.cells[base_idx].style, self.cells[base_idx].link);
         screen.markDirty(self, last.row);
         // 커서가 base 바로 뒤(width-1 전진 위치)면 2칸짜리로 한 칸 더 민다.
         if (self.cursor.row == last.row and self.cursor.col == last.col + 1) {
@@ -4619,7 +4524,8 @@ pub const TerminalCore = struct {
         screen.markCursorMoveDirty(self, old_cursor, self.cursor);
     }
 
-    fn index(self: *const TerminalCore, row: usize, col: usize) usize {
+    /// 행·열 → cells 1차원 인덱스. screen.zig 활성 화면 연산(lastCellIs*)도 cross-file 호출 — pub.
+    pub fn index(self: *const TerminalCore, row: usize, col: usize) usize {
         return row * self.size.cols + col;
     }
 };

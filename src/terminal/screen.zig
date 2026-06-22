@@ -12,6 +12,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const core = @import("core.zig"); // 활성 화면 연산이 *TerminalCore를 받는다(Scrollback struct는 여전히 types만 의존)
+const width = @import("../width.zig"); // EAW 셀 폭(중립 top-level 유틸) — wide 이모지 판정에 쓴다
 
 const TerminalCore = core.TerminalCore;
 
@@ -224,4 +225,107 @@ pub fn markCursorMoveDirty(self: *TerminalCore, old_cursor: types.Cursor, new_cu
 fn markCursorRowDirty(self: *TerminalCore, row: u16) void {
     if (self.size.rows == 0) return;
     markDirty(self, @min(row, self.size.rows - 1));
+}
+
+// ── G3 charset(G-set 지정·변환) ──────────────────────────────────────────────────────────────────
+// ESC ( / ESC ) 로 G0/G1에 charset 지정, SI/SO로 GL 호출, print 시 GL charset으로 codepoint 변환한다.
+// DEC special graphics(box drawing)가 유일한 비-ascii charset이다. 베이스: VT100 special graphics·xterm.
+
+/// `ESC <intermediate> <final>`로 G-set을 지정한다. intermediate '('=G0·')'=G1, final '0'=dec_special·
+/// 'B'=ascii(그 외 charset은 미지원이라 ascii로). G2/G3('*'/'+')는 maru가 호출(SS2/SS3)을 안 해 무시.
+pub fn designateCharset(self: *TerminalCore, intermediate: u8, final: u8) void {
+    const set: core.TerminalCore.Charset = switch (final) {
+        '0' => .dec_special, // DEC special graphics(box drawing)
+        else => .ascii, // 'B'(ASCII)·기타 미지원 → ascii
+    };
+    switch (intermediate) {
+        '(' => self.charset_g0 = set, // ESC ( = G0 지정
+        ')' => self.charset_g1 = set, // ESC ) = G1 지정
+        else => {}, // G2/G3·기타 intermediate는 소비(미지원)
+    }
+}
+
+/// GL에 호출된 G-set(charset_gl)의 charset으로 codepoint를 변환한다.
+pub fn translateCharset(self: *const TerminalCore, codepoint: u21) u21 {
+    const set = if (self.charset_gl == 0) self.charset_g0 else self.charset_g1;
+    return switch (set) {
+        .ascii => codepoint,
+        .dec_special => decSpecial(codepoint),
+    };
+}
+
+/// DEC special graphics: 0x60..0x7e를 box-drawing/기호 Unicode로. 그 밖은 그대로. 베이스: VT100 special
+/// graphics(Ghostty `charsets.zig` dec_special 표와 동작 비교 — 코드 표현 미복사).
+fn decSpecial(codepoint: u21) u21 {
+    return switch (codepoint) {
+        0x60 => 0x25C6, // ◆
+        0x61 => 0x2592, // ▒
+        0x62 => 0x2409, // ␉ HT
+        0x63 => 0x240C, // ␌ FF
+        0x64 => 0x240D, // ␍ CR
+        0x65 => 0x240A, // ␊ LF
+        0x66 => 0x00B0, // °
+        0x67 => 0x00B1, // ±
+        0x68 => 0x2424, // ␤ NL
+        0x69 => 0x240B, // ␋ VT
+        0x6a => 0x2518, // ┘
+        0x6b => 0x2510, // ┐
+        0x6c => 0x250C, // ┌
+        0x6d => 0x2514, // └
+        0x6e => 0x253C, // ┼
+        0x6f => 0x23BA, // ⎺
+        0x70 => 0x23BB, // ⎻
+        0x71 => 0x2500, // ─
+        0x72 => 0x23BC, // ⎼
+        0x73 => 0x23BD, // ⎽
+        0x74 => 0x251C, // ├
+        0x75 => 0x2524, // ┤
+        0x76 => 0x2534, // ┴
+        0x77 => 0x252C, // ┬
+        0x78 => 0x2502, // │
+        0x79 => 0x2264, // ≤
+        0x7a => 0x2265, // ≥
+        0x7b => 0x03C0, // π
+        0x7c => 0x2260, // ≠
+        0x7d => 0x00A3, // £
+        0x7e => 0x00B7, // ·
+        else => codepoint,
+    };
+}
+
+// ── 이모지/RI grapheme 폭 헬퍼 ───────────────────────────────────────────────────────────────────
+// 스킨톤 modifier 부착·지역표시자(RI) 페어링·wide 이모지 승격 판정. putCell·promoteLastToEmojiWidth(print
+// 경로, core 잔류)가 cross-file로 호출한다. last_print·cells·index(grid)에 의존한다.
+
+pub fn isSkinToneModifier(codepoint: u21) bool {
+    return codepoint >= 0x1F3FB and codepoint <= 0x1F3FF; // Fitzpatrick modifiers
+}
+
+pub fn isRegionalIndicator(codepoint: u21) bool {
+    return codepoint >= 0x1F1E6 and codepoint <= 0x1F1FF;
+}
+
+/// 직전 출력 셀이 짝 없는(아직 combining 안 붙은) wide 이모지 base인지 — 스킨톤 modifier를
+/// 거기 붙이기 위함. combining이 이미 있으면(예: 국기의 2번째 RI) 거기에 스킨톤을 또 붙이면
+/// 그 슬롯(하나뿐)을 덮어써 국기가 깨지므로 제외한다.
+pub fn lastCellIsWideEmoji(self: *const TerminalCore) bool {
+    const last = self.last_print orelse return false;
+    const cell = self.cells[self.index(last.row, last.col)];
+    // width 2를 wide emoji 대용으로 본다(스킨톤 modifier 부착 대상). 단 ambiguous-width=wide로 2칸이 된
+    // 동그란 번호(isWideRenderSymbol)는 이모지가 아니라 스킨톤 부착 대상이 아니므로 제외 — 안 그러면 ③ 뒤
+    // 스킨톤이 ③의 combining 슬롯에 잘못 병합된다(mode 2027).
+    return cell.width == 2 and cell.combining == null and !width.isWideRenderSymbol(cell.codepoint);
+}
+
+/// 직전 출력 셀이 짝 없는(combining 안 붙은) 지역 표시자인지 — 다음 RI와 국기로 묶기 위함.
+pub fn lastCellIsLoneRegionalIndicator(self: *const TerminalCore) bool {
+    const last = self.last_print orelse return false;
+    const cell = self.cells[self.index(last.row, last.col)];
+    return isRegionalIndicator(cell.codepoint) and cell.combining == null;
+}
+
+/// wide glyph의 오른쪽 continuation 칸(0폭). base의 style/link를 물려받는다 — putCell과
+/// promoteLastToEmojiWidth가 같은 표현을 쓰게 한다.
+pub fn wideContinuationCell(style: types.Style, link: u32) types.Cell {
+    return .{ .style = style, .width = 0, .continuation = true, .link = link };
 }

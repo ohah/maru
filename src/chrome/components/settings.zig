@@ -287,9 +287,11 @@ pub const Action = enum { close, toggle, slider_set, adjust_left, adjust_right, 
 const label_gap_cols: u32 = 2; // 라벨과 우측 위젯 사이 최소 간격(칸)
 
 /// control 열 폭(칸) — 모든 행이 같은 우측 열을 공유한다(가장 넓은 위젯=slider 기준). 픽셀 폭을 cw로 ceil. view/
-/// hitTest 단일 출처. toggle은 이 열 안에서 좌측정렬(slider·dropdown과 같은 시작 x).
+/// hitTest 단일 출처. toggle은 이 열 안에서 좌측정렬(slider·dropdown과 같은 시작 x). text/dropdown 값(폰트 패밀리·
+/// 테마 프리셋명 등)이 slider 폭보다 길 수 있어 settings_value_cols로 하한을 둬 값이 박스 안에서 충분히 보이게 한다
+/// (그래도 넘치는 값은 view에서 truncate). 열이 곧 박스 우측 경계라(fieldControlRect 우측정렬) 값이 박스를 안 넘는다.
 fn controlCols(ch: u32, cw: u32) u32 {
-    return (slider.width(ch) + cw - 1) / @max(cw, 1);
+    return @max((slider.width(ch) + cw - 1) / @max(cw, 1), settings_value_cols);
 }
 
 // ── palette_grid 기하(control 열을 공유하지 않는 특수 행 — 16칸은 control 열에 안 들어간다) ───────────────
@@ -303,6 +305,13 @@ fn paletteGridCols() u32 {
 }
 
 const nav_gap_cols: u32 = 2; // 좌측 네비와 폼 사이 간격(칸) — 구분 여백
+// 폼 라벨 고정 예약 폭(칸) — 모달 너비를 섹션·내용 무관 고정으로 두기 위해 라벨을 실측하지 않고 이 폭으로 예약한다
+// (가장 긴 한글 라벨을 담는 값). 라벨이 이보다 길면 view에서 truncate해 control 열을 침범하지 않게 한다.
+const form_label_reserve: u32 = 34;
+const palette_label_reserve: u32 = 14; // palette 행 라벨("ANSI 팔레트") 예약 폭
+// control 열 최소 폭(칸) — text 값(폰트 패밀리 "JetBrains Mono"=14)·dropdown 프리셋명("catppuccin-mocha"=16)을
+// 잘리지 않고 담는 하한. slider 폭이 이보다 넓으면 그쪽을 쓴다(controlCols).
+const settings_value_cols: u32 = 24;
 
 /// 좌측 네비 폭(칸) — 가장 긴 섹션 라벨 + 좌측 1칸 패딩(선택 표식 여유). 빈 목록이면 최소 5.
 fn navCols(sections: []const []const u8) u32 {
@@ -345,16 +354,14 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     const ch = @max(p.metrics.cell_height_px, 1);
     const ctrl_cols = controlCols(ch, cw);
     const nav_cols = navCols(sections);
-    // 폼 콘텐츠 폭 = max(필드 라벨 + 간격 + control 열). 제목은 박스 상단에 걸치므로 별도 하한으로 본다.
-    var form_content: u32 = ctrl_cols + label_gap_cols + 1;
-    for (rows) |r| {
-        // palette_grid는 control 열이 아니라 16칸 그리드 블록을 우측에 둔다(특수 폭).
-        const right_cols: u32 = switch (r.kind) {
-            .palette_grid => paletteGridCols(),
-            else => ctrl_cols,
-        };
-        form_content = @max(form_content, overlay_input.displayCols(r.label) + label_gap_cols + right_cols);
-    }
+    // 폼 폭은 **고정**이다(섹션·행 내용·창 크기에 불변) — 예전엔 현재 섹션의 라벨/위젯 최대 폭으로 매 프레임 재서
+    // 산정해 섹션을 바꿀 때마다 모달 너비가 들썩였고, 긴 값(폰트 패밀리 등)이 박스를 넘어 rich 테마에서 배경 quad
+    // 밖으로 삐져나가 깨졌다. form_label_reserve(가장 긴 라벨 담는 고정 칸) + control/palette 폭으로 못 박는다.
+    // 라벨은 reserve로, 값은 view에서 control 폭으로 truncate해 항상 박스 안에 가둔다(palette/find 고정 폭과 같은 취지).
+    const form_content: u32 = @max(
+        form_label_reserve + label_gap_cols + ctrl_cols, // 스칼라 행: 라벨 예약 + control 열
+        palette_label_reserve + label_gap_cols + paletteGridCols(), // palette 행: 16 스와치 + hex 블록
+    );
     const title_need = overlay_input.displayCols(title_text) + 12; // 제목 + 스크롤 위치 표식 여유
     const content_cols = @max(nav_cols + nav_gap_cols + form_content, title_need);
     const mv = maxVisible(p);
@@ -462,7 +469,13 @@ pub fn view(
         }
         // 비활성 행(프리셋 잠금 등)은 라벨도 muted_fg로 — 행 전체가 회색이라 잠긴 게 한눈에 보인다.
         const label_role: tokens.ColorRole = if (r.disabled) .muted_fg else .surface_fg;
-        try modal_box.text(box, l.form_x, content_row, r.label, label_role, arena, out);
+        // 라벨도 control/palette 열을 침범하지 않게 폼 라벨 영역 폭으로 truncate(고정 폭 안에 가둠 — rich quad 밖 삐짐 방지).
+        const row_right_cols: u32 = switch (r.kind) {
+            .palette_grid => paletteGridCols(),
+            else => l.ctrl_cols,
+        };
+        const label_shown = overlay_input.truncateToCols(arena, r.label, l.form_cols -| row_right_cols -| label_gap_cols) catch r.label;
+        try modal_box.text(box, l.form_x, content_row, label_shown, label_role, arena, out);
         const ctrl = fieldControlRect(l, vi);
         switch (r.kind) {
             .toggle => |v| {
@@ -470,11 +483,12 @@ pub fn view(
                 try toggle.view(&ts, toggleRectIn(ctrl, box.ch, box.cw), box.cw, tk, arena, out);
             },
             .slider => |s| try slider.view(ctrl, FieldRow.sliderRatio(s), box.cw, tk, arena, out),
-            .dropdown => |cur| try dropdown.view(ctrl, cur, tk, arena, out),
+            .dropdown => |cur| try dropdown.view(ctrl, overlay_input.truncateToCols(arena, cur, l.ctrl_cols) catch cur, tk, arena, out),
             .text => |cur| {
                 // 편집 중인 선택 행이면 편집 버퍼 + caret, 아니면 현재값. control 좌단(ctrl.x) 좌측정렬 text.
+                // 비편집 값은 control 폭으로 truncate해 박스 밖으로 삐지지 않게 한다(긴 폰트 패밀리 등 — rich quad 밖 비침 방지).
                 const editing_this = state.editing and actual == state.selected;
-                const shown: []const u8 = if (editing_this) state.editText() else cur;
+                const shown: []const u8 = if (editing_this) state.editText() else (overlay_input.truncateToCols(arena, cur, l.ctrl_cols) catch cur);
                 const text_role: tokens.ColorRole = if (editing_this) .accent_bar else .surface_fg;
                 if (shown.len > 0) {
                     const runs = try arena.alloc(draw.Run, 1);

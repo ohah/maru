@@ -2082,8 +2082,10 @@ pub const TerminalCore = struct {
     /// `"+y`로 씀). **코어는 파싱+base64 디코드만** 하고 결과를 clipboard_write pending에 둔다 — 실제 clipboard
     /// 쓰기와 정책(osc52.write ask/allow/deny)은 app/platform 책임이다(클립보드는 OS 리소스라 native 소유 —
     /// terminal-compatibility-policy.md "TerminalCore parses OSC52, app/platform layer만 실제 read/write"). 읽기
-    /// (data가 `?`)는 보안 표면이 커 코어가 무시한다(원격 세션의 clipboard 탈취 방지 — platform ask UI는 후속).
-    /// 베이스: xterm/iTerm2 OSC 52(사실상 표준), 보안 정책은 호환성/보안 정책 문서.
+    /// (data가 `?`)는 코어가 target만 기억하고 clipboard_read_pending을 세운다(무시하지 않는다) — 실제 base64 읽기와
+    /// osc52.read(allow|deny, 기본 deny) 정책은 app/platform이 한다(write 대칭, 코어는 OS 클립보드를 직접 안 읽음 —
+    /// 원격 세션의 clipboard 탈취는 기본 deny로 막고, ask UI는 후속). 베이스: xterm/iTerm2 OSC 52(사실상 표준),
+    /// 보안 정책은 호환성/보안 정책 문서.
     fn dispatchOscClipboard(self: *TerminalCore, body: []const u8) void {
         const semi = std.mem.indexOfScalar(u8, body, ';') orelse return; // <targets>;<data>
         const targets = body[0..semi];

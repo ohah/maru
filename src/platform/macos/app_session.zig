@@ -3506,6 +3506,9 @@ pub const AppSession = struct {
             // 활성 pane을 통째로 새 단독 워크스페이스로 분리(grip 드래그→사이드바 빈 영역의 키보드/팔릿 버전).
             // 단독 pane 워크스페이스면 promotePaneToNewWorkspace가 no-op. tabsBlocked(chrome 최소)면 막는다.
             .move_pane_to_new_workspace => if (!self.tabsBlocked()) self.promotePaneToNewWorkspace(self.activePane()),
+            // 활성 pane을 N번 워크스페이스에 합치기(merge — 드래그를 그 카드에 드롭하는 것의 키보드 버전). 자기/범위
+            // 밖/단독 pane이면 mergePaneIntoWorkspace가 no-op. index는 0-based(select_tab과 동일).
+            .move_pane_to_workspace => |n| if (!self.tabsBlocked()) self.mergePaneIntoWorkspace(self.activePane(), n),
             // 전체 선택(⌘A) — 활성 surface 코어의 selection을 스크롤백+화면 전체로. clipboard 쓰기는 네이티브.
             .select_all => {
                 // 선택 코어 mutate는 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
@@ -13657,6 +13660,50 @@ test "move_pane_to_new_workspace 액션: 활성 pane을 새 워크스페이스�
     // 새 탭은 단독 pane → 액션 다시 호출해도 no-op(빈 워크스페이스를 안 만든다).
     session.dispatchAppAction(.move_pane_to_new_workspace);
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+}
+
+test "move_pane_to_workspace:N 액션: 활성 pane을 N번 워크스페이스에 합치기(dispatch 경로) + 자기/단독 no-op" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    _ = try session.newTab(); // [ws0, ws1]
+    try std.testing.expect(session.switchTab(0)); // 활성 ws0
+    try session.splitActivePane(.horizontal); // ws0: 2 pane, 활성 b
+    const pane_b = session.activePane();
+
+    // 자기 워크스페이스(0)로 merge → no-op.
+    session.dispatchAppAction(.{ .move_pane_to_workspace = 0 });
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items[0].panes.items.len); // 무변
+
+    // 범위 밖(9)으로 merge → no-op.
+    session.dispatchAppAction(.{ .move_pane_to_workspace = 9 });
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items[0].panes.items.len); // 무변
+
+    // ws1(index 1)로 merge → ws0은 1 pane, ws1은 2 pane, 활성 = ws1, 합쳐진 pane이 활성.
+    session.dispatchAppAction(.{ .move_pane_to_workspace = 1 });
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items[0].panes.items.len);
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items[1].panes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    try std.testing.expectEqual(pane_b, session.tabs.items[1].activePane());
+
+    // ws1은 이제 2 pane(활성 b). b를 다시 ws0(index 0)로 merge → 단독 아님이라 동작(왕복).
+    session.dispatchAppAction(.{ .move_pane_to_workspace = 0 });
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items[0].panes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items[1].panes.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
 }
 
 // paneAtPoint가 스크린 점을 담는 leaf rect의 panel을 고르는지(반열린 구간 경계·밖·비유한) — 마우스

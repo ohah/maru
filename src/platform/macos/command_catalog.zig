@@ -71,6 +71,17 @@ pub const entries = [_]Entry{
     .{ .action = .{ .select_tab = 6 }, .key = "select_tab:6", .title = "Select Workspace 7" },
     .{ .action = .{ .select_tab = 7 }, .key = "select_tab:7", .title = "Select Workspace 8" },
     .{ .action = .{ .select_tab = 8 }, .key = "select_tab:8", .title = "Select Workspace 9" },
+    // 활성 pane을 N번 워크스페이스에 합치기(merge — grip 드래그를 그 카드에 드롭하는 것의 키보드 버전). select_tab처럼
+    // 0..8을 개별 엔트리로 편다. 기본 키바인딩 없음 — 팔릿이 발견 경로. tmux join-pane -t N 결.
+    .{ .action = .{ .move_pane_to_workspace = 0 }, .key = "move_pane_to_workspace:0", .title = "Move Pane to Workspace 1" },
+    .{ .action = .{ .move_pane_to_workspace = 1 }, .key = "move_pane_to_workspace:1", .title = "Move Pane to Workspace 2" },
+    .{ .action = .{ .move_pane_to_workspace = 2 }, .key = "move_pane_to_workspace:2", .title = "Move Pane to Workspace 3" },
+    .{ .action = .{ .move_pane_to_workspace = 3 }, .key = "move_pane_to_workspace:3", .title = "Move Pane to Workspace 4" },
+    .{ .action = .{ .move_pane_to_workspace = 4 }, .key = "move_pane_to_workspace:4", .title = "Move Pane to Workspace 5" },
+    .{ .action = .{ .move_pane_to_workspace = 5 }, .key = "move_pane_to_workspace:5", .title = "Move Pane to Workspace 6" },
+    .{ .action = .{ .move_pane_to_workspace = 6 }, .key = "move_pane_to_workspace:6", .title = "Move Pane to Workspace 7" },
+    .{ .action = .{ .move_pane_to_workspace = 7 }, .key = "move_pane_to_workspace:7", .title = "Move Pane to Workspace 8" },
+    .{ .action = .{ .move_pane_to_workspace = 8 }, .key = "move_pane_to_workspace:8", .title = "Move Pane to Workspace 9" },
     // maru CLI를 PATH에 설치(VS Code "Install 'code' command" 결). 기본 키바인딩 없음 — 팝업이 발견 경로.
     .{ .action = .install_cli, .key = "install_cli", .title = "Install CLI" },
     // 모든 설정을 내장 기본값으로 초기화(통합 리셋). 기본 키바인딩 없음 — 팝업이 발견 경로.

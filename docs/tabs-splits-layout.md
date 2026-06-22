@@ -211,13 +211,15 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
   영역이면 **카드 목록 아래 행**(표시 카드 수)에 활성/호버 밴드와 같은 lower 경로로 칠한다(`pane_drop_slot`을 drag(2)가
   paneDropHighlightSlot로 갱신, 슬롯 전환 시에만 rebuildSidebar). 분리·합치기 후 **양쪽** 워크스페이스의 pane을
   resize한다(소스는 collapse로 넓어지고, 타겟/새 트리는 새 레이아웃으로).
-- **액션·단계 위치**: ④/PR-E(탭·split 재배치)의 워크스페이스-간 확장이다. 드래그 외에 **분리(promote)는 액션
-  `move_pane_to_new_workspace`로도 노출**한다(커맨드 팔릿 "Move Pane to New Workspace"; dispatchAppAction이
-  `promotePaneToNewWorkspace`로 넘긴다). 합치기(merge)는 타겟 워크스페이스가 모호해 키 액션으로 두지 않는다(드래그
-  전용). 기본 단축키는 macOS 단일 관례가 없어 rename·split과 같은 규칙으로 **bindable 액션만 정의하고 기본 키는 두지
-  않는다**(발견성은 커맨드 팔릿·드래그; [필수 프로젝트 규칙](project-rules.md)의 베이스 명시 규칙). 검증은 트리
-  detach/insert·no-op 가드·드롭 타겟 하이라이트 슬롯·grip 드래그 end-to-end·액션 dispatch를 헤드리스 단위로, grip
-  글리프 렌더는 제품 스크린샷으로 고정한다.
+- **액션·단계 위치**: ④/PR-E(탭·split 재배치)의 워크스페이스-간 확장이다. 드래그 외에 **분리·합치기 둘 다 액션으로
+  노출**한다 — **분리(promote)** 는 `move_pane_to_new_workspace`(팔릿 "Move Pane to New Workspace" →
+  `promotePaneToNewWorkspace`), **합치기(merge)** 는 `move_pane_to_workspace:N`(0-based; 팔릿 "Move Pane to Workspace
+  1..9" → `mergePaneIntoWorkspace(activePane, N)`)로 노출한다. 드래그는 떨어뜨린 카드로 타겟을 정하지만 키는 **번호로
+  타겟을 명시**한다(`select_tab:N`·tmux `join-pane -t N`과 같은 선례 — 단일 표준 키가 없는 동작을 번호 타겟으로 단일화).
+  자기/범위 밖/단독 pane이면 두 액션 모두 no-op. 기본 단축키는 macOS 단일 관례가 없어 rename·split과 같은 규칙으로
+  **bindable 액션만 정의하고 기본 키는 두지 않는다**(발견성은 커맨드 팔릿·드래그; [필수 프로젝트 규칙](project-rules.md)의
+  베이스 명시 규칙). 검증은 트리 detach/insert·no-op 가드·드롭 타겟 하이라이트 슬롯·grip 드래그 end-to-end·두 액션
+  dispatch를 헤드리스 단위로, grip 글리프 렌더는 제품 스크린샷으로 고정한다.
 
 ### 사용자 지정 이름(rename)
 

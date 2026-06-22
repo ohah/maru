@@ -338,8 +338,7 @@ const Layout = struct {
     body_rows: u32, // 네비/폼 본문 행 수(FullHeight = maxVisible) — 활성 영역 세로 강조 바 높이·하단 힌트 행 위치에 쓴다
 };
 
-const title_rows: u32 = 2; // 제목(0) + 빈 줄(1)
-const hint_rows: u32 = 1; // 하단 힌트 1행("⇥ 섹션 ⇄ 설정" — Tab 영역 전환 안내). content_rows에 더해 박스 하단에 둔다.
+const title_rows: u32 = 2; // 제목(0) + 힌트 줄(1 — "⇥ 섹션 ⇄ 설정", 제목 바로 아래 상단)
 
 /// 한 화면에 보일 최대 필드 행 수 — 뷰포트 높이에서 제목·여백·여유를 뺀다. 행이 이보다 많으면 창을 스크롤한다
 /// (패널이 화면을 넘치지 않게). palette.max_visible과 같은 윈도잉 취지(여긴 뷰포트 적응형).
@@ -379,7 +378,7 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     // 섹션에서도 모달이 작아졌다 커졌다 하지 않고 화면 높이에 꽉 차게 한다(너비는 content_cols로 별도 고정 — #860).
     // 네비(섹션 수)가 mv보다 많을 일은 거의 없지만 안전하게 큰 쪽을 쓴다. win_len은 폼 스크롤 윈도로 그대로 유지.
     const body_rows = @max(sections.len, mv);
-    const content_rows = title_rows + @as(u32, @intCast(body_rows)) + hint_rows; // + 하단 힌트 1행
+    const content_rows = title_rows + @as(u32, @intCast(body_rows)); // 힌트는 title_rows 영역(제목 아래 줄)에 둬 별도 행 불필요
     const box = modal_box.layout(content_cols, content_rows, p, tk) orelse return null;
     const form_x = box.inner_x + @as(i32, @intCast((nav_cols + nav_gap_cols) * box.cw));
     const form_cols = box.inner_cols -| (nav_cols + nav_gap_cols);
@@ -583,9 +582,9 @@ pub fn view(
     }
 
     // 활성 영역(Tab 포커스) 좌단 세로 강조 바 — 섹션 모드는 네비 좌단(inner_x), 폼 모드는 폼 좌단 직전(form_x-cw).
-    // 하단 힌트: "⇥ 섹션 ⇄ 설정"을 박스 하단 중앙에 두되, **현재 활성 영역만 accent**로(반대편·구분자는 muted)
-    // 칠해 "지금 어느 영역 + Tab으로 전환"을 한 줄로 보인다(세로 바 없이 — 본문 dim과 이 강조가 활성 영역을 알린다).
-    const hint_row = l.first_field_row + l.body_rows;
+    // 힌트: "⇥ 섹션 ⇄ 설정"을 **제목 바로 아래(상단)** 중앙에 두되, **현재 활성 영역만 accent**로(반대편·구분자는
+    // muted) 칠해 "지금 어느 영역 + Tab으로 전환"을 한 줄로 보인다(세로 바 없이 — 본문 dim과 이 강조가 활성 영역을 알린다).
+    const hint_row = l.first_field_row - 1; // 제목(0) 아래 줄 — title_rows 영역 안(본문은 first_field_row부터 시작)
     const seg_tab = "⇥ ";
     const seg_sec = "섹션";
     const seg_mid = " ⇄ ";

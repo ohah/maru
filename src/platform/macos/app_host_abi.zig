@@ -623,6 +623,22 @@ pub export fn maru_macos_app_session_provide_clipboard_read(session: ?*AppSessio
     return @intFromEnum(Status.ok);
 }
 
+// 세팅 window.background-image 행 활성으로 파일 선택창 요청이 대기 중이면 1(플래그 비움), 없으면 0. Swift가 tick마다
+// 호출해 1이면 NSOpenPanel(PNG)을 열고 고른 경로를 provide_picked_file로 되돌린다. take_bell과 같은 1회성 신호. session null=0. (v81)
+pub export fn maru_macos_app_session_take_file_pick_request(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeFilePickRequest()) 1 else 0;
+}
+
+// take_file_pick_request가 1을 준 뒤, Swift가 NSOpenPanel에서 고른 파일의 절대경로를 넘긴다 — Zig가 window.background-image에
+// setText + 라이브 반영(다음 frame 디코드) + dirty(영속). bytes/len 0(취소 등)이면 무동작. 지우기는 행 Backspace가 담당. (v81)
+pub export fn maru_macos_app_session_provide_picked_file(session: ?*AppSession, bytes: ?[*]const u8, len: usize) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const slice: []const u8 = if (bytes) |p| p[0..len] else &.{};
+    app_session.providePickedFile(slice);
+    return @intFromEnum(Status.ok);
+}
+
 // view options(⚙) 사이드바 토글이 바뀌어 config 파일 반영이 필요하면 1(플래그 비움), 없으면 0. Swift가 tick마다
 // 호출해 1이면 serialize_sidebar_config로 받은 텍스트를 config 경로에 atomic write한다(앱→config). session null=0.
 pub export fn maru_macos_app_session_take_sidebar_config_dirty(session: ?*AppSession) u32 {

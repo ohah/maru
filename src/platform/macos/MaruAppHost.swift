@@ -4,6 +4,7 @@ import Darwin
 import Foundation
 import Metal
 import QuartzCore
+import UniformTypeIdentifiers // NSOpenPanel.allowedContentTypes = [.png] (배경 이미지 파일 선택, v81)
 import UserNotifications
 
 // MARK: - CGS 비공개 API (창 뒤 배경 블러, F3-1)
@@ -1386,6 +1387,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainMouseHide() // 타이핑(글자 입력) 중이면 마우스 커서를 숨긴다(config input.mouse-hide-while-typing).
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
+            drainFilePick() // 세팅 window.background-image 행 활성: NSOpenPanel(PNG)을 열어 고른 경로를 config에 적용.
             drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
         }
         return status
@@ -1937,6 +1939,26 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let session = appSession else { return }
         if maru_macos_app_session_take_mouse_hide(session) != 0 {
             NSCursor.setHiddenUntilMouseMoves(true)
+        }
+    }
+
+    // 세팅 window.background-image 행 활성(input 타이핑 대신 파일 선택창 — 사용자 요청): Zig가 file_pick_pending을 세우면
+    // 여기서 NSOpenPanel(PNG)을 열어, 고른 파일의 절대경로를 provide_picked_file로 Zig에 넘긴다(Zig가 config 적용·라이브
+    // 반영·영속). 취소면 무동작(pending은 이미 비웠으니 재시도 없음 — 사용자가 다시 활성화). 모달은 사용자 행동이라 tick
+    // 블로킹이 허용된다(메인 스레드 runModal — Open Config·표준 패턴).
+    private func drainFilePick() {
+        guard let session = appSession else { return }
+        guard maru_macos_app_session_take_file_pick_request(session) != 0 else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.png] // maru 내장 디코더는 PNG만(F2-1)
+        panel.message = "배경 이미지로 쓸 PNG를 고르세요"
+        guard panel.runModal() == .OK, let path = panel.url?.path else { return }
+        let bytes = Array(path.utf8)
+        _ = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_session_provide_picked_file(session, buf.baseAddress, buf.count)
         }
     }
 

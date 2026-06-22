@@ -777,6 +777,33 @@ test "parse: window.blur — 반경 파싱, 미설정 시 0(끔)" {
     try std.testing.expectEqual(@as(u32, 0), q.config.window_blur);
 }
 
+test "theme.preset 영속: 한 줄이 16색 팔레트까지 복원 + 개별 override 제거로 충돌 없음 (팔레트 영속 리뷰)" {
+    const a = std.testing.allocator;
+    // 옛 스타일 파일: 개별 4색 + 팔레트 override 하나(이전 프리셋이 4색만 써둔 잔재 모사).
+    const original =
+        "theme.background = #111111\ntheme.foreground = #eeeeee\ntheme.cursor = #ff0000\n" ++
+        "theme.selection = #00ff00\ntheme.palette.3 = #abcdef\n";
+    // serializeConfig가 하는 일을 그대로: (1) theme.preset = dracula set/update, (2) 개별 색·palette override 제거.
+    const updates = [_]KeyValue{.{ .key = "theme.preset", .value = "dracula" }};
+    const t1 = try updateConfigText(a, original, &updates);
+    defer a.free(t1);
+    var removed: std.ArrayList([]const u8) = .empty;
+    defer removed.deinit(a);
+    inline for (.{ "theme.background", "theme.foreground", "theme.cursor", "theme.selection" }) |k| try removed.append(a, k);
+    var bufs: [16][20]u8 = undefined;
+    for (0..16) |i| try removed.append(a, try std.fmt.bufPrint(&bufs[i], "theme.palette.{d}", .{i}));
+    const t2 = try removeConfigLines(a, t1, removed.items);
+    defer a.free(t2);
+
+    // parse: theme.preset이 dracula 전체(16색 팔레트 포함)를 깐다. 옛 override는 제거돼 충돌 없음.
+    var p = try parse(a, t2);
+    defer p.deinit();
+    const dr = theme.presetColors(.dracula);
+    try std.testing.expectEqualStrings(dr.background, p.config.theme.background); // 주 색 복원
+    try std.testing.expectEqualStrings("#f1fa8c", p.config.theme.palette[3].?); // 팔레트도 dracula 복원(옛 #abcdef 아님)
+    try std.testing.expectEqualStrings(dr.palette[0].?, p.config.theme.palette[0].?); // 전 16색 영속
+}
+
 test "parse: env.<KEY>가 누적되고 빈 KEY는 무시, 값 내부 공백 보존" {
     var p = try parse(std.testing.allocator,
         \\env.EDITOR = nvim

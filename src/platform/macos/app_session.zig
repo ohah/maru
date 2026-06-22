@@ -752,7 +752,7 @@ const CloseScope = union(enum) {
     session, // 창(세션) 전체
 };
 
-/// Term 포그라운드에서 도는 에이전트 CLI 종류. 사이드바에 심볼로 표시(claude=✳, codex=✻).
+/// Term 포그라운드에서 도는 에이전트 CLI 종류. 사이드바에 심볼로 표시(claude=✶, codex=◆).
 const AgentKind = enum(u8) { none = 0, claude, codex };
 
 /// 에이전트 완료 알림 한 건(owned). title=워크스페이스 이름, body=마지막 답변 일부. agent_notifications 큐에
@@ -9273,7 +9273,7 @@ pub const AppSession = struct {
             const brand: maru.color.Rgb = switch (t.agent_kind) {
                 .claude => .{ .r = 0xD9, .g = 0x78, .b = 0x5C }, // Anthropic 코랄
                 .codex => .{ .r = 0x10, .g = 0xA3, .b = 0x7F }, // OpenAI 청록(#10A37F)
-                .none => continue, // 아이콘 codepoint인데 kind=none(이름 글자가 ✳ 등) — 색칠 안 함.
+                .none => continue, // 아이콘 codepoint인데 kind=none(이름 글자가 ✶·◆ 등) — 색칠 안 함.
             };
             // running이면 펄스(blink off 위상 어둡게), idle/unknown은 정적 full 브랜드색.
             c.style.foreground = .{ .rgb = if (t.agent_state == .running and !self.blink_visible) dimRgb(brand) else brand };
@@ -10802,7 +10802,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
     }
 }
 
-test "buildSidebarTitleFrame: 에이전트 심볼(✳/✻) prefix여도 프레임 빌드 성공(제목 사라짐 회귀 방지)" {
+test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레임 빌드 성공(제목 사라짐 회귀 방지)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText shaper 경로
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);

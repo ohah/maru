@@ -286,6 +286,7 @@ fn buildLivePtyFixture(
         const key_result = try frame_loop.handleKeyEvent(
             resolver,
             native_key_event,
+            true, // option_as_meta: 이 smoke는 현행 동작(항상 meta) 고정 — config 분기는 app_session 경로가 본다(F2-2)
         );
         scripted_key_event_result = keyHandlingResultName(key_result);
         switch (key_result) {

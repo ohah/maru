@@ -5180,6 +5180,11 @@ pub const AppSession = struct {
 
     pub fn focusChanged(self: *AppSession, gained: bool) void {
         self.window_focused = gained; // 완료 알림: 포커스 창의 활성 탭만 "보고 있는" 것으로 친다.
+        // 포커스 변화는 PTY와 무관한 시각 변화다(cursor.unfocused가 window_focused로 커서 모드를 정한다) — frame 빌드가
+        // metal_dirty 게이트(idle tick은 빌드 생략) 뒤에 있어 여기서 dirty를 안 세우면 출력 없는 셸에선 Cmd+Tab 후에도
+        // 채운 커서가 그대로 남는다(focus reporting 꺼진 평범한 셸은 PTY 응답도 없어 dirty가 안 선다). 포커스 전환은
+        // 드물어 매번 한 frame 재빌드는 무시할 비용이고, 향후 포커스 의존 렌더에도 동일 보장. [[active-surface-render-path-trap]]
+        self.metal_dirty = true;
         if (!self.surface_initialized) return;
         // Phase 3 위임(docs/io-render-threading.md §9 P3-3): reportFocus는 코어 mutate(+response 생성)라 메인이
         // 직접 안 하고 reader로 위임한다 — reader가 적용 후 pendingResponse를 PTY로 흘린다(non-interactive 폴백은

@@ -42,7 +42,7 @@ dirty region에 박혀 있어 렌더 파이프라인 재설계가 필요하고, 
 | 섹션 | 포함 config 네임스페이스 | 주요 항목 |
 |---|---|---|
 | **Appearance › Font** | `font.*` | family, size, line-height, letter-spacing, (신규) family-bold/italic, fallback |
-| **Appearance › Theme** | `theme.*`, `chrome.theme` | preset, 개별 색, palette 16, (신규) search/sidebar 색, bold-is-bright, follow-system |
+| **Appearance › Theme** | `theme.*`, `chrome.theme` | preset(최상단·활성 시 개별 색·palette 잠금→클릭 시 "사용자 지정" 전환), 개별 색, palette 16, search/sidebar 색, bold-is-bright, follow-system |
 | **Appearance › Cursor** | `cursor.*` | shape, blink, color/text, (신규) blink-interval, unfocused |
 | **Appearance › Window** | `window.*` | padding, (신규) opacity, blur, background-image, unfocused-dim |
 | **Input › Keys** | `input.*` | page-keys, shift-enter, ime-enter, (신규) option-as-meta |

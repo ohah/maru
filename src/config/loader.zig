@@ -745,6 +745,20 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
 }
 
+test "parse: window.background-image — 경로 파싱, 미설정 시 빈 문자열(배경 없음)" {
+    // F2-1: 설정하면 절대경로를 그대로 보관(loader는 디코드·존재 확인 안 함 — app_session이 frame에서 디코드).
+    var p = try parse(std.testing.allocator,
+        \\window.background-image = /Users/me/Pictures/bg.png
+    );
+    defer p.deinit();
+    try std.testing.expectEqualStrings("/Users/me/Pictures/bg.png", p.config.window_background_image);
+
+    // 미설정이면 기본 빈 문자열(배경 이미지 없음 — 현행 동작 회귀 없음).
+    var q = try parse(std.testing.allocator, "font.size = 14");
+    defer q.deinit();
+    try std.testing.expectEqualStrings("", q.config.window_background_image);
+}
+
 test "parse: env.<KEY>가 누적되고 빈 KEY는 무시, 값 내부 공백 보존" {
     var p = try parse(std.testing.allocator,
         \\env.EDITOR = nvim

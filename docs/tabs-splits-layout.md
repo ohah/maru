@@ -8,7 +8,7 @@
 cmux 같은 유연한 레이아웃:
 
 - **세로 탭 사이드바**(왼쪽) — 워크스페이스마다 **1~3줄 카드**로 보여준다. line0=이름(워크스페이스 번호 prefix는
-  안 붙임 — 사용자 요청), git repo 안이면 line1=`⎇ {branch}`, line2=cwd 경로(`$HOME`→`~` 축약). 보조줄(브랜치·경로)은
+  안 붙임 — 사용자 요청), git repo 안이면 line1=`├ {branch}`, line2=cwd 경로(`$HOME`→`~` 축약). 보조줄(브랜치·경로)은
   git repo일 때만 추가되고 흐린 색, 줄들은 슬롯 안에 세로 중앙 정렬한다. 세로 위치는 row에 `slot*32 + line_count*4 +
   line_index`로 인코딩(`sidebarGlyphRow` 단일 출처)하고 렌더러(.m)가 디코드 — 인코딩은 향후 4번째 줄(상태)까지 여유,
   현재 구현은 3줄. 카드 높이는 cell의 3.8×. **베이스/결정**: git 브랜치는 OSC 7 cwd에서 `.git/HEAD` walk-up(cwd 변경

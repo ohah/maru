@@ -770,7 +770,7 @@ test "buildSidebarDrawList lays tab titles into per-row draw cells, truncating t
 test "buildSidebarDrawList multi-line card: name/branch/path stack; empty aux lines are skipped" {
     const allocator = std.testing.allocator;
     const names = [_][]const u8{ "maru", "docs" };
-    const branches = [_][]const u8{ "\u{2387} main", "" }; // 탭 0만 브랜치줄
+    const branches = [_][]const u8{ "\u{251C} main", "" }; // 탭 0만 브랜치줄
     const paths = [_][]const u8{ "~/dev/maru", "" }; // 탭 0만 경로줄
     var dl = try buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, 20, .default, null, null, null, .default);
     defer dl.deinit(allocator);
@@ -782,7 +782,7 @@ test "buildSidebarDrawList multi-line card: name/branch/path stack; empty aux li
     var tab1 = false;
     for (dl.cells) |c| {
         if (c.codepoint == 'a' and c.row == sidebarGlyphRow(0, 0, 3)) name0 = true; // "maru"의 a
-        if (c.codepoint == 0x2387 and c.row == sidebarGlyphRow(0, 1, 3)) branch1 = true; // ⎇ 브랜치줄
+        if (c.codepoint == 0x251C and c.row == sidebarGlyphRow(0, 1, 3)) branch1 = true; // ├ 브랜치줄
         if (c.codepoint == '~' and c.row == sidebarGlyphRow(0, 2, 3)) path2 = true; // 경로줄
         if (c.codepoint == 'd' and c.row == sidebarGlyphRow(1, 0, 1)) tab1 = true; // 1줄 탭
     }
@@ -802,7 +802,7 @@ test "buildSidebarDrawList multi-line card: name/branch/path stack; empty aux li
 test "buildSidebarDrawList agent icon: centered at col 0 independent of lines; text indented" {
     const allocator = std.testing.allocator;
     const names = [_][]const u8{"maru"};
-    const branches = [_][]const u8{"\u{2387} main"};
+    const branches = [_][]const u8{"\u{251C} main"};
     const paths = [_][]const u8{"~/dev/maru"};
     const agents = [_]u21{0x2736}; // claude ✶
     var dl = try buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &agents, 30, .default, null, null, null, .default);

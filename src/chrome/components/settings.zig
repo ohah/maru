@@ -305,9 +305,10 @@ fn paletteGridCols() u32 {
 }
 
 const nav_gap_cols: u32 = 2; // 좌측 네비와 폼 사이 간격(칸) — 구분 여백
-// 폼 라벨 고정 예약 폭(칸) — 모달 너비를 섹션·내용 무관 고정으로 두기 위해 라벨을 실측하지 않고 이 폭으로 예약한다
-// (가장 긴 한글 라벨을 담는 값). 라벨이 이보다 길면 view에서 truncate해 control 열을 침범하지 않게 한다.
-const form_label_reserve: u32 = 34;
+// 폼 라벨 고정 예약 폭(칸) — 모달 너비를 섹션·내용 무관 고정으로 두기 위해 라벨을 실측하지 않고 이 폭으로 예약한다.
+// 현재 스키마 최장 라벨 "셸 실행 파일 경로(절대경로, 빈 값=자동)"(≈36칸)을 담는 값. 더 긴 라벨은 view에서 truncate해
+// control 열을 침범하지 않게 한다(고정 폭 유지 — 라벨 실측으로 폭을 늘리면 모달이 섹션마다 들썩이던 문제가 재발).
+const form_label_reserve: u32 = 38;
 const palette_label_reserve: u32 = 14; // palette 행 라벨("ANSI 팔레트") 예약 폭
 // control 열 최소 폭(칸) — text 값(폰트 패밀리 "JetBrains Mono"=14)·dropdown 프리셋명("catppuccin-mocha"=16)을
 // 잘리지 않고 담는 하한. slider 폭이 이보다 넓으면 그쪽을 쓴다(controlCols).
@@ -483,7 +484,9 @@ pub fn view(
                 try toggle.view(&ts, toggleRectIn(ctrl, box.ch, box.cw), box.cw, tk, arena, out);
             },
             .slider => |s| try slider.view(ctrl, FieldRow.sliderRatio(s), box.cw, tk, arena, out),
-            .dropdown => |cur| try dropdown.view(ctrl, overlay_input.truncateToCols(arena, cur, l.ctrl_cols) catch cur, tk, arena, out),
+            // dropdown.view가 값 뒤에 " ▾"(2칸)를 붙이므로, chevron 자리를 빼고 truncate해 값+chevron이 control 열(=박스
+            // 경계)을 넘지 않게 한다(안 그러면 ctrl_cols+2칸이 되어 우측 여백을 침범·rich quad 밖으로 삐진다).
+            .dropdown => |cur| try dropdown.view(ctrl, overlay_input.truncateToCols(arena, cur, l.ctrl_cols -| 2) catch cur, tk, arena, out),
             .text => |cur| {
                 // 편집 중인 선택 행이면 편집 버퍼 + caret, 아니면 현재값. control 좌단(ctrl.x) 좌측정렬 text.
                 // 비편집 값은 control 폭으로 truncate해 박스 밖으로 삐지지 않게 한다(긴 폰트 패밀리 등 — rich quad 밖 비침 방지).

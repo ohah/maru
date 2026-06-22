@@ -7546,6 +7546,20 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 데스크톱 배너 클릭(activate_surface)으로 그 surface를 봤으니, 그 surface_id의 안 읽은 히스토리 항목을 모두 읽음
+    /// 처리한다(배너↔인앱 센터 읽음 동기화). 같은 surface가 여러 번 알림했으면 다 읽음 — 그 터미널을 봤다는 의미라 일관.
+    pub fn markNotificationsReadBySurface(self: *AppSession, surface_id: u64) void {
+        var changed = false;
+        for (self.notification_history.items) |*it| {
+            if (it.surface_id == surface_id and !it.is_read) {
+                it.is_read = true;
+                self.notification_unread -|= 1;
+                changed = true;
+            }
+        }
+        if (changed) self.metal_dirty = true;
+    }
+
     /// 모든 알림을 히스토리에서 삭제한다(owned 전부 free). 패널은 빈 목록("알림 없음")으로 유지된다.
     fn clearNotifications(self: *AppSession) void {
         for (self.notification_history.items) |it| {
@@ -10047,13 +10061,19 @@ pub const AppSession = struct {
         // 아이콘 색은 호버 여부와 무관하게 항상 sidebar_foreground다 — hover 강조는 아래 호버 배경 quad(밝은 반투명)가
         // 맡는다. 예전엔 호버 아이콘을 sidebar_active로 재색칠했는데, Ghostty 테마에선 sidebar_active가 밝은 전경색이
         // 아니라 어두운 밴드색이라 아이콘이 오히려 어두워졌다(사용자 피드백) — 재색칠을 제거한다.
-        // 알림 종(cols-12, EAW 2칸) + 안 읽은 개수 배지(종 우측 cols-10). headerHit의 notifications zone(cols-12..cols-9)과
-        // 같은 col(단일 레이아웃). 종 글리프는 🔔(U+1F514) — 🔍(검색)과 같은 이모지 경로(CoreText fallback). 배지는
-        // 안 읽은 알림이 있을 때만 숫자(9 초과는 9로 cap — 1칸 폭 유지). 색은 눈에 띄게 coral(안읽음 강조).
+        // 알림 종(cols-12, EAW 2칸) + 안 읽은 개수 배지(종 우측). headerHit의 notifications zone(cols-12..cols-9)과 같은
+        // col(단일 레이아웃). 종 글리프는 🔔(U+1F514) — 🔍(검색)과 같은 이모지 경로(CoreText fallback). 배지는 안 읽은
+        // 알림이 있을 때만: 1~9는 숫자 1칸(cols-10), 10개 이상은 "9+" 2칸(cols-10·cols-9). 색은 눈에 띄게 coral.
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 12, .codepoint = 0x1F514, .width = 2, .style = .{ .foreground = fg } });
         if (self.notification_unread > 0) {
-            const n: u21 = @intCast(@min(self.notification_unread, 9));
-            try cells.append(self.allocator, .{ .row = 0, .col = cols - 10, .codepoint = '0' + n, .style = .{ .foreground = .{ .rgb = .{ .r = 0xE0, .g = 0x5A, .b = 0x4A } } } });
+            const badge_rgb: terminal.Color = .{ .rgb = .{ .r = 0xE0, .g = 0x5A, .b = 0x4A } };
+            if (self.notification_unread > 9) {
+                // "9+": cols-9는 toggle zone 시작이라 '+' 위 클릭은 ◧(접기)로 가지만 — 배지는 시각 표시라 무해(드문 영역).
+                try cells.append(self.allocator, .{ .row = 0, .col = cols - 10, .codepoint = '9', .style = .{ .foreground = badge_rgb } });
+                try cells.append(self.allocator, .{ .row = 0, .col = cols - 9, .codepoint = '+', .style = .{ .foreground = badge_rgb } });
+            } else {
+                try cells.append(self.allocator, .{ .row = 0, .col = cols - 10, .codepoint = '0' + @as(u21, @intCast(self.notification_unread)), .style = .{ .foreground = badge_rgb } });
+            }
         }
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 8, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 5, .codepoint = 0x2699, .style = .{ .foreground = fg } });
@@ -11301,6 +11321,37 @@ test "알림 액션: deleteNotification(역순) + markAllNotificationsRead + cle
     session.clearNotifications();
     try std.testing.expectEqual(@as(usize, 0), session.notification_history.items.len);
     try std.testing.expectEqual(@as(usize, 0), session.notification_unread);
+}
+
+test "markNotificationsReadBySurface: 배너 클릭→그 surface 안읽음 모두 읽음(센터 동기화)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.pushNotificationHistory("a", "1", 11, true); // surface 11
+    session.pushNotificationHistory("b", "2", 22, true); // surface 22
+    session.pushNotificationHistory("c", "3", 11, false); // surface 11 (또 한 번)
+    try std.testing.expectEqual(@as(usize, 3), session.notification_unread);
+
+    // surface 11 배너 클릭 → surface 11의 안읽음(a·c) 모두 읽음, surface 22(b)는 유지.
+    session.markNotificationsReadBySurface(11);
+    try std.testing.expectEqual(@as(usize, 1), session.notification_unread); // b만 안읽음
+    try std.testing.expect(session.notification_history.items[0].is_read); // a (surface 11)
+    try std.testing.expect(!session.notification_history.items[1].is_read); // b (surface 22)
+    try std.testing.expect(session.notification_history.items[2].is_read); // c (surface 11)
+
+    // 없는 surface → 무동작.
+    session.markNotificationsReadBySurface(999);
+    try std.testing.expectEqual(@as(usize, 1), session.notification_unread);
 }
 
 test "parseGitHead: ref branch / nested ref / detached SHA / empty ref / junk" {

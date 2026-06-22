@@ -3116,6 +3116,17 @@ pub const AppSession = struct {
         _ = self.activateSurfaceById(surface_id); // 닫힌 surface면 false(점프 안 함, 패널은 이미 닫음)
     }
 
+    /// 키보드 ↑↓로 알림 선택이 바뀐 뒤 — 선택 카드가 패널 viewport 밖이면 보이게 스크롤한다(컴포넌트 ensureSelectedVisible
+    /// 단일 출처). 항목은 매 프레임 빌드. scroll_offset 상태를 두는 알림 패널 특유 처리(palette는 selected에서 윈도우 파생).
+    fn scrollNotificationsToSelected(self: *AppSession) void {
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        if (self.buildNotificationItems(arena_state.allocator())) |items| {
+            self.chrome_host.notifications.ensureSelectedVisible(items, self.buildChromeProps());
+        } else |_| {}
+        self.metal_dirty = true;
+    }
+
     /// **세션-트리 구조-무효화 계약(S1)의 단일 출처.** 한 Pane이 해제되기 직전 destroyPane이 부른다 — 모든
     /// 트리 변형(closeTab·closeActivePane·collapsePaneIn·applyWorkspaceWindow·reap)이 노드 해제 시 destroyPane을
     /// 거치므로, 이 한 지점이 흩어진 null화 없이 stale 포인터 UAF를 구조적으로 막는다(스냅샷 가드는 UAF를 못 잡는다
@@ -5045,7 +5056,7 @@ pub const AppSession = struct {
                 self.chrome_host.notifications.hide();
                 self.metal_dirty = true;
             },
-            .notifications_selection_changed => self.metal_dirty = true, // ↑↓ 선택 이동 — 재렌더
+            .notifications_selection_changed => self.scrollNotificationsToSelected(), // ↑↓ 선택 이동 — 선택 보이게 스크롤 + 재렌더
             .notifications_delete => self.deleteNotification(self.chrome_host.notifications.selected), // Backspace — selected 카드 삭제
             .notifications_mark_all_read => self.markAllNotificationsRead(), // 하단 "모두 읽음"
             .notifications_clear_all => self.clearNotifications(), // 하단 "모두 지우기"
@@ -5712,6 +5723,23 @@ pub const AppSession = struct {
         // 닫기 확인 모달은 결정 게이트라 마우스 클릭(mouse())뿐 아니라 휠도 막는다 — 안 막으면 모달 뒤 터미널/스크롤백이
         // 사용자 결정 중에 움직이거나(스크롤) 트래킹 앱에 휠이 리포트된다(모달 의도 위배).
         if (self.chrome_host.confirm.open) return;
+        // 알림 패널이 열려 있으면 휠은 패널 카드 스크롤로 가로챈다(클릭이 패널로 가로채지는 mouse()의 게이트와 짝 —
+        // 터미널/스크롤백으로 안 흘린다). 휠 위(lines>0)=목록 위(최신, offset↓)·아래=오래된(offset↑). 카드 단위라 줄
+        // 수를 그대로 카드 delta로 쓴다(부호 반전: 위로 굴리면 offset 감소). 항목은 매 프레임 빌드(layout이 상한 clamp).
+        if (self.chrome_host.notifications.open) {
+            if (std.math.isFinite(delta_y) and delta_y * self.wheel_accum < 0) self.wheel_accum = 0;
+            const scaled = delta_y * @as(f64, self.appearance.scroll_multiplier);
+            const lines = wheelDeltaToLines(&self.wheel_accum, scaled, precise, self.cell_height_px, self.scale_milli);
+            if (lines != 0) {
+                var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena_state.deinit();
+                if (self.buildNotificationItems(arena_state.allocator())) |items| {
+                    self.chrome_host.notifications.scrollBy(items, self.buildChromeProps(), @as(i64, -lines));
+                    self.metal_dirty = true;
+                } else |_| {}
+            }
+            return;
+        }
         // 방향이 뒤집히면 1줄 미만 잔여를 버린다 — 이전 방향의 residue가 첫 반대 틱을 상쇄해
         // 방향 전환이 굼뜨게 느껴지는 것 방지(iTerm2/xterm.js 동작).
         if (std.math.isFinite(delta_y) and delta_y * self.wheel_accum < 0) self.wheel_accum = 0;

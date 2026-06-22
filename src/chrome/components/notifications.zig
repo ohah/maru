@@ -52,21 +52,26 @@ pub const Item = struct {
     is_alive: bool,
 };
 
-/// 순수 UI 상태 — open + anchor(종 아이콘 px) + selected(강조 카드) + item_count(키 nav clamp용). 항목 데이터는
-/// platform이 매 프레임 주입(palette 선례)하므로 여기엔 없다. heap 없음(deinit 불필요).
+/// 순수 UI 상태 — open + anchor(종 아이콘 px) + selected(강조 카드) + item_count(키 nav clamp용) + scroll_offset(보이는
+/// 첫 카드). 항목 데이터는 platform이 매 프레임 주입(palette 선례)하므로 여기엔 없다. heap 없음(deinit 불필요).
 pub const State = struct {
     open: bool = false,
     anchor_x: i32 = 0,
     anchor_y: i32 = 0,
     selected: usize = 0,
     item_count: usize = 0,
+    /// 보이는 첫 카드 인덱스(0=최신 위). 카드가 화면 높이를 넘으면 이 offset 윈도우만 렌더(카드 단위 스크롤 — draw.Op에
+    /// scissor가 없어 부분 카드를 못 자르므로 통째 카드만). 상한 clamp는 layout(items·metrics 의존)이 하고, 여기선
+    /// 하한(0)만 보장. show 시 0으로 리셋.
+    scroll_offset: usize = 0,
 
-    /// 종 아이콘 위치(x,y px)와 항목 수로 연다 — 선택은 첫(=최신) 항목. platform이 항목을 빌드한 뒤 부른다.
+    /// 종 아이콘 위치(x,y px)와 항목 수로 연다 — 선택은 첫(=최신) 항목, 스크롤은 맨 위. platform이 항목을 빌드한 뒤 부른다.
     pub fn show(self: *State, x: i32, y: i32, item_count: usize) void {
         self.anchor_x = x;
         self.anchor_y = y;
         self.selected = 0;
         self.item_count = item_count;
+        self.scroll_offset = 0;
         self.open = true;
     }
 
@@ -86,6 +91,37 @@ pub const State = struct {
         const last: i64 = @intCast(self.item_count - 1);
         const cur: i64 = @intCast(self.selected);
         self.selected = @intCast(std.math.clamp(cur + delta, 0, last));
+    }
+
+    /// 마우스 휠/PageUp·Down용 — delta 카드만큼 스크롤(음수=위/최신, 양수=아래/오래된). 상한은 layout(items·metrics
+    /// 의존)이 알므로 그걸로 clamp(단일 출처). 스크롤 불필요(화면에 다 들어감)면 0으로.
+    pub fn scrollBy(self: *State, items: []const Item, p: props.ChromeProps, delta: i64) void {
+        const l = layout(self, items, p) orelse return;
+        if (!l.scrollable) {
+            self.scroll_offset = 0;
+            return;
+        }
+        const max_offset: i64 = @intCast(l.total - l.visible);
+        const cur: i64 = @intCast(@min(self.scroll_offset, @as(usize, @intCast(max_offset))));
+        self.scroll_offset = @intCast(std.math.clamp(cur + delta, 0, max_offset));
+    }
+
+    /// 키보드 ↑↓로 selected가 바뀐 뒤 호출 — 선택 카드가 viewport 밖이면 그만큼 스크롤해 보이게 한다(터미널 스크롤백·
+    /// palette 윈도우와 같은 규율). 스크롤 불필요면 0.
+    pub fn ensureSelectedVisible(self: *State, items: []const Item, p: props.ChromeProps) void {
+        const l = layout(self, items, p) orelse return;
+        if (!l.scrollable) {
+            self.scroll_offset = 0;
+            return;
+        }
+        const max_offset = l.total - l.visible;
+        var off = @min(self.scroll_offset, max_offset);
+        if (self.selected < off) {
+            off = self.selected; // 위로 — 선택을 맨 위에
+        } else if (self.selected >= off + l.visible) {
+            off = self.selected - l.visible + 1; // 아래로 — 선택을 맨 아래에
+        }
+        self.scroll_offset = off;
     }
 };
 
@@ -138,69 +174,126 @@ fn cardCols(it: Item) u32 {
     return @max(title_line, body_line);
 }
 
-/// 패널 박스 rect(px) — anchor에서 시작하되 화면(backing) 우/하단을 넘으면 당겨 안에 들게 clamp(context_menu menuRect와
-/// 같은 수학). 폭 = 최대 카드 폭(빈 목록은 "알림 없음") + 좌우 1칸 패딩, 높이 = 항목수 × 2행 × cell(빈 목록은 1행).
-/// **view·itemAt 단일 출처**라 "보이는 카드 == 클릭되는 카드". cell 0이면 null.
-fn panelRect(state: *const State, items: []const Item, p: props.ChromeProps) ?draw.Rect {
+/// 패널 레이아웃(스크롤 윈도우 포함) — **view·hitTest·panelRect 단일 출처**라 "보이는 카드 == 클릭되는 카드". 카드가
+/// 화면 가용 높이를 넘으면 카드 단위로 스크롤한다(부분 카드 클리핑 인프라가 없어 — draw.Op에 scissor 없음 — 통째
+/// 카드만 보인다). 액션 행(모두 읽음/지우기)은 보이는 카드들 바로 아래 = viewport 하단에 늘 붙어 스크롤해도 안 잘린다.
+const Layout = struct {
+    rect: draw.Rect, // 패널 박스(px) — 화면 안으로 clamp됨
+    cw: u32,
+    ch: u32,
+    card_h: u32, // 카드 1개 높이(px) = ch × card_rows
+    panel_cols: u32, // 박스 폭(칸)
+    total: usize, // 전체 카드 수
+    first: usize, // 보이는 첫 카드 인덱스(scroll_offset clamp 결과)
+    visible: usize, // 보이는 카드 수(≤ total)
+    has_action: bool, // 액션 행 그림(목록 있음)
+    scrollable: bool, // total > visible — 스크롤바·휠 활성
+};
+
+/// 패널 레이아웃을 계산한다(폭·높이·스크롤 윈도우·위치 clamp). cell 0이면 null. anchor에서 시작하되 화면(backing)
+/// 우/하단을 넘으면 당겨 안에 들게 clamp(context_menu menuRect와 같은 수학). 좌단은 종 드롭다운이라 사이드바로 안 민다.
+fn layout(state: *const State, items: []const Item, p: props.ChromeProps) ?Layout {
     const m = p.metrics;
-    const cw = @max(m.cell_width_px, 1);
-    const ch = @max(m.cell_height_px, 1);
+    if (m.cell_width_px == 0 or m.cell_height_px == 0) return null;
+    const cw = m.cell_width_px;
+    const ch = m.cell_height_px;
+    const card_h = ch * card_rows;
+
+    // 폭 — 최대 카드 폭(빈 목록은 "알림 없음") + 좌우 1칸 패딩, Warp 스타일 최소 폭 보장.
     var content_cols: u32 = if (items.len == 0) overlay_input.displayCols(empty_label) else 0;
     for (items) |it| {
         const c = cardCols(it);
         if (c > content_cols) content_cols = c;
     }
-    content_cols = @max(content_cols, min_panel_cols); // Warp 스타일 최소 폭(넉넉한 고정 폭)
-    const box_w = (content_cols + 2) * cw; // 좌우 1칸 패딩
-    // 목록이 있으면 카드들 아래에 액션 행(모두 읽음/지우기) 1줄을 더한다(빈 목록은 액션 행 없음).
-    const rows: u32 = if (items.len == 0) empty_panel_rows else @as(u32, @intCast(items.len)) * card_rows + action_rows;
-    const box_h = rows * ch;
+    content_cols = @max(content_cols, min_panel_cols);
+    const box_w = (content_cols + 2) * cw;
+
+    const total = items.len;
+    const has_action = total > 0;
+    const action_h: u32 = if (has_action) ch * action_rows else 0;
+
+    // 화면 가용 높이 — 위아래 1칸씩 여백. 작은 창에서도 카드 1개 + 액션 행은 최소 보장한다.
+    const bh = m.backing_height_px;
+    const avail_h = @max(card_h + action_h, bh -| 2 * ch);
+    const max_card_area = avail_h -| action_h; // 카드들이 쓸 수 있는 높이
+    const max_visible: usize = @intCast(@max(@as(u32, 1), max_card_area / card_h));
+
+    const visible: usize = if (total == 0) 0 else @min(total, max_visible);
+    const scrollable = total > visible;
+    const max_offset: usize = if (scrollable) total - visible else 0;
+    const first = @min(state.scroll_offset, max_offset);
+
+    // 높이 — 빈 목록은 empty_panel_rows, 아니면 보이는 카드 + 액션 1줄.
+    const box_h: u32 = if (total == 0)
+        empty_panel_rows * ch
+    else
+        @as(u32, @intCast(visible)) * card_h + action_h;
+
+    // 위치 clamp.
     var x = state.anchor_x;
     var y = state.anchor_y;
     const bw_px: i32 = @intCast(m.backing_width_px);
-    const bh_px: i32 = @intCast(m.backing_height_px);
+    const bh_px: i32 = @intCast(bh);
     if (x + @as(i32, @intCast(box_w)) > bw_px) x = bw_px - @as(i32, @intCast(box_w)); // 우단 넘으면 왼쪽으로
     if (y + @as(i32, @intCast(box_h)) > bh_px) y = bh_px - @as(i32, @intCast(box_h)); // 하단 넘으면 위로
-    // 좌단은 화면 안(0)으로만 clamp한다 — 알림 패널은 사이드바 헤더의 종 아이콘에서 나오므로 사이드바 위에 떠야
-    // 종 바로 아래에 보인다(context_menu는 터미널 영역 오버레이라 사이드바로 밀지만, 이 패널은 종 드롭다운이다).
     if (x < 0) x = 0;
     if (y < 0) y = 0;
-    return .{ .x = x, .y = y, .w = box_w, .h = box_h };
+
+    return .{
+        .rect = .{ .x = x, .y = y, .w = box_w, .h = box_h },
+        .cw = cw,
+        .ch = ch,
+        .card_h = card_h,
+        .panel_cols = box_w / cw,
+        .total = total,
+        .first = first,
+        .visible = visible,
+        .has_action = has_action,
+        .scrollable = scrollable,
+    };
 }
 
-/// 마우스 px를 패널 안의 동작으로 해석한다(박스 밖/빈 목록이면 null → 호출자가 닫기). view와 같은 panelRect를 써서
-/// "보이는 == 클릭되는". 세로: 카드 영역(각 카드 2행) 아래에 액션 행 1줄. 카드 안에서 본문줄(line 1) 우측 끝 1칸은
-/// ✕(삭제) zone, 나머지는 카드 본문(점프). 액션 행은 좌/우 절반으로 모두 읽음/지우기.
+/// 패널 박스 rect(px). view·hitTest와 같은 layout을 쓴다(단일 출처). cell 0이면 null.
+fn panelRect(state: *const State, items: []const Item, p: props.ChromeProps) ?draw.Rect {
+    const l = layout(state, items, p) orelse return null;
+    return l.rect;
+}
+
+/// 마우스 px를 패널 안의 동작으로 해석한다(박스 밖/빈 목록이면 null → 호출자가 닫기). view와 같은 layout을 써서
+/// "보이는 == 클릭되는". 세로: 보이는 카드 영역(visible × 2행) 아래에 액션 행 1줄(sticky). 보이는 vis번째 카드는 실제
+/// 인덱스 first+vis다. 카드 안에서 본문줄(line 1) 우측 끝 1칸은 ✕(삭제) zone, 나머지는 카드 본문(점프).
 pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x_px: f64, y_px: f64) ?Hit {
     if (!state.open or items.len == 0 or !std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
-    const rect = panelRect(state, items, p) orelse return null;
+    const l = layout(state, items, p) orelse return null;
+    const rect = l.rect;
     const x0: f64 = @floatFromInt(rect.x);
     const y0: f64 = @floatFromInt(rect.y);
     if (x_px < x0 or x_px >= x0 + @as(f64, @floatFromInt(rect.w))) return null;
     if (y_px < y0 or y_px >= y0 + @as(f64, @floatFromInt(rect.h))) return null;
-    const cw: f64 = @floatFromInt(@max(p.metrics.cell_width_px, 1));
-    const ch: f64 = @floatFromInt(@max(p.metrics.cell_height_px, 1));
+    const cw: f64 = @floatFromInt(l.cw);
+    const ch: f64 = @floatFromInt(l.ch);
+    const card_h: f64 = @floatFromInt(l.card_h);
     const rel_y = y_px - y0;
-    const card_area_h = @as(f64, @floatFromInt(items.len)) * @as(f64, @floatFromInt(card_rows)) * ch;
-    // 하단 액션 행: 카드 영역 아래 → 좌/우 절반으로 모두 읽음/지우기.
+    const card_area_h = @as(f64, @floatFromInt(l.visible)) * card_h;
+    // 하단 액션 행(viewport 하단 sticky): 보이는 카드 영역 아래 → 좌/우 절반으로 모두 읽음/지우기.
     if (rel_y >= card_area_h) {
         const mid = x0 + @as(f64, @floatFromInt(rect.w)) / 2.0;
         return if (x_px < mid) .mark_all_read else .clear_all;
     }
-    // 카드: 어느 카드인지 + 본문줄 우측 ✕ zone인지.
-    const card_h = @as(f64, @floatFromInt(card_rows)) * ch;
-    const card_idx: usize = @min(@as(usize, @intFromFloat(rel_y / card_h)), items.len - 1);
-    const within = rel_y - @as(f64, @floatFromInt(card_idx)) * card_h;
+    // 카드: 보이는 vis번째 → 실제 인덱스 first+vis + 본문줄 우측 ✕ zone인지.
+    const vis_idx: usize = @min(@as(usize, @intFromFloat(rel_y / card_h)), l.visible - 1);
+    const card_idx = l.first + vis_idx;
+    const within = rel_y - @as(f64, @floatFromInt(vis_idx)) * card_h;
     const line: u32 = @intFromFloat(within / ch); // 0=제목줄, 1=본문줄
-    const panel_cols: u32 = rect.w / @as(u32, @intCast(@max(p.metrics.cell_width_px, 1)));
-    const close_x0 = x0 + @as(f64, @floatFromInt(panel_cols -| 2)) * cw; // ✕ col(panel_cols-2) 이상
+    const close_x0 = x0 + @as(f64, @floatFromInt(l.panel_cols -| 2)) * cw; // ✕ col(panel_cols-2) 이상
     if (line >= 1 and x_px >= close_x0) return .{ .close = card_idx };
     return .{ .card = card_idx };
 }
 
-/// 패널(배경 quad + 카드들)을 `out`에 append한다. 안 열렸으면 무동작. 빈 목록도 패널 + "알림 없음"을 그린다. 순수:
-/// state·items·props·tokens만 읽는다. ops·runs는 호출자 frame arena 소유. 색: surface_bg(박스)·surface_fg(살아있는
-/// 글자)·muted_fg(닫힌 surface·시간·안내)·tab_active_bg(선택행)·focus_accent(테두리·안읽음 점)·divider(카드 구분선).
+/// 패널(배경 quad + 보이는 카드 윈도우 + sticky 액션 행 + 스크롤바)을 `out`에 append한다. 안 열렸으면 무동작. 빈
+/// 목록도 패널 + "알림 없음"을 그린다. 카드가 화면을 넘으면 items[first..first+visible]만 그린다(카드 단위 스크롤).
+/// 순수: state·items·props·tokens만 읽는다. ops·runs는 호출자 frame arena 소유. 색: surface_bg(박스)·surface_fg(살아있는
+/// 글자)·muted_fg(닫힌 surface·시간·안내·스크롤바)·tab_active_bg(선택행)·focus_accent(테두리·안읽음 점)·divider(구분선).
 pub fn view(
     state: *const State,
     items: []const Item,
@@ -211,9 +304,11 @@ pub fn view(
 ) !void {
     _ = tk;
     if (!state.open) return;
-    const rect = panelRect(state, items, p) orelse return;
-    const cw: i32 = @intCast(@max(p.metrics.cell_width_px, 1));
-    const ch: i32 = @intCast(@max(p.metrics.cell_height_px, 1));
+    const l = layout(state, items, p) orelse return;
+    const rect = l.rect;
+    const cw: i32 = @intCast(l.cw);
+    const ch: i32 = @intCast(l.ch);
+    const card_h_i: i32 = @intCast(l.card_h);
     const bg_r = p.shape.corner_radius_px;
     const bw = p.shape.border_width_px;
     // 패널 배경(둥근+테두리) — context_menu/palette와 동일.
@@ -226,13 +321,17 @@ pub fn view(
         return;
     }
 
-    const panel_cols: u32 = rect.w / @as(u32, @intCast(cw));
-    for (items, 0..) |it, i| {
-        const card_y = rect.y + @as(i32, @intCast(i)) * (ch * @as(i32, @intCast(card_rows)));
+    const panel_cols: u32 = l.panel_cols;
+    // 보이는 윈도우: items[first .. first+visible]만 그린다. 화면 vis번째 카드 y = rect.y + vis*card_h.
+    var vis: usize = 0;
+    while (vis < l.visible) : (vis += 1) {
+        const i = l.first + vis; // 실제 item 인덱스
+        const it = items[i];
+        const card_y = rect.y + @as(i32, @intCast(vis)) * card_h_i;
         const fg: tokens.ColorRole = if (it.is_alive) .surface_fg else .muted_fg; // 닫힌 surface는 회색 dim
         // 선택 카드 강조(2행 높이) — palette/context_menu 선택행과 같은 tab_active_bg. 텍스트가 그 위에.
         if (i == state.selected) {
-            try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y, .w = rect.w, .h = @intCast(ch * @as(i32, @intCast(card_rows))) }, .role = .tab_active_bg } });
+            try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y, .w = rect.w, .h = l.card_h }, .role = .tab_active_bg } });
         }
         // 제목줄: 안읽음 점(●) + 제목 + 우측정렬 상대시간.
         if (!it.is_read) {
@@ -259,13 +358,13 @@ pub fn view(
         const close_runs = try arena.alloc(draw.Run, 1);
         close_runs[0] = .{ .text = close_glyph };
         try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(panel_cols -| 2)) * cw, .y = card_y + ch }, .runs = close_runs, .role = .muted_fg } });
-        // 카드 구분선(마지막 제외) — **`.rule`은 macOS lowering no-op이라 `.fill` 1px**로 그린다(보이게).
-        if (i + 1 < items.len) {
-            try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y + ch * @as(i32, @intCast(card_rows)) - 1, .w = rect.w, .h = 1 }, .role = .divider } });
+        // 카드 구분선(보이는 마지막 카드 제외 — 그 아래엔 액션 행 구분선이 온다). `.rule`은 macOS no-op이라 `.fill` 1px.
+        if (vis + 1 < l.visible) {
+            try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y + card_h_i - 1, .w = rect.w, .h = 1 }, .role = .divider } });
         }
     }
-    // 하단 액션 행: 카드들 아래 구분선 + "모두 읽음"(좌) / "모두 지우기"(우, muted). hitTest가 좌/우 절반으로 가른다.
-    const action_y = rect.y + @as(i32, @intCast(@as(u32, @intCast(items.len)) * card_rows)) * ch;
+    // 하단 액션 행(viewport 하단 sticky): 보이는 카드들 아래 구분선 + "모두 읽음"(좌) / "모두 지우기"(우, muted).
+    const action_y = rect.y + @as(i32, @intCast(l.visible)) * card_h_i;
     try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = action_y, .w = rect.w, .h = 1 }, .role = .divider } });
     const mark_runs = try arena.alloc(draw.Run, 1);
     mark_runs[0] = .{ .text = mark_all_label };
@@ -274,6 +373,20 @@ pub fn view(
     const clear_runs = try arena.alloc(draw.Run, 1);
     clear_runs[0] = .{ .text = clear_all_label };
     try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(panel_cols -| clear_cols -| 1)) * cw, .y = action_y }, .runs = clear_runs, .role = .muted_fg } });
+
+    // 스크롤바 thumb(스크롤 가능할 때만) — 카드 영역 우측 가장자리에 얇은 막대. 위치/크기 = 보이는 비율(first/total,
+    // visible/total). 카드 단위라 thumb도 카드 영역(액션 행 위)에만 걸친다.
+    if (l.scrollable) {
+        const visible_i: i32 = @intCast(l.visible);
+        const total_i: i32 = @intCast(l.total);
+        const first_i: i32 = @intCast(l.first);
+        const card_area_h: i32 = card_h_i * visible_i;
+        const thumb_h = @max(ch, @divFloor(card_area_h * visible_i, total_i)); // 최소 1줄
+        const thumb_y = rect.y + @divFloor(card_area_h * first_i, total_i);
+        const thumb_w: i32 = 2; // 얇은 막대
+        const sb_x = rect.x + @as(i32, @intCast(rect.w)) - thumb_w;
+        try out.append(arena, .{ .fill = .{ .rect = .{ .x = sb_x, .y = thumb_y, .w = @intCast(thumb_w), .h = @intCast(thumb_h) }, .role = .muted_fg } });
+    }
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -426,4 +539,62 @@ test "notifications panelRect: 빈 제목 폴백 + 최소 폭 + 종 밑(사이�
     const r2 = panelRect(&s, &items, p).?;
     try std.testing.expect(r2.x + @as(i32, @intCast(r2.w)) <= 800);
     try std.testing.expect(r2.y + @as(i32, @intCast(r2.h)) <= 600);
+}
+
+test "notifications 스크롤: 화면 넘으면 카드 윈도우 + scrollBy/ensureSelectedVisible clamp + 스크롤바" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    // 작은 창(backing_height=100) — card_h=32, action=16이라 카드 1개만 보인다(avail=max(48,100-32)=68, area=52, 52/32=1).
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 0,
+        .backing_width_px = 800,
+        .backing_height_px = 100,
+    } };
+    var items_buf: [5]Item = undefined;
+    for (&items_buf) |*it| it.* = .{ .title = "t", .body = "b", .relative_time = "방금", .is_read = false, .is_alive = true };
+    const items: []const Item = &items_buf;
+
+    var s: State = .{};
+    s.show(0, 0, items.len);
+    const l0 = layout(&s, items, p).?;
+    try std.testing.expectEqual(@as(usize, 1), l0.visible); // 한 장만 보임
+    try std.testing.expect(l0.scrollable);
+    try std.testing.expectEqual(@as(usize, 0), l0.first);
+
+    // 휠 아래로 2 → offset 2(max_offset=total-visible=4).
+    s.scrollBy(items, p, 2);
+    try std.testing.expectEqual(@as(usize, 2), s.scroll_offset);
+    // 보이는 첫 카드 클릭 → 실제 인덱스 first(2)로 매핑(보이는==클릭되는).
+    const rect = panelRect(&s, items, p).?;
+    try std.testing.expectEqual(Hit{ .card = 2 }, hitTest(&s, items, p, @floatFromInt(rect.x + 8), @floatFromInt(rect.y + 4)).?);
+
+    // 상한/하한 clamp — 끝까지 내려도 4, 끝까지 올려도 0.
+    s.scrollBy(items, p, 100);
+    try std.testing.expectEqual(@as(usize, 4), s.scroll_offset);
+    s.scrollBy(items, p, -100);
+    try std.testing.expectEqual(@as(usize, 0), s.scroll_offset);
+
+    // 키보드 선택 따라 스크롤 — selected가 viewport 밖이면 보이게 당긴다(visible=1이라 offset=selected).
+    s.selected = 4;
+    s.ensureSelectedVisible(items, p);
+    try std.testing.expectEqual(@as(usize, 4), s.scroll_offset);
+    s.selected = 1;
+    s.ensureSelectedVisible(items, p);
+    try std.testing.expectEqual(@as(usize, 1), s.scroll_offset);
+
+    // view: 보이는 1장 + 액션행 + 스크롤바 thumb(우측 끝 얇은 muted 막대)만 그린다.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, items, p, &tk, arena_state.allocator(), &out);
+    var saw_scrollbar = false;
+    var card_titles: usize = 0;
+    for (out.items) |op| {
+        if (op == .fill and op.fill.role == .muted_fg and op.fill.rect.w == 2) saw_scrollbar = true;
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, "t")) card_titles += 1;
+    }
+    try std.testing.expect(saw_scrollbar); // 스크롤 가능 → thumb 표시
+    try std.testing.expectEqual(@as(usize, 1), card_titles); // 보이는 카드 1장만(윈도우)
 }

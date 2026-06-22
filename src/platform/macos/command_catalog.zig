@@ -41,6 +41,8 @@ pub const entries = [_]Entry{
     .{ .action = .focus_pane_down, .key = "focus_pane_down", .title = "Focus Pane Down" },
     .{ .action = .next_pane, .key = "next_pane", .title = "Next Pane" },
     .{ .action = .previous_pane, .key = "previous_pane", .title = "Previous Pane" },
+    // 활성 pane을 새 단독 워크스페이스로 분리(grip 드래그의 키보드/팔릿 버전). 기본 키바인딩 없음 — 팔릿이 발견 경로.
+    .{ .action = .move_pane_to_new_workspace, .key = "move_pane_to_new_workspace", .title = "Move Pane to New Workspace" },
     // 사용자 지정 이름(rename) — 활성 대상을 인라인 편집기로 연다(custom_name). 기본 키바인딩이 없어 팔릿이 주
     // 발견 경로다(+ 더블클릭·우클릭). select_all과 같은 일반 액션.
     .{ .action = .rename_workspace, .key = "rename_workspace", .title = "Rename Workspace" },

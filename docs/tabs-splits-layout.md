@@ -173,6 +173,50 @@ Node = leaf(Pane)
   끌리는 탭은 **floating 탭 미리보기**(박스+제목)가 커서를 따라간다(`buildFloatingTabFrame`, 맨 위 frame).
   **호버 커서(②)**: divider=↔/↕ resize, 사이드바 경계=↔, "+"=손가락, 터미널=I-beam.
 
+### Pane을 워크스페이스로 분리·합치기 (드래그, 구현됨)
+
+Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스 영역)로 끌어 **새 워크스페이스로 분리**하거나
+**기존 워크스페이스에 합칠** 수 있다. ④(split 재배치)가 pane **본문** 안에서의 이동이라면, 이건 pane을 사이드바로
+넘기는 **워크스페이스 간** 이동이다. 모델상 워크스페이스 = SplitTree 루트, Pane = leaf라 "leaf를 한 트리에서 떼
+다른 트리에 심기"라는 트리 연산으로 깔끔히 떨어진다 — Term을 옮기지 않고 `*Pane` 포인터를 통째로 재부모화한다.
+
+- **드래그 손잡이(베이스/결정)**: pane 탭바 **좌측 grip 핸들**(항상 보이는 ⠿ 글리프, `pane_grip_cols`=2칸 예약)을
+  잡으면 Pane 통째 드래그, **Term 탭**을 잡으면 기존대로 Term 1개 드래그(④)로 갈린다. **라벨 세그먼트만으로는 부족**
+  하다(custom_name 없는 pane은 라벨 폭이 0이라 잡을 자리가 없다 — `paneLabelCols`) → grip을 **이름 유무와 무관하게
+  항상 예약**해 모든 pane이 끌리게 한다(사용자 결정). custom_name이 있으면 grip 뒤에 이름이 붙는다(`paneBar`가
+  `grip_cols`+`label_cols`로 탭 영역을 우측 offset). 같은 탭바에서 "잡는 자리"로만 단위를 구분하므로 새 chrome가
+  필요 없다(`tab_drag_*`와 분리된 `pane_drag_*` arm; 좁은 바는 탭 영역 최소 `pane_min_tab_cols` 보장 위해 grip 생략).
+  **사이드바 카드 드래그(워크스페이스 순서 재정렬, `sidebar_drag_*`)와는 시작 위치로 구분**된다 — pane 드래그는
+  터미널 영역(pane 탭바 grip)에서 시작, 워크스페이스 재정렬은 사이드바 카드에서 시작.
+- **드롭 위치별 동작(단일 분기)**: 사이드바 드롭 좌표를 `sidebarSlotAt`로 해석해 ① **기존 워크스페이스 카드 위** →
+  그 워크스페이스에 **합치기**, ② **빈 사이드바 영역**(카드 목록 아래/"+" 부근) → **새 단독 워크스페이스 생성**.
+  사이드바 밖(원래 pane 본문·탭바)이면 ④ 경로(새 split/Term 이동) 그대로다.
+- **합치기 기본 배치(베이스/결정)**: 카드는 사이드바 슬롯이라 좌/우/상/하 방향 정보가 없다. 그래서 타겟 워크스페이스의
+  **활성 pane을 좌우(`split_horizontal`)로 나눠 들어온 Pane을 우측·활성**으로 둔다(⌘D 관례와 동일). 트리 수술은 ④의
+  `moveTermToNewSplit`과 **같은 모양**(`replaceLeaf(dst_active → split{a:기존, b:들어온 Pane})`)이되 새 Pane을 만들지
+  않고 떼어온 Pane을 재사용한다. 사용자는 들어간 뒤 ④ 드래그로 방향을 재배치한다.
+- **분리(새 워크스페이스)**: 빈 `Tab`을 직접 만들고(셸 PTY를 새로 띄우는 `newTab`/`createTab`은 안 쓴다 — 떼어온 Pane을
+  재부모화하므로 새 PTY가 불필요·낭비) 그 단일 leaf를 떼어온 Pane으로 채운다(`tree = leaf(pane)`). 새 워크스페이스는
+  **탭 목록 끝에 붙고 활성**이 된다 — "빈 사이드바 영역=카드 목록 아래=끝"이라 드롭 위치와 일치한다(슬롯 중간 삽입·pinned
+  clamp는 두지 않는다; 순서 조정은 기존 사이드바 카드 드래그가 맡는다).
+- **소스 정리(공통)**: 두 경우 모두 소스 트리에서 `removeLeaf`로 그 leaf를 떼고 형제로 collapse한다(④와 동일 경로).
+  **no-op 가드(베이스/결정)**: 소스 Pane이 그 워크스페이스의 **유일한 Pane**(split 안 된 단독)이면 떼어내봤자 빈
+  워크스페이스만 남으므로 드롭을 **무시**한다 — 단독 워크스페이스를 끄는 건 워크스페이스 순서 재정렬(사이드바 카드
+  드래그)의 몫이지 분리가 아니다.
+- **미리보기·하이라이트·resize 재사용**: 드래그 중 floating 미리보기는 `buildFloatingTabFrame`을 pane 라벨
+  (custom_name orelse 활성 Term 라벨)로 재사용해 커서를 따라간다. **드롭 타겟 하이라이트**는 사이드바 밴드 경로
+  (`sidebar.view`)에 `drop_slot`을 더해 `.drop_zone` 색 밴드로 그린다 — 합칠 **카드 슬롯**(displaySlotOf) 또는 빈
+  영역이면 **카드 목록 아래 행**(표시 카드 수)에 활성/호버 밴드와 같은 lower 경로로 칠한다(`pane_drop_slot`을 drag(2)가
+  paneDropHighlightSlot로 갱신, 슬롯 전환 시에만 rebuildSidebar). 분리·합치기 후 **양쪽** 워크스페이스의 pane을
+  resize한다(소스는 collapse로 넓어지고, 타겟/새 트리는 새 레이아웃으로).
+- **액션·단계 위치**: ④/PR-E(탭·split 재배치)의 워크스페이스-간 확장이다. 드래그 외에 **분리(promote)는 액션
+  `move_pane_to_new_workspace`로도 노출**한다(커맨드 팔릿 "Move Pane to New Workspace"; dispatchAppAction이
+  `promotePaneToNewWorkspace`로 넘긴다). 합치기(merge)는 타겟 워크스페이스가 모호해 키 액션으로 두지 않는다(드래그
+  전용). 기본 단축키는 macOS 단일 관례가 없어 rename·split과 같은 규칙으로 **bindable 액션만 정의하고 기본 키는 두지
+  않는다**(발견성은 커맨드 팔릿·드래그; [필수 프로젝트 규칙](project-rules.md)의 베이스 명시 규칙). 검증은 트리
+  detach/insert·no-op 가드·드롭 타겟 하이라이트 슬롯·grip 드래그 end-to-end·액션 dispatch를 헤드리스 단위로, grip
+  글리프 렌더는 제품 스크린샷으로 고정한다.
+
 ### 사용자 지정 이름(rename)
 
 워크스페이스(사이드바 탭)·Pane(분할 영역)·Term(가로 탭) 세 계층 모두 사용자가 직접 이름을 붙일 수 있다. 자동

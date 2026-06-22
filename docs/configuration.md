@@ -91,6 +91,7 @@ window.opacity        = 1.0   # 배경 투명도(0~1) — default 배경만 투�
 | `workspace.tab-inherit-cwd` | `true`\|`false` | `true` | 새 워크스페이스 탭(`new_tab`)·새 Term(`new_term`)이 포커스 Term의 현재 cwd(OSC 7)를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `tab-inherit-working-directory`). 아래 참조 |
 | `workspace.split-inherit-cwd` | `true`\|`false` | `true` | 새 분할(`split_*`, 팬)이 포커스 Term의 현재 cwd를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `split-inherit-working-directory`). 아래 참조 |
 | `scrollback.lines` | 정수(0~100000) | `1000` | 가시 화면 위로 보관할 과거 줄 수. `0`이면 스크롤백 비활성(과거 줄 안 보관). 범위 밖/비정수는 무시(기본 유지) |
+| `scroll.multiplier` | 실수(0.1~10.0) | `1.0` | 휠/트랙패드 **세로** 스크롤 속도 배수. `1.0`=OS 기본, `>1`=빠르게(예: `3`이면 한 틱에 3배 줄), `<1`=느리게. 가로(탭 바) 스크롤엔 적용 안 함. 범위 밖/비실수는 무시(기본 유지). `scrollback`(보관 줄 수)과 별개 |
 | `bell.audible` | `true`\|`false` | `true` | BEL(0x07) 수신 시 시스템 소리(NSSound.beep)를 낼지. `false`면 음소거(코어 플래그는 정상 소비) |
 | `notifications.agent-complete` | `true`\|`false` | `true` | 터미널에서 도는 에이전트(claude/codex) 세션이 **비활성 탭/창**에서 완료(running→idle)될 때 macOS 알림을 띄울지. 활성 탭은 화면으로 이미 보이므로 안 띄운다. 그 외 값은 무시 |
 | `text.ambiguous-width` | `narrow`\|`wide` | `narrow` | EAW Ambiguous 문자(동그란 번호 ① 등)의 셀 폭. 아래 참조 |

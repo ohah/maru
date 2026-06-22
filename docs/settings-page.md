@@ -6,7 +6,7 @@ PR 분해**를 단일 출처로 둔다. 실제 키·형식·검증은 항상 [�
 그리는 chrome 구조는 [Chrome 전략](chrome-strategy.md)이, 키바인딩 경계는 [키 입력과
 단축키](key-input-and-shortcuts.md)가 단일 출처다 — 여기서는 중복하지 않고 연결한다.
 
-> 상태(2026-06): **진행 중**. S0-1a·F1-1·F1-3·F1-4b(blink-interval-ms)·F1-8·F1-9 머지(F1-7은 기존 구현). 세팅 GUI
+> 상태(2026-06): **진행 중**. S0-1a·F1-1·F1-3·F1-4b(blink-interval-ms)·F1-8·F1-9·F1-10(multiplier) 머지(F1-7은 기존 구현). 세팅 GUI
 > (CS-4-0~6, config-gui.md) 완료 후 미뤄둔 신규 기능(F1~F3)을 schema-first로 채우는 단계. 가벼운(순수 Zig·ABI 무변경)
 > 항목부터 순차 진행. 진행 상황은 각 PR 표의 상태 칸으로 동기화한다.
 >
@@ -93,7 +93,7 @@ config 키 추가 + 기존 경로에 분기 한 줄. GUI 없이 config 파일로
 | **F1-7** ✅ | 탭 닫기 확인 | **이미 구현** — `request_window_close`(ABI v65)가 in-app 닫기(close_tab/탭바 ✕)에도 `requestClose`로 같은 확인 모달을 띄운다(창 전용 아님) | ✅ 기존 구현(상단 노트와 동기 — 표 상태만 정정) |
 | **F1-8** ✅ | env 주입 `env.<KEY>` | `SpawnRequest.env_overrides` + `EnvStorage` upsert(부모 상속 위 덮어쓰기/추가) | ✅ 머지. 부모+사용자 정책, EnvStorage upsert 단위 테스트 |
 | **F1-9** ✅ | 커스텀 셸 `shell.command`/`shell.args` | `spawnRequest` interactive 분기가 config.shell 사용(login 래퍼는 그대로 — `/bin/bash`는 메커니즘) | ✅ 머지. loader·serialize 단위 테스트. `command/args`는 spawn이 이미 받음 |
-| **F1-10** | 스크롤 `scroll.multiplier`/`scroll.on-output` | `handleScroll` delta 배수, PTY 출력 후 viewport 조정 | delta 경로 존재 |
+| **F1-10** | 스크롤 `scroll.multiplier` ✅ / `scroll.on-output`(후속) | `scrollWheel` 세로 delta에 배수(0.1~10, 가로 탭 바 제외). `on-output`(PTY 출력 시 viewport 따라가기)은 viewport 정책이라 별도 PR | ✅ multiplier 머지(schema slider + scrollWheel 통합 단위 테스트). `on-output` 잔여 |
 
 ## 4. 신규 기능 — 중간 (Phase F2)
 

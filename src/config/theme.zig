@@ -462,6 +462,8 @@ pub const Config = struct {
     notifications: NotificationConfig = .{},
     /// 스크롤백(가시 화면 위로 보관하는 과거 줄) 설정. loader가 `scrollback.*` 키로 파싱.
     scrollback: ScrollbackConfig = .{},
+    /// 휠/트랙패드 스크롤 입력 설정. loader가 `scroll.*` 키로 파싱(scrollback과 별개 — 이건 입력 속도).
+    scroll: ScrollConfig = .{},
     /// 벨(BEL) 설정. loader가 `bell.*` 키로 파싱.
     bell: BellConfig = .{},
     /// 셸 통합(zsh ZDOTDIR 주입) 설정. loader가 `shell-integration.*` 키로 파싱.
@@ -570,6 +572,17 @@ pub const ScrollbackConfig = struct {
 
     pub const schema = .{ // 키: scrollback.lines (u32 range)
         .lines = Meta{ .doc = "스크롤백 보관 줄 수", .range = .{ 0, 100000 }, .widget = .number, .section = .terminal },
+    };
+};
+
+/// 휠/트랙패드 스크롤 입력 설정(scrollback과 별개 — 이건 휠 속도, 저건 보관 줄 수).
+pub const ScrollConfig = struct {
+    /// 휠/트랙패드 **세로** 스크롤 줄 수에 곱하는 배수. 1.0=OS 기본 속도, >1=빠르게·<1=느리게. 가로(탭 바) 스크롤엔
+    /// 적용하지 않는다(세로 터미널 스크롤 전용). loader가 `scroll.multiplier` 키로 파싱(0.1~10.0). 기본 1.0=현행 동작.
+    multiplier: f32 = 1.0,
+
+    pub const schema = .{ // 키: scroll.multiplier (f32 range)
+        .multiplier = Meta{ .doc = "휠 스크롤 배수", .range = .{ 0.1, 10.0 }, .widget = .slider, .section = .input },
     };
 };
 

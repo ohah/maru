@@ -148,9 +148,11 @@ pub export fn maru_macos_app_session_create(
     };
 
     const session = allocator.create(AppSession) catch return @intFromEnum(Status.create_failed);
-    errdefer allocator.destroy(session);
-
+    // 이 함수는 c_int를 반환해 정상 return(@intFromEnum)으로 끝나므로 errdefer가 발화하지 않는다 — init 실패 시
+    // 바깥 struct를 catch 안에서 직접 해제해야 누수가 안 난다. (init 내부 errdefer self.deinit()는 내부 할당만
+    // 정리하지 이 create로 잡은 struct 자체는 못 푼다. 호스트는 실패 시 핸들이 없어 destroy도 못 한다.)
     session.init(std.Io.Threaded.global_single_threaded.io(), allocator, raw_config) catch {
+        allocator.destroy(session);
         return @intFromEnum(Status.create_failed);
     };
 

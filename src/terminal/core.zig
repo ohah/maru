@@ -4923,10 +4923,14 @@ pub const TerminalCore = struct {
         self.pending_wrap = false;
         if (self.size.cols == 0) return;
         const last = self.size.cols - 1;
-        if (self.cursor.col >= last) return; // 이미 마지막 칸
+        if (self.cursor.col >= last) return; // 이미 마지막 칸 — 이동 없음
+        const old_cursor = self.cursor;
         var next = self.cursor.col + 1;
         while (next < last and !self.isTabstop(next)) next += 1; // 다음 탭스톱(없으면 마지막 칸)에 멈춤
         self.cursor.col = next;
+        // 커서는 draw-time 오버레이라 이동 시 옛/새 칸을 모두 dirty로 마킹해야 한다 — markCursorMoveDirty 계약(\r·BS·CBT 등
+        // 이 함수를 거치는 모든 이동)에 TAB도 포함시켜, 옛 칸의 커서 잔상이 안 남게 한다(cursorBackTab과 동일).
+        self.markCursorMoveDirty(old_cursor, self.cursor);
     }
 
     /// CBT(CSI Ps Z): 역방향으로 Ps개 탭스톱 이동. 0번째 칸을 넘지 않는다.
@@ -5812,6 +5816,23 @@ test "terminal core marks cursor-only movement dirty for cursor overlay redraw" 
     try std.testing.expectEqual(@as(u16, 0), bs_dirty.start_row);
     try std.testing.expectEqual(@as(u16, 0), bs_dirty.end_row);
     try std.testing.expectEqual(@as(u16, 1), core.snapshot().cursor.col);
+}
+
+test "terminal core marks the TAB cursor move dirty (HT cursor overlay redraw)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 2 });
+    defer core.deinit();
+
+    // HT(tab) moves only the cursor to the next tab stop, leaving cell text intact —
+    // like CR/BS it must still dirty the cursor row so the renderer erases the old
+    // cursor overlay and draws the new one. Before the fix writeTab moved the cursor
+    // without calling markCursorMoveDirty, so this row stayed clean (takeDirty()==null).
+    core.clearDirty();
+    try core.write("\t");
+
+    const tab_dirty = core.takeDirty().?;
+    try std.testing.expectEqual(@as(u16, 0), tab_dirty.start_row);
+    try std.testing.expectEqual(@as(u16, 0), tab_dirty.end_row);
+    try std.testing.expectEqual(@as(u16, 8), core.snapshot().cursor.col);
 }
 
 test "terminal core marks old and new cursor rows dirty across line feed" {

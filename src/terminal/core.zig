@@ -144,29 +144,34 @@ const Scrollback = struct {
         if (self.prompt_marks.len > 0) allocator.free(self.prompt_marks);
     }
 
-    /// 용량을 바꾼다. cap은 항상 갱신하되 **ring은 키울 때만** 재할당한다(grow-only):
-    /// - grow(new_cap > ring.len): 기존 행을 전부 보존한 채 더 큰 ring으로 옮긴다. 행을 버리지
-    ///   않으므로 abs 좌표(선택·kitty placement)가 불변이고, count도 그대로다. 런타임 config로
-    ///   scrollback.lines를 올리면 즉시 더 많은 history를 보관할 수 있고, cap>ring.len 상태가
-    ///   해소돼 rewrap의 OOB 전제 자체가 사라진다.
-    /// - shrink/동일(new_cap <= ring.len): cap만 갱신하고 ring은 그대로 둔다. 오래된 행을 버리면
-    ///   eviction처럼 선택/placement 좌표를 보정해야 하는데 그 책임은 여기 없으므로, 안전하게
-    ///   물리 ring.len을 상한으로 유지한다(push·rewrap이 일관되게 ring.len을 쓴다 — maxScrollback()이
-    ///   ring.len보다 작아질 뿐 무해). 미할당이면 다음 lazy push가 new_cap로 잡는다.
-    /// OOM이면 옛 ring을 유지한다(best-effort — 잘못된 절반 상태보다 옛 용량이 낫다).
-    fn setCap(self: *Scrollback, allocator: std.mem.Allocator, new_cap: usize) void {
+    /// 용량을 바꾼다. cap을 갱신하고, ring이 할당돼 있으면 새 cap 크기로 **재구성**한다 — 가장 최근
+    /// min(count, new_cap)개 행을 보존하고, 넘치는 가장 오래된 행은 행 버퍼까지 해제한다. 이로써
+    /// ring.len이 항상 cap을 따라가 cap>ring.len(rewrap OOB의 전제)이 생기지 않고, 런타임 config 변경이
+    /// 상향(더 보관)·하향(즉시 트림 + 메모리 회수) 양쪽으로 즉시 반영된다.
+    ///
+    /// **버려진(가장 오래된) 행 수를 반환**한다 — 호출자(setMaxScrollback)가 그만큼 abs 좌표
+    /// (선택·kitty placement·view_offset)를 당겨야 한다(eviction과 동일 규율). 행을 안 버리는
+    /// 상향/동일은 0을 반환해 좌표 보정이 불필요하다. 미할당이면 cap만 바꾸고 0(다음 lazy push가
+    /// new_cap로 잡음). OOM이면 옛 ring을 유지하고 0(best-effort — rewrap의 ring.len clamp가 안전망).
+    fn setCap(self: *Scrollback, allocator: std.mem.Allocator, new_cap: usize) usize {
         self.cap = new_cap;
-        if (new_cap <= self.ring.len or self.ring.len == 0) return; // shrink·동일·미할당
-        // grow: keep == count(new_cap > ring.len >= count). 행 드랍 없음 → 좌표 보정 불필요.
-        const new_ring = allocator.alloc(?[]types.Cell, new_cap) catch return;
+        if (self.ring.len == 0 or self.ring.len == new_cap) return 0; // 미할당·동일 크기
+        const keep = @min(self.count, new_cap);
+        const drop = self.count - keep; // 버릴 가장 오래된 행 수(논리 [0, drop))
+        if (new_cap == 0) { // 스크롤백 끄기 — 행·배열 전부 해제
+            self.deinit(allocator);
+            self.* = .{};
+            return drop;
+        }
+        const new_ring = allocator.alloc(?[]types.Cell, new_cap) catch return 0;
         const new_wrapped = allocator.alloc(bool, new_cap) catch {
             allocator.free(new_ring);
-            return;
+            return 0;
         };
         const new_pmarks = allocator.alloc(types.RowPrompt, new_cap) catch {
             allocator.free(new_ring);
             allocator.free(new_wrapped);
-            return;
+            return 0;
         };
         @memset(new_ring, null);
         @memset(new_wrapped, false);
@@ -174,9 +179,13 @@ const Scrollback = struct {
         var i: usize = 0;
         while (i < self.count) : (i += 1) {
             const src = (self.head + i) % self.ring.len;
-            new_ring[i] = self.ring[src];
-            new_wrapped[i] = self.wrapped[src];
-            new_pmarks[i] = self.prompt_marks[src];
+            if (i < drop) {
+                if (self.ring[src]) |row| allocator.free(row); // 버려지는 가장 오래된 행
+            } else {
+                new_ring[i - drop] = self.ring[src];
+                new_wrapped[i - drop] = self.wrapped[src];
+                new_pmarks[i - drop] = self.prompt_marks[src];
+            }
         }
         allocator.free(self.ring);
         allocator.free(self.wrapped);
@@ -185,7 +194,8 @@ const Scrollback = struct {
         self.wrapped = new_wrapped;
         self.prompt_marks = new_pmarks;
         self.head = 0;
-        // count·cap은 그대로(cap은 위에서 갱신). 행 전부 보존.
+        self.count = keep;
+        return drop;
     }
 };
 
@@ -657,11 +667,22 @@ pub const TerminalCore = struct {
 
     /// scrollback.lines config를 반영한다(런타임 reload 포함). 화면 단위 정책이라 활성 화면과 무관하게
     /// **항상 primary 스크롤백**에 적용한다(alt의 cap=0 불변식 유지 — 데이터 모델 보정이 아니라 config
-    /// 라우팅). setCap이 ring을 새 cap으로 재구성하므로 변경이 즉시 반영되고 cap/ring.len 불일치
-    /// (rewrap OOB의 원인)가 생기지 않는다.
+    /// 라우팅). setCap이 ring을 새 cap으로 재구성하므로 변경이 즉시 반영되고(상향=더 보관, 하향=즉시
+    /// 트림+메모리 회수) cap/ring.len 불일치(rewrap OOB의 원인)가 생기지 않는다. 하향이 가장 오래된
+    /// 행을 버리면, setCap이 돌려준 버린 행 수만큼 abs 좌표(선택·placement·view_offset)를 당긴다
+    /// (스크롤백 eviction과 동일 규율 — 좌표가 다른 내용을 가리키지 않게).
     pub fn setMaxScrollback(self: *TerminalCore, lines: usize) void {
         const target = if (self.alt_active) &self.saved_sb else &self.sb;
-        target.setCap(self.allocator, lines);
+        const dropped = target.setCap(self.allocator, lines);
+        if (dropped > 0) {
+            // 선택은 alt면 이미 해제돼 no-op, primary면 끝점이 버린 범위에 걸리면 해제·아니면 당김.
+            self.shiftSelectionForEviction(dropped);
+            // placement anchor는 primary 공간 abs 행이라 항상 당긴다(pushScrollback eviction과 같은 보정).
+            self.shiftPlacementsForEviction(dropped);
+            // view_offset은 활성 화면 기준 — primary면 새 count로 클램프, alt면 0이라 무동작.
+            self.view_offset = @min(self.view_offset, self.sb.count);
+            self.dirty = fullDirty(self.size);
+        }
     }
 
     /// i=0이 가장 오래된 스크롤백 행. 범위 밖이거나 OOM으로 비어 있으면 null.
@@ -1335,16 +1356,18 @@ pub const TerminalCore = struct {
         self.selectionClear();
     }
 
-    fn shiftSelectionForEviction(self: *TerminalCore) void {
-        if (self.selection_anchor == null) return;
+    /// 가장 오래된 n개 행이 빠져 abs 좌표가 n칸 당겨질 때 선택을 보정한다(eviction n=1, 하향 트림 n=drop).
+    /// 끝점이 빠진 행 범위 [0, n)에 걸리면 선택을 해제한다.
+    fn shiftSelectionForEviction(self: *TerminalCore, n: usize) void {
+        if (n == 0 or self.selection_anchor == null) return;
         const a = &self.selection_anchor.?;
         const h = &self.selection_head.?;
-        if (a.row == 0 or h.row == 0) {
+        if (a.row < n or h.row < n) {
             self.selectionClear();
             return;
         }
-        a.row -= 1;
-        h.row -= 1;
+        a.row -= n;
+        h.row -= n;
     }
 
     fn absRowFromViewport(self: *const TerminalCore, viewport_row: u16) usize {
@@ -1714,8 +1737,8 @@ pub const TerminalCore = struct {
             self.sb.head = (self.sb.head + 1) % cap;
             // ring이 가득 차 가장 오래된 행이 밀려나면 절대 행 좌표가 한 칸 당겨진다 — 선택도
             // 따라 보정하고, 선택이 밀려난 행을 포함했으면 해제한다. placement anchor도 같은 보정.
-            self.shiftSelectionForEviction();
-            self.shiftPlacementsForEviction();
+            self.shiftSelectionForEviction(1);
+            self.shiftPlacementsForEviction(1);
         } else {
             self.sb.count += 1;
         }
@@ -2620,14 +2643,17 @@ pub const TerminalCore = struct {
     /// scrollback ring이 가득 차 가장 오래된 행이 밀려나면 절대 행 좌표가 한 칸 당겨진다 — placement
     /// anchor도 따라 보정하고, 0행(밀려난 행)에 앵커된 placement는 화면 밖이라 제거한다. selection의
     /// shiftSelectionForEviction과 같은 규율. 베이스: maru 절대-행 좌표계.
-    fn shiftPlacementsForEviction(self: *TerminalCore) void {
+    /// 가장 오래된 n개 행이 빠질 때 placement anchor(abs 행)를 n칸 당긴다(eviction n=1, 하향 트림 n=drop).
+    /// 빠진 행 범위 [0, n)에 anchor가 걸린 placement는 제거한다.
+    fn shiftPlacementsForEviction(self: *TerminalCore, n: usize) void {
+        if (n == 0) return;
         var i: usize = 0;
         while (i < self.kitty_placements.items.len) {
             const p = &self.kitty_placements.items[i];
-            if (p.anchor_row == 0) {
+            if (p.anchor_row < n) {
                 _ = self.kitty_placements.orderedRemove(i);
             } else {
-                p.anchor_row -= 1;
+                p.anchor_row -= n;
                 i += 1;
             }
         }
@@ -7058,7 +7084,7 @@ test "rewrap: cap이 ring.len보다 커도 ring.len 상한으로 묶어 OOB 없�
     try std.testing.expect(core.scrollbackLen() <= core.sb.ring.len);
 }
 
-test "Scrollback.setCap: cap 상향은 ring을 키우고 기존 행을 보존한다(grow-only)" {
+test "Scrollback.setCap: 상향은 ring을 키우고 하향(드랍 없는 범위)은 ring을 줄이며 행을 보존한다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
     defer core.deinit();
     core.setMaxScrollback(3);
@@ -7070,14 +7096,39 @@ test "Scrollback.setCap: cap 상향은 ring을 키우고 기존 행을 보존한
     try std.testing.expectEqual(@as(usize, 50), core.sb.ring.len); // ring이 자랐다
     try std.testing.expectEqual(@as(usize, 3), core.scrollbackLen()); // 행 보존(드랍 없음)
     try std.testing.expectEqual(@as(usize, 50), core.maxScrollback());
-    // 가장 오래된 보존 행이 "aaaaaa"인지 — 좌표/내용 불변 확인.
     const oldest = core.scrollbackRow(0).?;
     try std.testing.expectEqual(@as(u21, 'a'), oldest[0].codepoint);
 
-    core.setMaxScrollback(10); // 축소 → cap만 갱신, ring/행 그대로(좌표 안전)
-    try std.testing.expectEqual(@as(usize, 50), core.sb.ring.len);
+    core.setMaxScrollback(10); // 하향(count 3 < 10이라 드랍 없음) → ring을 10으로 줄이고 행 보존(메모리 회수)
+    try std.testing.expectEqual(@as(usize, 10), core.sb.ring.len); // ring 회수(50→10)
     try std.testing.expectEqual(@as(usize, 10), core.maxScrollback());
     try std.testing.expectEqual(@as(usize, 3), core.scrollbackLen());
+    try std.testing.expectEqual(@as(u21, 'a'), core.scrollbackRow(0).?[0].codepoint); // 내용 그대로
+}
+
+test "setMaxScrollback 하향 트림: 가장 오래된 행을 버리고 view_offset을 보정한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    core.setMaxScrollback(10);
+    try core.write("r0\r\nr1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\r\nr7"); // 스크롤백 r0..r5(6행)
+    const before = core.scrollbackLen();
+    try std.testing.expect(before >= 6);
+    try std.testing.expectEqual(@as(u21, '0'), core.scrollbackRow(0).?[1].codepoint); // 가장 오래된 = r0
+
+    core.scrollViewport(@intCast(before)); // 맨 위(가장 오래된)로
+    try std.testing.expectEqual(before, core.view_offset);
+
+    core.setMaxScrollback(2); // 하향: 최근 2행만 남기고 가장 오래된 (before-2)행을 버린다
+    try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen()); // 최근 2행만
+    try std.testing.expectEqual(@as(usize, 2), core.sb.ring.len); // 메모리 회수(ring=2)
+    try std.testing.expect(core.view_offset <= core.scrollbackLen()); // 버린 과거를 가리키지 않게 클램프
+    // 남은 가장 오래된 행은 r4(= before가 6이면 r0..r3 버림). 'r' 접두로 연속성만 확인.
+    try std.testing.expectEqual(@as(u21, 'r'), core.scrollbackRow(0).?[0].codepoint);
+
+    core.setMaxScrollback(0); // 끄기: 전부 버리고 ring 해제
+    try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen());
+    try std.testing.expectEqual(@as(usize, 0), core.sb.ring.len);
+    try std.testing.expectEqual(@as(usize, 0), core.view_offset);
 }
 
 test "resize during alt: 폭 변경이 복귀 후 primary 스크롤백 재-wrap을 트리거한다" {

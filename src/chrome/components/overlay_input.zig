@@ -41,6 +41,40 @@ pub fn truncateToCols(arena: std.mem.Allocator, bytes: []const u8, max_cols: u32
     return std.fmt.allocPrint(arena, "{s}…", .{bytes[0..end]});
 }
 
+test "truncateToCols: EAW 폭 기준 자르기 + 말줄임" {
+    const a = std.testing.allocator;
+    // 안 넘치면 원본 그대로(복사 없음 — free 금지).
+    try std.testing.expectEqualStrings("abc", try truncateToCols(a, "abc", 5));
+    try std.testing.expectEqualStrings("abc", try truncateToCols(a, "abc", 3));
+    try std.testing.expectEqualStrings("", try truncateToCols(a, "abc", 0)); // max_cols=0 → ""(리터럴)
+    // 넘치면 글자 예산(max_cols-1)까지 + "…", 결과 표시폭 ≤ max_cols.
+    {
+        const r = try truncateToCols(a, "abcdef", 4);
+        defer a.free(r);
+        try std.testing.expectEqualStrings("abc…", r);
+        try std.testing.expect(displayCols(r) <= 4);
+    }
+    { // max_cols=1 → budget 0 → "…"만
+        const r = try truncateToCols(a, "abc", 1);
+        defer a.free(r);
+        try std.testing.expectEqualStrings("…", r);
+    }
+    // 한글(2칸): "한국어"(6칸) max 5 → budget 4 → 한(2)국(2)=4, 어 초과 → "한국…"(5칸), 코드포인트 경계 유지.
+    {
+        const r = try truncateToCols(a, "한국어", 5);
+        defer a.free(r);
+        try std.testing.expectEqualStrings("한국…", r);
+        try std.testing.expect(displayCols(r) <= 5);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(r)); // 글자 중간에서 안 잘림
+    }
+    { // 2칸 글자가 마지막 예산에 안 들어가면 과잘림(표시폭 < max_cols)이지만 절대 넘치지 않음
+        const r = try truncateToCols(a, "한국어", 4); // budget 3 → 한(2), 국 초과 → "한…"(3칸)
+        defer a.free(r);
+        try std.testing.expectEqualStrings("한…", r);
+        try std.testing.expect(displayCols(r) <= 4);
+    }
+}
+
 /// 검색어(query) + IME 조합(preedit) 입력 모델. **커밋과 조합은 독립** — `appendChar`는 preedit를 건드리지 않고,
 /// preedit는 `setPreedit`가 단일 관리한다(터미널 core와 같은 모델). 이주 전 두 컴포넌트가 `appendChar`에서 preedit를
 /// 비우다가 IME 멀티-문자 흐름(커밋 N + 조합 N+1)에서 다음 조합을 지워 "조합 안 보임" 버그를 냈다 — 그 모델을 여기

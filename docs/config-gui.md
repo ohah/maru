@@ -67,6 +67,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
   section의 FieldRow 위젯들). 모달 오버레이 레이어(팔레트/Find와 같은 `ChromeHost` 모달, 우선순위 §host).
 - **열기**: 빌트인 키(예: `⌘,` — §10 결정) 또는 메뉴 "Settings…" / 커맨드 팔릿. `toggle_settings` app action.
 - **검색·blur**: 사이드바 검색바와 같은 규율(검색 영역 밖 클릭/Esc로 blur → 키 포커스 터미널 복귀).
+- **키보드 네비**: 폼에선 ↑↓=행 이동·←→=값 조절·Enter=토글/편집. **Tab/Shift+Tab으로 좌측 섹션 네비↔폼 전환**(`State.nav_focused`) — 네비 포커스면 ↑↓=섹션 이동·Enter/→=폼 복귀이고, 선택 섹션 좌측에 **▸ 마커**로 키 포커스 위치를 보인다. slider/색 행의 ←→ 값 조절과 겹치지 않게 영역 전환은 Tab 전용(`input.Key`에 `tab` 추가 — `chromeInputFromKeyEvent`가 매핑). 컴포넌트는 섹션 수를 모르므로 네비 ↓의 상한은 platform `refreshSettingsFieldCount`가 clamp한다.
 - **저장**: 변경된 키를 override로 config 파일에 write-back(S0-1b) + atomic write(주석 보존 — sidebar.* 토글이
   쓰던 `take_*_dirty`→serialize→atomic write 패턴 일반화, [configuration.md] 구현 경계).
 

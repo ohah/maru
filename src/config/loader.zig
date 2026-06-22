@@ -759,6 +759,20 @@ test "parse: window.background-image — 경로 파싱, 미설정 시 빈 문자
     try std.testing.expectEqualStrings("", q.config.window_background_image);
 }
 
+test "parse: window.blur — 반경 파싱, 미설정 시 0(끔)" {
+    // F3-1: 창 뒤 데스크톱 블러 반경. loader는 반경만 파싱(opacity 게이트는 windowBlurRadius가 적용).
+    var p = try parse(std.testing.allocator,
+        \\window.blur = 24
+    );
+    defer p.deinit();
+    try std.testing.expectEqual(@as(u32, 24), p.config.window_blur);
+
+    // 미설정이면 기본 0(블러 끔 — 현행 동작 회귀 없음).
+    var q = try parse(std.testing.allocator, "font.size = 14");
+    defer q.deinit();
+    try std.testing.expectEqual(@as(u32, 0), q.config.window_blur);
+}
+
 test "parse: env.<KEY>가 누적되고 빈 KEY는 무시, 값 내부 공백 보존" {
     var p = try parse(std.testing.allocator,
         \\env.EDITOR = nvim

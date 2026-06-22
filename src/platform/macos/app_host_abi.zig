@@ -564,6 +564,16 @@ pub export fn maru_macos_app_session_set_system_appearance(session: ?*AppSession
     return @intFromEnum(Status.ok);
 }
 
+// 창 뒤(데스크톱) 배경 블러의 유효 반경(px) — config window.blur, 단 window.opacity>=1이면 0(불투명 창=블러 안 보임).
+// 블러는 GPU가 아니라 OS 창 속성이라(Metal은 backdrop을 못 읽음) host가 이 값을 OS API에 싣는다: macOS=CGSSetWindow-
+// BackgroundBlurRadius(Ghostty·Terminal.app과 동일 비공개 CGS), Win=DwmSetWindowAttribute·Linux=컴포지터 속성(추후).
+// 게이트 정책은 Zig 단일 출처(windowBlurRadius). 라이브 read(reload로 갱신) — Swift가 창 생성·config 반영 시 호출.
+// session null=0(블러 끔). (ABI v79)
+pub export fn maru_macos_app_session_window_blur_radius(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return app_session.windowBlurRadius();
+}
+
 // 타이핑(글자 입력) 중 마우스 숨김 1회성 신호(config input.mouse-hide-while-typing). pending이면 1(플래그 비움),
 // 없으면 0. Swift가 tick마다 호출해 1이면 NSCursor.setHiddenUntilMouseMoves(true)(다음 마우스 이동에서 자동 복원).
 // take_bell과 같은 1회성 패턴 — 한 tick에 여러 글자를 쳐도 hide 호출은 한 번. session null=0. (ABI v72)

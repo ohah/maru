@@ -550,6 +550,14 @@ pub const Config = struct {
     /// 경로는 `~` 확장·상대경로 미지원(절대경로 권장). 못 읽거나 디코드 실패면 배경 없음(조용히 폴백). loader가
     /// `window.background-image` 키로 파싱. (docs/configuration.md·settings-page.md F2-1)
     window_background_image: []const u8 = "",
+    /// 창 **뒤(데스크톱)** 배경 블러 반경(px). 0=끔(기본·현행). 양수면 그 반경으로 창 뒤를 흐리게 한다("프로스트
+    /// 글래스"). **`window.opacity < 1`일 때만 유효** — 창이 불투명이면 뒤가 안 비쳐 블러도 안 보이므로 0으로 무시한다
+    /// (Ghostty `background-blur`와 같은 게이트). 블러는 GPU 렌더러가 아니라 **OS/컴포지터 창 속성**이라(어느 OS도
+    /// Metal로 backdrop을 못 읽는다) platform 어댑터가 적용한다: macOS=CGSSetWindowBackgroundBlurRadius(Ghostty·
+    /// Terminal.app과 동일한 비공개 CGS API), Windows=DwmSetWindowAttribute(추후), Linux=_KDE_NET_WM_BLUR_BEHIND_REGION/
+    /// kde-blur(추후·컴포지터 의존 best-effort). 유효 반경 정책(opacity 게이트)은 Zig 단일 출처(windowBlurRadius),
+    /// 실제 OS 호출만 host가 한다. loader가 `window.blur` u32로 파싱(0~100 range). (docs/configuration.md·settings-page.md F3-1)
+    window_blur: u32 = 0,
     /// 비활성 split pane 디밍 강도(0.0 끔 ~ 1.0 완전 배경색). 기본 0.0(현행 — 비활성 pane도 풀 밝기, 회귀 없음).
     /// 0보다 크면 **활성이 아닌 split pane의 셀 색**(전경+명시 배경)을 그 pane 배경 쪽으로 이 비율만큼 보간해 흐리게
     /// 그려 활성 pane을 시각적으로 구분한다. split이 없으면(단일 pane) 무효. 활성 pane은 항상 풀 밝기.
@@ -606,6 +614,7 @@ pub const Config = struct {
         .window_padding_left = Meta{ .key = "window.padding-left", .doc = "왼쪽 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
         .window_opacity = Meta{ .key = "window.opacity", .doc = "창 배경 투명도(0~1)", .range = .{ 0.0, 1.0 }, .widget = .slider, .section = .window },
         .window_background_image = Meta{ .key = "window.background-image", .doc = "배경 이미지 PNG 경로", .widget = .text, .section = .window },
+        .window_blur = Meta{ .key = "window.blur", .doc = "창 뒤 배경 블러 반경(px, 0=끔, opacity<1일 때만)", .range = .{ 0, 100 }, .widget = .slider, .section = .window },
         .window_unfocused_dim = Meta{ .key = "window.unfocused-dim", .doc = "비활성 split pane 디밍(0~1)", .range = .{ 0.0, 1.0 }, .widget = .slider, .section = .window },
         .term = Meta{ .key = "term", .doc = "$TERM 값", .widget = .text, .section = .terminal },
     };

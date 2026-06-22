@@ -6,6 +6,24 @@ import Metal
 import QuartzCore
 import UserNotifications
 
+// MARK: - CGS 비공개 API (창 뒤 배경 블러, F3-1)
+//
+// macOS에서 "창 뒤(데스크톱) 블러"는 공개 API가 없다 — Metal은 backdrop 픽셀을 못 읽으므로 GPU로 못 하고,
+// WindowServer가 창 뒤를 합성해줘야 한다. 그 길은 (1) NSVisualEffectView(vibrancy, 우리 Metal layer와 충돌)
+// 또는 (2) 비공개 CGS API `CGSSetWindowBackgroundBlurRadius`뿐이다. Ghostty·Terminal.app을 포함한 사실상
+// 모든 터미널이 (2)를 쓴다(references/ghostty/src/apprt/embedded.zig:2106 참조). maru는 App Store 배포가
+// 아니라 Ghostty와 같은 선택을 한다. "언제·얼마나" 블러할지(opacity 게이트·반경)는 Zig 단일 출처
+// (windowBlurRadius/ABI window_blur_radius)가 정하고, 여기선 OS에 싣기만 한다(platform 어댑터의 macOS 구현 —
+// 추후 Windows=DwmSetWindowAttribute·Linux=컴포지터 속성이 같은 자리를 채운다).
+typealias CGSConnectionID = Int32
+
+@_silgen_name("CGSMainConnectionID")
+func CGSMainConnectionID() -> CGSConnectionID
+
+@_silgen_name("CGSSetWindowBackgroundBlurRadius")
+@discardableResult
+func CGSSetWindowBackgroundBlurRadius(_ connection: CGSConnectionID, _ windowNumber: Int, _ radius: Int) -> Int32
+
 @MainActor
 final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     weak var controller: MaruAppHostController?
@@ -421,6 +439,9 @@ final class TerminalSurface {
     var metalNeedsRedraw = false
     var metalFramesDrawn = 0
     var metalRendererCreated = false
+    // 마지막으로 OS에 적용한 창 뒤 배경 블러 반경(window.blur, F3-1). -1=미적용 sentinel — 값이 바뀔 때만
+    // CGSSetWindowBackgroundBlurRadius를 호출해(매 frame WindowServer 호출 방지) reload·opacity 변화를 반영한다.
+    var lastAppliedBlurRadius: Int = -1
     var latestFrameSummary = MaruAppHostFrameSummary()
     var appSessionStatus: Int32 = 0
     var lastWindowTitle = ""
@@ -572,6 +593,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var metalNeedsRedraw: Bool {
         get { activeSurface?.metalNeedsRedraw ?? false }
         set { activeSurface?.metalNeedsRedraw = newValue }
+    }
+    private var lastAppliedBlurRadius: Int {
+        get { activeSurface?.lastAppliedBlurRadius ?? -1 }
+        set { activeSurface?.lastAppliedBlurRadius = newValue }
     }
     // tick summary가 알려주는 metal generation(u32). 이 값이 그대로면 metalFrame() ABI 호출과
     // draw를 idle tick에서 건너뛴다.
@@ -900,6 +925,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             win.isOpaque = opaqueWindow
             win.backgroundColor = opaqueWindow ? .windowBackgroundColor : .clear
             win.hasShadow = opaqueWindow // 투명 창은 그림자 끔(투명 영역 그림자가 어색)
+        }
+        // 창 뒤(데스크톱) 배경 블러(window.blur, F3-1). 유효 반경(opacity<1 게이트 포함)은 Zig 단일 출처
+        // (windowBlurRadius)가 정하고, 여기선 그 값을 OS 창 속성에 싣기만 한다 — 블러는 GPU가 아니라 WindowServer가
+        // 창 뒤를 합성하는 거라 Metal 렌더러로는 못 한다(Ghostty·Terminal.app도 동일한 비공개 CGS API 사용). 값이
+        // 바뀔 때만 호출(매 frame WindowServer 왕복 방지). 추후 Windows=DwmSetWindowAttribute·Linux=컴포지터 속성으로
+        // 같은 자리를 채운다(platform 어댑터).
+        let blurRadius = Int(maru_macos_app_session_window_blur_radius(appSession))
+        if blurRadius != lastAppliedBlurRadius, let win = view.window {
+            _ = CGSSetWindowBackgroundBlurRadius(CGSMainConnectionID(), win.windowNumber, blurRadius)
+            lastAppliedBlurRadius = blurRadius
         }
         // 새 frame(generation 변경)일 때뿐 아니라, drawableSize/backing-scale 변경 등 surface가
         // 무효화돼 다시 칠해야 할 때(metalNeedsRedraw)도 그린다. generation만 보면 한가한 셸이

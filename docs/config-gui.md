@@ -151,9 +151,10 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **`shell.args`**: `셸 인자 (공백 구분)` 행 — 값 = 현재 argv를 공백으로 join(`"-i -l"`). 편집 커밋 시 `setShellArgs`가 공백으로 토큰 분리해(`tokenizeAny`, loader와 같은 규칙 — 따옴표 미지원) `config.shell.args`에 적용 + `markConfigKeyDirty("shell.args")`. write-back은 `serialize.configKeyValues`가 join해 한 줄로 쓴다.
 - **`env.<KEY>`**: 각 환경 변수가 한 행(라벨=KEY, 값=VALUE 인라인 편집). 커밋 시 `setEnvVar(name, value)`가 `config.env`(`"KEY=VALUE"` 리스트)에서 그 KEY를 **upsert**(있으면 교체, 없으면 추가) + `markConfigKeyDirty("env.KEY")`. dirty 키는 동적이라 세션 arena에 둬 안정 포인터로 보관(serialize drain까지 유효 — palette의 정적 키와 다른 점).
 - **추가 행**: 목록 끝 `환경 변수 추가 (KEY=VALUE)` 행(빈 `env.` sentinel 키). 편집 커밋 시 `addEnvVar`가 `KEY=VALUE`를 파싱해 `setEnvVar`로 upsert(첫 `=` 기준, KEY는 양끝 trim; `=` 없거나 빈 KEY면 notice).
+- **삭제(Backspace)**: `env.<KEY>` 행에서 `Backspace`(편집 아님)를 누르면 그 변수를 삭제한다 — `removeEnvVar`가 `config.env`에서 빼고 `config_removed_keys`에 `env.<KEY>`를 예약, `serializeConfig`가 **`removeConfigLines`로 파일에서 그 줄을 제거**한다(`updateConfigText`는 줄 삭제를 안 하므로 전용 제거 패스 — keybind write-back처럼 갱신 패스 뒤에 체이닝). 추가 sentinel 행·`shell.args`·schema text 행에선 무동작.
 - **라이브 적용 없음**: env·shell.args는 **셸 spawn 시점에만** 쓰이므로 `reapplyLoadedConfig`를 안 부른다(이미 뜬 셸엔 영향 없고, 다음 새 Term부터 반영 — 정확한 동작). appearance/렌더 무변경이라 metal_dirty도 불필요.
 - **영속은 공짜**: write-back이 `shell.args`·set된 `env.<KEY>`를 이미 직렬화(serialize.zig, round-trip 테스트 보장)하므로 별도 write-경로 확장 없이 dirty만 찍으면 파일에 써진다.
-- **한계(후속)**: **삭제·KEY 변경**은 `updateConfigText`가 override-only(줄 갱신/추가만, 삭제 없음)라 영속 안 됨 — 줄 삭제 확장이 필요해 후속(현재는 upsert만; 완전 제거는 통합 리셋이 담당). 토큰 따옴표(공백 포함 인자)도 후속.
+- **한계(후속)**: env **KEY 변경**(기존 KEY를 다른 이름으로)은 삭제+추가로 해야 한다(인라인 KEY 편집은 후속). shell.args 토큰 따옴표(공백 포함 인자)도 후속.
 
 ### 6.7 keybind recorder(단축키 재바인딩) — 특수 행 (CS-4-3)
 

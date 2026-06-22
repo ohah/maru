@@ -1149,6 +1149,9 @@ pub const AppSession = struct {
     // action은 command_catalog 정적 키, chord는 loaded_config.arena 소유(toConfigString 결과). serializeConfig가
     // updateKeybindLines로 체이닝해 파일에 쓰고 비운다. takeConfigDirty가 이것도 본다(둘 중 하나라도 있으면 dirty).
     config_keybind_rebinds: std.ArrayList(config_mod.KeybindRebind) = .empty,
+    // 삭제 예약된 config 키(env 변수 삭제 등) — `keybind = value` 갱신이 아니라 줄을 **제거**한다. 키는 loaded_config.arena
+    // 소유(동적 env.KEY). serializeConfig가 갱신 패스 뒤 removeConfigLines로 체이닝해 줄을 빼고 비운다. takeConfigDirty가 봄.
+    config_removed_keys: std.ArrayList([]const u8) = .empty,
     // 시각 확인 디버그 훅: MARU_OPEN_SETTINGS env가 있으면 첫 frame에서 세팅 화면을 자동으로 연다(스크린샷
     // 하니스가 입력 없이 모달 상태를 캡처하게 — MARU_DEBUG와 같은 env-gate). env 미설정이면 무동작. 한 번만 연다.
     debug_settings_opened: bool = false,
@@ -3833,6 +3836,43 @@ pub const AppSession = struct {
         self.setEnvVar(name, text[eq + 1 ..]);
     }
 
+    /// 선택 행을 삭제한다(Backspace). 현재는 **env.<KEY> 행만** 대상(env 변수 삭제) — 다른 행(schema·shell.args·env 추가
+    /// sentinel·palette·keybind)은 무동작(삭제 의미가 없거나 다른 메커니즘). env는 spawn 시점 전용이라 라이브 재적용 없음.
+    fn deleteSelectedSettingRow(self: *AppSession) void {
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const cf = self.currentSectionFields(scratch.allocator()) catch return;
+        const sel = self.chrome_host.settings.selected;
+        const after_enums = cf.bools.len + cf.nums.len + cf.enums.len;
+        const after_texts = after_enums + cf.texts.len;
+        if (sel < after_enums or sel >= after_texts) return; // text 행만
+        const t = cf.texts[sel - after_enums];
+        if (!std.mem.startsWith(u8, t.key, "env.") or t.key.len <= "env.".len) return; // env.<KEY> 행만(추가 sentinel "env." 제외)
+        self.removeEnvVar(t.key["env.".len..]);
+        self.refreshSettingsFieldCount(); // 행이 줄어듦 → setFieldCount가 selected clamp
+        self.metal_dirty = true;
+    }
+
+    /// env.<name>을 config.env에서 제거 + 파일 줄 삭제 예약(removeConfigLines). setEnvVar의 짝. name 키는 동적이라
+    /// loaded_config.arena 소유로 config_removed_keys에 둔다(serializeConfig drain까지 유효).
+    fn removeEnvVar(self: *AppSession, name: []const u8) void {
+        const a = self.loaded_config.arena.allocator();
+        var list: std.ArrayList([]const u8) = .empty;
+        for (self.loaded_config.config.env) |entry| {
+            const eq = std.mem.indexOfScalar(u8, entry, '=') orelse entry.len;
+            if (!std.mem.eql(u8, entry[0..eq], name)) list.append(a, entry) catch return; // 그 KEY만 제외
+        }
+        self.loaded_config.config.env = list.toOwnedSlice(a) catch return;
+        const removed_key = std.fmt.allocPrint(a, "env.{s}", .{name}) catch return;
+        self.markConfigKeyRemoved(removed_key);
+    }
+
+    /// config 키 줄 삭제를 예약한다(중복은 한 번만 — markConfigKeyDirty의 삭제 짝). serializeConfig가 removeConfigLines로 반영.
+    fn markConfigKeyRemoved(self: *AppSession, key: []const u8) void {
+        for (self.config_removed_keys.items) |k| if (std.mem.eql(u8, k, key)) return;
+        self.config_removed_keys.append(self.allocator, key) catch {};
+    }
+
     /// 슬라이더 드래그/클릭(settings.pending_ratio)을 선택 행의 number config 값으로 매핑해 적용한다(라이브 + 영속
     /// 예약). 결합 순서(bool 먼저)라 selected<bool_count면 slider 아님 → 무동작. number 리스트는 selected-bool_count.
     fn applySelectedSlider(self: *AppSession) void {
@@ -4405,6 +4445,7 @@ pub const AppSession = struct {
                 self.refreshSettingsFieldCount();
                 self.metal_dirty = true;
             },
+            .settings_delete_row => self.deleteSelectedSettingRow(), // 선택 행 Backspace — env 변수 삭제(해당 행만)
         }
     }
 
@@ -5202,6 +5243,7 @@ pub const AppSession = struct {
                 .text_commit => .none, // 포인터 경로엔 안 옴(인라인 편집 Enter는 키 전용) — exhaustiveness
                 .adjust_left, .adjust_right => .none, // 포인터 경로엔 안 옴(키 전용) — exhaustiveness
                 .search_changed => .none, // 포인터 경로엔 안 옴(검색은 '/'·타이핑 키 전용) — exhaustiveness
+                .delete_row => .none, // 포인터 경로엔 안 옴(삭제는 Backspace 키 전용) — exhaustiveness
                 .consumed => .none,
             });
             self.metal_dirty = true;
@@ -6471,7 +6513,7 @@ pub const AppSession = struct {
     /// 않는다 — serializeConfig가 성공적으로 직렬화한 뒤 비운다(실패 시 키 유지→다음 tick 재시도). Swift가 매 tick
     /// take_sidebar_config_dirty(ABI 이름 유지)로 drain해 1이면 serialize→atomic write한다.
     pub fn takeConfigDirty(self: *AppSession) bool {
-        return self.config_dirty_keys.items.len > 0 or self.config_keybind_rebinds.items.len > 0;
+        return self.config_dirty_keys.items.len > 0 or self.config_keybind_rebinds.items.len > 0 or self.config_removed_keys.items.len > 0;
     }
 
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
@@ -6746,6 +6788,14 @@ pub const AppSession = struct {
             self.allocator.free(text);
             text = chained;
             self.config_keybind_rebinds.clearRetainingCapacity();
+        }
+        // 삭제 예약된 키(env 변수 삭제 등)는 줄을 제거한다 — 갱신 패스 뒤에 체이닝(삭제 우선). 같은 키를 갱신+삭제 둘 다면
+        // 갱신이 먼저 줄을 남겨도 여기서 빠진다.
+        if (self.config_removed_keys.items.len > 0) {
+            const chained = try config_mod.removeConfigLines(self.allocator, text, self.config_removed_keys.items);
+            self.allocator.free(text);
+            text = chained;
+            self.config_removed_keys.clearRetainingCapacity();
         }
         self.sidebar_config_buffer = text;
         self.config_dirty_keys.clearRetainingCapacity();
@@ -9245,6 +9295,7 @@ pub const AppSession = struct {
         if (self.sidebar_config_buffer) |b| self.allocator.free(b);
         self.config_dirty_keys.deinit(self.allocator);
         self.config_keybind_rebinds.deinit(self.allocator);
+        self.config_removed_keys.deinit(self.allocator);
         self.hover_leaf_scratch.deinit(self.allocator);
         self.scrollbar_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
@@ -14713,6 +14764,68 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
     const cf2 = try session.currentSectionFields(scratch.allocator());
     try std.testing.expectEqual(command_catalog.entries.len, cf2.keybind_entries.len);
     try std.testing.expect(cf2.enums.len > 0); // dropdown 복귀
+}
+
+test "settings env 삭제: Backspace로 env.<KEY> 행 삭제 → config.env에서 제거 + 줄 삭제 예약 (env delete)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var term_idx: usize = 0;
+    for (sections, 0..) |s, i| if (s.section == .terminal) {
+        term_idx = i;
+    };
+    session.chrome_host.settings.show();
+    session.chrome_host.settings.section = term_idx;
+
+    // env 두 개 추가(setEnvVar 경유).
+    session.setEnvVar("FOO", "bar");
+    session.setEnvVar("BAZ", "qux");
+    try std.testing.expectEqual(@as(usize, 2), session.loaded_config.config.env.len);
+
+    // env.FOO 행을 selected로(text 구간에서 key=="env.FOO" 찾기).
+    const cf = try session.currentSectionFields(scratch.allocator());
+    const after_enums = cf.bools.len + cf.nums.len + cf.enums.len;
+    var foo_sel: ?usize = null;
+    for (cf.texts, 0..) |t, i| if (std.mem.eql(u8, t.key, "env.FOO")) {
+        foo_sel = after_enums + i;
+    };
+    session.chrome_host.settings.selected = foo_sel.?;
+
+    // Backspace 삭제 → FOO 제거, BAZ 유지 + dirty 제거 키.
+    session.config_removed_keys.clearRetainingCapacity();
+    session.deleteSelectedSettingRow();
+    try std.testing.expectEqual(@as(usize, 1), session.loaded_config.config.env.len);
+    try std.testing.expectEqualStrings("BAZ=qux", session.loaded_config.config.env[0]);
+    try std.testing.expect(session.takeConfigDirty());
+    var saw = false;
+    for (session.config_removed_keys.items) |k| if (std.mem.eql(u8, k, "env.FOO")) {
+        saw = true;
+    };
+    try std.testing.expect(saw);
+
+    // 추가 sentinel 행("env.")이나 shell.args 행에서 삭제 시도 → 무동작(env 변화 없음).
+    const cf2 = try session.currentSectionFields(scratch.allocator());
+    const after_enums2 = cf2.bools.len + cf2.nums.len + cf2.enums.len;
+    var sa_sel: ?usize = null;
+    for (cf2.texts, 0..) |t, i| if (std.mem.eql(u8, t.key, "shell.args")) {
+        sa_sel = after_enums2 + i;
+    };
+    session.chrome_host.settings.selected = sa_sel.?;
+    session.deleteSelectedSettingRow();
+    try std.testing.expectEqual(@as(usize, 1), session.loaded_config.config.env.len); // 그대로
 }
 
 test "settings env/shell.args: terminal 섹션 synthetic text 행 — shell.args 분리·env upsert·추가 행 파싱 (CS-4-5)" {

@@ -45,6 +45,7 @@ pub const configValueForKey = serialize.valueForKey;
 pub const updateConfigForKeys = serialize.updateForKeys;
 pub const updateKeybindLines = loader.updateKeybindLines; // keybind recorder write-back(CS-4-3)
 pub const KeybindRebind = loader.KeybindRebind;
+pub const removeConfigLines = loader.removeConfigLines; // 키 줄 삭제(env 변수 삭제 등)
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

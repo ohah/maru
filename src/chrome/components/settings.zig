@@ -208,7 +208,7 @@ pub const State = struct {
 /// handle/handlePointer가 돌려주는 intent. platform이 rows[selected] 기준으로 처리:
 ///   toggle=bool flip, slider_set=pending_ratio→값 매핑, adjust_left/right=slider 한 스텝, selection_changed=재렌더,
 ///   close=hide, consumed=소비만(모달 뒤로 안 샘). 값 종류 판정(toggle인지 slider인지)은 platform이 rows로 한다.
-pub const Action = enum { close, toggle, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, consumed };
+pub const Action = enum { close, toggle, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, delete_row, consumed };
 
 const label_gap_cols: u32 = 2; // 라벨과 우측 위젯 사이 최소 간격(칸)
 
@@ -527,6 +527,7 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
         .left => return if (state.count == 0) .consumed else .adjust_left,
         .right => return if (state.count == 0) .consumed else .adjust_right,
         .enter => return if (state.count == 0) .consumed else .toggle,
+        .backspace => return if (state.count == 0) .consumed else .delete_row, // 선택 행 삭제(platform이 env 행만 처리)
         .char => {
             if (k.codepoint == '/') { // '/'로 검색 시작(현재 섹션 필터)
                 state.startSearch();

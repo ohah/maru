@@ -1388,6 +1388,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
             drainFilePick() // 세팅 window.background-image 행 활성: NSOpenPanel(PNG)을 열어 고른 경로를 config에 적용.
+            drainColorSample() // HSV picker `i`(스포이드): NSColorSampler로 화면 색을 추출해 picker에 반영(비동기).
             drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
             drainGlobalHotkeys() // 글로벌 핫키가 라이브로 바뀌었으면(녹음/해제·reload·reset) OS에 재등록(unregister 후 register).
         }
@@ -1960,6 +1961,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let bytes = Array(path.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_provide_picked_file(session, buf.baseAddress, buf.count)
+        }
+    }
+
+    // NSColorSampler를 show 동안 살려둔다(비동기 콜백까지 retain — 지역 변수면 콜백 전에 해제될 수 있음).
+    private var colorSampler: NSColorSampler?
+
+    // HSV picker `i`(스포이드): Zig가 color_sample_pending을 세우면 NSColorSampler(OS 화면 색 추출기 — 돋보기로 화면 픽셀
+    // 클릭)를 연다. show는 비동기라 콜백에서 고른 색(sRGB로 변환해 0~255 RGB)을 provide_sampled_color로 되돌린다. 취소면
+    // nil(무동작). picker가 그 사이 닫혔으면 Zig측 setPickerRgb가 무시한다. session은 콜백 시점에 재취득(중간 변경 대비).
+    private func drainColorSample() {
+        guard let session = appSession else { return }
+        guard maru_macos_app_session_take_color_sample_request(session) != 0 else { return }
+        let sampler = NSColorSampler()
+        colorSampler = sampler
+        // show 콜백은 메인 스레드에서 호출된다(AppKit) — assumeIsolated로 main-actor 상태(appSession)에 안전 접근(다른
+        // 콜백들과 같은 패턴). picked=nil(취소)이면 무동작. session은 콜백 시점 재취득(중간 변경 대비).
+        sampler.show { [weak self] picked in
+            MainActor.assumeIsolated {
+                defer { self?.colorSampler = nil }
+                guard let self, let s = self.appSession, let color = picked else { return }
+                let srgb = color.usingColorSpace(.sRGB) ?? color
+                let r = UInt32(max(0.0, min(255.0, (srgb.redComponent * 255.0).rounded())))
+                let g = UInt32(max(0.0, min(255.0, (srgb.greenComponent * 255.0).rounded())))
+                let b = UInt32(max(0.0, min(255.0, (srgb.blueComponent * 255.0).rounded())))
+                _ = maru_macos_app_session_provide_sampled_color(s, r, g, b)
+            }
         }
     }
 

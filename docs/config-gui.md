@@ -194,7 +194,8 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **연속 해상도(키)**: pick_h/s/v는 full precision(0~359/0~100)으로 저장되므로, **Shift+화살표**(±1 채도/명도)·**`{`/`}`**(=Shift+[/], ±1° hue)로 그리드 셀 **사이** 임의 값에 도달한다. 평범한 화살표·`[`/`]`는 빠른 셀 점프(coarse) 그대로 — 이산 그리드는 표시·coarse용이고 값은 미세 조정으로 연속. 미리보기 `#rrggbb H S V`가 정확한 효과색을 실시간 표시. (picker 고급화 리뷰)
 - **포인터 sub-cell**: SV 그리드 클릭/드래그는 픽셀 위치를 0~100 s/v로 **연속** 매핑(셀 양자화 안 함 — 키 Shift 미세의 포인터 짝). hue 스트립은 셀 유지(`{`/`}` 키 미세로 보완 — 우측 끝 wrap 마커 회귀 회피).
 - **hex 인라인 입력**: picker 안에서 **`#`** 키로 hex 편집 진입 → 6자리 타이핑/붙여넣기 → Enter가 `color.parseHex`→`rgbToHsv`로 h/s/v 적용(Esc=취소·picker 유지). 정확한 hex를 picker를 안 닫고 잡는다(hex/# 자리만 받음). 미리보기 행이 편집 중엔 버퍼를 accent로 표시.
-- **한계(후속)**: alpha(터미널 색은 #RRGGBB라 범위 밖에 가까움), eyedropper(macOS `NSColorSampler` 후속).
+- **eyedropper(스포이드)**: picker에서 **`i`** 키 → platform이 OS 화면 색 추출기(`NSColorSampler`, 돋보기로 화면 픽셀 클릭)를 연다(ABI v82 `take_color_sample_request`/`provide_sampled_color`, 비동기 콜백 — "언제"는 Zig·OS 추출기는 Swift host). 고른 색(sRGB→0~255 RGB)을 `setPickerRgb`로 picker에 반영(picking·non-editing 가드).
+- **한계(후속)**: alpha(터미널 색은 #RRGGBB라 범위 밖에 가까움 — 보류). picker 고급화 사실상 완료(연속 해상도·sub-cell·hex 인라인·eyedropper).
 
 ## 7. 의존성
 

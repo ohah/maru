@@ -53,6 +53,7 @@ pub const HostAction = union(enum) {
     settings_search_changed, // 세팅 검색 쿼리 변경(시작/입력/Backspace/종료) — platform이 필터 재적용(refreshSettingsFieldCount) + 재렌더
     settings_delete_row, // 세팅 선택 행 Backspace — platform이 env 변수 삭제 등(해당 안 되는 행은 무동작)
     settings_color_picked, // 세팅 HSV picker Enter — platform이 settings.pickerRgb()→#rrggbb로 선택 color 행 커밋 + picker 닫기
+    settings_eyedropper, // 세팅 HSV picker `i` — platform이 OS 화면 색 추출기(NSColorSampler)를 열고 고른 색을 picker에 반영
 };
 
 pub const ChromeHost = struct {
@@ -222,6 +223,7 @@ pub const ChromeHost = struct {
                         .search_changed => .settings_search_changed, // 검색 시작/입력/종료 — 필터 재적용
                         .delete_row => .settings_delete_row, // 선택 행 Backspace — env 삭제 등
                         .color_picked => .settings_color_picked, // HSV picker Enter — 선택 color 행 커밋
+                        .eyedropper => .settings_eyedropper, // HSV picker `i` — OS 화면 색 추출기 열기
                         .consumed => .none,
                     };
                 }

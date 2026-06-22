@@ -745,6 +745,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = maru_macos_app_session_focus_changed(session, 0)
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        // 사용자가 앱으로 돌아오면 "놓친 벨" Dock 배지(bell.dock-badge)를 지운다 — 배지는 앱 전역(dockTile)이라 여기서
+        // 한 번에 클리어한다(어느 창을 포커스하든). 배지를 안 띄웠으면 빈 라벨 대입은 무해.
+        _ = notification
+        NSApp.dockTile.badgeLabel = nil
+    }
+
     func windowDidEndLiveResize(_ notification: Notification) {
         // 그 창(notification.object)의 surface를 명시 대상으로(위 windowDidResize와 같은 이유).
         guard let surface = surfaceForWindow(notification.object as? NSWindow) else { return }
@@ -1248,6 +1255,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainOsc52Clipboard() // OSC 52: 이번 tick에 셸이 보낸 클립보드 쓰기를 NSPasteboard에 반영(정책 gate는 Zig).
             drainNotification() // OSC 9/777: 이번 tick에 셸이 보낸 데스크톱 알림을 네이티브 알림으로 띄운다.
             drainBell() // G12 BEL: 이번 tick에 셸이 보낸 벨(0x07)을 시스템 벨로 울린다.
+            drainBellBadge() // BEL이 언포커스 시 울렸으면 Dock 배지를 띄운다(config bell.dock-badge).
             drainMouseHide() // 타이핑(글자 입력) 중이면 마우스 커서를 숨긴다(config input.mouse-hide-while-typing).
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
@@ -1690,6 +1698,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let session = appSession else { return }
         if maru_macos_app_session_take_bell(session) != 0 {
             NSSound.beep()
+        }
+    }
+
+    // BEL이 창 포커스 없을 때 울렸으면(config bell.dock-badge) Dock 아이콘에 ● 배지를 띄운다(놓친 알림 표시). Zig가
+    // 언포커스 판정·1회성 신호를 소유하고(take_bell_badge), 배지는 OS Dock 리소스라 Swift가 띄운다. 포커스 복귀 시
+    // applicationDidBecomeActive가 지운다(아래). dockTile.badgeLabel은 앱 전역이라 어느 창이든 포커스되면 사라진다.
+    private func drainBellBadge() {
+        guard let session = appSession else { return }
+        if maru_macos_app_session_take_bell_badge(session) != 0 {
+            NSApp.dockTile.badgeLabel = "●"
         }
     }
 

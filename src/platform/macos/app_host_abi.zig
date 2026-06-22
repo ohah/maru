@@ -526,6 +526,13 @@ pub export fn maru_macos_app_session_take_bell(session: ?*AppSession) u32 {
     return if (app_session.takeBell()) 1 else 0;
 }
 
+// Dock 배지 1회성 신호(config bell.dock-badge). BEL이 창 포커스 없을 때 울리면 1, 아니면 0. Swift가 매 tick 호출해
+// 1이면 NSApp.dockTile.badgeLabel을 ●로 세운다(포커스 복귀 시 Swift가 지움). take_bell과 같은 1회성 패턴. session null=0. (v76)
+pub export fn maru_macos_app_session_take_bell_badge(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeBellBadge()) 1 else 0;
+}
+
 // 타이핑(글자 입력) 중 마우스 숨김 1회성 신호(config input.mouse-hide-while-typing). pending이면 1(플래그 비움),
 // 없으면 0. Swift가 tick마다 호출해 1이면 NSCursor.setHiddenUntilMouseMoves(true)(다음 마우스 이동에서 자동 복원).
 // take_bell과 같은 1회성 패턴 — 한 tick에 여러 글자를 쳐도 hide 호출은 한 번. session null=0. (ABI v72)

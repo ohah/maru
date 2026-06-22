@@ -46,7 +46,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 75; // 75: OSC 52 read(input.osc52.read=allow|deny — take_clipboard_read_request[정책 게이트, allow면 1]·provide_clipboard_read[Swift가 읽은 클립보드 바이트 → base64 OSC 52 응답을 요청 surface PTY로]. 코어는 `?` 쿼리 파싱만, 정책·실제 클립보드 읽기는 platform. deny 기본=탈취 방지. 끝에 export 2개 추가 — 구조체 offset 불변). 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 76; // 76: take_bell_badge(bell.dock-badge — dispatchBell이 BEL+언포커스 시 bell_badge_pending을 세우고 Swift가 tick마다 drain해 NSApp.dockTile.badgeLabel ● 표시, 포커스 복귀 시 Swift가 지움. take_bell과 같은 1회성 export 추가. 시각 벨 bell.visual은 GpuQuad라 ABI 무변). 75: OSC 52 read(input.osc52.read=allow|deny — take_clipboard_read_request[정책 게이트, allow면 1]·provide_clipboard_read[Swift가 읽은 클립보드 바이트 → base64 OSC 52 응답을 요청 surface PTY로]. 코어는 `?` 쿼리 파싱만, 정책·실제 클립보드 읽기는 platform. deny 기본=탈취 방지. 끝에 export 2개 추가 — 구조체 offset 불변). 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -101,6 +101,10 @@ const placeholder_cell_height_px = input_math.placeholder_cell_height_px; // ses
 // OSC 52 읽기 응답 상한(원문 클립보드 바이트). 과대 클립보드를 base64 OSC 52로 PTY에 쏟는 폭주를 막는다
 // (코어 OSC 52 write 상한 max_clipboard_bytes와 같은 16MB). 초과하면 응답하지 않는다(F2-6).
 const max_clipboard_read_bytes: usize = 16 * 1000 * 1000;
+// 시각 벨(bell.visual) flash 지속 tick 수 — frame이 ~30Hz라 8 tick ≈ 250ms. flash는 이만큼에서 0으로 선형 페이드(F2-4).
+const bell_flash_total_ticks: u32 = 8;
+// 시각 벨 flash 최대 alpha(천분율) — 전경색 반투명 오버레이의 시작 불투명도. 너무 세지 않게(가독성·자극 균형) 0.35(F2-4).
+const bell_flash_peak_milli: u32 = 350;
 
 // 세로 탭 사이드바의 기본 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
 // 터미널 surface는 이 폭만큼 오른쪽으로 그려지고, 왼쪽 strip이 사이드바다("surface→rect" 첫 적용). 사용자가
@@ -1025,6 +1029,19 @@ pub const AppSession = struct {
     page_keys_scroll: bool = false,
     /// BEL 시스템 소리 여부(config bell.audible 캐시). takeBell이 음소거 게이트로 읽는다. 기본 true.
     audible_bell: bool = true,
+    /// 시각 벨(config bell.visual 캐시). dispatchBell이 BEL 시 bell_flash_ticks를 켠다. 기본 false(F2-4).
+    bell_visual: bool = false,
+    /// Dock 배지(config bell.dock-badge 캐시). dispatchBell이 BEL+언포커스 시 bell_badge_pending을 켠다. 기본 false(F2-4).
+    bell_dock_badge: bool = false,
+    /// 소리 벨 1회성 신호 — dispatchBell이 BEL+audible 시 켜고 Swift take_bell이 drain해 NSSound.beep. 코어 플래그를
+    /// dispatchBell이 단일 drain하므로(audible/visual/badge 분배) takeBell은 이 신호만 본다(F2-4).
+    bell_audible_pending: bool = false,
+    /// 시각 벨 flash 남은 tick 수(0=꺼짐). 매 frame build가 >0이면 전경색 반투명 full-screen GpuQuad를 alpha=비율로
+    /// 덮고 1 감소·metal_dirty를 세워 ~250ms 페이드아웃한다(F2-4).
+    bell_flash_ticks: u32 = 0,
+    /// Dock 배지 1회성 신호 — dispatchBell이 BEL+dock-badge+언포커스 시 켜고 Swift take_bell_badge가 drain해
+    /// NSApp.dockTile.badgeLabel을 세운다(포커스 복귀 시 Swift가 지움). (F2-4)
+    bell_badge_pending: bool = false,
     /// Shift+Enter를 Option+Enter처럼 `\x1b\r`(Meta+Enter)로 보낼지(config input.shift-enter=newline 캐시).
     /// handleKeyEvent가 PTY 전송 직전에 게이트로 읽는다 — CLI/TUI 멀티라인 줄바꿈. 기본 true(newline).
     shift_enter_meta: bool = true,
@@ -1364,6 +1381,8 @@ pub const AppSession = struct {
         self.config_loaded = true;
         self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
         self.audible_bell = self.loaded_config.config.bell.audible;
+        self.bell_visual = self.loaded_config.config.bell.visual;
+        self.bell_dock_badge = self.loaded_config.config.bell.dock_badge;
         // cursor.unfocused 렌더를 헤드리스 스크린샷으로 self-verify하는 debug-gate(env를 init에서 한 번만 읽는다).
         self.force_unfocused_cursor = std.c.getenv("MARU_FORCE_UNFOCUSED_CURSOR") != null;
         self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
@@ -3613,6 +3632,14 @@ pub const AppSession = struct {
             s.core.write("\x1b]52;c;?\x1b\\") catch {};
             s.unlockCore(self.io);
         }
+        // MARU_FORCE_BELL=1 — 첫 frame에 BEL(0x07)을 활성 코어에 흘려 시각 벨(bell.visual) flash를 캡처(self-verify
+        // debug-gate). maybeDebugOpenSettings는 tick의 dispatchBell 전에 돌아 같은 frame에 flash quad가 들어간다.
+        if (std.c.getenv("MARU_FORCE_BELL") != null) {
+            const s = self.activeSurface();
+            s.lockCore(self.io);
+            s.core.write("\x07") catch {};
+            s.unlockCore(self.io);
+        }
         if (std.c.getenv("MARU_OPEN_SETTINGS") == null) return;
         self.toggleSettings();
         // MARU_OPEN_SETTINGS_SECTION=N — 특정 섹션을 열어 캡처(스크린샷 self-verify용 debug-gate). 미설정=섹션 0.
@@ -4291,6 +4318,8 @@ pub const AppSession = struct {
         const new_appearance = config_mod.resolveAppearance(self.loaded_config.config) catch return;
         self.applyAppearance(new_appearance);
         self.audible_bell = self.loaded_config.config.bell.audible;
+        self.bell_visual = self.loaded_config.config.bell.visual;
+        self.bell_dock_badge = self.loaded_config.config.bell.dock_badge;
         self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
         self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
         self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
@@ -5029,6 +5058,8 @@ pub const AppSession = struct {
         self.loaded_config = new_parsed;
         // 파일 새 값이라 캐시된 behavior도 갱신한다(appearance 밖 — applyAppearance가 안 건드림).
         self.audible_bell = self.loaded_config.config.bell.audible;
+        self.bell_visual = self.loaded_config.config.bell.visual;
+        self.bell_dock_badge = self.loaded_config.config.bell.dock_badge;
         self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
         self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
         self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
@@ -7111,10 +7142,31 @@ pub const AppSession = struct {
 
     /// G12 BEL: 활성 surface에 pending 벨이 있으면 true(코어 플래그를 비운다). Swift가 시스템 벨(NSSound.beep)을
     /// 울린다 — 코어는 OS 소리를 직접 내지 않는다(OSC 52/9·777과 같은 경계). 한 tick 1회로 합쳐져 벨 폭주 방지.
+    /// 활성 surface의 BEL 1회를 drain해 config에 따라 분배한다(audible 소리·visual flash·dock 배지). 매 tick frame
+    /// build 직전에 호출 — 코어 플래그를 **단일 drain**하므로 takeBell/take_bell_badge는 여기서 세운 신호만 본다.
+    /// 코어 플래그는 audible/visual 무관하게 항상 비운다(음소거·미설정에도 누적 방지). (F2-4)
+    fn dispatchBell(self: *AppSession) void {
+        if (!self.surface_initialized) return;
+        if (self.activeSurface().core.takeBell()) { // BEL 1회 — config에 따라 분배
+            if (self.audible_bell) self.bell_audible_pending = true; // Swift take_bell이 NSSound.beep
+            if (self.bell_visual) self.bell_flash_ticks = bell_flash_total_ticks; // 시각 flash 시작
+            if (self.bell_dock_badge and !self.window_focused) self.bell_badge_pending = true; // 언포커스 시 Dock 배지
+        }
+        // 시각 flash가 진행 중이면 매 tick 재빌드해 페이드를 그린다(appendBellFlashQuad가 alpha를 줄이고 1 감소).
+        if (self.bell_flash_ticks > 0) self.metal_dirty = true;
+    }
+
     pub fn takeBell(self: *AppSession) bool {
-        if (!self.surface_initialized) return false;
-        // 코어 플래그는 항상 drain(음소거 중에도 누적 방지)하고, 시스템 소리는 audible_bell일 때만 요청한다.
-        return self.activeSurface().core.takeBell() and self.audible_bell;
+        const p = self.bell_audible_pending; // dispatchBell이 BEL+audible 시 세움
+        self.bell_audible_pending = false;
+        return p;
+    }
+
+    /// Dock 배지 1회성 신호 drain — pending이면 true(비움). Swift가 tick마다 호출해 NSApp.dockTile.badgeLabel을 세운다. (F2-4)
+    pub fn takeBellBadge(self: *AppSession) bool {
+        const p = self.bell_badge_pending;
+        self.bell_badge_pending = false;
+        return p;
     }
 
     /// 타이핑 중 마우스 숨김 1회성 신호 drain(config input.mouse-hide-while-typing). pending이면 true + 비운다.
@@ -8063,6 +8115,7 @@ pub const AppSession = struct {
         // steady/숨김 커서 + 오버레이 닫힘이면 updateCursorBlink가 무토글로 고정한다. 오버레이 caret도 같은 위상으로
         // 깜빡이고, suffix-trim(setCursorVisible)이라 재빌드 없이 토글된다(터미널 커서와 같은 메커니즘 재활용).
         if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink();
+        self.dispatchBell(); // BEL 1회 drain → audible/visual/dock-badge 분배(아래 frame이 flash·페이드 그림)
         self.updateScrollbarFade(); // 스크롤바 fade: view_offset 변화/hover/드래그로 full↔faint(appendScrollbar 전에 갱신)
         // synchronized output(DECSET 2026): sync 중이면 frame 투영을 멈춘다(metal_dirty는 쌓인 채 유지) — ESU(2026
         // reset)로 sync가 꺼지면 다음 tick에 누적 출력을 한 frame으로 투영한다(render skip과 동형). 단 ESU가
@@ -8526,6 +8579,7 @@ pub const AppSession = struct {
                         }
                     }
                 }
+                self.appendBellFlashQuad(); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items, self.gpu_shadows.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     self.metal_dirty = false;
                 } else |_| {}
@@ -9106,6 +9160,31 @@ pub const AppSession = struct {
         } else |_| {
             self.appendScrollbar(self.active_pane_rect, self.activePane(), true);
         }
+    }
+
+    /// 시각 벨(bell.visual): flash 중(bell_flash_ticks>0)이면 화면 전체(backing px)를 전경색 반투명 GpuQuad로 덮고
+    /// 남은 tick 비율로 alpha를 정해 페이드한다(8→1 tick). over 패스(layer 1)라 셀·chrome 위에 뜬다. 매 frame 1 감소 —
+    /// 0이면 멈춘다. metal_dirty(다음 frame 재빌드)는 dispatchBell이 세운다. dispatchBell 단일 drain 후 build에서 호출(F2-4).
+    fn appendBellFlashQuad(self: *AppSession) void {
+        if (self.bell_flash_ticks == 0) return;
+        // alpha = peak × (남은 tick / 총 tick). 8/8=full peak → 1/8=거의 투명. 전경색이라 어두운 테마=밝은 flash.
+        const fade_milli: u32 = bell_flash_peak_milli * self.bell_flash_ticks / bell_flash_total_ticks;
+        const alpha: u8 = @intCast(@min(@as(u32, 255), fade_milli * 255 / 1000));
+        const color: u32 = packRgbAlpha(self.appearance.theme.foreground, alpha); // straight-alpha(셰이더가 rgb*=a)
+        self.gpu_quads.append(self.allocator, .{
+            .x = 0,
+            .y = 0,
+            .w = @floatFromInt(self.backing_width_px),
+            .h = @floatFromInt(self.backing_height_px),
+            .corner_radii = .{ 0, 0, 0, 0 },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = color,
+            .fill_color1 = color,
+            .border_color = 0,
+            .gradient_kind = 0,
+            .layer = 1, // over 패스 — 화면 전체 덮음(scrollbar layer 3·modal layer 1과 같은 over, append 순서로 위)
+        }) catch {};
+        self.bell_flash_ticks -= 1; // 페이드: 다음 frame은 더 흐리게(0이면 다음 dispatchBell이 metal_dirty 안 세움)
     }
 
     /// 한 pane 우측에 스크롤바 thumb(둥근 GpuQuad)를 그린다 — 스크롤백이 있을 때만(sb_count>0). thumb 높이는
@@ -10600,18 +10679,39 @@ test "takeBell respects bell.audible; createTerm injects config scrollback" {
     // createTerm이 config 스크롤백(is_test 빈 config → 기본 1000)을 활성 surface core에 주입했다.
     try std.testing.expectEqual(@as(usize, 1000), session.activeSurface().core.maxScrollback());
 
-    // audible(기본 true): BEL → takeBell true, 한 번 울리고 drain(두 번째는 false).
+    // audible(기본 true): BEL → dispatchBell이 분배 → takeBell true, 한 번 drain(두 번째는 false). (F2-4: takeBell은
+    // 코어가 아니라 dispatchBell이 세운 bell_audible_pending을 본다 — 코어 단일 drain.)
     session.audible_bell = true;
     try session.activeSurface().core.write("\x07");
+    session.dispatchBell();
     try std.testing.expect(session.takeBell());
     try std.testing.expect(!session.takeBell());
 
-    // 음소거: BEL → takeBell false(소리 억제). 단 플래그는 drain돼 stale 벨이 안 쌓인다.
+    // 음소거: BEL → dispatchBell이 코어를 drain하되 audible_pending은 안 켬 → takeBell false(소리 억제, stale 안 쌓임).
     session.audible_bell = false;
     try session.activeSurface().core.write("\x07");
+    session.dispatchBell();
     try std.testing.expect(!session.takeBell());
-    session.audible_bell = true; // 다시 켜도 이전 BEL은 이미 소비됨.
-    try std.testing.expect(!session.takeBell());
+
+    // 시각 벨(bell.visual): on이면 BEL이 bell_flash_ticks를 켠다(audible과 독립). (F2-4)
+    session.bell_visual = true;
+    try session.activeSurface().core.write("\x07");
+    session.dispatchBell();
+    try std.testing.expect(session.bell_flash_ticks > 0);
+    session.bell_visual = false;
+    session.bell_flash_ticks = 0;
+
+    // Dock 배지(bell.dock-badge): **언포커스 시에만** bell_badge_pending. 포커스 중엔 안 켠다. take_bell_badge는 1회성.
+    session.bell_dock_badge = true;
+    session.window_focused = true;
+    try session.activeSurface().core.write("\x07");
+    session.dispatchBell();
+    try std.testing.expect(!session.takeBellBadge()); // 포커스 중 → 배지 없음
+    session.window_focused = false;
+    try session.activeSurface().core.write("\x07");
+    session.dispatchBell();
+    try std.testing.expect(session.takeBellBadge()); // 언포커스 → 배지
+    try std.testing.expect(!session.takeBellBadge()); // 1회성
 }
 
 // wheelDeltaToLines 단위 테스트는 함수와 함께 src/session/input_math.zig로 이동.

@@ -1093,6 +1093,10 @@ pub const AppSession = struct {
     // view를 돌려준다. metal_dirty가 true일 때만(첫 frame, 새 output, resize) 재투영한다.
     metal_buffer: metal_frame.MetalFrameBuffer = .{},
     metal_dirty: bool = true,
+    // 테마 섹션에서 사용자가 "사용자 지정"을 명시 선택했는지(런타임 휘발 — 색은 detectThemePreset로 derive하므로 영속
+    // 불요). 색이 어떤 프리셋과 우연히 일치해도 이게 true면 프리셋 잠금을 풀어 색·팔레트 행을 편집 가능하게 둔다.
+    // 프리셋을 다시 고르거나 reset하면 false로 돌아간다. themePresetActive()의 판정 인자.
+    theme_user_custom: bool = false,
     // 세로 사이드바에 그릴 탭 엔트리 셀(owned). rebuildSidebar가 탭 추가/전환/cell 메트릭 변경 때 다시
     // 채우고, metalFrame()이 이걸 가리키는 view를 사이드바 셀(origin 0 렌더)로 넘긴다. PR3b-1은 활성
     // 탭 하이라이트 밴드만 담고, PR3b-2가 탭 번호·제목 glyph를 더한다. 비싸지 않아(탭 수만큼) 변경
@@ -3570,8 +3574,10 @@ pub const AppSession = struct {
         // theme 섹션엔 named 테마 프리셋(특수 — schema 필드 아님)을 synthetic enum 행으로 주입한다(dropdown 재사용).
         // 현재값은 config 색에서 derive(매칭 프리셋 @tagName 또는 "사용자 지정"). 핸들러가 key="theme.preset"만 특수 처리.
         if ((cross or sel_sec == .theme) and settingsRowMatches("테마 프리셋", "theme.preset", q)) {
-            const cur_name: []const u8 = if (detectThemePreset(self.loaded_config.config.theme)) |p| @tagName(p) else "사용자 지정";
-            try enums.append(arena, .{ .key = "theme.preset", .doc = "테마 프리셋", .current = cur_name, .section = .theme });
+            // 프리셋 행을 enum 구간 **맨 앞**에 둬 테마 섹션 최상단(색·팔레트보다 먼저)에 도드라지게 한다. 표시값은
+            // 활성(themePresetActive)이면 그 프리셋명, 아니면 "사용자 지정"(detect=null이거나 사용자가 명시로 푼 경우).
+            const cur_name: []const u8 = if (self.themePresetActive()) @tagName(detectThemePreset(self.loaded_config.config.theme).?) else "사용자 지정";
+            try enums.insert(arena, 0, .{ .key = "theme.preset", .doc = "테마 프리셋", .current = cur_name, .section = .theme });
         }
         var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
         for (texts_all.items) |t| if ((cross or t.section == sel_sec) and settingsRowMatches(t.doc, t.key, q)) try texts.append(arena, t);
@@ -3626,11 +3632,13 @@ pub const AppSession = struct {
             rows[i] = .{ .label = if (t.doc.len > 0) t.doc else t.key, .kind = .{ .text = t.value } };
             i += 1;
         }
+        // 테마 프리셋이 활성이면 색·팔레트 행을 잠근다(프리셋이 색을 정하므로) — 회색 표시 + 입력은 핸들러가 전환/차단.
+        const preset_active = self.themePresetActive();
         for (cf.colors) |c| {
             // 현재 hex를 RGB로 파싱해 스와치에. 저장 config는 검증돼 유효하지만 방어적으로 회색 폴백(상수 hex로 — 타입을
             // parseHexColor 반환과 일치시켜 별도 color import 불요; #808080은 항상 유효).
             const rgb = config_mod.appearance.parseHexColor(c.value) catch (config_mod.appearance.parseHexColor("#808080") catch unreachable);
-            rows[i] = .{ .label = if (c.doc.len > 0) c.doc else c.key, .kind = .{ .color = .{ .hex = c.value, .rgb = rgb } } };
+            rows[i] = .{ .label = if (c.doc.len > 0) c.doc else c.key, .kind = .{ .color = .{ .hex = c.value, .rgb = rgb } }, .disabled = preset_active };
             i += 1;
         }
         if (cf.has_palette) {
@@ -3648,7 +3656,7 @@ pub const AppSession = struct {
                 }
             }
             const sel = @min(self.chrome_host.settings.grid_cell, cells.len - 1);
-            rows[i] = .{ .label = "ANSI 팔레트", .kind = .{ .palette_grid = .{ .cells = cells, .selected = sel } } };
+            rows[i] = .{ .label = "ANSI 팔레트", .kind = .{ .palette_grid = .{ .cells = cells, .selected = sel } }, .disabled = preset_active };
             i += 1;
         }
         if (cf.keybind_entries.len > 0) {
@@ -3723,6 +3731,8 @@ pub const AppSession = struct {
             // commitPickerColor. ←→는 별개로 16색 프리셋 순환(adjustSelectedSetting), hex 영역 클릭은 컴포넌트가 enterEdit.
             const ci = sel - after_texts;
             if (ci < cf.colors.len) {
+                // 프리셋 잠금 상태면 "사용자 지정"으로 전환(잠금 해제)한 뒤 편집 — 클릭 시 자동 전환 후 편집(plan A).
+                if (self.themePresetActive()) self.theme_user_custom = true;
                 const c = cf.colors[ci];
                 const rgb = config_mod.appearance.parseHexColor(c.value) catch (config_mod.appearance.parseHexColor("#808080") catch unreachable);
                 self.chrome_host.settings.openPicker(rgb);
@@ -3732,6 +3742,7 @@ pub const AppSession = struct {
         }
         if (cf.paletteRowIndex()) |pi| if (sel == pi) {
             // 팔레트 그리드 행 — Enter/Space = 선택 셀 hex 인라인 편집 시작(현재 효과색 시드). 커밋은 commitSelectedText.
+            if (self.themePresetActive()) self.theme_user_custom = true; // 프리셋 잠금이면 사용자 지정으로 전환 후 편집
             const gi = @min(self.chrome_host.settings.grid_cell, 15);
             const seed = self.paletteCellHex(scratch.allocator(), gi) catch return;
             self.chrome_host.settings.enterEdit(seed);
@@ -3984,7 +3995,9 @@ pub const AppSession = struct {
         const after_texts = after_enums + cf.texts.len;
         const after_colors = after_texts + cf.colors.len;
         if (sel >= after_texts and sel < after_colors) {
-            // color 행 — ←/→ = 이전/다음 16색 프리셋 순환.
+            // color 행 — ←/→ = 이전/다음 16색 프리셋 순환. 단 테마 프리셋 잠금이면 막는다(색을 풀려면 클릭으로
+            // "사용자 지정" 전환해야 — ←/→로 슬쩍 바뀌는 혼란 방지).
+            if (self.themePresetActive()) return;
             const ci = sel - after_texts;
             if (ci < cf.colors.len) {
                 const c = cf.colors[ci];
@@ -4715,6 +4728,8 @@ pub const AppSession = struct {
         // 사이드바 카드 표시 토글(sidebar.show-branch/folder)이 파일에서 바뀌었을 수 있다 — 카드를 다시
         // 빌드해 즉시 반영한다(config→앱 양방향). rebuildSidebar 실패는 무시(다음 프레임에 자연 복구).
         self.rebuildSidebar() catch {};
+        // 파일에서 새로 깔았으니 "사용자 지정" 명시 플래그를 해제 — 색이 어떤 프리셋과 일치하면 다시 잠금(derive 기준).
+        self.theme_user_custom = false;
         self.metal_dirty = true;
     }
 
@@ -4753,6 +4768,7 @@ pub const AppSession = struct {
         // 리셋 직전 예약된 keybind rebind/unbind·env 삭제가 살아남아, 다음 tick serializeConfig가 takeConfigDirty()=true로
         // 방금 리셋한 파일에 그 변경을 도로 써넣는다(takeConfigDirty가 5개 컬렉션을 OR로 본다).
         self.clearConfigDirty();
+        self.theme_user_custom = false; // 기본값으로 되돌렸으니 "사용자 지정" 해제 — 기본 테마(maru 프리셋)는 잠금이 맞다
         self.metal_dirty = true;
         if (wrote or path.len == 0)
             self.showNotice("모든 설정을 기본값으로 초기화했습니다")
@@ -4784,22 +4800,37 @@ pub const AppSession = struct {
         return null;
     }
 
-    /// 테마 프리셋을 dir(+1 다음/-1 이전)으로 순환 적용한다(테마 섹션 dropdown). 현재가 프리셋이면 그 이웃으로,
-    /// "사용자 지정"(detect=null)이면 forward는 첫(0번) backward는 끝(n-1) — cur_ord를 dir>=0일 때 -1, 아니면 0으로
-    /// 둬 @mod 한 번으로 양방향 진입점을 만든다. config.theme를 그 색 세트로 통째로 깔고(presetColors — 정적 리터럴이라
-    /// dupe 불요) 라이브 재resolve + 주 색 4개만 write-back. **ANSI 16색 팔레트·search/sidebar 색은 라이브에만 반영되고
-    /// 영속 안 됨**(reload·재시작 시 파일의 옛 값으로 복귀) — theme.preset 키 자체 영속은 write-경로 확장이라 후속(§6.3).
+    /// 테마 프리셋을 dir(+1 다음/-1 이전)으로 순환한다(테마 섹션 dropdown). 순환 슬롯 = [프리셋 0..n-1] + ["사용자 지정"=n].
+    /// 현재 위치는 theme_user_custom이거나 detect=null이면 "사용자 지정"(n), 아니면 그 프리셋. "사용자 지정"으로 가면 색을
+    /// 그대로 두고 잠금만 해제(theme_user_custom=true — 색·팔레트 행 편집 허용), 프리셋으로 가면 그 색 세트를 통째로 깔고
+    /// (presetColors — 정적 리터럴이라 dupe 불요) 잠금(theme_user_custom=false) + 라이브 재resolve·주 색 4개 write-back.
+    /// **ANSI 16색 팔레트·search/sidebar 색은 라이브에만 반영되고 영속 안 됨**(reload·재시작 시 파일의 옛 값으로 복귀, §6.3).
     fn applyThemePreset(self: *AppSession, dir: i8) void {
         const Preset = config_mod.theme.ThemePreset;
-        const n: i64 = @typeInfo(Preset).@"enum".fields.len;
-        const cur_ord: i64 = if (detectThemePreset(self.loaded_config.config.theme)) |c| @intFromEnum(c) else (if (dir >= 0) -1 else 0);
-        const next: Preset = @enumFromInt(@as(usize, @intCast(@mod(cur_ord + @as(i64, dir) + n, n))));
-        self.loaded_config.config.theme = config_mod.theme.presetColors(next);
+        const n: i64 = @typeInfo(Preset).@"enum".fields.len; // 프리셋 수; 슬롯 인덱스 n = "사용자 지정"
+        const detected = detectThemePreset(self.loaded_config.config.theme);
+        const cur: i64 = if (self.theme_user_custom or detected == null) n else @intFromEnum(detected.?);
+        const slots = n + 1;
+        const next = @mod(cur + @as(i64, dir) + slots, slots);
+        if (next == n) {
+            // "사용자 지정" — 색은 그대로, 잠금만 해제. detect가 우연히 프리셋과 일치해도 이 플래그가 우선(themePresetActive).
+            self.theme_user_custom = true;
+            self.metal_dirty = true;
+            return;
+        }
+        self.theme_user_custom = false;
+        self.loaded_config.config.theme = config_mod.theme.presetColors(@enumFromInt(@as(usize, @intCast(next))));
         self.reapplyLoadedConfig();
         self.markConfigKeyDirty("theme.background");
         self.markConfigKeyDirty("theme.foreground");
         self.markConfigKeyDirty("theme.cursor");
         self.markConfigKeyDirty("theme.selection");
+    }
+
+    /// 테마 프리셋이 "활성"인가 — 색이 어떤 프리셋과 일치하고(detectThemePreset) 사용자가 "사용자 지정"으로 풀지 않았으면
+    /// true. 활성이면 세팅의 색·팔레트 행을 잠근다(프리셋이 색을 정하므로). 색 핸들러·buildSettingsFields가 공유하는 단일 판정.
+    fn themePresetActive(self: *const AppSession) bool {
+        return !self.theme_user_custom and detectThemePreset(self.loaded_config.config.theme) != null;
     }
 
     /// "Reset" 메뉴(⌘⇧R) — 활성 터미널 코어의 잔류 입력 모드(focus 1004·mouse·kitty keyboard 등)만
@@ -15515,6 +15546,78 @@ test "detectThemePreset / applyThemePreset / resetAllSettings: 테마 프리셋�
     defer if (nested_after) |na| allocator.free(na);
     try std.testing.expect(nested_after != null); // make_path가 nested/dir를 생성하고 헤더를 씀
     try std.testing.expect(std.mem.indexOf(u8, nested_after.?, "Reset to Defaults") != null);
+}
+
+test "테마 프리셋 잠금: 사용자 지정 순환 + 프리셋 활성 시 색·팔레트 잠금 + 프리셋 행 최상단" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const Preset = config_mod.theme.ThemePreset;
+    const n = @typeInfo(Preset).@"enum".fields.len;
+
+    // 프리셋 색 + 사용자 미전환 → 활성(잠금).
+    session.loaded_config.config.theme = config_mod.theme.presetColors(.maru);
+    session.theme_user_custom = false;
+    try std.testing.expect(session.themePresetActive());
+
+    // 마지막 프리셋에서 +1 → "사용자 지정": 색 보존 + theme_user_custom=true + 잠금 해제(색을 안 바꾼다).
+    const last: Preset = @enumFromInt(n - 1);
+    session.loaded_config.config.theme = config_mod.theme.presetColors(last);
+    session.theme_user_custom = false;
+    const last_bg = session.loaded_config.config.theme.background;
+    session.applyThemePreset(1);
+    try std.testing.expect(session.theme_user_custom);
+    try std.testing.expectEqualStrings(last_bg, session.loaded_config.config.theme.background);
+    try std.testing.expect(!session.themePresetActive());
+
+    // "사용자 지정"에서 +1 → 첫 프리셋(maru) 적용 + 잠금 복귀.
+    session.applyThemePreset(1);
+    try std.testing.expect(!session.theme_user_custom);
+    try std.testing.expectEqual(Preset.maru, AppSession.detectThemePreset(session.loaded_config.config.theme).?);
+    try std.testing.expect(session.themePresetActive());
+
+    // 세팅 폼(테마 섹션): 프리셋이 첫 dropdown(최상단)이고, 활성이라 색 행은 전부 disabled.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const secs = try session.buildSectionList(arena.allocator());
+    for (secs, 0..) |s, idx| if (s.section == .theme) {
+        session.chrome_host.settings.section = idx;
+    };
+    const rows = try session.buildSettingsFields(arena.allocator());
+    var first_dropdown: ?[]const u8 = null;
+    var any_color = false;
+    var any_color_enabled = false;
+    for (rows) |r| switch (r.kind) {
+        .dropdown => if (first_dropdown == null) {
+            first_dropdown = r.label;
+        },
+        .color => {
+            any_color = true;
+            if (!r.disabled) any_color_enabled = true;
+        },
+        else => {},
+    };
+    try std.testing.expectEqualStrings("테마 프리셋", first_dropdown.?); // 프리셋이 최상단 enum
+    try std.testing.expect(any_color and !any_color_enabled); // 색 행 존재 + 전부 잠금
+
+    // "사용자 지정"으로 풀면 색 행 활성(편집 가능).
+    session.theme_user_custom = true;
+    const rows2 = try session.buildSettingsFields(arena.allocator());
+    var any_color_enabled2 = false;
+    for (rows2) |r| if (r.kind == .color) {
+        if (!r.disabled) any_color_enabled2 = true;
+    };
+    try std.testing.expect(any_color_enabled2);
 }
 
 // isWindowDragRegion: 헤더 '빈' 영역(아이콘·검색 아님)만 창 드래그/확대 영역(Swift performDrag·zoom). 아이콘·검색·

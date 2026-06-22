@@ -21,6 +21,10 @@ pub const CoreTextFrameBuilder = struct {
     // 흘러 atlas slot이 정사각이 아니라 실제 모노스페이스 격자 크기가 된다.
     cell_width_px: u16 = 0,
     cell_height_px: u16 = 0,
+    // 창이 포커스를 잃었을 때 활성 surface 커서를 어떻게 그릴지(config.cursor.unfocused). app_session이 매 frame
+    // window_focused로 산출해 주입한다 — .normal이면 현행(반전 블록), .hollow/.hidden이면 renderer가 cursor
+    // overlay를 그렇게 만든다(F1-4b-2). 활성 surface는 이 build 경로로 그려지므로 여기서 모드를 받아야 한다.
+    cursor_unfocused: renderer.CursorUnfocused = .normal,
 
     pub fn build(
         self: CoreTextFrameBuilder,
@@ -42,7 +46,7 @@ pub const CoreTextFrameBuilder = struct {
         // 코어 메모리를 DrawList로 복사)는 **락 아래**, CoreText shaping(buildFromDrawList — DrawList
         // 복사본만 봄)은 **락 밖**. PR3에서 리더의 core.write가 CoreText shaping에 안 막히게 한다.
         active.lockCore(io);
-        const list_or = renderer.buildDrawList(allocator, active.core.renderSnapshot());
+        const list_or = renderer.buildDrawListWithUnfocused(allocator, active.core.renderSnapshot(), self.cursor_unfocused);
         active.unlockCore(io);
         const draw_list = try list_or;
         // buildFromDrawList가 draw_list 소유권을 가져간다(실패 시 정리, 성공 시 RenderFrame으로 이동).

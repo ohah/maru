@@ -11,12 +11,20 @@ pub const DrawCell = struct {
     style: terminal.Style = .{},
 };
 
+/// 창 포커스 잃었을 때 커서 처리(renderer 중립 — app이 window_focused·config.cursor.unfocused로 정해 buildDrawList에
+/// 넘긴다). normal=현행(채운 커서), hollow=빈 사각형 테두리, hidden=안 그림. config theme.UnfocusedCursor와 1:1이되
+/// renderer는 config를 모르므로 별도 enum으로 둔다(경계 — terminal/config 의존 없이 snapshot+이 모드만 읽는다).
+pub const CursorUnfocused = enum { normal, hollow, hidden };
+
 pub const CursorOverlay = struct {
     row: u16,
     col: u16,
     visible: bool = true,
     // DECSCUSR 모양. 렌더러가 block(반전)/underline(하단 바)/bar(좌측 세로 바)로 투영한다.
     shape: terminal.CursorShape = .block,
+    // 창 포커스 잃음 + cursor.unfocused=hollow일 때 true — 렌더러가 채운 커서 대신 **빈 사각형 테두리**(외곽선)로
+    // 그린다(shape 무관). app이 window_focused·appearance.cursor.unfocused로 정한다(unfocused=hidden은 visible=false).
+    hollow: bool = false,
 };
 
 // 텍스트 장식선의 종류 — 셀 안에서 선이 그려지는 위치를 정한다(렌더러가 reserved kind로 환산).
@@ -67,9 +75,16 @@ pub const DrawList = struct {
     }
 };
 
-pub fn buildDrawList(
+/// 포커스 정보 없는 호출용(테스트·기본) — 커서를 현행(normal)으로 그린다. 실제 app은 window_focused·
+/// config.cursor.unfocused를 반영하려 buildDrawListWithUnfocused를 직접 부른다.
+pub fn buildDrawList(allocator: std.mem.Allocator, snapshot: terminal.RenderSnapshot) !DrawList {
+    return buildDrawListWithUnfocused(allocator, snapshot, .normal);
+}
+
+pub fn buildDrawListWithUnfocused(
     allocator: std.mem.Allocator,
     snapshot: terminal.RenderSnapshot,
+    unfocused: CursorUnfocused,
 ) !DrawList {
     // DrawList는 GPU 명령이 아니라 renderer backend가 공유해서 소비할 중립 계약이다.
     // 여기서 PTY나 parser를 보지 않고 snapshot만 읽어야 Metal/WebGPU backend를
@@ -168,12 +183,15 @@ pub fn buildDrawList(
             // row range instead of comparing old/new snapshots itself.
             // rows/cols가 0이 아니면 위 dirty-row 블록이 반드시 실행돼 +1 자리를
             // 확보해 두므로 cursor overlay도 assumeCapacity로 붙일 수 있다.
-            overlays.appendAssumeCapacity(.{ .cursor = .{
-                .row = snapshot.cursor.row,
-                .col = snapshot.cursor.col,
-                .visible = snapshot.cursor.visible,
-                .shape = snapshot.cursor_shape,
-            } });
+            overlays.appendAssumeCapacity(.{
+                .cursor = .{
+                    .row = snapshot.cursor.row,
+                    .col = snapshot.cursor.col,
+                    .visible = snapshot.cursor.visible and unfocused != .hidden, // hidden: 포커스 잃으면 안 그림
+                    .shape = snapshot.cursor_shape,
+                    .hollow = unfocused == .hollow, // hollow: 채운 블록 대신 외곽선 테두리
+                },
+            });
         }
     }
 
@@ -241,6 +259,36 @@ test "draw list emits drawable cells from dirty rows only" {
     try std.testing.expectEqual(@as(usize, 1), draw_list.overlays.len);
     try std.testing.expectEqual(@as(u16, 0), draw_list.overlays[0].cursor.row);
     try std.testing.expectEqual(@as(u16, 1), draw_list.overlays[0].cursor.col);
+}
+
+test "buildDrawListWithUnfocused: hollow/hidden이 cursor overlay에 반영 (F1-4b-2)" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("A"); // 커서가 보이는 상태로
+
+    // normal(포커스 있음/block): 현행 — hollow 아님, visible.
+    var normal_dl = try buildDrawListWithUnfocused(std.testing.allocator, core.snapshot(), .normal);
+    defer normal_dl.deinit(std.testing.allocator);
+    try std.testing.expect(!normal_dl.overlays[0].cursor.hollow);
+    try std.testing.expect(normal_dl.overlays[0].cursor.visible);
+
+    // hollow: 외곽선 테두리 — hollow=true, 여전히 visible(그려짐).
+    var hollow_dl = try buildDrawListWithUnfocused(std.testing.allocator, core.snapshot(), .hollow);
+    defer hollow_dl.deinit(std.testing.allocator);
+    try std.testing.expect(hollow_dl.overlays[0].cursor.hollow);
+    try std.testing.expect(hollow_dl.overlays[0].cursor.visible);
+
+    // hidden: 안 그림 — visible=false(hollow도 아님).
+    var hidden_dl = try buildDrawListWithUnfocused(std.testing.allocator, core.snapshot(), .hidden);
+    defer hidden_dl.deinit(std.testing.allocator);
+    try std.testing.expect(!hidden_dl.overlays[0].cursor.visible);
+    try std.testing.expect(!hidden_dl.overlays[0].cursor.hollow);
+
+    // 기본 buildDrawList(2-arg)는 normal과 동일(테스트·기본 경로).
+    var default_dl = try buildDrawList(std.testing.allocator, core.snapshot());
+    defer default_dl.deinit(std.testing.allocator);
+    try std.testing.expect(!default_dl.overlays[0].cursor.hollow);
+    try std.testing.expect(default_dl.overlays[0].cursor.visible);
 }
 
 test "draw list emits OSC 133 gutter marks for prompt rows with a recorded exit" {

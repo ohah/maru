@@ -237,6 +237,15 @@ pub const CursorShape = enum {
     underline,
 };
 
+/// 창이 **포커스를 잃었을 때** 커서를 어떻게 그릴지. block(기본)=현행대로 포커스 무관하게 채운 커서 유지,
+/// hollow=빈 사각형 테두리(외곽선 — iTerm2/Terminal.app 관례: 비활성 창임을 시각적으로), hidden=안 그림.
+/// 포커스 상태는 app이 window_focused로 추적한다(focus reporting과 별개 — 렌더 전용).
+pub const UnfocusedCursor = enum {
+    block,
+    hollow,
+    hidden,
+};
+
 pub const CursorConfig = struct {
     shape: CursorShape = .block,
     blink: bool = true,
@@ -250,12 +259,15 @@ pub const CursorConfig = struct {
     // 스키마-주도(non-null 스칼라 전용)에서 빠지고, loader 수동 핸들러·serialize 수동 emit로 다룬다(palette 선례).
     color: ?[]const u8 = null,
     text: ?[]const u8 = null,
+    /// 창 포커스 잃을 때 커서 처리(기본 block=현행). loader가 `cursor.unfocused` 파싱.
+    unfocused: UnfocusedCursor = .block,
 
     // color/text는 nullable이라 schema에서 제외(theme.sidebar_*·palette와 같은 선례 — theme.zig 상단 주석).
     pub const schema = .{
         .shape = Meta{ .doc = "커서 모양", .widget = .dropdown, .section = .cursor },
         .blink = Meta{ .doc = "커서 깜빡임", .widget = .toggle, .section = .cursor },
         .blink_interval_ms = Meta{ .doc = "커서 깜빡임 반주기(ms)", .range = .{ 100, 10000 }, .widget = .number, .section = .cursor },
+        .unfocused = Meta{ .doc = "포커스 잃을 때 커서", .widget = .dropdown, .section = .cursor },
     };
 };
 

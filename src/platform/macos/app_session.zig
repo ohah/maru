@@ -1216,6 +1216,11 @@ pub const AppSession = struct {
     // 창이 키(포커스) 상태인지. focusChanged가 갱신. "활성 탭 AND 포커스 창"이면 사용자가 보고 있으므로 알림을
     // 띄우지 않는다(그 외 — 비활성 탭이거나 창이 백그라운드 — 는 띄운다).
     window_focused: bool = true,
+    // self-verify(MARU_FORCE_UNFOCUSED_CURSOR): 헤드리스 스크린샷(MARU_SCREENSHOT)은 OS 포커스 변화가 없어
+    // cursor.unfocused(hollow/hidden) 렌더를 캡처할 수 없다. init에서 env를 **한 번** 읽어 이 flag로 고정하면
+    // unfocusedCursorMode()가 window_focused와 무관하게 unfocused 모드를 강제한다(MARU_SCREENSHOT과 같은 debug-gate,
+    // 매 frame getenv 없음). env 미설정이면 false라 일반 실행·계약엔 영향 없다.
+    force_unfocused_cursor: bool = false,
     // urlAt()이 돌려준 URL의 소유 버퍼(다음 urlAt/destroy까지 유효).
     url_buffer: []u8 = &.{},
     // configPath()가 한 번 계산해 캐시하는 config 파일 경로(소유, destroy까지 유효). 경로 규칙(MARU_CONFIG
@@ -1317,6 +1322,8 @@ pub const AppSession = struct {
         self.config_loaded = true;
         self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
         self.audible_bell = self.loaded_config.config.bell.audible;
+        // cursor.unfocused 렌더를 헤드리스 스크린샷으로 self-verify하는 debug-gate(env를 init에서 한 번만 읽는다).
+        self.force_unfocused_cursor = std.c.getenv("MARU_FORCE_UNFOCUSED_CURSOR") != null;
         self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
         self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
 
@@ -5120,6 +5127,18 @@ pub const AppSession = struct {
 
     /// 창 포커스 변화(OS window key/resign)를 활성 surface 코어에 알린다 — focus reporting(DECSET 1004)이 켜져
     /// 있으면 CSI I(gained)/CSI O(lost)가 PTY로 흐른다(vim FocusGained/Lost). off면 reportFocus가 무동작이라 무전송.
+    /// 창이 포커스를 잃었을 때 커서를 어떻게 그릴지(config.cursor.unfocused) renderer 모드로 환산한다. 포커스가
+    /// 있으면(또는 .block) 현행(.normal). 활성 surface 빌드와 비활성 split pane 빌드가 같은 정책을 쓰도록 한 곳에
+    /// 둔다(F1-4b-2). force_unfocused_cursor(self-verify debug-gate)면 포커스와 무관하게 unfocused로 강제한다.
+    fn unfocusedCursorMode(self: *const AppSession) renderer.CursorUnfocused {
+        if (self.window_focused and !self.force_unfocused_cursor) return .normal;
+        return switch (self.appearance.cursor.unfocused) {
+            .block => .normal,
+            .hollow => .hollow,
+            .hidden => .hidden,
+        };
+    }
+
     pub fn focusChanged(self: *AppSession, gained: bool) void {
         self.window_focused = gained; // 완료 알림: 포커스 창의 활성 탭만 "보고 있는" 것으로 친다.
         if (!self.surface_initialized) return;
@@ -7632,6 +7651,8 @@ pub const AppSession = struct {
                     .scale_milli = self.scale_milli,
                     .cell_width_px = @intCast(self.cell_width_px),
                     .cell_height_px = @intCast(self.cell_height_px),
+                    // 활성 surface 커서: 창이 포커스를 잃었으면 cursor.unfocused(block/hollow/hidden) 적용(F1-4b-2).
+                    .cursor_unfocused = self.unfocusedCursorMode(),
                 };
                 break :blk try self.frame_loop.tickAfterDrainWithFrameBuilder(drain_summary, frame_builder);
             } else try self.frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
@@ -7949,7 +7970,9 @@ pub const AppSession = struct {
                         // 코어 읽기(snapshot→DrawList 복사 + per-pane 색 상태)는 락 아래, CoreText shaping
                         // (buildFromDrawList — DrawList 복사본만 봄)은 락 밖(docs/io-render-threading.md PR3).
                         pane_surface.lockCore(self.io);
-                        const dl_or = renderer.buildDrawList(self.allocator, pane_core.renderSnapshot());
+                        // 창이 포커스를 잃었으면 config.cursor.unfocused(block/hollow/hidden)를 커서에 반영한다 — 포커스
+                        // 있으면(또는 block) 현행(normal). renderer가 이 모드로 cursor overlay의 hollow/visible를 정한다(F1-4b-2).
+                        const dl_or = renderer.buildDrawListWithUnfocused(self.allocator, pane_core.renderSnapshot(), self.unfocusedCursorMode());
                         // palette를 소유 버퍼로 복사(코어 alias 제거). 예약 capacity 부족(OOM)이면 코어 포인터 폴백.
                         const pane_palette_ptr = if (self.pane_palette_copies.items.len < self.pane_palette_copies.capacity) blk: {
                             self.pane_palette_copies.appendAssumeCapacity(pane_core.paletteOverride().*);

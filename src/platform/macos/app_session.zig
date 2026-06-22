@@ -46,7 +46,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 77; // 77: set_system_appearance(theme.follow-system — Swift가 macOS NSAppearance light/dark를 생성 직후·변경마다 알려주고, follow-system이 켜져 있으면 Zig가 theme.preset-light/dark 색 세트로 라이브 교체(write-back 없음). 끝에 export 추가, 구조체 offset 불변). 76: take_bell_badge(bell.dock-badge — dispatchBell이 BEL+언포커스 시 bell_badge_pending을 세우고 Swift가 tick마다 drain해 NSApp.dockTile.badgeLabel ● 표시, 포커스 복귀 시 Swift가 지움. take_bell과 같은 1회성 export 추가. 시각 벨 bell.visual은 GpuQuad라 ABI 무변). 75: OSC 52 read(input.osc52.read=allow|deny — take_clipboard_read_request[정책 게이트, allow면 1]·provide_clipboard_read[Swift가 읽은 클립보드 바이트 → base64 OSC 52 응답을 요청 surface PTY로]. 코어는 `?` 쿼리 파싱만, 정책·실제 클립보드 읽기는 platform. deny 기본=탈취 방지. 끝에 export 2개 추가 — 구조체 offset 불변). 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 78; // 78: pending_notification에 surface_id_out 추가 + activate_surface(u32 found) export — 데스크톱 알림(OSC 9/777·에이전트 완료) 클릭 시 발신 surface로 점프. Swift가 알림 userInfo에 (창 토큰, surface_id)를 실어, 클릭 시 토큰으로 창/세션을 고르고 surface_id를 activate_surface로 넘기면 Zig가 activateSurfaceById(switchTab→focusPaneByPtr→focusTerm 순서 단일 출처)로 활성화. id는 세션-로컬·재사용 안 함이라 stale 안전. 끝에 export 1개 추가 + pending_notification 시그니처 확장 — 구조체 offset 불변. 77: set_system_appearance(theme.follow-system — Swift가 macOS NSAppearance light/dark를 생성 직후·변경마다 알려주고, follow-system이 켜져 있으면 Zig가 theme.preset-light/dark 색 세트로 라이브 교체(write-back 없음). 끝에 export 추가, 구조체 offset 불변). 76: take_bell_badge(bell.dock-badge — dispatchBell이 BEL+언포커스 시 bell_badge_pending을 세우고 Swift가 tick마다 drain해 NSApp.dockTile.badgeLabel ● 표시, 포커스 복귀 시 Swift가 지움. take_bell과 같은 1회성 export 추가. 시각 벨 bell.visual은 GpuQuad라 ABI 무변). 75: OSC 52 read(input.osc52.read=allow|deny — take_clipboard_read_request[정책 게이트, allow면 1]·provide_clipboard_read[Swift가 읽은 클립보드 바이트 → base64 OSC 52 응답을 요청 surface PTY로]. 코어는 `?` 쿼리 파싱만, 정책·실제 클립보드 읽기는 platform. deny 기본=탈취 방지. 끝에 export 2개 추가 — 구조체 offset 불변). 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -767,8 +767,9 @@ const CloseScope = union(enum) {
 const AgentKind = enum(u8) { none = 0, claude, codex };
 
 /// 에이전트 완료 알림 한 건(owned). title=워크스페이스 이름, body=마지막 답변 일부. agent_notifications 큐에
-/// 쌓였다가 pendingNotification()이 드레인하며 둘 다 해제한다.
-const AgentNotification = struct { title: []u8, body: []u8 };
+/// 쌓였다가 pendingNotification()이 드레인하며 title/body를 해제한다(surface_id는 POD라 해제 불요).
+/// surface_id=알림을 낸 Term의 surface.id — 알림 클릭이 그 터미널로 점프하도록 식별자에 싣는다(activateSurfaceById).
+const AgentNotification = struct { title: []u8, body: []u8, surface_id: u64 };
 
 /// 동시에 쌓일 수 있는 완료 알림 상한(폭주 가드). 보통 한 tick에 0~1건이라 넉넉하다 — 넘으면 가장 오래된 걸 버린다.
 const agent_notification_cap: usize = 16;
@@ -2960,6 +2961,34 @@ pub const AppSession = struct {
         self.recomputeActivePaneRect(); // 새 탭의 활성 panel rect로 좌표 origin 갱신
         self.rebuildSidebar() catch {}; // 활성 탭이 바뀌었으니 하이라이트 밴드를 새 행으로 옮긴다
         return true;
+    }
+
+    /// surface.id로 그 surface가 속한 (탭, panel, Term)을 찾아 그 자리로 활성화한다(찾으면 true). 데스크톱 알림
+    /// (OSC 9/777·에이전트 완료) 클릭이 발신 터미널로 점프하는 단일 경로다 — Swift가 알림 식별자의 (창 토큰,
+    /// surface_id)에서 토큰으로 올바른 창(세션)을 고른 뒤, 이 세션에 surface_id만 넘긴다(surface.id는 next_id로
+    /// 발급돼 세션-로컬이라 창 간 중복 가능 — 창 선택은 Swift, 세션 내 역조회는 Zig가 분담).
+    ///
+    /// **순서가 핵심**: focusPaneByPtr는 활성 탭의 panes만, focusTerm은 활성 pane만 보므로
+    /// switchTab→focusPaneByPtr→focusTerm 순으로 해야 한다 — 먼저 대상 탭을 활성으로 만들지 않으면 focusPaneByPtr가
+    /// 다른 탭의 panes에서 못 찾아 false가 되고, focusTerm도 엉뚱한 pane을 만진다. 이 순서 의존성을 여기 한 곳에
+    /// 가둔다(단일 출처). 세 호출은 같은 자리면 각자 no-op이라 이미 활성인 surface를 다시 눌러도 무해하다.
+    ///
+    /// id는 재사용하지 않으므로(next_id 단조 증가) stale id가 다른 surface로 오인 활성화될 위험이 없다 — 알림 후
+    /// 그 Term이 닫혔으면 못 찾아 false(무동작). 클릭 시점에 실시간 3중 순회하므로 알림 도착 후 탭/pane이 재배치돼도
+    /// 인덱스 캐시 없이 정확히 현재 위치로 점프한다.
+    pub fn activateSurfaceById(self: *AppSession, id: u64) bool {
+        for (self.tabs.items, 0..) |tab, tab_idx| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items, 0..) |term, term_idx| {
+                    if (term.surface.id != id) continue;
+                    _ = self.switchTab(tab_idx);
+                    _ = self.focusPaneByPtr(pane);
+                    self.focusTerm(term_idx);
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /// **세션-트리 구조-무효화 계약(S1)의 단일 출처.** 한 Pane이 해제되기 직전 destroyPane이 부른다 — 모든
@@ -7174,7 +7203,7 @@ pub const AppSession = struct {
     /// UNUserNotificationCenter로 띄운다. 코어 pending을 비워(한 번 쓰고 소비) 다음 tick에 같은 알림이 또
     /// 뜨지 않게 한다. 알림은 OS 리소스라 native(Swift)만 띄우고 코어/여기는 데이터만 넘긴다(경계). 클립보드와
     /// 달리 env 게이트 없음 — 알림은 OS authorization이 게이트하는 저위험 표면(iTerm2/Ghostty도 기본 허용).
-    pub fn pendingNotification(self: *AppSession) ?struct { title: []const u8, body: []const u8 } {
+    pub fn pendingNotification(self: *AppSession) ?struct { title: []const u8, body: []const u8, surface_id: u64 } {
         // 에이전트 완료 알림(running→idle)을 OSC 9/777보다 먼저 드레인한다 — 큐의 owned 버퍼를 그대로 반환하고
         // 직전 반환 버퍼는 여기서 해제(다음 pendingNotification/destroy까지 유효 규약은 동일).
         if (self.agent_notifications.items.len > 0) {
@@ -7183,9 +7212,12 @@ pub const AppSession = struct {
             if (self.notification_body_out.len > 0) self.allocator.free(self.notification_body_out);
             self.notification_title_out = n.title;
             self.notification_body_out = n.body;
-            return .{ .title = self.notification_title_out, .body = self.notification_body_out };
+            return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = n.surface_id };
         }
         if (!self.surface_initialized) return null;
+        // OSC 9/777은 활성 surface의 코어가 파싱했으므로(아래 activeSurface().core 드레인) 발신 surface=활성 surface.
+        // 그 id를 알림 식별자에 실어 클릭이 이 터미널로 점프하게 한다.
+        const osc_surface_id = self.activeSurface().id;
         const pending = self.activeSurface().core.pendingNotification() orelse return null;
         if (self.notification_title_out.len > 0) {
             self.allocator.free(self.notification_title_out);
@@ -7207,7 +7239,7 @@ pub const AppSession = struct {
             return null;
         };
         self.activeSurface().core.clearNotification();
-        return .{ .title = self.notification_title_out, .body = self.notification_body_out };
+        return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = osc_surface_id };
     }
 
     /// G12 BEL: 활성 surface에 pending 벨이 있으면 true(코어 플래그를 비운다). Swift가 시스템 벨(NSSound.beep)을
@@ -8100,7 +8132,9 @@ pub const AppSession = struct {
             self.allocator.free(dropped.title);
             self.allocator.free(dropped.body);
         }
-        self.agent_notifications.append(self.allocator, .{ .title = title, .body = body }) catch {
+        // surface_id는 알림 클릭 시 그 Term으로 점프하기 위한 식별자다(term은 heap-pin이라 닫히기 전까지 유효하지만
+        // 여기선 id 값만 복사하므로 수명 의존이 없다 — 클릭 시점에 id로 재조회한다).
+        self.agent_notifications.append(self.allocator, .{ .title = title, .body = body, .surface_id = term.surface.id }) catch {
             self.allocator.free(title);
             self.allocator.free(body);
         };
@@ -10751,6 +10785,56 @@ test "에이전트 완료 알림: enqueue 후 pendingNotification이 OSC보다 �
     session.enqueueAgentCompletion(tab, term);
     const n2 = session.pendingNotification() orelse return error.TestExpectedNotification;
     try std.testing.expectEqualStrings("완료", n2.body);
+    // 알림에 surface_id가 실린다(클릭 라우팅용) — 활성 탭의 활성 Term surface.id와 일치.
+    try std.testing.expectEqual(session.activeSurface().id, n2.surface_id);
+}
+
+test "activateSurfaceById: surface.id로 (탭·split panel·가로탭)을 역조회해 그 자리로 활성화한다" {
+    // 데스크톱 알림(OSC 9/777·에이전트 완료) 클릭이 발신 터미널로 점프하는 경로의 핵심이다. Swift는 창 토큰으로
+    // '어느 창(세션)'까지만 고르고, 그 세션 안에서 surface_id로 '어느 탭/split panel/가로탭'인지 찾아 포커스하는 건
+    // Zig가 소유한다. 순서(switchTab→focusPaneByPtr→focusTerm)가 틀리면 비활성 탭의 panel/term을 못 찾으므로,
+    // 비활성 탭의 둘째 panel 둘째 가로탭을 표적으로 삼아 세 단계 모두 정확히 들어가는지 검증한다. 터미널에서
+    // 중요한 이유: 알림은 "지금 안 보는 터미널"이 보내므로, 클릭이 정확히 그 화면을 되살리지 못하면 기능이 무의미하다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane/newTab/newTermInActivePane = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800; // split/resize가 의미 있으려면 backing 필요
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+
+    // 표적: 비활성 탭(t1)의 둘째 panel(우측 split)의 둘째 가로탭. 만든 직후 활성이라 activeSurface로 id를 잡는다.
+    _ = try session.newTab(); // tabs [t0, t1], 활성 t1
+    try session.splitActivePane(.horizontal); // t1: pane [p0, p1], 활성 p1
+    try session.newTermInActivePane(); // p1: term [tm0, tm1], 활성 tm1
+    const target_id = session.activeSurface().id;
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+
+    // 활성을 다른 워크스페이스(t0)로 옮겨, 활성화가 탭 경계를 넘는지(단순 no-op이 아닌지) 본다.
+    try std.testing.expect(session.switchTab(0));
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
+
+    // 알림 클릭 모사: id로 끝까지(탭→panel→가로탭) 정확히 점프.
+    try std.testing.expect(session.activateSurfaceById(target_id));
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+    try std.testing.expectEqual(target_id, session.activeSurface().id);
+
+    // 없는 id(알림 후 그 Term이 닫힌 경우 모사)는 false + 활성 상태 불변 — stale 알림이 엉뚱한 surface를 깨우지 않는다.
+    try std.testing.expect(!session.activateSurfaceById(0xFFFF_FFFF));
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
 }
 
 test "parseGitHead: ref branch / nested ref / detached SHA / empty ref / junk" {

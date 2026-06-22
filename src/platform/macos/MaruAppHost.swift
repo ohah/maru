@@ -407,6 +407,11 @@ final class TerminalSurface {
     var appSession: OpaquePointer?
     var metalRenderer: OpaquePointer?
 
+    // 데스크톱 알림 클릭 라우팅용 창(세션) 식별 토큰. surface.id는 세션-로컬(창마다 next_id가 1부터)이라 창 간
+    // 중복되므로, 알림 userInfo에 (token, surface_id) 쌍을 실어 클릭 시 token으로 정확한 창/세션을 먼저 고른다.
+    // makeTerminalSurface가 단조 증가로 채번한다(0=미설정 sentinel — parseNotificationRoute가 거른다).
+    var token: UInt64 = 0
+
     // 렌더 캐시(세션별). 의미는 컨트롤러의 drawMetalFrame/tickAppSession 주석 참조.
     var lastDrawnGeneration: UInt64 = 0
     var lastSeenMetalGeneration: UInt32 = 0
@@ -435,7 +440,7 @@ final class QuickTerminalPanel: NSPanel {
 
 @main
 @MainActor
-final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     private static var retainedDelegate: MaruAppHostController?
     private static let statusOK = Int32(MaruAppHostStatusOk.rawValue)
     // PTY 셸이 정상 종료했다는 신호. fault가 아니라 우아한 종료 대상이다.
@@ -450,6 +455,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 컬렉션에서 view/key 창으로 고른다. quick terminal이 별도(특수) surface다. 아래 계산 프로퍼티들은
     // 기존 세션별 메서드가 코드 변경 없이 "활성 surface"의 상태를 읽고 쓰게 하는 forwarder다(상태만 분리).
     private var windows: [TerminalSurface] = []
+    // 알림 클릭 라우팅 토큰 채번기(makeTerminalSurface가 단조 증가로 부여 — 창마다 유일). 0은 미설정 sentinel이라 1부터.
+    private var nextSurfaceToken: UInt64 = 1
     // 앱-전역 "메인/첫 일반 창" 별칭(= windows.first). 앱 요약·종료처럼 특정 한 창이 기준일 때 쓴다. 창별
     // 타게팅 세분화(key 창 기준 메뉴/포커스)는 W4. TerminalSurface는 reference라 `primary?.field = x` 변형은
     // 객체를 통해 그대로 동작한다(컬렉션 재대입이 아님).
@@ -612,7 +619,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 메인 창의 per-session 상태를 담을 surface를 가장 먼저 만든다 — 아래 window/appSession/렌더러
         // 대입이 전부 이 첫 창(primary = windows.first)으로 forwarding되므로(forwarder setter), 창이 없으면
         // 그 대입이 사라진다. New Window(W2)는 같은 컬렉션에 surface를 추가한다.
-        self.windows.append(TerminalSurface())
+        self.windows.append(makeTerminalSurface())
 
         let abiReady = validateZigBoundary()
         let smokeDuration = smokeDurationMs()
@@ -1014,12 +1021,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = createTerminalWindow(applyingWorkspace: nil)
     }
 
+    /// TerminalSurface 생성의 단일 출처 — 알림 클릭 라우팅 토큰(token)을 단조 증가로 채번한다. 초기 창·New Window·
+    /// quick 패널이 모두 이 팩토리를 거쳐, 어느 경로로 만든 창이든 알림이 정확히 그 창으로 돌아온다(채번 누락 방지).
+    private func makeTerminalSurface() -> TerminalSurface {
+        let surface = TerminalSurface()
+        surface.token = nextSurfaceToken
+        nextSurfaceToken += 1
+        return surface
+    }
+
     /// 새 일반 창(+세션+렌더러)을 만든다. 성공하면 true. 실패 시 만든 것을 정리한다. 복원할 창이면 (전체 텍스트,
     /// 창 인덱스)를 받아 세션 생성 직후 그 인덱스의 창을 적용해 탭/split/Term을 복원한다(R4b) — 포맷 파싱은
     /// Zig ABI가 소유한다(Swift는 'window ' 경계를 분할하지 않음).
     @discardableResult
     private func createTerminalWindow(applyingWorkspace ws: (text: String, index: Int)?) -> Bool {
-        let surface = TerminalSurface()
+        let surface = makeTerminalSurface()
         windows.append(surface)
         var ok = false
         withSurface(surface) {
@@ -1700,12 +1716,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func ensureNotificationAuthorization() {
         guard !notificationAuthRequested, Bundle.main.bundleIdentifier != nil else { return }
         notificationAuthRequested = true
+        // 클릭/포그라운드 콜백(didReceive·willPresent)을 받으려면 delegate가 등록돼 있어야 한다 — 권한과 무관하게,
+        // 권한 요청보다 먼저 건다. 다른 앱을 쓰는 중 클릭해도 OS가 앱을 깨워 didReceive로 발신 터미널을 활성화한다.
+        UNUserNotificationCenter.current().delegate = self
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    // OSC 9/777: 코어가 파싱한 데스크톱 알림(title/body)을 활성 세션에서 drain해 네이티브 알림으로 띄운다(매 tick).
-    // 알림이 없으면 Zig가 has=0을 줘 아무 것도 안 한다. OSC 9는 title이 없어(빈 문자열) 앱 이름으로 폴백한다.
-    // 번들 ID가 없으면(app shell 일부) UNUserNotificationCenter를 못 써 조용히 건너뛴다(GUI 수동 검증은 제품 앱).
+    // OSC 9/777·에이전트 완료: 코어가 모은 데스크톱 알림(title/body/surface_id)을 활성 세션에서 drain해 네이티브
+    // 알림으로 띄운다(매 tick). 알림이 없으면 Zig가 has=0을 줘 아무 것도 안 한다. OSC 9는 title이 없어(빈 문자열) 앱
+    // 이름으로 폴백한다. 번들 ID가 없으면(app shell 일부) UNUserNotificationCenter를 못 써 조용히 건너뛴다(GUI 수동
+    // 검증은 제품 앱). userInfo에 (창 토큰, surface_id)를 실어 클릭 시 didReceive가 발신 터미널로 점프하게 한다.
     private func drainNotification() {
         guard let session = appSession else { return }
         // 권한 팝업이 알림보다 먼저 떠야 첫 알림을 놓치지 않는다 — 세션이 사는 동안 선요청한다(내부 플래그로 실제 1회만).
@@ -1716,7 +1736,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var titleLen: size_t = 0
         var bodyPtr: UnsafePointer<UInt8>? = nil
         var bodyLen: size_t = 0
-        guard maru_macos_app_session_pending_notification(session, &has, &titlePtr, &titleLen, &bodyPtr, &bodyLen) == Self.statusOK,
+        var surfaceId: UInt64 = 0
+        guard maru_macos_app_session_pending_notification(session, &has, &titlePtr, &titleLen, &bodyPtr, &bodyLen, &surfaceId) == Self.statusOK,
               has != 0 else { return }
         guard Bundle.main.bundleIdentifier != nil else { return } // 번들 없으면 알림 API 사용 불가 — skip
         let title = titleLen > 0 ? String(decoding: UnsafeBufferPointer(start: titlePtr!, count: titleLen), as: UTF8.self) : ""
@@ -1724,8 +1745,53 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let content = UNMutableNotificationContent()
         content.title = title.isEmpty ? "maru" : title // OSC 9는 title 없음 → 앱 이름
         content.body = body
+        // drainNotification은 tickAppSession이 explicitSurface로 이 창을 고른 컨텍스트에서 돈다 — activeSurface가 곧
+        // 발신 창이다. 그 token과 surface_id를 실어, 클릭 시 token으로 창/세션을, surface_id로 그 안의 Term을 찾는다.
+        content.userInfo = ["wt": activeSurface?.token ?? 0, "sid": surfaceId]
+        // identifier는 UUID 유지(알림 dedup 식별자 — (token, surface_id)를 identifier에 쓰면 같은 터미널의 연속 알림이
+        // 서로 덮어써 사라진다). 라우팅 정보는 userInfo로 분리한다.
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+
+    /// 알림 userInfo에서 (창 토큰, surface_id)를 꺼낸다(drainNotification이 실은 ["wt","sid"]를 역으로 읽는다).
+    /// token이 양수일 때만 유효 — 0(미설정 sentinel)이거나 외부/레거시 알림이면 nil이라 클릭이 무시된다. 순수 함수라
+    /// AppKit 의존이 없어 라우팅 파싱을 단위로 검증할 수 있다(세션 내 역조회는 Zig activate_surface가 소유 — 네이티브 최소).
+    nonisolated static func parseNotificationRoute(_ userInfo: [AnyHashable: Any]) -> (token: UInt64, surfaceId: UInt64)? {
+        guard let wt = (userInfo["wt"] as? NSNumber)?.uint64Value, wt != 0,
+              let sid = (userInfo["sid"] as? NSNumber)?.uint64Value else { return nil }
+        return (token: wt, surfaceId: sid)
+    }
+
+    // 알림 클릭 → 발신 터미널로 점프. userInfo의 (token, surface_id)에서 token으로 정확한 창(세션)을 고르고(surface.id는
+    // 세션-로컬이라 token 없이 id만으론 창 간 오활성화가 난다), 창을 키로 올린 뒤 surface_id를 activate_surface로 넘겨
+    // Zig가 탭/pane/Term을 활성화한다(경계: 창 활성화=Swift AppKit, 세션 내 역조회/포커스=Zig). 창/Term이 이미 닫혔으면
+    // 무동작(창만 활성화). completionHandler는 모든 경로에서 호출한다(누락 시 OS 경고).
+    // UNUserNotificationCenterDelegate 요구사항은 nonisolated라 메서드도 nonisolated로 선언하고, 실제 작업은
+    // MainActor에서 한다 — 이 콜백은 메인 스레드로 오므로 assumeIsolated로 동기 진입한다(코드베이스 공통 패턴).
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                            didReceive response: UNNotificationResponse,
+                                            withCompletionHandler completionHandler: @escaping () -> Void) {
+        MainActor.assumeIsolated {
+            defer { completionHandler() } // 누락 시 OS 경고 — 모든 경로에서 보장.
+            guard let route = Self.parseNotificationRoute(response.notification.request.content.userInfo) else { return }
+            let target = windows.first(where: { $0.token == route.token }) ?? (quick?.token == route.token ? quick : nil)
+            guard let surface = target else { return } // 창이 닫혔으면 무동작.
+            surface.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            if let session = surface.appSession {
+                _ = maru_macos_app_session_activate_surface(session, route.surfaceId)
+            }
+        }
+    }
+
+    // 앱이 포그라운드일 때도 배너를 띄운다. 에이전트 완료 알림은 "지금 안 보는 탭"(Zig가 !is_current로 게이트)이 대상이라
+    // 앱이 떠 있어도 알려야 의미가 있다. 표시 스타일은 OS 표면이라 Swift가 정한다(Zig는 알림 여부만 결정 — 경계).
+    // self 접근이 없어 assumeIsolated 없이 nonisolated 본문에서 바로 completionHandler를 호출한다.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                            willPresent notification: UNNotification,
+                                            withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
     }
 
     // G12 BEL: 코어가 모은 벨(0x07)을 활성 세션에서 drain해 시스템 벨을 울린다(매 tick, 한 tick 1회로 합쳐짐).
@@ -2464,7 +2530,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// Metal 뷰/렌더러를 만든다. 세션 생성 실패면 quick은 nil로 남고 토글은 무동작(앱은 정상).
     private func ensureQuickTerminal() {
         guard quick == nil else { return }
-        let surface = TerminalSurface()
+        let surface = makeTerminalSurface()
 
         // borderless 떠 있는 패널 — 타이틀바 없이 화면 상단에서 내려오는 드롭다운. QuickTerminalPanel은
         // borderless여도 key가 될 수 있어 타이핑을 받는다. 화면 전환/전체화면 위에서도 보이게 collectionBehavior.

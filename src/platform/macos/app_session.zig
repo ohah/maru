@@ -3470,6 +3470,12 @@ pub const AppSession = struct {
     fn refreshSettingsFieldCount(self: *AppSession) void {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
+        // 네비 키보드 ↓는 섹션 수를 모르는 컴포넌트가 section을 +1만 하므로(상한 미지), 여기서 실제 섹션 수로 clamp한다.
+        // 안 하면 section이 범위를 넘어 계속 커져 ↑가 한참 먹지 않는다(currentSectionFields는 min clamp로 보기만 보정).
+        if (self.buildSectionList(scratch.allocator())) |sections| {
+            if (sections.len > 0 and self.chrome_host.settings.section >= sections.len)
+                self.chrome_host.settings.section = sections.len - 1;
+        } else |_| {}
         const cf = self.currentSectionFields(scratch.allocator()) catch return;
         self.chrome_host.settings.setFieldCount(cf.total());
     }
@@ -4068,6 +4074,7 @@ pub const AppSession = struct {
             .arrow_right => .right,
             .backspace => .backspace,
             .char => .char,
+            .tab => .tab,
             else => .other,
         };
         const cp: u21 = switch (event.key) {

@@ -109,9 +109,9 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
             state.input.appendChar(allocator, k.codepoint) catch {};
             return .query_changed;
         },
-        // left/right(가로 화살표)는 세로 목록 팔레트에서 의미 없어 기타 키와 같이 닫는다(기존 동작 보존 —
-        // 예전엔 arrow_left/right가 chrome .other로 매핑돼 같은 경로였다).
-        .left, .right, .other => {
+        // left/right(가로 화살표)·tab은 세로 목록 팔레트에서 의미 없어 기타 키와 같이 닫는다(기존 동작 보존 —
+        // 예전엔 arrow_left/right·tab이 chrome .other로 매핑돼 같은 경로였다).
+        .left, .right, .tab, .other => {
             state.hide();
             return .close;
         },

@@ -288,6 +288,10 @@ pub const AmbiguousWidth = enum {
     wide,
 };
 
+/// `emoji_width`(이모지 표현 폭) 전용 별칭 — 변형은 narrow|wide로 AmbiguousWidth와 같다(스키마 reflection 재사용).
+/// 별도 이름으로 두는 건 `emoji_width: AmbiguousWidth`가 EAW Ambiguous 의미로 오해되지 않게 하기 위함이다.
+pub const EmojiWidth = AmbiguousWidth;
+
 pub const InputConfig = struct {
     // 기본 scroll: Mac 관례(Terminal.app/iTerm2) + 셸 keymap 오해석(case 토글·'~' 삽입) 원천 차단.
     page_keys: PageKeys = .scroll,
@@ -410,7 +414,7 @@ pub const Config = struct {
     /// 것을 풀고 TUI 레이아웃과도 정합한다(`core.emoji_wide` → putCell이 VS16 base를 width 2로 승격). narrow면
     /// EAW 그대로 1칸 — zsh ZLE가 base+VS16을 1칸으로 가정하는 환경에서 줄 편집 드리프트를 피하려는 opt-out.
     /// mode 2027(grapheme cluster)을 켜는 앱은 이 설정과 무관하게 항상 2칸. loader가 `text.emoji-width` 키로 파싱.
-    emoji_width: AmbiguousWidth = .wide,
+    emoji_width: EmojiWidth = .wide,
     /// SGR bold(1) 글자의 ANSI **indexed 전경(0~7)** 을 그 bright 짝(8~15)으로 올릴지. **기본 false**.
     /// loader가 `theme.bold-is-bright` 키로 파싱한다. 켜면 bold + `.indexed` 0~7 전경만 +8 한다 — `.default`
     /// 전경과 `.rgb`·256색 cube(8~255)는 안 바꾼다(가장 정의가 분명한 부분집합만; default까지 밝히면 본문

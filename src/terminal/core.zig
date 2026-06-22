@@ -1008,6 +1008,13 @@ pub const TerminalCore = struct {
             const n = std.unicode.utf8Encode(cell.codepoint, &buf) catch continue;
             try out.appendSlice(allocator, buf[0..n]);
             if (cell.combining) |cp| {
+                // 키캡(base+VS16+U+20E3)은 단일 combining 슬롯이라 VS16이 U+20E3에 덮여 사라진다. 복사·URL 추출 시
+                // VS16을 재주입해 온전한 키캡 시퀀스를 내보낸다 — 화면 렌더(셰이퍼도 같은 재주입)와 클립보드를 일치시킴
+                // (안 그러면 보이는 컬러 키캡과 달리 'base+U+20E3'만 복사돼 붙여넣는 앱에서 깨진다). 단일 출처: width.isKeycapCombining.
+                if (width.isKeycapCombining(cp)) {
+                    const v = std.unicode.utf8Encode(0xFE0F, &buf) catch continue;
+                    try out.appendSlice(allocator, buf[0..v]);
+                }
                 const m = std.unicode.utf8Encode(cp, &buf) catch continue;
                 try out.appendSlice(allocator, buf[0..m]);
             }
@@ -7835,6 +7842,22 @@ test "selection extracts text across soft-wrapped and hard rows (scrollback + ac
     const text2 = (try core.extractSelection(std.testing.allocator)).?;
     defer std.testing.allocator.free(text2);
     try std.testing.expectEqualStrings("ef\nhi", text2);
+}
+
+test "selection re-injects VS16 for keycap emoji so copied bytes match the rendered cluster (review #3)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    // 2️⃣ = '2' + VS16(FE0F) + U+20E3. 단일 combining 슬롯이라 VS16이 U+20E3에 덮여 combining=0x20E3만 남는다.
+    try core.write("\x32\xef\xb8\x8f\xe2\x83\xa3");
+    try std.testing.expectEqual(@as(u21, 0x32), core.cells[0].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0x20E3), core.cells[0].combining);
+
+    core.selectionStart(0, 0);
+    core.selectionExtend(0, 3);
+    const text = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text);
+    // 복사 바이트 = base + VS16(재주입) + U+20E3 — 화면 컬러 키캡과 일치('2'+U+20E3만 복사되어 깨지지 않음).
+    try std.testing.expectEqualStrings("\x32\xef\xb8\x8f\xe2\x83\xa3", text);
 }
 
 test "selection span clips to the viewport and follows scrolling" {

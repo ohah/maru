@@ -68,11 +68,12 @@ pub fn layout(content_cols: u32, content_rows: u32, p: props.ChromeProps, tk: *c
 pub fn frame(box: Box, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
     const bg_r = p.shape.corner_radius_px;
     const bw = p.shape.border_width_px;
-    try out.append(arena, .{ .quad = .{ .rect = box.rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
+    // 모달 외곽선은 focus_accent(강조)가 아니라 divider(은은한 구분선) — 표 경계선처럼 배경과 살짝만 대비시킨다.
+    try out.append(arena, .{ .quad = .{ .rect = box.rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .divider } });
     try out.append(arena, .{ .border = .{
         .rect = box.rect,
         .sides = .{ .top = true, .right = true, .bottom = true, .left = true },
-        .role = .focus_accent,
+        .role = .divider,
     } });
 }
 

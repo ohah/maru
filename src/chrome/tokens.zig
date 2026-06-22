@@ -95,7 +95,7 @@ pub const Tokens = struct {
     border: Border = .{},
 
     /// tui 토큰셋: resolved 테마(chrome-중립 ThemeColors)에서 12개 ColorRole을 채운다 — **역할→색 매핑의 단일
-    /// 출처**. divider/focus_accent/tab_*/drop_zone은 현재 sidebar_active를 공유한다(렌더 sidebarActiveBg와 같은
+    /// 출처**. focus_accent/tab_*/drop_zone은 sidebar_active를 공유하고, divider만 sidebar_background에서 살짝 밝은 은은한 색이다(렌더 sidebarActiveBg와 같은
     /// 출처), rich(C4)는 토큰셋만 바꿔 분리한다. muted_fg는 C0에선 sidebar_foreground. initFill 기본값은 12역할을
     /// 전부 명시 set하므로 실제로 안 쓰이지만(foreground로 채워 둠) EnumArray 초기화에 필요하다.
     pub fn tui(theme: ThemeColors) Tokens {
@@ -105,7 +105,7 @@ pub const Tokens = struct {
         palette.set(.muted_fg, theme.sidebar_foreground);
         palette.set(.tab_active_bg, theme.sidebar_active);
         palette.set(.tab_hover_bg, theme.sidebar_active);
-        palette.set(.divider, theme.sidebar_active);
+        palette.set(.divider, lightenRgb(theme.sidebar_background, 14)); // 박스 배경에서 살짝 밝은 은은한 구분선(표 경계선·모달 외곽선·pane 분할선 공용) — 예전 sidebar_active(강조)는 너무 도드라졌다
         palette.set(.focus_accent, theme.sidebar_active);
         palette.set(.drop_zone, theme.sidebar_active);
         palette.set(.search_match, theme.search_match);
@@ -171,7 +171,7 @@ test "Tokens.tui maps resolved theme colors to the 12 semantic roles" {
     try std.testing.expectEqual(c.rgb(2, 2, 2), tk.get(.surface_bg));
     try std.testing.expectEqual(c.rgb(3, 3, 3), tk.get(.surface_fg));
     try std.testing.expectEqual(c.rgb(4, 4, 4), tk.get(.focus_accent)); // sidebar_active 공유
-    try std.testing.expectEqual(c.rgb(4, 4, 4), tk.get(.divider));
+    try std.testing.expectEqual(c.rgb(16, 16, 16), tk.get(.divider)); // sidebar_background(2) lighten 14 = 16 — 은은한 구분선(sidebar_active 공유 아님)
     try std.testing.expectEqual(c.rgb(8, 8, 8), tk.get(.cursor));
 }
 
@@ -193,8 +193,8 @@ test "Tokens.rich separates the sidebar_active-shared roles into derived colors 
     };
     const t = Tokens.tui(theme);
     const r = Tokens.rich(theme);
-    // tui: divider/focus_accent/drop_zone/tab_hover_bg = sidebar_active(공유). rich: 분리 파생.
-    try std.testing.expectEqual(c.rgb(100, 100, 100), t.get(.divider));
+    // tui: focus_accent/drop_zone/tab_hover_bg = sidebar_active(공유), divider = sidebar_background lighten(은은). rich: 분리 파생.
+    try std.testing.expectEqual(c.rgb(34, 34, 34), t.get(.divider)); // sidebar_background(20) lighten 14 = 34
     try std.testing.expectEqual(c.rgb(76, 76, 76), r.get(.divider)); // darken 24
     try std.testing.expectEqual(c.rgb(140, 140, 140), r.get(.focus_accent)); // lighten 40
     try std.testing.expectEqual(c.rgb(116, 116, 116), r.get(.drop_zone)); // lighten 16

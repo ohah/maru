@@ -73,6 +73,8 @@ pub const ResolvedAppearance = struct {
     // 창 배경 투명도(0.0~1.0, 기본 1.0=불투명). app이 화면 clear color alpha + metal layer/창 불투명도 wiring에 쓴다
     // (default 배경만 투명 — 근거는 theme.Config.window_opacity 주석 단일 출처). loader가 0~1 range 검증.
     window_opacity: f32 = 1.0,
+    // 휠/트랙패드 세로 스크롤 배수(0.1~10.0, 기본 1.0). app scrollWheel이 delta에 곱한다(근거는 theme.ScrollConfig 주석).
+    scroll_multiplier: f32 = 1.0,
 };
 
 pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
@@ -99,6 +101,7 @@ pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
         .window_padding_bottom = config.window_padding_bottom,
         .window_padding_left = config.window_padding_left,
         .window_opacity = config.window_opacity,
+        .scroll_multiplier = config.scroll.multiplier,
     };
 }
 

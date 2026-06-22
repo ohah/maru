@@ -5003,7 +5003,10 @@ pub const AppSession = struct {
         // 방향이 뒤집히면 1줄 미만 잔여를 버린다 — 이전 방향의 residue가 첫 반대 틱을 상쇄해
         // 방향 전환이 굼뜨게 느껴지는 것 방지(iTerm2/xterm.js 동작).
         if (std.math.isFinite(delta_y) and delta_y * self.wheel_accum < 0) self.wheel_accum = 0;
-        const lines = wheelDeltaToLines(&self.wheel_accum, delta_y, precise, self.cell_height_px, self.scale_milli);
+        // 세로 스크롤 배수(scroll.multiplier): delta에 곱해 줄 환산 전 속도를 조절한다(가로 탭 바엔 적용 안 함 — 아래
+        // tab_wheel_accum 경로는 원본 delta_x). 방향 판정(위 wheel_accum 부호)은 배수>0이라 부호 불변이라 영향 없다.
+        const scaled_delta_y = delta_y * @as(f64, self.appearance.scroll_multiplier);
+        const lines = wheelDeltaToLines(&self.wheel_accum, scaled_delta_y, precise, self.cell_height_px, self.scale_milli);
         // 휠은 '커서 아래' surface가 통째로 처리한다 — split에서 비활성 panel 위 스크롤이 그 panel을 스크롤하고
         // (포커스는 안 바꾼다), mouse tracking 판정·리포트 좌표도 그 surface 기준이라 정합한다. 베이스: Ghostty/
         // Warp — 휠은 포인터 아래 surface가 소유한다(포커스 무관). 그래야 포커스 pane이 트래킹 앱(vim/tmux 등)
@@ -13675,6 +13678,48 @@ test "wheel over an inactive pane scrolls that pane (not the active one)" {
     // 오른쪽(활성) 본문 위에서 스크롤 → 오른쪽 뷰포트가 움직인다.
     session.scrollWheel(3, 0, false, @floatFromInt(right_body.x + right_body.w / 2), @floatFromInt(right_body.y + right_body.h / 2));
     try std.testing.expect(right_surface.core.view_offset > 0);
+}
+
+// scroll.multiplier(F1-10): 세로 휠 delta에 배수를 곱해 같은 틱이 더(또는 덜) 스크롤되게 한다. 배수 1.0 기준 대비
+// 3.0이면 같은 휠 입력이 더 많은 줄을 굴린다(가로 탭 바엔 적용 안 함 — 이 테스트는 세로만). 실 init이라 macOS 게이트.
+test "scroll.multiplier: 세로 휠 배수가 스크롤 줄 수를 키운다 (F1-10)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    const surface = session.activeSurface();
+    try surface.core.write("X\r\n" ** 200); // 스크롤백 충분히(200줄)
+    const body = session.paneTermRect(session.active_pane_rect);
+    const cx: f64 = @floatFromInt(body.x + body.w / 2);
+    const cy: f64 = @floatFromInt(body.y + body.h / 2);
+
+    // 배수 1.0: 한 휠 틱(위로=과거)의 기준 스크롤량.
+    session.appearance.scroll_multiplier = 1.0;
+    session.wheel_accum = 0;
+    session.scrollWheel(3, 0, false, cx, cy);
+    const off1 = surface.core.view_offset;
+    try std.testing.expect(off1 > 0);
+
+    // 맨 아래로 복귀(아래 휠) + 누적 잔여 리셋 — 다음 측정을 동일 시작점에서.
+    session.wheel_accum = 0;
+    session.scrollWheel(-50, 0, false, cx, cy);
+    try std.testing.expectEqual(@as(usize, 0), surface.core.view_offset);
+
+    // 배수 3.0: 같은 휠 틱이 delta×3이라 더 많은 줄을 굴린다.
+    session.appearance.scroll_multiplier = 3.0;
+    session.wheel_accum = 0;
+    session.scrollWheel(3, 0, false, cx, cy);
+    try std.testing.expect(surface.core.view_offset > off1);
 }
 
 // 휠은 '커서 아래' surface가 소유한다(Ghostty/Warp) — 포커스(활성) pane이 마우스 트래킹 앱(vim/tmux 등)이어도,

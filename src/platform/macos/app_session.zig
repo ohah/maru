@@ -9373,7 +9373,7 @@ pub const AppSession = struct {
                     .toggle_sidebar => cols -| 8,
                     .view_options => cols -| 5,
                     .new_workspace => cols -| 2,
-                    .notifications => cols -| 11,
+                    .notifications => cols -| 12, // 벨 글리프(col cols-12)와 hover 하이라이트 정렬 — 예전 cols-11은 글리프보다 1칸 우측으로 어긋났다
                     .search, .none => cols, // 도달 안 함(setHoveredHeaderRegion이 정규화) — 안전값
                 };
                 const cw: f32 = @floatFromInt(self.cell_width_px);
@@ -14971,18 +14971,18 @@ test "tabNumberLabel formats {n} {title} with 1-based numbering" {
 test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
     var session: AppSession = undefined;
     // paneBarHeightPx → buildChromeTokens가 appearance(theme·chrome_theme)를 읽으므로 undefined 세션에 명시 초기화한다
-    // (chrome_theme=.tui → tab_bar_pad_y_px=0 → 바=cell 1칸). undefined 필드 읽기 UB(0xaa 우연 green) 회피.
+    // (chrome_theme=.tui → tab_bar_pad_y_px=3 → 바=cell+6). undefined 필드 읽기 UB(0xaa 우연 green) 회피.
     session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
     session.chrome_minimal = false; // paneBarHeightPx가 읽는다(false=바 있음)
     session.cell_width_px = 12;
-    session.cell_height_px = 12; // paneBarHeightPx = cell_height + 2*pad_y(tui 0) = 12
+    session.cell_height_px = 12; // paneBarHeightPx = cell_height + 2*pad_y(tui 3) = 18
     session.window_padding_px = .{}; // paneTermRect가 이제 padding을 읽는다 — 바 기하만 격리(undefined UB 회피)
 
     const rect: app.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
     const term = session.paneTermRect(rect);
-    try std.testing.expectEqual(app.SplitRect{ .x = 180, .y = 12, .w = 800, .h = 588 }, term); // 바 12 아래
+    try std.testing.expectEqual(app.SplitRect{ .x = 180, .y = 18, .w = 800, .h = 582 }, term); // 바 18(=cell 12 + pad 3*2) 아래
     const bar = session.paneBarRect(rect).?;
-    try std.testing.expectEqual(app.SplitRect{ .x = 180, .y = 0, .w = 800, .h = 12 }, bar);
+    try std.testing.expectEqual(app.SplitRect{ .x = 180, .y = 0, .w = 800, .h = 18 }, bar);
     // 바 + 터미널 = leaf rect(틈 없음).
     try std.testing.expectEqual(rect.h, bar.h + term.h);
 

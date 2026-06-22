@@ -46,6 +46,7 @@ theme.palette.1  = #d35f5f
 
 cursor.shape = block
 cursor.blink = true
+cursor.blink-interval-ms = 500   # 깜빡임 반주기(ms) — cursor.blink=true일 때
 # 커서 색 override(선택). 적으면 테마와 무관하게 커서만 그 색으로 칠한다. 안 적으면 테마를 따른다.
 # cursor.color = #ff5555   # 커서 칸 배경(미지정 시 theme.cursor)
 # cursor.text  = #101010   # 커서 위 반전 글자색(미지정 시 배경색)
@@ -76,6 +77,7 @@ window.opacity        = 1.0   # 배경 투명도(0~1) — default 배경만 투�
 | `theme.bold-is-bright` | `true`\|`false` | `false` | bold(SGR 1) 글자의 ANSI **indexed 전경(0~7)** 을 그 bright 짝(8~15)으로 올린다. `.default` 전경·`.rgb`·256색 cube(8~255)는 안 바꾼다(정의가 분명한 부분집합만). reverse(7)/conceal/blink-off 경로엔 적용 안 함(그 경로는 배경색을 그림). render-only(코어 셀·SGR 상태 불변). 베이스: xterm `boldColors`·Ghostty `bold-is-bright`와 같은 opt-in 트레이드오프 |
 | `cursor.shape` | `block`\|`bar`\|`underline` | `block` | 그 외 값은 무시 |
 | `cursor.blink` | `true`\|`false` | `true` | |
+| `cursor.blink-interval-ms` | 정수(100~10000) | `500` | 커서 깜빡임 **반주기**(밀리초) — on/off 각 단계 길이(500이면 0.5초 켜짐·0.5초 꺼짐). 렌더 tick이 30Hz 고정이라 틱으로 환산(반올림, 최소 1틱). `cursor.blink = false`면 이 값과 무관하게 안 깜빡인다. 범위 밖/비정수는 무시(기본 유지). Ghostty `cursor-blink-interval` 대응 |
 | `cursor.color` | `#RRGGBB` | (없음) | 커서 칸 배경색을 테마와 **독립적으로** override(opt-in). 미지정이면 `theme.cursor`를 따른다. 형식 오류는 무시(미지정 유지) |
 | `cursor.text` | `#RRGGBB` | (없음) | 반전 블록 커서 **위 glyph 색** override(opt-in). 미지정이면 기존 동작(메인 터미널은 배경색, 사이드바 caret은 사이드바 배경색)을 따른다. 형식 오류는 무시 |
 | `window.padding-top` | 정수(0~256) | `4` | 셀 그리드와 pane 가장자리 사이 **위** 여백(논리 pt, DPI 스케일). 탭 바·split divider·pane 배경 등 chrome은 사이드바 경계/창 가장자리까지 꽉 차고 셀 그리드만 들인다. 0이면 셀이 가장자리에 붙음. 범위 밖/비정수는 무시(기본 유지) |

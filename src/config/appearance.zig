@@ -46,6 +46,8 @@ pub const ResolvedTheme = struct {
 pub const ResolvedCursor = struct {
     shape: theme.CursorShape,
     blink: bool,
+    // 커서 깜빡임 반주기(ms). app이 30Hz tick으로 환산(근거는 theme.CursorConfig.blink_interval_ms 단일 출처).
+    blink_interval_ms: u32 = 500,
     // 커서 색 override(opt-in). null이면 렌더가 경로별 테마 기본으로 폴백한다(color→theme.cursor,
     // text→메인 background / chrome sidebar_background). 명시 색은 다른 테마 색과 같은 #RRGGBB 검증을 거친다.
     color: ?color.Rgb = null,
@@ -83,6 +85,7 @@ pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
         .cursor = .{
             .shape = config.cursor.shape,
             .blink = config.cursor.blink,
+            .blink_interval_ms = config.cursor.blink_interval_ms,
             // non-null만 검증·변환(palette와 동형). 깨진 색은 여기서 막힌다(loader가 valid만 담지만, resolve
             // 단독 호출·테스트도 같은 게이트를 거치게 한다). null은 그대로 둬 렌더가 테마 기본으로 폴백한다.
             .color = if (config.cursor.color) |c| try parseHexColor(c) else null,

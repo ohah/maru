@@ -410,6 +410,14 @@ pub export fn maru_macos_app_session_set_focus(session: ?*AppSession, focused: i
     return @intFromEnum(Status.ok);
 }
 
+// 세팅 등 chrome 오버레이가 열렸는지(keybind 녹음 중이면 settings.open=true라 포함). Swift performKeyEquivalent가 1이면
+// 메뉴바 keyEquivalent(⌘T 등)를 양보해 키를 keyDown(→ handleKeyEvent 모달/녹음 가드)으로 보낸다 — ⌘조합 단축키 누수·
+// chord 녹음 누락 방지(예전엔 ⌘조합이 메뉴바 keyEquivalent에 먹혀 handleKeyEvent를 통째로 우회했다).
+pub export fn maru_macos_app_session_any_overlay_open(session: ?*AppSession) c_int {
+    const app_session = session orelse return 0;
+    return if (app_session.anyOverlayOpen()) 1 else 0;
+}
+
 // 진행 중 IME 조합을 확정(커밋)한다. Swift가 IME를 우회하는 특수키/단축키 직전에 호출해
 // marked text와 core preedit가 어긋나지 않게 한다(조합 없으면 무동작).
 pub export fn maru_macos_app_session_commit_composition(session: ?*AppSession) c_int {

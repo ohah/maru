@@ -183,6 +183,18 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         markedTextBuffer = ""               // hasMarkedText() = false 로 동기화
     }
 
+    // 세팅 등 오버레이/keybind 녹음 중이면 메뉴바 keyEquivalent(⌘T 등)를 가로채지 않고 keyDown 경로로 보낸다 —
+    // handleKeyEvent의 모달 입력 차단·녹음 캡처가 그 키를 처리한다. 안 그러면 ⌘조합이 메뉴바 keyEquivalent에 먼저
+    // 먹혀(performKeyEquivalent → runCatalogAction) handleKeyEvent의 모달/녹음 가드를 통째로 우회해, 세팅 중 ⌘T가
+    // 새거나 녹음할 chord가 캡처되지 않는다(근본 수정). 오버레이가 아니면 super가 기존 메뉴 단축키를 처리한다.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if controller?.anyOverlayOpen == true {
+            controller?.handleKeyDown(event)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
         let m = event.modifierFlags
         let mods = "\(m.contains(.command) ? "Cmd " : "")\(m.contains(.control) ? "Ctrl " : "")\(m.contains(.option) ? "Opt " : "")\(m.contains(.shift) ? "Shift " : "")"
@@ -560,6 +572,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     var optionAsMeta: Bool {
         guard let session = appSession else { return true }
         return maru_macos_app_session_option_as_meta(session) != 0
+    }
+    // 세팅 등 chrome 오버레이/keybind 녹음 중인지(라이브 ABI). view.performKeyEquivalent·handleKeyDown이 true면 메뉴바
+    // keyEquivalent(⌘T 등)·OS 단축키(Cmd+C/V 등) 가로채기를 건너뛰고 키를 keyDown→handleKeyEvent로 보낸다 —
+    // 모달 입력 차단·chord 녹음이 거기서 처리되게(누수·녹음 누락 방지).
+    var anyOverlayOpen: Bool {
+        guard let session = appSession else { return false }
+        return maru_macos_app_session_any_overlay_open(session) != 0
     }
     private var tickTimer: Timer?
     // smoke 자동 종료용 one-shot timer. 창이 먼저 닫혀도 run loop에 남아 teardown 뒤
@@ -1373,44 +1392,47 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 조합이 복사/붙여넣기로 삼켜지지 않고 키 인코더(향후 별도 바인딩)로 흘러간다.
         // 키 비교는 글자가 아니라 물리 키코드다(kVK_ANSI_C=8, V=9) — 한글 입력 모드('ㅊ'/'ㅍ')
         // 에서도 Cmd+C/V가 동작한다(레이아웃 독립 단축키 정책).
-        let chordMods = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        // Cmd+C는 선택 텍스트 복사(클립보드는 OS 소유라 여기서 처리). 선택 추출은 Zig가 한다.
-        if chordMods == .command, event.keyCode == 8 {
-            copySelectionToPasteboard()
-            return
-        }
-        // Cmd+V: NSPasteboard의 텍스트를 Zig에 넘긴다 — 개행 정규화·bracketed paste 감싸기는
-        // Zig가 한다(클립보드 읽기만 OS 소유).
-        if chordMods == .command, event.keyCode == 9 {
-            pastePasteboardText()
-            return
-        }
-        // Shift+PageUp/Down는 PTY로 보내지 않고 스크롤백 뷰포트를 한 화면씩 스크롤한다. page 크기
-        // (rows-1) 계산은 권위 있는 rows를 가진 Zig가 하고, 여기선 방향(위 +1 / 아래 -1)만 넘긴다.
-        if event.modifierFlags.contains(.shift), let session = appSession {
-            if event.keyCode == 116 { // PageUp -> 과거(위)
-                _ = maru_macos_app_session_scroll_page(session, 1)
-                markMetalNeedsRedraw()
+        // 세팅 등 오버레이/keybind 녹음 중이면 OS 단축키 가로채기(Cmd+C/V 복사·붙여넣기, Shift+PageUp 스크롤,
+        // Cmd+↑↓ 프롬프트 점프)를 전부 건너뛰고 키를 그대로 코어(sendKeyEvent → handleKeyEvent)로 보낸다 — 모달
+        // 입력 차단·chord 녹음이 거기서 처리되게 한다(안 그러면 녹음할 ⌘C가 복사로 새거나 모달 위에서 단축키가 먹는다).
+        if !anyOverlayOpen {
+            // Cmd만 눌린 조합인지(Shift/Option/Control 동반 아님). 키 비교는 글자가 아니라 물리 키코드(kVK_ANSI_C=8, V=9).
+            let chordMods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+            // Cmd+C는 선택 텍스트 복사(클립보드는 OS 소유라 여기서 처리). 선택 추출은 Zig가 한다.
+            if chordMods == .command, event.keyCode == 8 {
+                copySelectionToPasteboard()
                 return
             }
-            if event.keyCode == 121 { // PageDown -> 현재(아래)
-                _ = maru_macos_app_session_scroll_page(session, -1)
-                markMetalNeedsRedraw()
+            // Cmd+V: NSPasteboard의 텍스트를 Zig에 넘긴다 — 개행 정규화·bracketed paste 감싸기는 Zig가 한다.
+            if chordMods == .command, event.keyCode == 9 {
+                pastePasteboardText()
                 return
             }
-        }
-        // Cmd+↑/↓: OSC 133 프롬프트 블록으로 점프(이전/다음 명령의 프롬프트로 뷰포트 이동). 분류·이동은
-        // Zig core가 하고 여기선 방향만 넘긴다. 셸 통합이 없으면 core가 false라 아무 일도 안 일어난다.
-        if chordMods == .command, let session = appSession {
-            if event.keyCode == 126 { // Up -> 이전(과거) 프롬프트
-                _ = maru_macos_app_session_jump_prompt(session, -1)
-                markMetalNeedsRedraw()
-                return
+            // Shift+PageUp/Down는 PTY로 보내지 않고 스크롤백 뷰포트를 한 화면씩 스크롤한다(방향만 넘김, page 크기는 Zig).
+            if event.modifierFlags.contains(.shift), let session = appSession {
+                if event.keyCode == 116 { // PageUp -> 과거(위)
+                    _ = maru_macos_app_session_scroll_page(session, 1)
+                    markMetalNeedsRedraw()
+                    return
+                }
+                if event.keyCode == 121 { // PageDown -> 현재(아래)
+                    _ = maru_macos_app_session_scroll_page(session, -1)
+                    markMetalNeedsRedraw()
+                    return
+                }
             }
-            if event.keyCode == 125 { // Down -> 다음(최근) 프롬프트
-                _ = maru_macos_app_session_jump_prompt(session, 1)
-                markMetalNeedsRedraw()
-                return
+            // Cmd+↑/↓: OSC 133 프롬프트 블록으로 점프(분류·이동은 Zig core, 여기선 방향만).
+            if chordMods == .command, let session = appSession {
+                if event.keyCode == 126 { // Up -> 이전(과거) 프롬프트
+                    _ = maru_macos_app_session_jump_prompt(session, -1)
+                    markMetalNeedsRedraw()
+                    return
+                }
+                if event.keyCode == 125 { // Down -> 다음(최근) 프롬프트
+                    _ = maru_macos_app_session_jump_prompt(session, 1)
+                    markMetalNeedsRedraw()
+                    return
+                }
             }
         }
         guard let keyEvent = normalizedKeyEvent(from: event) else {

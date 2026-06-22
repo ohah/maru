@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 79u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 80u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -500,6 +500,9 @@ int32_t maru_macos_app_session_ime_cursor_rect(
 int32_t maru_macos_app_session_ime_delete_backward(MaruAppHostSession *session);
 /* 포커스 변화. 잃으면(0) 조합 중 텍스트를 확정 커밋한다. */
 int32_t maru_macos_app_session_set_focus(MaruAppHostSession *session, int32_t focused);
+/* 세팅 등 chrome 오버레이/keybind 녹음 열림(1) — Swift performKeyEquivalent가 메뉴바 keyEquivalent를 양보할지 판정
+   (1이면 ⌘조합을 keyDown 경로로 보내 모달 입력 차단·chord 녹음이 동작). */
+int32_t maru_macos_app_session_any_overlay_open(MaruAppHostSession *session);
 /* 진행 중 IME 조합을 확정(커밋)한다. IME 우회 특수키/단축키 직전에 호출. */
 int32_t maru_macos_app_session_commit_composition(MaruAppHostSession *session);
 /* 마우스 호버 갱신(backing px). *out_cursor_kind에 위치별 커서 종류(0=arrow/사이드바·탭 바, 1=iBeam/터미널,

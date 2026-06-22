@@ -203,10 +203,10 @@ Maru도 같은 방향을 참고한다.
 이 모델의 핵심은 **"alt 화면엔 스크롤백이 없다"가 데이터 타입으로 보장**된다는 것이다(Ghostty의 `max_scrollback = 0` alt screen과 같다). 결과로:
 
 - `pushScrollback`은 `cap == 0`이면 무동작이라, alt 출력이 스크롤백에 쌓이지 않는 것이 분기 없이 성립한다.
-- `scrollbackLen()`(= 활성 `Scrollback.count`)이 alt에서 항상 0이라, 스크롤바 렌더·스크롤 뷰·스크롤백 검색·프롬프트 점프가 모두 by-construction으로 "스크롤백 없음"을 본다.
-- 과거에 흩어져 있던 `if (alt_active)` 보정 가드(scrollViewport·scrollToAbs·jumpToPrompt·searchScrollback·scrollRegionUp push)가 제거된다. abs 좌표를 쓰는 새 기능이 alt 보정을 "빠뜨려서" 생기는 회귀(스크롤바가 alt에서 남던 버그)가 구조적으로 불가능해진다.
+- `scrollbackLen()`(= 활성 `Scrollback.count`)이 alt에서 항상 0이라, 스크롤바 렌더·스크롤 뷰·스크롤백 검색이 모두 by-construction으로 "스크롤백 없음"을 본다.
+- 과거에 흩어져 있던 데이터 모델 보정 가드(`scrollViewport`·`scrollToAbs`·`searchScrollback`·`scrollRegionUp`의 push)가 제거된다. abs 좌표를 쓰는 새 기능이 alt 보정을 "빠뜨려서" 생기는 회귀(스크롤바가 alt에서 남던 버그)가 구조적으로 불가능해진다.
 
-단, `clearScreen`(Cmd+K)의 alt 가드는 데이터 모델 보정이 아니라 "실행 중 TUI를 지우지 않는다"는 정책이라 유지한다. 화면 단위 config(`scrollback.lines`)는 항상 primary 인스턴스에 적용한다(`setMaxScrollback`).
+단, `clearScreen`(Cmd+K)·`jumpToPrompt`의 alt 가드는 데이터 모델 보정이 아니라 "실행 중 TUI에는 적용하지 않는다"는 정책이라 유지한다(전자는 화면+스크롤백 clear, 후자는 프롬프트 블록 이동 — 둘 다 primary 화면 전용 동작). 화면 단위 config(`scrollback.lines`)는 활성 화면과 무관하게 항상 primary 인스턴스에 적용한다(`setMaxScrollback`).
 
 후속(2단계)은 cursor·grid까지 포함한 완전한 `Screen` 구조체로 흡수하고, 그 자리에 page-aligned storage를 얹는 것이다.
 

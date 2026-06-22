@@ -1,4 +1,4 @@
-//! VT 파서 dispatch — DCS(Device Control String) 핸들러: DECRQSS·XTGETTCAP host-reply.
+//! VT 파서 dispatch — OSC 라우터 + DCS(Device Control String) 핸들러(DECRQSS·XTGETTCAP host-reply).
 //!
 //! `TerminalCore`(core.zig)는 VT 파서 상태기계 + 화면/스크롤백 storage + host-reply를 한 struct에 섞은
 //! 구조 위반(docs/project-rules.md "구조와 파일 분리": parser·storage·encoding이 한 파일에서 서로 다른
@@ -15,8 +15,50 @@
 const std = @import("std");
 const core = @import("core.zig");
 const types = @import("types.zig");
+const osc = @import("osc.zig"); // OSC host-reply 핸들러 — 라우터(dispatchOsc)가 코드별로 위임
 
 const TerminalCore = core.TerminalCore;
+
+/// 종료된 OSC 내용을 코드별로 분기한다. 각 핸들러는 osc.zig(host-reply)에 있고 여기는 라우터다 —
+/// OSC 8(하이퍼링크)·133(semantic)·7(cwd)·0/2(title)·10/11/110/111(색)·52(클립보드)·4/104(팔레트)·
+/// 777/9(알림)·5379(maru)로 가른다. core.zig의 write 상태기계 루프(`.osc`/`.osc_escape`)가 위임한다.
+pub fn dispatchOsc(self: *TerminalCore) void {
+    if (self.osc_overflow) return; // 2048 버퍼를 넘긴 OSC는 통째로 무시(거대/악의적 시퀀스 방어)
+    const body = self.osc_buffer[0..self.osc_len];
+    if (std.mem.startsWith(u8, body, "8;")) {
+        osc.dispatchHyperlink(self, body[2..]);
+    } else if (std.mem.startsWith(u8, body, "133;")) {
+        osc.dispatchSemanticPrompt(self, body[4..]);
+    } else if (std.mem.startsWith(u8, body, "7;")) {
+        osc.dispatchCwd(self, body[2..]);
+    } else if (std.mem.startsWith(u8, body, "0;")) {
+        self.setWindowTitle(body[2..]); // OSC 0 = 아이콘 이름 + 창 제목(둘 다) — 창 제목으로 받는다
+    } else if (std.mem.startsWith(u8, body, "2;")) {
+        self.setWindowTitle(body[2..]); // OSC 2 = 창 제목만
+    } else if (std.mem.startsWith(u8, body, "10;")) {
+        osc.dispatchDefaultColor(self, body[3..], 10); // OSC 10 = 전경색 설정/질의
+    } else if (std.mem.startsWith(u8, body, "11;")) {
+        osc.dispatchDefaultColor(self, body[3..], 11); // OSC 11 = 배경색 설정/질의
+    } else if (std.mem.eql(u8, body, "110")) {
+        self.default_fg_override = null; // OSC 110 = 전경색 리셋(theme 기본 복귀)
+    } else if (std.mem.eql(u8, body, "111")) {
+        self.default_bg_override = null; // OSC 111 = 배경색 리셋
+    } else if (std.mem.startsWith(u8, body, "52;")) {
+        osc.dispatchClipboard(self, body[3..]); // OSC 52 = 클립보드(파싱+디코드만; 실제 쓰기·정책은 platform)
+    } else if (std.mem.startsWith(u8, body, "4;")) {
+        osc.dispatchPalette(self, body[2..]); // OSC 4 = 256색 팔레트 설정/질의(`<index>;<spec>` 쌍 반복)
+    } else if (std.mem.eql(u8, body, "104") or std.mem.startsWith(u8, body, "104;")) {
+        // OSC 104 = 팔레트 리셋. 인덱스 없으면(정확히 "104") 전부, "104;1;2"면 그 인덱스만.
+        osc.dispatchPaletteReset(self, if (body.len > 4) body[4..] else "");
+    } else if (std.mem.startsWith(u8, body, "777;")) {
+        osc.dispatchNotify777(self, body[4..]); // OSC 777 = rxvt 데스크톱 알림(notify;title;body)
+    } else if (std.mem.startsWith(u8, body, "9;")) {
+        osc.dispatchNotify9(self, body[2..]); // OSC 9 = iTerm2 알림(ConEmu 서브커맨드와 충돌 — 가드)
+    } else if (std.mem.startsWith(u8, body, "5379;")) {
+        osc.dispatchMaru(self, body["5379;".len..]); // OSC 5379 = maru 전용 통지(사설 번호; 현재 ssh;<dest>)
+    }
+    // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
+}
 
 /// 종료된 DCS(ESC P ... ST) 내용을 처리한다. 현재 DECRQSS(`DCS $ q <req> ST`)만 — 그 외 DCS(Sixel 등)는
 /// 미지원이라 소비만 한다(이 상태기계가 그 토대). overflow면 폐기.

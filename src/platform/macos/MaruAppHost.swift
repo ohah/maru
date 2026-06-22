@@ -1706,13 +1706,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // Open Config… — config 파일을 기본 편집기로 연다(경로는 Zig가 소유). ⌘,는 세팅 화면(toggle_settings)에
         // 양보했다(config-gui §10) — keyEquivalent 없이 메뉴 클릭 전용. ⌘,는 keyDown → Zig 키바인드 resolver가 처리.
         app.addItem(nativeMenuItem("Open Config…", #selector(menuOpenConfig(_:)), key: "", target: self))
-        // Reload Config — config 파일 편집을 재시작 없이 반영(Zig가 파일 재로드·재적용). Reset to Defaults — 런타임
-        // 줌/여백 변경을 프로그램 처음 실행 설정으로 복원(둘 다 단축키 없음 — 메뉴 클릭 전용, 발견성용).
+        // Reload Config — config 파일 편집을 재시작 없이 반영(Zig가 파일 재로드·재적용). Reset to Defaults — 모든 설정을
+        // 기본값으로(확인 모달 후 config 파일 삭제, Zig requestResetAll). 둘 다 단축키 없음 — 메뉴 클릭 전용, 발견성용.
         app.addItem(nativeMenuItem("Reload Config", #selector(menuReloadConfig(_:)), key: "", target: self))
         app.addItem(nativeMenuItem("Reset to Defaults", #selector(menuResetDefaults(_:)), key: "", target: self))
         // Reset Terminal(⌘⇧R) — 활성 터미널의 잔류 입력 모드(focus·mouse·kitty keyboard)만 끈다. ssh가 비정상
         // 종료해 정리 못 한 모드가 raw 셸 입력을 오염시키는 증상(포커스마다 ^[[I·비프)의 수동 회복 — 셸 통합
-        // 자동 리셋이 안 닿는 타 셸·hang 복구 직후용. 화면·스크롤백은 보존(Reset to Defaults와 대상이 다르다).
+        // 자동 리셋이 안 닿는 타 셸·hang 복구 직후용. 화면·스크롤백은 보존(Reset to Defaults=전체 설정 초기화와 다르다 — 입력 모드만 끈다).
         app.addItem(nativeMenuItem("Reset Terminal", #selector(menuResetTerminal(_:)), key: "r", mods: [.command, .shift], target: self))
         app.addItem(.separator())
         app.addItem(nativeMenuItem("Hide maru", #selector(NSApplication.hide(_:)), key: "h"))

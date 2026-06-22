@@ -583,14 +583,24 @@ pub fn view(
     }
 
     // 활성 영역(Tab 포커스) 좌단 세로 강조 바 — 섹션 모드는 네비 좌단(inner_x), 폼 모드는 폼 좌단 직전(form_x-cw).
-    // 지금 ↑↓·←→가 어느 영역에 작용하는지(섹션 이동 vs 값 조절)를 한눈에 보인다. 폼/네비 op 뒤에 둬 위 레이어로 얹는다.
-    const bar_x: i32 = if (state.nav_focused) box.inner_x else l.form_x - cw_i;
-    try out.append(arena, .{ .fill = .{ .rect = .{ .x = bar_x, .y = modal_box.rowY(box, l.first_field_row), .w = box.cw, .h = box.ch * l.body_rows }, .role = .accent_bar } });
-
-    // 하단 힌트: Tab으로 섹션(좌측)↔설정 폼(우측) 영역을 오간다는 안내. 본문 아래 한 줄에 muted로 둔다(활성 영역은
-    // 위 세로 바 + 비활성 dim으로 강조). 어느 영역이 활성이냐에 따라 ↑↓는 섹션 이동/행 이동으로 갈린다.
+    // 하단 힌트: "⇥ 섹션 ⇄ 설정"을 박스 하단 중앙에 두되, **현재 활성 영역만 accent**로(반대편·구분자는 muted)
+    // 칠해 "지금 어느 영역 + Tab으로 전환"을 한 줄로 보인다(세로 바 없이 — 본문 dim과 이 강조가 활성 영역을 알린다).
     const hint_row = l.first_field_row + l.body_rows;
-    try modal_box.text(box, box.inner_x, hint_row, "⇥ 섹션 ⇄ 설정", .muted_fg, arena, out);
+    const seg_tab = "⇥ ";
+    const seg_sec = "섹션";
+    const seg_mid = " ⇄ ";
+    const seg_form = "설정";
+    const hint_w = overlay_input.displayCols(seg_tab) + overlay_input.displayCols(seg_sec) + overlay_input.displayCols(seg_mid) + overlay_input.displayCols(seg_form);
+    var hx = box.inner_x + @as(i32, @intCast((box.inner_cols -| hint_w) / 2 * box.cw)); // 중앙 정렬
+    const sec_role: tokens.ColorRole = if (state.nav_focused) .accent_bar else .muted_fg;
+    const form_role: tokens.ColorRole = if (state.nav_focused) .muted_fg else .accent_bar;
+    try modal_box.text(box, hx, hint_row, seg_tab, .muted_fg, arena, out);
+    hx += @as(i32, @intCast(overlay_input.displayCols(seg_tab) * box.cw));
+    try modal_box.text(box, hx, hint_row, seg_sec, sec_role, arena, out);
+    hx += @as(i32, @intCast(overlay_input.displayCols(seg_sec) * box.cw));
+    try modal_box.text(box, hx, hint_row, seg_mid, .muted_fg, arena, out);
+    hx += @as(i32, @intCast(overlay_input.displayCols(seg_mid) * box.cw));
+    try modal_box.text(box, hx, hint_row, seg_form, form_role, arena, out);
 }
 
 /// 선택 마커 ▾를 (x, row) 셀 위에 accent text로 얹는다(palette와 같은 이유 — Op.border는 tui lowering이 셀 전체를
@@ -1085,12 +1095,13 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
     // 행1: 라벨 + slider 트랙 text(muted) + 채움 text(accent).
     try std.testing.expectEqualStrings("Font size", out.items[7].text.runs[0].text);
     try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[8].text.role); // slider 트랙
-    // slider 채움(accent) 뒤에 활성 영역 세로 바(fill) + 하단 힌트(text)가 본문 op 뒤로 붙는다.
-    const hint = out.items[out.items.len - 1];
-    try std.testing.expectEqualStrings("⇥ 섹션 ⇄ 설정", hint.text.runs[0].text); // 하단 힌트
-    try std.testing.expectEqual(tokens.ColorRole.muted_fg, hint.text.role);
-    try std.testing.expect(out.items[out.items.len - 2] == .fill); // 활성 영역 세로 바
-    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[out.items.len - 3].text.role); // slider 채움 █(앰버)
+    // slider 채움(accent) 뒤에 하단 힌트 4조각이 본문 op 뒤로 붙는다: "⇥ "/"섹션"/" ⇄ "/"설정". 폼 모드(기본)라
+    // 활성 영역인 "설정"만 accent, 반대편 "섹션"·구분자는 muted.
+    try std.testing.expectEqualStrings("설정", out.items[out.items.len - 1].text.runs[0].text);
+    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[out.items.len - 1].text.role); // 활성 영역(폼)
+    try std.testing.expectEqualStrings("섹션", out.items[out.items.len - 3].text.runs[0].text);
+    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[out.items.len - 3].text.role); // 비활성(섹션)
+    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[out.items.len - 5].text.role); // slider 채움 █(앰버)
 }
 
 test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, slider 드래그=.slider_set+pending_ratio, 라벨=.selection_changed" {

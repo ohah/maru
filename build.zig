@@ -644,12 +644,16 @@ pub fn build(b: *std.Build) void {
                 "rm -rf zig-out/Maru.app; " ++
                 "mkdir -p zig-out/Maru.app/Contents/MacOS zig-out/Maru.app/Contents/Resources/Fonts; " ++
                 "cp zig-out/bin/maru-macos-app zig-out/Maru.app/Contents/MacOS/maru-macos-app; " ++
+                // 형제 `maru` CLI도 번들에 넣는다 — 커맨드 팝업 "Install CLI"가 GUI 바이너리 옆 형제 maru를
+                // ~/.local/bin에 symlink하므로, 번들에 없으면 "maru CLI 바이너리를 찾지 못했습니다"로 실패한다.
+                "cp zig-out/bin/maru zig-out/Maru.app/Contents/MacOS/maru; " ++
                 "cp src/platform/macos/MaruAppHost-Info.plist zig-out/Maru.app/Contents/Info.plist; " ++
                 "cp assets/fonts/JetBrainsMono/*.ttf assets/fonts/JetBrainsMono/OFL.txt zig-out/Maru.app/Contents/Resources/Fonts/; " ++
                 "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo",
         });
         macos_app_bundle.setCwd(b.path("."));
         macos_app_bundle.step.dependOn(&macos_app_compile.step);
+        macos_app_bundle.step.dependOn(b.getInstallStep()); // zig-out/bin/maru(CLI) 빌드·설치 보장 — 번들 cp의 선행조건
 
         const macos_app_bundle_step = b.step("macos-app-bundle", "Package the macOS app shell as a HiDPI .app bundle");
         macos_app_bundle_step.dependOn(&macos_app_bundle.step);
@@ -683,6 +687,9 @@ pub fn build(b: *std.Build) void {
                 ": \"${MARU_NOTARY_PROFILE:?set -Dmacos-notary-profile}\"; " ++
                 "[ -d zig-out/Maru.app ] || { echo 'error: zig-out/Maru.app missing (run macos-app-bundle first)' >&2; exit 1; }; " ++
                 "echo '==> codesign app (Developer ID, hardened runtime, timestamp)'; " ++
+                // 중첩 바이너리(형제 maru CLI)를 먼저 개별 서명한다(inside-out) — 번들 서명은 main executable만 봉인하므로
+                // 추가 실행파일은 따로 서명해야 hardened runtime 공증을 통과한다.
+                "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/MacOS/maru; " ++
                 "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app; " ++
                 "codesign --verify --strict zig-out/Maru.app; " ++
                 "version=$(/usr/libexec/PlistBuddy -c \"Print :CFBundleShortVersionString\" zig-out/Maru.app/Contents/Info.plist); " ++

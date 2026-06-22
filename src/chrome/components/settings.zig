@@ -481,13 +481,14 @@ pub fn view(
             .palette_grid => paletteGridCols(),
             else => l.ctrl_cols,
         };
-        // 선택 행 하이라이트. rich 테마에서 quad 위젯(slider/toggle/color/palette)은 모달 셀(이 하이라이트가 사는 곳)보다
-        // 아래 레이어라, 행 전체를 칠하면 하이라이트 셀이 위젯을 덮어 가린다 → 그 행은 **control 칸을 비워**(라벨 영역만
-        // 칠해) 위젯이 빈 surface 셀로 비쳐 보이게 한다. 값이 text 셀인 dropdown/text/keybind는 같은 셀 레이어라 안 가려져
-        // 행 전체를 칠한다.
+        // 선택 행 하이라이트. rich 테마에서 **GPU quad 위젯(slider/toggle)** 만 모달 셀(이 하이라이트가 사는 곳)보다 아래
+        // 레이어(layer 3 quad)라, 행 전체를 칠하면 하이라이트 셀이 그 위젯을 덮어 가린다 → 그 행만 **control 칸을 비워**
+        // (라벨 영역만 칠해) 위젯이 빈 surface 셀로 비쳐 보이게 한다. color·palette의 swatch는 `Op.swatch`→`paintRectBg`로
+        // **셀 bg 레이어**에 이 하이라이트 뒤에 그려져(painter order) 덮이지 않고, dropdown/text/keybind 값도 text 셀이라
+        // 안 가려지므로 — 이들은 행 전체를 칠한다(불필요한 하이라이트 손실 방지).
         if (actual == state.selected) {
             const quad_widget = switch (r.kind) {
-                .toggle, .slider, .color, .palette_grid => true,
+                .toggle, .slider => true,
                 else => false,
             };
             const hl_cols = if (quad_widget) l.form_cols -| row_right_cols else l.form_cols;

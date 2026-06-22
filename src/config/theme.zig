@@ -363,8 +363,12 @@ pub const InputConfig = struct {
     /// 터미널 본문 우클릭 동작(트래킹 앱 비활성 시). 기본 paste(우클릭=클립보드 붙여넣기, PuTTY/X11식 — 사용자 결정).
     /// 트래킹 앱이 마우스를 캡처 중이면 이 값과 무관하게 리포팅이 우선한다(RightClick 주석). [[right-click]]
     right_click: RightClick = .paste,
+    /// 더블클릭 단어 선택의 추가 구분자 — 이 문자들도 단어 경계가 된다(공백은 항상 경계). 기본 빈 값(현행 — 공백만
+    /// 경계라 비공백 run 전체를 선택). 예: `/:.@`를 넣으면 경로/URL 컴포넌트를 잘게 선택한다. **URL 감지는 영향 없음**
+    /// (`:`·`/`가 URL을 쪼개면 안 됨 — 선택만 본다). UTF-8 단일 codepoint들(예: `│`)도 가능. Ghostty `selection-word-chars` 대응.
+    word_separators: []const u8 = "",
 
-    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta / input.right-click (필드명 dashed)
+    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta / input.right-click / input.word-separators (필드명 dashed)
         .page_keys = Meta{ .doc = "메인 화면 PageUp/Down", .widget = .dropdown, .section = .input },
         .shift_enter = Meta{ .doc = "Shift+Enter 인코딩", .widget = .dropdown, .section = .input },
         .ime_enter = Meta{ .doc = "IME 조합 중 Enter", .widget = .dropdown, .section = .input },
@@ -372,6 +376,7 @@ pub const InputConfig = struct {
         .mouse_hide_while_typing = Meta{ .doc = "타이핑 중 마우스 숨김", .widget = .toggle, .section = .input },
         .option_as_meta = Meta{ .doc = "Option을 Meta(Alt)로", .widget = .toggle, .section = .input },
         .right_click = Meta{ .doc = "터미널 우클릭 동작", .widget = .dropdown, .section = .input },
+        .word_separators = Meta{ .doc = "더블클릭 단어 구분자", .widget = .text, .section = .input },
     };
 };
 

@@ -6108,7 +6108,14 @@ pub const AppSession = struct {
             },
             4 => {
                 self.mouse_drag_selecting = false;
-                self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_word = .{ .row = row, .col = col } }, self.io) catch {};
+                // 더블클릭 단어 선택: config input.word-separators를 명령에 **복사**해 실어 보낸다(borrowed slice의
+                // reload 수명 문제 회피 — 코어는 구분자 상태를 안 들고 매 선택에 현재 config를 받는다, 항상 reload-safe). F2-8.
+                // 버퍼 크기(64)는 SelectWord.separators와 일치해야 한다 — 어긋나면 아래 .separators 대입이 컴파일 에러.
+                var sep_buf: [64]u8 = undefined;
+                const sep = self.loaded_config.config.input.word_separators;
+                const n: u8 = @intCast(@min(sep.len, sep_buf.len));
+                @memcpy(sep_buf[0..n], sep[0..n]);
+                self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_word = .{ .row = row, .col = col, .separators = sep_buf, .sep_len = n } }, self.io) catch {};
             },
             5 => {
                 self.mouse_drag_selecting = false;
@@ -17142,7 +17149,7 @@ test "drag autoscroll works after a double-click word selection and skips redraw
 
     const core = &tab_surface.core;
     try core.write("aa\r\nbb\r\ncc"); // 스크롤백 1(aa) + 화면 bb,cc
-    core.selectWordAt(1, 0); // 더블클릭 단어 선택(cc)
+    core.selectWordAt(1, 0, ""); // 더블클릭 단어 선택(cc)
     try std.testing.expect(core.selection_anchor != null);
 
     // 더블클릭 직후 드래그가 grid 위 밖으로 — mouse_drag_selecting=false여도 autoscroll이 돈다.

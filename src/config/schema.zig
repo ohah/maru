@@ -714,6 +714,9 @@ test "schema tryParse: 최상위 스칼라(Config.schema) — Meta.key 전체 �
     try std.testing.expectEqual(theme.RightClick.menu, cfg.input.right_click);
     try std.testing.expect(try tryParse(a, &cfg, "osc52.read", "allow", &diags, 9)); // sub-struct enum(기본 deny → allow)
     try std.testing.expectEqual(theme.Osc52Read.allow, cfg.osc52.read);
+    try std.testing.expect(try tryParse(a, &cfg, "input.word-separators", "/:.@", &diags, 9)); // sub-struct text
+    try std.testing.expectEqualStrings("/:.@", cfg.input.word_separators);
+    a.free(cfg.input.word_separators); // dupe 회수(테스트 한정)
     try std.testing.expect(try tryParse(a, &cfg, "font.fallback", "Apple SD Gothic Neo, Apple Color Emoji", &diags, 10)); // sub-struct text(내부 공백 보존)
     try std.testing.expectEqualStrings("Apple SD Gothic Neo, Apple Color Emoji", cfg.font.fallback);
     a.free(cfg.font.fallback); // dupe 회수(테스트 한정)

@@ -24,6 +24,14 @@ pub const CellMetrics = struct { width: u32, height: u32 };
 /// `select_extend_or_collapse`·`scroll_and_extend`)는 reader가 락 아래 **원자 실행**한다 — 메인은 코어를 안 만진다.
 pub const SelectAt = struct { row: u16, col: u16 };
 pub const SelectStart = struct { row: u16, col: u16, block: bool };
+/// 더블클릭 단어 선택 — selectWordAt(row, col, separators). config input.word-separators(F2-8)를 명령에 **복사**해
+/// 실어 보낸다(borrowed slice의 reload 수명 문제 회피, set_config_palette처럼 값 복사). buf 초과분은 잘려 무시.
+pub const SelectWord = struct {
+    row: u16,
+    col: u16,
+    separators: [64]u8 = undefined,
+    sep_len: u8 = 0,
+};
 /// 드래그 autoscroll: scrollViewport(delta) + selectionExtend(row,col)를 한 명령으로(원래 핸들러의 write 묶음).
 pub const ScrollExtend = struct { delta: isize, row: u16, col: u16 };
 
@@ -49,7 +57,7 @@ pub const CoreCommand = union(enum) {
     select_start: SelectStart, // selectionStart(+block)
     select_extend: SelectAt, // selectionExtend
     select_extend_or_collapse: SelectAt, // extend 후 anchor==head면 clear(이동 없는 클릭=해제 — read-after-write 원자)
-    select_word: SelectAt, // selectWordAt(더블클릭)
+    select_word: SelectWord, // selectWordAt(더블클릭) — config word-separators를 복사해 실음(F2-8)
     select_line: u16, // selectLineAt(트리플클릭, row)
     select_all,
     jump_to_prompt: i8, // jumpToPrompt(dir) — OSC 133 프롬프트 블록 점프(Cmd+↑/↓), view_offset mutate
@@ -96,7 +104,7 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) void {
                 }
             }
         },
-        .select_word => |s| core.selectWordAt(s.row, s.col),
+        .select_word => |s| core.selectWordAt(s.row, s.col, s.separators[0..s.sep_len]),
         .select_line => |row| core.selectLineAt(row),
         .select_all => core.selectAll(),
         .jump_to_prompt => |dir| _ = core.jumpToPrompt(dir), // bool 반환(스크롤됨)은 reader 렌더 트리거로 대체
@@ -161,6 +169,11 @@ test "core_command.apply: 각 명령이 코어를 올바르게 mutate (위임 �
     apply(&core, .{ .scroll_to_offset = 0 });
     apply(&core, .{ .select_start = .{ .row = 0, .col = 0, .block = false } });
     apply(&core, .{ .scroll_and_extend = .{ .delta = 0, .row = 1, .col = 1 } });
-    apply(&core, .{ .select_word = .{ .row = 0, .col = 0 } });
+    // select_word가 separators 페이로드를 selectWordAt(row, col, separators[0..sep_len])로 전달함을 고정(F2-8 — 무크래시
+    // + 분할 정확성은 core.zig "double-click with word-separators" 테스트가 별도로 본다). sep_len=0/>0 둘 다 경로 통과.
+    apply(&core, .{ .select_word = .{ .row = 0, .col = 0 } }); // sep_len 기본 0 → 공백만 경계
+    var sw_cmd: CoreCommand = .{ .select_word = .{ .row = 0, .col = 0, .sep_len = 1 } };
+    sw_cmd.select_word.separators[0] = ':';
+    apply(&core, sw_cmd); // sep_len=1(":") → 구분자 경로
     apply(&core, .{ .select_line = 0 });
 }

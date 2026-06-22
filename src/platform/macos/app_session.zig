@@ -4968,14 +4968,10 @@ pub const AppSession = struct {
                 self.total_terminal_input_events += 1;
                 self.total_terminal_input_bytes += terminal_input.bytes_len;
                 self.resetCursorBlink(); // 타이핑 중 커서가 사라지지 않게
-                // 타이핑(글자 입력) 중 마우스 숨김(config) — Ghostty press+utf8.len>0 모델을 .terminal_input + 글자키(.char)
-                // + 단축키 수식키(Ctrl/Cmd) 아님으로 근사(화살표/기능키·단축키는 제외). Swift가 takeMouseHide로 drain.
-                if (self.loaded_config.config.input.mouse_hide_while_typing and
-                    std.meta.activeTag(event.key) == .char and
-                    !event.modifiers.control and !event.modifiers.command)
-                {
-                    self.mouse_hide_pending = true;
-                }
+                // 마우스 숨김(mouse-hide-while-typing)은 여기가 아니라 routeCommittedText(IME 확정 경로)에 있다 —
+                // macOS는 평범한 글자 입력을 NSTextInputClient(IME) 트랜잭션으로 처리해 handleKeyEvent를 우회하므로
+                // (sendCommittedText 주석), 이 .terminal_input 경로엔 Option+글자 같은 meta chord만 .char로 도달한다.
+                // 그걸 숨김으로 치면 "단축키엔 안 숨김" 의도가 뒤집힌다(code-review max — 실제 타이핑은 IME 경로).
                 if (self.find_nav) { // 셸에 타이핑 재개 = 검색 종료 — 닫힘-네비 하이라이트 해제
                     self.find_nav = false;
                     self.find_matches.clearRetainingCapacity();
@@ -6105,6 +6101,11 @@ pub const AppSession = struct {
     fn routeCommittedText(self: *AppSession, bytes: []const u8) void {
         if (self.inputFocus() == .terminal) {
             if (self.find_nav) self.find_nav = false;
+            // 타이핑(글자 입력) 중 마우스 숨김(config). IME 확정 텍스트가 터미널로 갈 때 = 실제 글자 타이핑(ASCII·한글·
+            // CJK 모두 이 경로 — macOS NSTextInputClient가 평범한 키 입력을 여기로 커밋, handleKeyEvent 우회). find/
+            // palette 입력칸(else 분기)은 chrome 타이핑이라 안 숨긴다. Swift가 takeMouseHide로 drain → setHiddenUntilMouseMoves.
+            // 베이스: Ghostty mouse-hide-while-typing(press+utf8.len>0) — utf8 텍스트 produce가 곧 IME 확정이다(F1-6).
+            if (self.loaded_config.config.input.mouse_hide_while_typing and bytes.len > 0) self.mouse_hide_pending = true;
             self.sendCommittedText(bytes);
         } else {
             self.sendTextAsKeys(bytes);
@@ -15243,7 +15244,7 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
     try std.testing.expectEqual(@as(usize, 1), cf2.bools.len); // input 섹션 bool = mouse-hide-while-typing 1개(F1-6; split bool은 workspace라 검색 끝나 사라짐)
 }
 
-test "mouse-hide-while-typing: 글자 입력 시 takeMouseHide 신호(1회성), 화살표·단축키·config off 제외 (F1-6)" {
+test "mouse-hide-while-typing: IME 확정(글자) 입력 시 takeMouseHide 신호(1회성), 한글·meta chord·config off 구분 (F1-6)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -15258,22 +15259,24 @@ test "mouse-hide-while-typing: 글자 입력 시 takeMouseHide 신호(1회성), 
     defer session.deinit();
     session.loaded_config.config.input.mouse_hide_while_typing = true;
 
-    // 글자 'a' 입력(.terminal_input) → 숨김 신호. takeMouseHide는 1회성(다음 호출은 false).
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'a' }, .modifiers = .{} });
+    // 평범한 글자 'a' 입력은 macOS에서 IME(NSTextInputClient) 확정으로 routeCommittedText를 탄다(handleKeyEvent 우회).
+    // 터미널 focus라 숨김 신호. takeMouseHide는 1회성(다음 호출 false).
+    session.routeCommittedText("a");
     try std.testing.expect(session.takeMouseHide());
     try std.testing.expect(!session.takeMouseHide()); // drain됨
 
-    // 화살표(.arrow_left)는 글자(.char)가 아니므로 안 숨김(탐색/제어 키 제외).
-    _ = try session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{} });
-    try std.testing.expect(!session.takeMouseHide());
+    // 한글/CJK도 같은 IME 확정 경로 → 숨김(옛 구현은 handleKeyEvent .char만 봐서 CJK를 놓쳤다 — code-review max).
+    session.routeCommittedText("한");
+    try std.testing.expect(session.takeMouseHide());
 
-    // Cmd+글자(단축키)는 control/command 수식키라 안 숨김(탭 전환 등으로 숨지 않게 — Ghostty와 같은 의도).
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'x' }, .modifiers = .{ .command = true } });
+    // Option+글자 같은 meta chord는 handleKeyEvent .terminal_input로 오지만 타이핑이 아닌 nav chord라 안 숨김
+    // (mouse_hide 판정을 그 경로에서 뺐다 — 옛 구현은 여기서 숨겨 의도가 역전됐었다).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'b' }, .modifiers = .{ .option = true } });
     try std.testing.expect(!session.takeMouseHide());
 
     // config off면 글자여도 안 숨김(기본 false = 현행).
     session.loaded_config.config.input.mouse_hide_while_typing = false;
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'b' }, .modifiers = .{} });
+    session.routeCommittedText("c");
     try std.testing.expect(!session.takeMouseHide());
 }
 

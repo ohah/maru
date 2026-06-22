@@ -517,6 +517,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return windows.first(where: { $0.window === window })
     }
 
+    /// 주어진 알림 라우팅 토큰(makeTerminalSurface 채번)의 surface. 일반 창 컬렉션을 먼저 보고, 없으면 quick 패널을
+    /// 본다(quick도 토큰을 가짐). 알림 클릭(didReceive)이 발신 창/세션을 고를 때 쓰는 token 조회 단일 출처 —
+    /// surfaceForWindow/surfaceForView와 같은 lookup 패턴.
+    private func surfaceForToken(_ token: UInt64) -> TerminalSurface? {
+        if let surface = windows.first(where: { $0.token == token }) { return surface }
+        if let quick, quick.token == token { return quick }
+        return nil
+    }
+
     private var window: NSWindow? {
         get { activeSurface?.window }
         set { activeSurface?.window = newValue }
@@ -663,6 +672,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             resizeAppSessionFromWindow()
             // 전역(OS) 단축키를 OS에 등록한다(앱이 비활성이어도 동작). smoke는 자동 종료라 등록하지 않는다.
             registerGlobalHotkeys()
+        }
+
+        // 알림 클릭/포그라운드 콜백(didReceive·willPresent)을 받으려면 delegate가 **launch 완료 전에** 걸려 있어야
+        // 한다(Apple 요구사항) — 앱이 꺼진 상태에서 알림 클릭으로 켜진 경우의 첫 didReceive를 놓치지 않으려면 첫 tick의
+        // ensureNotificationAuthorization(lazy)이 아니라 여기서 등록해야 한다. 번들 ID가 없으면(smoke 등)
+        // UNUserNotificationCenter를 못 써 건너뛴다(권한 요청은 여전히 첫 tick에서 lazy로).
+        if Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current().delegate = self
         }
 
         startFrameLoopTicks()
@@ -1716,9 +1733,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func ensureNotificationAuthorization() {
         guard !notificationAuthRequested, Bundle.main.bundleIdentifier != nil else { return }
         notificationAuthRequested = true
-        // 클릭/포그라운드 콜백(didReceive·willPresent)을 받으려면 delegate가 등록돼 있어야 한다 — 권한과 무관하게,
-        // 권한 요청보다 먼저 건다. 다른 앱을 쓰는 중 클릭해도 OS가 앱을 깨워 didReceive로 발신 터미널을 활성화한다.
-        UNUserNotificationCenter.current().delegate = self
+        // delegate는 applicationDidFinishLaunching에서 launch 완료 전에 이미 등록했다(콜드 런치 클릭 누락 방지) —
+        // 여기선 권한만 요청한다(거부돼도 add는 무해히 무시되므로 결과는 안 본다).
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
@@ -1737,7 +1753,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var bodyPtr: UnsafePointer<UInt8>? = nil
         var bodyLen: size_t = 0
         var surfaceId: UInt64 = 0
-        guard maru_macos_app_session_pending_notification(session, &has, &titlePtr, &titleLen, &bodyPtr, &bodyLen, &surfaceId) == Self.statusOK,
+        var foreground: UInt32 = 0
+        guard maru_macos_app_session_pending_notification(session, &has, &titlePtr, &titleLen, &bodyPtr, &bodyLen, &surfaceId, &foreground) == Self.statusOK,
               has != 0 else { return }
         guard Bundle.main.bundleIdentifier != nil else { return } // 번들 없으면 알림 API 사용 불가 — skip
         let title = titleLen > 0 ? String(decoding: UnsafeBufferPointer(start: titlePtr!, count: titleLen), as: UTF8.self) : ""
@@ -1747,7 +1764,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         content.body = body
         // drainNotification은 tickAppSession이 explicitSurface로 이 창을 고른 컨텍스트에서 돈다 — activeSurface가 곧
         // 발신 창이다. 그 token과 surface_id를 실어, 클릭 시 token으로 창/세션을, surface_id로 그 안의 Term을 찾는다.
-        content.userInfo = ["wt": activeSurface?.token ?? 0, "sid": surfaceId]
+        // fg=전면 배너 여부(Zig 결정) — willPresent가 읽어 자기 화면 OSC 알림 배너 노이즈를 억제한다.
+        content.userInfo = ["wt": activeSurface?.token ?? 0, "sid": surfaceId, "fg": foreground]
         // identifier는 UUID 유지(알림 dedup 식별자 — (token, surface_id)를 identifier에 쓰면 같은 터미널의 연속 알림이
         // 서로 덮어써 사라진다). 라우팅 정보는 userInfo로 분리한다.
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
@@ -1775,23 +1793,36 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         MainActor.assumeIsolated {
             defer { completionHandler() } // 누락 시 OS 경고 — 모든 경로에서 보장.
             guard let route = Self.parseNotificationRoute(response.notification.request.content.userInfo) else { return }
-            let target = windows.first(where: { $0.token == route.token }) ?? (quick?.token == route.token ? quick : nil)
-            guard let surface = target else { return } // 창이 닫혔으면 무동작.
-            surface.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            guard let surface = surfaceForToken(route.token) else { return } // 창이 닫혔으면 무동작.
+            if surface === quick, let panel = surface.window {
+                // quick 패널은 숨김 시 화면 밖(frames.hidden)에 있어, 그냥 makeKeyAndOrderFront하면 보이지 않는 창이
+                // 키를 가져간다. 숨김 상태면 정식 show 경로(슬라이드/페이드 + grid + 상태)를 태우고, 이미 보이면 키만 올린다.
+                if panel.isVisible {
+                    panel.makeKeyAndOrderFront(nil)
+                    NSApp.activate(ignoringOtherApps: true)
+                } else {
+                    showQuickTerminalAnimated(panel) // 내부에서 makeKeyAndOrderFront + NSApp.activate 수행
+                }
+            } else {
+                surface.window?.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
             if let session = surface.appSession {
                 _ = maru_macos_app_session_activate_surface(session, route.surfaceId)
             }
         }
     }
 
-    // 앱이 포그라운드일 때도 배너를 띄운다. 에이전트 완료 알림은 "지금 안 보는 탭"(Zig가 !is_current로 게이트)이 대상이라
-    // 앱이 떠 있어도 알려야 의미가 있다. 표시 스타일은 OS 표면이라 Swift가 정한다(Zig는 알림 여부만 결정 — 경계).
+    // 앱이 전면일 때 배너를 띄울지 결정한다. fg(Zig foreground_banner): 1=에이전트 완료(지금 안 보는 탭, !is_current
+    // 게이트)는 전면에서도 배너+소리로 알려야 유용 / 0=OSC 9·777(활성 surface가 보내 사용자가 보고 있을 수 있음)은
+    // 배너 없이 알림 센터 목록에만(.list) — 자기 화면 알림 노이즈 억제. fg 누락(외부/레거시 알림)은 보수적으로 배너.
+    // "전면 배너 여부"는 알림 종류가 정하는 정책이라 Zig가, 표시 스타일 적용은 OS 표면이라 Swift가 한다(경계).
     // self 접근이 없어 assumeIsolated 없이 nonisolated 본문에서 바로 completionHandler를 호출한다.
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                             willPresent notification: UNNotification,
                                             withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner, .sound])
+        let fg = (notification.request.content.userInfo["fg"] as? NSNumber)?.uint32Value ?? 1
+        completionHandler(fg != 0 ? [.banner, .sound] : [.list])
     }
 
     // G12 BEL: 코어가 모은 벨(0x07)을 활성 세션에서 drain해 시스템 벨을 울린다(매 tick, 한 tick 1회로 합쳐짐).

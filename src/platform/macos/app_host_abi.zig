@@ -856,8 +856,10 @@ pub export fn maru_macos_app_session_quick_terminal_config(
     return @intFromEnum(Status.ok);
 }
 
-// 커맨드 카탈로그(메뉴바·커맨드 팝업이 그릴 액션 목록). config/액션에서 한 번 만들어 세션 동안 불변이라
-// Swift가 시작 시 한 번 읽는다. 배열·문자열 전부 app session 소유(destroy까지 유효). 비어 있으면
+// 커맨드 카탈로그(메뉴바·커맨드 팝업이 그릴 액션 목록). config/액션에서 만들고, keybind 변경(GUI rebind/unbind 또는
+// config reload)마다 Zig가 rebuildCommandCatalog로 재빌드한다 — 더는 세션-불변이 아니다. Swift 메뉴바는 시작 시 한 번만
+// 읽으므로 reload 후엔 stale(재시작 전까지 — 메뉴 재빌드는 후속). Zig-side 커맨드 팔레트는 command_key_displays를 매
+// 빌드 라이브로 읽어 즉시 갱신된다. 배열·문자열 전부 app session 소유(destroy까지 유효). 비어 있으면
 // out_ptr=null/out_count=0. global_hotkeys와 같은 패턴.
 pub export fn maru_macos_app_session_command_catalog(
     session: ?*AppSession,

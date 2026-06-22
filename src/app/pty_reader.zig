@@ -4,12 +4,21 @@ const runtime_mod = @import("runtime.zig");
 const terminal = @import("../terminal.zig");
 const core_command = @import("core_command.zig");
 
-/// reader-로컬 응답 outbound 버퍼(runProcessing의 out_buf)의 상한. write_queue(256 KiB)·command_queue(1024 entry)와
-/// 함께 "outbound 경로는 모두 bounded"라는 io-render-threading.md §8 정책을 세 번째(응답) 경로에도 적용한다 — 자식이
-/// stdin을 안 비우면서(POLLOUT 미발화) 응답 유발 출력(CPR·DA·OSC 10/11 등)을 쏟으면 out_buf가 무한 증가하던 이론적
-/// DoS를 막는다. pending(미전송 응답)이 이 값을 넘으면 추가 응답을 드롭하고(자식이 안 읽어 어차피 전달 불가 — 기존 OOM
-/// best-effort `catch {}`와 같은 의미), 소비된 prefix도 이 값마다 compact해 버퍼 점유를 ~2×response_buffer_capacity 이내로 bound한다.
-pub const response_buffer_capacity: usize = 1 << 18; // 256 KiB — live_pty.zig pty_write_queue_capacity와 동일 정책
+/// reader-로컬 응답 outbound 버퍼(runProcessing의 out_buf)의 상한. 자식이 stdin을 안 비우면서(POLLOUT 미발화) 응답
+/// 유발 출력(CPR·DA·OSC 10/11 등)을 쏟으면 out_buf가 무한 증가하던 경로(버그헌트 감사서 확정)를 막는다 — pending(미전송
+/// 응답)이 이 값을 넘으면 추가 응답을 드롭하고(자식이 안 읽어 어차피 전달 불가 — 기존 OOM best-effort `catch {}`와 같은
+/// 의미), 소비된 prefix도 이 값마다 compact해 점유를 ~2×response_buffer_capacity 이내로 bound한다.
+/// 결정·근거의 단일 출처는 docs/io-render-threading.md §8.8(3)이다(옛 "응답 드롭은 OOM만, capping은 실측 근거 시 재검토"를
+/// 이 확정 버그 + 사용자 승인으로 갱신 — 추가 전 상의 완료, [[no-defensive-code-without-consult]]). 값은 write_queue cap과 같다.
+pub const response_buffer_capacity: usize = 1 << 18; // 256 KiB
+
+/// 응답 reply를 out_buf에 적재하되, pending(미전송 = out_buf[out_head..])이 response_buffer_capacity를 넘으면 드롭한다.
+/// runProcessing의 명령 단계·read 단계 두 곳이 공유하는 단일 출처 — 게이트 로직이 둘로 갈라져 표류하지 않게 한다(상한·
+/// 근거는 response_buffer_capacity 주석). OOM도 best-effort 드롭(catch {}). out_head는 호출 시점 스냅샷이라 값으로 받는다.
+fn appendResponseBounded(allocator: std.mem.Allocator, out_buf: *std.ArrayList(u8), out_head: usize, reply: []const u8) void {
+    if (out_buf.items.len - out_head < response_buffer_capacity)
+        out_buf.appendSlice(allocator, reply) catch {};
+}
 
 pub const QueueError = std.mem.Allocator.Error || error{
     ZeroCapacity,
@@ -602,11 +611,8 @@ pub const PtyReader = struct {
                     core_command.apply(core, entry.cmd);
                     const reply = core.pendingResponse();
                     if (reply.len > 0) {
-                        // pending이 상한 미만일 때만 적재(초과 시 응답 드롭 — response_buffer_capacity 주석 참고). clearResponse는
-                        // 항상 호출해 코어 측 응답 버퍼도 안 쌓이게 한다(드롭해도 코어 버퍼는 비운다).
-                        if (out_buf.items.len - out_head < response_buffer_capacity)
-                            out_buf.appendSlice(self.allocator, reply) catch {}; // OOM이면 그 응답 드롭(best-effort)
-                        core.clearResponse();
+                        appendResponseBounded(self.allocator, &out_buf, out_head, reply);
+                        core.clearResponse(); // 드롭(상한 초과)해도 코어 측 응답 버퍼는 항상 비운다
                     }
                     core.owner_dbg.unlock(mutex, self.io);
                     cq.logApply(entry); // MARU_DEBUG면 enqueue→apply 지연 로깅
@@ -632,9 +638,7 @@ pub const PtyReader = struct {
                         core.write(readbuf[0..n]) catch {}; // best-effort(파서 OOM 등은 그 청크 드롭)
                         const reply = core.pendingResponse();
                         if (reply.len > 0) {
-                            // pending이 상한 미만일 때만 적재(초과 시 응답 드롭 — response_buffer_capacity 주석 참고). clearResponse는 항상.
-                            if (out_buf.items.len - out_head < response_buffer_capacity)
-                                out_buf.appendSlice(self.allocator, reply) catch {}; // OOM이면 그 응답 드롭
+                            appendResponseBounded(self.allocator, &out_buf, out_head, reply);
                             core.clearResponse();
                         }
                         core.owner_dbg.unlock(mutex, self.io);

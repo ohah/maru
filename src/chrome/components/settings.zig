@@ -75,7 +75,7 @@ const pick_sv_cols: u32 = 16; // 채도 0~100
 const pick_sv_rows: u32 = 8; // 명도 100~0(위→아래)
 const pick_swatch_w: u32 = 2; // 셀당 2칸(가시성)
 const pick_hue_cols: u32 = 16; // hue 0~360
-const pick_help = "←→ 채도  ↑↓ 명도  [ ] 색상  ⇧ 미세조정  Enter 확정  Esc 취소";
+const pick_help = "←→ 채도  ↑↓ 명도  [ ] 색상  ⇧ 미세  # hex  Enter 확정  Esc 취소";
 // picker 콘텐츠 행: 제목(0) + SV 그리드(1..pick_sv_rows) + hue 스트립 + 미리보기 + 도움말.
 const pick_hue_row: u32 = 1 + pick_sv_rows;
 const pick_preview_row: u32 = pick_hue_row + 1;
@@ -179,6 +179,7 @@ pub const State = struct {
     pub fn closePicker(self: *State) void {
         self.picking = false;
         self.dragging = false; // picker 드래그 중 Esc 취소 시 dragging이 폼으로 새지 않게(다른 mode-exit와 동일, code-review)
+        self.editing = false; // picker 내 hex 인라인 편집 중이었으면 같이 닫는다(편집 상태가 폼으로 새지 않게)
     }
     /// 현재 선택 h/s/v의 RGB(미리보기·확정 hex 산출). platform이 확정 시 #rrggbb로 직렬화.
     pub fn pickerRgb(self: *const State) color_mod.Rgb {
@@ -639,12 +640,19 @@ fn renderPicker(
     }
     try pickerMarker(box, box.inner_x + @as(i32, @intCast(hueColForHue(state.pick_h))) * sw_px, pick_hue_row, arena, out);
 
-    // 미리보기 스와치(현재 효과색) + "#rrggbb  H S V".
+    // 미리보기 스와치(현재 효과색) + 정보. 평소엔 "#rrggbb  H S V", **hex 인라인 편집 중엔 버퍼**(`#ab▏ 입력` — 무엇을
+    // 치는지 보이게, accent 색). 편집 중에도 스와치는 현재 h/s/v 색(커밋 전이라 직전 색) — Enter로 적용.
     const cur = state.pickerRgb();
     const preview = draw.Rect{ .x = box.inner_x, .y = modal_box.rowY(box, pick_preview_row), .w = pick_swatch_w * box.cw, .h = box.ch };
     try out.append(arena, .{ .swatch = .{ .rect = preview, .rgb = cur } });
-    const info = try std.fmt.allocPrint(arena, "#{x:0>2}{x:0>2}{x:0>2}  H{d} S{d} V{d}", .{ cur.r, cur.g, cur.b, state.pick_h, state.pick_s, state.pick_v });
-    try modal_box.text(box, box.inner_x + sw_px + @as(i32, @intCast(box.cw)), pick_preview_row, info, .surface_fg, arena, out);
+    const text_x = box.inner_x + sw_px + @as(i32, @intCast(box.cw));
+    if (state.editing) {
+        const buf = try std.fmt.allocPrint(arena, "{s}▏ hex 입력", .{state.editText()});
+        try modal_box.text(box, text_x, pick_preview_row, buf, .accent_bar, arena, out);
+    } else {
+        const info = try std.fmt.allocPrint(arena, "#{x:0>2}{x:0>2}{x:0>2}  H{d} S{d} V{d}", .{ cur.r, cur.g, cur.b, state.pick_h, state.pick_s, state.pick_v });
+        try modal_box.text(box, text_x, pick_preview_row, info, .surface_fg, arena, out);
+    }
 
     try modal_box.text(box, box.inner_x, pick_help_row, pick_help, .surface_fg, arena, out);
 }
@@ -654,6 +662,37 @@ fn renderPicker(
 pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
     // HSV picker 모드 — ←→ 채도, ↑↓ 명도, `[`/`]` 색상, Enter 확정(.color_picked → platform이 hex 커밋), Esc 취소. 그 외 소비.
     if (state.picking) {
+        // picker 안 hex 인라인 편집 중(`#`로 진입) — 정확한 hex를 타이핑/붙여넣어 색을 잡는다. Enter=파싱→h/s/v 적용,
+        // Esc=취소(picker 유지), 글자(hex/#)·Backspace=버퍼 편집. picker를 안 닫고 그 안에서 색만 바꾼다.
+        if (state.editing) {
+            switch (k.key) {
+                .enter => {
+                    if (color_mod.parseHex(state.editText())) |rgb| {
+                        const hsv = color_mod.rgbToHsv(rgb);
+                        state.pick_h = hsv.h;
+                        state.pick_s = hsv.s;
+                        state.pick_v = hsv.v;
+                    } // 형식 오류면 무시(편집만 닫음 — 직전 색 유지)
+                    state.editing = false;
+                    return .selection_changed;
+                },
+                .escape => {
+                    state.editing = false; // 편집만 취소(picker 유지)
+                    return .selection_changed;
+                },
+                .backspace => {
+                    state.edit_len = width.dropLastCodepoint(&state.edit_buf, state.edit_len);
+                    return .selection_changed;
+                },
+                .char => {
+                    const c = k.codepoint;
+                    const is_hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F') or c == '#';
+                    if (is_hex) state.appendEditCp(c); // hex 자리·# 만 받는다(잡문자 차단)
+                    return .selection_changed;
+                },
+                else => return .consumed,
+            }
+        }
         switch (k.key) {
             .escape => {
                 state.closePicker();
@@ -698,8 +737,12 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
                 }
                 return .selection_changed;
             },
-            // 색상: `[`/`]` 셀 이동(coarse), `{`/`}`(=Shift+[/]) ±1° 미세(연속 해상도). h는 0~359 wrap.
+            // 색상: `[`/`]` 셀 이동(coarse), `{`/`}`(=Shift+[/]) ±1° 미세(연속 해상도). h는 0~359 wrap. `#`=hex 인라인 편집.
             .char => {
+                if (k.codepoint == '#') { // hex 인라인 편집 시작 — `#`로 빈 입력 시작(이어서 6자리 타이핑/붙여넣기).
+                    state.enterEdit("#"); // editing=true + 버퍼="#"(위 editing 분기로 라우팅). 현재값 시드 안 함(새 입력이 자연스러움).
+                    return .selection_changed;
+                }
                 if (k.codepoint == '[') {
                     const c = hueColForHue(state.pick_h);
                     state.pick_h = hueForCol((c + pick_hue_cols - 1) % pick_hue_cols);
@@ -1535,6 +1578,35 @@ test "settings HSV picker 포인터 sub-cell: SV 그리드 중앙 클릭 → s�
     const pb = handlePointer(.{ .phase = .move, .x_px = right_x, .y_px = cy }, no_sections, &rows, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, pb);
     try std.testing.expect(s.pick_s >= 99); // 우측 끝 ≈ 100
+}
+
+test "settings HSV picker hex 인라인: # 진입·타이핑·Enter 파싱→h/s/v, Esc 취소, 비-hex 차단 (picker 후속)" {
+    var s: State = .{};
+    s.openPicker(.{ .r = 0, .g = 0, .b = 0 }); // 검정 시드(h/s/v=0)
+    // `#` → hex 편집 시작(버퍼="#").
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .char, .codepoint = '#' }, &s));
+    try std.testing.expect(s.editing);
+    try std.testing.expectEqualStrings("#", s.editText());
+    // 6자리 hex 타이핑(#ff0080 = 순수 빨강-마젠타). 비-hex('z')는 차단.
+    for ("ff00z80") |c| _ = handle(.{ .key = .char, .codepoint = c }, &s);
+    try std.testing.expectEqualStrings("#ff0080", s.editText()); // z 빠짐
+    // Enter → parseHex→rgbToHsv 적용. #ff0080의 hsv ≈ h=330, s=100, v=100.
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .enter }, &s));
+    try std.testing.expect(!s.editing); // 편집 종료
+    try std.testing.expect(s.picking); // picker는 유지
+    const back = s.pickerRgb();
+    try std.testing.expectEqual(@as(u8, 0xff), back.r); // 적용된 색이 #ff0080 근사
+    try std.testing.expectEqual(@as(u8, 0x80), back.b);
+
+    // Esc는 편집만 취소(picker 유지·색 불변). 새 # 편집 후 Esc.
+    const before = s.pickerRgb();
+    _ = handle(.{ .key = .char, .codepoint = '#' }, &s);
+    _ = handle(.{ .key = .char, .codepoint = '0' }, &s);
+    try std.testing.expect(s.editing);
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .escape }, &s));
+    try std.testing.expect(!s.editing);
+    try std.testing.expect(s.picking); // picker 유지(편집만 닫힘)
+    try std.testing.expectEqual(before.r, s.pickerRgb().r); // 색 불변(취소)
 }
 
 test "settings 검색: '/'로 시작·char 쿼리·Backspace·↑↓ 나비·Enter 활성·Esc 종료 + 제목 렌더 (CS-4-4 검색)" {

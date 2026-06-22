@@ -857,11 +857,14 @@ fn pickerPointer(ev: input.PointerEvent, p: props.ChromeProps, tk: *const tokens
     const sv_y0: f64 = @floatFromInt(modal_box.rowY(box, 1));
     const hue_y0: f64 = @floatFromInt(modal_box.rowY(box, pick_hue_row));
     if (ev.y_px >= sv_y0 and ev.y_px < sv_y0 + @as(f64, @floatFromInt(pick_sv_rows)) * ch_px) {
-        const col: u32 = @intFromFloat(col_f);
-        if (col >= pick_sv_cols) return .consumed;
-        const row: u32 = @intFromFloat((ev.y_px - sv_y0) / ch_px);
-        state.pick_s = svSatForCol(col);
-        state.pick_v = svValForRow(@min(row, pick_sv_rows - 1));
+        // sub-cell 연속: 픽셀 위치를 0~100 s/v로 직접 매핑(셀 양자화 안 함 — 클릭/드래그로 셀 사이 임의 색). 좌→우
+        // 채도 0~100, 위→아래 명도 100~0. 그리드 폭/높이로 정규화 후 clamp(밖으로 드래그해도 경계값으로 saturate).
+        const grid_w: f64 = sw_px * @as(f64, @floatFromInt(pick_sv_cols));
+        const grid_h: f64 = ch_px * @as(f64, @floatFromInt(pick_sv_rows));
+        const fx = std.math.clamp((ev.x_px - inner_x) / grid_w, 0, 1);
+        const fy = std.math.clamp((ev.y_px - sv_y0) / grid_h, 0, 1);
+        state.pick_s = @intFromFloat(@round(fx * 100));
+        state.pick_v = @intFromFloat(@round((1.0 - fy) * 100));
         return .selection_changed;
     }
     if (ev.y_px >= hue_y0 and ev.y_px < hue_y0 + ch_px) {
@@ -1459,14 +1462,14 @@ test "settings HSV picker: openPicker 시드·SV/hue 스와치 렌더·←→↑
     try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .escape }, &s));
     try std.testing.expect(!s.picking);
 
-    // handlePointer: 다시 열고 SV 그리드 col 0·row 0 클릭 → s=0, v=100.
+    // handlePointer: 다시 열고 SV 그리드 **좌상단 모서리**(inner_x, sv_y0) 클릭 → s=0, v=100(연속 매핑이라 정확히 모서리).
     s.openPicker(.{ .r = 255, .g = 0, .b = 0 });
     const box = pickerLayout(test_props, &tk).?;
     const sw_px: i32 = @intCast(pick_swatch_w * box.cw);
-    const pa = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(box.inner_x + 1), .y_px = @floatFromInt(modal_box.rowY(box, 1) + 2) }, no_sections, &rows, test_props, &tk, &s);
+    const pa = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(box.inner_x), .y_px = @floatFromInt(modal_box.rowY(box, 1)) }, no_sections, &rows, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, pa);
-    try std.testing.expectEqual(@as(u8, 0), s.pick_s);
-    try std.testing.expectEqual(@as(u8, 100), s.pick_v);
+    try std.testing.expectEqual(@as(u8, 0), s.pick_s); // 좌단 = 채도 0
+    try std.testing.expectEqual(@as(u8, 100), s.pick_v); // 상단 = 명도 100
 
     // hue 스트립 col 8 클릭 → h = hueForCol(8).
     const ha = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(box.inner_x + 8 * sw_px + 1), .y_px = @floatFromInt(modal_box.rowY(box, pick_hue_row) + 2) }, no_sections, &rows, test_props, &tk, &s);
@@ -1510,6 +1513,28 @@ test "settings HSV picker 미세 조정: Shift+화살표 ±1 채도/명도, {/} 
     s.pick_s = s0;
     _ = handle(.{ .key = .right }, &s); // 셀 점프(다음 셀의 svSatForCol)
     try std.testing.expect(s.pick_s != fine or svSatForCol(svColForSat(s0) + 1) == s0 + 1); // 보통 셀≠미세(셀이 우연히 s0+1이면 예외)
+}
+
+test "settings HSV picker 포인터 sub-cell: SV 그리드 중앙 클릭 → s≈50·v≈50 (셀 양자화 아님)" {
+    const tk = testTokens();
+    const rows = [_]FieldRow{.{ .label = "BG", .kind = .{ .color = .{ .hex = "#ff0000", .rgb = .{ .r = 255, .g = 0, .b = 0 } } } }};
+    var s: State = .{};
+    s.openPicker(.{ .r = 255, .g = 0, .b = 0 });
+    const box = pickerLayout(test_props, &tk).?;
+    const sw_px: f64 = @floatFromInt(pick_swatch_w * box.cw);
+    const ch_px: f64 = @floatFromInt(box.ch);
+    // SV 그리드 **중앙** 클릭 → 좌→우 채도 0~100의 중앙=50, 위→아래 명도 100~0의 중앙=50. 셀 경계와 무관(연속).
+    const cx: f64 = @as(f64, @floatFromInt(box.inner_x)) + sw_px * @as(f64, @floatFromInt(pick_sv_cols)) / 2.0;
+    const cy: f64 = @as(f64, @floatFromInt(modal_box.rowY(box, 1))) + ch_px * @as(f64, @floatFromInt(pick_sv_rows)) / 2.0;
+    const pa = handlePointer(.{ .phase = .down, .x_px = cx, .y_px = cy }, no_sections, &rows, test_props, &tk, &s);
+    try std.testing.expectEqual(Action.selection_changed, pa);
+    try std.testing.expectEqual(@as(u8, 50), s.pick_s);
+    try std.testing.expectEqual(@as(u8, 50), s.pick_v);
+    // SV 그리드 우측 끝 안쪽(박스 내) 드래그 → 채도≈100(연속 추적). down이 dragging을 켰으므로 move가 값 추적.
+    const right_x: f64 = @as(f64, @floatFromInt(box.inner_x)) + sw_px * @as(f64, @floatFromInt(pick_sv_cols)) - 1.0;
+    const pb = handlePointer(.{ .phase = .move, .x_px = right_x, .y_px = cy }, no_sections, &rows, test_props, &tk, &s);
+    try std.testing.expectEqual(Action.selection_changed, pb);
+    try std.testing.expect(s.pick_s >= 99); // 우측 끝 ≈ 100
 }
 
 test "settings 검색: '/'로 시작·char 쿼리·Backspace·↑↓ 나비·Enter 활성·Esc 종료 + 제목 렌더 (CS-4-4 검색)" {

@@ -5447,7 +5447,7 @@ pub const AppSession = struct {
         // 부분 갱신(updateForKeys)이 아닌 전체 덮어쓰기인 이유: 기본값 위 override만 쓰는 정책상 (a) 비-schema 키
         // (theme.preset/palette/env/cursor.color/shell.args)가 안 지워지고 (b) 빈 항목까지 40여 줄을 쏟는다(리뷰 #827).
         var wrote = false;
-        const path = self.configPath();
+        const path = self.configWritePath(); // 안전 chokepoint: 테스트가 tmp redirect 안 했으면 ""(쓰기 스킵) — 실 config 보호
         if (path.len > 0) {
             const header = "# Maru config — Reset to Defaults로 초기화됨(모든 설정 기본값). 키 설명: docs/configuration.md\n";
             // atomic write(temp + replace=rename) — 부분 쓰기가 원본 config를 손상하지 않게(serializeConfig→Swift atomic·
@@ -7888,6 +7888,16 @@ pub const AppSession = struct {
         const path = (config_mod.defaultConfigPath(self.allocator) catch null) orelse return &.{};
         self.config_path_buffer = path; // owned 슬라이스 — 세션이 소유(deinit이 해제)
         return path;
+    }
+
+    /// **config 파일을 실제로 쓰는 경로**가 대상 경로를 얻을 때 쓰는 안전 chokepoint(configPath는 resolve+캐시 read 전용).
+    /// 테스트에서 config_path_buffer를 tmp로 명시 redirect하지 않았으면 빈 경로를 돌려줘 쓰기를 스킵시킨다 — zig build
+    /// test(macOS)가 실제 사용자 config($HOME/.config/maru/config)를 절대 못 건드리게 한다. 과거 reset 테스트가 tmp 가드를
+    /// 빠뜨려 실 config를 헤더만 남기고 날린 footgun을 **개별 테스트 가드 누락과 무관하게 원천 차단**한다(새 config-쓰기
+    /// 테스트가 가드를 잊어도 안전). 프로덕션(is_test=false)은 configPath() 그대로. 새 config-파일 writer는 이걸 거쳐야 한다.
+    fn configWritePath(self: *AppSession) []const u8 {
+        if (builtin.is_test and self.config_path_buffer == null) return &.{};
+        return self.configPath();
     }
 
     /// 창 제목으로 보여줄 문자열(OSC 0/2 제목 우선, 없으면 cwd basename, 둘 다 없으면 빈 슬라이스).

@@ -342,13 +342,23 @@ pub const InputConfig = struct {
     /// `handleKeyEvent`를 우회한다)로 잡는다. ASCII·한글·CJK가 모두 이 경로다. 단축키·화살표·기능키(`handleKeyEvent`로 감)·
     /// find/palette 입력칸은 제외한다. 복원은 macOS `NSCursor.setHiddenUntilMouseMoves`가 다음 마우스 이동에서 자동.
     mouse_hide_while_typing: bool = false,
+    /// macOS Option 키를 Meta(Alt)로 쓸지. 기본 true(현행 — Option+글자가 ESC-prefix meta 인코딩, 예: Option+b→`\x1bb`).
+    /// false면 Option+글자를 macOS 입력기에 맡겨 특수문자를 조합한다(US 레이아웃 Option+b→`∫`, Option+e→´ dead key).
+    /// 베이스/결정: Ghostty `macos-option-as-alt`(false|true|left|right)를 동작 베이스로 했다. 단 (1) maru는
+    /// device-independent `.option`만 봐(좌/우 Option 구분 없음) **bool**로 두고(좌/우 분리는 후속), (2) Ghostty 기본은
+    /// 레이아웃 의존(특정 레이아웃만 true)이지만 maru는 신규 키 "회귀 없음 opt-in" 선례를 따라 **현행값 true**(항상 meta)를
+    /// 기본으로 둔다 — macOS/iTerm2 관례(Option 조합=특수문자)와는 다르나, 특수문자 입력이 필요하면 false로 끈다.
+    /// Swift keyDown이 이 값으로 Option-단독 키를 입력기 경로(조합)로 보낼지(meta 인코딩 우회) 정하고, encodeKey는
+    /// EncodeOptions.option_as_meta로 ESC-prefix 여부를 정한다(Cmd/Ctrl+Option 같은 우회 키에 적용).
+    option_as_meta: bool = true,
 
-    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing (필드명 dashed)
+    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta (필드명 dashed)
         .page_keys = Meta{ .doc = "메인 화면 PageUp/Down", .widget = .dropdown, .section = .input },
         .shift_enter = Meta{ .doc = "Shift+Enter 인코딩", .widget = .dropdown, .section = .input },
         .ime_enter = Meta{ .doc = "IME 조합 중 Enter", .widget = .dropdown, .section = .input },
         .url_click_modifier = Meta{ .doc = "URL 클릭 수식키", .widget = .dropdown, .section = .input },
         .mouse_hide_while_typing = Meta{ .doc = "타이핑 중 마우스 숨김", .widget = .toggle, .section = .input },
+        .option_as_meta = Meta{ .doc = "Option을 Meta(Alt)로", .widget = .toggle, .section = .input },
     };
 };
 

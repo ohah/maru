@@ -105,6 +105,7 @@ pub fn handleKeyEvent(
     runtime: *runtime_mod.SurfaceRuntime,
     resolver: config_mod.KeyBindingResolver,
     event: terminal.KeyEvent,
+    option_as_meta: bool,
 ) !KeyHandlingResult {
     // Platform code gives us a normalized key event, but it must not decide
     // whether that key is an app action or terminal bytes. Keeping that choice
@@ -112,8 +113,10 @@ pub fn handleKeyEvent(
     var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
     // 인코딩 모드(DECCKM 등)는 active surface의 프로그램이 정한다 — vim이 ?1h를 보냈으면 화살표가
     // SS3로 가야 하므로 매 키마다 core의 현재 모드를 읽어 인코더에 넘긴다.
-    const encode_options: terminal.input.EncodeOptions =
+    var encode_options: terminal.input.EncodeOptions =
         if (app_window.active()) |active| active.core.encodeOptions() else .{};
+    // option_as_meta는 core 모드가 아니라 config(input.option-as-meta)다 — 호출자(app)가 넘겨 인코더에 합친다.
+    encode_options.option_as_meta = option_as_meta;
     const resolved = try resolver.resolve(event, &buffer, encode_options);
     return switch (resolved) {
         .app_action => |action| .{ .app_action = action },
@@ -659,10 +662,36 @@ test "app host resolves terminal key events before writing to active PTY" {
     const result = try handleKeyEvent(&app_window, &runtime, resolver, .{
         .key = .{ .char = 'b' },
         .modifiers = .{ .command = true },
-    });
+    }, true);
 
     try std.testing.expectEqual(@as(usize, 1), result.terminal_input.bytes_len);
     try std.testing.expectEqualStrings("\x02", memory_pty.writes.items);
+}
+
+test "app host threads option_as_meta into encoding: true=ESC-prefix, false=plain (input.option-as-meta)" {
+    const allocator = std.testing.allocator;
+    var memory_pty = MemoryPty.init(allocator);
+    defer memory_pty.deinit();
+    var surfaces = [_]surface_mod.Surface{try surface_mod.Surface.init(allocator, 1, .{ .cols = 10, .rows = 2 })};
+    defer surfaces[0].deinit();
+    var tab_ptrs = [_]*surface_mod.Surface{&surfaces[0]};
+    var app_window: window_mod.AppWindow = .{ .tabs = &tab_ptrs };
+
+    var runtime = runtime_mod.SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    _ = try runtime.attach(&surfaces[0], 10, memory_pty.io());
+
+    const resolver: config_mod.KeyBindingResolver = .{}; // 바인딩 없음 → Option+b는 terminal_input 인코딩으로
+    try resolver.validate();
+
+    // option_as_meta=true(기본): Option+b → ESC-prefix meta "\x1bb".
+    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .{ .char = 'b' }, .modifiers = .{ .option = true } }, true);
+    try std.testing.expectEqualStrings("\x1bb", memory_pty.writes.items);
+
+    // option_as_meta=false: ESC 없이 평문 "b"(macOS에선 Option-단독이 입력기 조합으로 빠지지만, 우회로 여기 와도 ESC 없음).
+    memory_pty.writes.clearRetainingCapacity();
+    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .{ .char = 'b' }, .modifiers = .{ .option = true } }, false);
+    try std.testing.expectEqualStrings("b", memory_pty.writes.items);
 }
 
 test "app host encodes arrows per the active surface's DECCKM mode" {
@@ -681,13 +710,13 @@ test "app host encodes arrows per the active surface's DECCKM mode" {
     const resolver: config_mod.KeyBindingResolver = .{};
 
     // normal mode: CSI 화살표
-    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .arrow_up });
+    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .arrow_up }, true);
     try std.testing.expectEqualStrings("\x1b[A", memory_pty.writes.items);
 
     // 프로그램(vim)이 DECCKM을 켜면 같은 키가 SS3로 인코딩돼야 한다.
     try surfaces[0].core.write("\x1b[?1h");
     memory_pty.writes.clearRetainingCapacity();
-    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .arrow_up });
+    _ = try handleKeyEvent(&app_window, &runtime, resolver, .{ .key = .arrow_up }, true);
     try std.testing.expectEqualStrings("\x1bOA", memory_pty.writes.items);
 }
 
@@ -712,14 +741,14 @@ test "app host does not leak app actions or ignored Cmd keys to PTY" {
     const app_result = try handleKeyEvent(&app_window, &runtime, resolver, .{
         .key = .{ .char = 't' },
         .modifiers = .{ .command = true },
-    });
+    }, true);
     try std.testing.expectEqual(config_mod.Action.new_tab, app_result.app_action);
     try std.testing.expectEqual(@as(usize, 0), memory_pty.writes.items.len);
 
     const ignored = try handleKeyEvent(&app_window, &runtime, resolver, .{
         .key = .{ .char = 's' },
         .modifiers = .{ .command = true },
-    });
+    }, true);
     try std.testing.expectEqual(KeyHandlingResult.ignored, ignored);
     try std.testing.expectEqual(@as(usize, 0), memory_pty.writes.items.len);
 }

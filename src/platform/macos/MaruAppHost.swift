@@ -179,8 +179,12 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         }
         // Ctrl/Cmd/Option 조합은 입력기에 보내지 않고 바로 단축키/인코딩 경로로 — 한글 입력
         // 모드에서도 Ctrl+B(멀티플렉서 prefix)나 Cmd+C가 동작하고(레이아웃 독립 매칭은 Zig가 물리
-        // 키코드로 한다), Option+글자는 특수문자 입력이 아니라 기존 meta-ESC 인코딩을 유지한다.
-        let chord = event.modifierFlags.intersection([.command, .control, .option])
+        // 키코드로 한다). Option은 config input.option-as-meta가 가른다: true(기본)면 Option도 우회해
+        // 기존 meta-ESC 인코딩 유지, false면 Option-단독 키를 입력기 조합 경로로 보내 macOS 특수문자
+        // (Option+b=∫ 등)를 조합하게 하고 Cmd/Ctrl 동반 Option만 우회한다(라이브 config 값을 ABI로 읽음).
+        let optionAsMeta = controller?.optionAsMeta ?? true
+        let bypassMods: NSEvent.ModifierFlags = optionAsMeta ? [.command, .control, .option] : [.command, .control]
+        let chord = event.modifierFlags.intersection(bypassMods)
         // 이 키가 IME를 우회해(단축키 조합 또는 특수키) handleKeyDown으로 직행하는가.
         let bypassesIME = !chord.isEmpty || Self.directEncodeKeyCodes.contains(event.keyCode)
         // 조합(marked text) 중에 우회 키가 오면 '먼저 조합을 확정'한다 — 안 그러면 Swift의 marked
@@ -503,6 +507,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var appSession: OpaquePointer? {
         get { activeSurface?.appSession }
         set { activeSurface?.appSession = newValue }
+    }
+    // macOS Option을 Meta로 쓰는지(config input.option-as-meta). 활성 세션의 라이브 값을 ABI로 읽어 view.keyDown이
+    // Option-단독 키를 입력기 조합 경로(false)/meta 인코딩(true=현행)으로 가른다. 세션 없으면 현행 meta 폴백(true).
+    var optionAsMeta: Bool {
+        guard let session = appSession else { return true }
+        return maru_macos_app_session_option_as_meta(session) != 0
     }
     private var tickTimer: Timer?
     // smoke 자동 종료용 one-shot timer. 창이 먼저 닫혀도 run loop에 남아 teardown 뒤

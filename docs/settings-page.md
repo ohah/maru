@@ -6,7 +6,7 @@ PR 분해**를 단일 출처로 둔다. 실제 키·형식·검증은 항상 [�
 그리는 chrome 구조는 [Chrome 전략](chrome-strategy.md)이, 키바인딩 경계는 [키 입력과
 단축키](key-input-and-shortcuts.md)가 단일 출처다 — 여기서는 중복하지 않고 연결한다.
 
-> 상태(2026-06): **진행 중**. S0-1a·F1-1·F1-2·F1-3·F1-4b(blink-interval-ms·unfocused)·F1-5·F1-6·F1-8·F1-9·F1-10(multiplier)·F2-7(unfocused-dim) 머지(F1-7·F1-10 on-output은 기존 구현/표준). 세팅 GUI
+> 상태(2026-06): **진행 중**. S0-1a·F1-1·F1-2·F1-3·F1-4b(blink-interval-ms·unfocused)·F1-5·F1-6·F1-8·F1-9·F1-10(multiplier)·F2-2(option-as-meta)·F2-7(unfocused-dim) 머지(F1-7·F1-10 on-output은 기존 구현/표준). 세팅 GUI
 > (CS-4-0~6, config-gui.md) 완료 후 미뤄둔 신규 기능(F1~F3)을 schema-first로 채우는 단계. 가벼운(순수 Zig·ABI 무변경)
 > 항목부터 순차 진행. 진행 상황은 각 PR 표의 상태 칸으로 동기화한다.
 >
@@ -102,7 +102,7 @@ config 키 추가 + 기존 경로에 분기 한 줄. GUI 없이 config 파일로
 | PR | 기능 / 키 | 핵심 변경 | 근거(현황) |
 |---|---|---|---|
 | **F2-1** | 배경 이미지 `window.background-image` | 이미지 로드/config + 배경 quad pass | **렌더 ~90%는 인라인 이미지(텍스처 캐시·quad) 재사용 가능** |
-| **F2-2** | Option=Meta 토글 `input.option-as-meta` | `EncodeOptions`에 bool + session 캐시 + `input.zig` 분기 | Option 항상 meta-ESC(`terminal/input.zig`) |
+| **F2-2** ✅ | Option=Meta 토글 `input.option-as-meta` | bool(기본 true=현행 항상 meta). `EncodeOptions.option_as_meta`로 encodeKey ESC-prefix 게이트 + AppSession 세션 캐시(reload 갱신) + frame_loop/host.handleKeyEvent에 인자 전달. **Swift keyDown**이 ABI `option_as_meta`(v73 getter)를 읽어 false면 Option-단독 키를 입력기 조합 경로(macOS 특수문자 ∫·´)로, Cmd/Ctrl 동반만 우회 | ✅ 머지. input.zig(false→ESC 없음)·schema 파싱 단위 테스트, ABI v73(순수 read getter). 좌/우 Option 구분은 후속(device-independent `.option`). Ghostty `macos-option-as-alt` 베이스, 기본은 maru "회귀 없음" 선례 따라 true |
 | **F2-3** | Bold/Italic family `font.family-bold`/`family-italic` | style_flags로 face 쿼리(없으면 synthetic) | 현재 synthetic bold만(`coretext_smoke.m`) |
 | **F2-4** | 시각 벨 + Dock 배지 `bell.visual`/`bell.dock-badge` | 프레임 flash overlay + `dockTile.badgeLabel` | audible만 구현(`bell.audible`) |
 | **F2-5** | 우클릭 동작 `input.right-click` (paste\|menu\|reporting) | reporting off일 때 분기 | 현재 reporting만 |

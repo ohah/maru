@@ -533,6 +533,15 @@ pub export fn maru_macos_app_session_take_mouse_hide(session: ?*AppSession) u32 
     return if (app_session.takeMouseHide()) 1 else 0;
 }
 
+// macOS Option을 Meta(Alt)로 쓰는지(config input.option-as-meta). 1=meta(현행 — Option+키 ESC-prefix 인코딩),
+// 0=조합(입력기에 맡겨 Option+키가 특수문자 조합). Swift keyDown이 호출해 Option-단독 키를 입력기 경로로 보낼지
+// (0) meta 인코딩 경로로 보낼지(1) 가른다. take_*와 달리 1회성 신호가 아니라 라이브 config 값 read(reload로 갱신).
+// session null=1(현행 meta 폴백). (ABI v73)
+pub export fn maru_macos_app_session_option_as_meta(session: ?*AppSession) u32 {
+    const app_session = session orelse return 1;
+    return if (app_session.optionAsMeta()) 1 else 0;
+}
+
 // view options(⚙) 사이드바 토글이 바뀌어 config 파일 반영이 필요하면 1(플래그 비움), 없으면 0. Swift가 tick마다
 // 호출해 1이면 serialize_sidebar_config로 받은 텍스트를 config 경로에 atomic write한다(앱→config). session null=0.
 pub export fn maru_macos_app_session_take_sidebar_config_dirty(session: ?*AppSession) u32 {

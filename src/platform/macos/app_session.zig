@@ -762,13 +762,16 @@ const AgentNotification = struct { title: []u8, body: []u8 };
 const agent_notification_cap: usize = 16;
 
 /// 에이전트 아이콘 코드포인트(없으면 0) — 사이드바 카드에서 이름줄과 분리해 슬롯 세로 중앙에 독립 배치한다
-/// (buildSidebarDrawList의 agents). 0=아이콘 없음. 브랜드 마크의 전용 유니코드가 없어 근사 글리프: claude=✳
-/// (U+2733, Anthropic 선버스트), codex=✻(U+273B, OpenAI 블로썸/6잎 꽃 모티프). 포그라운드인 동안만 표시.
+/// (buildSidebarDrawList의 agents). 0=아이콘 없음. 브랜드 전용 유니코드가 없어 근사 글리프를 쓰되,
+/// **터미널 폰트(JetBrains Mono)가 보유한** 글리프만 고른다 — 미보유 코드포인트(예전 ✳ U+2733)는 CoreText가
+/// fallback 폰트로 넘기는데 그 폰트에서 글리프가 한글 '정' 등으로 어긋나 간헐적으로 깨졌다(근본 원인). 폰트가 가진
+/// 글리프만 쓰면 fallback 자체가 일어나지 않아 깨질 여지가 사라진다. claude=✶(U+2736 6각별, 선버스트 근사),
+/// codex=◆(U+25C6 다이아). 포그라운드인 동안만 표시.
 fn agentSymbolCodepoint(kind: AgentKind) u21 {
     return switch (kind) {
         .none => 0,
-        .claude => 0x2733,
-        .codex => 0x273B,
+        .claude => 0x2736,
+        .codex => 0x25C6,
     };
 }
 
@@ -9245,14 +9248,14 @@ pub const AppSession = struct {
         // 호버 슬롯엔 닫기 ✕(없으면 null). plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼.
         // plus_row=null — 하단 "+" 버튼은 헤더 우측 아이콘으로 이동·폐기(P2). 호버 슬롯엔 닫기 ✕(없으면 null).
         var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, sidebar_cols, fg, self.hovered_slot, null, self.displaySlotOf(self.app_window.active_tab), active_fg);
-        // 에이전트 아이콘(✳ claude / ✻ codex)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄, codex=OpenAI 청록.
+        // 에이전트 아이콘(✶ claude / ◆ codex)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄, codex=OpenAI 청록.
         // 종류를 색으로 구분하고, 진행/완료는 색이 아니라 **펄스**(running 밝기 변조) + 상태줄(● 진행중 / ✓ 완료)이
         // 담당한다(상태색은 어두운 배경에서 흐려 가독성이 나빴다 — 사용자 피드백). 색은 `term.agent_kind` 단일
         // 출처로 고르고(codepoint 역매핑 아님 — agentSymbolCodepoint와 짝 유지), 아이콘은 gutter col 0에만 있어
-        // col 0 + 아이콘 codepoint로 좁힌다 → 워크스페이스 이름/경로(col≥3)에 ✳·✻가 들어가도 안 오염. docs/agent-session.md.
+        // col 0 + 아이콘 codepoint로 좁힌다 → 워크스페이스 이름/경로(col≥3)에 ✶·◆가 들어가도 안 오염. docs/agent-session.md.
         for (draw_list.cells) |*c| {
             if (c.col != 0) continue; // 아이콘은 왼쪽 gutter col 0 — 텍스트 셀(col≥3)의 동일 글리프 오염 방지.
-            if (c.codepoint != 0x2733 and c.codepoint != 0x273B) continue; // ✳ claude / ✻ codex
+            if (c.codepoint != 0x2736 and c.codepoint != 0x25C6) continue; // ✶ claude / ◆ codex
             // 아이콘 셀 row에서 슬롯(탭) 인덱스를 디코드(row=slot*32+…)해 그 Term을 얻는다.
             const slot = c.row / coretext_frame_builder.sidebar_line_base; // 표시 슬롯
             const orig = self.visibleTab(slot) orelse continue; // 표시 슬롯 → 원본 탭(검색 필터)
@@ -10334,8 +10337,8 @@ test "classifyAgent: claude/codex 부분일치(대소문자 무시), 그 외·nu
     try std.testing.expectEqual(AgentKind.none, classifyAgent(""));
     // 아이콘 코드포인트 매핑(독립 아이콘 셀에 쓰임).
     try std.testing.expectEqual(@as(u21, 0), agentSymbolCodepoint(.none));
-    try std.testing.expectEqual(@as(u21, 0x2733), agentSymbolCodepoint(.claude));
-    try std.testing.expectEqual(@as(u21, 0x273B), agentSymbolCodepoint(.codex));
+    try std.testing.expectEqual(@as(u21, 0x2736), agentSymbolCodepoint(.claude));
+    try std.testing.expectEqual(@as(u21, 0x25C6), agentSymbolCodepoint(.codex));
 }
 
 test "dimRgb: 펄스 off 위상은 브랜드색을 45%로 낮춘다(글자 안 사라짐)" {

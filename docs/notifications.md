@@ -64,10 +64,15 @@
   `HeaderRegion.notifications` zone은 `headerHit`(렌더 `buildSidebarHeaderFrame`과 같은 col)이 단일 출처 —
   안 그리면 hit-test도 none(`cols < 13` 좁은 사이드바). 아이콘 4개(종·◧·⚙·+)가 3칸 간격으로 우측 정렬.
 - **떠 있는 카드 패널**: `src/chrome/components/notifications.zig`(context_menu를 본뜸). 한 항목 = **2줄 카드**
-  (제목 + 본문), 안읽음 점(●), 우측 상대시간("N분 전"), 닫힌 surface는 회색(`muted_fg` role). `panelRect`를 view·itemAt이
-  공유(보이는 카드 == 클릭되는 카드). 카드 구분선은 `.fill`(1px)로 — `.rule` op은 macOS lowering에서 no-op이라.
-  빈 목록도 패널 + "알림 없음"을 그린다. 항목은 platform이 매 프레임 arena로 주입(palette `Row` 선례) — chrome은
-  중립(surface_id·라이브 포인터 모름).
+  (제목 + 본문), 안읽음 점(●), 우측 상대시간("N분 전"), 닫힌 surface는 회색(`muted_fg` role). `layout`(폭·높이·스크롤
+  윈도우·위치 clamp)을 view·hitTest·panelRect가 공유(보이는 카드 == 클릭되는 카드). 카드 구분선은 `.fill`(1px)로 —
+  `.rule` op은 macOS lowering에서 no-op이라. 빈 목록도 패널 + "알림 없음"을 그린다. 항목은 platform이 매 프레임
+  arena로 주입(palette `Row` 선례) — chrome은 중립(surface_id·라이브 포인터 모름).
+- **스크롤(화면 넘으면)**: 카드가 화면 가용 높이를 넘으면 **카드 단위 스크롤**(`draw.Op`에 scissor가 없어 부분 카드를
+  못 자르므로 통째 카드만 보인다). `State.scroll_offset`(보이는 첫 카드, 0=최신)으로 `items[first..first+visible]`만
+  렌더한다. 마우스 휠(패널 열림 시 `scrollWheel`이 가로채 터미널/스크롤백으로 안 흘림)·키보드 ↑↓(선택이 viewport
+  밖이면 `ensureSelectedVisible`가 따라 스크롤)로 움직인다. **액션 행("모두 읽음/지우기")은 viewport 하단 sticky**라
+  스크롤해도 안 잘린다. 스크롤 가능하면 우측에 얇은 스크롤바 thumb(보이는 비율). 상한 clamp는 `layout` 단일 출처.
 - **클릭 → 점프 + 읽음**: 카드 본문 클릭/Enter → `acceptNotification`이 selected(역순: 0=최신)를 히스토리 인덱스로
   되돌려 그 카드의 surface를 봤다는 의미로 **같은 surface의 안읽음을 모두** 읽음 처리(`markNotificationsReadBySurface`
   — 2단계 배너 클릭과 **동일 정책**)하고, `activateSurfaceById(surface_id)`(1단계 재사용)로 점프한 뒤 패널을 닫는다.

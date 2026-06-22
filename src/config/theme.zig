@@ -317,12 +317,19 @@ pub const InputConfig = struct {
     ime_enter: ImeEnter = .newline,
     // 기본 command: Cmd+클릭으로 URL 열기(현행). URL 밑줄/링크 커서 hover도 같은 키에서만.
     url_click_modifier: UrlClickModifier = .command,
+    /// 타이핑(글자 입력) 중 마우스 커서를 숨기고, 마우스를 움직이면 다시 보인다. 기본 false(현행 — 안 숨김, opt-in).
+    /// 베이스/결정: Ghostty `mouse-hide-while-typing`(기본 false)을 베이스로, "press + 텍스트 produce(utf8.len>0)"일
+    /// 때 숨기는 모델이다(references/ghostty/src/Surface.zig:2681 keyCallback). maru는 그 입력을 frame_loop의
+    /// `.terminal_input` + 글자키(.char) + 단축키 수식키(Ctrl/Cmd) 아님으로 근사한다 — 단축키(탭 전환 등)·화살표/기능키는
+    /// 안 숨긴다. 복원은 macOS `NSCursor.setHiddenUntilMouseMoves`가 다음 마우스 이동에서 자동으로 한다(별도 핸들러 불요).
+    mouse_hide_while_typing: bool = false,
 
-    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier (필드명 dashed)
+    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing (필드명 dashed)
         .page_keys = Meta{ .doc = "메인 화면 PageUp/Down", .widget = .dropdown, .section = .input },
         .shift_enter = Meta{ .doc = "Shift+Enter 인코딩", .widget = .dropdown, .section = .input },
         .ime_enter = Meta{ .doc = "IME 조합 중 Enter", .widget = .dropdown, .section = .input },
         .url_click_modifier = Meta{ .doc = "URL 클릭 수식키", .widget = .dropdown, .section = .input },
+        .mouse_hide_while_typing = Meta{ .doc = "타이핑 중 마우스 숨김", .widget = .toggle, .section = .input },
     };
 };
 

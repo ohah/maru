@@ -525,6 +525,14 @@ pub export fn maru_macos_app_session_take_bell(session: ?*AppSession) u32 {
     return if (app_session.takeBell()) 1 else 0;
 }
 
+// 타이핑(글자 입력) 중 마우스 숨김 1회성 신호(config input.mouse-hide-while-typing). pending이면 1(플래그 비움),
+// 없으면 0. Swift가 tick마다 호출해 1이면 NSCursor.setHiddenUntilMouseMoves(true)(다음 마우스 이동에서 자동 복원).
+// take_bell과 같은 1회성 패턴 — 한 tick에 여러 글자를 쳐도 hide 호출은 한 번. session null=0. (ABI v72)
+pub export fn maru_macos_app_session_take_mouse_hide(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeMouseHide()) 1 else 0;
+}
+
 // view options(⚙) 사이드바 토글이 바뀌어 config 파일 반영이 필요하면 1(플래그 비움), 없으면 0. Swift가 tick마다
 // 호출해 1이면 serialize_sidebar_config로 받은 텍스트를 config 경로에 atomic write한다(앱→config). session null=0.
 pub export fn maru_macos_app_session_take_sidebar_config_dirty(session: ?*AppSession) u32 {

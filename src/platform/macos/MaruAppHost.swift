@@ -1238,6 +1238,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainOsc52Clipboard() // OSC 52: 이번 tick에 셸이 보낸 클립보드 쓰기를 NSPasteboard에 반영(정책 gate는 Zig).
             drainNotification() // OSC 9/777: 이번 tick에 셸이 보낸 데스크톱 알림을 네이티브 알림으로 띄운다.
             drainBell() // G12 BEL: 이번 tick에 셸이 보낸 벨(0x07)을 시스템 벨로 울린다.
+            drainMouseHide() // 타이핑(글자 입력) 중이면 마우스 커서를 숨긴다(config input.mouse-hide-while-typing).
             drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
         }
         return status
@@ -1676,6 +1677,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let session = appSession else { return }
         if maru_macos_app_session_take_bell(session) != 0 {
             NSSound.beep()
+        }
+    }
+
+    // 타이핑(글자 입력) 중 마우스 숨김(config input.mouse-hide-while-typing): Zig가 이번 tick에 글자 입력을 PTY로
+    // 보냈으면 플래그를 세운다 — drain해 1이면 NSCursor.setHiddenUntilMouseMoves(true)로 커서를 숨긴다. 복원(다음
+    // 마우스 이동에서 다시 보임)은 AppKit이 자동으로 하므로 별도 unhide 핸들러가 필요 없다(F1-6).
+    private func drainMouseHide() {
+        guard let session = appSession else { return }
+        if maru_macos_app_session_take_mouse_hide(session) != 0 {
+            NSCursor.setHiddenUntilMouseMoves(true)
         }
     }
 

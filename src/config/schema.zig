@@ -700,6 +700,8 @@ test "schema tryParse: 최상위 스칼라(Config.schema) — Meta.key 전체 �
     a.free(cfg.term); // 위 dupe 회수(테스트 한정)
     try std.testing.expect(try tryParse(a, &cfg, "window.opacity", "0.7", &diags, 5)); // f32 range 0~1
     try std.testing.expectApproxEqAbs(@as(f32, 0.7), cfg.window_opacity, 0.001);
+    try std.testing.expect(try tryParse(a, &cfg, "cursor.blink-interval-ms", "250", &diags, 6)); // sub-struct u32 range
+    try std.testing.expectEqual(@as(u32, 250), cfg.cursor.blink_interval_ms);
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 
     // 범위 밖 padding → diagnostic + 기본 유지

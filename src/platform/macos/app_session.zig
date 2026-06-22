@@ -151,9 +151,8 @@ const scrollbar_fade_ticks: u32 = 14; // ~0.45s 동안 full→faint
 const scrollbar_alpha_full: u8 = 0xFF; // 활성/hover/드래그
 const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
 
-// 커서 깜빡임 반주기(30Hz tick 단위). 15틱 = 500ms — 일반 터미널 관례(on 500ms / off 500ms). 틱이 고정 30Hz라
-// 정확히 500ms다. ms 기반 위상·config 노출·deadline 스케줄러는 문서화된 시간-모델 후속(docs/layering §5).
-const blink_interval_ticks: u32 = 15;
+// 커서 깜빡임 반주기는 이제 config(`cursor.blink-interval-ms`, 기본 500ms)에서 온다 — blinkIntervalTicks()가 30Hz
+// 고정 tick으로 환산한다(F1-4b, 옛 상수 15틱=500ms를 동적화). 일반 터미널 관례(on 500ms / off 500ms)가 기본값.
 const agent_poll_interval_ticks: u32 = 15; // ≈0.5s@30Hz — 포그라운드 프로세스(에이전트) polling 주기.
 // 에이전트 마지막 답변 미리보기를 담는 Term inline 버퍼 크기(바이트). 한 줄 미리보기라 충분하고, 사이드바가
 // 카드 폭으로 다시 말줄임하므로 여기선 넉넉히만 잡는다(UTF-8 경계로 잘려 들어옴).
@@ -5659,6 +5658,13 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 커서 깜빡임 반주기를 30Hz tick으로 환산한다(config `cursor.blink-interval-ms` → 틱). tick이 30Hz 고정이라
+    /// ticks = round(ms × 30 / 1000)이고, 최소 1틱(0틱이면 토글이 멈춰 영구 visible로 굳음). 한 반주기 = on 또는 off
+    /// 한 단계라 사용자가 적은 ms가 곧 깜빡임 속도다. blink=false는 updateCursorBlink 가드가 호출 전에 걸러낸다.
+    fn blinkIntervalTicks(self: *const AppSession) u32 {
+        return @max(1, (self.appearance.cursor.blink_interval_ms * 30 + 500) / 1000);
+    }
+
     /// 커서/오버레이 caret 깜빡임 한 스텝(30Hz tick마다). 깜빡일 대상이 없으면(steady 커서 + 오버레이 닫힘) 보이는
     /// 위상으로 고정한다 — 토글 없으니 idle 재투영도 없다. 오버레이(find·palette)가 열렸으면 커서 blink 설정과 무관
     /// 하게 caret이 깜빡인다(텍스트 입력 caret 관용). 터미널 커서의 기존 메커니즘(틱-카운터 + suffix-trim)을 그대로 탄다.
@@ -5694,7 +5700,7 @@ pub const AppSession = struct {
             return;
         }
         self.blink_ticks += 1;
-        if (self.blink_ticks >= blink_interval_ticks) {
+        if (self.blink_ticks >= self.blinkIntervalTicks()) {
             self.blink_ticks = 0;
             self.blink_visible = !self.blink_visible;
             // suffix-trim 토글(재빌드 없음). 오버레이가 열렸으면 suffix=오버레이 caret이라 caret을, 닫혔으면 suffix=
@@ -10123,6 +10129,19 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     try std.testing.expectEqual(@as(i8, 0), session.drag_autoscroll);
 }
 
+test "blinkIntervalTicks: cursor.blink-interval-ms를 30Hz 틱으로 환산(round, 최소 1) (F1-4b)" {
+    var session: AppSession = undefined;
+    // blinkIntervalTicks는 appearance.cursor.blink_interval_ms만 읽는다 — 그 필드만 명시 초기화(undefined 트랩 회피).
+    session.appearance.cursor.blink_interval_ms = 500;
+    try std.testing.expectEqual(@as(u32, 15), session.blinkIntervalTicks()); // 500ms@30Hz=15틱(옛 상수 보존)
+    session.appearance.cursor.blink_interval_ms = 1000;
+    try std.testing.expectEqual(@as(u32, 30), session.blinkIntervalTicks());
+    session.appearance.cursor.blink_interval_ms = 100;
+    try std.testing.expectEqual(@as(u32, 3), session.blinkIntervalTicks()); // round(100×30/1000)=3
+    session.appearance.cursor.blink_interval_ms = 10; // 극단값도 0틱이 되지 않게 최소 1틱(토글 멈춤 방지)
+    try std.testing.expectEqual(@as(u32, 1), session.blinkIntervalTicks());
+}
+
 test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오버레이 caret도 깜빡(suffix-trim 재활용)" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
@@ -10138,15 +10157,16 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     session.chrome_host = .{}; // updateCursorBlink이 find/palette.open을 읽음 — undefined면 UB([[devsession-undefined-test-field-trap]])
     session.rename = null; // inputFocus/updateCursorBlink가 rename을 읽음(undefined면 garbage가 .rename 분기)
     session.tabs = .empty; // updateCursorBlink→anyAgentRunning이 tabs를 순회 — undefined면 UB(같은 함정). 빈 목록=펄스 없음
+    session.appearance.cursor.blink_interval_ms = 500; // blinkIntervalTicks가 읽음(F1-4b) — undefined면 *30 overflow([[devsession-undefined-test-field-trap]])
 
     // 기본(DECSCUSR 1 = 깜빡 block): interval 틱마다 토글. rebuild(metal_dirty) 없이 generation만(suffix 토글).
     var i: u32 = 0;
-    while (i < blink_interval_ticks) : (i += 1) session.updateCursorBlink();
+    while (i < session.blinkIntervalTicks()) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(!session.blink_visible);
     try std.testing.expect(!session.metal_dirty);
     try std.testing.expectEqual(@as(u64, 1), session.metal_buffer.generation);
     try std.testing.expect(!session.metal_buffer.show_cursor);
-    while (i < blink_interval_ticks * 2) : (i += 1) session.updateCursorBlink();
+    while (i < session.blinkIntervalTicks() * 2) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(session.blink_visible);
 
     // 활동(입력/출력) 리셋: off 위상이어도 즉시 보이게.
@@ -10160,7 +10180,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     try tab_surface.core.write("\x1b[2 q");
     session.blink_visible = true;
     i = 0;
-    while (i < blink_interval_ticks * 3) : (i += 1) session.updateCursorBlink();
+    while (i < session.blinkIntervalTicks() * 3) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(session.blink_visible);
 
     // 오버레이(find) 열림: steady 커서여도 caret은 깜빡인다(overlay_open이라 토글 — suffix=오버레이 caret). 회귀:
@@ -10169,7 +10189,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     session.blink_visible = true;
     session.blink_ticks = 0;
     i = 0;
-    while (i < blink_interval_ticks) : (i += 1) session.updateCursorBlink();
+    while (i < session.blinkIntervalTicks()) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(!session.blink_visible); // caret이 off 위상으로 토글됨
     session.chrome_host.find.open = false;
 
@@ -10178,7 +10198,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     try tab_surface.core.setPreedit("\xec\x95\x88");
     session.blink_visible = true;
     i = 0;
-    while (i < blink_interval_ticks * 3) : (i += 1) session.updateCursorBlink();
+    while (i < session.blinkIntervalTicks() * 3) : (i += 1) session.updateCursorBlink();
     try std.testing.expect(session.blink_visible);
     try tab_surface.core.setPreedit("");
 }
@@ -10344,7 +10364,7 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
     var last_vis = session.blink_visible;
     var last_gen: u64 = session.metal_buffer.generation;
     var i: usize = 0;
-    while (i < blink_interval_ticks * 20 and toggles == 0) : (i += 1) {
+    while (i < session.blinkIntervalTicks() * 20 and toggles == 0) : (i += 1) {
         _ = try session.tick();
         if (session.blink_visible != last_vis) {
             toggles += 1;

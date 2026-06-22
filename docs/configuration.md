@@ -64,6 +64,7 @@ window.opacity        = 1.0   # 배경 투명도(0~1) — default 배경만 투�
 | 키 | 타입 | 기본값 | 비고 |
 |---|---|---|---|
 | `font.family` | 문자열 | `JetBrains Mono` | 내부 공백 보존. 비어 있으면 무시(기본 유지) |
+| `font.fallback` | 문자열(쉼표 구분) | (없음) | **폴백 폰트** 목록(예: `Apple SD Gothic Neo, Apple Color Emoji`). 주 `font.family`에 없는 글리프(한글·이모지·기호 등)를 그릴 때 이 목록을 앞에 두고 CoreText 기본 폴백을 뒤에 잇는다(`kCTFontCascadeListAttribute`). 각 항목은 앞뒤 공백 trim(내부 공백 보존). 잘못된 폰트명은 무시(best-effort). 비어 있으면 CoreText 기본 폴백만 |
 | `font.size` | 숫자 | `14` | 1~512 범위. 범위 밖/비숫자는 무시 |
 | `font.size-step` | 숫자 | `1` | ⌘+/⌘-(Bigger/Smaller)가 한 번에 바꾸는 증분(pt). 0.1~32 범위. ⌘0(Actual Size)은 step과 무관하게 `font.size`로 복귀 |
 | `font.line-height` | 숫자 | `1.0` | 행간 배수. 1.0=CoreText 자동 cell 높이, 1.5=50% 더 큰 줄 간격. 0.5~3.0 범위. 범위 밖/비숫자는 무시. 늘어난 높이는 글자를 셀 안 세로 가운데로 그려 위아래 여백이 된다 |

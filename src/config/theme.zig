@@ -41,15 +41,21 @@ pub const FontConfig = struct {
     /// cell_width_px에 가산한다(최소 1px로 saturate). 늘어난 폭은 native 셰이퍼가 glyph를 가로 가운데로 그려 좌우
     /// 여백이 된다(grid 자동 정합). 범위는 아래 const(-8~32 pt — 음수 허용).
     letter_spacing: f32 = 0.0,
+    /// 폴백 폰트 패밀리 목록(쉼표 구분, 예: `Apple SD Gothic Neo, Apple Color Emoji`). 주 `family`에 없는 글리프(한글·
+    /// 이모지·기호 등)를 그릴 때 **이 목록을 앞에 두고** CoreText 자동 cascade를 뒤에 잇는다. 빈 값(기본)이면 CoreText
+    /// 기본 cascade만 쓴다(현행). loader가 `font.fallback` 키로 파싱(내부 공백 보존, 각 항목은 trim). 적용은 셰이퍼가
+    /// 주 폰트에 `kCTFontCascadeListAttribute`로 박는다(매 글리프 자동 폴백 — 근거: Ghostty도 cascade list 명시).
+    fallback: []const u8 = "",
 
     // 범위는 아래 font_* const(단일 출처 — appearance.resolveFont도 같은 const를 써 schema↔resolve drift 없음).
     // size는 1~512 리터럴(전용 const 없음 — resolveFont도 같은 범위).
-    pub const schema = .{ // 키: font.size / font.size-step / font.line-height / font.letter-spacing / font.family (필드명 dashed)
+    pub const schema = .{ // 키: font.size / font.size-step / font.line-height / font.letter-spacing / font.family / font.fallback (필드명 dashed)
         .size = Meta{ .doc = "폰트 크기(pt)", .range = .{ 1, 512 }, .widget = .number, .section = .font },
         .size_step = Meta{ .doc = "⌘+/⌘- 폰트 증분(pt)", .range = .{ font_size_step_min, font_size_step_max }, .widget = .number, .section = .font },
         .line_height = Meta{ .doc = "행간 배수", .range = .{ font_line_height_min, font_line_height_max }, .widget = .number, .section = .font },
         .letter_spacing = Meta{ .doc = "자간(논리 pt, 음수 허용)", .range = .{ font_letter_spacing_min, font_letter_spacing_max }, .widget = .number, .section = .font },
         .family = Meta{ .doc = "폰트 패밀리(내부 공백 보존)", .widget = .text, .section = .font },
+        .fallback = Meta{ .doc = "폴백 폰트(쉼표 구분)", .widget = .text, .section = .font },
     };
 };
 

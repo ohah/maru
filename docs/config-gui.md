@@ -163,7 +163,8 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **전체 키 캡처**: 녹음 중엔 platform이 chrome 변환 **전에** raw `terminal.KeyEvent`를 가로챈다(`handleKeyEvent`). `chromeInputFromKeyEvent`가 키를 축약 enum(`enter`/`char`/`other`…)으로 줄여 Tab·Home·F-키를 잃으므로, 전체 키 정보가 있는 raw 이벤트를 `KeyChord.fromKeyEvent`로 chord화한다. 평범한 `Esc`(모디파이어 없음)는 녹음 취소(흔한 recorder 관례).
 - **즉시 반영**: `rebindActionEntry`가 `loaded_config.keybindings`를 새 슬라이스로 교체(그 액션을 새 chord로, 없으면 추가)하고 `rebuildCommandCatalog`로 메뉴바·팝업 표시도 갱신한다. resolver가 매 키 이벤트마다 이 슬라이스를 읽으므로 재시작 없이 바로 동작한다.
 - **영속(전용 write-back)**: keybind는 `key = value`가 아니라 줄마다 같은 `keybind` 키 + 두 번째 `=`로 chord/action을 나눠서 `updateConfigText`(key 기준)로는 못 다룬다(모든 keybind 줄이 한 키로 충돌). 그래서 `updateKeybindLines`(loader)가 **action 기준**으로 `keybind = <chord> = <action>` 줄을 찾아 교체(없으면 append)한다. chord는 `KeyChord.toConfigString`(parse와 round-trip되는 ASCII 표기 — 표시용 `formatChord`의 ⌘⇧ 기호와 다름). `serializeConfig`가 schema write-back 뒤에 이 패스를 **체이닝**하고, `takeConfigDirty`가 keybind 재바인딩도 본다. 매크로 줄(`text:`/`esc:` rhs에 `=` 포함)은 action 키와 안 겹쳐 자연히 보존된다.
-- **한계(후속)**: 옛 chord가 **빌트인 기본**이면 그 chord도 계속 액션을 발동한다(새 chord를 **추가**하는 셈 — 완전 교체는 옛 빌트인을 `unbind`해야 하므로 후속). 충돌 검출 UI(다른 액션에 이미 묶인 chord 경고)·unbind·terminal 매크로/global 바인딩 편집·F13+ 키도 후속.
+- **해제(unbind)**: keybind 행에서 `Backspace`(녹음 아님)를 누르면 그 액션의 **사용자 지정** 단축키를 해제한다 — `unbindActionEntry`가 `loaded_config.keybindings`에서 그 액션을 빼고 카탈로그를 재빌드, `keybind = * = action` 줄을 **`removeKeybindLines`(action 기준 제거)**로 빼며(serializeConfig 체이닝), 펜딩 rebind도 취소한다. 해제 후 resolver는 빌트인(있으면)을 반환하거나 미지정 — 행 표시가 그에 맞게 갱신. 사용자 바인딩이 없으면 notice(빌트인은 안 건드림).
+- **한계(후속)**: 옛 chord가 **빌트인 기본**이면 그 chord도 계속 액션을 발동한다(새 chord를 **추가**하는 셈 — 완전 교체/빌트인 chord 죽이기는 `keybind = chord = unbind` 지시어가 필요해 후속; 현재 unbind는 사용자 override만 제거). 충돌 검출 UI(다른 액션에 이미 묶인 chord 경고)·terminal 매크로/global 바인딩 편집·F13+ 키도 후속.
 
 ### 6.8 폼 검색(현재 섹션 필터) (CS-4-4 후속)
 

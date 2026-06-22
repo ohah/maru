@@ -596,6 +596,40 @@ pub fn removeConfigLines(allocator: std.mem.Allocator, original: []const u8, key
     return out.toOwnedSlice(allocator);
 }
 
+/// `keybind = <chord> = <action>` 줄을 **action 기준**으로 삭제한다(keybind unbind — 사용자 지정 단축키 제거).
+/// keybind는 key가 모두 `keybind`라 removeConfigLines(key 기준)로는 특정 줄만 못 빼므로, updateKeybindLines처럼 두 번째
+/// `=` 뒤 rhs(action)를 비교해 `actions`에 든 것만 줄째 제거한다. 매크로 줄(rhs `text:` 등)은 action 키와 안 겹쳐 보존.
+/// 주석·다른 줄 보존. 반환은 owned. serializeConfig가 keybind 갱신 패스 뒤에 체이닝(제거 우선).
+pub fn removeKeybindLines(allocator: std.mem.Allocator, original: []const u8, actions: []const []const u8) LoadError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var it = std.mem.splitScalar(u8, original, '\n');
+    var first = true;
+    while (it.next()) |raw_line| {
+        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
+        var drop = false;
+        if (trimmed.len > 0 and trimmed[0] != '#') {
+            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
+                if (std.mem.eql(u8, std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace), "keybind")) {
+                    const rest = trimmed[eq1 + 1 ..];
+                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
+                        const action = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
+                        for (actions) |a| if (std.mem.eql(u8, a, action)) {
+                            drop = true;
+                            break;
+                        };
+                    }
+                }
+            }
+        }
+        if (drop) continue;
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        try out.appendSlice(allocator, raw_line);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// 빈 기본 결과(파일 없음/HOME 없음 등). config 텍스트를 안 읽었으므로 arena도 비어 있다.
 fn emptyDefault(allocator: std.mem.Allocator) Parsed {
     return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .unbinds = &.{}, .terminal_bindings = &.{}, .global_bindings = &.{}, .diagnostics = &.{} };
@@ -801,6 +835,30 @@ test "removeConfigLines: 키 줄 삭제(중복 포함), 주석·다른 줄 보�
     defer p.deinit();
     try std.testing.expectEqual(@as(usize, 1), p.config.env.len);
     try std.testing.expectEqualStrings("BAZ=qux", p.config.env[0]);
+}
+
+test "removeKeybindLines: action 기준 keybind 줄 삭제, 매크로·다른 keybind·주석 보존 (keybind unbind)" {
+    const a = std.testing.allocator;
+    const original =
+        "# 주석\n" ++
+        "keybind = Cmd+E = new_term\n" ++ // 삭제 대상(action=new_term)
+        "keybind = Cmd+Shift+E = new_tab\n" ++ // 보존(action 다름)
+        "keybind = Cmd+B = text:hi=there\n"; // 매크로(rhs '=') — action과 안 겹쳐 보존
+    const out = try removeKeybindLines(a, original, &.{"new_term"});
+    defer a.free(out);
+    var p = try parse(a, out);
+    defer p.deinit();
+    // new_term 줄 삭제 → 사용자 바인딩에서 new_term 없음(빌트인은 남지만 parse 결과 keybindings엔 user만).
+    for (p.keybindings) |b| try std.testing.expect(std.meta.activeTag(b.action) != .new_term);
+    // new_tab은 유지.
+    var saw_new_tab = false;
+    for (p.keybindings) |b| if (std.meta.activeTag(b.action) == .new_tab) {
+        saw_new_tab = true;
+    };
+    try std.testing.expect(saw_new_tab);
+    try std.testing.expect(std.mem.indexOf(u8, out, "text:hi=there") != null); // 매크로 보존
+    try std.testing.expect(std.mem.indexOf(u8, out, "# 주석") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Cmd+E = new_term") == null); // 삭제됨
 }
 
 test "updateKeybindLines: action 기준 교체, 없으면 append, 매크로·다른 줄·주석 보존 (keybind recorder write-back)" {

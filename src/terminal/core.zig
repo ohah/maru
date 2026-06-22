@@ -786,7 +786,8 @@ pub const TerminalCore = struct {
     /// 알려진 엣지(실 zsh에선 도달 안 함): C가 B와 같은 행에서(개행 없이) 와 입력 행이 .command로
     /// 재분류되면, 그 명령엔 promptish 시작 행이 없어 스캔이 '이전' 블록을 찍을 수 있다. 실제 zsh는
     /// Enter의 개행이 C를 새 행에 두므로 입력 행이 .input으로 남아 안전하다(합성 스트림 한정 엣지).
-    fn stampPromptExit(self: *TerminalCore, exit: i16) void {
+    // osc.zig의 OSC 133 핸들러가 호출하므로 pub(prompt 분류 storage는 core 소유, OSC 파싱은 osc.zig).
+    pub fn stampPromptExit(self: *TerminalCore, exit: i16) void {
         var abs = self.sb.count + self.cursor.row + 1;
         while (abs > 0) {
             abs -= 1;
@@ -1945,11 +1946,11 @@ pub const TerminalCore = struct {
         if (self.osc_overflow) return; // 2048 버퍼를 넘긴 OSC는 통째로 무시(거대/악의적 시퀀스 방어)
         const body = self.osc_buffer[0..self.osc_len];
         if (std.mem.startsWith(u8, body, "8;")) {
-            self.dispatchOscHyperlink(body[2..]);
+            osc.dispatchHyperlink(self, body[2..]);
         } else if (std.mem.startsWith(u8, body, "133;")) {
-            self.dispatchOscSemanticPrompt(body[4..]);
+            osc.dispatchSemanticPrompt(self, body[4..]);
         } else if (std.mem.startsWith(u8, body, "7;")) {
-            self.dispatchOscCwd(body[2..]);
+            osc.dispatchCwd(self, body[2..]);
         } else if (std.mem.startsWith(u8, body, "0;")) {
             self.setWindowTitle(body[2..]); // OSC 0 = 아이콘 이름 + 창 제목(둘 다) — 창 제목으로 받는다
         } else if (std.mem.startsWith(u8, body, "2;")) {
@@ -1974,7 +1975,7 @@ pub const TerminalCore = struct {
         } else if (std.mem.startsWith(u8, body, "9;")) {
             osc.dispatchNotify9(self, body[2..]); // OSC 9 = iTerm2 알림(ConEmu 서브커맨드와 충돌 — 가드)
         } else if (std.mem.startsWith(u8, body, "5379;")) {
-            self.dispatchOscMaru(body["5379;".len..]); // OSC 5379 = maru 전용 통지(사설 번호; 현재 ssh;<dest>)
+            osc.dispatchMaru(self, body["5379;".len..]); // OSC 5379 = maru 전용 통지(사설 번호; 현재 ssh;<dest>)
         }
         // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
     }
@@ -2814,83 +2815,6 @@ pub const TerminalCore = struct {
         });
     }
 
-    /// OSC 8: `8 ; params ; URI` — URI가 비면 링크 닫기, 있으면 열기(이후 출력 셀에 id가 찍힌다).
-    /// params(`id=...` 등)는 무시한다(xterm ctlseqs의 OSC 8 확장 — 시각 묶음 힌트일 뿐).
-    /// URI 안의 ';'는 보존된다(두 번째 구분자 이후 전부 URI).
-    fn dispatchOscHyperlink(self: *TerminalCore, after_code: []const u8) void {
-        const params_end = std.mem.indexOfScalar(u8, after_code, ';') orelse return;
-        const uri = after_code[params_end + 1 ..];
-        if (uri.len == 0) {
-            self.pen_link = 0;
-            return;
-        }
-        self.pen_link = self.internLink(uri) catch 0; // OOM이면 링크 없이 출력(텍스트는 보존)
-    }
-
-    /// OSC 7: `7 ; file://<host>/<percent-encoded path>` — 셸이 cwd를 보고한다. VTE(GNOME)가
-    /// 정의한 사실상 표준으로(공개 형식 문서 기반, VTE는 LGPL이라 소스 미열람), iTerm2/Terminal.app/
-    /// kitty/WezTerm이 채택했다. `file://` 스킴만 받고, host는 무시한 채(로컬 단일 호스트 가정) 첫
-    /// '/'부터의 path를 percent-decode해 저장한다. 형식이 안 맞거나 빈 path, OOM이면 기존 cwd를
-    /// 유지한다 — 부분/깨진 갱신으로 이전 값을 잃지 않게 한다.
-    fn dispatchOscCwd(self: *TerminalCore, body: []const u8) void {
-        const scheme = "file://";
-        if (!std.mem.startsWith(u8, body, scheme)) return; // file 스킴만(다른 스킴은 무시)
-        const authority_and_path = body[scheme.len..];
-        // file://<host>/<path> — host(authority)는 첫 '/'까지, path는 그 '/'부터(절대경로라 '/' 포함).
-        const slash = std.mem.indexOfScalar(u8, authority_and_path, '/') orelse return;
-        const raw_path = authority_and_path[slash..];
-        if (raw_path.len == 0) return;
-        const decoded = self.percentDecodeAlloc(raw_path) catch return; // OOM/실패면 기존 cwd 유지
-        if (self.cwd) |old| self.allocator.free(old);
-        self.cwd = decoded;
-        self.recordShellEvent(.cwd_changed); // 값은 currentCwd()가 권위 — 이벤트는 경계만 표시
-    }
-
-    /// OSC 5379: maru 전용 통지(사설 OSC 번호 — 표준/벤더 충돌을 피하려 골랐다). payload는
-    /// `<서브커맨드>;<인자...>`. 현재 서브커맨드는 `ssh;<dest>` 하나로, maru ssh 래퍼가 exec 직전 emit해
-    /// "이 세션은 maru ssh 원격 세션, 목적지=dest"임을 Maru에 알린다(docs/ssh-integration.md §4). Maru는
-    /// dest로 cli.ssh.controlSocketPath를 계산해 드롭 파일을 그 control socket으로 업로드한다(3단계).
-    /// 알 수 없는 서브커맨드나 빈 dest는 무시하고(기존 상태 유지), OOM이면 갱신하지 않는다.
-    fn dispatchOscMaru(self: *TerminalCore, body: []const u8) void {
-        var it = std.mem.splitScalar(u8, body, ';');
-        const sub = it.next() orelse return;
-        if (!std.mem.eql(u8, sub, "ssh")) return; // 알 수 없는 서브커맨드는 무시(소비만)
-        const dest = it.rest(); // 첫 필드(sub) 뒤 나머지 전체 = dest(목적지 문자열)
-        if (dest.len == 0) return; // 빈 dest는 무시(기존 dest 유지)
-        const dup = self.allocator.dupe(u8, dest) catch return; // OOM이면 기존 dest 유지
-        if (self.ssh_remote_dest) |old| self.allocator.free(old);
-        self.ssh_remote_dest = dup;
-    }
-
-    /// `%XX`를 바이트로 디코드한 새 문자열을 돌려준다(호출자 소유). 잘못된 %escape(두 hex가
-    /// 아니거나 끝에서 잘림)는 관대하게 '%'를 리터럴로 두고 계속한다 — path 한 글자가 깨졌다고
-    /// 전체를 버리지 않는다. UTF-8 바이트는 그대로 통과(셸이 raw로 보내든 %인코드로 보내든 복원).
-    fn percentDecodeAlloc(self: *TerminalCore, s: []const u8) ![]u8 {
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer out.deinit(self.allocator);
-        var i: usize = 0;
-        while (i < s.len) {
-            if (s[i] == '%' and i + 2 < s.len) {
-                const hi = std.fmt.charToDigit(s[i + 1], 16) catch {
-                    try out.append(self.allocator, s[i]);
-                    i += 1;
-                    continue;
-                };
-                const lo = std.fmt.charToDigit(s[i + 2], 16) catch {
-                    try out.append(self.allocator, s[i]);
-                    i += 1;
-                    continue;
-                };
-                try out.append(self.allocator, hi * 16 + lo);
-                i += 3;
-            } else {
-                try out.append(self.allocator, s[i]);
-                i += 1;
-            }
-        }
-        return out.toOwnedSlice(self.allocator);
-    }
-
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
     /// 창 제목 등 platform layer가 읽는다(facade를 통해 노출).
     pub fn currentCwd(self: *const TerminalCore) []const u8 {
@@ -2931,7 +2855,7 @@ pub const TerminalCore = struct {
 
     /// 셸 의미 이벤트를 스트림에 기록한다(OSC 133/7 dispatch가 호출). cap을 넘거나 OOM이면 드롭하고
     /// overflow를 표시한다 — 조용히 잃지 않고 소비자(디버그 로그)가 드롭을 보고할 수 있게.
-    fn recordShellEvent(self: *TerminalCore, event: types.ShellEvent) void {
+    pub fn recordShellEvent(self: *TerminalCore, event: types.ShellEvent) void {
         if (self.shell_events.items.len >= shell_events_cap) {
             self.shell_events_overflow = true;
             return;
@@ -2958,58 +2882,9 @@ pub const TerminalCore = struct {
         return self.shell_events_overflow;
     }
 
-    /// OSC 133(semantic prompt): 셸이 프롬프트/입력/출력 경계를 마킹한다. `133 ; <action> [; opts]`.
-    /// 명세: freedesktop semantic-prompts.md(FinalTerm 발) + kitty/Ghostty 확장. 동작 비교만 했고
-    /// 레퍼런스 코드 표현은 옮기지 않았다(clean-room). 옵션은 liberal하게 파싱 — 모르는 키는 무시한다.
-    ///   A/P = 프롬프트 시작, B = 프롬프트 끝·입력 시작, C = 입력 끝·출력 시작, D[;code] = 명령 끝.
-    /// 각 마커는 현재 커서 행을 그 영역으로 태깅하고 semantic_state를 갱신한다(lineFeed가 다음 행에
-    /// 전파). D는 행을 태깅하지 않고 종료코드만 기록한 뒤 영역을 닫는다(.unknown).
-    fn dispatchOscSemanticPrompt(self: *TerminalCore, rest: []const u8) void {
-        if (rest.len == 0) return;
-        const action = rest[0];
-        // action 뒤에 내용이 더 있으면 반드시 ';'로 시작해야 한다(아니면 `Pextra`류 — invalid).
-        if (rest.len > 1 and rest[1] != ';') return;
-        const opts: []const u8 = if (rest.len > 2) rest[2..] else "";
-        const row: u16 = @intCast(@min(self.cursor.row, std.math.maxInt(u16)));
-        switch (action) {
-            // A(fresh_line_new_prompt)·P(prompt_start) — PR1은 동일 취급(prompt_kind 옵션은 파싱·무시).
-            'A', 'P' => {
-                self.semantic_state = .prompt;
-                self.prompt_marks[self.cursor.row] = .{ .kind = .prompt }; // 새 프롬프트 — exit 리셋
-                self.recordShellEvent(.{ .prompt_start = row });
-            },
-            'B' => {
-                self.semantic_state = .input;
-                self.prompt_marks[self.cursor.row].kind = .input; // exit는 보존(D가 채움)
-                self.recordShellEvent(.{ .input_start = row });
-            },
-            'C' => {
-                self.semantic_state = .command;
-                self.prompt_marks[self.cursor.row].kind = .command;
-                self.recordShellEvent(.{ .command_start = row });
-            },
-            'D' => {
-                // 첫 ';' 구분 토큰을 종료코드로(없거나 정수 아니면 이전 값 유지 — 명세상 D는 code 없이도 옴).
-                const first = if (std.mem.indexOfScalar(u8, opts, ';')) |s| opts[0..s] else opts;
-                var exit_clamped: ?i16 = null;
-                if (std.fmt.parseInt(i32, first, 10) catch null) |code| {
-                    self.last_command_exit = code;
-                    exit_clamped = @intCast(std.math.clamp(code, std.math.minInt(i16), std.math.maxInt(i16)));
-                    // 이 명령의 프롬프트 시작 행(커서에서 위로 가장 가까운 isPromptStart)에 종료코드를
-                    // 스탬프한다 — 거터가 그 행 옆에 ✓(0)/✗(≠0)를 그린다. exit는 행과 함께 carry된다.
-                    self.stampPromptExit(exit_clamped.?);
-                }
-                self.recordShellEvent(.{ .command_end = .{ .row = row, .exit = exit_clamped } });
-                self.semantic_state = .unknown; // 명령 끝 — 영역을 닫는다(커서 행은 태깅하지 않음)
-            },
-            // L(fresh_line)·I·N 등은 수용하되 무동작(분류 상태 변화 없음).
-            else => {},
-        }
-    }
-
     /// URI를 link_store에 intern하고 id(인덱스+1)를 돌려준다. 같은 URI는 한 번만 저장된다 —
     /// ls --hyperlink처럼 수백 셀이 같은 파일 URI를 가리켜도 문자열은 하나다.
-    fn internLink(self: *TerminalCore, uri: []const u8) !u32 {
+    pub fn internLink(self: *TerminalCore, uri: []const u8) !u32 {
         if (self.link_ids.get(uri)) |id| return id;
         const owned = try self.allocator.dupe(u8, uri);
         errdefer self.allocator.free(owned);

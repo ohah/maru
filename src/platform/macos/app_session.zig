@@ -143,8 +143,9 @@ const titlebar_strip_min_pt: u32 = 28;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
-// 1~2칸으로 무너져 런타임 단축키 UX로는 부적절하다(config 파일로는 그 밖 값도 가능, 단축키만 이 범위).
-// ⌘+/⌘- 증분(step)은 config `font.size-step`(appearance.font.size_step, 기본 1pt)이 정한다.
+// 1~2칸으로 무너져 런타임 UX로는 부적절하다(config 파일로는 그 밖 값도 가능, 단축키·세팅 GUI 슬라이더가 이 범위).
+// ⌘+/⌘- 증분(step)은 config `font.size-step`(appearance.font.size_step, 기본 1pt)이 정한다. 아래 const는 config
+// theme.font_size_min/max(세팅 슬라이더 range)와 **같은 값** — 단축키·GUI가 한 범위를 공유한다(drift 시 둘 다 갱신).
 const font_size_min: f32 = 6.0;
 const font_size_max: f32 = 72.0;
 

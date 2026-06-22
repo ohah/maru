@@ -20,6 +20,13 @@ const card_rows: u32 = 2;
 /// 제목/본문 좌측 들여쓰기(칸) — 점(●) 자리 1칸 + 공백 1칸. 점은 안읽음일 때만 그 자리에 그린다(읽음이면 공백).
 const text_indent_cols: u32 = 2;
 
+/// 패널 최소 폭(칸). Warp 알림 popover처럼 내용에 딱 맞추지 않고 넉넉한 고정 폭(~360px at 12px cell)을 둬서
+/// 제목/시간 사이에 여백을 주고 카드가 답답하지 않게 한다.
+const min_panel_cols: u32 = 30;
+
+/// 빈 목록("알림 없음")일 때도 너무 작지 않게 둘 최소 행 수(카드 1.5개분 높이).
+const empty_panel_rows: u32 = 3;
+
 /// 비어 있을 때 패널에 그릴 안내 문구(빈 목록도 패널은 그린다 — context_menu가 len==0이면 null이던 것과 다름).
 const empty_label = "알림 없음";
 
@@ -125,8 +132,9 @@ fn panelRect(state: *const State, items: []const Item, p: props.ChromeProps) ?dr
         const c = cardCols(it);
         if (c > content_cols) content_cols = c;
     }
+    content_cols = @max(content_cols, min_panel_cols); // Warp 스타일 최소 폭(넉넉한 고정 폭)
     const box_w = (content_cols + 2) * cw; // 좌우 1칸 패딩
-    const rows: u32 = if (items.len == 0) 1 else @as(u32, @intCast(items.len)) * card_rows;
+    const rows: u32 = if (items.len == 0) empty_panel_rows else @as(u32, @intCast(items.len)) * card_rows;
     const box_h = rows * ch;
     var x = state.anchor_x;
     var y = state.anchor_y;
@@ -134,8 +142,9 @@ fn panelRect(state: *const State, items: []const Item, p: props.ChromeProps) ?dr
     const bh_px: i32 = @intCast(m.backing_height_px);
     if (x + @as(i32, @intCast(box_w)) > bw_px) x = bw_px - @as(i32, @intCast(box_w)); // 우단 넘으면 왼쪽으로
     if (y + @as(i32, @intCast(box_h)) > bh_px) y = bh_px - @as(i32, @intCast(box_h)); // 하단 넘으면 위로
-    const sidebar: i32 = @intCast(m.sidebar_width_px);
-    if (x < sidebar) x = sidebar; // 좌단을 사이드바 오른쪽으로(터미널 영역 오버레이 — chrome 위 안 겹침)
+    // 좌단은 화면 안(0)으로만 clamp한다 — 알림 패널은 사이드바 헤더의 종 아이콘에서 나오므로 사이드바 위에 떠야
+    // 종 바로 아래에 보인다(context_menu는 터미널 영역 오버레이라 사이드바로 밀지만, 이 패널은 종 드롭다운이다).
+    if (x < 0) x = 0;
     if (y < 0) y = 0;
     return .{ .x = x, .y = y, .w = box_w, .h = box_h };
 }
@@ -332,7 +341,7 @@ test "notifications view: 빈목록=패널+안내, 항목들=점·제목·시간
     try std.testing.expect(saw_closed_title); // 닫힌 surface 제목은 muted_fg(dim)
 }
 
-test "notifications panelRect: 빈 제목 폴백 + 화면 우/하단 clamp + 사이드바 좌단 clamp" {
+test "notifications panelRect: 빈 제목 폴백 + 최소 폭 + 종 밑(사이드바 안 유지) + 화면 우/하단 clamp" {
     const p = props.ChromeProps{ .metrics = .{
         .cell_width_px = 8,
         .cell_height_px = 16,
@@ -344,10 +353,11 @@ test "notifications panelRect: 빈 제목 폴백 + 화면 우/하단 clamp + 사
         .{ .title = "", .body = "본문", .relative_time = "방금", .is_read = false, .is_alive = true }, // 빈 제목 → 폴백 폭
     };
     var s: State = .{};
-    // anchor가 사이드바 안(x=20)이어도 좌단은 사이드바 오른쪽(>=200)으로.
+    // 종 드롭다운이라 사이드바 좌단으로 밀지 않는다 — anchor가 사이드바 안(x=20=종 위치)이어도 그 자리에 뜬다(종 바로 밑).
     s.show(20, 50, items.len);
     const r = panelRect(&s, &items, p).?;
-    try std.testing.expect(r.x >= 200);
+    try std.testing.expectEqual(@as(i32, 20), r.x); // 사이드바(200) 안이어도 종 위치 유지
+    try std.testing.expect(r.w >= min_panel_cols * 8); // Warp 스타일 최소 폭 보장(내용보다 넉넉)
     // 화면 우/하단 밖 anchor → 안으로 clamp.
     s.show(790, 595, items.len);
     const r2 = panelRect(&s, &items, p).?;

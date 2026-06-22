@@ -708,6 +708,8 @@ test "schema tryParse: 최상위 스칼라(Config.schema) — Meta.key 전체 �
     try std.testing.expectEqual(theme.UrlClickModifier.control, cfg.input.url_click_modifier);
     try std.testing.expect(try tryParse(a, &cfg, "input.mouse-hide-while-typing", "true", &diags, 9)); // sub-struct bool
     try std.testing.expectEqual(true, cfg.input.mouse_hide_while_typing);
+    try std.testing.expect(try tryParse(a, &cfg, "input.option-as-meta", "false", &diags, 9)); // sub-struct bool(기본 true → false)
+    try std.testing.expectEqual(false, cfg.input.option_as_meta);
     try std.testing.expect(try tryParse(a, &cfg, "font.fallback", "Apple SD Gothic Neo, Apple Color Emoji", &diags, 10)); // sub-struct text(내부 공백 보존)
     try std.testing.expectEqualStrings("Apple SD Gothic Neo, Apple Color Emoji", cfg.font.fallback);
     a.free(cfg.font.fallback); // dupe 회수(테스트 한정)

@@ -72,6 +72,11 @@ pub const EncodeOptions = struct {
     /// DECKPAM/DECKPNM(ESC =/ESC >, application keypad). 켜지면 numpad 키(KeyEvent.keypad)가 SS3(`ESC O p`..)로
     /// 인코딩된다(DECCKM 화살표와 같은 결). 끄면(numeric) 일반 char/CR. core가 application_keypad로 추적·전달.
     application_keypad: bool = false,
+    /// macOS Option 키를 Meta(Alt)로 쓸지(`input.option-as-meta`). 기본 true면 Option+키가 ESC-prefix(meta) 인코딩.
+    /// false면 ESC를 붙이지 않는다 — macOS에선 Option-단독 키가 입력기 조합 경로로 빠져 여기 안 오고(Swift가 가름),
+    /// 이 플래그는 Cmd/Ctrl+Option처럼 입력기를 우회해 여기로 오는 키의 ESC-prefix 여부에 적용된다. config 값이라
+    /// core 모드(DECCKM 등)와 달리 호출자(app)가 EncodeOptions에 채운다. 비-macOS/테스트는 기본 true로 현행 유지.
+    option_as_meta: bool = true,
 };
 
 pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: EncodeOptions) ![]const u8 {
@@ -94,7 +99,7 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: 
     }
 
     var len: usize = 0;
-    if (event.modifiers.option and !keyBaseStartsWithEscape(event.key)) {
+    if (options.option_as_meta and event.modifiers.option and !keyBaseStartsWithEscape(event.key)) {
         // macOS Option/Alt is the traditional terminal "Meta" modifier. The
         // terminal byte stream represents Meta by prefixing the normal key bytes
         // with ESC, which lets shells/readline see Alt+B without Maru inventing
@@ -374,6 +379,22 @@ test "encodes control letters and option-prefixed terminal input" {
         "\x1b한",
         try encodeKey(.{ .key = .{ .char = '한' }, .modifiers = .{ .option = true } }, &buffer, .{}),
     );
+}
+
+test "option-as-meta=false drops the ESC prefix for option-modified keys (input.option-as-meta)" {
+    var buffer: [encoded_key_buffer_len]u8 = undefined;
+    const no_meta: EncodeOptions = .{ .option_as_meta = false };
+
+    // 기본(true): Option+b → ESC-prefix meta. 끔(false): ESC 없이 평문 'b'.
+    try std.testing.expectEqualStrings("\x1bb", try encodeKey(.{ .key = .{ .char = 'b' }, .modifiers = .{ .option = true } }, &buffer, .{}));
+    try std.testing.expectEqualStrings("b", try encodeKey(.{ .key = .{ .char = 'b' }, .modifiers = .{ .option = true } }, &buffer, no_meta));
+
+    // Ctrl+Option+b: 끔이면 ESC 없이 Ctrl-B(C0 0x02)만 — meta 합성 안 함.
+    try std.testing.expectEqualStrings("\x1b\x02", try encodeKey(.{ .key = .{ .char = 'b' }, .modifiers = .{ .option = true, .control = true } }, &buffer, .{}));
+    try std.testing.expectEqualStrings("\x02", try encodeKey(.{ .key = .{ .char = 'b' }, .modifiers = .{ .option = true, .control = true } }, &buffer, no_meta));
+
+    // option 없는 키는 플래그와 무관(영향 없음).
+    try std.testing.expectEqualStrings("a", try encodeKey(.{ .key = .{ .char = 'a' }, .modifiers = .{} }, &buffer, no_meta));
 }
 
 test "charKeyFromCodepoint rejects non-scalar codepoints" {

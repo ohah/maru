@@ -122,10 +122,12 @@ pub const FrameLoop = struct {
         self: *FrameLoop,
         resolver: config_mod.KeyBindingResolver,
         event: terminal.KeyEvent,
+        option_as_meta: bool,
     ) !host.KeyHandlingResult {
         // Platform code는 normalized event만 넘긴다. app-vs-terminal 판정은 기존
         // AppHost 정책을 그대로 쓰게 해서 smoke와 제품 loop가 다른 key 정책을 갖지 않게 한다.
-        return host.handleKeyEvent(self.app_window, self.runtime, resolver, event);
+        // option_as_meta(config input.option-as-meta)는 app이 넘긴다 — Option ESC-prefix 여부.
+        return host.handleKeyEvent(self.app_window, self.runtime, resolver, event, option_as_meta);
     }
 
     pub fn resizeActiveSurface(self: *FrameLoop, size: terminal.Size) !void {
@@ -594,7 +596,7 @@ test "app frame loop can reuse an injected frame builder across interactive tick
     const input_result = try loop.handleKeyEvent(resolver, .{
         .key = .{ .char = 'b' },
         .modifiers = .{ .command = true },
-    });
+    }, true);
     try std.testing.expectEqual(@as(usize, "echo maru\n".len), input_result.terminal_input.bytes_len);
     try std.testing.expectEqualStrings("echo maru\n", memory_pty.writes.items);
 
@@ -664,7 +666,7 @@ test "app frame loop routes key events through the same app host policy" {
     const result = try loop.handleKeyEvent(resolver, .{
         .key = .{ .char = 'b' },
         .modifiers = .{ .command = true },
-    });
+    }, true);
     try std.testing.expectEqual(@as(usize, "typed\n".len), result.terminal_input.bytes_len);
     try std.testing.expectEqualStrings("typed\n", memory_pty.writes.items);
 }

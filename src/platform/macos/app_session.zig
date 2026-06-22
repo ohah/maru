@@ -3363,6 +3363,18 @@ pub const AppSession = struct {
             for (std.mem.span(sv)) |c| self.chrome_host.settings.appendSearchCp(c);
             self.refreshSettingsFieldCount();
         }
+        // MARU_OPEN_SETTINGS_PICK=1 — 현재 섹션 첫 color 행을 선택하고 HSV picker를 연다(picker self-verify debug-gate).
+        // theme 섹션(MARU_OPEN_SETTINGS_SECTION=1)과 함께 쓰면 색 그리드를 캡처. color 행이 없으면 무동작.
+        if (std.c.getenv("MARU_OPEN_SETTINGS_PICK") != null) {
+            var scratch = std.heap.ArenaAllocator.init(self.allocator);
+            defer scratch.deinit();
+            if (self.currentSectionFields(scratch.allocator())) |cf| {
+                if (cf.colors.len > 0) {
+                    self.chrome_host.settings.selected = cf.bools.len + cf.nums.len + cf.enums.len + cf.texts.len;
+                    self.toggleSelectedSetting();
+                }
+            } else |_| {}
+        }
     }
 
     /// `maru` CLI를 PATH(`~/.local/bin/maru`)에 symlink 설치한다(커맨드 팝업 "Install CLI"). main.zig install-cli와
@@ -3704,14 +3716,14 @@ pub const AppSession = struct {
         }
         const after_colors = after_texts + cf.colors.len;
         if (sel >= after_texts and sel < after_colors) {
-            // color 행 — 활성(스와치 클릭/Enter) = 다음 16색 프리셋 순환. hex 영역 클릭 편집은 컴포넌트가 enterEdit.
+            // color 행 — 활성(스와치 클릭/Enter) = HSV picker 열기(현재 색으로 시드). 확정은 settings_color_picked →
+            // commitPickerColor. ←→는 별개로 16색 프리셋 순환(adjustSelectedSetting), hex 영역 클릭은 컴포넌트가 enterEdit.
             const ci = sel - after_texts;
             if (ci < cf.colors.len) {
                 const c = cf.colors[ci];
-                if (config_mod.schema.cycleColor(&self.loaded_config.config, c.key, 1)) {
-                    self.reapplyLoadedConfig();
-                    self.markConfigKeyDirty(c.key);
-                }
+                const rgb = config_mod.appearance.parseHexColor(c.value) catch (config_mod.appearance.parseHexColor("#808080") catch unreachable);
+                self.chrome_host.settings.openPicker(rgb);
+                self.metal_dirty = true;
             }
             return;
         }
@@ -3793,6 +3805,27 @@ pub const AppSession = struct {
                 self.markConfigKeyDirty(cf.colors[ci].key);
             }
             return;
+        }
+    }
+
+    /// HSV picker 확정(Enter → settings_color_picked) — settings.pickerRgb()를 #rrggbb로 직렬화해 선택 color 행 키에
+    /// setText로 적용(commitSelectedText의 color 분기와 같은 인덱스 매핑·setter). 라이브 재resolve + write-back 예약 후
+    /// picker 닫기. hex 문자열은 loaded_config.arena 소유(라이브/직렬화가 계속 읽는다). picker 외 행이면 무동작.
+    fn commitPickerColor(self: *AppSession) void {
+        defer self.chrome_host.settings.closePicker(); // 성공/실패 무관 picker 종료(폼 복귀)
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const cf = self.currentSectionFields(scratch.allocator()) catch return;
+        const sel = self.chrome_host.settings.selected;
+        const after_texts = cf.bools.len + cf.nums.len + cf.enums.len + cf.texts.len;
+        const after_colors = after_texts + cf.colors.len;
+        if (sel < after_texts or sel >= after_colors) return; // 선택 행이 color가 아니면(있을 수 없지만 방어) 무동작
+        const ci = sel - after_texts;
+        if (ci >= cf.colors.len) return;
+        const hex = rgbToHex(self.loaded_config.arena.allocator(), self.chrome_host.settings.pickerRgb()) catch return;
+        if (config_mod.schema.setText(&self.loaded_config.config, cf.colors[ci].key, hex)) {
+            self.reapplyLoadedConfig();
+            self.markConfigKeyDirty(cf.colors[ci].key);
         }
     }
 
@@ -4466,6 +4499,7 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
             .settings_delete_row => self.deleteSelectedSettingRow(), // 선택 행 Backspace — env 변수 삭제(해당 행만)
+            .settings_color_picked => self.commitPickerColor(), // HSV picker Enter — pickerRgb()→#rrggbb로 선택 color 행 커밋
         }
     }
 
@@ -5264,6 +5298,7 @@ pub const AppSession = struct {
                 .adjust_left, .adjust_right => .none, // 포인터 경로엔 안 옴(키 전용) — exhaustiveness
                 .search_changed => .none, // 포인터 경로엔 안 옴(검색은 '/'·타이핑 키 전용) — exhaustiveness
                 .delete_row => .none, // 포인터 경로엔 안 옴(삭제는 Backspace 키 전용) — exhaustiveness
+                .color_picked => .none, // 포인터 경로엔 안 옴(picker 확정은 Enter 키 전용; 클릭은 selection_changed) — exhaustiveness
                 .consumed => .none,
             });
             self.metal_dirty = true;
@@ -14774,6 +14809,62 @@ test "settings palette grid: theme 섹션 마지막 행에서 셀 hex 편집 →
     session.chrome_host.settings.enterEdit("#gggggg");
     session.commitSelectedText();
     try std.testing.expectEqualStrings("#abcdef", session.loaded_config.config.theme.palette[5].?); // 거부 — 유지
+}
+
+test "settings HSV picker 커밋: theme color 행 Enter→picker 열림, pickerRgb()→#rrggbb setText + dirty (CS-4-6)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var theme_idx: usize = 0;
+    for (sections, 0..) |s, i| if (s.section == .theme) {
+        theme_idx = i;
+    };
+    session.chrome_host.settings.show();
+    session.chrome_host.settings.section = theme_idx;
+
+    // theme 섹션 첫 color 행 선택(bool+num+enum+text 다음).
+    const cf = try session.currentSectionFields(scratch.allocator());
+    try std.testing.expect(cf.colors.len > 0);
+    const first_color = cf.bools.len + cf.nums.len + cf.enums.len + cf.texts.len;
+    session.chrome_host.settings.selected = first_color;
+    const key = cf.colors[0].key;
+
+    // Enter(toggle) → HSV picker 열림(현재 색 시드).
+    session.toggleSelectedSetting();
+    try std.testing.expect(session.chrome_host.settings.picking);
+
+    // 순수 빨강으로 설정 후 커밋 → 그 color 키 = #ff0000, dirty 예약, picker 닫힘.
+    session.chrome_host.settings.pick_h = 0;
+    session.chrome_host.settings.pick_s = 100;
+    session.chrome_host.settings.pick_v = 100;
+    session.config_dirty_keys.clearRetainingCapacity();
+    session.commitPickerColor();
+    try std.testing.expect(!session.chrome_host.settings.picking); // 커밋 후 닫힘(폼 복귀)
+    var found = false;
+    for (session.config_dirty_keys.items) |k| if (std.mem.eql(u8, k, key)) {
+        found = true;
+    };
+    try std.testing.expect(found);
+
+    // 재빌드한 color 값이 빨강으로 갱신(포맷/대소문자 무관하게 parse해 RGB 비교).
+    const cf2 = try session.currentSectionFields(scratch.allocator());
+    const rgb = try config_mod.appearance.parseHexColor(cf2.colors[0].value);
+    try std.testing.expectEqual(@as(u8, 255), rgb.r);
+    try std.testing.expectEqual(@as(u8, 0), rgb.g);
+    try std.testing.expectEqual(@as(u8, 0), rgb.b);
 }
 
 test "settings keybind recorder: 입력 섹션 행 녹음→캡처→rebind + 영속 예약, Esc 취소 (CS-4-3)" {

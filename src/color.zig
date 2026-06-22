@@ -14,6 +14,75 @@ pub const Rgb = struct {
     b: u8,
 };
 
+/// HSV 색(세팅 GUI 색 picker용). h=색상(0~359도), s=채도(0~100%), v=명도(0~100%). 정수라 셀-그리드 picker의
+/// 이산 선택과 맞물린다. RGB와 round-trip은 양자화 때문에 근사다(picker는 셀 해상도라 충분).
+pub const Hsv = struct { h: u16, s: u8, v: u8 };
+
+/// HSV→RGB(표준 변환). h 0~359, s·v 0~100. 색 picker가 그리드 셀·선택값을 화면색으로 푼다.
+pub fn hsvToRgb(hsv: Hsv) Rgb {
+    const h: f32 = @floatFromInt(@mod(hsv.h, 360));
+    const s: f32 = @as(f32, @floatFromInt(@min(hsv.s, 100))) / 100.0;
+    const v: f32 = @as(f32, @floatFromInt(@min(hsv.v, 100))) / 100.0;
+    const c = v * s; // chroma
+    const hp = h / 60.0;
+    const x = c * (1.0 - @abs(@mod(hp, 2.0) - 1.0));
+    const m = v - c;
+    var r: f32 = 0;
+    var g: f32 = 0;
+    var b: f32 = 0;
+    if (hp < 1.0) {
+        r = c;
+        g = x;
+    } else if (hp < 2.0) {
+        r = x;
+        g = c;
+    } else if (hp < 3.0) {
+        g = c;
+        b = x;
+    } else if (hp < 4.0) {
+        g = x;
+        b = c;
+    } else if (hp < 5.0) {
+        r = x;
+        b = c;
+    } else {
+        r = c;
+        b = x;
+    }
+    return .{
+        .r = @intFromFloat(@round((r + m) * 255.0)),
+        .g = @intFromFloat(@round((g + m) * 255.0)),
+        .b = @intFromFloat(@round((b + m) * 255.0)),
+    };
+}
+
+/// RGB→HSV(표준 변환). picker가 현재 색에서 초기 h/s/v를 잡을 때. s·v는 0~100, h는 0~359로 반올림.
+pub fn rgbToHsv(rgb: Rgb) Hsv {
+    const r: f32 = @as(f32, @floatFromInt(rgb.r)) / 255.0;
+    const g: f32 = @as(f32, @floatFromInt(rgb.g)) / 255.0;
+    const b: f32 = @as(f32, @floatFromInt(rgb.b)) / 255.0;
+    const max = @max(r, @max(g, b));
+    const min = @min(r, @min(g, b));
+    const d = max - min;
+    var h: f32 = 0;
+    if (d > 0.00001) {
+        if (max == r) {
+            h = 60.0 * @mod((g - b) / d, 6.0);
+        } else if (max == g) {
+            h = 60.0 * ((b - r) / d + 2.0);
+        } else {
+            h = 60.0 * ((r - g) / d + 4.0);
+        }
+    }
+    if (h < 0) h += 360.0;
+    const s: f32 = if (max > 0.00001) d / max else 0;
+    return .{
+        .h = @intFromFloat(@round(@mod(h, 360.0))),
+        .s = @intFromFloat(@round(s * 100.0)),
+        .v = @intFromFloat(@round(max * 100.0)),
+    };
+}
+
 // 표준 xterm 16색 팔레트(0..15). 터미널 `Color.indexed`를 화면 RGB로 풀 때 쓴다.
 const ansi16 = [16]Rgb{
     .{ .r = 0, .g = 0, .b = 0 }, // 0 black
@@ -95,6 +164,29 @@ test "rgb holds three independent 8-bit channels" {
     try std.testing.expectEqual(@as(u8, 0x10), c.r);
     try std.testing.expectEqual(@as(u8, 0x20), c.g);
     try std.testing.expectEqual(@as(u8, 0x30), c.b);
+}
+
+test "hsvToRgb / rgbToHsv: 기준색 변환 + round-trip 근사 (색 picker)" {
+    // 기준: 순수 빨강/초록/파랑/흰/검.
+    try std.testing.expectEqual(Rgb{ .r = 255, .g = 0, .b = 0 }, hsvToRgb(.{ .h = 0, .s = 100, .v = 100 }));
+    try std.testing.expectEqual(Rgb{ .r = 0, .g = 255, .b = 0 }, hsvToRgb(.{ .h = 120, .s = 100, .v = 100 }));
+    try std.testing.expectEqual(Rgb{ .r = 0, .g = 0, .b = 255 }, hsvToRgb(.{ .h = 240, .s = 100, .v = 100 }));
+    try std.testing.expectEqual(Rgb{ .r = 255, .g = 255, .b = 255 }, hsvToRgb(.{ .h = 0, .s = 0, .v = 100 }));
+    try std.testing.expectEqual(Rgb{ .r = 0, .g = 0, .b = 0 }, hsvToRgb(.{ .h = 0, .s = 0, .v = 0 }));
+    // rgbToHsv 기준.
+    const red = rgbToHsv(.{ .r = 255, .g = 0, .b = 0 });
+    try std.testing.expectEqual(@as(u16, 0), red.h);
+    try std.testing.expectEqual(@as(u8, 100), red.s);
+    try std.testing.expectEqual(@as(u8, 100), red.v);
+    // round-trip 근사: hsv→rgb→hsv가 양자화 오차 내에서 같다(채널당 ±3, h ±2도).
+    const cases = [_]Hsv{ .{ .h = 30, .s = 80, .v = 90 }, .{ .h = 200, .s = 50, .v = 70 }, .{ .h = 300, .s = 100, .v = 40 } };
+    for (cases) |c| {
+        const back = rgbToHsv(hsvToRgb(c));
+        try std.testing.expect(@abs(@as(i32, back.s) - @as(i32, c.s)) <= 3);
+        try std.testing.expect(@abs(@as(i32, back.v) - @as(i32, c.v)) <= 3);
+        const dh = @abs(@as(i32, back.h) - @as(i32, c.h));
+        try std.testing.expect(dh <= 2 or dh >= 358); // h wrap
+    }
 }
 
 test "xterm256 resolves ansi, color cube, and grayscale ranges" {

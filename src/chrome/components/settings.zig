@@ -20,6 +20,7 @@ const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭
 const toggle = @import("toggle.zig");
 const slider = @import("slider.zig");
 const dropdown = @import("dropdown.zig");
+const color_mod = @import("../../color.zig"); // HSV picker — hsvToRgb/rgbToHsv/Hsv
 const color = @import("color.zig");
 
 /// 최상위 모달 레이어(palette/notice와 동일).
@@ -65,6 +66,47 @@ const edit_cap: usize = 128;
 /// 검색 쿼리 버퍼 용량(바이트) — 짧은 키워드면 충분(고정 버퍼).
 const search_cap: usize = 64;
 
+// HSV 색 picker 기하 — SV 그리드(채도 col × 명도 row) + hue 스트립. 셀-그리드 tui라 이산 해상도(셀 단위 샘플).
+const pick_sv_cols: u32 = 16; // 채도 0~100
+const pick_sv_rows: u32 = 8; // 명도 100~0(위→아래)
+const pick_swatch_w: u32 = 2; // 셀당 2칸(가시성)
+const pick_hue_cols: u32 = 16; // hue 0~360
+const pick_help = "←→ 채도  ↑↓ 명도  [ ] 색상  Enter 확정  Esc 취소";
+// picker 콘텐츠 행: 제목(0) + SV 그리드(1..pick_sv_rows) + hue 스트립 + 미리보기 + 도움말.
+const pick_hue_row: u32 = 1 + pick_sv_rows;
+const pick_preview_row: u32 = pick_hue_row + 1;
+const pick_help_row: u32 = pick_hue_row + 2;
+const pick_content_rows: u32 = pick_help_row + 1;
+
+// SV 그리드/hue 스트립의 셀↔값 매핑(이산 샘플). col→채도, row→명도(위가 높음), col→색상. 역함수는 현재 h/s/v를
+// 가장 가까운 셀로 스냅(마커 위치·키 스텝). 정수 반올림(+분모/2)으로 양 끝(0/100, 0/360)에 정확히 닿는다.
+fn svSatForCol(col: u32) u8 {
+    return @intCast(col * 100 / (pick_sv_cols - 1));
+}
+fn svValForRow(row: u32) u8 {
+    return @intCast((pick_sv_rows - 1 - row) * 100 / (pick_sv_rows - 1));
+}
+fn svColForSat(s: u8) u32 {
+    return (@as(u32, s) * (pick_sv_cols - 1) + 50) / 100;
+}
+fn svRowForVal(v: u8) u32 {
+    return (pick_sv_rows - 1) - (@as(u32, v) * (pick_sv_rows - 1) + 50) / 100;
+}
+fn hueForCol(col: u32) u16 {
+    return @intCast(col * 360 / pick_hue_cols);
+}
+fn hueColForHue(h: u16) u32 {
+    return (@as(u32, h) * pick_hue_cols / 360) % pick_hue_cols;
+}
+
+/// picker 모달 박스 기하 — renderPicker와 handlePointer가 같은 출처로 공유(hit-test/렌더 일관). SV 그리드 폭과
+/// 도움말 폭 중 큰 쪽으로 content_cols. null이면 화면이 너무 좁음.
+fn pickerLayout(p: props.ChromeProps, tk: *const tokens.Tokens) ?modal_box.Box {
+    const sv_w = pick_sv_cols * pick_swatch_w;
+    const help_cols: u32 = @intCast(overlay_input.displayCols(pick_help));
+    return modal_box.layout(@max(sv_w, help_cols), pick_content_rows, p, tk);
+}
+
 pub const State = struct {
     open: bool = false,
     selected: usize = 0,
@@ -94,6 +136,12 @@ pub const State = struct {
     searching: bool = false,
     search_buf: [search_cap]u8 = undefined,
     search_len: usize = 0,
+    /// HSV 색 picker 모드(color 행 활성 시 platform이 openPicker로 켬). 켜지면 폼 대신 SV 그리드 + hue 스트립을 그리고
+    /// ←→(채도)·↑↓(명도)·`[`/`]`(색상)·포인터로 h/s/v를 고른다. Enter 확정(platform이 hex→setText), Esc 취소. h 0~359·s/v 0~100.
+    picking: bool = false,
+    pick_h: u16 = 0,
+    pick_s: u8 = 0,
+    pick_v: u8 = 0,
 
     pub fn show(self: *State) void {
         self.open = true;
@@ -105,6 +153,22 @@ pub const State = struct {
         self.recording = false;
         self.searching = false;
         self.search_len = 0;
+        self.picking = false;
+    }
+    /// HSV picker 열기(platform이 color 행 활성 시 호출 — 현재 색 rgb로 초기 h/s/v 시드). 폼 키/포인터가 picker로 라우팅된다.
+    pub fn openPicker(self: *State, rgb: color_mod.Rgb) void {
+        const hsv = color_mod.rgbToHsv(rgb);
+        self.pick_h = hsv.h;
+        self.pick_s = hsv.s;
+        self.pick_v = hsv.v;
+        self.picking = true;
+    }
+    pub fn closePicker(self: *State) void {
+        self.picking = false;
+    }
+    /// 현재 선택 h/s/v의 RGB(미리보기·확정 hex 산출). platform이 확정 시 #rrggbb로 직렬화.
+    pub fn pickerRgb(self: *const State) color_mod.Rgb {
+        return color_mod.hsvToRgb(.{ .h = self.pick_h, .s = self.pick_s, .v = self.pick_v });
     }
     /// 섹션 전환(좌측 네비 클릭) — 선택 섹션과 첫 필드로. platform이 새 섹션 필드 수를 setFieldCount로 다시 준다.
     pub fn selectSection(self: *State, i: usize) void {
@@ -116,6 +180,7 @@ pub const State = struct {
         self.recording = false;
         self.searching = false; // 섹션 바꾸면 검색 초기화(필터는 섹션 내라)
         self.search_len = 0;
+        self.picking = false;
     }
     /// 검색 쿼리(현재 버퍼). platform이 currentSectionFields에서 읽어 행을 필터한다.
     pub fn searchQuery(self: *const State) []const u8 {
@@ -191,6 +256,7 @@ pub const State = struct {
         self.recording = false;
         self.searching = false;
         self.search_len = 0;
+        self.picking = false;
     }
     pub fn setFieldCount(self: *State, n: usize) void {
         self.count = n;
@@ -208,7 +274,7 @@ pub const State = struct {
 /// handle/handlePointer가 돌려주는 intent. platform이 rows[selected] 기준으로 처리:
 ///   toggle=bool flip, slider_set=pending_ratio→값 매핑, adjust_left/right=slider 한 스텝, selection_changed=재렌더,
 ///   close=hide, consumed=소비만(모달 뒤로 안 샘). 값 종류 판정(toggle인지 slider인지)은 platform이 rows로 한다.
-pub const Action = enum { close, toggle, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, delete_row, consumed };
+pub const Action = enum { close, toggle, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, delete_row, color_picked, consumed };
 
 const label_gap_cols: u32 = 2; // 라벨과 우측 위젯 사이 최소 간격(칸)
 
@@ -349,6 +415,7 @@ pub fn view(
     out: *std.ArrayList(draw.Op),
 ) !void {
     if (!state.open) return;
+    if (state.picking) return renderPicker(state, p, tk, arena, out); // HSV picker 모드 — 폼 대신 그리드+스트립
     const l = computeLayout(sections, rows, state.selected, p, tk) orelse return;
     const box = l.box;
     try modal_box.frame(box, p, arena, out);
@@ -466,9 +533,108 @@ pub fn view(
     }
 }
 
+/// 선택 마커 ▾를 (x, row) 셀 위에 accent text로 얹는다(palette와 같은 이유 — Op.border는 tui lowering이 셀 전체를
+/// 칠해 스와치 색을 덮으므로 마커 글리프를 text 레이어로). 스와치 bg는 거의 안 가린다.
+fn pickerMarker(box: modal_box.Box, x: i32, row: u32, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
+    const marker = try arena.alloc(draw.Run, 1);
+    marker[0] = .{ .text = "▾" };
+    try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = modal_box.rowY(box, row) }, .runs = marker, .role = .accent_bar } });
+}
+
+/// HSV picker 렌더 — SV 그리드(채도 col × 명도 row 원색 스와치, 현재 hue 고정) + hue 스트립(채도·명도 100) + 미리보기
+/// 스와치 + "#rrggbb  H S V" + 도움말. 셀-그리드라 이산 샘플. 선택 셀은 ▾ 마커(스와치를 안 덮음 — pickerMarker 주석).
+fn renderPicker(
+    state: *const State,
+    p: props.ChromeProps,
+    tk: *const tokens.Tokens,
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(draw.Op),
+) !void {
+    const box = pickerLayout(p, tk) orelse return;
+    try modal_box.frame(box, p, arena, out);
+    try modal_box.text(box, box.inner_x, 0, "HSV 색 선택", .accent_bar, arena, out);
+
+    const sw_px: i32 = @intCast(pick_swatch_w * box.cw);
+    // SV 그리드 — 행 1..pick_sv_rows. 각 셀은 (col→채도, row→명도)로 현재 hue의 원색.
+    var ry: u32 = 0;
+    while (ry < pick_sv_rows) : (ry += 1) {
+        var cx: u32 = 0;
+        while (cx < pick_sv_cols) : (cx += 1) {
+            const rgb = color_mod.hsvToRgb(.{ .h = state.pick_h, .s = svSatForCol(cx), .v = svValForRow(ry) });
+            const rect = draw.Rect{ .x = box.inner_x + @as(i32, @intCast(cx)) * sw_px, .y = modal_box.rowY(box, 1 + ry), .w = pick_swatch_w * box.cw, .h = box.ch };
+            try out.append(arena, .{ .swatch = .{ .rect = rect, .rgb = rgb } });
+        }
+    }
+    const sel_col = svColForSat(state.pick_s);
+    const sel_row = svRowForVal(state.pick_v);
+    try pickerMarker(box, box.inner_x + @as(i32, @intCast(sel_col)) * sw_px, 1 + sel_row, arena, out);
+
+    // hue 스트립 — 채도·명도 100 고정, col→색상.
+    var hc: u32 = 0;
+    while (hc < pick_hue_cols) : (hc += 1) {
+        const rgb = color_mod.hsvToRgb(.{ .h = hueForCol(hc), .s = 100, .v = 100 });
+        const rect = draw.Rect{ .x = box.inner_x + @as(i32, @intCast(hc)) * sw_px, .y = modal_box.rowY(box, pick_hue_row), .w = pick_swatch_w * box.cw, .h = box.ch };
+        try out.append(arena, .{ .swatch = .{ .rect = rect, .rgb = rgb } });
+    }
+    try pickerMarker(box, box.inner_x + @as(i32, @intCast(hueColForHue(state.pick_h))) * sw_px, pick_hue_row, arena, out);
+
+    // 미리보기 스와치(현재 효과색) + "#rrggbb  H S V".
+    const cur = state.pickerRgb();
+    const preview = draw.Rect{ .x = box.inner_x, .y = modal_box.rowY(box, pick_preview_row), .w = pick_swatch_w * box.cw, .h = box.ch };
+    try out.append(arena, .{ .swatch = .{ .rect = preview, .rgb = cur } });
+    const info = try std.fmt.allocPrint(arena, "#{x:0>2}{x:0>2}{x:0>2}  H{d} S{d} V{d}", .{ cur.r, cur.g, cur.b, state.pick_h, state.pick_s, state.pick_v });
+    try modal_box.text(box, box.inner_x + sw_px + @as(i32, @intCast(box.cw)), pick_preview_row, info, .surface_fg, arena, out);
+
+    try modal_box.text(box, box.inner_x, pick_help_row, pick_help, .surface_fg, arena, out);
+}
+
 /// 키 처리(열려 있을 때만 host 호출). ↑↓=행 이동, ←→=선택 행 조절(slider 스텝; toggle은 platform이 무시), Space/Enter=
 /// 선택 행 활성(toggle flip; slider는 무시), Esc=닫기, 그 외=소비. 값 종류 판정은 platform이 rows[selected]로 한다.
 pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
+    // HSV picker 모드 — ←→ 채도, ↑↓ 명도, `[`/`]` 색상, Enter 확정(.color_picked → platform이 hex 커밋), Esc 취소. 그 외 소비.
+    if (state.picking) {
+        switch (k.key) {
+            .escape => {
+                state.closePicker();
+                return .selection_changed; // picker만 닫고 폼 복귀(모달 유지)
+            },
+            .enter => return .color_picked,
+            .left => {
+                const col = svColForSat(state.pick_s);
+                if (col > 0) state.pick_s = svSatForCol(col - 1);
+                return .selection_changed;
+            },
+            .right => {
+                const col = svColForSat(state.pick_s);
+                if (col + 1 < pick_sv_cols) state.pick_s = svSatForCol(col + 1);
+                return .selection_changed;
+            },
+            .up => {
+                const row = svRowForVal(state.pick_v);
+                if (row > 0) state.pick_v = svValForRow(row - 1);
+                return .selection_changed;
+            },
+            .down => {
+                const row = svRowForVal(state.pick_v);
+                if (row + 1 < pick_sv_rows) state.pick_v = svValForRow(row + 1);
+                return .selection_changed;
+            },
+            .char => {
+                if (k.codepoint == '[') {
+                    const c = hueColForHue(state.pick_h);
+                    state.pick_h = hueForCol((c + pick_hue_cols - 1) % pick_hue_cols);
+                    return .selection_changed;
+                }
+                if (k.codepoint == ']') {
+                    const c = hueColForHue(state.pick_h);
+                    state.pick_h = hueForCol((c + 1) % pick_hue_cols);
+                    return .selection_changed;
+                }
+                return .consumed;
+            },
+            else => return .consumed,
+        }
+    }
     // 인라인 편집 중이면 키를 편집 버퍼로 라우팅한다(Enter=커밋, Esc=취소, Backspace/글자=버퍼 편집). 다른 키는 소비.
     if (state.editing) {
         switch (k.key) {
@@ -543,6 +709,50 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
     }
 }
 
+/// HSV picker 포인터 — down/move(드래그)로 SV 그리드 셀→s/v, hue 스트립 셀→h. 박스 밖 down=picker 취소(폼 복귀, 모달
+/// 유지). up·비-히트는 소비. 기하는 renderPicker와 같은 pickerLayout 출처.
+fn pickerPointer(ev: input.PointerEvent, p: props.ChromeProps, tk: *const tokens.Tokens, state: *State) Action {
+    if (ev.phase == .up) {
+        state.dragging = false;
+        return .consumed;
+    }
+    const box = pickerLayout(p, tk) orelse return .consumed;
+    const bx: f64 = @floatFromInt(box.rect.x);
+    const by: f64 = @floatFromInt(box.rect.y);
+    const inside = ev.x_px >= bx and ev.x_px < bx + @as(f64, @floatFromInt(box.rect.w)) and
+        ev.y_px >= by and ev.y_px < by + @as(f64, @floatFromInt(box.rect.h));
+    if (ev.phase == .down and !inside) {
+        state.closePicker();
+        return .selection_changed; // 밖 클릭 → picker만 취소
+    }
+    if (ev.phase == .move and !state.dragging) return .consumed; // 버튼 안 누른 hover는 값 안 바꿈(폼 move 가드와 동일)
+    if (ev.phase == .down) state.dragging = true; // 박스 안 down → 드래그 시작(이후 move가 그리드 추적)
+    if (!inside) return .consumed; // 드래그가 밖으로 나가도 모달은 유지(값만 안 바뀜)
+    // 셀 col/row = (px - inner) / (셀폭·행높이). 그리드 좌단은 inner_x, 셀폭은 pick_swatch_w*cw.
+    const sw_px: f64 = @floatFromInt(pick_swatch_w * box.cw);
+    const ch_px: f64 = @floatFromInt(box.ch);
+    const inner_x: f64 = @floatFromInt(box.inner_x);
+    const col_f = (ev.x_px - inner_x) / sw_px;
+    if (col_f < 0) return .consumed;
+    const sv_y0: f64 = @floatFromInt(modal_box.rowY(box, 1));
+    const hue_y0: f64 = @floatFromInt(modal_box.rowY(box, pick_hue_row));
+    if (ev.y_px >= sv_y0 and ev.y_px < sv_y0 + @as(f64, @floatFromInt(pick_sv_rows)) * ch_px) {
+        const col: u32 = @intFromFloat(col_f);
+        if (col >= pick_sv_cols) return .consumed;
+        const row: u32 = @intFromFloat((ev.y_px - sv_y0) / ch_px);
+        state.pick_s = svSatForCol(col);
+        state.pick_v = svValForRow(@min(row, pick_sv_rows - 1));
+        return .selection_changed;
+    }
+    if (ev.y_px >= hue_y0 and ev.y_px < hue_y0 + ch_px) {
+        const col: u32 = @intFromFloat(col_f);
+        if (col >= pick_hue_cols) return .consumed;
+        state.pick_h = hueForCol(col);
+        return .selection_changed;
+    }
+    return .consumed;
+}
+
 /// 포인터 처리(열려 있을 때만). up=드래그 종료(소비). down=박스 밖이면 닫기, 안이면 행 선택 후 위젯별:
 ///   slider 위→드래그 시작 + pending_ratio + .slider_set, toggle 위→.toggle, 그 외(라벨)→.selection_changed.
 ///   move=드래그 중이고 선택 행이 slider면 pending_ratio 갱신 + .slider_set, 아니면 소비. 우클릭=소비.
@@ -555,6 +765,8 @@ pub fn handlePointer(
     state: *State,
 ) Action {
     if (ev.button != .left) return .consumed;
+    // HSV picker 모드 — SV 그리드/hue 스트립 클릭·드래그로 s/v·h 선택, 박스 밖 클릭은 picker 취소(폼 복귀). 폼 hit-test 안 함.
+    if (state.picking) return pickerPointer(ev, p, tk, state);
     const l = computeLayout(sections, rows, state.selected, p, tk) orelse return .consumed;
     const box = l.box;
 
@@ -1010,6 +1222,80 @@ test "settings palette_grid: 16 스와치 + 선택 셀 테두리·hex 렌더, �
     try std.testing.expectEqual(Action.selection_changed, a2);
     try std.testing.expect(s.editing);
     try std.testing.expectEqualStrings("#000000", s.editText());
+}
+
+test "settings HSV picker: openPicker 시드·SV/hue 스와치 렌더·←→↑↓[] 조절·Enter=color_picked·Esc 취소·클릭 hit-test (CS-4-6)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = testTokens();
+    const rows = [_]FieldRow{.{ .label = "BG", .kind = .{ .color = .{ .hex = "#ff0000", .rgb = .{ .r = 255, .g = 0, .b = 0 } } } }};
+    var s = State{};
+    s.show();
+    s.setFieldCount(rows.len);
+
+    // openPicker: 순수 빨강 → s=100, v=100. pickerRgb 왕복 근사(rgb→hsv→rgb, ±3).
+    s.openPicker(.{ .r = 255, .g = 0, .b = 0 });
+    try std.testing.expect(s.picking);
+    try std.testing.expectEqual(@as(u8, 100), s.pick_s);
+    try std.testing.expectEqual(@as(u8, 100), s.pick_v);
+    const rt = s.pickerRgb();
+    try std.testing.expect(rt.r >= 252 and rt.g <= 3 and rt.b <= 3);
+
+    // view(picking): SV 그리드(16×8) + hue(16) + 미리보기(1) 스와치 + 마커 ▾ 2개 + 도움말 텍스트.
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    var swatch_count: usize = 0;
+    var marker_count: usize = 0;
+    var has_help = false;
+    for (out.items) |op| {
+        if (op == .swatch) swatch_count += 1;
+        if (op == .text and std.mem.eql(u8, op.text.runs[0].text, "▾")) marker_count += 1;
+        if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, "채도") != null) has_help = true;
+    }
+    try std.testing.expectEqual(@as(usize, pick_sv_cols * pick_sv_rows + pick_hue_cols + 1), swatch_count);
+    try std.testing.expectEqual(@as(usize, 2), marker_count); // SV 선택 + hue 선택
+    try std.testing.expect(has_help);
+    for (out.items) |op| if (op == .border) try std.testing.expect(op.border.role != .accent_bar); // 스와치 안 덮음(마커는 text)
+
+    // handle: ← 채도 감소, → 복귀, ↓ 명도 감소, [ 색상 한 칸 뒤로(0→마지막 칸 wrap).
+    const s_before = s.pick_s;
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .left }, &s));
+    try std.testing.expect(s.pick_s < s_before);
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .right }, &s));
+    try std.testing.expectEqual(s_before, s.pick_s);
+    const v_before = s.pick_v;
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .down }, &s));
+    try std.testing.expect(s.pick_v < v_before);
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .char, .codepoint = '[' }, &s));
+    try std.testing.expect(s.pick_h != 0); // 0 → 마지막 hue 칸
+
+    // Enter → .color_picked(platform이 hex 커밋). picker는 platform이 닫는다(컴포넌트는 유지).
+    try std.testing.expectEqual(Action.color_picked, handle(.{ .key = .enter }, &s));
+    try std.testing.expect(s.picking);
+
+    // Esc → picker 취소(closePicker) + selection_changed(모달은 유지).
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .escape }, &s));
+    try std.testing.expect(!s.picking);
+
+    // handlePointer: 다시 열고 SV 그리드 col 0·row 0 클릭 → s=0, v=100.
+    s.openPicker(.{ .r = 255, .g = 0, .b = 0 });
+    const box = pickerLayout(test_props, &tk).?;
+    const sw_px: i32 = @intCast(pick_swatch_w * box.cw);
+    const pa = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(box.inner_x + 1), .y_px = @floatFromInt(modal_box.rowY(box, 1) + 2) }, no_sections, &rows, test_props, &tk, &s);
+    try std.testing.expectEqual(Action.selection_changed, pa);
+    try std.testing.expectEqual(@as(u8, 0), s.pick_s);
+    try std.testing.expectEqual(@as(u8, 100), s.pick_v);
+
+    // hue 스트립 col 8 클릭 → h = hueForCol(8).
+    const ha = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(box.inner_x + 8 * sw_px + 1), .y_px = @floatFromInt(modal_box.rowY(box, pick_hue_row) + 2) }, no_sections, &rows, test_props, &tk, &s);
+    try std.testing.expectEqual(Action.selection_changed, ha);
+    try std.testing.expectEqual(hueForCol(8), s.pick_h);
+
+    // 박스 밖 클릭 → picker 취소(폼 복귀).
+    const oa = handlePointer(.{ .phase = .down, .x_px = -10, .y_px = -10 }, no_sections, &rows, test_props, &tk, &s);
+    try std.testing.expectEqual(Action.selection_changed, oa);
+    try std.testing.expect(!s.picking);
 }
 
 test "settings 검색: '/'로 시작·char 쿼리·Backspace·↑↓ 나비·Enter 활성·Esc 종료 + 제목 렌더 (CS-4-4 검색)" {

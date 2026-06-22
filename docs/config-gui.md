@@ -9,7 +9,7 @@ PR 분해를 단일 출처로 둔다. config 키·메타는 [config-schema.md], 
 
 > 상태(2026-06): **CS-4 구현 진행**. 스키마 토대(CS-1·CS-2·CS-2b·CS-3)에 더해 CS-4-0(pointer)·CS-4-1(toggle·
 > slider·dropdown·text)·CS-4-2(color)·CS-4-4(세팅 페이지 셸 — Section 네비·폼 스크롤·즉시 write-back)가 머지됐다.
-> CS-4-3(keybind recorder)·CS-4-5 bespoke 에디터(palette·env·shell.args)도 머지됐다. 후속은 CS-4-6(HSV picker)·상단 검색·unbind/충돌 UI.
+> CS-4-3(keybind recorder)·CS-4-5 bespoke 에디터(palette·env·shell.args)·CS-4-6(HSV picker)도 머지됐다. 후속은 picker 연속 해상도·alpha 등 고급화.
 > **CS-4는 시각/상호작용이라** 각 PR을 머지 전 `zig build macos-app`로 실기 확인한다(스키마 PR처럼 헤드리스
 > 단위만으로 blind 머지하지 않는다 — [run-macos-app-before-merge] 규율).
 
@@ -96,7 +96,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | GPU quad/rounded/shadow | `ChromeDraw.quad` + 토큰 | — |
 | 입력 라우팅 | `ChromeHost`(모달 우선순위) | pointer + 위젯 State |
 | **슬라이더** | divider `dragRatio` 참고 | bar+thumb view + 드래그 |
-| **color input** | quad + 토큰 | 1차: 16색 프리셋 + hex 입력(text 재사용); 2차: HSV picker |
+| **color input** | quad + 토큰 | 1차 ✅ 16색 프리셋 + hex 입력(text 재사용); 2차 ✅ HSV picker(§6.9) |
 | **keybind recorder** | `input.InputEvent` 그대로 | 녹음 State(키 캡처) |
 
 > 핵심 리스크 2개: **color picker**(2차 HSV는 색공간 수학·2D 그리드 — 1차는 16색+hex로 우회) + **pointer
@@ -115,11 +115,12 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 **text(widget `.text` = 폰트 패밀리)**: 인라인 편집. 행을 클릭/Enter하면 편집 모드(현재값 시드) — 글자/Backspace로 고치고 Enter 커밋, Esc 취소. 편집 버퍼는 컴포넌트 State의 **고정 버퍼**(`edit_buf[128]`)라 별도 allocator가 없다. 커밋 시 platform이 `editText()`를 **config arena에 dupe**해 `schema.setText`로 적용(라이브 재resolve + write-back, 검증 포함) — 라이브/직렬화가 슬라이스를 계속 읽으므로 config arena가 소유한다.
 
-**color(widget `.color` = `#RRGGBB`)**: **스와치 + hex**(`components/color.zig`). 스와치는 `Op.swatch`(literal RGB)로 실제 색을 보여준다 — 다른 op은 색을 `ColorRole`(테마 토큰)로 두지만 스와치는 "이 색이 무엇인지"를 보여주는 **값 미리보기**라 의도적 예외로 원색을 싣는다(**raw-RGB draw 프리미티브** — role 추상화의 명시적 확장, CS-4-2 결정). platform이 `parseHexColor`로 RGB를 만들어 주입한다(chrome은 config 무지 유지). 인터랙션 두 zone:
-- **스와치 클릭 / ←→ / Enter** → 16색 프리셋(`schema.color_presets`, 중립+dracula+maru 앰버) 순환(`cycleColor`). 정적 리터럴이라 dupe 없이 대입.
+**color(widget `.color` = `#RRGGBB`)**: **스와치 + hex**(`components/color.zig`). 스와치는 `Op.swatch`(literal RGB)로 실제 색을 보여준다 — 다른 op은 색을 `ColorRole`(테마 토큰)로 두지만 스와치는 "이 색이 무엇인지"를 보여주는 **값 미리보기**라 의도적 예외로 원색을 싣는다(**raw-RGB draw 프리미티브** — role 추상화의 명시적 확장, CS-4-2 결정). platform이 `parseHexColor`로 RGB를 만들어 주입한다(chrome은 config 무지 유지). 인터랙션 세 zone:
+- **스와치 클릭 / Enter** → **HSV picker 열기**(현재 색으로 시드 — §6.9). 임의 색을 그리드로 고른다(2차 색 선택, CS-4-6).
+- **←→** → 16색 프리셋(`schema.color_presets`, 중립+dracula+maru 앰버) 순환(`cycleColor`). 정적 리터럴이라 dupe 없이 대입(빠른 선택 — picker 없이 한 손).
 - **hex 클릭** → 인라인 편집(text 위젯 재사용 — `editText`→`setText`, hex 검증).
 
-- **미구현(후속)**: 프리셋 **팝업 그리드**(현재는 사이클러), 옵셔널 색(`?[]const u8` sidebar 파생색), IME 조합 편집, 값 길이에 따른 박스 폭 확장, color 스와치의 rich(둥근 quad) 렌더(현재 셀 bg).
+- **미구현(후속)**: 옵셔널 색(`?[]const u8` sidebar 파생색), IME 조합 편집, 값 길이에 따른 박스 폭 확장, color 스와치의 rich(둥근 quad) 렌더(현재 셀 bg), picker의 연속(non-discrete) 해상도·alpha.
 
 ### 6.3 테마 프리셋(named 테마) — 특수 행
 
@@ -180,6 +181,16 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **교차 섹션 검색**: 쿼리가 있으면(`cross = q.len>0`) 섹션 게이트(`x.section==sel_sec`)를 무시해 **전 섹션**의 매칭 행을 보여준다(설정이 어느 섹션인지 몰라도 찾는다). 빈 쿼리면 현재 섹션만. 교차 검색에선 palette(theme)·keybind(input)가 함께 나올 수 있어 `keybindRowStart`가 palette 한 행 오프셋을 더해 인덱스 충돌을 막는다(필터·인덱싱 단일 출처는 `currentSectionFields`).
 - **한계(후속)**: 검색 활성화는 `/` 키(클릭 진입점은 후속), 교차 결과에 섹션 라벨 접두는 후속.
 
+### 6.9 HSV 색 picker(임의 색 선택) — color 위젯 모드 (CS-4-6)
+
+16색 프리셋(§6.2)만으로 못 고르는 임의 색을 위해 **HSV picker**를 둔다. **새 ChromeHost 모달이 아니라 세팅 모달의 모드**(`State.picking`)다 — picker가 켜지면 `settings.view`가 폼 대신 picker를 그리고(early-return) 키/포인터가 picker로 라우팅된다(host 배선 추가 없이 기존 settings 경로 재사용).
+
+- **HSV↔RGB**: `src/color.zig`의 `hsvToRgb`/`rgbToHsv`(`Hsv{h:0~359, s:0~100, v:0~100}`). 표준 변환(round-trip ±3 — 단위 테스트가 못박음). 색공간 수학은 chrome이 아니라 `color.zig`(렌더러 계층 공유 유틸)에 둔다.
+- **레이아웃(셀-그리드 tui)**: ① **SV 그리드** — 채도(col 16칸) × 명도(row 8칸)의 원색 스와치(현재 hue 고정, 위가 명도 100). ② **hue 스트립** — 색상(col 16칸, 채도·명도 100). ③ **미리보기** — 현재 효과색 스와치 + `#rrggbb  H S V`. ④ 도움말. 셀-그리드라 **이산 샘플**(연속 해상도는 후속) — `svSatForCol`/`svValForRow`/`hueForCol` 등이 셀↔값을 정수 반올림으로 매핑(양 끝 0/100·0/360에 정확히 닿음). 선택 셀은 **▾ 마커 글리프**(text 레이어)로 표시 — palette 그리드와 같은 이유로 `Op.border`를 안 쓴다([§6.5]·[[tui-widgets-must-be-cell-text-not-quad]]: tui lowering의 `paintRectBg`가 1행 border를 셀 전체로 칠해 스와치 색을 덮음). picker 박스 기하는 `pickerLayout`이 단일 출처(렌더·hit-test 공유).
+- **조작**: `←→` 채도, `↑↓` 명도, `[`/`]` 색상(wrap), `Enter` 확정, `Esc` 취소(picker만 닫고 폼 복귀 — 모달 유지). 포인터: SV 그리드 클릭·드래그 → s/v, hue 스트립 클릭 → h, 박스 밖 클릭 → 취소(드래그는 폼 slider와 같은 press-gate라 hover로는 안 바뀜).
+- **커밋**: 컴포넌트가 `Enter`에서 `color_picked` Action → host가 `settings_color_picked`로 정규화 → platform `commitPickerColor`가 `settings.pickerRgb()`를 `#rrggbb`로 직렬화해 선택 color 행 키에 `setText`(인라인 편집 커밋과 같은 인덱스 매핑·검증·write-back 예약) + picker 닫기. hex 문자열은 `loaded_config.arena` 소유.
+- **한계(후속)**: 연속(non-discrete) 해상도, alpha, eyedropper, hex 직접 입력 동시 표시(현재 hex 편집은 §6.2 hex zone 별도).
+
 ## 7. 의존성
 
 - **S0-1b** ✅(머지) — `serialize.updateForKeys(original, config, keys)`로 **변경 키만** write-back(즉시-저장 결정에
@@ -200,7 +211,8 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | **CS-4-3** ✅ | keybind recorder(`command_catalog` 행 + 키 캡처 + `keybind` 줄 write-back) — §6.7. unbind·충돌 UI는 후속 | 헤드리스 + 실기 |
 | **CS-4-4** ✅ | **세팅 페이지 셸** — Section 네비 + 제너릭 폼(schema 메타 소비) + 폼 스크롤 + `toggle_settings`(⌘,) 키/메뉴 + **폼 검색**(`/` 현재 섹션 필터 — §6.8; 교차 섹션은 후속) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-5** | write-back 연결(S0-1b ✅) + bespoke 에디터: **palette 16색 그리드 ✅**(§6.5) · **env·shell.args ✅**(§6.6, upsert; 삭제는 후속) → keybind(CS-4-3) | 헤드리스 + 실기 |
-| **CS-4-6+** | (선택) color HSV picker 2차, 고급화 | 실기 |
+| **CS-4-6** ✅ | **color HSV picker** — SV 그리드 + hue 스트립 + 미리보기, 세팅 모달 모드(§6.9). `color.zig` HSV↔RGB | 헤드리스 + 실기 |
+| **CS-4-7+** | (선택) picker 연속 해상도·alpha·eyedropper, 고급화 | 실기 |
 
 > 시각/상호작용 PR(CS-4-0~5)은 로직을 헤드리스 단위로 고정하되, **머지 전 `zig build macos-app`로 ohah가 실기
 > 확인**한다(보이나·눌리나·드래그되나). 스키마 PR과 결정적으로 다른 점.

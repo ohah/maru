@@ -45,6 +45,7 @@ pub const HostAction = union(enum) {
     settings_text_commit, // 세팅 text 행 인라인 편집 Enter — platform이 editText()→config arena dupe→setText + 적용
     settings_search_changed, // 세팅 검색 쿼리 변경(시작/입력/Backspace/종료) — platform이 필터 재적용(refreshSettingsFieldCount) + 재렌더
     settings_delete_row, // 세팅 선택 행 Backspace — platform이 env 변수 삭제 등(해당 안 되는 행은 무동작)
+    settings_color_picked, // 세팅 HSV picker Enter — platform이 settings.pickerRgb()→#rrggbb로 선택 color 행 커밋 + picker 닫기
 };
 
 pub const ChromeHost = struct {
@@ -189,6 +190,7 @@ pub const ChromeHost = struct {
                         .text_commit => .settings_text_commit, // 인라인 편집 Enter
                         .search_changed => .settings_search_changed, // 검색 시작/입력/종료 — 필터 재적용
                         .delete_row => .settings_delete_row, // 선택 행 Backspace — env 삭제 등
+                        .color_picked => .settings_color_picked, // HSV picker Enter — 선택 color 행 커밋
                         .consumed => .none,
                     };
                 }

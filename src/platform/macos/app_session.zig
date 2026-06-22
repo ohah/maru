@@ -5418,11 +5418,21 @@ pub const AppSession = struct {
     /// **통합 리셋** — 모든 config를 **내장 기본값**으로 되돌린다. 메뉴 "Reset to Defaults"(ABI `reset_defaults`)와 커맨드
     /// 팝업 "Reset All Settings to Defaults"(`reset_settings` 액션) **두 진입점이 모두 이 단일 함수**를 호출한다(통일 —
     /// code-review #829 후속: 옛 메뉴 전용 부분 갱신이 preset/alias 오염·런타임 드리프트를 내던 걸 검증된 단일 경로로
-    /// 일원화). loaded_config.config를 정적 기본값으로 갈고(새 arena 불요 — 기본값은 정적 리터럴), reloadConfig와 같은
-    /// 재적용(appearance·behavior·scrollback·palette·ambiguous·사이드바)을 한 뒤, **config 파일을 안내 주석만 남긴 기본
+    /// 일원화). loaded_config.config를 정적 기본값으로 갈고(새 arena 불요 — 기본값은 정적 리터럴), keybind 바인딩 4종도
+    /// 빈 슬라이스(빌트인만)로 비우고, reloadConfig와 같은 재적용(appearance·behavior·scrollback·palette·ambiguous·사이드바)
+    /// + 카탈로그·전역 단축키 재빌드를 한 뒤, **config 파일을 안내 주석만 남긴 기본
     /// 상태로 덮어쓴다**(삭제가 아니라 — 파일·경로 보존, 사용자가 기본 상태를 보고 편집 가능; 사용자 요청).
     pub fn resetAllSettings(self: *AppSession) void {
         self.loaded_config.config = config_mod.Config{}; // 내장 기본값(정적 — 옛 arena 문자열은 미참조로 남았다 다음 reload/deinit에 해제)
+        // keybind도 config다 — "모든 설정 초기화"는 인앱/파일 keybind 바인딩(keybindings·unbinds·terminal_bindings·
+        // global_bindings)도 즉시 기본값(빈 슬라이스=빌트인만)으로 되돌린다. 옛 슬라이스는 arena 소유라 미참조로 남았다
+        // 다음 reload/deinit에 해제(config.* 정적 교체와 같은 수명 규칙 — 여기서 free 금지). 이렇게 비워야 keyBindingResolver
+        // (매 키 라이브)가 빌트인만 적용하고, 아래 rebuildGlobalHotkeys가 전역 단축키를 실제로 해제하며, rebuildCommandCatalog가
+        // 기본 chord를 표시한다(빈 슬라이스 대입은 옛 slice를 deref하지 않아 안전).
+        self.loaded_config.keybindings = &.{};
+        self.loaded_config.unbinds = &.{};
+        self.loaded_config.terminal_bindings = &.{};
+        self.loaded_config.global_bindings = &.{};
         self.theme_pre_follow = null; // 기본값으로 갈았으니 follow-system 복귀 스냅샷(옛 arena slice)도 무효 — 비운다(F2-9 dangling 방지)
         self.follow_applied_dark = null; // 외관 게이트도 리셋(기본값은 follow off라 어차피 무적용)
         self.reapplyLoadedConfig(); // resolve→apply→behavior 캐시→reapply* 재적용(resolve-first 안전; reloadConfig 미러 — 중복 제거, 리뷰 #827)
@@ -5453,7 +5463,10 @@ pub const AppSession = struct {
         // 방금 리셋한 파일에 그 변경을 도로 써넣는다(takeConfigDirty가 5개 컬렉션을 OR로 본다).
         self.clearConfigDirty();
         self.theme_user_custom = false; // 기본값으로 되돌렸으니 "사용자 지정" 해제 — 기본 테마(maru 프리셋)는 잠금이 맞다
-        // 기본값엔 전역 단축키가 없으니 global_hotkeys도 비우고 라이브 OS 재등록(PR2 — 리셋이 OS 등록까지 따라가게).
+        // keybind를 빌트인만으로 비웠으니 커맨드 카탈로그(팔레트·메뉴바 표시 chord)도 재빌드한다. reapplyLoadedConfig는
+        // keybind 불변 경로라 카탈로그를 안 건드린다 — reset은 keybind를 바꾸는 유일한 reapply 호출자라 여기서 명시 재빌드.
+        self.rebuildCommandCatalog();
+        // 위에서 global_bindings를 비웠으니 global_hotkeys도 비고, 라이브 OS 재등록(dirty)으로 등록 해제까지 따라간다(PR2).
         self.rebuildGlobalHotkeys() catch {};
         self.global_hotkeys_dirty = true;
         self.metal_dirty = true;
@@ -14163,6 +14176,17 @@ test "resetAllSettings: 런타임 줌·config 변경을 공장 기본값으로 �
     try std.testing.expect(session.appearance.font.size != factory.font.size);
     try std.testing.expect(session.cell_width_px > cw0); // 폰트 키우면 cell 픽셀이 커진다(메트릭)
 
+    // 안전 가드: resetAllSettings가 configPath()에 파일을 쓰므로, 실제 사용자 config(~/.config/maru/config)가 아니라
+    // tmp 파일을 덮어쓰도록 config_path_buffer를 박는다(없으면 macOS에서 zig build test가 실 config를 헤더만 남기고 지운다).
+    var reset_tmp = std.testing.tmpDir(.{});
+    defer reset_tmp.cleanup();
+    var reset_path_buf: [4096]u8 = undefined;
+    const reset_cfg_path = try std.fmt.bufPrint(&reset_path_buf, ".zig-cache/tmp/{s}/config", .{reset_tmp.sub_path});
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, reset_cfg_path);
+    // keybind 초기화(#2-b) 검증용: unbind 1개를 arena에 심어 reset이 비우는지 본다(빈 슬라이스에서 시작하면 약한 검증이라).
+    session.loaded_config.unbinds = try session.loaded_config.arena.allocator().dupe(config_mod.KeyChord, &.{try config_mod.KeyChord.parse("Cmd+J")});
+
     session.resetAllSettings();
 
     // 런타임·loaded_config가 공장 기본값으로(resetAllSettings: loaded_config=Config{} + reapplyLoadedConfig).
@@ -14173,6 +14197,11 @@ test "resetAllSettings: 런타임 줌·config 변경을 공장 기본값으로 �
     try std.testing.expectEqual(factory.font.size, session.loaded_config.config.font.size);
     try std.testing.expectEqual(true, session.loaded_config.config.bell.audible);
     try std.testing.expect(session.chrome_host.notice.open); // 완료 notice가 떴는지(showNotice)
+    // keybind 바인딩 4종이 빈 슬라이스(빌트인만)로 초기화됐는지(#2-b — reset은 keybind도 기본값으로).
+    try std.testing.expectEqual(@as(usize, 0), session.loaded_config.unbinds.len);
+    try std.testing.expectEqual(@as(usize, 0), session.loaded_config.keybindings.len);
+    try std.testing.expectEqual(@as(usize, 0), session.loaded_config.terminal_bindings.len);
+    try std.testing.expectEqual(@as(usize, 0), session.loaded_config.global_bindings.len);
 }
 
 // applyAppearance: 새 appearance를 통째로 갈아끼우면 appearance·base_font_size·cell 메트릭이 따라 바뀌는지.
@@ -15754,6 +15783,14 @@ test "reset-confirm: 모달에서 Esc=취소(설정 유지)·Enter=확정(전체
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     const factory = try config_mod.resolveAppearance(.{});
+
+    // 안전 가드: 확정 시 resetAllSettings가 configPath()에 파일을 쓰므로 실 config 대신 tmp로 박는다(14139와 동일 — 실 config 보호).
+    var reset_tmp = std.testing.tmpDir(.{});
+    defer reset_tmp.cleanup();
+    var reset_path_buf: [4096]u8 = undefined;
+    const reset_cfg_path = try std.fmt.bufPrint(&reset_path_buf, ".zig-cache/tmp/{s}/config", .{reset_tmp.sub_path});
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, reset_cfg_path);
 
     // 비기본 config로 둔 뒤 리셋 요청 → 확인 모달이 뜨고 보류(아직 적용 안 됨).
     session.loaded_config.config.font.size = factory.font.size + 6;
@@ -17958,6 +17995,13 @@ test "global hotkey live re-register: rebuildGlobalHotkeys가 descriptor 재생�
 
     // resetAllSettings도 dirty를 세운다 — 기본값엔 전역 바인딩이 없어 목록을 비우고 라이브 재등록 신호.
     // (reloadConfig도 같은 wiring으로 dirty를 세우지만, 파일 I/O 의존이라 디스크 상태와 무관한 reset으로 검증한다.)
+    // 안전 가드: resetAllSettings가 configPath()에 파일을 쓰므로 실 config 대신 tmp로 박는다(실 config 보호).
+    var reset_tmp = std.testing.tmpDir(.{});
+    defer reset_tmp.cleanup();
+    var reset_path_buf: [4096]u8 = undefined;
+    const reset_cfg_path = try std.fmt.bufPrint(&reset_path_buf, ".zig-cache/tmp/{s}/config", .{reset_tmp.sub_path});
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, reset_cfg_path);
     _ = session.takeGlobalHotkeysDirty();
     session.resetAllSettings();
     try std.testing.expect(session.global_hotkeys_dirty);

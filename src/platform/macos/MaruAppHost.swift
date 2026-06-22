@@ -2029,7 +2029,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 표준 macOS 메뉴바(maru/File/Edit/View/Window/Help)를 프로그래매틱하게 세운다. Zig 액션 항목은 커맨드
     /// 카탈로그(command_catalog ABI)에서 제목·단축키(keyEquivalent)를 읽어 만들고 선택 시 run_action으로
     /// 디스패치한다(네이티브는 NSMenu 구성만, 카탈로그·실행 결정은 Zig — 경계). copy/paste·about/hide/quit/
-    /// minimize/zoom·fullscreen은 OS 동작이라 네이티브 셀렉터. 세션-불변이라 시작 시 한 번 빌드한다.
+    /// minimize/zoom·fullscreen은 OS 동작이라 네이티브 셀렉터. 시작 시 빌드하고, config reload/reset로 keybind가 바뀌면
+    /// (menuReloadConfig/menuResetDefaults가) 다시 빌드해 메뉴 keyEquivalent를 갱신한다 — 더는 세션-불변이 아니다(매번 새 NSMenu 재배정).
     private func buildMainMenu() {
         // 카탈로그를 [action_key: (제목, keyEquivalent, modifier)]로 읽어 둔다(세션-불변). primary에서 읽는다
         // (제목·단축키는 모든 세션 동일). 실제 디스패치는 runCatalogAction이 활성 세션(appSession)에 한다.
@@ -2244,6 +2245,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = sender
         guard let session = appSession else { return }
         _ = maru_macos_app_session_reload_config(session)
+        // reload로 keybind가 바뀌면 Zig가 커맨드 카탈로그를 재빌드한다 — 메뉴바 keyEquivalent는 카탈로그 스냅샷이라
+        // 여기서 메뉴를 다시 빌드해야 갱신된다(Zig-side 커맨드 팔레트는 command_key_displays를 라이브로 읽어 이미 최신).
+        buildMainMenu()
     }
 
     /// view options에서 sidebar 토글(show-branch/show-folder)을 바꿨을 때, 갱신된 config 텍스트를 받아 config
@@ -2273,6 +2277,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = sender
         guard let session = appSession else { return }
         _ = maru_macos_app_session_reset_defaults(session)
+        // reset으로 keybind가 기본값(빌트인만)이 되면 Zig 카탈로그도 재빌드된다 — 메뉴바 keyEquivalent를 갱신한다(menuReloadConfig와 동일).
+        buildMainMenu()
     }
 
     /// Reset Terminal(⌘⇧R) — 활성 터미널의 잔류 입력 모드(focus 1004·mouse·kitty keyboard)만 끈다. ssh 너머 TUI가

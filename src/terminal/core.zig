@@ -433,7 +433,7 @@ pub const TerminalCore = struct {
     /// chunked(m=1) 전송에서 누적할 수 있는 base64 payload 상한 — 악의적 m=1 무한 전송의 메모리 폭주를
     /// 막는 방어선(이미지 320MB·APC 4096·placement 1024 한계와 같은 결). 디코드된 이미지는 320MB로 따로
     /// 제한되므로, base64 오버헤드(~4/3)를 감안해 480MB로 둔다. 초과하면 그 chunked 전송을 폐기한다.
-    const max_kitty_chunk_bytes: usize = 480 * 1000 * 1000;
+    pub const max_kitty_chunk_bytes: usize = 480 * 1000 * 1000; // parser.dispatchApc도 참조(cross-file) — pub
     // OSC 52 클립보드 쓰기 상한(max_clipboard_bytes)은 osc.zig로 이동(clipboard 핸들러 전용).
 
     pub fn init(allocator: std.mem.Allocator, size: types.Size) !TerminalCore {
@@ -500,7 +500,7 @@ pub const TerminalCore = struct {
         self.resetInputModes();
         self.kitty_images.clear(self.allocator); // RIS는 전송된 kitty graphics 이미지를 전부 비운다
         self.kitty_placements.clearRetainingCapacity(); // placement도 함께 비운다
-        self.abortKittyChunk(); // 진행 중이던 chunked 전송도 폐기
+        parser.abortKittyChunk(self); // 진행 중이던 chunked 전송도 폐기(parser 소유)
         self.grapheme_cluster_mode = false;
         self.charset_g0 = .ascii; // G3 charset도 공장 초기화(G0/G1 ascii, GL=G0).
         self.charset_g1 = .ascii;
@@ -1822,7 +1822,7 @@ pub const TerminalCore = struct {
                 },
                 .apc_escape => {
                     // APC 안에서 ESC 다음 바이트. ST(ESC \)면 dispatch, 그 외도 APC를 끝낸다(관대 처리).
-                    if (bytes[index_] == '\\') self.dispatchApc();
+                    if (bytes[index_] == '\\') parser.dispatchApc(self);
                     self.parser = .ground;
                     index_ += 1;
                 },
@@ -1923,62 +1923,10 @@ pub const TerminalCore = struct {
         return had;
     }
 
-    /// 종료된 APC(ESC _ ... ESC \) 내용을 처리한다. kitty graphics(`ESC _ G ...`)가 유일한 소비자다.
-    /// 토대 단계라 현재는 수집만 — command 파싱·이미지 저장·렌더는 후속(audit 5/5 단계적). APC를 안
-    /// 받으면 payload가 화면에 텍스트로 새므로(과거 ESC_ 미처리), 수집해서 무시하는 것만으로도 그 누수를
-    /// 막는다. 베이스: kitty graphics protocol(APC payload), OSC dispatch와 동형.
-    fn dispatchApc(self: *TerminalCore) void {
-        if (self.apc_overflow or self.apc_buffer.items.len == 0) {
-            // 한 청크가 4096을 넘쳤다(overflow) — chunked 진행 중이면 그 전송 전체가 손상이라 폐기한다.
-            if (self.apc_overflow) self.abortKittyChunk();
-            return;
-        }
-        // kitty graphics(ESC _ G ...)만 처리한다. control(k=v)을 파싱하고, transmit이면 payload(base64)를
-        // 디코드해 이미지를 저장한다. payload는 control 다음(';' 이후)이다.
-        if (self.apc_buffer.items[0] != 'G') return;
-        const body = self.apc_buffer.items[1..];
-        const cmd = parseKittyGraphicsCommand(body);
-        const payload = if (std.mem.indexOfScalar(u8, body, ';')) |i| body[i + 1 ..] else body[0..0];
-
-        // chunked(m=1): 첫 청크가 control을 갖고, 이후 청크는 payload만 이어 붙인다. m=0에서 누적분을
-        // 한 번에 실행한다. 진행 중이 아니고(첫 등장) m=0이면 단일 전송이라 즉시 실행(기존 경로).
-        if (self.kitty_chunk_cmd == null and !cmd.more) {
-            self.execKittyGraphics(cmd, payload);
-            return;
-        }
-        // chunked 진행 중 도착한 명령이 transmit continuation(a=t/T)이 아니라 독립 명령(delete 등)이면,
-        // kitty 명세상 정의되지 않은 interleave다 — 진행 중 chunk를 버리고 새 명령을 즉시 실행한다(code
-        // review #3, 사용자 결정). continuation은 a= 생략(기본 t) 또는 t/T라 누적 경로로 떨어진다.
-        if (self.kitty_chunk_cmd != null and cmd.action != 't' and cmd.action != 'T') {
-            self.abortKittyChunk();
-            self.execKittyGraphics(cmd, payload);
-            return;
-        }
-        if (self.kitty_chunk_cmd == null) self.kitty_chunk_cmd = cmd; // 첫 청크의 control 보존
-        if (self.kitty_chunk.items.len + payload.len > max_kitty_chunk_bytes) {
-            self.abortKittyChunk(); // 폭주 방어선 초과 — 전송 폐기
-            return;
-        }
-        self.kitty_chunk.appendSlice(self.allocator, payload) catch {
-            self.abortKittyChunk(); // OOM도 폐기(graceful)
-            return;
-        };
-        if (!cmd.more) { // 마지막 청크 — 첫 청크 control + 누적 payload로 실행
-            const first = self.kitty_chunk_cmd.?;
-            self.execKittyGraphics(first, self.kitty_chunk.items);
-            self.abortKittyChunk();
-        }
-    }
-
-    /// 진행 중인 chunked 전송을 폐기한다(누적 버퍼 비우고 control 해제). 완료·overflow·OOM·RIS 공용.
-    fn abortKittyChunk(self: *TerminalCore) void {
-        self.kitty_chunk.clearRetainingCapacity();
-        self.kitty_chunk_cmd = null;
-    }
-
     /// kitty graphics APC control의 파싱 결과(주요 key). transmit(s/v/f/o)와 display(나머지) 양쪽 키를
     /// 한 구조체에 담는다 — a 값(t/T/p/d)이 어느 필드를 쓰는지 정한다. 렌더는 후속이다.
-    const KittyGraphicsCommand = struct {
+    /// parser.parseKittyGraphicsCommand의 결과 DTO이자 exec/storage 입력 — parser가 cross-file로 이름을 쓰므로 pub.
+    pub const KittyGraphicsCommand = struct {
         action: u8 = 't', // a: t=transmit / T=transmit+display / q=query / p=display / d=delete
         format: u16 = 32, // f: 24=RGB / 32=RGBA / 100=PNG
         width: u32 = 0, // s: 이미지 픽셀 폭
@@ -2020,52 +1968,6 @@ pub const TerminalCore = struct {
         rows: u32,
         z: i32,
     };
-
-    /// kitty graphics APC의 control 섹션(`G` 다음 ~ ';' 전)을 파싱한다. `k=v,k=v` 형식 — 주요 key만
-    /// 추출하고 나머지는 후속 확장으로 무시한다. value는 단일 비숫자 문자면 그 문자(a/o), 아니면 정수
-    /// (f/s/v/i/m) — 어느 key가 문자/정수인지는 kitty 명세 control data가 정한다. payload(base64)는
-    /// 토대에선 보지 않는다(디코드·저장은 후속). 베이스: kitty graphics protocol control data.
-    fn parseKittyGraphicsCommand(body: []const u8) KittyGraphicsCommand {
-        var cmd: KittyGraphicsCommand = .{};
-        const control = if (std.mem.indexOfScalar(u8, body, ';')) |i| body[0..i] else body;
-        var it = std.mem.splitScalar(u8, control, ',');
-        while (it.next()) |pair| {
-            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
-            const key = pair[0..eq];
-            const val = pair[eq + 1 ..];
-            if (key.len != 1 or val.len == 0) continue; // kitty control key는 모두 1글자
-            switch (key[0]) {
-                'a' => if (val.len == 1) {
-                    cmd.action = val[0];
-                },
-                'f' => cmd.format = std.fmt.parseInt(u16, val, 10) catch cmd.format,
-                's' => cmd.width = std.fmt.parseInt(u32, val, 10) catch 0,
-                'v' => cmd.height = std.fmt.parseInt(u32, val, 10) catch 0,
-                'i' => cmd.image_id = std.fmt.parseInt(u32, val, 10) catch 0,
-                'm' => cmd.more = (val.len == 1 and val[0] == '1'),
-                'o' => if (val.len == 1) {
-                    cmd.compression = val[0];
-                },
-                // display(placement) 키. 대/소문자가 다른 키(x/X, y/Y)는 별개 의미라 그대로 구분한다.
-                'p' => cmd.placement_id = std.fmt.parseInt(u32, val, 10) catch 0,
-                'x' => cmd.src_x = std.fmt.parseInt(u32, val, 10) catch 0,
-                'y' => cmd.src_y = std.fmt.parseInt(u32, val, 10) catch 0,
-                'w' => cmd.src_width = std.fmt.parseInt(u32, val, 10) catch 0,
-                'h' => cmd.src_height = std.fmt.parseInt(u32, val, 10) catch 0,
-                'X' => cmd.cell_x_offset = std.fmt.parseInt(u32, val, 10) catch 0,
-                'Y' => cmd.cell_y_offset = std.fmt.parseInt(u32, val, 10) catch 0,
-                'c' => cmd.columns = std.fmt.parseInt(u32, val, 10) catch 0,
-                'r' => cmd.rows = std.fmt.parseInt(u32, val, 10) catch 0,
-                'z' => cmd.z = std.fmt.parseInt(i32, val, 10) catch 0, // 부호 있음(텍스트 앞/뒤)
-                'C' => cmd.no_cursor_move = (val.len == 1 and val[0] == '1'),
-                'd' => if (val.len == 1) {
-                    cmd.delete_what = val[0]; // 삭제 타깃 문자(a/A/i/I/z/Z/…)
-                },
-                else => {}, // 나머지 control key는 토대에선 무시(후속 확장)
-            }
-        }
-        return cmd;
-    }
 
     /// 디코드된 kitty graphics 이미지(픽셀 버퍼를 소유). bpp=3(RGB)/4(RGBA). generation은 storage가
     /// (재)transmit마다 단조 증가로 찍어 주는 업로드 캐시 무효화 키다(렌더러가 image_id별 텍스처를
@@ -2137,7 +2039,8 @@ pub const TerminalCore = struct {
 
     /// 파싱된 kitty graphics command를 실행한다. transmit(디코드+저장)·display(placement)·delete까지 —
     /// query 응답·애니메이션은 후속. payload는 control(';' 전) 다음 base64다.
-    fn execKittyGraphics(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
+    /// parser.dispatchApc가 파싱한 command를 실행(transmit/display/delete) — parser가 cross-file 호출하므로 pub.
+    pub fn execKittyGraphics(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
         switch (cmd.action) {
             't' => self.kittyTransmit(cmd, payload),
             'T' => { // transmit + display(한 command로 저장 후 placement까지)
@@ -8496,7 +8399,7 @@ test "APC (ESC _ ... ESC \\): kitty graphics payload가 화면에 텍스트로 �
 
 test "kitty graphics command 파싱: control k=v 주요 key (audit 5/5b)" {
     // a=T(transmit+display), f=32(RGBA), s/v 픽셀 크기, i image id, m=1 chunked, o=z compression.
-    const cmd = TerminalCore.parseKittyGraphicsCommand("a=T,f=32,s=100,v=50,i=3,m=1,o=z");
+    const cmd = parser.parseKittyGraphicsCommand("a=T,f=32,s=100,v=50,i=3,m=1,o=z");
     try std.testing.expectEqual(@as(u8, 'T'), cmd.action);
     try std.testing.expectEqual(@as(u16, 32), cmd.format);
     try std.testing.expectEqual(@as(u32, 100), cmd.width);
@@ -8507,10 +8410,10 @@ test "kitty graphics command 파싱: control k=v 주요 key (audit 5/5b)" {
 }
 
 test "kitty graphics command 파싱: 기본값 + payload(';' 다음)는 control에서 제외" {
-    const q = TerminalCore.parseKittyGraphicsCommand("a=q;AAAAdata");
+    const q = parser.parseKittyGraphicsCommand("a=q;AAAAdata");
     try std.testing.expectEqual(@as(u8, 'q'), q.action); // query
     try std.testing.expectEqual(@as(u16, 32), q.format); // 기본 RGBA — payload는 파싱 안 함
-    const empty = TerminalCore.parseKittyGraphicsCommand("");
+    const empty = parser.parseKittyGraphicsCommand("");
     try std.testing.expectEqual(@as(u8, 't'), empty.action); // 기본 transmit(견고성)
 }
 

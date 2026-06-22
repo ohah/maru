@@ -1,4 +1,4 @@
-//! VT 파서 dispatch — OSC 라우터 + DCS(Device Control String) 핸들러(DECRQSS·XTGETTCAP host-reply).
+//! VT 파서 dispatch — OSC 라우터 + DCS(DECRQSS·XTGETTCAP) + APC(kitty graphics) control 파싱·라우팅.
 //!
 //! `TerminalCore`(core.zig)는 VT 파서 상태기계 + 화면/스크롤백 storage + host-reply를 한 struct에 섞은
 //! 구조 위반(docs/project-rules.md "구조와 파일 분리": parser·storage·encoding이 한 파일에서 서로 다른
@@ -215,4 +215,106 @@ fn appendSgrUnderlineColor(self: *TerminalCore, c: types.Color) void {
         .indexed => |n| self.appendResponse(std.fmt.bufPrint(&buf, ";58;5;{d}", .{n}) catch return),
         .rgb => |v| self.appendResponse(std.fmt.bufPrint(&buf, ";58;2;{d};{d};{d}", .{ v.r, v.g, v.b }) catch return),
     }
+}
+
+/// 종료된 APC(ESC _ ... ESC \) 내용을 처리한다. kitty graphics(`ESC _ G ...`)가 유일한 소비자다.
+/// 토대 단계라 현재는 수집만 — command 파싱·이미지 저장·렌더는 후속(audit 5/5 단계적). APC를 안
+/// 받으면 payload가 화면에 텍스트로 새므로(과거 ESC_ 미처리), 수집해서 무시하는 것만으로도 그 누수를
+/// 막는다. 베이스: kitty graphics protocol(APC payload), OSC dispatch와 동형. control 파싱은 여기서,
+/// 실제 이미지 exec/display/transmit/delete는 core(execKittyGraphics, pub)가 한다(범위 분리 — 후속 kitty.zig).
+pub fn dispatchApc(self: *TerminalCore) void {
+    if (self.apc_overflow or self.apc_buffer.items.len == 0) {
+        // 한 청크가 4096을 넘쳤다(overflow) — chunked 진행 중이면 그 전송 전체가 손상이라 폐기한다.
+        if (self.apc_overflow) abortKittyChunk(self);
+        return;
+    }
+    // kitty graphics(ESC _ G ...)만 처리한다. control(k=v)을 파싱하고, transmit이면 payload(base64)를
+    // 디코드해 이미지를 저장한다. payload는 control 다음(';' 이후)이다.
+    if (self.apc_buffer.items[0] != 'G') return;
+    const body = self.apc_buffer.items[1..];
+    const cmd = parseKittyGraphicsCommand(body);
+    const payload = if (std.mem.indexOfScalar(u8, body, ';')) |i| body[i + 1 ..] else body[0..0];
+
+    // chunked(m=1): 첫 청크가 control을 갖고, 이후 청크는 payload만 이어 붙인다. m=0에서 누적분을
+    // 한 번에 실행한다. 진행 중이 아니고(첫 등장) m=0이면 단일 전송이라 즉시 실행(기존 경로).
+    if (self.kitty_chunk_cmd == null and !cmd.more) {
+        self.execKittyGraphics(cmd, payload);
+        return;
+    }
+    // chunked 진행 중 도착한 명령이 transmit continuation(a=t/T)이 아니라 독립 명령(delete 등)이면,
+    // kitty 명세상 정의되지 않은 interleave다 — 진행 중 chunk를 버리고 새 명령을 즉시 실행한다(code
+    // review #3, 사용자 결정). continuation은 a= 생략(기본 t) 또는 t/T라 누적 경로로 떨어진다.
+    if (self.kitty_chunk_cmd != null and cmd.action != 't' and cmd.action != 'T') {
+        abortKittyChunk(self);
+        self.execKittyGraphics(cmd, payload);
+        return;
+    }
+    if (self.kitty_chunk_cmd == null) self.kitty_chunk_cmd = cmd; // 첫 청크의 control 보존
+    if (self.kitty_chunk.items.len + payload.len > core.TerminalCore.max_kitty_chunk_bytes) {
+        abortKittyChunk(self); // 폭주 방어선 초과 — 전송 폐기
+        return;
+    }
+    self.kitty_chunk.appendSlice(self.allocator, payload) catch {
+        abortKittyChunk(self); // OOM도 폐기(graceful)
+        return;
+    };
+    if (!cmd.more) { // 마지막 청크 — 첫 청크 control + 누적 payload로 실행
+        const first = self.kitty_chunk_cmd.?;
+        self.execKittyGraphics(first, self.kitty_chunk.items);
+        abortKittyChunk(self);
+    }
+}
+
+/// 진행 중인 chunked 전송을 폐기한다(누적 버퍼 비우고 control 해제). 완료·overflow·OOM·RIS 공용.
+/// core.fullReset(RIS)이 cross-file로 부른다(pub).
+pub fn abortKittyChunk(self: *TerminalCore) void {
+    self.kitty_chunk.clearRetainingCapacity();
+    self.kitty_chunk_cmd = null;
+}
+
+/// kitty graphics APC의 control 섹션(`G` 다음 ~ ';' 전)을 파싱한다. `k=v,k=v` 형식 — 주요 key만
+/// 추출하고 나머지는 후속 확장으로 무시한다. value는 단일 비숫자 문자면 그 문자(a/o), 아니면 정수
+/// (f/s/v/i/m) — 어느 key가 문자/정수인지는 kitty 명세 control data가 정한다. payload(base64)는
+/// 토대에선 보지 않는다(디코드·저장은 후속). 베이스: kitty graphics protocol control data. 결과 struct
+/// (KittyGraphicsCommand)는 core가 소유(exec·storage가 공유 — parse→exec DTO라 pub).
+pub fn parseKittyGraphicsCommand(body: []const u8) core.TerminalCore.KittyGraphicsCommand {
+    var cmd: core.TerminalCore.KittyGraphicsCommand = .{};
+    const control = if (std.mem.indexOfScalar(u8, body, ';')) |i| body[0..i] else body;
+    var it = std.mem.splitScalar(u8, control, ',');
+    while (it.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        const key = pair[0..eq];
+        const val = pair[eq + 1 ..];
+        if (key.len != 1 or val.len == 0) continue; // kitty control key는 모두 1글자
+        switch (key[0]) {
+            'a' => if (val.len == 1) {
+                cmd.action = val[0];
+            },
+            'f' => cmd.format = std.fmt.parseInt(u16, val, 10) catch cmd.format,
+            's' => cmd.width = std.fmt.parseInt(u32, val, 10) catch 0,
+            'v' => cmd.height = std.fmt.parseInt(u32, val, 10) catch 0,
+            'i' => cmd.image_id = std.fmt.parseInt(u32, val, 10) catch 0,
+            'm' => cmd.more = (val.len == 1 and val[0] == '1'),
+            'o' => if (val.len == 1) {
+                cmd.compression = val[0];
+            },
+            // display(placement) 키. 대/소문자가 다른 키(x/X, y/Y)는 별개 의미라 그대로 구분한다.
+            'p' => cmd.placement_id = std.fmt.parseInt(u32, val, 10) catch 0,
+            'x' => cmd.src_x = std.fmt.parseInt(u32, val, 10) catch 0,
+            'y' => cmd.src_y = std.fmt.parseInt(u32, val, 10) catch 0,
+            'w' => cmd.src_width = std.fmt.parseInt(u32, val, 10) catch 0,
+            'h' => cmd.src_height = std.fmt.parseInt(u32, val, 10) catch 0,
+            'X' => cmd.cell_x_offset = std.fmt.parseInt(u32, val, 10) catch 0,
+            'Y' => cmd.cell_y_offset = std.fmt.parseInt(u32, val, 10) catch 0,
+            'c' => cmd.columns = std.fmt.parseInt(u32, val, 10) catch 0,
+            'r' => cmd.rows = std.fmt.parseInt(u32, val, 10) catch 0,
+            'z' => cmd.z = std.fmt.parseInt(i32, val, 10) catch 0, // 부호 있음(텍스트 앞/뒤)
+            'C' => cmd.no_cursor_move = (val.len == 1 and val[0] == '1'),
+            'd' => if (val.len == 1) {
+                cmd.delete_what = val[0]; // 삭제 타깃 문자(a/A/i/I/z/Z/…)
+            },
+            else => {}, // 나머지 control key는 토대에선 무시(후속 확장)
+        }
+    }
+    return cmd;
 }

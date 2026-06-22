@@ -101,6 +101,7 @@ window.opacity        = 1.0   # 배경 투명도(0~1) — default 배경만 투�
 | `input.page-keys` | `passthrough`\|`scroll` | `scroll` | 메인 화면 PageUp/Down 동작. 아래 참조 |
 | `input.shift-enter` | `newline`\|`native` | `newline` | Shift+Enter 인코딩. `newline`(기본)=Option+Enter와 같은 `\x1b\r`(멀티라인 줄바꿈). 아래 참조 |
 | `input.ime-enter` | `newline`\|`commit-only` | `newline` | IME(한글 등) 조합 중 Enter. `newline`(기본)=확정+개행 한 번에(브라우저 동작). 아래 참조 |
+| `input.url-click-modifier` | `command`\|`control`\|`alt`\|`shift` | `command` | 터미널 안 URL을 **클릭으로 열 때** 눌러야 하는 수식키(macOS `command`=Cmd). 수식키 없는 클릭은 텍스트 선택이라 URL 열기는 수식키로 구분(iTerm2/Ghostty 관례). hover 시 URL 밑줄·링크 커서도 같은 키에서만 뜬다. 판정은 Zig 단일 출처. 그 외 값은 무시(기본 유지) |
 | `quick-terminal.height` | 숫자(0.1~1.0) | `0.45` | 가장자리에 수직인 '두께' 비율(화면 대비). `top`/`bottom`=높이, `left`/`right`=폭, `center`=세로 비율. 범위 밖/비숫자는 무시 |
 | `quick-terminal.width` | 숫자(0.1~1.0) | (`height` 따라감) | **`center` 전용** 가로 비율(화면 대비). 미설정이면 `height`와 같게(정사각). `top`/`bottom`(전폭)·`left`/`right`(`height`로 두께)에선 무시. 범위 밖/비숫자는 무시 |
 | `quick-terminal.auto-hide` | `true`\|`false` | `true` | 포커스 잃으면(다른 창/앱 클릭) 자동 숨김. `false`면 토글로만 |

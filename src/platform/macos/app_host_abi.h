@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 70u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 71u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -503,20 +503,24 @@ int32_t maru_macos_app_session_set_focus(MaruAppHostSession *session, int32_t fo
 /* 진행 중 IME 조합을 확정(커밋)한다. IME 우회 특수키/단축키 직전에 호출. */
 int32_t maru_macos_app_session_commit_composition(MaruAppHostSession *session);
 /* 마우스 호버 갱신(backing px). *out_cursor_kind에 위치별 커서 종류(0=arrow/사이드바·탭 바, 1=iBeam/터미널,
-   2=pointingHand/Cmd+hover URL, 3=resizeLeftRight/세로 divider, 4=resizeUpDown/가로 divider). Swift가 이 값으로
-   NSCursor를 세운다. Zig는 부수적으로 사이드바 슬롯·pane 탭 호버·URL 밑줄을 갱신한다. cmd_held=0이면 URL 호버
-   해제. 창 밖이면 음수 sentinel(-1,-1)로 호버 해제. */
+   2=pointingHand/URL hover, 3=resizeLeftRight/세로 divider, 4=resizeUpDown/가로 divider). Swift가 이 값으로
+   NSCursor를 세운다. Zig는 부수적으로 사이드바 슬롯·pane 탭 호버·URL 밑줄을 갱신한다. mods는 마우스 수식키 비트
+   (xterm 규약: shift=4, alt=8, ctrl=16, cmd=32) — Zig가 config input.url-click-modifier와 비교해 URL 밑줄을 켠다
+   (v71: 옛 cmd_held bool 대체). 수식키 불일치면 URL 호버 해제. 창 밖이면 음수 sentinel(-1,-1)로 호버 해제. */
 int32_t maru_macos_app_session_hover(
     MaruAppHostSession *session,
     double x_px,
     double y_px,
-    int32_t cmd_held,
+    int32_t mods,
     int32_t *out_cursor_kind
 );
+/* (config 수식키)+클릭 위치의 URL. mods(hover와 같은 xterm 비트)가 url-click-modifier와 안 맞으면 *out_len=0
+   (일반 클릭으로 처리). 버퍼는 Zig 소유(다음 url_at/destroy까지). v71: mods 인자 추가(modifier 판정 Zig 단일 출처). */
 int32_t maru_macos_app_session_url_at(
     MaruAppHostSession *session,
     double x_px,
     double y_px,
+    int32_t mods,
     const uint8_t **out_ptr,
     size_t *out_len
 );

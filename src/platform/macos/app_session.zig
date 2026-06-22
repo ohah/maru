@@ -46,7 +46,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 70; // 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 삭제). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 71; // 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 삭제). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -6361,7 +6361,21 @@ pub const AppSession = struct {
     /// Cmd+hover URL 밑줄을 갱신한다. 영역 우선순위는 마우스 클릭(mouse down)과 같다: 사이드바 → 탭 바 → divider
     /// → 터미널. 사이드바·탭 바=arrow(default), divider=resize(좌우 split=↔, 상하 split=↕), 터미널=iBeam(text),
     /// Cmd+hover URL=pointingHand(link). 창 밖 sentinel(-1,-1)이면 inSidebar=false→터미널 경로로 호버 해제.
-    pub fn hoverCursor(self: *AppSession, x_px: f64, y_px: f64, cmd_held: bool) CursorKind {
+    /// 마우스 수식키 비트(xterm 규약: shift=4, alt/meta=8, ctrl=16, command=32)가 config `input.url-click-modifier`와
+    /// 일치하는지 — URL hover 밑줄·클릭 열기의 **단일 판정**(Swift는 NSEvent 수식키를 이 비트로 변환만 한다). modifier
+    /// 정책을 Zig가 소유해 이식(Linux/Win)·테스트가 한 곳에서 된다. command 비트(32)는 hover/url_at 전용 인코딩이다
+    /// (mouse reporting ABI는 command를 안 싣지만 — 터미널 앱엔 Cmd를 리포트 안 함 — URL 판정엔 필요).
+    fn urlModifierHeld(self: *const AppSession, mods: i32) bool {
+        const mask: i32 = switch (self.loaded_config.config.input.url_click_modifier) {
+            .command => 32,
+            .control => 16,
+            .alt => 8,
+            .shift => 4,
+        };
+        return (mods & mask) != 0;
+    }
+
+    pub fn hoverCursor(self: *AppSession, x_px: f64, y_px: f64, mods: i32) CursorKind {
         if (!self.surface_initialized) return .text;
         // 닫기 확인 모달 중엔 호버 부수효과(사이드바/탭/◧ 호버 강조·스크롤바 hover·URL 밑줄)를 멈추고 화살표 커서만
         // 둔다 — 안 그러면 모달 뒤 버튼/슬롯이 호버에 반응해 강조되며(모달 위로 비침) UI가 깨져 보인다(모달 게이트).
@@ -6427,9 +6441,9 @@ pub const AppSession = struct {
                 .horizontal_line => .resize_v, // 가로 divider — 위아래로 끈다
             };
         }
-        // 터미널 영역: Cmd+hover URL이면 link(pointingHand), 아니면 text(iBeam).
+        // 터미널 영역: (config 수식키)+hover URL이면 link(pointingHand), 아니면 text(iBeam).
         var next: ?terminal.SelectionPoint = null;
-        if (cmd_held) {
+        if (self.urlModifierHeld(mods)) {
             if (self.pxToCell(x_px, y_px)) |cell| {
                 const core = &self.activeSurface().core;
                 // URL이면 그 시작 셀의 절대 좌표를 저장한다(뷰포트 좌표가 아님) — 스크롤/출력으로
@@ -6468,8 +6482,11 @@ pub const AppSession = struct {
 
     /// Cmd+클릭 위치의 URL(없으면 빈 슬라이스). Swift가 NSWorkspace로 연다 — URL 인식(단어 경계,
     /// soft-wrap 이어 붙임, http(s) 검사, 끝 문장부호 다듬기)은 core가 소유한다.
-    pub fn urlAt(self: *AppSession, x_px: f64, y_px: f64) []const u8 {
+    pub fn urlAt(self: *AppSession, x_px: f64, y_px: f64, mods: i32) []const u8 {
         if (!self.surface_initialized) return &.{};
+        // config 수식키가 안 눌렸으면 URL을 안 연다(빈 슬라이스 → Swift는 일반 클릭으로 처리). hover 밑줄과 같은
+        // urlModifierHeld 단일 판정이라 "밑줄 보이는 키 = 열리는 키"가 항상 일치한다.
+        if (!self.urlModifierHeld(mods)) return &.{};
         // 스크린→셀 변환은 pxToCell 단일 출처를 쓴다(사이드바 offset 차감 포함) — 별도 변환을 두면
         // 사이드바 폭만큼 어긋난 셀에서 URL을 찾는다(직접 x/cw로 계산하던 버그를 여기로 일원화해 고침).
         const cell = self.pxToCell(x_px, y_px) orelse return &.{};
@@ -13034,7 +13051,7 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     const bar_y: f64 = @floatFromInt(bar.y + 1);
 
     // 호버 → hovered_tab이 (활성 pane, 탭 1)로 설정된다(✕가 그려질 대상).
-    _ = session.hoverCursor(close_x, bar_y, false);
+    _ = session.hoverCursor(close_x, bar_y, 0);
     try std.testing.expect(session.hovered_tab != null);
     try std.testing.expectEqual(@as(usize, 1), session.hovered_tab.?.tab);
     try std.testing.expect(m.inCloseZone(1, close_x)); // ✕ zone 안
@@ -13231,7 +13248,7 @@ test "close-confirm 마우스 게이트: 확인 버튼 위 우/중클릭 무시�
     //     게이트가 실제로 동작함을 증명한다(뒤 사이드바/탭/◧ 호버 부수효과 차단).
     session.showConfirm("닫을까요?");
     const term_x: f64 = @floatFromInt(session.sidebar_width_px + 200); // 터미널 본문(게이트 없으면 .text)
-    try std.testing.expectEqual(CursorKind.default, session.hoverCursor(term_x, 300, false));
+    try std.testing.expectEqual(CursorKind.default, session.hoverCursor(term_x, 300, 0));
 }
 
 // 바 우측 "+" 버튼을 클릭하면 그 pane에 새 Term이 뜨는지(PR-F) — ⌘T의 마우스 버전. 실 init/spawn이라 macOS 게이트.
@@ -13299,14 +13316,14 @@ test "hovering the '+' button does not mark the last tab for close" {
 
     // 마지막 탭(탭 1) 위 호버 → hovered_tab = 탭 1(정상).
     const tab1_x: f64 = @floatFromInt(bar.x + (m.tab_cols - 1) * session.cell_width_px); // 탭 영역 우측 끝(탭 1)
-    _ = session.hoverCursor(tab1_x, bar_y, false);
+    _ = session.hoverCursor(tab1_x, bar_y, 0);
     try std.testing.expect(session.hovered_tab != null);
     try std.testing.expectEqual(@as(usize, 1), session.hovered_tab.?.tab);
 
     // "+" zone 위 호버 → hovered_tab 비워짐(마지막 탭로 clamp되지 않는다 — ✕ 오표시 방지).
     const plus_x: f64 = @floatFromInt(bar.x + m.tab_cols * session.cell_width_px + session.cell_width_px / 2);
     try std.testing.expect(m.inPlusZone(plus_x));
-    _ = session.hoverCursor(plus_x, bar_y, false);
+    _ = session.hoverCursor(plus_x, bar_y, 0);
     try std.testing.expect(session.hovered_tab == null);
 }
 
@@ -13722,6 +13739,31 @@ test "scroll.multiplier: 세로 휠 배수가 스크롤 줄 수를 키운다 (F1
     try std.testing.expect(surface.core.view_offset > off1);
 }
 
+// input.url-click-modifier(F1-5): URL hover 밑줄·클릭 열기의 수식키 판정을 Zig가 config로 한다. urlModifierHeld가
+// 마우스 mods 비트(xterm: shift=4·alt=8·ctrl=16·cmd=32)를 config 키와 비교한다. Swift는 NSEvent 수식키를 이 비트로
+// 변환만(네이티브 최소). undefined 테스트는 url_click_modifier만 읽으므로 그 필드만 초기화.
+test "urlModifierHeld: config url-click-modifier가 mods 비트와 매칭 (F1-5)" {
+    var session: AppSession = undefined;
+    // command(기본): cmd 비트(32)만 활성. 다른 수식키 동반(cmd+shift)도 cmd 포함이면 활성.
+    session.loaded_config.config.input.url_click_modifier = .command;
+    try std.testing.expect(session.urlModifierHeld(32));
+    try std.testing.expect(session.urlModifierHeld(32 | 4)); // cmd+shift
+    try std.testing.expect(!session.urlModifierHeld(16)); // ctrl 단독
+    try std.testing.expect(!session.urlModifierHeld(0)); // 수식키 없음
+    // control: ctrl 비트(16).
+    session.loaded_config.config.input.url_click_modifier = .control;
+    try std.testing.expect(session.urlModifierHeld(16));
+    try std.testing.expect(!session.urlModifierHeld(32));
+    // alt: 8.
+    session.loaded_config.config.input.url_click_modifier = .alt;
+    try std.testing.expect(session.urlModifierHeld(8));
+    try std.testing.expect(!session.urlModifierHeld(16));
+    // shift: 4.
+    session.loaded_config.config.input.url_click_modifier = .shift;
+    try std.testing.expect(session.urlModifierHeld(4));
+    try std.testing.expect(!session.urlModifierHeld(8));
+}
+
 // 휠은 '커서 아래' surface가 소유한다(Ghostty/Warp) — 포커스(활성) pane이 마우스 트래킹 앱(vim/tmux 등)이어도,
 // 커서가 옆 비활성 셸 pane 위면 그 셸의 스크롤백이 움직이고(트래킹이 휠을 가로채지 않음) 포커스도 안 바뀐다.
 // 반대로 활성·트래킹 pane 본문 위 휠은 앱이 소비해 스크롤백이 안 움직인다. 실 init/split이라 macOS 게이트.
@@ -14049,22 +14091,22 @@ test "hoverCursor returns region-specific cursor kinds" {
     // 단일 pane: 터미널 영역(바 아래) = text(iBeam).
     const term_x: f64 = @floatFromInt(session.active_pane_rect.x + 50);
     const term_y: f64 = @floatFromInt(session.active_pane_rect.y + 50);
-    try std.testing.expectEqual(CursorKind.text, session.hoverCursor(term_x, term_y, false));
+    try std.testing.expectEqual(CursorKind.text, session.hoverCursor(term_x, term_y, 0));
 
     // pane 탭 바 위 = link(pointingHand) — #5c: 탭·‹/›·+·pane 포커스 모두 클릭 가능.
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
     const bar = session.paneBarRect(lr.items[0].rect).?;
-    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(@floatFromInt(bar.x + 20), @floatFromInt(bar.y + 1), false));
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(@floatFromInt(bar.x + 20), @floatFromInt(bar.y + 1), 0));
 
     // 사이드바 워크스페이스 슬롯 위 = link(클릭=전환), "+" 슬롯 아래 빈 영역 = default(arrow) — #5c.
     if (session.sidebar_width_px > 0 and session.sidebar_slot_height_px > 0) {
         const sb_x: f64 = @floatFromInt(session.sidebar_width_px / 2);
         const slot0_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + @as(f64, @floatFromInt(session.sidebar_slot_height_px / 2)); // 슬롯 0 중앙(상단 헤더 아래) — 확실히 슬롯 안
-        try std.testing.expectEqual(CursorKind.link, session.hoverCursor(sb_x, slot0_y, false));
+        try std.testing.expectEqual(CursorKind.link, session.hoverCursor(sb_x, slot0_y, 0));
         const empty_y: f64 = @floatFromInt((session.tabs.items.len + 2) * session.sidebar_slot_height_px); // "+" 슬롯 아래(빈)
-        try std.testing.expectEqual(CursorKind.default, session.hoverCursor(sb_x, empty_y, false));
+        try std.testing.expectEqual(CursorKind.default, session.hoverCursor(sb_x, empty_y, 0));
     }
 
     // 좌우 split → 세로 divider 위 = resize_h(↔). 상하 split → 가로 divider 위 = resize_v(↕).
@@ -14074,7 +14116,7 @@ test "hoverCursor returns region-specific cursor kinds" {
     try session.layoutActiveTabDividers(&segs);
     const hseg = segs.items[0];
     const hdiv_y: f64 = @floatFromInt(hseg.bounds.y + hseg.bounds.h / 2);
-    try std.testing.expectEqual(CursorKind.resize_h, session.hoverCursor(@floatFromInt(hseg.pos), hdiv_y, false));
+    try std.testing.expectEqual(CursorKind.resize_h, session.hoverCursor(@floatFromInt(hseg.pos), hdiv_y, 0));
 
     try session.splitActivePane(.vertical);
     segs.clearRetainingCapacity();
@@ -14086,7 +14128,7 @@ test "hoverCursor returns region-specific cursor kinds" {
             const vdiv_x: f64 = @floatFromInt(seg.bounds.x + seg.bounds.w / 2);
             // seam 바로 위(밴드 안·위쪽 pane 터미널 영역). 정확히 seam y면 아래 pane 탭 바가 잡혀 default다(탭 바 우선).
             const vdiv_y: f64 = @floatFromInt(seg.pos - 3);
-            try std.testing.expectEqual(CursorKind.resize_v, session.hoverCursor(vdiv_x, vdiv_y, false));
+            try std.testing.expectEqual(CursorKind.resize_v, session.hoverCursor(vdiv_x, vdiv_y, 0));
         }
     }
     try std.testing.expect(saw_v);
@@ -14388,15 +14430,15 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
 
     // 호버: 비활성 슬롯(0, 활성은 1) 위면 호버 밴드가 추가된다(활성 밴드 + 호버 밴드 = 2).
-    _ = session.hoverCursor(x_in, header_h + 1, false);
+    _ = session.hoverCursor(x_in, header_h + 1, 0);
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
     try std.testing.expectEqual(@as(usize, 2), session.sidebar_cells.items.len);
     // 호버가 활성 슬롯(1) 위면 별도 호버 밴드 없음(활성 색 우선) → 밴드 1개.
-    _ = session.hoverCursor(x_in, header_h + slot_h + 1, false);
+    _ = session.hoverCursor(x_in, header_h + slot_h + 1, 0);
     try std.testing.expectEqual(@as(?usize, 1), session.hovered_slot);
     try std.testing.expectEqual(@as(usize, 1), session.sidebar_cells.items.len);
     // 터미널 영역(리사이즈 밴드보다 안쪽)으로 나가면 호버 해제.
-    _ = session.hoverCursor(@floatFromInt(session.sidebar_width_px + 50), 1, false);
+    _ = session.hoverCursor(@floatFromInt(session.sidebar_width_px + 50), 1, 0);
     try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
 }
 
@@ -14428,12 +14470,12 @@ test "hovering the sidebar + slot adds a hover band at the plus row" {
     const x_in: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1; // 사이드바 우측 끝(헤더 새 워크스페이스 아이콘 영역)
 
     // 헤더 새 워크스페이스 아이콘(우측 끝) 호버 → link 커서. 카드 슬롯이 아니라 hovered_slot=null(하단 "+" → 헤더로 이동).
-    const cursor = session.hoverCursor(x_in, icon_y, false);
+    const cursor = session.hoverCursor(x_in, icon_y, 0);
     try std.testing.expectEqual(CursorKind.link, cursor);
     try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
 
     // 탭 슬롯(0, 비활성)으로 이동(헤더 아래) → 호버 밴드가 그 탭 행으로(slotAt이 header_h를 빼고 슬롯 0).
-    _ = session.hoverCursor(x_in, header_h + 1, false);
+    _ = session.hoverCursor(x_in, header_h + 1, 0);
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
     try std.testing.expectEqual(@as(usize, 2), session.sidebar_cells.items.len);
 }
@@ -14473,7 +14515,7 @@ test "clicking the hovered slot close zone closes that tab, elsewhere switches" 
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
 
     // 슬롯 0을 호버(✕ 표시)한 뒤 그 ✕ zone 클릭 → 탭 0 닫힘(switchTab 아님).
-    _ = session.hoverCursor(close_x, slot0_y, false);
+    _ = session.hoverCursor(close_x, slot0_y, 0);
     try std.testing.expectEqual(@as(?usize, 0), session.hovered_slot);
     session.mouse(1, close_x, slot0_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
@@ -14595,7 +14637,7 @@ test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, c
     const start_px = session.sidebar_width_px;
     const edge: f64 = @floatFromInt(start_px);
     // 경계 호버 → resize_h(↔). 경계 안쪽(사이드바)은 default.
-    try std.testing.expectEqual(CursorKind.resize_h, session.hoverCursor(edge, 100, false));
+    try std.testing.expectEqual(CursorKind.resize_h, session.hoverCursor(edge, 100, 0));
 
     // 경계 down → 리사이즈 시작. 넓게 드래그(+60) → 폭 증가. up → 종료.
     session.mouse(1, edge, 100, 0, 0);
@@ -14640,7 +14682,7 @@ test "③b: clicking the sidebar '+' button opens a new workspace" {
     try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.new_workspace, chrome.components.sidebar.headerHit(new_ws_x, header_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px));
 
     // 새 워크스페이스 아이콘 호버 → pointingHand(link) affordance.
-    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(new_ws_x, header_y, false));
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(new_ws_x, header_y, 0));
 
     // 새 워크스페이스 아이콘 클릭 → 워크스페이스 2개, 새 탭이 활성.
     session.mouse(1, new_ws_x, header_y, 0, 0);
@@ -15516,19 +15558,19 @@ test "collapsed toggle: hover emits a highlight quad and metalFrame carries titl
     }
     // 토글 밖(띠 빈 곳) 호버 → 호버 off, 호버 quad 없음.
     const far_x: f64 = @floatFromInt(r.x + @as(i32, @intCast(r.w)) + 100);
-    _ = session.hoverCursor(far_x, 1, false);
+    _ = session.hoverCursor(far_x, 1, 0);
     try std.testing.expect(!session.hovered_collapsed_toggle);
     try std.testing.expect(!hasHoverQuad(session, hover_fill));
 
     // 토글 중심 호버 → pointingHand(.link) + 호버 on + 호버 quad 방출.
     const cx: f64 = @floatFromInt(r.x + @as(i32, @intCast(r.w / 2)));
     const cy: f64 = @floatFromInt(@as(i32, @intCast(r.h / 2)));
-    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(cx, cy, false));
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(cx, cy, 0));
     try std.testing.expect(session.hovered_collapsed_toggle);
     try std.testing.expect(hasHoverQuad(session, hover_fill));
 
     // 다시 밖으로 → 호버 off, quad 제거(rebuildSidebar가 다시 비움).
-    _ = session.hoverCursor(far_x, 1, false);
+    _ = session.hoverCursor(far_x, 1, 0);
     try std.testing.expect(!session.hovered_collapsed_toggle);
     try std.testing.expect(!hasHoverQuad(session, hover_fill));
 }

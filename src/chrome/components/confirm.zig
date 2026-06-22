@@ -286,7 +286,7 @@ test "confirm handle: ←/→로 포커스 이동, Enter는 포커스된 버튼 
     try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape }, &s).?);
 }
 
-test "confirm view: 닫힘이면 ops 0, 열림이면 패널(quad+border)+accent 기본 버튼+메시지·버튼·키 텍스트" {
+test "confirm view: 닫힘이면 ops 0, 열림이면 패널(quad)+accent 기본 버튼+메시지·버튼·키 텍스트" {
     const Rgb = @import("../../color.zig").Rgb;
     const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
     const p = props.ChromeProps{ .metrics = .{
@@ -308,9 +308,8 @@ test "confirm view: 닫힘이면 ops 0, 열림이면 패널(quad+border)+accent 
 
     s.show("실행 중인 명령이 있습니다.", .{ .confirm = "닫기", .cancel = "취소" });
     try view(&s, p, &tk, arena, &out);
-    // 프레임이 먼저(quad 배경 + border 테두리).
+    // 프레임이 먼저(quad 배경 — 외곽선 별도 op 없음).
     try std.testing.expect(out.items[0] == .quad);
-    try std.testing.expect(out.items[1] == .border);
     // 구조: 두 버튼 배경 fill(기본=accent, 보조=tab_hover_bg) + 메시지 + 단축키 통합 버튼 라벨("[Y] 닫기"/"[N] 취소").
     // 영어 단어(Enter/Esc) 줄은 없다 — 단축키는 [Y]/[N]로 라벨에 통합. 순서에 무관하게 존재 확인.
     var saw_accent_fill = false;

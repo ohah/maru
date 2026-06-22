@@ -85,7 +85,7 @@ test "notice handle: Enter/Esc 닫고 dismissed, 닫힘이면 null" {
     try std.testing.expect(s.open); // 평문 키로는 안 닫힘
 }
 
-test "notice view: 닫힘이면 ops 0, 열림이면 fill+border+text(modal)" {
+test "notice view: 닫힘이면 ops 0, 열림이면 quad+text(modal)" {
     const Rgb = @import("../../color.zig").Rgb;
     const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
     const p = props.ChromeProps{ .metrics = .{
@@ -107,11 +107,10 @@ test "notice view: 닫힘이면 ops 0, 열림이면 fill+border+text(modal)" {
 
     s.show("file corrupt");
     try view(&s, p, &tk, arena, &out);
-    try std.testing.expectEqual(@as(usize, 3), out.items.len);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
     try std.testing.expect(out.items[0] == .quad);
-    try std.testing.expect(out.items[1] == .border);
-    try std.testing.expect(out.items[2] == .text);
-    try std.testing.expectEqualStrings("file corrupt", out.items[2].text.runs[0].text);
+    try std.testing.expect(out.items[1] == .text);
+    try std.testing.expectEqualStrings("file corrupt", out.items[1].text.runs[0].text);
     // 모달 박스는 터미널 영역(사이드바 오른쪽) 안, 화면 중앙쯤. 박스 기하 엣지케이스(soft-lock 가드·폭 clamp·
     // rich 패딩 침범)는 modal_box.zig 테스트가 단일 출처로 커버한다(notice/confirm 공유 — 여기선 위임만 확인).
     try std.testing.expect(out.items[0].quad.rect.x >= 40);

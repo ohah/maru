@@ -96,7 +96,11 @@ fn hueForCol(col: u32) u16 {
     return @intCast(col * 360 / pick_hue_cols);
 }
 fn hueColForHue(h: u16) u32 {
-    return (@as(u32, h) * pick_hue_cols / 360) % pick_hue_cols;
+    // hueForCol(col)=col*360/16은 truncate(360/16=22.5 비정수)다. 역변환을 floor로 하면 odd column이 복원 안 돼
+    // hueColForHue(hueForCol(9))=8처럼 어긋나, '['/']' 키가 같은 hue로 되돌아오며 stuck되고 ▾ 마커가 실제 swatch보다
+    // 한 칸 왼쪽에 그려진다(code-review #1). +180(=360/2) round로 좌역원을 만든다 — SV 그리드(svColForSat의 +50)와
+    // 같은 반올림 규율. %로 끝(h≈360)을 col 0으로 wrap.
+    return ((@as(u32, h) * pick_hue_cols + 180) / 360) % pick_hue_cols;
 }
 
 /// picker 모달 박스 기하 — renderPicker와 handlePointer가 같은 출처로 공유(hit-test/렌더 일관). SV 그리드 폭과
@@ -165,6 +169,7 @@ pub const State = struct {
     }
     pub fn closePicker(self: *State) void {
         self.picking = false;
+        self.dragging = false; // picker 드래그 중 Esc 취소 시 dragging이 폼으로 새지 않게(다른 mode-exit와 동일, code-review)
     }
     /// 현재 선택 h/s/v의 RGB(미리보기·확정 hex 산출). platform이 확정 시 #rrggbb로 직렬화.
     pub fn pickerRgb(self: *const State) color_mod.Rgb {
@@ -1222,6 +1227,18 @@ test "settings palette_grid: 16 스와치 + 선택 셀 테두리·hex 렌더, �
     try std.testing.expectEqual(Action.selection_changed, a2);
     try std.testing.expect(s.editing);
     try std.testing.expectEqualStrings("#000000", s.editText());
+}
+
+test "settings HSV picker hue 셀↔값 round-trip: 모든 col 가역(마커·키 stuck 회귀 방지) (code-review max #1)" {
+    // hueColForHue는 hueForCol의 좌역원이어야 한다 — 아니면 odd column에서 '['/']' 키가 stuck되고 ▾ 마커가 어긋난다.
+    var col: u32 = 0;
+    while (col < pick_hue_cols) : (col += 1) {
+        try std.testing.expectEqual(col, hueColForHue(hueForCol(col)));
+    }
+    // 옛 버그 회귀 가드: col 9(h=202)에서 ']'(전진)이 실제로 col 10으로 가야 한다(옛 floor는 9로 되돌아와 stuck).
+    const c = hueColForHue(hueForCol(9));
+    try std.testing.expectEqual(@as(u32, 9), c);
+    try std.testing.expectEqual(@as(u32, 10), hueColForHue(hueForCol((c + 1) % pick_hue_cols)));
 }
 
 test "settings HSV picker: openPicker 시드·SV/hue 스와치 렌더·←→↑↓[] 조절·Enter=color_picked·Esc 취소·클릭 hit-test (CS-4-6)" {

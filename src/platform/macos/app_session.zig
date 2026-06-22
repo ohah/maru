@@ -3818,7 +3818,9 @@ pub const AppSession = struct {
         const sel = self.chrome_host.settings.selected;
         const after_texts = cf.bools.len + cf.nums.len + cf.enums.len + cf.texts.len;
         const after_colors = after_texts + cf.colors.len;
-        if (sel < after_texts or sel >= after_colors) return; // 선택 행이 color가 아니면(있을 수 없지만 방어) 무동작
+        // sel<after_texts면 다음 줄 `sel - after_texts`가 usize 언더플로(panic)라 그 범위 가드는 필수다(방어가 아니라
+        // 언더플로 안전). picker는 color 행에서만 열리므로 sel은 [after_texts, after_colors)이지만, 호출 계약을 코드로 못박는다.
+        if (sel < after_texts or sel >= after_colors) return;
         const ci = sel - after_texts;
         if (ci >= cf.colors.len) return;
         const hex = rgbToHex(self.loaded_config.arena.allocator(), self.chrome_host.settings.pickerRgb()) catch return;

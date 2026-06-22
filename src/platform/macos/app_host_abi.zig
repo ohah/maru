@@ -589,7 +589,7 @@ pub export fn maru_macos_app_session_reload_config(session: ?*AppSession) c_int 
 }
 
 // Reset to Defaults 메뉴 — requestResetAll로 **확인 모달**을 연다(커맨드 팝업 "Reset All Settings to Defaults"와 같은
-// 경로). 확정 시 모든 config를 내장 기본값으로 되돌리고 config 파일을 삭제한다(파괴적이라 무확인 즉시 실행 안 함 —
+// 경로). 확정 시 모든 config를 내장 기본값으로 되돌리고 config 파일을 기본 상태(빈+주석)로 덮어쓴다(파괴적이라 무확인 즉시 실행 안 함 —
 // 확정/취소는 다음 tick confirm 모달 입력으로). 항상 Status.ok. Swift는 메뉴 클릭에서 호출만 한다.
 pub export fn maru_macos_app_session_reset_defaults(session: ?*AppSession) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);

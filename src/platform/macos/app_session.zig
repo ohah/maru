@@ -4730,37 +4730,45 @@ pub const AppSession = struct {
         // **config 파일을 기본 상태로 덮어쓴다**(삭제 아님) → 빈+주석이라 다음 로드는 schema·특수 키·주석 전부 기본값.
         // 부분 갱신(updateForKeys)이 아닌 전체 덮어쓰기인 이유: 기본값 위 override만 쓰는 정책상 (a) 비-schema 키
         // (theme.preset/palette/env/cursor.color/shell.args)가 안 지워지고 (b) 빈 항목까지 40여 줄을 쏟는다(리뷰 #827).
-        // write 실패는 무시(forgiving — 라이브엔 이미 반영). dirty도 비워 Swift 부분 write-back이 안 끼게 한다(이후 GUI
-        // 변경은 serializeConfig가 이 파일을 채운다 — 자연 복구).
+        var wrote = false;
         const path = self.configPath();
         if (path.len > 0) {
-            // 디렉터리 보장(신규 사용자 — ~/.config/maru가 아직 없을 수 있다). 한 단계 mkdir(부모 ~/.config는 대개 존재;
-            // 이미 있으면 EEXIST라 무시). createFileAtomic이 temp를 같은 디렉터리에 만들므로 이게 선행돼야 한다.
-            if (std.fs.path.dirname(path)) |dir| {
-                if (dir.len > 0 and dir.len < std.fs.max_path_bytes) {
-                    var dbuf: [std.fs.max_path_bytes]u8 = undefined;
-                    @memcpy(dbuf[0..dir.len], dir);
-                    dbuf[dir.len] = 0;
-                    _ = std.c.mkdir(@as([*:0]const u8, @ptrCast(&dbuf)), 0o755);
-                }
-            }
             const header = "# Maru config — Reset to Defaults로 초기화됨(모든 설정 기본값). 키 설명: docs/configuration.md\n";
-            // atomic write(temp 파일 + replace=rename) — 부분 쓰기가 원본 config를 손상하지 않게(다른 config write 경로와
-            // 정합; serializeConfig→Swift atomic·workspace write와 같은 보장). write/replace 실패는 무시(forgiving — 라이브엔
-            // 이미 반영, 다음 GUI 변경 때 serializeConfig가 채운다).
-            if (std.Io.Dir.cwd().createFileAtomic(self.io, path, .{})) |af_init| {
-                var af = af_init;
-                defer af.deinit(self.io); // replace 성공 시 no-op, 실패 시 temp 정리
+            // atomic write(temp + replace=rename) — 부분 쓰기가 원본 config를 손상하지 않게(serializeConfig→Swift atomic·
+            // workspace write와 같은 보장). .replace=true는 File.Atomic.replace 계약(Dir.zig:1878), .make_path=true는 신규
+            // 사용자의 ~/.config[/maru] 부모까지 재귀 생성(리뷰 #844-followup — 수동 단계별 mkdir 대체). 실패는 forgiving이되
+            // wrote로 추적해 거짓 성공 notice는 피한다(파일 미반영이면 재부팅 시 옛 설정 부활하므로 사용자에게 알린다).
+            write_blk: {
+                var af = std.Io.Dir.cwd().createFileAtomic(self.io, path, .{ .replace = true, .make_path = true }) catch break :write_blk;
+                defer af.deinit(self.io); // replace 성공 시 no-op, 실패/중도 탈출 시 temp 정리
                 var wbuf: [256]u8 = undefined;
                 var fw = af.file.writer(self.io, &wbuf);
-                fw.interface.writeAll(header) catch {};
-                fw.interface.flush() catch {};
-                af.replace(self.io) catch {};
-            } else |_| {}
+                fw.interface.writeAll(header) catch break :write_blk;
+                fw.interface.flush() catch break :write_blk;
+                af.replace(self.io) catch break :write_blk;
+                wrote = true;
+            }
         }
-        self.config_dirty_keys.clearRetainingCapacity();
+        // 모든 dirty 컬렉션을 비워 Swift 부분 write-back을 막는다(리뷰 #844-followup) — config_dirty_keys 하나만 비우면
+        // 리셋 직전 예약된 keybind rebind/unbind·env 삭제가 살아남아, 다음 tick serializeConfig가 takeConfigDirty()=true로
+        // 방금 리셋한 파일에 그 변경을 도로 써넣는다(takeConfigDirty가 5개 컬렉션을 OR로 본다).
+        self.clearConfigDirty();
         self.metal_dirty = true;
-        self.showNotice("모든 설정을 기본값으로 초기화했습니다");
+        if (wrote or path.len == 0)
+            self.showNotice("모든 설정을 기본값으로 초기화했습니다")
+        else
+            self.showNotice("기본값으로 초기화(화면은 적용됨) — config 파일 쓰기에 실패했습니다");
+    }
+
+    /// serializeConfig가 소비하는 config write-back 대기열 5개를 전부 비운다(takeConfigDirty가 OR로 보는 것과 동일 집합).
+    /// reset처럼 "대기 중인 모든 변경을 폐기"해야 하는 경로에서 쓴다 — 일부만 비우면 남은 keybind/env 변경이 다음 tick
+    /// serializeConfig를 통해 되살아난다. serializeConfig와 같은 clearRetainingCapacity 패턴(항목 메모리는 비소유).
+    fn clearConfigDirty(self: *AppSession) void {
+        self.config_dirty_keys.clearRetainingCapacity();
+        self.config_keybind_rebinds.clearRetainingCapacity();
+        self.config_removed_keys.clearRetainingCapacity();
+        self.config_keybind_removed.clearRetainingCapacity();
+        self.config_keybind_unbinds.clearRetainingCapacity();
     }
 
     /// config.theme의 주 색 4개가 어느 named 프리셋과 일치하는지(없으면 null = "사용자 지정"). 테마 프리셋 dropdown
@@ -15483,15 +15491,30 @@ test "detectThemePreset / applyThemePreset / resetAllSettings: 테마 프리셋�
     session.config_dirty_keys.clearRetainingCapacity();
     session.loaded_config.config.font.size = 99;
     session.loaded_config.config.cursor.blink = !(config_mod.Config{}).cursor.blink;
+    // 리셋 직전 예약된 변경이 config_dirty_keys 외 컬렉션에 있어도 reset이 전부 폐기하는지(리뷰 #844-followup) —
+    // 안 비우면 다음 tick serializeConfig가 takeConfigDirty()=true로 방금 리셋한 파일에 되살린다. 대표로 두 컬렉션에 더미.
+    try session.config_removed_keys.append(allocator, "env.STALE");
+    try session.config_keybind_unbinds.append(allocator, "cmd+k");
     session.resetAllSettings();
     try std.testing.expectEqual((config_mod.Config{}).font.size, session.loaded_config.config.font.size); // 라이브 기본값
     try std.testing.expectEqual((config_mod.Config{}).cursor.blink, session.loaded_config.config.cursor.blink);
-    try std.testing.expect(!session.takeConfigDirty()); // 부분 write-back 예약 없음(전체 덮어쓰기로 영속까지 기본)
+    try std.testing.expect(!session.takeConfigDirty()); // 5개 dirty 컬렉션 전부 비워짐(부분 write-back 예약 없음)
     // config 파일이 기본 상태로 덮어써졌는지(삭제 아님 — 파일 존재 + 안내 주석, 옛 override 사라짐).
     const after = try tmp.dir.readFileAlloc(io, "config", allocator, .limited(4096));
     defer allocator.free(after);
     try std.testing.expect(std.mem.indexOf(u8, after, "Reset to Defaults") != null); // 안내 주석 헤더
     try std.testing.expect(std.mem.indexOf(u8, after, "font.size = 99") == null); // 옛 override 사라짐
+
+    // make_path + replace 계약(리뷰 #844-followup): config 경로의 부모 디렉터리가 없어도(신규 사용자 ~/.config[/maru] 부재)
+    // reset이 부모를 재귀 생성하고 헤더를 쓴다. 존재하지 않는 nested/dir 하위로 경로를 바꿔 검증.
+    const nested = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/nested/dir/config", .{tmp.sub_path});
+    allocator.free(session.config_path_buffer.?);
+    session.config_path_buffer = try allocator.dupe(u8, nested);
+    session.resetAllSettings();
+    const nested_after = tmp.dir.readFileAlloc(io, "nested/dir/config", allocator, .limited(4096)) catch null;
+    defer if (nested_after) |na| allocator.free(na);
+    try std.testing.expect(nested_after != null); // make_path가 nested/dir를 생성하고 헤더를 씀
+    try std.testing.expect(std.mem.indexOf(u8, nested_after.?, "Reset to Defaults") != null);
 }
 
 // isWindowDragRegion: 헤더 '빈' 영역(아이콘·검색 아님)만 창 드래그/확대 영역(Swift performDrag·zoom). 아이콘·검색·

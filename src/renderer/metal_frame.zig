@@ -254,8 +254,11 @@ fn packForeground(style: terminal.Style, colors: CellColors) u32 {
 /// 미세하게 다를 수 있으나(셀 배경 vs theme 배경), dim+컬러배경+장식선이 겹치는 드문 조합이라 허용한다.
 fn effectiveLineColor(l: renderer.LineOverlay, colors: CellColors) color.Rgb {
     const fg = resolveColor(l.color, colors.default_fg, colors.palette, colors.config_palette);
-    if (!l.dim) return fg;
-    return lerpHalf(fg, colors.default_bg);
+    // SGR 2 faint면 배경 쪽으로 0.5 보간(글리프와 일관), 그 다음 비활성 split pane 디밍(F2-7)도 같은 fill 쪽으로
+    // 적용한다 — 안 하면 밑줄/취소선/윗줄만 풀 밝기로 남아 디밍된 글자 위에서 튄다(packForeground/packBackground와
+    // 같은 dimToward 후처리로 모든 셀 요소를 일률 디밍). dim_milli=0(활성 pane)이면 dimToward는 무변화.
+    const faint = if (l.dim) lerpHalf(fg, colors.default_bg) else fg;
+    return dimToward(faint, colors.default_bg, colors.dim_milli);
 }
 
 /// terminal cell의 배경 Color를 0xAARRGGBB로 packing한다. default 배경은 theme 기본 배경
@@ -1714,6 +1717,11 @@ test "unfocused dim interpolates fg and explicit bg toward default_bg, leaving d
     // dim_milli=1000(완전): 전경이 배경색과 같아진다(완전히 사라짐).
     const full: CellColors = .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 }, .default_bg = .{ .r = 16, .g = 16, .b = 16 }, .dim_milli = 1000 };
     try std.testing.expectEqual(@as(u32, 0x101010), packForeground(.{ .foreground = .default }, full));
+
+    // 장식선(밑줄/취소선/윗줄)도 글리프와 같이 디밍돼야 한다(code-review max C3) — 안 그러면 디밍된 글자 위에서 선만 튄다.
+    const line: renderer.LineOverlay = .{ .row = 0, .col = 0, .kind = .underline, .color = .default };
+    try std.testing.expectEqual(color.Rgb{ .r = 255, .g = 255, .b = 255 }, effectiveLineColor(line, off)); // 활성: 그대로
+    try std.testing.expectEqual(color.Rgb{ .r = 0x87, .g = 0x87, .b = 0x87 }, effectiveLineColor(line, half)); // 비활성 50%: 글리프와 동일 0x87
 }
 
 test "bold-is-bright: bold + indexed 0..7 전경만 bright(8..15)로, 그 외는 불변" {

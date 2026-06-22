@@ -7,7 +7,8 @@
 const std = @import("std");
 
 /// 의미적 키(레이아웃 독립). 평문 입력은 `.char` + codepoint. left/right는 가로 포커스 이동(confirm 버튼 선택 등).
-pub const Key = enum { enter, escape, up, down, left, right, backspace, char, other };
+/// tab은 영역 전환(세팅 모달 폼↔좌측 네비) — Shift 여부는 mods.shift로 구분한다.
+pub const Key = enum { enter, escape, up, down, left, right, backspace, char, tab, other };
 
 /// 모디파이어 상태. find의 Shift+Enter(이전 매치)·⌘/⌃/⌥+글자(닫기) 같은 조합 판정에 쓴다. platform 어댑터가
 /// OS 모디파이어를 이걸로 매핑한다(예: app_session.chromeInputFromKeyEvent).

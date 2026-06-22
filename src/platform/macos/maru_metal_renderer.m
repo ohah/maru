@@ -789,7 +789,9 @@ bool maru_metal_renderer_draw(
                 sx_origin = glyph_pad;
             }
             // 에이전트 심볼(✶ U+2736 / ◆ U+25C6)은 width=2(2칸 slot)로 또렷이 rasterize되므로 stretch는 보조만(1.1×).
-            const float gscale = (sc.slot_id != 0u && (sc.codepoint == 0x2736u || sc.codepoint == 0x25C6u)) ? 1.1f : 1.0f;
+            // **gutter col 0 아이콘만** 확대한다 — col 가드가 없으면 워크스페이스 이름/경로/브랜치 텍스트에 ◆·✶가
+            // 들어갈 때 그 텍스트 셀(slot_id≠0·동일 codepoint)까지 1.1×로 늘어난다(app_session.zig 색칠 루프의 col 0 가드와 짝).
+            const float gscale = (sc.slot_id != 0u && sc.col == 0u && (sc.codepoint == 0x2736u || sc.codepoint == 0x25C6u)) ? 1.1f : 1.0f;
             maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h, gscale);
         }
     }

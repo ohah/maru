@@ -101,6 +101,9 @@ const placeholder_cell_height_px = input_math.placeholder_cell_height_px; // ses
 // OSC 52 읽기 응답 상한(원문 클립보드 바이트). 과대 클립보드를 base64 OSC 52로 PTY에 쏟는 폭주를 막는다
 // (코어 OSC 52 write 상한 max_clipboard_bytes와 같은 16MB). 초과하면 응답하지 않는다(F2-6).
 const max_clipboard_read_bytes: usize = 16 * 1000 * 1000;
+// 배경 이미지(window.background-image, F2-1)용 예약 kitty image id — kg 텍스처 캐시·live_ids에서 배경 이미지를
+// 가리킨다. u32 최댓값이라 kitty 프로그램 id(보통 작은 값)와 충돌 가능성이 낮다(충돌 시 텍스처 슬롯 공유 — 드묾).
+const background_image_id: u32 = 0xFFFF_FFFF;
 // 시각 벨(bell.visual) flash 지속 tick 수 — frame이 ~30Hz라 8 tick ≈ 250ms. flash는 이만큼에서 0으로 선형 페이드(F2-4).
 const bell_flash_total_ticks: u32 = 8;
 // 시각 벨 flash 최대 alpha(천분율) — 전경색 반투명 오버레이의 시작 불투명도. 너무 세지 않게(가독성·자극 균형) 0.35(F2-4).
@@ -1152,6 +1155,16 @@ pub const AppSession = struct {
     // 비교해 바뀐 것만 업로드 채널에 싣는다(이미지당 개별 텍스처·upload-once). Swift 렌더러 텍스처 캐시의
     // Zig측 미러 — 둘이 desync하면(렌더러 재생성 등) 그 이미지는 다음 transmit까지 안 그려질 뿐이다.
     kitty_uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{},
+    // 배경 이미지(window.background-image, F2-1) 디코드 캐시. config 경로가 바뀔 때만 파일을 읽어 PNG를 RGBA(또는
+    // RGB)로 디코드해 둔다. 매 frame 디코드 안 함 — pixels는 generation으로 1회 업로드(kg_uploads), GpuImage는 매
+    // frame 풀-윈도 pass-0으로 붙인다. 빈 경로면 width=0(배경 없음). destroy에서 pixels·path_cache 해제.
+    bg_image_pixels: []u8 = &.{},
+    bg_image_width: u32 = 0,
+    bg_image_height: u32 = 0,
+    bg_image_bpp: u32 = 4, // 3(RGB)/4(RGBA)
+    bg_image_path_cache: []u8 = &.{}, // 마지막 디코드한 config 경로(변화 감지 — 매 frame 재디코드 방지)
+    bg_image_generation: u64 = 0, // 경로가 바뀌어 재디코드할 때마다 증가 — 렌더러 텍스처 재업로드 트리거
+    bg_image_uploaded_gen: u64 = 0, // 마지막으로 업로드 채널에 실은 generation(같으면 재업로드 안 함)
     // 마우스가 호버 중인 사이드바 탭 슬롯 인덱스(없으면 null). hoverCursor이 사이드바 영역에서 갱신하고,
     // rebuildSidebar가 이 슬롯에 호버 하이라이트 밴드를 그린다(활성 슬롯과 다를 때만). 후속 호버 X
     // 닫기 아이콘의 대상 슬롯도 이 값이다.
@@ -8636,6 +8649,48 @@ pub const AppSession = struct {
                         }
                     }
                 }
+                // F2-1 배경 이미지(window.background-image): 풀-윈도 pass-0 GpuImage를 kitty 채널 앞에 끼운다
+                // (렌더러 변경 없이 텍스처 캐시·image quad 인프라 재사용). pass 0이라 (pass,z) 정렬 partition을
+                // 유지하려 kg_images **앞**에 prepend한다(below-text 먼저·above-text 뒤 split 불변).
+                self.ensureBackgroundImage();
+                if (self.buildBackgroundGpuImage()) |bg_gi| {
+                    if (self.allocator.alloc(metal_frame.GpuImage, kg_images.len + 1) catch null) |new_images| {
+                        new_images[0] = bg_gi;
+                        @memcpy(new_images[1..], kg_images);
+                        self.allocator.free(kg_images);
+                        kg_images = new_images;
+                        // live 집합에 bg id 추가 — eviction(live 아닌 텍스처 회수)에서 살아남게.
+                        kg_live_ids.append(self.allocator, background_image_id) catch {};
+                        // 픽셀 업로드는 generation이 바뀐(경로 변경 후 첫 frame) 때만 — 렌더러 텍스처 1회 캐시
+                        // (upload-once, kitty와 동일 모델; 렌더러 재생성 시 desync는 kitty_uploaded 캐비엇과 같음).
+                        if (self.bg_image_generation != self.bg_image_uploaded_gen and self.bg_image_pixels.len > 0) {
+                            const bg_upload = metal_frame.GpuImageUpload{
+                                .image_id = background_image_id,
+                                .width = self.bg_image_width,
+                                .height = self.bg_image_height,
+                                .bpp = self.bg_image_bpp,
+                                .generation = self.bg_image_generation,
+                                .pixels_offset = kg_pixels.len, // 합친 픽셀 버퍼 끝에 bg 픽셀을 잇는다
+                                .pixels_len = self.bg_image_pixels.len,
+                            };
+                            const new_uploads = self.allocator.alloc(metal_frame.GpuImageUpload, kg_uploads.len + 1) catch null;
+                            const new_pixels = std.mem.concat(self.allocator, u8, &.{ kg_pixels, self.bg_image_pixels }) catch null;
+                            if (new_uploads != null and new_pixels != null) {
+                                @memcpy(new_uploads.?[0..kg_uploads.len], kg_uploads);
+                                new_uploads.?[kg_uploads.len] = bg_upload;
+                                self.allocator.free(kg_uploads);
+                                self.allocator.free(kg_pixels);
+                                kg_uploads = new_uploads.?;
+                                kg_pixels = new_pixels.?;
+                                self.bg_image_uploaded_gen = self.bg_image_generation;
+                            } else {
+                                // 부분 할당 실패 — 누수 방지로 새 버퍼만 해제(이번 frame 업로드 생략, 다음 frame 재시도).
+                                if (new_uploads) |nu| self.allocator.free(nu);
+                                if (new_pixels) |np| self.allocator.free(np);
+                            }
+                        }
+                    }
+                }
                 self.appendBellFlashQuad(); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items, self.gpu_shadows.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     self.metal_dirty = false;
@@ -9242,6 +9297,83 @@ pub const AppSession = struct {
             .layer = 1, // over 패스 — 화면 전체 덮음(scrollbar layer 3·modal layer 1과 같은 over, append 순서로 위)
         }) catch {};
         self.bell_flash_ticks -= 1; // 페이드: 다음 frame은 더 흐리게(0이면 다음 dispatchBell이 metal_dirty 안 세움)
+    }
+
+    /// 배경 이미지(window.background-image, F2-1) 디코드 캐시를 config 경로와 동기화한다. 경로가 바뀐 frame에만
+    /// 파일을 읽어 PNG를 디코드한다(매 frame 디코드 방지) — 디코드 픽셀은 bg_image_pixels에 owned로 보관하고
+    /// generation을 올려 렌더러 텍스처 1회 재업로드를 트리거한다. 빈 경로/읽기·디코드 실패는 배경 없음(width=0)으로
+    /// 조용히 폴백하되 path_cache는 갱신해 같은 (잘못된) 경로를 매 frame 다시 읽지 않게 한다.
+    /// 베이스: kitty graphics f=100 PNG 디코더(terminal/png.zig) 재사용 — JPEG 등은 후속(maru 내장 디코더 PNG만).
+    fn ensureBackgroundImage(self: *AppSession) void {
+        const path = self.loaded_config.config.window_background_image;
+        // 경로 무변: 이미 이 경로로 디코드(또는 폴백)했다 — 재작업 없음.
+        if (std.mem.eql(u8, path, self.bg_image_path_cache)) return;
+
+        // 경로가 바뀌었다(빈→채움·채움→다름·채움→빈 포함). 옛 디코드 픽셀·path_cache를 버리고 새로 시도한다.
+        if (self.bg_image_pixels.len > 0) self.allocator.free(self.bg_image_pixels);
+        self.bg_image_pixels = &.{};
+        self.bg_image_width = 0;
+        self.bg_image_height = 0;
+        self.allocator.free(self.bg_image_path_cache);
+        self.bg_image_path_cache = self.allocator.dupe(u8, path) catch &.{};
+        self.bg_image_generation +%= 1; // 경로 변경 → 렌더러가 옛 텍스처를 버리고(빈 경로면 evict) 새로 업로드
+
+        if (path.len == 0) return; // 빈 경로 = 배경 없음
+
+        // 절대경로 PNG 파일을 읽어 디코드한다. 못 읽거나(없음·권한) 미지원 PNG면 width=0 유지(조용한 폴백).
+        // 파일 상한 64MiB(디코드 출력 상한은 png.decode 내부 320MB) — 비정상적으로 큰 파일은 거부.
+        const bytes = std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(1 << 26)) catch return;
+        defer self.allocator.free(bytes);
+        const img = terminal.png.decode(self.allocator, bytes) catch return;
+        // decode 성공: img.data(owned)를 그대로 인수받는다(복사 없음). bpp는 3(RGB)/4(RGBA).
+        self.bg_image_pixels = img.data;
+        self.bg_image_width = img.width;
+        self.bg_image_height = img.height;
+        self.bg_image_bpp = img.bpp;
+    }
+
+    /// 디코드된 배경 이미지(F2-1)를 창 전체를 덮는 pass-0 GpuImage로 환산한다. aspect-fill(cover) — 종횡비를
+    /// 유지하며 창을 꽉 채우고, 넘치는 축을 가운데 기준으로 UV crop한다. pass=0·z=minInt이라 kitty 이미지·셀
+    /// 배경·텍스트 모두보다 뒤에 그려져 default 배경 셀(빈 영역)로 비친다. 디코드 픽셀/창 크기가 없으면 null.
+    fn buildBackgroundGpuImage(self: *AppSession) ?metal_frame.GpuImage {
+        if (self.bg_image_width == 0 or self.bg_image_height == 0) return null;
+        if (self.backing_width_px == 0 or self.backing_height_px == 0) return null;
+        const win_w: f32 = @floatFromInt(self.backing_width_px);
+        const win_h: f32 = @floatFromInt(self.backing_height_px);
+        const img_w: f32 = @floatFromInt(self.bg_image_width);
+        const img_h: f32 = @floatFromInt(self.bg_image_height);
+        const win_aspect = win_w / win_h;
+        const img_aspect = img_w / img_h;
+        var uv_u0: f32 = 0;
+        var uv_v0: f32 = 0;
+        var uv_u1: f32 = 1;
+        var uv_v1: f32 = 1;
+        if (win_aspect > img_aspect) {
+            // 창이 이미지보다 넓다 → 가로를 꽉 채우고 세로를 crop(visible = 보이는 세로 비율).
+            const visible = img_aspect / win_aspect;
+            uv_v0 = (1.0 - visible) / 2.0;
+            uv_v1 = 1.0 - uv_v0;
+        } else {
+            // 창이 이미지보다 좁(높)다 → 세로를 꽉 채우고 가로를 crop.
+            const visible = win_aspect / img_aspect;
+            uv_u0 = (1.0 - visible) / 2.0;
+            uv_u1 = 1.0 - uv_u0;
+        }
+        return metal_frame.GpuImage{
+            .image_id = background_image_id,
+            .dest_x = 0,
+            .dest_y = 0,
+            .dest_w = win_w,
+            .dest_h = win_h,
+            .origin_x = 0,
+            .origin_y = 0,
+            .src_u0 = uv_u0,
+            .src_v0 = uv_v0,
+            .src_u1 = uv_u1,
+            .src_v1 = uv_v1,
+            .z = std.math.minInt(i32), // pass 0 안에서도 맨 뒤(혹시 z<bg_limit인 kitty 이미지보다 더 뒤)
+            .pass = 0, // below_bg — 셀 배경·텍스트 모두 앞에 그려져 default 배경 셀로 비침
+        };
     }
 
     /// 한 pane 우측에 스크롤바 thumb(둥근 GpuQuad)를 그린다 — 스크롤백이 있을 때만(sb_count>0). thumb 높이는
@@ -10192,6 +10324,9 @@ pub const AppSession = struct {
         self.gpu_quads.deinit(self.allocator);
         self.gpu_shadows.deinit(self.allocator);
         self.kitty_uploaded.deinit(self.allocator);
+        // F2-1 배경 이미지 디코드 캐시 — owned 픽셀·경로 문자열(빈 경로면 empty라 무해).
+        if (self.bg_image_pixels.len > 0) self.allocator.free(self.bg_image_pixels);
+        self.allocator.free(self.bg_image_path_cache);
         self.global_hotkeys.deinit(self.allocator);
         // 커맨드 카탈로그: owned 문자열(key_display·key_equivalent)을 먼저 해제하고 목록들을 deinit(빌드 전이면 empty라 무해).
         for (self.command_key_displays.items) |s| self.allocator.free(s);

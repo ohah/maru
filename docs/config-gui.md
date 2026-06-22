@@ -142,7 +142,8 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **선택·편집**: `←→`로 셀 이동(`State.grid_cell`, wrap), `Enter`/스와치 클릭으로 선택, 선택 셀의 hex를 인라인 편집(text/color 위젯과 같은 고정 버퍼·Enter 커밋·Esc 취소). 커밋은 `schema.setPaletteColor`(파일 로드와 같은 `#RRGGBB` 검증)로 적용 + `theme.palette.N` 키 dirty.
 - **선택 표식 = 인덱스 텍스트**: 우측에 **`N  #rrggbb`**(선택 ANSI 인덱스 + hex)를 보여준다. 셀 위에 `Op.border`/`fill`을 얹으면 tui lowering(`paintRectBg`가 셀 단위)이 **1행 높이라 셀 전체를 그 색으로 칠해 스와치 색을 덮으므로** 안 쓴다. 인덱스는 색과 무관하게 어느 칸인지 분명히 보여준다.
 - **영속은 공짜**: write-back(`serialize.configKeyValues`)이 **이미 set된 `theme.palette.N`을 직렬화**한다(round-trip 테스트가 보장). 그래서 별도 write-경로 확장 없이 dirty만 찍으면 파일에 써진다 — `theme.preset`이 깐 팔레트도 이 그리드로 직접 칠하면 영속된다([§6.3] 한계의 직접 해소 경로).
-- **한계(후속)**: 온-그리드 선택 마커(현재는 인덱스 텍스트 — reserved 밑줄 프리미티브가 생기면 셀 위 얇은 띠로), 셀별 프리셋 순환(현재는 hex 입력만), null로 되돌리기(현재는 통합 리셋이 담당), env/shell.args bespoke 에디터(§6.6).
+- **온-그리드 선택 마커**: 선택 스와치 위에 `▾` 글리프(accent text 레이어)를 얹어 어느 칸인지 보여준다 — `Op.border`/`fill`은 tui lowering(`paintRectBg` 셀 단위)이 셀 전체를 칠해 스와치 색을 덮으므로, 글리프(셀 bg=스와치 색은 거의 안 가림)로. 우측 `N  #hex` 인덱스 텍스트와 함께.
+- **한계(후속)**: 셀별 프리셋 순환(현재는 hex 입력만), null로 되돌리기(현재는 통합 리셋이 담당).
 
 ### 6.6 셸 인자(`shell.args`) + 환경 변수(`env.<KEY>`) — 특수 행 (CS-4-5)
 
@@ -164,7 +165,9 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **즉시 반영**: `rebindActionEntry`가 `loaded_config.keybindings`를 새 슬라이스로 교체(그 액션을 새 chord로, 없으면 추가)하고 `rebuildCommandCatalog`로 메뉴바·팝업 표시도 갱신한다. resolver가 매 키 이벤트마다 이 슬라이스를 읽으므로 재시작 없이 바로 동작한다.
 - **영속(전용 write-back)**: keybind는 `key = value`가 아니라 줄마다 같은 `keybind` 키 + 두 번째 `=`로 chord/action을 나눠서 `updateConfigText`(key 기준)로는 못 다룬다(모든 keybind 줄이 한 키로 충돌). 그래서 `updateKeybindLines`(loader)가 **action 기준**으로 `keybind = <chord> = <action>` 줄을 찾아 교체(없으면 append)한다. chord는 `KeyChord.toConfigString`(parse와 round-trip되는 ASCII 표기 — 표시용 `formatChord`의 ⌘⇧ 기호와 다름). `serializeConfig`가 schema write-back 뒤에 이 패스를 **체이닝**하고, `takeConfigDirty`가 keybind 재바인딩도 본다. 매크로 줄(`text:`/`esc:` rhs에 `=` 포함)은 action 키와 안 겹쳐 자연히 보존된다.
 - **해제(unbind)**: keybind 행에서 `Backspace`(녹음 아님)를 누르면 그 액션의 **사용자 지정** 단축키를 해제한다 — `unbindActionEntry`가 `loaded_config.keybindings`에서 그 액션을 빼고 카탈로그를 재빌드, `keybind = * = action` 줄을 **`removeKeybindLines`(action 기준 제거)**로 빼며(serializeConfig 체이닝), 펜딩 rebind도 취소한다. 해제 후 resolver는 빌트인(있으면)을 반환하거나 미지정 — 행 표시가 그에 맞게 갱신. 사용자 바인딩이 없으면 notice(빌트인은 안 건드림).
-- **한계(후속)**: 옛 chord가 **빌트인 기본**이면 그 chord도 계속 액션을 발동한다(새 chord를 **추가**하는 셈 — 완전 교체/빌트인 chord 죽이기는 `keybind = chord = unbind` 지시어가 필요해 후속; 현재 unbind는 사용자 override만 제거). 충돌 검출 UI(다른 액션에 이미 묶인 chord 경고)·terminal 매크로/global 바인딩 편집·F13+ 키도 후속.
+- **빌트인까지 완전 해제**: unbind는 사용자 줄 제거에 더해 그 액션의 **빌트인 chord(들)**(`default_app_bindings`)를 `loaded_config.unbinds`에 넣고(라이브) `keybind = <chord> = unbind` 지시어로 영속해 빌트인까지 죽인다. **한 액션에 빌트인 chord가 여럿이면(next_tab·previous_tab·increase/decrease_font_size는 2개) 전부** unbind한다 — 하나만 죽이면 `chordForAction`이 남은 chord를 반환해 해제가 실패하므로(리뷰 #840). 해제 후 `chordForAction`이 null → 행은 "(미지정)".
+- **충돌 경고**: rebind 시 그 chord가 다른 액션의 effective chord와 같으면 `showNotice`로 알린다(rebind는 진행 — 사용자 의도, last-wins). 다만 다중-chord 빌트인의 2번째 변형·terminal 매크로 바인딩과의 충돌은 못 잡는다(best-effort — 후속).
+- **한계(후속)**: rebind는 여전히 빌트인 chord를 **추가**하는 셈(새 chord + 빌트인 둘 다 발동 — 완전 교체는 후속). terminal 매크로/global 바인딩 편집·F13+ 키·rebind 후 stale `unbind` 줄 정리도 후속.
 
 ### 6.8 폼 검색(현재 섹션 필터) (CS-4-4 후속)
 
@@ -174,7 +177,8 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **필터는 단일 출처**: `currentSectionFields`가 `settingsRowMatches(label, key, query)`(쿼리 부분일치 — ASCII 대소문자 무시, 한글은 그대로)를 **모든 행 종류**(schema bool/num/enum/text/color + synthetic theme.preset/shell.args/env + palette + keybind)에 같은 규칙으로 적용한다. 그래서 필터 후에도 view(행 목록)와 핸들러(selected 인덱스 매핑)가 **일관**된다 — 핸들러가 `selected`로 라우팅할 때 필터된 같은 집합을 본다.
 - **keybind 필터의 인덱스 정합**: keybind 행은 검색으로 부분집합이 되므로 `SettingsSectionFields`가 `has_keybinds`(bool) 대신 **`keybind_entries`(필터된 목록)**를 들고, `total`/`keybindRowStart`/`buildSettingsFields`/`captureKeybindRecording`가 모두 이 목록을 쓴다. 그래서 "split"로 필터한 뒤 첫 행을 녹음하면 **필터된 첫 액션**(Split Right)이 정확히 rebind된다(단위 테스트가 못박음).
 - **흐름**: 컴포넌트가 `search_changed` Action을 내면 platform이 `refreshSettingsFieldCount`로 필터된 행 수를 다시 주입(`setFieldCount`가 `selected`를 clamp)하고 재렌더.
-- **한계(후속)**: 현재 섹션 안 필터만(섹션을 모르면 못 찾음 — **교차 섹션 검색**은 후속). 검색 활성화는 `/` 키(클릭 진입점은 후속).
+- **교차 섹션 검색**: 쿼리가 있으면(`cross = q.len>0`) 섹션 게이트(`x.section==sel_sec`)를 무시해 **전 섹션**의 매칭 행을 보여준다(설정이 어느 섹션인지 몰라도 찾는다). 빈 쿼리면 현재 섹션만. 교차 검색에선 palette(theme)·keybind(input)가 함께 나올 수 있어 `keybindRowStart`가 palette 한 행 오프셋을 더해 인덱스 충돌을 막는다(필터·인덱싱 단일 출처는 `currentSectionFields`).
+- **한계(후속)**: 검색 활성화는 `/` 키(클릭 진입점은 후속), 교차 결과에 섹션 라벨 접두는 후속.
 
 ## 7. 의존성
 

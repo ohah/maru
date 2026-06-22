@@ -1915,8 +1915,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         try? text.data(using: .utf8)?.write(to: url, options: .atomic)
     }
 
-    /// Reset to Defaults — 모든 config를 내장 기본값으로 되돌리고 config 파일을 삭제한다(Zig resetToDefaults가
-    /// resetAllSettings에 위임 — 커맨드 팝업 "Reset All Settings to Defaults"와 같은 동작). 여기선 활성 세션에 호출만 한다.
+    /// Reset to Defaults — 모든 config를 내장 기본값으로 되돌리고 config 파일을 삭제한다(Zig resetAllSettings 단일 함수 —
+    /// 커맨드 팝업 "Reset All Settings to Defaults"와 같은 동작). 여기선 활성 세션에 호출만 한다.
     @objc private func menuResetDefaults(_ sender: Any?) {
         _ = sender
         guard let session = appSession else { return }

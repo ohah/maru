@@ -362,6 +362,31 @@ fn effectiveWindowBlur(blur: u32, opacity: f32) u32 {
     return blur;
 }
 
+/// `bytes`를 최대 `max` 바이트로 자르되 UTF-8 codepoint 경계에서 자른 길이를 돌려준다(F2-8). 멀티바이트가 max
+/// 중간에서 쪼개지면 그 codepoint의 시작 바이트까지 후퇴해, 소비자(core.selectWordAt의 Utf8View.init)가 슬라이스
+/// 전체를 거부하지 않게 한다. bytes.len ≤ max이면 그대로. 반환은 항상 ≤ max라 u8(max≤255 가정) 안전.
+fn utf8TruncateLen(bytes: []const u8, max: usize) u8 {
+    var n = @min(bytes.len, max);
+    if (n == bytes.len) return @intCast(n); // 안 잘림 — 보정 불필요
+    // 잘렸다 — bytes[n](프리픽스 다음 바이트)이 continuation(0b10xxxxxx)이면 codepoint 중간을 끊은 것. 시작 바이트까지 후퇴.
+    while (n > 0 and (bytes[n] & 0xC0) == 0x80) : (n -= 1) {}
+    return @intCast(n);
+}
+
+test "utf8TruncateLen: codepoint 경계에서 자른다(멀티바이트 중간 안 끊김)" {
+    // ASCII는 그대로(상한 이하).
+    try std.testing.expectEqual(@as(u8, 3), utf8TruncateLen("abc", 64));
+    // 정확히 상한이면 그대로.
+    try std.testing.expectEqual(@as(u8, 4), utf8TruncateLen("abcd", 4));
+    // 3바이트 codepoint(가 = EA B0 80)가 상한 경계에서 쪼개지면 시작 전까지 후퇴.
+    // "a가" = 61 EA B0 80 (4바이트). max=2면 'a'(1)+가의 첫 바이트 EA(continuation 아님)→ n=2에서 bytes[2]=B0 continuation→후퇴 n=1.
+    try std.testing.expectEqual(@as(u8, 1), utf8TruncateLen("a가", 2));
+    try std.testing.expectEqual(@as(u8, 1), utf8TruncateLen("a가", 3)); // n=3 bytes[3]=80 continuation→후퇴…n=1
+    try std.testing.expectEqual(@as(u8, 4), utf8TruncateLen("a가", 4)); // 딱 맞음(전체)
+    // 멀티바이트만: "가나"(EA B0 80 EB 82 98), max=4 → bytes[4]=82 continuation→후퇴 n=3(가 1글자).
+    try std.testing.expectEqual(@as(u8, 3), utf8TruncateLen("가나", 4));
+}
+
 test "effectiveWindowBlur: opacity 게이트 — 불투명이면 0, 투명일 때만 반경" {
     // 블러 0이면 opacity 무관하게 0.
     try std.testing.expectEqual(@as(u32, 0), effectiveWindowBlur(0, 0.5));
@@ -1182,6 +1207,14 @@ pub const AppSession = struct {
     // 마지막으로 Swift가 알려준 시스템 외관(NSAppearance)이 다크인지(theme.follow-system, F2-9). 기본 true(maru 다크).
     // config reload·setSystemAppearance가 이 값으로 preset-light/dark를 골라 follow-system 테마를 재적용한다.
     system_is_dark: bool = true,
+    // follow-system이 마지막으로 적용한 외관(is_dark). null=현재 follow 미적용(off거나 켠 적 없음). 같은 외관을 반복
+    // 통지받아도(AppKit viewDidChangeEffectiveAppearance는 accent·대비 변경에도 발화) 무거운 재적용(재resolve+팔레트+
+    // 사이드바)을 건너뛰는 게이트(F2-9 리뷰). follow를 끄거나 config를 갈면 null로 비워 다음 켜기/외관에 다시 적용한다.
+    follow_applied_dark: ?bool = null,
+    // follow-system이 처음 켜져 config.theme를 시스템 프리셋으로 덮기 **직전의 사용자(파일) 테마** 스냅샷(F2-9).
+    // follow-system을 끄면 이걸로 라이브 복귀한다(파일 write-back은 안 했으니 메모리 복원이 단일 경로). slice는
+    // loaded_config.arena 소유라, reload/reset에서 arena를 갈 때 반드시 null로 비운다(dangling 방지). null=스냅샷 없음.
+    theme_pre_follow: ?config_mod.theme.ThemeConfig = null,
     // 세로 사이드바에 그릴 탭 엔트리 셀(owned). rebuildSidebar가 탭 추가/전환/cell 메트릭 변경 때 다시
     // 채우고, metalFrame()이 이걸 가리키는 view를 사이드바 셀(origin 0 렌더)로 넘긴다. PR3b-1은 활성
     // 탭 하이라이트 밴드만 담고, PR3b-2가 탭 번호·제목 glyph를 더한다. 비싸지 않아(탭 수만큼) 변경
@@ -4168,7 +4201,16 @@ pub const AppSession = struct {
             // bool 행 — flip.
             const f = cf.bools[sel];
             if (config_mod.schema.setBool(&self.loaded_config.config, f.key, !f.value)) {
-                self.reapplyLoadedConfig();
+                // theme.follow-system은 단순 재resolve로 부족하다 — 켜면 현재 시스템 외관 프리셋을 즉시 덮고(reapply만
+                // 하면 system_is_dark가 안 반영돼 토글이 무효처럼 보임), 끄면 덮기 전 사용자 테마로 복귀해야 한다(F2-9).
+                if (std.mem.eql(u8, f.key, "theme.follow-system")) {
+                    if (self.loaded_config.config.theme_follow_system)
+                        self.applyFollowSystemTheme()
+                    else
+                        self.disableFollowSystemTheme();
+                } else {
+                    self.reapplyLoadedConfig();
+                }
                 self.markConfigKeyDirty(f.key);
             }
             return;
@@ -5236,6 +5278,10 @@ pub const AppSession = struct {
         self.applyAppearance(new_appearance); // appearance 통째 교체 — 옛 family를 더는 안 읽는다
         self.loaded_config.deinit(); // 이제 옛 loaded_config(arena)를 버려도 안전
         self.loaded_config = new_parsed;
+        // 옛 arena를 버렸으니 follow-system 복귀 스냅샷(옛 arena slice)도 비운다(dangling 방지). 아래 applyFollowSystemTheme가
+        // 새 파일 테마로 다시 스냅샷·적용한다(F2-9). null 대입은 옛 slice를 deref하지 않아 free 후라도 안전.
+        self.theme_pre_follow = null;
+        self.follow_applied_dark = null; // 새 config라 외관 게이트도 리셋 — 아래 applyFollowSystemTheme가 다시 적용
         // 파일 새 값이라 캐시된 behavior도 갱신한다(appearance 밖 — applyAppearance가 안 건드림).
         self.audible_bell = self.loaded_config.config.bell.audible;
         self.bell_visual = self.loaded_config.config.bell.visual;
@@ -5266,6 +5312,8 @@ pub const AppSession = struct {
     /// 상태로 덮어쓴다**(삭제가 아니라 — 파일·경로 보존, 사용자가 기본 상태를 보고 편집 가능; 사용자 요청).
     pub fn resetAllSettings(self: *AppSession) void {
         self.loaded_config.config = config_mod.Config{}; // 내장 기본값(정적 — 옛 arena 문자열은 미참조로 남았다 다음 reload/deinit에 해제)
+        self.theme_pre_follow = null; // 기본값으로 갈았으니 follow-system 복귀 스냅샷(옛 arena slice)도 무효 — 비운다(F2-9 dangling 방지)
+        self.follow_applied_dark = null; // 외관 게이트도 리셋(기본값은 follow off라 어차피 무적용)
         self.reapplyLoadedConfig(); // resolve→apply→behavior 캐시→reapply* 재적용(resolve-first 안전; reloadConfig 미러 — 중복 제거, 리뷰 #827)
         // **config 파일을 기본 상태로 덮어쓴다**(삭제 아님) → 빈+주석이라 다음 로드는 schema·특수 키·주석 전부 기본값.
         // 부분 갱신(updateForKeys)이 아닌 전체 덮어쓰기인 이유: 기본값 위 override만 쓰는 정책상 (a) 비-schema 키
@@ -5356,7 +5404,7 @@ pub const AppSession = struct {
     /// follow-system이 켜져 있으면 그 외관의 프리셋으로 테마 색을 라이브 교체한다(꺼져 있으면 무시 — 수동 테마 유지). F2-9.
     pub fn setSystemAppearance(self: *AppSession, is_dark: bool) void {
         self.system_is_dark = is_dark;
-        self.applyFollowSystemTheme();
+        self.applyFollowSystemTheme(); // 재적용 게이트(같은 외관 반복 무시)는 applyFollowSystemTheme 안에 있다(F2-9)
     }
 
     /// follow-system이 켜져 있으면 현재 시스템 외관(system_is_dark)에 맞는 프리셋으로 config.theme를 교체하고 라이브
@@ -5364,12 +5412,33 @@ pub const AppSession = struct {
     /// 않는다(사용자가 적은 theme.preset/색은 파일에 그대로 남아 follow-system을 끄면 복귀). reload·setSystemAppearance가 공유.
     fn applyFollowSystemTheme(self: *AppSession) void {
         if (!self.loaded_config.config.theme_follow_system) return;
+        // 같은 외관을 이미 적용했으면 무거운 재적용을 건너뛴다(AppKit의 잦은 viewDidChangeEffectiveAppearance 통지 대비).
+        // follow를 막 켰을 땐(follow_applied_dark==null) 같은 is_dark여도 적용해야 하므로 null 체크가 게이트를 연다(F2-9).
+        if (self.follow_applied_dark) |applied| {
+            if (applied == self.system_is_dark) return;
+        }
         const preset = if (self.system_is_dark)
             self.loaded_config.config.theme_preset_dark
         else
             self.loaded_config.config.theme_preset_light;
+        // 덮기 직전의 사용자(파일) 테마를 1회 스냅샷 — follow-system을 끄면 이걸로 복귀한다(F2-9). 이미 스냅샷이
+        // 있으면(이전 시스템 외관에서 이미 덮음) 덮지 않는다 — 그래야 스냅샷이 프리셋이 아닌 원본 파일 값을 가리킨다.
+        if (self.theme_pre_follow == null) self.theme_pre_follow = self.loaded_config.config.theme;
         self.theme_user_custom = false;
         self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
+        self.follow_applied_dark = self.system_is_dark;
+        self.reapplyLoadedConfig();
+    }
+
+    /// follow-system을 끌 때(세팅 토글 OFF) 호출 — 덮기 전 스냅샷한 사용자(파일) 테마로 config.theme를 복귀하고
+    /// 라이브 재적용한다. 스냅샷이 없으면(켠 적 없음) config.theme가 이미 파일 값이라 그대로 재적용만. follow-system
+    /// 색은 파일에 write-back을 안 했으므로 이 메모리 복원이 복귀의 단일 경로다(reload는 async write 경합 위험). F2-9.
+    fn disableFollowSystemTheme(self: *AppSession) void {
+        if (self.theme_pre_follow) |saved| {
+            self.loaded_config.config.theme = saved;
+            self.theme_pre_follow = null;
+        }
+        self.follow_applied_dark = null; // follow 종료 — 다음에 다시 켜면 같은 외관이어도 재적용
         self.reapplyLoadedConfig();
     }
 
@@ -6392,7 +6461,10 @@ pub const AppSession = struct {
                 // 버퍼 크기(64)는 SelectWord.separators와 일치해야 한다 — 어긋나면 아래 .separators 대입이 컴파일 에러.
                 var sep_buf: [64]u8 = undefined;
                 const sep = self.loaded_config.config.input.word_separators;
-                const n: u8 = @intCast(@min(sep.len, sep_buf.len));
+                // 64바이트 상한으로 자르되 **codepoint 경계**에서 자른다 — 멀티바이트 구분자가 64바이트 중간에서
+                // 쪼개지면 코어의 Utf8View.init이 슬라이스 전체를 거부해 **모든** 구분자가 조용히 무시되기 때문이다(F2-8
+                // 리뷰). 경계 보정: 잘린 경우(n<sep.len) 다음 바이트가 continuation(0b10xxxxxx)이면 시작 바이트까지 후퇴.
+                const n: u8 = utf8TruncateLen(sep, sep_buf.len);
                 @memcpy(sep_buf[0..n], sep[0..n]);
                 self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_word = .{ .row = row, .col = col, .separators = sep_buf, .sep_len = n } }, self.io) catch {};
             },
@@ -11322,6 +11394,45 @@ test "setSystemAppearance: follow-system on이면 light/dark 프리셋으로 교
     try std.testing.expectEqualStrings(dark_bg, session.loaded_config.config.theme.background);
     // appearance도 재resolve돼 라이브 색이 갱신된다(reapplyLoadedConfig — gruvbox 배경 #282828 = {0x28,0x28,0x28}).
     try std.testing.expectEqual(@as(u8, 0x28), session.appearance.theme.background.r);
+}
+
+test "follow-system 토글 ON 즉시 적용·OFF 사용자 테마 복귀 + 같은 외관 재적용 게이트 (F2-9 리뷰)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const user_bg = config_mod.theme.presetColors(.dracula).background; // 사용자(파일) 테마
+    const dark_bg = config_mod.theme.presetColors(.gruvbox_dark).background;
+    session.loaded_config.config.theme = config_mod.theme.presetColors(.dracula);
+    session.loaded_config.config.theme_preset_light = .solarized_light;
+    session.loaded_config.config.theme_preset_dark = .gruvbox_dark;
+    session.system_is_dark = true;
+
+    // 토글 ON: setSystemAppearance(외관 변화) 없이 즉시 시스템 프리셋이 적용돼야 한다(버그: 예전엔 무효였음).
+    session.loaded_config.config.theme_follow_system = true;
+    session.applyFollowSystemTheme(); // 토글 경로가 부르는 것
+    try std.testing.expectEqualStrings(dark_bg, session.loaded_config.config.theme.background); // 즉시 gruvbox-dark
+    try std.testing.expect(session.theme_pre_follow != null); // 사용자 테마 스냅샷됨
+
+    // 같은 외관 재통지는 재적용 게이트로 무시(theme 그대로) — 관측은 색 동일.
+    session.applyFollowSystemTheme();
+    try std.testing.expectEqualStrings(dark_bg, session.loaded_config.config.theme.background);
+
+    // 토글 OFF: 덮기 전 사용자(dracula) 테마로 라이브 복귀해야 한다(버그: 예전엔 시스템색 잔류).
+    session.loaded_config.config.theme_follow_system = false;
+    session.disableFollowSystemTheme();
+    try std.testing.expectEqualStrings(user_bg, session.loaded_config.config.theme.background); // dracula 복귀
+    try std.testing.expect(session.theme_pre_follow == null); // 스냅샷 소비됨
+    try std.testing.expect(session.follow_applied_dark == null); // 외관 게이트 리셋
 }
 
 // wheelDeltaToLines 단위 테스트는 함수와 함께 src/session/input_math.zig로 이동.

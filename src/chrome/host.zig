@@ -16,6 +16,7 @@ const confirm = @import("components/confirm.zig");
 const find = @import("components/find.zig");
 const palette = @import("components/palette.zig");
 const context_menu = @import("components/context_menu.zig");
+const notifications = @import("components/notifications.zig");
 const settings = @import("components/settings.zig");
 
 /// 컴포넌트 handle이 낸 의도를 session이 디스패치할 형태로 host가 정규화한 것. chrome은 config.Action·session을
@@ -33,6 +34,9 @@ pub const HostAction = union(enum) {
     context_menu_accept, // 우클릭 메뉴 항목 선택 — platform이 selected→대상 액션(rename) 해석·실행
     context_menu_close,
     context_menu_selection_changed,
+    notifications_accept, // 알림 카드 선택(Enter/클릭) — platform이 selected→surface_id 해석 후 activateSurfaceById + 읽음 처리
+    notifications_close,
+    notifications_selection_changed,
     confirm_accept, // 확인 모달 Enter/Y — platform이 보류한 닫기(pending_close)를 실행
     confirm_cancel, // 확인 모달 Esc/N — platform이 보류한 닫기를 버린다
     settings_close, // 세팅 모달 Esc/바깥클릭 — platform이 hide
@@ -55,6 +59,7 @@ pub const ChromeHost = struct {
     find: find.State = .{},
     palette: palette.State = .{},
     context_menu: context_menu.State = .{},
+    notifications: notifications.State = .{},
     settings: settings.State = .{},
 
     /// 컴포넌트 State 중 heap을 든 것(find/palette의 query·preedit)을 해제한다. AppSession.deinit가 부른다.
@@ -121,6 +126,21 @@ pub const ChromeHost = struct {
         if (ops.items.len > 0) try out.append(arena, .{ .layer = context_menu.layer, .ops = ops.items });
     }
 
+    /// notifications도 카드(Item)를 platform이 히스토리에서 빌드해 주입해야 그릴 수 있다(palette/context_menu와
+    /// 동형). 닫힘이면 무동작(빈 out).
+    pub fn collectNotificationsDraws(
+        self: *ChromeHost,
+        items: []const notifications.Item,
+        p: props.ChromeProps,
+        tk: *const tokens.Tokens,
+        arena: std.mem.Allocator,
+        out: *std.ArrayList(draw.ChromeDraw),
+    ) !void {
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try notifications.view(&self.notifications, items, p, tk, arena, &ops);
+        if (ops.items.len > 0) try out.append(arena, .{ .layer = notifications.layer, .ops = ops.items });
+    }
+
     /// settings도 행(FieldRow)을 platform이 config 스키마에서 빌드해 주입해야 그릴 수 있다(palette/context_menu와
     /// 동형). 닫힘이면 무동작(빈 out).
     pub fn collectSettingsDraws(
@@ -140,8 +160,8 @@ pub const ChromeHost = struct {
     /// 입력을 모달 우선으로 라우팅한다. `.key`는 활성 컴포넌트의 키 handle로, `.pointer`는 handlePointer로
     /// 가른다(CS-4-0 — docs/config-gui.md §3). 열린 컴포넌트가 있으면 소비하고 의도(HostAction)를 돌려준다
     /// (session이 디스패치). 열린 게 없으면 null(소비 안 함 — 뒤 터미널로 흘림). 우선순위: Confirm > Notice >
-    /// ContextMenu > Find > Palette(배타적이라 동시 열림은 라우팅이 막는다). find/palette는 query 변형에
-    /// allocator가 필요해 받는다.
+    /// ContextMenu > Notifications > Find > Palette > Settings(배타적이라 동시 열림은 라우팅이 막는다). find/palette는
+    /// query 변형에 allocator가 필요해 받는다.
     pub fn handleInput(self: *ChromeHost, allocator: std.mem.Allocator, ev: input.InputEvent) ?HostAction {
         switch (ev) {
             .key => |k| {
@@ -161,6 +181,13 @@ pub const ChromeHost = struct {
                         .accept => .context_menu_accept,
                         .close => .context_menu_close,
                         .selection_changed => .context_menu_selection_changed,
+                    };
+                }
+                if (self.notifications.open) {
+                    return switch (notifications.handle(k, &self.notifications)) {
+                        .accept => .notifications_accept,
+                        .close => .notifications_close,
+                        .selection_changed => .notifications_selection_changed,
                     };
                 }
                 if (self.find.open) {
@@ -208,7 +235,7 @@ pub const ChromeHost = struct {
     /// 위젯별 hit-test·드래그(divider `dragRatio` 패턴)는 위젯 컴포넌트가 들어오는 후속 PR에서 추가한다.
     pub fn handlePointer(self: *ChromeHost, ev: input.PointerEvent) ?HostAction {
         _ = ev; // 위젯이 좌표/버튼을 소비하는 건 CS-4-1+; 지금은 모달 열림 여부만으로 소비/통과를 가른다.
-        if (self.confirm.open or self.notice.open or self.context_menu.open or self.find.open or self.palette.open or self.settings.open) {
+        if (self.confirm.open or self.notice.open or self.context_menu.open or self.notifications.open or self.find.open or self.palette.open or self.settings.open) {
             return .none;
         }
         return null;

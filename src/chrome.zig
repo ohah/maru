@@ -30,6 +30,7 @@ pub const components = struct {
     pub const sidebar = @import("chrome/components/sidebar.zig"); // 마우스 hit-test 컴포넌트(워크스페이스 사이드바)
     pub const tabbar = @import("chrome/components/tabbar.zig"); // 마우스 hit-test 컴포넌트(pane 탭 바)
     pub const context_menu = @import("chrome/components/context_menu.zig"); // 우클릭 컨텍스트 메뉴(오버레이 모달)
+    pub const notifications = @import("chrome/components/notifications.zig"); // 인앱 알림 센터 패널(2줄 카드 오버레이 모달)
     pub const toggle = @import("chrome/components/toggle.zig"); // 설정 폼 위젯 — on/off 스위치(CS-4-1, leaf 컴포넌트)
     pub const slider = @import("chrome/components/slider.zig"); // 설정 폼 위젯 — 범위 숫자(f32/u32+range) 슬라이더(CS-4-1b)
     pub const dropdown = @import("chrome/components/dropdown.zig"); // 설정 폼 위젯 — enum 사이클러(CS-4-1c)

@@ -54,12 +54,12 @@ pub fn headerRows(header_height_px: u32, cell_height_px: u32) u32 {
     return @max(@as(u32, 2), header_height_px / cell_height_px);
 }
 
-/// 사이드바 상단 헤더([0, header_h) 영역)의 어느 부분을 가리키는가. **아이콘 줄(row 0)**: 우측 아이콘 3개(셀 col
-/// cols-2=새 워크스페이스, cols-4=view options, cols-6=사이드바 접기), 좌측은 네이티브 신호등(닫기·최소화·확대) 영역이라
-/// none(macOS가 클릭 소비). **검색 줄(마지막 줄)**: 전체 폭 검색 입력. 사이 빈 줄·헤더 밖·폭/cell 0·비유한·cols<8(헤더
-/// frame이 안 그려짐)은 none. 영역 경계는 buildSidebarHeaderFrame이 glyph를 그리는 cell row/col(floor cols)과 정확히 같게
-/// 잡는다 — 픽셀 분할(h×0.6·w−Ncw)을 쓰면 3줄 헤더의 빈 가운데 줄이나 폭이 cell 배수가 아닐 때 그려진 glyph와 어긋난다.
-pub const HeaderRegion = enum { none, search, view_options, new_workspace, toggle_sidebar };
+/// 사이드바 상단 헤더([0, header_h) 영역)의 어느 부분을 가리키는가. **아이콘 줄(row 0)**: 우측 아이콘 4개(셀 col
+/// cols-2=새 워크스페이스, cols-5=view options, cols-8=사이드바 접기, cols-11=알림 종), 좌측은 네이티브 신호등
+/// (닫기·최소화·확대) 영역이라 none(macOS가 클릭 소비). **검색 줄(마지막 줄)**: 전체 폭 검색 입력. 사이 빈 줄·헤더 밖·
+/// 폭/cell 0·비유한·cols<13(아이콘 4개가 안 들어감)은 none. 영역 경계는 buildSidebarHeaderFrame이 glyph를 그리는 cell
+/// row/col(floor cols)과 정확히 같게 잡는다 — 안 그리면 hit-test도 none(그려진 것=클릭되는 것 단일 출처).
+pub const HeaderRegion = enum { none, search, view_options, new_workspace, toggle_sidebar, notifications };
 pub fn headerHit(x_px: f64, y_px: f64, sidebar_width_px: u32, cell_width_px: u32, cell_height_px: u32, header_height_px: u32) HeaderRegion {
     if (header_height_px == 0 or sidebar_width_px == 0 or cell_width_px == 0 or cell_height_px == 0) return .none;
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return .none;
@@ -69,13 +69,14 @@ pub fn headerHit(x_px: f64, y_px: f64, sidebar_width_px: u32, cell_width_px: u32
     const cw: f64 = @floatFromInt(cell_width_px);
     const ch: f64 = @floatFromInt(cell_height_px);
     const cols: u32 = sidebar_width_px / cell_width_px; // buildSidebarHeaderFrame과 같은 floor — 아이콘 col 정합
-    if (cols < 10) return .none; // 헤더 glyph가 안 그려지는 폭(buildSidebarHeaderFrame가 null) — 클릭 무시
+    if (cols < 13) return .none; // 헤더 glyph 4개(종·◧·⚙·+)가 안 들어가는 폭 — 안 그리면 hit-test도 none(단일 출처)
     const search_row: u32 = headerRows(header_height_px, cell_height_px) - 1;
     if (y_px >= @as(f64, @floatFromInt(search_row)) * ch) return .search; // 마지막 줄 = 검색(그려진 🔍/입력 줄)
     if (y_px >= ch) return .none; // 아이콘 줄(0)과 검색 줄 사이 빈 줄
     if (x_px >= @as(f64, @floatFromInt(cols - 3)) * cw) return .new_workspace; // 줄0 우측, 그려진 '+' col(cols-2) 포함 3칸 zone
     if (x_px >= @as(f64, @floatFromInt(cols - 6)) * cw) return .view_options; // 그려진 ⚙ col(cols-5) 포함 3칸 zone
     if (x_px >= @as(f64, @floatFromInt(cols - 9)) * cw) return .toggle_sidebar; // 그려진 ◧ col(cols-8) 포함 3칸 zone
+    if (x_px >= @as(f64, @floatFromInt(cols - 12)) * cw) return .notifications; // 그려진 종 col(cols-11) 포함 3칸 zone
     return .none; // 줄0 좌측 = 네이티브 신호등 영역(클릭은 macOS가 소비) 또는 빈 영역
 }
 
@@ -185,22 +186,24 @@ test "sidebar hit-test: inSidebar·onResizeEdge·slotAt·headerHit·closeButton�
     try std.testing.expectEqual(@as(?usize, null), slotAt(10, 20, 16, 3)); // 헤더 영역
     try std.testing.expectEqual(@as(?usize, 0), slotAt(20, 20, 16, 3)); // 헤더 직후 = 슬롯0
     try std.testing.expectEqual(@as(?usize, 1), slotAt(40, 20, 16, 3)); // (40-20)/16=1
-    // headerHit(2줄, ch=10, header=20 → rows=2, search_row=1): row0=아이콘 줄, row1(y≥10)=검색 줄. w=100,cw=8 → cols=12.
-    // 영역은 그려진 cell row/col에 정합 — new_workspace=col cols-2=10(x≥80), view_options=col cols-4=8(x≥64).
-    try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 15, 100, 8, 10, 20)); // 검색 줄(y≥10)
-    try std.testing.expectEqual(HeaderRegion.new_workspace, headerHit(90, 5, 100, 8, 10, 20)); // 줄0 우측 cols-3=9 [72,100)
-    try std.testing.expectEqual(HeaderRegion.view_options, headerHit(60, 5, 100, 8, 10, 20)); // 줄0 ⚙ cols-6=6 [48,72)
-    try std.testing.expectEqual(HeaderRegion.toggle_sidebar, headerHit(30, 5, 100, 8, 10, 20)); // 줄0 ◧ cols-9=3 [24,48)
-    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 5, 100, 8, 10, 20)); // 줄0 좌측 = 신호등 영역(<24)
-    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 25, 100, 8, 10, 20)); // 헤더 밖(y≥20)
-    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 10, 100, 8, 10, 0)); // 헤더 없음
+    // headerHit(2줄, ch=10, header=20 → rows=2, search_row=1): row0=아이콘 줄, row1(y≥10)=검색 줄. w=160,cw=8 → cols=20.
+    // 우측 아이콘 4개 zone(3칸씩): new_workspace=col cols-2(x≥(cols-3)cw=136), view_options=cols-5(x≥112),
+    // toggle_sidebar=cols-8(x≥88), notifications=cols-11(x≥64). 좌측(<64)=신호등 영역(none).
+    try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 15, 160, 8, 10, 20)); // 검색 줄(y≥10)
+    try std.testing.expectEqual(HeaderRegion.new_workspace, headerHit(150, 5, 160, 8, 10, 20)); // 줄0 우측 [136,160)
+    try std.testing.expectEqual(HeaderRegion.view_options, headerHit(120, 5, 160, 8, 10, 20)); // 줄0 ⚙ [112,136)
+    try std.testing.expectEqual(HeaderRegion.toggle_sidebar, headerHit(95, 5, 160, 8, 10, 20)); // 줄0 ◧ [88,112)
+    try std.testing.expectEqual(HeaderRegion.notifications, headerHit(70, 5, 160, 8, 10, 20)); // 줄0 종 [64,88)
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 5, 160, 8, 10, 20)); // 줄0 좌측 = 신호등 영역(<64)
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 25, 160, 8, 10, 20)); // 헤더 밖(y≥20)
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 10, 160, 8, 10, 0)); // 헤더 없음
     // 3줄 헤더(ch=10, header=30 → rows=3, search_row=2): row0=아이콘, row1=빈 줄(none), row2(y≥20)=검색.
-    try std.testing.expectEqual(HeaderRegion.new_workspace, headerHit(90, 5, 100, 8, 10, 30)); // 줄0 아이콘
-    try std.testing.expectEqual(HeaderRegion.none, headerHit(90, 15, 100, 8, 10, 30)); // 빈 가운데 줄(아이콘 col이어도 none)
-    try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 25, 100, 8, 10, 30)); // 검색 줄(y≥20)
-    // cols<8(너무 좁아 아이콘 3개가 안 들어감)이면 헤더 glyph가 안 그려지므로 클릭 무시(검색 무단 활성 방지).
-    try std.testing.expectEqual(HeaderRegion.none, headerHit(35, 15, 40, 8, 10, 20)); // w=40,cw=8 → cols=5<8
-    try std.testing.expectEqual(HeaderRegion.none, headerHit(50, 15, 56, 8, 10, 20)); // w=56,cw=8 → cols=7<8
+    try std.testing.expectEqual(HeaderRegion.new_workspace, headerHit(150, 5, 160, 8, 10, 30)); // 줄0 아이콘
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(150, 15, 160, 8, 10, 30)); // 빈 가운데 줄(아이콘 col이어도 none)
+    try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 25, 160, 8, 10, 30)); // 검색 줄(y≥20)
+    // cols<13(너무 좁아 아이콘 4개가 안 들어감)이면 헤더 glyph가 안 그려지므로 클릭 무시(검색 무단 활성 방지).
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(50, 15, 96, 8, 10, 20)); // w=96,cw=8 → cols=12<13
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(35, 15, 40, 8, 10, 20)); // w=40,cw=8 → cols=5<13
     // closeButton: [w-2cw, w). w=100, cw=8 → [84, 100).
     try std.testing.expect(closeButton(90, 100, 8));
     try std.testing.expect(!closeButton(83, 100, 8));

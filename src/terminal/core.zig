@@ -1786,7 +1786,7 @@ pub const TerminalCore = struct {
                     // OSC string은 BEL(0x07) 또는 ST(ESC \)로 끝난다. 내용은 버퍼에 모아 종료
                     // 시점에 해석한다(현재 OSC 8 하이퍼링크만 적용, title 등은 소비).
                     if (byte == 0x07) {
-                        self.dispatchOsc();
+                        parser.dispatchOsc(self);
                         self.parser = .ground;
                     } else if (byte == 0x1b) {
                         self.parser = .osc_escape;
@@ -1801,7 +1801,7 @@ pub const TerminalCore = struct {
                 .osc_escape => {
                     // OSC 안에서 ESC 다음 바이트. ST(ESC \)면 정상 종료로 해석하고, 그 외도
                     // OSC를 끝낸다(관대 처리 — 내용은 버린다).
-                    if (bytes[index_] == '\\') self.dispatchOsc();
+                    if (bytes[index_] == '\\') parser.dispatchOsc(self);
                     self.parser = .ground;
                     index_ += 1;
                 },
@@ -1847,45 +1847,6 @@ pub const TerminalCore = struct {
                 },
             }
         }
-    }
-
-    /// 종료된 OSC 내용을 코드별로 분기한다. 현재 OSC 8(하이퍼링크)·OSC 133(semantic prompt)을 적용한다.
-    fn dispatchOsc(self: *TerminalCore) void {
-        if (self.osc_overflow) return; // 2048 버퍼를 넘긴 OSC는 통째로 무시(거대/악의적 시퀀스 방어)
-        const body = self.osc_buffer[0..self.osc_len];
-        if (std.mem.startsWith(u8, body, "8;")) {
-            osc.dispatchHyperlink(self, body[2..]);
-        } else if (std.mem.startsWith(u8, body, "133;")) {
-            osc.dispatchSemanticPrompt(self, body[4..]);
-        } else if (std.mem.startsWith(u8, body, "7;")) {
-            osc.dispatchCwd(self, body[2..]);
-        } else if (std.mem.startsWith(u8, body, "0;")) {
-            self.setWindowTitle(body[2..]); // OSC 0 = 아이콘 이름 + 창 제목(둘 다) — 창 제목으로 받는다
-        } else if (std.mem.startsWith(u8, body, "2;")) {
-            self.setWindowTitle(body[2..]); // OSC 2 = 창 제목만
-        } else if (std.mem.startsWith(u8, body, "10;")) {
-            osc.dispatchDefaultColor(self, body[3..], 10); // OSC 10 = 전경색 설정/질의
-        } else if (std.mem.startsWith(u8, body, "11;")) {
-            osc.dispatchDefaultColor(self, body[3..], 11); // OSC 11 = 배경색 설정/질의
-        } else if (std.mem.eql(u8, body, "110")) {
-            self.default_fg_override = null; // OSC 110 = 전경색 리셋(theme 기본 복귀)
-        } else if (std.mem.eql(u8, body, "111")) {
-            self.default_bg_override = null; // OSC 111 = 배경색 리셋
-        } else if (std.mem.startsWith(u8, body, "52;")) {
-            osc.dispatchClipboard(self, body[3..]); // OSC 52 = 클립보드(파싱+디코드만; 실제 쓰기·정책은 platform)
-        } else if (std.mem.startsWith(u8, body, "4;")) {
-            osc.dispatchPalette(self, body[2..]); // OSC 4 = 256색 팔레트 설정/질의(`<index>;<spec>` 쌍 반복)
-        } else if (std.mem.eql(u8, body, "104") or std.mem.startsWith(u8, body, "104;")) {
-            // OSC 104 = 팔레트 리셋. 인덱스 없으면(정확히 "104") 전부, "104;1;2"면 그 인덱스만.
-            osc.dispatchPaletteReset(self, if (body.len > 4) body[4..] else "");
-        } else if (std.mem.startsWith(u8, body, "777;")) {
-            osc.dispatchNotify777(self, body[4..]); // OSC 777 = rxvt 데스크톱 알림(notify;title;body)
-        } else if (std.mem.startsWith(u8, body, "9;")) {
-            osc.dispatchNotify9(self, body[2..]); // OSC 9 = iTerm2 알림(ConEmu 서브커맨드와 충돌 — 가드)
-        } else if (std.mem.startsWith(u8, body, "5379;")) {
-            osc.dispatchMaru(self, body["5379;".len..]); // OSC 5379 = maru 전용 통지(사설 번호; 현재 ssh;<dest>)
-        }
-        // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
     }
 
     /// OSC 10/11로 설정된 전경/배경 색 override(없으면 null = theme 기본). app이 렌더러 default 색과 화면
@@ -2581,8 +2542,8 @@ pub const TerminalCore = struct {
 
     /// OSC 0/2 창 제목을 설정한다(xterm ctlseqs). 빈 텍스트는 해제(null)로 본다 — `OSC 2 ; ST`로
     /// 앱이 제목을 지우면 cwd basename 폴백으로 돌아간다. OOM이면 제목 없이 둔다(텍스트는 어차피
-    /// 그리드에 안 나오므로 손실 없음).
-    fn setWindowTitle(self: *TerminalCore, text: []const u8) void {
+    /// 그리드에 안 나오므로 손실 없음). parser.dispatchOsc(OSC 라우터)가 cross-file로 호출하므로 pub.
+    pub fn setWindowTitle(self: *TerminalCore, text: []const u8) void {
         if (self.title) |old| self.allocator.free(old);
         self.title = null;
         if (text.len == 0) return; // 빈 제목 = 해제

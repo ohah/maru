@@ -11,6 +11,8 @@ const std = @import("std");
 const maru = @import("maru");
 
 const Action = maru.config.Action;
+const GlobalAction = maru.config.GlobalAction;
+const GlobalBinding = maru.config.GlobalBinding;
 const KeyChord = maru.config.KeyChord;
 const KeyBindingResolver = maru.config.KeyBindingResolver;
 const default_app_bindings = maru.config.keybinding.default_app_bindings;
@@ -87,6 +89,31 @@ pub const entries = [_]Entry{
     // 모든 설정을 내장 기본값으로 초기화(통합 리셋). 기본 키바인딩 없음 — 팝업이 발견 경로.
     .{ .action = .reset_settings, .key = "reset_settings", .title = "Reset All Settings to Defaults" },
 };
+
+/// 전역(OS) 단축키 카탈로그 한 항목(정적). in-app `Entry`와 평행하되 action이 GlobalAction이다. action_key는
+/// parseGlobalAction이 받는 문자열과 일치(round-trip 테스트가 고정), title은 한글 UI 표시 문자열.
+pub const GlobalEntry = struct {
+    action: GlobalAction,
+    key: [:0]const u8,
+    title: [:0]const u8,
+};
+
+/// 세팅 `.global_hotkey` 섹션에 노출할 전역 액션 목록(3개). in-app `entries`와 달리 빌트인 기본 chord가 없다 —
+/// 사용자가 `keybind = global:<chord> = <action>`로 명시하지 않으면 미지정이다(chordForGlobalAction이 null).
+pub const global_entries = [_]GlobalEntry{
+    .{ .action = .toggle_window, .key = "toggle_window", .title = "창 토글" },
+    .{ .action = .show_window, .key = "show_window", .title = "창 표시" },
+    .{ .action = .toggle_quick_terminal, .key = "toggle_quick_terminal", .title = "퀵 터미널 토글" },
+};
+
+/// 한 전역 액션에 현재 묶인 chord를 찾는다(표시용). in-app `chordForAction`과 달리 빌트인 기본 바인딩이 없으므로
+/// 사용자 `global_bindings`만 스캔한다(없으면 null = "(미지정)"). 첫 매칭을 반환(파싱이 chord별 한 줄로 dedup).
+pub fn chordForGlobalAction(bindings: []const GlobalBinding, action: GlobalAction) ?KeyChord {
+    for (bindings) |binding| {
+        if (binding.action == action) return binding.chord;
+    }
+    return null;
+}
 
 /// chord 표시 문자열의 최대 바이트(modifiers 4개 × 3바이트 + 키 심볼 + 여유). 32면 충분하다.
 pub const max_chord_display_len = 32;
@@ -263,6 +290,32 @@ test "keyEquivalent/modifierMask: NSMenuItem용 소문자 글자·mask·화살�
     const n = try std.unicode.utf8Encode(0xF702, &expect);
     try std.testing.expectEqualStrings(expect[0..n], keyEquivalent(left, &buf));
     try std.testing.expectEqual(mod_command | mod_option, modifierMask(left));
+}
+
+test "global catalog action_key가 parseGlobalAction으로 round-trip된다(양방향 일치)" {
+    for (global_entries) |entry| {
+        const parsed = maru.config.parseGlobalAction(entry.key) orelse {
+            std.debug.print("parseGlobalAction failed for key: {s}\n", .{entry.key});
+            return error.UnparsableGlobalActionKey;
+        };
+        try std.testing.expectEqual(parsed, entry.action);
+    }
+    // 카탈로그가 GlobalAction enum 전체를 덮는지(빠진 액션이 없게).
+    try std.testing.expectEqual(@typeInfo(GlobalAction).@"enum".fields.len, global_entries.len);
+}
+
+test "chordForGlobalAction: 사용자 global_bindings만 스캔(빌트인 기본 없음)" {
+    // 빈 목록 → 모두 null(in-app과 달리 빌트인 기본 chord가 없다).
+    try std.testing.expect(chordForGlobalAction(&.{}, .toggle_window) == null);
+
+    const bindings = [_]GlobalBinding{
+        .{ .chord = try KeyChord.parse("Cmd+Alt+Space"), .action = .toggle_window },
+        .{ .chord = try KeyChord.parse("Cmd+Alt+T"), .action = .show_window },
+    };
+    try std.testing.expect(chordForGlobalAction(&bindings, .toggle_window).?.eql(try KeyChord.parse("Cmd+Alt+Space")));
+    try std.testing.expect(chordForGlobalAction(&bindings, .show_window).?.eql(try KeyChord.parse("Cmd+Alt+T")));
+    // 안 묶인 액션은 null.
+    try std.testing.expect(chordForGlobalAction(&bindings, .toggle_quick_terminal) == null);
 }
 
 test "select_tab은 0..8로 펼쳐지고 ⌘1..9로 표시된다" {

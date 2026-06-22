@@ -535,16 +535,23 @@ pub fn updateKeybindLines(allocator: std.mem.Allocator, original: []const u8, re
                 if (std.mem.eql(u8, k, "keybind")) {
                     const rest = trimmed[eq1 + 1 ..];
                     if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
-                        const action = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace); // 두 번째 = 뒤 끝까지(매크로 = 포함)
-                        for (rebinds, 0..) |rb, i| {
-                            if (std.mem.eql(u8, rb.action, action)) {
-                                try out.appendSlice(allocator, "keybind = ");
-                                try out.appendSlice(allocator, rb.chord);
-                                try out.appendSlice(allocator, " = ");
-                                try out.appendSlice(allocator, action);
-                                applied[i] = true; // 같은 action 줄이 여러 개면 모두 교체(parse last-wins라 stale 방지)
-                                replaced = true;
-                                break;
+                        // 좌측 chord가 `global:`로 시작하면 전역 줄이라 in-app 패스가 안 건드린다(섞임 방지 — 전역은
+                        // updateGlobalKeybindLines가 담당). chord(첫·둘째 = 사이)를 trim해 접두사를 본다.
+                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
+                        if (std.mem.startsWith(u8, left_chord, "global:")) {
+                            // global 줄 — in-app 갱신 대상 아님. 그대로 보존.
+                        } else {
+                            const action = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace); // 두 번째 = 뒤 끝까지(매크로 = 포함)
+                            for (rebinds, 0..) |rb, i| {
+                                if (std.mem.eql(u8, rb.action, action)) {
+                                    try out.appendSlice(allocator, "keybind = ");
+                                    try out.appendSlice(allocator, rb.chord);
+                                    try out.appendSlice(allocator, " = ");
+                                    try out.appendSlice(allocator, action);
+                                    applied[i] = true; // 같은 action 줄이 여러 개면 모두 교체(parse last-wins라 stale 방지)
+                                    replaced = true;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -613,11 +620,112 @@ pub fn removeKeybindLines(allocator: std.mem.Allocator, original: []const u8, ac
                 if (std.mem.eql(u8, std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace), "keybind")) {
                     const rest = trimmed[eq1 + 1 ..];
                     if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
-                        const action = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
-                        for (actions) |a| if (std.mem.eql(u8, a, action)) {
-                            drop = true;
-                            break;
-                        };
+                        // 좌측 chord가 `global:`면 전역 줄 — in-app 제거 패스가 안 건드린다(섞임 방지, removeGlobalKeybindLines가 담당).
+                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
+                        if (!std.mem.startsWith(u8, left_chord, "global:")) {
+                            const action = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
+                            for (actions) |a| if (std.mem.eql(u8, a, action)) {
+                                drop = true;
+                                break;
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        if (drop) continue;
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        try out.appendSlice(allocator, raw_line);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// 전역(OS) keybind recorder write-back 한 건 — 전역 action(키)을 새 chord 표기로 다시 묶는다. action은
+/// command_catalog 글로벌 키(정적 리터럴, 예: `"toggle_window"`), chord는 `KeyChord.toConfigString` 결과(예: `"Cmd+Alt+Space"`).
+pub const GlobalKeybindRebind = struct { action: []const u8, chord: []const u8 };
+
+/// 전역 keybind 줄(`keybind = global:<chord> = <action>`)을 **action 기준**으로 in-place 갱신한다 — updateKeybindLines의
+/// 전역 미러. **좌측 chord가 `global:`로 시작하는 줄만** 매칭한다(in-app keybind 줄·매크로·주석은 보존 — 섞임 방지).
+/// 출력은 `keybind = global:<새 chord> = <action>`. 원본에 그 전역 action 줄이 없으면 끝에 append. 반환 owned(`allocator`).
+pub fn updateGlobalKeybindLines(allocator: std.mem.Allocator, original: []const u8, rebinds: []const GlobalKeybindRebind) LoadError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    const applied = try allocator.alloc(bool, rebinds.len);
+    defer allocator.free(applied);
+    @memset(applied, false);
+
+    var it = std.mem.splitScalar(u8, original, '\n');
+    var first = true;
+    while (it.next()) |raw_line| {
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        var replaced = false;
+        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
+        if (trimmed.len > 0 and trimmed[0] != '#') {
+            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
+                const k = std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace);
+                if (std.mem.eql(u8, k, "keybind")) {
+                    const rest = trimmed[eq1 + 1 ..];
+                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
+                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
+                        // **전역 줄만** — 좌측 chord가 `global:`로 시작해야 갱신 대상이다(in-app keybind 줄은 안 건드린다).
+                        if (std.mem.startsWith(u8, left_chord, "global:")) {
+                            const action = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
+                            for (rebinds, 0..) |rb, i| {
+                                if (std.mem.eql(u8, rb.action, action)) {
+                                    try out.appendSlice(allocator, "keybind = global:");
+                                    try out.appendSlice(allocator, rb.chord);
+                                    try out.appendSlice(allocator, " = ");
+                                    try out.appendSlice(allocator, action);
+                                    applied[i] = true; // 같은 action 줄이 여러 개면 모두 교체(parse last-wins라 stale 방지)
+                                    replaced = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (!replaced) try out.appendSlice(allocator, raw_line);
+    }
+    // 원본에 없던 전역 action은 끝에 append.
+    for (rebinds, 0..) |rb, i| {
+        if (applied[i]) continue;
+        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append(allocator, '\n');
+        try out.appendSlice(allocator, "keybind = global:");
+        try out.appendSlice(allocator, rb.chord);
+        try out.appendSlice(allocator, " = ");
+        try out.appendSlice(allocator, rb.action);
+        try out.append(allocator, '\n');
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// `keybind = global:<chord> = <action>` 줄을 **action 기준**으로 삭제한다(전역 단축키 해제 — removeKeybindLines의 전역
+/// 미러). **좌측 chord가 `global:`로 시작하는 줄만** 본다(in-app keybind 줄·주석·다른 줄 보존). 반환 owned.
+pub fn removeGlobalKeybindLines(allocator: std.mem.Allocator, original: []const u8, actions: []const []const u8) LoadError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var it = std.mem.splitScalar(u8, original, '\n');
+    var first = true;
+    while (it.next()) |raw_line| {
+        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
+        var drop = false;
+        if (trimmed.len > 0 and trimmed[0] != '#') {
+            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
+                if (std.mem.eql(u8, std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace), "keybind")) {
+                    const rest = trimmed[eq1 + 1 ..];
+                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
+                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
+                        if (std.mem.startsWith(u8, left_chord, "global:")) {
+                            const action = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
+                            for (actions) |a| if (std.mem.eql(u8, a, action)) {
+                                drop = true;
+                                break;
+                            };
+                        }
                     }
                 }
             }
@@ -977,6 +1085,92 @@ test "updateKeybindLines: action 기준 교체, 없으면 append, 매크로·다
 fn findBind(binds: []const keybinding.AppBinding, want: action_mod.Action) usize {
     for (binds, 0..) |b, i| if (std.meta.activeTag(b.action) == std.meta.activeTag(want)) return i;
     return 0;
+}
+
+test "updateGlobalKeybindLines: 전역 줄만 action 기준 교체/추가, in-app keybind·주석 보존" {
+    const a = std.testing.allocator;
+    const original =
+        "# 사용자 주석\n" ++
+        "keybind = global:Cmd+Alt+Space = toggle_window\n" ++ // 교체 대상(전역 action=toggle_window)
+        "keybind = Cmd+T = new_term\n" ++ // in-app 줄 — 보존(global: 아님)
+        "font.size = 14\n"; // 다른 줄 — 보존
+    const rebinds = [_]GlobalKeybindRebind{
+        .{ .action = "toggle_window", .chord = "Cmd+Alt+W" }, // 기존 전역 줄 교체
+        .{ .action = "show_window", .chord = "Cmd+Alt+S" }, // 원본에 없음 → append
+    };
+    const out = try updateGlobalKeybindLines(a, original, &rebinds);
+    defer a.free(out);
+
+    // 파싱해 의미로 검증.
+    var p = try parse(a, out);
+    defer p.deinit();
+    // toggle_window는 Cmd+Alt+W로 교체, show_window는 append돼 Cmd+Alt+S.
+    var saw_toggle = false;
+    var saw_show = false;
+    for (p.global_bindings) |b| {
+        switch (b.action) {
+            .toggle_window => {
+                saw_toggle = true;
+                try std.testing.expect(b.chord.eql(try keybinding.KeyChord.parse("Cmd+Alt+W")));
+            },
+            .show_window => {
+                saw_show = true;
+                try std.testing.expect(b.chord.eql(try keybinding.KeyChord.parse("Cmd+Alt+S")));
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_toggle and saw_show);
+    // in-app keybind 줄은 보존(global 패스가 안 건드림) — parse 결과 new_term이 in-app 풀에 남는다.
+    var saw_new_term = false;
+    for (p.keybindings) |b| if (std.meta.activeTag(b.action) == .new_term) {
+        saw_new_term = true;
+    };
+    try std.testing.expect(saw_new_term);
+    // 텍스트 보존 확인.
+    try std.testing.expect(std.mem.indexOf(u8, out, "# 사용자 주석") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Cmd+T = new_term") != null); // in-app 줄 그대로
+    try std.testing.expect(std.mem.indexOf(u8, out, "font.size = 14") != null);
+    // 옛 global:Cmd+Alt+Space = toggle_window 줄은 사라짐(교체됨).
+    try std.testing.expect(std.mem.indexOf(u8, out, "Cmd+Alt+Space = toggle_window") == null);
+}
+
+test "removeGlobalKeybindLines: 전역 줄만 action 기준 삭제, in-app keybind·주석 보존" {
+    const a = std.testing.allocator;
+    const original =
+        "# 주석\n" ++
+        "keybind = global:Cmd+Alt+Space = toggle_window\n" ++ // 삭제 대상(전역 action=toggle_window)
+        "keybind = global:Cmd+Alt+T = show_window\n" ++ // 보존(전역 action 다름)
+        "keybind = Cmd+T = new_term\n"; // in-app 줄 — 보존
+    const out = try removeGlobalKeybindLines(a, original, &.{"toggle_window"});
+    defer a.free(out);
+    var p = try parse(a, out);
+    defer p.deinit();
+    // toggle_window 전역 줄 삭제 → global_bindings에 show_window만.
+    try std.testing.expectEqual(@as(usize, 1), p.global_bindings.len);
+    try std.testing.expectEqual(action_mod.GlobalAction.show_window, p.global_bindings[0].action);
+    // in-app new_term은 보존.
+    var saw_new_term = false;
+    for (p.keybindings) |b| if (std.meta.activeTag(b.action) == .new_term) {
+        saw_new_term = true;
+    };
+    try std.testing.expect(saw_new_term);
+    try std.testing.expect(std.mem.indexOf(u8, out, "# 주석") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Cmd+T = new_term") != null); // in-app 줄 그대로
+    try std.testing.expect(std.mem.indexOf(u8, out, "Cmd+Alt+Space = toggle_window") == null); // 삭제됨
+    try std.testing.expect(std.mem.indexOf(u8, out, "Cmd+Alt+T = show_window") != null); // 다른 전역 줄 보존
+}
+
+test "updateKeybindLines: in-app 패스는 global: 줄을 안 건드린다(섞임 방지)" {
+    const a = std.testing.allocator;
+    const original =
+        "keybind = global:Cmd+Alt+Space = toggle_window\n"; // 전역 줄 — in-app 패스가 보존해야
+    // in-app rebind 목록에 (우연히 같은 이름의) action이 와도 global: 줄은 매칭 안 됨.
+    const rebinds = [_]KeybindRebind{.{ .action = "toggle_window", .chord = "Cmd+E" }};
+    const out = try updateKeybindLines(a, original, &rebinds);
+    defer a.free(out);
+    // 전역 줄은 그대로 — 교체 안 됨. (in-app append로 끝에 toggle_window가 한 줄 더 붙긴 하지만 global 줄은 보존.)
+    try std.testing.expect(std.mem.indexOf(u8, out, "global:Cmd+Alt+Space = toggle_window") != null);
 }
 
 test "parse: window padding defaults to left/right=8, top/bottom=4; bad/out-of-range values are forgiving" {

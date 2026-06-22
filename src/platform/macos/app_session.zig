@@ -4734,14 +4734,29 @@ pub const AppSession = struct {
         // 변경은 serializeConfig가 이 파일을 채운다 — 자연 복구).
         const path = self.configPath();
         if (path.len > 0) {
+            // 디렉터리 보장(신규 사용자 — ~/.config/maru가 아직 없을 수 있다). 한 단계 mkdir(부모 ~/.config는 대개 존재;
+            // 이미 있으면 EEXIST라 무시). createFileAtomic이 temp를 같은 디렉터리에 만들므로 이게 선행돼야 한다.
+            if (std.fs.path.dirname(path)) |dir| {
+                if (dir.len > 0 and dir.len < std.fs.max_path_bytes) {
+                    var dbuf: [std.fs.max_path_bytes]u8 = undefined;
+                    @memcpy(dbuf[0..dir.len], dir);
+                    dbuf[dir.len] = 0;
+                    _ = std.c.mkdir(@as([*:0]const u8, @ptrCast(&dbuf)), 0o755);
+                }
+            }
             const header = "# Maru config — Reset to Defaults로 초기화됨(모든 설정 기본값). 키 설명: docs/configuration.md\n";
-            if (std.Io.Dir.cwd().createFile(self.io, path, .{})) |file| {
-                defer file.close(self.io);
+            // atomic write(temp 파일 + replace=rename) — 부분 쓰기가 원본 config를 손상하지 않게(다른 config write 경로와
+            // 정합; serializeConfig→Swift atomic·workspace write와 같은 보장). write/replace 실패는 무시(forgiving — 라이브엔
+            // 이미 반영, 다음 GUI 변경 때 serializeConfig가 채운다).
+            if (std.Io.Dir.cwd().createFileAtomic(self.io, path, .{})) |af_init| {
+                var af = af_init;
+                defer af.deinit(self.io); // replace 성공 시 no-op, 실패 시 temp 정리
                 var wbuf: [256]u8 = undefined;
-                var fw = file.writer(self.io, &wbuf);
+                var fw = af.file.writer(self.io, &wbuf);
                 fw.interface.writeAll(header) catch {};
                 fw.interface.flush() catch {};
-            } else |_| {} // 디렉터리 없음·권한 등 — 무시(라이브는 기본값, 파일은 다음 GUI 변경에 채워짐)
+                af.replace(self.io) catch {};
+            } else |_| {}
         }
         self.config_dirty_keys.clearRetainingCapacity();
         self.metal_dirty = true;

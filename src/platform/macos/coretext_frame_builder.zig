@@ -394,6 +394,29 @@ pub fn buildPaneLabelDrawList(
     };
 }
 
+/// pane 탭 바 좌측 grip 핸들(pane 통째 드래그 손잡이)의 glyph DrawList — 한 줄(row 0)에 grip 글리프 ⠿
+/// (U+283F, braille 6점 — 사용자 preview 손잡이 모양)를 col 0에 깐다(나머지 칸은 라벨/탭과의 간격). 폰트에
+/// 글리프가 없으면 빈 칸으로 degrade하지만, grip 영역은 paneBar가 예약하고 마우스 arm이 그 영역을 잡으므로
+/// 드래그는 그대로 동작한다. 색은 `fg`(호출자가 muted로 줘 손잡이가 과하지 않게). 커서/overlay 없는 UI 텍스트.
+pub fn buildPaneGripDrawList(
+    allocator: std.mem.Allocator,
+    cols: u16,
+    fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    if (cols >= 1) {
+        _ = try appendEllipsizedTitle(allocator, &cells, "\u{283F}", 0, 0, 1, .{ .foreground = fg });
+    }
+    return .{
+        .size = .{ .cols = cols, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
 pub fn buildPaneTabBarDrawList(
     allocator: std.mem.Allocator,
     titles: []const []const u8,

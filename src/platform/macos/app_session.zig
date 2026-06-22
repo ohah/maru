@@ -1191,6 +1191,17 @@ pub const AppSession = struct {
     // drag(2)가 갱신한다(tab_drag_active일 때만 유효).
     tab_drag_x: f64 = 0,
     tab_drag_y: f64 = 0,
+    // pane(분할 영역) 통째 드래그 — pane 탭바 좌측 grip 핸들에서 시작해 사이드바로 끌어 워크스페이스로 분리·
+    // 합치기(단일 출처: docs/tabs-splits-layout.md "Pane을 워크스페이스로 분리·합치기"). tab_drag(Term 1개)와
+    // 별개 상태 — 손잡이(grip vs Term 탭)로 갈린다. pane_drag_pane은 끌리는 *Pane(항상 활성 탭 소속이라 src 탭=
+    // 활성 탭), x/y는 floating 미리보기·드롭 판정용 커서 좌표. 그 pane이 reap으로 사라지면 invalidateForFreedPane이 비운다.
+    pane_drag_active: bool = false,
+    pane_drag_pane: ?*Pane = null,
+    pane_drag_x: f64 = 0,
+    pane_drag_y: f64 = 0,
+    // pane grip 드래그 중 사이드바 드롭 타겟 하이라이트 슬롯(표시 슬롯; == 표시 카드 수면 카드 아래 '새 워크스페이스'
+    // 행). drag(2)가 paneDropHighlightSlot로 갱신해 바뀌면 rebuildSidebar가 .drop_zone 밴드를 그 슬롯에 그린다. up/취소면 null.
+    pane_drop_slot: ?usize = null,
     // panel 사이 divider 드래그 리사이즈 상태(PR6). down이 divider 밴드에서 시작하면 그 split 노드를 잡고,
     // drag(kind 2)가 마우스 위치를 bounds 안 ratio로 매핑해 split.ratio를 바꿔 live 재배치, up(kind 3)이 끝낸다.
     // split은 활성 탭 트리의 heap 노드(`*PaneTree.Split`) — 구조가 바뀌면(collapse/close) stale 방지로 null 비운다.
@@ -1522,13 +1533,16 @@ pub const AppSession = struct {
     /// 이름 표시폭(name_width 칸)으로부터 라벨 세그먼트 컬럼 수를 산출하는 코어 — 좌패딩+이름+간격을 [3, max]로,
     /// 탭 영역 최소(min_tab_cols)는 남기고 좁은 바면 0(라벨 생략). custom_name(paneLabelCols)·rename 편집 텍스트
     /// (paneBar)가 공유한다(폭 셈법 단일 출처).
+    /// pane 탭 바 좌측 grip 핸들 폭(항상 예약 — pane 통째 드래그 손잡이). 라벨 뒤 탭 영역 최소 보장(좁은 바면
+    /// grip·라벨 생략). 둘 다 paneBar·paneLabelColsForWidth가 공유하는 단일 출처(grip 예약·라벨 폭 셈법이 같은 한도).
+    const pane_grip_cols: u32 = 2;
+    const pane_min_tab_cols: u32 = 6;
     fn paneLabelColsForWidth(name_width: usize, bar_cols: u32) u32 {
         if (name_width == 0) return 0;
-        const min_tab_cols: u32 = 6; // 라벨 뒤 탭 영역 최소 보장(좁은 바면 라벨 생략)
         const max_label: u32 = 20; // 긴 이름이 바를 지배하지 않게 상한
-        if (bar_cols <= min_tab_cols) return 0;
+        if (bar_cols <= pane_min_tab_cols) return 0;
         const want = @min(@as(u32, @intCast(name_width)) + 2, max_label); // 좌패딩+이름+간격
-        const cols = @min(want, bar_cols - min_tab_cols);
+        const cols = @min(want, bar_cols - pane_min_tab_cols);
         return if (cols < 3) 0 else cols; // 3칸 미만이면 패딩+글자+간격 불가 → 생략
     }
 
@@ -1647,7 +1661,7 @@ pub const AppSession = struct {
                 const caret_col = @min(1 + qcols, if (pb.label_cols > 1) pb.label_cols - 1 else 1);
                 const pad_y = self.buildChromeTokens().space.tab_bar_pad_y_px;
                 return .{
-                    .x = @intCast(pb.full.x + caret_col * cw),
+                    .x = @intCast(pb.full.x + (pb.grip_cols + caret_col) * cw), // 이름은 grip 핸들 뒤에서 시작
                     .y = @intCast(pb.full.y + pad_y),
                     .w = @intCast(cw),
                     .h = @intCast(ch),
@@ -1679,21 +1693,26 @@ pub const AppSession = struct {
         return .{ .x = bar.x + off, .y = bar.y, .w = bar.w -| off, .h = bar.h };
     }
 
-    /// 한 pane 탭 바의 레이아웃 단일 출처 — `full`(전체 바: 배경·클릭 판정·라벨), `tabs`(라벨 뗀 탭 영역:
-    /// barMetrics·탭 제목·활성 밴드), `label_cols`(라벨 폭). 모든 hit-test/렌더가 이 한 함수를 거쳐 "보이는 == 클릭되는"
-    /// 을 유지한다(label_cols가 render·hit-test에서 동일). 바가 없거나 cell 미상이면 null.
-    const PaneBar = struct { full: app.SplitRect, tabs: app.SplitRect, label_cols: u32 };
+    /// 한 pane 탭 바의 레이아웃 단일 출처 — `full`(전체 바: 배경·클릭 판정), `grip`(좌측 grip 핸들 폭, 항상 예약:
+    /// pane 통째 드래그 손잡이), `label_cols`(grip 뒤 custom_name 라벨 폭, 이름 없으면 0), `tabs`(grip+라벨 뗀 탭
+    /// 영역: barMetrics·탭 제목·활성 밴드). 좌측 세그먼트 = `[full.x, tabs.x)` = grip + 라벨. 모든 hit-test/렌더가 이
+    /// 한 함수를 거쳐 "보이는 == 클릭되는"을 유지한다. 바가 없거나 cell 미상이면 null. 좁은 바(min_tab 미보장)면 grip 0.
+    const PaneBar = struct { full: app.SplitRect, tabs: app.SplitRect, label_cols: u32, grip_cols: u32 };
     fn paneBar(self: *const AppSession, rect: app.SplitRect, pane: *Pane) ?PaneBar {
         const full = self.paneBarRect(rect) orelse return null;
         const cw = self.cell_width_px;
         if (cw == 0) return null;
         const bar_cols = full.w / cw;
+        // grip 핸들은 항상 예약하되, 탭 영역 최소(min_tab_cols)가 안 남는 좁은 바면 생략(0). 라벨 폭은 grip을 뺀
+        // 나머지(avail) 기준으로 잡아 grip+라벨+탭이 모두 들어가게 한다.
+        const grip = if (bar_cols > pane_grip_cols + pane_min_tab_cols) pane_grip_cols else 0;
+        const avail = bar_cols - grip;
         // rename 편집 중인 pane이면 custom_name이 비어도 편집 텍스트 폭으로 세그먼트를 띄운다(caret이 보이게).
         const label_cols = if (self.renamingPane(pane))
-            paneLabelColsForWidth(self.renameDisplayWidth(), bar_cols)
+            paneLabelColsForWidth(self.renameDisplayWidth(), avail)
         else
-            paneLabelCols(pane, bar_cols);
-        return .{ .full = full, .tabs = paneTabBarRect(full, label_cols, cw), .label_cols = label_cols };
+            paneLabelCols(pane, avail);
+        return .{ .full = full, .tabs = paneTabBarRect(full, grip + label_cols, cw), .label_cols = label_cols, .grip_cols = grip };
     }
 
     /// 활성 탭의 SplitTree를 터미널 영역 rect 안에서 각 panel(leaf)의 (surface, rect)로 편다(멀티-panel
@@ -2280,14 +2299,27 @@ pub const AppSession = struct {
         builder: coretext_frame_builder.CoreTextFrameBuilder,
         built_frames: *std.ArrayList(renderer.RenderFrame),
     ) ?metal_frame.PaneFrame {
-        if (!self.tab_drag_active) return null;
         const cw = self.cell_width_px;
         const ch = self.cell_height_px;
         if (cw == 0 or ch == 0) return null;
-        const pane = self.tab_drag_pane orelse return null;
-        if (self.tab_drag_index >= pane.terms.items.len) return null;
-        // 드래그 미리보기 라벨도 탭과 같은 해석(rename custom_name 우선). 탭바와 floating 미리보기가 어긋나지 않게.
-        const title = termLabel(pane.terms.items[self.tab_drag_index]);
+        // tab(Term 1개) 또는 pane(분할 영역 통째) 드래그 중 끌리는 대상의 라벨·커서 좌표를 고른다(둘은 상호배타).
+        var title: []const u8 = undefined;
+        var drag_x: f64 = undefined;
+        var drag_y: f64 = undefined;
+        if (self.tab_drag_active) {
+            const pane = self.tab_drag_pane orelse return null;
+            if (self.tab_drag_index >= pane.terms.items.len) return null;
+            // 드래그 미리보기 라벨도 탭과 같은 해석(rename custom_name 우선). 탭바와 floating 미리보기가 어긋나지 않게.
+            title = termLabel(pane.terms.items[self.tab_drag_index]);
+            drag_x = self.tab_drag_x;
+            drag_y = self.tab_drag_y;
+        } else if (self.pane_drag_active) {
+            const pane = self.pane_drag_pane orelse return null;
+            // pane 미리보기 라벨: custom_name 우선, 없으면 활성 Term 라벨(grip만 있는 pane도 의미 있게).
+            title = app.pickLabel(pane.custom_name, termLabel(pane.activeTerm()));
+            drag_x = self.pane_drag_x;
+            drag_y = self.pane_drag_y;
+        } else return null;
         const cols: u16 = @intCast(std.math.clamp(title.len + 2, @as(usize, 8), @as(usize, 24))); // 제목+패딩, [8,24]
         const fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
         const bg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_active }; // 솔리드 박스 색(활성 강조색)
@@ -2299,8 +2331,8 @@ pub const AppSession = struct {
         };
         // 커서 중심으로 박스 배치(왼쪽 위가 음수면 0으로 clamp).
         const box_w: f64 = @floatFromInt(@as(u32, cols) * cw);
-        const ox = self.tab_drag_x - box_w / 2;
-        const oy = self.tab_drag_y - @as(f64, @floatFromInt(ch)) / 2;
+        const ox = drag_x - box_w / 2;
+        const oy = drag_y - @as(f64, @floatFromInt(ch)) / 2;
         return .{
             .frame = f,
             .origin_x = if (ox > 0) @intFromFloat(@min(ox, @as(f64, @floatFromInt(std.math.maxInt(u32))))) else 0,
@@ -2348,13 +2380,15 @@ pub const AppSession = struct {
         self.collapsePaneIn(self.activeTab(), pane);
     }
 
-    /// 주어진 탭(tab)에서 비어 있는 pane을 트리에서 떼고(removeLeaf, 형제로 collapse) panes에서 빼고 해제한다.
-    /// split에서만(형제가 있을 때) 일어나므로 단일 pane이면 무동작. active_pane은 범위 clamp만(호출자가 필요 시
-    /// 다시 잡는다). pane.terms는 비어 있어 destroyPane이 리스트·Pane만 해제한다. 활성/배경 탭 모두에 쓴다.
-    fn collapsePaneIn(self: *AppSession, tab: *Tab, pane: *Pane) void {
-        if (tab.panes.items.len <= 1) return;
-        const freed_split = PaneTree.removeLeaf(&tab.tree, pane) orelse return;
-        self.invalidateForFreedSplit(freed_split); // divider_drag가 이 split이면 표적 null(destroy 전, 무관 드래그는 보존)
+    /// 주어진 탭(tab)에서 pane을 트리(removeLeaf, 형제로 collapse)와 panes 리스트에서 떼지만 **해제하지 않고**
+    /// 보존한다 — pane은 살아남아 호출자가 다른 워크스페이스에 심는다(분리·합치기). 단일 pane 워크스페이스(형제
+    /// 없음)면 false(호출자가 no-op). 성공 시 떼어낸 split을 destroy하고 active_pane을 범위 clamp한다. pane이
+    /// 살아 있으므로 invalidateForFreedPane은 부르지 않는다(포인터가 유효 — destroy 경로인 collapsePaneIn만 부른다).
+    /// divider_drag가 이 split이면 destroy 전에 표적 null한다(무관 드래그는 보존 — removeLeaf가 freed split을 surface).
+    fn detachPaneFromTab(self: *AppSession, tab: *Tab, pane: *Pane) bool {
+        if (tab.panes.items.len <= 1) return false;
+        const freed_split = PaneTree.removeLeaf(&tab.tree, pane) orelse return false;
+        self.invalidateForFreedSplit(freed_split);
         self.allocator.destroy(freed_split);
         for (tab.panes.items, 0..) |p, i| {
             if (p == pane) {
@@ -2362,8 +2396,144 @@ pub const AppSession = struct {
                 break;
             }
         }
-        self.destroyPane(pane);
         if (tab.active_pane >= tab.panes.items.len) tab.active_pane = tab.panes.items.len - 1;
+        return true;
+    }
+
+    /// 주어진 탭(tab)에서 비어 있는 pane을 떼고(detachPaneFromTab, 형제로 collapse) 해제한다. split에서만(형제가
+    /// 있을 때) 일어나므로 단일 pane이면 무동작. pane.terms는 비어 있어 destroyPane이 리스트·Pane만 해제한다.
+    /// 활성/배경 탭 모두에 쓴다(detach + destroy의 단일 출처 — 분리·합치기는 detach만 쓰고 pane을 보존한다).
+    fn collapsePaneIn(self: *AppSession, tab: *Tab, pane: *Pane) void {
+        if (!self.detachPaneFromTab(tab, pane)) return;
+        self.destroyPane(pane);
+    }
+
+    /// 활성 탭의 한 pane(분할 영역)을 **통째로** 떼어 새 단독 워크스페이스로 분리한다(grip 핸들을 사이드바 빈
+    /// 영역에 드롭). Term을 옮기는 게 아니라 `*Pane` 포인터를 새 Tab의 단일 leaf 트리로 재부모화한다 — 담긴
+    /// Term(가로 탭)·surface/PTY는 heap-pin이라 그대로 따라온다. 단독 pane 워크스페이스(형제 없음)면 빈
+    /// 워크스페이스만 남으므로 **무동작**(단독 워크스페이스를 옮기는 건 사이드바 카드 재정렬의 몫). 새 탭을 끝에
+    /// 붙이고 활성으로 만든다(사이드바 빈 영역 = 목록 아래 = 끝). 단일 출처: docs/tabs-splits-layout.md.
+    fn promotePaneToNewWorkspace(self: *AppSession, pane: *Pane) void {
+        const src_tab = self.activeTab();
+        if (src_tab.panes.items.len <= 1) return; // 단독 pane — 무동작
+        const src_index = self.app_window.active_tab;
+        // 1) 실패 가능한 alloc 먼저(트리는 아직 안 건드림) — 새 Tab + 모든 리스트 capacity 예약. 실패하면 pane은
+        //    src에 그대로 남는다(원자성). 예약을 다 끝낸 뒤의 단계는 infallible이라 부분 실패가 없다.
+        const tab = self.allocator.create(Tab) catch return;
+        tab.* = .{};
+        tab.panes.ensureTotalCapacity(self.allocator, 1) catch {
+            self.allocator.destroy(tab);
+            return;
+        };
+        self.tabs.ensureUnusedCapacity(self.allocator, 1) catch {
+            tab.panes.deinit(self.allocator);
+            self.allocator.destroy(tab);
+            return;
+        };
+        self.surface_ptrs.ensureUnusedCapacity(self.allocator, 1) catch {
+            tab.panes.deinit(self.allocator);
+            self.allocator.destroy(tab);
+            return;
+        };
+        // 2) infallible: src에서 pane을 떼고(형제로 collapse) src 대표 surface를 새 활성 Term으로 재바인딩.
+        _ = self.detachPaneFromTab(src_tab, pane); // len>1 확인했으므로 true
+        self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
+        self.surface_ptrs.items[src_index] = &src_tab.activeTerm().surface;
+        // 3) 새 Tab에 pane을 단일 leaf로 심고 tabs/surface_ptrs 끝에 붙여 활성으로.
+        tab.panes.appendAssumeCapacity(pane);
+        tab.active_pane = 0;
+        tab.tree = .{ .leaf = pane };
+        self.tabs.appendAssumeCapacity(tab);
+        self.surface_ptrs.appendAssumeCapacity(&pane.activeTerm().surface);
+        self.app_window.tabs = self.surface_ptrs.items; // realloc 가능성 — 새 items로 재바인딩
+        self.app_window.active_tab = self.tabs.items.len - 1;
+        // 4) 양쪽 resize(소스는 형제가 빈자리 확장, 새 탭은 단일 leaf 풀 영역) + 좌표/사이드바 갱신.
+        self.resizeTabPanes(src_tab); // 비활성이라 best-effort
+        self.resizeActiveTabPanes() catch {};
+        self.recomputeActivePaneRect();
+        self.metal_dirty = true;
+        self.rebuildSidebar() catch {};
+    }
+
+    /// 활성 탭의 한 pane을 통째로 떼어 **다른** 워크스페이스(target_index)에 합친다(grip 핸들을 그 카드에 드롭).
+    /// target의 활성 pane을 좌우(`split_horizontal`)로 나눠 들어온 pane을 우측·활성으로 둔다(⌘D 관례 — 카드는
+    /// 방향 정보가 없어 기본 좌우). 트리 수술은 moveTermToNewSplit과 같은 모양(replaceLeaf로 target leaf → split)
+    /// 이되 새 pane을 만들지 않고 떼어온 pane을 재사용한다. 단독 pane 워크스페이스이거나 target이 자기 워크스페이스/
+    /// 범위 밖이면 무동작. 단일 출처: docs/tabs-splits-layout.md.
+    fn mergePaneIntoWorkspace(self: *AppSession, pane: *Pane, target_index: usize) void {
+        const src_tab = self.activeTab();
+        if (src_tab.panes.items.len <= 1) return; // 단독 pane — 무동작
+        const src_index = self.app_window.active_tab;
+        if (target_index == src_index or target_index >= self.tabs.items.len) return; // 자기/범위 밖 — 무동작
+        const target_tab = self.tabs.items[target_index];
+        const target_active = target_tab.activePane();
+        // 1) 실패 가능한 alloc 먼저: split 노드 + target.panes capacity. 실패하면 src 무변.
+        const split = self.allocator.create(PaneTree.Split) catch return;
+        target_tab.panes.ensureUnusedCapacity(self.allocator, 1) catch {
+            self.allocator.destroy(split);
+            return;
+        };
+        split.* = .{
+            .direction = .horizontal,
+            .ratio = 0.5,
+            .a = .{ .leaf = target_active },
+            .b = .{ .leaf = pane },
+        };
+        // 2) target 트리에 split을 먼저 끼운다(pane이 잠시 양쪽 트리 leaf가 되지만 동기라 무해). target_active는
+        //    target leaf라 false일 수 없으나, 도달 불가 분기에서 split만 해제하고 src를 안 건드린 채 빠진다.
+        if (!PaneTree.replaceLeaf(&target_tab.tree, target_active, .{ .split = split })) {
+            self.allocator.destroy(split);
+            return;
+        }
+        // 3) infallible: src에서 떼고(형제로 collapse) 두 탭 대표 surface 재바인딩 + target.panes에 pane 추가.
+        _ = self.detachPaneFromTab(src_tab, pane);
+        self.hovered_tab = null;
+        self.surface_ptrs.items[src_index] = &src_tab.activeTerm().surface;
+        target_tab.panes.appendAssumeCapacity(pane);
+        target_tab.active_pane = target_tab.panes.items.len - 1;
+        self.surface_ptrs.items[target_index] = &target_tab.activeTerm().surface;
+        // 4) 소스 resize(형제 확장) 후 target을 활성으로 전환(switchTab이 target resize+좌표+사이드바 재빌드).
+        self.resizeTabPanes(src_tab);
+        _ = self.switchTab(target_index);
+        self.metal_dirty = true;
+    }
+
+    /// pane grip 드래그의 드롭 목적지 — 사이드바 좌표를 해석한다. 카드 위면 그 워크스페이스에 **합치기**(merge),
+    /// 사이드바 빈 영역(헤더·목록 아래)이면 **새 워크스페이스**(new_workspace). 사이드바 밖이거나 자기 워크스페이스
+    /// 카드면 null(드롭 아님 — no-op). dropPaneAt(커밋)이 단일 출처로 쓴다.
+    const PaneDropDest = union(enum) { new_workspace, merge: usize };
+    fn computePaneDropDest(self: *AppSession, x_px: f64, y_px: f64) ?PaneDropDest {
+        if (!self.inSidebar(x_px)) return null; // 사이드바 밖 — 드롭 아님
+        // 헤더(검색바·◧/⚙/+ 아이콘) 영역은 드롭 불가 — 여기서 떼면 sidebarSlotAt가 null이라 아래 폴백이 new_workspace로
+        // 떨어져 '검색바에 떨어뜨려도 새 워크스페이스가 생기는' 오동작이 된다(하이라이트도 카드 아래 행에 잘못 켜진다).
+        if (y_px < @as(f64, @floatFromInt(self.sidebar_header_height_px))) return null;
+        if (self.sidebarSlotAt(y_px)) |slot| {
+            if (self.visibleTab(slot)) |tab_idx| {
+                if (tab_idx == self.app_window.active_tab) return null; // 자기 워크스페이스 — 무의미
+                return .{ .merge = tab_idx };
+            }
+        }
+        return .new_workspace; // 사이드바 빈 영역(카드 목록 아래) — 새 워크스페이스
+    }
+
+    /// 드롭 타겟 하이라이트로 강조할 사이드바 표시 슬롯 — computePaneDropDest(드롭 판정 단일 출처)에서 도출한다.
+    /// merge면 그 카드의 표시 슬롯(displaySlotOf), new_workspace면 카드 아래 행(표시 카드 수). 드롭 아님(밖/자기)이면 null.
+    fn paneDropHighlightSlot(self: *AppSession, x_px: f64, y_px: f64) ?usize {
+        return switch (self.computePaneDropDest(x_px, y_px) orelse return null) {
+            .new_workspace => self.sidebar_visible_tabs.items.len, // 카드 목록 아래 행
+            .merge => |tab_idx| self.displaySlotOf(tab_idx), // 합칠 카드의 표시 슬롯(검색 필터로 숨겨졌으면 null)
+        };
+    }
+
+    /// pane grip 드래그 up(drop) — 드롭 목적지에 따라 분리(promote)/합치기(merge). 사이드바 밖/자기 워크스페이스면
+    /// 무동작. mouse가 up(kind 3)에서 부른다(pane_drag 캡처 경로).
+    fn dropPaneAt(self: *AppSession, x_px: f64, y_px: f64) void {
+        const pane = self.pane_drag_pane orelse return;
+        const dest = self.computePaneDropDest(x_px, y_px) orelse return;
+        switch (dest) {
+            .new_workspace => self.promotePaneToNewWorkspace(pane),
+            .merge => |idx| self.mergePaneIntoWorkspace(pane, idx),
+        }
     }
 
     const TermLoc = struct { tab_index: usize, pane: *Pane, term_index: usize };
@@ -2723,6 +2893,11 @@ pub const AppSession = struct {
         if (self.tab_drag_pane == pane) {
             self.tab_drag_pane = null;
             self.tab_drag_active = false; // 드래그 대상이 사라졌으니 제스처 중단(다음 mouse-up은 no-op)
+        }
+        if (self.pane_drag_pane == pane) {
+            self.pane_drag_pane = null;
+            self.pane_drag_active = false; // 끌리던 pane이 reap으로 사라짐 → 제스처 중단(같은 표적 무효화 계약)
+            self.pane_drop_slot = null; // 드롭 타겟 하이라이트도 비운다(다음 rebuildSidebar가 안 그림)
         }
         // rename 대상이 이 pane이면 stale 포인터가 안 되게 비운다(teardown 중이라 closeRename의 부수효과 없이 직접).
         if (self.renamingPane(pane)) {
@@ -3274,6 +3449,9 @@ pub const AppSession = struct {
             .previous_term => self.focusTermRelative(-1),
             .next_pane => self.focusPaneRelative(1),
             .previous_pane => self.focusPaneRelative(-1),
+            // 활성 pane을 통째로 새 단독 워크스페이스로 분리(grip 드래그→사이드바 빈 영역의 키보드/팔릿 버전).
+            // 단독 pane 워크스페이스면 promotePaneToNewWorkspace가 no-op. tabsBlocked(chrome 최소)면 막는다.
+            .move_pane_to_new_workspace => if (!self.tabsBlocked()) self.promotePaneToNewWorkspace(self.activePane()),
             // 전체 선택(⌘A) — 활성 surface 코어의 selection을 스크롤백+화면 전체로. clipboard 쓰기는 네이티브.
             .select_all => {
                 // 선택 코어 mutate는 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
@@ -4332,8 +4510,8 @@ pub const AppSession = struct {
         for (leaf_rects.items) |lr| {
             const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
             if (!pointInRect(x_px, y_px, pb.full)) continue;
-            // 좌측 라벨 세그먼트 → 그 pane.
-            if (pb.label_cols > 0 and x_px < @as(f64, @floatFromInt(pb.tabs.x))) return .{ .pane = lr.leaf };
+            // 좌측 grip+라벨 세그먼트 → 그 pane(grip은 항상 예약돼 더블/우클릭 rename 대상도 grip 영역 포함).
+            if ((pb.grip_cols > 0 or pb.label_cols > 0) and x_px < @as(f64, @floatFromInt(pb.tabs.x))) return .{ .pane = lr.leaf };
             const count = lr.leaf.terms.items.len;
             const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse return null;
             if (m.inScrollLeftZone(x_px) or m.inScrollRightZone(x_px) or m.inPlusZone(x_px)) return null; // ‹›/+ 은 대상 아님
@@ -5407,6 +5585,9 @@ pub const AppSession = struct {
             if (self.renameTargetAt(x_px, y_px)) |target| {
                 self.sidebar_drag_active = false;
                 self.tab_drag_active = false;
+                self.pane_drag_active = false; // pane grip 드래그도 무장 해제(잃은 up 이벤트로 잔류 방지 — 형제 드래그와 동일)
+                self.pane_drag_pane = null;
+                self.pane_drop_slot = null;
                 self.startRename(target);
                 return;
             }
@@ -5439,6 +5620,32 @@ pub const AppSession = struct {
                 self.tab_drag_active = false;
                 self.tab_drag_pane = null;
                 self.setDropTarget(null); // 드롭 끝 — 하이라이트 해제
+            }
+            return;
+        }
+        // pane(분할 영역) 통째 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 커서 좌표만 갱신(floating
+        // 미리보기가 따라가게), up이 사이드바면 새 워크스페이스 분리/합치기(dropPaneAt). 사이드바 밖이면 no-op.
+        // 새 down(1)은 아래 일반 처리로 흘려 새 제스처를 시작한다.
+        if (self.pane_drag_active and (kind == 2 or kind == 3)) {
+            if (kind == 2) {
+                self.pane_drag_x = x_px;
+                self.pane_drag_y = y_px;
+                const slot = self.paneDropHighlightSlot(x_px, y_px); // 드롭 타겟 카드/빈 영역
+                if (!usizeOptEql(self.pane_drop_slot, slot)) {
+                    self.pane_drop_slot = slot;
+                    self.rebuildSidebar() catch {}; // .drop_zone 밴드를 새 슬롯으로 이동(슬롯 전환 시에만)
+                }
+                self.metal_dirty = true; // floating 미리보기가 커서를 따라가게
+            } else {
+                const was_highlighting = self.pane_drop_slot != null;
+                self.pane_drop_slot = null; // 하이라이트 해제(커밋 rebuild가 밴드를 안 그리게 — 먼저 비운다)
+                self.dropPaneAt(x_px, y_px); // up: 사이드바면 분리(빈 영역)/합치기(카드), 밖이면 no-op
+                self.pane_drag_active = false;
+                self.pane_drag_pane = null;
+                // 밴드가 떠 있었으면 제거를 보장한다. 커밋(promote/merge)은 이미 rebuild하므로 그 경우만 약간 중복이나,
+                // 밴드가 없던 드롭(터미널 등)은 rebuild를 건너뛴다(드롭은 hot path 아님 — 무조건 rebuild 대비 절감).
+                if (was_highlighting) self.rebuildSidebar() catch {};
+                self.metal_dirty = true;
             }
             return;
         }
@@ -5561,11 +5768,16 @@ pub const AppSession = struct {
                 for (leaf_rects.items) |lr| {
                     const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
                     if (pointInRect(x_px, y_px, pb.full)) {
-                        // 좌측 pane 라벨 세그먼트 클릭 → 그 pane만 포커스(탭 전환/드래그 arm 안 함). 탭 hit-test는 라벨 뒤
-                        // 영역(pb.tabs)만 대상이라, 라벨 영역 x가 tabIndex의 좌측 clamp로 탭0을 잘못 잡는 걸 막는다.
-                        // (PR4/PR5에서 더블클릭·우클릭 rename 트리거가 이 라벨 영역에 붙는다.)
-                        if (pb.label_cols > 0 and x_px < @as(f64, @floatFromInt(pb.tabs.x))) {
+                        // 좌측 grip+라벨 세그먼트 클릭 → 그 pane 포커스 + **pane 통째 드래그 arm**(이어지는 drag(2)가
+                        // floating 미리보기, up(3)이 사이드바면 분리/합치기 — 안 끌면 그냥 포커스). 탭 hit-test는 그 뒤
+                        // 영역(pb.tabs)만 대상이라, 좌측 영역 x가 tabIndex의 좌측 clamp로 탭0을 잘못 잡는 걸 막는다.
+                        // 더블클릭·우클릭 rename은 같은 영역에서 renameTargetAt이 따로 처리(kind 4/우클릭은 위에서 분기).
+                        if ((pb.grip_cols > 0 or pb.label_cols > 0) and x_px < @as(f64, @floatFromInt(pb.tabs.x))) {
                             _ = self.focusPaneByPtr(lr.leaf);
+                            self.pane_drag_active = true;
+                            self.pane_drag_pane = lr.leaf;
+                            self.pane_drag_x = x_px;
+                            self.pane_drag_y = y_px;
                             self.drag_autoscroll = 0;
                             self.mouse_drag_selecting = false;
                             return;
@@ -7867,6 +8079,25 @@ pub const AppSession = struct {
                     // 제목/라벨을 위 패딩만큼 내려 바 가운데에. tui(pad=0)면 바 상단(full.y).
                     const text_origin_y = pb.full.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px);
 
+                    // 1a-grip) pane grip 핸들(좌측, 항상 예약) — [full.x, full.x+grip_cols*cw)에 grip 글리프. pane
+                    //     통째 드래그 손잡이(아래 마우스 arm과 같은 영역). 라벨·탭은 grip 뒤로 밀려 안 겹친다. muted 색.
+                    if (pb.grip_cols > 0) {
+                        const grip_fg: terminal.Color = .{ .rgb = dimRgb(self.appearance.theme.sidebar_foreground) };
+                        if (coretext_frame_builder.buildPaneGripDrawList(self.allocator, @intCast(pb.grip_cols), grip_fg)) |gdl| {
+                            if (pane_frame_builder.buildFromDrawList(self.allocator, gdl, &self.renderer_state)) |gf| {
+                                var grip_frame = gf;
+                                if (built_frames.append(self.allocator, grip_frame)) |_| {
+                                    pane_frames.append(self.allocator, .{
+                                        .frame = grip_frame,
+                                        .origin_x = pb.full.x,
+                                        .origin_y = text_origin_y,
+                                        .colors = tabbar_colors,
+                                    }) catch {};
+                                } else |_| grip_frame.deinit(self.allocator); // 추적 실패 시만 해제(grip 생략, 탭은 계속)
+                            } else |_| {}
+                        } else |_| {}
+                    }
+
                     // 1a) pane 라벨 세그먼트(좌측) — custom_name이 있으면 [full.x, full.x+label_cols*cw)에 이름 glyph.
                     //     탭 영역(pb.tabs)이 라벨만큼 우측으로 밀려 겹치지 않는다(label_cols=0이면 이 블록 생략 = 기존 동작).
                     if (pb.label_cols > 0) {
@@ -7886,7 +8117,7 @@ pub const AppSession = struct {
                                 if (built_frames.append(self.allocator, label_frame)) |_| {
                                     pane_frames.append(self.allocator, .{
                                         .frame = label_frame,
-                                        .origin_x = pb.full.x,
+                                        .origin_x = pb.full.x + pb.grip_cols * self.cell_width_px, // grip 핸들 뒤에 이름
                                         .origin_y = text_origin_y,
                                         .colors = tabbar_colors,
                                     }) catch {};
@@ -8236,8 +8467,8 @@ pub const AppSession = struct {
                 const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
                 if (pointInRect(x_px, y_px, pb.full)) {
                     on_bar = true; // 탭 바 위 — 탭·‹/›·+·pane 포커스 모두 클릭 가능 영역
-                    // 좌측 pane 라벨 영역은 탭 호버 아님(탭0 ✕ 오표시 방지) — 라벨 뒤 탭 영역(pb.tabs)만 hit-test.
-                    if (pb.label_cols > 0 and x_px < @as(f64, @floatFromInt(pb.tabs.x))) break;
+                    // 좌측 grip+라벨 영역은 탭 호버 아님(탭0 ✕ 오표시 방지) — 그 뒤 탭 영역(pb.tabs)만 hit-test.
+                    if ((pb.grip_cols > 0 or pb.label_cols > 0) and x_px < @as(f64, @floatFromInt(pb.tabs.x))) break;
                     const count = lr.leaf.terms.items.len;
                     const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse break; // 메트릭 불가(초소형 바) → 호버 없음
                     if (m.inScrollLeftZone(x_px)) { // #5b: ‹ 버튼 호버 — 탭 호버 아님
@@ -8282,7 +8513,7 @@ pub const AppSession = struct {
         const arena = arena_state.allocator();
         const tabs = self.sidebarTabs(arena) catch return;
         var ops: std.ArrayList(chrome.draw.Op) = .empty;
-        chrome.components.sidebar.view(tabs, self.hovered_slot, self.buildChromeProps(), arena, &ops) catch return;
+        chrome.components.sidebar.view(tabs, self.hovered_slot, self.pane_drop_slot, self.buildChromeProps(), arena, &ops) catch return;
         self.lowerSidebar(ops.items);
         // 헤더(검색바) 하단 구분선 — 검색 줄과 카드 목록 사이 경계를 명확히(사용자 요청 "Searchbar에 언더바"). divider
         // 색·border 두께로 사이드바 폭 전체에 가로선(layer 0=사이드바 retained). 검색 줄 바로 아래(=header_h 하단)에 둔다.
@@ -8709,6 +8940,7 @@ pub const AppSession = struct {
                 }
                 var color = switch (q.fill_role) {
                     .tab_active_bg => self.sidebarActiveBg(),
+                    .drop_zone => packOpaqueRgb(self.buildChromeTokens().palette.get(.drop_zone)), // pane 드롭 타겟(rich=밝게)
                     else => self.sidebarHoverBg(),
                 };
                 // 이 슬롯 탭에 배경 tint가 있으면 밴드 색에 섞는다 — tui 활성/호버 슬롯은 불투명 밴드(셀)가 tint quad를
@@ -10866,13 +11098,13 @@ test "double-click on a Term tab or sidebar slot starts rename" {
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    // ① Term 탭 더블클릭 → 그 Term rename(단일 pane, custom_name 없어 라벨 세그먼트 없음 → 탭이 바 좌단부터).
+    // ① Term 탭 더블클릭 → 그 Term rename(custom_name 없어도 좌측 grip 핸들이 항상 있어 탭은 grip 뒤 pb.tabs부터).
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
     const term0 = session.activePane().activeTerm();
-    session.mouse(4, @floatFromInt(bar.x + 4), @floatFromInt(bar.y + 1), 0, 0);
+    session.mouse(4, @floatFromInt(pb.tabs.x + 4), @floatFromInt(pb.full.y + 1), 0, 0);
     try std.testing.expect(session.renamingTerm(term0));
     session.closeRename();
 
@@ -10906,11 +11138,11 @@ test "right-click opens context menu on a rename target; clicking Rename starts 
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const bar = session.paneBarRect(lr.items[0].rect).?;
+    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?; // 탭은 grip 뒤 pb.tabs부터
     const term0 = session.activePane().activeTerm();
 
     // ① Term 탭 우클릭(button==2) → 메뉴 열림 + 대상 = term0(아직 rename 아님 — 메뉴만).
-    session.mouse(1, @floatFromInt(bar.x + 4), @floatFromInt(bar.y + 1), 2, 0);
+    session.mouse(1, @floatFromInt(pb.tabs.x + 4), @floatFromInt(pb.full.y + 1), 2, 0);
     try std.testing.expect(session.chrome_host.context_menu.open);
     try std.testing.expect(session.rename == null);
 
@@ -10923,7 +11155,7 @@ test "right-click opens context menu on a rename target; clicking Rename starts 
     session.closeRename();
 
     // ③ 터미널 본문(바 아래) 우클릭 → 대상 없음 → 메뉴 안 열림.
-    session.mouse(1, @floatFromInt(bar.x + 4), @floatFromInt(bar.y + bar.h + 5), 2, 0);
+    session.mouse(1, @floatFromInt(pb.full.x + 4), @floatFromInt(pb.full.y + pb.full.h + 5), 2, 0);
     try std.testing.expect(!session.chrome_host.context_menu.open);
 }
 
@@ -12721,6 +12953,340 @@ test "S1 표적 divider: 무관한 split의 pane이 collapse돼도 divider_drag 
     try std.testing.expect(session.divider_drag == null); // 표적: 닫힌 게 root split
 }
 
+// Pane을 워크스페이스로 분리(promote)·합치기(merge) — grip 드래그의 트리 수술 코어를 헤드리스로 고정한다
+// (단일 출처: docs/tabs-splits-layout.md "Pane을 워크스페이스로 분리·합치기"). `*Pane`/`*Term`은 heap-pin이라
+// 트리 사이를 포인터로만 옮기고, src는 형제로 collapse, 대표 surface(surface_ptrs)는 양쪽 다 재바인딩된다.
+test "promotePaneToNewWorkspace: 활성 pane을 떼어 새 단독 워크스페이스로 옮긴다(소스는 형제로 collapse)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+
+    // ws0: split으로 pane 2개([a, b]), 활성 b.
+    const pane_a = session.activePane();
+    try session.splitActivePane(.horizontal);
+    const pane_b = session.activePane();
+    try std.testing.expect(pane_b != pane_a);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
+
+    session.promotePaneToNewWorkspace(pane_b); // 활성 pane(b)을 새 워크스페이스로 분리
+
+    // 워크스페이스 2개, 새 탭이 활성, 새 탭은 pane b 하나(단일 leaf), ws0은 a 하나.
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    const new_tab = session.tabs.items[1];
+    try std.testing.expectEqual(@as(usize, 1), new_tab.panes.items.len);
+    try std.testing.expectEqual(pane_b, new_tab.panes.items[0]);
+    switch (new_tab.tree) {
+        .leaf => |l| try std.testing.expectEqual(pane_b, l),
+        .split => return error.TestExpectedLeaf,
+    }
+    const ws0 = session.tabs.items[0];
+    try std.testing.expectEqual(@as(usize, 1), ws0.panes.items.len);
+    try std.testing.expectEqual(pane_a, ws0.panes.items[0]);
+    // 대표 surface 재바인딩: 새 활성 탭 = b의 활성 Term, ws0 = a의 활성 Term.
+    try std.testing.expectEqual(&pane_b.activeTerm().surface, session.surface_ptrs.items[1]);
+    try std.testing.expectEqual(&pane_a.activeTerm().surface, session.surface_ptrs.items[0]);
+}
+
+test "promotePaneToNewWorkspace: 단독 pane 워크스페이스면 무동작(빈 워크스페이스를 안 만든다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
+    session.promotePaneToNewWorkspace(session.activePane()); // 단독 pane — no-op
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len); // 무변(빈 워크스페이스 안 생김)
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
+}
+
+test "mergePaneIntoWorkspace: 활성 pane을 다른 워크스페이스에 합친다(target 활성 pane 좌우 split, 우측·활성)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+
+    // ws0: split → pane 2개([a,b]), 활성 b. ws1: newTab(활성이 ws1로). 다시 ws0으로 전환.
+    const pane_a = session.activePane();
+    try session.splitActivePane(.horizontal);
+    const pane_b = session.activePane();
+    _ = try session.newTab();
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    const ws1 = session.tabs.items[1];
+    const ws1_pane0 = ws1.panes.items[0];
+    try std.testing.expect(session.switchTab(0));
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
+
+    session.mergePaneIntoWorkspace(pane_b, 1); // 활성(ws0)의 pane b를 ws1에 합침
+
+    // ws0은 a 하나, ws1은 [원래 pane0, b] 2개, 활성은 ws1, ws1 활성 pane = b(우측).
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items[0].panes.items.len);
+    try std.testing.expectEqual(pane_a, session.tabs.items[0].panes.items[0]);
+    try std.testing.expectEqual(@as(usize, 2), ws1.panes.items.len);
+    try std.testing.expectEqual(pane_b, ws1.activePane());
+    try std.testing.expectEqual(@as(usize, 2), PaneTree.leafCount(ws1.tree));
+    switch (ws1.tree) { // split{a: 원래 pane0, b: pane_b}, 좌우(horizontal)
+        .split => |sp| {
+            try std.testing.expect(sp.direction == .horizontal);
+            switch (sp.a) {
+                .leaf => |l| try std.testing.expectEqual(ws1_pane0, l),
+                .split => return error.TestExpectedLeaf,
+            }
+            switch (sp.b) {
+                .leaf => |l| try std.testing.expectEqual(pane_b, l),
+                .split => return error.TestExpectedLeaf,
+            }
+        },
+        .leaf => return error.TestExpectedSplit,
+    }
+    // 대표 surface: ws0 = a, ws1 = b(새 활성 pane).
+    try std.testing.expectEqual(&pane_a.activeTerm().surface, session.surface_ptrs.items[0]);
+    try std.testing.expectEqual(&pane_b.activeTerm().surface, session.surface_ptrs.items[1]);
+}
+
+test "mergePaneIntoWorkspace: 자기 워크스페이스/범위 밖/단독 pane이면 무동작" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+
+    // 단독 pane 워크스페이스 → 무동작(다른 ws가 있어도).
+    _ = try session.newTab(); // tabs [ws0, ws1], 활성 ws1(단독 pane)
+    try std.testing.expect(session.switchTab(0));
+    session.mergePaneIntoWorkspace(session.activePane(), 1); // src 단독 pane → no-op
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items[0].panes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items[1].panes.items.len);
+
+    // split으로 2 pane 만든 뒤: target=자기(활성) → no-op, 범위 밖 → no-op.
+    try session.splitActivePane(.horizontal);
+    const pane_b = session.activePane();
+    session.mergePaneIntoWorkspace(pane_b, session.app_window.active_tab); // 자기 자신
+    try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
+    session.mergePaneIntoWorkspace(pane_b, 99); // 범위 밖
+    try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
+}
+
+// grip 드래그 end-to-end(마우스 경로): pane 탭바 좌측 grip을 잡으면 pane_drag arm(tab_drag 아님), 사이드바
+// 빈 영역에 up하면 새 워크스페이스로 분리, 다른 워크스페이스 카드에 up하면 합치기. 실 init/split/spawn이라 macOS 게이트.
+test "grip 드래그: 사이드바 빈 영역 드롭 → 새 워크스페이스 분리(pane_drag arm 포함)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    try session.splitActivePane(.horizontal); // ws0: pane 2개, 활성 = 우(b)
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const pane_b = session.activePane();
+    try std.testing.expect(lr.items[1].leaf == pane_b);
+    const pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?;
+    try std.testing.expect(pb.grip_cols > 0); // grip 항상 예약
+
+    // grip(좌측, tabs.x 앞) down → pane_drag arm(tab_drag 아님).
+    const grip_x: f64 = @floatFromInt(pb.full.x + 1);
+    const grip_y: f64 = @floatFromInt(pb.full.y + 1);
+    session.mouse(1, grip_x, grip_y, 0, 0);
+    try std.testing.expect(session.pane_drag_active);
+    try std.testing.expect(session.pane_drag_pane == pane_b);
+    try std.testing.expect(!session.tab_drag_active);
+
+    // 사이드바 빈 영역(카드 한참 아래)으로 drag + up → 새 워크스페이스 분리.
+    const sx: f64 = @floatFromInt(session.sidebar_width_px / 2);
+    const empty_y: f64 = @floatFromInt(session.sidebar_header_height_px + session.sidebar_slot_height_px * 5 + 10);
+    session.mouse(2, sx, empty_y, 0, 0);
+    session.mouse(3, sx, empty_y, 0, 0);
+    try std.testing.expect(!session.pane_drag_active); // 드래그 종료
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len); // 새 워크스페이스 생김
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab); // 새 탭 활성
+    try std.testing.expectEqual(pane_b, session.tabs.items[1].panes.items[0]); // 분리된 pane이 새 탭에
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items[0].panes.items.len); // 소스 collapse
+}
+
+test "grip 드래그: 다른 워크스페이스 카드에 드롭 → 그 워크스페이스에 합치기" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    _ = try session.newTab(); // tabs [ws0, ws1]
+    try std.testing.expect(session.switchTab(0)); // 활성 ws0
+    try session.splitActivePane(.horizontal); // ws0: pane 2개, 활성 = 우(b)
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const pane_b = session.activePane();
+    const pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?;
+
+    session.mouse(1, @floatFromInt(pb.full.x + 1), @floatFromInt(pb.full.y + 1), 0, 0); // grip down → arm
+    try std.testing.expect(session.pane_drag_active);
+
+    // ws1 카드(slot 1) 중앙에 up → 합치기. visible_tabs=[0,1]이라 slot 1 = ws1.
+    const sx: f64 = @floatFromInt(session.sidebar_width_px / 2);
+    const card_y: f64 = @floatFromInt(session.sidebar_header_height_px + session.sidebar_slot_height_px + session.sidebar_slot_height_px / 2);
+    session.mouse(2, sx, card_y, 0, 0);
+    session.mouse(3, sx, card_y, 0, 0);
+
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len); // 워크스페이스 수 그대로(합치기)
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items[0].panes.items.len); // ws0 1 pane(소스 collapse)
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items[1].panes.items.len); // ws1 2 pane(합쳐짐)
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab); // 활성 = target ws1
+    try std.testing.expectEqual(pane_b, session.tabs.items[1].activePane()); // 합쳐진 pane이 활성(우측)
+}
+
+test "grip 드래그: 드래그 중 드롭 타겟 하이라이트 슬롯 추적(카드/빈 영역/밖/자기)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    _ = try session.newTab(); // [ws0, ws1]
+    try std.testing.expect(session.switchTab(0)); // 활성 ws0
+    try session.splitActivePane(.horizontal); // ws0 2 pane, 활성 = b
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?;
+    session.mouse(1, @floatFromInt(pb.full.x + 1), @floatFromInt(pb.full.y + 1), 0, 0); // grip arm
+    try std.testing.expect(session.pane_drag_active);
+
+    const sx: f64 = @floatFromInt(session.sidebar_width_px / 2);
+    // ① ws1 카드(slot 1) 위 → 하이라이트 슬롯 = 1(merge 타겟).
+    const card_y: f64 = @floatFromInt(session.sidebar_header_height_px + session.sidebar_slot_height_px + session.sidebar_slot_height_px / 2);
+    session.mouse(2, sx, card_y, 0, 0);
+    try std.testing.expectEqual(@as(?usize, 1), session.pane_drop_slot);
+    // ② 빈 영역(카드 아래) → 하이라이트 슬롯 = 표시 카드 수(새 워크스페이스 행).
+    const empty_y: f64 = @floatFromInt(session.sidebar_header_height_px + session.sidebar_slot_height_px * 5 + 10);
+    session.mouse(2, sx, empty_y, 0, 0);
+    try std.testing.expectEqual(@as(?usize, session.sidebar_visible_tabs.items.len), session.pane_drop_slot);
+    // ③ 사이드바 밖(터미널) → 하이라이트 없음.
+    session.mouse(2, @floatFromInt(pb.full.x + 20), @floatFromInt(pb.full.y + 1), 0, 0);
+    try std.testing.expect(session.pane_drop_slot == null);
+    // ④ 자기 워크스페이스(ws0 = slot 0) 위 → 하이라이트 없음(merge 무의미).
+    const own_y: f64 = @floatFromInt(session.sidebar_header_height_px + session.sidebar_slot_height_px / 2);
+    session.mouse(2, sx, own_y, 0, 0);
+    try std.testing.expect(session.pane_drop_slot == null);
+    // ⑤ 헤더(검색바·아이콘) 위 → 하이라이트 없음·드롭 불가(검색바에서 새 워크스페이스 오생성 방지).
+    const header_y: f64 = @floatFromInt(session.sidebar_header_height_px / 2);
+    session.mouse(2, sx, header_y, 0, 0);
+    try std.testing.expect(session.pane_drop_slot == null);
+    try std.testing.expect(session.computePaneDropDest(sx, header_y) == null); // 드롭도 no-op
+    // up → 하이라이트·드래그 정리.
+    session.mouse(3, @floatFromInt(pb.full.x + 20), @floatFromInt(pb.full.y + 1), 0, 0);
+    try std.testing.expect(session.pane_drop_slot == null);
+    try std.testing.expect(!session.pane_drag_active);
+}
+
+test "move_pane_to_new_workspace 액션: 활성 pane을 새 워크스페이스로 분리(dispatch 경로) + 단독이면 no-op" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    try session.splitActivePane(.horizontal); // ws0: 2 pane, 활성 b
+    const pane_b = session.activePane();
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+
+    session.dispatchAppAction(.move_pane_to_new_workspace); // 활성 pane → 새 워크스페이스
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab); // 새 탭 활성
+    try std.testing.expectEqual(pane_b, session.tabs.items[1].panes.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items[0].panes.items.len); // 소스 collapse
+
+    // 새 탭은 단독 pane → 액션 다시 호출해도 no-op(빈 워크스페이스를 안 만든다).
+    session.dispatchAppAction(.move_pane_to_new_workspace);
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+}
+
 // paneAtPoint가 스크린 점을 담는 leaf rect의 panel을 고르는지(반열린 구간 경계·밖·비유한) — 마우스
 // pane 전환의 hit-test 코어라 헤드리스 단위로 고정한다(레이아웃 rect만 입력, OS 무관). leaf는 deref되지
 // 않아(pointer-identity만) 빈 Pane 더미로 충분하다.
@@ -13439,11 +14005,11 @@ test "dragging a Term tab reorders it within the pane" {
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const bar = session.paneBarRect(lr.items[0].rect).?;
-    const m = barMetrics(bar, session.cell_width_px, 3, 0, 0).?;
-    const tab0_x: f64 = @floatFromInt(bar.x + (0 * m.tab_w + 1) * session.cell_width_px); // 탭 0 세그먼트(✕ 아님)
-    const tab2_x: f64 = @floatFromInt(bar.x + (2 * m.tab_w + 1) * session.cell_width_px); // 탭 2 세그먼트
-    const bar_y: f64 = @floatFromInt(bar.y + 1);
+    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?; // 탭은 grip 뒤 pb.tabs부터
+    const m = barMetrics(pb.tabs, session.cell_width_px, 3, 0, 0).?;
+    const tab0_x: f64 = @floatFromInt(pb.tabs.x + (0 * m.tab_w + 1) * session.cell_width_px); // 탭 0 세그먼트(✕ 아님)
+    const tab2_x: f64 = @floatFromInt(pb.tabs.x + (2 * m.tab_w + 1) * session.cell_width_px); // 탭 2 세그먼트
+    const bar_y: f64 = @floatFromInt(pb.full.y + 1);
 
     // 탭 0 down → 드래그 arm. drag to 탭 2 → 재정렬. up → 종료.
     session.mouse(1, tab0_x, bar_y, 0, 0);
@@ -13491,11 +14057,11 @@ test "dragging a tab to another pane moves the Term; emptying the source collaps
     const left = lr.items[0].leaf;
     try std.testing.expect(lr.items[1].leaf == right);
     const left_bar = session.paneBarRect(lr.items[0].rect).?;
-    const right_bar = session.paneBarRect(lr.items[1].rect).?;
+    const right_pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?; // 탭은 grip 뒤 pb.tabs부터
     const moved_id = right.terms.items[0].surface.id; // 옮길 Term(우 탭 0)
 
     // ① 우 탭 0을 좌 pane 바에 drop → 좌 2개·우 1개, 좌 활성. collapse 없음(우에 1개 남음).
-    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1), 0, 0); // down on 우 탭 0
+    session.mouse(1, @floatFromInt(right_pb.tabs.x + 5), @floatFromInt(right_pb.full.y + 1), 0, 0); // down on 우 탭 0
     try std.testing.expect(session.tab_drag_active);
     session.mouse(3, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1), 0, 0); // up over 좌 바 → cross-move
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len); // 아직 2 pane
@@ -13509,7 +14075,7 @@ test "dragging a tab to another pane moves the Term; emptying the source collaps
     try std.testing.expect(found); // 옮긴 Term이 좌 pane에 있다
 
     // ② 우 pane의 '마지막' Term을 좌로 drop → 우 비어 collapse → 단일 pane(좌, Term 3개).
-    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1), 0, 0); // down on 우 탭 0(마지막)
+    session.mouse(1, @floatFromInt(right_pb.tabs.x + 5), @floatFromInt(right_pb.full.y + 1), 0, 0); // down on 우 탭 0(마지막)
     session.mouse(3, @floatFromInt(left_bar.x + 5), @floatFromInt(left_bar.y + 1), 0, 0); // up over 좌 바
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len); // 우 collapse → 1 pane
     try std.testing.expectEqual(@as(usize, 1), PaneTree.leafCount(session.activeTab().tree));
@@ -13543,11 +14109,11 @@ test "④: dropping a tab on a pane body edge creates a new split there (rearran
     const right = session.activePane();
     try std.testing.expect(lr.items[1].leaf == right);
     const left_body = session.paneTermRect(lr.items[0].rect); // 좌 pane 본문(바 아래)
-    const right_bar = session.paneBarRect(lr.items[1].rect).?;
+    const right_pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?; // 탭은 grip 뒤 pb.tabs부터
     const moved_id = right.terms.items[0].surface.id; // 옮길 Term(우 pane의 유일 Term)
 
     // 우 pane 탭 down(드래그 arm) → 좌 pane 본문 '좌측 절반'에 up(drop). 우는 비어 collapse, 새 split 좌우.
-    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1), 0, 0);
+    session.mouse(1, @floatFromInt(right_pb.tabs.x + 5), @floatFromInt(right_pb.full.y + 1), 0, 0);
     try std.testing.expect(session.tab_drag_active);
     const drop_x: f64 = @floatFromInt(left_body.x + left_body.w / 10); // 좌측 가장자리 근처
     const drop_y: f64 = @floatFromInt(left_body.y + left_body.h / 2);
@@ -13594,10 +14160,10 @@ test "④b: tab drag tracks the drop target and emits a translucent highlight" {
     const left = lr.items[0].leaf;
     const left_body = session.paneTermRect(lr.items[0].rect);
     const left_bar = session.paneBarRect(lr.items[0].rect).?;
-    const right_bar = session.paneBarRect(lr.items[1].rect).?;
+    const right_pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?; // 탭은 grip 뒤 pb.tabs부터
 
     // 우 pane 탭 down(드래그 arm). 처음엔 드롭 타겟 없음.
-    session.mouse(1, @floatFromInt(right_bar.x + 5), @floatFromInt(right_bar.y + 1), 0, 0);
+    session.mouse(1, @floatFromInt(right_pb.tabs.x + 5), @floatFromInt(right_pb.full.y + 1), 0, 0);
     try std.testing.expect(session.tab_drag_active);
     try std.testing.expect(session.tab_drop_target == null);
 

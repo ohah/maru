@@ -27,6 +27,12 @@ pub const Action = union(enum) {
     // (Term 순환 previous_term/next_term은 ⌘⌥[/⌘⌥]로 옮겨 ⌘[]를 split에 양보 — 사용자 요청.)
     previous_pane,
     next_pane,
+    // 활성 pane(분할 영역)을 통째로 떼어 **새 단독 워크스페이스로 분리**한다 — grip 드래그를 사이드바 빈 영역에
+    // 드롭하는 것의 키보드/팔릿 버전(dispatchAppAction이 promotePaneToNewWorkspace로 넘긴다). 단독 pane 워크스페이스면
+    // 무동작(no-op 가드). 합치기(merge)는 타겟 워크스페이스가 모호해 키 액션으로 두지 않는다(드래그 전용). 기본
+    // 키바인딩은 없다(macOS 단일 관례 부재 — 발견성은 커맨드 팔릿; rename·split과 같은 베이스 명시 규칙). 단일
+    // 출처: docs/tabs-splits-layout.md "Pane을 워크스페이스로 분리·합치기".
+    move_pane_to_new_workspace,
     // 사용자 지정 이름(rename) 시작 — 활성 대상의 이름을 인라인으로 편집한다. workspace=활성 사이드바 탭,
     // pane=활성 분할 영역, term=활성 가로 탭. dispatchAppAction이 인라인 편집기를 연다(custom_name을 쓴다).
     // 기본 키바인딩은 없다(macOS 단일 관례 부재 — 발견성은 커맨드 팔릿·더블클릭·우클릭). 단일 출처:
@@ -93,6 +99,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "focus_pane_down")) return .focus_pane_down;
     if (std.mem.eql(u8, value, "previous_pane")) return .previous_pane;
     if (std.mem.eql(u8, value, "next_pane")) return .next_pane;
+    if (std.mem.eql(u8, value, "move_pane_to_new_workspace")) return .move_pane_to_new_workspace;
     if (std.mem.eql(u8, value, "rename_workspace")) return .rename_workspace;
     if (std.mem.eql(u8, value, "rename_pane")) return .rename_pane;
     if (std.mem.eql(u8, value, "rename_term")) return .rename_term;
@@ -154,6 +161,7 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.split_vertical, parseAction("split_vertical").?);
     try std.testing.expectEqual(Action.focus_pane_left, parseAction("focus_pane_left").?);
     try std.testing.expectEqual(Action.focus_pane_down, parseAction("focus_pane_down").?);
+    try std.testing.expectEqual(Action.move_pane_to_new_workspace, parseAction("move_pane_to_new_workspace").?);
     try std.testing.expectEqual(Action.rename_workspace, parseAction("rename_workspace").?);
     try std.testing.expectEqual(Action.rename_pane, parseAction("rename_pane").?);
     try std.testing.expectEqual(Action.rename_term, parseAction("rename_term").?);

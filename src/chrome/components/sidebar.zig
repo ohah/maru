@@ -105,7 +105,7 @@ pub fn dragTargetSlot(y_px: f64, header_height_px: u32, slot_height_px: u32, tab
 /// slot_h). **slot_height_px는 cell 높이가 아니다**(= cell_h × ratio, 더 크다) — platform이 `sidebar_slot_height_px`를
 /// 넘긴다. strip 배경·제목 glyph는 platform이 따로(밴드만 chrome). 활성 우선(활성 슬롯은 호버여도 활성 색). tabs
 /// 빈(사이드바 꺼짐)이거나 메트릭 0이면 무동작. 순수: tabs·hover 상태만 읽는다. out·op은 호출자 frame arena 소유.
-pub fn view(tabs: []const Tab, hovered_slot: ?usize, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
+pub fn view(tabs: []const Tab, hovered_slot: ?usize, drop_slot: ?usize, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
     const w = p.metrics.sidebar_width_px;
     const slot_h = p.metrics.sidebar_slot_height_px;
     if (w == 0 or slot_h == 0 or tabs.len == 0) return;
@@ -136,6 +136,13 @@ pub fn view(tabs: []const Tab, hovered_slot: ?usize, p: props.ChromeProps, arena
         if (hs < tabs.len and (active_idx == null or hs != active_idx.?)) {
             try out.append(arena, bandFill(hs, w, slot_h, .tab_hover_bg, p.shape));
         }
+    }
+
+    // 드롭 타겟 하이라이트 밴드(pane grip 드래그 중에만 platform이 슬롯을 준다) — 활성/호버 위에 .drop_zone 색으로
+    // 그린다. drop_slot < tabs.len이면 합칠 카드, == tabs.len이면 카드 목록 아래 행('새 워크스페이스'). 범위 검사 없이
+    // 그 행에 밴드를 낸다(카드 아래 행도 유효 — platform이 드래그 중에만, 그리고 자기 카드는 제외해 넘긴다).
+    if (drop_slot) |ds| {
+        try out.append(arena, bandFill(ds, w, slot_h, .drop_zone, p.shape));
     }
 }
 
@@ -226,7 +233,7 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
 
     // 활성(idx 1) + 호버(idx 0) → 밴드 2개(header_h=0, 하단 "+" 밴드는 헤더 아이콘으로 이동해 폐기).
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&tabs, 0, p, arena, &out);
+    try view(&tabs, 0, null, p, arena, &out);
     try std.testing.expectEqual(@as(usize, 2), out.items.len);
     // 활성: row 1 → y=40, role tab_active_bg, 전체 폭.
     try std.testing.expect(out.items[0] == .quad);
@@ -242,25 +249,38 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
 
     // 호버 슬롯 == 활성이면 호버 밴드 생략(활성 색 우선).
     out.clearRetainingCapacity();
-    try view(&tabs, 1, p, arena, &out);
+    try view(&tabs, 1, null, p, arena, &out);
     try std.testing.expectEqual(@as(usize, 1), out.items.len); // 활성만
+
+    // 드롭 타겟 하이라이트: drop_slot 주면 활성/호버 위에 .drop_zone 밴드 추가(pane grip 드래그 중 platform이 준다).
+    out.clearRetainingCapacity();
+    try view(&tabs, null, 0, p, arena, &out); // 활성(idx1) + 드롭(slot 0)
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expect(out.items[1].quad.fill_role == .drop_zone);
+    try std.testing.expectEqual(@as(i32, 0), out.items[1].quad.rect.y); // slot 0
+    // drop_slot == tabs.len이면 카드 목록 아래 행(새 워크스페이스) — 범위 밖 행도 밴드를 낸다.
+    out.clearRetainingCapacity();
+    try view(&tabs, null, tabs.len, p, arena, &out);
+    const last = out.items[out.items.len - 1].quad;
+    try std.testing.expect(last.fill_role == .drop_zone);
+    try std.testing.expectEqual(@as(i32, 3 * 40), last.rect.y); // row 3(카드 아래) = tabs.len × slot_h
 
     // 사이드바 꺼짐(폭 0)·slot_h 0·탭 없음이면 무동작.
     out.clearRetainingCapacity();
     var off = p;
     off.metrics.sidebar_width_px = 0;
-    try view(&tabs, null, off, arena, &out);
+    try view(&tabs, null, null, off, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
     off = p;
     off.metrics.sidebar_slot_height_px = 0;
-    try view(&tabs, 0, off, arena, &out);
+    try view(&tabs, 0, null, off, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 
     // rich shape(corner_radius>0): 같은 밴드가 둥근 quad로(radii 실림 → lowering이 GPU quad). tui와 같은 view 코드.
     out.clearRetainingCapacity();
     var rich_p = p;
     rich_p.shape = .{ .corner_radius_px = 8, .border_width_px = 1 };
-    try view(&tabs, null, rich_p, arena, &out);
+    try view(&tabs, null, null, rich_p, arena, &out);
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expectEqual(@as(u16, 8), out.items[0].quad.corner_radii[0]);
 
@@ -268,7 +288,7 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     out.clearRetainingCapacity();
     var bar_p = p;
     bar_p.shape = .{ .accent_bar_width_px = 3 };
-    try view(&tabs, null, bar_p, arena, &out);
+    try view(&tabs, null, null, bar_p, arena, &out);
     try std.testing.expectEqual(@as(usize, 2), out.items.len); // 활성 밴드(idx 1) + 좌측 막대
     try std.testing.expect(out.items[1].quad.fill_role == .accent_bar);
     try std.testing.expectEqual(@as(u32, 3), out.items[1].quad.rect.w); // 막대 폭 3px
@@ -279,7 +299,7 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     out.clearRetainingCapacity();
     var card_p = p;
     card_p.shape = .{ .corner_radius_px = 8, .accent_bar_width_px = 3, .card_gap_px = 4 };
-    try view(&tabs, null, card_p, arena, &out);
+    try view(&tabs, null, null, card_p, arena, &out);
     try std.testing.expectEqual(@as(usize, 2), out.items.len); // 활성 카드 밴드 + 좌측 막대
     const card = out.items[0].quad.rect;
     try std.testing.expectEqual(@as(i32, 4), card.x); // 좌 패딩(gap)

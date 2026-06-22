@@ -126,13 +126,66 @@ const Scrollback = struct {
     // 보는 순간(scrollViewport/renderSnapshot)에 현재 폭으로 1회 수행한다.
     rewrap_pending: bool = false,
 
-    fn deinit(self: *Scrollback, allocator: std.mem.Allocator) void {
-        for (self.ring) |slot| {
-            if (slot) |cells_row| allocator.free(cells_row);
+    /// ring 슬롯의 행 버퍼를 모두 해제하고 null로 비운다(슬롯 배열 자체는 유지 — 재사용 경로용).
+    /// deinit·clearScrollback·rewrapScrollbackInner이 공유한다(같은 free 루프 3벌 중복 제거).
+    fn freeSlots(self: *Scrollback, allocator: std.mem.Allocator) void {
+        for (self.ring) |*slot| {
+            if (slot.*) |cells_row| {
+                allocator.free(cells_row);
+                slot.* = null;
+            }
         }
+    }
+
+    fn deinit(self: *Scrollback, allocator: std.mem.Allocator) void {
+        self.freeSlots(allocator);
         if (self.ring.len > 0) allocator.free(self.ring);
         if (self.wrapped.len > 0) allocator.free(self.wrapped);
         if (self.prompt_marks.len > 0) allocator.free(self.prompt_marks);
+    }
+
+    /// 용량을 바꾼다. cap은 항상 갱신하되 **ring은 키울 때만** 재할당한다(grow-only):
+    /// - grow(new_cap > ring.len): 기존 행을 전부 보존한 채 더 큰 ring으로 옮긴다. 행을 버리지
+    ///   않으므로 abs 좌표(선택·kitty placement)가 불변이고, count도 그대로다. 런타임 config로
+    ///   scrollback.lines를 올리면 즉시 더 많은 history를 보관할 수 있고, cap>ring.len 상태가
+    ///   해소돼 rewrap의 OOB 전제 자체가 사라진다.
+    /// - shrink/동일(new_cap <= ring.len): cap만 갱신하고 ring은 그대로 둔다. 오래된 행을 버리면
+    ///   eviction처럼 선택/placement 좌표를 보정해야 하는데 그 책임은 여기 없으므로, 안전하게
+    ///   물리 ring.len을 상한으로 유지한다(push·rewrap이 일관되게 ring.len을 쓴다 — maxScrollback()이
+    ///   ring.len보다 작아질 뿐 무해). 미할당이면 다음 lazy push가 new_cap로 잡는다.
+    /// OOM이면 옛 ring을 유지한다(best-effort — 잘못된 절반 상태보다 옛 용량이 낫다).
+    fn setCap(self: *Scrollback, allocator: std.mem.Allocator, new_cap: usize) void {
+        self.cap = new_cap;
+        if (new_cap <= self.ring.len or self.ring.len == 0) return; // shrink·동일·미할당
+        // grow: keep == count(new_cap > ring.len >= count). 행 드랍 없음 → 좌표 보정 불필요.
+        const new_ring = allocator.alloc(?[]types.Cell, new_cap) catch return;
+        const new_wrapped = allocator.alloc(bool, new_cap) catch {
+            allocator.free(new_ring);
+            return;
+        };
+        const new_pmarks = allocator.alloc(types.RowPrompt, new_cap) catch {
+            allocator.free(new_ring);
+            allocator.free(new_wrapped);
+            return;
+        };
+        @memset(new_ring, null);
+        @memset(new_wrapped, false);
+        @memset(new_pmarks, .{});
+        var i: usize = 0;
+        while (i < self.count) : (i += 1) {
+            const src = (self.head + i) % self.ring.len;
+            new_ring[i] = self.ring[src];
+            new_wrapped[i] = self.wrapped[src];
+            new_pmarks[i] = self.prompt_marks[src];
+        }
+        allocator.free(self.ring);
+        allocator.free(self.wrapped);
+        allocator.free(self.prompt_marks);
+        self.ring = new_ring;
+        self.wrapped = new_wrapped;
+        self.prompt_marks = new_pmarks;
+        self.head = 0;
+        // count·cap은 그대로(cap은 위에서 갱신). 행 전부 보존.
     }
 };
 
@@ -266,10 +319,10 @@ pub const TerminalCore = struct {
     // 전이 스트림이라 RIS는 건드리지 않는다(프레임마다 drain되어 어차피 짧게 유지).
     shell_events: std.ArrayListUnmanaged(types.ShellEvent) = .empty,
     shell_events_overflow: bool = false,
-    // 활성 화면의 스크롤백 ring. primary는 cap>0(config scrollback.lines), alt는 cap=0인 빈
-    // 인스턴스라 "alt엔 스크롤백 없음"이 데이터 타입으로 보장된다(Scrollback 구조체 주석 참고).
-    // init이 cap을 default_max_scrollback으로 세우고 setMaxScrollback이 config를 반영한다.
-    sb: Scrollback = .{},
+    // 활성 화면의 스크롤백 ring. primary는 cap>0(기본 default_max_scrollback, config가 setMaxScrollback
+    // 으로 덮음), alt는 cap=0인 빈 인스턴스라 "alt엔 스크롤백 없음"이 데이터 타입으로 보장된다
+    // (Scrollback 구조체 주석 참고). 기본 cap은 여기 한곳에 둔다(init이 따로 세팅하지 않음).
+    sb: Scrollback = .{ .cap = default_max_scrollback },
     // alt 화면 동안 primary의 스크롤백을 보관하는 슬롯(grid의 saved_cells와 같은 스왑 패턴).
     // primary 활성 중에는 비어 있다.
     saved_sb: Scrollback = .{},
@@ -474,7 +527,6 @@ pub const TerminalCore = struct {
             .tabstops = tabstops,
             .dirty = fullDirty(grid),
             .scroll_bottom = grid.rows - 1,
-            .sb = .{ .cap = default_max_scrollback }, // primary 스크롤백 용량(config가 setMaxScrollback으로 덮음)
         };
     }
 
@@ -594,20 +646,22 @@ pub const TerminalCore = struct {
         return self.sb.count;
     }
 
-    /// primary 스크롤백의 용량(config scrollback.lines). alt 중에는 활성 sb가 cap=0인 빈
-    /// 인스턴스라, config 값을 보고 싶으면 보관 슬롯(primary)을 본다.
+    /// primary 스크롤백의 용량(config scrollback.lines). 용량을 화면당 Scrollback.cap에 두는 건
+    /// 의도적이다 — 이 per-screen 저장이 "alt=cap0" 불변식을 만들고, 그 불변식이 pushScrollback·
+    /// scrollbackLen의 alt 무동작을 분기 없이 떠받친다(cap을 TerminalCore로 끌어올리면 pushScrollback에
+    /// alt_active 가드가 되살아난다). alt 중에는 활성 sb가 빈(cap=0) 인스턴스라 config 값은 보관
+    /// 슬롯(primary)에서 읽는다.
     pub fn maxScrollback(self: *const TerminalCore) usize {
         return if (self.alt_active) self.saved_sb.cap else self.sb.cap;
     }
 
-    /// scrollback.lines config를 반영한다. 화면 단위 정책이므로 활성 화면과 무관하게 **항상
-    /// primary 스크롤백**에 적용한다(alt의 cap=0 불변식은 유지 — 데이터 모델 보정이 아니라 config 라우팅).
+    /// scrollback.lines config를 반영한다(런타임 reload 포함). 화면 단위 정책이라 활성 화면과 무관하게
+    /// **항상 primary 스크롤백**에 적용한다(alt의 cap=0 불변식 유지 — 데이터 모델 보정이 아니라 config
+    /// 라우팅). setCap이 ring을 새 cap으로 재구성하므로 변경이 즉시 반영되고 cap/ring.len 불일치
+    /// (rewrap OOB의 원인)가 생기지 않는다.
     pub fn setMaxScrollback(self: *TerminalCore, lines: usize) void {
-        if (self.alt_active) {
-            self.saved_sb.cap = lines;
-        } else {
-            self.sb.cap = lines;
-        }
+        const target = if (self.alt_active) &self.saved_sb else &self.sb;
+        target.setCap(self.allocator, lines);
     }
 
     /// i=0이 가장 오래된 스크롤백 행. 범위 밖이거나 OOM으로 비어 있으면 null.
@@ -753,7 +807,7 @@ pub const TerminalCore = struct {
     /// view_offset줄은 가장 최근 스크롤백, 나머지는 활성 화면 윗부분이다. 스크롤백 행이 비었으면(OOM)
     /// 빈 슬라이스를 준다. resize로 폭이 달라진 스크롤백 행은 저장된 폭 그대로 — 렌더가 clamp/pad한다.
     pub fn viewportRow(self: *const TerminalCore, r: u16) []const types.Cell {
-        const ci = self.sb.count - self.view_offset + r; // content index (sb_count>=view_offset 보장)
+        const ci = self.sb.count - @min(self.view_offset, self.sb.count) + r; // content index (underflow 가드 — 형제 호출부와 동일)
         if (ci < self.sb.count) {
             return self.scrollbackRow(ci) orelse &.{};
         }
@@ -1385,14 +1439,10 @@ pub const TerminalCore = struct {
     /// 스크롤백을 비운다(ED 3). 행 버퍼는 해제하고 ring 슬롯 배열은 유지해 다음 push가 재할당
     /// 없이 다시 쓴다. 뷰포트는 바닥으로 스냅한다(지워진 과거를 보고 있을 수 없으니).
     fn clearScrollback(self: *TerminalCore) void {
-        for (self.sb.ring) |*slot| {
-            if (slot.*) |cells_row| {
-                self.allocator.free(cells_row);
-                slot.* = null;
-            }
-        }
+        self.sb.freeSlots(self.allocator);
         self.sb.head = 0;
         self.sb.count = 0;
+        self.sb.rewrap_pending = false; // 비운 ring에 지연 재-wrap이 남을 이유 없다(상태 위생)
         self.view_offset = 0;
         self.invalidateSelection(); // 스크롤백을 지우면 abs 좌표가 무효 — 선택 해제(필드 주석의 약속)
     }
@@ -1450,7 +1500,10 @@ pub const TerminalCore = struct {
                 i = j + 1;
             }
         }
-        const keep = @min(total_out, self.sb.cap);
+        // 물리적 ring.len으로 묶는다(cap이 아니라) — setCap이 cap과 ring.len을 항상 같게 유지하지만,
+        // 여기서 ring.len을 쓰면 cap이 어떤 경로로 ring보다 커져도 아래 ring[k] 쓰기가 OOB가 될 수 없다.
+        // rewrap은 count>0일 때만 오므로 ring은 항상 할당돼 있다.
+        const keep = @min(total_out, self.sb.ring.len);
         const skip = total_out - keep; // 생성 없이 건너뛸 산출 행 수(가장 오래된 쪽)
 
         var rows: std.ArrayList([]types.Cell) = .empty;
@@ -1539,13 +1592,8 @@ pub const TerminalCore = struct {
         }
 
         // 기존 ring 행을 비우고(슬롯 배열은 재사용) 새 행으로 채운다. ring이 아직 lazy 미할당이면
-        // sb_count==0이라 여기 못 온다(가드).
-        for (self.sb.ring) |*slot| {
-            if (slot.*) |old_row| {
-                self.allocator.free(old_row);
-                slot.* = null;
-            }
-        }
+        // sb.count==0이라 여기 못 온다(가드).
+        self.sb.freeSlots(self.allocator);
         for (rows.items, 0..) |row_cells, k| {
             self.sb.ring[k] = row_cells;
             self.sb.wrapped[k] = wraps.items[k];
@@ -4111,6 +4159,10 @@ pub const TerminalCore = struct {
             // CSI 파서 상태/UTF-8 꼬리는 유지(아래 일반 경로와 동일한 이유).
             self.dirty = fullDirty(next_size);
             self.rebuildTabstops(old_cols); // 탭스톱을 새 cols에 맞춘다(겹침 보존·새 열 8칸 기본).
+            // alt 중 폭이 바뀌면 보관된 primary 스크롤백(saved_sb)을 복귀 후 현재 폭으로 재-wrap하도록
+            // 마크한다(활성 alt sb는 빈 인스턴스라 무의미 — primary는 saved_sb에 있다). leaveAltScreen이
+            // 복원하면 ensureScrollbackRewrapped가 1회 수행한다. 안 그러면 옛 폭 행이 복귀 후 stale로 보인다.
+            if (new_cols != old_cols) self.saved_sb.rewrap_pending = true;
             return;
         }
 
@@ -6989,6 +7041,58 @@ test "per-screen Scrollback: 스왑 불변식(중첩 enter·alt 중 config·alt�
     try core.write("\x1b[?1049l"); // 복귀
     try std.testing.expectEqual(primary_sb, core.scrollbackLen()); // ED 3에도 primary 스크롤백 살아있음
     try std.testing.expectEqual(@as(usize, 77), core.maxScrollback()); // 복원 후에도 cap 반영
+}
+
+test "rewrap: cap이 ring.len보다 커도 ring.len 상한으로 묶어 OOB 없이 재-wrap한다(회귀)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
+    defer core.deinit();
+    core.setMaxScrollback(3);
+    try core.write("aaaaaa\r\nbbbbbb\r\ncccccc\r\ndddddd\r\neeeeee"); // 스크롤백 3행, ring이 cap=3로 할당
+    try std.testing.expectEqual(@as(usize, 3), core.sb.ring.len);
+
+    // cap/ring.len 불일치를 직접 만든다(과거엔 config raise가 이 상태를 남겨 rewrap이 ring을 넘겨 OOB로 썼다).
+    core.sb.cap = 1000;
+    try core.resize(2, 2); // 폭 2: 6글자 줄이 3행으로 풀린다 → total_out(9) > ring.len(3)
+    core.scrollViewport(@intCast(core.scrollbackLen())); // 과거 보기 → rewrap 트리거
+    // keep=@min(total_out, ring.len)이라 ring.len(3)을 넘겨 쓰지 않는다 — 여기 도달하면 크래시 없음.
+    try std.testing.expect(core.scrollbackLen() <= core.sb.ring.len);
+}
+
+test "Scrollback.setCap: cap 상향은 ring을 키우고 기존 행을 보존한다(grow-only)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
+    defer core.deinit();
+    core.setMaxScrollback(3);
+    try core.write("aaaaaa\r\nbbbbbb\r\ncccccc\r\ndddddd\r\neeeeee"); // 스크롤백 3행
+    try std.testing.expectEqual(@as(usize, 3), core.scrollbackLen());
+    try std.testing.expectEqual(@as(usize, 3), core.sb.ring.len);
+
+    core.setMaxScrollback(50); // 상향 → grow
+    try std.testing.expectEqual(@as(usize, 50), core.sb.ring.len); // ring이 자랐다
+    try std.testing.expectEqual(@as(usize, 3), core.scrollbackLen()); // 행 보존(드랍 없음)
+    try std.testing.expectEqual(@as(usize, 50), core.maxScrollback());
+    // 가장 오래된 보존 행이 "aaaaaa"인지 — 좌표/내용 불변 확인.
+    const oldest = core.scrollbackRow(0).?;
+    try std.testing.expectEqual(@as(u21, 'a'), oldest[0].codepoint);
+
+    core.setMaxScrollback(10); // 축소 → cap만 갱신, ring/행 그대로(좌표 안전)
+    try std.testing.expectEqual(@as(usize, 50), core.sb.ring.len);
+    try std.testing.expectEqual(@as(usize, 10), core.maxScrollback());
+    try std.testing.expectEqual(@as(usize, 3), core.scrollbackLen());
+}
+
+test "resize during alt: 폭 변경이 복귀 후 primary 스크롤백 재-wrap을 트리거한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
+    defer core.deinit();
+    try core.write("aaaaaa\r\nbbbbbb\r\ncccccc"); // primary 스크롤백 1행("aaaaaa")
+    try std.testing.expect(core.scrollbackLen() >= 1);
+
+    try core.write("\x1b[?1049h"); // alt 진입 — primary는 saved_sb로 보관
+    try core.resize(3, 2); // alt 중 폭 변경(6→3)
+    try std.testing.expect(core.saved_sb.rewrap_pending); // 보관된 primary가 재-wrap 마크됨
+    try core.write("\x1b[?1049l"); // 복귀 — sb=saved_sb(rewrap_pending 동반)
+    try std.testing.expect(core.sb.rewrap_pending);
+    core.scrollViewport(@intCast(core.scrollbackLen())); // 트리거 → 현재 폭(3)으로 재-wrap
+    try std.testing.expect(!core.sb.rewrap_pending); // 소비됨
 }
 
 test "DECSET 47 switches screens without saving the cursor" {

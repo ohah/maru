@@ -48,6 +48,7 @@ pub const KeybindRebind = loader.KeybindRebind;
 pub const removeConfigLines = loader.removeConfigLines; // 키 줄 삭제(env 변수 삭제 등)
 pub const removeKeybindLines = loader.removeKeybindLines; // keybind 줄 action 기준 삭제(unbind)
 pub const appendKeybindUnbinds = loader.appendKeybindUnbinds; // keybind = chord = unbind 지시어(빌트인 죽이기)
+pub const removeKeybindUnbindLines = loader.removeKeybindUnbindLines; // keybind = chord = unbind 줄 chord 기준 삭제(stale 정리 — 재바인딩)
 pub const updateGlobalKeybindLines = loader.updateGlobalKeybindLines; // 전역 keybind write-back(global:<chord> = action, PR1)
 pub const GlobalKeybindRebind = loader.GlobalKeybindRebind;
 pub const removeGlobalKeybindLines = loader.removeGlobalKeybindLines; // 전역 keybind 줄 action 기준 삭제(unbind)

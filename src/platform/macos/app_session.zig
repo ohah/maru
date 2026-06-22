@@ -1296,6 +1296,10 @@ pub const AppSession = struct {
     // 빌트인 단축키 죽이기 — `keybind = <chord> = unbind` 지시어로 쓸 chord 표기 목록(loaded_config.arena 소유). 사용자
     // override 제거(위)로 안 죽는 빌트인 chord를 ignored로. serializeConfig가 appendKeybindUnbinds로 체이닝, takeConfigDirty가 봄.
     config_keybind_unbinds: std.ArrayList([]const u8) = .empty,
+    // stale unbind 정리 — 어떤 chord를 다시 **사용자 바인딩**으로 묶으면(rebind), 옛 `keybind = <chord> = unbind` 줄이 모순되게
+    // 남으므로(파일 위생; resolver는 사용자 바인딩 우선이라 동작은 정상) 그 chord 표기를 여기에 둔다. serializeConfig가
+    // removeKeybindUnbindLines로 unbind-append 패스 뒤에 체이닝. takeConfigDirty가 봄. loaded_config.arena 소유.
+    config_keybind_unbind_removed: std.ArrayList([]const u8) = .empty,
     // 전역(OS) 단축키 재바인딩 — `keybind = global:<chord> = <action>` 줄이라 전용 패스(updateGlobalKeybindLines). action은
     // command_catalog 글로벌 정적 키, chord는 loaded_config.arena 소유(toConfigString). serializeConfig가 체이닝, takeConfigDirty가 봄. (PR1)
     config_global_rebinds: std.ArrayList(config_mod.GlobalKeybindRebind) = .empty,
@@ -5431,6 +5435,7 @@ pub const AppSession = struct {
         self.config_removed_keys.clearRetainingCapacity();
         self.config_keybind_removed.clearRetainingCapacity();
         self.config_keybind_unbinds.clearRetainingCapacity();
+        self.config_keybind_unbind_removed.clearRetainingCapacity();
         self.theme_preset_persist = null; // 테마 프리셋 영속 예약도 폐기(다른 대기열과 같은 집합)
         self.config_global_rebinds.clearRetainingCapacity();
         self.config_global_removed.clearRetainingCapacity();
@@ -7787,7 +7792,8 @@ pub const AppSession = struct {
     pub fn takeConfigDirty(self: *AppSession) bool {
         return self.config_dirty_keys.items.len > 0 or self.config_keybind_rebinds.items.len > 0 or
             self.config_removed_keys.items.len > 0 or self.config_keybind_removed.items.len > 0 or
-            self.config_keybind_unbinds.items.len > 0 or self.theme_preset_persist != null or
+            self.config_keybind_unbinds.items.len > 0 or self.config_keybind_unbind_removed.items.len > 0 or
+            self.theme_preset_persist != null or
             self.config_global_rebinds.items.len > 0 or self.config_global_removed.items.len > 0;
     }
 
@@ -7939,6 +7945,37 @@ pub const AppSession = struct {
         if (added_any) self.loaded_config.unbinds = ub.toOwnedSlice(a) catch return;
     }
 
+    /// chord를 다시 **사용자 바인딩**으로 묶을 때, 옛 `keybind = <chord> = unbind` 지시어가 모순되게 남는 걸 정리한다
+    /// (stale unbind). resolver는 사용자 바인딩을 unbinds보다 먼저 봐서 동작은 정상이지만, 파일에 "X = unbind"와 "X = 액션"이
+    /// 공존하면 혼란스럽고 다음 unbind/편집에 헷갈린다. ① 라이브 unbinds에서 chord 제거 ② 이번 세션 펜딩 unbind-append 취소
+    /// ③ 파일에 있을 옛 줄 제거 예약(removeKeybindUnbindLines). chord가 unbinds에 없으면 무동작(흔한 경우 비용 0).
+    fn clearStaleUnbind(self: *AppSession, chord: config_mod.KeyChord) void {
+        var present = false;
+        for (self.loaded_config.unbinds) |u| if (u.eql(chord)) {
+            present = true;
+            break;
+        };
+        if (!present) return;
+        const a = self.loaded_config.arena.allocator();
+        // ① 라이브 unbinds에서 제거(그 chord를 더는 ignored로 안 본다).
+        var keep: std.ArrayList(config_mod.KeyChord) = .empty;
+        for (self.loaded_config.unbinds) |u| if (!u.eql(chord)) keep.append(a, u) catch return;
+        self.loaded_config.unbinds = keep.toOwnedSlice(a) catch return;
+        var chord_buf: [command_catalog.max_chord_display_len]u8 = undefined;
+        const cs = chord.toConfigString(&chord_buf);
+        // ② 이번 세션에 죽였다 다시 묶는 경우 — 펜딩 unbind-append에서 같은 chord 제거(append 안 되게).
+        var i: usize = 0;
+        while (i < self.config_keybind_unbinds.items.len) {
+            if (std.mem.eql(u8, self.config_keybind_unbinds.items[i], cs)) {
+                _ = self.config_keybind_unbinds.orderedRemove(i);
+            } else i += 1;
+        }
+        // ③ 옛 세션이 파일에 쓴 `keybind = cs = unbind` 줄 제거 예약(없으면 removeKeybindUnbindLines가 no-op).
+        for (self.config_keybind_unbind_removed.items) |c| if (std.mem.eql(u8, c, cs)) return; // 이미 예약
+        const owned = a.dupe(u8, cs) catch return;
+        self.config_keybind_unbind_removed.append(self.allocator, owned) catch {};
+    }
+
     fn rebindActionEntry(self: *AppSession, entry: command_catalog.Entry, chord: config_mod.KeyChord) void {
         const a = self.loaded_config.arena.allocator();
         // 충돌 경고: 이 chord가 **다른 액션**에 이미 묶여 있으면 알린다(rebind는 진행 — 사용자 의도, last-wins). 현재 effective
@@ -7968,6 +8005,8 @@ pub const AppSession = struct {
         // 살아 있어 옛 키 + 새 키 둘 다 동작한다(추가가 아니라 교체여야 표시=동작·옛 키 되찾기). 새 chord가 빌트인과
         // 같으면(재확인) 그건 살린다(except). 키바인드 완전 교체 — docs/config-gui.md §6.7.
         self.unbindBuiltinChords(entry, chord);
+        // stale unbind 정리: 이 새 chord가 옛 `keybind = chord = unbind`로 죽어 있었으면 그 모순 줄을 뺀다(사용자 바인딩으로 부활).
+        self.clearStaleUnbind(chord);
         self.rebuildCommandCatalog();
 
         // 영속 예약 — action 키별 upsert(같은 액션 여러 번 바꾸면 마지막만). chord는 config 표기로 arena에 둔다.
@@ -8317,6 +8356,14 @@ pub const AppSession = struct {
             self.allocator.free(text);
             text = chained;
             self.config_keybind_unbinds.clearRetainingCapacity();
+        }
+        // stale unbind 정리 — 재바인딩으로 부활한 chord의 옛 `keybind = chord = unbind` 줄을 제거(append 패스 뒤 — append가 안
+        // 쓴 chord를 여기서 빼 정리; 같은 chord를 죽임+부활 둘 다면 append는 펜딩에서 빠져 안 쓰고 여기서 옛 줄만 뺀다).
+        if (self.config_keybind_unbind_removed.items.len > 0) {
+            const chained = try config_mod.removeKeybindUnbindLines(self.allocator, text, self.config_keybind_unbind_removed.items);
+            self.allocator.free(text);
+            text = chained;
+            self.config_keybind_unbind_removed.clearRetainingCapacity();
         }
         // 전역(OS) 단축키 재바인딩 — `keybind = global:<chord> = <action>` 줄을 action 기준 갱신/추가(in-app keybind 줄과
         // 별도 패스, global: 좌측만 매칭). 기존 keybind 체이닝 뒤에 둔다.
@@ -11089,6 +11136,7 @@ pub const AppSession = struct {
         self.config_removed_keys.deinit(self.allocator);
         self.config_keybind_removed.deinit(self.allocator);
         self.config_keybind_unbinds.deinit(self.allocator);
+        self.config_keybind_unbind_removed.deinit(self.allocator);
         self.config_global_rebinds.deinit(self.allocator);
         self.config_global_removed.deinit(self.allocator);
         self.hover_leaf_scratch.deinit(self.allocator);
@@ -17991,6 +18039,62 @@ test "settings keybind 완전 교체: rebind하면 그 액션 빌트인 chord가
     try std.testing.expect(had_builtin); // next_tab엔 죽일 빌트인이 있었다(테스트 전제)
     // (3) 영속: 빌트인 unbind 지시어가 예약됐다(파일에 keybind = chord = unbind).
     try std.testing.expect(session.config_keybind_unbinds.items.len >= 1);
+}
+
+test "settings keybind stale unbind 정리: unbind한 chord를 다시 바인딩하면 unbinds에서 빠지고 옛 줄 제거 예약 (stale unbind)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // (1) next_tab을 unbind → 빌트인 chord(들)가 loaded_config.unbinds + 펜딩 unbind-append에 들어간다.
+    var nt: ?command_catalog.Entry = null;
+    for (command_catalog.entries) |e| if (std.mem.eql(u8, e.key, "next_tab")) {
+        nt = e;
+    };
+    session.unbindActionEntry(nt.?);
+    var target: ?config_mod.KeyChord = null;
+    for (config_mod.keybinding.default_app_bindings) |db| if (std.meta.eql(db.action, .next_tab)) {
+        target = db.chord;
+    };
+    try std.testing.expect(target != null);
+    var was_unbound = false;
+    for (session.loaded_config.unbinds) |u| if (u.eql(target.?)) {
+        was_unbound = true;
+    };
+    try std.testing.expect(was_unbound); // 그 chord가 지금 죽어 있다
+
+    // (2) 다른 액션(previous_tab)을 그 죽은 chord로 rebind → stale unbind 정리.
+    var pt: ?command_catalog.Entry = null;
+    for (command_catalog.entries) |e| if (std.mem.eql(u8, e.key, "previous_tab")) {
+        pt = e;
+    };
+    session.config_keybind_unbind_removed.clearRetainingCapacity();
+    session.rebindActionEntry(pt.?, target.?);
+
+    // (3) 그 chord가 loaded_config.unbinds에서 빠졌다(부활) + previous_tab의 effective chord가 됐다.
+    var still = false;
+    for (session.loaded_config.unbinds) |u| if (u.eql(target.?)) {
+        still = true;
+    };
+    try std.testing.expect(!still);
+    try std.testing.expect(command_catalog.chordForAction(session.loaded_config.keyBindingResolver(), .previous_tab).?.eql(target.?));
+    // (4) 옛 `keybind = chord = unbind` 줄 제거가 예약됐다(파일 위생).
+    var chord_buf: [command_catalog.max_chord_display_len]u8 = undefined;
+    const cs = target.?.toConfigString(&chord_buf);
+    var reserved = false;
+    for (session.config_keybind_unbind_removed.items) |c| if (std.mem.eql(u8, c, cs)) {
+        reserved = true;
+    };
+    try std.testing.expect(reserved);
 }
 
 test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 인덱스가 올바른 액션에 매핑 (CS-4-4 검색)" {

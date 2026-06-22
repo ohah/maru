@@ -641,6 +641,43 @@ pub fn removeKeybindLines(allocator: std.mem.Allocator, original: []const u8, ac
     return out.toOwnedSlice(allocator);
 }
 
+/// `keybind = <chord> = unbind` 줄을 **chord(좌측) 기준**으로 제거한다 — 그 chord를 다시 **사용자 바인딩**으로 묶을 때
+/// 모순되는 옛 unbind 지시어를 뺀다(stale unbind 정리). rhs가 정확히 `unbind`인 줄만, 좌측 chord가 `chords`에 있는 것만
+/// 드롭한다. `global:`·매크로(rhs `text:`/`esc:`)·다른 keybind 줄·주석은 보존. removeKeybindLines(action 기준)의 chord-기준
+/// 짝. serializeConfig가 unbind-append 패스 뒤에 체이닝한다(append가 안 쓴 chord를 여기서 빼 정리). 반환 owned(`allocator`).
+pub fn removeKeybindUnbindLines(allocator: std.mem.Allocator, original: []const u8, chords: []const []const u8) LoadError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var it = std.mem.splitScalar(u8, original, '\n');
+    var first = true;
+    while (it.next()) |raw_line| {
+        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
+        var drop = false;
+        if (trimmed.len > 0 and trimmed[0] != '#') {
+            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
+                if (std.mem.eql(u8, std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace), "keybind")) {
+                    const rest = trimmed[eq1 + 1 ..];
+                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
+                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
+                        const right = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
+                        if (std.mem.eql(u8, right, "unbind")) {
+                            for (chords) |c| if (std.mem.eql(u8, c, left_chord)) {
+                                drop = true;
+                                break;
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        if (drop) continue;
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        try out.appendSlice(allocator, raw_line);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// 전역(OS) keybind recorder write-back 한 건 — 전역 action(키)을 새 chord 표기로 다시 묶는다. action은
 /// command_catalog 글로벌 키(정적 리터럴, 예: `"toggle_window"`), chord는 `KeyChord.toConfigString` 결과(예: `"Cmd+Alt+Space"`).
 pub const GlobalKeybindRebind = struct { action: []const u8, chord: []const u8 };
@@ -910,6 +947,23 @@ test "theme.preset 영속: 한 줄이 16색 팔레트까지 복원 + 개별 over
     try std.testing.expectEqualStrings(dr.background, p.config.theme.background); // 주 색 복원
     try std.testing.expectEqualStrings("#f1fa8c", p.config.theme.palette[3].?); // 팔레트도 dracula 복원(옛 #abcdef 아님)
     try std.testing.expectEqualStrings(dr.palette[0].?, p.config.theme.palette[0].?); // 전 16색 영속
+}
+
+test "removeKeybindUnbindLines: chord 기준으로 unbind 지시어만 제거(다른 keybind·global·매크로·주석 보존) (stale unbind)" {
+    const a = std.testing.allocator;
+    const original =
+        "# 주석\nkeybind = Shift+Cmd+] = unbind\nkeybind = Shift+Cmd+] = previous_tab\n" ++
+        "keybind = Cmd+K = unbind\nkeybind = global:Cmd+Space = toggle_window\nkeybind = Cmd+E = text:hi\n";
+    const removed = [_][]const u8{"Shift+Cmd+]"};
+    const out = try removeKeybindUnbindLines(a, original, &removed);
+    defer a.free(out);
+    // Shift+Cmd+]의 **unbind** 줄만 빠진다 — 같은 chord의 previous_tab 바인딩, 다른 unbind(Cmd+K), global, 매크로, 주석은 보존.
+    try std.testing.expect(std.mem.indexOf(u8, out, "Shift+Cmd+] = unbind") == null); // 제거됨
+    try std.testing.expect(std.mem.indexOf(u8, out, "Shift+Cmd+] = previous_tab") != null); // 사용자 바인딩 보존
+    try std.testing.expect(std.mem.indexOf(u8, out, "Cmd+K = unbind") != null); // 다른 chord unbind 보존
+    try std.testing.expect(std.mem.indexOf(u8, out, "global:Cmd+Space") != null); // global 보존
+    try std.testing.expect(std.mem.indexOf(u8, out, "Cmd+E = text:hi") != null); // 매크로 보존
+    try std.testing.expect(std.mem.indexOf(u8, out, "# 주석") != null); // 주석 보존
 }
 
 test "parse: env.<KEY>가 누적되고 빈 KEY는 무시, 값 내부 공백 보존" {

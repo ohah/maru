@@ -91,6 +91,7 @@ pub const CursorKind = enum(i32) {
     link = 2, // pointingHand — Cmd+hover URL
     resize_h = 3, // resizeLeftRight ↔ — 세로 divider(좌우 split, 좌우로 끈다)
     resize_v = 4, // resizeUpDown ↕ — 가로 divider(상하 split, 위아래로 끈다)
+    grab = 5, // openHand ✋ — pane 탭바 좌측 grip 핸들 호버(통째 드래그 가능 신호)
 };
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -1565,9 +1566,10 @@ pub const AppSession = struct {
     /// 이름 표시폭(name_width 칸)으로부터 라벨 세그먼트 컬럼 수를 산출하는 코어 — 좌패딩+이름+간격을 [3, max]로,
     /// 탭 영역 최소(min_tab_cols)는 남기고 좁은 바면 0(라벨 생략). custom_name(paneLabelCols)·rename 편집 텍스트
     /// (paneBar)가 공유한다(폭 셈법 단일 출처).
-    /// pane 탭 바 좌측 grip 핸들 폭(항상 예약 — pane 통째 드래그 손잡이). 라벨 뒤 탭 영역 최소 보장(좁은 바면
-    /// grip·라벨 생략). 둘 다 paneBar·paneLabelColsForWidth가 공유하는 단일 출처(grip 예약·라벨 폭 셈법이 같은 한도).
-    const pane_grip_cols: u32 = 2;
+    /// pane 탭 바 좌측 grip 핸들 폭(항상 예약 — pane 통째 드래그 손잡이). 3칸 = 좌패딩 + grip 글리프(중앙) + 우패딩
+    /// (글리프가 좌단·divider에 붙지 않게 양쪽 여백). 라벨 뒤 탭 영역 최소 보장(좁은 바면 grip·라벨 생략). 둘 다
+    /// paneBar·paneLabelColsForWidth가 공유하는 단일 출처. buildPaneGripDrawList가 글리프를 cols/2(중앙) 칸에 그린다.
+    const pane_grip_cols: u32 = 3;
     const pane_min_tab_cols: u32 = 6;
     fn paneLabelColsForWidth(name_width: usize, bar_cols: u32) u32 {
         if (name_width == 0) return 0;
@@ -6872,9 +6874,11 @@ pub const AppSession = struct {
         self.setHoveredSlot(null); // 터미널 영역으로 나가면 사이드바 호버 해제
         self.setHoveredHeaderRegion(.none); // 사이드바 밖 → 헤더 아이콘 호버 배경 지움
         // 어느 pane의 탭 바 위면 호버 탭을 갱신(✕ 표시). 바 위면 URL/divider 아니므로 밑줄 해제하고 arrow.
-        if (self.updateHoveredTab(x_px, y_px)) {
+        const bar_hover = self.updateHoveredTab(x_px, y_px);
+        if (bar_hover != .none) {
             self.clearHoverUrlAnchor();
-            return .link; // #5c: 탭 바 위(탭·‹/›·+·pane 포커스 — 클릭 가능) → pointingHand
+            // 좌측 grip+라벨 = 드래그 손잡이 → openHand(grab), 그 외 탭/‹›/+/pane 포커스 = 클릭 가능 → pointingHand.
+            return if (bar_hover == .grip) .grab else .link;
         }
         // divider 밴드 위면 리사이즈 커서(클릭과 같은 dividerAtPoint — 탭 바 다음 순서). 단일 panel이면 null.
         if (self.dividerAtPoint(x_px, y_px)) |hit| {
@@ -8618,12 +8622,15 @@ pub const AppSession = struct {
         self.clearHoverUrlAnchor();
     }
 
-    /// 마우스가 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로 호버 탭을 갱신하고, 아니면 null로 비운다. 활성
-    /// 탭 leaf rect를 펴 각 pane 바를 hit-test한다(마우스 이동마다 — 작은 트리라 cheap). hoverCursor이 호출한다.
-    fn updateHoveredTab(self: *AppSession, x_px: f64, y_px: f64) bool {
+    /// pane 탭 바 호버 영역 — none(바 밖), tabs(탭/‹›/+/pane 포커스 = 클릭), grip(좌측 grip+라벨 = 드래그 손잡이).
+    const BarHover = enum { none, tabs, grip };
+    /// 마우스가 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로 호버 탭을 갱신하고, 아니면 null로 비운다. 좌측
+    /// grip+라벨 세그먼트면 grip(grab 커서). 활성 탭 leaf rect를 펴 각 pane 바를 hit-test한다. hoverCursor이 호출한다.
+    fn updateHoveredTab(self: *AppSession, x_px: f64, y_px: f64) BarHover {
         var next: ?TabRef = null;
         var next_scroll: ?ScrollRef = null;
-        var on_bar = false; // #5c: 탭 바 위 여부 — hoverCursor가 pointingHand(클릭 가능) 판정에 쓴다
+        var on_bar = false; // 탭 바 위 여부(탭 영역) — hoverCursor가 pointingHand(클릭 가능) 판정에 쓴다
+        var on_grip = false; // 좌측 grip+라벨 세그먼트 위 여부 — grab(openHand) 커서
         // 매 이동마다 새 ArrayList를 안 만들고 재사용 scratch에 레이아웃을 다시 깐다(할당 churn 제거, 결과는 최신).
         const leaf_rects = &self.hover_leaf_scratch;
         leaf_rects.clearRetainingCapacity();
@@ -8632,8 +8639,11 @@ pub const AppSession = struct {
                 const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
                 if (pointInRect(x_px, y_px, pb.full)) {
                     on_bar = true; // 탭 바 위 — 탭·‹/›·+·pane 포커스 모두 클릭 가능 영역
-                    // 좌측 grip+라벨 영역은 탭 호버 아님(탭0 ✕ 오표시 방지) — 그 뒤 탭 영역(pb.tabs)만 hit-test.
-                    if ((pb.grip_cols > 0 or pb.label_cols > 0) and x_px < @as(f64, @floatFromInt(pb.tabs.x))) break;
+                    // 좌측 grip+라벨 영역 = 드래그 손잡이(grab 커서). 탭 호버 아님(탭0 ✕ 오표시 방지) — 그 뒤 탭 영역만 hit-test.
+                    if ((pb.grip_cols > 0 or pb.label_cols > 0) and x_px < @as(f64, @floatFromInt(pb.tabs.x))) {
+                        on_grip = true;
+                        break;
+                    }
                     const count = lr.leaf.terms.items.len;
                     const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse break; // 메트릭 불가(초소형 바) → 호버 없음
                     if (m.inScrollLeftZone(x_px)) { // #5b: ‹ 버튼 호버 — 탭 호버 아님
@@ -8652,7 +8662,7 @@ pub const AppSession = struct {
         } else |_| {}
         self.setHoveredTab(next);
         self.setHoveredScroll(next_scroll);
-        return on_bar;
+        return if (on_grip) .grip else if (on_bar) .tabs else .none;
     }
 
     fn usizeOptEql(a: ?usize, b: ?usize) bool {
@@ -14468,8 +14478,8 @@ test "floating tab preview frame is built (and positioned) while dragging a tab"
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const bar = session.paneBarRect(lr.items[0].rect).?;
-    session.mouse(1, @floatFromInt(bar.x + 20), @floatFromInt(bar.y + 1), 0, 0); // 탭 down → arm
+    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?; // 탭은 grip 뒤 pb.tabs부터
+    session.mouse(1, @floatFromInt(pb.tabs.x + 4), @floatFromInt(pb.full.y + 1), 0, 0); // 탭 down → arm
     try std.testing.expect(session.tab_drag_active);
     session.mouse(2, 333, 222, 0, 0); // 드래그
     try std.testing.expectEqual(@as(f64, 333), session.tab_drag_x);
@@ -14972,12 +14982,16 @@ test "hoverCursor returns region-specific cursor kinds" {
     const term_y: f64 = @floatFromInt(session.active_pane_rect.y + 50);
     try std.testing.expectEqual(CursorKind.text, session.hoverCursor(term_x, term_y, 0));
 
-    // pane 탭 바 위 = link(pointingHand) — #5c: 탭·‹/›·+·pane 포커스 모두 클릭 가능.
+    // pane 탭 바 좌측 grip 핸들 위 = grab(openHand, 드래그 손잡이), 그 뒤 탭 영역 위 = link(pointingHand, 클릭 가능).
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const bar = session.paneBarRect(lr.items[0].rect).?;
-    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(@floatFromInt(bar.x + 20), @floatFromInt(bar.y + 1), 0));
+    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    try std.testing.expect(pb.grip_cols > 0);
+    // grip 중앙(글리프 칸) — full.x+1은 padding=0 테스트라 사이드바 resize-edge 밴드와 겹쳐 .resize_h가 되므로 그 밖으로.
+    const grip_cx: f64 = @floatFromInt(pb.full.x + pb.grip_cols * session.cell_width_px / 2);
+    try std.testing.expectEqual(CursorKind.grab, session.hoverCursor(grip_cx, @floatFromInt(pb.full.y + 1), 0)); // 좌측 grip
+    try std.testing.expectEqual(CursorKind.link, session.hoverCursor(@floatFromInt(pb.tabs.x + 4), @floatFromInt(pb.full.y + 1), 0)); // 탭 영역
 
     // 사이드바 워크스페이스 슬롯 위 = link(클릭=전환), "+" 슬롯 아래 빈 영역 = default(arrow) — #5c.
     if (session.sidebar_width_px > 0 and session.sidebar_slot_height_px > 0) {

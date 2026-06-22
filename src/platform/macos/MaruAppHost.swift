@@ -1434,13 +1434,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         Self.cursor(for: cursorKind).set()
     }
 
-    // CursorKind(app_host_abi.h: 0=arrow, 1=iBeam, 2=pointingHand, 3=resizeLeftRight, 4=resizeUpDown) → NSCursor.
+    // CursorKind(app_host_abi.h: 0=arrow, 1=iBeam, 2=pointingHand, 3=resizeLeftRight, 4=resizeUpDown, 5=openHand) → NSCursor.
     private static func cursor(for kind: Int32) -> NSCursor {
         switch kind {
         case 0: return .arrow
         case 2: return .pointingHand
         case 3: return .resizeLeftRight
         case 4: return .resizeUpDown
+        case 5: return .openHand // pane grip 호버(드래그 손잡이)
         default: return .iBeam // 1(text) 및 미지값
         }
     }

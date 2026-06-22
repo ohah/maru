@@ -1289,6 +1289,12 @@ pub const AppSession = struct {
     // 빌트인 단축키 죽이기 — `keybind = <chord> = unbind` 지시어로 쓸 chord 표기 목록(loaded_config.arena 소유). 사용자
     // override 제거(위)로 안 죽는 빌트인 chord를 ignored로. serializeConfig가 appendKeybindUnbinds로 체이닝, takeConfigDirty가 봄.
     config_keybind_unbinds: std.ArrayList([]const u8) = .empty,
+    // 전역(OS) 단축키 재바인딩 — `keybind = global:<chord> = <action>` 줄이라 전용 패스(updateGlobalKeybindLines). action은
+    // command_catalog 글로벌 정적 키, chord는 loaded_config.arena 소유(toConfigString). serializeConfig가 체이닝, takeConfigDirty가 봄. (PR1)
+    config_global_rebinds: std.ArrayList(config_mod.GlobalKeybindRebind) = .empty,
+    // 전역 단축키 해제 — `keybind = global:<chord> = <action>` 줄을 action 기준으로 제거(removeGlobalKeybindLines). action은
+    // command_catalog 글로벌 정적 키. serializeConfig가 갱신 패스 뒤 체이닝(제거 우선), takeConfigDirty가 봄. (PR1)
+    config_global_removed: std.ArrayList([]const u8) = .empty,
     // 시각 확인 디버그 훅: MARU_OPEN_SETTINGS env가 있으면 첫 frame에서 세팅 화면을 자동으로 연다(스크린샷
     // 하니스가 입력 없이 모달 상태를 캡처하게 — MARU_DEBUG와 같은 env-gate). env 미설정이면 무동작. 한 번만 연다.
     debug_settings_opened: bool = false,
@@ -3955,11 +3961,14 @@ pub const AppSession = struct {
         /// 아님). **검색 쿼리로 필터된 부분집합**이라 목록으로 보관한다(필터 후 인덱스가 view·핸들러에서 일관). palette와
         /// 배타(다른 섹션). 핸들러가 selected>=keybindRowStart면 keybind_entries[selected-start]로 라우팅.
         keybind_entries: []const command_catalog.Entry = &.{},
+        /// `.global_hotkey` 섹션이면 전역(OS) 단축키 녹음 행을 맨 끝에 둔다(전역 액션별 한 행 — keybind_entries와 평행하되
+        /// GlobalEntry라 별도 풀). 핸들러가 selected>=globalKeybindRowStart면 global_entries[selected-start]로 라우팅.
+        global_entries: []const command_catalog.GlobalEntry = &.{},
         fn nonSpecialTotal(self: SettingsSectionFields) usize {
             return self.bools.len + self.nums.len + self.enums.len + self.texts.len + self.colors.len;
         }
         fn total(self: SettingsSectionFields) usize {
-            return self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) + self.keybind_entries.len;
+            return self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) + self.keybind_entries.len + self.global_entries.len;
         }
         /// 팔레트 그리드 행의 selected 인덱스(있으면 항상 마지막 = 다른 필드 다음). 없으면 null.
         fn paletteRowIndex(self: SettingsSectionFields) ?usize {
@@ -3969,6 +3978,10 @@ pub const AppSession = struct {
         /// keybind(input)가 같이 나올 수 있어 palette 한 행을 오프셋에 더한다(없으면 0). 없으면 null.
         fn keybindRowStart(self: SettingsSectionFields) ?usize {
             return if (self.keybind_entries.len > 0) self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) else null;
+        }
+        /// 전역 단축키 행들의 첫 selected 인덱스(있으면 항상 **맨 끝** = schema 필드 + palette + in-app keybind 다음). 없으면 null.
+        fn globalKeybindRowStart(self: SettingsSectionFields) ?usize {
+            return if (self.global_entries.len > 0) self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) + self.keybind_entries.len else null;
         }
     };
 
@@ -3992,10 +4005,14 @@ pub const AppSession = struct {
             .workspace => "워크스페이스",
             .quick_terminal => "퀵 터미널",
             .sidebar => "사이드바",
+            .global_hotkey => "글로벌 핫키",
         };
     }
 
     fn settingsSectionHasField(bools: []const config_mod.schema.BoolField, nums: []const config_mod.schema.NumberField, enums: []const config_mod.schema.EnumField, texts: []const config_mod.schema.TextField, colors: []const config_mod.schema.ColorField, sec: ?config_mod.Section) bool {
+        // `.global_hotkey`는 schema 필드가 없는 특수 섹션이라 강제로 목록에 넣는다(전역 단축키 녹음 행만 — theme의
+        // palette·input의 keybind 특수 행 패턴처럼 currentSectionFields가 행을 합성한다). 좌측 네비에 항상 보여야 한다.
+        if (sec == .global_hotkey) return true;
         for (bools) |b| if (b.section == sec) return true;
         for (nums) |n| if (n.section == sec) return true;
         for (enums) |e| if (e.section == sec) return true;
@@ -4089,7 +4106,13 @@ pub const AppSession = struct {
             for (command_catalog.entries) |entry| if (settingsRowMatches(entry.title, entry.key, q)) try keybinds.append(arena, entry);
         }
         const palette_on = (cross or sel_sec == .theme) and settingsRowMatches("ANSI 팔레트", "theme.palette", q);
-        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = palette_on, .keybind_entries = keybinds.items };
+        // `.global_hotkey` 섹션엔 전역(OS) 단축키 녹음 행(GlobalEntry별 한 행 — schema 필드 아님, keybind 특수 행 선례).
+        // 검색 쿼리로도 필터(매칭 액션만). 핸들러가 selected>=globalKeybindRowStart면 global_entries로 라우팅.
+        var globals: std.ArrayList(command_catalog.GlobalEntry) = .empty;
+        if (cross or sel_sec == .global_hotkey) {
+            for (command_catalog.global_entries) |entry| if (settingsRowMatches(entry.title, entry.key, q)) try globals.append(arena, entry);
+        }
+        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = palette_on, .keybind_entries = keybinds.items, .global_entries = globals.items };
     }
 
     /// config 스키마의 **현재 섹션** 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2·§4). 라벨=meta.doc
@@ -4150,6 +4173,17 @@ pub const AppSession = struct {
             const resolver = self.loaded_config.keyBindingResolver();
             for (cf.keybind_entries) |entry| {
                 const chord = command_catalog.chordForAction(resolver, entry.action);
+                var disp_scratch: [command_catalog.max_chord_display_len]u8 = undefined;
+                const display: []const u8 = if (chord) |c| command_catalog.formatChord(c, &disp_scratch) else "";
+                rows[i] = .{ .label = entry.title, .kind = .{ .keybind = try arena.dupe(u8, display) } };
+                i += 1;
+            }
+        }
+        if (cf.global_entries.len > 0) {
+            // 전역(OS) 단축키 행(라벨=title, 값=현재 chord 표시). in-app과 달리 빌트인 기본이 없어 사용자 global_bindings만
+            // 스캔(chordForGlobalAction) — 없으면 빈 문자열(컴포넌트가 "(미지정)"으로 표시). 같은 `.keybind` 위젯 재사용.
+            for (cf.global_entries) |entry| {
+                const chord = command_catalog.chordForGlobalAction(self.loaded_config.global_bindings, entry.action);
                 var disp_scratch: [command_catalog.max_chord_display_len]u8 = undefined;
                 const display: []const u8 = if (chord) |c| command_catalog.formatChord(c, &disp_scratch) else "";
                 rows[i] = .{ .label = entry.title, .kind = .{ .keybind = try arena.dupe(u8, display) } };
@@ -4264,6 +4298,12 @@ pub const AppSession = struct {
         };
         if (cf.keybindRowStart()) |ks| if (sel >= ks and sel - ks < cf.keybind_entries.len) {
             // keybind 행 — Enter/Space/클릭 = 녹음 시작. 다음 raw 키를 handleKeyEvent가 가로채 captureKeybindRecording로 rebind.
+            self.chrome_host.settings.recording = true;
+            self.metal_dirty = true;
+            return;
+        };
+        if (cf.globalKeybindRowStart()) |gs| if (sel >= gs and sel - gs < cf.global_entries.len) {
+            // 전역 단축키 행 — in-app keybind 행과 동일 경로(녹음 시작 → captureKeybindRecording가 글로벌 분기로 rebind).
             self.chrome_host.settings.recording = true;
             self.metal_dirty = true;
             return;
@@ -4437,6 +4477,12 @@ pub const AppSession = struct {
         // keybind 행 → 사용자 지정 단축키 해제(unbind).
         if (cf.keybindRowStart()) |ks| if (sel >= ks and sel - ks < cf.keybind_entries.len) {
             self.unbindActionEntry(cf.keybind_entries[sel - ks]);
+            self.metal_dirty = true;
+            return;
+        };
+        // 전역 단축키 행 → global_bindings에서 제거(unbind) + 줄 제거 예약.
+        if (cf.globalKeybindRowStart()) |gs| if (sel >= gs and sel - gs < cf.global_entries.len) {
+            self.unbindGlobalEntry(cf.global_entries[sel - gs]);
             self.metal_dirty = true;
             return;
         };
@@ -5362,8 +5408,8 @@ pub const AppSession = struct {
             self.showNotice("기본값으로 초기화(화면은 적용됨) — config 파일 쓰기에 실패했습니다");
     }
 
-    /// serializeConfig가 소비하는 config write-back 대기열 5개를 전부 비운다(takeConfigDirty가 OR로 보는 것과 동일 집합).
-    /// reset처럼 "대기 중인 모든 변경을 폐기"해야 하는 경로에서 쓴다 — 일부만 비우면 남은 keybind/env 변경이 다음 tick
+    /// serializeConfig가 소비하는 config write-back 대기열 전부를 비운다(takeConfigDirty가 OR로 보는 것과 동일 집합).
+    /// reset처럼 "대기 중인 모든 변경을 폐기"해야 하는 경로에서 쓴다 — 일부만 비우면 남은 keybind/env/전역 변경이 다음 tick
     /// serializeConfig를 통해 되살아난다. serializeConfig와 같은 clearRetainingCapacity 패턴(항목 메모리는 비소유).
     fn clearConfigDirty(self: *AppSession) void {
         self.config_dirty_keys.clearRetainingCapacity();
@@ -5372,6 +5418,8 @@ pub const AppSession = struct {
         self.config_keybind_removed.clearRetainingCapacity();
         self.config_keybind_unbinds.clearRetainingCapacity();
         self.theme_preset_persist = null; // 테마 프리셋 영속 예약도 폐기(다른 대기열과 같은 집합)
+        self.config_global_rebinds.clearRetainingCapacity();
+        self.config_global_removed.clearRetainingCapacity();
     }
 
     /// config.theme의 주 색 4개가 어느 named 프리셋과 일치하는지(없으면 null = "사용자 지정"). 테마 프리셋 dropdown
@@ -7692,7 +7740,8 @@ pub const AppSession = struct {
     pub fn takeConfigDirty(self: *AppSession) bool {
         return self.config_dirty_keys.items.len > 0 or self.config_keybind_rebinds.items.len > 0 or
             self.config_removed_keys.items.len > 0 or self.config_keybind_removed.items.len > 0 or
-            self.config_keybind_unbinds.items.len > 0 or self.theme_preset_persist != null;
+            self.config_keybind_unbinds.items.len > 0 or self.theme_preset_persist != null or
+            self.config_global_rebinds.items.len > 0 or self.config_global_removed.items.len > 0;
     }
 
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
@@ -7884,6 +7933,94 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 전역(OS) 액션을 새 chord로 다시 묶는다(rebindActionEntry의 글로벌 미러). chord가 전역 등록 불가(descriptorFor가
+    /// null — 가상 키코드 매핑 없음, 예 Plus·Insert)면 notice로 거부하고 중단한다(파일에 못 쓸 chord를 안 받는다). 아니면
+    /// loaded_config.global_bindings를 새 슬라이스로 교체(그 액션을 새 chord로, 없으면 추가, 같은 action 중복 제거),
+    /// write-back 예약(updateGlobalKeybindLines가 `keybind = global:<chord> = <action>` 줄로 영속). 옛 슬라이스는 미참조로
+    /// 남아 reload/deinit에 arena 통째 해제. OS 재등록(라이브)은 PR2 — 이번엔 "재시작 후 적용"이다.
+    fn rebindGlobalEntry(self: *AppSession, entry: command_catalog.GlobalEntry, chord: config_mod.KeyChord) void {
+        const a = self.loaded_config.arena.allocator();
+        // 전역 등록 가능한 chord인지 먼저 확인(가상 키코드 매핑) — 안 되면 파일에 못 쓸 chord라 거부.
+        if (global_hotkey.descriptorFor(.{ .chord = chord, .action = entry.action }) == null) {
+            self.showNotice("이 키는 전역 단축키로 등록할 수 없습니다");
+            return;
+        }
+        // 충돌 경고(선택): 이 chord가 **다른 전역 액션**에 이미 묶여 있으면 알린다(rebind는 진행 — last-wins).
+        for (self.loaded_config.global_bindings) |other| {
+            if (other.action == entry.action) continue;
+            if (other.chord.eql(chord)) {
+                self.showNotice("이 전역 단축키는 이미 다른 동작에 묶여 있습니다 — 덮어씁니다");
+                break;
+            }
+        }
+        // global_bindings를 새 슬라이스로 교체 — 이 액션은 새 chord로 갈고(같은 action 중복은 한 번만), 다른 액션은 보존.
+        var list: std.ArrayList(config_mod.GlobalBinding) = .empty;
+        var replaced = false;
+        for (self.loaded_config.global_bindings) |b| {
+            if (b.action == entry.action) {
+                if (replaced) continue; // 같은 action 중복 제거(첫 매칭만 새 chord로)
+                list.append(a, .{ .chord = chord, .action = entry.action }) catch return;
+                replaced = true;
+            } else list.append(a, b) catch return;
+        }
+        if (!replaced) list.append(a, .{ .chord = chord, .action = entry.action }) catch return;
+        self.loaded_config.global_bindings = list.toOwnedSlice(a) catch return;
+
+        // 영속 예약 — action 키별 upsert(같은 액션 여러 번 바꾸면 마지막만). chord는 config 표기로 arena에 둔다.
+        var chord_buf: [command_catalog.max_chord_display_len]u8 = undefined;
+        const chord_str = a.dupe(u8, chord.toConfigString(&chord_buf)) catch return;
+        self.markGlobalRebind(entry.key, chord_str);
+        self.metal_dirty = true;
+    }
+
+    /// 전역(OS) 액션의 단축키를 해제한다(전역 행 Backspace — unbindActionEntry의 글로벌 미러). 빌트인 기본이 없으므로
+    /// global_bindings에서 그 액션 줄을 빼면 끝이다(in-app처럼 unbind 지시어가 필요 없다). 안 묶여 있으면 notice. 펜딩
+    /// rebind는 취소하고 줄 제거를 예약(markGlobalRemoved → removeGlobalKeybindLines). OS 반영은 재시작 후.
+    fn unbindGlobalEntry(self: *AppSession, entry: command_catalog.GlobalEntry) void {
+        const a = self.loaded_config.arena.allocator();
+        if (command_catalog.chordForGlobalAction(self.loaded_config.global_bindings, entry.action) == null) {
+            self.showNotice("이미 지정된 전역 단축키가 없습니다");
+            return;
+        }
+        var list: std.ArrayList(config_mod.GlobalBinding) = .empty;
+        for (self.loaded_config.global_bindings) |b| {
+            if (b.action == entry.action) continue; // 드롭(중복 포함 전부)
+            list.append(a, b) catch return;
+        }
+        self.loaded_config.global_bindings = list.toOwnedSlice(a) catch return;
+        self.cancelGlobalRebind(entry.key); // 펜딩 rebind 취소(제거가 우선)
+        self.markGlobalRemoved(entry.key); // 영속: 전역 줄 제거
+        self.metal_dirty = true;
+    }
+
+    /// 전역 keybind 재바인딩 예약(markConfigKeyDirty·rebind upsert의 글로벌 미러 — action 키별 한 건). action은
+    /// command_catalog 정적 키, chord는 loaded_config.arena 소유(config 표기). serializeConfig가 updateGlobalKeybindLines로 반영.
+    fn markGlobalRebind(self: *AppSession, action_key: []const u8, chord_str: []const u8) void {
+        for (self.config_global_rebinds.items) |*rb| {
+            if (std.mem.eql(u8, rb.action, action_key)) {
+                rb.chord = chord_str;
+                return;
+            }
+        }
+        self.config_global_rebinds.append(self.allocator, .{ .action = action_key, .chord = chord_str }) catch {};
+    }
+
+    /// 전역 keybind 줄 제거 예약(중복 한 번만). action은 command_catalog 정적 키. serializeConfig가 removeGlobalKeybindLines로 반영.
+    fn markGlobalRemoved(self: *AppSession, action_key: []const u8) void {
+        for (self.config_global_removed.items) |k| if (std.mem.eql(u8, k, action_key)) return;
+        self.config_global_removed.append(self.allocator, action_key) catch {};
+    }
+
+    /// 펜딩 전역 rebind를 액션 키로 취소한다(unbind가 rebind보다 우선 — 같은 액션을 바꿨다 지우면 결국 제거).
+    fn cancelGlobalRebind(self: *AppSession, action_key: []const u8) void {
+        var i: usize = 0;
+        while (i < self.config_global_rebinds.items.len) {
+            if (std.mem.eql(u8, self.config_global_rebinds.items[i].action, action_key)) {
+                _ = self.config_global_rebinds.orderedRemove(i);
+            } else i += 1;
+        }
+    }
+
     /// keybind 줄 제거 예약(중복 한 번만). action은 command_catalog 정적 키. serializeConfig가 removeKeybindLines로 반영.
     fn markKeybindRemoved(self: *AppSession, action_key: []const u8) void {
         for (self.config_keybind_removed.items) |k| if (std.mem.eql(u8, k, action_key)) return;
@@ -7906,10 +8043,20 @@ pub const AppSession = struct {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
         const cf = self.currentSectionFields(scratch.allocator()) catch return;
-        const start = cf.keybindRowStart() orelse return;
         const sel = self.chrome_host.settings.selected;
-        if (sel < start or sel - start >= cf.keybind_entries.len) return; // 선택이 keybind 행이 아님
-        self.rebindActionEntry(cf.keybind_entries[sel - start], chord);
+        // in-app keybind 행이면 그 액션에 rebind, 전역 단축키 행이면 글로벌 분기로 rebind(둘은 selected 구간으로 갈린다).
+        if (cf.keybindRowStart()) |start| {
+            if (sel >= start and sel - start < cf.keybind_entries.len) {
+                self.rebindActionEntry(cf.keybind_entries[sel - start], chord);
+                return;
+            }
+        }
+        if (cf.globalKeybindRowStart()) |gstart| {
+            if (sel >= gstart and sel - gstart < cf.global_entries.len) {
+                self.rebindGlobalEntry(cf.global_entries[sel - gstart], chord);
+                return;
+            }
+        }
     }
 
     /// 커맨드 카탈로그(메뉴바·팝업이 그릴 액션 목록). 세션 동안 불변. owned — destroy까지 유효.
@@ -8078,6 +8225,21 @@ pub const AppSession = struct {
             self.allocator.free(text);
             text = chained;
             self.config_keybind_unbinds.clearRetainingCapacity();
+        }
+        // 전역(OS) 단축키 재바인딩 — `keybind = global:<chord> = <action>` 줄을 action 기준 갱신/추가(in-app keybind 줄과
+        // 별도 패스, global: 좌측만 매칭). 기존 keybind 체이닝 뒤에 둔다.
+        if (self.config_global_rebinds.items.len > 0) {
+            const chained = try config_mod.updateGlobalKeybindLines(self.allocator, text, self.config_global_rebinds.items);
+            self.allocator.free(text);
+            text = chained;
+            self.config_global_rebinds.clearRetainingCapacity();
+        }
+        // 전역 단축키 해제 — `keybind = global:<chord> = <action>` 줄을 action 기준 제거(전역 갱신 패스 뒤, 제거 우선).
+        if (self.config_global_removed.items.len > 0) {
+            const chained = try config_mod.removeGlobalKeybindLines(self.allocator, text, self.config_global_removed.items);
+            self.allocator.free(text);
+            text = chained;
+            self.config_global_removed.clearRetainingCapacity();
         }
         self.sidebar_config_buffer = text;
         self.config_dirty_keys.clearRetainingCapacity();
@@ -10818,6 +10980,8 @@ pub const AppSession = struct {
         self.config_removed_keys.deinit(self.allocator);
         self.config_keybind_removed.deinit(self.allocator);
         self.config_keybind_unbinds.deinit(self.allocator);
+        self.config_global_rebinds.deinit(self.allocator);
+        self.config_global_removed.deinit(self.allocator);
         self.hover_leaf_scratch.deinit(self.allocator);
         self.scrollbar_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
@@ -17324,6 +17488,80 @@ test "settings keybind recorder: 입력 섹션 행 녹음→캡처→rebind + �
     session.captureKeybindRecording(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(!session.chrome_host.settings.recording);
     try std.testing.expectEqual(before, session.config_keybind_rebinds.items.len); // 변화 없음
+}
+
+test "settings global hotkey: .global_hotkey 섹션 3행 노출 + rebind가 global_bindings 교체·큐 적재, descriptorFor null 거부, Backspace 해제 (PR1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // .global_hotkey 섹션은 schema 필드가 없어도 좌측 네비에 강제로 들어간다.
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var gh_idx: ?usize = null;
+    for (sections, 0..) |s, i| if (s.section == .global_hotkey) {
+        gh_idx = i;
+    };
+    try std.testing.expect(gh_idx != null);
+
+    session.chrome_host.settings.show();
+    session.chrome_host.settings.section = gh_idx.?;
+    const cf = try session.currentSectionFields(scratch.allocator());
+    // 전역 행 3개(toggle_window/show_window/toggle_quick_terminal), schema·keybind 행 없음.
+    try std.testing.expectEqual(@as(usize, 3), cf.global_entries.len);
+    try std.testing.expectEqual(@as(usize, 0), cf.keybind_entries.len);
+    const gs = cf.globalKeybindRowStart().?;
+    try std.testing.expectEqual(gs, cf.total() - 3); // 맨 끝 3행
+
+    // global_entries[0]=toggle_window 행 선택 → Enter(toggle) = 녹음 시작.
+    session.chrome_host.settings.selected = gs;
+    session.toggleSelectedSetting();
+    try std.testing.expect(session.chrome_host.settings.recording);
+
+    // Cmd+Alt+Space 캡처 → toggle_window가 그 chord로 rebind + global_bindings 교체 + 큐 적재 + 녹음 종료.
+    session.captureKeybindRecording(.{ .key = .{ .char = ' ' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(!session.chrome_host.settings.recording);
+    const chord = command_catalog.chordForGlobalAction(session.loaded_config.global_bindings, .toggle_window).?;
+    try std.testing.expect((try config_mod.KeyChord.parse("Cmd+Alt+Space")).eql(chord)); // global_bindings 교체 반영
+    try std.testing.expect(session.takeConfigDirty());
+    var saw = false;
+    for (session.config_global_rebinds.items) |rb| if (std.mem.eql(u8, rb.action, "toggle_window") and std.mem.eql(u8, rb.chord, "Cmd+Alt+Space")) {
+        saw = true;
+    };
+    try std.testing.expect(saw); // write-back 큐 적재
+
+    // descriptorFor가 null인 chord(Cmd+Plus — 가상 키코드 매핑 없음)는 거부(global_bindings·큐 불변).
+    const before_len = session.loaded_config.global_bindings.len;
+    const before_q = session.config_global_rebinds.items.len;
+    session.chrome_host.settings.selected = gs;
+    session.chrome_host.settings.recording = true;
+    session.captureKeybindRecording(.{ .key = .{ .char = '+' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(before_len, session.loaded_config.global_bindings.len); // 거부 — 불변
+    try std.testing.expectEqual(before_q, session.config_global_rebinds.items.len);
+    // 거부돼도 toggle_window는 여전히 Cmd+Alt+Space.
+    try std.testing.expect((try config_mod.KeyChord.parse("Cmd+Alt+Space")).eql(command_catalog.chordForGlobalAction(session.loaded_config.global_bindings, .toggle_window).?));
+
+    // Backspace로 해제 → global_bindings에서 제거 + 줄 제거 예약 + 펜딩 rebind 취소.
+    const cf2 = try session.currentSectionFields(scratch.allocator());
+    session.chrome_host.settings.selected = cf2.globalKeybindRowStart().?; // toggle_window 행
+    session.deleteSelectedSettingRow();
+    try std.testing.expect(command_catalog.chordForGlobalAction(session.loaded_config.global_bindings, .toggle_window) == null);
+    var saw_removed = false;
+    for (session.config_global_removed.items) |k| if (std.mem.eql(u8, k, "toggle_window")) {
+        saw_removed = true;
+    };
+    try std.testing.expect(saw_removed);
+    for (session.config_global_rebinds.items) |rb| try std.testing.expect(!std.mem.eql(u8, rb.action, "toggle_window")); // 펜딩 취소
 }
 
 test "settings keybind unbind: keybind 행 Backspace → 사용자 바인딩 해제 + 줄 제거 예약, 펜딩 rebind 취소 (keybind unbind)" {

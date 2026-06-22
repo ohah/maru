@@ -6,8 +6,9 @@
 /// 세팅 GUI 위젯 종류(타입에서 유추하되 명시 override). CS-4+ 제너릭 렌더러가 소비.
 pub const Widget = enum { auto, toggle, number, slider, dropdown, text, color };
 
-/// 세팅 페이지 좌측 섹션(GUI 그룹). 단일 출처는 settings-page.md §1.
-pub const Section = enum { font, theme, cursor, window, input, terminal, workspace, quick_terminal, sidebar };
+/// 세팅 페이지 좌측 섹션(GUI 그룹). 단일 출처는 settings-page.md §1. `.global_hotkey`는 schema 필드가 없는
+/// 특수 섹션(전역 OS 단축키 녹음 행만 — app_session이 강제로 목록에 넣고 라벨을 준다).
+pub const Section = enum { font, theme, cursor, window, input, terminal, workspace, quick_terminal, sidebar, global_hotkey };
 
 /// 한 필드의 메타. 값은 평범한 Zig 필드로 두고(직접 접근 보존), 메타만 sub-struct `schema` decl에 comptime으로 둔다.
 pub const Meta = struct {

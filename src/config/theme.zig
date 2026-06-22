@@ -688,8 +688,18 @@ pub const NotificationConfig = struct {
     /// loader가 `notifications.agent-complete` 키로 파싱.
     agent_complete: bool = true,
 
-    pub const schema = .{ // 키: notifications.agent-complete
+    /// 셸/TUI가 보낸 OSC 9(iTerm2)/777(rxvt) 데스크톱 알림을 띄울지. 기본 true. false면 OSC 알림을 무시한다
+    /// (데스크톱 배너·인앱 센터 둘 다 — 코어 pending만 비운다). loader가 `notifications.osc` 키로 파싱.
+    osc: bool = true,
+
+    /// 인앱 알림 센터(종 아이콘 패널)에 보관할 최대 알림 수(ring). 초과하면 가장 오래된 것부터 버린다. 기본 64.
+    /// loader가 `notifications.history-limit` 키로 파싱(8~512, 상한은 메모리 가드).
+    history_limit: u32 = 64,
+
+    pub const schema = .{ // 키: notifications.agent-complete / notifications.osc / notifications.history-limit
         .agent_complete = Meta{ .doc = "비활성 탭 에이전트 완료 알림", .widget = .toggle, .section = .terminal },
+        .osc = Meta{ .doc = "OSC 9/777 데스크톱 알림", .widget = .toggle, .section = .terminal },
+        .history_limit = Meta{ .doc = "알림 센터 보관 개수", .range = .{ 8, 512 }, .widget = .number, .section = .terminal },
     };
 };
 

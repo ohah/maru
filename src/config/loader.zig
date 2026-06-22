@@ -717,6 +717,8 @@ test "parse: full config sets every field" {
         \\window.padding-x = 12
         \\window.padding-y = 6
         \\notifications.agent-complete = false
+        \\notifications.osc = false
+        \\notifications.history-limit = 100
     );
     defer p.deinit();
     try std.testing.expectEqualStrings("JetBrains Mono", p.config.font.family);
@@ -742,6 +744,8 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(@as(u32, 6), p.config.window_padding_top); // window.padding-y alias → top+bottom
     try std.testing.expectEqual(@as(u32, 6), p.config.window_padding_bottom);
     try std.testing.expectEqual(false, p.config.notifications.agent_complete); // notifications.agent-complete 파싱(기본 true)
+    try std.testing.expectEqual(false, p.config.notifications.osc); // notifications.osc 파싱(기본 true)
+    try std.testing.expectEqual(@as(u32, 100), p.config.notifications.history_limit); // notifications.history-limit 파싱(기본 64)
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
 }
 

@@ -594,6 +594,7 @@ fn parseUintRange(value: []const u8, min: u32, max: u32) ?u32 {
 /// config 키 segment의 '_'를 '-'로(field명→키 토큰 규약). namespace·segment 둘 다 이걸 쓴다(maru 키는 일관되게
 /// 하이픈). 예외(field명≠키 segment, 예: height_fraction→"height")만 Meta.key_seg로 명시 override. comptime-only.
 fn dashed(comptime s: []const u8) []const u8 {
+    @setEvalBranchQuota(100000); // 키가 늘면 comptime 순회(topKey/keyOf×필드 수)의 backwards branch가 기본 1000을 넘는다 — 공통 경로인 여기서 budget을 키운다
     var out: []const u8 = "";
     for (s) |c| out = out ++ &[_]u8{if (c == '_') '-' else c};
     return out;

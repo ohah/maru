@@ -2560,7 +2560,7 @@ pub const AppSession = struct {
         errdefer term.surface.deinit();
         // config 스크롤백 ring 크기를 주입한다(모든 surface가 이 chokepoint를 지난다 — init 첫 탭·새 탭·split·
         // restore). lazy-alloc(첫 scroll) 전이라 안전. 0이면 스크롤백 비활성.
-        term.surface.core.max_scrollback = self.loaded_config.config.scrollback.lines;
+        term.surface.core.setMaxScrollback(self.loaded_config.config.scrollback.lines);
         // EAW Ambiguous(동그란 번호 등) 폭(text.ambiguous-width). 같은 chokepoint라 모든 surface가 일관된 폭으로
         // putCell한다(grid·커서·렌더 단일 출처). 기본 narrow — wide면 동그란 번호 등을 2칸 advance.
         term.surface.core.ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide;
@@ -10019,7 +10019,7 @@ test "takeBell respects bell.audible; createTerm injects config scrollback" {
     defer session.deinit();
 
     // createTerm이 config 스크롤백(is_test 빈 config → 기본 1000)을 활성 surface core에 주입했다.
-    try std.testing.expectEqual(@as(usize, 1000), session.activeSurface().core.max_scrollback);
+    try std.testing.expectEqual(@as(usize, 1000), session.activeSurface().core.maxScrollback());
 
     // audible(기본 true): BEL → takeBell true, 한 번 울리고 drain(두 번째는 false).
     session.audible_bell = true;

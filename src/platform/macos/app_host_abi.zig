@@ -856,11 +856,11 @@ pub export fn maru_macos_app_session_quick_terminal_config(
     return @intFromEnum(Status.ok);
 }
 
-// 커맨드 카탈로그(메뉴바·커맨드 팝업이 그릴 액션 목록). config/액션에서 만들고, keybind 변경(GUI rebind/unbind 또는
-// config reload)마다 Zig가 rebuildCommandCatalog로 재빌드한다 — 더는 세션-불변이 아니다. Swift 메뉴바는 시작 시 한 번만
-// 읽으므로 reload 후엔 stale(재시작 전까지 — 메뉴 재빌드는 후속). Zig-side 커맨드 팔레트는 command_key_displays를 매
-// 빌드 라이브로 읽어 즉시 갱신된다. 배열·문자열 전부 app session 소유(destroy까지 유효). 비어 있으면
-// out_ptr=null/out_count=0. global_hotkeys와 같은 패턴.
+// 커맨드 카탈로그(메뉴바·커맨드 팝업이 그릴 액션 목록). config/액션에서 만들고, keybind 변경(GUI rebind/unbind·config
+// reload·reset)마다 Zig가 rebuildCommandCatalog로 재빌드한다 — 더는 세션-불변이 아니다. 재빌드 시 command_catalog_dirty를
+// 세우고 Swift가 tick마다 take_command_catalog_dirty(v85)로 drain해 buildMainMenu로 메뉴바 keyEquivalent를 다시 깐다(reset은
+// 모달-확정 후 tick에서 갱신). Zig-side 커맨드 팔레트는 command_key_displays를 매 빌드 라이브로 읽어 즉시 갱신된다. 배열·
+// 문자열 전부 app session 소유(destroy까지 유효). 비어 있으면 out_ptr=null/out_count=0. global_hotkeys와 같은 패턴.
 pub export fn maru_macos_app_session_command_catalog(
     session: ?*AppSession,
     out_ptr: ?*?[*]const session_mod.CommandEntry,
@@ -949,6 +949,15 @@ pub export fn maru_macos_app_session_metal_frame(
 pub export fn maru_macos_app_session_take_global_hotkeys_dirty(session: ?*AppSession) u32 {
     const app_session = session orelse return 0;
     return if (app_session.takeGlobalHotkeysDirty()) 1 else 0;
+}
+
+// 커맨드 카탈로그가 런타임에 재빌드돼(keybind rebind/unbind·reload·reset → rebuildCommandCatalog) 메뉴바 재빌드가
+// 필요하면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면 buildMainMenu로 NSMenu keyEquivalent를 새 카탈로그로
+// 다시 깐다. reset은 확인 모달 확정 후 다음 tick에 갱신되므로 동기 호출이 아니라 이 신호가 단일 경로다(인앱 rebind·멀티창
+// 활성 세션도 같이 커버). take_global_hotkeys_dirty와 같은 1회성 신호. session null=0. (v85)
+pub export fn maru_macos_app_session_take_command_catalog_dirty(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeCommandCatalogDirty()) 1 else 0;
 }
 
 fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {

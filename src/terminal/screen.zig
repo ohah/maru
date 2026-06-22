@@ -156,7 +156,7 @@ pub fn writeTab(self: *TerminalCore) void {
     self.cursor.col = next;
     // 커서는 draw-time 오버레이라 이동 시 옛/새 칸을 모두 dirty로 마킹해야 한다 — markCursorMoveDirty 계약(\r·BS·CBT 등
     // 이 함수를 거치는 모든 이동)에 TAB도 포함시켜, 옛 칸의 커서 잔상이 안 남게 한다(cursorBackTab과 동일).
-    self.markCursorMoveDirty(old_cursor, self.cursor); // markCursorMoveDirty는 core 잔류(9/N에서 screen.zig로)
+    markCursorMoveDirty(self, old_cursor, self.cursor); // 같은 파일(dirty 추적도 screen.zig)
 }
 
 /// CBT(CSI Ps Z): 역방향으로 Ps개 탭스톱 이동. 0번째 칸을 넘지 않는다.
@@ -171,7 +171,7 @@ pub fn cursorBackTab(self: *TerminalCore, count: u16) void {
         while (prev > 0 and !isTabstop(self, prev)) prev -= 1; // 이전 탭스톱(없으면 col 0)으로
         self.cursor.col = prev;
     }
-    self.markCursorMoveDirty(old_cursor, self.cursor);
+    markCursorMoveDirty(self, old_cursor, self.cursor);
 }
 
 /// TBC(CSI Ps g): Ps=0(기본) 커서 열 탭스톱 제거, Ps=3 전체 제거. 그 외 Ps는 무시.
@@ -183,4 +183,45 @@ pub fn clearTabstop(self: *TerminalCore, mode: u16) void {
         3 => @memset(self.tabstops, false),
         else => {},
     }
+}
+
+// ── dirty 영역 추적 ──────────────────────────────────────────────────────────────────────────────
+// 렌더러가 다시 그릴 행 범위(DirtyRegion). 셀/커서가 바뀐 행을 마킹하고 렌더가 takeDirty로 소비한다(takeDirty/
+// clearDirty 소비 API는 core 잔류). 거의 모든 활성 화면 연산이 부르는 헬퍼라 먼저 옮겨 안정화한다(9/N).
+
+pub fn markDirty(self: *TerminalCore, row: u16) void {
+    if (self.dirty) |*dirty| {
+        if (row < dirty.start_row) dirty.start_row = row;
+        if (row > dirty.end_row) dirty.end_row = row;
+        return;
+    }
+
+    self.dirty = .{ .start_row = row, .end_row = row };
+}
+
+pub fn markCursorMoveDirty(self: *TerminalCore, old_cursor: types.Cursor, new_cursor: types.Cursor) void {
+    // 명시적 커서 이동(CR/LF/backspace/CUP/CHA/VPA/CUU..CUB 등 이 함수를 거치는 모든 이동)은
+    // deferred autowrap을 무효화한다. putCell의 cursor 전진은 이 함수를 거치지 않으므로
+    // pending_wrap을 직접 관리한다. 위치가 안 바뀌는 이동(아래 early-return)도 wrap 의도는
+    // 취소되므로 early-return 전에 끈다.
+    self.pending_wrap = false;
+    // Cursor is drawn as an overlay, not as part of the cell glyph bitmap.
+    // Moving it still changes pixels: the old cursor cell must be erased
+    // and the new cursor cell must be drawn. Keeping that dirty decision in
+    // TerminalCore prevents a future renderer from guessing dirty rows by
+    // comparing snapshots on its own.
+    if (old_cursor.row == new_cursor.row and
+        old_cursor.col == new_cursor.col and
+        old_cursor.visible == new_cursor.visible)
+    {
+        return;
+    }
+
+    if (old_cursor.visible) markCursorRowDirty(self, old_cursor.row);
+    if (new_cursor.visible) markCursorRowDirty(self, new_cursor.row);
+}
+
+fn markCursorRowDirty(self: *TerminalCore, row: u16) void {
+    if (self.size.rows == 0) return;
+    markDirty(self, @min(row, self.size.rows - 1));
 }

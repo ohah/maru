@@ -2560,7 +2560,7 @@ pub const TerminalCore = struct {
             'E' => {
                 const old_cursor = self.cursor;
                 self.cursor.col = 0;
-                self.markCursorMoveDirty(old_cursor, self.cursor);
+                screen.markCursorMoveDirty(self, old_cursor, self.cursor);
                 self.lineFeed();
                 self.parser = .ground;
             },
@@ -2803,7 +2803,7 @@ pub const TerminalCore = struct {
                 6 => self.setOriginMode(set), // DECOM: CUP/HVP origin을 scroll region 상단으로 + 커서 home
                 25 => { // DECTCEM: 커서 표시/숨김. 커서 행만 다시 그리면 된다.
                     self.cursor_visible = set;
-                    self.markDirty(self.cursor.row);
+                    screen.markDirty(self, self.cursor.row);
                 },
                 1007 => self.alternate_scroll = set, // alt screen 휠 -> 화살표 변환 on/off
                 2004 => self.bracketed_paste = set, // bracketed paste(붙여넣기 감싸기)
@@ -2857,7 +2857,7 @@ pub const TerminalCore = struct {
         self.cursor = .{};
         self.pending_wrap = false;
         self.last_print = null;
-        self.markCursorMoveDirty(old_cursor, self.cursor);
+        screen.markCursorMoveDirty(self, old_cursor, self.cursor);
         self.dirty = fullDirty(self.size);
     }
 
@@ -2941,7 +2941,7 @@ pub const TerminalCore = struct {
             .col = @min(slot.cursor.col, self.size.cols - 1),
         };
         self.pen = slot.pen;
-        self.markCursorMoveDirty(old_cursor, self.cursor);
+        screen.markCursorMoveDirty(self, old_cursor, self.cursor);
         // markCursorMoveDirty가 deferred autowrap을 무효화(pending_wrap=false)하므로, 저장된 pending_wrap은
         // 그 '뒤'에 복원한다 — 줄 끝 deferred-wrap 상태에서 저장→복원하면 복원이 즉시 덮어써지던 버그
         // (DECSC/DECRC·CSI s/u가 공유하는 restoreFromSlot, code review).
@@ -3060,7 +3060,7 @@ pub const TerminalCore = struct {
             },
             else => return,
         }
-        self.markDirty(self.cursor.row); // 모양이 바뀐 커서 칸을 다시 그린다
+        screen.markDirty(self, self.cursor.row); // 모양이 바뀐 커서 칸을 다시 그린다
     }
 
     /// DSR(CSI Ps n): 호스트의 상태 질의에 응답한다. 응답은 response 버퍼에 쌓이고 app이 PTY로 되쓴다.
@@ -3258,7 +3258,7 @@ pub const TerminalCore = struct {
         const col = self.csiParam(1, 1);
         self.cursor.row = self.resolveRow(row); // DECOM이면 scroll region 상단 기준 + region 안 clamp
         self.cursor.col = @intCast(@min(@as(u32, col) - 1, @as(u32, self.size.cols) - 1));
-        self.markCursorMoveDirty(old, self.cursor);
+        screen.markCursorMoveDirty(self, old, self.cursor);
         self.last_print = null;
     }
 
@@ -3269,7 +3269,7 @@ pub const TerminalCore = struct {
         const old = self.cursor;
         self.cursor = .{ .row = if (on) self.scroll_top else 0, .col = 0 };
         self.pending_wrap = false;
-        self.markCursorMoveDirty(old, self.cursor);
+        screen.markCursorMoveDirty(self, old, self.cursor);
         self.last_print = null;
     }
 
@@ -3292,7 +3292,7 @@ pub const TerminalCore = struct {
             const max_row = self.size.rows - 1;
             self.cursor.row = @intCast(@min(@as(u32, self.cursor.row) + amount, max_row));
         }
-        self.markCursorMoveDirty(old, self.cursor);
+        screen.markCursorMoveDirty(self, old, self.cursor);
         self.last_print = null;
     }
 
@@ -3305,7 +3305,7 @@ pub const TerminalCore = struct {
         } else {
             self.cursor.col -|= amount;
         }
-        self.markCursorMoveDirty(old, self.cursor);
+        screen.markCursorMoveDirty(self, old, self.cursor);
         self.last_print = null;
     }
 
@@ -3313,7 +3313,7 @@ pub const TerminalCore = struct {
         if (self.size.cols == 0) return;
         const old = self.cursor;
         self.cursor.col = @intCast(@min(@as(u32, col) - 1, @as(u32, self.size.cols) - 1));
-        self.markCursorMoveDirty(old, self.cursor);
+        screen.markCursorMoveDirty(self, old, self.cursor);
         self.last_print = null;
     }
 
@@ -3322,7 +3322,7 @@ pub const TerminalCore = struct {
         const old = self.cursor;
         // VPA(CSI Ps d)도 CUP/HVP처럼 DECOM origin 영향을 받는다(xterm/Ghostty 공통 — setCursorPos 단일 경로).
         self.cursor.row = self.resolveRow(row);
-        self.markCursorMoveDirty(old, self.cursor);
+        screen.markCursorMoveDirty(self, old, self.cursor);
         self.last_print = null;
     }
 
@@ -3362,7 +3362,7 @@ pub const TerminalCore = struct {
         // (시작~커서)은 오른쪽 끝이 멀쩡해 줄이 여전히 다음 행으로 이어질 수 있으므로 wrapped를 끄지
         // 않는다 — 안 그러면 reflow가 한 논리 줄을 둘로 쪼갠다.
         if (mode != 1) self.wrapped[row] = false;
-        self.markDirty(row);
+        screen.markDirty(self, row);
         // 모든 EL 모드는 deferred autowrap을 무효화한다(xterm/Ghostty 동작). 안 끄면 마지막 칸
         // 출력(pending) 후 EL+글자 시퀀스가 한 줄 일찍 wrap돼 상대 커서 이동이 어긋난다.
         self.pending_wrap = false;
@@ -3385,7 +3385,7 @@ pub const TerminalCore = struct {
             self.cells[self.index(row, col)] = .{ .style = self.pen };
         }
         self.repairWideGlyphEdges(row, start, end);
-        self.markDirty(row);
+        screen.markDirty(self, row);
         // ECH는 부분 erase라 soft-wrap flag를 끄지 않는다(EL mode 1과 같은 결 — 줄 끝이 남아 다음 행으로
         // 이어질 수 있다). deferred autowrap만 무효화(다른 erase op과 동일).
         self.pending_wrap = false;
@@ -3417,7 +3417,7 @@ pub const TerminalCore = struct {
         // continuation이 줄 밖으로 나간 wide base를 비운다.
         self.repairWideGlyphEdges(row, start, cols);
         if (self.cells[self.index(row, cols - 1)].width == 2) self.cells[self.index(row, cols - 1)] = blank;
-        self.markDirty(row);
+        screen.markDirty(self, row);
         self.pending_wrap = false;
         self.last_print = null;
     }
@@ -3442,7 +3442,7 @@ pub const TerminalCore = struct {
         // 왼쪽 경계에서 쪼개진 wide(start-1 base)를 복구하고, 당겨와서 base를 잃은 continuation을 비운다.
         self.repairWideGlyphEdges(row, start, cols);
         if (self.cells[self.index(row, start)].continuation) self.cells[self.index(row, start)] = blank;
-        self.markDirty(row);
+        screen.markDirty(self, row);
         self.pending_wrap = false;
         self.last_print = null;
     }
@@ -3472,8 +3472,8 @@ pub const TerminalCore = struct {
                 self.repairWideGlyphEdges(self.cursor.row, 0, @min(self.cursor.col + 1, self.size.cols));
                 // dirty를 덮어쓰지 않고 markDirty로 병합한다 — 같은 write()에서 앞서 dirty된 행
                 // (예: 방금 출력한 아래쪽 행)을 잃어 렌더가 stale glyph를 남기지 않게 한다.
-                self.markDirty(0);
-                self.markDirty(self.cursor.row);
+                screen.markDirty(self, 0);
+                screen.markDirty(self, self.cursor.row);
             },
             // 0(기본): 커서 ~ 화면 끝까지.
             else => {
@@ -3482,8 +3482,8 @@ pub const TerminalCore = struct {
                 while (i < self.cells.len) : (i += 1) self.cells[i] = blank;
                 for (self.cursor.row..self.size.rows) |r| self.wrapped[r] = false;
                 self.repairWideGlyphEdges(self.cursor.row, self.cursor.col, self.size.cols);
-                self.markDirty(self.cursor.row);
-                self.markDirty(self.size.rows - 1);
+                screen.markDirty(self, self.cursor.row);
+                screen.markDirty(self, self.size.rows - 1);
             },
         }
         self.last_print = null;
@@ -4083,7 +4083,7 @@ pub const TerminalCore = struct {
             '\r' => {
                 const old_cursor = self.cursor;
                 self.cursor.col = 0;
-                self.markCursorMoveDirty(old_cursor, self.cursor);
+                screen.markCursorMoveDirty(self, old_cursor, self.cursor);
                 self.last_print = null;
             },
             '\n' => {
@@ -4104,7 +4104,7 @@ pub const TerminalCore = struct {
                 // clearCellForWrite가 base/continuation을 정리하므로 안전하다.
                 const old_cursor = self.cursor;
                 if (self.cursor.col > 0) self.cursor.col -= 1;
-                self.markCursorMoveDirty(old_cursor, self.cursor);
+                screen.markCursorMoveDirty(self, old_cursor, self.cursor);
                 self.last_print = null;
             },
             else => {
@@ -4296,7 +4296,7 @@ pub const TerminalCore = struct {
         }
         self.last_print = .{ .row = row, .col = col };
         self.last_printed_cp = codepoint; // G5 REP: 직전 출력 글자 추적
-        self.markDirty(self.cursor.row);
+        screen.markDirty(self, self.cursor.row);
 
         if (self.cursor.col + cell_width < self.size.cols) {
             self.cursor.col += cell_width;
@@ -4355,7 +4355,7 @@ pub const TerminalCore = struct {
         if (last.col + 1 >= self.size.cols) {
             const base = self.cells[base_idx];
             self.cells[base_idx] = .{}; // 이전 줄 마지막 칸은 빈칸으로
-            self.markDirty(last.row);
+            screen.markDirty(self, last.row);
             self.cursor.col = 0;
             self.lineFeed();
             const row = self.cursor.row;
@@ -4368,7 +4368,7 @@ pub const TerminalCore = struct {
             self.cells[self.index(row, 0)].width = 2;
             self.cells[self.index(row, 1)] = wideContinuationCell(base.style, base.link);
             self.last_print = .{ .row = row, .col = 0 };
-            self.markDirty(row);
+            screen.markDirty(self, row);
             if (2 < self.size.cols) {
                 self.cursor.col = 2;
                 self.pending_wrap = false;
@@ -4381,7 +4381,7 @@ pub const TerminalCore = struct {
 
         self.cells[base_idx].width = 2;
         self.cells[self.index(last.row, last.col + 1)] = wideContinuationCell(self.cells[base_idx].style, self.cells[base_idx].link);
-        self.markDirty(last.row);
+        screen.markDirty(self, last.row);
         // 커서가 base 바로 뒤(width-1 전진 위치)면 2칸짜리로 한 칸 더 민다.
         if (self.cursor.row == last.row and self.cursor.col == last.col + 1) {
             if (last.col + 2 < self.size.cols) {
@@ -4404,7 +4404,7 @@ pub const TerminalCore = struct {
         // nothing to attach to and is dropped.
         const last = self.last_print orelse return;
         self.cells[self.index(last.row, last.col)].combining = codepoint;
-        self.markDirty(last.row);
+        screen.markDirty(self, last.row);
     }
 
     fn clearCellForWrite(self: *TerminalCore, row: u16, col: u16) void {
@@ -4442,7 +4442,7 @@ pub const TerminalCore = struct {
         if (self.cursor.row + 1 < self.size.rows) {
             const old_cursor = self.cursor;
             self.cursor.row += 1;
-            self.markCursorMoveDirty(old_cursor, self.cursor);
+            screen.markCursorMoveDirty(self, old_cursor, self.cursor);
             // OSC 133 영역이 활성이면(프롬프트/입력/출력) 다음 행에 전파한다 — 여러 줄 프롬프트·출력이
             // 전부 같은 분류로 태깅된다. unknown 상태에선 기존 태그를 지우지 않는다(분류 보존).
             if (self.semantic_state != .unknown) self.prompt_marks[self.cursor.row] = .{ .kind = self.semantic_state };
@@ -4461,7 +4461,7 @@ pub const TerminalCore = struct {
         if (self.cursor.row > 0) {
             const old_cursor = self.cursor;
             self.cursor.row -= 1;
-            self.markCursorMoveDirty(old_cursor, self.cursor);
+            screen.markCursorMoveDirty(self, old_cursor, self.cursor);
         }
     }
 
@@ -4616,45 +4616,7 @@ pub const TerminalCore = struct {
         // DECSTBM 후 커서를 origin home으로 — DECOM이면 region 상단, 아니면 화면 좌상단(xterm 동작).
         self.cursor = .{ .row = if (self.origin_mode) self.scroll_top else 0, .col = 0 };
         self.pending_wrap = false;
-        self.markCursorMoveDirty(old_cursor, self.cursor);
-    }
-
-    fn markDirty(self: *TerminalCore, row: u16) void {
-        if (self.dirty) |*dirty| {
-            if (row < dirty.start_row) dirty.start_row = row;
-            if (row > dirty.end_row) dirty.end_row = row;
-            return;
-        }
-
-        self.dirty = .{ .start_row = row, .end_row = row };
-    }
-
-    /// screen.writeTab/cursorBackTab(8/N)이 cross-file 호출 — pub. 9/N에서 dirty 추적과 함께 screen.zig로 이동 예정.
-    pub fn markCursorMoveDirty(self: *TerminalCore, old_cursor: types.Cursor, new_cursor: types.Cursor) void {
-        // 명시적 커서 이동(CR/LF/backspace/CUP/CHA/VPA/CUU..CUB 등 이 함수를 거치는 모든 이동)은
-        // deferred autowrap을 무효화한다. putCell의 cursor 전진은 이 함수를 거치지 않으므로
-        // pending_wrap을 직접 관리한다. 위치가 안 바뀌는 이동(아래 early-return)도 wrap 의도는
-        // 취소되므로 early-return 전에 끈다.
-        self.pending_wrap = false;
-        // Cursor is drawn as an overlay, not as part of the cell glyph bitmap.
-        // Moving it still changes pixels: the old cursor cell must be erased
-        // and the new cursor cell must be drawn. Keeping that dirty decision in
-        // TerminalCore prevents a future renderer from guessing dirty rows by
-        // comparing snapshots on its own.
-        if (old_cursor.row == new_cursor.row and
-            old_cursor.col == new_cursor.col and
-            old_cursor.visible == new_cursor.visible)
-        {
-            return;
-        }
-
-        if (old_cursor.visible) self.markCursorRowDirty(old_cursor.row);
-        if (new_cursor.visible) self.markCursorRowDirty(new_cursor.row);
-    }
-
-    fn markCursorRowDirty(self: *TerminalCore, row: u16) void {
-        if (self.size.rows == 0) return;
-        self.markDirty(@min(row, self.size.rows - 1));
+        screen.markCursorMoveDirty(self, old_cursor, self.cursor);
     }
 
     fn index(self: *const TerminalCore, row: usize, col: usize) usize {

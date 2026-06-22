@@ -4921,6 +4921,9 @@ pub const TerminalCore = struct {
         // 않는다. xterm.js(InputHandler.tab)·Ghostty(horizontalTab)도 커서만 이동한다 — putCell(' ')로 공백을
         // 찍으면 CR 후 탭 redraw에서 기존 글자가 지워진다. 탭은 wrap하지 않으므로 pending_wrap도 끈다.
         self.pending_wrap = false;
+        // TAB은 grapheme run을 끊는다 — CR/LF/BS와 동일하게 last_print를 비워, 탭 뒤의 combining mark(또는 skin-tone·
+        // RI 페어링)가 탭 이전 글자에 잘못 붙지 않게 한다. 이동 여부와 무관하게(이미 마지막 칸이어도) 컨트롤 처리 = run 종료다.
+        self.last_print = null;
         if (self.size.cols == 0) return;
         const last = self.size.cols - 1;
         if (self.cursor.col >= last) return; // 이미 마지막 칸 — 이동 없음
@@ -4936,6 +4939,7 @@ pub const TerminalCore = struct {
     /// CBT(CSI Ps Z): 역방향으로 Ps개 탭스톱 이동. 0번째 칸을 넘지 않는다.
     fn cursorBackTab(self: *TerminalCore, count: u16) void {
         self.pending_wrap = false;
+        self.last_print = null; // CBT도 커서 이동 — grapheme run을 끊는다(HT/CR/LF/BS와 동일).
         const old_cursor = self.cursor;
         var remaining = @max(count, 1);
         while (remaining > 0) : (remaining -= 1) {
@@ -5833,6 +5837,19 @@ test "terminal core marks the TAB cursor move dirty (HT cursor overlay redraw)" 
     try std.testing.expectEqual(@as(u16, 0), tab_dirty.start_row);
     try std.testing.expectEqual(@as(u16, 0), tab_dirty.end_row);
     try std.testing.expectEqual(@as(u16, 8), core.snapshot().cursor.col);
+}
+
+test "terminal core: TAB breaks the grapheme run so a following combining mark is dropped" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 2 });
+    defer core.deinit();
+
+    // Print 'a', HT to the next tab stop, then a combining acute accent (U+0301). The tab clears
+    // last_print (the grapheme-continuation anchor), so the mark has no base on the current run and
+    // is dropped — it must NOT attach to the already-committed 'a' at col 0. This mirrors CR/LF/BS,
+    // which all clear last_print. Before the fix the mark wrongly mutated cells[0].combining.
+    try core.write("a\t\u{0301}");
+
+    try std.testing.expect(core.cells[0].combining == null);
 }
 
 test "terminal core marks old and new cursor rows dirty across line feed" {

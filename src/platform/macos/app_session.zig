@@ -950,6 +950,20 @@ fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
     return a.?.pane == b.?.pane and a.?.tab == b.?.tab;
 }
 
+/// orderedRemove(removed_index)로 한 항목을 뺀 뒤, active 인덱스가 같은 논리적 항목을 계속 가리키도록 보정한다.
+/// orderedRemove는 removed_index 뒤 항목을 한 칸씩 당기므로, active가 removed_index보다 뒤였으면 한 칸 당기고,
+/// 그래도 범위를 벗어나면 마지막으로 clamp한다. new_len은 제거 후 길이(>0이어야 한다 — 0이면 호출자가 collapse/close로
+/// 처리하고 이 함수를 호출하지 않는다). 임의 인덱스 제거(배경 형제 reap·드래그 이동·pane 분리)가 활성 선택을 엉뚱한
+/// 항목으로 튀게 하던 버그의 단일 출처 수정 — Pane.active_term(closeTermAt·moveTermToNewSplit·moveTermToPane)과
+/// Tab.active_pane(detachPaneFromTab)이 공유한다. (closeActiveTerm·closeActivePane은 removed==active라 이 보정이
+/// 불필요하다 — 그 자리로 당겨 온 다음 항목을 그대로 활성으로 둔다.)
+fn activeIndexAfterRemoval(active: usize, removed_index: usize, new_len: usize) usize {
+    var a = active;
+    if (removed_index < a) a -= 1; // 닫힌 항목이 활성보다 앞 → 활성이 한 칸 당겨졌다
+    if (a >= new_len) a = new_len - 1; // 활성이 마지막이었고 그 뒤가 닫힘 → 마지막으로 clamp
+    return a;
+}
+
 pub const AppSession = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -2381,7 +2395,8 @@ pub const AppSession = struct {
         const term = src.terms.orderedRemove(src_idx);
         new_pane.terms.appendAssumeCapacity(term);
         new_pane.active_term = 0;
-        src.active_term = if (src.terms.items.len == 0) 0 else @min(src.active_term, src.terms.items.len - 1);
+        // src에서 임의 위치(src_idx)를 뺐으니 활성 인덱스를 시프트 보정한다(단일 출처) — 비면(아래 collapse) 0 무의미.
+        src.active_term = if (src.terms.items.len == 0) 0 else activeIndexAfterRemoval(src.active_term, src_idx, src.terms.items.len);
         self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
         if (src.terms.items.len == 0) self.collapsePaneIn(tab, src); // src가 비면 collapse(removeLeaf)
         // 4) 새 pane으로 포커스 + 대표 surface 재바인딩 + 전 panel을 새 leaf rect grid로 resize + 좌표 재계산.
@@ -2516,7 +2531,8 @@ pub const AppSession = struct {
             src.terms.insert(self.allocator, @min(src_idx, src.terms.items.len), term) catch {}; // 원복
             return;
         };
-        src.active_term = if (src.terms.items.len == 0) 0 else @min(src.active_term, src.terms.items.len - 1);
+        // src에서 임의 위치(src_idx)를 뺐으니 활성 인덱스를 시프트 보정한다(단일 출처) — 비면(아래 collapse) 0 무의미.
+        src.active_term = if (src.terms.items.len == 0) 0 else activeIndexAfterRemoval(src.active_term, src_idx, src.terms.items.len);
         dst.active_term = idx; // 옮긴 Term을 dst의 활성으로
 
         self.hovered_tab = null; // 트리/탭이 바뀌니 stale 호버 비움
@@ -2553,13 +2569,17 @@ pub const AppSession = struct {
         const freed_split = PaneTree.removeLeaf(&tab.tree, pane) orelse return false;
         self.invalidateForFreedSplit(freed_split);
         self.allocator.destroy(freed_split);
+        var removed_index: usize = tab.panes.items.len; // 미발견 sentinel(>= 모든 활성 인덱스 → 보정 no-op)
         for (tab.panes.items, 0..) |p, i| {
             if (p == pane) {
+                removed_index = i;
                 _ = tab.panes.orderedRemove(i);
                 break;
             }
         }
-        if (tab.active_pane >= tab.panes.items.len) tab.active_pane = tab.panes.items.len - 1;
+        // 임의 위치(removed_index)의 pane을 뺐으니 활성 인덱스를 시프트 보정한다(단일 출처) — 배경 pane collapse(reap
+        // 경로 closeTermAt→collapsePaneIn 포함) 시 활성 pane이 엉뚱한 pane으로 튀던 버그. len>1 가드 후라 제거 후 len>=1.
+        tab.active_pane = activeIndexAfterRemoval(tab.active_pane, removed_index, tab.panes.items.len);
         return true;
     }
 
@@ -2751,12 +2771,9 @@ pub const AppSession = struct {
         const term = pane.terms.orderedRemove(term_index);
         self.destroyTerm(term);
         if (pane.terms.items.len > 0) {
-            // orderedRemove가 term_index 뒤의 Term을 한 칸씩 당긴다. 활성 Term이 닫힌 Term보다 뒤에 있었으면
-            // active_term도 한 칸 당겨야 같은 Term을 계속 가리킨다 — 임의 인덱스 reap(배경 형제 셸 종료)에서
-            // 클램프만 하면 active_term이 엉뚱한 Term으로 튀던 버그. closeActiveTerm은 idx==active_term이라
-            // 클램프-only로 충분하지만, 여긴 종료된 임의 위치를 받으므로 시프트 보정이 필요하다.
-            if (term_index < pane.active_term) pane.active_term -= 1;
-            if (pane.active_term >= pane.terms.items.len) pane.active_term = pane.terms.items.len - 1;
+            // 임의 위치(종료된 Term)를 빼므로 활성 인덱스를 시프트 보정한다(단일 출처 activeIndexAfterRemoval) —
+            // 배경 형제 reap 시 활성이 엉뚱한 Term으로 튀던 버그.
+            pane.active_term = activeIndexAfterRemoval(pane.active_term, term_index, pane.terms.items.len);
             self.refreshAfterReap(tab_index);
         } else if (tab.panes.items.len > 1) {
             self.collapsePaneIn(tab, pane); // 빈 pane을 형제로 collapse(active_pane clamp 포함)
@@ -4617,8 +4634,11 @@ pub const AppSession = struct {
         self.reapplyAmbiguousWidth();
         self.reapplyEmojiWidth();
         self.rebuildSidebar() catch {};
-        // Reset to Defaults·in-place config 변경으로 keybind가 바뀌었을 수 있으니 커맨드 카탈로그(표시 chord)도 재빌드한다(reloadConfig와 미러).
-        self.rebuildCommandCatalog();
+        // 커맨드 카탈로그는 여기서 재빌드하지 않는다 — reapplyLoadedConfig를 부르는 경로(GUI 토글·슬라이더·색 선택·
+        // Reset to Defaults)는 keybindings/unbinds를 바꾸지 않는다(스키마 GUI 필드가 아니다). keybind를 실제로 바꾸는
+        // 경로만 카탈로그를 재빌드한다: rebind/unbindActionEntry(직접 호출)·reloadConfig(파일 재로드, 자체 호출).
+        // (Reset to Defaults가 keybind까지 비워야 하는지는 별도 결정 — 현재 reset은 loaded_config.config만 갈고
+        // keybindings는 보존하므로 카탈로그도 그대로가 맞다.)
         self.metal_dirty = true;
     }
 
@@ -5383,9 +5403,10 @@ pub const AppSession = struct {
         // 파일에서 새로 깔았으니 "사용자 지정" 명시 플래그를 해제 — 색이 어떤 프리셋과 일치하면 다시 잠금(derive 기준).
         self.theme_user_custom = false;
         self.metal_dirty = true;
-        // 파일 새 값이라 keybind도 바뀌었을 수 있다 — 커맨드 카탈로그(팔레트·메뉴바에 표시되는 chord 문자열)를 재빌드한다.
-        // 키 디스패치는 resolver를 매 이벤트마다 라이브로 읽어 이미 새 값이지만, 캐시된 표시 문자열(command_key_displays)은
-        // 재빌드해야 갱신된다 — rebind/unbindActionEntry가 keybind 변경마다 하던 것과 동일(모든 keybind 변경은 카탈로그 재빌드 동반).
+        // 파일 새 값이라 keybind도 바뀌었을 수 있다 — 커맨드 카탈로그를 재빌드해 Zig-side 커맨드 팔레트의 표시 chord를
+        // 갱신한다(buildPaletteRows가 command_key_displays를 라이브로 읽는다). 키 디스패치는 resolver를 매 이벤트마다
+        // 라이브로 읽어 이미 새 값이지만, 캐시된 표시 문자열은 재빌드해야 바뀐다(rebind/unbindActionEntry와 동일).
+        // (Swift 메뉴바 keyEquivalent는 시작 시 1회만 빌드돼 reload엔 stale — 재시작 전까진 안 바뀐다, 후속.)
         self.rebuildCommandCatalog();
         // 파일 새 값이라 전역 단축키도 다시 빌드해 라이브 OS 재등록(PR2 — 지금까지 reload가 global을 재반영 못 하던 버그도 같이 고침).
         self.rebuildGlobalHotkeys() catch {};
@@ -7905,11 +7926,17 @@ pub const AppSession = struct {
 
             const owned_display = try self.allocator.dupeZ(u8, display);
             errdefer self.allocator.free(owned_display);
-            try self.command_key_displays.append(self.allocator, owned_display);
             const owned_equiv = try self.allocator.dupeZ(u8, equiv);
             errdefer self.allocator.free(owned_equiv);
-            try self.command_key_equivalents.append(self.allocator, owned_equiv);
-            try self.command_entries.append(self.allocator, .{
+            // 세 리스트 capacity를 먼저 확보한 뒤 한꺼번에 무오류 append한다. append 중간에 OOM이 나면 이미 리스트에 든
+            // owned_display를 errdefer가 다시 free해 dangling/이중-free(다음 rebuild·deinit의 free 루프)가 되던 버그를
+            // 막는다 — capacity 확보 전(append 전)에만 errdefer가 발화하므로, 적재된 포인터는 errdefer가 건드리지 않는다.
+            try self.command_key_displays.ensureUnusedCapacity(self.allocator, 1);
+            try self.command_key_equivalents.ensureUnusedCapacity(self.allocator, 1);
+            try self.command_entries.ensureUnusedCapacity(self.allocator, 1);
+            self.command_key_displays.appendAssumeCapacity(owned_display);
+            self.command_key_equivalents.appendAssumeCapacity(owned_equiv);
+            self.command_entries.appendAssumeCapacity(.{
                 .action_key = entry.key.ptr,
                 .title = entry.title.ptr,
                 .key_display = owned_display.ptr,
@@ -16786,6 +16813,21 @@ test "PR5b regression: reaping a lower-indexed sibling keeps the middle-active T
     try std.testing.expectEqual(t1_id, session.activeSurface().id); // 대표 surface도 T1로 재바인딩
     try std.testing.expect(!session.ended_seen);
     _ = try session.tick();
+}
+
+// activeIndexAfterRemoval 단위 테스트: orderedRemove 후 활성 인덱스 시프트 보정의 단일 출처. closeTermAt·
+// moveTermToNewSplit·moveTermToPane(active_term)·detachPaneFromTab(active_pane)이 모두 이 함수를 거치므로, 여기서
+// 각 케이스를 고정하면 네 사이트의 "활성이 엉뚱한 항목으로 튀던" 버그 클래스를 한 번에 회귀 방지한다. 순수 함수라 OS 무관.
+test "activeIndexAfterRemoval: lower removal shifts active down, equal/last clamps" {
+    // 닫힌 항목이 활성보다 앞 → 활성이 한 칸 당겨져 같은 논리 항목을 유지.
+    try std.testing.expectEqual(@as(usize, 0), activeIndexAfterRemoval(1, 0, 2)); // [X,A]→remove0→A@0
+    try std.testing.expectEqual(@as(usize, 1), activeIndexAfterRemoval(2, 0, 2)); // [X,?,A]→remove0→A@1 (중간 활성 버그 케이스)
+    try std.testing.expectEqual(@as(usize, 0), activeIndexAfterRemoval(1, 0, 1)); // [X,A]→remove0→A@0
+    // 닫힌 항목이 활성보다 뒤 → 인덱스 불변.
+    try std.testing.expectEqual(@as(usize, 1), activeIndexAfterRemoval(1, 2, 3));
+    // removed==active(활성 자신을 reap) → 그 자리로 당겨 온 다음 항목, 마지막이었으면 직전으로 clamp(closeActiveTerm 의미).
+    try std.testing.expectEqual(@as(usize, 1), activeIndexAfterRemoval(1, 1, 2));
+    try std.testing.expectEqual(@as(usize, 1), activeIndexAfterRemoval(2, 2, 2));
 }
 
 // 닫기 확인 모달이 보류 중일 때 배경 Term이 자기 셸 종료로 reap되면 트리(인덱스·활성 선택)가 바뀌어 보류 표적이

@@ -640,7 +640,14 @@ pub fn appendKeybindUnbinds(allocator: std.mem.Allocator, original: []const u8, 
     for (chords) |chord| {
         var buf: [96]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "keybind = {s} = unbind", .{chord}) catch continue;
-        if (std.mem.indexOf(u8, out.items, line) != null) continue; // 이미 있음
+        // 중복 검사는 **줄 단위 정확 비교**(부분문자열 indexOf는 다른 chord 줄에 substring으로 걸려 거짓 스킵될 여지 — 리뷰 #840).
+        var exists = false;
+        var lit = std.mem.splitScalar(u8, out.items, '\n');
+        while (lit.next()) |ln| if (std.mem.eql(u8, std.mem.trim(u8, ln, &std.ascii.whitespace), line)) {
+            exists = true;
+            break;
+        };
+        if (exists) continue;
         if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append(allocator, '\n');
         try out.appendSlice(allocator, line);
         try out.append(allocator, '\n');

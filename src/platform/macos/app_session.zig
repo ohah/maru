@@ -6694,21 +6694,27 @@ pub const AppSession = struct {
             } else list.append(a, b) catch return;
         }
         if (found_user) self.loaded_config.keybindings = list.toOwnedSlice(a) catch return;
-        // ② **빌트인 chord**를 찾아 unbind(default_app_bindings). 사용자 chord만 빼면 빌트인이 되살아나므로 빌트인 chord를
-        // unbinds에 넣어(라이브) + `keybind = chord = unbind`로 영속(죽인다). 빌트인이 없으면 ①로 충분.
-        var builtin_chord: ?config_mod.KeyChord = null;
+        // ② **빌트인 chord 전부**를 찾아 unbind(default_app_bindings). 사용자 chord만 빼면 빌트인이 되살아나므로 빌트인 chord를
+        // unbinds에 넣어(라이브) + `keybind = chord = unbind`로 영속(죽인다). **한 액션에 빌트인 chord가 여럿일 수 있다**
+        // (next_tab/previous_tab/increase·decrease_font_size는 2개) — 하나만 죽이면 chordForAction이 남은 chord를 반환해
+        // 해제가 실패하므로 매칭되는 모든 chord를 unbind한다(리뷰 #840 — 다중-chord 결함). 이미 unbinds에 있으면 스킵(중복 누적 방지).
+        var ub: std.ArrayList(config_mod.KeyChord) = .empty;
+        ub.appendSlice(a, self.loaded_config.unbinds) catch return;
+        var added_any = false;
         for (config_mod.keybinding.default_app_bindings) |db| {
-            if (std.meta.eql(db.action, entry.action)) builtin_chord = db.chord;
-        }
-        if (builtin_chord) |bc| {
-            var ub: std.ArrayList(config_mod.KeyChord) = .empty;
-            ub.appendSlice(a, self.loaded_config.unbinds) catch return;
-            ub.append(a, bc) catch return;
-            self.loaded_config.unbinds = ub.toOwnedSlice(a) catch return;
+            if (!std.meta.eql(db.action, entry.action)) continue;
+            var dup = false;
+            for (ub.items) |u| if (u.eql(db.chord)) {
+                dup = true;
+                break;
+            };
+            if (dup) continue;
+            ub.append(a, db.chord) catch return;
+            added_any = true;
             var chord_buf: [command_catalog.max_chord_display_len]u8 = undefined;
-            const chord_str = a.dupe(u8, bc.toConfigString(&chord_buf)) catch return;
-            self.markKeybindUnbind(chord_str);
+            self.markKeybindUnbind(a.dupe(u8, db.chord.toConfigString(&chord_buf)) catch return);
         }
+        if (added_any) self.loaded_config.unbinds = ub.toOwnedSlice(a) catch return;
         self.rebuildCommandCatalog();
         // 펜딩 rebind 취소(unbind가 우선).
         var i: usize = 0;
@@ -14921,6 +14927,44 @@ test "settings keybind 충돌: 이미 다른 액션에 묶인 chord로 rebind �
     // rebind는 진행됨 — new_term이 Cmd+W로(사용자 바인딩 우선, last-wins).
     const chord = command_catalog.chordForAction(session.loaded_config.keyBindingResolver(), .new_term).?;
     try std.testing.expect((try config_mod.KeyChord.parse("Cmd+W")).eql(chord));
+}
+
+test "settings keybind unbind 다중-chord: 빌트인 chord가 2개인 액션도 모두 해제 (리뷰 #840)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var input_idx: usize = 0;
+    for (sections, 0..) |s, i| if (s.section == .input) {
+        input_idx = i;
+    };
+    session.chrome_host.settings.show();
+    session.chrome_host.settings.section = input_idx;
+    const cf = try session.currentSectionFields(scratch.allocator());
+    const ks = cf.keybindRowStart().?;
+    // next_tab은 빌트인 chord가 2개(⇧⌘] 와 ⇧⌘}) — 그 행을 찾아 Backspace.
+    var nt_sel: ?usize = null;
+    for (cf.keybind_entries, 0..) |e, i| if (std.mem.eql(u8, e.key, "next_tab")) {
+        nt_sel = ks + i;
+    };
+    session.chrome_host.settings.selected = nt_sel.?;
+    session.config_keybind_unbinds.clearRetainingCapacity();
+    session.deleteSelectedSettingRow();
+    // 두 빌트인 chord가 모두 죽어 next_tab이 **완전히** 미지정(하나만 죽이는 회귀면 첫 chord가 남아 non-null).
+    try std.testing.expect(command_catalog.chordForAction(session.loaded_config.keyBindingResolver(), .next_tab) == null);
+    try std.testing.expect(session.config_keybind_unbinds.items.len >= 2); // chord 2개 다 unbind 지시어 예약
 }
 
 test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 인덱스가 올바른 액션에 매핑 (CS-4-4 검색)" {

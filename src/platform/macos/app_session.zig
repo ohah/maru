@@ -1215,6 +1215,9 @@ pub const AppSession = struct {
     // follow-system을 끄면 이걸로 라이브 복귀한다(파일 write-back은 안 했으니 메모리 복원이 단일 경로). slice는
     // loaded_config.arena 소유라, reload/reset에서 arena를 갈 때 반드시 null로 비운다(dangling 방지). null=스냅샷 없음.
     theme_pre_follow: ?config_mod.theme.ThemeConfig = null,
+    // theme_pre_follow를 찍던 순간의 theme_user_custom("사용자 지정" 잠금해제 플래그). applyFollowSystemTheme가 프리셋을
+    // 덮으며 theme_user_custom=false로 강제하므로, follow를 끌 때 색만 복원하면 잠금 상태가 어긋난다(F2-9 리뷰 라운드2). 같이 복원.
+    theme_user_custom_pre_follow: bool = false,
     // 세로 사이드바에 그릴 탭 엔트리 셀(owned). rebuildSidebar가 탭 추가/전환/cell 메트릭 변경 때 다시
     // 채우고, metalFrame()이 이걸 가리키는 view를 사이드바 셀(origin 0 렌더)로 넘긴다. PR3b-1은 활성
     // 탭 하이라이트 밴드만 담고, PR3b-2가 탭 번호·제목 glyph를 더한다. 비싸지 않아(탭 수만큼) 변경
@@ -4223,7 +4226,17 @@ pub const AppSession = struct {
             if (std.mem.eql(u8, e.key, "theme.preset")) {
                 self.applyThemePreset(1);
             } else if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, 1)) {
-                self.reapplyLoadedConfig();
+                // follow-system이 켜져 있을 때 그 프리셋 선택(theme.preset-light/dark)을 바꾸면 라이브 색도 새 프리셋으로
+                // 다시 적용해야 한다 — reapplyLoadedConfig만으론 config.theme가 옛 프리셋 색이라 안 바뀐다(F2-9 리뷰 라운드2).
+                // 게이트를 열고(follow_applied_dark=null) applyFollowSystemTheme로 현재 외관 프리셋을 재해석한다. 그 외 enum은 일반 경로.
+                if (self.loaded_config.config.theme_follow_system and
+                    (std.mem.eql(u8, e.key, "theme.preset-dark") or std.mem.eql(u8, e.key, "theme.preset-light")))
+                {
+                    self.follow_applied_dark = null;
+                    self.applyFollowSystemTheme();
+                } else {
+                    self.reapplyLoadedConfig();
+                }
                 self.markConfigKeyDirty(e.key);
             }
             return;
@@ -5423,7 +5436,11 @@ pub const AppSession = struct {
             self.loaded_config.config.theme_preset_light;
         // 덮기 직전의 사용자(파일) 테마를 1회 스냅샷 — follow-system을 끄면 이걸로 복귀한다(F2-9). 이미 스냅샷이
         // 있으면(이전 시스템 외관에서 이미 덮음) 덮지 않는다 — 그래야 스냅샷이 프리셋이 아닌 원본 파일 값을 가리킨다.
-        if (self.theme_pre_follow == null) self.theme_pre_follow = self.loaded_config.config.theme;
+        // theme_user_custom("사용자 지정" 잠금해제)도 같이 스냅샷한다 — 아래서 false로 강제하므로 끌 때 복원해야 한다.
+        if (self.theme_pre_follow == null) {
+            self.theme_pre_follow = self.loaded_config.config.theme;
+            self.theme_user_custom_pre_follow = self.theme_user_custom;
+        }
         self.theme_user_custom = false;
         self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
         self.follow_applied_dark = self.system_is_dark;
@@ -5436,6 +5453,7 @@ pub const AppSession = struct {
     fn disableFollowSystemTheme(self: *AppSession) void {
         if (self.theme_pre_follow) |saved| {
             self.loaded_config.config.theme = saved;
+            self.theme_user_custom = self.theme_user_custom_pre_follow; // 색과 함께 잠금 상태도 복원(F2-9 리뷰 라운드2)
             self.theme_pre_follow = null;
         }
         self.follow_applied_dark = null; // follow 종료 — 다음에 다시 켜면 같은 외관이어도 재적용
@@ -11435,6 +11453,43 @@ test "follow-system 토글 ON 즉시 적용·OFF 사용자 테마 복귀 + 같�
     try std.testing.expectEqualStrings(user_bg, session.loaded_config.config.theme.background); // dracula 복귀
     try std.testing.expect(session.theme_pre_follow == null); // 스냅샷 소비됨
     try std.testing.expect(session.follow_applied_dark == null); // 외관 게이트 리셋
+}
+
+test "follow-system 중 preset-dark 변경은 라이브 재적용 + user_custom 잠금 복원 (F2-9 리뷰 라운드2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 사용자가 "사용자 지정"으로 색 잠금을 풀어둔 상태에서 follow-system을 켠다.
+    session.loaded_config.config.theme = config_mod.theme.presetColors(.dracula);
+    session.loaded_config.config.theme_preset_dark = .gruvbox_dark;
+    session.theme_user_custom = true; // 잠금 해제 상태
+    session.system_is_dark = true;
+    session.loaded_config.config.theme_follow_system = true;
+    session.applyFollowSystemTheme();
+    try std.testing.expectEqualStrings(config_mod.theme.presetColors(.gruvbox_dark).background, session.loaded_config.config.theme.background);
+    try std.testing.expectEqual(false, session.theme_user_custom); // 프리셋 적용 중엔 잠금
+
+    // follow-system 켜진 채 preset-dark를 dracula로 바꾸면(세팅 cycleEnum 경로) 라이브 색도 즉시 dracula여야 한다
+    // (버그: 게이트가 같은 외관이라 막아 옛 gruvbox 잔류). cycleEnum 분기가 하는 것: 게이트 열기 + applyFollowSystemTheme.
+    session.loaded_config.config.theme_preset_dark = .dracula;
+    session.follow_applied_dark = null;
+    session.applyFollowSystemTheme();
+    try std.testing.expectEqualStrings(config_mod.theme.presetColors(.dracula).background, session.loaded_config.config.theme.background); // 새 프리셋 라이브
+
+    // 끄면 색뿐 아니라 user_custom 잠금 상태(true)도 복원돼야 한다(버그: false 잔류로 잠김).
+    session.loaded_config.config.theme_follow_system = false;
+    session.disableFollowSystemTheme();
+    try std.testing.expectEqual(true, session.theme_user_custom); // 잠금 해제 복원
 }
 
 // wheelDeltaToLines 단위 테스트는 함수와 함께 src/session/input_math.zig로 이동.

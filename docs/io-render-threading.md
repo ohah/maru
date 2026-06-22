@@ -220,7 +220,7 @@ mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 
 ### 9.5 시퀀싱 (각 PR green, doc-first)
 
 - **P3-0 — 이 설계 + (a) 확정 + §9.7 측정/디버그** ✅(이 PR).
-- **P3-1 — CoreCommandQueue 프리미티브** ✅(`e77a82c`): `src/app/core_command.zig` + 단위 테스트 + `coreq.*` 디버그 스코프 + `core_command_apply` perf 벤치. P3-1에선 미배선 프리미티브로 추가(`PtyWriteQueue` 선례) — P3-2부터 `enqueueCoreCommand`로 배선된다.
+- **P3-1 — CoreCommandQueue 프리미티브** ✅(`e77a82c`): `src/app/core_command.zig` + 단위 테스트 + `coreq.*` 디버그 스코프 + `core_command_queue` perf 벤치. P3-1에선 미배선 프리미티브로 추가(`PtyWriteQueue` 선례) — P3-2부터 `enqueueCoreCommand`로 배선된다.
 - **P3-2 — IME `setPreedit` 위임** ✅(`85658ce`): 비민감 첫 사례 — `commitComposition`/`imeMarked`를 명령으로. 재진입 토양 1순위 제거.
 - **P3-3 — `reportFocus`·config 위임** ✅(`8e9581a`): `reportFocus`(드묾)·`setConfigPalette`/`max_scrollback`(reload 루프)·`setCellMetrics`(폰트 변경)를 `enqueueCoreCommand`로 위임. 응답 생성 명령은 reader가 PTY로 흘리고 non-interactive 폴백도 같게 흘린다. `report_mouse`/config 명령 변형 + `apply` 추가. createTerm 초기화·per-tick 렌더 metric은 §9.1대로 직접 유지. `reportMouse`는 P3-4(측정)로 이동.
 - **P3-4 — scroll·선택·`reportMouse` 위임(full (a))** ✅(`e147604`): read-modify-decide를 명령으로 원자화(`select_extend_or_collapse`·`scroll_and_extend`·`scroll_to_offset`)해 메인 코어 mutate 0 달성(§9.4 구현 결과). 모든 mouse 선택/scroll/reportMouse 사이트(클릭·드래그·휠·PageUp·find·스크롤바·hover)를 `enqueueCoreCommand`로. 예외(per-tick 렌더·createTerm init)는 §9.1 직접 유지. 검증: `core_command.apply` 단위(선택/scroll 변형)·macos-app-build·런타임 GUI는 수동.
@@ -237,7 +237,7 @@ mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 
 
 위임은 "보이지 않는 지연"을 만들 수 있으므로, 각 PR은 **관측 훅을 함께** 넣는다(추측 말고 측정 — §5 락-보유 측정과 같은 규율).
 
-- **perf 벤치(`tools/perf`)** — `core_command_apply`: 명령을 enqueue→reader가 drain·적용까지의 지연을 측정한다(헤드리스: reader-processing 루프에 명령 N건을 흘려 enqueue 시각과 적용 시각의 분포를 본다). P3-4의 scroll·선택은 이 수치로 (a) 유지 vs 국소 (b) 강등을 **데이터로** 판정한다. budget·게이트·리포트 포맷은 `render_build_drawlist` 선례(`maru.perf.v1`, 2s budget·머신 여유).
+- **perf 벤치(`tools/perf`)** — `core_command_queue`: 큐 1건의 라운드트립 비용(단일 스레드 `enqueueBlocking`→`pop`→`freeCommand`)을 측정한다 — reader 스레드도, 실제 apply도, 타임스탬프도 없는 큐 기계 비용 자체(위임 latency의 바닥)다. P3-4의 scroll·선택 위임이 이 큐 바닥 위에서 무시 가능한지를 확인한다. enqueue→apply 실측 지연(분포)은 MARU_DEBUG `coreq.apply` 로거(`src/app/pty_reader.zig`의 `logApply`)가 reader 적용 시점에 찍는다 — (a) 유지 vs 국소 (b) 강등은 그 로그로 **데이터로** 판정한다. budget·게이트·리포트 포맷은 `render_build_drawlist` 선례(`maru.perf.v1`, 2s budget·머신 여유).
 - **MARU_DEBUG `coreq.*` 스코프**(`diag.maruDebugEnabled` 게이트 + `input_diag` 식 scoped logger 선례): 켜면 명령 enqueue(종류·바이트 수), reader drain(배치 크기·큐 깊이), 적용 지연(enqueue→apply ms), backpressure 대기, close 시 폐기 건수를 로깅한다. 기본 off(미설정 시 분기 하나, no-alloc). 데드락/지연 회귀를 사람이 즉시 본다(#700식 hang 재발 시 큐 깊이·미적용 명령이 바로 드러남).
 - **결정성 단위 테스트**: §6 패턴(타이밍 비의존)으로 "명령이 reader 1턴 내 enqueue 순서대로 적용"·"backpressure 시 손실 0"·"close 시 미적용 명령 폐기"를 고정한다. 측정 훅 자체(지연 기록)는 release에서 `@sizeOf` 0이거나 debug-only로 hot path 비용 0을 유지한다.
 

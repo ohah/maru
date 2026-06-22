@@ -100,7 +100,7 @@ F1..F24
 
 정규화 규칙:
 
-- modifier 순서는 항상 `Ctrl`, `Alt`, `Shift`, `Cmd` 순서로 저장한다.
+- modifier 순서는 항상 `Cmd`, `Ctrl`, `Alt`, `Shift` 순서로 저장한다(`KeyChord.toConfigString`이 config 파일에 write-back하는 순서). 단 메뉴/표시 경로(`command_catalog.formatChord`)는 다른 시각 순서 `⌃⌥⇧⌘`(Ctrl, Option, Shift, Cmd)로 렌더한다 — 즉 config 파일 write-back 순서와 메뉴 표시 순서는 다르며, 여기서는 영속(persisted) config 파일 형식을 기술한다. parsing은 순서 무관이라 이는 동작이 아니라 저장 철자(canonical spelling) 계약이다.
 - key 이름은 대소문자를 구분하지 않고 canonical name으로 바꾼다.
 - `Command` 같은 alias는 초기에는 허용하지 않는다. alias가 필요하면 별도 PR에서 추가한다.
 - 같은 modifier를 두 번 쓰면 오류다.
@@ -112,7 +112,7 @@ F1..F24
 
 ```text
 Cmd+B          -> Cmd+B
-ctrl+cmd+,     -> Ctrl+Cmd+,
+ctrl+cmd+,     -> Cmd+Ctrl+,
 Shift+Alt+F13  -> Alt+Shift+F13
 Cmd+Cmd+B      -> 오류
 Command+B      -> 초기에는 오류

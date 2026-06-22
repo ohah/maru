@@ -91,7 +91,7 @@ v1에서 약속하지 않는 것:
   - **Braille(U+2800~28FF) 완료**(`renderer/braille_glyph.zig`). 한 셀에 2열×4행 8점, 코드포인트 **하위 8비트가 점 비트마스크**(점1~8)다. 켜진 점마다 둥근 점(거리 ≤ r, pitch의 ~0.38배라 분리)을 셀 하위 격자(열 ¼·¾, 행 ⅛·⅜·⅝·⅞)에 스냅해 찍는다. btop·plotille 류 TUI 그래프가 흐려지지 않고 정렬된다. U+2800(빈 패턴)은 빈 셀. 베이스 = Unicode Braille Patterns dot 번호.
   - **Legacy Computing 블록 모자이크 완료**(`renderer/legacy_mosaic_glyph.zig`). **sextant**(U+1FB00~1FB3B, 2열×3행 6칸)·**octant**(U+1CD00~1CDE5, 2열×4행 8칸) — 각 코드포인트의 하위 칸 패턴을 셀 하위 격자 사각형으로 채운다(Teletext·PETSCII식 그래픽, block quadrant를 더 잘게). sextant는 64패턴 중 이미 인코딩된 {0,21,42,63}(space·▌·▐·█)을 건너뛴 60개라 `pattern = idx + idx/20 + 1` 공식. octant는 256패턴 중 이미 인코딩된 26개(space·반칸·4분면·full)를 건너뛴 230개를 **마스크 오름차순**으로 배정(Unicode BLOCK OCTANT-* 순서가 그러함 확인) → skip 26개만 데이터로 두고 표는 comptime 생성.
   - **Legacy Computing edge wedge 완료**(`renderer/legacy_wedge_glyph.zig`). U+1FB68~1FB6F = 한 변을 밑변·셀 중앙을 꼭짓점으로 하는 삼각형(solid 4 🭬🭭🭮🭯 + 반전 4 🭨🭩🭪🭫), bowtie U+1FB9A/1FB9B = 두 wedge가 중앙에서 맞닿은 모래시계. point-in-triangle 채움(`glyph_pixels.fillTriangle`, invert로 반전). 대각 반쪽 **corner 삼각형**도 같은 모듈: solid ◢◣◤◥(U+25E2~25E5, Geometric Shapes)·50% 음영 🮜🮝🮞🮟(U+1FB9C~9F) — 셀 대각선으로 가른 반쪽을 `fillTriangleAlpha`로(음영=alpha 0x80).
-  - **Legacy Computing smooth mosaic 완료**(`renderer/legacy_smooth_glyph.zig`). U+1FB3C~1FB67 44개 — 셀 둘레 10정점(모서리 4 + 좌·우변 1/3·2/3 4 + 상·하변 중점 2) 중 글자별 부분집합을 둘레 순으로 이은 대각 폴리곤(block 모자이크의 빗변 버전). Unicode 형상에서 정점 집합(10비트 마스크)을 독립 디코더로 산출해 마스크 44개만 임베드(레퍼런스 패턴표 미복사), 채움은 공유 `glyph_pixels.fillPolygon`(scanline even-odd). corner-shade(1FB9C~9F, 50% alpha 삼각형)는 후속.
+  - **Legacy Computing smooth mosaic 완료**(`renderer/legacy_smooth_glyph.zig`). U+1FB3C~1FB67 44개 — 셀 둘레 10정점(모서리 4 + 좌·우변 1/3·2/3 4 + 상·하변 중점 2) 중 글자별 부분집합을 둘레 순으로 이은 대각 폴리곤(block 모자이크의 빗변 버전). Unicode 형상에서 정점 집합(10비트 마스크)을 독립 디코더로 산출해 마스크 44개만 임베드(레퍼런스 패턴표 미복사), 채움은 공유 `glyph_pixels.fillPolygon`(scanline even-odd).
   - **Legacy Computing 대각선 stroke 완료**(`renderer/legacy_diagonal_glyph.zig`). 코너 대각선 U+1FBA0~1FBAE(중앙선↔모서리중점 4선분 다이아몬드 변 조합 15개)·cell 대각선 U+1FBD0~1FBDF(셀 정렬점 사이 대각 선분 16개). 채움이 아니라 **light 두께 선분 stroke**(공유 `glyph_pixels.fillSegment`). 모든 끝점이 3×3 정렬 격자의 한 점이라 코너·cell이 점-쌍 선분으로 통일된다. 코드포인트↔선분 매핑은 Unicode 이름에서 유도. **대각 hatch** U+1FB98/99(🮘╲·🮙╱)도 같은 모듈: 평행 전셀 대각선을 stride(≈2t) 간격으로 stripe(선이 셀 밖으로 뻗고 fillSegment가 셀 안만 칠해 이웃 셀과 이어짐). **나머지**: Powerline-extra(U+E0C0~ 불꽃·고드름, PUA·Nerd Font 의존)만 후속.
   - **공유 프리미티브**(`renderer/glyph_pixels.zig`): 위 합성 모듈들이 슬롯 계약 검증(`slotFits`)·clear·setPixel(+alpha)·fillRect(교차 dedup 회계)·균일 alpha·코너 대각선·삼각형(invert·alpha 포함)·선분 stroke(`distSeg`/`fillSegment`)·폴리곤(scanline)을 단일 출처로 공유한다(Powerline·wedge·diagonal 등 중복·드리프트 제거).
   - **합성 글리프 cache_key**: 폰트 글리프(`font_id+glyph_id`)와 달리 **codepoint로 키잉**한다 — 네이티브 셰이퍼(`coretext_smoke.m`)가 폰트가 글리프를 제공해도(`glyph!=0`) `glyph_id=0`으로 정규화해 보내므로, 합성 글자는 `font_id=0`(합성 전용 공간)·`glyph_id=codepoint`로 모인다. 그래야 primary/fallback이 한 atlas 슬롯에 모이고(중복 슬롯 방지) 폰트 glyph_id와 안 겹친다(aliasing 방지).
@@ -105,11 +105,22 @@ v1에서 약속하지 않는 것:
 ```text
 font.family = "JetBrains Mono"
 font.size = 14
+font.size-step = 1.0
+font.line-height = 1.0
+font.letter-spacing = 0.0
+font.fallback = ""
+font.family-bold = ""
+font.family-italic = ""
 ```
 
 해석 규칙:
 
 - `family`는 사용자가 원하는 primary monospace family다.
+- `font.size-step`은 ⌘+/⌘-(폰트 키우기/줄이기)가 한 번에 바꾸는 크기 증분(pt)이다. 기본 1.0.
+- `font.line-height`는 행간 배수다(1.0=CoreText 자동 cell 높이 그대로). 기본 1.0.
+- `font.letter-spacing`은 자간(논리 pt, 음수 허용 — 칸 좁힘)이다. 기본 0.0.
+- `font.fallback`은 폴백 폰트 패밀리 목록(쉼표 구분)이다. primary `family`에 없는 글리프(한글·이모지·기호 등)를 그릴 때 이 목록을 앞에 두고 CoreText 자동 cascade(`kCTFontCascadeListAttribute`)를 뒤에 잇는다. 빈 값(기본)이면 CoreText 기본 cascade만 쓴다.
+- `font.family-bold`/`font.family-italic`은 bold(SGR 1)/italic(SGR 3) 글자에 쓸 별도 패밀리다. 빈 값(기본)이면 primary `family`의 bold/italic variant를 쓰고, variant가 없으면 regular로 대체한다(합성/faux 안 함).
 - raw `FontConfig`는 `ResolvedFontRequest`로 먼저 검증한다. 빈 family와 1px 미만 또는 512px 초과 font size는 renderer로 보내지 않는다.
 - family가 설치되어 있지 않으면 앱은 죽지 않고 system monospaced font로 fallback한다.
 - fallback이 발생하면 debug artifact와 structured log에 남긴다.
@@ -137,7 +148,7 @@ codepoint / grapheme
 - East Asian wide 문자는 2 cell.
 - combining mark는 이전 cell cluster에 붙인다.
 - grapheme cluster는 UAX#29 기준으로 분절하고, ZWJ 시퀀스·국기·skin-tone modifier는 하나의 cluster로 묶어 폭을 width policy로 정한다. 완전한 처리는 fixture로 확장한다.
-- ambiguous width(UAX#11 'A')는 기본 1 cell로 시작한다. 로케일/CJK 맥락에서 2 cell이 필요한 경우의 설정화는 구현 전에 다시 논의한다.
+- ambiguous width(UAX#11 'A')는 config 키 `text.ambiguous-width`로 정한다(값 `narrow`(기본)/`wide`). 기본 `narrow`는 1 cell(정렬 안전·Ghostty/xterm.js 호환), `wide`는 로케일/CJK 맥락에서 폰트가 전각으로 그리는 심볼(`width.isWideRenderSymbol` — Enclosed Alphanumerics U+2460~U+24FF)을 2 cell로 올린다(advance 2). box/block·PUA(Nerd Font)는 제외한다. live-reload로 즉시 반영된다.
 - unsupported/ambiguous width는 보수적으로 1 cell로 시작하고 fixture로 확장한다.
 - emoji는 표시 폭과 실제 glyph bounds가 다를 수 있으므로, cursor advance는 width policy를 따른다.
 
@@ -362,7 +373,10 @@ renderer가 붙은 뒤 다음 숫자를 성능 예산에 추가한다.
 
 - ligature를 v1 이후 어느 단계에서 다룰지.
 - emoji 품질 기준을 replacement 허용으로 둘지, color glyph 필수로 둘지.
-- ambiguous width(UAX#11 'A')를 1 cell 고정으로 둘지, 로케일/설정으로 2 cell을 허용할지.
-- 폰트에 bold/italic face가 없을 때 합성(faux bold/italic)할지, regular로 대체할지.
-- font config에 fallback family list를 노출할지.
 - user-installed font 파일 경로를 직접 지정하게 할지.
+
+다음은 결정·구현 완료다(이력 기록):
+
+- ambiguous width(UAX#11 'A'): config 키 `text.ambiguous-width`(`narrow`(기본)/`wide`)로 노출 완료. 기본 narrow(1 cell), wide opt-in으로 전각 심볼을 2 cell로(`width.cellWidthAmbiguous`/`isWideRenderSymbol`). 위 "Cell Width와 Font Metric" 참고.
+- 폰트에 bold/italic face가 없을 때: **regular로 대체**(합성/faux 안 함)로 결정. bold/italic 패밀리는 `font.family-bold`/`font.family-italic`로 따로 지정 가능.
+- font config의 fallback family list: `font.fallback`(쉼표 구분)으로 노출 완료 — primary 앞에 두고 CoreText cascade를 잇는다. 위 "FontConfig" 참고.

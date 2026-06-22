@@ -45,12 +45,11 @@
 
 현재 app shell에서 아직 하지 않는 것:
 
-- underline overlay 렌더(SGR 4의 밑줄 선 — hover 밑줄과 같은 부분-사각형 기법 재사용 가능)
 - plugin/Wasm
-- function key/keypad·CSI-u 인코딩(조합/확정·preedit 표시·레이아웃 독립 단축키·판정 상태 머신 Zig 이전·후보창 커서 위치 배치(ABI v22)·dead key는 완료; CSI-u/function key 인코딩이 잔여)
+- IME/입력 인코딩 중 일부(조합/확정·preedit 표시·레이아웃 독립 단축키·판정 상태 머신 Zig 이전·후보창 커서 위치 배치(ABI v22)·dead key는 완료; function key F1~F12·CSI-u/kitty·키패드 application 모드(DECKPAM) 인코딩도 완료 — 아래 "이미 구현된 것" 참조. 잔여는 F13+뿐(`input.zig functionKeySequence`가 표준 갈림을 이유로 거부, Ghostty도 todo))
 - full VT parser 잔여 갭(alternate screen·scroll region·mouse mode는 구현; DECOM·ICH/DCH·SS2/SS3·British charset 등 잔여는 implementation-plan.md G-시리즈가 단일 출처)
 
-이미 구현된 것(과거 이 목록에 있던 항목): 탭/분할 UI(세로 사이드바 탭·가로 탭 바·split 멀티 panel — 아래 "남은 한계" 단락 끝), workspace restore([workspace-restore.md] R1~R6, `captureWorkspaceWindow`/`restoreSpawn`), settings UI(`toggle_settings` ⌘, → schema-주도 세팅 모달, [config-gui.md])·runtime reload(ABI v56 `reloadConfig`), global shortcut(ABI v28 `GlobalHotkey` — 위 "C ABI 규칙" 참조).
+이미 구현된 것(과거 이 목록에 있던 항목): 탭/분할 UI(세로 사이드바 탭·가로 탭 바·split 멀티 panel — 아래 "남은 한계" 단락 끝), workspace restore([workspace-restore.md] R1~R6, `captureWorkspaceWindow`/`restoreSpawn`), settings UI(`toggle_settings` ⌘, → schema-주도 세팅 모달, [config-gui.md])·runtime reload(ABI v56 `reloadConfig`), global shortcut(ABI v28 `GlobalHotkey` — 위 "C ABI 규칙" 참조). SGR 4 밑줄 등 텍스트 장식선 overlay 렌더(`draw_list.zig`가 `cell.style.underline`에 `.underline` LineOverlay 방출 → `metal_frame.zig`가 reserved kind로 투영(밑줄=reserved 9) → `maru_metal_renderer.m`가 reserved==9를 셀 하단 가는 띠로 그림 — 커서·hover 밑줄과 같은 부분-사각형 기법 재사용). function key F1~F12(`input.zig encodeKey`의 `.function`→`functionKeySequence`, F1~F4 SS3·F5~F12 CSI `~`)와 CSI-u/kitty 인코딩(`encodeKitty`)도 구현 — Swift는 `app_host_abi.zig keyEventFromAbi`로 f1~f12·home/end 등을 `terminal.KeyEvent`로 매핑한다.
 
 ## C ABI 규칙
 
@@ -80,7 +79,7 @@
 - `mise run macos-app-host-swift-check`: Swift host가 C header를 import하고 AppKit 타입을 type-check할 수 있는지 확인한다.
 - `mise run macos-app-build`: Swift host executable을 만들고 Zig static ABI library를 링크한다.
 - `mise run macos-app-smoke`: 실제 `NSApplication` placeholder window를 잠깐 띄우고 controlled PTY command, scripted key events, scripted resize, app close가 Zig app session의 `FrameLoop`까지 도달했는지 summary에 `terminal_surface=true`, `frame_loop_ticks`, `output_events`, `exit_events`, `key_events`, `terminal_input_events`, `resize_events`, `close_events`, renderer frame 통계로 남긴다.
-- `mise run macos-app`: 같은 executable을 smoke timeout 없이 실행해 사용자가 window lifecycle을 수동 확인한다. 이때 Zig session은 interactive shell을 띄우지만 아직 Swift window에 terminal glyph를 그리지는 않는다.
+- `mise run macos-app`: 같은 executable을 smoke의 auto-quit timeout(`MARU_MACOS_APP_SMOKE_MS`) 없이 실행해 사용자가 window lifecycle을 수동 확인한다. smoke와 동일하게 Zig session의 shell glyph·커서를 Swift window에 그린다 — 차이는 자동 종료 타임아웃뿐이다(`drawMetalFrame`이 `frame.cells`를 무조건 그린다).
 - 기존 `mise run macos-app-pty-metal-smoke`: Objective-C smoke bridge가 PTY/output/keyDown/close/render 경계를 계속 검증한다.
 
 ## 남은 한계

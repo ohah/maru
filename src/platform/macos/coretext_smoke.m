@@ -836,6 +836,8 @@ void maru_macos_coretext_shape_draw_list(
 
         // 사용자 폴백 폰트(font.fallback)가 있으면 주 폰트에 cascade list로 박는다 — 이후 모든 CTLine(attributes의
         // kCTFontAttributeName이 이 폰트)이 주 폰트에 없는 글리프를 사용자 폴백→시스템 폴백 순으로 그린다(매 cell 변경 불요).
+        // 비용: cascade 폰트를 **shape 호출(출력/dirty 프레임)마다** 재구성한다 — 같은 family+fallback+size면 결과가
+        // 동일하므로 후속에서 (primary_font 생성과 함께) family+fallback+size 키로 캐시할 여지가 있다(code-review max F1-2 #1).
         if (fallback_families != NULL && fallback_families_len > 0) {
             CTFontRef with_cascade = maru_apply_cascade_list(
                 primary_font, fallback_families, fallback_families_len, requested_font_size);
@@ -881,6 +883,9 @@ void maru_macos_coretext_shape_draw_list(
             const bool want_bold = (cell.style_flags & MaruDrawCellBoldBit) != 0;
             if (want_bold && !bold_attempted) {
                 bold_attempted = true;
+                // bold variant는 (이미 위에서 font.fallback cascade가 박힌) primary_font에서 파생하므로 cascade list를
+                // **상속**한다 — bold cell의 한글·이모지도 사용자 폴백을 탄다. 이 순서(cascade 적용 → bold 파생)를
+                // 뒤집으면 bold 폴백이 조용히 사라지니 유지한다(code-review max F1-2).
                 bold_font = CTFontCreateCopyWithSymbolicTraits(
                     primary_font, 0.0, NULL, kCTFontTraitBold, kCTFontTraitBold);
                 if (bold_font != NULL) {

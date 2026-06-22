@@ -566,6 +566,36 @@ pub fn updateKeybindLines(allocator: std.mem.Allocator, original: []const u8, re
     return out.toOwnedSlice(allocator);
 }
 
+/// `keys`에 든 키의 **줄을 통째로 삭제**한다(env 변수 삭제 등 — override-only write-back의 "제거" 짝). updateConfigText는
+/// 줄을 갱신/추가만 하고 삭제는 안 하므로(주석·미파싱 키 보존 우선), 명시적 제거는 이 전용 패스로 한다. 비-주석 줄의
+/// `key`(첫 `=` 앞 trim)가 `keys` 중 하나와 같으면 그 줄을 출력에서 뺀다(같은 키 중복 줄도 전부 제거 — parse last-wins라
+/// 일부만 남기면 옛 값이 reload 시 부활). 주석·다른 줄은 보존. 반환은 owned(`allocator`). serializeConfig가 갱신 패스
+/// 뒤에 체이닝한다(삭제가 갱신보다 우선 — 같은 키를 갱신+삭제 둘 다면 결국 삭제).
+pub fn removeConfigLines(allocator: std.mem.Allocator, original: []const u8, keys: []const []const u8) LoadError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var it = std.mem.splitScalar(u8, original, '\n');
+    var first = true;
+    while (it.next()) |raw_line| {
+        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
+        var drop = false;
+        if (trimmed.len > 0 and trimmed[0] != '#') {
+            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
+                const k = std.mem.trim(u8, trimmed[0..eq], &std.ascii.whitespace);
+                for (keys) |key| if (std.mem.eql(u8, k, key)) {
+                    drop = true;
+                    break;
+                };
+            }
+        }
+        if (drop) continue; // 줄 삭제 — 그 줄과 그에 붙은 개행이 함께 사라진다(유지 줄만 아래에서 join).
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        try out.appendSlice(allocator, raw_line);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// 빈 기본 결과(파일 없음/HOME 없음 등). config 텍스트를 안 읽었으므로 arena도 비어 있다.
 fn emptyDefault(allocator: std.mem.Allocator) Parsed {
     return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .unbinds = &.{}, .terminal_bindings = &.{}, .global_bindings = &.{}, .diagnostics = &.{} };
@@ -750,6 +780,27 @@ test "updateConfigText: 빈 원본에도 키를 append한다(파일 없음 케�
     const updated = try updateConfigText(a, "", &updates);
     defer a.free(updated);
     try std.testing.expectEqualStrings("sidebar.show-branch = false\n", updated);
+}
+
+test "removeConfigLines: 키 줄 삭제(중복 포함), 주석·다른 줄 보존, 개행 정합 (env 삭제 토대)" {
+    const a = std.testing.allocator;
+    const original =
+        "# 주석\n" ++
+        "env.FOO = bar\n" ++ // 삭제 대상
+        "font.size = 14\n" ++ // 보존
+        "env.BAZ = qux\n" ++ // 보존(키 다름)
+        "env.FOO = dup\n"; // 같은 키 중복 — 함께 삭제(last-wins 부활 방지)
+    const out = try removeConfigLines(a, original, &.{"env.FOO"});
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "env.FOO") == null); // 두 줄 다 사라짐
+    try std.testing.expect(std.mem.indexOf(u8, out, "# 주석") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "font.size = 14") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "env.BAZ = qux") != null);
+    // 파싱해 env에 FOO 없고 BAZ만 남는지.
+    var p = try parse(a, out);
+    defer p.deinit();
+    try std.testing.expectEqual(@as(usize, 1), p.config.env.len);
+    try std.testing.expectEqualStrings("BAZ=qux", p.config.env[0]);
 }
 
 test "updateKeybindLines: action 기준 교체, 없으면 append, 매크로·다른 줄·주석 보존 (keybind recorder write-back)" {

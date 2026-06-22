@@ -14,6 +14,10 @@
 두 소스는 `AppSession.pendingNotification()` 한 funnel로 합류한다(에이전트 큐를 OSC보다 먼저 드레인). 반환은
 `{ title, body, surface_id, foreground_banner }` — Swift가 tick마다 poll한다.
 
+종류별 표시는 config `notifications.*`가 각 발화 지점에서 게이트한다 — `agent-complete`(에이전트 완료, `enqueueAgentCompletion`)·
+`osc`(OSC 9/777, `pendingNotification`)를 끄면 데스크톱 배너·인앱 센터 둘 다 안 만든다. 인앱 센터 보관 개수는
+`history-limit`(8~512, 기본 64). 단일 출처는 [config 스키마](configuration.md)다(스키마-주도라 세팅 화면에도 자동 노출).
+
 ## 2. 데스크톱 배너 (OS, 1단계)
 
 `pendingNotification()` → Swift `drainNotification()` → `UNUserNotificationCenter`. 배너는 OS 리소스라 native(Swift)만
@@ -92,5 +96,4 @@
 
 ## 6. 범위 밖 (후속)
 
-알림 설정(config — 인앱 센터 on/off·보관 개수·OSC 포함 여부), 데스크톱 배너와 인앱 센터의 읽음 동기화(배너 클릭 시
-센터도 읽음). 배지 두 자리(현재 `min(9)` cap → "9+").
+데스크톱 배너와 인앱 센터의 읽음 동기화(배너 클릭 시 센터도 읽음). 배지 두 자리(현재 `min(9)` cap → "9+").

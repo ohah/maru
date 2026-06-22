@@ -810,9 +810,8 @@ const NotificationHistoryItem = struct {
     is_agent: bool = false,
 };
 
-/// 알림 히스토리 보관 상한(ring buffer — 넘으면 가장 오래된 걸 버린다). 사용자가 스크롤할 목록이라 agent 큐(16)보다
-/// 크게. 64건이면 owned title/body 합쳐도 수십 KB 수준이라 가볍다.
-const notification_history_cap: usize = 64;
+// 알림 히스토리 보관 상한(ring)은 config `notifications.history-limit`(기본 64, 8~512)가 단일 출처다 —
+// pushNotificationHistory가 매 push에서 읽어 초과분을 버린다(reload로 값이 바뀌면 다음 push부터 새 상한 적용).
 
 /// 에이전트 아이콘 코드포인트(없으면 0) — 사이드바 카드에서 이름줄과 분리해 슬롯 세로 중앙에 독립 배치한다
 /// (buildSidebarDrawList의 agents). 0=아이콘 없음. 브랜드 전용 유니코드가 없어 근사 글리프를 쓰되,
@@ -7455,6 +7454,13 @@ pub const AppSession = struct {
         // 그 id를 알림 식별자에 실어 클릭이 이 터미널로 점프하게 한다.
         const osc_surface_id = self.activeSurface().id;
         const pending = self.activeSurface().core.pendingNotification() orelse return null;
+        // config notifications.osc=false면 OSC 9/777 알림을 끈다 — 코어 pending만 비우고(다음 tick 재발화 방지) 띄우지
+        // 않는다(데스크톱 배너·인앱 센터 둘 다 안 만듦). 에이전트 완료(enqueueAgentCompletion의 agent_complete 게이트)와
+        // 대칭: 종류별 on/off를 각 발화 지점에서 단일하게 막는다.
+        if (!self.loaded_config.config.notifications.osc) {
+            self.activeSurface().core.clearNotification();
+            return null;
+        }
         if (self.notification_title_out.len > 0) {
             self.allocator.free(self.notification_title_out);
             self.notification_title_out = &.{};
@@ -7481,15 +7487,15 @@ pub const AppSession = struct {
     }
 
     /// 인앱 알림 센터 히스토리에 한 건 보관한다(title/body dupe — pendingNotification이 드레인하는 owned 버퍼와
-    /// 소유권이 겹치지 않게 복사한다). 상한(notification_history_cap) 초과면 가장 오래된 걸 버리고, 그게 안 읽음이면
-    /// unread를 보정한다. dupe/append 실패는 best-effort로 버린다(알림 보관은 부가 기능 — enqueueAgentCompletion 규율).
+    /// 소유권이 겹치지 않게 복사한다). 상한(config notifications.history-limit) 초과면 가장 오래된 걸 버리고, 그게 안
+    /// 읽음이면 unread를 보정한다. dupe/append 실패는 best-effort로 버린다(알림 보관은 부가 기능 — enqueueAgentCompletion 규율).
     fn pushNotificationHistory(self: *AppSession, title: []const u8, body: []const u8, surface_id: u64, is_agent: bool) void {
         const title_dup = self.allocator.dupe(u8, title) catch return;
         const body_dup = self.allocator.dupe(u8, body) catch {
             self.allocator.free(title_dup);
             return;
         };
-        if (self.notification_history.items.len >= notification_history_cap) {
+        if (self.notification_history.items.len >= @as(usize, self.loaded_config.config.notifications.history_limit)) {
             const dropped = self.notification_history.orderedRemove(0);
             if (!dropped.is_read) self.notification_unread -|= 1;
             self.allocator.free(dropped.title);
@@ -11215,10 +11221,11 @@ test "알림 히스토리: push 상한 ring + unread 증감 + markRead + formatR
     session.markNotificationRead(999); // 범위 밖 — 무동작
     try std.testing.expectEqual(@as(usize, 1), session.notification_unread);
 
-    // 상한 초과: cap+5건 더 push → len은 cap 유지(ring), 누수 없이 가장 오래된 것 free.
+    // 상한 초과: cap+5건 더 push → len은 cap(config notifications.history-limit) 유지(ring), 누수 없이 오래된 것 free.
+    const cap: usize = @intCast(session.loaded_config.config.notifications.history_limit);
     var i: usize = 0;
-    while (i < notification_history_cap + 5) : (i += 1) session.pushNotificationHistory("x", "y", 100, false);
-    try std.testing.expectEqual(notification_history_cap, session.notification_history.items.len);
+    while (i < cap + 5) : (i += 1) session.pushNotificationHistory("x", "y", 100, false);
+    try std.testing.expectEqual(cap, session.notification_history.items.len);
 
     // formatRelativeTime 경계(arena).
     var arena_state = std.heap.ArenaAllocator.init(allocator);

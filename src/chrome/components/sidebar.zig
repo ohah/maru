@@ -55,7 +55,8 @@ pub fn headerRows(header_height_px: u32, cell_height_px: u32) u32 {
 }
 
 /// 사이드바 상단 헤더([0, header_h) 영역)의 어느 부분을 가리키는가. **아이콘 줄(row 0)**: 우측 아이콘 4개(셀 col
-/// cols-2=새 워크스페이스, cols-5=view options, cols-8=사이드바 접기, cols-11=알림 종), 좌측은 네이티브 신호등
+/// cols-2=새 워크스페이스, cols-5=view options, cols-8=사이드바 접기, cols-11=알림 종(EAW 2칸이라 cols-11·cols-10 점유)),
+/// 좌측은 네이티브 신호등
 /// (닫기·최소화·확대) 영역이라 none(macOS가 클릭 소비). **검색 줄(마지막 줄)**: 전체 폭 검색 입력. 사이 빈 줄·헤더 밖·
 /// 폭/cell 0·비유한·cols<13(아이콘 4개가 안 들어감)은 none. 영역 경계는 buildSidebarHeaderFrame이 glyph를 그리는 cell
 /// row/col(floor cols)과 정확히 같게 잡는다 — 안 그리면 hit-test도 none(그려진 것=클릭되는 것 단일 출처).
@@ -76,7 +77,7 @@ pub fn headerHit(x_px: f64, y_px: f64, sidebar_width_px: u32, cell_width_px: u32
     if (x_px >= @as(f64, @floatFromInt(cols - 3)) * cw) return .new_workspace; // 줄0 우측, 그려진 '+' col(cols-2) 포함 3칸 zone
     if (x_px >= @as(f64, @floatFromInt(cols - 6)) * cw) return .view_options; // 그려진 ⚙ col(cols-5) 포함 3칸 zone
     if (x_px >= @as(f64, @floatFromInt(cols - 9)) * cw) return .toggle_sidebar; // 그려진 ◧ col(cols-8) 포함 3칸 zone
-    if (x_px >= @as(f64, @floatFromInt(cols - 12)) * cw) return .notifications; // 그려진 종 col(cols-11) 포함 3칸 zone
+    if (x_px >= @as(f64, @floatFromInt(cols - 12)) * cw) return .notifications; // 그려진 종(cols-11·cols-10)+배지(cols-12) 포함 3칸 zone[cols-12,cols-9)
     return .none; // 줄0 좌측 = 네이티브 신호등 영역(클릭은 macOS가 소비) 또는 빈 영역
 }
 
@@ -188,7 +189,8 @@ test "sidebar hit-test: inSidebar·onResizeEdge·slotAt·headerHit·closeButton�
     try std.testing.expectEqual(@as(?usize, 1), slotAt(40, 20, 16, 3)); // (40-20)/16=1
     // headerHit(2줄, ch=10, header=20 → rows=2, search_row=1): row0=아이콘 줄, row1(y≥10)=검색 줄. w=160,cw=8 → cols=20.
     // 우측 아이콘 4개 zone(3칸씩): new_workspace=col cols-2(x≥(cols-3)cw=136), view_options=cols-5(x≥112),
-    // toggle_sidebar=cols-8(x≥88), notifications=cols-11(x≥64). 좌측(<64)=신호등 영역(none).
+    // toggle_sidebar=cols-8(x≥88), notifications zone[cols-12,cols-9)=x≥64(종 글리프 cols-11·cols-10, 배지 cols-12 포함).
+    // 좌측(<64)=신호등 영역(none).
     try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 15, 160, 8, 10, 20)); // 검색 줄(y≥10)
     try std.testing.expectEqual(HeaderRegion.new_workspace, headerHit(150, 5, 160, 8, 10, 20)); // 줄0 우측 [136,160)
     try std.testing.expectEqual(HeaderRegion.view_options, headerHit(120, 5, 160, 8, 10, 20)); // 줄0 ⚙ [112,136)

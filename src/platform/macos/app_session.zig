@@ -6359,9 +6359,10 @@ pub const AppSession = struct {
                         // 종 클릭 → 인앱 알림 센터 패널(2줄 카드)을 종 아이콘 아래에 띄운다. 항목은 collect/itemAt 시점에
                         // 히스토리에서 빌드한다(buildNotificationItems) — show엔 개수만 준다(키 nav clamp용). 열어도 읽음
                         // 처리는 안 한다(클릭한 항목만 읽음 — 안읽음 점 유지).
-                        // 패널을 종 아이콘 바로 아래에 띄운다 — 종 왼쪽 끝(col cols-12)에 패널 좌단을 맞춘다.
+                        // 패널을 종 아이콘 바로 아래에 띄운다 — 종 글리프는 cols-11이지만, 알림 그룹 좌단(배지 col cols-12)에
+                        // 패널 좌단을 맞춰 종+배지 묶음 아래로 정렬한다.
                         const hcols = self.sidebar_width_px / self.cell_width_px;
-                        const anchor_x: i32 = @intCast((hcols -| 12) * self.cell_width_px); // 종 col(cols-12) 왼쪽 끝
+                        const anchor_x: i32 = @intCast((hcols -| 12) * self.cell_width_px); // 알림 그룹 좌단(배지 col cols-12)
                         const anchor_y: i32 = @intCast(self.cell_height_px); // 아이콘 줄(0) 바로 아래
                         self.chrome_host.notifications.show(anchor_x, anchor_y, self.notification_history.items.len);
                         self.metal_dirty = true;
@@ -9626,7 +9627,7 @@ pub const AppSession = struct {
                     .toggle_sidebar => cols -| 8,
                     .view_options => cols -| 5,
                     .new_workspace => cols -| 2,
-                    .notifications => cols -| 12, // 벨 글리프(col cols-12)와 hover 하이라이트 정렬 — 예전 cols-11은 글리프보다 1칸 우측으로 어긋났다
+                    .notifications => cols -| 11, // 벨 글리프(col cols-11, 2칸 폭)와 hover 정렬 — 2.6칸 폭 quad가 cols-11·cols-10 글리프를 덮는다
                     .search, .none => cols, // 도달 안 함(setHoveredHeaderRegion이 정규화) — 안전값
                 };
                 const cw: f32 = @floatFromInt(self.cell_width_px);
@@ -10348,18 +10349,24 @@ pub const AppSession = struct {
         // 아이콘 색은 호버 여부와 무관하게 항상 sidebar_foreground다 — hover 강조는 아래 호버 배경 quad(밝은 반투명)가
         // 맡는다. 예전엔 호버 아이콘을 sidebar_active로 재색칠했는데, Ghostty 테마에선 sidebar_active가 밝은 전경색이
         // 아니라 어두운 밴드색이라 아이콘이 오히려 어두워졌다(사용자 피드백) — 재색칠을 제거한다.
-        // 알림 종(cols-12, EAW 2칸) + 안 읽은 개수 배지(종 우측). headerHit의 notifications zone(cols-12..cols-9)과 같은
-        // col(단일 레이아웃). 종 글리프는 🔔(U+1F514) — 🔍(검색)과 같은 이모지 경로(CoreText fallback). 배지는 안 읽은
-        // 알림이 있을 때만: 1~9는 숫자 1칸(cols-10), 10개 이상은 "9+" 2칸(cols-10·cols-9). 색은 눈에 띄게 coral.
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 12, .codepoint = 0x1F514, .width = 2, .style = .{ .foreground = fg } });
+        // 알림 종(글리프 col cols-11, EAW 2칸이라 cols-11·cols-10 점유) + 안 읽은 개수 배지(종 좌측 cols-12). 종은 2칸
+        // 폭이라, 1칸 폭 아이콘과 중심 간격을 맞추려면 글리프 좌단을 cols-11에 둔다(중심 픽셀 (cols-10)*cw). 그러면
+        // 종↔토글 중심 간격이 (cols-10)→(cols-7.5)=2.5칸이 아니라… 실제로 1칸 아이콘 중심은 (cols-7.5)·(cols-4.5)·
+        // (cols-1.5)로 3칸 간격이고, 종 글리프 두 셀(cols-11·cols-10) 중심 (cols-10.5)*cw도 토글 (cols-7.5)*cw와 3칸 —
+        // 즉 [종]–[토글]–[⚙]–[+]가 균일 3칸 간격이 된다(예전 cols-12는 4칸이라 종만 신호등 쪽으로 밀려 보였다).
+        // headerHit의 notifications zone(cols-12..cols-9)이 종 글리프(cols-11·cols-10)와 배지(cols-12)를 모두 포함한다.
+        // 종 글리프는 🔔(U+1F514) — 🔍(검색)과 같은 이모지 경로(CoreText fallback). 배지는 안 읽은 알림이 있을 때만
+        // 종 좌측에: 1~9는 숫자 1칸(cols-12), 10개 이상은 "9+" 2칸(cols-13·cols-12). 종(cols-11)과 겹치지 않는다. 색은 coral.
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 11, .codepoint = 0x1F514, .width = 2, .style = .{ .foreground = fg } });
         if (self.notification_unread > 0) {
             const badge_rgb: terminal.Color = .{ .rgb = .{ .r = 0xE0, .g = 0x5A, .b = 0x4A } };
             if (self.notification_unread > 9) {
-                // "9+": cols-9는 toggle zone 시작이라 '+' 위 클릭은 ◧(접기)로 가지만 — 배지는 시각 표시라 무해(드문 영역).
-                try cells.append(self.allocator, .{ .row = 0, .col = cols - 10, .codepoint = '9', .style = .{ .foreground = badge_rgb } });
-                try cells.append(self.allocator, .{ .row = 0, .col = cols - 9, .codepoint = '+', .style = .{ .foreground = badge_rgb } });
+                // "9+": 종 좌측 cols-13·cols-12. notifications zone(cols-12..)에 cols-12는 들지만 cols-13은 신호등 쪽 —
+                // 배지는 시각 표시라 무해(드문 영역), 종 클릭 영역은 cols-11·cols-10이 zone 안이라 그대로 동작.
+                try cells.append(self.allocator, .{ .row = 0, .col = cols - 13, .codepoint = '9', .style = .{ .foreground = badge_rgb } });
+                try cells.append(self.allocator, .{ .row = 0, .col = cols - 12, .codepoint = '+', .style = .{ .foreground = badge_rgb } });
             } else {
-                try cells.append(self.allocator, .{ .row = 0, .col = cols - 10, .codepoint = '0' + @as(u21, @intCast(self.notification_unread)), .style = .{ .foreground = badge_rgb } });
+                try cells.append(self.allocator, .{ .row = 0, .col = cols - 12, .codepoint = '0' + @as(u21, @intCast(self.notification_unread)), .style = .{ .foreground = badge_rgb } });
             }
         }
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 8, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });

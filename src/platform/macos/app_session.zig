@@ -5026,6 +5026,9 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
             .notifications_selection_changed => self.metal_dirty = true, // ↑↓ 선택 이동 — 재렌더
+            .notifications_delete => self.deleteNotification(self.chrome_host.notifications.selected), // Backspace — selected 카드 삭제
+            .notifications_mark_all_read => self.markAllNotificationsRead(), // 하단 "모두 읽음"
+            .notifications_clear_all => self.clearNotifications(), // 하단 "모두 지우기"
             .confirm_accept => { // Enter/Y — 보류한 동작 실행. pending을 먼저 비워(재진입 방지) 실행.
                 self.metal_dirty = true;
                 if (self.pending_reset) {
@@ -5995,18 +5998,25 @@ pub const AppSession = struct {
             }
             return;
         }
-        // 알림 센터 패널이 열려 있으면 클릭을 패널로 라우팅한다(context_menu와 동형 — 항목 위면 그 surface로 점프,
-        // 밖이면 닫기). 카드는 itemAt에 줄 동적 Item을 임시 arena로 빌드한다(buildNotificationItems — collect와 같은 역순).
+        // 알림 센터 패널이 열려 있으면 클릭을 패널로 라우팅한다 — 카드 본문=점프, 카드 우측 ✕=삭제, 하단 액션 행=
+        // 모두 읽음/지우기, 패널 밖=닫기. hitTest에 줄 동적 Item을 임시 arena로 빌드한다(buildNotificationItems — 역순).
         if (self.chrome_host.notifications.open) {
             if (kind == 1) {
                 var arena_state = std.heap.ArenaAllocator.init(self.allocator);
                 defer arena_state.deinit();
                 const items = self.buildNotificationItems(arena_state.allocator()) catch return;
-                if (chrome.components.notifications.itemAt(&self.chrome_host.notifications, items, self.buildChromeProps(), x_px, y_px)) |idx| {
-                    self.chrome_host.notifications.selected = idx;
-                    self.acceptNotification();
+                if (chrome.components.notifications.hitTest(&self.chrome_host.notifications, items, self.buildChromeProps(), x_px, y_px)) |hit| {
+                    switch (hit) {
+                        .card => |idx| {
+                            self.chrome_host.notifications.selected = idx;
+                            self.acceptNotification();
+                        },
+                        .close => |idx| self.deleteNotification(idx), // 카드 ✕ → 그 카드 삭제
+                        .mark_all_read => self.markAllNotificationsRead(),
+                        .clear_all => self.clearNotifications(),
+                    }
                 } else {
-                    self.chrome_host.notifications.hide(); // 카드 밖 클릭 → 닫기
+                    self.chrome_host.notifications.hide(); // 패널 밖 클릭 → 닫기
                     self.metal_dirty = true;
                 }
             }
@@ -7503,6 +7513,39 @@ pub const AppSession = struct {
         if (self.notification_history.items[index].is_read) return;
         self.notification_history.items[index].is_read = true;
         self.notification_unread -|= 1;
+    }
+
+    /// 알림 센터 목록의 list_index(역순: 0=최신)에 해당하는 히스토리 항목을 삭제한다(owned title/body free). 안 읽음
+    /// 이었으면 unread 보정. 목록이 줄었으니 패널 selected를 clamp한다(다음 collect의 setItemCount와 같은 단일 출처).
+    fn deleteNotification(self: *AppSession, list_index: usize) void {
+        const len = self.notification_history.items.len;
+        if (len == 0 or list_index >= len) return;
+        const history_index = len - 1 - list_index; // 역순 매핑(목록 0 = 최신 = 히스토리 끝)
+        const removed = self.notification_history.orderedRemove(history_index);
+        if (!removed.is_read) self.notification_unread -|= 1;
+        self.allocator.free(removed.title);
+        self.allocator.free(removed.body);
+        self.chrome_host.notifications.setItemCount(self.notification_history.items.len);
+        self.metal_dirty = true;
+    }
+
+    /// 모든 알림을 읽음 처리한다(배지 0). 히스토리 항목은 유지 — 목록엔 남고 안읽음 점(●)만 사라진다.
+    fn markAllNotificationsRead(self: *AppSession) void {
+        for (self.notification_history.items) |*it| it.is_read = true;
+        self.notification_unread = 0;
+        self.metal_dirty = true;
+    }
+
+    /// 모든 알림을 히스토리에서 삭제한다(owned 전부 free). 패널은 빈 목록("알림 없음")으로 유지된다.
+    fn clearNotifications(self: *AppSession) void {
+        for (self.notification_history.items) |it| {
+            self.allocator.free(it.title);
+            self.allocator.free(it.body);
+        }
+        self.notification_history.clearRetainingCapacity();
+        self.notification_unread = 0;
+        self.chrome_host.notifications.setItemCount(0);
+        self.metal_dirty = true;
     }
 
     /// G12 BEL: 활성 surface에 pending 벨이 있으면 true(코어 플래그를 비운다). Swift가 시스템 벨(NSSound.beep)을
@@ -11198,6 +11241,42 @@ test "acceptNotification: 목록 역순 매핑(0=최신) + 클릭 항목만 읽�
     try std.testing.expect(session.notification_history.items[1].is_read); // 최신("new")만 읽음
     try std.testing.expect(!session.notification_history.items[0].is_read); // 오래된("old")은 안 읽음 유지
     try std.testing.expectEqual(@as(usize, 1), session.notification_unread);
+}
+
+test "알림 액션: deleteNotification(역순) + markAllNotificationsRead + clearNotifications + unread 보정" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.pushNotificationHistory("a", "1", 11, true); // 히스토리 idx 0(가장 오래됨)
+    session.pushNotificationHistory("b", "2", 22, true); // idx 1
+    session.pushNotificationHistory("c", "3", 33, false); // idx 2(최신) — 목록 역순 [c, b, a]
+    try std.testing.expectEqual(@as(usize, 3), session.notification_unread);
+
+    // 목록 list_index 0 = 최신("c") = 히스토리 끝. 삭제 → "c" 제거, unread 1 감소.
+    session.deleteNotification(0);
+    try std.testing.expectEqual(@as(usize, 2), session.notification_history.items.len);
+    try std.testing.expectEqual(@as(usize, 2), session.notification_unread);
+    try std.testing.expectEqualStrings("b", session.notification_history.items[1].title); // 최신이 이제 "b"
+
+    // 모두 읽음 → unread 0, 항목 유지(목록엔 남음).
+    session.markAllNotificationsRead();
+    try std.testing.expectEqual(@as(usize, 0), session.notification_unread);
+    try std.testing.expectEqual(@as(usize, 2), session.notification_history.items.len);
+
+    // 모두 지우기 → 히스토리 비움(누수 없이 owned free).
+    session.clearNotifications();
+    try std.testing.expectEqual(@as(usize, 0), session.notification_history.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.notification_unread);
 }
 
 test "parseGitHead: ref branch / nested ref / detached SHA / empty ref / junk" {

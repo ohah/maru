@@ -68,6 +68,9 @@ pub const ResolvedAppearance = struct {
     window_padding_right: u32 = 8,
     window_padding_bottom: u32 = 4,
     window_padding_left: u32 = 8,
+    // 창 배경 투명도(0.0~1.0, 기본 1.0=불투명). app이 화면 clear color alpha + metal layer/창 불투명도 wiring에 쓴다
+    // (default 배경만 투명 — 근거는 theme.Config.window_opacity 주석 단일 출처). loader가 0~1 range 검증.
+    window_opacity: f32 = 1.0,
 };
 
 pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
@@ -92,6 +95,7 @@ pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
         .window_padding_right = config.window_padding_right,
         .window_padding_bottom = config.window_padding_bottom,
         .window_padding_left = config.window_padding_left,
+        .window_opacity = config.window_opacity,
     };
 }
 

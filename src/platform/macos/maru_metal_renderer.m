@@ -638,7 +638,8 @@ bool maru_metal_renderer_draw(
     const uint32_t *live_image_ids,
     size_t live_image_id_count,
     uint32_t terminal_bg,
-    uint32_t titlebar_strip_px
+    uint32_t titlebar_strip_px,
+    uint32_t window_opacity_milli
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -927,14 +928,18 @@ bool maru_metal_renderer_draw(
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     // 화면 clear color: terminal_bg(0xAARRGGBB — OSC 11 배경 set 또는 theme.background)가 비-0이면 그 색,
     // 0이면 기존 기본(어두운 남색)으로 폴백. 빈 영역/기본 배경(A0) 셀이 비치는 색.
+    // window.opacity(배경 투명도): clear color의 **alpha에만** 곱한다 — default 배경(여기 clear로 칠해지는 영역)만
+    // 투명해지고, 명시적 배경색 셀(bg.a=1)은 셀 quad로 그려져 영향 없다(iTerm2/Ghostty background-opacity 모델).
+    // BGRA8Unorm은 straight-alpha clear라 rgb는 그대로, alpha만 낮추면 layer(비불투명)가 뒤를 비춘다. milli/1000.
+    const double opacity = (double)window_opacity_milli / 1000.0;
     if (terminal_bg != 0) {
         pass.colorAttachments[0].clearColor = MTLClearColorMake(
             (double)((terminal_bg >> 16) & 0xff) / 255.0,
             (double)((terminal_bg >> 8) & 0xff) / 255.0,
             (double)(terminal_bg & 0xff) / 255.0,
-            1.0);
+            opacity);
     } else {
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0.06, 0.08, 0.12, 1.0);
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0.06, 0.08, 0.12, opacity);
     }
 
     id<MTLCommandBuffer> command_buffer = [impl.queue commandBuffer];

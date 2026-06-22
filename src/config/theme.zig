@@ -435,6 +435,13 @@ pub const Config = struct {
     window_padding_right: u32 = 8,
     window_padding_bottom: u32 = 4,
     window_padding_left: u32 = 8,
+    /// 창 배경 투명도(0.0 완전 투명 ~ 1.0 불투명). 기본 1.0(현행 불투명, 회귀 없음). loader가 `window.opacity` 파싱.
+    /// 베이스/결정: "배경 투명도"는 단일 표준이 없는 사실상 표준이다. **default 배경(빈 영역·기본 배경 셀 A=0)에만**
+    /// 적용하고 명시적 배경색 셀(ANSI bg·OSC 11 set·선택 하이라이트)은 불투명 유지하는 iTerm2/Ghostty `background-opacity`
+    /// 모델을 택했다 — 글자·강조색 가독성을 지키려는 의도. 구현상 default 배경은 셀 bg.a=0이라 화면 clear color가 칠하므로,
+    /// 렌더러가 **clear color의 alpha에만** 이 값을 곱한다(셰이더·셀 불변). metal layer/NSWindow도 opacity<1이면 비불투명.
+    /// (docs/configuration.md·settings-page.md F1-1)
+    window_opacity: f32 = 1.0,
     /// 셸에 줄 TERM 값. 기본 `xterm-maru` — maru가 자체 terminfo(Sync 등)를 embed해 자식 셸에
     /// `TERMINFO=~/.cache/maru/terminfo`(자동 컴파일)로 가리키므로 로컬은 설치 없이 동작하고,
     /// tic이 없거나 실패하면 `xterm-256color`로 폴백한다(로컬 안 깨짐 — pty/macos.zig resolveTerm).
@@ -472,6 +479,7 @@ pub const Config = struct {
         .window_padding_right = Meta{ .key = "window.padding-right", .doc = "오른쪽 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
         .window_padding_bottom = Meta{ .key = "window.padding-bottom", .doc = "아래 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
         .window_padding_left = Meta{ .key = "window.padding-left", .doc = "왼쪽 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
+        .window_opacity = Meta{ .key = "window.opacity", .doc = "창 배경 투명도(0~1)", .range = .{ 0.0, 1.0 }, .widget = .slider, .section = .window },
         .term = Meta{ .key = "term", .doc = "$TERM 값", .widget = .text, .section = .terminal },
     };
 };

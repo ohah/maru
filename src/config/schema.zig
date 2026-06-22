@@ -698,12 +698,19 @@ test "schema tryParse: 최상위 스칼라(Config.schema) — Meta.key 전체 �
     try std.testing.expect(try tryParse(a, &cfg, "term", "xterm-256color", &diags, 4)); // text
     try std.testing.expectEqualStrings("xterm-256color", cfg.term);
     a.free(cfg.term); // 위 dupe 회수(테스트 한정)
+    try std.testing.expect(try tryParse(a, &cfg, "window.opacity", "0.7", &diags, 5)); // f32 range 0~1
+    try std.testing.expectApproxEqAbs(@as(f32, 0.7), cfg.window_opacity, 0.001);
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 
     // 범위 밖 padding → diagnostic + 기본 유지
-    try std.testing.expect(try tryParse(a, &cfg, "window.padding-right", "999", &diags, 5));
+    try std.testing.expect(try tryParse(a, &cfg, "window.padding-right", "999", &diags, 6));
     try std.testing.expectEqual(@as(u32, 8), cfg.window_padding_right); // 기본 유지
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+
+    // 범위 밖 opacity(>1) → diagnostic + 직전 유효값(0.7) 유지(파싱 실패는 기존값 보존)
+    try std.testing.expect(try tryParse(a, &cfg, "window.opacity", "1.5", &diags, 7));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.7), cfg.window_opacity, 0.001); // reject → 직전값 유지
+    try std.testing.expectEqual(@as(usize, 2), diags.items.len);
 }
 
 test "schema tryParse: 잘못된 값은 diagnostic + 기본값 유지 + true(폴백 안 함)" {

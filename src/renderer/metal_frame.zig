@@ -904,6 +904,11 @@ pub const MetalFrame = extern struct {
     // [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 수직 정렬시키는 데만 쓴다(펼침 헤더 아이콘은 영향
     // 없음 — 사이드바 폭>0이라 구분). 0이면 띠 없음(렌더러가 기존 0.3ch nudge 폴백). 끝에 추가해 기존 offset 불변(ABI v66).
     titlebar_strip_px: u32 = 0,
+    // 창 배경 투명도 × 1000(0~1000, 기본 1000=불투명). 렌더러가 화면 clear color alpha에 이 값/1000을 곱한다 —
+    // default 배경(빈 영역·기본 배경 셀 A=0)만 투명해지고 명시적 배경색 셀은 불투명 유지(근거는 config.window_opacity
+    // 주석 단일 출처). float 대신 milli u32로 실어 extern ABI를 정수로 유지(SessionConfig.scale_milli 선례). 끝에
+    // 추가해 기존 offset 불변(ABI v70). app이 ResolvedAppearance.window_opacity에서 채운다.
+    window_opacity_milli: u32 = 1000,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).

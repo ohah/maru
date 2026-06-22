@@ -1123,6 +1123,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             guard createSessionForActiveSurface(smokeMode: false) else { return }
             if let ws { applyWorkspaceWindow(ws.text, ws.index) } // 복원: 기본 탭을 이 창의 탭/split/Term으로 교체
             resizeAppSessionFromWindow()
+            // 새 창 세션에 현재 시스템 외관을 즉시 알린다(theme.follow-system 라이브 적용) — viewDidChangeEffectiveAppearance는
+            // 창 표시 중 세션 생성 **전**에 발화해 이 새 세션을 놓치고, didApplyInitialAppearance는 앱-전역 1회뿐이라
+            // 두 번째 창부터 못 닿는다(리뷰 B). 첫 paint 전에 호출해 시작 프레임부터 올바른 프리셋이 보이게 한다.
+            applySystemAppearanceToAllSessions()
             _ = renderTick() // 즉시 첫 paint(다음 timer tick을 안 기다림)
             ok = true
         }
@@ -2687,6 +2691,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         surface.appSession = created
         self.quick = surface
+        // quick 세션에도 현재 시스템 외관을 즉시 알린다(theme.follow-system 라이브 적용 — 새 창과 같은 이유, 리뷰 B).
+        applySystemAppearanceToAllSessions()
 
         // 포커스 잃음 자동 숨김: 패널이 key를 잃으면 quickTerminalLostKey가 슬라이드로 숨긴다. 패널을 컨트롤러의
         // window-delegate로 잡으면 windowWillClose/Resize가 primary 경로와 섞이므로, delegate 대신 이 패널만

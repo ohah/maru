@@ -75,6 +75,36 @@ test "truncateToCols: EAW 폭 기준 자르기 + 말줄임" {
     }
 }
 
+/// 목록 오버레이(palette·settings·notifications)의 **보이는-윈도우 시작 인덱스** 단일 출처 — selected가 [start,
+/// start+win) 안에 들게 하되 prev_start(이전 스크롤 위치)를 최대한 존중한다(휠 스크롤 보존). total ≤ win이면 0,
+/// 결과는 [0, total-win]로 clamp. palette·settings는 prev_start=0(selected 기준 재파생), notifications는 scroll_offset을
+/// 넘겨 위치를 유지한다(휠로 굴린 자리에서 selected만 보이게 최소 이동).
+pub fn windowStart(total: usize, win: usize, selected: usize, prev_start: usize) usize {
+    if (total <= win) return 0;
+    const max_start = total - win;
+    var s = @min(prev_start, max_start);
+    if (selected < s) {
+        s = selected; // selected가 창 위로 → 창 top을 selected에
+    } else if (selected >= s + win) {
+        s = selected - win + 1; // selected가 창 아래로 → 창 bottom을 selected에
+    }
+    return @min(s, max_start);
+}
+
+test "overlay_input windowStart: prev=0 재파생(palette·settings) + prev 유지(notifications)" {
+    // prev_start=0 → selected 기준 재파생(기존 settings.windowStart 케이스와 동일).
+    try std.testing.expectEqual(@as(usize, 0), windowStart(5, 10, 3, 0)); // 전체(5) ≤ 창(10) → 0
+    try std.testing.expectEqual(@as(usize, 0), windowStart(20, 10, 2, 0)); // selected 2 < 창 → 0
+    try std.testing.expectEqual(@as(usize, 3), windowStart(20, 10, 12, 0)); // selected 12 → 12-10+1=3
+    try std.testing.expectEqual(@as(usize, 10), windowStart(20, 10, 19, 0)); // 끝 → 20-10=10(clamp)
+    try std.testing.expectEqual(@as(usize, 10), windowStart(20, 10, 25, 0)); // 범위 밖이어도 clamp
+    // prev_start 유지(notifications 휠 위치 보존).
+    try std.testing.expectEqual(@as(usize, 4), windowStart(5, 1, 4, 0)); // 창1, selected4 → 끝맞춤 4
+    try std.testing.expectEqual(@as(usize, 1), windowStart(5, 1, 1, 4)); // prev4, selected1 → 위로 1
+    try std.testing.expectEqual(@as(usize, 2), windowStart(10, 3, 3, 2)); // prev2, selected3 창[2,5) 안 → 2 유지
+    try std.testing.expectEqual(@as(usize, 1), windowStart(10, 3, 1, 2)); // prev2, selected1 창 위 → 1
+}
+
 /// 검색어(query) + IME 조합(preedit) 입력 모델. **커밋과 조합은 독립** — `appendChar`는 preedit를 건드리지 않고,
 /// preedit는 `setPreedit`가 단일 관리한다(터미널 core와 같은 모델). 이주 전 두 컴포넌트가 `appendChar`에서 preedit를
 /// 비우다가 IME 멀티-문자 흐름(커밋 N + 조합 N+1)에서 다음 조합을 지워 "조합 안 보임" 버그를 냈다 — 그 모델을 여기

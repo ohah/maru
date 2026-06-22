@@ -341,14 +341,6 @@ fn maxVisible(p: props.ChromeProps) usize {
     return @max(@as(usize, 4), @as(usize, avail) -| 7); // 제목 2 + 위아래 여백 2 + 여유 3
 }
 
-/// selected가 보이도록 [0,total)에서 길이 mv(≤total)인 창의 시작을 고른다(palette 윈도잉: 끝맞춤 + clamp).
-fn windowStart(total: usize, selected: usize, mv: usize) usize {
-    if (total <= mv) return 0;
-    var s: usize = if (selected >= mv) selected - mv + 1 else 0;
-    if (s + mv > total) s = total - mv;
-    return s;
-}
-
 fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected: usize, p: props.ChromeProps, tk: *const tokens.Tokens) ?Layout {
     const cw = @max(p.metrics.cell_width_px, 1);
     const ch = @max(p.metrics.cell_height_px, 1);
@@ -365,7 +357,7 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     const title_need = overlay_input.displayCols(title_text) + 12; // 제목 + 스크롤 위치 표식 여유
     const content_cols = @max(nav_cols + nav_gap_cols + form_content, title_need);
     const mv = maxVisible(p);
-    const win_start = windowStart(rows.len, @min(selected, rows.len -| 1), mv);
+    const win_start = overlay_input.windowStart(rows.len, mv, @min(selected, rows.len -| 1), 0); // 공유 윈도잉(prev=0 재파생)
     const win_len = @min(rows.len, mv);
     // 박스 높이는 **항상 가용 최대(FullHeight)** — win_len(보이는 행 수) 대신 mv(maxVisible)로 고정해, 행이 적은
     // 섹션에서도 모달이 작아졌다 커졌다 하지 않고 화면 높이에 꽉 차게 한다(너비는 content_cols로 별도 고정 — #860).
@@ -1051,14 +1043,6 @@ const test_sections = [_][]const u8{ "Font", "Cursor", "Window" };
 fn testTokens() tokens.Tokens {
     const Rgb = @import("../../color.zig").Rgb;
     return tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
-}
-
-test "settings windowStart: 전체≤창=0, 넘치면 selected를 창 안에 끝맞춤·clamp" {
-    try std.testing.expectEqual(@as(usize, 0), windowStart(5, 3, 10)); // 전체(5) ≤ 창(10) → 0
-    try std.testing.expectEqual(@as(usize, 0), windowStart(20, 2, 10)); // selected 2 < 창 → 0
-    try std.testing.expectEqual(@as(usize, 3), windowStart(20, 12, 10)); // selected 12 → start=12-10+1=3
-    try std.testing.expectEqual(@as(usize, 10), windowStart(20, 19, 10)); // 끝(19) → start=20-10=10(clamp)
-    try std.testing.expectEqual(@as(usize, 10), windowStart(20, 25, 10)); // selected 범위 밖이어도 clamp
 }
 
 test "settings view: 행이 창보다 많으면 창만 렌더 + 제목에 위치 표식 + selected가 창 안" {

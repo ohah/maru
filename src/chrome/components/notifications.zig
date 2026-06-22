@@ -93,35 +93,28 @@ pub const State = struct {
         self.selected = @intCast(std.math.clamp(cur + delta, 0, last));
     }
 
-    /// 마우스 휠용 — delta 카드만큼 스크롤(음수=위/최신, 양수=아래/오래된). 상한은 layout(items·metrics 의존)이
-    /// 알므로 그걸로 clamp(단일 출처). 스크롤 불필요(화면에 다 들어감)면 0으로.
-    pub fn scrollBy(self: *State, items: []const Item, p: props.ChromeProps, delta: i64) void {
-        const l = layout(self, items, p) orelse return;
-        if (!l.scrollable) {
+    /// 마우스 휠용 — delta 카드만큼 스크롤(음수=위/최신, 양수=아래/오래된). count·metrics만 받는다(전체 Item 빌드·폭
+    /// 계산 불필요 — scrollWindow는 개수·화면 높이만 본다). 상한은 scrollWindow가 clamp(단일 출처). 스크롤 불필요면 0.
+    pub fn scrollBy(self: *State, total: usize, m: props.CellMetrics, delta: i64) void {
+        const sw = scrollWindow(total, m);
+        if (!sw.scrollable) {
             self.scroll_offset = 0;
             return;
         }
-        const max_offset: i64 = @intCast(l.total - l.visible);
-        const cur: i64 = @intCast(@min(self.scroll_offset, @as(usize, @intCast(max_offset))));
+        const max_offset: i64 = @intCast(sw.max_offset);
+        const cur: i64 = @intCast(@min(self.scroll_offset, sw.max_offset));
         self.scroll_offset = @intCast(std.math.clamp(cur + delta, 0, max_offset));
     }
 
-    /// 키보드 ↑↓로 selected가 바뀐 뒤 호출 — 선택 카드가 viewport 밖이면 그만큼 스크롤해 보이게 한다(터미널 스크롤백·
-    /// palette 윈도우와 같은 규율). 스크롤 불필요면 0.
-    pub fn ensureSelectedVisible(self: *State, items: []const Item, p: props.ChromeProps) void {
-        const l = layout(self, items, p) orelse return;
-        if (!l.scrollable) {
+    /// 키보드 ↑↓로 selected가 바뀐 뒤 호출 — 선택 카드가 viewport 밖이면 보이게 스크롤한다(prev 위치 유지 + selected
+    /// 끝맞춤, overlay_input.windowStart 단일 출처). count·metrics만 받는다(Item 빌드 불필요). 스크롤 불필요면 0.
+    pub fn ensureSelectedVisible(self: *State, total: usize, m: props.CellMetrics) void {
+        const sw = scrollWindow(total, m);
+        if (!sw.scrollable) {
             self.scroll_offset = 0;
             return;
         }
-        const max_offset = l.total - l.visible;
-        var off = @min(self.scroll_offset, max_offset);
-        if (self.selected < off) {
-            off = self.selected; // 위로 — 선택을 맨 위에
-        } else if (self.selected >= off + l.visible) {
-            off = self.selected - l.visible + 1; // 아래로 — 선택을 맨 아래에
-        }
-        self.scroll_offset = off;
+        self.scroll_offset = overlay_input.windowStart(total, sw.visible, self.selected, self.scroll_offset);
     }
 };
 
@@ -174,6 +167,23 @@ fn cardCols(it: Item) u32 {
     return @max(title_line, body_line);
 }
 
+/// 카드 윈도우(보이는 카드 수·스크롤 여부·최대 offset) — **width 없이** 개수와 화면 높이(metrics)만으로 계산한다.
+/// layout(렌더용, 폭도 계산)과 scrollBy/ensureSelectedVisible(스크롤만)이 공유 — 후자가 매 휠/키마다 전체 Item을 빌드
+/// 하거나 카드 폭을 재지 않게 한다(개수만 필요). 화면 가용 높이에서 카드 1개 + 액션 행은 최소 보장.
+const ScrollWindow = struct { visible: usize, scrollable: bool, max_offset: usize };
+
+fn scrollWindow(total: usize, m: props.CellMetrics) ScrollWindow {
+    const ch = @max(m.cell_height_px, 1);
+    const card_h = ch * card_rows;
+    const action_h: u32 = if (total > 0) ch * action_rows else 0;
+    const avail_h = @max(card_h + action_h, m.backing_height_px -| 2 * ch); // 위아래 1칸 여백
+    const max_card_area = avail_h -| action_h;
+    const max_visible: usize = @intCast(@max(@as(u32, 1), max_card_area / card_h));
+    const visible: usize = if (total == 0) 0 else @min(total, max_visible);
+    const scrollable = total > visible;
+    return .{ .visible = visible, .scrollable = scrollable, .max_offset = if (scrollable) total - visible else 0 };
+}
+
 /// 패널 레이아웃(스크롤 윈도우 포함) — **view·hitTest·panelRect 단일 출처**라 "보이는 카드 == 클릭되는 카드". 카드가
 /// 화면 가용 높이를 넘으면 카드 단위로 스크롤한다(부분 카드 클리핑 인프라가 없어 — draw.Op에 scissor 없음 — 통째
 /// 카드만 보인다). 액션 행(모두 읽음/지우기)은 보이는 카드들 바로 아래 = viewport 하단에 늘 붙어 스크롤해도 안 잘린다.
@@ -208,24 +218,16 @@ fn layout(state: *const State, items: []const Item, p: props.ChromeProps) ?Layou
     const box_w = (content_cols + 2) * cw;
 
     const total = items.len;
+    const sw = scrollWindow(total, m); // 보이는 카드 수·스크롤 여부·max_offset(단일 출처)
     const action_h: u32 = if (total > 0) ch * action_rows else 0;
-
-    // 화면 가용 높이 — 위아래 1칸씩 여백. 작은 창에서도 카드 1개 + 액션 행은 최소 보장한다.
     const bh = m.backing_height_px;
-    const avail_h = @max(card_h + action_h, bh -| 2 * ch);
-    const max_card_area = avail_h -| action_h; // 카드들이 쓸 수 있는 높이
-    const max_visible: usize = @intCast(@max(@as(u32, 1), max_card_area / card_h));
-
-    const visible: usize = if (total == 0) 0 else @min(total, max_visible);
-    const scrollable = total > visible;
-    const max_offset: usize = if (scrollable) total - visible else 0;
-    const first = @min(state.scroll_offset, max_offset);
+    const first = @min(state.scroll_offset, sw.max_offset);
 
     // 높이 — 빈 목록은 empty_panel_rows, 아니면 보이는 카드 + 액션 1줄.
     const box_h: u32 = if (total == 0)
         empty_panel_rows * ch
     else
-        @as(u32, @intCast(visible)) * card_h + action_h;
+        @as(u32, @intCast(sw.visible)) * card_h + action_h;
 
     // 위치 clamp.
     var x = state.anchor_x;
@@ -245,8 +247,8 @@ fn layout(state: *const State, items: []const Item, p: props.ChromeProps) ?Layou
         .panel_cols = box_w / cw,
         .total = total,
         .first = first,
-        .visible = visible,
-        .scrollable = scrollable,
+        .visible = sw.visible,
+        .scrollable = sw.scrollable,
     };
 }
 
@@ -563,25 +565,25 @@ test "notifications 스크롤: 화면 넘으면 카드 윈도우 + scrollBy/ensu
     try std.testing.expect(l0.scrollable);
     try std.testing.expectEqual(@as(usize, 0), l0.first);
 
-    // 휠 아래로 2 → offset 2(max_offset=total-visible=4).
-    s.scrollBy(items, p, 2);
+    // 휠 아래로 2 → offset 2(max_offset=total-visible=4). count·metrics만 받는다(Item 빌드 불필요).
+    s.scrollBy(items.len, p.metrics, 2);
     try std.testing.expectEqual(@as(usize, 2), s.scroll_offset);
     // 보이는 첫 카드 클릭 → 실제 인덱스 first(2)로 매핑(보이는==클릭되는).
     const rect = panelRect(&s, items, p).?;
     try std.testing.expectEqual(Hit{ .card = 2 }, hitTest(&s, items, p, @floatFromInt(rect.x + 8), @floatFromInt(rect.y + 4)).?);
 
     // 상한/하한 clamp — 끝까지 내려도 4, 끝까지 올려도 0.
-    s.scrollBy(items, p, 100);
+    s.scrollBy(items.len, p.metrics, 100);
     try std.testing.expectEqual(@as(usize, 4), s.scroll_offset);
-    s.scrollBy(items, p, -100);
+    s.scrollBy(items.len, p.metrics, -100);
     try std.testing.expectEqual(@as(usize, 0), s.scroll_offset);
 
     // 키보드 선택 따라 스크롤 — selected가 viewport 밖이면 보이게 당긴다(visible=1이라 offset=selected).
     s.selected = 4;
-    s.ensureSelectedVisible(items, p);
+    s.ensureSelectedVisible(items.len, p.metrics);
     try std.testing.expectEqual(@as(usize, 4), s.scroll_offset);
     s.selected = 1;
-    s.ensureSelectedVisible(items, p);
+    s.ensureSelectedVisible(items.len, p.metrics);
     try std.testing.expectEqual(@as(usize, 1), s.scroll_offset);
 
     // view: 보이는 1장 + 액션행 + 스크롤바 thumb(우측 끝 얇은 muted 막대)만 그린다.

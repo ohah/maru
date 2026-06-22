@@ -4533,7 +4533,7 @@ pub const AppSession = struct {
     }
 
     /// appearance(폰트·여백·테마)가 통째로 바뀌었을 때의 일반 적용 경로. setFontSize의 메트릭 재계산을 일반화한 것 —
-    /// reloadConfig(파일 새 값)·resetToDefaults(공장 기본값 복원)이 공유한다. appearance를 갈아끼우고 base_font_size를
+    /// reloadConfig(파일 새 값)·reapplyLoadedConfig(통합 리셋 resetAllSettings 등)이 공유한다. appearance를 갈아끼우고 base_font_size를
     /// 새 폰트 크기로 맞춘 뒤(⌘0 기준도 따라감), 메트릭·grid·atlas 파이프라인을 돌린다. palette/scrollback 같은
     /// 코어 behavior 재주입은 호출자가 한다(appearance만 다루는 단일 책임).
     fn applyAppearance(self: *AppSession, new_appearance: config_mod.ResolvedAppearance) void {
@@ -4559,22 +4559,13 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// "Reset to Defaults" 메뉴 — resetAllSettings(커맨드 팝업 "Reset All Settings to Defaults")와 **같은 동작으로 통일**한다
-    /// (code-review #829 후속). 모든 config를 내장 기본값으로 되돌리고 config 파일을 삭제한다. 기존 부분 갱신
-    /// (changedScalarKeys + dirty in-place) 방식은 theme.preset/window.padding alias로 parse-time에 펼쳐진 키를 파일에
-    /// 기본값 줄로 쏟아 테마를 오염시키고(preset 줄 + 기본색 공존), 셸/env/workspace.root을 런타임에서만 덮어 새 탭
-    /// spawn을 어긋나게 했다. 검증된 파일 삭제 단일 구현(resetAllSettings)으로 합쳐 그 문제를 없앤다 — 메뉴·팝업이 같은 결과.
-    pub fn resetToDefaults(self: *AppSession) void {
-        self.resetAllSettings();
-    }
-
     /// "Reload Config" 메뉴 — config 파일을 재로드해 재시작 없이 반영한다. 파싱은 forgiving(알 수 없는 key/잘못된
     /// 값은 기본값 유지 + diagnostic), 로드 자체가 실패(OOM 등)하면 무동작이다(기존 config 유지). 적용 순서:
     /// ① 새 Parsed로 loaded_config 교체(옛 arena deinit 후 — appearance가 family 슬라이스를 빌리므로 새 appearance를
     ///    먼저 만들지 말고 loaded_config를 갈아끼운 뒤 resolve한다 → 옛 family를 빌린 옛 appearance는 이 시점에 버린다).
     /// ② appearance resolve + applyAppearance(메트릭·grid·atlas + base_font_size).
     /// ③ 파일 새 값이라 코어 behavior(scrollback/bell/page-keys/palette/ambiguous-width)도 모든 surface에 재적용.
-    /// resetToDefaults와 형제 경로다 — reload는 파일 값으로, reset은 기본 Config로 같은 appearance/behavior 적용을 한다.
+    /// resetAllSettings(통합 리셋)와 형제 경로다 — reload는 파일 값으로, reset은 기본 Config로 같은 appearance/behavior 적용을 한다.
     pub fn reloadConfig(self: *AppSession) void {
         var new_parsed = config_mod.loadConfigDefault(self.io, self.allocator) catch return; // 실패 시 무동작(forgiving)
         // 새 config로 appearance를 먼저 resolve한 뒤에 옛 loaded_config를 버린다 — resolve가 실패하면 옛
@@ -4601,11 +4592,13 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// **통합 리셋**(커맨드 팝업 "Reset All Settings to Defaults") — 모든 config를 **내장 기본값**으로 되돌린다. 메뉴
-    /// "Reset to Defaults"(런타임 줌/여백만 → init 설정)와 달리 config 전체다. loaded_config.config를 정적 기본값으로
-    /// 갈고(새 arena 불요 — 기본값은 정적 리터럴), reloadConfig와 같은 재적용(appearance·behavior·scrollback·palette·
-    /// ambiguous·사이드바)을 한 뒤, **config 파일을 삭제**해 영속까지 기본값으로 만든다(파일 부재 = 모든 키 기본). 사용자 요청.
-    fn resetAllSettings(self: *AppSession) void {
+    /// **통합 리셋** — 모든 config를 **내장 기본값**으로 되돌린다. 메뉴 "Reset to Defaults"(ABI `reset_defaults`)와 커맨드
+    /// 팝업 "Reset All Settings to Defaults"(`reset_settings` 액션) **두 진입점이 모두 이 단일 함수**를 호출한다(통일 —
+    /// code-review #829 후속: 옛 메뉴 전용 부분 갱신이 preset/alias 오염·런타임 드리프트를 내던 걸 검증된 파일 삭제로
+    /// 일원화). loaded_config.config를 정적 기본값으로 갈고(새 arena 불요 — 기본값은 정적 리터럴), reloadConfig와 같은
+    /// 재적용(appearance·behavior·scrollback·palette·ambiguous·사이드바)을 한 뒤, **config 파일을 삭제**해 영속까지
+    /// 기본값으로 만든다(파일 부재 = 모든 키 기본).
+    pub fn resetAllSettings(self: *AppSession) void {
         self.loaded_config.config = config_mod.Config{}; // 내장 기본값(정적 — 옛 arena 문자열은 미참조로 남았다 다음 reload/deinit에 해제)
         self.reapplyLoadedConfig(); // resolve→apply→behavior 캐시→reapply* 재적용(resolve-first 안전; reloadConfig 미러 — 중복 제거, 리뷰 #827)
         // **config 파일 삭제** → 다음 로드가 빈 상태 = schema·특수 키·주석 전부 기본값(진짜 통합 리셋). schema 키만 dirty로
@@ -11653,10 +11646,10 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     try std.testing.expectEqual(font_size_max, session.appearance.font.size);
 }
 
-// Reset to Defaults 메뉴는 resetAllSettings(통합 리셋)에 위임한다 — 런타임 줌·config 변경을 공장 기본값으로 되돌린다.
-// config 파일 삭제·notice 등 영속 측면은 resetAllSettings 통합 테스트가 다루므로, 여기선 메뉴 경로(resetToDefaults)가
-// 런타임 상태를 기본값으로 만드는지(위임 회귀 가드)만 본다.
-test "resetToDefaults: 메뉴 리셋이 런타임을 공장 기본값으로 되돌린다(resetAllSettings 위임)" {
+// resetAllSettings(통합 리셋 — 메뉴 Reset to Defaults·커맨드 팝업 공용 단일 함수)가 런타임 줌·config 변경을 공장
+// 기본값으로 되돌리는지. 파일 삭제·notice·테마 프리셋 측면은 별도 통합 테스트가 다루므로, 여기선 런타임 상태
+// (appearance·cell 메트릭·behavior 캐시·loaded_config)가 기본값이 되는지(회귀 가드)만 본다.
+test "resetAllSettings: 런타임 줌·config 변경을 공장 기본값으로 복원한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 메트릭 + PTY
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -11683,7 +11676,7 @@ test "resetToDefaults: 메뉴 리셋이 런타임을 공장 기본값으로 되�
     try std.testing.expect(session.appearance.font.size != factory.font.size);
     try std.testing.expect(session.cell_width_px > cw0); // 폰트 키우면 cell 픽셀이 커진다(메트릭)
 
-    session.resetToDefaults();
+    session.resetAllSettings();
 
     // 런타임·loaded_config가 공장 기본값으로(resetAllSettings: loaded_config=Config{} + reapplyLoadedConfig).
     try std.testing.expectEqual(factory.font.size, session.appearance.font.size);

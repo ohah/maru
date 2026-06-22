@@ -486,11 +486,13 @@ pub export fn maru_macos_app_session_pending_clipboard(
     return @intFromEnum(Status.ok);
 }
 
-// OSC 9/777·에이전트 완료 데스크톱 알림 데이터(title, body, surface_id). has_out=1이면 알림 있음(title/body 채움
-// — title은 빈 문자열일 수 있어 len으로 판단), 0이면 없음. surface_id_out=발신 Term의 surface.id로, Swift가 알림
-// userInfo에 (창 토큰, surface_id)로 실어 클릭 시 발신 터미널로 점프한다(activate_surface). 반환 버퍼는 Zig 소유로
+// OSC 9/777·에이전트 완료 데스크톱 알림 데이터(title, body, surface_id, foreground). has_out=1이면 알림 있음
+// (title/body 채움 — title은 빈 문자열일 수 있어 len으로 판단), 0이면 없음. surface_id_out=발신 Term의 surface.id로,
+// Swift가 알림 userInfo에 (창 토큰, surface_id)로 실어 클릭 시 발신 터미널로 점프한다(activate_surface).
+// foreground_out=앱이 전면일 때도 배너로 띄울지(1=에이전트 완료, 안 보는 탭이라 배너 / 0=OSC, 활성 surface가 보내
+// 사용자가 보고 있을 수 있어 전면이면 목록만) — Swift willPresent가 읽어 표시 스타일을 정한다. 반환 버퍼는 Zig 소유로
 // 다음 pending_notification/destroy까지 유효. Swift가 tick마다 호출해 UNUserNotificationCenter로 띄운다(알림은 OS
-// 소유 — 코어/Zig는 데이터만 넘긴다). title/body/surface_id를 같은 drain 한 번으로 원자적으로 돌려준다(race 없음).
+// 소유 — 코어/Zig는 데이터만 넘긴다). 네 값을 같은 drain 한 번으로 원자적으로 돌려준다(race 없음).
 pub export fn maru_macos_app_session_pending_notification(
     session: ?*AppSession,
     has_out: ?*u32,
@@ -499,6 +501,7 @@ pub export fn maru_macos_app_session_pending_notification(
     body_ptr: ?*?[*]const u8,
     body_len: ?*usize,
     surface_id_out: ?*u64,
+    foreground_out: ?*u32,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const has = has_out orelse return @intFromEnum(Status.null_out);
@@ -507,6 +510,7 @@ pub export fn maru_macos_app_session_pending_notification(
     const bp = body_ptr orelse return @intFromEnum(Status.null_out);
     const bl = body_len orelse return @intFromEnum(Status.null_out);
     const sid = surface_id_out orelse return @intFromEnum(Status.null_out);
+    const fg = foreground_out orelse return @intFromEnum(Status.null_out);
     const n = app_session.pendingNotification() orelse {
         has.* = 0;
         tp.* = null;
@@ -514,6 +518,7 @@ pub export fn maru_macos_app_session_pending_notification(
         bp.* = null;
         bl.* = 0;
         sid.* = 0;
+        fg.* = 0;
         return @intFromEnum(Status.ok);
     };
     has.* = 1;
@@ -522,6 +527,7 @@ pub export fn maru_macos_app_session_pending_notification(
     bp.* = if (n.body.len > 0) n.body.ptr else null;
     bl.* = n.body.len;
     sid.* = n.surface_id;
+    fg.* = if (n.foreground_banner) 1 else 0;
     return @intFromEnum(Status.ok);
 }
 

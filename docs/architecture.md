@@ -196,6 +196,20 @@ Maru도 같은 방향을 참고한다.
 
 이 결정의 의도는 메모리 최적화를 성급하게 전체 구조에 섞지 않고, hot storage가 명확해졌을 때 그 책임만 교체할 수 있게 만드는 것이다.
 
+### 스크롤백은 화면(screen)에 귀속한다
+
+위 "scrollback/page 책임을 별도 모듈로 분리"의 1단계로, 스크롤백 상태(ring·head·count·cap·rewrap 마크)를 `TerminalCore`의 평평한 필드가 아니라 `Scrollback` 구조체로 묶고, **활성 화면마다 별도 인스턴스**를 둔다. primary 화면은 `cap = scrollback.lines`인 ring을 갖고, **alternate screen(vim·less 등 TUI)은 `cap = 0`인 빈 인스턴스**를 갖는다. alt 진입 시 primary의 `Scrollback`을 보관 슬롯으로 옮기고 빈 인스턴스를 활성으로 세우며, 복귀 시 되돌린다(grid의 `saved_cells` 스왑과 같은 패턴).
+
+이 모델의 핵심은 **"alt 화면엔 스크롤백이 없다"가 데이터 타입으로 보장**된다는 것이다(Ghostty의 `max_scrollback = 0` alt screen과 같다). 결과로:
+
+- `pushScrollback`은 `cap == 0`이면 무동작이라, alt 출력이 스크롤백에 쌓이지 않는 것이 분기 없이 성립한다.
+- `scrollbackLen()`(= 활성 `Scrollback.count`)이 alt에서 항상 0이라, 스크롤바 렌더·스크롤 뷰·스크롤백 검색·프롬프트 점프가 모두 by-construction으로 "스크롤백 없음"을 본다.
+- 과거에 흩어져 있던 `if (alt_active)` 보정 가드(scrollViewport·scrollToAbs·jumpToPrompt·searchScrollback·scrollRegionUp push)가 제거된다. abs 좌표를 쓰는 새 기능이 alt 보정을 "빠뜨려서" 생기는 회귀(스크롤바가 alt에서 남던 버그)가 구조적으로 불가능해진다.
+
+단, `clearScreen`(Cmd+K)의 alt 가드는 데이터 모델 보정이 아니라 "실행 중 TUI를 지우지 않는다"는 정책이라 유지한다. 화면 단위 config(`scrollback.lines`)는 항상 primary 인스턴스에 적용한다(`setMaxScrollback`).
+
+후속(2단계)은 cursor·grid까지 포함한 완전한 `Screen` 구조체로 흡수하고, 그 자리에 page-aligned storage를 얹는 것이다.
+
 ## 개발환경
 
 필수 도구:

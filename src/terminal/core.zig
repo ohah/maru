@@ -106,6 +106,36 @@ fn clampSavedCursor(slot: *SavedCursor, size: types.Size) void {
     slot.cursor.col = clamped_col;
 }
 
+/// 한 화면(primary/alt)에 귀속된 스크롤백 ring. 화면 위로 밀려난 맨 윗줄을 보관한다. ring buffer로
+/// 가장 오래된 행이 `head`, 보관 개수가 `count`, 용량이 `cap`이다. 세 ring(cells/wrapped/prompt_marks)은
+/// 길이가 항상 같아야 한다(`(head+i)%len` 인덱싱 — pushScrollback이 함께 할당). 슬롯 cell 버퍼는
+/// 재사용해 scroll hot path가 alloc 없이 memcpy만 하게 한다.
+///
+/// 핵심 불변식: **alt 화면은 `cap == 0`인 빈 인스턴스**를 갖는다. 그래서 `pushScrollback`이 무동작이고
+/// `count`가 항상 0이라, "alt엔 스크롤백 없음"이 분기 없이 데이터 타입으로 보장된다(Ghostty의
+/// `max_scrollback = 0` alt screen과 동일). alt 진입/이탈은 grid의 `saved_cells` 스왑과 같은 패턴으로
+/// primary 인스턴스를 보관 슬롯에 옮기고 빈 인스턴스를 활성으로 세운다. 설계: docs/architecture.md.
+const Scrollback = struct {
+    ring: []?[]types.Cell = &.{},
+    wrapped: []bool = &.{},
+    prompt_marks: []types.RowPrompt = &.{},
+    head: usize = 0,
+    count: usize = 0,
+    cap: usize = 0,
+    // 재-wrap 지연 마크. resize는 비싼 ring 재구성을 즉시 하지 않고 이 플래그만 세우고, 과거를 실제로
+    // 보는 순간(scrollViewport/renderSnapshot)에 현재 폭으로 1회 수행한다.
+    rewrap_pending: bool = false,
+
+    fn deinit(self: *Scrollback, allocator: std.mem.Allocator) void {
+        for (self.ring) |slot| {
+            if (slot) |cells_row| allocator.free(cells_row);
+        }
+        if (self.ring.len > 0) allocator.free(self.ring);
+        if (self.wrapped.len > 0) allocator.free(self.wrapped);
+        if (self.prompt_marks.len > 0) allocator.free(self.prompt_marks);
+    }
+};
+
 pub const TerminalCore = struct {
     allocator: std.mem.Allocator,
     size: types.Size,
@@ -236,21 +266,13 @@ pub const TerminalCore = struct {
     // 전이 스트림이라 RIS는 건드리지 않는다(프레임마다 drain되어 어차피 짧게 유지).
     shell_events: std.ArrayListUnmanaged(types.ShellEvent) = .empty,
     shell_events_overflow: bool = false,
-    // 스크롤백: 화면 위로 밀려난(scroll된) 맨 윗줄을 보관한다. ring buffer로, 가장 오래된 행이
-    // sb_head, 보관 개수가 sb_count다. 슬롯 버퍼를 재사용해 scroll마다 alloc 없이 memcpy만 하므로
-    // 출력 hot path(매 줄 scroll)를 느리게 하지 않는다. 과거를 스크롤해서 보는 뷰포트와 reflow는
-    // 이 저장 위에 올린다(다음 단계). 첫 scroll에서 max_scrollback 크기로 lazy 할당한다.
-    scrollback: []?[]types.Cell = &.{},
-    // 각 스크롤백 행의 soft-wrap 플래그. scrollback과 병렬 ring(같은 max_scrollback 길이, 같은
-    // (sb_head+i)%len 인덱싱). 슬롯 cell 버퍼 재사용 경로를 건드리지 않는 평평한 []bool이다.
-    sb_wrapped: []bool = &.{},
-    // 각 스크롤백 행의 OSC 133 semantic 태그. scrollback/sb_wrapped와 병렬 ring(같은 max_scrollback
-    // 길이, 같은 (sb_head+i)%len 인덱싱). 세 ring의 길이는 항상 같아야 한다(pushScrollback이 함께
-    // 할당). 스크롤백으로 밀려난 프롬프트/출력 행의 분류를 보존한다.
-    sb_prompt_marks: []types.RowPrompt = &.{},
-    sb_head: usize = 0,
-    sb_count: usize = 0,
-    max_scrollback: usize = default_max_scrollback,
+    // 활성 화면의 스크롤백 ring. primary는 cap>0(config scrollback.lines), alt는 cap=0인 빈
+    // 인스턴스라 "alt엔 스크롤백 없음"이 데이터 타입으로 보장된다(Scrollback 구조체 주석 참고).
+    // init이 cap을 default_max_scrollback으로 세우고 setMaxScrollback이 config를 반영한다.
+    sb: Scrollback = .{},
+    // alt 화면 동안 primary의 스크롤백을 보관하는 슬롯(grid의 saved_cells와 같은 스왑 패턴).
+    // primary 활성 중에는 비어 있다.
+    saved_sb: Scrollback = .{},
     // EAW Ambiguous(동그란 번호 등)를 2칸으로 advance할지(text.ambiguous-width=wide). 기본 false(narrow — 정렬
     // 안전·Ghostty/xterm.js 호환). putCell이 셀 폭을 정할 때 width.cellWidthAmbiguous로 반영하므로 grid·커서·렌더가
     // 같은 폭을 본다(단일 출처). app_session이 loaded_config에서 set(max_scrollback과 같은 직접 대입 패턴).
@@ -264,10 +286,6 @@ pub const TerminalCore = struct {
     // 스크롤백(과거)이 보이고 활성 화면 아랫부분은 가려진다. 과거를 보는 중 새 출력이 scroll되면
     // 같은 내용을 계속 보도록 함께 올린다(scroll-lock).
     view_offset: usize = 0,
-    // 스크롤백 재-wrap 지연 마크. resize는 비싼 ring 재구성(행 1000개 재할당)을 즉시 하지 않고
-    // 이 플래그만 세우고, 사용자가 실제로 과거를 보는 순간(scrollViewport/renderSnapshot)에 현재
-    // 폭으로 1회 수행한다 — 연속 드래그 resize가 와도 마지막 폭으로 한 번만 재-wrap된다.
-    sb_rewrap_pending: bool = false,
     // 마우스 드래그 선택(anchor=누른 곳, head=현재 끝). 절대 행 좌표라 스크롤해도 내용을 따라간다.
     // 스크롤백 eviction(가득 찬 ring)·재-wrap·clear 때 보정/해제된다.
     selection_anchor: ?types.SelectionPoint = null,
@@ -456,6 +474,7 @@ pub const TerminalCore = struct {
             .tabstops = tabstops,
             .dirty = fullDirty(grid),
             .scroll_bottom = grid.rows - 1,
+            .sb = .{ .cap = default_max_scrollback }, // primary 스크롤백 용량(config가 setMaxScrollback으로 덮음)
         };
     }
 
@@ -550,12 +569,8 @@ pub const TerminalCore = struct {
         if (self.saved_cells.len > 0) self.allocator.free(self.saved_cells);
         if (self.saved_wrapped.len > 0) self.allocator.free(self.saved_wrapped);
         if (self.saved_prompt_marks.len > 0) self.allocator.free(self.saved_prompt_marks);
-        for (self.scrollback) |slot| {
-            if (slot) |cells| self.allocator.free(cells);
-        }
-        if (self.scrollback.len > 0) self.allocator.free(self.scrollback);
-        if (self.sb_wrapped.len > 0) self.allocator.free(self.sb_wrapped);
-        if (self.sb_prompt_marks.len > 0) self.allocator.free(self.sb_prompt_marks);
+        self.sb.deinit(self.allocator);
+        self.saved_sb.deinit(self.allocator); // alt 중 destroy면 primary 스크롤백이 여기 보관돼 있다
         if (self.viewport_cells.len > 0) self.allocator.free(self.viewport_cells);
         if (self.viewport_prompt_marks.len > 0) self.allocator.free(self.viewport_prompt_marks);
         if (self.reflow_cells.len > 0) self.allocator.free(self.reflow_cells);
@@ -576,24 +591,39 @@ pub const TerminalCore = struct {
 
     /// 스크롤백에 보관된 행 수.
     pub fn scrollbackLen(self: *const TerminalCore) usize {
-        return self.sb_count;
+        return self.sb.count;
+    }
+
+    /// primary 스크롤백의 용량(config scrollback.lines). alt 중에는 활성 sb가 cap=0인 빈
+    /// 인스턴스라, config 값을 보고 싶으면 보관 슬롯(primary)을 본다.
+    pub fn maxScrollback(self: *const TerminalCore) usize {
+        return if (self.alt_active) self.saved_sb.cap else self.sb.cap;
+    }
+
+    /// scrollback.lines config를 반영한다. 화면 단위 정책이므로 활성 화면과 무관하게 **항상
+    /// primary 스크롤백**에 적용한다(alt의 cap=0 불변식은 유지 — 데이터 모델 보정이 아니라 config 라우팅).
+    pub fn setMaxScrollback(self: *TerminalCore, lines: usize) void {
+        if (self.alt_active) {
+            self.saved_sb.cap = lines;
+        } else {
+            self.sb.cap = lines;
+        }
     }
 
     /// i=0이 가장 오래된 스크롤백 행. 범위 밖이거나 OOM으로 비어 있으면 null.
     pub fn scrollbackRow(self: *const TerminalCore, i: usize) ?[]const types.Cell {
-        if (i >= self.sb_count) return null;
-        return self.scrollback[(self.sb_head + i) % self.scrollback.len];
+        if (i >= self.sb.count) return null;
+        return self.sb.ring[(self.sb.head + i) % self.sb.ring.len];
     }
 
     /// 뷰포트를 delta_up줄만큼 위(과거, 양수)/아래(현재, 음수)로 스크롤한다. [0, sb_count]로 clamp.
     /// 뷰가 바뀌면 화면 전체를 dirty로 표시한다(렌더가 새 윈도를 다시 그리도록).
     pub fn scrollViewport(self: *TerminalCore, delta_up: isize) void {
         self.owner_dbg.assertOwnedBySelf(); // reader 노출 시 core_mutex 보유 강제(디버그 전용 §6-5)
-        // alt screen에서는 스크롤백 뷰가 잠긴다(xterm 동작) — TUI 화면 위로 history가 겹치지 않게.
-        if (self.alt_active) return;
-        // 지연된 재-wrap을 먼저 수행한다 — sb_count(스크롤 범위)가 재-wrap으로 바뀔 수 있다.
+        // 지연된 재-wrap을 먼저 수행한다 — sb.count(스크롤 범위)가 재-wrap으로 바뀔 수 있다.
+        // alt에서는 활성 sb.count==0이라 아래 clamp가 자연히 무동작이다(가드 불필요 — Scrollback 모델).
         self.ensureScrollbackRewrapped();
-        const max_off: isize = @intCast(self.sb_count);
+        const max_off: isize = @intCast(self.sb.count);
         var off: isize = @as(isize, @intCast(self.view_offset)) + delta_up;
         if (off < 0) off = 0;
         if (off > max_off) off = max_off;
@@ -614,17 +644,16 @@ pub const TerminalCore = struct {
     }
 
     /// 절대 행 abs가 뷰포트 세로 중앙쯤에 오도록 스크롤한다(스크롤백 Find가 현재 매치를 화면에 보일 때).
-    /// 중앙 배치라 상단 Find 오버레이에 매치가 가리지 않는다. alt screen에선 스크롤백이 잠겨 무동작
-    /// (jumpToPrompt와 같은 규율). [0, sb_count]로 clamp.
+    /// 중앙 배치라 상단 Find 오버레이에 매치가 가리지 않는다. alt screen에선 sb.count==0이라 매치가
+    /// 활성 화면뿐이고 new_off가 0(바닥)으로 떨어져 자연히 무동작이다. [0, sb.count]로 clamp.
     pub fn scrollToAbs(self: *TerminalCore, abs: usize) void {
-        if (self.alt_active) return;
-        self.ensureScrollbackRewrapped(); // sb_count(절대 좌표 범위)가 재-wrap으로 바뀔 수 있다
-        const total = self.sb_count + self.size.rows;
+        self.ensureScrollbackRewrapped(); // sb.count(절대 좌표 범위)가 재-wrap으로 바뀔 수 있다
+        const total = self.sb.count + self.size.rows;
         if (total == 0) return;
         // 매치를 뷰포트 세로 중앙(target_top = abs - rows/2, saturating)에 둔다.
         const half = self.size.rows / 2;
         const target_top = if (abs > half) abs - half else 0;
-        const new_off: usize = if (target_top < self.sb_count) self.sb_count - target_top else 0; // 활성 행이면 바닥
+        const new_off: usize = if (target_top < self.sb.count) self.sb.count - target_top else 0; // 활성 행이면 바닥
         if (new_off != self.view_offset) {
             self.view_offset = new_off;
             self.dirty = fullDirty(self.size);
@@ -633,8 +662,8 @@ pub const TerminalCore = struct {
 
     /// 절대 행(스크롤백 0..sb_count-1, 이어서 활성 화면)의 OSC 133 정보(분류+종료코드). 범위 밖은 기본값.
     fn promptAtAbs(self: *const TerminalCore, abs: usize) types.RowPrompt {
-        if (abs < self.sb_count) return self.scrollbackRowPrompt(abs);
-        const active = abs - self.sb_count;
+        if (abs < self.sb.count) return self.scrollbackRowPrompt(abs);
+        const active = abs - self.sb.count;
         if (active < self.prompt_marks.len) return self.prompt_marks[active];
         return .{};
     }
@@ -653,11 +682,11 @@ pub const TerminalCore = struct {
 
     /// 절대 행 abs의 종료코드를 설정한다(활성/스크롤백 통일). 거터 색 결정용.
     fn setPromptExitAtAbs(self: *TerminalCore, abs: usize, exit: i16) void {
-        if (abs >= self.sb_count) {
-            const active = abs - self.sb_count;
+        if (abs >= self.sb.count) {
+            const active = abs - self.sb.count;
             if (active < self.prompt_marks.len) self.prompt_marks[active].exit = exit;
-        } else if (self.sb_prompt_marks.len > 0) {
-            self.sb_prompt_marks[(self.sb_head + abs) % self.sb_prompt_marks.len].exit = exit;
+        } else if (self.sb.prompt_marks.len > 0) {
+            self.sb.prompt_marks[(self.sb.head + abs) % self.sb.prompt_marks.len].exit = exit;
         }
     }
 
@@ -668,7 +697,7 @@ pub const TerminalCore = struct {
     /// 재분류되면, 그 명령엔 promptish 시작 행이 없어 스캔이 '이전' 블록을 찍을 수 있다. 실제 zsh는
     /// Enter의 개행이 C를 새 행에 두므로 입력 행이 .input으로 남아 안전하다(합성 스트림 한정 엣지).
     fn stampPromptExit(self: *TerminalCore, exit: i16) void {
-        var abs = self.sb_count + self.cursor.row + 1;
+        var abs = self.sb.count + self.cursor.row + 1;
         while (abs > 0) {
             abs -= 1;
             if (self.isPromptStart(abs)) {
@@ -684,9 +713,9 @@ pub const TerminalCore = struct {
     pub fn jumpToPrompt(self: *TerminalCore, dir: i8) bool {
         if (self.alt_active) return false;
         self.ensureScrollbackRewrapped(); // sb_count(절대 좌표 범위)가 재-wrap으로 바뀔 수 있다
-        const total = self.sb_count + self.size.rows;
+        const total = self.sb.count + self.size.rows;
         if (total == 0) return false;
-        const top = self.sb_count - @min(self.view_offset, self.sb_count); // 현재 뷰포트 맨 위 절대 행(underflow 가드)
+        const top = self.sb.count - @min(self.view_offset, self.sb.count); // 현재 뷰포트 맨 위 절대 행(underflow 가드)
         var target: ?usize = null;
         if (dir < 0) {
             var r = top;
@@ -707,7 +736,7 @@ pub const TerminalCore = struct {
             }
         }
         const t = target orelse return false;
-        const new_off: usize = if (t < self.sb_count) self.sb_count - t else 0; // 활성 행이면 바닥
+        const new_off: usize = if (t < self.sb.count) self.sb.count - t else 0; // 활성 행이면 바닥
         if (new_off != self.view_offset) {
             self.view_offset = new_off;
             self.dirty = fullDirty(self.size);
@@ -724,11 +753,11 @@ pub const TerminalCore = struct {
     /// view_offset줄은 가장 최근 스크롤백, 나머지는 활성 화면 윗부분이다. 스크롤백 행이 비었으면(OOM)
     /// 빈 슬라이스를 준다. resize로 폭이 달라진 스크롤백 행은 저장된 폭 그대로 — 렌더가 clamp/pad한다.
     pub fn viewportRow(self: *const TerminalCore, r: u16) []const types.Cell {
-        const ci = self.sb_count - self.view_offset + r; // content index (sb_count>=view_offset 보장)
-        if (ci < self.sb_count) {
+        const ci = self.sb.count - self.view_offset + r; // content index (sb_count>=view_offset 보장)
+        if (ci < self.sb.count) {
             return self.scrollbackRow(ci) orelse &.{};
         }
-        const active_row = ci - self.sb_count;
+        const active_row = ci - self.sb.count;
         const start = active_row * self.size.cols;
         return self.cells[start .. start + self.size.cols];
     }
@@ -747,24 +776,24 @@ pub const TerminalCore = struct {
 
     /// 보이는 행 r의 OSC 133 정보(viewportRow와 같은 [스크롤백 ++ 활성] 윈도 인덱싱).
     pub fn viewportRowPrompt(self: *const TerminalCore, r: u16) types.RowPrompt {
-        const ci = self.sb_count - @min(self.view_offset, self.sb_count) + r; // underflow 가드(다른 호출부와 동일)
-        if (ci < self.sb_count) return self.scrollbackRowPrompt(ci);
-        return self.prompt_marks[ci - self.sb_count];
+        const ci = self.sb.count - @min(self.view_offset, self.sb.count) + r; // underflow 가드(다른 호출부와 동일)
+        if (ci < self.sb.count) return self.scrollbackRowPrompt(ci);
+        return self.prompt_marks[ci - self.sb.count];
     }
 
     /// scroll로 위로 밀려나는 맨 윗줄을 스크롤백 ring에 보관한다. 슬롯 버퍼를 재사용해(같은 길이면
     /// memcpy만) 매 scroll에 alloc하지 않는다. OOM이면 그 행은 보관하지 않고 넘어간다(best-effort).
     /// i=0이 가장 오래된 스크롤백 행의 soft-wrap 플래그.
     pub fn scrollbackRowWrapped(self: *const TerminalCore, i: usize) bool {
-        if (i >= self.sb_count or self.sb_wrapped.len == 0) return false;
-        return self.sb_wrapped[(self.sb_head + i) % self.sb_wrapped.len];
+        if (i >= self.sb.count or self.sb.wrapped.len == 0) return false;
+        return self.sb.wrapped[(self.sb.head + i) % self.sb.wrapped.len];
     }
 
     /// i번째 스크롤백 행의 OSC 133 정보(i=0이 가장 오래된 행). sb_wrapped와 같은 ring 인덱싱.
     /// 없거나 범위 밖이면 기본값({.unknown, null}).
     pub fn scrollbackRowPrompt(self: *const TerminalCore, i: usize) types.RowPrompt {
-        if (i >= self.sb_count or self.sb_prompt_marks.len == 0) return .{};
-        return self.sb_prompt_marks[(self.sb_head + i) % self.sb_prompt_marks.len];
+        if (i >= self.sb.count or self.sb.prompt_marks.len == 0) return .{};
+        return self.sb.prompt_marks[(self.sb.head + i) % self.sb.prompt_marks.len];
     }
 
     /// 붙여넣기 바이트를 PTY 입력으로 인코딩한다: 개행을 CR로 정규화(\r\n/\n -> \r — 셸 입력의
@@ -886,7 +915,7 @@ pub const TerminalCore = struct {
     /// 절대-행 [start, end] 선형 범위를 현재 뷰포트 좌표로 클립한다(화면 밖이면 null). 선택
     /// 하이라이트와 URL 밑줄이 같은 규칙을 쓰게 공유한다.
     fn clipAbsSpanToViewport(self: *const TerminalCore, start: types.SelectionPoint, end: types.SelectionPoint, block: bool) ?types.SelectionSpan {
-        const top_abs = self.sb_count - @min(self.view_offset, self.sb_count);
+        const top_abs = self.sb.count - @min(self.view_offset, self.sb.count);
         const bottom_abs = top_abs + self.size.rows - 1;
         if (end.row < top_abs or start.row > bottom_abs) return null;
         const start_row: u16 = if (start.row < top_abs) 0 else @intCast(start.row - top_abs);
@@ -954,7 +983,7 @@ pub const TerminalCore = struct {
     /// 절대 좌표 anchor에서 시작하는 URL 단어의 현재 뷰포트 밑줄 범위. 매 frame 호출돼 스크롤/
     /// 출력/resize 후에도 현재 폭/위치에 맞게 클립된다(stale span OOB 차단).
     pub fn urlSpanAtAbs(self: *const TerminalCore, anchor: types.SelectionPoint) ?types.SelectionSpan {
-        const top_abs = self.sb_count - @min(self.view_offset, self.sb_count);
+        const top_abs = self.sb.count - @min(self.view_offset, self.sb.count);
         const bottom_abs = top_abs + self.size.rows - 1;
         if (anchor.row < top_abs or anchor.row > bottom_abs) return null; // anchor가 화면 밖
         const id = self.cellLinkAt(anchor.row, anchor.col);
@@ -1095,7 +1124,7 @@ pub const TerminalCore = struct {
     pub fn selectAll(self: *TerminalCore) void {
         self.ensureScrollbackRewrapped(); // selectLineAt와 같은 이유 — abs 좌표 쓰기 전 스크롤백 rewrap 확정
         if (self.size.rows == 0) return;
-        const last_abs = self.sb_count + self.size.rows - 1;
+        const last_abs = self.sb.count + self.size.rows - 1;
         const end_cells = self.absRow(last_abs) orelse return;
         self.selection_anchor = .{ .row = 0, .col = 0 };
         self.selection_head = .{ .row = last_abs, .col = @intCast(end_cells.len -| 1) };
@@ -1169,12 +1198,11 @@ pub const TerminalCore = struct {
         while (nit.nextCodepoint()) |cp| try needle.append(allocator, cp);
         if (needle.items.len == 0) return;
 
-        const total = self.sb_count + self.size.rows;
-        // alt screen에선 현재 화면(active 영역 [sb_count, total))만 검색한다. primary면 스크롤백 포함 0부터.
-        // 이유: alt에선 scrollToAbs가 잠겨(무동작) primary 스크롤백 매치로 갈 수 없어 "찾았지만 못 가는"
-        // 카운터만 늘고, alt는 화면 밖 과거를 스크롤백에 안 쌓으므로(scrollRegionUp의 push 가드) 현재 화면이
-        // 검색 가능한 전부다. 베이스: Ghostty도 alt에선 active area(현재 화면)만 검색한다(search ActiveSearch).
-        const start_abs: usize = if (self.alt_active) self.sb_count else 0;
+        const total = self.sb.count + self.size.rows;
+        // 스크롤백 포함 [0, total) 전체를 검색한다. alt에선 활성 sb.count==0이라 이 범위가 자연히
+        // 현재 화면뿐이다(스크롤백이 cap=0인 빈 인스턴스 — Scrollback 모델, 가드 불필요). primary면
+        // 스크롤백+화면 전부. 베이스: Ghostty도 alt에선 active area(현재 화면)만 검색한다(ActiveSearch).
+        const start_abs: usize = 0;
         // 논리 줄마다 코드포인트 시퀀스(cps)와 각 코드포인트의 절대 좌표(coords)를 만들어 검색하고, 다음 줄에서
         // 버퍼를 재사용한다(스크롤백 전체를 한 문자열로 들지 않음 — 메모리는 가장 긴 논리 줄 하나).
         var cps: std.ArrayList(u21) = .empty;
@@ -1267,7 +1295,7 @@ pub const TerminalCore = struct {
 
     fn absRowFromViewport(self: *const TerminalCore, viewport_row: u16) usize {
         // 절대 행 = 스크롤백 시작 기준. 뷰포트 첫 행은 sb_count - view_offset.
-        return self.sb_count - @min(self.view_offset, self.sb_count) + viewport_row;
+        return self.sb.count - @min(self.view_offset, self.sb.count) + viewport_row;
     }
 
     /// 정규화된 선택(start <= end). 없으면 null.
@@ -1340,16 +1368,16 @@ pub const TerminalCore = struct {
 
     /// 절대 행 -> 셀(스크롤백 또는 활성 화면). 범위 밖이면 null.
     fn absRow(self: *const TerminalCore, abs: usize) ?[]const types.Cell {
-        if (abs < self.sb_count) return self.scrollbackRow(abs);
-        const active = abs - self.sb_count;
+        if (abs < self.sb.count) return self.scrollbackRow(abs);
+        const active = abs - self.sb.count;
         if (active >= self.size.rows) return null;
         const start = @as(usize, @intCast(active)) * self.size.cols;
         return self.cells[start .. start + self.size.cols];
     }
 
     fn absRowWrapped(self: *const TerminalCore, abs: usize) bool {
-        if (abs < self.sb_count) return self.scrollbackRowWrapped(abs);
-        const active = abs - self.sb_count;
+        if (abs < self.sb.count) return self.scrollbackRowWrapped(abs);
+        const active = abs - self.sb.count;
         if (active >= self.size.rows) return false;
         return self.wrapped[active];
     }
@@ -1357,14 +1385,14 @@ pub const TerminalCore = struct {
     /// 스크롤백을 비운다(ED 3). 행 버퍼는 해제하고 ring 슬롯 배열은 유지해 다음 push가 재할당
     /// 없이 다시 쓴다. 뷰포트는 바닥으로 스냅한다(지워진 과거를 보고 있을 수 없으니).
     fn clearScrollback(self: *TerminalCore) void {
-        for (self.scrollback) |*slot| {
+        for (self.sb.ring) |*slot| {
             if (slot.*) |cells_row| {
                 self.allocator.free(cells_row);
                 slot.* = null;
             }
         }
-        self.sb_head = 0;
-        self.sb_count = 0;
+        self.sb.head = 0;
+        self.sb.count = 0;
         self.view_offset = 0;
         self.invalidateSelection(); // 스크롤백을 지우면 abs 좌표가 무효 — 선택 해제(필드 주석의 약속)
     }
@@ -1377,13 +1405,13 @@ pub const TerminalCore = struct {
     /// 지연된 스크롤백 재-wrap을 지금 수행한다(있다면). 과거를 보는 경로(scrollViewport/
     /// renderSnapshot)가 진입할 때 불러, 뷰가 항상 현재 폭 기준의 행 수/내용을 보게 한다.
     fn ensureScrollbackRewrapped(self: *TerminalCore) void {
-        if (!self.sb_rewrap_pending) return;
-        self.sb_rewrap_pending = false;
+        if (!self.sb.rewrap_pending) return;
+        self.sb.rewrap_pending = false;
         self.rewrapScrollback(self.size.cols);
     }
 
     fn rewrapScrollback(self: *TerminalCore, new_cols: u16) void {
-        if (self.sb_count == 0 or new_cols == 0) return;
+        if (self.sb.count == 0 or new_cols == 0) return;
         self.selectionClear(); // 행 좌표가 재배치된다 — 선택은 해제가 안전(다른 터미널도 동일)
         _ = self.rewrapScrollbackInner(new_cols, null) catch null;
     }
@@ -1392,7 +1420,7 @@ pub const TerminalCore = struct {
     /// 바닥으로 튕기지 않고, 그 행이 재-wrap 후 어느 행이 됐는지로 view_offset을 재계산한다
     /// (Ghostty/iTerm2처럼 보던 내용이 그대로 보이게).
     fn rewrapScrollbackAnchored(self: *TerminalCore, new_cols: u16, anchor_row: usize) void {
-        if (self.sb_count == 0 or new_cols == 0) return;
+        if (self.sb.count == 0 or new_cols == 0) return;
         self.selectionClear(); // rewrapScrollback과 동일 — 좌표 재배치
 
         const new_anchor = self.rewrapScrollbackInner(new_cols, anchor_row) catch {
@@ -1401,10 +1429,10 @@ pub const TerminalCore = struct {
         };
         if (new_anchor) |row_index| {
             // 뷰 최상단이 그 행을 다시 가리키게: viewportRow(0) = sb_count - view_offset.
-            self.view_offset = @min(self.sb_count - @min(row_index, self.sb_count), self.sb_count);
+            self.view_offset = @min(self.sb.count - @min(row_index, self.sb.count), self.sb.count);
         } else {
             // 앵커 행이 cap 드랍으로 사라졌다 — 남은 가장 오래된 행(맨 위)으로.
-            self.view_offset = self.sb_count;
+            self.view_offset = self.sb.count;
         }
     }
 
@@ -1415,14 +1443,14 @@ pub const TerminalCore = struct {
         var total_out: usize = 0;
         {
             var i: usize = 0;
-            while (i < self.sb_count) {
+            while (i < self.sb.count) {
                 var j = i;
-                while (j + 1 < self.sb_count and self.scrollbackRowWrapped(j)) j += 1;
+                while (j + 1 < self.sb.count and self.scrollbackRowWrapped(j)) j += 1;
                 total_out += self.countRewrapRows(i, j, new_cols);
                 i = j + 1;
             }
         }
-        const keep = @min(total_out, self.max_scrollback);
+        const keep = @min(total_out, self.sb.cap);
         const skip = total_out - keep; // 생성 없이 건너뛸 산출 행 수(가장 오래된 쪽)
 
         var rows: std.ArrayList([]types.Cell) = .empty;
@@ -1443,10 +1471,10 @@ pub const TerminalCore = struct {
         var emitted: usize = 0; // 전체 산출 행 인덱스(skip 비교용)
         var anchor_out: ?usize = null; // anchor_row(옛 행)가 떨어진 새 행 인덱스(skip 반영 전)
         var i: usize = 0;
-        while (i < self.sb_count) {
+        while (i < self.sb.count) {
             // 논리 줄 [i, j]: 연속된 soft-wrap 행 + 마지막 행.
             var j = i;
-            while (j + 1 < self.sb_count and self.scrollbackRowWrapped(j)) j += 1;
+            while (j + 1 < self.sb.count and self.scrollbackRowWrapped(j)) j += 1;
             // 줄의 마지막 산출 행이 물려받을 wrap 플래그: 논리 줄이 스크롤백의 끝을 넘어 활성
             // 화면으로 이어지면(마지막 행의 sb_wrapped=true) 그 경계 연속성을 보존한다.
             const tail_wrap = self.scrollbackRowWrapped(j);
@@ -1512,19 +1540,19 @@ pub const TerminalCore = struct {
 
         // 기존 ring 행을 비우고(슬롯 배열은 재사용) 새 행으로 채운다. ring이 아직 lazy 미할당이면
         // sb_count==0이라 여기 못 온다(가드).
-        for (self.scrollback) |*slot| {
+        for (self.sb.ring) |*slot| {
             if (slot.*) |old_row| {
                 self.allocator.free(old_row);
                 slot.* = null;
             }
         }
         for (rows.items, 0..) |row_cells, k| {
-            self.scrollback[k] = row_cells;
-            self.sb_wrapped[k] = wraps.items[k];
-            self.sb_prompt_marks[k] = pmarks.items[k]; // 재-wrap된 행과 정렬된 OSC 133 태그
+            self.sb.ring[k] = row_cells;
+            self.sb.wrapped[k] = wraps.items[k];
+            self.sb.prompt_marks[k] = pmarks.items[k]; // 재-wrap된 행과 정렬된 OSC 133 태그
         }
-        self.sb_head = 0;
-        self.sb_count = rows.items.len;
+        self.sb.head = 0;
+        self.sb.count = rows.items.len;
         // 소유권 이전 완료 — defer가 이중 해제하지 않게 목록을 비운다.
         rows.items.len = 0;
 
@@ -1597,51 +1625,51 @@ pub const TerminalCore = struct {
     /// 행을 스크롤백에 보관한다. OOM 등으로 실제 보관에 실패하면 false — 호출자(scroll-lock)는
     /// 보관된 경우에만 view_offset을 보정해야 보던 위치가 어긋나지 않는다.
     fn pushScrollback(self: *TerminalCore, row_cells: []const types.Cell, wrapped_flag: bool, mark: types.RowPrompt) bool {
-        if (self.max_scrollback == 0) return false;
-        if (self.scrollback.len == 0) {
-            const ring = self.allocator.alloc(?[]types.Cell, self.max_scrollback) catch return false;
+        if (self.sb.cap == 0) return false;
+        if (self.sb.ring.len == 0) {
+            const ring = self.allocator.alloc(?[]types.Cell, self.sb.cap) catch return false;
             @memset(ring, null);
             // wrap·semantic 병렬 ring도 함께 할당한다. 하나라도 실패하면 전부 포기해 세 ring 길이를
             // 항상 같게 유지한다((sb_head+i)%len 인덱싱이 어긋나면 안 된다).
-            const wring = self.allocator.alloc(bool, self.max_scrollback) catch {
+            const wring = self.allocator.alloc(bool, self.sb.cap) catch {
                 self.allocator.free(ring);
                 return false;
             };
             @memset(wring, false);
-            const pring = self.allocator.alloc(types.RowPrompt, self.max_scrollback) catch {
+            const pring = self.allocator.alloc(types.RowPrompt, self.sb.cap) catch {
                 self.allocator.free(ring);
                 self.allocator.free(wring);
                 return false;
             };
             @memset(pring, .{});
-            self.scrollback = ring;
-            self.sb_wrapped = wring;
-            self.sb_prompt_marks = pring;
+            self.sb.ring = ring;
+            self.sb.wrapped = wring;
+            self.sb.prompt_marks = pring;
         }
-        const cap = self.scrollback.len;
+        const cap = self.sb.ring.len;
         // 가득 차면 (sb_head+sb_count)%cap == sb_head라, 가장 오래된 슬롯을 재사용해 덮어쓴다.
-        const idx = (self.sb_head + self.sb_count) % cap;
-        if (self.scrollback[idx]) |existing| {
+        const idx = (self.sb.head + self.sb.count) % cap;
+        if (self.sb.ring[idx]) |existing| {
             if (existing.len == row_cells.len) {
                 @memcpy(existing, row_cells);
             } else {
                 const dup = self.allocator.dupe(types.Cell, row_cells) catch return false; // OOM이면 옛 행 유지
                 self.allocator.free(existing);
-                self.scrollback[idx] = dup;
+                self.sb.ring[idx] = dup;
             }
         } else {
-            self.scrollback[idx] = self.allocator.dupe(types.Cell, row_cells) catch return false;
+            self.sb.ring[idx] = self.allocator.dupe(types.Cell, row_cells) catch return false;
         }
-        self.sb_wrapped[idx] = wrapped_flag;
-        self.sb_prompt_marks[idx] = mark;
-        if (self.sb_count == cap) {
-            self.sb_head = (self.sb_head + 1) % cap;
+        self.sb.wrapped[idx] = wrapped_flag;
+        self.sb.prompt_marks[idx] = mark;
+        if (self.sb.count == cap) {
+            self.sb.head = (self.sb.head + 1) % cap;
             // ring이 가득 차 가장 오래된 행이 밀려나면 절대 행 좌표가 한 칸 당겨진다 — 선택도
             // 따라 보정하고, 선택이 밀려난 행을 포함했으면 해제한다. placement anchor도 같은 보정.
             self.shiftSelectionForEviction();
             self.shiftPlacementsForEviction();
         } else {
-            self.sb_count += 1;
+            self.sb.count += 1;
         }
         return true;
     }
@@ -2400,7 +2428,7 @@ pub const TerminalCore = struct {
         self.addOrReplacePlacement(.{
             .image_id = cmd.image_id,
             .placement_id = cmd.placement_id,
-            .anchor_row = self.sb_count + self.cursor.row, // 커서의 절대 행
+            .anchor_row = self.sb.count + self.cursor.row, // 커서의 절대 행
             .anchor_col = self.cursor.col,
             .cell_x_offset = cmd.cell_x_offset,
             .cell_y_offset = cmd.cell_y_offset,
@@ -3441,8 +3469,13 @@ pub const TerminalCore = struct {
         self.prompt_marks = alt_prompt_marks; // alt 화면은 셸 프롬프트 의미가 없다(전부 .unknown)
         self.semantic_state = .unknown; // alt 진입 — primary의 진행 중 영역을 이어받지 않는다
         self.alt_active = true;
-        // alt에서 스크롤백 뷰는 잠긴다 — 보고 있던 과거는 닫는다. 선택도 해제(활성 cells가 alt로
-        // 바뀌어 abs>=sb_count 좌표가 다른 내용을 가리키므로 — xterm.js도 버퍼 전환 시 선택 해제).
+        // primary 스크롤백을 보관 슬롯으로 옮기고 alt는 cap=0인 빈 스크롤백을 쓴다 — alt 출력은
+        // history에 안 쌓이고(pushScrollback 무동작), count가 0이라 스크롤 뷰·스크롤바·검색이
+        // by-construction으로 잠긴다(grid의 saved_cells 스왑과 같은 패턴). 보던 과거를 닫고 선택도
+        // 해제한다(활성 cells가 alt로 바뀌어 abs 좌표가 다른 내용을 가리키므로 — xterm.js도 버퍼
+        // 전환 시 선택 해제).
+        self.saved_sb = self.sb;
+        self.sb = .{};
         self.view_offset = 0;
         self.invalidateSelection();
         self.pen_link = 0; // OSC 8 링크는 화면에 스코프된다 — 전환 시 닫는다(Ghostty endHyperlink)
@@ -3469,6 +3502,9 @@ pub const TerminalCore = struct {
         self.saved_cells = &.{};
         self.saved_wrapped = &.{};
         self.saved_prompt_marks = &.{};
+        self.sb.deinit(self.allocator); // alt의 빈 스크롤백 해제(보통 ring 미할당 — no-op)
+        self.sb = self.saved_sb; // primary 스크롤백 복원(보관해 둔 ring·count·cap·rewrap 마크 그대로)
+        self.saved_sb = .{};
         self.semantic_state = .unknown; // primary 복귀 — 진행 중 영역을 이어받지 않는다(다음 프롬프트가 재마킹)
         self.alt_active = false;
         self.pending_wrap = false;
@@ -4084,13 +4120,13 @@ pub const TerminalCore = struct {
         // reflow가 밀어내는 새 폭 행이 ring에 섞여도, 재-wrap은 행별 저장 폭 기준이라 혼재가 안전하다.
         // 단 지금 과거를 보는 중(view_offset>0)이면 즉시 재-wrap하면서 보던 행을 앵커로 offset을
         // 재계산한다 — 바닥으로 튕기지 않고 보던 내용이 유지된다(드물어서 1회 비용 수용).
-        if (new_cols != old_cols and self.sb_count > 0) {
+        if (new_cols != old_cols and self.sb.count > 0) {
             if (self.view_offset > 0) {
-                const anchor = self.sb_count - @min(self.view_offset, self.sb_count);
+                const anchor = self.sb.count - @min(self.view_offset, self.sb.count);
                 self.rewrapScrollbackAnchored(new_cols, anchor);
-                self.sb_rewrap_pending = false;
+                self.sb.rewrap_pending = false;
             } else {
-                self.sb_rewrap_pending = true;
+                self.sb.rewrap_pending = true;
             }
         }
 
@@ -4240,7 +4276,7 @@ pub const TerminalCore = struct {
             if (!outputRowBlank(scratch, pr, new_cols)) {
                 const pushed = self.pushScrollback(scratch[pr * new_cols ..][0..new_cols], swrap[pr], pmarks[pr]);
                 // 과거를 보는 중이면 새로 밀려든 행만큼 offset도 올린다(scroll-lock — 보던 내용 유지).
-                if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
+                if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb.count);
             }
         }
 
@@ -4281,7 +4317,7 @@ pub const TerminalCore = struct {
 
         // 스크롤 위치는 유지한다(과거를 보는 중이었으면 위의 anchored 재-wrap이 offset을 새 행
         // 수 기준으로 보정했고, 아래 overflow push의 scroll-lock 보정이 이어진다). 범위만 방어.
-        self.view_offset = @min(self.view_offset, self.sb_count);
+        self.view_offset = @min(self.view_offset, self.sb.count);
         self.dirty = fullDirty(next_size);
         // 옛 grid 좌표에 묶인 상태(grapheme run, deferred wrap)만 끊는다. CSI 파서 상태와
         // partial UTF-8 꼬리는 grid와 무관한 바이트 스트림 상태라 유지한다 — 리셋하면 PTY read
@@ -4314,7 +4350,7 @@ pub const TerminalCore = struct {
         if (self.view_offset == 0) {
             // 바닥(스크롤 안 함)에서는 활성 화면이 최상단 — top_abs = sb_count(활성 행의 절대 시작).
             var snap = if (self.preedit) |preedit_bytes| self.snapshotWithPreedit(preedit_bytes) else self.snapshot();
-            snap.placements = self.buildPlacementViews(self.sb_count);
+            snap.placements = self.buildPlacementViews(self.sb.count);
             snap.images = self.buildImageViews();
             return snap;
         }
@@ -4352,7 +4388,7 @@ pub const TerminalCore = struct {
         }
 
         // 위로 스크롤한 뷰포트의 최상단 절대 행 — clipAbsSpanToViewport와 같은 식.
-        const top_abs = self.sb_count - @min(self.view_offset, self.sb_count);
+        const top_abs = self.sb.count - @min(self.view_offset, self.sb.count);
         return .{
             .size = self.size,
             // 과거를 보는 중엔 활성 커서가 화면 밖(아래)에 가려져 있으므로 커서를 숨긴다.
@@ -4974,8 +5010,10 @@ pub const TerminalCore = struct {
     /// 스크롤백에 보관한다 — 화면 위로 나가는 줄만 history다. 부분 region(top>0)의 스크롤아웃은
     /// 버린다(xterm 동작). 기본 region [0, rows-1]이면 전체 화면 스크롤과 같다.
     fn scrollRegionUp(self: *TerminalCore) void {
-        // alt screen의 출력은 history가 아니다(vim 화면이 스크롤백을 오염시키지 않게).
-        const push = self.scroll_top == 0 and !self.alt_active;
+        // top==0이면 화면 위로 밀려나는 줄을 스크롤백에 보관한다. alt는 활성 sb.cap==0이라
+        // pushScrollback이 by-construction 무동작 — vim 화면이 스크롤백을 오염시키지 않는다
+        // (과거의 !alt_active 가드 불필요 — Scrollback 모델).
+        const push = self.scroll_top == 0;
         self.scrollRangeUp(self.scroll_top, self.scroll_bottom, 1, push);
     }
 
@@ -5008,7 +5046,7 @@ pub const TerminalCore = struct {
                 const pushed = self.pushScrollback(self.cells[self.index(top + pr, 0)..][0..self.size.cols], self.wrapped[top + pr], self.prompt_marks[top + pr]);
                 // 과거를 보는 중(view_offset>0)이면 같은 내용을 계속 보도록 offset도 올린다
                 // (scroll-lock). 보관 실패(OOM) 시엔 보정하지 않는다 — 뷰가 내용과 어긋나지 않게.
-                if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb_count);
+                if (pushed and self.view_offset > 0) self.view_offset = @min(self.view_offset + 1, self.sb.count);
             }
         }
 
@@ -5312,7 +5350,7 @@ test "findMatches: alt screen에선 현재 화면만 검색한다(primary 스크
     try core.write("alpha\r\n");
     var i: usize = 0;
     while (i < 6) : (i += 1) try core.write("filler\r\n");
-    try std.testing.expect(core.sb_count > 0);
+    try std.testing.expect(core.sb.count > 0);
 
     var matches: std.ArrayList(types.Match) = .empty;
     defer matches.deinit(std.testing.allocator);
@@ -5345,13 +5383,13 @@ test "scrollToAbs: 스크롤백 매치를 뷰포트로 가져온다" {
     defer core.deinit();
     var i: usize = 0;
     while (i < 10) : (i += 1) try core.write("line\r\n"); // 화면(3행)보다 많이 써 스크롤백 생성
-    try std.testing.expect(core.sb_count > 0);
+    try std.testing.expect(core.sb.count > 0);
 
     // 맨 위(abs 0)로 → 과거를 본다(view_offset > 0).
     core.scrollToAbs(0);
     try std.testing.expect(core.viewOffset() > 0);
     // 바닥(활성 화면 마지막 행)으로 → view_offset 0.
-    core.scrollToAbs(core.sb_count + core.size.rows - 1);
+    core.scrollToAbs(core.sb.count + core.size.rows - 1);
     try std.testing.expectEqual(@as(usize, 0), core.viewOffset());
 }
 
@@ -6337,7 +6375,7 @@ test "scrollback keeps rows that scroll off the top" {
 test "scrollback ring drops the oldest rows past max_scrollback" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
     defer core.deinit();
-    core.max_scrollback = 2; // 첫 scroll 전에 cap을 작게 둔다(lazy 할당이 이 값을 쓴다).
+    core.sb.cap = 2; // 첫 scroll 전에 cap을 작게 둔다(lazy 할당이 이 값을 쓴다).
     // a,b,c가 차례로 밀려난다(d/e는 화면에 남음). cap=2라 가장 최근 2개(b,c)만 남는다.
     try core.write("a\r\nb\r\nc\r\nd\r\ne");
     try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
@@ -6350,7 +6388,7 @@ test "scrollback ring drops the oldest rows past max_scrollback" {
 test "scrollback disabled when max_scrollback is zero" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
     defer core.deinit();
-    core.max_scrollback = 0;
+    core.sb.cap = 0;
     try core.write("a\r\nb\r\nc\r\nd");
     try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen());
 }
@@ -6913,11 +6951,14 @@ test "alt screen output never reaches the scrollback and the viewport is locked"
 
     try core.write("\x1b[?1049h");
     try core.write("1\r\n2\r\n3\r\n4\r\n5"); // alt에서 여러 줄 스크롤
-    try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen()); // 그대로
-    core.scrollViewport(1); // alt에선 잠김
+    // alt는 cap=0인 빈 스크롤백이라 출력이 history에 안 쌓이고(push 무동작), primary의 1행도 보관
+    // 슬롯에 있어 활성 scrollbackLen()은 0이다(Scrollback 모델 — "alt엔 스크롤백 없음"이 by-construction).
+    try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen());
+    core.scrollViewport(1); // alt에선 sb.count==0이라 자연히 잠김(가드 없이)
     try std.testing.expectEqual(@as(usize, 0), core.view_offset);
 
     try core.write("\x1b[?1049l");
+    try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen()); // primary 스크롤백 복원
     core.scrollViewport(1); // primary 복귀 후엔 다시 동작
     try std.testing.expectEqual(@as(usize, 1), core.view_offset);
 }
@@ -7740,7 +7781,7 @@ fn cellsText4(row: []const types.Cell) [4]u8 {
 test "scrollback re-wrap keeps hard line boundaries separate and drops oldest rows past the cap" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
     defer core.deinit();
-    core.max_scrollback = 4; // 작은 cap으로 드랍 검증
+    core.sb.cap = 4; // 작은 cap으로 드랍 검증
     try core.write("aaaa\r\nbb\r\ncccc\r\ndd\r\n1\r\n2"); // 4줄이 스크롤백(각각 hard)
     try std.testing.expectEqual(@as(usize, 4), core.scrollbackLen());
 
@@ -7760,10 +7801,10 @@ test "scrollback re-wrap is deferred until the scrollback is actually viewed" {
     try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen());
     try core.resize(4, 2);
     // 아직 안 봤으니 ring은 옛 폭 그대로(지연) — 행 수 불변.
-    try std.testing.expect(core.sb_rewrap_pending);
+    try std.testing.expect(core.sb.rewrap_pending);
     try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen());
     core.scrollViewport(1); // 보는 순간 재-wrap
-    try std.testing.expect(!core.sb_rewrap_pending);
+    try std.testing.expect(!core.sb.rewrap_pending);
     try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
 }
 
@@ -7966,7 +8007,7 @@ test "selectAll/selectWordAt/selectLineAt이 블록 모드를 리셋한다(Optio
 test "selection survives new output until eviction shifts it off the ring" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
     defer core.deinit();
-    core.max_scrollback = 2;
+    core.sb.cap = 2;
     try core.write("a\r\nb\r\nc"); // sb=[a], 화면=[b,c]
     core.selectionStart(0, 0);
     core.selectionExtend(0, 0); // abs 0 = "a"(스크롤백 첫 행 — 화면 첫 행 b가 아님? 뷰포트 행0=b... )
@@ -8146,13 +8187,13 @@ test "selectAll selects scrollback + screen regardless of scroll position" {
     defer core.deinit();
     // "a"가 스크롤백으로, "b"/"c"가 화면에 남게(2행 화면). sb_count=1, 화면 [b, c].
     try core.write("a\r\nb\r\nc");
-    try std.testing.expect(core.sb_count >= 1);
+    try std.testing.expect(core.sb.count >= 1);
 
     core.selectAll();
     // anchor=첫 스크롤백 행(abs 0, col 0), head=마지막 화면 행(abs sb_count+rows-1).
     try std.testing.expectEqual(@as(usize, 0), core.selection_anchor.?.row);
     try std.testing.expectEqual(@as(u16, 0), core.selection_anchor.?.col);
-    try std.testing.expectEqual(core.sb_count + core.size.rows - 1, core.selection_head.?.row);
+    try std.testing.expectEqual(core.sb.count + core.size.rows - 1, core.selection_head.?.row);
 
     // 추출하면 전체 내용(스크롤백 a + 화면 b,c)이 줄바꿈으로 잡힌다(빈 칸 trim).
     const text = (try core.extractSelection(std.testing.allocator)).?;
@@ -8164,7 +8205,7 @@ test "selectAll selects scrollback + screen regardless of scroll position" {
     core.scrollViewport(1); // 위로 1행 스크롤(스크롤백 노출)
     core.selectAll();
     try std.testing.expectEqual(@as(usize, 0), core.selection_anchor.?.row);
-    try std.testing.expectEqual(core.sb_count + core.size.rows - 1, core.selection_head.?.row);
+    try std.testing.expectEqual(core.sb.count + core.size.rows - 1, core.selection_head.?.row);
 }
 
 test "scrollback re-wrap clears a truncated wide-glyph base at narrow widths" {
@@ -8806,7 +8847,7 @@ test "kitty graphics placement: RIS는 placement를 비운다 (K1)" {
 test "kitty graphics placement: 스크롤백 eviction에 따라 anchor 보정·제거 (K1)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer core.deinit();
-    core.max_scrollback = 2; // 작은 스크롤백으로 eviction을 빨리 유발
+    core.sb.cap = 2; // 작은 스크롤백으로 eviction을 빨리 유발
     const raw = [_]u8{0x66} ** 16;
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
@@ -8819,7 +8860,7 @@ test "kitty graphics placement: 스크롤백 eviction에 따라 anchor 보정·�
 
     // 개행 3번 → 스크롤백이 가득(sb_count=2)차지만 eviction 전이라 anchor(절대 0) 유지.
     try core.write("\n\n\n");
-    try std.testing.expectEqual(@as(usize, 2), core.sb_count);
+    try std.testing.expectEqual(@as(usize, 2), core.sb.count);
     try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
     try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items[0].anchor_row);
 
@@ -8840,7 +8881,7 @@ test "kitty graphics placement: 위로 스크롤하면 뷰포트 상대 row로 �
     // 행0에 표시(anchor abs 0). 개행으로 스크롤백 2줄 쌓아 placement가 활성 화면 위로 올라가게.
     try core.write("\x1b[1;1H\x1b_Ga=p,i=7\x1b\\");
     try core.write("\n\n\n"); // sb_count=2, anchor 0 유지(default max_scrollback이라 eviction 없음)
-    try std.testing.expectEqual(@as(usize, 2), core.sb_count);
+    try std.testing.expectEqual(@as(usize, 2), core.sb.count);
 
     // 바닥에서는 anchor abs0가 top_abs(=sb_count=2) 위라 row=-2(화면 밖, 렌더러가 클립).
     try std.testing.expectEqual(@as(i32, -2), core.renderSnapshot().placements[0].row);

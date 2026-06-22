@@ -68,7 +68,7 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) void {
         .report_focus => |gained| core.reportFocus(gained),
         .set_cell_metrics => |cm| core.setCellMetrics(cm.width, cm.height),
         .set_config_palette => |palette| core.setConfigPalette(palette),
-        .set_max_scrollback => |lines| core.max_scrollback = lines,
+        .set_max_scrollback => |lines| core.setMaxScrollback(lines),
         .set_ambiguous_wide => |v| core.ambiguous_wide = v,
         .set_emoji_wide => |v| core.emoji_wide = v,
         .scroll_to_abs => |abs| core.scrollToAbs(abs),
@@ -130,7 +130,7 @@ test "core_command.apply: 각 명령이 코어를 올바르게 mutate (위임 �
 
     // config 값 명령(set_max_scrollback / set_cell_metrics / set_config_palette)
     apply(&core, .{ .set_max_scrollback = 500 });
-    try std.testing.expectEqual(@as(usize, 500), core.max_scrollback);
+    try std.testing.expectEqual(@as(usize, 500), core.maxScrollback());
     apply(&core, .{ .set_ambiguous_wide = true }); // text.ambiguous-width reload — 라이브 코어 폭 재적용
     try std.testing.expect(core.ambiguous_wide);
     apply(&core, .{ .set_ambiguous_wide = false });

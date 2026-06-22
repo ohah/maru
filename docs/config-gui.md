@@ -131,7 +131,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **주입·배치**: platform이 theme 섹션 `currentSectionFields.enums`에 **synthetic `EnumField`**(`key="theme.preset"`)를 **맨 앞에 `insert`**한다 → 색·팔레트보다 위(테마 섹션 최상단)에 도드라지게, 기존 dropdown/enum 경로 재사용(새 Kind·index 수술 없음).
 - **적용**: 핸들러가 `key=="theme.preset"`만 특수 처리 → `applyThemePreset`이 `config.theme = presetColors(next)`(정적 리터럴) + 라이브 재resolve + **주 색 4개(bg/fg/cursor/selection)만** write-back(`detectThemePreset`이 그 4개로 식별하므로 재시작 후에도 같은 프리셋으로 표시됨).
 - **프리셋 활성 시 색 잠금(옵션 A)**: `themePresetActive`(=색이 프리셋과 일치 ∧ `theme_user_custom`=false)면 색·팔레트 행을 `FieldRow.disabled`로 회색·잠금 표시한다(프리셋이 색을 정하므로 직접 편집은 혼란). 비활성 색을 **클릭하면**(swatch/hex 무관) 핸들러가 `theme_user_custom=true`로 "사용자 지정" 전환 후 바로 편집(picker/인라인)을 연다 — ←/→ 색 순환은 잠금 중 막힌다. `theme_user_custom`은 런타임 휘발(색은 derive하므로 영속 불요); 프리셋 재선택·reload·reset 시 false로 돌아간다(색이 프리셋과 같으면 자동으로 다시 잠금).
-- **한계(후속)**: 프리셋이 깐 **ANSI 16색 팔레트·search/sidebar 색은 영속되지 않는다** — 라이브에만 반영되고 reload·재시작 시 config 파일의 옛 값으로 복귀(주 색 4개만 파일에 써지기 때문). 전체 영속은 `theme.preset` 키 자체를 쓰는 write-경로 확장(비-schema 키 직렬화)이 필요해 후속. 팝업 그리드도 후속.
+- **영속(해결)**: 프리셋을 고르면 `persistThemePreset`이 **`theme.preset = <name>` 한 줄**을 쓰고(serializeConfig 전용 패스 — configKeyValues는 round-trip 대칭 유지 위해 derive 키를 안 emit), 충돌할 개별 `theme.*` 색·`theme.palette.N` override 줄은 제거한다. 로더가 `theme.preset`을 통째 프리셋 색(**16색 팔레트 포함**)으로 펼치므로 reload·재시작 후에도 **팔레트까지 그대로** 복원된다(search/sidebar 색은 그 테마에서 derive돼 자동). 옛 "주 색 4개만 영속" 한계 해소(팔레트 영속 리뷰). **한계(후속)**: 팝업 그리드.
 
 ### 6.4 통합 리셋(Reset All Settings to Defaults)
 

@@ -1278,6 +1278,11 @@ pub const AppSession = struct {
     // 삭제 예약된 config 키(env 변수 삭제 등) — `keybind = value` 갱신이 아니라 줄을 **제거**한다. 키는 loaded_config.arena
     // 소유(동적 env.KEY). serializeConfig가 갱신 패스 뒤 removeConfigLines로 체이닝해 줄을 빼고 비운다. takeConfigDirty가 봄.
     config_removed_keys: std.ArrayList([]const u8) = .empty,
+    // 테마 프리셋 영속(팔레트 포함) — 프리셋을 고르면 그 dashed 이름(예: "gruvbox-dark")을 둔다. serializeConfig가 갱신
+    // 패스 뒤 `theme.preset = <name>` 줄을 set/update하고(개별 theme.* 색·palette override 줄은 config_removed_keys로
+    // 제거) 비운다. 로더가 theme.preset을 통째 프리셋 색(16색 팔레트 포함)으로 펼치므로, 4색만 쓰던 옛 한계를 해소한다.
+    // loaded_config.arena 소유(serialize drain까지 유효). null=쓸 프리셋 없음. takeConfigDirty가 봄.
+    theme_preset_persist: ?[]const u8 = null,
     // unbind 예약된 keybind action(keybind recorder 해제) — `keybind = chord = action` 줄을 action 기준으로 제거한다
     // (key=value가 아니라 전용 removeKeybindLines). action은 command_catalog 정적 키. serializeConfig가 체이닝, takeConfigDirty가 봄.
     config_keybind_removed: std.ArrayList([]const u8) = .empty,
@@ -5366,6 +5371,7 @@ pub const AppSession = struct {
         self.config_removed_keys.clearRetainingCapacity();
         self.config_keybind_removed.clearRetainingCapacity();
         self.config_keybind_unbinds.clearRetainingCapacity();
+        self.theme_preset_persist = null; // 테마 프리셋 영속 예약도 폐기(다른 대기열과 같은 집합)
     }
 
     /// config.theme의 주 색 4개가 어느 named 프리셋과 일치하는지(없으면 null = "사용자 지정"). 테마 프리셋 dropdown
@@ -5384,8 +5390,9 @@ pub const AppSession = struct {
     /// 테마 프리셋을 dir(+1 다음/-1 이전)으로 순환한다(테마 섹션 dropdown). 순환 슬롯 = [프리셋 0..n-1] + ["사용자 지정"=n].
     /// 현재 위치는 theme_user_custom이거나 detect=null이면 "사용자 지정"(n), 아니면 그 프리셋. "사용자 지정"으로 가면 색을
     /// 그대로 두고 잠금만 해제(theme_user_custom=true — 색·팔레트 행 편집 허용), 프리셋으로 가면 그 색 세트를 통째로 깔고
-    /// (presetColors — 정적 리터럴이라 dupe 불요) 잠금(theme_user_custom=false) + 라이브 재resolve·주 색 4개 write-back.
-    /// **ANSI 16색 팔레트·search/sidebar 색은 라이브에만 반영되고 영속 안 됨**(reload·재시작 시 파일의 옛 값으로 복귀, §6.3).
+    /// (presetColors — 정적 리터럴이라 dupe 불요) 잠금(theme_user_custom=false) + 라이브 재resolve·`theme.preset` write-back.
+    /// **프리셋 전체가 영속된다**(persistThemePreset — `theme.preset = <name>` 한 줄을 쓰고 로더가 16색 팔레트·파생색까지
+    /// 통째로 펼친다; 옛 "주 색 4개만 영속" 한계 해소, 팔레트 영속 리뷰). search/sidebar 색은 그 테마에서 derive돼 자동 복원.
     fn applyThemePreset(self: *AppSession, dir: i8) void {
         const Preset = config_mod.theme.ThemePreset;
         const n: i64 = @typeInfo(Preset).@"enum".fields.len; // 프리셋 수; 슬롯 인덱스 n = "사용자 지정"
@@ -5400,12 +5407,28 @@ pub const AppSession = struct {
             return;
         }
         self.theme_user_custom = false;
-        self.loaded_config.config.theme = config_mod.theme.presetColors(@enumFromInt(@as(usize, @intCast(next))));
+        const preset: config_mod.theme.ThemePreset = @enumFromInt(@as(usize, @intCast(next)));
+        self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
         self.reapplyLoadedConfig();
-        self.markConfigKeyDirty("theme.background");
-        self.markConfigKeyDirty("theme.foreground");
-        self.markConfigKeyDirty("theme.cursor");
-        self.markConfigKeyDirty("theme.selection");
+        self.persistThemePreset(preset);
+    }
+
+    /// 프리셋을 **통째로 영속**한다(4색만 쓰던 옛 한계 해소 — ANSI 16색 팔레트·파생색 포함, 리뷰). `theme.preset = <name>`
+    /// 한 줄을 쓰도록 예약하고(serializeConfig가 set/update), 그 줄과 충돌할 개별 theme.* 색·palette override 줄은 제거
+    /// 예약한다 — 로더가 theme.preset을 통째 프리셋 색으로 펼치므로 남은 override가 위에 덮어쓰면 반쪽만 적용되기 때문.
+    fn persistThemePreset(self: *AppSession, preset: config_mod.theme.ThemePreset) void {
+        const a = self.loaded_config.arena.allocator();
+        // @tagName은 underscore(gruvbox_dark), config 파일은 dash(gruvbox-dark) — 로더 parseEnum이 받는 형식으로 변환.
+        self.theme_preset_persist = std.mem.replaceOwned(u8, a, @tagName(preset), "_", "-") catch null;
+        // 개별 override 줄 제거(theme.preset이 base를 깔므로 남으면 충돌). 4 주 색 + 16 팔레트.
+        self.markConfigKeyRemoved("theme.background");
+        self.markConfigKeyRemoved("theme.foreground");
+        self.markConfigKeyRemoved("theme.cursor");
+        self.markConfigKeyRemoved("theme.selection");
+        for (0..16) |i| {
+            const k = std.fmt.allocPrint(a, "theme.palette.{d}", .{i}) catch continue;
+            self.markConfigKeyRemoved(k);
+        }
     }
 
     /// Swift가 macOS 시스템 외관(NSAppearance light/dark)을 알려준다(생성 직후·외관 변경마다). 마지막 값을 기억하고,
@@ -7669,7 +7692,7 @@ pub const AppSession = struct {
     pub fn takeConfigDirty(self: *AppSession) bool {
         return self.config_dirty_keys.items.len > 0 or self.config_keybind_rebinds.items.len > 0 or
             self.config_removed_keys.items.len > 0 or self.config_keybind_removed.items.len > 0 or
-            self.config_keybind_unbinds.items.len > 0;
+            self.config_keybind_unbinds.items.len > 0 or self.theme_preset_persist != null;
     }
 
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
@@ -8016,6 +8039,16 @@ pub const AppSession = struct {
         // 공용). 값은 스키마 직렬화(configKeyValues)가 단일 출처라 타입별 손코드 중복이 없다. 성공 시 dirty 집합을
         // 비운다(아래) — updateConfigForKeys가 실패하면 try가 빠져나가 키가 남아 다음 tick 재시도된다.
         var text = try config_mod.updateConfigForKeys(self.allocator, original, self.loaded_config.config, self.config_dirty_keys.items);
+        // 테마 프리셋 영속(팔레트 포함): `theme.preset = <name>` 줄을 set/update한다 — configKeyValues가 derive 키
+        // theme.preset을 emit하지 않으므로(round-trip 대칭 유지) 전용 패스로 쓴다. 충돌할 개별 theme.* override는
+        // config_removed_keys(아래 제거 패스)가 빼므로 base 프리셋 색이 온전히 산다. 성공해야 비운다(실패 시 재시도).
+        if (self.theme_preset_persist) |name| {
+            const kv = [_]config_mod.ConfigKeyValue{.{ .key = "theme.preset", .value = name }};
+            const chained = try config_mod.updateConfigText(self.allocator, text, &kv);
+            self.allocator.free(text);
+            text = chained;
+            self.theme_preset_persist = null;
+        }
         // keybind 재바인딩은 `keybind = chord = action` 줄이라 key=value 패스로 못 다룬다 — 전용 패스로 체이닝한다
         // (앞 단계 결과 텍스트 위에 keybind 줄을 action 기준 갱신/추가). 성공해야 양쪽 dirty를 비운다.
         if (self.config_keybind_rebinds.items.len > 0) {
@@ -17675,16 +17708,19 @@ test "detectThemePreset / applyThemePreset / resetAllSettings: 테마 프리셋�
     session.loaded_config.config.theme.background = "#123456";
     try std.testing.expect(AppSession.detectThemePreset(session.loaded_config.config.theme) == null); // 사용자 지정
 
-    // applyThemePreset: dir=+1 적용 → config.theme가 그 프리셋 색 + 주 색 4개 dirty.
+    // applyThemePreset: dir=+1 적용 → config.theme가 그 프리셋 색 + **theme.preset 영속 예약**(개별 색·palette는 제거
+    // 예약 — 4색만 쓰던 옛 한계 해소, 팔레트 영속 리뷰). theme.preset 한 줄이 로더에서 16색 팔레트까지 통째로 펼쳐진다.
     session.loaded_config.config.theme = config_mod.theme.presetColors(.maru);
     session.applyThemePreset(1); // maru → 다음(ghostty)
     try std.testing.expectEqualStrings(config_mod.theme.presetColors(.ghostty).background, session.loaded_config.config.theme.background);
     try std.testing.expectEqual(config_mod.theme.ThemePreset.ghostty, AppSession.detectThemePreset(session.loaded_config.config.theme).?);
-    var saw_bg_dirty = false;
-    for (session.config_dirty_keys.items) |k| if (std.mem.eql(u8, k, "theme.background")) {
-        saw_bg_dirty = true;
+    try std.testing.expect(session.theme_preset_persist != null);
+    try std.testing.expectEqualStrings("ghostty", session.theme_preset_persist.?); // dashed 이름(파일에 theme.preset = ghostty)
+    var saw_bg_removed = false;
+    for (session.config_removed_keys.items) |k| if (std.mem.eql(u8, k, "theme.background")) {
+        saw_bg_removed = true; // 개별 색은 제거 예약(theme.preset이 base를 깔므로 충돌 방지)
     };
-    try std.testing.expect(saw_bg_dirty);
+    try std.testing.expect(saw_bg_removed);
 
     // resetAllSettings: 모든 config를 기본값으로 + **config 파일을 기본 상태로 덮어쓰기**(삭제 아님 — 파일·경로 보존) +
     // dirty 비움(부분 write-back 안 함). 안전: 실제 사용자 config가 아니라 tmp 파일을 덮어쓰도록 config_path_buffer를 박는다.

@@ -924,6 +924,14 @@ pub export fn maru_macos_app_session_metal_frame(
     return @intFromEnum(Status.ok);
 }
 
+// 전역(OS) 단축키가 라이브로 바뀌어(세팅 GUI 녹음/해제·reload·reset) OS 재등록이 필요하면 1(플래그 비움), 없으면 0.
+// Swift가 tick마다 호출해 1이면 unregisterGlobalHotkeys 후 registerGlobalHotkeys로 새 global_hotkeys를 OS에 다시 깐다.
+// take_bell과 같은 1회성 신호 — drain하면 비워진다. session null=0. (v82)
+pub export fn maru_macos_app_session_take_global_hotkeys_dirty(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeGlobalHotkeysDirty()) 1 else 0;
+}
+
 fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
     // 레이아웃 독립 단축키: Ctrl/Cmd 조합인데 현재 입력 소스의 글자가 라틴이 아니면(한글 'ㅂ'
     // 등 >= 0x80) 물리 키코드를 US 배열 라틴으로 되돌린다 — 한글 모드에서도 Ctrl+B가 0x02로

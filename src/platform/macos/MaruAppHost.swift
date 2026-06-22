@@ -1389,6 +1389,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
             drainFilePick() // 세팅 window.background-image 행 활성: NSOpenPanel(PNG)을 열어 고른 경로를 config에 적용.
             drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
+            drainGlobalHotkeys() // 글로벌 핫키가 라이브로 바뀌었으면(녹음/해제·reload·reset) OS에 재등록(unregister 후 register).
         }
         return status
     }
@@ -1968,6 +1969,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let session = appSession else { return }
         if maru_macos_app_session_take_sidebar_config_dirty(session) != 0 {
             persistSidebarConfig()
+        }
+    }
+
+    // 글로벌 핫키가 라이브로 바뀌면(세팅 GUI 녹음/해제·reload·reset → Zig가 global_hotkeys 재빌드 + dirty) tick마다 drain해
+    // 1이면 OS 등록을 다시 깐다 — unregisterGlobalHotkeys(기존 핸들/핫키 해제, idempotent) 후 registerGlobalHotkeys(새
+    // descriptor를 global_hotkeys ABI로 읽어 RegisterEventHotKey). 앱 시작 register와 같은 smoke 게이트(smoke는 자동 종료라 미등록).
+    private func drainGlobalHotkeys() {
+        guard let session = appSession, !smokeMode else { return }
+        if maru_macos_app_session_take_global_hotkeys_dirty(session) != 0 {
+            unregisterGlobalHotkeys()
+            registerGlobalHotkeys()
         }
     }
 

@@ -1,6 +1,7 @@
 const std = @import("std");
 const input = @import("input.zig");
 const types = @import("types.zig");
+const osc = @import("osc.zig"); // OSC host-reply 핸들러(색·팔레트 OSC 10/11/4/104) — 목적별 분리(구조와 파일 분리)
 const png = @import("png.zig"); // kitty graphics f=100 PNG 디코드(K3c)
 const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
 const CoreOwner = @import("core_owner.zig").CoreOwner; // core_mutex 재진입 추적(디버그 전용 안전망)
@@ -1955,9 +1956,9 @@ pub const TerminalCore = struct {
         } else if (std.mem.startsWith(u8, body, "2;")) {
             self.setWindowTitle(body[2..]); // OSC 2 = 창 제목만
         } else if (std.mem.startsWith(u8, body, "10;")) {
-            self.dispatchOscDefaultColor(body[3..], 10); // OSC 10 = 전경색 설정/질의
+            osc.dispatchDefaultColor(self, body[3..], 10); // OSC 10 = 전경색 설정/질의
         } else if (std.mem.startsWith(u8, body, "11;")) {
-            self.dispatchOscDefaultColor(body[3..], 11); // OSC 11 = 배경색 설정/질의
+            osc.dispatchDefaultColor(self, body[3..], 11); // OSC 11 = 배경색 설정/질의
         } else if (std.mem.eql(u8, body, "110")) {
             self.default_fg_override = null; // OSC 110 = 전경색 리셋(theme 기본 복귀)
         } else if (std.mem.eql(u8, body, "111")) {
@@ -1965,10 +1966,10 @@ pub const TerminalCore = struct {
         } else if (std.mem.startsWith(u8, body, "52;")) {
             self.dispatchOscClipboard(body[3..]); // OSC 52 = 클립보드(파싱+디코드만; 실제 쓰기·정책은 platform)
         } else if (std.mem.startsWith(u8, body, "4;")) {
-            self.dispatchOscPalette(body[2..]); // OSC 4 = 256색 팔레트 설정/질의(`<index>;<spec>` 쌍 반복)
+            osc.dispatchPalette(self, body[2..]); // OSC 4 = 256색 팔레트 설정/질의(`<index>;<spec>` 쌍 반복)
         } else if (std.mem.eql(u8, body, "104") or std.mem.startsWith(u8, body, "104;")) {
             // OSC 104 = 팔레트 리셋. 인덱스 없으면(정확히 "104") 전부, "104;1;2"면 그 인덱스만.
-            self.dispatchOscPaletteReset(if (body.len > 4) body[4..] else "");
+            osc.dispatchPaletteReset(self, if (body.len > 4) body[4..] else "");
         } else if (std.mem.startsWith(u8, body, "777;")) {
             self.dispatchOscNotify777(body[4..]); // OSC 777 = rxvt 데스크톱 알림(notify;title;body)
         } else if (std.mem.startsWith(u8, body, "9;")) {
@@ -1979,37 +1980,6 @@ pub const TerminalCore = struct {
         // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
     }
 
-    /// OSC 10/11(전경/배경 색) 설정·질의. spec이 `?`면 현재 색(override 또는 주입된 theme)을 xterm 형식
-    /// `OSC <code> ; rgb:rrrr/gggg/bbbb ST`로 회신한다(nvim 등이 배경 밝기로 light/dark 테마를 감지). color
-    /// spec이면 그 색을 `default_fg/bg_override`에 둔다 — 렌더러 default 색과 화면 clear color를 app이 그
-    /// override로 바꾼다(OSC 4 팔레트와 같은 결: 코어가 override 보관, app이 CellColors/clear로 wiring).
-    /// theme 기본 RGB는 platform이 setDefaultColors로 주입(코어는 Color.default 추상만 알아 실제 RGB는 받는다).
-    /// OSC 110/111이 리셋. 베이스: xterm ctlseqs OSC 10/11.
-    fn dispatchOscDefaultColor(self: *TerminalCore, body: []const u8, code: u16) void {
-        // 여러 `;` 필드 중 첫 필드만 본다(xterm 연속 설정 `OSC 10 ; fg ; bg`는 후속).
-        var it = std.mem.splitScalar(u8, body, ';');
-        const spec = it.next() orelse return;
-        if (std.mem.eql(u8, spec, "?")) {
-            // 질의: override가 있으면 그 색, 없으면 주입된 theme 색을 회신(설정 직후 질의가 set 값을 본다).
-            const base = if (code == 10) self.default_fg_rgb else self.default_bg_rgb;
-            const ovr = if (code == 10) self.default_fg_override else self.default_bg_override;
-            const rgb = ovr orelse base;
-            var buf: [40]u8 = undefined;
-            // 8-bit 채널을 16-bit로 복제(0xAB → 0xABAB) — xterm 4-hex-per-channel 표준 형식.
-            const resp = std.fmt.bufPrint(&buf, "\x1b]{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}\x1b\\", .{
-                code, rgb.r, rgb.r, rgb.g, rgb.g, rgb.b, rgb.b,
-            }) catch return;
-            self.appendResponse(resp);
-        } else if (types.parseSpec(spec)) |rgb| {
-            // 설정: default 전경/배경 override를 둔다 — 렌더러 default 색을 app이 override로 바꾼다.
-            if (code == 10) {
-                self.default_fg_override = rgb;
-            } else {
-                self.default_bg_override = rgb;
-            }
-        }
-    }
-
     /// OSC 10/11로 설정된 전경/배경 색 override(없으면 null = theme 기본). app이 렌더러 default 색과 화면
     /// clear color를 `override orelse theme`로 정할 때 쓴다(OSC 4 paletteOverride와 같은 결).
     pub fn defaultFgOverride(self: *const TerminalCore) ?types.Rgb {
@@ -2017,47 +1987,6 @@ pub const TerminalCore = struct {
     }
     pub fn defaultBgOverride(self: *const TerminalCore) ?types.Rgb {
         return self.default_bg_override;
-    }
-
-    /// OSC 4 — 256색 팔레트 설정/질의. `<index>;<spec>` 쌍을 반복 파싱한다. spec이 `?`면 현재 색(우선순위
-    /// override > config base(idx<16) > 기본 xterm256)을 `OSC 4 ; <index> ; rgb:rrrr/gggg/bbbb ST`로 회신, color
-    /// spec이면 그 인덱스를 덮어쓴다. 인덱스는 0..255(parseInt u8 — 256+ 자동 실패→skip). 짝이 안 맞는 끝 토큰은
-    /// 버린다. 베이스: xterm ctlseqs OSC 4(`rgb:`/`#` 색 명세). 색 적용은 렌더러가 palette_override+config_palette를
-    /// 소비(코어는 표만 보관 — K1 경계). query 응답은 렌더(metal_frame)와 같은 우선순위라 화면·보고가 일치한다.
-    fn dispatchOscPalette(self: *TerminalCore, body: []const u8) void {
-        var it = std.mem.splitScalar(u8, body, ';');
-        while (it.next()) |idx_str| {
-            const spec = it.next() orelse break; // 쌍이 안 맞는 마지막 index는 무시
-            const idx = std.fmt.parseInt(u8, idx_str, 10) catch continue; // 0..255 밖 → skip
-            if (std.mem.eql(u8, spec, "?")) {
-                // 렌더(metal_frame.paletteColor)와 동일 우선순위: OSC4 override → config base(idx<16) → xterm256.
-                const rgb = self.palette_override[idx] orelse
-                    (if (idx < 16) self.config_palette[idx] else null) orelse
-                    types.xterm256(idx);
-                var buf: [48]u8 = undefined;
-                // 8-bit 채널을 16-bit로 복제(0xAB → 0xABAB) — xterm 4-hex-per-channel 표준 응답 형식.
-                const resp = std.fmt.bufPrint(&buf, "\x1b]4;{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}\x1b\\", .{
-                    idx, rgb.r, rgb.r, rgb.g, rgb.g, rgb.b, rgb.b,
-                }) catch continue;
-                self.appendResponse(resp);
-            } else if (types.parseSpec(spec)) |rgb| {
-                self.palette_override[idx] = rgb;
-            }
-        }
-    }
-
-    /// OSC 104 — 팔레트 리셋. body가 비면 전부 기본 xterm256으로(override 제거), 아니면 `;`로 나눈 인덱스만.
-    /// 베이스: xterm ctlseqs OSC 104.
-    fn dispatchOscPaletteReset(self: *TerminalCore, body: []const u8) void {
-        if (body.len == 0) {
-            @memset(&self.palette_override, null);
-            return;
-        }
-        var it = std.mem.splitScalar(u8, body, ';');
-        while (it.next()) |s| {
-            const idx = std.fmt.parseInt(u8, s, 10) catch continue;
-            self.palette_override[idx] = null;
-        }
     }
 
     /// 렌더러가 `.indexed` 색을 풀 때 참조하는 OSC 4 팔레트 override 표(null = 기본 xterm256). app이
@@ -3773,7 +3702,9 @@ pub const TerminalCore = struct {
         self.appendResponse(s);
     }
 
-    fn appendResponse(self: *TerminalCore, bytes: []const u8) void {
+    /// 호스트(PTY)로 보낼 응답 바이트를 버퍼에 적재한다(best-effort). osc.zig 등 목적별 host-reply 모듈이
+    /// 호출하므로 pub다(구조와 파일 분리 — 같은 응답 버퍼를 단일 경로로 쓴다).
+    pub fn appendResponse(self: *TerminalCore, bytes: []const u8) void {
         self.response.appendSlice(self.allocator, bytes) catch {}; // best-effort(OOM이면 응답 생략)
     }
 

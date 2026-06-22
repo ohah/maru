@@ -29,10 +29,14 @@ pub const Action = union(enum) {
     next_pane,
     // 활성 pane(분할 영역)을 통째로 떼어 **새 단독 워크스페이스로 분리**한다 — grip 드래그를 사이드바 빈 영역에
     // 드롭하는 것의 키보드/팔릿 버전(dispatchAppAction이 promotePaneToNewWorkspace로 넘긴다). 단독 pane 워크스페이스면
-    // 무동작(no-op 가드). 합치기(merge)는 타겟 워크스페이스가 모호해 키 액션으로 두지 않는다(드래그 전용). 기본
-    // 키바인딩은 없다(macOS 단일 관례 부재 — 발견성은 커맨드 팔릿; rename·split과 같은 베이스 명시 규칙). 단일
-    // 출처: docs/tabs-splits-layout.md "Pane을 워크스페이스로 분리·합치기".
+    // 무동작(no-op 가드). 기본 키바인딩은 없다(macOS 단일 관례 부재 — 발견성은 커맨드 팔릿; rename·split과 같은 베이스
+    // 명시 규칙). 단일 출처: docs/tabs-splits-layout.md "Pane을 워크스페이스로 분리·합치기".
     move_pane_to_new_workspace,
+    // 활성 pane을 **N번 워크스페이스에 합친다**(merge) — grip 드래그를 다른 카드에 드롭하는 것의 키보드/팔릿 버전
+    // (dispatchAppAction이 mergePaneIntoWorkspace로 넘긴다). index는 0-based(select_tab과 동일 — :0=워크스페이스 1).
+    // 타겟의 활성 pane을 좌우 split해 들어온 pane을 우측·활성으로 둔다. 자기 워크스페이스·범위 밖·단독 pane이면 무동작.
+    // tmux `join-pane -t N` 결. 드래그는 카드로 타겟을 정하지만 키는 번호로 정한다(타겟 명시). 기본 키바인딩은 없다.
+    move_pane_to_workspace: usize,
     // 사용자 지정 이름(rename) 시작 — 활성 대상의 이름을 인라인으로 편집한다. workspace=활성 사이드바 탭,
     // pane=활성 분할 영역, term=활성 가로 탭. dispatchAppAction이 인라인 편집기를 연다(custom_name을 쓴다).
     // 기본 키바인딩은 없다(macOS 단일 관례 부재 — 발견성은 커맨드 팔릿·더블클릭·우클릭). 단일 출처:
@@ -126,6 +130,12 @@ pub fn parseAction(value: []const u8) ?Action {
         return .{ .select_tab = index };
     }
 
+    const mpw_prefix = "move_pane_to_workspace:";
+    if (std.mem.startsWith(u8, value, mpw_prefix)) {
+        const index = std.fmt.parseUnsigned(usize, value[mpw_prefix.len..], 10) catch return null;
+        return .{ .move_pane_to_workspace = index };
+    }
+
     const fs_prefix = "set_font_size:";
     if (std.mem.startsWith(u8, value, fs_prefix)) {
         const size = std.fmt.parseFloat(f32, value[fs_prefix.len..]) catch return null;
@@ -181,6 +191,11 @@ test "parse configured actions" {
 
     const action = parseAction("select_tab:3").?;
     try std.testing.expectEqual(@as(usize, 3), action.select_tab);
+
+    // move_pane_to_workspace:N — 활성 pane을 N번 워크스페이스에 합치기(파라미터 액션, 0-based).
+    try std.testing.expectEqual(@as(usize, 2), parseAction("move_pane_to_workspace:2").?.move_pane_to_workspace);
+    try std.testing.expect(parseAction("move_pane_to_workspace:abc") == null);
+    try std.testing.expect(parseAction("move_pane_to_workspace:") == null);
     try std.testing.expect(parseAction("unknown") == null);
 
     // set_font_size:N — 절대 폰트 크기(파라미터 액션). 정수·소수 모두, 비숫자·비유한은 null.

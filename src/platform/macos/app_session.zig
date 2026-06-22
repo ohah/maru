@@ -1988,7 +1988,13 @@ pub const AppSession = struct {
         if (self.scale_milli == 0 or !std.math.isFinite(x_px)) return;
         const clamped_x = if (x_px < 0) 0 else @min(x_px, @as(f64, @floatFromInt(std.math.maxInt(u32))));
         const px: u32 = @intFromFloat(clamped_x);
-        const pt: u32 = std.math.clamp(px * 1000 / self.scale_milli, sidebar_min_pt, sidebar_max_pt);
+        // 헤더 아이콘 줄(좌측 네이티브 신호등 ~72pt + 우측 ◧/⚙/+ 아이콘 9칸, sidebar.zig headerHit)이 겹치지 않는 최소
+        // 폭. 아이콘은 cell 폭에 비례하므로 고정 sidebar_min_pt(120)로는 큰 폰트에서 신호등과 겹친다 — 신호등 클리어런스 +
+        // 10칸(아이콘 9 + 여유 1, headerHit의 cols<10 가드도 만족)을 px로 잡아 pt로 환산한 값과 sidebar_min_pt 중 큰 쪽을
+        // 하한으로 쓴다(cell_width_px=0인 초기 프레임이면 헤더 항이 0이라 sidebar_min_pt가 이긴다).
+        const header_min_px = ptToPx(traffic_light_clearance_pt, self.scale_milli) + 10 * self.cell_width_px;
+        const eff_min_pt = @max(sidebar_min_pt, header_min_px * 1000 / self.scale_milli);
+        const pt: u32 = std.math.clamp(px * 1000 / self.scale_milli, eff_min_pt, sidebar_max_pt);
         if (pt == self.sidebar_width_pt) return;
         self.sidebar_width_pt = pt;
         self.sidebar_width_px = ptToPx(pt, self.scale_milli);
@@ -14820,7 +14826,11 @@ test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, c
     session.setSidebarWidthPx(1_000_000);
     try std.testing.expectEqual(sidebar_max_pt, session.sidebar_width_pt);
     session.setSidebarWidthPx(0);
-    try std.testing.expectEqual(sidebar_min_pt, session.sidebar_width_pt);
+    // 좁게 → 헤더 아이콘(신호등 + ◧/⚙/+ 9칸)이 겹치지 않는 동적 최소로 clamp. 고정 sidebar_min_pt 이상.
+    const header_min_px = ptToPx(traffic_light_clearance_pt, session.scale_milli) + 10 * session.cell_width_px;
+    const eff_min = @max(sidebar_min_pt, header_min_px * 1000 / session.scale_milli);
+    try std.testing.expectEqual(eff_min, session.sidebar_width_pt);
+    try std.testing.expect(session.sidebar_width_pt >= sidebar_min_pt);
     _ = try session.tick(); // 폭 변경 후 다음 tick 크래시 없음
 }
 

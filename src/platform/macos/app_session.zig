@@ -774,6 +774,23 @@ const AgentNotification = struct { title: []u8, body: []u8, surface_id: u64 };
 /// 동시에 쌓일 수 있는 완료 알림 상한(폭주 가드). 보통 한 tick에 0~1건이라 넉넉하다 — 넘으면 가장 오래된 걸 버린다.
 const agent_notification_cap: usize = 16;
 
+/// 인앱 알림 센터에 보관하는 알림 한 건(owned title/body). agent_notifications(드레인되면 사라지는 OS 배너 큐)와
+/// 달리 사용자가 종 아이콘으로 다시 열람하는 히스토리다. 에이전트 완료·OSC 9/777 둘 다 pendingNotification()이
+/// 드레인하는 단일 funnel에서 push된다. surface_id로 클릭 시 그 터미널로 점프(activateSurfaceById). timestamp_ns는
+/// 상대시간("N분 전") 표시용, is_read=목록에서 클릭하면 true(안읽음 점/배지 계산), is_agent=에이전트/OSC 구분.
+const NotificationHistoryItem = struct {
+    title: []u8,
+    body: []u8,
+    surface_id: u64,
+    timestamp_ns: i128,
+    is_read: bool = false,
+    is_agent: bool = false,
+};
+
+/// 알림 히스토리 보관 상한(ring buffer — 넘으면 가장 오래된 걸 버린다). 사용자가 스크롤할 목록이라 agent 큐(16)보다
+/// 크게. 64건이면 owned title/body 합쳐도 수십 KB 수준이라 가볍다.
+const notification_history_cap: usize = 64;
+
 /// 에이전트 아이콘 코드포인트(없으면 0) — 사이드바 카드에서 이름줄과 분리해 슬롯 세로 중앙에 독립 배치한다
 /// (buildSidebarDrawList의 agents). 0=아이콘 없음. 브랜드 전용 유니코드가 없어 근사 글리프를 쓰되,
 /// **터미널 폰트(JetBrains Mono)가 보유한** 글리프만 고른다 — 미보유 코드포인트(예전 ✳ U+2733)는 CoreText가
@@ -1290,6 +1307,11 @@ pub const AppSession = struct {
     // 드레인해 Swift 알림으로 띄운다. running→idle 전환은 한 번만 일어나 자연 디바운스되고, 비활성 탭/창에서
     // 끝났을 때만 enqueue된다(docs/agent-session.md "알림"). 한 tick에 여러 탭 완료를 안 잃게 큐(상한 가드).
     agent_notifications: std.ArrayList(AgentNotification) = .empty,
+    // 인앱 알림 센터 히스토리(owned). pendingNotification()이 드레인하는 알림을 여기에도 보관해 종 아이콘으로 다시
+    // 열람한다(2단계). 최신이 뒤(append). notification_unread는 안 읽은 개수 캐시 — push/read/cap-drop 3곳에서만
+    // 증감(직접 조작 금지). 매번 순회하지 않게 캐시해 배지 렌더를 싸게 한다.
+    notification_history: std.ArrayList(NotificationHistoryItem) = .empty,
+    notification_unread: usize = 0,
     // 창이 키(포커스) 상태인지. focusChanged가 갱신. "활성 탭 AND 포커스 창"이면 사용자가 보고 있으므로 알림을
     // 띄우지 않는다(그 외 — 비활성 탭이거나 창이 백그라운드 — 는 띄운다).
     window_focused: bool = true,
@@ -3000,6 +3022,61 @@ pub const AppSession = struct {
         _ = self.focusPaneByPtr(loc.pane);
         self.focusTerm(loc.term_index);
         return true;
+    }
+
+    /// 인앱 알림 센터(notifications 컴포넌트)에 주입할 카드 배열을 arena로 빌드한다(palette buildPaletteRows 패턴 —
+    /// 매 프레임/클릭마다 재빌드). 히스토리를 **역순**(최신 먼저)으로 — title/body는 히스토리 owned slice 그대로(수명이
+    /// 더 김), relative_time만 arena 포맷, is_alive는 surface가 아직 살아있는지(findTermWhere 조회 — activate는 부수효과라
+    /// 안 씀). collect/itemAt/accept가 같은 역순 매핑(selected 0 = 최신 = 히스토리 끝)을 공유한다.
+    fn buildNotificationItems(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.notifications.Item {
+        const len = self.notification_history.items.len;
+        const items = try arena.alloc(chrome.components.notifications.Item, len);
+        const now: i128 = std.Io.Clock.awake.now(self.io).nanoseconds;
+        for (items, 0..) |*it, i| {
+            const h = self.notification_history.items[len - 1 - i]; // 역순: 최신이 먼저
+            const alive = self.findTermWhere(h.surface_id, struct {
+                fn pred(want: u64, term: *Term) bool {
+                    return term.surface.id == want;
+                }
+            }.pred) != null;
+            it.* = .{
+                .title = h.title,
+                .body = h.body,
+                .relative_time = self.formatRelativeTime(arena, now - h.timestamp_ns) catch "",
+                .is_read = h.is_read,
+                .is_alive = alive,
+            };
+        }
+        return items;
+    }
+
+    /// 경과 시간(나노초)을 사람이 읽는 상대시간으로 — "방금"(<1분)/"N분 전"(<1시간)/"N시간 전"(<1일)/"N일 전". 음수
+    /// (시계 역행)는 0으로 본다. arena 포맷(notifications 카드 수명 = frame arena).
+    fn formatRelativeTime(self: *AppSession, arena: std.mem.Allocator, delta_ns: i128) ![]const u8 {
+        _ = self;
+        const ns: i128 = if (delta_ns < 0) 0 else delta_ns;
+        const sec = @divFloor(ns, std.time.ns_per_s);
+        if (sec < 60) return "방금";
+        const min = @divFloor(sec, 60);
+        if (min < 60) return std.fmt.allocPrint(arena, "{d}분 전", .{min});
+        const hour = @divFloor(min, 60);
+        if (hour < 24) return std.fmt.allocPrint(arena, "{d}시간 전", .{hour});
+        const day = @divFloor(hour, 24);
+        return std.fmt.allocPrint(arena, "{d}일 전", .{day});
+    }
+
+    /// 알림 카드 선택(Enter/클릭)을 처리한다 — selected(역순: 0=최신)를 히스토리 인덱스로 되돌려 읽음 처리하고, 그
+    /// surface로 점프(activateSurfaceById, 닫혔으면 false=점프 안 함)한 뒤 패널을 닫는다. 빈 목록/범위 밖이면 닫기만.
+    fn acceptNotification(self: *AppSession) void {
+        const sel = self.chrome_host.notifications.selected;
+        const len = self.notification_history.items.len;
+        self.chrome_host.notifications.hide();
+        self.metal_dirty = true;
+        if (len == 0 or sel >= len) return;
+        const history_index = len - 1 - sel; // 역순 매핑(목록 0 = 최신 = 히스토리 끝)
+        const surface_id = self.notification_history.items[history_index].surface_id;
+        self.markNotificationRead(history_index); // 클릭한 항목만 읽음(unread 감소 → 배지 갱신)
+        _ = self.activateSurfaceById(surface_id); // 닫힌 surface면 false(점프 안 함, 패널은 이미 닫음)
     }
 
     /// **세션-트리 구조-무효화 계약(S1)의 단일 출처.** 한 Pane이 해제되기 직전 destroyPane이 부른다 — 모든
@@ -4893,6 +4970,12 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
             .context_menu_selection_changed => self.metal_dirty = true, // ↑↓ 선택 이동 — 재렌더
+            .notifications_accept => self.acceptNotification(), // Enter/클릭 — selected 카드의 surface로 점프 + 읽음
+            .notifications_close => { // Esc/그 외 키 — 컴포넌트가 이미 hide, 재렌더만
+                self.chrome_host.notifications.hide();
+                self.metal_dirty = true;
+            },
+            .notifications_selection_changed => self.metal_dirty = true, // ↑↓ 선택 이동 — 재렌더
             .confirm_accept => { // Enter/Y — 보류한 동작 실행. pending을 먼저 비워(재진입 방지) 실행.
                 self.metal_dirty = true;
                 if (self.pending_reset) {
@@ -5575,7 +5658,7 @@ pub const AppSession = struct {
     /// 공유한다(6-way boolean 복붙 방지 — 모달 추가 시 여기 한 곳만 고친다).
     fn anyOverlayOpen(self: *const AppSession) bool {
         const h = &self.chrome_host;
-        return h.confirm.open or h.notice.open or h.context_menu.open or h.find.open or h.palette.open or h.settings.open;
+        return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.settings.open;
     }
 
     fn unfocusedCursorMode(self: *const AppSession) renderer.CursorUnfocused {
@@ -5822,6 +5905,23 @@ pub const AppSession = struct {
             }
             return;
         }
+        // 알림 센터 패널이 열려 있으면 클릭을 패널로 라우팅한다(context_menu와 동형 — 항목 위면 그 surface로 점프,
+        // 밖이면 닫기). 카드는 itemAt에 줄 동적 Item을 임시 arena로 빌드한다(buildNotificationItems — collect와 같은 역순).
+        if (self.chrome_host.notifications.open) {
+            if (kind == 1) {
+                var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena_state.deinit();
+                const items = self.buildNotificationItems(arena_state.allocator()) catch return;
+                if (chrome.components.notifications.itemAt(&self.chrome_host.notifications, items, self.buildChromeProps(), x_px, y_px)) |idx| {
+                    self.chrome_host.notifications.selected = idx;
+                    self.acceptNotification();
+                } else {
+                    self.chrome_host.notifications.hide(); // 카드 밖 클릭 → 닫기
+                    self.metal_dirty = true;
+                }
+            }
+            return;
+        }
         // 세팅 모달이 열려 있으면 포인터를 settings 컴포넌트에 라우팅한다(confirm/context_menu처럼 전용 hit-test —
         // 아래 generic handlePointer 게이트는 settings를 모르므로 여기서 먼저 처리·return해 클릭이 뒤로 안 샌다). 행은
         // config 스키마에서 빌드해 주입(hit-test에 행 수·control rect 필요). 바깥 클릭=닫기·toggle=flip은 dispatchChromeAction.
@@ -6036,6 +6136,15 @@ pub const AppSession = struct {
                         self.sidebar_search_active = true; // 검색바 클릭 → 활성(키/IME가 검색으로 라우팅)
                         self.rebuildSidebar() catch {}; // 보존된 검색어가 있으면 필터를 즉시 재개(blur 중 일시정지됐던 것)
                         self.resetCursorBlink();
+                        self.metal_dirty = true;
+                    },
+                    .notifications => {
+                        // 종 클릭 → 인앱 알림 센터 패널(2줄 카드)을 종 아이콘 아래에 띄운다. 항목은 collect/itemAt 시점에
+                        // 히스토리에서 빌드한다(buildNotificationItems) — show엔 개수만 준다(키 nav clamp용). 열어도 읽음
+                        // 처리는 안 한다(클릭한 항목만 읽음 — 안읽음 점 유지).
+                        const anchor_x: i32 = @intCast(self.sidebar_width_px -| 11 * self.cell_width_px); // 종 col 근처
+                        const anchor_y: i32 = @intCast(self.cell_height_px); // 아이콘 줄(0) 바로 아래
+                        self.chrome_host.notifications.show(anchor_x, anchor_y, self.notification_history.items.len);
                         self.metal_dirty = true;
                     },
                     .none => if (self.sidebarSlotAt(y_px)) |slot| if (self.visibleTab(slot)) |tab_idx| {
@@ -7228,6 +7337,8 @@ pub const AppSession = struct {
             if (self.notification_body_out.len > 0) self.allocator.free(self.notification_body_out);
             self.notification_title_out = n.title;
             self.notification_body_out = n.body;
+            // 인앱 히스토리에도 보관(dupe — 위 버퍼는 OS 배너용으로 move됐다). 에이전트 완료라 is_agent=true.
+            self.pushNotificationHistory(self.notification_title_out, self.notification_body_out, n.surface_id, true);
             return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = n.surface_id, .foreground_banner = true };
         }
         if (!self.surface_initialized) return null;
@@ -7255,7 +7366,48 @@ pub const AppSession = struct {
             return null;
         };
         self.activeSurface().core.clearNotification();
+        // 인앱 히스토리에도 보관(OSC 9/777이라 is_agent=false).
+        self.pushNotificationHistory(self.notification_title_out, self.notification_body_out, osc_surface_id, false);
         return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = osc_surface_id, .foreground_banner = false };
+    }
+
+    /// 인앱 알림 센터 히스토리에 한 건 보관한다(title/body dupe — pendingNotification이 드레인하는 owned 버퍼와
+    /// 소유권이 겹치지 않게 복사한다). 상한(notification_history_cap) 초과면 가장 오래된 걸 버리고, 그게 안 읽음이면
+    /// unread를 보정한다. dupe/append 실패는 best-effort로 버린다(알림 보관은 부가 기능 — enqueueAgentCompletion 규율).
+    fn pushNotificationHistory(self: *AppSession, title: []const u8, body: []const u8, surface_id: u64, is_agent: bool) void {
+        const title_dup = self.allocator.dupe(u8, title) catch return;
+        const body_dup = self.allocator.dupe(u8, body) catch {
+            self.allocator.free(title_dup);
+            return;
+        };
+        if (self.notification_history.items.len >= notification_history_cap) {
+            const dropped = self.notification_history.orderedRemove(0);
+            if (!dropped.is_read) self.notification_unread -|= 1;
+            self.allocator.free(dropped.title);
+            self.allocator.free(dropped.body);
+        }
+        self.notification_history.append(self.allocator, .{
+            .title = title_dup,
+            .body = body_dup,
+            .surface_id = surface_id,
+            .timestamp_ns = @as(i128, std.Io.Clock.awake.now(self.io).nanoseconds),
+            .is_read = false,
+            .is_agent = is_agent,
+        }) catch {
+            self.allocator.free(title_dup);
+            self.allocator.free(body_dup);
+            return;
+        };
+        self.notification_unread += 1;
+        self.metal_dirty = true; // 배지 갱신 재렌더
+    }
+
+    /// 히스토리 항목 index를 읽음 처리한다(안 읽음이었으면 unread 1 감소). 범위 밖/이미 읽음이면 무동작.
+    fn markNotificationRead(self: *AppSession, index: usize) void {
+        if (index >= self.notification_history.items.len) return;
+        if (self.notification_history.items[index].is_read) return;
+        self.notification_history.items[index].is_read = true;
+        self.notification_unread -|= 1;
     }
 
     /// G12 BEL: 활성 surface에 pending 벨이 있으면 true(코어 플래그를 비운다). Swift가 시스템 벨(NSSound.beep)을
@@ -8892,7 +9044,7 @@ pub const AppSession = struct {
     /// (재빌드 churn 방지 — 아이콘 경계를 넘을 때만 1회). 검색 줄은 caret만 있고 호버 배경 없음(텍스트 입력 영역).
     fn setHoveredHeaderRegion(self: *AppSession, region: chrome.components.sidebar.HeaderRegion) void {
         const next: ?chrome.components.sidebar.HeaderRegion = switch (region) {
-            .toggle_sidebar, .view_options, .new_workspace => region,
+            .toggle_sidebar, .view_options, .new_workspace, .notifications => region,
             .search, .none => null,
         };
         if (self.hovered_header_region == next) return;
@@ -9011,6 +9163,7 @@ pub const AppSession = struct {
                     .toggle_sidebar => cols -| 8,
                     .view_options => cols -| 5,
                     .new_workspace => cols -| 2,
+                    .notifications => cols -| 11,
                     .search, .none => cols, // 도달 안 함(setHoveredHeaderRegion이 정규화) — 안전값
                 };
                 const cw: f32 = @floatFromInt(self.cell_width_px);
@@ -9715,7 +9868,7 @@ pub const AppSession = struct {
         if (self.sidebar_collapsed) return self.buildCollapsedToggleFrame();
         if (self.sidebar_header_height_px == 0) return null;
         const cols: u16 = @intCast(@min(self.sidebar_width_px / cw, @as(u32, std.math.maxInt(u16))));
-        if (cols < 10) return null; // 검색 줄 + 우측 아이콘 3개(◧/⚙/+, 각 3칸 간격)가 들어갈 최소 폭
+        if (cols < 13) return null; // 검색 줄 + 우측 아이콘 4개(종/◧/⚙/+, 각 3칸 간격)가 들어갈 최소 폭(headerHit cols<13과 정합)
 
         var cells: std.ArrayList(renderer.DrawCell) = .empty;
         errdefer cells.deinit(self.allocator);
@@ -9732,6 +9885,14 @@ pub const AppSession = struct {
         // 아이콘 색은 호버 여부와 무관하게 항상 sidebar_foreground다 — hover 강조는 아래 호버 배경 quad(밝은 반투명)가
         // 맡는다. 예전엔 호버 아이콘을 sidebar_active로 재색칠했는데, Ghostty 테마에선 sidebar_active가 밝은 전경색이
         // 아니라 어두운 밴드색이라 아이콘이 오히려 어두워졌다(사용자 피드백) — 재색칠을 제거한다.
+        // 알림 종(cols-12, EAW 2칸) + 안 읽은 개수 배지(종 우측 cols-10). headerHit의 notifications zone(cols-12..cols-9)과
+        // 같은 col(단일 레이아웃). 종 글리프는 🔔(U+1F514) — 🔍(검색)과 같은 이모지 경로(CoreText fallback). 배지는
+        // 안 읽은 알림이 있을 때만 숫자(9 초과는 9로 cap — 1칸 폭 유지). 색은 눈에 띄게 coral(안읽음 강조).
+        try cells.append(self.allocator, .{ .row = 0, .col = cols - 12, .codepoint = 0x1F514, .width = 2, .style = .{ .foreground = fg } });
+        if (self.notification_unread > 0) {
+            const n: u21 = @intCast(@min(self.notification_unread, 9));
+            try cells.append(self.allocator, .{ .row = 0, .col = cols - 10, .codepoint = '0' + n, .style = .{ .foreground = .{ .rgb = .{ .r = 0xE0, .g = 0x5A, .b = 0x4A } } } });
+        }
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 8, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 5, .codepoint = 0x2699, .style = .{ .foreground = fg } });
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
@@ -10278,6 +10439,11 @@ pub const AppSession = struct {
         if (self.chrome_host.context_menu.open) {
             try self.chrome_host.collectContextMenuDraws(self.contextMenuItems(), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
         }
+        if (self.chrome_host.notifications.open) {
+            const items = try self.buildNotificationItems(arena); // 히스토리 → 카드(역순) 주입
+            self.chrome_host.notifications.setItemCount(items.len); // 패널 열린 채 새 알림 도착 시 selected clamp 동기화
+            try self.chrome_host.collectNotificationsDraws(items, props, &tokens, arena, &draws);
+        }
         if (self.chrome_host.settings.open) {
             const labels = try self.buildSettingsSectionLabels(arena); // 좌측 네비 라벨(platform 소유)
             const fields = try self.buildSettingsFields(arena); // 현재 섹션의 필드 행 주입(platform 소유)
@@ -10353,6 +10519,11 @@ pub const AppSession = struct {
             self.allocator.free(n.body);
         }
         self.agent_notifications.deinit(self.allocator);
+        for (self.notification_history.items) |n| {
+            self.allocator.free(n.title);
+            self.allocator.free(n.body);
+        }
+        self.notification_history.deinit(self.allocator);
         self.pane_palette_copies.deinit(self.allocator);
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
         if (self.config_path_buffer) |b| self.allocator.free(b);
@@ -10853,6 +11024,84 @@ test "activateSurfaceById: surface.id로 (탭·split panel·가로탭)을 역조
     try std.testing.expect(!session.activateSurfaceById(0xFFFF_FFFF));
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+}
+
+test "알림 히스토리: push 상한 ring + unread 증감 + markRead + formatRelativeTime 경계" {
+    // 인앱 알림 센터의 토대 — 드레인되면 사라지는 OS 배너와 달리 히스토리는 보관·열람된다. 상한(ring) 초과 시 가장
+    // 오래된 걸 버리고, unread 캐시는 push/markRead/cap-drop 3곳에서만 정확히 증감해야 종 배지 수가 맞는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // AppSession.init = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // push 2건(에이전트/OSC) → len 2, unread 2, owned dupe.
+    session.pushNotificationHistory("ws1", "done", 1, true);
+    session.pushNotificationHistory("ws2", "fail", 2, false);
+    try std.testing.expectEqual(@as(usize, 2), session.notification_history.items.len);
+    try std.testing.expectEqual(@as(usize, 2), session.notification_unread);
+    try std.testing.expect(session.notification_history.items[0].is_agent);
+    try std.testing.expect(!session.notification_history.items[1].is_agent);
+    try std.testing.expectEqual(@as(u64, 2), session.notification_history.items[1].surface_id);
+
+    // markRead(0) → unread 1, 다시 호출은 무동작(이미 읽음).
+    session.markNotificationRead(0);
+    try std.testing.expectEqual(@as(usize, 1), session.notification_unread);
+    session.markNotificationRead(0);
+    try std.testing.expectEqual(@as(usize, 1), session.notification_unread);
+    session.markNotificationRead(999); // 범위 밖 — 무동작
+    try std.testing.expectEqual(@as(usize, 1), session.notification_unread);
+
+    // 상한 초과: cap+5건 더 push → len은 cap 유지(ring), 누수 없이 가장 오래된 것 free.
+    var i: usize = 0;
+    while (i < notification_history_cap + 5) : (i += 1) session.pushNotificationHistory("x", "y", 100, false);
+    try std.testing.expectEqual(notification_history_cap, session.notification_history.items.len);
+
+    // formatRelativeTime 경계(arena).
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try std.testing.expectEqualStrings("방금", try session.formatRelativeTime(a, 30 * std.time.ns_per_s));
+    try std.testing.expectEqualStrings("5분 전", try session.formatRelativeTime(a, 5 * 60 * std.time.ns_per_s));
+    try std.testing.expectEqualStrings("2시간 전", try session.formatRelativeTime(a, 2 * 3600 * std.time.ns_per_s));
+    try std.testing.expectEqualStrings("3일 전", try session.formatRelativeTime(a, 3 * 86400 * std.time.ns_per_s));
+    try std.testing.expectEqualStrings("방금", try session.formatRelativeTime(a, -100)); // 시계 역행 → 0
+}
+
+test "acceptNotification: 목록 역순 매핑(0=최신) + 클릭 항목만 읽음 + 패널 닫기" {
+    // 목록은 최신이 위(역순)라 selected 0 = 히스토리 끝. accept는 그 인덱스만 읽음 처리하고 패널을 닫아야 한다
+    // (열어도 다 읽음 처리하지 않는다 — 안읽음 점 유지가 요구사항).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.pushNotificationHistory("old", "1", 11, true); // history index 0 (오래됨)
+    session.pushNotificationHistory("new", "2", 22, true); // history index 1 (최신)
+    session.chrome_host.notifications.show(0, 0, 2);
+    session.chrome_host.notifications.selected = 0; // 목록 0 = 최신("new") = history index 1
+    try std.testing.expectEqual(@as(usize, 2), session.notification_unread);
+
+    session.acceptNotification();
+    try std.testing.expect(!session.chrome_host.notifications.open); // 패널 닫힘
+    try std.testing.expect(session.notification_history.items[1].is_read); // 최신("new")만 읽음
+    try std.testing.expect(!session.notification_history.items[0].is_read); // 오래된("old")은 안 읽음 유지
+    try std.testing.expectEqual(@as(usize, 1), session.notification_unread);
 }
 
 test "parseGitHead: ref branch / nested ref / detached SHA / empty ref / junk" {

@@ -3101,8 +3101,9 @@ pub const AppSession = struct {
         return std.fmt.allocPrint(arena, "{d}일 전", .{day});
     }
 
-    /// 알림 카드 선택(Enter/클릭)을 처리한다 — selected(역순: 0=최신)를 히스토리 인덱스로 되돌려 읽음 처리하고, 그
-    /// surface로 점프(activateSurfaceById, 닫혔으면 false=점프 안 함)한 뒤 패널을 닫는다. 빈 목록/범위 밖이면 닫기만.
+    /// 알림 카드 선택(Enter/클릭)을 처리한다 — selected(역순: 0=최신)를 히스토리 인덱스로 되돌려 그 surface를 봤다는
+    /// 의미로 같은 surface의 안읽음을 모두 읽음 처리(markNotificationsReadBySurface — 데스크톱 배너 클릭과 동일 정책)하고,
+    /// 그 surface로 점프(activateSurfaceById, 닫혔으면 false=점프 안 함)한 뒤 패널을 닫는다. 빈 목록/범위 밖이면 닫기만.
     fn acceptNotification(self: *AppSession) void {
         const sel = self.chrome_host.notifications.selected;
         const len = self.notification_history.items.len;
@@ -3111,7 +3112,7 @@ pub const AppSession = struct {
         if (len == 0 or sel >= len) return;
         const history_index = len - 1 - sel; // 역순 매핑(목록 0 = 최신 = 히스토리 끝)
         const surface_id = self.notification_history.items[history_index].surface_id;
-        self.markNotificationRead(history_index); // 클릭한 항목만 읽음(unread 감소 → 배지 갱신)
+        self.markNotificationsReadBySurface(surface_id); // 그 surface를 봤으니 전체 읽음 — 데스크톱 배너 클릭과 동일 정책(통일)
         _ = self.activateSurfaceById(surface_id); // 닫힌 surface면 false(점프 안 함, 패널은 이미 닫음)
     }
 
@@ -7562,18 +7563,15 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 데스크톱 배너 클릭(activate_surface)으로 그 surface를 봤으니, 그 surface_id의 안 읽은 히스토리 항목을 모두 읽음
+    /// 그 surface를 봤으니(데스크톱 배너 클릭 또는 인앱 카드 클릭) 그 surface_id의 안 읽은 히스토리 항목을 모두 읽음
     /// 처리한다(배너↔인앱 센터 읽음 동기화). 같은 surface가 여러 번 알림했으면 다 읽음 — 그 터미널을 봤다는 의미라 일관.
+    /// 한 항목 읽음 회계는 markNotificationRead 단일 출처를 재사용한다(이미 읽음이면 내부에서 무동작). dirty는 형제
+    /// 알림 mutator(push·delete·markAll·clear)와 같이 무조건 세운다 — 배너/카드 클릭은 cold path라 조건부 절약 불필요.
     pub fn markNotificationsReadBySurface(self: *AppSession, surface_id: u64) void {
-        var changed = false;
-        for (self.notification_history.items) |*it| {
-            if (it.surface_id == surface_id and !it.is_read) {
-                it.is_read = true;
-                self.notification_unread -|= 1;
-                changed = true;
-            }
+        for (self.notification_history.items, 0..) |*it, i| {
+            if (it.surface_id == surface_id) self.markNotificationRead(i);
         }
-        if (changed) self.metal_dirty = true;
+        self.metal_dirty = true;
     }
 
     /// 모든 알림을 히스토리에서 삭제한다(owned 전부 free). 패널은 빈 목록("알림 없음")으로 유지된다.
@@ -11294,9 +11292,10 @@ test "알림 히스토리: push 상한 ring + unread 증감 + markRead + formatR
     try std.testing.expectEqualStrings("방금", try session.formatRelativeTime(a, -100)); // 시계 역행 → 0
 }
 
-test "acceptNotification: 목록 역순 매핑(0=최신) + 클릭 항목만 읽음 + 패널 닫기" {
-    // 목록은 최신이 위(역순)라 selected 0 = 히스토리 끝. accept는 그 인덱스만 읽음 처리하고 패널을 닫아야 한다
-    // (열어도 다 읽음 처리하지 않는다 — 안읽음 점 유지가 요구사항).
+test "acceptNotification: 목록 역순 매핑(0=최신) + 클릭 surface 전체 읽음(배너와 통일) + 패널 닫기" {
+    // 목록은 최신이 위(역순)라 selected 0 = 히스토리 끝. accept는 그 카드의 surface를 봤다는 의미라 같은 surface의
+    // 안읽음을 모두 읽음 처리하고(데스크톱 배너 클릭과 동일 정책 — markNotificationsReadBySurface) 패널을 닫는다.
+    // 다른 surface 알림은 안읽음 점을 유지한다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -11310,17 +11309,20 @@ test "acceptNotification: 목록 역순 매핑(0=최신) + 클릭 항목만 읽�
     });
     defer session.deinit();
 
-    session.pushNotificationHistory("old", "1", 11, true); // history index 0 (오래됨)
-    session.pushNotificationHistory("new", "2", 22, true); // history index 1 (최신)
-    session.chrome_host.notifications.show(0, 0, 2);
-    session.chrome_host.notifications.selected = 0; // 목록 0 = 최신("new") = history index 1
-    try std.testing.expectEqual(@as(usize, 2), session.notification_unread);
+    session.pushNotificationHistory("old-A", "1", 11, true); // history 0: surface 11
+    session.pushNotificationHistory("other", "2", 22, true); // history 1: surface 22(다른 터미널)
+    session.pushNotificationHistory("new-A", "3", 11, false); // history 2(최신): surface 11(또 한 번)
+    session.chrome_host.notifications.show(0, 0, 3);
+    session.chrome_host.notifications.selected = 0; // 목록 0 = 최신("new-A") = surface 11
+    try std.testing.expectEqual(@as(usize, 3), session.notification_unread);
 
     session.acceptNotification();
     try std.testing.expect(!session.chrome_host.notifications.open); // 패널 닫힘
-    try std.testing.expect(session.notification_history.items[1].is_read); // 최신("new")만 읽음
-    try std.testing.expect(!session.notification_history.items[0].is_read); // 오래된("old")은 안 읽음 유지
-    try std.testing.expectEqual(@as(usize, 1), session.notification_unread);
+    // 클릭 카드의 surface(11) 안읽음(old-A·new-A) 모두 읽음, 다른 surface(22, "other")는 유지.
+    try std.testing.expect(session.notification_history.items[0].is_read); // old-A (surface 11)
+    try std.testing.expect(!session.notification_history.items[1].is_read); // other (surface 22)
+    try std.testing.expect(session.notification_history.items[2].is_read); // new-A (surface 11)
+    try std.testing.expectEqual(@as(usize, 1), session.notification_unread); // other만 안읽음
 }
 
 test "알림 액션: deleteNotification(역순) + markAllNotificationsRead + clearNotifications + unread 보정" {

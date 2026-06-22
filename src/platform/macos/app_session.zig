@@ -3122,13 +3122,9 @@ pub const AppSession = struct {
     }
 
     /// 키보드 ↑↓로 알림 선택이 바뀐 뒤 — 선택 카드가 패널 viewport 밖이면 보이게 스크롤한다(컴포넌트 ensureSelectedVisible
-    /// 단일 출처). 항목은 매 프레임 빌드. scroll_offset 상태를 두는 알림 패널 특유 처리(palette는 selected에서 윈도우 파생).
+    /// 단일 출처). 개수·metrics만 넘긴다(Item 빌드 불필요). scroll_offset 상태를 두는 알림 패널 특유 처리(palette는 파생).
     fn scrollNotificationsToSelected(self: *AppSession) void {
-        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena_state.deinit();
-        if (self.buildNotificationItems(arena_state.allocator())) |items| {
-            self.chrome_host.notifications.ensureSelectedVisible(items, self.buildChromeProps());
-        } else |_| {}
+        self.chrome_host.notifications.ensureSelectedVisible(self.notification_history.items.len, self.buildCellMetrics());
         self.metal_dirty = true;
     }
 
@@ -5748,21 +5744,20 @@ pub const AppSession = struct {
         if (self.chrome_host.confirm.open) return;
         // 알림 패널이 열려 있으면 휠은 패널 카드 스크롤로 가로챈다(클릭이 패널로 가로채지는 mouse()의 게이트와 짝 —
         // 터미널/스크롤백으로 안 흘린다). 휠 위(lines>0)=목록 위(최신, offset↓)·아래=오래된(offset↑). 카드 단위라 줄
-        // 수를 그대로 카드 delta로 쓴다(부호 반전: 위로 굴리면 offset 감소). 항목은 매 프레임 빌드(layout이 상한 clamp).
+        // 수를 그대로 카드 delta로 쓴다(부호 반전: 위로 굴리면 offset 감소). 개수·metrics만 넘긴다(Item 빌드 불필요).
         if (self.chrome_host.notifications.open) {
             if (std.math.isFinite(delta_y) and delta_y * self.wheel_accum < 0) self.wheel_accum = 0;
             const scaled = delta_y * @as(f64, self.appearance.scroll_multiplier);
             const lines = wheelDeltaToLines(&self.wheel_accum, scaled, precise, self.cell_height_px, self.scale_milli);
             if (lines != 0) {
-                var arena_state = std.heap.ArenaAllocator.init(self.allocator);
-                defer arena_state.deinit();
-                if (self.buildNotificationItems(arena_state.allocator())) |items| {
-                    self.chrome_host.notifications.scrollBy(items, self.buildChromeProps(), @as(i64, -lines));
-                    self.metal_dirty = true;
-                } else |_| {}
+                self.chrome_host.notifications.scrollBy(self.notification_history.items.len, self.buildCellMetrics(), @as(i64, -lines));
+                self.metal_dirty = true;
             }
             return;
         }
+        // 그 외 오버레이(notice·context_menu·find·palette·settings)가 열려 있으면 휠을 **소비**한다 — 터미널/스크롤백으로
+        // 안 흘린다(클릭이 mouse()에서 막히는 것과 짝, 오버레이는 배타적이라 한 번에 하나). 자체 스크롤은 아직 없다(후속).
+        if (self.anyOverlayOpen()) return;
         // 방향이 뒤집히면 1줄 미만 잔여를 버린다 — 이전 방향의 residue가 첫 반대 틱을 상쇄해
         // 방향 전환이 굼뜨게 느껴지는 것 방지(iTerm2/xterm.js 동작).
         if (std.math.isFinite(delta_y) and delta_y * self.wheel_accum < 0) self.wheel_accum = 0;
@@ -10348,18 +10343,24 @@ pub const AppSession = struct {
     /// chrome 컴포넌트가 읽는 불변 메트릭(props seam). 매 frame 세션 실측값에서 빌드한다 — chrome은 terminal/
     /// config 타입을 모르므로 plain u32만 넘긴다. 오버레이는 터미널과 같은 셀(self.cell_width_px — CoreText 실측)을
     /// 쓴다. sidebar/backing은 실 px 그대로. sidebar_width_px는 런타임 가변(드래그)이라 토큰이 아닌 여기로.
+    /// 셀/화면 메트릭만(토큰·shape 없이) — 휠/키 스크롤처럼 metrics만 필요한 경로가 buildChromeProps의 토큰 빌드를
+    /// 피하게 한다. buildChromeProps도 이걸 재사용해 metrics를 단일 출처로 둔다.
+    fn buildCellMetrics(self: *const AppSession) chrome.props.CellMetrics {
+        return .{
+            .cell_width_px = self.cell_width_px,
+            .cell_height_px = self.cell_height_px,
+            .sidebar_width_px = self.sidebar_width_px,
+            .sidebar_slot_height_px = self.sidebar_slot_height_px,
+            .backing_width_px = self.backing_width_px,
+            .backing_height_px = self.backing_height_px,
+            .chrome_minimal = self.chrome_minimal,
+        };
+    }
+
     fn buildChromeProps(self: *const AppSession) chrome.ChromeProps {
         const tk = self.buildChromeTokens();
         return .{
-            .metrics = .{
-                .cell_width_px = self.cell_width_px,
-                .cell_height_px = self.cell_height_px,
-                .sidebar_width_px = self.sidebar_width_px,
-                .sidebar_slot_height_px = self.sidebar_slot_height_px,
-                .backing_width_px = self.backing_width_px,
-                .backing_height_px = self.backing_height_px,
-                .chrome_minimal = self.chrome_minimal,
-            },
+            .metrics = self.buildCellMetrics(),
             // C4b: 박스 모양 토큰을 tokens.space에서(단일 출처). tui=0(직각·셀 밴드), rich>0(둥근 GPU quad).
             .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px, .accent_bar_width_px = tk.space.accent_bar_width_px, .card_gap_px = tk.space.card_gap_px },
             // 활성 pane rect(셀 그리드 영역) — find 오버레이가 활성 pane 우상단에 붙도록(findLayout 단일 출처).
@@ -10668,9 +10669,8 @@ pub const AppSession = struct {
         const total = self.palette_filtered.items.len;
         const selected = self.chrome_host.palette.selected;
         const visible_count = @min(total, max_visible);
-        var win_start: usize = 0;
-        if (selected >= max_visible) win_start = selected - max_visible + 1; // 선택이 창 아래로 나가면 끝맞춤
-        if (win_start + visible_count > total) win_start = total - visible_count; // total≥visible_count라 안전
+        // 공유 윈도잉(prev=0 재파생) — selected가 창 아래로 나가면 끝맞춤 + clamp. settings·notifications와 단일 출처.
+        const win_start = chrome.components.overlay_input.windowStart(total, max_visible, selected, 0);
         const rows = try arena.alloc(Row, visible_count);
         var i: usize = 0;
         while (i < visible_count) : (i += 1) {

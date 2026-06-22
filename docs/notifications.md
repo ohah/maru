@@ -72,7 +72,9 @@
   못 자르므로 통째 카드만 보인다). `State.scroll_offset`(보이는 첫 카드, 0=최신)으로 `items[first..first+visible]`만
   렌더한다. 마우스 휠(패널 열림 시 `scrollWheel`이 가로채 터미널/스크롤백으로 안 흘림)·키보드 ↑↓(선택이 viewport
   밖이면 `ensureSelectedVisible`가 따라 스크롤)로 움직인다. **액션 행("모두 읽음/지우기")은 viewport 하단 sticky**라
-  스크롤해도 안 잘린다. 스크롤 가능하면 우측에 얇은 스크롤바 thumb(보이는 비율). 상한 clamp는 `layout` 단일 출처.
+  스크롤해도 안 잘린다. 스크롤 가능하면 우측에 얇은 스크롤바 thumb(보이는 비율). 보이는 카드 수·상한은 `scrollWindow`
+  (개수·화면 높이만 — 휠/키 경로가 Item을 안 빌드하게)가, 선택 끝맞춤 윈도잉은 `overlay_input.windowStart`(palette·
+  settings와 공유)가 단일 출처. 다른 오버레이가 열렸을 땐 휠을 소비만 한다(터미널로 안 흘림 — `mouse()` 클릭 게이트와 짝).
 - **클릭 → 점프 + 읽음**: 카드 본문 클릭/Enter → `acceptNotification`이 selected(역순: 0=최신)를 히스토리 인덱스로
   되돌려 그 카드의 surface를 봤다는 의미로 **같은 surface의 안읽음을 모두** 읽음 처리(`markNotificationsReadBySurface`
   — 2단계 배너 클릭과 **동일 정책**)하고, `activateSurfaceById(surface_id)`(1단계 재사용)로 점프한 뒤 패널을 닫는다.

@@ -505,7 +505,7 @@ pub const TerminalCore = struct {
         self.charset_g0 = .ascii; // G3 charset도 공장 초기화(G0/G1 ascii, GL=G0).
         self.charset_g1 = .ascii;
         self.charset_gl = 0;
-        self.resetTabstops(); // G4 탭스톱도 8칸 기본으로 공장 초기화(xterm RIS).
+        screen.resetTabstops(self); // G4 탭스톱도 8칸 기본으로 공장 초기화(xterm RIS).
         self.insert_mode = false; // G6 IRM도 off로 복원.
         self.autowrap = true; // G8 DECAWM도 on(기본)으로 복원.
         self.last_printed_cp = 0; // G5 REP 직전 글자도 비운다.
@@ -2763,8 +2763,8 @@ pub const TerminalCore = struct {
             'M' => self.deleteLines(self.csiParam(0, 1)),
             '@' => self.insertChars(self.csiParam(0, 1)), // ICH: 커서에 N개(기본 1) blank 삽입, 오른쪽으로 민다
             'P' => self.deleteChars(self.csiParam(0, 1)), // DCH: 커서에서 N개(기본 1) 삭제, 왼쪽으로 당긴다
-            'Z' => self.cursorBackTab(self.csiParam(0, 1)), // CBT: 역방향 N개(기본 1) 탭스톱 — Shift+Tab 폼 역이동
-            'g' => self.clearTabstop(self.csiRawParam(0)), // TBC: 0(기본)=커서 열 탭스톱 제거, 3=전체 제거
+            'Z' => screen.cursorBackTab(self, self.csiParam(0, 1)), // CBT: 역방향 N개(기본 1) 탭스톱 — Shift+Tab 폼 역이동
+            'g' => screen.clearTabstop(self, self.csiRawParam(0)), // TBC: 0(기본)=커서 열 탭스톱 제거, 3=전체 제거
             'b' => self.repeatLastChar(self.csiParam(0, 1)), // REP(G5): 직전 graphic 글자를 N회 반복
             'S' => self.scrollRangeUp(self.scroll_top, self.scroll_bottom, self.csiParam(0, 1), false), // SU(G7): scroll region N줄 위로 팬(history 미보관)
             'T' => self.scrollRangeDown(self.scroll_top, self.scroll_bottom, self.csiParam(0, 1)), // SD(G7): scroll region N줄 아래로 팬
@@ -3627,7 +3627,7 @@ pub const TerminalCore = struct {
             self.last_print = null;
             // CSI 파서 상태/UTF-8 꼬리는 유지(아래 일반 경로와 동일한 이유).
             self.dirty = fullDirty(next_size);
-            self.rebuildTabstops(old_cols); // 탭스톱을 새 cols에 맞춘다(겹침 보존·새 열 8칸 기본).
+            screen.rebuildTabstops(self, old_cols); // 탭스톱을 새 cols에 맞춘다(겹침 보존·새 열 8칸 기본).
             // alt 중 폭이 바뀌면 보관된 primary 스크롤백(saved_sb)을 복귀 후 현재 폭으로 재-wrap하도록
             // 마크한다(활성 alt sb는 빈 인스턴스라 무의미 — primary는 saved_sb에 있다). leaveAltScreen이
             // 복원하면 ensureScrollbackRewrapped가 1회 수행한다. 안 그러면 옛 폭 행이 복귀 후 stale로 보인다.
@@ -3819,7 +3819,7 @@ pub const TerminalCore = struct {
         self.cells = next_cells;
         self.wrapped = next_wrapped;
         self.prompt_marks = next_prompt_marks;
-        self.rebuildTabstops(old_cols); // 탭스톱을 새 cols에 맞춘다(겹침 보존·새 열 8칸 기본).
+        screen.rebuildTabstops(self, old_cols); // 탭스톱을 새 cols에 맞춘다(겹침 보존·새 열 8칸 기본).
         // semantic_state(진행 중 영역)는 유지한다 — 커서 줄(보통 활성 프롬프트/입력)이 verbatim으로
         // 보존되므로, resize 후 첫 lineFeed가 같은 영역을 이어 전파해야 한다(reset하면 분류가 끊긴다).
         // scroll region margin은 화면 크기에 묶이므로 resize 때 전체로 리셋한다(xterm 동작).
@@ -4090,7 +4090,7 @@ pub const TerminalCore = struct {
                 self.lineFeed();
                 self.last_print = null;
             },
-            '\t' => self.writeTab(),
+            '\t' => screen.writeTab(self),
             0x07 => self.bell_pending = true, // BEL: 시스템 벨 요청(platform이 drain — NSSound.beep)
             0x0b, 0x0c => self.lineFeed(), // VT(0x0b)/FF(0x0c): LF처럼 한 줄 내림(col 유지) — printf '\f'/'\v'
             0x0e => self.charset_gl = 1, // SO(shift out): G1을 GL로 호출(ESC ) 0 후 box 문자 시작)
@@ -4236,76 +4236,6 @@ pub const TerminalCore = struct {
         // byte transport and does not need text-decoding logic.
         @memcpy(self.utf8_tail[0..bytes.len], bytes);
         self.utf8_tail_len = bytes.len;
-    }
-
-    /// col이 탭스톱인가. tabstops 배열 안이면 그 값, 밖(OOM 등 길이 불일치)이면 8칸 기본으로 폴백.
-    fn isTabstop(self: *const TerminalCore, col: u16) bool {
-        if (col < self.tabstops.len) return self.tabstops[col];
-        return col % 8 == 0;
-    }
-
-    /// 탭스톱을 8칸 기본으로 되돌린다(RIS·TBC 3). 길이 불일치(OOM)면 가능한 만큼만.
-    fn resetTabstops(self: *TerminalCore) void {
-        for (self.tabstops, 0..) |*t, c| t.* = (c % 8 == 0);
-    }
-
-    /// resize 후 탭스톱 배열을 새 cols에 맞춘다. 겹치는 열은 보존(HTS/TBC 유지), 새 열은 8칸 기본. OOM이면
-    /// 기존 배열 유지(isTabstop이 8칸으로 폴백) — best-effort라 resize를 실패시키지 않는다.
-    fn rebuildTabstops(self: *TerminalCore, old_cols: u16) void {
-        const new_cols = self.size.cols;
-        if (new_cols == self.tabstops.len) return; // 폭 불변이면 그대로
-        const buf = self.allocator.alloc(bool, new_cols) catch return;
-        for (buf, 0..) |*t, c| {
-            t.* = if (c < old_cols and c < self.tabstops.len) self.tabstops[c] else (c % 8 == 0);
-        }
-        if (self.tabstops.len > 0) self.allocator.free(self.tabstops);
-        self.tabstops = buf;
-    }
-
-    fn writeTab(self: *TerminalCore) void {
-        // 탭은 수평 이동이다 — 다음 탭스톱으로 커서만 옮기고(끝 칸에 멈춤), 지나는 셀의 내용은 건드리지
-        // 않는다. xterm.js(InputHandler.tab)·Ghostty(horizontalTab)도 커서만 이동한다 — putCell(' ')로 공백을
-        // 찍으면 CR 후 탭 redraw에서 기존 글자가 지워진다. 탭은 wrap하지 않으므로 pending_wrap도 끈다.
-        self.pending_wrap = false;
-        // TAB은 grapheme run을 끊는다 — CR/LF/BS와 동일하게 last_print를 비워, 탭 뒤의 combining mark(또는 skin-tone·
-        // RI 페어링)가 탭 이전 글자에 잘못 붙지 않게 한다. 이동 여부와 무관하게(이미 마지막 칸이어도) 컨트롤 처리 = run 종료다.
-        self.last_print = null;
-        if (self.size.cols == 0) return;
-        const last = self.size.cols - 1;
-        if (self.cursor.col >= last) return; // 이미 마지막 칸 — 이동 없음
-        const old_cursor = self.cursor;
-        var next = self.cursor.col + 1;
-        while (next < last and !self.isTabstop(next)) next += 1; // 다음 탭스톱(없으면 마지막 칸)에 멈춤
-        self.cursor.col = next;
-        // 커서는 draw-time 오버레이라 이동 시 옛/새 칸을 모두 dirty로 마킹해야 한다 — markCursorMoveDirty 계약(\r·BS·CBT 등
-        // 이 함수를 거치는 모든 이동)에 TAB도 포함시켜, 옛 칸의 커서 잔상이 안 남게 한다(cursorBackTab과 동일).
-        self.markCursorMoveDirty(old_cursor, self.cursor);
-    }
-
-    /// CBT(CSI Ps Z): 역방향으로 Ps개 탭스톱 이동. 0번째 칸을 넘지 않는다.
-    fn cursorBackTab(self: *TerminalCore, count: u16) void {
-        self.pending_wrap = false;
-        self.last_print = null; // CBT도 커서 이동 — grapheme run을 끊는다(HT/CR/LF/BS와 동일).
-        const old_cursor = self.cursor;
-        var remaining = @max(count, 1);
-        while (remaining > 0) : (remaining -= 1) {
-            if (self.cursor.col == 0) break;
-            var prev = self.cursor.col - 1;
-            while (prev > 0 and !self.isTabstop(prev)) prev -= 1; // 이전 탭스톱(없으면 col 0)으로
-            self.cursor.col = prev;
-        }
-        self.markCursorMoveDirty(old_cursor, self.cursor);
-    }
-
-    /// TBC(CSI Ps g): Ps=0(기본) 커서 열 탭스톱 제거, Ps=3 전체 제거. 그 외 Ps는 무시.
-    fn clearTabstop(self: *TerminalCore, mode: u16) void {
-        switch (mode) {
-            0 => if (self.cursor.col < self.tabstops.len) {
-                self.tabstops[self.cursor.col] = false;
-            },
-            3 => @memset(self.tabstops, false),
-            else => {},
-        }
     }
 
     fn putCell(self: *TerminalCore, codepoint: u21) void {
@@ -4699,7 +4629,8 @@ pub const TerminalCore = struct {
         self.dirty = .{ .start_row = row, .end_row = row };
     }
 
-    fn markCursorMoveDirty(self: *TerminalCore, old_cursor: types.Cursor, new_cursor: types.Cursor) void {
+    /// screen.writeTab/cursorBackTab(8/N)이 cross-file 호출 — pub. 9/N에서 dirty 추적과 함께 screen.zig로 이동 예정.
+    pub fn markCursorMoveDirty(self: *TerminalCore, old_cursor: types.Cursor, new_cursor: types.Cursor) void {
         // 명시적 커서 이동(CR/LF/backspace/CUP/CHA/VPA/CUU..CUB 등 이 함수를 거치는 모든 이동)은
         // deferred autowrap을 무효화한다. putCell의 cursor 전진은 이 함수를 거치지 않으므로
         // pending_wrap을 직접 관리한다. 위치가 안 바뀌는 이동(아래 early-return)도 wrap 의도는

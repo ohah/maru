@@ -5,10 +5,15 @@
 //! osc.zig로 분리했고, 여기는 "storage" 책임을 모은다. `Scrollback`은 이미 self-contained 서브-struct라
 //! (architecture.md가 가리킨 자연스러운 seam) types만 의존하고 `TerminalCore`를 참조하지 않는다.
 //! facade(terminal.zig)·`TerminalCore` struct는 불변 — core.zig가 이 타입을 import해 `sb`/`saved_sb` 필드로 쓴다.
-//! 점진 분리: 활성 화면 grid·커서 storage 추출은 후속 PR로 이리로 모은다.
+//! 점진 분리: 활성 화면 storage/연산 추출이 진행 중이다 — tabstops(G4 동적 탭스톱)부터 이리로 모은다(8/N~,
+//! docs/terminal-core-decomposition.md). 각 연산은 `*TerminalCore`를 받는 free 함수다(필드 직접 접근 — Zig는
+//! 필드 privacy가 없다; osc.zig·parser.zig와 동형). core↔screen 순환 import은 그 둘이 이미 검증한 그래프다.
 
 const std = @import("std");
 const types = @import("types.zig");
+const core = @import("core.zig"); // 활성 화면 연산이 *TerminalCore를 받는다(Scrollback struct는 여전히 types만 의존)
+
+const TerminalCore = core.TerminalCore;
 
 /// 한 화면(primary/alt)의 스크롤백 ring buffer. `ring`/`wrapped`/`prompt_marks`는 같은 길이의 병렬 배열로
 /// `(head+i)%len`로 인덱싱한다(pushScrollback이 함께 할당). 슬롯 cell 버퍼는 lazy 할당이라 빈 슬롯은 null이다.
@@ -104,3 +109,78 @@ pub const Scrollback = struct {
         return drop;
     }
 };
+
+// ── G4 동적 탭스톱 ───────────────────────────────────────────────────────────────────────────────
+// col별 탭스톱(기본 8칸마다). HTS(ESC H)가 set, TBC(CSI g)가 clear, CBT(CSI Z)가 역방향 이동, HT(0x09)가
+// 다음 탭스톱으로 전진. 길이는 cols와 맞춘다(resize가 재구성). 활성 화면 storage라 screen.zig로 모은다(8/N).
+// core가 `self.tabstops`/`self.cursor`/`self.size` 필드를 직접 들고, 여기는 그 위의 연산만 제공한다.
+
+/// col이 탭스톱인가. tabstops 배열 안이면 그 값, 밖(OOM 등 길이 불일치)이면 8칸 기본으로 폴백.
+fn isTabstop(self: *const TerminalCore, col: u16) bool {
+    if (col < self.tabstops.len) return self.tabstops[col];
+    return col % 8 == 0;
+}
+
+/// 탭스톱을 8칸 기본으로 되돌린다(RIS·TBC 3). 길이 불일치(OOM)면 가능한 만큼만.
+pub fn resetTabstops(self: *TerminalCore) void {
+    for (self.tabstops, 0..) |*t, c| t.* = (c % 8 == 0);
+}
+
+/// resize 후 탭스톱 배열을 새 cols에 맞춘다. 겹치는 열은 보존(HTS/TBC 유지), 새 열은 8칸 기본. OOM이면
+/// 기존 배열 유지(isTabstop이 8칸으로 폴백) — best-effort라 resize를 실패시키지 않는다.
+pub fn rebuildTabstops(self: *TerminalCore, old_cols: u16) void {
+    const new_cols = self.size.cols;
+    if (new_cols == self.tabstops.len) return; // 폭 불변이면 그대로
+    const buf = self.allocator.alloc(bool, new_cols) catch return;
+    for (buf, 0..) |*t, c| {
+        t.* = if (c < old_cols and c < self.tabstops.len) self.tabstops[c] else (c % 8 == 0);
+    }
+    if (self.tabstops.len > 0) self.allocator.free(self.tabstops);
+    self.tabstops = buf;
+}
+
+pub fn writeTab(self: *TerminalCore) void {
+    // 탭은 수평 이동이다 — 다음 탭스톱으로 커서만 옮기고(끝 칸에 멈춤), 지나는 셀의 내용은 건드리지
+    // 않는다. xterm.js(InputHandler.tab)·Ghostty(horizontalTab)도 커서만 이동한다 — putCell(' ')로 공백을
+    // 찍으면 CR 후 탭 redraw에서 기존 글자가 지워진다. 탭은 wrap하지 않으므로 pending_wrap도 끈다.
+    self.pending_wrap = false;
+    // TAB은 grapheme run을 끊는다 — CR/LF/BS와 동일하게 last_print를 비워, 탭 뒤의 combining mark(또는 skin-tone·
+    // RI 페어링)가 탭 이전 글자에 잘못 붙지 않게 한다. 이동 여부와 무관하게(이미 마지막 칸이어도) 컨트롤 처리 = run 종료다.
+    self.last_print = null;
+    if (self.size.cols == 0) return;
+    const last = self.size.cols - 1;
+    if (self.cursor.col >= last) return; // 이미 마지막 칸 — 이동 없음
+    const old_cursor = self.cursor;
+    var next = self.cursor.col + 1;
+    while (next < last and !isTabstop(self, next)) next += 1; // 다음 탭스톱(없으면 마지막 칸)에 멈춤
+    self.cursor.col = next;
+    // 커서는 draw-time 오버레이라 이동 시 옛/새 칸을 모두 dirty로 마킹해야 한다 — markCursorMoveDirty 계약(\r·BS·CBT 등
+    // 이 함수를 거치는 모든 이동)에 TAB도 포함시켜, 옛 칸의 커서 잔상이 안 남게 한다(cursorBackTab과 동일).
+    self.markCursorMoveDirty(old_cursor, self.cursor); // markCursorMoveDirty는 core 잔류(9/N에서 screen.zig로)
+}
+
+/// CBT(CSI Ps Z): 역방향으로 Ps개 탭스톱 이동. 0번째 칸을 넘지 않는다.
+pub fn cursorBackTab(self: *TerminalCore, count: u16) void {
+    self.pending_wrap = false;
+    self.last_print = null; // CBT도 커서 이동 — grapheme run을 끊는다(HT/CR/LF/BS와 동일).
+    const old_cursor = self.cursor;
+    var remaining = @max(count, 1);
+    while (remaining > 0) : (remaining -= 1) {
+        if (self.cursor.col == 0) break;
+        var prev = self.cursor.col - 1;
+        while (prev > 0 and !isTabstop(self, prev)) prev -= 1; // 이전 탭스톱(없으면 col 0)으로
+        self.cursor.col = prev;
+    }
+    self.markCursorMoveDirty(old_cursor, self.cursor);
+}
+
+/// TBC(CSI Ps g): Ps=0(기본) 커서 열 탭스톱 제거, Ps=3 전체 제거. 그 외 Ps는 무시.
+pub fn clearTabstop(self: *TerminalCore, mode: u16) void {
+    switch (mode) {
+        0 => if (self.cursor.col < self.tabstops.len) {
+            self.tabstops[self.cursor.col] = false;
+        },
+        3 => @memset(self.tabstops, false),
+        else => {},
+    }
+}

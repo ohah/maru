@@ -4049,7 +4049,8 @@ pub const AppSession = struct {
         for (enums_all.items) |e| if ((cross or e.section == sel_sec) and settingsRowMatches(e.doc, e.key, q)) try enums.append(arena, e);
         // theme 섹션엔 named 테마 프리셋(특수 — schema 필드 아님)을 synthetic enum 행으로 주입한다(dropdown 재사용).
         // 현재값은 config 색에서 derive(매칭 프리셋 @tagName 또는 "사용자 지정"). 핸들러가 key="theme.preset"만 특수 처리.
-        if ((cross or sel_sec == .theme) and settingsRowMatches("테마 프리셋", "theme.preset", q)) {
+        // follow-system이 켜지면 색을 preset-light/dark가 정하므로 단일 theme.preset 행은 무의미(골라도 곧 덮임) — 숨긴다(리뷰 C).
+        if ((cross or sel_sec == .theme) and !self.loaded_config.config.theme_follow_system and settingsRowMatches("테마 프리셋", "theme.preset", q)) {
             // 프리셋 행을 enum 구간 **맨 앞**에 둬 테마 섹션 최상단(색·팔레트보다 먼저)에 도드라지게 한다. 표시값은
             // 활성(themePresetActive)이면 그 프리셋명, 아니면 "사용자 지정"(detect=null이거나 사용자가 명시로 푼 경우).
             const cur_name: []const u8 = if (self.themePresetActive()) @tagName(detectThemePreset(self.loaded_config.config.theme).?) else "사용자 지정";
@@ -4183,6 +4184,9 @@ pub const AppSession = struct {
                         self.applyFollowSystemTheme()
                     else
                         self.disableFollowSystemTheme();
+                    // theme.preset synthetic 행이 follow-system on/off로 사라지거나 나타나 theme 섹션 행 수가 바뀐다 —
+                    // setFieldCount가 selected를 clamp하도록 갱신한다(안 하면 선택 인덱스가 stale, 리뷰 C).
+                    self.refreshSettingsFieldCount();
                 } else {
                     self.reapplyLoadedConfig();
                 }
@@ -16792,6 +16796,47 @@ test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist �
         if (std.mem.eql(u8, k, first_key)) found = true;
     }
     try std.testing.expect(found);
+}
+
+test "settings theme.preset 행: follow-system on이면 숨김, off면 표시 (리뷰 C)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    // theme 섹션 인덱스를 찾는다.
+    const sections = try session.buildSectionList(scratch.allocator());
+    var theme_si: ?usize = null;
+    for (sections, 0..) |s, si| if (s.section == .theme) {
+        theme_si = si;
+    };
+    try std.testing.expect(theme_si != null);
+    session.chrome_host.settings.section = theme_si.?;
+
+    const hasPreset = struct {
+        fn f(cf: anytype) bool {
+            for (cf.enums) |e| if (std.mem.eql(u8, e.key, "theme.preset")) return true;
+            return false;
+        }
+    }.f;
+
+    // follow-system OFF(기본): theme.preset synthetic 행이 보인다.
+    session.loaded_config.config.theme_follow_system = false;
+    try std.testing.expect(hasPreset(try session.currentSectionFields(scratch.allocator())));
+
+    // follow-system ON: 색을 preset-light/dark가 정하므로 theme.preset 행은 숨는다.
+    session.loaded_config.config.theme_follow_system = true;
+    try std.testing.expect(!hasPreset(try session.currentSectionFields(scratch.allocator())));
 }
 
 test "settings palette grid: theme 섹션 마지막 행에서 셀 hex 편집 → palette[idx] set + theme.palette.idx dirty (CS-4-5)" {

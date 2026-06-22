@@ -65,7 +65,7 @@ pub const Spacing = struct {
     tab_width_cols: u16 = 0,
     // U-tab: rich 탭 바 텍스트 위아래 세로 패딩(px). 바 높이 = cell_height + 2*이값, 제목은 가운데(탭 세로 여유).
     // tui=0이면 바 = cell 1칸(기존).
-    tab_bar_pad_y_px: u16 = 0,
+    tab_bar_pad_y_px: u16 = 3, // tui 기본도 세로 패딩 — grip 핸들·탭 제목이 바 세로 가운데에 오게(0이면 상단에 붙어 답답). rich는 6으로 override.
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.

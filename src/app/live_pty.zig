@@ -16,6 +16,9 @@ const pty_write_queue_capacity: usize = 1 << 18; // 256 KiB
 /// backpressure로 잠깐 대기(손실 금지) — write_queue와 같은 계약(docs/io-render-threading.md §9.2).
 const pty_command_queue_capacity: usize = 1024;
 
+// 세 번째 outbound 경로(코어 query 응답)의 상한은 pty_reader.response_buffer_capacity에 있다 — 세 outbound
+// (write_queue·command_queue·응답 버퍼)가 모두 bounded라는 §8 정책의 단일 출처를 한곳에서 보이게 교차 참조한다.
+
 /// 단일 writer 라우팅(docs/io-render-threading.md §8 P2-3b): 메인 입력을 직접 세션에 쓰지 않고 write 큐에
 /// enqueue + I/O 스레드 wake. PtyIo.ctx가 이 구조를 가리킨다(LivePtySession이 핀 고정해 주소 안정). resize는
 /// 바이트 스트림이 아니라 ioctl이라 큐를 안 거치고 세션에 바로 전달한다(write(2) 바이트와 독립이라 안전).

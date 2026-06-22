@@ -2751,6 +2751,11 @@ pub const AppSession = struct {
         const term = pane.terms.orderedRemove(term_index);
         self.destroyTerm(term);
         if (pane.terms.items.len > 0) {
+            // orderedRemove가 term_index 뒤의 Term을 한 칸씩 당긴다. 활성 Term이 닫힌 Term보다 뒤에 있었으면
+            // active_term도 한 칸 당겨야 같은 Term을 계속 가리킨다 — 임의 인덱스 reap(배경 형제 셸 종료)에서
+            // 클램프만 하면 active_term이 엉뚱한 Term으로 튀던 버그. closeActiveTerm은 idx==active_term이라
+            // 클램프-only로 충분하지만, 여긴 종료된 임의 위치를 받으므로 시프트 보정이 필요하다.
+            if (term_index < pane.active_term) pane.active_term -= 1;
             if (pane.active_term >= pane.terms.items.len) pane.active_term = pane.terms.items.len - 1;
             self.refreshAfterReap(tab_index);
         } else if (tab.panes.items.len > 1) {
@@ -4612,6 +4617,8 @@ pub const AppSession = struct {
         self.reapplyAmbiguousWidth();
         self.reapplyEmojiWidth();
         self.rebuildSidebar() catch {};
+        // Reset to Defaults·in-place config 변경으로 keybind가 바뀌었을 수 있으니 커맨드 카탈로그(표시 chord)도 재빌드한다(reloadConfig와 미러).
+        self.rebuildCommandCatalog();
         self.metal_dirty = true;
     }
 
@@ -5376,6 +5383,10 @@ pub const AppSession = struct {
         // 파일에서 새로 깔았으니 "사용자 지정" 명시 플래그를 해제 — 색이 어떤 프리셋과 일치하면 다시 잠금(derive 기준).
         self.theme_user_custom = false;
         self.metal_dirty = true;
+        // 파일 새 값이라 keybind도 바뀌었을 수 있다 — 커맨드 카탈로그(팔레트·메뉴바에 표시되는 chord 문자열)를 재빌드한다.
+        // 키 디스패치는 resolver를 매 이벤트마다 라이브로 읽어 이미 새 값이지만, 캐시된 표시 문자열(command_key_displays)은
+        // 재빌드해야 갱신된다 — rebind/unbindActionEntry가 keybind 변경마다 하던 것과 동일(모든 keybind 변경은 카탈로그 재빌드 동반).
+        self.rebuildCommandCatalog();
         // 파일 새 값이라 전역 단축키도 다시 빌드해 라이브 OS 재등록(PR2 — 지금까지 reload가 global을 재반영 못 하던 버그도 같이 고침).
         self.rebuildGlobalHotkeys() catch {};
         self.global_hotkeys_dirty = true;
@@ -16734,6 +16745,47 @@ test "PR5b: a Term whose shell exits is reaped, the sibling Term survives" {
     try std.testing.expectEqual(t1_id, session.activeSurface().id);
     try std.testing.expect(!session.ended_seen);
     _ = try session.tick(); // 다음 tick 크래시 없음
+}
+
+// ①-b(회귀): pane에 Term이 3개([T0,T1,T2])이고 활성이 **중간**(T1)일 때, 그보다 낮은 인덱스(T0)의 셸이 배경에서
+// exit해 reap되면 활성은 여전히 T1이어야 한다. orderedRemove가 T1을 인덱스 1→0으로 당기므로 active_term도 1→0으로
+// 보정해야 한다 — 보정 없이 클램프(>=len)만 하면 active_term=1이 그대로 남아 T2를 가리킨다(사용자의 활성 터미널이
+// 무관한 형제 종료로 조용히 전환되던 버그). 기존 ① 테스트는 2-term이라 clamp가 우연히 맞아 이 케이스를 못 잡았다.
+test "PR5b regression: reaping a lower-indexed sibling keeps the middle-active Term active (active_term shift)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+
+    // ⌘T ×2 → 활성 pane에 Term 3개([T0,T1,T2], T2 활성).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    const pane = session.activePane();
+    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+    // 활성을 **중간** T1로 둔다(구조 단위 테스트 — 탭 전환과 동치). T1이 화면에 보이는 터미널.
+    pane.active_term = 1;
+    const t1_id = pane.terms.items[1].surface.id; // 계속 활성이어야 할 Term
+
+    // 배경 T0(인덱스 0 < active_term 1)의 셸이 exit → reap. T1이 인덱스 0으로 당겨지고 active_term도 0으로 보정돼야 한다.
+    pane.terms.items[0].terminated = true;
+    session.reapTerminatedTerms();
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    try std.testing.expectEqual(@as(usize, 0), pane.active_term); // 1→0 시프트 보정(버그면 1로 남아 T2를 가리킴)
+    try std.testing.expectEqual(t1_id, pane.terms.items[pane.active_term].surface.id); // 여전히 T1
+    try std.testing.expectEqual(t1_id, session.activeSurface().id); // 대표 surface도 T1로 재바인딩
+    try std.testing.expect(!session.ended_seen);
+    _ = try session.tick();
 }
 
 // 닫기 확인 모달이 보류 중일 때 배경 Term이 자기 셸 종료로 reap되면 트리(인덱스·활성 선택)가 바뀌어 보류 표적이

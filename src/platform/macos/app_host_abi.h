@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 77u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 78u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -538,17 +538,24 @@ int32_t maru_macos_app_session_pending_clipboard(
     const uint8_t **out_ptr,
     size_t *out_len
 );
-/* OSC 9/777 데스크톱 알림 데이터(title, body, UTF-8). *has=1이면 알림 있음(title은 빈 문자열일 수 있어 len으로
-   판단), 0이면 없음. 버퍼는 Zig 소유로 다음 pending_notification/destroy까지 유효. Swift가 tick마다 호출해
-   UNUserNotificationCenter로 띄운다(알림은 OS 소유). */
+/* OSC 9/777·에이전트 완료 데스크톱 알림 데이터(title, body, UTF-8, surface_id). *has=1이면 알림 있음(title은 빈
+   문자열일 수 있어 len으로 판단), 0이면 없음. *surface_id=발신 Term의 surface.id로, Swift가 알림 userInfo에 (창
+   토큰, surface_id)로 실어 클릭 시 발신 터미널로 점프한다(activate_surface). 버퍼는 Zig 소유로 다음
+   pending_notification/destroy까지 유효. Swift가 tick마다 호출해 UNUserNotificationCenter로 띄운다(알림은 OS 소유). v76. */
 int32_t maru_macos_app_session_pending_notification(
     MaruAppHostSession *session,
     uint32_t *has,
     const uint8_t **title_ptr,
     size_t *title_len,
     const uint8_t **body_ptr,
-    size_t *body_len
+    size_t *body_len,
+    uint64_t *surface_id
 );
+/* 데스크톱 알림 클릭 → 발신 surface로 활성화. Swift가 알림 userInfo의 (창 토큰, surface_id)에서 토큰으로 올바른
+   창/세션을 고른 뒤(창 키 활성화는 Swift), 이 세션에 surface_id를 넘긴다. Zig가 (탭/panel/Term)을 역조회해 그
+   자리로 포커스한다(switchTab→focusPaneByPtr→focusTerm). 찾아 활성화했으면 1, 이미 닫혔으면 0(무동작). session
+   null=0. take_bell과 같은 u32 반환(found 여부). v76. */
+uint32_t maru_macos_app_session_activate_surface(MaruAppHostSession *session, uint64_t surface_id);
 /* G12 BEL: 활성 세션에 pending 벨이 있으면 1(코어 플래그 비움), 없으면 0. Swift가 tick마다 호출해 시스템 벨
    (NSSound.beep)을 울린다(벨은 OS 소유). */
 uint32_t maru_macos_app_session_take_bell(MaruAppHostSession *session);

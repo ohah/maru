@@ -486,9 +486,11 @@ pub export fn maru_macos_app_session_pending_clipboard(
     return @intFromEnum(Status.ok);
 }
 
-// OSC 9/777 데스크톱 알림 데이터(title, body). has_out=1이면 알림 있음(title/body 채움 — title은 빈 문자열일 수
-// 있어 len으로 판단), 0이면 없음. 반환 버퍼는 Zig 소유로 다음 pending_notification/destroy까지 유효. Swift가
-// tick마다 호출해 UNUserNotificationCenter로 띄운다(알림은 OS 소유 — 코어/Zig는 데이터만 넘긴다).
+// OSC 9/777·에이전트 완료 데스크톱 알림 데이터(title, body, surface_id). has_out=1이면 알림 있음(title/body 채움
+// — title은 빈 문자열일 수 있어 len으로 판단), 0이면 없음. surface_id_out=발신 Term의 surface.id로, Swift가 알림
+// userInfo에 (창 토큰, surface_id)로 실어 클릭 시 발신 터미널로 점프한다(activate_surface). 반환 버퍼는 Zig 소유로
+// 다음 pending_notification/destroy까지 유효. Swift가 tick마다 호출해 UNUserNotificationCenter로 띄운다(알림은 OS
+// 소유 — 코어/Zig는 데이터만 넘긴다). title/body/surface_id를 같은 drain 한 번으로 원자적으로 돌려준다(race 없음).
 pub export fn maru_macos_app_session_pending_notification(
     session: ?*AppSession,
     has_out: ?*u32,
@@ -496,6 +498,7 @@ pub export fn maru_macos_app_session_pending_notification(
     title_len: ?*usize,
     body_ptr: ?*?[*]const u8,
     body_len: ?*usize,
+    surface_id_out: ?*u64,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const has = has_out orelse return @intFromEnum(Status.null_out);
@@ -503,12 +506,14 @@ pub export fn maru_macos_app_session_pending_notification(
     const tl = title_len orelse return @intFromEnum(Status.null_out);
     const bp = body_ptr orelse return @intFromEnum(Status.null_out);
     const bl = body_len orelse return @intFromEnum(Status.null_out);
+    const sid = surface_id_out orelse return @intFromEnum(Status.null_out);
     const n = app_session.pendingNotification() orelse {
         has.* = 0;
         tp.* = null;
         tl.* = 0;
         bp.* = null;
         bl.* = 0;
+        sid.* = 0;
         return @intFromEnum(Status.ok);
     };
     has.* = 1;
@@ -516,7 +521,18 @@ pub export fn maru_macos_app_session_pending_notification(
     tl.* = n.title.len;
     bp.* = if (n.body.len > 0) n.body.ptr else null;
     bl.* = n.body.len;
+    sid.* = n.surface_id;
     return @intFromEnum(Status.ok);
+}
+
+// 데스크톱 알림 클릭 → 발신 surface로 활성화. Swift가 알림 userInfo의 (창 토큰, surface_id)에서 토큰으로 올바른
+// 창/세션을 고른 뒤(창 키 활성화 makeKeyAndOrderFront도 Swift), 이 세션에 surface_id를 넘긴다. Zig가 (탭/panel/
+// Term)을 역조회해 그 자리로 포커스한다(activateSurfaceById — switchTab→focusPaneByPtr→focusTerm 순서 단일 출처).
+// 찾아서 활성화했으면 1, 그 surface가 이미 닫혔으면 0(무동작 — 창 활성화까지만). session null이면 0. take_bell과
+// 같은 u32 반환 패턴(상태 코드가 아니라 found 여부).
+pub export fn maru_macos_app_session_activate_surface(session: ?*AppSession, surface_id: u64) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.activateSurfaceById(surface_id)) 1 else 0;
 }
 
 // G12 BEL: 활성 세션에 pending 벨이 있으면 1(코어 플래그 비움), 없으면 0. Swift가 tick마다 호출해 시스템 벨

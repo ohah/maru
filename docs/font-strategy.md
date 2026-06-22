@@ -225,6 +225,17 @@ emoji는 v1에서 "완벽한 typography"가 아니라 "grid를 깨지 않는 표
 
 이 결정을 보수적으로 두는 이유는 macOS 버전과 Apple Color Emoji 버전에 따라 픽셀 결과가 달라질 수 있기 때문이다.
 
+### 슬롯 안 세로 정렬(텍스트 baseline vs 이모지 ink-center)
+
+글리프를 atlas 슬롯(`cell_width_px × span` 폭 × `cell_height_px` 높이) 안에 **세로로 어디에 앉히는지**는 글리프 종류에 따라 두 갈래다. 구현은 `coretext_smoke.m`의 `maru_macos_coretext_smoke_rasterize_glyph`가 단일 출처다.
+
+- **일반 텍스트(한글/CJK 포함)**: 모든 글리프를 **공통 baseline**에 앉힌다(baseline = descent + 위아래 여백/2, 정수 픽셀로 스냅). 글자마다 ink 위치가 달라도 같은 줄에 정렬돼야 `m`·`a`가 위아래로 흔들리지 않는다. 수평은 advance 폭 기준 가운데(ink 폭이 아니라 — 폰트가 의도한 칸 위치).
+- **이모지·슬롯을 넘는 기호·헤더 심볼(◧/⚙)**: **cover-fit**(종횡비 유지하며 슬롯을 꽉 채우게 확대/축소) 후 **보이는 ink를 슬롯 세로 중앙에 앉힌다**. 심볼은 글리프마다 baseline 대비 ink 위치가 달라 공통 baseline이면 서로 어긋나 보이므로 ink-center가 자연스럽다.
+
+여기서 "ink 중앙"은 **`CTFontGetBoundingRectsForGlyphs`가 주는 design bbox 중앙이 아니라, 실제로 색이 칠해진 픽셀(alpha>0)의 중앙**이다. 컬러 이모지(sbix/COLR — 예: 알림 종 🔔)는 폰트가 design bbox 안에 비대칭 여백을 두고 artwork를 얹어, design bbox 중앙과 보이는 artwork 중앙이 다르다. design bbox만 중앙에 맞추면 종이 위로 떠 보였고, 예전에는 렌더러가 종에만 별도 보정 상수(`py_nudge` 0.40ch vs 단색 0.30ch)를 손으로 맞춰야 했다 — 폰트/DPI마다 다시 틀어지는 근사다. 그래서 cover-fit으로 그린 **뒤** 실제 픽셀의 세로 범위를 측정해 슬롯 중앙으로 옮긴다(`maru_center_ink_vertically`, 정수-행 이동). 단색 윤곽 글리프(◧/⚙)는 design bbox가 곧 ink라 이동량이 0에 가까워 안전하다.
+
+이 ink-center 덕분에 렌더러(`maru_metal_renderer.m`)는 **모든 헤더 아이콘(◧/⚙/+/🔔)에 같은 `py_nudge`(0.30ch)만** 적용하면 자동으로 세로 정렬된다 — 글리프별 보정 상수가 없다. `py_nudge`는 줄0이 창 top에 붙어 위로 쏠리는 것을 신호등/타이틀바 중앙에 맞추는 **줄 단위 레이아웃 오프셋**일 뿐이고, 글리프 정렬은 atlas 래스터가 책임진다. 검증: 폰트 11/14/22pt(셀 높이 ~17→36px)에서 종의 세로 중심이 ⚙와 0.5px 이내로 유지됨을 화면 캡처로 확인했다(폰트-독립).
+
 ## Ligature와 Complex Script
 
 ligature는 터미널에서 매력적인 기능이지만 v1 기본 품질 기준으로 넣지 않는다.

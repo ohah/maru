@@ -599,6 +599,80 @@ static uint32_t maru_count_non_clear_rgba_pixels(
     return count;
 }
 
+// 글리프를 슬롯에 그린 뒤, 실제로 보이는(alpha>0) 픽셀의 세로 범위를 측정해 슬롯 세로 중앙으로 옮긴다.
+// 왜: 컬러 이모지(sbix/COLR — 예: 알림 종 🔔)는 CTFontGetBoundingRectsForGlyphs가 돌려주는 design bbox와,
+// 실제 색이 칠해진 보이는 artwork의 중심이 다르다(폰트가 bbox 안에 비대칭 여백을 두고 그림을 얹기 때문).
+// cover-fit 분기는 그 design bbox 중심을 슬롯 중앙에 맞추므로, 보이는 종이 위로 떠 보였고 — 그래서 렌더러가
+// 종에만 별도 py_nudge(0.40ch)를 단색 아이콘(0.30ch)과 손으로 맞춰야 했다(폰트/DPI마다 다시 틀어지는 근사).
+// 여기서 보이는 ink를 직접 측정해 슬롯 중앙에 앉히면 그 보정이 폰트-독립적으로 사라진다(렌더러는 모든 헤더
+// 아이콘에 같은 nudge만 준다). 단색 윤곽 글리프(◧/⚙ 등)는 design bbox가 곧 ink라 이동량이 0에 가깝다 —
+// 즉 이 정렬은 cover-fit/center 분기 전체에 안전하게 적용된다(일반 텍스트 baseline 분기는 호출하지 않는다).
+static void maru_center_ink_vertically(
+    uint8_t *pixels,
+    size_t width,
+    size_t height,
+    size_t bytes_per_row
+) {
+    // 보이는 ink가 걸친 첫(top)·마지막(bottom) 메모리 행을 찾는다. 메모리 행 공간에서 대칭으로 중앙을 맞추므로
+    // CTFontDrawGlyphs의 y-up 좌표계와 메모리의 top-to-bottom 순서가 어떻든(중앙 정렬은 방향에 무관) 정확하다.
+    size_t ink_top = height; // sentinel: ink 없음(top>bottom)
+    size_t ink_bottom = 0;
+    for (size_t y = 0; y < height; y++) {
+        const uint8_t *row = pixels + y * bytes_per_row;
+        bool row_has_ink = false;
+        for (size_t x = 0; x < width; x++) {
+            if (row[x * 4 + 3] != 0) {
+                row_has_ink = true;
+                break;
+            }
+        }
+        if (row_has_ink) {
+            if (y < ink_top) {
+                ink_top = y;
+            }
+            ink_bottom = y;
+        }
+    }
+    if (ink_top > ink_bottom) {
+        return; // zero-ink — 옮길 것이 없다(status 7 경로).
+    }
+    // 슬롯 중앙에 ink box 중앙을 맞추는 정수-행 이동량. long으로 계산해 size_t 언더플로를 피한다(ink_height가
+    // 슬롯 높이를 넘는 비정상 입력에서도 음수가 안전하게 표현된다 — cover-fit이 보장하지만 방어적으로).
+    const size_t ink_height = ink_bottom - ink_top + 1;
+    const long target_top = ((long)height - (long)ink_height) / 2; // 위/아래 여백 균등
+    const long shift = target_top - (long)ink_top;
+    if (shift == 0) {
+        return; // 이미 중앙(단색 글리프 대부분).
+    }
+    // 행 단위 이동. 중앙으로만 옮기므로 슬롯 안 ink는 경계를 넘지 않는다. 경계 밖에서 온 행은 0으로 비운다.
+    // 폭은 width*4만 다룬다 — bytes_per_row의 padding 바이트는 시작 시 memset(0)으로 이미 비어 있다.
+    const size_t row_bytes = width * 4;
+    if (shift > 0) {
+        // 아래로 이동: 겹침 방지로 아래 행부터 채운다(dst 행 y ← src 행 y-shift).
+        for (size_t y = height; y-- > 0;) {
+            uint8_t *dst = pixels + y * bytes_per_row;
+            if ((long)y - shift >= 0) {
+                const uint8_t *src = pixels + (size_t)((long)y - shift) * bytes_per_row;
+                memmove(dst, src, row_bytes);
+            } else {
+                memset(dst, 0, row_bytes);
+            }
+        }
+    } else {
+        // 위로 이동: 위 행부터 채운다(dst 행 y ← src 행 y+up).
+        const size_t up = (size_t)(-shift);
+        for (size_t y = 0; y < height; y++) {
+            uint8_t *dst = pixels + y * bytes_per_row;
+            if (y + up < height) {
+                const uint8_t *src = pixels + (y + up) * bytes_per_row;
+                memmove(dst, src, row_bytes);
+            } else {
+                memset(dst, 0, row_bytes);
+            }
+        }
+    }
+}
+
 static void maru_append_glyph_record(
     MaruCoreTextSmokeResult *result,
     MaruCoreTextGlyphRecord *records,
@@ -1288,6 +1362,11 @@ void maru_macos_coretext_smoke_rasterize_glyph(
             CGPoint position = CGPointMake(-ink_center_x, -ink_center_y);
             CTFontDrawGlyphs(draw_font, &glyph, &position, 1, context);
             CGContextRestoreGState(context);
+            // design bbox 기준으로 중앙에 그렸지만, 컬러 이모지는 보이는 artwork 중심이 design bbox 중심과
+            // 다르다(위 함수 주석 참고). 그려진 실제 픽셀을 측정해 슬롯 세로 중앙으로 재배치한다 — 렌더러가
+            // 종에만 주던 손튜닝 nudge(0.40 vs 0.30)를 폰트-독립으로 없애는 근본 정렬. CGBitmapContext는 이미
+            // pixels에 동기 렌더를 끝냈으므로(추가 draw 없음) 버퍼를 직접 옮겨도 안전하다.
+            maru_center_ink_vertically(pixels, width_px, height_px, bytes_per_row);
         } else {
             // 수평은 글리프 **advance 폭** 기준 가운데(ink 폭이 아니라) + 공통 baseline. 이전엔 ink
             // bounds 가운데정렬이라, ink 폭이 글자마다 달라 글자가 셀 안에서 좌우로 흔들렸다 — 특히

@@ -5340,9 +5340,10 @@ test "findMatches: soft-wrap 경계를 넘는 매치" {
 }
 
 test "findMatches: alt screen에선 현재 화면만 검색한다(primary 스크롤백 제외)" {
-    // alt screen(vim/less/Claude/Codex)에선 scrollToAbs가 잠겨 primary 스크롤백 매치로 갈 수 없고, alt는
-    // 화면 밖 과거를 스크롤백에 안 쌓으므로, findMatches는 현재 alt 화면만 검색해야 한다(Ghostty ActiveSearch와
-    // 같은 범위). 이게 깨지면 "찾았지만 못 가는" 매치가 카운터에 섞여 ⌘G 네비가 헛돈다.
+    // alt screen(vim/less/Claude/Codex)에선 활성 스크롤백이 cap=0인 빈 인스턴스라 primary 스크롤백이
+    // 검색 범위에 안 들어가고(sb.count==0), alt는 화면 밖 과거를 스크롤백에 안 쌓으므로, findMatches는
+    // 현재 alt 화면만 검색한다(Ghostty ActiveSearch와 같은 범위). 이게 깨지면 "찾았지만 못 가는" 매치가
+    // 카운터에 섞여 ⌘G 네비가 헛돈다.
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 3 });
     defer core.deinit();
 
@@ -6961,6 +6962,33 @@ test "alt screen output never reaches the scrollback and the viewport is locked"
     try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen()); // primary 스크롤백 복원
     core.scrollViewport(1); // primary 복귀 후엔 다시 동작
     try std.testing.expectEqual(@as(usize, 1), core.view_offset);
+}
+
+test "per-screen Scrollback: 스왑 불변식(중첩 enter·alt 중 config·alt에서 ED 3·복원)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\nd"); // primary 스크롤백 누적
+    const primary_sb = core.scrollbackLen();
+    try std.testing.expect(primary_sb >= 2);
+
+    try core.write("\x1b[?1049h"); // alt 진입 — primary가 saved_sb로 보관됨
+    try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen()); // alt는 빈 스크롤백
+
+    // 중첩 1049h: 이미 alt면 saved_sb(primary)를 다시 덮어쓰지 않아야 한다(early-return).
+    try core.write("\x1b[?1049h");
+    try core.write("\x1b[?1049l");
+    try std.testing.expectEqual(primary_sb, core.scrollbackLen()); // primary 보존
+
+    try core.write("\x1b[?1049h"); // 다시 alt
+    // alt 중 config(set_max_scrollback)는 활성(빈) sb가 아니라 primary에 적용돼야 한다.
+    core.setMaxScrollback(77);
+    try std.testing.expectEqual(@as(usize, 77), core.maxScrollback()); // 보관된 primary cap을 본다
+    // alt에서 ED 3(CSI 3J: erase saved lines)은 빈 alt 스크롤백만 건드리고 primary는 보존한다
+    // (xterm "alt엔 saved lines 없음" 모델 — primary history를 alt 프로그램이 못 지운다).
+    try core.write("\x1b[3J");
+    try core.write("\x1b[?1049l"); // 복귀
+    try std.testing.expectEqual(primary_sb, core.scrollbackLen()); // ED 3에도 primary 스크롤백 살아있음
+    try std.testing.expectEqual(@as(usize, 77), core.maxScrollback()); // 복원 후에도 cap 반영
 }
 
 test "DECSET 47 switches screens without saving the cursor" {

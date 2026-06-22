@@ -593,6 +593,10 @@ pub const ScrollbackConfig = struct {
 pub const ScrollConfig = struct {
     /// 휠/트랙패드 **세로** 스크롤 줄 수에 곱하는 배수. 1.0=OS 기본 속도, >1=빠르게·<1=느리게. 가로(탭 바) 스크롤엔
     /// 적용하지 않는다(세로 터미널 스크롤 전용). loader가 `scroll.multiplier` 키로 파싱(0.1~10.0). 기본 1.0=현행 동작.
+    /// 베이스/결정: 배수는 maru 스크롤백뿐 아니라 **마우스 리포팅(DECSET 1000~1003) 트래킹 앱(vim/tmux)에도 적용**된다 —
+    /// 환산된 줄 수(delta)만큼 휠 버튼(SGR 64/65)을 보내므로 배수가 그 횟수를 키운다. 이는 Ghostty `mouse-scroll-multiplier`와
+    /// 같은 모델이다(references/ghostty/src/Surface.zig scrollCallback: `yoff * mouse_scroll_multiplier` → `y.delta`를
+    /// `for (0..y.delta) mouseReport(.four/.five)`로 트래킹 앱에 그대로 전달). 동작 비교만 참고했고 코드 표현은 옮기지 않았다.
     multiplier: f32 = 1.0,
 
     pub const schema = .{ // 키: scroll.multiplier (f32 range)

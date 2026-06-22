@@ -363,7 +363,7 @@ fn buildLivePtyFixture(
         null,
         @intFromEnum(metal_smoke.NativeKeyDownMode.none),
     );
-    const close_lifecycle = try verifyCloseLifecycle(&live_pty, &runtime, &live_registry, active.id, live_pty.pty_id, native.*);
+    const close_lifecycle = try verifyCloseLifecycle(io, &live_pty, &runtime, &live_registry, active.id, live_pty.pty_id, native.*);
 
     return .{
         .metal = metal_fixture,
@@ -414,6 +414,7 @@ fn drainUntilTerminationWithRaw(
 }
 
 fn verifyCloseLifecycle(
+    io: std.Io,
     live_pty: *app.LivePtySession,
     runtime: *app.SurfaceRuntime,
     live_registry: *app.LivePtyRegistry,

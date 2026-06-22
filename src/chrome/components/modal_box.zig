@@ -68,13 +68,10 @@ pub fn layout(content_cols: u32, content_rows: u32, p: props.ChromeProps, tk: *c
 pub fn frame(box: Box, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
     const bg_r = p.shape.corner_radius_px;
     const bw = p.shape.border_width_px;
-    // 모달 외곽선은 focus_accent(강조)가 아니라 divider(은은한 구분선) — 표 경계선처럼 배경과 살짝만 대비시킨다.
+    // 외곽선(별도 .border op)은 두지 않는다 — tui에서 박스보다 밝은 외곽선이 색이 튀어 어색했다(사용자 피드백).
+    // tui(bw=0)는 외곽선 없는 박스 배경(surface_bg)만이고 화면과는 배경 밝기 차이로 구분된다. rich(bw>0)는 quad가
+    // 둥근 모서리 + 얇은 divider 테두리 + 그림자로 떠 보이게 한다(rich 외곽선은 quad의 border_widths가 그린다).
     try out.append(arena, .{ .quad = .{ .rect = box.rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .divider } });
-    try out.append(arena, .{ .border = .{
-        .rect = box.rect,
-        .sides = .{ .top = true, .right = true, .bottom = true, .left = true },
-        .role = .divider,
-    } });
 }
 
 /// 콘텐츠 row(0-based) 상단 y(px). 콘텐츠 영역 inner_y에서 row행 아래.
@@ -121,7 +118,7 @@ pub fn view(
 // 공유 박스 기하의 엣지케이스(soft-lock 가드·폭 clamp·rich 패딩 침범 방지)를 한 곳에서 증명한다 — notice/confirm은
 // 이 view에 줄만 넘기므로, 여기서 기하를 검증하면 두 컴포넌트가 같은 보장을 받는다.
 
-test "modal_box: lines 0이면 ops 0, 1줄이면 quad+border+text(3), 2줄이면 +text(4)" {
+test "modal_box: lines 0이면 ops 0, 1줄이면 quad+text(2), 2줄이면 +text(3)" {
     const Rgb = @import("../../color.zig").Rgb;
     const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
     const p = props.ChromeProps{ .metrics = .{
@@ -140,17 +137,16 @@ test "modal_box: lines 0이면 ops 0, 1줄이면 quad+border+text(3), 2줄이면
     try std.testing.expectEqual(@as(usize, 0), out.items.len); // 빈 줄 → 무동작
 
     try view(&.{.{ .text = "한 줄", .role = .surface_fg }}, p, &tk, arena, &out);
-    try std.testing.expectEqual(@as(usize, 3), out.items.len);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
     try std.testing.expect(out.items[0] == .quad);
-    try std.testing.expect(out.items[1] == .border);
-    try std.testing.expect(out.items[2] == .text);
+    try std.testing.expect(out.items[1] == .text);
     const h1 = out.items[0].quad.rect.h;
 
     out.clearRetainingCapacity();
     try view(&.{ .{ .text = "메시지", .role = .surface_fg }, .{ .text = "안내", .role = .muted_fg } }, p, &tk, arena, &out);
-    try std.testing.expectEqual(@as(usize, 4), out.items.len); // 2줄 → text 2개
-    try std.testing.expect(out.items[3] == .text);
-    try std.testing.expect(out.items[3].text.origin.y > out.items[2].text.origin.y); // 둘째 줄이 아래
+    try std.testing.expectEqual(@as(usize, 3), out.items.len); // 2줄 → text 2개
+    try std.testing.expect(out.items[2] == .text);
+    try std.testing.expect(out.items[2].text.origin.y > out.items[1].text.origin.y); // 둘째 줄이 아래
     try std.testing.expect(out.items[0].quad.rect.h > h1); // 2줄 박스가 1줄보다 한 줄 큼
     try std.testing.expect(out.items[0].quad.rect.x >= 40); // 사이드바 오른쪽
 }
@@ -199,7 +195,7 @@ test "modal_box: 좁은 창(1~3칸)도 작은 박스를 그리되 term_cols==0�
     var out: std.ArrayList(draw.Op) = .empty;
 
     try view(&.{.{ .text = "긴 메시지를 넘침", .role = .surface_fg }}, p, &tk, arena, &out);
-    try std.testing.expectEqual(@as(usize, 3), out.items.len); // 작아도 그린다(보여서 Esc 가능)
+    try std.testing.expectEqual(@as(usize, 2), out.items.len); // 작아도 그린다(보여서 Esc 가능)
     const box = out.items[0].quad.rect;
     try std.testing.expect(box.w > 0 and box.w <= 20); // term 영역 안
     try std.testing.expect(box.x >= 40);
@@ -241,13 +237,13 @@ test "modal_box: rich 패딩이어도 확장 박스(box_w + 2*pad)가 터미널 
         .{ .text = "this is a fairly long message to force the width clamp", .role = .surface_fg },
         .{ .text = "Enter to close   Esc to cancel", .role = .muted_fg },
     }, p, &tk, arena, &out);
-    try std.testing.expectEqual(@as(usize, 4), out.items.len); // quad+border+text+text
+    try std.testing.expectEqual(@as(usize, 3), out.items.len); // quad+text+text
     const ch = p.metrics.cell_height_px; // 16
     const box2 = out.items[0].quad.rect;
     try std.testing.expect(box2.w + 2 * pad <= term_w_px); // 폭 clamp 동일
     try std.testing.expect(box2.x - @as(i32, @intCast(pad)) >= @as(i32, @intCast(sidebar)));
     try std.testing.expect(box2.h == box.h + ch); // 2줄 박스가 1줄보다 정확히 한 줄(ch) 큼
-    try std.testing.expect(out.items[3].text.origin.y == out.items[2].text.origin.y + @as(i32, @intCast(ch))); // 둘째 줄 = 첫째 + ch
+    try std.testing.expect(out.items[2].text.origin.y == out.items[1].text.origin.y + @as(i32, @intCast(ch))); // 둘째 줄 = 첫째 + ch
 }
 
 test "modal_box: 박스가 뷰포트보다 높으면 y를 0으로 clamp (상단/제목 화면 위로 안 잘림 — 리뷰 #823)" {

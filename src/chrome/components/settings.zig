@@ -1006,7 +1006,7 @@ test "settings view: 행이 창보다 많으면 창만 렌더 + 제목에 위치
     const mv = maxVisible(small);
     try std.testing.expect(mv < rows.len); // 윈도잉 발생(작은 뷰포트)
     // 제목에 "Settings   19/20" 위치 표식(rows.len > win_len).
-    try std.testing.expect(std.mem.indexOf(u8, out.items[2].text.runs[0].text, "19/20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items[1].text.runs[0].text, "19/20") != null);
     // 패널 높이가 전체 20행이 아니라 창(mv)만큼이라 뷰포트(200) 안.
     try std.testing.expect(out.items[0].quad.rect.h <= 200);
 }
@@ -1074,18 +1074,18 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
         .{ .label = "Font size", .kind = .{ .slider = .{ .value = 512, .min = 1, .max = 512 } } }, // ratio=1 → 채움 op
     };
     try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
-    // tui: 위젯이 모두 셀 정렬 text(quad 아님 — paintRectBg 셀 번짐·선택 하이라이트 가림 회피). frame(quad+border)=2,
+    // tui: 위젯이 모두 셀 정렬 text(quad 아님 — paintRectBg 셀 번짐·선택 하이라이트 가림 회피). frame(quad)=1,
     // 제목=1. 행0(선택 fill + label + toggle 트랙 text + knob text)=4. 행1(label + slider 트랙 text + 채움 text)=3.
-    try std.testing.expect(out.items[0] == .quad and out.items[1] == .border); // 박스 bg+테두리
-    try std.testing.expect(out.items[2] == .text); // 제목
-    try std.testing.expect(out.items[3] == .fill); // 행0 선택 하이라이트(셀 bg)
-    try std.testing.expectEqualStrings("Cursor blink", out.items[4].text.runs[0].text);
-    try std.testing.expect(out.items[5] == .text); // toggle 트랙(muted) — quad 아님
-    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[5].text.role);
-    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[6].text.role); // toggle knob on(앰버)
+    try std.testing.expect(out.items[0] == .quad); // 박스 bg(외곽선 별도 op 없음)
+    try std.testing.expect(out.items[1] == .text); // 제목
+    try std.testing.expect(out.items[2] == .fill); // 행0 선택 하이라이트(셀 bg)
+    try std.testing.expectEqualStrings("Cursor blink", out.items[3].text.runs[0].text);
+    try std.testing.expect(out.items[4] == .text); // toggle 트랙(muted) — quad 아님
+    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[4].text.role);
+    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[5].text.role); // toggle knob on(앰버)
     // 행1: 라벨 + slider 트랙 text(muted) + 채움 text(accent).
-    try std.testing.expectEqualStrings("Font size", out.items[7].text.runs[0].text);
-    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[8].text.role); // slider 트랙
+    try std.testing.expectEqualStrings("Font size", out.items[6].text.runs[0].text);
+    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[7].text.role); // slider 트랙
     // slider 채움(accent) 뒤에 하단 힌트 4조각이 본문 op 뒤로 붙는다: "⇥ "/"섹션"/" ⇄ "/"설정". 폼 모드(기본)라
     // 활성 영역인 "설정"만 accent, 반대편 "섹션"·구분자는 muted.
     try std.testing.expectEqualStrings("설정", out.items[out.items.len - 1].text.runs[0].text);

@@ -191,7 +191,8 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **레이아웃(셀-그리드 tui)**: ① **SV 그리드** — 채도(col 16칸) × 명도(row 8칸)의 원색 스와치(현재 hue 고정, 위가 명도 100). ② **hue 스트립** — 색상(col 16칸, 채도·명도 100). ③ **미리보기** — 현재 효과색 스와치 + `#rrggbb  H S V`. ④ 도움말. 셀-그리드라 **이산 샘플**(연속 해상도는 후속) — `svSatForCol`/`svValForRow`/`hueForCol` 등이 셀↔값을 정수 반올림으로 매핑(양 끝 0/100·0/360에 정확히 닿음). 선택 셀은 **▾ 마커 글리프**(text 레이어)로 표시 — palette 그리드와 같은 이유로 `Op.border`를 안 쓴다([§6.5]·[[tui-widgets-must-be-cell-text-not-quad]]: tui lowering의 `paintRectBg`가 1행 border를 셀 전체로 칠해 스와치 색을 덮음). picker 박스 기하는 `pickerLayout`이 단일 출처(렌더·hit-test 공유).
 - **조작**: `←→` 채도, `↑↓` 명도, `[`/`]` 색상(wrap), `Enter` 확정, `Esc` 취소(picker만 닫고 폼 복귀 — 모달 유지). 포인터: SV 그리드 클릭·드래그 → s/v, hue 스트립 클릭 → h, 박스 밖 클릭 → 취소(드래그는 폼 slider와 같은 press-gate라 hover로는 안 바뀜).
 - **커밋**: 컴포넌트가 `Enter`에서 `color_picked` Action → host가 `settings_color_picked`로 정규화 → platform `commitPickerColor`가 `settings.pickerRgb()`를 `#rrggbb`로 직렬화해 선택 color 행 키에 `setText`(인라인 편집 커밋과 같은 인덱스 매핑·검증·write-back 예약) + picker 닫기. hex 문자열은 `loaded_config.arena` 소유.
-- **한계(후속)**: 연속(non-discrete) 해상도, alpha, eyedropper, hex 직접 입력 동시 표시(현재 hex 편집은 §6.2 hex zone 별도).
+- **연속 해상도(키)**: pick_h/s/v는 full precision(0~359/0~100)으로 저장되므로, **Shift+화살표**(±1 채도/명도)·**`{`/`}`**(=Shift+[/], ±1° hue)로 그리드 셀 **사이** 임의 값에 도달한다. 평범한 화살표·`[`/`]`는 빠른 셀 점프(coarse) 그대로 — 이산 그리드는 표시·coarse용이고 값은 미세 조정으로 연속. 미리보기 `#rrggbb H S V`가 정확한 효과색을 실시간 표시. (picker 고급화 리뷰)
+- **한계(후속)**: alpha(터미널 색은 #RRGGBB라 범위 밖에 가까움), eyedropper(macOS `NSColorSampler` 후속), hex 직접 입력 picker 내 동시 표시(현재 hex 편집은 §6.2 hex zone 별도), 포인터 드래그 sub-cell 정밀(현재 클릭=셀).
 
 ## 7. 의존성
 

@@ -5353,6 +5353,11 @@ pub const AppSession = struct {
         // 새 파일 테마로 다시 스냅샷·적용한다(F2-9). null 대입은 옛 slice를 deref하지 않아 free 후라도 안전.
         self.theme_pre_follow = null;
         self.follow_applied_dark = null; // 새 config라 외관 게이트도 리셋 — 아래 applyFollowSystemTheme가 다시 적용
+        // 옛 arena를 버렸으니 write-back 대기열(config_dirty_keys·theme_preset_persist·keybind/global rebind·removed 등 9개)도
+        // 비운다 — 이 큐들은 옛 arena의 문자열(동적 env 키·keybind chord·프리셋 이름)을 가리키므로 free 후 다음 serializeConfig가
+        // 읽으면 use-after-free다. reload는 "파일에서 다시 읽기"라 대기 중 미저장 편집을 버리는 게 의미상 맞다. clearConfigDirty는
+        // list 길이만 리셋·옵셔널 null 대입이라 옛 slice를 deref하지 않아 free 후 호출도 안전.
+        self.clearConfigDirty();
         // 파일 새 값이라 캐시된 behavior도 갱신한다(appearance 밖 — applyAppearance가 안 건드림).
         self.audible_bell = self.loaded_config.config.bell.audible;
         self.bell_visual = self.loaded_config.config.bell.visual;
@@ -8317,6 +8322,8 @@ pub const AppSession = struct {
         // 공용). 값은 스키마 직렬화(configKeyValues)가 단일 출처라 타입별 손코드 중복이 없다. 성공 시 dirty 집합을
         // 비운다(아래) — updateConfigForKeys가 실패하면 try가 빠져나가 키가 남아 다음 tick 재시도된다.
         var text = try config_mod.updateConfigForKeys(self.allocator, original, self.loaded_config.config, self.config_dirty_keys.items);
+        errdefer self.allocator.free(text); // 이후 체이닝 패스(theme.preset·keybind 등) 중 try 실패 시 현재 text 버퍼 누수 방지 —
+        // text는 패스마다 reassign되므로 errdefer는 항상 최신 버퍼를 free하고, 성공 경로(sidebar_config_buffer 보관·return)에선 미발화.
         // 테마 프리셋 영속(팔레트 포함): `theme.preset = <name>` 줄을 set/update한다 — configKeyValues가 derive 키
         // theme.preset을 emit하지 않으므로(round-trip 대칭 유지) 전용 패스로 쓴다. 충돌할 개별 theme.* override는
         // config_removed_keys(아래 제거 패스)가 빼므로 base 프리셋 색이 온전히 산다. 성공해야 비운다(실패 시 재시도).
@@ -17514,7 +17521,7 @@ test "settings window.background-image: 행 활성→파일 선택창 요청, pr
     try std.testing.expectEqualStrings("", session.loaded_config.config.window_background_image);
 }
 
-test "settings HSV picker 스포이드 ABI: settings_eyedropper→pending, take 1회성, provide→picker 반영 (v82)" {
+test "settings HSV picker 스포이드 ABI: settings_eyedropper→pending, take 1회성, provide→picker 반영 (v83)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -17861,6 +17868,38 @@ test "global hotkey live re-register: rebuildGlobalHotkeys가 descriptor 재생�
     session.resetAllSettings();
     try std.testing.expect(session.global_hotkeys_dirty);
     try std.testing.expectEqual(@as(usize, 0), session.globalHotkeys().len);
+}
+
+test "reloadConfig: 옛 arena 문자열을 가리키는 write-back 대기열을 비운다 — use-after-free 방지 (리뷰)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 옛 loaded_config arena의 문자열을 가리키는 두 큐를 시드한다(이 리뷰가 다룬 UAF 부류):
+    //  ① theme_preset_persist — persistThemePreset이 arena에 프리셋 이름을 dupe.
+    //  ② config_keybind_unbind_removed — arena dupe한 chord 문자열.
+    session.persistThemePreset(.gruvbox_dark);
+    try std.testing.expect(session.theme_preset_persist != null);
+    const a = session.loaded_config.arena.allocator();
+    try session.config_keybind_unbind_removed.append(allocator, try a.dupe(u8, "cmd+shift+x"));
+    try std.testing.expect(session.config_keybind_unbind_removed.items.len > 0);
+
+    // reloadConfig는 옛 arena를 deinit한다 — clearConfigDirty로 위 큐를 비우지 않으면 두 슬라이스가 dangling이 되고
+    // 다음 serializeConfig가 freed 메모리를 읽는다. 비우면 null·빈 목록이라 안전.
+    session.reloadConfig();
+    try std.testing.expect(session.theme_preset_persist == null);
+    try std.testing.expectEqual(@as(usize, 0), session.config_keybind_unbind_removed.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.config_dirty_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.config_removed_keys.items.len);
 }
 
 test "settings keybind unbind: keybind 행 Backspace → 사용자 바인딩 해제 + 줄 제거 예약, 펜딩 rebind 취소 (keybind unbind)" {

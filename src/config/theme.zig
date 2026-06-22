@@ -695,8 +695,16 @@ pub const BellConfig = struct {
     /// BEL 수신 시 시스템 소리(NSSound.beep)를 낼지. 기본 true. false면 음소거(코어 플래그는 정상 소비).
     /// loader가 `bell.audible` 키로 파싱.
     audible: bool = true,
+    /// BEL 수신 시 화면을 잠깐 번쩍이는 시각 벨. 기본 false(현행 — 소리만). true면 활성 surface 위에 전경색
+    /// 반투명 flash를 덮고 ~250ms 페이드아웃한다(소리 못 듣는 환경·집중 모드 보조). audible과 독립(둘 다 가능).
+    visual: bool = false,
+    /// BEL 수신 시(창이 **포커스 없을 때만**) Dock 아이콘에 배지를 띄울지. 기본 false. true면 백그라운드에서 벨이
+    /// 울리면 Dock에 ● 배지가 뜨고 창을 다시 포커스하면 사라진다(놓친 알림 표시 — Terminal.app/iTerm2 관례).
+    dock_badge: bool = false,
 
-    pub const schema = .{ // 키: bell.audible
+    pub const schema = .{ // 키: bell.audible / bell.visual / bell.dock-badge
         .audible = Meta{ .doc = "BEL 수신 시 시스템 소리", .widget = .toggle, .section = .terminal },
+        .visual = Meta{ .doc = "BEL 수신 시 화면 번쩍임", .widget = .toggle, .section = .terminal },
+        .dock_badge = Meta{ .doc = "BEL 수신 시 Dock 배지", .widget = .toggle, .section = .terminal },
     };
 };

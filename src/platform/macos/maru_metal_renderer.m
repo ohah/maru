@@ -744,6 +744,9 @@ bool maru_metal_renderer_draw(
             //  드물게 확대 — 무시 가능. NB: 화질은 slot-stretch라 약간 부드럽다 — per-cell 큰-크기 래스터화는 후속.)
             const bool is_header = (tc.origin_x == 0u && tc.origin_y == 0u);
             const bool is_corner_icon = is_header && tc.row == 0u && (tc.codepoint == 0x2699u || tc.codepoint == (uint32_t)'+' || tc.codepoint == 0x25E7u);
+            // 알림 종(🔔 U+1F514)은 이모지(width=2, 컬러 fallback)라 단색 아이콘처럼 1.7×로 키우면 과대해진다 —
+            // 확대는 안 하고 py_nudge(아래로 0.30ch)만 같이 적용해 다른 헤더 아이콘과 세로 정렬한다(상단 쏠림 제거).
+            const bool is_bell_icon = is_header && tc.row == 0u && tc.codepoint == 0x1F514u;
             // 접힘 펼치기 토글(◧)은 사이드바가 없을 때(terminal_origin_x_px==0) 신호등 바로 옆에 단독으로 떠,
             // 신호등과 수직 정렬돼야 한다. 펼침 헤더 아이콘(◧/⚙/+)은 사이드바 안(origin_x>0)이라 신호등과
             // 비교되지 않으므로 기존 0.3ch nudge를 유지한다. 접힘 토글이면 타이틀바 띠 [0, titlebar_strip_px]
@@ -755,7 +758,8 @@ bool maru_metal_renderer_draw(
                 const float strip = (float)titlebar_strip_px;
                 py_top = (strip > ch) ? (strip - ch) * 0.5f : 0.0f; // 띠 안 세로 중앙(신호등 정렬)
             } else {
-                const float py_nudge = is_corner_icon ? ch * 0.30f : 0.0f;
+                // 종은 컬러 이모지라 셀 상단에 그려져 단색 아이콘(0.30ch nudge)보다 더 내려야 같은 높이로 보인다.
+                const float py_nudge = is_corner_icon ? ch * 0.30f : (is_bell_icon ? ch * 0.55f : 0.0f);
                 py_top = (float)tc.origin_y + (float)tc.row * ch + py_nudge;
             }
             maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, hscale);

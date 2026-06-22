@@ -6242,7 +6242,9 @@ pub const AppSession = struct {
                         // 종 클릭 → 인앱 알림 센터 패널(2줄 카드)을 종 아이콘 아래에 띄운다. 항목은 collect/itemAt 시점에
                         // 히스토리에서 빌드한다(buildNotificationItems) — show엔 개수만 준다(키 nav clamp용). 열어도 읽음
                         // 처리는 안 한다(클릭한 항목만 읽음 — 안읽음 점 유지).
-                        const anchor_x: i32 = @intCast(self.sidebar_width_px -| 11 * self.cell_width_px); // 종 col 근처
+                        // 패널을 종 아이콘 바로 아래에 띄운다 — 종 왼쪽 끝(col cols-12)에 패널 좌단을 맞춘다.
+                        const hcols = self.sidebar_width_px / self.cell_width_px;
+                        const anchor_x: i32 = @intCast((hcols -| 12) * self.cell_width_px); // 종 col(cols-12) 왼쪽 끝
                         const anchor_y: i32 = @intCast(self.cell_height_px); // 아이콘 줄(0) 바로 아래
                         self.chrome_host.notifications.show(anchor_x, anchor_y, self.notification_history.items.len);
                         self.metal_dirty = true;

@@ -1152,6 +1152,9 @@ pub const AppSession = struct {
     // 삭제 예약된 config 키(env 변수 삭제 등) — `keybind = value` 갱신이 아니라 줄을 **제거**한다. 키는 loaded_config.arena
     // 소유(동적 env.KEY). serializeConfig가 갱신 패스 뒤 removeConfigLines로 체이닝해 줄을 빼고 비운다. takeConfigDirty가 봄.
     config_removed_keys: std.ArrayList([]const u8) = .empty,
+    // unbind 예약된 keybind action(keybind recorder 해제) — `keybind = chord = action` 줄을 action 기준으로 제거한다
+    // (key=value가 아니라 전용 removeKeybindLines). action은 command_catalog 정적 키. serializeConfig가 체이닝, takeConfigDirty가 봄.
+    config_keybind_removed: std.ArrayList([]const u8) = .empty,
     // 시각 확인 디버그 훅: MARU_OPEN_SETTINGS env가 있으면 첫 frame에서 세팅 화면을 자동으로 연다(스크린샷
     // 하니스가 입력 없이 모달 상태를 캡처하게 — MARU_DEBUG와 같은 env-gate). env 미설정이면 무동작. 한 번만 연다.
     debug_settings_opened: bool = false,
@@ -3836,8 +3839,8 @@ pub const AppSession = struct {
         self.setEnvVar(name, text[eq + 1 ..]);
     }
 
-    /// 선택 행을 삭제한다(Backspace). 현재는 **env.<KEY> 행만** 대상(env 변수 삭제) — 다른 행(schema·shell.args·env 추가
-    /// sentinel·palette·keybind)은 무동작(삭제 의미가 없거나 다른 메커니즘). env는 spawn 시점 전용이라 라이브 재적용 없음.
+    /// 선택 행을 삭제한다(Backspace). **env.<KEY> 행** → env 변수 삭제, **keybind 행** → 사용자 지정 단축키 해제(unbind).
+    /// 그 외(schema·shell.args·env 추가 sentinel·palette)는 무동작. 둘 다 spawn/입력 시점이라 appearance 재적용 없음.
     fn deleteSelectedSettingRow(self: *AppSession) void {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
@@ -3845,12 +3848,22 @@ pub const AppSession = struct {
         const sel = self.chrome_host.settings.selected;
         const after_enums = cf.bools.len + cf.nums.len + cf.enums.len;
         const after_texts = after_enums + cf.texts.len;
-        if (sel < after_enums or sel >= after_texts) return; // text 행만
-        const t = cf.texts[sel - after_enums];
-        if (!std.mem.startsWith(u8, t.key, "env.") or t.key.len <= "env.".len) return; // env.<KEY> 행만(추가 sentinel "env." 제외)
-        self.removeEnvVar(t.key["env.".len..]);
-        self.refreshSettingsFieldCount(); // 행이 줄어듦 → setFieldCount가 selected clamp
-        self.metal_dirty = true;
+        // env.<KEY> text 행 → env 삭제.
+        if (sel >= after_enums and sel < after_texts) {
+            const t = cf.texts[sel - after_enums];
+            if (std.mem.startsWith(u8, t.key, "env.") and t.key.len > "env.".len) {
+                self.removeEnvVar(t.key["env.".len..]);
+                self.refreshSettingsFieldCount(); // 행이 줄어듦 → setFieldCount가 selected clamp
+                self.metal_dirty = true;
+            }
+            return;
+        }
+        // keybind 행 → 사용자 지정 단축키 해제(unbind).
+        if (cf.keybindRowStart()) |ks| if (sel >= ks and sel - ks < cf.keybind_entries.len) {
+            self.unbindActionEntry(cf.keybind_entries[sel - ks]);
+            self.metal_dirty = true;
+            return;
+        };
     }
 
     /// env.<name>을 config.env에서 제거 + 파일 줄 삭제 예약(removeConfigLines). setEnvVar의 짝. name 키는 동적이라
@@ -6513,7 +6526,8 @@ pub const AppSession = struct {
     /// 않는다 — serializeConfig가 성공적으로 직렬화한 뒤 비운다(실패 시 키 유지→다음 tick 재시도). Swift가 매 tick
     /// take_sidebar_config_dirty(ABI 이름 유지)로 drain해 1이면 serialize→atomic write한다.
     pub fn takeConfigDirty(self: *AppSession) bool {
-        return self.config_dirty_keys.items.len > 0 or self.config_keybind_rebinds.items.len > 0 or self.config_removed_keys.items.len > 0;
+        return self.config_dirty_keys.items.len > 0 or self.config_keybind_rebinds.items.len > 0 or
+            self.config_removed_keys.items.len > 0 or self.config_keybind_removed.items.len > 0;
     }
 
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
@@ -6637,6 +6651,42 @@ pub const AppSession = struct {
         }
         self.config_keybind_rebinds.append(self.allocator, .{ .action = entry.key, .chord = chord_str }) catch return;
         self.metal_dirty = true;
+    }
+
+    /// 액션의 **사용자 지정** 단축키를 해제한다(keybind 행 Backspace). loaded_config.keybindings에서 그 액션을 빼고(없으면
+    /// notice — 빌트인은 안 건드림, 후속) 카탈로그 재빌드, `keybind = * = action` 줄 제거 예약. 펜딩 rebind도 취소. 해제 후
+    /// resolver는 빌트인(있으면)을 반환하거나 미지정 — 행 표시가 그에 맞게 갱신된다. 한계: 빌트인 chord 자체를 죽이는
+    /// `keybind = chord = unbind`는 후속(현재는 사용자 override만 제거).
+    fn unbindActionEntry(self: *AppSession, entry: command_catalog.Entry) void {
+        const a = self.loaded_config.arena.allocator();
+        var list: std.ArrayList(config_mod.AppBinding) = .empty;
+        var found = false;
+        for (self.loaded_config.keybindings) |b| {
+            if (std.meta.eql(b.action, entry.action)) {
+                found = true; // 드롭
+            } else list.append(a, b) catch return;
+        }
+        if (!found) {
+            self.showNotice("사용자 지정 단축키가 없습니다 (기본 단축키 해제는 후속)");
+            return;
+        }
+        self.loaded_config.keybindings = list.toOwnedSlice(a) catch return;
+        self.rebuildCommandCatalog();
+        // 펜딩 rebind 취소(unbind가 우선 — 같은 액션을 바꿨다 해제하면 줄 추가가 아니라 제거).
+        var i: usize = 0;
+        while (i < self.config_keybind_rebinds.items.len) {
+            if (std.mem.eql(u8, self.config_keybind_rebinds.items[i].action, entry.key)) {
+                _ = self.config_keybind_rebinds.orderedRemove(i);
+            } else i += 1;
+        }
+        self.markKeybindRemoved(entry.key); // 영속: 줄 제거 예약
+        self.metal_dirty = true;
+    }
+
+    /// keybind 줄 제거 예약(중복 한 번만). action은 command_catalog 정적 키. serializeConfig가 removeKeybindLines로 반영.
+    fn markKeybindRemoved(self: *AppSession, action_key: []const u8) void {
+        for (self.config_keybind_removed.items) |k| if (std.mem.eql(u8, k, action_key)) return;
+        self.config_keybind_removed.append(self.allocator, action_key) catch {};
     }
 
     /// keybind 녹음 중 raw 키 한 개를 처리한다(handleKeyEvent가 가로채 호출). 평범한 Esc(모디파이어 없음)는 취소(rebind
@@ -6796,6 +6846,13 @@ pub const AppSession = struct {
             self.allocator.free(text);
             text = chained;
             self.config_removed_keys.clearRetainingCapacity();
+        }
+        // keybind unbind — `keybind = chord = action` 줄을 action 기준으로 제거(keybind 갱신 패스 뒤, 제거 우선).
+        if (self.config_keybind_removed.items.len > 0) {
+            const chained = try config_mod.removeKeybindLines(self.allocator, text, self.config_keybind_removed.items);
+            self.allocator.free(text);
+            text = chained;
+            self.config_keybind_removed.clearRetainingCapacity();
         }
         self.sidebar_config_buffer = text;
         self.config_dirty_keys.clearRetainingCapacity();
@@ -9296,6 +9353,7 @@ pub const AppSession = struct {
         self.config_dirty_keys.deinit(self.allocator);
         self.config_keybind_rebinds.deinit(self.allocator);
         self.config_removed_keys.deinit(self.allocator);
+        self.config_keybind_removed.deinit(self.allocator);
         self.hover_leaf_scratch.deinit(self.allocator);
         self.scrollbar_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
@@ -14714,6 +14772,61 @@ test "settings keybind recorder: 입력 섹션 행 녹음→캡처→rebind + �
     session.captureKeybindRecording(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(!session.chrome_host.settings.recording);
     try std.testing.expectEqual(before, session.config_keybind_rebinds.items.len); // 변화 없음
+}
+
+test "settings keybind unbind: keybind 행 Backspace → 사용자 바인딩 해제 + 줄 제거 예약, 펜딩 rebind 취소 (keybind unbind)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var input_idx: usize = 0;
+    for (sections, 0..) |s, i| if (s.section == .input) {
+        input_idx = i;
+    };
+    session.chrome_host.settings.show();
+    session.chrome_host.settings.section = input_idx;
+    const cf = try session.currentSectionFields(scratch.allocator());
+    const ks = cf.keybindRowStart().?;
+    session.chrome_host.settings.selected = ks; // entries[0]=new_term
+
+    // 먼저 new_term을 Cmd+E로 rebind(사용자 바인딩 생성 + 펜딩).
+    session.chrome_host.settings.recording = true;
+    session.captureKeybindRecording(.{ .key = .{ .char = 'E' }, .modifiers = .{ .command = true } });
+    var has_user_bind = false;
+    for (session.loaded_config.keybindings) |b| if (std.meta.activeTag(b.action) == .new_term) {
+        has_user_bind = true;
+    };
+    try std.testing.expect(has_user_bind);
+
+    // 이제 Backspace로 unbind → 사용자 바인딩 제거 + 줄 제거 예약 + 펜딩 rebind 취소.
+    session.deleteSelectedSettingRow();
+    for (session.loaded_config.keybindings) |b| try std.testing.expect(std.meta.activeTag(b.action) != .new_term); // 사용자 바인딩 사라짐
+    var saw_removed = false;
+    for (session.config_keybind_removed.items) |k| if (std.mem.eql(u8, k, "new_term")) {
+        saw_removed = true;
+    };
+    try std.testing.expect(saw_removed); // 줄 제거 예약
+    for (session.config_keybind_rebinds.items) |rb| try std.testing.expect(!std.mem.eql(u8, rb.action, "new_term")); // 펜딩 rebind 취소
+    try std.testing.expect(session.takeConfigDirty());
+
+    // 사용자 바인딩 없는 액션을 다시 unbind 시도 → notice 경로(무동작, keybindings 불변).
+    const cf2 = try session.currentSectionFields(scratch.allocator());
+    session.chrome_host.settings.selected = cf2.keybindRowStart().?;
+    const len_before = session.loaded_config.keybindings.len;
+    session.deleteSelectedSettingRow();
+    try std.testing.expectEqual(len_before, session.loaded_config.keybindings.len); // 불변(빌트인은 안 건드림)
 }
 
 test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 인덱스가 올바른 액션에 매핑 (CS-4-4 검색)" {

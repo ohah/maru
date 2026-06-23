@@ -817,6 +817,59 @@ test "CoreText draw-list shaper shapes a ZWJ emoji family into a color glyph (GB
     try std.testing.expect(saw_color_at_col0);
 }
 
+test "CoreText draw-list shaper marks keycap and VS16 clusters as color, plain text as monochrome" {
+    // 회귀 고정: color_glyph_kind는 base 코드포인트 category가 아니라 **실제 셰이핑된 run 폰트의 컬러 여부**
+    // (sbix/COLR)로 정해야 한다. base category(0x1F300~1FAFF만 Emoji)로 판정하면 키캡(base ASCII '2')·
+    // VS16 표현(❤️ base U+2764)이 mono로 잘못 판정돼 컬러 글리프가 회색 틴트로 렌더된다(HG3b 회귀). CoreText가
+    // AppleColorEmoji로 셰이핑한 cluster는 color여야 하고, 일반 텍스트('A')는 monochrome이어야 한다.
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+    const shaper = coretext_shaper.CoreTextDrawListShaper{
+        .appearance = appearance,
+        .shape_draw_list = maru_macos_coretext_shape_draw_list,
+    };
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 16, .rows = 1 });
+    defer core.deinit();
+    core.clearDirty();
+    try core.write("\x1b[?2027h"); // grapheme cluster mode
+    try core.write("2\u{FE0F}\u{20E3}"); // 키캡 2️⃣ (base '2' + VS16 + U+20E3)
+    try core.write(" \u{2764}\u{FE0F}"); // ❤️ (base U+2764 + VS16)
+    try core.write(" A"); // 일반 텍스트 — mono여야 한다
+
+    var dl = try renderer.buildDrawList(allocator, core.snapshot());
+    defer dl.deinit(allocator);
+    var fr = renderer.FontIdentityRegistry.init(allocator);
+    defer fr.deinit();
+    var shaped = try shaper.shape(allocator, dl, &fr);
+    defer shaped.deinit(allocator);
+
+    var keycap_color = false; // base '2' (0x32) cluster
+    var heart_color = false; // base ❤ (0x2764) cluster
+    var saw_ascii_a = false;
+    var ascii_a_color = false; // base 'A' (0x41)
+    for (shaped.runs.glyphs) |g| {
+        const is_color = g.cache_key.color_glyph_kind == .color;
+        switch (g.codepoint) {
+            '2' => if (is_color) {
+                keycap_color = true;
+            },
+            0x2764 => if (is_color) {
+                heart_color = true;
+            },
+            'A' => {
+                saw_ascii_a = true;
+                if (is_color) ascii_a_color = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(keycap_color); // 키캡 = AppleColorEmoji = color
+    try std.testing.expect(heart_color); // ❤️ = AppleColorEmoji = color
+    try std.testing.expect(saw_ascii_a); // 'A' glyph가 실제로 났는지(테스트 자체 건전성)
+    try std.testing.expect(!ascii_a_color); // 일반 텍스트는 monochrome
+}
+
 test "CoreText smoke does not treat fallback as required for shaping" {
     // fallback 관측은 유용한 진단 신호지만, OS와 설치 폰트에 따라 run 분리가 달라질 수
     // 있다. smoke의 pass/fail은 "글자를 glyph run으로 만들 수 있는가"에 둔다.

@@ -721,6 +721,9 @@ static void maru_append_glyph_record(
     result->glyph_record_count += 1;
 }
 
+// 전방선언 — 정의는 아래(rasterizer와 공유). 셰이핑 단계에서 color_glyph_kind를 run 폰트 색으로 정하는 데 쓴다.
+static bool maru_font_is_color(CTFontRef font);
+
 static void maru_append_draw_glyph_record(
     MaruCoreTextDrawListShapeResult *result,
     MaruCoreTextDrawGlyphRecord *records,
@@ -729,7 +732,8 @@ static void maru_append_draw_glyph_record(
     MaruCoreTextDrawCell cell,
     CFStringRef font_name,
     CGGlyph glyph,
-    uint32_t fallback
+    uint32_t fallback,
+    bool is_color_font
 ) {
     if (records == NULL || result->glyph_record_count >= record_capacity || cell_index > UINT32_MAX) {
         result->glyph_record_overflow = 1;
@@ -765,7 +769,13 @@ static void maru_append_draw_glyph_record(
     record->glyph_id = synth ? 0 : (uint32_t)glyph;
     record->drawable = drawable ? 1 : 0;
     record->fallback = fallback;
-    record->color_glyph_kind = category == MaruGlyphCategoryEmoji ? 1 : 0;
+    // 색 판정은 **실제 셰이핑된 run 폰트가 컬러 글리프 테이블(sbix/COLR)을 가졌는지**로 한다 — base
+    // 코드포인트 category(0x1F300~1FAFF만 Emoji)로 판정하면 키캡(base ASCII '2')·VS16 표현(❤️ base
+    // U+2764)·기본표현 이모지(✅ 등 BMP)가 mono로 잘못 판정돼 컬러 글리프가 회색 틴트로 그려진다(HG3b에서
+    // colorUv가 isColorGlyph→color_glyph_kind로 옮겨오며 생긴 회귀). run 폰트 기반은 rasterizer(maru_font_is_color)와
+    // 동일 신호라 UV sentinel과 atlas 색이 항상 일치한다. synth(glyph_id=0)는 rasterizer가 mono로 그리는데,
+    // box-drawing 등은 텍스트(mono) 폰트로 셰이핑돼 is_color_font=false라 자연히 mono.
+    record->color_glyph_kind = is_color_font ? 1 : 0;
     if (!maru_copy_cfstring(font_name, record->font_name, sizeof(record->font_name))) {
         record->font_name[0] = '\0';
         // 합성(synth) 글리프는 font_name이 불요하다(rasterizer가 코드포인트로 그림) → 복사 실패로 드롭하지
@@ -1105,6 +1115,8 @@ void maru_macos_coretext_shape_draw_list(
                 CTFontRef run_font = run_attributes == NULL
                     ? NULL
                     : (CTFontRef)CFDictionaryGetValue(run_attributes, kCTFontAttributeName);
+                // 이 run을 그릴 실제 폰트의 컬러 여부(sbix/COLR) — color_glyph_kind의 단일 출처(아래).
+                const bool run_is_color = run_font != NULL ? maru_font_is_color(run_font) : false;
                 if (run_font != NULL) {
                     run_name = CTFontCopyPostScriptName(run_font);
                     if (run_name != NULL &&
@@ -1138,7 +1150,8 @@ void maru_macos_coretext_shape_draw_list(
                         cell,
                         record_font_name,
                         glyphs[glyph_index],
-                        run_fallback
+                        run_fallback,
+                        run_is_color
                     );
                     if (result->glyph_record_overflow != 0) {
                         result->status = 7;

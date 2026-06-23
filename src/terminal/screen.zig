@@ -485,13 +485,16 @@ fn emojiClusterExtends(self: *const TerminalCore, cell: types.Cell, cp: u21) boo
     const base = cell.codepoint;
     // 스킨톤 modifier: 그림문자 cluster에 붙는다(modifier는 GB9 Extend지만 폭 2라 cellWidth-0 경로를 안 탐).
     // 단 (1) 동그란 번호(③ ambiguous-wide)는 그림문자가 아니라 제외, (2) **국기(RI base)는 제외** — 완성된
-    // 국기 뒤 스킨톤이 cluster에 잘못 병합돼 국기가 깨지면 안 된다(review #15). lone이 아니어도(ZWJ 가족 안
-    // 사람마다 스킨톤) base가 그림문자면 붙는다 — base는 cluster 시작 글자라 가족 전체가 한 셀로 모인다.
-    if (isSkinToneModifier(cp)) return grapheme.isExtendedPictographic(base) and !isRegionalIndicator(base) and !width.isWideRenderSymbol(base);
+    // 국기 뒤 스킨톤이 cluster에 잘못 병합돼 국기가 깨지면 안 된다(review #15), (3) **폭 2 base에만** — Fitzpatrick은
+    // Emoji_Modifier_Base(전부 폭 2 사람·손 이모지)에만 유효하다. 폭 1 그림문자(❤ U+2764 등)에 스킨톤이 붙어
+    // promoteLastToEmojiWidth가 1→2로 늘리던 오동작(malformed 입력)을 막는다. lone이 아니어도(ZWJ 가족 안 사람마다
+    // 스킨톤) base가 그림문자면 붙는다 — base는 cluster 시작 글자라 가족 전체가 한 셀로 모인다.
+    if (isSkinToneModifier(cp)) return cell.width == 2 and grapheme.isExtendedPictographic(base) and !isRegionalIndicator(base) and !width.isWideRenderSymbol(base);
     // 국기: 짝 없는(extra 없는) RI에 둘째 RI만 묶는다(GB12/13 — 3개 이상은 안 이어 다음 국기가 새 셀로).
     if (isRegionalIndicator(cp)) return isRegionalIndicator(base) and cell.grapheme_id == 0;
     // ZWJ: 그림문자 cluster 뒤에 붙는다(GB11 좌변). base가 그림문자면 OK — 사이에 VS16 등 Extend가 끼어도.
-    if (cp == 0x200D) return grapheme.isExtendedPictographic(base);
+    // 단 **RI base는 제외** — 짝 안 찬 국기(반쪽, 폭 1)에 ZWJ가 잘못 흡수되면 안 된다(유효한 emoji 시퀀스에 flag+ZWJ 없음).
+    if (cp == 0x200D) return grapheme.isExtendedPictographic(base) and !isRegionalIndicator(base);
     // ZWJ 뒤 그림문자: 합류한다(GB11 우변 — trailing이 방금 붙은 ZWJ).
     if (grapheme.isExtendedPictographic(cp)) return trailingClusterCp(self, cell) == 0x200D;
     return false;

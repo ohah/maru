@@ -556,7 +556,9 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 - `rewrap`은 hard 행에 `trimmedLen` 적용(이미 가변폭 가정).
 - 단 **A2 착수 시 selection/search/absRow 소비자가 `row.len`을 존중하는지 전수 확인**(현재 scrollback 행은 resize transient에만 가변폭이었고 rewrap이 곧 정규화 → A2는 영구 가변폭).
 
-**페이지 모델 변경**: A1의 uniform-width(`rows_per_page × width` 연속) → **per-row-descriptor arena**. `Page = { cells: []Cell(arena), row_descs: [{ offset, len, wrapped, prompt }], used }`. 행을 trim된 len으로 arena에 팩, `locate(i)`는 cumulative row count로 페이지+desc 이진탐색. soft-wrap 행은 full width(내용이 끝까지)라 trim 안 함; **hard 행만** 끝 default trim(rewrap `trimmedLen` 규칙과 동일 — 단일 출처).
+**페이지 모델 변경**: A1의 uniform-width(`rows_per_page × width` 연속) → **per-row-descriptor arena**. `Page = { cells: []Cell(arena), row_descs: [{ offset, len, wrapped, prompt }], used }`. 행을 trim된 len으로 arena에 팩, `locate(i)`는 cumulative row count로 페이지+desc 이진탐색. soft-wrap 행은 full width(내용이 끝까지)라 trim 안 함; **hard 행만** 끝 default trim(rewrap `trimmedLen` 규칙과 동일 — 단일 출처). 구현 시 `wrapped_flag` 분기 필수: `stored_len = if (wrapped) cells.len else trimmedLen(cells)` — soft 행을 trim하면 내부 trailing space가 사라져 rewrap이 논리 줄을 잘못 잇는다(검증됨, A2 prep).
+
+**arena 크기(중요 — 실제 절감의 핵심, A2 prep 발견)**: arena를 `rows_per_page × cols`로 잡으면 trim된(짧은) 행이 **desc cap(rows_per_page)을 먼저 채우고 arena는 반만 차** → 절감 0(A1과 동일 메모리). 절감하려면 arena를 **cols와 무관한 고정 셀 예산**(단 `≥ cols`라 어떤 단일 행도 들어감)으로 두고 페이지를 `min(desc cap, arena full)` 양쪽으로 bound한다 — trim 행이 고정 arena에 촘촘히 팩돼 페이지 수↓(= 총 메모리↓), wide 행은 arena가 먼저 차 페이지↑되 데이터는 원래 큼(정상). 절감은 "내용이 얼마나 짧으냐"에 비례. pool 재사용은 arena 크기 고정이라 단순(폭 무관 — A1의 width별 realloc 불필요).
 
 **동작 영향**: `scrollbackRow(i).len`이 cols보다 작을 수 있다(A1까진 push가 full-width 저장). 관측 동작은 불변(render가 pad, 내용·선택·검색 결과 동일). OOM 트랜잭션(rewrap)·row-count cap·eviction 유지.
 

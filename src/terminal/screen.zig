@@ -18,6 +18,14 @@ const std = @import("std");
 const types = @import("types.zig");
 const core = @import("core.zig"); // 활성 화면 연산이 *TerminalCore를 받는다(Scrollback struct는 여전히 types만 의존)
 const width = @import("../width.zig"); // EAW 셀 폭(중립 top-level 유틸) — wide 이모지 판정에 쓴다
+const grapheme = @import("grapheme.zig"); // UAX#29 한글 cluster 분절(HG2에서 print 경로 통합 예정)
+
+// HG1 단계에서 grapheme.zig는 아직 print 경로(writeCodepoint)가 호출하지 않으므로, 미사용
+// import만으로는 Zig가 그 파일을 analyze하지 않아 단위 테스트가 수집되지 않는다. 이 참조로
+// grapheme.zig의 테스트를 빌드에 끌어온다(HG2에서 실제 호출이 생기면 이 블록은 제거한다).
+test {
+    _ = grapheme;
+}
 
 const TerminalCore = core.TerminalCore;
 

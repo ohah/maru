@@ -102,6 +102,12 @@ Maru는 이미 셰이핑 엔진(CoreText)을 갖췄다. 막힌 곳은 **셀이 b
 
 이 저장 모델은 Ghostty가 grapheme을 페이지의 별도 저장소에 두는 **동작/설계 개념**과 같다. 단 [필수 프로젝트 규칙](project-rules.md)·[오라클 비교 테스트 전략](oracle-testing.md)에 따라 **Ghostty의 자료구조 레이아웃·함수 분해·코드 표현은 복사하지 않는다.** 분절 규칙은 공개 명세(UAX#29)에서 독립 유도하고, Ghostty는 최종 화면 동작 비교(오라클)로만 쓴다.
 
+**저장 방식 결정 (B — id + 외부 store):** "side-storage"를 구현하는 세 방식을 검토했다 — (A) `Cell` 인라인 고정 배열, (B) `Cell`엔 `id`만 두고 외부 store, (C) 하이브리드. **B를 택한다.**
+
+- A는 고정 크기를 넘는 긴 cluster(ZWJ 가족 이모지 등 — U+200D로 이어져 길이가 사실상 무제한)에서 코드포인트가 **잘려 데이터가 손실**된다. 잘림은 화면뿐 아니라 **클립보드 복사·재출력·trace까지** 망가뜨리므로 받아들일 수 없다.
+- B는 가변 길이를 store가 담아 **무손실**이고, maru가 이미 `link: u32` + `link_store`(OSC 8 URI를 셀엔 id만, 본체는 store에 — `core.zig`)에서 쓰는 **검증된 패턴을 그대로 재사용**한다. id는 셀의 POD 필드라 셀이 스크롤백·resize로 이동해도 값으로 따라가 **키가 안정적**이고(위치 키가 아니라 id 키), combining 없는 셀은 `id=0`이라 **메모리 0 비용**이다.
+- link과 다른 점은 (1) grapheme은 셀마다 거의 고유해 dedup 이득이 없으니 dedup을 강제하지 않고, (2) 대량 생성되므로 스크롤백 eviction·clear·덮어쓰기 때 **id를 회수하는 수명 관리**를 처음부터 둔다(link store의 기존 append-only 누수도 같은 메커니즘으로 함께 고친다).
+
 ## 4. 메커니즘
 
 ### 4.1 코어 — UAX#29 grapheme breaking + Hangul L/V/T (GB6/GB7/GB8)
@@ -119,12 +125,15 @@ conjoining 자모를 cluster로 묶는 규칙은 UAX#29 Grapheme Cluster Boundar
 - T(종성): U+11A8~U+11FF
 - (완성형 LV/LVT: U+AC00~U+D7A3 — `(code-0xAC00) % 28 == 0`이면 LV, 아니면 LVT)
 
-### 4.2 셀 저장 — 단일 combining → 다중 코드포인트 grapheme storage
+### 4.2 셀 저장 — 단일 combining → `grapheme_id` + `grapheme_store` (B 방식)
 
-현재 `types.Cell.combining: ?u21`(1개)을 다중 코드포인트 cluster를 담는 모델로 확장한다. 셀 구조체 자체를 키우지 않도록, cluster가 있는 셀만 가리키는 **side-storage**(행/페이지 단위 보조 배열 + 셀의 "grapheme 있음" 표식)를 둔다. 이때:
+현재 `types.Cell.combining: ?u21`(1개)을 다중 코드포인트 cluster를 담는 모델로 확장한다. §3.2 결정에 따라 **link과 같은 "id + 외부 store" 패턴**을 쓴다:
 
-- `width.zig`의 `isKeycapCombining`(U+20E3 키캡) 같은 **단일-combining 보정 hack 세 곳**(컬러 판정·셰이퍼 VS16 재주입·`appendRowUtf8` 복사)은 다중 저장으로 일반화되며 제거 대상이 된다(주석이 가리키는 "근본 해법").
-- 저장 상한·문자열 복사(`appendRowUtf8`)·trace/snapshot 직렬화가 다중 코드포인트를 잃지 않도록 함께 본다.
+- `Cell`에 `grapheme_id: u32`(0=없음)를 두어 기존 `combining: ?u21`을 대체한다. 본체(base 뒤에 붙는 자모·combining·ZWJ 코드포인트 배열)는 `TerminalCore.grapheme_store`에 담고 셀은 id만 든다 — `link: u32`/`link_store`(`core.zig`)와 동형.
+- **키 안정성**: id는 POD라 셀이 스크롤백 push·resize·reflow로 복사·이동해도 값으로 따라간다(위치 키가 아니라 id 키라 안 깨진다 — link과 동일).
+- **수명 관리**: grapheme은 셀마다 고유하고 대량 생성되므로, link store의 append-only(누수)와 달리 스크롤백 eviction·`clearScrollback`·셀 덮어쓰기(`clearCellForWrite`) 때 id를 회수한다. link store의 기존 누수도 같은 메커니즘으로 함께 정리한다.
+- **기존 combining 경로 통합**: `width.zig`의 `isKeycapCombining`(U+20E3 키캡)을 경유하는 **단일-combining 보정 hack 세 곳**(`metal_frame.isColorGlyph` 컬러 판정·셰이퍼 VS16 재주입·`appendRowUtf8` 복사)은 다중 저장으로 **근본 해소**되어 제거 대상이다 — 키캡 `base+VS16+U+20E3`을 그대로 저장하니 재주입이 불필요하다. VS16(❤️)·skin-tone(👍🏽)·국기(RI 쌍)도 같은 cluster 저장 경로로 흡수한다. 단 이는 동작 변경이 아니라 **모델 이전**이라, 기존 이모지/키캡 테스트가 green을 유지해야 한다.
+- 저장 상한·문자열 복사(`appendRowUtf8`)·trace/snapshot 직렬화가 다중 코드포인트를 **잃지 않도록**(무손실) 함께 본다.
 
 ### 4.3 폭 — cluster 단위로 base가 결정한다
 
@@ -149,16 +158,26 @@ flowchart TD
   A["ls 출력 바이트 (NFD)"] --> B["파서: codepoint 스트림 (L V T …)"]
   B --> C["UAX#29 grapheme breaking + Hangul GB6/GB7/GB8"]
   C --> D["grapheme cluster (base + 후속 자모)"]
-  D --> E["셀 저장: base codepoint + grapheme side-storage"]
+  D --> E["셀 저장: Cell.grapheme_id + grapheme_store (link 패턴)"]
   E --> F["폭: cluster base 기준 2칸 (V·T는 0폭 흡수)"]
   F --> G["CoreText: cluster 전체를 CTLine으로 셰이핑"]
   G --> H["음절 글리프 → GlyphAtlas → Metal"]
 ```
 
+### 4.7 입력 경로 일관성 (IME·붙여넣기)
+
+cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 진입점**에 들어간다. PTY 출력이든, 붙여넣기(bracketed paste → 셸 echo → PTY 출력)든, IME 확정 텍스트든 codepoint가 이 진입점에 도달하면 같은 cluster 로직을 타므로 **입력 소스마다 따로 적용할 필요가 없다**. IME는 보통 NFC(완성형), 파일명은 NFD지만 정규화 없이 둘 다 cluster 모델이 올바로 처리한다(NFC 음절은 1 codepoint = 1 cluster, NFD는 자모를 묶어 같은 결과).
+
+단일 진입점을 거치지 않는 두 곳만 명시적으로 챙긴다:
+
+- **IME preedit(조합 중 표시)**: `screen.zig`의 `snapshotWithPreedit`/`drawPreeditCells`는 셀 저장이 아니라 스냅샷 시점에 `preedit_bytes`를 codepoint 단위 폭으로 임시 렌더하는 별도 경로다(확정 전이라 셀에 안 들어감). preedit도 cluster 폭·표시를 인지하도록 HG3/HG4에서 맞춘다.
+- **클립보드 복사·재출력(`appendRowUtf8`)**: 저장된 다중 코드포인트를 손실 없이 UTF-8로 뽑아야 한다(무손실 — §3.2 잘림 금지와 직결). HG2a 직렬화 확장에 포함한다.
+
 ## 5. 분해 (HG1~HG4)
 
 - **HG1 — 코어 grapheme 분절**: UAX#29 cluster boundary + Hangul L/V/T(GB6/7/8) 분류·묶기, cluster 단위 폭(base 2칸, V/T 0폭 흡수). 순수 Zig 단위 테스트(NFD "한글" → 음절 2개·각 2칸, 옛한글 cluster).
-- **HG2 — 셀 다중 코드포인트 저장**: `Cell.combining` 단일 → grapheme side-storage 확장, `appendRowUtf8`·trace/snapshot 직렬화·저장 상한 반영. 단일-combining 보정 hack(`isKeycapCombining` 경유 3곳) 일반화/정리.
+- **HG2a — 셀 다중 코드포인트 저장(B 방식)**: `Cell.grapheme_id: u32` + `TerminalCore.grapheme_store`(link 패턴), `RowCodepoints` iterator·`appendRowUtf8`·trace/snapshot 직렬화 확장(무손실), eviction·clear·덮어쓰기 시 id 회수(수명 관리).
+- **HG2b — 기존 combining 경로 통합**: VS16(❤️)·키캡(2️⃣)·skin-tone(👍🏽)·국기(RI) 경로를 새 cluster 저장 모델로 이전하고 단일-combining 보정 hack 3곳(`isKeycapCombining` 경유)을 제거한다. 동작 변경이 아니라 모델 이전이라 **기존 이모지/키캡 테스트 green 유지가 합격선**이다.
 - **HG3 — 렌더·셰이핑 통합**: `coretext_smoke.m`/`coretext_shaper.zig`가 cluster 전체를 CTLine에 넘겨 음절 글리프로 셰이핑, atlas cache key 정합.
 - **HG4 — 검증·fixture**: NFD `ls` 시나리오·옛한글·정렬(vim/tmux/htop) fixture-oracle + 실제 렌더 캡처.
 

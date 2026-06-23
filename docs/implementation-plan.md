@@ -505,7 +505,7 @@ TDD 방식:
 
 배경(현황 — "계획에 있었나/구현 안 됐나/누락인가"): 전략([폰트 전략](font-strategy.md))은 "grapheme cluster는 UAX#29로 분절"을 적었으나 구현은 **combining 1개 저장**(`types.Cell.combining: ?u21`)에서 멈춘 알려진 후속이고, **한글 NFD 케이스는 계획에서 누락**됐다(다중 코드포인트 예시가 ZWJ 이모지·국기·skin-tone에 한정, docs 전체에 NFC/NFD/자모 0건). `width.zig`의 `isKeycapCombining` 주석도 "다중-combining 저장이 근본 해법"이라 자인.
 
-결정: NFC 정규화로 때우지 않는다(옛한글은 NFC로도 안 합쳐짐 + 터미널은 원본 코드포인트 보존 — selection/커서/재그리기 정합). **베이스 = UAX#29 GB6/GB7/GB8**(공개 명세). Ghostty식 grapheme side-storage는 **동작/설계 개념만 비교(clean-room — 자료구조·코드 미복사)**.
+결정: NFC 정규화로 때우지 않는다(옛한글은 NFC로도 안 합쳐짐 + 터미널은 원본 코드포인트 보존 — selection/커서/재그리기 정합). **베이스 = UAX#29 GB6/GB7/GB8**(공개 명세). Ghostty식 grapheme side-storage는 **동작/설계 개념만 비교(clean-room — 자료구조·코드 미복사)**. 저장은 **B 방식 — `Cell.grapheme_id: u32` + `TerminalCore.grapheme_store`**로 maru의 `link`/`link_store` 패턴을 재사용한다(무손실 — 긴 ZWJ cluster도 안 잘림, id라 셀 이동에 키 안정, combining 없는 셀은 0 비용).
 
 완료 기준:
 - NFD 한글(초성+중성+종성)을 한 cluster로 묶어 cell width 2칸·음절 글리프 렌더(완성형 NFC와 동일 결과).
@@ -515,7 +515,8 @@ TDD 방식:
 
 분해 (HG1~HG4 — 상세는 설계 문서 §5):
 - **HG1 — 코어 grapheme 분절**: UAX#29 cluster boundary + Hangul L/V/T(GB6/7/8) 분류·묶기, cluster 단위 폭(base 초성 2칸·후속 V/T 0폭 흡수). 순수 Zig 단위(NFD "한글"→음절 2개·각 2칸, 옛한글).
-- **HG2 — 셀 다중 코드포인트 저장**: `Cell.combining` 단일 → grapheme side-storage 확장, `appendRowUtf8`·trace/snapshot 직렬화·저장 상한 반영, 단일-combining 보정 hack(`isKeycapCombining` 경유 3곳) 일반화/정리.
+- **HG2a — 셀 다중 코드포인트 저장(B)**: `Cell.grapheme_id: u32` + `TerminalCore.grapheme_store`(link 패턴), `RowCodepoints`·`appendRowUtf8`·trace/snapshot 직렬화 확장(무손실), eviction·clear·덮어쓰기 시 id 회수(수명 관리).
+- **HG2b — 기존 combining 경로 통합**: VS16·키캡·skin-tone·국기를 새 모델로 이전 + 단일-combining hack 3곳(`isKeycapCombining` 경유) 제거. 동작 변경 아님(모델 이전) — 기존 이모지/키캡 테스트 green 유지가 합격선.
 - **HG3 — 렌더·셰이핑 통합**: `coretext_smoke.m`/`coretext_shaper.zig`가 cluster 전체를 CTLine으로 셰이핑(글리프 합성은 CoreText), atlas cache key 정합.
 - **HG4 — 검증·fixture**: NFD `ls`·옛한글·정렬(vim/tmux/htop) fixture-oracle + 렌더 캡처.
 

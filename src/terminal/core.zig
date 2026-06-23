@@ -1660,6 +1660,29 @@ test "NFD Hangul: a conjoining vowel after a non-Hangul base is its own cell (bo
     try std.testing.expectEqual(@as(u21, 0x1161), s.cells[1].codepoint); // 별도 셀
 }
 
+test "multi-combining: 둘째 mark부터 grapheme_store에 누적돼 무손실 (HG2b)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    // e + combining acute(U+0301) + combining dot-below(U+0323). 예전엔 단일 combining 슬롯이라
+    // 마지막(U+0323)만 남아 U+0301을 dump·복사에서 잃었다 — 이제 둘째 mark부터 store에 누적해 무손실.
+    try core.write("e\u{0301}\u{0323}x");
+
+    const s = core.snapshot();
+    try std.testing.expectEqual(@as(u16, 2), s.cursor.col); // combining은 0폭 — e,x만 advance
+    try std.testing.expectEqual(@as(u21, 'e'), s.cells[0].codepoint);
+    // 렌더 그림자(combining)는 현행대로 '마지막' mark 유지(동작 보존).
+    try std.testing.expectEqual(@as(u21, 0x0323), s.cells[0].combining.?);
+    // 무손실 권위는 store — 두 mark 전부.
+    try std.testing.expect(s.cells[0].grapheme_id != 0);
+    try std.testing.expectEqualSlices(u21, &.{ 0x0301, 0x0323 }, core.graphemeCluster(s.cells[0].grapheme_id).?);
+
+    // dump 무손실: e + 두 결합 마크 + x가 모두 복원된다(예전엔 U+0301이 사라졌다).
+    const text = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "e\u{0301}\u{0323}x") != null);
+}
+
 test "ambiguous_wide makes circled numbers occupy two cells (advance 2) with a continuation" {
     {
         // 기본 narrow: ③는 1칸, 커서 advance 1(Ghostty/xterm.js 호환).
@@ -4237,19 +4260,23 @@ test "selection extracts text across soft-wrapped and hard rows (scrollback + ac
     try std.testing.expectEqualStrings("ef\nhi", text2);
 }
 
-test "selection re-injects VS16 for keycap emoji so copied bytes match the rendered cluster (review #3)" {
+test "keycap emoji is stored losslessly in grapheme_store so copied bytes match (HG2b)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
     defer core.deinit();
-    // 2️⃣ = '2' + VS16(FE0F) + U+20E3. 단일 combining 슬롯이라 VS16이 U+20E3에 덮여 combining=0x20E3만 남는다.
+    // 2️⃣ = '2' + VS16(FE0F) + U+20E3. combining 그림자는 현행대로 마지막 mark(U+20E3)지만(렌더 동작
+    // 보존), HG2b부터 둘째 mark에서 store에 누적돼 VS16이 더는 사라지지 않는다 — 복사가 재주입 hack
+    // 없이 store 본체에서 온전한 시퀀스를 낸다(이전엔 VS16이 덮여 selection이 재주입으로 때웠다).
     try core.write("\x32\xef\xb8\x8f\xe2\x83\xa3");
     try std.testing.expectEqual(@as(u21, 0x32), core.screen.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x20E3), core.screen.cells[0].combining);
+    try std.testing.expectEqual(@as(?u21, 0x20E3), core.screen.cells[0].combining); // 그림자=마지막 mark
+    try std.testing.expect(core.screen.cells[0].grapheme_id != 0);
+    try std.testing.expectEqualSlices(u21, &.{ 0xFE0F, 0x20E3 }, core.graphemeCluster(core.screen.cells[0].grapheme_id).?);
 
     core.selectionStart(0, 0);
     core.selectionExtend(0, 3);
     const text = (try core.extractSelection(std.testing.allocator)).?;
     defer std.testing.allocator.free(text);
-    // 복사 바이트 = base + VS16(재주입) + U+20E3 — 화면 컬러 키캡과 일치('2'+U+20E3만 복사되어 깨지지 않음).
+    // 복사 바이트 = base + VS16 + U+20E3 — 화면 컬러 키캡과 일치('2'+U+20E3만 복사되어 깨지지 않음).
     try std.testing.expectEqualStrings("\x32\xef\xb8\x8f\xe2\x83\xa3", text);
 }
 

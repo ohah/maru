@@ -124,7 +124,7 @@ pub fn isEmojiPresentation(codepoint: u21) bool {
 /// U+20E3(COMBINING ENCLOSING KEYCAP)인지 — 키캡 이모지(0️⃣~9️⃣·#️⃣·*️⃣ = base + VS16 + U+20E3)의 표식.
 /// maru 셀은 combining을 하나만 저장해(types.Cell.combining: 단일 ?u21) VS16(U+FE0F)이 U+20E3에 덮여 사라진다.
 /// U+20E3은 키캡 시퀀스 외 용도가 없으므로, 이 mark가 붙은 셀은 키캡 이모지로 취급한다 — (1) 컬러로 렌더
-/// (metal_frame.isColorGlyph), (2) 셰이핑·복사 시 VS16 재주입(coretext_smoke.m 셰이퍼 / core.appendRowUtf8).
+/// (metal_frame.isColorGlyph), (2) 셰이핑·복사 시 VS16 재주입(coretext_smoke.m 셰이퍼 / selection.appendRowUtf8).
 /// 단일-combining 셀 모델을 보정하는 세 곳이 이 한 함수를 단일 출처로 공유한다(다중-combining 저장이 근본 해법).
 pub fn isKeycapCombining(combining: ?u21) bool {
     return combining == 0x20E3;

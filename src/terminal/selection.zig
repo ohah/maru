@@ -26,7 +26,7 @@ const TerminalCore = core.TerminalCore;
 
 /// 셀이 추가 단어 구분자인가 — config codepoint 집합(separators) 멤버십. continuation(wide 2번째 칸)은 제외
 /// (구분자는 폭 1 문장부호). separators가 비면(기본) 항상 false라 현행 "공백만 경계"와 동일.
-pub fn isWordSeparatorCell(cell: types.Cell, separators: []const u21) bool {
+fn isWordSeparatorCell(cell: types.Cell, separators: []const u21) bool {
     if (cell.continuation) return false;
     for (separators) |sep| {
         if (sep == cell.codepoint) return true;
@@ -36,13 +36,13 @@ pub fn isWordSeparatorCell(cell: types.Cell, separators: []const u21) bool {
 
 /// 단어 경계 셀인가 — 공백(isBlankCell) 또는 separators 집합 멤버. URL 감지는 separators=&.{}라 공백만 본다
 /// (`:`·`/`·`.`가 URL을 쪼개지 않게). 선택은 config 구분자를 넘긴다.
-pub fn isWordBoundaryCell(cell: types.Cell, separators: []const u21) bool {
+fn isWordBoundaryCell(cell: types.Cell, separators: []const u21) bool {
     return screen.isBlankCell(cell) or isWordSeparatorCell(cell, separators);
 }
 
 /// 절대-행 [start, end] 선형 범위를 현재 뷰포트 좌표로 클립한다(화면 밖이면 null). 선택
 /// 하이라이트와 URL 밑줄이 같은 규칙을 쓰게 공유한다.
-pub fn clipAbsSpanToViewport(self: *const TerminalCore, start: types.SelectionPoint, end: types.SelectionPoint, block: bool) ?types.SelectionSpan {
+fn clipAbsSpanToViewport(self: *const TerminalCore, start: types.SelectionPoint, end: types.SelectionPoint, block: bool) ?types.SelectionSpan {
     const top_abs = self.sb.count - @min(self.view_offset, self.sb.count);
     const bottom_abs = top_abs + self.size.rows - 1;
     if (end.row < top_abs or start.row > bottom_abs) return null;
@@ -56,7 +56,7 @@ pub fn clipAbsSpanToViewport(self: *const TerminalCore, start: types.SelectionPo
 }
 
 /// 클릭 셀의 OSC 8 링크 id(0=없음).
-pub fn cellLinkAt(self: *const TerminalCore, abs: usize, col: u16) u32 {
+fn cellLinkAt(self: *const TerminalCore, abs: usize, col: u16) u32 {
     const row_cells = screen.absRow(self, abs) orelse return 0;
     if (col >= row_cells.len) return 0;
     return row_cells[col].link;
@@ -65,7 +65,7 @@ pub fn cellLinkAt(self: *const TerminalCore, abs: usize, col: u16) u32 {
 /// 같은 OSC 8 링크 id가 이어지는 셀 run의 절대 좌표 경계. 링크 텍스트 안의 공백도 포함하고
 /// (보이는 텍스트 전체에 밑줄), soft-wrap 경계 너머로도 이어진다. 행이 바뀌는 hard 줄도 같은
 /// id면 잇는다 — 한 링크가 여러 줄에 걸쳐 출력된 경우(개행 포함 echo) 모두 한 링크다.
-pub fn linkBoundsAt(self: *const TerminalCore, abs: usize, col: u16, id: u32) struct { start: types.SelectionPoint, end: types.SelectionPoint } {
+fn linkBoundsAt(self: *const TerminalCore, abs: usize, col: u16, id: u32) struct { start: types.SelectionPoint, end: types.SelectionPoint } {
     var start_row = abs;
     var start_col: u16 = col;
     outer_left: while (true) {
@@ -98,7 +98,7 @@ pub fn linkBoundsAt(self: *const TerminalCore, abs: usize, col: u16, id: u32) st
 
 /// 셀 [from, to) 구간을 UTF-8로 out에 덧붙인다(continuation 셀 건너뜀, combining mark 포함).
 /// extractSelection과 extractUrlAt이 공유 — URL/선택이 같은 글자열을 만들게 한다.
-pub fn appendRowUtf8(out: *std.ArrayList(u8), allocator: std.mem.Allocator, row_cells: []const types.Cell, from: usize, to: usize) !void {
+fn appendRowUtf8(out: *std.ArrayList(u8), allocator: std.mem.Allocator, row_cells: []const types.Cell, from: usize, to: usize) !void {
     var c = from;
     while (c < to) : (c += 1) {
         const cell = row_cells[c];
@@ -159,13 +159,8 @@ pub fn shiftSelectionForEviction(self: *TerminalCore, n: usize) void {
     h.row -= n;
 }
 
-pub fn absRowFromViewport(self: *const TerminalCore, viewport_row: u16) usize {
-    // 절대 행 = 스크롤백 시작 기준. 뷰포트 첫 행은 sb_count - view_offset.
-    return self.sb.count - @min(self.view_offset, self.sb.count) + viewport_row;
-}
-
 /// 정규화된 선택(start <= end). 없으면 null.
-pub fn normalizedSelection(self: *const TerminalCore) ?struct { start: types.SelectionPoint, end: types.SelectionPoint } {
+fn normalizedSelection(self: *const TerminalCore) ?struct { start: types.SelectionPoint, end: types.SelectionPoint } {
     const a = self.selection_anchor orelse return null;
     const h = self.selection_head orelse return null;
     if (a.row < h.row or (a.row == h.row and a.col <= h.col)) return .{ .start = a, .end = h };
@@ -193,7 +188,7 @@ pub fn foldCase(cp: u21) u21 {
 }
 
 /// haystack 앞부분이 needle과 대소문자 무시(foldCase)로 일치하는지(needle.len ≤ haystack.len 가정 — 호출자가 보장).
-pub fn matchAtIgnoreCase(haystack: []const u21, needle: []const u21) bool {
+fn matchAtIgnoreCase(haystack: []const u21, needle: []const u21) bool {
     for (needle, 0..) |n, k| {
         if (foldCase(haystack[k]) != foldCase(n)) return false;
     }
@@ -218,7 +213,7 @@ pub const WordBounds = struct { start: types.SelectionPoint, end: types.Selectio
 /// scrollViewport(자동 스크롤 포함)가 재-wrap을 수행하며 선택을 지워버린다.
 pub fn selectionStart(self: *TerminalCore, viewport_row: u16, col: u16) void {
     screen.ensureScrollbackRewrapped(self);
-    const abs = absRowFromViewport(self, viewport_row);
+    const abs = screen.absRowFromViewport(self, viewport_row);
     self.selection_anchor = .{ .row = abs, .col = @min(col, self.size.cols -| 1) };
     self.selection_head = self.selection_anchor;
     self.selection_block = false; // 기본 선형 — 블록은 setSelectionBlock으로 켠다(start 직후, Option+드래그)
@@ -236,7 +231,7 @@ pub fn setSelectionBlock(self: *TerminalCore, on: bool) void {
 /// 선택 확장(드래그). anchor가 없으면 무시.
 pub fn selectionExtend(self: *TerminalCore, viewport_row: u16, col: u16) void {
     if (self.selection_anchor == null) return;
-    self.selection_head = .{ .row = absRowFromViewport(self, viewport_row), .col = @min(col, self.size.cols -| 1) };
+    self.selection_head = .{ .row = screen.absRowFromViewport(self, viewport_row), .col = @min(col, self.size.cols -| 1) };
     self.dirty = core.fullDirty(self.size);
 }
 
@@ -267,13 +262,13 @@ pub fn selectWordAt(self: *TerminalCore, viewport_row: u16, col: u16, separator_
 }
 
 /// URL 감지용(공백만 경계 — 구분자 무시). selectWordAt(선택)은 wordBoundsAtImpl에 config 구분자를 넘긴다.
-pub fn wordBoundsAt(self: *const TerminalCore, viewport_row: u16, col: u16) ?WordBounds {
+fn wordBoundsAt(self: *const TerminalCore, viewport_row: u16, col: u16) ?WordBounds {
     return wordBoundsAtImpl(self, viewport_row, col, &.{});
 }
 
 /// 클릭 위치가 속한 비공백 run(단어)의 절대 좌표 경계. soft-wrap을 넘어 확장한다. 공백 위치면 null.
-pub fn wordBoundsAtImpl(self: *const TerminalCore, viewport_row: u16, col: u16, separators: []const u21) ?WordBounds {
-    const abs = absRowFromViewport(self, viewport_row);
+fn wordBoundsAtImpl(self: *const TerminalCore, viewport_row: u16, col: u16, separators: []const u21) ?WordBounds {
+    const abs = screen.absRowFromViewport(self, viewport_row);
     const row_cells = screen.absRow(self, abs) orelse return null;
     const c = @min(col, @as(u16, @intCast(row_cells.len -| 1)));
     if (screen.isBlankCell(row_cells[c])) return null; // 공백 클릭 → 선택 없음(현행)
@@ -320,7 +315,7 @@ pub fn wordBoundsAtImpl(self: *const TerminalCore, viewport_row: u16, col: u16, 
 /// 트리플클릭 줄 선택: 클릭한 행이 속한 논리 줄 전체(soft-wrap된 행들 포함)를 선택한다.
 pub fn selectLineAt(self: *TerminalCore, viewport_row: u16) void {
     screen.ensureScrollbackRewrapped(self); // selectionStart와 같은 이유
-    const abs = absRowFromViewport(self, viewport_row);
+    const abs = screen.absRowFromViewport(self, viewport_row);
     if (screen.absRow(self, abs) == null) return;
     var start_row = abs;
     while (start_row > 0 and screen.absRowWrapped(self, start_row - 1)) start_row -= 1;
@@ -365,7 +360,7 @@ pub fn selectionClear(self: *TerminalCore) void {
 /// Cmd+클릭/hover 위치가 URL이면 그 run의 시작 셀 절대 좌표를 돌려준다(밑줄 anchor용, 할당 없음).
 /// OSC 8 명시적 링크가 있으면 그것이 우선이고(보이는 텍스트와 무관), 없으면 화면 글자의 http(s) 휴리스틱.
 pub fn urlAnchorAt(self: *const TerminalCore, viewport_row: u16, col: u16) ?types.SelectionPoint {
-    const abs = absRowFromViewport(self, viewport_row);
+    const abs = screen.absRowFromViewport(self, viewport_row);
     const id = cellLinkAt(self, abs, col);
     if (id != 0) return linkBoundsAt(self, abs, col, id).start;
     if (!wordIsUrl(self, viewport_row, col)) return null;
@@ -394,7 +389,7 @@ pub fn urlSpanAtAbs(self: *const TerminalCore, anchor: types.SelectionPoint) ?ty
 /// OSC 8 명시적 링크가 있으면 그 URI를 그대로(다듬지 않고). 호출자가 free한다.
 pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, viewport_row: u16, col: u16) !?[]u8 {
     // OSC 8 명시적 링크가 우선 — 프로그램이 지정한 URI를 그대로 연다(보이는 텍스트와 무관).
-    const link_id = cellLinkAt(self, absRowFromViewport(self, viewport_row), col);
+    const link_id = cellLinkAt(self, screen.absRowFromViewport(self, viewport_row), col);
     if (link_id != 0) {
         const uri = self.linkUri(link_id) orelse return null;
         return try allocator.dupe(u8, uri);
@@ -419,9 +414,10 @@ pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, vie
 }
 
 /// 클릭 셀이 속한 단어가 URL인지(할당 없이) 판정한다. hover의 매-mouseMove 비용을 줄이려
-/// extractUrlAt의 alloc 없이 같은 판정만 한다(내부 전용 — facade 없음).
+/// extractUrlAt의 alloc 없이 같은 판정만 한다. app 호출은 없어 core facade가 없지만, core.zig 테스트가
+/// `selection.wordIsUrl(&core, ...)`로 cross-file 호출하므로 pub(foldCase·urlSpanInWord와 같은 이유).
 pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16) bool {
-    if (cellLinkAt(self, absRowFromViewport(self, viewport_row), col) != 0) return true;
+    if (cellLinkAt(self, screen.absRowFromViewport(self, viewport_row), col) != 0) return true;
     const bounds = wordBoundsAt(self, viewport_row, col) orelse return false;
     // URL은 보통 한 단어라 짧은 스택 버퍼로 충분하고, 넘치면 URL일 수 있으니 통과시킨다.
     var buf: [2048]u8 = undefined;
@@ -467,8 +463,8 @@ pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf
     while (nit.nextCodepoint()) |cp| try needle.append(allocator, cp);
     if (needle.items.len == 0) return;
 
+    // 스크롤백 포함 [0, total) 전체를 검색한다(abs 0부터). alt에선 sb.count==0이라 자연히 현재 화면뿐.
     const total = self.sb.count + self.size.rows;
-    const start_abs: usize = 0;
     // 논리 줄마다 코드포인트 시퀀스(cps)와 각 코드포인트의 절대 좌표(coords)를 만들어 검색하고, 다음 줄에서
     // 버퍼를 재사용한다(스크롤백 전체를 한 문자열로 들지 않음 — 메모리는 가장 긴 논리 줄 하나).
     var cps: std.ArrayList(u21) = .empty;
@@ -476,7 +472,7 @@ pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf
     var coords: std.ArrayList(types.SelectionPoint) = .empty;
     defer coords.deinit(allocator);
 
-    var abs: usize = start_abs;
+    var abs: usize = 0;
     while (abs < total) {
         cps.clearRetainingCapacity();
         coords.clearRetainingCapacity();
@@ -572,7 +568,7 @@ pub fn extractSelection(self: *const TerminalCore, allocator: std.mem.Allocator)
 /// 블록(직사각형) 선택 추출 — 각 행에서 [lo,hi] 열만(col은 행과 무관, soft-wrap 무시), 행마다 개행.
 /// hi 칸 뒤 빈칸은 trim해 패딩이 텍스트로 안 들어간다(선형 추출과 같은 trimmedLen 규칙). 행이 hi보다
 /// 짧으면 그 행 몫만(빈 줄도 개행은 유지 — 사각형 모양 보존). start/end는 row만 정규화돼 col은 여기서 min/max.
-pub fn extractBlockSelection(self: *const TerminalCore, allocator: std.mem.Allocator, start: types.SelectionPoint, end: types.SelectionPoint) !?[]u8 {
+fn extractBlockSelection(self: *const TerminalCore, allocator: std.mem.Allocator, start: types.SelectionPoint, end: types.SelectionPoint) !?[]u8 {
     const lo: usize = @min(start.col, end.col);
     const hi: usize = @max(start.col, end.col);
     var out: std.ArrayList(u8) = .empty;

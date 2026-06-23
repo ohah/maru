@@ -620,6 +620,12 @@ pub fn absRowWrapped(self: *const TerminalCore, abs: usize) bool {
     return self.wrapped[active];
 }
 
+/// 뷰포트 행 -> 절대 행. 뷰포트 첫 행은 sb.count - view_offset(과거를 볼수록 view_offset이 큼). absRow와
+/// 같은 좌표 family(selection.zig가 cross-file 호출 — pub). 스크롤백/뷰포트 상태만 읽고 선택 상태와 무관.
+pub fn absRowFromViewport(self: *const TerminalCore, viewport_row: u16) usize {
+    return self.sb.count - @min(self.view_offset, self.sb.count) + viewport_row;
+}
+
 // ── 커서 이동/위치 ───────────────────────────────────────────────────────────────────────────────
 // CUP/HVP/VPA·CUU..CUB·CHA·DECSCUSR·DECOM 등 커서를 옮기거나 모양을 바꾸는 연산. 명시적 이동은 모두
 // markCursorMoveDirty로 옛/새 칸을 dirty 마킹하고 deferred wrap(pending_wrap)·grapheme run(last_print)을 끊는다.

@@ -309,7 +309,9 @@ static void maru_fill_cell_quad(
     float cell_h,
     float drawable_w,
     float drawable_h,
-    float glyph_scale // 글리프 확대 배율(1.0=무확대). 사이드바 에이전트 심볼만 >1로 키운다.
+    float glyph_scale, // 글리프 확대 배율(1.0=무확대). 사이드바 에이전트 심볼만 >1로 키운다.
+    uint32_t atlas_tex_w, // **현재** atlas 텍스처 크기(impl.atlasWidth/Height) — UV를 그리는 시점에
+    uint32_t atlas_tex_h // 이 크기로 정규화한다(아래 참조).
 ) {
     const float span = (float)(cell.width == 0 ? 1 : cell.width);
     float px_left = origin_x + (float)cell.col * cw;
@@ -389,13 +391,29 @@ static void maru_fill_cell_quad(
     const float br = (float)((cell.background >> 16) & 0xff) / 255.0f;
     const float bg = (float)((cell.background >> 8) & 0xff) / 255.0f;
     const float bb = (float)(cell.background & 0xff) / 255.0f;
+    // draw-time UV 정규화: 글리프 셀(slot_id≠0)의 UV를 **현재 atlas 텍스처 크기**로 다시 만든다. baked
+    // u0/v0(metal_frame이 glyph_quads로 빌드 시점 atlas dims ÷)는, 한 렌더 프레임 중 atlas가 grow하면
+    // (멀티 페인이 한 atlas를 여러 빌드로 공유 — 나중 빌드의 grow가 텍스처를 키움) 먼저 빌드된 페인의 UV가
+    // 새 텍스처와 어긋난다. atlas 픽셀 좌표(atlas_x_px 등)는 grow에 불변이므로 여기서 현재 dims로 정규화하면
+    // 견고하다. slot_id==0(배경/솔리드/커서 — sentinel u<0)은 손대지 않고, 컬러 글리프 sentinel(+2.0)은
+    // 보존한다. non-grow 케이스에선 빌드 dims==현재 dims라 수식이 정확히 동일(no-op).
+    float u0 = cell.u0, v0 = cell.v0, u1 = cell.u1, v1 = cell.v1;
+    if (cell.slot_id != 0u && atlas_tex_w > 0u && atlas_tex_h > 0u) {
+        const float aw = (float)atlas_tex_w;
+        const float ah = (float)atlas_tex_h;
+        const float color_off = (cell.u0 >= 2.0f) ? 2.0f : 0.0f; // 컬러 글리프(+2.0 sentinel) 보존
+        u0 = (float)cell.atlas_x_px / aw + color_off;
+        u1 = (float)(cell.atlas_x_px + cell.atlas_width_px) / aw + color_off;
+        v0 = (float)cell.atlas_y_px / ah;
+        v1 = (float)(cell.atlas_y_px + cell.atlas_height_px) / ah;
+    }
     const MaruRendererVertex quad[6] = {
-        {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}, {br, bg, bb, ba}},
-        {{left, bottom}, {cell.u0, cell.v1}, {fr, fg, fb}, {br, bg, bb, ba}},
-        {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}, {br, bg, bb, ba}},
-        {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}, {br, bg, bb, ba}},
-        {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}, {br, bg, bb, ba}},
-        {{right, top}, {cell.u1, cell.v0}, {fr, fg, fb}, {br, bg, bb, ba}},
+        {{left, top}, {u0, v0}, {fr, fg, fb}, {br, bg, bb, ba}},
+        {{left, bottom}, {u0, v1}, {fr, fg, fb}, {br, bg, bb, ba}},
+        {{right, bottom}, {u1, v1}, {fr, fg, fb}, {br, bg, bb, ba}},
+        {{left, top}, {u0, v0}, {fr, fg, fb}, {br, bg, bb, ba}},
+        {{right, bottom}, {u1, v1}, {fr, fg, fb}, {br, bg, bb, ba}},
+        {{right, top}, {u1, v0}, {fr, fg, fb}, {br, bg, bb, ba}},
     };
     memcpy(out, quad, sizeof(quad));
 }
@@ -780,7 +798,7 @@ bool maru_metal_renderer_draw(
             // 배경 quad도 (cols-11+0.5)=(cols-10.5)*cw 중심이라, 종 글리프를 0.5칸 왼쪽으로 밀면 균일 간격·hover 중앙
             // 정렬에 동시에 맞는다(2칸 글리프 중심은 정수 col로는 반칸에 못 와 렌더 단계 가로 nudge가 필요 — py_nudge와 동형).
             const float px_nudge = is_bell_icon ? cw * -0.5f : 0.0f;
-            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x + px_nudge, cw, py_top, ch, drawable_w, drawable_h, hscale);
+            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x + px_nudge, cw, py_top, ch, drawable_w, drawable_h, hscale, impl.atlasWidth, impl.atlasHeight);
         }
         quad_index += cell_count;
         // 3) 사이드바 cells — origin 0, 배경 quad 위에 그린다(painter 순서). 탭 슬롯 높이로 배치하되 셀 종류를
@@ -814,7 +832,7 @@ bool maru_metal_renderer_draw(
             // **gutter col 0 아이콘만** 확대한다 — col 가드가 없으면 워크스페이스 이름/경로/브랜치 텍스트에 ◆·✶가
             // 들어갈 때 그 텍스트 셀(slot_id≠0·동일 codepoint)까지 1.1×로 늘어난다(app_session.zig 색칠 루프의 col 0 가드와 짝).
             const float gscale = (sc.slot_id != 0u && sc.col == 0u && (sc.codepoint == 0x2736u || sc.codepoint == 0x25C6u)) ? 1.1f : 1.0f;
-            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h, gscale);
+            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h, gscale, impl.atlasWidth, impl.atlasHeight);
         }
     }
 

@@ -5,8 +5,17 @@ pub const AtlasSlotId = u32;
 
 pub const GlyphAtlasConfig = struct {
     max_slots: usize = 1024,
+    // **현재** 텍스처 크기. 한 프레임의 고유 글리프가 이 크기에 안 들어가면 grow()가 max까지 2배씩
+    // 키워 이 값을 갱신한다(Ghostty식 growable atlas). 그래서 atlas.config.atlas_*_px는 늘 "지금
+    // 텍스처가 이만큼이다"를 뜻하고, 렌더러(app_session→metal_frame→set_atlas)가 이 값으로 GPU
+    // 텍스처를 재할당한다. 초기값이 곧 시작 크기다.
     atlas_width_px: u32 = 1024,
     atlas_height_px: u32 = 1024,
+    // grow 상한(GPU 2D 텍스처 한계 안전선 — 모든 Metal feature set이 ≥8192를 보장). 여기 도달하면
+    // 더 못 키우고, 그 프레임의 고유 글리프가 max 용량(≈수만 와이드 글리프)마저 넘는 극단에서만
+    // 부분 깨짐이 가능하다(현실에선 도달 불가 — distinct 글리프가 그렇게 많을 수 없다).
+    max_atlas_width_px: u32 = 8192,
+    max_atlas_height_px: u32 = 8192,
 };
 
 pub const AtlasInvalidationReason = enum {
@@ -16,7 +25,9 @@ pub const AtlasInvalidationReason = enum {
     color_glyph_theme_changed,
     eviction_policy_changed,
     // row packer 좌표가 텍스처를 소진했다(eviction은 슬롯 수만 줄이고 좌표는 재활용하지 않으므로,
-    // 고유 글리프가 많으면 y가 텍스처 높이를 넘는다). 전체 invalidate 후 (0,0)부터 재배치한다.
+    // 고유 글리프가 많으면 y가 텍스처 높이를 넘는다). 전체 invalidate 후 (0,0)부터 재배치하고,
+    // clean repack으로도 한 프레임이 안 들어가면 prepareGlyphFrame이 grow()로 텍스처를 키운 뒤
+    // 다시 재배치한다 — 좌표 부족으로 두 글리프가 같은 자리에 겹치는 일(─가 ? 비트맵을 샘플)을 막는다.
     atlas_full,
     manual,
 };
@@ -226,6 +237,24 @@ pub const GlyphAtlas = struct {
         self.next_x_px += dimensions.width_px;
         self.row_height_px = @max(self.row_height_px, dimensions.height_px);
         return placement;
+    }
+
+    /// 텍스처를 키운다(Ghostty식 grow on full). clean repack(invalidate 후 (0,0)부터 재배치)으로도
+    /// 한 프레임의 고유 글리프가 안 들어갈 때 호출자(prepareGlyphFrame)가 부른다 — 높이를 먼저 2배,
+    /// 더 못 키우면 너비를 2배, max에 도달하면 false. 이게 충돌의 근본 차단책이다: 좌표가 모자라
+    /// 두 글리프가 같은 자리를 받는 대신 **자리를 늘려** 모든 distinct 글리프가 고유 좌표를 받게 한다.
+    /// 크기만 바꾼다 — 좌표(next_x/y)·캐시 비우기는 호출 흐름의 invalidate가 맡는다(grow→invalidate→
+    /// 재시작 순서라 다음 패스가 커진 텍스처에 (0,0)부터 한 세대로 repack된다).
+    pub fn grow(self: *GlyphAtlas) bool {
+        if (self.config.atlas_height_px < self.config.max_atlas_height_px) {
+            self.config.atlas_height_px = @min(self.config.atlas_height_px *| 2, self.config.max_atlas_height_px);
+            return true;
+        }
+        if (self.config.atlas_width_px < self.config.max_atlas_width_px) {
+            self.config.atlas_width_px = @min(self.config.atlas_width_px *| 2, self.config.max_atlas_width_px);
+            return true;
+        }
+        return false;
     }
 };
 

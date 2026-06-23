@@ -67,16 +67,25 @@ pub fn prepareGlyphFrame(
     };
 
     // atlas 좌표가 frame 중간에 소진되면(lookup.invalidated) 이미 나눠준 슬롯들이 무효가 된다 —
-    // 한 frame에 두 좌표 세대가 섞이면 앞 글리프들이 덮어쓰인 텍셀을 샘플해 화면이 깨진다.
-    // invalidate 직후 atlas는 비어 있으므로 frame을 처음부터 다시 빌드해 모든 글리프가 일관된
-    // 새 좌표를 받게 한다. 재시작은 1회만 — 두 번째 패스에서 또 소진되면(한 frame의 고유 글리프가
-    // 텍스처 용량 자체를 초과) 어쩔 수 없이 진행한다(부분 깨짐, 다음 frame에 회복).
+    // 한 frame에 두 좌표 세대가 섞이면 앞 글리프들이 덮어쓰인 텍셀을 샘플해 화면이 깨진다(예: 보더라인
+    // ─가 나중 글리프 ?의 비트맵을 샘플). invalidate 직후 atlas는 비어 있으므로 frame을 처음부터 다시
+    // 빌드해 모든 글리프가 일관된 새 좌표를 받게 한다.
+    //
+    // 첫 재시작은 grow 없이 한다 — 소진이 "이전 frame들이 남긴 누적 좌표"(eviction이 좌표를 회수 안 함)
+    // 때문일 수 있어, clean repack((0,0)부터)만으로 들어가는 경우가 많다(기존 동작 보존). 그래도 또
+    // 소진되면(=이 frame의 고유 글리프가 현재 텍스처보다 많다) atlas.grow()로 텍스처를 키우고 재시작한다 —
+    // 들어갈 때까지 반복. 이게 충돌의 근본 차단: 좌표가 모자라 두 글리프를 같은 자리에 겹치는 대신
+    // **자리를 늘려** 모든 distinct 글리프가 고유 좌표를 받는다(Ghostty식 grow on full). grow가 false면
+    // (이미 max(8192²) 도달 — 한 frame이 그 용량마저 초과, 현실 도달 불가) 재시작해도 못 들어가니
+    // 멈추고 진행한다. 종료는 grow의 false가 보장한다 — 매번 2배라 max까지 유한 단계 뒤 반드시 false.
     var attempt: u8 = 0;
     build: while (true) {
         for (glyphs.glyphs, 0..) |glyph, index| {
             const lookup = try atlas.ensureGlyph(glyph);
-            if (lookup.invalidated and attempt == 0) {
-                attempt = 1;
+            // 1회차(attempt==0)는 grow 없이 clean repack. 2회차+는 grow로 자리를 만든다 — grow가 false면
+            // 더 못 키우니 재시작을 멈추고(아래로 떨어져) 진행한다(degraded, 다음 frame에 회복).
+            if (lookup.invalidated and (attempt == 0 or atlas.grow())) {
+                attempt += 1;
                 prepared.clearRetainingCapacity();
                 uploads.clearRetainingCapacity();
                 stats.upload_count = 0;
@@ -322,4 +331,52 @@ test "glyph frame restarts once when the atlas exhausts mid-build, keeping one c
     }
     // 재빌드된 frame의 모든 슬롯은 이번 패스 업로드와 짝이 맞아야 한다(8개 전부 miss→업로드).
     try std.testing.expectEqual(frame.glyphs.len, frame.uploads.len);
+}
+
+test "glyph frame never maps two distinct glyphs to the same atlas coords (─→? 회귀)" {
+    const allocator = std.testing.allocator;
+    // 회귀 가드(원래 버그): 한 frame의 **고유 글리프 수가 atlas 물리 용량을 초과**하면, 옛 prepareGlyphFrame
+    // 은 재시작이 1회뿐이라 2차 패스에서도 좌표가 소진됐다. 그때 invalidate가 좌표를 (0,0)으로 리셋한 채
+    // **재시작 없이 진행**해, frame 안에서 두 좌표 세대가 섞이고 서로 다른 글리프가 같은 아틀라스 좌표를
+    // 받았다. GPU 업로드는 나중 글리프가 앞 글리프의 텍셀을 덮어쓰므로, 앞 글리프(예: 보더라인 ─)가 나중
+    // 글리프(예: ?)의 비트맵을 샘플해 화면에 ─ 대신 ?가 그려졌다(간헐적 TUI 깨짐).
+    //
+    // 수정(Ghostty식 grow on full): clean repack으로도 안 들어가면 atlas.grow()로 텍스처를 키워 모든
+    // distinct 글리프가 고유 좌표를 받는다. 14px 글리프 → 28×56 atlas는 2열×4행 = 물리 용량 8개. 고유
+    // 9개를 한 frame에 넣어 초과시키면, 이제 atlas가 28×112로 커져 9개가 충돌 없이 들어가야 한다.
+    var atlas = glyph_atlas.GlyphAtlas.init(allocator, .{ .atlas_width_px = 28, .atlas_height_px = 56 });
+    defer atlas.deinit();
+    const initial_height = atlas.config.atlas_height_px;
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 9, .rows = 1 });
+    defer core.deinit();
+    core.clearDirty();
+    try core.write("abcdefghi"); // 고유 9개 > 물리 용량 8
+
+    var list = try draw_list.buildDrawList(allocator, core.snapshot());
+    defer list.deinit(allocator);
+    var glyph_runs = try glyph_layout.buildGlyphRunList(allocator, list, .{ .font_size_px = 14, .device_scale = 1 }, glyph_layout.FakeFontBackend{});
+    defer glyph_runs.deinit(allocator);
+
+    var frame = try prepareGlyphFrame(allocator, glyph_runs, &atlas);
+    defer frame.deinit(allocator);
+
+    // grow가 실제로 일어났는지 — 텍스처가 커져야 9개가 들어간다(테스트가 우연히 통과하지 않게 고정).
+    try std.testing.expect(atlas.config.atlas_height_px > initial_height);
+
+    // 렌더링 계약: 한 frame 안에서 cache_key가 다른(=다른 비트맵) 두 글리프는 절대 같은 아틀라스
+    // 좌표를 가리켜선 안 된다 — 가리키면 한쪽이 다른 쪽 텍셀을 샘플해 잘못된 글자가 그려진다.
+    for (frame.glyphs, 0..) |a, i| {
+        for (frame.glyphs[i + 1 ..]) |b| {
+            const same_coords = a.slot.x_px == b.slot.x_px and a.slot.y_px == b.slot.y_px;
+            const different_glyph = !std.meta.eql(a.slot.key, b.slot.key);
+            if (same_coords and different_glyph) {
+                std.debug.print(
+                    "충돌: glyph[{d}](key.glyph_id={d}) 와 다른 글리프(key.glyph_id={d})가 같은 좌표 ({d},{d})\n",
+                    .{ i, a.slot.key.glyph_id, b.slot.key.glyph_id, a.slot.x_px, a.slot.y_px },
+                );
+            }
+            try std.testing.expect(!(same_coords and different_glyph));
+        }
+    }
 }

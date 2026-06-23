@@ -53,6 +53,8 @@ RenderSnapshot
 
 - glyph bitmap을 texture atlas에 캐시한다.
 - atlas miss, upload byte, eviction 같은 성능 관측 값을 남긴다.
+- **growable atlas(grow on full)**: 한 프레임의 고유 글리프가 현재 텍스처에 안 들어가면 `GlyphAtlas.grow()`가 텍스처를 max(8192²)까지 2배씩 키운 뒤 (0,0)부터 다시 배치한다(Ghostty식). 이게 충돌의 근본 차단책이다 — 좌표가 모자라 두 글리프가 같은 아틀라스 좌표를 받으면(GPU 업로드가 앞 글리프를 덮어써) 보더라인 `─`가 나중 글리프 `?`의 비트맵을 샘플하는 간헐적 깨짐이 났다. grow된 현재 크기는 `config.atlas_*_px`에 반영돼 렌더러(app_session→metal_frame→`set_atlas`)가 GPU 텍스처를 재할당한다. **멀티 페인은 한 atlas를 여러 빌드로 공유**해 나중 빌드의 grow가 텍스처를 키우면 먼저 빌드된 페인의 baked UV(빌드 시점 dims ÷)가 어긋날 수 있으므로, 렌더러(`maru_metal_renderer.m`)가 **그리는 시점에 UV를 현재 텍스처 크기로 다시 정규화**한다(atlas 픽셀 좌표는 grow에 불변 — `atlas_x_px ÷ impl.atlasWidth`; 배경 sentinel·컬러 sentinel(+2.0)은 보존, non-grow에선 bit-exact no-op). 좌표 회수(eviction이 비운 자리를 재사용하는 packer)는 후속 성능 최적화다 — 한 렌더 프레임의 모든 빌드를 덮는 frame-epoch 경계가 필요해 별도 설계로 분리한다.
+- **불변식**: 한 프레임 안에서 서로 다른 글리프(cache_key가 다른)는 절대 같은 아틀라스 좌표를 공유하지 않는다 — 공유하면 한쪽이 다른 쪽 텍셀을 샘플해 잘못된 글자가 그려진다. 회귀 테스트로 고정한다.
 - renderer backend가 바뀌어도 cache key와 glyph run 의미가 흔들리지 않게 한다.
 - 초기 구현은 `GlyphCacheKey -> AtlasSlot` domain cache/placement 계약, `GlyphRunList -> GlyphFrame` 준비 계약, `GlyphFrame -> GlyphQuadFrame` UV 변환 계약, `GlyphFrame -> GlyphRasterFrame` upload byte/skip 계약, macOS CoreText CPU bitmap smoke, CPU bitmap -> Metal texture upload smoke를 먼저 고정한다. 실제 atlas texture packing과 제품 shader sampling은 macOS backend 단계에서 붙인다.
 

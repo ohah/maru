@@ -414,7 +414,7 @@ pub const TerminalCore = struct {
     /// 0x60..0x7e를 box 문자로 변환. 베이스: VT100 special graphics·xterm ctlseqs(Ghostty `charsets.zig` 동작 비교).
     pub const Charset = enum { ascii, dec_special };
 
-    pub const max_csi_params = 16; // parser.applySgr/applyExtendedColor(cross-file)도 참조 — pub
+    pub const max_csi_params = 16; // parser(applySgr·csiNextParam)·screen·core가 cross-file 참조 — pub
 
     const default_max_scrollback = 1000;
     /// 한 세션이 동시에 가질 수 있는 kitty graphics placement 상한 — maru가 정한 실용 값이다(kitty
@@ -2141,14 +2141,16 @@ pub const TerminalCore = struct {
     }
 
     /// i번째 CSI 파라미터를 raw로 돌려준다(없으면 0). erase mode처럼 0이 유효값인 곳에 쓴다.
-    /// parser의 SGR/모드 dispatch(setPrivateModes·applySgr 등)가 cross-file 호출 — pub. 20/N서 csiRawParam이 parser.zig로 가며 정리.
+    /// param 저장소(csi_params/csi_param_count 필드)와 한 묶음이라 core 잔류. parser의 SGR/모드 dispatch
+    /// (setPrivateModes·applySgr 등)와 screen이 cross-file 호출 — pub.
     pub fn csiRawParam(self: *const TerminalCore, i: usize) u16 {
         const count = @min(self.csi_param_count, max_csi_params);
         return if (i >= count) 0 else self.csi_params[i];
     }
 
     /// i번째 CSI 파라미터(없거나 0이면 default). cursor move처럼 0을 1로 보는 곳에 쓴다.
-    /// screen.cursorPosition(CUP/HVP)이 cross-file 호출 — pub(CSI param 접근). csiParam이 parser.zig로 옮길 때(Phase D) 정리.
+    /// param 저장소(csi_params 필드)와 한 묶음이라 core 잔류. parser의 dispatchCsi와 screen.cursorPosition
+    /// (CUP/HVP)·setScrollRegion이 cross-file 호출 — pub.
     pub fn csiParam(self: *const TerminalCore, i: usize, default: u16) u16 {
         const value = self.csiRawParam(i);
         return if (value == 0) default else value;

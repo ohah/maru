@@ -237,13 +237,13 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 ## 6. 미해결/후속 (이번 범위 밖, 기록만)
 
 - **2단계(Screen struct fold)**: §2 — 필드를 `Screen` 하위 struct로 접는 architecture.md 종착지. 연산 추출 완료 후 별도 initiative.
-- **selection.zig**: 선택/검색/URL 클러스터(현 core 잔류). → **§7에서 진행 중**(절차·PR 시퀀스 단일 출처).
+- **selection.zig** ✅ **완료**: 선택/검색/URL/preedit 클러스터를 §7(S1~S5)로 분리 완결(core.zig 7228→6715줄, selection.zig 591줄).
 - **kitty.zig**: kitty graphics 본체(현 core 잔류). parser는 이미 파싱만 위임(7/N).
 - **input/report.zig**: `reportFocus`/`reportMouse`/`encodeKey` 등 입력→host-reply 인코딩.
 
 ---
 
-## 7. selection.zig 분리 (후속 initiative)
+## 7. selection.zig 분리 (후속 initiative — ✅ 완료, S1~S5)
 
 §6의 selection.zig 후속을 §1~§5와 **같은 절차·메커니즘**(방향 A, 연산 추출, facade 보존, 매 PR green auto-merge)으로 진행한다. 선택/검색/URL/IME-preedit 클러스터(현 core.zig 822~1470, 함수 ~30개)를 `selection.zig`로 떼어낸다.
 
@@ -269,6 +269,8 @@ selection은 화면/스크롤백을 **읽어** 좌표·텍스트를 산출하는
 | **S2** ✅ | `selection.zig` 신설 + **순수 leaf 12개**(`cellLinkAt`·`linkBoundsAt`·`appendRowUtf8`·`urlSpanInWord`·`isWordSeparatorCell`·`isWordBoundaryCell`·`clipAbsSpanToViewport`·`normalizedSelection`·`absRowFromViewport`·`foldCase`·`matchAtIgnoreCase`·`shiftSelectionForEviction`) | 전부 private(facade 0). screen/필드/std만 의존(자기-cluster self 의존 없음). 테스트 호출부 `TerminalCore.foldCase`/`urlSpanInWord` → `selection.X`. `shiftSelectionForEviction`은 `self.selectionClear()`(core pub) 호출 | 낮음 |
 | **S3** ✅ | word-bounds + 포인터 선택(`WordBounds`·`wordBoundsAt`·`wordBoundsAtImpl`·`selectWordAt`·`selectionStart`·`selectionExtend`·`setSelectionBlock`·`selectLineAt`·`selectAll`·`selectionClear`·`max_word_separators`) | leaf(S2) 위에 빌드. facade 7개(selectionStart·setSelectionBlock·selectionExtend·selectWordAt·selectLineAt·selectAll·selectionClear). `invalidateSelection`·`screen.clearScrollback`(core/screen seam)이 `self.selectionClear()`(→facade) 호출 유지(screen→selection import 없음). S4 함수의 `self.wordBoundsAt`→`selection.wordBoundsAt(self,)` | 중 |
 | **S4** ✅ | URL 감지(`urlAnchorAt`·`urlSpanAtAbs`·`extractUrlAt`·`wordIsUrl`) | wordBoundsAt(S3)·cellLinkAt/clip(S2)에 의존. facade 3개(urlAnchorAt·urlSpanAtAbs·extractUrlAt). `wordIsUrl`은 app 호출 없어 facade 없이 selection.zig pub(테스트 `core.wordIsUrl`→`selection.wordIsUrl(&core,)`). `linkUri`(core link_store accessor)는 extractUrlAt(OSC 8)가 cross-file 호출하므로 pub 승격 | 중 |
-| **S5** | 검색 + 추출 + preedit(`findMatches`·`matchViewportSpan`·`selectionViewportSpan`·`extractSelection`·`extractBlockSelection`·`setPreedit`) | normalizedSelection/foldCase/match(S2)·clip(S2)에 의존. findMatches·추출 테스트로 보존 검증. `shiftCoordsForEviction`(core seam)은 이미 `selection.shiftSelectionForEviction`(S2) 호출. 분리 완결 | 중 |
+| **S5** ✅ | 검색 + 추출 + preedit(`findMatches`·`matchViewportSpan`·`selectionViewportSpan`·`extractSelection`·`extractBlockSelection`·`setPreedit`) | normalizedSelection/foldCase/match(S2)·clip(S2)에 의존. facade 5개(findMatches·matchViewportSpan·selectionViewportSpan·extractSelection·setPreedit), extractBlockSelection은 내부(extractSelection이 호출). preedit는 core 필드 — selection.zig가 alloc/free만. **selection.zig 분리 완결** | 중 |
+
+> **selection.zig 분리 완결**(S1~S5 머지): core.zig 7228→6715줄, selection.zig 591줄. core 잔류 = facade 16개(점-호출 API)·seam(invalidateSelection·shiftCoordsForEviction)·필드(selection_anchor/head/block·preedit·link_store)·linkUri(pub). 후속 별도 initiative: kitty.zig(§6)·Screen struct fold(§2).
 
 검증·리뷰는 §5 그대로(매 PR `zig build test`·`macos-app-build`·`check-boundaries`·`zig fmt`, green auto-merge --rebase). PR 5개라 마지막에 `/code-review max` 1회. `selection.zig`는 check-boundaries가 `terminal/`을 walk하므로 자동 포함(등록 불필요).

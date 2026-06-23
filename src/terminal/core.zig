@@ -902,91 +902,17 @@ pub const TerminalCore = struct {
         return false;
     }
 
-    /// 스크롤백 + 활성 화면 전체에서 needle을 찾아 절대-좌표 Match로 out에 채운다(out은 먼저 비운다).
-    /// 대소문자 무시 부분일치(Ghostty 스크롤백 검색의 기본 — 같은 1차 레퍼런스). 대소문자 무시는 `foldCase`
-    /// (ASCII+Latin-1·Greek·Cyrillic 유니코드) — command_palette 필터(ASCII `toLower`)보다 넓다(거기는 영문
-    /// 명령명이라 ASCII로 충분; 통일은 후속).
-    /// 논리 줄(soft-wrap 이음) 단위로 스캔해 wrap 경계를 넘는 매치도 잡는다. 같은 줄 안에선 비겹침(매치 뒤로
-    /// needle 길이만큼 건너뜀, 관례). needle이 비면 무동작. 대소문자 무시는 `foldCase`(ASCII + Latin-1·Greek·
-    /// Cyrillic 깔끔한 오프셋 블록 — Latin Ext-A 등은 후속). 스크롤백 Find의 단일 출처(코어 상태) — UI 상태머신
-    /// (find_overlay)은 이 결과를 받기만 한다. regex/fuzzy는 후속.
+    /// 스크롤백 + 화면에서 needle 검색(Find, out에 절대 좌표 매치). 본문: selection.findMatches.
     pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf8: []const u8, out: *std.ArrayList(types.Match)) !void {
-        out.clearRetainingCapacity();
-        if (needle_utf8.len == 0) return;
-        screen.ensureScrollbackRewrapped(self); // abs 좌표 쓰기 전 스크롤백 rewrap 확정(selectAll과 같은 이유)
-
-        // needle을 코드포인트 배열로 디코드(셀 codepoint와 같은 단위로 비교 — 멀티바이트 오프셋 매핑 회피).
-        var needle: std.ArrayList(u21) = .empty;
-        defer needle.deinit(allocator);
-        var nv = std.unicode.Utf8View.init(needle_utf8) catch return; // 깨진 needle은 매치 없음
-        var nit = nv.iterator();
-        while (nit.nextCodepoint()) |cp| try needle.append(allocator, cp);
-        if (needle.items.len == 0) return;
-
-        const total = self.sb.count + self.size.rows;
-        // 스크롤백 포함 [0, total) 전체를 검색한다. alt에선 활성 sb.count==0이라 이 범위가 자연히
-        // 현재 화면뿐이다(스크롤백이 cap=0인 빈 인스턴스 — Scrollback 모델, 가드 불필요). primary면
-        // 스크롤백+화면 전부. 베이스: Ghostty도 alt에선 active area(현재 화면)만 검색한다(ActiveSearch).
-        const start_abs: usize = 0;
-        // 논리 줄마다 코드포인트 시퀀스(cps)와 각 코드포인트의 절대 좌표(coords)를 만들어 검색하고, 다음 줄에서
-        // 버퍼를 재사용한다(스크롤백 전체를 한 문자열로 들지 않음 — 메모리는 가장 긴 논리 줄 하나).
-        var cps: std.ArrayList(u21) = .empty;
-        defer cps.deinit(allocator);
-        var coords: std.ArrayList(types.SelectionPoint) = .empty;
-        defer coords.deinit(allocator);
-
-        var abs: usize = start_abs;
-        while (abs < total) {
-            cps.clearRetainingCapacity();
-            coords.clearRetainingCapacity();
-            // 논리 줄 = 현재 abs부터 wrapped=false인 행까지(soft-wrap 이음).
-            var line_abs = abs;
-            while (true) {
-                const row = screen.absRow(self, line_abs) orelse break;
-                const wrapped = screen.absRowWrapped(self, line_abs);
-                // wrapped 행은 전폭이 실제 내용(우측 끝에서 wrap), 마지막(hard) 행은 뒤 빈칸을 자른다(extractSelection과 같은 규칙).
-                const limit: usize = if (wrapped) row.len else screen.trimmedLen(row);
-                var col: usize = 0;
-                while (col < limit) : (col += 1) {
-                    const cell = row[col];
-                    if (cell.continuation) continue; // wide glyph의 둘째 슬롯은 건너뜀(코드포인트 1개)
-                    try cps.append(allocator, cell.codepoint);
-                    try coords.append(allocator, .{ .row = line_abs, .col = @intCast(col) });
-                }
-                if (!wrapped) break;
-                line_abs += 1;
-                if (line_abs >= total) break;
-            }
-            // 이 논리 줄에서 needle 슬라이딩 매치(비겹침).
-            var i: usize = 0;
-            while (i + needle.items.len <= cps.items.len) {
-                if (selection.matchAtIgnoreCase(cps.items[i..], needle.items)) {
-                    try out.append(allocator, .{
-                        .start = coords.items[i],
-                        .end = coords.items[i + needle.items.len - 1],
-                    });
-                    i += needle.items.len; // 비겹침: 매치 뒤로 건너뜀
-                } else i += 1;
-            }
-            abs = line_abs + 1;
-        }
+        return selection.findMatches(self, allocator, needle_utf8, out);
     }
-
-    /// 검색 매치(절대 좌표)를 현재 뷰포트 좌표로 클립한다(화면 밖이면 null) — 선택 하이라이트와 같은 규칙 공유.
+    /// 검색 매치를 뷰포트 좌표로 클립. 본문: selection.matchViewportSpan.
     pub fn matchViewportSpan(self: *const TerminalCore, m: types.Match) ?types.SelectionSpan {
-        return selection.clipAbsSpanToViewport(self, m.start, m.end, false);
+        return selection.matchViewportSpan(self, m);
     }
-
-    /// IME 조합 중 텍스트를 설정한다(빈 입력 = 조합 종료/취소). 렌더 합성 전용 상태라 셀
-    /// 그리드·커서는 변하지 않는다. 표시는 renderSnapshot이 한다.
+    /// IME preedit 텍스트 설정(빈 입력 = 종료). 본문: selection.setPreedit.
     pub fn setPreedit(self: *TerminalCore, bytes: []const u8) !void {
-        self.owner_dbg.assertOwnedBySelf(); // reader 노출 시 core_mutex 보유 강제(디버그 전용 §6-5)
-        if (self.preedit) |old| {
-            self.allocator.free(old);
-            self.preedit = null;
-        }
-        if (bytes.len > 0) self.preedit = try self.allocator.dupe(u8, bytes);
-        self.dirty = fullDirty(self.size);
+        return selection.setPreedit(self, bytes);
     }
 
     /// 선택 해제. 본문: selection.selectionClear. screen.clearScrollback·invalidateSelection seam이 self로 호출.
@@ -1015,65 +941,13 @@ pub const TerminalCore = struct {
         self.shiftPlacementsForEviction(n);
     }
 
-    /// 현재 뷰포트에 보이는 선택 범위(렌더용). 화면 밖이면 null. 블록 모드면 col을 행과 무관하게 min/max로
-    /// 정렬해 직사각형 span([lo,hi]×[start.row,end.row])으로 낸다(normalizedSelection은 row만 정규화).
+    /// 현재 뷰포트에 보이는 선택 범위(렌더용). 본문: selection.selectionViewportSpan.
     pub fn selectionViewportSpan(self: *const TerminalCore) ?types.SelectionSpan {
-        const sel = selection.normalizedSelection(self) orelse return null;
-        if (self.selection_block) {
-            const lo = @min(sel.start.col, sel.end.col);
-            const hi = @max(sel.start.col, sel.end.col);
-            return selection.clipAbsSpanToViewport(
-                self,
-                .{ .row = sel.start.row, .col = lo },
-                .{ .row = sel.end.row, .col = hi },
-                true,
-            );
-        }
-        return selection.clipAbsSpanToViewport(self, sel.start, sel.end, false);
+        return selection.selectionViewportSpan(self);
     }
-
-    /// 선택된 텍스트를 추출한다(클립보드 복사용). 행 단위 선형 선택 — soft-wrap으로 이어진 행은
-    /// 줄바꿈 없이 잇고, hard 줄끝에서만 \n을 넣는다. 각 행은 뒤 빈칸을 trim한다(soft 행 제외).
-    /// 블록 모드면 직사각형 추출로 분기한다(각 행 [lo,hi], 항상 행마다 개행).
+    /// 선택 텍스트 추출(클립보드 복사, 호출자가 free). 본문: selection.extractSelection.
     pub fn extractSelection(self: *const TerminalCore, allocator: std.mem.Allocator) !?[]u8 {
-        const sel = selection.normalizedSelection(self) orelse return null;
-        if (self.selection_block) return self.extractBlockSelection(allocator, sel.start, sel.end);
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(allocator);
-
-        var abs = sel.start.row;
-        while (abs <= sel.end.row) : (abs += 1) {
-            const row_cells = screen.absRow(self, abs) orelse continue;
-            const wrapped_flag = screen.absRowWrapped(self, abs);
-            const from: usize = if (abs == sel.start.row) sel.start.col else 0;
-            const full_to: usize = if (abs == sel.end.row) @min(@as(usize, sel.end.col) + 1, row_cells.len) else row_cells.len;
-            // hard 줄끝(또는 선택 끝 행)은 뒤 빈칸을 잘라 복사한다 — 패딩이 텍스트로 들어가지 않게.
-            const to: usize = if (wrapped_flag and abs != sel.end.row) full_to else @max(from, @min(full_to, screen.trimmedLen(row_cells)));
-            try selection.appendRowUtf8(&out, allocator, row_cells, from, to);
-            if (abs != sel.end.row and !wrapped_flag) try out.append(allocator, '\n');
-        }
-        return try out.toOwnedSlice(allocator);
-    }
-
-    /// 블록(직사각형) 선택 추출 — 각 행에서 [lo,hi] 열만(col은 행과 무관, soft-wrap 무시), 행마다 개행.
-    /// hi 칸 뒤 빈칸은 trim해 패딩이 텍스트로 안 들어간다(선형 추출과 같은 trimmedLen 규칙). 행이 hi보다
-    /// 짧으면 그 행 몫만(빈 줄도 개행은 유지 — 사각형 모양 보존). start/end는 row만 정규화돼 col은 여기서 min/max.
-    fn extractBlockSelection(self: *const TerminalCore, allocator: std.mem.Allocator, start: types.SelectionPoint, end: types.SelectionPoint) !?[]u8 {
-        const lo: usize = @min(start.col, end.col);
-        const hi: usize = @max(start.col, end.col);
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(allocator);
-        var abs = start.row;
-        while (abs <= end.row) : (abs += 1) {
-            if (screen.absRow(self, abs)) |row_cells| {
-                const from: usize = @min(lo, row_cells.len);
-                const full_to: usize = @min(hi + 1, row_cells.len);
-                const to: usize = @max(from, @min(full_to, screen.trimmedLen(row_cells)));
-                try selection.appendRowUtf8(&out, allocator, row_cells, from, to);
-            }
-            if (abs != end.row) try out.append(allocator, '\n'); // 블록은 행마다 개행(사각형 — soft-wrap 무관)
-        }
-        return try out.toOwnedSlice(allocator);
+        return selection.extractSelection(self, allocator);
     }
 
     /// PTY 출력 바이트를 VT 상태기계로 처리한다. 본문(escape/CSI/OSC/DCS/APC + UTF-8 디코드)은

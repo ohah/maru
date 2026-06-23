@@ -553,3 +553,183 @@ fn applyExtendedColor(self: *TerminalCore, start: usize, target: *types.Color) u
     // 형식이 안 맞으면 나머지 파라미터를 버린다.
     return count;
 }
+
+// ── CSI 상태기계 (param 누적 + final dispatch) ──────────────────────────────────────────────────
+// write 루프의 .csi 상태가 byte별로 handleCsiByte에 넘긴다: 숫자는 param에 누적, ;/: 는 다음 슬롯,
+// </=/>/? 는 marker, 0x20..0x2f 는 intermediate, 0x40..0x7e final이면 dispatchCsi 후 ground 복귀.
+// dispatchCsi는 (intermediate, marker, final)로 분기해 화면 연산(screen.X)·SGR/모드(같은 파일)·
+// host-reply(self.appendResponse)로 위임한다. CSI param 접근자(csiRawParam/csiParam)는 core 잔류
+// (screen.cursorPosition/setScrollRegion도 호출 — self.로 부른다).
+
+pub fn beginCsi(self: *TerminalCore) void {
+    self.csi_params = [_]u16{0} ** core.TerminalCore.max_csi_params;
+    self.csi_subparam = [_]bool{false} ** core.TerminalCore.max_csi_params;
+    // 항상 최소 1개의 (비어 있을 수도 있는) 파라미터가 있다고 본다.
+    self.csi_param_count = 1;
+    self.csi_has_digit = false;
+    self.csi_marker = 0;
+    self.csi_intermediate = 0;
+    self.csi_overflow = false;
+}
+
+/// ';'(is_sub=false)나 ':'(is_sub=true)로 다음 파라미터 슬롯을 연다. ':'로 연 슬롯은
+/// sub-parameter로 표시해, 38/48 확장 색의 colon 형식을 세미콜론 형식과 구분한다.
+fn csiNextParam(self: *TerminalCore, is_sub: bool) void {
+    if (self.csi_param_count >= core.TerminalCore.max_csi_params) {
+        self.csi_overflow = true;
+    } else {
+        self.csi_param_count += 1;
+        self.csi_subparam[self.csi_param_count - 1] = is_sub;
+    }
+    self.csi_has_digit = false;
+}
+
+pub fn handleCsiByte(self: *TerminalCore, byte: u8) void {
+    switch (byte) {
+        '0'...'9' => {
+            self.csi_has_digit = true;
+            // 파라미터가 max(16)를 넘으면(';'가 csi_overflow를 세움) 이후 자릿수는 버린다.
+            // 안 그러면 17번째+ 파라미터의 숫자가 params[15]에 누적돼 마지막 파라미터를
+            // 오염시킨다.
+            if (self.csi_overflow) return;
+            const slot = self.csi_param_count - 1;
+            const digit: u16 = byte - '0';
+            const value = self.csi_params[slot];
+            // saturating: 손상/악성 입력이 u16을 넘기지 않게 한다.
+            self.csi_params[slot] = if (value > (std.math.maxInt(u16) - digit) / 10)
+                std.math.maxInt(u16)
+            else
+                value * 10 + digit;
+        },
+        // ';'는 파라미터 구분자, ':'는 sub-parameter 구분자다. 둘 다 다음 슬롯을 열되,
+        // ':'로 연 슬롯은 sub-parameter로 표시해 colon 확장색 형식을 구분한다.
+        ';' => csiNextParam(self, false),
+        ':' => csiNextParam(self, true),
+        // private/marker bytes: < = > ? (예: CSI ? 25 h). 어떤 marker였는지 기억한다.
+        0x3c...0x3f => self.csi_marker = byte,
+        // intermediate bytes(공백~/): 같은 final이라도 다른 명령이 된다 — 바이트를 기억해
+        // (intermediate, final) 튜플로 dispatch한다(아래 dispatchCsi).
+        0x20...0x2f => self.csi_intermediate = byte,
+        // final byte: 시퀀스를 dispatch하고 ground로 돌아간다.
+        0x40...0x7e => {
+            dispatchCsi(self, byte);
+            self.parser = .ground;
+        },
+        // ESC는 진행 중인 CSI를 취소하고 새 escape를 시작한다(VT abort-and-restart). 안 하면
+        // ESC[ ESC[31m 같은 입력에서 두 번째 시퀀스가 글자로 샌다.
+        0x1b => self.parser = .escape,
+        // CSI 안의 C0 control(ESC 제외)은 실행하고 CSI 파싱을 계속한다(VT spec). writeCodepoint가
+        // CR/LF/Tab/BS를 처리하고 나머지 C0는 버린다. parser는 .csi로 유지된다.
+        0x00...0x1a, 0x1c...0x1f => screen.writeCodepoint(self, byte),
+        // 그 밖(DEL/high byte)은 CSI를 중단하고 소비한다(관대 처리).
+        else => self.parser = .ground,
+    }
+}
+
+fn dispatchCsi(self: *TerminalCore, final: u8) void {
+    // intermediate가 붙은 시퀀스는 bare final과 다른 명령이다 — 아는 (intermediate, final)
+    // 조합만 dispatch하고 나머지는 소비한다(Williams VT500 파서의 튜플 dispatch 의미).
+    if (self.csi_intermediate != 0) {
+        switch (self.csi_intermediate) {
+            ' ' => switch (final) {
+                'q' => screen.setCursorStyle(self, self.csiRawParam(0)), // DECSCUSR
+                else => {},
+            },
+            '$' => switch (final) {
+                // DECRQM(CSI ? Ps $ p): private mode 상태 질의. 앱(terminal-unicode-core 등)이
+                // mode 2027 지원 여부를 이걸로 먼저 묻고, "지원함"이면 DECSET 2027로 켠다. 응답이
+                // 없으면 미지원으로 보고 안 켜므로, 우리가 아는 모드는 현재 상태를 보고한다.
+                'p' => if (self.csi_marker == '?') reportPrivateMode(self, self.csiRawParam(0)),
+                else => {},
+            },
+            else => {}, // `$r`(DECCARA) 등 미지원 조합은 무시
+        }
+        return;
+    }
+    // marker별 처리: '?'는 DEC private mode(DECSET/DECRST), '>'는 secondary DA. 그 외 marker
+    // 시퀀스(>m modifyOtherKeys, <u kitty 등)는 소비만 한다 — bare final로 흘리면 SGR 등을
+    // 오염시킨다.
+    if (self.csi_marker != 0) {
+        switch (self.csi_marker) {
+            '?' => switch (final) {
+                'h' => setPrivateModes(self, true),
+                'l' => setPrivateModes(self, false),
+                // kitty keyboard(CSI ? u): 현재 flag 스택 최상단을 CSI ? flags u로 보고. 앱이 지원
+                // 여부·현재 모드를 감지한다(flags=0이면 비활성). 베이스: kitty keyboard protocol query.
+                'u' => reportKittyFlags(self),
+                else => {},
+            },
+            '>' => switch (final) {
+                // DA2(CSI > c): 단말 버전 식별. DA1만 답하고 침묵하면 vim 등이 DA2 응답을
+                // 타임아웃까지 기다린다. VT220급(1), 버전 10, ROM 0으로 답한다.
+                'c' => if (self.csiRawParam(0) == 0) self.appendResponse("\x1b[>1;10;0c"),
+                // XTVERSION(CSI > q, Ps=0): xterm ctlseqs "Report xterm name and version".
+                // DA1/DA2가 범용 신원만 주는 것과 달리 "이 단말은 maru다"를 이름으로 알리는
+                // 런타임 자기식별 채널이다. 응답은 DCS `DCS > | <name> <version> ST`
+                // (= ESC P > | ... ESC \). Ps=0만 정의돼 있어 그 외엔 침묵한다. 이름/버전은
+                // terminal_name/terminal_version 단일 출처에서 comptime으로 조립한다.
+                'q' => if (self.csiRawParam(0) == 0)
+                    self.appendResponse("\x1bP>|" ++ core.terminal_name ++ " " ++ core.terminal_version ++ "\x1b\\"),
+                // kitty keyboard(CSI > flags u): flag 스택에 push(enable). flags는 u5로 truncate.
+                'u' => self.kitty_flags.push(kittyFlagsFromParam(self.csiRawParam(0))),
+                else => {},
+            },
+            '<' => switch (final) {
+                // kitty keyboard(CSI < n u): 스택에서 n개(기본 1) pop — 이전 모드 복원/비활성.
+                'u' => self.kitty_flags.pop(self.csiParam(0, 1)),
+                else => {},
+            },
+            '=' => switch (final) {
+                // kitty keyboard(CSI = flags ; mode u): 최상단 flags set — mode 1=치환·2=or·3=not(기본 1).
+                'u' => self.kitty_flags.set(switch (self.csiParam(1, 1)) {
+                    2 => .@"or",
+                    3 => .not,
+                    else => .set,
+                }, kittyFlagsFromParam(self.csiRawParam(0))),
+                else => {},
+            },
+            else => {},
+        }
+        return;
+    }
+    switch (final) {
+        'm' => applySgr(self),
+        'H', 'f' => screen.cursorPosition(self),
+        'A' => screen.cursorVertical(self, self.csiParam(0, 1), true),
+        'B', 'e' => screen.cursorVertical(self, self.csiParam(0, 1), false),
+        'C', 'a' => screen.cursorHorizontal(self, self.csiParam(0, 1), true),
+        'D' => screen.cursorHorizontal(self, self.csiParam(0, 1), false),
+        'G', '`' => screen.cursorToColumn(self, self.csiParam(0, 1)),
+        'd' => screen.cursorToRow(self, self.csiParam(0, 1)),
+        'J' => screen.eraseInDisplay(self, self.csiRawParam(0)),
+        'K' => screen.eraseInLine(self, self.csiRawParam(0)),
+        'X' => screen.eraseCharacters(self, self.csiParam(0, 1)), // ECH: 커서부터 N개(기본 1) cell blank, 커서 유지 — nvim이 모드 라벨(-- INSERT --) clear에 이걸 쓴다
+        'n' => deviceStatusReport(self),
+        'r' => screen.setScrollRegion(self),
+        'L' => screen.insertLines(self, self.csiParam(0, 1)),
+        'M' => screen.deleteLines(self, self.csiParam(0, 1)),
+        '@' => screen.insertChars(self, self.csiParam(0, 1)), // ICH: 커서에 N개(기본 1) blank 삽입, 오른쪽으로 민다
+        'P' => screen.deleteChars(self, self.csiParam(0, 1)), // DCH: 커서에서 N개(기본 1) 삭제, 왼쪽으로 당긴다
+        'Z' => screen.cursorBackTab(self, self.csiParam(0, 1)), // CBT: 역방향 N개(기본 1) 탭스톱 — Shift+Tab 폼 역이동
+        'g' => screen.clearTabstop(self, self.csiRawParam(0)), // TBC: 0(기본)=커서 열 탭스톱 제거, 3=전체 제거
+        'b' => repeatLastChar(self, self.csiParam(0, 1)), // REP(G5): 직전 graphic 글자를 N회 반복
+        'S' => screen.scrollRangeUp(self, self.scroll_top, self.scroll_bottom, self.csiParam(0, 1), false), // SU(G7): scroll region N줄 위로 팬(history 미보관)
+        'T' => screen.scrollRangeDown(self, self.scroll_top, self.scroll_bottom, self.csiParam(0, 1)), // SD(G7): scroll region N줄 아래로 팬
+        'h' => setAnsiModes(self, true), // SM(G6): 비-private ANSI 모드 set(IRM=4 등)
+        'l' => setAnsiModes(self, false), // RM(G6): 비-private ANSI 모드 reset
+        // SCOSC/SCORC(CSI s / CSI u): ANSI(SCO) 커서 저장/복원. DECSC/DECRC(ESC 7/8)와 같은 슬롯을
+        // 쓴다(위치+pen+pending_wrap). xterm은 좌우 margin 모드(DECLRMM ?69)일 때만 CSI s를 DECSLRM으로
+        // 보지만, maru는 좌우 margin 미구현이라 항상 save로 처리한다. multi-line progress(brew 등)가
+        // 커서 저장→여러 줄 그리기→복원으로 제자리 갱신하는 표준 수단이다 — 복원을 무시하면 진행바가
+        // 줄줄이 쌓인다. 베이스: xterm ctlseqs SCOSC/SCORC(Ghostty 동등). bare 's'/'u'만 — kitty CSI u
+        // (`> < = ?` prefix)는 위 private 분기에서 처리하므로 여기 안 온다.
+        's' => screen.saveCursorState(self),
+        'u' => screen.restoreCursorState(self),
+
+        // DA1(CSI c / CSI 0 c): 터미널 식별 질의. 프로그램(claude CLI 등)이 시작 시 기능 협상
+        // 으로 보내며, 응답이 없으면 타임아웃을 기다리거나 기능을 보수적으로 끈다. VT102로
+        // 식별한다(CSI ?6c) — 현재 구현 수준(커서/erase/scroll region/IL/DL)과 부합.
+        'c' => if (self.csiRawParam(0) == 0) self.appendResponse("\x1b[?6c"),
+        else => {},
+    }
+}

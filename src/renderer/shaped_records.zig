@@ -8,7 +8,6 @@ pub const ShapedGlyphRecord = struct {
     col: u16,
     cell_width: u2 = 1,
     codepoint: u21,
-    combining: ?u21 = null,
     font_id: glyph_layout.FontId,
     glyph_id: glyph_layout.GlyphId,
     fallback: bool = false,
@@ -89,7 +88,6 @@ pub fn buildGlyphRunListFromShapedRecordsWithSurface(
             .col = record.col,
             .cell_width = record.cell_width,
             .codepoint = record.codepoint,
-            .combining = record.combining,
             .font_id = record.font_id,
             .glyph_id = record.glyph_id,
             .fallback = record.fallback,
@@ -178,7 +176,7 @@ test "shaped records build backend neutral glyph runs" {
     // 계약으로 들어갈 수 있는지 고정한다. 이 경계가 있어야 macOS smoke와 future
     // 제품 shaper가 `GlyphFrame` 준비 로직을 복제하지 않는다.
     const records = [_]ShapedGlyphRecord{
-        .{ .col = 0, .cell_width = 1, .codepoint = 'A', .combining = 0x0301, .font_id = 1, .glyph_id = 10 },
+        .{ .col = 0, .cell_width = 1, .codepoint = 'A', .font_id = 1, .glyph_id = 10 },
         .{ .col = 1, .cell_width = 2, .codepoint = '한', .font_id = 2, .glyph_id = 20, .fallback = true },
         .{ .col = 3, .cell_width = 2, .codepoint = 0x1f34e, .font_id = 3, .glyph_id = 30, .fallback = true, .color_glyph_kind = .color },
     };
@@ -190,7 +188,7 @@ test "shaped records build backend neutral glyph runs" {
     try std.testing.expectEqual(@as(u16, 5), result.runs.size.cols);
     try std.testing.expectEqual(@as(usize, 2), result.runs.fallback_count);
     try std.testing.expectEqual(@as(usize, 1), result.color_glyph_count);
-    try std.testing.expectEqual(@as(?u21, 0x0301), result.runs.glyphs[0].combining);
+    try std.testing.expectEqual(@as(u21, 'A'), result.runs.glyphs[0].codepoint);
     try std.testing.expectEqual(@as(u2, 2), result.runs.glyphs[1].cell_width);
     try std.testing.expectEqual(@as(glyph_layout.ColorGlyphKind, .color), result.runs.glyphs[2].cache_key.color_glyph_kind);
     try std.testing.expectEqual(@as(u16, 17), result.runs.glyphs[0].cache_key.font_size_px);

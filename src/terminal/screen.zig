@@ -367,15 +367,15 @@ pub fn lastCellIsWideEmoji(self: *const TerminalCore) bool {
     const cell = self.screen.cells[self.index(last.row, last.col)];
     // width 2를 wide emoji 대용으로 본다(스킨톤 modifier 부착 대상). 단 ambiguous-width=wide로 2칸이 된
     // 동그란 번호(isWideRenderSymbol)는 이모지가 아니라 스킨톤 부착 대상이 아니므로 제외 — 안 그러면 ③ 뒤
-    // 스킨톤이 ③의 combining 슬롯에 잘못 병합된다(mode 2027).
-    return cell.width == 2 and cell.combining == null and !width.isWideRenderSymbol(cell.codepoint);
+    // 스킨톤이 ③ cluster에 잘못 병합된다(mode 2027). grapheme_id==0 = 아직 extra가 안 붙은 단독 base.
+    return cell.width == 2 and cell.grapheme_id == 0 and !width.isWideRenderSymbol(cell.codepoint);
 }
 
-/// 직전 출력 셀이 짝 없는(combining 안 붙은) 지역 표시자인지 — 다음 RI와 국기로 묶기 위함.
+/// 직전 출력 셀이 짝 없는(extra 안 붙은) 지역 표시자인지 — 다음 RI와 국기로 묶기 위함.
 pub fn lastCellIsLoneRegionalIndicator(self: *const TerminalCore) bool {
     const last = self.screen.last_print orelse return false;
     const cell = self.screen.cells[self.index(last.row, last.col)];
-    return isRegionalIndicator(cell.codepoint) and cell.combining == null;
+    return isRegionalIndicator(cell.codepoint) and cell.grapheme_id == 0;
 }
 
 /// wide glyph의 오른쪽 continuation 칸(0폭). base의 style/link를 물려받는다 — putCell과
@@ -1329,7 +1329,7 @@ pub fn writeCodepoint(self: *TerminalCore, codepoint: u21) void {
             const cp = translateCharset(self, codepoint);
             if (width.cellWidth(cp) == 0) {
                 // VS16(U+FE0F) 등 변형 선택자/결합 문자는 0폭 combining으로 앞 글자에 붙인다.
-                attachCombiningMark(self, cp);
+                appendClusterCodepoint(self, cp);
                 // VS16이 앞 글자를 이모지 표현(width 2)으로 승격해 풀사이즈로 그린다(❤+VS16=❤️, 키캡 2️⃣ 2칸).
                 // 승격 조건은 둘 중 하나: (1) mode 2027(grapheme cluster) — 앱이 너비를 합의함, (2) emoji_wide
                 // (text.emoji-width=wide, 기본) — Ghostty/iTerm2처럼 이모지를 항상 2칸으로 본다(모던 TUI 정합).
@@ -1342,12 +1342,12 @@ pub fn writeCodepoint(self: *TerminalCore, codepoint: u21) void {
                 // 스킨톤 modifier(👍 + 🏽): 앞 이모지에 combining으로 붙여 한 글자. base는 이미
                 // width 2(EAW Wide)라 폭 승격 불필요.
                 if (isSkinToneModifier(cp) and lastCellIsWideEmoji(self)) {
-                    attachCombiningMark(self, cp);
+                    appendClusterCodepoint(self, cp);
                     return;
                 }
                 // 국기: 지역 표시자(RI) 2개를 한 셀(width 2)로. 직전이 짝 없는 RI면 combining + 승격.
                 if (isRegionalIndicator(cp) and lastCellIsLoneRegionalIndicator(self)) {
-                    attachCombiningMark(self, cp);
+                    appendClusterCodepoint(self, cp);
                     promoteLastToEmojiWidth(self);
                     return;
                 }
@@ -1496,58 +1496,29 @@ fn promoteLastToEmojiWidth(self: *TerminalCore) void {
     }
 }
 
-fn attachCombiningMark(self: *TerminalCore, codepoint: u21) void {
-    // A combining mark is zero-width and belongs to the most recently
-    // printed base cell, wherever the cursor ended up. Deriving the base
-    // from the cursor was wrong at the last column (cursor parks on the
-    // base, so cursor-1 pointed at the previous glyph) and after a line
-    // feed (cursor sat over a blank cell on the new row). With no base on
-    // the current run (stream start, or right after CR/LF), the mark has
-    // nothing to attach to and is dropped.
-    const last = self.screen.last_print orelse return;
-    const idx = self.index(last.row, last.col);
-    var cell = self.screen.cells[idx];
-    // 무손실 저장(HG2b): 둘째 mark부터 grapheme_store에 누적한다 — 예전엔 단일 combining 슬롯이라
-    // 키캡(base+VS16+U+20E3)에서 VS16이 U+20E3에 덮이고, 다중 악센트(e+◌́+◌̣)도 마지막만 남아
-    // dump·복사에서 잃었다. 첫 mark는 흔한 단일 결합처럼 store 없이 combining만(0 비용). combining은
-    // 렌더 그림자로 **마지막 mark**를 그대로 유지한다 — renderer·hack은 이 그림자를 읽어 동작 보존
-    // (cluster 전체를 읽는 셰이퍼 이전·combining 제거는 HG3). 무손실 권위는 store(grapheme_id).
-    if (cell.grapheme_id != 0) {
-        cell.grapheme_id = self.appendGraphemeCodepoint(cell.grapheme_id, codepoint) catch cell.grapheme_id;
-    } else if (cell.combining) |first| {
-        cell.grapheme_id = self.internGrapheme(&.{ first, codepoint }) catch 0;
-    }
-    cell.combining = codepoint;
-    self.screen.cells[idx] = cell;
-    markDirty(self, last.row);
-}
-
 /// 셀 cluster의 마지막 코드포인트 — UAX#29 boundary 판정(extendsCluster)의 prev 입력. store에
-/// cluster 본체가 있으면 그 끝, 없으면 단일 combining, 그도 없으면 base다. 이렇게 base가 아니라
-/// '직전 자모'와 비교해야 NFD 음절의 V→T(GB7) 연쇄가 끊기지 않는다(base L과 T는 GB6 밖이라 false).
+/// cluster 본체가 있으면 그 끝, 없으면 base다. 이렇게 base가 아니라 '직전 자모'와 비교해야 NFD
+/// 음절의 V→T(GB7) 연쇄가 끊기지 않는다(base L과 T는 GB6 밖이라 false).
 fn trailingClusterCp(self: *const TerminalCore, cell: types.Cell) u21 {
     if (self.graphemeCluster(cell.grapheme_id)) |cps| {
         if (cps.len > 0) return cps[cps.len - 1];
     }
-    if (cell.combining) |c| return c;
     return cell.codepoint;
 }
 
-/// cp를 직전 base 셀의 grapheme cluster에 0폭 extra로 붙인다(커서·last_print·폭은 그대로 —
-/// attachCombiningMark와 같은 위치 규칙). 단일 extra는 store 없이 combining 그림자로 두고(흔한
-/// 단일 결합과 같은 0 비용), 둘째 extra부터 grapheme_store로 승격해 무손실로 담는다. combining은
-/// 첫 extra의 잠정 그림자로 유지된다(렌더 back-compat — HG2b에서 제거). OOM이면 그 자모만 떨군다.
+/// cp를 직전 base 셀의 grapheme cluster에 0폭 extra로 붙인다(커서·last_print·폭은 그대로). 모든
+/// extra(악센트·VS16·NFD 자모·키캡·ZWJ)가 grapheme_store에 누적된다 — pure-B 단일 출처라 잘림·손실이
+/// 없다(첫 extra는 internGrapheme, 둘째부터 appendGraphemeCodepoint). base가 없는 run(스트림 시작·
+/// CR/LF 직후)이면 붙일 데가 없어 떨구고, OOM이면 그 extra만 떨군다(앞선 cluster·셀은 유지).
+/// combining mark(폭 0)·skin-tone·RI·NFD 자모가 모두 이 한 진입점을 공유한다.
 fn appendClusterCodepoint(self: *TerminalCore, cp: u21) void {
     const last = self.screen.last_print orelse return;
     const idx = self.index(last.row, last.col);
     var cell = self.screen.cells[idx];
-    if (cell.grapheme_id != 0) {
-        cell.grapheme_id = self.appendGraphemeCodepoint(cell.grapheme_id, cp) catch return;
-    } else if (cell.combining) |first| {
-        cell.grapheme_id = self.internGrapheme(&.{ first, cp }) catch return;
-    } else {
-        cell.combining = cp;
-    }
+    cell.grapheme_id = if (cell.grapheme_id != 0)
+        self.appendGraphemeCodepoint(cell.grapheme_id, cp) catch return
+    else
+        self.internGrapheme(&.{cp}) catch return;
     self.screen.cells[idx] = cell;
     markDirty(self, last.row);
 }
@@ -1581,12 +1552,12 @@ fn trimmedRowLen(self: *const TerminalCore, row: u16) u16 {
     return len;
 }
 
-/// 기본 배경의 빈 공백 셀인지(reflow trim 기준). continuation/combining/배경색이 있으면 내용이다.
+/// 기본 배경의 빈 공백 셀인지(reflow trim 기준). continuation/grapheme cluster/배경색이 있으면 내용이다.
 /// core의 selection(wordBounds)도 cross-file 호출 — pub.
 pub fn isBlankCell(cell: types.Cell) bool {
     return cell.codepoint == ' ' and
         !cell.continuation and
-        cell.combining == null and
+        cell.grapheme_id == 0 and
         std.meta.activeTag(cell.style.background) == .default;
 }
 

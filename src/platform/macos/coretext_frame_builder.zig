@@ -540,7 +540,6 @@ fn emptyNativeDrawGlyphRecord() coretext_shaper.NativeDrawGlyphRecord {
         .col = 0,
         .cell_width = 0,
         .codepoint = 0,
-        .combining = 0,
         .glyph_id = 0,
         .drawable = 0,
         .fallback = 0,
@@ -567,7 +566,7 @@ fn testShapeDrawList(
     _: usize, // italic family len
     cells_ptr: [*]const coretext_shaper.NativeDrawCell,
     cell_count: usize,
-    _: [*]const u32, // grapheme_pool ptr (fake shaper는 combining 그림자만 본다)
+    _: [*]const u32, // grapheme_pool ptr (fake shaper는 풀 미사용 — codepoint 기반 색판정)
     _: usize, // grapheme_pool_len
     result: *coretext_shaper.NativeDrawListShapeResult,
     records_ptr: [*]coretext_shaper.NativeDrawGlyphRecord,
@@ -604,7 +603,6 @@ fn testShapeDrawList(
         record.col = cell.col;
         record.cell_width = cell.width;
         record.codepoint = cell.codepoint;
-        record.combining = cell.combining;
         record.glyph_id = cell.codepoint + 10;
         record.drawable = 1;
         record.fallback = if (fallback) 1 else 0;

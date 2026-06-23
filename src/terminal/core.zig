@@ -1511,6 +1511,13 @@ test "terminal core stores wide characters with continuation cells" {
     try std.testing.expect(std.mem.indexOf(u8, text, "A한B") != null);
 }
 
+/// 테스트 보조: 셀의 grapheme cluster 본체(base 뒤 extra 코드포인트)가 expected와 같은지 확인한다.
+/// grapheme_id==0이면 빈 슬라이스. combining 필드를 없앤(pure-B) 뒤 단언을 store 기반으로 통일한다.
+fn expectCluster(c: *const TerminalCore, grapheme_id: u32, expected: []const u21) !void {
+    const cluster = c.graphemeCluster(grapheme_id) orelse &.{};
+    try std.testing.expectEqualSlices(u21, expected, cluster);
+}
+
 test "terminal core attaches a combining mark without advancing the cursor" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
     defer core.deinit();
@@ -1523,7 +1530,7 @@ test "terminal core attaches a combining mark without advancing the cursor" {
     const snapshot = core.snapshot();
     try std.testing.expectEqual(@as(u16, 2), snapshot.cursor.col);
     try std.testing.expectEqual(@as(u21, 'e'), snapshot.cells[0].codepoint);
-    try std.testing.expectEqual(@as(u21, 0x0301), snapshot.cells[0].combining.?);
+    try expectCluster(&core, snapshot.cells[0].grapheme_id, &.{0x0301});
     try std.testing.expectEqual(@as(u21, 'x'), snapshot.cells[1].codepoint);
 
     const text = try core.dumpUtf8(std.testing.allocator);
@@ -1542,9 +1549,9 @@ test "terminal core attaches a combining mark to a base char in the last column"
 
     const snapshot = core.snapshot();
     try std.testing.expectEqual(@as(u21, 'b'), snapshot.cells[1].codepoint);
-    try std.testing.expect(snapshot.cells[1].combining == null);
+    try expectCluster(&core, snapshot.cells[1].grapheme_id, &.{});
     try std.testing.expectEqual(@as(u21, 'e'), snapshot.cells[2].codepoint);
-    try std.testing.expectEqual(@as(u21, 0x0301), snapshot.cells[2].combining.?);
+    try expectCluster(&core, snapshot.cells[2].grapheme_id, &.{0x0301});
 
     const text = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(text);
@@ -1562,8 +1569,8 @@ test "terminal core drops a combining mark with no base on the current row" {
 
     const snapshot = core.snapshot();
     try std.testing.expectEqual(@as(u21, 'A'), snapshot.cells[0].codepoint);
-    try std.testing.expect(snapshot.cells[0].combining == null);
-    for (snapshot.cells) |cell| try std.testing.expect(cell.combining == null);
+    try expectCluster(&core, snapshot.cells[0].grapheme_id, &.{});
+    for (snapshot.cells) |cell| try std.testing.expectEqual(@as(u32, 0), cell.grapheme_id);
 }
 
 test "NFD Hangul: conjoining L+V+T merges into one 2-cell syllable (GB6/7/8)" {
@@ -1580,10 +1587,9 @@ test "NFD Hangul: conjoining L+V+T merges into one 2-cell syllable (GB6/7/8)" {
     try std.testing.expectEqual(@as(u2, 2), s.cells[0].width);
     try std.testing.expect(s.cells[1].continuation);
     try std.testing.expectEqual(@as(u2, 0), s.cells[1].width);
-    // 중성·종성은 store cluster 본체로 무손실 저장. combining은 첫 extra(중성)의 잠정 그림자.
-    try std.testing.expectEqual(@as(u21, 0x1161), s.cells[0].combining.?);
+    // 중성·종성은 store cluster 본체로 무손실 저장(base 뒤 [중성, 종성]).
     try std.testing.expect(s.cells[0].grapheme_id != 0);
-    try std.testing.expectEqualSlices(u21, &.{ 0x1161, 0x11AB }, core.graphemeCluster(s.cells[0].grapheme_id).?);
+    try expectCluster(&core, s.cells[0].grapheme_id, &.{ 0x1161, 0x11AB });
 
     // dump 무손실: 원본 NFD 자모 3개가 그대로 복원된다(클립보드·재출력 — 잘림 금지).
     const text = try core.dumpUtf8(std.testing.allocator);
@@ -1613,21 +1619,20 @@ test "NFD Hangul: '한글' splits into two syllable clusters across 4 columns" {
     try std.testing.expect(std.mem.indexOf(u8, text, "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}") != null);
 }
 
-test "NFD Hangul: L+V without a final consonant uses the cheap combining shadow (no store)" {
+test "NFD Hangul: L+V without a final consonant stores the single extra in grapheme_store (pure-B)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
     defer core.deinit();
 
-    // '가' NFD = ㄱ(U+1100) + ㅏ(U+1161), 종성 없음. extra가 1개뿐이라 흔한 단일 결합처럼 store
-    // 없이 combining 그림자만 쓴다(메모리 0 비용) — 둘째 extra부터 store로 승격한다.
+    // '가' NFD = ㄱ(U+1100) + ㅏ(U+1161), 종성 없음. extra 1개도 grapheme_store에 담는다(pure-B 단일
+    // 출처 — combining 그림자 폐지). base=초성, width 2, cluster 본체=[중성].
     try core.write("\u{1100}\u{1161}");
 
     const s = core.snapshot();
     try std.testing.expectEqual(@as(u16, 2), s.cursor.col);
     try std.testing.expectEqual(@as(u21, 0x1100), s.cells[0].codepoint);
     try std.testing.expectEqual(@as(u2, 2), s.cells[0].width);
-    try std.testing.expectEqual(@as(u21, 0x1161), s.cells[0].combining.?);
-    try std.testing.expectEqual(@as(u32, 0), s.cells[0].grapheme_id); // store 미사용
-    try std.testing.expectEqual(@as(usize, 0), core.grapheme_store.items.len);
+    try std.testing.expect(s.cells[0].grapheme_id != 0);
+    try expectCluster(&core, s.cells[0].grapheme_id, &.{0x1161});
 
     const text = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(text);
@@ -1644,7 +1649,6 @@ test "NFD Hangul: a conjoining vowel after a non-Hangul base is its own cell (bo
 
     const s = core.snapshot();
     try std.testing.expectEqual(@as(u21, 'A'), s.cells[0].codepoint);
-    try std.testing.expect(s.cells[0].combining == null);
     try std.testing.expectEqual(@as(u32, 0), s.cells[0].grapheme_id);
     try std.testing.expectEqual(@as(u21, 0x1161), s.cells[1].codepoint); // 별도 셀
 }
@@ -1658,13 +1662,11 @@ test "multi-combining: 둘째 mark부터 grapheme_store에 누적돼 무손실 (
     try core.write("e\u{0301}\u{0323}x");
 
     const s = core.snapshot();
-    try std.testing.expectEqual(@as(u16, 2), s.cursor.col); // combining은 0폭 — e,x만 advance
+    try std.testing.expectEqual(@as(u16, 2), s.cursor.col); // combining mark는 0폭 — e,x만 advance
     try std.testing.expectEqual(@as(u21, 'e'), s.cells[0].codepoint);
-    // 렌더 그림자(combining)는 현행대로 '마지막' mark 유지(동작 보존).
-    try std.testing.expectEqual(@as(u21, 0x0323), s.cells[0].combining.?);
-    // 무손실 권위는 store — 두 mark 전부.
+    // store가 두 mark 전부 무손실 보존(base 뒤 [acute, dot-below]).
     try std.testing.expect(s.cells[0].grapheme_id != 0);
-    try std.testing.expectEqualSlices(u21, &.{ 0x0301, 0x0323 }, core.graphemeCluster(s.cells[0].grapheme_id).?);
+    try expectCluster(&core, s.cells[0].grapheme_id, &.{ 0x0301, 0x0323 });
 
     // dump 무손실: e + 두 결합 마크 + x가 모두 복원된다(예전엔 U+0301이 사라졌다).
     const text = try core.dumpUtf8(std.testing.allocator);
@@ -1685,7 +1687,6 @@ test "bare ZWJ(U+200D)는 NFD cluster에 흡수되지 않고 제 셀을 유지�
     try std.testing.expectEqual(@as(u16, 3), s.cursor.col);
     try std.testing.expectEqual(@as(u21, 'a'), s.cells[0].codepoint);
     try std.testing.expectEqual(@as(u32, 0), s.cells[0].grapheme_id); // ZWJ가 'a'에 안 붙음
-    try std.testing.expect(s.cells[0].combining == null);
     try std.testing.expectEqual(@as(u21, 0x200D), s.cells[1].codepoint); // ZWJ는 제 셀
     try std.testing.expectEqual(@as(u21, 'b'), s.cells[2].codepoint);
 }
@@ -1837,10 +1838,10 @@ test "terminal core: TAB breaks the grapheme run so a following combining mark i
     // Print 'a', HT to the next tab stop, then a combining acute accent (U+0301). The tab clears
     // last_print (the grapheme-continuation anchor), so the mark has no base on the current run and
     // is dropped — it must NOT attach to the already-committed 'a' at col 0. This mirrors CR/LF/BS,
-    // which all clear last_print. Before the fix the mark wrongly mutated cells[0].combining.
+    // which all clear last_print. Before the fix the mark wrongly attached to the 'a' cluster at col 0.
     try core.write("a\t\u{0301}");
 
-    try std.testing.expect(core.screen.cells[0].combining == null);
+    try std.testing.expectEqual(@as(u32, 0), core.screen.cells[0].grapheme_id);
 }
 
 test "terminal core marks old and new cursor rows dirty across line feed" {
@@ -2314,7 +2315,7 @@ test "eraseInLine ends the grapheme run so a later combining mark is dropped" {
     try core.write("\x1b[1G\x1b[K");
     try core.write("\u{0301}");
 
-    try std.testing.expectEqual(@as(?u21, null), core.screen.cells[core.index(0, 0)].combining);
+    try expectCluster(&core, core.screen.cells[core.index(0, 0)].grapheme_id, &.{});
 }
 
 test "SGR colon sub-parameter direct color (38:2:cs:r:g:b) reads RGB past the colorspace slot" {
@@ -4409,14 +4410,13 @@ test "selection extracts text across soft-wrapped and hard rows (scrollback + ac
 test "keycap emoji is stored losslessly in grapheme_store so copied bytes match (HG2b)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
     defer core.deinit();
-    // 2️⃣ = '2' + VS16(FE0F) + U+20E3. combining 그림자는 현행대로 마지막 mark(U+20E3)지만(렌더 동작
-    // 보존), HG2b부터 둘째 mark에서 store에 누적돼 VS16이 더는 사라지지 않는다 — 복사가 재주입 hack
-    // 없이 store 본체에서 온전한 시퀀스를 낸다(이전엔 VS16이 덮여 selection이 재주입으로 때웠다).
+    // 2️⃣ = '2' + VS16(FE0F) + U+20E3. 셋이 grapheme_store에 base 뒤 [VS16, U+20E3]로 온전히 담긴다 —
+    // 단일 combining 슬롯 시절 VS16이 U+20E3에 덮여 사라지던 문제가 사라져, 복사가 재주입 hack 없이
+    // store 본체에서 온전한 키캡 시퀀스를 낸다(이전엔 selection이 VS16을 재주입으로 때웠다).
     try core.write("\x32\xef\xb8\x8f\xe2\x83\xa3");
     try std.testing.expectEqual(@as(u21, 0x32), core.screen.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x20E3), core.screen.cells[0].combining); // 그림자=마지막 mark
     try std.testing.expect(core.screen.cells[0].grapheme_id != 0);
-    try std.testing.expectEqualSlices(u21, &.{ 0xFE0F, 0x20E3 }, core.graphemeCluster(core.screen.cells[0].grapheme_id).?);
+    try expectCluster(&core, core.screen.cells[0].grapheme_id, &.{ 0xFE0F, 0x20E3 });
 
     core.selectionStart(0, 0);
     core.selectionExtend(0, 3);
@@ -5038,7 +5038,7 @@ test "emoji grapheme: skin tone modifier and flag (RI pair) cluster into one wid
     // 일치시켜 붙여넣기 redraw가 안 깨지게(너비 합의). 👍는 col0-1, 🏽는 col2-3.
     try core.write("\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd");
     try std.testing.expectEqual(@as(u21, 0x1F44D), core.screen.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, null), core.screen.cells[0].combining); // 클러스터 안 함
+    try expectCluster(&core, core.screen.cells[0].grapheme_id, &.{}); // 클러스터 안 함
     try std.testing.expectEqual(@as(u2, 2), core.screen.cells[0].width);
     try std.testing.expectEqual(@as(u21, 0x1F3FD), core.screen.cells[2].codepoint); // 스킨톤은 별도 셀
     try std.testing.expectEqual(@as(u16, 4), core.screen.cursor.col); // 4칸(zsh와 일치)
@@ -5049,7 +5049,7 @@ test "emoji grapheme: skin tone modifier and flag (RI pair) cluster into one wid
     try std.testing.expectEqual(@as(u21, 0x1F1F0), core.screen.cells[10].codepoint);
     try std.testing.expectEqual(@as(u2, 1), core.screen.cells[10].width); // RI = width 1(EAW Neutral)
     try std.testing.expectEqual(@as(u21, 0x1F1F7), core.screen.cells[11].codepoint); // 둘째 RI 별도 셀
-    try std.testing.expectEqual(@as(?u21, null), core.screen.cells[10].combining);
+    try expectCluster(&core, core.screen.cells[10].grapheme_id, &.{});
 }
 
 test "mode 2027: VS16 promotes to width 2 only when grapheme cluster mode is on" {
@@ -5064,7 +5064,7 @@ test "mode 2027: VS16 promotes to width 2 only when grapheme cluster mode is on"
     try core.write("\r\n\x1b[?2027h\xe2\x9d\xa4\xef\xb8\x8f");
     try std.testing.expect(core.grapheme_cluster_mode);
     try std.testing.expectEqual(@as(u21, 0x2764), core.screen.cells[10].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0xFE0F), core.screen.cells[10].combining);
+    try expectCluster(&core, core.screen.cells[10].grapheme_id, &.{0xFE0F});
     try std.testing.expectEqual(@as(u2, 2), core.screen.cells[10].width);
     try std.testing.expect(core.screen.cells[11].continuation);
 }
@@ -5105,17 +5105,17 @@ test "mode 2027: skin tone and flags cluster only when on" {
     // 스킨톤: 👍🏽 한 셀 width 2.
     try core.write("\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd");
     try std.testing.expectEqual(@as(u21, 0x1F44D), core.screen.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x1F3FD), core.screen.cells[0].combining);
+    try expectCluster(&core, core.screen.cells[0].grapheme_id, &.{0x1F3FD});
     try std.testing.expectEqual(@as(u16, 2), core.screen.cursor.col);
     // 국기: 🇰🇷 한 셀 width 2.
     try core.write("\xf0\x9f\x87\xb0\xf0\x9f\x87\xb7");
     try std.testing.expectEqual(@as(u21, 0x1F1F0), core.screen.cells[2].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x1F1F7), core.screen.cells[2].combining);
+    try expectCluster(&core, core.screen.cells[2].grapheme_id, &.{0x1F1F7});
     try std.testing.expectEqual(@as(u2, 2), core.screen.cells[2].width);
 
     // 2027 off면 스킨톤은 별도 셀(EAW Wide).
     try core.write("\x1b[?2027l\r\n\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd");
-    try std.testing.expectEqual(@as(?u21, null), core.screen.cells[12].combining);
+    try expectCluster(&core, core.screen.cells[12].grapheme_id, &.{});
     try std.testing.expectEqual(@as(u21, 0x1F3FD), core.screen.cells[14].codepoint); // 별도 셀
 }
 
@@ -5952,7 +5952,7 @@ test "mode 2027: skin tone after a flag does not clobber the flag's combining (r
     try core.write("\xf0\x9f\x87\xb0\xf0\x9f\x87\xb7\xf0\x9f\x8f\xbd");
     // 국기의 combining은 2번째 RI 그대로 — 스킨톤이 덮어쓰지 않는다.
     try std.testing.expectEqual(@as(u21, 0x1F1F0), core.screen.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x1F1F7), core.screen.cells[0].combining); // 안 깨짐
+    try expectCluster(&core, core.screen.cells[0].grapheme_id, &.{0x1F1F7}); // 안 깨짐
     // 스킨톤은 국기에 못 붙으니 별도 셀(putCell, EAW Wide).
     try std.testing.expectEqual(@as(u21, 0x1F3FD), core.screen.cells[2].codepoint);
 }
@@ -5967,7 +5967,7 @@ test "mode 2027: emoji promotion at the last column wraps to next line as width 
     try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[4].codepoint); // row0 col4 비움
     try std.testing.expect(core.screen.wrapped[0]); // soft-wrap 표시
     try std.testing.expectEqual(@as(u21, 0x2764), core.screen.cells[5].codepoint); // row1 col0
-    try std.testing.expectEqual(@as(?u21, 0xFE0F), core.screen.cells[5].combining);
+    try expectCluster(&core, core.screen.cells[5].grapheme_id, &.{0xFE0F});
     try std.testing.expectEqual(@as(u2, 2), core.screen.cells[5].width);
     try std.testing.expect(core.screen.cells[6].continuation);
     try std.testing.expectEqual(@as(u16, 1), core.screen.cursor.row);
@@ -6497,7 +6497,7 @@ test "VS16 attaches to the base as a combining mark (one cell), shaper sees the 
     try core.write("\xe2\x9d\xa4\xef\xb8\x8f"); // ❤(U+2764) + VS16(U+FE0F)
     // 폭은 EAW per-codepoint(❤=1, VS16=0) — zsh와 일치시켜 붙여넣기 redraw가 안 깨지게(폭 승격하면 CSI<N>D recolor 어긋남).
     try std.testing.expectEqual(@as(u21, 0x2764), core.screen.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0xFE0F), core.screen.cells[0].combining);
+    try expectCluster(&core, core.screen.cells[0].grapheme_id, &.{0xFE0F});
     try std.testing.expectEqual(@as(u2, 1), core.screen.cells[0].width); // EAW Neutral = 1(zsh 일치)
     try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[1].codepoint); // 다음 칸은 빈칸
     try std.testing.expectEqual(@as(u16, 1), core.screen.cursor.col);

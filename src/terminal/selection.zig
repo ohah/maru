@@ -20,7 +20,6 @@ const std = @import("std");
 const core = @import("core.zig");
 const types = @import("types.zig");
 const screen = @import("screen.zig"); // 화면/스크롤백 읽기(absRow·isBlankCell·ensureScrollbackRewrapped)
-const width = @import("../width.zig"); // 키캡 combining 재주입(복사 바이트를 렌더와 일치)
 
 const TerminalCore = core.TerminalCore;
 
@@ -98,8 +97,9 @@ fn linkBoundsAt(self: *const TerminalCore, abs: usize, col: u16, id: u32) struct
 
 /// 셀 [from, to) 구간을 UTF-8로 out에 덧붙인다(continuation 셀 건너뜀, grapheme cluster 본체 포함).
 /// extractSelection과 extractUrlAt이 공유 — URL/선택이 같은 글자열을 만들게 한다. `graphemes`는
-/// TerminalCore.grapheme_store.items로, 셀의 grapheme_id가 가리키는 다중 코드포인트(NFD 한글 V/T
-/// 등)를 무손실로 복원한다(잘림 금지 — 설계 §3.2). grapheme_id가 0이면 단일 combining 폴백.
+/// TerminalCore.grapheme_store.items로, 셀의 grapheme_id가 가리키는 extra 코드포인트(악센트·VS16·NFD
+/// 한글 V/T·키캡 base+VS16+U+20E3 등)를 모두 무손실로 복원한다(잘림 금지 — 설계 §3.2). store가 단일
+/// 출처라 키캡 VS16 재주입 같은 보정이 불필요하다(원본 시퀀스가 그대로 담겨 있다).
 fn appendRowUtf8(out: *std.ArrayList(u8), allocator: std.mem.Allocator, row_cells: []const types.Cell, graphemes: []const []const u21, from: usize, to: usize) !void {
     var c = from;
     while (c < to) : (c += 1) {
@@ -109,22 +109,10 @@ fn appendRowUtf8(out: *std.ArrayList(u8), allocator: std.mem.Allocator, row_cell
         const n = std.unicode.utf8Encode(cell.codepoint, &buf) catch continue;
         try out.appendSlice(allocator, buf[0..n]);
         if (cell.grapheme_id != 0 and cell.grapheme_id <= graphemes.len) {
-            // 다중 코드포인트 cluster(NFD 한글 등) — store 본체 전체를 무손실로 내보낸다(combining
-            // 그림자는 첫 extra의 사본이라 무시). store가 권위라 키캡 재주입도 불필요(원본 그대로 담김).
             for (graphemes[cell.grapheme_id - 1]) |cp| {
                 const m = std.unicode.utf8Encode(cp, &buf) catch continue;
                 try out.appendSlice(allocator, buf[0..m]);
             }
-        } else if (cell.combining) |cp| {
-            // 키캡(base+VS16+U+20E3)은 단일 combining 슬롯이라 VS16이 U+20E3에 덮여 사라진다. 복사·URL 추출 시
-            // VS16을 재주입해 온전한 키캡 시퀀스를 내보낸다 — 화면 렌더(셰이퍼도 같은 재주입)와 클립보드를 일치시킴
-            // (안 그러면 보이는 컬러 키캡과 달리 'base+U+20E3'만 복사돼 붙여넣는 앱에서 깨진다). 단일 출처: width.isKeycapCombining.
-            if (width.isKeycapCombining(cp)) {
-                const v = std.unicode.utf8Encode(0xFE0F, &buf) catch continue;
-                try out.appendSlice(allocator, buf[0..v]);
-            }
-            const m = std.unicode.utf8Encode(cp, &buf) catch continue;
-            try out.appendSlice(allocator, buf[0..m]);
         }
     }
 }

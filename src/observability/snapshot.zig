@@ -58,27 +58,23 @@ fn writeCellMetadata(writer: *std.Io.Writer, snapshot: terminal.RenderSnapshot) 
     for (0..snapshot.size.rows) |row| {
         for (0..snapshot.size.cols) |col| {
             const cell = snapshot.cells[index(snapshot.size, row, col)];
-            if (cell.width == 1 and !cell.continuation and cell.combining == null) continue;
+            if (cell.width == 1 and !cell.continuation and cell.grapheme_id == 0) continue;
 
             wrote_any = true;
+            // grapheme=은 base 뒤 cluster 본체(store) 전체 — 악센트·VS16·NFD 한글 V/T·키캡을 무손실로
+            // 적는다(grapheme_id==0이면 none). row text는 base+cluster를 합쳐 보여주지만, 메타데이터는
+            // 폭/continuation/cluster를 분리 기록해 trace/replay가 그리드 상태를 재구성할 수 있게 한다.
             try writer.print(
-                "cell row={d} col={d} codepoint=U+{X:0>4} width={d} continuation={} combining=",
+                "cell row={d} col={d} codepoint=U+{X:0>4} width={d} continuation={} grapheme=",
                 .{ row, col, cell.codepoint, cell.width, cell.continuation },
             );
-            if (cell.combining) |combining| {
-                try writer.print("U+{X:0>4}", .{combining});
-            } else {
-                try writer.writeAll("none");
-            }
-            // 다중 코드포인트 cluster(NFD 한글 등)는 store 본체 전체를 추가로 적어 무손실로 만든다
-            // (combining은 첫 extra의 그림자라 그것만으론 손실). grapheme_id가 0이면 줄을 안 바꿔
-            // 단일-combining 메타데이터 포맷을 유지한다(기존 테스트 불변).
             if (cell.grapheme_id != 0 and cell.grapheme_id <= snapshot.graphemes.len) {
-                try writer.writeAll(" grapheme=");
                 for (snapshot.graphemes[cell.grapheme_id - 1], 0..) |cp, i| {
                     if (i != 0) try writer.writeByte(',');
                     try writer.print("U+{X:0>4}", .{cp});
                 }
+            } else {
+                try writer.writeAll("none");
             }
             try writer.writeByte('\n');
         }
@@ -217,7 +213,7 @@ test "terminal snapshot records styled cells separately from visible text" {
     ) != null);
 }
 
-test "terminal snapshot records wide and combining cell metadata" {
+test "terminal snapshot records wide and grapheme cluster cell metadata" {
     var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
     defer core.deinit();
 
@@ -233,17 +229,17 @@ test "terminal snapshot records wide and combining cell metadata" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         rendered,
-        "cell row=0 col=1 codepoint=U+D55C width=2 continuation=false combining=none\n",
+        "cell row=0 col=1 codepoint=U+D55C width=2 continuation=false grapheme=none\n",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         rendered,
-        "cell row=0 col=2 codepoint=U+0020 width=0 continuation=true combining=none\n",
+        "cell row=0 col=2 codepoint=U+0020 width=0 continuation=true grapheme=none\n",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         rendered,
-        "cell row=0 col=3 codepoint=U+0065 width=1 continuation=false combining=U+0301\n",
+        "cell row=0 col=3 codepoint=U+0065 width=1 continuation=false grapheme=U+0301\n",
     ) != null);
 }
 
@@ -252,8 +248,8 @@ test "terminal snapshot records an NFD Hangul cluster losslessly (grapheme store
     defer core.deinit();
 
     // NFD '한' = 초성 U+1112 + 중성 U+1161 + 종성 U+11AB. 한 셀(width 2)로 묶이고 중성·종성은
-    // grapheme_store 본체에 담긴다 — combining(첫 extra 그림자)만 적으면 종성이 손실되므로,
-    // 메타데이터가 grapheme=로 cluster 전체를 적어야 trace/replay가 무손실이다.
+    // grapheme_store 본체에 담긴다 — 메타데이터가 grapheme=로 cluster 전체(중성·종성)를 적어야
+    // trace/replay가 무손실이다.
     try core.write("\u{1112}\u{1161}\u{11AB}");
 
     const rendered = try renderTerminalSnapshot(std.testing.allocator, core.snapshot());
@@ -262,6 +258,6 @@ test "terminal snapshot records an NFD Hangul cluster losslessly (grapheme store
     try std.testing.expect(std.mem.indexOf(
         u8,
         rendered,
-        "cell row=0 col=0 codepoint=U+1112 width=2 continuation=false combining=U+1161 grapheme=U+1161,U+11AB\n",
+        "cell row=0 col=0 codepoint=U+1112 width=2 continuation=false grapheme=U+1161,U+11AB\n",
     ) != null);
 }

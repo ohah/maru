@@ -51,7 +51,6 @@ pub const GlyphRun = struct {
     col: u16,
     cell_width: u2,
     codepoint: u21,
-    combining: ?u21 = null,
     font_id: FontId,
     glyph_id: GlyphId,
     fallback: bool = false,
@@ -151,7 +150,6 @@ pub fn buildGlyphRunList(
             .col = cell.col,
             .cell_width = cell.width,
             .codepoint = cell.codepoint,
-            .combining = cell.combining,
             .font_id = shaped.font_id,
             .glyph_id = shaped.glyph_id,
             .fallback = shaped.fallback,
@@ -213,13 +211,13 @@ fn colorGlyphKind(codepoint: u21) ColorGlyphKind {
     return .monochrome;
 }
 
-test "fake glyph layout maps primary fallback and combining data" {
+test "fake glyph layout maps primary and fallback fonts" {
     var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
     defer core.deinit();
 
-    // 이 테스트는 실제 CoreText 없이도 cell -> font/glyph 계약을 먼저 고정한다.
-    // ASCII는 primary font, 한글은 fallback font, combining mark는 base glyph에
-    // 붙은 상태로 다음 단계에 전달되어야 한다.
+    // 이 테스트는 실제 CoreText 없이도 cell -> font/glyph 계약을 먼저 고정한다. ASCII는 primary
+    // font, 한글은 fallback font로 간다. (grapheme cluster 본체는 GlyphRun이 아니라 DrawList.grapheme_pool로
+    // 흐르며 실제 셰이퍼가 소비한다 — fake 경로는 base codepoint만 본다.)
     core.clearDirty();
     try core.write("A한e\u{0301}");
 
@@ -237,7 +235,6 @@ test "fake glyph layout maps primary fallback and combining data" {
     try std.testing.expect(glyphs.glyphs[1].fallback);
     try std.testing.expectEqual(@as(u2, 2), glyphs.glyphs[1].cell_width);
     try std.testing.expectEqual(@as(u21, 'e'), glyphs.glyphs[2].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x0301), glyphs.glyphs[2].combining);
     try std.testing.expect(glyphs.overlays.len > 0);
 }
 

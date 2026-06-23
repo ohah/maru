@@ -8,7 +8,6 @@ pub const CoreTextGlyphRecord = struct {
     col: u16,
     cell_width: u2 = 1,
     codepoint: u21,
-    combining: ?u21 = null,
     glyph_id: renderer.GlyphId,
     font_name: []const u8,
     fallback: bool = false,
@@ -37,7 +36,6 @@ pub fn shapedRecordFromCoreTextGlyph(
         .col = record.col,
         .cell_width = record.cell_width,
         .codepoint = record.codepoint,
-        .combining = record.combining,
         .font_id = font_id,
         .glyph_id = record.glyph_id,
         .fallback = record.fallback,
@@ -127,7 +125,6 @@ test "CoreText font bridge preserves renderer-neutral glyph metadata" {
         .col = 3,
         .cell_width = 2,
         .codepoint = '한',
-        .combining = 0x0301,
         .glyph_id = 84,
         .font_name = "AppleSDGothicNeo-Regular",
         .fallback = true,
@@ -139,7 +136,6 @@ test "CoreText font bridge preserves renderer-neutral glyph metadata" {
     try std.testing.expectEqual(@as(u16, 2), shaped.row);
     try std.testing.expectEqual(@as(u16, 3), shaped.col);
     try std.testing.expectEqual(@as(u2, 2), shaped.cell_width);
-    try std.testing.expectEqual(@as(?u21, 0x0301), shaped.combining);
     try std.testing.expect(shaped.fallback);
     try std.testing.expect(shaped.style.bold);
     try std.testing.expect(shaped.style.underline);

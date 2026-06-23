@@ -126,24 +126,13 @@ fn brightenIfBold(c: terminal.Color, bold: bool, enabled: bool) terminal.Color {
     };
 }
 
-/// 컬러 글리프(이모지)인지 판정한다. 셰이더는 이 cell의 UV에 +2.0이 더해져 오면 atlas의 컬러
-/// RGBA를 그대로 쓴다(전경색 무시). 단일 출처는 width.isEmojiPresentation — 단색 텍스트 기호
-/// (✓★♠ 등)를 컬러 경로로 보내 SGR 전경색을 잃던 버그를 막으려고, 손으로 넓힌 블록 대신
-/// 큐레이션 집합을 공유한다. VS16(U+FE0F)이 결합된 글자(❤+VS16=❤️)는 text-default codepoint라도
-/// 이모지 표현이라 컬러다 — codepoint만으론 ❤(텍스트)와 ❤️(이모지)를 못 가르므로 combining도 본다.
-fn isColorGlyph(codepoint: u21, combining: ?u21) bool {
-    if (combining == 0xFE0E) return false; // VS15 = 텍스트 표현 강제(default-emoji라도 단색)
-    if (terminal.width.isEmojiPresentation(codepoint)) return true;
-    // 키캡(2️⃣ = base+VS16+U+20E3)은 단일-combining 슬롯에서 VS16이 U+20E3에 덮여 사라지지만 컬러 이모지다 —
-    // 셰이퍼가 VS16을 재주입해 atlas엔 컬러 키캡이 들어오므로(coretext_smoke.m), 여기서도 컬러로 인정해야
-    // 셰이더가 전경색 단색 tint 대신 atlas 컬러 RGBA를 쓴다(안 그러면 숫자 없는 단색 블롭으로 보인다).
-    if (terminal.width.isKeycapCombining(combining)) return true;
-    return combining == 0xFE0F; // VS16 = 이모지 표현
-}
-
-/// 컬러 글리프면 UV u에 sentinel(+2.0)을 더한다(셰이더가 빼고 샘플해 atlas 컬러를 쓴다).
-fn colorUv(uv: f32, codepoint: u21, combining: ?u21) f32 {
-    return if (isColorGlyph(codepoint, combining)) uv + color_glyph_uv_offset else uv;
+/// 컬러 글리프면 UV u에 sentinel(+2.0)을 더한다(셰이더가 빼고 샘플해 atlas 컬러 RGBA를 그대로 쓴다 —
+/// 전경색 무시). 컬러 여부는 셰이퍼(CoreText)가 정한 `color_glyph_kind`를 단일 출처로 본다: CoreText가
+/// AppleColorEmoji 글리프를 고르면 color다(VS16 이모지 ❤️·키캡 2️⃣·default-emoji 🍎 포함; VS15는 텍스트
+/// 폰트라 mono). 예전엔 codepoint+combining 휴리스틱(isColorGlyph·isKeycapCombining)으로 재유도했는데,
+/// 이제 cluster 전체가 셰이퍼에 가 색이 실제로 결정되므로(HG3a 풀) 그 결과를 그대로 쓴다(HG3b).
+fn colorUv(uv: f32, kind: renderer.ColorGlyphKind) f32 {
+    return if (kind == .color) uv + color_glyph_uv_offset else uv;
 }
 
 /// 컬러 글리프면 UV u에 더하는 sentinel 오프셋(셰이더가 빼고 샘플). u<0(배경)·[0,1](일반)과
@@ -348,9 +337,9 @@ pub fn buildNativeCellsSplit(
             .atlas_y_px = glyph.slot.y_px,
             .atlas_width_px = glyph.slot.width_px,
             .atlas_height_px = glyph.slot.height_px,
-            .u0 = colorUv(glyph.uv.u0, glyph.run.codepoint, glyph.run.combining),
+            .u0 = colorUv(glyph.uv.u0, glyph.run.cache_key.color_glyph_kind),
             .v0 = glyph.uv.v0,
-            .u1 = colorUv(glyph.uv.u1, glyph.run.codepoint, glyph.run.combining),
+            .u1 = colorUv(glyph.uv.u1, glyph.run.cache_key.color_glyph_kind),
             .v1 = glyph.uv.v1,
             .foreground = packForeground(glyph.run.style, colors),
             .background = if (highlightBg(colors, glyph.run.row, glyph.run.col)) |hl|
@@ -602,9 +591,9 @@ pub fn buildNativeCellsSplit(
                     .atlas_height_px = glyph.slot.height_px,
                     // 커서 아래 컬러 이모지도 컬러로 유지한다 — 메인 pass와 같은 +2.0 sentinel을
                     // 적용하지 않으면 셰이더가 단색 분기로 그려 이모지가 색을 잃는다.
-                    .u0 = colorUv(glyph.uv.u0, glyph.run.codepoint, glyph.run.combining),
+                    .u0 = colorUv(glyph.uv.u0, glyph.run.cache_key.color_glyph_kind),
                     .v0 = glyph.uv.v0,
-                    .u1 = colorUv(glyph.uv.u1, glyph.run.codepoint, glyph.run.combining),
+                    .u1 = colorUv(glyph.uv.u1, glyph.run.cache_key.color_glyph_kind),
                     .v1 = glyph.uv.v1,
                     .foreground = packRgb(cursor_colors.text),
                     .background = cursor_bg,
@@ -2058,90 +2047,45 @@ test "SGR underline overlays project a foreground-colored underline cell (kind 9
     try std.testing.expectEqual(@as(f32, -1.0), cells[0].u0); // sentinel UV(atlas 미샘플)
 }
 
-test "color emoji glyph cells get the +2.0 UV sentinel; normal glyphs do not" {
+test "color glyph cells get the +2.0 UV sentinel by color_glyph_kind; monochrome glyphs do not" {
     const allocator = std.testing.allocator;
+    // 색 판정은 셰이퍼(CoreText)가 정한 color_glyph_kind를 단일 출처로 본다(HG3b). 예전엔 codepoint+
+    // combining 휴리스틱으로 재유도했지만, 이제 cluster 전체가 셰이퍼에 가 색이 결정되므로 그 결과를
+    // 그대로 쓴다. 이모지·VS16(❤️)·키캡(2️⃣)은 셰이퍼가 color로, 텍스트/단색 기호(✓)는 monochrome으로
+    // 표시한다 — colorUv가 color에만 +2.0 sentinel을 붙이는지 고정한다(단색 기호 전경색 유지 회귀 가드).
     const mkGlyph = struct {
-        fn f(cp: u21) renderer.GlyphQuad {
+        fn f(cp: u21, kind: renderer.ColorGlyphKind) renderer.GlyphQuad {
             return .{
-                .run = .{ .row = 0, .col = 0, .cell_width = 2, .codepoint = cp, .font_id = 1, .glyph_id = 1, .cache_key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1 } },
+                .run = .{ .row = 0, .col = 0, .cell_width = 2, .codepoint = cp, .font_id = 1, .glyph_id = 1, .cache_key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1, .color_glyph_kind = kind } },
                 .slot = .{ .id = 1, .key = .{ .font_id = 1, .glyph_id = 1, .font_size_px = 16, .device_scale = 1 }, .x_px = 0, .y_px = 0, .width_px = 16, .height_px = 16, .upload_bytes = 0, .generation = 0 },
                 .uv = .{ .u0 = 0.1, .v0 = 0.2, .u1 = 0.3, .v1 = 0.4 },
             };
         }
     }.f;
 
-    // 이모지(😀 U+1F600): u에 +2.0.
-    var emoji = [_]renderer.GlyphQuad{mkGlyph(0x1F600)};
-    const ec = try buildNativeCellsFromGlyphQuads(allocator, .{
-        .size = .{ .cols = 4, .rows = 1 },
-        .cursor = .{ .row = 0, .col = 0 },
-        .dirty = null,
-        .glyphs = &emoji,
-        .overlays = &.{},
-        .stats = .{},
-    }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
-    defer allocator.free(ec);
-    try std.testing.expectEqual(@as(usize, 1), ec.len);
-    try std.testing.expectApproxEqAbs(@as(f32, 2.1), ec[0].u0, 0.001); // 0.1 + 2.0
-    try std.testing.expectApproxEqAbs(@as(f32, 2.3), ec[0].u1, 0.001);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.2), ec[0].v0, 0.001); // v는 그대로
-
-    // 일반 글자('A'): 오프셋 없음.
-    var ascii = [_]renderer.GlyphQuad{mkGlyph('A')};
-    const ac = try buildNativeCellsFromGlyphQuads(allocator, .{
-        .size = .{ .cols = 4, .rows = 1 },
-        .cursor = .{ .row = 0, .col = 0 },
-        .dirty = null,
-        .glyphs = &ascii,
-        .overlays = &.{},
-        .stats = .{},
-    }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
-    defer allocator.free(ac);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.1), ac[0].u0, 0.001);
-
-    // 단색 텍스트 기호(✓ U+2713): 0x2600-0x27BF 블록 안이지만 이모지 아님 → 오프셋 없음(SGR
-    // 전경색 유지). 이게 +2.0이 되면 셰이더 컬러 분기로 가 전경색을 잃는 버그였다.
-    var check = [_]renderer.GlyphQuad{mkGlyph(0x2713)};
-    const cc = try buildNativeCellsFromGlyphQuads(allocator, .{
-        .size = .{ .cols = 4, .rows = 1 },
-        .cursor = .{ .row = 0, .col = 0 },
-        .dirty = null,
-        .glyphs = &check,
-        .overlays = &.{},
-        .stats = .{},
-    }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
-    defer allocator.free(cc);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.1), cc[0].u0, 0.001); // 오프셋 없음
-
-    // ❤ + VS16(combining 0xFE0F): text-default codepoint(U+2764)지만 이모지 표현 → +2.0.
-    var heart = [_]renderer.GlyphQuad{mkGlyph(0x2764)};
-    heart[0].run.combining = 0xFE0F;
-    const hc = try buildNativeCellsFromGlyphQuads(allocator, .{
-        .size = .{ .cols = 4, .rows = 1 },
-        .cursor = .{ .row = 0, .col = 0 },
-        .dirty = null,
-        .glyphs = &heart,
-        .overlays = &.{},
-        .stats = .{},
-    }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
-    defer allocator.free(hc);
-    try std.testing.expectApproxEqAbs(@as(f32, 2.1), hc[0].u0, 0.001); // VS16 → +2.0
-
-    // 키캡(2️⃣ = '2' + VS16 + U+20E3): 단일 combining 슬롯이라 VS16이 U+20E3에 덮여 combining=0x20E3만 남지만
-    // 컬러 이모지다. 셰이퍼가 VS16을 재주입해 atlas는 컬러 키캡이라, 여기서 +2.0을 안 주면 셰이더가 전경색
-    // 단색으로 tint해 숫자 없는 블롭이 된다(리뷰 #1 회귀 가드).
-    var keycap = [_]renderer.GlyphQuad{mkGlyph('2')};
-    keycap[0].run.combining = 0x20E3;
-    const kc = try buildNativeCellsFromGlyphQuads(allocator, .{
-        .size = .{ .cols = 4, .rows = 1 },
-        .cursor = .{ .row = 0, .col = 0 },
-        .dirty = null,
-        .glyphs = &keycap,
-        .overlays = &.{},
-        .stats = .{},
-    }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
-    defer allocator.free(kc);
-    try std.testing.expectApproxEqAbs(@as(f32, 2.1), kc[0].u0, 0.001); // 키캡(U+20E3) → +2.0(컬러)
+    const Case = struct { cp: u21, kind: renderer.ColorGlyphKind, offset: bool };
+    const cases = [_]Case{
+        .{ .cp = 0x1F600, .kind = .color, .offset = true }, // 😀
+        .{ .cp = 0x2764, .kind = .color, .offset = true }, // ❤️ — 셰이퍼가 VS16 cluster를 color로
+        .{ .cp = '2', .kind = .color, .offset = true }, // 키캡 2️⃣ — base+VS16+U+20E3 cluster → color
+        .{ .cp = 'A', .kind = .monochrome, .offset = false }, // 일반 글자
+        .{ .cp = 0x2713, .kind = .monochrome, .offset = false }, // 단색 기호 ✓ (SGR 전경색 유지)
+    };
+    for (cases) |case| {
+        var glyphs = [_]renderer.GlyphQuad{mkGlyph(case.cp, case.kind)};
+        const cells = try buildNativeCellsFromGlyphQuads(allocator, .{
+            .size = .{ .cols = 4, .rows = 1 },
+            .cursor = .{ .row = 0, .col = 0 },
+            .dirty = null,
+            .glyphs = &glyphs,
+            .overlays = &.{},
+            .stats = .{},
+        }, &.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
+        defer allocator.free(cells);
+        // uv.u0=0.1; color면 +2.0 sentinel, monochrome이면 그대로.
+        try std.testing.expectApproxEqAbs(@as(f32, if (case.offset) 2.1 else 0.1), cells[0].u0, 0.001);
+        if (case.offset) try std.testing.expectApproxEqAbs(@as(f32, 0.2), cells[0].v0, 0.001); // v는 불변
+    }
 }
 
 test "appendRaster concatenates pixels and shifts upload offsets into the merged suffix (N-way merge core)" {

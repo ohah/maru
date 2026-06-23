@@ -6,11 +6,9 @@ pub const DrawCell = struct {
     row: u16,
     col: u16,
     codepoint: u21,
-    combining: ?u21 = null,
-    // grapheme cluster 본체(base 뒤 extra 코드포인트)를 DrawList.grapheme_pool의 [offset, offset+count)로
-    // 가리킨다. count>0이면 CoreText 셰이퍼가 풀의 코드포인트를 base 뒤에 모두 붙여 cluster 전체를
-    // 셰이핑한다(NFD 한글 종성·다중 악센트·키캡 무손실 — combining 단일 슬롯의 손실 보정). count==0이면
-    // cluster가 없어 combining(단일 그림자) 폴백. combining은 색판정·fake 경로용으로 유지(HG3b 제거).
+    // grapheme cluster 본체(base 뒤 extra 코드포인트 — 악센트·VS16·NFD 한글 V/T·키캡·ZWJ)를
+    // DrawList.grapheme_pool의 [offset, offset+count)로 가리킨다. count>0이면 CoreText 셰이퍼가 풀의
+    // 코드포인트를 base 뒤에 모두 붙여 cluster 전체를 셰이핑한다(무손실). count==0이면 extra 없음.
     grapheme_offset: u32 = 0,
     grapheme_count: u16 = 0,
     width: u2 = 1,
@@ -171,7 +169,6 @@ pub fn buildDrawListWithUnfocused(
                             .row = @intCast(row),
                             .col = @intCast(col),
                             .codepoint = cell.codepoint,
-                            .combining = cell.combining,
                             .grapheme_offset = g_offset,
                             .grapheme_count = g_count,
                             .width = render_width,
@@ -435,12 +432,12 @@ test "draw list renders wide-render symbol (circled number) at 2 cells when next
     }
 }
 
-test "draw list carries style and combining mark for font layout" {
+test "draw list carries style and grapheme cluster for font layout" {
     var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 3, .rows = 1 });
     defer core.deinit();
 
-    // DrawList는 나중에 glyph shaping과 atlas upload의 입력이 된다. 그래서 화면에
-    // 보이는 글자뿐 아니라 style과 combining mark도 같이 이동해야 한다.
+    // DrawList는 나중에 glyph shaping과 atlas upload의 입력이 된다. 그래서 화면에 보이는 글자뿐 아니라
+    // style과 grapheme cluster 본체(grapheme_pool)도 같이 이동해야 한다(combining mark는 풀에 담긴다).
     try core.write("e\u{0301}");
     core.screen.cells[0].style = .{
         .foreground = .{ .indexed = 2 },
@@ -452,7 +449,9 @@ test "draw list carries style and combining mark for font layout" {
     defer draw_list.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u21, 'e'), draw_list.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x0301), draw_list.cells[0].combining);
+    // combining mark는 grapheme_pool에 cluster 본체로 실린다 — DrawCell이 [offset, count)로 참조.
+    try std.testing.expectEqual(@as(u16, 1), draw_list.cells[0].grapheme_count);
+    try std.testing.expectEqual(@as(u32, 0x0301), draw_list.grapheme_pool[draw_list.cells[0].grapheme_offset]);
     try std.testing.expectEqual(terminal.Color{ .indexed = 2 }, draw_list.cells[0].style.foreground);
     try std.testing.expectEqual(terminal.Color{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, draw_list.cells[0].style.background);
     try std.testing.expect(draw_list.cells[0].style.underline);

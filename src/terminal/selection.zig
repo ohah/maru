@@ -267,6 +267,7 @@ fn wordBoundsAt(self: *const TerminalCore, viewport_row: u16, col: u16) ?WordBou
 fn wordBoundsAtImpl(self: *const TerminalCore, viewport_row: u16, col: u16, separators: []const u21) ?WordBounds {
     const abs = screen.absRowFromViewport(self, viewport_row);
     const row_cells = screen.absRow(self, abs) orelse return null;
+    if (row_cells.len == 0) return null; // 빈 행(전부 공백 → A2 trim으로 len 0, §11) = 단어 없음 — [c] 인덱싱 전 가드
     const c = @min(col, @as(u16, @intCast(row_cells.len -| 1)));
     if (screen.isBlankCell(row_cells[c])) return null; // 공백 클릭 → 선택 없음(현행)
     // 구분자 클릭: 구분자는 제 자신이 한 토큰 → 그 1칸만 선택(Ghostty/iTerm2 관례). separators 비면 false라 무관.

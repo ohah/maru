@@ -842,6 +842,7 @@ bool maru_metal_renderer_draw(
     size_t quad_vertex_total = 0;
     size_t bottom_quad_n = 0; // C4b-5: layer 2(bottom — 탭 밴드) quad 수. part1(터미널·탭 제목) '앞'에 그려 제목 아래로.
     size_t under_quad_n = 0; // C4b 모달: layer 0(under — 사이드바 밴드) quad 수. draw가 under/over를 가르는 경계.
+    size_t header_quad_n = 0; // layer 4(header — 사이드바 bg strip 뒤·헤더 글리프 앞) quad 수. 알림 종 배지(빨강 원) 등.
     const size_t gpu_quad_n = (gpu_quads != NULL) ? gpu_quad_count : 0;
     if (gpu_quad_n > 0) {
         if (gpu_quad_n > SIZE_MAX / 6) {
@@ -858,17 +859,21 @@ bool maru_metal_renderer_draw(
             return false;
         }
         MaruRendererQuadVertex *qv = (MaruRendererQuadVertex *)quad_vertex_buffer.contents;
-        // C4b: layer로 z를 가른다 — 2(bottom 탭 밴드, part1 앞)·0(under 사이드바, part1 뒤·part2 앞)·1(over 모달, 최상위).
-        // 정점 버퍼에 bottom→under→over 순서로 배치해 draw가 세 패스로 그린다(탭 밴드만 layer 2 신설, 사이드바·모달 불변).
+        // C4b: layer로 z를 가른다 — 2(bottom 탭 밴드, part1 앞)·0(under 사이드바, part1 뒤·part2 앞)·4(header — 사이드바
+        // bg strip 뒤·헤더 글리프 앞)·1(over 모달, 최상위). 정점 버퍼에 bottom→under→header→over 순서로 배치해 draw가
+        // 네 패스로 그린다. layer 4는 헤더 글리프(터미널 셀 패스) '뒤'에 quad를 끼울 유일한 패스다 — 알림 종 배지(빨강
+        // 원) 위에 흰 숫자 글리프가 보이게 한다(0/1/3은 셀 패스 '뒤'가 안 돼 글리프를 덮는다 — 헤더 호버 quad 한계와 동형).
         for (size_t i = 0; i < gpu_quad_n; i++) {
             if (gpu_quads[i].layer == 2) bottom_quad_n += 1;
             else if (gpu_quads[i].layer == 0) under_quad_n += 1;
+            else if (gpu_quads[i].layer == 4) header_quad_n += 1;
         }
-        size_t bi = 0, ui = bottom_quad_n, oi = bottom_quad_n + under_quad_n;
+        size_t bi = 0, ui = bottom_quad_n, hi = bottom_quad_n + under_quad_n, oi = bottom_quad_n + under_quad_n + header_quad_n;
         for (size_t i = 0; i < gpu_quad_n; i++) {
             size_t dst;
             if (gpu_quads[i].layer == 2) dst = bi++;
             else if (gpu_quads[i].layer == 0) dst = ui++;
+            else if (gpu_quads[i].layer == 4) dst = hi++;
             else dst = oi++;
             maru_fill_quad_instance(&qv[dst * 6], gpu_quads[i], drawable_w, drawable_h);
         }
@@ -1008,6 +1013,7 @@ bool maru_metal_renderer_draw(
     const size_t cells_base_v = sidebar_bg_quads * 6;
     const size_t bottom_vertex_count = bottom_quad_n * 6; // C4b-5: 탭 밴드(part1 앞 패스)
     const size_t under_vertex_count = under_quad_n * 6;
+    const size_t header_vertex_count = header_quad_n * 6; // 헤더 quad(알림 배지) — bg strip 뒤·헤더 글리프 앞 패스
     // C4b 모달: 모달(overlay) 셀이 cells[modal_cells_start..cell_count]에 있으면, over quad(모달 배경)를 모달
     // 텍스트 '앞'에 끼운다 → 터미널(모달 제외) → 배경 → under quad(사이드바 밴드) → 사이드바 → over quad
     // (모달 배경) → 모달 텍스트. 모달 없으면(0) terminal_end=cell_count라 1·6이 합쳐져 기존과 같다.
@@ -1053,6 +1059,9 @@ bool maru_metal_renderer_draw(
     // 1a. 사이드바 배경 strip(bg quad, 버퍼 맨 앞 [0, cells_base_v)) — 터미널 cells '앞'에 그려 사이드바 헤더
     //     glyph(origin_x=0, 셀 패스)·밴드·제목이 배경 '위'에 보이게 한다(painter — 헤더 glyph 가림 회귀 fix).
     if (vertex_buffer != nil) MARU_DRAW_CELLS(0, cells_base_v);
+    // 1a+. 헤더 quad(layer 4, 알림 종 배지 빨강 원) — 사이드바 bg strip '뒤' / 터미널·헤더 글리프 '앞'에 끼운다(흰 숫자
+    //      글리프가 원 위에 보이게). 버퍼 구간 [bottom+under, +header). 배지 없으면 0이라 no-op(기존 경로 불변).
+    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count + under_vertex_count, header_vertex_count);
     // 1b. 터미널(모달 제외, 탭 제목 포함) — cells는 bg quad 다음(cells_base_v)부터.
     if (vertex_buffer != nil) MARU_DRAW_CELLS(cells_base_v, terminal_end_v);
     MARU_DRAW_IMAGES(image_above_start, gpu_image_n);                         // 1.5 kitty 이미지(텍스트 앞)
@@ -1065,7 +1074,7 @@ bool maru_metal_renderer_draw(
         [encoder setVertexBuffer:shadow_vertex_buffer offset:0 atIndex:0];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:shadow_vertex_total];
     }
-    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count + under_vertex_count, quad_vertex_total - bottom_vertex_count - under_vertex_count); // 5. over quad(모달 배경)
+    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count + under_vertex_count + header_vertex_count, quad_vertex_total - bottom_vertex_count - under_vertex_count - header_vertex_count); // 5. over quad(모달 배경)
     // 6. 모달 텍스트(cells_base_v 오프셋) — clip 영역이 있으면 모달 셀만 scissor로 자른다(부분 카드 픽셀 스크롤
     //    인프라). Metal scissor는 좌하단 원점이라 y = drawable_h - (y+h)로 뒤집고, drawable 안으로 clamp(범위 밖이면
     //    Metal이 크래시). w==0이면 클리핑 없음(기존 동작). 모달 셀이 이 encoder의 마지막 draw라 복원 불필요.

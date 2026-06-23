@@ -65,11 +65,18 @@
   점유하는데, 정수 col 슬롯 중심이 `(cols-10)*cw`로 1칸 아이콘(중심 `col+0.5`)과 2.5칸이 되므로(좌우 패딩 어긋남)
   렌더러(`maru_metal_renderer.m`)가 종 글리프만 가로로 0.5칸 왼쪽으로 미는 px nudge를 줘 중심을 `(cols-10.5)*cw`
   (=균일 3칸 + hover quad 중앙·말풍선 caret과 동심)에 맞춘다(py_nudge와 동형 — 2칸 글리프는 정수 col로 반칸에 못 옴).
-  안 읽은 개수 배지(coral)는 **종 한 칸 왼쪽**부터 — 1~9는 숫자 1칸(`cols-12`), 10개 이상은 "9+" 2칸(`cols-13·cols-12`).
-  `HeaderRegion.notifications` zone은 `headerHit`(렌더 `buildSidebarHeaderFrame`과 같은 col)이 단일 출처 — 종 글리프
-  (`cols-11·cols-10`)+배지(`cols-12`)를 포함하는 3칸 zone `[cols-12, cols-9)`. 안 그리면 hit-test도 none(`cols < 13`
-  좁은 사이드바, 우측 아이콘 4개가 안 들어감). 사이드바 **최소 폭**(`sidebarMinPt`)은 신호등 클리어런스 + **13칸**으로,
-  알림 그룹 좌단("9+" 배지 `cols-13`)까지 신호등과 안 겹치게 둔다(예전 10칸은 ◧까지만 잡아 종+배지가 겹쳤다).
+- **안 읽은 개수 배지(종 우상단 빨강 원형, 펼침)**: 종 **우측 한 칸**(`cols-9` = `notificationBadgeCol`)에 **빨강 원형 quad
+  + 흰 숫자**를 겹쳐 그린다(iOS/macOS 배지식 — 예전 종 좌측 coral 텍스트는 대비가 낮아 안 읽혔다). **빨강 원**은
+  `appendNotificationBadge`가 GpuQuad(layer 4)로, **흰 숫자**는 `appendBellAndBadge`가 헤더 frame 셀(같은 `cols-9`)로 둔다
+  — cell↔quad가 같은 col에서 만나 어긋나지 않는 단일 출처. 원형 1칸 제약상 **1~9는 숫자, 10개 이상은 "9"로 cap**한다
+  (2칸 "9+"는 ◧가 종 우측에 붙어 자리가 없음 — 종을 옮기지 않는 한 구조적 제약). **렌더 레이어 4**는 사이드바 bg strip
+  '뒤' / 헤더 글리프(터미널 셀 패스) '앞'에 끼우는 전용 quad 패스다(`maru_metal_renderer.m`) — 0/1/3 레이어는 헤더 글리프
+  '뒤'가 안 돼 흰 숫자를 덮으므로(헤더 hover quad 한계와 동형), 빨강 원이 숫자 아래·사이드바 배경 위에 오게 한 칸 신설.
+- **접힘 배지(종 좌측 텍스트, 유지)**: 접힘 타이틀바 헤더는 터미널 위에 그려져 layer 4 quad가 터미널 셀에 가리므로(원형
+  부적합), 종 **좌측** coral 텍스트 배지를 유지한다 — 1~9 숫자 1칸(`cols-12`), 10+ "9+" 2칸(`cols-13·cols-12`).
+- **hit-test/최소 폭**: `HeaderRegion.notifications` zone은 `headerHit`(렌더 `buildSidebarHeaderFrame`과 같은 col)이 단일 출처 —
+  종 글리프(`cols-11·cols-10`)+배지(`cols-9`/접힘 `cols-12`)를 포함하는 zone. 안 그리면 hit-test도 none(`cols < 13` 좁은
+  사이드바). 사이드바 **최소 폭**(`sidebarMinPt`)은 신호등 클리어런스 + **13칸**으로 신호등과 안 겹치게 둔다.
 - **접힘에도 알림 종 유지**: 사이드바 접힘(`sidebar_collapsed`, 폭 0)이면 좌상단 타이틀바 띠에 ◧ 펼치기 토글만 떴는데,
   이제 종+배지를 ◧ **왼쪽**(가장 왼쪽; `collapsedToggleCol()` = `collapsedBellCol()+3`)에 그려 펼침 헤더와 같은 종→◧
   순서로 둔다(`buildCollapsedToggleFrame`) — 토글로 접힘↔펼침을 오가도 종/◧ 위치가 안 바뀐다(사용자 피드백). 종 base는
@@ -142,8 +149,11 @@
   `headerHit` 4-아이콘 zone, **접힘 종 hit-test**(`collapsedNotificationRect` 종 글리프 동심·◧ rect 비겹침·클릭→패널 열림).
 - **렌더 1회**: op 방출만으론 부족(modal_box 회귀 전례) — `buildSidebarHeaderFrame`(펼침)·`buildCollapsedToggleFrame`(접힘)이
   공유하는 `appendBellAndBadge` 종/배지 cell + 오버레이 lowering으로 2줄 카드가 cell 그리드에 들어가고 한글 본문이 안
-  잘리는지(EAW). **종 글리프(🔔)는 실제 렌더로 fallback 확인** — 깨지면 BMP 기호로 교체(`agentSymbolCodepoint` 규율:
-  JetBrains Mono 보유 글리프만). 접힘 종은 `MARU_COLLAPSE_SIDEBAR` 헤드리스 스크린샷으로 ◧↔종 띠 세로 정렬 확인.
+  잘리는지(EAW). **종 글리프(🔔)·빈 상태 종-슬래시(🔕)는 실제 렌더로 fallback 확인** — 깨지면 BMP 기호로 교체
+  (`agentSymbolCodepoint` 규율: JetBrains Mono 보유 글리프만). **펼침 원형 배지**는 `MARU_OPEN_NOTIFICATIONS=N`(N개 시드+
+  패널 열림) 헤드리스 스크린샷으로 종 우상단 빨강 원 + 흰 숫자(1~9)·10+ "9" cap·◧ 비침범을 확인하고, **빈 상태 패널**은
+  `MARU_OPEN_NOTIFICATIONS_EMPTY=1`로 헤더 밴드 + 일러스트(아이콘·제목·부제)를 확인한다. 접힘 종은 `MARU_COLLAPSE_SIDEBAR`로
+  ◧↔종 띠 세로 정렬·좌측 텍스트 배지 확인. 빨강 원은 GpuQuad **layer 4**(bg strip 뒤·헤더 글리프 앞)로 흰 숫자 아래에 그려진다.
 - **수동 E2E**(`.app` 번들): OSC/에이전트 알림 → 배너 클릭 → 발신 터미널 점프 / 멀티 윈도우 토큰 라우팅 / 종 클릭 →
   카드 패널 → 항목 클릭 점프 / 안읽음 배지·점.
 

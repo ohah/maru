@@ -1,6 +1,8 @@
 # TerminalCore(core.zig) 분해: Parser/Screen 분리 설계
 
-`src/terminal/core.zig`(현재 9,962줄·573KB·함수 236개·테스트 289개)는 VT **파서 상태기계** + **화면/스크롤백 storage** + **host-reply/encoding**을 한 struct에 섞고 있다. 이는 `docs/project-rules.md` "구조와 파일 분리"(한 파일이 parser·storage·encoding처럼 서로 다른 이유로 바뀌면 facade는 유지하되 구현을 목적별로 분리) 위반이다. 이 문서는 그 분해의 **남은 단계(parser·active screen storage)** 설계를 단일 출처로 둔다.
+`src/terminal/core.zig`(분해 시작 시점 9,962줄·573KB·함수 236개·테스트 289개)는 VT **파서 상태기계** + **화면/스크롤백 storage** + **host-reply/encoding**을 한 struct에 섞고 있었다. 이는 `docs/project-rules.md` "구조와 파일 분리"(한 파일이 parser·storage·encoding처럼 서로 다른 이유로 바뀌면 facade는 유지하되 구현을 목적별로 분리) 위반이었다. 이 문서는 그 분해(parser·active screen storage)의 설계·메커니즘·PR 시퀀스를 단일 출처로 둔다.
+
+> **상태: 분해 완결**(분할 1~21/N + 리뷰 3배치 머지). core.zig는 7,228줄로 줄고 parser.zig(989줄)·screen.zig(2,001줄)·osc.zig(294줄)로 분리됐다. 이 문서는 이제 **완료된 분해의 설계 기록**이며, §0 현황표가 최종 결과를, §2가 채택한 전략(방향 A)을, §6이 후속 별도 initiative를 담는다.
 
 이 문서는 `AGENTS.md` 설계 문서 인덱스에 연결된다. 분해 작업의 경계·메커니즘·PR 시퀀스를 바꿀 때는 이 문서를 먼저 갱신한다.
 
@@ -17,9 +19,10 @@
 | 분할 5~7/N | #936·#938·#939 | **Phase A 완료** — parser dispatch: DCS(DECRQSS·XTGETTCAP)·OSC 라우터·APC(kitty graphics) 파싱·라우팅 | `parser.zig` (320줄) |
 | 분할 8~11/N | #940~#943 | **Phase B 완료** — 활성 화면 연산: tabstops·dirty 추적·G3 charset/이모지 폭·스크롤백 저장·재-wrap | `screen.zig` |
 | 분할 12~18/N | #946~#952 | **Phase C 완료** — 화면 본체: cursor 이동·erase/insert/delete·scroll/feed·alt screen·print 핫패스(putCell)·resize/reflow·snapshot/viewport 합성 | `screen.zig` (~1990줄) |
-| 분할 19~21/N | #954~#956 | **Phase D 완료 — 분해 완결** — parser 상태기계 본체: SGR/모드 dispatch·CSI 상태기계(handleCsiByte·dispatchCsi)·escape+UTF-8 intake+write 루프(`write`→`parser.feed` 위임) | `parser.zig` (984줄) |
+| 분할 19~21/N | #954~#956 | **Phase D 완료 — 분해 완결** — parser 상태기계 본체: SGR/모드 dispatch·CSI 상태기계(handleCsiByte·dispatchCsi)·escape+UTF-8 intake+write 루프(`write`→`parser.feed` 위임) | `parser.zig` (989줄) |
+| 리뷰 후속 | #944·#953·#957 | 배치 1~3 `/code-review max` cleanup(주석·모듈 doc·현황표 정합 — 정확성 버그 0) | (doc/주석) |
 
-> 배치 1(5~11/N)·배치 2(12~18/N)·배치 3(19~21/N) 후 `/code-review max` 누적 리뷰 각각 완료(정확성 버그 0 — 순수 이동 검증). **분해 완결: core.zig 9962→7226줄(−2736), parser.zig 984줄·screen.zig 2001줄로 분리.** core.zig는 struct·필드·facade(write/resize/snapshot/renderSnapshot은 외부 점-호출이라 잔류, 본문은 parser/screen)·selection/search/url·kitty graphics 본체·host-reply·lifecycle만 보유. CSI param 접근자(csiRawParam/csiParam·max_csi_params)는 param 저장소(csi_params 필드)와 한 묶음이라 core 잔류 — parser/screen이 cross-file 호출(pub). 잔여(후속 별도 initiative): `absRow`/`absRowWrapped` accessor·selection 분리(11b/N), Screen struct 필드-fold(architecture.md 2단계).
+> 배치 1(5~11/N)·배치 2(12~18/N)·배치 3(19~21/N) 후 `/code-review max` 누적 리뷰 각각 완료(정확성 버그 0 — 순수 이동 검증). **분해 완결: core.zig 9962→7228줄(−2734), parser.zig 989줄·screen.zig 2001줄·osc.zig 294줄로 분리.** core.zig는 struct·필드·facade(write/resize/snapshot/renderSnapshot은 외부 점-호출이라 잔류, 본문은 parser/screen)·selection/search/url·kitty graphics 본체·host-reply·lifecycle만 보유. CSI param 접근자(csiRawParam/csiParam·max_csi_params)는 param 저장소(csi_params 필드)와 한 묶음이라 core 잔류 — parser/screen이 cross-file 호출(pub). 잔여(후속 별도 initiative): `absRow`/`absRowWrapped` accessor·selection 분리(11b/N), Screen struct 필드-fold(architecture.md 2단계).
 
 확립된 두 분리 패턴(이 분해의 토대):
 
@@ -95,13 +98,11 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 
 ---
 
-## 2. ★ 전략 정합성 — 합의가 필요한 결정
+## 2. 전략 정합성 — 채택한 결정 (방향 A, 확정·완료)
 
-`architecture.md` §"스크롤백은 화면에 귀속한다"는 분해의 **종착지(2단계)**를 이렇게 명시한다:
+> **결정 완료:** 아래 두 옵션 중 **(A) 연산 추출 우선**을 사용자와 합의해 채택했고, 분할 5~21/N으로 전부 실행·머지했다. 필드는 평평하게 둔 채 함수만 parser.zig/screen.zig로 옮겼다. Screen struct fold(2단계)는 §6 후속 별도 initiative로 남는다. 아래는 그 결정의 근거 기록이다.
 
-> 후속(2단계)은 cursor·grid까지 포함한 완전한 `Screen` 구조체로 흡수하고, 그 자리에 page-aligned storage를 얹는 것이다.
-
-즉 최종 목표는 `cells`/`cursor`/`wrapped`/`prompt_marks`/`sb` 등 **필드를 `Screen` 하위 struct로 접고** `TerminalCore`가 `screen: Screen`을 보유하는 형태다. 그런데 이번 작업을 **그 형태로 직행**하면:
+[architecture.md §"스크롤백은 화면에 귀속한다"](architecture.md#스크롤백은-화면screen에-귀속한다)가 분해의 **종착지(2단계)**를 정의한다 — cursor·grid까지 포함한 완전한 `Screen` 구조체로 필드를 접고 그 자리에 page-aligned storage를 얹는 것(원문·갱신은 그 문서를 단일 출처로 둔다; 여기서는 verbatim 복제 대신 링크로 참조). 즉 최종 목표는 `cells`/`cursor`/`wrapped`/`prompt_marks`/`sb` 등 **필드를 `Screen` 하위 struct로 접고** `TerminalCore`가 `screen: Screen`을 보유하는 형태다. 그런데 이번 작업을 **그 형태로 직행**하면:
 
 - `self.cells`→`self.screen.cells`, `self.cursor`→`self.screen.cursor`가 core.zig 9,962줄 + 외부 호출부(`term.cursor`/`term.cells`를 읽는 곳) + 289 테스트 + 스냅샷/ABI 전반에 퍼진다.
 - 한 PR이 거대해지고 동작-보존 검증이 어려워진다(고위험 단일 도약).
@@ -112,14 +113,14 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 - 외부 호출부·ABI·스냅샷 **불변**(§1.2). 위험은 PR 단위로 격리되고, 매 PR을 기존 289 테스트로 보존 검증.
 - 연산이 깨끗이 갈린 뒤, **필드를 `Screen`으로 접는 2단계**는 별도 initiative로 진행(그땐 함수가 이미 screen.zig에 모여 있어 fold가 기계적).
 
-### 결정 요청
+### 검토한 옵션 (A 채택)
 
 | 옵션 | 내용 | 위험 | 정합성 |
 |---|---|---|---|
-| **(A) 연산 추출 우선** [권장] | 필드는 평평하게, 함수만 parser.zig/screen.zig로. 2단계(Screen struct fold)는 후속 별도 initiative. | 낮음(PR별 격리, 선례 동형) | architecture.md 2단계의 **선행 단계**임을 문서·커밋에 명시 |
+| **(A) 연산 추출 우선** ✅ 채택 | 필드는 평평하게, 함수만 parser.zig/screen.zig로. 2단계(Screen struct fold)는 후속 별도 initiative. | 낮음(PR별 격리, 선례 동형) | architecture.md 2단계의 **선행 단계**임을 문서·커밋에 명시 |
 | **(B) Screen struct 직행** | cells/cursor/… 필드를 Screen struct로 접으며 동시에 연산 이동. | 높음(필드 접근 전수 변경·ABI·스냅샷·외부 호출부) | architecture.md 2단계 종착지에 한 번에 도달 |
 
-(A)를 권장한다 — "코어 심장부라 위험하니 doc-first, 저위험 단위부터"라는 이번 요청과 직접 부합하고, architecture.md 전략을 **수정하지 않고 그 1.5단계로 정렬**하기 때문이다. 합의되면 §3~§5대로 진행한다. (B)를 택하면 PR 시퀀스를 필드-fold 중심으로 다시 설계한다.
+(A)를 채택했다 — "코어 심장부라 위험하니 doc-first, 저위험 단위부터"라는 요청과 직접 부합하고, architecture.md 전략을 **수정하지 않고 그 1.5단계로 정렬**하기 때문이다. §3~§5대로 진행해 분할 5~21/N으로 완료했다.
 
 ---
 
@@ -129,7 +130,7 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 
 ### 3.1 → `parser.zig` (바이트 해독 + 시퀀스 dispatch)
 
-- **상태기계 루프**: `write`(pub, 위임 메서드로 잔류 — 본문은 `parser.feed(self, bytes)`로), `handleEscapeByte`, `beginCsi`, `csiNextParam`, `handleCsiByte`, `csiRawParam`, `csiParam`
+- **상태기계 루프**: `write`(pub, 위임 메서드로 잔류 — 본문은 `parser.feed(self, bytes)`로), `handleEscapeByte`, `beginCsi`, `csiNextParam`, `handleCsiByte` — ⚠️ **실제 결과**: `csiRawParam`/`csiParam`은 계획과 달리 **core 잔류**(param 저장소 `csi_params` 필드와 한 묶음, parser/screen이 cross-file 호출, §3.3 참조)
 - **CSI dispatch**: `dispatchCsi`, `setPrivateModes`, `setAnsiModes`, `repeatLastChar`, `kittyFlagsFromParam`
 - **SGR 파싱**: `applySgr`, `applyExtendedColor`
 - **OSC 라우터**: `dispatchOsc`(→ osc.zig 핸들러 위임)
@@ -141,7 +142,7 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 ### 3.2 → `screen.zig` (활성 grid/cursor/scroll storage·연산)
 
 - **cursor 이동/위치**: `cursorPosition`, `setOriginMode`, `resolveRow`, `cursorVertical`, `cursorHorizontal`, `cursorToColumn`, `cursorToRow`, `setCursorStyle`, `clampSavedCursor`(top-level)
-- **erase/insert/delete**: `eraseInLine`, `eraseCharacters`, `insertChars`, `deleteChars`, `eraseInDisplay`, `repairWideGlyphEdges`, **`clearScreen`(pub)**
+- **erase/insert/delete**: `eraseInLine`, `eraseCharacters`, `insertChars`, `deleteChars`, `eraseInDisplay`, `repairWideGlyphEdges` — ⚠️ **실제 결과**: `clearScreen`은 계획과 달리 **core 잔류**(`isPromptish`(prompt 마크 storage)와 결합, §3.3 참조)
 - **scroll/feed**: `lineFeed`, `reverseIndex`, `scrollRegionUp`, `scrollRegionDown`, `scrollRangeUp`, `scrollRangeDown`, `insertLines`, `deleteLines`, `setScrollRegion`, `decAlign`
 - **print 경로**: `writeCodepoint`, `putCell`, `clearCellForWrite`, `attachCombiningMark`, `promoteLastToEmojiWidth`, `wideContinuationCell`, `isSkinToneModifier`, `isRegionalIndicator`, `lastCellIsWideEmoji`, `lastCellIsLoneRegionalIndicator`, `translateCharset`, `decSpecial`, `designateCharset`
 - **alt screen + saved cursor**: `enterAltScreen`, `leaveAltScreen`, `saveCursorState`, `restoreCursorState`, `restoreFromSlot`, `activeSavedCursor`
@@ -149,19 +150,21 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 - **dirty 추적**: `markDirty`, `markCursorMoveDirty`, `markCursorRowDirty`, **`takeDirty`(pub)**, **`clearDirty`(pub)**
 - **resize/reflow**: **`resize`(pub)**, `ensureReflowScratch`, `copyRegionResize`, `trimmedRowLen`, `isBlankCell`, `outputRowBlank`, `clearTruncatedWideBase`
 - **snapshot/viewport**: **`snapshot`(pub)**, **`renderSnapshot`(pub)**, `drawPreeditCells`, `snapshotWithPreedit`, **`viewportRow`/`viewportHasBlink`/`viewportRowPrompt`/`viewOffset`(pub)**
-- **스크롤백 행 연산**(Scrollback struct와 짝): `pushScrollback`, `clearScrollback`, `ensureScrollbackRewrapped`, `rewrapScrollback`, `rewrapScrollbackAnchored`, `rewrapScrollbackInner`, `countRewrapRows`, `trimmedLen`, `absRow`, `absRowWrapped`, **`scrollbackLen`/`maxScrollback`/`setMaxScrollback`/`scrollbackRow`/`scrollViewport`/`scrollToBottom`/`scrollToAbs`/`scrollbackRowWrapped`/`scrollbackRowPrompt`(pub)**
+- **스크롤백 행 연산**(Scrollback struct와 짝): `pushScrollback`, `clearScrollback`, `ensureScrollbackRewrapped`, `rewrapScrollback`, `rewrapScrollbackAnchored`, `rewrapScrollbackInner`, `countRewrapRows`, `trimmedLen`, **`scrollbackLen`/`maxScrollback`/`setMaxScrollback`/`scrollbackRow`/`scrollViewport`/`scrollToBottom`/`scrollToAbs`/`scrollbackRowWrapped`/`scrollbackRowPrompt`(pub)** — ⚠️ **실제 결과**: `absRow`/`absRowWrapped`는 selection 공유(19+6 호출)로 **core 잔류**, 11b/N 후속 accessor PR로 분리 예정(§4·§6 참조)
 - **grid 헬퍼**: `index`, `cellCount`(top-level), `fullDirty`(top-level), `clampGridSize`(pub, facade re-export — core가 `screen.clampGridSize` re-export하거나 core 잔류)
 
 ### 3.3 core.zig 잔류 (이번 범위 밖)
 
 - **라이프사이클**: `init`, `deinit`, `fullReset`, `resetInputModes`, `clearLinkStore`
 - **선택/검색/URL**(후속 `selection.zig` 후보): `selection*`, `wordBounds*`, `selectWordAt`, `selectLineAt`, `selectAll`, `findMatches`, `matchViewportSpan`, `extractSelection`, `extractBlockSelection`, `extractUrlAt`, `urlAnchorAt`, `urlSpanAtAbs`, `urlSpanInWord`, `wordIsUrl`, `cellLinkAt`, `linkBoundsAt`, `appendRowUtf8`, `foldCase`, `matchAtIgnoreCase`, `clipAbsSpanToViewport`, `normalizedSelection`, `absRowFromViewport`, `shiftSelectionForEviction`, `shiftCoordsForEviction`, `invalidateSelection`, `setPreedit`
-- **prompt 마크/semantic storage**: `promptAtAbs`, `isPromptish`, `isPromptStart`, `setPromptExitAtAbs`, `stampPromptExit`, `jumpToPrompt`(선택과 얽혀 잔류, screen이 pub로 호출)
+- **prompt 마크/semantic storage**: `promptAtAbs`, `isPromptish`, `isPromptStart`, `setPromptExitAtAbs`, `stampPromptExit`, `jumpToPrompt`(선택과 얽혀 잔류, screen이 pub로 호출), `clearScreen`(`isPromptish` 결합으로 §3.2 erase 클러스터 중 유일하게 core 잔류)
+- **CSI param 접근자**: `csiRawParam`, `csiParam`(pub) — param 저장소 `csi_params`/`csi_param_count` 필드와 한 묶음이라 core 잔류, parser(`dispatchCsi`·`applySgr`)·screen(`cursorPosition`·`setScrollRegion`)이 cross-file 호출
+- **스크롤백 절대행 accessor**: `absRow`, `absRowWrapped` — selection/url/snapshot 25곳 공유로 11b/N 후속 분리까지 core 잔류(§3.2 스크롤백 행 연산은 storage·rewrap만 screen.zig로 감)
 - **kitty graphics 본체**(후속 `kitty.zig` 후보): `execKittyGraphics`, `kittyDisplay`, `kittyAdvanceRows`, `addOrReplacePlacement`, `removePlacementsForImage`, `removeOnePlacement`, `kittyDelete`, `deleteByZ`, `shiftPlacementsForEviction`, `buildPlacementViews`, `buildImageViews`, `storeKittyImage`, `evictKittyImagesFor`, `pickKittyEvictionVictim`, `kittyImageHasPlacement`, `kittyTransmit`, `kittyTransmitPng`, struct들(`KittyGraphicsCommand`/`KittyImage`/`KittyImageStorage`/`StoredPlacement`)
 - **host-reply/encoding 상태·접근자**: `appendResponse`/`pendingResponse`/`clearResponse`, `reportFocus`, `reportMouse`, `encodeKey`, `encodeOptions`, `recordShellEvent`/`shellEvents`/`clearShellEvents`/`shellEventsOverflowed`, `internLink`/`linkUri`, `setWindowTitle`/`windowTitle`/`currentCwd`/`sshRemoteDest`, `setCellMetrics`/`setDefaultColors`/`setConfigPalette`, `defaultFgOverride`/`defaultBgOverride`/`paletteOverride`/`reverseScreen`, clipboard·notification·bell 접근자, `encodePaste`, `dumpUtf8`
 - **enum/const**: `ParserState`(§1.5), `Charset`, `MouseTracking`, `MouseFormat`, `KittyFlags`, `KittyFlagStack`, `KittySetMode`, `SavedCursor`, `max_csi_params`, `default_max_scrollback`, kitty 상한들
 
-> 경계 메모: selection/search·kitty graphics는 screen 연산을 많이 부르지만(예: `absRow`·`viewportRow`), screen.zig가 pub로 노출하면 core 잔류 코드가 `screen.absRow(self, ...)`로 부른다(단방향, 순환 무관). 이 둘의 분리는 **이번 범위 밖**(향후 selection.zig/kitty.zig). 
+> 경계 메모: selection/search·kitty graphics는 screen 연산을 많이 부른다 — `viewportRow` 등은 이미 screen.zig pub라 core 잔류 코드가 `screen.viewportRow(self, ...)`로 부른다(단방향, 순환 무관). `absRow`/`absRowWrapped`는 아직 core 잔류(11b/N에서 screen.zig로 옮기면 `screen.absRow(self, ...)` 형태가 됨). selection/kitty 자체의 분리는 **이번 범위 밖**(향후 selection.zig/kitty.zig, §6). 
 
 ---
 
@@ -192,7 +195,7 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 | PR | 범위(이동) | 비고 | 위험 |
 |---|---|---|---|
 | **12/N** | cursor 이동/위치(`cursorPosition`·`cursorVertical/Horizontal/ToColumn/ToRow`·`resolveRow`·`setOriginMode`·`setCursorStyle`·`clampSavedCursor`) | | 중 |
-| **13/N** | erase/insert/delete(`eraseInLine`·`eraseCharacters`·`insertChars`·`deleteChars`·`eraseInDisplay`·`repairWideGlyphEdges`·`clearScreen`) | | 중 |
+| **13/N** | erase/insert/delete(`eraseInLine`·`eraseCharacters`·`insertChars`·`deleteChars`·`eraseInDisplay`·`repairWideGlyphEdges`) | `clearScreen`은 `isPromptish` 결합으로 core 잔류(실제 결과) | 중 |
 | **14/N** | scroll/feed(`lineFeed`·`reverseIndex`·`scrollRegion*`·`scrollRange*`·`insertLines`·`deleteLines`·`setScrollRegion`·`decAlign`) | scrollRangeUp의 history push가 스크롤백과 결합(11/N 이후라 안전) | 중~높음 |
 | **15/N** | alt screen + saved cursor(`enterAltScreen`·`leaveAltScreen`·`save/restoreCursorState`·`restoreFromSlot`·`activeSavedCursor`) | grid+scrollback 스왑 | 중~높음 |
 | **16/N** | print 핫패스(`writeCodepoint`·`putCell`·`clearCellForWrite`·`attachCombiningMark`·`promoteLastToEmojiWidth`) | grapheme/wide/combining — 가장 뜨거운 경로 | 높음 |
@@ -204,7 +207,7 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 | PR | 범위(이동) | 비고 | 위험 |
 |---|---|---|---|
 | **19/N** | SGR+모드 dispatch(`applySgr`·`applyExtendedColor`·`setPrivateModes`·`setAnsiModes`·`repeatLastChar`·report 3개·`kittyFlagsFromParam`) | 모드 setter가 screen·다수 필드 건드림 | 높음 |
-| **20/N** | CSI dispatch(`dispatchCsi`·`beginCsi`·`csiNextParam`·`handleCsiByte`·`csiRawParam`·`csiParam`) | ~40개 `screen.x(self)` 호출(이미 이동됨) | 높음 |
+| **20/N** | CSI dispatch(`dispatchCsi`·`beginCsi`·`csiNextParam`·`handleCsiByte`) | `csiRawParam`/`csiParam`은 param 저장소와 한 묶음이라 core 잔류(실제 결과). ~40개 `screen.x(self)` 호출(이미 이동됨) | 높음 |
 | **21/N** | escape+UTF-8 intake+write 루프(`handleEscapeByte`·`completePendingUtf8`·`storePendingUtf8`·`utf8SequenceLength`·`decodeUtf8`; write 본문→`parser.feed`, core `write`는 위임) | 진입점 — 호출 대상이 전부 이동 완료된 상태 | 최고 |
 
 > 위 21개는 선례(분할 1~4/N)의 granularity를 잇는 상한이다. 합의 시 인접 저위험 PR을 합쳐 수를 줄일 수 있다(예: 8+9, 5+6). granularity는 합의 사항.

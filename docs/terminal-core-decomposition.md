@@ -259,14 +259,16 @@ selection은 화면/스크롤백을 **읽어** 좌표·텍스트를 산출하는
 
 순환 import은 osc/parser/screen가 검증한 그래프와 동형(core↔selection 상호 import을 Zig lazy 분석이 푼다).
 
-### 7.2 PR 시퀀스 (저위험 → 고위험)
+### 7.2 PR 시퀀스 (의존성 DAG 순 — leaf 먼저)
+
+> ⚠️ **순서 결정 근거**: URL 함수(`urlAnchorAt`/`extractUrlAt`/`wordIsUrl`)는 `wordBoundsAt`(word-bounds)에, `wordBoundsAtImpl`은 `absRowFromViewport`·`isWordBoundaryCell`에 의존한다. 따라서 "URL을 먼저"가 아니라 **순수 leaf(자기-cluster 의존 없는 헬퍼)를 먼저** 옮겨야 각 PR이 컴파일된다(이동된 함수가 부르는 대상이 이미 selection.zig pub이거나 core 메서드/필드/screen). 초안의 "S2=URL leaf"는 이 의존성을 놓쳐 S2서 dependency-순으로 정정.
 
 | PR | 범위(이동) | 비고 | 위험 |
 |---|---|---|---|
 | **S1**(11b/N) ✅ | `absRow`·`absRowWrapped` → screen.zig | 스크롤백 abs-좌표 accessor. 호출부 25곳(19+6) 전부 selection 클러스터(core) → `screen.absRow(self,...)`. selection→screen 단방향 확보 | 낮음 |
-| **S2** | `selection.zig` 신설 + URL/link leaf(`cellLinkAt`·`linkBoundsAt`·`urlAnchorAt`·`urlSpanAtAbs`·`urlSpanInWord`·`wordIsUrl`·`extractUrlAt`·`appendRowUtf8`) | screen accessor만 의존하는 leaf. facade: urlAnchorAt·urlSpanAtAbs·extractUrlAt | 낮음 |
-| **S3** | word-bounds + 포인터 선택(`isWordSeparatorCell`·`isWordBoundaryCell`·`WordBounds`·`wordBoundsAt`·`wordBoundsAtImpl`·`selectWordAt`·`selectionStart`·`selectionExtend`·`setSelectionBlock`·`selectLineAt`·`selectAll`·`selectionClear`·`absRowFromViewport`) | facade 다수. `invalidateSelection`(core seam)이 `self.selectionClear()` 호출 유지 | 중 |
-| **S4** | 검색 + 추출(`findMatches`·`matchViewportSpan`·`foldCase`·`matchAtIgnoreCase`·`normalizedSelection`·`selectionViewportSpan`·`clipAbsSpanToViewport`·`extractSelection`·`extractBlockSelection`) | findMatches 테스트 4개·selection 추출 테스트 다수로 보존 검증 | 중 |
-| **S5** | preedit + eviction 선택분(`setPreedit`·`shiftSelectionForEviction`) | `shiftCoordsForEviction`(core seam)이 `selection.shiftSelectionForEviction(self,n)` 호출. 분리 완결 | 중 |
+| **S2** ✅ | `selection.zig` 신설 + **순수 leaf 12개**(`cellLinkAt`·`linkBoundsAt`·`appendRowUtf8`·`urlSpanInWord`·`isWordSeparatorCell`·`isWordBoundaryCell`·`clipAbsSpanToViewport`·`normalizedSelection`·`absRowFromViewport`·`foldCase`·`matchAtIgnoreCase`·`shiftSelectionForEviction`) | 전부 private(facade 0). screen/필드/std만 의존(자기-cluster self 의존 없음). 테스트 호출부 `TerminalCore.foldCase`/`urlSpanInWord` → `selection.X`. `shiftSelectionForEviction`은 `self.selectionClear()`(core pub) 호출 | 낮음 |
+| **S3** | word-bounds + 포인터 선택(`WordBounds`·`wordBoundsAt`·`wordBoundsAtImpl`·`selectWordAt`·`selectionStart`·`selectionExtend`·`setSelectionBlock`·`selectLineAt`·`selectAll`·`selectionClear`·`max_word_separators`) | leaf(S2) 위에 빌드. facade 다수. `invalidateSelection`(core seam)이 `self.selectionClear()`(→facade) 호출 유지. 테스트 `wordBoundsAt` 호출부 갱신 | 중 |
+| **S4** | URL 감지(`urlAnchorAt`·`urlSpanAtAbs`·`extractUrlAt`·`wordIsUrl`) | wordBoundsAt(S3)·cellLinkAt/clip(S2)·linkUri(core)에 의존. facade: urlAnchorAt·urlSpanAtAbs·extractUrlAt | 중 |
+| **S5** | 검색 + 추출 + preedit(`findMatches`·`matchViewportSpan`·`selectionViewportSpan`·`extractSelection`·`extractBlockSelection`·`setPreedit`) | normalizedSelection/foldCase/match(S2)·clip(S2)에 의존. findMatches·추출 테스트로 보존 검증. `shiftCoordsForEviction`(core seam)은 이미 `selection.shiftSelectionForEviction`(S2) 호출. 분리 완결 | 중 |
 
 검증·리뷰는 §5 그대로(매 PR `zig build test`·`macos-app-build`·`check-boundaries`·`zig fmt`, green auto-merge --rebase). PR 5개라 마지막에 `/code-review max` 1회. `selection.zig`는 check-boundaries가 `terminal/`을 walk하므로 자동 포함(등록 불필요).

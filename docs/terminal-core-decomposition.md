@@ -608,3 +608,25 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 3. **granularity**: page_allocator는 OS page(4KB+) 단위 — arena가 360KB(8192×44)라 무시 가능한 반올림.
 
 **리스크**: 테스트 leak 추적(주입으로 해결), per-arena mmap syscall 비용(arena가 크고 pool 재사용이라 syscall 적음), realloc(초광폭 행) 시 remap(page_allocator 지원). 동작 보존(저장 위치만 이동 — 관측 불변).
+
+### 11.10 B 설계 — 활성 grid까지 통합 PageList (full B, 다단계·설계·합의 대기)
+
+**결정**: 사용자가 full B를 선택(§11.6 B-게이트 해소) — perf 이득 ~0(P0)·최고 위험을 알고도 architecture.md §211 종착지(통일 저장 모델) + grapheme page-local 메모리 회수(§11.8)를 위해 진행. **다단계 PR + 매 단계 누적 `/code-review max`**, 동작 보존(관측 불변) 기준.
+
+**모델**: 스크롤백 PageList(A1/A2)를 활성 grid까지 확장 — **활성 화면 = 페이지 리스트의 꼬리 `rows`행**, 스크롤백 = 그 앞 전부. 별도 `screen.cells` 평평 배열 제거. scroll = 활성 윈도가 리스트를 따라 내려가는 것(맨 위 활성행이 스크롤백이 됨) — 페이지 경계 포인터 이동(O(1) 잠재).
+
+**커서 표현(핵심 결정 — Pin 대신 (row,col)+anchor)**: maru 커서는 `(row,col)`이 전 코드(262곳)에 박혀 있다. Ghostty식 Pin(page ptr+offset, tracked)로 바꾸면 그 262곳 전수 재작성이라 위험·비용 과대. 대신 **커서를 활성-상대 `(row,col)` 그대로 두고**, cell 접근 원시함수(`index`/`getCellPtr`/`putCell`)만 **활성 region anchor**(활성 행 0이 시작하는 page+offset, scroll/resize 때 1회 재계산)를 통해 `(row,col)→(page,cell)`로 O(1) 변환한다. → 262 커서 사이트 불변, 변환은 cell-access 층에만. hot-path는 anchor 캐시로 직접 인덱싱과 동급(perf 회귀 방지의 핵심). (대안: Pin — 채택 안 함, 비용·위험 과대.)
+
+**단계(각 PR 동작 보존 + 게이트)**:
+| 단계 | 내용 | 게이트 |
+|------|------|--------|
+| **B1** | 통합 PageList 골격 — 활성 region을 페이지 리스트 꼬리로 표현하되 동작·레이아웃 보존(활성 anchor 도입, `screen.cells`→page tail 매핑). cell-access 원시함수만 변경 | 전 테스트 green(동작 보존) + hot-path perf 게이트 |
+| **B2** | scroll/clear/erase/insert/delete를 page-tail 연산으로(활성 윈도 이동) | 동작 보존 + scroll perf |
+| **B3** | reflow 통일(활성+스크롤백 한 경로) — 가장 위험. 기존 reflow 테스트 전수 보존 | 누적 리뷰 + reflow 테스트 |
+| **B4** | grapheme page-local(§11.8) — page가 grapheme 풀 소유, evict 시 동반 소멸. snapshot.graphemes seam만 page-local로 | HG oracle·NFD smoke green + grapheme 메모리 회수 측정 |
+
+**perf 게이트(필수)**: B는 perf 이득이 ~0이므로 **회귀가 없어야** 정당하다 — hot-path(putCell/large_output)·scroll·reflow가 현 budget 유지. anchor 캐시가 (row,col)→cell을 O(1)로 지키는지 각 단계 측정.
+
+**리스크**: (1) hot-path page-fetch 회귀 — anchor 캐시로 직접 인덱싱 동급 유지(측정 강제). (2) reflow 통일 정확성(soft-wrap·wide-glyph·prompt·커서 행) — 단계 분리 + 누적 리뷰. (3) 활성 anchor 무효화 누락(scroll/resize/alt swap 후 stale) — anchor 재계산 지점 전수. (4) alt swap이 활성 region 통째 교체 — 페이지 리스트 swap으로 표현.
+
+**정직한 종착지 확인**: full B 완료 = architecture.md §211 "cursor·grid 완전한 Screen + page-aligned storage" 달성. 그 이상(file-backing 등)은 측정된 필요 시 별도.

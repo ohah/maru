@@ -238,7 +238,7 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 
 - **2단계(Screen struct fold)**: §2 — 필드를 `Screen` 하위 struct로 접는 architecture.md 종착지. 연산 추출 완료 후 별도 initiative.
 - **selection.zig** ✅ **완료**: 선택/검색/URL/preedit 클러스터를 §7(S1~S5)로 분리 완결(core.zig 7228→6715줄, selection.zig 587줄(리뷰 cleanup 후)).
-- **kitty.zig**: kitty graphics 본체(현 core 잔류). parser는 이미 파싱만 위임(7/N).
+- **kitty.zig**: kitty graphics 본체(현 core 잔류). parser는 이미 파싱만 위임(7/N). → **§8에서 진행**.
 - **input/report.zig**: `reportFocus`/`reportMouse`/`encodeKey` 등 입력→host-reply 인코딩.
 
 ---
@@ -282,3 +282,31 @@ selection은 화면/스크롤백을 **읽어** 좌표·텍스트를 산출하는
 - **API 표면 축소**: selection.zig의 intra-only 헬퍼 11개(`clipAbsSpanToViewport`·`cellLinkAt`·`linkBoundsAt`·`appendRowUtf8`·`normalizedSelection`·`matchAtIgnoreCase`·`isWordSeparatorCell`·`isWordBoundaryCell`·`wordBoundsAt`·`wordBoundsAtImpl`·`extractBlockSelection`)를 `pub fn`→`fn`로 데모트 — 모듈 doc의 "osc/parser/screen와 동형"(헬퍼는 private)에 정합. cross-file 호출 있는 것만 pub 유지(facade-backed 15 + `foldCase`/`urlSpanInWord`/`wordIsUrl`=테스트 + `shiftSelectionForEviction`=seam).
 - **좌표 family 응집**: `absRowFromViewport`(viewport→abs, 선택 상태 무관)를 screen.zig로 — `absRow`/`absRowWrapped`(S1)와 한 곳. selection.zig는 `screen.absRowFromViewport(self,)`로 호출.
 - **잔재 정리**: `findMatches`의 vestigial `start_abs` 상수 인라인, `wordIsUrl` pub-for-test 사유 주석, `src/width.zig` stale 주석(`core.appendRowUtf8`→`selection.appendRowUtf8`).
+
+---
+
+## 8. kitty.zig 분리 (후속 initiative)
+
+§6의 kitty.zig 후속을 §1~§5·§7과 **같은 절차·메커니즘**으로 진행한다. kitty graphics 본체(현 core.zig ~1036~1530, 함수 17개 + 저장 struct 4개)를 `kitty.zig`로 떼어낸다. parser는 이미 파싱(`parseKittyGraphicsCommand`·`dispatchApc`, 7/N)만 갖고, core가 exec/storage/placement/transmit/render-view 본체를 들고 있다 — 그 본체를 옮긴다.
+
+### 8.1 경계 설계
+
+- **이동 struct(4개, 전부 self-contained — `Scrollback` 선례 동형, TerminalCore 미참조)**: `KittyGraphicsCommand`(parse↔exec DTO)·`StoredPlacement`·`KittyImage`·`KittyImageStorage`(map+add/clear/deinit 메서드 포함). core는 `const KittyGraphicsCommand = kitty.KittyGraphicsCommand;`처럼 **별칭**을 둬 필드 선언(`kitty_chunk_cmd: ?KittyGraphicsCommand`·`kitty_images: KittyImageStorage`·`kitty_placements: [...]StoredPlacement`)을 불변으로 둔다(§1.5 순환은 self-contained라 lazy 분석으로 해소).
+- **core 잔류(graphics 아님)**: `KittyFlags`/`KittyFlagStack`/`KittySetMode`(kitty **keyboard** protocol — parser의 `kittyFlagsFromParam`·`reportKittyFlags`가 씀)·`kitty_flags` 필드. graphics와 별개 subsystem이라 안 옮긴다.
+- **parser 연동**: `parseKittyGraphicsCommand`의 반환 타입을 `core.TerminalCore.KittyGraphicsCommand`→`kitty.KittyGraphicsCommand`로, `dispatchApc`의 `self.execKittyGraphics(...)`→`kitty.execKittyGraphics(self, ...)`로(parser가 kitty.zig import — osc import과 동형. execKittyGraphics는 외부 호출 없어 facade 불필요).
+- **core facade(2개)**: `buildPlacementViews`·`buildImageViews`는 screen.zig snapshot/renderSnapshot이 `self.X()`로 호출 — kitty.zig로 옮기면 screen→kitty 하향 의존(레이어 역전)이라 core facade로 잔류(본문은 kitty.zig). screen은 kitty를 import하지 않는다.
+- **core seam**: `shiftCoordsForEviction`(core)이 `self.shiftPlacementsForEviction(n)`→`kitty.shiftPlacementsForEviction(self, n)` 호출(selection의 shiftSelectionForEviction과 같은 결 — eviction 조율자는 core, 부분만 위임).
+- **테스트**: `core.kittyImageHasPlacement(...)`(테스트 직접 호출) → `kitty.kittyImageHasPlacement(&core, ...)`(facade 없음 — app 호출 없고 테스트만, wordIsUrl과 같은 처리).
+- **의존**: kitty.zig는 std·core·types·png(PNG 디코드)·(zlib는 std.compress)만 의존. check-boundaries가 `terminal/` walk라 자동 포함.
+
+### 8.2 PR 시퀀스 (의존성 DAG 순 — leaf 먼저)
+
+의존 그래프: orchestrator(`execKittyGraphics`→`kittyTransmit`/`kittyDisplay`/`kittyDelete`) → mid(`storeKittyImage`→`evictKittyImagesFor`→`pickKittyEvictionVictim`; 이들이 `removePlacementsForImage` leaf를 부름) → leaf(placement·view·`kittyImageHasPlacement`·`kittyAdvanceRows`). 그래서 **true leaf 먼저**(storage는 leaf 아님 — removePlacementsForImage 호출).
+
+| PR | 범위(이동) | 비고 | 위험 |
+|---|---|---|---|
+| **K1** ✅ | `kitty.zig` 신설 + struct 4개 + **true leaf 8개**(`removePlacementsForImage`·`removeOnePlacement`·`addOrReplacePlacement`·`shiftPlacementsForEviction`·`kittyImageHasPlacement`·`kittyAdvanceRows`·`buildPlacementViews`·`buildImageViews`) | 다른 kitty fn 호출 없음(필드·types만). core 별칭 4개(KittyGraphicsCommand·StoredPlacement·KittyImage·KittyImageStorage) + facade 2개(buildViews) + `max_kitty_placements`·KittyImageStorage 메서드(add/clear/deinit/remove) pub 승격 + parser `KittyGraphicsCommand` 참조. 테스트 `kittyImageHasPlacement`→`kitty.X(&core,)` | 중 |
+| **K2** | storage/evict mid(`pickKittyEvictionVictim`·`evictKittyImagesFor`·`storeKittyImage`·`deleteByZ`) | K1 leaf(removePlacementsForImage 등) 위에 빌드 | 중 |
+| **K3** | orchestrator(`execKittyGraphics`·`kittyDisplay`·`kittyDelete`·`kittyTransmit`·`kittyTransmitPng`) + parser `dispatchApc` 연동(`kitty.execKittyGraphics`) | PNG/zlib 디코드. KittyImage 별칭 제거(kittyTransmit 이동 완료). **kitty.zig 분리 완결** | 중~높 |
+
+검증·리뷰는 §5 그대로(매 PR 4종 게이트 green auto-merge --rebase). PR 3개라 마지막에 `/code-review max` 1회.

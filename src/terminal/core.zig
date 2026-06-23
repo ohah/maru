@@ -5,6 +5,12 @@ const osc = @import("osc.zig"); // OSC host-reply 핸들러(색·팔레트·클�
 const parser = @import("parser.zig"); // VT 파서(write feed + escape/CSI/OSC/DCS/APC dispatch + UTF-8) — 목적별 분리
 const screen = @import("screen.zig"); // 화면 storage + 활성 화면 연산(grid·cursor·scroll·print·resize·snapshot) — 목적별 분리
 const selection = @import("selection.zig"); // 선택/검색/URL/preedit(화면을 읽는 상위 레이어) — 목적별 분리
+const kitty = @import("kitty.zig"); // kitty graphics 본체(transmit·display·delete·view) — 목적별 분리
+// kitty graphics 저장 struct는 kitty.zig 소유(self-contained — Scrollback 선례). core는 별칭으로 필드 타입을 둔다.
+const KittyGraphicsCommand = kitty.KittyGraphicsCommand;
+const StoredPlacement = kitty.StoredPlacement;
+const KittyImage = kitty.KittyImage;
+const KittyImageStorage = kitty.KittyImageStorage;
 const png = @import("png.zig"); // kitty graphics f=100 PNG 디코드(K3c)
 const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
 const CoreOwner = @import("core_owner.zig").CoreOwner; // core_mutex 재진입 추적(디버그 전용 안전망)
@@ -422,7 +428,7 @@ pub const TerminalCore = struct {
     /// 명세는 상한을 규정하지 않는다). (image_id, placement_id) 키 교체로 대부분 자연히 묶이지만, 한
     /// 이미지에 placement_id를 무한히 바꿔 보내는 폭주를 막는 방어선이다(이미지 320MB·APC 버퍼 한계와
     /// 같은 결). 보통 화면에 떠 있는 이미지는 한 자릿수~수십이라 1024는 충분히 여유롭다.
-    const max_kitty_placements = 1024;
+    pub const max_kitty_placements = 1024; // kitty.addOrReplacePlacement(cross-file)가 참조 — pub
     /// chunked(m=1) 전송에서 누적할 수 있는 base64 payload 상한 — 악의적 m=1 무한 전송의 메모리 폭주를
     /// 막는 방어선(이미지 320MB·APC 4096·placement 1024 한계와 같은 결). 디코드된 이미지는 320MB로 따로
     /// 제한되므로, base64 오버헤드(~4/3)를 감안해 480MB로 둔다. 초과하면 그 chunked 전송을 폐기한다.
@@ -938,7 +944,7 @@ pub const TerminalCore = struct {
     /// screen.pushScrollback(eviction)이 cross-file 호출 — pub.
     pub fn shiftCoordsForEviction(self: *TerminalCore, n: usize) void {
         selection.shiftSelectionForEviction(self, n);
-        self.shiftPlacementsForEviction(n);
+        kitty.shiftPlacementsForEviction(self, n);
     }
 
     /// 현재 뷰포트에 보이는 선택 범위(렌더용). 본문: selection.selectionViewportSpan.
@@ -1032,120 +1038,6 @@ pub const TerminalCore = struct {
         return had;
     }
 
-    /// kitty graphics APC control의 파싱 결과(주요 key). transmit(s/v/f/o)와 display(나머지) 양쪽 키를
-    /// 한 구조체에 담는다 — a 값(t/T/p/d)이 어느 필드를 쓰는지 정한다. 렌더는 후속이다.
-    /// parser.parseKittyGraphicsCommand의 결과 DTO이자 exec/storage 입력 — parser가 cross-file로 이름을 쓰므로 pub.
-    pub const KittyGraphicsCommand = struct {
-        action: u8 = 't', // a: t=transmit / T=transmit+display / q=query / p=display / d=delete
-        format: u16 = 32, // f: 24=RGB / 32=RGBA / 100=PNG
-        width: u32 = 0, // s: 이미지 픽셀 폭
-        height: u32 = 0, // v: 이미지 픽셀 높이
-        image_id: u32 = 0, // i
-        more: bool = false, // m: 1이면 chunk가 이어짐
-        compression: u8 = 0, // o: 'z'=zlib
-        // --- display(placement) 키 — a=p/T에서 쓴다. 베이스: kitty graphics protocol display data. ---
-        placement_id: u32 = 0, // p: placement 식별자(0=default)
-        src_x: u32 = 0, // x: source 사각형 좌상단 x(이미지 픽셀)
-        src_y: u32 = 0, // y: source 사각형 좌상단 y
-        src_width: u32 = 0, // w: source 사각형 폭(0=전체)
-        src_height: u32 = 0, // h: source 사각형 높이(0=전체)
-        cell_x_offset: u32 = 0, // X: 첫 셀 내 픽셀 x 오프셋
-        cell_y_offset: u32 = 0, // Y: 첫 셀 내 픽셀 y 오프셋
-        columns: u32 = 0, // c: 표시할 열 수(0=auto)
-        rows: u32 = 0, // r: 표시할 행 수(0=auto)
-        z: i32 = 0, // z: z-index(부호 있음)
-        no_cursor_move: bool = false, // C=1이면 표시 후 커서를 옮기지 않음
-        delete_what: u8 = 'a', // d: 삭제 타깃(a=d일 때). 기본 'a'(전체). 대문자=이미지 데이터도 free, 소문자=placement만
-    };
-
-    /// 저장된 kitty graphics placement(표시 중인 이미지 인스턴스). anchor_row는 절대 행(스크롤백
-    /// 0..sb_count-1, 이어서 활성 화면)이라 selection/find와 같은 좌표계로 스크롤·eviction에 따라
-    /// 보정돼 내용과 함께 움직인다. 렌더 시 renderSnapshot이 뷰포트 상대 types.KittyPlacement로 환산한다.
-    /// 셀 단위 크기는 담지 않는다(코어는 셀 픽셀 크기를 모름 — 렌더러가 환산).
-    const StoredPlacement = struct {
-        image_id: u32,
-        placement_id: u32,
-        anchor_row: usize, // 절대 행
-        anchor_col: u16,
-        cell_x_offset: u32,
-        cell_y_offset: u32,
-        src_x: u32,
-        src_y: u32,
-        src_width: u32,
-        src_height: u32,
-        columns: u32,
-        rows: u32,
-        z: i32,
-    };
-
-    /// 디코드된 kitty graphics 이미지(픽셀 버퍼를 소유). bpp=3(RGB)/4(RGBA). generation은 storage가
-    /// (재)transmit마다 단조 증가로 찍어 주는 업로드 캐시 무효화 키다(렌더러가 image_id별 텍스처를
-    /// 이 값이 바뀔 때만 다시 업로드 — K2d).
-    const KittyImage = struct {
-        id: u32,
-        width: u32,
-        height: u32,
-        bpp: u8,
-        data: []u8,
-        generation: u64 = 0, // KittyImageStorage.add가 채운다
-    };
-
-    /// kitty graphics 이미지 저장소(image_id → KittyImage). 총량 한계로 악의적/대량 전송을 막는다.
-    /// 토대(1단계): 같은 id 교체 + 한계 초과 거부 — LRU evict(transmit_time 기준)는 후속이다.
-    /// 베이스: kitty graphics protocol image storage. 자료구조(map + total_bytes)는 placement/LRU/
-    /// 애니메이션 프레임 없이 image_id→픽셀만 담는 maru 단순 설계다(그 확장은 후속 단계).
-    const KittyImageStorage = struct {
-        map: std.AutoHashMapUnmanaged(u32, KittyImage) = .{},
-        total_bytes: usize = 0,
-        /// 세션 내 단조 증가 카운터 — add마다 다음 generation을 찍는다. clear/RIS에서 **리셋하지
-        /// 않는다**(같은 image_id가 비운 뒤 재전송돼도 새 generation을 받아 렌더러 캐시가 stale을
-        /// 재사용하지 않게). u64라 현실적으로 wrap 없음.
-        gen_counter: u64 = 0,
-        /// 한 세션이 kitty graphics 이미지로 잡을 수 있는 메모리 상한 — maru가 정한 실용 값이다(kitty
-        /// 명세는 상한을 규정하지 않으므로 과대/악의적 전송 폭주를 막는 방어선으로 둔다). 대형 이미지
-        /// 수십~수백 장을 담되 무한 누적을 차단하는 선에서 320MB로 잡았다. 한도 초과 시 evict(K4b)로
-        /// 자리를 만든다. 필드라 테스트가 작게 설정할 수 있다(Ghostty total_limit과 동형).
-        limit: usize = 320 * 1000 * 1000,
-
-        fn deinit(self: *KittyImageStorage, alloc: std.mem.Allocator) void {
-            var it = self.map.valueIterator();
-            while (it.next()) |img| alloc.free(img.data);
-            self.map.deinit(alloc);
-        }
-        fn clear(self: *KittyImageStorage, alloc: std.mem.Allocator) void {
-            var it = self.map.valueIterator();
-            while (it.next()) |img| alloc.free(img.data);
-            self.map.clearRetainingCapacity();
-            self.total_bytes = 0;
-        }
-        /// 이미지를 저장한다 — img.data의 소유권을 가져간다(성공=map 보관, 거부/실패=즉시 free).
-        /// 성공 시 새 generation을 찍어(같은 id 교체도 새 값) 렌더러 업로드 캐시를 무효화한다.
-        fn add(self: *KittyImageStorage, alloc: std.mem.Allocator, img: KittyImage) void {
-            if (self.map.fetchRemove(img.id)) |old| { // 같은 id는 교체(기존 free)
-                self.total_bytes -= old.value.data.len;
-                alloc.free(old.value.data);
-            }
-            if (self.total_bytes + img.data.len > self.limit) { // 한계 초과면 거부
-                alloc.free(img.data);
-                return;
-            }
-            var stored = img;
-            self.gen_counter += 1;
-            stored.generation = self.gen_counter;
-            self.map.put(alloc, stored.id, stored) catch {
-                alloc.free(stored.data);
-                return;
-            };
-            self.total_bytes += stored.data.len;
-        }
-        fn remove(self: *KittyImageStorage, alloc: std.mem.Allocator, id: u32) void {
-            if (self.map.fetchRemove(id)) |old| {
-                self.total_bytes -= old.value.data.len;
-                alloc.free(old.value.data);
-            }
-        }
-    };
-
     /// 파싱된 kitty graphics command를 실행한다. transmit(디코드+저장)·display(placement)·delete까지 —
     /// query 응답·애니메이션은 후속. payload는 control(';' 전) 다음 base64다.
     /// parser.dispatchApc가 파싱한 command를 실행(transmit/display/delete) — parser가 cross-file 호출하므로 pub.
@@ -1172,7 +1064,7 @@ pub const TerminalCore = struct {
     fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
         if (cmd.image_id == 0) return;
         if (!self.kitty_images.map.contains(cmd.image_id)) return; // 없는 이미지는 표시 안 함
-        self.addOrReplacePlacement(.{
+        kitty.addOrReplacePlacement(self, .{
             .image_id = cmd.image_id,
             .placement_id = cmd.placement_id,
             .anchor_row = self.sb.count + self.cursor.row, // 커서의 절대 행
@@ -1188,7 +1080,7 @@ pub const TerminalCore = struct {
             .z = cmd.z,
         });
         if (!cmd.no_cursor_move) {
-            const rows_span = self.kittyAdvanceRows(cmd);
+            const rows_span = kitty.kittyAdvanceRows(self, cmd);
             if (rows_span > 0) {
                 const target = @as(usize, self.cursor.row) + rows_span;
                 self.cursor.row = @intCast(@min(target, self.size.rows - 1));
@@ -1211,63 +1103,6 @@ pub const TerminalCore = struct {
     }
 
     /// kitty display가 커서를 내릴 행 수. rows(r)가 명시되면 그 값, 자동 크기(r 미지정)면 셀 메트릭이 있을 때
-    /// 이미지 dest 픽셀 높이를 셀 높이로 올림해 환산한다 — 렌더러 buildGpuImages와 같은 PlacementGeometry를
-    /// 써 화면에 그려진 행 수와 어긋나지 않는다. 셀 메트릭 미보유(cell_height_px==0, 헤드리스)면 자동 크기는
-    /// 0(K1대로 미이동). 베이스: kitty graphics protocol display(cursor advance), Ghostty gridSize 동작 비교.
-    fn kittyAdvanceRows(self: *const TerminalCore, cmd: KittyGraphicsCommand) u16 {
-        if (cmd.rows > 0) return @intCast(@min(cmd.rows, @as(u32, std.math.maxInt(u16))));
-        if (self.cell_height_px == 0) return 0; // 셀 메트릭 미보유 — 자동 크기 환산 불가
-        const img = self.kitty_images.map.get(cmd.image_id) orelse return 0;
-        const geom = types.PlacementGeometry.compute(
-            img.width,
-            img.height,
-            cmd.src_x,
-            cmd.src_y,
-            cmd.src_width,
-            cmd.src_height,
-            cmd.columns,
-            cmd.rows,
-            self.cell_width_px,
-            self.cell_height_px,
-        ) orelse return 0;
-        const span = @ceil(geom.dest_h / @as(f32, @floatFromInt(self.cell_height_px)));
-        return @intFromFloat(@min(span, 65535.0));
-    }
-
-    /// placement를 추가하거나 같은 (image_id, placement_id)면 교체한다. 상한 초과면 거부(graceful),
-    /// OOM이면 표시를 포기한다(절대 panic 없음 — 출력 경로 견고성).
-    fn addOrReplacePlacement(self: *TerminalCore, p: StoredPlacement) void {
-        for (self.kitty_placements.items) |*existing| {
-            if (existing.image_id == p.image_id and existing.placement_id == p.placement_id) {
-                existing.* = p;
-                return;
-            }
-        }
-        if (self.kitty_placements.items.len >= max_kitty_placements) return; // 폭주 방어선
-        self.kitty_placements.append(self.allocator, p) catch {};
-    }
-
-    /// 특정 image_id의 placement를 모두 제거한다(delete 시 이미지와 함께). 순서를 보존해(orderedRemove)
-    /// 노출 순서를 결정적으로 둔다 — placement 수는 작아 비용이 무시할 만하다.
-    fn removePlacementsForImage(self: *TerminalCore, image_id: u32) void {
-        var i: usize = 0;
-        while (i < self.kitty_placements.items.len) {
-            if (self.kitty_placements.items[i].image_id == image_id) {
-                _ = self.kitty_placements.orderedRemove(i);
-            } else i += 1;
-        }
-    }
-
-    /// (image_id, placement_id) 한 placement만 제거한다(delete d=i + p 지정).
-    fn removeOnePlacement(self: *TerminalCore, image_id: u32, placement_id: u32) void {
-        for (self.kitty_placements.items, 0..) |p, i| {
-            if (p.image_id == image_id and p.placement_id == placement_id) {
-                _ = self.kitty_placements.orderedRemove(i);
-                return;
-            }
-        }
-    }
-
     /// kitty graphics delete(a=d). d= 타깃 문자로 무엇을 지울지 정한다. **소문자=placement만 제거**(이미지
     /// 데이터는 남겨 재표시 가능), **대문자=placement + 이미지 데이터까지 free**. 베이스: kitty graphics
     /// protocol(deletion). 핵심 부분집합만 지원: a/A(전체)·i/I(image_id[+placement_id])·z/Z(z-index).
@@ -1284,12 +1119,12 @@ pub const TerminalCore = struct {
             'i' => { // image_id로(+ 선택적 placement_id)
                 if (cmd.image_id == 0) return;
                 if (free_image) { // 이미지 + 그 이미지의 모든 placement 제거
-                    self.removePlacementsForImage(cmd.image_id);
+                    kitty.removePlacementsForImage(self, cmd.image_id);
                     self.kitty_images.remove(self.allocator, cmd.image_id);
                 } else if (cmd.placement_id != 0) {
-                    self.removeOnePlacement(cmd.image_id, cmd.placement_id);
+                    kitty.removeOnePlacement(self, cmd.image_id, cmd.placement_id);
                 } else {
-                    self.removePlacementsForImage(cmd.image_id);
+                    kitty.removePlacementsForImage(self, cmd.image_id);
                 }
             },
             'z' => self.deleteByZ(cmd.z, free_image), // z-index로
@@ -1307,7 +1142,7 @@ pub const TerminalCore = struct {
                 if (free_images) {
                     const id = p.image_id;
                     self.kitty_images.remove(self.allocator, id);
-                    self.removePlacementsForImage(id); // 그 이미지의 모든 placement 제거(배열 변형)
+                    kitty.removePlacementsForImage(self, id); // 그 이미지의 모든 placement 제거(배열 변형)
                     i = 0; // 배열이 바뀌었으니 처음부터 다시 스캔
                 } else {
                     _ = self.kitty_placements.orderedRemove(i);
@@ -1316,89 +1151,13 @@ pub const TerminalCore = struct {
         }
     }
 
-    /// scrollback ring이 가득 차 가장 오래된 행이 밀려나면 절대 행 좌표가 한 칸 당겨진다 — placement
-    /// anchor도 따라 보정하고, 0행(밀려난 행)에 앵커된 placement는 화면 밖이라 제거한다. selection의
-    /// shiftSelectionForEviction과 같은 규율. 베이스: maru 절대-행 좌표계.
-    /// 가장 오래된 n개 행이 빠질 때 placement anchor(abs 행)를 n칸 당긴다(eviction n=1, 하향 트림 n=drop).
-    /// 빠진 행 범위 [0, n)에 anchor가 걸린 placement는 제거한다.
-    fn shiftPlacementsForEviction(self: *TerminalCore, n: usize) void {
-        if (n == 0) return;
-        var i: usize = 0;
-        while (i < self.kitty_placements.items.len) {
-            const p = &self.kitty_placements.items[i];
-            if (p.anchor_row < n) {
-                _ = self.kitty_placements.orderedRemove(i);
-            } else {
-                p.anchor_row -= n;
-                i += 1;
-            }
-        }
-    }
-
-    /// 저장된 placement(절대 행)를 뷰포트 상대 types.KittyPlacement로 환산해 재사용 버퍼에 담아
-    /// 돌려준다. placement가 없으면 빈 슬라이스(할당 없음). 화면 위/아래로 완전히 벗어났는지의 판단은
-    /// 셀 span을 아는 렌더러 몫이라, 코어는 모든 placement를 그대로 환산해 노출한다(row는 i32 — 음수
-    /// 가능). top_abs는 뷰포트 최상단의 절대 행이다.
-    /// screen.renderSnapshot이 cross-file 호출 — pub(kitty placement view 합성). 본체는 후속 kitty.zig 후보.
+    /// 렌더 placement view 합성. 본문: kitty.buildPlacementViews. screen.snapshot이 self.로 호출(screen→kitty 역전 방지 facade).
     pub fn buildPlacementViews(self: *TerminalCore, top_abs: usize) []const types.KittyPlacement {
-        const n = self.kitty_placements.items.len;
-        if (n == 0) return &.{};
-        if (self.placement_views.len != n) {
-            if (self.placement_views.len > 0) self.allocator.free(self.placement_views);
-            self.placement_views = self.allocator.alloc(types.KittyPlacement, n) catch {
-                self.placement_views = &.{};
-                return &.{}; // OOM이면 placement 노출만 포기(렌더는 후속이라 영향 없음)
-            };
-        }
-        for (self.kitty_placements.items, 0..) |p, i| {
-            const row_i64 = @as(i64, @intCast(p.anchor_row)) - @as(i64, @intCast(top_abs));
-            self.placement_views[i] = .{
-                .image_id = p.image_id,
-                .placement_id = p.placement_id,
-                // 행 오프셋은 작은 값이라 i32에 들지만, 극단값은 포화시켜 안전하게 둔다.
-                .row = std.math.cast(i32, row_i64) orelse (if (row_i64 < 0) std.math.minInt(i32) else std.math.maxInt(i32)),
-                .col = p.anchor_col,
-                .cell_x_offset = p.cell_x_offset,
-                .cell_y_offset = p.cell_y_offset,
-                .src_x = p.src_x,
-                .src_y = p.src_y,
-                .src_width = p.src_width,
-                .src_height = p.src_height,
-                .columns = p.columns,
-                .rows = p.rows,
-                .z = p.z,
-            };
-        }
-        return self.placement_views;
+        return kitty.buildPlacementViews(self, top_abs);
     }
-
-    /// 저장된 kitty graphics 이미지를 KittyImageView로 빌려 재사용 버퍼에 담아 돌려준다. 이미지가
-    /// 없으면 빈 슬라이스(할당 없음). 픽셀은 복사하지 않고 storage 버퍼를 가리킨다(zero-copy). map
-    /// 순회 순서는 비결정적이지만 렌더러는 image_id로 찾으므로 무관하다.
-    /// screen.renderSnapshot이 cross-file 호출 — pub(kitty image view 합성). 본체는 후속 kitty.zig 후보.
+    /// 렌더 image view 합성. 본문: kitty.buildImageViews. screen.renderSnapshot이 self.로 호출(facade).
     pub fn buildImageViews(self: *TerminalCore) []const types.KittyImageView {
-        const n = self.kitty_images.map.count();
-        if (n == 0) return &.{};
-        if (self.image_views.len != n) {
-            if (self.image_views.len > 0) self.allocator.free(self.image_views);
-            self.image_views = self.allocator.alloc(types.KittyImageView, n) catch {
-                self.image_views = &.{};
-                return &.{}; // OOM이면 이미지 노출만 포기(렌더는 후속이라 영향 없음)
-            };
-        }
-        var i: usize = 0;
-        var it = self.kitty_images.map.valueIterator();
-        while (it.next()) |img| : (i += 1) {
-            self.image_views[i] = .{
-                .image_id = img.id,
-                .width = img.width,
-                .height = img.height,
-                .bpp = img.bpp,
-                .generation = img.generation,
-                .pixels = img.data,
-            };
-        }
-        return self.image_views[0..i];
+        return kitty.buildImageViews(self);
     }
 
     /// 이미지를 저장하되, 320MB 한도를 넘기면 먼저 evict해 자리를 만든다(K4b). 한 장이 한도보다 크면 거부.
@@ -1417,7 +1176,7 @@ pub const TerminalCore = struct {
         self.kitty_images.add(self.allocator, img); // 같은-id 교체 + 최종 한도 체크(evict 후 통과)
         // add가 한도로 거부하면 같은 id의 기존 이미지는 이미 제거됐고(같은-id 교체 규칙) 새 것도 안 들어가
         // map에 그 id가 없다 — 그 id를 가리키던 placement가 orphan으로 남지 않게 함께 정리한다(code review #8).
-        if (!self.kitty_images.map.contains(img.id)) self.removePlacementsForImage(img.id);
+        if (!self.kitty_images.map.contains(img.id)) kitty.removePlacementsForImage(self, img.id);
     }
 
     /// 한도 초과 시 부족분(needed 바이트) 이상을 비우도록 이미지를 evict한다(exclude_id·그 이미지는 제외 —
@@ -1430,7 +1189,7 @@ pub const TerminalCore = struct {
         while (freed < needed) {
             const victim = self.pickKittyEvictionVictim(exclude_id) orelse break;
             const sz = if (self.kitty_images.map.get(victim)) |im| im.data.len else 0;
-            self.removePlacementsForImage(victim); // 안전망(victim은 unused라 보통 placement 없음)
+            kitty.removePlacementsForImage(self, victim); // 안전망(victim은 unused라 보통 placement 없음)
             self.kitty_images.remove(self.allocator, victim);
             freed += sz;
         }
@@ -1447,7 +1206,7 @@ pub const TerminalCore = struct {
         while (it.next()) |kv| {
             const id = kv.key_ptr.*;
             if (id == exclude_id) continue;
-            if (self.kittyImageHasPlacement(id)) continue; // 화면 표시 중인 이미지는 보호(evict 안 함)
+            if (kitty.kittyImageHasPlacement(self, id)) continue; // 화면 표시 중인 이미지는 보호(evict 안 함)
             const gen = kv.value_ptr.generation;
             if (best == null or gen < best_gen) {
                 best = id;
@@ -1455,14 +1214,6 @@ pub const TerminalCore = struct {
             }
         }
         return best;
-    }
-
-    /// 이미지에 살아있는 placement가 있는지(evict 우선순위 판정용).
-    fn kittyImageHasPlacement(self: *const TerminalCore, image_id: u32) bool {
-        for (self.kitty_placements.items) |p| {
-            if (p.image_id == image_id) return true;
-        }
-        return false;
     }
 
     /// kitty graphics transmit: base64 payload를 디코드해 RGBA(f=32)/RGB(f=24) 이미지를 저장한다.
@@ -3657,7 +3408,7 @@ test "setMaxScrollback 하향 트림: 가장 오래된 행을 버리고 view_off
     try std.testing.expectEqual(@as(usize, 0), core.view_offset);
 }
 
-fn mkTestPlacement(anchor_row: usize) TerminalCore.StoredPlacement {
+fn mkTestPlacement(anchor_row: usize) StoredPlacement {
     return .{
         .image_id = 1,
         .placement_id = 1,
@@ -6051,8 +5802,8 @@ test "kitty graphics evict: 모두 화면 표시 중(used)이면 새 transmit을
     try std.testing.expect(!core.kitty_images.map.contains(3)); // 새 이미지 거부
     try std.testing.expect(core.kitty_images.map.contains(1)); // 화면 이미지 보존
     try std.testing.expect(core.kitty_images.map.contains(2));
-    try std.testing.expect(core.kittyImageHasPlacement(1));
-    try std.testing.expect(core.kittyImageHasPlacement(2));
+    try std.testing.expect(kitty.kittyImageHasPlacement(&core, 1));
+    try std.testing.expect(kitty.kittyImageHasPlacement(&core, 2));
 }
 
 test "kitty graphics: 재transmit이 한도로 거부되면 그 image_id placement를 orphan으로 남기지 않는다 (code review #8)" {
@@ -6068,7 +5819,7 @@ test "kitty graphics: 재transmit이 한도로 거부되면 그 image_id placeme
     try core.write("\x1b_Ga=p,i=1\x1b\\");
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=2;{s}\x1b\\", .{b64s}));
     try core.write("\x1b_Ga=p,i=2\x1b\\");
-    try std.testing.expect(core.kittyImageHasPlacement(1));
+    try std.testing.expect(kitty.kittyImageHasPlacement(&core, 1));
     // i=1을 더 큰(32B) 이미지로 재transmit: evict 불가(i=2 used 보호) → add가 old i=1 제거 후 거부.
     const raw_big = [_]u8{2} ** 32; // 4x2 RGBA = 32
     var b64b: [44]u8 = undefined;
@@ -6076,9 +5827,9 @@ test "kitty graphics: 재transmit이 한도로 거부되면 그 image_id placeme
     var seq2: [120]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq2, "\x1b_Ga=t,f=32,s=4,v=2,i=1;{s}\x1b\\", .{b64bs}));
     try std.testing.expect(!core.kitty_images.map.contains(1)); // 재transmit 거부(old i=1 제거됨)
-    try std.testing.expect(!core.kittyImageHasPlacement(1)); // placement도 정리 — orphan 없음
+    try std.testing.expect(!kitty.kittyImageHasPlacement(&core, 1)); // placement도 정리 — orphan 없음
     try std.testing.expect(core.kitty_images.map.contains(2)); // i=2 보존
-    try std.testing.expect(core.kittyImageHasPlacement(2));
+    try std.testing.expect(kitty.kittyImageHasPlacement(&core, 2));
 }
 
 test "kitty graphics: chunked 전송 중 독립 명령(delete)이 오면 chunk를 버리고 새 명령을 실행 (code review #3)" {

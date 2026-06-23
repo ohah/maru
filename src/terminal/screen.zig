@@ -1200,9 +1200,9 @@ fn restoreFromSlot(self: *TerminalCore, slot: core.SavedCursor) void {
     self.last_print = null;
 }
 
-/// alt screen으로 전환한다. primary 그리드(cells/wrapped)를 saved_*로 옮기고 빈 alt 버퍼를
-/// 만든다(1049는 들어가며 clear — TUI가 어차피 전체를 그린다). 할당 실패면 전환하지 않는다
-/// (primary 유지가 안전 — 커서 저장도 두 할당이 성공한 뒤에 해 실패가 부작용 없게 한다).
+/// alt screen으로 전환한다. primary 화면(grid+스크롤백)을 `saved_screen`으로 통째 옮기고(struct swap) 빈 alt
+/// 버퍼를 만든다(1049는 들어가며 clear — TUI가 어차피 전체를 그린다). 할당 실패면 전환하지 않는다(primary
+/// 유지가 안전 — 커서 저장도 grid 세 할당이 성공한 뒤에 해 실패가 부작용 없게 한다).
 /// 1049의 커서 저장은 이미 alt여도 수행한다(xterm: "unconditionally saves the cursor").
 pub fn enterAltScreen(self: *TerminalCore, save_cursor: bool) void {
     if (self.alt_active) {

@@ -410,3 +410,7 @@ architecture.md §211 종착지 = "cursor·grid 완전한 Screen **+ 그 자리�
 3. **page-aligned storage**(§11, 별도 initiative): 평평한 `cells: []Cell` + Scrollback ring → Ghostty PageList식 page-pool 레이아웃. **architecture.md의 진짜 최종 골**이고, B-full이 이를 가능하게 하는 전제다.
 
 **성격 차이 — page storage는 A·B와 다르다**: A·B는 순수 리팩터(동작·메모리 레이아웃 불변, 위치만 이동 → 매번 "정확성 버그 0"). page storage는 **메모리 레이아웃·할당·성능을 바꾸는 의미 변경**(perf 예산·동작 검증 폭이 넓음)이라, B-full 완료 후 **별도 doc-first 설계+합의**로 §11에서 진행한다.
+
+### 10.7 B-min 리뷰 cleanup (B1~B3 `/code-review max` 후속)
+
+누적 리뷰(B3 alt-swap 심층 감사 + 전수 rename 검증 + cleanup) 결과 **정확성 버그 0**: B3 struct swap이 baseline과 byte-for-byte 동작 일치(enter/leave/resize-during-alt/deinit/setMaxScrollback·소유권·leak 안전), rename 누락 repo-wide 0, B2 cap-0 회귀 없음(init만이 생성 경로), 289 테스트 green. cleanup 4건만 정리: 죽은 `const Scrollback` 별칭+stale doc 제거(sb/saved_sb가 Screen으로 흡수돼 core에 Scrollback 타입 필드 없음), `enterAltScreen` 헤더 doc을 struct-swap 모델로 갱신, semantic_state breadcrumb 빈 줄 분리.

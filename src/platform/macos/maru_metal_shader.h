@@ -52,7 +52,7 @@ static NSString *const MARU_METAL_QUAD_SHADER_SOURCE =
      "using namespace metal;\n"
      "struct QuadIn { packed_float2 position; packed_float2 local; packed_float2 half_size; packed_float4 corner; packed_float4 border; packed_float4 fill0; packed_float4 fill1; packed_float4 border_color; float gradient_kind; };\n"
      "struct QuadOut { float4 position [[position]]; float2 local; float2 half_size; float4 corner; float4 border; float4 fill0; float4 fill1; float4 border_color; float gradient_kind; };\n"
-     "static inline float3 srgb_to_linear(float3 c) { return select(c/12.92, pow((c+0.055)/1.055, 3.0), c > 0.04045); }\n"
+     "static inline float3 srgb_to_linear(float3 c) { return select(c/12.92, pow((c+0.055)/1.055, 2.4), c > 0.04045); }\n"
      "static inline float3 linear_to_srgb(float3 c) { return select(c*12.92, 1.055*pow(c, 1.0/2.4)-0.055, c > 0.0031308); }\n"
      "vertex QuadOut maru_quad_vertex(uint vid [[vertex_id]], const device QuadIn *v [[buffer(0)]]) {\n"
      "  QuadOut o;\n"

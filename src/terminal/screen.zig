@@ -563,19 +563,19 @@ fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16, anchor_row: ?usize)
             i = j + 1;
         }
     }
-    // 물리적 ring.len으로 묶는다(cap이 아니라) — setCap이 cap과 ring.len을 항상 같게 유지하지만,
-    // 여기서 ring.len을 쓰면 cap이 어떤 경로로 ring보다 커져도 아래 ring[k] 쓰기가 OOB가 될 수 없다.
-    // rewrap은 count>0일 때만 오므로 ring은 항상 할당돼 있다.
+    // cap으로 묶는다 — 산출 행이 cap을 넘으면 가장 오래된 초과분은 어차피 버려지므로 생성하지 않는다.
+    // (page 저장은 cap/실제 길이 불일치가 구조적으로 불가 — 페이지는 필요 시 자란다. §11 A1)
     const keep = @min(total_out, self.screen.sb.cap);
     const skip = total_out - keep; // 생성 없이 건너뛸 산출 행 수(가장 오래된 쪽)
 
     var rows: std.ArrayList([]types.Cell) = .empty;
     var wraps: std.ArrayList(bool) = .empty;
     var pmarks: std.ArrayList(types.RowPrompt) = .empty; // 산출 행별 OSC 133 태그(rows와 병렬)
-    // 성공 경로에선 행 소유권이 ring으로 넘어가므로(items.len = 0으로 비움), 이 defer는
-    // 실패 경로에서만 만든 행들을 해제한다.
+    var consumed: usize = 0; // commit에서 rebuilt로 복사·해제 완료한 rows 개수(나머지만 defer가 해제)
+    // commit이 각 행을 rebuilt로 복사하며 즉시 해제하므로(peak ~2x 유지), 이 defer는 아직 안 옮긴 행만
+    // 해제한다 — build 실패 시 전부, commit 중 OOM 시 미복사분.
     defer {
-        for (rows.items) |r| self.allocator.free(r);
+        for (rows.items[consumed..]) |r| self.allocator.free(r);
         rows.deinit(self.allocator);
         wraps.deinit(self.allocator);
         pmarks.deinit(self.allocator);
@@ -654,12 +654,19 @@ fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16, anchor_row: ?usize)
         i = j + 1;
     }
 
-    // 기존 페이지를 pool로 회수하고(§11 A1) 재-wrap된 행을 새로 push한다. keep(≤cap)개라 push 중 eviction은
-    // 없다. pushRow가 페이지로 **복사**하므로 임시 rows 버퍼 소유권은 그대로 — defer가 해제한다(이중 해제 없음).
-    self.screen.sb.clear(self.allocator);
+    // 옛 storage를 건드리기 전에 새 페이지를 임시 Scrollback에 쌓는다 — commit 중 OOM이면 옛 내용을 그대로
+    // 두고 error를 반환해 호출자가 옛 폭 표시를 유지하게 한다(옛 ring의 "OOM이면 통째 포기" 계약 — clear-먼저는
+    // commit OOM 시 스크롤백을 조용히 잃었다, A1 리뷰). 한 행을 rebuilt로 복사하면 그 임시 버퍼를 즉시 해제해
+    // peak 메모리를 옛 방식과 같은 ~2x로 유지한다(수백만 줄 목표상 3x 금지). keep(≤cap)개라 push 중 eviction 없음.
+    var rebuilt: Scrollback = .{ .cap = self.screen.sb.cap };
+    errdefer rebuilt.deinit(self.allocator); // commit OOM 시 임시만 해제(옛 sb는 그대로)
     for (rows.items, 0..) |row_cells, k| {
-        _ = self.screen.sb.pushRow(self.allocator, row_cells, wraps.items[k], pmarks.items[k]);
+        if (!rebuilt.pushRow(self.allocator, row_cells, wraps.items[k], pmarks.items[k])) return error.OutOfMemory;
+        self.allocator.free(row_cells);
+        consumed = k + 1; // defer가 이 행을 다시 해제하지 않게
     }
+    self.screen.sb.deinit(self.allocator); // 전부 성공 — 옛 storage 해제하고 교체
+    self.screen.sb = rebuilt;
 
     if (anchor_out) |a| {
         if (a >= skip) return a - skip; // cap 드랍을 반영한 새 행 인덱스

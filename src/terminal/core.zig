@@ -3250,6 +3250,40 @@ test "Scrollback.setCap: 상향/하향(드랍 없는 범위)은 행을 보존한
     try std.testing.expectEqual(@as(u21, 'a'), core.scrollbackRow(0).?[0].codepoint); // 내용 그대로
 }
 
+test "rewrap commit OOM은 옛 스크롤백 내용을 보존한다(transactional, §11 A1 리뷰)" {
+    // 회귀 가드: page 저장의 rewrap commit이 옛 페이지를 clear한 뒤 OOM나면 스크롤백을 조용히 잃던 버그.
+    // setup(쓰기·resize)은 실패 없이 끝내고, rewrap 직전부터 off번째 alloc이 실패하게 주입해 rewrap 도중
+    // OOM을 일으킨다. 성공이든 OOM이든 스크롤백 전체 내용이 폭과 무관하게 "ABCDEF"로 보존돼야 한다(트랜잭션:
+    // 새 페이지가 전부 성공해야 옛 내용을 교체). 부분 손실이면 문자열이 달라진다.
+    var off: usize = 0;
+    while (off < 40) : (off += 1) {
+        var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{}); // setup 중엔 실패 없음
+        const a = fa.allocator();
+        var core = try TerminalCore.init(a, .{ .cols = 4, .rows = 1 });
+        defer core.deinit();
+        core.setMaxScrollback(10);
+        try core.write("AB\r\nCD\r\nEF\r\nGH"); // AB·CD·EF 스크롤백, GH 표시(2칸 줄이라 wrap 없음)
+        try std.testing.expectEqual(@as(usize, 3), core.scrollbackLen());
+        try core.resize(3, 1); // 폭 변경 → rewrap_pending (아직 실패 주입 전)
+        fa.fail_index = fa.alloc_index + off; // 이 시점부터 off번째 alloc이 실패 → rewrap 도중 OOM
+        core.scrollViewport(@intCast(core.scrollbackLen())); // 과거 보기 → rewrap 트리거(OOM이면 옛 내용 유지)
+        core.scrollToBottom();
+        var buf: [16]u8 = undefined;
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < core.scrollbackLen()) : (i += 1) {
+            const r = core.scrollbackRow(i) orelse continue;
+            for (r) |cell| {
+                if (cell.codepoint != ' ' and n < buf.len) {
+                    buf[n] = @intCast(cell.codepoint);
+                    n += 1;
+                }
+            }
+        }
+        try std.testing.expectEqualStrings("ABCDEF", buf[0..n]);
+    }
+}
+
 test "setMaxScrollback 하향 트림: 가장 오래된 행을 버리고 view_offset을 보정한다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
     defer core.deinit();

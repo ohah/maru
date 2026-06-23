@@ -621,11 +621,14 @@ pub const TerminalCore = struct {
     }
 
     /// 스크롤백 cell arena의 backing allocator를 교체한다(§11 P4). production은 startup에 page_allocator
-    /// (mmap/VirtualAlloc — demand-commit + 콜드 OS swap)를 넣는다. **반드시 스크롤백 출력 전(페이지 0개일 때)
-    /// 호출**해야 한다 — 이미 잡힌 arena를 다른 allocator로 free하면 mismatch다(그래서 count==0 assert). primary
-    /// 슬롯에 적용한다(alt면 보관분, 아니면 활성 — startup은 항상 비-alt). 미호출 시 init 기본(core 일반 allocator).
+    /// (mmap/VirtualAlloc — demand-commit + 콜드 OS swap)를 넣는다. **반드시 스크롤백 페이지가 0개일 때(첫 출력
+    /// 전) 호출**해야 한다 — 옛 arena로 잡힌 cells를 새 arena로 realloc/free하면 cross-allocator mismatch다. 따라서
+    /// live 행(count)뿐 아니라 **pool에 회수된 페이지까지** 없어야 한다(clear/setCap(0)는 count=0이어도 pool에 옛
+    /// arena 페이지를 남기므로 — P4 리뷰). primary 슬롯에 적용(startup은 항상 비-alt). 미호출 시 init 기본(일반 alloc).
     pub fn setScrollbackArena(self: *TerminalCore, arena: std.mem.Allocator) void {
-        std.debug.assert(self.screen.sb.count == 0 and self.saved_screen.sb.count == 0); // 출력 전에만(arena mismatch 방지)
+        // 옛 arena로 잡힌 페이지가 pages·pool 어디에도 없어야 안전하게 교체 가능(arena mismatch 방지).
+        std.debug.assert(self.screen.sb.pages.items.len == 0 and self.screen.sb.pool.items.len == 0);
+        std.debug.assert(self.saved_screen.sb.pages.items.len == 0 and self.saved_screen.sb.pool.items.len == 0);
         self.screen.sb.arena_alloc = arena;
         self.saved_screen.sb.arena_alloc = arena; // alt 보관분도(현재 비었지만 일관성)
     }

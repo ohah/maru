@@ -78,11 +78,18 @@
   전용 `is_collapsed_toggle`을 헤더 줄0 전체 `is_collapsed_header`로 일반화). 종 클릭(`collapsedNotificationRect`)은
   `openNotificationPanel`이 접힘 분기로 띠 아래에 패널을 띄우고(`is_window_drag_region`·hover 커서도 이 영역 제외/포인터),
   ◧ 클릭은 펼치기(별개 영역, 클릭 우선순위 종→◧).
-- **떠 있는 카드 패널**: `src/chrome/components/notifications.zig`(context_menu를 본뜸). 한 항목 = **2줄 카드**
-  (제목 + 본문), 안읽음 점(●), 우측 상대시간("N분 전"), 닫힌 surface는 회색(`muted_fg` role). `layout`(폭·높이·스크롤
-  윈도우·위치 clamp)을 view·hitTest·panelRect가 공유(보이는 카드 == 클릭되는 카드). 카드 구분선은 `.fill`(1px)로 —
-  `.rule` op은 macOS lowering에서 no-op이라. 빈 목록도 패널 + "알림 없음"을 그린다. 항목은 platform이 매 프레임
-  arena로 주입(palette `Row` 선례) — chrome은 중립(surface_id·라이브 포인터 모름).
+- **떠 있는 카드 패널**: `src/chrome/components/notifications.zig`(Maru 독립 설계). **상단 헤더 밴드**("알림" 제목 +
+  우측 액션 "모두 읽음"/"모두 지우기")와 그 아래 본문(카드 목록 또는 빈 상태 일러스트)으로 구성된다 — 헤더는 viewport
+  상단 sticky, 카드는 그 아래에서 스크롤한다. 한 항목 = **2줄 카드**(제목 + 본문), 안읽음 점(●), 우측 상대시간
+  ("N분 전"), 닫힌 surface는 회색(`muted_fg` role). `layout`(폭·높이·스크롤 윈도우·위치 clamp)을 view·hitTest·panelRect가
+  공유(보이는 카드 == 클릭되는 카드). 헤더 구분선·카드 구분선은 `.fill`(1px)로 — `.rule` op은 macOS lowering에서 no-op이라.
+  항목은 platform이 매 프레임 arena로 주입(palette `Row` 선례) — chrome은 중립(surface_id·라이브 포인터 모름).
+- **빈 상태 일러스트**: 알림이 없으면 헤더 아래 본문에 **종-슬래시 아이콘(🔕) + 굵은 제목("아직 알림이 없습니다") +
+  부제("데스크톱 알림이 여기에 표시됩니다.")**를 가로 가운데로 그린다(예전 좌상단 "알림 없음" 한 줄을 대체). 아이콘은
+  이모지라 CoreText fallback에 의존 — 실제 렌더로 확인하고 깨지면 BMP 기호로 교체한다(종 글리프와 같은 규율, §5).
+- **폭 cap·말줄임**: 패널 폭은 `[min_panel_cols=30, max_panel_cols=44]`로 cap한다(내용이 길어도 패널이 화면을 가로지를
+  만큼 넓어지지 않게 — 사용자 피드백 "maxwidth가 있어서 적당한 크기"). cap을 넘는 제목/본문은 `overlay_input.truncateToCols`
+  (EAW 폭 기준, 끝에 `…`)로 말줄임한다. 빈 상태는 제목/부제 폭으로 폭을 잡되 같은 cap을 따른다.
 - **말풍선 팝오버(형태)**: `openNotificationPanel`이 content top을 `anchor_y = 2*cell_h + modal_padding_px`로 둔다(단일 출처).
   rich 모달 배경 quad는 lowering(`rasterizeOverlayCells`)이 content rect를 사방 `modal_padding_px`만큼 **outset**하므로
   **보이는** 패널 상단 = `anchor_y − mp` = 줄2(=2ch) — mp를 더해 보이는 상단을 줄2에 맞춘다(안 더하면 보이는 패널이
@@ -96,14 +103,15 @@
   배경과 **픽셀값까지 같은** 건 rich quad 셰이더의 sRGB 역감마가 표준 2.4라 round-trip이 identity이기 때문(예전 3.0
   지수 버그면 패널만 어둡게 렌더돼 caret과 안 맞았다 — `maru_metal_shader.h srgb_to_linear`). 패널 배경 quad **'뒤'**라
   상단 테두리를 caret 폭만큼 덮어 bubble을 연다. 패널이 세로 clamp로 밀렸거나 종이 보이는 패널 가로 밖이면 caret 생략(어긋남 방지).
-- **최소 높이**: 항목이 적어도 팝업이 납작하지 않게 `min_panel_rows`(8) baseline을 보장한다 — 카드는 상단, 액션
-  행(footer)은 박스 하단 고정, 사이 여백은 패널 배경(클릭 무시 = `Hit.background`; 박스 '밖'만 닫기). 카드가 그보다
-  많으면 자연 높이(화면 cap)로 커지므로 무영향(`layout` 단일 출처 — view·hitTest 공유).
+- **최소 높이**: 항목이 적어도 팝업이 납작하지 않게 `min_panel_rows`(8, 헤더 포함) baseline을 보장한다 — 헤더+카드는
+  상단, 사이 여백은 패널 배경(클릭 무시 = `Hit.background`; 박스 '밖'만 닫기). 카드가 그보다 많으면 자연 높이(화면 cap)로
+  커지므로 무영향(`layout` 단일 출처 — view·hitTest 공유). `scrollWindow`는 상단 sticky 헤더(`header_rows`)를 늘 예약하고
+  남은 높이로 보이는 카드 수를 정한다.
 - **스크롤(화면 넘으면)**: 카드가 화면 가용 높이를 넘으면 **카드 단위 스크롤**(`draw.Op`에 scissor가 없어 부분 카드를
   못 자르므로 통째 카드만 보인다). `State.scroll_offset`(보이는 첫 카드, 0=최신)으로 `items[first..first+visible]`만
   렌더한다. 마우스 휠(패널 열림 시 `scrollWheel`이 가로채 터미널/스크롤백으로 안 흘림)·키보드 ↑↓(선택이 viewport
-  밖이면 `ensureSelectedVisible`가 따라 스크롤)로 움직인다. **액션 행("모두 읽음/지우기")은 viewport 하단 sticky**라
-  스크롤해도 안 잘린다. 스크롤 가능하면 우측에 얇은 스크롤바 thumb(보이는 비율). 보이는 카드 수·상한은 `scrollWindow`
+  밖이면 `ensureSelectedVisible`가 따라 스크롤)로 움직인다. **헤더 밴드(제목+액션)는 viewport 상단 sticky**라 스크롤해도
+  안 잘리고, 카드 영역만 스크롤한다. 스크롤 가능하면 카드 영역(헤더 아래) 우측에 얇은 스크롤바 thumb(보이는 비율). 보이는 카드 수·상한은 `scrollWindow`
   (개수·화면 높이만 — 휠/키 경로가 Item을 안 빌드하게)가, 선택 끝맞춤 윈도잉은 `overlay_input.windowStart`(palette·
   settings와 공유)가 단일 출처. 다른 오버레이가 열렸을 땐 휠을 소비만 한다(터미널로 안 흘림 — `mouse()` 클릭 게이트와 짝).
 - **클릭 → 점프 + 읽음**: 카드 본문 클릭/Enter → `acceptNotification`이 selected(역순: 0=최신)를 히스토리 인덱스로
@@ -111,9 +119,10 @@
   — 2단계 배너 클릭과 **동일 정책**)하고, `activateSurfaceById(surface_id)`(1단계 재사용)로 점프한 뒤 패널을 닫는다.
   닫힌 surface면 점프 없이 닫기만(카드는 이미 회색). 배너든 카드든 "그 터미널을 봤다"는 한 가지 읽음 정책으로 통일.
 - **읽음/지우기 액션**: 마우스 hit-test는 `Hit` union(`card`/`close`/`mark_all_read`/`clear_all`/`background`)으로 가른다 — 카드
-  우측 ✕(본문줄)=개별 삭제(`deleteNotification`), 키보드 Backspace=선택 카드 삭제. 패널 하단 액션 행 좌/우 절반=
-  "모두 읽음"(`markAllNotificationsRead` — 점/배지만 끄고 항목 유지) / "모두 지우기"(`clearNotifications` — 전체 삭제).
-  unread 캐시는 push/markRead/delete/markAll/clear 헬퍼에서만 증감(단일 출처).
+  우측 ✕(본문줄)=개별 삭제(`deleteNotification`), 키보드 Backspace=선택 카드 삭제. **상단 헤더 우측**의 "모두 읽음"
+  (`markAllNotificationsRead` — 점/배지만 끄고 항목 유지) / "모두 지우기"(`clearNotifications` — 전체 삭제). 헤더 좌측
+  제목 영역과 빈 상태 본문은 `background`(클릭해도 안 닫힘 — 박스 밖만 닫기). unread 캐시는 push/markRead/delete/markAll/
+  clear 헬퍼에서만 증감(단일 출처).
 
 ## 4. 경계 분담 (단일 출처)
 

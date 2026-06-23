@@ -1,13 +1,18 @@
-//! 화면 storage — 스크롤백 ring buffer(`Scrollback`).
+//! 화면 storage + 활성 화면 연산 — 스크롤백 ring(`Scrollback`) + grid/cursor/scroll/print/resize/snapshot.
 //!
 //! `TerminalCore`(core.zig)가 VT 파서 + 화면/스크롤백 저장 + host-reply를 한 struct에 섞은 구조 위반
-//! (docs/project-rules.md "구조와 파일 분리")을 목적별 파일로 떼어내는 storage 1단계다. OSC(host-reply)는
-//! osc.zig로 분리했고, 여기는 "storage" 책임을 모은다. `Scrollback`은 이미 self-contained 서브-struct라
-//! (architecture.md가 가리킨 자연스러운 seam) types만 의존하고 `TerminalCore`를 참조하지 않는다.
-//! facade(terminal.zig)·`TerminalCore` struct는 불변 — core.zig가 이 타입을 import해 `sb`/`saved_sb` 필드로 쓴다.
-//! 점진 분리: 활성 화면 storage/연산 추출이 진행 중이다 — tabstops(G4 동적 탭스톱)부터 이리로 모은다(8/N~,
-//! docs/terminal-core-decomposition.md). 각 연산은 `*TerminalCore`를 받는 free 함수다(필드 직접 접근 — Zig는
-//! 필드 privacy가 없다; osc.zig·parser.zig와 동형). core↔screen 순환 import은 그 둘이 이미 검증한 그래프다.
+//! (docs/project-rules.md "구조와 파일 분리")을 목적별 파일로 떼어낸 결과다. 여기는 "활성 화면이 어떻게
+//! 바뀌는가"(storage + 연산)를 모은다 — 파서 dispatch는 parser.zig, OSC host-reply는 osc.zig. `Scrollback`
+//! 구조체는 self-contained라(architecture.md가 가리킨 seam) types만 의존하지만, 나머지 연산은 `*TerminalCore`
+//! 를 받는 free 함수다(필드 직접 접근 — Zig는 필드 privacy가 없다; osc.zig·parser.zig와 동형).
+//! facade(terminal.zig)·`TerminalCore` struct는 불변 — core.zig가 이 타입을 import해 필드로 쓴다.
+//!
+//! 현재 보유(core.zig 분할 8~18/N 완료, docs/terminal-core-decomposition.md): tabstops·dirty 추적·G3 charset·
+//! 이모지 폭·스크롤백 저장/재-wrap(Phase B) + cursor 이동·erase/insert/delete·scroll/feed·alt screen·print
+//! 핫패스(putCell)·resize/reflow·snapshot/viewport 합성(Phase C). 외부가 점-호출하는 pub API(resize·snapshot·
+//! renderSnapshot)는 core.zig에 얇은 facade 메서드로 남고 본문만 여기 있다. 후속: 필드를 `Screen` 하위 struct로
+//! 접는 architecture.md §"스크롤백은 화면에 귀속" 2단계, accessor(absRow 등)·selection 분리(11b/N~).
+//! core↔screen 순환 import은 osc/parser가 이미 검증한 그래프다.
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -294,8 +299,8 @@ fn decSpecial(codepoint: u21) u21 {
 }
 
 // ── 이모지/RI grapheme 폭 헬퍼 ───────────────────────────────────────────────────────────────────
-// 스킨톤 modifier 부착·지역표시자(RI) 페어링·wide 이모지 승격 판정. putCell·promoteLastToEmojiWidth(print
-// 경로, core 잔류)가 cross-file로 호출한다. last_print·cells·index(grid)에 의존한다.
+// 스킨톤 modifier 부착·지역표시자(RI) 페어링·wide 이모지 승격 판정. 같은 파일의 print 경로(writeCodepoint·
+// putCell·promoteLastToEmojiWidth, 16/N서 이리로 이동)가 호출한다. last_print·cells·index(grid)에 의존한다.
 
 pub fn isSkinToneModifier(codepoint: u21) bool {
     return codepoint >= 0x1F3FB and codepoint <= 0x1F3FF; // Fitzpatrick modifiers
@@ -333,8 +338,9 @@ pub fn wideContinuationCell(style: types.Style, link: u32) types.Cell {
 // ── 스크롤백 행 저장·재-wrap ─────────────────────────────────────────────────────────────────────
 // Scrollback ring에 행을 push하고, resize 시 새 폭으로 재-wrap하는 storage 로직(Scrollback struct와 짝).
 // accessor(scrollbackRow/scrollbackRowWrapped/scrollbackRowPrompt)와 absRow/absRowWrapped는 core 잔류
-// (facade·selection 공유 — 후속 accessor PR). 잔류 헬퍼(isBlankCell·clearTruncatedWideBase·invalidateSelection·
-// shiftCoordsForEviction)는 core가 pub로 노출, 여기선 self./core.TerminalCore로 호출한다.
+// (facade·selection 공유 — 후속 accessor PR). isBlankCell·clearTruncatedWideBase는 17/N서 이리로 이동(같은
+// 파일 bare 호출; isBlankCell만 core selection이 cross-file로 써 pub). invalidateSelection·shiftCoordsForEviction은
+// core 잔류라 self.(pub)로 호출한다.
 
 /// 스크롤백을 비운다(ED 3). 행 버퍼는 해제하고 ring 슬롯 배열은 유지해 다음 push가 재할당
 /// 없이 다시 쓴다. 뷰포트는 바닥으로 스냅한다(지워진 과거를 보고 있을 수 없으니).
@@ -709,7 +715,8 @@ pub fn cursorToRow(self: *TerminalCore, row: u16) void {
 
 /// 저장 커서를 새 grid 안으로 clamp한다. col이 잘려 더는 마지막 칸이 아니면 pending_wrap도 끈다
 /// (deferred wrap은 "마지막 칸에 머무는 중"일 때만 유효한 상태다). DECSC/DECRC·1048/1049 저장 슬롯에 쓴다.
-pub fn clampSavedCursor(slot: *core.SavedCursor, size: types.Size) void {
+/// resize(같은 파일, 17/N)만 호출하므로 private(15/N의 cross-file pub은 resize 이동으로 불필요해짐).
+fn clampSavedCursor(slot: *core.SavedCursor, size: types.Size) void {
     const clamped_col = @min(slot.cursor.col, size.cols - 1);
     if (clamped_col != slot.cursor.col) slot.pending_wrap = false;
     slot.cursor.row = @min(slot.cursor.row, size.rows - 1);
@@ -1472,9 +1479,9 @@ fn outputRowBlank(cells: []const types.Cell, row: usize, cols: u16) bool {
 
 /// 폭이 줄어 행 마지막 칸에 wide glyph base(width 2)만 남고 continuation이 잘렸으면 그 base를
 /// 비운다(한 칸 공간에 2칸 폭 half-glyph가 렌더되는 것 방지). 폭 축소로 내용을 clip하는 모든
-/// 경로(resize 커서 줄 verbatim, renderSnapshot 스크롤백 합성)가 공유한다.
-/// core의 renderSnapshot(스크롤백 합성)도 cross-file 호출 — pub.
-pub fn clearTruncatedWideBase(row: []types.Cell) void {
+/// 경로(resize 커서 줄 verbatim, renderSnapshot 스크롤백 합성)가 공유한다. resize·renderSnapshot·rewrap이
+/// 17~18/N서 모두 이리로 이동해 호출처가 전부 같은 파일 — private(11/N의 cross-file pub은 더는 불필요).
+fn clearTruncatedWideBase(row: []types.Cell) void {
     if (row.len > 0 and row[row.len - 1].width == 2) row[row.len - 1] = .{};
 }
 

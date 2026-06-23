@@ -342,3 +342,7 @@ selection은 화면/스크롤백을 **읽어** 좌표·텍스트를 산출하는
 | **R1** ✅ | input_report.zig 신설 + `encodeKey`·`encodeOptions`·`encodePaste`·`reportFocus`·`reportMouse` | facade 5개. appendResponse/dumpUtf8 core 잔류. reportFocus/Mouse는 self.appendResponse(core) 호출, encodeKey는 encodeOptions(self) intra. core.zig 6233→6166줄, input_report.zig 113줄 | 낮음~중 |
 
 검증·리뷰는 §5 그대로(4종 게이트 green auto-merge --rebase + `/code-review max`).
+
+### 9.3 리뷰 cleanup (R1 `/code-review max` 후속)
+
+누적 리뷰 결과 **정확성 버그 0**(byte-identical 이동 + build + 테스트 + check-boundaries green, 모든 호출부 facade로 해소). cleanup 1건만 정리: `reportMouse` doc-comment의 중복 단락(원본 core.zig에서 그대로 옮겨온 pre-existing — col/row 0-based 설명이 두 번)을 한 블록으로 dedup.

@@ -53,14 +53,12 @@ pub fn reportFocus(self: *TerminalCore, gained: bool) void {
     self.appendResponse(if (gained) "\x1b[I" else "\x1b[O");
 }
 
-/// mouse 이벤트를 앱에 리포트한다(mouse_tracking이 .none이 아닐 때). col/row는 0-based(인코딩은 1-based로 +1).
-/// button: 0=left,1=middle,2=right, 3=no-button(any-event motion), 64=wheel-up,65=wheel-down. mods 비트: 4=shift,8=meta(alt),16=ctrl. motion이면
-/// drag/move(button·any 모드만, Cb에 +32). 베이스: xterm — SGR(1006/1016) `CSI < Cb;Px;Py M`(press)/`m`(release);
-/// x10 `CSI M` + (32+Cb)(32+Px)(32+Py) 바이트(좌표 223 초과는 깨져 SGR 권장, release는 버튼 미상이라 Cb=3).
-/// 마우스 이벤트를 활성 tracking 모드/format으로 PTY에 리포트한다. col/row는 0-based 셀,
-/// x_px/y_px는 0-based 픽셀이며 SGR-Pixels(1016) format에서만 쓴다 — platform이 활성 pane
-/// 영역 좌상단 기준 backing(device) 픽셀로 보정해 전달한다. SGR/x10 format은 픽셀을 무시하고
-/// 셀 좌표를 인코딩한다.
+/// mouse 이벤트를 활성 tracking 모드/format으로 PTY에 리포트한다(mouse_tracking이 .none이 아닐 때).
+/// col/row는 0-based 셀(인코딩은 1-based로 +1). x_px/y_px는 0-based backing(device) 픽셀로 SGR-Pixels(1016)
+/// format에서만 쓴다 — platform이 활성 pane 좌상단 기준으로 보정해 전달하고, SGR/x10은 픽셀을 무시하고 셀 좌표를 쓴다.
+/// button: 0=left,1=middle,2=right, 3=no-button(any-event motion), 64=wheel-up,65=wheel-down. mods 비트: 4=shift,8=meta(alt),16=ctrl.
+/// motion이면 drag/move(button·any 모드만, Cb에 +32). 베이스: xterm — SGR(1006/1016) `CSI < Cb;Px;Py M`(press)/
+/// `m`(release); x10 `CSI M` + (32+Cb)(32+Px)(32+Py) 바이트(좌표 223 초과는 깨져 SGR 권장, release는 버튼 미상이라 Cb=3).
 pub fn reportMouse(self: *TerminalCore, button: u8, col: u16, row: u16, x_px: u16, y_px: u16, pressed: bool, motion: bool, mods: u8) void {
     if (self.mouse_tracking == .none) return;
     // motion(drag/move)은 button·any 모드만 리포트한다(x10/normal은 press·release만).

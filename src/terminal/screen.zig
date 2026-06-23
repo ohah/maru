@@ -18,11 +18,11 @@ const std = @import("std");
 const types = @import("types.zig");
 const core = @import("core.zig"); // 활성 화면 연산이 *TerminalCore를 받는다(Scrollback struct는 여전히 types만 의존)
 const width = @import("../width.zig"); // EAW 셀 폭(중립 top-level 유틸) — wide 이모지 판정에 쓴다
-const grapheme = @import("grapheme.zig"); // UAX#29 한글 cluster 분절(HG2에서 print 경로 통합 예정)
+const grapheme = @import("grapheme.zig"); // UAX#29 한글 cluster 분절(writeCodepoint가 호출)
 
-// HG1 단계에서 grapheme.zig는 아직 print 경로(writeCodepoint)가 호출하지 않으므로, 미사용
-// import만으로는 Zig가 그 파일을 analyze하지 않아 단위 테스트가 수집되지 않는다. 이 참조로
-// grapheme.zig의 테스트를 빌드에 끌어온다(HG2에서 실제 호출이 생기면 이 블록은 제거한다).
+// grapheme.zig의 HG1 단위 테스트를 빌드에 끌어오는 수집 앵커. writeCodepoint가 grapheme
+// 함수를 호출해도, Zig는 import한 파일의 함수만 analyze하고 그 파일의 `test` 블록은 끌어오지
+// 않는다 — 테스트 수집은 이렇게 `_ = @import`을 test 블록에서 참조해야만 된다(그래서 유지).
 test {
     _ = grapheme;
 }
@@ -1335,6 +1335,18 @@ pub fn writeCodepoint(self: *TerminalCore, codepoint: u21) void {
                     return;
                 }
             }
+            // NFD 한글 conjoining 자모(GB6/7/8): 중성(V)·종성(T)은 단독 폭이 1이라 위 combining
+            // (폭 0) 경로에 안 걸리지만, 앞 음절 cluster에 0폭으로 흡수돼야 한다 — 안 그러면 자모가
+            // 셀마다 흩어지고 폭이 음절당 2배가 된다(초성만 wide). mode 2027과 무관하게 적용한다:
+            // macOS 파일명(NFD)을 내는 `ls`는 grapheme cluster mode를 켜지 않기 때문이다(설계 §4.7).
+            // extendsCluster는 폭≠0 글자에 대해선 한글 L/V/T 연쇄에서만 true라 다른 문자는 안 묶인다.
+            if (self.last_print) |last| {
+                const last_cell = self.screen.cells[self.index(last.row, last.col)];
+                if (grapheme.extendsCluster(trailingClusterCp(self, last_cell), cp)) {
+                    appendClusterCodepoint(self, cp);
+                    return;
+                }
+            }
             putCell(self, cp);
         },
     }
@@ -1473,6 +1485,36 @@ fn attachCombiningMark(self: *TerminalCore, codepoint: u21) void {
     // nothing to attach to and is dropped.
     const last = self.last_print orelse return;
     self.screen.cells[self.index(last.row, last.col)].combining = codepoint;
+    markDirty(self, last.row);
+}
+
+/// 셀 cluster의 마지막 코드포인트 — UAX#29 boundary 판정(extendsCluster)의 prev 입력. store에
+/// cluster 본체가 있으면 그 끝, 없으면 단일 combining, 그도 없으면 base다. 이렇게 base가 아니라
+/// '직전 자모'와 비교해야 NFD 음절의 V→T(GB7) 연쇄가 끊기지 않는다(base L과 T는 GB6 밖이라 false).
+fn trailingClusterCp(self: *const TerminalCore, cell: types.Cell) u21 {
+    if (self.graphemeCluster(cell.grapheme_id)) |cps| {
+        if (cps.len > 0) return cps[cps.len - 1];
+    }
+    if (cell.combining) |c| return c;
+    return cell.codepoint;
+}
+
+/// cp를 직전 base 셀의 grapheme cluster에 0폭 extra로 붙인다(커서·last_print·폭은 그대로 —
+/// attachCombiningMark와 같은 위치 규칙). 단일 extra는 store 없이 combining 그림자로 두고(흔한
+/// 단일 결합과 같은 0 비용), 둘째 extra부터 grapheme_store로 승격해 무손실로 담는다. combining은
+/// 첫 extra의 잠정 그림자로 유지된다(렌더 back-compat — HG2b에서 제거). OOM이면 그 자모만 떨군다.
+fn appendClusterCodepoint(self: *TerminalCore, cp: u21) void {
+    const last = self.last_print orelse return;
+    const idx = self.index(last.row, last.col);
+    var cell = self.screen.cells[idx];
+    if (cell.grapheme_id != 0) {
+        cell.grapheme_id = self.appendGraphemeCodepoint(cell.grapheme_id, cp) catch return;
+    } else if (cell.combining) |first| {
+        cell.grapheme_id = self.internGrapheme(&.{ first, cp }) catch return;
+    } else {
+        cell.combining = cp;
+    }
+    self.screen.cells[idx] = cell;
     markDirty(self, last.row);
 }
 
@@ -1873,6 +1915,7 @@ pub fn snapshot(self: *const TerminalCore) types.RenderSnapshot {
         .cursor_shape = self.cursor_shape,
         .cursor_blink = self.cursor_blink,
         .cells = self.screen.cells,
+        .graphemes = self.grapheme_store.items, // cluster 본체 store를 zero-copy로 빌려준다(id로 참조)
         .prompt_marks = self.screen.prompt_marks, // 활성 화면 행 태그를 그대로 빌려준다(zero-copy)
         .last_command_exit = self.last_command_exit,
         .dirty = self.dirty,
@@ -1931,6 +1974,8 @@ pub fn renderSnapshot(self: *TerminalCore) types.RenderSnapshot {
         // 과거를 보는 중엔 활성 커서가 화면 밖(아래)에 가려져 있으므로 커서를 숨긴다.
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .cells = self.viewport_cells,
+        // grapheme store는 코어 전역(활성·스크롤백 셀이 같은 id 공간을 공유)이라 합성 뷰포트도 그대로 빌려준다.
+        .graphemes = self.grapheme_store.items,
         .prompt_marks = self.viewport_prompt_marks,
         .last_command_exit = self.last_command_exit,
         .placements = self.buildPlacementViews(top_abs),
@@ -2040,6 +2085,7 @@ fn snapshotWithPreedit(self: *TerminalCore, preedit_bytes: []const u8) types.Ren
         // 후속(후보창 배치 등)이 참조할 수 있게 하되 그리지는 않는다.
         .cursor = .{ .row = row, .col = @min(draw_col, cols - 1), .visible = false },
         .cells = self.viewport_cells,
+        .graphemes = self.grapheme_store.items, // cluster 본체 store(preedit 합성 셀도 같은 id 공간)
         .prompt_marks = self.screen.prompt_marks, // preedit은 행 태그를 바꾸지 않는다(활성 그대로)
         .last_command_exit = self.last_command_exit,
         .dirty = self.dirty,

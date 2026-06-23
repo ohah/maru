@@ -3327,6 +3327,19 @@ test "A2: trim된 행도 스크롤하면 cols 폭으로 pad되어 보인다(rend
     core.scrollToBottom();
 }
 
+test "A2: 빈(trim된 len-0) 스크롤백 행에서 단어/URL 선택은 크래시 없이 null(§11 A2 리뷰)" {
+    // 회귀 가드: A2가 전부-공백 hard 행을 len 0으로 저장하면서, wordBoundsAt가 row_cells[0]을 가드 없이
+    // 인덱싱해 빈 스크롤백 행에서 더블클릭/Cmd-hover가 OOB 패닉이던 버그(리뷰 발견·재현).
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+    core.setMaxScrollback(10);
+    try core.write("\r\nx"); // 빈 줄이 스크롤백으로(전부 공백 → trim len 0), x 표시
+    core.scrollViewport(1); // 빈 스크롤백 행을 본다
+    core.selectWordAt(0, 0, ""); // 더블클릭 — 크래시 없이(선택 없음)
+    try std.testing.expect(core.urlAnchorAt(0, 0) == null); // Cmd-hover — 크래시 없이 null
+    core.scrollToBottom();
+}
+
 test "setMaxScrollback 하향 트림: 가장 오래된 행을 버리고 view_offset을 보정한다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
     defer core.deinit();

@@ -71,8 +71,10 @@
   좁은 사이드바, 우측 아이콘 4개가 안 들어감). 사이드바 **최소 폭**(`sidebarMinPt`)은 신호등 클리어런스 + **13칸**으로,
   알림 그룹 좌단("9+" 배지 `cols-13`)까지 신호등과 안 겹치게 둔다(예전 10칸은 ◧까지만 잡아 종+배지가 겹쳤다).
 - **접힘에도 알림 종 유지**: 사이드바 접힘(`sidebar_collapsed`, 폭 0)이면 좌상단 타이틀바 띠에 ◧ 펼치기 토글만 떴는데,
-  이제 그 오른쪽(`collapsedBellCol()` = `collapsedToggleCol()+3`)에 **종 + 배지**도 그린다(`buildCollapsedToggleFrame`).
-  렌더러는 접힘(terminal_origin_x_px==0) 헤더 줄0 글리프(◧·종·배지)를 모두 타이틀바 띠 세로 중앙에 정렬한다(예전 ◧
+  이제 종+배지를 ◧ **왼쪽**(가장 왼쪽; `collapsedToggleCol()` = `collapsedBellCol()+3`)에 그려 펼침 헤더와 같은 종→◧
+  순서로 둔다(`buildCollapsedToggleFrame`) — 토글로 접힘↔펼침을 오가도 종/◧ 위치가 안 바뀐다(사용자 피드백). 종 base는
+  `클리어런스 + 여백 + 배지폭`(`collapsed_badge_max_cells`)이라 "9+" 배지도 신호등을 침범 안 한다(anchor도 같은 폭으로 묶음 좌단).
+  렌더러는 접힘(terminal_origin_x_px==0) 헤더 줄0 글리프(종·배지·◧)를 모두 타이틀바 띠 세로 중앙에 정렬한다(예전 ◧
   전용 `is_collapsed_toggle`을 헤더 줄0 전체 `is_collapsed_header`로 일반화). 종 클릭(`collapsedNotificationRect`)은
   `openNotificationPanel`이 접힘 분기로 띠 아래에 패널을 띄우고(`is_window_drag_region`·hover 커서도 이 영역 제외/포인터),
   ◧ 클릭은 펼치기(별개 영역, 클릭 우선순위 종→◧).
@@ -88,9 +90,12 @@
   버퍼 행)이 종↔패널 간격이자 **말풍선 caret**(위로 뾰족한 삼각형) 자리가 된다 — **팝업이 종을 안 가린다**(예전 `anchor_y=1ch`는
   종 하단을 덮었다). caret은 chrome 모달 lowering이 셀 그리드(픽셀 정밀 도형은 둥근 quad뿐)라, platform `appendNotificationCaret`이
   `self.gpu_quads`에 `GpuQuad{gradient_kind=3}`(셰이더가 rect 내접 삼각형 + fwidth edge AA로 그림 — 별도 파이프라인/ABI 없이
-  quad 채널 재활용) 2개(focus_accent 외곽선 + surface_bg 채움)를 종 중심(`(cols-10.5)*cw`)·**보이는** 패널 상단(`panel.y − mp`)에
-  append한다. 패널 배경 quad **'뒤'**라 상단 테두리를 caret 폭만큼 덮어 bubble을 연다. 패널이 세로 clamp로 밀렸거나
-  종이 보이는 패널 가로 밖이면 caret 생략(어긋남 방지).
+  quad 채널 재활용) **1개**(surface_bg 채움만)를 종 중심(`(cols-10.5)*cw`)·**보이는** 패널 상단(`panel.y − mp`)에
+  append한다(예전 2개[focus_accent 외곽선 + 채움]는 채움 삼각형 빗변의 fwidth edge-AA가 내부까지 부분 커버리지를 줘
+  외곽선과 블렌딩, 내부가 패널색 아닌 중간톤으로 떴다 — 단일 채움으로 패널과 같은 색). caret 채움(surface_bg)이 패널
+  배경과 **픽셀값까지 같은** 건 rich quad 셰이더의 sRGB 역감마가 표준 2.4라 round-trip이 identity이기 때문(예전 3.0
+  지수 버그면 패널만 어둡게 렌더돼 caret과 안 맞았다 — `maru_metal_shader.h srgb_to_linear`). 패널 배경 quad **'뒤'**라
+  상단 테두리를 caret 폭만큼 덮어 bubble을 연다. 패널이 세로 clamp로 밀렸거나 종이 보이는 패널 가로 밖이면 caret 생략(어긋남 방지).
 - **최소 높이**: 항목이 적어도 팝업이 납작하지 않게 `min_panel_rows`(8) baseline을 보장한다 — 카드는 상단, 액션
   행(footer)은 박스 하단 고정, 사이 여백은 패널 배경(클릭 무시 = `Hit.background`; 박스 '밖'만 닫기). 카드가 그보다
   많으면 자연 높이(화면 cap)로 커지므로 무영향(`layout` 단일 출처 — view·hitTest 공유).

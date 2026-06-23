@@ -134,12 +134,15 @@ const sidebar_search_icon_col: u16 = 1; // 🔍 좌측 패딩 1칸
 const sidebar_search_text_col: u16 = sidebar_search_icon_col + 3; // 🔍(2칸)+공백(1) 뒤 = 입력/caret 시작 col(=4)
 // 사이드바 접힘 시 좌상단 펼치기 버튼이 신호등 오른쪽에서 비울 가로 여백(논리 pt). 신호등은 좌상단 ~70pt를 차지한다.
 const traffic_light_clearance_pt: u32 = 72;
-// 접힘 펼치기 토글(◧)을 신호등 클리어런스에서 더 오른쪽으로 미는 칸 수 — 호버 배경이 셀 중심 기준 좌측으로
-// ≈0.8칸 번지므로, 1칸이면 신호등에 닿을 만큼 붙어 보였다(사용자 피드백). 2칸으로 한 칸 이상 간격을 둔다.
+// 접힘 헤더 가장 왼쪽 아이콘 묶음(종+배지)을 신호등 클리어런스에서 더 오른쪽으로 미는 여백 칸 수 — 호버 배경이 셀
+// 중심 기준 좌측으로 ≈0.8칸 번지므로, 1칸이면 신호등에 닿을 만큼 붙어 보였다(사용자 피드백). 2칸으로 한 칸 이상 간격.
 const collapsed_toggle_gap_cells: u32 = 2;
-// 접힘 시 알림 종(🔔)을 ◧ 펼치기 토글에서 오른쪽으로 띄우는 칸 수 — 펼침 헤더의 아이콘 간격(3칸)과 같게 둬 ◧↔종이
-// 같은 리듬으로 보인다(접힘에도 알림 아이콘 유지, 사용자 피드백). 종 글리프 col = collapsedToggleCol() + 이 값.
+// 접힘 시 ◧ 펼치기 토글을 알림 종에서 오른쪽으로 띄우는 칸 수 — 펼침 헤더의 아이콘 간격(3칸)과 같게 둬 종↔◧이
+// 같은 리듬으로 보인다(접힘에도 알림 아이콘 유지, 사용자 피드백). ◧ col = collapsedBellCol() + 이 값(종이 ◧ 왼쪽).
 const collapsed_bell_gap_cells: u32 = 3;
+// "9+" 안 읽음 배지가 종 글리프 왼쪽으로 뻗는 최대 칸 수(10+면 2칸). collapsedBellCol이 이만큼을 신호등 클리어런스
+// 오른쪽에 예약해 배지가 신호등을 침범하지 않게 하고, openNotificationPanel 접힘 anchor가 배지 묶음 좌단을 잡는 단일 출처.
+const collapsed_badge_max_cells: u16 = 2;
 // 접힘 시 상단 타이틀바 띠의 최소 높이(논리 pt) — 신호등 세로 높이(~28pt)를 가려야 터미널/탭이 신호등을 침범 안 함.
 // 펼침은 한 줄(터미널이 사이드바 우측이라 신호등 아래가 아님)이지만, 접힘은 터미널이 전폭이라 신호등 높이를 확보한다.
 const collapsed_titlebar_min_pt: u32 = 30;
@@ -10636,21 +10639,22 @@ pub const AppSession = struct {
         return try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
     }
 
-    /// 사이드바 접힘 시 좌상단 펼치기 버튼(◧)의 col(신호등 오른쪽). render(buildCollapsedToggleFrame)와 hit-test
-    /// (collapsedToggleRect)가 같은 값을 써야 그려진 버튼과 클릭 영역이 일치한다(단일 출처). cell_width 0이면 0.
-    fn collapsedToggleCol(self: *const AppSession) u16 {
+    /// 사이드바 접힘 시 좌상단 알림 종(🔔) 글리프 col — 신호등 클리어런스 오른쪽 **첫(가장 왼쪽)** 아이콘. 펼침 헤더처럼
+    /// 종이 ◧ '왼쪽'에 와 접힘↔펼침을 토글해도 종/◧ 순서가 안 바뀐다(사용자 피드백 "◧ 누르면 알림이랑 위치가 바뀜").
+    /// render(buildCollapsedToggleFrame)·hit-test(collapsedNotificationRect)·패널 anchor(openNotificationPanel)가 같은 값을
+    /// 쓴다(단일 출처). cell_width 0이면 0.
+    fn collapsedBellCol(self: *const AppSession) u16 {
         if (self.cell_width_px == 0) return 0;
         const clearance_px = ptToPx(traffic_light_clearance_pt, self.scale_milli); // 신호등 클리어런스(backing px, pt→px 단일 출처)
-        // 신호등 오른쪽 + 여백 칸. 호버 배경(아래 buildSidebar… hover quad)이 셀 중심 기준 ≈2.6칸 폭이라 col-0.8칸까지
-        // 왼쪽으로 번져, +1이면 호버가 신호등에 닿을 만큼 붙어 보였다(사용자 피드백 "초록 아이콘이랑 붙어있다"). 칸을
-        // 더 줘 신호등과 한 칸 이상 간격을 둔다(호버 좌단 = clearance + ≈1.2칸).
-        return @intCast(@min(clearance_px / self.cell_width_px + collapsed_toggle_gap_cells, @as(u32, std.math.maxInt(u16))));
+        // 신호등 오른쪽 + 여백 + 배지폭. 종 왼쪽으로 "9+" 배지가 collapsed_badge_max_cells칸 뻗으므로, 종 base에 그 폭을
+        // 더 보태 배지 좌단(=종−배지폭)이 클리어런스 + 여백 칸 안에 들어오게 한다 — 안 그러면 10+ 배지가 신호등에 닿는다.
+        return @intCast(@min(clearance_px / self.cell_width_px + collapsed_toggle_gap_cells + collapsed_badge_max_cells, @as(u32, std.math.maxInt(u16))));
     }
 
-    /// 접힘 시 알림 종(🔔) 글리프 col(◧ 오른쪽 collapsed_bell_gap_cells칸). render(buildCollapsedToggleFrame)·hit-test
-    /// (collapsedNotificationRect)·패널 anchor(openNotificationPanel)가 같은 값을 써야 그려진 종·클릭 영역·팝업이 일치한다(단일 출처).
-    fn collapsedBellCol(self: *const AppSession) u16 {
-        return self.collapsedToggleCol() + @as(u16, @intCast(collapsed_bell_gap_cells));
+    /// 접힘 시 ◧ 펼치기 토글 글리프 col — 종 오른쪽 collapsed_bell_gap_cells칸(펼침 헤더의 종↔◧ 3칸 간격과 같은 리듬).
+    /// render(buildCollapsedToggleFrame)·hit-test(collapsedToggleRect)가 같은 값을 써 그려진 버튼과 클릭 영역이 일치한다(단일 출처).
+    fn collapsedToggleCol(self: *const AppSession) u16 {
+        return self.collapsedBellCol() + @as(u16, @intCast(collapsed_bell_gap_cells));
     }
 
     /// 접힘 상태 좌상단 펼치기 버튼(◧)만 그린 frame — 사이드바 폭 0이라 터미널 좌상단에 겹쳐 그린다(replace가 커서
@@ -10663,12 +10667,13 @@ pub const AppSession = struct {
         const bell_col = self.collapsedBellCol();
         var cells: std.ArrayList(renderer.DrawCell) = .empty;
         errdefer cells.deinit(self.allocator);
-        try cells.append(self.allocator, .{ .row = 0, .col = btn_col, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
-        // 알림 종(접힘에도 유지) + 안 읽은 개수 배지 — 펼침 헤더와 같은 글리프/색/"9+" 규칙(appendBellAndBadge 단일 출처).
-        // 렌더러가 접힘 헤더 줄0 글리프(◧·종·배지)를 타이틀바 띠 세로 중앙에 함께 정렬한다(terminal_origin_x_px==0 분기).
+        // 좌→우: 종+배지(가장 왼쪽, 펼침 헤더와 같은 순서) → ◧ 펼치기 토글. 알림 종은 접힘에도 유지 — 펼침 헤더와 같은
+        // 글리프/색/"9+" 규칙(appendBellAndBadge 단일 출처). 렌더러가 접힘 헤더 줄0 글리프(종·배지·◧)를 타이틀바 띠
+        // 세로 중앙에 함께 정렬한다(terminal_origin_x_px==0 분기).
         try self.appendBellAndBadge(&cells, bell_col, fg);
+        try cells.append(self.allocator, .{ .row = 0, .col = btn_col, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
         const draw_list = renderer.DrawList{
-            .size = .{ .cols = bell_col + 3, .rows = 1 }, // ◧ + 종(2칸) + 여유 1칸
+            .size = .{ .cols = btn_col + 2, .rows = 1 }, // ◧(가장 오른쪽, 1칸) + 여유 1칸
             .cursor = .{ .row = 0, .col = 0 },
             .dirty = null,
             .cells = try cells.toOwnedSlice(self.allocator),
@@ -11206,7 +11211,9 @@ pub const AppSession = struct {
         if (self.sidebar_collapsed) {
             // 접힘: 종은 타이틀바 띠 안 collapsedBellCol(). 패널 좌단을 종 묶음(배지) 좌단에, 보이는 상단을 띠 하단에 둔다.
             // (접힘은 사이드바 폭 0이라 말풍선 caret은 appendNotificationCaret의 cols<13 가드로 자동 생략 — 띠 아래 드롭다운.)
-            anchor_x = @intCast(@as(u32, self.collapsedBellCol() -| 1) * self.cell_width_px); // 배지/종 묶음 좌단
+            // 배지/종 묶음 좌단: 안 읽음 개수별 배지 폭(10+ 2칸, 1~9 1칸, 0 없음)만큼 종 왼쪽이 묶음 좌단(collapsed_badge_max_cells 단일 출처).
+            const badge_cells: u16 = if (self.notification_unread > 9) collapsed_badge_max_cells else if (self.notification_unread > 0) 1 else 0;
+            anchor_x = @intCast(@as(u32, self.collapsedBellCol() -| badge_cells) * self.cell_width_px);
             anchor_y = @intCast(self.titlebar_strip_px + mp); // content_top − mp = titlebar_strip_px(띠 하단)
         } else {
             // 펼침: 패널 좌단을 알림 그룹 좌단(배지 col cols-12)에, 보이는 상단을 줄2에 둔다 — 벨(줄0, py_nudge로 ~1.30ch)을
@@ -11219,8 +11226,9 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 알림 패널 말풍선 caret을 GPU 삼각형(gpu_quads gradient_kind=3) 2개로 그린다 — 외곽선(focus_accent) 위에
-    /// 채움(surface_bg, 패널 배경과 같은 색). 벨 글리프 중심(렌더러 가로 nudge 반영: col cols-11·width 2 슬롯이 0.5칸
+    /// 알림 패널 말풍선 caret을 GPU 삼각형(gpu_quads gradient_kind=3) **1개**(채움 surface_bg, 패널 배경과 같은 색)로
+    /// 그린다. 예전엔 focus_accent 외곽선 삼각형 위에 채움 삼각형을 얹었는데 채움 빗변의 fwidth edge-AA가 내부까지 부분
+    /// 커버리지를 줘 외곽선과 블렌딩, 내부가 패널색 아닌 중간톤으로 떴다(사용자 피드백). 벨 글리프 중심(렌더러 가로 nudge 반영: col cols-11·width 2 슬롯이 0.5칸
     /// 왼쪽으로 밀려 중심 (cols-10.5)*cw)에 apex를 두고, 밑변을 패널 상단에 overlap만큼 겹쳐 상단 테두리를 caret
     /// 폭만큼 덮어 'bubble을 연다'. 패널이 세로 clamp로 anchor보다 위로 밀렸거나 벨이 패널 가로 밖이면 생략(벨과
     /// 어긋난 caret 방지). buildChromeOverlayFrame이 패널 배경 quad를 self.gpu_quads에 append한 '뒤'에 부른다(테두리 위로).
@@ -11245,11 +11253,11 @@ pub const AppSession = struct {
         const caret_w: f32 = cw_f * 1.6; // ~1.6칸 폭(말풍선 꼭지)
         const caret_h: f32 = ch_f * 0.5; // ~반 줄 높이
         const overlap: f32 = 2.0; // 밑변을 패널 안으로 — 상단 테두리 seam 덮기
-        const outline: f32 = 1.5; // accent 외곽선(빗변 peek) — 패널 테두리(1px)와 어울리게
-        const fill = packRgbAlpha(tk.get(.surface_bg), 0xFF); // 채움=패널 배경색
-        const accent = packRgbAlpha(tk.get(.focus_accent), 0xFF); // 외곽선=패널 테두리색
-        // 외곽(accent) 삼각형 — 사방 outline만큼 큰 rect에 내접(빗변이 ~outline px 비져 외곽선) → 그 위에 채움.
-        self.gpu_quads.append(self.allocator, triangleQuad(bell_cx - caret_w / 2 - outline, panel_top - caret_h - outline, caret_w + 2 * outline, caret_h + outline + overlap, accent)) catch {};
+        const fill = packRgbAlpha(tk.get(.surface_bg), 0xFF); // 채움=패널 배경색(텍스트 박스와 동일)
+        // 말풍선 caret = 패널 배경(surface_bg)으로 꽉 찬 **단일** 삼각형. 예전엔 accent 삼각형 위에 더 작은 채움 삼각형을
+        // 얹었는데, 작은 삼각형의 fwidth edge-AA가 내부까지 부분 커버리지를 줘 아래 accent와 블렌딩돼 내부가 패널색이
+        // 아닌 중간톤으로 떠 보였다(사용자 피드백 "채우기가 텍스트 박스랑 동일하게"). 외곽선 없이 surface_bg로만 채워 패널
+        // 상단과 이음새 없이 잇는다(패널 배경 quad '뒤'에 그려 상단 테두리를 caret 폭만큼 덮어 bubble을 연다).
         self.gpu_quads.append(self.allocator, triangleQuad(bell_cx - caret_w / 2, panel_top - caret_h, caret_w, caret_h + overlap, fill)) catch {};
     }
 
@@ -19013,8 +19021,8 @@ test "collapsed notification bell: hit-test rect is concentric with the glyph, c
     session.toggleSidebarCollapsed();
     try std.testing.expect(session.sidebar_collapsed);
 
-    // collapsedBellCol = collapsedToggleCol + 3(아이콘 간격 단일 출처).
-    try std.testing.expectEqual(session.collapsedToggleCol() + @as(u16, 3), session.collapsedBellCol());
+    // 종이 ◧ '왼쪽'(펼침과 같은 순서) — collapsedToggleCol = collapsedBellCol + 3(아이콘 간격 단일 출처). 토글↔펼침 swap 방지.
+    try std.testing.expectEqual(session.collapsedBellCol() + @as(u16, 3), session.collapsedToggleCol());
 
     const cw_i: i32 = @intCast(session.cell_width_px);
     const r = session.collapsedNotificationRect().?;
@@ -19023,9 +19031,9 @@ test "collapsed notification bell: hit-test rect is concentric with the glyph, c
     // 클릭 rect 중심 == 종 글리프 시각 중심 (bell_col+0.5)·cw(렌더러 −0.5칸 px_nudge 반영; (3cw)/2 == cw + cw/2라 홀/짝 cw 무관).
     const bell_center = @as(i32, session.collapsedBellCol()) * cw_i + @divTrunc(cw_i, 2);
     try std.testing.expectEqual(bell_center, r.x + @as(i32, @intCast(r.w / 2)));
-    // 종 rect와 ◧ 토글 rect는 안 겹친다(클릭 모호성 없음) — 종 좌단 ≥ 토글 우단.
+    // 종 rect(왼쪽)와 ◧ 토글 rect(오른쪽)는 안 겹친다(클릭 모호성 없음) — 종 우단 ≤ 토글 좌단.
     const t = session.collapsedToggleRect().?;
-    try std.testing.expect(r.x >= t.x + @as(i32, @intCast(t.w)));
+    try std.testing.expect(t.x >= r.x + @as(i32, @intCast(r.w)));
 
     // 종 클릭 → 알림 패널 열림(접힘 분기 anchor). 종은 ◧와 별개라 펼치지 않는다(폭 0 유지).
     const cx: f64 = @floatFromInt(r.x + @as(i32, @intCast(r.w / 2)));

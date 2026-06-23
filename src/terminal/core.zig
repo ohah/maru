@@ -462,7 +462,7 @@ pub const TerminalCore = struct {
     /// RIS(ESC c) 하드 리셋: 화면을 비우고 스크롤백·선택·링크 저장소를 지우고 pen·모드를
     /// 공장 초기 상태로 되돌린다(VT100 RIS 의미론 근사). alt 화면이면 primary로 복귀한다.
     fn fullReset(self: *TerminalCore) void {
-        if (self.alt_active) self.leaveAltScreen(false);
+        if (self.alt_active) screen.leaveAltScreen(self, false);
         @memset(self.cells, .{});
         @memset(self.wrapped, false);
         @memset(self.prompt_marks, .{});
@@ -2304,11 +2304,11 @@ pub const TerminalCore = struct {
             // home)를 ESC 8이 되돌린다 — 복원이 없으면 커서가 (0,0)에 남아 UI가 기존 화면 맨 위를
             // 덮는다. DECSET 1048과 같은 저장 슬롯을 쓴다(xterm 동일).
             '7' => {
-                self.saveCursorState();
+                screen.saveCursorState(self);
                 self.parser = .ground;
             },
             '8' => {
-                self.restoreCursorState();
+                screen.restoreCursorState(self);
                 self.parser = .ground;
             },
             // RIS(ESC c): 하드 리셋. 화면/스크롤백/선택/링크 저장소를 비우고 pen·pen_link·모드를
@@ -2512,8 +2512,8 @@ pub const TerminalCore = struct {
             // 커서 저장→여러 줄 그리기→복원으로 제자리 갱신하는 표준 수단이다 — 복원을 무시하면 진행바가
             // 줄줄이 쌓인다. 베이스: xterm ctlseqs SCOSC/SCORC(Ghostty 동등). bare 's'/'u'만 — kitty CSI u
             // (`> < = ?` prefix)는 위 private 분기에서 처리하므로 여기 안 온다.
-            's' => self.saveCursorState(),
-            'u' => self.restoreCursorState(),
+            's' => screen.saveCursorState(self),
+            'u' => screen.restoreCursorState(self),
 
             // DA1(CSI c / CSI 0 c): 터미널 식별 질의. 프로그램(claude CLI 등)이 시작 시 기능 협상
             // 으로 보내며, 응답이 없으면 타임아웃을 기다리거나 기능을 보수적으로 끈다. VT102로
@@ -2554,9 +2554,9 @@ pub const TerminalCore = struct {
                 7 => self.autowrap = set, // DECAWM(G8): autowrap on/off — off면 마지막 칸에서 덮어쓴다
                 2027 => self.grapheme_cluster_mode = set, // grapheme cluster 너비(이모지 풀사이즈 합의)
                 2026 => self.sync_output = set, // synchronized output(set=BSU hold 시작, reset=ESU flush)
-                47, 1047 => if (set) self.enterAltScreen(false) else self.leaveAltScreen(false),
-                1048 => if (set) self.saveCursorState() else self.restoreCursorState(),
-                1049 => if (set) self.enterAltScreen(true) else self.leaveAltScreen(true),
+                47, 1047 => if (set) screen.enterAltScreen(self, false) else screen.leaveAltScreen(self, false),
+                1048 => if (set) screen.saveCursorState(self) else screen.restoreCursorState(self),
+                1049 => if (set) screen.enterAltScreen(self, true) else screen.leaveAltScreen(self, true),
                 else => {}, // 그 외 private 모드(25 커서 표시 등)는 아직 소비만 한다.
             }
         }
@@ -2637,121 +2637,6 @@ pub const TerminalCore = struct {
             },
         };
         self.appendResponse(out);
-    }
-
-    /// 현재 활성 화면의 DECSC 저장 슬롯. ESC 7/8과 1048은 항상 "지금 보이는 화면"의 슬롯을 쓴다
-    /// (xterm 동일). 1049의 enter(저장)/leave(복원)는 primary 슬롯을 쓴다 — 셸 커서를 보관했다가
-    /// TUI 종료 시 되돌리는 용도라서다.
-    fn activeSavedCursor(self: *TerminalCore) *SavedCursor {
-        return if (self.alt_active) &self.saved_cursor_alt else &self.saved_cursor_primary;
-    }
-
-    fn saveCursorState(self: *TerminalCore) void {
-        self.activeSavedCursor().* = .{
-            .cursor = self.cursor,
-            .pen = self.pen,
-            .pending_wrap = self.pending_wrap,
-        };
-    }
-
-    fn restoreCursorState(self: *TerminalCore) void {
-        self.restoreFromSlot(self.activeSavedCursor().*);
-    }
-
-    fn restoreFromSlot(self: *TerminalCore, slot: SavedCursor) void {
-        const old_cursor = self.cursor;
-        self.cursor = .{
-            .row = @min(slot.cursor.row, self.size.rows - 1),
-            .col = @min(slot.cursor.col, self.size.cols - 1),
-        };
-        self.pen = slot.pen;
-        screen.markCursorMoveDirty(self, old_cursor, self.cursor);
-        // markCursorMoveDirty가 deferred autowrap을 무효화(pending_wrap=false)하므로, 저장된 pending_wrap은
-        // 그 '뒤'에 복원한다 — 줄 끝 deferred-wrap 상태에서 저장→복원하면 복원이 즉시 덮어써지던 버그
-        // (DECSC/DECRC·CSI s/u가 공유하는 restoreFromSlot, code review).
-        self.pending_wrap = slot.pending_wrap;
-        self.last_print = null;
-    }
-
-    /// alt screen으로 전환한다. primary 그리드(cells/wrapped)를 saved_*로 옮기고 빈 alt 버퍼를
-    /// 만든다(1049는 들어가며 clear — TUI가 어차피 전체를 그린다). 할당 실패면 전환하지 않는다
-    /// (primary 유지가 안전 — 커서 저장도 두 할당이 성공한 뒤에 해 실패가 부작용 없게 한다).
-    /// 1049의 커서 저장은 이미 alt여도 수행한다(xterm: "unconditionally saves the cursor").
-    fn enterAltScreen(self: *TerminalCore, save_cursor: bool) void {
-        if (self.alt_active) {
-            // 화면은 이미 alt지만 1049h의 커서 저장 의미는 유지한다(중첩 멀티플렉서/SIGCONT 재초기화).
-            if (save_cursor) self.saveCursorState();
-            return;
-        }
-
-        const alt_cells = self.allocator.alloc(types.Cell, cellCount(self.size)) catch return;
-        @memset(alt_cells, .{});
-        const alt_wrapped = self.allocator.alloc(bool, self.size.rows) catch {
-            self.allocator.free(alt_cells);
-            return;
-        };
-        @memset(alt_wrapped, false);
-        const alt_prompt_marks = self.allocator.alloc(types.RowPrompt, self.size.rows) catch {
-            self.allocator.free(alt_cells);
-            self.allocator.free(alt_wrapped);
-            return;
-        };
-        @memset(alt_prompt_marks, .{});
-
-        // 세 할당이 성공한 뒤에야 상태를 바꾼다(OOM 경로가 저장 슬롯을 오염시키지 않게).
-        if (save_cursor) self.saveCursorState(); // primary 슬롯(아직 alt_active=false)
-        self.saved_cells = self.cells;
-        self.saved_wrapped = self.wrapped;
-        self.saved_prompt_marks = self.prompt_marks; // primary의 OSC 133 분류 보관
-        self.cells = alt_cells;
-        self.wrapped = alt_wrapped;
-        self.prompt_marks = alt_prompt_marks; // alt 화면은 셸 프롬프트 의미가 없다(전부 .unknown)
-        self.semantic_state = .unknown; // alt 진입 — primary의 진행 중 영역을 이어받지 않는다
-        self.alt_active = true;
-        // primary 스크롤백을 보관 슬롯으로 옮기고 alt는 cap=0인 빈 스크롤백을 쓴다 — alt 출력은
-        // history에 안 쌓이고(pushScrollback 무동작), count가 0이라 스크롤 뷰·스크롤바·검색이
-        // by-construction으로 잠긴다(grid의 saved_cells 스왑과 같은 패턴). 보던 과거를 닫고 선택도
-        // 해제한다(활성 cells가 alt로 바뀌어 abs 좌표가 다른 내용을 가리키므로 — xterm.js도 버퍼
-        // 전환 시 선택 해제).
-        self.saved_sb = self.sb;
-        self.sb = .{};
-        self.view_offset = 0;
-        self.invalidateSelection();
-        self.pen_link = 0; // OSC 8 링크는 화면에 스코프된다 — 전환 시 닫는다(Ghostty endHyperlink)
-        self.pending_wrap = false;
-        self.last_print = null;
-        self.dirty = fullDirty(self.size);
-    }
-
-    /// primary screen으로 복귀한다. alt 버퍼를 버리고 saved 그리드를 복원한다. 1049는 커서도
-    /// primary 슬롯에서 복원해 vim 종료 시 프롬프트가 원래 자리로 돌아온다 — alt 안에서 TUI가
-    /// ESC 7/8을 써도(alt 슬롯) 셸 커서는 안전하다. 1049l의 커서 복원은 이미 primary여도
-    /// 수행한다(xterm 동작 — 방어적 `\e[?1049l` 정리 스크립트 호환).
-    fn leaveAltScreen(self: *TerminalCore, restore_cursor: bool) void {
-        if (!self.alt_active) {
-            if (restore_cursor) self.restoreFromSlot(self.saved_cursor_primary);
-            return;
-        }
-        self.allocator.free(self.cells);
-        self.allocator.free(self.wrapped);
-        if (self.prompt_marks.len > 0) self.allocator.free(self.prompt_marks);
-        self.cells = self.saved_cells;
-        self.wrapped = self.saved_wrapped;
-        self.prompt_marks = self.saved_prompt_marks; // primary 분류 복원
-        self.saved_cells = &.{};
-        self.saved_wrapped = &.{};
-        self.saved_prompt_marks = &.{};
-        self.sb.deinit(self.allocator); // alt의 빈 스크롤백 해제(보통 ring 미할당 — no-op)
-        self.sb = self.saved_sb; // primary 스크롤백 복원(보관해 둔 ring·count·cap·rewrap 마크 그대로)
-        self.saved_sb = .{};
-        self.semantic_state = .unknown; // primary 복귀 — 진행 중 영역을 이어받지 않는다(다음 프롬프트가 재마킹)
-        self.alt_active = false;
-        self.pending_wrap = false;
-        self.last_print = null;
-        self.pen_link = 0; // 화면 전환 — 열린 링크를 닫는다(Ghostty endHyperlink)
-        self.invalidateSelection(); // primary 복귀 — 활성 cells가 다시 바뀌므로 선택 해제
-        if (restore_cursor) self.restoreFromSlot(self.saved_cursor_primary);
-        self.dirty = fullDirty(self.size);
     }
 
     /// DSR(CSI Ps n): 호스트의 상태 질의에 응답한다. 응답은 response 버퍼에 쌓이고 app이 PTY로 되쓴다.
@@ -3796,7 +3681,8 @@ fn decodeUtf8(bytes: []const u8) !u21 {
     return std.unicode.utf8Decode(bytes) catch error.InvalidUtf8;
 }
 
-fn cellCount(size: types.Size) usize {
+/// grid 셀 수(rows×cols). screen.enterAltScreen(alt 버퍼 할당)이 cross-file 호출 — pub.
+pub fn cellCount(size: types.Size) usize {
     return @as(usize, size.cols) * @as(usize, size.rows);
 }
 

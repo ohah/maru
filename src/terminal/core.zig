@@ -453,7 +453,9 @@ pub const TerminalCore = struct {
         return .{
             .allocator = allocator,
             .size = grid,
-            .screen = .{ .cells = cells, .wrapped = wrapped, .prompt_marks = prompt_marks, .sb = .{ .cap = default_max_scrollback } },
+            // sb.arena_alloc을 core 일반 allocator로 둔다(기본 page_allocator override) — 테스트가 testing.allocator를
+            // 쓰면 cell arena도 leak 추적된다. production은 app_session이 setScrollbackArena(page_allocator)로 교체(§11 P4).
+            .screen = .{ .cells = cells, .wrapped = wrapped, .prompt_marks = prompt_marks, .sb = .{ .cap = default_max_scrollback, .arena_alloc = allocator } },
             .tabstops = tabstops,
             .dirty = fullDirty(grid),
             .scroll_bottom = grid.rows - 1,
@@ -616,6 +618,16 @@ pub const TerminalCore = struct {
             // 버리면 보이는 내용은 그대로라 전체 dirty가 불필요하다.
             if (self.view_offset != old_offset) self.dirty = fullDirty(self.size);
         }
+    }
+
+    /// 스크롤백 cell arena의 backing allocator를 교체한다(§11 P4). production은 startup에 page_allocator
+    /// (mmap/VirtualAlloc — demand-commit + 콜드 OS swap)를 넣는다. **반드시 스크롤백 출력 전(페이지 0개일 때)
+    /// 호출**해야 한다 — 이미 잡힌 arena를 다른 allocator로 free하면 mismatch다(그래서 count==0 assert). primary
+    /// 슬롯에 적용한다(alt면 보관분, 아니면 활성 — startup은 항상 비-alt). 미호출 시 init 기본(core 일반 allocator).
+    pub fn setScrollbackArena(self: *TerminalCore, arena: std.mem.Allocator) void {
+        std.debug.assert(self.screen.sb.count == 0 and self.saved_screen.sb.count == 0); // 출력 전에만(arena mismatch 방지)
+        self.screen.sb.arena_alloc = arena;
+        self.saved_screen.sb.arena_alloc = arena; // alt 보관분도(현재 비었지만 일관성)
     }
 
     /// i=0이 가장 오래된 스크롤백 행. 범위 밖이면 null. page 저장(§11 A1)에 위임.
@@ -3347,6 +3359,23 @@ test "A2: 빈(trim된 len-0) 스크롤백 행에서 단어/URL 선택은 크래�
     core.selectWordAt(0, 0, ""); // 더블클릭 — 크래시 없이(선택 없음)
     try std.testing.expect(core.urlAnchorAt(0, 0) == null); // Cmd-hover — 크래시 없이 null
     core.scrollToBottom();
+}
+
+test "P4: 스크롤백 cell arena는 주입된 arena allocator를 통해 할당된다(§11 P4)" {
+    // setScrollbackArena로 cell arena를 별도 allocator로 라우팅하고, 스크롤백을 채우면 그 allocator를 통해
+    // 할당이 일어남을 확인(production은 page_allocator). FailingAllocator는 실패 없이 alloc 횟수를 센다.
+    var arena_tracker = std.testing.FailingAllocator.init(std.testing.allocator, .{}); // never-fail, 카운팅
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 80, .rows = 2 });
+    defer core.deinit();
+    core.setScrollbackArena(arena_tracker.allocator()); // cell arena만 이 allocator로(나머지는 testing)
+    core.setMaxScrollback(100);
+    const before = arena_tracker.alloc_index;
+    var i: usize = 0;
+    while (i < 40) : (i += 1) try core.write("page-arena-line\r\n"); // 스크롤백 채움 → cell arena 할당
+    try std.testing.expect(core.scrollbackLen() > 0);
+    try std.testing.expect(arena_tracker.alloc_index > before); // cell arena가 주입된 allocator를 통과
+    // 내용 정합(arena 분리해도 동작 불변): 가장 오래된 행 첫 글자.
+    try std.testing.expectEqual(@as(u21, 'p'), core.scrollbackRow(0).?[0].codepoint);
 }
 
 test "setMaxScrollback 하향 트림: 가장 오래된 행을 버리고 view_offset을 보정한다" {

@@ -1,17 +1,20 @@
-//! VT 파서 dispatch — OSC 라우터 + DCS(DECRQSS·XTGETTCAP) + APC(kitty graphics) control 파싱·라우팅.
+//! VT 파서 — write 상태기계 진입점(feed) + escape/CSI/OSC/DCS/APC dispatch + UTF-8 디코드.
 //!
-//! `TerminalCore`(core.zig)는 VT 파서 상태기계 + 화면/스크롤백 storage + host-reply를 한 struct에 섞은
+//! `TerminalCore`(core.zig)가 VT 파서 상태기계 + 화면/스크롤백 storage + host-reply를 한 struct에 섞은
 //! 구조 위반(docs/project-rules.md "구조와 파일 분리": parser·storage·encoding이 한 파일에서 서로 다른
-//! 이유로 바뀌면 facade는 유지하되 구현을 목적별로 분리)을 목적별 파일로 떼어내는 **parser 분리 1단계**다.
-//! 여기는 "바이트를 해독하고 시퀀스를 dispatch하는" 파서 책임을 모은다(화면 연산은 screen.zig, OSC host-reply는
-//! osc.zig). struct·facade(terminal.zig)는 불변이고, 각 핸들러는 `*TerminalCore`를 받는 free 함수다
-//! (필드 + pub helper만 접근 — Zig는 필드 privacy가 없어 cross-file 필드 접근이 자유롭다). 현재 진입점은
-//! core.zig의 write 상태기계 루프가 위임한다: `.dcs_escape`→`dispatchDcs`(5/N), `.osc`/`.osc_escape`→
-//! `dispatchOsc`(6/N), `.apc_escape`→`dispatchApc`(7/N). 남은 파서 dispatch(CSI·SGR·escape·write 루프
-//! 본체)는 후속 PR로 이리로 이주한다(점진 분리, docs/terminal-core-decomposition.md §4 Phase D).
+//! 이유로 바뀌면 facade는 유지하되 구현을 목적별로 분리)을 목적별 파일로 떼어낸 결과다. 여기는 "바이트를
+//! 해독하고 시퀀스를 dispatch하는" 파서 책임을 모은다(화면 연산은 screen.zig, OSC host-reply는 osc.zig).
+//! struct·facade(terminal.zig)는 불변이고, 각 함수는 `*TerminalCore`를 받는 free 함수다(필드 직접 접근 — Zig는
+//! 필드 privacy가 없다). core.zig의 `write` facade가 owner_dbg 확인 후 `feed`로 위임하고, feed가 상태기계로
+//! escape→handleEscapeByte, CSI→handleCsiByte/dispatchCsi, OSC/DCS/APC→dispatchOsc/Dcs/Apc, ground→
+//! screen.writeCodepoint로 분기한다. CSI param 접근자(csiRawParam/csiParam)는 core 잔류 — param 저장소
+//! (csi_params 필드)와 한 묶음이고 screen.cursorPosition/setScrollRegion도 호출해 self.로 부른다.
 //!
-//! 베이스: xterm ctlseqs DCS(DECRQSS는 VT420, XTGETTCAP는 xterm). 단일 표준 없는 동작의 결정은 해당
-//! 핸들러 주석·docs/terminal-compatibility-policy.md를 단일 출처로 둔다.
+//! 현재 보유(core.zig 분할 5~21/N 완료, docs/terminal-core-decomposition.md): DCS(DECRQSS·XTGETTCAP)·OSC
+//! 라우터·APC(kitty graphics) 파싱(Phase A) + SGR/모드 dispatch·CSI 상태기계·escape/write 루프(Phase D).
+//!
+//! 베이스: vt100.net DEC ANSI state machine(ground/escape/CSI/OSC/DCS/APC) + xterm ctlseqs(DECRQSS는 VT420,
+//! XTGETTCAP는 xterm). 단일 표준 없는 동작의 결정은 해당 함수 주석·docs/terminal-compatibility-policy.md를 단일 출처로 둔다.
 
 const std = @import("std");
 const core = @import("core.zig");
@@ -322,10 +325,12 @@ pub fn parseKittyGraphicsCommand(body: []const u8) core.TerminalCore.KittyGraphi
 }
 
 // ── CSI dispatch sub-handler: 모드(DECSET/SM)·SGR·host-reply report ──────────────────────────────
-// dispatchCsi(20/N서 이리로 이동 예정)가 final byte별로 위임하는 핸들러. 모드 setter는 화면 연산
+// dispatchCsi(같은 파일)가 final byte별로 위임하는 핸들러. 모드 setter는 화면 연산
 // (screen.setOriginMode/enterAltScreen/putCell 등)을 호출하고, report는 self.appendResponse(core 잔류)로
-// PTY 응답을 쌓는다. CSI param 접근(csiRawParam/csi_params)은 아직 core 잔류라 self./core로 부른다(20/N서 정리).
+// PTY 응답을 쌓는다. CSI param 접근(csiRawParam/csiParam)은 core 잔류 — param 저장소(csi_params 필드)와 한 묶음.
 
+/// DECSET(h)/DECRST(l)의 사적 모드를 적용한다(파라미터가 여러 개면 각각). 47/1047=alt 전환만, 1048=커서
+/// 저장/복원만, 1049=결합(들어갈 때 커서 저장+빈 alt, 나갈 때 커서 복원) — vim/less가 쓰는 표준 조합이다.
 pub fn setPrivateModes(self: *TerminalCore, set: bool) void {
     var i: usize = 0;
     while (i < self.csi_param_count) : (i += 1) {

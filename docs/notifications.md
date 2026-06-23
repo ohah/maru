@@ -65,17 +65,19 @@
   점유하는데, 정수 col 슬롯 중심이 `(cols-10)*cw`로 1칸 아이콘(중심 `col+0.5`)과 2.5칸이 되므로(좌우 패딩 어긋남)
   렌더러(`maru_metal_renderer.m`)가 종 글리프만 가로로 0.5칸 왼쪽으로 미는 px nudge를 줘 중심을 `(cols-10.5)*cw`
   (=균일 3칸 + hover quad 중앙·말풍선 caret과 동심)에 맞춘다(py_nudge와 동형 — 2칸 글리프는 정수 col로 반칸에 못 옴).
-- **안 읽은 개수 배지(종 우상단 빨강 원형, 펼침)**: 종 **우측 한 칸**(`cols-9` = `notificationBadgeCol`)에 **빨강 원형 quad
-  + 흰 숫자**를 겹쳐 그린다(iOS/macOS 배지식 — 예전 종 좌측 coral 텍스트는 대비가 낮아 안 읽혔다). **빨강 원**은
-  `appendNotificationBadge`가 GpuQuad(layer 4)로, **흰 숫자**는 `appendBellAndBadge`가 헤더 frame 셀(같은 `cols-9`)로 둔다
-  — cell↔quad가 같은 col에서 만나 어긋나지 않는 단일 출처. 원형 1칸 제약상 **1~9는 숫자, 10개 이상은 "9"로 cap**한다
-  (2칸 "9+"는 ◧가 종 우측에 붙어 자리가 없음 — 종을 옮기지 않는 한 구조적 제약). **렌더 레이어 4**는 사이드바 bg strip
+- **안 읽은 개수 배지(종 우상단 빨강 원형, 펼침)**: 종을 `cols-12`(점유 `cols-12·cols-11`)에 두고 **우측 한 칸**
+  (`cols-10` = `notificationBadgeCol`)에 **빨강 원형 quad + 흰 숫자**를 겹쳐 그린다(iOS/macOS 배지식 — 예전 종 좌측 coral
+  텍스트는 대비가 낮아 안 읽혔다). 종을 한 칸 왼쪽(`cols-12`)에 둬 배지(`cols-10`)와 ◧(`cols-8`) 사이에 `cols-9` 한 칸
+  간격을 둔다(◧가 1.7×라 `cols-9`로 번져 배지와 닿던 것을 뗌). **빨강 원**은 `appendNotificationBadge`가 GpuQuad(layer 4)로,
+  **흰 숫자**는 `appendBellAndBadge`가 헤더 frame 셀(같은 `cols-10`)로 둔다 — cell↔quad가 같은 col에서 만나 어긋나지 않는
+  단일 출처. 원형 1칸 제약상 **1~9는 숫자, 10개 이상은 "9"로 cap**한다(2칸 "9+"는 자리가 없음). **렌더 레이어 4**는 사이드바 bg strip
   '뒤' / 헤더 글리프(터미널 셀 패스) '앞'에 끼우는 전용 quad 패스다(`maru_metal_renderer.m`) — 0/1/3 레이어는 헤더 글리프
   '뒤'가 안 돼 흰 숫자를 덮으므로(헤더 hover quad 한계와 동형), 빨강 원이 숫자 아래·사이드바 배경 위에 오게 한 칸 신설.
 - **접힘 배지(종 좌측 텍스트, 유지)**: 접힘 타이틀바 헤더는 터미널 위에 그려져 layer 4 quad가 터미널 셀에 가리므로(원형
   부적합), 종 **좌측** coral 텍스트 배지를 유지한다 — 1~9 숫자 1칸(`cols-12`), 10+ "9+" 2칸(`cols-13·cols-12`).
 - **hit-test/최소 폭**: `HeaderRegion.notifications` zone은 `headerHit`(렌더 `buildSidebarHeaderFrame`과 같은 col)이 단일 출처 —
-  종 글리프(`cols-11·cols-10`)+배지(`cols-9`/접힘 `cols-12`)를 포함하는 zone. 안 그리면 hit-test도 none(`cols < 13` 좁은
+  펼침 종 글리프(`cols-12·cols-11`)+배지(`cols-10`)를 모두 포함하는 zone `[cols-12, cols-9)`(접힘은 `collapsedNotificationRect`가
+  따로 hit-test). 안 그리면 hit-test도 none(`cols < 13` 좁은
   사이드바). 사이드바 **최소 폭**(`sidebarMinPt`)은 신호등 클리어런스 + **13칸**으로 신호등과 안 겹치게 둔다.
 - **접힘에도 알림 종 유지**: 사이드바 접힘(`sidebar_collapsed`, 폭 0)이면 좌상단 타이틀바 띠에 ◧ 펼치기 토글만 떴는데,
   이제 종+배지를 ◧ **왼쪽**(가장 왼쪽; `collapsedToggleCol()` = `collapsedBellCol()+3`)에 그려 펼침 헤더와 같은 종→◧

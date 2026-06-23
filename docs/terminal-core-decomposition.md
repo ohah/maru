@@ -587,3 +587,22 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 - 전역 `grapheme_store`·`grapheme_ids` 제거(page로 흡수). 검증: 기존 HG 단위·`nfd_hangul` oracle·`test-macos-coretext-smoke`(NFD '한'≡완성형) green 유지 + eviction 후 grapheme 메모리 회수 측정.
 
 **seam 준비(지금 가능, 충돌 0)**: grapheme 해석이 `graphemeCluster(id)`/`snapshot.graphemes` 한 군데로 모여 있어, B에서 이 seam만 page-local로 바꾸면 호출부(RowCodepoints·draw_list·selection)는 안 바뀐다.
+
+### 11.9 P4 설계 — mmap backing for 스크롤백 page arena (설계·합의 대기)
+
+**목표**: A2가 만든 **고정 크기 cell arena**(ScrollbackPage.cells)를 일반 allocator 대신 **mmap/VirtualAlloc 기반 page allocator**로 받쳐, (1) demand-commit(안 쓴 arena tail은 물리 메모리 미점유), (2) 메모리 압박 시 콜드 히스토리 arena가 OS swap으로 디스크에 내려감(= history > RAM 가능), (3) free 시 즉시 OS 반납(general allocator의 caching과 달리)을 얻는다. architecture.md §180("hot terminal page backing → mmap/VirtualAlloc 직접, hot storage가 명확해지면 그 책임만 교체")의 실현. A1/A2로 hot storage(=고정 arena)가 명확해진 지금이 교체 시점.
+
+**경계(중요 — terminal은 platform import 금지)**: maru `platform/`을 import하면 check-boundaries 실패다. 그러나 **`std.heap.page_allocator`(std의 mmap/VirtualAlloc 래퍼)는 std라 terminal에서 직접 써도 경계 위반이 아니다**. 따라서 platform 레이어 추상화 없이 std만으로 boundary-safe하게 구현한다(Ghostty가 직접 mmap하는 것과 같은 효과를 std로).
+
+**스코프(최소)**: **ScrollbackPage.cells arena만** page allocator로. descs(작은 ArrayList)·pages/pool 리스트·active grid는 일반 allocator 유지(작거나 hot이 아님). 즉 Scrollback에 `arena_alloc: std.mem.Allocator` 필드를 두고 acquirePage/freePage의 cells alloc/realloc/free만 그걸 쓴다.
+
+**주입(테스트 leak 추적 유지)**: production은 `std.heap.page_allocator`, **테스트는 `std.testing.allocator`를 arena_alloc로 주입**(page_allocator는 leak 추적이 안 돼 테스트가 arena 누수를 못 잡으므로). TerminalCore.init이 arena allocator를 받거나(시그니처 +1) 기본 page_allocator + 테스트 override. → init 시그니처/배선 변경이라 합의 필요.
+
+**정직한 가치**: A1+A2만으로 이미 100만 줄이 viable하다(평균40칸 ~1.76GB). P4는 그 위에 demand-commit + 콜드 swap + 즉시 반납을 더해 **history > RAM**(수천만 줄, 콜드는 디스크)을 가능케 하는 증분이다. 목표가 "수백만"이면 P4 없이도 충분할 수 있고, "수천만~RAM 초과"면 P4가 enabler. **committed RSS를 측정해 이득을 수치 확인**(게이트).
+
+**결정 사항(합의 필요)**:
+1. **anonymous mmap(OS swap) 먼저** vs 명시적 file-backing. anon-mmap은 std.heap.page_allocator로 즉시 되고 콜드는 OS swap으로 디스크행 — 대부분 충분. swap보다 큰 초거대 history는 file-backing(별도 후속).
+2. **init 시그니처**: arena allocator 주입(+1 파라미터) vs 기본 page_allocator(테스트만 override 훅).
+3. **granularity**: page_allocator는 OS page(4KB+) 단위 — arena가 360KB(8192×44)라 무시 가능한 반올림.
+
+**리스크**: 테스트 leak 추적(주입으로 해결), per-arena mmap syscall 비용(arena가 크고 pool 재사용이라 syscall 적음), realloc(초광폭 행) 시 remap(page_allocator 지원). 동작 보존(저장 위치만 이동 — 관측 불변).

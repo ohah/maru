@@ -65,6 +65,14 @@ pub fn clusterWidth(base: u21) u2 {
     return width.cellWidth(base);
 }
 
+/// NFD conjoining 자모(U+1100~U+11FF: 초성 L·중성 V·종성 T)인가. 완성형 음절(U+AC00~)·일반
+/// 문자·ZWJ는 제외한다. print 경로의 cluster 흡수는 이 범위의 글자만 대상으로 한다 — combining
+/// mark(폭 0)는 이미 별도 경로가 처리하고, ZWJ(GB9)·완성형은 각자 제 셀을 차지해야 하므로, NFD
+/// 자모만 0폭으로 앞 음절에 합친다(extendsCluster만으론 GB9가 ZWJ도 true라 폭≠0인 ZWJ가 새어든다).
+pub fn isConjoiningJamo(cp: u21) bool {
+    return cp >= 0x1100 and cp <= 0x11FF;
+}
+
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
@@ -128,4 +136,17 @@ test "clusterWidth: 한글 음절은 2칸, ASCII는 1칸 (base가 폭을 정한�
     try expectEqual(@as(u2, 2), clusterWidth(0x1112)); // ㅎ 초성 = NFD 음절 base
     try expectEqual(@as(u2, 2), clusterWidth(0xAC00)); // 가 (완성형)
     try expectEqual(@as(u2, 1), clusterWidth('a'));
+}
+
+test "isConjoiningJamo: NFD 자모만 true, 완성형·ZWJ·일반문자는 false" {
+    // 왜 중요: print 경로의 cluster 흡수가 이 범위만 0폭으로 합쳐야 한다. ZWJ(GB9)는
+    // extendsCluster에선 true지만 폭 1이라 여기서 걸러내야 NFD와 무관한 ZWJ가 안 새어든다.
+    try expect(isConjoiningJamo(0x1100)); // ㄱ 초성
+    try expect(isConjoiningJamo(0x1161)); // ㅏ 중성
+    try expect(isConjoiningJamo(0x11AB)); // ㄴ 종성
+    try expect(isConjoiningJamo(0x11FF)); // 범위 끝
+    try expect(!isConjoiningJamo(0x10FF)); // 범위 직전
+    try expect(!isConjoiningJamo(0xAC00)); // 완성형 '가' — 제 셀을 차지
+    try expect(!isConjoiningJamo(0x200D)); // ZWJ — 폭 1, 제 경로
+    try expect(!isConjoiningJamo('a'));
 }

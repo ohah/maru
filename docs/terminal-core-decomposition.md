@@ -406,11 +406,63 @@ maru의 **현재 alt-screen 전환은 grid(cells·wrapped·prompt_marks)+`sb`만
 architecture.md §211 종착지 = "cursor·grid 완전한 Screen **+ 그 자리에 page-aligned storage**". 따라서:
 
 1. **Direction A**(함수 추출, §5~§9) ✅ 완료.
-2. **Direction B**(Screen struct fold): B-min(B1~B3) → **B-full**(B4~, cursor·모드 흡수). ← 이 분해 initiative의 마무리(조직화).
+2. **Direction B**(Screen struct fold): B-min(B1~B3) → **B-full = Option 3**(B4~B6, **per-screen cursor**, §10.8). 레퍼런스 정정으로 범위가 cursor 클러스터로 좁혀짐(scroll/모드는 global 유지). ← 이 분해 initiative의 마무리이자 **첫 의도적 동작 변경**.
 3. **page-aligned storage**(§11, 별도 initiative): 평평한 `cells: []Cell` + Scrollback ring → Ghostty PageList식 page-pool 레이아웃. **architecture.md의 진짜 최종 골**이고, B-full이 이를 가능하게 하는 전제다.
 
-**성격 차이 — page storage는 A·B와 다르다**: A·B는 순수 리팩터(동작·메모리 레이아웃 불변, 위치만 이동 → 매번 "정확성 버그 0"). page storage는 **메모리 레이아웃·할당·성능을 바꾸는 의미 변경**(perf 예산·동작 검증 폭이 넓음)이라, B-full 완료 후 **별도 doc-first 설계+합의**로 §11에서 진행한다.
+**성격 차이 — 셋의 동작 보존 등급이 다르다**: Direction A·B-min은 순수 리팩터(동작·메모리 레이아웃 불변, 위치만 이동 → 매번 "정확성 버그 0"). **B-full(=§10.8 Option 3)은 의도적 동작 변경**(cursor를 화면에 귀속 → alt 전환 의미가 바뀜)이라 "정확성 버그 0"이 아니라 **"의도한 동작 변경 + 테스트로 핀"**이 기준이다. page storage(§11)는 **메모리 레이아웃·할당·성능 변경**이라 또 별개(perf 예산 검증). B-full → §11 순으로, 각자 doc-first.
 
 ### 10.7 B-min 리뷰 cleanup (B1~B3 `/code-review max` 후속)
 
 누적 리뷰(B3 alt-swap 심층 감사 + 전수 rename 검증 + cleanup) 결과 **정확성 버그 0**: B3 struct swap이 baseline과 byte-for-byte 동작 일치(enter/leave/resize-during-alt/deinit/setMaxScrollback·소유권·leak 안전), rename 누락 repo-wide 0, B2 cap-0 회귀 없음(init만이 생성 경로), 289 테스트 green. cleanup 4건만 정리: 죽은 `const Scrollback` 별칭+stale doc 제거(sb/saved_sb가 Screen으로 흡수돼 core에 Scrollback 타입 필드 없음), `enterAltScreen` 헤더 doc을 struct-swap 모델로 갱신, semantic_state breadcrumb 빈 줄 분리.
+
+### 10.8 B-full = Option 3 — cursor를 화면에 귀속(per-screen cursor, 의도적 동작 변경)
+
+**결정**: B-full을 Ghostty식 **per-screen cursor 모델**로 진행한다(사용자 합의 — "옵션3으로 바로"). architecture.md §211 "cursor·grid 완전한 Screen"의 직접 구현이고, alt 전환이 cursor까지 포함한 **통째 swap**이 되어 현재의 흩어진 carry+DECSC-복원+선택 reset 로직이 사라진다. **순수 리팩터가 아니라 의도된 동작 변경**이므로(§10.6 성격 차이) 검증 기준은 "동작 보존"이 아니라 "바뀐 동작을 테스트로 핀"이다.
+
+#### 10.8.1 레퍼런스 근거 (read-reference-terminals-early)
+
+Ghostty `Screen`은 `cursor: Cursor` + `saved_cursor: ?SavedCursor`를 **소유**(per-screen). 반면 `Terminal`(global)은 `tabstops`·`scrolling_region`·modes를 둔다. → **cursor 클러스터만 per-screen, scroll region·tabstops·모드는 global**.
+결정적 함의: maru는 지금 scroll region·tabstops·모드를 alt-swap **안 함(carry)** = Ghostty의 global과 동치 → **이동 불필요, 동작 불변**. 즉 Option 3에서 실제로 바뀌는 건 **cursor 하나뿐**이고, B-full의 범위가 §10.2의 광의(scroll/모드 전부 흡수)에서 **cursor 클러스터로 좁혀진다**(레퍼런스가 정정).
+
+#### 10.8.2 필드 멤버십
+
+- **Screen += `{ cursor, pen, pending_wrap, last_print, last_printed_cp, saved_cursor: SavedCursor }`** — cursor 위치·pen·deferred-wrap·grapheme 연속 상태 + DECSC 슬롯. 모두 화면 content에 귀속되어 swap을 탄다.
+- **core 잔류(global, Ghostty `Terminal`과 동형)**: `scroll_top/scroll_bottom`(scrolling_region)·`tabstops`·`origin_mode`·`autowrap`·`insert_mode`·`cursor_visible/shape/blink`(DECTCEM/DECSCUSR)·`view_offset`·`semantic_state`·모든 터미널 모드(mouse·bracketed_paste·focus_events·kitty_flags…). `size`(공유 geometry)·`dirty`(렌더 추적)도 잔류.
+  - `view_offset`·`semantic_state`는 enter/leave가 이미 명시 리셋(현 동작 유지). `cursor_visible/shape/blink`의 per-screen화는 추가 동작 변경이라 **이번 범위 밖**(차후 검토 — 주석으로 명시).
+
+#### 10.8.3 새 alt enter/leave 의미
+
+- `enterAltScreen`: `saved_screen = screen`(primary cursor+DECSC 슬롯 통째 보관) → `screen = .{ 새 grid, cursor=home, pen=.{}, saved_cursor=.{} }`. **alt는 home cursor에서 시작**.
+- `leaveAltScreen`: `screen = saved_screen`(primary cursor+DECSC 슬롯 통째 복원).
+- 모드 매핑: **47·1047·1049** → `enterAltScreen()`/`leaveAltScreen()`(save_cursor 플래그 제거 — cursor가 swap에 흡수). **1048** → `saveCursorState()`/`restoreCursorState()`(화면 전환 없이 현 screen의 `saved_cursor` 슬롯). **DECSC ESC 7/8·CSI s/u** → 동일 슬롯.
+
+#### 10.8.4 의도적 동작 변경 목록 (document-basis-and-decision)
+
+| # | 변경 | 베이스·근거 |
+|---|------|------------|
+| 1 | alt 진입 시 cursor가 **home(0,0)**에서 시작(현재: primary cursor carry) | per-screen 모델(Ghostty Screen.cursor 소유). TUI는 진입 직후 절대 이동 → 실사용 무영향 |
+| 2 | alt 이탈 시 **항상** primary cursor 복원 — 1049뿐 아니라 **1047·47도**(현재: 1047은 복원 안 함) | cursor가 화면 귀속이면 1047/1049의 save/restore 구분이 소멸. xterm 1047(no-save)은 단일-cursor 모델 유물 |
+| 3 | 1049h가 primary **DECSC 슬롯을 덮어쓰지 않음**(현 deviation 수정) | 현재 1049h는 live cursor를 `saved_cursor_primary`(=primary DECSC 슬롯)에 써 셸 선행 ESC7을 클로버. swap은 cursor를 DECSC 슬롯과 분리 보관 → 셸 ESC7 생존(xterm "separate private slot" 의도 부합) |
+| 4 | (엣지) 이미 alt에서 1049h / 이미 primary에서 1049l → no-op(현재: 방어적 save/restore) | swap 대상 부재. pathological, 문서화만 |
+
+#### 10.8.5 PR 분해
+
+- **B4**: cursor 클러스터(`cursor`·`pen`·`pending_wrap`·`last_print`·`last_printed_cp`)를 Screen으로 fold + enter/leave를 cursor 포함 swap으로. 47/1047/1049의 save_cursor 흡수(플래그 제거). `saved_cursor_primary/alt`는 **일단 core 잔류**(1048/DECSC가 `alt_active`로 슬롯 선택 — 사실상 per-screen). **+ per-screen cursor 동작 테스트 다수**(§10.8.6).
+- **B5**: `saved_cursor_primary`/`saved_cursor_alt` → per-Screen `saved_cursor`(DECSC 슬롯도 swap을 탐). `activeSavedCursor` → `&self.screen.saved_cursor`(플래그 선택 → swap 선택, 등가). **+ per-screen DECSC 테스트**.
+- **B6**: 누적 `/code-review max`(B4~B5 배치) + cleanup.
+
+#### 10.8.6 테스트 계획 (heavy — 동작 변경 방어, 사용자 요청)
+
+B4(필수):
+1. alt 진입 직후 `cursor == (0,0)` (변경된 동작 #1)
+2. primary cursor (r,c) → 1049h → alt home → alt 이동 (r2,c2) → 1049l → primary (r,c) 복원
+3. **1047(47)** 진입/이탈도 primary cursor 복원 (변경된 동작 #2)
+4. alt 안에서 SGR/pen 변경·pending_wrap·last_print 설정 → 1049l 후 primary의 pen/wrap/last_print 불변(화면별 독립)
+5. 셸 ESC7(r5) → 1049h/이동/1049l → 셸 ESC8 → r5 복원 (수정된 동작 #3 — 회귀 가드)
+6. resize-during-alt: `saved_screen.cursor`도 clamp(행/열 축소)
+7. nested 1049h(이미 alt) no-op 안전; 1049l-while-primary no-op 안전 (엣지 #4)
+8. deferred autowrap 상태(줄 끝 pending_wrap)에서 alt 왕복 후 primary wrap 동작 정상
+
+B5(필수, 위 전부 유지 + DECSC 슬롯 per-screen):
+9. alt 안 ESC7/8(DECSC)이 primary 슬롯 불간섭; primary ESC7/8이 alt 슬롯 불간섭(swap 경유로 동일 보장)
+10. CSI s/u(SCO save/restore)도 현 화면 슬롯 사용

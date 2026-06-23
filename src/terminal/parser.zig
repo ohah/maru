@@ -178,7 +178,7 @@ fn dispatchDecrqss(self: *TerminalCore, req: []const u8) void {
 /// 포함되므로 생략). appendResponse로 조각조각 누적한다.
 fn appendDecrqssSgr(self: *TerminalCore) void {
     self.appendResponse("\x1bP1$r0");
-    const s = self.pen;
+    const s = self.screen.pen;
     if (s.bold) self.appendResponse(";1");
     if (s.dim) self.appendResponse(";2");
     if (s.italic) self.appendResponse(";3");
@@ -330,8 +330,10 @@ pub fn parseKittyGraphicsCommand(body: []const u8) kitty.KittyGraphicsCommand {
 // (screen.setOriginMode/enterAltScreen/putCell 등)을 호출하고, report는 self.appendResponse(core 잔류)로
 // PTY 응답을 쌓는다. CSI param 접근(csiRawParam/csiParam)은 core 잔류 — param 저장소(csi_params 필드)와 한 묶음.
 
-/// DECSET(h)/DECRST(l)의 사적 모드를 적용한다(파라미터가 여러 개면 각각). 47/1047=alt 전환만, 1048=커서
-/// 저장/복원만, 1049=결합(들어갈 때 커서 저장+빈 alt, 나갈 때 커서 복원) — vim/less가 쓰는 표준 조합이다.
+/// DECSET(h)/DECRST(l)의 사적 모드를 적용한다(파라미터가 여러 개면 각각). 커서가 화면에 귀속되므로(per-screen,
+/// §10.8) 47/1047/1049는 모두 alt 진입/이탈 한 동작으로 수렴한다 — 커서·pen·deferred-wrap이 grid·스크롤백과
+/// 함께 swap돼 진입은 home, 이탈은 primary 복원이 자동이다(옛 save_cursor 플래그 분기 소멸). 1048(별도 SCO
+/// 저장/복원)만 화면 전환 없이 커서 슬롯을 다룬다 — vim/less가 47/1047/1049를, CSI s/u·1048이 커서만 쓴다.
 pub fn setPrivateModes(self: *TerminalCore, set: bool) void {
     var i: usize = 0;
     while (i < self.csi_param_count) : (i += 1) {
@@ -344,7 +346,7 @@ pub fn setPrivateModes(self: *TerminalCore, set: bool) void {
             6 => screen.setOriginMode(self, set), // DECOM: CUP/HVP origin을 scroll region 상단으로 + 커서 home
             25 => { // DECTCEM: 커서 표시/숨김. 커서 행만 다시 그리면 된다.
                 self.cursor_visible = set;
-                screen.markDirty(self, self.cursor.row);
+                screen.markDirty(self, self.screen.cursor.row);
             },
             1007 => self.alternate_scroll = set, // alt screen 휠 -> 화살표 변환 on/off
             2004 => self.bracketed_paste = set, // bracketed paste(붙여넣기 감싸기)
@@ -359,9 +361,8 @@ pub fn setPrivateModes(self: *TerminalCore, set: bool) void {
             7 => self.autowrap = set, // DECAWM(G8): autowrap on/off — off면 마지막 칸에서 덮어쓴다
             2027 => self.grapheme_cluster_mode = set, // grapheme cluster 너비(이모지 풀사이즈 합의)
             2026 => self.sync_output = set, // synchronized output(set=BSU hold 시작, reset=ESU flush)
-            47, 1047 => if (set) screen.enterAltScreen(self, false) else screen.leaveAltScreen(self, false),
+            47, 1047, 1049 => if (set) screen.enterAltScreen(self) else screen.leaveAltScreen(self), // 커서가 화면 귀속이라 셋 다 동일(§10.8)
             1048 => if (set) screen.saveCursorState(self) else screen.restoreCursorState(self),
-            1049 => if (set) screen.enterAltScreen(self, true) else screen.leaveAltScreen(self, true),
             else => {}, // 그 외 private 모드(25 커서 표시 등)는 아직 소비만 한다.
         }
     }
@@ -381,8 +382,8 @@ pub fn setAnsiModes(self: *TerminalCore, set: bool) void {
 /// REP(CSI Ps b): 직전에 출력한 graphic 글자(last_printed_cp)를 N회(기본 1) 더 반복한다. 아직 출력이
 /// 없으면(0) 무동작. 각 반복은 putCell 경로(wrap·IRM·DECAWM·wide 적용)를 그대로 탄다.
 pub fn repeatLastChar(self: *TerminalCore, count: u16) void {
-    if (self.last_printed_cp == 0) return;
-    const cp = self.last_printed_cp;
+    if (self.screen.last_printed_cp == 0) return;
+    const cp = self.screen.last_printed_cp;
     var n = @max(count, 1);
     // putCell을 직접 호출한다(writeCodepoint가 아니라) — last_printed_cp는 이미 charset 변환을 거친 최종
     // 글리프라, writeCodepoint로 다시 보내면 translateCharset이 두 번 적용된다(현 charset이 dec_special이면
@@ -396,8 +397,8 @@ pub fn deviceStatusReport(self: *TerminalCore) void {
         6 => {
             var buf: [40]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{
-                self.cursor.row + 1,
-                self.cursor.col + 1,
+                self.screen.cursor.row + 1,
+                self.screen.cursor.col + 1,
             }) catch return;
             self.appendResponse(s);
         },
@@ -445,12 +446,12 @@ pub fn applySgr(self: *TerminalCore) void {
     while (i < count) {
         const p = self.csi_params[i];
         switch (p) {
-            0 => self.pen = .{},
-            7 => self.pen.reverse = true,
-            27 => self.pen.reverse = false,
-            1 => self.pen.bold = true,
-            2 => self.pen.dim = true, // SGR 2: faint/decreased intensity (ECMA-48)
-            3 => self.pen.italic = true,
+            0 => self.screen.pen = .{},
+            7 => self.screen.pen.reverse = true,
+            27 => self.screen.pen.reverse = false,
+            1 => self.screen.pen.bold = true,
+            2 => self.screen.pen.dim = true, // SGR 2: faint/decreased intensity (ECMA-48)
+            3 => self.screen.pen.italic = true,
             4 => {
                 // underline. colon 형식 4:x(ITU T.416 — x는 underline 스타일)는 x=0이면 off, x=2면 double,
                 // 그 외 x>0은 single on(curly/dotted 등 스타일 종류는 single로 근사). 세미콜론 plain 4는 single on.
@@ -458,51 +459,51 @@ pub fn applySgr(self: *TerminalCore) void {
                 const styled = i + 1 < count and self.csi_subparam[i + 1];
                 if (styled) {
                     const sub = self.csi_params[i + 1];
-                    self.pen.underline = sub != 0;
-                    self.pen.underline_double = sub == 2; // 4:2 = double underline
+                    self.screen.pen.underline = sub != 0;
+                    self.screen.pen.underline_double = sub == 2; // 4:2 = double underline
                 } else {
-                    self.pen.underline = true;
-                    self.pen.underline_double = false;
+                    self.screen.pen.underline = true;
+                    self.screen.pen.underline_double = false;
                 }
             },
             22 => { // SGR 22: normal intensity — bold·faint 둘 다 off (ECMA-48)
-                self.pen.bold = false;
-                self.pen.dim = false;
+                self.screen.pen.bold = false;
+                self.screen.pen.dim = false;
             },
-            23 => self.pen.italic = false,
+            23 => self.screen.pen.italic = false,
             24 => { // SGR 24: underline off — single·double 둘 다 끈다
-                self.pen.underline = false;
-                self.pen.underline_double = false;
+                self.screen.pen.underline = false;
+                self.screen.pen.underline_double = false;
             },
             21 => { // SGR 21: doubly underlined — 하단 2중선
-                self.pen.underline = true;
-                self.pen.underline_double = true;
+                self.screen.pen.underline = true;
+                self.screen.pen.underline_double = true;
             },
-            9 => self.pen.strikethrough = true, // SGR 9: crossed-out (ECMA-48)
-            29 => self.pen.strikethrough = false, // SGR 29: not crossed-out
-            53 => self.pen.overline = true, // SGR 53: overlined (ECMA-48)
-            55 => self.pen.overline = false, // SGR 55: not overlined
-            5, 6 => self.pen.blink = true, // SGR 5(slow)/6(rapid) blink — 파싱·저장만(렌더 정적)
-            25 => self.pen.blink = false, // SGR 25: blink off
-            8 => self.pen.conceal = true, // SGR 8: concealed(invisible)
-            28 => self.pen.conceal = false, // SGR 28: reveal
-            59 => self.pen.underline_color = .default, // SGR 59: underline color를 default(전경색)로
-            30...37 => self.pen.foreground = .{ .indexed = @intCast(p - 30) },
-            39 => self.pen.foreground = .default,
-            40...47 => self.pen.background = .{ .indexed = @intCast(p - 40) },
-            49 => self.pen.background = .default,
-            90...97 => self.pen.foreground = .{ .indexed = @intCast(p - 90 + 8) },
-            100...107 => self.pen.background = .{ .indexed = @intCast(p - 100 + 8) },
+            9 => self.screen.pen.strikethrough = true, // SGR 9: crossed-out (ECMA-48)
+            29 => self.screen.pen.strikethrough = false, // SGR 29: not crossed-out
+            53 => self.screen.pen.overline = true, // SGR 53: overlined (ECMA-48)
+            55 => self.screen.pen.overline = false, // SGR 55: not overlined
+            5, 6 => self.screen.pen.blink = true, // SGR 5(slow)/6(rapid) blink — 파싱·저장만(렌더 정적)
+            25 => self.screen.pen.blink = false, // SGR 25: blink off
+            8 => self.screen.pen.conceal = true, // SGR 8: concealed(invisible)
+            28 => self.screen.pen.conceal = false, // SGR 28: reveal
+            59 => self.screen.pen.underline_color = .default, // SGR 59: underline color를 default(전경색)로
+            30...37 => self.screen.pen.foreground = .{ .indexed = @intCast(p - 30) },
+            39 => self.screen.pen.foreground = .default,
+            40...47 => self.screen.pen.background = .{ .indexed = @intCast(p - 40) },
+            49 => self.screen.pen.background = .default,
+            90...97 => self.screen.pen.foreground = .{ .indexed = @intCast(p - 90 + 8) },
+            100...107 => self.screen.pen.background = .{ .indexed = @intCast(p - 100 + 8) },
             38 => {
-                i = applyExtendedColor(self, i, &self.pen.foreground);
+                i = applyExtendedColor(self, i, &self.screen.pen.foreground);
                 continue;
             },
             48 => {
-                i = applyExtendedColor(self, i, &self.pen.background);
+                i = applyExtendedColor(self, i, &self.screen.pen.background);
                 continue;
             },
             58 => { // SGR 58: underline color(58;2;r;g;b·58;5;n) — 전경과 별개 밑줄 색(nvim/helix LSP)
-                i = applyExtendedColor(self, i, &self.pen.underline_color);
+                i = applyExtendedColor(self, i, &self.screen.pen.underline_color);
                 continue;
             },
             else => {},
@@ -898,14 +899,14 @@ fn handleEscapeByte(self: *TerminalCore, byte: u8) void {
         },
         // HTS(ESC H): 현재 커서 열에 탭스톱을 설정한다(G4 동적 탭스톱).
         'H' => {
-            if (self.cursor.col < self.tabstops.len) self.tabstops[self.cursor.col] = true;
+            if (self.screen.cursor.col < self.tabstops.len) self.tabstops[self.screen.cursor.col] = true;
             self.parser = .ground;
         },
         // NEL(ESC E): next line = CR + LF. 커서를 다음 줄 0열로 옮긴다(하단 margin이면 스크롤). G12.
         'E' => {
-            const old_cursor = self.cursor;
-            self.cursor.col = 0;
-            screen.markCursorMoveDirty(self, old_cursor, self.cursor);
+            const old_cursor = self.screen.cursor;
+            self.screen.cursor.col = 0;
+            screen.markCursorMoveDirty(self, old_cursor, self.screen.cursor);
             screen.lineFeed(self);
             self.parser = .ground;
         },

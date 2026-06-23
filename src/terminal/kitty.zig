@@ -389,8 +389,8 @@ fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
     addOrReplacePlacement(self, .{
         .image_id = cmd.image_id,
         .placement_id = cmd.placement_id,
-        .anchor_row = self.screen.sb.count + self.cursor.row, // 커서의 절대 행
-        .anchor_col = self.cursor.col,
+        .anchor_row = self.screen.sb.count + self.screen.cursor.row, // 커서의 절대 행
+        .anchor_col = self.screen.cursor.col,
         .cell_x_offset = cmd.cell_x_offset,
         .cell_y_offset = cmd.cell_y_offset,
         .src_x = cmd.src_x,
@@ -404,8 +404,8 @@ fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
     if (!cmd.no_cursor_move) {
         const rows_span = kittyAdvanceRows(self, cmd);
         if (rows_span > 0) {
-            const target = @as(usize, self.cursor.row) + rows_span;
-            self.cursor.row = @intCast(@min(target, self.size.rows - 1));
+            const target = @as(usize, self.screen.cursor.row) + rows_span;
+            self.screen.cursor.row = @intCast(@min(target, self.size.rows - 1));
         }
     }
 }

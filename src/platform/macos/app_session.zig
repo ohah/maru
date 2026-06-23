@@ -6971,7 +6971,7 @@ pub const AppSession = struct {
 
     /// IME 후보창 배치용 커서 셀 사각형(backing px, 좌상단 원점 — 마우스 좌표와 같은 규약).
     /// 입력기가 firstRect로 물어보면 Swift가 이 값을 화면 좌표로 바꿔 후보창을 커서 위치에
-    /// 띄운다. 조합 중에는 커서가 preedit 시작(core.cursor)에 있어 후보창이 조합 글자 옆에 뜬다.
+    /// 띄운다. 조합 중에는 커서가 preedit 시작(core.screen.cursor)에 있어 후보창이 조합 글자 옆에 뜬다.
     /// 반환: row*cell_h, col*cell_w, cell_w, cell_h.
     // self는 *AppSession(비-const) — rename caret 위치(renameCaretRect)가 leaf-rects 레이아웃을 펴는 *AppSession
     // 헬퍼를 거치기 때문(읽기 전용 계산이지만 activeTabLeafRects 체인이 비-const). ABI·테스트 호출자는 모두 mutable.
@@ -6995,7 +6995,7 @@ pub const AppSession = struct {
         if (overlay_caret) |r| {
             return .{ .x = @floatFromInt(r.x), .y = @floatFromInt(r.y), .w = @floatFromInt(r.w), .h = @floatFromInt(r.h) };
         }
-        const cursor = self.activeSurfaceConst().core.cursor;
+        const cursor = self.activeSurfaceConst().core.screen.cursor;
         return .{
             // 활성 panel은 자기 rect origin(active_pane_rect.x/y)에서 그려지므로 커서의 스크린 좌표도 그 origin을
             // 더해야 한다 — 안 더하면 후보창이 실제 커서보다 origin만큼 왼쪽/위에 뜬다(pxToCell의 역변환:
@@ -8811,11 +8811,11 @@ pub const AppSession = struct {
         // 헤더에 OSC 133 마지막 명령 종료코드도 찍는다(셸 통합이 emit하면 채워진다).
         if (core.last_command_exit) |code| {
             screen_diag.info("=== screen {d}x{d} cursor=({d},{d}) last_exit={d} ===", .{
-                core.size.cols, core.size.rows, core.cursor.row, core.cursor.col, code,
+                core.size.cols, core.size.rows, core.screen.cursor.row, core.screen.cursor.col, code,
             });
         } else {
             screen_diag.info("=== screen {d}x{d} cursor=({d},{d}) ===", .{
-                core.size.cols, core.size.rows, core.cursor.row, core.cursor.col,
+                core.size.cols, core.size.rows, core.screen.cursor.row, core.screen.cursor.col,
             });
         }
         // OSC 7로 셸이 보고한 cwd(셸 통합이 emit하면 채워진다). 창 제목이 읽는 값을 데이터로 확인.

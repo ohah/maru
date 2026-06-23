@@ -170,7 +170,7 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 
 단일 진입점을 거치지 않는 두 곳만 명시적으로 챙긴다:
 
-- **IME preedit(조합 중 표시)**: `screen.zig`의 `snapshotWithPreedit`/`drawPreeditCells`는 셀 저장이 아니라 스냅샷 시점에 `preedit_bytes`를 codepoint 단위 폭으로 임시 렌더하는 별도 경로다(확정 전이라 셀에 안 들어감). preedit도 cluster 폭·표시를 인지하도록 HG3/HG4에서 맞춘다.
+- **IME preedit(조합 중 표시) — codepoint 단위(의도된 한계)**: `screen.zig`의 `snapshotWithPreedit`/`drawPreeditCells`는 셀 저장이 아니라 스냅샷 시점에 `preedit_bytes`를 codepoint 단위 폭으로 임시 렌더하는 별도 경로다(확정 전이라 셀에 안 들어감). **여기엔 cluster 인지를 적용하지 않는다.** 근거(검증): macOS 한글 IME는 조합 중에도 **완성형 음절**(NFC, 예 `한`=U+D55C)을 marked text로 보내고 — preedit 경로(`setMarkedText`→`imeMarked`→`core.setPreedit`)엔 정규화가 없어 그대로 저장된다 — 완성형은 단일 코드포인트라 그대로 한 셀(폭 2)로 정상 렌더된다(기존 IME 테스트도 전부 완성형 전제). NFD 자모/폭0 combining을 marked text로 보내는 IME(드묾)에서만 조합 중 자모가 분리되거나 악센트가 잠깐 안 보이는데, 이는 **확정 직후 PTY 경로(`writeCodepoint`)가 cluster로 정상 묶으므로** 조합 중 한정 표시 한계다. 추측만으로 cluster 로직을 preedit에 복제하지 않는다(`architecture.md` "성급한 최적화 금지"). 실사용 근거(그런 IME가 실제로 쓰임)가 생기면 그때 검토한다.
 - **클립보드 복사·재출력(`appendRowUtf8`)**: 저장된 다중 코드포인트를 손실 없이 UTF-8로 뽑아야 한다(무손실 — §3.2 잘림 금지와 직결). HG2a 직렬화 확장에 포함한다.
 
 ## 5. 분해 (HG1~HG4)
@@ -197,6 +197,7 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 
 ## 7. 잔여와 후속
 
-- ZWJ 이모지 시퀀스(GB11)·국기(RI 쌍)·skin-tone은 mode 2027에서 한 셀(폭 2)로 묶여 정확하다(HG-후속 `emojiClusterExtends` 통합). 남은 것: (1) `isExtendedPictographic`의 완전한 Extended_Pictographic 속성표(현재 흔한 이모지 블록 큐레이션 — fixture로 확장), (2) mode 2027을 안 켠 환경의 ZWJ 폭 정책(현재 비-2027은 컴포넌트별 폭 — 앱과 합의 없이 묶지 않음).
+- ZWJ 이모지 시퀀스(GB11)·국기(RI 쌍)·skin-tone은 mode 2027에서 한 셀(폭 2)로 묶여 정확하다(HG-후속 `emojiClusterExtends` 통합). 남은 것(현재 안 함 — 동작 영향 없음): (1) `isExtendedPictographic`의 완전한 Extended_Pictographic 속성표 — 현재 큐레이션 범위가 RI·skin-tone을 과포함하나 `emojiClusterExtends`에서 각자 분기가 먼저 처리해 **무해**하므로, 출력이 바뀌는 실사용 근거가 없으면 도입하지 않는다, (2) mode 2027을 안 켠 환경의 ZWJ 폭 정책(현재 비-2027은 컴포넌트별 폭 — 앱과 합의 없이 묶지 않음, 의도된 정책).
+- IME preedit는 codepoint 단위 렌더다(위 §4 preedit 항목) — 주 타깃 한글 IME가 완성형 marked text를 보내 정상이고, NFD/combining marked text는 조합 중 표시에 한해 미지원(확정 후 PTY 경로가 정상 cluster화). cluster 인지 복제는 그런 IME가 실제로 쓰이는 근거가 생기면 검토한다.
 - 다중 glyph로 셰이핑되는 cluster의 atlas 키잉·배치 정책은 실제 CoreText 결과를 보고 확정한다(현재 base+glyph_id 기준 — NFD 음절·이모지는 합성 후 단일/소수 glyph라 실사용 충돌 없음).
 - 정규화(NFC/NFD) 자체는 도입하지 않는다(§3.1). 만약 외부 요구로 입력 정규화가 필요해지면 전략 수정이므로 [PR 체크리스트](pr-checklist.md) 절차에 따라 사용자와 먼저 논의한다.

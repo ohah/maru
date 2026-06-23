@@ -198,12 +198,10 @@ pub const TerminalCore = struct {
     // alt 화면 동안 비활성 화면(primary)을 통째로 보관하는 슬롯 — grid(cells·wrapped·prompt_marks) + 스크롤백(sb)을
     // 한 Screen으로 묶어 alt 전환이 `self.screen ↔ saved_screen` struct 교환 한 번이 된다(B3). primary 활성 중엔
     // 빈 인스턴스(cells 등 &.{}, sb cap 0). "alt엔 스크롤백 없음"이 grid까지 타입으로 보장된다(architecture.md 2단계).
+    // DECSC 슬롯(saved_cursor)도 커서와 함께 Screen에 귀속돼 swap을 탄다(per-screen, §10.8 B5) — 화면(primary/alt)
+    // 마다 별도 슬롯이 by-construction으로 보장되므로(한 슬롯 공유 시 alt 안 ESC 7/8이 셸 커서를 덮던 문제 소멸)
+    // 옛 saved_cursor_primary/alt 평평 필드는 self.screen.saved_cursor / self.saved_screen.saved_cursor가 대체한다.
     saved_screen: Screen = .{},
-    // DECSC/DECRC + 1048/1049가 쓰는 저장 커서. xterm처럼 화면(primary/alt)마다 별도 슬롯을 둔다 —
-    // 한 슬롯을 공유하면 TUI가 alt 안에서 ESC 7/8을 쓸 때 1049가 저장한 셸 커서가 덮여, 종료 시
-    // 프롬프트가 엉뚱한 위치(예: 화면 맨 위)로 복원된다.
-    saved_cursor_primary: SavedCursor = .{},
-    saved_cursor_alt: SavedCursor = .{},
     // 각 CSI 파라미터가 ';'(새 파라미터)가 아니라 ':'(sub-parameter)로 들어왔는지 표시한다.
     // ITU colon 형식 38:2:colorspace:r:g:b는 38;2;r;g;b와 달리 colorspace 컴포넌트가 하나 더
     // 있어, 이 구분 없이는 RGB가 한 칸 밀린다.
@@ -4051,7 +4049,7 @@ test "1049h does not clobber the primary DECSC slot (per-screen fix, §10.8.4 #3
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
     defer core.deinit();
     try core.write("hello"); // 커서 (0,5)
-    try core.write("\x1b7"); // DECSC: saved_cursor_primary = (0,5)
+    try core.write("\x1b7"); // DECSC: primary 화면 saved_cursor = (0,5)
     try core.write("\x1b[1;1H"); // 커서 (0,0)으로
     try core.write("\x1b[?1049h"); // 옛 모델은 여기서 live (0,0)을 primary 슬롯에 덮어썼다 — 이제 안 덮음
     try core.write("\x1b[2;3Hzz"); // alt 활동
@@ -4096,6 +4094,45 @@ test "deferred autowrap state survives an alt round-trip on the primary (per-scr
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("abcd\ne   \n    ", dump);
+}
+
+// ── B5 per-screen DECSC 슬롯 (saved_cursor가 화면 귀속·swap, §10.8.5) ───────────────────────────────
+
+test "primary DECSC slot survives an alt round-trip, alt ESC 7 cannot clobber it (per-screen, B5)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    try core.write("hello\x1b7"); // 커서 (0,5), DECSC → primary 슬롯 (0,5)
+    try core.write("\x1b[?1049h"); // alt 진입 — primary 슬롯이 saved_screen으로 보관
+    try core.write("\x1b[2;3HZ\x1b7"); // alt에서 ESC 7 → alt 슬롯(primary 슬롯 불간섭)
+    try core.write("\x1b[?1049l"); // 복귀 → primary 슬롯 (0,5) swap 복원
+    try core.write("\x1b[1;1H"); // 커서 (0,0)으로
+    try core.write("\x1b8"); // DECRC → primary 슬롯 (0,5) 복원
+    try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.row);
+    try std.testing.expectEqual(@as(u16, 5), core.screen.cursor.col);
+}
+
+test "alt DECSC slot is fresh on each alt entry (per-screen, §10.8.5 B5)" {
+    // alt는 매 진입 재생성이라 alt 슬롯도 fresh — 옛 평평 saved_cursor_alt의 세션 간 persist는 의도적으로 사라진다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    try core.write("\x1b[?1049h"); // alt 진입 #1
+    try core.write("\x1b[2;5H\x1b7"); // alt에서 ESC 7 → alt 슬롯 (1,4)
+    try core.write("\x1b[?1049l"); // 이탈(alt 폐기)
+    try core.write("\x1b[?1049h"); // alt 진입 #2 → 슬롯 fresh(.{})
+    try core.write("\x1b[1;1H"); // 커서 (0,0)
+    try core.write("\x1b8"); // DECRC → fresh 슬롯 (0,0) 복원(옛 모델은 (1,4))
+    try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.row);
+    try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
+}
+
+test "CSI s/u (SCO save/restore) use the active screen's saved_cursor (B5)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    try core.write("ab\x1b[s"); // 커서 (0,2), CSI s 저장
+    try core.write("\x1b[3;6H"); // (2,5)로
+    try core.write("\x1b[u"); // CSI u 복원 → (0,2)
+    try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.row);
+    try std.testing.expectEqual(@as(u16, 2), core.screen.cursor.col);
 }
 
 test "resize while in the alt screen preserves the saved primary's soft-wrap flags" {

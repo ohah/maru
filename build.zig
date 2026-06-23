@@ -694,11 +694,25 @@ pub fn build(b: *std.Build) void {
                 "codesign --verify --strict zig-out/Maru.app; " ++
                 "version=$(/usr/libexec/PlistBuddy -c \"Print :CFBundleShortVersionString\" zig-out/Maru.app/Contents/Info.plist); " ++
                 "rm -rf dist/dmg-staging; mkdir -p dist/dmg-staging; " ++
+                // .app 자체를 먼저 공증 + staple한다 — dmg에만 staple하면 .app엔 티켓이 없어, 다른 맥(특히 오프라인·
+                // Gatekeeper 공증 조회 실패 환경)에서 dmg로 연 .app이 "손상된 파일"로 거부된다. .app을 zip으로 묶어
+                // notarytool에 제출하고, 발급된 티켓을 staple로 .app에 부착한 뒤 dmg에 담는다(아래 ditto).
+                "echo '==> notarize app + staple (.app 자체에 티켓 부착 — 오프라인/타 맥 손상 방지)'; " ++
+                "ditto -c -k --keepParent zig-out/Maru.app dist/Maru-app-notarize.zip; " ++
+                "xcrun notarytool submit dist/Maru-app-notarize.zip --keychain-profile \"$MARU_NOTARY_PROFILE\" --wait; " ++
+                "xcrun stapler staple zig-out/Maru.app; " ++
+                "xcrun stapler validate zig-out/Maru.app; " ++
+                "rm -f dist/Maru-app-notarize.zip; " ++
+                // 티켓이 박힌 .app을 dmg 스테이징으로 복사한다(이제 .app에 공증 티켓 포함).
                 "ditto zig-out/Maru.app dist/dmg-staging/Maru.app; " ++
                 "ln -s /Applications dist/dmg-staging/Applications; " ++
                 "dmg=\"dist/Maru-${version}-arm64.dmg\"; " ++
                 "rm -f \"$dmg\"; " ++
                 "echo \"==> create dmg: $dmg\"; " ++
+                // 이전 빌드/검증에서 dmg를 마운트(/Volumes/Maru)한 뒤 detach가 실패하면, 같은 볼륨명으로 hdiutil
+                // create가 "could not access /Volumes/Maru ... 작업이 허용되지 않음"으로 막힌다. 생성 직전 강제
+                // detach해 빌드를 idempotent하게 만든다(마운트가 없으면 실패를 무시 — set -eu에 걸리지 않게 || true).
+                "hdiutil detach /Volumes/Maru -force >/dev/null 2>&1 || true; " ++
                 "hdiutil create -volname Maru -srcfolder dist/dmg-staging -ov -format UDZO \"$dmg\"; " ++
                 "rm -rf dist/dmg-staging; " ++
                 "codesign --force --timestamp --sign \"$MARU_SIGN_IDENTITY\" \"$dmg\"; " ++

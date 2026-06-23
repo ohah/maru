@@ -540,7 +540,9 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 | **A1 ✅** | `Scrollback.ring`(행마다 `dupe`) → **page 리스트 + pool**. 행 연산은 `pushScrollback`·`scrollbackRow*`·`rewrapScrollback*` 접근자 뒤 캡슐화(공개 API·renderer·selection 불변). 동작 보존(row-count cap·eviction·setCap 반환 그대로). **uniform-width 페이지**(폭 변경 시 새 페이지) | **할당 100만→~수천**, mmap-ready 토대 |
 | **A2 ✅ 가변폭/trim** | 페이지 행을 가변폭(per-row desc, hard 행 끝-공백 trim)으로 → 전형 출력 메모리 절감 | 메모리 viable |
 | **P4 ✅ mmap backing** | cell arena를 `std.heap.page_allocator`(mmap/VirtualAlloc, §180) → demand-commit + 콜드 OS swap(RAM 미점유) + free 즉시 반납 | RAM 한계 돌파 |
-| **B (선택)** | 활성 grid까지 통합 PageList. 측정 게이트 뒤. **이 단계에서 grapheme도 page-local로 귀속(§11.8)** — page가 grapheme 풀을 소유, free 시 동반 소멸 | (perf, 별개) + grapheme 구조적 회수 |
+| **B** ❌ **불가(미진행)** | 활성 grid 통일 PageList — **A2(가변폭 스크롤백)와 구조적 충돌로 불가**(§11.10 정정). 활성=고정폭 mutate vs 스크롤백=가변폭 packed 불변. ring 대안은 perf~0. grapheme page-local도 vehicle(B) 상실 → 측정 시 split 모델 후속(§11.8) | — (A2 메모리 이득과 동시 불가) |
+
+> **§11 종료**: 수백만 줄 목표는 **A1+A2+P4로 달성·초과**(할당 ~128×↓·메모리 ~5.8~94×↓·history>RAM). full B(Ghostty식 통일)는 A2와 양립 불가(§11.10)이고 ring/grapheme-recovery는 측정 이득 없어 보류. architecture.md §211은 maru가 A2로 택한 "가변폭 스크롤백 + 고정 활성 grid 분리 모델"로 재해석한다. 더 진행은 측정된 필요(grapheme 메모리 blowup 등) 시에만.
 
 > grapheme 메모리는 그 전까지 **dedup된 전역 `grapheme_store`**(HG dedup PR)가 distinct cluster 수로 bound한다. 화면 밖으로 사라진 cluster까지 회수(구조적)하는 건 위 **B**에서 grapheme을 page에 귀속시킬 때 온다 — 전역 refcount/GC는 flat `cells:[]Cell`+`memcpy` 위에서 위험·임시품이라 도입하지 않는다(§11.8).
 
@@ -590,6 +592,8 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 
 **seam 준비(지금 가능, 충돌 0)**: grapheme 해석이 `graphemeCluster(id)`/`snapshot.graphemes` 한 군데로 모여 있어, B에서 이 seam만 page-local로 바꾸면 호출부(RowCodepoints·draw_list·selection)는 안 바뀐다.
 
+> **정정(§11.10 발견 반영)**: 이 계획의 **vehicle인 B(활성 grid 통일)가 A2와 충돌해 불가**해졌다(§11.10). 따라서 "B의 한 step으로 grapheme page-local"은 진행 불가. 남는 길은 (a) 위에서 "더 나쁨"으로 평가한 **split 모델**(스크롤백만 page-local grapheme + 전역 활성), 또는 (b) **현 전역 dedup store 유지**(브리지)다. **결정: (b) 유지·보류** — dedup이 distinct cluster 수로 메모리를 bound하고(100만 줄이라도 고유 cluster는 보통 수천~수만·각 몇 코드포인트 → MB급), **측정된 grapheme 메모리 병목이 없다**(measure-first). grapheme **렌더링** 작업(dedup·무손실 cluster 저장·NFD 한글·CoreText 셰이퍼)은 이미 완료·유효하며, **회수(page-local)만 보류**다 — huge history에서 grapheme 메모리가 실제로 커짐이 측정되면 그때 split 모델(스크롤백 page-local, 활성 grid 안 건드림)로 재개한다.
+
 ### 11.9 P4 설계 — mmap backing for 스크롤백 page arena (설계·합의 대기)
 
 **목표**: A2가 만든 **고정 크기 cell arena**(ScrollbackPage.cells)를 일반 allocator 대신 **mmap/VirtualAlloc 기반 page allocator**로 받쳐, (1) demand-commit(안 쓴 arena tail은 물리 메모리 미점유), (2) 메모리 압박 시 콜드 히스토리 arena가 OS swap으로 디스크에 내려감(= history > RAM 가능), (3) free 시 즉시 OS 반납(general allocator의 caching과 달리)을 얻는다. architecture.md §180("hot terminal page backing → mmap/VirtualAlloc 직접, hot storage가 명확해지면 그 책임만 교체")의 실현. A1/A2로 hot storage(=고정 arena)가 명확해진 지금이 교체 시점.
@@ -609,9 +613,17 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 
 **리스크**: 테스트 leak 추적(주입으로 해결), per-arena mmap syscall 비용(arena가 크고 pool 재사용이라 syscall 적음), realloc(초광폭 행) 시 remap(page_allocator 지원). 동작 보존(저장 위치만 이동 — 관측 불변).
 
-### 11.10 B 설계 — 활성 grid까지 통합 PageList (full B, 다단계·설계·합의 대기)
+### 11.10 B 설계 — 활성 grid까지 통합 PageList (❌ 정정: A2와 구조적 충돌로 **불가**, 미진행)
 
-**결정**: 사용자가 full B를 선택(§11.6 B-게이트 해소) — perf 이득 ~0(P0)·최고 위험을 알고도 architecture.md §211 종착지(통일 저장 모델) + grapheme page-local 메모리 회수(§11.8)를 위해 진행. **다단계 PR + 매 단계 누적 `/code-review max`**, 동작 보존(관측 불변) 기준.
+> **정정(B1 착수 직전 발견 — 이 설계는 폐기)**: 아래 "활성=통합 리스트 꼬리" 설계는 **A2와 양립 불가**임이 구현 스코핑에서 드러났다. **근거**: A2는 스크롤백 행을 **가변폭**(trim해 arena에 팩, append-only·불변)으로 만들었는데, 활성 grid는 **고정 `rows×cols`·제자리 mutate**(putCell이 아무 칸이나 즉시 씀, 고정 stride `r*cols+c` 필수)다. 가변폭 팩 구조에선 한 행을 늘리면 뒤를 통째 밀어야 해 활성 grid의 in-place mutation이 불가능하다. Ghostty의 통일이 되는 건 **모든 page가 균일 고정폭**이기 때문인데, maru는 A2로 스크롤백을 비균일하게 만들어(메모리 94×↓) 그 전제를 깼다. "경계 이동 O(1) scroll"도 밀려난 고정폭 행을 A2 스크롤백으로 넣으려면 **trim=복사**라 zero-copy가 안 된다. 즉 **A2의 메모리 이득과 Ghostty식 통일은 한 구조에서 동시 불가** — maru는 millions 목표상 A2(메모리)를 택했고 그게 통일을 막는다(트레이드오프, 버그 아님).
+>
+> **대안 평가**: ① 활성 grid를 ring(anchor)으로 → scroll O(1)이지만 P0서 활성 scroll 이미 싸 **perf~0** + hot-path 재작성 위험만 → 비채택. ② grapheme page-local(§11.8의 진짜 이득)은 활성 grid 통일 없이 스크롤백 page에 얹을 수 있으나 §11.8 자체가 "split 모델은 더 나쁨"이라 평가했고, 전역 dedup store가 이미 메모리를 bound해 **측정된 필요 없음** → 보류(measure-first).
+>
+> **결론**: **full B 미진행. §11은 A1/A2/P4로 완성**(수백만 줄 목표 달성·초과). architecture.md §211의 "통일 PageList"는 Ghostty 균일-페이지 모델 전제였고 maru는 A2로 다른 최적점을 택했다 — §211을 "maru는 A2(가변폭 스크롤백) + 고정 활성 grid의 분리 모델로 메모리를 우선한다"로 재해석한다. 통일을 정 원하면 A2를 되돌려야 하는데 그건 메모리 이득 포기라 millions에 역행.
+
+아래는 폐기된 원설계(기록 보존용):
+
+**(폐기) 결정**: full B 선택 — architecture.md §211 종착지(통일 저장 모델) + grapheme page-local 메모리 회수(§11.8). 위 정정으로 무효.
 
 **모델**: 스크롤백 PageList(A1/A2)를 활성 grid까지 확장 — **활성 화면 = 페이지 리스트의 꼬리 `rows`행**, 스크롤백 = 그 앞 전부. 별도 `screen.cells` 평평 배열 제거. scroll = 활성 윈도가 리스트를 따라 내려가는 것(맨 위 활성행이 스크롤백이 됨) — 페이지 경계 포인터 이동(O(1) 잠재).
 

@@ -393,8 +393,8 @@ maru의 **현재 alt-screen 전환은 grid(cells·wrapped·prompt_marks)+`sb`만
 
 | PR | 범위 | rename | 위험 |
 |---|---|---|---|
-| **B1** | `Screen` struct 신설(grid: cells·wrapped·prompt_marks) + fold → `self.screen.cells/wrapped/prompt_marks`. 내부·외부 접근 전수 rename(컴파일러 강제) | ~169 내부 + grid 외부(~14) | 중 |
-| **B2** | `sb`를 Screen에 추가 + fold → `self.screen.sb` | ~116 내부 + sb 외부 | 중 |
+| **B1** ✅ | `Screen` struct 신설(grid: cells·wrapped·prompt_marks) + fold → `self.screen.cells/wrapped/prompt_marks`. 내부·외부 접근 전수 rename(컴파일러 강제) | 내부 169 + 외부 238(테스트 다수) | 중 |
+| **B2** ✅ | `sb`를 Screen에 추가 + fold → `self.screen.sb` | 내부 93(외부 0 — sb는 terminal-internal). primary cap default는 init `.screen = .{ … .sb = .{ .cap = default_max_scrollback } }`로 이동 | 중 |
 | **B3** | `saved_cells`/`saved_wrapped`/`saved_prompt_marks`/`saved_sb` → `saved_screen: Screen`, alt enter/leave를 `std.mem.swap(&self.screen, &self.saved_screen)` struct swap으로(의미 보존). **B-min 완결** | 소(alt 경로) | 중 |
 
 검증·리뷰는 §5 그대로(매 PR 4종 게이트 green auto-merge + 마지막 `/code-review max`). 외부 접근 rename은 해당 필드 fold PR에 포함(컴파일러가 내부·외부 동시 강제). 머지 충돌 최소화 위해 연속 처리.

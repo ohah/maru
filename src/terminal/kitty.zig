@@ -389,7 +389,7 @@ fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
     addOrReplacePlacement(self, .{
         .image_id = cmd.image_id,
         .placement_id = cmd.placement_id,
-        .anchor_row = self.sb.count + self.cursor.row, // 커서의 절대 행
+        .anchor_row = self.screen.sb.count + self.cursor.row, // 커서의 절대 행
         .anchor_col = self.cursor.col,
         .cell_x_offset = cmd.cell_x_offset,
         .cell_y_offset = cmd.cell_y_offset,

@@ -1348,12 +1348,16 @@ pub fn writeCodepoint(self: *TerminalCore, codepoint: u21) void {
             // (폭 0) 경로에 안 걸리지만, 앞 음절 cluster에 0폭으로 흡수돼야 한다 — 안 그러면 자모가
             // 셀마다 흩어지고 폭이 음절당 2배가 된다(초성만 wide). mode 2027과 무관하게 적용한다:
             // macOS 파일명(NFD)을 내는 `ls`는 grapheme cluster mode를 켜지 않기 때문이다(설계 §4.7).
-            // extendsCluster는 폭≠0 글자에 대해선 한글 L/V/T 연쇄에서만 true라 다른 문자는 안 묶인다.
-            if (self.screen.last_print) |last| {
-                const last_cell = self.screen.cells[self.index(last.row, last.col)];
-                if (grapheme.extendsCluster(trailingClusterCp(self, last_cell), cp)) {
-                    appendClusterCodepoint(self, cp);
-                    return;
+            // 흡수 대상은 conjoining 자모(U+1100~U+11FF)로 한정한다 — extendsCluster만 쓰면 GB9가
+            // ZWJ(폭 1)까지 true라 NFD와 무관한 ZWJ가 0폭으로 새어들어 커서 전진이 달라졌다(리뷰).
+            // ZWJ 시퀀스(GB11)·완성형은 각자 제 경로로 가고, 여기선 NFD 자모만 합친다.
+            if (grapheme.isConjoiningJamo(cp)) {
+                if (self.screen.last_print) |last| {
+                    const last_cell = self.screen.cells[self.index(last.row, last.col)];
+                    if (grapheme.extendsCluster(trailingClusterCp(self, last_cell), cp)) {
+                        appendClusterCodepoint(self, cp);
+                        return;
+                    }
                 }
             }
             putCell(self, cp);

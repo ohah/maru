@@ -1668,6 +1668,24 @@ test "multi-combining: 둘째 mark부터 grapheme_store에 누적돼 무손실 (
     try std.testing.expect(std.mem.indexOf(u8, text, "e\u{0301}\u{0323}x") != null);
 }
 
+test "bare ZWJ(U+200D)는 NFD cluster에 흡수되지 않고 제 셀을 유지한다 (리뷰 #2 회귀)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
+    defer core.deinit();
+
+    // ZWJ는 conjoining 자모(U+1100~U+11FF) 범위 밖이라 NFD 흡수 대상이 아니다. extendsCluster는
+    // GB9로 ZWJ를 true로 보지만 폭이 1이라, 흡수했다면 'a' 셀에 0폭으로 붙어 커서가 2칸만 전진했을
+    // 것이다. 흡수하지 않으므로 'a','ZWJ','b' 세 셀(커서 3) — NFD 한글 작업이 ZWJ 동작을 안 바꾼다.
+    try core.write("a\u{200D}b");
+
+    const s = core.snapshot();
+    try std.testing.expectEqual(@as(u16, 3), s.cursor.col);
+    try std.testing.expectEqual(@as(u21, 'a'), s.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u32, 0), s.cells[0].grapheme_id); // ZWJ가 'a'에 안 붙음
+    try std.testing.expect(s.cells[0].combining == null);
+    try std.testing.expectEqual(@as(u21, 0x200D), s.cells[1].codepoint); // ZWJ는 제 셀
+    try std.testing.expectEqual(@as(u21, 'b'), s.cells[2].codepoint);
+}
+
 test "ambiguous_wide makes circled numbers occupy two cells (advance 2) with a continuation" {
     {
         // 기본 narrow: ③는 1칸, 커서 advance 1(Ghostty/xterm.js 호환).

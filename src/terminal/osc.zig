@@ -227,22 +227,22 @@ pub fn dispatchSemanticPrompt(self: *TerminalCore, rest: []const u8) void {
     // action 뒤에 내용이 더 있으면 반드시 ';'로 시작해야 한다(아니면 `Pextra`류 — invalid).
     if (rest.len > 1 and rest[1] != ';') return;
     const opts: []const u8 = if (rest.len > 2) rest[2..] else "";
-    const row: u16 = @intCast(@min(self.cursor.row, std.math.maxInt(u16)));
+    const row: u16 = @intCast(@min(self.screen.cursor.row, std.math.maxInt(u16)));
     switch (action) {
         // A(fresh_line_new_prompt)·P(prompt_start) — PR1은 동일 취급(prompt_kind 옵션은 파싱·무시).
         'A', 'P' => {
             self.semantic_state = .prompt;
-            self.screen.prompt_marks[self.cursor.row] = .{ .kind = .prompt }; // 새 프롬프트 — exit 리셋
+            self.screen.prompt_marks[self.screen.cursor.row] = .{ .kind = .prompt }; // 새 프롬프트 — exit 리셋
             self.recordShellEvent(.{ .prompt_start = row });
         },
         'B' => {
             self.semantic_state = .input;
-            self.screen.prompt_marks[self.cursor.row].kind = .input; // exit는 보존(D가 채움)
+            self.screen.prompt_marks[self.screen.cursor.row].kind = .input; // exit는 보존(D가 채움)
             self.recordShellEvent(.{ .input_start = row });
         },
         'C' => {
             self.semantic_state = .command;
-            self.screen.prompt_marks[self.cursor.row].kind = .command;
+            self.screen.prompt_marks[self.screen.cursor.row].kind = .command;
             self.recordShellEvent(.{ .command_start = row });
         },
         'D' => {

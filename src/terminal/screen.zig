@@ -144,12 +144,27 @@ pub const Screen = struct {
     /// alt는 cap=0인 빈 인스턴스라 "alt엔 스크롤백 없음"이 타입으로 보장된다(architecture.md §"스크롤백 귀속" 1단계가
     /// grid와 함께 Screen에 귀속 — B2). 기본 cap=0이라 primary cap은 init의 `.screen = .{ … .sb = .{ .cap = … } }`이 세팅.
     sb: Scrollback = .{},
+    /// 이 화면의 커서 위치. per-screen — alt 전환 시 grid·sb와 함께 통째 swap된다(Ghostty Screen.cursor 동형, §10.8).
+    /// alt 진입은 home(0,0)에서 시작하고, 이탈은 보관된 primary 커서를 복원한다(saved_screen swap).
+    cursor: types.Cursor = .{},
+    /// 현재 SGR 스타일(pen). printable cell을 쓸 때마다 stamp한다. CSI ... m 이 갱신한다. per-screen(커서와 함께 swap).
+    pen: types.Style = .{},
+    /// deferred autowrap(DECAWM). 마지막 칸을 채운 직후 커서는 그 칸에 머물고 이 플래그가 선다. 다음 printable이
+    /// 먼저 다음 줄 첫 칸으로 넘어간 뒤 그려진다. 명시적 커서 이동(CR/LF/backspace/위치 지정/resize)이 무효화한다.
+    /// per-screen(커서 render 상태라 화면과 함께 swap — alt는 false에서 시작, 이탈은 primary 상태 복원).
+    pending_wrap: bool = false,
+    /// 가장 최근 printable codepoint를 받은 셀(zero-width combining mark가 커서 추정 대신 실제 base glyph에 붙도록).
+    /// 커서는 모호하다: base를 정상 전진하지만 마지막 칸(autowrap 없음)에선 base '위'에 머물고 LF 뒤엔 새 행으로
+    /// 간다. grapheme run을 끝내는 무엇이든(CR/LF/backspace/resize) 리셋. per-screen(커서와 함께 swap).
+    last_print: ?struct { row: u16, col: u16 } = null,
+    /// 직전 printable codepoint(REP·grapheme 연속용). per-screen(커서 render 상태와 함께 swap).
+    last_printed_cp: u21 = 0,
 };
 
 // ── G4 동적 탭스톱 ───────────────────────────────────────────────────────────────────────────────
 // col별 탭스톱(기본 8칸마다). HTS(ESC H)가 set, TBC(CSI g)가 clear, CBT(CSI Z)가 역방향 이동, HT(0x09)가
 // 다음 탭스톱으로 전진. 길이는 cols와 맞춘다(resize가 재구성). 활성 화면 storage라 screen.zig로 모은다(8/N).
-// core가 `self.tabstops`/`self.cursor`/`self.size` 필드를 직접 들고, 여기는 그 위의 연산만 제공한다.
+// core가 `self.tabstops`/`self.screen.cursor`/`self.size` 필드를 직접 들고, 여기는 그 위의 연산만 제공한다.
 
 /// col이 탭스톱인가. tabstops 배열 안이면 그 값, 밖(OOM 등 길이 불일치)이면 8칸 기본으로 폴백.
 fn isTabstop(self: *const TerminalCore, col: u16) bool {
@@ -179,42 +194,42 @@ pub fn writeTab(self: *TerminalCore) void {
     // 탭은 수평 이동이다 — 다음 탭스톱으로 커서만 옮기고(끝 칸에 멈춤), 지나는 셀의 내용은 건드리지
     // 않는다. xterm.js(InputHandler.tab)·Ghostty(horizontalTab)도 커서만 이동한다 — putCell(' ')로 공백을
     // 찍으면 CR 후 탭 redraw에서 기존 글자가 지워진다. 탭은 wrap하지 않으므로 pending_wrap도 끈다.
-    self.pending_wrap = false;
+    self.screen.pending_wrap = false;
     // TAB은 grapheme run을 끊는다 — CR/LF/BS와 동일하게 last_print를 비워, 탭 뒤의 combining mark(또는 skin-tone·
     // RI 페어링)가 탭 이전 글자에 잘못 붙지 않게 한다. 이동 여부와 무관하게(이미 마지막 칸이어도) 컨트롤 처리 = run 종료다.
-    self.last_print = null;
+    self.screen.last_print = null;
     if (self.size.cols == 0) return;
     const last = self.size.cols - 1;
-    if (self.cursor.col >= last) return; // 이미 마지막 칸 — 이동 없음
-    const old_cursor = self.cursor;
-    var next = self.cursor.col + 1;
+    if (self.screen.cursor.col >= last) return; // 이미 마지막 칸 — 이동 없음
+    const old_cursor = self.screen.cursor;
+    var next = self.screen.cursor.col + 1;
     while (next < last and !isTabstop(self, next)) next += 1; // 다음 탭스톱(없으면 마지막 칸)에 멈춤
-    self.cursor.col = next;
+    self.screen.cursor.col = next;
     // 커서는 draw-time 오버레이라 이동 시 옛/새 칸을 모두 dirty로 마킹해야 한다 — markCursorMoveDirty 계약(\r·BS·CBT 등
     // 이 함수를 거치는 모든 이동)에 TAB도 포함시켜, 옛 칸의 커서 잔상이 안 남게 한다(cursorBackTab과 동일).
-    markCursorMoveDirty(self, old_cursor, self.cursor); // 같은 파일(dirty 추적도 screen.zig)
+    markCursorMoveDirty(self, old_cursor, self.screen.cursor); // 같은 파일(dirty 추적도 screen.zig)
 }
 
 /// CBT(CSI Ps Z): 역방향으로 Ps개 탭스톱 이동. 0번째 칸을 넘지 않는다.
 pub fn cursorBackTab(self: *TerminalCore, count: u16) void {
-    self.pending_wrap = false;
-    self.last_print = null; // CBT도 커서 이동 — grapheme run을 끊는다(HT/CR/LF/BS와 동일).
-    const old_cursor = self.cursor;
+    self.screen.pending_wrap = false;
+    self.screen.last_print = null; // CBT도 커서 이동 — grapheme run을 끊는다(HT/CR/LF/BS와 동일).
+    const old_cursor = self.screen.cursor;
     var remaining = @max(count, 1);
     while (remaining > 0) : (remaining -= 1) {
-        if (self.cursor.col == 0) break;
-        var prev = self.cursor.col - 1;
+        if (self.screen.cursor.col == 0) break;
+        var prev = self.screen.cursor.col - 1;
         while (prev > 0 and !isTabstop(self, prev)) prev -= 1; // 이전 탭스톱(없으면 col 0)으로
-        self.cursor.col = prev;
+        self.screen.cursor.col = prev;
     }
-    markCursorMoveDirty(self, old_cursor, self.cursor);
+    markCursorMoveDirty(self, old_cursor, self.screen.cursor);
 }
 
 /// TBC(CSI Ps g): Ps=0(기본) 커서 열 탭스톱 제거, Ps=3 전체 제거. 그 외 Ps는 무시.
 pub fn clearTabstop(self: *TerminalCore, mode: u16) void {
     switch (mode) {
-        0 => if (self.cursor.col < self.tabstops.len) {
-            self.tabstops[self.cursor.col] = false;
+        0 => if (self.screen.cursor.col < self.tabstops.len) {
+            self.tabstops[self.screen.cursor.col] = false;
         },
         3 => @memset(self.tabstops, false),
         else => {},
@@ -240,7 +255,7 @@ pub fn markCursorMoveDirty(self: *TerminalCore, old_cursor: types.Cursor, new_cu
     // deferred autowrap을 무효화한다. putCell의 cursor 전진은 이 함수를 거치지 않으므로
     // pending_wrap을 직접 관리한다. 위치가 안 바뀌는 이동(아래 early-return)도 wrap 의도는
     // 취소되므로 early-return 전에 끈다.
-    self.pending_wrap = false;
+    self.screen.pending_wrap = false;
     // Cursor is drawn as an overlay, not as part of the cell glyph bitmap.
     // Moving it still changes pixels: the old cursor cell must be erased
     // and the new cursor cell must be drawn. Keeping that dirty decision in
@@ -344,7 +359,7 @@ pub fn isRegionalIndicator(codepoint: u21) bool {
 /// 거기 붙이기 위함. combining이 이미 있으면(예: 국기의 2번째 RI) 거기에 스킨톤을 또 붙이면
 /// 그 슬롯(하나뿐)을 덮어써 국기가 깨지므로 제외한다.
 pub fn lastCellIsWideEmoji(self: *const TerminalCore) bool {
-    const last = self.last_print orelse return false;
+    const last = self.screen.last_print orelse return false;
     const cell = self.screen.cells[self.index(last.row, last.col)];
     // width 2를 wide emoji 대용으로 본다(스킨톤 modifier 부착 대상). 단 ambiguous-width=wide로 2칸이 된
     // 동그란 번호(isWideRenderSymbol)는 이모지가 아니라 스킨톤 부착 대상이 아니므로 제외 — 안 그러면 ③ 뒤
@@ -354,7 +369,7 @@ pub fn lastCellIsWideEmoji(self: *const TerminalCore) bool {
 
 /// 직전 출력 셀이 짝 없는(combining 안 붙은) 지역 표시자인지 — 다음 RI와 국기로 묶기 위함.
 pub fn lastCellIsLoneRegionalIndicator(self: *const TerminalCore) bool {
-    const last = self.last_print orelse return false;
+    const last = self.screen.last_print orelse return false;
     const cell = self.screen.cells[self.index(last.row, last.col)];
     return isRegionalIndicator(cell.codepoint) and cell.combining == null;
 }
@@ -691,29 +706,29 @@ pub fn setCursorStyle(self: *TerminalCore, param: u16) void {
         },
         else => return,
     }
-    markDirty(self, self.cursor.row); // 모양이 바뀐 커서 칸을 다시 그린다
+    markDirty(self, self.screen.cursor.row); // 모양이 바뀐 커서 칸을 다시 그린다
 }
 
 pub fn cursorPosition(self: *TerminalCore) void {
     if (self.size.rows == 0 or self.size.cols == 0) return;
-    const old = self.cursor;
+    const old = self.screen.cursor;
     const row = self.csiParam(0, 1); // CSI 파라미터 접근(parser helper, core 잔류 — pub)
     const col = self.csiParam(1, 1);
-    self.cursor.row = resolveRow(self, row); // DECOM이면 scroll region 상단 기준 + region 안 clamp
-    self.cursor.col = @intCast(@min(@as(u32, col) - 1, @as(u32, self.size.cols) - 1));
-    markCursorMoveDirty(self, old, self.cursor);
-    self.last_print = null;
+    self.screen.cursor.row = resolveRow(self, row); // DECOM이면 scroll region 상단 기준 + region 안 clamp
+    self.screen.cursor.col = @intCast(@min(@as(u32, col) - 1, @as(u32, self.size.cols) - 1));
+    markCursorMoveDirty(self, old, self.screen.cursor);
+    self.screen.last_print = null;
 }
 
 /// DECOM(DECSET/DECRST ?6) 적용. origin mode를 토글하고 커서를 origin home으로 옮긴다(xterm 동작 —
 /// DECOM 변경 시 커서가 home으로). origin이면 scroll region 좌상단, 아니면 화면 좌상단.
 pub fn setOriginMode(self: *TerminalCore, on: bool) void {
     self.origin_mode = on;
-    const old = self.cursor;
-    self.cursor = .{ .row = if (on) self.scroll_top else 0, .col = 0 };
-    self.pending_wrap = false;
-    markCursorMoveDirty(self, old, self.cursor);
-    self.last_print = null;
+    const old = self.screen.cursor;
+    self.screen.cursor = .{ .row = if (on) self.scroll_top else 0, .col = 0 };
+    self.screen.pending_wrap = false;
+    markCursorMoveDirty(self, old, self.screen.cursor);
+    self.screen.last_print = null;
 }
 
 /// CUP/HVP/VPA의 1-based row 파라미터를 0-based 셀 행으로 변환한다. DECOM(origin mode)이면 scroll
@@ -728,45 +743,45 @@ fn resolveRow(self: *const TerminalCore, row_param: u16) u16 {
 
 pub fn cursorVertical(self: *TerminalCore, amount: u16, up: bool) void {
     if (self.size.rows == 0) return;
-    const old = self.cursor;
+    const old = self.screen.cursor;
     if (up) {
-        self.cursor.row -|= amount;
+        self.screen.cursor.row -|= amount;
     } else {
         const max_row = self.size.rows - 1;
-        self.cursor.row = @intCast(@min(@as(u32, self.cursor.row) + amount, max_row));
+        self.screen.cursor.row = @intCast(@min(@as(u32, self.screen.cursor.row) + amount, max_row));
     }
-    markCursorMoveDirty(self, old, self.cursor);
-    self.last_print = null;
+    markCursorMoveDirty(self, old, self.screen.cursor);
+    self.screen.last_print = null;
 }
 
 pub fn cursorHorizontal(self: *TerminalCore, amount: u16, right: bool) void {
     if (self.size.cols == 0) return;
-    const old = self.cursor;
+    const old = self.screen.cursor;
     if (right) {
         const max_col = self.size.cols - 1;
-        self.cursor.col = @intCast(@min(@as(u32, self.cursor.col) + amount, max_col));
+        self.screen.cursor.col = @intCast(@min(@as(u32, self.screen.cursor.col) + amount, max_col));
     } else {
-        self.cursor.col -|= amount;
+        self.screen.cursor.col -|= amount;
     }
-    markCursorMoveDirty(self, old, self.cursor);
-    self.last_print = null;
+    markCursorMoveDirty(self, old, self.screen.cursor);
+    self.screen.last_print = null;
 }
 
 pub fn cursorToColumn(self: *TerminalCore, col: u16) void {
     if (self.size.cols == 0) return;
-    const old = self.cursor;
-    self.cursor.col = @intCast(@min(@as(u32, col) - 1, @as(u32, self.size.cols) - 1));
-    markCursorMoveDirty(self, old, self.cursor);
-    self.last_print = null;
+    const old = self.screen.cursor;
+    self.screen.cursor.col = @intCast(@min(@as(u32, col) - 1, @as(u32, self.size.cols) - 1));
+    markCursorMoveDirty(self, old, self.screen.cursor);
+    self.screen.last_print = null;
 }
 
 pub fn cursorToRow(self: *TerminalCore, row: u16) void {
     if (self.size.rows == 0) return;
-    const old = self.cursor;
+    const old = self.screen.cursor;
     // VPA(CSI Ps d)도 CUP/HVP처럼 DECOM origin 영향을 받는다(xterm/Ghostty 공통 — setCursorPos 단일 경로).
-    self.cursor.row = resolveRow(self, row);
-    markCursorMoveDirty(self, old, self.cursor);
-    self.last_print = null;
+    self.screen.cursor.row = resolveRow(self, row);
+    markCursorMoveDirty(self, old, self.screen.cursor);
+    self.screen.last_print = null;
 }
 
 /// 저장 커서를 새 grid 안으로 clamp한다. col이 잘려 더는 마지막 칸이 아니면 pending_wrap도 끈다
@@ -788,7 +803,7 @@ fn clampSavedCursor(slot: *core.SavedCursor, size: types.Size) void {
 /// clearCellForWrite가 쓰기 시 하던 짝 정리를 erase에도 적용해, 짝 잃은 base나 orphan
 /// continuation이 남아 half-glyph로 그려지는 것을 막는다.
 fn repairWideGlyphEdges(self: *TerminalCore, row: u16, start: u16, end: u16) void {
-    const blank: types.Cell = .{ .style = self.pen };
+    const blank: types.Cell = .{ .style = self.screen.pen };
     // 왼쪽 경계: start-1이 width=2 base면 그 continuation(start)이 지워졌으므로 base도 비운다.
     if (start > 0 and self.screen.cells[self.index(row, start - 1)].width == 2) {
         self.screen.cells[self.index(row, start - 1)] = blank;
@@ -800,20 +815,20 @@ fn repairWideGlyphEdges(self: *TerminalCore, row: u16, start: u16, end: u16) voi
 }
 
 pub fn eraseInLine(self: *TerminalCore, mode: u16) void {
-    const row = self.cursor.row;
+    const row = self.screen.cursor.row;
     if (self.size.cols == 0 or row >= self.size.rows) return;
     const start: u16 = switch (mode) {
         1, 2 => 0,
-        else => self.cursor.col,
+        else => self.screen.cursor.col,
     };
     const end: u16 = switch (mode) {
-        1 => @min(self.cursor.col + 1, self.size.cols),
+        1 => @min(self.screen.cursor.col + 1, self.size.cols),
         else => self.size.cols,
     };
     var col = start;
     while (col < end) : (col += 1) {
         // erase는 현재 pen의 배경색으로 채워야 하므로 blank cell에 style만 남긴다.
-        self.screen.cells[self.index(row, col)] = .{ .style = self.pen };
+        self.screen.cells[self.index(row, col)] = .{ .style = self.screen.pen };
     }
     repairWideGlyphEdges(self, row, start, end);
     // 행의 오른쪽 끝을 지우면(mode 0=커서~끝, mode 2=전체) soft-wrap 연속성이 끊긴다. mode 1
@@ -823,31 +838,31 @@ pub fn eraseInLine(self: *TerminalCore, mode: u16) void {
     markDirty(self, row);
     // 모든 EL 모드는 deferred autowrap을 무효화한다(xterm/Ghostty 동작). 안 끄면 마지막 칸
     // 출력(pending) 후 EL+글자 시퀀스가 한 줄 일찍 wrap돼 상대 커서 이동이 어긋난다.
-    self.pending_wrap = false;
+    self.screen.pending_wrap = false;
     // 다른 cursor/erase op과 같이 grapheme run을 끝낸다. 안 하면 CSI K 뒤 combining mark가
     // 방금 지운 셀에 붙는다.
-    self.last_print = null;
+    self.screen.last_print = null;
 }
 
 /// ECH(CSI Ps X): 커서 위치부터 Ps개(기본 1) cell을 현재 pen 배경의 blank로 지운다. EL과 달리 줄 끝까지가
 /// 아니라 N개만, DCH(CSI P)와 달리 뒤 cell을 당기지도 않는다(제자리 blank). **커서는 안 움직인다**.
 /// 베이스: xterm `ECH`("Erase Ps Character(s)") — nvim이 모드 라벨(`-- INSERT --`)을 이 시퀀스로 지운다(EL 아님).
 pub fn eraseCharacters(self: *TerminalCore, count: u16) void {
-    const row = self.cursor.row;
+    const row = self.screen.cursor.row;
     if (self.size.cols == 0 or row >= self.size.rows) return;
-    const start = self.cursor.col;
+    const start = self.screen.cursor.col;
     const end: u16 = @min(start +| @max(count, 1), self.size.cols);
     var col = start;
     while (col < end) : (col += 1) {
         // erase는 현재 pen의 배경색으로 채운다(blank cell + style만) — eraseInLine과 동일 규칙(bce).
-        self.screen.cells[self.index(row, col)] = .{ .style = self.pen };
+        self.screen.cells[self.index(row, col)] = .{ .style = self.screen.pen };
     }
     repairWideGlyphEdges(self, row, start, end);
     markDirty(self, row);
     // ECH는 부분 erase라 soft-wrap flag를 끄지 않는다(EL mode 1과 같은 결 — 줄 끝이 남아 다음 행으로
     // 이어질 수 있다). deferred autowrap만 무효화(다른 erase op과 동일).
-    self.pending_wrap = false;
-    self.last_print = null;
+    self.screen.pending_wrap = false;
+    self.screen.last_print = null;
 }
 
 /// ICH (CSI Ps @): 커서 위치에 Ps개(기본 1) 빈 칸을 삽입한다. 커서부터 줄 끝까지의 셀을 오른쪽으로
@@ -855,13 +870,13 @@ pub fn eraseCharacters(self: *TerminalCore, count: u16) void {
 /// 위치는 불변. 베이스: ECMA-48 ICH / xterm ctlseqs `CSI Ps @`. 좌우 margin(DECSLRM) 미구현이라
 /// 줄 전체에서 작동한다.
 pub fn insertChars(self: *TerminalCore, count: u16) void {
-    const row = self.cursor.row;
+    const row = self.screen.cursor.row;
     if (self.size.cols == 0 or row >= self.size.rows) return;
-    const start = self.cursor.col;
+    const start = self.screen.cursor.col;
     if (start >= self.size.cols) return;
     const cols = self.size.cols;
     const n: u16 = @min(@max(count, 1), cols - start);
-    const blank: types.Cell = .{ .style = self.pen };
+    const blank: types.Cell = .{ .style = self.screen.pen };
     // 커서부터 오른쪽 셀을 n칸 오른쪽으로(역순 복사라 영역이 겹쳐도 안전). 줄 끝을 넘는 셀은 버린다.
     var col: u16 = cols;
     while (col > start + n) {
@@ -876,20 +891,20 @@ pub fn insertChars(self: *TerminalCore, count: u16) void {
     repairWideGlyphEdges(self, row, start, cols);
     if (self.screen.cells[self.index(row, cols - 1)].width == 2) self.screen.cells[self.index(row, cols - 1)] = blank;
     markDirty(self, row);
-    self.pending_wrap = false;
-    self.last_print = null;
+    self.screen.pending_wrap = false;
+    self.screen.last_print = null;
 }
 
 /// DCH (CSI Ps P): 커서 위치에서 Ps개(기본 1) 문자를 삭제한다. 커서 오른쪽 셀을 왼쪽으로 당기고,
 /// 줄 끝의 빈 자리는 현재 pen 배경(BCE). 커서 위치는 불변. 베이스: ECMA-48 DCH / xterm `CSI Ps P`.
 pub fn deleteChars(self: *TerminalCore, count: u16) void {
-    const row = self.cursor.row;
+    const row = self.screen.cursor.row;
     if (self.size.cols == 0 or row >= self.size.rows) return;
-    const start = self.cursor.col;
+    const start = self.screen.cursor.col;
     if (start >= self.size.cols) return;
     const cols = self.size.cols;
     const n: u16 = @min(@max(count, 1), cols - start);
-    const blank: types.Cell = .{ .style = self.pen };
+    const blank: types.Cell = .{ .style = self.screen.pen };
     // 커서 오른쪽 셀을 n칸 왼쪽으로 당긴다.
     var col = start;
     while (col + n < cols) : (col += 1) {
@@ -901,15 +916,15 @@ pub fn deleteChars(self: *TerminalCore, count: u16) void {
     repairWideGlyphEdges(self, row, start, cols);
     if (self.screen.cells[self.index(row, start)].continuation) self.screen.cells[self.index(row, start)] = blank;
     markDirty(self, row);
-    self.pending_wrap = false;
-    self.last_print = null;
+    self.screen.pending_wrap = false;
+    self.screen.last_print = null;
 }
 
 pub fn eraseInDisplay(self: *TerminalCore, mode: u16) void {
     if (self.size.rows == 0 or self.size.cols == 0) return;
     // 모든 ED 모드는 deferred autowrap을 무효화한다(EL과 동일한 이유, xterm/Ghostty 동작).
-    self.pending_wrap = false;
-    const blank: types.Cell = .{ .style = self.pen };
+    self.screen.pending_wrap = false;
+    const blank: types.Cell = .{ .style = self.screen.pen };
     switch (mode) {
         // 2/3: 화면 전체. 3(xterm E3)은 저장된 줄(스크롤백)까지 지운다 — `clear`가 보내는
         // \e[3J의 핵심 의미로, 비밀 출력 후 history를 비우는 용도다.
@@ -923,28 +938,28 @@ pub fn eraseInDisplay(self: *TerminalCore, mode: u16) void {
         },
         // 1: 화면 시작 ~ 커서까지.
         1 => {
-            const cursor_index = self.index(self.cursor.row, self.cursor.col);
+            const cursor_index = self.index(self.screen.cursor.row, self.screen.cursor.col);
             var i: usize = 0;
             while (i <= cursor_index and i < self.screen.cells.len) : (i += 1) self.screen.cells[i] = blank;
-            for (0..@min(@as(usize, self.cursor.row) + 1, self.screen.wrapped.len)) |r| self.screen.wrapped[r] = false;
-            repairWideGlyphEdges(self, self.cursor.row, 0, @min(self.cursor.col + 1, self.size.cols));
+            for (0..@min(@as(usize, self.screen.cursor.row) + 1, self.screen.wrapped.len)) |r| self.screen.wrapped[r] = false;
+            repairWideGlyphEdges(self, self.screen.cursor.row, 0, @min(self.screen.cursor.col + 1, self.size.cols));
             // dirty를 덮어쓰지 않고 markDirty로 병합한다 — 같은 write()에서 앞서 dirty된 행
             // (예: 방금 출력한 아래쪽 행)을 잃어 렌더가 stale glyph를 남기지 않게 한다.
             markDirty(self, 0);
-            markDirty(self, self.cursor.row);
+            markDirty(self, self.screen.cursor.row);
         },
         // 0(기본): 커서 ~ 화면 끝까지.
         else => {
-            const cursor_index = self.index(self.cursor.row, self.cursor.col);
+            const cursor_index = self.index(self.screen.cursor.row, self.screen.cursor.col);
             var i: usize = cursor_index;
             while (i < self.screen.cells.len) : (i += 1) self.screen.cells[i] = blank;
-            for (self.cursor.row..self.size.rows) |r| self.screen.wrapped[r] = false;
-            repairWideGlyphEdges(self, self.cursor.row, self.cursor.col, self.size.cols);
-            markDirty(self, self.cursor.row);
+            for (self.screen.cursor.row..self.size.rows) |r| self.screen.wrapped[r] = false;
+            repairWideGlyphEdges(self, self.screen.cursor.row, self.screen.cursor.col, self.size.cols);
+            markDirty(self, self.screen.cursor.row);
             markDirty(self, self.size.rows - 1);
         },
     }
-    self.last_print = null;
+    self.screen.last_print = null;
 }
 
 // ── scroll / line feed (행 스크롤·줄 이동) ──────────────────────────────────────────────────────
@@ -956,11 +971,11 @@ pub fn eraseInDisplay(self: *TerminalCore, mode: u16) void {
 pub fn decAlign(self: *TerminalCore) void {
     for (self.screen.cells) |*c| c.* = .{ .codepoint = 'E', .width = 1 };
     @memset(self.screen.wrapped, false);
-    const old_cursor = self.cursor;
-    self.cursor = .{};
-    self.pending_wrap = false;
-    self.last_print = null;
-    markCursorMoveDirty(self, old_cursor, self.cursor);
+    const old_cursor = self.screen.cursor;
+    self.screen.cursor = .{};
+    self.screen.pending_wrap = false;
+    self.screen.last_print = null;
+    markCursorMoveDirty(self, old_cursor, self.screen.cursor);
     self.dirty = core.fullDirty(self.size);
 }
 
@@ -970,40 +985,40 @@ pub fn lineFeed(self: *TerminalCore) void {
     // 끄지만, scroll 분기(scrollRegionUp)는 그걸 안 거치므로 여기서 한 번에 끈다. 안 그러면
     // 마지막 행이 꽉 찬(pending_wrap) 상태에서 bare LF가 와도 플래그가 남아, 다음 printable
     // 글자가 또 한 줄 내려가(scroll) 직전 줄을 잃는다(이중 스크롤).
-    self.pending_wrap = false;
+    self.screen.pending_wrap = false;
     // 스크롤/이동으로 grapheme run이 끝난다 — 다음 combining mark가 옮겨진 셀에 붙지 않게.
     // (\n 경로는 writeCodepoint가 이미 끊지만 ESC D(IND)는 이 함수로 직행한다.)
-    self.last_print = null;
+    self.screen.last_print = null;
     // 커서가 scroll region 하단 margin이면 region을 위로 스크롤(커서는 그대로). 그 외엔 화면
     // 끝 전까지 한 줄 내려간다(region 위/아래 모두 동일). scrollRegionUp의 fullDirty가 커서
     // 행까지 다시 칠하므로 scroll 분기는 cursor-move diff가 따로 필요 없다.
-    if (self.cursor.row == self.scroll_bottom) {
+    if (self.screen.cursor.row == self.scroll_bottom) {
         scrollRegionUp(self);
         return;
     }
-    if (self.cursor.row + 1 < self.size.rows) {
-        const old_cursor = self.cursor;
-        self.cursor.row += 1;
-        markCursorMoveDirty(self, old_cursor, self.cursor);
+    if (self.screen.cursor.row + 1 < self.size.rows) {
+        const old_cursor = self.screen.cursor;
+        self.screen.cursor.row += 1;
+        markCursorMoveDirty(self, old_cursor, self.screen.cursor);
         // OSC 133 영역이 활성이면(프롬프트/입력/출력) 다음 행에 전파한다 — 여러 줄 프롬프트·출력이
         // 전부 같은 분류로 태깅된다. unknown 상태에선 기존 태그를 지우지 않는다(분류 보존).
-        if (self.semantic_state != .unknown) self.screen.prompt_marks[self.cursor.row] = .{ .kind = self.semantic_state };
+        if (self.semantic_state != .unknown) self.screen.prompt_marks[self.screen.cursor.row] = .{ .kind = self.semantic_state };
     }
 }
 
 /// RI(ESC M): 커서를 한 줄 올리고, scroll region 상단 margin이면 region을 아래로 스크롤한다.
 pub fn reverseIndex(self: *TerminalCore) void {
     if (self.size.rows == 0) return;
-    self.pending_wrap = false;
-    self.last_print = null; // IND와 동일 — 스크롤/이동으로 grapheme run 종료
-    if (self.cursor.row == self.scroll_top) {
+    self.screen.pending_wrap = false;
+    self.screen.last_print = null; // IND와 동일 — 스크롤/이동으로 grapheme run 종료
+    if (self.screen.cursor.row == self.scroll_top) {
         scrollRegionDown(self);
         return;
     }
-    if (self.cursor.row > 0) {
-        const old_cursor = self.cursor;
-        self.cursor.row -= 1;
-        markCursorMoveDirty(self, old_cursor, self.cursor);
+    if (self.screen.cursor.row > 0) {
+        const old_cursor = self.screen.cursor;
+        self.screen.cursor.row -= 1;
+        markCursorMoveDirty(self, old_cursor, self.screen.cursor);
     }
 }
 
@@ -1070,7 +1085,7 @@ pub fn scrollRangeUp(self: *TerminalCore, top: u16, bottom: u16, count: u16, pus
         // 베이스: xterm.js getNullCell이 erase 속성(fg+bg)을 carry — 우리도 full pen을 carry(default pen이면
         // 기존과 동일한 default blank). Ghostty는 bgCell()로 배경만 좁히는데, 우리는 EL/ED와의 내부 일관성을
         // 위해 full pen으로 통일한다(bg-only 정제는 후속). 색 배경 화면이 스크롤될 때 빈 줄이 그 색을 잇는다.
-        @memset(self.screen.cells[blank_start .. blank_start + self.size.cols], .{ .style = self.pen });
+        @memset(self.screen.cells[blank_start .. blank_start + self.size.cols], .{ .style = self.screen.pen });
         self.screen.wrapped[blank_row] = false;
         self.screen.prompt_marks[blank_row] = .{ .kind = if (lf_scroll) self.semantic_state else .unknown };
     }
@@ -1111,7 +1126,7 @@ pub fn scrollRangeDown(self: *TerminalCore, top: u16, bottom: u16, count: u16) v
     while (blank_row < top + n) : (blank_row += 1) {
         const blank_start = self.index(blank_row, 0);
         // BCE: 아래로 밀며 생기는 빈 줄(RI/IL)도 현재 pen 배경으로 채운다(scrollRangeUp과 같은 규칙).
-        @memset(self.screen.cells[blank_start .. blank_start + self.size.cols], .{ .style = self.pen });
+        @memset(self.screen.cells[blank_start .. blank_start + self.size.cols], .{ .style = self.screen.pen });
         self.screen.wrapped[blank_row] = false;
         self.screen.prompt_marks[blank_row] = .{}; // 삽입된 빈 행은 비분류(잔여 태그 → 헛 거터 방지)
     }
@@ -1127,21 +1142,21 @@ pub fn scrollRangeDown(self: *TerminalCore, top: u16, bottom: u16, count: u16) v
 /// 줄은 버려진다. 커서가 scroll region 밖이면 무시. 후처리로 커서를 행 첫 칸으로 옮긴다(CR —
 /// xterm/DEC 동작). vim이 줄 열기/삭제를 전체 redraw 없이 하는 핵심 시퀀스.
 pub fn insertLines(self: *TerminalCore, count: u16) void {
-    if (self.cursor.row < self.scroll_top or self.cursor.row > self.scroll_bottom) return;
-    scrollRangeDown(self, self.cursor.row, self.scroll_bottom, count);
-    self.pending_wrap = false;
-    self.cursor.col = 0;
-    self.last_print = null;
+    if (self.screen.cursor.row < self.scroll_top or self.screen.cursor.row > self.scroll_bottom) return;
+    scrollRangeDown(self, self.screen.cursor.row, self.scroll_bottom, count);
+    self.screen.pending_wrap = false;
+    self.screen.cursor.col = 0;
+    self.screen.last_print = null;
 }
 
 /// DL(CSI Ps M): 커서 행부터 n줄을 삭제한다. 아래 줄들이 올라오고 region 하단에 빈 줄이 생긴다.
 /// 삭제된 줄은 history가 아니다(스크롤백에 안 넣음). 커서가 region 밖이면 무시, 후처리 CR.
 pub fn deleteLines(self: *TerminalCore, count: u16) void {
-    if (self.cursor.row < self.scroll_top or self.cursor.row > self.scroll_bottom) return;
-    scrollRangeUp(self, self.cursor.row, self.scroll_bottom, count, false);
-    self.pending_wrap = false;
-    self.cursor.col = 0;
-    self.last_print = null;
+    if (self.screen.cursor.row < self.scroll_top or self.screen.cursor.row > self.scroll_bottom) return;
+    scrollRangeUp(self, self.screen.cursor.row, self.scroll_bottom, count, false);
+    self.screen.pending_wrap = false;
+    self.screen.cursor.col = 0;
+    self.screen.last_print = null;
 }
 
 /// DECSTBM(CSI Pt ; Pb r): scroll region을 설정한다. 1-indexed, 기본 Pt=1·Pb=rows. region 안으로
@@ -1154,11 +1169,11 @@ pub fn setScrollRegion(self: *TerminalCore) void {
     if (top >= bottom or bottom >= rows) return; // 2행 미만이면 무시
     self.scroll_top = top;
     self.scroll_bottom = bottom;
-    const old_cursor = self.cursor;
+    const old_cursor = self.screen.cursor;
     // DECSTBM 후 커서를 origin home으로 — DECOM이면 region 상단, 아니면 화면 좌상단(xterm 동작).
-    self.cursor = .{ .row = if (self.origin_mode) self.scroll_top else 0, .col = 0 };
-    self.pending_wrap = false;
-    markCursorMoveDirty(self, old_cursor, self.cursor);
+    self.screen.cursor = .{ .row = if (self.origin_mode) self.scroll_top else 0, .col = 0 };
+    self.screen.pending_wrap = false;
+    markCursorMoveDirty(self, old_cursor, self.screen.cursor);
 }
 
 // ── alt screen + saved cursor (화면 전환·커서 저장/복원) ─────────────────────────────────────────
@@ -1175,9 +1190,9 @@ fn activeSavedCursor(self: *TerminalCore) *core.SavedCursor {
 
 pub fn saveCursorState(self: *TerminalCore) void {
     activeSavedCursor(self).* = .{
-        .cursor = self.cursor,
-        .pen = self.pen,
-        .pending_wrap = self.pending_wrap,
+        .cursor = self.screen.cursor,
+        .pen = self.screen.pen,
+        .pending_wrap = self.screen.pending_wrap,
     };
 }
 
@@ -1186,30 +1201,27 @@ pub fn restoreCursorState(self: *TerminalCore) void {
 }
 
 fn restoreFromSlot(self: *TerminalCore, slot: core.SavedCursor) void {
-    const old_cursor = self.cursor;
-    self.cursor = .{
+    const old_cursor = self.screen.cursor;
+    self.screen.cursor = .{
         .row = @min(slot.cursor.row, self.size.rows - 1),
         .col = @min(slot.cursor.col, self.size.cols - 1),
     };
-    self.pen = slot.pen;
-    markCursorMoveDirty(self, old_cursor, self.cursor);
+    self.screen.pen = slot.pen;
+    markCursorMoveDirty(self, old_cursor, self.screen.cursor);
     // markCursorMoveDirty가 deferred autowrap을 무효화(pending_wrap=false)하므로, 저장된 pending_wrap은
     // 그 '뒤'에 복원한다 — 줄 끝 deferred-wrap 상태에서 저장→복원하면 복원이 즉시 덮어써지던 버그
     // (DECSC/DECRC·CSI s/u가 공유하는 restoreFromSlot, code review).
-    self.pending_wrap = slot.pending_wrap;
-    self.last_print = null;
+    self.screen.pending_wrap = slot.pending_wrap;
+    self.screen.last_print = null;
 }
 
-/// alt screen으로 전환한다. primary 화면(grid+스크롤백)을 `saved_screen`으로 통째 옮기고(struct swap) 빈 alt
-/// 버퍼를 만든다(1049는 들어가며 clear — TUI가 어차피 전체를 그린다). 할당 실패면 전환하지 않는다(primary
-/// 유지가 안전 — 커서 저장도 grid 세 할당이 성공한 뒤에 해 실패가 부작용 없게 한다).
-/// 1049의 커서 저장은 이미 alt여도 수행한다(xterm: "unconditionally saves the cursor").
-pub fn enterAltScreen(self: *TerminalCore, save_cursor: bool) void {
-    if (self.alt_active) {
-        // 화면은 이미 alt지만 1049h의 커서 저장 의미는 유지한다(중첩 멀티플렉서/SIGCONT 재초기화).
-        if (save_cursor) saveCursorState(self);
-        return;
-    }
+/// alt screen으로 전환한다. primary 화면(grid+스크롤백+커서 클러스터)을 `saved_screen`으로 통째 옮기고(struct
+/// swap) 빈 alt 버퍼를 만든다. 커서가 화면에 귀속되므로(per-screen, §10.8) primary 커서는 swap으로 보관되고
+/// alt는 home(0,0)에서 시작한다 — 별도 커서 저장 로직이 필요 없다(47/1047/1049 동일 진입). 할당 실패면 전환하지
+/// 않는다(primary 유지가 안전 — grid 세 할당이 성공한 뒤에야 상태를 바꿔 OOM이 부작용 없게).
+/// 이미 alt면 no-op이다(§10.8.4 #4 — 옛 1049h "unconditionally saves the cursor"는 단일-커서 모델 유물).
+pub fn enterAltScreen(self: *TerminalCore) void {
+    if (self.alt_active) return;
 
     const alt_cells = self.allocator.alloc(types.Cell, core.cellCount(self.size)) catch return;
     @memset(alt_cells, .{});
@@ -1225,10 +1237,10 @@ pub fn enterAltScreen(self: *TerminalCore, save_cursor: bool) void {
     };
     @memset(alt_prompt_marks, .{});
 
-    // 세 할당이 성공한 뒤에야 상태를 바꾼다(OOM 경로가 저장 슬롯을 오염시키지 않게).
-    if (save_cursor) saveCursorState(self); // primary 슬롯(아직 alt_active=false)
-    // primary 화면(grid+스크롤백)을 통째로 보관 슬롯으로 옮기고, alt는 새 빈 grid + cap=0 빈 스크롤백(Screen 기본)을
-    // 쓴다. alt 출력은 history에 안 쌓이고(pushScrollback 무동작), sb.count가 0이라 스크롤 뷰·스크롤바·검색이
+    // 세 할당이 성공한 뒤에야 상태를 바꾼다(OOM 경로가 보관 슬롯을 오염시키지 않게).
+    // primary 화면(grid+스크롤백+커서 클러스터)을 통째로 보관 슬롯으로 옮기고, alt는 새 빈 grid + cap=0 빈
+    // 스크롤백 + home 커서(Screen 기본: cursor=.{}, pen=.{}, pending_wrap=false, last_print=null)를 쓴다.
+    // alt 출력은 history에 안 쌓이고(pushScrollback 무동작), sb.count가 0이라 스크롤 뷰·스크롤바·검색이
     // by-construction으로 잠긴다("alt엔 스크롤백 없음"이 타입으로 보장). alt 화면은 셸 프롬프트 의미가 없어
     // prompt_marks는 전부 .unknown이다. 보던 과거를 닫고 선택도 해제한다(활성 cells가 alt로 바뀌어 abs 좌표가
     // 다른 내용을 가리키므로 — xterm.js도 버퍼 전환 시 선택 해제).
@@ -1239,35 +1251,28 @@ pub fn enterAltScreen(self: *TerminalCore, save_cursor: bool) void {
     self.view_offset = 0;
     self.invalidateSelection();
     self.pen_link = 0; // OSC 8 링크는 화면에 스코프된다 — 전환 시 닫는다(Ghostty endHyperlink)
-    self.pending_wrap = false;
-    self.last_print = null;
     self.dirty = core.fullDirty(self.size);
 }
 
-/// primary screen으로 복귀한다. alt 버퍼를 버리고 saved 그리드를 복원한다. 1049는 커서도
-/// primary 슬롯에서 복원해 vim 종료 시 프롬프트가 원래 자리로 돌아온다 — alt 안에서 TUI가
-/// ESC 7/8을 써도(alt 슬롯) 셸 커서는 안전하다. 1049l의 커서 복원은 이미 primary여도
-/// 수행한다(xterm 동작 — 방어적 `\e[?1049l` 정리 스크립트 호환).
-pub fn leaveAltScreen(self: *TerminalCore, restore_cursor: bool) void {
-    if (!self.alt_active) {
-        if (restore_cursor) restoreFromSlot(self, self.saved_cursor_primary);
-        return;
-    }
+/// primary screen으로 복귀한다. alt 버퍼를 버리고 보관해 둔 primary Screen(grid+스크롤백+커서 클러스터)을
+/// 통째로 복원한다. 커서가 화면에 귀속되므로(per-screen, §10.8) primary 커서·pen·deferred-wrap 상태가 swap으로
+/// 한 번에 돌아온다 — vim 종료 시 프롬프트가 떠났던 자리로 복귀하고, alt 안에서 TUI가 커서를 어떻게 옮겼든 셸
+/// 커서는 안전하다(47/1047/1049 동일 — 옛 1047의 "복원 안 함"은 단일-커서 모델 유물, §10.8.4 #2).
+/// 이미 primary면 no-op이다(§10.8.4 #4).
+pub fn leaveAltScreen(self: *TerminalCore) void {
+    if (!self.alt_active) return;
     // alt 화면(grid+빈 스크롤백)을 해제하고 보관해 둔 primary Screen을 통째로 복원한다 — grid·스크롤백
-    // (ring·count·cap·rewrap 마크)이 한 번에 돌아온다. alt의 sb는 빈 인스턴스라 deinit은 보통 no-op.
+    // (ring·count·cap·rewrap 마크)·커서가 한 번에 돌아온다. alt의 sb는 빈 인스턴스라 deinit은 보통 no-op.
     self.allocator.free(self.screen.cells);
     self.allocator.free(self.screen.wrapped);
     if (self.screen.prompt_marks.len > 0) self.allocator.free(self.screen.prompt_marks);
     self.screen.sb.deinit(self.allocator); // alt의 빈 스크롤백 해제(보통 ring 미할당 — no-op)
-    self.screen = self.saved_screen; // primary 화면(grid+스크롤백) 통째 복원
+    self.screen = self.saved_screen; // primary 화면(grid+스크롤백+커서) 통째 복원
     self.saved_screen = .{};
     self.semantic_state = .unknown; // primary 복귀 — 진행 중 영역을 이어받지 않는다(다음 프롬프트가 재마킹)
     self.alt_active = false;
-    self.pending_wrap = false;
-    self.last_print = null;
     self.pen_link = 0; // 화면 전환 — 열린 링크를 닫는다(Ghostty endHyperlink)
     self.invalidateSelection(); // primary 복귀 — 활성 cells가 다시 바뀌므로 선택 해제
-    if (restore_cursor) restoreFromSlot(self, self.saved_cursor_primary);
     self.dirty = core.fullDirty(self.size);
 }
 
@@ -1279,14 +1284,14 @@ pub fn leaveAltScreen(self: *TerminalCore, restore_cursor: bool) void {
 pub fn writeCodepoint(self: *TerminalCore, codepoint: u21) void {
     switch (codepoint) {
         '\r' => {
-            const old_cursor = self.cursor;
-            self.cursor.col = 0;
-            markCursorMoveDirty(self, old_cursor, self.cursor);
-            self.last_print = null;
+            const old_cursor = self.screen.cursor;
+            self.screen.cursor.col = 0;
+            markCursorMoveDirty(self, old_cursor, self.screen.cursor);
+            self.screen.last_print = null;
         },
         '\n' => {
             lineFeed(self);
-            self.last_print = null;
+            self.screen.last_print = null;
         },
         '\t' => writeTab(self),
         0x07 => self.bell_pending = true, // BEL: 시스템 벨 요청(platform이 drain — NSSound.beep)
@@ -1300,10 +1305,10 @@ pub fn writeCodepoint(self: *TerminalCore, codepoint: u21) void {
             // 그 친절이 셸 계산과 한 칸 어긋나 지우기 공백이 프롬프트를 침범했다(라이브
             // 한글 삭제에서 실제 발생). continuation 위에 선 커서의 다음 쓰기는
             // clearCellForWrite가 base/continuation을 정리하므로 안전하다.
-            const old_cursor = self.cursor;
-            if (self.cursor.col > 0) self.cursor.col -= 1;
-            markCursorMoveDirty(self, old_cursor, self.cursor);
-            self.last_print = null;
+            const old_cursor = self.screen.cursor;
+            if (self.screen.cursor.col > 0) self.screen.cursor.col -= 1;
+            markCursorMoveDirty(self, old_cursor, self.screen.cursor);
+            self.screen.last_print = null;
         },
         else => {
             if (codepoint < 0x20) return;
@@ -1340,7 +1345,7 @@ pub fn writeCodepoint(self: *TerminalCore, codepoint: u21) void {
             // 셀마다 흩어지고 폭이 음절당 2배가 된다(초성만 wide). mode 2027과 무관하게 적용한다:
             // macOS 파일명(NFD)을 내는 `ls`는 grapheme cluster mode를 켜지 않기 때문이다(설계 §4.7).
             // extendsCluster는 폭≠0 글자에 대해선 한글 L/V/T 연쇄에서만 true라 다른 문자는 안 묶인다.
-            if (self.last_print) |last| {
+            if (self.screen.last_print) |last| {
                 const last_cell = self.screen.cells[self.index(last.row, last.col)];
                 if (grapheme.extendsCluster(trailingClusterCp(self, last_cell), cp)) {
                     appendClusterCodepoint(self, cp);
@@ -1357,33 +1362,33 @@ pub fn putCell(self: *TerminalCore, codepoint: u21) void {
     // deferred autowrap: 직전 글자가 마지막 칸을 채웠으면(pending_wrap), 이 글자를 그리기
     // 전에 다음 줄 첫 칸으로 넘긴다(바닥이면 scroll). 이렇게 다음 글자 시점에 wrap해야 줄을
     // 정확히 채운 마지막 글자마다 빈 줄이 끼지 않는다(표준 VT 동작, zsh prompt 등이 의존).
-    if (self.pending_wrap) {
+    if (self.screen.pending_wrap) {
         // 다음 줄로 넘긴다. lineFeed가 pending_wrap을 끈다. 이 행은 autowrap으로 다음 줄로 이어지는
         // soft-wrap이다(reflow가 이 플래그로 잇는다). soft-wrap 플래그는 lineFeed '후'에 세운다 — 커서가
         // scroll_bottom이라 lineFeed가 scroll이면 scrollRangeUp의 경계 fixup이 lineFeed 전에 세운
         // wrapped를 지우기 때문이다(promoteLastToEmojiWidth와 같은 이유). scroll 여부와 무관하게 "직전
         // 줄(row-1)이 이 줄로 이어진다"를 정확히 남긴다.
-        self.cursor.col = 0;
+        self.screen.cursor.col = 0;
         lineFeed(self);
-        if (self.cursor.row > 0) self.screen.wrapped[self.cursor.row - 1] = true;
+        if (self.screen.cursor.row > 0) self.screen.wrapped[self.screen.cursor.row - 1] = true;
     }
-    if (self.cursor.col >= self.size.cols) self.cursor.col = self.size.cols - 1;
-    if (self.cursor.row >= self.size.rows) self.cursor.row = self.size.rows - 1;
+    if (self.screen.cursor.col >= self.size.cols) self.screen.cursor.col = self.size.cols - 1;
+    if (self.screen.cursor.row >= self.size.rows) self.screen.cursor.row = self.size.rows - 1;
 
     const cell_width: u2 = width.cellWidthAmbiguous(codepoint, self.ambiguous_wide);
     // wide glyph(2칸)가 줄 끝(마지막 칸, 1칸만 남음)에 안 들어가면 통째로 다음 줄로 넘긴다
     // (이전 줄 마지막 칸은 빈칸으로 남는다). grid는 항상 cols>=2라(clampGridSize) 넘긴 뒤엔
     // 반드시 들어가므로, 칸을 줄이는 degrade 없이 그대로 width 2로 쓴다.
-    if (cell_width == 2 and self.cursor.col + 1 >= self.size.cols) {
+    if (cell_width == 2 and self.screen.cursor.col + 1 >= self.size.cols) {
         // wide glyph를 통째로 다음 줄로 넘긴다 — 직전 줄이 이 줄로 이어지는 soft-wrap이다. 플래그는 위
         // pending_wrap과 같은 이유로 lineFeed '후'에 세운다(scroll 시 scrollRangeUp fixup이 지우지 않게).
-        self.cursor.col = 0;
+        self.screen.cursor.col = 0;
         lineFeed(self);
-        if (self.cursor.row > 0) self.screen.wrapped[self.cursor.row - 1] = true;
+        if (self.screen.cursor.row > 0) self.screen.wrapped[self.screen.cursor.row - 1] = true;
     }
 
-    const row = self.cursor.row;
-    const col = self.cursor.col;
+    const row = self.screen.cursor.row;
+    const col = self.screen.cursor.col;
     // G6 IRM(insert mode): 켜져 있으면 쓰기 전에 커서 위치에 cell_width칸을 삽입(오른쪽 밀기) — 덮어쓰기 대신
     // 삽입이 된다. insertChars가 커서는 안 옮기고 줄만 민다.
     if (self.insert_mode) insertChars(self, cell_width);
@@ -1396,37 +1401,37 @@ pub fn putCell(self: *TerminalCore, codepoint: u21) void {
 
     self.screen.cells[self.index(row, col)] = .{
         .codepoint = codepoint,
-        .style = self.pen,
+        .style = self.screen.pen,
         .width = cell_width,
         .link = self.pen_link,
     };
     if (cell_width == 2) {
         self.screen.cells[self.index(row, col + 1)] = .{
-            .style = self.pen,
+            .style = self.screen.pen,
             .width = 0,
             .continuation = true,
             .link = self.pen_link,
         };
     }
-    self.last_print = .{ .row = row, .col = col };
-    self.last_printed_cp = codepoint; // G5 REP: 직전 출력 글자 추적
-    markDirty(self, self.cursor.row);
+    self.screen.last_print = .{ .row = row, .col = col };
+    self.screen.last_printed_cp = codepoint; // G5 REP: 직전 출력 글자 추적
+    markDirty(self, self.screen.cursor.row);
 
-    if (self.cursor.col + cell_width < self.size.cols) {
-        self.cursor.col += cell_width;
+    if (self.screen.cursor.col + cell_width < self.size.cols) {
+        self.screen.cursor.col += cell_width;
     } else {
         // 마지막 칸을 채웠다. autowrap(DECAWM)이 켜져 있으면 커서를 마지막 칸에 두고 pending_wrap을 세워
         // 다음 printable 글자가 먼저 다음 줄로 넘어가게 한다(deferred autowrap). off(?7l)면 wrap 없이
         // 마지막 칸에 머물러 다음 글자가 그 칸을 덮어쓴다(G8).
-        self.cursor.col = self.size.cols - 1;
-        if (self.autowrap) self.pending_wrap = true;
+        self.screen.cursor.col = self.size.cols - 1;
+        if (self.autowrap) self.screen.pending_wrap = true;
     }
 }
 
 /// grapheme(VS16/RI 페어 등)이 붙은 직전 base 셀을 width 1 -> 2로 승격한다(이미 2면 무시).
 /// mode 2027 또는 emoji_wide(text.emoji-width=wide)에서 호출된다 — 둘 다 이모지를 2칸으로 보는 상태다.
 fn promoteLastToEmojiWidth(self: *TerminalCore) void {
-    const last = self.last_print orelse return;
+    const last = self.screen.last_print orelse return;
     const base_idx = self.index(last.row, last.col);
     if (self.screen.cells[base_idx].width == 2) return; // 이미 wide
 
@@ -1437,9 +1442,9 @@ fn promoteLastToEmojiWidth(self: *TerminalCore) void {
         const base = self.screen.cells[base_idx];
         self.screen.cells[base_idx] = .{}; // 이전 줄 마지막 칸은 빈칸으로
         markDirty(self, last.row);
-        self.cursor.col = 0;
+        self.screen.cursor.col = 0;
         lineFeed(self);
-        const row = self.cursor.row;
+        const row = self.screen.cursor.row;
         // soft-wrap 플래그는 lineFeed '후'에 세운다. lineFeed가 scroll(커서가 scroll_bottom)일
         // 때 scrollRangeUp의 경계 fixup이 lineFeed 전에 세운 wrapped를 지우기 때문이다 —
         // scroll 여부와 무관하게 "이전 줄(row-1)이 이 이모지 줄로 이어진다"를 정확히 남긴다.
@@ -1448,14 +1453,14 @@ fn promoteLastToEmojiWidth(self: *TerminalCore) void {
         self.screen.cells[self.index(row, 0)] = base;
         self.screen.cells[self.index(row, 0)].width = 2;
         self.screen.cells[self.index(row, 1)] = wideContinuationCell(base.style, base.link);
-        self.last_print = .{ .row = row, .col = 0 };
+        self.screen.last_print = .{ .row = row, .col = 0 };
         markDirty(self, row);
         if (2 < self.size.cols) {
-            self.cursor.col = 2;
-            self.pending_wrap = false;
+            self.screen.cursor.col = 2;
+            self.screen.pending_wrap = false;
         } else {
-            self.cursor.col = self.size.cols - 1;
-            self.pending_wrap = true;
+            self.screen.cursor.col = self.size.cols - 1;
+            self.screen.pending_wrap = true;
         }
         return;
     }
@@ -1464,13 +1469,13 @@ fn promoteLastToEmojiWidth(self: *TerminalCore) void {
     self.screen.cells[self.index(last.row, last.col + 1)] = wideContinuationCell(self.screen.cells[base_idx].style, self.screen.cells[base_idx].link);
     markDirty(self, last.row);
     // 커서가 base 바로 뒤(width-1 전진 위치)면 2칸짜리로 한 칸 더 민다.
-    if (self.cursor.row == last.row and self.cursor.col == last.col + 1) {
+    if (self.screen.cursor.row == last.row and self.screen.cursor.col == last.col + 1) {
         if (last.col + 2 < self.size.cols) {
-            self.cursor.col = last.col + 2;
-            self.pending_wrap = false;
+            self.screen.cursor.col = last.col + 2;
+            self.screen.pending_wrap = false;
         } else {
-            self.cursor.col = self.size.cols - 1;
-            self.pending_wrap = true;
+            self.screen.cursor.col = self.size.cols - 1;
+            self.screen.pending_wrap = true;
         }
     }
 }
@@ -1483,7 +1488,7 @@ fn attachCombiningMark(self: *TerminalCore, codepoint: u21) void {
     // feed (cursor sat over a blank cell on the new row). With no base on
     // the current run (stream start, or right after CR/LF), the mark has
     // nothing to attach to and is dropped.
-    const last = self.last_print orelse return;
+    const last = self.screen.last_print orelse return;
     const idx = self.index(last.row, last.col);
     var cell = self.screen.cells[idx];
     // 무손실 저장(HG2b): 둘째 mark부터 grapheme_store에 누적한다 — 예전엔 단일 combining 슬롯이라
@@ -1517,7 +1522,7 @@ fn trailingClusterCp(self: *const TerminalCore, cell: types.Cell) u21 {
 /// 단일 결합과 같은 0 비용), 둘째 extra부터 grapheme_store로 승격해 무손실로 담는다. combining은
 /// 첫 extra의 잠정 그림자로 유지된다(렌더 back-compat — HG2b에서 제거). OOM이면 그 자모만 떨군다.
 fn appendClusterCodepoint(self: *TerminalCore, cp: u21) void {
-    const last = self.last_print orelse return;
+    const last = self.screen.last_print orelse return;
     const idx = self.index(last.row, last.col);
     var cell = self.screen.cells[idx];
     if (cell.grapheme_id != 0) {
@@ -1683,12 +1688,19 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
         self.size = next_size;
         self.scroll_top = 0;
         self.scroll_bottom = new_rows - 1;
-        self.cursor.row = @min(self.cursor.row, new_rows - 1);
-        self.cursor.col = @min(self.cursor.col, new_cols - 1);
+        self.screen.cursor.row = @min(self.screen.cursor.row, new_rows - 1);
+        self.screen.cursor.col = @min(self.screen.cursor.col, new_cols - 1);
+        // 보관된 primary 커서(saved_screen)도 새 크기로 clamp한다 — 커서가 화면 귀속(per-screen, §10.8)이라
+        // leaveAltScreen이 이걸 통째로 복원하므로, 안 하면 축소 후 복귀 시 OOB 커서가 살아난다.
+        self.saved_screen.cursor.row = @min(self.saved_screen.cursor.row, new_rows - 1);
+        self.saved_screen.cursor.col = @min(self.saved_screen.cursor.col, new_cols - 1);
         clampSavedCursor(&self.saved_cursor_primary, next_size);
         clampSavedCursor(&self.saved_cursor_alt, next_size);
-        self.pending_wrap = false;
-        self.last_print = null;
+        self.screen.pending_wrap = false;
+        self.screen.last_print = null;
+        // 보관 primary의 deferred-wrap·combining 앵커도 무효화(resize는 reflow라 활성 화면과 동일 처리).
+        self.saved_screen.pending_wrap = false;
+        self.saved_screen.last_print = null;
         // CSI 파서 상태/UTF-8 꼬리는 유지(아래 일반 경로와 동일한 이유).
         self.dirty = core.fullDirty(next_size);
         rebuildTabstops(self, old_cols); // 탭스톱을 새 cols에 맞춘다(겹침 보존·새 열 8칸 기본).
@@ -1750,9 +1762,9 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
     // SIGWINCH로 직접 다시 그린다(xterm.js의 reflowCursorLine=false 기본 동작). 커서가 있는 줄을
     // 재배치하면 커서가 옮겨져, 옛 폭 기준으로 상대 이동(\e[A)하는 셸 redraw가 어긋나 프롬프트가
     // 중복된다. 그 줄은 셸이 알아서 새 폭으로 다시 그리므로 건드리지 않는 게 안전하다.
-    var cur_start: u16 = self.cursor.row;
+    var cur_start: u16 = self.screen.cursor.row;
     while (cur_start > 0 and self.screen.wrapped[cur_start - 1]) cur_start -= 1;
-    var cur_end: u16 = self.cursor.row;
+    var cur_end: u16 = self.screen.cursor.row;
     while (cur_end + 1 < old_rows and self.screen.wrapped[cur_end]) cur_end += 1;
 
     var old_r: u16 = 0;
@@ -1773,9 +1785,9 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
                 clearTruncatedWideBase(scratch[dst0..][0..new_cols]);
                 swrap[out_rows] = self.screen.wrapped[r];
                 pmarks[out_rows] = self.screen.prompt_marks[r]; // 커서 줄은 verbatim — 태그도 1:1 보존
-                if (r == self.cursor.row) {
+                if (r == self.screen.cursor.row) {
                     cursor_out_row = out_rows;
-                    cursor_out_col = @min(self.cursor.col, new_cols - 1);
+                    cursor_out_col = @min(self.screen.cursor.col, new_cols - 1);
                 }
                 out_rows += 1;
             }
@@ -1893,11 +1905,11 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
     // 커서 재배치: 기록한 출력 위치에서 스크롤아웃된 행 수를 빼고 grid 안으로 clamp.
     if (cursor_out_row) |cr_raw| {
         const r = cr_raw -| drop;
-        self.cursor.row = @intCast(@min(r, @as(usize, new_rows - 1)));
-        self.cursor.col = @min(cursor_out_col, new_cols - 1);
+        self.screen.cursor.row = @intCast(@min(r, @as(usize, new_rows - 1)));
+        self.screen.cursor.col = @min(cursor_out_col, new_cols - 1);
     } else {
-        self.cursor.row = @min(self.cursor.row, new_rows - 1);
-        self.cursor.col = @min(self.cursor.col, new_cols - 1);
+        self.screen.cursor.row = @min(self.screen.cursor.row, new_rows - 1);
+        self.screen.cursor.col = @min(self.screen.cursor.col, new_cols - 1);
     }
 
     // 스크롤 위치는 유지한다(과거를 보는 중이었으면 위의 anchored 재-wrap이 offset을 새 행
@@ -1908,8 +1920,8 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
     // partial UTF-8 꼬리는 grid와 무관한 바이트 스트림 상태라 유지한다 — 리셋하면 PTY read
     // 경계로 쪼개진 시퀀스 한가운데에 resize가 끼었을 때 꼬리 바이트가 글자로 새고 SGR이
     // 유실된다(xterm도 resize에 파서를 리셋하지 않는다).
-    self.last_print = null;
-    self.pending_wrap = false;
+    self.screen.last_print = null;
+    self.screen.pending_wrap = false;
 }
 
 // ── snapshot / viewport 합성 (렌더 출력) ────────────────────────────────────────────────────────
@@ -1920,7 +1932,7 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
 // viewport 접근자(viewportRow/viewportRowPrompt)는 core 잔류 — self.X(pub)로 호출한다.
 
 pub fn snapshot(self: *const TerminalCore) types.RenderSnapshot {
-    var cursor = self.cursor;
+    var cursor = self.screen.cursor;
     cursor.visible = cursor.visible and self.cursor_visible; // DECTCEM(?25l)이면 숨김
     return .{
         .size = self.size,
@@ -2044,8 +2056,8 @@ fn snapshotWithPreedit(self: *TerminalCore, preedit_bytes: []const u8) types.Ren
     @memcpy(self.viewport_cells, self.screen.cells[0..needed]);
 
     const cols = self.size.cols;
-    const row = self.cursor.row;
-    const cursor_col = self.cursor.col;
+    const row = self.screen.cursor.row;
+    const cursor_col = self.screen.cursor.col;
 
     // 잘못된 UTF-8이면 표시만 포기. 동시에 조합 폭(셀 수)을 미리 합산한다 — 삽입형 시프트가
     // '뒤 글자를 얼마나 밀지' 결정하려면 전체 폭이 먼저 필요하다.
@@ -2088,7 +2100,7 @@ fn snapshotWithPreedit(self: *TerminalCore, preedit_bytes: []const u8) types.Ren
         }
     }
     var draw_col = cursor_col;
-    drawPreeditCells(self.pen, preedit_bytes, row_cells, &draw_col, self.ambiguous_wide);
+    drawPreeditCells(self.screen.pen, preedit_bytes, row_cells, &draw_col, self.ambiguous_wide);
     clearTruncatedWideBase(row_cells); // 시프트/잘림으로 끝칸에 wide base만 남으면 정리
 
     return .{

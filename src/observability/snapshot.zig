@@ -42,7 +42,10 @@ fn writeRows(writer: *std.Io.Writer, snapshot: terminal.RenderSnapshot) !void {
     for (0..snapshot.size.rows) |row| {
         try writer.print("row {d}: |", .{row});
         const row_start = index(snapshot.size, row, 0);
-        var codepoints: terminal.RowCodepoints = .{ .cells = snapshot.cells[row_start..][0..snapshot.size.cols] };
+        var codepoints: terminal.RowCodepoints = .{
+            .cells = snapshot.cells[row_start..][0..snapshot.size.cols],
+            .graphemes = snapshot.graphemes, // cluster 본체(NFD 한글 등)를 무손실로 직렬화
+        };
         while (codepoints.next()) |codepoint| try writeCodepoint(writer, codepoint);
         try writer.writeAll("|\n");
     }
@@ -66,6 +69,16 @@ fn writeCellMetadata(writer: *std.Io.Writer, snapshot: terminal.RenderSnapshot) 
                 try writer.print("U+{X:0>4}", .{combining});
             } else {
                 try writer.writeAll("none");
+            }
+            // 다중 코드포인트 cluster(NFD 한글 등)는 store 본체 전체를 추가로 적어 무손실로 만든다
+            // (combining은 첫 extra의 그림자라 그것만으론 손실). grapheme_id가 0이면 줄을 안 바꿔
+            // 단일-combining 메타데이터 포맷을 유지한다(기존 테스트 불변).
+            if (cell.grapheme_id != 0 and cell.grapheme_id <= snapshot.graphemes.len) {
+                try writer.writeAll(" grapheme=");
+                for (snapshot.graphemes[cell.grapheme_id - 1], 0..) |cp, i| {
+                    if (i != 0) try writer.writeByte(',');
+                    try writer.print("U+{X:0>4}", .{cp});
+                }
             }
             try writer.writeByte('\n');
         }
@@ -231,5 +244,24 @@ test "terminal snapshot records wide and combining cell metadata" {
         u8,
         rendered,
         "cell row=0 col=3 codepoint=U+0065 width=1 continuation=false combining=U+0301\n",
+    ) != null);
+}
+
+test "terminal snapshot records an NFD Hangul cluster losslessly (grapheme store body)" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
+    defer core.deinit();
+
+    // NFD '한' = 초성 U+1112 + 중성 U+1161 + 종성 U+11AB. 한 셀(width 2)로 묶이고 중성·종성은
+    // grapheme_store 본체에 담긴다 — combining(첫 extra 그림자)만 적으면 종성이 손실되므로,
+    // 메타데이터가 grapheme=로 cluster 전체를 적어야 trace/replay가 무손실이다.
+    try core.write("\u{1112}\u{1161}\u{11AB}");
+
+    const rendered = try renderTerminalSnapshot(std.testing.allocator, core.snapshot());
+    defer std.testing.allocator.free(rendered);
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        rendered,
+        "cell row=0 col=0 codepoint=U+1112 width=2 continuation=false combining=U+1161 grapheme=U+1161,U+11AB\n",
     ) != null);
 }

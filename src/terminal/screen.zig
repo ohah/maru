@@ -329,3 +329,267 @@ pub fn lastCellIsLoneRegionalIndicator(self: *const TerminalCore) bool {
 pub fn wideContinuationCell(style: types.Style, link: u32) types.Cell {
     return .{ .style = style, .width = 0, .continuation = true, .link = link };
 }
+
+// ── 스크롤백 행 저장·재-wrap ─────────────────────────────────────────────────────────────────────
+// Scrollback ring에 행을 push하고, resize 시 새 폭으로 재-wrap하는 storage 로직(Scrollback struct와 짝).
+// accessor(scrollbackRow/scrollbackRowWrapped/scrollbackRowPrompt)와 absRow/absRowWrapped는 core 잔류
+// (facade·selection 공유 — 후속 accessor PR). 잔류 헬퍼(isBlankCell·clearTruncatedWideBase·invalidateSelection·
+// shiftCoordsForEviction)는 core가 pub로 노출, 여기선 self./core.TerminalCore로 호출한다.
+
+/// 스크롤백을 비운다(ED 3). 행 버퍼는 해제하고 ring 슬롯 배열은 유지해 다음 push가 재할당
+/// 없이 다시 쓴다. 뷰포트는 바닥으로 스냅한다(지워진 과거를 보고 있을 수 없으니).
+pub fn clearScrollback(self: *TerminalCore) void {
+    self.sb.freeSlots(self.allocator);
+    self.sb.head = 0;
+    self.sb.count = 0;
+    self.sb.rewrap_pending = false; // 비운 ring에 지연 재-wrap이 남을 이유 없다(상태 위생)
+    self.view_offset = 0;
+    self.invalidateSelection(); // 스크롤백을 지우면 abs 좌표가 무효 — 선택 해제(필드 주석의 약속)
+}
+
+/// 지연된 스크롤백 재-wrap을 지금 수행한다(있다면). 과거를 보는 경로(scrollViewport/
+/// renderSnapshot)가 진입할 때 불러, 뷰가 항상 현재 폭 기준의 행 수/내용을 보게 한다.
+pub fn ensureScrollbackRewrapped(self: *TerminalCore) void {
+    if (!self.sb.rewrap_pending) return;
+    self.sb.rewrap_pending = false;
+    rewrapScrollback(self, self.size.cols);
+}
+
+/// 스크롤백 전체를 새 폭으로 재-wrap한다(resize 시). 활성 화면 reflow와 같은 규칙을 ring에
+/// 적용한다: sb_wrapped로 논리 줄을 복원해 새 폭에 다시 자르고(hard 행 끝 빈칸은 trim, soft
+/// 행은 저장 폭 전체가 내용), wide glyph base가 행 끝에 안 들어가면 먼저 줄을 넘긴다. 재-wrap
+/// 행 수가 cap을 넘으면 가장 오래된 것부터 버린다. OOM이면 통째로 포기하고 기존 ring을
+/// 유지한다(best-effort — 잘못된 절반 상태보다 옛 폭 표시가 낫다).
+pub fn rewrapScrollback(self: *TerminalCore, new_cols: u16) void {
+    if (self.sb.count == 0 or new_cols == 0) return;
+    self.selectionClear(); // 행 좌표가 재배치된다 — 선택은 해제가 안전(다른 터미널도 동일)
+    _ = rewrapScrollbackInner(self, new_cols, null) catch null;
+}
+
+/// 보던 위치(옛 스크롤백 행 anchor)를 유지하며 재-wrap한다. 과거를 보는 중 resize가 오면
+/// 바닥으로 튕기지 않고, 그 행이 재-wrap 후 어느 행이 됐는지로 view_offset을 재계산한다
+/// (Ghostty/iTerm2처럼 보던 내용이 그대로 보이게).
+pub fn rewrapScrollbackAnchored(self: *TerminalCore, new_cols: u16, anchor_row: usize) void {
+    if (self.sb.count == 0 or new_cols == 0) return;
+    self.selectionClear(); // rewrapScrollback과 동일 — 좌표 재배치
+
+    const new_anchor = rewrapScrollbackInner(self, new_cols, anchor_row) catch {
+        // 재-wrap 실패(OOM): ring이 그대로이므로 offset도 그대로 유효하다.
+        return;
+    };
+    if (new_anchor) |row_index| {
+        // 뷰 최상단이 그 행을 다시 가리키게: viewportRow(0) = sb_count - view_offset.
+        self.view_offset = @min(self.sb.count - @min(row_index, self.sb.count), self.sb.count);
+    } else {
+        // 앵커 행이 cap 드랍으로 사라졌다 — 남은 가장 오래된 행(맨 위)으로.
+        self.view_offset = self.sb.count;
+    }
+}
+
+fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16, anchor_row: ?usize) !?usize {
+    // 1차 패스: 출력 행 수만 센다(할당/복사 없음). cap을 넘는 앞쪽(가장 오래된) 행들은 어차피
+    // 버려지므로 2차 패스에서 아예 생성하지 않는다 — 좁힘 재-wrap의 alloc 비용을 절반 가까이
+    // 줄인다(perf 게이트 scrollback_rewrap이 1회 비용을 잰다).
+    var total_out: usize = 0;
+    {
+        var i: usize = 0;
+        while (i < self.sb.count) {
+            var j = i;
+            while (j + 1 < self.sb.count and self.scrollbackRowWrapped(j)) j += 1;
+            total_out += countRewrapRows(self, i, j, new_cols);
+            i = j + 1;
+        }
+    }
+    // 물리적 ring.len으로 묶는다(cap이 아니라) — setCap이 cap과 ring.len을 항상 같게 유지하지만,
+    // 여기서 ring.len을 쓰면 cap이 어떤 경로로 ring보다 커져도 아래 ring[k] 쓰기가 OOB가 될 수 없다.
+    // rewrap은 count>0일 때만 오므로 ring은 항상 할당돼 있다.
+    const keep = @min(total_out, self.sb.ring.len);
+    const skip = total_out - keep; // 생성 없이 건너뛸 산출 행 수(가장 오래된 쪽)
+
+    var rows: std.ArrayList([]types.Cell) = .empty;
+    var wraps: std.ArrayList(bool) = .empty;
+    var pmarks: std.ArrayList(types.RowPrompt) = .empty; // 산출 행별 OSC 133 태그(rows와 병렬)
+    // 성공 경로에선 행 소유권이 ring으로 넘어가므로(items.len = 0으로 비움), 이 defer는
+    // 실패 경로에서만 만든 행들을 해제한다.
+    defer {
+        for (rows.items) |r| self.allocator.free(r);
+        rows.deinit(self.allocator);
+        wraps.deinit(self.allocator);
+        pmarks.deinit(self.allocator);
+    }
+    try rows.ensureTotalCapacity(self.allocator, keep);
+    try wraps.ensureTotalCapacity(self.allocator, keep);
+    try pmarks.ensureTotalCapacity(self.allocator, keep);
+
+    var emitted: usize = 0; // 전체 산출 행 인덱스(skip 비교용)
+    var anchor_out: ?usize = null; // anchor_row(옛 행)가 떨어진 새 행 인덱스(skip 반영 전)
+    var i: usize = 0;
+    while (i < self.sb.count) {
+        // 논리 줄 [i, j]: 연속된 soft-wrap 행 + 마지막 행.
+        var j = i;
+        while (j + 1 < self.sb.count and self.scrollbackRowWrapped(j)) j += 1;
+        // 줄의 마지막 산출 행이 물려받을 wrap 플래그: 논리 줄이 스크롤백의 끝을 넘어 활성
+        // 화면으로 이어지면(마지막 행의 sb_wrapped=true) 그 경계 연속성을 보존한다.
+        const tail_wrap = self.scrollbackRowWrapped(j);
+        // 논리 줄은 단일 OSC 133 분류다(lineFeed가 같은 영역을 전파). 분류(kind)는 이 줄의 모든
+        // 산출 행이 물려받아 재-wrap 후에도 정렬을 유지한다. 단 종료코드(exit)는 leader 한 행에만
+        // 스탬프되므로 줄의 '첫' 산출 행에만 둔다 — 안 그러면 거터 바가 여러 개로 보인다(코드리뷰 #1).
+        const line_tag = self.scrollbackRowPrompt(i);
+        var line_exit: ?i16 = line_tag.exit;
+
+        var cur: ?[]types.Cell = null;
+        errdefer if (cur) |c| self.allocator.free(c);
+        var oc: u16 = 0;
+
+        var r = i;
+        while (r <= j) : (r += 1) {
+            // 앵커 옛 행이 시작되는 시점의 산출 행이 "보던 줄"의 새 위치다(셀 단위 정밀도까지는
+            // 불필요 — 행 단위면 보던 내용이 화면 안에 유지된다).
+            if (anchor_row != null and r == anchor_row.?) anchor_out = emitted;
+            const src = self.scrollbackRow(r) orelse continue;
+            // soft 행은 저장 폭 전체가 내용(꽉 찼다는 뜻), hard(마지막) 행은 뒤 빈칸 trim.
+            const contrib: usize = if (r < j) src.len else trimmedLen(src);
+            var c: usize = 0;
+            while (c < contrib) : (c += 1) {
+                const cell = src[c];
+                const needs: u16 = if (cell.width == 2) 2 else 1;
+                if (oc + needs > new_cols) {
+                    if (cur) |full| {
+                        core.TerminalCore.clearTruncatedWideBase(full); // 마지막 칸의 잘린 wide base 정리(new_cols==1 등)
+                        rows.appendAssumeCapacity(full);
+                        wraps.appendAssumeCapacity(true);
+                        pmarks.appendAssumeCapacity(.{ .kind = line_tag.kind, .exit = line_exit });
+                        line_exit = null; // exit는 줄의 첫 산출 행에만
+                        cur = null;
+                    }
+                    emitted += 1;
+                    oc = 0;
+                }
+                // skip 범위를 지나서야 행 버퍼를 만든다(버려질 행은 셀 스캔만 하고 할당 생략).
+                if (cur == null and emitted >= skip) {
+                    cur = try self.allocator.alloc(types.Cell, new_cols);
+                    @memset(cur.?, .{});
+                }
+                if (cur) |dst| dst[oc] = cell;
+                oc += 1;
+            }
+        }
+        // 논리 줄의 마지막 행을 닫는다(내용이 전혀 없던 빈 줄도 한 행으로 보존).
+        if (cur == null and emitted >= skip) {
+            cur = try self.allocator.alloc(types.Cell, new_cols);
+            @memset(cur.?, .{});
+        }
+        if (cur) |last| {
+            core.TerminalCore.clearTruncatedWideBase(last);
+            rows.appendAssumeCapacity(last);
+            wraps.appendAssumeCapacity(tail_wrap);
+            pmarks.appendAssumeCapacity(.{ .kind = line_tag.kind, .exit = line_exit });
+            line_exit = null;
+            cur = null;
+        }
+        emitted += 1;
+        i = j + 1;
+    }
+
+    // 기존 ring 행을 비우고(슬롯 배열은 재사용) 새 행으로 채운다. ring이 아직 lazy 미할당이면
+    // sb.count==0이라 여기 못 온다(가드).
+    self.sb.freeSlots(self.allocator);
+    for (rows.items, 0..) |row_cells, k| {
+        self.sb.ring[k] = row_cells;
+        self.sb.wrapped[k] = wraps.items[k];
+        self.sb.prompt_marks[k] = pmarks.items[k]; // 재-wrap된 행과 정렬된 OSC 133 태그
+    }
+    self.sb.head = 0;
+    self.sb.count = rows.items.len;
+    // 소유권 이전 완료 — defer가 이중 해제하지 않게 목록을 비운다.
+    rows.items.len = 0;
+
+    if (anchor_out) |a| {
+        if (a >= skip) return a - skip; // cap 드랍을 반영한 새 행 인덱스
+        return null; // 보던 행이 드랍됨
+    }
+    return null;
+}
+
+/// 논리 줄 [first, last]가 new_cols로 재-wrap될 때의 산출 행 수(할당/복사 없는 시뮬레이션).
+fn countRewrapRows(self: *const TerminalCore, first: usize, last: usize, new_cols: u16) usize {
+    var count: usize = 0;
+    var oc: u16 = 0;
+    var r = first;
+    while (r <= last) : (r += 1) {
+        const src = self.scrollbackRow(r) orelse continue;
+        const contrib: usize = if (r < last) src.len else trimmedLen(src);
+        var c: usize = 0;
+        while (c < contrib) : (c += 1) {
+            const needs: u16 = if (src[c].width == 2) 2 else 1;
+            if (oc + needs > new_cols) {
+                count += 1;
+                oc = 0;
+            }
+            oc += 1;
+        }
+    }
+    return count + 1; // 마지막(열린) 행
+}
+
+/// 행 슬라이스의 내용 길이(뒤 빈칸 trim). 활성 화면의 trimmedRowLen과 같은 기준을 스크롤백
+/// 행(저장 폭이 현재와 다를 수 있음)에 적용한다. selection(core 잔류)도 호출하므로 pub.
+pub fn trimmedLen(row: []const types.Cell) usize {
+    var len: usize = row.len;
+    while (len > 0) : (len -= 1) {
+        if (!core.TerminalCore.isBlankCell(row[len - 1])) break;
+    }
+    return len;
+}
+
+/// 행을 스크롤백에 보관한다. OOM 등으로 실제 보관에 실패하면 false — 호출자(scroll-lock)는
+/// 보관된 경우에만 view_offset을 보정해야 보던 위치가 어긋나지 않는다.
+pub fn pushScrollback(self: *TerminalCore, row_cells: []const types.Cell, wrapped_flag: bool, mark: types.RowPrompt) bool {
+    if (self.sb.cap == 0) return false;
+    if (self.sb.ring.len == 0) {
+        const ring = self.allocator.alloc(?[]types.Cell, self.sb.cap) catch return false;
+        @memset(ring, null);
+        // wrap·semantic 병렬 ring도 함께 할당한다. 하나라도 실패하면 전부 포기해 세 ring 길이를
+        // 항상 같게 유지한다((sb_head+i)%len 인덱싱이 어긋나면 안 된다).
+        const wring = self.allocator.alloc(bool, self.sb.cap) catch {
+            self.allocator.free(ring);
+            return false;
+        };
+        @memset(wring, false);
+        const pring = self.allocator.alloc(types.RowPrompt, self.sb.cap) catch {
+            self.allocator.free(ring);
+            self.allocator.free(wring);
+            return false;
+        };
+        @memset(pring, .{});
+        self.sb.ring = ring;
+        self.sb.wrapped = wring;
+        self.sb.prompt_marks = pring;
+    }
+    const cap = self.sb.ring.len;
+    // 가득 차면 (sb_head+sb_count)%cap == sb_head라, 가장 오래된 슬롯을 재사용해 덮어쓴다.
+    const idx = (self.sb.head + self.sb.count) % cap;
+    if (self.sb.ring[idx]) |existing| {
+        if (existing.len == row_cells.len) {
+            @memcpy(existing, row_cells);
+        } else {
+            const dup = self.allocator.dupe(types.Cell, row_cells) catch return false; // OOM이면 옛 행 유지
+            self.allocator.free(existing);
+            self.sb.ring[idx] = dup;
+        }
+    } else {
+        self.sb.ring[idx] = self.allocator.dupe(types.Cell, row_cells) catch return false;
+    }
+    self.sb.wrapped[idx] = wrapped_flag;
+    self.sb.prompt_marks[idx] = mark;
+    if (self.sb.count == cap) {
+        self.sb.head = (self.sb.head + 1) % cap;
+        // ring이 가득 차 가장 오래된 행이 밀려나면 절대 행 좌표가 한 칸 당겨진다 — 선택·placement
+        // anchor를 같이 보정한다(밀려난 행에 걸리면 선택 해제·placement 제거). count는 불변(ring-full)
+        // 이라 view_offset 클램프는 불필요.
+        self.shiftCoordsForEviction(1);
+    } else {
+        self.sb.count += 1;
+    }
+    return true;
+}

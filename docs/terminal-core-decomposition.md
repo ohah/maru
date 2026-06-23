@@ -240,6 +240,7 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 - **selection.zig** ✅ **완료**: 선택/검색/URL/preedit 클러스터를 §7(S1~S5)로 분리 완결(core.zig 7228→6715줄, selection.zig 587줄(리뷰 cleanup 후)).
 - **kitty.zig** ✅ **완료**: kitty graphics 본체를 §8(K1~K3)로 분리 완결(core.zig 6715→6233줄, kitty.zig 516줄). parser는 파싱(7/N) + `kitty.execKittyGraphics` 위임.
 - **input/report.zig**: `reportFocus`/`reportMouse`/`encodeKey` 등 입력→host-reply 인코딩.
+- **RIS가 DECSC 슬롯 미초기화**(B4~B5 리뷰서 확인, §10.8.7): `fullReset`(ESC c)이 `screen.saved_cursor`를 안 비운다 — 평평 슬롯 시절부터의 기존 동작(분해가 도입한 게 아님). xterm RIS는 슬롯을 비우므로 정합성 검토 가치가 있으나 **동작 변경**이라 별도 doc-first 결정 필요.
 
 ---
 
@@ -466,3 +467,14 @@ B4(필수):
 B5(필수, 위 전부 유지 + DECSC 슬롯 per-screen):
 9. alt 안 ESC7/8(DECSC)이 primary 슬롯 불간섭; primary ESC7/8이 alt 슬롯 불간섭(swap 경유로 동일 보장)
 10. CSI s/u(SCO save/restore)도 현 화면 슬롯 사용
+
+### 10.8.7 B4~B5 리뷰 cleanup (`/code-review max` 후속, B6)
+
+누적 리뷰(라인별·removed-behavior·cross-file/state·Zig pitfall·cleanup/altitude/conventions 6각 + verify/sweep) 결과 **정확성 버그 0**(crash-class 0): per-screen 커서/슬롯 swap이 모든 경로(1049/1047/47·이미-alt·이미-primary·DECSC·CSI s/u·resize-during-alt)에서 의도대로 동작, flat 필드 잔존 0(전 트리 grep), 레이아웃 cycle 없음(TerminalCore→Screen→SavedCursor→primitives 종료), snapshot/serialize/render/IME 모두 활성 `self.screen.cursor`만 읽음. 유일한 실버그였던 "resize-during-alt가 보관 primary 커서 미clamp → 복귀 시 OOB"는 **B4 구현 중 발견·동PR 수정+테스트**됐다(리뷰가 재확인).
+
+cleanup 2건만 정리(B6):
+
+1. **resize alt 분기 중복 → `clampScreenCursorForResize(s, size)` 헬퍼**: 활성·보관 두 화면에 같은 5연산(커서·DECSC 슬롯 clamp + pending_wrap/last_print 무효화)을 손으로 복제하던 것을 swap 단위(Screen) 한 헬퍼로 묶어 drift 위험 제거(altitude — 두 블록이 어긋나면 OOB-after-leave 버그 재발).
+2. **`activeSavedCursor` 인라인**: B5가 `alt_active` 분기를 없애 `&self.screen.saved_cursor` 한 줄 래퍼만 남았고 doc 주석이 사라진 분기를 재정당화 → `saveCursorState`/`restoreCursorState`에 직접 접근 + 근거를 `saveCursorState` 주석으로 이관, 함수 제거.
+
+**기록(범위 밖 — 후속)**: RIS(`ESC c`)가 DECSC 슬롯(`screen.saved_cursor`)을 안 비운다 — B4/B5 이전부터 그랬고(평평 슬롯 시절에도 미초기화) 이 분해가 도입한 게 아니다. xterm RIS는 슬롯을 비우므로 정합성 검토 가치가 있으나, 동작 변경이라 별도 결정 사항으로 §6에 남긴다.

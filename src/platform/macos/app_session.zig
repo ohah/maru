@@ -2942,6 +2942,9 @@ pub const AppSession = struct {
 
         term.surface = try app.Surface.init(self.allocator, id, size);
         errdefer term.surface.deinit();
+        // 스크롤백 cell arena를 mmap 기반 page_allocator로(§11 P4 — demand-commit + 콜드 OS swap + free 즉시 반납,
+        // history > RAM). 이 chokepoint는 모든 live surface가 첫 출력 전(페이지 0개)에 지나므로 arena 교체가 안전하다.
+        term.surface.core.setScrollbackArena(std.heap.page_allocator);
         // config 스크롤백 ring 크기를 주입한다(모든 surface가 이 chokepoint를 지난다 — init 첫 탭·새 탭·split·
         // restore). lazy-alloc(첫 scroll) 전이라 안전. 0이면 스크롤백 비활성.
         term.surface.core.setMaxScrollback(self.loaded_config.config.scrollback.lines);

@@ -68,6 +68,11 @@ pub const Scrollback = struct {
 
     pages: std.ArrayList(*ScrollbackPage) = .empty, // 오래된→최신 순(abs_start 오름차순)
     pool: std.ArrayList(*ScrollbackPage) = .empty, // 비워진 free 페이지(재사용 — steady-state 0 할당)
+    /// cell arena 전용 allocator(§11 P4). 기본은 page_allocator(mmap/VirtualAlloc — demand-commit + 콜드 OS swap +
+    /// free 즉시 반납)이나, init이 core 일반 allocator로 덮어써(테스트 leak 추적 유지) production만 app_session이
+    /// page_allocator로 override한다(setScrollbackArena). cells alloc/realloc/free에만 쓰고, page struct·descs·
+    /// pages/pool 리스트는 일반 allocator(아래 함수들의 `allocator` 인자). std라 platform import 없이 boundary-safe.
+    arena_alloc: std.mem.Allocator = std.heap.page_allocator,
     count: usize = 0, // live 행 수(공개 동작 보존)
     cap: usize = 0,
     evicted_abs: usize = 0, // 지금까지 evict된 행 수 = 가장 오래된 live 행의 abs
@@ -76,8 +81,10 @@ pub const Scrollback = struct {
     // 순간(scrollViewport/renderSnapshot)에 현재 폭으로 1회 수행한다.
     rewrap_pending: bool = false,
 
-    fn freePage(allocator: std.mem.Allocator, page: *ScrollbackPage) void {
-        allocator.free(page.cells);
+    /// 페이지 해제. cells arena는 arena_alloc(P4: page_allocator), page struct·descs는 일반 allocator로 — 두
+    /// allocator가 섞이므로 짝을 맞춘다(cells=arena, 나머지=일반).
+    fn freePage(self: *Scrollback, allocator: std.mem.Allocator, page: *ScrollbackPage) void {
+        self.arena_alloc.free(page.cells);
         page.descs.deinit(allocator);
         allocator.destroy(page);
     }
@@ -89,19 +96,19 @@ pub const Scrollback = struct {
         page.used = 0;
         page.descs.clearRetainingCapacity(); // 백킹은 유지(재사용 — 다음 push가 realloc 없이 채움)
         self.pool.append(allocator, page) catch {
-            freePage(allocator, page); // pool append OOM이면 그냥 해제(누수 방지)
+            self.freePage(allocator, page); // pool append OOM이면 그냥 해제(누수 방지)
         };
     }
 
-    /// 새(또는 pool 재사용) 페이지를 끝에 붙인다. arena를 `@max(arena_cells, min_cells)`로 잡아 적어도 한 행
-    /// (min_cells=그 행의 폭)은 들어가게 한다 — 초광폭 단일 행 안전망. pool 페이지 arena가 모자라면 realloc.
-    /// OOM이면 null.
+    /// 새(또는 pool 재사용) 페이지를 끝에 붙인다. cell arena는 arena_alloc(P4)에서, page struct·descs는 일반
+    /// allocator에서 잡는다. arena를 `@max(arena_cells, min_cells)`로 잡아 적어도 한 행(min_cells=그 행의 폭)은
+    /// 들어가게 한다 — 초광폭 단일 행 안전망. pool 페이지 arena가 모자라면 realloc. OOM이면 null.
     fn acquirePage(self: *Scrollback, allocator: std.mem.Allocator, min_cells: usize) ?*ScrollbackPage {
         const need_cells = @max(arena_cells, min_cells);
         if (self.pool.pop()) |page| {
             if (page.cells.len < need_cells) {
-                const new_cells = allocator.realloc(page.cells, need_cells) catch {
-                    freePage(allocator, page);
+                const new_cells = self.arena_alloc.realloc(page.cells, need_cells) catch {
+                    self.freePage(allocator, page);
                     return null;
                 };
                 page.cells = new_cells;
@@ -114,7 +121,7 @@ pub const Scrollback = struct {
         }
         const page = allocator.create(ScrollbackPage) catch return null;
         page.* = .{ .cells = &.{}, .descs = .empty, .abs_start = self.pushed_abs };
-        page.cells = allocator.alloc(types.Cell, need_cells) catch {
+        page.cells = self.arena_alloc.alloc(types.Cell, need_cells) catch {
             allocator.destroy(page);
             return null;
         };
@@ -221,9 +228,9 @@ pub const Scrollback = struct {
     }
 
     pub fn deinit(self: *Scrollback, allocator: std.mem.Allocator) void {
-        for (self.pages.items) |p| freePage(allocator, p);
+        for (self.pages.items) |p| self.freePage(allocator, p);
         self.pages.deinit(allocator);
-        for (self.pool.items) |p| freePage(allocator, p);
+        for (self.pool.items) |p| self.freePage(allocator, p);
         self.pool.deinit(allocator);
     }
 
@@ -670,7 +677,7 @@ fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16, anchor_row: ?usize)
     // 두고 error를 반환해 호출자가 옛 폭 표시를 유지하게 한다(옛 ring의 "OOM이면 통째 포기" 계약 — clear-먼저는
     // commit OOM 시 스크롤백을 조용히 잃었다, A1 리뷰). 한 행을 rebuilt로 복사하면 그 임시 버퍼를 즉시 해제해
     // peak 메모리를 옛 방식과 같은 ~2x로 유지한다(수백만 줄 목표상 3x 금지). keep(≤cap)개라 push 중 eviction 없음.
-    var rebuilt: Scrollback = .{ .cap = self.screen.sb.cap };
+    var rebuilt: Scrollback = .{ .cap = self.screen.sb.cap, .arena_alloc = self.screen.sb.arena_alloc }; // 같은 arena allocator(§11 P4)
     errdefer rebuilt.deinit(self.allocator); // commit OOM 시 임시만 해제(옛 sb는 그대로)
     for (rows.items, 0..) |row_cells, k| {
         if (!rebuilt.pushRow(self.allocator, row_cells, wraps.items[k], pmarks.items[k])) return error.OutOfMemory;

@@ -497,6 +497,30 @@ TDD 방식:
   - **kitty keyboard protocol(CSI u, #526/#527)**: 위 키 인코딩 문단 참조 — FlagStack(push `>`/pop `<`/set `=`/query `?`) + disambiguate 인코딩, Shift+Tab backtab fix(code review 발견).
   - **kitty graphics protocol(APC, #528/#530/#531 + K1)**: ① 파서+command 토대(`ESC _ G ...` 수집 + control `k=v` 파싱, #528) ② 이미지 디코드+저장(transmit RGBA/RGB base64→`KittyImageStorage`, 같은 id 교체·320MB 총량 한계·`a=d` delete·RIS 비움, #530; 치수 곱 오버플로 crash fix #531) ③ **K1 placement(코어)**: display(`a=p`/`a=T`)를 현재 커서 셀에 placement로 걸어 `(image_id, placement_id)`로 저장(같은 키 교체)하고 `RenderSnapshot.placements`로 노출까지 완료. **베이스**: kitty graphics protocol display data(`p`/`x`/`y`/`w`/`h`/`X`/`Y`/`c`/`r`/`z`/`C` 키). **의사결정**: (1) anchor는 **절대 행**(스크롤백 0..sb_count-1, 이어서 활성 화면)이라 selection/find와 같은 좌표계로 스크롤·eviction과 함께 움직인다(`shiftPlacementsForEviction`이 eviction마다 보정, 화면 밖이면 제거 — `shiftSelectionForEviction`과 동형). (2) **셀 단위 크기(span)는 코어가 계산하지 않는다** — 코어는 셀 픽셀 크기를 모르므로(`Size`는 rows/cols, 마우스 1016도 platform이 픽셀을 주입) source rect(픽셀)와 명시 `c`/`r`만 담고, 픽셀→셀 환산·클립은 셀 메트릭을 가진 **렌더러(K2) 책임**이다(마우스 1016 경계와 정합). `RenderSnapshot.placements`의 `row`는 뷰포트 상대 i32(화면 위로 벗어난 앵커는 음수 — 렌더러가 span으로 가시성/클립 판정). (3) 커서 이동 정책(`C`): 기본은 이미지 아래로 내리되 행 수(`r`)가 명시됐을 때만(자동 크기는 span 미상이라 미이동 — K1 한계), 화면 끝 초과는 스크롤 없이 마지막 행 clamp. (4) placement 상한(`max_kitty_placements`=1024)으로 placement_id 폭주 차단(이미지 320MB·APC 버퍼 한계와 같은 결의 방어선). **검증**: 생성·모든 display 키 파싱·뷰포트 매핑·`a=T` 합성·없는 이미지/`i=0` graceful·같은 키 교체·다른 p 별개·커서 이동(C/r/clamp)·delete가 이미지+placement 동시 제거·RIS 비움·eviction anchor 보정/제거·위 스크롤 시 뷰포트 row 환산을 결정적 unit으로 단언. K1은 화면 렌더 없이 노출까지다. ④ **K2 렌더(완료)**: GpuImage 환산 + per-image 텍스처 + Metal 파이프라인 + ABI v48 — 아래 "kitty graphics K2 렌더" 절. ⑤ **K3 디코드 확장(완료)**: K3a chunked(`m=1`)(여러 APC 누적·480MB 상한·RIS 폐기), K3b zlib(`o=z`)(`std.compress.flate(.zlib)` inflate, zlib bomb 바운드), K3c PNG(`f=100`) — `src/terminal/png.zig` clean-room 디코더로 **8-bit truecolor(color type 2 RGB·6 RGBA, non-interlaced)** 만 디코드(청크 파싱·IDAT zlib inflate·스캔라인 필터 None/Sub/Up/Average/Paeth), grayscale(0/4)·palette(3)·16-bit·Adam7은 graceful 거부. **풀 PNG(전 color type·16-bit)는 라이브러리 벤더링 백로그** — 아래 "kitty graphics PNG 백로그" 절. ⑥ **K4 저장 관리**: K4a 세분화된 delete(`a=d` + `d=` 타깃) **완료** — 기본 `d='a'`(전체), 소문자=placement만/대문자=이미지 데이터까지 free, `a/A`(전체)·`i/I`(image_id[+placement_id])·`z/Z`(z-index) 지원, 나머지(c 커서·n 이미지번호·p/q/x/y/r 위치·f 애니메이션)는 셀 span/이미지번호 필요라 graceful 무시. K4b LRU evict **완료** — 320MB 한도(이제 settable 필드) 초과 시 거부가 아니라 **placement 없는 것·오래된(generation 작은) 것 우선**으로 evict해 자리를 만든다(kitty 명세 권장; Ghostty `evictImage` 동작 비교). 한 장이 한도보다 크면 거부. K4c 텍스처 eviction **완료**(ABI v49) — 코어가 매 frame **살아있는 image_id 집합**(활성 surface 저장소 키)을 `MetalFrame.live_image_ids`로 노출하고, Swift/Metal이 그 집합에 없는 캐시 `MTLTexture`를 evict해 GPU 메모리를 회수한다(delete/evict/RIS 반영). AppSession이 `kitty_uploaded` dedup 상태도 같은 집합으로 prune해 재진입 시 재업로드를 보장(Swift 캐시와 동기). **K4 완료 → kitty graphics 전 단계(K1~K4) 완성.** sixel(DCS 기반)은 별개이고 Ghostty도 미지원이라 후순위. ⑦ **K5 query(`a=q`) 응답 + 자기능력 보고(후속, 미착수)**: 현재 `execKittyGraphics`가 `q`(query)를 `else => {}`로 무시해, kitty graphics 지원 여부·transmit 결과를 묻는 앱(`timg`·`chafa --format=kitty`·kitty `icat`)에 APC 응답을 주지 않는다 → 앱이 미지원으로 판단해 폴백하거나 transmit 후 멈출 수 있다. 베이스: Ghostty `graphics_exec.zig`(query는 load를 시도해 검증한 뒤 `OK`/에러를 APC로 회신하되 실제 저장은 안 함). 동작: `a=q`면 픽셀을 저장하지 않고 control 파싱·검증만 해 `ESC _ G i=<id>;OK ESC \` (또는 에러코드)로 회신. 난이도: 중(transmit 경로에서 "저장"과 "응답"을 분리). 애니메이션(`a=a/c/f`)은 Ghostty도 미구현이라 계속 보류(위 VT 갭 절 "갭 아님" 노트와 동일 결).
 
+## 한글 Grapheme Cluster 렌더링 (HG1~HG4 — NFD 자모 정공법)
+
+목표:
+- macOS 파일명 NFD(분해형)로 들어온 한글 conjoining 자모(초성 L+중성 V+종성 T)를 UAX#29 grapheme cluster로 묶어 한 셀에 저장하고 음절로 셰이핑·렌더한다. `ls` 출력의 한글 자모 분리·폭 2배 깨짐을 고친다.
+- 상세·설계 결정·검증은 [Grapheme Cluster 저장·렌더링 전략](grapheme-clustering.md)을 단일 출처로 둔다.
+
+배경(현황 — "계획에 있었나/구현 안 됐나/누락인가"): 전략([폰트 전략](font-strategy.md))은 "grapheme cluster는 UAX#29로 분절"을 적었으나 구현은 **combining 1개 저장**(`types.Cell.combining: ?u21`)에서 멈춘 알려진 후속이고, **한글 NFD 케이스는 계획에서 누락**됐다(다중 코드포인트 예시가 ZWJ 이모지·국기·skin-tone에 한정, docs 전체에 NFC/NFD/자모 0건). `width.zig`의 `isKeycapCombining` 주석도 "다중-combining 저장이 근본 해법"이라 자인.
+
+결정: NFC 정규화로 때우지 않는다(옛한글은 NFC로도 안 합쳐짐 + 터미널은 원본 코드포인트 보존 — selection/커서/재그리기 정합). **베이스 = UAX#29 GB6/GB7/GB8**(공개 명세). Ghostty식 grapheme side-storage는 **동작/설계 개념만 비교(clean-room — 자료구조·코드 미복사)**.
+
+완료 기준:
+- NFD 한글(초성+중성+종성)을 한 cluster로 묶어 cell width 2칸·음절 글리프 렌더(완성형 NFC와 동일 결과).
+- 셀이 다중 코드포인트 grapheme을 저장(단일 combining 모델 해소).
+- 옛한글·ZWJ 이모지·국기(RI)·skin-tone가 같은 cluster 경로를 탄다.
+- fixture-oracle + 실제 `ls` 렌더 캡처.
+
+분해 (HG1~HG4 — 상세는 설계 문서 §5):
+- **HG1 — 코어 grapheme 분절**: UAX#29 cluster boundary + Hangul L/V/T(GB6/7/8) 분류·묶기, cluster 단위 폭(base 초성 2칸·후속 V/T 0폭 흡수). 순수 Zig 단위(NFD "한글"→음절 2개·각 2칸, 옛한글).
+- **HG2 — 셀 다중 코드포인트 저장**: `Cell.combining` 단일 → grapheme side-storage 확장, `appendRowUtf8`·trace/snapshot 직렬화·저장 상한 반영, 단일-combining 보정 hack(`isKeycapCombining` 경유 3곳) 일반화/정리.
+- **HG3 — 렌더·셰이핑 통합**: `coretext_smoke.m`/`coretext_shaper.zig`가 cluster 전체를 CTLine으로 셰이핑(글리프 합성은 CoreText), atlas cache key 정합.
+- **HG4 — 검증·fixture**: NFD `ls`·옛한글·정렬(vim/tmux/htop) fixture-oracle + 렌더 캡처.
+
+각 단계는 작은 PR(progressive enhancement, legacy 공존). **현황: 설계 완료([grapheme-clustering.md](grapheme-clustering.md)) — 미착수. HG1부터 진행.**
+
 ## VT 호환성 갭 (G1~G14 — Ghostty는 되는데 Maru는 안 되는 시퀀스)
 
 확정 순서(아래 "의존성·확정 순서")의 1번 "BCE + 작은 VT 갭" 중 **BCE는 완료**(EL/ED/ECH/DCH/스크롤이 pen 배경을 carry — `core.zig`의 eraseInLine/eraseInDisplay/eraseCharacters/scrollRange)이고, 여기 모은 것이 남은 "작은 VT 갭"이다.

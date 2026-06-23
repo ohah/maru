@@ -106,7 +106,7 @@ Maru는 이미 셰이핑 엔진(CoreText)을 갖췄다. 막힌 곳은 **셀이 b
 
 - A는 고정 크기를 넘는 긴 cluster(ZWJ 가족 이모지 등 — U+200D로 이어져 길이가 사실상 무제한)에서 코드포인트가 **잘려 데이터가 손실**된다. 잘림은 화면뿐 아니라 **클립보드 복사·재출력·trace까지** 망가뜨리므로 받아들일 수 없다.
 - B는 가변 길이를 store가 담아 **무손실**이고, maru가 이미 `link: u32` + `link_store`(OSC 8 URI를 셀엔 id만, 본체는 store에 — `core.zig`)에서 쓰는 **검증된 패턴을 그대로 재사용**한다. id는 셀의 POD 필드라 셀이 스크롤백·resize로 이동해도 값으로 따라가 **키가 안정적**이고(위치 키가 아니라 id 키), combining 없는 셀은 `id=0`이라 **메모리 0 비용**이다.
-- link과 다른 점은 (1) grapheme은 셀마다 거의 고유해 dedup 이득이 없으니 dedup을 강제하지 않고, (2) 대량 생성되므로 스크롤백 eviction·clear·덮어쓰기 때 **id를 회수하는 수명 관리**를 처음부터 둔다(link store의 기존 append-only 누수도 같은 메커니즘으로 함께 고친다).
+- link과 다른 점은 (1) grapheme은 셀마다 거의 고유해 dedup 이득이 없으니 dedup을 강제하지 않고, (2) 대량 생성되므로 스크롤백 eviction·clear·덮어쓰기 때 **id를 회수하는 수명 관리**가 궁극적으로 필요하다. 다만 grid가 flat `cells: []Cell`이라 스크롤·reflow의 `memcpy`가 `grapheme_id`를 값 복사해 한 store 항목을 여러 셀이 잠시 공유하므로, 안전한 회수는 **refcount**가 있어야 한다(단순 free-list는 dangling). 그래서 HG2a는 link과 같은 append-only로 먼저 닫고, 회수(+link store 누수 정리)는 refcount 후속 PR로 분리한다(§5).
 
 ## 4. 메커니즘
 
@@ -176,7 +176,8 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 ## 5. 분해 (HG1~HG4)
 
 - **HG1 — 코어 grapheme 분절**: UAX#29 cluster boundary + Hangul L/V/T(GB6/7/8) 분류·묶기, cluster 단위 폭(base 2칸, V/T 0폭 흡수). 순수 Zig 단위 테스트(NFD "한글" → 음절 2개·각 2칸, 옛한글 cluster).
-- **HG2a — 셀 다중 코드포인트 저장(B 방식)**: `Cell.grapheme_id: u32` + `TerminalCore.grapheme_store`(link 패턴), `RowCodepoints` iterator·`appendRowUtf8`·trace/snapshot 직렬화 확장(무손실), eviction·clear·덮어쓰기 시 id 회수(수명 관리).
+- **HG2a — 셀 다중 코드포인트 저장(B 방식, append-only)**: `Cell.grapheme_id: u32` + `TerminalCore.grapheme_store`(link 패턴), `RowCodepoints` iterator·`appendRowUtf8`·trace/snapshot 직렬화 확장(무손실). store는 `link_store`와 동형의 **append-only**로, reset(RIS)·deinit에서만 일괄 free한다(이때 모든 셀이 함께 사라져 dangling이 없다). cluster producer는 `writeCodepoint`에 `grapheme.extendsCluster`를 통합해 NFD conjoining 자모(L+V+T)를 한 셀(base 폭=2)로 묶는다 — 이 단계에서 폭 버그(음절 8칸→4칸)가 실제로 고쳐진다. 렌더 back-compat을 위해 `Cell.combining`은 첫 extra의 그림자로 **잠정 유지**(HG2b에서 제거).
+- **HG2a-후속 — id 회수(refcount)**: grid가 flat `cells: []Cell`이라 스크롤·reflow가 `memcpy`로 셀을 **값 복사**한다 — `grapheme_id`가 복사돼 한 store 항목을 여러 셀이 잠시 공유하므로, 단순 free-list로 한쪽을 비우며 회수하면 다른 셀이 dangling된다(`link_store`가 append-only로 이를 피하는 이유와 동일). 안전한 eviction·clear·덮어쓰기 회수는 **refcount**가 필요해 별도 PR로 분리한다(`link_store`의 기존 append-only 누수도 같은 메커니즘으로 함께 정리).
 - **HG2b — 기존 combining 경로 통합**: VS16(❤️)·키캡(2️⃣)·skin-tone(👍🏽)·국기(RI) 경로를 새 cluster 저장 모델로 이전하고 단일-combining 보정 hack 3곳(`isKeycapCombining` 경유)을 제거한다. 동작 변경이 아니라 모델 이전이라 **기존 이모지/키캡 테스트 green 유지가 합격선**이다.
 - **HG3 — 렌더·셰이핑 통합**: `coretext_smoke.m`/`coretext_shaper.zig`가 cluster 전체를 CTLine에 넘겨 음절 글리프로 셰이핑, atlas cache key 정합.
 - **HG4 — 검증·fixture**: NFD `ls` 시나리오·옛한글·정렬(vim/tmux/htop) fixture-oracle + 실제 렌더 캡처.

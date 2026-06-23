@@ -356,3 +356,91 @@ pub fn selectionClear(self: *TerminalCore) void {
     self.selection_block = false;
     self.dirty = core.fullDirty(self.size);
 }
+
+// ── URL 감지(Cmd+hover/클릭) ──────────────────────────────────────────────────────────────────────
+// OSC 8 명시적 링크가 항상 우선이고(보이는 텍스트와 무관), 없으면 클릭 단어의 http(s) 휴리스틱
+// (urlSpanInWord). urlAnchorAt/urlSpanAtAbs/extractUrlAt는 core.zig facade로 점-호출되고, wordIsUrl은
+// hover의 매-mouseMove 비용을 줄이는 alloc-없는 판정(내부 전용). OSC 8 URI는 self.linkUri(core 잔류 link_store).
+
+/// Cmd+클릭/hover 위치가 URL이면 그 run의 시작 셀 절대 좌표를 돌려준다(밑줄 anchor용, 할당 없음).
+/// OSC 8 명시적 링크가 있으면 그것이 우선이고(보이는 텍스트와 무관), 없으면 화면 글자의 http(s) 휴리스틱.
+pub fn urlAnchorAt(self: *const TerminalCore, viewport_row: u16, col: u16) ?types.SelectionPoint {
+    const abs = absRowFromViewport(self, viewport_row);
+    const id = cellLinkAt(self, abs, col);
+    if (id != 0) return linkBoundsAt(self, abs, col, id).start;
+    if (!wordIsUrl(self, viewport_row, col)) return null;
+    const bounds = wordBoundsAt(self, viewport_row, col) orelse return null;
+    return bounds.start;
+}
+
+/// 절대 좌표 anchor에서 시작하는 URL 단어의 현재 뷰포트 밑줄 범위. 매 frame 호출돼 스크롤/
+/// 출력/resize 후에도 현재 폭/위치에 맞게 클립된다(stale span OOB 차단).
+pub fn urlSpanAtAbs(self: *const TerminalCore, anchor: types.SelectionPoint) ?types.SelectionSpan {
+    const top_abs = self.sb.count - @min(self.view_offset, self.sb.count);
+    const bottom_abs = top_abs + self.size.rows - 1;
+    if (anchor.row < top_abs or anchor.row > bottom_abs) return null; // anchor가 화면 밖
+    const id = cellLinkAt(self, anchor.row, anchor.col);
+    if (id != 0) {
+        const bounds = linkBoundsAt(self, anchor.row, anchor.col, id);
+        return clipAbsSpanToViewport(self, bounds.start, bounds.end, false);
+    }
+    const vp_row: u16 = @intCast(anchor.row - top_abs);
+    const bounds = wordBoundsAt(self, vp_row, anchor.col) orelse return null;
+    return clipAbsSpanToViewport(self, bounds.start, bounds.end, false);
+}
+
+/// Cmd+클릭 위치의 URL을 추출한다(없으면 null). 클릭 셀이 속한 비공백 run(soft-wrap 포함) 안에서
+/// http:// 또는 https:// 부터 run 끝까지를 URL로 보고, 끝에 붙은 문장 부호(괄호/마침표 등)는 다듬는다.
+/// OSC 8 명시적 링크가 있으면 그 URI를 그대로(다듬지 않고). 호출자가 free한다.
+pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, viewport_row: u16, col: u16) !?[]u8 {
+    // OSC 8 명시적 링크가 우선 — 프로그램이 지정한 URI를 그대로 연다(보이는 텍스트와 무관).
+    const link_id = cellLinkAt(self, absRowFromViewport(self, viewport_row), col);
+    if (link_id != 0) {
+        const uri = self.linkUri(link_id) orelse return null;
+        return try allocator.dupe(u8, uri);
+    }
+    const bounds = wordBoundsAt(self, viewport_row, col) orelse return null;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var abs = bounds.start.row;
+    while (abs <= bounds.end.row) : (abs += 1) {
+        const row_cells = screen.absRow(self, abs) orelse break;
+        const from: usize = if (abs == bounds.start.row) bounds.start.col else 0;
+        const to: usize = if (abs == bounds.end.row) @min(@as(usize, bounds.end.col) + 1, row_cells.len) else row_cells.len;
+        try appendRowUtf8(&out, allocator, row_cells, from, to);
+    }
+    const span = urlSpanInWord(out.items) orelse {
+        out.deinit(allocator);
+        return null;
+    };
+    const url = try allocator.dupe(u8, out.items[span.start..span.end]);
+    out.deinit(allocator);
+    return url;
+}
+
+/// 클릭 셀이 속한 단어가 URL인지(할당 없이) 판정한다. hover의 매-mouseMove 비용을 줄이려
+/// extractUrlAt의 alloc 없이 같은 판정만 한다(내부 전용 — facade 없음).
+pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16) bool {
+    if (cellLinkAt(self, absRowFromViewport(self, viewport_row), col) != 0) return true;
+    const bounds = wordBoundsAt(self, viewport_row, col) orelse return false;
+    // URL은 보통 한 단어라 짧은 스택 버퍼로 충분하고, 넘치면 URL일 수 있으니 통과시킨다.
+    var buf: [2048]u8 = undefined;
+    var len: usize = 0;
+    var abs = bounds.start.row;
+    outer: while (abs <= bounds.end.row) : (abs += 1) {
+        const row_cells = screen.absRow(self, abs) orelse break;
+        const from: usize = if (abs == bounds.start.row) bounds.start.col else 0;
+        const to: usize = if (abs == bounds.end.row) @min(@as(usize, bounds.end.col) + 1, row_cells.len) else row_cells.len;
+        var c = from;
+        while (c < to) : (c += 1) {
+            const cell = row_cells[c];
+            if (cell.continuation) continue;
+            var enc: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(cell.codepoint, &enc) catch continue;
+            if (len + n > buf.len) break :outer; // 너무 긴 단어 — 판정 보류, 통과
+            @memcpy(buf[len .. len + n], enc[0..n]);
+            len += n;
+        }
+    }
+    return urlSpanInWord(buf[0..len]) != null;
+}

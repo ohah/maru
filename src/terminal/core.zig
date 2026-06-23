@@ -835,92 +835,17 @@ pub const TerminalCore = struct {
         selection.selectWordAt(self, viewport_row, col, separator_bytes);
     }
 
-    /// Cmd+hover 위치의 URL 단어 범위(뷰포트 좌표로 클립). URL이 아니면 null. 밑줄 하이라이트
-    /// 렌더용 — 단어 run 전체에 밑줄을 긋는다(http 시작 전 괄호까지 포함될 수 있음, 시각 피드백
-    /// 용도라 충분).
-    /// Cmd+클릭/hover 위치가 URL이면 그 run의 시작 셀 절대 좌표를 돌려준다(밑줄 anchor용,
-    /// 할당 없음). OSC 8 명시적 링크가 있으면 그것이 우선이고(보이는 텍스트와 무관), 없으면
-    /// 화면 글자의 http(s) 휴리스틱(extractUrlAt과 동일 판정)이다.
+    /// Cmd+hover/클릭 URL anchor 절대 좌표. 본문: selection.urlAnchorAt.
     pub fn urlAnchorAt(self: *const TerminalCore, viewport_row: u16, col: u16) ?types.SelectionPoint {
-        const abs = selection.absRowFromViewport(self, viewport_row);
-        const id = selection.cellLinkAt(self, abs, col);
-        if (id != 0) return selection.linkBoundsAt(self, abs, col, id).start;
-        if (!self.wordIsUrl(viewport_row, col)) return null;
-        const bounds = selection.wordBoundsAt(self, viewport_row, col) orelse return null;
-        return bounds.start;
+        return selection.urlAnchorAt(self, viewport_row, col);
     }
-
-    /// 절대 좌표 anchor에서 시작하는 URL 단어의 현재 뷰포트 밑줄 범위. 매 frame 호출돼 스크롤/
-    /// 출력/resize 후에도 현재 폭/위치에 맞게 클립된다(stale span OOB 차단).
+    /// anchor에서 시작하는 URL의 현재 뷰포트 밑줄 범위. 본문: selection.urlSpanAtAbs.
     pub fn urlSpanAtAbs(self: *const TerminalCore, anchor: types.SelectionPoint) ?types.SelectionSpan {
-        const top_abs = self.sb.count - @min(self.view_offset, self.sb.count);
-        const bottom_abs = top_abs + self.size.rows - 1;
-        if (anchor.row < top_abs or anchor.row > bottom_abs) return null; // anchor가 화면 밖
-        const id = selection.cellLinkAt(self, anchor.row, anchor.col);
-        if (id != 0) {
-            const bounds = selection.linkBoundsAt(self, anchor.row, anchor.col, id);
-            return selection.clipAbsSpanToViewport(self, bounds.start, bounds.end, false);
-        }
-        const vp_row: u16 = @intCast(anchor.row - top_abs);
-        const bounds = selection.wordBoundsAt(self, vp_row, anchor.col) orelse return null;
-        return selection.clipAbsSpanToViewport(self, bounds.start, bounds.end, false);
+        return selection.urlSpanAtAbs(self, anchor);
     }
-
-    /// Cmd+클릭 위치의 URL을 추출한다(없으면 null). 클릭 셀이 속한 비공백 run(soft-wrap 포함)
-    /// 안에서 http:// 또는 https:// 부터 run 끝까지를 URL로 보고, 끝에 붙은 문장 부호(괄호/마침표
-    /// 등)는 다듬는다. 호출자가 free한다.
+    /// Cmd+클릭 위치의 URL 추출(호출자가 free). 본문: selection.extractUrlAt.
     pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, viewport_row: u16, col: u16) !?[]u8 {
-        // OSC 8 명시적 링크가 우선 — 프로그램이 지정한 URI를 그대로 연다(보이는 텍스트와 무관,
-        // 휴리스틱의 문장부호 다듬기도 적용하지 않는다).
-        const link_id = selection.cellLinkAt(self, selection.absRowFromViewport(self, viewport_row), col);
-        if (link_id != 0) {
-            const uri = self.linkUri(link_id) orelse return null;
-            return try allocator.dupe(u8, uri);
-        }
-        const bounds = selection.wordBoundsAt(self, viewport_row, col) orelse return null;
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(allocator);
-        var abs = bounds.start.row;
-        while (abs <= bounds.end.row) : (abs += 1) {
-            const row_cells = screen.absRow(self, abs) orelse break;
-            const from: usize = if (abs == bounds.start.row) bounds.start.col else 0;
-            const to: usize = if (abs == bounds.end.row) @min(@as(usize, bounds.end.col) + 1, row_cells.len) else row_cells.len;
-            try selection.appendRowUtf8(&out, allocator, row_cells, from, to);
-        }
-        const span = selection.urlSpanInWord(out.items) orelse {
-            out.deinit(allocator);
-            return null;
-        };
-        const url = try allocator.dupe(u8, out.items[span.start..span.end]);
-        out.deinit(allocator);
-        return url;
-    }
-
-    /// 클릭 셀이 속한 단어가 URL인지(할당 없이) 판정한다. hover의 매-mouseMove 비용을 줄이려
-    /// extractUrlAt의 alloc 없이 같은 판정만 한다.
-    pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16) bool {
-        if (selection.cellLinkAt(self, selection.absRowFromViewport(self, viewport_row), col) != 0) return true;
-        const bounds = selection.wordBoundsAt(self, viewport_row, col) orelse return false;
-        // URL은 보통 한 단어라 짧은 스택 버퍼로 충분하고, 넘치면 URL일 수 있으니 통과시킨다.
-        var buf: [2048]u8 = undefined;
-        var len: usize = 0;
-        var abs = bounds.start.row;
-        outer: while (abs <= bounds.end.row) : (abs += 1) {
-            const row_cells = screen.absRow(self, abs) orelse break;
-            const from: usize = if (abs == bounds.start.row) bounds.start.col else 0;
-            const to: usize = if (abs == bounds.end.row) @min(@as(usize, bounds.end.col) + 1, row_cells.len) else row_cells.len;
-            var c = from;
-            while (c < to) : (c += 1) {
-                const cell = row_cells[c];
-                if (cell.continuation) continue;
-                var enc: [4]u8 = undefined;
-                const n = std.unicode.utf8Encode(cell.codepoint, &enc) catch continue;
-                if (len + n > buf.len) break :outer; // 너무 긴 단어 — 판정 보류, 통과
-                @memcpy(buf[len .. len + n], enc[0..n]);
-                len += n;
-            }
-        }
-        return selection.urlSpanInWord(buf[0..len]) != null;
+        return selection.extractUrlAt(self, allocator, viewport_row, col);
     }
 
     /// 트리플클릭 줄 선택. 본문: selection.selectLineAt.
@@ -1822,8 +1747,8 @@ pub const TerminalCore = struct {
         return id;
     }
 
-    /// 링크 id -> URI(없으면 null).
-    fn linkUri(self: *const TerminalCore, id: u32) ?[]const u8 {
+    /// 링크 id -> URI(없으면 null). selection.extractUrlAt(OSC 8 우선)이 cross-file 호출 — pub.
+    pub fn linkUri(self: *const TerminalCore, id: u32) ?[]const u8 {
         if (id == 0 or id > self.link_store.items.len) return null;
         return self.link_store.items[id - 1];
     }
@@ -5057,7 +4982,7 @@ test "double-click with word-separators splits at separator chars; URL detection
     try std.testing.expectEqualStrings("usr", w3);
 
     // **URL 감지는 구분자 무시**: wordBoundsAt(공백만)이라 wordIsUrl이 전체 URL을 본다(col4=h).
-    try std.testing.expect(core.wordIsUrl(0, 4));
+    try std.testing.expect(selection.wordIsUrl(&core, 0, 4));
 }
 
 test "triple-click selects the whole logical line including wrapped rows" {
@@ -5131,8 +5056,8 @@ test "urlAnchorAt + urlSpanAtAbs project the hovered URL word, following content
     try std.testing.expectEqual(@as(u16, 0), span.start.row);
     try std.testing.expectEqual(@as(u16, 3), span.start.col); // "https://..." 단어 시작
     try std.testing.expect(core.urlAnchorAt(0, 0) == null); // "go"
-    try std.testing.expect(core.wordIsUrl(0, 5)); // 할당 없는 판정도 같은 결과
-    try std.testing.expect(!core.wordIsUrl(0, 0));
+    try std.testing.expect(selection.wordIsUrl(&core, 0, 5)); // 할당 없는 판정도 같은 결과
+    try std.testing.expect(!selection.wordIsUrl(&core, 0, 0));
 }
 
 test "urlSpanInWord keeps balanced trailing parens but trims prose punctuation" {
@@ -5248,11 +5173,11 @@ test "OSC 8 hyperlink: click returns the stored URI regardless of visible text" 
     const url = (try core.extractUrlAt(std.testing.allocator, 0, 2)).?;
     defer std.testing.allocator.free(url);
     try std.testing.expectEqualStrings("https://maru.dev/docs", url);
-    try std.testing.expect(core.wordIsUrl(0, 2));
+    try std.testing.expect(selection.wordIsUrl(&core, 0, 2));
     // 링크 안 공백("click here"의 ' ')도 같은 링크다.
-    try std.testing.expect(core.wordIsUrl(0, 5));
+    try std.testing.expect(selection.wordIsUrl(&core, 0, 5));
     // 링크 밖("tail")은 아니다.
-    try std.testing.expect(!core.wordIsUrl(0, 12));
+    try std.testing.expect(!selection.wordIsUrl(&core, 0, 12));
     // 닫은 뒤 출력엔 링크가 없다.
     try std.testing.expectEqual(@as(u32, 0), core.cells[12].link);
 }
@@ -5298,7 +5223,7 @@ test "OSC 8 oversized URI is ignored and plain heuristic still works" {
     try std.testing.expectEqual(@as(u21, 'h'), core.cells[0].codepoint);
     // 휴리스틱은 여전히 동작.
     try core.write("\r\nhttps://x.yz ");
-    try std.testing.expect(core.wordIsUrl(1, 3));
+    try std.testing.expect(selection.wordIsUrl(&core, 1, 3));
 }
 
 test "preedit composition shows the in-progress hangul at the cursor without touching the grid" {

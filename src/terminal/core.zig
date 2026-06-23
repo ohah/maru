@@ -6,6 +6,7 @@ const parser = @import("parser.zig"); // VT 파서(write feed + escape/CSI/OSC/D
 const screen = @import("screen.zig"); // 화면 storage + 활성 화면 연산(grid·cursor·scroll·print·resize·snapshot) — 목적별 분리
 const selection = @import("selection.zig"); // 선택/검색/URL/preedit(화면을 읽는 상위 레이어) — 목적별 분리
 const kitty = @import("kitty.zig"); // kitty graphics 본체(transmit·display·delete·view) — 목적별 분리
+const input_report = @import("input_report.zig"); // 입력/이벤트 → host 바이트 인코딩(키·paste·focus·mouse) — 목적별 분리
 // kitty graphics 저장 struct는 kitty.zig 소유(self-contained — Scrollback 선례). core는 별칭으로 필드 타입을 둔다.
 const KittyGraphicsCommand = kitty.KittyGraphicsCommand;
 const StoredPlacement = kitty.StoredPlacement;
@@ -793,32 +794,10 @@ pub const TerminalCore = struct {
         return self.sb.prompt_marks[(self.sb.head + i) % self.sb.prompt_marks.len];
     }
 
-    /// 붙여넣기 바이트를 PTY 입력으로 인코딩한다: 개행을 CR로 정규화(\r\n/\n -> \r — 셸 입력의
-    /// 줄바꿈 관례)하고, 프로그램이 bracketed paste(DECSET 2004)를 켰으면 ESC[200~ ... ESC[201~로
-    /// 감싼다(타이핑과 구분돼 자동 들여쓰기/즉시 실행 방지). 호출자가 free한다.
+    /// 붙여넣기 바이트를 PTY 입력으로 인코딩한다(bracketed paste 래핑 + CR 정규화 + ESC 인젝션 방어).
+    /// 본문: input_report.encodePaste. 호출자가 free한다.
     pub fn encodePaste(self: *const TerminalCore, allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(allocator);
-        if (self.bracketed_paste) try out.appendSlice(allocator, "\x1b[200~");
-        var i: usize = 0;
-        while (i < bytes.len) : (i += 1) {
-            const b = bytes[i];
-            if (b == '\r' or b == '\n') {
-                try out.append(allocator, '\r');
-                if (b == '\r' and i + 1 < bytes.len and bytes[i + 1] == '\n') i += 1; // CRLF는 한 번만
-            } else if (b == 0x1b) {
-                // 보안: 붙여넣기 본문의 ESC를 공백으로 치환한다. 안 그러면 악성 클립보드가 ESC[201~
-                // 를 심어 bracketed paste 괄호를 일찍 닫고, 뒤따르는 \r-종료 바이트가 "타이핑"으로
-                // 실행된다(고전적 paste 인젝션). bracketed paste를 안 쓸 때도 ESC 시퀀스가 그대로
-                // 터미널에 주입되는 걸 막는다. ECMA-48의 C1/CSI는 ESC로 시작하므로 ESC만 막으면
-                // 시퀀스가 무력화된다. Ghostty(input/paste.zig)도 같은 보호를 한다.
-                try out.append(allocator, ' ');
-            } else {
-                try out.append(allocator, b);
-            }
-        }
-        if (self.bracketed_paste) try out.appendSlice(allocator, "\x1b[201~");
-        return try out.toOwnedSlice(allocator);
+        return input_report.encodePaste(self, allocator, bytes);
     }
 
     // ── 선택/검색/URL facade — 본문은 selection.zig(외부 점-호출이라 struct 메서드로 잔류) ──────────
@@ -1161,58 +1140,13 @@ pub const TerminalCore = struct {
         return if (value == 0) default else value;
     }
 
-    /// focus reporting(DECSET 1004)이 켜져 있으면 창 포커스 변화를 CSI I(gained)/CSI O(lost)로 PTY에 리포트한다.
-    /// 베이스: xterm focus event(mode 1004) — 인코딩은 Ghostty `focus.zig`와 동일(`\x1b[I`/`\x1b[O`). off면 무동작.
+    /// focus reporting(DECSET 1004) 변화를 CSI I/O로 리포트. 본문: input_report.reportFocus.
     pub fn reportFocus(self: *TerminalCore, gained: bool) void {
-        if (!self.focus_events) return;
-        self.appendResponse(if (gained) "\x1b[I" else "\x1b[O");
+        input_report.reportFocus(self, gained);
     }
-
-    /// mouse 이벤트를 앱에 리포트한다(mouse_tracking이 .none이 아닐 때). col/row는 0-based(인코딩은 1-based로 +1).
-    /// button: 0=left,1=middle,2=right, 3=no-button(any-event motion), 64=wheel-up,65=wheel-down. mods 비트: 4=shift,8=meta(alt),16=ctrl. motion이면
-    /// drag/move(button·any 모드만, Cb에 +32). 베이스: xterm — SGR(1006/1016) `CSI < Cb;Px;Py M`(press)/`m`(release);
-    /// x10 `CSI M` + (32+Cb)(32+Px)(32+Py) 바이트(좌표 223 초과는 깨져 SGR 권장, release는 버튼 미상이라 Cb=3).
-    /// 마우스 이벤트를 활성 tracking 모드/format으로 PTY에 리포트한다. col/row는 0-based 셀,
-    /// x_px/y_px는 0-based 픽셀이며 SGR-Pixels(1016) format에서만 쓴다 — platform이 활성 pane
-    /// 영역 좌상단 기준 backing(device) 픽셀로 보정해 전달한다. SGR/x10 format은 픽셀을 무시하고
-    /// 셀 좌표를 인코딩한다.
+    /// 마우스 이벤트를 활성 tracking/format으로 PTY에 리포트. 본문: input_report.reportMouse.
     pub fn reportMouse(self: *TerminalCore, button: u8, col: u16, row: u16, x_px: u16, y_px: u16, pressed: bool, motion: bool, mods: u8) void {
-        if (self.mouse_tracking == .none) return;
-        // motion(drag/move)은 button·any 모드만 리포트한다(x10/normal은 press·release만).
-        if (motion and self.mouse_tracking != .button and self.mouse_tracking != .any) return;
-        // x10은 press만 리포트(release를 안 보낸다).
-        if (!pressed and self.mouse_tracking == .x10) return;
-        const cb: u32 = @as(u32, button) + @as(u32, mods) + (if (motion) @as(u32, 32) else 0);
-        var buf: [32]u8 = undefined;
-        const out = switch (self.mouse_format) {
-            .sgr => std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{
-                cb, @as(u32, col) + 1, @as(u32, row) + 1, @as(u8, if (pressed) 'M' else 'm'),
-            }) catch return,
-            // SGR-Pixels(1016): 1006과 같은 형식이되 셀이 아니라 픽셀 좌표를 1-based로 리포트한다.
-            // 베이스: xterm ctlseqs "report position in pixels rather than character cells". 단위는
-            // maru가 마우스·렌더 전반에 쓰는 backing(device) 픽셀로, xterm X11 device-pixel 관례와 정합한다.
-            .sgr_pixels => std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{
-                cb, @as(u32, x_px) + 1, @as(u32, y_px) + 1, @as(u8, if (pressed) 'M' else 'm'),
-            }) catch return,
-            // urxvt(1015): x10과 같은 Cb(32 offset)·1-based 셀 좌표를 바이트가 아니라 십진수 `CSI Cb;Px;Py M`로
-            // 보낸다(release는 x10처럼 Cb=3). 좌표 무제한이라 x10의 >223 깨짐이 없다. 베이스: urxvt 1015.
-            .urxvt => blk: {
-                const eb: u32 = if (pressed) cb else 3;
-                break :blk std.fmt.bufPrint(&buf, "\x1b[{d};{d};{d}M", .{
-                    32 + eb, @as(u32, col) + 1, @as(u32, row) + 1,
-                }) catch return;
-            },
-            .x10 => blk: {
-                // x10은 release 시 버튼 미상이라 Cb=3(sentinel). 각 바이트 32 offset, 255 saturate(>223 깨짐).
-                const eb: u32 = if (pressed) cb else 3;
-                break :blk std.fmt.bufPrint(&buf, "\x1b[M{c}{c}{c}", .{
-                    @as(u8, @intCast(@min(32 + eb, 255))),
-                    @as(u8, @intCast(@min(32 + @as(u32, col) + 1, 255))),
-                    @as(u8, @intCast(@min(32 + @as(u32, row) + 1, 255))),
-                }) catch return;
-            },
-        };
-        self.appendResponse(out);
+        input_report.reportMouse(self, button, col, row, x_px, y_px, pressed, motion, mods);
     }
 
     /// 호스트(PTY)로 보낼 응답 바이트를 버퍼에 적재한다(best-effort). osc.zig 등 목적별 host-reply 모듈이
@@ -1262,14 +1196,13 @@ pub const TerminalCore = struct {
         self.dirty = null;
     }
 
+    /// KeyEvent를 PTY 입력 바이트로 인코딩(현재 입력 모드 반영). 본문: input_report.encodeKey.
     pub fn encodeKey(self: *const TerminalCore, event: input.KeyEvent, buffer: *[input.encoded_key_buffer_len]u8) ![]const u8 {
-        return input.encodeKey(event, buffer, self.encodeOptions());
+        return input_report.encodeKey(self, event, buffer);
     }
-
-    /// 이 surface의 현재 입력 인코딩 모드. 키를 인코딩하는 쪽(keybinding resolver 경유 포함)이
-    /// 매 키마다 읽어 전달한다 — DECCKM은 프로그램이 수시로 켜고 끈다(vim 진입/이탈).
+    /// 현재 입력 인코딩 모드(DECCKM·kitty·keypad). 본문: input_report.encodeOptions.
     pub fn encodeOptions(self: *const TerminalCore) input.EncodeOptions {
-        return .{ .application_cursor_keys = self.application_cursor_keys, .kitty_flags = self.kitty_flags.current().int(), .application_keypad = self.application_keypad };
+        return input_report.encodeOptions(self);
     }
 
     pub fn dumpUtf8(self: *const TerminalCore, allocator: std.mem.Allocator) ![]u8 {

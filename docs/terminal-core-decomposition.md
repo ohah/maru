@@ -319,3 +319,26 @@ selection은 화면/스크롤백을 **읽어** 좌표·텍스트를 산출하는
 
 - **API 표면 축소**: kitty.zig의 intra-only 6개(`kittyAdvanceRows`·`addOrReplacePlacement`·`removePlacementsForImage`·`removeOnePlacement`·`storeKittyImage`·`deleteByZ`) + `KittyImage` struct + `KittyImageStorage.add`/`.remove`를 `pub`→private 데모트. K2 시점엔 store/deleteByZ가 core orchestrator에 cross-file 호출돼 pub였지만 K3에서 orchestrator가 kitty.zig로 와 intra-only가 됨. **pub 유지(cross-file)**: `execKittyGraphics`(parser)·`shiftPlacementsForEviction`(core seam)·`buildPlacementViews`/`buildImageViews`(core facade)·`kittyImageHasPlacement`(테스트)·struct 3개(필드 타입)·`KittyImageStorage.clear`/`.deinit`(core fullReset/deinit).
 - **stale 포인터**: `types.zig`의 KittyPlacement 주석 "core.zig의 KittyGraphicsCommand" → "kitty.zig의 …"(K1서 이동), `max_kitty_placements` 주석 정정.
+
+---
+
+## 9. input_report.zig 분리 (후속 initiative)
+
+§6의 input/report.zig 후속을 §1~§5·§7·§8과 **같은 절차·메커니즘**으로 진행한다. 입력/이벤트를 host(PTY) 바이트로 인코딩하는 클러스터(현 core.zig, 함수 5개)를 `input_report.zig`로 떼어낸다(파일명은 core_owner.zig 선례의 underscore 컨벤션).
+
+### 9.1 경계 설계
+
+- **이동 5개(전부 외부 점-호출 → core facade)**: `encodeKey`(KeyEvent→바이트, input.encodeKey 위임)·`encodeOptions`(현재 입력 모드 → input.EncodeOptions)·`encodePaste`(bracketed paste 래핑 + CR 정규화 + ESC 인젝션 방어)·`reportFocus`(DECSET 1004, CSI I/O)·`reportMouse`(SGR/SGR-Pixels/urxvt/x10 마우스 리포트). 본문은 input_report.zig free 함수, core엔 위임 메서드.
+- **core 잔류**: `appendResponse`/`pendingResponse`/`clearResponse`(host-reply 응답 버퍼 `self.response` primitive — parser/osc/kitty/report 전부가 씀, core 잔류. reportFocus/Mouse가 `self.appendResponse`로 호출). `dumpUtf8`(그리드→UTF-8 직렬화 — 입력/리포트 아니라 screen 덤프, test/smoke 8곳이 씀, core 잔류).
+- **의존**: input_report.zig는 std·core·input(키 인코딩 primitive)만. self 필드(bracketed_paste·focus_events·mouse_tracking·mouse_format·application_cursor_keys·kitty_flags·application_keypad) 직접 접근. intra: encodeKey→encodeOptions(self).
+- **레이어**: core↔input_report 상호 import(osc/selection/kitty와 동형). check-boundaries가 terminal/ walk라 자동 포함.
+
+### 9.2 PR 시퀀스
+
+5함수 cohesive·intra-dep는 encodeKey→encodeOptions뿐이라 **단일 PR(R1)**로 이동 + facade. 이어서 `/code-review max` 1회.
+
+| PR | 범위(이동) | 비고 | 위험 |
+|---|---|---|---|
+| **R1** ✅ | input_report.zig 신설 + `encodeKey`·`encodeOptions`·`encodePaste`·`reportFocus`·`reportMouse` | facade 5개. appendResponse/dumpUtf8 core 잔류. reportFocus/Mouse는 self.appendResponse(core) 호출, encodeKey는 encodeOptions(self) intra. core.zig 6233→6166줄, input_report.zig 113줄 | 낮음~중 |
+
+검증·리뷰는 §5 그대로(4종 게이트 green auto-merge --rebase + `/code-review max`).

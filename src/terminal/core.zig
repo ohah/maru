@@ -9,9 +9,7 @@ const kitty = @import("kitty.zig"); // kitty graphics 본체(transmit·display·
 // kitty graphics 저장 struct는 kitty.zig 소유(self-contained — Scrollback 선례). core는 별칭으로 필드 타입을 둔다.
 const KittyGraphicsCommand = kitty.KittyGraphicsCommand;
 const StoredPlacement = kitty.StoredPlacement;
-const KittyImage = kitty.KittyImage;
 const KittyImageStorage = kitty.KittyImageStorage;
-const png = @import("png.zig"); // kitty graphics f=100 PNG 디코드(K3c)
 const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
 const CoreOwner = @import("core_owner.zig").CoreOwner; // core_mutex 재진입 추적(디버그 전용 안전망)
 
@@ -1038,56 +1036,6 @@ pub const TerminalCore = struct {
         return had;
     }
 
-    /// 파싱된 kitty graphics command를 실행한다. transmit(디코드+저장)·display(placement)·delete까지 —
-    /// query 응답·애니메이션은 후속. payload는 control(';' 전) 다음 base64다.
-    /// parser.dispatchApc가 파싱한 command를 실행(transmit/display/delete) — parser가 cross-file 호출하므로 pub.
-    pub fn execKittyGraphics(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
-        switch (cmd.action) {
-            't' => self.kittyTransmit(cmd, payload),
-            'T' => { // transmit + display(한 command로 저장 후 placement까지)
-                self.kittyTransmit(cmd, payload);
-                self.kittyDisplay(cmd);
-            },
-            'p' => self.kittyDisplay(cmd), // 기존 이미지를 placement로 표시
-            'd' => self.kittyDelete(cmd), // delete: d= 타깃에 따라 placement(소문자)/이미지까지(대문자) 제거
-            else => {}, // q(query)·f/a/c(애니메이션)는 후속
-        }
-    }
-
-    /// kitty graphics display(a=p/T): 저장된 이미지를 현재 커서 셀에 placement로 건다. 이미지가 없으면
-    /// 무시한다(graceful — transmit 실패/미전송 이미지). (image_id, placement_id) 같은 키는 교체한다.
-    /// 커서 이동 정책(C): 기본(C≠1)은 이미지 아래로 커서를 내린다 — 단 행 수(r)가 명시됐을 때만이다.
-    /// 자동 크기(r 미지정)는 setCellMetrics로 주입된 셀 메트릭이 있으면 이미지 픽셀 높이를 행 span으로 환산해
-    /// 내리고(kittyAdvanceRows — 렌더러 buildGpuImages와 같은 `PlacementGeometry` 공유), 메트릭이 없으면
-    /// (헤드리스) 옮기지 않는다(K1 fallback). 화면 끝을 넘기는 이동은 스크롤 없이 마지막 행으로 clamp한다(이미지 표시가
-    /// 스크롤을 유발하지 않게). 베이스: kitty graphics protocol display.
-    fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
-        if (cmd.image_id == 0) return;
-        if (!self.kitty_images.map.contains(cmd.image_id)) return; // 없는 이미지는 표시 안 함
-        kitty.addOrReplacePlacement(self, .{
-            .image_id = cmd.image_id,
-            .placement_id = cmd.placement_id,
-            .anchor_row = self.sb.count + self.cursor.row, // 커서의 절대 행
-            .anchor_col = self.cursor.col,
-            .cell_x_offset = cmd.cell_x_offset,
-            .cell_y_offset = cmd.cell_y_offset,
-            .src_x = cmd.src_x,
-            .src_y = cmd.src_y,
-            .src_width = cmd.src_width,
-            .src_height = cmd.src_height,
-            .columns = cmd.columns,
-            .rows = cmd.rows,
-            .z = cmd.z,
-        });
-        if (!cmd.no_cursor_move) {
-            const rows_span = kitty.kittyAdvanceRows(self, cmd);
-            if (rows_span > 0) {
-                const target = @as(usize, self.cursor.row) + rows_span;
-                self.cursor.row = @intCast(@min(target, self.size.rows - 1));
-            }
-        }
-    }
-
     /// 셀 픽셀 크기를 platform이 주입한다(폰트·DPI·resize 시 갱신). kitty 자동 크기 이미지의 커서 advance에
     /// 쓴다(마우스 1016이 픽셀을 주입하는 것과 같은 결). 그 외 픽셀↔셀 환산은 렌더러 책임(K1).
     pub fn setCellMetrics(self: *TerminalCore, cell_width_px: u32, cell_height_px: u32) void {
@@ -1102,36 +1050,6 @@ pub const TerminalCore = struct {
         self.default_bg_rgb = bg;
     }
 
-    /// kitty display가 커서를 내릴 행 수. rows(r)가 명시되면 그 값, 자동 크기(r 미지정)면 셀 메트릭이 있을 때
-    /// kitty graphics delete(a=d). d= 타깃 문자로 무엇을 지울지 정한다. **소문자=placement만 제거**(이미지
-    /// 데이터는 남겨 재표시 가능), **대문자=placement + 이미지 데이터까지 free**. 베이스: kitty graphics
-    /// protocol(deletion). 핵심 부분집합만 지원: a/A(전체)·i/I(image_id[+placement_id])·z/Z(z-index).
-    /// 나머지(c 커서·n 이미지번호·p/q/x/y/r 위치·f 애니메이션)는 셀 span/이미지번호가 필요해 graceful 무시.
-    fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) void {
-        const c = cmd.delete_what;
-        const free_image = (c >= 'A' and c <= 'Z'); // 대문자면 이미지 데이터도 free
-        const target = if (free_image) c - 'A' + 'a' else c; // 소문자로 정규화
-        switch (target) {
-            'a' => { // 전체
-                self.kitty_placements.clearRetainingCapacity();
-                if (free_image) self.kitty_images.clear(self.allocator);
-            },
-            'i' => { // image_id로(+ 선택적 placement_id)
-                if (cmd.image_id == 0) return;
-                if (free_image) { // 이미지 + 그 이미지의 모든 placement 제거
-                    kitty.removePlacementsForImage(self, cmd.image_id);
-                    self.kitty_images.remove(self.allocator, cmd.image_id);
-                } else if (cmd.placement_id != 0) {
-                    kitty.removeOnePlacement(self, cmd.image_id, cmd.placement_id);
-                } else {
-                    kitty.removePlacementsForImage(self, cmd.image_id);
-                }
-            },
-            'z' => kitty.deleteByZ(self, cmd.z, free_image), // z-index로
-            else => {}, // c/n/p/q/x/y/r/f는 미지원(graceful) — 셀 span·이미지번호 필요
-        }
-    }
-
     /// 렌더 placement view 합성. 본문: kitty.buildPlacementViews. screen.snapshot이 self.로 호출(screen→kitty 역전 방지 facade).
     pub fn buildPlacementViews(self: *TerminalCore, top_abs: usize) []const types.KittyPlacement {
         return kitty.buildPlacementViews(self, top_abs);
@@ -1139,82 +1057,6 @@ pub const TerminalCore = struct {
     /// 렌더 image view 합성. 본문: kitty.buildImageViews. screen.renderSnapshot이 self.로 호출(facade).
     pub fn buildImageViews(self: *TerminalCore) []const types.KittyImageView {
         return kitty.buildImageViews(self);
-    }
-
-    /// kitty graphics transmit: base64 payload를 디코드해 RGBA(f=32)/RGB(f=24) 이미지를 저장한다.
-    /// zlib(o=z) 압축이면 base64 디코드 후 inflate한다(K3b). PNG(f=100)는 후속(K3c). 베이스: kitty
-    /// graphics protocol transmit — RGBA/RGB 직접 픽셀은 base64만 풀면 되고, zlib은 std.compress로 푼다.
-    fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
-        if (cmd.image_id == 0) return; // 필수 control 누락(저장 키)
-        if (cmd.format == 100) return self.kittyTransmitPng(cmd, payload); // PNG는 별도 경로(s/v는 PNG가 자기기술)
-        const bpp: u8 = switch (cmd.format) {
-            24 => 3,
-            32 => 4,
-            else => return, // 알 수 없는 format
-        };
-        if (cmd.width == 0 or cmd.height == 0) return; // raw 픽셀은 치수가 필수
-        // 치수(s/v)는 APC에서 상한 없이 오는 u32라 곱이 usize를 넘을 수 있다(악의적 대형 값) — 오버플로면
-        // 거부한다(graceful). 안 그러면 Debug/ReleaseSafe에서 panic, ReleaseFast에선 wrap된다(code review).
-        const wh = std.math.mul(usize, cmd.width, cmd.height) catch return;
-        const expected = std.math.mul(usize, wh, bpp) catch return;
-
-        // base64 디코드 → raw 바이트(압축이면 압축 데이터, 아니면 곧 픽셀).
-        const dec = std.base64.standard.Decoder;
-        const decoded_len = dec.calcSizeForSlice(payload) catch return; // 잘못된 base64
-        if (decoded_len == 0) return;
-        if (cmd.compression == 0 and decoded_len != expected) return; // 비압축은 디코드 크기 = 선언 크기여야(early reject)
-        const raw = self.allocator.alloc(u8, decoded_len) catch return;
-        dec.decode(raw, payload) catch {
-            self.allocator.free(raw);
-            return;
-        };
-
-        // 압축 해제. o=z(zlib)만 지원, 그 외 압축은 거부. 없으면 raw가 곧 픽셀.
-        const data: []u8 = switch (cmd.compression) {
-            0 => raw,
-            'z' => blk: {
-                defer self.allocator.free(raw); // 압축 입력은 inflate 후 불필요
-                // PNG IDAT 경로와 같은 exact-inflate 공유(중복 제거) — expected로 바운드하고 over-long 거부.
-                break :blk png.inflateExact(self.allocator, raw, expected) catch return;
-            },
-            else => {
-                self.allocator.free(raw); // 알 수 없는 압축
-                return;
-            },
-        };
-        if (data.len != expected) { // 선언 크기 ≠ 실제 픽셀(inflate가 보장하지만 비압축 경로 가드)
-            self.allocator.free(data);
-            return;
-        }
-        kitty.storeKittyImage(self, .{
-            .id = cmd.image_id,
-            .width = cmd.width,
-            .height = cmd.height,
-            .bpp = bpp,
-            .data = data,
-        });
-    }
-
-    /// kitty graphics transmit PNG(f=100): base64 디코드 후 PNG 디코더로 RGB/RGBA 픽셀을 푼다. 치수·bpp는
-    /// PNG가 자기기술하므로 s/v control은 안 본다. 8-bit truecolor만 지원(미지원 변종·malformed는 graceful
-    /// 거부 — png.zig). PNG에 추가 압축(o=z)은 미지원(PNG는 이미 압축됨, 실사용 없음). 베이스: kitty graphics
-    /// protocol(f=100) + PNG 명세.
-    fn kittyTransmitPng(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) void {
-        if (cmd.compression != 0) return; // PNG + 추가 압축은 미지원(rare)
-        const dec = std.base64.standard.Decoder;
-        const decoded_len = dec.calcSizeForSlice(payload) catch return;
-        if (decoded_len == 0) return;
-        const png_bytes = self.allocator.alloc(u8, decoded_len) catch return;
-        defer self.allocator.free(png_bytes); // PNG 파일 바이트는 디코드 후 불필요
-        dec.decode(png_bytes, payload) catch return;
-        const img = png.decode(self.allocator, png_bytes) catch return; // 미지원/malformed는 graceful 거부
-        kitty.storeKittyImage(self, .{
-            .id = cmd.image_id,
-            .width = img.width,
-            .height = img.height,
-            .bpp = img.bpp,
-            .data = img.data, // storeKittyImage→add가 소유권 가져감
-        });
     }
 
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.

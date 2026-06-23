@@ -4260,6 +4260,20 @@ test "selection re-injects VS16 for keycap emoji so copied bytes match the rende
     try std.testing.expectEqualStrings("\x32\xef\xb8\x8f\xe2\x83\xa3", text);
 }
 
+test "selection extracts an NFD Hangul cluster losslessly (multi-codepoint grapheme body)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
+    defer core.deinit();
+    // NFD '한' = 초성 U+1112 + 중성 U+1161 + 종성 U+11AB. 한 셀에 묶이고 중성·종성은 grapheme_store에
+    // 담긴다 — 복사 바이트가 원본 자모 3개를 모두 보존해야(잘림 금지, 설계 §3.2) 붙여넣는 앱에서
+    // 음절이 깨지지 않는다(combining 그림자만 복사하면 종성이 사라진다).
+    try core.write("\u{1112}\u{1161}\u{11AB}");
+    core.selectionStart(0, 0);
+    core.selectionExtend(0, 1);
+    const text = (try core.extractSelection(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("\u{1112}\u{1161}\u{11AB}", text);
+}
+
 test "selection span clips to the viewport and follows scrolling" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
     defer core.deinit();

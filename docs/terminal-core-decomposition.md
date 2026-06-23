@@ -477,4 +477,62 @@ cleanup 2건만 정리(B6):
 1. **resize alt 분기 중복 → `clampScreenCursorForResize(s, size)` 헬퍼**: 활성·보관 두 화면에 같은 5연산(커서·DECSC 슬롯 clamp + pending_wrap/last_print 무효화)을 손으로 복제하던 것을 swap 단위(Screen) 한 헬퍼로 묶어 drift 위험 제거(altitude — 두 블록이 어긋나면 OOB-after-leave 버그 재발).
 2. **`activeSavedCursor` 인라인**: B5가 `alt_active` 분기를 없애 `&self.screen.saved_cursor` 한 줄 래퍼만 남았고 doc 주석이 사라진 분기를 재정당화 → `saveCursorState`/`restoreCursorState`에 직접 접근 + 근거를 `saveCursorState` 주석으로 이관, 함수 제거.
 
-**기록(범위 밖 — 후속)**: RIS(`ESC c`)가 DECSC 슬롯(`screen.saved_cursor`)을 안 비운다 — B4/B5 이전부터 그랬고(평평 슬롯 시절에도 미초기화) 이 분해가 도입한 게 아니다. xterm RIS는 슬롯을 비우므로 정합성 검토 가치가 있으나, 동작 변경이라 별도 결정 사항으로 §6에 남긴다.
+**후속 발견 → ✅ 해결**: RIS(`ESC c`)가 DECSC 슬롯(`screen.saved_cursor`)을 안 비우던 기존 동작(B4/B5 이전부터 — 평평 슬롯 시절에도 미초기화, 분해가 도입한 게 아님)을 별도 fix PR로 정합성 수정했다(베이스 VT100 RIS + Ghostty `Screen.reset()` saved_cursor=null, §6 참조). 사용자 합의 후 page storage 설계 전 area를 깨끗이 닫음.
+
+---
+
+## 11. page-aligned storage (architecture.md 진짜 최종 골 — 설계·합의 대기)
+
+architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈로 분리 + cursor·grid 완전한 Screen에 **page-aligned storage**를 얹는다"(+ §180 mmap/VirtualAlloc backing). 방향 A·B로 Screen 토대가 완성됐으니(grid+sb+cursor+saved_cursor 전부 Screen 귀속) 이제 그 storage 레이아웃을 바꾼다. **A·B와 성격이 다르다 — 순수 리팩터가 아니라 메모리 레이아웃·할당·성능 변경**이라 동작·perf 검증 폭이 넓고, **측정으로 전제 확인 후 단계적**으로 간다(§11.4).
+
+### 11.1 현 모델 vs 페이지 모델
+
+- **현재**: 활성 grid = 평평 `cells: []Cell`(rows×cols 연속) + 병렬 `wrapped`/`prompt_marks`. 스크롤백 = `Scrollback.ring: []?[]Cell`(행마다 `allocator.dupe` heap) + 병렬 메타 + head/count/cap + lazy rewrap. **활성과 스크롤백의 저장 모양이 다르다.**
+- **페이지 모델**: 고정 용량 `Page`(연속 rows×cols cells + 메타) 덩어리들을 리스트로 잇고, 활성 화면 = 리스트 꼬리 N행, 스크롤백 = 그 앞 전부(통합). 페이지 pool/freelist로 재사용, 바이트 단위 메모리 bound.
+
+페이지 저장이 주는 것: ① 스크롤백 push의 per-row alloc(dupe) churn 제거(페이지당 1 alloc) ② 활성 scroll의 O(rows) memmove를 페이지 경계 포인터 이동으로 ③ 바이트 단위 메모리 bound(현 행 수 cap) ④ 활성+스크롤백 통합 ⑤ mmap zero-fill backing(§180).
+
+### 11.2 maru 적응 — Ghostty 복잡도의 대부분은 불필요
+
+레퍼런스 Ghostty PageList는 ~19000줄(PageList 14710 + page 3918)이지만, **maru는 그 핵심 복잡도 대부분을 안 짊어진다**(블래스트 분석 확인):
+
+- **Pin 불필요**: maru 커서는 순수 `(row,col)` u16이 전 코드(262곳)에 박혀 있고 포인터 커서가 없다. Ghostty의 Pin(page ptr+offset+tracked pin pool, reflow마다 갱신) 인프라 전부 생략 — resize 시 지금처럼 `(row,col)` clamp/재계산만.
+- **offset 기반 직렬화 불필요**: maru는 mmap-to-disk COW/serialize를 안 하므로 페이지는 평범한 포인터 기반 struct로 충분(Ghostty의 `Offset(T)` 자료형 전부 생략).
+- **renderer 경계 이미 격리**: `RenderSnapshot`은 활성을 zero-copy slice, 스크롤백 뷰는 memcpy로 materialize(스크롤 시 이미 그렇게 함). 페이지 저장이면 뷰포트를 flat로 materialize만 하면 되고 renderer·selection(`absRow` 추상)·snapshot API는 **불변**.
+- **style/grapheme pool 생략**: Ghostty의 page-local style/grapheme intern pool은 maru Cell(self-contained) + 별도 grapheme_store(HG 작업)와 안 맞으니 채택 안 함.
+
+→ maru `Page ≈ { rows, cols, cells: []Cell, wrapped: []bool, prompt_marks: []RowPrompt }` 한 덩어리 + pool. 훨씬 작다.
+
+### 11.3 마이그레이션 옵션 (블래스트: reflow/rewrap ~430줄이 비용의 대부분)
+
+| 옵션 | 범위 | 비용(대략) | 위험 | payoff |
+|------|------|-----------|------|--------|
+| **A 스크롤백만 페이지화** | 활성 grid 평평 유지, `Scrollback.ring`을 페이지 리스트로 | ~150줄(pushScrollback·rewrapScrollback·scrollbackRow 접근자 뒤) | 중 | per-row dupe churn 제거 + 바이트 bound. 활성 hot-path·활성 reflow 불변 |
+| **B 전면 통합** | 활성+스크롤백 한 PageList, 활성=tail | ~400~600줄, reflow/print/scroll 전면 | 높음(직접 인덱싱→page-fetch perf 회귀 가능) | 전부(scroll O(1) 포함) |
+| **C 하이브리드(권장)** | A를 1단계로 굳히고, 측정 뒤 B를 후속 단계로 | A + (측정) + B | 단계별 통제 | A 즉시, B는 게이트 뒤 |
+
+### 11.4 perf 전제 검증 우선 (no-defensive-code 정신 — 추측 말고 측정)
+
+큰 재작성 전에 **진짜 병목인지 측정**한다: 대량 출력(스크롤백 push churn)·스크롤 워크로드(활성 memmove)를 현 perf 게이트(`core_resize_loop`·`core performance budget`)로 벤치해 페이지화 이득을 수치화. 측정이 payoff를 못 보이면 A에서 멈추거나 보류한다. page-fetch가 hot-path를 느리게 할 위험이 실재하므로(직접 인덱싱 대비) B는 측정 게이트를 통과해야 진행.
+
+### 11.5 리스크
+
+- **reflow 재작성이 정확성 위험 최고**(soft-wrap·wide-glyph spacer·prompt_mark 경계 — 페이지 경계까지 얹힘). 단계마다 누적 `/code-review max` + 기존 reflow 테스트 보존.
+- **mmap backing은 platform 경계**(§180: allocator 주입 + 특수 영역만 직접) — terminal층이 mmap 직접 호출하면 이식성/경계와 충돌. 도입 시점·책임 위치 별도 결정.
+- **hot-path perf 회귀**(page-fetch 오버헤드)가 perf 게이트 위협.
+
+### 11.6 결정 — C(측정 먼저 → A → 게이트 B), 확정
+
+사용자와 합의해 **옵션 C**로 간다. 추측 없이 측정으로 전제를 검증하고, 위험이 통제되는 A를 먼저 굳힌 뒤, payoff가 수치로 확인될 때만 B(전면 통합)로 확장한다. mmap backing은 순수 heap 페이지를 먼저 안정화한 뒤의 후속이다.
+
+**단계 (각 단계 doc-first + 누적 `/code-review max`)**:
+
+| 단계 | 내용 | 게이트 |
+|------|------|--------|
+| **P0 측정** | 스크롤백 push churn(대량 출력)·활성 scroll memmove 워크로드를 perf 게이트(`core performance budget`·`core_resize_loop`)로 벤치, baseline 수치를 §11.4에 기록 | — |
+| **P1 옵션 A** | `Scrollback.ring`(행마다 `dupe`)을 `Page` 리스트로. `Page = { rows, cols, cells, wrapped, prompt_marks } + pool`. `pushScrollback`·`rewrapScrollback*`·`scrollbackRow*` 접근자 뒤로 캡슐화(공개 API·renderer·selection 불변) | A 후 push/메모리 재측정 — 개선 확인 |
+| **P2 게이트** | A 측정 결과로 B 진행 여부 결정. payoff 미미하면 A에서 정지(스크롤백 모듈화 + 바이트 bound만 취득) | 수치 기반 go/no-go |
+| **P3 옵션 B** | (게이트 통과 시) 활성 grid를 같은 PageList로 통합, 활성=tail. reflow/print/scroll 전면 재작성 | hot-path perf 게이트 통과 필수 |
+| **P4 mmap** | (후속) page backing을 mmap/VirtualAlloc로(§180). platform 경계 책임 위치 별도 설계 | 이식성·경계 검증 |
+
+**열린 세부(P1 착수 시 확정)**: 페이지 크기(행 수)·pool 정책·바이트 cap을 행 수 cap에 어떻게 매핑할지.

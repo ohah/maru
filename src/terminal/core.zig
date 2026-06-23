@@ -115,7 +115,16 @@ const Screen = screen.Screen;
 /// link_ids(StringHashMap, []u8 키)의 []u21 판이다(같은 cluster를 한 번만 저장).
 const GraphemeKeyContext = struct {
     pub fn hash(_: GraphemeKeyContext, key: []const u21) u64 {
-        return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(key));
+        // **값 기반** 해시 — `sliceAsBytes([]u21)`는 u21의 4바이트 backing 중 상위 11 패딩 비트를
+        // 같이 해시해서, 같은 값이라도 패딩(alloc 잔재)이 다르면 다른 해시가 나온다(eql은 값만 비교 →
+        // "같은 키는 같은 해시" 계약 위반 → dedup이 새 entry를 또 만든다). 각 코드포인트를 u32로 넓혀
+        // 정의된 바이트만 해시한다(eql과 일치).
+        var h = std.hash.Wyhash.init(0);
+        for (key) |cp| {
+            const v: u32 = cp;
+            h.update(std.mem.asBytes(&v));
+        }
+        return h.final();
     }
     pub fn eql(_: GraphemeKeyContext, a: []const u21, b: []const u21) bool {
         return std.mem.eql(u21, a, b);
@@ -4944,6 +4953,28 @@ test "grapheme_store: intern/lookup/append round-trip + dedup (link_ids 패턴)"
     try std.testing.expectEqual(@as(u32, 1), try core.internGrapheme(&.{ 0x1161, 0x11AB }));
 }
 
+test "grapheme dedup: 힙 버퍼(다른 메모리)로 같은 cluster를 intern해도 같은 id (값 기반 해시)" {
+    // 회귀 고정: u21은 stride 4바이트(21 값 비트 + padding). `alloc(u21)`로 만든 버퍼는 값 store가 alignment
+    // 바이트를 안 건드려(plat. 따라) alloc 잔재가 padding에 남을 수 있다. 옛 해시(`sliceAsBytes([]u21)`)는 그
+    // dirty padding까지 해시해 — 같은 cluster라도 매 alloc마다 padding이 달라 다른 해시 → getContext miss →
+    // dedup이 같은 cluster를 store에 또 쌓는다(PR #991 잠재 버그, store 무한 증가). 값 기반 해시(u32 widen)면
+    // padding과 무관하게 같은 값→같은 해시→dedup HIT. 여기선 **별도 힙 버퍼**로 같은 값을 intern해도 한
+    // entry임을 고정한다(comptime 리터럴 재사용 dedup 테스트는 padding이 우연 일치해 이 경로를 못 짚었다).
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    const id1 = try core.internGrapheme(&.{ 0x1161, 0x11AB });
+    try std.testing.expectEqual(@as(usize, 1), core.grapheme_store.items.len);
+
+    // 같은 값을 별도 힙 alloc 버퍼(다른 주소·다른 padding 잔재 가능)로 intern → 값이 같으니 같은 id, store 불변.
+    const buf = try std.testing.allocator.alloc(u21, 2);
+    defer std.testing.allocator.free(buf);
+    buf[0] = 0x1161;
+    buf[1] = 0x11AB;
+    try std.testing.expectEqual(id1, try core.internGrapheme(buf));
+    try std.testing.expectEqual(@as(usize, 1), core.grapheme_store.items.len); // dedup — 안 커진다
+}
+
 test "OSC 8 hyperlink: click returns the stored URI regardless of visible text" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 3 });
     defer core.deinit();
@@ -5273,6 +5304,28 @@ test "emoji ZWJ + 스킨톤: 사람마다 스킨톤이 다른 가족도 한 셀�
     try std.testing.expectEqual(@as(u16, 2), s.cursor.col); // 한 글자 = 2칸
     try std.testing.expectEqual(@as(u21, 0x1F9D1), s.cells[0].codepoint);
     try expectCluster(&core, s.cells[0].grapheme_id, &.{ 0x1F3FB, 0x200D, 0x1F91D, 0x200D, 0x1F9D1, 0x1F3FD });
+}
+
+test "emoji 통합 경로 엣지: 스킨톤은 폭 2 base에만·ZWJ는 RI base에 안 붙는다 (회귀 가드)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[?2027h");
+
+    // (1) 좁은 그림문자(❤ U+2764, 폭 1)에 스킨톤이 붙으면 안 된다 — Fitzpatrick은 Emoji_Modifier_Base(폭 2)
+    // 에만 유효하다. 붙이면 promoteLastToEmojiWidth가 ❤를 1→2로 잘못 늘렸다(malformed 입력). 스킨톤은 제 셀로.
+    try core.write("\u{2764}\u{1F3FD}"); // ❤ + 🏽
+    try std.testing.expectEqual(@as(u21, 0x2764), core.screen.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u2, 1), core.screen.cells[0].width); // 1 유지(승격 안 됨)
+    try expectCluster(&core, core.screen.cells[0].grapheme_id, &.{}); // 스킨톤 흡수 안 함
+    try std.testing.expectEqual(@as(u21, 0x1F3FD), core.screen.cells[1].codepoint); // 스킨톤 별도 셀
+
+    // (2) 짝 안 찬 국기(반쪽 RI 🇰 U+1F1F0, 폭 1) 뒤 ZWJ는 흡수되면 안 된다 — 유효한 emoji 시퀀스에
+    // flag+ZWJ 없음. RI는 GB12/13(다음 RI와 짝)만 따르고 ZWJ(GB11)에 안 낚인다.
+    try core.write("\r\n\u{1F1F0}\u{200D}"); // 🇰(lone RI) + ZWJ
+    try std.testing.expectEqual(@as(u21, 0x1F1F0), core.screen.cells[12].codepoint);
+    try std.testing.expectEqual(@as(u2, 1), core.screen.cells[12].width); // 1 유지
+    try expectCluster(&core, core.screen.cells[12].grapheme_id, &.{}); // ZWJ 흡수 안 함
+    try std.testing.expectEqual(@as(u21, 0x200D), core.screen.cells[13].codepoint); // ZWJ 별도 셀
 }
 
 test "DECRQM reports mode 2027 state so apps can detect support" {

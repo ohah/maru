@@ -21,6 +21,7 @@ const core = @import("core.zig");
 const types = @import("types.zig");
 const osc = @import("osc.zig"); // OSC host-reply 핸들러 — 라우터(dispatchOsc)가 코드별로 위임
 const screen = @import("screen.zig"); // CSI dispatch가 화면 연산(setOriginMode·enterAltScreen·putCell 등) 호출
+const kitty = @import("kitty.zig"); // APC kitty graphics — parseKittyGraphicsCommand의 결과 DTO(KittyGraphicsCommand) 소유
 
 const TerminalCore = core.TerminalCore;
 
@@ -281,9 +282,9 @@ pub fn abortKittyChunk(self: *TerminalCore) void {
 /// 추출하고 나머지는 후속 확장으로 무시한다. value는 단일 비숫자 문자면 그 문자(a/o), 아니면 정수
 /// (f/s/v/i/m) — 어느 key가 문자/정수인지는 kitty 명세 control data가 정한다. payload(base64)는
 /// 토대에선 보지 않는다(디코드·저장은 후속). 베이스: kitty graphics protocol control data. 결과 struct
-/// (KittyGraphicsCommand)는 core가 소유(exec·storage가 공유 — parse→exec DTO라 pub).
-pub fn parseKittyGraphicsCommand(body: []const u8) core.TerminalCore.KittyGraphicsCommand {
-    var cmd: core.TerminalCore.KittyGraphicsCommand = .{};
+/// (KittyGraphicsCommand)는 kitty.zig가 소유(exec·storage가 공유 — parse→exec DTO라 pub).
+pub fn parseKittyGraphicsCommand(body: []const u8) kitty.KittyGraphicsCommand {
+    var cmd: kitty.KittyGraphicsCommand = .{};
     const control = if (std.mem.indexOfScalar(u8, body, ';')) |i| body[0..i] else body;
     var it = std.mem.splitScalar(u8, control, ',');
     while (it.next()) |pair| {

@@ -1,0 +1,179 @@
+# Grapheme Cluster 저장·렌더링 전략 (한글 NFD 정공법)
+
+> 단일 출처(design). 이 문서는 Maru가 **다중 코드포인트 grapheme cluster**(NFD 한글 conjoining 자모, ZWJ 이모지 시퀀스, 국기, skin-tone, 다중 combining mark)를 **셀에 어떻게 저장하고 셰이핑·렌더링하는지**를 정한다. 핵심 동기는 macOS 파일명이 NFD(분해형)로 저장돼 `ls` 출력의 한글이 자모로 분리돼 보이는 버그다. Unicode 폭(EAW) 자체와 폰트/atlas/fallback 책임은 [폰트 전략](font-strategy.md)이 단일 출처이고, 이 문서는 그 위에서 **cluster 분절·저장·폭·셰이핑 통합**만 다룬다.
+
+작성일: 2026-06-23
+
+배경: 사용자가 Maru에서 `ls`로 한글 폴더 이름을 보면 자음·모음이 분리돼 보인다. 원인은 (1) macOS 파일시스템이 파일명을 NFD로 저장하고, (2) Maru가 그 conjoining 자모를 하나의 grapheme cluster로 묶어 한 셀에 담지 못하기 때문이다. 이 문서는 그 정공법(grapheme cluster 저장 모델)을 기록한다.
+
+## 0. 범위와 단일 출처
+
+이 문서는 **다중 코드포인트 grapheme의 분절·셀 저장·폭·셰이핑 통합**의 단일 출처다. 인접 주제는 각자의 단일 출처를 따른다.
+
+- Unicode 폭(EAW)·폰트 resolve·glyph atlas·fallback·이모지 컬러 글리프: [폰트 전략](font-strategy.md)
+- 폭 함수(`cellWidth`/`isCombiningMark`/`isWideCodepoint`)의 코드 단일 출처: `src/width.zig`
+- 셀/행 저장 구조(`Cell`, `RowCodepoints`): `src/terminal/types.zig`, `src/terminal/screen.zig`
+- 셰이핑·래스터(CoreText): `src/platform/macos/coretext_smoke.m`, `src/renderer/coretext_shaper.zig`
+- 폭/combining 검증 매트릭스 항목: [검증 매트릭스](verification-matrix.md)의 `wide-character(East-Asian width)` 항목
+- 단계별 구현 순서: [실제 구현 계획](implementation-plan.md)의 "한글 Grapheme Cluster 렌더링" 절
+
+이 문서는 **NFD conjoining 자모를 한 셀로 재결합해 정확한 폭·셰이핑으로 렌더**하는 메커니즘만 다룬다. 이미 완료된 East Asian wide(완성형 NFC 한글 2칸)·box/block 합성은 다루지 않는다.
+
+## 1. 현황 — 전략엔 방향이 있고, 구현은 멈췄고, 한글은 누락됐다
+
+세 층위를 구분해야 한다. "계획에 있었나 / 구현이 안 됐나 / 누락인가"의 답이 층위마다 다르다.
+
+### 1.1 메커니즘 방향(UAX#29 cluster)은 전략에 있었다
+
+[폰트 전략 §Cell Width와 Font Metric](font-strategy.md)이 이미 명시한다:
+
+> "grapheme cluster는 UAX#29 기준으로 분절하고, ZWJ 시퀀스·국기·skin-tone modifier는 하나의 cluster로 묶어 폭을 width policy로 정한다. 완전한 처리는 fixture로 확장한다." (`font-strategy.md`)
+
+즉 정공법의 방향(UAX#29로 cluster를 묶어 폭을 정한다)은 처음부터 전략 문서에 있었다.
+
+### 1.2 구현은 "combining 1개"에서 멈춰 있다 — 알려진 미구현
+
+전략은 UAX#29인데 코드는 거기까지 가지 않았다. `font-strategy.md`가 스스로 적은 현재 한계:
+
+> "현재 구현은 최소 width table, continuation cell, **combining mark 1개 저장**을 제공한다. … ZWJ emoji 폭 처리는 fixture를 추가하며 확장한다."
+
+> (v1에서 약속하지 않는 것) "**다중 코드포인트 grapheme의 완전한 폭/표시 정확도**."
+
+코드도 같은 한계를 자인한다 — `src/width.zig`의 키캡 이모지 보정 주석:
+
+> "maru 셀은 combining을 하나만 저장해(`types.Cell.combining`: 단일 `?u21`) VS16(U+FE0F)이 U+20E3에 덮여 사라진다. … 단일-combining 셀 모델을 보정하는 세 곳이 이 한 함수를 단일 출처로 공유한다(**다중-combining 저장이 근본 해법**)." (`width.zig` `isKeycapCombining`)
+
+→ 셀이 base 코드포인트 1개 + combining 1개만 담는 모델은 **문서·코드가 모두 인정한 미구현 후속**이고, 근본 해법(다중 저장)도 코드 주석에 이미 적혀 있다.
+
+### 1.3 "한글 NFD"라는 케이스 자체는 계획에서 누락됐다
+
+다중 코드포인트 grapheme의 예로 전략이 든 것은 **ZWJ 이모지·국기·skin-tone**(전부 이모지 계열)뿐이다. `docs/` 전체에서 `NFC / NFD / 정규화 / 자모 / jamo / conjoining / 첫가끝`은 **0건**이다(키 입력 정규화 문구는 유니코드 정규화가 아니다).
+
+→ 한글 NFD가 똑같은 다중 코드포인트 grapheme이고, **macOS 파일명이 NFD라서 `ls`에서 즉시 깨진다**는 시나리오는 시야에 없었다. 그래서 이 케이스는 이모지 전용 후속처럼 적혀 우선순위에서 빠져 있었다.
+
+## 2. 문제 — macOS 파일명 NFD가 `ls`에서 분리돼 보인다
+
+### 2.1 macOS 파일시스템의 NFD 저장
+
+- HFS+는 파일명을 분해형(Apple 변형 NFD)으로 **강제 저장**했다. APFS는 입력 바이트를 보존하되 정규화에 무관하게 비교하므로, NFD로 만들어진 이름이 그대로 남는다.
+- 결과: `ls`는 디스크의 바이트를 그대로 출력하므로, 한글 파일·폴더명이 **conjoining 자모 시퀀스(NFD)** 로 터미널에 들어온다.
+
+예: "한글"
+- NFC(완성형): `한`(U+D55C) `글`(U+AE00) — 코드포인트 2개
+- NFD(분해형): `ㅎ`(U+1112) `ㅏ`(U+1161) `ㄴ`(U+11AB) · `ㄱ`(U+1100) `ㅡ`(U+1173) `ㄹ`(U+11AF) — 코드포인트 6개(conjoining L/V/T)
+
+### 2.2 현재 Maru의 동작 — 폭부터 깨진다
+
+`src/width.zig`의 `isWideCodepoint`는 wide 범위로 `0x1100...0x115F`만 본다. 이 범위는 **초성(L) 영역만** 포함하고, 중성(V, U+1161~)·종성(T, U+11A8~)은 범위 밖이다. 또 `isCombiningMark`에는 한글 자모가 **하나도 없다**. 그래서 NFD 자모는 각각 독립 셀로, 다음 폭으로 그려진다:
+
+| 자모 | 코드포인트 | 분류 | 현재 `cellWidth` |
+| --- | --- | --- | --- |
+| ㅎ 초성 | U+1112 | L | **2** (`0x1100...0x115F`) |
+| ㅏ 중성 | U+1161 | V | **1** (범위 밖) |
+| ㄴ 종성 | U+11AB | T | **1** (범위 밖) |
+
+→ NFD "한" = 2+1+1 = **4칸**, "한글" = **8칸**. 정상(완성형 NFC, 음절당 2칸)의 **2배**다. 게다가 conjoining 자모가 combining(0폭 결합)으로 묶이지 않으므로 각 자모가 **별도 grapheme = 별도 셀**로 흩어져, 폰트가 음절로 합쳐 그리지 못하고 자모가 분리돼 보인다.
+
+대비:
+- **완성형(NFC) 한글**(`U+AC00...U+D7A3`)은 `isWideCodepoint`에 포함돼 2칸으로 정확하다 → Maru에서 **직접 타이핑한 한글은 멀쩡한데 `ls` 파일명만 깨지는** 비대칭이 생긴다.
+- iTerm2·Terminal.app은 CoreText 셰이핑 단계에서 conjoining 자모를 합쳐 그려 정상으로 보인다.
+
+> Before 캡처(실제 `ls` 출력의 자모 분리·정렬 깨짐)는 구현 PR에서 RGBA 덤프→PNG로 첨부한다("추측 말고 캡처").
+
+## 3. 설계 결정
+
+### 3.1 NFC 정규화로 때우지 않는다
+
+입력을 NFC로 정규화해 자모를 완성형으로 합치는 방법은 채택하지 않는다.
+
+- **옛한글·조합형은 NFC로도 안 합쳐진다.** 완성형 코드포인트가 있는 건 현대 한글 11,172자뿐이다. 첫가끝(옛한글) 조합은 NFC를 거쳐도 conjoining 자모 시퀀스로 남으므로, 정규화는 반쪽짜리다 — 결국 cluster 처리가 필요하다.
+- **터미널은 원본 코드포인트를 보존해야 한다.** 셸·vim·tmux는 "몇 개의 코드포인트를 어느 셀에 썼다"고 가정한다. 터미널이 임의로 NFC로 합치면 코드포인트 개수가 바뀌어 커서 위치·재그리기·selection·hit-test가 애플리케이션과 어긋난다. 정상적인 터미널(Ghostty 포함)은 정규화하지 않는다.
+
+→ 정규화가 아니라 **grapheme cluster로 묶어서 저장·셰이핑**하는 정공법으로 간다.
+
+### 3.2 정공법: cluster를 셀에 다중 코드포인트로 저장한다 (Ghostty식 모델, clean-room)
+
+Maru는 이미 셰이핑 엔진(CoreText)을 갖췄다. 막힌 곳은 **셀이 base + combining 1개만 담아** 초성+중성+종성(3개 이상)을 못 담는 저장 모델이다. 따라서:
+
+- **NFC 정규화는 하지 않는다.** 원본 NFD 자모를 그대로 받는다.
+- **UAX#29 grapheme cluster 분절을 구현**해 conjoining L/V/T를 하나의 cluster로 묶는다.
+- cluster의 추가 코드포인트는 **셀 옆 별도 저장소(grapheme side-storage)** 에 담는다 — 대부분의 셀은 단일 코드포인트로 두고, cluster가 있는 셀만 side-storage를 쓴다(메모리 효율).
+- 묶인 cluster의 코드포인트들을 **CoreText에 함께 넘겨** 음절 글리프로 셰이핑한다(글리프 합성은 CoreText가 한다 — Maru가 자모를 직접 합성하지 않는다).
+
+이 저장 모델은 Ghostty가 grapheme을 페이지의 별도 저장소에 두는 **동작/설계 개념**과 같다. 단 [필수 프로젝트 규칙](project-rules.md)·[오라클 비교 테스트 전략](oracle-testing.md)에 따라 **Ghostty의 자료구조 레이아웃·함수 분해·코드 표현은 복사하지 않는다.** 분절 규칙은 공개 명세(UAX#29)에서 독립 유도하고, Ghostty는 최종 화면 동작 비교(오라클)로만 쓴다.
+
+## 4. 메커니즘
+
+### 4.1 코어 — UAX#29 grapheme breaking + Hangul L/V/T (GB6/GB7/GB8)
+
+conjoining 자모를 cluster로 묶는 규칙은 UAX#29 Grapheme Cluster Boundary 규칙에서 유도한다:
+
+- **GB6**: `L × (L | V | LV | LVT)` — 초성 뒤 초성/중성/음절을 붙인다.
+- **GB7**: `(LV | V) × (V | T)` — 중성 뒤 중성/종성을 붙인다.
+- **GB8**: `(LVT | T) × T` — 종성 뒤 종성을 붙인다.
+- **GB9**: `× (Extend | ZWJ)` — combining mark는 앞 cluster에 붙는다(기존 동작 유지·일반화).
+
+자모 분류는 코드포인트 범위로 판정한다(현대 + 옛한글 영역 포함):
+- L(초성): U+1100~U+115F
+- V(중성): U+1160~U+11A7
+- T(종성): U+11A8~U+11FF
+- (완성형 LV/LVT: U+AC00~U+D7A3 — `(code-0xAC00) % 28 == 0`이면 LV, 아니면 LVT)
+
+### 4.2 셀 저장 — 단일 combining → 다중 코드포인트 grapheme storage
+
+현재 `types.Cell.combining: ?u21`(1개)을 다중 코드포인트 cluster를 담는 모델로 확장한다. 셀 구조체 자체를 키우지 않도록, cluster가 있는 셀만 가리키는 **side-storage**(행/페이지 단위 보조 배열 + 셀의 "grapheme 있음" 표식)를 둔다. 이때:
+
+- `width.zig`의 `isKeycapCombining`(U+20E3 키캡) 같은 **단일-combining 보정 hack 세 곳**(컬러 판정·셰이퍼 VS16 재주입·`appendRowUtf8` 복사)은 다중 저장으로 일반화되며 제거 대상이 된다(주석이 가리키는 "근본 해법").
+- 저장 상한·문자열 복사(`appendRowUtf8`)·trace/snapshot 직렬화가 다중 코드포인트를 잃지 않도록 함께 본다.
+
+### 4.3 폭 — cluster 단위로 base가 결정한다
+
+폭은 자모 개별 합산이 아니라 **cluster 단위**로 정한다:
+
+- cluster의 폭 = **base(첫) 코드포인트의 폭**. 후속 conjoining V/T와 combining mark는 **0폭으로 cluster에 흡수**한다.
+- 현대 한글 초성(L)은 wide(2)이므로 NFD 음절 cluster = **2칸**이 되어 완성형(NFC) 음절과 동일해진다.
+- 이 규칙은 `width.zig`의 폭 함수가 코드 단일 출처를 유지하되, "자모 개별 폭"을 보는 현재 동작을 cluster 인지 경로가 대체한다(폭 함수 자체는 중립 유지, cluster 묶기는 코어/저장 계층 책임).
+
+### 4.4 렌더 — CoreText cluster 셰이핑(기존 경로 확장)
+
+`coretext_smoke.m`은 이미 base + combining 1개를 한 `CFString`에 담아 `CTLineCreateWithAttributedString`으로 셰이핑한다. 이 경로를 cluster의 **모든 코드포인트**(L+V+T)를 담도록 확장하면, CoreText가 conjoining 자모를 하나의 음절 글리프로 합성한다. CoreText 호출 구조 자체는 거의 바뀌지 않는다.
+
+### 4.5 glyph atlas cache key
+
+`GlyphCacheKey`는 `font_id + glyph_id` 기반이고 cluster가 어떤 glyph_id가 되는지는 셰이퍼(CoreText)의 책임이다([폰트 전략 §Glyph Atlas Cache Key](font-strategy.md) 정책 유지). cluster가 셰이핑 후 단일 glyph_id로 떨어지면 기존 키가 그대로 동작하고, 다중 glyph로 떨어지는 경우의 키잉·배치는 셰이핑 통합(HG3)에서 확정한다.
+
+### 4.6 데이터 흐름
+
+```mermaid
+flowchart TD
+  A["ls 출력 바이트 (NFD)"] --> B["파서: codepoint 스트림 (L V T …)"]
+  B --> C["UAX#29 grapheme breaking + Hangul GB6/GB7/GB8"]
+  C --> D["grapheme cluster (base + 후속 자모)"]
+  D --> E["셀 저장: base codepoint + grapheme side-storage"]
+  E --> F["폭: cluster base 기준 2칸 (V·T는 0폭 흡수)"]
+  F --> G["CoreText: cluster 전체를 CTLine으로 셰이핑"]
+  G --> H["음절 글리프 → GlyphAtlas → Metal"]
+```
+
+## 5. 분해 (HG1~HG4)
+
+- **HG1 — 코어 grapheme 분절**: UAX#29 cluster boundary + Hangul L/V/T(GB6/7/8) 분류·묶기, cluster 단위 폭(base 2칸, V/T 0폭 흡수). 순수 Zig 단위 테스트(NFD "한글" → 음절 2개·각 2칸, 옛한글 cluster).
+- **HG2 — 셀 다중 코드포인트 저장**: `Cell.combining` 단일 → grapheme side-storage 확장, `appendRowUtf8`·trace/snapshot 직렬화·저장 상한 반영. 단일-combining 보정 hack(`isKeycapCombining` 경유 3곳) 일반화/정리.
+- **HG3 — 렌더·셰이핑 통합**: `coretext_smoke.m`/`coretext_shaper.zig`가 cluster 전체를 CTLine에 넘겨 음절 글리프로 셰이핑, atlas cache key 정합.
+- **HG4 — 검증·fixture**: NFD `ls` 시나리오·옛한글·정렬(vim/tmux/htop) fixture-oracle + 실제 렌더 캡처.
+
+각 단계는 작은 PR로 진행한다(progressive enhancement). 베이스 = UAX#29(공개 명세), Ghostty는 동작 비교만(clean-room).
+
+## 6. 검증 전략
+
+- **코어 단위(순수 Zig, Linux CI)**: NFD 자모 시퀀스 → cluster 분절·개수·폭 단언. 현대 한글·옛한글·자모 + combining 혼합·경계(초성만, 중성 없는 시퀀스)·이모지 ZWJ/skin-tone가 같은 cluster 경로를 타는지.
+- **저장 round-trip**: cluster 셀을 `appendRowUtf8`로 복사·trace/snapshot 직렬화 후 코드포인트가 보존되는지(다중 자모 손실 없음).
+- **오라클**: 같은 NFD 입력에서 Maru와 레퍼런스(Ghostty/Terminal.app)의 **화면 동작**(셀 점유·정렬) 비교. 코드는 보지 않는다.
+- **렌더 캡처**: macOS opt-in smoke로 NFD `ls` 출력의 음절 결합·폭 정렬을 RGBA 덤프→PNG로 확인(자동 비교는 폰트 의존이라 기본 CI 제외, 수동 검증 절차 기록).
+- [검증 매트릭스](verification-matrix.md)의 `wide-character` 항목에 NFD 한글 cluster 케이스를 추가한다.
+
+## 7. 잔여와 후속
+
+- ZWJ 이모지 시퀀스·국기(RI 쌍)·skin-tone modifier의 완전한 폭/표시는 같은 다중 저장 모델 위에서 함께 정확해진다(현재 `font-strategy.md` v1 미보장 항목). HG2 이후 별도 fixture로 확장.
+- 다중 glyph로 셰이핑되는 cluster의 atlas 키잉·배치 정책은 HG3에서 실제 CoreText 결과를 보고 확정한다.
+- 정규화(NFC/NFD) 자체는 도입하지 않는다(§3.1). 만약 외부 요구로 입력 정규화가 필요해지면 전략 수정이므로 [PR 체크리스트](pr-checklist.md) 절차에 따라 사용자와 먼저 논의한다.

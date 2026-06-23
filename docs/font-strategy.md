@@ -147,12 +147,12 @@ codepoint / grapheme
 - ASCII printable은 1 cell.
 - East Asian wide 문자는 2 cell.
 - combining mark는 이전 cell cluster에 붙인다.
-- grapheme cluster는 UAX#29 기준으로 분절하고, ZWJ 시퀀스·국기·skin-tone modifier는 하나의 cluster로 묶어 폭을 width policy로 정한다. 완전한 처리는 fixture로 확장한다.
+- grapheme cluster는 UAX#29 기준으로 분절하고, ZWJ 시퀀스·국기·skin-tone modifier, **그리고 NFD(분해형) 한글 conjoining 자모(초성 L+중성 V+종성 T)** 는 하나의 cluster로 묶어 폭을 width policy로 정한다(한글은 base 초성이 wide라 음절 cluster=2칸). 완전한 처리는 fixture로 확장한다 — 다중 코드포인트 cluster의 저장·셰이핑 정공법은 [Grapheme Cluster 저장·렌더링 전략](grapheme-clustering.md)이 단일 출처다.
 - ambiguous width(UAX#11 'A')는 config 키 `text.ambiguous-width`로 정한다(값 `narrow`(기본)/`wide`). 기본 `narrow`는 1 cell(정렬 안전·Ghostty/xterm.js 호환), `wide`는 로케일/CJK 맥락에서 폰트가 전각으로 그리는 심볼(`width.isWideRenderSymbol` — Enclosed Alphanumerics U+2460~U+24FF)을 2 cell로 올린다(advance 2). box/block·PUA(Nerd Font)는 제외한다. live-reload로 즉시 반영된다.
 - unsupported/ambiguous width는 보수적으로 1 cell로 시작하고 fixture로 확장한다.
 - emoji는 표시 폭과 실제 glyph bounds가 다를 수 있으므로, cursor advance는 width policy를 따른다.
 
-wide/combining 처리는 [검증 매트릭스](verification-matrix.md)의 `wide-character(East-Asian width)` 항목과 연결한다. 현재 구현은 최소 width table, continuation cell, combining mark 1개 저장을 제공한다. UAX#11 전체, ambiguous width 설정, ZWJ emoji 폭 처리는 fixture를 추가하며 확장한다.
+wide/combining 처리는 [검증 매트릭스](verification-matrix.md)의 `wide-character(East-Asian width)` 항목과 연결한다. 현재 구현은 최소 width table, continuation cell, **combining mark 1개 저장**을 제공한다 — 이 단일-combining 한계 때문에 NFD 한글(초성+중성+종성 3개 코드포인트)이 한 셀로 안 묶여 `ls` 출력의 한글 자모가 분리되고 폭이 음절당 2배로 깨진다(근본 해법은 다중 코드포인트 grapheme 저장 — [Grapheme Cluster 저장·렌더링 전략](grapheme-clustering.md)). UAX#11 전체, ambiguous width 설정, ZWJ emoji 폭 처리는 fixture를 추가하며 확장한다.
 
 ## Fallback 전략
 

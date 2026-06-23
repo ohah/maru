@@ -538,13 +538,15 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 | 단계 | 내용 | 수백만 줄 기여 |
 |------|------|--------|
 | **A1 ✅** | `Scrollback.ring`(행마다 `dupe`) → **page 리스트 + pool**. 행 연산은 `pushScrollback`·`scrollbackRow*`·`rewrapScrollback*` 접근자 뒤 캡슐화(공개 API·renderer·selection 불변). 동작 보존(row-count cap·eviction·setCap 반환 그대로). **uniform-width 페이지**(폭 변경 시 새 페이지) | **할당 100만→~수천**, mmap-ready 토대 |
-| **A2 가변폭/trim** | 페이지 행을 가변폭(per-row len, 끝 공백 trim)으로 → 전형 출력 메모리 ~10x↓ | 메모리 viable |
+| **A2 ✅ 가변폭/trim** | 페이지 행을 가변폭(per-row desc, hard 행 끝-공백 trim)으로 → 전형 출력 메모리 절감 | 메모리 viable |
 | **P4 mmap backing** | page arena를 mmap/VirtualAlloc(§180) → 콜드 히스토리 OS 페이징(RAM 미점유) | RAM 한계 돌파 |
 | **B (선택)** | 활성 grid까지 통합 PageList. 측정 게이트 뒤. **이 단계에서 grapheme도 page-local로 귀속(§11.8)** — page가 grapheme 풀을 소유, free 시 동반 소멸 | (perf, 별개) + grapheme 구조적 회수 |
 
 > grapheme 메모리는 그 전까지 **dedup된 전역 `grapheme_store`**(HG dedup PR)가 distinct cluster 수로 bound한다. 화면 밖으로 사라진 cluster까지 회수(구조적)하는 건 위 **B**에서 grapheme을 page에 귀속시킬 때 온다 — 전역 refcount/GC는 flat `cells:[]Cell`+`memcpy` 위에서 위험·임시품이라 도입하지 않는다(§11.8).
 
 **A1 측정 결과(validated)**: counting-allocator probe — cap 10,000: 스크롤백 할당 10,003 → **82**(122×↓). cap 1,000,000: ~1,000,003 → **7,824**(~128×↓). perf 게이트 회귀 없음(large_output 344→330ms). 동작 보존 — 기존 스크롤백 테스트 전부 green + ring.len 의존 테스트 3개를 관측 동작 기준으로 갱신.
+
+**A2 측정 결과(validated)**: live-bytes probe(cap 10,000, cols 200) — 1칸 행: 88MB → **0.94MB(~94×↓)**, 평균 40칸 행: 88MB → **15MB(~5.8×↓ = trim 비율)**. 절감이 "내용이 얼마나 짧으냐"에 비례(§11.7대로). 핵심 구현 교훈: **arena를 binding 제약**으로(고정 cell arena + grow하는 desc) — 처음의 "고정 arena + 고정 desc cap" 모델은 짧은 행에서 desc cap이 arena를 반만 채워 1칸 행이 23.8MB(겨우 ~3.7×)였다. arena-binds로 바꿔 94×. TDD(hard-trim RED→GREEN) + soft 비-trim·render-pad 가드, OOM 트랜잭션·cap·eviction 보존. 0폭 행 스트림 무한 grow는 desc 상한(arena_cells)으로 봉인.
 
 각 단계 doc-first + 누적 `/code-review max`. A1은 동작 보존이라 "정확성 버그 0" 기준, A2/P4는 메모리·동작 변경이라 측정+검증.
 

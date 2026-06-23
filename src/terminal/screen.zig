@@ -34,20 +34,24 @@ const TerminalCore = core.TerminalCore;
 /// **핵심 불변식**: alt 화면은 `cap == 0`인 빈 인스턴스를 갖는다 — 그래서 `pushScrollback`이 무동작이고
 /// 스크롤백 뷰포트가 잠긴다(분기 없이 모델로 떠받친다). 행 push/get/rewrap 로직은 TerminalCore가 이 필드들을
 /// 직접 다루고(cross-file 필드 접근), 이 struct는 메모리 수명(free/cap 재구성)만 소유한다.
-/// 스크롤백 행을 담는 고정 행수 페이지(§11 A1). 행마다 개별 heap `dupe`하던 ring(per-row 할당)을 연속 arena로
-/// 묶어 할당 수를 `rows_per_page`분의 1로 낮춘다 — "수백만 줄" 목표의 토대(100만 행 = 100만 할당 → ~수천
-/// 페이지, + 미래 mmap backing 전제, §11.6). 한 페이지의 모든 행은 같은 폭(`width`)이고, 폭이 다른 행(resize
-/// 직후·rewrap 전)은 새 페이지에서 시작한다. 행 r 셀 = `cells[r*width .. (r+1)*width]`(연속).
-const ScrollbackPage = struct {
-    cells: []types.Cell, // rows_per_page * width
-    wrapped: []bool, // rows_per_page
-    prompt_marks: []types.RowPrompt, // rows_per_page
-    width: usize,
-    filled: usize = 0, // append된 행 수(단조 증가, 0..rows_per_page). live = [evicted_abs..pushed_abs) 교집합
-    abs_start: usize = 0, // 이 페이지 첫 슬롯의 절대 행 id(단조). live 논리 i ↔ abs = evicted_abs + i
+/// 페이지 내 한 행 디스크립터: arena `cells`의 offset·len + 행 메타. `len`은 hard 행이면 끝-공백을 자른
+/// 가변폭(메모리 절감, §11 A2), soft-wrap 행이면 full 폭(내부 공백 보존 — rewrap 정합).
+const RowDesc = struct { off: usize, len: usize, wrapped: bool, prompt: types.RowPrompt = .{} };
 
-    fn rowCells(self: *const ScrollbackPage, r: usize) []types.Cell {
-        return self.cells[r * self.width .. (r + 1) * self.width];
+/// 스크롤백 행을 담는 페이지(§11 A1→A2). 행마다 개별 heap `dupe`하던 ring을 **연속 arena + per-row 디스크립터**로
+/// 묶어 (1) 할당 수를 `rows_per_page`분의 1로 낮추고(A1), (2) 가변폭 행을 촘촘히 팩해 메모리를 줄인다(A2 —
+/// 끝-공백 trim). "수백만 줄" 목표의 토대(+ 미래 mmap backing 전제, §11.6). 페이지는 `min(desc cap, arena 용량)`
+/// 양쪽으로 bound한다 — arena가 cols-무관 고정 예산이라 trim 행이 빽빽이 들어가 페이지 수가 준다(§11.7).
+const ScrollbackPage = struct {
+    cells: []types.Cell, // 고정 크기 arena(=arena 용량) — 가변폭 행을 offset 순서로 연속 팩. **binding 제약**
+    descs: std.ArrayList(RowDesc) = .empty, // 행 디스크립터(arena가 찰 때까지 grow — 짧은 행이면 많이, 넓으면 적게)
+    head: usize = 0, // 첫 live desc 인덱스(eviction이 전진). live = descs.items[head..]
+    used: usize = 0, // arena 다음 append 오프셋(append-only — evict해도 안 줄고, 페이지가 비면 통째 회수)
+    abs_start: usize = 0, // descs[0]의 절대 행 id(단조). desc d ↔ abs = abs_start + d
+
+    fn rowCells(self: *const ScrollbackPage, d: usize) []types.Cell {
+        const desc = self.descs.items[d];
+        return self.cells[desc.off .. desc.off + desc.len];
     }
 };
 
@@ -56,7 +60,11 @@ const ScrollbackPage = struct {
 /// 오래된)는 `abs = evicted_abs + i`로 매핑하고 페이지를 abs_start 이진탐색한다. pool이 비워진 페이지를 재사용해
 /// steady-state 할당을 0으로 유지한다(옛 ring이 슬롯을 memcpy 재활용하던 것과 동률).
 pub const Scrollback = struct {
-    const rows_per_page: usize = 512;
+    /// 페이지 cell arena의 고정 크기(cols-무관, §11.7). **arena가 binding 제약**이다 — descs는 arena가 찰 때까지
+    /// 자유롭게 grow하므로(짧은 행이면 많이, 넓으면 적게) arena는 항상 거의 꽉 차 underfill 낭비가 없다(고정 desc
+    /// cap이 짧은 행에서 arena를 반만 채우던 문제 해결). 고정 크기라 mmap backing(P4)에도 적합. 단일 행이 이보다
+    /// 넓으면(초광폭) acquirePage가 그 행에 맞춰 키운다(`@max(arena_cells, 행폭)`). 작을수록 page 수↑(tail 낭비↓).
+    const arena_cells: usize = 8192;
 
     pages: std.ArrayList(*ScrollbackPage) = .empty, // 오래된→최신 순(abs_start 오름차순)
     pool: std.ArrayList(*ScrollbackPage) = .empty, // 비워진 free 페이지(재사용 — steady-state 0 할당)
@@ -70,53 +78,46 @@ pub const Scrollback = struct {
 
     fn freePage(allocator: std.mem.Allocator, page: *ScrollbackPage) void {
         allocator.free(page.cells);
-        allocator.free(page.wrapped);
-        allocator.free(page.prompt_marks);
+        page.descs.deinit(allocator);
         allocator.destroy(page);
     }
 
-    /// 비울 때 페이지를 pool로 회수(재사용). pool도 비울 땐 freePage. cells 배열은 width별 크기라, 재사용 시
-    /// 폭이 다르면 acquirePage가 realloc한다(steady-state 동일 폭이면 그대로 재사용 — 0 할당).
+    /// 비울 때 페이지를 pool로 회수(재사용). pool도 비울 땐 freePage. arena는 고정 크기라 재사용 시 보통 realloc
+    /// 불필요(초광폭 행에 맞춰 키운 페이지만 acquirePage가 조정 — §11.7, A1의 width별 realloc보다 단순).
     fn recyclePage(self: *Scrollback, allocator: std.mem.Allocator, page: *ScrollbackPage) void {
-        page.filled = 0;
+        page.head = 0;
+        page.used = 0;
+        page.descs.clearRetainingCapacity(); // 백킹은 유지(재사용 — 다음 push가 realloc 없이 채움)
         self.pool.append(allocator, page) catch {
             freePage(allocator, page); // pool append OOM이면 그냥 해제(누수 방지)
         };
     }
 
-    /// 새(또는 pool 재사용) 페이지를 끝에 붙인다. 폭(w)이 다르면 cells를 realloc. OOM이면 null.
-    fn acquirePage(self: *Scrollback, allocator: std.mem.Allocator, w: usize) ?*ScrollbackPage {
-        const need_cells = rows_per_page * w;
+    /// 새(또는 pool 재사용) 페이지를 끝에 붙인다. arena를 `@max(arena_cells, min_cells)`로 잡아 적어도 한 행
+    /// (min_cells=그 행의 폭)은 들어가게 한다 — 초광폭 단일 행 안전망. pool 페이지 arena가 모자라면 realloc.
+    /// OOM이면 null.
+    fn acquirePage(self: *Scrollback, allocator: std.mem.Allocator, min_cells: usize) ?*ScrollbackPage {
+        const need_cells = @max(arena_cells, min_cells);
         if (self.pool.pop()) |page| {
-            if (page.width != w) {
+            if (page.cells.len < need_cells) {
                 const new_cells = allocator.realloc(page.cells, need_cells) catch {
                     freePage(allocator, page);
                     return null;
                 };
                 page.cells = new_cells;
-                page.width = w;
             }
-            page.filled = 0;
+            page.head = 0;
+            page.used = 0;
+            page.descs.clearRetainingCapacity();
             page.abs_start = self.pushed_abs;
             return page;
         }
         const page = allocator.create(ScrollbackPage) catch return null;
+        page.* = .{ .cells = &.{}, .descs = .empty, .abs_start = self.pushed_abs };
         page.cells = allocator.alloc(types.Cell, need_cells) catch {
             allocator.destroy(page);
             return null;
         };
-        page.wrapped = allocator.alloc(bool, rows_per_page) catch {
-            allocator.free(page.cells);
-            allocator.destroy(page);
-            return null;
-        };
-        page.prompt_marks = allocator.alloc(types.RowPrompt, rows_per_page) catch {
-            allocator.free(page.cells);
-            allocator.free(page.wrapped);
-            allocator.destroy(page);
-            return null;
-        };
-        page.* = .{ .cells = page.cells, .wrapped = page.wrapped, .prompt_marks = page.prompt_marks, .width = w, .filled = 0, .abs_start = self.pushed_abs };
         return page;
     }
 
@@ -131,7 +132,7 @@ pub const Scrollback = struct {
             const p = self.pages.items[mid];
             if (abs < p.abs_start) {
                 hi = mid;
-            } else if (abs >= p.abs_start + p.filled) {
+            } else if (abs >= p.abs_start + p.descs.items.len) {
                 lo = mid + 1;
             } else {
                 return .{ .page = p, .row = abs - p.abs_start };
@@ -147,28 +148,29 @@ pub const Scrollback = struct {
 
     pub fn rowWrapped(self: *const Scrollback, i: usize) bool {
         const loc = self.locate(i) orelse return false;
-        return loc.page.wrapped[loc.row];
+        return loc.page.descs.items[loc.row].wrapped;
     }
 
     pub fn rowPrompt(self: *const Scrollback, i: usize) types.RowPrompt {
         const loc = self.locate(i) orelse return .{};
-        return loc.page.prompt_marks[loc.row];
+        return loc.page.descs.items[loc.row].prompt;
     }
 
     /// live 행 i의 OSC 133 종료코드를 갱신한다(거터 색용 — setPromptExitAtAbs). 범위 밖이면 무동작.
     pub fn setRowPromptExit(self: *Scrollback, i: usize, exit: i16) void {
         const loc = self.locate(i) orelse return;
-        loc.page.prompt_marks[loc.row].exit = exit;
+        loc.page.descs.items[loc.row].prompt.exit = exit;
     }
 
     /// 가장 오래된 한 행을 버린다(eviction). 첫 페이지가 다 소진되면 pool로 회수한다. 좌표 보정은 호출자
     /// (pushScrollback)가 한다 — 데이터/좌표 책임 분리(옛 ring과 동일 규율).
     fn evictOldest(self: *Scrollback, allocator: std.mem.Allocator) void {
         if (self.count == 0) return;
+        const first = self.pages.items[0];
+        first.head += 1; // 첫 페이지의 가장 오래된 live 행을 죽인다(arena 셀은 페이지가 비면 통째 회수)
         self.evicted_abs += 1;
         self.count -= 1;
-        const first = self.pages.items[0];
-        if (first.abs_start + first.filled <= self.evicted_abs) {
+        if (first.head >= first.descs.items.len) { // 페이지의 모든 행이 evict됨 → pool로 회수
             _ = self.pages.orderedRemove(0);
             self.recyclePage(allocator, first);
         }
@@ -178,24 +180,29 @@ pub const Scrollback = struct {
     /// 하지 않는다(pushScrollback 래퍼가 eviction 여부로 처리). cap==0이면 무동작.
     pub fn pushRow(self: *Scrollback, allocator: std.mem.Allocator, cells: []const types.Cell, wrapped_flag: bool, mark: types.RowPrompt) bool {
         if (self.cap == 0) return false;
-        const w = cells.len;
-        const last: ?*ScrollbackPage = if (self.pages.items.len > 0) self.pages.items[self.pages.items.len - 1] else null;
+        // hard 행은 끝-default 셀을 잘라 가변폭 저장(메모리 절감, §11 A2). soft-wrap 행은 full 폭 유지 —
+        // 내부 trailing space가 wrap-fill의 일부라 trim하면 rewrap이 논리 줄을 잘못 잇는다(§11.7, 검증됨).
+        const stored: []const types.Cell = if (wrapped_flag) cells else cells[0..trimmedLen(cells)];
+        const w = stored.len;
         const page = blk: {
+            const last: ?*ScrollbackPage = if (self.pages.items.len > 0) self.pages.items[self.pages.items.len - 1] else null;
             if (last) |p| {
-                if (p.width == w and p.filled < rows_per_page) break :blk p;
+                // arena 여유 + desc 상한(arena_cells) — 보통 arena가 binding이지만, 0폭(빈 행) 스트림은 arena를
+                // 안 채워 한 페이지가 영영 안 닫히므로 desc 상한이 그 경우 페이지를 봉인한다(무한 grow 방지).
+                if (p.used + w <= p.cells.len and p.descs.items.len < arena_cells) break :blk p;
             }
-            const np = self.acquirePage(allocator, w) orelse return false;
+            const np = self.acquirePage(allocator, w) orelse return false; // arena ≥ max(arena_cells, w)라 이 행은 들어감
             self.pages.append(allocator, np) catch {
                 self.recyclePage(allocator, np);
                 return false;
             };
             break :blk np;
         };
-        const r = page.filled;
-        @memcpy(page.cells[r * w .. r * w + w], cells);
-        page.wrapped[r] = wrapped_flag;
-        page.prompt_marks[r] = mark;
-        page.filled += 1;
+        const off = page.used;
+        // desc를 먼저 추가한다 — OOM이면 arena/카운터를 안 건드리고 깨끗이 실패(상태 일관).
+        page.descs.append(allocator, .{ .off = off, .len = w, .wrapped = wrapped_flag, .prompt = mark }) catch return false;
+        @memcpy(page.cells[off .. off + w], stored);
+        page.used += w;
         self.pushed_abs += 1;
         self.count += 1;
         if (self.count > self.cap) self.evictOldest(allocator);

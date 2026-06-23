@@ -3284,6 +3284,49 @@ test "rewrap commit OOM은 옛 스크롤백 내용을 보존한다(transactional
     }
 }
 
+// ── §11 A2: 가변폭/trailing-trim (per-row-descriptor arena) ───────────────────────────────────────
+// hard 행은 끝 default-cell을 잘라 가변폭으로 저장(메모리 절감), soft-wrap 행은 full(내부 공백 보존 — rewrap
+// 정합). 관측 동작은 불변(render가 short 행을 pad). 아래 첫 테스트는 A1(full-width 저장)에선 RED, A2서 GREEN.
+
+test "A2: hard 스크롤백 행은 끝 공백을 trim해 저장한다(가변폭)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 1 });
+    defer core.deinit();
+    core.setMaxScrollback(10);
+    try core.write("hi\r\nxx"); // "hi"(2칸 hard 줄)가 스크롤백으로, xx 표시
+    const r = core.scrollbackRow(0).?;
+    try std.testing.expectEqual(@as(usize, 2), r.len); // A1: 20(full), A2: 2(trim) — RED→GREEN
+    try std.testing.expectEqual(@as(u21, 'h'), r[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'i'), r[1].codepoint);
+}
+
+test "A2: soft-wrap 행은 trim하지 않고 full 폭으로 보존한다" {
+    // maru는 끝-공백으로 채워 wrap된 행을 hard(wrapped=false)로 보므로 soft 행엔 끝 공백이 없지만, A2의 trim은
+    // rewrap 규칙(`if r<j src.len else trimmedLen`)과 동일하게 wrapped_flag로 분기해 soft 행은 절대 줄이지 않는다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    core.setMaxScrollback(10);
+    try core.write("abcde"); // abcd가 'e'로 soft-wrap(wrapped[0]=true), e는 row1
+    try core.write("\r\nfg"); // 바닥에서 scroll → abcd(wrapped) 스크롤백으로
+    try std.testing.expect(core.scrollbackRowWrapped(0)); // soft-wrap 행
+    const r = core.scrollbackRow(0).?;
+    try std.testing.expectEqual(@as(usize, 4), r.len); // soft는 full 폭 유지(trim 안 함)
+}
+
+test "A2: trim된 행도 스크롤하면 cols 폭으로 pad되어 보인다(render 불변)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+    core.setMaxScrollback(10);
+    try core.write("ok\r\nzz"); // "ok"(2칸) 스크롤백
+    core.scrollViewport(1); // 과거("ok")를 본다
+    const snap = core.renderSnapshot();
+    try std.testing.expectEqual(@as(u21, 'o'), snap.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'k'), snap.cells[1].codepoint);
+    try std.testing.expectEqual(@as(u21, ' '), snap.cells[2].codepoint); // trim된 뒤는 blank로 pad
+    try std.testing.expectEqual(@as(u21, ' '), snap.cells[7].codepoint);
+    try std.testing.expectEqual(@as(usize, 8), snap.cells.len); // 뷰포트는 항상 cols 폭
+    core.scrollToBottom();
+}
+
 test "setMaxScrollback 하향 트림: 가장 오래된 행을 버리고 view_offset을 보정한다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
     defer core.deinit();

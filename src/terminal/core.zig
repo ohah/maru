@@ -905,7 +905,7 @@ pub const TerminalCore = struct {
 
     fn wordBoundsAtImpl(self: *const TerminalCore, viewport_row: u16, col: u16, separators: []const u21) ?WordBounds {
         const abs = self.absRowFromViewport(viewport_row);
-        const row_cells = self.absRow(abs) orelse return null;
+        const row_cells = screen.absRow(self, abs) orelse return null;
         const c = @min(col, @as(u16, @intCast(row_cells.len -| 1)));
         if (screen.isBlankCell(row_cells[c])) return null; // 공백 클릭 → 선택 없음(현행)
         // 구분자 클릭: 구분자는 제 자신이 한 토큰 → 그 1칸만 선택(Ghostty/iTerm2 관례). separators 비면 false라 무관.
@@ -917,13 +917,13 @@ pub const TerminalCore = struct {
         var start_row = abs;
         var start_col: u16 = c;
         outer_left: while (true) {
-            const cells_row = self.absRow(start_row) orelse break;
+            const cells_row = screen.absRow(self, start_row) orelse break;
             while (start_col > 0) {
                 if (isWordBoundaryCell(cells_row[start_col - 1], separators)) break :outer_left;
                 start_col -= 1;
             }
-            if (start_row == 0 or !self.absRowWrapped(start_row - 1)) break;
-            const prev = self.absRow(start_row - 1) orelse break;
+            if (start_row == 0 or !screen.absRowWrapped(self, start_row - 1)) break;
+            const prev = screen.absRow(self, start_row - 1) orelse break;
             if (prev.len == 0 or isWordBoundaryCell(prev[prev.len - 1], separators)) break;
             start_row -= 1;
             start_col = @intCast(prev.len - 1);
@@ -933,13 +933,13 @@ pub const TerminalCore = struct {
         var end_row = abs;
         var end_col: u16 = c;
         outer_right: while (true) {
-            const cells_row = self.absRow(end_row) orelse break;
+            const cells_row = screen.absRow(self, end_row) orelse break;
             while (end_col + 1 < cells_row.len) {
                 if (isWordBoundaryCell(cells_row[end_col + 1], separators)) break :outer_right;
                 end_col += 1;
             }
-            if (!self.absRowWrapped(end_row)) break;
-            const next = self.absRow(end_row + 1) orelse break;
+            if (!screen.absRowWrapped(self, end_row)) break;
+            const next = screen.absRow(self, end_row + 1) orelse break;
             if (next.len == 0 or isWordBoundaryCell(next[0], separators)) break;
             end_row += 1;
             end_col = 0;
@@ -968,7 +968,7 @@ pub const TerminalCore = struct {
 
     /// 클릭 셀의 OSC 8 링크 id(0=없음).
     fn cellLinkAt(self: *const TerminalCore, abs: usize, col: u16) u32 {
-        const row_cells = self.absRow(abs) orelse return 0;
+        const row_cells = screen.absRow(self, abs) orelse return 0;
         if (col >= row_cells.len) return 0;
         return row_cells[col].link;
     }
@@ -980,13 +980,13 @@ pub const TerminalCore = struct {
         var start_row = abs;
         var start_col: u16 = col;
         outer_left: while (true) {
-            const cells_row = self.absRow(start_row) orelse break;
+            const cells_row = screen.absRow(self, start_row) orelse break;
             while (start_col > 0) {
                 if (cells_row[start_col - 1].link != id) break :outer_left;
                 start_col -= 1;
             }
             if (start_row == 0) break;
-            const prev = self.absRow(start_row - 1) orelse break;
+            const prev = screen.absRow(self, start_row - 1) orelse break;
             if (prev.len == 0 or prev[prev.len - 1].link != id) break;
             start_row -= 1;
             start_col = @intCast(prev.len - 1);
@@ -994,12 +994,12 @@ pub const TerminalCore = struct {
         var end_row = abs;
         var end_col: u16 = col;
         outer_right: while (true) {
-            const cells_row = self.absRow(end_row) orelse break;
+            const cells_row = screen.absRow(self, end_row) orelse break;
             while (end_col + 1 < cells_row.len) {
                 if (cells_row[end_col + 1].link != id) break :outer_right;
                 end_col += 1;
             }
-            const next = self.absRow(end_row + 1) orelse break;
+            const next = screen.absRow(self, end_row + 1) orelse break;
             if (next.len == 0 or next[0].link != id) break;
             end_row += 1;
             end_col = 0;
@@ -1051,7 +1051,7 @@ pub const TerminalCore = struct {
         errdefer out.deinit(allocator);
         var abs = bounds.start.row;
         while (abs <= bounds.end.row) : (abs += 1) {
-            const row_cells = self.absRow(abs) orelse break;
+            const row_cells = screen.absRow(self, abs) orelse break;
             const from: usize = if (abs == bounds.start.row) bounds.start.col else 0;
             const to: usize = if (abs == bounds.end.row) @min(@as(usize, bounds.end.col) + 1, row_cells.len) else row_cells.len;
             try appendRowUtf8(&out, allocator, row_cells, from, to);
@@ -1124,7 +1124,7 @@ pub const TerminalCore = struct {
         var len: usize = 0;
         var abs = bounds.start.row;
         outer: while (abs <= bounds.end.row) : (abs += 1) {
-            const row_cells = self.absRow(abs) orelse break;
+            const row_cells = screen.absRow(self, abs) orelse break;
             const from: usize = if (abs == bounds.start.row) bounds.start.col else 0;
             const to: usize = if (abs == bounds.end.row) @min(@as(usize, bounds.end.col) + 1, row_cells.len) else row_cells.len;
             var c = from;
@@ -1145,12 +1145,12 @@ pub const TerminalCore = struct {
     pub fn selectLineAt(self: *TerminalCore, viewport_row: u16) void {
         screen.ensureScrollbackRewrapped(self); // selectionStart와 같은 이유
         const abs = self.absRowFromViewport(viewport_row);
-        if (self.absRow(abs) == null) return;
+        if (screen.absRow(self, abs) == null) return;
         var start_row = abs;
-        while (start_row > 0 and self.absRowWrapped(start_row - 1)) start_row -= 1;
+        while (start_row > 0 and screen.absRowWrapped(self, start_row - 1)) start_row -= 1;
         var end_row = abs;
-        while (self.absRowWrapped(end_row) and self.absRow(end_row + 1) != null) end_row += 1;
-        const end_cells = self.absRow(end_row) orelse return;
+        while (screen.absRowWrapped(self, end_row) and screen.absRow(self, end_row + 1) != null) end_row += 1;
+        const end_cells = screen.absRow(self, end_row) orelse return;
         self.selection_anchor = .{ .row = start_row, .col = 0 };
         self.selection_head = .{ .row = end_row, .col = @intCast(end_cells.len -| 1) };
         self.selection_block = false; // 새 선택은 선형(selectionStart와 일관)
@@ -1164,7 +1164,7 @@ pub const TerminalCore = struct {
         screen.ensureScrollbackRewrapped(self); // selectLineAt와 같은 이유 — abs 좌표 쓰기 전 스크롤백 rewrap 확정
         if (self.size.rows == 0) return;
         const last_abs = self.sb.count + self.size.rows - 1;
-        const end_cells = self.absRow(last_abs) orelse return;
+        const end_cells = screen.absRow(self, last_abs) orelse return;
         self.selection_anchor = .{ .row = 0, .col = 0 };
         self.selection_head = .{ .row = last_abs, .col = @intCast(end_cells.len -| 1) };
         self.selection_block = false; // 새 선택은 선형 — Option+드래그 블록 뒤 ⌘A가 직사각형으로 새던 누수 수정
@@ -1256,8 +1256,8 @@ pub const TerminalCore = struct {
             // 논리 줄 = 현재 abs부터 wrapped=false인 행까지(soft-wrap 이음).
             var line_abs = abs;
             while (true) {
-                const row = self.absRow(line_abs) orelse break;
-                const wrapped = self.absRowWrapped(line_abs);
+                const row = screen.absRow(self, line_abs) orelse break;
+                const wrapped = screen.absRowWrapped(self, line_abs);
                 // wrapped 행은 전폭이 실제 내용(우측 끝에서 wrap), 마지막(hard) 행은 뒤 빈칸을 자른다(extractSelection과 같은 규칙).
                 const limit: usize = if (wrapped) row.len else screen.trimmedLen(row);
                 var col: usize = 0;
@@ -1386,8 +1386,8 @@ pub const TerminalCore = struct {
 
         var abs = sel.start.row;
         while (abs <= sel.end.row) : (abs += 1) {
-            const row_cells = self.absRow(abs) orelse continue;
-            const wrapped_flag = self.absRowWrapped(abs);
+            const row_cells = screen.absRow(self, abs) orelse continue;
+            const wrapped_flag = screen.absRowWrapped(self, abs);
             const from: usize = if (abs == sel.start.row) sel.start.col else 0;
             const full_to: usize = if (abs == sel.end.row) @min(@as(usize, sel.end.col) + 1, row_cells.len) else row_cells.len;
             // hard 줄끝(또는 선택 끝 행)은 뒤 빈칸을 잘라 복사한다 — 패딩이 텍스트로 들어가지 않게.
@@ -1408,7 +1408,7 @@ pub const TerminalCore = struct {
         errdefer out.deinit(allocator);
         var abs = start.row;
         while (abs <= end.row) : (abs += 1) {
-            if (self.absRow(abs)) |row_cells| {
+            if (screen.absRow(self, abs)) |row_cells| {
                 const from: usize = @min(lo, row_cells.len);
                 const full_to: usize = @min(hi + 1, row_cells.len);
                 const to: usize = @max(from, @min(full_to, screen.trimmedLen(row_cells)));
@@ -1417,22 +1417,6 @@ pub const TerminalCore = struct {
             if (abs != end.row) try out.append(allocator, '\n'); // 블록은 행마다 개행(사각형 — soft-wrap 무관)
         }
         return try out.toOwnedSlice(allocator);
-    }
-
-    /// 절대 행 -> 셀(스크롤백 또는 활성 화면). 범위 밖이면 null.
-    fn absRow(self: *const TerminalCore, abs: usize) ?[]const types.Cell {
-        if (abs < self.sb.count) return self.scrollbackRow(abs);
-        const active = abs - self.sb.count;
-        if (active >= self.size.rows) return null;
-        const start = @as(usize, @intCast(active)) * self.size.cols;
-        return self.cells[start .. start + self.size.cols];
-    }
-
-    fn absRowWrapped(self: *const TerminalCore, abs: usize) bool {
-        if (abs < self.sb.count) return self.scrollbackRowWrapped(abs);
-        const active = abs - self.sb.count;
-        if (active >= self.size.rows) return false;
-        return self.wrapped[active];
     }
 
     /// 대문자를 소문자로 접는다(findMatches 대소문자 무시 비교용). **베이스 = Unicode simple case folding**,

@@ -346,3 +346,65 @@ selection은 화면/스크롤백을 **읽어** 좌표·텍스트를 산출하는
 ### 9.3 리뷰 cleanup (R1 `/code-review max` 후속)
 
 누적 리뷰 결과 **정확성 버그 0**(byte-identical 이동 + build + 테스트 + check-boundaries green, 모든 호출부 facade로 해소). cleanup 1건만 정리: `reportMouse` doc-comment의 중복 단락(원본 core.zig에서 그대로 옮겨온 pre-existing — col/row 0-based 설명이 두 번)을 한 블록으로 dedup.
+
+---
+
+## 10. Screen struct fold (방향 B, 2단계) — 설계·합의 대기
+
+§2에서 미룬 **2단계**(architecture.md §"스크롤백은 화면에 귀속한다" 종착지)다. 방향 A(연산 추출)는 §5~§9로 소진됐고, 남은 건 **필드를 `Screen` 하위 struct로 접는** 구조 변경이다. 이건 함수 이동과 성격이 다르다 — 동작 변경 없는 **대규모 기계적 필드-접근 rename**(self.cells → self.screen.cells)이고, alt-screen swap 의미까지 건드린다. **고위험 단일 도약**이라 합의 후 착수한다.
+
+### 10.1 규모 (실측)
+
+- **내부(terminal/) self.<field> 접근 ~792**: cursor 159·size 143·sb 116·cells 72·pen 51·wrapped 50·prompt_marks 47·view_offset 36·last_print 35·dirty 33·pending_wrap 29·tabstops 17·scroll_top 16·scroll_bottom 15·semantic_state 13·alt_active 12·…
+- **외부(비 terminal/) TerminalCore 필드 직접 접근 ~78**: core.size 31·view_offset 23·cells 12·alt_active 6·cursor 4·wrapped 1·prompt_marks 1 (대부분 renderer/runtime 테스트가 fake core를 세팅 + surface.zig/host.zig가 `core.size`로 창 geometry 읽음).
+- 합계 **~870 접근부 rename**. 순수 기계적(동작 불변), 컴파일러+289 테스트가 누락 강제.
+
+### 10.2 핵심 설계 결정 — 무엇을 Screen에 넣나 (동작 보존 긴장)
+
+maru의 **현재 alt-screen 전환은 grid(cells·wrapped·prompt_marks)+`sb`만 swap**한다(saved_cells/saved_wrapped/saved_prompt_marks/saved_sb ↔ 활성). cursor는 reset/`saved_cursor`로 복원, scroll region·모드·tabstops는 **swap 안 함**. 따라서 "Screen에 넣어 swap"하는 필드는 **현 swap 의미와 일치**해야 동작이 보존된다(아무거나 Screen에 넣고 swap하면 alt 전환 동작이 바뀜).
+
+두 가지 scope:
+
+**(B-min) grid+scrollback만** — `Screen = { cells, wrapped, prompt_marks, sb }`. 현재 swap되는 것과 **정확히 일치** → 동작 보존이 by-construction. `saved_*` 4필드 → `saved_screen: Screen` 한 개로, alt 전환이 `std.mem.swap(&self.screen, &self.saved_screen)` 한 줄이 된다(Scrollback 1단계의 자연스러운 확장 + Ghostty primary/alternate Screen과 동형). cursor·모드·scroll region은 core 잔류. rename ~285 내부 + grid 외부(cells 12·wrapped 1·prompt_marks 1). **위험 낮음~중**, "alt엔 스크롤백 없음"이 타입으로 보장되는 §"스크롤백 귀속"이 grid까지 확장.
+
+**(B-full) cursor·모드까지** — `Screen = { grid, sb, cursor, pen, pending_wrap, last_print, scroll_top/bottom, origin_mode, autowrap, insert_mode, cursor_visible/shape/blink, view_offset, tabstops, semantic_state, … }`. architecture.md "cursor·grid 포함 완전한 Screen" 문언에 가장 충실. 하지만 현재 alt가 swap 안 하는 필드(scroll region·모드·tabstops)를 Screen에 넣고 swap하면 동작이 바뀌므로, alt enter/leave에 **명시적 reset 로직**을 추가해 현 동작을 재현해야 한다(순수 rename이 아님 — 의미 작업 추가). rename ~700+ 내부 + size 31 등 외부. **위험 높음**(동작 보존 검증이 alt 전환 엣지까지 넓어짐).
+
+> 공통: parser 상태(parser·csi_*·osc_*…)·host-reply(response·clipboard·notification·shell_events)·selection(anchor/head/preedit)·kitty(images/placements)·터미널 모드(mouse·bracketed_paste·focus_events·kitty_flags…)·config/metrics(cell_*_px·palette·default_*)·alt_active(swap 상태 자체)·reflow scratch는 화면 content가 아니라 **core 잔류**. `size`(두 화면 공유 geometry)·`dirty`(렌더 추적)는 B-min에선 core 잔류, B-full에서도 공유라 core 권장.
+
+### 10.3 마이그레이션 전략 (staging)
+
+필드-fold는 필드별 atomic(한 필드를 옮기면 그 필드 접근 전부 동시 변경)이지만 **그룹 단위로 incremental** 가능 — 각 PR이 한 필드 그룹을 `screen`에 넣고 접근부 전수 rename, 매 PR 4종 게이트 green. 빅뱅(단일 거대 PR)은 리뷰·머지 충돌 위험이 커 지양.
+
+- **B-min**: ① `Screen` struct 신설 + grid(cells·wrapped·prompt_marks) fold → `self.screen.cells` (~169 rename) → ② `sb` fold → `self.screen.sb` (~116) → ③ `saved_*` → `saved_screen: Screen` + alt swap을 struct swap으로(의미 보존) → ④ 외부 접근부(renderer/app 테스트·surface/host) rename. 4 PR.
+- **B-full**(B-min 후 선택): cursor·print state·scroll region·모드를 그룹별로 추가 fold + alt enter/leave reset 로직. 별도 다회 PR.
+
+### 10.4 위험·정직한 평가
+
+- **직접 payoff는 조직화**(평평한 ~60 필드 → screen 그룹핑)와 alt-swap 단순화. **page-aligned storage**(다중 page 스크롤백, Ghostty식)라는 진짜 이득은 이 fold가 **가능하게 만들 뿐**, 그 자체는 별도 후속 initiative다.
+- 순수 rename이라 버그 위험은 낮지만(컴파일러+테스트), **churn이 크다** — 동시 진행되는 terminal 작업과 머지 충돌이 잦을 수 있어 집중 스프린트로 처리 권장.
+- B-full의 alt enter/leave reset은 유일한 비-기계적 부분 — 동작 보존 검증(alt 전환·DECSC·scroll region)이 필요.
+
+### 10.5 결정 — B-min 채택 (확정)
+
+사용자와 합의해 **B-min을 먼저, 이어서 B-full까지** 진행한다(2단계 종착지 = "cursor·grid 완전한 Screen"). B-min은 scope 축소가 아니라 ~870 rename + alt-swap 의미 변경을 한 번에 하지 않으려는 **안전한 1단계**다 — 동작 보존이 by-construction인 grid+sb를 먼저 굳히고, 그 위에 cursor·모드를 얹는다.
+
+- **B-min**(B1~B3): `Screen = { cells, wrapped, prompt_marks, sb }`(현 alt-swap 대상과 정확히 일치). `Screen` struct는 self-contained(types + Scrollback, TerminalCore 미참조)라 screen.zig 소유 + core가 `const Screen = screen.Screen`·`screen: Screen` 필드(Scrollback 선례 동형).
+- **B-full**(B4~, 확정 후속): cursor·pen·pending_wrap·last_print·scroll_top/bottom·origin_mode·autowrap·insert_mode·cursor_visible/shape/blink·view_offset·tabstops·semantic_state를 그룹별로 Screen에 흡수. alt enter/leave에 현 동작 재현 reset 로직 추가(비-기계적 — 동작 보존 검증이 alt 전환·DECSC·scroll region까지). size·dirty는 공유라 core 잔류.
+
+| PR | 범위 | rename | 위험 |
+|---|---|---|---|
+| **B1** | `Screen` struct 신설(grid: cells·wrapped·prompt_marks) + fold → `self.screen.cells/wrapped/prompt_marks`. 내부·외부 접근 전수 rename(컴파일러 강제) | ~169 내부 + grid 외부(~14) | 중 |
+| **B2** | `sb`를 Screen에 추가 + fold → `self.screen.sb` | ~116 내부 + sb 외부 | 중 |
+| **B3** | `saved_cells`/`saved_wrapped`/`saved_prompt_marks`/`saved_sb` → `saved_screen: Screen`, alt enter/leave를 `std.mem.swap(&self.screen, &self.saved_screen)` struct swap으로(의미 보존). **B-min 완결** | 소(alt 경로) | 중 |
+
+검증·리뷰는 §5 그대로(매 PR 4종 게이트 green auto-merge + 마지막 `/code-review max`). 외부 접근 rename은 해당 필드 fold PR에 포함(컴파일러가 내부·외부 동시 강제). 머지 충돌 최소화 위해 연속 처리.
+
+### 10.6 전체 로드맵 — B-full은 종착지가 아니다
+
+architecture.md §211 종착지 = "cursor·grid 완전한 Screen **+ 그 자리에 page-aligned storage**". 따라서:
+
+1. **Direction A**(함수 추출, §5~§9) ✅ 완료.
+2. **Direction B**(Screen struct fold): B-min(B1~B3) → **B-full**(B4~, cursor·모드 흡수). ← 이 분해 initiative의 마무리(조직화).
+3. **page-aligned storage**(§11, 별도 initiative): 평평한 `cells: []Cell` + Scrollback ring → Ghostty PageList식 page-pool 레이아웃. **architecture.md의 진짜 최종 골**이고, B-full이 이를 가능하게 하는 전제다.
+
+**성격 차이 — page storage는 A·B와 다르다**: A·B는 순수 리팩터(동작·메모리 레이아웃 불변, 위치만 이동 → 매번 "정확성 버그 0"). page storage는 **메모리 레이아웃·할당·성능을 바꾸는 의미 변경**(perf 예산·동작 검증 폭이 넓음)이라, B-full 완료 후 **별도 doc-first 설계+합의**로 §11에서 진행한다.

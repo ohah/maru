@@ -232,17 +232,17 @@ pub fn dispatchSemanticPrompt(self: *TerminalCore, rest: []const u8) void {
         // A(fresh_line_new_prompt)·P(prompt_start) — PR1은 동일 취급(prompt_kind 옵션은 파싱·무시).
         'A', 'P' => {
             self.semantic_state = .prompt;
-            self.prompt_marks[self.cursor.row] = .{ .kind = .prompt }; // 새 프롬프트 — exit 리셋
+            self.screen.prompt_marks[self.cursor.row] = .{ .kind = .prompt }; // 새 프롬프트 — exit 리셋
             self.recordShellEvent(.{ .prompt_start = row });
         },
         'B' => {
             self.semantic_state = .input;
-            self.prompt_marks[self.cursor.row].kind = .input; // exit는 보존(D가 채움)
+            self.screen.prompt_marks[self.cursor.row].kind = .input; // exit는 보존(D가 채움)
             self.recordShellEvent(.{ .input_start = row });
         },
         'C' => {
             self.semantic_state = .command;
-            self.prompt_marks[self.cursor.row].kind = .command;
+            self.screen.prompt_marks[self.cursor.row].kind = .command;
             self.recordShellEvent(.{ .command_start = row });
         },
         'D' => {

@@ -8827,7 +8827,7 @@ pub const AppSession = struct {
         for (0..core.size.rows) |row| {
             var any = false;
             for (0..cols) |col| {
-                const cell = core.cells[row * grid_cols + col];
+                const cell = core.screen.cells[row * grid_cols + col];
                 const cp = cell.codepoint;
                 text[col] = if (cp >= 0x20 and cp < 0x7f) @intCast(cp) else ' ';
                 const has_bg = switch (cell.style.background) {
@@ -8839,10 +8839,10 @@ pub const AppSession = struct {
             }
             // soft-wrap 플래그를 함께 찍는다(w=다음 줄로 이어짐, .=hard 줄끝). reflow 피드백 루프
             // 회귀는 hard 줄(프롬프트)이 w로 잘못 찍히는 것으로 드러나므로, wrapped인 빈 줄도 보인다.
-            const w_mark: u8 = if (row < core.wrapped.len and core.wrapped[row]) 'w' else '.';
+            const w_mark: u8 = if (row < core.screen.wrapped.len and core.screen.wrapped[row]) 'w' else '.';
             // OSC 133 semantic 분류(P=프롬프트 I=입력 C=명령출력 ·=미분류). 셸 통합이 마커를 emit하면
             // 채워진다 — 프롬프트/입력/출력이 어떤 행으로 잡히는지 데이터로 본다(거터 PR 전 조기 확인).
-            const p_mark: u8 = if (row < core.prompt_marks.len) switch (core.prompt_marks[row].kind) {
+            const p_mark: u8 = if (row < core.screen.prompt_marks.len) switch (core.screen.prompt_marks[row].kind) {
                 .unknown => '.',
                 .prompt => 'P',
                 .input => 'I',

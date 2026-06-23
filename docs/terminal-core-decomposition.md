@@ -395,9 +395,11 @@ maru의 **현재 alt-screen 전환은 grid(cells·wrapped·prompt_marks)+`sb`만
 |---|---|---|---|
 | **B1** ✅ | `Screen` struct 신설(grid: cells·wrapped·prompt_marks) + fold → `self.screen.cells/wrapped/prompt_marks`. 내부·외부 접근 전수 rename(컴파일러 강제) | 내부 169 + 외부 238(테스트 다수) | 중 |
 | **B2** ✅ | `sb`를 Screen에 추가 + fold → `self.screen.sb` | 내부 93(외부 0 — sb는 terminal-internal). primary cap default는 init `.screen = .{ … .sb = .{ .cap = default_max_scrollback } }`로 이동 | 중 |
-| **B3** | `saved_cells`/`saved_wrapped`/`saved_prompt_marks`/`saved_sb` → `saved_screen: Screen`, alt enter/leave를 `std.mem.swap(&self.screen, &self.saved_screen)` struct swap으로(의미 보존). **B-min 완결** | 소(alt 경로) | 중 |
+| **B3** ✅ | `saved_cells`/`saved_wrapped`/`saved_prompt_marks`/`saved_sb` → `saved_screen: Screen`, alt enter/leave를 `saved_screen = screen`/`screen = saved_screen` struct 교환으로(의미 보존). **B-min 완결** | 28 + resize-during-alt·deinit·setMaxScrollback | 중 |
 
 검증·리뷰는 §5 그대로(매 PR 4종 게이트 green auto-merge + 마지막 `/code-review max`). 외부 접근 rename은 해당 필드 fold PR에 포함(컴파일러가 내부·외부 동시 강제). 머지 충돌 최소화 위해 연속 처리.
+
+> **B-min(B1~B3) 완결**: 활성 화면 grid+scrollback이 `screen: Screen`으로, alt 보관분이 `saved_screen: Screen`으로 묶였다. alt 전환은 `self.screen ↔ self.saved_screen` 통째 교환 한 번 — "alt엔 스크롤백 없음"이 grid까지 타입으로 보장. 동작 불변(289 테스트 — alt 전환·DECSC·resize-during-alt·스크롤백 보존). 다음: **B-full**(cursor·pen·print·scroll region·모드 흡수, B4~).
 
 ### 10.6 전체 로드맵 — B-full은 종착지가 아니다
 

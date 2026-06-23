@@ -3894,13 +3894,18 @@ pub const AppSession = struct {
             while (i < seed) : (i += 1) self.pushNotificationHistory("Maru", "에이전트 작업 완료 — 빌드 통과", 0, true);
             if (!self.sidebar_collapsed) self.toggleSidebarCollapsed();
         }
-        // MARU_OPEN_NOTIFICATIONS=N — 첫 frame에 테스트 알림 N개(미설정/0→2)를 시드하고 알림 패널을 연다(말풍선 caret·
-        // 최소 높이·footer를 헤드리스 스크린샷으로 self-verify하는 debug-gate). env 미설정이면 무동작.
+        // MARU_OPEN_NOTIFICATIONS=N — 첫 frame에 테스트 알림 N개(미설정/0→2)를 시드하고 알림 패널을 연다(헤더 밴드·
+        // 말풍선 caret·카드·스크롤을 헤드리스 스크린샷으로 self-verify하는 debug-gate). env 미설정이면 무동작.
         if (std.c.getenv("MARU_OPEN_NOTIFICATIONS")) |nv| {
             var seed: usize = std.fmt.parseInt(usize, std.mem.span(nv), 10) catch 2;
             if (seed == 0) seed = 2;
             var i: usize = 0;
             while (i < seed) : (i += 1) self.pushNotificationHistory("Maru", "에이전트 작업 완료 — 빌드 통과", 0, true);
+            self.openNotificationPanel();
+        }
+        // MARU_OPEN_NOTIFICATIONS_EMPTY=1 — 알림 0개로 패널을 연다(빈 상태 일러스트: 아이콘+제목+부제를 헤드리스
+        // 스크린샷으로 self-verify하는 debug-gate). MARU_OPEN_NOTIFICATIONS와 배타(둘 다면 위에서 이미 시드됨).
+        if (std.c.getenv("MARU_OPEN_NOTIFICATIONS_EMPTY") != null and !self.chrome_host.notifications.open) {
             self.openNotificationPanel();
         }
         if (std.c.getenv("MARU_OPEN_SETTINGS") == null) return;

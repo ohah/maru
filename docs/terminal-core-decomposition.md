@@ -500,7 +500,8 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 - **Pin 불필요**: maru 커서는 순수 `(row,col)` u16이 전 코드(262곳)에 박혀 있고 포인터 커서가 없다. Ghostty의 Pin(page ptr+offset+tracked pin pool, reflow마다 갱신) 인프라 전부 생략 — resize 시 지금처럼 `(row,col)` clamp/재계산만.
 - **offset 기반 직렬화 불필요**: maru는 mmap-to-disk COW/serialize를 안 하므로 페이지는 평범한 포인터 기반 struct로 충분(Ghostty의 `Offset(T)` 자료형 전부 생략).
 - **renderer 경계 이미 격리**: `RenderSnapshot`은 활성을 zero-copy slice, 스크롤백 뷰는 memcpy로 materialize(스크롤 시 이미 그렇게 함). 페이지 저장이면 뷰포트를 flat로 materialize만 하면 되고 renderer·selection(`absRow` 추상)·snapshot API는 **불변**.
-- **style/grapheme pool 생략**: Ghostty의 page-local style/grapheme intern pool은 maru Cell(self-contained) + 별도 grapheme_store(HG 작업)와 안 맞으니 채택 안 함.
+- **style pool 생략**: style은 `Cell`에 inline(self-contained)이라 Ghostty식 page-local style intern pool은 채택 안 함.
+- **grapheme는 page-local로 귀속(B 단계, §11.8)**: 처음엔 grapheme도 별도 `grapheme_store`(HG 작업)라 page pool을 생략했으나, 활성 grid가 page로 가면(B) grapheme도 **page-local로 옮겨 구조적 회수**를 얻기로 한다(결정 — 본 세션). page free 시 그 page의 grapheme이 함께 사라져 A1의 recycle/eviction-frees 속성을 grapheme도 물려받는다(전역 store의 "distinct-ever-seen" 증가 대신 live 내용에 비례). 그 전까지는 dedup된 전역 `grapheme_store`(HG dedup, append-only)가 브리지다 — append-only라 page-local로 깔끔히 흡수된다. 상세는 §11.8.
 
 → maru `Page ≈ { rows, cols, cells: []Cell, wrapped: []bool, prompt_marks: []RowPrompt }` 한 덩어리 + pool. 훨씬 작다.
 
@@ -539,7 +540,9 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 | **A1 ✅** | `Scrollback.ring`(행마다 `dupe`) → **page 리스트 + pool**. 행 연산은 `pushScrollback`·`scrollbackRow*`·`rewrapScrollback*` 접근자 뒤 캡슐화(공개 API·renderer·selection 불변). 동작 보존(row-count cap·eviction·setCap 반환 그대로). **uniform-width 페이지**(폭 변경 시 새 페이지) | **할당 100만→~수천**, mmap-ready 토대 |
 | **A2 가변폭/trim** | 페이지 행을 가변폭(per-row len, 끝 공백 trim)으로 → 전형 출력 메모리 ~10x↓ | 메모리 viable |
 | **P4 mmap backing** | page arena를 mmap/VirtualAlloc(§180) → 콜드 히스토리 OS 페이징(RAM 미점유) | RAM 한계 돌파 |
-| **B (선택)** | 활성 grid까지 통합 PageList. 측정 게이트 뒤 | (perf, 별개) |
+| **B (선택)** | 활성 grid까지 통합 PageList. 측정 게이트 뒤. **이 단계에서 grapheme도 page-local로 귀속(§11.8)** — page가 grapheme 풀을 소유, free 시 동반 소멸 | (perf, 별개) + grapheme 구조적 회수 |
+
+> grapheme 메모리는 그 전까지 **dedup된 전역 `grapheme_store`**(HG dedup PR)가 distinct cluster 수로 bound한다. 화면 밖으로 사라진 cluster까지 회수(구조적)하는 건 위 **B**에서 grapheme을 page에 귀속시킬 때 온다 — 전역 refcount/GC는 flat `cells:[]Cell`+`memcpy` 위에서 위험·임시품이라 도입하지 않는다(§11.8).
 
 **A1 측정 결과(validated)**: counting-allocator probe — cap 10,000: 스크롤백 할당 10,003 → **82**(122×↓). cap 1,000,000: ~1,000,003 → **7,824**(~128×↓). perf 게이트 회귀 없음(large_output 344→330ms). 동작 보존 — 기존 스크롤백 테스트 전부 green + ring.len 의존 테스트 3개를 관측 동작 기준으로 갱신.
 
@@ -565,3 +568,20 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 **위험**: per-row-descriptor arena가 A1보다 복잡(arena 팩·eviction 시 단편화/compaction, locate 이진탐색 2단). wide-glyph 끝 trim 경계. **메모리 절감을 probe로 검증**(게이트 — 전형 출력 ~10×↓ 확인, 안 나오면 재고).
 
 **테스트**: trim len 정확성(짧은 줄), render pad 동일성(snapshot 불변), selection/search 짧은 행 안전, 메모리 probe(절감 수치), OOM 트랜잭션 유지. A2는 동작 보존이라 "정확성 버그 0" + 메모리 절감 측정.
+
+### 11.8 grapheme의 page 귀속 (B 단계 — 결정·플랜)
+
+**결정(본 세션)**: 활성 grid가 page로 가는 **B 단계에서 grapheme 저장을 page-local로 옮긴다**(§11.2 §502의 "page pool 생략"을 grapheme에 한해 뒤집음 — style은 그대로 Cell inline 유지). 동기: 전역 `grapheme_store`는 dedup해도 **세션 동안 본 distinct cluster 누계**로만 bound돼 화면 밖으로 사라진 cluster를 회수하지 못한다. grapheme을 page가 소유하면 **page free(eviction/recycle) 시 grapheme이 함께 사라져** A1의 recycle/eviction-frees 속성을 grapheme도 물려받는다(메모리 ∝ live 내용). page는 자족적이 되고("page를 free = 그 page의 모든 것 free"), 전역 store·교차 수명축이 사라진다.
+
+**왜 지금(미리) 코드로 안 하나**: 활성 grid의 grapheme이 붙을 **page 구조 자체가 B의 산출물**이라 B 전에는 만들 수 없다(스크롤백만 먼저 하면 page-local 스크롤백 + 전역 활성의 split 모델 — 더 나쁨). 또 같은 스토리지 레이어를 동시 리팩터하면 충돌·rework다. 그래서 **B의 한 step으로** 진행하고, 그 전엔 dedup 전역 store가 브리지다.
+
+**왜 전역 refcount/GC가 아닌가**: flat `cells:[]Cell`의 `memcpy`(스크롤·reflow)가 `grapheme_id`를 값 복사해 한 항목을 여러 셀이 공유 → 전역 refcount는 모든 셀 수명 이벤트를, GC는 모든 root를 빠짐없이 추적해야 해 위험하고, B가 들어오면 버려질 임시품이다. page 귀속은 회수가 **구조적**(page 수명)이라 refcount/GC가 불필요하다.
+
+**B에서 할 일(플랜)**:
+- `Page`에 grapheme 풀 추가(예: `[]u21` arena + per-cluster (offset,len), 또는 `ArrayList([]u21)`). cell의 `grapheme_id`는 **page-local 인덱스**가 된다. dedup은 page 내(rows_per_page 범위)로 — 페이지가 작아 within-page 중복은 작다(필요하면 측정 후 결정).
+- 해석을 `page.graphemeCluster(id)`로(현재 `core.graphemeCluster`/`snapshot.graphemes` 전역). page free/recycle 시 풀을 free/clear(cells와 같은 pool 재사용).
+- **reflow/cross-page 이동**: 셀이 다른 page로 옮겨갈 때 grapheme을 목적지 page 풀로 re-intern(id 재매핑) — B가 만드는 셀 이동 로직에 얹는다(이 단계의 주된 신규 복잡도).
+- **renderer/직렬화 API 불변 유지**: `RenderSnapshot.graphemes`·`RowCodepoints`는 그대로 두되, 뷰포트 materialize(스크롤 시 이미 memcpy) 때 보이는 셀의 cluster를 **flat 뷰포트 grapheme 풀로 재수집**해 snapshot이 단일 `graphemes` 슬라이스를 노출하게 한다 — draw_list/selection/snapshot.zig 호출부 불변.
+- 전역 `grapheme_store`·`grapheme_ids` 제거(page로 흡수). 검증: 기존 HG 단위·`nfd_hangul` oracle·`test-macos-coretext-smoke`(NFD '한'≡완성형) green 유지 + eviction 후 grapheme 메모리 회수 측정.
+
+**seam 준비(지금 가능, 충돌 0)**: grapheme 해석이 `graphemeCluster(id)`/`snapshot.graphemes` 한 군데로 모여 있어, B에서 이 seam만 page-local로 바꾸면 호출부(RowCodepoints·draw_list·selection)는 안 바뀐다.

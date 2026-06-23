@@ -139,6 +139,27 @@ fn colorUv(uv: f32, kind: renderer.ColorGlyphKind) f32 {
 /// 겹치지 않는 [2,3] 범위로 보낸다.
 const color_glyph_uv_offset: f32 = 2.0;
 
+/// 셀 UV를 **최종** atlas 텍스처 크기로 다시 정규화한다(in-place). 멀티 페인이 한 atlas를 여러 빌드로
+/// 공유하면, 먼저 빌드된 페인은 grow 이전(작은) dims로 UV가 구워져 grow된 GPU 텍스처와 어긋난다 —
+/// 보더라인 `─`가 나중 글리프 `?`의 비트맵을 샘플하는 멀티 페인 grow 잔상. atlas 픽셀 좌표(atlas_x_px 등)는
+/// grow에 불변이므로, `replace`가 최종 dims를 알게 된 시점에 여기서 다시 나눈다(렌더러 .m이 아니라 Zig에서 —
+/// 테스트 가능·단일 출처·cross-platform, host-boundary 규칙). slot_id==0(배경/커서 — UV sentinel -1)은
+/// 손대지 않고, 컬러 글리프 sentinel(+2.0)은 보존한다. px→UV 나눗셈은 `glyph_quads.uvRectForPx` 단일
+/// 출처를 재사용하며, non-grow에선 빌드 dims==최종 dims라 bit-exact no-op이다. 0-dim/OOB(uvRectForPx
+/// 에러)면 baked UV를 유지한다(diagnostic 경로 안전).
+fn renormalizeGlyphCellUvs(cells: []NativeMetalCell, atlas_width_px: u32, atlas_height_px: u32) void {
+    const tex = renderer.AtlasTextureSize{ .width_px = atlas_width_px, .height_px = atlas_height_px };
+    for (cells) |*cell| {
+        if (cell.slot_id == 0) continue; // 배경/커서/오버레이 sentinel — atlas 글리프 아님
+        const rect = renderer.glyph_quads.uvRectForPx(cell.atlas_x_px, cell.atlas_y_px, cell.atlas_width_px, cell.atlas_height_px, tex) catch continue;
+        const color_off: f32 = if (cell.u0 >= color_glyph_uv_offset) color_glyph_uv_offset else 0.0; // 컬러(+2.0) 보존
+        cell.u0 = rect.u0 + color_off;
+        cell.u1 = rect.u1 + color_off;
+        cell.v0 = rect.v0;
+        cell.v1 = rect.v1;
+    }
+}
+
 /// Rgb를 0x00RRGGBB로 packing한다(공용 — 전경/커서/배경 packing이 같은 byte 순서를 쓰게).
 fn packRgb(rgb: color.Rgb) u32 {
     return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
@@ -1194,6 +1215,12 @@ pub const MetalFrameBuffer = struct {
 
         const new_sidebar_cells = try buildMergedSidebarCells(allocator, sidebar_band_cells, sidebar_frame, sidebar_colors);
         errdefer allocator.free(new_sidebar_cells);
+
+        // 멀티 페인 grow 견고성: 페인들이 한 atlas를 여러 빌드로 공유하므로, 먼저 빌드된 페인은 grow
+        // 이전 dims로 UV가 구워졌을 수 있다. 최종 atlas 크기(atlas_config)로 두 셀 배열(.m이 그리는
+        // 유일한 atlas-glyph 경로 — 터미널 셀·사이드바 셀)의 UV를 다시 정규화한다(atlas px는 grow 불변).
+        renormalizeGlyphCellUvs(new_cells, atlas_config.atlas_width_px, atlas_config.atlas_height_px);
+        renormalizeGlyphCellUvs(new_sidebar_cells, atlas_config.atlas_width_px, atlas_config.atlas_height_px);
 
         const new_gpu_quads = try allocator.dupe(GpuQuad, gpu_quads);
         errdefer allocator.free(new_gpu_quads);
@@ -2350,4 +2377,46 @@ test "planImageUploads: 두 이미지의 pixels_offset/len이 각 구간을 가�
     try std.testing.expectEqual(@as(usize, 12), plan.uploads[1].pixels_offset);
     try std.testing.expectEqual(@as(usize, 16), plan.uploads[1].pixels_len);
     try std.testing.expectEqual(@as(u8, 0xB), plan.pixels[12]);
+}
+
+test "renormalizeGlyphCellUvs rescales glyph UVs to final atlas dims, preserves sentinels (멀티 페인 grow 잔상)" {
+    // 멀티 페인: 먼저 빌드된 페인이 1024 dims로 UV를 구웠는데 나중 페인의 grow로 텍스처가 2048이 됐다.
+    // atlas px(x=512,w=64)는 grow 불변이므로 최종 2048로 재정규화하면 u0=512/2048=0.25(옛 0.5 아님).
+    var cells = [_]NativeMetalCell{
+        // mono 글리프: baked u0=512/1024=0.5
+        .{ .row = 0, .col = 0, .width = 1, .codepoint = 'A', .slot_id = 1, .atlas_x_px = 512, .atlas_y_px = 256, .atlas_width_px = 64, .atlas_height_px = 32, .u0 = 0.5, .v0 = 0.25, .u1 = 0.5625, .v1 = 0.28125 },
+        // color 글리프: baked u0 = 512/1024 + 2.0 sentinel = 2.5
+        .{ .row = 0, .col = 1, .width = 2, .codepoint = 0x1F34E, .slot_id = 2, .atlas_x_px = 512, .atlas_y_px = 256, .atlas_width_px = 64, .atlas_height_px = 32, .u0 = 2.5, .v0 = 0.25, .u1 = 2.5625, .v1 = 0.28125 },
+        // 배경/커서 sentinel: slot_id=0, u0=-1 — 절대 건드리면 안 됨
+        .{ .row = 0, .col = 3, .width = 1, .codepoint = ' ', .slot_id = 0, .atlas_x_px = 0, .atlas_y_px = 0, .atlas_width_px = 0, .atlas_height_px = 0, .u0 = -1.0, .v0 = -1.0, .u1 = -1.0, .v1 = -1.0 },
+    };
+    renormalizeGlyphCellUvs(&cells, 2048, 2048);
+    // mono: 최종 dims로 재정규화(512/2048=0.25). 모두 2의 거듭제곱이라 bit-exact.
+    try std.testing.expectEqual(@as(f32, 0.25), cells[0].u0);
+    try std.testing.expectEqual(@as(f32, 576.0 / 2048.0), cells[0].u1);
+    try std.testing.expectEqual(@as(f32, 0.125), cells[0].v0);
+    try std.testing.expectEqual(@as(f32, 288.0 / 2048.0), cells[0].v1);
+    // color: base 재정규화 + 2.0 sentinel 보존
+    try std.testing.expectEqual(@as(f32, 2.25), cells[1].u0);
+    try std.testing.expectEqual(@as(f32, 2.0 + 576.0 / 2048.0), cells[1].u1);
+    try std.testing.expectEqual(@as(f32, 0.125), cells[1].v0); // v엔 sentinel 없음
+    // 배경 sentinel 불변(slot_id==0 가드)
+    try std.testing.expectEqual(@as(f32, -1.0), cells[2].u0);
+    try std.testing.expectEqual(@as(f32, -1.0), cells[2].v0);
+
+    // non-grow: 빌드 dims==최종 dims면 bit-exact no-op(512/1024=0.5 그대로).
+    var same = [_]NativeMetalCell{
+        .{ .row = 0, .col = 0, .width = 1, .codepoint = 'A', .slot_id = 1, .atlas_x_px = 512, .atlas_y_px = 256, .atlas_width_px = 64, .atlas_height_px = 32, .u0 = 0.5, .v0 = 0.25, .u1 = 0.5625, .v1 = 0.28125 },
+    };
+    renormalizeGlyphCellUvs(&same, 1024, 1024);
+    try std.testing.expectEqual(@as(f32, 0.5), same[0].u0);
+    try std.testing.expectEqual(@as(f32, 0.5625), same[0].u1);
+    try std.testing.expectEqual(@as(f32, 0.25), same[0].v0);
+
+    // 0-dim(diagnostic 경로): uvRectForPx 에러 → baked UV 유지(크래시 없음).
+    var zero = [_]NativeMetalCell{
+        .{ .row = 0, .col = 0, .width = 1, .codepoint = 'A', .slot_id = 1, .atlas_x_px = 0, .atlas_y_px = 0, .atlas_width_px = 0, .atlas_height_px = 0, .u0 = 0.5, .v0 = 0.25, .u1 = 0.5625, .v1 = 0.28125 },
+    };
+    renormalizeGlyphCellUvs(&zero, 0, 0);
+    try std.testing.expectEqual(@as(f32, 0.5), zero[0].u0); // baked 유지
 }

@@ -60,6 +60,13 @@ pub const Cell = struct {
     style: Style = .{},
     width: u2 = 1,
     continuation: bool = false,
+    // base(codepoint) 뒤에 붙는 grapheme cluster 본체(NFD 한글 V/T·다중 combining·ZWJ 시퀀스).
+    // grapheme_id(0=없음)가 TerminalCore.grapheme_store의 코드포인트 배열을 가리킨다 —
+    // link/link_store와 동형(셀엔 id만, 본체는 store에). 긴 cluster도 무손실(잘림 없음).
+    grapheme_id: u32 = 0,
+    // 단일 extra(combining 1개)의 잠정 그림자(HG2a). grapheme_id가 있을 땐 store가 권위이고
+    // combining은 첫 extra의 사본이라 무시한다(렌더 back-compat용 — HG2b에서 제거). grapheme_id가
+    // 0이면 이 필드가 0개/1개 extra의 단일 출처다(악센트·VS16 등 흔한 단일 결합은 store 비용 0).
     combining: ?u21 = null,
     // OSC 8 하이퍼링크 id(0=없음). URI 자체는 TerminalCore.link_store에 한 번만 저장하고
     // 셀은 id만 든다 — 링크가 걸린 긴 출력에서도 셀 메모리가 URI 길이에 비례하지 않는다.
@@ -108,17 +115,31 @@ pub const ShellEvent = union(enum) {
 };
 
 /// Iterates the visible codepoints of a single row: each non-continuation
-/// cell yields its base codepoint, immediately followed by its combining mark
-/// when present. Both the plain-text dump (`TerminalCore.dumpUtf8`) and the
+/// cell yields its base codepoint, immediately followed by the rest of its
+/// grapheme cluster (the extra codepoints — NFD jamo, combining marks, ZWJ
+/// sequences). Both the plain-text dump (`TerminalCore.dumpUtf8`) and the
 /// snapshot row rendering consume this, so the rule for which cells actually
-/// show on screen (skip continuations, append combining marks) lives in
-/// exactly one place instead of being re-derived per consumer.
+/// show on screen (skip continuations, append the cluster body) lives in
+/// exactly one place instead of being re-derived per consumer — and stays
+/// lossless (clipboard/re-output get every codepoint, not just the first).
+///
+/// `graphemes` is `TerminalCore.grapheme_store.items` (id-1 indexed). When it
+/// is empty (default) or a cell's `grapheme_id` is 0, the iterator falls back
+/// to the single `combining` shadow — so legacy callers that only pass `cells`
+/// keep their old base+combining behavior.
 pub const RowCodepoints = struct {
     cells: []const Cell,
+    graphemes: []const []const u21 = &.{},
     col: usize = 0,
-    pending_combining: ?u21 = null,
+    pending: []const u21 = &.{}, // grapheme_id store 슬라이스의 아직 안 내보낸 꼬리
+    pending_combining: ?u21 = null, // grapheme_id 없을 때의 단일 combining
 
     pub fn next(self: *RowCodepoints) ?u21 {
+        if (self.pending.len > 0) {
+            const cp = self.pending[0];
+            self.pending = self.pending[1..];
+            return cp;
+        }
         if (self.pending_combining) |combining| {
             self.pending_combining = null;
             return combining;
@@ -127,7 +148,14 @@ pub const RowCodepoints = struct {
             const cell = self.cells[self.col];
             self.col += 1;
             if (cell.continuation) continue;
-            self.pending_combining = cell.combining;
+            if (cell.grapheme_id != 0 and cell.grapheme_id <= self.graphemes.len) {
+                // store가 권위 — cluster 본체 전체를 내보낸다(combining 그림자는 무시).
+                self.pending = self.graphemes[cell.grapheme_id - 1];
+                self.pending_combining = null;
+            } else {
+                self.pending = &.{};
+                self.pending_combining = cell.combining;
+            }
             return cell.codepoint;
         }
         return null;
@@ -268,6 +296,11 @@ pub const RenderSnapshot = struct {
     cursor_shape: CursorShape = .block,
     cursor_blink: bool = true,
     cells: []const Cell = &.{},
+    // grapheme cluster 본체 store(TerminalCore.grapheme_store.items, id-1 인덱싱) — cells의
+    // grapheme_id가 가리킨다. zero-copy(코어 store 슬라이스를 빌려줌). 비어 있으면 cluster 셀이
+    // 없다(일반 경로). 직렬화(dumpUtf8·snapshot.zig)·후속 렌더(HG3)가 RowCodepoints로 이걸 풀어
+    // 다중 코드포인트를 무손실로 본다. 셀의 combining은 첫 extra의 잠정 그림자다(HG2b에서 제거).
+    graphemes: []const []const u21 = &.{},
     // 행별 OSC 133 정보(분류 + 종료코드, 길이=size.rows, cells와 같은 행 인덱싱). 스크롤된
     // 뷰포트에서도 보이는 행에 맞춰 합성된다. 마킹이 없으면 전부 {.unknown, null}이라 렌더러는
     // 무시해도 된다. 거터(✓/✗)는 prompt 시작 행의 exit로 색을 정한다.

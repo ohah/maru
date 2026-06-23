@@ -271,6 +271,13 @@ pub const TerminalCore = struct {
     link_store: std.ArrayListUnmanaged([]u8) = .empty,
     link_ids: std.StringHashMapUnmanaged(u32) = .empty,
     pen_link: u32 = 0,
+    // grapheme cluster 본체 저장소(셀 base 뒤에 붙는 extra 코드포인트 배열). Cell.grapheme_id가
+    // 인덱스+1로 가리킨다 — link_store와 동형의 "셀엔 id, 본체는 store" 패턴(NFD 한글 V/T·다중
+    // combining·ZWJ 시퀀스를 무손실 저장). dedup하지 않는다(grapheme은 셀마다 거의 고유). HG2a는
+    // append-only다 — flat cells:[]Cell grid의 memcpy(스크롤·reflow)가 grapheme_id를 값 복사해
+    // 한 항목을 여러 셀이 잠시 공유하므로 단순 회수는 dangling을 낳는다(link_store가 append-only인
+    // 이유와 동일). reset(RIS)·deinit에서만 일괄 free하고, 안전한 회수(refcount)는 후속 PR이다.
+    grapheme_store: std.ArrayListUnmanaged([]u21) = .empty,
     // IME 조합 중(preedit) 텍스트(UTF-8, core 소유). 셀 그리드를 더럽히지 않고 renderSnapshot
     // 합성 단계에서만 커서 위치에 반전 스타일로 표시된다 — 조합이 끝나면(확정/취소) 비워진다.
     preedit: ?[]u8 = null,
@@ -472,6 +479,7 @@ pub const TerminalCore = struct {
         self.last_command_exit = null;
         screen.clearScrollback(self); // sb 비우기 + 선택 해제
         self.clearLinkStore();
+        self.clearGraphemeStore(); // 화면·스크롤백이 모두 비워져 grapheme_id가 가리킬 셀이 없다
         if (self.cwd) |c| { // OSC 7 cwd도 공장 초기화(셸이 다음 프롬프트에 다시 보고)
             self.allocator.free(c);
             self.cwd = null;
@@ -536,6 +544,8 @@ pub const TerminalCore = struct {
         for (self.link_store.items) |uri| self.allocator.free(uri);
         self.link_store.deinit(self.allocator);
         self.link_ids.deinit(self.allocator);
+        for (self.grapheme_store.items) |g| self.allocator.free(g);
+        self.grapheme_store.deinit(self.allocator);
         self.allocator.free(self.screen.cells);
         if (self.screen.wrapped.len > 0) self.allocator.free(self.screen.wrapped);
         if (self.screen.prompt_marks.len > 0) self.allocator.free(self.screen.prompt_marks);
@@ -1118,6 +1128,42 @@ pub const TerminalCore = struct {
         return self.link_store.items[id - 1];
     }
 
+    /// cluster 본체(base 뒤 extra 코드포인트 배열)를 store에 복사 저장하고 id(인덱스+1)를 돌려준다.
+    /// link과 달리 dedup하지 않는다(grapheme은 셀마다 거의 고유). append-only — 회수는 refcount 후속.
+    pub fn internGrapheme(self: *TerminalCore, cps: []const u21) !u32 {
+        const owned = try self.allocator.dupe(u21, cps);
+        errdefer self.allocator.free(owned);
+        try self.grapheme_store.append(self.allocator, owned);
+        return @intCast(self.grapheme_store.items.len);
+    }
+
+    /// 기존 cluster(id; 0이면 빈 것으로 취급) 뒤에 cp 하나를 덧붙인 새 cluster를 intern해 새 id를
+    /// 돌려준다. append-only라 옛 항목은 그대로 둔다(회수는 refcount 후속). NFD 한글 자모가 음절에
+    /// 차례로 붙을 때(writeCodepoint의 cluster 확장) 호출된다. screen.zig가 cross-file 호출 — pub.
+    pub fn appendGraphemeCodepoint(self: *TerminalCore, id: u32, cp: u21) !u32 {
+        const old: []const u21 = self.graphemeCluster(id) orelse &.{};
+        const owned = try self.allocator.alloc(u21, old.len + 1);
+        errdefer self.allocator.free(owned);
+        @memcpy(owned[0..old.len], old);
+        owned[old.len] = cp;
+        try self.grapheme_store.append(self.allocator, owned);
+        return @intCast(self.grapheme_store.items.len);
+    }
+
+    /// grapheme id -> cluster 본체(없으면 null). RowCodepoints(직렬화)·screen.writeCodepoint가
+    /// cross-file 호출 — pub.
+    pub fn graphemeCluster(self: *const TerminalCore, id: u32) ?[]const u21 {
+        if (id == 0 or id > self.grapheme_store.items.len) return null;
+        return self.grapheme_store.items[id - 1];
+    }
+
+    /// grapheme store를 비운다(RIS 등 하드 리셋 — 이후 셀이 다 지워져 grapheme_id가 가리킬 대상이
+    /// 없다). clearLinkStore와 같은 자리에서 호출된다.
+    fn clearGraphemeStore(self: *TerminalCore) void {
+        for (self.grapheme_store.items) |g| self.allocator.free(g);
+        self.grapheme_store.clearRetainingCapacity();
+    }
+
     /// i번째 CSI 파라미터를 raw로 돌려준다(없으면 0). erase mode처럼 0이 유효값인 곳에 쓴다.
     /// param 저장소(csi_params/csi_param_count 필드)와 한 묶음이라 core 잔류. parser의 SGR/모드 dispatch
     /// (setPrivateModes·applySgr 등)와 screen이 cross-file 호출 — pub.
@@ -1210,7 +1256,10 @@ pub const TerminalCore = struct {
         for (0..self.size.rows) |row| {
             if (row != 0) try output.append(allocator, '\n');
             const row_start = self.index(row, 0);
-            var codepoints: types.RowCodepoints = .{ .cells = self.screen.cells[row_start..][0..self.size.cols] };
+            var codepoints: types.RowCodepoints = .{
+                .cells = self.screen.cells[row_start..][0..self.size.cols],
+                .graphemes = self.grapheme_store.items, // cluster 본체 무손실 복원(id→자모 전체)
+            };
             while (codepoints.next()) |codepoint| {
                 var buffer: [4]u8 = undefined;
                 const len = try std.unicode.utf8Encode(codepoint, &buffer);
@@ -1533,6 +1582,89 @@ test "terminal core drops a combining mark with no base on the current row" {
     try std.testing.expectEqual(@as(u21, 'A'), snapshot.cells[0].codepoint);
     try std.testing.expect(snapshot.cells[0].combining == null);
     for (snapshot.cells) |cell| try std.testing.expect(cell.combining == null);
+}
+
+test "NFD Hangul: conjoining L+V+T merges into one 2-cell syllable (GB6/7/8)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
+    defer core.deinit();
+
+    // macOS 파일명은 NFD라 `ls`가 '한'을 초성 U+1112 + 중성 U+1161 + 종성 U+11AB로 보낸다. 안
+    // 묶으면 자모가 셀마다 흩어지고 폭이 2배(초성만 wide)가 된다 — 한 음절 cluster(2칸)로 묶는다.
+    try core.write("\u{1112}\u{1161}\u{11AB}");
+
+    const s = core.snapshot();
+    try std.testing.expectEqual(@as(u16, 2), s.cursor.col); // 음절 1개 = 2칸 advance(완성형과 동일)
+    try std.testing.expectEqual(@as(u21, 0x1112), s.cells[0].codepoint); // base=초성
+    try std.testing.expectEqual(@as(u2, 2), s.cells[0].width);
+    try std.testing.expect(s.cells[1].continuation);
+    try std.testing.expectEqual(@as(u2, 0), s.cells[1].width);
+    // 중성·종성은 store cluster 본체로 무손실 저장. combining은 첫 extra(중성)의 잠정 그림자.
+    try std.testing.expectEqual(@as(u21, 0x1161), s.cells[0].combining.?);
+    try std.testing.expect(s.cells[0].grapheme_id != 0);
+    try std.testing.expectEqualSlices(u21, &.{ 0x1161, 0x11AB }, core.graphemeCluster(s.cells[0].grapheme_id).?);
+
+    // dump 무손실: 원본 NFD 자모 3개가 그대로 복원된다(클립보드·재출력 — 잘림 금지).
+    const text = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\u{1112}\u{1161}\u{11AB}") != null);
+}
+
+test "NFD Hangul: '한글' splits into two syllable clusters across 4 columns" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+
+    // '한글' NFD = (ㅎㅏㄴ)(ㄱㅡㄹ). 종성 다음 새 초성에서 음절 경계가 끊겨야 한다(GB8은 T×T만,
+    // T×L은 boundary). 두 음절이 각각 2칸씩 총 4칸을 차지한다.
+    try core.write("\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}");
+
+    const s = core.snapshot();
+    try std.testing.expectEqual(@as(u16, 4), s.cursor.col);
+    try std.testing.expectEqual(@as(u21, 0x1112), s.cells[0].codepoint); // 한
+    try std.testing.expectEqual(@as(u2, 2), s.cells[0].width);
+    try std.testing.expect(s.cells[1].continuation);
+    try std.testing.expectEqual(@as(u21, 0x1100), s.cells[2].codepoint); // 글 — 새 음절(경계)
+    try std.testing.expectEqual(@as(u2, 2), s.cells[2].width);
+    try std.testing.expect(s.cells[3].continuation);
+
+    const text = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}") != null);
+}
+
+test "NFD Hangul: L+V without a final consonant uses the cheap combining shadow (no store)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
+    defer core.deinit();
+
+    // '가' NFD = ㄱ(U+1100) + ㅏ(U+1161), 종성 없음. extra가 1개뿐이라 흔한 단일 결합처럼 store
+    // 없이 combining 그림자만 쓴다(메모리 0 비용) — 둘째 extra부터 store로 승격한다.
+    try core.write("\u{1100}\u{1161}");
+
+    const s = core.snapshot();
+    try std.testing.expectEqual(@as(u16, 2), s.cursor.col);
+    try std.testing.expectEqual(@as(u21, 0x1100), s.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u2, 2), s.cells[0].width);
+    try std.testing.expectEqual(@as(u21, 0x1161), s.cells[0].combining.?);
+    try std.testing.expectEqual(@as(u32, 0), s.cells[0].grapheme_id); // store 미사용
+    try std.testing.expectEqual(@as(usize, 0), core.grapheme_store.items.len);
+
+    const text = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\u{1100}\u{1161}") != null);
+}
+
+test "NFD Hangul: a conjoining vowel after a non-Hangul base is its own cell (boundary)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 1 });
+    defer core.deinit();
+
+    // 'A' 다음 중성(U+1161) — A는 한글이 아니라(hangulClass=none) cluster로 묶이지 않는다.
+    // 잘못 묶으면 무관한 글자가 자모를 빨아들인다. 중성은 별도 셀로 떨어진다.
+    try core.write("A\u{1161}");
+
+    const s = core.snapshot();
+    try std.testing.expectEqual(@as(u21, 'A'), s.cells[0].codepoint);
+    try std.testing.expect(s.cells[0].combining == null);
+    try std.testing.expectEqual(@as(u32, 0), s.cells[0].grapheme_id);
+    try std.testing.expectEqual(@as(u21, 0x1161), s.cells[1].codepoint); // 별도 셀
 }
 
 test "ambiguous_wide makes circled numbers occupy two cells (advance 2) with a continuation" {
@@ -4481,6 +4613,38 @@ test "scrollback re-wrap clears a truncated wide-glyph base at narrow widths" {
         const row = core.scrollbackRow(r).?;
         if (row.len > 0) try std.testing.expect(row[row.len - 1].width != 2);
     }
+}
+
+test "grapheme_store: intern/lookup/append round-trip (link 패턴, append-only)" {
+    // 왜 중요: NFD 한글·ZWJ 시퀀스의 cluster 본체가 셀 밖 store에 무손실로 담겨야(잘림 금지)
+    // 클립보드·재출력·trace가 전체 코드포인트를 복원한다. id 키라 dedup 없이 셀마다 고유하다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+
+    try std.testing.expectEqual(@as(?[]const u21, null), core.graphemeCluster(0)); // 0=없음
+
+    const id1 = try core.internGrapheme(&.{ 0x1161, 0x11AB }); // '한'의 V·T
+    try std.testing.expectEqual(@as(u32, 1), id1); // 인덱스+1
+    try std.testing.expectEqualSlices(u21, &.{ 0x1161, 0x11AB }, core.graphemeCluster(id1).?);
+
+    const id2 = try core.internGrapheme(&.{0x0301}); // 다른 cluster — dedup 안 함(고유 id)
+    try std.testing.expectEqual(@as(u32, 2), id2);
+
+    // append: 기존 cluster 뒤에 cp 하나를 더한 새 cluster를 intern(옛 항목은 그대로 — append-only).
+    const id3 = try core.appendGraphemeCodepoint(id1, 0x0323);
+    try std.testing.expectEqual(@as(u32, 3), id3);
+    try std.testing.expectEqualSlices(u21, &.{ 0x1161, 0x11AB, 0x0323 }, core.graphemeCluster(id3).?);
+    try std.testing.expectEqualSlices(u21, &.{ 0x1161, 0x11AB }, core.graphemeCluster(id1).?); // 불변
+    // id=0에서 append면 빈 것 뒤에 붙어 1개짜리 cluster가 된다.
+    const id4 = try core.appendGraphemeCodepoint(0, 0x1175);
+    try std.testing.expectEqualSlices(u21, &.{0x1175}, core.graphemeCluster(id4).?);
+
+    // 범위 밖 id는 null(안전).
+    try std.testing.expectEqual(@as(?[]const u21, null), core.graphemeCluster(999));
+
+    // RIS(하드 리셋)는 store를 비운다(셀도 함께 사라져 dangling 없음).
+    core.fullReset();
+    try std.testing.expectEqual(@as(usize, 0), core.grapheme_store.items.len);
 }
 
 test "OSC 8 hyperlink: click returns the stored URI regardless of visible text" {

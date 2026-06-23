@@ -600,6 +600,26 @@ pub fn pushScrollback(self: *TerminalCore, row_cells: []const types.Cell, wrappe
     return true;
 }
 
+/// 절대 행 -> 셀(스크롤백 또는 활성 화면). 범위 밖이면 null. abs=[0, sb.count)는 스크롤백,
+/// [sb.count, sb.count+rows)는 활성 grid. 선택/검색/URL이 뷰포트 스크롤과 무관한 절대 좌표로
+/// 행을 읽을 때 쓴다(selection.zig가 cross-file 호출 — pub). `self.scrollbackRow`(core 잔류 sb accessor)에 위임.
+pub fn absRow(self: *const TerminalCore, abs: usize) ?[]const types.Cell {
+    if (abs < self.sb.count) return self.scrollbackRow(abs);
+    const active = abs - self.sb.count;
+    if (active >= self.size.rows) return null;
+    const start = @as(usize, @intCast(active)) * self.size.cols;
+    return self.cells[start .. start + self.size.cols];
+}
+
+/// 절대 행이 soft-wrap continuation인가(다음 행과 논리 줄로 이어지는가). 단어/선택 확장이 행 경계를
+/// 넘을지 판단할 때 쓴다. absRow와 같은 좌표계.
+pub fn absRowWrapped(self: *const TerminalCore, abs: usize) bool {
+    if (abs < self.sb.count) return self.scrollbackRowWrapped(abs);
+    const active = abs - self.sb.count;
+    if (active >= self.size.rows) return false;
+    return self.wrapped[active];
+}
+
 // ── 커서 이동/위치 ───────────────────────────────────────────────────────────────────────────────
 // CUP/HVP/VPA·CUU..CUB·CHA·DECSCUSR·DECOM 등 커서를 옮기거나 모양을 바꾸는 연산. 명시적 이동은 모두
 // markCursorMoveDirty로 옛/새 칸을 dirty 마킹하고 deferred wrap(pending_wrap)·grapheme run(last_print)을 끊는다.

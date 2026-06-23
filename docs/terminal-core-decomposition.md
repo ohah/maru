@@ -22,7 +22,7 @@
 | 분할 19~21/N | #954~#956 | **Phase D 완료 — 분해 완결** — parser 상태기계 본체: SGR/모드 dispatch·CSI 상태기계(handleCsiByte·dispatchCsi)·escape+UTF-8 intake+write 루프(`write`→`parser.feed` 위임) | `parser.zig` (989줄) |
 | 리뷰 후속 | #944·#953·#957 | 배치 1~3 `/code-review max` cleanup(주석·모듈 doc·현황표 정합 — 정확성 버그 0) | (doc/주석) |
 
-> 배치 1(5~11/N)·배치 2(12~18/N)·배치 3(19~21/N) 후 `/code-review max` 누적 리뷰 각각 완료(정확성 버그 0 — 순수 이동 검증). **분해 완결: core.zig 9962→7228줄(−2734), parser.zig 989줄·screen.zig 2001줄·osc.zig 294줄로 분리.** core.zig는 struct·필드·facade(write/resize/snapshot/renderSnapshot은 외부 점-호출이라 잔류, 본문은 parser/screen)·selection/search/url·kitty graphics 본체·host-reply·lifecycle만 보유. CSI param 접근자(csiRawParam/csiParam·max_csi_params)는 param 저장소(csi_params 필드)와 한 묶음이라 core 잔류 — parser/screen이 cross-file 호출(pub). 잔여(후속 별도 initiative): `absRow`/`absRowWrapped` accessor·selection 분리(11b/N), Screen struct 필드-fold(architecture.md 2단계).
+> 배치 1(5~11/N)·배치 2(12~18/N)·배치 3(19~21/N) 후 `/code-review max` 누적 리뷰 각각 완료(정확성 버그 0 — 순수 이동 검증). **분해 완결: core.zig 9962→7228줄(−2734), parser.zig 989줄·screen.zig 2001줄·osc.zig 294줄로 분리.** core.zig는 struct·필드·facade(write/resize/snapshot/renderSnapshot은 외부 점-호출이라 잔류, 본문은 parser/screen)·selection/search/url·kitty graphics 본체·host-reply·lifecycle만 보유. CSI param 접근자(csiRawParam/csiParam·max_csi_params)는 param 저장소(csi_params 필드)와 한 묶음이라 core 잔류 — parser/screen이 cross-file 호출(pub). 잔여(후속 별도 initiative): selection.zig 분리(**§7 진행 중** — S1서 `absRow`/`absRowWrapped`→screen 완료), Screen struct 필드-fold(architecture.md 2단계).
 
 확립된 두 분리 패턴(이 분해의 토대):
 
@@ -150,7 +150,8 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 - **dirty 추적**: `markDirty`, `markCursorMoveDirty`, `markCursorRowDirty`, **`takeDirty`(pub)**, **`clearDirty`(pub)**
 - **resize/reflow**: **`resize`(pub)**, `ensureReflowScratch`, `copyRegionResize`, `trimmedRowLen`, `isBlankCell`, `outputRowBlank`, `clearTruncatedWideBase`
 - **snapshot/viewport**: **`snapshot`(pub)**, **`renderSnapshot`(pub)**, `drawPreeditCells`, `snapshotWithPreedit`, **`viewportRow`/`viewportHasBlink`/`viewportRowPrompt`/`viewOffset`(pub)**
-- **스크롤백 행 연산**(Scrollback struct와 짝): `pushScrollback`, `clearScrollback`, `ensureScrollbackRewrapped`, `rewrapScrollback`, `rewrapScrollbackAnchored`, `rewrapScrollbackInner`, `countRewrapRows`, `trimmedLen`, **`scrollbackLen`/`maxScrollback`/`setMaxScrollback`/`scrollbackRow`/`scrollViewport`/`scrollToBottom`/`scrollToAbs`/`scrollbackRowWrapped`/`scrollbackRowPrompt`(pub)** — ⚠️ **실제 결과**: `absRow`/`absRowWrapped`는 selection 공유(19+6 호출)로 **core 잔류**, 11b/N 후속 accessor PR로 분리 예정(§4·§6 참조)
+- **스크롤백 행 저장·재-wrap + 절대행 accessor**(screen.zig로 이동): `pushScrollback`, `clearScrollback`, `ensureScrollbackRewrapped`, `rewrapScrollback`, `rewrapScrollbackAnchored`, `rewrapScrollbackInner`, `countRewrapRows`, `trimmedLen`, `absRow`, `absRowWrapped`(`absRow`/`absRowWrapped`는 §7 S1/11b/N에서 이동 — selection→screen 단방향 확보)
+- ⚠️ **실제 결과 — core 잔류 스크롤백 accessor**: `scrollbackLen`/`maxScrollback`/`setMaxScrollback`/`scrollbackRow`/`scrollViewport`/`scrollToBottom`/`scrollToAbs`/`scrollbackRowWrapped`/`scrollbackRowPrompt`(pub)는 §3.2 계획과 달리 **core 잔류** — `self.sb` 필드를 직접 읽는 trivial accessor(scrollbackRow=`self.sb.ring[...]` 3줄 등)라 이동 이득이 작고, screen.zig가 `self.scrollbackRow(...)`로 호출(§3.3)
 - **grid 헬퍼**: `index`, `cellCount`(top-level), `fullDirty`(top-level), `clampGridSize`(pub, facade re-export — core가 `screen.clampGridSize` re-export하거나 core 잔류)
 
 ### 3.3 core.zig 잔류 (이번 범위 밖)
@@ -159,12 +160,12 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 - **선택/검색/URL**(후속 `selection.zig` 후보): `selection*`, `wordBounds*`, `selectWordAt`, `selectLineAt`, `selectAll`, `findMatches`, `matchViewportSpan`, `extractSelection`, `extractBlockSelection`, `extractUrlAt`, `urlAnchorAt`, `urlSpanAtAbs`, `urlSpanInWord`, `wordIsUrl`, `cellLinkAt`, `linkBoundsAt`, `appendRowUtf8`, `foldCase`, `matchAtIgnoreCase`, `clipAbsSpanToViewport`, `normalizedSelection`, `absRowFromViewport`, `shiftSelectionForEviction`, `shiftCoordsForEviction`, `invalidateSelection`, `setPreedit`
 - **prompt 마크/semantic storage**: `promptAtAbs`, `isPromptish`, `isPromptStart`, `setPromptExitAtAbs`, `stampPromptExit`, `jumpToPrompt`(선택과 얽혀 잔류, screen이 pub로 호출), `clearScreen`(`isPromptish` 결합으로 §3.2 erase 클러스터 중 유일하게 core 잔류)
 - **CSI param 접근자**: `csiRawParam`, `csiParam`(pub) — param 저장소 `csi_params`/`csi_param_count` 필드와 한 묶음이라 core 잔류, parser(`dispatchCsi`·`applySgr`)·screen(`cursorPosition`·`setScrollRegion`)이 cross-file 호출
-- **스크롤백 절대행 accessor**: `absRow`, `absRowWrapped` — selection/url/snapshot 25곳 공유로 11b/N 후속 분리까지 core 잔류(§3.2 스크롤백 행 연산은 storage·rewrap만 screen.zig로 감)
+- **core 잔류 스크롤백 accessor**(§3.2 참조): `scrollbackRow`/`scrollbackRowWrapped`/`scrollbackLen`/`scrollViewport` 등 9개 — `self.sb` 직접 접근하는 trivial accessor. screen.zig의 `absRow`/`ensureScrollbackRewrapped` 등이 `self.scrollbackRow(...)`로 호출(`self` 메서드, 순환 무관). (`absRow`/`absRowWrapped`는 S1에서 screen.zig로 이동 완료 — 더 이상 core 잔류 아님)
 - **kitty graphics 본체**(후속 `kitty.zig` 후보): `execKittyGraphics`, `kittyDisplay`, `kittyAdvanceRows`, `addOrReplacePlacement`, `removePlacementsForImage`, `removeOnePlacement`, `kittyDelete`, `deleteByZ`, `shiftPlacementsForEviction`, `buildPlacementViews`, `buildImageViews`, `storeKittyImage`, `evictKittyImagesFor`, `pickKittyEvictionVictim`, `kittyImageHasPlacement`, `kittyTransmit`, `kittyTransmitPng`, struct들(`KittyGraphicsCommand`/`KittyImage`/`KittyImageStorage`/`StoredPlacement`)
 - **host-reply/encoding 상태·접근자**: `appendResponse`/`pendingResponse`/`clearResponse`, `reportFocus`, `reportMouse`, `encodeKey`, `encodeOptions`, `recordShellEvent`/`shellEvents`/`clearShellEvents`/`shellEventsOverflowed`, `internLink`/`linkUri`, `setWindowTitle`/`windowTitle`/`currentCwd`/`sshRemoteDest`, `setCellMetrics`/`setDefaultColors`/`setConfigPalette`, `defaultFgOverride`/`defaultBgOverride`/`paletteOverride`/`reverseScreen`, clipboard·notification·bell 접근자, `encodePaste`, `dumpUtf8`
 - **enum/const**: `ParserState`(§1.5), `Charset`, `MouseTracking`, `MouseFormat`, `KittyFlags`, `KittyFlagStack`, `KittySetMode`, `SavedCursor`, `max_csi_params`, `default_max_scrollback`, kitty 상한들
 
-> 경계 메모: selection/search·kitty graphics는 screen 연산을 많이 부른다 — `viewportRow` 등은 이미 screen.zig pub라 core 잔류 코드가 `screen.viewportRow(self, ...)`로 부른다(단방향, 순환 무관). `absRow`/`absRowWrapped`는 아직 core 잔류(11b/N에서 screen.zig로 옮기면 `screen.absRow(self, ...)` 형태가 됨). selection/kitty 자체의 분리는 **이번 범위 밖**(향후 selection.zig/kitty.zig, §6). 
+> 경계 메모: selection/search·kitty graphics는 screen 연산을 많이 부른다 — `viewportRow`·`absRow`(S1 이후) 등이 screen.zig pub라 core 잔류 코드가 `screen.absRow(self, ...)`로 부른다(단방향, 순환 무관). selection 자체의 분리는 **§7에서 진행**, kitty 분리는 **이번 범위 밖**(향후 kitty.zig, §6). 
 
 ---
 
@@ -188,7 +189,7 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 | **9/N** | dirty 추적(`markDirty`·`markCursorMoveDirty`·`markCursorRowDirty`; `takeDirty`/`clearDirty`는 위임 메서드) | 거의 모든 screen 연산이 부르는 헬퍼 — 먼저 옮겨 안정화 | 낮음 |
 | **10/N** | charset·print 폭 헬퍼(`translateCharset`·`decSpecial`·`designateCharset`·emoji/RI 판정 6개·`wideContinuationCell`) | 순수 함수 다수 | 낮음~중 |
 | **11/N** | 스크롤백 행 저장·재-wrap(`pushScrollback`·`clearScrollback`·`ensureScrollbackRewrapped`·`rewrapScrollback`/`Anchored`/`Inner`·`countRewrapRows`·`trimmedLen`) | rewrap 엔진 응집 이동. `absRow`/`absRowWrapped`는 selection 공유(19+6 호출)라 후속 accessor PR로 분리 — 본 PR을 작게·검증 가능하게. 잔류 헬퍼 4개(invalidateSelection·shiftCoordsForEviction·isBlankCell·clearTruncatedWideBase) pub 승격 | 중 |
-| **11b/N(후속)** | 스크롤백 accessor(`absRow`·`absRowWrapped`) → screen.zig | selection/url/snapshot의 25 호출 redirect. selection 인접 작업과 함께 | 중 |
+| **11b/N(후속)** ✅ | 스크롤백 accessor(`absRow`·`absRowWrapped`) → screen.zig | selection 클러스터의 25 호출 redirect. **§7 S1로 완료**(selection 분리 전제) | 중 |
 
 ### Phase C — screen 본체
 
@@ -236,6 +237,36 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 ## 6. 미해결/후속 (이번 범위 밖, 기록만)
 
 - **2단계(Screen struct fold)**: §2 — 필드를 `Screen` 하위 struct로 접는 architecture.md 종착지. 연산 추출 완료 후 별도 initiative.
-- **selection.zig**: 선택/검색/URL 클러스터(현 core 잔류). screen.zig 접근자 위에서 분리 가능.
+- **selection.zig**: 선택/검색/URL 클러스터(현 core 잔류). → **§7에서 진행 중**(절차·PR 시퀀스 단일 출처).
 - **kitty.zig**: kitty graphics 본체(현 core 잔류). parser는 이미 파싱만 위임(7/N).
 - **input/report.zig**: `reportFocus`/`reportMouse`/`encodeKey` 등 입력→host-reply 인코딩.
+
+---
+
+## 7. selection.zig 분리 (후속 initiative)
+
+§6의 selection.zig 후속을 §1~§5와 **같은 절차·메커니즘**(방향 A, 연산 추출, facade 보존, 매 PR green auto-merge)으로 진행한다. 선택/검색/URL/IME-preedit 클러스터(현 core.zig 822~1470, 함수 ~30개)를 `selection.zig`로 떼어낸다.
+
+### 7.1 경계 설계 (레이어 방향)
+
+selection은 화면/스크롤백을 **읽어** 좌표·텍스트를 산출하는 **상위 레이어**다. 의존 방향은 `selection → screen → (types)` 단방향이어야 한다(`screen`이 `selection`을 import하면 하향 역전 — 금지).
+
+- **selection.zig가 부르는 것**: `screen.ensureScrollbackRewrapped`·`screen.isBlankCell`·`screen.absRow`/`absRowWrapped`(S1 이후)·core 필드(`selection_anchor`/`head`/`block`·`sb`·`view_offset`·`size`·`link_store`)·top-level `core.fullDirty`.
+- **core 잔류 seam(screen↔selection 다리)**: `invalidateSelection`(screen이 6곳서 `self.invalidateSelection()` 호출 — 옮기면 screen→selection 역전이라 core 잔류, 본문은 `self.selectionClear()` 한 줄), `shiftCoordsForEviction`(선택+kitty placement eviction 조율 — selection 부분만 `selection.shiftSelectionForEviction(self,n)`로, kitty 부분은 core).
+- **core 잔류 facade delegator**(외부 dot-call이라 struct 메서드 필수, §1.2): `selectionStart`·`selectionExtend`·`selectWordAt`·`setSelectionBlock`·`selectLineAt`·`selectAll`·`selectionClear`·`selectionViewportSpan`·`extractSelection`·`extractUrlAt`·`urlAnchorAt`·`urlSpanAtAbs`·`findMatches`·`matchViewportSpan`·`setPreedit`. 본문은 selection.zig로, core엔 `pub fn X(self,...) { return selection.X(self,...); }`.
+- **selection.zig 내부 전용**(완전 이동, intra-cluster pub): `wordBoundsAt`/`wordBoundsAtImpl`·`isWordSeparatorCell`·`isWordBoundaryCell`·`WordBounds`·`clipAbsSpanToViewport`·`cellLinkAt`·`linkBoundsAt`·`appendRowUtf8`·`urlSpanInWord`·`wordIsUrl`·`normalizedSelection`·`absRowFromViewport`·`extractBlockSelection`·`foldCase`·`matchAtIgnoreCase`·`shiftSelectionForEviction`.
+- **테스트 호출부 갱신**: core.zig 테스트가 직접 부르는 private 3개(`wordBoundsAt`@5371·`foldCase`@2388~·`urlSpanInWord`@5452/5455)는 selection.zig pub로 두고 호출부를 `selection.X(...)`로 바꾼다(§1.7 — 테스트는 core 잔류).
+
+순환 import은 osc/parser/screen가 검증한 그래프와 동형(core↔selection 상호 import을 Zig lazy 분석이 푼다).
+
+### 7.2 PR 시퀀스 (저위험 → 고위험)
+
+| PR | 범위(이동) | 비고 | 위험 |
+|---|---|---|---|
+| **S1**(11b/N) ✅ | `absRow`·`absRowWrapped` → screen.zig | 스크롤백 abs-좌표 accessor. 호출부 25곳(19+6) 전부 selection 클러스터(core) → `screen.absRow(self,...)`. selection→screen 단방향 확보 | 낮음 |
+| **S2** | `selection.zig` 신설 + URL/link leaf(`cellLinkAt`·`linkBoundsAt`·`urlAnchorAt`·`urlSpanAtAbs`·`urlSpanInWord`·`wordIsUrl`·`extractUrlAt`·`appendRowUtf8`) | screen accessor만 의존하는 leaf. facade: urlAnchorAt·urlSpanAtAbs·extractUrlAt | 낮음 |
+| **S3** | word-bounds + 포인터 선택(`isWordSeparatorCell`·`isWordBoundaryCell`·`WordBounds`·`wordBoundsAt`·`wordBoundsAtImpl`·`selectWordAt`·`selectionStart`·`selectionExtend`·`setSelectionBlock`·`selectLineAt`·`selectAll`·`selectionClear`·`absRowFromViewport`) | facade 다수. `invalidateSelection`(core seam)이 `self.selectionClear()` 호출 유지 | 중 |
+| **S4** | 검색 + 추출(`findMatches`·`matchViewportSpan`·`foldCase`·`matchAtIgnoreCase`·`normalizedSelection`·`selectionViewportSpan`·`clipAbsSpanToViewport`·`extractSelection`·`extractBlockSelection`) | findMatches 테스트 4개·selection 추출 테스트 다수로 보존 검증 | 중 |
+| **S5** | preedit + eviction 선택분(`setPreedit`·`shiftSelectionForEviction`) | `shiftCoordsForEviction`(core seam)이 `selection.shiftSelectionForEviction(self,n)` 호출. 분리 완결 | 중 |
+
+검증·리뷰는 §5 그대로(매 PR `zig build test`·`macos-app-build`·`check-boundaries`·`zig fmt`, green auto-merge --rebase). PR 5개라 마지막에 `/code-review max` 1회. `selection.zig`는 check-boundaries가 `terminal/`을 walk하므로 자동 포함(등록 불필요).

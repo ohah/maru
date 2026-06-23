@@ -276,10 +276,12 @@ pub const TerminalCore = struct {
     // grapheme_ids로 같은 cluster를 한 번만 저장하므로(같은 '한'을 천 번 찍어도 1 entry) store는
     // 셀 수가 아니라 **distinct cluster 수**만큼만 큰다 — 악센트·NFD 음절·키캡처럼 반복되는 cluster의
     // per-cell 증가를 막는다. append-only(reset·deinit에서만 free)라 flat cells:[]Cell의 memcpy가
-    // grapheme_id를 복사해도 dangling이 없다(link과 동일). 화면에서 사라진 cluster의 **구조적 회수**는
-    // grapheme 저장을 Screen/page 수명에 귀속시키는 page-aligned storage(아키텍처 §메모리 전략)와
-    // 함께 들어온다 — 그때 이 전역 store·dedup은 page-local 저장으로 흡수된다(전역 refcount/GC는
-    // 위험하고 임시품이라 도입하지 않는다).
+    // grapheme_id를 복사해도 dangling이 없다(link과 동일). 이 전역 dedup store가 메모리를 distinct
+    // cluster 수로 bound하는 **standing 답**이다 — 화면에서 사라진 cluster까지 회수하는 page-local
+    // **구조적 회수**는 활성 grid 페이징(§11 B)을 vehicle로 삼았으나 **B가 A2와 충돌해 불가**해져 보류다
+    // (terminal-core-decomposition.md §11.8 §595 정정 — 측정된 grapheme 메모리 병목 없음). 재개가
+    // 필요하면 활성 grid를 안 건드리는 split 모델(스크롤백만 page-local)로 — 전역 refcount/GC는 flat
+    // cells:[]Cell+memcpy 위에서 위험해 도입하지 않는다.
     grapheme_store: std.ArrayListUnmanaged([]u21) = .empty,
     grapheme_ids: std.HashMapUnmanaged([]const u21, u32, GraphemeKeyContext, std.hash_map.default_max_load_percentage) = .empty,
     // IME 조합 중(preedit) 텍스트(UTF-8, core 소유). 셀 그리드를 더럽히지 않고 renderSnapshot

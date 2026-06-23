@@ -501,7 +501,7 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 - **offset 기반 직렬화 불필요**: maru는 mmap-to-disk COW/serialize를 안 하므로 페이지는 평범한 포인터 기반 struct로 충분(Ghostty의 `Offset(T)` 자료형 전부 생략).
 - **renderer 경계 이미 격리**: `RenderSnapshot`은 활성을 zero-copy slice, 스크롤백 뷰는 memcpy로 materialize(스크롤 시 이미 그렇게 함). 페이지 저장이면 뷰포트를 flat로 materialize만 하면 되고 renderer·selection(`absRow` 추상)·snapshot API는 **불변**.
 - **style pool 생략**: style은 `Cell`에 inline(self-contained)이라 Ghostty식 page-local style intern pool은 채택 안 함.
-- **grapheme는 page-local로 귀속(B 단계, §11.8)**: 처음엔 grapheme도 별도 `grapheme_store`(HG 작업)라 page pool을 생략했으나, 활성 grid가 page로 가면(B) grapheme도 **page-local로 옮겨 구조적 회수**를 얻기로 한다(결정 — 본 세션). page free 시 그 page의 grapheme이 함께 사라져 A1의 recycle/eviction-frees 속성을 grapheme도 물려받는다(전역 store의 "distinct-ever-seen" 증가 대신 live 내용에 비례). 그 전까지는 dedup된 전역 `grapheme_store`(HG dedup, append-only)가 브리지다 — append-only라 page-local로 깔끔히 흡수된다. 상세는 §11.8.
+- **grapheme 저장은 전역 dedup store(page-local 회수는 ❌ 보류)**: 처음엔 grapheme도 별도 `grapheme_store`(HG 작업)라 page pool을 생략했고, 활성 grid가 page로 가는 B 단계에서 grapheme을 **page-local로 옮겨 구조적 회수**를 얻으려 했다(원래 결정). **그러나 그 vehicle인 B가 A2와 구조적으로 충돌해 불가(§11.10)**해지며 page-local 회수는 보류됐다 — dedup된 전역 `grapheme_store`(HG dedup, append-only)가 distinct cluster 수로 메모리를 bound하는 **standing 답**이고(측정된 병목 없음), 재개가 필요하면 활성 grid를 안 건드리는 split 모델(스크롤백만 page-local)로 간다. 상세·정정 근거는 §11.8 §595.
 
 → maru `Page ≈ { rows, cols, cells: []Cell, wrapped: []bool, prompt_marks: []RowPrompt }` 한 덩어리 + pool. 훨씬 작다.
 
@@ -575,7 +575,7 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 
 **테스트**: trim len 정확성(짧은 줄), render pad 동일성(snapshot 불변), selection/search 짧은 행 안전, 메모리 probe(절감 수치), OOM 트랜잭션 유지. A2는 동작 보존이라 "정확성 버그 0" + 메모리 절감 측정.
 
-### 11.8 grapheme의 page 귀속 (B 단계 — 결정·플랜)
+### 11.8 grapheme의 page 귀속 (B 단계 계획 — ❌ 정정: B 불가로 보류, §595)
 
 **결정(본 세션)**: 활성 grid가 page로 가는 **B 단계에서 grapheme 저장을 page-local로 옮긴다**(§11.2 §502의 "page pool 생략"을 grapheme에 한해 뒤집음 — style은 그대로 Cell inline 유지). 동기: 전역 `grapheme_store`는 dedup해도 **세션 동안 본 distinct cluster 누계**로만 bound돼 화면 밖으로 사라진 cluster를 회수하지 못한다. grapheme을 page가 소유하면 **page free(eviction/recycle) 시 grapheme이 함께 사라져** A1의 recycle/eviction-frees 속성을 grapheme도 물려받는다(메모리 ∝ live 내용). page는 자족적이 되고("page를 free = 그 page의 모든 것 free"), 전역 store·교차 수명축이 사라진다.
 

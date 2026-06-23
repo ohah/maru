@@ -13,7 +13,11 @@
 | 단계 | PR | 무엇 | 결과 파일 |
 |---|---|---|---|
 | 분할 1~3/N | #930~#932 | OSC host-reply(색·팔레트 10/11/4/104, clipboard·notify 52/9/777, hyperlink·cwd·maru·semantic 8/7/5379/133) | `osc.zig` (293줄) |
-| 분할 4/N | #933 | 스크롤백 ring `Scrollback` 구조체(storage 시작) | `screen.zig` (106줄) |
+| 분할 4/N | #933 | 스크롤백 ring `Scrollback` 구조체(storage 시작) | `screen.zig` |
+| 분할 5~7/N | #936·#938·#939 | **Phase A 완료** — parser dispatch: DCS(DECRQSS·XTGETTCAP)·OSC 라우터·APC(kitty graphics) 파싱·라우팅 | `parser.zig` (320줄) |
+| 분할 8~11/N | #940~#943 | **Phase B 완료** — 활성 화면 연산: tabstops·dirty 추적·G3 charset/이모지 폭·스크롤백 저장·재-wrap | `screen.zig` (595줄) |
+
+> 배치 1(5~11/N) 후 `/code-review max` 누적 리뷰 완료(정확성 버그 0 — 순수 이동 검증). 잔여: `absRow`/`absRowWrapped` accessor(11b/N 후속), Phase C(screen 본체)·Phase D(parser 본체)는 §4 참조.
 
 확립된 두 분리 패턴(이 분해의 토대):
 

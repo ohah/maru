@@ -5,9 +5,10 @@
 //! 이유로 바뀌면 facade는 유지하되 구현을 목적별로 분리)을 목적별 파일로 떼어내는 **parser 분리 1단계**다.
 //! 여기는 "바이트를 해독하고 시퀀스를 dispatch하는" 파서 책임을 모은다(화면 연산은 screen.zig, OSC host-reply는
 //! osc.zig). struct·facade(terminal.zig)는 불변이고, 각 핸들러는 `*TerminalCore`를 받는 free 함수다
-//! (필드 + pub helper만 접근 — Zig는 필드 privacy가 없어 cross-file 필드 접근이 자유롭다). 진입점
-//! `dispatchDcs`는 core.zig의 write 상태기계 루프(`.dcs_escape`)가 `parser.dispatchDcs(self)`로 위임한다
-//! (점진 분리 — 나머지 파서 dispatch도 PR 단위로 이리로 이주, docs/terminal-core-decomposition.md §4).
+//! (필드 + pub helper만 접근 — Zig는 필드 privacy가 없어 cross-file 필드 접근이 자유롭다). 현재 진입점은
+//! core.zig의 write 상태기계 루프가 위임한다: `.dcs_escape`→`dispatchDcs`(5/N), `.osc`/`.osc_escape`→
+//! `dispatchOsc`(6/N), `.apc_escape`→`dispatchApc`(7/N). 남은 파서 dispatch(CSI·SGR·escape·write 루프
+//! 본체)는 후속 PR로 이리로 이주한다(점진 분리, docs/terminal-core-decomposition.md §4 Phase D).
 //!
 //! 베이스: xterm ctlseqs DCS(DECRQSS는 VT420, XTGETTCAP는 xterm). 단일 표준 없는 동작의 결정은 해당
 //! 핸들러 주석·docs/terminal-compatibility-policy.md를 단일 출처로 둔다.

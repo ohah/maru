@@ -593,10 +593,9 @@ pub const TerminalCore = struct {
         }
     }
 
-    /// i=0이 가장 오래된 스크롤백 행. 범위 밖이거나 OOM으로 비어 있으면 null.
+    /// i=0이 가장 오래된 스크롤백 행. 범위 밖이면 null. page 저장(§11 A1)에 위임.
     pub fn scrollbackRow(self: *const TerminalCore, i: usize) ?[]const types.Cell {
-        if (i >= self.screen.sb.count) return null;
-        return self.screen.sb.ring[(self.screen.sb.head + i) % self.screen.sb.ring.len];
+        return self.screen.sb.row(i);
     }
 
     /// 뷰포트를 delta_up줄만큼 위(과거, 양수)/아래(현재, 음수)로 스크롤한다. [0, sb_count]로 clamp.
@@ -668,8 +667,8 @@ pub const TerminalCore = struct {
         if (abs >= self.screen.sb.count) {
             const active = abs - self.screen.sb.count;
             if (active < self.screen.prompt_marks.len) self.screen.prompt_marks[active].exit = exit;
-        } else if (self.screen.sb.prompt_marks.len > 0) {
-            self.screen.sb.prompt_marks[(self.screen.sb.head + abs) % self.screen.sb.prompt_marks.len].exit = exit;
+        } else {
+            self.screen.sb.setRowPromptExit(abs, exit);
         }
     }
 
@@ -769,15 +768,13 @@ pub const TerminalCore = struct {
     /// memcpy만) 매 scroll에 alloc하지 않는다. OOM이면 그 행은 보관하지 않고 넘어간다(best-effort).
     /// i=0이 가장 오래된 스크롤백 행의 soft-wrap 플래그.
     pub fn scrollbackRowWrapped(self: *const TerminalCore, i: usize) bool {
-        if (i >= self.screen.sb.count or self.screen.sb.wrapped.len == 0) return false;
-        return self.screen.sb.wrapped[(self.screen.sb.head + i) % self.screen.sb.wrapped.len];
+        return self.screen.sb.rowWrapped(i);
     }
 
     /// i번째 스크롤백 행의 OSC 133 정보(i=0이 가장 오래된 행). sb_wrapped와 같은 ring 인덱싱.
     /// 없거나 범위 밖이면 기본값({.unknown, null}).
     pub fn scrollbackRowPrompt(self: *const TerminalCore, i: usize) types.RowPrompt {
-        if (i >= self.screen.sb.count or self.screen.sb.prompt_marks.len == 0) return .{};
-        return self.screen.sb.prompt_marks[(self.screen.sb.head + i) % self.screen.sb.prompt_marks.len];
+        return self.screen.sb.rowPrompt(i);
     }
 
     /// 붙여넣기 바이트를 PTY 입력으로 인코딩한다(bracketed paste 래핑 + CR 정규화 + ESC 인젝션 방어).
@@ -3196,38 +3193,35 @@ test "per-screen Scrollback: 스왑 불변식(중첩 enter·alt 중 config·alt�
     try std.testing.expectEqual(@as(usize, 77), core.maxScrollback()); // 복원 후에도 cap 반영
 }
 
-test "rewrap: cap이 ring.len보다 커도 ring.len 상한으로 묶어 OOB 없이 재-wrap한다(회귀)" {
-    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
-    defer core.deinit();
-    core.setMaxScrollback(3);
-    try core.write("aaaaaa\r\nbbbbbb\r\ncccccc\r\ndddddd\r\neeeeee"); // 스크롤백 3행, ring이 cap=3로 할당
-    try std.testing.expectEqual(@as(usize, 3), core.screen.sb.ring.len);
-
-    // cap/ring.len 불일치를 직접 만든다(과거엔 config raise가 이 상태를 남겨 rewrap이 ring을 넘겨 OOB로 썼다).
-    core.screen.sb.cap = 1000;
-    try core.resize(2, 2); // 폭 2: 6글자 줄이 3행으로 풀린다 → total_out(9) > ring.len(3)
-    core.scrollViewport(@intCast(core.scrollbackLen())); // 과거 보기 → rewrap 트리거
-    // keep=@min(total_out, ring.len)이라 ring.len(3)을 넘겨 쓰지 않는다 — 여기 도달하면 크래시 없음.
-    try std.testing.expect(core.scrollbackLen() <= core.screen.sb.ring.len);
-}
-
-test "Scrollback.setCap: 상향은 ring을 키우고 하향(드랍 없는 범위)은 ring을 줄이며 행을 보존한다" {
+test "rewrap: cap이 count보다 훨씬 커도 OOB 없이 재-wrap한다(회귀, §11 A1 page 저장)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
     defer core.deinit();
     core.setMaxScrollback(3);
     try core.write("aaaaaa\r\nbbbbbb\r\ncccccc\r\ndddddd\r\neeeeee"); // 스크롤백 3행
     try std.testing.expectEqual(@as(usize, 3), core.scrollbackLen());
-    try std.testing.expectEqual(@as(usize, 3), core.screen.sb.ring.len);
 
-    core.setMaxScrollback(50); // 상향 → grow
-    try std.testing.expectEqual(@as(usize, 50), core.screen.sb.ring.len); // ring이 자랐다
+    // cap을 크게 올려도(page 저장은 cap/ring 길이 불일치가 구조적으로 불가 — 페이지는 필요 시 자란다)
+    // rewrap이 keep=@min(total_out, cap)으로 묶여 안전하다. 과거 OOB 회귀를 막는 가드.
+    core.setMaxScrollback(1000);
+    try core.resize(2, 2); // 폭 2: 6글자 줄이 3행으로 풀린다 → total_out > 기존 count
+    core.scrollViewport(@intCast(core.scrollbackLen())); // 과거 보기 → rewrap 트리거(크래시 없으면 통과)
+    try std.testing.expect(core.scrollbackLen() > 0);
+}
+
+test "Scrollback.setCap: 상향/하향(드랍 없는 범위)은 행을 보존한다(§11 A1)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
+    defer core.deinit();
+    core.setMaxScrollback(3);
+    try core.write("aaaaaa\r\nbbbbbb\r\ncccccc\r\ndddddd\r\neeeeee"); // 스크롤백 3행
+    try std.testing.expectEqual(@as(usize, 3), core.scrollbackLen());
+
+    core.setMaxScrollback(50); // 상향
     try std.testing.expectEqual(@as(usize, 3), core.scrollbackLen()); // 행 보존(드랍 없음)
     try std.testing.expectEqual(@as(usize, 50), core.maxScrollback());
     const oldest = core.scrollbackRow(0).?;
     try std.testing.expectEqual(@as(u21, 'a'), oldest[0].codepoint);
 
-    core.setMaxScrollback(10); // 하향(count 3 < 10이라 드랍 없음) → ring을 10으로 줄이고 행 보존(메모리 회수)
-    try std.testing.expectEqual(@as(usize, 10), core.screen.sb.ring.len); // ring 회수(50→10)
+    core.setMaxScrollback(10); // 하향(count 3 < 10이라 드랍 없음) → 행 보존
     try std.testing.expectEqual(@as(usize, 10), core.maxScrollback());
     try std.testing.expectEqual(@as(usize, 3), core.scrollbackLen());
     try std.testing.expectEqual(@as(u21, 'a'), core.scrollbackRow(0).?[0].codepoint); // 내용 그대로
@@ -3247,14 +3241,12 @@ test "setMaxScrollback 하향 트림: 가장 오래된 행을 버리고 view_off
 
     core.setMaxScrollback(2); // 하향: 최근 2행만 남기고 가장 오래된 (before-2)행을 버린다
     try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen()); // 최근 2행만
-    try std.testing.expectEqual(@as(usize, 2), core.screen.sb.ring.len); // 메모리 회수(ring=2)
     try std.testing.expect(core.view_offset <= core.scrollbackLen()); // 버린 과거를 가리키지 않게 클램프
     // 남은 가장 오래된 행은 r4(= before가 6이면 r0..r3 버림). 'r' 접두로 연속성만 확인.
     try std.testing.expectEqual(@as(u21, 'r'), core.scrollbackRow(0).?[0].codepoint);
 
-    core.setMaxScrollback(0); // 끄기: 전부 버리고 ring 해제
+    core.setMaxScrollback(0); // 끄기: 전부 버리고 페이지 회수
     try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen());
-    try std.testing.expectEqual(@as(usize, 0), core.screen.sb.ring.len);
     try std.testing.expectEqual(@as(usize, 0), core.view_offset);
 }
 

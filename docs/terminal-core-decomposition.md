@@ -511,9 +511,15 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 | **B 전면 통합** | 활성+스크롤백 한 PageList, 활성=tail | ~400~600줄, reflow/print/scroll 전면 | 높음(직접 인덱싱→page-fetch perf 회귀 가능) | 전부(scroll O(1) 포함) |
 | **C 하이브리드(권장)** | A를 1단계로 굳히고, 측정 뒤 B를 후속 단계로 | A + (측정) + B | 단계별 통제 | A 즉시, B는 게이트 뒤 |
 
-### 11.4 perf 전제 검증 우선 (no-defensive-code 정신 — 추측 말고 측정)
+### 11.4 P0 측정 결과 + scale 단서 (no-defensive-code 정신 — 추측 말고 측정)
 
-큰 재작성 전에 **진짜 병목인지 측정**한다: 대량 출력(스크롤백 push churn)·스크롤 워크로드(활성 memmove)를 현 perf 게이트(`core_resize_loop`·`core performance budget`)로 벤치해 페이지화 이득을 수치화. 측정이 payoff를 못 보이면 A에서 멈추거나 보류한다. page-fetch가 hot-path를 느리게 할 위험이 실재하므로(직접 인덱싱 대비) B는 측정 게이트를 통과해야 진행.
+**P0 측정(로컬, cap 1K~10K)**: `core_large_output` 344ms/100k줄(3.44µs/줄), 스크롤백 push는 steady-state에 슬롯을 같은 폭 `@memcpy`로 재활용해 **0 할당**. 메모리 probe(counting allocator): `Cell`=44B, 스크롤백 메모리는 99.7%+가 raw cell 데이터(cap×cols×44)이고 **할당자 오버헤드 0.1~0.6%**. → **cap 1K~10K에선 페이지화의 perf·메모리 이득이 사실상 0.**
+
+**그러나 목표는 cap "수백만 줄"**(사용자 제품 목표) — 이 scale에서 전제가 뒤집힌다:
+- ring `[]?[]Cell`은 **행마다 독립 할당** → 100만 줄 = **100만 할당**(메타데이터·단편화 수십 MB, setCap이 100만 포인터 O(cap) 재구성). 페이지 모델은 ~`cap/ROWS_PER_PAGE` 페이지로 할당 압력을 수천분의 1로 낮춘다.
+- 100만 줄을 RAM에 다 올리는 비용(1M×cols×44 = 수 GB)은 Cell 그대로면 비현실적 → **mmap backing(콜드 히스토리 OS 페이징)이 핵심 enabler**이고, 그 전제가 page 저장이다.
+
+→ **결론: 페이지화는 1K~10K에선 불필요, "수백만 줄" 목표에서 정당화된다.** 측정이 scale 의존성을 드러냈다(작은 cap 측정만으로 "보류" 결론을 내면 목표를 놓침).
 
 ### 11.5 리스크
 
@@ -521,18 +527,21 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 - **mmap backing은 platform 경계**(§180: allocator 주입 + 특수 영역만 직접) — terminal층이 mmap 직접 호출하면 이식성/경계와 충돌. 도입 시점·책임 위치 별도 결정.
 - **hot-path perf 회귀**(page-fetch 오버헤드)가 perf 게이트 위협.
 
-### 11.6 결정 — C(측정 먼저 → A → 게이트 B), 확정
+### 11.6 결정 — 진행(basis: 수백만 줄 스크롤백 제품 목표)
 
-사용자와 합의해 **옵션 C**로 간다. 추측 없이 측정으로 전제를 검증하고, 위험이 통제되는 A를 먼저 굳힌 뒤, payoff가 수치로 확인될 때만 B(전면 통합)로 확장한다. mmap backing은 순수 heap 페이지를 먼저 안정화한 뒤의 후속이다.
+**Basis(document-basis-and-decision)**: 제품 목표가 **"수백만 줄 스크롤백을 읽게 한다"**이다. §11.4가 보였듯 작은 cap(1K~10K)에선 페이지화가 무의미하지만, 수백만 줄에서는 (a) per-row 할당 압력(100만 할당→수천 페이지)과 (b) mmap backing 전제로 **정당화된다**. 이 basis가 없으면 보류가 맞고, 있으면 진행이 맞다 — scale 의존 결정.
 
-**단계 (각 단계 doc-first + 누적 `/code-review max`)**:
+**중요(정직)**: A1 하나로 수백만 줄이 viable해지지 않는다. 순서가 필요하다:
 
-| 단계 | 내용 | 게이트 |
+| 단계 | 내용 | 수백만 줄 기여 |
 |------|------|--------|
-| **P0 측정** | 스크롤백 push churn(대량 출력)·활성 scroll memmove 워크로드를 perf 게이트(`core performance budget`·`core_resize_loop`)로 벤치, baseline 수치를 §11.4에 기록 | — |
-| **P1 옵션 A** | `Scrollback.ring`(행마다 `dupe`)을 `Page` 리스트로. `Page = { rows, cols, cells, wrapped, prompt_marks } + pool`. `pushScrollback`·`rewrapScrollback*`·`scrollbackRow*` 접근자 뒤로 캡슐화(공개 API·renderer·selection 불변) | A 후 push/메모리 재측정 — 개선 확인 |
-| **P2 게이트** | A 측정 결과로 B 진행 여부 결정. payoff 미미하면 A에서 정지(스크롤백 모듈화 + 바이트 bound만 취득) | 수치 기반 go/no-go |
-| **P3 옵션 B** | (게이트 통과 시) 활성 grid를 같은 PageList로 통합, 활성=tail. reflow/print/scroll 전면 재작성 | hot-path perf 게이트 통과 필수 |
-| **P4 mmap** | (후속) page backing을 mmap/VirtualAlloc로(§180). platform 경계 책임 위치 별도 설계 | 이식성·경계 검증 |
+| **A1 ✅** | `Scrollback.ring`(행마다 `dupe`) → **page 리스트 + pool**. 행 연산은 `pushScrollback`·`scrollbackRow*`·`rewrapScrollback*` 접근자 뒤 캡슐화(공개 API·renderer·selection 불변). 동작 보존(row-count cap·eviction·setCap 반환 그대로). **uniform-width 페이지**(폭 변경 시 새 페이지) | **할당 100만→~수천**, mmap-ready 토대 |
+| **A2 가변폭/trim** | 페이지 행을 가변폭(per-row len, 끝 공백 trim)으로 → 전형 출력 메모리 ~10x↓ | 메모리 viable |
+| **P4 mmap backing** | page arena를 mmap/VirtualAlloc(§180) → 콜드 히스토리 OS 페이징(RAM 미점유) | RAM 한계 돌파 |
+| **B (선택)** | 활성 grid까지 통합 PageList. 측정 게이트 뒤 | (perf, 별개) |
 
-**열린 세부(P1 착수 시 확정)**: 페이지 크기(행 수)·pool 정책·바이트 cap을 행 수 cap에 어떻게 매핑할지.
+**A1 측정 결과(validated)**: counting-allocator probe — cap 10,000: 스크롤백 할당 10,003 → **82**(122×↓). cap 1,000,000: ~1,000,003 → **7,824**(~128×↓). perf 게이트 회귀 없음(large_output 344→330ms). 동작 보존 — 기존 스크롤백 테스트 전부 green + ring.len 의존 테스트 3개를 관측 동작 기준으로 갱신.
+
+각 단계 doc-first + 누적 `/code-review max`. A1은 동작 보존이라 "정확성 버그 0" 기준, A2/P4는 메모리·동작 변경이라 측정+검증.
+
+**A1 확정 세부**: `ROWS_PER_PAGE` 고정(예 512), uniform-width 페이지(폭 변경=새 페이지), page **pool**로 steady-state 0 할당 유지(ring과 동률), row-count cap 유지(바이트 cap은 A2/config 후속), 논리 행 i→(page,row)는 cumulative 인덱스.

@@ -244,7 +244,7 @@ pub fn dispatchApc(self: *TerminalCore) void {
     // chunked(m=1): 첫 청크가 control을 갖고, 이후 청크는 payload만 이어 붙인다. m=0에서 누적분을
     // 한 번에 실행한다. 진행 중이 아니고(첫 등장) m=0이면 단일 전송이라 즉시 실행(기존 경로).
     if (self.kitty_chunk_cmd == null and !cmd.more) {
-        self.execKittyGraphics(cmd, payload);
+        kitty.execKittyGraphics(self, cmd, payload);
         return;
     }
     // chunked 진행 중 도착한 명령이 transmit continuation(a=t/T)이 아니라 독립 명령(delete 등)이면,
@@ -252,7 +252,7 @@ pub fn dispatchApc(self: *TerminalCore) void {
     // review #3, 사용자 결정). continuation은 a= 생략(기본 t) 또는 t/T라 누적 경로로 떨어진다.
     if (self.kitty_chunk_cmd != null and cmd.action != 't' and cmd.action != 'T') {
         abortKittyChunk(self);
-        self.execKittyGraphics(cmd, payload);
+        kitty.execKittyGraphics(self, cmd, payload);
         return;
     }
     if (self.kitty_chunk_cmd == null) self.kitty_chunk_cmd = cmd; // 첫 청크의 control 보존
@@ -266,7 +266,7 @@ pub fn dispatchApc(self: *TerminalCore) void {
     };
     if (!cmd.more) { // 마지막 청크 — 첫 청크 control + 누적 payload로 실행
         const first = self.kitty_chunk_cmd.?;
-        self.execKittyGraphics(first, self.kitty_chunk.items);
+        kitty.execKittyGraphics(self, first, self.kitty_chunk.items);
         abortKittyChunk(self);
     }
 }

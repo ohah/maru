@@ -100,15 +100,6 @@ pub const SavedCursor = struct {
     pending_wrap: bool = false,
 };
 
-/// 저장 커서를 새 grid 안으로 clamp한다. col이 잘려 더는 마지막 칸이 아니면 pending_wrap도 끈다
-/// (deferred wrap은 "마지막 칸에 머무는 중"일 때만 유효한 상태다).
-fn clampSavedCursor(slot: *SavedCursor, size: types.Size) void {
-    const clamped_col = @min(slot.cursor.col, size.cols - 1);
-    if (clamped_col != slot.cursor.col) slot.pending_wrap = false;
-    slot.cursor.row = @min(slot.cursor.row, size.rows - 1);
-    slot.cursor.col = clamped_col;
-}
-
 /// 스크롤백 ring buffer(Scrollback)는 화면 storage라 src/terminal/screen.zig로 분리했다(구조와 파일 분리 —
 /// storage 책임). core는 `sb`/`saved_sb` 필드로 이 타입을 쓰고, 행 push/get/rewrap 로직은 이 파일에서 그
 /// 필드들(ring/head/count/cap 등)을 직접 다룬다 — struct는 메모리 수명(free/cap 재구성)만 소유한다(screen.zig 주석).
@@ -2418,7 +2409,8 @@ pub const TerminalCore = struct {
     }
 
     /// i번째 CSI 파라미터(없거나 0이면 default). cursor move처럼 0을 1로 보는 곳에 쓴다.
-    fn csiParam(self: *const TerminalCore, i: usize, default: u16) u16 {
+    /// screen.cursorPosition(CUP/HVP)이 cross-file 호출 — pub(CSI param 접근). csiParam이 parser.zig로 옮길 때(Phase D) 정리.
+    pub fn csiParam(self: *const TerminalCore, i: usize, default: u16) u16 {
         const value = self.csiRawParam(i);
         return if (value == 0) default else value;
     }
@@ -2429,7 +2421,7 @@ pub const TerminalCore = struct {
         if (self.csi_intermediate != 0) {
             switch (self.csi_intermediate) {
                 ' ' => switch (final) {
-                    'q' => self.setCursorStyle(self.csiRawParam(0)), // DECSCUSR
+                    'q' => screen.setCursorStyle(self, self.csiRawParam(0)), // DECSCUSR
                     else => {},
                 },
                 '$' => switch (final) {
@@ -2491,13 +2483,13 @@ pub const TerminalCore = struct {
         }
         switch (final) {
             'm' => self.applySgr(),
-            'H', 'f' => self.cursorPosition(),
-            'A' => self.cursorVertical(self.csiParam(0, 1), true),
-            'B', 'e' => self.cursorVertical(self.csiParam(0, 1), false),
-            'C', 'a' => self.cursorHorizontal(self.csiParam(0, 1), true),
-            'D' => self.cursorHorizontal(self.csiParam(0, 1), false),
-            'G', '`' => self.cursorToColumn(self.csiParam(0, 1)),
-            'd' => self.cursorToRow(self.csiParam(0, 1)),
+            'H', 'f' => screen.cursorPosition(self),
+            'A' => screen.cursorVertical(self, self.csiParam(0, 1), true),
+            'B', 'e' => screen.cursorVertical(self, self.csiParam(0, 1), false),
+            'C', 'a' => screen.cursorHorizontal(self, self.csiParam(0, 1), true),
+            'D' => screen.cursorHorizontal(self, self.csiParam(0, 1), false),
+            'G', '`' => screen.cursorToColumn(self, self.csiParam(0, 1)),
+            'd' => screen.cursorToRow(self, self.csiParam(0, 1)),
             'J' => self.eraseInDisplay(self.csiRawParam(0)),
             'K' => self.eraseInLine(self.csiRawParam(0)),
             'X' => self.eraseCharacters(self.csiParam(0, 1)), // ECH: 커서부터 N개(기본 1) cell blank, 커서 유지 — nvim이 모드 라벨(-- INSERT --) clear에 이걸 쓴다
@@ -2544,7 +2536,7 @@ pub const TerminalCore = struct {
                     self.reverse_screen = set;
                     self.dirty = fullDirty(self.size);
                 },
-                6 => self.setOriginMode(set), // DECOM: CUP/HVP origin을 scroll region 상단으로 + 커서 home
+                6 => screen.setOriginMode(self, set), // DECOM: CUP/HVP origin을 scroll region 상단으로 + 커서 home
                 25 => { // DECTCEM: 커서 표시/숨김. 커서 행만 다시 그리면 된다.
                     self.cursor_visible = set;
                     screen.markDirty(self, self.cursor.row);
@@ -2774,39 +2766,6 @@ pub const TerminalCore = struct {
         self.dirty = fullDirty(self.size);
     }
 
-    /// DECSCUSR(CSI Ps SP q): 커서 모양/깜빡임. 0|1=깜빡 block, 2=고정 block, 3=깜빡 underline,
-    /// 4=고정 underline, 5=깜빡 bar, 6=고정 bar. 모르는 값은 무시한다. vim이 모드 전환마다 보낸다.
-    fn setCursorStyle(self: *TerminalCore, param: u16) void {
-        switch (param) {
-            0, 1 => {
-                self.cursor_shape = .block;
-                self.cursor_blink = true;
-            },
-            2 => {
-                self.cursor_shape = .block;
-                self.cursor_blink = false;
-            },
-            3 => {
-                self.cursor_shape = .underline;
-                self.cursor_blink = true;
-            },
-            4 => {
-                self.cursor_shape = .underline;
-                self.cursor_blink = false;
-            },
-            5 => {
-                self.cursor_shape = .bar;
-                self.cursor_blink = true;
-            },
-            6 => {
-                self.cursor_shape = .bar;
-                self.cursor_blink = false;
-            },
-            else => return,
-        }
-        screen.markDirty(self, self.cursor.row); // 모양이 바뀐 커서 칸을 다시 그린다
-    }
-
     /// DSR(CSI Ps n): 호스트의 상태 질의에 응답한다. 응답은 response 버퍼에 쌓이고 app이 PTY로 되쓴다.
     /// 5n=터미널 OK(CSI 0n), 6n=커서 위치 보고(CPR, CSI row;col R, 1-indexed). zsh가 SIGWINCH
     /// redraw 때 6n으로 커서를 물으므로 응답이 없으면 redraw가 어긋난다(프롬프트 중복 등).
@@ -2993,81 +2952,6 @@ pub const TerminalCore = struct {
         }
         // 형식이 안 맞으면 나머지 파라미터를 버린다.
         return count;
-    }
-
-    fn cursorPosition(self: *TerminalCore) void {
-        if (self.size.rows == 0 or self.size.cols == 0) return;
-        const old = self.cursor;
-        const row = self.csiParam(0, 1);
-        const col = self.csiParam(1, 1);
-        self.cursor.row = self.resolveRow(row); // DECOM이면 scroll region 상단 기준 + region 안 clamp
-        self.cursor.col = @intCast(@min(@as(u32, col) - 1, @as(u32, self.size.cols) - 1));
-        screen.markCursorMoveDirty(self, old, self.cursor);
-        self.last_print = null;
-    }
-
-    /// DECOM(DECSET/DECRST ?6) 적용. origin mode를 토글하고 커서를 origin home으로 옮긴다(xterm 동작 —
-    /// DECOM 변경 시 커서가 home으로). origin이면 scroll region 좌상단, 아니면 화면 좌상단.
-    fn setOriginMode(self: *TerminalCore, on: bool) void {
-        self.origin_mode = on;
-        const old = self.cursor;
-        self.cursor = .{ .row = if (on) self.scroll_top else 0, .col = 0 };
-        self.pending_wrap = false;
-        screen.markCursorMoveDirty(self, old, self.cursor);
-        self.last_print = null;
-    }
-
-    /// CUP/HVP/VPA의 1-based row 파라미터를 0-based 셀 행으로 변환한다. DECOM(origin mode)이면 scroll
-    /// region 상단 기준(1=region top)으로 옮기고 region 안에 clamp, 아니면 화면 절대로 clamp. 베이스:
-    /// xterm/Ghostty 공통 — CUP·HVP·VPA가 모두 같은 origin 변환을 거친다(Ghostty는 setCursorPos 단일 경로).
-    fn resolveRow(self: *const TerminalCore, row_param: u16) u16 {
-        if (self.origin_mode) {
-            return @intCast(@min(@as(u32, self.scroll_top) + @as(u32, row_param) - 1, @as(u32, self.scroll_bottom)));
-        }
-        return @intCast(@min(@as(u32, row_param) - 1, @as(u32, self.size.rows) - 1));
-    }
-
-    fn cursorVertical(self: *TerminalCore, amount: u16, up: bool) void {
-        if (self.size.rows == 0) return;
-        const old = self.cursor;
-        if (up) {
-            self.cursor.row -|= amount;
-        } else {
-            const max_row = self.size.rows - 1;
-            self.cursor.row = @intCast(@min(@as(u32, self.cursor.row) + amount, max_row));
-        }
-        screen.markCursorMoveDirty(self, old, self.cursor);
-        self.last_print = null;
-    }
-
-    fn cursorHorizontal(self: *TerminalCore, amount: u16, right: bool) void {
-        if (self.size.cols == 0) return;
-        const old = self.cursor;
-        if (right) {
-            const max_col = self.size.cols - 1;
-            self.cursor.col = @intCast(@min(@as(u32, self.cursor.col) + amount, max_col));
-        } else {
-            self.cursor.col -|= amount;
-        }
-        screen.markCursorMoveDirty(self, old, self.cursor);
-        self.last_print = null;
-    }
-
-    fn cursorToColumn(self: *TerminalCore, col: u16) void {
-        if (self.size.cols == 0) return;
-        const old = self.cursor;
-        self.cursor.col = @intCast(@min(@as(u32, col) - 1, @as(u32, self.size.cols) - 1));
-        screen.markCursorMoveDirty(self, old, self.cursor);
-        self.last_print = null;
-    }
-
-    fn cursorToRow(self: *TerminalCore, row: u16) void {
-        if (self.size.rows == 0) return;
-        const old = self.cursor;
-        // VPA(CSI Ps d)도 CUP/HVP처럼 DECOM origin 영향을 받는다(xterm/Ghostty 공통 — setCursorPos 단일 경로).
-        self.cursor.row = self.resolveRow(row);
-        screen.markCursorMoveDirty(self, old, self.cursor);
-        self.last_print = null;
     }
 
     /// erase로 [start, end) 범위를 비울 때, 경계에 걸친 wide glyph(width=2)의 반쪽을 정리한다.
@@ -3367,8 +3251,8 @@ pub const TerminalCore = struct {
             self.scroll_bottom = new_rows - 1;
             self.cursor.row = @min(self.cursor.row, new_rows - 1);
             self.cursor.col = @min(self.cursor.col, new_cols - 1);
-            clampSavedCursor(&self.saved_cursor_primary, next_size);
-            clampSavedCursor(&self.saved_cursor_alt, next_size);
+            screen.clampSavedCursor(&self.saved_cursor_primary, next_size);
+            screen.clampSavedCursor(&self.saved_cursor_alt, next_size);
             self.pending_wrap = false;
             self.last_print = null;
             // CSI 파서 상태/UTF-8 꼬리는 유지(아래 일반 경로와 동일한 이유).

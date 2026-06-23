@@ -70,11 +70,12 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
   move되므로 히스토리는 **다시 dupe**). 상한은 config `notifications.history-limit`(기본 64, 8~512 — §1과 같은 단일 출처)이고,
   push마다 다시 읽어 초과 시 가장 오래된 것을 버린다(cap-drop은 `pushNotificationHistory` 안). `notification_unread`는
   안 읽은 개수 캐시(아래 "읽음/지우기 액션"의 5곳 — push/markRead/delete/markAll/clear 헬퍼에서만 증감, 단일 출처).
-- **사이드바 헤더 종 + 배지**: 헤더 우측 아이콘 줄에 4개 아이콘이 3칸 간격으로 우측 정렬된다 — 종(🔔)·접기(◧)·
-  view options(⚙)·새 워크스페이스(+)가 각각 `cols-11`·`cols-8`·`cols-5`·`cols-2`. 종은 EAW 2칸이라 `cols-11·cols-10`을
-  점유하는데, 정수 col 슬롯 중심이 `(cols-10)*cw`로 1칸 아이콘(중심 `col+0.5`)과 2.5칸이 되므로(좌우 패딩 어긋남)
-  렌더러(`maru_metal_renderer.m`)가 종 글리프만 가로로 0.5칸 왼쪽으로 미는 px nudge를 줘 중심을 `(cols-10.5)*cw`
-  (=균일 3칸 + hover quad 중앙·말풍선 caret과 동심)에 맞춘다(py_nudge와 동형 — 2칸 글리프는 정수 col로 반칸에 못 옴).
+- **사이드바 헤더 종 + 배지**: 헤더 우측 아이콘 줄에 종(🔔)·접기(◧)·view options(⚙)·새 워크스페이스(+)를 우측
+  정렬한다 — ◧·⚙·+는 3칸 간격(`cols-8`·`cols-5`·`cols-2`)이고, 종은 우상단 배지(아래) 자리를 비우려 한 칸 더 왼쪽
+  `cols-12`(EAW 2칸이라 `cols-12·cols-11` 점유)에 둔다(종↔◧ 4칸: 그 사이 `cols-10`=배지·`cols-9`=간격). 종은 2칸
+  글리프라 정수 col 슬롯 중심이 `(cols-11)*cw`로 1칸 아이콘(중심 `col+0.5`)과 반칸 어긋나므로, 렌더러
+  (`maru_metal_renderer.m`)가 종 글리프만 가로로 0.5칸 왼쪽으로 미는 px nudge를 줘 중심을 `(cols-11.5)*cw`
+  (hover quad 중앙·말풍선 caret과 동심)에 맞춘다(py_nudge와 동형 — 2칸 글리프는 정수 col로 반칸에 못 옴).
 - **안 읽은 개수 배지(종 우상단 빨강 원형, 펼침)**: 종을 `cols-12`(점유 `cols-12·cols-11`)에 두고 **우측 한 칸**
   (`cols-10` = `notificationBadgeCol`)에 **빨강 원형 quad + 흰 숫자**를 겹쳐 그린다(iOS/macOS 배지식 — 예전 종 좌측 coral
   텍스트는 대비가 낮아 안 읽혔다). 종을 한 칸 왼쪽(`cols-12`)에 둬 배지(`cols-10`)와 ◧(`cols-8`) 사이에 `cols-9` 한 칸
@@ -117,7 +118,7 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
   버퍼 행)이 종↔패널 간격이자 **말풍선 caret**(위로 뾰족한 삼각형) 자리가 된다 — **팝업이 종을 안 가린다**(예전 `anchor_y=1ch`는
   종 하단을 덮었다). caret은 chrome 모달 lowering이 셀 그리드(픽셀 정밀 도형은 둥근 quad뿐)라, platform `appendNotificationCaret`이
   `self.gpu_quads`에 `GpuQuad{gradient_kind=3}`(셰이더가 rect 내접 삼각형 + fwidth edge AA로 그림 — 별도 파이프라인/ABI 없이
-  quad 채널 재활용) **1개**(surface_bg 채움만)를 종 중심(`(cols-10.5)*cw`)·**보이는** 패널 상단(`panel.y − mp`)에
+  quad 채널 재활용) **1개**(surface_bg 채움만)를 종 중심(`(cols-11.5)*cw`)·**보이는** 패널 상단(`panel.y − mp`)에
   append한다(예전 2개[focus_accent 외곽선 + 채움]는 채움 삼각형 빗변의 fwidth edge-AA가 내부까지 부분 커버리지를 줘
   외곽선과 블렌딩, 내부가 패널색 아닌 중간톤으로 떴다 — 단일 채움으로 패널과 같은 색). caret 채움(surface_bg)이 패널
   배경과 **픽셀값까지 같은** 건 rich quad 셰이더의 sRGB 역감마가 표준 2.4라 round-trip이 identity이기 때문(예전 3.0
